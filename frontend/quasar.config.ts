@@ -3,7 +3,7 @@
 
 import { defineConfig } from '#q-app';
 
-export default defineConfig((/* ctx */) => {
+export default defineConfig((ctx) => {
   return {
     // https://v2.quasar.dev/quasar-cli-vite/prefetch-feature
     // preFetch: true,
@@ -11,7 +11,7 @@ export default defineConfig((/* ctx */) => {
     // app boot file (/src/boot)
     // --> boot files are part of "main.js"
     // https://v2.quasar.dev/quasar-cli-vite/boot-files
-    boot: [],
+    boot: ['axios'],
 
     // https://v2.quasar.dev/quasar-cli-vite/quasar-config-file#css
     css: ['app.scss'],
@@ -43,8 +43,25 @@ export default defineConfig((/* ctx */) => {
         // extendTsConfig (tsConfig) {}
       },
 
+      // https://v2.quasar.dev/quasar-cli-vite/quasar-config-file#build-env
+      // Por defecto Quasar expone al cliente solo variables con prefijo 'QCLI_'.
+      // Este proyecto usa la convencion estandar de Vite ('VITE_', ver security-and-scope.md).
+      env: {
+        clientPrefix: 'VITE_',
+      },
+
+      // https://v2.quasar.dev/quasar-cli-vite/handling-vite#folder-aliases
+      // Nota: '@types' no es viable como alias -> TypeScript reserva ese prefijo
+      // para paquetes de definiciones en node_modules/@types (error TS6137).
+      alias: {
+        '@components': ctx.appPaths.resolve.app('src/components'),
+        '@stores': ctx.appPaths.resolve.app('src/stores'),
+        '@boot': ctx.appPaths.resolve.app('src/boot'),
+      },
+
       // https://v2.quasar.dev/quasar-cli-vite/page-routing-with-vue-router#filename-based-routing
-      filenameBasedRouting: true,
+      // Se usa enrutamiento manual (src/router/routes.ts) con layout dedicado en src/layouts/
+      filenameBasedRouting: false,
 
       vueRouterMode: 'hash', // available values: 'hash', 'history'
       // vueRouterBase,
