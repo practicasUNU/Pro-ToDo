@@ -1,5 +1,17 @@
 # Reglas de Seguridad Perimetral, Control de Acceso y Alcance (Scope)
 
+## 0. 🐳 Aislamiento de Infraestructura (PostgreSQL vía Docker)
+
+- **Prohibido depender de instalación nativa:** Ningún servicio del backend debe conectarse a un socket local de PostgreSQL instalado directamente en el sistema operativo. La única fuente de datos válida es el contenedor definido en `docker-compose.yml`.
+- **Conexión exclusiva vía TCP al contenedor:** El backend (NestJS/TypeORM) debe apuntar siempre a `DB_HOST=localhost` / `DB_PORT=5432` mapeado desde el contenedor `postgres`, nunca a un `unix socket` del host.
+- **Servidor MCP:** La cadena de conexión estándar para el servidor MCP de Claude contra la base de datos local del contenedor es:
+  ```
+  postgresql://postgres:postgres@localhost:5432/protodo_db
+  ```
+- **Persistencia:** Los datos deben residir únicamente en el volumen `pgdata/` gestionado por Docker Compose; no crear rutas de persistencia alternativas fuera del volumen declarado.
+
+---
+
 ## 1. 🛡️ Seguridad Perimetral y Red Local
 - **Validación de Subred / VPN:** Todas las rutas protegidas deben pasar por el `RedLocalMiddleware` antes de permitir el acceso.
 - **Uso de `ip-range-check`:** Se debe comprobar que la dirección IP de origen (`req.ip` o cabeceras de proxy inverso) pertenezca a los rangos CIDR corporativos autorizados.

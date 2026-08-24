@@ -44,6 +44,16 @@ describe('LlmExtractorStrategy', () => {
 
 * 🛡️ **Simulación de Clientes HTTP / SDKs:** Usar `jest.spyOn()` o mocks inyectados de Jest para simular respuestas exitosas, respuestas malformadas y errores de red.
 
+* 🏭 **Factory `createMockStatePayloadContext`:** No instanciar `StatePayloadContext` manualmente en cada test. Usar la factory compartida (`test/factories/state-payload-context.factory.ts`) para construir el contexto con namespaces precargados:
+
+```typescript
+const context = createMockStatePayloadContext({
+  executionId: 'exec-123',
+  currentStep: 'PROCESADOR_IA',
+  namespaces: { nodo_trigger: { body: 'Texto del correo...' } },
+});
+```
+
 
 
 ---

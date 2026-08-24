@@ -30,14 +30,28 @@ Pro-ToDo/
 
 ---
 
+## 📦 Stack Tecnológico
+
+| Categoría | Librerías |
+| --- | --- |
+| **Ingesta de correo** | `imapflow` (conexión IMAP), `mailparser` (decodificación MIME) |
+| **Sanitización & extracción web** | `cheerio` (DOM), `playwright` (navegación headless), `@mozilla/readability` (aislamiento de artículos) |
+| **Inferencia LLM** | `@anthropic-ai/sdk` (Claude), `openai` (ChatGPT) |
+| **Validación / transformación** | `ajv` (JSON Schema para Drupal), `validator` / `@types/validator`, `sanitize-html`, `handlebars` |
+| **Seguridad y perímetro** | `ip-range-check` (CIDR), `otplib` (OTP) |
+| **Trazabilidad** | `winston`, `winston-daily-rotate-file` |
+| **Infraestructura** | Docker Compose (PostgreSQL 16, puerto `5432:5432`) |
+
+---
+
 ## 🧭 Índice de Configuración Modular
 
 ### 📜 Reglas del Proyecto (`.claude/rules/`)
 
-* `architecture-patterns.md`: Ciclo de vida del motor FSM, patrón Strategy (`INodeStrategy`) y contrato inmutable de `StatePayloadContext`.
+* `architecture-patterns.md`: Ciclo de vida del motor FSM, patrón Strategy (`INodeStrategy`), contrato inmutable de `StatePayloadContext` y librerías externas por tipo de nodo.
 * `code-conventions.md`: Idioma de identificadores, estándares TypeScript/Vue y orden obligatorio de archivos.
 * `git-workflow.md`: Convención de ramas (`feat/`, `fix/`) y Conventional Commits.
-* `security-and-scope.md`: Validación de subred local, autenticación OTP y límites de alcance (*scope*).
+* `security-and-scope.md`: Aislamiento de PostgreSQL en Docker, validación de subred local, autenticación OTP y límites de alcance (*scope*).
 * `testing-standards.md`: Patrón AAA, dobles de prueba y casos límite obligatorios en Jest.
 
 ### 🧠 Habilidades Especializadas (`.claude/skills/`)
@@ -45,6 +59,7 @@ Pro-ToDo/
 * `documentacion-codigo.md`: Estándar TSDoc y separadores visuales por capas.
 * `diagnostico-fsm-logs.md`: Cruce de errores entre PostgreSQL y logs físicos en disco.
 * `diagnostico-entorno-linux.md`: Resolución de permisos, puertos y conflictos en Apache/NPM.
+* `diagnostico-docker-postgres.md`: Conflicto de puerto 5432, permisos de volumen `pgdata/` y reinicialización limpia del contenedor.
 
 ### ⚡ Comandos Rápidos (`.claude/commands/`)
 
@@ -54,6 +69,24 @@ Pro-ToDo/
 * `/nuevo-nodo <nombre>`: Genera la estrategia `INodeStrategy` y su registro.
 * `/crear-test <ruta>`: Genera suite en Jest con patrón AAA y mocks.
 * `/siguiente-paso`: Analiza el estado del repo y presenta la próxima tarea.
+* `/docker-db <up|down|restart|status|reset>`: Gestiona el ciclo de vida del contenedor PostgreSQL.
+
+---
+
+## 🐳 Docker: Base de Datos PostgreSQL
+
+- **Ciclo de vida:**
+
+| Acción | Comando |
+| --- | --- |
+| Iniciar en segundo plano | `docker compose up -d` |
+| Detener contenedor | `docker compose down` |
+| Ver estado | `docker compose ps` |
+| Seguir logs | `docker compose logs -f postgres` |
+| Reinicializar limpio (⚠️ borra datos) | `docker compose down -v && docker compose up -d` |
+
+- **Conexión MCP:** `postgresql://postgres:postgres@localhost:5432/protodo_db`
+- **Regla clave:** el backend nunca debe depender de una instalación nativa de PostgreSQL ni de sockets fuera del contenedor — ver `rules/security-and-scope.md`.
 
 ---
 

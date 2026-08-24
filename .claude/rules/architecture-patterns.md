@@ -108,3 +108,12 @@ Cuando un nodo retorna `success: false` o lanza una excepción no controlada, el
 
 * **Colas Productor-Consumidor:** Las ejecuciones pesadas o disparadas por Cron/IMAP deben enviarse a colas de BullMQ para no bloquear el hilo de peticiones HTTP.
 * **WebSockets Gateway:** Cada flujo ejecutándose debe emitir eventos (`node_started`, `node_completed`, `flow_finished`, `flow_failed`) a la sala correspondiente (`flow_${flowId}`).
+
+---
+
+## 6. 📚 Librerías Externas por Tipo de Nodo
+
+* **Nodos de Ingesta:** `imapflow` (conexión IMAP) + `mailparser` (decodificación MIME de correos y adjuntos).
+* **Nodos de Extracción Web / Sanitización Pre-IA:** `cheerio` (manipulación DOM), `playwright` (navegación headless anti-bloqueo), `@mozilla/readability` (aislamiento del contenido del artículo).
+* **Nodos de Inferencia LLM:** `@anthropic-ai/sdk` (Claude) u `openai` (ChatGPT), según el proveedor configurado en el nodo.
+* **Nodos de Validación / Mapeo a Drupal:** `ajv` (JSON Schema estricto), `validator` (sanitización de strings), `sanitize-html` (filtrado de tags) y `handlebars` (interpolación de plantillas, alternativa a `getInterpolatedValue` para casos complejos).

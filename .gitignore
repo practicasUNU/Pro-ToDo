@@ -1,0 +1,71 @@
+# =============================================================================
+# Dependencias
+# =============================================================================
+node_modules/
+backend/node_modules/
+frontend/node_modules/
+.pnp
+.pnp.js
+
+# =============================================================================
+# Compilación y Salidas de Build
+# =============================================================================
+dist/
+backend/dist/
+frontend/dist/
+frontend/.quasar/
+.output/
+build/
+
+# =============================================================================
+# Variables de Entorno y Credenciales
+# =============================================================================
+.env
+.env.local
+.env.*.local
+backend/.env
+frontend/.env
+*.pem
+
+# Preservar la plantilla base
+!.env.example
+
+# =============================================================================
+# Logs físicos y Depuración
+# =============================================================================
+logs/
+backend/logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+# =============================================================================
+# Persistencia Local de Docker y Base de Datos
+# =============================================================================
+pgdata/
+.docker/
+
+# =============================================================================
+# Cobertura de Pruebas y Reportes
+# =============================================================================
+coverage/
+backend/coverage/
+.nyc_output/
+
+# =============================================================================
+# Archivos del Sistema Operativo y Editores
+# =============================================================================
+.DS_Store
+Thumbs.db
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json
+.idea/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?

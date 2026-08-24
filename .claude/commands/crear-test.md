@@ -13,9 +13,11 @@ Genera o actualiza la suite de pruebas unitarias en Jest para el archivo especif
 2. 🛡️ **Aislamiento y Mocks (Sin dependencias externas):**
    - Identifica todas las dependencias inyectadas (servicios de red, base de datos, APIs de IA).
    - Genera implementaciones simuladas (*jest.fn()*, *jest.spyOn()*) para garantizar que ninguna prueba realice llamadas HTTP o consultas reales a PostgreSQL.
+   - Si el archivo bajo prueba usa `StatePayloadContext`, constrúyelo con la factory `createMockStatePayloadContext` (ver `rules/testing-standards.md`) en lugar de instanciarlo manualmente.
 
-3. 🧱 **Estructura bajo el Patrón AAA:**
+3. 🧱 **Estructura bajo el Patrón AAA e Interfaz Polimórfica:**
    - Sigue el patrón Arrange-Act-Assert definido en `rules/testing-standards.md`.
+   - Si el archivo implementa `INodeStrategy`, verifica el contrato polimórfico (`nodeType`, `execute()`) y el tipo de retorno `NodeResult`.
 
 4. 🧪 **Casos de Prueba Obligatorios:**
    - 🟢 **Camino feliz (Happy Path):** Ejecución exitosa con datos válidos.
