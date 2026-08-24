@@ -4,11 +4,17 @@
 
 - **Prohibido depender de instalación nativa:** Ningún servicio del backend debe conectarse a un socket local de PostgreSQL instalado directamente en el sistema operativo. La única fuente de datos válida es el contenedor definido en `docker-compose.yml`.
 - **Conexión exclusiva vía TCP al contenedor:** El backend (NestJS/TypeORM) debe apuntar siempre a `DB_HOST=localhost` / `DB_PORT=5432` mapeado desde el contenedor `postgres`, nunca a un `unix socket` del host.
-- **Servidor MCP:** La cadena de conexión estándar para el servidor MCP de Claude contra la base de datos local del contenedor es:
-  ```
-  postgresql://postgres:postgres@localhost:5432/protodo_db
-  ```
+- **Servidor MCP:** `.mcp.json` (raíz del proyecto) define el servidor MCP de PostgreSQL usando exclusivamente variables de entorno en la cadena de conexión (`postgresql://${DB_USER}:${DB_PASSWORD}@localhost:${DB_PORT}/${DB_NAME}`) — nunca credenciales literales, ya que este archivo sí se versiona en Git.
+- **Requisito de entorno para el MCP:** Esas variables se expanden desde el entorno del shell que lanza Claude Code/el IDE, no desde `backend/.env` (Node/NestJS solo las carga dentro de su propio proceso). Deben exportarse antes de abrir el IDE, ej. `set -a && source backend/.env && set +a`; de lo contrario el servidor MCP no podrá conectarse.
 - **Persistencia:** Los datos deben residir únicamente en el volumen `pgdata/` gestionado por Docker Compose; no crear rutas de persistencia alternativas fuera del volumen declarado.
+
+---
+
+## 0.1 🔐 Separación de Variables de Entorno (Cliente-Servidor Desacoplado)
+
+- **Contextos aislados:** `backend/.env` y `frontend/.env` son archivos independientes. El frontend (Quasar/Vite) no debe declarar, referenciar ni recibir por ningún medio secretos de infraestructura (credenciales de base de datos, `JWT_SECRET`, `OTP_SECRET`) ni tokens de servicios de terceros (`CLAUDE_API_KEY`, `OPENAI_API_KEY`, `DRUPAL_API_TOKEN`, `ACENS_API_KEY`).
+- **Prefijo obligatorio en frontend:** Toda variable expuesta al cliente debe llevar el prefijo `VITE_` (ej. `VITE_API_BASE_URL`), siguiendo la convención de Vite para exposición explícita al bundle.
+- **Plantillas versionadas:** Los archivos reales `backend/.env` y `frontend/.env` **jamás** deben subirse a Git (ya excluidos en `.gitignore`). Siempre deben construirse a partir de sus plantillas versionadas `backend/.env.example` y `frontend/.env.example`, manteniéndolas actualizadas ante cualquier nueva variable.
 
 ---
 

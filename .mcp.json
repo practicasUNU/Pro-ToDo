@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "postgres-protodo": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "@modelcontextprotocol/server-postgres",
+        "postgresql://${DB_USER}:${DB_PASSWORD}@localhost:${DB_PORT}/${DB_NAME}"
+      ]
+    }
+  }
+}
