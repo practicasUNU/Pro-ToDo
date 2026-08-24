@@ -19,16 +19,7 @@ CREATE TYPE enum_estado_nodo AS ENUM ('OK', 'ERROR', 'ADVERTENCIA');
 
 CREATE TYPE enum_nivel_error AS ENUM ('URGENTE', 'GRAVE', 'LEVE');
 
--- =============================================================================
--- Tabla: ROLES
--- =============================================================================
-
-CREATE TABLE roles (
-    id_rol UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-    nombre VARCHAR(50) NOT NULL UNIQUE,
-    descripcion VARCHAR(255),
-    fecha_creacion TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-);
+CREATE TYPE enum_rol_usuario AS ENUM ('ADMIN', 'EDITOR');
 
 -- =============================================================================
 -- Tabla: USUARIOS
@@ -37,7 +28,7 @@ CREATE TABLE roles (
 CREATE TABLE usuarios (
     id_usuario UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     correo VARCHAR(255) NOT NULL UNIQUE,
-    id_rol UUID NOT NULL REFERENCES roles(id_rol),
+    rol enum_rol_usuario NOT NULL,
     codigo_otp VARCHAR(6),
     expiracion_otp TIMESTAMP,
     activo BOOLEAN DEFAULT TRUE,
@@ -145,7 +136,6 @@ CREATE TABLE alertas_error (
 -- Índices de apoyo para claves foráneas de alta consulta
 -- =============================================================================
 
-CREATE INDEX idx_usuarios_id_rol ON usuarios(id_rol);
 CREATE INDEX idx_plantillas_html_id_usuario_creador ON plantillas_html(id_usuario_creador);
 CREATE INDEX idx_flujos_id_usuario_creador ON flujos(id_usuario_creador);
 CREATE INDEX idx_nodos_id_flujo ON nodos(id_flujo);
@@ -158,10 +148,6 @@ CREATE INDEX idx_alertas_error_id_ejecucion ON alertas_error(id_ejecucion);
 -- =============================================================================
 -- SEED: Datos iniciales
 -- =============================================================================
-
-INSERT INTO roles (nombre, descripcion) VALUES
-    ('ADMINISTRADOR', 'Acceso completo al sistema y gestion exclusiva de usuarios'),
-    ('EDITOR', 'Operacion, configuracion y auditoria de flujos y plantillas');
 
 INSERT INTO tipos_nodo (codigo, nombre, categoria, descripcion) VALUES
     ('TRIGGER_IMAP', 'Disparador IMAP', 'TRIGGER', 'Inicia el flujo mediante la lectura de correos entrantes'),
