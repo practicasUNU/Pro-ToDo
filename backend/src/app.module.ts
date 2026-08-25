@@ -1,8 +1,13 @@
 import { Module } from '@nestjs/common';
 import { ConfigModule, ConfigService } from '@nestjs/config';
+import { APP_GUARD } from '@nestjs/core';
 import { TypeOrmModule } from '@nestjs/typeorm';
 
-import { UsersModule } from './modules/users/users.module';
+import { CommonModule } from '@common/common.module';
+import { IpWhitelistGuard } from '@common/guards/ip-whitelist.guard';
+import { AuthModule } from '@modules/auth/auth.module';
+import { HealthModule } from '@modules/health/health.module';
+import { UsersModule } from '@modules/users/users.module';
 
 import { AppController } from './app.controller';
 import { AppService } from './app.service';
@@ -24,9 +29,17 @@ import { AppService } from './app.service';
         synchronize: false,
       }),
     }),
+    CommonModule,
+    AuthModule,
+    HealthModule,
     UsersModule,
   ],
   controllers: [AppController],
-  providers: [AppService],
+  providers: [
+    AppService,
+    // Perimetro de red (PROT-05): guard global, se evalua antes que los guards de
+    // controlador, de modo que una IP no autorizada se rechaza sin procesar credenciales.
+    { provide: APP_GUARD, useClass: IpWhitelistGuard },
+  ],
 })
 export class AppModule {}

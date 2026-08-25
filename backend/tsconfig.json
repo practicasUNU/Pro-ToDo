@@ -17,7 +17,14 @@
     "skipLibCheck": true,
     "strictNullChecks": true,
     "forceConsistentCasingInFileNames": true,
-    "noImplicitAny": false,
+    "noImplicitAny": true,
+    "baseUrl": "./",
+    "paths": {
+      "@core/*": ["src/core/*"],
+      "@modules/*": ["src/modules/*"],
+      "@strategies/*": ["src/strategies/*"],
+      "@common/*": ["src/common/*"]
+    },
     "strictBindCallApply": false,
     "noFallthroughCasesInSwitch": false
   }

@@ -1,4 +1,10 @@
-import { IsBoolean, IsEmail, IsEnum, IsOptional, MaxLength } from 'class-validator';
+import {
+  IsBoolean,
+  IsEmail,
+  IsEnum,
+  IsOptional,
+  MaxLength,
+} from 'class-validator';
 
 import { UserRole } from '../enums/user-role.enum';
 

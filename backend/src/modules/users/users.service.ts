@@ -1,5 +1,10 @@
 import { ConfigService } from '@nestjs/config';
-import { ConflictException, ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
+import {
+  ConflictException,
+  ForbiddenException,
+  Injectable,
+  NotFoundException,
+} from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 
@@ -17,14 +22,18 @@ export class UsersService {
 
   // Filtro de dominios corporativos (MOD-01): rechaza correos fuera de ACCEPTED_EMAIL_DOMAINS
   private assertCorporateEmail(email: string): void {
-    const acceptedDomains = (this.configService.get<string>('ACCEPTED_EMAIL_DOMAINS') ?? '')
+    const acceptedDomains = (
+      this.configService.get<string>('ACCEPTED_EMAIL_DOMAINS') ?? ''
+    )
       .split(',')
       .map((domain) => domain.trim())
       .filter(Boolean);
 
     if (acceptedDomains.length === 0) return;
 
-    const isAccepted = acceptedDomains.some((domain) => email.toLowerCase().endsWith(domain.toLowerCase()));
+    const isAccepted = acceptedDomains.some((domain) =>
+      email.toLowerCase().endsWith(domain.toLowerCase()),
+    );
 
     if (!isAccepted) {
       throw new ForbiddenException(
@@ -55,7 +64,9 @@ export class UsersService {
     });
 
     if (existingUser) {
-      throw new ConflictException(`El correo "${createUserDto.email}" ya está registrado`);
+      throw new ConflictException(
+        `El correo "${createUserDto.email}" ya está registrado`,
+      );
     }
 
     const user = this.userRepository.create(createUserDto);
