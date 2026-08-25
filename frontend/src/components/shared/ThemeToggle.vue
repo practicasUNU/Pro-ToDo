@@ -18,7 +18,7 @@ const themeStore = useThemeStore();
     data-testid="theme-toggle"
     @click="themeStore.toggleTheme"
   >
-    <q-icon :name="themeStore.isDark ? 'light_mode' : 'dark_mode'" size="20px" />
+    <q-icon :name="themeStore.isDark ? 'dark_mode' : 'light_mode'" size="20px" />
     <q-tooltip anchor="bottom middle" self="top middle">
       {{ themeStore.isDark ? 'Modo claro' : 'Modo oscuro' }}
     </q-tooltip>
