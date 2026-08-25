@@ -1,8 +1,8 @@
 <!-- src/components/shared/AppHeader.vue -->
-<!-- QHeader se queda oscuro ($dark) en ambos modos a propósito —
-     es la decisión de marca ya visible en los wireframes originales
-     del proyecto. Lo único que cambia con el tema es el contenido,
-     vía las custom properties de app.scss. -->
+<!-- El QHeader lleva el degradado corporativo obligatorio
+     (.pd-gradient-header, definido en app.scss) y no conmuta con el
+     tema: es identidad de marca. Solo cambia con $q.dark el contenido
+     del area de pagina, via las custom properties --pd-*. -->
 <script setup lang="ts">
 import ThemeToggle from '@components/shared/ThemeToggle.vue';
 
@@ -20,27 +20,52 @@ defineEmits<{ 'toggle-drawer': [] }>();
 </script>
 
 <template>
-  <q-header class="bg-dark text-white" :height-hint="60">
+  <q-header class="pd-gradient-header" :height-hint="60">
     <q-toolbar class="pd-toolbar">
-      <q-btn flat dense round icon="menu" @click="$emit('toggle-drawer')" />
+      <q-btn
+        flat
+        dense
+        round
+        icon="menu"
+        aria-label="Alternar menu"
+        @click="$emit('toggle-drawer')"
+      />
 
       <q-avatar size="26px" class="q-ml-sm">
         <img src="@/assets/unuware-logo-isotype.svg" alt="UNUWARE" />
       </q-avatar>
-      <q-toolbar-title class="text-weight-bold" style="letter-spacing: 1.5px; font-size: 14px">
-        UNUWARE
-      </q-toolbar-title>
+      <q-toolbar-title class="pd-nav">UNUWARE</q-toolbar-title>
 
-      <q-separator dark vertical inset class="q-mx-md" />
-      <div class="pd-shell-text-secondary">{{ breadcrumb }}</div>
+      <q-separator vertical inset class="q-mx-md pd-header-separator" />
+      <div class="pd-header-breadcrumb">{{ breadcrumb }}</div>
 
       <q-space />
 
       <theme-toggle class="q-mr-sm" />
 
-      <q-avatar size="30px" color="grey-9" text-color="white" class="text-caption">
-        {{ userInitials }}
-      </q-avatar>
+      <q-avatar size="30px" class="pd-header-avatar">{{ userInitials }}</q-avatar>
     </q-toolbar>
   </q-header>
 </template>
+
+<style scoped lang="scss">
+// Sobre el degradado se consumen los tokens --pd-shell-*; los --pd-text-*
+// son del area de contenido y no aplican aqui (regla §2, Layout).
+.pd-header-breadcrumb {
+  color: var(--pd-shell-text-secondary);
+  font-size: 12.5px;
+  line-height: 18px;
+}
+
+.pd-header-separator {
+  background: var(--pd-shell-text-secondary);
+  opacity: 0.4;
+}
+
+.pd-header-avatar {
+  background: var(--pd-panel-solid);
+  color: var(--pd-shell-text);
+  font-size: 12px;
+  font-weight: 700;
+}
+</style>

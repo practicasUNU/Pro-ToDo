@@ -1,50 +1,3 @@
-<template>
-  <q-dialog :model-value="modelValue" persistent @update:model-value="onDialogToggle">
-    <q-card style="min-width: 380px">
-      <q-card-section>
-        <div class="text-h6">{{ isEditMode ? 'Editar usuario' : 'Nuevo usuario' }}</div>
-      </q-card-section>
-
-      <q-form @submit.prevent="onSubmit">
-        <q-card-section class="q-gutter-md">
-          <q-input
-            v-model="form.email"
-            label="Correo"
-            type="email"
-            outlined
-            :rules="[
-              (val: string) => !!val || 'El correo es obligatorio',
-              (val: string) => isCorporateEmail(val) || corporateEmailErrorMessage,
-            ]"
-          />
-
-          <!-- Selector determinista: evita errores de tipeo en el rol (Poka-Yoke) -->
-          <q-select
-            v-model="form.role"
-            :options="roleOptions"
-            label="Rol"
-            outlined
-            emit-value
-            map-options
-            :rules="[(val: UserRole | null) => !!val || 'El rol es obligatorio']"
-          />
-        </q-card-section>
-
-        <q-card-actions align="right">
-          <q-btn flat label="Cancelar" color="primary" @click="closeDialog" />
-          <q-btn
-            flat
-            label="Guardar"
-            color="primary"
-            type="submit"
-            :loading="usersStore.isLoading"
-          />
-        </q-card-actions>
-      </q-form>
-    </q-card>
-  </q-dialog>
-</template>
-
 <script setup lang="ts">
 import { computed, reactive, watch } from 'vue';
 import { useQuasar } from 'quasar';
@@ -126,3 +79,91 @@ const onSubmit = async (): Promise<void> => {
   }
 };
 </script>
+
+<template>
+  <q-dialog :model-value="modelValue" persistent @update:model-value="onDialogToggle">
+    <q-card class="pd-dialog-card">
+      <q-card-section class="row items-center no-wrap q-gutter-sm">
+        <span class="pd-icon-circle">
+          <q-icon name="person_add" size="20px" class="pd-dialog-icon" />
+        </span>
+        <div class="pd-h2">{{ isEditMode ? 'Editar usuario' : 'Nuevo usuario' }}</div>
+      </q-card-section>
+
+      <q-form @submit.prevent="onSubmit">
+        <q-card-section class="q-gutter-md q-pt-none">
+          <div>
+            <label class="pd-label" for="user-email">
+              Correo corporativo<span class="pd-required">*</span>
+            </label>
+            <q-input
+              id="user-email"
+              v-model="form.email"
+              type="email"
+              outlined
+              dense
+              class="q-mt-xs"
+              placeholder="usuario@unuware.com"
+              :rules="[
+                (val: string) => !!val || 'El correo es obligatorio',
+                (val: string) => isCorporateEmail(val) || corporateEmailErrorMessage,
+              ]"
+            />
+          </div>
+
+          <!-- Selector determinista: evita errores de tipeo en el rol (Poka-Yoke) -->
+          <div>
+            <label class="pd-label" for="user-role">Rol<span class="pd-required">*</span></label>
+            <q-select
+              id="user-role"
+              v-model="form.role"
+              :options="roleOptions"
+              outlined
+              dense
+              class="q-mt-xs"
+              emit-value
+              map-options
+              :rules="[(val: UserRole | null) => !!val || 'El rol es obligatorio']"
+            />
+          </div>
+        </q-card-section>
+
+        <q-card-actions align="right" class="q-px-md q-pb-md">
+          <q-btn flat no-caps label="Cancelar" class="pd-btn-cancel" @click="closeDialog" />
+          <q-btn
+            class="pd-btn-primary"
+            unelevated
+            no-caps
+            label="Guardar"
+            icon-right="north_east"
+            type="submit"
+            :loading="usersStore.isLoading"
+          />
+        </q-card-actions>
+      </q-form>
+    </q-card>
+  </q-dialog>
+</template>
+
+<style scoped lang="scss">
+.pd-dialog-icon {
+  color: var(--pd-primary);
+}
+
+.pd-btn-cancel {
+  color: var(--pd-text-secondary);
+}
+
+// Campos e inputs sobre los tokens del sistema (regla §2, Formularios).
+:deep(.q-field--outlined .q-field__control) {
+  background: var(--pd-card-bg);
+}
+
+:deep(.q-field--outlined .q-field__control::before) {
+  border-color: var(--pd-border);
+}
+
+:deep(.q-field__native::placeholder) {
+  color: var(--pd-text-secondary);
+}
+</style>

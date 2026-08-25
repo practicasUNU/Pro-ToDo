@@ -1,10 +1,13 @@
 import { defineStore, acceptHMRUpdate } from 'pinia';
 import { ref } from 'vue';
 
-import { api } from '@boot/axios';
+import * as usersService from '@services/users.service';
 
 import type { CreateUserPayload, UpdateUserPayload, User } from '@/types/user';
 
+// Logica de negocio y estado compartido del dominio Usuarios. Esta capa no
+// conoce Axios ni rutas del backend (ver frontend-architecture.md §2.1): solo
+// invoca al servicio y muta el estado de forma inmutable con su resultado.
 export const useUsersStore = defineStore('users', () => {
   const users = ref<User[]>([]);
   const isLoading = ref(false);
@@ -13,8 +16,7 @@ export const useUsersStore = defineStore('users', () => {
     isLoading.value = true;
 
     try {
-      const { data } = await api.get<User[]>('/users');
-      users.value = data;
+      users.value = await usersService.fetchUsers();
     } finally {
       isLoading.value = false;
     }
@@ -24,9 +26,9 @@ export const useUsersStore = defineStore('users', () => {
     isLoading.value = true;
 
     try {
-      const { data } = await api.post<User>('/users', payload);
-      users.value = [...users.value, data];
-      return data;
+      const created = await usersService.createUser(payload);
+      users.value = [...users.value, created];
+      return created;
     } finally {
       isLoading.value = false;
     }
@@ -36,9 +38,9 @@ export const useUsersStore = defineStore('users', () => {
     isLoading.value = true;
 
     try {
-      const { data } = await api.patch<User>(`/users/${id}`, payload);
-      users.value = users.value.map((user) => (user.id === id ? data : user));
-      return data;
+      const updated = await usersService.updateUser(id, payload);
+      users.value = users.value.map((user) => (user.id === id ? updated : user));
+      return updated;
     } finally {
       isLoading.value = false;
     }
@@ -49,9 +51,9 @@ export const useUsersStore = defineStore('users', () => {
     isLoading.value = true;
 
     try {
-      const { data } = await api.delete<User>(`/users/${id}`);
-      users.value = users.value.map((user) => (user.id === id ? data : user));
-      return data;
+      const deactivated = await usersService.deactivateUser(id);
+      users.value = users.value.map((user) => (user.id === id ? deactivated : user));
+      return deactivated;
     } finally {
       isLoading.value = false;
     }

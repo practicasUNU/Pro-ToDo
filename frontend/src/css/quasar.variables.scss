@@ -7,22 +7,24 @@
 // app.scss como CSS custom properties (ver ese archivo).
 // ============================================================
 
-// ---- Marca ----
-$primary: #2e75b6; // azul de marca (logo UNUWARE)
-$secondary: #4e7796; // azul-gris de soporte
-$accent: #2e75b6;
+// ---- Marca (paleta institucional UNUWARE) ----
+// Idénticos en claro y oscuro por consistencia identitaria.
+$primary: #2c4fc7; // inicio del degradado corporativo
+$primary-light: #4e74e8; // fin del degradado corporativo
+$secondary: #3a5ce0; // paneles sólidos institucionales
+$accent: #5b8ce8; // micro-interacciones, hover de superficies
 
 // ---- Tríada semántica de severidad ----
-$positive: #2e7d32; // EXITOSO
-$negative: #c0392b; // URGENTE / FALLIDO
-$warning: #d4860a; // GRAVE / PAUSADO
-$info: #4e7796; // LEVE
+$positive: #10b981; // EXITOSO
+$negative: #e74c3c; // URGENTE / FALLIDO
+$warning: #f59e0b; // GRAVE / PAUSADO
+$info: #5b8ce8; // LEVE
 
-// Shell (QHeader + QDrawer): se mantiene oscuro en ambos modos
-// como parte de la identidad de marca (así estaba ya en los
-// wireframes originales del proyecto).
-$dark: #1e1e1e;
-$dark-page: #141516; // fondo de página cuando $q.dark está activo
+// Shell (QHeader + QDrawer): navy institucional, idéntico en ambos
+// modos. El QHeader además lleva el degradado obligatorio (ver la
+// clase .pd-gradient-header en app.scss).
+$dark: #12142e;
+$dark-page: #0d0f26; // fondo de página cuando $q.dark está activo
 
 // ---- Tipografía (briefing §1.2) ----
 // Familias self-hosted vía @fontsource (importadas en app.scss):
@@ -31,6 +33,10 @@ $dark-page: #141516; // fondo de página cuando $q.dark está activo
 $typography-font-family:
   'Inter Variable', 'Inter', 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
 $mono-font-family: 'JetBrains Mono Variable', 'JetBrains Mono', Consolas, ui-monospace, monospace;
+
+// Encabezados y navegación: Poppins con Montserrat como respaldo.
+// La consumen .pd-h1 / .pd-h2 / .pd-nav en app.scss.
+$heading-font-family: 'Poppins', 'Montserrat', $typography-font-family;
 
 // Cuerpo base: la interfaz es densa (tablas de trazabilidad,
 // wizard), de ahí los 13px del briefing en lugar de los 14 de Quasar.

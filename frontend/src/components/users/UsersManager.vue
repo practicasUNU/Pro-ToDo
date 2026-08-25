@@ -1,80 +1,21 @@
-<template>
-  <q-page padding class="pd-page">
-    <q-table
-      class="pd-card pd-table"
-      flat
-      title="Gestion de Usuarios"
-      :rows="usersStore.users"
-      :columns="columns"
-      row-key="id"
-      :loading="usersStore.isLoading"
-    >
-      <template #top-right>
-        <q-btn color="primary" icon="add" label="Nuevo usuario" no-caps @click="openCreateDialog" />
-      </template>
-
-      <template #body-cell-status="cellProps">
-        <q-td :props="cellProps">
-          <q-badge class="pd-badge" :color="cellProps.row.isActive ? 'positive' : 'negative'">
-            {{ cellProps.row.isActive ? 'Activo' : 'Inactivo' }}
-          </q-badge>
-        </q-td>
-      </template>
-
-      <template #body-cell-actions="cellProps">
-        <q-td :props="cellProps" class="q-gutter-x-sm">
-          <q-btn
-            dense
-            flat
-            round
-            icon="edit"
-            color="primary"
-            @click="openEditDialog(cellProps.row)"
-          />
-          <q-btn
-            v-if="cellProps.row.isActive"
-            dense
-            flat
-            round
-            icon="block"
-            color="negative"
-            @click="requestDeactivation(cellProps.row)"
-          />
-          <q-btn
-            v-else
-            dense
-            flat
-            round
-            icon="check_circle"
-            color="positive"
-            @click="activateUser(cellProps.row)"
-          />
-        </q-td>
-      </template>
-    </q-table>
-
-    <UserDialog v-model="isDialogOpen" :user="selectedUser" @saved="onUserSaved" />
-
-    <SafeDeleteModal
-      v-model="isDeleteDialogOpen"
-      title="Desactivar usuario"
-      :message="`¿Seguro que deseas desactivar a ${userToDeactivate?.email ?? ''}?`"
-      confirm-label="Desactivar"
-      @confirm="confirmDeactivation"
-    />
-  </q-page>
-</template>
-
 <script setup lang="ts">
 import { onMounted, ref } from 'vue';
 import { useQuasar, type QTableColumn } from 'quasar';
 
 import { useUsersStore } from '@stores/users.store';
 
-import type { User } from '@/types/user';
-
 import UserDialog from './UserDialog.vue';
 import SafeDeleteModal from './SafeDeleteModal.vue';
+
+import { deriveDisplayName } from '@/utils/user-display';
+
+import { UserRole, type User } from '@/types/user';
+
+// Etiquetas legibles del enum de rol (el backend expone ADMIN / EDITOR)
+const ROLE_LABELS: Record<UserRole, string> = {
+  [UserRole.ADMIN]: 'Administrador',
+  [UserRole.EDITOR]: 'Editor',
+};
 
 const $q = useQuasar();
 const usersStore = useUsersStore();
@@ -85,11 +26,19 @@ const selectedUser = ref<User | null>(null);
 const isDeleteDialogOpen = ref(false);
 const userToDeactivate = ref<User | null>(null);
 
-const columns: QTableColumn[] = [
-  { name: 'id', label: 'ID', field: 'id', align: 'left' },
-  { name: 'email', label: 'Correo', field: 'email', align: 'left', sortable: true },
+// El id tecnico (UUID) no ocupa columna propia: se expone en el tooltip del
+// nombre para no romper la legibilidad de la tabla.
+const columns: QTableColumn<User>[] = [
+  {
+    name: 'name',
+    label: 'Nombre',
+    field: (row: User) => deriveDisplayName(row.email),
+    align: 'left',
+    sortable: true,
+  },
+  { name: 'email', label: 'Correo Corporativo', field: 'email', align: 'left', sortable: true },
   { name: 'role', label: 'Rol', field: 'role', align: 'left', sortable: true },
-  { name: 'status', label: 'Estado', field: 'isActive', align: 'center' },
+  { name: 'status', label: 'Estado', field: 'isActive', align: 'center', sortable: true },
   { name: 'actions', label: 'Acciones', field: 'id', align: 'center' },
 ];
 
@@ -144,3 +93,136 @@ const activateUser = async (user: User): Promise<void> => {
 
 onMounted(loadUsers);
 </script>
+
+<template>
+  <q-page padding class="pd-page">
+    <header class="users-header">
+      <div>
+        <h1 class="pd-h1">Gestion de Usuarios</h1>
+        <p class="pd-subtitle">
+          Alta, edicion y baja logica de cuentas con acceso a Proto-Do (CU-02).
+        </p>
+      </div>
+
+      <q-btn
+        class="pd-btn-primary"
+        unelevated
+        no-caps
+        label="Nuevo Usuario"
+        icon-right="north_east"
+        @click="openCreateDialog"
+      />
+    </header>
+
+    <q-table
+      class="pd-card pd-table"
+      flat
+      :rows="usersStore.users"
+      :columns="columns"
+      row-key="id"
+      :loading="usersStore.isLoading"
+    >
+      <template #body-cell-name="cellProps">
+        <q-td :props="cellProps">
+          {{ cellProps.value }}
+          <q-tooltip anchor="top middle" self="bottom middle">
+            <span class="pd-mono">{{ cellProps.row.id }}</span>
+          </q-tooltip>
+        </q-td>
+      </template>
+
+      <template #body-cell-email="cellProps">
+        <q-td :props="cellProps">
+          <span class="pd-mono">{{ cellProps.value }}</span>
+        </q-td>
+      </template>
+
+      <template #body-cell-role="cellProps">
+        <q-td :props="cellProps">
+          <q-badge class="pd-badge pd-badge--role">
+            {{ ROLE_LABELS[cellProps.row.role as UserRole] }}
+          </q-badge>
+        </q-td>
+      </template>
+
+      <template #body-cell-status="cellProps">
+        <q-td :props="cellProps">
+          <q-badge
+            class="pd-badge"
+            :class="cellProps.row.isActive ? 'pd-badge--active' : 'pd-badge--inactive'"
+          >
+            {{ cellProps.row.isActive ? 'Activo' : 'Inactivo' }}
+          </q-badge>
+        </q-td>
+      </template>
+
+      <template #body-cell-actions="cellProps">
+        <q-td :props="cellProps" class="q-gutter-x-xs">
+          <q-btn
+            class="pd-btn-icon"
+            outline
+            dense
+            size="sm"
+            icon="edit"
+            :aria-label="`Editar ${cellProps.row.email}`"
+            @click="openEditDialog(cellProps.row)"
+          >
+            <q-tooltip>Editar usuario</q-tooltip>
+          </q-btn>
+
+          <q-btn
+            v-if="cellProps.row.isActive"
+            class="pd-btn-icon pd-btn-icon--danger"
+            outline
+            dense
+            size="sm"
+            icon="block"
+            :aria-label="`Desactivar ${cellProps.row.email}`"
+            @click="requestDeactivation(cellProps.row)"
+          >
+            <q-tooltip>Desactivar usuario</q-tooltip>
+          </q-btn>
+
+          <q-btn
+            v-else
+            class="pd-btn-icon pd-btn-icon--positive"
+            outline
+            dense
+            size="sm"
+            icon="check_circle"
+            :aria-label="`Activar ${cellProps.row.email}`"
+            @click="activateUser(cellProps.row)"
+          >
+            <q-tooltip>Reactivar usuario</q-tooltip>
+          </q-btn>
+        </q-td>
+      </template>
+    </q-table>
+
+    <UserDialog v-model="isDialogOpen" :user="selectedUser" @saved="onUserSaved" />
+
+    <SafeDeleteModal
+      v-model="isDeleteDialogOpen"
+      title="Desactivar usuario"
+      :message="`¿Seguro que deseas desactivar a ${userToDeactivate?.email ?? ''}?`"
+      confirm-label="Desactivar"
+      @confirm="confirmDeactivation"
+    />
+  </q-page>
+</template>
+
+<style scoped lang="scss">
+// Solo maquetacion: el color proviene de las clases .pd-* globales.
+.users-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+  margin-bottom: 16px;
+}
+
+.pd-subtitle {
+  margin: 4px 0 0;
+}
+</style>

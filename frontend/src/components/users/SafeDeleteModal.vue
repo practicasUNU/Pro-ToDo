@@ -1,29 +1,3 @@
-<template>
-  <q-dialog :model-value="modelValue" persistent @update:model-value="onDialogToggle">
-    <q-card style="min-width: 360px">
-      <q-card-section class="row items-center q-gutter-sm">
-        <q-icon name="warning" color="warning" size="28px" />
-        <div class="text-h6">{{ title }}</div>
-      </q-card-section>
-
-      <q-card-section class="q-pt-none">
-        {{ message }}
-      </q-card-section>
-
-      <q-card-actions align="right">
-        <q-btn flat label="Cancelar" color="primary" @click="onCancel" />
-        <q-btn
-          flat
-          :label="confirmButtonLabel"
-          color="negative"
-          :disable="secondsRemaining > 0"
-          @click="onConfirm"
-        />
-      </q-card-actions>
-    </q-card>
-  </q-dialog>
-</template>
-
 <script setup lang="ts">
 import { computed, onBeforeUnmount, ref, watch } from 'vue';
 
@@ -105,3 +79,42 @@ const onCancel = (): void => {
 
 onBeforeUnmount(clearCountdown);
 </script>
+
+<template>
+  <q-dialog :model-value="modelValue" persistent @update:model-value="onDialogToggle">
+    <q-card class="pd-dialog-card pd-card--accent pd-accent-urgente">
+      <q-card-section class="row items-center no-wrap q-gutter-sm">
+        <span class="pd-icon-circle">
+          <q-icon name="warning_amber" size="20px" class="pd-danger-icon" />
+        </span>
+        <div class="pd-h2">{{ title }}</div>
+      </q-card-section>
+
+      <q-card-section class="q-pt-none pd-text-secondary">
+        {{ message }}
+      </q-card-section>
+
+      <q-card-actions align="right" class="q-px-md q-pb-md">
+        <q-btn flat no-caps label="Cancelar" class="pd-btn-cancel" @click="onCancel" />
+        <q-btn
+          class="pd-btn-danger"
+          unelevated
+          no-caps
+          :label="confirmButtonLabel"
+          :disable="secondsRemaining > 0"
+          @click="onConfirm"
+        />
+      </q-card-actions>
+    </q-card>
+  </q-dialog>
+</template>
+
+<style scoped lang="scss">
+.pd-danger-icon {
+  color: var(--pd-negative);
+}
+
+.pd-btn-cancel {
+  color: var(--pd-text-secondary);
+}
+</style>

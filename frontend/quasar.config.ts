@@ -56,6 +56,7 @@ export default defineConfig((ctx) => {
       alias: {
         '@components': ctx.appPaths.resolve.app('src/components'),
         '@stores': ctx.appPaths.resolve.app('src/stores'),
+        '@services': ctx.appPaths.resolve.app('src/services'),
         '@boot': ctx.appPaths.resolve.app('src/boot'),
       },
 
