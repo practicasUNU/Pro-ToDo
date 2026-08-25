@@ -1,4 +1,5 @@
-import { ConflictException, Injectable, NotFoundException } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
+import { ConflictException, ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 
@@ -11,7 +12,26 @@ export class UsersService {
   constructor(
     @InjectRepository(User)
     private readonly userRepository: Repository<User>,
+    private readonly configService: ConfigService,
   ) {}
+
+  // Filtro de dominios corporativos (MOD-01): rechaza correos fuera de ACCEPTED_EMAIL_DOMAINS
+  private assertCorporateEmail(email: string): void {
+    const acceptedDomains = (this.configService.get<string>('ACCEPTED_EMAIL_DOMAINS') ?? '')
+      .split(',')
+      .map((domain) => domain.trim())
+      .filter(Boolean);
+
+    if (acceptedDomains.length === 0) return;
+
+    const isAccepted = acceptedDomains.some((domain) => email.toLowerCase().endsWith(domain.toLowerCase()));
+
+    if (!isAccepted) {
+      throw new ForbiddenException(
+        `El correo debe pertenecer a un dominio corporativo autorizado (${acceptedDomains.join(', ')})`,
+      );
+    }
+  }
 
   public async findAll(): Promise<User[]> {
     return this.userRepository.find();
@@ -28,6 +48,8 @@ export class UsersService {
   }
 
   public async create(createUserDto: CreateUserDto): Promise<User> {
+    this.assertCorporateEmail(createUserDto.email);
+
     const existingUser = await this.userRepository.findOne({
       where: { email: createUserDto.email },
     });
@@ -41,6 +63,10 @@ export class UsersService {
   }
 
   public async update(id: string, updateUserDto: UpdateUserDto): Promise<User> {
+    if (updateUserDto.email) {
+      this.assertCorporateEmail(updateUserDto.email);
+    }
+
     const user = await this.findOne(id);
 
     Object.assign(user, updateUserDto);
