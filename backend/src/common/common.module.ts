@@ -1,6 +1,7 @@
 import { Global, Module } from '@nestjs/common';
 
 import { RedLocalMiddleware } from '@common/middlewares/red-local.middleware';
+import { EmailService } from '@common/services/email.service';
 import { IpAccessService } from '@common/services/ip-access.service';
 
 /**
@@ -12,7 +13,7 @@ import { IpAccessService } from '@common/services/ip-access.service';
  */
 @Global()
 @Module({
-  providers: [IpAccessService, RedLocalMiddleware],
-  exports: [IpAccessService, RedLocalMiddleware],
+  providers: [IpAccessService, RedLocalMiddleware, EmailService],
+  exports: [IpAccessService, RedLocalMiddleware, EmailService],
 })
 export class CommonModule {}

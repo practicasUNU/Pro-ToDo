@@ -56,6 +56,17 @@ export class UsersService {
     return user;
   }
 
+  /**
+   * Busca un usuario por su correo. A diferencia de `findOne`, NO lanza si no existe:
+   * el flujo de autenticacion necesita distinguir el caso sin convertirlo en un 404,
+   * que permitiria enumerar cuentas validas desde fuera.
+   */
+  public async findByEmail(email: string): Promise<User | null> {
+    return this.userRepository.findOne({
+      where: { email: email.trim().toLowerCase() },
+    });
+  }
+
   public async create(createUserDto: CreateUserDto): Promise<User> {
     this.assertCorporateEmail(createUserDto.email);
 

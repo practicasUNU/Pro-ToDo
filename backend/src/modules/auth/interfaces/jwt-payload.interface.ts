@@ -25,3 +25,9 @@ export interface AuthenticatedUser {
 export interface RequestWithUser {
   user?: AuthenticatedUser;
 }
+
+/** Respuesta de una validacion de OTP exitosa: token de sesion e identidad. */
+export interface AuthTokenResponse {
+  accessToken: string;
+  user: AuthenticatedUser;
+}

@@ -3,8 +3,12 @@ import { ConfigModule, ConfigService } from '@nestjs/config';
 import { JwtModule } from '@nestjs/jwt';
 import { PassportModule } from '@nestjs/passport';
 
+import { AuthController } from '@modules/auth/auth.controller';
+import { AuthService } from '@modules/auth/auth.service';
 import { JwtAuthGuard } from '@modules/auth/guards/jwt-auth.guard';
+import { OtpConfigService } from '@modules/auth/services/otp-config.service';
 import { JwtStrategy } from '@modules/auth/strategies/jwt.strategy';
+import { UsersModule } from '@modules/users/users.module';
 
 import type { JwtModuleOptions } from '@nestjs/jwt';
 
@@ -15,13 +19,14 @@ type ExpiresIn = NonNullable<JwtModuleOptions['signOptions']>['expiresIn'];
 const DEFAULT_JWT_EXPIRATION = '8h';
 
 /**
- * Capa de verificacion de identidad (PROT-04.2).
+ * Autenticacion corporativa: verificacion del JWT (PROT-04.2) y emision del token
+ * tras validar el OTP enviado por correo (PROT-04.1).
  *
- * Intencionadamente sin controlador: la emision de tokens (solicitud y validacion
- * del OTP corporativo) pertenece a PROT-04.1 y se añadira aqui mismo.
+ * `EmailService` no se declara aqui: lo provee `CommonModule`, que es global.
  */
 @Module({
   imports: [
+    UsersModule,
     PassportModule.register({ defaultStrategy: 'jwt' }),
     JwtModule.registerAsync({
       imports: [ConfigModule],
@@ -37,7 +42,8 @@ const DEFAULT_JWT_EXPIRATION = '8h';
       }),
     }),
   ],
-  providers: [JwtStrategy, JwtAuthGuard],
+  controllers: [AuthController],
+  providers: [AuthService, OtpConfigService, JwtStrategy, JwtAuthGuard],
   exports: [JwtAuthGuard, JwtModule, PassportModule],
 })
 export class AuthModule {}

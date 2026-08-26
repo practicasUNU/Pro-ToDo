@@ -48,6 +48,7 @@
     "ip-range-check": "^0.2.1",
     "jsdom": "^30.0.1",
     "mailparser": "^3.9.8",
+    "nodemailer": "^9.0.5",
     "openai": "^7.5.0",
     "otplib": "^13.4.1",
     "passport": "^0.7.0",
@@ -75,6 +76,7 @@
     "@types/jsdom": "^30.0.0",
     "@types/mailparser": "^3.4.6",
     "@types/node": "^24.0.0",
+    "@types/nodemailer": "^8.0.1",
     "@types/passport-jwt": "^4.0.1",
     "@types/sanitize-html": "^2.16.1",
     "@types/supertest": "^7.0.0",
@@ -100,14 +102,26 @@
   "jest": {
     "moduleFileExtensions": [
       "js",
+      "cjs",
+      "mjs",
       "json",
       "ts"
     ],
     "rootDir": "src",
     "testRegex": ".*\\.spec\\.ts$",
     "transform": {
-      "^.+\\.(t|j)s$": "ts-jest"
+      "^.+\\.(t|j)s$": [
+        "ts-jest",
+        {
+          "tsconfig": {
+            "allowJs": true
+          }
+        }
+      ]
     },
+    "transformIgnorePatterns": [
+      "/node_modules/(?!.*(?:@scure|@noble)/)"
+    ],
     "moduleNameMapper": {
       "^@core/(.*)$": "<rootDir>/core/$1",
       "^@modules/(.*)$": "<rootDir>/modules/$1",
