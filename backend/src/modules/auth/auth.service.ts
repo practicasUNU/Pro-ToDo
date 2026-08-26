@@ -3,6 +3,7 @@ import { JwtService } from '@nestjs/jwt';
 
 import { EmailService } from '@common/services/email.service';
 import { OtpConfigService } from '@modules/auth/services/otp-config.service';
+import { RefreshTokenService } from '@modules/auth/services/refresh-token.service';
 import { UsersService } from '@modules/users/users.service';
 
 import type {
@@ -12,11 +13,16 @@ import type {
 } from '@modules/auth/interfaces/jwt-payload.interface';
 import type { User } from '@modules/users/entities/user.entity';
 
+/** Mensaje unico de fallo de autenticacion: no distingue la causa. */
+const INVALID_CREDENTIALS_MESSAGE = 'Credenciales invalidas o codigo expirado.';
+
 /**
- * Orquestador de la autenticacion sin contrasena (PROT-04.1).
+ * Orquestador de la autenticacion sin contrasena (PROT-04.1) y del ciclo de
+ * sesion (PROT-06.4).
  *
- * Coordina la busqueda del usuario, la emision del codigo, su envio por correo y la
- * firma del JWT. No conoce HTTP: los codigos de estado los decide el controlador.
+ * Coordina la busqueda del usuario, la emision del codigo, su envio por correo y
+ * la entrega del par de tokens. No conoce HTTP: los codigos de estado los decide
+ * el controlador.
  */
 @Injectable()
 export class AuthService {
@@ -27,6 +33,7 @@ export class AuthService {
     private readonly otpConfigService: OtpConfigService,
     private readonly emailService: EmailService,
     private readonly jwtService: JwtService,
+    private readonly refreshTokenService: RefreshTokenService,
   ) {}
 
   /**
@@ -52,7 +59,7 @@ export class AuthService {
   }
 
   /**
-   * Valida el codigo y, si es correcto, emite el JWT de sesion.
+   * Valida el codigo y, si es correcto, abre la sesion.
    *
    * @throws UnauthorizedException si el codigo es invalido, ha expirado, pertenece a
    *         otro usuario, o la cuenta no existe o esta desactivada.
@@ -66,9 +73,7 @@ export class AuthService {
     // Mismo error para cuenta inexistente, inactiva y codigo erroneo: el cliente no
     // debe poder distinguir cual de los tres casos ocurrio.
     if (!user || !user.isActive) {
-      throw new UnauthorizedException(
-        'Credenciales invalidas o codigo expirado.',
-      );
+      throw new UnauthorizedException(INVALID_CREDENTIALS_MESSAGE);
     }
 
     const isValidCode = await this.otpConfigService.verifyCode(
@@ -78,16 +83,39 @@ export class AuthService {
 
     if (!isValidCode) {
       this.logger.warn(`Codigo OTP invalido para ${user.email}`);
-      throw new UnauthorizedException(
-        'Credenciales invalidas o codigo expirado.',
-      );
+      throw new UnauthorizedException(INVALID_CREDENTIALS_MESSAGE);
     }
 
     return this.buildTokenResponse(user);
   }
 
-  /** Firma el token con la identidad del usuario y arma la respuesta de sesion. */
-  private buildTokenResponse(user: User): AuthTokenResponse {
+  /**
+   * Renueva la sesion canjeando el refresh token por un par nuevo (PROT-06.4).
+   *
+   * La rotacion la resuelve `RefreshTokenService`: aqui solo se vuelve a firmar
+   * el access token para el usuario que aquel devuelve.
+   *
+   * @throws UnauthorizedException propagada desde la rotacion.
+   */
+  public async refreshSession(rawToken: string): Promise<AuthTokenResponse> {
+    const user = await this.refreshTokenService.rotate(rawToken);
+
+    return this.buildTokenResponse(user);
+  }
+
+  /**
+   * Cierra la sesion revocando el refresh token presentado.
+   *
+   * El access token sigue siendo valido hasta que caduque por su cuenta: es la
+   * contrapartida de un JWT autocontenido, y el motivo de que su vigencia sea de
+   * una hora y no de ocho.
+   */
+  public async logout(rawToken: string): Promise<void> {
+    await this.refreshTokenService.revoke(rawToken);
+  }
+
+  /** Firma el access token, emite el refresh y arma la respuesta de sesion. */
+  private async buildTokenResponse(user: User): Promise<AuthTokenResponse> {
     const payload: JwtPayload = {
       sub: user.id,
       email: user.email,
@@ -101,6 +129,7 @@ export class AuthService {
 
     return {
       accessToken: this.jwtService.sign(payload),
+      refreshToken: await this.refreshTokenService.issue(user),
       user: authenticatedUser,
     };
   }

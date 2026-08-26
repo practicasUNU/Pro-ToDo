@@ -2,11 +2,14 @@ import { Module } from '@nestjs/common';
 import { ConfigModule, ConfigService } from '@nestjs/config';
 import { JwtModule } from '@nestjs/jwt';
 import { PassportModule } from '@nestjs/passport';
+import { TypeOrmModule } from '@nestjs/typeorm';
 
 import { AuthController } from '@modules/auth/auth.controller';
 import { AuthService } from '@modules/auth/auth.service';
+import { RefreshToken } from '@modules/auth/entities/refresh-token.entity';
 import { JwtAuthGuard } from '@modules/auth/guards/jwt-auth.guard';
 import { OtpConfigService } from '@modules/auth/services/otp-config.service';
+import { RefreshTokenService } from '@modules/auth/services/refresh-token.service';
 import { JwtStrategy } from '@modules/auth/strategies/jwt.strategy';
 import { UsersModule } from '@modules/users/users.module';
 
@@ -27,6 +30,7 @@ const DEFAULT_JWT_EXPIRATION = '8h';
 @Module({
   imports: [
     UsersModule,
+    TypeOrmModule.forFeature([RefreshToken]),
     PassportModule.register({ defaultStrategy: 'jwt' }),
     JwtModule.registerAsync({
       imports: [ConfigModule],
@@ -43,7 +47,13 @@ const DEFAULT_JWT_EXPIRATION = '8h';
     }),
   ],
   controllers: [AuthController],
-  providers: [AuthService, OtpConfigService, JwtStrategy, JwtAuthGuard],
+  providers: [
+    AuthService,
+    OtpConfigService,
+    RefreshTokenService,
+    JwtStrategy,
+    JwtAuthGuard,
+  ],
   exports: [JwtAuthGuard, JwtModule, PassportModule],
 })
 export class AuthModule {}

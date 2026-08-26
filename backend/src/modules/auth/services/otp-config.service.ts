@@ -83,8 +83,14 @@ export class OtpConfigService {
     return new ScureBase32Plugin().encode(new Uint8Array(digest));
   }
 
-  /** Ventana de validez en segundos, derivada de `OTP_EXPIRATION_MINUTES`. */
-  private getExpirationSeconds(): number {
+  /**
+   * Ventana de validez en segundos, derivada de `OTP_EXPIRATION_MINUTES`.
+   *
+   * Es publica porque el controlador la devuelve al cliente: es un parametro de
+   * configuracion global, igual para toda cuenta, asi que exponerla no permite
+   * enumerar usuarios ni deducir nada del codigo emitido.
+   */
+  public getExpirationSeconds(): number {
     const minutes =
       this.configService.get<number>('OTP_EXPIRATION_MINUTES') ??
       DEFAULT_EXPIRATION_MINUTES;

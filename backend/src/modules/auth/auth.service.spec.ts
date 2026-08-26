@@ -6,6 +6,7 @@ import { UserRole } from '@modules/users/enums/user-role.enum';
 import type { EmailService } from '@common/services/email.service';
 import type { JwtService } from '@nestjs/jwt';
 import type { OtpConfigService } from '@modules/auth/services/otp-config.service';
+import type { RefreshTokenService } from '@modules/auth/services/refresh-token.service';
 import type { User } from '@modules/users/entities/user.entity';
 import type { UsersService } from '@modules/users/users.service';
 
@@ -24,14 +25,18 @@ const INACTIVE_USER: User = {
 
 const GENERATED_CODE = '123456';
 const SIGNED_TOKEN = 'jwt.firmado.de.prueba';
+const ISSUED_REFRESH_TOKEN = 'refresh-opaco-de-prueba';
 
-describe('AuthService (PROT-04.1)', () => {
+describe('AuthService (PROT-04.1 / PROT-06.4)', () => {
   let usersService: jest.Mocked<Pick<UsersService, 'findByEmail'>>;
   let otpConfigService: jest.Mocked<
     Pick<OtpConfigService, 'generateCode' | 'verifyCode'>
   >;
   let emailService: jest.Mocked<Pick<EmailService, 'sendOtpCode'>>;
   let jwtService: jest.Mocked<Pick<JwtService, 'sign'>>;
+  let refreshTokenService: jest.Mocked<
+    Pick<RefreshTokenService, 'issue' | 'rotate' | 'revoke'>
+  >;
   let service: AuthService;
 
   beforeEach(() => {
@@ -42,12 +47,18 @@ describe('AuthService (PROT-04.1)', () => {
     };
     emailService = { sendOtpCode: jest.fn().mockResolvedValue(undefined) };
     jwtService = { sign: jest.fn().mockReturnValue(SIGNED_TOKEN) };
+    refreshTokenService = {
+      issue: jest.fn().mockResolvedValue(ISSUED_REFRESH_TOKEN),
+      rotate: jest.fn().mockResolvedValue(ACTIVE_USER),
+      revoke: jest.fn().mockResolvedValue(undefined),
+    };
 
     service = new AuthService(
       usersService as unknown as UsersService,
       otpConfigService as unknown as OtpConfigService,
       emailService as unknown as EmailService,
       jwtService as unknown as JwtService,
+      refreshTokenService as unknown as RefreshTokenService,
     );
   });
 
@@ -106,7 +117,7 @@ describe('AuthService (PROT-04.1)', () => {
   });
 
   describe('verifyOtp', () => {
-    it('deberia emitir el token y la identidad cuando el codigo es valido', async () => {
+    it('deberia emitir el par de tokens y la identidad cuando el codigo es valido', async () => {
       // 1. Arrange
       usersService.findByEmail.mockResolvedValue(ACTIVE_USER);
 
@@ -116,12 +127,14 @@ describe('AuthService (PROT-04.1)', () => {
       // 3. Assert
       expect(result).toEqual({
         accessToken: SIGNED_TOKEN,
+        refreshToken: ISSUED_REFRESH_TOKEN,
         user: {
           id: ACTIVE_USER.id,
           email: ACTIVE_USER.email,
           role: UserRole.ADMIN,
         },
       });
+      expect(refreshTokenService.issue).toHaveBeenCalledWith(ACTIVE_USER);
       expect(jwtService.sign).toHaveBeenCalledWith({
         sub: ACTIVE_USER.id,
         email: ACTIVE_USER.email,
@@ -191,6 +204,61 @@ describe('AuthService (PROT-04.1)', () => {
 
       // 3. Assert
       expect(missingAccountError).toBe(wrongCodeError);
+    });
+  });
+
+  describe('refreshSession', () => {
+    it('deberia entregar un par nuevo canjeando el refresh token', async () => {
+      // 2. Act
+      const result = await service.refreshSession('refresh-anterior');
+
+      // 3. Assert
+      expect(refreshTokenService.rotate).toHaveBeenCalledWith(
+        'refresh-anterior',
+      );
+      expect(result).toEqual({
+        accessToken: SIGNED_TOKEN,
+        refreshToken: ISSUED_REFRESH_TOKEN,
+        user: {
+          id: ACTIVE_USER.id,
+          email: ACTIVE_USER.email,
+          role: UserRole.ADMIN,
+        },
+      });
+    });
+
+    it('deberia emitir un refresh distinto del presentado (rotacion)', async () => {
+      // 2. Act
+      const result = await service.refreshSession('refresh-anterior');
+
+      // 3. Assert
+      expect(result.refreshToken).not.toBe('refresh-anterior');
+      expect(refreshTokenService.issue).toHaveBeenCalledWith(ACTIVE_USER);
+    });
+
+    it('deberia propagar el UnauthorizedException de la rotacion sin firmar nada', async () => {
+      // 1. Arrange
+      refreshTokenService.rotate.mockRejectedValue(
+        new UnauthorizedException('Sesion invalida o expirada.'),
+      );
+
+      // 2. Act & 3. Assert
+      await expect(service.refreshSession('robado')).rejects.toThrow(
+        UnauthorizedException,
+      );
+      expect(jwtService.sign).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('logout', () => {
+    it('deberia revocar el refresh token presentado', async () => {
+      // 2. Act
+      await service.logout('refresh-vigente');
+
+      // 3. Assert
+      expect(refreshTokenService.revoke).toHaveBeenCalledWith(
+        'refresh-vigente',
+      );
     });
   });
 });

@@ -26,8 +26,21 @@ export interface RequestWithUser {
   user?: AuthenticatedUser;
 }
 
-/** Respuesta de una validacion de OTP exitosa: token de sesion e identidad. */
+/**
+ * Par de credenciales entregado al validar el OTP y en cada renovacion.
+ *
+ * `accessToken` es un JWT corto y autocontenido; `refreshToken` es una cadena
+ * opaca de larga duracion cuya validez vive en la tabla `refresh_tokens`.
+ */
 export interface AuthTokenResponse {
   accessToken: string;
+  refreshToken: string;
   user: AuthenticatedUser;
+}
+
+/** Respuesta de `POST /auth/otp/generate`: nunca incluye el codigo. */
+export interface OtpRequestResponse {
+  message: string;
+  /** Vigencia del codigo, para que el cliente pinte su cuenta regresiva. */
+  expiresInSeconds: number;
 }

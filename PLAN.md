@@ -95,14 +95,127 @@ sin haber procesado credenciales, cumpliendo el *rechazo temprano* de `security-
 | `JWT_SECRET` | Verificación de firma del token | El proceso no arranca (guarda en `JwtStrategy`) |
 | `JWT_EXPIRES_IN` | Vigencia al firmar (PROT-04.1) | Cae a `8h` |
 
-### 1.5 Fuera de alcance en esta entrega
+### 1.5 Entregado en PROT-04.1 / PROT-06.4
 
-Emisión de tokens (solicitud y validación de OTP, `@nestjs/throttler` sobre esos endpoints)
-pertenece a **PROT-04.1**. `AuthModule` queda deliberadamente sin controlador para recibirla.
+La emisión de tokens que esta sección dejaba pendiente ya está implementada. Ver §2.
 
 ---
 
-## 2. Motor FSM (pendiente)
+## 2. Autenticación OTP y ciclo de sesión (PROT-04.1 / PROT-06.4)
+
+Rama: `feat/auth-otp`.
+
+### 2.1 Endpoints
+
+Todos dentro del perímetro (`IpWhitelistGuard` global) — **ninguno** lleva `@PublicIp()`:
+iniciar sesión también exige estar en la red corporativa.
+
+| Método y ruta | Código | Cuerpo | Respuesta |
+|---|---|---|---|
+| `POST /api/auth/otp/generate` | `202` | `RequestOtpDto` | `{ message, expiresInSeconds }` — **nunca** el código |
+| `POST /api/auth/otp/validate` | `200` | `VerifyOtpDto` | `AuthTokenResponse` |
+| `POST /api/auth/refresh` | `200` | `RefreshTokenDto` | `AuthTokenResponse` con el par rotado |
+| `POST /api/auth/logout` | `204` | `RefreshTokenDto` | vacío (idempotente) |
+
+Límite de tasa con `@nestjs/throttler`: **3 peticiones/60 s por IP** en las rutas de OTP
+(fuerza bruta y saturación de buzones), elevado a **10/60 s** en `refresh` y `logout`
+mediante `@Throttle`, porque renovar sesión no comparte ese riesgo y varias pestañas
+abiertas agotarían el presupuesto estricto.
+
+### 2.2 Contratos
+
+```typescript
+// @modules/auth/services/otp-config.service.ts — único punto que conoce otplib v13
+export class OtpConfigService {
+  public async generateCode(email: string): Promise<string>;
+  public async verifyCode(email: string, code: string): Promise<boolean>;
+  public getExpirationSeconds(): number;
+}
+
+// @modules/auth/services/refresh-token.service.ts — único punto que conoce `refresh_tokens`
+export class RefreshTokenService {
+  /** Devuelve el token EN CLARO; en la tabla solo queda su SHA-256. */
+  public async issue(user: User): Promise<string>;
+  /** Canjea y revoca en el mismo acto. Lanza 401 en todo caso de fallo. */
+  public async rotate(rawToken: string): Promise<User>;
+  public async revoke(rawToken: string): Promise<void>;
+  public async revokeAllForUser(userId: string): Promise<void>;
+  public async purgeExpired(): Promise<void>;
+}
+
+// @modules/auth/interfaces/jwt-payload.interface.ts
+export interface AuthTokenResponse {
+  accessToken: string;   // JWT autocontenido, 1 h
+  refreshToken: string;  // cadena opaca base64url, 7 días, revocable
+  user: AuthenticatedUser;
+}
+
+export interface OtpRequestResponse {
+  message: string;
+  expiresInSeconds: number;
+}
+```
+
+Secreto TOTP **derivado por usuario**: `base32( HMAC-SHA256( OTP_SECRET, email.toLowerCase() ) )`.
+Es determinista, así que no se persiste. Con un `OTP_SECRET` compartido, un mismo código de
+6 dígitos sería válido para **todas** las cuentas en la misma ventana temporal.
+
+### 2.3 Diagrama de inyección de dependencias
+
+```
+ConfigModule (global)          CommonModule (@Global)
+      │                              └── EmailService (nodemailer, único punto SMTP)
+      ▼                                        │
+AuthModule                                     │
+      ├── TypeOrmModule.forFeature([RefreshToken])
+      ├── JwtModule.registerAsync(JWT_SECRET, JWT_EXPIRES_IN=1h)
+      │
+      ├── AuthService ──┬── UsersService        (busca la cuenta por correo)
+      │                 ├── OtpConfigService    (genera / verifica el código)
+      │                 ├── EmailService ◄──────┘ (único canal del código)
+      │                 ├── JwtService          (firma el access token)
+      │                 └── RefreshTokenService (emite / rota / revoca)
+      │
+      └── AuthController  ── @UseGuards(ThrottlerGuard) a nivel de clase
+```
+
+### 2.4 Máquina de estados del refresh token
+
+```
+        issue()                    rotate()
+  ─────────────────►  VIGENTE  ──────────────►  REVOCADO ──► (purgeExpired)
+                         │  │                       │
+       expiracion ◄──────┘  └──── revoke()          │
+       vencida                    (logout)          │
+                                                    ▼
+                              rotate() de nuevo ⇒ REUTILIZACIÓN
+                              ⇒ revokeAllForUser() + 401
+```
+
+### 2.5 Variables de entorno
+
+| Variable | Uso | Política si falta |
+|---|---|---|
+| `OTP_SECRET` | Semilla maestra de la derivación por usuario | Excepción al generar: no se emiten códigos |
+| `OTP_EXPIRATION_MINUTES` | Vigencia del código y valor de `expiresInSeconds` | Cae a `5` |
+| `JWT_EXPIRES_IN` | Vigencia del access token (**`1h`**) | Cae a `8h` |
+| `REFRESH_TOKEN_EXPIRES_IN_DAYS` | Vigencia del refresh token | Cae a `7` |
+| `OTP_THROTTLE_TTL_MS` / `OTP_THROTTLE_LIMIT` | Ventana y cupo del límite de tasa | Caen a `60000` / `3` |
+| `SMTP_*` | Transporte del correo | El envío falla con `500` |
+
+### 2.6 Esquema
+
+Tabla `refresh_tokens` (columnas en español, como el resto de `init.sql`):
+`id_refresh_token`, `id_usuario` (FK `ON DELETE CASCADE`), `hash_token CHAR(64) UNIQUE`,
+`expiracion`, `revocado`, `fecha_creacion`.
+
+TypeORM corre con `synchronize: false`, así que el DDL se aplica a mano:
+`db/migrations/001-refresh-tokens.sql` (idempotente) para bases ya creadas,
+e `init.sql` para clonados nuevos.
+
+---
+
+## 3. Motor FSM (pendiente)
 
 `INodeStrategy`, `NodeStrategyFactory` y `StatePayloadContext` se documentarán aquí al implementarse.
 El contrato de referencia vive en `.claude/rules/architecture-patterns.md` §2 y §3.
