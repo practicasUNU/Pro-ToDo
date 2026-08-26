@@ -4,6 +4,8 @@ import { useQuasar } from 'quasar';
 
 import { useUsersStore } from '@stores/users.store';
 
+import { corporateEmailErrorMessage, isCorporateEmail } from '@/utils/corporate-email';
+
 import { UserRole, type User } from '@/types/user';
 
 interface Props {
@@ -26,18 +28,8 @@ const roleOptions = [
   { label: 'Editor', value: UserRole.EDITOR },
 ];
 
-// Filtro de dominios corporativos (Poka-Yoke): bloquea el envio si el correo no pertenece a un dominio autorizado
-const acceptedEmailDomains = (import.meta.env.VITE_ACCEPTED_EMAIL_DOMAINS ?? '')
-  .split(',')
-  .map((domain) => domain.trim())
-  .filter(Boolean);
-
-const corporateEmailErrorMessage = `El correo debe pertenecer a un dominio corporativo autorizado (${acceptedEmailDomains.join(', ')})`;
-
-const isCorporateEmail = (value: string): boolean => {
-  if (acceptedEmailDomains.length === 0) return true;
-  return acceptedEmailDomains.some((domain) => value.toLowerCase().endsWith(domain.toLowerCase()));
-};
+// Filtro de dominios corporativos (Poka-Yoke): compartido con LoginPage.vue,
+// vive en @/utils/corporate-email desde que lo necesitan dos vistas.
 
 const form = reactive<{ email: string; role: UserRole | null }>({
   email: '',

@@ -6,7 +6,11 @@ import {
   createWebHistory,
 } from 'vue-router';
 
+import { useSessionStore } from '@stores/session.store';
+
 import routes from './routes';
+
+const LOGIN_ROUTE = '/login';
 
 /*
  * If not building with SSR mode, you can
@@ -17,7 +21,7 @@ import routes from './routes';
  * with the Router instance.
  */
 
-export default defineRouter((/* { store, ssrContext } */) => {
+export default defineRouter(({ store }) => {
   const createHistory = import.meta.env.QUASAR_SERVER
     ? createMemoryHistory
     : import.meta.env.QUASAR_VUE_ROUTER_MODE === 'history'
@@ -32,6 +36,25 @@ export default defineRouter((/* { store, ssrContext } */) => {
     // quasar.conf.js -> build -> vueRouterMode
     // quasar.conf.js -> build -> publicPath
     history: createHistory(import.meta.env.QUASAR_VUE_ROUTER_BASE),
+  });
+
+  // Guarda de sesion. Solo mira el estado local: la autoridad real es el backend,
+  // que responde 401 si el token no vale. Esto evita pintar vistas privadas que
+  // acabarian vacias, no sustituye a la comprobacion del servidor.
+  Router.beforeEach((to) => {
+    const sessionStore = useSessionStore(store);
+    const requiresAuth = to.matched.some((record) => record.meta.requiresAuth);
+
+    if (requiresAuth && !sessionStore.isAuthenticated) {
+      // Se recuerda el destino para volver a el tras validar el codigo.
+      return { path: LOGIN_ROUTE, query: { redirect: to.fullPath } };
+    }
+
+    if (to.path === LOGIN_ROUTE && sessionStore.isAuthenticated) {
+      return { path: '/' };
+    }
+
+    return true;
   });
 
   return Router;

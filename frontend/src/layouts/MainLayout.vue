@@ -4,6 +4,8 @@ import { useRoute } from 'vue-router';
 
 import AppHeader from '@components/shared/AppHeader.vue';
 
+import { useSessionMonitor } from '@/composables/useSessionMonitor';
+
 // Titulo de seccion mostrado en la cabecera, derivado de la ruta activa.
 const ROUTE_BREADCRUMBS: Record<string, string> = {
   '/': 'Inicio',
@@ -11,6 +13,10 @@ const ROUTE_BREADCRUMBS: Record<string, string> = {
 };
 
 const route = useRoute();
+
+// Vigila la caducidad del JWT. Se engancha aqui porque este layout envuelve
+// todas las rutas autenticadas y se desmonta al salir a /login.
+useSessionMonitor();
 
 const leftDrawerOpen = ref(false);
 

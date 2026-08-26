@@ -117,8 +117,9 @@ export default defineConfig((ctx) => {
       // components: [],
       // directives: [],
 
-      // Quasar plugins
-      plugins: ['Notify'],
+      // Quasar plugins. 'Dialog' lo requiere SessionMonitor.vue para lanzar el
+      // aviso de expiracion de sesion desde codigo, sin un v-model en plantilla.
+      plugins: ['Notify', 'Dialog'],
     },
 
     // animations: 'all', // --- includes all animations

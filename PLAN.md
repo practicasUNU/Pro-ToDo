@@ -213,6 +213,37 @@ TypeORM corre con `synchronize: false`, así que el DDL se aplica a mano:
 `db/migrations/001-refresh-tokens.sql` (idempotente) para bases ya creadas,
 e `init.sql` para clonados nuevos.
 
+### 2.7 Capa de sesión en el frontend (Quasar)
+
+```
+LoginPage.vue ──► useSessionStore ──► auth.service ──► authApi (SIN interceptores)
+                        │
+                        ▼
+              utils/session-storage.ts  ◄────  boot/axios.ts (interceptores de `api`)
+              (módulo HOJA: rompe el ciclo boot ↔ store)
+
+MainLayout.vue ──► useSessionMonitor() ──► SessionExpiryDialog.vue
+                        │                  (Mantener sesión ⇒ refreshTokens)
+                        └── watch(accessToken) + visibilitychange
+```
+
+| Archivo | Responsabilidad |
+|---|---|
+| `utils/session-storage.ts` | Persistencia en `localStorage` con guarda `try/catch`. Sin dependencias |
+| `utils/jwt.ts` | `decodeJwtClaims` / `getMillisecondsUntilExpiry`. **Decodifica, no verifica** |
+| `utils/corporate-email.ts` | `isCorporateEmail`, compartida por login y alta de usuario |
+| `services/auth.service.ts` | Única capa que conoce las rutas de `AuthController` |
+| `stores/session.store.ts` | `accessToken`, `refreshToken`, `user`, `otpVerified`, `isAuthenticated` |
+| `composables/useSessionMonitor.ts` | Programa el aviso 60 s antes de `exp`; recalcula al recuperar visibilidad |
+| `layouts/AuthLayout.vue` | Layout desnudo de `/login`, sin shell corporativo |
+
+Dos instancias de Axios: `api` con interceptores (petición inyecta `Bearer`, respuesta
+purga y redirige ante `401`) y `authApi` **sin ninguno**, para que un 401 del login o del
+refresh no dispare el manejador que cerraría la sesión que se intenta abrir o renovar.
+
+`meta: { requiresAuth: true }` se declara en la ruta **padre** de `MainLayout`: toda vista
+nueva bajo ese layout nace protegida.
+
 ---
 
 ## 3. Motor FSM (pendiente)
