@@ -1,5 +1,6 @@
 import {
   Body,
+  ClassSerializerInterceptor,
   Controller,
   Delete,
   Get,
@@ -8,7 +9,9 @@ import {
   Patch,
   Post,
   UseGuards,
+  UseInterceptors,
 } from '@nestjs/common';
+import { plainToInstance } from 'class-transformer';
 import {
   ApiBearerAuth,
   ApiForbiddenResponse,
@@ -23,9 +26,11 @@ import { JwtAuthGuard } from '@modules/auth/guards/jwt-auth.guard';
 
 import { CreateUserDto } from './dto/create-user.dto';
 import { UpdateUserDto } from './dto/update-user.dto';
-import { User } from './entities/user.entity';
+import { UserResponseDto } from './dto/user-response.dto';
 import { UserRole } from './enums/user-role.enum';
 import { UsersService } from './users.service';
+
+import type { User } from './entities/user.entity';
 
 /**
  * CRUD de usuarios (CU-02), reservado en exclusiva al rol ADMIN (PROT-04.2).
@@ -41,44 +46,61 @@ import { UsersService } from './users.service';
   description: 'IP fuera de la red corporativa o rol distinto de ADMIN',
 })
 @UseGuards(JwtAuthGuard, RolesGuard)
+@UseInterceptors(ClassSerializerInterceptor)
 @Roles(UserRole.ADMIN)
 @Controller('users')
 export class UsersController {
   constructor(private readonly usersService: UsersService) {}
 
+  /**
+   * Proyecta la entidad al DTO publico. `UserResponseDto` lleva `@Exclude()` de
+   * clase, asi que solo sobreviven los campos con `@Expose()`: un campo nuevo en
+   * la entidad no se filtra hasta que alguien lo exponga a proposito.
+   */
+  private toResponse(user: User): UserResponseDto {
+    return plainToInstance(UserResponseDto, user);
+  }
+
   @Get()
   @ApiOperation({ summary: 'Lista todos los usuarios' })
-  public findAll(): Promise<User[]> {
-    return this.usersService.findAll();
+  public async findAll(): Promise<UserResponseDto[]> {
+    const users = await this.usersService.findAll();
+    return users.map((user) => this.toResponse(user));
   }
 
   @Get(':id')
   @ApiOperation({ summary: 'Obtiene un usuario por su identificador' })
-  public findOne(@Param('id', ParseUUIDPipe) id: string): Promise<User> {
-    return this.usersService.findOne(id);
+  public async findOne(
+    @Param('id', ParseUUIDPipe) id: string,
+  ): Promise<UserResponseDto> {
+    return this.toResponse(await this.usersService.findOne(id));
   }
 
   @Post()
   @ApiOperation({
     summary: 'Crea un usuario con correo de dominio corporativo',
   })
-  public create(@Body() createUserDto: CreateUserDto): Promise<User> {
-    return this.usersService.create(createUserDto);
+  public async create(
+    @Body() createUserDto: CreateUserDto,
+  ): Promise<UserResponseDto> {
+    return this.toResponse(await this.usersService.create(createUserDto));
   }
 
   @Patch(':id')
   @ApiOperation({ summary: 'Actualiza los datos de un usuario' })
-  public update(
+  public async update(
     @Param('id', ParseUUIDPipe) id: string,
     @Body() updateUserDto: UpdateUserDto,
-  ): Promise<User> {
-    return this.usersService.update(id, updateUserDto);
+  ): Promise<UserResponseDto> {
+    return this.toResponse(await this.usersService.update(id, updateUserDto));
   }
 
   // Borrado logico: nunca elimina fisicamente el registro
   @Delete(':id')
   @ApiOperation({ summary: 'Desactiva un usuario (borrado logico)' })
-  public remove(@Param('id', ParseUUIDPipe) id: string): Promise<User> {
-    return this.usersService.remove(id);
+  public async remove(
+    @Param('id', ParseUUIDPipe) id: string,
+  ): Promise<UserResponseDto> {
+    return this.toResponse(await this.usersService.remove(id));
   }
 }

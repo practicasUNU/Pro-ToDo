@@ -29,8 +29,9 @@ CREATE TABLE usuarios (
     id_usuario UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     correo VARCHAR(255) NOT NULL UNIQUE,
     rol enum_rol_usuario NOT NULL,
-    codigo_otp VARCHAR(6),
-    expiracion_otp TIMESTAMP,
+    -- Secreto TOTP por cuenta. Nullable: la inscripción es perezosa, se genera
+    -- la primera vez que el usuario pide un código (ver migración 003).
+    secreto_otp VARCHAR(64),
     activo BOOLEAN DEFAULT TRUE,
     fecha_creacion TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );

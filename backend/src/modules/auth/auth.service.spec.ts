@@ -10,12 +10,19 @@ import type { RefreshTokenService } from '@modules/auth/services/refresh-token.s
 import type { User } from '@modules/users/entities/user.entity';
 import type { UsersService } from '@modules/users/users.service';
 
+const OTP_SECRET = 'JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP';
+const NEW_SECRET = 'KRUGS4ZANFZSAYJANFZSAYJANFZSAYJA';
+
 const ACTIVE_USER: User = {
   id: '3f1c2b64-8a5e-4c2f-9d3a-7b6e5f4c1a20',
   email: 'admin@unuware.com',
   role: UserRole.ADMIN,
+  otpSecret: OTP_SECRET,
   isActive: true,
 };
+
+/** Cuenta creada desde el CRUD que aun no ha solicitado ningun codigo. */
+const UNENROLLED_USER: User = { ...ACTIVE_USER, otpSecret: null };
 
 const INACTIVE_USER: User = {
   ...ACTIVE_USER,
@@ -28,9 +35,11 @@ const SIGNED_TOKEN = 'jwt.firmado.de.prueba';
 const ISSUED_REFRESH_TOKEN = 'refresh-opaco-de-prueba';
 
 describe('AuthService (PROT-04.1 / PROT-06.4)', () => {
-  let usersService: jest.Mocked<Pick<UsersService, 'findByEmail'>>;
+  let usersService: jest.Mocked<
+    Pick<UsersService, 'findByEmailWithOtpSecret' | 'ensureOtpSecret'>
+  >;
   let otpConfigService: jest.Mocked<
-    Pick<OtpConfigService, 'generateCode' | 'verifyCode'>
+    Pick<OtpConfigService, 'generateSecret' | 'generateCode' | 'verifyCode'>
   >;
   let emailService: jest.Mocked<Pick<EmailService, 'sendOtpCode'>>;
   let jwtService: jest.Mocked<Pick<JwtService, 'sign'>>;
@@ -40,8 +49,12 @@ describe('AuthService (PROT-04.1 / PROT-06.4)', () => {
   let service: AuthService;
 
   beforeEach(() => {
-    usersService = { findByEmail: jest.fn() };
+    usersService = {
+      findByEmailWithOtpSecret: jest.fn(),
+      ensureOtpSecret: jest.fn().mockResolvedValue(NEW_SECRET),
+    };
     otpConfigService = {
+      generateSecret: jest.fn().mockReturnValue(NEW_SECRET),
       generateCode: jest.fn().mockResolvedValue(GENERATED_CODE),
       verifyCode: jest.fn().mockResolvedValue(true),
     };
@@ -65,15 +78,13 @@ describe('AuthService (PROT-04.1 / PROT-06.4)', () => {
   describe('requestOtp', () => {
     it('deberia generar el codigo y enviarlo por correo cuando el usuario esta activo', async () => {
       // 1. Arrange
-      usersService.findByEmail.mockResolvedValue(ACTIVE_USER);
+      usersService.findByEmailWithOtpSecret.mockResolvedValue(ACTIVE_USER);
 
       // 2. Act
       await service.requestOtp(ACTIVE_USER.email);
 
       // 3. Assert
-      expect(otpConfigService.generateCode).toHaveBeenCalledWith(
-        ACTIVE_USER.email,
-      );
+      expect(otpConfigService.generateCode).toHaveBeenCalledWith(OTP_SECRET);
       expect(emailService.sendOtpCode).toHaveBeenCalledWith(
         ACTIVE_USER.email,
         GENERATED_CODE,
@@ -82,7 +93,7 @@ describe('AuthService (PROT-04.1 / PROT-06.4)', () => {
 
     it('NUNCA deberia retornar el codigo generado en el valor de retorno', async () => {
       // 1. Arrange
-      usersService.findByEmail.mockResolvedValue(ACTIVE_USER);
+      usersService.findByEmailWithOtpSecret.mockResolvedValue(ACTIVE_USER);
 
       // 2. Act
       const result = await service.requestOtp(ACTIVE_USER.email);
@@ -94,7 +105,7 @@ describe('AuthService (PROT-04.1 / PROT-06.4)', () => {
 
     it('deberia terminar en silencio, sin lanzar, si el correo no existe (anti-enumeracion)', async () => {
       // 1. Arrange
-      usersService.findByEmail.mockResolvedValue(null);
+      usersService.findByEmailWithOtpSecret.mockResolvedValue(null);
 
       // 2. Act & 3. Assert
       await expect(
@@ -104,9 +115,50 @@ describe('AuthService (PROT-04.1 / PROT-06.4)', () => {
       expect(emailService.sendOtpCode).not.toHaveBeenCalled();
     });
 
+    it('deberia inscribir la cuenta y usar el secreto nuevo si aun no tiene uno', async () => {
+      // 1. Arrange: cuenta creada desde el CRUD, sin secreto TOTP
+      usersService.findByEmailWithOtpSecret.mockResolvedValue(UNENROLLED_USER);
+
+      // 2. Act
+      await service.requestOtp(UNENROLLED_USER.email);
+
+      // 3. Assert
+      expect(otpConfigService.generateSecret).toHaveBeenCalledTimes(1);
+      expect(usersService.ensureOtpSecret).toHaveBeenCalledWith(
+        UNENROLLED_USER.id,
+        NEW_SECRET,
+      );
+      expect(otpConfigService.generateCode).toHaveBeenCalledWith(NEW_SECRET);
+    });
+
+    it('NO deberia reinscribir una cuenta que ya tiene secreto', async () => {
+      // 1. Arrange
+      usersService.findByEmailWithOtpSecret.mockResolvedValue(ACTIVE_USER);
+
+      // 2. Act
+      await service.requestOtp(ACTIVE_USER.email);
+
+      // 3. Assert: sobreescribir el secreto invalidaria los codigos ya enviados
+      expect(usersService.ensureOtpSecret).not.toHaveBeenCalled();
+      expect(otpConfigService.generateSecret).not.toHaveBeenCalled();
+    });
+
+    it('deberia respetar el secreto ganador ante una inscripcion concurrente', async () => {
+      // 1. Arrange: otro proceso inscribio la cuenta primero, asi que la
+      // actualizacion condicional devuelve el secreto preexistente
+      usersService.findByEmailWithOtpSecret.mockResolvedValue(UNENROLLED_USER);
+      usersService.ensureOtpSecret.mockResolvedValue(OTP_SECRET);
+
+      // 2. Act
+      await service.requestOtp(UNENROLLED_USER.email);
+
+      // 3. Assert: el codigo se emite con el secreto persistido, no con el propio
+      expect(otpConfigService.generateCode).toHaveBeenCalledWith(OTP_SECRET);
+    });
+
     it('deberia terminar en silencio si la cuenta existe pero esta desactivada', async () => {
       // 1. Arrange
-      usersService.findByEmail.mockResolvedValue(INACTIVE_USER);
+      usersService.findByEmailWithOtpSecret.mockResolvedValue(INACTIVE_USER);
 
       // 2. Act & 3. Assert
       await expect(
@@ -119,7 +171,7 @@ describe('AuthService (PROT-04.1 / PROT-06.4)', () => {
   describe('verifyOtp', () => {
     it('deberia emitir el par de tokens y la identidad cuando el codigo es valido', async () => {
       // 1. Arrange
-      usersService.findByEmail.mockResolvedValue(ACTIVE_USER);
+      usersService.findByEmailWithOtpSecret.mockResolvedValue(ACTIVE_USER);
 
       // 2. Act
       const result = await service.verifyOtp(ACTIVE_USER.email, GENERATED_CODE);
@@ -144,7 +196,7 @@ describe('AuthService (PROT-04.1 / PROT-06.4)', () => {
 
     it('NUNCA deberia incluir el codigo OTP en la respuesta de sesion', async () => {
       // 1. Arrange
-      usersService.findByEmail.mockResolvedValue(ACTIVE_USER);
+      usersService.findByEmailWithOtpSecret.mockResolvedValue(ACTIVE_USER);
 
       // 2. Act
       const result = await service.verifyOtp(ACTIVE_USER.email, GENERATED_CODE);
@@ -155,7 +207,7 @@ describe('AuthService (PROT-04.1 / PROT-06.4)', () => {
 
     it('deberia lanzar UnauthorizedException cuando el codigo es invalido o expiro', async () => {
       // 1. Arrange
-      usersService.findByEmail.mockResolvedValue(ACTIVE_USER);
+      usersService.findByEmailWithOtpSecret.mockResolvedValue(ACTIVE_USER);
       otpConfigService.verifyCode.mockResolvedValue(false);
 
       // 2. Act & 3. Assert
@@ -167,7 +219,7 @@ describe('AuthService (PROT-04.1 / PROT-06.4)', () => {
 
     it('deberia lanzar UnauthorizedException, no NotFound, si el correo no existe', async () => {
       // 1. Arrange
-      usersService.findByEmail.mockResolvedValue(null);
+      usersService.findByEmailWithOtpSecret.mockResolvedValue(null);
 
       // 2. Act & 3. Assert: mismo error que un codigo erroneo, para no enumerar cuentas
       await expect(
@@ -178,7 +230,7 @@ describe('AuthService (PROT-04.1 / PROT-06.4)', () => {
 
     it('deberia rechazar a un usuario desactivado aunque el codigo fuese correcto', async () => {
       // 1. Arrange
-      usersService.findByEmail.mockResolvedValue(INACTIVE_USER);
+      usersService.findByEmailWithOtpSecret.mockResolvedValue(INACTIVE_USER);
 
       // 2. Act & 3. Assert
       await expect(
@@ -187,14 +239,51 @@ describe('AuthService (PROT-04.1 / PROT-06.4)', () => {
       expect(jwtService.sign).not.toHaveBeenCalled();
     });
 
+    it('deberia rechazar a una cuenta sin secreto sin inscribirla', async () => {
+      // 1. Arrange: nunca pidio un codigo, asi que no hay codigo legitimo
+      usersService.findByEmailWithOtpSecret.mockResolvedValue(UNENROLLED_USER);
+
+      // 2. Act & 3. Assert
+      await expect(
+        service.verifyOtp(UNENROLLED_USER.email, GENERATED_CODE),
+      ).rejects.toThrow(UnauthorizedException);
+      expect(usersService.ensureOtpSecret).not.toHaveBeenCalled();
+      expect(otpConfigService.verifyCode).not.toHaveBeenCalled();
+    });
+
+    it('deberia validar el codigo contra el secreto persistido del usuario', async () => {
+      // 1. Arrange
+      usersService.findByEmailWithOtpSecret.mockResolvedValue(ACTIVE_USER);
+
+      // 2. Act
+      await service.verifyOtp(ACTIVE_USER.email, GENERATED_CODE);
+
+      // 3. Assert
+      expect(otpConfigService.verifyCode).toHaveBeenCalledWith(
+        OTP_SECRET,
+        GENERATED_CODE,
+      );
+    });
+
+    it('NUNCA deberia incluir el secreto TOTP en la respuesta de sesion', async () => {
+      // 1. Arrange
+      usersService.findByEmailWithOtpSecret.mockResolvedValue(ACTIVE_USER);
+
+      // 2. Act
+      const result = await service.verifyOtp(ACTIVE_USER.email, GENERATED_CODE);
+
+      // 3. Assert
+      expect(JSON.stringify(result)).not.toContain(OTP_SECRET);
+    });
+
     it('deberia devolver el mismo mensaje para cuenta inexistente y codigo invalido', async () => {
       // 1. Arrange
-      usersService.findByEmail.mockResolvedValueOnce(null);
+      usersService.findByEmailWithOtpSecret.mockResolvedValueOnce(null);
       const missingAccountError = await service
         .verifyOtp('fantasma@unuware.com', GENERATED_CODE)
         .catch((error: UnauthorizedException) => error.message);
 
-      usersService.findByEmail.mockResolvedValueOnce(ACTIVE_USER);
+      usersService.findByEmailWithOtpSecret.mockResolvedValueOnce(ACTIVE_USER);
       otpConfigService.verifyCode.mockResolvedValueOnce(false);
 
       // 2. Act

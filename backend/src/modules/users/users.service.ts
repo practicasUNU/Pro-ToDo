@@ -6,7 +6,7 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { IsNull, Repository } from 'typeorm';
 
 import { CreateUserDto } from './dto/create-user.dto';
 import { UpdateUserDto } from './dto/update-user.dto';
@@ -65,6 +65,49 @@ export class UsersService {
     return this.userRepository.findOne({
       where: { email: email.trim().toLowerCase() },
     });
+  }
+
+  /**
+   * Busca un usuario incluyendo su secreto TOTP.
+   *
+   * `otpSecret` esta marcado con `select: false`, asi que ningun `find` lo trae:
+   * hace falta pedirlo explicitamente con `addSelect`. Este metodo es el unico
+   * camino por el que el secreto sale del repositorio, y solo lo consume el flujo
+   * de autenticacion.
+   */
+  public async findByEmailWithOtpSecret(email: string): Promise<User | null> {
+    return this.userRepository
+      .createQueryBuilder('user')
+      .addSelect('user.otpSecret')
+      .where('user.email = :email', { email: email.trim().toLowerCase() })
+      .getOne();
+  }
+
+  /**
+   * Inscribe la cuenta en TOTP si aun no tiene secreto (inscripcion perezosa).
+   *
+   * La actualizacion es CONDICIONAL (`otpSecret IS NULL`): si dos peticiones
+   * concurrentes intentan inscribir la misma cuenta, la segunda no sobreescribe
+   * el secreto de la primera, que invalidaria el codigo ya enviado por correo.
+   *
+   * @returns El secreto que ha quedado persistido, sea el nuevo o el preexistente.
+   */
+  public async ensureOtpSecret(
+    userId: string,
+    secret: string,
+  ): Promise<string> {
+    await this.userRepository.update(
+      { id: userId, otpSecret: IsNull() },
+      { otpSecret: secret },
+    );
+
+    const user = await this.userRepository
+      .createQueryBuilder('user')
+      .addSelect('user.otpSecret')
+      .where('user.id = :userId', { userId })
+      .getOne();
+
+    return user?.otpSecret ?? secret;
   }
 
   public async create(createUserDto: CreateUserDto): Promise<User> {

@@ -25,11 +25,23 @@ const EDITOR_USER: AuthenticatedUser = {
   role: UserRole.EDITOR,
 };
 
+/** Secreto TOTP cargado a proposito: la respuesta jamas debe contenerlo. */
+const LEAKY_OTP_SECRET = 'JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP';
+
 const EXISTING_USER: User = {
   id: 'c8a1f2d3-5b6e-4790-8c1d-2e3f4a5b6c7d',
   email: 'usuario@unuware.com',
   role: UserRole.EDITOR,
+  otpSecret: LEAKY_OTP_SECRET,
   isActive: true,
+};
+
+/** Lo que el cliente debe ver: la entidad menos `otpSecret`. */
+const EXISTING_USER_RESPONSE = {
+  id: EXISTING_USER.id,
+  email: EXISTING_USER.email,
+  role: EXISTING_USER.role,
+  isActive: EXISTING_USER.isActive,
 };
 
 describe('UsersController (RBAC, PROT-04.2)', () => {
@@ -158,7 +170,7 @@ describe('UsersController (RBAC, PROT-04.2)', () => {
 
       // 3. Assert
       expect(response.status).toBe(200);
-      expect(response.body).toEqual([EXISTING_USER]);
+      expect(response.body).toEqual([EXISTING_USER_RESPONSE]);
       expect(usersServiceMock.findAll).toHaveBeenCalledTimes(1);
     });
 
@@ -230,6 +242,42 @@ describe('UsersController (RBAC, PROT-04.2)', () => {
       // 3. Assert
       expect(response.status).toBe(403);
       expect(usersServiceMock.findAll).not.toHaveBeenCalled();
+    });
+  });
+  describe('serializacion de la respuesta (UserResponseDto)', () => {
+    beforeEach(() => {
+      currentUser = ADMIN_USER;
+    });
+
+    it('NUNCA deberia exponer otpSecret aunque el servicio lo devuelva cargado', async () => {
+      // 2. Act
+      const response = await request(httpServer()).get('/users');
+
+      // 3. Assert
+      expect(response.status).toBe(200);
+      expect(JSON.stringify(response.body)).not.toContain(LEAKY_OTP_SECRET);
+      expect(response.body).toEqual([EXISTING_USER_RESPONSE]);
+    });
+
+    it('deberia filtrar otpSecret en todos los verbos, no solo en el listado', async () => {
+      // 2. Act: en serie, no en paralelo -- varias peticiones simultaneas contra
+      // la misma instancia de supertest provocan ECONNRESET
+      const responses = [
+        await request(httpServer()).get(`/users/${EXISTING_USER.id}`),
+        await request(httpServer())
+          .post('/users')
+          .send({ email: 'nuevo@unuware.com', role: UserRole.EDITOR }),
+        await request(httpServer())
+          .patch(`/users/${EXISTING_USER.id}`)
+          .send({ role: UserRole.ADMIN }),
+        await request(httpServer()).delete(`/users/${EXISTING_USER.id}`),
+      ];
+
+      // 3. Assert
+      for (const response of responses) {
+        expect(JSON.stringify(response.body)).not.toContain(LEAKY_OTP_SECRET);
+        expect(response.body).not.toHaveProperty('otpSecret');
+      }
     });
   });
 });

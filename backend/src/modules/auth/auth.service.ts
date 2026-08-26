@@ -46,14 +46,23 @@ export class AuthService {
    * El codigo generado JAMAS se retorna ni se registra: su unico canal es el correo.
    */
   public async requestOtp(email: string): Promise<void> {
-    const user = await this.usersService.findByEmail(email);
+    const user = await this.usersService.findByEmailWithOtpSecret(email);
 
     if (!user || !user.isActive) {
       this.logger.warn(`Solicitud de OTP para un correo no elegible: ${email}`);
       return;
     }
 
-    const code = await this.otpConfigService.generateCode(user.email);
+    // Inscripcion perezosa: las cuentas creadas antes de TOTP, o desde el CRUD,
+    // no traen secreto. Se genera en la primera solicitud, sin migrar datos.
+    const secret =
+      user.otpSecret ??
+      (await this.usersService.ensureOtpSecret(
+        user.id,
+        this.otpConfigService.generateSecret(),
+      ));
+
+    const code = await this.otpConfigService.generateCode(secret);
 
     await this.emailService.sendOtpCode(user.email, code);
   }
@@ -68,16 +77,20 @@ export class AuthService {
     email: string,
     code: string,
   ): Promise<AuthTokenResponse> {
-    const user = await this.usersService.findByEmail(email);
+    const user = await this.usersService.findByEmailWithOtpSecret(email);
 
-    // Mismo error para cuenta inexistente, inactiva y codigo erroneo: el cliente no
-    // debe poder distinguir cual de los tres casos ocurrio.
-    if (!user || !user.isActive) {
+    // Mismo error para cuenta inexistente, inactiva, sin inscribir y codigo
+    // erroneo: el cliente no debe poder distinguir cual de los casos ocurrio.
+    //
+    // Sin secreto NO se inscribe aqui: si la cuenta nunca solicito un codigo, no
+    // hay codigo legitimo que validar, e inscribirla en este punto convertiria la
+    // ruta de validacion en un canal de alta silencioso.
+    if (!user || !user.isActive || !user.otpSecret) {
       throw new UnauthorizedException(INVALID_CREDENTIALS_MESSAGE);
     }
 
     const isValidCode = await this.otpConfigService.verifyCode(
-      user.email,
+      user.otpSecret,
       code,
     );
 

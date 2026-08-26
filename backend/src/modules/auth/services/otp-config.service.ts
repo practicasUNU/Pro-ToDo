@@ -1,4 +1,4 @@
-import { createHmac } from 'node:crypto';
+import { randomBytes } from 'node:crypto';
 
 import { Injectable } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
@@ -19,68 +19,59 @@ const DEFAULT_EXPIRATION_MINUTES = 5;
 
 const SECONDS_PER_MINUTE = 60;
 
+/** 20 bytes = 160 bits, el tamaño de clave que recomienda la RFC 4226 para HOTP/TOTP. */
+const SECRET_BYTES = 20;
+
 /**
  * Generacion y verificacion criptografica de codigos temporales (PROT-04.1).
  *
- * Unico punto del backend que conoce `otplib`. No sabe de HTTP, de correo ni de
- * usuarios: recibe un correo, deriva su secreto y opera sobre el.
+ * Unico punto del backend que conoce `otplib`. Opera sobre un secreto que recibe
+ * como argumento: no sabe de HTTP, de correo, de usuarios ni de base de datos.
+ * Quien custodia el secreto es `UsersService`.
  */
 @Injectable()
 export class OtpConfigService {
   private readonly totp: TOTP;
+  private readonly base32 = new ScureBase32Plugin();
 
   constructor(private readonly configService: ConfigService) {
     // otplib v13 es modular: hay que inyectar explicitamente los plugins de
     // criptografia y de codificacion base32 (la API `authenticator` de la v12 ya no existe).
     this.totp = new TOTP({
       crypto: new NobleCryptoPlugin(),
-      base32: new ScureBase32Plugin(),
+      base32: this.base32,
       digits: OTP_DIGITS,
       period: OTP_PERIOD_SECONDS,
     });
   }
 
-  /** Genera el codigo de 6 digitos vigente para ese correo. */
-  public async generateCode(email: string): Promise<string> {
-    return this.totp.generate({ secret: this.deriveUserSecret(email) });
+  /**
+   * Crea un secreto TOTP nuevo en base32 (32 caracteres, sin relleno).
+   *
+   * Aleatorio y por cuenta, no derivado de una semilla maestra: rotar o revocar
+   * la inscripcion de un usuario no afecta a la de nadie mas.
+   */
+  public generateSecret(): string {
+    return this.base32.encode(new Uint8Array(randomBytes(SECRET_BYTES)));
+  }
+
+  /** Genera el codigo de 6 digitos vigente para ese secreto. */
+  public async generateCode(secret: string): Promise<string> {
+    return this.totp.generate({ secret });
   }
 
   /**
-   * Verifica el codigo contra el secreto derivado del correo, aceptando cualquier
-   * paso temporal dentro de la ventana de expiracion (solo hacia el pasado: un
-   * codigo del futuro nunca es valido).
+   * Verifica el codigo contra el secreto, aceptando cualquier paso temporal
+   * dentro de la ventana de expiracion (solo hacia el pasado: un codigo del
+   * futuro nunca es valido).
    */
-  public async verifyCode(email: string, code: string): Promise<boolean> {
+  public async verifyCode(secret: string, code: string): Promise<boolean> {
     const result = await this.totp.verify(code, {
-      secret: this.deriveUserSecret(email),
+      secret,
       epochTolerance: [this.getExpirationSeconds(), 0],
     });
 
     return result.valid;
-  }
-
-  /**
-   * Deriva un secreto TOTP propio de cada usuario a partir de la semilla maestra.
-   *
-   * Es imprescindible: con un `OTP_SECRET` compartido, el mismo codigo de 6 digitos
-   * seria valido para TODAS las cuentas en la misma ventana temporal, y cualquiera
-   * podria pedir su propio codigo para entrar como otro. Al ser determinista, no
-   * hace falta persistir el secreto en base de datos.
-   */
-  private deriveUserSecret(email: string): string {
-    const masterSecret = this.configService.get<string>('OTP_SECRET');
-
-    if (!masterSecret) {
-      throw new Error(
-        'OTP_SECRET no esta definida: no se pueden emitir codigos temporales.',
-      );
-    }
-
-    const digest = createHmac('sha256', masterSecret)
-      .update(email.trim().toLowerCase())
-      .digest();
-
-    return new ScureBase32Plugin().encode(new Uint8Array(digest));
   }
 
   /**

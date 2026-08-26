@@ -1,10 +1,12 @@
 import {
   Body,
+  ClassSerializerInterceptor,
   Controller,
   HttpCode,
   HttpStatus,
   Post,
   UseGuards,
+  UseInterceptors,
 } from '@nestjs/common';
 import {
   ApiOperation,
@@ -47,6 +49,7 @@ const SESSION_THROTTLE = { [OTP_THROTTLER_NAME]: { limit: 10, ttl: 60_000 } };
  */
 @ApiTags('auth')
 @UseGuards(ThrottlerGuard)
+@UseInterceptors(ClassSerializerInterceptor)
 @Controller('auth')
 export class AuthController {
   constructor(

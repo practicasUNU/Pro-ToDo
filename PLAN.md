@@ -125,11 +125,21 @@ abiertas agotarían el presupuesto estricto.
 ### 2.2 Contratos
 
 ```typescript
-// @modules/auth/services/otp-config.service.ts — único punto que conoce otplib v13
+// @modules/auth/services/otp-config.service.ts — único punto que conoce otplib v13.
+// Opera sobre un secreto que recibe como argumento: no conoce usuarios ni BD.
 export class OtpConfigService {
-  public async generateCode(email: string): Promise<string>;
-  public async verifyCode(email: string, code: string): Promise<boolean>;
+  public generateSecret(): string;                       // base32, 160 bits
+  public async generateCode(secret: string): Promise<string>;
+  public async verifyCode(secret: string, code: string): Promise<boolean>;
   public getExpirationSeconds(): number;
+}
+
+// @modules/users/users.service.ts — custodia del secreto (PROT-04.1)
+export class UsersService {
+  /** Único camino por el que `otpSecret` sale del repositorio (`addSelect`). */
+  public async findByEmailWithOtpSecret(email: string): Promise<User | null>;
+  /** Inscripción perezosa, con UPDATE condicional a `otpSecret IS NULL`. */
+  public async ensureOtpSecret(userId: string, secret: string): Promise<string>;
 }
 
 // @modules/auth/services/refresh-token.service.ts — único punto que conoce `refresh_tokens`
@@ -156,9 +166,15 @@ export interface OtpRequestResponse {
 }
 ```
 
-Secreto TOTP **derivado por usuario**: `base32( HMAC-SHA256( OTP_SECRET, email.toLowerCase() ) )`.
-Es determinista, así que no se persiste. Con un `OTP_SECRET` compartido, un mismo código de
-6 dígitos sería válido para **todas** las cuentas en la misma ventana temporal.
+Secreto TOTP **aleatorio y persistido por cuenta** en `usuarios.secreto_otp` (migración 003).
+La inscripción es perezosa: se genera en la primera solicitud de código, sin migrar datos.
+`otpSecret` lleva `select: false` en la entidad y `@Exclude()` de `class-transformer`, así que
+no se carga salvo petición explícita y jamás se serializa en una respuesta.
+
+El CRUD responde con `UserResponseDto`, que lleva `@Exclude()` **de clase**: solo sale lo
+marcado con `@Expose()` (`id`, `email`, `role`, `isActive`). Un campo nuevo en la entidad no
+se filtra hasta que alguien lo exponga a propósito. `UsersController` y `AuthController`
+aplican `ClassSerializerInterceptor`.
 
 ### 2.3 Diagrama de inyección de dependencias
 
@@ -196,7 +212,6 @@ AuthModule                                     │
 
 | Variable | Uso | Política si falta |
 |---|---|---|
-| `OTP_SECRET` | Semilla maestra de la derivación por usuario | Excepción al generar: no se emiten códigos |
 | `OTP_EXPIRATION_MINUTES` | Vigencia del código y valor de `expiresInSeconds` | Cae a `5` |
 | `JWT_EXPIRES_IN` | Vigencia del access token (**`1h`**) | Cae a `8h` |
 | `REFRESH_TOKEN_EXPIRES_IN_DAYS` | Vigencia del refresh token | Cae a `7` |
@@ -212,6 +227,9 @@ Tabla `refresh_tokens` (columnas en español, como el resto de `init.sql`):
 TypeORM corre con `synchronize: false`, así que el DDL se aplica a mano:
 `db/migrations/001-refresh-tokens.sql` (idempotente) para bases ya creadas,
 e `init.sql` para clonados nuevos.
+
+`db/migrations/003-otp-secret.sql` añade `secreto_otp` y retira `codigo_otp` / `expiracion_otp`,
+dos columnas de un diseño anterior de códigos persistidos que ningún código leía.
 
 `db/migrations/002-bootstrap-admin.sql` rompe el bloqueo circular del RBAC: el CRUD de
 usuarios exige `ADMIN` y crear un usuario pasa por ese mismo CRUD, así que sin ningún

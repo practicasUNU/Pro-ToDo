@@ -4,6 +4,58 @@ Registro técnico del "por qué" de cada decisión de implementación. Los estad
 
 ---
 
+## 2026-08-26 · Secreto TOTP persistido por cuenta y blindaje de la serialización — rama `feat/auth-otp`
+
+### Qué cambió
+
+El secreto TOTP pasa de **derivarse** (`base32(HMAC-SHA256(OTP_SECRET, correo))`) a ser **aleatorio y persistido** en `usuarios.secreto_otp`. La entrada del 25 documenta el diseño anterior; se conserva como registro histórico.
+
+### Por qué, y qué se pierde
+
+**Se gana:** poder rotar o revocar la inscripción de **un** usuario sin tocar a nadie más. Con una semilla maestra, cambiar `OTP_SECRET` invalidaba los códigos de todas las cuentas a la vez, así que en la práctica no se podía rotar nunca.
+
+**Se pierde, y hay que decirlo:** el secreto se muda a la base de datos. Con la derivación, un volcado de `usuarios` **no** permitía forjar códigos — hacía falta además conocer `OTP_SECRET`, que vive en el entorno del proceso. Ahora un lector de la tabla puede generar códigos válidos para cualquier cuenta. Es exactamente lo contrario del razonamiento que justificó hashear los refresh tokens, y es una regresión consciente aceptada a cambio de la rotación por usuario.
+
+Si esa exposición no resulta aceptable, la salida es cifrar `secreto_otp` en reposo (AES-256-GCM con clave en el entorno): conserva la rotación por usuario y devuelve la propiedad de que el volcado por sí solo no basta. No está implementado.
+
+### La inscripción es perezosa, y por qué el UPDATE es condicional
+
+Las cuentas existentes y las que crea el CRUD no traen secreto. En lugar de una migración de datos, se genera en la primera solicitud de código. Eso deja `secreto_otp` como `NULL`able, que es lo correcto: refleja el estado real "aún no inscrita".
+
+El `UPDATE` de `ensureOtpSecret` filtra por `otpSecret IS NULL` y vuelve a leer el valor persistido. Sin esa condición, dos solicitudes concurrentes sobre la misma cuenta nueva escribirían secretos distintos y el segundo invalidaría el código que el primero ya envió por correo. Con ella, el perdedor de la carrera adopta el secreto ganador y emite un código válido. Hay una prueba AAA para ese caso.
+
+### `verifyOtp` no inscribe
+
+Solo `requestOtp` genera secretos. Si `verifyOtp` recibe una cuenta sin secreto, devuelve el 401 genérico y no inscribe: no existe código legítimo que validar, e inscribir ahí convertiría la ruta de validación en un canal de alta silencioso.
+
+### Doble barrera contra la fuga del secreto
+
+Las dos capas cubren casos distintos y por eso están las dos:
+
+- **`select: false`** en la columna: ningún `find` la trae, así que el secreto ni llega a memoria en el CRUD. Sacarlo exige `addSelect` explícito, que vive en un único método (`findByEmailWithOtpSecret`).
+- **`@Exclude()`** de `class-transformer`: actúa cuando el secreto **sí** se ha cargado, que es justo el flujo de autenticación.
+
+Encima, el CRUD responde con `UserResponseDto`, que lleva `@Exclude()` **de clase** en vez de `@Exclude()` campo a campo. La diferencia importa: invierte la política por defecto, de modo que un campo nuevo en la entidad no aparece en la respuesta hasta que alguien lo exponga a propósito. La alternativa —excluir lo sensible— falla en silencio la próxima vez que alguien añada una columna.
+
+`ClassSerializerInterceptor` está en `UsersController` y en `AuthController`. En el de autenticación es defensa en profundidad y hoy no hace nada: `AuthTokenResponse.user` se construye campo a campo como objeto plano, y el interceptor solo transforma instancias de clase. Sirve para el día en que alguien devuelva la entidad desde una ruta de auth.
+
+La prueba de `UsersController` carga el secreto **a propósito** en el doble del servicio y verifica que no aparece en ninguno de los cinco verbos. Al hacerlo saltó una aserción antigua que comparaba la respuesta contra la entidad completa: buena señal, el filtrado funcionaba.
+
+### Lo que la tarea daba por hecho y no existía
+
+- No había **CRON job** ni uso de `@nestjs/schedule` que eliminar; el paquete está instalado pero sin usar.
+- No había **tabla de códigos temporales**, sino dos columnas huérfanas en `usuarios` (`codigo_otp`, `expiracion_otp`) que ningún código leía. La migración 003 las retira.
+- Los nombres `AuthOtpController` / `AuthOtpService` no existen: son `AuthController` / `AuthService`.
+- La columna se llama `secreto_otp`, no `otpSecret`, por coherencia con el resto de `init.sql`; la entidad la mapea con `@Column({ name })` como ya hacía `User`.
+
+### Consecuencia operativa
+
+`OTP_SECRET` dejó de leerse y se retiró de `backend/.env.example`. En `backend/.env` queda como resto inofensivo.
+
+**La migración 003 es requisito de arranque:** hasta aplicarla, `findByEmailWithOtpSecret` falla con `column user.secreto_otp does not exist` y el login entero queda roto. El CRUD sigue funcionando porque `select: false` mantiene la columna fuera del `SELECT` por defecto.
+
+---
+
 ## 2026-08-25 · Autenticación OTP y ciclo de sesión con rotación de refresh tokens (PROT-04.1 / PROT-06.4) — rama `feat/auth-otp`
 
 ### Punto de partida
