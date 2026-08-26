@@ -213,6 +213,11 @@ TypeORM corre con `synchronize: false`, así que el DDL se aplica a mano:
 `db/migrations/001-refresh-tokens.sql` (idempotente) para bases ya creadas,
 e `init.sql` para clonados nuevos.
 
+`db/migrations/002-bootstrap-admin.sql` rompe el bloqueo circular del RBAC: el CRUD de
+usuarios exige `ADMIN` y crear un usuario pasa por ese mismo CRUD, así que sin ningún
+`ADMIN` nadie puede crear el primero. Promueve la cuenta activa más antigua **solo si** no
+existe ya un `ADMIN` activo; con uno presente no modifica nada.
+
 ### 2.7 Capa de sesión en el frontend (Quasar)
 
 ```

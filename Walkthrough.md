@@ -50,6 +50,16 @@ Los cinco modos de fallo de `rotate()` (inexistente, revocado, caducado, dueño 
 
 TypeORM corre con `synchronize: false` — y debe seguir así: activarlo dejaría que TypeORM alterase o borrase columnas de las nueve tablas del esquema. Como `init.sql` solo se ejecuta con el volumen `pgdata_protodo` vacío, el DDL vive **duplicado a propósito** en dos sitios: `init.sql` para clonados nuevos y `db/migrations/001-refresh-tokens.sql`, idempotente, para las bases ya pobladas.
 
+**Nota operativa:** el `.env` de este equipo tiene finales de línea **CRLF**, así que un `source backend/.env` deja cada valor con un `\r` pegado. De ahí que los comandos de `psql` documentados lleven usuario y base literales en lugar de `$DB_USER` / `$DB_NAME`.
+
+### El arranque en frío del RBAC (migración 002)
+
+El CRUD de usuarios exige `ADMIN`, pero **crear** un usuario pasa por ese mismo CRUD. Con la tabla `usuarios` sin ningún `ADMIN`, nadie puede crear el primero: un bloqueo circular que la API no puede romper por definición. La verificación en vivo lo destapó — la única cuenta de la base era `EDITOR`, y `GET /api/users` con un token válido devolvía **403** correctamente.
+
+`db/migrations/002-bootstrap-admin.sql` lo rompe desde fuera, y solo eso: promueve la cuenta activa más antigua **si y solo si** no existe ya ningún `ADMIN` activo. Con uno presente no toca nada, porque a partir de ahí gestionar roles es competencia del CRUD y no de una migración.
+
+No se versiona ningún correo concreto: el caso de instalación desde cero queda como un `INSERT` comentado al final del archivo para rellenar con el correo real. La cuenta debe existir en un buzón accesible de verdad — la autenticación es por OTP contra ese correo y no hay contraseña que definir.
+
 ### Frontend: por qué el interceptor no lee el token de Pinia
 
 La cadena natural sería `boot/axios → session.store → auth.service → boot/axios`: un ciclo de imports. Se rompe con `src/utils/session-storage.ts`, un módulo **hoja** que no importa nada; tanto el store como el interceptor dependen de él y él de nadie.
@@ -87,6 +97,7 @@ Por eso hay un `visibilitychange`: cada vez que la pestaña vuelve a ser visible
 - [ ] **`SMTP_HOST=smtp.example.com`:** hasta poner credenciales reales, `requestOtp` responde 500 y el recorrido de extremo a extremo exige leer el código de otra forma.
 - [ ] **Columnas `codigo_otp` / `expiracion_otp` de `usuarios`:** quedaron huérfanas en `init.sql`. El diseño TOTP no persiste códigos, así que deberían eliminarse en una migración futura.
 - [ ] **`test/app.e2e-spec.ts`:** sigue siendo el boilerplate de `nest new` y falla al exigir Postgres. No se tocó.
+- [ ] **Credenciales SMTP reales:** con `SMTP_HOST=smtp.example.com` el login por navegador no se puede completar. La verificación se hizo derivando el código OTP con la misma función del backend.
 
 ---
 
