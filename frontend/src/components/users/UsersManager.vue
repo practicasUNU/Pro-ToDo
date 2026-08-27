@@ -7,15 +7,9 @@ import { useUsersStore } from '@stores/users.store';
 import UserDialog from './UserDialog.vue';
 import SafeDeleteModal from './SafeDeleteModal.vue';
 
-import { deriveDisplayName } from '@/utils/user-display';
+import { deriveDisplayName, roleDisplayLabel, roleIconName } from '@/utils/user-display';
 
-import { UserRole, type User } from '@/types/user';
-
-// Etiquetas legibles del enum de rol (el backend expone ADMIN / EDITOR)
-const ROLE_LABELS: Record<UserRole, string> = {
-  [UserRole.ADMIN]: 'Administrador',
-  [UserRole.EDITOR]: 'Editor',
-};
+import type { User, UserRole } from '@/types/user';
 
 const $q = useQuasar();
 const usersStore = useUsersStore();
@@ -140,15 +134,12 @@ onMounted(loadUsers);
       <template #body-cell-role="cellProps">
         <q-td :props="cellProps">
           <q-badge class="pd-badge pd-badge--role">
-            <!-- Iconos del set mdi-v7, habilitado en quasar.config.ts -->
             <q-icon
-              :name="
-                cellProps.row.role === UserRole.ADMIN ? 'mdi-shield-crown' : 'mdi-pencil'
-              "
+              :name="roleIconName(cellProps.row.role as UserRole)"
               size="14px"
               class="q-mr-xs"
             />
-            {{ ROLE_LABELS[cellProps.row.role as UserRole] }}
+            {{ roleDisplayLabel(cellProps.row.role as UserRole) }}
           </q-badge>
         </q-td>
       </template>

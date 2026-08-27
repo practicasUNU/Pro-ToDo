@@ -89,7 +89,11 @@ export default defineConfig((ctx) => {
               useFlatConfig: true,
             },
           },
-          { server: false },
+          // `server: true` a proposito: con el checker apagado en dev, un import
+          // que no resuelve (o un asset inexistente) no pinta overlay y la unica
+          // senal es una vista en blanco, porque el import() diferido de la ruta
+          // se rechaza en silencio. Cuesta algo de arranque; ahorra diagnosticos.
+          { server: true },
         ],
       ],
     },

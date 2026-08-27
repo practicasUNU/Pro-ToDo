@@ -6,9 +6,7 @@
 // valida el dominio por su cuenta (ACCEPTED_EMAIL_DOMAINS) y es quien manda.
 
 /** Dominios autorizados, declarados en `frontend/.env` con prefijo VITE_. */
-export const acceptedEmailDomains: string[] = (
-  import.meta.env.VITE_ACCEPTED_EMAIL_DOMAINS ?? ''
-)
+export const acceptedEmailDomains: string[] = (import.meta.env.VITE_ACCEPTED_EMAIL_DOMAINS ?? '')
   .split(',')
   .map((domain) => domain.trim())
   .filter(Boolean);
@@ -23,7 +21,5 @@ export const corporateEmailErrorMessage = `El correo debe pertenecer a un domini
 export const isCorporateEmail = (value: string): boolean => {
   if (acceptedEmailDomains.length === 0) return true;
 
-  return acceptedEmailDomains.some((domain) =>
-    value.toLowerCase().endsWith(domain.toLowerCase()),
-  );
+  return acceptedEmailDomains.some((domain) => value.toLowerCase().endsWith(domain.toLowerCase()));
 };

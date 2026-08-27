@@ -6,7 +6,7 @@ import {
   createWebHistory,
 } from 'vue-router';
 
-import { Dialog } from 'quasar';
+import { Dialog, Notify } from 'quasar';
 
 import { useSessionStore } from '@stores/session.store';
 
@@ -64,8 +64,7 @@ export default defineRouter(({ store }) => {
       // montado del que obtener la instancia.
       Dialog.create({
         title: 'Acceso denegado',
-        message:
-          'Esta seccion esta reservada a administradores. Tu cuenta no tiene ese permiso.',
+        message: 'Esta seccion esta reservada a administradores. Tu cuenta no tiene ese permiso.',
         persistent: true,
         ok: { label: 'Entendido', unelevated: true, noCaps: true, color: 'negative' },
       });
@@ -81,6 +80,21 @@ export default defineRouter(({ store }) => {
     }
 
     return true;
+  });
+
+  // Un chunk de ruta que no carga (asset inexistente, import sin resolver, o un
+  // despliegue nuevo que invalida los hashes del anterior) deja el <router-view>
+  // vacio: la app arranca pero la vista no pinta, y la promesa rechazada del
+  // import() diferido muere sin ruido. Aqui se hace visible.
+  Router.onError((error) => {
+    console.error('[router] fallo al cargar la vista', error);
+
+    Notify.create({
+      type: 'negative',
+      message: 'No se pudo cargar la vista. Recarga la pagina.',
+      timeout: 0,
+      actions: [{ label: 'Recargar', color: 'white', handler: () => window.location.reload() }],
+    });
   });
 
   return Router;

@@ -89,10 +89,7 @@ watch(
   (value) => {
     if (value === code.value) return;
 
-    digits.value = Array.from(
-      { length: OTP_LENGTH },
-      (_, index) => value[index] ?? '',
-    );
+    digits.value = Array.from({ length: OTP_LENGTH }, (_, index) => value[index] ?? '');
 
     if (!value) focusAt(0);
   },

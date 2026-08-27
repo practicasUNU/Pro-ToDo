@@ -77,5 +77,4 @@ export const formatDate = (value: DateInput): string => {
  * Nombre del huso resuelto por el navegador (`Europe/Madrid`).
  * Util para rotular una columna de fechas y que nadie dude de que hora esta viendo.
  */
-export const getLocalTimeZone = (): string =>
-  Intl.DateTimeFormat().resolvedOptions().timeZone;
+export const getLocalTimeZone = (): string => Intl.DateTimeFormat().resolvedOptions().timeZone;

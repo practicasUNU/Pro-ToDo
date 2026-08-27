@@ -138,16 +138,26 @@ onBeforeUnmount(clearCountdown);
 </script>
 
 <template>
-  <q-page class="pd-page">
+  <q-page class="pd-page pd-login-page">
     <div class="row pd-login-row">
-      <!-- Lado izquierdo: identidad institucional sobre superficie subordinada -->
-      <div class="col-12 col-md-6 pd-surface-muted pd-login-brand">
+      <!-- Lado izquierdo: identidad institucional sobre superficie subordinada.
+           La superficie se pinta en el scoped (.pd-login-brand) en vez de con
+           la utilidad .pd-surface-muted, porque necesita ser translucida para
+           que el patron de fondo de la pagina se lea por debajo. -->
+      <div class="col-12 col-md-6 pd-login-brand">
         <div class="pd-login-brand__content">
-          <q-avatar size="48px" class="q-mb-md">
-            <img src="@/assets/unuware-logo-isotype.svg" alt="UNUWARE" />
-          </q-avatar>
+          <!-- El blanqueo se decide con una clase enlazada al store, no con un
+               selector de tema en CSS: `:global(body.body--dark) .x` compila mal
+               en scoped CSS (Vue descarta el descendiente y el filtro acaba
+               aplicado al <body> entero, blanqueando la pagina completa). -->
+          <img
+            src="@/assets/unuware-long-logo.png"
+            alt="UNUWARE"
+            class="pd-login-brand__logo q-mb-lg"
+            :class="{ 'pd-login-brand__logo--inverted': themeStore.isDark }"
+          />
 
-          <h1 class="pd-h1 q-mb-xs">Proto-Do</h1>
+          <h1 class="pd-h1 pd-login-brand__title q-mb-xs">Proto-Do</h1>
 
           <a class="pd-link pd-nav" href="https://unuware.com" target="_blank" rel="noopener">
             unuware.com
@@ -165,7 +175,7 @@ onBeforeUnmount(clearCountdown);
         <q-card flat class="pd-card pd-login-card">
           <q-card-section class="row items-start no-wrap">
             <div class="col">
-              <h2 class="pd-h1">Inicio de Sesion</h2>
+              <h2 class="pd-h2 pd-login-card__title">Inicio de Sesion</h2>
               <p class="pd-subtitle q-mt-xs">
                 {{
                   otpSent
@@ -218,7 +228,9 @@ onBeforeUnmount(clearCountdown);
               <div v-else-if="isCodeExpired">
                 <q-banner dense rounded class="pd-banner-expired">
                   <template #avatar>
-                    <q-icon name="schedule" color="white" size="22px" />
+                    <!-- Sin `color`: hereda el del banner. `color="white"` mapea a
+                         la paleta de Quasar, que §2 prohibe como sustituto de un token. -->
+                    <q-icon name="schedule" size="22px" />
                   </template>
                   Codigo caducado
                   <div class="pd-banner-expired__hint">
@@ -229,9 +241,7 @@ onBeforeUnmount(clearCountdown);
 
               <!-- Estado 2: validacion del codigo -->
               <div v-else>
-                <label class="pd-label">
-                  Codigo de acceso<span class="pd-required">*</span>
-                </label>
+                <label class="pd-label"> Codigo de acceso<span class="pd-required">*</span> </label>
 
                 <otp-code-input
                   v-model="code"
@@ -284,6 +294,48 @@ onBeforeUnmount(clearCountdown);
 </template>
 
 <style scoped lang="scss">
+// Patron de fondo del login: dos halos radiales en esquinas opuestas y una
+// reticula de puntos, todo derivado de tokens. `color-mix` es lo que permite dar
+// opacidad a un token sin quemar el hexadecimal, que es lo que obligaria `rgba()`.
+//
+// Una sola regla cubre ambos temas: --pd-primary/--pd-primary-light NO conmutan
+// (identidad de marca) y --pd-page-bg SI, asi que el mismo tinte al 15% se lee
+// como azul palido sobre #FAFBFF y como halo sobre #0D0F26. No hace falta un
+// bloque body--dark, ni existe body--light con el que hacer simetria.
+//
+// Vive aqui y no en app.scss por especificidad: .pd-page declara `background` en
+// forma abreviada, que resetea `background-image` a none. Al ser scoped, Vue
+// compila esto como .pd-login-page[data-v-x] -> (0,2,0), que gana a .pd-page
+// (0,1,0) sin depender del orden de aparicion en el archivo.
+//
+// Degradacion: `background-color` va en declaracion propia, de modo que si el
+// motor no entiende `color-mix` invalida SOLO `background-image` y la pagina se
+// queda con el fondo plano del token, nunca sin fondo. No unificar en `background`.
+.pd-login-page {
+  background-color: var(--pd-page-bg);
+  background-image:
+    radial-gradient(
+      circle at 12% 18%,
+      color-mix(in srgb, var(--pd-primary-light) 15%, transparent) 0%,
+      transparent 42%
+    ),
+    radial-gradient(
+      circle at 88% 82%,
+      color-mix(in srgb, var(--pd-primary) 12%, transparent) 0%,
+      transparent 48%
+    ),
+    radial-gradient(
+      circle at 1px 1px,
+      color-mix(in srgb, var(--pd-primary-light) 15%, transparent) 1px,
+      transparent 0
+    );
+  background-repeat: no-repeat, no-repeat, repeat;
+  background-size:
+    100% 100%,
+    100% 100%,
+    22px 22px;
+}
+
 .pd-login-row {
   min-height: 100vh;
 }
@@ -292,11 +344,46 @@ onBeforeUnmount(clearCountdown);
   display: flex;
   align-items: center;
   padding: 48px 40px;
+  // Fallback opaco primero; la version translucida (para que el patron se lea
+  // por debajo) lo sobrescribe donde color-mix esta soportado. Dos declaraciones
+  // de la misma propiedad: la ultima valida gana, la invalida se descarta.
+  background: var(--pd-surface-muted);
+  background: color-mix(in srgb, var(--pd-surface-muted) 72%, transparent);
 }
 
 .pd-login-brand__content {
   max-width: 380px;
   margin: 0 auto;
+}
+
+// Alto fijo y ancho automatico: preserva la proporcion 1100x200 del PNG
+// (44px de alto -> 242px de ancho).
+.pd-login-brand__logo {
+  display: block;
+  height: 44px;
+  width: auto;
+  max-width: 100%;
+}
+
+// El logotipo es azul monocromo: legible sobre el panel claro, pero pierde
+// contraste sobre el navy del modo oscuro. Solo ahi se fuerza a blanco, via la
+// clase que enlaza la plantilla contra `themeStore.isDark`.
+.pd-login-brand__logo--inverted {
+  filter: brightness(0) invert(1);
+}
+
+// Solo escala: la familia la sigue heredando de .pd-h1, para no declarar
+// `font-family` en el componente (regla §2, Tipografia).
+.pd-login-brand__title {
+  font-size: 34px;
+  line-height: 42px;
+}
+
+// Idem: .pd-h2 aporta familia y peso; aqui solo se sube un paso la escala
+// para que el titulo de la tarjeta no compita con el h1 de marca.
+.pd-login-card__title {
+  font-size: 19px;
+  line-height: 26px;
 }
 
 .pd-login-brand__description {
@@ -316,10 +403,12 @@ onBeforeUnmount(clearCountdown);
   color: var(--pd-negative);
 }
 
-// Banner de caducidad: rojo institucional sobre texto blanco.
+// Banner de caducidad: rojo institucional sobre texto blanco. El blanco sale de
+// --pd-shell-text (invariante en la lista cerrada de tokens), igual que hacen
+// .pd-btn-primary y .pd-btn-danger en app.scss para texto sobre relleno solido.
 .pd-banner-expired {
   background: var(--pd-negative);
-  color: #ffffff;
+  color: var(--pd-shell-text);
   font-weight: 700;
 }
 
