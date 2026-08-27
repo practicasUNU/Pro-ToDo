@@ -4,6 +4,7 @@ import { useQuasar } from 'quasar';
 import { useRoute, useRouter } from 'vue-router';
 
 import OtpCodeInput from '@components/session/OtpCodeInput.vue';
+import ThemeToggle from '@components/shared/ThemeToggle.vue';
 import { useSessionStore } from '@stores/session.store';
 import { useThemeStore } from '@stores/theme.store';
 
@@ -29,16 +30,6 @@ const otpSent = ref(false);
 const secondsRemaining = ref(0);
 
 let countdownId: ReturnType<typeof setInterval> | undefined;
-
-/**
- * El toggle escribe a traves del store, no sobre `$q.dark.isActive` directamente:
- * `isActive` es de solo lectura y, ademas, `useThemeStore` es quien persiste la
- * eleccion en localStorage. Asignarlo a mano perderia el modo al recargar.
- */
-const isDarkMode = computed<boolean>({
-  get: () => themeStore.isDark,
-  set: () => themeStore.toggleTheme(),
-});
 
 const isCodeExpired = computed(() => otpSent.value && secondsRemaining.value <= 0);
 
@@ -140,11 +131,35 @@ onBeforeUnmount(clearCountdown);
 <template>
   <q-page class="pd-page pd-login-page">
     <div class="row pd-login-row">
-      <!-- Lado izquierdo: identidad institucional sobre superficie subordinada.
-           La superficie se pinta en el scoped (.pd-login-brand) en vez de con
-           la utilidad .pd-surface-muted, porque necesita ser translucida para
-           que el patron de fondo de la pagina se lea por debajo. -->
+      <!-- Lado izquierdo: identidad institucional y unico lienzo decorativo de
+           la vista (halos, reticula de puntos e hexagonos 3D). El lado del
+           formulario queda limpio, sobre el fondo plano del token. -->
       <div class="col-12 col-md-6 pd-login-brand">
+        <!-- Capa decorativa 3D: 15 hexagonos en profundidad sobre el patron del
+             panel. `aria-hidden` + `pointer-events: none` en el scoped: es
+             adorno, no debe llegar al lector de pantalla ni robar clics.
+             `--hex-index` viaja como custom property para desfasar la animacion
+             sin generar 15 clases de delay. -->
+        <div class="pd-login-bg" aria-hidden="true">
+          <div
+            v-for="index in 15"
+            :key="index"
+            class="hex-wrapper"
+            :style="{ '--hex-index': index }"
+          >
+            <svg class="hex" viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg">
+              <polygon
+                points="50,3 91,26.5 91,73.5 50,97 9,73.5 9,26.5"
+                fill="var(--pd-primary-light)"
+                stroke="var(--pd-accent)"
+                stroke-width="2"
+                stroke-linejoin="round"
+              />
+              <circle cx="50" cy="50" r="6" fill="var(--pd-accent)" />
+            </svg>
+          </div>
+        </div>
+
         <div class="pd-login-brand__content">
           <!-- El blanqueo se decide con una clase enlazada al store, no con un
                selector de tema en CSS: `:global(body.body--dark) .x` compila mal
@@ -185,19 +200,9 @@ onBeforeUnmount(clearCountdown);
               </p>
             </div>
 
-            <!-- Conmutador de tema: el login queda fuera del shell, que es donde
-                 vive el ThemeToggle del header -->
-            <q-toggle
-              v-model="isDarkMode"
-              dense
-              checked-icon="dark_mode"
-              unchecked-icon="light_mode"
-              color="primary"
-              aria-label="Alternar modo claro y oscuro"
-              data-testid="login-theme-toggle"
-            >
-              <q-tooltip>{{ isDarkMode ? 'Modo claro' : 'Modo oscuro' }}</q-tooltip>
-            </q-toggle>
+            <!-- Mismo componente que el header, en su variante de contenido: el
+                 login queda fuera del shell, sobre la tarjeta del tema activo. -->
+            <theme-toggle />
           </q-card-section>
 
           <q-form @submit.prevent="onSubmit">
@@ -294,25 +299,136 @@ onBeforeUnmount(clearCountdown);
 </template>
 
 <style scoped lang="scss">
-// Patron de fondo del login: dos halos radiales en esquinas opuestas y una
-// reticula de puntos, todo derivado de tokens. `color-mix` es lo que permite dar
-// opacidad a un token sin quemar el hexadecimal, que es lo que obligaria `rgba()`.
-//
-// Una sola regla cubre ambos temas: --pd-primary/--pd-primary-light NO conmutan
-// (identidad de marca) y --pd-page-bg SI, asi que el mismo tinte al 15% se lee
-// como azul palido sobre #FAFBFF y como halo sobre #0D0F26. No hace falta un
-// bloque body--dark, ni existe body--light con el que hacer simetria.
-//
-// Vive aqui y no en app.scss por especificidad: .pd-page declara `background` en
-// forma abreviada, que resetea `background-image` a none. Al ser scoped, Vue
-// compila esto como .pd-login-page[data-v-x] -> (0,2,0), que gana a .pd-page
-// (0,1,0) sin depender del orden de aparicion en el archivo.
-//
-// Degradacion: `background-color` va en declaracion propia, de modo que si el
-// motor no entiende `color-mix` invalida SOLO `background-image` y la pagina se
-// queda con el fondo plano del token, nunca sin fondo. No unificar en `background`.
+// El area de pagina se queda con el fondo plano del token: toda la decoracion
+// (halos, puntos e hexagonos) vive ahora en el panel de marca.
 .pd-login-page {
   background-color: var(--pd-page-bg);
+}
+
+// ---------------------------------------------------------------------------
+// Fondo animado tridimensional (hexagonos)
+// ---------------------------------------------------------------------------
+// `perspective` vive aqui, en el ancestro comun: es la unica forma de que los
+// 15 hijos compartan el mismo punto de fuga y se lean como una escena y no como
+// 15 cajas 3D independientes. `overflow: hidden` recorta el translateZ positivo
+// para que ningun hexagono genere scroll horizontal, y `pointer-events: none`
+// deja pasar el foco y los clics al formulario que va por encima.
+.pd-login-bg {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  overflow: hidden;
+  pointer-events: none;
+  perspective: 1000px;
+  transform-style: preserve-3d;
+}
+
+// El wrapper es quien se anima; el SVG solo escala. Separar ambos permite que
+// `preserve-3d` propague la profundidad al glifo sin que el rasterizado del SVG
+// se recalcule en cada frame.
+.hex-wrapper {
+  position: absolute;
+  transform-style: preserve-3d;
+  // El desfase se lee de la variable inyectada por el v-for: un unico bloque
+  // de CSS cubre los 15 elementos.
+  animation: pd-hex-drift 20s ease-in-out infinite;
+  animation-delay: calc(var(--hex-index) * 0.4s);
+  // Aisla cada hexagono en su propia capa de composicion: la animacion corre
+  // en el hilo del compositor y no dispara repintados del formulario.
+  will-change: transform;
+}
+
+.hex {
+  display: block;
+  width: 100%;
+  height: 100%;
+  // Los colores del trazo y el relleno son tokens declarados en el SVG del
+  // template (regla §2: cero hexadecimales en el componente). Aqui solo se
+  // rebaja el relleno para que el hexagono se lea como marca de agua y el
+  // contorno --pd-accent siga siendo el elemento dominante.
+  fill-opacity: 0.14;
+}
+
+// Posicion, escala, ritmo y opacidad se resuelven en tiempo de compilacion:
+// `random()` de Sass corre en el build, asi que el resultado es una constelacion
+// fija (estable entre recargas) y no un calculo por frame en el cliente.
+@for $i from 1 through 15 {
+  .hex-wrapper:nth-child(#{$i}) {
+    $size: 34px + random(70);
+
+    // Se multiplica por la unidad en vez de interpolar: `#{random(92)}%` emite
+    // `44 %` (con espacio), que es un valor invalido y el navegador descarta.
+    top: random(92) * 1%;
+    left: random(92) * 1%;
+    width: $size;
+    height: $size;
+    // Duracion dispar por elemento: con una unica duracion los 15 hexagonos
+    // volverian a sincronizarse aunque arranquen desfasados.
+    animation-duration: (16 + random(16)) * 1s;
+    opacity: (5 + random(13)) * 0.01;
+
+    @if $i % 3 == 0 {
+      animation-direction: alternate-reverse;
+    }
+  }
+}
+
+// Rotacion en los tres ejes + vaiven en Z: el translateZ es lo que produce la
+// sensacion de acercamiento/alejamiento respecto al `perspective` del padre.
+@keyframes pd-hex-drift {
+  0% {
+    transform: translateZ(-280px) rotateX(0deg) rotateY(0deg) rotate(0deg);
+  }
+
+  50% {
+    transform: translateZ(120px) rotateX(180deg) rotateY(140deg) rotate(12deg);
+  }
+
+  100% {
+    transform: translateZ(-280px) rotateX(360deg) rotateY(360deg) rotate(0deg);
+  }
+}
+
+// Accesibilidad: quien pide menos movimiento conserva la composicion estatica
+// (los hexagonos siguen visibles), no la animacion.
+@media (prefers-reduced-motion: reduce) {
+  .hex-wrapper {
+    animation: none;
+  }
+}
+
+.pd-login-row {
+  min-height: 100vh;
+}
+
+// Panel de marca: superficie subordinada + patron decorativo. Dos halos radiales
+// en esquinas opuestas y una reticula de puntos, todo derivado de tokens.
+// `color-mix` es lo que permite dar opacidad a un token sin quemar el
+// hexadecimal, que es lo que obligaria `rgba()`.
+//
+// Una sola regla cubre ambos temas: --pd-primary/--pd-primary-light NO conmutan
+// (identidad de marca) y --pd-surface-muted SI, asi que el mismo tinte al 15% se
+// lee como azul palido sobre #E4EAFB y como halo sobre #161A3D. No hace falta un
+// bloque body--dark, ni existe body--light con el que hacer simetria.
+//
+// `position: relative` es el requisito para que .pd-login-bg (absoluto) se ancle
+// al panel y no al viewport; `overflow: hidden` recorta los hexagonos que la
+// aleatoriedad deje asomando por el borde derecho, que es la frontera con la
+// columna del formulario.
+//
+// Degradacion: `background-color` va en declaracion propia (dos veces: fallback
+// opaco y version translucida), de modo que si el motor no entiende `color-mix`
+// invalida SOLO `background-image` y el panel se queda con el relleno plano del
+// token, nunca sin fondo. No unificar en la forma abreviada `background`, que
+// resetearia `background-image` a none.
+.pd-login-brand {
+  position: relative;
+  overflow: hidden;
+  display: flex;
+  align-items: center;
+  padding: 48px 40px;
+  background-color: var(--pd-surface-muted);
+  background-color: color-mix(in srgb, var(--pd-surface-muted) 72%, transparent);
   background-image:
     radial-gradient(
       circle at 12% 18%,
@@ -336,22 +452,12 @@ onBeforeUnmount(clearCountdown);
     22px 22px;
 }
 
-.pd-login-row {
-  min-height: 100vh;
-}
-
-.pd-login-brand {
-  display: flex;
-  align-items: center;
-  padding: 48px 40px;
-  // Fallback opaco primero; la version translucida (para que el patron se lea
-  // por debajo) lo sobrescribe donde color-mix esta soportado. Dos declaraciones
-  // de la misma propiedad: la ultima valida gana, la invalida se descarta.
-  background: var(--pd-surface-muted);
-  background: color-mix(in srgb, var(--pd-surface-muted) 72%, transparent);
-}
-
+// El contenido se eleva sobre la capa decorativa. Sin esto, el z-index: 0 del
+// fondo y el orden del DOM lo dejarian por debajo, pero el `will-change` de los
+// hexagonos crea contexto de apilamiento y el orden deja de ser fiable.
 .pd-login-brand__content {
+  position: relative;
+  z-index: 1;
   max-width: 380px;
   margin: 0 auto;
 }

@@ -76,7 +76,9 @@ const onLogout = async (): Promise<void> => {
 
       <q-space />
 
-      <theme-toggle class="q-mr-sm" />
+      <!-- `variant="shell"` porque el toggle vive sobre el degradado oscuro:
+           el azul de marca no contrastaria contra el propio header. -->
+      <theme-toggle variant="shell" class="q-mr-sm" />
 
       <q-avatar size="30px" class="pd-header-avatar cursor-pointer">
         {{ userInitials }}
