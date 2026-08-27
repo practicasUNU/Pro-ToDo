@@ -3,7 +3,9 @@ import { computed, onBeforeUnmount, ref } from 'vue';
 import { useQuasar } from 'quasar';
 import { useRoute, useRouter } from 'vue-router';
 
+import OtpCodeInput from '@components/session/OtpCodeInput.vue';
 import { useSessionStore } from '@stores/session.store';
+import { useThemeStore } from '@stores/theme.store';
 
 import { corporateEmailErrorMessage, isCorporateEmail } from '@/utils/corporate-email';
 
@@ -17,6 +19,7 @@ const $q = useQuasar();
 const route = useRoute();
 const router = useRouter();
 const sessionStore = useSessionStore();
+const themeStore = useThemeStore();
 
 // Estado local del formulario: vive y muere con esta vista, asi que no sube al
 // store (frontend-architecture.md §2.1).
@@ -26,6 +29,16 @@ const otpSent = ref(false);
 const secondsRemaining = ref(0);
 
 let countdownId: ReturnType<typeof setInterval> | undefined;
+
+/**
+ * El toggle escribe a traves del store, no sobre `$q.dark.isActive` directamente:
+ * `isActive` es de solo lectura y, ademas, `useThemeStore` es quien persiste la
+ * eleccion en localStorage. Asignarlo a mano perderia el modo al recargar.
+ */
+const isDarkMode = computed<boolean>({
+  get: () => themeStore.isDark,
+  set: () => themeStore.toggleTheme(),
+});
 
 const isCodeExpired = computed(() => otpSent.value && secondsRemaining.value <= 0);
 
@@ -83,9 +96,21 @@ const sendOtp = async (): Promise<void> => {
       type: 'positive',
       message: 'Si el correo existe, recibiras un codigo en tu bandeja.',
     });
-  } catch {
-    // Respuesta neutra tambien en el cliente: no se confirma si la cuenta existe.
-    $q.notify({ type: 'negative', message: 'No se pudo enviar el codigo. Intentalo de nuevo.' });
+  } catch (error) {
+    // El backend responde 401 'Cuenta inactiva' para cuentas desactivadas; el
+    // resto de fallos se muestran de forma generica.
+    const isInactiveAccount =
+      typeof error === 'object' &&
+      error !== null &&
+      'response' in error &&
+      (error as { response?: { status?: number } }).response?.status === 401;
+
+    $q.notify({
+      type: 'negative',
+      message: isInactiveAccount
+        ? 'Tu cuenta esta desactivada. Contacta con un administrador.'
+        : 'No se pudo enviar el codigo. Intentalo de nuevo.',
+    });
   }
 };
 
@@ -107,6 +132,13 @@ const onSubmit = async (): Promise<void> => {
   if (isSubmitDisabled.value) return;
 
   await (otpSent.value ? verifyOtp() : sendOtp());
+};
+
+/** Envio automatico al completar las seis casillas, sin pulsar el boton. */
+const onCodeComplete = async (): Promise<void> => {
+  if (isCodeExpired.value || sessionStore.isLoading) return;
+
+  await verifyOtp();
 };
 
 onBeforeUnmount(clearCountdown);
@@ -138,15 +170,31 @@ onBeforeUnmount(clearCountdown);
       <!-- Lado derecho: tarjeta del formulario -->
       <div class="col-12 col-md-6 flex flex-center pd-login-form">
         <q-card flat class="pd-card pd-login-card">
-          <q-card-section>
-            <h2 class="pd-h1">Inicio de Sesion</h2>
-            <p class="pd-subtitle q-mt-xs">
-              {{
-                otpSent
-                  ? 'Introduce el codigo de 6 digitos que enviamos a tu correo.'
-                  : 'Te enviaremos un codigo temporal a tu correo corporativo.'
-              }}
-            </p>
+          <q-card-section class="row items-start no-wrap">
+            <div class="col">
+              <h2 class="pd-h1">Inicio de Sesion</h2>
+              <p class="pd-subtitle q-mt-xs">
+                {{
+                  otpSent
+                    ? 'Introduce el codigo de 6 digitos que enviamos a tu correo.'
+                    : 'Te enviaremos un codigo temporal a tu correo corporativo.'
+                }}
+              </p>
+            </div>
+
+            <!-- Conmutador de tema: el login queda fuera del shell, que es donde
+                 vive el ThemeToggle del header -->
+            <q-toggle
+              v-model="isDarkMode"
+              dense
+              checked-icon="dark_mode"
+              unchecked-icon="light_mode"
+              color="primary"
+              aria-label="Alternar modo claro y oscuro"
+              data-testid="login-theme-toggle"
+            >
+              <q-tooltip>{{ isDarkMode ? 'Modo claro' : 'Modo oscuro' }}</q-tooltip>
+            </q-toggle>
           </q-card-section>
 
           <q-form @submit.prevent="onSubmit">
@@ -172,60 +220,68 @@ onBeforeUnmount(clearCountdown);
                 />
               </div>
 
+              <!-- Estado 3: el codigo caduco. Sustituye por completo a las
+                   casillas y al contador, en vez de dejarlas deshabilitadas -->
+              <div v-else-if="isCodeExpired">
+                <q-banner dense rounded class="pd-banner-expired">
+                  <template #avatar>
+                    <q-icon name="schedule" color="white" size="22px" />
+                  </template>
+                  Codigo caducado
+                  <div class="pd-banner-expired__hint">
+                    El codigo enviado a {{ email }} ya no es valido.
+                  </div>
+                </q-banner>
+              </div>
+
               <!-- Estado 2: validacion del codigo -->
               <div v-else>
-                <label class="pd-label" for="login-code">
+                <label class="pd-label">
                   Codigo de acceso<span class="pd-required">*</span>
                 </label>
-                <q-input
-                  id="login-code"
+
+                <otp-code-input
                   v-model="code"
-                  outlined
-                  dense
                   autofocus
-                  mask="######"
-                  unmasked-value
-                  inputmode="numeric"
-                  class="q-mt-xs pd-mono pd-login-code"
-                  placeholder="000000"
-                  :disable="isCodeExpired"
-                  :rules="[
-                    (val: string) => val.length === OTP_LENGTH || 'El codigo tiene 6 digitos',
-                  ]"
+                  class="q-mt-xs"
+                  @complete="onCodeComplete"
                 />
 
-                <div class="pd-subtitle q-mt-xs">{{ email }}</div>
+                <div class="pd-subtitle q-mt-sm">{{ email }}</div>
               </div>
             </q-card-section>
 
             <q-card-actions class="q-px-md q-pb-md column items-stretch q-gutter-sm">
               <q-btn
+                v-if="isCodeExpired"
                 class="pd-btn-primary full-width"
                 unelevated
                 no-caps
-                type="submit"
-                :label="submitLabel"
-                icon-right="north_east"
-                :disable="isSubmitDisabled"
+                label="Solicitar un codigo nuevo"
+                icon-right="refresh"
                 :loading="sessionStore.isLoading"
+                @click="resetToEmailStep"
               />
 
-              <!-- Temporizador: mono + rojo institucional, segun regla §2 -->
-              <div v-if="otpSent" class="text-center">
-                <span v-if="!isCodeExpired" class="pd-mono pd-countdown">
-                  {{ secondsRemaining }} segundos restantes
-                </span>
-
+              <template v-else>
                 <q-btn
-                  v-else
-                  flat
-                  dense
+                  class="pd-btn-primary full-width"
+                  unelevated
                   no-caps
-                  class="pd-link"
-                  label="Reenviar codigo"
-                  @click="resetToEmailStep"
+                  type="submit"
+                  :label="submitLabel"
+                  icon-right="north_east"
+                  :disable="isSubmitDisabled"
+                  :loading="sessionStore.isLoading"
                 />
-              </div>
+
+                <!-- Temporizador: mono + rojo institucional, segun regla §2 -->
+                <div v-if="otpSent" class="text-center">
+                  <span class="pd-mono pd-countdown">
+                    {{ secondsRemaining }} segundos restantes
+                  </span>
+                </div>
+              </template>
             </q-card-actions>
           </q-form>
         </q-card>
@@ -263,12 +319,21 @@ onBeforeUnmount(clearCountdown);
   max-width: 400px;
 }
 
-// Codigo OTP: espaciado amplio para leerlo digito a digito.
-.pd-login-code :deep(input) {
-  letter-spacing: 6px;
-}
-
 .pd-countdown {
   color: var(--pd-negative);
+}
+
+// Banner de caducidad: rojo institucional sobre texto blanco.
+.pd-banner-expired {
+  background: var(--pd-negative);
+  color: #ffffff;
+  font-weight: 700;
+}
+
+.pd-banner-expired__hint {
+  font-weight: 400;
+  font-size: 12.5px;
+  line-height: 18px;
+  opacity: 0.9;
 }
 </style>

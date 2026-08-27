@@ -16,7 +16,13 @@ const routes: RouteRecordRaw[] = [
     meta: { requiresAuth: true },
     children: [
       { path: '', component: () => import('@/pages/IndexPage.vue') },
-      { path: 'users', component: () => import('@/pages/UsersPage.vue') },
+      {
+        path: 'users',
+        component: () => import('@/pages/UsersPage.vue'),
+        // Espeja el @Roles(UserRole.ADMIN) del UsersController: un EDITOR que
+        // llegue aqui solo veria una tabla vacia y un 403 en la consola.
+        meta: { requiresAdmin: true },
+      },
     ],
   },
 

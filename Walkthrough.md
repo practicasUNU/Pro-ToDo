@@ -4,6 +4,67 @@ Registro técnico del "por qué" de cada decisión de implementación. Los estad
 
 ---
 
+## 2026-08-26 · Correcciones de UX del login, pool SMTP y RBAC en el router — rama `feat/auth-otp`
+
+### ⚠️ Se abrió un oráculo de enumeración en `POST /auth/otp/generate`
+
+`requestOtp` ahora distingue dos casos que antes eran indistinguibles:
+
+| Situación | Antes | Ahora |
+|---|---|---|
+| Correo no registrado | `202` silencioso | `202` silencioso |
+| Cuenta registrada pero inactiva | `202` silencioso | **`401 Cuenta inactiva`** |
+
+Esa diferencia es explotable: un atacante recorre una lista de correos corporativos y **deduce cuáles están dados de alta** por el código de respuesta. Es exactamente lo que la regla anti-enumeración de la entrega PROT-04.1 existía para impedir, y contradice el requisito original ("si no encuentra el email o está inactivo, retorna `void`; NUNCA arrojes 404").
+
+Se implementa así por decisión de producto: se quiere que el frontend pueda decirle al usuario que su cuenta está desactivada en lugar de dejarlo esperando un correo que nunca llega. Cerrarlo es volver al `return` silencioso en `AuthService.requestOtp`; hay una prueba (`DOCUMENTA EL ORACULO DE ENUMERACION`) que falla en cuanto ambos caminos vuelvan a comportarse igual, para que el cambio no pase inadvertido.
+
+Nota: `POST /auth/otp/validate` **sí** sigue devolviendo el mismo 401 genérico para cuenta inexistente, inactiva, sin inscribir y código erróneo. El oráculo está solo en `generate`.
+
+### Pool SMTP: por qué el segundo correo tardaba
+
+Sin `pool`, NodeMailer abre una conexión nueva por envío: saludo SMTP, handshake TLS y autenticación otra vez. Ahí estaban los segundos de latencia. Con `pool: true` la conexión queda abierta y el siguiente envío la reutiliza.
+
+`maxConnections: 1` porque el volumen real es un OTP por inicio de sesión, y abrir varios canales en paralelo solo invita al proveedor a aplicar límites. `maxMessages: 100` recicla la conexión antes de que el servidor la corte por su cuenta.
+
+Efecto secundario que obligó a añadir `onModuleDestroy`: un pool con conexiones abiertas mantiene vivo el bucle de eventos y el proceso de Node no termina. `transporter.close()` al apagar lo resuelve.
+
+### La plantilla del correo es la única excepción a la regla de tokens CSS
+
+`frontend-quasar.md` prohíbe hexadecimales inline, pero un cliente de correo no tiene `var(--pd-*)`: Gmail y Outlook descartan las hojas externas y el `<style>` del `<head>`. La paleta se replica como constantes en `email.service.ts` y todo el CSS va inline, con maquetación en `<table>` porque el soporte de flex/grid en Outlook es irregular.
+
+### Casillas de OTP: por qué el avance escucha `update:model-value` y no `keyup`
+
+`OtpCodeInput.vue` mantiene seis casillas internas pero expone al padre la cadena completa por `v-model`. El avance automático se dispara en `update:model-value` en lugar de en `keyup`, que era lo pedido: el autorrelleno del código desde el gestor de contraseñas o desde la notificación del correo **no genera pulsaciones de tecla**, así que con `keyup` el foco se quedaría clavado en la primera casilla. Pegar el código entero en cualquier casilla lo reparte por las siguientes.
+
+Al completarse las seis emite `complete` y el login valida solo, sin pulsar el botón.
+
+### `q-toggle` del tema: no se ata a `$q.dark.isActive`
+
+`$q.dark.isActive` es de solo lectura — escribirlo no conmuta nada, hay que llamar a `Dark.set()`. Y aunque funcionara, saltarse `useThemeStore` perdería la persistencia en `localStorage` y el tema se olvidaría al recargar. El toggle usa un `computed` con `get`/`set` que delega en el store.
+
+### Guarda RBAC: se redirige, no se cancela
+
+La tarea pedía `next(false)` **y** redirigir a `/`. Son excluyentes en vue-router 4: se devuelve una ubicación o `false`, no ambas. Se devuelve `{ path: '/' }`, que además es lo correcto — `next(false)` deja la barra de direcciones mostrando la URL prohibida, porque el navegador ya la había escrito.
+
+El diálogo usa `Dialog.create()` importado del paquete, no `useQuasar()`: dentro de una guarda no hay componente montado del que obtener la instancia.
+
+`meta.requiresAdmin` va en `/users`, espejando el `@Roles(UserRole.ADMIN)` del `UsersController`. **No es control de acceso**: solo evita pintar una vista que el backend contestaría con 403. La autoridad sigue siendo el `RolesGuard` de NestJS.
+
+### Monitor de expiración: de `setTimeout` a `setInterval`
+
+Un `setTimeout` programado a 59 minutos vista no sobrevive de forma fiable a una suspensión del equipo ni a un salto del reloj del sistema. El sondeo de 1 s recalcula `exp * 1000 - Date.now()` en cada vuelta y se autocorrige solo.
+
+Se conserva el `visibilitychange` de la entrega anterior porque sigue haciendo falta por otro motivo: los navegadores frenan los temporizadores de pestañas en segundo plano hasta ~1 vuelta por minuto, así que al volver podría pasar casi un minuto hasta el siguiente tick.
+
+### Tareas que no tenían dónde aplicarse
+
+- **Formateo de fechas:** no existe ningún componente de trazabilidad, y el CRUD de usuarios no muestra **ninguna** fecha (`User` es `id`, `email`, `role`, `isActive`). Se creó `@/utils/date-format.ts` listo para usar, sin consumidores todavía. Usa `Intl.DateTimeFormat` y **no** `date.formatDate` de Quasar: `formatDate` da formato pero no convierte husos, así que por sí solo no resolvería el problema. Añade la `Z` a las cadenas ISO sin sufijo de zona, porque el navegador las interpretaría como hora local en lugar de UTC.
+- **`localStorage`:** ya estaba limpio. Tres claves (`proto-do:access-token`, `proto-do:refresh-token`, `proto-do:user`), sin hashes inventados y sin ningún `setItem` fuera de `session-storage.ts` y `theme.store.ts`. Sin cambios.
+- **`mdi-v7` estaba comentado** en `extras` de `quasar.config.ts`, así que `mdi-shield-crown` no habría renderizado. Habilitado; la fuente se empaqueta (`materialdesignicons-webfont-*.woff2`).
+
+---
+
 ## 2026-08-26 · Secreto TOTP persistido por cuenta y blindaje de la serialización — rama `feat/auth-otp`
 
 ### Qué cambió

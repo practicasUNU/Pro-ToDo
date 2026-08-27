@@ -39,18 +39,31 @@ export class AuthService {
   /**
    * Genera y envia un codigo temporal al correo corporativo indicado.
    *
-   * Anti-enumeracion: si el correo no existe o la cuenta esta desactivada, la
-   * operacion termina en silencio con exito aparente. Nunca lanza 404 ni 403, porque
-   * eso convertiria el endpoint en un validador de cuentas para un atacante.
+   * Correo inexistente: termina en silencio con exito aparente, para no confirmar
+   * que la cuenta no existe.
+   *
+   * Cuenta desactivada: lanza `UnauthorizedException` para que el frontend pueda
+   * dar feedback explicito al usuario.
+   *
+   * ADVERTENCIA — los dos parrafos anteriores son incompatibles entre si: al
+   * responder 401 solo cuando la cuenta existe pero esta inactiva, y 202 cuando no
+   * existe, la diferencia de respuesta permite ENUMERAR que correos corporativos
+   * estan dados de alta. Es una decision de producto explicita (ver Walkthrough);
+   * para cerrar el oraculo basta con volver al `return` silencioso.
    *
    * El codigo generado JAMAS se retorna ni se registra: su unico canal es el correo.
    */
   public async requestOtp(email: string): Promise<void> {
     const user = await this.usersService.findByEmailWithOtpSecret(email);
 
-    if (!user || !user.isActive) {
-      this.logger.warn(`Solicitud de OTP para un correo no elegible: ${email}`);
+    if (!user) {
+      this.logger.warn(`Solicitud de OTP para un correo inexistente: ${email}`);
       return;
+    }
+
+    if (!user.isActive) {
+      this.logger.warn(`Solicitud de OTP para una cuenta desactivada: ${email}`);
+      throw new UnauthorizedException('Cuenta inactiva');
     }
 
     // Inscripcion perezosa: las cuentas creadas antes de TOTP, o desde el CRUD,

@@ -19,7 +19,9 @@ export default defineConfig((ctx) => {
     // https://github.com/quasarframework/quasar/tree/dev/extras
     extras: [
       // 'ionicons-v4',
-      // 'mdi-v7',
+      // Necesario para los iconos de rol del CRUD (mdi-shield-crown / mdi-pencil):
+      // el set 'material-icons' no los incluye.
+      'mdi-v7',
       // 'fontawesome-v7',
       // 'eva-icons',
       // 'themify',

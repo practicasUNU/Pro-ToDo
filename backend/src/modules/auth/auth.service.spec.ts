@@ -156,15 +156,40 @@ describe('AuthService (PROT-04.1 / PROT-06.4)', () => {
       expect(otpConfigService.generateCode).toHaveBeenCalledWith(OTP_SECRET);
     });
 
-    it('deberia terminar en silencio si la cuenta existe pero esta desactivada', async () => {
+    it('deberia lanzar UnauthorizedException si la cuenta esta desactivada', async () => {
       // 1. Arrange
       usersService.findByEmailWithOtpSecret.mockResolvedValue(INACTIVE_USER);
 
       // 2. Act & 3. Assert
-      await expect(
-        service.requestOtp(INACTIVE_USER.email),
-      ).resolves.toBeUndefined();
+      await expect(service.requestOtp(INACTIVE_USER.email)).rejects.toThrow(
+        new UnauthorizedException('Cuenta inactiva'),
+      );
       expect(emailService.sendOtpCode).not.toHaveBeenCalled();
+    });
+
+    it('DOCUMENTA EL ORACULO DE ENUMERACION: inactiva lanza, inexistente no', async () => {
+      // 1. Arrange
+      usersService.findByEmailWithOtpSecret.mockResolvedValueOnce(
+        INACTIVE_USER,
+      );
+      const inactiveOutcome = await service
+        .requestOtp(INACTIVE_USER.email)
+        .then(() => 'silencio')
+        .catch(() => 'lanza');
+
+      usersService.findByEmailWithOtpSecret.mockResolvedValueOnce(null);
+
+      // 2. Act
+      const unknownOutcome = await service
+        .requestOtp('fantasma@unuware.com')
+        .then(() => 'silencio')
+        .catch(() => 'lanza');
+
+      // 3. Assert: respuestas distinguibles => un atacante puede deducir que
+      // correos estan registrados. Si esta prueba empieza a fallar porque ambos
+      // devuelven lo mismo, el oraculo se cerro y hay que borrarla.
+      expect(inactiveOutcome).toBe('lanza');
+      expect(unknownOutcome).toBe('silencio');
     });
   });
 

@@ -16,6 +16,14 @@ import { useSessionStore } from '@stores/session.store';
 /** Antelacion del aviso respecto a la caducidad del access token. */
 const WARNING_MS = 60_000;
 
+/**
+ * Cadencia del sondeo. Se usa `setInterval` y no un `setTimeout` calculado:
+ * un temporizador programado a 59 minutos vista no sobrevive a una suspension
+ * del equipo ni a un salto del reloj del sistema, mientras que un sondeo corto
+ * recalcula contra `Date.now()` en cada vuelta y se autocorrige.
+ */
+const CHECK_INTERVAL_MS = 1000;
+
 const MILLISECONDS_PER_SECOND = 1000;
 
 const LOGIN_ROUTE = '/login';
@@ -25,13 +33,13 @@ export const useSessionMonitor = (): void => {
   const router = useRouter();
   const sessionStore = useSessionStore();
 
-  let warningTimeoutId: ReturnType<typeof setTimeout> | undefined;
+  let checkIntervalId: ReturnType<typeof setInterval> | undefined;
   let isDialogOpen = false;
 
   const clearScheduledWarning = (): void => {
-    if (warningTimeoutId) {
-      clearTimeout(warningTimeoutId);
-      warningTimeoutId = undefined;
+    if (checkIntervalId) {
+      clearInterval(checkIntervalId);
+      checkIntervalId = undefined;
     }
   };
 
@@ -48,14 +56,13 @@ export const useSessionMonitor = (): void => {
   };
 
   /**
-   * Reprograma el aviso a partir del `exp` del token vigente.
+   * Una vuelta del sondeo: lee el `exp` del JWT y decide.
    *
-   * Se llama al montar, en cada cambio de token y al recuperar visibilidad, de
-   * modo que el temporizador nunca queda apoyado en un calculo antiguo.
+   * Todo el estado sale de `Date.now()` contra el claim, nunca de cuanto lleva
+   * corriendo el temporizador, asi que da igual que el navegador haya frenado el
+   * intervalo en segundo plano o que el equipo haya estado suspendido.
    */
-  const scheduleWarning = (): void => {
-    clearScheduledWarning();
-
+  const checkExpiry = (): void => {
     const millisecondsUntilExpiry = sessionStore.millisecondsUntilExpiry;
 
     // Sin token legible no hay nada que vigilar; si alguna peticion sale con esas
@@ -67,16 +74,19 @@ export const useSessionMonitor = (): void => {
       return;
     }
 
-    // Token ya dentro de su ultimo minuto (p. ej. tras recargar la pagina): el
-    // aviso se muestra de inmediato, con el tiempo que reste de verdad.
+    // Dentro del ultimo minuto: se avisa con el tiempo que reste de verdad, que
+    // tras una recarga puede ser bastante menos de 60 s.
     if (millisecondsUntilExpiry <= WARNING_MS) {
       openExpiryDialog(millisecondsUntilExpiry);
-      return;
     }
+  };
 
-    warningTimeoutId = setTimeout(() => {
-      openExpiryDialog(WARNING_MS);
-    }, millisecondsUntilExpiry - WARNING_MS);
+  /** Arranca el sondeo desde cero y comprueba de inmediato, sin esperar un tick. */
+  const scheduleWarning = (): void => {
+    clearScheduledWarning();
+    checkExpiry();
+
+    checkIntervalId = setInterval(checkExpiry, CHECK_INTERVAL_MS);
   };
 
   function openExpiryDialog(millisecondsUntilExpiry: number): void {
@@ -106,11 +116,10 @@ export const useSessionMonitor = (): void => {
   /**
    * Resiliencia ante suspension del equipo.
    *
-   * `setTimeout` no sobrevive de forma fiable a una suspension del sistema
-   * operativo: al despertar puede dispararse tarde, o no haberse disparado
-   * mientras el token ya caducaba. Por eso, cada vez que la pestaña vuelve a ser
-   * visible se recalcula el tiempo restante contra el reloj real, en lugar de
-   * confiar en el temporizador programado.
+   * El sondeo ya recalcula contra el reloj real, pero los navegadores frenan los
+   * temporizadores de las pestañas en segundo plano (hasta ~1 vuelta por minuto),
+   * asi que al volver puede pasar casi un minuto antes del siguiente tick. Este
+   * listener fuerza la comprobacion en el acto.
    */
   const onVisibilityChange = (): void => {
     if (document.visibilityState !== 'visible') return;
@@ -125,7 +134,7 @@ export const useSessionMonitor = (): void => {
       return;
     }
 
-    scheduleWarning();
+    checkExpiry();
   };
 
   // Un token nuevo (login o renovacion) reinicia el ciclo desde cero.

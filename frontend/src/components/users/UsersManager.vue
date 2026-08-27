@@ -140,6 +140,14 @@ onMounted(loadUsers);
       <template #body-cell-role="cellProps">
         <q-td :props="cellProps">
           <q-badge class="pd-badge pd-badge--role">
+            <!-- Iconos del set mdi-v7, habilitado en quasar.config.ts -->
+            <q-icon
+              :name="
+                cellProps.row.role === UserRole.ADMIN ? 'mdi-shield-crown' : 'mdi-pencil'
+              "
+              size="14px"
+              class="q-mr-xs"
+            />
             {{ ROLE_LABELS[cellProps.row.role as UserRole] }}
           </q-badge>
         </q-td>

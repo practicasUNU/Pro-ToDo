@@ -6,11 +6,16 @@ import {
   createWebHistory,
 } from 'vue-router';
 
+import { Dialog } from 'quasar';
+
 import { useSessionStore } from '@stores/session.store';
+
+import { UserRole } from '@/types/user';
 
 import routes from './routes';
 
 const LOGIN_ROUTE = '/login';
+const HOME_ROUTE = '/';
 
 /*
  * If not building with SSR mode, you can
@@ -44,14 +49,35 @@ export default defineRouter(({ store }) => {
   Router.beforeEach((to) => {
     const sessionStore = useSessionStore(store);
     const requiresAuth = to.matched.some((record) => record.meta.requiresAuth);
+    const requiresAdmin = to.matched.some((record) => record.meta.requiresAdmin);
 
     if (requiresAuth && !sessionStore.isAuthenticated) {
       // Se recuerda el destino para volver a el tras validar el codigo.
       return { path: LOGIN_ROUTE, query: { redirect: to.fullPath } };
     }
 
+    // RBAC: espejo del @Roles(UserRole.ADMIN) del backend. Evita enseñar una
+    // vista que el servidor contestaria con 403; NO es el control de acceso real,
+    // que sigue siendo el RolesGuard de NestJS.
+    if (requiresAdmin && sessionStore.user?.role !== UserRole.ADMIN) {
+      // `Dialog` importado del paquete, no `useQuasar()`: aqui no hay componente
+      // montado del que obtener la instancia.
+      Dialog.create({
+        title: 'Acceso denegado',
+        message:
+          'Esta seccion esta reservada a administradores. Tu cuenta no tiene ese permiso.',
+        persistent: true,
+        ok: { label: 'Entendido', unelevated: true, noCaps: true, color: 'negative' },
+      });
+
+      // Se devuelve la ruta de inicio en lugar de `next(false)`: cancelar sin mas
+      // dejaria la barra de direcciones mostrando la URL prohibida, porque el
+      // navegador ya la habia escrito.
+      return { path: HOME_ROUTE };
+    }
+
     if (to.path === LOGIN_ROUTE && sessionStore.isAuthenticated) {
-      return { path: '/' };
+      return { path: HOME_ROUTE };
     }
 
     return true;
