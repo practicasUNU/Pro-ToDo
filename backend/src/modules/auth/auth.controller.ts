@@ -29,8 +29,15 @@ import type {
   OtpRequestResponse,
 } from '@modules/auth/interfaces/jwt-payload.interface';
 
-/** Respuesta neutra de la solicitud de OTP: identica exista o no la cuenta. */
-const OTP_REQUESTED_MESSAGE = 'Si el correo existe, recibira un codigo OTP.';
+/**
+ * Respuesta neutra de la solicitud de OTP.
+ *
+ * Es la MISMA cadena, con el MISMO 202, tanto si el codigo se envio como si la
+ * cuenta no existe o esta desactivada: homologar los tres caminos es lo que
+ * impide enumerar cuentas desde fuera.
+ */
+const OTP_REQUESTED_MESSAGE =
+  'Si la cuenta existe y esta activa, hemos enviado un codigo OTP a su correo';
 
 /**
  * Limite propio de las rutas de sesion. El presupuesto de 3 peticiones/minuto
@@ -62,12 +69,17 @@ export class AuthController {
   @ApiOperation({ summary: 'Envia un codigo temporal al correo corporativo' })
   @ApiResponse({
     status: HttpStatus.ACCEPTED,
-    description: 'Solicitud aceptada',
+    description:
+      'Solicitud aceptada. Se responde igual exista o no la cuenta, y este activa o no.',
   })
   @ApiTooManyRequestsResponse({ description: 'Limite de solicitudes excedido' })
   public async generate(
     @Body() requestOtpDto: RequestOtpDto,
   ): Promise<OtpRequestResponse> {
+    // `requestOtp` no lanza por cuenta inexistente ni desactivada: descarta en
+    // silencio. Aqui no hay try/catch precisamente porque no hay nada que
+    // capturar — si algun dia lo hubiera, envolverlo seria obligatorio para no
+    // reabrir el oraculo de enumeracion.
     await this.authService.requestOtp(requestOtpDto.email);
 
     // Respuesta constante: no revela si el correo esta registrado ni si esta activo.

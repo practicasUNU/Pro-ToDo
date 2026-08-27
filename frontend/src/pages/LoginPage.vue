@@ -96,20 +96,13 @@ const sendOtp = async (): Promise<void> => {
       type: 'positive',
       message: 'Si el correo existe, recibiras un codigo en tu bandeja.',
     });
-  } catch (error) {
-    // El backend responde 401 'Cuenta inactiva' para cuentas desactivadas; el
-    // resto de fallos se muestran de forma generica.
-    const isInactiveAccount =
-      typeof error === 'object' &&
-      error !== null &&
-      'response' in error &&
-      (error as { response?: { status?: number } }).response?.status === 401;
-
+  } catch {
+    // Aqui solo se llega por fallo de red, 429 del throttler o 5xx: el backend
+    // responde 202 tanto si la cuenta no existe como si esta desactivada, asi
+    // que no hay forma (ni intencion) de distinguir esos casos en el cliente.
     $q.notify({
       type: 'negative',
-      message: isInactiveAccount
-        ? 'Tu cuenta esta desactivada. Contacta con un administrador.'
-        : 'No se pudo enviar el codigo. Intentalo de nuevo.',
+      message: 'No se pudo enviar el codigo. Intentalo de nuevo.',
     });
   }
 };

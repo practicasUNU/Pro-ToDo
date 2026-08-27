@@ -4,9 +4,46 @@ Registro técnico del "por qué" de cada decisión de implementación. Los estad
 
 ---
 
+## 2026-08-26 · Cierre del oráculo de enumeración en la solicitud de OTP — rama `feat/auth-otp`
+
+Revierte la tarea 1 de la entrega anterior, que había hecho que una cuenta registrada pero inactiva respondiera `401 Cuenta inactiva` mientras un correo desconocido seguía devolviendo `202`. Esa diferencia bastaba para recorrer una lista de correos corporativos y deducir cuáles estaban dados de alta.
+
+Los tres caminos vuelven a ser indistinguibles desde fuera:
+
+| Situación | Respuesta |
+|---|---|
+| Código enviado | `202` + mensaje genérico |
+| Correo no registrado | `202` + **el mismo** mensaje |
+| Cuenta desactivada | `202` + **el mismo** mensaje |
+
+El motivo real del descarte viaja solo al `Logger.warn` del servidor, que distingue "correo inexistente" de "cuenta desactivada" para quien lee los logs.
+
+### El coste que se acepta a cambio
+
+Un usuario cuya cuenta fue desactivada no recibe ninguna pista: pide el código, ve un mensaje de éxito y espera un correo que no llega. Es incómodo a propósito. La alternativa era la vulnerabilidad, y el canal correcto para avisarle es el administrador que lo dio de baja, no un endpoint público sin autenticar.
+
+### La prueba cambió de bando
+
+`DOCUMENTA EL ORACULO DE ENUMERACION`, que verificaba que los caminos **diferían**, se sustituyó por `ANTI-ENUMERACION: cuenta inexistente, inactiva y valida son indistinguibles`, que compara el desenlace de los tres y exige que sean idénticos. Falla si alguien vuelve a abrir el oráculo.
+
+### Limpieza derivada en el frontend
+
+`LoginPage.sendOtp` inspeccionaba el `401` para mostrar "Tu cuenta esta desactivada". Ese 401 ya no puede ocurrir — el guard de IP da 403 y el throttler 429 —, así que era código muerto y se retiró. El `catch` queda para fallo de red, 429 y 5xx.
+
+### Nota para el futuro
+
+El controlador **no** lleva `try/catch` alrededor de `requestOtp` porque el servicio no lanza. Si algún día lanzara (por ejemplo, un fallo de SMTP que hoy sube como 500), envolverlo pasa a ser obligatorio: un 500 que solo ocurre con correos existentes reabre el oráculo por la puerta de atrás. Queda anotado en el propio controlador.
+
+---
+
 ## 2026-08-26 · Correcciones de UX del login, pool SMTP y RBAC en el router — rama `feat/auth-otp`
 
-### ⚠️ Se abrió un oráculo de enumeración en `POST /auth/otp/generate`
+### ⚠️ Se abrió un oráculo de enumeración en `POST /auth/otp/generate` — **CERRADO el 2026-08-26**
+
+> **Resuelto.** Duró una entrega. `requestOtp` volvió al `return` silencioso para
+> ambos casos y el controlador homologa los tres caminos con el mismo `202`. Lo que
+> sigue se conserva como registro de por qué existió y por qué se revirtió.
+
 
 `requestOtp` ahora distingue dos casos que antes eran indistinguibles:
 
