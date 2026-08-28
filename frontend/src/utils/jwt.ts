@@ -50,13 +50,29 @@ export const decodeJwtClaims = (token: string | null): JwtClaims | null => {
 };
 
 /**
- * Milisegundos que faltan para que el token caduque.
- * Negativo si ya caduco, `null` si no se pudo leer el `exp`.
+ * Instante de caducidad del token, en milisegundos desde epoch.
+ *
+ * Deriva UNICAMENTE del token y NO lee el reloj. Esa distincion es la que permite
+ * envolverlo en un `computed` sin que se quede obsoleto: el tiempo restante, en
+ * cambio, cambia solo y jamas debe cachearse (ver session.store.ts).
  */
-export const getMillisecondsUntilExpiry = (token: string | null): number | null => {
+export const getExpiresAtMs = (token: string | null): number | null => {
   const claims = decodeJwtClaims(token);
   if (!claims) return null;
 
   // `exp` viaja en segundos desde epoch; Date.now() en milisegundos.
-  return claims.exp * 1000 - Date.now();
+  return claims.exp * 1000;
+};
+
+/**
+ * Vigencia total con la que se firmo el token (`exp - iat`), en milisegundos.
+ *
+ * Sirve para dimensionar la ventana de aviso: una antelacion fija mas larga que
+ * la vida del token abriria el aviso en el mismo instante de la emision.
+ */
+export const getTokenLifetimeMs = (token: string | null): number | null => {
+  const claims = decodeJwtClaims(token);
+  if (!claims) return null;
+
+  return (claims.exp - claims.iat) * 1000;
 };

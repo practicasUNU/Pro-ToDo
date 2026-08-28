@@ -4,7 +4,7 @@ import { computed, ref } from 'vue';
 import * as authService from '@services/auth.service';
 
 import { getOrCreateDeviceId } from '@/utils/device-id';
-import { getMillisecondsUntilExpiry } from '@/utils/jwt';
+import { getExpiresAtMs, getTokenLifetimeMs } from '@/utils/jwt';
 import {
   clearSession,
   isSessionStorageKey,
@@ -41,10 +41,32 @@ export const useSessionStore = defineStore('session', () => {
     () => Boolean(accessToken.value) && Boolean(user.value),
   );
 
-  /** Milisegundos hasta la caducidad del access token; `null` si no hay token legible. */
-  const millisecondsUntilExpiry = computed<number | null>(() =>
-    getMillisecondsUntilExpiry(accessToken.value),
+  /**
+   * Instante de caducidad del access token, en ms desde epoch; `null` si no hay
+   * token legible. Aqui el `computed` SI es correcto: deriva solo del token, que
+   * es reactivo, asi que la cache se invalida exactamente cuando debe.
+   */
+  const accessTokenExpiresAt = computed<number | null>(() => getExpiresAtMs(accessToken.value));
+
+  /** Vigencia total con la que se firmo el token, para dimensionar la ventana de aviso. */
+  const accessTokenLifetimeMs = computed<number | null>(() =>
+    getTokenLifetimeMs(accessToken.value),
   );
+
+  /**
+   * Milisegundos que restan AHORA hasta la caducidad; `null` si no hay token legible.
+   *
+   * Es una FUNCION y no un `computed` a proposito. `Date.now()` no es una
+   * dependencia reactiva: un computed que lo invoque se evalua una sola vez por
+   * token y devuelve ese mismo numero en todas las lecturas posteriores. El sondeo
+   * de 1 s del monitor de expiracion leia por eso el valor del instante del login
+   * en cada vuelta, el contador nunca bajaba y el aviso no llegaba a abrirse jamas.
+   */
+  const getMillisecondsUntilExpiry = (): number | null => {
+    const expiresAt = accessTokenExpiresAt.value;
+
+    return expiresAt === null ? null : expiresAt - Date.now();
+  };
 
   /** Aplica el par de tokens recibido y lo persiste. Punto unico de escritura. */
   const applyTokens = (response: AuthTokenResponse): void => {
@@ -212,7 +234,9 @@ export const useSessionStore = defineStore('session', () => {
     otpVerified,
     isLoading,
     isAuthenticated,
-    millisecondsUntilExpiry,
+    accessTokenExpiresAt,
+    accessTokenLifetimeMs,
+    getMillisecondsUntilExpiry,
     requestOtp,
     verifyOtp,
     refreshTokens,

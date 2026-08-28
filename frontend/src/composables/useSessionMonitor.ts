@@ -15,8 +15,18 @@ import type { DialogChainObject } from 'quasar';
 // el de la sesion activa. El $q.dialog sigue perteneciendo a la capa de
 // componentes (frontend-architecture.md §2.1); el store nunca conoce Quasar.
 
-/** Antelacion del aviso respecto a la caducidad del access token. */
+/** Antelacion nominal del aviso respecto a la caducidad del access token. */
 const WARNING_MS = 60_000;
+
+/**
+ * Techo del aviso expresado como fraccion de la vida del token.
+ *
+ * Con las vigencias de produccion no cambia nada. Existe por las cortas: con un
+ * `JWT_EXPIRES_IN` de 1 minuto, una antelacion fija de 60 s cubre el token
+ * entero, asi que el aviso saltaria en el mismo instante del login y de nuevo
+ * justo despues de cada renovacion —un modal permanente en vez de un aviso—.
+ */
+const MAX_WARNING_FRACTION = 0.5;
 
 /**
  * Cadencia del sondeo. Se usa `setInterval` y no un `setTimeout` calculado:
@@ -81,6 +91,20 @@ export const useSessionMonitor = (): void => {
   };
 
   /**
+   * Antelacion efectiva del aviso para el token en curso.
+   *
+   * Sin token legible se devuelve la nominal: quien llama ya trata el `null` del
+   * tiempo restante antes de comparar contra este valor.
+   */
+  const getWarningMs = (): number => {
+    const lifetimeMs = sessionStore.accessTokenLifetimeMs;
+
+    if (lifetimeMs === null) return WARNING_MS;
+
+    return Math.min(WARNING_MS, Math.floor(lifetimeMs * MAX_WARNING_FRACTION));
+  };
+
+  /**
    * Una vuelta del sondeo: lee el `exp` del JWT y decide.
    *
    * Todo el estado sale de `Date.now()` contra el claim, nunca de cuanto lleva
@@ -92,7 +116,7 @@ export const useSessionMonitor = (): void => {
     // el par de tokens nuevo, y el `watch` sobre accessToken reprograma el ciclo.
     if (isRefreshing) return;
 
-    const millisecondsUntilExpiry = sessionStore.millisecondsUntilExpiry;
+    const millisecondsUntilExpiry = sessionStore.getMillisecondsUntilExpiry();
 
     // Sin token legible no hay nada que vigilar; si alguna peticion sale con esas
     // credenciales, el 401 del interceptor cubre el caso.
@@ -103,9 +127,9 @@ export const useSessionMonitor = (): void => {
       return;
     }
 
-    // Dentro del ultimo minuto: se avisa con el tiempo que reste de verdad, que
-    // tras una recarga puede ser bastante menos de 60 s.
-    if (millisecondsUntilExpiry <= WARNING_MS) {
+    // Dentro de la ventana de aviso: se abre con el tiempo que reste de verdad,
+    // que tras una recarga puede ser bastante menos que la ventana completa.
+    if (millisecondsUntilExpiry <= getWarningMs()) {
       openExpiryDialog(millisecondsUntilExpiry);
     }
   };
@@ -117,7 +141,7 @@ export const useSessionMonitor = (): void => {
     // Sin token legible no hay nada que vigilar: se sale sin reinstalar el
     // intervalo. Cubre el caso de `clear()`, que dispara este mismo `watch` y
     // dejaba un sondeo de 1 s corriendo en vacio tras cerrar sesion.
-    if (sessionStore.millisecondsUntilExpiry === null) return;
+    if (sessionStore.accessTokenExpiresAt === null) return;
 
     checkExpiry();
 
@@ -176,7 +200,7 @@ export const useSessionMonitor = (): void => {
     // vuelo no debe cerrar la sesion mirando el token que esta a punto de morir.
     if (isRefreshing) return;
 
-    const millisecondsUntilExpiry = sessionStore.millisecondsUntilExpiry;
+    const millisecondsUntilExpiry = sessionStore.getMillisecondsUntilExpiry();
 
     if (millisecondsUntilExpiry !== null && millisecondsUntilExpiry <= 0) {
       // El token murio mientras el equipo estaba suspendido: fuera de inmediato,
