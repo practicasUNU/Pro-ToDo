@@ -34,6 +34,12 @@ const GENERATED_CODE = '123456';
 const SIGNED_TOKEN = 'jwt.firmado.de.prueba';
 const ISSUED_REFRESH_TOKEN = 'refresh-opaco-de-prueba';
 
+/** Dispositivo que el cliente envia al validar el OTP. */
+const DEVICE_ID = 'b3f1c2d4-5a6b-4c7d-8e9f-0a1b2c3d4e5f';
+
+/** Dispositivo grabado en un token ya emitido, para la ruta de renovacion. */
+const ROTATED_DEVICE_ID = 'e1d2c3b4-a5f6-4e7d-8c9b-0a1f2e3d4c5b';
+
 describe('AuthService (PROT-04.1 / PROT-06.4)', () => {
   let usersService: jest.Mocked<
     Pick<UsersService, 'findByEmailWithOtpSecret' | 'ensureOtpSecret'>
@@ -62,7 +68,9 @@ describe('AuthService (PROT-04.1 / PROT-06.4)', () => {
     jwtService = { sign: jest.fn().mockReturnValue(SIGNED_TOKEN) };
     refreshTokenService = {
       issue: jest.fn().mockResolvedValue(ISSUED_REFRESH_TOKEN),
-      rotate: jest.fn().mockResolvedValue(ACTIVE_USER),
+      rotate: jest
+        .fn()
+        .mockResolvedValue({ user: ACTIVE_USER, deviceId: ROTATED_DEVICE_ID }),
       revoke: jest.fn().mockResolvedValue(undefined),
     };
 
@@ -199,7 +207,11 @@ describe('AuthService (PROT-04.1 / PROT-06.4)', () => {
       usersService.findByEmailWithOtpSecret.mockResolvedValue(ACTIVE_USER);
 
       // 2. Act
-      const result = await service.verifyOtp(ACTIVE_USER.email, GENERATED_CODE);
+      const result = await service.verifyOtp(
+        ACTIVE_USER.email,
+        GENERATED_CODE,
+        DEVICE_ID,
+      );
 
       // 3. Assert
       expect(result).toEqual({
@@ -211,7 +223,10 @@ describe('AuthService (PROT-04.1 / PROT-06.4)', () => {
           role: UserRole.ADMIN,
         },
       });
-      expect(refreshTokenService.issue).toHaveBeenCalledWith(ACTIVE_USER);
+      expect(refreshTokenService.issue).toHaveBeenCalledWith(
+        ACTIVE_USER,
+        DEVICE_ID,
+      );
       expect(jwtService.sign).toHaveBeenCalledWith({
         sub: ACTIVE_USER.id,
         email: ACTIVE_USER.email,
@@ -224,7 +239,11 @@ describe('AuthService (PROT-04.1 / PROT-06.4)', () => {
       usersService.findByEmailWithOtpSecret.mockResolvedValue(ACTIVE_USER);
 
       // 2. Act
-      const result = await service.verifyOtp(ACTIVE_USER.email, GENERATED_CODE);
+      const result = await service.verifyOtp(
+        ACTIVE_USER.email,
+        GENERATED_CODE,
+        DEVICE_ID,
+      );
 
       // 3. Assert
       expect(JSON.stringify(result)).not.toContain(GENERATED_CODE);
@@ -237,7 +256,7 @@ describe('AuthService (PROT-04.1 / PROT-06.4)', () => {
 
       // 2. Act & 3. Assert
       await expect(
-        service.verifyOtp(ACTIVE_USER.email, '000000'),
+        service.verifyOtp(ACTIVE_USER.email, '000000', DEVICE_ID),
       ).rejects.toThrow(UnauthorizedException);
       expect(jwtService.sign).not.toHaveBeenCalled();
     });
@@ -248,7 +267,7 @@ describe('AuthService (PROT-04.1 / PROT-06.4)', () => {
 
       // 2. Act & 3. Assert: mismo error que un codigo erroneo, para no enumerar cuentas
       await expect(
-        service.verifyOtp('fantasma@unuware.com', GENERATED_CODE),
+        service.verifyOtp('fantasma@unuware.com', GENERATED_CODE, DEVICE_ID),
       ).rejects.toThrow(UnauthorizedException);
       expect(otpConfigService.verifyCode).not.toHaveBeenCalled();
     });
@@ -259,7 +278,7 @@ describe('AuthService (PROT-04.1 / PROT-06.4)', () => {
 
       // 2. Act & 3. Assert
       await expect(
-        service.verifyOtp(INACTIVE_USER.email, GENERATED_CODE),
+        service.verifyOtp(INACTIVE_USER.email, GENERATED_CODE, DEVICE_ID),
       ).rejects.toThrow(UnauthorizedException);
       expect(jwtService.sign).not.toHaveBeenCalled();
     });
@@ -270,7 +289,7 @@ describe('AuthService (PROT-04.1 / PROT-06.4)', () => {
 
       // 2. Act & 3. Assert
       await expect(
-        service.verifyOtp(UNENROLLED_USER.email, GENERATED_CODE),
+        service.verifyOtp(UNENROLLED_USER.email, GENERATED_CODE, DEVICE_ID),
       ).rejects.toThrow(UnauthorizedException);
       expect(usersService.ensureOtpSecret).not.toHaveBeenCalled();
       expect(otpConfigService.verifyCode).not.toHaveBeenCalled();
@@ -281,7 +300,7 @@ describe('AuthService (PROT-04.1 / PROT-06.4)', () => {
       usersService.findByEmailWithOtpSecret.mockResolvedValue(ACTIVE_USER);
 
       // 2. Act
-      await service.verifyOtp(ACTIVE_USER.email, GENERATED_CODE);
+      await service.verifyOtp(ACTIVE_USER.email, GENERATED_CODE, DEVICE_ID);
 
       // 3. Assert
       expect(otpConfigService.verifyCode).toHaveBeenCalledWith(
@@ -295,7 +314,11 @@ describe('AuthService (PROT-04.1 / PROT-06.4)', () => {
       usersService.findByEmailWithOtpSecret.mockResolvedValue(ACTIVE_USER);
 
       // 2. Act
-      const result = await service.verifyOtp(ACTIVE_USER.email, GENERATED_CODE);
+      const result = await service.verifyOtp(
+        ACTIVE_USER.email,
+        GENERATED_CODE,
+        DEVICE_ID,
+      );
 
       // 3. Assert
       expect(JSON.stringify(result)).not.toContain(OTP_SECRET);
@@ -305,7 +328,7 @@ describe('AuthService (PROT-04.1 / PROT-06.4)', () => {
       // 1. Arrange
       usersService.findByEmailWithOtpSecret.mockResolvedValueOnce(null);
       const missingAccountError = await service
-        .verifyOtp('fantasma@unuware.com', GENERATED_CODE)
+        .verifyOtp('fantasma@unuware.com', GENERATED_CODE, DEVICE_ID)
         .catch((error: UnauthorizedException) => error.message);
 
       usersService.findByEmailWithOtpSecret.mockResolvedValueOnce(ACTIVE_USER);
@@ -313,7 +336,7 @@ describe('AuthService (PROT-04.1 / PROT-06.4)', () => {
 
       // 2. Act
       const wrongCodeError = await service
-        .verifyOtp(ACTIVE_USER.email, '000000')
+        .verifyOtp(ACTIVE_USER.email, '000000', DEVICE_ID)
         .catch((error: UnauthorizedException) => error.message);
 
       // 3. Assert
@@ -347,7 +370,26 @@ describe('AuthService (PROT-04.1 / PROT-06.4)', () => {
 
       // 3. Assert
       expect(result.refreshToken).not.toBe('refresh-anterior');
-      expect(refreshTokenService.issue).toHaveBeenCalledWith(ACTIVE_USER);
+      expect(refreshTokenService.issue).toHaveBeenCalledWith(
+        ACTIVE_USER,
+        ROTATED_DEVICE_ID,
+      );
+    });
+
+    it('deberia arrastrar el deviceId del token rotado sin que el cliente lo reenvie', async () => {
+      // 2. Act: `/auth/refresh` solo recibe el refresh token, nunca un deviceId
+      await service.refreshSession('refresh-anterior');
+
+      // 3. Assert: el dispositivo sale del token canjeado, asi que la sesion
+      // conserva el mismo equipo durante toda su cadena de rotaciones.
+      expect(refreshTokenService.issue).toHaveBeenCalledWith(
+        ACTIVE_USER,
+        ROTATED_DEVICE_ID,
+      );
+      expect(refreshTokenService.issue).not.toHaveBeenCalledWith(
+        ACTIVE_USER,
+        DEVICE_ID,
+      );
     });
 
     it('deberia propagar el UnauthorizedException de la rotacion sin firmar nada', async () => {

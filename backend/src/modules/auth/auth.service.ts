@@ -89,6 +89,7 @@ export class AuthService {
   public async verifyOtp(
     email: string,
     code: string,
+    deviceId: string,
   ): Promise<AuthTokenResponse> {
     const user = await this.usersService.findByEmailWithOtpSecret(email);
 
@@ -112,7 +113,7 @@ export class AuthService {
       throw new UnauthorizedException(INVALID_CREDENTIALS_MESSAGE);
     }
 
-    return this.buildTokenResponse(user);
+    return this.buildTokenResponse(user, deviceId);
   }
 
   /**
@@ -121,12 +122,15 @@ export class AuthService {
    * La rotacion la resuelve `RefreshTokenService`: aqui solo se vuelve a firmar
    * el access token para el usuario que aquel devuelve.
    *
+   * El dispositivo no lo reenvia el cliente: viene del token canjeado, de modo que
+   * la sesion conserva el mismo dispositivo durante toda su cadena de rotaciones.
+   *
    * @throws UnauthorizedException propagada desde la rotacion.
    */
   public async refreshSession(rawToken: string): Promise<AuthTokenResponse> {
-    const user = await this.refreshTokenService.rotate(rawToken);
+    const { user, deviceId } = await this.refreshTokenService.rotate(rawToken);
 
-    return this.buildTokenResponse(user);
+    return this.buildTokenResponse(user, deviceId);
   }
 
   /**
@@ -141,7 +145,10 @@ export class AuthService {
   }
 
   /** Firma el access token, emite el refresh y arma la respuesta de sesion. */
-  private async buildTokenResponse(user: User): Promise<AuthTokenResponse> {
+  private async buildTokenResponse(
+    user: User,
+    deviceId: string,
+  ): Promise<AuthTokenResponse> {
     const payload: JwtPayload = {
       sub: user.id,
       email: user.email,
@@ -155,7 +162,7 @@ export class AuthService {
 
     return {
       accessToken: this.jwtService.sign(payload),
-      refreshToken: await this.refreshTokenService.issue(user),
+      refreshToken: await this.refreshTokenService.issue(user, deviceId),
       user: authenticatedUser,
     };
   }

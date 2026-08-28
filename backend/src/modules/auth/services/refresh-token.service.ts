@@ -3,7 +3,7 @@ import { createHash, randomBytes } from 'node:crypto';
 import { Injectable, Logger, UnauthorizedException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { InjectRepository } from '@nestjs/typeorm';
-import { LessThan, Repository } from 'typeorm';
+import { LessThan, LessThanOrEqual, Repository } from 'typeorm';
 
 import { RefreshToken } from '@modules/auth/entities/refresh-token.entity';
 
@@ -18,6 +18,16 @@ const DEFAULT_EXPIRATION_DAYS = 7;
 const MILLISECONDS_PER_DAY = 24 * 60 * 60 * 1000;
 
 /**
+ * Tokens ya inservibles que se conservan por usuario tras cada emision.
+ *
+ * No es un numero arbitrario: son la ventana de deteccion de reutilizacion de
+ * `rotate()`. Un token robado que reaparezca dentro de estas ultimas rotaciones
+ * todavia encuentra su fila y derriba la familia entera; sin ella degeneraria en
+ * un 401 plano y la brecha pasaria desapercibida.
+ */
+const RETAINED_DEAD_TOKENS = 5;
+
+/**
  * Mensaje unico para todos los modos de fallo de la renovacion.
  *
  * Un token inexistente, uno caducado y uno ya canjeado devuelven exactamente lo
@@ -25,6 +35,18 @@ const MILLISECONDS_PER_DAY = 24 * 60 * 60 * 1000;
  * credencial, porque esa diferencia es informacion util para un atacante.
  */
 const INVALID_REFRESH_MESSAGE = 'Sesion invalida o expirada.';
+
+/**
+ * Usuario y dispositivo del token canjeado, para emitir el reemplazo.
+ *
+ * El `deviceId` viaja de vuelta a proposito: el dispositivo se fija en el login y
+ * lo transporta la cadena de tokens, asi que el cliente no lo reenvia al renovar.
+ * Un token en rotacion no debe poder cambiar de dispositivo a mitad de sesion.
+ */
+export interface RotatedSession {
+  user: User;
+  deviceId: string;
+}
 
 /**
  * Emision, rotacion y revocacion de refresh tokens (PROT-06.4).
@@ -44,22 +66,45 @@ export class RefreshTokenService {
   ) {}
 
   /**
-   * Emite un token nuevo para el usuario y persiste unicamente su hash.
+   * Emite un token nuevo para el dispositivo indicado y persiste solo su hash.
+   *
+   * Aisla las sesiones por dispositivo: la sesion anterior de ESE dispositivo
+   * queda revocada, y las de los demas equipos del usuario siguen intactas.
    *
    * @returns El token EN CLARO. Es la unica vez que existe fuera del cliente:
    *          no se registra en logs ni se puede recuperar despues.
    */
-  public async issue(user: User): Promise<string> {
+  public async issue(user: User, deviceId: string): Promise<string> {
     const rawToken = randomBytes(TOKEN_BYTES).toString('base64url');
 
-    await this.refreshTokenRepository.save(
-      this.refreshTokenRepository.create({
-        userId: user.id,
-        tokenHash: this.hashToken(rawToken),
-        expiresAt: new Date(Date.now() + this.getExpirationMs()),
-        isRevoked: false,
-      }),
-    );
+    // Los tres pasos comparten transaccion: si alguno falla, el token nuevo
+    // tampoco se persiste. Nunca se revoca ni se borra nada sin que su reemplazo
+    // exista. Por eso la revocacion usa el repositorio TRANSACCIONAL y no
+    // `this.refreshTokenRepository`, que quedaria fuera de la transaccion y
+    // dejaria al usuario sin sesion en este dispositivo si la insercion fallara.
+    await this.refreshTokenRepository.manager.transaction(async (manager) => {
+      const repository = manager.getRepository(RefreshToken);
+
+      // Una sesion nueva en un dispositivo sustituye a la anterior de ese mismo
+      // dispositivo. Va ANTES de insertar a proposito: despues, el filtro
+      // `isRevoked: false` alcanzaria al token recien creado y lo revocaria al nacer.
+      await repository.update(
+        { userId: user.id, deviceId, isRevoked: false },
+        { isRevoked: true },
+      );
+
+      await repository.save(
+        repository.create({
+          userId: user.id,
+          deviceId,
+          tokenHash: this.hashToken(rawToken),
+          expiresAt: new Date(Date.now() + this.getExpirationMs()),
+          isRevoked: false,
+        }),
+      );
+
+      await this.pruneDeadTokens(repository, user.id);
+    });
 
     return rawToken;
   }
@@ -67,12 +112,14 @@ export class RefreshTokenService {
   /**
    * Canjea un token por su dueño y lo invalida en el mismo acto (rotacion).
    *
-   * Quien llama es responsable de emitir el reemplazo con `issue()`.
+   * Quien llama es responsable de emitir el reemplazo con `issue()`, para lo que
+   * necesita tambien el dispositivo: de ahi que se devuelva `RotatedSession` y no
+   * solo el usuario.
    *
    * @throws UnauthorizedException si el token no existe, ya fue canjeado, ha
    *         caducado, o su dueño no existe o esta desactivado.
    */
-  public async rotate(rawToken: string): Promise<User> {
+  public async rotate(rawToken: string): Promise<RotatedSession> {
     const stored = await this.refreshTokenRepository.findOne({
       where: { tokenHash: this.hashToken(rawToken) },
       relations: { user: true },
@@ -109,7 +156,7 @@ export class RefreshTokenService {
       { isRevoked: true },
     );
 
-    return stored.user;
+    return { user: stored.user, deviceId: stored.deviceId };
   }
 
   /**
@@ -138,6 +185,37 @@ export class RefreshTokenService {
     await this.refreshTokenRepository.delete({
       expiresAt: LessThan(new Date()),
     });
+  }
+
+  /**
+   * Borra los tokens ya inservibles del usuario, conservando los mas recientes.
+   *
+   * Un token VIGENTE no entra jamas en el filtro, por antiguo que sea: son las
+   * sesiones abiertas en otros dispositivos, y podarlas por antiguedad expulsaria
+   * al usuario sin aviso —el refresco rutinario de un equipo cerraria la sesion
+   * del otro—. Solo se elimina lo que ya no puede canjearse.
+   *
+   * El token recien insertado tampoco es candidato: nace sin revocar y con
+   * expiracion futura. De ahi el orden insertar -> podar.
+   */
+  private async pruneDeadTokens(
+    repository: Repository<RefreshToken>,
+    userId: string,
+  ): Promise<void> {
+    // El `where` en forma de array es un OR: revocado O caducado.
+    const doomedTokens = await repository.find({
+      where: [
+        { userId, isRevoked: true },
+        { userId, expiresAt: LessThanOrEqual(new Date()) },
+      ],
+      order: { createdAt: 'DESC' },
+      select: { id: true },
+      skip: RETAINED_DEAD_TOKENS,
+    });
+
+    if (doomedTokens.length === 0) return;
+
+    await repository.delete(doomedTokens.map(({ id }) => id));
   }
 
   /**

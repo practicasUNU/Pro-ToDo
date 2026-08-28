@@ -228,6 +228,28 @@ describe('UsersController (RBAC, PROT-04.2)', () => {
       expect(response.status).toBe(400);
       expect(usersServiceMock.create).not.toHaveBeenCalled();
     });
+
+    it('deberia responder 403 si el ADMIN intenta modificar su propio usuario (MOD-01)', async () => {
+      // 2. Act
+      const response = await request(httpServer())
+        .patch(`/users/${ADMIN_USER.id}`)
+        .send({ role: UserRole.EDITOR });
+
+      // 3. Assert
+      expect(response.status).toBe(403);
+      expect(usersServiceMock.update).not.toHaveBeenCalled();
+    });
+
+    it('deberia responder 403 si el ADMIN intenta eliminar su propio usuario (MOD-01)', async () => {
+      // 2. Act
+      const response = await request(httpServer()).delete(
+        `/users/${ADMIN_USER.id}`,
+      );
+
+      // 3. Assert
+      expect(response.status).toBe(403);
+      expect(usersServiceMock.remove).not.toHaveBeenCalled();
+    });
   });
 
   describe('cuando la peticion no trae identidad', () => {

@@ -104,7 +104,11 @@ export class AuthController {
   public async validate(
     @Body() verifyOtpDto: VerifyOtpDto,
   ): Promise<AuthTokenResponse> {
-    return this.authService.verifyOtp(verifyOtpDto.email, verifyOtpDto.code);
+    return this.authService.verifyOtp(
+      verifyOtpDto.email,
+      verifyOtpDto.code,
+      verifyOtpDto.deviceId,
+    );
   }
 
   @Post('refresh')

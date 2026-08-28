@@ -33,6 +33,16 @@ export class RefreshToken {
   @JoinColumn({ name: 'id_usuario' })
   user: User;
 
+  /**
+   * Dispositivo/navegador que abrio la sesion. Lo genera y persiste el cliente.
+   *
+   * Agrupa los tokens por origen para que emitir uno nuevo revoque solo la sesion
+   * anterior de ESE dispositivo. No es un dato de confianza: lo elige el cliente y
+   * nunca se usa como entrada de autorizacion, solo acotado a `userId`.
+   */
+  @Column({ name: 'id_dispositivo', type: 'uuid' })
+  deviceId: string;
+
   @Column({ name: 'hash_token', type: 'char', length: 64, unique: true })
   tokenHash: string;
 

@@ -135,13 +135,17 @@ CREATE TABLE alertas_error (
 
 -- =============================================================================
 -- Tabla: REFRESH_TOKENS (PROT-06.4)
--- Duplicada en db/migrations/001-refresh-tokens.sql para las bases de datos ya
--- creadas: este archivo solo se ejecuta con el volumen de Docker vacío.
+-- Duplicada en db/migrations/001-refresh-tokens.sql (y 004 para la columna
+-- id_dispositivo) para las bases de datos ya creadas: este archivo solo se
+-- ejecuta con el volumen de Docker vacío.
 -- =============================================================================
 
 CREATE TABLE refresh_tokens (
     id_refresh_token UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     id_usuario UUID NOT NULL REFERENCES usuarios(id_usuario) ON DELETE CASCADE,
+    -- Dispositivo/navegador que abrió la sesión, generado por el cliente. Agrupa
+    -- los tokens por origen para revocar solo la sesión anterior de ese equipo
+    id_dispositivo UUID NOT NULL,
     -- SHA-256 hexadecimal del token opaco; el valor en claro nunca se persiste
     hash_token CHAR(64) NOT NULL UNIQUE,
     expiracion TIMESTAMP NOT NULL,
