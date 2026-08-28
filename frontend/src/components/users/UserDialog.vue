@@ -4,6 +4,7 @@ import { useQuasar } from 'quasar';
 
 import { useUsersStore } from '@stores/users.store';
 
+import { extractApiErrorMessage } from '@/utils/api-error';
 import { corporateEmailErrorMessage, isCorporateEmail } from '@/utils/corporate-email';
 
 import { UserRole, type User } from '@/types/user';
@@ -66,8 +67,11 @@ const onSubmit = async (): Promise<void> => {
 
     emit('saved');
     closeDialog();
-  } catch {
-    $q.notify({ type: 'negative', message: 'No se pudo guardar el usuario' });
+  } catch (error) {
+    $q.notify({
+      type: 'negative',
+      message: extractApiErrorMessage(error, 'No se pudo guardar el usuario'),
+    });
   }
 };
 </script>

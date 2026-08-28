@@ -221,8 +221,8 @@ AuthModule                                     │
 ### 2.6 Esquema
 
 Tabla `refresh_tokens` (columnas en español, como el resto de `init.sql`):
-`id_refresh_token`, `id_usuario` (FK `ON DELETE CASCADE`), `hash_token CHAR(64) UNIQUE`,
-`expiracion`, `revocado`, `fecha_creacion`.
+`id_refresh_token`, `id_usuario` (FK `ON DELETE CASCADE`), `id_dispositivo UUID NOT NULL`,
+`hash_token CHAR(64) UNIQUE`, `expiracion`, `revocado`, `fecha_creacion`.
 
 TypeORM corre con `synchronize: false`, así que el DDL se aplica a mano:
 `db/migrations/001-refresh-tokens.sql` (idempotente) para bases ya creadas,
@@ -230,6 +230,11 @@ e `init.sql` para clonados nuevos.
 
 `db/migrations/003-otp-secret.sql` añade `secreto_otp` y retira `codigo_otp` / `expiracion_otp`,
 dos columnas de un diseño anterior de códigos persistidos que ningún código leía.
+
+`db/migrations/004-device-id-refresh-tokens.sql` añade `id_dispositivo`, que agrupa los tokens
+por origen para que emitir uno nuevo revoque solo la sesión anterior de **ese** dispositivo.
+Descarta las filas heredadas (no tienen dispositivo conocido), así que quien tuviera sesión
+abierta al aplicarla vuelve a entrar por OTP.
 
 `db/migrations/002-bootstrap-admin.sql` rompe el bloqueo circular del RBAC: el CRUD de
 usuarios exige `ADMIN` y crear un usuario pasa por ese mismo CRUD, así que sin ningún

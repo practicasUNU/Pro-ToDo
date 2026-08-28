@@ -1,7 +1,7 @@
 import { defineBoot } from '#q-app';
 import axios, { type AxiosInstance } from 'axios';
 
-import { clearSession, readAccessToken } from '@/utils/session-storage';
+import { readAccessToken } from '@/utils/session-storage';
 
 declare module 'vue' {
   interface ComponentCustomProperties {
@@ -24,7 +24,7 @@ const api = axios.create({ baseURL: import.meta.env.VITE_API_BASE_URL });
 // error antes de que LoginPage.vue pudiera mostrarlo.
 const authApi = axios.create({ baseURL: import.meta.env.VITE_API_BASE_URL });
 
-export default defineBoot(({ app, router }) => {
+export default defineBoot(({ app, router, store }) => {
   // Peticion: adjunta el token en cada llamada. Se lee del almacenamiento y no
   // del store de Pinia para evitar el ciclo de imports (ver session-storage.ts).
   api.interceptors.request.use((config) => {
@@ -45,7 +45,17 @@ export default defineBoot(({ app, router }) => {
     (response) => response,
     async (error: unknown) => {
       if (axios.isAxiosError(error) && error.response?.status === 401) {
-        clearSession();
+        // Se purga el STORE, no solo `localStorage`: limpiar unicamente el
+        // almacenamiento dejaba los refs de Pinia con el token muerto, y la
+        // guarda del router (`isAuthenticated`) seguia devolviendo `true`.
+        // Resultado: la redireccion a /login rebotaba de vuelta al inicio y el
+        // usuario quedaba atrapado en un bucle sin poder reautenticarse.
+        //
+        // El import es diferido a proposito: en el nivel de modulo cerraria el
+        // ciclo boot -> store -> service -> boot que documenta session-storage.ts.
+        // `clear()` ya invoca `clearSession()` por dentro.
+        const { useSessionStore } = await import('@stores/session.store');
+        useSessionStore(store).clear();
 
         if (router.currentRoute.value.path !== LOGIN_ROUTE) {
           await router.replace(LOGIN_ROUTE);

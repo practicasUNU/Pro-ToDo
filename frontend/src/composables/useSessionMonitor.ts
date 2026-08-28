@@ -5,6 +5,8 @@ import { useRouter } from 'vue-router';
 import SessionExpiryDialog from '@components/session/SessionExpiryDialog.vue';
 import { useSessionStore } from '@stores/session.store';
 
+import type { DialogChainObject } from 'quasar';
+
 // Monitor proactivo de expiracion del JWT (PROT-06.4).
 //
 // Es un composable y no un componente porque no pinta nada: solo programa
@@ -36,6 +38,17 @@ export const useSessionMonitor = (): void => {
   let checkIntervalId: ReturnType<typeof setInterval> | undefined;
   let isDialogOpen = false;
 
+  /**
+   * Renovacion en vuelo. Congela el sondeo mientras dura: hasta que llegue el par
+   * nuevo, el token viejo sigue en el store y cada vuelta lo veria igual de
+   * moribundo, reabriendo el aviso o cerrando la sesion por debajo de una
+   * renovacion que iba a tener exito.
+   */
+  let isRefreshing = false;
+
+  /** Handle del dialogo abierto, para poder cerrarlo desde fuera del propio dialogo. */
+  let dialogHandle: DialogChainObject | undefined;
+
   const clearScheduledWarning = (): void => {
     if (checkIntervalId) {
       clearInterval(checkIntervalId);
@@ -43,9 +56,21 @@ export const useSessionMonitor = (): void => {
     }
   };
 
+  /** Cierra el aviso si sigue en pantalla y libera su estado. */
+  const closeExpiryDialog = (): void => {
+    dialogHandle?.hide();
+    dialogHandle = undefined;
+    isDialogOpen = false;
+  };
+
   /** Purga la sesion y devuelve al login. Punto unico de salida del monitor. */
   const terminateSession = async (message: string): Promise<void> => {
     clearScheduledWarning();
+
+    // El dialogo es `persistent` y el plugin lo monta fuera del arbol del layout:
+    // sin este cierre explicito quedaria flotando sobre la vista de login.
+    closeExpiryDialog();
+
     await sessionStore.logout();
 
     $q.notify({ type: 'negative', message });
@@ -63,6 +88,10 @@ export const useSessionMonitor = (): void => {
    * intervalo en segundo plano o que el equipo haya estado suspendido.
    */
   const checkExpiry = (): void => {
+    // Con una renovacion en curso no hay nada que decidir: el veredicto lo dara
+    // el par de tokens nuevo, y el `watch` sobre accessToken reprograma el ciclo.
+    if (isRefreshing) return;
+
     const millisecondsUntilExpiry = sessionStore.millisecondsUntilExpiry;
 
     // Sin token legible no hay nada que vigilar; si alguna peticion sale con esas
@@ -84,6 +113,12 @@ export const useSessionMonitor = (): void => {
   /** Arranca el sondeo desde cero y comprueba de inmediato, sin esperar un tick. */
   const scheduleWarning = (): void => {
     clearScheduledWarning();
+
+    // Sin token legible no hay nada que vigilar: se sale sin reinstalar el
+    // intervalo. Cubre el caso de `clear()`, que dispara este mismo `watch` y
+    // dejaba un sondeo de 1 s corriendo en vacio tras cerrar sesion.
+    if (sessionStore.millisecondsUntilExpiry === null) return;
+
     checkExpiry();
 
     checkIntervalId = setInterval(checkExpiry, CHECK_INTERVAL_MS);
@@ -93,21 +128,33 @@ export const useSessionMonitor = (): void => {
     if (isDialogOpen) return;
     isDialogOpen = true;
 
-    $q.dialog({
-      component: SessionExpiryDialog,
-      componentProps: {
-        secondsUntilExpiry: Math.round(millisecondsUntilExpiry / MILLISECONDS_PER_SECOND),
-      },
-    })
+    dialogHandle = $q
+      .dialog({
+        component: SessionExpiryDialog,
+        componentProps: {
+          secondsUntilExpiry: Math.round(millisecondsUntilExpiry / MILLISECONDS_PER_SECOND),
+        },
+      })
       .onOk(() => {
+        dialogHandle = undefined;
         isDialogOpen = false;
 
+        // `isRefreshing` se levanta ANTES de lanzar la peticion: el siguiente tick
+        // del sondeo llega en 1 s y veria el token viejo todavia en el store.
+        isRefreshing = true;
+
         // El watch sobre accessToken reprograma el ciclo al llegar el par nuevo.
-        void sessionStore.refreshTokens().catch(() => {
-          void terminateSession('No se pudo renovar la sesion. Vuelve a iniciar sesion.');
-        });
+        void sessionStore
+          .refreshTokens()
+          .catch(() => {
+            void terminateSession('No se pudo renovar la sesion. Vuelve a iniciar sesion.');
+          })
+          .finally(() => {
+            isRefreshing = false;
+          });
       })
       .onCancel(() => {
+        dialogHandle = undefined;
         isDialogOpen = false;
         void terminateSession('Sesion cerrada.');
       });
@@ -124,6 +171,10 @@ export const useSessionMonitor = (): void => {
   const onVisibilityChange = (): void => {
     if (document.visibilityState !== 'visible') return;
     if (!sessionStore.isAuthenticated) return;
+
+    // Misma razon que en checkExpiry: volver a la pestaña con una renovacion en
+    // vuelo no debe cerrar la sesion mirando el token que esta a punto de morir.
+    if (isRefreshing) return;
 
     const millisecondsUntilExpiry = sessionStore.millisecondsUntilExpiry;
 

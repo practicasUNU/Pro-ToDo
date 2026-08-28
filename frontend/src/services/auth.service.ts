@@ -14,8 +14,16 @@ export const requestOtp = async (email: string): Promise<OtpRequestResponse> => 
 };
 
 /** Canjea el codigo por el par de tokens de sesion. */
-export const verifyOtp = async (email: string, code: string): Promise<AuthTokenResponse> => {
-  const { data } = await authApi.post<AuthTokenResponse>('/auth/otp/validate', { email, code });
+export const verifyOtp = async (
+  email: string,
+  code: string,
+  deviceId: string,
+): Promise<AuthTokenResponse> => {
+  const { data } = await authApi.post<AuthTokenResponse>('/auth/otp/validate', {
+    email,
+    code,
+    deviceId,
+  });
   return data;
 };
 

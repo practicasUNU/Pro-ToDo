@@ -125,7 +125,8 @@ export default defineConfig((ctx) => {
 
       // Quasar plugins. 'Dialog' lo requiere SessionMonitor.vue para lanzar el
       // aviso de expiracion de sesion desde codigo, sin un v-model en plantilla.
-      plugins: ['Notify', 'Dialog'],
+      // 'LocalStorage' lo usa @/utils/device-id.ts para persistir el deviceId.
+      plugins: ['Notify', 'Dialog', 'LocalStorage'],
     },
 
     // animations: 'all', // --- includes all animations

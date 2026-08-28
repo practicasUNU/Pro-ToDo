@@ -4,6 +4,98 @@ Registro técnico del "por qué" de cada decisión de implementación. Los estad
 
 ---
 
+## 2026-08-27 · Revocación de sesiones aislada por dispositivo + sincronización multi-pestaña — rama `feat/auth-otp`
+
+Cierra el pendiente que dejó la entrega anterior (*"el backend no persiste `deviceId`"*) y, con él, la deuda multi-pestaña que arrastraba la entrega del endurecimiento del JWT. Las dos mitades van juntas a propósito: la primera, sola, convertiría una pestaña desincronizada en un cierre de sesión global.
+
+### Lo que cambia de comportamiento
+
+`refresh_tokens` gana `id_dispositivo UUID NOT NULL` (migración 004), y `issue()` pasa a recibir el dispositivo. Emitir un token ahora revoca el token vivo anterior **de ese mismo dispositivo** y deja intactos los de los demás equipos del usuario. Volver a entrar desde el portátil ya no deja dos sesiones vivas en él, y no expulsa al móvil.
+
+### El orden dentro de la transacción es la propiedad de corrección
+
+Son tres pasos con tres motivos distintos, y dos de ellos tiran en direcciones opuestas:
+
+| Paso | Por qué ahí |
+|---|---|
+| 1. Revocar `{userId, deviceId, isRevoked: false}` | **Antes** de insertar. Después, el filtro `isRevoked: false` alcanzaría al token recién creado y lo revocaría al nacer. |
+| 2. Insertar el token nuevo | — |
+| 3. Podar los inservibles | **Después** de insertar. El token nuevo nace vigente, así que no es candidato (razonamiento ya documentado en la entrega de la poda). |
+
+### Desviación deliberada del encargo: el repositorio transaccional
+
+La especificación pedía `this.refreshTokenRepository.update(...)`. Se usa el `repository` que entrega `manager.transaction`, no el inyectado: `this.refreshTokenRepository` opera **fuera** de la transacción de `issue()`, así que si la inserción fallara después, la revocación quedaría confirmada y el usuario perdería su sesión en ese dispositivo sin recibir reemplazo. La invariante que ya declaraba el comentario del método —*"nunca se borra nada sin que su reemplazo exista"*— exige el repositorio transaccional. Hay una prueba que fija el orden vía `mock.invocationCallOrder`.
+
+### `rotate()` devuelve `RotatedSession`, no `User`
+
+Devolvía solo el usuario y **descartaba la fila**, que es donde vive el `deviceId`. Ahora devuelve `{ user, deviceId }`, y `refreshSession` lo pasa a `buildTokenResponse`.
+
+La alternativa era que el cliente reenviara el `deviceId` en `/auth/refresh`. Se descartó: el dispositivo se fija en el login y lo transporta la cadena de tokens, de modo que un token en rotación no puede cambiar de etiqueta de dispositivo a mitad de sesión. `RefreshTokenDto` no se tocó.
+
+### El falso positivo de reutilización se acepta: es comportamiento esperado del servidor
+
+Un login nuevo en el dispositivo D revoca el token vivo anterior de D. Si algún cliente todavía conserva ese token y lo presenta, `rotate()` lo ve revocado, lo interpreta como robo y ejecuta `revokeAllForUser()`: **caen todas las sesiones del usuario**.
+
+Es una decisión, no un descuido. La detección de reutilización **no puede distinguir** un token robado de uno que un cliente desincronizado conservaba: ambos son la misma observación (una credencial revocada que reaparece). Resolver la ambigüedad en el backend exigiría una columna de motivo de revocación —`ROTACION` vs `SUPERSEDIDO`— y ramificar `rotate()`; se descartó explícitamente para no ampliar el esquema, y ante la duda el servidor elige el lado seguro: asumir robo.
+
+**Por tanto la sincronización es responsabilidad del frontend**, y de ahí la segunda mitad de esta entrega.
+
+### Nota de seguridad sobre el `deviceId`
+
+Lo elige el cliente y **no está autenticado**: cualquiera puede enviar el UUID que quiera. Solo se usa acotado a `userId`, así que un usuario únicamente puede afectar a sus propias filas — no hay vector cruzado. Jamás debe usarse como entrada de autorización.
+
+### Frontend: el evento `storage` cierra el agujero
+
+`session.store.ts` escucha `storage`, que **solo se dispara en las otras pestañas**, nunca en la que escribió — así que adoptar el estado no puede realimentarse.
+
+- **Se relee el trío completo, no solo el access token.** Adoptar únicamente el access token dejaría el `refreshToken` viejo en memoria, que es *exactamente* la credencial que dispara la detección de reutilización descrita arriba. Adoptar los tres es lo que cierra el agujero.
+- **`writeSession` escribe tres claves**, así que un login ajeno llega como tres eventos. Reaccionar a cualquiera releyendo el estado completo converge al valor correcto; los intermedios son transitorios.
+- **Sin token en disco se propaga el cierre**: cerrar sesión en una pestaña desloguea las demás.
+- **El temporizador se reinicia solo.** No hace falta tocar el monitor: `useSessionMonitor` ya tiene `watch(() => sessionStore.accessToken, scheduleWarning)`, y `scheduleWarning` limpia el intervalo y vuelve a sondear desde cero. Actualizar el ref **es** reiniciar el temporizador, y así el store sigue sin conocer Quasar ni `$q.dialog` (`frontend-architecture.md` §2.1).
+- **Las claves salen de `session-storage.ts`** mediante un `isSessionStorageKey` nuevo: el store no hardcodea `'proto-do:access-token'`, el módulo hoja sigue siendo el único dueño de los nombres.
+
+### Desviación deliberada: el listener NO se retira en `clear()`
+
+El encargo lo pedía. Sería un bug: `clear()` corre en cada cierre de sesión, y una pestaña sin listener no volvería a enterarse de un login posterior en otra — la desincronización regresaría en cuanto el usuario cierre y vuelva a entrar. El listener vive tanto como el store, que es un singleton de la aplicación.
+
+Se expone `stopCrossTabSync()` para pruebas y desmontaje, y el módulo guarda la referencia al listener activo porque en HMR se reevalúa y cada recarga en caliente apilaría un listener más.
+
+### Verificación
+
+93 pruebas en verde (9 suites): las 87 previas más 6 nuevas —revoca el token del mismo dispositivo, no alcanza a otros dispositivos, revoca antes de insertar, persiste el `deviceId`, `rotate` devuelve el dispositivo, y el arrastre en la renovación—. `npx tsc --noEmit` **en cero errores**: de paso se cerró el TS2741 preexistente de `refresh-token.service.spec.ts:13` (`ACTIVE_USER` sin `otpSecret`), que era el único del proyecto. `eslint` y `nest build` limpios. En frontend, `vue-tsc --noEmit`, `eslint` y `npm run build` limpios; sin pruebas automatizadas porque el frontend aún no tiene arnés.
+
+Pendiente de verificación manual contra el backend real: los puntos 6-12 del plan de esta entrega, en particular que un login desde otro navegador **no** cierre la sesión del primero, y que dos pestañas se mantengan sincronizadas al renovar.
+
+### Checklist de dependencias restantes
+
+- [ ] **Aplicar la migración 004** — es requisito de arranque: hasta entonces cualquier login falla con `column RefreshToken.id_dispositivo does not exist`. Borra las sesiones abiertas.
+- [ ] **La ventana de detección de reutilización es por usuario, no por dispositivo:** `RETAINED_DEAD_TOKENS = 5` cuenta sobre todos los tokens muertos del usuario, así que con varios equipos la ventana efectiva **por dispositivo** se estrecha (~5/N rotaciones). Hacer la poda por `(userId, deviceId)` la restauraría y acotaría el crecimiento a `sesiones_vivas + 5 × dispositivos`.
+- [ ] **Diálogo de expiración obsoleto:** si una pestaña tiene el aviso abierto y adopta un token fresco de otra, el diálogo no se cierra solo (`scheduleWarning` reprograma el sondeo pero no toca `dialogHandle`). Queda con una cuenta regresiva vieja; "Mantener sesión" renueva con el token nuevo, sin daño. El arreglo es un `closeExpiryDialog()` dentro del `watch` de `useSessionMonitor.ts` cuando el token nuevo tenga holgura — fuera del alcance "solo `session.store.ts`" de esta entrega.
+- [ ] **`@Cron` sobre `purgeExpired()`:** sigue pendiente desde la entrega de la poda.
+
+---
+
+## 2026-08-27 · `deviceId` en `verifyOtp` (solo frontend) — rama `feat/auth-otp`
+
+El frontend genera y persiste un identificador de dispositivo (`crypto.randomUUID()`, vía el plugin nativo `LocalStorage` de Quasar) y lo adjunta al `POST /auth/otp/validate`. Alcance acotado a propósito a esta capa.
+
+- **`frontend/src/utils/device-id.ts`** (nuevo): `getOrCreateDeviceId()` lee `proto-do:device-id` de `LocalStorage`, genera un UUID si no existe y lo persiste. Sigue el mismo criterio de `session-storage.ts` — es un helper que hace I/O de almacenamiento, no de red, así que se aparta de la regla "helpers puros, sin I/O" de `frontend-architecture.md` §2.1 por el mismo motivo ya documentado ahí.
+- **`quasar.config.ts`**: se añadió `'LocalStorage'` a `framework.plugins`. No estaba registrado — solo `Notify` y `Dialog` — y sin registrarlo el plugin no funciona (mismo tropiezo que tuvo `Dialog` en la entrega del 26).
+- **`auth.service.ts`**: `verifyOtp` gana un tercer parámetro `deviceId` y lo incluye en el body.
+- **`session.store.ts`**: la acción `verifyOtp` llama a `getOrCreateDeviceId()` internamente; su firma pública `(email, code)` no cambió, así que `LoginPage.vue` no se tocó.
+
+### El backend todavía no hace nada con este campo
+
+`VerifyOtpDto` solo declara `email` y `code`. El `ValidationPipe` global usa `whitelist: true` sin `forbidNonWhitelisted` (`main.ts:29`), así que el `deviceId` que llega en el body se **descarta en silencio**: la petición no falla, pero el dato se pierde antes de llegar a `AuthService.verifyOtp`. No hay columna en `refresh_tokens` ni en ningún otro sitio para persistirlo.
+
+Es una decisión de alcance, no un olvido: esta entrega es deliberadamente frontend-only. Para que el `deviceId` sirva para algo (p. ej. distinguir sesiones por dispositivo, o mostrarlas en un futuro "cerrar sesión en otros dispositivos") hace falta una entrega aparte que extienda `VerifyOtpDto`, añada la columna a `refresh_tokens` (migración) y la hidrate en `RefreshTokenService.issue()`.
+
+### Checklist de dependencias restantes
+
+- [x] **Wiring de backend** — *resuelto el 2026-08-27* (ver la entrada de revocación por dispositivo, arriba): `VerifyOtpDto.deviceId` pasa a ser obligatorio, `refresh_tokens` gana `id_dispositivo` (migración 004) y `issue()` lo persiste. El campo ya no se descarta.
+
+---
+
 ## 2026-08-26 · Cierre del oráculo de enumeración en la solicitud de OTP — rama `feat/auth-otp`
 
 Revierte la tarea 1 de la entrega anterior, que había hecho que una cuenta registrada pero inactiva respondiera `401 Cuenta inactiva` mientras un correo desconocido seguía devolviendo `202`. Esa diferencia bastaba para recorrer una lista de correos corporativos y deducir cuáles estaban dados de alta.
@@ -336,3 +428,135 @@ Había **tres** nombres para la misma idea y ninguno se leía: `ALLOWED_IP_SUBNE
 - [ ] **`ErrorNotFound.vue`**: aún usa `bg-dark`, `text-h4` y `style` inline (`font-size: 30vh`).
 - [ ] **Iconografía outline**: `@quasar/extras` no trae el set `material-icons-outlined` en esta instalación, así que los iconos de navegación siguen siendo del set filled. Habría que añadir el paquete para cumplir la regla de trazo lineal en todos los glifos.
 - [ ] **Tests**: falta el test AAA de `deriveDisplayName` y el de `users.store` con `users.service` mockeado.
+
+---
+
+## 2026-08-27 · Endurecimiento del ciclo de vida del JWT (PROT-06.4) — rama `feat/auth-otp`
+
+Auditoría de la coordinación entre el interceptor de Axios, `session.store.ts` y `useSessionMonitor.ts`. La funcionalidad ya estaba completa (decodificación de `exp`, aviso a 60 s, renovar / cerrar, limpieza de temporizadores); lo que fallaba era el reparto de responsabilidades entre las tres piezas. Cuatro defectos, ninguno visible en la ruta feliz.
+
+**Se descartó mover el temporizador al store.** Un `setTimeout` calculado a `timeRemaining - 60000` se programa, con un JWT de 60 minutos, a 59 minutos vista: no sobrevive a una suspensión del equipo ni a un salto del reloj del sistema, y el usuario recibiría un 401 seco en vez del aviso. El sondeo de 1 s recalcula contra `Date.now()` en cada vuelta y se autocorrige. Además, un `$q.dialog` dentro del store rompe `frontend-architecture.md` §2.1 y obliga a `useQuasar()` fuera de un `setup()`.
+
+### Defecto 1 — El interceptor 401 desincronizaba el store (crítico)
+
+`boot/axios.ts` llamaba a `clearSession()`, el helper de `localStorage`, **no** a `sessionStore.clear()`. Los refs de Pinia quedaban vivos con el token muerto, y como la guarda del router lee `isAuthenticated`, la redirección a `/login` rebotaba a `/` (`router/index.ts:78`): el usuario quedaba atrapado en un dashboard sin tokens, con cada petición dando 401 y **sin poder alcanzar el login**. Peor: `refreshToken.value` seguía en memoria, así que "Mantener sesión" podía resucitar una sesión ya rechazada por el backend.
+
+El arreglo purga el store. El import de `@stores/session.store` es **diferido dentro del manejador**, no en el nivel de módulo: ahí cerraría el ciclo `boot → store → service → boot` que documenta `session-storage.ts`. La instancia de Pinia sale del parámetro `store` que `defineBoot` ya recibía sin usarse. `clear()` invoca `clearSession()` por dentro, así que el helper dejó de importarse en `axios.ts`.
+
+### Defecto 2 — Carrera entre `refreshTokens()` y el sondeo
+
+`.onOk()` bajaba `isDialogOpen` **antes** de que la renovación resolviera, y el sondeo seguía corriendo sobre el token viejo. Al tick siguiente el aviso se reabría encima de la renovación en curso; y si la petición tardaba más que el tiempo restante, `millisecondsUntilExpiry <= 0` disparaba `logout()` **con el refresh en vuelo** — la renovación resolvía después y `applyTokens()` reescribía `localStorage`, dejando una sesión zombi con el usuario ya en `/login`.
+
+Se añadió el flag `isRefreshing`, levantado *antes* de lanzar la petición (el siguiente tick llega en 1 s) y bajado en el `finally`. Lo respetan como guarda temprana tanto `checkExpiry()` como `onVisibilityChange()`: volver a la pestaña durante una renovación tampoco debe cerrar la sesión mirando el token que está a punto de morir.
+
+### Defecto 3 — Diálogo huérfano al expirar
+
+`terminateSession()` no cerraba un diálogo abierto. Al ser `persistent` y montarse fuera del árbol de `MainLayout`, quedaba flotando sobre la vista de login. Se conserva el `DialogChainObject` que devuelve `$q.dialog()` y se llama a `.hide()` desde `closeExpiryDialog()`. La cuenta regresiva interna de `SessionExpiryDialog.vue` se mantiene como respaldo visual, pero la autoridad sobre la terminación pasa a ser sólo el monitor.
+
+### Defecto 4 — Sondeo residual tras `clear()`
+
+`clear()` pone `accessToken = null`, lo que dispara el `watch` → `scheduleWarning()`, que reinstalaba un `setInterval` de 1 s aunque `checkExpiry` saliera de inmediato por `millisecondsUntilExpiry === null`. Ahora `scheduleWarning()` sale sin reinstalar el intervalo cuando no hay token legible.
+
+### Deuda técnica conocida: multi-pestaña — **RESUELTA el 2026-08-27**
+
+> **Resuelto.** El listener de `storage` en `session.store.ts` propaga el par nuevo entre pestañas (ver la entrada de revocación por dispositivo, al principio del archivo). Lo que sigue se conserva como registro del problema.
+
+Cada pestaña corre su propio monitor **sin sincronización**. Si la pestaña A renueva, el backend rota el refresh token; la pestaña B conserva el viejo en memoria y al pulsar "Mantener sesión" lo presenta de nuevo — lo que según `auth.service.ts` **derribaría todas las sesiones del usuario** por detección de reuso. No se abordó aquí: el arreglo (listener de `storage` para propagar el par nuevo, o un lock de renovación en `localStorage`) es un cambio de mayor calado.
+
+### Verificación
+
+`npx vue-tsc --noEmit` sin errores, `eslint` sobre los dos archivos tocados con salida limpia y `npm run build` correcto (SPA, Quasar v2.25.1). `session.store.ts`, `jwt.ts` y `SessionExpiryDialog.vue` no se tocaron: su lógica ya era correcta.
+
+### Checklist de dependencias restantes
+
+- [x] **Multi-pestaña** — *resuelto el 2026-08-27* con el listener de `storage` en `session.store.ts`.
+- [ ] **Tests**: faltan las pruebas AAA de `decodeJwtClaims` (base64url con relleno, token corrupto, `exp` ausente) y del monitor con temporizadores falsos de Jest — en particular la carrera del Defecto 2.
+- [ ] **`trust proxy`**: sigue pendiente de la definición del proxy inverso de despliegue.
+
+---
+
+## 2026-08-27 · Poda transaccional de refresh tokens (PROT-06.4) — rama `feat/auth-otp`
+
+Cierra la mitad del punto pendiente *"la tabla solo crece"*: cada emisión de token limpia ahora las filas muertas de ese usuario. La poda vive en `RefreshTokenService.issue()`, **no** en `AuthService` — este último no inyecta repositorio, y `RefreshTokenService` es el único punto del backend que conoce la tabla (`code-conventions.md` §2).
+
+### Por qué no se poda "por los 2 más recientes"
+
+La regla intuitiva —conservar los N tokens más recientes por `createdAt`— **borra tokens activos de otros dispositivos**. Con dos sesiones abiertas:
+
+| Paso | Filas del usuario (`createdAt` desc) | Poda "top 2" |
+|---|---|---|
+| Portátil inicia sesión | `A(activo)` | — |
+| Móvil inicia sesión | `B(activo)`, `A(activo)` | conserva B, A |
+| Móvil refresca: `rotate(B)` revoca B, `issue()` inserta D | `D(activo)`, `B(revocado)`, `A(activo)` | conserva D, B → **borra A** |
+
+El refresco rutinario de un equipo expulsa al otro, porque el token revocado `B` ocupa una de las dos plazas. De facto limita a un solo dispositivo, y la expulsión es silenciosa: la víctima recibe un 401 genérico. Con tres dispositivos, el tercer login mata al primero directamente.
+
+### Regla adoptada
+
+> Borrar los tokens **ya inservibles** (revocados **o** caducados) del usuario, **excepto los `RETAINED_DEAD_TOKENS = 5` más recientes**. Un token vigente no se toca jamás, sea cual sea su antigüedad.
+
+Los 5 supervivientes no son decorativos: son la ventana de detección de reutilización de `rotate()`. Un token robado que reaparece dentro de esas últimas rotaciones todavía encuentra su fila y dispara `revokeAllForUser()`; sin ella daría un 401 plano, la familia no caería y la brecha pasaría desapercibida. Es el control que la FSM de `PLAN.md:202` dibuja como `rotate() de nuevo ⇒ REUTILIZACIÓN`.
+
+El crecimiento queda acotado a `sesiones_vivas + 5` filas por usuario.
+
+### Detalles de implementación
+
+- **Transacción sin `DataSource`.** Se usa `this.refreshTokenRepository.manager.transaction()`, que llega gratis con el repositorio ya inyectado. Evita un provider nuevo y deja `auth.module.ts` intacto. Si la poda falla, el token nuevo tampoco se persiste.
+- **El orden insertar → podar es la propiedad de seguridad.** El token recién creado nace `isRevoked: false` con `expiresAt` futuro, así que nunca entra en el filtro de candidatos. No hace falta excluirlo explícitamente.
+- **Dos pasos (`find` + `delete`) en vez de un `DELETE ... NOT IN (subquery)`.** Dentro de la transacción es igual de seguro, se expresa con nombres de propiedad de la entidad en lugar de columnas crudas (`id_usuario`, `revocado`, `expiracion`) y es trivial de mockear. El `where` en forma de array es el OR revocado/caducado.
+- **Sin migración.** El índice `idx_refresh_tokens_id_usuario` ya cubre el filtro; ordenar unas pocas filas por usuario es trivial. Relevante porque `app.module.ts:35` fija `synchronize: false`.
+- **El doble de repositorio del spec se devuelve a sí mismo** como repositorio transaccional (`manager.transaction` ejecuta el callback en el acto con un `getRepository` que retorna el mock). Sin ese puente, las tres pruebas previas de `issue` rompían al no encontrar `manager`.
+
+### Verificación
+
+85 pruebas en verde (9 suites), 5 nuevas sobre la poda: transacción única, criterio con `skip`/`order`/`where` de dos ramas, retorno temprano sin candidatos, borrado por ids exactos y regresión de la sesión vigente ajena. `eslint` limpio y `nest build` correcto. Nota: `refresh-token.service.spec.ts:13` arrastra un error de `tsc` preexistente (`otpSecret` ausente en el literal `ACTIVE_USER`), anterior a este cambio y no introducido aquí.
+
+### Checklist de dependencias restantes
+
+- [ ] **`@Cron` sobre `purgeExpired()`:** la poda de `issue()` solo actúa cuando el usuario emite un token; una cuenta que deja de entrar conserva sus 5 filas muertas indefinidamente. El barrido periódico con `@nestjs/schedule` (ya instalado) sigue pendiente.
+- [ ] **`rotate()` e `issue()` no comparten transacción:** la revocación se confirma antes de que `AuthService.buildTokenResponse` llame a `issue()`. Si la emisión fallara, el usuario queda sin token y debe reentrar por OTP. Comportamiento **preexistente**; unificarlo exige propagar un `EntityManager` a través de `buildTokenResponse`.
+- [ ] **`ACTIVE_USER` sin `otpSecret`** en `refresh-token.service.spec.ts`: error de `tsc` pendiente desde la incorporación de TOTP.
+
+---
+
+## 2026-08-27 · Bloqueo de auto-modificación/eliminación en el CRUD de usuarios (MOD-01) — rama `feat/auth-otp`
+
+Un ADMIN autenticado podía ejecutar `PATCH /users/:id` o `DELETE /users/:id` sobre su propio `id`: desactivarse o degradar su propio rol lo dejaría fuera del único módulo que gestiona cuentas, sin otro ADMIN activo que lo revirtiera.
+
+- **Nuevo `@common/decorators/current-user.decorator.ts`.** No existía forma de extraer `req.user` fuera de un guard; los guards acceden directo a `context.switchToHttp().getRequest<RequestWithUser>()` (`roles.guard.ts:29`). El decorador reutiliza ese mismo contrato — mismo patrón que `public-ip.decorator.ts` para un concepto transversal — y no repite la comprobación de "sin usuario": para cuando se evalúa, `RolesGuard` ya lanzó `ForbiddenException` si `req.user` faltaba.
+- `UsersController.update()` y `.remove()` reciben `@CurrentUser() currentUser: AuthenticatedUser` y abren con `assertNotOperatingOnSelf()`, extraído como método privado en vez de duplicar el `if` en los dos endpoints.
+- `@ApiForbiddenResponse` de clase actualizado para reflejar la causa nueva del 403.
+
+### Verificación
+
+87 pruebas en verde (85 previas + 2 nuevas: PATCH y DELETE contra el propio `ADMIN_USER.id` → 403, servicio no invocado), reutilizando el arnés existente de `users.controller.spec.ts` (app real con `RolesGuard` auténtico). `eslint` limpio, `nest build` correcto. El error de `tsc` en `refresh-token.service.spec.ts:13` sigue siendo el mismo preexistente, ajeno a este cambio.
+
+---
+
+## 2026-08-27 · El CRUD de usuarios muestra el motivo real del error (no un texto genérico) — rama `feat/auth-otp`
+
+Tras MOD-01, un ADMIN que intenta modificar o eliminar su propia cuenta recibía un toast
+genérico ("No se pudo guardar el usuario") en vez del mensaje real del backend
+("Operación denegada: No puedes modificar ni eliminar tu propio usuario."). La causa no era
+específica de MOD-01: los cuatro `catch` del CRUD de usuarios (`UserDialog.vue` `onSubmit`,
+`UsersManager.vue` `confirmDeactivation`/`activateUser`/`loadUsers`) usaban `catch {}` **sin
+parámetro**, así que era estructuralmente imposible que leyeran el error real.
+
+- Nuevo helper puro `frontend/src/utils/api-error.ts`: `extractApiErrorMessage(error, fallback)`
+  lee `error.response.data.message` con el mismo patrón de detección que
+  `boot/axios.ts:47` (`axios.isAxiosError`). Normaliza tanto el `string` de un
+  `ForbiddenException(...)` como el `string[]` de un error de validación de `class-validator`.
+  `fallback` conserva exactamente el texto que cada sitio mostraba antes, para errores de red o
+  respuestas sin este formato.
+- Los cuatro `catch` pasaron a recibir el error y usar el helper con su fallback original. No se
+  tocó `users.store.ts` ni `users.service.ts`: las excepciones ya se propagaban sin capturar
+  (`frontend-architecture.md` §2.1), que es justo lo que este cambio necesitaba.
+- `SafeDeleteModal.vue` no se tocó: es un componente genérico de confirmación ajeno al resultado
+  de la operación; el `$q.notify` con el mensaje correcto sigue apareciendo después de cerrarse.
+
+### Verificación
+
+`eslint --fix` limpio, `vue-tsc --noEmit` sin errores, `npm run build` correcto. Sin pruebas
+automatizadas: el frontend no tiene arnés de tests todavía (deuda ya anotada en este archivo).
+Verificación manual pendiente para quien pruebe contra el backend real: editar/desactivar la
+propia cuenta ADMIN debe mostrar el mensaje de MOD-01 textual, no el genérico.

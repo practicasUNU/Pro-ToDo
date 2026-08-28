@@ -7,6 +7,7 @@ import { useUsersStore } from '@stores/users.store';
 import UserDialog from './UserDialog.vue';
 import SafeDeleteModal from './SafeDeleteModal.vue';
 
+import { extractApiErrorMessage } from '@/utils/api-error';
 import { deriveDisplayName, roleDisplayLabel, roleIconName } from '@/utils/user-display';
 
 import type { User, UserRole } from '@/types/user';
@@ -39,8 +40,11 @@ const columns: QTableColumn<User>[] = [
 const loadUsers = async (): Promise<void> => {
   try {
     await usersStore.fetchUsers();
-  } catch {
-    $q.notify({ type: 'negative', message: 'No se pudo cargar la lista de usuarios' });
+  } catch (error) {
+    $q.notify({
+      type: 'negative',
+      message: extractApiErrorMessage(error, 'No se pudo cargar la lista de usuarios'),
+    });
   }
 };
 
@@ -69,8 +73,11 @@ const confirmDeactivation = async (): Promise<void> => {
   try {
     await usersStore.deactivateUser(userToDeactivate.value.id);
     $q.notify({ type: 'positive', message: 'Usuario desactivado correctamente' });
-  } catch {
-    $q.notify({ type: 'negative', message: 'No se pudo desactivar al usuario' });
+  } catch (error) {
+    $q.notify({
+      type: 'negative',
+      message: extractApiErrorMessage(error, 'No se pudo desactivar al usuario'),
+    });
   } finally {
     userToDeactivate.value = null;
   }
@@ -80,8 +87,11 @@ const activateUser = async (user: User): Promise<void> => {
   try {
     await usersStore.updateUser(user.id, { isActive: true });
     $q.notify({ type: 'positive', message: 'Usuario activado correctamente' });
-  } catch {
-    $q.notify({ type: 'negative', message: 'No se pudo activar al usuario' });
+  } catch (error) {
+    $q.notify({
+      type: 'negative',
+      message: extractApiErrorMessage(error, 'No se pudo activar al usuario'),
+    });
   }
 };
 
@@ -94,7 +104,7 @@ onMounted(loadUsers);
       <div>
         <h1 class="pd-h1">Gestion de Usuarios</h1>
         <p class="pd-subtitle">
-          Alta, edicion y baja logica de cuentas con acceso a Proto-Do (CU-02).
+          Alta, edicion y baja logica de cuentas con acceso a Proto-Do.
         </p>
       </div>
 

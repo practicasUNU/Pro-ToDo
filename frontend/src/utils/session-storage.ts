@@ -87,3 +87,15 @@ export const clearSession = (): void => {
   removeItem(REFRESH_TOKEN_KEY);
   removeItem(USER_KEY);
 };
+
+/**
+ * Cierto si la clave pertenece al namespace de sesion.
+ *
+ * La consume el listener de `storage` del store para ignorar escrituras ajenas
+ * (el tema, por ejemplo). Se expone desde aqui, y no como tres constantes, para
+ * que este modulo siga siendo el unico dueño de los nombres de clave.
+ */
+export const isSessionStorageKey = (key: string | null): boolean =>
+  key === ACCESS_TOKEN_KEY ||
+  key === REFRESH_TOKEN_KEY ||
+  key === USER_KEY;
