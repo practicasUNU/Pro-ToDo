@@ -13,7 +13,7 @@ CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
 
 CREATE TYPE enum_categoria AS ENUM ('TRIGGER', 'PROCESAMIENTO', 'CONTROL', 'DESTINO');
 
-CREATE TYPE enum_estado AS ENUM ('EN_PROCESO', 'EXITOSO', 'FALLIDO', 'PAUSADO');
+CREATE TYPE enum_estado AS ENUM ('INACTIVO', 'EN_PROCESO', 'EXITOSO', 'FALLIDO', 'PAUSADO');
 
 CREATE TYPE enum_estado_nodo AS ENUM ('OK', 'ERROR', 'ADVERTENCIA');
 
@@ -96,11 +96,13 @@ CREATE TABLE nodos (
 CREATE TABLE ejecuciones_flujo (
     id_ejecucion UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     id_flujo UUID NOT NULL REFERENCES flujos(id_flujo) ON DELETE CASCADE,
-    estado enum_estado NOT NULL DEFAULT 'EN_PROCESO',
+    estado enum_estado NOT NULL DEFAULT 'INACTIVO',
     paso_actual VARCHAR(50),
-    contexto_acumulado JSONB,
+    contexto_acumulado JSONB NOT NULL DEFAULT '{}'::jsonb,
+    retry_state JSONB NOT NULL DEFAULT '{}'::jsonb,
     ruta_archivo_log VARCHAR(255),
     fecha_inicio TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    fecha_actualizacion TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     fecha_fin TIMESTAMP
 );
 
@@ -164,6 +166,13 @@ CREATE INDEX idx_flujos_id_usuario_creador ON flujos(id_usuario_creador);
 CREATE INDEX idx_nodos_id_flujo ON nodos(id_flujo);
 CREATE INDEX idx_nodos_id_tipo_nodo ON nodos(id_tipo_nodo);
 CREATE INDEX idx_ejecuciones_flujo_id_flujo ON ejecuciones_flujo(id_flujo);
+
+-- Mutex de ejecucion (PROT-08): indice unico PARCIAL. Solo aplica mientras la
+-- ejecucion esta EN_PROCESO, asi que un flujo no puede tener dos vivas a la vez
+-- pero si todo el historico que haga falta en estados terminales.
+CREATE UNIQUE INDEX idx_flujo_activo
+    ON ejecuciones_flujo (id_flujo)
+ WHERE estado = 'EN_PROCESO';
 CREATE INDEX idx_logs_nodo_id_ejecucion ON logs_nodo(id_ejecucion);
 CREATE INDEX idx_logs_nodo_id_nodo ON logs_nodo(id_nodo);
 CREATE INDEX idx_alertas_error_id_ejecucion ON alertas_error(id_ejecucion);

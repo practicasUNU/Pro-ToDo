@@ -11,6 +11,7 @@ import {
   OTP_THROTTLER_NAME,
 } from '@common/constants/throttler.constants';
 import { IpWhitelistGuard } from '@common/guards/ip-whitelist.guard';
+import { FsmModule } from '@core/fsm/fsm.module';
 import { AuthModule } from '@modules/auth/auth.module';
 import { HealthModule } from '@modules/health/health.module';
 import { UsersModule } from '@modules/users/users.module';
@@ -56,6 +57,7 @@ import { AppService } from './app.service';
       }),
     }),
     CommonModule,
+    FsmModule,
     AuthModule,
     HealthModule,
     UsersModule,

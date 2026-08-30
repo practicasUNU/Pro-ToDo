@@ -274,9 +274,9 @@ nueva bajo ese layout nace protegida.
 
 ---
 
-## 3. Motor FSM: contratos del `pipeline_schema` (PROT-07)
+## 3. Motor FSM: contratos, contexto y persistencia (PROT-07 / PROT-08)
 
-Rama: `feat/fsm-contracts`.
+Ramas: `feat/fsm-contracts` (PROT-07) y `feat/fsm-payload-context` (PROT-08).
 
 Primera pieza del motor: el contrato del grafo que el `FsmEngineService` recorrerá. Describe qué
 nodo viene después de cuál, dónde escribe cada uno su resultado y cómo se reintenta ante un fallo.
@@ -383,3 +383,106 @@ puntos nunca podría resolverse desde una plantilla `{{nodo.campo}}`.
 `tipos_nodo.codigo` replica los 7 valores de `NodeType` (migración `005-tipos-nodo-fsm.sql`).
 `TRIGGER_CRON` y `DESTINO_ACENS` permanecen en el catálogo pero **no** son declarables en un
 `pipeline_schema` hasta que existan sus estrategias y se amplíe el enum.
+
+---
+
+### 3.6 Contexto de ejecución (PROT-08)
+
+```typescript
+// @core/fsm/types/fsm.enums.ts
+export enum ExecutionState {
+  INACTIVO, EN_PROCESO, PAUSADO, EXITOSO, FALLIDO,   // = tipo `enum_estado` de PostgreSQL
+}
+
+// @core/fsm/context/state-payload.context.ts — clase PURA, no @Injectable()
+export class MissingContextVariableException extends Error {
+  readonly variable: string;                        // ej. "ia_result.titulo"
+}
+
+export class StatePayloadContext {
+  constructor(executionId: string, workflowId: string, initialStep: string);
+
+  setNamespace(namespace: string, data: Record<string, unknown>): void;
+  getNamespace(namespace: string): Record<string, unknown> | undefined;
+  getAllContext(): Record<string, Record<string, unknown>>;
+  getCursor(): string;
+  setCursor(nextStep: string): void;
+  getInterpolatedValue(template: string): string;   // lanza si la variable falta
+  getExecutionId(): string;
+  getWorkflowId(): string;
+}
+
+// @core/fsm/entities/fsm-execution.entity.ts — mapea `ejecuciones_flujo`
+@Entity('ejecuciones_flujo')
+@Index('idx_flujo_activo', ['flowId'], { unique: true, where: "estado = 'EN_PROCESO'" })
+export class FsmExecution {
+  executionId: string;    // id_ejecucion        flowId: string;        // id_flujo
+  currentState: ExecutionState;  // estado       activeCursor: string | null;  // paso_actual
+  contextPayload: Record<string, Record<string, unknown>>;  // contexto_acumulado (jsonb)
+  retryState: Record<string, unknown>;                      // retry_state (jsonb)
+  createdAt: Date;        // fecha_inicio        updatedAt: Date;       // fecha_actualizacion
+}
+```
+
+**No es `@Injectable()`.** `StatePayloadContext` se instancia una vez por ejecución y viaja como
+argumento a `INodeStrategy.execute()`. Un provider de Nest sería un singleton compartido entre
+ejecuciones concurrentes, justo lo contrario de lo que necesita ser.
+
+**`structuredClone` en ambas direcciones, no *spread*.** El *spread* copia superficialmente: un
+`context.getNamespace('ia').meta.titulo = 'otro'` alcanzaría el objeto interno y corrompería un
+checkpoint ya dado por bueno. Se clona en profundidad la entrada de `setNamespace`, su salida y la
+de `getAllContext`.
+
+**La interpolación falla en vez de callar.** A diferencia de la implementación de referencia de
+`architecture-patterns.md` §3 —que devuelve `''`—, una variable ausente o nula lanza
+`MissingContextVariableException`. Interpolar en silencio publicaría un artículo con el título
+vacío; el fallo aparecería aguas abajo, ya en Drupal, lejos de su causa. Por el mismo motivo, un
+valor no escalar se serializa con `JSON.stringify` y nunca como `[object Object]`.
+
+### 3.7 Máquina de estados de la ejecución
+
+```
+                    ┌──────────────────────────────────────────┐
+                    │            arranque del backend          │
+                    │        (FsmModule.onModuleInit)          │
+                    ▼                                          │
+  INACTIVO ──► EN_PROCESO ──┬──► EXITOSO                       │
+   (fila         (mutex)    │                                  │
+   recien          │        └──► PAUSADO ──► EN_PROCESO  (CU-09, reintento)
+   creada)         │                 ▲          │
+                   └── fallo ────────┘          └──► FALLIDO  (reintentos agotados)
+```
+
+`idx_flujo_activo` es un índice único **parcial**: solo aplica mientras `estado = 'EN_PROCESO'`, de
+modo que un flujo no puede tener dos ejecuciones vivas a la vez pero sí todo el histórico que haga
+falta en estados terminales. La garantía la da PostgreSQL, no un bloqueo en memoria que se perdería
+al escalar a varios procesos.
+
+La transición de arranque `EN_PROCESO → PAUSADO` no es cosmética: tras un reinicio, una fila
+`EN_PROCESO` afirma algo falso —que hay un bucle atendiéndola— y **seguiría reservando el mutex**,
+dejando ese flujo bloqueado para siempre. `FsmModule.onModuleInit` las reconcilia y las deja donde
+el protocolo de resiliencia (`architecture-patterns.md` §4) espera encontrarlas.
+
+### 3.8 Diagrama de inyección de dependencias (PROT-08)
+
+```
+AppModule
+   └── FsmModule  ──implements OnModuleInit──► reconcilia EN_PROCESO → PAUSADO al arrancar
+         ├── TypeOrmModule.forFeature([FsmExecution])
+         │        └── Repository<FsmExecution>  ──inyectado en la propia clase del modulo
+         ├── FsmController          POST /api/fsm/validate-schema   (@PublicIp() TEMPORAL)
+         │        └── PipelineValidatorService
+         └── exports: PipelineValidatorService   (para el futuro CRUD de flujos)
+
+StatePayloadContext  ──  FUERA del contenedor: `new` por ejecucion, no provider
+```
+
+### 3.9 Esquema (PROT-08)
+
+`ejecuciones_flujo` se amplía en `db/migrations/006-fsm-execution-mutex.sql`: `INACTIVO` se añade a
+`enum_estado`, aparecen `retry_state` y `fecha_actualizacion`, `contexto_acumulado` pasa a
+`NOT NULL DEFAULT '{}'`, el default del estado pasa a `INACTIVO` y se crea `idx_flujo_activo`.
+
+**Requisito de arranque:** hasta aplicar la 006 el backend no levanta — `onModuleInit` lanza un
+`UPDATE` y `@UpdateDateColumn` añade `fecha_actualizacion` al `SET`.
+

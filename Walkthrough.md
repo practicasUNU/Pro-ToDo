@@ -653,3 +653,119 @@ contraseña interactiva. Queda pendiente de ejecutar contra el contenedor.
       estrategias; hasta entonces esas dos filas del catálogo son inalcanzables desde un pipeline.
 - [ ] **`test/jest-e2e.json` sin `moduleNameMapper`**: los alias no resuelven en e2e, así que la
       suite e2e sigue rota (deuda previa, ajena a PROT-07).
+
+---
+
+## 2026-08-29 · Contexto inmutable, mutex de ejecución y limpieza en arranque (PROT-08) — rama `feat/fsm-payload-context`
+
+PROT-07 dejó el contrato del grafo, pero el motor seguía sin poder ejecutar nada: faltaba la
+estructura que transporta los resultados entre nodos y la fila donde se persiste el checkpoint.
+Además `PipelineValidatorService` había quedado `@Injectable()` sin módulo que lo declarara — código
+inalcanzable desde el contenedor de Nest.
+
+### `structuredClone` en ambas direcciones, no *spread*
+
+El enunciado pedía inmutabilidad estricta y la implementación de referencia de
+`architecture-patterns.md` §3 la resuelve con *spread*. No basta: el *spread* copia superficialmente,
+así que `context.getNamespace('ia').meta.titulo = 'otro'` alcanza el objeto interno a través del
+segundo nivel y corrompe un checkpoint que quizá ya se había dado por bueno. `StatePayloadContext`
+clona en profundidad la entrada de `setNamespace`, su salida, y la de `getAllContext`. Hay tres
+pruebas que fuerzan exactamente esa fuga —mutando la salida en dos niveles, y mutando el objeto de
+entrada *después* de haberlo escrito— para que la garantía no dependa de que nadie toque el código.
+
+`setNamespace` además **fusiona** con el namespace existente en vez de reemplazarlo, de modo que un
+nodo pueda escribir en dos tandas sin perder lo anterior.
+
+### El mutex necesita la reconciliación, o se autobloquea
+
+`idx_flujo_activo` es un índice único **parcial**: `UNIQUE (id_flujo) WHERE estado = 'EN_PROCESO'`.
+La garantía la da PostgreSQL, no un bloqueo en memoria que se perdería al escalar a varios procesos,
+y al ser parcial deja fuera los estados terminales: un flujo puede acumular todo el histórico de
+ejecuciones que haga falta, pero solo una viva.
+
+Ese diseño tiene un fallo latente que obliga a la segunda mitad del cambio. Una fila `EN_PROCESO`
+afirma "hay un bucle atendiendo este flujo ahora mismo". Tras un reinicio esa afirmación es falsa:
+no queda ningún bucle, pero la fila **sigue reservando el mutex** y el flujo no podría volver a
+arrancar nunca. De ahí el `onModuleInit` de `FsmModule`, que las pasa a `PAUSADO` al levantar: libera
+el índice y las deja donde el protocolo de resiliencia (`architecture-patterns.md` §4) espera
+encontrarlas para el reintento de CU-09.
+
+El error de esa reconciliación **no se captura** a propósito: arrancar el motor sobre un estado que
+no se ha podido reconciliar es peor que no arrancar. Se registra con `Logger.warn` cuántas filas se
+reconciliaron, y silencio cuando son cero.
+
+La clase del módulo inyecta el repositorio directamente por constructor —Nest lo permite igual que en
+cualquier provider— en vez de crear un servicio intermedio que hoy no tendría más responsabilidad.
+
+### La interpolación falla en vez de callar
+
+`getInterpolatedValue` lanza `MissingContextVariableException` ante una variable ausente o nula, en
+lugar de resolverla como `''` como hace la implementación de referencia. Interpolar en silencio
+publicaría en Drupal un artículo con el título vacío, y el fallo aparecería aguas abajo, lejos de su
+causa. La excepción lleva el nombre de la variable culpable (`ia_result.titulo`) para que el mensaje
+sea accionable.
+
+Por el mismo motivo, un valor no escalar **no** se convierte con `String()`. El linter lo detectó
+(`@typescript-eslint/no-base-to-string`) y tenía razón: un objeto mapeado por error habría acabado
+como el literal `[object Object]` dentro del artículo publicado. Ahora las cadenas se insertan tal
+cual y todo lo demás pasa por `JSON.stringify`, que además resuelve números y booleanos sin añadir
+comillas (`42` → `42`).
+
+### Detalles de implementación
+
+- **`FsmExecution` mapea `ejecuciones_flujo`**, la tabla que ya existía, en vez de crear una
+  `fsm_executions` paralela. `logs_nodo` y `alertas_error` tienen FK apuntándole; duplicarla habría
+  dejado dos fuentes de verdad para el mismo concepto. Propiedades en inglés, columnas en español
+  vía `@Column({ name })`, igual que `User` y `RefreshToken`. Es la primera entidad del proyecto con
+  columnas `jsonb`.
+- `ruta_archivo_log` y `fecha_fin` quedan sin mapear, como `User` no mapea `fecha_creacion`; entran
+  con el protocolo de resiliencia.
+- **El decorador `@Index` no crea nada** con `synchronize: false`. Es declarativo; el índice real lo
+  crea la migración. Va dicho en un comentario de la entidad para que nadie lo dé por aplicado.
+- `StatePayloadContext` **no** es `@Injectable()`: se instancia una por ejecución. Un provider sería
+  un singleton compartido entre ejecuciones concurrentes, justo lo contrario de lo que necesita ser.
+- `db/migrations/006-fsm-execution-mutex.sql` añade `INACTIVO` al tipo `enum_estado` con
+  `BEFORE 'EN_PROCESO'` (orden natural del ciclo de vida), crea `retry_state` y
+  `fecha_actualizacion`, normaliza `contexto_acumulado` a `NOT NULL DEFAULT '{}'` y crea el mutex.
+  La cabecera avisa de dos cosas: es **requisito de arranque** (sin ella el `onModuleInit` falla por
+  la columna `fecha_actualizacion` que añade `@UpdateDateColumn` al `SET`), y **no debe envolverse en
+  `BEGIN`/`COMMIT`** porque PostgreSQL prohíbe usar un valor de enum en la misma transacción en que
+  se añade.
+- El endpoint `POST /api/fsm/validate-schema` lleva `@PublicIp()` y **queda sin ninguna protección**:
+  es el único guard global, `JwtAuthGuard` no lo es, y `RedLocalMiddleware` solo cubre las rutas de
+  Swagger. Es temporal y para Postman; va marcado con `TODO(PROT-08)` en el propio controlador.
+  Mitigación mientras tanto: no lee ni escribe en base de datos, solo valida un JSON en memoria.
+- Comprobado que el `ValidationPipe` global no interfiere con `@Body() rawJson: unknown`: `unknown`
+  emite `Object` como metatipo y `ValidationPipe.toValidate()` descarta ese tipo
+  (`validation.pipe.js:119`), así que el cuerpo llega intacto — imprescindible, porque el servicio
+  necesita ver las propiedades no declaradas para rechazarlas.
+
+### Verificación
+
+17 pruebas nuevas en verde (126 en total en el backend), cubriendo los 3 casos obligatorios —copias
+profundas, aislamiento entre namespaces, interpolación múltiple y excepción ante nulos— más fusión
+sin pérdida, clonado del objeto de entrada, `getAllContext`, namespace ausente, cursor e
+identificadores, espacios dentro de las llaves, plantilla sin variables, namespace inexistente,
+`null` explícito, el nombre de la variable en la excepción, y la serialización de números, booleanos
+y objetos. `npx tsc --noEmit` sin errores, `npm run lint` limpio (queda el warning preexistente de
+`main.ts:59`, ajeno a este cambio), `nest build` correcto.
+
+**Sin verificación contra la base de datos**: las migraciones las aplica el usuario. Ni el mutex ni
+la reconciliación de arranque se han ejercitado todavía contra PostgreSQL.
+
+### Checklist de dependencias restantes
+
+- [ ] **Aplicar `db/migrations/005-tipos-nodo-fsm.sql` y `006-fsm-execution-mutex.sql`**. La 006 es
+      requisito de arranque: sin ella el backend no levanta.
+- [ ] **Verificar el mutex** con dos `INSERT` `EN_PROCESO` del mismo `id_flujo` (debe violar
+      `idx_flujo_activo`) y la reconciliación reiniciando el backend con una fila viva.
+- [ ] **Proteger o retirar `POST /api/fsm/validate-schema`** antes de cualquier despliegue: quitar
+      `@PublicIp()` y añadir `@UseGuards(JwtAuthGuard, RolesGuard)`.
+- [ ] **Entidad `Flujo`** que mapee `flujos.configuracion_pipeline` a `PipelineSchema` e invoque el
+      validador antes de persistir.
+- [ ] **`FsmEngineService`, `INodeStrategy`, `NodeStrategyFactory`**: el bucle de ejecución que
+      consumirá `StatePayloadContext` y escribirá los checkpoints sigue sin implementar.
+- [ ] **Servicio de dominio sobre `FsmExecution`**: la entidad se declara y se reconcilia, pero
+      ninguna lógica de negocio la consulta todavía.
+- [ ] **Ampliar `NodeType`** con `TRIGGER_CRON` y un destino Acens cuando se escriban sus estrategias.
+- [ ] **`test/jest-e2e.json` sin `moduleNameMapper`**: los alias no resuelven en e2e (deuda previa).
