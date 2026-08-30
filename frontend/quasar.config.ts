@@ -3,7 +3,7 @@
 
 import { defineConfig } from '#q-app';
 
-export default defineConfig((/* ctx */) => {
+export default defineConfig((ctx) => {
   return {
     // https://v2.quasar.dev/quasar-cli-vite/prefetch-feature
     // preFetch: true,
@@ -11,7 +11,7 @@ export default defineConfig((/* ctx */) => {
     // app boot file (/src/boot)
     // --> boot files are part of "main.js"
     // https://v2.quasar.dev/quasar-cli-vite/boot-files
-    boot: [],
+    boot: ['axios'],
 
     // https://v2.quasar.dev/quasar-cli-vite/quasar-config-file#css
     css: ['app.scss'],
@@ -19,7 +19,9 @@ export default defineConfig((/* ctx */) => {
     // https://github.com/quasarframework/quasar/tree/dev/extras
     extras: [
       // 'ionicons-v4',
-      // 'mdi-v7',
+      // Necesario para los iconos de rol del CRUD (mdi-shield-crown / mdi-pencil):
+      // el set 'material-icons' no los incluye.
+      'mdi-v7',
       // 'fontawesome-v7',
       // 'eva-icons',
       // 'themify',
@@ -43,8 +45,26 @@ export default defineConfig((/* ctx */) => {
         // extendTsConfig (tsConfig) {}
       },
 
+      // https://v2.quasar.dev/quasar-cli-vite/quasar-config-file#build-env
+      // Por defecto Quasar expone al cliente solo variables con prefijo 'QCLI_'.
+      // Este proyecto usa la convencion estandar de Vite ('VITE_', ver security-and-scope.md).
+      env: {
+        clientPrefix: 'VITE_',
+      },
+
+      // https://v2.quasar.dev/quasar-cli-vite/handling-vite#folder-aliases
+      // Nota: '@types' no es viable como alias -> TypeScript reserva ese prefijo
+      // para paquetes de definiciones en node_modules/@types (error TS6137).
+      alias: {
+        '@components': ctx.appPaths.resolve.app('src/components'),
+        '@stores': ctx.appPaths.resolve.app('src/stores'),
+        '@services': ctx.appPaths.resolve.app('src/services'),
+        '@boot': ctx.appPaths.resolve.app('src/boot'),
+      },
+
       // https://v2.quasar.dev/quasar-cli-vite/page-routing-with-vue-router#filename-based-routing
-      filenameBasedRouting: true,
+      // Se usa enrutamiento manual (src/router/routes.ts) con layout dedicado en src/layouts/
+      filenameBasedRouting: false,
 
       vueRouterMode: 'hash', // available values: 'hash', 'history'
       // vueRouterBase,
@@ -69,7 +89,11 @@ export default defineConfig((/* ctx */) => {
               useFlatConfig: true,
             },
           },
-          { server: false },
+          // `server: true` a proposito: con el checker apagado en dev, un import
+          // que no resuelve (o un asset inexistente) no pinta overlay y la unica
+          // senal es una vista en blanco, porque el import() diferido de la ruta
+          // se rechaza en silencio. Cuesta algo de arranque; ahorra diagnosticos.
+          { server: true },
         ],
       ],
     },
@@ -83,7 +107,11 @@ export default defineConfig((/* ctx */) => {
 
     // https://v2.quasar.dev/quasar-cli-vite/quasar-config-file#framework
     framework: {
-      config: {},
+      config: {
+        // Default declarativo del tema antes de que el store se instancie.
+        // useThemeStore().initTheme() lo sobrescribe con el modo persistido.
+        dark: 'auto',
+      },
 
       // iconSet: 'material-icons', // Quasar icon set
       // lang: 'en-US', // Quasar language pack
@@ -95,8 +123,10 @@ export default defineConfig((/* ctx */) => {
       // components: [],
       // directives: [],
 
-      // Quasar plugins
-      plugins: [],
+      // Quasar plugins. 'Dialog' lo requiere SessionMonitor.vue para lanzar el
+      // aviso de expiracion de sesion desde codigo, sin un v-model en plantilla.
+      // 'LocalStorage' lo usa @/utils/device-id.ts para persistir el deviceId.
+      plugins: ['Notify', 'Dialog', 'LocalStorage'],
     },
 
     // animations: 'all', // --- includes all animations

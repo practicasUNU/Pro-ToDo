@@ -1,1 +1,463 @@
-// app global css
+// ============================================================
+// Proto-Do · UNUWARE — tokens de área de contenido (claro/oscuro)
+//
+// Quasar añade automáticamente la clase `body--dark` al <body>
+// cuando $q.dark está activo (lo gobierna useThemeStore, ver
+// src/stores/theme.store.ts). Estas custom properties son la
+// fuente de verdad para todo lo que Quasar no tematiza por sí
+// solo: fondo de página, cards, bordes, texto y los tintes de
+// fila por severidad de alerta.
+//
+// La lista de tokens --pd-* es CERRADA y replica 1:1 la tabla de
+// .claude/rules/frontend-quasar.md §2. Cualquier color nuevo se
+// añade primero aquí como token, nunca inline en un componente.
+//
+// Las familias tipográficas se importan desde @fontsource en
+// src/App.vue (self-hosted, sin CDN externo).
+// ============================================================
+
+:root {
+  // Modo claro: superficies TINTADAS de marca (no papel blanco puro).
+  // Las cards se distinguen por fondo propio además del borde.
+  --pd-page-bg: #fafbff;
+  --pd-card-bg: #eef1fa;
+  --pd-surface-muted: #e4eafb;
+
+  --pd-border: #d3d8ee;
+
+  --pd-text-primary: #12142e;
+  --pd-text-secondary: #4a4f6b;
+
+  // Enlaces y texto interactivo: en claro se oscurece para cumplir
+  // contraste AA (--pd-accent se queda en ~3:1, insuficiente).
+  --pd-accent-text: #3d6bd9;
+
+  --pd-disabled-bg: #c7c9d6;
+  --pd-disabled-text: #7a7e92;
+
+  --pd-negative: #d93a2b;
+
+  // Fondo de fila de tabla según severidad (Vista 6 — Trazabilidad).
+  // Tokens derivados de la tríada semántica: no son colores nuevos,
+  // son el mismo matiz a baja opacidad sobre la superficie clara.
+  --pd-row-urgente: #fbeceb;
+  --pd-row-grave: #fdf4e3;
+  --pd-row-exitoso: #e7f7f1;
+}
+
+body.body--dark {
+  --pd-page-bg: #0d0f26;
+  --pd-card-bg: #12142e;
+  --pd-surface-muted: #161a3d;
+
+  --pd-border: rgba(184, 192, 222, 0.4);
+
+  --pd-text-primary: #ffffff;
+  --pd-text-secondary: #b8c0de;
+
+  --pd-accent-text: #5b8ce8;
+
+  --pd-disabled-bg: #5b5b66;
+  --pd-disabled-text: #9ca0b5;
+
+  --pd-negative: #e74c3c;
+
+  --pd-row-urgente: #2b1a1d;
+  --pd-row-grave: #2c2418;
+  --pd-row-exitoso: #142b2a;
+}
+
+// Tokens que NO conmutan con el tema: el azul de marca y los
+// acentos son idénticos en claro y oscuro por consistencia
+// identitaria (regla §2). Igual que el shell (QHeader + QDrawer),
+// que se mantiene navy en ambos modos.
+:root {
+  --pd-primary: #2c4fc7;
+  --pd-primary-light: #4e74e8;
+  --pd-panel-solid: #3a5ce0;
+  --pd-accent: #5b8ce8;
+
+  --pd-warning: #f59e0b;
+  --pd-positive: #10b981;
+
+  --pd-shell-bg: #12142e;
+  --pd-shell-alt: #1c2049; // ítem de nav activo / hover sobre shell
+  --pd-shell-text: #ffffff;
+  --pd-shell-text-secondary: #b8c0de;
+
+  // Degradado corporativo obligatorio (header y botones primarios)
+  --pd-gradient: linear-gradient(90deg, var(--pd-primary) 0%, var(--pd-primary-light) 100%);
+}
+
+// ---- Base ----
+
+body {
+  background: var(--pd-page-bg);
+  color: var(--pd-text-primary);
+}
+
+// ---- Clases de utilidad reutilizables en las páginas ----
+
+.pd-page {
+  background: var(--pd-page-bg);
+  min-height: 100vh;
+  transition: background-color 0.15s ease;
+}
+
+.pd-card {
+  background: var(--pd-card-bg);
+  border: 1px solid var(--pd-border);
+  border-radius: $generic-border-radius;
+  color: var(--pd-text-primary);
+}
+
+// Franja superior de 3px por categoría/severidad (regla §2).
+// El color se inyecta con --pd-accent-color; por defecto, marca.
+.pd-card--accent {
+  position: relative;
+  overflow: hidden;
+
+  &::before {
+    content: '';
+    position: absolute;
+    inset: 0 0 auto 0;
+    height: 3px;
+    background: var(--pd-accent-color, var(--pd-primary));
+    z-index: 1;
+  }
+}
+
+.pd-accent-exitoso {
+  --pd-accent-color: var(--pd-positive);
+}
+.pd-accent-leve {
+  --pd-accent-color: var(--pd-accent);
+}
+.pd-accent-grave {
+  --pd-accent-color: var(--pd-warning);
+}
+.pd-accent-urgente {
+  --pd-accent-color: var(--pd-negative);
+}
+
+// Panel de estado institucional: relleno sólido, tipografía blanca.
+.pd-panel-solid {
+  background: var(--pd-panel-solid);
+  color: var(--pd-shell-text);
+  border-radius: $generic-border-radius;
+}
+
+.pd-surface-muted {
+  background: var(--pd-surface-muted);
+}
+
+.pd-text-secondary {
+  color: var(--pd-text-secondary);
+}
+.pd-text-disabled {
+  color: var(--pd-disabled-text);
+}
+
+// Enlace / texto interactivo (usa el token con contraste AA)
+.pd-link {
+  color: var(--pd-accent-text);
+  text-decoration: none;
+
+  &:hover {
+    text-decoration: underline;
+  }
+}
+
+// ---- Escala tipográfica (regla §2) ----
+
+.pd-h1 {
+  font-family: $heading-font-family;
+  font-size: 20px;
+  line-height: 28px;
+  font-weight: 700;
+  letter-spacing: -0.2px;
+  margin: 0;
+  color: var(--pd-text-primary);
+}
+.pd-h2 {
+  font-family: $heading-font-family;
+  font-size: 16px;
+  line-height: 24px;
+  font-weight: 600;
+  letter-spacing: -0.1px;
+  margin: 0;
+  color: var(--pd-text-primary);
+}
+.pd-subtitle {
+  font-size: 12.5px;
+  line-height: 18px;
+  font-weight: 400;
+  color: var(--pd-text-secondary);
+}
+
+// Label de formulario: Inter 700, escala compacta.
+.pd-label {
+  font-size: 13px;
+  line-height: 18px;
+  font-weight: 700;
+  color: var(--pd-text-primary);
+}
+
+// Asterisco de campo obligatorio
+.pd-required {
+  color: var(--pd-negative);
+  font-weight: 700;
+  margin-left: 2px;
+}
+
+// Navegación / menú: Poppins medium, mayúsculas, tracking amplio.
+.pd-nav {
+  font-family: $heading-font-family;
+  font-weight: 500;
+  font-size: 13px;
+  text-transform: uppercase;
+  letter-spacing: 1.2px;
+}
+
+// Valores técnicos: id_flujo, nombres de plantilla/prompt, payload JSON, rutas .log
+.pd-mono {
+  font-family: $mono-font-family;
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 18px;
+}
+
+// ---- Botones (regla §2) ----
+
+// Primario activo: degradado corporativo + flecha diagonal (icon-right="north_east").
+.pd-btn-primary {
+  background: var(--pd-gradient);
+  color: var(--pd-shell-text);
+  font-weight: 700;
+  border-radius: $button-border-radius;
+
+  .q-icon {
+    font-size: 16px;
+  }
+
+  // Deshabilitado: plano, sin degradado ni hover, con texto legible
+  // (nunca el mismo tono que el fondo).
+  &.disabled,
+  &[disabled] {
+    background: var(--pd-disabled-bg) !important;
+    color: var(--pd-disabled-text) !important;
+    opacity: 1 !important;
+    box-shadow: none;
+  }
+}
+
+// Acción crítica confirmada (sujeta a la cuenta regresiva de 5s).
+.pd-btn-danger {
+  background: var(--pd-negative);
+  color: var(--pd-shell-text);
+  font-weight: 700;
+  border-radius: $button-border-radius;
+
+  &.disabled,
+  &[disabled] {
+    background: var(--pd-disabled-bg) !important;
+    color: var(--pd-disabled-text) !important;
+    opacity: 1 !important;
+  }
+}
+
+// Botón de icono de trazo lineal (columna Acciones): sin rellenos pesados.
+.pd-btn-icon {
+  border-radius: $button-border-radius;
+  color: var(--pd-text-secondary);
+  transition:
+    color 0.15s ease,
+    background-color 0.15s ease,
+    border-color 0.15s ease;
+
+  // QBtn con prop `outline` pinta su borde en ::before con currentColor;
+  // se fuerza al token de borde para que el trazo no siga al texto.
+  &.q-btn--outline::before {
+    border-color: var(--pd-border);
+    transition: border-color 0.15s ease;
+  }
+
+  &:hover {
+    color: var(--pd-accent-text);
+    background: var(--pd-surface-muted);
+  }
+
+  &:hover.q-btn--outline::before {
+    border-color: var(--pd-accent);
+  }
+
+  &.pd-btn-icon--danger:hover {
+    color: var(--pd-negative);
+
+    &.q-btn--outline::before {
+      border-color: var(--pd-negative);
+    }
+  }
+
+  &.pd-btn-icon--positive:hover {
+    color: var(--pd-positive);
+
+    &.q-btn--outline::before {
+      border-color: var(--pd-positive);
+    }
+  }
+}
+
+// ---- Diálogos (regla §2: radio 10px) ----
+
+.q-dialog__inner > div {
+  border-radius: 10px;
+}
+
+// Card estándar de diálogo: sustituye los `style="min-width"` inline.
+.pd-dialog-card {
+  min-width: 380px;
+  max-width: 92vw;
+  background: var(--pd-card-bg);
+  color: var(--pd-text-primary);
+}
+
+// Contenedor circular de icono, borde punteado (iconografía §2).
+.pd-icon-circle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  border: 1px dashed var(--pd-border);
+  background: var(--pd-surface-muted);
+  flex: 0 0 auto;
+}
+
+// ---- Badges ----
+// Pill de severidad/estado. No se sobrescribe QChip de forma global
+// para no romper la variante `square`.
+
+.pd-badge {
+  border-radius: 999px;
+  padding: 4px 10px;
+  font-size: 11.5px;
+  font-weight: 700;
+  letter-spacing: 0.3px;
+}
+
+// Rol: chip tenue de marca sobre superficie subordinada.
+.pd-badge--role {
+  background: var(--pd-surface-muted);
+  color: var(--pd-accent-text);
+  border: 1px solid var(--pd-border);
+}
+
+.pd-badge--active {
+  background: var(--pd-positive);
+  color: var(--pd-shell-text);
+}
+
+// Inactivo NO es un error: es estado neutro, de ahí los tokens de deshabilitado.
+.pd-badge--inactive {
+  background: var(--pd-disabled-bg);
+  color: var(--pd-disabled-text);
+}
+
+// ---- Shell: QHeader + QDrawer (regla §2) ----
+// Header 60px, drawer 220px. El header lleva el degradado corporativo
+// obligatorio; el drawer se queda navy sólido. Ambos consumen los
+// tokens --pd-shell-* y nunca los --pd-text-*.
+
+.pd-toolbar {
+  min-height: 60px;
+  padding-left: 12px;
+  padding-right: 12px;
+}
+
+// Degradado horizontal obligatorio de cabecera. Nunca color sólido.
+.pd-gradient-header {
+  background: var(--pd-gradient);
+  color: var(--pd-shell-text);
+}
+
+// Texto subordinado sobre el shell oscuro (breadcrumb, metadatos).
+// Sustituye a las clases text-grey-N de Quasar, que están fijadas a
+// un valor y no son un token del sistema.
+.pd-shell-text-secondary {
+  color: var(--pd-shell-text-secondary);
+  font-size: 12.5px;
+  line-height: 18px;
+}
+
+.pd-drawer {
+  background: var(--pd-shell-bg);
+  color: var(--pd-shell-text);
+
+  .q-item {
+    min-height: 40px;
+    margin: 2px 8px;
+    border-radius: $button-border-radius;
+    color: var(--pd-shell-text-secondary);
+  }
+
+  .q-item:hover {
+    background: var(--pd-shell-alt);
+    color: var(--pd-shell-text);
+  }
+
+  // Ítem de nav activo: mismo tratamiento en claro y oscuro
+  .q-item.q-router-link--active,
+  .q-item.q-router-link--exact-active {
+    background: var(--pd-shell-alt);
+    color: var(--pd-shell-text);
+  }
+
+  .q-item__label--header {
+    color: var(--pd-shell-text-secondary);
+    font-family: $heading-font-family;
+    font-size: 10.5px;
+    font-weight: 500;
+    text-transform: uppercase;
+    letter-spacing: 1.2px;
+  }
+}
+
+// ---- Tablas (Vista 2, Vista 6) ----
+
+.pd-table {
+  background: var(--pd-card-bg);
+  color: var(--pd-text-primary);
+
+  thead th {
+    background: var(--pd-surface-muted);
+    color: var(--pd-text-secondary);
+    font-size: 10.5px;
+    font-weight: 700;
+    letter-spacing: 0.4px;
+    text-transform: uppercase;
+  }
+
+  th,
+  td {
+    border-color: var(--pd-border);
+  }
+
+  tbody tr:hover > td {
+    background: var(--pd-surface-muted);
+  }
+}
+
+// Filas de la tabla de Trazabilidad (Vista 6), coloreadas por severidad
+// pero SIN depender del color de texto para transmitir el estado
+// (el QBadge ya lleva icono + texto).
+.row-urgente {
+  background: var(--pd-row-urgente);
+}
+.row-grave {
+  background: var(--pd-row-grave);
+}
+.row-exitoso {
+  background: var(--pd-row-exitoso);
+}

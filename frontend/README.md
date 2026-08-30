@@ -4,13 +4,13 @@ SPA construida con [Vue 3](https://vuejs.org/) y [Quasar Framework](https://quas
 
 ## Stack tecnológico
 
-| Categoría | Librerías |
-| --- | --- |
-| **Framework** | Vue 3 (Composition API, `<script setup>`), Quasar 2 (Vite) |
-| **Estado global** | Pinia |
-| **Enrutamiento** | Vue Router |
-| **Comunicación** | Axios (HTTP), `socket.io-client` (eventos en tiempo real de los flujos) |
-| **Calidad** | ESLint, Prettier, `vue-tsc` (chequeo de tipos) |
+| Categoría         | Librerías                                                               |
+| ----------------- | ----------------------------------------------------------------------- |
+| **Framework**     | Vue 3 (Composition API, `<script setup>`), Quasar 2 (Vite)              |
+| **Estado global** | Pinia                                                                   |
+| **Enrutamiento**  | Vue Router                                                              |
+| **Comunicación**  | Axios (HTTP), `socket.io-client` (eventos en tiempo real de los flujos) |
+| **Calidad**       | ESLint, Prettier, `vue-tsc` (chequeo de tipos)                          |
 
 ## Requisitos previos
 

@@ -1,25 +1,51 @@
-// Quasar Sass (& SCSS) Variables
-// --------------------------------------------------
-// To customize the look and feel of this app, you can override
-// the Sass/SCSS variables found in Quasar's source Sass/SCSS files.
+// ============================================================
+// Proto-Do · UNUWARE — Quasar brand variables
+// Estos valores son los mismos en modo claro y oscuro: Quasar
+// resuelve el contraste de cada componente internamente a partir
+// de $dark / $dark-page + el flag $q.dark. Los tokens de "área de
+// contenido" (cards, tablas, bordes) que Quasar NO cubre viven en
+// app.scss como CSS custom properties (ver ese archivo).
+// ============================================================
 
-// Check documentation for full list of Quasar variables
+// ---- Marca (paleta institucional UNUWARE) ----
+// Idénticos en claro y oscuro por consistencia identitaria.
+$primary: #2c4fc7; // inicio del degradado corporativo
+$primary-light: #4e74e8; // fin del degradado corporativo
+$secondary: #3a5ce0; // paneles sólidos institucionales
+$accent: #5b8ce8; // micro-interacciones, hover de superficies
 
-// Your own variables (that are declared here) and Quasar's own
-// ones will be available out of the box in your .vue/.scss/.sass files
+// ---- Tríada semántica de severidad ----
+$positive: #10b981; // EXITOSO
+$negative: #e74c3c; // URGENTE / FALLIDO
+$warning: #f59e0b; // GRAVE / PAUSADO
+$info: #5b8ce8; // LEVE
 
-// It's highly recommended to change the default colors
-// to match your app's branding.
-// Tip: Use the "Theme Builder" on Quasar's documentation website.
+// Shell (QHeader + QDrawer): navy institucional, idéntico en ambos
+// modos. El QHeader además lleva el degradado obligatorio (ver la
+// clase .pd-gradient-header en app.scss).
+$dark: #12142e;
+$dark-page: #0d0f26; // fondo de página cuando $q.dark está activo
 
-$primary: #1976d2;
-$secondary: #26a69a;
-$accent: #9c27b0;
+// ---- Tipografía (briefing §1.2) ----
+// Familias self-hosted vía @fontsource (importadas en app.scss):
+// sin peticiones a CDN externos, coherente con el aislamiento
+// perimetral del proyecto.
+$typography-font-family:
+  'Inter Variable', 'Inter', 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+$mono-font-family: 'JetBrains Mono Variable', 'JetBrains Mono', Consolas, ui-monospace, monospace;
 
-$dark: #1d1d1d;
-$dark-page: #121212;
+// Encabezados y navegación: Poppins con Montserrat como respaldo.
+// La consumen .pd-h1 / .pd-h2 / .pd-nav en app.scss.
+$heading-font-family: 'Poppins', 'Montserrat', $typography-font-family;
 
-$positive: #21ba45;
-$negative: #c10015;
-$info: #31ccec;
-$warning: #f2c037;
+// Cuerpo base: la interfaz es densa (tablas de trazabilidad,
+// wizard), de ahí los 13px del briefing en lugar de los 14 de Quasar.
+$body-font-size: 13px;
+$body-line-height: 1.42;
+
+// ---- Radios canónicos (briefing §1.3) ----
+// Quasar solo expone estas dos como variables SCSS. El radio de
+// QDialog (10px) y el pill de los badges de severidad no tienen
+// variable propia: se aplican como override en app.scss.
+$generic-border-radius: 8px; // QCard, paneles, QMenu
+$button-border-radius: 6px; // QBtn

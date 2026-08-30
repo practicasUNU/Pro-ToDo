@@ -19,16 +19,7 @@ CREATE TYPE enum_estado_nodo AS ENUM ('OK', 'ERROR', 'ADVERTENCIA');
 
 CREATE TYPE enum_nivel_error AS ENUM ('URGENTE', 'GRAVE', 'LEVE');
 
--- =============================================================================
--- Tabla: ROLES
--- =============================================================================
-
-CREATE TABLE roles (
-    id_rol UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-    nombre VARCHAR(50) NOT NULL UNIQUE,
-    descripcion VARCHAR(255),
-    fecha_creacion TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-);
+CREATE TYPE enum_rol_usuario AS ENUM ('ADMIN', 'EDITOR');
 
 -- =============================================================================
 -- Tabla: USUARIOS
@@ -37,9 +28,10 @@ CREATE TABLE roles (
 CREATE TABLE usuarios (
     id_usuario UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     correo VARCHAR(255) NOT NULL UNIQUE,
-    id_rol UUID NOT NULL REFERENCES roles(id_rol),
-    codigo_otp VARCHAR(6),
-    expiracion_otp TIMESTAMP,
+    rol enum_rol_usuario NOT NULL,
+    -- Secreto TOTP por cuenta. Nullable: la inscripción es perezosa, se genera
+    -- la primera vez que el usuario pide un código (ver migración 003).
+    secreto_otp VARCHAR(64),
     activo BOOLEAN DEFAULT TRUE,
     fecha_creacion TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
@@ -142,10 +134,31 @@ CREATE TABLE alertas_error (
 );
 
 -- =============================================================================
+-- Tabla: REFRESH_TOKENS (PROT-06.4)
+-- Duplicada en db/migrations/001-refresh-tokens.sql (y 004 para la columna
+-- id_dispositivo) para las bases de datos ya creadas: este archivo solo se
+-- ejecuta con el volumen de Docker vacío.
+-- =============================================================================
+
+CREATE TABLE refresh_tokens (
+    id_refresh_token UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    id_usuario UUID NOT NULL REFERENCES usuarios(id_usuario) ON DELETE CASCADE,
+    -- Dispositivo/navegador que abrió la sesión, generado por el cliente. Agrupa
+    -- los tokens por origen para revocar solo la sesión anterior de ese equipo
+    id_dispositivo UUID NOT NULL,
+    -- SHA-256 hexadecimal del token opaco; el valor en claro nunca se persiste
+    hash_token CHAR(64) NOT NULL UNIQUE,
+    expiracion TIMESTAMP NOT NULL,
+    -- Se marca en vez de borrarse: reaparecer revocado delata un robo
+    revocado BOOLEAN NOT NULL DEFAULT FALSE,
+    fecha_creacion TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+-- =============================================================================
 -- Índices de apoyo para claves foráneas de alta consulta
 -- =============================================================================
 
-CREATE INDEX idx_usuarios_id_rol ON usuarios(id_rol);
+CREATE INDEX idx_refresh_tokens_id_usuario ON refresh_tokens(id_usuario);
 CREATE INDEX idx_plantillas_html_id_usuario_creador ON plantillas_html(id_usuario_creador);
 CREATE INDEX idx_flujos_id_usuario_creador ON flujos(id_usuario_creador);
 CREATE INDEX idx_nodos_id_flujo ON nodos(id_flujo);
@@ -158,10 +171,6 @@ CREATE INDEX idx_alertas_error_id_ejecucion ON alertas_error(id_ejecucion);
 -- =============================================================================
 -- SEED: Datos iniciales
 -- =============================================================================
-
-INSERT INTO roles (nombre, descripcion) VALUES
-    ('ADMINISTRADOR', 'Acceso completo al sistema y gestion exclusiva de usuarios'),
-    ('EDITOR', 'Operacion, configuracion y auditoria de flujos y plantillas');
 
 INSERT INTO tipos_nodo (codigo, nombre, categoria, descripcion) VALUES
     ('TRIGGER_IMAP', 'Disparador IMAP', 'TRIGGER', 'Inicia el flujo mediante la lectura de correos entrantes'),
