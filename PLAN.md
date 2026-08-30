@@ -274,7 +274,112 @@ nueva bajo ese layout nace protegida.
 
 ---
 
-## 3. Motor FSM (pendiente)
+## 3. Motor FSM: contratos del `pipeline_schema` (PROT-07)
 
-`INodeStrategy`, `NodeStrategyFactory` y `StatePayloadContext` se documentarán aquí al implementarse.
-El contrato de referencia vive en `.claude/rules/architecture-patterns.md` §2 y §3.
+Rama: `feat/fsm-contracts`.
+
+Primera pieza del motor: el contrato del grafo que el `FsmEngineService` recorrerá. Describe qué
+nodo viene después de cuál, dónde escribe cada uno su resultado y cómo se reintenta ante un fallo.
+Se persiste en la columna `flujos.configuracion_pipeline` (JSONB).
+
+`INodeStrategy`, `NodeStrategyFactory` y `StatePayloadContext` **siguen pendientes**; su contrato de
+referencia vive en `.claude/rules/architecture-patterns.md` §2 y §3.
+
+### 3.1 Contratos
+
+```typescript
+// @core/fsm/types/pipeline-schema.types.ts — forma del JSON ya validado
+export const MAX_RETRY_ATTEMPTS = 5;
+export const OUTPUT_NAMESPACE_PATTERN = /^[a-z0-9_]+$/;   // snake_case: interpolable como {{ns.campo}}
+export const SEMVER_PATTERN = /^\d+\.\d+\.\d+$/;
+
+// Enum, no union type: @IsEnum() necesita un objeto en runtime.
+export enum NodeType {
+  TRIGGER_IMAP, PARSER_PRE_IA, EXTRACTOR_WEB, PROCESADOR_IA,
+  ESCUDO_POST_IA, MAPEADOR_PLANTILLA, DESTINO_HTTP,
+}
+
+export interface PipelineNodeConfig {
+  nodeId: string;                      // idéntico a su clave en `nodes`
+  nodeType: NodeType;                  // lo resolverá NodeStrategyFactory
+  outputNamespace: string;             // único en todo el pipeline
+  nextStep: string | null;             // null ⇒ nodo terminal
+  onErrorStep: string | null;          // puede apuntar hacia atrás (reintento)
+  retryPolicy?: RetryPolicy;           // { maxRetries: 0..5, backoffMs?, backoffFactor? }
+  params: Record<string, unknown>;     // cada estrategia valida los suyos
+}
+
+export interface PipelineSchema {
+  flowId: string; name: string; version: string;   // version en SemVer
+  entrypoint: string;                              // clave de `nodes`
+  nodes: Record<string, PipelineNodeConfig>;
+}
+
+// @core/fsm/validators/pipeline-topology.validator.ts — función pura, sin DI
+export interface SchemaIssue { field: string; constraints: string[]; }
+export const validatePipelineTopology: (schema: PipelineSchemaDto) => SchemaIssue[];
+
+// @core/fsm/services/pipeline-validator.service.ts — frontera Poka-Yoke
+export class PipelineValidatorService {
+  /** @throws BadRequestException con `issues: SchemaIssue[]` si algo no encaja. */
+  public validateSchema(rawJson: unknown): Promise<PipelineSchemaDto>;
+}
+```
+
+### 3.2 Diagrama de inyección de dependencias
+
+```
+PipelineValidatorService              (@Injectable, sin dependencias inyectadas)
+      │
+      ├── class-transformer.plainToInstance ──► PipelineSchemaDto      (forma del esquema)
+      │                                    └──► PipelineNodeConfigDto  (nodo a nodo, manual)
+      │
+      ├── class-validator.validate({ whitelist, forbidNonWhitelisted })
+      │        └── flattenValidationErrors ──► rutas con punto (`nodes.X.retryPolicy.maxRetries`)
+      │
+      └── validatePipelineTopology(schema)   (función pura: sin estado, sin I/O, sin Nest)
+
+Aún sin módulo: el servicio se declarará en `FsmModule` cuando exista su primer consumidor
+(el CRUD de flujos, que validará antes de escribir en `flujos.configuracion_pipeline`).
+```
+
+### 3.3 Reglas de integridad topológica
+
+| # | Regla | `field` del issue |
+|---|---|---|
+| 1 | `entrypoint` existe en `nodes` | `entrypoint` |
+| 2 | La clave del mapa coincide con el `nodeId` del nodo | `nodes.<clave>.nodeId` |
+| 3 | Todo `nextStep` / `onErrorStep` no nulo resuelve a un nodo existente | `nodes.<clave>.<puntero>` |
+| 4 | Ningún `outputNamespace` se repite entre nodos | `nodes.<clave>.outputNamespace` |
+| 5 | El camino activo termina en `nextStep === null` sin revisitar nodos | `nodes.<clave>.nextStep` |
+
+```
+entrypoint ──► A ──► B ──► C ──► null        OK (termina en terminal)
+                     │
+                     └── onErrorStep ──► A   OK (los ciclos de reintento son legítimos)
+
+entrypoint ──► A ──► B ──► C ──► A           ERROR: ciclo infinito en nextStep
+
+nodes: { A, B, C, huerfano_Z }               OK: Z es inalcanzable y se IGNORA
+```
+
+Dos decisiones deliberadas: solo se recorre `nextStep` (un `onErrorStep` hacia atrás es el patrón de
+reintento, no un defecto) y los nodos inalcanzables no invalidan el esquema (un flujo puede
+conservar ramas en construcción).
+
+### 3.4 Namespaces
+
+`outputNamespace` es la clave bajo la que un nodo escribe en el `StatePayloadContext`. Su unicidad es
+lo que sostiene la inmutabilidad del contexto: si dos nodos compartieran namespace, el `spread` del
+segundo pisaría los datos del primero y el *checkpoint* dejaría de reflejar lo realmente ejecutado.
+De ahí que la colisión sea un error de esquema y no una advertencia.
+
+El patrón `^[a-z0-9_]+$` no es estético: la expresión de interpolación de `getInterpolatedValue`
+(`architecture-patterns.md` §3) solo reconoce `[a-zA-Z0-9_]`, así que un namespace con guiones o
+puntos nunca podría resolverse desde una plantilla `{{nodo.campo}}`.
+
+### 3.5 Esquema
+
+`tipos_nodo.codigo` replica los 7 valores de `NodeType` (migración `005-tipos-nodo-fsm.sql`).
+`TRIGGER_CRON` y `DESTINO_ACENS` permanecen en el catálogo pero **no** son declarables en un
+`pipeline_schema` hasta que existan sus estrategias y se amplíe el enum.

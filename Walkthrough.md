@@ -560,3 +560,96 @@ parámetro**, así que era estructuralmente imposible que leyeran el error real.
 automatizadas: el frontend no tiene arnés de tests todavía (deuda ya anotada en este archivo).
 Verificación manual pendiente para quien pruebe contra el backend real: editar/desactivar la
 propia cuenta ADMIN debe mostrar el mensaje de MOD-01 textual, no el genérico.
+
+---
+
+## 2026-08-29 · Contratos y validación topológica del `pipeline_schema` (PROT-07) — rama `feat/fsm-contracts`
+
+Primera pieza del motor FSM. Antes de escribir una sola estrategia hacía falta el contrato del grafo
+que el `FsmEngineService` va a recorrer: sin él, un `configuracion_pipeline` mal formado —un
+`nextStep` colgando, dos nodos escribiendo el mismo namespace, un camino que nunca termina— solo se
+descubriría en runtime, con la ejecución a medias y el `StatePayloadContext` ya corrompido. Este
+cambio mueve ese fallo al momento de guardar el flujo.
+
+### `@ValidateNested({ each: true })` no funciona sobre un `Record`
+
+El diseño de partida ponía `@ValidateNested({ each: true })` + `@Type(() => PipelineNodeConfigDto)`
+sobre `nodes: Record<string, PipelineNodeConfigDto>`. No valida nada. En class-validator 0.15.1
+(`node_modules/class-validator/cjs/validation/ValidationExecutor.js:272`) la rama `each` solo se
+activa para `Array`, `Set` y `Map`:
+
+```js
+if (Array.isArray(value) || value instanceof Set || value instanceof Map) { /* itera */ }
+else if (value instanceof Object) { this.execute(value, targetSchema, error.children); }
+```
+
+Un objeto plano cae a la segunda rama y valida el **mapa entero** como si fuera un único
+`PipelineNodeConfigDto`; `@Type` lo empeora convirtiendo el `Record` completo en una sola instancia.
+Sumado a `forbidNonWhitelisted: true`, el resultado habría sido un error `property nodo_trigger
+should not exist` por cada nodo, sin llegar a validar un solo campo real.
+
+La iteración se hace a mano en `PipelineValidatorService.validateNodes()`. No es solo un parche: al
+recorrer `Object.entries(nodes)` se conserva la clave del nodo en la ruta del error
+(`nodes.nodo_ia.retryPolicy.maxRetries`), que es exactamente lo que el wizard del frontend necesita
+para señalar el paso culpable. Con el decorador nunca se habría tenido esa ruta.
+
+### Por qué `onErrorStep` sí puede apuntar hacia atrás
+
+El recorrido de detección de ciclos sigue **solo** `nextStep`. Un `onErrorStep` que vuelve a un nodo
+anterior no es un defecto sino el patrón de reintento o recuperación; prohibirlo habría impedido
+modelar declarativamente lo que el protocolo de resiliencia (`architecture-patterns.md` §4) ya
+contempla. El grafo de `nextStep` es funcional —un sucesor como máximo por nodo—, así que basta un
+recorrido lineal con un `Set` de visitados: no hace falta DFS ni componentes fuertemente conexas.
+
+### Por qué los nodos huérfanos no invalidan el esquema
+
+Un nodo inalcanzable desde el `entrypoint` se ignora en silencio. Un flujo en construcción puede
+tener ramas todavía sin conectar, y rechazar el esquema entero por eso convertiría el validador en
+un estorbo durante la edición. Lo que sí es innegociable es que el camino activo **termine**: si
+`nextStep` cierra un ciclo, no hay nodo terminal y la ejecución no pararía nunca.
+
+### Detalles de implementación
+
+- `NodeType` es un `enum` de TypeScript y no un union type: `@IsEnum()` necesita un objeto
+  disponible en runtime.
+- `nextStep` / `onErrorStep` usan `@ValidateIf((_, value) => value !== null)` y no `@IsOptional()`.
+  `null` es un valor legítimo (nodo terminal), `undefined` no: `@IsOptional()` habría dejado pasar
+  un campo ausente. Comprobado que esto no rompe el whitelist —`ValidationExecutor.whitelist()` solo
+  descarta propiedades sin metadata alguna, y estas la tienen.
+- La topología se ejecuta **solo** si forma y tipos ya son válidos. Sobre un `nextStep` numérico o un
+  `nodes` que no es objeto, esas comprobaciones solo añadirían ruido sobre el error real.
+- `Object.hasOwn()` en lugar de `Object.prototype.hasOwnProperty.call()`: lo segundo devuelve `any` y
+  disparaba `@typescript-eslint/no-unsafe-return`.
+- El validador topológico es una función pura sin DI ni estado, testeable al margen de Nest.
+- `db/migrations/005-tipos-nodo-fsm.sql` alinea `tipos_nodo` con el enum: `NODO_PARSER_CORREO` →
+  `PARSER_PRE_IA`, `NODO_VALIDACION` → `ESCUDO_POST_IA`, `DESTINO_DRUPAL` → `DESTINO_HTTP`. Como
+  `codigo` es `VARCHAR(50) UNIQUE` y no un `ENUM` de PostgreSQL, basta un `UPDATE`. **No se borra
+  ninguna fila**: `nodos.id_tipo_nodo` es FK contra esta tabla, así que `TRIGGER_CRON` y
+  `DESTINO_ACENS` se quedan en el catálogo aunque hoy no sean declarables en un `pipeline_schema`.
+
+### Verificación
+
+16 pruebas nuevas en verde (109 en total en el backend), cubriendo los 5 casos obligatorios —Notiweb
+completo de 7 nodos, huérfano aceptado, ciclo rechazado, namespace duplicado, clave ≠ `nodeId`— más
+`entrypoint` inexistente, punteros colgantes, `nodeType` fuera del enum, `maxRetries > 5`,
+`onErrorStep` hacia atrás aceptado, propiedad desconocida, `outputNamespace` no snake_case, `version`
+no SemVer, nodo que no es objeto y payload que no es JSON. `npx tsc --noEmit` sin errores,
+`eslint "src/core/**/*.ts"` limpio.
+
+La migración `005` **no se pudo aplicar** en esta sesión: el demonio de Docker exige `sudo` con
+contraseña interactiva. Queda pendiente de ejecutar contra el contenedor.
+
+### Checklist de dependencias restantes
+
+- [ ] **Aplicar `db/migrations/005-tipos-nodo-fsm.sql`** contra `protodo_postgres` y comprobar el
+      `SELECT` final (7 códigos del enum + `TRIGGER_CRON` + `DESTINO_ACENS`).
+- [ ] **`FsmModule`**: `PipelineValidatorService` está `@Injectable()` pero no lo declara ningún
+      módulo. Se registrará cuando exista su primer consumidor (el CRUD de flujos).
+- [ ] **Entidad TypeORM `Flujo`** que mapee `flujos.configuracion_pipeline` a `PipelineSchema`, para
+      invocar el validador antes de persistir.
+- [ ] **`StatePayloadContext`, `INodeStrategy`, `NodeStrategyFactory`**: el resto del contrato del
+      motor sigue sin implementar (`architecture-patterns.md` §2 y §3).
+- [ ] **Ampliar `NodeType`** con `TRIGGER_CRON` y un destino Acens cuando se escriban sus
+      estrategias; hasta entonces esas dos filas del catálogo son inalcanzables desde un pipeline.
+- [ ] **`test/jest-e2e.json` sin `moduleNameMapper`**: los alias no resuelven en e2e, así que la
+      suite e2e sigue rota (deuda previa, ajena a PROT-07).

@@ -172,13 +172,18 @@ CREATE INDEX idx_alertas_error_id_ejecucion ON alertas_error(id_ejecucion);
 -- SEED: Datos iniciales
 -- =============================================================================
 
+-- Los 7 primeros codigos replican el enum `NodeType` del backend
+-- (`@core/fsm/types/pipeline-schema.types`): son los unicos que un
+-- `pipeline_schema` puede declarar hoy. `TRIGGER_CRON` y `DESTINO_ACENS` siguen
+-- en el catalogo a la espera de su estrategia; hasta entonces no son
+-- referenciables desde `flujos.configuracion_pipeline` (ver migracion 005).
 INSERT INTO tipos_nodo (codigo, nombre, categoria, descripcion) VALUES
     ('TRIGGER_IMAP', 'Disparador IMAP', 'TRIGGER', 'Inicia el flujo mediante la lectura de correos entrantes'),
-    ('TRIGGER_CRON', 'Disparador Cron', 'TRIGGER', 'Inicia el flujo mediante una programacion temporal'),
-    ('NODO_PARSER_CORREO', 'Parser de Correo', 'PROCESAMIENTO', 'Decodifica y extrae el contenido MIME de un correo'),
+    ('PARSER_PRE_IA', 'Parser Pre-IA', 'PROCESAMIENTO', 'Decodifica el contenido MIME y sanitiza el texto antes de llamar al modelo'),
     ('EXTRACTOR_WEB', 'Extractor Web', 'PROCESAMIENTO', 'Extrae y sanitiza contenido desde una pagina web'),
     ('PROCESADOR_IA', 'Procesador de IA', 'PROCESAMIENTO', 'Ejecuta inferencia mediante un modelo de lenguaje'),
-    ('NODO_VALIDACION', 'Validacion', 'CONTROL', 'Valida los datos del contexto contra un esquema esperado'),
+    ('ESCUDO_POST_IA', 'Escudo Post-IA', 'CONTROL', 'Valida la salida del modelo contra el esquema esperado antes de propagarla'),
     ('MAPEADOR_PLANTILLA', 'Mapeador de Plantilla', 'PROCESAMIENTO', 'Interpola variables dinamicas sobre una plantilla HTML'),
-    ('DESTINO_DRUPAL', 'Destino Drupal', 'DESTINO', 'Publica el resultado final en Drupal via JSON:API'),
+    ('DESTINO_HTTP', 'Destino HTTP', 'DESTINO', 'Publica el resultado final mediante una peticion HTTP (Drupal JSON:API u otro)'),
+    ('TRIGGER_CRON', 'Disparador Cron', 'TRIGGER', 'Inicia el flujo mediante una programacion temporal'),
     ('DESTINO_ACENS', 'Destino Acens', 'DESTINO', 'Realiza el envio masivo a traves de Acens');
