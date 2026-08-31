@@ -436,8 +436,10 @@ de `getAllContext`.
 **La interpolación falla en vez de callar.** A diferencia de la implementación de referencia de
 `architecture-patterns.md` §3 —que devuelve `''`—, una variable ausente o nula lanza
 `MissingContextVariableException`. Interpolar en silencio publicaría un artículo con el título
-vacío; el fallo aparecería aguas abajo, ya en Drupal, lejos de su causa. Por el mismo motivo, un
-valor no escalar se serializa con `JSON.stringify` y nunca como `[object Object]`.
+vacío; el fallo aparecería aguas abajo, ya en Drupal, lejos de su causa.
+
+> La gramática de rutas que aquí se describía (`{{nodo.campo}}`, dos segmentos) quedó ampliada en
+> PROT-10 a rutas compuestas de cualquier profundidad. Ver **§3.15**.
 
 ### 3.7 Máquina de estados de la ejecución
 
@@ -619,4 +621,59 @@ contra **la misma instancia** que consume el motor.
 La **validación previa** (`findOne`, comprobación de `EN_PROCESO`, marca inicial) queda fuera del
 `try` externo a propósito: si marcar `EN_PROCESO` choca contra el mutex `idx_flujo_activo`, la
 excepción debe propagarse **sin** marcar `FALLIDO`. No ha fallado el flujo; no le tocaba el turno.
+
+---
+
+### 3.15 Motor de interpolación de plantillas (PROT-10)
+
+```typescript
+// @core/fsm/context/state-payload.context.ts — funcion PURA exportada
+export const resolvePath: (
+  namespaces: Record<string, Record<string, unknown>>,
+  rawPath: string,
+) => unknown;                    // lanza MissingContextVariableException
+```
+
+#### Gramática soportada
+
+```
+{{ namespace.prop }}                       un segmento
+{{ namespace.prop.sub.sub }}               anidamiento sin limite
+{{ namespace.array[0] }}                   indice de arreglo
+{{ namespace.array[1].prop }}              propiedad dentro de un arreglo
+{{ namespace.array.1.prop }}               notacion equivalente por punto
+{{   namespace.prop   }}                   espaciado holgado
+{{ namespace }}                            NO casa: se deja literal
+```
+
+Identificadores restringidos a `[a-zA-Z0-9_]`, el mismo juego que
+`OUTPUT_NAMESPACE_PATTERN` impone a los `outputNamespace`: una ruta que el DTO no permite declarar
+tampoco debería poder escribirse en una plantilla.
+
+**Algoritmo** — cero `eval`, cero parser de AST (`security-and-scope.md` §3). Los corchetes se
+normalizan a puntos (`urls[0]` → `urls.0`) para recorrer una sola gramática, y la navegación es una
+reducción sobre los segmentos con tres cortes por salto: clave bloqueada, nodo intermedio no
+navegable, propiedad no propia.
+
+#### Serialización por tipo
+
+| Tipo del valor | Salida | Motivo |
+|---|---|---|
+| `string` | El valor tal cual | Es texto destinado a la plantilla; sin comillas ni escapes |
+| `number` / `boolean` / `bigint` | `String(value)` | `42`, no `"42"`. El `bigint` va aquí porque `JSON.stringify(1n)` lanza |
+| objeto / arreglo | `JSON.stringify(value)` | Nunca `[object Object]`: sería corrupción silenciosa en el artículo publicado |
+| `null` / `undefined` | — | Lanza `MissingContextVariableException` |
+
+#### Garantías de seguridad
+
+Dos barreras independientes, cada una necesaria para un vector distinto:
+
+| Barrera | Detiene | Vector real |
+|---|---|---|
+| `BLOCKED_KEYS` (`__proto__`, `constructor`, `prototype`) | Esas claves aunque sean **propias** | `JSON.parse('{"__proto__":{...}}')` las crea como propias; sobreviven a `structuredClone` y al spread de `setNamespace`. Es el camino de la respuesta del nodo de IA |
+| `Object.hasOwn` en cada salto | Todo lo **heredado** | `{{ ns.dato.toString }}` devolvería una función, y `JSON.stringify` de una función es `undefined`: la plantilla acabaría con ese literal dentro |
+
+Ninguna es redundante: retirar cualquiera de las dos hace fallar una prueba distinta de la suite.
+Además, la excepción cita siempre la ruta **literal** que escribió el autor
+(`parsed_email.extracted_urls[99]`), no la forma normalizada interna.
 

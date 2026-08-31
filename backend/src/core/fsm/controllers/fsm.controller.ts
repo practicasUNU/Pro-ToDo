@@ -1,31 +1,43 @@
-import { Body, Controller, HttpCode, HttpStatus, Post } from '@nestjs/common';
+import {
+  Body,
+  Controller,
+  HttpCode,
+  HttpStatus,
+  Post,
+  UseGuards,
+} from '@nestjs/common';
 import {
   ApiBadRequestResponse,
+  ApiBearerAuth,
   ApiBody,
   ApiOkResponse,
   ApiOperation,
   ApiTags,
+  ApiUnauthorizedResponse,
 } from '@nestjs/swagger';
 
-import { PublicIp } from '@common/decorators/public-ip.decorator';
+import { RolesGuard } from '@common/guards/roles.guard';
 import { PipelineSchemaDto } from '@core/fsm/dto/pipeline-schema.dto';
 import { PipelineValidatorService } from '@core/fsm/services/pipeline-validator.service';
+import { JwtAuthGuard } from '@modules/auth/guards/jwt-auth.guard';
 
 /**
  * Superficie HTTP del motor FSM.
  *
- * TODO(PROT-08): `@PublicIp()` es TEMPORAL, solo para poder ejercitar el
- * validador desde Postman durante el desarrollo. Deja la ruta accesible sin
- * token y desde cualquier IP: el unico guard global es `IpWhitelistGuard`, que
- * es justo del que exime, `JwtAuthGuard` no es global y `RedLocalMiddleware`
- * solo cubre las rutas de Swagger (ver `main.ts`). Retirar el decorador y
- * anadir `@UseGuards(JwtAuthGuard, RolesGuard)` antes de cualquier despliegue.
+ * Doble barrera, igual que `AuthController`: al no llevar `@PublicIp()`, la ruta
+ * queda bajo el `IpWhitelistGuard` global (perimetro corporativo, PROT-05) y
+ * ademas exige un JWT valido. El `@PublicIp()` temporal que PROT-08 dejo aqui
+ * para ejercitar el validador desde Postman se retiro en PROT-10.
  *
- * Mitigacion mientras tanto: el endpoint no lee ni escribe en base de datos,
- * solo valida un JSON en memoria y lo devuelve.
+ * Sin `@Roles(...)`: `RolesGuard` deja pasar cuando no hay metadata de roles, de
+ * modo que basta con estar autenticado. Es lo correcto segun
+ * `security-and-scope.md` §2 — configurar y auditar flujos es competencia del
+ * rol EDITOR, no solo del ADMIN.
  */
 @ApiTags('FSM')
-@PublicIp()
+@ApiBearerAuth()
+@ApiUnauthorizedResponse({ description: 'Token ausente, expirado o invalido' })
+@UseGuards(JwtAuthGuard, RolesGuard)
 @Controller('fsm')
 export class FsmController {
   constructor(

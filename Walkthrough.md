@@ -877,3 +877,119 @@ pendientes de aplicar.
 - [ ] **Proteger o retirar `POST /api/fsm/validate-schema`**: sigue con `@PublicIp()` temporal.
 - [ ] **Entidad `Flujo`** que mapee `flujos.configuracion_pipeline` a `PipelineSchema`.
 - [ ] **`test/jest-e2e.json` sin `moduleNameMapper`**: los alias no resuelven en e2e (deuda previa).
+
+---
+
+## 2026-08-31 · Motor de interpolación funcional (PROT-10) — Épica 3 finalizada
+
+`getInterpolatedValue` solo sabía resolver rutas de **dos segmentos**: la regex capturaba
+`(nodo)\.(campo)` y hacía un acceso plano `namespaces[nodo]?.[campo]`. Basta para
+`{{parsed_email.subject}}`, pero se queda corto en cuanto llegan los datos reales — un correo trae
+cabeceras anidadas, el extractor devuelve arreglos de URLs y el nodo de IA responde con listas de
+artículos. `{{ llm_response.articles[1].title }}` ni siquiera casaba con el patrón: se habría
+quedado literal dentro del artículo publicado.
+
+### El algoritmo: normalizar y reducir
+
+Dos decisiones lo mantienen en veinte líneas sin `eval` ni parser de expresiones, ambos prohibidos
+por `security-and-scope.md` §3:
+
+1. **Normalizar los corchetes a puntos** (`urls[0]` → `urls.0`) antes de trocear. Así solo hay *una*
+   gramática que recorrer, y como efecto secundario `{{ node.items[0].id }}` y `{{ node.items.0.id }}`
+   resultan equivalentes gratis, sin código que los reconcilie.
+2. **Navegar por reducción** sobre los segmentos, con tres cortes de seguridad en cada salto: clave
+   bloqueada, nodo intermedio no navegable, propiedad no propia. Cualquiera de los tres devuelve
+   `undefined` y el fail-safe final lo convierte en `MissingContextVariableException`.
+
+`resolvePath` es una función **pura exportada**: no toca estado ni hace I/O, así que se prueba al
+margen de la clase y podrá reutilizarla el nodo `MAPEADOR_PLANTILLA` cuando llegue.
+
+La excepción cita siempre la ruta **literal** que escribió el autor
+(`parsed_email.extracted_urls[99]`), no la normalizada. El mensaje debe mencionar lo que esa persona
+puede buscar en su plantilla, no una forma interna que no reconocería.
+
+### Las dos barreras de seguridad, y por qué ninguna sobra
+
+Aquí está el hallazgo del ticket. El enunciado pedía una lista de bloqueo con `__proto__`,
+`constructor` y `prototype`. Al añadir además `Object.hasOwn` en cada salto, comprobé por mutación
+si cada guarda era portante — y la primera pasada dijo que **la lista de bloqueo era redundante**:
+retirarla no rompía ninguna prueba, porque esas tres claves son heredadas y `Object.hasOwn` ya las
+detenía.
+
+Esa conclusión era incompleta. `JSON.parse('{"__proto__":{"polluted":"si"}}')` crea `__proto__` como
+propiedad **propia** — no invoca el setter—, y comprobado en Node: sobrevive intacta a
+`structuredClone` y al spread de `setNamespace`. Es decir, `Object.hasOwn` devuelve `true` y sin la
+lista de bloqueo el interpolador leería datos controlados por el atacante. Y no es un vector
+hipotético: es exactamente el camino de la respuesta del nodo de IA, que llega como texto y se
+parsea.
+
+Con la prueba 5.13 escrita para ese caso concreto, ambas guardas quedan verificadas por mutación:
+
+| Barrera | Detiene | Prueba que falla si se retira |
+|---|---|---|
+| `BLOCKED_KEYS` | `__proto__` / `constructor` / `prototype` aunque sean **propias** | 5.13 (`__proto__` inyectado vía JSON) |
+| `Object.hasOwn` | Todo lo **heredado** (`toString`, `valueOf`, `hasOwnProperty`) | 5.10 (propiedades heredadas no listadas) |
+
+Sin `Object.hasOwn`, `{{ ns.dato.toString }}` devolvería una función; `JSON.stringify` de una función
+es `undefined`, así que la plantilla acabaría con ese literal dentro del artículo.
+
+Matiz sobre los índices fuera de rango: `{{ urls[99] }}` lo detiene el fail-safe final por sí solo,
+no `Object.hasOwn`. La guarda no le añade nada ahí; su aportación real es la cadena heredada.
+
+### Serialización estricta por tipo
+
+Las ramas se escriben con `typeof` explícito en vez de un `String(value)` sobre `unknown`, que
+volvería a disparar `no-base-to-string` como en PROT-08. El `bigint` acompaña a los números porque
+`structuredClone` lo preserva y `JSON.stringify(1n)` lanza `TypeError`.
+
+### Cierre del endpoint público
+
+Se retiró el `@PublicIp()` que PROT-08 dejó marcado con `TODO(PROT-08)` en `FsmController`, aplicando
+lo que el propio comentario prescribía: `@UseGuards(JwtAuthGuard, RolesGuard)` más `@ApiBearerAuth()`.
+Sin `@Roles(...)`, porque `RolesGuard` deja pasar cuando no hay metadata de roles y configurar flujos
+es competencia del rol EDITOR, no solo del ADMIN (`security-and-scope.md` §2). Al quitar `@PublicIp()`
+la ruta vuelve además bajo el `IpWhitelistGuard` global: doble barrera, igual que `AuthController`.
+
+### Verificación
+
+17 pruebas nuevas en verde (161 en total en el backend). La red de seguridad real fue la
+retrocompatibilidad: las 8 pruebas de interpolación de PROT-08 y las 2 del spec del motor pasaron
+**sin tocar una sola línea**, lo que confirma que el patrón nuevo —que exige al menos un segmento
+tras el namespace— sigue casando con `{{ns.campo}}` exactamente igual que el anterior.
+
+`npx tsc --noEmit` sin errores, `npm run lint` con 0 errores (queda el warning preexistente de
+`main.ts:59`), `nest build` correcto.
+
+---
+
+## Balance de cierre de la Épica 3
+
+| Ticket | Entregado | Verificado |
+|---|---|---|
+| PROT-07 · Contratos y validación topológica | `PipelineSchemaDto`, `validatePipelineTopology`, `PipelineValidatorService` | 16 pruebas unitarias |
+| PROT-08 · Contexto inmutable y persistencia | `StatePayloadContext`, `FsmExecution`, mutex `idx_flujo_activo`, reconciliación en arranque | 17 pruebas; **mutex y reconciliación sin ejercitar contra PostgreSQL** |
+| PROT-09 · Motor y bucle de ejecución | `FsmEngineService`, `NodeStrategyFactory`, resiliencia de dos niveles, circuit breaker | 18 pruebas con repositorio mockeado |
+| PROT-10 · Interpolación funcional | `resolvePath`, serialización por tipo, blindaje de prototipos | 17 pruebas, dos de ellas validadas por mutación |
+
+**Lo que la épica NO ha demostrado todavía**, y conviene tener presente antes de darla por buena:
+
+- **Nada se ha ejecutado contra PostgreSQL.** Las migraciones 005 y 006 siguen sin aplicar; toda la
+  persistencia está verificada con dobles. El mutex, la reconciliación de arranque y los checkpoints
+  no han tocado una base de datos real ni una vez.
+- **El motor no tiene nada que ejecutar.** `NodeStrategyFactory` arranca vacía: cualquier flujo real
+  pausaría en el primer nodo con `StrategyNotFoundException`. Las estrategias concretas son PROT-11+.
+- **Nadie invoca `executeWorkflow`.** No hay endpoint, disparador ni consumidor de cola.
+
+### Checklist de dependencias restantes
+
+- [ ] **Aplicar `db/migrations/005-tipos-nodo-fsm.sql` y `006-fsm-execution-mutex.sql`**. La 006 es
+      requisito de arranque: sin ella el backend no levanta.
+- [ ] **Verificar el mutex y la reconciliación** contra la base de datos real.
+- [x] **Proteger `POST /api/fsm/validate-schema`** — resuelto el 2026-08-31 en PROT-10.
+- [ ] **Estrategias concretas** en `src/strategies/` y su registro en la factoría.
+- [ ] **Quién invoca `executeWorkflow`**: endpoint, disparador IMAP/Cron o consumidor de cola.
+- [ ] **Volcado a `.log` físico con Winston** y fila en `alertas_error` (`architecture-patterns.md` §4).
+- [ ] **Notificación WebSocket** a la sala `flow_${flowId}` (§4 paso 4 y §5).
+- [ ] **Cola BullMQ**: hoy el bucle corre en el proceso que lo invoca y el backoff duerme ese hilo.
+- [ ] **Entidad `Flujo`** que mapee `flujos.configuracion_pipeline` a `PipelineSchema`.
+- [ ] **`test/jest-e2e.json` sin `moduleNameMapper`**: los alias no resuelven en e2e (deuda previa).
