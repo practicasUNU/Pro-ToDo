@@ -769,3 +769,111 @@ la reconciliación de arranque se han ejercitado todavía contra PostgreSQL.
       ninguna lógica de negocio la consulta todavía.
 - [ ] **Ampliar `NodeType`** con `TRIGGER_CRON` y un destino Acens cuando se escriban sus estrategias.
 - [ ] **`test/jest-e2e.json` sin `moduleNameMapper`**: los alias no resuelven en e2e (deuda previa).
+
+---
+
+## 2026-08-31 · Motor FSM, bucle de ejecución y factoría de estrategias (PROT-09) — rama `feat/fsm-engine`
+
+PROT-07 definió el grafo y PROT-08 la memoria inmutable con su checkpoint, pero nada los recorría:
+`StatePayloadContext` no lo consumía ningún servicio y `ejecuciones_flujo` solo se tocaba en la
+reconciliación de arranque. Este cambio pone el orquestador.
+
+### Resiliencia de dos niveles
+
+El motor tiene dos `try` con responsabilidades distintas, y confundirlos sería el error clásico:
+
+- **Interno (`runNode`)**: aísla el fallo de *un nodo*. Cualquier excepción no controlada de una
+  estrategia —incluida `StrategyNotFoundException`— se normaliza a un `NodeResult` con nivel
+  `URGENTE` en vez de propagarse. Un nodo defectuoso no puede tumbar la ejecución entera, y mucho
+  menos el proceso de Node.
+- **Externo**: atrapa el fallo catastrófico, típicamente que PostgreSQL deje de responder. Registra,
+  intenta marcar `FALLIDO` y **re-lanza**, porque quien invocó el motor tiene que enterarse.
+
+El intento de marcar `FALLIDO` va envuelto en su propio `try/catch`: si lo que falló fue justamente
+la base de datos, ese guardado también fallará, y no debe enmascarar el error original.
+
+### La validación previa queda fuera del `try` externo
+
+Buscar la ejecución, comprobar que no esté ya `EN_PROCESO` y marcarla se hacen **antes** de abrir el
+`try`. No es un descuido. Si marcar `EN_PROCESO` choca contra el mutex `idx_flujo_activo` —porque
+otra ejecución del mismo flujo está viva—, la excepción debe propagarse **sin** marcar `FALLIDO`: no
+ha fallado el flujo, simplemente no le tocaba el turno. Meterlo dentro del `try` habría convertido
+una colisión de concurrencia perfectamente normal en una ejecución marcada como rota.
+
+### Defensa en dos capas contra ciclos, y por qué los reintentos van anidados
+
+PROT-07 permite **a propósito** que `onErrorStep` apunte hacia atrás: es el patrón de recuperación.
+El precio es que `A → falla → B → A` es un esquema topológicamente válido que, con un
+`while (cursor !== null)` desnudo, colgaría el worker para siempre. De ahí las dos capas:
+
+| Capa | Mecanismo | Qué acota | Al agotarse |
+|---|---|---|---|
+| 1 | `@Max(5)` en `RetryPolicyDto` (ya existía, de PROT-07) | Reintentos intra-nodo, sin mover el cursor | Fallback a `onErrorStep` o `PAUSADO` |
+| 2 | `MAX_TRANSITIONS = 100` | Saltos entre nodos | Log `URGENTE` + `PAUSADO` |
+
+La decisión de diseño que las mantiene separadas: **los reintentos viven en un bucle anidado**, no en
+un `continue` del bucle externo. Reintentar con `continue` habría hecho que cada reintento consumiera
+presupuesto de transiciones, mezclando dos conceptos que no tienen nada que ver — un nodo con
+`maxRetries: 5` habría gastado cinco saltos de grafo sin moverse del sitio. Anidándolo, el contador
+cuenta saltos reales *por construcción*, sin excepciones que recordar al leer el código. Hay una
+prueba dedicada a eso: tres ejecuciones del mismo nodo producen una sola transición.
+
+### Otras decisiones que no son obvias
+
+- **Solo `GRAVE` reintenta.** `URGENTE` es irrecuperable (contrato roto, credenciales, dato corrupto)
+  y `LEVE` no justifica insistir; ambos van directos a `onErrorStep` o a `PAUSADO`. La severidad
+  gobierna el control de flujo, no solo la traza.
+- **El contador de reintentos no se limpia al tener éxito.** Es por ejecución, no por visita: si un
+  `onErrorStep` hacia atrás devuelve el flujo a un nodo que ya agotó intentos, no vuelve a
+  reintentar. Acota el trabajo total y complementa el circuit breaker.
+- **`initialPayload` aterriza en el namespace reservado `trigger`**, de modo que las plantillas lo
+  interpolan como `{{trigger.campo}}` con independencia de qué nodo dispare el flujo.
+- **Al terminar no se escribe un `EN_PROCESO` con cursor nulo.** La primera versión persistía ese
+  estado intermedio y acto seguido `EXITOSO`: dos `UPDATE` para el mismo instante lógico, y un estado
+  sin significado en la tabla. Lo detectó una aserción de la prueba del flujo lineal al contar los
+  checkpoints. Ahora el nodo terminal rompe el bucle y la finalización escribe `EXITOSO` directamente.
+- **`checkpoint()` hace `Object.assign` sobre la entidad en memoria** además del `update`, así la
+  instancia devuelta refleja el estado final sin un `findOne` extra.
+- **`QueryDeepPartialEntity` no admite un `Record` con firma de índice**: intenta hacerlo parcial
+  recursivamente y no cuadra con `Record<string, unknown>`. Hizo falta un cast acotado en el `update`,
+  documentado en el propio archivo; es seguro porque `CheckpointPatch` solo declara columnas reales.
+- **El registro de estrategias es explícito**, no por descubrimiento automático: una estrategia solo
+  entra en juego si alguien la declara, lo que evita que un archivo suelto en `src/strategies/` se
+  active sin querer. `NodeStrategyFactory` se exporta desde `FsmModule` para que los módulos de nodos
+  registren contra la misma instancia que consume el motor.
+
+### Verificación
+
+18 pruebas nuevas en verde (144 en total en el backend). Cubren los casos obligatorios —flujo lineal
+de 3 nodos, reintento intra-nodo sin alterar la ruta, límite del DTO, fallo con `onErrorStep`, fallo
+sin fallback, aislamiento de excepción, estrategia inexistente, circuit breaker cortando en
+exactamente 100 visitas, y reanudación desde el cursor persistido— más `LEVE` sin reintentar, el
+backoff exponencial con temporizadores falsos, el namespace `trigger` interpolable, y las
+precondiciones (`NotFoundException`, `ConflictException`) junto al fallo catastrófico.
+
+Las pruebas usan la **factoría real** con estrategias falsas registradas, no un doble de la factoría:
+así se ejercita de verdad el camino de registro y resolución, y el caso de estrategia inexistente
+sale gratis con no registrar nada.
+
+`npx tsc --noEmit` sin errores, `npm run lint` con 0 errores (queda el warning preexistente de
+`main.ts:59`), `nest build` correcto.
+
+**Sin verificación contra la base de datos**: el repositorio va mockeado y las migraciones siguen
+pendientes de aplicar.
+
+### Checklist de dependencias restantes
+
+- [ ] **Aplicar `db/migrations/005-tipos-nodo-fsm.sql` y `006-fsm-execution-mutex.sql`**. La 006 es
+      requisito de arranque: sin ella el backend no levanta.
+- [ ] **Estrategias concretas** en `src/strategies/` y su registro en `NodeStrategyFactory`
+      (PROT-10). Hoy la factoría arranca vacía y cualquier flujo pausaría en el primer nodo.
+- [ ] **Quién invoca `executeWorkflow`**: no hay endpoint, disparador ni consumidor de cola todavía.
+- [ ] **Volcado a `.log` físico con Winston** y fila en `alertas_error` ante un fallo
+      (`architecture-patterns.md` §4, pasos 1 y 2). Hoy el motor solo escribe en el `Logger` de Nest.
+- [ ] **Notificación WebSocket** (`node_started`, `node_completed`, `flow_finished`, `flow_failed`) a
+      la sala `flow_${flowId}` (§4 paso 4 y §5).
+- [ ] **Cola BullMQ**: «asíncrono» aquí es `async/await`; el bucle corre en el proceso que lo invoca
+      y el backoff duerme ese hilo. Las ejecuciones pesadas deben pasar a productor-consumidor (§5).
+- [ ] **Proteger o retirar `POST /api/fsm/validate-schema`**: sigue con `@PublicIp()` temporal.
+- [ ] **Entidad `Flujo`** que mapee `flujos.configuracion_pipeline` a `PipelineSchema`.
+- [ ] **`test/jest-e2e.json` sin `moduleNameMapper`**: los alias no resuelven en e2e (deuda previa).

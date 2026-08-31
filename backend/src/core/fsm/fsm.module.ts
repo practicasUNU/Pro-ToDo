@@ -3,6 +3,8 @@ import { InjectRepository, TypeOrmModule } from '@nestjs/typeorm';
 
 import { FsmController } from '@core/fsm/controllers/fsm.controller';
 import { FsmExecution } from '@core/fsm/entities/fsm-execution.entity';
+import { NodeStrategyFactory } from '@core/fsm/factories/node-strategy.factory';
+import { FsmEngineService } from '@core/fsm/services/fsm-engine.service';
 import { PipelineValidatorService } from '@core/fsm/services/pipeline-validator.service';
 import { ExecutionState } from '@core/fsm/types/fsm.enums';
 
@@ -10,13 +12,17 @@ import type { OnModuleInit } from '@nestjs/common';
 import type { Repository } from 'typeorm';
 
 /**
- * Modulo del motor FSM: contratos, validacion y persistencia del checkpoint.
+ * Modulo del motor FSM: contratos, validacion, factoria de estrategias y el
+ * bucle de ejecucion con su persistencia de checkpoints.
+ *
+ * `NodeStrategyFactory` se exporta para que los modulos de nodos (PROT-10)
+ * registren sus estrategias contra la misma instancia que consume el motor.
  */
 @Module({
   imports: [TypeOrmModule.forFeature([FsmExecution])],
   controllers: [FsmController],
-  providers: [PipelineValidatorService],
-  exports: [PipelineValidatorService],
+  providers: [PipelineValidatorService, NodeStrategyFactory, FsmEngineService],
+  exports: [PipelineValidatorService, NodeStrategyFactory, FsmEngineService],
 })
 export class FsmModule implements OnModuleInit {
   private readonly logger = new Logger(FsmModule.name);

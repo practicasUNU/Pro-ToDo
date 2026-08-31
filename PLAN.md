@@ -274,9 +274,9 @@ nueva bajo ese layout nace protegida.
 
 ---
 
-## 3. Motor FSM: contratos, contexto y persistencia (PROT-07 / PROT-08)
+## 3. Motor FSM: contratos, contexto, persistencia y bucle (PROT-07 / PROT-08 / PROT-09)
 
-Ramas: `feat/fsm-contracts` (PROT-07) y `feat/fsm-payload-context` (PROT-08).
+Ramas: `feat/fsm-contracts` (PROT-07), `feat/fsm-payload-context` (PROT-08) y `feat/fsm-engine` (PROT-09).
 
 Primera pieza del motor: el contrato del grafo que el `FsmEngineService` recorrerá. Describe qué
 nodo viene después de cuál, dónde escribe cada uno su resultado y cómo se reintenta ante un fallo.
@@ -485,4 +485,138 @@ StatePayloadContext  ──  FUERA del contenedor: `new` por ejecucion, no provi
 
 **Requisito de arranque:** hasta aplicar la 006 el backend no levanta — `onModuleInit` lanza un
 `UPDATE` y `@UpdateDateColumn` añade `fecha_actualizacion` al `SET`.
+
+---
+
+### 3.10 Contratos polimórficos de nodo (PROT-09)
+
+```typescript
+// @core/fsm/types/node-strategy.types.ts
+export type NodeErrorSeverity = 'LEVE' | 'GRAVE' | 'URGENTE';   // = enum_nivel_error
+
+export interface NodeErrorDetail {
+  level: NodeErrorSeverity;      // gobierna el control de flujo, no solo la traza
+  message: string;
+  missingFields?: string[];
+  stackTrace?: string;
+}
+
+export interface NodeResult {
+  success: boolean;
+  data?: Record<string, unknown>;   // se escribe en el outputNamespace del nodo
+  error?: NodeErrorDetail;
+}
+
+export interface INodeStrategy {
+  readonly nodeType: NodeType;
+  execute(context: StatePayloadContext, params: Record<string, unknown>): Promise<NodeResult>;
+}
+
+// @core/fsm/exceptions/strategy-not-found.exception.ts
+export class StrategyNotFoundException extends Error { readonly nodeType: string; }
+
+// @core/fsm/factories/node-strategy.factory.ts
+@Injectable()
+export class NodeStrategyFactory {
+  registerStrategy(strategy: INodeStrategy): void;
+  getStrategy(nodeType: NodeType): INodeStrategy;   // lanza StrategyNotFoundException
+}
+
+// @core/fsm/services/fsm-engine.service.ts
+export const TRIGGER_NAMESPACE = 'trigger';
+export const MAX_TRANSITIONS = 100;
+
+@Injectable()
+export class FsmEngineService {
+  executeWorkflow(
+    executionId: string,
+    schema: PipelineSchemaDto,
+    initialPayload?: Record<string, unknown>,
+  ): Promise<FsmExecution>;      // NotFoundException | ConflictException
+}
+```
+
+**Un nodo no lanza para señalar un fallo de negocio**: devuelve `success: false` con su
+`NodeErrorDetail`. Las excepciones quedan para lo imprevisto, que el motor aísla y normaliza a ese
+mismo contrato con nivel `URGENTE`.
+
+### 3.11 Defensa en dos capas contra ciclos
+
+| Capa | Mecanismo | Qué acota | Dónde vive | Al agotarse |
+|---|---|---|---|---|
+| 1 | `@Max(5)` en `RetryPolicyDto` | Reintentos **intra-nodo**: mismo cursor, sin moverse | `retry_state[nodeId]` (jsonb) | Fallback a `onErrorStep`, o `PAUSADO` |
+| 2 | `MAX_TRANSITIONS = 100` | Saltos **entre nodos**: cada cambio de cursor | Variable local del bucle | Log `URGENTE` + `PAUSADO` |
+
+La capa 2 es imprescindible porque §3.3 permite **a propósito** que `onErrorStep` apunte hacia atrás:
+`A → falla → B → A` es un esquema topológicamente válido que, sin presupuesto, colgaría el worker.
+
+### 3.12 Bucle de ejecución
+
+```
+                        ┌──────────────────────────────────────────┐
+                        │  while (activeCursor !== null)           │
+                        │  ++transitions > MAX_TRANSITIONS ────────┼──► URGENTE + PAUSADO
+                        └────────────────┬─────────────────────────┘
+                                         ▼
+                        ┌────────────────────────────────────────┐
+                        │  BUCLE INTRA-NODO (no mueve el cursor) │
+                        │  ┌──────────────────────────────────┐  │
+                        │  │ runNode()  ── try/catch interno  │  │
+                        │  │   excepción ⇒ NodeResult URGENTE │  │
+                        │  └───────────────┬──────────────────┘  │
+                        │      fallo GRAVE │ con intentos libres │
+                        │      retry_state++ · checkpoint ·      │
+                        │      sleep(backoffMs · factor^(n-1)) ──┘  (vuelve arriba)
+                        └────────────────┬───────────────────────┘
+                                         ▼
+        ┌────────────────────────────────┼────────────────────────────────┐
+        ▼                                ▼                                ▼
+    success                     onErrorStep !== null            onErrorStep === null
+ setNamespace()                  cursor = onErrorStep            checkpoint(PAUSADO)
+ cursor = nextStep                checkpoint(EN_PROCESO)          break
+ checkpoint(EN_PROCESO)                  │                          │
+        │                          TRANSICIÓN                       │
+   TRANSICIÓN                                                   (conserva el cursor
+        │                                                        del nodo culpable)
+        ▼
+  cursor === null ──► checkpoint(EXITOSO, null)
+```
+
+Nótese la asimetría deliberada: **el bucle interno no incrementa `transitions`**. Anidarlo, en lugar
+de reintentar con un `continue` del bucle externo, hace que el presupuesto cuente saltos de grafo
+*por construcción*, sin excepciones que recordar.
+
+Cuando el nodo terminal tiene éxito el motor **no** escribe un `EN_PROCESO` con cursor nulo: rompe el
+bucle y deja que la finalización persista `EXITOSO` directamente. Un estado intermedio sin
+significado, y una ida y vuelta a la base de datos, menos.
+
+### 3.13 Diagrama de inyección de dependencias (PROT-09)
+
+```
+AppModule
+   └── FsmModule  ──implements OnModuleInit──► reconcilia EN_PROCESO → PAUSADO al arrancar
+         ├── TypeOrmModule.forFeature([FsmExecution])
+         │        └── Repository<FsmExecution> ──┬── FsmModule (reconciliación)
+         │                                       └── FsmEngineService (checkpoints)
+         ├── FsmController ──► PipelineValidatorService
+         ├── FsmEngineService ──► NodeStrategyFactory ──► Map<NodeType, INodeStrategy>
+         │                                                  (vacío hasta PROT-10)
+         └── exports: PipelineValidatorService, NodeStrategyFactory, FsmEngineService
+
+StatePayloadContext  ──  FUERA del contenedor: `new` por ejecución, no provider
+```
+
+`NodeStrategyFactory` se exporta para que los módulos de nodos de PROT-10 registren sus estrategias
+contra **la misma instancia** que consume el motor.
+
+### 3.14 Resiliencia de dos niveles
+
+| Nivel | Qué atrapa | Reacción |
+|---|---|---|
+| `try` interno (`runNode`) | Excepción no controlada de una estrategia, incluida `StrategyNotFoundException` | Se normaliza a `NodeResult` URGENTE; el flujo sigue su lógica de fallback |
+| `try` externo | Fallo catastrófico (la BD deja de responder) | `logger.error`, intento defensivo de `FALLIDO` y **re-lanza** |
+
+La **validación previa** (`findOne`, comprobación de `EN_PROCESO`, marca inicial) queda fuera del
+`try` externo a propósito: si marcar `EN_PROCESO` choca contra el mutex `idx_flujo_activo`, la
+excepción debe propagarse **sin** marcar `FALLIDO`. No ha fallado el flujo; no le tocaba el turno.
 
