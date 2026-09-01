@@ -10,6 +10,7 @@ import { useSessionMonitor } from '@/composables/useSessionMonitor';
 const ROUTE_BREADCRUMBS: Record<string, string> = {
   '/': 'Inicio',
   '/users': 'Gestion de Usuarios',
+  '/ip-whitelist': 'Lista Blanca de IPs',
 };
 
 const route = useRoute();
@@ -50,6 +51,13 @@ const toggleLeftDrawer = (): void => {
             <q-icon name="group" size="20px" />
           </q-item-section>
           <q-item-section class="pd-nav">Usuarios</q-item-section>
+        </q-item>
+
+        <q-item to="/ip-whitelist" clickable v-ripple>
+          <q-item-section avatar>
+            <q-icon name="shield" size="20px" />
+          </q-item-section>
+          <q-item-section class="pd-nav">Lista Blanca de IPs</q-item-section>
         </q-item>
       </q-list>
     </q-drawer>

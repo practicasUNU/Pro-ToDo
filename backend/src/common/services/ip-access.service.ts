@@ -1,12 +1,8 @@
 import { ForbiddenException, Injectable, Logger } from '@nestjs/common';
-import { ConfigService } from '@nestjs/config';
-import ipRangeCheck from 'ip-range-check';
 
-import {
-  ACCESS_DENIED_MESSAGE,
-  ALLOWED_IP_RANGES_ENV,
-} from '@common/constants/security.constants';
+import { ACCESS_DENIED_MESSAGE } from '@common/constants/security.constants';
 import { extractClientIp } from '@common/utils/client-ip.util';
+import { AllowedIpsService } from '@modules/security/allowed-ips/allowed-ips.service';
 
 import type { Request } from 'express';
 
@@ -15,46 +11,25 @@ import type { Request } from 'express';
  *
  * Es la unica fuente de verdad sobre "que IP puede entrar": tanto el `IpWhitelistGuard`
  * (rutas del router de Nest) como el `RedLocalMiddleware` (rutas de Swagger, que viven
- * fuera del router) delegan aqui para evitar duplicar la regla.
+ * fuera del router) delegan aqui para evitar duplicar la regla. La resolucion de los
+ * rangos autorizados (tabla `allowed_ips` + fallback de arranque) vive en
+ * `AllowedIpsService`; este servicio solo orquesta la extraccion de IP y el rechazo.
  */
 @Injectable()
 export class IpAccessService {
   private readonly logger = new Logger(IpAccessService.name);
 
-  constructor(private readonly configService: ConfigService) {}
-
-  /**
-   * Rangos CIDR autorizados, parseados desde `ALLOWED_IP_RANGES`.
-   * Se lee en cada peticion (no se cachea) para que un cambio de configuracion
-   * en caliente no requiera reiniciar el proceso.
-   */
-  private getAllowedRanges(): string[] {
-    return (this.configService.get<string>(ALLOWED_IP_RANGES_ENV) ?? '')
-      .split(',')
-      .map((range) => range.trim())
-      .filter(Boolean);
-  }
+  constructor(private readonly allowedIpsService: AllowedIpsService) {}
 
   /**
    * Verifica que la peticion provenga de la red corporativa / VPN autorizada.
    *
-   * Politica estricta fail-closed: si la lista de rangos no esta definida, esta vacia
-   * o la IP de origen no se puede determinar, se rechaza. Nunca se abre el perimetro
-   * por ausencia de configuracion.
+   * Politica estricta fail-closed: si la IP de origen no se puede determinar o no
+   * cae en ningun rango autorizado, se rechaza.
    *
    * @throws ForbiddenException (HTTP 403) si el origen no esta autorizado.
    */
-  public assertRequestAllowed(req: Request): void {
-    const allowedRanges = this.getAllowedRanges();
-
-    if (allowedRanges.length === 0) {
-      throw this.buildDenial(
-        req,
-        null,
-        'ALLOWED_IP_RANGES no esta configurada (politica fail-closed)',
-      );
-    }
-
+  public async assertRequestAllowed(req: Request): Promise<void> {
     const clientIp = extractClientIp(req);
 
     if (!clientIp) {
@@ -65,7 +40,7 @@ export class IpAccessService {
       );
     }
 
-    if (!ipRangeCheck(clientIp, allowedRanges)) {
+    if (!(await this.allowedIpsService.isIpAllowed(clientIp))) {
       throw this.buildDenial(
         req,
         clientIp,

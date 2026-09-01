@@ -17,8 +17,12 @@ import type { NextFunction, Request, Response } from 'express';
 export class RedLocalMiddleware implements NestMiddleware {
   constructor(private readonly ipAccessService: IpAccessService) {}
 
-  public use(req: Request, _res: Response, next: NextFunction): void {
-    this.ipAccessService.assertRequestAllowed(req);
+  public async use(
+    req: Request,
+    _res: Response,
+    next: NextFunction,
+  ): Promise<void> {
+    await this.ipAccessService.assertRequestAllowed(req);
 
     next();
   }

@@ -157,6 +157,20 @@ CREATE TABLE refresh_tokens (
 );
 
 -- =============================================================================
+-- Tabla: ALLOWED_IPS (PROT-05: perímetro de red dinámico)
+-- Duplicada en db/migrations/007-allowed-ips.sql para las bases de datos ya
+-- creadas: este archivo solo se ejecuta con el volumen de Docker vacío.
+-- =============================================================================
+
+CREATE TABLE allowed_ips (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    ip_o_cidr VARCHAR(64) NOT NULL UNIQUE,
+    descripcion VARCHAR(255) NOT NULL,
+    creado_en TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    actualizado_en TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+-- =============================================================================
 -- Índices de apoyo para claves foráneas de alta consulta
 -- =============================================================================
 
