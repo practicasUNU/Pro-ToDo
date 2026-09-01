@@ -172,7 +172,7 @@ onBeforeUnmount(clearCountdown);
             :class="{ 'pd-login-brand__logo--inverted': themeStore.isDark }"
           />
 
-          <h1 class="pd-h1 pd-login-brand__title q-mb-xs">Proto-Do</h1>
+          <h1 class="pd-h1 pd-login-brand__title q-mb-xs">Pro-ToDo</h1>
 
           <a class="pd-link pd-nav" href="https://unuware.com" target="_blank" rel="noopener">
             unuware.com

@@ -4,8 +4,9 @@ import { useQuasar, type QTableColumn } from 'quasar';
 
 import { useUsersStore } from '@stores/users.store';
 
+import SafeDeleteModal from '@components/shared/SafeDeleteModal.vue';
+
 import UserDialog from './UserDialog.vue';
-import SafeDeleteModal from './SafeDeleteModal.vue';
 
 import { extractApiErrorMessage } from '@/utils/api-error';
 import { deriveDisplayName, roleDisplayLabel, roleIconName } from '@/utils/user-display';
@@ -103,9 +104,7 @@ onMounted(loadUsers);
     <header class="users-header">
       <div>
         <h1 class="pd-h1">Gestion de Usuarios</h1>
-        <p class="pd-subtitle">
-          Alta, edicion y baja logica de cuentas con acceso a Proto-Do.
-        </p>
+        <p class="pd-subtitle">Alta, edicion y baja logica de cuentas con acceso a Proto-Do.</p>
       </div>
 
       <q-btn
