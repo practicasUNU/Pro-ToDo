@@ -993,3 +993,108 @@ tras el namespace— sigue casando con `{{ns.campo}}` exactamente igual que el a
 - [ ] **Cola BullMQ**: hoy el bucle corre en el proceso que lo invoca y el backoff duerme ese hilo.
 - [ ] **Entidad `Flujo`** que mapee `flujos.configuracion_pipeline` a `PipelineSchema`.
 - [ ] **`test/jest-e2e.json` sin `moduleNameMapper`**: los alias no resuelven en e2e (deuda previa).
+
+---
+
+## 2026-08-31 · Primera ejecución real del motor contra PostgreSQL (runner E2E) — rama `feat/fsm-e2e`
+
+El balance de cierre de la Épica 3 dejaba una afirmación incómoda por escrito: **nada se había
+ejecutado contra PostgreSQL**. 161 pruebas, todas con dobles; el repositorio mockeado; la factoría
+vacía. El motor nunca había recorrido un pipeline de verdad ni escrito un checkpoint real, y el
+cableado de Nest jamás se había arrancado. Esta entrada cierra esa brecha.
+
+### El bloqueo que el enunciado no contemplaba
+
+La FASE 2 pedía insertar la ejecución con «`id_flujo`: UUID aleatorio (`v4()`)». Eso habría fallado
+en el primer intento: `ejecuciones_flujo.id_flujo` es **clave foránea a `flujos`**, y esa tabla
+estaba vacía. Y `flujos.id_usuario_creador` es a su vez FK contra `usuarios`. La siembra necesita la
+cadena entera: localizar un ADMIN activo → crear el flujo → crear la ejecución. Se reutiliza uno de
+los tres ADMIN que ya existen en lugar de inventar usuarios de prueba, y `flujos` se inserta con SQL
+directo porque todavía no tiene entidad TypeORM.
+
+### Estrategias dummy con tipos reales, no inventados
+
+El enunciado proponía `'DUMMY_INPUT' as any`. Se descartó: las tres dummy se registran bajo
+`TRIGGER_IMAP`, `MAPEADOR_PLANTILLA` y `DESTINO_HTTP`, que son exactamente los roles que representan
+y los huecos que ocuparán las estrategias definitivas. Cero casts, y una ventaja que no es cosmética:
+**el esquema dummy pasa el `PipelineValidatorService`**, así que el e2e asevera de paso que sigue
+siendo un pipeline legítimo según el contrato de PROT-07. Con un tipo inventado eso era imposible.
+
+### El andamiaje no puede cablearse en un módulo
+
+Las dummy y el runner viven en `src/` (donde los pedía el enunciado) pero se excluyen de
+`tsconfig.build.json` con `**/dummies/**` y `**/scripts/**`, para que no viajen a `dist/`. Eso tiene
+una consecuencia que condiciona el diseño: **si `FsmModule` los declarara en `providers`,
+`nest build` fallaría**, porque el módulo referenciaría archivos que la compilación deja fuera. Por
+eso no se cablean en ningún módulo; el runner y el spec los instancian con `new` y los pasan a
+`NodeStrategyFactory.registerStrategy()`, que es justo el punto de extensión que PROT-09 preparó.
+
+De ahí también que `DummyLogDispatcherStrategy` cree su `Logger` con `new` en lugar de inyectarlo:
+vive fuera del contenedor, no hay inyección que resolver.
+
+### Reparar la suite e2e costó tres pasadas
+
+`test/jest-e2e.json` llevaba roto desde que se introdujeron los alias, y arreglarlo tuvo más aristas
+de las esperadas:
+
+1. Faltaba el `moduleNameMapper`. Al añadirlo con `<rootDir>/src/...` **seguía fallando**: `rootDir`
+   es `"."` **relativo al propio archivo de configuración**, es decir `backend/test/`, no `backend/`.
+   Las rutas correctas son `<rootDir>/../src/...`.
+2. Después falló al resolver `otplib`, que publica fuentes TS/ESM. El jest principal ya lo
+   contemplaba con `transformIgnorePatterns` y `allowJs` en el transform; hubo que replicar ambos.
+
+Con eso, `app.e2e-spec.ts` —que estaba roto desde hacía tickets— **pasa por primera vez**.
+
+### Resultado de la primera ejecución real
+
+```
+[NodeStrategyFactory] Estrategia registrada para el nodo "TRIGGER_IMAP".
+[NodeStrategyFactory] Estrategia registrada para el nodo "MAPEADOR_PLANTILLA".
+[NodeStrategyFactory] Estrategia registrada para el nodo "DESTINO_HTTP".
+[RunDummyE2E] El esquema dummy supera PipelineValidatorService.
+[DummyLogDispatcherStrategy] [PROTO-DO MOTOR FSM] -> Salida generada:
+    Noticia: Innovacion en Madrid | remitente: prensa@unuware.com
+
+estado = EXITOSO | paso_actual = null
+namespaces = input_data, rendered_message, dispatch_result
+```
+
+La plantilla del nodo mapeador combina a propósito una ruta compuesta con índice de arreglo
+(`{{ input_data.articulos[0].titulo }}`) y otra simple, de modo que la corrida certifica que el
+resolutor funcional de PROT-10 opera sobre datos que ya pasaron por `structuredClone`, por el
+checkpoint y por una columna `jsonb` de PostgreSQL. Que la interpolación resuelva ahí es la prueba
+que ninguna suite con dobles podía dar.
+
+### Verificación
+
+- `npm run test:fsm:manual` — el runner completa el pipeline e imprime el checkpoint releído de la base.
+- `npm run test:e2e` — **7 pruebas en verde**: 1 de `app.e2e-spec.ts` (reparada) + 6 de
+  `fsm-engine.e2e-spec.ts`.
+- `npm test` — **161 unitarias**, que siguen sin necesitar base de datos: la suite unitaria no quedó
+  acoplada a Docker.
+- `npx tsc --noEmit` sin errores, `npm run lint` con 0 errores, `nest build` correcto y **`dist/`
+  verificado sin rastro** de `dummies/` ni `scripts/`.
+- Comprobado en la base: dos ejecuciones persistidas (runner + e2e), ambas `EXITOSO`, `paso_actual`
+  nulo y los tres namespaces en `contexto_acumulado`.
+
+La prueba que más valor aporta es la que lee con SQL directo, al margen del mapeo de TypeORM:
+comprueba lo que quedó **escrito**, no lo que el motor creía haber escrito.
+
+### Checklist de dependencias restantes
+
+- [x] **Aplicar las migraciones 005 y 006** — resuelto: verificadas como aplicadas el 2026-08-31.
+- [x] **Verificar el motor contra PostgreSQL real** — resuelto el 2026-08-31 con el runner y el e2e.
+- [x] **`test/jest-e2e.json` sin `moduleNameMapper`** — resuelto el 2026-08-31; `app.e2e-spec.ts`
+      vuelve a ejecutarse.
+- [ ] **Ejercitar el mutex `idx_flujo_activo` contra la base**: cada corrida crea su propio flujo, así
+      que dos ejecuciones nunca colisionan. Falta una prueba que fuerce dos `EN_PROCESO` del mismo
+      `id_flujo` y espere la violación de unicidad.
+- [ ] **Ejercitar la reanudación y la pausa contra la base**: el e2e solo cubre el camino feliz. Falta
+      un flujo que falle sin `onErrorStep`, quede `PAUSADO` y se reanude desde el cursor persistido.
+- [ ] **Estrategias reales** en `src/strategies/`: las dummy son andamiaje, no implementan IMAP,
+      plantillas ni publicación HTTP.
+- [ ] **Quién invoca `executeWorkflow`** en producción: endpoint, disparador o consumidor de cola.
+- [ ] **Volcado a `.log` con Winston** y fila en `alertas_error` (`architecture-patterns.md` §4).
+- [ ] **Notificación WebSocket** a la sala `flow_${flowId}` (§4 paso 4 y §5).
+- [ ] **Cola BullMQ**: el bucle sigue corriendo en el proceso que lo invoca.
+- [ ] **Entidad `Flujo`**: la siembra usa SQL directo porque `flujos` aún no está mapeada.
