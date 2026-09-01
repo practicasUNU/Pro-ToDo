@@ -23,6 +23,12 @@ const routes: RouteRecordRaw[] = [
         // llegue aqui solo veria una tabla vacia y un 403 en la consola.
         meta: { requiresAdmin: true },
       },
+      {
+        path: 'ip-whitelist',
+        component: () => import('@/pages/IpWhitelistPage.vue'),
+        // Espeja el @Roles(UserRole.ADMIN) del AllowedIpsController.
+        meta: { requiresAdmin: true },
+      },
     ],
   },
 

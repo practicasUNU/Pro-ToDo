@@ -24,7 +24,7 @@ export class IpWhitelistGuard implements CanActivate {
     private readonly ipAccessService: IpAccessService,
   ) {}
 
-  public canActivate(context: ExecutionContext): boolean {
+  public async canActivate(context: ExecutionContext): Promise<boolean> {
     const isPublicIp = this.reflector.getAllAndOverride<boolean>(
       IS_PUBLIC_IP_KEY,
       [context.getHandler(), context.getClass()],
@@ -32,7 +32,7 @@ export class IpWhitelistGuard implements CanActivate {
 
     if (isPublicIp) return true;
 
-    this.ipAccessService.assertRequestAllowed(
+    await this.ipAccessService.assertRequestAllowed(
       context.switchToHttp().getRequest<Request>(),
     );
 
