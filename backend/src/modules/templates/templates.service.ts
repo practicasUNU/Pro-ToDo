@@ -1,0 +1,295 @@
+import {
+  BadRequestException,
+  ConflictException,
+  Injectable,
+  NotFoundException,
+} from '@nestjs/common';
+import { InjectRepository } from '@nestjs/typeorm';
+import { Repository } from 'typeorm';
+
+import { CreateTemplateDto } from './dto/create-template.dto';
+import { UpdateTemplateDto } from './dto/update-template.dto';
+import { HtmlTemplate } from './entities/html-template.entity';
+
+import type { FindOptionsWhere } from 'typeorm';
+
+/**
+ * Namespaces que un nodo del pipeline puede llegar a producir.
+ *
+ * Lista CERRADA y ordenada por posicion en el flujo. Es la lista blanca contra
+ * la que se valida toda variable de una plantilla: si un namespace no esta
+ * aqui, ningun nodo lo escribira nunca y la variable jamas resolveria.
+ */
+export const ALLOWED_NAMESPACES = [
+  'raw_email',
+  'parsed_email',
+  'scraped_web',
+  'llm_response',
+  'validated_drupal_json',
+  'rendered_html',
+] as const;
+
+/** Busqueda O(1); el arreglo se exporta para documentacion y para el frontend. */
+const ALLOWED_NAMESPACE_SET: ReadonlySet<string> = new Set(ALLOWED_NAMESPACES);
+
+/**
+ * Variable interpolable: un namespace raiz seguido de al menos un segmento.
+ *
+ * Acepta propiedades (`.campo`) e indices en notacion de literal de segmento de
+ * Handlebars (`.[0]`), encadenados sin limite:
+ *
+ *   {{ parsed_email.clean_title }}
+ *   {{ llm_response.articles.[0].title }}
+ *
+ * Exigir un segmento como minimo deja fuera `{{ parsed_email }}` a proposito: un
+ * namespace entero no es un valor interpolable. El grupo 1 captura la raiz, que
+ * es lo que se contrasta con la lista blanca, y el grupo 2 el resto de la ruta.
+ */
+const TEMPLATE_VARIABLE_PATTERN =
+  /\{\{\s*([a-zA-Z0-9_]+)((?:\.(?:[a-zA-Z0-9_]+|\[\d+\]))+)\s*\}\}/g;
+
+/** Cualquier marcador que sobreviva a la extraccion: sintaxis no reconocida. */
+const RESIDUAL_MARKER_PATTERN = /\{\{[\s\S]*?\}\}/;
+
+/** `.[0]` -> `.0`, la forma que `resolvePath` del contexto FSM navega. */
+const SEGMENT_LITERAL_PATTERN = /\.\[(\d+)\]/g;
+
+/**
+ * Construcciones de Handlebars que quedan fuera del lenguaje admitido.
+ *
+ * `security-and-scope.md` §3 limita la transformacion de datos a "sustitucion
+ * determinista de variables": nada de logica en la plantilla. Rechazarlas al
+ * guardar, y no al renderizar, es lo que convierte el limite en un Poka-Yoke.
+ */
+const FORBIDDEN_SYNTAX: ReadonlyArray<{ token: string; reason: string }> = [
+  {
+    token: '{{{',
+    reason:
+      'el triple-stash desactiva el escapado de HTML y abriria una via de inyeccion en el articulo publicado',
+  },
+  {
+    token: '{{&',
+    reason:
+      'la marca de no-escapado desactiva el escapado de HTML y abriria una via de inyeccion en el articulo publicado',
+  },
+  {
+    token: '{{#',
+    reason:
+      'los bloques y helpers introducen logica en la plantilla, que solo admite sustitucion determinista de variables',
+  },
+  {
+    token: '{{/',
+    reason: 'cierra un bloque, y los bloques no estan admitidos',
+  },
+  {
+    token: '{{>',
+    reason:
+      'los parciales cargarian una plantilla externa fuera del control del gestor',
+  },
+];
+
+/**
+ * Gestor de plantillas HTML (PROT-11.1).
+ *
+ * Su razon de ser no es el CRUD, sino la validacion estatica: una plantilla se
+ * guarda solo si TODAS sus variables apuntan a un namespace que algun nodo
+ * produce. El fallo aparece al crearla, no semanas despues cuando un flujo en
+ * produccion publique un articulo con el titular en blanco.
+ */
+@Injectable()
+export class TemplatesService {
+  constructor(
+    @InjectRepository(HtmlTemplate)
+    private readonly templateRepository: Repository<HtmlTemplate>,
+  ) {}
+
+  public async findAll(onlyActive = true): Promise<HtmlTemplate[]> {
+    const where: FindOptionsWhere<HtmlTemplate> = onlyActive
+      ? { active: true }
+      : {};
+
+    // Orden alfabetico y no por fecha: el consumidor natural del listado es el
+    // selector de plantillas de la Vista 4.
+    return this.templateRepository.find({ where, order: { name: 'ASC' } });
+  }
+
+  public async findOne(id: string): Promise<HtmlTemplate> {
+    const template = await this.templateRepository.findOne({ where: { id } });
+
+    if (!template) {
+      throw new NotFoundException(`Plantilla con id "${id}" no encontrada`);
+    }
+
+    return template;
+  }
+
+  /**
+   * Registra una plantilla nueva.
+   *
+   * @param createTemplateDto Datos validados por `class-validator`.
+   * @param createdById Autor, tomado del JWT y no del cuerpo de la peticion.
+   */
+  public async create(
+    createTemplateDto: CreateTemplateDto,
+    createdById: string,
+  ): Promise<HtmlTemplate> {
+    const name = createTemplateDto.name.trim();
+
+    // El nombre se comprueba antes de analizar el HTML: es la validacion mas
+    // barata y la que el usuario corrige mas a menudo.
+    await this.assertNameAvailable(name);
+
+    const requiredVariables = this.extractAndValidateVariables(
+      createTemplateDto.htmlContent,
+    );
+
+    const template = this.templateRepository.create({
+      name,
+      description: createTemplateDto.description?.trim() ?? null,
+      htmlContent: createTemplateDto.htmlContent,
+      requiredVariables,
+      createdById,
+    });
+
+    return this.templateRepository.save(template);
+  }
+
+  /**
+   * Actualiza una plantilla existente.
+   *
+   * Cambiar el HTML obliga a recalcular `requiredVariables`: dejarlas obsoletas
+   * haria que la estrategia comprobase variables que ya no existen e ignorase
+   * las nuevas.
+   */
+  public async update(
+    id: string,
+    updateTemplateDto: UpdateTemplateDto,
+  ): Promise<HtmlTemplate> {
+    const template = await this.findOne(id);
+
+    if (updateTemplateDto.name !== undefined) {
+      const name = updateTemplateDto.name.trim();
+      await this.assertNameAvailable(name, id);
+      template.name = name;
+    }
+
+    if (updateTemplateDto.description !== undefined) {
+      template.description = updateTemplateDto.description.trim();
+    }
+
+    if (updateTemplateDto.htmlContent !== undefined) {
+      template.requiredVariables = this.extractAndValidateVariables(
+        updateTemplateDto.htmlContent,
+      );
+      template.htmlContent = updateTemplateDto.htmlContent;
+    }
+
+    return this.templateRepository.save(template);
+  }
+
+  /**
+   * Borrado logico (Poka-Yoke): no elimina el registro fisico.
+   *
+   * Una ejecucion ya trazada apunta a la plantilla con la que se genero su
+   * markup; borrarla dejaria la auditoria sin la pieza que explica el
+   * resultado. La plantilla desaparece del listado y la estrategia la rechaza,
+   * pero la fila sigue ahi.
+   */
+  public async softDelete(id: string): Promise<HtmlTemplate> {
+    const template = await this.findOne(id);
+
+    template.active = false;
+    return this.templateRepository.save(template);
+  }
+
+  /**
+   * Extrae las variables del HTML y valida su namespace contra la lista blanca.
+   *
+   * Fail-fast: la primera variable invalida corta con `BadRequestException`. Se
+   * valida la RAIZ de la ruta a cualquier profundidad, no solo `{{ns.campo}}`:
+   * Handlebars resuelve `{{llm_response.articles.[0].title}}` igual de bien, y
+   * un regex de dos segmentos dejaria esa ruta fuera de todo control.
+   *
+   * @param html Contenido de la plantilla.
+   * @returns Rutas detectadas, normalizadas y sin duplicados.
+   * @throws BadRequestException Si hay sintaxis prohibida, un namespace fuera de
+   *         la lista blanca o un marcador que no se puede interpretar.
+   */
+  private extractAndValidateVariables(html: string): string[] {
+    this.assertDeterministicSyntax(html);
+
+    const paths: string[] = [];
+
+    // El resultado del `replace` no es el HTML final: es el residuo con las
+    // variables validas ya consumidas, y sirve para detectar lo que el patron
+    // NO supo leer. Analizar y limpiar en una sola pasada evita recorrer dos
+    // veces la misma cadena con dos gramaticas que podrian divergir.
+    const residue = html.replace(
+      TEMPLATE_VARIABLE_PATTERN,
+      (_match, namespace: string, nestedPath: string) => {
+        const variable = `${namespace}${nestedPath}`;
+
+        if (!ALLOWED_NAMESPACE_SET.has(namespace)) {
+          throw new BadRequestException({
+            message: `Namespace no permitido o desconocido: "${namespace}" en la variable {{${variable}}}. Verifique la sintaxis.`,
+            invalidVariable: variable,
+          });
+        }
+
+        paths.push(variable.replace(SEGMENT_LITERAL_PATTERN, '.$1'));
+        return '';
+      },
+    );
+
+    this.assertNoResidualMarkers(residue);
+
+    // `Set` preserva el orden de aparicion: la lista se lee igual que el HTML.
+    return [...new Set(paths)];
+  }
+
+  /** Rechaza toda construccion de Handlebars que no sea sustitucion simple. */
+  private assertDeterministicSyntax(html: string): void {
+    const forbidden = FORBIDDEN_SYNTAX.find(({ token }) =>
+      html.includes(token),
+    );
+
+    if (forbidden) {
+      throw new BadRequestException({
+        message: `Sintaxis no permitida "${forbidden.token}": ${forbidden.reason}. La plantilla solo admite variables {{namespace.campo}}.`,
+        invalidVariable: forbidden.token,
+      });
+    }
+  }
+
+  /**
+   * Rechaza los marcadores que sobrevivieron a la extraccion.
+   *
+   * Cubre lo que el patron no reconoce: un namespace suelto (`{{titulo}}`), un
+   * identificador con guion o un marcador mal cerrado. Sin esta guarda pasarian
+   * la validacion sin figurar en `requiredVariables`, y reventarian en tiempo
+   * de ejecucion con Handlebars en modo estricto.
+   */
+  private assertNoResidualMarkers(residue: string): void {
+    const [marker] = RESIDUAL_MARKER_PATTERN.exec(residue) ?? [];
+
+    if (marker !== undefined) {
+      throw new BadRequestException({
+        message: `Marcador no interpretable "${marker}". Toda variable debe tener la forma {{namespace.campo}} con un namespace de la lista permitida (${ALLOWED_NAMESPACES.join(', ')}).`,
+        invalidVariable: marker,
+      });
+    }
+  }
+
+  private async assertNameAvailable(
+    name: string,
+    excludeId?: string,
+  ): Promise<void> {
+    const existing = await this.templateRepository.findOne({
+      where: { name },
+    });
+
+    if (existing && existing.id !== excludeId) {
+      throw new ConflictException(`La plantilla "${name}" ya esta registrada`);
+    }
+  }
+}

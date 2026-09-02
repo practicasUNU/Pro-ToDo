@@ -54,11 +54,25 @@ CREATE TABLE tipos_nodo (
 
 CREATE TABLE plantillas_html (
     id_plantilla UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-    nombre VARCHAR(100) NOT NULL,
-    contenido_html TEXT,
-    variables_esperadas JSONB,
+    nombre VARCHAR(120) NOT NULL,
+    descripcion VARCHAR(255),
+    contenido_html TEXT NOT NULL,
+
+    -- Rutas "namespace.campo" detectadas en el HTML. El servicio las recalcula
+    -- en cada escritura, asi que nunca es nula: un NULL significaria "nunca se
+    -- valido", estado que el gestor no permite alcanzar.
+    variables_esperadas JSONB NOT NULL DEFAULT '[]'::jsonb,
+
+    -- Poblado desde el JWT (`@CurrentUser()`), no desde el DTO: el cliente no
+    -- puede falsificar la autoria.
     id_usuario_creador UUID NOT NULL REFERENCES usuarios(id_usuario),
-    fecha_creacion TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+
+    -- Borrado logico: una plantilla retirada se conserva para no romper la
+    -- trazabilidad de las ejecuciones que la usaron.
+    activo BOOLEAN NOT NULL DEFAULT TRUE,
+
+    fecha_creacion TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    fecha_actualizacion TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
 -- =============================================================================
@@ -176,6 +190,7 @@ CREATE TABLE allowed_ips (
 
 CREATE INDEX idx_refresh_tokens_id_usuario ON refresh_tokens(id_usuario);
 CREATE INDEX idx_plantillas_html_id_usuario_creador ON plantillas_html(id_usuario_creador);
+CREATE UNIQUE INDEX idx_plantillas_html_nombre ON plantillas_html(nombre);
 CREATE INDEX idx_flujos_id_usuario_creador ON flujos(id_usuario_creador);
 CREATE INDEX idx_nodos_id_flujo ON nodos(id_flujo);
 CREATE INDEX idx_nodos_id_tipo_nodo ON nodos(id_tipo_nodo);

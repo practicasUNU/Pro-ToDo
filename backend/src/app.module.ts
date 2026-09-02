@@ -14,7 +14,9 @@ import { IpWhitelistGuard } from '@common/guards/ip-whitelist.guard';
 import { FsmModule } from '@core/fsm/fsm.module';
 import { AuthModule } from '@modules/auth/auth.module';
 import { HealthModule } from '@modules/health/health.module';
+import { NodesModule } from '@modules/nodes/nodes.module';
 import { AllowedIpsModule } from '@modules/security/allowed-ips/allowed-ips.module';
+import { TemplatesModule } from '@modules/templates/templates.module';
 import { UsersModule } from '@modules/users/users.module';
 
 import { AppController } from './app.controller';
@@ -63,6 +65,8 @@ import { AppService } from './app.service';
     HealthModule,
     UsersModule,
     AllowedIpsModule,
+    TemplatesModule,
+    NodesModule,
   ],
   controllers: [AppController],
   providers: [

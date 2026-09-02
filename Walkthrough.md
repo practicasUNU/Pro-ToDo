@@ -1098,3 +1098,146 @@ comprueba lo que quedó **escrito**, no lo que el motor creía haber escrito.
 - [ ] **Notificación WebSocket** a la sala `flow_${flowId}` (§4 paso 4 y §5).
 - [ ] **Cola BullMQ**: el bucle sigue corriendo en el proceso que lo invoca.
 - [ ] **Entidad `Flujo`**: la siembra usa SQL directo porque `flujos` aún no está mapeada.
+
+---
+
+## 2026-09-02 · Gestor de plantillas HTML y nodo `MAPEADOR_PLANTILLA` (PROT-11.1 / PROT-11.2) — rama `feat/html-template-mapper`
+
+PROT-10 dejó la interpolación resuelta pero la plantilla seguía viviendo dentro del
+`pipeline_schema`, en `params.template`. Cambiar un `<h1>` obligaba a editar el JSON de cada flujo
+que lo usara, y dos flujos no podían compartir el mismo maquetado. Esta entrega mueve la plantilla a
+`plantillas_html` y deja al nodo declarando solo `params.templateId`.
+
+Lo que sigue son las cuatro decisiones donde el código **se separa del enunciado**, y el porqué.
+
+### La estrategia no escribe en el contexto
+
+El enunciado pedía que `execute()` terminase con
+`context.setNamespace(outputNamespace, { compiled_markup, mapped_at })`. No se hizo.
+
+`FsmEngineService` ya escribe `result.data` en `node.outputNamespace` en cuanto un nodo devuelve
+`success: true` (`fsm-engine.service.ts`, rama `if (result.success)`). Añadir la escritura desde la
+estrategia no la sustituye: la **duplica**. El payload acabaría en dos namespaces distintos —el
+`params.outputNamespace` que eligiera la estrategia y el `node.outputNamespace` del esquema— y una
+plantilla aguas abajo podría leer del que no toca sin que nada fallara. Además el TSDoc de
+`INodeStrategy` es explícito: el contexto llega para **leerse**, y quien escribe es el motor.
+
+La estrategia devuelve `data` y punto. El test `3.1` lo blinda comparando `getAllContext()` antes y
+después: si alguien vuelve a meter un `setNamespace` aquí, la suite lo caza.
+
+### `strict: true`, contra lo que pedía el enunciado
+
+Handlebars con `strict: false` (lo especificado) interpola una variable ausente como cadena vacía y
+sigue adelante. Eso es exactamente lo que PROT-10 decidió **no** hacer cuando
+`getInterpolatedValue` pasó a lanzar `MissingContextVariableException` en vez de callar: un titular
+en blanco se publicaría en Drupal sin que nadie se enterase, y el fallo aparecería lejos de su causa.
+
+Sería incoherente que el motor fuese estricto y el nodo que consume plantillas no lo fuese. Se compila
+con `strict: true` y el fallo se traduce a `NodeResult` con nivel `GRAVE`.
+
+### El pre-chequeo de variables existe para no informar de una en una
+
+Con `strict: true` bastaría para detener el flujo, pero Handlebars lanza en la **primera** variable
+ausente. Un operador con tres variables mal cableadas tendría que arreglar, reintentar, descubrir la
+siguiente, y así tres veces.
+
+Antes de compilar se recorre `requiredVariables` con `resolvePath` —la función pura que PROT-10 ya
+exportaba del contexto FSM, así que la comprobación usa exactamente la misma gramática de navegación
+que la interpolación real— y se acumulan **todas** las que faltan en `missingFields`. El `try/catch`
+alrededor de la compilación se queda como red: cubre el modo `rawTemplate`, donde no hay
+`requiredVariables` precalculadas.
+
+### La lista blanca valida la raíz, no dos segmentos
+
+El regex del enunciado (`/\{\{\s*([a-zA-Z0-9_]+)\.([a-zA-Z0-9_]+)\s*\}\}/g`) solo ve rutas de dos
+segmentos. Pero Handlebars resuelve `{{llm_response.articles.[0].title}}` igual de bien, así que esa
+ruta habría pasado sin que su namespace se comprobara nunca — el Poka-Yoke tendría un agujero del
+tamaño de cualquier ruta anidada.
+
+El patrón implementado captura la raíz y el resto por separado, a cualquier profundidad, y valida la
+raíz. Las rutas se guardan normalizadas (`.[0]` → `.0`) para que `resolvePath` las navegue tal cual.
+
+#### Y el residuo: lo que el patrón *no* reconoce
+
+Validar lo que casa no basta. `{{titulo}}` (namespace suelto), `{{mi-var.campo}}` (guion) o un
+marcador mal cerrado no casan con el patrón, así que sin más se colarían: pasarían la validación, no
+figurarían en `requiredVariables` y reventarían en ejecución con Handlebars estricto.
+
+La extracción usa el **residuo** del `replace` —el HTML con las variables válidas ya consumidas— y
+rechaza cualquier `{{...}}` que sobreviva. Analizar y limpiar en la misma pasada evita mantener dos
+gramáticas que podrían divergir.
+
+### Sintaxis prohibida: el añadido que no estaba en el enunciado
+
+`security-and-scope.md` §3 limita la transformación de datos a "sustitución determinista de
+variables". Handlebars trae bastante más, y todo se rechaza **al guardar**:
+
+| Token | Por qué se rechaza |
+|---|---|
+| `{{{` y `{{&` | Desactivan el escapado de HTML. Un valor del contexto (la respuesta del nodo de IA, por ejemplo) podría inyectar markup en el artículo publicado |
+| `{{#` y `{{/` | Bloques y helpers: lógica dentro de la plantilla |
+| `{{>` | Parciales: cargarían una plantilla externa, fuera del control del gestor |
+
+Prohibir el triple-stash es lo que permite confiar en el escapado por defecto de `{{ }}`. El test
+`1.4` de la estrategia lo comprueba de frente: un `<script>` en el contexto sale como `&lt;script&gt;`.
+
+### Detalles de implementación
+
+- **La tabla ya existía** en `init.sql` desde el esquema original, con `nombre VARCHAR(100)`, sin
+  `descripcion`, sin `activo` y con `contenido_html`/`variables_esperadas` anulables. La migración
+  `008` la alinea; `init.sql` se actualiza en paralelo para que un clonado nuevo nazca igual, como se
+  hizo con `allowed_ips`.
+- **`id_usuario_creador` se conserva** `NOT NULL` en vez de eliminarla. No entra por el DTO: el
+  controlador la toma de `@CurrentUser()`, de modo que el cliente no puede falsificar la autoría. Es
+  lo que sostiene la trazabilidad que justifica el borrado lógico.
+- **`variables_esperadas` pasa a `NOT NULL DEFAULT '[]'`**: el servicio la recalcula en cada
+  escritura, así que un `NULL` significaría "nunca se validó", estado que el gestor ya no permite
+  alcanzar.
+- **El cambio de tipo de `fecha_creacion`** (`TIMESTAMP` → `TIMESTAMPTZ`) va en su propia sentencia,
+  separado del `SET DEFAULT`: combinarlos en un mismo `ALTER TABLE` obliga a PostgreSQL a recastear
+  el default a medio camino del cambio de tipo.
+- **El registro de la estrategia** vive en `NodesModule.onModuleInit()`, no dentro de
+  `NodeStrategyFactory`. El enunciado pedía "añadir el mapeo al registro interno de la factoría",
+  pero la factoría es agnóstica a propósito: registro explícito, sin descubrimiento automático, para
+  que un archivo suelto no se active sin querer. `FsmModule` exporta la instancia justo para esto.
+- **`DummyTemplateMapperStrategy` sigue ganando en el e2e.** `fsm-engine.e2e-spec.ts` importa
+  `AppModule` (que ya registra la estrategia real) y después llama a `registerDummyStrategies`, que
+  la sustituye dejando un `warn`. Es lo correcto: el runner manual no debe depender de que haya
+  plantillas en la base.
+- **`PUT` y no `PATCH`**, siguiendo el enunciado, aunque el resto del repo use `PATCH`.
+- **El perímetro de red no necesitó nada.** El enunciado pedía `RedLocalMiddleware` sobre
+  `/templates`; ese middleware solo se monta sobre las rutas de Swagger porque escapan al router de
+  Nest. `/templates` ya lo cubre `IpWhitelistGuard`, registrado como `APP_GUARD` global.
+
+### Verificación
+
+```
+npx tsc --noEmit    13 errores, todos preexistentes en allowed-ips.service.spec.ts
+npm run lint        1 warning, preexistente en main.ts
+npm run build       OK
+npm test            18 suites, 217 pruebas (32 nuevas)
+```
+
+Las 32 pruebas nuevas se reparten en: 19 de `templates.service.spec.ts` (lista blanca, rutas
+profundas, sintaxis prohibida, residuo, unicidad, borrado lógico), 12 de
+`template-mapper.strategy.spec.ts` (compilación, escapado, los cinco fallos `GRAVE`, inmutabilidad
+del contexto) y 1 de `nodes.module.spec.ts`, que comprueba el registro en la factoría sin arrancar
+Nest ni PostgreSQL — sin ella, un cableado roto no se detectaría hasta que un flujo real reventase
+con `StrategyNotFoundException`.
+
+Los dos archivos SQL se validaron con `pglast` (el parser real de PostgreSQL, vía `libpg_query`): 11
+sentencias en la migración, 29 en `init.sql`, todas correctas. La semántica sobre datos reales queda
+pendiente de aplicar la migración.
+
+### Checklist de dependencias restantes
+
+- [ ] **Aplicar la migración 008** (`db/migrations/008-plantillas-html.sql`): la ejecuta el usuario.
+      Hasta entonces, el CRUD de `/templates` fallará contra la base aunque la suite unitaria pase.
+- [ ] **Entidad `Nodo` y `Flujo`**: `nodos.id_plantilla` sigue sin mapear, así que nada valida todavía
+      que el `templateId` de un `params` corresponda a la plantilla enlazada en el nodo.
+- [ ] **Frontend de Vista 4**: el `<q-select>` cerrado debe alimentarse de `requiredVariables`, que ya
+      viaja en la respuesta de `GET /templates`.
+- [ ] **Estrategias reales restantes**: IMAP, extracción web, IA y publicación HTTP siguen siendo
+      dummies. `MAPEADOR_PLANTILLA` es la primera real.
+- [ ] **Volcado a `.log` con Winston** y fila en `alertas_error`: los fallos `GRAVE` de este nodo aún
+      no se persisten (`architecture-patterns.md` §4).

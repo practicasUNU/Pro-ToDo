@@ -677,3 +677,134 @@ Ninguna es redundante: retirar cualquiera de las dos hace fallar una prueba dist
 Además, la excepción cita siempre la ruta **literal** que escribió el autor
 (`parsed_email.extracted_urls[99]`), no la forma normalizada interna.
 
+
+---
+
+## 4. Gestor de plantillas HTML y `MAPEADOR_PLANTILLA` (PROT-11.1 / PROT-11.2)
+
+Cierra el hueco que dejaba PROT-10: la interpolación existía, pero la plantilla viajaba incrustada en
+`params.template` del `pipeline_schema`. Ahora vive en `plantillas_html`, reutilizable entre flujos y
+auditable, y el nodo solo declara `params.templateId`.
+
+### 4.1 Contratos
+
+```typescript
+// @modules/templates/templates.service.ts
+export const ALLOWED_NAMESPACES: readonly [
+  'raw_email', 'parsed_email', 'scraped_web',
+  'llm_response', 'validated_drupal_json', 'rendered_html',
+];
+
+export class TemplatesService {
+  findAll(onlyActive?: boolean): Promise<HtmlTemplate[]>;
+  findOne(id: string): Promise<HtmlTemplate>;               // lanza NotFoundException
+  create(dto: CreateTemplateDto, createdById: string): Promise<HtmlTemplate>;
+  update(id: string, dto: UpdateTemplateDto): Promise<HtmlTemplate>;
+  softDelete(id: string): Promise<HtmlTemplate>;            // activo = false
+  // privado: extractAndValidateVariables(html) -> string[]  lanza BadRequestException
+}
+
+// @modules/nodes/strategies/template-mapper.strategy.ts
+export class TemplateMapperStrategy implements INodeStrategy {
+  readonly nodeType = NodeType.MAPEADOR_PLANTILLA;
+  constructor(templatesService: TemplatesService);
+  execute(context: StatePayloadContext, params: Record<string, unknown>): Promise<NodeResult>;
+}
+```
+
+`CreateTemplateDto` expone **solo** `name`, `description?` y `htmlContent`. `requiredVariables` es un
+campo derivado que recalcula el servicio a partir del propio HTML, y `createdById` sale del JWT: si
+cualquiera de los dos entrase por el cuerpo, se podrían declarar variables que la plantilla no usa o
+suplantar la autoría.
+
+### 4.2 Endpoints
+
+`/templates`, con `JwtAuthGuard` + `RolesGuard` a nivel de clase y `@Roles(ADMIN, EDITOR)` —
+configurar plantillas es operación de flujos, no gestión de cuentas. El perímetro de red lo cubre
+`IpWhitelistGuard`, ya registrado como `APP_GUARD` global.
+
+| Verbo | Ruta | Efecto |
+|---|---|---|
+| `POST` | `/templates` | Valida namespaces y persiste. `400` si alguno no está en la lista blanca |
+| `GET` | `/templates` | Lista las activas, ordenadas por `name` (alimenta el `<q-select>` de Vista 4) |
+| `GET` | `/templates/:id` | Detalle. `404` si no existe |
+| `PUT` | `/templates/:id` | Actualiza; si cambia el HTML, recalcula `requiredVariables` |
+| `DELETE` | `/templates/:id` | Borrado **lógico** (`activo = false`) |
+
+### 4.3 Lenguaje de plantilla admitido
+
+Subconjunto deliberado de Handlebars: **solo sustitución determinista de variables**
+(`security-and-scope.md` §3). La validación es estática, al guardar, no al renderizar.
+
+```
+{{ parsed_email.clean_title }}             OK
+{{ llm_response.articles.[0].title }}      OK — indice en literal de segmento
+{{ contacto.telefono }}                    400 — namespace fuera de la lista blanca
+{{ titulo }}                               400 — namespace suelto, no interpolable
+{{{ llm_response.summary }}}               400 — triple-stash: desactiva el escapado de HTML
+{{# if ... }} / {{/ if}} / {{> parcial }}   400 — logica y parciales
+```
+
+Se valida la **raíz** de la ruta a cualquier profundidad, y todo marcador que el patrón no reconozca
+se rechaza. Las rutas se guardan normalizadas (`.[0]` → `.0`), la forma que navega `resolvePath`.
+
+### 4.4 Diagrama de inyección de dependencias
+
+```
+AppModule
+ ├── TemplatesModule ───────────── TypeOrmModule.forFeature([HtmlTemplate])
+ │    ├── TemplatesController ──── TemplatesService
+ │    └── exports: TemplatesService
+ │                                      │
+ └── NodesModule                        │ (inyeccion)
+      ├── imports: FsmModule ──────── NodeStrategyFactory  (singleton exportado)
+      ├── imports: TemplatesModule ──────┘
+      ├── providers: TemplateMapperStrategy
+      └── onModuleInit() ──> factory.registerStrategy(templateMapperStrategy)
+```
+
+El registro se hace en `NodesModule.onModuleInit()` y **no** dentro de `NodeStrategyFactory`: la
+factoría es deliberadamente agnóstica de estrategias concretas (registro explícito, sin
+descubrimiento automático), y `FsmModule` exporta la instancia justo para que los módulos de nodos
+escriban sobre la misma que consume `FsmEngineService`.
+
+### 4.5 Namespaces: quién escribe el resultado
+
+`TemplateMapperStrategy` **no llama a `setNamespace`**. Devuelve
+
+```typescript
+{ success: true, data: { compiled_markup: string, mapped_at: string } }
+```
+
+y es `FsmEngineService` quien lo deposita en el `outputNamespace` declarado por el nodo. Escribir
+también desde la estrategia duplicaría el payload en dos namespaces (`params.outputNamespace` y
+`node.outputNamespace`) y contradiría el contrato de `INodeStrategy`, donde el contexto es de solo
+lectura para la estrategia.
+
+### 4.6 Esquema
+
+```sql
+-- plantillas_html, tras la migracion 008
+id_plantilla         UUID PK DEFAULT uuid_generate_v4()
+nombre               VARCHAR(120) NOT NULL   -- idx unico idx_plantillas_html_nombre
+descripcion          VARCHAR(255)
+contenido_html       TEXT NOT NULL
+variables_esperadas  JSONB NOT NULL DEFAULT '[]'::jsonb
+id_usuario_creador   UUID NOT NULL REFERENCES usuarios(id_usuario)
+activo               BOOLEAN NOT NULL DEFAULT TRUE
+fecha_creacion       TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+fecha_actualizacion  TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+```
+
+### 4.7 Severidad de los fallos del nodo
+
+Todos los fallos son `GRAVE`, nunca `URGENTE`: son errores de configuración corregibles, y solo
+`GRAVE` entra en la política de reintentos del motor (`canRetry`).
+
+| Situación | `NodeResult` |
+|---|---|
+| `templateId` ausente | `GRAVE`, `missingFields: ['templateId']` |
+| `templateId` inexistente (`NotFoundException` capturada) | `GRAVE` |
+| Plantilla con `activo = false` | `GRAVE` |
+| Variables del contexto ausentes | `GRAVE`, `missingFields` con **todas** las rutas que faltan |
+| Fallo de compilación de Handlebars | `GRAVE` + `stackTrace` |
