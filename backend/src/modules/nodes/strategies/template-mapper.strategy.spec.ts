@@ -2,6 +2,7 @@ import { NotFoundException } from '@nestjs/common';
 
 import { StatePayloadContext } from '@core/fsm/context/state-payload.context';
 import { NodeType } from '@core/fsm/types/pipeline-schema.types';
+import { TemplateRendererService } from '@modules/templates/services/template-renderer.service';
 
 import { TemplateMapperStrategy } from './template-mapper.strategy';
 
@@ -35,9 +36,35 @@ const buildTemplate = (
 
 const buildService = (): TemplatesServiceMock => ({ findOne: jest.fn() });
 
-/** El doble no implementa `TemplatesService` entero; el cast se aisla aqui. */
-const buildStrategy = (service: TemplatesServiceMock): TemplateMapperStrategy =>
-  new TemplateMapperStrategy(service as unknown as TemplatesService);
+type TemplateRendererMock = jest.Mocked<
+  Pick<TemplateRendererService, 'renderStrict'>
+>;
+
+/** Doble del renderer, solo para el bloque que verifica la delegacion. */
+const buildRendererMock = (): TemplateRendererMock => ({
+  renderStrict: jest.fn(),
+});
+
+/**
+ * Instancia la estrategia. El renderer va REAL por defecto a proposito.
+ *
+ * Mockearlo en todas las pruebas volveria tautologicas las de compilacion,
+ * escapado y rutas anidadas: comprobarian que un doble devuelve lo que se le
+ * dijo, no que Handlebars haga su trabajo — justo la cobertura que impide que la
+ * vista previa del gestor mienta. Como el renderer es puro (sin repositorio, red
+ * ni estado), usarlo de verdad no introduce acoplamiento alguno. El bloque 4
+ * si lo mockea, porque alli lo que se verifica es el contrato de delegacion.
+ */
+const buildStrategy = (
+  service: TemplatesServiceMock,
+  renderer:
+    | TemplateRendererService
+    | TemplateRendererMock = new TemplateRendererService(),
+): TemplateMapperStrategy =>
+  new TemplateMapperStrategy(
+    service as unknown as TemplatesService,
+    renderer as TemplateRendererService,
+  );
 
 /** Contexto con los namespaces que la plantilla por defecto espera. */
 const buildContext = (): StatePayloadContext => {
@@ -289,6 +316,130 @@ describe('TemplateMapperStrategy', () => {
       expect(result.success).toBe(true);
       expect(context.getAllContext()).toEqual(before);
       expect(context.getNamespace('rendered_html')).toBeUndefined();
+    });
+  });
+
+  describe('4. Delegacion en TemplateRendererService', () => {
+    it('4.1 deberia invocar renderStrict con html, variables requeridas y namespaces', async () => {
+      // 1. Arrange
+      const service = buildService();
+      service.findOne.mockResolvedValue(buildTemplate());
+      const renderer = buildRendererMock();
+      renderer.renderStrict.mockReturnValue({ markup: '<p>ok</p>' });
+      const strategy = buildStrategy(service, renderer);
+      const context = buildContext();
+
+      // 2. Act
+      await strategy.execute(context, { templateId: TEMPLATE_ID });
+
+      // 3. Assert: la estrategia no compila nada por su cuenta, delega
+      expect(renderer.renderStrict).toHaveBeenCalledTimes(1);
+      expect(renderer.renderStrict).toHaveBeenCalledWith(
+        '<h1>{{parsed_email.clean_title}}</h1><p>{{llm_response.summary}}</p>',
+        ['parsed_email.clean_title', 'llm_response.summary'],
+        context.getAllContext(),
+      );
+    });
+
+    it('4.2 deberia traducir { markup } a un NodeResult exitoso', async () => {
+      // 1. Arrange
+      const service = buildService();
+      service.findOne.mockResolvedValue(buildTemplate());
+      const renderer = buildRendererMock();
+      renderer.renderStrict.mockReturnValue({ markup: '<h1>Compilado</h1>' });
+      const strategy = buildStrategy(service, renderer);
+
+      // 2. Act
+      const result = await strategy.execute(buildContext(), {
+        templateId: TEMPLATE_ID,
+      });
+
+      // 3. Assert
+      expect(result.success).toBe(true);
+      expect(result.data?.compiled_markup).toBe('<h1>Compilado</h1>');
+      expect(typeof result.data?.mapped_at).toBe('string');
+    });
+
+    it('4.3 deberia traducir { missingFields } a un fallo GRAVE que las conserva', async () => {
+      // 1. Arrange
+      const service = buildService();
+      service.findOne.mockResolvedValue(buildTemplate());
+      const renderer = buildRendererMock();
+      renderer.renderStrict.mockReturnValue({
+        missingFields: ['scraped_web.headline', 'raw_email.body'],
+      });
+      const strategy = buildStrategy(service, renderer);
+
+      // 2. Act
+      const result = await strategy.execute(buildContext(), {
+        templateId: TEMPLATE_ID,
+      });
+
+      // 3. Assert
+      expect(result.success).toBe(false);
+      expect(result.error?.level).toBe('GRAVE');
+      expect(result.error?.missingFields).toEqual([
+        'scraped_web.headline',
+        'raw_email.body',
+      ]);
+      expect(result.error?.message).toContain('2 variable(s)');
+    });
+
+    it('4.4 deberia traducir { failure } a un fallo GRAVE propagando el stackTrace', async () => {
+      // 1. Arrange
+      const service = buildService();
+      service.findOne.mockResolvedValue(buildTemplate());
+      const renderer = buildRendererMock();
+      renderer.renderStrict.mockReturnValue({
+        failure: 'Parse error on line 3',
+        stackTrace: 'Error: Parse error on line 3\n    at compile',
+      });
+      const strategy = buildStrategy(service, renderer);
+
+      // 2. Act
+      const result = await strategy.execute(buildContext(), {
+        templateId: TEMPLATE_ID,
+      });
+
+      // 3. Assert
+      expect(result.success).toBe(false);
+      expect(result.error?.level).toBe('GRAVE');
+      expect(result.error?.message).toContain('Parse error on line 3');
+      expect(result.error?.stackTrace).toContain('at compile');
+    });
+
+    it('4.5 no deberia inventar un stackTrace si el renderer no lo aporta', async () => {
+      // 1. Arrange
+      const service = buildService();
+      service.findOne.mockResolvedValue(buildTemplate());
+      const renderer = buildRendererMock();
+      renderer.renderStrict.mockReturnValue({ failure: 'fallo sin traza' });
+      const strategy = buildStrategy(service, renderer);
+
+      // 2. Act
+      const result = await strategy.execute(buildContext(), {
+        templateId: TEMPLATE_ID,
+      });
+
+      // 3. Assert
+      expect(result.error?.stackTrace).toBeUndefined();
+    });
+
+    it('4.6 no deberia llamar al renderer si la plantilla no se pudo resolver', async () => {
+      // 1. Arrange
+      const service = buildService();
+      service.findOne.mockResolvedValue(buildTemplate({ active: false }));
+      const renderer = buildRendererMock();
+      const strategy = buildStrategy(service, renderer);
+
+      // 2. Act
+      const result = await strategy.execute(buildContext(), {
+        templateId: TEMPLATE_ID,
+      });
+
+      // 3. Assert: compilar una plantilla desactivada seria trabajo tirado
+      expect(result.success).toBe(false);
+      expect(renderer.renderStrict).not.toHaveBeenCalled();
     });
   });
 });

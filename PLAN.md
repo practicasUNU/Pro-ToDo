@@ -808,3 +808,104 @@ Todos los fallos son `GRAVE`, nunca `URGENTE`: son errores de configuración cor
 | Plantilla con `activo = false` | `GRAVE` |
 | Variables del contexto ausentes | `GRAVE`, `missingFields` con **todas** las rutas que faltan |
 | Fallo de compilación de Handlebars | `GRAVE` + `stackTrace` |
+
+---
+
+## 5. Frontend: catálogo de plantillas y tríada modular de nodos (PROT-11 · Quasar)
+
+### 5.1 Regla de arquitectura: tríada por tipo de nodo
+
+Fijada en [.claude/rules/frontend-quasar.md](.claude/rules/frontend-quasar.md) §3.1. Cada tipo de
+nodo del pipeline se implementa con tres piezas, y ninguna asume el trabajo de otra:
+
+| Pieza | Ruta | Responsabilidad |
+|---|---|---|
+| Servicio | `src/services/nodes/<node-name>.service.ts` | Única capa que conoce rutas del backend |
+| Store | `src/stores/nodes/<node-name>.store.ts` | Estado, validaciones y derivados. Exporta `use<NodeName>Store` |
+| Componente | `src/components/nodes/<NodeName>Config.vue` | UI exclusiva. Cero llamadas HTTP |
+
+**Prohibida la nomenclatura ordinal** (`Step1`, `Paso2`): el orden de un nodo es un dato del
+`pipeline_schema`, no una propiedad del componente. Acoplarlos impide reordenar un flujo sin
+renombrar archivos, y reutilizar un nodo en dos flujos que lo colocan en posiciones distintas.
+
+### 5.2 Contrato del componente de nodo
+
+```typescript
+// Prop obligatoria de todo <NodeName>Config.vue
+interface Props { nodeId: string }
+
+// Getter obligatorio de todo store de nodo. Es lo UNICO que el anfitrion
+// consulta para decidir si el flujo puede avanzar; nunca inspecciona la
+// `config` interna del nodo.
+const isConfigValid: ComputedRef<boolean>;
+```
+
+### 5.3 Registro y resolución polimórfica
+
+```typescript
+// src/components/nodes/node-config-registry.ts
+export const nodeConfigRegistry: Partial<Record<NodeType, Component>> = {
+  [NodeType.MAPEADOR_PLANTILLA]: defineAsyncComponent(
+    () => import('@components/nodes/TemplateMapperConfig.vue'),
+  ),
+};
+```
+
+El anfitrión monta con `<component :is="nodeConfigRegistry[node.nodeType]" />`. Añadir un tipo de
+nodo es añadir una entrada; el anfitrión no cambia. `Partial` es deliberado: los tipos aún sin
+implementar simplemente no están, y el anfitrión debe contemplar el `undefined`. Cuando existan los
+siete, el `Partial` cae y el compilador exigirá cobertura total.
+
+El campo es **`nodeType`** (inglés, camelCase), como en `PipelineNodeConfigDto`. `tipo_nodo` es el
+nombre de la columna SQL y no aparece en el JSON del esquema ni en el frontend.
+
+### 5.4 Reparto de estado con `useFlujoDraftStore`
+
+`useFlujoDraftStore` deja de guardar los campos de cada nodo y pasa a **agregador**: posee la
+topología del flujo (orden, `nextStep`, `onErrorStep`), el autosave, y ensambla el `pipeline_schema`
+leyendo la `config` de cada store de nodo. Duplicar ahí el estado de un nodo crearía dos fuentes de
+verdad que se desincronizan en cuanto el usuario retrocede un paso.
+
+### 5.5 Cadena de capas del catálogo
+
+```
+TemplatesManager.vue --> useTemplatesStore --> templates.service.ts --> /templates
+TemplateMapperConfig.vue --> useTemplateMapperStore --> nodes/template-mapper.service.ts
+                                                              |
+                                                    delega en templates.service.ts
+```
+
+El servicio del nodo **delega** en `templates.service.ts` en vez de reescribir las rutas: el nodo
+consume el mismo recurso que el gestor, y duplicar las URLs crearía dos sitios que actualizar. Lo que
+aporta ese archivo es el vocabulario del nodo (`fetchSelectableTemplates`, `compilePreview`).
+
+### 5.6 Endpoint de previsualización (`POST /templates/:id/preview`)
+
+```typescript
+// TemplateRendererService — un solo motor, dos consumidores
+renderStrict(htmlContent: string, requiredVariables: readonly string[],
+             namespaces: RenderNamespaces): RenderOutcome;
+
+type RenderOutcome =
+  | { markup: string }
+  | { missingFields: string[] }
+  | { failure: string; stackTrace?: string };
+```
+
+Consumido por `TemplateMapperStrategy` (lo traduce a `NodeResult`) y por `TemplatesService.previewTemplate`
+(lo traduce a respuesta HTTP). Con dos implementaciones de Handlebars, la vista previa podría
+divergir del render real y mentirle al editor sobre lo que se va a publicar.
+
+El backend autogenera marcadores `«namespace.campo»` a partir de `requiredVariables` y fusiona encima
+el `samplePayload` del cliente: la vista previa nunca falla por falta de datos, y donde el cliente
+aporte valores reales se ven esos.
+
+### 5.7 Poka-Yoke aplicado
+
+| Mecanismo | Dónde | Qué previene |
+|---|---|---|
+| Chips de namespace | `TemplateEditorDialog.vue` | Teclear un namespace inexistente: se elige de la lista blanca y se inserta en el cursor |
+| `<q-select>` cerrado | `TemplateMapperConfig.vue` | Escribir un UUID de plantilla a mano |
+| Validación de `outputNamespace` | `useTemplateMapperStore` | Un 400 al guardar el flujo entero por un guion en el namespace |
+| `SafeDeleteModal` (5 s) | `TemplatesManager.vue` | Desactivar una plantilla por reflejo |
+| `<iframe sandbox>` | `TemplatePreviewDialog.vue` | Ejecutar el `<script>` de una plantilla en el origen de la sesión |

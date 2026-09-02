@@ -11,6 +11,8 @@ const ROUTE_BREADCRUMBS: Record<string, string> = {
   '/': 'Inicio',
   '/users': 'Gestion de Usuarios',
   '/ip-whitelist': 'Lista Blanca de IPs',
+  '/templates': 'Catalogo de Plantillas',
+  '/nodos/config-sandbox': 'Banco de Pruebas de Nodos',
 };
 
 const route = useRoute();
@@ -58,6 +60,20 @@ const toggleLeftDrawer = (): void => {
             <q-icon name="shield" size="20px" />
           </q-item-section>
           <q-item-section class="pd-nav">Lista Blanca de IPs</q-item-section>
+        </q-item>
+
+        <q-item to="/templates" clickable v-ripple>
+          <q-item-section avatar>
+            <q-icon name="description" size="20px" />
+          </q-item-section>
+          <q-item-section class="pd-nav">Plantillas</q-item-section>
+        </q-item>
+
+        <q-item to="/nodos/config-sandbox" clickable v-ripple>
+          <q-item-section avatar>
+            <q-icon name="account_tree" size="20px" />
+          </q-item-section>
+          <q-item-section class="pd-nav">Nodos</q-item-section>
         </q-item>
       </q-list>
     </q-drawer>

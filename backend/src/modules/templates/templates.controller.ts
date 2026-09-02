@@ -3,6 +3,8 @@ import {
   Controller,
   Delete,
   Get,
+  HttpCode,
+  HttpStatus,
   Param,
   ParseUUIDPipe,
   Post,
@@ -26,6 +28,7 @@ import { JwtAuthGuard } from '@modules/auth/guards/jwt-auth.guard';
 import { UserRole } from '@modules/users/enums/user-role.enum';
 
 import { CreateTemplateDto } from './dto/create-template.dto';
+import { PreviewTemplateDto } from './dto/preview-template.dto';
 import { UpdateTemplateDto } from './dto/update-template.dto';
 import { TemplatesService } from './templates.service';
 
@@ -105,6 +108,25 @@ export class TemplatesController {
     @Body() updateTemplateDto: UpdateTemplateDto,
   ): Promise<HtmlTemplate> {
     return this.templatesService.update(id, updateTemplateDto);
+  }
+
+  @Post(':id/preview')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: 'Compila la plantilla contra un payload simulado (vista previa)',
+  })
+  @ApiBadRequestResponse({
+    description: 'La plantilla no compila o referencia variables irresolubles',
+  })
+  @ApiNotFoundResponse({
+    description: 'No existe ninguna plantilla con ese id',
+  })
+  public async preview(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() previewTemplateDto: PreviewTemplateDto,
+  ): Promise<{ compiledMarkup: string }> {
+    // 200 y no 201: no se crea ningun recurso, es una consulta con cuerpo.
+    return this.templatesService.previewTemplate(id, previewTemplateDto);
   }
 
   // Borrado logico: preserva la trazabilidad de las ejecuciones que la usaron

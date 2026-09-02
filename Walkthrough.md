@@ -1241,3 +1241,168 @@ pendiente de aplicar la migración.
       dummies. `MAPEADOR_PLANTILLA` es la primera real.
 - [ ] **Volcado a `.log` con Winston** y fila en `alertas_error`: los fallos `GRAVE` de este nodo aún
       no se persisten (`architecture-patterns.md` §4).
+
+---
+
+## 2026-09-02 · Catálogo de plantillas y tríada modular de nodos (PROT-11 · Quasar) — rama `feat/html-template-mapper`
+
+El backend de PROT-11 quedó cerrado en el commit anterior, pero sin nada en el frontend: el catálogo
+no se podía administrar y el nodo `MAPEADOR_PLANTILLA` no tenía componente de configuración. Esta
+entrega cierra el ciclo, y antes fija una regla de arquitectura que no existía.
+
+### La regla se escribió sobre un hueco, no sobre un problema
+
+El encargo pedía "eliminar la nomenclatura secuencial acoplada (`StepN`)". Un `grep` sobre
+`frontend/src` no encontró **ningún** archivo `Step`, ni un `q-stepper`, ni un wizard: las únicas
+menciones a "Wizard" estaban en el propio `.md` de reglas. No había nada que renombrar.
+
+Eso cambia la naturaleza del trabajo pero no su valor: la regla es **preventiva**. El razonamiento
+que se dejó escrito es el que importa — el orden de un nodo es un dato del `pipeline_schema`, no una
+propiedad del componente. Con `Step1.vue`…`Step5.vue`, reordenar un flujo obligaría a renombrar
+archivos, y un mismo nodo no podría reutilizarse en dos flujos que lo colocan en posiciones
+distintas. El nombre describe el tipo funcional: `TemplateMapperConfig.vue`.
+
+### `tipo_nodo` no existe en el JSON
+
+El encargo pedía resolver los componentes "según la propiedad `tipo_nodo` del schema JSON". No hay
+tal propiedad: `PipelineNodeConfigDto` usa **`nodeType`**, y `tipo_nodo` es el nombre de la columna
+SQL de la tabla `nodos`. Escribir la regla con el nombre de la columna habría enviado a quien
+implemente el siguiente nodo a buscar un campo que no está, además de contradecir
+`code-conventions.md` §1 (identificadores en inglés). La regla dice `nodeType`.
+
+### El registro, y por qué no un `v-if`
+
+```typescript
+export const nodeConfigRegistry: Partial<Record<NodeType, Component>> = {
+  [NodeType.MAPEADOR_PLANTILLA]: defineAsyncComponent(
+    () => import('@components/nodes/TemplateMapperConfig.vue'),
+  ),
+};
+```
+
+Encadenar `v-if="node.nodeType === 'MAPEADOR_PLANTILLA'"` en el anfitrión funcionaría hoy, con un
+solo nodo. Con siete, cada tipo nuevo obliga a editar el anfitrión — que es exactamente el
+acoplamiento que la tríada quiere evitar, solo que movido de los nombres de archivo a una plantilla.
+El registro deja el anfitrión cerrado a modificación.
+
+`Partial` es deliberado: los seis tipos sin implementar simplemente no están, y el anfitrión debe
+contemplar el `undefined`. Cuando existan los siete, retirar el `Partial` hará que el compilador
+exija cobertura total, sin que nadie tenga que acordarse.
+
+El build confirma que la carga diferida hace su trabajo: `TemplateMapperConfig-ChsWNX52.js` sale como
+chunk propio, así que un flujo que use dos nodos no descarga los siete.
+
+### La vista previa vive en el backend, y esa es la decisión de fondo
+
+El encargo pedía que el servicio del nodo "probara compilación de payloads simulados", pero el
+backend no tenía endpoint de previsualización. Había tres salidas y dos eran malas:
+
+- Compilar en el navegador añadiendo `handlebars` al frontend: dos motores, y cualquier divergencia
+  futura (modo estricto, sintaxis prohibida) daría una vista previa que **miente** sobre lo que se va
+  a publicar. Es justo el fallo que PROT-11.1 se propuso evitar validando al guardar.
+- Pintar el HTML crudo sin interpolar: no verifica que la plantilla compile de verdad.
+- Añadir `POST /templates/:id/preview`. Más trabajo, pero una sola fuente de verdad.
+
+Se eligió la tercera, y para sostenerla se extrajo `TemplateRendererService`: la lógica de Handlebars
+sale de `TemplateMapperStrategy` y pasa a un servicio con **dos consumidores** —la estrategia en
+tiempo de ejecución y el endpoint del gestor—, cada uno traduciendo el mismo `RenderOutcome` a su
+propio contrato (`NodeResult` o respuesta HTTP). El renderer no conoce a ninguno de los dos.
+
+#### Marcadores autogenerados
+
+El endpoint construye el contexto a partir de `requiredVariables`, poniendo `«parsed_email.clean_title»`
+donde irá el titular, y fusiona encima el `samplePayload` que envíe el cliente. Así la vista previa
+**nunca falla por falta de datos**: el editor abre el diálogo y ve la maqueta al instante, y donde
+aporte valores reales se ven esos. Las comillas angulares se eligieron porque no aparecen en texto
+corriente y sobreviven al escapado de Handlebars sin convertirse en entidades.
+
+### El refactor del constructor y las pruebas que casi se vuelven mentira
+
+Extraer el renderer cambió la firma de `TemplateMapperStrategy` de uno a dos parámetros, lo que rompe
+la instanciación de las 12 pruebas existentes. Lo evidente era mockear el renderer en todas.
+
+No se hizo, porque cuatro de esas pruebas —`1.1` interpolación, `1.3` ruta con índice, `1.4` escapado
+de `<script>`, `2.5` variable ausente— dejarían de ejercitar Handlebars y pasarían a comprobar que un
+doble devuelve lo que se le dijo. Habrían seguido en verde sin verificar nada, y precisamente la
+cobertura perdida es la que impide que la vista previa mienta.
+
+La suite quedó partida en dos:
+
+| Bloque | Renderer | Qué prueba |
+|---|---|---|
+| 1–3 (las 12 originales) | **Real** | Compilación, escapado, rutas anidadas, fallos `GRAVE`, inmutabilidad |
+| 4 (nuevo, 6 pruebas) | **Mockeado** | Que se invoca `renderStrict(html, requiredVariables, namespaces)` y que las 3 variantes de `RenderOutcome` se traducen a su `NodeResult` |
+
+El renderer real es puro —sin repositorio, red ni estado—, así que usarlo no introduce I/O ni acopla
+la prueba a nada externo. `buildStrategy` lo instancia por defecto y admite el doble por parámetro.
+
+### `iframe sandbox` y no `v-html`
+
+El contenido de una plantilla es markup arbitrario escrito por un editor. Un `v-html` ejecutaría
+cualquier `<script>` que contenga, en el mismo origen que la sesión y con el JWT en `localStorage` al
+alcance. El `<iframe sandbox="">` sin ningún token `allow-*` desactiva scripts, formularios y
+navegación por completo.
+
+Es una barrera **independiente** del escapado de Handlebars, y ninguna sobra: el escapado protege de
+los valores del contexto (la respuesta del nodo de IA), el sandbox protege del HTML de la propia
+plantilla. Hacen falta las dos porque el vector es distinto.
+
+### Detalles de implementación
+
+- **Convención de nombres de store.** El encargo pedía `useTemplatesStore.ts` y
+  `nodes/useTemplateMapperStore.ts`. Se mantuvo `<dominio>.store.ts` (`templates.store.ts`,
+  `nodes/template-mapper.store.ts`), que es lo que usan los cinco stores existentes; adoptar el otro
+  estilo habría dejado el proyecto con dos convenciones de nombre de archivo conviviendo.
+- **`nativeEl`, no el ref del componente.** El primer intento de insertar el chip de namespace en el
+  cursor leía `selectionStart` del ref de la `QInput`, que apunta al **componente** y no al
+  `<textarea>`. Habría pasado el typecheck y fallado en silencio en tiempo de ejecución; se corrigió
+  a `htmlInput.value?.nativeEl`. La recolocación del caret va dentro de `nextTick` porque antes del
+  repintado el textarea aún contiene el texto viejo.
+- **Las llaves no pueden vivir en la plantilla.** `<span>{{ '{{#if}}' }}</span>` rompe el compilador
+  de Vue (`vue/no-parsing-error`): no distingue unas llaves literales de una interpolación anidada.
+  Los ejemplos con llaves se declararon como constantes en el `<script setup>`.
+- **`/templates` no lleva `requiresAdmin`.** A diferencia de `/users` y `/ip-whitelist`, el
+  `TemplatesController` admite `@Roles(ADMIN, EDITOR)`: configurar plantillas es operación de flujos,
+  no gestión de cuentas. La ruta espeja al backend.
+- **Se reutilizó `SafeDeleteModal`** tal cual: ya implementaba la cuenta regresiva de 5 segundos, no
+  se reimplementó nada.
+- **`PUT` y no `PATCH`** en `updateTemplate`, porque es lo que expone el controlador — a diferencia
+  de `/users` y `/allowed-ips`.
+- **Banco de pruebas en lugar de wizard.** Como Vista 3+4 no existe, `NodeConfigSandboxPage.vue`
+  reproduce lo único que el asistente hará con un configurador: resolverlo por `nodeType` desde el
+  registro y leer `isConfigValid`. Sin él, `TemplateMapperConfig.vue` compilaría y tiparía pero no se
+  podría ver funcionando hasta PROT-12.
+
+### Verificación
+
+```
+Backend
+  npm test          19 suites, 239 pruebas (antes 217; +22)
+  npx tsc --noEmit  13 errores, todos preexistentes en allowed-ips.service.spec.ts
+  npm run lint      1 warning, preexistente en main.ts
+  npm run build     OK
+
+Frontend
+  npm run typecheck  vue-tsc --noEmit, limpio
+  npm run lint       limpio
+  npm run build      OK — TemplateMapperConfig sale en su propio chunk
+```
+
+Las 22 pruebas nuevas del backend: 6 de delegación en la estrategia, 7 de previsualización en
+`templates.service.spec.ts` (marcadores autogenerados, override por `samplePayload`, ruta profunda,
+escapado, plantilla desactivada, `404`, `400` por HTML que no compila) y 9 del
+`template-renderer.service.spec.ts` aislado.
+
+### Checklist de dependencias restantes
+
+- [ ] **Asistente de flujos (Vista 3+4, PROT-12)**: el banco de pruebas es andamiaje. Falta el
+      `<q-stepper>` real, `useFlujoDraftStore` como agregador y la topología del pipeline.
+- [ ] **Los otros seis configuradores de nodo**: solo `MAPEADOR_PLANTILLA` está en el registro.
+      Al completarlos, retirar el `Partial` de `nodeConfigRegistry`.
+- [ ] **Sin pruebas en el frontend**: no hay runner instalado (ni vitest ni jest). `isConfigValid` y
+      la inserción de chips en el cursor son lógica que merece prueba unitaria.
+- [ ] **`samplePayload` real en la vista previa**: hoy siempre se envía vacío y se ven marcadores.
+      Podría alimentarse del último `contexto_acumulado` de una ejecución del flujo.
+- [ ] **Ocultar entradas del drawer por rol**: `/users` y `/ip-whitelist` se muestran a un EDITOR
+      aunque la guarda de ruta los bloquee. No es nuevo de esta entrega, pero se hace más visible al
+      añadir rutas con roles distintos.

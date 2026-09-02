@@ -1,5 +1,6 @@
 import { NodeStrategyFactory } from '@core/fsm/factories/node-strategy.factory';
 import { NodeType } from '@core/fsm/types/pipeline-schema.types';
+import { TemplateRendererService } from '@modules/templates/services/template-renderer.service';
 
 import { NodesModule } from './nodes.module';
 import { TemplateMapperStrategy } from './strategies/template-mapper.strategy';
@@ -19,7 +20,10 @@ describe('NodesModule', () => {
     // 1. Arrange
     const factory = new NodeStrategyFactory();
     jest.spyOn(factory['logger'], 'log').mockImplementation(() => undefined);
-    const strategy = new TemplateMapperStrategy({} as TemplatesService);
+    const strategy = new TemplateMapperStrategy(
+      {} as TemplatesService,
+      new TemplateRendererService(),
+    );
     const module = new NodesModule(factory, strategy);
 
     // 2. Act

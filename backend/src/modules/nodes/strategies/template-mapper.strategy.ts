@@ -1,11 +1,7 @@
 import { Injectable } from '@nestjs/common';
-import Handlebars from 'handlebars';
 
-import {
-  MissingContextVariableException,
-  resolvePath,
-} from '@core/fsm/context/state-payload.context';
 import { NodeType } from '@core/fsm/types/pipeline-schema.types';
+import { TemplateRendererService } from '@modules/templates/services/template-renderer.service';
 import { TemplatesService } from '@modules/templates/templates.service';
 
 import type { StatePayloadContext } from '@core/fsm/context/state-payload.context';
@@ -40,6 +36,11 @@ type TemplateResolution =
  * `params.template`. Aqui el nodo solo declara `params.templateId` y la
  * plantilla vive en `plantillas_html`, reutilizable y auditable.
  *
+ * La compilacion se DELEGA en `TemplateRendererService`, compartido con el
+ * endpoint de previsualizacion del gestor: con dos implementaciones de
+ * Handlebars, la vista previa podria divergir de lo que el nodo genera de verdad.
+ * Aqui solo queda la traduccion de su `RenderOutcome` al contrato `NodeResult`.
+ *
  * NO escribe en el contexto: devuelve `data` y es `FsmEngineService` quien la
  * deposita en el `outputNamespace` declarado por el nodo. Escribir tambien
  * desde aqui duplicaria el payload en dos namespaces y contradiria el contrato
@@ -49,7 +50,10 @@ type TemplateResolution =
 export class TemplateMapperStrategy implements INodeStrategy {
   public readonly nodeType = NodeType.MAPEADOR_PLANTILLA;
 
-  constructor(private readonly templatesService: TemplatesService) {}
+  constructor(
+    private readonly templatesService: TemplatesService,
+    private readonly templateRendererService: TemplateRendererService,
+  ) {}
 
   public async execute(
     context: StatePayloadContext,
@@ -64,53 +68,47 @@ export class TemplateMapperStrategy implements INodeStrategy {
 
     const { htmlContent, requiredVariables } = resolution.template;
 
-    // 2. Pre-chequeo de variables. Handlebars en modo estricto tambien lanzaria,
-    //    pero solo por la PRIMERA ausencia; recorrer las rutas ya validadas al
-    //    guardar la plantilla permite informar de todas de golpe, que es lo que
-    //    el operador necesita para arreglar el flujo en una sola pasada.
-    const missingFields = this.findMissingVariables(context, requiredVariables);
+    // 2. Compilar sobre el volcado completo de memoria.
+    const outcome = this.templateRendererService.renderStrict(
+      htmlContent,
+      requiredVariables,
+      context.getAllContext(),
+    );
 
-    if (missingFields.length > 0) {
+    // 3. Traducir la salida del renderer al contrato del motor. Los tres fallos
+    //    son GRAVE y nunca URGENTE: son errores corregibles, y solo GRAVE entra
+    //    en la politica de reintentos de `FsmEngineService.canRetry`.
+    if ('missingFields' in outcome) {
       return {
         success: false,
         error: {
           level: 'GRAVE',
-          message: `El contexto no aporta ${missingFields.length} variable(s) que la plantilla requiere.`,
-          missingFields,
+          message: `El contexto no aporta ${outcome.missingFields.length} variable(s) que la plantilla requiere.`,
+          missingFields: outcome.missingFields,
         },
       };
     }
 
-    // 3. Compilar y renderizar sobre el volcado completo de memoria.
-    try {
-      // `strict: true` frente al `false` habitual de Handlebars: una variable
-      // ausente debe detener el flujo, no interpolarse como cadena vacia. Un
-      // titular en blanco se publicaria en Drupal sin que nadie se enterase, y
-      // el fallo apareceria lejos de su causa.
-      const render = Handlebars.compile(htmlContent, { strict: true });
-
-      // El escapado de HTML por defecto de `{{ }}` se conserva a proposito: el
-      // gestor prohibe el triple-stash, asi que ningun valor del contexto puede
-      // inyectar markup en el articulo publicado.
-      const compiledMarkup = render(context.getAllContext());
-
-      return {
-        success: true,
-        data: {
-          compiled_markup: compiledMarkup,
-          mapped_at: new Date().toISOString(),
-        },
-      };
-    } catch (error) {
+    if ('failure' in outcome) {
       return {
         success: false,
         error: {
           level: 'GRAVE',
-          message: `Fallo al compilar la plantilla: ${this.describeError(error)}`,
-          stackTrace: error instanceof Error ? error.stack : undefined,
+          message: `Fallo al compilar la plantilla: ${outcome.failure}`,
+          ...(outcome.stackTrace !== undefined
+            ? { stackTrace: outcome.stackTrace }
+            : {}),
         },
       };
     }
+
+    return {
+      success: true,
+      data: {
+        compiled_markup: outcome.markup,
+        mapped_at: new Date().toISOString(),
+      },
+    };
   }
 
   /**
@@ -177,43 +175,9 @@ export class TemplateMapperStrategy implements INodeStrategy {
       return {
         failure: {
           level: 'GRAVE',
-          message: `No se pudo resolver la plantilla "${templateId}": ${this.describeError(error)}`,
+          message: `No se pudo resolver la plantilla "${templateId}": ${error instanceof Error ? error.message : String(error)}`,
         },
       };
     }
-  }
-
-  /**
-   * Rutas de `requiredVariables` que el contexto no puede resolver.
-   *
-   * Reutiliza `resolvePath`, la funcion pura del contexto FSM, para que la
-   * comprobacion siga exactamente la misma gramatica de navegacion que la
-   * interpolacion del motor.
-   */
-  private findMissingVariables(
-    context: StatePayloadContext,
-    requiredVariables: readonly string[],
-  ): string[] {
-    // Un solo volcado: `getAllContext()` clona en profundidad en cada llamada.
-    const namespaces = context.getAllContext();
-
-    return requiredVariables.filter((path) => {
-      try {
-        resolvePath(namespaces, path);
-        return false;
-      } catch (error) {
-        if (error instanceof MissingContextVariableException) {
-          return true;
-        }
-
-        // Cualquier otra cosa es imprevista: se deja subir para que el motor la
-        // normalice a URGENTE en vez de disfrazarla de variable ausente.
-        throw error;
-      }
-    });
-  }
-
-  private describeError(error: unknown): string {
-    return error instanceof Error ? error.message : String(error);
   }
 }

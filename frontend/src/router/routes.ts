@@ -29,6 +29,16 @@ const routes: RouteRecordRaw[] = [
         // Espeja el @Roles(UserRole.ADMIN) del AllowedIpsController.
         meta: { requiresAdmin: true },
       },
+      {
+        path: 'templates',
+        component: () => import('@/pages/templates/TemplatesPage.vue'),
+        // SIN requiresAdmin: TemplatesController admite @Roles(ADMIN, EDITOR).
+        // Configurar plantillas es operacion de flujos, no gestion de cuentas.
+      },
+      {
+        path: 'nodos/config-sandbox',
+        component: () => import('@/pages/nodes/NodeConfigSandboxPage.vue'),
+      },
     ],
   },
 

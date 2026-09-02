@@ -4,6 +4,7 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 
+import { TemplateRendererService } from './services/template-renderer.service';
 import { ALLOWED_NAMESPACES, TemplatesService } from './templates.service';
 
 import type { HtmlTemplate } from './entities/html-template.entity';
@@ -42,9 +43,18 @@ const buildRepository = (): TemplateRepositoryMock =>
     remove: jest.fn((entity: HtmlTemplate) => Promise.resolve(entity)),
   }) as unknown as TemplateRepositoryMock;
 
-/** El doble no implementa `Repository` entero; el cast se aisla aqui. */
+/**
+ * El doble no implementa `Repository` entero; el cast se aisla aqui.
+ *
+ * El renderer va REAL: es puro (sin repositorio, red ni estado), y la vista
+ * previa se prueba mejor comprobando el markup que sale de verdad que
+ * aseverando sobre un doble.
+ */
 const buildService = (repository: TemplateRepositoryMock): TemplatesService =>
-  new TemplatesService(repository as unknown as Repository<HtmlTemplate>);
+  new TemplatesService(
+    repository as unknown as Repository<HtmlTemplate>,
+    new TemplateRendererService(),
+  );
 
 /**
  * Ejecuta la promesa esperando una `BadRequestException` y devuelve su cuerpo,
@@ -404,6 +414,135 @@ describe('TemplatesService', () => {
         NotFoundException,
       );
       expect(repository.save).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('6. Previsualizacion', () => {
+    it('6.1 deberia autogenerar marcadores por cada variable requerida', async () => {
+      // 1. Arrange
+      const repository = buildRepository();
+      repository.findOne.mockResolvedValue({
+        ...STORED_TEMPLATE,
+        htmlContent: '<h1>{{parsed_email.clean_title}}</h1>',
+        requiredVariables: ['parsed_email.clean_title'],
+      });
+      const service = buildService(repository);
+
+      // 2. Act
+      const { compiledMarkup } = await service.previewTemplate(TEMPLATE_ID, {});
+
+      // 3. Assert: sin datos del cliente, la maqueta se ve igualmente
+      expect(compiledMarkup).toBe('<h1>«parsed_email.clean_title»</h1>');
+    });
+
+    it('6.2 deberia dejar que samplePayload gane sobre el marcador', async () => {
+      // 1. Arrange
+      const repository = buildRepository();
+      repository.findOne.mockResolvedValue({
+        ...STORED_TEMPLATE,
+        htmlContent:
+          '<h1>{{parsed_email.clean_title}}</h1><p>{{llm_response.summary}}</p>',
+        requiredVariables: ['parsed_email.clean_title', 'llm_response.summary'],
+      });
+      const service = buildService(repository);
+
+      // 2. Act: solo se aporta una de las dos rutas
+      const { compiledMarkup } = await service.previewTemplate(TEMPLATE_ID, {
+        samplePayload: {
+          parsed_email: { clean_title: 'Innovacion en Madrid' },
+        },
+      });
+
+      // 3. Assert: la aportada sale real, la otra sigue como marcador
+      expect(compiledMarkup).toBe(
+        '<h1>Innovacion en Madrid</h1><p>«llm_response.summary»</p>',
+      );
+    });
+
+    it('6.3 deberia construir el anidamiento de una ruta profunda', async () => {
+      // 1. Arrange
+      const repository = buildRepository();
+      repository.findOne.mockResolvedValue({
+        ...STORED_TEMPLATE,
+        htmlContent: '<h2>{{llm_response.articles.[0].title}}</h2>',
+        requiredVariables: ['llm_response.articles.0.title'],
+      });
+      const service = buildService(repository);
+
+      // 2. Act
+      const { compiledMarkup } = await service.previewTemplate(TEMPLATE_ID, {});
+
+      // 3. Assert
+      expect(compiledMarkup).toBe('<h2>«llm_response.articles.0.title»</h2>');
+    });
+
+    it('6.4 deberia escapar el HTML que llegue por samplePayload', async () => {
+      // 1. Arrange
+      const repository = buildRepository();
+      repository.findOne.mockResolvedValue({
+        ...STORED_TEMPLATE,
+        htmlContent: '<h1>{{parsed_email.clean_title}}</h1>',
+        requiredVariables: ['parsed_email.clean_title'],
+      });
+      const service = buildService(repository);
+
+      // 2. Act
+      const { compiledMarkup } = await service.previewTemplate(TEMPLATE_ID, {
+        samplePayload: {
+          parsed_email: { clean_title: '<script>alert(1)</script>' },
+        },
+      });
+
+      // 3. Assert
+      expect(compiledMarkup).not.toContain('<script>');
+      expect(compiledMarkup).toContain('&lt;script&gt;');
+    });
+
+    it('6.5 deberia previsualizar tambien una plantilla desactivada', async () => {
+      // 1. Arrange
+      const repository = buildRepository();
+      repository.findOne.mockResolvedValue({
+        ...STORED_TEMPLATE,
+        active: false,
+        htmlContent: '<p>fija</p>',
+        requiredVariables: [],
+      });
+      const service = buildService(repository);
+
+      // 2. Act & 3. Assert: revisar por que se retiro una es motivo para conservarla
+      await expect(service.previewTemplate(TEMPLATE_ID, {})).resolves.toEqual({
+        compiledMarkup: '<p>fija</p>',
+      });
+    });
+
+    it('6.6 deberia lanzar NotFoundException si la plantilla no existe', async () => {
+      // 1. Arrange
+      const service = buildService(buildRepository());
+
+      // 2. Act & 3. Assert
+      await expect(service.previewTemplate(TEMPLATE_ID, {})).rejects.toThrow(
+        NotFoundException,
+      );
+    });
+
+    it('6.7 deberia lanzar BadRequestException si la plantilla no compila', async () => {
+      // 1. Arrange: HTML con un bloque sin cerrar; solo alcanzable por SQL directo,
+      // porque el alta lo habria rechazado antes de guardarlo
+      const repository = buildRepository();
+      repository.findOne.mockResolvedValue({
+        ...STORED_TEMPLATE,
+        htmlContent: '{{#if algo}}<p>roto</p>',
+        requiredVariables: [],
+      });
+      const service = buildService(repository);
+
+      // 2. Act
+      const response = await expectBadRequest(
+        service.previewTemplate(TEMPLATE_ID, {}),
+      );
+
+      // 3. Assert
+      expect(response.message).toContain('no compila');
     });
   });
 });

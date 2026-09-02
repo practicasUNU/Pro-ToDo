@@ -8,9 +8,12 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 
 import { CreateTemplateDto } from './dto/create-template.dto';
+import { PreviewTemplateDto } from './dto/preview-template.dto';
 import { UpdateTemplateDto } from './dto/update-template.dto';
 import { HtmlTemplate } from './entities/html-template.entity';
+import { TemplateRendererService } from './services/template-renderer.service';
 
+import type { RenderNamespaces } from './services/template-renderer.service';
 import type { FindOptionsWhere } from 'typeorm';
 
 /**
@@ -89,6 +92,13 @@ const FORBIDDEN_SYNTAX: ReadonlyArray<{ token: string; reason: string }> = [
 ];
 
 /**
+ * Envuelve la ruta para que el marcador se distinga de un valor real de un
+ * vistazo. Las comillas angulares no aparecen en texto corriente y sobreviven al
+ * escapado de Handlebars sin convertirse en entidades.
+ */
+const buildPlaceholder = (path: string): string => `«${path}»`;
+
+/**
  * Gestor de plantillas HTML (PROT-11.1).
  *
  * Su razon de ser no es el CRUD, sino la validacion estatica: una plantilla se
@@ -101,6 +111,7 @@ export class TemplatesService {
   constructor(
     @InjectRepository(HtmlTemplate)
     private readonly templateRepository: Repository<HtmlTemplate>,
+    private readonly templateRendererService: TemplateRendererService,
   ) {}
 
   public async findAll(onlyActive = true): Promise<HtmlTemplate[]> {
@@ -200,6 +211,146 @@ export class TemplatesService {
 
     template.active = false;
     return this.templateRepository.save(template);
+  }
+
+  /**
+   * Compila la plantilla contra un payload simulado, para la vista previa.
+   *
+   * Usa el MISMO `TemplateRendererService` que `TemplateMapperStrategy`: si la
+   * vista previa tuviera su propia compilacion, podria mostrar al editor un
+   * resultado que el nodo no va a producir.
+   *
+   * Se previsualizan tambien las plantillas desactivadas: revisar por que se
+   * retiro una es justo uno de los motivos para conservarlas.
+   *
+   * @throws NotFoundException Si la plantilla no existe.
+   * @throws BadRequestException Si la plantilla no compila.
+   */
+  public async previewTemplate(
+    id: string,
+    previewTemplateDto: PreviewTemplateDto,
+  ): Promise<{ compiledMarkup: string }> {
+    const template = await this.findOne(id);
+    const namespaces = this.buildPreviewContext(
+      template.requiredVariables,
+      previewTemplateDto.samplePayload,
+    );
+
+    const outcome = this.templateRendererService.renderStrict(
+      template.htmlContent,
+      template.requiredVariables,
+      namespaces,
+    );
+
+    if ('markup' in outcome) {
+      return { compiledMarkup: outcome.markup };
+    }
+
+    // Con los marcadores autogenerados no deberia faltar ninguna ruta de
+    // `requiredVariables`; si falta, la plantilla usa una variable que la
+    // validacion no detecto y el editor debe enterarse.
+    if ('missingFields' in outcome) {
+      throw new BadRequestException({
+        message: `La plantilla referencia variables que no se pudieron resolver: ${outcome.missingFields.join(', ')}.`,
+        missingFields: outcome.missingFields,
+      });
+    }
+
+    throw new BadRequestException({
+      message: `La plantilla no compila: ${outcome.failure}`,
+    });
+  }
+
+  /**
+   * Contexto de previsualizacion: marcadores por cada ruta requerida, con el
+   * `samplePayload` del cliente fusionado encima.
+   *
+   * Autogenerar los marcadores es lo que evita que la vista previa falle por
+   * falta de datos: el editor abre el dialogo y ve la maqueta al instante, con
+   * `«parsed_email.clean_title»` donde ira el titular. Donde aporte valores
+   * reales, se ven esos.
+   */
+  private buildPreviewContext(
+    requiredVariables: readonly string[],
+    samplePayload: Record<string, Record<string, unknown>> | undefined,
+  ): RenderNamespaces {
+    const namespaces: RenderNamespaces = {};
+
+    for (const path of requiredVariables) {
+      const [namespace, ...nestedKeys] = path.split('.');
+
+      // `requiredVariables` siempre trae namespace + al menos un segmento, pero
+      // la fila pudo escribirse por SQL directo: sin esta guarda seria un
+      // TypeError opaco al previsualizar.
+      if (namespace === undefined || nestedKeys.length === 0) {
+        continue;
+      }
+
+      namespaces[namespace] ??= {};
+      this.assignNested(
+        namespaces[namespace],
+        nestedKeys,
+        buildPlaceholder(path),
+      );
+    }
+
+    return this.deepMerge(namespaces, samplePayload ?? {});
+  }
+
+  /** Escribe `value` en `keys` creando los objetos intermedios que falten. */
+  private assignNested(
+    target: Record<string, unknown>,
+    keys: string[],
+    value: string,
+  ): void {
+    let cursor = target;
+
+    for (let index = 0; index < keys.length - 1; index += 1) {
+      const key = keys[index];
+      const existing = cursor[key];
+
+      // Un tramo ya ocupado por un primitivo se sustituye: dos rutas que se
+      // contradicen (`a.b` y `a.b.c`) son un error de la plantilla, y aqui solo
+      // se trata de pintar algo coherente.
+      if (typeof existing !== 'object' || existing === null) {
+        cursor[key] = {};
+      }
+
+      cursor = cursor[key] as Record<string, unknown>;
+    }
+
+    cursor[keys[keys.length - 1]] = value;
+  }
+
+  /** Fusion recursiva: `override` gana, y los objetos se combinan por clave. */
+  private deepMerge<T extends Record<string, unknown>>(
+    base: T,
+    override: Record<string, unknown>,
+  ): T {
+    const merged: Record<string, unknown> = { ...base };
+
+    for (const [key, value] of Object.entries(override)) {
+      const current = merged[key];
+
+      if (
+        typeof value === 'object' &&
+        value !== null &&
+        !Array.isArray(value) &&
+        typeof current === 'object' &&
+        current !== null &&
+        !Array.isArray(current)
+      ) {
+        merged[key] = this.deepMerge(
+          current as Record<string, unknown>,
+          value as Record<string, unknown>,
+        );
+        continue;
+      }
+
+      merged[key] = value;
+    }
+
+    return merged as T;
   }
 
   /**
