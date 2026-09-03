@@ -909,3 +909,62 @@ aporte valores reales se ven esos.
 | Validación de `outputNamespace` | `useTemplateMapperStore` | Un 400 al guardar el flujo entero por un guion en el namespace |
 | `SafeDeleteModal` (5 s) | `TemplatesManager.vue` | Desactivar una plantilla por reflejo |
 | `<iframe sandbox>` | `TemplatePreviewDialog.vue` | Ejecutar el `<script>` de una plantilla en el origen de la sesión |
+
+### 5.8 Editor de plantillas: CodeMirror 6 y borrador en Pinia
+
+Refactor de `TemplateEditorDialog.vue` en tres capas con responsabilidades disjuntas:
+
+```
+TemplateEditorDialog.vue          orquesta el modal (split view 35/65) y el guardado
+  │  ref imperativo                v-model + eventos
+  ▼                                     ▼
+TemplateCodeEditor.vue            useTemplatesStore (activeDraft)
+  aisla toda la API de CodeMirror   buffer, cursor espejo, getters derivados
+```
+
+#### Contrato del hijo
+
+```typescript
+// TemplateCodeEditor.vue
+interface Props { modelValue: string }
+emits: { 'update:modelValue': [value: string]; cursorChange: [position: number] }
+defineExpose({ insertTextAtCursor: (text: string, cursorOffset?: number) => void })
+```
+
+Es lo único que el diálogo conoce del editor. `@codemirror/*` no se importa en ningún otro archivo:
+cambiar de motor de edición no toca el diálogo ni el store.
+
+#### Estado del borrador (`templates.store.ts`)
+
+| Miembro | Tipo | Nota |
+|---|---|---|
+| `activeDraft` | `TemplateDraft` | `{ name, description?, htmlContent }`. **Uno solo por app** |
+| `cursorPosition` | `number` | **Espejo** del cursor de CodeMirror, que es quien manda |
+| `isDraftValid` | `computed<boolean>` | Nombre y HTML no vacíos; gobierna el botón Guardar |
+| `detectedVariables` | `computed<string[]>` | Rutas detectadas, deduplicadas y en orden de aparición |
+| `initDraft(template?)` | acción | Omite la clave `description` si la entidad trae `null` |
+| `insertMarker(namespace)` | acción | **Solo fallback** si el editor aún no montó |
+
+`detectedVariables` usa el mismo patrón que el backend, índice `.[0]` incluido. Detecta la **forma**,
+no la lista blanca: `{{contacto.telefono}}` aparece en los chips y aun así el backend lo rechaza con
+un `400` — el gestor de plantillas sigue siendo la única autoridad sobre qué namespaces existen.
+
+#### Quién gobierna el cursor
+
+**CodeMirror.** El chip despacha `insertTextAtCursor('{{ns.}}', -2)` sobre el `EditorView`; la
+transacción emite `update:modelValue` y el store se sincroniza solo. Insertar además desde el store
+duplicaría el texto, y empalmar strings allí reconstruiría el documento entero y perdería el caret.
+
+Una sola transacción mueve texto y cursor a la vez, así que `Ctrl+Z` deshace la inserción completa.
+
+#### Tema y resaltado
+
+Un único `HighlightStyle` y un `EditorView.theme()` construidos sobre custom properties `--pd-*`. Como
+esos tokens conmutan solos con `body--dark`, el editor sigue el tema sin reconfigurar extensiones ni
+observar `$q.dark`. Tokens nuevos: `--pd-accent-soft` (chip de marcador) y `--pd-accent-selection`.
+
+#### Pruebas
+
+Primer runner del frontend: **Vitest 4** con `vitest.config.ts` propio (replica los alias de
+`quasar.config.ts`, que Vitest no lee). `src/stores/templates.store.spec.ts` cubre 19 casos del
+borrador sin entorno DOM ni red, mockeando `@services/templates.service`.

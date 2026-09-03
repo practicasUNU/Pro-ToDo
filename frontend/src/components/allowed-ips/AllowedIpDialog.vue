@@ -121,7 +121,7 @@ const onSubmit = async (): Promise<void> => {
         </q-card-section>
 
         <q-card-actions align="right" class="q-px-md q-pb-md">
-          <q-btn flat no-caps label="Cancelar" class="pd-btn-cancel" @click="closeDialog" />
+          <q-btn flat no-caps label="Cancelar" class="pd-btn-secondary" @click="closeDialog" />
           <q-btn
             class="pd-btn-primary"
             unelevated
@@ -140,10 +140,6 @@ const onSubmit = async (): Promise<void> => {
 <style scoped lang="scss">
 .pd-dialog-icon {
   color: var(--pd-primary);
-}
-
-.pd-btn-cancel {
-  color: var(--pd-text-secondary);
 }
 
 // Campos e inputs sobre los tokens del sistema (regla §2, Formularios).

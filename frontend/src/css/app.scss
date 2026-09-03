@@ -77,6 +77,11 @@ body.body--dark {
   --pd-panel-solid: #3a5ce0;
   --pd-accent: #5b8ce8;
 
+  // Derivados de --pd-accent a baja opacidad. No son colores nuevos: son el
+  // mismo matiz translucido, y por eso valen igual en claro y en oscuro.
+  --pd-accent-soft: rgba(91, 140, 232, 0.15); // fondo del chip de marcador en el editor
+  --pd-accent-selection: rgba(91, 140, 232, 0.25); // seleccion activa de CodeMirror
+
   --pd-warning: #f59e0b;
   --pd-positive: #10b981;
 
@@ -264,6 +269,13 @@ body {
     color: var(--pd-disabled-text) !important;
     opacity: 1 !important;
   }
+}
+
+// Secundario: accion de escape (Cancelar, Cerrar). Sin relleno ni degradado,
+// para que nunca compita visualmente con la accion primaria del dialogo.
+.pd-btn-secondary {
+  color: var(--pd-text-secondary);
+  border-radius: $button-border-radius;
 }
 
 // Botón de icono de trazo lineal (columna Acciones): sin rellenos pesados.

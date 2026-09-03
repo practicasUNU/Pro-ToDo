@@ -109,7 +109,7 @@ const closeDialog = (): void => emit('update:modelValue', false);
       </q-card-section>
 
       <q-card-actions align="right" class="q-px-md q-pb-md">
-        <q-btn flat no-caps label="Cerrar" class="pd-btn-cancel" @click="closeDialog" />
+        <q-btn flat no-caps label="Cerrar" class="pd-btn-secondary" @click="closeDialog" />
       </q-card-actions>
     </q-card>
   </q-dialog>
@@ -122,10 +122,6 @@ const closeDialog = (): void => emit('update:modelValue', false);
 
 .pd-dialog-icon {
   color: var(--pd-primary);
-}
-
-.pd-btn-cancel {
-  color: var(--pd-text-secondary);
 }
 
 .pd-preview-frame {

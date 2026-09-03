@@ -1406,3 +1406,151 @@ escapado, plantilla desactivada, `404`, `400` por HTML que no compila) y 9 del
 - [ ] **Ocultar entradas del drawer por rol**: `/users` y `/ip-whitelist` se muestran a un EDITOR
       aunque la guarda de ruta los bloquee. No es nuevo de esta entrega, pero se hace más visible al
       añadir rutas con roles distintos.
+
+---
+
+## 2026-09-02 · Editor CodeMirror 6, split view y borrador en Pinia — rama `feat/html-template-mapper`
+
+El diálogo de plantillas entregado esta mañana era un modal de 620px con un `<q-textarea>` plano. Se
+podía escribir HTML, pero sin resaltado, sin números de línea y sin ninguna señal de qué era un
+marcador y qué era texto: el autor descubría el error cuando el backend devolvía un `400`. Este
+refactor separa las tres responsabilidades que el componente concentraba y hace el error **visible
+mientras se escribe**.
+
+### CodeMirror manda sobre el cursor, no el store
+
+El encargo especificaba dos caminos de inserción a la vez: `store.insertMarker(ns)`, que empalma
+strings sobre un `cursorPosition` guardado en Pinia, y `codeEditorRef.insertTextAtCursor(...)`, que
+despacha una transacción sobre el `EditorView`. Ejecutar ambos inserta `{{ns.}}` **dos veces**.
+
+Y no es solo eso: si el store fuese el dueño, cada inserción reemplazaría el documento entero por una
+cadena nueva, CodeMirror lo recibiría por prop y el cursor se iría al principio. El punto de control
+del propio encargo pedía lo contrario — "inserción atómica sin pérdida de foco".
+
+Gobierna CodeMirror. El chip despacha la transacción; el `update:modelValue` sincroniza el store
+después. `insertMarker` sobrevive como red por si el editor aún no ha resuelto su carga diferida, y
+`cursorPosition` queda como espejo que alimenta ese fallback. El TSDoc de ambos lo dice, para que
+nadie los tome por la ruta principal.
+
+Que la inserción sea **una sola transacción** —texto y selección en el mismo `dispatch`— es lo que
+hace que `Ctrl+Z` la deshaga entera en vez de dejar el caret descolocado.
+
+### La guarda contra el bucle de eco
+
+El `v-model` entre un componente Vue y un editor imperativo tiene una trampa clásica:
+
+```
+tecla → docChanged → emit → store → prop → watch → dispatch → docChanged → …
+```
+
+Sin cortar ese ciclo, cada pulsación reemplaza el documento completo y el cursor salta. El `watch`
+compara antes de despachar:
+
+```ts
+if (!view || view.state.doc.toString() === value) return;   // el cambio vino de aqui
+```
+
+Tres caracteres de comparación que son la diferencia entre un editor usable y uno que se pelea con
+quien escribe.
+
+### Un solo `HighlightStyle` para los dos modos
+
+`defaultHighlightStyle` de CodeMirror está pensado para fondo claro y sería ilegible en oscuro, que
+es el modo por defecto del proyecto. La salida habitual es mantener dos temas y conmutarlos con un
+`Compartment` observando `$q.dark`.
+
+No hizo falta: el tema y el resaltado se construyen sobre custom properties `--pd-*`, que ya conmutan
+solas con `body--dark`. Un único `EditorView.theme()` y un único `HighlightStyle` sirven para ambos
+modos, sin reconfigurar extensiones ni observar el store de tema.
+
+Los dos colores que el encargo pedía inline (`rgba(91,140,232,.15)` y `.25`) se añadieron antes como
+tokens `--pd-accent-soft` y `--pd-accent-selection`: `app.scss` declara que la lista `--pd-*` es
+cerrada y que todo color nuevo entra primero como token.
+
+### `:deep()` no es opcional aquí
+
+CodeMirror construye su DOM de forma imperativa, sin el atributo de scope que Vue añade a lo que él
+renderiza. Un `.cm-pd-template-marker` en `<style scoped>` normal **no alcanzaría** a esos nodos. El
+contenedor sí es un elemento de Vue, así que `:deep()` desde el componente hijo funciona.
+
+### `min-height: 0`, el detalle que decide si el modal funciona
+
+El split view es una cadena de contenedores flex: card → form → row → columna → editor. Un ítem flex
+tiene `min-height: auto` por defecto y **se niega a encogerse por debajo de su contenido**, así que
+sin `min-height: 0` en cada eslabón el editor empuja el modal más allá del `85vh` en vez de hacer
+scroll interno. Es exactamente el desbordamiento que el punto 2 de la verificación manual buscaba.
+
+### `vue-codemirror` no entró
+
+El encargo lo pedía, pero el wrapper obliga igualmente a sacar el `EditorView` del payload de su
+evento `@ready` para poder despachar transacciones — y con `no-unsafe-assignment` como *error* en el
+lint, ese payload hay que tiparlo a mano. A cambio de dos dependencias (`vue-codemirror` más el
+metapaquete `codemirror`, que declara como peer y faltaba en la lista), ahorraba unas 35 líneas de
+`onMounted`/`onBeforeUnmount`. Se montó el `EditorView` directamente.
+
+La lista de paquetes sí se corrigió por lo contrario: faltaban tres. `@codemirror/language` (sin él
+el HTML se parsea pero **no se colorea**), `@codemirror/commands` (sin él no hay deshacer/rehacer, lo
+que dejaría el editor por debajo de un `<textarea>`) y `@lezer/highlight` para los `tags`.
+
+### Detalles de implementación
+
+- **El `EditorView` no vive en un `ref`.** Envolver una instancia imperativa con estado interno en un
+  proxy reactivo de Vue es una fuente conocida de rarezas, y aquí no se necesita reactividad sobre
+  ella: es una variable del `setup`.
+- **Carga diferida.** El diálogo monta `TemplateCodeEditor` con `defineAsyncComponent`. El build lo
+  confirma: `TemplateCodeEditor-DPHlm0aB.js` pesa 451 KB y **no aparece** en el chunk principal
+  (167 KB), que es lo que importa porque el diálogo lo importan dos componentes distintos.
+- **El regex se alineó con el del backend**, índice `.[0]` incluido. Con el del encargo,
+  `{{llm_response.articles.[0].title}}` no habría salido en los chips aunque el backend sí la
+  registra en `requiredVariables`: los chips habrían mentido.
+- **`detectedVariables` detecta la forma, no la validez.** `{{contacto.telefono}}` se resalta y se
+  lista, y aun así el backend lo rechaza. Duplicar aquí la lista blanca crearía una segunda autoridad
+  sobre qué namespaces existen; hay una sola, y está en el backend.
+- **`exactOptionalPropertyTypes` en `initDraft`**: la entidad trae `description: string | null` y el
+  borrador la quiere `string | undefined`. No se puede asignar `undefined`: hay que **omitir la
+  clave**, con el mismo spread condicional que ya usaba `onSubmit`. Hay un test que lo fija
+  (`'description' in draft === false`), porque es el tipo de cosa que un refactor rompe en silencio.
+- **`.pd-btn-secondary` unificó cinco duplicados.** No existía; cinco diálogos repetían una
+  `.pd-btn-cancel` local idéntica. Se creó como utilidad global, se añadió a la tabla §2 de las
+  reglas y se migraron los cinco.
+- **Un solo borrador por aplicación.** `activeDraft` es un singleton: dos `TemplateEditorDialog`
+  montados a la vez compartirían buffer. No es un problema real porque los `<q-dialog>` son modales y
+  solo uno está abierto, e `initDraft` se llama al abrir — pero queda escrito en el TSDoc para que
+  nadie construya encima la suposición contraria.
+
+### Primer runner de pruebas del frontend
+
+Hasta ahora no había ninguno. El refactor movía a Pinia lógica pura que antes no existía —el regex de
+detección y la aritmética del offset del caret— y eso pedía red. Vitest 4 (declara `vite ^8.0.0`;
+instalado 8.2.2), con `vitest.config.ts` propio porque Vitest no lee los alias de `quasar.config.ts`.
+
+Los helpers se importan explícitamente en vez de activar `globals: true`: eso exigiría añadir
+`vitest/globals` a los `types` de `.quasar/tsconfig.json`, que es un archivo **generado** por
+`quasar prepare` y se perdería en el siguiente `postinstall`.
+
+`src/stores/templates.store.spec.ts`, 19 casos sin DOM ni red (`vi.mock` sobre el servicio evita
+cargar `@boot/axios`): `initDraft` con `description: null`, los cuatro casos de `isDraftValid`, siete
+de `detectedVariables` (dedupe, rutas profundas, índice, namespace suelto, recálculo tras cambio) y
+cuatro de `insertMarker` (posición, offset del caret, cursor desfasado y acotado).
+
+### Verificación
+
+```
+npm run typecheck   vue-tsc --noEmit, limpio
+npm run lint:check  limpio (exit 0)
+npm test            1 archivo, 19 pruebas
+npm run build       OK — CodeMirror aislado en su propio chunk, ausente del index
+```
+
+### Checklist de dependencias restantes
+
+- [x] **Sin pruebas en el frontend** — resuelto parcialmente: Vitest instalado y `templates.store.ts`
+      cubierto. Faltan las de componente (`@vue/test-utils` + `happy-dom` cuando haga falta).
+- [ ] **`TemplateCodeEditor` sin pruebas**: la guarda del bucle de eco y el offset de
+      `insertTextAtCursor` solo se verifican a mano. Necesitan entorno DOM.
+- [ ] **Autocompletado de campos tras el punto**: al insertar `{{parsed_email.}}` el editor podría
+      ofrecer los campos conocidos del namespace, pero el backend no expone hoy ese catálogo.
+- [ ] **Resaltar en rojo los namespaces fuera de la lista blanca**: el decorador valida la forma. Con
+      `TEMPLATE_NAMESPACES` ya en el frontend, distinguir válido de inválido dentro del editor es
+      barato y adelantaría el `400` al momento de teclear.
+- [ ] **Asistente de flujos (PROT-12)** y los otros seis configuradores de nodo, sin cambios.

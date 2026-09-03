@@ -95,7 +95,7 @@ onBeforeUnmount(clearCountdown);
       </q-card-section>
 
       <q-card-actions align="right" class="q-px-md q-pb-md">
-        <q-btn flat no-caps label="Cancelar" class="pd-btn-cancel" @click="onCancel" />
+        <q-btn flat no-caps label="Cancelar" class="pd-btn-secondary" @click="onCancel" />
         <q-btn
           class="pd-btn-danger"
           unelevated
@@ -112,9 +112,5 @@ onBeforeUnmount(clearCountdown);
 <style scoped lang="scss">
 .pd-danger-icon {
   color: var(--pd-negative);
-}
-
-.pd-btn-cancel {
-  color: var(--pd-text-secondary);
 }
 </style>

@@ -1,12 +1,23 @@
 <script setup lang="ts">
-import { computed, nextTick, reactive, ref, watch } from 'vue';
-import { useQuasar, type QInput } from 'quasar';
+import { computed, defineAsyncComponent, ref, watch } from 'vue';
+import { useQuasar } from 'quasar';
 
 import { useTemplatesStore } from '@stores/templates.store';
 
 import { extractApiErrorMessage } from '@/utils/api-error';
 
 import { TEMPLATE_NAMESPACES, type HtmlTemplate } from '@/types/html-template';
+
+// CodeMirror pesa unos cientos de KB y este dialogo lo importan dos componentes
+// distintos; en diferido solo se descarga al abrir el editor.
+const TemplateCodeEditor = defineAsyncComponent(
+  () => import('@components/templates/TemplateCodeEditor.vue'),
+);
+
+/** Contrato imperativo que `TemplateCodeEditor` expone con `defineExpose`. */
+interface TemplateCodeEditorInstance {
+  insertTextAtCursor: (text: string, cursorOffset?: number) => void;
+}
 
 interface Props {
   modelValue: boolean;
@@ -25,29 +36,23 @@ const templatesStore = useTemplatesStore();
 
 // Los ejemplos con llaves viven aqui y no en la plantilla: el compilador de Vue
 // no sabe distinguir unas llaves literales de una interpolacion anidada.
-const HTML_PLACEHOLDER = '<h1>{{parsed_email.clean_title}}</h1>';
 const FORBIDDEN_BLOCK_EXAMPLE = '{{#if}}';
 
-const htmlInput = ref<QInput | null>(null);
+/** Retroceso del caret tras insertar, para dejarlo en `{{namespace.|}}`. */
+const CARET_OFFSET_INSIDE_BRACES = -2;
 
-const form = reactive<{ name: string; description: string; htmlContent: string }>({
-  name: '',
-  description: '',
-  htmlContent: '',
-});
+// `InstanceType<typeof ...>` no resuelve a traves de defineAsyncComponent, de
+// ahi la interfaz explicita.
+const codeEditorRef = ref<TemplateCodeEditorInstance | null>(null);
 
 const isEditMode = computed(() => !!props.template);
-
-const resetForm = (): void => {
-  form.name = props.template?.name ?? '';
-  form.description = props.template?.description ?? '';
-  form.htmlContent = props.template?.htmlContent ?? '';
-};
 
 watch(
   () => props.modelValue,
   (isOpen) => {
-    if (isOpen) resetForm();
+    // El borrador se inicializa AL ABRIR, no al montar: el dialogo permanece en
+    // el arbol cerrado, y `props.template` cambia entre un alta y una edicion.
+    if (isOpen) templatesStore.initDraft(props.template ?? undefined);
   },
 );
 
@@ -56,50 +61,38 @@ const onDialogToggle = (value: boolean): void => emit('update:modelValue', value
 const closeDialog = (): void => emit('update:modelValue', false);
 
 /**
- * Inserta `{{namespace.}}` en la posicion del cursor (Poka-Yoke).
+ * Inserta `{{namespace.}}` en el cursor (Poka-Yoke).
  *
  * El autor elige el namespace de la lista blanca en vez de teclearlo: es la
  * unica forma de no equivocarse ANTES de que el backend rechace la plantilla.
- * El cursor queda entre el punto y las llaves, listo para escribir el campo.
+ *
+ * CodeMirror es el dueno del cursor, asi que la insercion se despacha sobre el
+ * editor y el store se sincroniza solo por `update:modelValue`. Hacerlo tambien
+ * desde el store insertaria el texto dos veces.
  */
 const insertNamespace = (namespace: string): void => {
   const snippet = `{{${namespace}.}}`;
 
-  // `nativeEl` es el <textarea> real; el ref de una QInput apunta al componente,
-  // que no tiene selectionStart. Si aun no esta montado, se anade al final.
-  const textarea = htmlInput.value?.nativeEl;
-
-  if (!textarea) {
-    form.htmlContent += snippet;
+  if (codeEditorRef.value) {
+    codeEditorRef.value.insertTextAtCursor(snippet, CARET_OFFSET_INSIDE_BRACES);
     return;
   }
 
-  const selectionStart = textarea.selectionStart ?? form.htmlContent.length;
-  const selectionEnd = textarea.selectionEnd ?? selectionStart;
-
-  form.htmlContent = `${form.htmlContent.slice(0, selectionStart)}${snippet}${form.htmlContent.slice(selectionEnd)}`;
-
-  // El caret queda entre el punto y las llaves, listo para escribir el campo.
-  // Hay que esperar al repintado: antes de el, el textarea aun tiene el texto
-  // viejo y setSelectionRange se aplicaria sobre indices que ya no valen.
-  const caretPosition = selectionStart + snippet.length - 2;
-
-  void nextTick(() => {
-    textarea.focus();
-    textarea.setSelectionRange(caretPosition, caretPosition);
-  });
+  // Red por si el editor aun no ha resuelto su carga diferida.
+  templatesStore.insertMarker(namespace);
 };
 
 const onSubmit = async (): Promise<void> => {
-  const description = form.description.trim();
+  const { name, description, htmlContent } = templatesStore.activeDraft;
+  const trimmedDescription = description?.trim();
 
   try {
     // `exactOptionalPropertyTypes`: la clave se omite en vez de enviarse como
     // `undefined`, que el tipo del payload no admite.
     const payload = {
-      name: form.name.trim(),
-      htmlContent: form.htmlContent,
-      ...(description ? { description } : {}),
+      name: name.trim(),
+      htmlContent,
+      ...(trimmedDescription ? { description: trimmedDescription } : {}),
     };
 
     const saved =
@@ -124,96 +117,115 @@ const onSubmit = async (): Promise<void> => {
 <template>
   <q-dialog :model-value="modelValue" persistent @update:model-value="onDialogToggle">
     <q-card class="pd-dialog-card pd-editor-card">
-      <q-card-section class="row items-center no-wrap q-gutter-sm">
+      <q-card-section class="row items-center no-wrap q-gutter-sm pd-editor-header">
         <span class="pd-icon-circle">
           <q-icon name="description" size="20px" class="pd-dialog-icon" />
         </span>
         <div class="pd-h2">{{ isEditMode ? 'Editar plantilla' : 'Nueva plantilla' }}</div>
       </q-card-section>
 
-      <q-form @submit.prevent="onSubmit">
-        <q-card-section class="q-gutter-md q-pt-none">
-          <div>
-            <label class="pd-label" for="template-name">
-              Nombre<span class="pd-required">*</span>
-            </label>
-            <q-input
-              id="template-name"
-              v-model="form.name"
-              outlined
-              dense
-              class="q-mt-xs"
-              maxlength="120"
-              placeholder="noticia-basica"
-              :rules="[(val: string) => !!val.trim() || 'El nombre es obligatorio']"
-            />
-          </div>
-
-          <div>
-            <label class="pd-label" for="template-description">Descripcion</label>
-            <q-input
-              id="template-description"
-              v-model="form.description"
-              outlined
-              dense
-              class="q-mt-xs"
-              maxlength="255"
-              placeholder="Cuerpo de noticia con titular y resumen"
-            />
-          </div>
-
-          <!-- Chips Poka-Yoke: el namespace se elige, no se teclea -->
-          <div>
-            <div class="pd-label">Namespaces disponibles</div>
-            <p class="pd-subtitle q-mt-xs q-mb-sm">
-              Pulsa uno para insertarlo en el cursor. Solo estos estan permitidos.
-            </p>
-            <div class="pd-chip-bar">
-              <q-chip
-                v-for="namespace in TEMPLATE_NAMESPACES"
-                :key="namespace"
-                clickable
+      <q-form class="pd-editor-form" @submit.prevent="onSubmit">
+        <div class="row q-col-gutter-md pd-editor-columns">
+          <!-- Columna izquierda: metadatos y Poka-Yoke de variables -->
+          <div class="col-12 col-md-4 pd-editor-side">
+            <div class="q-mb-md">
+              <label class="pd-label" for="template-name">
+                Nombre<span class="pd-required">*</span>
+              </label>
+              <q-input
+                id="template-name"
+                v-model="templatesStore.activeDraft.name"
+                outlined
                 dense
-                class="pd-namespace-chip pd-mono"
-                :label="namespace"
-                @click="insertNamespace(namespace)"
+                class="q-mt-xs"
+                maxlength="120"
+                placeholder="noticia-basica"
+                :rules="[(val: string) => !!val.trim() || 'El nombre es obligatorio']"
               />
+            </div>
+
+            <div class="q-mb-md">
+              <label class="pd-label" for="template-description">Descripcion</label>
+              <q-input
+                id="template-description"
+                v-model="templatesStore.activeDraft.description"
+                outlined
+                dense
+                class="q-mt-xs"
+                maxlength="255"
+                placeholder="Cuerpo de noticia con titular y resumen"
+              />
+            </div>
+
+            <!-- Chips Poka-Yoke: el namespace se elige, no se teclea -->
+            <div class="q-mb-md">
+              <div class="pd-label">Namespaces disponibles</div>
+              <p class="pd-subtitle q-mt-xs q-mb-sm">
+                Pulsa uno para insertarlo en el cursor. Solo estos estan permitidos.
+              </p>
+              <div class="pd-chip-bar">
+                <q-chip
+                  v-for="namespace in TEMPLATE_NAMESPACES"
+                  :key="namespace"
+                  clickable
+                  dense
+                  class="pd-namespace-chip pd-mono"
+                  :label="namespace"
+                  @click="insertNamespace(namespace)"
+                />
+              </div>
+            </div>
+
+            <div>
+              <div class="pd-label">Variables detectadas</div>
+              <p class="pd-subtitle q-mt-xs q-mb-sm">
+                Lo que el backend guardara en <span class="pd-mono">requiredVariables</span>.
+              </p>
+              <div v-if="templatesStore.detectedVariables.length > 0" class="pd-chip-bar">
+                <q-chip
+                  v-for="variable in templatesStore.detectedVariables"
+                  :key="variable"
+                  dense
+                  class="pd-detected-chip pd-mono"
+                  :label="variable"
+                />
+              </div>
+              <p v-else class="pd-subtitle">Ninguna todavia.</p>
             </div>
           </div>
 
-          <div>
-            <label class="pd-label" for="template-html">
-              Contenido HTML<span class="pd-required">*</span>
-            </label>
-            <q-input
-              id="template-html"
-              ref="htmlInput"
-              v-model="form.htmlContent"
-              type="textarea"
-              outlined
-              class="q-mt-xs pd-mono"
-              input-class="pd-mono"
-              :rows="10"
-              :placeholder="HTML_PLACEHOLDER"
-              :rules="[(val: string) => !!val.trim() || 'El contenido es obligatorio']"
+          <!-- Columna derecha: editor de codigo -->
+          <div class="col-12 col-md-8 pd-editor-main">
+            <div class="row items-center justify-between q-mb-xs">
+              <span class="pd-label"> Contenido HTML<span class="pd-required">*</span> </span>
+              <span class="pd-mono pd-editor-badge">Editor HTML Handlebars</span>
+            </div>
+
+            <TemplateCodeEditor
+              ref="codeEditorRef"
+              :model-value="templatesStore.activeDraft.htmlContent"
+              @update:model-value="templatesStore.updateHtmlContent"
+              @cursor-change="templatesStore.setCursorPosition"
             />
-            <p class="pd-subtitle q-mt-xs">
+
+            <p class="pd-subtitle q-mt-xs q-mb-none">
               Solo sustitucion de variables. Prohibidos los bloques
               <span class="pd-mono">{{ FORBIDDEN_BLOCK_EXAMPLE }}</span
               >, los parciales y el triple-stash.
             </p>
           </div>
-        </q-card-section>
+        </div>
 
-        <q-card-actions align="right" class="q-px-md q-pb-md">
-          <q-btn flat no-caps label="Cancelar" class="pd-btn-cancel" @click="closeDialog" />
+        <q-card-actions align="right" class="q-px-md q-pb-md pd-editor-actions">
+          <q-btn flat no-caps label="Cancelar" class="pd-btn-secondary" @click="closeDialog" />
           <q-btn
             class="pd-btn-primary"
             unelevated
             no-caps
-            label="Guardar"
+            label="Guardar Plantilla"
             icon-right="north_east"
             type="submit"
+            :disable="!templatesStore.isDraftValid"
             :loading="templatesStore.isLoading"
           />
         </q-card-actions>
@@ -223,17 +235,70 @@ const onSubmit = async (): Promise<void> => {
 </template>
 
 <style scoped lang="scss">
-// Solo maquetacion y tokens: ningun color literal.
+// Modal ancho: la autoria de HTML necesita sitio. Sobrescribe el min-width de
+// 380px que impone .pd-dialog-card.
 .pd-editor-card {
-  min-width: 620px;
+  display: flex;
+  flex-direction: column;
+  width: 92vw;
+  max-width: 1400px;
+  height: 85vh;
+  max-height: 900px;
+  min-width: 0;
+}
+
+// Cadena flex: cabecera y acciones a tamano natural, el cuerpo se queda el resto.
+//
+// `min-height: 0` en CADA eslabon es lo que decide si esto funciona: un item
+// flex tiene `min-height: auto` y se niega a encogerse por debajo de su
+// contenido, asi que sin esto el editor empujaria el modal mas alla del 85vh en
+// vez de hacer scroll interno.
+.pd-editor-header {
+  flex: 0 0 auto;
+}
+
+.pd-editor-form {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-height: 0;
+  padding: 0 16px;
+}
+
+.pd-editor-columns {
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.pd-editor-side {
+  overflow-y: auto;
+  max-height: 100%;
+}
+
+.pd-editor-main {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+// El editor ocupa todo el hueco que dejan la cabecera del panel y la nota.
+.pd-editor-main > .pd-code-editor,
+.pd-editor-main :deep(.pd-code-editor) {
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.pd-editor-actions {
+  flex: 0 0 auto;
+}
+
+.pd-editor-badge {
+  color: var(--pd-text-secondary);
+  font-size: 11.5px;
 }
 
 .pd-dialog-icon {
   color: var(--pd-primary);
-}
-
-.pd-btn-cancel {
-  color: var(--pd-text-secondary);
 }
 
 .pd-chip-bar {
@@ -246,6 +311,14 @@ const onSubmit = async (): Promise<void> => {
   background: var(--pd-surface-muted);
   color: var(--pd-accent-text);
   border: 1px solid var(--pd-border);
+}
+
+// Detectadas: mismo lenguaje visual que el chip del editor, para que se lean
+// como lo mismo en dos sitios distintos.
+.pd-detected-chip {
+  background: var(--pd-accent-soft);
+  color: var(--pd-accent);
+  border: 1px solid var(--pd-accent);
 }
 
 :deep(.q-field--outlined .q-field__control) {

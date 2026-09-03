@@ -23,6 +23,8 @@ Actúas como un Arquitecto Frontend experto. Al generar o refactorizar código p
   | `--pd-primary-light` | `#4E74E8` | `#4E74E8` | Fin del degradado corporativo y foco activo |
   | `--pd-panel-solid` | `#3A5CE0` | `#3A5CE0` | Tarjetas de estado institucional, CTAs destacadas |
   | `--pd-accent` | `#5B8CE8` | `#5B8CE8` | Micro-interacciones, hover de superficies grandes, chips de variables |
+  | `--pd-accent-soft` | `rgba(91,140,232,.15)` | *(idéntico)* | Fondo del chip de marcador `{{ns.campo}}` dentro del editor de código |
+  | `--pd-accent-selection` | `rgba(91,140,232,.25)` | *(idéntico)* | Selección activa de texto en el editor de código |
   | `--pd-accent-text` | `#5B8CE8` | `#3D6BD9` | Enlaces y texto interactivo (cumple contraste AA en modo claro) |
   | `--pd-text-primary` | `#FFFFFF` | `#12142E` | Titulares (`H1`, `H2`), labels destacados, texto sobre azul |
   | `--pd-text-secondary` | `#B8C0DE` | `#4A4F6B` | Párrafos de cuerpo, metadatos |
@@ -49,6 +51,7 @@ Actúas como un Arquitecto Frontend experto. Al generar o refactorizar código p
 - **Botones (`QBtn`):**
   - Primario (activo): degradado `linear-gradient(90deg, var(--pd-primary) 0%, var(--pd-primary-light) 100%)`, tipografía blanca bold, radio 6px, ícono de flecha diagonal (`↗`) al lateral derecho como micro-interacción.
   - Deshabilitado: fondo `--pd-disabled-bg`, texto `--pd-disabled-text` (nunca el mismo tono que el fondo), sin degradado ni hover.
+  - Secundario (`.pd-btn-secondary`): acción de escape (Cancelar, Cerrar). `flat`, sin relleno ni degradado, texto en `--pd-text-secondary`, radio 6px. Nunca debe competir visualmente con la acción primaria del diálogo.
   - Crítico / borrado seguro: rojo `--pd-negative`, sujeto a la cuenta regresiva de 5 segundos (ver sección 4, Acciones Críticas).
 - **Formularios (`QForm`, `QInput`, `QSelect`):**
   - Campos: fondo `--pd-card-bg` (o transparente en oscuro), borde `--pd-border`, placeholder en `--pd-text-secondary`.
