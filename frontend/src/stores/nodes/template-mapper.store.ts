@@ -10,6 +10,16 @@ import type { HtmlTemplate } from '@/types/html-template';
 /** Namespace por defecto, el mismo que asume `TemplateMapperStrategy`. */
 const DEFAULT_OUTPUT_NAMESPACE = 'rendered_html';
 
+/**
+ * Namespaces que se asume que los nodos previos dejaran en el contexto.
+ *
+ * PROVISIONAL: la fuente real son los `outputNamespace` de los nodos anteriores
+ * del `pipeline_schema`, que el asistente (PROT-12) inyectara con
+ * `setAvailableUpstreamNamespaces`. Hasta entonces, el banco de pruebas los
+ * manipula a mano.
+ */
+const DEFAULT_UPSTREAM_NAMESPACES = ['parsed_email', 'scraped_web', 'llm_response'];
+
 /** `params` que el nodo aporta al `pipeline_schema`. */
 export interface TemplateMapperConfig {
   templateId: string | null;
@@ -26,6 +36,7 @@ export const useTemplateMapperStore = defineStore('templateMapperNode', () => {
   });
 
   const availableTemplates = ref<HtmlTemplate[]>([]);
+  const availableUpstreamNamespaces = ref<string[]>([...DEFAULT_UPSTREAM_NAMESPACES]);
   const previewResult = ref<string | null>(null);
   const isLoading = ref(false);
 
@@ -34,20 +45,43 @@ export const useTemplateMapperStore = defineStore('templateMapperNode', () => {
       availableTemplates.value.find((template) => template.id === config.value.templateId) ?? null,
   );
 
+  /** Variables que la plantilla elegida exige al contexto. */
+  const requiredVariables = computed<string[]>(
+    () => selectedTemplate.value?.requiredVariables ?? [],
+  );
+
   /**
-   * Contrato uniforme del nodo. Exige plantilla elegida y un `outputNamespace`
-   * que el backend vaya a aceptar: validarlo aqui evita un 400 al guardar el
-   * flujo entero por un guion en el namespace.
+   * Variables cuya raiz ningun nodo previo del flujo produce.
+   *
+   * Es el contrato entre la plantilla y el pipeline: si la plantilla interpola
+   * `{{scraped_web.headline}}` y ningun nodo anterior escribe `scraped_web`, la
+   * ejecucion fallaria con un GRAVE y el flujo quedaria PAUSADO. Detectarlo al
+   * configurar es la diferencia entre corregirlo ahora o descubrirlo en
+   * produccion.
+   */
+  const missingRequiredVariables = computed<string[]>(() =>
+    requiredVariables.value.filter((path) => {
+      // Con `noUncheckedIndexedAccess`, desestructurar da `string | undefined`.
+      const [root] = path.split('.');
+
+      return root === undefined || !availableUpstreamNamespaces.value.includes(root);
+    }),
+  );
+
+  /**
+   * Contrato uniforme del nodo. Exige tres cosas:
+   *
+   * 1. Plantilla elegida.
+   * 2. Un `outputNamespace` que el backend vaya a aceptar: validarlo aqui evita
+   *    un 400 al guardar el flujo entero por un guion en el namespace.
+   * 3. Que el flujo suministre TODOS los namespaces que la plantilla exige
+   *    (Poka-Yoke): no se puede avanzar con un contrato que se sabe roto.
    */
   const isConfigValid = computed<boolean>(
     () =>
       config.value.templateId !== null &&
-      OUTPUT_NAMESPACE_PATTERN.test(config.value.outputNamespace),
-  );
-
-  /** Variables que la plantilla elegida exige al contexto. */
-  const requiredVariables = computed<string[]>(
-    () => selectedTemplate.value?.requiredVariables ?? [],
+      OUTPUT_NAMESPACE_PATTERN.test(config.value.outputNamespace) &&
+      missingRequiredVariables.value.length === 0,
   );
 
   const loadTemplates = async (): Promise<void> => {
@@ -65,6 +99,16 @@ export const useTemplateMapperStore = defineStore('templateMapperNode', () => {
     // La vista previa pertenece a la plantilla anterior: conservarla mostraria
     // un markup que ya no corresponde a la seleccion.
     previewResult.value = null;
+  };
+
+  /**
+   * Declara que namespaces aportan los nodos previos.
+   *
+   * Hoy lo llama el banco de pruebas; manana lo hara el asistente leyendo los
+   * `outputNamespace` de los nodos anteriores del `pipeline_schema`.
+   */
+  const setAvailableUpstreamNamespaces = (namespaces: string[]): void => {
+    availableUpstreamNamespaces.value = [...namespaces];
   };
 
   const setOutputNamespace = (outputNamespace: string): void => {
@@ -99,11 +143,14 @@ export const useTemplateMapperStore = defineStore('templateMapperNode', () => {
     availableTemplates,
     previewResult,
     isLoading,
+    availableUpstreamNamespaces,
     selectedTemplate,
     isConfigValid,
     requiredVariables,
+    missingRequiredVariables,
     loadTemplates,
     setTemplateId,
+    setAvailableUpstreamNamespaces,
     setOutputNamespace,
     loadPreview,
     resetConfig,

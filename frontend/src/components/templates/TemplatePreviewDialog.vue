@@ -116,17 +116,26 @@ const closeDialog = (): void => emit('update:modelValue', false);
 </template>
 
 <style scoped lang="scss">
+// 1020px = los 680 originales +50%. Se expresa como `width` + `max-width` y no
+// como `min-width`: en CSS el min-width gana al max-width: 92vw que impone
+// .pd-dialog-card, de modo que en una pantalla estrecha el modal desbordaria.
+// Asi ocupa 1020px cuando hay sitio y se encoge cuando no lo hay.
 .pd-preview-card {
-  min-width: 680px;
+  width: 92vw;
+  max-width: 1020px;
+  min-width: 0;
 }
 
 .pd-dialog-icon {
   color: var(--pd-primary);
 }
 
+// 360px = los 240 originales +50%. Un iframe NO crece con su contenido, asi que
+// esta altura es la ventana real de lectura: lo que sobra se navega con el
+// scroll interno del propio documento.
 .pd-preview-frame {
   position: relative;
-  min-height: 240px;
+  min-height: 460px;
   border: 1px solid var(--pd-border);
   border-radius: 8px;
   overflow: hidden;
@@ -138,7 +147,7 @@ const closeDialog = (): void => emit('update:modelValue', false);
 .pd-preview-iframe {
   display: block;
   width: 100%;
-  min-height: 240px;
+  min-height: 460px;
   border: 0;
 }
 

@@ -24,6 +24,14 @@ const userToDeactivate = ref<User | null>(null);
 
 // El id tecnico (UUID) no ocupa columna propia: se expone en el tooltip del
 // nombre para no romper la legibilidad de la tabla.
+// Termino de busqueda. Lo consume el `filterMethod` por defecto de QTable, que
+// recorre los `field` de las columnas visibles.
+//
+// El tipo admite `null` porque el boton `clearable` de QInput escribe eso, no
+// una cadena vacia. QTable declara su prop `filter` como `any`, asi que el
+// compilador no delataria la mentira: mas vale que el ref diga la verdad.
+const filter = ref<string | null>('');
+
 const columns: QTableColumn<User>[] = [
   {
     name: 'name',
@@ -124,7 +132,26 @@ onMounted(loadUsers);
       :columns="columns"
       row-key="id"
       :loading="usersStore.isLoading"
+      :filter="filter"
+      no-results-label="Ningun resultado para la busqueda"
     >
+      <template #top-right>
+        <q-input
+          v-model="filter"
+          dense
+          outlined
+          clearable
+          debounce="300"
+          placeholder="Buscar..."
+          class="pd-search-input"
+          aria-label="Filtrar la tabla"
+        >
+          <template #append>
+            <q-icon name="search" />
+          </template>
+        </q-input>
+      </template>
+
       <template #body-cell-name="cellProps">
         <q-td :props="cellProps">
           {{ cellProps.value }}

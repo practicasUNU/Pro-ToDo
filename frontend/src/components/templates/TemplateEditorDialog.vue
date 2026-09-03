@@ -36,7 +36,9 @@ const templatesStore = useTemplatesStore();
 
 // Los ejemplos con llaves viven aqui y no en la plantilla: el compilador de Vue
 // no sabe distinguir unas llaves literales de una interpolacion anidada.
+const VARIABLE_SYNTAX_EXAMPLE = '{{namespace.campo}}';
 const FORBIDDEN_BLOCK_EXAMPLE = '{{#if}}';
+const FORBIDDEN_TRIPLE_STASH_EXAMPLE = '{{{}}}';
 
 /** Retroceso del caret tras insertar, para dejarlo en `{{namespace.|}}`. */
 const CARET_OFFSET_INSIDE_BRACES = -2;
@@ -127,7 +129,7 @@ const onSubmit = async (): Promise<void> => {
       <q-form class="pd-editor-form" @submit.prevent="onSubmit">
         <div class="row q-col-gutter-md pd-editor-columns">
           <!-- Columna izquierda: metadatos y Poka-Yoke de variables -->
-          <div class="col-12 col-md-4 pd-editor-side">
+          <div class="col-12 col-md-4 q-pr-sm pd-editor-side">
             <div class="q-mb-md">
               <label class="pd-label" for="template-name">
                 Nombre<span class="pd-required">*</span>
@@ -192,6 +194,48 @@ const onSubmit = async (): Promise<void> => {
               </div>
               <p v-else class="pd-subtitle">Ninguna todavia.</p>
             </div>
+
+            <q-separator class="q-my-md pd-editor-separator" />
+
+            <!-- Las acciones viven en esta columna, no en un q-card-actions al
+                 pie de la tarjeta: alli se superponian sobre las ultimas lineas
+                 del editor, que ocupa toda la altura de la columna derecha. -->
+            <div>
+              <div class="pd-label">Acciones de la Plantilla</div>
+
+              <p class="pd-subtitle q-mt-xs q-mb-none">
+                Solo se permite sustitucion determinista de variables (<span class="pd-mono">{{
+                  VARIABLE_SYNTAX_EXAMPLE
+                }}</span
+                >). Quedan prohibidos bloques (<span class="pd-mono">{{
+                  FORBIDDEN_BLOCK_EXAMPLE
+                }}</span
+                >), parciales y escapes triples (<span class="pd-mono">{{
+                  FORBIDDEN_TRIPLE_STASH_EXAMPLE
+                }}</span
+                >).
+              </p>
+
+              <div class="row q-gutter-sm q-mt-sm">
+                <q-btn
+                  flat
+                  no-caps
+                  label="Cancelar"
+                  class="pd-btn-secondary"
+                  @click="closeDialog"
+                />
+                <q-btn
+                  unelevated
+                  no-caps
+                  label="Guardar Plantilla"
+                  icon-right="north_east"
+                  type="submit"
+                  class="pd-btn-primary"
+                  :disable="!templatesStore.isDraftValid"
+                  :loading="templatesStore.isLoading"
+                />
+              </div>
+            </div>
           </div>
 
           <!-- Columna derecha: editor de codigo -->
@@ -207,28 +251,8 @@ const onSubmit = async (): Promise<void> => {
               @update:model-value="templatesStore.updateHtmlContent"
               @cursor-change="templatesStore.setCursorPosition"
             />
-
-            <p class="pd-subtitle q-mt-xs q-mb-none">
-              Solo sustitucion de variables. Prohibidos los bloques
-              <span class="pd-mono">{{ FORBIDDEN_BLOCK_EXAMPLE }}</span
-              >, los parciales y el triple-stash.
-            </p>
           </div>
         </div>
-
-        <q-card-actions align="right" class="q-px-md q-pb-md pd-editor-actions">
-          <q-btn flat no-caps label="Cancelar" class="pd-btn-secondary" @click="closeDialog" />
-          <q-btn
-            class="pd-btn-primary"
-            unelevated
-            no-caps
-            label="Guardar Plantilla"
-            icon-right="north_east"
-            type="submit"
-            :disable="!templatesStore.isDraftValid"
-            :loading="templatesStore.isLoading"
-          />
-        </q-card-actions>
       </q-form>
     </q-card>
   </q-dialog>
@@ -247,7 +271,7 @@ const onSubmit = async (): Promise<void> => {
   min-width: 0;
 }
 
-// Cadena flex: cabecera y acciones a tamano natural, el cuerpo se queda el resto.
+// Cadena flex: la cabecera a tamano natural, el cuerpo se queda todo el resto.
 //
 // `min-height: 0` en CADA eslabon es lo que decide si esto funciona: un item
 // flex tiene `min-height: auto` y se niega a encogerse por debajo de su
@@ -257,12 +281,14 @@ const onSubmit = async (): Promise<void> => {
   flex: 0 0 auto;
 }
 
+// El padding inferior lo pone ahora el formulario: ya no hay un q-card-actions
+// al pie de la tarjeta que lo aportara.
 .pd-editor-form {
   display: flex;
   flex-direction: column;
   flex: 1 1 auto;
   min-height: 0;
-  padding: 0 16px;
+  padding: 0 16px 16px;
 }
 
 .pd-editor-columns {
@@ -270,26 +296,33 @@ const onSubmit = async (): Promise<void> => {
   min-height: 0;
 }
 
+// La columna de configuracion scrollea por su cuenta, sin arrastrar al editor.
 .pd-editor-side {
   overflow-y: auto;
   max-height: 100%;
 }
 
+// `overflow: hidden` es la guarda real contra el solape: sin el, un documento
+// largo desborda la columna y CodeMirror se pinta por encima de lo que haya
+// debajo, en vez de hacer scroll dentro de su propia caja.
 .pd-editor-main {
   display: flex;
   flex-direction: column;
+  height: 100%;
   min-height: 0;
+  overflow: hidden;
 }
 
-// El editor ocupa todo el hueco que dejan la cabecera del panel y la nota.
+// El editor ocupa todo el hueco que deja la cabecera del panel.
 .pd-editor-main > .pd-code-editor,
 .pd-editor-main :deep(.pd-code-editor) {
   flex: 1 1 auto;
   min-height: 0;
 }
 
-.pd-editor-actions {
-  flex: 0 0 auto;
+// QSeparator trae su propio color; se fuerza al token del sistema.
+.pd-editor-separator {
+  background: var(--pd-border);
 }
 
 .pd-editor-badge {

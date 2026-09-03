@@ -545,4 +545,125 @@ describe('TemplatesService', () => {
       expect(response.message).toContain('no compila');
     });
   });
+
+  describe('7. Markup no publicable', () => {
+    it('7.1 deberia rechazar una plantilla con <script>', async () => {
+      // 1. Arrange
+      const repository = buildRepository();
+      const service = buildService(repository);
+
+      // 2. Act
+      const response = await expectBadRequest(
+        service.create(
+          {
+            name: 'con-script',
+            htmlContent:
+              '<p>{{parsed_email.clean_title}}</p><script>alert(1)</script>',
+          },
+          AUTHOR_ID,
+        ),
+      );
+
+      // 3. Assert: el saneado al compilar lo purgaria igualmente; esto es lo que
+      // hace que el autor se entere en vez de descubrirlo publicado a medias.
+      expect(response.message).toContain('no se puede publicar');
+      expect(response.sanitizedHtml).toBe(
+        '<p>{{parsed_email.clean_title}}</p>',
+      );
+      expect(repository.save).not.toHaveBeenCalled();
+    });
+
+    it('7.2 deberia rechazar un atributo de evento en linea', async () => {
+      // 1. Arrange
+      const repository = buildRepository();
+      const service = buildService(repository);
+
+      // 2. Act
+      await expectBadRequest(
+        service.create(
+          {
+            name: 'con-onerror',
+            htmlContent: '<img src="x" onerror="alert(1)">',
+          },
+          AUTHOR_ID,
+        ),
+      );
+
+      // 3. Assert
+      expect(repository.save).not.toHaveBeenCalled();
+    });
+
+    it('7.3 deberia rechazar un enlace con protocolo javascript:', async () => {
+      // 1. Arrange
+      const repository = buildRepository();
+      const service = buildService(repository);
+
+      // 2. Act
+      await expectBadRequest(
+        service.create(
+          {
+            name: 'con-js',
+            htmlContent: '<a href="javascript:alert(1)">click</a>',
+          },
+          AUTHOR_ID,
+        ),
+      );
+
+      // 3. Assert
+      expect(repository.save).not.toHaveBeenCalled();
+    });
+
+    it('7.4 deberia aceptar las etiquetas nuevas de la lista blanca', async () => {
+      // 1. Arrange
+      const service = buildService(buildRepository());
+
+      // 2. Act
+      const result = await service.create(
+        {
+          name: 'con-figura',
+          htmlContent:
+            '<figure><img src="https://x/a.png" alt="foto" />' +
+            '<figcaption>{{parsed_email.clean_title}}</figcaption></figure>',
+        },
+        AUTHOR_ID,
+      );
+
+      // 3. Assert
+      expect(result.requiredVariables).toEqual(['parsed_email.clean_title']);
+    });
+
+    it('7.5 NO deberia rechazar por una simple normalizacion del parser', async () => {
+      // 1. Arrange
+      const service = buildService(buildRepository());
+
+      // 2. Act: `<br>` se normaliza a `<br />`, pero eso no es un filtrado
+      const result = await service.create(
+        { name: 'con-br', htmlContent: '<p>hola<br>mundo</p>' },
+        AUTHOR_ID,
+      );
+
+      // 3. Assert: el HTML se guarda TAL CUAL lo escribio el autor; la guarda
+      // solo comprueba, no reescribe.
+      expect(result.htmlContent).toBe('<p>hola<br>mundo</p>');
+    });
+
+    it('7.6 deberia rechazar al actualizar sin tocar la entidad', async () => {
+      // 1. Arrange
+      const stored = { ...STORED_TEMPLATE };
+      const repository = buildRepository();
+      repository.findOne.mockResolvedValue(stored);
+      const service = buildService(repository);
+
+      // 2. Act
+      await expectBadRequest(
+        service.update(TEMPLATE_ID, {
+          htmlContent: '<div onclick="alert(1)">x</div>',
+        }),
+      );
+
+      // 3. Assert
+      expect(stored.htmlContent).toBe('<h1>{{parsed_email.clean_title}}</h1>');
+      expect(repository.save).not.toHaveBeenCalled();
+    });
+  });
 });

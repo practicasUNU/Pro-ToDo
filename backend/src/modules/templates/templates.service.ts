@@ -153,6 +153,7 @@ export class TemplatesService {
     const requiredVariables = this.extractAndValidateVariables(
       createTemplateDto.htmlContent,
     );
+    this.assertPublishableMarkup(createTemplateDto.htmlContent);
 
     const template = this.templateRepository.create({
       name,
@@ -192,6 +193,7 @@ export class TemplatesService {
       template.requiredVariables = this.extractAndValidateVariables(
         updateTemplateDto.htmlContent,
       );
+      this.assertPublishableMarkup(updateTemplateDto.htmlContent);
       template.htmlContent = updateTemplateDto.htmlContent;
     }
 
@@ -396,6 +398,32 @@ export class TemplatesService {
 
     // `Set` preserva el orden de aparicion: la lista se lee igual que el HTML.
     return [...new Set(paths)];
+  }
+
+  /**
+   * Rechaza el markup que la lista blanca eliminaria al compilar.
+   *
+   * `TemplateRendererService` sanea igualmente en tiempo de render, asi que esto
+   * NO es lo que impide publicar un `<script>`: es lo que impide que el autor se
+   * entere tarde. Sin esta guarda, la plantilla se guardaria tal cual, se veria
+   * intacta en el editor, y el recorte ocurriria en silencio al compilar. Mismo
+   * criterio que con los namespaces: el fallo se senala al guardar.
+   *
+   * @throws BadRequestException Si algo del markup no sobrevive al saneado.
+   */
+  private assertPublishableMarkup(html: string): void {
+    const { sanitized, wasFiltered } =
+      this.templateRendererService.inspectPublishableMarkup(html);
+
+    if (!wasFiltered) {
+      return;
+    }
+
+    throw new BadRequestException({
+      message:
+        'La plantilla contiene markup que no se puede publicar y seria eliminado al compilar: etiquetas fuera de la lista blanca, atributos de evento (on*) o enlaces con protocolo no permitido. Revise el resultado saneado.',
+      sanitizedHtml: sanitized,
+    });
   }
 
   /** Rechaza toda construccion de Handlebars que no sea sustitucion simple. */

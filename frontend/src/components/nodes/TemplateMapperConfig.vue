@@ -35,6 +35,18 @@ const templateOptions = computed(() =>
   })),
 );
 
+// Raices distintas de las variables que faltan: el banner nombra namespaces, no
+// rutas completas, porque lo que hay que anadir al flujo es un nodo que produzca
+// el namespace entero.
+const missingNamespaces = computed(() => [
+  ...new Set(
+    templateMapperStore.missingRequiredVariables.map((path) => path.split('.')[0] ?? path),
+  ),
+]);
+
+const isMissingVariable = (variable: string): boolean =>
+  templateMapperStore.missingRequiredVariables.includes(variable);
+
 const loadTemplates = async (): Promise<void> => {
   try {
     await templateMapperStore.loadTemplates();
@@ -106,6 +118,23 @@ onMounted(loadTemplates);
       />
     </div>
 
+    <!-- Bloquea el avance, no es un simple aviso: de ahi el rojo y no el ambar -->
+    <div
+      v-if="templateMapperStore.missingRequiredVariables.length > 0"
+      class="pd-contract-banner q-mb-md"
+      role="alert"
+    >
+      <q-icon name="error_outline" size="20px" class="pd-contract-icon" />
+      <div>
+        <div class="pd-label pd-contract-title">Incompatibilidad de contrato</div>
+        <p class="pd-subtitle q-mb-none">
+          El flujo actual no provee los namespaces requeridos por esta plantilla:
+          <span class="pd-mono">{{ missingNamespaces.join(', ') }}</span
+          >. Anade un nodo previo que los produzca o elige otra plantilla.
+        </p>
+      </div>
+    </div>
+
     <div v-if="templateMapperStore.requiredVariables.length > 0" class="q-mb-md">
       <div class="pd-label">Variables que exige al contexto</div>
       <div class="pd-chip-bar q-mt-xs">
@@ -114,8 +143,13 @@ onMounted(loadTemplates);
           :key="variable"
           dense
           class="pd-variable-chip pd-mono"
+          :class="{ 'pd-variable-chip--missing': isMissingVariable(variable) }"
           :label="variable"
-        />
+        >
+          <q-tooltip v-if="isMissingVariable(variable)">
+            Ningun nodo previo produce este namespace
+          </q-tooltip>
+        </q-chip>
       </div>
     </div>
 
@@ -161,6 +195,32 @@ onMounted(loadTemplates);
   background: var(--pd-surface-muted);
   color: var(--pd-accent-text);
   border: 1px solid var(--pd-border);
+}
+
+// La variable que rompe el contrato, distinguible de un vistazo entre las demas.
+.pd-variable-chip--missing {
+  background: var(--pd-row-urgente);
+  color: var(--pd-negative);
+  border-color: var(--pd-negative);
+}
+
+.pd-contract-banner {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 12px;
+  border: 1px solid var(--pd-negative);
+  border-radius: $generic-border-radius;
+  background: var(--pd-row-urgente);
+}
+
+.pd-contract-icon {
+  color: var(--pd-negative);
+  flex: 0 0 auto;
+}
+
+.pd-contract-title {
+  color: var(--pd-negative);
 }
 
 .pd-actions {

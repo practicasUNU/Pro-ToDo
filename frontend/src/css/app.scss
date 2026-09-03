@@ -436,6 +436,36 @@ body {
   }
 }
 
+// Buscador de las tablas administrativas. Global y no scoped porque lo consumen
+// los tres gestores; se compone con tokens ya existentes, sin anadir ninguno.
+.pd-search-input {
+  width: 240px;
+  max-width: 100%;
+
+  .q-field__control {
+    background: var(--pd-card-bg);
+  }
+
+  .q-field__control::before {
+    border-color: var(--pd-border);
+  }
+
+  .q-field__native,
+  .q-field__input {
+    color: var(--pd-text-primary);
+  }
+
+  // Placeholder e icono en el tono subordinado del sistema, nunca en las clases
+  // text-grey-N de Quasar, que estan fijadas a un valor y no son un token.
+  .q-field__native::placeholder {
+    color: var(--pd-text-secondary);
+  }
+
+  .q-icon {
+    color: var(--pd-text-secondary);
+  }
+}
+
 // ---- Tablas (Vista 2, Vista 6) ----
 
 .pd-table {

@@ -5,6 +5,7 @@ import { useTemplateMapperStore } from '@stores/nodes/template-mapper.store';
 
 import { configurableNodeTypes, nodeConfigRegistry } from '@components/nodes/node-config-registry';
 
+import { TEMPLATE_NAMESPACES } from '@/types/html-template';
 import { NODE_TYPE_LABELS, NodeType } from '@/types/pipeline';
 
 // Banco de pruebas de la resolucion polimorfica (regla frontend-quasar.md §3.1).
@@ -28,6 +29,18 @@ const nodeTypeOptions = computed(() =>
 // Sin `v-if` por tipo: el componente sale del registro (regla §3.1).
 const resolvedComponent = computed(() => nodeConfigRegistry[selectedNodeType.value] ?? null);
 
+/**
+ * Namespaces que se simula que aportan los nodos previos.
+ *
+ * Con el asistente sin construir no hay pipeline del que deducirlos, asi que se
+ * marcan a mano. Es lo que permite comprobar en vivo que `isConfigValid` conmuta
+ * cuando el flujo deja de suministrar un namespace que la plantilla exige.
+ */
+const simulatedUpstream = computed<string[]>({
+  get: () => templateMapperStore.availableUpstreamNamespaces,
+  set: (namespaces) => templateMapperStore.setAvailableUpstreamNamespaces(namespaces),
+});
+
 // Lo que el asistente inspeccionaria del nodo activo. De momento solo hay un
 // configurador, asi que se lee su store directamente; cuando haya varios, el
 // anfitrion resolvera tambien el store por tipo.
@@ -38,6 +51,8 @@ const inspectedState = computed(() =>
       config: templateMapperStore.config,
       isConfigValid: templateMapperStore.isConfigValid,
       requiredVariables: templateMapperStore.requiredVariables,
+      availableUpstreamNamespaces: templateMapperStore.availableUpstreamNamespaces,
+      missingRequiredVariables: templateMapperStore.missingRequiredVariables,
     },
     null,
     2,
@@ -94,6 +109,27 @@ const inspectedState = computed(() =>
         </q-badge>
 
         <pre class="pd-mono sandbox-state">{{ inspectedState }}</pre>
+
+        <q-separator class="q-my-md sandbox-separator" />
+
+        <div class="pd-h2 q-mb-sm">Simulacion de Namespaces Previos</div>
+        <p class="pd-subtitle q-mb-sm">
+          Lo que dejarian en el contexto los nodos anteriores del flujo. Desmarca uno que la
+          plantilla exija y <span class="pd-mono">isConfigValid</span> pasa a
+          <span class="pd-mono">false</span>.
+        </p>
+
+        <div class="sandbox-namespaces">
+          <q-checkbox
+            v-for="namespace in TEMPLATE_NAMESPACES"
+            :key="namespace"
+            v-model="simulatedUpstream"
+            :val="namespace"
+            dense
+            class="pd-mono sandbox-namespace"
+            :label="namespace"
+          />
+        </div>
       </aside>
     </div>
   </q-page>
@@ -119,6 +155,20 @@ const inspectedState = computed(() =>
   .sandbox-grid {
     grid-template-columns: minmax(0, 1fr);
   }
+}
+
+.sandbox-separator {
+  background: var(--pd-border);
+}
+
+.sandbox-namespaces {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.sandbox-namespace {
+  color: var(--pd-text-primary);
 }
 
 .sandbox-state {

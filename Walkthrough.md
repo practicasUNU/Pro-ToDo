@@ -1554,3 +1554,151 @@ npm run build       OK — CodeMirror aislado en su propio chunk, ausente del in
       `TEMPLATE_NAMESPACES` ya en el frontend, distinguir válido de inválido dentro del editor es
       barato y adelantaría el `400` al momento de teclear.
 - [ ] **Asistente de flujos (PROT-12)** y los otros seis configuradores de nodo, sin cambios.
+
+---
+
+## 2026-09-03 · Blindaje XSS, filtro de tablas y contrato de namespaces — rama `feat/html-template-mapper`
+
+Tres carencias con el mismo patrón de fondo: **el sistema no avisa hasta que ya es tarde**. Las
+tablas no se podían filtrar, el markup de una plantilla llegaba crudo a Drupal, y el nodo mapeador se
+declaraba válido con un contrato que se sabía roto.
+
+### Las dos barreras XSS cubren cosas distintas
+
+Ya existían dos protecciones y ninguna cubría el hueco real:
+
+- El **escapado `{{ }}` de Handlebars** protege de los *valores* del contexto — la respuesta del nodo
+  de IA, por ejemplo. No toca el HTML que el editor escribió en la plantilla.
+- El **`<iframe sandbox>`** de la vista previa protege al *operador de Proto-Do*. Al lector del
+  artículo publicado en Drupal no lo protege nadie: ahí no hay iframe.
+
+El hueco era el cuerpo de la plantilla. Un `<script>`, un `onerror=` o un `href="javascript:"`
+escritos ahí se compilaban tal cual. `sanitize-html` llevaba instalado desde el principio, sin usar.
+
+### Lo que el enunciado daba por hecho y no era cierto
+
+`disallowedTagsMode: 'discard'` supuestamente elimina "la etiqueta y su contenido" para `script`,
+`style` e `iframe`. Ejecutando la configuración propuesta antes de escribirla:
+
+```
+script -> "<p>ok</p>"                    purgado con su contenido
+iframe -> "contenido interno<p>ok</p>"   la etiqueta se fue, el TEXTO se quedó
+```
+
+`discard` solo borra el contenido de las etiquetas listadas en `nonTextTags`, y `iframe` no está en
+esa lista. Sin corregirlo, el texto interno de un `<iframe>` acabaría suelto en el artículo.
+
+#### Y el detalle que casi abre un agujero
+
+Declarar `nonTextTags` **sustituye** la lista por defecto, no la amplía. Escribir `['iframe']` a
+secas habría eliminado `script`, `style`, `textarea`, `option` y `xmp` de la protección. El propio
+código de la librería avisa sobre el último:
+
+> `xmp` is included because htmlparser2 treats it as a raw-text element, so markup inside is parsed
+> as text on input but would otherwise be re-emitted unescaped, allowing XSS bypass.
+
+La configuración declara los seis. El comentario en el código explica por qué no se puede acortar.
+
+### Detectar al guardar: dos pasadas del mismo parser
+
+Sanear en silencio deja al autor sin enterarse. Todo el gestor hace lo contrario —los namespaces se
+rechazan al guardar con un 400 que cita la variable—, así que el saneado debía comportarse igual.
+
+El problema: `sanitize-html` no informa de lo que elimina, y comparar su salida contra el HTML crudo
+daría falsos positivos constantes, porque el parser normaliza aunque no filtre (`<br>` → `<br />`,
+comillas, orden de atributos). La comparación válida es entre **dos pasadas del mismo parser**, una
+con lista blanca y otra sin ella: lo que difiera lo quitó el filtro, no el formateo.
+
+Y una trampa que solo apareció al probarlo: la primera versión **rechazaba un `<a target="_blank">`
+legítimo**. La pasada estricta le *añade* `rel="noopener noreferrer"` vía `transformTags` y la
+permisiva no, así que las salidas diferían por una **adición**. La sonda aplica ahora la misma
+transformación; el `forceSafeLinkRel` está extraído a una constante precisamente para que no puedan
+divergir.
+
+### Una aserción que medía lo que no era
+
+La prueba de que el escapado y el saneado se suman en vez de anularse empezó siendo
+`expect(markup).not.toContain('onerror=')`. Falló, y por una razón instructiva: Handlebars escapa el
+`=` como `&#x3D;`, pero `sanitize-html` lo re-serializa como `=` al normalizar entidades. El texto
+literal `onerror=` **sí** aparece en la salida.
+
+Y es inofensivo: está dentro de un nodo de texto, con el `<` como `&lt;`, así que el navegador nunca
+construye la etiqueta. La aserción correcta es sobre la salida completa, no sobre una subcadena. Es
+un buen recordatorio de que en seguridad la prueba tiene que medir la propiedad real —"no se forma un
+elemento"— y no un proxy textual de ella.
+
+### Jest no podía cargar sanitize-html
+
+Añadir el import rompió las cuatro suites que lo alcanzaban:
+
+```
+node_modules/sanitize-html/node_modules/htmlparser2/dist/index.js:1
+import { Parser } from "./Parser.js";
+SyntaxError: Cannot use import statement outside a module
+```
+
+`htmlparser2@12` es ESM puro y **no publica build CJS**. Node 22+ lo requiere sin problema —de ahí
+que la app funcione— pero el pipeline CommonJS de Jest no. La salida es dejar que ts-jest transforme
+esa cadena, y el repo ya tenía el precedente con `@scure`/`@noble`.
+
+El primer intento no funcionó: el lookahead `/node_modules/(?!htmlparser2/…)` se evalúa justo tras el
+**primer** `/node_modules/`, y `htmlparser2` vive en el anidado de `sanitize-html`. Hacía falta el
+prefijo `.*`, que es justo por lo que la excepción existente estaba escrita así.
+
+### Contrato de namespaces: el fallo se adelanta a la configuración
+
+`isConfigValid` gana una tercera condición: `missingRequiredVariables.length === 0`. Si la plantilla
+interpola `{{scraped_web.headline}}` y ningún nodo previo escribe `scraped_web`, antes se podía
+avanzar y el fallo aparecía en ejecución, como un `GRAVE` con `missingFields` y el flujo `PAUSADO`.
+
+Se valida la **raíz** de la ruta, no la ruta entera: lo que un nodo previo produce es el namespace
+completo, así que `llm_response.articles.0.title` se satisface con que alguien escriba
+`llm_response`. El banner nombra namespaces y no rutas por la misma razón — lo que hay que añadir al
+flujo es un nodo, no un campo.
+
+`availableUpstreamNamespaces` es un mock y el TSDoc lo dice: la fuente real son los `outputNamespace`
+de los nodos anteriores, que el asistente inyectará. El banco de pruebas lo suple con checkboxes, que
+es la única forma hoy de ver `isConfigValid` conmutar en vivo.
+
+### Detalles de implementación
+
+- **`ip-whitelist/IpWhitelistManager.vue` no existe.** El componente es
+  `allowed-ips/AllowedIpsManager.vue`; solo la *página* se llama `IpWhitelistPage.vue`.
+- **`color="grey-5"` no entró.** El proyecto está 100 % limpio de `grey-N` y `frontend-quasar.md` §2
+  lo prohíbe; el icono toma el color de `--pd-text-secondary` desde `.pd-search-input`.
+- **El ref del filtro se tipa `string | null`.** El botón `clearable` de QInput escribe `null`, y
+  QTable declara su prop `filter` como `any`: el compilador no habría delatado la mentira.
+- **Los botones de crear no se movieron** al slot de la tabla: los tres gestores conservan su
+  anatomía y el CTA su prominencia. Solo el buscador va en `#top-right`.
+- **`allowedTags` se amplió** con `figure`, `figcaption`, `code`, `pre`, `caption`, `tfoot`, `sub`,
+  `sup`, `small` y `time`. Todas semánticas y sin capacidad de ejecución; una imagen con pie de foto
+  es markup normal en una noticia y con la lista original se habría perdido.
+
+### Verificación
+
+```
+Backend
+  npm test          19 suites, 260 pruebas (antes 239; +21)
+  npx tsc --noEmit  13 errores, todos preexistentes en allowed-ips.service.spec.ts
+  npm run lint      1 warning, preexistente en main.ts
+  npm run build     OK
+
+Frontend
+  npm run typecheck  limpio
+  npm run lint:check limpio
+  npm test           2 archivos, 30 pruebas (antes 19; +11)
+  npm run build      OK
+```
+
+### Checklist de dependencias restantes
+
+- [ ] **Plantillas anteriores a este cambio** pueden contener markup no publicable: se sanea al
+      compilar, pero solo se rechaza al volver a guardarlas. Una consulta que las liste ayudaría.
+- [ ] **`allowedStyles` sin restringir**: el atributo `style` pasa con cualquier valor. Los vectores
+      clásicos (`expression()`, `url(javascript:)`) los bloquean los navegadores modernos, pero
+      acotar las propiedades permitidas cerraría el asunto del todo.
+- [ ] **El filtro es cliente**: con miles de filas habrá que pasar a paginación de servidor
+      (`@request` de QTable). Hoy las tres tablas caben en memoria de sobra.
+- [ ] **`availableUpstreamNamespaces` sigue siendo un mock** hasta que exista el asistente (PROT-12).
+- [ ] **`loadPreview` y `previewResult` del store del nodo son código muerto**: nadie los consume,
+      porque `TemplateMapperConfig` pasa `selectedTemplate` directo al diálogo de vista previa.

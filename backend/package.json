@@ -121,7 +121,7 @@
       ]
     },
     "transformIgnorePatterns": [
-      "/node_modules/(?!.*(?:@scure|@noble)/)"
+      "/node_modules/(?!.*(?:@scure|@noble|htmlparser2|domhandler|domutils|dom-serializer|domelementtype|entities)/)"
     ],
     "moduleNameMapper": {
       "^@core/(.*)$": "<rootDir>/core/$1",

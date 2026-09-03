@@ -968,3 +968,72 @@ observar `$q.dark`. Tokens nuevos: `--pd-accent-soft` (chip de marcador) y `--pd
 Primer runner del frontend: **Vitest 4** con `vitest.config.ts` propio (replica los alias de
 `quasar.config.ts`, que Vitest no lee). `src/stores/templates.store.spec.ts` cubre 19 casos del
 borrador sin entorno DOM ni red, mockeando `@services/templates.service`.
+
+---
+
+## 6. Blindaje XSS y contrato de namespaces
+
+### 6.1 Sanitización del markup compilado
+
+`TemplateRendererService` sanea con `sanitize-html` el resultado **ya interpolado**. Dos barreras
+independientes, y ninguna cubre lo que cubre la otra:
+
+| Barrera | Protege de | Alcance |
+|---|---|---|
+| Escapado `{{ }}` de Handlebars | Los **valores** del contexto (la respuesta del nodo de IA) | Ya existía |
+| `TEMPLATE_SANITIZER_CONFIG` | El **HTML de la plantilla**, que escribe un editor y se compila crudo | Nuevo |
+| `<iframe sandbox>` en la vista previa | Al **operador** de Proto-Do | Ya existía; no protege al lector del artículo |
+
+Puntos no evidentes de la configuración:
+
+- **`nonTextTags` se declara completo**: `['script','style','textarea','option','xmp','iframe']`.
+  Declararlo **sustituye** la lista por defecto de la librería, y su propio código advierte que
+  omitir `xmp` reabre un bypass XSS. `iframe` se añade porque `disallowedTagsMode: 'discard'` por sí
+  solo quita la etiqueta pero **conserva su texto**.
+- **`transformTags.a`** fuerza `rel="noopener noreferrer"` en los `target="_blank"`, contra el
+  *tabnabbing*.
+- **`allowedTags`** cubre cuerpo de artículo, no estructura de página: `section`, `article`,
+  `header`, `footer`, `nav` y `main` quedan fuera a propósito.
+
+### 6.2 Detección al guardar
+
+`TemplatesService.assertPublishableMarkup` rechaza con un `400` la plantilla cuyo markup no
+sobreviviría al saneado. No es lo que impide publicar un `<script>` —de eso ya se encarga el render—
+sino lo que impide que el autor se entere tarde.
+
+`sanitize-html` no informa de lo que elimina, y comparar contra el HTML crudo daría falsos positivos
+porque el parser normaliza igualmente (`<br>` → `<br />`). La comparación válida es entre **dos
+pasadas del mismo parser**, una con lista blanca y otra sin ella:
+
+```typescript
+inspectPublishableMarkup(html): { sanitized: string; wasFiltered: boolean }
+// sanitizeHtml(html, TEMPLATE_SANITIZER_CONFIG) !== sanitizeHtml(html, PUBLISHABLE_MARKUP_PROBE_CONFIG)
+```
+
+Ambas configuraciones aplican **el mismo `transformTags`**: sin eso, un `<a target="_blank">`
+legítimo se rechazaría, porque la estricta le *añade* el `rel` y la permisiva no — una diferencia por
+adición, no por eliminación.
+
+### 6.3 Contrato de namespaces del nodo mapeador
+
+```typescript
+// stores/nodes/template-mapper.store.ts
+availableUpstreamNamespaces: string[]        // lo que aportan los nodos previos
+missingRequiredVariables: computed<string[]> // rutas cuya RAIZ nadie produce
+isConfigValid: computed<boolean>             // + templateId + outputNamespace valido
+```
+
+Tercera condición de `isConfigValid`: `missingRequiredVariables.length === 0`. Si la plantilla exige
+`{{scraped_web.headline}}` y ningún nodo anterior escribe `scraped_web`, la ejecución fallaría con un
+`GRAVE` y el flujo quedaría `PAUSADO`. Detectarlo al configurar es la diferencia entre corregirlo
+ahora o descubrirlo en producción.
+
+`availableUpstreamNamespaces` es **provisional**: la fuente real son los `outputNamespace` de los
+nodos anteriores del `pipeline_schema`, que el asistente (PROT-12) inyectará con
+`setAvailableUpstreamNamespaces`. Hasta entonces lo manipula el banco de pruebas con checkboxes.
+
+### 6.4 Filtro de las tablas administrativas
+
+`filter` + slot `#top-right` con `.pd-search-input` en los tres gestores, usando el `filterMethod`
+por defecto de QTable. El ref se tipa `string | null` porque el botón `clearable` escribe `null`, y
+QTable declara su prop `filter` como `any`: el compilador no delataría la mentira.
