@@ -13,6 +13,7 @@ import { UpdateTemplateDto } from './dto/update-template.dto';
 import { HtmlTemplate } from './entities/html-template.entity';
 import { TemplateRendererService } from './services/template-renderer.service';
 
+import type { TemplateViolation } from './dto/template-violation.dto';
 import type { RenderNamespaces } from './services/template-renderer.service';
 import type { FindOptionsWhere } from 'typeorm';
 
@@ -379,13 +380,19 @@ export class TemplatesService {
     // veces la misma cadena con dos gramaticas que podrian divergir.
     const residue = html.replace(
       TEMPLATE_VARIABLE_PATTERN,
-      (_match, namespace: string, nestedPath: string) => {
+      (match: string, namespace: string, nestedPath: string) => {
         const variable = `${namespace}${nestedPath}`;
 
         if (!ALLOWED_NAMESPACE_SET.has(namespace)) {
           throw new BadRequestException({
             message: `Namespace no permitido o desconocido: "${namespace}" en la variable {{${variable}}}. Verifique la sintaxis.`,
             invalidVariable: variable,
+            // `match` y no `variable`: el editor busca esta cadena tal cual, y
+            // `variable` va sin llaves y con la ruta ya normalizada.
+            violations: TemplatesService.buildVariableViolation(
+              match,
+              `Namespace '${namespace}' no permitido. Solo se admiten: ${ALLOWED_NAMESPACES.join(', ')}.`,
+            ),
           });
         }
 
@@ -398,6 +405,21 @@ export class TemplatesService {
 
     // `Set` preserva el orden de aparicion: la lista se lee igual que el HTML.
     return [...new Set(paths)];
+  }
+
+  /**
+   * Envuelve un fallo de interpolacion como infraccion localizable.
+   *
+   * `target` debe ser una subcadena VERBATIM del documento para que el editor
+   * pueda subrayarla (ver la invariante en `TemplateViolation`). De ahi que los
+   * tres emisores pasen el texto tal y como aparece en el HTML —el match
+   * completo con sus llaves y espacios— y no la ruta ya normalizada.
+   */
+  private static buildVariableViolation(
+    target: string,
+    message: string,
+  ): TemplateViolation[] {
+    return [{ target, type: 'variable', message }];
   }
 
   /**
@@ -419,10 +441,14 @@ export class TemplatesService {
       return;
     }
 
+    // La sonda es la puerta y ya ha decidido que hay que rechazar; la auditoria
+    // solo anade DONDE, para que el editor lo subraye. Si no supiera localizar
+    // nada, `violations` sale vacio y el 400 se comporta como antes.
     throw new BadRequestException({
       message:
         'La plantilla contiene markup que no se puede publicar y seria eliminado al compilar: etiquetas fuera de la lista blanca, atributos de evento (on*) o enlaces con protocolo no permitido. Revise el resultado saneado.',
       sanitizedHtml: sanitized,
+      violations: this.templateRendererService.auditPublishableMarkup(html),
     });
   }
 
@@ -436,6 +462,10 @@ export class TemplatesService {
       throw new BadRequestException({
         message: `Sintaxis no permitida "${forbidden.token}": ${forbidden.reason}. La plantilla solo admite variables {{namespace.campo}}.`,
         invalidVariable: forbidden.token,
+        violations: TemplatesService.buildVariableViolation(
+          forbidden.token,
+          `Sintaxis no permitida "${forbidden.token}": ${forbidden.reason}.`,
+        ),
       });
     }
   }
@@ -455,6 +485,10 @@ export class TemplatesService {
       throw new BadRequestException({
         message: `Marcador no interpretable "${marker}". Toda variable debe tener la forma {{namespace.campo}} con un namespace de la lista permitida (${ALLOWED_NAMESPACES.join(', ')}).`,
         invalidVariable: marker,
+        violations: TemplatesService.buildVariableViolation(
+          marker,
+          `Marcador no interpretable "${marker}". Use la forma {{namespace.campo}}.`,
+        ),
       });
     }
   }

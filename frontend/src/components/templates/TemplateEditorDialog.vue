@@ -4,9 +4,13 @@ import { useQuasar } from 'quasar';
 
 import { useTemplatesStore } from '@stores/templates.store';
 
-import { extractApiErrorMessage } from '@/utils/api-error';
+import { extractApiErrorMessage, extractApiViolations } from '@/utils/api-error';
 
-import { TEMPLATE_NAMESPACES, type HtmlTemplate } from '@/types/html-template';
+import {
+  TEMPLATE_NAMESPACES,
+  type HtmlTemplate,
+  type TemplateViolation,
+} from '@/types/html-template';
 
 // CodeMirror pesa unos cientos de KB y este dialogo lo importan dos componentes
 // distintos; en diferido solo se descarga al abrir el editor.
@@ -17,6 +21,7 @@ const TemplateCodeEditor = defineAsyncComponent(
 /** Contrato imperativo que `TemplateCodeEditor` expone con `defineExpose`. */
 interface TemplateCodeEditorInstance {
   insertTextAtCursor: (text: string, cursorOffset?: number) => void;
+  setViolations: (violations: TemplateViolation[]) => void;
 }
 
 interface Props {
@@ -105,11 +110,22 @@ const onSubmit = async (): Promise<void> => {
     emit('saved', saved);
     closeDialog();
   } catch (error) {
-    // El 400 del backend cita la variable invalida (`invalidVariable`): se
-    // muestra tal cual porque es exactamente lo que el autor necesita corregir.
+    // Diagnostico visual (Poka-Yoke): el backend no solo dice que algo sobra,
+    // dice QUE construccion es. El editor la subraya para que el autor no tenga
+    // que buscarla a ojo en un documento largo.
+    const violations = extractApiViolations(error);
+
+    codeEditorRef.value?.setViolations(violations);
+
+    // El mensaje generico SOLO sustituye al del backend cuando hay algo
+    // subrayado. En los demas 400 —nombre duplicado, namespace concreto— el
+    // texto del backend es mas util que cualquier frase fija.
     $q.notify({
       type: 'negative',
-      message: extractApiErrorMessage(error, 'No se pudo guardar la plantilla'),
+      message:
+        violations.length > 0
+          ? 'La plantilla contiene marcado no permitido. Revise las lineas resaltadas en el editor.'
+          : extractApiErrorMessage(error, 'No se pudo guardar la plantilla'),
       timeout: 6000,
     });
   }

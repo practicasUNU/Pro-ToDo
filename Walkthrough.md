@@ -1702,3 +1702,141 @@ Frontend
 - [ ] **`availableUpstreamNamespaces` sigue siendo un mock** hasta que exista el asistente (PROT-12).
 - [ ] **`loadPreview` y `previewResult` del store del nodo son código muerto**: nadie los consume,
       porque `TemplateMapperConfig` pasa `selectedTemplate` directo al diálogo de vista previa.
+
+---
+
+## 2026-09-03 · Diagnóstico visual del marcado rechazado — rama `feat/html-template-mapper`
+
+Desde el cambio anterior, guardar una plantilla con `<script>` devolvía un 400 y no persistía nada.
+El autor se enteraba, pero no sabía **dónde**: un `$q.notify` con un párrafo genérico y un editor sin
+marcar. En una plantilla de ochenta líneas eso es una búsqueda a ojo.
+
+Ahora el backend dice qué construcción sobra y el editor la subraya en rojo, con marcador en el
+gutter y tooltip, limpiándose sola al corregir.
+
+### El caso de aceptación era, literalmente, el que no funcionaba
+
+La receta prescribía `cheerio.load(html, null, false)` y, como comprobación manual, escribir
+`<body><p>Hola</p></body>` y confirmar el subrayado. Ejecutando lo primero antes de escribir nada:
+
+```
+cheerio.load('<body> <p>Hola</p> </body>', null, false)  ->  p
+cheerio.load('<p>ok</p><script>x</script>', null, true)  ->  html head body p script
+```
+
+Con `isDocument: false`, parse5 parsea en **modo fragmento** y descarta `<body>`, `<html>` y `<head>`
+por ser inválidos en ese contexto: el recorrido nunca los ve, y la infracción se vuelve
+indetectable. Con `isDocument: true` ocurre lo contrario — parse5 **sintetiza** los tres en cualquier
+entrada, así que el 100 % de las plantillas quedarían marcadas. Ninguno de los dos modos sirve.
+
+La salida es cambiar de parser a htmlparser2, con la opción pública `{ xml: { xmlMode: false } }`.
+Como **objeto** y no `xml: true`: basta con que sea truthy para elegir htmlparser2, pero `true`
+activa además el modo XML, que es sensible a mayúsculas y dejaría `<BODY>` como `BODY` — fuera de la
+lista blanca, y con el target del subrayado en mayúsculas.
+
+El beneficio de segundo orden acabó pesando más que el arreglo: htmlparser2 es el parser que ya usa
+`sanitize-html`. Auditor y saneador ven ahora **un único DOM**. Con parse5 verían dos, y el auditor
+podría aprobar algo que el saneador recorta, o al revés.
+
+### La detección ya existía; lo que faltaba era la localización
+
+Fácil de confundir: el 400 por `<body>` no es nuevo. La sonda de dos pasadas del cambio anterior ya
+lo rechazaba, junto con `<section>` y `srcset`.
+
+Eso descartó la idea de sustituir la sonda por la auditoría. Las reglas propuestas —etiqueta, `on*`,
+protocolo— **no cubren `srcset`** ni ningún otro atributo fuera de la lista blanca, así que cambiar
+una por otra habría sido una regresión de cobertura disfrazada de mejora. La sonda se queda como
+**puerta** (compara el saneador entero, es exhaustiva por construcción) y la auditoría entra como
+**localizador** que solo enriquece la excepción.
+
+### Una segunda lista blanca es una lista blanca que va a divergir
+
+La receta pedía declarar una constante `ALLOWED_TAGS` nueva. `TEMPLATE_SANITIZER_CONFIG.allowedTags`
+ya estaba en el mismo archivo. Con dos listas, añadir `section` al saneador dejaría al auditor
+marcándolo para siempre y el autor recibiría un 400 por algo que en realidad se publica sin problema.
+
+La auditoría deriva sus tres conjuntos de la config del saneador. Contrastar ambas sobre dieciséis
+casos —hay una prueba que lo hace, la 6.12— confirmó que coinciden, incluidos los que las reglas
+originales dejaban fuera.
+
+### El servicio puro sigue sin lanzar
+
+La receta situaba el `throw new BadRequestException` dentro de `TemplateRendererService`. Ese
+servicio devuelve uniones discriminadas precisamente para que cada consumidor construya su respuesta,
+y uno de ellos es `TemplateMapperStrategy`, que no habla HTTP: acoplarlo al transporte lo habría
+roto.
+
+`auditPublishableMarkup` devuelve `TemplateViolation[]` y no lanza. Quien lanza sigue siendo
+`TemplatesService.assertPublishableMarkup`, que ya existía y ya estaba invocado desde `create` y
+`update` — **cero puntos de llamada nuevos**.
+
+### El `target` tiene dos formas, y hay que decir cuál es cuál
+
+Al ampliar el alcance a las variables aparecieron tres emisores más, y sus targets no se parecen a
+los del markup. `invalidVariable` guarda `bad_ns.titulo`: sin llaves y con la ruta ya normalizada.
+Buscar eso en el documento fallaría cuando el autor escribiese `{{ bad_ns.titulo }}` con espacios, o
+`{{ llm_response.articles.[0].title }}`.
+
+De ahí la invariante que documenta el propio tipo:
+
+- `tag`, `attribute`, `protocol` → identificador **normalizado en minúsculas**; el editor lo busca
+  con un patrón estructural insensible a mayúsculas.
+- `variable` → subcadena **verbatim** del documento; búsqueda literal.
+
+El emisor de las variables pasa el match completo del regex, que hasta ahora se descartaba como
+`_match`.
+
+### Por qué el matcher no es un `indexOf`
+
+Es la pieza cuyo fallo sería silencioso: subrayar de menos o de más no rompe nada visible. Un
+`indexOf(target)` casa `<p` dentro de `<pre>`, `onerror=` dentro de `data-onerror=`, y la palabra
+«body» de un párrafo con la etiqueta. Cada tipo lleva su frontera —lookahead para las etiquetas,
+lookbehind para los atributos— y el target pasa siempre por un escapador: `{{{` sin escapar es un
+cuantificador inválido.
+
+Por eso vive en `src/utils/violation-matcher.ts` y no dentro del SFC. Vitest corre en entorno `node`,
+sin DOM, así que dentro del componente no habría forma de probarlo; fuera, son catorce pruebas contra
+un documento con señuelos deliberados para cada falso positivo.
+
+Los diagnósticos se limpian solos en el `updateListener` que ya existía. No hay bucle porque
+`setDiagnostics` despacha efectos de estado, no cambios de documento.
+
+### Dos cosas que se ajustaron sobre la marcha
+
+- **`expect.stringContaining` devuelve `any`** y dispara `no-unsafe-assignment`, que en este proyecto
+  es error y no aviso. Los mensajes se afirman por separado con `toContain`.
+- Una aserción propia estaba mal, no el código: en `<BODY><IMG ONERROR=…></BODY>` esperaba solo la
+  infracción de `body`. La guarda que salta los atributos de una etiqueta prohibida cubre los
+  atributos **del propio elemento**, no los de su descendencia — y debe ser así, porque `discard`
+  elimina el `<body>` pero conserva sus hijos: ese `onerror` llegaría al artículo publicado.
+
+### Verificación
+
+```
+Backend
+  npm test           19 suites, 275 pruebas (antes 260; +15)
+  npx tsc --noEmit   solo los 13 errores preexistentes de allowed-ips.service.spec.ts
+  npm run lint       solo el warning preexistente de main.ts
+  npm run build      OK
+
+Frontend
+  npm run typecheck  limpio
+  npm run lint:check limpio
+  npm test           3 archivos, 44 pruebas (antes 30; +14)
+  npm run build      OK
+```
+
+`cheerio` no necesitó tocar `transformIgnorePatterns`: es dual y su build CJS resuelve
+`htmlparser2@10` de raíz, no la copia `@12` ESM-only anidada bajo `sanitize-html` que rompió la suite
+en el cambio anterior.
+
+### Checklist de dependencias restantes
+
+- [ ] **Las infracciones no se acumulan**: `create` valida variables antes que markup, así que una
+      plantilla con las dos cosas mal reporta solo la primera. Es el *fail-fast* declarado, pero
+      obliga a dos rondas de guardado.
+- [ ] **El resaltado no sobrevive a una edición**: cualquier tecla limpia los diagnósticos, porque
+      las posiciones se calcularon sobre el documento enviado. Mapearlas a través de los `ChangeSet`
+      de CodeMirror permitiría conservarlas mientras el autor corrige.
+- [ ] **La vista previa no informa de infracciones**: `previewTemplate` compila y sanea, pero no
+      audita. Una plantilla guardada antes de estos cambios se ve recortada sin explicación.

@@ -326,4 +326,184 @@ describe('TemplateRendererService', () => {
       expect(result.wasFiltered).toBe(false);
     });
   });
+
+  describe('6. Auditoria de marcado', () => {
+    /** Atajo: la auditoria devuelve objetos, pero casi todo se afirma por par. */
+    const audit = (html: string): Array<{ type: string; target: string }> =>
+      renderer
+        .auditPublishableMarkup(html)
+        .map(({ type, target }) => ({ type, target }));
+
+    it('6.1 deberia detectar <body>, que el modo fragmento de parse5 esconde', () => {
+      // 1. Arrange & 2. Act: caso de aceptacion del requisito. Con el parser por
+      //    defecto (`load(html, null, false)`) parse5 descarta `<body>` por ser
+      //    invalido en un fragmento y esta asercion daria [].
+      const violations = renderer.auditPublishableMarkup(
+        '<body> <p>Hola</p> </body>',
+      );
+
+      // 3. Assert
+      expect(violations).toEqual([
+        {
+          target: 'body',
+          type: 'tag',
+          message: 'Etiqueta <body> no permitida',
+        },
+      ]);
+    });
+
+    it('6.2 deberia detectar <script> y <style>', () => {
+      // 1. Arrange & 2. Act
+      const violations = audit('<style>p{}</style><p>ok</p><script>x</script>');
+
+      // 3. Assert: domhandler no los etiqueta como `tag` sino con tipo propio;
+      //    esto fija que la guarda de estrechamiento no los deja fuera.
+      expect(violations).toEqual([
+        { target: 'style', type: 'tag' },
+        { target: 'script', type: 'tag' },
+      ]);
+    });
+
+    it('6.3 deberia detectar <iframe> y <section>', () => {
+      // 1. Arrange & 2. Act
+      const violations = audit(
+        '<iframe src="http://x">dentro</iframe><section><p>a</p></section>',
+      );
+
+      // 3. Assert
+      expect(violations).toEqual([
+        { target: 'iframe', type: 'tag' },
+        { target: 'section', type: 'tag' },
+      ]);
+    });
+
+    it('6.4 deberia detectar los atributos de evento con mensaje propio', () => {
+      // 1. Arrange & 2. Act
+      const violations = renderer.auditPublishableMarkup(
+        '<img src="https://x/a.png" onerror="alert(1)" alt="x">',
+      );
+
+      // 3. Assert: solo `onerror`; `src` y `alt` estan permitidos en <img>
+      expect(violations).toEqual([
+        {
+          target: 'onerror',
+          type: 'attribute',
+          message: "Atributo de evento 'onerror' no permitido",
+        },
+      ]);
+    });
+
+    it('6.5 deberia detectar un atributo que no es de evento (srcset)', () => {
+      // 1. Arrange & 2. Act: lo que las reglas de solo tag/on*/protocolo
+      //    dejarian pasar, y que el saneador si recorta.
+      const violations = renderer.auditPublishableMarkup(
+        '<img src="https://x/a.png" srcset="https://x/b.png 2x" alt="x">',
+      );
+
+      // 3. Assert
+      expect(violations).toEqual([
+        {
+          target: 'srcset',
+          type: 'attribute',
+          message: "Atributo 'srcset' no permitido en <img>",
+        },
+      ]);
+    });
+
+    it('6.6 deberia detectar los pseudo-protocolos javascript: y data:', () => {
+      // 1. Arrange & 2. Act
+      const violations = audit(
+        '<a href="javascript:alert(1)">c</a><a href="data:text/html,x">d</a>',
+      );
+
+      // 3. Assert
+      expect(violations).toEqual([
+        { target: 'javascript:', type: 'protocol' },
+        { target: 'data:', type: 'protocol' },
+      ]);
+    });
+
+    it('6.7 NO deberia inspeccionar los atributos de una etiqueta ya prohibida', () => {
+      // 1. Arrange & 2. Act
+      const violations = audit('<marquee onclick="x()" srcset="y">t</marquee>');
+
+      // 3. Assert: el saneador descarta el elemento entero; senalar tambien sus
+      //    atributos solo anadiria ruido sobre lo que hay que corregir.
+      expect(violations).toEqual([{ target: 'marquee', type: 'tag' }]);
+    });
+
+    it('6.8 deberia normalizar el target a minusculas', () => {
+      // 1. Arrange & 2. Act
+      const violations = audit('<BODY><IMG SRC="x" ONERROR="y"></BODY>');
+
+      // 3. Assert: los DOS targets salen en minusculas. El `ONERROR` anidado se
+      //    senala aunque su ancestro ya este prohibido, y debe ser asi: `discard`
+      //    elimina el `<body>` pero conserva sus hijos, de modo que ese atributo
+      //    llegaria al articulo publicado. La guarda de 6.7 solo salta los
+      //    atributos DEL PROPIO elemento descartado, no los de su descendencia.
+      expect(violations).toEqual([
+        { target: 'body', type: 'tag' },
+        { target: 'onerror', type: 'attribute' },
+      ]);
+    });
+
+    it('6.9 deberia de-duplicar infracciones repetidas conservando el orden', () => {
+      // 1. Arrange & 2. Act
+      const violations = audit(
+        '<script>a</script><section>x</section><script>b</script>',
+      );
+
+      // 3. Assert: dos <script> son UN problema que resolver
+      expect(violations).toEqual([
+        { target: 'script', type: 'tag' },
+        { target: 'section', type: 'tag' },
+      ]);
+    });
+
+    it('6.10 NO deberia marcar los enlaces relativos ni las anclas', () => {
+      // 1. Arrange & 2. Act: sin esquema no hay pseudo-protocolo
+      const violations = renderer.auditPublishableMarkup(
+        '<a href="/ruta/relativa">r</a><a href="#seccion">a</a><a href="mailto:a@b.com">m</a>',
+      );
+
+      // 3. Assert
+      expect(violations).toEqual([]);
+    });
+
+    it('6.11 NO deberia marcar una plantilla limpia con sus marcadores', () => {
+      // 1. Arrange & 2. Act: la prueba de que no hay falsos positivos
+      const violations = renderer.auditPublishableMarkup(
+        '<h1>{{parsed_email.clean_title}}</h1>' +
+          '<p>{{llm_response.summary}}</p><br><hr>' +
+          '<figure><img src="https://x/a.png" alt="f"><figcaption>Pie</figcaption></figure>' +
+          '<a href="https://x" target="_blank" rel="noopener">link</a>' +
+          '<time datetime="2026-01-01">hoy</time>',
+      );
+
+      // 3. Assert
+      expect(violations).toEqual([]);
+    });
+
+    it('6.12 deberia coincidir con el veredicto de la sonda de dos pasadas', () => {
+      // 1. Arrange: la sonda es la puerta y la auditoria el localizador; que
+      //    discrepen significaria rechazar sin poder senalar, o al reves.
+      const samples = [
+        '<body><p>a</p></body>',
+        '<img src="a.png" srcset="b.png 2x" alt="x">',
+        '<a href="javascript:void(0)">c</a>',
+        '<section><p>a</p></section>',
+        '<h1>Hola</h1><p>Mundo</p>',
+        '<a href="/relativa">r</a>',
+      ];
+
+      // 2. Act & 3. Assert
+      for (const html of samples) {
+        const { wasFiltered } = renderer.inspectPublishableMarkup(html);
+
+        expect(renderer.auditPublishableMarkup(html).length > 0).toBe(
+          wasFiltered,
+        );
+      }
+    });
+  });
 });

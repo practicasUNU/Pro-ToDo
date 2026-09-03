@@ -1037,3 +1037,104 @@ nodos anteriores del `pipeline_schema`, que el asistente (PROT-12) inyectará co
 `filter` + slot `#top-right` con `.pd-search-input` en los tres gestores, usando el `filterMethod`
 por defecto de QTable. El ref se tipa `string | null` porque el botón `clearable` escribe `null`, y
 QTable declara su prop `filter` como `any`: el compilador no delataría la mentira.
+
+---
+
+## 7. Diagnóstico visual de marcado no permitido
+
+### 7.1 Contrato `TemplateViolation`
+
+```typescript
+// backend/src/modules/templates/dto/template-violation.dto.ts
+export type ViolationType = 'tag' | 'attribute' | 'protocol' | 'variable';
+
+export interface TemplateViolation {
+  readonly target: string;   // texto a localizar en el documento
+  readonly type: ViolationType;
+  readonly message: string;  // listo para el tooltip del editor
+}
+```
+
+Es un contrato de **salida** —viaja dentro del cuerpo de un `BadRequestException`, nunca entra por
+una petición—, de ahí que sea una `interface` sin decoradores, a diferencia de los tres DTOs de
+entrada de esa carpeta.
+
+**Invariante de `target`, y de ella depende todo el resaltado:**
+
+| Tipo | Forma de `target` | Ejemplo | Cómo lo busca el editor |
+|---|---|---|---|
+| `tag`, `attribute`, `protocol` | Identificador normalizado en **minúsculas** | `body`, `onerror`, `javascript:` | Patrón estructural, insensible a mayúsculas |
+| `variable` | Subcadena **verbatim** del documento, espacios incluidos | `{{ bad_ns.titulo }}`, `{{{` | Búsqueda literal |
+
+Sin esa distinción el frontend tendría que adivinar cómo localizar cada caso. Por eso el emisor del
+tipo `variable` pasa el **match completo del regex** y no `invalidVariable`, que va sin llaves y con
+la ruta ya normalizada: sería un texto que no existe en el documento.
+
+Como no hay ningún `ExceptionFilter` en el backend, Nest devuelve el payload objeto tal cual y el
+cliente recibe `{ message, violations, … }` en la raíz del cuerpo, sin `statusCode` ni `error`.
+
+### 7.2 La sonda es la puerta; la auditoría, el localizador
+
+`inspectPublishableMarkup` (§6.2) sigue decidiendo **si** se rechaza.
+`auditPublishableMarkup(html): TemplateViolation[]` solo añade **dónde**.
+
+Las dos coexisten porque cubren cosas distintas: reducir la puerta a las reglas de la auditoría
+—etiqueta, atributo, protocolo— perdería cobertura, ya que la sonda compara el saneador entero y es
+exhaustiva por construcción. Si alguna vez la sonda filtrase algo que la auditoría no sabe localizar,
+`violations` sale vacío y el 400 se comporta como antes: se rechaza sin subrayar.
+
+La auditoría **deriva de `TEMPLATE_SANITIZER_CONFIG`** (`allowedTags`, `allowedAttributes`,
+`allowedSchemes`) en lugar de declarar su propia lista blanca. Con dos listas, añadir `section` al
+saneador dejaría al auditor marcándolo para siempre, y el autor recibiría un 400 por algo que en
+realidad se publica.
+
+`TemplateRendererService` **sigue sin lanzar**: es un servicio puro que devuelve datos. La
+`BadRequestException` la construye `TemplatesService`, que es quien conoce el transporte.
+
+### 7.3 Elección de parser: por qué no vale ninguno de los dos modos de parse5
+
+```typescript
+cheerio.load(html, { xml: { xmlMode: false } }, false)  // -> htmlparser2
+```
+
+| Configuración | `<body><p>Hola</p></body>` | `<p>ok</p>` |
+|---|---|---|
+| `load(html, null, false)` — fragmento parse5 | `p` — **`<body>` descartado** | `p` |
+| `load(html, null, true)` — documento parse5 | `html head body p` | `html head body p` — **sintetizados** |
+| `load(html, { xml: { xmlMode: false } }, false)` | `body p` | `p` |
+
+En modo fragmento parse5 descarta `<body>`, `<html>` y `<head>` por ser inválidos en ese contexto, y
+la infracción se vuelve **indetectable**; en modo documento los sintetiza en cualquier entrada y
+marcaría el 100 % de las plantillas. htmlparser2 conserva el árbol tal y como se escribió.
+
+`xml` como **objeto** y no `xml: true`: basta con que sea truthy para elegir htmlparser2, pero `true`
+activa además el modo XML, que es sensible a mayúsculas y dejaría `<BODY>` como `BODY`, fuera de la
+lista blanca.
+
+Beneficio de segundo orden: htmlparser2 es el parser que ya usa `sanitize-html`, así que auditor y
+saneador ven **un único DOM** en vez de dos que podrían discrepar.
+
+La guarda de estrechamiento del nodo comprueba `'tagName' in element` y **no**
+`element.type === 'tag'`: domhandler etiqueta `<script>` y `<style>` con tipo propio, y esa
+comparación dejaría fuera justo las dos etiquetas más peligrosas.
+
+### 7.4 Localización en el editor (`src/utils/violation-matcher.ts`)
+
+Helper puro, fuera del SFC, porque su fallo sería silencioso —subrayar de menos o de más no rompe
+nada visible— y desde `src/utils/` sí se puede probar de forma aislada.
+
+Un `indexOf(target)` daría falsos positivos constantes. Cada tipo lleva su frontera:
+
+| Tipo | Patrón | Descarta |
+|---|---|---|
+| `tag` | `` /<\/?TARGET(?=[\s/>]|$)/gi `` | `<pre>` para el tag `p`; «body» en texto; `&lt;body&gt;` |
+| `attribute` | `` /(?<![\w-])TARGET(?=\s*=)/gi `` | `data-onerror=`; el nombre suelto sin `=` |
+| `protocol` | `/TARGET/gi` | — |
+| `variable` | literal, sensible a mayúsculas | — (es verbatim, §7.1) |
+
+`TARGET` pasa siempre por un escapador de metacaracteres: `{`, `[`, `]` y `.` son sintaxis de
+`RegExp`, y un `{{{` sin escapar es un cuantificador inválido.
+
+Se resuelve contra el **texto** y no contra el árbol de sintaxis: el backend devuelve identificadores,
+no posiciones, porque el HTML que parseó es el que se envió y no necesariamente el que hay ahora en
+pantalla. Los rangos se devuelven ordenados por posición, como exige CodeMirror.

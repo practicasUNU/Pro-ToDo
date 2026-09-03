@@ -4,6 +4,7 @@ import { onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import { defaultKeymap, history, historyKeymap } from '@codemirror/commands';
 import { html } from '@codemirror/lang-html';
 import { HighlightStyle, syntaxHighlighting } from '@codemirror/language';
+import { lintGutter, setDiagnostics } from '@codemirror/lint';
 import { EditorState } from '@codemirror/state';
 import {
   Decoration,
@@ -15,7 +16,12 @@ import {
 } from '@codemirror/view';
 import { tags } from '@lezer/highlight';
 
+import { locateViolations } from '@/utils/violation-matcher';
+
+import type { Diagnostic } from '@codemirror/lint';
 import type { DecorationSet, ViewUpdate } from '@codemirror/view';
+
+import type { TemplateViolation } from '@/types/html-template';
 
 interface Props {
   modelValue: string;
@@ -78,6 +84,27 @@ const unuwareTheme = EditorView.theme({
   '.cm-selectionBackground, &.cm-focused .cm-selectionBackground, ::selection': {
     backgroundColor: 'var(--pd-accent-selection)',
   },
+  // Diagnosticos. `background-image: none` es obligatorio: la ondulacion por
+  // defecto de @codemirror/lint es un SVG en data URI con su propio rojo
+  // incrustado, que ninguna propiedad de color puede retintar.
+  '.cm-lintRange-error': {
+    backgroundImage: 'none',
+    textDecoration: 'underline wavy var(--pd-negative)',
+    textUnderlineOffset: '3px',
+  },
+  '.cm-lint-marker-error': { color: 'var(--pd-negative)' },
+  '.cm-tooltip-lint': {
+    backgroundColor: 'var(--pd-surface-muted)',
+    border: '1px solid var(--pd-border)',
+    borderRadius: '6px',
+  },
+  '.cm-diagnostic': {
+    color: 'var(--pd-text-primary)',
+    fontFamily: "'Inter Variable', 'Inter', Roboto, sans-serif",
+    fontSize: '12.5px',
+    padding: '4px 8px',
+  },
+  '.cm-diagnostic-error': { borderLeftColor: 'var(--pd-negative)' },
 });
 
 /**
@@ -120,12 +147,46 @@ const markerHighlighter = ViewPlugin.fromClass(
 const changeListener = EditorView.updateListener.of((update: ViewUpdate) => {
   if (update.docChanged) {
     emit('update:modelValue', update.state.doc.toString());
+
+    // Los diagnosticos describen un documento que ya cambio: dejarlos visibles
+    // senalaria posiciones desplazadas. No hay bucle porque `setDiagnostics`
+    // despacha efectos de estado, no cambios de documento.
+    clearViolations(update.view);
   }
 
   if (update.selectionSet || update.docChanged) {
     emit('cursorChange', update.state.selection.main.head);
   }
 });
+
+/** Retira todo el subrayado de error de la vista dada. */
+const clearViolations = (target: EditorView): void => {
+  target.dispatch(setDiagnostics(target.state, []));
+};
+
+/**
+ * Pinta en rojo las construcciones que el backend rechazo al guardar.
+ *
+ * La localizacion la resuelve `locateViolations`; aqui solo se traduce a la
+ * forma que espera CodeMirror y se despacha.
+ *
+ * @param violations Infracciones del 400; un array vacio limpia el resaltado.
+ */
+const setViolations = (violations: TemplateViolation[]): void => {
+  if (!view) return;
+
+  if (violations.length === 0) {
+    clearViolations(view);
+    return;
+  }
+
+  const diagnostics: Diagnostic[] = locateViolations(
+    view.state.doc.toString(),
+    violations,
+  ).map((range) => ({ ...range, severity: 'error' }));
+
+  view.dispatch(setDiagnostics(view.state, diagnostics));
+};
 
 /**
  * Inserta texto en el cursor en UNA sola transaccion.
@@ -174,6 +235,9 @@ onMounted(() => {
       doc: props.modelValue,
       extensions: [
         lineNumbers(),
+        // Despues de `lineNumbers()` para que la columna de marcadores quede a
+        // la derecha de los numeros de linea.
+        lintGutter(),
         history(),
         keymap.of([...defaultKeymap, ...historyKeymap]),
         html(),
@@ -193,7 +257,7 @@ onBeforeUnmount(() => {
   view = null;
 });
 
-defineExpose({ insertTextAtCursor });
+defineExpose({ insertTextAtCursor, setViolations });
 </script>
 
 <template>

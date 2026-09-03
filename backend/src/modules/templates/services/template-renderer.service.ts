@@ -1,4 +1,5 @@
 import { Injectable } from '@nestjs/common';
+import * as cheerio from 'cheerio';
 import Handlebars from 'handlebars';
 import sanitizeHtml from 'sanitize-html';
 
@@ -6,6 +7,8 @@ import {
   MissingContextVariableException,
   resolvePath,
 } from '@core/fsm/context/state-payload.context';
+
+import type { TemplateViolation } from '../dto/template-violation.dto';
 
 /** Namespaces acumulados contra los que se compila una plantilla. */
 export type RenderNamespaces = Record<string, Record<string, unknown>>;
@@ -137,6 +140,38 @@ export const PUBLISHABLE_MARKUP_PROBE_CONFIG: sanitizeHtml.IOptions = {
 };
 
 /**
+ * Lo que la auditoria comprueba, DERIVADO de `TEMPLATE_SANITIZER_CONFIG`.
+ *
+ * No hay una segunda lista blanca a proposito: dos listas que describen la misma
+ * regla divergen en cuanto alguien toca una sola. Anadir `section` al saneador
+ * dejaria al auditor marcandolo para siempre, y el autor recibiria un 400 por
+ * algo que en realidad se publica sin problema.
+ */
+const ALLOWED_TAGS = new Set(
+  (TEMPLATE_SANITIZER_CONFIG.allowedTags as string[]).map((tag) =>
+    tag.toLowerCase(),
+  ),
+);
+
+const ALLOWED_ATTRIBUTES =
+  TEMPLATE_SANITIZER_CONFIG.allowedAttributes as Record<string, string[]>;
+
+const ALLOWED_SCHEMES = new Set(
+  (TEMPLATE_SANITIZER_CONFIG.allowedSchemes as string[]).map((scheme) =>
+    scheme.toLowerCase(),
+  ),
+);
+
+/** Atributos cuyo valor es una URL y por tanto puede portar un pseudo-protocolo. */
+const URL_ATTRIBUTES = new Set(['href', 'src', 'action', 'xlink:href']);
+
+/** Esquema inicial de una URL (`javascript:`, `data:`, `https:`). */
+const URL_SCHEME_PATTERN = /^\s*([a-z][a-z0-9+.-]*)\s*:/i;
+
+/** Atributo de evento en linea (`onerror`, `onclick`). */
+const EVENT_ATTRIBUTE_PATTERN = /^on[a-z]+$/i;
+
+/**
  * Salida del render, como union discriminada.
  *
  * Ni lanza ni devuelve `null`: cada rama lleva el dato que su consumidor
@@ -236,6 +271,118 @@ export class TemplateRendererService {
     const normalized = sanitizeHtml(html, PUBLISHABLE_MARKUP_PROBE_CONFIG);
 
     return { sanitized, wasFiltered: sanitized !== normalized };
+  }
+
+  /**
+   * Enumera QUE construcciones del markup rechazaria la lista blanca.
+   *
+   * Complementa a `inspectPublishableMarkup`, que solo responde si/no: aquella
+   * es la puerta —exhaustiva por construccion, porque compara dos pasadas del
+   * saneador entero— y esta es el localizador, que devuelve algo que el editor
+   * puede subrayar. Se mantienen las dos: reducir la puerta a estas reglas
+   * perderia cobertura (un `srcset` no es ni etiqueta, ni evento, ni protocolo).
+   *
+   * No lanza. Este servicio es puro y devuelve datos; construir la excepcion
+   * HTTP es cosa de `TemplatesService`, que es quien conoce el transporte.
+   *
+   * @param html Markup a examinar, sin compilar.
+   * @returns Infracciones unicas, en orden de aparicion. Vacio si no hay ninguna.
+   */
+  public auditPublishableMarkup(html: string): TemplateViolation[] {
+    // Cambiar a htmlparser2 NO es un detalle de gusto: con el parser por
+    // defecto (parse5) ninguno de sus dos modos sirve. En modo fragmento
+    // (`isDocument: false`) descarta `<body>`, `<html>` y `<head>` por ser
+    // invalidos en ese contexto, y la infraccion se volveria indetectable; en
+    // modo documento los SINTETIZA en cualquier entrada, y marcaria el 100% de
+    // las plantillas. htmlparser2 conserva el arbol tal y como se escribio.
+    //
+    // Ademas es el mismo parser que usa `sanitize-html`, asi que auditor y
+    // saneador ven un unico DOM en vez de dos que podrian discrepar.
+    //
+    // `xml` como OBJETO y no `xml: true`: basta con que sea truthy para elegir
+    // htmlparser2, pero `true` activa ademas el modo XML, que es sensible a
+    // mayusculas y dejaria `<BODY>` como `BODY`, fuera de la lista blanca.
+    const $ = cheerio.load(html, { xml: { xmlMode: false } }, false);
+
+    // `Map` y no array: de-duplica por `target` conservando el orden de
+    // aparicion. Diez `<script>` son un unico problema que resolver.
+    const violations = new Map<string, TemplateViolation>();
+
+    const register = (
+      target: string,
+      type: TemplateViolation['type'],
+      message: string,
+    ): void => {
+      if (!violations.has(target)) {
+        violations.set(target, { target, type, message });
+      }
+    };
+
+    $('*').each((_index, element) => {
+      // `$('*')` esta tipado como `AnyNode`, union que incluye `Document`. Se
+      // estrecha por la presencia de `tagName` en lugar de comparar
+      // `element.type === 'tag'`: domhandler etiqueta `<script>` y `<style>`
+      // con su propio tipo, y esa comparacion dejaria fuera justo las dos
+      // etiquetas mas peligrosas. Tampoco se importa `Element` de `domhandler`,
+      // que es una dependencia transitiva y no declarada.
+      if (!('tagName' in element)) {
+        return;
+      }
+
+      const tagName = element.tagName.toLowerCase();
+
+      if (!ALLOWED_TAGS.has(tagName)) {
+        register(tagName, 'tag', `Etiqueta <${tagName}> no permitida`);
+
+        // Sus atributos no se inspeccionan: el saneador descarta el elemento
+        // entero, asi que senalarlos solo anadiria ruido a lo que el autor tiene
+        // que corregir, que es la etiqueta.
+        return;
+      }
+
+      const allowedForTag = new Set([
+        ...(ALLOWED_ATTRIBUTES['*'] ?? []),
+        ...(ALLOWED_ATTRIBUTES[tagName] ?? []),
+      ]);
+
+      for (const [rawName, rawValue] of Object.entries(element.attribs)) {
+        const attribute = rawName.toLowerCase();
+
+        if (!allowedForTag.has(attribute)) {
+          register(
+            attribute,
+            'attribute',
+            EVENT_ATTRIBUTE_PATTERN.test(attribute)
+              ? `Atributo de evento '${attribute}' no permitido`
+              : `Atributo '${attribute}' no permitido en <${tagName}>`,
+          );
+        }
+
+        if (!URL_ATTRIBUTES.has(attribute)) {
+          continue;
+        }
+
+        const [, scheme] = URL_SCHEME_PATTERN.exec(rawValue) ?? [];
+
+        // Sin esquema no hay infraccion: `/ruta/relativa` y `#ancla` son
+        // enlaces legitimos que el saneador conserva.
+        if (scheme === undefined) {
+          continue;
+        }
+
+        const normalizedScheme = scheme.toLowerCase();
+
+        if (!ALLOWED_SCHEMES.has(normalizedScheme)) {
+          register(
+            `${normalizedScheme}:`,
+            'protocol',
+            `Protocolo '${normalizedScheme}:' no permitido en el atributo '${attribute}'`,
+          );
+        }
+      }
+    });
+
+    return [...violations.values()];
   }
 
   /**

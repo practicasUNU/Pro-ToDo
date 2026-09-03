@@ -32,6 +32,32 @@ export interface UpdateHtmlTemplatePayload {
   htmlContent?: string;
 }
 
+/**
+ * Replica de `ViolationType` (backend, `dto/template-violation.dto.ts`).
+ */
+export type ViolationType = 'tag' | 'attribute' | 'protocol' | 'variable';
+
+/**
+ * Infraccion localizable que el backend adjunta a un 400 al guardar.
+ *
+ * ## Invariante de `target`, y de ella depende el resaltado
+ *
+ * - `tag`, `attribute`, `protocol`: identificador normalizado en MINUSCULAS
+ *   (`body`, `onerror`, `javascript:`). En el documento puede aparecer como
+ *   `<BODY>`, asi que se busca con un patron estructural insensible a mayusculas.
+ * - `variable`: subcadena LITERAL del documento, espacios incluidos
+ *   (`{{ bad_ns.titulo }}`, `{{{`). Se busca tal cual.
+ *
+ * `TemplateCodeEditor` usa esta distincion para elegir el patron de busqueda;
+ * un `indexOf` unico para todo daria falsos positivos (`<p` casa dentro de
+ * `<pre>`, `onerror=` dentro de `data-onerror=`).
+ */
+export interface TemplateViolation {
+  target: string;
+  type: ViolationType;
+  message: string;
+}
+
 /** Cuerpo de `POST /templates/:id/preview`. */
 export interface PreviewTemplatePayload {
   samplePayload?: Record<string, Record<string, unknown>>;

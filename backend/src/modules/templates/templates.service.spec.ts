@@ -570,6 +570,15 @@ describe('TemplatesService', () => {
       expect(response.sanitizedHtml).toBe(
         '<p>{{parsed_email.clean_title}}</p>',
       );
+      // `violations` es lo que permite al editor subrayar el sitio exacto en
+      // lugar de mostrar solo un parrafo generico.
+      expect(response.violations).toEqual([
+        {
+          target: 'script',
+          type: 'tag',
+          message: 'Etiqueta <script> no permitida',
+        },
+      ]);
       expect(repository.save).not.toHaveBeenCalled();
     });
 
@@ -579,7 +588,7 @@ describe('TemplatesService', () => {
       const service = buildService(repository);
 
       // 2. Act
-      await expectBadRequest(
+      const response = await expectBadRequest(
         service.create(
           {
             name: 'con-onerror',
@@ -590,6 +599,13 @@ describe('TemplatesService', () => {
       );
 
       // 3. Assert
+      expect(response.violations).toEqual([
+        {
+          target: 'onerror',
+          type: 'attribute',
+          message: "Atributo de evento 'onerror' no permitido",
+        },
+      ]);
       expect(repository.save).not.toHaveBeenCalled();
     });
 
@@ -599,7 +615,7 @@ describe('TemplatesService', () => {
       const service = buildService(repository);
 
       // 2. Act
-      await expectBadRequest(
+      const response = await expectBadRequest(
         service.create(
           {
             name: 'con-js',
@@ -610,6 +626,13 @@ describe('TemplatesService', () => {
       );
 
       // 3. Assert
+      expect(response.violations).toEqual([
+        {
+          target: 'javascript:',
+          type: 'protocol',
+          message: "Protocolo 'javascript:' no permitido en el atributo 'href'",
+        },
+      ]);
       expect(repository.save).not.toHaveBeenCalled();
     });
 
@@ -655,15 +678,106 @@ describe('TemplatesService', () => {
       const service = buildService(repository);
 
       // 2. Act
-      await expectBadRequest(
+      const response = await expectBadRequest(
         service.update(TEMPLATE_ID, {
           htmlContent: '<div onclick="alert(1)">x</div>',
         }),
       );
 
       // 3. Assert
+      expect(response.violations).toEqual([
+        {
+          target: 'onclick',
+          type: 'attribute',
+          message: "Atributo de evento 'onclick' no permitido",
+        },
+      ]);
       expect(stored.htmlContent).toBe('<h1>{{parsed_email.clean_title}}</h1>');
       expect(repository.save).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('8. Infracciones localizables de variables', () => {
+    /**
+     * Invariante compartida por los tres emisores de tipo `variable`: el
+     * `target` es una subcadena VERBATIM del HTML. Si no lo fuera, el editor
+     * buscaria un texto que no existe y no subrayaria nada.
+     */
+    const expectVerbatimTarget = (
+      response: Record<string, unknown>,
+      htmlContent: string,
+    ): void => {
+      const [violation] = response.violations as Array<Record<string, unknown>>;
+
+      expect(violation?.type).toBe('variable');
+      expect(htmlContent).toContain(violation?.target as string);
+    };
+
+    it('8.1 deberia localizar un namespace fuera de la lista blanca', async () => {
+      // 1. Arrange: con espacios dentro de las llaves, que es donde un target
+      //    reconstruido a mano dejaria de coincidir con el documento.
+      const repository = buildRepository();
+      const htmlContent = '<h1>{{ bad_ns.titulo }}</h1>';
+
+      // 2. Act
+      const response = await expectBadRequest(
+        buildService(repository).create(
+          { name: 'ns-malo', htmlContent },
+          AUTHOR_ID,
+        ),
+      );
+
+      // 3. Assert
+      expect(response.violations).toEqual([
+        {
+          target: '{{ bad_ns.titulo }}',
+          type: 'variable',
+          message:
+            "Namespace 'bad_ns' no permitido. Solo se admiten: raw_email, parsed_email, scraped_web, llm_response, validated_drupal_json, rendered_html.",
+        },
+      ]);
+      expectVerbatimTarget(response, htmlContent);
+      expect(repository.save).not.toHaveBeenCalled();
+    });
+
+    it('8.2 deberia localizar la sintaxis prohibida', async () => {
+      // 1. Arrange
+      const htmlContent = '<p>{{#if parsed_email.clean_title}}x{{/if}}</p>';
+
+      // 2. Act
+      const response = await expectBadRequest(
+        buildService(buildRepository()).create(
+          { name: 'con-bloque', htmlContent },
+          AUTHOR_ID,
+        ),
+      );
+
+      // 3. Assert
+      expectVerbatimTarget(response, htmlContent);
+      expect(
+        (response.violations as Array<Record<string, unknown>>)[0]?.target,
+      ).toBe('{{#');
+    });
+
+    it('8.3 deberia localizar un marcador no interpretable', async () => {
+      // 1. Arrange: namespace suelto, sin ruta
+      const htmlContent = '<h1>{{titulo}}</h1>';
+
+      // 2. Act
+      const response = await expectBadRequest(
+        buildService(buildRepository()).create(
+          { name: 'suelto', htmlContent },
+          AUTHOR_ID,
+        ),
+      );
+
+      // 3. Assert
+      expectVerbatimTarget(response, htmlContent);
+
+      const [violation] = response.violations as Array<Record<string, unknown>>;
+
+      expect(violation?.target).toBe('{{titulo}}');
+      expect(violation?.message).toContain('no interpretable');
     });
   });
 });
