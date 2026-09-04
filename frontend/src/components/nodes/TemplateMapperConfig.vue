@@ -130,7 +130,7 @@ onMounted(loadTemplates);
         <p class="pd-subtitle q-mb-none">
           El flujo actual no provee los namespaces requeridos por esta plantilla:
           <span class="pd-mono">{{ missingNamespaces.join(', ') }}</span
-          >. Anade un nodo previo que los produzca o elige otra plantilla.
+          >. Añade un nodo previo que los produzca o elige otra plantilla.
         </p>
       </div>
     </div>
