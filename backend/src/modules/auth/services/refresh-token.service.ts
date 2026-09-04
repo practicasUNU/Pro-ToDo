@@ -3,7 +3,7 @@ import { createHash, randomBytes } from 'node:crypto';
 import { Injectable, Logger, UnauthorizedException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { InjectRepository } from '@nestjs/typeorm';
-import { LessThan, LessThanOrEqual, Repository } from 'typeorm';
+import { LessThanOrEqual, MoreThan, Repository } from 'typeorm';
 
 import { RefreshToken } from '@modules/auth/entities/refresh-token.entity';
 
@@ -26,6 +26,20 @@ const MILLISECONDS_PER_DAY = 24 * 60 * 60 * 1000;
  * un 401 plano y la brecha pasaria desapercibida.
  */
 const RETAINED_DEAD_TOKENS = 5;
+
+/**
+ * Sesiones vivas simultaneas que se permiten por usuario (MOD-01).
+ *
+ * OJO: coincide en valor con `RETAINED_DEAD_TOKENS` y no tiene NADA que ver.
+ * Aquella cuenta tokens ya inservibles que se conservan como rastro; esta acota
+ * cuantos dispositivos pueden tener sesion abierta a la vez. Cambiar una no
+ * implica cambiar la otra.
+ *
+ * Como `issue()` revoca antes el token previo del mismo dispositivo, no puede
+ * haber dos filas vivas para un mismo `deviceId`: contar tokens activos es, por
+ * tanto, contar dispositivos.
+ */
+const MAX_ACTIVE_SESSIONS = 5;
 
 /**
  * Mensaje unico para todos los modos de fallo de la renovacion.
@@ -102,6 +116,11 @@ export class RefreshTokenService {
           isRevoked: false,
         }),
       );
+
+      // Despues del `save` a proposito, igual que la poda: el token recien
+      // insertado es el mas reciente, asi que nunca cae en la cola del `skip` y
+      // no puede expulsarse a si mismo.
+      await this.enforceSessionLimit(repository, user.id);
 
       await this.pruneDeadTokens(repository, user.id);
     });
@@ -180,11 +199,37 @@ export class RefreshTokenService {
     );
   }
 
-  /** Elimina los tokens ya caducados. Sin uso automatico todavia (ver Walkthrough). */
-  public async purgeExpired(): Promise<void> {
-    await this.refreshTokenRepository.delete({
-      expiresAt: LessThan(new Date()),
+  /**
+   * Expulsa las sesiones que exceden `MAX_ACTIVE_SESSIONS`, de la mas antigua.
+   *
+   * Las sobrantes se BORRAN, nunca se revocan, y la diferencia es de seguridad,
+   * no de estilo. Una fila revocada sigue existiendo, asi que cuando el
+   * dispositivo expulsado presentase su token, `rotate()` lo encontraria con
+   * `isRevoked: true` y lo interpretaria como REUTILIZACION: derribaria con
+   * `revokeAllForUser()` las demas sesiones del usuario y registraria una alerta
+   * de robo falsa. Al borrarla, ese mismo intento no encuentra fila y termina en
+   * el 401 corriente, con el mensaje opaco de siempre y sin dañar a nadie mas.
+   *
+   * Solo cuentan las sesiones REALMENTE vivas: una fila revocada o caducada ya no
+   * ocupa plaza, y de esas se encarga `pruneDeadTokens`.
+   */
+  private async enforceSessionLimit(
+    repository: Repository<RefreshToken>,
+    userId: string,
+  ): Promise<void> {
+    const evictedSessions = await repository.find({
+      where: { userId, isRevoked: false, expiresAt: MoreThan(new Date()) },
+      // El desempate por `id` hace determinista el orden: dos tokens emitidos en
+      // el mismo instante compartirian `createdAt` y el corte del `skip` quedaria
+      // a merced del plan de ejecucion.
+      order: { createdAt: 'DESC', id: 'DESC' },
+      select: { id: true },
+      skip: MAX_ACTIVE_SESSIONS,
     });
+
+    if (evictedSessions.length === 0) return;
+
+    await repository.delete(evictedSessions.map(({ id }) => id));
   }
 
   /**
@@ -229,12 +274,25 @@ export class RefreshTokenService {
     return createHash('sha256').update(rawToken).digest('hex');
   }
 
-  /** Vigencia en milisegundos, derivada de `REFRESH_TOKEN_EXPIRES_IN_DAYS`. */
+  /**
+   * Vigencia en milisegundos, derivada de `REFRESH_TOKEN_EXPIRES_IN_DAYS`.
+   *
+   * La coalescencia nula por si sola NO basta: solo cubre la variable ausente,
+   * y del `.env` llega siempre una cadena. Una vacia daria `Number('') === 0` y
+   * cada token naceria ya caducado —el login quedaria roto sin un solo error en
+   * el log—; una no numerica daria `NaN` y con el una fecha invalida. De ahi que
+   * se valide el numero resultante y no la mera presencia de la variable.
+   */
   private getExpirationMs(): number {
-    const days =
-      this.configService.get<number>('REFRESH_TOKEN_EXPIRES_IN_DAYS') ??
-      DEFAULT_EXPIRATION_DAYS;
+    const configuredDays = Number(
+      this.configService.get<string>('REFRESH_TOKEN_EXPIRES_IN_DAYS'),
+    );
 
-    return Number(days) * MILLISECONDS_PER_DAY;
+    const days =
+      Number.isFinite(configuredDays) && configuredDays > 0
+        ? configuredDays
+        : DEFAULT_EXPIRATION_DAYS;
+
+    return days * MILLISECONDS_PER_DAY;
   }
 }

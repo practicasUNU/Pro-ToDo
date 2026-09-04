@@ -144,13 +144,22 @@ export class UsersService {
 
 // @modules/auth/services/refresh-token.service.ts — único punto que conoce `refresh_tokens`
 export class RefreshTokenService {
-  /** Devuelve el token EN CLARO; en la tabla solo queda su SHA-256. */
-  public async issue(user: User): Promise<string>;
+  /**
+   * Devuelve el token EN CLARO; en la tabla solo queda su SHA-256.
+   * En una sola transaccion: revoca la sesion previa de ESE dispositivo,
+   * inserta, aplica el cupo de sesiones y poda los tokens muertos.
+   */
+  public async issue(user: User, deviceId: string): Promise<string>;
   /** Canjea y revoca en el mismo acto. Lanza 401 en todo caso de fallo. */
-  public async rotate(rawToken: string): Promise<User>;
+  public async rotate(rawToken: string): Promise<RotatedSession>;
   public async revoke(rawToken: string): Promise<void>;
   public async revokeAllForUser(userId: string): Promise<void>;
-  public async purgeExpired(): Promise<void>;
+}
+
+/** El dispositivo lo transporta la cadena de tokens; el cliente no lo reenvia. */
+export interface RotatedSession {
+  user: User;
+  deviceId: string;
 }
 
 // @modules/auth/interfaces/jwt-payload.interface.ts
@@ -199,14 +208,27 @@ AuthModule                                     │
 
 ```
         issue()                    rotate()
-  ─────────────────►  VIGENTE  ──────────────►  REVOCADO ──► (purgeExpired)
-                         │  │                       │
-       expiracion ◄──────┘  └──── revoke()          │
-       vencida                    (logout)          │
-                                                    ▼
-                              rotate() de nuevo ⇒ REUTILIZACIÓN
-                              ⇒ revokeAllForUser() + 401
+  ─────────────────►  VIGENTE  ──────────────►  REVOCADO ──┐
+                         │  │                       │      │
+       expiracion ◄──────┘  └──── revoke()          │      │ pruneDeadTokens()
+       vencida                    (logout)          │      │ (conserva los 5
+                         │                          │      │  mas recientes)
+                         │                          ▼      ▼
+                         │    rotate() de nuevo ⇒ REUTILIZACIÓN   BORRADO
+                         │    ⇒ revokeAllForUser() + 401
+                         │
+                         └── 6.ª sesion viva ⇒ enforceSessionLimit() ⇒ BORRADO
+                             (NO pasa por REVOCADO: ver abajo)
 ```
+
+**La expulsion por cupo borra la fila; no la revoca.** Una fila revocada sigue existiendo, y
+cuando el dispositivo expulsado presentase su token, `rotate()` lo encontraria con
+`isRevoked: true` y tomaria el camino de REUTILIZACIÓN: `revokeAllForUser()` derribaria las
+otras cinco sesiones y quedaria una alerta de robo falsa en el log. Al borrarla, ese intento
+cae en la rama de «token inexistente» y termina en el 401 corriente.
+
+Es la contrapartida de la retencion: los tokens **muertos** se conservan (son la ventana de
+deteccion de reuso), pero una sesion **viva** expulsada por cupo no debe dejar rastro revocado.
 
 ### 2.5 Variables de entorno
 
@@ -214,7 +236,7 @@ AuthModule                                     │
 |---|---|---|
 | `OTP_EXPIRATION_MINUTES` | Vigencia del código y valor de `expiresInSeconds` | Cae a `5` |
 | `JWT_EXPIRES_IN` | Vigencia del access token (**`1h`**) | Cae a `8h` |
-| `REFRESH_TOKEN_EXPIRES_IN_DAYS` | Vigencia del refresh token | Cae a `7` |
+| `REFRESH_TOKEN_EXPIRES_IN_DAYS` | Vigencia del refresh token | Cae a `7` si falta **o no es un numero positivo** |
 | `OTP_THROTTLE_TTL_MS` / `OTP_THROTTLE_LIMIT` | Ventana y cupo del límite de tasa | Caen a `60000` / `3` |
 | `SMTP_*` | Transporte del correo | El envío falla con `500` |
 

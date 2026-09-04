@@ -1840,3 +1840,119 @@ en el cambio anterior.
       de CodeMirror permitiría conservarlas mientras el autor corrige.
 - [ ] **La vista previa no informa de infracciones**: `previewTemplate` compila y sanea, pero no
       audita. Una plantilla guardada antes de estos cambios se ve recortada sin explicación.
+
+---
+
+## 2026-09-03 · Límite de sesiones activas y retirada de la purga muerta (MOD-01) — rama `feat/auth-token-cleanup`
+
+El encargo listaba tres defectos del ciclo de vida de los refresh tokens. **Dos no existían**, el
+tercero sí, y la forma en que el encargo proponía resolverlo habría abierto un fallo peor que el
+que cerraba.
+
+### Dos de los tres defectos ya estaban resueltos
+
+| Defecto del encargo | Realidad |
+|---|---|
+| «La purga solo evalúa `isRevoked`, dejando huérfanos los caducados» | `pruneDeadTokens` ya usaba un `where` en array, que en TypeORM es un **OR**: revocado **o** caducado. Ambos criterios, desde la entrada de poda transaccional del 27-08 |
+| «Múltiples peticiones del mismo `deviceId` generan filas redundantes» | `issue()` ya revocaba `{userId, deviceId, isRevoked: false}` **antes** de insertar, dentro de la transacción. `id_dispositivo` existe de punta a punta desde la migración `004` |
+| «Máximo de 5 dispositivos activos» | **Cierto, no existía.** El único trabajo real |
+
+Fácil de confundir con lo segundo: en el archivo ya había un `RETAINED_DEAD_TOKENS = 5`. Es otra
+cosa por completo — cuántos tokens *muertos* se conservan como ventana de detección de reuso, no
+cuántas sesiones *vivas* se permiten. Las dos constantes valen 5 y no tienen relación; el docblock
+de la nueva lo dice de forma explícita porque el próximo que lo lea va a asumir lo contrario.
+
+Añadí pruebas para los dos defectos inexistentes. No por ceremonia: el encargo los daba por rotos,
+así que conviene que quede escrito que funcionan y que no puedan romperse en silencio.
+
+### Revocar las sesiones sobrantes habría sido el fallo
+
+El encargo ofrecía «revocar **o** eliminar los más antiguos» como si fuesen intercambiables. No lo
+son, por cómo está construido `rotate()`:
+
+```
+El dispositivo expulsado presenta su token en /auth/refresh
+   │
+   ├── si se REVOCÓ   → la fila sigue ahí, con isRevoked = true
+   │                    → rotate() lo lee como REUTILIZACIÓN
+   │                    → revokeAllForUser() TUMBA LAS OTRAS 5 SESIONES
+   │                    → y deja una alerta de robo FALSA en el log
+   │
+   └── si se ELIMINÓ  → no hay fila → 401 corriente, mensaje opaco de siempre
+```
+
+Cada expulsión rutinaria por cupo se habría convertido en una falsa alarma de robo que echa al
+usuario de todos sus equipos. El límite **borra**.
+
+Es la contrapartida exacta de una decisión anterior: los tokens muertos se conservan porque son la
+ventana de detección, pero una sesión **viva** expulsada por cupo no debe dejar rastro revocado.
+Ese es el motivo de que no se reutilizara `revokeAllForUser` ni nada parecido.
+
+### Por qué el `skip` va después del `save`
+
+`enforceSessionLimit` corre dentro de la transacción que `issue()` ya abría, después del `save`.
+El token recién insertado es el más reciente, así que ordenando por `createdAt DESC` nunca cae en
+la cola del `skip` y no puede expulsarse a sí mismo — el mismo razonamiento que ya justificaba el
+orden insertar → podar.
+
+Se ordena por `createdAt DESC, id DESC`. El desempate no es adorno: dos tokens emitidos en el mismo
+instante comparten `createdAt`, y sin él, cuál de los dos cae del lado del corte lo decidiría el
+plan de ejecución de PostgreSQL.
+
+### El fallback de la vigencia no cubría lo que parecía
+
+`?? DEFAULT_EXPIRATION_DAYS` solo atrapa la variable ausente, y del `.env` siempre llega una cadena:
+
+| `REFRESH_TOKEN_EXPIRES_IN_DAYS` | Antes | Ahora |
+|---|---|---|
+| ausente | 7 días ✓ | 7 días |
+| `` (vacía) | `Number('') === 0` → **el token nace caducado y el login queda roto** | 7 días |
+| `abc` | `NaN` → fecha inválida | 7 días |
+| `-3` / `0` | expiración en el pasado | 7 días |
+
+El primero es el que asusta: la sesión no se abriría nunca y no habría un solo error en el log que
+lo explicara. Ahora se valida el número resultante, no la mera presencia de la variable.
+
+Se conservó el nombre `REFRESH_TOKEN_EXPIRES_IN_DAYS` en vez del `REFRESH_TOKEN_EXPIRES_IN` que
+pedía el encargo: lleva la unidad en el nombre, ya está en `.env` y `.env.example`, y el corto
+quedaría ambiguo junto a `JWT_EXPIRES_IN=1h`, que la lleva en el valor.
+
+### `purgeExpired()` retirada
+
+Código muerto: cero llamadas en todo `backend/src`, ni siquiera en tests. Y además incompleta —solo
+miraba `expiresAt`, sin retención—, así que engancharla a un `@Cron` habría borrado la ventana de
+detección de reuso de todos los usuarios. Un método muerto que encima es una trampa para el
+siguiente que lo encuentre no merece conservarse; la ruta viva ya purga en cada emisión.
+
+### El arnés de pruebas tuvo que aprender a distinguir dos consultas
+
+`issue()` lanza ahora **dos** `find` en la misma transacción, y el doble devolvía `[]` para
+cualquiera. Se discriminan por la forma del `where` —objeto para el cupo, array para el OR de la
+poda— y no por el orden de llamada: indexar por posición ataría las pruebas al orden interno de
+`issue()`, que es un detalle de implementación y ya cambió una vez en esta misma tarea.
+
+### Verificación
+
+```
+Backend
+  npm test           19 suites, 289 pruebas (antes 275; +14)
+  npx tsc --noEmit   solo los 13 errores preexistentes de allowed-ips.service.spec.ts
+  npm run lint       solo el warning preexistente de main.ts
+  npm run build      OK
+```
+
+Sin migración y sin tocar `.env`: no hay columna nueva y el nombre de la variable se mantiene.
+La migración `004` ya dejó dicho que `idx_refresh_tokens_id_usuario` cubre este filtro.
+
+### Checklist de dependencias restantes
+
+- [ ] **El cupo no se aplica al renovar sin emitir.** `enforceSessionLimit` vive en `issue()`, así
+      que un usuario con 6 sesiones abiertas de antes no baja a 5 hasta que alguna emita. En la
+      práctica renovar pasa por `issue()`, pero una cuenta inactiva conserva el exceso.
+- [ ] **`MAX_ACTIVE_SESSIONS` no es configurable por entorno.** Está fijo a 5, como pedía el
+      encargo. Si alguna vez hay que ajustarlo por despliegue, la variable no existe.
+- [ ] **Sigue sin haber barrido periódico.** `@nestjs/schedule` está instalado y `ScheduleModule`
+      nunca se importa. Si se añade, el barrido debe respetar la retención **por usuario**: uno
+      global destruiría la ventana de detección de reuso.
+- [ ] **`rotate()` e `issue()` no comparten transacción** (pendiente preexistente): si la emisión
+      fallara tras la revocación, el usuario queda sin sesión y debe reentrar por OTP.
