@@ -1,4 +1,5 @@
 import { ConflictException, NotFoundException } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 
 import { StatePayloadContext } from '@core/fsm/context/state-payload.context';
 import { NodeStrategyFactory } from '@core/fsm/factories/node-strategy.factory';
@@ -114,9 +115,18 @@ describe('FsmEngineService (PROT-09)', () => {
     jest.spyOn(factory['logger'], 'error').mockImplementation(() => undefined);
   });
 
-  /** Silencia el Logger del motor para que la salida de Jest siga legible. */
-  const buildEngine = (repo: Repository<FsmExecution>): FsmEngineService => {
-    const engine = new FsmEngineService(repo, factory);
+  /**
+   * Silencia el Logger del motor para que la salida de Jest siga legible.
+   *
+   * El `ConfigService` va vacio: estas pruebas ejercitan `executeWorkflow`, que
+   * no consulta configuracion. El unico consumidor es `createExecution`, con su
+   * propio bloque y su propia siembra de `MAX_CONCURRENT_EXECUTIONS_PER_FLOW`.
+   */
+  const buildEngine = (
+    repo: Repository<FsmExecution>,
+    configService: ConfigService = new ConfigService({}),
+  ): FsmEngineService => {
+    const engine = new FsmEngineService(repo, factory, configService);
     jest.spyOn(engine['logger'], 'warn').mockImplementation(() => undefined);
     jest.spyOn(engine['logger'], 'error').mockImplementation(() => undefined);
 
@@ -650,6 +660,74 @@ describe('FsmEngineService (PROT-09)', () => {
         buildEngine(repo).executeWorkflow(EXECUTION_ID, buildLinearSchema()),
       ).rejects.toThrow('conexion perdida con PostgreSQL');
       expect(execution.currentState).toBe(ExecutionState.FALLIDO);
+    });
+  });
+  describe('createExecution y control de concurrencia (RNF-09)', () => {
+    /** Doble con `count` y `create`/`save`, que `buildRepository` no cubre. */
+    const buildCreationRepository = (
+      activeCount: number,
+    ): {
+      repo: Repository<FsmExecution>;
+      count: jest.Mock;
+      save: jest.Mock;
+    } => {
+      const count = jest.fn().mockResolvedValue(activeCount);
+      const save = jest.fn((entity: FsmExecution) => Promise.resolve(entity));
+      const create = jest.fn((entity: Partial<FsmExecution>) => entity);
+
+      return {
+        repo: { count, create, save } as unknown as Repository<FsmExecution>,
+        count,
+        save,
+      };
+    };
+
+    it('deberia crear la ejecucion INACTIVO sembrando los namespaces recibidos', async () => {
+      // 1. Arrange
+      const { repo, count, save } = buildCreationRepository(0);
+      const initialContext = {
+        parsed_email: { clean_title: 'Noticia de prueba' },
+      };
+
+      // 2. Act
+      const execution = await buildEngine(repo).createExecution(
+        FLOW_ID,
+        initialContext,
+      );
+
+      // 3. Assert
+      expect(count).toHaveBeenCalledWith({
+        where: { flowId: FLOW_ID, currentState: ExecutionState.EN_PROCESO },
+      });
+      expect(save).toHaveBeenCalledTimes(1);
+      expect(execution.currentState).toBe(ExecutionState.INACTIVO);
+      expect(execution.activeCursor).toBeNull();
+      expect(execution.contextPayload).toEqual(initialContext);
+    });
+
+    it('deberia lanzar ConflictException si el flujo ya tiene una instancia EN_PROCESO', async () => {
+      // 1. Arrange
+      const { repo, save } = buildCreationRepository(1);
+
+      // 2. Act + 3. Assert: se rechaza ANTES de insertar, no despues
+      await expect(
+        buildEngine(repo).createExecution(FLOW_ID),
+      ).rejects.toBeInstanceOf(ConflictException);
+      expect(save).not.toHaveBeenCalled();
+    });
+
+    it('deberia respetar el cupo declarado en MAX_CONCURRENT_EXECUTIONS_PER_FLOW', async () => {
+      // 1. Arrange: con cupo 2, una sola instancia activa no bloquea
+      const { repo, save } = buildCreationRepository(1);
+      const configService = new ConfigService({
+        MAX_CONCURRENT_EXECUTIONS_PER_FLOW: '2',
+      });
+
+      // 2. Act
+      await buildEngine(repo, configService).createExecution(FLOW_ID);
+
+      // 3. Assert
+      expect(save).toHaveBeenCalledTimes(1);
     });
   });
 });

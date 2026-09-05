@@ -74,6 +74,10 @@ export interface TemplatePreviewResponse {
  * Alimenta los chips Poka-Yoke del editor: el autor elige el namespace en vez
  * de teclearlo, que es la unica forma de no equivocarse antes de que el backend
  * rechace la plantilla con un 400.
+ *
+ * `_assets` es el unico que no produce ningun nodo: lo inyecta el backend en
+ * cada render desde `ASSETS_BASE_URL`, y expone una sola clave, `base_url`,
+ * para prefijar rutas relativas de imagen.
  */
 export const TEMPLATE_NAMESPACES = [
   'raw_email',
@@ -82,6 +86,7 @@ export const TEMPLATE_NAMESPACES = [
   'llm_response',
   'validated_drupal_json',
   'rendered_html',
+  '_assets',
 ] as const;
 
 export type TemplateNamespace = (typeof TEMPLATE_NAMESPACES)[number];

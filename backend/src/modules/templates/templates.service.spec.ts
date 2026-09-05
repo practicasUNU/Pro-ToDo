@@ -4,7 +4,8 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 
-import { TemplateRendererService } from './services/template-renderer.service';
+import { createTemplateRendererService } from '@test/factories/template-renderer.factory';
+
 import { ALLOWED_NAMESPACES, TemplatesService } from './templates.service';
 
 import type { HtmlTemplate } from './entities/html-template.entity';
@@ -53,7 +54,7 @@ const buildRepository = (): TemplateRepositoryMock =>
 const buildService = (repository: TemplateRepositoryMock): TemplatesService =>
   new TemplatesService(
     repository as unknown as Repository<HtmlTemplate>,
-    new TemplateRendererService(),
+    createTemplateRendererService(),
   );
 
 /**
@@ -732,8 +733,10 @@ describe('TemplatesService', () => {
         {
           target: '{{ bad_ns.titulo }}',
           type: 'variable',
-          message:
-            "Namespace 'bad_ns' no permitido. Solo se admiten: raw_email, parsed_email, scraped_web, llm_response, validated_drupal_json, rendered_html.",
+          // La lista se deriva de la constante y no se transcribe: anadir un
+          // namespace nuevo no debe romper esta prueba, que verifica el
+          // localizador de infracciones, no el contenido de la lista blanca.
+          message: `Namespace 'bad_ns' no permitido. Solo se admiten: ${ALLOWED_NAMESPACES.join(', ')}.`,
         },
       ]);
       expectVerbatimTarget(response, htmlContent);

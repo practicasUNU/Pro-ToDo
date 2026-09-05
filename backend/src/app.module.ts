@@ -18,6 +18,7 @@ import { NodesModule } from '@modules/nodes/nodes.module';
 import { AllowedIpsModule } from '@modules/security/allowed-ips/allowed-ips.module';
 import { TemplatesModule } from '@modules/templates/templates.module';
 import { UsersModule } from '@modules/users/users.module';
+import { WorkflowsModule } from '@modules/workflows/workflows.module';
 
 import { AppController } from './app.controller';
 import { AppService } from './app.service';
@@ -67,6 +68,7 @@ import { AppService } from './app.service';
     AllowedIpsModule,
     TemplatesModule,
     NodesModule,
+    WorkflowsModule,
   ],
   controllers: [AppController],
   providers: [

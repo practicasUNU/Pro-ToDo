@@ -1160,3 +1160,125 @@ Un `indexOf(target)` daría falsos positivos constantes. Cada tipo lleva su fron
 Se resuelve contra el **texto** y no contra el árbol de sintaxis: el backend devuelve identificadores,
 no posiciones, porque el HTML que parseó es el que se envió y no necesariamente el que hay ahora en
 pantalla. Los rangos se devuelven ordenados por posición, como exige CodeMirror.
+
+---
+
+## 8. Despacho manual del pipeline (Camino B) y namespace sintético `_assets`
+
+### 8.1 Por qué un endpoint y no un script
+
+El runner `npm run test:fsm:manual` ya ejercitaba el motor, pero desde dentro del proceso: registra
+estrategias *dummy* a mano y no pasa por guards, DTOs ni serialización HTTP. El Camino B cierra el
+hueco que quedaba entre «el bucle funciona» y «el sistema funciona»: `POST /api/workflows/:id/run-test`
+recorre la cadena completa —perímetro de red, JWT, RBAC, `ParseUUIDPipe`, `ValidationPipe`,
+`PipelineValidatorService`, `FsmEngineService`, `TemplateMapperStrategy`— sin depender de que llegue
+un correo al buzón IMAP. El disparador es lo único que se sustituye; todo lo demás es el camino real.
+
+### 8.2 Namespace sintético `_assets`
+
+| Pieza | Responsabilidad |
+|---|---|
+| `ASSETS_BASE_URL` (`.env`) | Prefijo absoluto de recursos estáticos |
+| `TemplateRendererService.assetsBaseUrl` | Lo resuelve **una vez** en el constructor, sin barra final |
+| `renderStrict()` | Fusiona `_assets: { base_url }` sobre los namespaces del contexto |
+| `ALLOWED_NAMESPACES` | Lo admite como namespace válido de plantilla |
+
+`_assets` es el único namespace de la lista blanca que **ningún nodo produce**: lo aporta el entorno.
+Sin él, una plantilla tendría que incrustar el host (`<img src="http://cms.interno/uploads/…">`) y
+migrar de dominio obligaría a reescribir todas las plantillas guardadas.
+
+Tres decisiones que no son de gusto:
+
+1. **Se fusiona al final** (`{ ...sanitized, _assets: {…} }`). Un nodo que escribiera en `_assets`
+   podría redirigir todas las imágenes del artículo a un dominio ajeno; así su valor se descarta.
+2. **El guion bajo inicial no es cosmético.** `OUTPUT_NAMESPACE_PATTERN` (`/^[a-z0-9_]+$/` con inicio
+   alfanumérico en la práctica) describe namespaces de nodo; el prefijo `_` marca a simple vista que
+   este no lo es. Y sigue cabiendo en `TEMPLATE_VARIABLE_PATTERN`, que ya aceptaba `[a-zA-Z0-9_]+`
+   como raíz: **no hubo que tocar la gramática del gestor**.
+3. **Va antes del pre-chequeo de variables.** `{{_assets.base_url}}` figura en `requiredVariables` de
+   la plantilla; comprobar las rutas contra el contexto *crudo* lo reportaría siempre como ausente y
+   el nodo fallaría con un `missingFields` imposible de corregir.
+
+### 8.3 Normalización temprana de rutas
+
+`{{_assets.base_url}}/{{parsed_email.image_path}}` produce `…/uploads//2026/09/foto.jpg` si el nodo
+parseador entrega la ruta con barra inicial. No rompe la petición, pero cambia la URL canónica del
+recurso y ensucia la trazabilidad. El recorte **no puede vivir en la plantilla**: el gestor prohíbe
+los helpers de Handlebars (`security-and-scope.md` §3), así que no hay dónde escribir la
+transformación en el marcado.
+
+Se normaliza en `renderStrict()`, y **solo en los campos cuya clave es una ruta**
+(`ASSET_PATH_KEY_PATTERN = /(?:^|_)path$/`: `image_path`, `path`, `file_path`, `thumbnail_path`).
+Recortar la barra inicial de *cualquier* cadena corrompería datos legítimos —un `clean_body` que
+arranque con `/`, un `source_url` relativo—, que es un fallo silencioso mucho peor que una doble
+barra visible. El recorrido es de un nivel: bajar recursivamente obligaría a clonar en profundidad
+todo el contexto en cada render, y las rutas de asset que el pipeline produce viven en la raíz del
+namespace de su nodo.
+
+### 8.4 Concurrencia (RNF-09): dos capas, una sola verdad
+
+```
+FsmEngineService.createExecution()      →  count(EN_PROCESO) ≥ cupo  →  409 ConflictException
+        ↓ (fila INACTIVO creada)
+FsmEngineService.executeWorkflow()      →  UPDATE estado = 'EN_PROCESO'
+        ↓
+PostgreSQL: idx_flujo_activo (UNIQUE PARTIAL WHERE estado = 'EN_PROCESO')   ← barrera real
+```
+
+La guarda de `createExecution` **no es atómica** y no pretende serlo: entre el `count` y el `UPDATE`
+hay una ventana. La barrera real es el índice único parcial, que ya existía desde PROT-08 y funciona
+incluso con varios procesos. Lo que aporta la capa de aplicación es el **diagnóstico**: un 409 con
+`«el flujo X ya tiene 1/1 ejecución(es) EN_PROCESO»` en vez de un 500 por violación de unicidad.
+
+`MAX_CONCURRENT_EXECUTIONS_PER_FLOW` por defecto vale 1, que es exactamente lo que impone el índice.
+Subirlo no levanta el límite: solo cambia un 409 limpio por un fallo de integridad referencial. Está
+declarada porque la restricción es de negocio y merece nombre, no para que se toque a la ligera.
+
+Sin bandera de forzado, a propósito: dos bucles sobre el mismo flujo se pisarían el checkpoint y el
+segundo publicaría con un contexto a medias.
+
+### 8.5 Entidad `Workflow`: dónde vive el estado
+
+`@Entity('flujos')` mapea la tabla que ya define `init.sql`, con propiedades en inglés y columnas en
+español (igual que `User`, `RefreshToken` y `FsmExecution`).
+
+La frontera importante: esta entidad describe la **plantilla del trabajo** —topología y habilitación—,
+nunca su ciclo de vida. El `currentState` (`INACTIVO`, `EN_PROCESO`, `PAUSADO`, `EXITOSO`, `FALLIDO`)
+vive **exclusivamente** en `FsmExecution`, porque un flujo acumula muchas ejecuciones históricas y
+una columna de estado aquí solo podría reflejar una de ellas. `activo` es otra cosa: significa «este
+flujo se puede disparar automáticamente», no «se está ejecutando».
+
+`configuracion_pipeline` es *nullable* porque el asistente guarda el flujo antes de terminar de
+configurar sus nodos. `WorkflowsService` lo convierte en un **400 y no un 404**: el flujo existe, lo
+que falta es completar el asistente.
+
+### 8.6 Reparto de responsabilidades del endpoint
+
+```
+WorkflowsController  →  guards + ParseUUIDPipe + DTO           (transporte)
+WorkflowsService     →  buscar, validar, crear, ejecutar        (orquestación)
+PipelineValidatorService  →  forma, tipos y topología del grafo (Poka-Yoke)
+FsmEngineService     →  cupo de concurrencia + recorrido        (motor)
+```
+
+`WorkflowsService` no reimplementa nada: su único trabajo propio es traducir el checkpoint final al
+DTO de respuesta. **No captura excepciones**: el filtro global de Nest ya traduce `NotFoundException`
+a 404, `BadRequestException` a 400 y `ConflictException` a 409, que es literalmente el contrato del
+endpoint.
+
+El esquema se **revalida en cada disparo** aunque ya pasara el validador al guardarse: la columna
+JSONB se puede haber escrito por SQL directo, y el motor da por hecho un grafo íntegro para
+recorrerlo sin defensas en cada paso.
+
+El módulo importa `FsmModule` y **no** `NodesModule`: las estrategias se inscriben solas en la
+instancia compartida de `NodeStrategyFactory` cuando `AppModule` levanta `NodesModule`. Acoplarlo a
+los nodos obligaría a editar este módulo cada vez que se añada un tipo, que es justo lo que la
+factoría evita.
+
+### 8.7 `HttpStatus.OK` y no 201
+
+La petición es **síncrona**: no retorna hasta que el motor alcanza un estado terminal. El recurso que
+le interesa al cliente no es la fila creada en `ejecuciones_flujo`, sino el *resultado* del recorrido,
+que viaja en el mismo cuerpo. Un flujo que queda `PAUSADO` tampoco es un error HTTP: es un 200 con
+`finalState: "PAUSADO"` y el `activeCursor` del nodo culpable, que es lo que permite el reintento
+manual de CU-09.

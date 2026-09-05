@@ -1,4 +1,5 @@
 import { Injectable } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import * as cheerio from 'cheerio';
 import Handlebars from 'handlebars';
 import sanitizeHtml from 'sanitize-html';
@@ -12,6 +13,36 @@ import type { TemplateViolation } from '../dto/template-violation.dto';
 
 /** Namespaces acumulados contra los que se compila una plantilla. */
 export type RenderNamespaces = Record<string, Record<string, unknown>>;
+
+/**
+ * Namespace RESERVADO que el renderer inyecta por su cuenta.
+ *
+ * No lo produce ningun nodo: lo aporta el entorno, para que una plantilla pueda
+ * componer la URL absoluta de una imagen sin incrustar el host. Empieza por `_`
+ * a proposito, que es lo que lo distingue de los namespaces de nodo
+ * (`OUTPUT_NAMESPACE_PATTERN` los obliga a empezar por `[a-z0-9]`), y sigue
+ * cabiendo en `TEMPLATE_VARIABLE_PATTERN` sin tocar la gramatica del gestor.
+ */
+export const ASSETS_NAMESPACE = '_assets';
+
+/** Prefijo de assets cuando `ASSETS_BASE_URL` no esta declarada. */
+export const DEFAULT_ASSETS_BASE_URL = 'http://localhost:3000/static/uploads';
+
+/**
+ * Campos del contexto que se tratan como ruta relativa de asset.
+ *
+ * Solo estas claves se normalizan, y NO todo valor de cadena: recortar la barra
+ * inicial de cualquier campo corromperia texto legitimo (un `clean_body` que
+ * arranque con "/" o una URL absoluta en `source_url`). Cubre `image_path`,
+ * `path`, `file_path`, `thumbnail_path`...
+ */
+const ASSET_PATH_KEY_PATTERN = /(?:^|_)path$/;
+
+/** Barras iniciales de una ruta relativa; se recortan para no duplicarlas. */
+const LEADING_SLASHES_PATTERN = /^\/+/;
+
+/** Barras finales del prefijo de assets, por el mismo motivo. */
+const TRAILING_SLASHES_PATTERN = /\/+$/;
 
 /**
  * Fuerza `rel="noopener noreferrer"` en los enlaces que abren pestana nueva.
@@ -198,6 +229,22 @@ export type RenderOutcome =
 @Injectable()
 export class TemplateRendererService {
   /**
+   * Prefijo de assets, resuelto UNA vez en el arranque y sin barra final.
+   *
+   * Se cachea en lugar de consultar `ConfigService` en cada render: el valor no
+   * cambia en caliente (`backend/.env` solo se relee al reiniciar Nest) y
+   * `renderStrict` se invoca una vez por nodo MAPEADOR_PLANTILLA.
+   */
+  private readonly assetsBaseUrl: string;
+
+  constructor(private readonly configService: ConfigService) {
+    this.assetsBaseUrl = (
+      this.configService.get<string>('ASSETS_BASE_URL') ??
+      DEFAULT_ASSETS_BASE_URL
+    ).replace(TRAILING_SLASHES_PATTERN, '');
+  }
+
+  /**
    * Compila `htmlContent` sustituyendo las variables por su valor en `namespaces`.
    *
    * @param htmlContent Plantilla a compilar.
@@ -210,13 +257,19 @@ export class TemplateRendererService {
     requiredVariables: readonly string[],
     namespaces: RenderNamespaces,
   ): RenderOutcome {
+    // 0. Contexto efectivo: rutas de asset normalizadas y namespace sintetico
+    //    `_assets` fusionado. Va ANTES del pre-chequeo porque
+    //    `{{_assets.base_url}}` figura en `requiredVariables` de la plantilla, y
+    //    comprobarlo sobre el contexto crudo lo reportaria siempre como ausente.
+    const effectiveNamespaces = this.withAssetsNamespace(namespaces);
+
     // 1. Pre-chequeo. Handlebars en modo estricto tambien detendria el render,
     //    pero solo en la PRIMERA variable ausente: recorrer las rutas ya
     //    validadas al guardar permite informar de todas de golpe, que es lo que
     //    el operador necesita para arreglar el flujo en una sola pasada.
     const missingFields = this.findMissingVariables(
       requiredVariables,
-      namespaces,
+      effectiveNamespaces,
     );
 
     if (missingFields.length > 0) {
@@ -233,7 +286,7 @@ export class TemplateRendererService {
       // El escapado de HTML por defecto de `{{ }}` se conserva a proposito: el
       // gestor prohibe el triple-stash, asi que ningun valor del contexto puede
       // inyectar markup en el articulo publicado.
-      const compiledMarkup = render(namespaces);
+      const compiledMarkup = render(effectiveNamespaces);
 
       // Ultima linea de defensa, sobre el markup YA compilado: el escapado de
       // Handlebars cubre los valores del contexto, pero no el HTML que el editor
@@ -383,6 +436,55 @@ export class TemplateRendererService {
     });
 
     return [...violations.values()];
+  }
+
+  /**
+   * Contexto efectivo del render: rutas de asset normalizadas y `_assets` dentro.
+   *
+   * NORMALIZACION TEMPRANA: se hace aqui y no en la plantilla porque el gestor
+   * no admite helpers de Handlebars (`security-and-scope.md` §3), asi que no hay
+   * donde recortar la barra en el propio marcado. Un `image_path` que llegue
+   * como `/2026/09/foto.jpg` produciria
+   * `http://host/static/uploads//2026/09/foto.jpg`: la doble barra no rompe la
+   * peticion, pero cambia la URL canonica del recurso y ensucia la trazabilidad.
+   *
+   * `_assets` se fusiona al FINAL: sobrescribe cualquier namespace homonimo que
+   * viniera del contexto, de modo que un nodo no pueda suplantar el prefijo de
+   * assets escribiendo en `_assets` por su cuenta.
+   */
+  private withAssetsNamespace(namespaces: RenderNamespaces): RenderNamespaces {
+    const sanitizedNamespaces: RenderNamespaces = Object.fromEntries(
+      Object.entries(namespaces).map(([namespace, data]) => [
+        namespace,
+        this.normalizeAssetPaths(data),
+      ]),
+    );
+
+    return {
+      ...sanitizedNamespaces,
+      [ASSETS_NAMESPACE]: { base_url: this.assetsBaseUrl },
+    };
+  }
+
+  /**
+   * Recorta las barras iniciales de los campos de ruta de un namespace.
+   *
+   * Recorrido de UN nivel: `ASSET_PATH_KEY_PATTERN` describe claves de campo, y
+   * bajar recursivamente a arreglos y subobjetos obligaria a clonar en
+   * profundidad todo el contexto en cada render para respetar la inmutabilidad
+   * del `StatePayloadContext`. Las rutas de asset que el pipeline produce viven
+   * en la raiz del namespace del nodo (`parsed_email.image_path`).
+   */
+  private normalizeAssetPaths(
+    data: Record<string, unknown>,
+  ): Record<string, unknown> {
+    return Object.fromEntries(
+      Object.entries(data).map(([key, value]) =>
+        ASSET_PATH_KEY_PATTERN.test(key) && typeof value === 'string'
+          ? [key, value.replace(LEADING_SLASHES_PATTERN, '')]
+          : [key, value],
+      ),
+    );
   }
 
   /**

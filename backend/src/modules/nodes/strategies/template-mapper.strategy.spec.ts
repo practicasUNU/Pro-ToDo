@@ -2,11 +2,12 @@ import { NotFoundException } from '@nestjs/common';
 
 import { StatePayloadContext } from '@core/fsm/context/state-payload.context';
 import { NodeType } from '@core/fsm/types/pipeline-schema.types';
-import { TemplateRendererService } from '@modules/templates/services/template-renderer.service';
+import { createTemplateRendererService } from '@test/factories/template-renderer.factory';
 
 import { TemplateMapperStrategy } from './template-mapper.strategy';
 
 import type { HtmlTemplate } from '@modules/templates/entities/html-template.entity';
+import type { TemplateRendererService } from '@modules/templates/services/template-renderer.service';
 import type { TemplatesService } from '@modules/templates/templates.service';
 
 const EXECUTION_ID = 'a1b2c3d4-5e6f-4a7b-8c9d-0e1f2a3b4c5d';
@@ -59,7 +60,7 @@ const buildStrategy = (
   service: TemplatesServiceMock,
   renderer:
     | TemplateRendererService
-    | TemplateRendererMock = new TemplateRendererService(),
+    | TemplateRendererMock = createTemplateRendererService(),
 ): TemplateMapperStrategy =>
   new TemplateMapperStrategy(
     service as unknown as TemplatesService,

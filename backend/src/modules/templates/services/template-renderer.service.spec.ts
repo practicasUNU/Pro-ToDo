@@ -1,6 +1,14 @@
-import { TemplateRendererService } from './template-renderer.service';
+import {
+  createTemplateRendererService,
+  TEST_ASSETS_BASE_URL,
+} from '@test/factories/template-renderer.factory';
 
-import type { RenderNamespaces } from './template-renderer.service';
+import { DEFAULT_ASSETS_BASE_URL } from './template-renderer.service';
+
+import type {
+  RenderNamespaces,
+  TemplateRendererService,
+} from './template-renderer.service';
 
 /** Contexto tipico de una ejecucion a mitad de pipeline. */
 const buildNamespaces = (): RenderNamespaces => ({
@@ -15,7 +23,7 @@ describe('TemplateRendererService', () => {
   let renderer: TemplateRendererService;
 
   beforeEach(() => {
-    renderer = new TemplateRendererService();
+    renderer = createTemplateRendererService();
   });
 
   describe('1. Render exitoso', () => {
@@ -504,6 +512,135 @@ describe('TemplateRendererService', () => {
           wasFiltered,
         );
       }
+    });
+  });
+  describe('7. Namespace sintetico _assets y rutas relativas', () => {
+    /** Plantilla canonica del fixture: prefijo de entorno + ruta del contexto. */
+    const IMAGE_TEMPLATE =
+      '<img src="{{_assets.base_url}}/{{parsed_email.image_path}}" alt="foto" />';
+    const IMAGE_VARIABLES = ['_assets.base_url', 'parsed_email.image_path'];
+
+    it('7.1 deberia compilar {{_assets.base_url}} sin que el contexto lo aporte', () => {
+      // 1. Arrange: el contexto NO trae `_assets`; lo inyecta el renderer
+      const namespaces: RenderNamespaces = {
+        parsed_email: { image_path: '2026/09/laboratorio.jpg' },
+      };
+
+      // 2. Act
+      const outcome = renderer.renderStrict(
+        IMAGE_TEMPLATE,
+        IMAGE_VARIABLES,
+        namespaces,
+      );
+
+      // 3. Assert
+      expect(outcome).toEqual({
+        markup: `<img src="${TEST_ASSETS_BASE_URL}/2026/09/laboratorio.jpg" alt="foto" />`,
+      });
+    });
+
+    it('7.2 deberia recortar la barra inicial de image_path para no duplicarla', () => {
+      // 1. Arrange
+      const namespaces: RenderNamespaces = {
+        parsed_email: { image_path: '/2026/09/laboratorio.jpg' },
+      };
+
+      // 2. Act
+      const outcome = renderer.renderStrict(
+        IMAGE_TEMPLATE,
+        IMAGE_VARIABLES,
+        namespaces,
+      );
+
+      // 3. Assert: la URL canonica no debe llevar `//` tras el prefijo
+      expect(outcome).toEqual({
+        markup: `<img src="${TEST_ASSETS_BASE_URL}/2026/09/laboratorio.jpg" alt="foto" />`,
+      });
+      expect('markup' in outcome && outcome.markup).not.toContain('uploads//');
+    });
+
+    it('7.3 deberia recortar tambien varias barras iniciales', () => {
+      // 1. Arrange & 2. Act
+      const outcome = renderer.renderStrict(IMAGE_TEMPLATE, IMAGE_VARIABLES, {
+        parsed_email: { image_path: '///2026/09/laboratorio.jpg' },
+      });
+
+      // 3. Assert
+      expect(outcome).toEqual({
+        markup: `<img src="${TEST_ASSETS_BASE_URL}/2026/09/laboratorio.jpg" alt="foto" />`,
+      });
+    });
+
+    it('7.4 deberia recortar la barra final del prefijo declarado en el entorno', () => {
+      // 1. Arrange: `ASSETS_BASE_URL` con barra sobrante, error tipico de .env
+      const trailingRenderer = createTemplateRendererService(
+        `${TEST_ASSETS_BASE_URL}///`,
+      );
+
+      // 2. Act
+      const outcome = trailingRenderer.renderStrict(
+        IMAGE_TEMPLATE,
+        IMAGE_VARIABLES,
+        { parsed_email: { image_path: '/2026/09/laboratorio.jpg' } },
+      );
+
+      // 3. Assert
+      expect(outcome).toEqual({
+        markup: `<img src="${TEST_ASSETS_BASE_URL}/2026/09/laboratorio.jpg" alt="foto" />`,
+      });
+    });
+
+    it('7.5 deberia usar DEFAULT_ASSETS_BASE_URL si la variable no esta declarada', () => {
+      // 1. Arrange
+      const fallbackRenderer = createTemplateRendererService(null);
+
+      // 2. Act
+      const outcome = fallbackRenderer.renderStrict(
+        '<p>{{_assets.base_url}}</p>',
+        ['_assets.base_url'],
+        {},
+      );
+
+      // 3. Assert
+      expect(outcome).toEqual({
+        markup: `<p>${DEFAULT_ASSETS_BASE_URL}</p>`,
+      });
+    });
+
+    it('7.6 NO deberia tocar los campos que no son rutas de asset', () => {
+      // 1. Arrange: un cuerpo que arranca con "/" es texto legitimo, no ruta
+      const namespaces: RenderNamespaces = {
+        parsed_email: { clean_body: '/no soy una ruta', source_url: '/a/b' },
+      };
+
+      // 2. Act
+      const outcome = renderer.renderStrict(
+        '<p>{{parsed_email.clean_body}}</p><span>{{parsed_email.source_url}}</span>',
+        ['parsed_email.clean_body', 'parsed_email.source_url'],
+        namespaces,
+      );
+
+      // 3. Assert
+      expect(outcome).toEqual({
+        markup: '<p>/no soy una ruta</p><span>/a/b</span>',
+      });
+    });
+
+    it('7.7 deberia ignorar un _assets que venga del contexto', () => {
+      // 1. Arrange: un nodo no puede suplantar el prefijo escribiendo `_assets`
+      const namespaces: RenderNamespaces = {
+        _assets: { base_url: 'https://atacante.example' },
+      };
+
+      // 2. Act
+      const outcome = renderer.renderStrict(
+        '<p>{{_assets.base_url}}</p>',
+        ['_assets.base_url'],
+        namespaces,
+      );
+
+      // 3. Assert
+      expect(outcome).toEqual({ markup: `<p>${TEST_ASSETS_BASE_URL}</p>` });
     });
   });
 });

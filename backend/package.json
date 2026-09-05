@@ -18,7 +18,8 @@
     "test:cov": "jest --coverage",
     "test:debug": "node --inspect-brk -r tsconfig-paths/register -r ts-node/register node_modules/.bin/jest --runInBand",
     "test:e2e": "jest --config ./test/jest-e2e.json",
-    "test:fsm:manual": "ts-node -r tsconfig-paths/register src/core/fsm/scripts/run-dummy-e2e.ts"
+    "test:fsm:manual": "ts-node -r tsconfig-paths/register src/core/fsm/scripts/run-dummy-e2e.ts",
+    "seed:fsm-runner": "ts-node -r tsconfig-paths/register src/database/seeds/test-fsm-runner.seed.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.120.0",
@@ -127,7 +128,8 @@
       "^@core/(.*)$": "<rootDir>/core/$1",
       "^@modules/(.*)$": "<rootDir>/modules/$1",
       "^@strategies/(.*)$": "<rootDir>/strategies/$1",
-      "^@common/(.*)$": "<rootDir>/common/$1"
+      "^@common/(.*)$": "<rootDir>/common/$1",
+      "^@test/(.*)$": "<rootDir>/../test/$1"
     },
     "collectCoverageFrom": [
       "**/*.(t|j)s"

@@ -4,6 +4,7 @@ import {
   Logger,
   NotFoundException,
 } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { InjectRepository } from '@nestjs/typeorm';
 
 import { StatePayloadContext } from '@core/fsm/context/state-payload.context';
@@ -32,6 +33,15 @@ export const MAX_TRANSITIONS = 100;
 
 /** Factor por defecto cuando el nodo declara `backoffMs` pero no `backoffFactor`. */
 const DEFAULT_BACKOFF_FACTOR = 2;
+
+/**
+ * Instancias vivas por flujo cuando `MAX_CONCURRENT_EXECUTIONS_PER_FLOW` falta.
+ *
+ * Uno, y no un numero mayor, porque es lo que la base de datos impone de todos
+ * modos con el indice unico parcial `idx_flujo_activo`: un valor por defecto mas
+ * alto solo cambiaria un 409 limpio por un fallo de integridad referencial.
+ */
+const DEFAULT_MAX_CONCURRENT_EXECUTIONS = 1;
 
 /** Intentos ya consumidos por nodo, indexados por `nodeId`. */
 type RetryState = Record<string, number>;
@@ -72,7 +82,59 @@ export class FsmEngineService {
     @InjectRepository(FsmExecution)
     private readonly fsmExecutionRepo: Repository<FsmExecution>,
     private readonly strategyFactory: NodeStrategyFactory,
+    private readonly configService: ConfigService,
   ) {}
+
+  /**
+   * Da de alta una ejecucion INACTIVO lista para que `executeWorkflow` la tome.
+   *
+   * CONTROL DE CONCURRENCIA (RNF-09): antes de insertar nada se cuentan las
+   * instancias EN_PROCESO del flujo. Rechazar aqui, y no dejar que reviente el
+   * indice `idx_flujo_activo`, es lo que convierte el limite en un 409 con un
+   * mensaje que el operador entiende en vez de un 500 por violacion de unicidad.
+   * No hay bandera de forzado a proposito: dos bucles sobre el mismo flujo se
+   * pisarian el checkpoint, y el segundo publicaria con un contexto a medias.
+   *
+   * La guarda NO es atomica —hay una ventana entre el `count` y el `UPDATE` a
+   * EN_PROCESO de `executeWorkflow`—, pero no necesita serlo: el indice unico
+   * parcial es la barrera real y cierra la carrera desde la base de datos. Esto
+   * es la capa que da el diagnostico.
+   *
+   * @param flowId Flujo de `flujos` al que pertenece la ejecucion.
+   * @param initialContext Namespaces con los que se siembra `contexto_acumulado`,
+   *        para que `buildContext()` los restaure de forma inmutable.
+   * @returns La fila persistida, con su `executionId` ya asignado.
+   * @throws ConflictException Si el flujo agota su cupo de instancias activas.
+   */
+  public async createExecution(
+    flowId: string,
+    initialContext: Record<string, Record<string, unknown>> = {},
+  ): Promise<FsmExecution> {
+    const maxAllowed =
+      Number(
+        this.configService.get<string>('MAX_CONCURRENT_EXECUTIONS_PER_FLOW'),
+      ) || DEFAULT_MAX_CONCURRENT_EXECUTIONS;
+
+    const activeCount = await this.fsmExecutionRepo.count({
+      where: { flowId, currentState: ExecutionState.EN_PROCESO },
+    });
+
+    if (activeCount >= maxAllowed) {
+      throw new ConflictException(
+        `Conflicto de concurrencia (RNF-09): el flujo "${flowId}" ya tiene ${activeCount}/${maxAllowed} ejecucion(es) EN_PROCESO.`,
+      );
+    }
+
+    const execution = this.fsmExecutionRepo.create({
+      flowId,
+      currentState: ExecutionState.INACTIVO,
+      activeCursor: null,
+      contextPayload: initialContext,
+      retryState: {},
+    });
+
+    return this.fsmExecutionRepo.save(execution);
+  }
 
   /**
    * Ejecuta un flujo de principio a fin, o hasta que un nodo lo detenga.

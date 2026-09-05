@@ -1956,3 +1956,163 @@ La migración `004` ya dejó dicho que `idx_refresh_tokens_id_usuario` cubre est
       global destruiría la ventana de detección de reuso.
 - [ ] **`rotate()` e `issue()` no comparten transacción** (pendiente preexistente): si la emisión
       fallara tras la revocación, el usuario queda sin sesión y debe reentrar por OTP.
+
+---
+
+## 2026-09-04 · Habilitador de despacho manual (Camino B) y namespace `_assets` — rama `feat/html-template-mapper`
+
+Primera ejecución del pipeline **completo** disparada por HTTP: `POST /api/workflows/:id/run-test`
+recorre `FsmEngineService` → `StatePayloadContext` → `TemplateMapperStrategy` →
+`TemplateRendererService` sin depender del listener IMAP.
+
+### Estados de la FSM ejercitados
+
+| Transición | Cómo se provocó | Resultado verificado |
+|---|---|---|
+| `INACTIVO → EN_PROCESO → EXITOSO` | Despacho con `initialPayload` completo | 200, `activeCursor: null`, markup compilado |
+| `INACTIVO → EN_PROCESO → PAUSADO` | Nodo `MAPEADOR_PLANTILLA` sin variable requerida | 200 con `finalState: PAUSADO` y el cursor culpable |
+| Rechazo previo al alta | Fila `EN_PROCESO` preexistente del mismo flujo | **409** `ConflictException` sin crear fila |
+| Rechazo previo a la validación | UUID sin fila en `flujos` | **404** `NotFoundException` |
+
+### El plan pedía `id_flujo: 'wf-test-template-e2e'` y eso no puede existir
+
+`flujos.id_flujo` es `UUID PRIMARY KEY` (`init.sql:83`) y el endpoint valida el parámetro con
+`ParseUUIDPipe`. Un identificador legible se habría rechazado con un 400 **antes de llegar al
+servicio**, o habría reventado en el `INSERT`. El seed usa una constante UUID v4 escrita a mano
+(`11111111-2222-4333-8444-555555555555`) y no un UUID aleatorio: fijarla permite dejar el `curl` en la
+documentación sin releer la base tras cada siembra. El seed la imprime ya sustituida.
+
+### `createExecution` no existía
+
+El plan lo daba por implementado. `FsmEngineService` solo tenía `executeWorkflow`, que **espera una
+fila ya creada**; las pruebas anteriores la sembraban a mano desde el fixture del runner. Se añadió
+con la guarda de cupo dentro, para que el 409 se decida en un solo sitio.
+
+También hubo que reconciliar nombres: el plan hablaba de `workflowId` y `fsmExecutionRepository`, pero
+la entidad expone `flowId` (columna `id_flujo`) y el motor inyecta `fsmExecutionRepo`. Se respetó lo
+que ya había: renombrar la columna habría arrastrado a `logs_nodo` y `alertas_error`, que le apuntan
+con clave foránea.
+
+### Por qué el cupo configurable no relaja nada
+
+`MAX_CONCURRENT_EXECUTIONS_PER_FLOW=1` coincide con lo que ya impone `idx_flujo_activo`, el índice
+único **parcial** de PROT-08. La guarda de aplicación no es la barrera —hay una ventana entre su
+`count` y el `UPDATE` a `EN_PROCESO`— sino el **diagnóstico**: convierte un 500 por violación de
+unicidad en un 409 que dice qué flujo y qué cupo. Subir la variable no levanta el límite real; solo
+devuelve el fallo feo. Queda anotado en el checklist.
+
+### `_assets` cupo en la gramática existente sin tocarla
+
+`TEMPLATE_VARIABLE_PATTERN` ya aceptaba `[a-zA-Z0-9_]+` como raíz del namespace, así que
+`{{_assets.base_url}}` se parsea sin modificar el validador. Solo hubo que añadir `_assets` a
+`ALLOWED_NAMESPACES` — y a su réplica del frontend (`TEMPLATE_NAMESPACES`), que alimenta los chips
+Poka-Yoke del editor. Dejarla desincronizada habría hecho que el backend aceptara una variable que el
+autor no puede seleccionar, que es exactamente el fallo que esa réplica existe para evitar.
+
+Se fusiona **al final** del spread, no al principio: un nodo que escribiera en `_assets` podría
+redirigir todas las imágenes del artículo a un dominio ajeno. Hay prueba dedicada (7.7).
+
+Y se inyecta **antes** del pre-chequeo de variables. Con el orden inverso, `_assets.base_url` figura
+en `requiredVariables` pero no en el contexto crudo, y el nodo fallaría siempre con un `missingFields`
+que el operador no podría corregir de ninguna manera.
+
+### La normalización de barras se limitó a las claves de ruta
+
+El plan decía «si un campo `image_path` (o ruta relativa) inicia con `/`, recortarlo». Interpretarlo
+como «toda cadena del contexto» habría corrompido datos: un `clean_body` que arranque con `/` o un
+`source_url` relativo perderían su primer carácter, y eso es un fallo silencioso mucho peor que la
+doble barra visible que se pretende evitar.
+
+La regla es determinista y está documentada en el código: `ASSET_PATH_KEY_PATTERN = /(?:^|_)path$/`,
+que cubre `image_path`, `path`, `file_path`, `thumbnail_path`. El recorrido es de un solo nivel; bajar
+recursivamente obligaría a clonar en profundidad todo el contexto en cada render para respetar la
+inmutabilidad del `StatePayloadContext`, y las rutas de asset que el pipeline produce viven en la raíz
+del namespace de su nodo.
+
+De paso se recorta la barra **final** del prefijo (`ASSETS_BASE_URL=…/uploads///`), que es el error de
+`.env` complementario y no cuesta nada cubrir.
+
+### `ConfigService` en el renderer obligó a tocar cuatro suites
+
+`TemplateRendererService` se instanciaba con `new TemplateRendererService()` en cuatro sitios
+(`nodes.module.spec`, `template-mapper.strategy.spec`, `templates.service.spec` y su propio spec).
+En vez de repetir el doble cuatro veces se añadió `test/factories/template-renderer.factory.ts`, con
+el `ConfigService` **real** sembrado por `internalConfig` y no un objeto casteado: así la prueba
+verifica también que la clave que el servicio pide (`ASSETS_BASE_URL`) es la que existe de verdad.
+
+Anotado en el propio archivo: `ConfigService.get()` da prioridad a `process.env` sobre el objeto
+interno, así que exportar `ASSETS_BASE_URL` en el shell haría que estas pruebas leyeran ese valor.
+
+Con la factoría hizo falta un alias: `@test/*` en `tsconfig.json`, `package.json` (jest) y
+`test/jest-e2e.json`. Sin él, importarla desde `src/modules/**` exigía `../../../../test/…`, que
+`code-conventions.md` §6 prohíbe.
+
+### Una prueba ajena se rompió, y estaba bien que se rompiera
+
+`templates.service.spec.ts` 8.1 transcribía la lista de namespaces dentro del mensaje esperado.
+Añadir `_assets` la tumbó. Se cambió por una plantilla derivada de `ALLOWED_NAMESPACES.join(', ')`:
+esa prueba verifica el **localizador de infracciones**, no el contenido de la lista blanca, y no debe
+volver a caerse cada vez que se añada un namespace.
+
+### El seed dejó de exportar sus constantes
+
+Al verificar contra PostgreSQL se importó `TEST_FLOW_ID` desde el seed… y el seed **se ejecutó**:
+el archivo llama a `main()` en el nivel superior. Exportar constantes desde un módulo autoejecutable
+es una trampa para el siguiente que las necesite, así que pasaron a locales. Lo que haya que
+compartir irá a un `*.fixture.ts` aparte, como ya hace `dummy-pipeline.fixture.ts` frente a
+`run-dummy-e2e.ts`.
+
+### `HttpStatus.OK` y no el 201 por defecto de `@Post`
+
+La petición es síncrona y el cuerpo devuelve el **resultado**, no la fila creada. Un flujo `PAUSADO`
+tampoco es un error HTTP: es un 200 con `finalState` y `activeCursor`, que es lo que necesita CU-09
+para el reintento manual.
+
+### Verificación
+
+```
+Backend
+  npm run build              OK
+  npm test                   20 suites, 307 pruebas (antes 289; +18)
+  npx tsc --noEmit           solo los 13 errores preexistentes de allowed-ips.service.spec.ts
+  npx eslint (ficheros tocados)  limpio
+  npm run seed:fsm-runner    OK, idempotente en la segunda pasada
+
+Frontend
+  npm run typecheck          OK
+  npm test                   3 ficheros, 44 pruebas
+
+E2E contra PostgreSQL (5433)
+  finalState                 EXITOSO
+  activeCursor               null
+  namespaces                 parsed_email, rendered_html
+  markup                     <img src="http://localhost:3000/static/uploads/2026/09/laboratorio.jpg" …>
+  doble barra                ausente
+  fila EN_PROCESO previa     409 ConflictException
+  UUID inexistente           404 NotFoundException
+```
+
+El `image_path` de entrada llevaba barra inicial (`/2026/09/laboratorio.jpg`): la URL de salida es la
+prueba de que la normalización actúa.
+
+### Checklist de dependencias restantes
+
+- [x] ~~**`ASSETS_BASE_URL` apunta al puerto 3000 y la API escucha en el 5000.**~~ Falsa alarma: el
+      `PORT=5000` que vi era el de `backend/.env.example`; el `backend/.env` real declara `PORT=3000`.
+      No había discrepancia.
+- [x] ~~**No existe la ruta `/static/uploads`.**~~ Resuelto el 2026-09-04 con `ServeStaticModule`
+      (ver la entrada siguiente).
+- [ ] **La carrera del cupo devuelve 500, no 409.** Dos despachos verdaderamente simultáneos pueden
+      pasar los dos el `count`; el segundo choca contra `idx_flujo_activo` en el `UPDATE` a
+      `EN_PROCESO`, que ocurre **fuera** del `try` de `executeWorkflow` y sube como `QueryFailedError`.
+      Traducirla exigiría atrapar la violación de unicidad de PostgreSQL (`23505`) y reemitirla como
+      `ConflictException`.
+- [ ] **El despacho manual ignora `flujos.activo` a propósito** (probar antes de habilitar). Cuando
+      exista el disparador automático, es él quien debe respetarla.
+- [ ] **Sin cola.** La petición bloquea el hilo HTTP hasta que el motor termina.
+      `architecture-patterns.md` §5 pide BullMQ para las ejecuciones pesadas; aquí el pipeline es de
+      un solo nodo y el bloqueo es aceptable para una herramienta de verificación, no para producción.
+- [ ] **Sin `NotificationGateway`.** El frontend no recibe `node_started` / `flow_finished`: no hay
+      WebSocket todavía, así que el resultado solo llega en la respuesta HTTP.
+- [ ] **Sin prueba e2e automatizada del endpoint.** La verificación de arriba se hizo con un script
+      desechable contra la base real; `test/` no tiene un `workflows.e2e-spec.ts` que la repita en CI.

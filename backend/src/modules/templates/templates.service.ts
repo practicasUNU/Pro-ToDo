@@ -11,18 +11,29 @@ import { CreateTemplateDto } from './dto/create-template.dto';
 import { PreviewTemplateDto } from './dto/preview-template.dto';
 import { UpdateTemplateDto } from './dto/update-template.dto';
 import { HtmlTemplate } from './entities/html-template.entity';
-import { TemplateRendererService } from './services/template-renderer.service';
+import {
+  ASSETS_NAMESPACE,
+  TemplateRendererService,
+} from './services/template-renderer.service';
 
 import type { TemplateViolation } from './dto/template-violation.dto';
 import type { RenderNamespaces } from './services/template-renderer.service';
 import type { FindOptionsWhere } from 'typeorm';
 
 /**
- * Namespaces que un nodo del pipeline puede llegar a producir.
+ * Namespaces que una plantilla puede referenciar.
  *
  * Lista CERRADA y ordenada por posicion en el flujo. Es la lista blanca contra
  * la que se valida toda variable de una plantilla: si un namespace no esta
  * aqui, ningun nodo lo escribira nunca y la variable jamas resolveria.
+ *
+ * El ultimo, `_assets`, es el unico que NO produce ningun nodo: lo inyecta
+ * `TemplateRendererService` desde `ASSETS_BASE_URL` en cada render. Se admite
+ * aqui porque, sin el, `{{_assets.base_url}}` seria un namespace desconocido y
+ * la plantilla se rechazaria al guardar aunque en ejecucion resolviese
+ * perfectamente. El guion bajo inicial lo distingue a simple vista de un
+ * namespace de nodo, que `OUTPUT_NAMESPACE_PATTERN` obliga a empezar por
+ * `[a-z0-9]`.
  */
 export const ALLOWED_NAMESPACES = [
   'raw_email',
@@ -31,6 +42,7 @@ export const ALLOWED_NAMESPACES = [
   'llm_response',
   'validated_drupal_json',
   'rendered_html',
+  ASSETS_NAMESPACE,
 ] as const;
 
 /** Busqueda O(1); el arreglo se exporta para documentacion y para el frontend. */
