@@ -1282,3 +1282,61 @@ le interesa al cliente no es la fila creada en `ejecuciones_flujo`, sino el *res
 que viaja en el mismo cuerpo. Un flujo que queda `PAUSADO` tampoco es un error HTTP: es un 200 con
 `finalState: "PAUSADO"` y el `activeCursor` del nodo culpable, que es lo que permite el reintento
 manual de CU-09.
+
+---
+
+## 9. Entrega de archivos estáticos (`ServeStaticModule`)
+
+### 9.1 Dónde vive el directorio, y por qué
+
+```
+backend/
+├── src/          ← se compila a dist/ y se limpia en cada build
+├── dist/
+└── static/
+    └── uploads/  ← rootPath, resuelto con process.cwd()
+```
+
+| Ubicación | Por qué no |
+|---|---|
+| `backend/src/static/` | `nest build` compila `src/` → `dist/` y lo limpia; los binarios se perderían y ensuciarían el árbol de TypeScript |
+| `Pro-ToDo/uploads/` | La entrega de archivos es infraestructura del backend; sacarla rompe el desacoplamiento del monolito modular |
+| `backend/static/uploads/` | ✅ Raíz del entorno de ejecución de Node (`process.cwd()`), mapeable como volumen Docker, aislable en `.gitignore` |
+
+`process.cwd()` y **no** `__dirname`: el módulo se ejecuta desde `src/` en desarrollo y desde `dist/`
+en producción, así que una ruta relativa al archivo apuntaría a dos sitios distintos.
+
+### 9.2 El prefijo HTTP no pasa por `setGlobalPrefix`
+
+`ServeStaticModule` registra sus rutas con `httpAdapter.useStaticAssets()`, a nivel de Express y
+**fuera del router de Nest**. Consecuencias, ambas verificadas contra el servidor en marcha:
+
+1. `serveRoot: '/static/uploads'` responde en esa ruta literal, sin el `/api` global. Es el mismo
+   motivo por el que Swagger vive en `/api/docs` y no en `/api/api/docs`.
+2. **El `IpWhitelistGuard` global no las alcanza.** Una petición con `X-Forwarded-For` fuera del rango
+   corporativo recibe 403 en `/api/templates` y en `/api/docs`, pero **200** en `/static/uploads/…`.
+   `main.ts` ya documenta y resuelve este mismo caso para Swagger montando `RedLocalMiddleware` a
+   mano; aquí queda **sin aplicar y anotado**, porque cerrar el perímetro cambia quién puede
+   descargar las imágenes de un artículo publicado y esa es una decisión de despliegue, no técnica.
+
+### 9.3 Contrato con `ASSETS_BASE_URL`
+
+```
+ASSETS_BASE_URL = http://localhost:3000/static/uploads
+                  └── host:PORT ──┘└── serveRoot ────┘
+```
+
+Las dos mitades tienen dueños distintos y ninguna vive en las plantillas guardadas: el host y el
+puerto salen de `.env`, la cola del `serveRoot` de `AppModule`. Mover los estáticos a un CDN es
+cambiar **una sola variable**, sin tocar una sola fila de `plantillas_html`. Ese es justo el motivo
+de que `_assets` sea un namespace sintético y no texto incrustado en el HTML (§8.2).
+
+### 9.4 Endurecimiento
+
+`index: false` y `redirect: false`: una petición a un directorio debe ser 404, nunca un listado del
+contenido del servidor ni un `index.html` implícito. Los *dotfiles* los ignora la librería por
+defecto, así que `.gitkeep` tampoco se sirve. El *path traversal* lo bloquea Express, tanto
+codificado (`..%2f`) como literal (`--path-as-is`).
+
+El alcance se detiene aquí: **referenciar y servir**. Sin subida, sin recorte, sin compresión y sin
+edición gráfica (`security-and-scope.md` §3). Los archivos los prepara el operador.

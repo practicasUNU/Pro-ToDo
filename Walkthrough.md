@@ -2116,3 +2116,101 @@ prueba de que la normalización actúa.
       WebSocket todavía, así que el resultado solo llega en la respuesta HTTP.
 - [ ] **Sin prueba e2e automatizada del endpoint.** La verificación de arriba se hizo con un script
       desechable contra la base real; `test/` no tiene un `workflows.e2e-spec.ts` que la repita en CI.
+
+---
+
+## 2026-09-04 · Entrega de archivos estáticos (`ServeStaticModule`) — rama `feat/html-template-mapper`
+
+Cierra el pendiente que dejó el Camino B: `{{_assets.base_url}}` componía una URL correcta que no
+resolvía a ningún archivo. Ahora `backend/static/uploads/` se sirve en `/static/uploads`.
+
+### La versión 12 de `@nestjs/serve-static` no vale aquí
+
+`npm install @nestjs/serve-static` falló con `ERESOLVE`: la 12.0.0 exige `@nestjs/common@^12` y el
+proyecto va en Nest 11.2.3. **No** se resolvió con `--force` ni `--legacy-peer-deps`, que habrían
+dejado en el árbol un paquete construido contra una API distinta para que reventara en runtime. Se
+instaló la línea correspondiente a Nest 11: `@nestjs/serve-static@^5.0.5`
+(peer `@nestjs/common@^11.0.2`, `express@^5.0.1`; el proyecto tiene Express 5.2.1).
+
+Las dos vulnerabilidades que reporta `npm audit` (`fast-uri` alta, `qs` moderada) son **preexistentes**
+y transitivas de `ajv` y `express`; no las introduce este paquete y no se tocaron aquí.
+
+### Por qué `process.cwd()` y no `__dirname`
+
+`app.module.ts` se ejecuta desde `src/` en desarrollo y desde `dist/` en producción: una ruta relativa
+al módulo apuntaría a dos sitios distintos. El directorio de trabajo es `backend/` en ambos casos.
+
+Y por eso `static/` vive **fuera de `src/`**: `nest build` compila `src/` hacia `dist/` y lo limpia en
+cada build, así que un binario ahí dentro se perdería. Tampoco en la raíz del monorepo: la entrega de
+archivos es infraestructura del backend.
+
+### `serveRoot` no lleva el prefijo `/api`
+
+`ServeStaticModule` registra sus rutas con `httpAdapter.useStaticAssets()`, es decir, a nivel de
+Express y **fuera del router de Nest**, así que `setGlobalPrefix('api')` no las alcanza. Es el mismo
+motivo por el que Swagger vive en `/api/docs` y no en `/api/api/docs`.
+
+### ⚠️ Ese mismo hecho abre un agujero en el perímetro
+
+Comprobado contra el servidor en marcha, no deducido:
+
+| Petición con `X-Forwarded-For: 203.0.113.10` (fuera de rango) | Código |
+|---|---|
+| `GET /api/templates` (ruta Nest, guard global) | **403** |
+| `GET /api/docs` (Swagger, protegido a mano en `main.ts`) | **403** |
+| `GET /static/uploads/2026/09/laboratorio.jpg` | **200** |
+
+`IpWhitelistGuard` es un `APP_GUARD` del router de Nest y no ve estas rutas — exactamente el caso que
+`main.ts` ya documenta para Swagger y resuelve montando `RedLocalMiddleware` a mano.
+`security-and-scope.md` §1 exige que toda ruta protegida pase por él. **No se aplicó por decisión
+propia** porque cambia quién puede leer las imágenes: si el CMS de destino las descarga desde fuera
+del rango corporativo, cerrarlo rompería la publicación. Queda en el checklist para decidir.
+
+### Endurecimiento aplicado y verificado
+
+`index: false` y `redirect: false`. Con el servidor en marcha:
+
+| Petición | Resultado |
+|---|---|
+| `…/2026/09/laboratorio.jpg` | **200**, `Content-Type: image/jpeg`, 160 bytes |
+| `…/2026/09/` (directorio) | 404 — sin listado ni `index.html` implícito |
+| `…/no-existe.jpg` | 404 |
+| `…/..%2f..%2f.env` | 404 |
+| `…/../../.env` (`curl --path-as-is`) | 404 |
+| `…/.gitkeep` | 404 — `dotfiles: 'ignore'` por defecto |
+
+### Cadena completa, extremo a extremo
+
+```
+runWorkflowTest → EXITOSO
+  src interpolado : http://localhost:3000/static/uploads/2026/09/laboratorio.jpg
+  GET a esa URL   : 200  image/jpeg  160 bytes
+```
+
+El `image_path` de entrada seguía llevando barra inicial. La imagen de prueba (JPEG 1×1) se dejó en
+su sitio a propósito: hace que el fixture del Camino B produzca una URL que resuelve de verdad. Está
+cubierta por `.gitignore`, así que no se versiona.
+
+### Verificación
+
+```
+npm run build      OK
+npm test           20 suites, 307 pruebas (sin regresiones)
+npx tsc --noEmit   solo los 13 errores preexistentes de allowed-ips.service.spec.ts
+npm run lint       solo el warning preexistente de main.ts:59
+git check-ignore   backend/static/uploads/foto.jpg → ignorado; .gitkeep → versionado
+```
+
+### Checklist de dependencias restantes
+
+- [ ] **`/static/uploads` está fuera del perímetro de red** (evidencia arriba). Si estas imágenes solo
+      deben verse desde la red corporativa, basta replicar el patrón de Swagger en `main.ts`:
+      `app.use('/static/uploads', redLocalMiddleware.use.bind(redLocalMiddleware));`
+- [ ] **No hay endpoint de subida.** El directorio se puebla a mano; queda fuera del MVP igual que la
+      edición gráfica (`security-and-scope.md` §3). Cuando exista, necesitará validar tipo MIME real
+      —no la extensión—, tamaño máximo y un nombre de archivo saneado.
+- [ ] **Sin volumen en `docker-compose.yml`.** `backend/static/uploads/` vive en el sistema de
+      archivos del host; si el backend se contenedoriza, hay que mapearlo o las imágenes se pierden
+      en cada recreación.
+- [ ] **Sin caché.** `Cache-Control: public, max-age=0`: se revalida en cada petición. Para
+      producción convendría un `maxAge` real, ya que las rutas incluyen año y mes.

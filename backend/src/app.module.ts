@@ -1,8 +1,10 @@
 import { Module } from '@nestjs/common';
 import { ConfigModule, ConfigService } from '@nestjs/config';
 import { APP_GUARD } from '@nestjs/core';
+import { ServeStaticModule } from '@nestjs/serve-static';
 import { ThrottlerModule } from '@nestjs/throttler';
 import { TypeOrmModule } from '@nestjs/typeorm';
+import { join } from 'path';
 
 import { CommonModule } from '@common/common.module';
 import {
@@ -23,9 +25,47 @@ import { WorkflowsModule } from '@modules/workflows/workflows.module';
 import { AppController } from './app.controller';
 import { AppService } from './app.service';
 
+/**
+ * Raiz fisica de los recursos estaticos.
+ *
+ * `process.cwd()` y no `__dirname`: este archivo se ejecuta desde `src/` en
+ * desarrollo y desde `dist/` en produccion, asi que una ruta relativa al modulo
+ * apuntaria a dos sitios distintos. El directorio de trabajo es `backend/` en
+ * ambos casos, que es exactamente donde vive `static/uploads`.
+ *
+ * Queda FUERA de `src/` a proposito: `nest build` compila `src/` hacia `dist/` y
+ * `rimraf dist` lo borra en cada build. Un binario ahi dentro se perderia, o
+ * ensuciaria el arbol que ve el compilador de TypeScript.
+ */
+const STATIC_UPLOADS_ROOT = join(process.cwd(), 'static', 'uploads');
+
+/**
+ * Prefijo HTTP de los recursos. Debe coincidir con la cola de `ASSETS_BASE_URL`,
+ * que es lo que `TemplateRendererService` interpola en `{{_assets.base_url}}`.
+ */
+const STATIC_UPLOADS_ROUTE = '/static/uploads';
+
 @Module({
   imports: [
     ConfigModule.forRoot({ isGlobal: true }),
+    // Entrega de imagenes referenciadas por las plantillas (`{{_assets.base_url}}`).
+    // El alcance del MVP es referenciar y servir: nada de recorte, compresion ni
+    // edicion grafica (`security-and-scope.md` §3).
+    //
+    // `serveRoot` NO lleva el prefijo `/api`: el adaptador de Express registra
+    // estas rutas fuera del router de Nest, asi que `setGlobalPrefix()` no las
+    // alcanza. Es el mismo motivo por el que Swagger vive en `/api/docs` y no en
+    // `/api/api/docs`.
+    ServeStaticModule.forRoot({
+      rootPath: STATIC_UPLOADS_ROOT,
+      serveRoot: STATIC_UPLOADS_ROUTE,
+      serveStaticOptions: {
+        // Sin listado ni `index.html` implicito: una peticion al directorio debe
+        // ser un 404, no un indice del contenido del servidor.
+        index: false,
+        redirect: false,
+      },
+    }),
     TypeOrmModule.forRootAsync({
       imports: [ConfigModule],
       inject: [ConfigService],

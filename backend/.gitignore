@@ -54,3 +54,9 @@ pids
 
 # Diagnostic reports (https://nodejs.org/api/report.html)
 report.[0-9]*.[0-9]*.[0-9]*.[0-9]*.json
+
+# Archivos estaticos servidos por ServeStaticModule.
+# Se versiona el directorio (via .gitkeep) pero nunca los binarios que contiene:
+# las imagenes de los articulos las sube el operador y no son codigo fuente.
+/static/uploads/*
+!/static/uploads/.gitkeep
