@@ -2214,3 +2214,99 @@ git check-ignore   backend/static/uploads/foto.jpg → ignorado; .gitkeep → ve
       en cada recreación.
 - [ ] **Sin caché.** `Cache-Control: public, max-age=0`: se revalida en cada petición. Para
       producción convendría un `maxAge` real, ya que las rutas incluyen año y mes.
+
+---
+
+## 2026-09-04 · Perímetro sobre `/static/uploads` y traducción del conflicto 23505 — rama `feat/html-template-mapper`
+
+Cierra los dos huecos que quedaron anotados en las dos entradas anteriores.
+
+### 1. El perímetro ya cubre los estáticos
+
+`main.ts` renombra `SWAGGER_PERIMETER_PATHS` a `PERIMETER_PATHS` y le suma `/static/uploads`.
+Las dos familias comparten causa: ni `SwaggerModule` ni `ServeStaticModule` registran en el
+router de Nest, sino en el adaptador de Express, así que el `IpWhitelistGuard` —un `APP_GUARD`
+del router— nunca las alcanza. Comprobado contra el servidor en marcha:
+
+| Petición con `X-Forwarded-For: 203.0.113.10` | Antes | Ahora |
+|---|---|---|
+| `/static/uploads/2026/09/laboratorio.jpg` | 200 | **403** |
+| `/api/docs` | 403 | 403 |
+| Mismo estático desde localhost | 200 | 200 |
+
+El orden de registro funciona sin trucos: `app.use()` corre en `bootstrap()`, y
+`ServeStaticModule` no monta lo suyo hasta `app.init()` —o sea, dentro del `listen()` de más
+abajo—, así que el middleware perimetral entra antes en la pila de Express.
+
+### 2. La carrera del mutex ya devuelve 409, no 500
+
+`createExecution` cuenta las ejecuciones `EN_PROCESO` antes de insertar, pero entre ese `count`
+y el `UPDATE` a `EN_PROCESO` hay una ventana. Dos despachos simultáneos la pasan los dos, y el
+segundo choca contra `idx_flujo_activo`. Eso subía como `QueryFailedError` crudo.
+
+**Detección más estricta que la del encargo.** No basta con `driverError.code === '23505'`:
+
+```
+instanceof QueryFailedError  &&  driverError.code === '23505'
+&& (driverError.constraint === undefined || driverError.constraint === 'idx_flujo_activo')
+```
+
+El nombre de la restricción **estrecha cuando viene, pero no se exige**. Las dos rigideces
+alternativas fallan en direcciones opuestas: aceptar cualquier 23505 disfrazaría de 409 el bug
+de otra unicidad (fallo silencioso), y exigir siempre el nombre devolvería 500 en una carrera
+legítima si el driver no lo informa (`pg` solo asigna `code` y `constraint` cuando el servidor
+los envía). El helper se llama `isActiveFlowMutexViolation` y no `isUniqueViolation` a
+propósito: el predicado no es «cualquier unicidad», y el nombre genérico invitaría a
+reutilizarlo mal en otro servicio.
+
+Se verificó en `node_modules/typeorm@1.1.0` que `QueryFailedError<T extends Error = Error>`
+expone `driverError` y que su constructor copia las props del driver también a la raíz — de ahí
+que el `instanceof` vaya primero y la lectura sea por `driverError`, que es el camino tipado.
+
+**Solo se envuelve la primera escritura.** El índice es *parcial* (`WHERE estado = 'EN_PROCESO'`):
+una vez la fila ya está dentro, ella misma es la única entrada del índice para su `id_flujo`, y
+ninguna rival puede entrar mientras tanto. Los `saveCheckpoint` del bucle no pueden violarlo. El
+`try` es local y **no** el externo, conservando la intención ya documentada ahí: perder la
+carrera no es un fallo del flujo y no debe marcar `FALLIDO`.
+
+### 3. `saveCheckpoint` mutaba la entidad antes de escribir
+
+Hacía `Object.assign(execution, patch)` y *luego* el `UPDATE`. Si la escritura fallaba, la
+entidad en memoria anunciaba `EN_PROCESO` sobre una fila que seguía `INACTIVO`. Era inocuo
+mientras solo pasaba en el camino catastrófico; con el 409 esa mentira pasaba a estar en un
+desenlace **esperado**. Invertido el orden.
+
+No es un detalle cosmético y la prueba lo demuestra: con el orden antiguo,
+`NO deberia marcar FALLIDO al perder la carrera por el mutex` falla con
+`Expected: "INACTIVO" / Received: "EN_PROCESO"`.
+
+### Verificación
+
+Seis pruebas nuevas en `fsm-engine.service.spec.ts` (bloque `mutex de ejecucion
+idx_flujo_activo`), construyendo el `QueryFailedError` **real** de TypeORM y no un objeto de
+forma parecida: la guarda arranca con un `instanceof` y un doble suelto la dejaría sin
+ejercitar. Cubren el 23505 con y sin `constraint`, el 23505 de otra restricción, un
+`40001` y un `Error` ajeno a TypeORM.
+
+```
+npm run build      OK
+npm test           20 suites, 313 pruebas (antes 307; +6)
+npx tsc --noEmit   solo los 13 errores preexistentes de allowed-ips.service.spec.ts
+npm run lint       solo el warning preexistente de main.ts
+
+Carrera real contra PostgreSQL (script desechable):
+  createExecution sin rivales      -> ejecucion INACTIVO creada
+  se inserta una rival EN_PROCESO  -> reproduce la ventana del count
+  executeWorkflow                  -> ConflictException, httpStatus 409
+  estado de la fila                -> INACTIVO (no se marco FALLIDO)
+```
+
+### Checklist de dependencias restantes
+
+- [x] ~~`/static/uploads` está fuera del perímetro de red.~~ Resuelto aquí.
+- [x] ~~La carrera del cupo devuelve 500, no 409.~~ Resuelto aquí.
+- [ ] **La guarda de `createExecution` sigue sin ser atómica**, y así se queda: la barrera real
+      es el índice único parcial, que funciona incluso con varios procesos. Lo que hay ahora son
+      dos capas de *diagnóstico* sobre esa barrera, no dos barreras.
+- [ ] **Sin prueba e2e automatizada de la carrera.** La verificación de arriba es un script
+      desechable; reproducirla en CI exige dos conexiones concurrentes reales.

@@ -6,6 +6,7 @@ import {
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { InjectRepository } from '@nestjs/typeorm';
+import { QueryFailedError } from 'typeorm';
 
 import { StatePayloadContext } from '@core/fsm/context/state-payload.context';
 import { FsmExecution } from '@core/fsm/entities/fsm-execution.entity';
@@ -43,6 +44,17 @@ const DEFAULT_BACKOFF_FACTOR = 2;
  */
 const DEFAULT_MAX_CONCURRENT_EXECUTIONS = 1;
 
+/**
+ * Nombre del indice unico parcial que hace de mutex de ejecucion.
+ *
+ * Se repite aqui, ademas de en la entidad, porque es la unica pista que trae el
+ * error del driver para distinguir ESTA violacion de cualquier otra unicidad.
+ */
+const ACTIVE_FLOW_MUTEX_INDEX = 'idx_flujo_activo';
+
+/** SQLSTATE de PostgreSQL para `unique_violation`. */
+const PG_UNIQUE_VIOLATION = '23505';
+
 /** Intentos ya consumidos por nodo, indexados por `nodeId`. */
 type RetryState = Record<string, number>;
 
@@ -52,6 +64,18 @@ interface CheckpointPatch {
   activeCursor: string | null;
   contextPayload: Record<string, Record<string, unknown>>;
   retryState: RetryState;
+}
+
+/**
+ * Subconjunto del error del driver `pg` que el motor necesita leer.
+ *
+ * TypeORM tipa `driverError` como un `Error` generico, asi que sin esto no hay
+ * forma de mirar el SQLSTATE sin un `any`. Las dos propiedades son OPCIONALES
+ * porque asi llegan: el parser de `pg` solo las asigna si el servidor las envia.
+ */
+interface PostgresDriverError extends Error {
+  code?: string;
+  constraint?: string;
 }
 
 /** Espera pasiva; solo se invoca cuando el nodo declara un backoff real. */
@@ -144,7 +168,8 @@ export class FsmEngineService {
    * @param initialPayload Datos del disparador; se cargan en `trigger`.
    * @returns La entidad con el estado final (EXITOSO, PAUSADO o FALLIDO).
    * @throws NotFoundException Si la ejecucion no existe.
-   * @throws ConflictException Si ya hay un bucle atendiendola.
+   * @throws ConflictException Si ya hay un bucle atendiendola, o si otro
+   *         despacho gana la carrera por el mutex `idx_flujo_activo` (RNF-09).
    */
   public async executeWorkflow(
     executionId: string,
@@ -180,12 +205,35 @@ export class FsmEngineService {
     );
     let retryState: RetryState = { ...(execution.retryState as RetryState) };
 
-    await this.saveCheckpoint(execution, {
-      currentState: ExecutionState.EN_PROCESO,
-      activeCursor: cursor,
-      contextPayload: context.getAllContext(),
-      retryState,
-    });
+    // Unica escritura que puede chocar contra el mutex `idx_flujo_activo`: es la
+    // transicion que RESERVA el turno del flujo. Las demas del bucle no pueden
+    // violarlo, porque el indice es PARCIAL sobre `WHERE estado = 'EN_PROCESO'`
+    // y, una vez dentro, esta fila ya es la unica entrada del indice para su
+    // `id_flujo`.
+    //
+    // El try es local y NO el externo, a proposito: perder la carrera no es un
+    // fallo del flujo y no debe marcar FALLIDO (mismo criterio que la
+    // validacion previa de arriba).
+    try {
+      await this.saveCheckpoint(execution, {
+        currentState: ExecutionState.EN_PROCESO,
+        activeCursor: cursor,
+        contextPayload: context.getAllContext(),
+        retryState,
+      });
+    } catch (error: unknown) {
+      if (this.isActiveFlowMutexViolation(error)) {
+        this.logger.warn(
+          `Conflicto de concurrencia (RNF-09): la ejecucion "${executionId}" no arranca; el flujo "${execution.flowId}" ya tiene otra EN_PROCESO.`,
+        );
+
+        throw new ConflictException(
+          `Conflicto de concurrencia (RNF-09): el flujo "${execution.flowId}" ya tiene una ejecucion EN_PROCESO. La ejecucion "${executionId}" no ha arrancado.`,
+        );
+      }
+
+      throw error;
+    }
 
     try {
       let transitions = 0;
@@ -449,14 +497,44 @@ export class FsmEngineService {
     execution: FsmExecution,
     patch: CheckpointPatch,
   ): Promise<void> {
-    Object.assign(execution, patch);
-
     // `QueryDeepPartialEntity` no acepta un Record con firma de indice: intenta
     // hacerlo parcial recursivamente y no cuadra con `Record<string, unknown>`.
     // El cast es seguro porque `CheckpointPatch` solo declara columnas reales.
     await this.fsmExecutionRepo.update(
       execution.executionId,
       patch as QueryDeepPartialEntity<FsmExecution>,
+    );
+
+    // DESPUES del UPDATE, nunca antes: si la escritura falla —y con el mutex
+    // `idx_flujo_activo` ahora es un desenlace esperado, no una rareza— la
+    // entidad en memoria no debe anunciar un estado que la fila jamas tuvo.
+    Object.assign(execution, patch);
+  }
+
+  /**
+   * Distingue el choque contra el mutex `idx_flujo_activo` de otro fallo de BD.
+   *
+   * Exige el SQLSTATE de `unique_violation` y, CUANDO el driver informa el
+   * nombre de la restriccion, que sea el del mutex: asi un 23505 de otra
+   * unicidad sigue subiendo crudo en vez de disfrazarse de un 409 que mentiria.
+   * Si el nombre no viene se acepta igual, porque la unica sentencia protegida
+   * es el UPDATE que marca EN_PROCESO y la unica unicidad que puede violar en
+   * `ejecuciones_flujo` es la del mutex: la clave primaria ni se toca.
+   */
+  private isActiveFlowMutexViolation(error: unknown): boolean {
+    if (!(error instanceof QueryFailedError)) {
+      return false;
+    }
+
+    const driverError = error.driverError as PostgresDriverError | undefined;
+
+    if (driverError?.code !== PG_UNIQUE_VIOLATION) {
+      return false;
+    }
+
+    return (
+      driverError.constraint === undefined ||
+      driverError.constraint === ACTIVE_FLOW_MUTEX_INDEX
     );
   }
 

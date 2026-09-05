@@ -52,7 +52,9 @@ export class WorkflowsService {
    * @param runWorkflowTestDto Namespaces iniciales del contexto.
    * @throws NotFoundException Si el flujo no existe.
    * @throws BadRequestException Si no tiene esquema o el esquema no es integro.
-   * @throws ConflictException Si el flujo agota su cupo de instancias activas.
+   * @throws ConflictException Por dos vias distintas: la guarda de cupo de
+   *         `createExecution`, o la perdida de la carrera contra el mutex
+   *         `idx_flujo_activo` ya dentro de `executeWorkflow` (RNF-09).
    */
   public async runWorkflowTest(
     workflowId: string,

@@ -1,5 +1,6 @@
 import { ConflictException, NotFoundException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import { QueryFailedError } from 'typeorm';
 
 import { StatePayloadContext } from '@core/fsm/context/state-payload.context';
 import { NodeStrategyFactory } from '@core/fsm/factories/node-strategy.factory';
@@ -54,6 +55,40 @@ const buildRepository = (execution: FsmExecution): RepositoryDouble => {
     findOne,
     update,
   };
+};
+
+/** Forma del error del driver `pg` que el motor inspecciona. */
+type PostgresDriverErrorDouble = Error & {
+  code: string;
+  constraint?: string;
+};
+
+/**
+ * Error tal y como lo envuelve TypeORM cuando el driver `pg` rechaza la sentencia.
+ *
+ * `code` y `constraint` van dentro de `driverError` porque es de donde los lee
+ * el motor. Se construye el error REAL de TypeORM, no un objeto con la forma
+ * parecida: la guarda del motor arranca con un `instanceof`, y un doble suelto
+ * la dejaria sin ejercitar.
+ *
+ * @param code SQLSTATE a simular (`23505` es `unique_violation`).
+ * @param constraint Nombre de la restriccion. Omitirlo simula al driver que no
+ *        lo informa, que es la rama tolerante de la guarda.
+ */
+const buildQueryFailedError = (
+  code: string,
+  constraint?: string,
+): QueryFailedError => {
+  const driverError: PostgresDriverErrorDouble = Object.assign(
+    new Error('duplicate key value violates unique constraint'),
+    { code, constraint },
+  );
+
+  return new QueryFailedError(
+    'UPDATE "ejecuciones_flujo" SET "estado" = $1 WHERE "id_ejecucion" = $2',
+    [],
+    driverError,
+  );
 };
 
 /** Estrategia falsa: la factoria real la registra e indexa por `nodeType`. */
@@ -662,6 +697,106 @@ describe('FsmEngineService (PROT-09)', () => {
       expect(execution.currentState).toBe(ExecutionState.FALLIDO);
     });
   });
+  describe('mutex de ejecucion idx_flujo_activo (RNF-09)', () => {
+    /**
+     * Arranca el motor con la PRIMERA escritura rechazada por el driver.
+     *
+     * Esa escritura —la que marca EN_PROCESO— es la unica que puede perder la
+     * carrera contra el indice unico parcial, asi que basta con un
+     * `mockRejectedValueOnce` para reproducir el choque completo.
+     */
+    const runWithFirstWriteRejected = async (
+      rejection: unknown,
+    ): Promise<{
+      execution: FsmExecution;
+      update: jest.Mock;
+      caught: unknown;
+    }> => {
+      const execution = buildExecution();
+      const { repo, update } = buildRepository(execution);
+      update.mockRejectedValueOnce(rejection);
+
+      const caught: unknown = await buildEngine(repo)
+        .executeWorkflow(EXECUTION_ID, buildLinearSchema())
+        .then(() => undefined)
+        .catch((error: unknown) => error);
+
+      return { execution, update, caught };
+    };
+
+    it('deberia traducir la violacion del mutex a ConflictException', async () => {
+      // 1. Arrange & 2. Act
+      const { caught } = await runWithFirstWriteRejected(
+        buildQueryFailedError('23505', 'idx_flujo_activo'),
+      );
+
+      // 3. Assert: el mensaje nombra el flujo, que es lo que el operador busca
+      expect(caught).toBeInstanceOf(ConflictException);
+      expect((caught as ConflictException).message).toContain(FLOW_ID);
+    });
+
+    it('NO deberia marcar FALLIDO al perder la carrera por el mutex', async () => {
+      // 1. Arrange & 2. Act
+      const { execution, update } = await runWithFirstWriteRejected(
+        buildQueryFailedError('23505', 'idx_flujo_activo'),
+      );
+
+      // 3. Assert: no le tocaba turno, el flujo no ha fallado. Y la entidad en
+      // memoria no debe anunciar un estado que la fila nunca llego a tener.
+      expect(update).toHaveBeenCalledTimes(1);
+      expect(update).not.toHaveBeenCalledWith(
+        EXECUTION_ID,
+        expect.objectContaining({ currentState: ExecutionState.FALLIDO }),
+      );
+      expect(execution.currentState).toBe(ExecutionState.INACTIVO);
+    });
+
+    it('deberia aceptar el 23505 aunque el driver no informe la restriccion', async () => {
+      // 1. Arrange & 2. Act: rama tolerante de la guarda
+      const { caught } = await runWithFirstWriteRejected(
+        buildQueryFailedError('23505'),
+      );
+
+      // 3. Assert
+      expect(caught).toBeInstanceOf(ConflictException);
+    });
+
+    it('deberia propagar un 23505 de OTRA restriccion sin disfrazarlo de 409', async () => {
+      // 1. Arrange & 2. Act
+      const { caught } = await runWithFirstWriteRejected(
+        buildQueryFailedError('23505', 'ejecuciones_flujo_pkey'),
+      );
+
+      // 3. Assert: convertirlo en 409 enmascararia un bug distinto
+      expect(caught).toBeInstanceOf(QueryFailedError);
+      expect(caught).not.toBeInstanceOf(ConflictException);
+    });
+
+    it('deberia propagar un fallo de BD distinto del mutex sin marcar FALLIDO', async () => {
+      // 1. Arrange & 2. Act: 40001 es `serialization_failure`
+      const { caught, update } = await runWithFirstWriteRejected(
+        buildQueryFailedError('40001'),
+      );
+
+      // 3. Assert: esta escritura vive FUERA del try externo, asi que ningun
+      // fallo suyo marca FALLIDO; eso solo ocurre con los fallos del bucle.
+      expect(caught).toBeInstanceOf(QueryFailedError);
+      expect(caught).not.toBeInstanceOf(ConflictException);
+      expect(update).toHaveBeenCalledTimes(1);
+    });
+
+    it('deberia propagar tal cual un error ajeno a TypeORM', async () => {
+      // 1. Arrange & 2. Act: cubre la guarda `instanceof` del helper
+      const { caught } = await runWithFirstWriteRejected(
+        new Error('conexion perdida con PostgreSQL'),
+      );
+
+      // 3. Assert
+      expect(caught).not.toBeInstanceOf(ConflictException);
+      expect((caught as Error).message).toBe('conexion perdida con PostgreSQL');
+    });
+  });
+
   describe('createExecution y control de concurrencia (RNF-09)', () => {
     /** Doble con `count` y `create`/`save`, que `buildRepository` no cubre. */
     const buildCreationRepository = (
