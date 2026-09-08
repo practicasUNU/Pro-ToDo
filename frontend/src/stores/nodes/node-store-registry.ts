@@ -44,7 +44,12 @@ export type NodeStoreHook = () => NodeConfigStore;
 
 /**
  * Resolucion polimorfica de los STORES de configuracion de nodo, hermana de
- * `node-config-registry.ts` (regla frontend-quasar.md §3.1).
+ * `components/nodes/node-config-registry.ts` (regla frontend-quasar.md §3.1).
+ *
+ * VIVE EN LA CAPA DE STORES y no junto a su hermano de componentes: no importa
+ * ni resuelve un solo `.vue` —solo stores— y su unico consumidor es otro store,
+ * el agregador del borrador. §3.1 fija la ruta del registro de COMPONENTES, que
+ * si pertenece a `components/`; para este, la capa la manda lo que resuelve.
  *
  * El registro de componentes resuelve QUE pintar; este resuelve A QUIEN
  * preguntar si lo pintado es valido. Hacian falta los dos: el anfitrion monta el

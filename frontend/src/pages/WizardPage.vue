@@ -25,9 +25,7 @@ const draftStore = useFlujoDraftStore();
  */
 const reviewStepIndex = computed<number>(() => draftStore.pipelineTopology.length);
 
-const isReviewStep = computed<boolean>(
-  () => draftStore.activeStep === reviewStepIndex.value,
-);
+const isReviewStep = computed<boolean>(() => draftStore.activeStep === reviewStepIndex.value);
 
 /** Datos del flujo a crear; se piden al final, no al principio. */
 const form = reactive<{ name: string; description: string }>({
@@ -36,9 +34,7 @@ const form = reactive<{ name: string; description: string }>({
 });
 
 /** Fase 0 mientras no haya pipeline elegido; Fase 1..N en cuanto lo hay. */
-const isSelectingPipeline = computed<boolean>(
-  () => draftStore.selectedPipelineId === null,
-);
+const isSelectingPipeline = computed<boolean>(() => draftStore.selectedPipelineId === null);
 
 /**
  * Configurador del paso indicado, o `null` si su tipo aun no tiene uno.
@@ -78,10 +74,7 @@ const onGoToReview = (): void => {
 
 const onSaveWorkflow = async (): Promise<void> => {
   try {
-    const created = await draftStore.assembleAndSaveWorkflow(
-      form.name.trim(),
-      form.description,
-    );
+    const created = await draftStore.assembleAndSaveWorkflow(form.name.trim(), form.description);
 
     $q.notify({
       type: 'positive',
@@ -135,14 +128,7 @@ onMounted(loadPipelines);
         />
       </div>
 
-      <q-stepper
-        v-model="draftStore.activeStep"
-        class="pd-card"
-        vertical
-        animated
-        flat
-        keep-alive
-      >
+      <q-stepper v-model="draftStore.activeStep" class="pd-card" vertical animated flat keep-alive>
         <q-step
           v-for="(step, index) in draftStore.pipelineTopology"
           :key="step.nodeId"
@@ -165,8 +151,9 @@ onMounted(loadPipelines);
             <div class="pd-h2">Configurador no disponible</div>
             <p class="pd-subtitle q-mt-xs q-mb-none">
               El nodo <span class="pd-mono">{{ step.nodeId }}</span> es de tipo
-              <span class="pd-mono">{{ step.nodeType }}</span>, que todavia no tiene interfaz
-              de configuracion. No se puede continuar mas alla de este paso.
+              <span class="pd-mono">{{ step.nodeType }}</span
+              >, que todavia no tiene interfaz de configuracion. No se puede continuar mas alla de
+              este paso.
             </p>
           </div>
 

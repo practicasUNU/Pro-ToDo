@@ -32,8 +32,8 @@ const previewSteps = (pipeline: PipelineSummary): string =>
   <section>
     <h1 class="pd-h1">Nuevo flujo</h1>
     <p class="pd-subtitle q-mb-lg">
-      Elige el pipeline del que partir. Cada uno define su propia secuencia de nodos y el
-      asistente te guiara paso a paso para configurarlos.
+      Elige el pipeline del que partir. Cada uno define su propia secuencia de nodos y el asistente
+      te guiara paso a paso para configurarlos.
     </p>
 
     <div v-if="props.isLoading" class="row justify-center q-py-xl">
@@ -53,11 +53,7 @@ const previewSteps = (pipeline: PipelineSummary): string =>
     </div>
 
     <div v-else class="row q-col-gutter-md">
-      <div
-        v-for="pipeline in props.pipelines"
-        :key="pipeline.id"
-        class="col-12 col-md-6 col-lg-4"
-      >
+      <div v-for="pipeline in props.pipelines" :key="pipeline.id" class="col-12 col-md-6 col-lg-4">
         <q-card class="pd-card pd-pipeline-card" flat @click="emit('select', pipeline.id)">
           <div class="pd-pipeline-card__banner">
             <q-icon name="account_tree" size="22px" />

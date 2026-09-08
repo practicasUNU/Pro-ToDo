@@ -1,7 +1,7 @@
 import { defineStore, acceptHMRUpdate } from 'pinia';
 import { computed, ref } from 'vue';
 
-import { resolveNodeStore } from '@components/nodes/node-store-registry';
+import { resolveNodeStore } from '@stores/nodes/node-store-registry';
 import * as pipelinesService from '@services/pipelines.service';
 import * as workflowsService from '@services/workflows.service';
 
@@ -46,17 +46,14 @@ export const useFlujoDraftStore = defineStore('flujoDraft', () => {
 
   const selectedPipeline = computed<PipelineSummary | null>(
     () =>
-      availablePipelines.value.find(
-        (pipeline) => pipeline.id === selectedPipelineId.value,
-      ) ?? null,
+      availablePipelines.value.find((pipeline) => pipeline.id === selectedPipelineId.value) ?? null,
   );
 
   const isFirstStep = computed<boolean>(() => activeStep.value === 0);
 
   const isLastStep = computed<boolean>(
     () =>
-      pipelineTopology.value.length > 0 &&
-      activeStep.value === pipelineTopology.value.length - 1,
+      pipelineTopology.value.length > 0 && activeStep.value === pipelineTopology.value.length - 1,
   );
 
   /**
@@ -89,9 +86,7 @@ export const useFlujoDraftStore = defineStore('flujoDraft', () => {
    * Excluye el paso indicado a proposito: un nodo no puede leer su propia salida.
    */
   const upstreamNamespaces = (stepIndex: number): string[] =>
-    pipelineTopology.value
-      .slice(0, Math.max(stepIndex, 0))
-      .map((step) => step.outputNamespace);
+    pipelineTopology.value.slice(0, Math.max(stepIndex, 0)).map((step) => step.outputNamespace);
 
   const loadAvailablePipelines = async (): Promise<void> => {
     isLoading.value = true;
@@ -110,9 +105,7 @@ export const useFlujoDraftStore = defineStore('flujoDraft', () => {
    * backend la devuelve completa y ordenada en el listado.
    */
   const selectPipeline = (pipelineId: string): void => {
-    const pipeline = availablePipelines.value.find(
-      (candidate) => candidate.id === pipelineId,
-    );
+    const pipeline = availablePipelines.value.find((candidate) => candidate.id === pipelineId);
 
     if (pipeline === undefined) return;
 
@@ -179,9 +172,7 @@ export const useFlujoDraftStore = defineStore('flujoDraft', () => {
     pipelineTopology.value.forEach((step, index) => {
       // El metodo es opcional en el contrato: un disparador es el primero del
       // grafo y no tiene nada aguas arriba que declarar.
-      resolveNodeStore(step.nodeType)?.setAvailableUpstreamNamespaces?.(
-        upstreamNamespaces(index),
-      );
+      resolveNodeStore(step.nodeType)?.setAvailableUpstreamNamespaces?.(upstreamNamespaces(index));
     });
   };
 

@@ -26,9 +26,7 @@ vi.mock('@services/nodes/template-mapper.service', () => ({
 }));
 
 const pipelinesService = await import('@services/pipelines.service');
-const fetchSelectablePipelines = vi.mocked(
-  pipelinesService.fetchSelectablePipelines,
-);
+const fetchSelectablePipelines = vi.mocked(pipelinesService.fetchSelectablePipelines);
 
 const workflowsService = await import('@services/workflows.service');
 const createWorkflow = vi.mocked(workflowsService.createWorkflow);
@@ -37,9 +35,7 @@ const PIPELINE_ID = 'b3f1c2d4-5a6b-4c7d-8e9f-0a1b2c3d4e5f';
 const OTHER_PIPELINE_ID = 'c4a2d3e5-6f7b-4c8d-9e0f-1a2b3c4d5e6f';
 
 /** Pipeline de tres pasos: trigger -> parser -> mapeador. */
-const buildPipeline = (
-  overrides: Partial<PipelineSummary> = {},
-): PipelineSummary => ({
+const buildPipeline = (overrides: Partial<PipelineSummary> = {}): PipelineSummary => ({
   id: PIPELINE_ID,
   name: 'Notiweb - publicacion automatica',
   description: 'Publica noticias entrantes en el CMS',
@@ -65,9 +61,7 @@ const buildPipeline = (
 });
 
 /** Borrador con el catalogo cargado y un pipeline ya elegido. */
-const buildSelectedDraft = async (): Promise<
-  ReturnType<typeof useFlujoDraftStore>
-> => {
+const buildSelectedDraft = async (): Promise<ReturnType<typeof useFlujoDraftStore>> => {
   const draft = useFlujoDraftStore();
   fetchSelectablePipelines.mockResolvedValue([buildPipeline()]);
   await draft.loadAvailablePipelines();
@@ -356,10 +350,7 @@ describe('useFlujoDraftStore · agregador del asistente', () => {
       //    de los dos anteriores. Antes de esta conexion usaba una lista fija
       //    marcada PROVISIONAL y validaba contra namespaces inventados.
       const mapper = useTemplateMapperStore();
-      expect(mapper.availableUpstreamNamespaces).toEqual([
-        'raw_email',
-        'parsed_email',
-      ]);
+      expect(mapper.availableUpstreamNamespaces).toEqual(['raw_email', 'parsed_email']);
     });
 
     it('7.2 no deberia fallar con nodos que no declaran el metodo', async () => {
@@ -384,10 +375,7 @@ describe('useFlujoDraftStore · agregador del asistente', () => {
           },
         ],
       });
-      fetchSelectablePipelines.mockResolvedValue([
-        buildPipeline(),
-        shortPipeline,
-      ]);
+      fetchSelectablePipelines.mockResolvedValue([buildPipeline(), shortPipeline]);
       await draft.loadAvailablePipelines();
       draft.selectPipeline(PIPELINE_ID);
 
@@ -434,9 +422,7 @@ describe('useFlujoDraftStore · agregador del asistente', () => {
       // 3. Assert: en el esquema es propiedad del NODO. Publicarlo tambien en
       //    `params` crearia dos fuentes de verdad dentro del mismo JSON.
       expect(schema.nodes.trigger_imap?.outputNamespace).toBe('raw_email');
-      expect(schema.nodes.trigger_imap?.params).not.toHaveProperty(
-        'outputNamespace',
-      );
+      expect(schema.nodes.trigger_imap?.params).not.toHaveProperty('outputNamespace');
     });
 
     it('8.3 deberia encadenar nextStep siguiendo el orden de la topologia', async () => {
@@ -487,9 +473,9 @@ describe('useFlujoDraftStore · agregador del asistente', () => {
       // 2. Act & 3. Assert: la guarda vive en el store y no solo en el
       //    `:disable` del boton; guardar un flujo a medias dejaria en la BD un
       //    esquema que revienta en su primera ejecucion.
-      await expect(
-        draft.assembleAndSaveWorkflow('Flujo incompleto'),
-      ).rejects.toThrow(/sin configurar/);
+      await expect(draft.assembleAndSaveWorkflow('Flujo incompleto')).rejects.toThrow(
+        /sin configurar/,
+      );
       expect(createWorkflow).not.toHaveBeenCalled();
     });
 
@@ -498,9 +484,9 @@ describe('useFlujoDraftStore · agregador del asistente', () => {
       const draft = await buildSelectedDraft();
 
       // 2. Act & 3. Assert
-      await expect(
-        draft.assembleAndSaveWorkflow('Flujo incompleto'),
-      ).rejects.toThrow(/Disparador IMAP/);
+      await expect(draft.assembleAndSaveWorkflow('Flujo incompleto')).rejects.toThrow(
+        /Disparador IMAP/,
+      );
     });
 
     it('9.3 deberia enviar nombre, descripcion y esquema ensamblado', async () => {
@@ -521,9 +507,7 @@ describe('useFlujoDraftStore · agregador del asistente', () => {
         }),
       );
       const payload = createWorkflow.mock.calls[0]?.[0];
-      expect(payload?.pipelineSchema.nodes.trigger_imap?.nodeId).toBe(
-        'trigger_imap',
-      );
+      expect(payload?.pipelineSchema.nodes.trigger_imap?.nodeId).toBe('trigger_imap');
     });
 
     it('9.4 deberia omitir description cuando llega vacia', async () => {
@@ -538,9 +522,7 @@ describe('useFlujoDraftStore · agregador del asistente', () => {
 
       // 3. Assert: con `exactOptionalPropertyTypes` la clave se omite en vez de
       //    enviarse como `undefined`, que el DTO backend rechazaria.
-      expect(createWorkflow.mock.calls[0]?.[0]).not.toHaveProperty(
-        'description',
-      );
+      expect(createWorkflow.mock.calls[0]?.[0]).not.toHaveProperty('description');
     });
 
     it('9.5 deberia anadir el flujo creado al catalogo', async () => {
@@ -568,9 +550,7 @@ describe('useFlujoDraftStore · agregador del asistente', () => {
       createWorkflow.mockRejectedValue(new Error('400 Bad Request'));
 
       // 2. Act & 3. Assert
-      await expect(
-        draft.assembleAndSaveWorkflow('Notiweb v2'),
-      ).rejects.toThrow('400 Bad Request');
+      await expect(draft.assembleAndSaveWorkflow('Notiweb v2')).rejects.toThrow('400 Bad Request');
       expect(draft.isLoading).toBe(false);
     });
 

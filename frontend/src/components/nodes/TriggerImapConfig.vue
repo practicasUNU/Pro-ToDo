@@ -111,9 +111,7 @@ const onTestConnection = async (): Promise<void> => {
       </div>
 
       <div class="col-12 col-md-4">
-        <label class="pd-label" for="imap-port">
-          Puerto<span class="pd-required">*</span>
-        </label>
+        <label class="pd-label" for="imap-port"> Puerto<span class="pd-required">*</span> </label>
         <q-input
           id="imap-port"
           :model-value="store.config.port"
@@ -146,9 +144,7 @@ const onTestConnection = async (): Promise<void> => {
       </div>
 
       <div class="col-12 col-md-4">
-        <label class="pd-label" for="imap-mailbox">
-          Buzon<span class="pd-required">*</span>
-        </label>
+        <label class="pd-label" for="imap-mailbox"> Buzon<span class="pd-required">*</span> </label>
         <q-input
           id="imap-mailbox"
           :model-value="store.config.mailbox"

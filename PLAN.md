@@ -1541,8 +1541,8 @@ Rama: `feat/trigger-imap`. Tres frentes de corrección más un hallazgo de DI de
 es funcionalidad nueva.
 
 - [x] 0. Backend — `ConfigService` como import de valor en `ImapPollingService` (DI roto en arranque real)
-- [ ] 1. Frontend — mover `node-store-registry.ts` de `components/nodes/` a `stores/nodes/`
-- [ ] 2. Backend — reducir la sección IMAP de `.env.example` al secreto referenciado
+- [x] 1. Frontend — mover `node-store-registry.ts` de `components/nodes/` a `stores/nodes/`
+- [x] 2. Backend — reducir la sección IMAP de `.env.example` al secreto referenciado
 - [ ] 3a. Frontend — factoría de store por `nodeId` en los dos stores de nodo + contrato y registro
 - [ ] 3b. Frontend — propagación del `nodeId` y limpieza de stores en `resetDraft` / `selectPipeline`
 - [ ] 3c. Frontend — `nodeId` capturado en los dos configuradores y en el banco de pruebas

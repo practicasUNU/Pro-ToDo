@@ -2959,3 +2959,47 @@ necesita importarlo para que la inyección funcione — cuando el problema era e
 **Próximo paso:** objetivo 1 — mover `frontend/src/components/nodes/node-store-registry.ts` a
 `frontend/src/stores/nodes/node-store-registry.ts` y actualizar su único consumidor
 (`flujo-draft.store.ts:4`).
+
+### Pasos 1-2 completados — capa del registro de stores y depuración del `.env.example`
+
+| Archivo | Estado |
+|---|---|
+| `frontend/src/components/nodes/node-store-registry.ts` | movido a `frontend/src/stores/nodes/` |
+| `frontend/src/stores/flujo-draft.store.ts` | import actualizado a `@stores/nodes/node-store-registry` |
+| `backend/.env.example` | sección 4 reducida a `IMAP_UNUWARE_PASSWORD` |
+
+```
+Frontend → 108 pruebas · 6 archivos · vue-tsc limpio · eslint limpio · quasar build OK
+```
+
+**1. El registro de stores no pertenecía a `components/`.** No importa ni resuelve un solo `.vue`
+—solo stores— y su único consumidor es otro store, el agregador del borrador. §3.1 fija la ruta del
+registro de COMPONENTES (`components/nodes/node-config-registry.ts`), que sí resuelve componentes y se
+queda donde está; para su hermano de stores la capa la manda lo que resuelve, no con quién comparte
+nombre. Un solo consumidor a actualizar y ninguna spec importaba la ruta antigua.
+
+**2. Del entorno solo sale el secreto.** `IMAP_HOST`, `IMAP_PORT`, `IMAP_USER` e `IMAP_SECURE` eran
+residuo del modelo anterior a las credenciales híbridas: se comprobó que **ninguna línea de `src/` las
+lee** (las únicas claves IMAP que el código resuelve son `IMAP_POLLING_ENABLED` e
+`IMAP_RECONCILE_INTERVAL_MS`, de la sección 8). Mantenerlas en la plantilla enseñaba un modelo de
+configuración que el código ya no implementa, y era una invitación a que alguien las rellenase esperando
+que surtieran efecto. Host, puerto, usuario, buzón y periodo son configuración POR FLUJO y viven en el
+`params` jsonb del nodo; dos flujos pueden vigilar dos buzones distintos en el mismo despliegue.
+
+`IMAP_PASSWORD` se renombra a `IMAP_UNUWARE_PASSWORD` para que la plantilla muestre el patrón real
+(`IMAP_*PASSWORD`) con un nombre de buzón concreto en vez de un genérico que se lee como «la» clave
+IMAP del sistema. El bloque `SMTP_*` se conserva íntegro: lo consume `EmailService` para los OTP y sí es
+configuración del servidor.
+
+⚠️ **Acción manual pendiente del desarrollador:** renombrar `IMAP_PASSWORD` → `IMAP_UNUWARE_PASSWORD`
+en el `backend/.env` real y usar ese nombre en el campo `passwordEnvKey` del asistente. Editar `.env`
+exige reiniciar Nest.
+
+Nota de formato: `npm run lint` (prettier) reflowó a 100 columnas seis archivos creados en la tanda
+anterior de esta misma rama. Se conservan los reformateos —son los que el formateador del proyecto
+impone— a diferencia de `src/utils/violation-matcher.spec.ts`, que es ajeno a la rama y se revierte en
+cada ronda.
+
+**Próximo paso:** objetivo 3a — envolver el setup de `trigger-imap.store.ts` y `template-mapper.store.ts`
+en una factoría `defineStore(\`<id>:${nodeId}\`)` memoizada, y cambiar `NodeStoreHook` a
+`(nodeId: string) => NodeConfigStore` con `resetConfig` obligatorio en el contrato.

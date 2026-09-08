@@ -13,9 +13,7 @@ import type { CreateWorkflowPayload, PipelineSummary } from '@/types/pipeline';
  * llega como 400 con la lista de campos invalidos. Devuelve el resumen del flujo
  * creado, con la misma forma que el listado del catalogo.
  */
-export const createWorkflow = async (
-  payload: CreateWorkflowPayload,
-): Promise<PipelineSummary> => {
+export const createWorkflow = async (payload: CreateWorkflowPayload): Promise<PipelineSummary> => {
   const { data } = await api.post<PipelineSummary>('/workflows', payload);
   return data;
 };
