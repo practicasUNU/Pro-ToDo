@@ -2,7 +2,7 @@ import { defineStore, acceptHMRUpdate } from 'pinia';
 import { computed, ref } from 'vue';
 
 import { resolveNodeStore } from '@stores/nodes/node-store-registry';
-import * as pipelinesService from '@services/pipelines.service';
+import * as workflowTemplatesService from '@services/workflow-templates.service';
 import * as workflowsService from '@services/workflows.service';
 
 import { toWizardStep } from '@/types/pipeline';
@@ -12,6 +12,7 @@ import type {
   AssembledPipelineSchema,
   PipelineSummary,
   WizardStep,
+  WorkflowTemplateSummary,
 } from '@/types/pipeline';
 
 /**
@@ -30,8 +31,16 @@ import type {
 const INITIAL_SCHEMA_VERSION = '1.0.0';
 
 export const useFlujoDraftStore = defineStore('flujoDraft', () => {
-  const availablePipelines = ref<PipelineSummary[]>([]);
-  const selectedPipelineId = ref<string | null>(null);
+  /**
+   * Catalogo de blueprints del que parte el asistente.
+   *
+   * Antes de la migracion 010 esto eran FLUJOS ya instanciados: la Fase 0
+   * listaba los que tenian esquema y clonaba su topologia, asi que editar el
+   * flujo del que otros habian partido cambiaba la plantilla de facto. Ahora son
+   * plantillas maestras, que no se ejecutan nunca.
+   */
+  const availableTemplates = ref<WorkflowTemplateSummary[]>([]);
+  const selectedTemplateId = ref<string | null>(null);
   const pipelineTopology = ref<WizardStep[]>([]);
 
   /** Cursor del stepper: indice dentro de `pipelineTopology`. */
@@ -44,9 +53,9 @@ export const useFlujoDraftStore = defineStore('flujoDraft', () => {
     () => pipelineTopology.value[activeStep.value] ?? null,
   );
 
-  const selectedPipeline = computed<PipelineSummary | null>(
+  const selectedTemplate = computed<WorkflowTemplateSummary | null>(
     () =>
-      availablePipelines.value.find((pipeline) => pipeline.id === selectedPipelineId.value) ?? null,
+      availableTemplates.value.find((template) => template.id === selectedTemplateId.value) ?? null,
   );
 
   const isFirstStep = computed<boolean>(() => activeStep.value === 0);
@@ -88,34 +97,54 @@ export const useFlujoDraftStore = defineStore('flujoDraft', () => {
   const upstreamNamespaces = (stepIndex: number): string[] =>
     pipelineTopology.value.slice(0, Math.max(stepIndex, 0)).map((step) => step.outputNamespace);
 
-  const loadAvailablePipelines = async (): Promise<void> => {
+  /** Solo las plantillas disponibles: una retirada no se puede instanciar. */
+  const loadAvailableTemplates = async (): Promise<void> => {
     isLoading.value = true;
 
     try {
-      availablePipelines.value = await pipelinesService.fetchSelectablePipelines();
+      availableTemplates.value = await workflowTemplatesService.fetchWorkflowTemplates();
     } finally {
       isLoading.value = false;
     }
   };
 
   /**
-   * Fija el pipeline elegido y arranca el recorrido desde el primer paso.
+   * Fija la plantilla elegida y arranca el recorrido desde el primer paso.
+   *
+   * CLONADO INMUTABLE: cada paso del borrador se construye campo a campo, no
+   * por referencia. Sin esa copia, `pipelineTopology` compartiria objetos con
+   * `availableTemplates`, y cualquier retoque del borrador mutaria el catalogo
+   * en memoria: volver al selector mostraria una plantilla que ya no coincide
+   * con la fila de la base de datos, y elegirla de nuevo arrancaria desde el
+   * estado contaminado del intento anterior.
+   *
+   * Se copia campo a campo y NO con `structuredClone`, por dos razones: los
+   * elementos vienen envueltos en el Proxy reactivo de Vue y `structuredClone`
+   * lanza `DataCloneError` sobre un Proxy; y el literal explicito obliga al
+   * compilador a exigir aqui cualquier campo que `PipelineStep` gane en el
+   * futuro, en vez de copiarlo por referencia sin avisar.
    *
    * La topologia se toma del catalogo ya cargado en vez de pedirla otra vez: el
    * backend la devuelve completa y ordenada en el listado.
    */
-  const selectPipeline = (pipelineId: string): void => {
-    const pipeline = availablePipelines.value.find((candidate) => candidate.id === pipelineId);
+  const selectTemplate = (templateId: string): void => {
+    const template = availableTemplates.value.find((candidate) => candidate.id === templateId);
 
-    if (pipeline === undefined) return;
+    if (template === undefined) return;
 
     // La topologia anterior deja de existir, y sus stores no deben sobrevivirle:
-    // sin esto, cambiar de pipeline arrastraria la configuracion de un nodo que
+    // sin esto, cambiar de plantilla arrastraria la configuracion de un nodo que
     // el flujo nuevo ni siquiera contiene.
     resetNodeStores();
 
-    selectedPipelineId.value = pipelineId;
-    pipelineTopology.value = pipeline.topology.map(toWizardStep);
+    selectedTemplateId.value = templateId;
+    pipelineTopology.value = template.topology.map((step) =>
+      toWizardStep({
+        nodeId: step.nodeId,
+        nodeType: step.nodeType,
+        outputNamespace: step.outputNamespace,
+      }),
+    );
     activeStep.value = 0;
 
     // En cuanto hay topologia, cada nodo debe conocer su contrato aguas arriba:
@@ -214,9 +243,9 @@ export const useFlujoDraftStore = defineStore('flujoDraft', () => {
 
     return {
       // El backend ignora este `flowId` y asigna el de la fila que crea; viaja
-      // porque `PipelineSchemaDto` lo exige y el pipeline de origen es la
+      // porque `PipelineSchemaDto` lo exige y la plantilla de origen es la
       // referencia mas honesta hasta que exista la fila nueva.
-      flowId: selectedPipelineId.value ?? '',
+      flowId: selectedTemplateId.value ?? '',
       name,
       version: INITIAL_SCHEMA_VERSION,
       entrypoint: pipelineTopology.value[0]?.nodeId ?? '',
@@ -260,11 +289,11 @@ export const useFlujoDraftStore = defineStore('flujoDraft', () => {
           ? { description: description.trim() }
           : {}),
         pipelineSchema: assemblePipelineSchema(name),
+        // Trazabilidad de la procedencia. El grafo viaja COPIADO en
+        // `pipelineSchema`, asi que editar la plantilla despues no altera este
+        // flujo. La clave se omite si el flujo no parte de ninguna.
+        ...(selectedTemplateId.value !== null ? { templateId: selectedTemplateId.value } : {}),
       });
-
-      // El catalogo queda obsoleto en cuanto se crea un flujo: refrescarlo aqui
-      // evita que volver al selector muestre una lista sin el recien creado.
-      availablePipelines.value = [created, ...availablePipelines.value];
 
       return created;
     } finally {
@@ -294,19 +323,19 @@ export const useFlujoDraftStore = defineStore('flujoDraft', () => {
   const resetDraft = (): void => {
     resetNodeStores();
 
-    selectedPipelineId.value = null;
+    selectedTemplateId.value = null;
     pipelineTopology.value = [];
     activeStep.value = 0;
   };
 
   return {
-    availablePipelines,
-    selectedPipelineId,
+    availableTemplates,
+    selectedTemplateId,
     pipelineTopology,
     activeStep,
     isLoading,
     activeStepDefinition,
-    selectedPipeline,
+    selectedTemplate,
     isFirstStep,
     isLastStep,
     isActiveStepValid,
@@ -317,8 +346,8 @@ export const useFlujoDraftStore = defineStore('flujoDraft', () => {
     assemblePipelineSchema,
     assembleAndSaveWorkflow,
     resetNodeStores,
-    loadAvailablePipelines,
-    selectPipeline,
+    loadAvailableTemplates,
+    selectTemplate,
     goToNextStep,
     goToPreviousStep,
     resetDraft,

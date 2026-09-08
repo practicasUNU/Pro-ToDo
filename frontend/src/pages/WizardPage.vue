@@ -33,8 +33,8 @@ const form = reactive<{ name: string; description: string }>({
   description: '',
 });
 
-/** Fase 0 mientras no haya pipeline elegido; Fase 1..N en cuanto lo hay. */
-const isSelectingPipeline = computed<boolean>(() => draftStore.selectedPipelineId === null);
+/** Fase 0 mientras no haya plantilla elegida; Fase 1..N en cuanto la hay. */
+const isSelectingTemplate = computed<boolean>(() => draftStore.selectedTemplateId === null);
 
 /**
  * Configurador del paso indicado, o `null` si su tipo aun no tiene uno.
@@ -46,19 +46,19 @@ const isSelectingPipeline = computed<boolean>(() => draftStore.selectedPipelineI
 const resolveStepComponent = (step: WizardStep): Component | null =>
   nodeConfigRegistry[step.nodeType] ?? null;
 
-const loadPipelines = async (): Promise<void> => {
+const loadTemplates = async (): Promise<void> => {
   try {
-    await draftStore.loadAvailablePipelines();
+    await draftStore.loadAvailableTemplates();
   } catch (error) {
     $q.notify({
       type: 'negative',
-      message: extractApiErrorMessage(error, 'No se pudieron cargar los pipelines'),
+      message: extractApiErrorMessage(error, 'No se pudieron cargar las plantillas'),
     });
   }
 };
 
-const onSelectPipeline = (pipelineId: string): void => {
-  draftStore.selectPipeline(pipelineId);
+const onSelectTemplate = (templateId: string): void => {
+  draftStore.selectTemplate(templateId);
 };
 
 const onBackToSelector = (): void => {
@@ -87,7 +87,9 @@ const onSaveWorkflow = async (): Promise<void> => {
     form.name = '';
     form.description = '';
 
-    await router.push('/');
+    // A `/flujos` y no a la portada: ahi aparece el flujo recien creado y ahi
+    // esta el toggle con el que se habilita.
+    await router.push('/flujos');
   } catch (error) {
     $q.notify({
       type: 'negative',
@@ -96,22 +98,22 @@ const onSaveWorkflow = async (): Promise<void> => {
   }
 };
 
-onMounted(loadPipelines);
+onMounted(loadTemplates);
 </script>
 
 <template>
   <q-page class="pd-page q-pa-md">
     <PipelineSelector
-      v-if="isSelectingPipeline"
-      :pipelines="draftStore.availablePipelines"
+      v-if="isSelectingTemplate"
+      :templates="draftStore.availableTemplates"
       :is-loading="draftStore.isLoading"
-      @select="onSelectPipeline"
+      @select="onSelectTemplate"
     />
 
     <section v-else>
       <div class="row items-center no-wrap q-gutter-sm q-mb-md">
         <div>
-          <h1 class="pd-h1 q-mb-none">{{ draftStore.selectedPipeline?.name }}</h1>
+          <h1 class="pd-h1 q-mb-none">{{ draftStore.selectedTemplate?.name }}</h1>
           <p class="pd-subtitle q-mb-none">
             Paso {{ draftStore.activeStep + 1 }} de {{ reviewStepIndex + 1 }}
             <span v-if="isReviewStep"> · revision final</span>
@@ -122,7 +124,7 @@ onMounted(loadPipelines);
           flat
           no-caps
           class="pd-btn-secondary"
-          label="Cambiar pipeline"
+          label="Cambiar plantilla"
           icon="arrow_back"
           @click="onBackToSelector"
         />

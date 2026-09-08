@@ -50,14 +50,76 @@ export interface PipelineStep {
   readonly outputNamespace: string;
 }
 
-/** Flujo seleccionable como plantilla en la Fase 0 del asistente. */
+/**
+ * Flujo YA INSTANCIADO, tal como lo devuelve `GET /api/workflows`.
+ *
+ * Replica de `PipelineSummaryResponseDto`. Es lo que pinta el catalogo de
+ * `/flujos`; el selector del asistente NO lo consume: desde la migracion 010
+ * parte de `WorkflowTemplateSummary`, que son los blueprints maestros.
+ */
 export interface PipelineSummary {
   readonly id: string;
   readonly name: string;
   readonly description: string | null;
   readonly active: boolean;
+  /** Plantilla de la que se instancio, o `null` si nacio desde cero. */
+  readonly templateId: string | null;
   /** Pasos EN ORDEN DE EJECUCION, ya resueltos por el backend. */
   readonly topology: PipelineStep[];
+}
+
+/**
+ * Plantilla de flujo (blueprint maestro) del catalogo `plantillas_flujo`.
+ *
+ * Replica de `WorkflowTemplateResponseDto`. Es la fuente de la Fase 0 del
+ * asistente y de la tabla administrativa. NO trae `pipelineSchema`: los `params`
+ * de un TRIGGER_IMAP llevan `host` y `passwordEnvKey`, y para dibujar la
+ * secuencia de pasos basta la topologia proyectada.
+ */
+export interface WorkflowTemplateSummary {
+  readonly id: string;
+  readonly name: string;
+  readonly description: string | null;
+  readonly active: boolean;
+  readonly topology: PipelineStep[];
+}
+
+/**
+ * Plantilla con su grafo completo, para el editor administrativo.
+ *
+ * Replica de `WorkflowTemplateDetailResponseDto`. Solo la devuelve
+ * `GET /api/workflow-templates/:id`, porque es el objeto que el CRUD edita.
+ */
+export interface WorkflowTemplateDetail extends WorkflowTemplateSummary {
+  readonly pipelineSchema: Record<string, unknown>;
+}
+
+/** Cuerpo de `POST /api/workflow-templates`. */
+export interface CreateWorkflowTemplatePayload {
+  readonly name: string;
+  readonly description?: string;
+  readonly pipelineSchema: Record<string, unknown>;
+  readonly active?: boolean;
+}
+
+/**
+ * Cuerpo de `PUT /api/workflow-templates/:id`.
+ *
+ * Todos los campos opcionales: un solo verbo cubre editar, activar e inactivar.
+ */
+export type UpdateWorkflowTemplatePayload = Partial<CreateWorkflowTemplatePayload>;
+
+/**
+ * Cuerpo de `PATCH /api/workflows/:id`.
+ *
+ * NO incluye `templateId`, y no es una omision: el maestro del que nacio un
+ * flujo es un hecho historico y el backend rechaza reescribirlo.
+ */
+export interface UpdateWorkflowPayload {
+  readonly name?: string;
+  readonly description?: string;
+  readonly active?: boolean;
+  readonly pipelineSchema?: AssembledPipelineSchema;
 }
 
 /**
@@ -133,6 +195,13 @@ export interface CreateWorkflowPayload {
   readonly description?: string;
   readonly pipelineSchema: AssembledPipelineSchema;
   readonly active?: boolean;
+  /**
+   * Plantilla de la que parte el flujo.
+   *
+   * Solo trazabilidad: el flujo viaja con su PROPIA copia del grafo en
+   * `pipelineSchema`, asi que editar la plantilla despues no lo altera.
+   */
+  readonly templateId?: string;
 }
 
 /** Nodo del `pipeline_schema` tal como lo ensambla el asistente. */

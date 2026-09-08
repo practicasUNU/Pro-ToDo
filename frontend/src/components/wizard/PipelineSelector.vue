@@ -1,17 +1,24 @@
 <script setup lang="ts">
 import { NODE_TYPE_LABELS } from '@/types/pipeline';
 
-import type { PipelineSummary } from '@/types/pipeline';
+import type { WorkflowTemplateSummary } from '@/types/pipeline';
 
 interface Props {
-  pipelines: PipelineSummary[];
+  /**
+   * Blueprints disponibles.
+   *
+   * Son PLANTILLAS y no flujos instanciados: hasta la migracion 010 el selector
+   * partia de `flujos`, lo que hacia que el maestro y la instancia fuesen la
+   * misma fila.
+   */
+  templates: WorkflowTemplateSummary[];
   isLoading: boolean;
 }
 
 const props = defineProps<Props>();
 
 const emit = defineEmits<{
-  select: [pipelineId: string];
+  select: [templateId: string];
 }>();
 
 /**
@@ -21,61 +28,69 @@ const emit = defineEmits<{
  * Se recorta a los tres primeros: la tarjeta es un adelanto, no el diagrama de
  * topologia (que es la vista `/flujos/:id`, de solo lectura).
  */
-const previewSteps = (pipeline: PipelineSummary): string =>
-  pipeline.topology
+const previewSteps = (template: WorkflowTemplateSummary): string =>
+  template.topology
     .slice(0, 3)
     .map((step) => NODE_TYPE_LABELS[step.nodeType])
-    .join(' → ') + (pipeline.topology.length > 3 ? ' → …' : '');
+    .join(' → ') + (template.topology.length > 3 ? ' → …' : '');
 </script>
 
 <template>
   <section>
     <h1 class="pd-h1">Nuevo flujo</h1>
     <p class="pd-subtitle q-mb-lg">
-      Elige el pipeline del que partir. Cada uno define su propia secuencia de nodos y el asistente
-      te guiara paso a paso para configurarlos.
+      Elige la plantilla de la que partir. Cada una define una secuencia de nodos y el asistente te
+      guiara paso a paso para configurarlos. Tu flujo se queda con una copia propia: editar la
+      plantilla despues no lo altera.
     </p>
 
     <div v-if="props.isLoading" class="row justify-center q-py-xl">
       <q-spinner size="32px" color="primary" />
     </div>
 
-    <!-- Estado vacio explicito: sin esto, un catalogo sin flujos configurados
-         dejaria la vista en blanco y parecería un fallo de carga. -->
-    <div v-else-if="props.pipelines.length === 0" class="pd-card q-pa-lg text-center">
+    <!-- Estado vacio explicito Y CON SALIDA: sin el enlace al catalogo, un
+         operador que llega antes de que exista ninguna plantilla se queda sin
+         saber que hacer, y la vista en blanco parece un fallo de carga. -->
+    <div v-else-if="props.templates.length === 0" class="pd-card q-pa-lg text-center">
       <span class="pd-icon-circle q-mb-sm">
         <q-icon name="account_tree" size="20px" class="pd-empty-icon" />
       </span>
-      <div class="pd-h2">No hay pipelines configurados</div>
-      <p class="pd-subtitle q-mt-sm q-mb-none">
-        Solo aparecen aqui los flujos que ya tienen una configuracion de pipeline guardada.
+      <div class="pd-h2">No hay plantillas disponibles</div>
+      <p class="pd-subtitle q-mt-sm q-mb-md">
+        Un flujo se crea siempre a partir de una plantilla. Define la primera en el catalogo de
+        plantillas de flujo.
       </p>
+      <q-btn
+        class="pd-btn-primary"
+        unelevated
+        no-caps
+        label="Ir a Plantillas de Flujo"
+        icon-right="north_east"
+        to="/plantillas-flujo"
+      />
     </div>
 
     <div v-else class="row q-col-gutter-md">
-      <div v-for="pipeline in props.pipelines" :key="pipeline.id" class="col-12 col-md-6 col-lg-4">
-        <q-card class="pd-card pd-pipeline-card" flat @click="emit('select', pipeline.id)">
+      <div v-for="template in props.templates" :key="template.id" class="col-12 col-md-6 col-lg-4">
+        <q-card class="pd-card pd-pipeline-card" flat @click="emit('select', template.id)">
           <div class="pd-pipeline-card__banner">
             <q-icon name="account_tree" size="22px" />
           </div>
 
           <q-card-section>
             <div class="row items-center no-wrap q-gutter-xs">
-              <div class="pd-h2 ellipsis">{{ pipeline.name }}</div>
+              <div class="pd-h2 ellipsis">{{ template.name }}</div>
               <q-space />
-              <q-badge
-                class="pd-badge"
-                :class="pipeline.active ? 'pd-badge--active' : 'pd-badge--inactive'"
-              >
-                {{ pipeline.active ? 'Activo' : 'Inactivo' }}
+              <q-badge class="pd-badge pd-badge--active">
+                {{ template.topology.length }} nodos
               </q-badge>
             </div>
 
             <p class="pd-subtitle q-mt-xs q-mb-sm">
-              {{ pipeline.description ?? 'Sin descripcion' }}
+              {{ template.description ?? 'Sin descripcion' }}
             </p>
 
-            <div class="pd-mono pd-pipeline-card__steps">{{ previewSteps(pipeline) }}</div>
+            <div class="pd-mono pd-pipeline-card__steps">{{ previewSteps(template) }}</div>
           </q-card-section>
 
           <q-card-actions align="right" class="q-px-md q-pb-md q-pt-none">
@@ -85,7 +100,7 @@ const previewSteps = (pipeline: PipelineSummary): string =>
               no-caps
               label="Configurar"
               icon-right="north_east"
-              @click.stop="emit('select', pipeline.id)"
+              @click.stop="emit('select', template.id)"
             />
           </q-card-actions>
         </q-card>

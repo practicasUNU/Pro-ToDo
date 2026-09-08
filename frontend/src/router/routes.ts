@@ -36,10 +36,26 @@ const routes: RouteRecordRaw[] = [
         // Configurar plantillas es operacion de flujos, no gestion de cuentas.
       },
       {
+        path: 'flujos',
+        component: () => import('@/pages/workflows/WorkflowsPage.vue'),
+        // SIN requiresAdmin: WorkflowsController admite @Roles(ADMIN, EDITOR).
+        // Operar flujos es operacion, no gestion de cuentas.
+      },
+      {
         path: 'flujos/nuevo',
         component: () => import('@/pages/WizardPage.vue'),
-        // SIN requiresAdmin: WorkflowsController admite @Roles(ADMIN, EDITOR).
-        // Configurar flujos es operacion, no gestion de cuentas.
+        // SIN requiresAdmin: idem. Se declara DESPUES de 'flujos' por claridad;
+        // vue-router resuelve por especificidad y no por orden en rutas
+        // estaticas, asi que no hay riesgo de que una capture a la otra.
+      },
+      {
+        path: 'plantillas-flujo',
+        component: () => import('@/pages/workflow-templates/WorkflowTemplatesPage.vue'),
+        // SIN requiresAdmin a proposito, aunque las ESCRITURAS del backend sean
+        // solo de ADMIN: un EDITOR necesita consultar el catalogo para saber de
+        // que puede partir. El 403 en el alta y la edicion lo impone el
+        // servidor, que es la autoridad; bloquear la ruta entera le ocultaria
+        // informacion que si puede ver.
       },
       {
         path: 'nodos/config-sandbox',

@@ -3361,3 +3361,83 @@ instanciarlas vaciaría de sentido el borrado lógico.
 `pipelines.service.ts` en `workflows.service.ts`, tres stores (`workflow-templates`, `workflows` y el
 refactor de `flujo-draft` con clonado inmutable), las vistas `/flujos` y `/plantillas-flujo`, router,
 `MainLayout` y las pruebas de Vitest.
+
+### Paso 4 completado — frontend: catálogo de flujos, CRUD de plantillas y asistente repuntado
+
+| Archivo | Estado |
+|---|---|
+| `frontend/src/types/pipeline.ts` | `WorkflowTemplateSummary`/`Detail`, payloads y `templateId` |
+| `frontend/src/services/workflow-templates.service.ts` | creado |
+| `frontend/src/services/workflows.service.ts` | absorbe `fetchWorkflows` + `updateWorkflow` |
+| `frontend/src/services/pipelines.service.ts` | **eliminado** |
+| `frontend/src/stores/workflow-templates.store.ts` | creado |
+| `frontend/src/stores/workflows.store.ts` | creado |
+| `frontend/src/stores/flujo-draft.store.ts` | parte de plantillas, con clonado inmutable |
+| `frontend/src/components/workflows/WorkflowsManager.vue` · `WorkflowDialog.vue` | creados |
+| `frontend/src/components/workflow-templates/WorkflowTemplatesManager.vue` · `WorkflowTemplateDialog.vue` | creados |
+| `frontend/src/pages/workflows/WorkflowsPage.vue` · `workflow-templates/WorkflowTemplatesPage.vue` | creados |
+| `frontend/src/components/wizard/PipelineSelector.vue` | recibe `templates`, estado vacío con salida |
+| `frontend/src/pages/WizardPage.vue` | Fase 0 desde plantillas; tras guardar va a `/flujos` |
+| `frontend/src/router/routes.ts` · `layouts/MainLayout.vue` | dos rutas, drawer y migas |
+| `frontend/src/stores/flujo-draft.store.spec.ts` | adaptada + bloques 11-12 |
+| `frontend/src/stores/workflow-templates.store.spec.ts` · `workflows.store.spec.ts` | creadas |
+
+```
+Backend   → 443 pruebas · 25 suites · tsc limpio · eslint 0 errores
+Frontend  → 149 pruebas (antes 113) · 8 archivos · vue-tsc limpio · eslint limpio · quasar build OK
+```
+
+### El «por qué» de cinco decisiones
+
+**1. `pipelines.service.ts` se elimina, no se deja como alias.** Apuntaba a la MISMA ruta `/workflows`
+que `workflows.service.ts`. `frontend-architecture.md` §1 fija un servicio por dominio, y tener dos fue
+literalmente la grieta por la que el asistente acabó leyendo flujos instanciados donde debía leer
+plantillas maestras: el nombre `fetchSelectablePipelines` sonaba a catálogo de blueprints y devolvía
+instancias. Conservar el archivo habría dejado el mismo malentendido a mano del siguiente.
+
+**2. El clonado inmutable se hace campo a campo, no con `structuredClone`.** Fue el intento inicial y
+**falla en ejecución**: los elementos de `availableTemplates` vienen envueltos en el Proxy reactivo de
+Vue, y `structuredClone` lanza `DataCloneError` sobre un Proxy. Lo detectaron las 37 pruebas del
+borrador al ponerse rojas de golpe. La copia explícita (`{ nodeId, nodeType, outputNamespace }`) es
+además mejor que el clon genérico: el literal obliga al compilador a exigir aquí cualquier campo que
+`PipelineStep` gane en el futuro, en vez de copiarlo por referencia sin avisar.
+
+Las pruebas 11.1-11.3 fijan las tres consecuencias: objetos distintos con los mismos valores, mutar el
+borrador no toca el catálogo, y reelegir la misma plantilla arranca de ella intacta y no del recorte
+anterior.
+
+**3. La prueba 9.5 cambia de sentido, no se borra.** Antes verificaba que el flujo creado se añadía al
+catálogo del asistente. Ahora verifica lo contrario: que **no** se añade, porque ese catálogo son
+plantillas y colar ahí una instancia la ofrecería como blueprint — exactamente el error que esta entrega
+corrige. El flujo se devuelve al llamante, que navega a `/flujos`.
+
+**4. `/plantillas-flujo` no lleva `requiresAdmin`, aunque las escrituras del backend sí sean de ADMIN.**
+Un EDITOR necesita consultar el catálogo para saber de qué puede partir; el 403 en el alta y la edición
+lo impone el servidor, que es la autoridad. Bloquear la ruta entera le ocultaría información que sí
+puede ver, y duplicaría en el router una regla que ya vive en el controlador.
+
+**5. Activar va por interruptor; desactivar pasa por el temporizador de 5 s.** Habilitar un flujo no
+destruye nada y el backend ya lo rechaza si el esquema no es íntegro, así que el `QToggle` basta.
+Desactivar corta la ingesta de un flujo en marcha, y eso es una acción crítica: `SafeDeleteModal` con su
+cuenta atrás (`frontend-quasar.md` §4). El store escribe siempre la **respuesta del servidor** y no un
+parche optimista: activar puede fallar con un 400, y pintar el interruptor en verde antes de saberlo
+mentiría sobre el estado real del flujo (prueba 3.3 de `workflows.store.spec.ts`).
+
+El editor de plantillas valida el JSON en el cliente solo en cuanto a FORMA (que parsee y sea un
+objeto). La coherencia del grafo la decide `PipelineValidatorService`, que es la única autoridad sobre la
+topología; comprobar la sintaxis aquí solo evita gastar una petición en un 400 seguro.
+
+### Pendientes
+
+- [ ] **Aplicar `db/migrations/009-tokens-sesion.sql` y `010-plantillas-flujo.sql`.** Las ejecuta el
+      usuario. Hasta la 009 el login falla; hasta la 010 falla cualquier consulta de flujos o
+      plantillas. Nada se ha ejecutado contra PostgreSQL.
+- [ ] **Sembrar la primera plantilla de flujo.** Hasta que exista una, el asistente muestra su estado
+      vacío con el enlace a `/plantillas-flujo`. La topología de Notiweb de 7 nodos está en
+      `pipeline-validator.service.spec.ts:15`.
+- [ ] Solo 2 de los 7 tipos de nodo tienen configurador (`TRIGGER_IMAP`, `MAPEADOR_PLANTILLA`), así que
+      una plantilla que incluya cualquiera de los otros cinco no se puede completar en el asistente.
+- [ ] El disparo sigue siendo en proceso, no encolado (`architecture-patterns.md` §5 pide BullMQ).
+- [ ] `host` sin lista blanca en el nodo IMAP.
+- [ ] 26 errores de tipo preexistentes en dos specs bajo `tsconfig.json` (varianza de mocks de TypeORM);
+      la puerta del proyecto es `tsconfig.build.json`, que excluye specs.

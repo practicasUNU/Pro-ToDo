@@ -8,11 +8,11 @@ import { useFlujoDraftStore } from './flujo-draft.store';
 
 import { NodeType } from '@/types/pipeline';
 
-import type { PipelineSummary } from '@/types/pipeline';
+import type { PipelineSummary, WorkflowTemplateSummary } from '@/types/pipeline';
 
 // Sin esto se cargaria `@boot/axios`, que necesita entorno de navegador.
-vi.mock('@services/pipelines.service', () => ({
-  fetchSelectablePipelines: vi.fn(),
+vi.mock('@services/workflow-templates.service', () => ({
+  fetchWorkflowTemplates: vi.fn(),
 }));
 vi.mock('@services/workflows.service', () => ({
   createWorkflow: vi.fn(),
@@ -25,14 +25,14 @@ vi.mock('@services/nodes/template-mapper.service', () => ({
   compilePreview: vi.fn(),
 }));
 
-const pipelinesService = await import('@services/pipelines.service');
-const fetchSelectablePipelines = vi.mocked(pipelinesService.fetchSelectablePipelines);
+const workflowTemplatesService = await import('@services/workflow-templates.service');
+const fetchWorkflowTemplates = vi.mocked(workflowTemplatesService.fetchWorkflowTemplates);
 
 const workflowsService = await import('@services/workflows.service');
 const createWorkflow = vi.mocked(workflowsService.createWorkflow);
 
-const PIPELINE_ID = 'b3f1c2d4-5a6b-4c7d-8e9f-0a1b2c3d4e5f';
-const OTHER_PIPELINE_ID = 'c4a2d3e5-6f7b-4c8d-9e0f-1a2b3c4d5e6f';
+const TEMPLATE_ID = 'b3f1c2d4-5a6b-4c7d-8e9f-0a1b2c3d4e5f';
+const OTHER_TEMPLATE_ID = 'c4a2d3e5-6f7b-4c8d-9e0f-1a2b3c4d5e6f';
 
 // `nodeId` de la topologia de prueba. Los stores de nodo se instancian POR
 // `nodeId`, asi que una prueba que resuelva el store con otro identificador
@@ -41,9 +41,11 @@ const TRIGGER_NODE_ID = 'trigger_imap';
 const PARSER_NODE_ID = 'nodo_parser';
 const MAPPER_NODE_ID = 'nodo_mapeador';
 
-/** Pipeline de tres pasos: trigger -> parser -> mapeador. */
-const buildPipeline = (overrides: Partial<PipelineSummary> = {}): PipelineSummary => ({
-  id: PIPELINE_ID,
+/** Plantilla de tres pasos: trigger -> parser -> mapeador. */
+const buildTemplate = (
+  overrides: Partial<WorkflowTemplateSummary> = {},
+): WorkflowTemplateSummary => ({
+  id: TEMPLATE_ID,
   name: 'Notiweb - publicacion automatica',
   description: 'Publica noticias entrantes en el CMS',
   active: true,
@@ -67,12 +69,29 @@ const buildPipeline = (overrides: Partial<PipelineSummary> = {}): PipelineSummar
   ...overrides,
 });
 
+/**
+ * Flujo ya instanciado, tal como lo devuelve `POST /api/workflows`.
+ *
+ * Distinto del de la plantilla y no por capricho: un flujo lleva `templateId`
+ * —la procedencia— y una plantilla no. Reutilizar un solo fixture ocultaria
+ * justo la frontera que esta entrega establece.
+ */
+const buildWorkflow = (overrides: Partial<PipelineSummary> = {}): PipelineSummary => ({
+  id: 'f1e2d3c4-b5a6-4978-8a9b-0c1d2e3f4a5b',
+  name: 'Notiweb - publicacion automatica',
+  description: 'Publica noticias entrantes en el CMS',
+  active: false,
+  templateId: TEMPLATE_ID,
+  topology: [],
+  ...overrides,
+});
+
 /** Borrador con el catalogo cargado y un pipeline ya elegido. */
 const buildSelectedDraft = async (): Promise<ReturnType<typeof useFlujoDraftStore>> => {
   const draft = useFlujoDraftStore();
-  fetchSelectablePipelines.mockResolvedValue([buildPipeline()]);
-  await draft.loadAvailablePipelines();
-  draft.selectPipeline(PIPELINE_ID);
+  fetchWorkflowTemplates.mockResolvedValue([buildTemplate()]);
+  await draft.loadAvailableTemplates();
+  draft.selectTemplate(TEMPLATE_ID);
 
   return draft;
 };
@@ -104,24 +123,24 @@ describe('useFlujoDraftStore · agregador del asistente', () => {
     it('1.1 deberia cargar los pipelines seleccionables', async () => {
       // 1. Arrange
       const draft = useFlujoDraftStore();
-      fetchSelectablePipelines.mockResolvedValue([buildPipeline()]);
+      fetchWorkflowTemplates.mockResolvedValue([buildTemplate()]);
 
       // 2. Act
-      await draft.loadAvailablePipelines();
+      await draft.loadAvailableTemplates();
 
       // 3. Assert
-      expect(draft.availablePipelines).toHaveLength(1);
+      expect(draft.availableTemplates).toHaveLength(1);
       expect(draft.isLoading).toBe(false);
     });
 
     it('1.2 deberia apagar isLoading aunque el servicio lance', async () => {
       // 1. Arrange
       const draft = useFlujoDraftStore();
-      fetchSelectablePipelines.mockRejectedValue(new Error('500'));
+      fetchWorkflowTemplates.mockRejectedValue(new Error('500'));
 
       // 2. Act & 3. Assert: el error sube al componente, pero el `finally` deja
       //    el indicador apagado.
-      await expect(draft.loadAvailablePipelines()).rejects.toThrow('500');
+      await expect(draft.loadAvailableTemplates()).rejects.toThrow('500');
       expect(draft.isLoading).toBe(false);
     });
   });
@@ -132,7 +151,7 @@ describe('useFlujoDraftStore · agregador del asistente', () => {
       const draft = await buildSelectedDraft();
 
       // 3. Assert
-      expect(draft.selectedPipelineId).toBe(PIPELINE_ID);
+      expect(draft.selectedTemplateId).toBe(TEMPLATE_ID);
       expect(draft.pipelineTopology).toHaveLength(3);
       expect(draft.activeStep).toBe(0);
     });
@@ -161,22 +180,22 @@ describe('useFlujoDraftStore · agregador del asistente', () => {
     it('2.4 deberia resetear el cursor al cambiar de pipeline', async () => {
       // 1. Arrange
       const draft = useFlujoDraftStore();
-      fetchSelectablePipelines.mockResolvedValue([
-        buildPipeline(),
-        buildPipeline({ id: OTHER_PIPELINE_ID, name: 'Otro flujo' }),
+      fetchWorkflowTemplates.mockResolvedValue([
+        buildTemplate(),
+        buildTemplate({ id: OTHER_TEMPLATE_ID, name: 'Otro flujo' }),
       ]);
-      await draft.loadAvailablePipelines();
-      draft.selectPipeline(PIPELINE_ID);
+      await draft.loadAvailableTemplates();
+      draft.selectTemplate(TEMPLATE_ID);
       verifyTriggerStore();
       draft.goToNextStep();
       expect(draft.activeStep).toBe(1);
 
       // 2. Act
-      draft.selectPipeline(OTHER_PIPELINE_ID);
+      draft.selectTemplate(OTHER_TEMPLATE_ID);
 
       // 3. Assert: arrastrar el cursor mostraria el paso 2 de un flujo distinto.
       expect(draft.activeStep).toBe(0);
-      expect(draft.selectedPipelineId).toBe(OTHER_PIPELINE_ID);
+      expect(draft.selectedTemplateId).toBe(OTHER_TEMPLATE_ID);
     });
 
     it('2.5 deberia ignorar un pipelineId que no esta en el catalogo', async () => {
@@ -184,10 +203,10 @@ describe('useFlujoDraftStore · agregador del asistente', () => {
       const draft = await buildSelectedDraft();
 
       // 2. Act
-      draft.selectPipeline('id-inexistente');
+      draft.selectTemplate('id-inexistente');
 
       // 3. Assert
-      expect(draft.selectedPipelineId).toBe(PIPELINE_ID);
+      expect(draft.selectedTemplateId).toBe(TEMPLATE_ID);
     });
   });
 
@@ -337,7 +356,7 @@ describe('useFlujoDraftStore · agregador del asistente', () => {
       draft.resetDraft();
 
       // 3. Assert
-      expect(draft.selectedPipelineId).toBeNull();
+      expect(draft.selectedTemplateId).toBeNull();
       expect(draft.pipelineTopology).toEqual([]);
       expect(draft.activeStep).toBe(0);
     });
@@ -350,7 +369,7 @@ describe('useFlujoDraftStore · agregador del asistente', () => {
       draft.resetDraft();
 
       // 3. Assert: volver al selector no debe obligar a otra peticion HTTP.
-      expect(draft.availablePipelines).toHaveLength(1);
+      expect(draft.availableTemplates).toHaveLength(1);
     });
   });
 
@@ -378,8 +397,8 @@ describe('useFlujoDraftStore · agregador del asistente', () => {
     it('7.3 deberia recalcular al cambiar de pipeline', async () => {
       // 1. Arrange
       const draft = useFlujoDraftStore();
-      const shortPipeline = buildPipeline({
-        id: OTHER_PIPELINE_ID,
+      const shortPipeline = buildTemplate({
+        id: OTHER_TEMPLATE_ID,
         topology: [
           {
             nodeId: MAPPER_NODE_ID,
@@ -388,12 +407,12 @@ describe('useFlujoDraftStore · agregador del asistente', () => {
           },
         ],
       });
-      fetchSelectablePipelines.mockResolvedValue([buildPipeline(), shortPipeline]);
-      await draft.loadAvailablePipelines();
-      draft.selectPipeline(PIPELINE_ID);
+      fetchWorkflowTemplates.mockResolvedValue([buildTemplate(), shortPipeline]);
+      await draft.loadAvailableTemplates();
+      draft.selectTemplate(TEMPLATE_ID);
 
       // 2. Act
-      draft.selectPipeline(OTHER_PIPELINE_ID);
+      draft.selectTemplate(OTHER_TEMPLATE_ID);
 
       // 3. Assert: en el pipeline corto el mapeador es el primero, asi que no
       //    tiene nada aguas arriba. Arrastrar la lista anterior le haria creer
@@ -507,7 +526,7 @@ describe('useFlujoDraftStore · agregador del asistente', () => {
       const draft = await buildSelectedDraft();
       draft.pipelineTopology = [draft.pipelineTopology[0]!];
       verifyTriggerStore();
-      createWorkflow.mockResolvedValue(buildPipeline({ id: 'nuevo-id' }));
+      createWorkflow.mockResolvedValue(buildWorkflow({ id: 'nuevo-id' }));
 
       // 2. Act
       await draft.assembleAndSaveWorkflow('Notiweb v2', '  Con espacios  ');
@@ -528,7 +547,7 @@ describe('useFlujoDraftStore · agregador del asistente', () => {
       const draft = await buildSelectedDraft();
       draft.pipelineTopology = [draft.pipelineTopology[0]!];
       verifyTriggerStore();
-      createWorkflow.mockResolvedValue(buildPipeline());
+      createWorkflow.mockResolvedValue(buildWorkflow());
 
       // 2. Act
       await draft.assembleAndSaveWorkflow('Notiweb v2', '   ');
@@ -538,21 +557,23 @@ describe('useFlujoDraftStore · agregador del asistente', () => {
       expect(createWorkflow.mock.calls[0]?.[0]).not.toHaveProperty('description');
     });
 
-    it('9.5 deberia anadir el flujo creado al catalogo', async () => {
+    it('9.5 no deberia meter el flujo creado en el catalogo de plantillas', async () => {
       // 1. Arrange
       const draft = await buildSelectedDraft();
       draft.pipelineTopology = [draft.pipelineTopology[0]!];
       verifyTriggerStore();
-      const created = buildPipeline({ id: 'nuevo-id', name: 'Recien creado' });
+      const created = buildWorkflow({ id: 'nuevo-id', name: 'Recien creado' });
       createWorkflow.mockResolvedValue(created);
 
       // 2. Act
       const result = await draft.assembleAndSaveWorkflow('Recien creado');
 
-      // 3. Assert: sin esto, volver al selector mostraria una lista sin el flujo
-      //    que se acaba de guardar.
+      // 3. Assert: el flujo se devuelve al llamante, que navega a `/flujos`. El
+      //    catalogo del asistente son PLANTILLAS, y colar ahi una instancia la
+      //    ofreceria como blueprint —el error que esta entrega vino a corregir.
       expect(result).toEqual(created);
-      expect(draft.availablePipelines[0]).toEqual(created);
+      expect(draft.availableTemplates).toHaveLength(1);
+      expect(draft.availableTemplates[0]?.id).toBe(TEMPLATE_ID);
     });
 
     it('9.6 deberia apagar isLoading aunque el guardado falle', async () => {
@@ -619,11 +640,11 @@ describe('useFlujoDraftStore · agregador del asistente', () => {
     it('10.2 deberia ensamblar params propios para dos nodos del mismo tipo', async () => {
       // 1. Arrange
       const draft = useFlujoDraftStore();
-      fetchSelectablePipelines.mockResolvedValue([
-        buildPipeline({ id: OTHER_PIPELINE_ID, topology: TWIN_TRIGGER_TOPOLOGY }),
+      fetchWorkflowTemplates.mockResolvedValue([
+        buildTemplate({ id: OTHER_TEMPLATE_ID, topology: TWIN_TRIGGER_TOPOLOGY }),
       ]);
-      await draft.loadAvailablePipelines();
-      draft.selectPipeline(OTHER_PIPELINE_ID);
+      await draft.loadAvailableTemplates();
+      draft.selectTemplate(OTHER_TEMPLATE_ID);
       verifyTriggerStore('trigger_principal', 'imap.principal.com');
       verifyTriggerStore('trigger_secundario', 'imap.backup.com');
 
@@ -666,7 +687,7 @@ describe('useFlujoDraftStore · agregador del asistente', () => {
       draft.resetDraft();
       // El catalogo sobrevive al reseteo (prueba 6.2), asi que el operador puede
       // empezar otro flujo del mismo pipeline sin recargar la vista.
-      draft.selectPipeline(PIPELINE_ID);
+      draft.selectTemplate(TEMPLATE_ID);
 
       // 3. Assert: el borrador nuevo arranca en blanco. La instancia del store
       //    vive en Pinia y sobrevive a la topologia, asi que sin la limpieza
@@ -681,22 +702,98 @@ describe('useFlujoDraftStore · agregador del asistente', () => {
     it('10.5 no deberia arrastrar la configuracion al cambiar de pipeline', async () => {
       // 1. Arrange
       const draft = useFlujoDraftStore();
-      fetchSelectablePipelines.mockResolvedValue([
-        buildPipeline(),
-        buildPipeline({ id: OTHER_PIPELINE_ID, topology: TWIN_TRIGGER_TOPOLOGY }),
+      fetchWorkflowTemplates.mockResolvedValue([
+        buildTemplate(),
+        buildTemplate({ id: OTHER_TEMPLATE_ID, topology: TWIN_TRIGGER_TOPOLOGY }),
       ]);
-      await draft.loadAvailablePipelines();
-      draft.selectPipeline(PIPELINE_ID);
+      await draft.loadAvailableTemplates();
+      draft.selectTemplate(TEMPLATE_ID);
       verifyTriggerStore();
 
       // 2. Act
-      draft.selectPipeline(OTHER_PIPELINE_ID);
+      draft.selectTemplate(OTHER_TEMPLATE_ID);
 
       // 3. Assert: el trigger del pipeline abandonado queda limpio, y los dos
       //    del nuevo arrancan sin configurar.
       expect(useTriggerImapStore(TRIGGER_NODE_ID).config.host).toBe('');
       expect(draft.invalidSteps).toHaveLength(2);
       expect(draft.canSave).toBe(false);
+    });
+  });
+
+  describe('11. Clonado inmutable de la plantilla', () => {
+    it('11.1 no deberia compartir objetos entre el borrador y el catalogo', async () => {
+      // 1. Arrange
+      const draft = await buildSelectedDraft();
+      const templateStep = draft.availableTemplates[0]?.topology[0];
+      const draftStep = draft.pipelineTopology[0];
+
+      // 3. Assert: mismos valores, objetos DISTINTOS. Compartir la referencia
+      //    haria que retocar el borrador mutase el catalogo en memoria.
+      expect(draftStep?.nodeId).toBe(templateStep?.nodeId);
+      expect(draftStep).not.toBe(templateStep);
+    });
+
+    it('11.2 no deberia alterar la plantilla al mutar la topologia del borrador', async () => {
+      // 1. Arrange
+      const draft = await buildSelectedDraft();
+
+      // 2. Act: el asistente reordena o recorta pasos, como en las pruebas del
+      //    bloque 9.
+      draft.pipelineTopology = [draft.pipelineTopology[0]!];
+
+      // 3. Assert: la plantilla del catalogo sigue teniendo sus tres nodos.
+      expect(draft.availableTemplates[0]?.topology).toHaveLength(3);
+    });
+
+    it('11.3 deberia reconstruir el borrador desde la plantilla al reelegirla', async () => {
+      // 1. Arrange
+      const draft = await buildSelectedDraft();
+      draft.pipelineTopology = [draft.pipelineTopology[0]!];
+
+      // 2. Act: volver al selector y elegir la MISMA plantilla.
+      draft.resetDraft();
+      draft.selectTemplate(TEMPLATE_ID);
+
+      // 3. Assert: arranca de la plantilla intacta, no del recorte anterior.
+      expect(draft.pipelineTopology).toHaveLength(3);
+      expect(draft.pipelineTopology.map((step) => step.nodeId)).toEqual([
+        TRIGGER_NODE_ID,
+        PARSER_NODE_ID,
+        MAPPER_NODE_ID,
+      ]);
+    });
+  });
+
+  describe('12. Procedencia del flujo creado', () => {
+    it('12.1 deberia enviar el templateId de la plantilla elegida', async () => {
+      // 1. Arrange
+      const draft = await buildSelectedDraft();
+      draft.pipelineTopology = [draft.pipelineTopology[0]!];
+      verifyTriggerStore();
+      createWorkflow.mockResolvedValue(buildWorkflow());
+
+      // 2. Act
+      await draft.assembleAndSaveWorkflow('Notiweb v2');
+
+      // 3. Assert: es la trazabilidad de la procedencia. El grafo viaja copiado
+      //    en `pipelineSchema`, asi que el flujo no depende de la plantilla.
+      expect(createWorkflow).toHaveBeenCalledWith(
+        expect.objectContaining({ templateId: TEMPLATE_ID }),
+      );
+    });
+
+    it('12.2 deberia usar la plantilla de origen como flowId del esquema', async () => {
+      // 1. Arrange
+      const draft = await buildSelectedDraft();
+
+      // 2. Act
+      const schema = draft.assemblePipelineSchema('Notiweb v2');
+
+      // 3. Assert: el backend lo ignora y asigna el de la fila que crea, pero
+      //    `PipelineSchemaDto` exige el campo y la plantilla es la referencia
+      //    mas honesta hasta que la fila exista.
+      expect(schema.flowId).toBe(TEMPLATE_ID);
     });
   });
 });
