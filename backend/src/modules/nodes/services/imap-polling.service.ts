@@ -1,4 +1,8 @@
 import { ConflictException, Injectable, Logger } from '@nestjs/common';
+// Import de VALOR y no `import type`: `ConfigService` se inyecta por constructor, y
+// con `emitDecoratorMetadata` un `import type` se borra al transpilar, dejando
+// `design:paramtypes` en `Object`. Nest no podria resolver la dependencia.
+import { ConfigService } from '@nestjs/config';
 import { SchedulerRegistry } from '@nestjs/schedule';
 import { InjectRepository } from '@nestjs/typeorm';
 import { plainToInstance } from 'class-transformer';
@@ -14,7 +18,6 @@ import { Workflow } from '@modules/workflows/entities/workflow.entity';
 import { WorkflowsService } from '@modules/workflows/workflows.service';
 
 import type { OnModuleDestroy, OnModuleInit } from '@nestjs/common';
-import type { ConfigService } from '@nestjs/config';
 import type { ResolvedImapConfig } from '@modules/nodes/dto/imap-trigger-config.dto';
 import type { ImapFlow } from 'imapflow';
 import type { Repository } from 'typeorm';

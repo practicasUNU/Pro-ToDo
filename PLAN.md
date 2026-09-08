@@ -1532,3 +1532,26 @@ Rama: `feat/trigger-imap`. Cierra los tres pendientes que dejó anotados `Walkth
 - [x] 9. Frontend — pruebas del ensamblado ⇒ verificación + commit
 - [x] 10. Frontend — paso terminal de revisión y guardado en `WizardPage.vue`
 - [x] 11. Cierre — verificación completa y commit final
+
+---
+
+## 13. Correcciones arquitectónicas post-PROT-12 (capas, `.env` y aislamiento por nodo)
+
+Rama: `feat/trigger-imap`. Tres frentes de corrección más un hallazgo de DI del desarrollador. Ninguno
+es funcionalidad nueva.
+
+- [x] 0. Backend — `ConfigService` como import de valor en `ImapPollingService` (DI roto en arranque real)
+- [ ] 1. Frontend — mover `node-store-registry.ts` de `components/nodes/` a `stores/nodes/`
+- [ ] 2. Backend — reducir la sección IMAP de `.env.example` al secreto referenciado
+- [ ] 3a. Frontend — factoría de store por `nodeId` en los dos stores de nodo + contrato y registro
+- [ ] 3b. Frontend — propagación del `nodeId` y limpieza de stores en `resetDraft` / `selectPipeline`
+- [ ] 3c. Frontend — `nodeId` capturado en los dos configuradores y en el banco de pruebas
+- [ ] 3d. Frontend — pruebas adaptadas + bloque `10. Aislamiento de la configuracion por nodo`
+- [ ] 4. Cierre — verificación completa de ambos lados y commit final
+
+**Nota sobre el objetivo 3 tal como se reportó.** No existía la mutación destructiva descrita:
+`assemblePipelineSchema` construye un diccionario `nodes` local y nuevo en cada llamada, lo puebla por
+llave recorriendo la topología completa, y `nextStep` ya apunta al `nodeId` siguiente — invariante que
+la prueba 8.3 fijaba ya en verde. Lo que sí producía pérdida de configuración eran dos defectos
+adyacentes: la identidad del store por `nodeType` en vez de por `nodeId`, y un `resetDraft()` que no
+limpiaba los stores de nodo. Son esos los que se corrigen.

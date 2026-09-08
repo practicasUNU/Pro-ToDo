@@ -2926,3 +2926,36 @@ sobre los restos del flujo anterior.
 - [ ] **`host` sin lista blanca** en el nodo IMAP: el patrón de `passwordEnvKey` acota qué secreto se
       puede leer, pero un EDITOR sigue pudiendo apuntar el nodo a un servidor arbitrario.
 - [ ] `npm run lint` reformatea `src/utils/violation-matcher.spec.ts` (prettier, archivo ajeno).
+
+---
+
+## 2026-09-08 · Correcciones arquitectónicas post-PROT-12 — rama `feat/trigger-imap`
+
+### Paso 0 completado — inyección de `ConfigService` en el sondeo IMAP
+
+| Archivo | Estado |
+|---|---|
+| `backend/src/modules/nodes/services/imap-polling.service.ts` | `import type` → import de valor |
+
+```
+Backend → 398 pruebas · 23 suites · tsc limpio · eslint 0 errores
+```
+
+**El «por qué».** `ImapPollingService` importaba `ConfigService` con `import type`. Con
+`emitDecoratorMetadata` activo, un `import type` desaparece por completo en la transpilación y el
+`design:paramtypes` que Nest lee para resolver el constructor queda en `Object`: **el módulo no
+arrancaría en un despliegue real**, con un `Nest can't resolve dependencies`. Las 398 pruebas no lo
+detectan porque instancian el servicio a mano pasándole un doble, que es precisamente el punto ciego de
+la prueba unitaria frente a un fallo de contenedor.
+
+Se auditaron los otros siete `import type { ConfigService }` del repositorio: todos están en archivos
+`*.spec.ts`, donde el símbolo solo se usa como tipo del doble y el `import type` es correcto. Este era
+el único archivo de producción con el patrón.
+
+Se descartó añadir `ConfigModule` a los `imports` de `NodesModule`: `app.module.ts` ya lo declara con
+`forRoot({ isGlobal: true })`, así que la entrada sería redundante y sugeriría falsamente que el módulo
+necesita importarlo para que la inyección funcione — cuando el problema era exclusivamente el import.
+
+**Próximo paso:** objetivo 1 — mover `frontend/src/components/nodes/node-store-registry.ts` a
+`frontend/src/stores/nodes/node-store-registry.ts` y actualizar su único consumidor
+(`flujo-draft.store.ts:4`).
