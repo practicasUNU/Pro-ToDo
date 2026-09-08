@@ -37,10 +37,28 @@ export interface NodeConfigStore {
    * existencia antes de llamarlo.
    */
   readonly setAvailableUpstreamNamespaces?: (namespaces: string[]) => void;
+
+  /**
+   * Devuelve el nodo a su configuracion inicial.
+   *
+   * OBLIGATORIO en el contrato, y no opcional como el anterior: el agregador lo
+   * necesita al abandonar un borrador o al cambiar de pipeline, porque la
+   * instancia del store sobrevive a la topologia que la creo. Sin este metodo,
+   * empezar un flujo nuevo arrancaria con los `params` del anterior y `canSave`
+   * en `true` sin haber tocado un solo campo. Exigirlo por tipo obliga a
+   * cualquier store de nodo futuro a implementarlo en vez de dejar la fuga.
+   */
+  readonly resetConfig: () => void;
 }
 
-/** Hook de Pinia que devuelve un store conforme al contrato del nodo. */
-export type NodeStoreHook = () => NodeConfigStore;
+/**
+ * Hook de Pinia que devuelve el store de UN nodo concreto.
+ *
+ * Recibe el `nodeId` y no solo el `nodeType`: los stores de nodo se instancian
+ * por nodo, de modo que dos nodos del mismo tipo en el mismo flujo no compartan
+ * estado (ver el TSDoc de `buildTriggerImapStore`).
+ */
+export type NodeStoreHook = (nodeId: string) => NodeConfigStore;
 
 /**
  * Resolucion polimorfica de los STORES de configuracion de nodo, hermana de
@@ -71,14 +89,18 @@ export const nodeStoreRegistry: Partial<Record<NodeType, NodeStoreHook>> = {
 };
 
 /**
- * Resuelve el store de un tipo de nodo, o `null` si aun no tiene configurador.
+ * Resuelve el store del nodo `nodeId`, o `null` si su tipo aun no tiene
+ * configurador.
  *
  * El hook se invoca AQUI y no en el llamante: `useXStore()` debe ejecutarse con
  * una instancia de Pinia activa, y centralizarlo evita que cada anfitrion tenga
  * que acordarse de invocarlo.
+ *
+ * Hacen falta los dos argumentos y ninguno sustituye al otro: el `nodeType`
+ * elige QUE store, el `nodeId` elige CUAL de sus instancias.
  */
-export const resolveNodeStore = (nodeType: NodeType): NodeConfigStore | null => {
+export const resolveNodeStore = (nodeType: NodeType, nodeId: string): NodeConfigStore | null => {
   const useStore = nodeStoreRegistry[nodeType];
 
-  return useStore === undefined ? null : useStore();
+  return useStore === undefined ? null : useStore(nodeId);
 };

@@ -15,9 +15,19 @@ import { NODE_TYPE_LABELS, NodeType } from '@/types/pipeline';
 // ver funcionando. Reproduce lo unico que el asistente hara con ellos: resolver
 // el componente por `nodeType` y leer `isConfigValid` para decidir si avanza.
 
+/**
+ * `nodeId` del nodo simulado.
+ *
+ * Constante compartida por el componente y por el store que este banco inspecciona:
+ * los stores de nodo se instancian POR `nodeId`, asi que montar el configurador con
+ * uno y leer el store de otro dejaria el panel de estado mirando una instancia
+ * vacia distinta de la que el formulario esta editando.
+ */
+const SANDBOX_NODE_ID = 'nodo_mapeador_demo';
+
 const selectedNodeType = ref<NodeType>(NodeType.MAPEADOR_PLANTILLA);
 
-const templateMapperStore = useTemplateMapperStore();
+const templateMapperStore = useTemplateMapperStore(SANDBOX_NODE_ID);
 
 const nodeTypeOptions = computed(() =>
   configurableNodeTypes.map((nodeType) => ({
@@ -88,7 +98,7 @@ const inspectedState = computed(() =>
           />
         </div>
 
-        <component :is="resolvedComponent" v-if="resolvedComponent" node-id="nodo_mapeador_demo" />
+        <component :is="resolvedComponent" v-if="resolvedComponent" :node-id="SANDBOX_NODE_ID" />
 
         <div v-else class="pd-card q-pa-md pd-text-secondary">
           Este tipo de nodo aun no tiene componente de configuracion registrado.

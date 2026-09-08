@@ -18,11 +18,13 @@ interface Props {
   nodeId: string;
 }
 
-defineProps<Props>();
+const props = defineProps<Props>();
 
 const $q = useQuasar();
-// Este componente NO llama a la red: todo pasa por su store (regla §3.1).
-const templateMapperStore = useTemplateMapperStore();
+// Este componente NO llama a la red: todo pasa por su store (regla §3.1), y ese
+// store es el de ESTE nodo: dos mapeadores en el mismo flujo eligen plantillas
+// distintas sin pisarse.
+const templateMapperStore = useTemplateMapperStore(props.nodeId);
 
 const isPreviewOpen = ref(false);
 const isEditorOpen = ref(false);

@@ -20,6 +20,15 @@ vi.mock('@services/nodes/trigger-imap.service', () => ({
 const triggerImapService = await import('@services/nodes/trigger-imap.service');
 const checkImapConnection = vi.mocked(triggerImapService.checkImapConnection);
 
+/**
+ * `nodeId` del nodo bajo prueba.
+ *
+ * El store se instancia POR NODO, asi que toda prueba tiene que nombrar el nodo
+ * al que pregunta. El aislamiento entre dos `nodeId` distintos se comprueba
+ * aparte, en `flujo-draft.store.spec.ts`.
+ */
+const NODE_ID = 'trigger_imap';
+
 const VALID_HOST = 'imap.unuware.com';
 const VALID_USER = 'notiweb@unuware.com';
 const VALID_ENV_KEY = 'IMAP_PASSWORD';
@@ -43,7 +52,7 @@ const FAILURE_RESULT: CheckImapResult = {
 
 /** Store con los campos completos y la conexion YA verificada. */
 const buildVerifiedStore = (): ReturnType<typeof useTriggerImapStore> => {
-  const store = useTriggerImapStore();
+  const store = useTriggerImapStore(NODE_ID);
   store.patchConfig(VALID_CONFIG);
   store.connectionVerified = true;
 
@@ -59,7 +68,7 @@ describe('useTriggerImapStore · configuracion del nodo TRIGGER_IMAP', () => {
   describe('1. Valores por defecto', () => {
     it('1.1 deberia replicar los defaults del DTO backend', () => {
       // 1. Arrange & 2. Act
-      const store = useTriggerImapStore();
+      const store = useTriggerImapStore(NODE_ID);
 
       // 3. Assert
       expect(store.config).toEqual({
@@ -78,7 +87,7 @@ describe('useTriggerImapStore · configuracion del nodo TRIGGER_IMAP', () => {
 
     it('1.2 deberia arrancar sin verificar y sin resultado previo', () => {
       // 1. Arrange & 2. Act
-      const store = useTriggerImapStore();
+      const store = useTriggerImapStore(NODE_ID);
 
       // 3. Assert
       expect(store.connectionVerified).toBe(false);
@@ -90,7 +99,7 @@ describe('useTriggerImapStore · configuracion del nodo TRIGGER_IMAP', () => {
   describe('2. Validacion de campos', () => {
     it('2.1 deberia invalidar si falta el host', () => {
       // 1. Arrange
-      const store = useTriggerImapStore();
+      const store = useTriggerImapStore(NODE_ID);
 
       // 2. Act
       store.patchConfig({ ...VALID_CONFIG, host: '   ' });
@@ -101,7 +110,7 @@ describe('useTriggerImapStore · configuracion del nodo TRIGGER_IMAP', () => {
 
     it('2.2 deberia invalidar si falta el usuario', () => {
       // 1. Arrange
-      const store = useTriggerImapStore();
+      const store = useTriggerImapStore(NODE_ID);
 
       // 2. Act
       store.patchConfig({ ...VALID_CONFIG, user: '' });
@@ -112,7 +121,7 @@ describe('useTriggerImapStore · configuracion del nodo TRIGGER_IMAP', () => {
 
     it('2.3 deberia invalidar si el buzon esta vacio', () => {
       // 1. Arrange
-      const store = useTriggerImapStore();
+      const store = useTriggerImapStore(NODE_ID);
 
       // 2. Act
       store.patchConfig({ ...VALID_CONFIG, mailbox: '' });
@@ -123,7 +132,7 @@ describe('useTriggerImapStore · configuracion del nodo TRIGGER_IMAP', () => {
 
     it('2.4 deberia rechazar una passwordEnvKey fuera del patron', () => {
       // 1. Arrange: intento de apuntar a otro secreto del entorno.
-      const store = useTriggerImapStore();
+      const store = useTriggerImapStore(NODE_ID);
 
       // 2. Act & 3. Assert: el patron acota lo que el nodo puede leer del
       //    entorno a credenciales de correo.
@@ -141,7 +150,7 @@ describe('useTriggerImapStore · configuracion del nodo TRIGGER_IMAP', () => {
 
     it('2.5 deberia aceptar las claves IMAP_*PASSWORD legitimas', () => {
       // 1. Arrange
-      const store = useTriggerImapStore();
+      const store = useTriggerImapStore(NODE_ID);
 
       // 2. Act & 3. Assert
       for (const envKey of ['IMAP_PASSWORD', 'IMAP_NOTIWEB_PASSWORD']) {
@@ -152,7 +161,7 @@ describe('useTriggerImapStore · configuracion del nodo TRIGGER_IMAP', () => {
 
     it('2.6 deberia rechazar un pollIntervalMs bajo el minimo del backend', () => {
       // 1. Arrange
-      const store = useTriggerImapStore();
+      const store = useTriggerImapStore(NODE_ID);
 
       // 2. Act
       store.patchConfig({ ...VALID_CONFIG, pollIntervalMs: 1_000 });
@@ -170,7 +179,7 @@ describe('useTriggerImapStore · configuracion del nodo TRIGGER_IMAP', () => {
 
     it('2.7 deberia rechazar un puerto fuera de rango', () => {
       // 1. Arrange
-      const store = useTriggerImapStore();
+      const store = useTriggerImapStore(NODE_ID);
 
       // 2. Act & 3. Assert
       store.patchConfig({ ...VALID_CONFIG, port: 0 });
@@ -187,7 +196,7 @@ describe('useTriggerImapStore · configuracion del nodo TRIGGER_IMAP', () => {
   describe('3. Prueba de conexion', () => {
     it('3.1 deberia invocar al servicio con el payload recortado', async () => {
       // 1. Arrange
-      const store = useTriggerImapStore();
+      const store = useTriggerImapStore(NODE_ID);
       store.patchConfig({ ...VALID_CONFIG, host: '  imap.unuware.com  ' });
       checkImapConnection.mockResolvedValue(SUCCESS_RESULT);
 
@@ -210,7 +219,7 @@ describe('useTriggerImapStore · configuracion del nodo TRIGGER_IMAP', () => {
 
     it('3.2 deberia habilitar isConfigValid tras una conexion correcta', async () => {
       // 1. Arrange
-      const store = useTriggerImapStore();
+      const store = useTriggerImapStore(NODE_ID);
       store.patchConfig(VALID_CONFIG);
       checkImapConnection.mockResolvedValue(SUCCESS_RESULT);
 
@@ -225,7 +234,7 @@ describe('useTriggerImapStore · configuracion del nodo TRIGGER_IMAP', () => {
 
     it('3.3 no deberia habilitar isConfigValid si el backend responde success false', async () => {
       // 1. Arrange
-      const store = useTriggerImapStore();
+      const store = useTriggerImapStore(NODE_ID);
       store.patchConfig(VALID_CONFIG);
       checkImapConnection.mockResolvedValue(FAILURE_RESULT);
 
@@ -241,7 +250,7 @@ describe('useTriggerImapStore · configuracion del nodo TRIGGER_IMAP', () => {
 
     it('3.4 deberia mantener isConfigValid en false con campos completos pero sin probar', () => {
       // 1. Arrange & 2. Act
-      const store = useTriggerImapStore();
+      const store = useTriggerImapStore(NODE_ID);
       store.patchConfig(VALID_CONFIG);
 
       // 3. Assert: unas credenciales bien formadas pero equivocadas no fallarian
@@ -252,7 +261,7 @@ describe('useTriggerImapStore · configuracion del nodo TRIGGER_IMAP', () => {
 
     it('3.5 deberia apagar isLoading aunque el servicio lance', async () => {
       // 1. Arrange
-      const store = useTriggerImapStore();
+      const store = useTriggerImapStore(NODE_ID);
       store.patchConfig(VALID_CONFIG);
       checkImapConnection.mockRejectedValue(new Error('Network Error'));
 

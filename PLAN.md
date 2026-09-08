@@ -1543,11 +1543,11 @@ es funcionalidad nueva.
 - [x] 0. Backend — `ConfigService` como import de valor en `ImapPollingService` (DI roto en arranque real)
 - [x] 1. Frontend — mover `node-store-registry.ts` de `components/nodes/` a `stores/nodes/`
 - [x] 2. Backend — reducir la sección IMAP de `.env.example` al secreto referenciado
-- [ ] 3a. Frontend — factoría de store por `nodeId` en los dos stores de nodo + contrato y registro
-- [ ] 3b. Frontend — propagación del `nodeId` y limpieza de stores en `resetDraft` / `selectPipeline`
-- [ ] 3c. Frontend — `nodeId` capturado en los dos configuradores y en el banco de pruebas
-- [ ] 3d. Frontend — pruebas adaptadas + bloque `10. Aislamiento de la configuracion por nodo`
-- [ ] 4. Cierre — verificación completa de ambos lados y commit final
+- [x] 3a. Frontend — factoría de store por `nodeId` en los dos stores de nodo + contrato y registro
+- [x] 3b. Frontend — propagación del `nodeId` y limpieza de stores en `resetDraft` / `selectPipeline`
+- [x] 3c. Frontend — `nodeId` capturado en los dos configuradores y en el banco de pruebas
+- [x] 3d. Frontend — pruebas adaptadas + bloque `10. Aislamiento de la configuracion por nodo`
+- [x] 4. Cierre — verificación completa de ambos lados y commit final
 
 **Nota sobre el objetivo 3 tal como se reportó.** No existía la mutación destructiva descrita:
 `assemblePipelineSchema` construye un diccionario `nodes` local y nuevo en cada llamada, lo puebla por

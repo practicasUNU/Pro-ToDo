@@ -11,6 +11,14 @@ vi.mock('@services/nodes/template-mapper.service', () => ({
   compilePreview: vi.fn(),
 }));
 
+/**
+ * `nodeId` del nodo bajo prueba.
+ *
+ * El store se instancia POR NODO, asi que toda prueba tiene que nombrar el nodo
+ * al que pregunta.
+ */
+const NODE_ID = 'nodo_mapeador';
+
 const TEMPLATE_ID = '5e2d1c4b-7a89-4f30-b1c2-6d5e4f3a2b10';
 
 const buildTemplate = (requiredVariables: string[]): HtmlTemplate => ({
@@ -29,7 +37,7 @@ const buildTemplate = (requiredVariables: string[]): HtmlTemplate => ({
 const buildStoreWithTemplate = (
   requiredVariables: string[],
 ): ReturnType<typeof useTemplateMapperStore> => {
-  const store = useTemplateMapperStore();
+  const store = useTemplateMapperStore(NODE_ID);
 
   store.availableTemplates = [buildTemplate(requiredVariables)];
   store.setTemplateId(TEMPLATE_ID);
@@ -72,7 +80,7 @@ describe('useTemplateMapperStore · contrato de namespaces', () => {
 
     it('1.4 deberia estar vacio sin plantilla seleccionada', () => {
       // 1. Arrange & 2. Act
-      const store = useTemplateMapperStore();
+      const store = useTemplateMapperStore(NODE_ID);
 
       // 3. Assert
       expect(store.missingRequiredVariables).toEqual([]);
@@ -94,7 +102,7 @@ describe('useTemplateMapperStore · contrato de namespaces', () => {
   describe('2. isConfigValid', () => {
     it('2.1 deberia ser falso sin plantilla', () => {
       // 1. Arrange & 2. Act
-      const store = useTemplateMapperStore();
+      const store = useTemplateMapperStore(NODE_ID);
 
       // 3. Assert
       expect(store.isConfigValid).toBe(false);

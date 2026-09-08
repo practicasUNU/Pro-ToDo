@@ -3003,3 +3003,80 @@ cada ronda.
 **Próximo paso:** objetivo 3a — envolver el setup de `trigger-imap.store.ts` y `template-mapper.store.ts`
 en una factoría `defineStore(\`<id>:${nodeId}\`)` memoizada, y cambiar `NodeStoreHook` a
 `(nodeId: string) => NodeConfigStore` con `resetConfig` obligatorio en el contrato.
+
+### Pasos 3a-3d completados — aislamiento de la configuración por `nodeId`
+
+| Archivo | Estado |
+|---|---|
+| `frontend/src/stores/nodes/trigger-imap.store.ts` | factoría `defineStore` por `nodeId` |
+| `frontend/src/stores/nodes/template-mapper.store.ts` | factoría `defineStore` por `nodeId` |
+| `frontend/src/stores/nodes/node-store-registry.ts` | `NodeStoreHook` recibe `nodeId`; `resetConfig` obligatorio |
+| `frontend/src/stores/flujo-draft.store.ts` | `nodeId` propagado + `resetNodeStores()` |
+| `frontend/src/components/nodes/TriggerImapConfig.vue` | store resuelto con `props.nodeId` |
+| `frontend/src/components/nodes/TemplateMapperConfig.vue` | store resuelto con `props.nodeId` |
+| `frontend/src/pages/nodes/NodeConfigSandboxPage.vue` | `SANDBOX_NODE_ID` compartido por componente y store |
+| `frontend/src/stores/nodes/trigger-imap.store.spec.ts` | 15 llamadas con `NODE_ID` |
+| `frontend/src/stores/nodes/template-mapper.store.spec.ts` | 3 llamadas con `NODE_ID` |
+| `frontend/src/stores/flujo-draft.store.spec.ts` | topología con constantes + bloque 10 (5 pruebas) |
+
+```
+Backend   → 398 pruebas · 23 suites · tsc limpio · eslint 0 errores
+Frontend  → 113 pruebas · 6 archivos · vue-tsc limpio · eslint limpio · quasar build OK
+```
+
+### El «por qué» de cuatro decisiones
+
+**1. La premisa reportada no era el defecto.** Se pedía corregir una acción de guardado que sobrescribía
+el diccionario `nodes` del pipeline. Esa acción no existe: `assemblePipelineSchema` construye un
+diccionario **local y nuevo** en cada llamada, lo puebla por llave (`nodes[step.nodeId] = …`)
+recorriendo la topología completa, y `nextStep` ya apuntaba al `nodeId` siguiente del arreglo —
+invariante que la prueba **8.3** fijaba ya en verde. La solución prescrita *era* la implementación.
+
+Lo que sí producía el síntoma («el nodo anterior desaparece») eran dos defectos adyacentes, y son los
+que se corrigen. La prueba **10.3** queda como candado de la invariante que se creía rota: verifica que
+los N nodos de la topología sobreviven al ensamblado y que la cadena está completa de punta a punta.
+
+**2. La identidad del estado de un nodo es su `nodeId`, no su `nodeType`.** `resolveNodeStore` resolvía
+un singleton de Pinia por tipo, así que un pipeline con dos disparadores IMAP contra buzones distintos
+compartía **una sola instancia**: configurar el segundo borraba los `params` del primero, y el esquema
+ensamblado salía con la misma configuración duplicada en ambos nodos. La topología canónica de Notiweb
+no repite tipos, de modo que el defecto estaba latente esperando el primer flujo que lo hiciera.
+
+Se eligió **instancia por nodo** (`defineStore(\`<prefijo>:${nodeId}\`)` con la definición memoizada)
+frente a un `Record<nodeId, Config>` dentro de un store único. Con la instancia por nodo el cuerpo del
+setup no cambia una línea y el contrato del anfitrión sigue siendo un `boolean` plano; con el
+diccionario habría que rekeyar `isConfigValid`, `isLoading` y `connectionVerified`, y cada `computed`
+pasaría a ser una función que devuelve un `computed` por nodo. El estado que se corrige no debía
+complicar la lectura de lo que ya funcionaba.
+
+Se memoiza la **definición** y no la instancia: de la instancia ya se encarga Pinia, que cachea por id.
+Lo que hay que evitar es reconstruir la definición en cada render, que descarta la identidad
+referencial del hook. Coste declarado: dos nodos mapeadores en el mismo flujo piden el catálogo de
+plantillas una vez cada uno.
+
+Contrapartida del HMR: con ids dinámicos no hay una definición única que declarar al cargar el módulo,
+así que `acceptHMRUpdate` se arma sobre cada definición nueva. Vite conserva un solo callback
+self-accept por módulo, de modo que hot-recarga el último nodo creado —en la práctica el que se está
+configurando— y los demás exigen recarga completa.
+
+**3. La instancia del store sobrevive a la topología que la creó.** Vive en la instancia de Pinia, no
+en el borrador, así que `resetDraft()` vaciando `pipelineTopology` no limpiaba nada: crear un flujo y
+volver al asistente arrancaba con los `params` del anterior ya cargados y `canSave` en `true` sin que
+el operador hubiera tocado un campo — el escenario exacto en el que un guardado accidental publica la
+configuración equivocada. `resetNodeStores()` recorre la topología **antes** de vaciarla (una vez vacía
+ya no hay a quién preguntar) y se invoca también en `selectPipeline`, porque cambiar de pipeline
+abandona una topología cuyos stores no deben sobrevivirle.
+
+**4. `resetConfig` pasa a ser obligatorio en `NodeConfigStore`.** Es lo que necesita la limpieza
+anterior, y exigirlo por tipo obliga a cualquier store de nodo futuro a implementarlo en vez de dejar
+una fuga silenciosa. `setAvailableUpstreamNamespaces` sigue opcional: un disparador es el primero del
+grafo y no tiene nada aguas arriba que declarar. Al cambiar la firma de `NodeStoreHook`, el compilador
+enumeró los 20 puntos de llamada afectados — el tipo hizo de lista de tareas.
+
+Nota de método: las cuatro pruebas de aislamiento (10.1, 10.2, 10.4 y 10.5) se comprobaron contra la
+implementación anterior antes de dar el paso por cerrado. Las cuatro fallan sin su corrección; 10.3
+pasa en ambas, que es precisamente su papel de candado.
+
+**Próximo paso:** ninguno pendiente de esta tanda. Los pendientes abiertos del proyecto siguen siendo
+los cinco listados al cierre de PROT-12, con el `PATCH /api/workflows/:id` de activación como el de
+mayor prioridad: la vía de creación termina hoy en un flujo que nadie puede habilitar desde la interfaz.

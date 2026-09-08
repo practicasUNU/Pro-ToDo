@@ -15,10 +15,12 @@ interface Props {
   nodeId: string;
 }
 
-defineProps<Props>();
+const props = defineProps<Props>();
 
 const $q = useQuasar();
-const store = useTriggerImapStore();
+// El store se resuelve POR NODO: dos disparadores IMAP en el mismo flujo tienen
+// cada uno su propia configuracion, no una compartida.
+const store = useTriggerImapStore(props.nodeId);
 
 // Mensajes de regla como constantes: el mismo texto lo usan la regla del campo y
 // la ayuda bajo el input, y duplicarlo los dejaria divergir.

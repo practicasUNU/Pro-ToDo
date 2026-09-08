@@ -34,6 +34,13 @@ const createWorkflow = vi.mocked(workflowsService.createWorkflow);
 const PIPELINE_ID = 'b3f1c2d4-5a6b-4c7d-8e9f-0a1b2c3d4e5f';
 const OTHER_PIPELINE_ID = 'c4a2d3e5-6f7b-4c8d-9e0f-1a2b3c4d5e6f';
 
+// `nodeId` de la topologia de prueba. Los stores de nodo se instancian POR
+// `nodeId`, asi que una prueba que resuelva el store con otro identificador
+// mirara una instancia vacia distinta de la que el borrador esta usando.
+const TRIGGER_NODE_ID = 'trigger_imap';
+const PARSER_NODE_ID = 'nodo_parser';
+const MAPPER_NODE_ID = 'nodo_mapeador';
+
 /** Pipeline de tres pasos: trigger -> parser -> mapeador. */
 const buildPipeline = (overrides: Partial<PipelineSummary> = {}): PipelineSummary => ({
   id: PIPELINE_ID,
@@ -42,17 +49,17 @@ const buildPipeline = (overrides: Partial<PipelineSummary> = {}): PipelineSummar
   active: true,
   topology: [
     {
-      nodeId: 'trigger_imap',
+      nodeId: TRIGGER_NODE_ID,
       nodeType: NodeType.TRIGGER_IMAP,
       outputNamespace: 'raw_email',
     },
     {
-      nodeId: 'nodo_parser',
+      nodeId: PARSER_NODE_ID,
       nodeType: NodeType.PARSER_PRE_IA,
       outputNamespace: 'parsed_email',
     },
     {
-      nodeId: 'nodo_mapeador',
+      nodeId: MAPPER_NODE_ID,
       nodeType: NodeType.MAPEADOR_PLANTILLA,
       outputNamespace: 'rendered_html',
     },
@@ -70,11 +77,17 @@ const buildSelectedDraft = async (): Promise<ReturnType<typeof useFlujoDraftStor
   return draft;
 };
 
-/** Deja el store del trigger en estado valido y con la conexion probada. */
-const verifyTriggerStore = (): void => {
-  const trigger = useTriggerImapStore();
+/**
+ * Deja el store del trigger indicado en estado valido y con la conexion probada.
+ *
+ * El `nodeId` es un parametro y no una constante porque las pruebas de
+ * aislamiento (bloque 10) necesitan configurar dos disparadores distintos con
+ * valores distintos.
+ */
+const verifyTriggerStore = (nodeId: string = TRIGGER_NODE_ID, host = 'imap.unuware.com'): void => {
+  const trigger = useTriggerImapStore(nodeId);
   trigger.patchConfig({
-    host: 'imap.unuware.com',
+    host,
     user: 'notiweb@unuware.com',
     passwordEnvKey: 'IMAP_PASSWORD',
   });
@@ -349,7 +362,7 @@ describe('useFlujoDraftStore · agregador del asistente', () => {
       // 3. Assert: el mapeador es el tercer paso, asi que recibe los namespaces
       //    de los dos anteriores. Antes de esta conexion usaba una lista fija
       //    marcada PROVISIONAL y validaba contra namespaces inventados.
-      const mapper = useTemplateMapperStore();
+      const mapper = useTemplateMapperStore(MAPPER_NODE_ID);
       expect(mapper.availableUpstreamNamespaces).toEqual(['raw_email', 'parsed_email']);
     });
 
@@ -369,7 +382,7 @@ describe('useFlujoDraftStore · agregador del asistente', () => {
         id: OTHER_PIPELINE_ID,
         topology: [
           {
-            nodeId: 'nodo_mapeador',
+            nodeId: MAPPER_NODE_ID,
             nodeType: NodeType.MAPEADOR_PLANTILLA,
             outputNamespace: 'rendered_html',
           },
@@ -385,7 +398,7 @@ describe('useFlujoDraftStore · agregador del asistente', () => {
       // 3. Assert: en el pipeline corto el mapeador es el primero, asi que no
       //    tiene nada aguas arriba. Arrastrar la lista anterior le haria creer
       //    que `raw_email` existe en un flujo donde nadie lo produce.
-      const mapper = useTemplateMapperStore();
+      const mapper = useTemplateMapperStore(MAPPER_NODE_ID);
       expect(mapper.availableUpstreamNamespaces).toEqual([]);
     });
   });
@@ -569,6 +582,121 @@ describe('useFlujoDraftStore · agregador del asistente', () => {
       // 3. Assert (despues)
       expect(draft.canSave).toBe(true);
       expect(draft.invalidSteps).toEqual([]);
+    });
+  });
+
+  describe('10. Aislamiento de la configuracion por nodo', () => {
+    /** Pipeline con DOS disparadores IMAP: el caso que rompia el estado compartido. */
+    const TWIN_TRIGGER_TOPOLOGY = [
+      {
+        nodeId: 'trigger_principal',
+        nodeType: NodeType.TRIGGER_IMAP,
+        outputNamespace: 'raw_email',
+      },
+      {
+        nodeId: 'trigger_secundario',
+        nodeType: NodeType.TRIGGER_IMAP,
+        outputNamespace: 'raw_email_backup',
+      },
+    ];
+
+    it('10.1 deberia dar una instancia independiente a cada nodeId', () => {
+      // 1. Arrange
+      const first = useTriggerImapStore('trigger_principal');
+      const second = useTriggerImapStore('trigger_secundario');
+
+      // 2. Act
+      first.patchConfig({ host: 'imap.principal.com' });
+
+      // 3. Assert: con un store por `nodeType` ambas referencias serian el mismo
+      //    objeto y el segundo nodo habria heredado el host del primero.
+      expect(first.config.host).toBe('imap.principal.com');
+      expect(second.config.host).toBe('');
+      // La definicion esta memoizada: el mismo `nodeId` devuelve el mismo store.
+      expect(useTriggerImapStore('trigger_principal')).toBe(first);
+    });
+
+    it('10.2 deberia ensamblar params propios para dos nodos del mismo tipo', async () => {
+      // 1. Arrange
+      const draft = useFlujoDraftStore();
+      fetchSelectablePipelines.mockResolvedValue([
+        buildPipeline({ id: OTHER_PIPELINE_ID, topology: TWIN_TRIGGER_TOPOLOGY }),
+      ]);
+      await draft.loadAvailablePipelines();
+      draft.selectPipeline(OTHER_PIPELINE_ID);
+      verifyTriggerStore('trigger_principal', 'imap.principal.com');
+      verifyTriggerStore('trigger_secundario', 'imap.backup.com');
+
+      // 2. Act
+      const schema = draft.assemblePipelineSchema('Dos buzones');
+
+      // 3. Assert: cada nodo publica SU host. Antes, configurar el segundo
+      //    sobrescribia el estado del primero y los dos nodos salian del
+      //    ensamblado con la misma configuracion.
+      expect(schema.nodes.trigger_principal?.params.host).toBe('imap.principal.com');
+      expect(schema.nodes.trigger_secundario?.params.host).toBe('imap.backup.com');
+    });
+
+    it('10.3 deberia conservar todos los nodos de la topologia en el ensamblado', async () => {
+      // 1. Arrange
+      const draft = await buildSelectedDraft();
+      verifyTriggerStore();
+
+      // 2. Act
+      const schema = draft.assemblePipelineSchema('Notiweb v2');
+
+      // 3. Assert: regresion de la premisa que se reporto como mutacion
+      //    destructiva. Los tres nodos sobreviven y la cadena esta completa de
+      //    punta a punta, sin punteros a nodos ausentes.
+      expect(Object.keys(schema.nodes)).toEqual([TRIGGER_NODE_ID, PARSER_NODE_ID, MAPPER_NODE_ID]);
+      expect(schema.entrypoint).toBe(TRIGGER_NODE_ID);
+      expect(schema.nodes[TRIGGER_NODE_ID]?.nextStep).toBe(PARSER_NODE_ID);
+      expect(schema.nodes[PARSER_NODE_ID]?.nextStep).toBe(MAPPER_NODE_ID);
+      expect(schema.nodes[MAPPER_NODE_ID]?.nextStep).toBeNull();
+    });
+
+    it('10.4 deberia limpiar los stores de nodo al resetear el borrador', async () => {
+      // 1. Arrange
+      const draft = await buildSelectedDraft();
+      verifyTriggerStore();
+      const trigger = useTriggerImapStore(TRIGGER_NODE_ID);
+      expect(trigger.isConfigValid).toBe(true);
+
+      // 2. Act
+      draft.resetDraft();
+      // El catalogo sobrevive al reseteo (prueba 6.2), asi que el operador puede
+      // empezar otro flujo del mismo pipeline sin recargar la vista.
+      draft.selectPipeline(PIPELINE_ID);
+
+      // 3. Assert: el borrador nuevo arranca en blanco. La instancia del store
+      //    vive en Pinia y sobrevive a la topologia, asi que sin la limpieza
+      //    explicita el flujo nuevo saldria con los `params` del anterior y
+      //    `canSave` en true sin haber tocado un solo campo.
+      expect(trigger.config.host).toBe('');
+      expect(trigger.connectionVerified).toBe(false);
+      expect(trigger.isConfigValid).toBe(false);
+      expect(draft.canSave).toBe(false);
+    });
+
+    it('10.5 no deberia arrastrar la configuracion al cambiar de pipeline', async () => {
+      // 1. Arrange
+      const draft = useFlujoDraftStore();
+      fetchSelectablePipelines.mockResolvedValue([
+        buildPipeline(),
+        buildPipeline({ id: OTHER_PIPELINE_ID, topology: TWIN_TRIGGER_TOPOLOGY }),
+      ]);
+      await draft.loadAvailablePipelines();
+      draft.selectPipeline(PIPELINE_ID);
+      verifyTriggerStore();
+
+      // 2. Act
+      draft.selectPipeline(OTHER_PIPELINE_ID);
+
+      // 3. Assert: el trigger del pipeline abandonado queda limpio, y los dos
+      //    del nuevo arrancan sin configurar.
+      expect(useTriggerImapStore(TRIGGER_NODE_ID).config.host).toBe('');
+      expect(draft.invalidSteps).toHaveLength(2);
+      expect(draft.canSave).toBe(false);
     });
   });
 });

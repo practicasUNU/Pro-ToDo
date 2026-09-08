@@ -26,10 +26,18 @@ export interface TemplateMapperConfig {
   outputNamespace: string;
 }
 
+/** Prefijo del id de Pinia; el sufijo es el `nodeId` del `pipeline_schema`. */
+const STORE_ID_PREFIX = 'templateMapperNode';
+
 // Estado reactivo del nodo MAPEADOR_PLANTILLA (regla frontend-quasar.md §3.1).
 // No conoce Axios ni rutas: delega en su servicio y expone `isConfigValid`, que
 // es lo unico que el asistente consulta para habilitar el avance.
-export const useTemplateMapperStore = defineStore('templateMapperNode', () => {
+//
+// El cuerpo se declara aparte y NO recibe el `nodeId`: este estado no sabe en
+// que posicion del grafo esta ni como se llama su nodo. El `nodeId` solo decide
+// CUANTAS instancias hay, y eso se resuelve en el id de Pinia (ver
+// `useTemplateMapperStore`), no dentro del estado.
+const templateMapperSetup = () => {
   const config = ref<TemplateMapperConfig>({
     templateId: null,
     outputNamespace: DEFAULT_OUTPUT_NAMESPACE,
@@ -169,8 +177,56 @@ export const useTemplateMapperStore = defineStore('templateMapperNode', () => {
     loadPreview,
     resetConfig,
   };
-});
+};
 
-if (import.meta.hot) {
-  import.meta.hot.accept(acceptHMRUpdate(useTemplateMapperStore, import.meta.hot));
-}
+/**
+ * Definicion de Pinia para UN nodo concreto.
+ *
+ * El id lleva el `nodeId` dentro a proposito: un flujo puede mapear dos
+ * plantillas distintas en dos pasos, y con un id fijo compartirian una sola
+ * instancia — elegir la plantilla del segundo nodo borraria la del primero y el
+ * esquema ensamblado saldria con el mismo `templateId` duplicado en ambos. La
+ * identidad del estado tiene que ser la del nodo, no la del tipo.
+ */
+const buildTemplateMapperStore = (nodeId: string) =>
+  defineStore(`${STORE_ID_PREFIX}:${nodeId}`, templateMapperSetup);
+
+/** Instancia del store, para tipar helpers y consumidores sin `any`. */
+export type TemplateMapperStore = ReturnType<ReturnType<typeof buildTemplateMapperStore>>;
+
+/**
+ * Definiciones ya creadas, indexadas por `nodeId`.
+ *
+ * Se memoiza la DEFINICION, no la instancia: de la instancia ya se encarga Pinia,
+ * que cachea por id en la instancia activa. Lo que hay que evitar es reconstruir
+ * la definicion en cada render, porque eso descarta la identidad referencial del
+ * hook y hace trabajo por nada en cada paso del asistente.
+ */
+const definitions = new Map<string, ReturnType<typeof buildTemplateMapperStore>>();
+
+/**
+ * Store del nodo MAPEADOR_PLANTILLA identificado por `nodeId`.
+ *
+ * Cada nodo del pipeline recibe su propia instancia, aislada de los demas. Como
+ * contrapartida, dos nodos mapeadores en el mismo flujo piden el catalogo de
+ * plantillas una vez cada uno: una peticion por nodo montado contra un catalogo
+ * pequeno, y el precio de que cada nodo tenga su propia seleccion.
+ */
+export const useTemplateMapperStore = (nodeId: string): TemplateMapperStore => {
+  const cached = definitions.get(nodeId);
+
+  if (cached !== undefined) return cached();
+
+  const definition = buildTemplateMapperStore(nodeId);
+  definitions.set(nodeId, definition);
+
+  // Con ids dinamicos no hay una definicion unica que declarar al cargar el
+  // modulo, asi que el HMR se arma sobre cada definicion nueva. Vite conserva un
+  // solo callback self-accept por modulo: hot-recarga el ultimo nodo creado, que
+  // en la practica es el que se esta configurando.
+  if (import.meta.hot) {
+    import.meta.hot.accept(acceptHMRUpdate(definition, import.meta.hot));
+  }
+
+  return definition();
+};

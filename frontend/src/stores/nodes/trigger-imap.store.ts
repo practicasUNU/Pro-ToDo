@@ -56,10 +56,18 @@ const buildInitialConfig = (): TriggerImapConfig => ({
   pollIntervalMs: DEFAULT_POLL_INTERVAL_MS,
 });
 
+/** Prefijo del id de Pinia; el sufijo es el `nodeId` del `pipeline_schema`. */
+const STORE_ID_PREFIX = 'triggerImapNode';
+
 // Estado reactivo del nodo TRIGGER_IMAP (regla frontend-quasar.md §3.1).
 // No conoce Axios ni rutas: delega en su servicio y expone `isConfigValid`, que
 // es lo unico que el asistente consulta para habilitar el avance.
-export const useTriggerImapStore = defineStore('triggerImapNode', () => {
+//
+// El cuerpo se declara aparte y NO recibe el `nodeId`: este estado no sabe en
+// que posicion del grafo esta ni como se llama su nodo. El `nodeId` solo decide
+// CUANTAS instancias hay, y eso se resuelve en el id de Pinia (ver
+// `useTriggerImapStore`), no dentro del estado.
+const triggerImapSetup = () => {
   const config = ref<TriggerImapConfig>(buildInitialConfig());
 
   /**
@@ -183,8 +191,54 @@ export const useTriggerImapStore = defineStore('triggerImapNode', () => {
     testConnection,
     resetConfig,
   };
-});
+};
 
-if (import.meta.hot) {
-  import.meta.hot.accept(acceptHMRUpdate(useTriggerImapStore, import.meta.hot));
-}
+/**
+ * Definicion de Pinia para UN nodo concreto.
+ *
+ * El id lleva el `nodeId` dentro a proposito: un pipeline puede encadenar dos
+ * disparadores IMAP contra buzones distintos, y con un id fijo compartirian una
+ * sola instancia — configurar el segundo borraria los `params` del primero y el
+ * esquema ensamblado saldria con la misma configuracion duplicada en ambos
+ * nodos. La identidad del estado tiene que ser la del nodo, no la del tipo.
+ */
+const buildTriggerImapStore = (nodeId: string) =>
+  defineStore(`${STORE_ID_PREFIX}:${nodeId}`, triggerImapSetup);
+
+/** Instancia del store, para tipar helpers y consumidores sin `any`. */
+export type TriggerImapStore = ReturnType<ReturnType<typeof buildTriggerImapStore>>;
+
+/**
+ * Definiciones ya creadas, indexadas por `nodeId`.
+ *
+ * Se memoiza la DEFINICION, no la instancia: de la instancia ya se encarga Pinia,
+ * que cachea por id en la instancia activa. Lo que hay que evitar es reconstruir
+ * la definicion en cada render, porque eso descarta la identidad referencial del
+ * hook y hace trabajo por nada en cada paso del asistente.
+ */
+const definitions = new Map<string, ReturnType<typeof buildTriggerImapStore>>();
+
+/**
+ * Store del nodo TRIGGER_IMAP identificado por `nodeId`.
+ *
+ * Cada nodo del pipeline recibe su propia instancia, aislada de los demas.
+ */
+export const useTriggerImapStore = (nodeId: string): TriggerImapStore => {
+  const cached = definitions.get(nodeId);
+
+  if (cached !== undefined) return cached();
+
+  const definition = buildTriggerImapStore(nodeId);
+  definitions.set(nodeId, definition);
+
+  // Con ids dinamicos no hay una definicion unica que declarar al cargar el
+  // modulo, asi que el HMR se arma sobre cada definicion nueva. Vite conserva un
+  // solo callback self-accept por modulo: hot-recarga el ultimo nodo creado, que
+  // en la practica es el que se esta configurando. Los demas exigen recarga
+  // completa, y es el precio de que cada nodo tenga su propio estado.
+  if (import.meta.hot) {
+    import.meta.hot.accept(acceptHMRUpdate(definition, import.meta.hot));
+  }
+
+  return definition();
+};

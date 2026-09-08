@@ -72,7 +72,7 @@ export const useFlujoDraftStore = defineStore('flujoDraft', () => {
 
     if (step === null) return false;
 
-    return resolveNodeStore(step.nodeType)?.isConfigValid ?? false;
+    return resolveNodeStore(step.nodeType, step.nodeId)?.isConfigValid ?? false;
   });
 
   /**
@@ -108,6 +108,11 @@ export const useFlujoDraftStore = defineStore('flujoDraft', () => {
     const pipeline = availablePipelines.value.find((candidate) => candidate.id === pipelineId);
 
     if (pipeline === undefined) return;
+
+    // La topologia anterior deja de existir, y sus stores no deben sobrevivirle:
+    // sin esto, cambiar de pipeline arrastraria la configuracion de un nodo que
+    // el flujo nuevo ni siquiera contiene.
+    resetNodeStores();
 
     selectedPipelineId.value = pipelineId;
     pipelineTopology.value = pipeline.topology.map(toWizardStep);
@@ -147,7 +152,7 @@ export const useFlujoDraftStore = defineStore('flujoDraft', () => {
    */
   const invalidSteps = computed<WizardStep[]>(() =>
     pipelineTopology.value.filter(
-      (step) => resolveNodeStore(step.nodeType)?.isConfigValid !== true,
+      (step) => resolveNodeStore(step.nodeType, step.nodeId)?.isConfigValid !== true,
     ),
   );
 
@@ -172,7 +177,9 @@ export const useFlujoDraftStore = defineStore('flujoDraft', () => {
     pipelineTopology.value.forEach((step, index) => {
       // El metodo es opcional en el contrato: un disparador es el primero del
       // grafo y no tiene nada aguas arriba que declarar.
-      resolveNodeStore(step.nodeType)?.setAvailableUpstreamNamespaces?.(upstreamNamespaces(index));
+      resolveNodeStore(step.nodeType, step.nodeId)?.setAvailableUpstreamNamespaces?.(
+        upstreamNamespaces(index),
+      );
     });
   };
 
@@ -193,7 +200,7 @@ export const useFlujoDraftStore = defineStore('flujoDraft', () => {
     const nodes: Record<string, AssembledPipelineNode> = {};
 
     pipelineTopology.value.forEach((step, index) => {
-      const store = resolveNodeStore(step.nodeType);
+      const store = resolveNodeStore(step.nodeType, step.nodeId);
 
       nodes[step.nodeId] = {
         nodeId: step.nodeId,
@@ -265,7 +272,28 @@ export const useFlujoDraftStore = defineStore('flujoDraft', () => {
     }
   };
 
+  /**
+   * Devuelve a su estado inicial los stores de los nodos de la topologia actual.
+   *
+   * Es imprescindible porque la instancia de un store de nodo SOBREVIVE a la
+   * topologia que la creo: vive en la instancia de Pinia, no en el borrador. Sin
+   * esta limpieza, crear un flujo y volver al asistente arrancaria con los
+   * `params` del flujo anterior ya cargados y `canSave` en `true` sin que el
+   * operador haya tocado un solo campo — que es exactamente el caso en el que un
+   * guardado accidental publica la configuracion equivocada.
+   *
+   * Recorre la topologia ANTES de vaciarla: una vez vacia ya no hay forma de
+   * saber a que stores preguntar.
+   */
+  const resetNodeStores = (): void => {
+    pipelineTopology.value.forEach((step) => {
+      resolveNodeStore(step.nodeType, step.nodeId)?.resetConfig();
+    });
+  };
+
   const resetDraft = (): void => {
+    resetNodeStores();
+
     selectedPipelineId.value = null;
     pipelineTopology.value = [];
     activeStep.value = 0;
@@ -288,6 +316,7 @@ export const useFlujoDraftStore = defineStore('flujoDraft', () => {
     syncUpstreamNamespaces,
     assemblePipelineSchema,
     assembleAndSaveWorkflow,
+    resetNodeStores,
     loadAvailablePipelines,
     selectPipeline,
     goToNextStep,
