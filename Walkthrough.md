@@ -3234,3 +3234,73 @@ anticiclos, el truncado ante un puntero huérfano y el callback de aviso.
 **Próximo paso:** paso 2 — `backend/src/modules/workflow-templates/` con sus DTOs, servicio (con
 `PipelineValidatorService` y `assertNameAvailable`), controlador (`@Roles(ADMIN)` en las escrituras vía
 `getAllAndOverride`), módulo, registro en `AppModule` y `workflow-templates.service.spec.ts`.
+
+### Paso 2 completado — módulo `WorkflowTemplates`
+
+| Archivo | Estado |
+|---|---|
+| `backend/src/modules/workflow-templates/dto/create-workflow-template.dto.ts` | creado |
+| `backend/src/modules/workflow-templates/dto/update-workflow-template.dto.ts` | creado |
+| `backend/src/modules/workflow-templates/dto/workflow-template-response.dto.ts` | creado |
+| `backend/src/modules/workflow-templates/workflow-templates.service.ts` | creado |
+| `backend/src/modules/workflow-templates/workflow-templates.controller.ts` | creado |
+| `backend/src/modules/workflow-templates/workflow-templates.module.ts` | creado |
+| `backend/src/modules/workflow-templates/workflow-templates.service.spec.ts` | creado, 24 pruebas |
+| `backend/src/app.module.ts` | registra `WorkflowTemplatesModule` |
+| `backend/src/modules/workflows/workflows.service.spec.ts` | fixture con `templateId`/`template` en null |
+
+```
+Backend → 429 pruebas (antes 405) · 25 suites · tsc limpio · eslint 0 errores
+```
+
+### El «por qué» de cuatro decisiones
+
+**1. Lectura para EDITOR, escritura solo para ADMIN.** Es la diferencia con `TemplatesController`, que
+admite ambos roles en todo. El selector de la Fase 0 del asistente lo usa un EDITOR, así que el `GET`
+tiene que estar abierto; pero redefinir el maestro del que parten todos los flujos es más poderoso que
+editar un flujo suelto —cambiar la topología base decide qué nodos existen en cada flujo que alguien
+cree después. Los `@Roles(UserRole.ADMIN)` de método ganan al de clase porque `RolesGuard` resuelve con
+`getAllAndOverride`; los guards siguen declarados a nivel de clase para que un endpoint futuro no nazca
+desprotegido.
+
+**2. Dos DTO de respuesta, no uno.** El listado (`WorkflowTemplateResponseDto`) proyecta la topología y
+**omite** `pipelineSchema`, por el mismo criterio que `PipelineSummaryResponseDto`: los `params` de un
+TRIGGER_IMAP llevan `host`, `user` y `passwordEnvKey`. Devolverlos en el listado expondría la
+configuración de cada nodo de cada plantilla en la petición que el asistente hace en cada arranque. El
+detalle (`WorkflowTemplateDetailResponseDto`) sí lo incluye, porque es el objeto que el editor
+administrativo edita. La prueba 1.4 fija esa frontera serializando la respuesta y buscando
+`passwordEnvKey`.
+
+Reutiliza `PipelineStepDto` de `@modules/workflows` en lugar de declarar su propio paso: es la misma
+proyección, y así el frontend usa un único tipo para pintar el stepper venga de una plantilla o de un
+flujo.
+
+**3. La validación del grafo es la razón de ser del servicio, no el CRUD.** Una plantilla es el punto de
+partida de N flujos, así que un `nextStep` roto aquí se propaga a cada instancia que alguien cree. Se
+reutiliza `PipelineValidatorService` —el mismo que valida el esquema de un flujo— para que ambos caminos
+exijan exactamente lo mismo; replicarlo abriría la puerta a una plantilla que el catálogo acepta y el
+motor rechaza. En `update` se revalida siempre que el grafo viaje.
+
+El nombre se comprueba **antes** del grafo (prueba 3.4 verifica que `validateSchema` no llega a
+llamarse): es la validación más barata y la que el usuario corrige más a menudo.
+
+**4. `assertInstantiable` y no un simple `findOne`.** Lo consume `WorkflowsService` en el paso 3 para
+comprobar el `templateId` recibido. Una plantilla retirada devuelve 400: permitir instanciarla vaciaría
+de sentido el borrado lógico, que existe justo para que deje de usarse. Y el borrado es lógico porque
+los flujos instanciados apuntan a la fila con `id_plantilla_origen`.
+
+Nota de método: `update` comprueba `!== undefined` en cada campo y no la veracidad del valor. Es lo que
+permite que `{ active: false }` inactive de verdad y que una descripción vacía se guarde vacía; con un
+`if (updateDto.active)` ambos casos se ignorarían en silencio. La prueba 4.4 lo fija.
+
+Hallazgo colateral: `npx tsc -p tsconfig.json` (el que incluye las specs) arrastra **26 errores
+preexistentes** en `imap-polling.service.spec.ts` y `allowed-ips.service.spec.ts` —varianza de las
+firmas de los mocks de TypeORM y un `delete` sobre propiedad `readonly`—, ajenos a esta entrega. La
+puerta del proyecto es `tsconfig.build.json`, que excluye specs, y `ts-jest` transpila sin comprobar
+tipos (`isolatedModules`). De los 4 errores que aparecían en `workflows.service.spec.ts`, **1 lo
+introdujo esta entrega** (el fixture `buildWorkflow` dejó de satisfacer `Workflow` al ganar dos
+columnas) y quedó corregido; los otros 3 son de la misma familia preexistente.
+
+**Próximo paso:** paso 3 — `templateId` en `CreateWorkflowDto`, `WorkflowsService.createWorkflow`
+validando con `assertInstantiable`, `updateWorkflow` + `UpdateWorkflowDto`, `PATCH /api/workflows/:id`
+con la revalidación al activar, y ampliación de `workflows.service.spec.ts`.

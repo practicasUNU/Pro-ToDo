@@ -1599,7 +1599,7 @@ Rama: `feat/trigger-imap`. Introduce el catálogo de blueprints, la relación in
 tres vistas que la separación exige. Cierra el pendiente «sin endpoint para activar un flujo».
 
 - [x] 1. Esquema y entidades — migración 010, `init.sql`, `WorkflowTemplate`, relación en `Workflow`, helper `pipeline-topology.util.ts`
-- [ ] 2. Módulo `WorkflowTemplates` — DTOs, servicio, controlador, módulo y pruebas
+- [x] 2. Módulo `WorkflowTemplates` — DTOs, servicio, controlador, módulo y pruebas
 - [ ] 3. Flujos — `templateId` en el alta, `updateWorkflow` y `PATCH /api/workflows/:id`
 - [ ] 4. Frontend — tipos, servicios, tres stores, tres vistas, router, layout y pruebas
 

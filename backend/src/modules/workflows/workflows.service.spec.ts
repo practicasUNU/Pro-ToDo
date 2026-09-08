@@ -56,6 +56,10 @@ const buildWorkflow = (overrides: Partial<Workflow> = {}): Workflow => ({
   description: null,
   active: true,
   pipelineSchema: buildSchema(),
+  // Un flujo que no nacio de ninguna plantilla, que es el caso de todos los
+  // anteriores a la migracion 010 y el del asistente creando uno desde cero.
+  templateId: null,
+  template: null,
   createdById: AUTHOR_ID,
   createdAt: new Date('2026-01-01T00:00:00.000Z'),
   ...overrides,
