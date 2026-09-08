@@ -2803,3 +2803,67 @@ alta hereda gratis la exclusión de `params` (prueba 8.2).
 
 **Paso 6:** crear `frontend/src/services/workflows.service.ts` con `createWorkflow(payload)` contra
 `POST /workflows`, tipando el payload como `CreateWorkflowPayload` en `types/pipeline.ts`.
+
+---
+
+## 2026-09-08 · PROT-12 · Ensamblado del esquema y conexión de `upstreamNamespaces` — rama `feat/trigger-imap`
+
+Segunda mitad del cierre: el agregador ya sabe recolectar la configuración de cada nodo y persistir el
+flujo, y los nodos ya conocen su contrato aguas arriba de verdad.
+
+### Pasos 6-9 completados
+
+| Archivo | Estado |
+|---|---|
+| `frontend/src/types/pipeline.ts` | +`CreateWorkflowPayload`, `AssembledPipelineNode`, `AssembledPipelineSchema` |
+| `frontend/src/services/workflows.service.ts` | creado |
+| `frontend/src/components/nodes/node-store-registry.ts` | contrato ampliado |
+| `frontend/src/stores/nodes/trigger-imap.store.ts` | +`toNodeParams()` |
+| `frontend/src/stores/nodes/template-mapper.store.ts` | +`toNodeParams()` |
+| `frontend/src/stores/flujo-draft.store.ts` | +`assembleAndSaveWorkflow`, `assemblePipelineSchema`, `syncUpstreamNamespaces`, `invalidSteps`, `canSave` |
+| `frontend/src/stores/flujo-draft.store.spec.ts` | +15 pruebas (bloques 7, 8 y 9) |
+
+Verificación: **108 pruebas en verde** (6 archivos, +15), `vue-tsc` limpio, `eslint` limpio.
+
+### El «por qué» de cuatro decisiones
+
+**1. `toNodeParams()` en lugar de leer `config`.** El agregador podría haber copiado `store.config` tal
+cual, pero eso le obligaría a conocer la forma interna de cada nodo — lo que §3.1 prohíbe. Con este
+método el nodo **decide qué publica**, y hay un caso donde `config` y `params` no coinciden: el mapeador
+guarda `outputNamespace` en su config para la interfaz, pero en el esquema ese valor es propiedad del
+**nodo**, no de sus `params`. Publicarlo en ambos sitios crearía dos fuentes de verdad dentro del mismo
+JSON, y nada garantizaría que coincidieran (pruebas 8.1 y 8.2).
+
+Beneficio colateral de tipado: una `interface` no es asignable a `Record<string, unknown>` en
+TypeScript por no tener index signature implícita, así que exponer `config` directamente habría exigido
+convertir las interfaces de configuración a type aliases o meter un cast.
+
+**2. `setAvailableUpstreamNamespaces` es opcional en el contrato.** No todo nodo depende del contexto:
+un disparador es el primero del grafo y no tiene nada aguas arriba que declarar. El anfitrión comprueba
+su existencia con `?.()` antes de llamarlo (prueba 7.2).
+
+**3. La sincronización ocurre al elegir el pipeline, no al llegar al paso.** `selectPipeline` llama a
+`syncUpstreamNamespaces()` de inmediato: si se esperara a que el usuario llegase al paso del mapeador,
+su primera validación se haría contra una lista vacía y avisaría de variables ausentes que sí existen.
+Y se recalcula sobre **todos** los pasos al cambiar de pipeline, porque arrastrar la lista anterior le
+haría creer a un nodo que `raw_email` existe en un flujo donde nadie lo produce (prueba 7.3).
+
+Esto cierra el pendiente que arrastraba `template-mapper.store.ts`: su `DEFAULT_UPSTREAM_NAMESPACES`
+estaba marcado PROVISIONAL y validaba contra namespaces inventados. Ahora un flujo que arranca en
+`TRIGGER_IMAP` expone `raw_email` de verdad, y el mapeador puede afirmar que `{{raw_email.subject}}` es
+resoluble y que `{{scraped_web.headline}}` no lo es en ese flujo concreto (prueba 7.1).
+
+**4. `invalidSteps` pregunta a TODOS los pasos, no solo al activo.** El asistente permite retroceder,
+así que sin esta comprobación se podría guardar un flujo tras haber vaciado un paso anterior ya
+visitado. El error nombra los pasos que faltan en lugar de decir «hay errores» (pruebas 9.1 y 9.2).
+
+`onErrorStep` queda en `null` en todos los nodos: el asistente aún no ofrece configurar caminos de
+recuperación, y un puntero inventado sería peor que su ausencia — con `null`, el motor detiene la
+ejecución en el nodo que falla, que es el comportamiento correcto por defecto (prueba 8.4).
+
+### Próximo paso exacto
+
+**Paso 10:** añadir el paso terminal de «Revisión y Guardado» a `frontend/src/pages/WizardPage.vue`:
+campo `name` (requerido) y `description`, resumen de la topología configurada, botón «Crear Flujo»
+(`.pd-btn-primary`, `icon-right="north_east"`, `:loading="draftStore.isLoading"`,
+`:disable="!draftStore.canSave"`), `$q.notify` de éxito y redirección al catálogo.

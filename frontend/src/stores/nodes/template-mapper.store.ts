@@ -130,6 +130,19 @@ export const useTemplateMapperStore = defineStore('templateMapperNode', () => {
     }
   };
 
+  /**
+   * `params` del nodo para el `pipeline_schema`.
+   *
+   * Solo `templateId`: es lo unico que `TemplateMapperStrategy` lee de sus
+   * `params`. El `outputNamespace` que este store guarda sirve a la interfaz,
+   * pero en el esquema es propiedad del NODO, y el agregador lo toma de la
+   * topologia; publicarlo tambien aqui crearia dos fuentes de verdad dentro del
+   * mismo JSON.
+   */
+  const toNodeParams = (): Record<string, unknown> => ({
+    templateId: config.value.templateId,
+  });
+
   const resetConfig = (): void => {
     config.value = {
       templateId: null,
@@ -148,6 +161,7 @@ export const useTemplateMapperStore = defineStore('templateMapperNode', () => {
     isConfigValid,
     requiredVariables,
     missingRequiredVariables,
+    toNodeParams,
     loadTemplates,
     setTemplateId,
     setAvailableUpstreamNamespaces,

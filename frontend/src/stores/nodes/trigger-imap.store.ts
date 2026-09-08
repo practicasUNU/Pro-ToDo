@@ -150,6 +150,20 @@ export const useTriggerImapStore = defineStore('triggerImapNode', () => {
     }
   };
 
+  /**
+   * `params` del nodo para el `pipeline_schema`.
+   *
+   * Publica los siete campos de conexion, `passwordEnvKey` incluido: es el
+   * NOMBRE de la variable de entorno, no el secreto, y la estrategia del backend
+   * lo necesita para resolverlo en cada ejecucion. Se recortan los espacios por
+   * el mismo motivo que en `checkPayload`: lo que se guarda debe ser exactamente
+   * lo que se probo.
+   *
+   * `outputNamespace` NO va aqui: en el esquema es propiedad del nodo, no de sus
+   * `params`, y el agregador lo toma de la topologia.
+   */
+  const toNodeParams = (): Record<string, unknown> => ({ ...checkPayload.value });
+
   const resetConfig = (): void => {
     config.value = buildInitialConfig();
     connectionVerified.value = false;
@@ -164,6 +178,7 @@ export const useTriggerImapStore = defineStore('triggerImapNode', () => {
     hasValidFields,
     isConfigValid,
     checkPayload,
+    toNodeParams,
     patchConfig,
     testConnection,
     resetConfig,

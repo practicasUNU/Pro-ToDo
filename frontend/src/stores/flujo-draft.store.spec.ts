@@ -1,6 +1,7 @@
 import { createPinia, setActivePinia } from 'pinia';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { useTemplateMapperStore } from '@stores/nodes/template-mapper.store';
 import { useTriggerImapStore } from '@stores/nodes/trigger-imap.store';
 
 import { useFlujoDraftStore } from './flujo-draft.store';
@@ -12,6 +13,9 @@ import type { PipelineSummary } from '@/types/pipeline';
 // Sin esto se cargaria `@boot/axios`, que necesita entorno de navegador.
 vi.mock('@services/pipelines.service', () => ({
   fetchSelectablePipelines: vi.fn(),
+}));
+vi.mock('@services/workflows.service', () => ({
+  createWorkflow: vi.fn(),
 }));
 vi.mock('@services/nodes/trigger-imap.service', () => ({
   checkImapConnection: vi.fn(),
@@ -25,6 +29,9 @@ const pipelinesService = await import('@services/pipelines.service');
 const fetchSelectablePipelines = vi.mocked(
   pipelinesService.fetchSelectablePipelines,
 );
+
+const workflowsService = await import('@services/workflows.service');
+const createWorkflow = vi.mocked(workflowsService.createWorkflow);
 
 const PIPELINE_ID = 'b3f1c2d4-5a6b-4c7d-8e9f-0a1b2c3d4e5f';
 const OTHER_PIPELINE_ID = 'c4a2d3e5-6f7b-4c8d-9e0f-1a2b3c4d5e6f';
@@ -337,6 +344,251 @@ describe('useFlujoDraftStore · agregador del asistente', () => {
 
       // 3. Assert: volver al selector no debe obligar a otra peticion HTTP.
       expect(draft.availablePipelines).toHaveLength(1);
+    });
+  });
+
+  describe('7. Sincronizacion de namespaces aguas arriba', () => {
+    it('7.1 deberia exponer raw_email al mapeador al elegir el pipeline', async () => {
+      // 1. Arrange & 2. Act
+      await buildSelectedDraft();
+
+      // 3. Assert: el mapeador es el tercer paso, asi que recibe los namespaces
+      //    de los dos anteriores. Antes de esta conexion usaba una lista fija
+      //    marcada PROVISIONAL y validaba contra namespaces inventados.
+      const mapper = useTemplateMapperStore();
+      expect(mapper.availableUpstreamNamespaces).toEqual([
+        'raw_email',
+        'parsed_email',
+      ]);
+    });
+
+    it('7.2 no deberia fallar con nodos que no declaran el metodo', async () => {
+      // 1. Arrange & 2. Act: el trigger no tiene
+      //    `setAvailableUpstreamNamespaces` porque es el primero del grafo.
+      const draft = await buildSelectedDraft();
+
+      // 3. Assert: la llamada opcional no revienta.
+      expect(() => draft.syncUpstreamNamespaces()).not.toThrow();
+    });
+
+    it('7.3 deberia recalcular al cambiar de pipeline', async () => {
+      // 1. Arrange
+      const draft = useFlujoDraftStore();
+      const shortPipeline = buildPipeline({
+        id: OTHER_PIPELINE_ID,
+        topology: [
+          {
+            nodeId: 'nodo_mapeador',
+            nodeType: NodeType.MAPEADOR_PLANTILLA,
+            outputNamespace: 'rendered_html',
+          },
+        ],
+      });
+      fetchSelectablePipelines.mockResolvedValue([
+        buildPipeline(),
+        shortPipeline,
+      ]);
+      await draft.loadAvailablePipelines();
+      draft.selectPipeline(PIPELINE_ID);
+
+      // 2. Act
+      draft.selectPipeline(OTHER_PIPELINE_ID);
+
+      // 3. Assert: en el pipeline corto el mapeador es el primero, asi que no
+      //    tiene nada aguas arriba. Arrastrar la lista anterior le haria creer
+      //    que `raw_email` existe en un flujo donde nadie lo produce.
+      const mapper = useTemplateMapperStore();
+      expect(mapper.availableUpstreamNamespaces).toEqual([]);
+    });
+  });
+
+  describe('8. Ensamblado del pipeline_schema', () => {
+    it('8.1 deberia recolectar los params de cada store de nodo', async () => {
+      // 1. Arrange
+      const draft = await buildSelectedDraft();
+      verifyTriggerStore();
+
+      // 2. Act
+      const schema = draft.assemblePipelineSchema('Flujo de prueba');
+
+      // 3. Assert: los siete campos de conexion salen del store del trigger, no
+      //    de una copia que mantuviera el agregador.
+      expect(schema.nodes.trigger_imap?.params).toEqual({
+        host: 'imap.unuware.com',
+        port: 993,
+        secure: true,
+        user: 'notiweb@unuware.com',
+        passwordEnvKey: 'IMAP_PASSWORD',
+        mailbox: 'INBOX',
+        pollIntervalMs: 60_000,
+      });
+    });
+
+    it('8.2 no deberia duplicar outputNamespace dentro de params', async () => {
+      // 1. Arrange
+      const draft = await buildSelectedDraft();
+
+      // 2. Act
+      const schema = draft.assemblePipelineSchema('Flujo de prueba');
+
+      // 3. Assert: en el esquema es propiedad del NODO. Publicarlo tambien en
+      //    `params` crearia dos fuentes de verdad dentro del mismo JSON.
+      expect(schema.nodes.trigger_imap?.outputNamespace).toBe('raw_email');
+      expect(schema.nodes.trigger_imap?.params).not.toHaveProperty(
+        'outputNamespace',
+      );
+    });
+
+    it('8.3 deberia encadenar nextStep siguiendo el orden de la topologia', async () => {
+      // 1. Arrange
+      const draft = await buildSelectedDraft();
+
+      // 2. Act
+      const schema = draft.assemblePipelineSchema('Flujo de prueba');
+
+      // 3. Assert
+      expect(schema.entrypoint).toBe('trigger_imap');
+      expect(schema.nodes.trigger_imap?.nextStep).toBe('nodo_parser');
+      expect(schema.nodes.nodo_parser?.nextStep).toBe('nodo_mapeador');
+      expect(schema.nodes.nodo_mapeador?.nextStep).toBeNull();
+    });
+
+    it('8.4 deberia dejar onErrorStep en null en todos los nodos', async () => {
+      // 1. Arrange
+      const draft = await buildSelectedDraft();
+
+      // 2. Act
+      const schema = draft.assemblePipelineSchema('Flujo de prueba');
+
+      // 3. Assert: el asistente aun no ofrece caminos de recuperacion, y un
+      //    puntero inventado seria peor que su ausencia.
+      for (const node of Object.values(schema.nodes)) {
+        expect(node.onErrorStep).toBeNull();
+      }
+    });
+
+    it('8.5 deberia declarar la version SemVer inicial', async () => {
+      // 1. Arrange
+      const draft = await buildSelectedDraft();
+
+      // 2. Act
+      const schema = draft.assemblePipelineSchema('Flujo de prueba');
+
+      // 3. Assert: `SEMVER_PATTERN` del backend lo exige.
+      expect(schema.version).toBe('1.0.0');
+    });
+  });
+
+  describe('9. Guardado del flujo', () => {
+    it('9.1 deberia rechazar el guardado con pasos sin configurar', async () => {
+      // 1. Arrange: el trigger arranca sin probar la conexion.
+      const draft = await buildSelectedDraft();
+
+      // 2. Act & 3. Assert: la guarda vive en el store y no solo en el
+      //    `:disable` del boton; guardar un flujo a medias dejaria en la BD un
+      //    esquema que revienta en su primera ejecucion.
+      await expect(
+        draft.assembleAndSaveWorkflow('Flujo incompleto'),
+      ).rejects.toThrow(/sin configurar/);
+      expect(createWorkflow).not.toHaveBeenCalled();
+    });
+
+    it('9.2 deberia nombrar los pasos invalidos en el error', async () => {
+      // 1. Arrange
+      const draft = await buildSelectedDraft();
+
+      // 2. Act & 3. Assert
+      await expect(
+        draft.assembleAndSaveWorkflow('Flujo incompleto'),
+      ).rejects.toThrow(/Disparador IMAP/);
+    });
+
+    it('9.3 deberia enviar nombre, descripcion y esquema ensamblado', async () => {
+      // 1. Arrange: los tres pasos validos.
+      const draft = await buildSelectedDraft();
+      draft.pipelineTopology = [draft.pipelineTopology[0]!];
+      verifyTriggerStore();
+      createWorkflow.mockResolvedValue(buildPipeline({ id: 'nuevo-id' }));
+
+      // 2. Act
+      await draft.assembleAndSaveWorkflow('Notiweb v2', '  Con espacios  ');
+
+      // 3. Assert
+      expect(createWorkflow).toHaveBeenCalledWith(
+        expect.objectContaining({
+          name: 'Notiweb v2',
+          description: 'Con espacios',
+        }),
+      );
+      const payload = createWorkflow.mock.calls[0]?.[0];
+      expect(payload?.pipelineSchema.nodes.trigger_imap?.nodeId).toBe(
+        'trigger_imap',
+      );
+    });
+
+    it('9.4 deberia omitir description cuando llega vacia', async () => {
+      // 1. Arrange
+      const draft = await buildSelectedDraft();
+      draft.pipelineTopology = [draft.pipelineTopology[0]!];
+      verifyTriggerStore();
+      createWorkflow.mockResolvedValue(buildPipeline());
+
+      // 2. Act
+      await draft.assembleAndSaveWorkflow('Notiweb v2', '   ');
+
+      // 3. Assert: con `exactOptionalPropertyTypes` la clave se omite en vez de
+      //    enviarse como `undefined`, que el DTO backend rechazaria.
+      expect(createWorkflow.mock.calls[0]?.[0]).not.toHaveProperty(
+        'description',
+      );
+    });
+
+    it('9.5 deberia anadir el flujo creado al catalogo', async () => {
+      // 1. Arrange
+      const draft = await buildSelectedDraft();
+      draft.pipelineTopology = [draft.pipelineTopology[0]!];
+      verifyTriggerStore();
+      const created = buildPipeline({ id: 'nuevo-id', name: 'Recien creado' });
+      createWorkflow.mockResolvedValue(created);
+
+      // 2. Act
+      const result = await draft.assembleAndSaveWorkflow('Recien creado');
+
+      // 3. Assert: sin esto, volver al selector mostraria una lista sin el flujo
+      //    que se acaba de guardar.
+      expect(result).toEqual(created);
+      expect(draft.availablePipelines[0]).toEqual(created);
+    });
+
+    it('9.6 deberia apagar isLoading aunque el guardado falle', async () => {
+      // 1. Arrange
+      const draft = await buildSelectedDraft();
+      draft.pipelineTopology = [draft.pipelineTopology[0]!];
+      verifyTriggerStore();
+      createWorkflow.mockRejectedValue(new Error('400 Bad Request'));
+
+      // 2. Act & 3. Assert
+      await expect(
+        draft.assembleAndSaveWorkflow('Notiweb v2'),
+      ).rejects.toThrow('400 Bad Request');
+      expect(draft.isLoading).toBe(false);
+    });
+
+    it('9.7 deberia exponer canSave e invalidSteps de forma coherente', async () => {
+      // 1. Arrange
+      const draft = await buildSelectedDraft();
+      draft.pipelineTopology = [draft.pipelineTopology[0]!];
+
+      // 3. Assert (antes)
+      expect(draft.canSave).toBe(false);
+      expect(draft.invalidSteps).toHaveLength(1);
+
+      // 2. Act
+      verifyTriggerStore();
+
+      // 3. Assert (despues)
+      expect(draft.canSave).toBe(true);
+      expect(draft.invalidSteps).toEqual([]);
     });
   });
 });

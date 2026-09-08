@@ -116,3 +116,40 @@ export interface CheckImapResult {
     readonly message: string;
   };
 }
+
+/**
+ * Cuerpo de `POST /api/workflows`.
+ *
+ * `pipelineSchema` va sin tipar en profundidad a proposito: lo ensambla el
+ * asistente a partir de la `config` de cada store de nodo, y el backend lo valida
+ * con `PipelineValidatorService`. Replicar aqui el grafo completo con tipos
+ * estrictos obligaria a mantener dos definiciones sincronizadas del mismo
+ * contrato para no ganar nada: el error de forma llega igual como 400.
+ *
+ * No incluye `createdById`: la autoria la toma el backend del token JWT.
+ */
+export interface CreateWorkflowPayload {
+  readonly name: string;
+  readonly description?: string;
+  readonly pipelineSchema: AssembledPipelineSchema;
+  readonly active?: boolean;
+}
+
+/** Nodo del `pipeline_schema` tal como lo ensambla el asistente. */
+export interface AssembledPipelineNode {
+  readonly nodeId: string;
+  readonly nodeType: NodeType;
+  readonly outputNamespace: string;
+  readonly nextStep: string | null;
+  readonly onErrorStep: string | null;
+  readonly params: Record<string, unknown>;
+}
+
+/** Grafo completo que el asistente envia al backend. */
+export interface AssembledPipelineSchema {
+  readonly flowId: string;
+  readonly name: string;
+  readonly version: string;
+  readonly entrypoint: string;
+  readonly nodes: Record<string, AssembledPipelineNode>;
+}

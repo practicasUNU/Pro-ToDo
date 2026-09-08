@@ -13,6 +13,30 @@ import { NodeType } from '@/types/pipeline';
  */
 export interface NodeConfigStore {
   readonly isConfigValid: boolean;
+
+  /**
+   * `params` que este nodo aporta al `pipeline_schema`.
+   *
+   * Es el nodo quien decide QUE publica, no el agregador quien lo deduce de su
+   * `config`. Dos razones:
+   *
+   * 1. El agregador no debe conocer la forma interna de ninguna config (§3.1);
+   *    con este metodo pregunta en vez de inspeccionar.
+   * 2. `config` y `params` no siempre coinciden. El mapeador guarda
+   *    `outputNamespace` en su config para la interfaz, pero en el esquema ese
+   *    valor es propiedad del NODO y no de sus `params`: publicarlo en ambos
+   *    sitios crearia dos fuentes de verdad dentro del mismo JSON.
+   */
+  readonly toNodeParams: () => Record<string, unknown>;
+
+  /**
+   * Declara los namespaces que aportan los nodos anteriores del flujo.
+   *
+   * OPCIONAL porque no todo nodo depende del contexto: un disparador es el
+   * primero del grafo y no tiene nada aguas arriba. El anfitrion comprueba su
+   * existencia antes de llamarlo.
+   */
+  readonly setAvailableUpstreamNamespaces?: (namespaces: string[]) => void;
 }
 
 /** Hook de Pinia que devuelve un store conforme al contrato del nodo. */
