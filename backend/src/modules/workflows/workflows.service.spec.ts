@@ -80,7 +80,7 @@ const buildExecution = (
 });
 
 type WorkflowRepositoryMock = jest.Mocked<
-  Pick<Repository<Workflow>, 'findOne'>
+  Pick<Repository<Workflow>, 'findOne' | 'find'>
 >;
 type ValidatorMock = jest.Mocked<
   Pick<PipelineValidatorService, 'validateSchema'>
@@ -110,6 +110,7 @@ interface ServiceHarness {
 const buildHarness = (): ServiceHarness => {
   const repository: WorkflowRepositoryMock = {
     findOne: jest.fn().mockResolvedValue(buildWorkflow()),
+    find: jest.fn().mockResolvedValue([buildWorkflow()]),
   };
   const validator: ValidatorMock = {
     validateSchema: jest.fn().mockResolvedValue(buildSchema()),
@@ -130,6 +131,7 @@ const buildHarness = (): ServiceHarness => {
     engine as unknown as FsmEngineService,
   );
   jest.spyOn(service['logger'], 'log').mockImplementation(() => undefined);
+  jest.spyOn(service['logger'], 'warn').mockImplementation(() => undefined);
 
   return { service, repository, validator, engine };
 };
@@ -260,6 +262,222 @@ describe('WorkflowsService (despacho manual, Camino B)', () => {
         service.runWorkflowTest(WORKFLOW_ID, {}),
       ).rejects.toBeInstanceOf(ConflictException);
       expect(engine.executeWorkflow).not.toHaveBeenCalled();
+    });
+  });
+});
+
+/**
+ * Pipeline de tres nodos cuyas CLAVES estan a proposito en orden inverso al de
+ * ejecucion (destino -> parser -> trigger).
+ *
+ * Es el nucleo de la prueba de orden: si la proyeccion usara
+ * `Object.values(schema.nodes)`, devolveria justo esta secuencia invertida y el
+ * asistente pintaria el stepper al reves.
+ */
+const buildUnorderedSchema = (): PipelineSchemaDto => ({
+  flowId: WORKFLOW_ID,
+  name: 'Notiweb - publicacion automatica',
+  version: '1.0.0',
+  entrypoint: 'trigger_imap',
+  nodes: {
+    nodo_destino: {
+      nodeId: 'nodo_destino',
+      nodeType: NodeType.DESTINO_HTTP,
+      outputNamespace: 'destino_http',
+      nextStep: null,
+      onErrorStep: null,
+      params: { url: 'https://drupal.unuware.com/jsonapi/node/article' },
+    },
+    nodo_parser: {
+      nodeId: 'nodo_parser',
+      nodeType: NodeType.PARSER_PRE_IA,
+      outputNamespace: 'parsed_email',
+      nextStep: 'nodo_destino',
+      onErrorStep: null,
+      params: { stripSignatures: true },
+    },
+    trigger_imap: {
+      nodeId: 'trigger_imap',
+      nodeType: NodeType.TRIGGER_IMAP,
+      outputNamespace: 'raw_email',
+      nextStep: 'nodo_parser',
+      onErrorStep: null,
+      params: {
+        host: 'imap.unuware.com',
+        user: 'notiweb@unuware.com',
+        passwordEnvKey: 'IMAP_PASSWORD',
+      },
+    },
+  },
+});
+
+describe('WorkflowsService (catalogo de pipelines del asistente)', () => {
+  describe('4. Filtrado de flujos seleccionables', () => {
+    it('4.1 deberia omitir los flujos sin configuracion_pipeline', async () => {
+      // 1. Arrange: uno configurado y otro a medio crear.
+      const { service, repository } = buildHarness();
+      repository.find.mockResolvedValue([
+        buildWorkflow(),
+        buildWorkflow({ id: EXECUTION_ID, pipelineSchema: null }),
+      ]);
+
+      // 2. Act
+      const result = await service.findSelectablePipelines();
+
+      // 3. Assert: un flujo sin esquema no sirve como plantilla de la que
+      //    partir, y el asistente no tendria pasos que mostrar.
+      expect(result).toHaveLength(1);
+      expect(result[0]?.id).toBe(WORKFLOW_ID);
+    });
+
+    it('4.2 deberia devolver una lista vacia si ningun flujo tiene esquema', async () => {
+      // 1. Arrange
+      const { service, repository } = buildHarness();
+      repository.find.mockResolvedValue([
+        buildWorkflow({ pipelineSchema: null }),
+      ]);
+
+      // 2. Act
+      const result = await service.findSelectablePipelines();
+
+      // 3. Assert
+      expect(result).toEqual([]);
+    });
+
+    it('4.3 deberia proyectar los metadatos del flujo', async () => {
+      // 1. Arrange
+      const { service, repository } = buildHarness();
+      repository.find.mockResolvedValue([
+        buildWorkflow({ description: 'Publicacion automatica de noticias' }),
+      ]);
+
+      // 2. Act
+      const [summary] = await service.findSelectablePipelines();
+
+      // 3. Assert
+      expect(summary).toMatchObject({
+        id: WORKFLOW_ID,
+        name: '[E2E] Mapeador de plantilla',
+        description: 'Publicacion automatica de noticias',
+        active: true,
+      });
+    });
+  });
+
+  describe('5. Orden de la topologia', () => {
+    it('5.1 deberia ordenar los pasos siguiendo nextStep desde entrypoint', async () => {
+      // 1. Arrange: las claves del mapa van en orden INVERSO al de ejecucion.
+      const { service, repository } = buildHarness();
+      repository.find.mockResolvedValue([
+        buildWorkflow({ pipelineSchema: buildUnorderedSchema() }),
+      ]);
+
+      // 2. Act
+      const [summary] = await service.findSelectablePipelines();
+
+      // 3. Assert: el orden sale del grafo, no de `Object.keys`. Si saliera del
+      //    mapa, esto seria ['nodo_destino', 'nodo_parser', 'trigger_imap'].
+      expect(summary?.topology.map((step) => step.nodeId)).toEqual([
+        'trigger_imap',
+        'nodo_parser',
+        'nodo_destino',
+      ]);
+    });
+
+    it('5.2 deberia proyectar nodeType y outputNamespace de cada paso', async () => {
+      // 1. Arrange
+      const { service, repository } = buildHarness();
+      repository.find.mockResolvedValue([
+        buildWorkflow({ pipelineSchema: buildUnorderedSchema() }),
+      ]);
+
+      // 2. Act
+      const [summary] = await service.findSelectablePipelines();
+
+      // 3. Assert: es lo que el frontend necesita para resolver el configurador
+      //    y para saber que namespaces aportan los pasos previos.
+      expect(summary?.topology[0]).toEqual({
+        nodeId: 'trigger_imap',
+        nodeType: NodeType.TRIGGER_IMAP,
+        outputNamespace: 'raw_email',
+      });
+    });
+
+    it('5.3 no deberia colgarse ante un nextStep circular', async () => {
+      // 1. Arrange: ciclo que `validatePipelineTopology` rechazaria, pero que
+      //    una fila escrita por SQL directo puede contener.
+      const schema = buildUnorderedSchema();
+      schema.nodes.nodo_destino.nextStep = 'trigger_imap';
+      const { service, repository } = buildHarness();
+      repository.find.mockResolvedValue([
+        buildWorkflow({ pipelineSchema: schema }),
+      ]);
+
+      // 2. Act
+      const [summary] = await service.findSelectablePipelines();
+
+      // 3. Assert: el `Set` de visitados corta el bucle; sin el, la peticion
+      //    HTTP no volveria nunca.
+      expect(summary?.topology).toHaveLength(3);
+    });
+
+    it('5.4 deberia truncar la topologia ante un puntero huerfano', async () => {
+      // 1. Arrange: `nodo_parser` no existe en el mapa.
+      const schema = buildUnorderedSchema();
+      delete schema.nodes.nodo_parser;
+      const { service, repository } = buildHarness();
+      repository.find.mockResolvedValue([
+        buildWorkflow({ pipelineSchema: schema }),
+      ]);
+
+      // 2. Act
+      const [summary] = await service.findSelectablePipelines();
+
+      // 3. Assert: devuelve lo acumulado en vez de lanzar. Es un esquema roto,
+      //    pero el catalogo debe responder para que alguien pueda verlo.
+      expect(summary?.topology.map((step) => step.nodeId)).toEqual([
+        'trigger_imap',
+      ]);
+    });
+  });
+
+  describe('6. No filtracion de configuracion sensible', () => {
+    it('6.1 no deberia incluir params en ningun paso', async () => {
+      // 1. Arrange: el nodo trigger lleva host, user y passwordEnvKey.
+      const { service, repository } = buildHarness();
+      repository.find.mockResolvedValue([
+        buildWorkflow({ pipelineSchema: buildUnorderedSchema() }),
+      ]);
+
+      // 2. Act
+      const [summary] = await service.findSelectablePipelines();
+
+      // 3. Assert: un endpoint de listado no debe convertirse en una fuga de
+      //    configuracion de infraestructura hacia el navegador.
+      for (const step of summary?.topology ?? []) {
+        expect(step).not.toHaveProperty('params');
+      }
+
+      const serialized = JSON.stringify(summary);
+      expect(serialized).not.toContain('imap.unuware.com');
+      expect(serialized).not.toContain('IMAP_PASSWORD');
+      expect(serialized).not.toContain('drupal.unuware.com');
+    });
+
+    it('6.2 no deberia incluir los punteros del grafo', async () => {
+      // 1. Arrange
+      const { service, repository } = buildHarness();
+      repository.find.mockResolvedValue([
+        buildWorkflow({ pipelineSchema: buildUnorderedSchema() }),
+      ]);
+
+      // 2. Act
+      const [summary] = await service.findSelectablePipelines();
+
+      // 3. Assert: el orden ya viene resuelto, asi que el cliente no necesita
+      //    recorrer ningun grafo.
+      expect(summary?.topology[0]).not.toHaveProperty('nextStep');
+      expect(summary?.topology[0]).not.toHaveProperty('onErrorStep');
     });
   });
 });

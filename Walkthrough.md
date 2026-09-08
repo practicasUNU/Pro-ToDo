@@ -2518,3 +2518,55 @@ eslint            → limpio
 Nuevas: 2 del namespace por defecto (incluida la que comprueba que el default está en
 `ALLOWED_NAMESPACES`, para que ambos no puedan separarse sin que falle la suite) y 13 del
 `WizardService`, con tres específicas de no filtración de secretos.
+
+---
+
+## 2026-09-07 · PROT-12.3 · Catálogo de pipelines para el asistente — rama `feat/trigger-imap`
+
+Primera tanda del wizard: el backend que alimenta la Fase 0. El asistente necesita listar los flujos
+que puede usar como plantilla, y no existía endpoint alguno — `WorkflowsController` solo tenía
+`POST /:id/run-test`.
+
+### Pasos 1-4 completados
+
+| Archivo | Estado |
+|---|---|
+| `backend/src/modules/workflows/dto/pipeline-summary-response.dto.ts` | creado |
+| `backend/src/modules/workflows/workflows.service.ts` | `findSelectablePipelines()` + `buildOrderedTopology()` |
+| `backend/src/modules/workflows/workflows.controller.ts` | `@Get()` añadido |
+| `backend/src/modules/workflows/workflows.service.spec.ts` | +9 pruebas (bloques 4, 5 y 6) |
+
+Verificación: **384 pruebas en verde** (23 suites, +9), `tsc -p tsconfig.build.json` limpio, `eslint src`
+sin errores (queda el warning preexistente de `bootstrap()` en `main.ts:78`).
+
+### El «por qué» de tres decisiones
+
+**1. `params` no viaja.** La proyección es deliberadamente parcial. En un nodo `TRIGGER_IMAP`, `params`
+contiene `host`, `user` y `passwordEnvKey`; en un `DESTINO_HTTP`, la URL interna del CMS. Devolver el
+esquema entero convertiría un endpoint de *listado* en una fuga de configuración de infraestructura
+hacia el navegador, y el selector del asistente no necesita ninguno de esos datos para pintar una
+tarjeta. La prueba 6.1 lo blinda serializando la respuesta y comprobando que no aparecen ni el host ni
+la clave de entorno.
+
+**2. El orden sale del grafo, no del mapa.** `schema.nodes` está indexado por `nodeId` y sus claves
+conservan el orden de escritura del JSON, que no tiene por qué coincidir con el camino de ejecución.
+`buildOrderedTopology` recorre desde `entrypoint` siguiendo `nextStep`. La prueba 5.1 usa un esquema
+con las claves **en orden inverso** al de ejecución: si la proyección usara `Object.values`, devolvería
+exactamente esa secuencia invertida y el stepper se pintaría al revés.
+
+**3. El `Set` de visitados no es redundante.** `validatePipelineTopology` ya garantiza que el camino
+activo es acíclico (garantía 5), así que sobre un esquema validado nunca hace falta. Cubre la fila
+escrita por SQL directo, que se salta esa validación: sin él, un `nextStep` circular colgaría la
+petición HTTP en un bucle infinito. Un puntero huérfano trunca el recorrido y registra un `warn` en
+lugar de lanzar — es un esquema roto, pero el catálogo debe seguir respondiendo para que el operador
+pueda verlo y corregirlo (pruebas 5.3 y 5.4).
+
+Detalle de TypeScript que obligó a una anotación explícita: `cursor` se reasigna desde `node.nextStep`
+y `node` se lee de `schema.nodes[cursor]`, así que sin anotar `node: PipelineNodeConfig | undefined` el
+compilador entra en inferencia circular y falla con TS7022.
+
+### Próximo paso exacto
+
+**Paso 5:** extender `frontend/src/types/pipeline.ts` con `PipelineStep`, `PipelineSummary` y
+`WizardStep` (este último enriquecido con `name`, derivado de `NODE_TYPE_LABELS[nodeType]`, que ya
+existe en ese archivo). El enum `NodeType` y `OUTPUT_NAMESPACE_PATTERN` ya están ahí.

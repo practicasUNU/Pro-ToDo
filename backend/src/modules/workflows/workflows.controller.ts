@@ -1,6 +1,7 @@
 import {
   Body,
   Controller,
+  Get,
   HttpCode,
   HttpStatus,
   Param,
@@ -25,6 +26,7 @@ import { RolesGuard } from '@common/guards/roles.guard';
 import { JwtAuthGuard } from '@modules/auth/guards/jwt-auth.guard';
 import { UserRole } from '@modules/users/enums/user-role.enum';
 
+import { PipelineSummaryResponseDto } from './dto/pipeline-summary-response.dto';
 import { RunWorkflowTestDto } from './dto/run-workflow-test.dto';
 import { WorkflowExecutionResponseDto } from './dto/workflow-execution-response.dto';
 import { WorkflowsService } from './workflows.service';
@@ -52,6 +54,33 @@ import { WorkflowsService } from './workflows.service';
 @Controller('workflows')
 export class WorkflowsController {
   constructor(private readonly workflowsService: WorkflowsService) {}
+
+  /**
+   * Catalogo de flujos utilizables como plantilla en el asistente.
+   *
+   * Devuelve la topologia YA ORDENADA para que el cliente pinte el stepper sin
+   * recorrer el grafo, y sin los `params` de cada nodo: ahi viven el host, el
+   * usuario y la clave de entorno del buzon, que no tienen por que llegar al
+   * navegador solo para poblar un selector.
+   *
+   * No lleva guards propios: los de clase (`JwtAuthGuard`, `RolesGuard`,
+   * `@Roles(ADMIN, EDITOR)`) y el `IpWhitelistGuard` global ya lo cubren. Es el
+   * motivo por el que se declaran a nivel de clase y no por endpoint.
+   */
+  @Get()
+  @ApiOperation({
+    summary:
+      'Lista los flujos con pipeline configurado y su topologia en orden de ejecucion',
+  })
+  @ApiOkResponse({
+    description: 'Flujos seleccionables, sin los params de sus nodos',
+    type: [PipelineSummaryResponseDto],
+  })
+  public async findSelectablePipelines(): Promise<
+    PipelineSummaryResponseDto[]
+  > {
+    return this.workflowsService.findSelectablePipelines();
+  }
 
   /**
    * Despacho manual de un flujo (Camino B).

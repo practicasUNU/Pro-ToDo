@@ -11,8 +11,16 @@ import { PipelineValidatorService } from '@core/fsm/services/pipeline-validator.
 
 import { Workflow } from './entities/workflow.entity';
 
+import type {
+  PipelineStepDto,
+  PipelineSummaryResponseDto,
+} from './dto/pipeline-summary-response.dto';
 import type { RunWorkflowTestDto } from './dto/run-workflow-test.dto';
 import type { WorkflowExecutionResponseDto } from './dto/workflow-execution-response.dto';
+import type {
+  PipelineNodeConfig,
+  PipelineSchema,
+} from '@core/fsm/types/pipeline-schema.types';
 import type { Repository } from 'typeorm';
 
 /**
@@ -146,6 +154,87 @@ export class WorkflowsService {
     );
 
     return finished.executionId;
+  }
+
+  /**
+   * Flujos utilizables como plantilla en el asistente, con su topologia ordenada.
+   *
+   * Se filtran los que no tienen `configuracion_pipeline`: un flujo a medio
+   * crear no sirve como plantilla de la que partir, y el asistente no tendria
+   * pasos que mostrar.
+   *
+   * NO se revalida el esquema con `PipelineValidatorService`. Es un listado de
+   * lectura, no un despacho: un esquema corrupto debe poder verse en la interfaz
+   * para que alguien lo corrija, no desaparecer del catalogo. La revalidacion
+   * sigue ocurriendo donde importa, al ejecutar.
+   */
+  public async findSelectablePipelines(): Promise<
+    PipelineSummaryResponseDto[]
+  > {
+    const workflows = await this.workflowRepository.find({
+      order: { createdAt: 'DESC' },
+    });
+
+    return workflows
+      .filter((workflow) => workflow.pipelineSchema !== null)
+      .map((workflow) => ({
+        id: workflow.id,
+        name: workflow.name,
+        description: workflow.description,
+        active: workflow.active,
+        // El `!` es seguro: el `filter` de arriba ya descarto los nulos.
+        topology: this.buildOrderedTopology(workflow.pipelineSchema!),
+      }));
+  }
+
+  /**
+   * Proyecta un `pipeline_schema` a la secuencia de pasos EN ORDEN DE EJECUCION.
+   *
+   * El orden NO puede salir de `Object.values(schema.nodes)`: ese mapa esta
+   * indexado por `nodeId` y sus claves conservan el orden de escritura del JSON,
+   * que no tiene por que coincidir con el camino de ejecucion. Un esquema
+   * guardado con los nodos en cualquier orden pintaria un stepper desordenado.
+   * Asi que se recorre el grafo desde `entrypoint` siguiendo `nextStep`.
+   *
+   * El `Set` de visitados no es defensa contra un esquema valido:
+   * `validatePipelineTopology` ya garantiza que el camino activo es aciclico y
+   * termina en un nodo terminal. Cubre el caso de una fila escrita por SQL
+   * directo, que se salta esa validacion — sin el, un `nextStep` circular
+   * colgaria la peticion HTTP en un bucle infinito.
+   *
+   * Un puntero huerfano (apunta a un nodo que no existe) corta el recorrido en
+   * silencio y devuelve lo acumulado: es un esquema roto, pero el catalogo debe
+   * seguir respondiendo para que el operador pueda verlo y arreglarlo.
+   */
+  private buildOrderedTopology(schema: PipelineSchema): PipelineStepDto[] {
+    const steps: PipelineStepDto[] = [];
+    const visited = new Set<string>();
+
+    let cursor: string | null = schema.entrypoint;
+
+    while (cursor !== null && !visited.has(cursor)) {
+      // Anotacion explicita obligada: `cursor` se reasigna desde `node.nextStep`,
+      // asi que sin ella TypeScript entra en inferencia circular (TS7022).
+      const node: PipelineNodeConfig | undefined = schema.nodes[cursor];
+
+      if (node === undefined) {
+        this.logger.warn(
+          `El flujo "${schema.flowId}" apunta al nodo inexistente "${cursor}": la topologia se truncara ahi.`,
+        );
+        break;
+      }
+
+      visited.add(cursor);
+      steps.push({
+        nodeId: node.nodeId,
+        nodeType: node.nodeType,
+        outputNamespace: node.outputNamespace,
+      });
+
+      cursor = node.nextStep;
+    }
+
+    return steps;
   }
 
   /**

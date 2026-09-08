@@ -1491,3 +1491,26 @@ Cuatro decisiones:
 `IMAP_*PASSWORD`, cualquiera con rol EDITOR podría pedir al backend que enviase `JWT_SECRET` a un
 servidor propio y confirmar el acierto leyendo el `success` de la respuesta. Las tres barreras
 —perímetro de red, JWT+RBAC y el patrón del DTO— son las que hacen que el endpoint sea publicable.
+
+---
+
+## 11. Seguimiento de PROT-12.3 / PROT-12.4 (Wizard + nodo TRIGGER_IMAP en Quasar)
+
+Rama: `feat/trigger-imap`. Fuente de verdad del avance de esta tanda; el detalle de cada paso queda en
+`Walkthrough.md`. Los pasos 4, 8 y 12 son fronteras de commit: cada uno cierra un submódulo que pasa
+pruebas y lint de forma aislada.
+
+- [x] 1. Backend — DTO `pipeline-summary-response.dto.ts` (sin `params`)
+- [x] 2. Backend — `WorkflowsService.findSelectablePipelines()` con recorrido `entrypoint` → `nextStep`
+- [x] 3. Backend — `@Get()` en `WorkflowsController`
+- [x] 4. Backend — pruebas en `workflows.service.spec.ts` ⇒ verificación + commit
+- [ ] 5. Frontend — tipos `PipelineStep`, `PipelineSummary`, `WizardStep`
+- [ ] 6. Frontend — `pipelines.service.ts` y `nodes/trigger-imap.service.ts`
+- [ ] 7. Frontend — `stores/nodes/trigger-imap.store.ts`
+- [ ] 8. Frontend — `trigger-imap.store.spec.ts` ⇒ verificación + commit
+- [ ] 9. Frontend — `TriggerImapConfig.vue` + entrada en `node-config-registry.ts`
+- [ ] 10. Frontend — `node-store-registry.ts`
+- [ ] 11. Frontend — `stores/flujo-draft.store.ts`
+- [ ] 12. Frontend — `flujo-draft.store.spec.ts` ⇒ verificación + commit
+- [ ] 13. Frontend — `PipelineSelector.vue`, `WizardPage.vue`, ruta, breadcrumb y drawer
+- [ ] 14. Cierre — verificación completa de ambos lados y commit final
