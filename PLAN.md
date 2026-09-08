@@ -1514,3 +1514,21 @@ pruebas y lint de forma aislada.
 - [x] 12. Frontend — `flujo-draft.store.spec.ts` ⇒ verificación + commit
 - [x] 13. Frontend — `PipelineSelector.vue`, `WizardPage.vue`, ruta, breadcrumb y drawer
 - [x] 14. Cierre — verificación completa de ambos lados y commit final
+
+---
+
+## 12. Cierre de PROT-12: persistencia del flujo y conexión de namespaces
+
+Rama: `feat/trigger-imap`. Cierra los tres pendientes que dejó anotados `Walkthrough.md`.
+
+- [x] 1. Backend — `CreateWorkflowDto` (delegando la validación del grafo en `PipelineValidatorService`)
+- [x] 2. Backend — `WorkflowsService.createWorkflow()` + `toPipelineSummary()` compartido
+- [x] 3. Backend — `@Post()` en `WorkflowsController` con autoría desde el token
+- [x] 4. Backend — reconciliación periódica en `ImapPollingService` (evita el ciclo de módulos)
+- [x] 5. Backend — pruebas de alta y de reconciliación ⇒ verificación + commit
+- [ ] 6. Frontend — `workflows.service.ts` con `createWorkflow()`
+- [ ] 7. Frontend — contrato `NodeConfigStore` ampliado (`toNodeParams`, `setAvailableUpstreamNamespaces`)
+- [ ] 8. Frontend — `assembleAndSaveWorkflow()` y `syncUpstreamNamespaces()` en el draft store
+- [ ] 9. Frontend — pruebas del ensamblado ⇒ verificación + commit
+- [ ] 10. Frontend — paso terminal de revisión y guardado en `WizardPage.vue`
+- [ ] 11. Cierre — verificación completa y commit final

@@ -13,6 +13,7 @@ import {
   ApiBadRequestResponse,
   ApiBearerAuth,
   ApiConflictResponse,
+  ApiCreatedResponse,
   ApiForbiddenResponse,
   ApiNotFoundResponse,
   ApiOkResponse,
@@ -21,15 +22,19 @@ import {
   ApiUnauthorizedResponse,
 } from '@nestjs/swagger';
 
+import { CurrentUser } from '@common/decorators/current-user.decorator';
 import { Roles } from '@common/decorators/roles.decorator';
 import { RolesGuard } from '@common/guards/roles.guard';
 import { JwtAuthGuard } from '@modules/auth/guards/jwt-auth.guard';
 import { UserRole } from '@modules/users/enums/user-role.enum';
 
+import { CreateWorkflowDto } from './dto/create-workflow.dto';
 import { PipelineSummaryResponseDto } from './dto/pipeline-summary-response.dto';
 import { RunWorkflowTestDto } from './dto/run-workflow-test.dto';
 import { WorkflowExecutionResponseDto } from './dto/workflow-execution-response.dto';
 import { WorkflowsService } from './workflows.service';
+
+import type { AuthenticatedUser } from '@modules/auth/interfaces/jwt-payload.interface';
 
 /**
  * Superficie HTTP de operacion de flujos.
@@ -80,6 +85,39 @@ export class WorkflowsController {
     PipelineSummaryResponseDto[]
   > {
     return this.workflowsService.findSelectablePipelines();
+  }
+
+  /**
+   * Alta de un flujo con el pipeline que ensamblo el asistente.
+   *
+   * Deja el 201 por defecto de `@Post`, a diferencia de `run-test`: aqui SI se
+   * crea un recurso, y se devuelve con la misma forma que el listado para que el
+   * cliente no tenga que tratar de forma distinta el flujo que acaba de crear.
+   *
+   * La autoria sale del token y nunca del cuerpo, de modo que no se pueda
+   * suplantar; `CreateWorkflowDto` no tiene campo para ella.
+   */
+  @Post()
+  @ApiOperation({
+    summary: 'Crea un flujo con su configuracion de pipeline validada',
+  })
+  @ApiCreatedResponse({
+    description:
+      'Flujo creado; se devuelve su resumen con la topologia ordenada',
+    type: PipelineSummaryResponseDto,
+  })
+  @ApiBadRequestResponse({
+    description:
+      'El esquema no supera PipelineValidatorService (forma, tipos o integridad del grafo)',
+  })
+  public async createWorkflow(
+    @Body() createWorkflowDto: CreateWorkflowDto,
+    @CurrentUser() currentUser: AuthenticatedUser,
+  ): Promise<PipelineSummaryResponseDto> {
+    return this.workflowsService.createWorkflow(
+      createWorkflowDto,
+      currentUser.id,
+    );
   }
 
   /**

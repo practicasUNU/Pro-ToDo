@@ -9,6 +9,8 @@ import { NodeType } from '@core/fsm/types/pipeline-schema.types';
 
 import { WorkflowsService } from './workflows.service';
 
+import type { CreateWorkflowDto } from './dto/create-workflow.dto';
+
 import type { PipelineSchemaDto } from '@core/fsm/dto/pipeline-schema.dto';
 import type { FsmExecution } from '@core/fsm/entities/fsm-execution.entity';
 import type { FsmEngineService } from '@core/fsm/services/fsm-engine.service';
@@ -80,7 +82,7 @@ const buildExecution = (
 });
 
 type WorkflowRepositoryMock = jest.Mocked<
-  Pick<Repository<Workflow>, 'findOne' | 'find'>
+  Pick<Repository<Workflow>, 'findOne' | 'find' | 'create' | 'save'>
 >;
 type ValidatorMock = jest.Mocked<
   Pick<PipelineValidatorService, 'validateSchema'>
@@ -111,6 +113,11 @@ const buildHarness = (): ServiceHarness => {
   const repository: WorkflowRepositoryMock = {
     findOne: jest.fn().mockResolvedValue(buildWorkflow()),
     find: jest.fn().mockResolvedValue([buildWorkflow()]),
+    // `create` devuelve la entidad sin persistir; `save` la que quedo en la BD.
+    create: jest.fn((partial: Partial<Workflow>) => partial as Workflow),
+    save: jest.fn((entity: Workflow) =>
+      Promise.resolve({ ...buildWorkflow(), ...entity }),
+    ),
   };
   const validator: ValidatorMock = {
     validateSchema: jest.fn().mockResolvedValue(buildSchema()),
@@ -478,6 +485,151 @@ describe('WorkflowsService (catalogo de pipelines del asistente)', () => {
       //    recorrer ningun grafo.
       expect(summary?.topology[0]).not.toHaveProperty('nextStep');
       expect(summary?.topology[0]).not.toHaveProperty('onErrorStep');
+    });
+  });
+});
+
+/** Cuerpo valido de `POST /api/workflows`, tal como lo envia el asistente. */
+const buildCreateDto = (
+  overrides: Partial<CreateWorkflowDto> = {},
+): CreateWorkflowDto => ({
+  name: 'Notiweb - publicacion automatica',
+  description: 'Publica noticias entrantes en el CMS',
+  pipelineSchema: buildUnorderedSchema() as unknown as Record<string, unknown>,
+  ...overrides,
+});
+
+describe('WorkflowsService (alta de flujos desde el asistente)', () => {
+  describe('7. Persistencia', () => {
+    it('7.1 deberia validar el esquema ANTES de tocar la base de datos', async () => {
+      // 1. Arrange
+      const { service, validator, repository } = buildHarness();
+      validator.validateSchema.mockRejectedValue(
+        new BadRequestException('nodes.trigger_imap.nextStep no resuelve'),
+      );
+
+      // 2. Act & 3. Assert: la columna `configuracion_pipeline` es la unica
+      //    fuente de verdad del motor; admitir ahi un grafo roto seria una
+      //    ejecucion que revienta a mitad de camino en vez de un 400 al guardar.
+      await expect(
+        service.createWorkflow(buildCreateDto(), AUTHOR_ID),
+      ).rejects.toThrow(BadRequestException);
+      expect(repository.save).not.toHaveBeenCalled();
+    });
+
+    it('7.2 deberia persistir el esquema YA VALIDADO, no el crudo del cuerpo', async () => {
+      // 1. Arrange
+      const validated = buildUnorderedSchema();
+      const { service, validator, repository } = buildHarness();
+      validator.validateSchema.mockResolvedValue(validated);
+
+      // 2. Act
+      await service.createWorkflow(buildCreateDto(), AUTHOR_ID);
+
+      // 3. Assert: guardar el crudo dejaria en la BD propiedades que el
+      //    validador descarta con `whitelist`.
+      expect(repository.create).toHaveBeenCalledWith(
+        expect.objectContaining({ pipelineSchema: validated }),
+      );
+      expect(repository.save).toHaveBeenCalledTimes(1);
+    });
+
+    it('7.3 deberia tomar la autoria del token y no del cuerpo', async () => {
+      // 1. Arrange
+      const { service, repository } = buildHarness();
+
+      // 2. Act
+      await service.createWorkflow(buildCreateDto(), AUTHOR_ID);
+
+      // 3. Assert: asi no se puede suplantar al autor.
+      expect(repository.create).toHaveBeenCalledWith(
+        expect.objectContaining({ createdById: AUTHOR_ID }),
+      );
+    });
+
+    it('7.4 deberia nacer INACTIVO por defecto', async () => {
+      // 1. Arrange
+      const { service, repository } = buildHarness();
+
+      // 2. Act
+      await service.createWorkflow(buildCreateDto(), AUTHOR_ID);
+
+      // 3. Assert: `flujos.activo` gobierna los disparadores automaticos. Un
+      //    flujo que se activase solo empezaria a consumir el buzon corporativo
+      //    —marcando los correos como leidos— sin revision previa.
+      expect(repository.create).toHaveBeenCalledWith(
+        expect.objectContaining({ active: false }),
+      );
+    });
+
+    it('7.5 deberia respetar un active explicito', async () => {
+      // 1. Arrange
+      const { service, repository } = buildHarness();
+
+      // 2. Act
+      await service.createWorkflow(buildCreateDto({ active: true }), AUTHOR_ID);
+
+      // 3. Assert
+      expect(repository.create).toHaveBeenCalledWith(
+        expect.objectContaining({ active: true }),
+      );
+    });
+
+    it('7.6 deberia normalizar una descripcion ausente a null', async () => {
+      // 1. Arrange: `description` es opcional en el DTO.
+      const dto: Partial<CreateWorkflowDto> = buildCreateDto();
+      delete dto.description;
+      const { service, repository } = buildHarness();
+
+      // 2. Act
+      await service.createWorkflow(dto as CreateWorkflowDto, AUTHOR_ID);
+
+      // 3. Assert: la columna es nullable, no admite `undefined`.
+      expect(repository.create).toHaveBeenCalledWith(
+        expect.objectContaining({ description: null }),
+      );
+    });
+  });
+
+  describe('8. Respuesta del alta', () => {
+    it('8.1 deberia devolver el resumen con la topologia ordenada', async () => {
+      // 1. Arrange
+      const { service, validator, repository } = buildHarness();
+      const validated = buildUnorderedSchema();
+      validator.validateSchema.mockResolvedValue(validated);
+      repository.save.mockResolvedValue(
+        buildWorkflow({ pipelineSchema: validated }),
+      );
+
+      // 2. Act
+      const result = await service.createWorkflow(buildCreateDto(), AUTHOR_ID);
+
+      // 3. Assert: misma forma que el listado, para que el cliente no trate de
+      //    forma distinta el flujo que acaba de crear.
+      expect(result.id).toBe(WORKFLOW_ID);
+      expect(result.topology.map((step) => step.nodeId)).toEqual([
+        'trigger_imap',
+        'nodo_parser',
+        'nodo_destino',
+      ]);
+    });
+
+    it('8.2 no deberia devolver los params de los nodos', async () => {
+      // 1. Arrange
+      const { service, validator, repository } = buildHarness();
+      const validated = buildUnorderedSchema();
+      validator.validateSchema.mockResolvedValue(validated);
+      repository.save.mockResolvedValue(
+        buildWorkflow({ pipelineSchema: validated }),
+      );
+
+      // 2. Act
+      const result = await service.createWorkflow(buildCreateDto(), AUTHOR_ID);
+
+      // 3. Assert: el alta reutiliza la misma proyeccion segura que el listado.
+      const serialized = JSON.stringify(result);
+      expect(serialized).not.toContain('IMAP_PASSWORD');
+      expect(serialized).not.toContain('imap.unuware.com');
     });
   });
 });

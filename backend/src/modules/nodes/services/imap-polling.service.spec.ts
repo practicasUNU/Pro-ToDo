@@ -141,6 +141,16 @@ const buildHarness = (
 
 const intervalNameOf = (flowId: string): string => `imap-poll:${flowId}`;
 
+/**
+ * Intervalos de SONDEO inscritos, excluyendo el de reconciliacion.
+ *
+ * `getIntervals()` devuelve tambien `imap-reconcile`, que no es un buzon
+ * vigilado sino la recarga periodica de la tabla: contarlo como uno mas haria
+ * que "ningun flujo programado" pareciera "un flujo programado".
+ */
+const pollIntervalsOf = (registry: SchedulerRegistry): string[] =>
+  registry.getIntervals().filter((name) => name.startsWith('imap-poll:'));
+
 describe('ImapPollingService', () => {
   beforeEach(() => {
     jest.clearAllMocks();
@@ -200,7 +210,7 @@ describe('ImapPollingService', () => {
       await service.onModuleInit();
 
       // 3. Assert
-      expect(registry.getIntervals()).toHaveLength(0);
+      expect(pollIntervalsOf(registry)).toHaveLength(0);
     });
 
     it('1.5 deberia ignorar un flujo sin nodo TRIGGER_IMAP', async () => {
@@ -220,7 +230,7 @@ describe('ImapPollingService', () => {
       await service.onModuleInit();
 
       // 3. Assert
-      expect(registry.getIntervals()).toHaveLength(0);
+      expect(pollIntervalsOf(registry)).toHaveLength(0);
     });
 
     it('1.6 deberia ignorar un flujo cuyo nodo IMAP tiene params invalidos', async () => {
@@ -242,7 +252,9 @@ describe('ImapPollingService', () => {
       await service.onModuleInit();
 
       // 3. Assert
-      expect(registry.getIntervals()).toEqual([intervalNameOf(OTHER_FLOW_ID)]);
+      expect(pollIntervalsOf(registry)).toEqual([
+        intervalNameOf(OTHER_FLOW_ID),
+      ]);
       service.onModuleDestroy();
     });
 
@@ -268,7 +280,7 @@ describe('ImapPollingService', () => {
       await service.refreshSchedules();
 
       // 3. Assert
-      expect(registry.getIntervals()).toEqual([intervalNameOf(FLOW_ID)]);
+      expect(pollIntervalsOf(registry)).toEqual([intervalNameOf(FLOW_ID)]);
       service.onModuleDestroy();
     });
 
@@ -469,6 +481,98 @@ describe('ImapPollingService', () => {
       // 2. Act & 3. Assert: degradacion, no motivo para dejar la API sin
       //    arrancar.
       await expect(service.onModuleInit()).resolves.toBeUndefined();
+      expect(pollIntervalsOf(registry)).toHaveLength(0);
+
+      // La reconciliacion SI queda armada: es lo que reintentara la consulta
+      // cuando PostgreSQL vuelva, sin necesidad de reiniciar el proceso.
+      expect(registry.doesExist('interval', 'imap-reconcile')).toBe(true);
+      service.onModuleDestroy();
+    });
+  });
+
+  describe('4. Reconciliacion periodica', () => {
+    it('4.1 deberia inscribir el intervalo de reconciliacion al arrancar', async () => {
+      // 1. Arrange
+      const { service, registry } = buildHarness();
+
+      // 2. Act
+      await service.onModuleInit();
+
+      // 3. Assert: es la via por la que el sondeo descubre los flujos que el
+      //    asistente crea, sin que `WorkflowsService` tenga que notificar nada
+      //    (eso crearia un ciclo de modulos).
+      expect(registry.doesExist('interval', 'imap-reconcile')).toBe(true);
+      service.onModuleDestroy();
+    });
+
+    it('4.2 no deberia inscribirla si el sondeo esta deshabilitado', async () => {
+      // 1. Arrange
+      const { service, registry } = buildHarness({ env: {} });
+
+      // 2. Act
+      await service.onModuleInit();
+
+      // 3. Assert
+      expect(registry.getIntervals()).toHaveLength(0);
+    });
+
+    it('4.3 deberia recoger un flujo nuevo en el siguiente ciclo', async () => {
+      // 1. Arrange: al arrancar no hay ningun flujo con nodo IMAP.
+      const { service, repository, registry } = buildHarness({
+        workflowRows: [],
+      });
+      await service.onModuleInit();
+      expect(pollIntervalsOf(registry)).toHaveLength(0);
+
+      // 2. Act: el asistente crea uno y vence la reconciliacion.
+      repository.find.mockResolvedValue([buildWorkflow()]);
+      await jest.advanceTimersByTimeAsync(60_000);
+
+      // 3. Assert: queda programado sin que nadie haya notificado el alta.
+      expect(pollIntervalsOf(registry)).toEqual([intervalNameOf(FLOW_ID)]);
+      service.onModuleDestroy();
+    });
+
+    it('4.4 deberia dejar de sondear un flujo que se desactiva', async () => {
+      // 1. Arrange
+      const { service, repository, registry } = buildHarness();
+      await service.onModuleInit();
+      expect(pollIntervalsOf(registry)).toHaveLength(1);
+
+      // 2. Act: el flujo deja de estar activo y vence la reconciliacion.
+      repository.find.mockResolvedValue([]);
+      await jest.advanceTimersByTimeAsync(60_000);
+
+      // 3. Assert: cubre un caso que una notificacion puntual del alta no veria.
+      expect(pollIntervalsOf(registry)).toHaveLength(0);
+      service.onModuleDestroy();
+    });
+
+    it('4.5 no deberia propagar un fallo de la reconciliacion', async () => {
+      // 1. Arrange
+      const { service, repository, registry } = buildHarness();
+      await service.onModuleInit();
+      repository.find.mockRejectedValue(new Error('Sin conexion a PostgreSQL'));
+
+      // 2. Act & 3. Assert: corre dentro de un `setInterval`, asi que una
+      //    promesa rechazada sin manejar terminaria el proceso de Node.
+      await expect(
+        jest.advanceTimersByTimeAsync(60_000),
+      ).resolves.toBeUndefined();
+      expect(registry.doesExist('interval', 'imap-reconcile')).toBe(true);
+      service.onModuleDestroy();
+    });
+
+    it('4.6 deberia borrar la reconciliacion en onModuleDestroy', async () => {
+      // 1. Arrange
+      const { service, registry } = buildHarness();
+      await service.onModuleInit();
+
+      // 2. Act
+      service.onModuleDestroy();
+
+      // 3. Assert: sin esto, cada recarga del `--watch` acumularia una recarga
+      //    periodica de la generacion anterior del proceso.
       expect(registry.getIntervals()).toHaveLength(0);
     });
   });

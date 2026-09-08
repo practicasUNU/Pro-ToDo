@@ -32,6 +32,21 @@ const INTERVAL_PREFIX = 'imap-poll';
  */
 const POLLING_ENABLED_KEY = 'IMAP_POLLING_ENABLED';
 
+/**
+ * Nombre del intervalo de reconciliacion.
+ *
+ * No lleva el prefijo de los intervalos por flujo a proposito: `clearSchedules`
+ * borra solo `imap-poll:*`, asi que una recarga de la tabla no se cancela a si
+ * misma a mitad de ejecucion.
+ */
+const RECONCILE_INTERVAL_NAME = 'imap-reconcile';
+
+/** Cada cuanto se rearma la tabla de intervalos contra `flujos`. */
+const DEFAULT_RECONCILE_INTERVAL_MS = 60_000;
+
+/** Variable que permite ajustar el periodo de reconciliacion. */
+const RECONCILE_INTERVAL_KEY = 'IMAP_RECONCILE_INTERVAL_MS';
+
 /** Nombre del intervalo de un flujo concreto. */
 const intervalName = (flowId: string): string => `${INTERVAL_PREFIX}:${flowId}`;
 
@@ -98,7 +113,8 @@ export class ImapPollingService implements OnModuleInit, OnModuleDestroy {
     }
 
     // No relanza: no poder programar el sondeo es una degradacion, no un motivo
-    // para impedir que la API arranque. `refreshSchedules` es invocable despues.
+    // para impedir que la API arranque. La reconciliacion periodica que se
+    // registra debajo lo reintentara por su cuenta.
     try {
       await this.refreshSchedules();
     } catch (error) {
@@ -106,10 +122,13 @@ export class ImapPollingService implements OnModuleInit, OnModuleDestroy {
         `No se pudo programar el sondeo IMAP al arrancar: ${error instanceof Error ? error.message : String(error)}`,
       );
     }
+
+    this.registerReconcileInterval();
   }
 
   public onModuleDestroy(): void {
     this.clearSchedules();
+    this.deleteIntervalIfExists(RECONCILE_INTERVAL_NAME);
   }
 
   /**
@@ -317,9 +336,7 @@ export class ImapPollingService implements OnModuleInit, OnModuleDestroy {
 
     // `addInterval` LANZA si el nombre ya esta tomado, asi que se borra primero
     // (el borrado hace el `clearInterval` por dentro).
-    if (this.schedulerRegistry.doesExist('interval', name)) {
-      this.schedulerRegistry.deleteInterval(name);
-    }
+    this.deleteIntervalIfExists(name);
 
     // `void`: el callback de `setInterval` es sincrono y no puede esperar la
     // promesa. Y `addInterval` NO envuelve el callback en try/catch, asi que
@@ -330,6 +347,49 @@ export class ImapPollingService implements OnModuleInit, OnModuleDestroy {
     }, node.config.pollIntervalMs);
 
     this.schedulerRegistry.addInterval(name, interval);
+  }
+
+  /**
+   * Inscribe la recarga periodica de la tabla de intervalos.
+   *
+   * Es la via por la que el sondeo descubre los flujos que el asistente acaba de
+   * crear, y NO una llamada desde `WorkflowsService`: `NodesModule` ya importa
+   * `WorkflowsModule` para despachar los flujos detectados, asi que la
+   * dependencia inversa crearia un ciclo de modulos.
+   *
+   * Reconciliar tambien cubre lo que una notificacion puntual no veria: un
+   * esquema editado despues de guardarse, un `activo` cambiado por SQL directo o
+   * un flujo borrado. La latencia maxima es un ciclo.
+   */
+  private registerReconcileInterval(): void {
+    this.deleteIntervalIfExists(RECONCILE_INTERVAL_NAME);
+
+    const periodMs =
+      Number(this.configService.get<string>(RECONCILE_INTERVAL_KEY)) ||
+      DEFAULT_RECONCILE_INTERVAL_MS;
+
+    const interval = setInterval(() => {
+      // `refreshSchedules` puede rechazar si PostgreSQL no responde, y esto
+      // corre dentro de un `setInterval`: sin el `catch`, la promesa sin manejar
+      // terminaria el proceso.
+      void this.refreshSchedules().catch((error: unknown) => {
+        this.logger.warn(
+          `Fallo la reconciliacion del sondeo IMAP: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      });
+    }, periodMs);
+
+    this.schedulerRegistry.addInterval(RECONCILE_INTERVAL_NAME, interval);
+    this.logger.log(
+      `Reconciliacion del sondeo IMAP cada ${periodMs} ms; los flujos nuevos se recogeran en el siguiente ciclo.`,
+    );
+  }
+
+  /** Borra un intervalo solo si esta inscrito: `deleteInterval` lanza si no. */
+  private deleteIntervalIfExists(name: string): void {
+    if (this.schedulerRegistry.doesExist('interval', name)) {
+      this.schedulerRegistry.deleteInterval(name);
+    }
   }
 
   /**

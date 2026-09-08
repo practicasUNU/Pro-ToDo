@@ -11,6 +11,7 @@ import { PipelineValidatorService } from '@core/fsm/services/pipeline-validator.
 
 import { Workflow } from './entities/workflow.entity';
 
+import type { CreateWorkflowDto } from './dto/create-workflow.dto';
 import type {
   PipelineStepDto,
   PipelineSummaryResponseDto,
@@ -177,14 +178,7 @@ export class WorkflowsService {
 
     return workflows
       .filter((workflow) => workflow.pipelineSchema !== null)
-      .map((workflow) => ({
-        id: workflow.id,
-        name: workflow.name,
-        description: workflow.description,
-        active: workflow.active,
-        // El `!` es seguro: el `filter` de arriba ya descarto los nulos.
-        topology: this.buildOrderedTopology(workflow.pipelineSchema!),
-      }));
+      .map((workflow) => this.toPipelineSummary(workflow));
   }
 
   /**
@@ -235,6 +229,76 @@ export class WorkflowsService {
     }
 
     return steps;
+  }
+
+  /**
+   * Da de alta un flujo con el pipeline que ensamblo el asistente.
+   *
+   * El esquema se valida con `PipelineValidatorService` ANTES de tocar la base de
+   * datos: la columna `configuracion_pipeline` es la unica fuente de verdad del
+   * motor, y admitir ahi un grafo con un `nextStep` huerfano significaria una
+   * ejecucion que revienta a mitad de camino en lugar de un 400 al guardar.
+   *
+   * NACE INACTIVO por defecto (`active: false`). Es una decision de seguridad,
+   * no un descuido: `flujos.activo` gobierna los disparadores automaticos, y un
+   * flujo recien creado que se activase solo empezaria a consumir el buzon
+   * corporativo —marcando los correos como leidos— sin que nadie hubiera
+   * revisado su configuracion. Activarlo es un acto deliberado posterior.
+   *
+   * Sobre el registro en `ImapPollingService`: NO se inyecta aqui. `NodesModule`
+   * ya importa `WorkflowsModule` para despachar los flujos que el sondeo
+   * detecta, asi que la dependencia inversa crearia un ciclo de modulos. El
+   * sondeo recoge los flujos nuevos por reconciliacion periodica, que ademas
+   * cubre casos que una notificacion puntual no ve: la edicion de un esquema ya
+   * guardado o una activacion hecha por SQL directo.
+   *
+   * @param createWorkflowDto Nombre, descripcion y grafo del pipeline.
+   * @param userId Autor, tomado del token JWT y nunca del cuerpo.
+   * @throws BadRequestException Si el esquema no supera forma, tipos o topologia.
+   */
+  public async createWorkflow(
+    createWorkflowDto: CreateWorkflowDto,
+    userId: string,
+  ): Promise<PipelineSummaryResponseDto> {
+    const schema = await this.pipelineValidatorService.validateSchema(
+      createWorkflowDto.pipelineSchema,
+    );
+
+    const workflow = this.workflowRepository.create({
+      name: createWorkflowDto.name,
+      description: createWorkflowDto.description ?? null,
+      pipelineSchema: schema,
+      active: createWorkflowDto.active ?? false,
+      createdById: userId,
+    });
+
+    const saved = await this.workflowRepository.save(workflow);
+
+    this.logger.log(
+      `Flujo creado: "${saved.name}" (${saved.id}) | nodos=${Object.keys(schema.nodes).length} | activo=${String(saved.active)} | autor=${userId}`,
+    );
+
+    return this.toPipelineSummary(saved);
+  }
+
+  /**
+   * Proyecta un flujo persistido a su resumen publicable.
+   *
+   * Compartido por el listado y el alta para que ambos devuelvan exactamente la
+   * misma forma: si divergieran, el cliente tendria que tratar el flujo que acaba
+   * de crear distinto de los que lee del catalogo.
+   */
+  private toPipelineSummary(workflow: Workflow): PipelineSummaryResponseDto {
+    return {
+      id: workflow.id,
+      name: workflow.name,
+      description: workflow.description,
+      active: workflow.active,
+      topology:
+        workflow.pipelineSchema === null
+          ? []
+          : this.buildOrderedTopology(workflow.pipelineSchema),
+    };
   }
 
   /**

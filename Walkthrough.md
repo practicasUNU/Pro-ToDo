@@ -2735,3 +2735,71 @@ configurados dejaría la vista en blanco y se leería como un error de red.
   estén los siete, el `Partial` de ambos registros debe caer para que el compilador exija exhaustividad.
 - `npm run lint` reformatea `src/utils/violation-matcher.spec.ts` (prettier, archivo ajeno). Se revierte
   en cada tanda para no mezclarlo.
+
+---
+
+## 2026-09-08 · PROT-12 · Persistencia del flujo (`POST /api/workflows`) — rama `feat/trigger-imap`
+
+Primera mitad del cierre de PROT-12: el endpoint que faltaba para que el asistente pueda guardar lo
+que ensambla.
+
+### Pasos 1-5 completados
+
+| Archivo | Estado |
+|---|---|
+| `backend/src/modules/workflows/dto/create-workflow.dto.ts` | creado |
+| `backend/src/modules/workflows/workflows.service.ts` | `createWorkflow()` + `toPipelineSummary()` |
+| `backend/src/modules/workflows/workflows.controller.ts` | `@Post()` añadido |
+| `backend/src/modules/nodes/services/imap-polling.service.ts` | reconciliación periódica |
+| `backend/src/modules/workflows/workflows.service.spec.ts` | +8 pruebas (bloques 7 y 8) |
+| `backend/src/modules/nodes/services/imap-polling.service.spec.ts` | +6 pruebas (bloque 4) |
+
+Verificación: **398 pruebas en verde** (23 suites, +14), `tsc` limpio, `eslint src` sin errores.
+
+### Desviación justificada: cómo se registra el sondeo de un flujo nuevo
+
+El enunciado pedía que `createWorkflow` registrase el intervalo invocando `ImapPollingService`. **No se
+ha hecho así, y no por comodidad:** `NodesModule` ya importa `WorkflowsModule` (el sondeo necesita
+`runAutomaticWorkflow` para despachar lo que detecta), así que inyectar `ImapPollingService` en
+`WorkflowsService` crearía un ciclo `workflows ⇄ nodes`. Resolverlo exigiría `forwardRef` en ambos
+módulos, o instalar `@nestjs/event-emitter`, que no está en el proyecto.
+
+En su lugar se implementó **reconciliación periódica**: un intervalo `imap-reconcile` (60 s por
+defecto, ajustable con `IMAP_RECONCILE_INTERVAL_MS`) que rearma la tabla de intervalos contra `flujos`.
+Es estrictamente más robusto que una notificación puntual del alta, porque cubre tres casos que esa no
+vería:
+
+- el `pipeline_schema` de un flujo **editado** después de guardarse (host, buzón o periodo nuevos),
+- un `activo` cambiado por SQL directo o desde otra vía,
+- un flujo **borrado** o desactivado, que debe dejar de sondearse (prueba 4.4).
+
+Coste: latencia de un ciclo hasta que el flujo nuevo entra en sondeo. Aceptable, sobre todo porque un
+flujo **nace inactivo** y no sería elegible de todos modos hasta que alguien lo active.
+
+El callback lleva `.catch()` explícito: corre dentro de un `setInterval` y una promesa rechazada sin
+manejar termina el proceso en Node ≥ 18 (prueba 4.5).
+
+### El «por qué» de tres decisiones más
+
+**1. El flujo nace INACTIVO.** `flujos.activo` gobierna los disparadores automáticos, y la estrategia
+IMAP marca los correos con `\Seen`. Un flujo que se activase solo al crearse empezaría a **consumir el
+buzón corporativo** sin que nadie hubiera revisado su configuración, y esos correos no volverían a
+verse. `active` es opcional en el DTO con default `false`; activarlo es un acto deliberado posterior.
+
+**2. `pipelineSchema` se declara como objeto y NO con `@ValidateNested()`.** `validateSchema()` ya hace
+las dos capas —forma y tipos con `PipelineSchemaDto`, integridad del grafo con
+`validatePipelineTopology`— y devuelve `BadRequestException` con la lista exacta de campos inválidos.
+Anidar el DTO duplicaría la primera capa y produciría **dos formatos de error distintos** para el mismo
+fallo según cuál saltara antes: el del `ValidationPipe` global o el del validador. La prueba 7.1 fija
+que la validación ocurre antes de tocar la base de datos, y la 7.2 que se persiste el esquema **ya
+validado** y no el crudo del cuerpo (guardar el crudo dejaría en la BD propiedades que `whitelist`
+descarta).
+
+**3. `toPipelineSummary` se comparte entre el alta y el listado.** Si divergieran, el cliente tendría
+que tratar el flujo que acaba de crear distinto de los que lee del catálogo. Como efecto secundario, el
+alta hereda gratis la exclusión de `params` (prueba 8.2).
+
+### Próximo paso exacto
+
+**Paso 6:** crear `frontend/src/services/workflows.service.ts` con `createWorkflow(payload)` contra
+`POST /workflows`, tipando el payload como `CreateWorkflowPayload` en `types/pipeline.ts`.
