@@ -17,7 +17,7 @@ export const MAX_RETRY_ATTEMPTS = 5;
  * Formato obligatorio de `outputNamespace`: snake_case alfanumerico.
  *
  * El namespace acaba siendo una clave del `StatePayloadContext` y se interpola
- * en plantillas como `{{nodo_trigger.campo}}`, cuya expresion de sustitucion
+ * en plantillas como `{{raw_email.campo}}`, cuya expresion de sustitucion
  * (ver `architecture-patterns.md` §3) solo reconoce `[a-zA-Z0-9_]`. Restringirlo
  * aqui evita namespaces que el motor nunca podria resolver.
  */

@@ -22,8 +22,19 @@ export const DEFAULT_MAILBOX = 'INBOX';
 /** Periodo de sondeo por defecto: un minuto. */
 export const DEFAULT_POLL_INTERVAL_MS = 60_000;
 
-/** Namespace por defecto bajo el que el nodo declara escribir su salida. */
-export const DEFAULT_OUTPUT_NAMESPACE = 'nodo_trigger';
+/**
+ * Namespace por defecto bajo el que el nodo declara escribir su salida.
+ *
+ * Es `raw_email` y no un nombre nuevo porque ese namespace ya esta reservado en
+ * `ALLOWED_NAMESPACES` (`templates.service.ts`) para el correo crudo: una
+ * plantilla puede interpolar `{{raw_email.subject}}` sin tocar el gestor. Un
+ * namespace fuera de esa lista blanca haria que el gestor rechazase la plantilla
+ * con un 400, aunque el nodo lo hubiera escrito correctamente en el contexto.
+ *
+ * No confundir con el `nodeId` del nodo, que es una clave de topologia: un nodo
+ * llamado `nodo_trigger` escribe en el namespace `raw_email`.
+ */
+export const DEFAULT_OUTPUT_NAMESPACE = 'raw_email';
 
 /** Por defecto el correo procesado se marca como leido para no reprocesarlo. */
 export const DEFAULT_MARK_AS_READ = true;

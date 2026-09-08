@@ -16,12 +16,12 @@ const buildNotiwebSchema = (): PipelineSchema => ({
   flowId: 'b3f1c2d4-5a6b-4c7d-8e9f-0a1b2c3d4e5f',
   name: 'Notiweb - publicacion automatica',
   version: '1.0.0',
-  entrypoint: 'nodo_trigger',
+  entrypoint: 'trigger_imap',
   nodes: {
-    nodo_trigger: {
-      nodeId: 'nodo_trigger',
+    trigger_imap: {
+      nodeId: 'trigger_imap',
       nodeType: NodeType.TRIGGER_IMAP,
-      outputNamespace: 'nodo_trigger',
+      outputNamespace: 'raw_email',
       nextStep: 'nodo_parser',
       onErrorStep: null,
       params: { host: 'imap.unuware.com', folder: 'INBOX' },
@@ -123,7 +123,7 @@ describe('PipelineValidatorService (PROT-07)', () => {
       // 3. Assert
       expect(result).toBeInstanceOf(PipelineSchemaDto);
       expect(Object.keys(result.nodes)).toHaveLength(7);
-      expect(result.entrypoint).toBe('nodo_trigger');
+      expect(result.entrypoint).toBe('trigger_imap');
     });
 
     it('deberia aceptar un nodo huerfano inalcanzable desde el entrypoint', async () => {
@@ -291,14 +291,14 @@ describe('PipelineValidatorService (PROT-07)', () => {
       // 1. Arrange: un `nextStepp` mal escrito no puede colarse en silencio
       const schema = buildNotiwebSchema();
       (
-        schema.nodes.nodo_trigger as unknown as Record<string, unknown>
+        schema.nodes.trigger_imap as unknown as Record<string, unknown>
       ).nextStepp = 'nodo_parser';
 
       // 2. Act
       const issues = await captureIssues(service, schema);
 
       // 3. Assert
-      expect(fieldsOf(issues)).toContain('nodes.nodo_trigger.nextStepp');
+      expect(fieldsOf(issues)).toContain('nodes.trigger_imap.nextStepp');
     });
 
     it('deberia rechazar un nodo que no es un objeto de configuracion', async () => {

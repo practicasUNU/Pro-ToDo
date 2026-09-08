@@ -21,6 +21,7 @@ import { NodesModule } from '@modules/nodes/nodes.module';
 import { AllowedIpsModule } from '@modules/security/allowed-ips/allowed-ips.module';
 import { TemplatesModule } from '@modules/templates/templates.module';
 import { UsersModule } from '@modules/users/users.module';
+import { WizardModule } from '@modules/wizard/wizard.module';
 import { WorkflowsModule } from '@modules/workflows/workflows.module';
 
 import { AppController } from './app.controller';
@@ -114,6 +115,7 @@ const STATIC_UPLOADS_ROUTE = '/static/uploads';
     TemplatesModule,
     NodesModule,
     WorkflowsModule,
+    WizardModule,
   ],
   controllers: [AppController],
   providers: [

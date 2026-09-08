@@ -2,7 +2,6 @@ import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { plainToInstance } from 'class-transformer';
 import { validate } from 'class-validator';
-import { ImapFlow } from 'imapflow';
 import { simpleParser } from 'mailparser';
 
 import { NodeType } from '@core/fsm/types/pipeline-schema.types';
@@ -10,6 +9,10 @@ import {
   ImapTriggerConfigDto,
   resolveImapConfig,
 } from '@modules/nodes/dto/imap-trigger-config.dto';
+import {
+  createImapClient,
+  DOWNLOAD_SOCKET_TIMEOUT_MS,
+} from '@modules/nodes/services/imap-client.factory';
 
 import type { StatePayloadContext } from '@core/fsm/context/state-payload.context';
 import type {
@@ -19,7 +22,7 @@ import type {
 } from '@core/fsm/types/node-strategy.types';
 import type { ResolvedImapConfig } from '@modules/nodes/dto/imap-trigger-config.dto';
 import type { ValidatorOptions } from 'class-validator';
-import type { MailboxLockObject } from 'imapflow';
+import type { ImapFlow, MailboxLockObject } from 'imapflow';
 import type { AddressObject, ParsedMail } from 'mailparser';
 
 /**
@@ -30,21 +33,6 @@ import type { AddressObject, ParsedMail } from 'mailparser';
  * PAUSADO en su primer paso varias veces por hora.
  */
 export const NO_MESSAGES_STATUS = 'NO_MESSAGES_FOUND';
-
-/** Espera maxima para establecer la conexion TCP/TLS con el servidor IMAP. */
-const CONNECTION_TIMEOUT_MS = 15_000;
-
-/** Espera maxima del saludo inicial del servidor tras conectar. */
-const GREETING_TIMEOUT_MS = 15_000;
-
-/**
- * Inactividad maxima del socket durante la descarga.
- *
- * Sin este tope, un servidor que acepta la conexion y deja de responder a mitad
- * de un `FETCH` colgaria el paso del pipeline indefinidamente: el motor no
- * impone ningun timeout propio sobre `strategy.execute()`.
- */
-const SOCKET_TIMEOUT_MS = 60_000;
 
 /**
  * Opciones de validacion canonicas del repositorio (ver `PipelineValidatorService`).
@@ -69,14 +57,22 @@ type ImapConfigResolution =
   | { readonly config: ResolvedImapConfig; readonly password: string }
   | { readonly failure: NodeErrorDetail };
 
-/** Payload determinista que el nodo expone en su namespace de salida. */
+/**
+ * Payload determinista que el nodo expone en su namespace de salida.
+ *
+ * Cinco claves y ninguna de marcado: el cuerpo viaja SOLO como texto plano. El
+ * HTML del correo no se propaga a proposito —traeria estilos en linea, imagenes
+ * incrustadas como `data:` URI y etiquetas del cliente remitente— y ni el
+ * escudo pre-IA ni el mapeador de plantillas lo necesitan: `PARSER_PRE_IA`
+ * trabaja sobre texto para ahorrar tokens, y el marcado final lo aporta la
+ * plantilla del gestor, no el correo de origen.
+ */
 interface ExtractedEmail {
   readonly message_id: string;
   readonly from: string;
   readonly subject: string;
-  readonly date: string;
-  readonly raw_html: string;
   readonly text: string;
+  readonly date: string;
 }
 
 /** Normaliza a cadena un campo que `mailparser` puede dejar sin definir. */
@@ -107,9 +103,16 @@ const extractFromAddress = (from: AddressObject | undefined): string => {
  *
  * NO filtra ni sanea nada a proposito: la carga viaja tal cual para alimentar
  * tanto la prueba directa contra `TemplateMapperStrategy`
- * (`{{ns.raw_html}}`, `{{ns.subject}}`) como la sanitizacion posterior en
- * `PARSER_PRE_IA`. Meter aqui reglas de limpieza duplicaria la responsabilidad
- * de ese nodo.
+ * (`{{raw_email.subject}}`, `{{raw_email.text}}`) como la sanitizacion posterior
+ * en `PARSER_PRE_IA`. Meter aqui reglas de limpieza duplicaria la
+ * responsabilidad de ese nodo.
+ *
+ * El cuerpo se expone SOLO como texto plano (`text`), sin marcado. El HTML del
+ * correo no se propaga: arrastraria estilos en linea, imagenes incrustadas como
+ * `data:` URI y etiquetas del cliente remitente, y el marcado final lo aporta la
+ * plantilla del gestor. Consecuencia a tener presente al configurar un flujo: un
+ * correo que llegue unicamente en HTML, sin parte `text/plain`, dejara `text`
+ * vacio.
  *
  * MODELO DE SEGURIDAD HIBRIDO: la contrasena NO esta en `params`. El nodo declara
  * `passwordEnvKey` y esta estrategia resuelve la variable con `ConfigService` en
@@ -210,32 +213,19 @@ export class ImapTriggerStrategy implements INodeStrategy {
     config: ResolvedImapConfig,
     password: string,
   ): Promise<NodeResult> {
-    const client = new ImapFlow({
-      host: config.host,
-      port: config.port,
-      secure: config.secure,
-      auth: { user: config.user, pass: password },
-      // Sin logger propio: imapflow volcaria la conversacion IMAP completa,
-      // cabeceras de autenticacion incluidas, al stdout del contenedor.
-      logger: false,
-      emitLogs: false,
-      // El nodo hace una lectura corta y se va: mantener IDLE abierto solo
-      // dejaria un socket ocioso contra el servidor de correo.
-      disableAutoIdle: true,
-      connectionTimeout: CONNECTION_TIMEOUT_MS,
-      greetingTimeout: GREETING_TIMEOUT_MS,
-      socketTimeout: SOCKET_TIMEOUT_MS,
-    });
-
-    // OBLIGATORIO: `ImapFlow` es un EventEmitter y un evento 'error' sin oyente
-    // es una excepcion no capturada que derriba el proceso de Node entero. El
-    // fallo ya se refleja en el `NodeResult` por la via del `catch`, asi que
-    // aqui solo hay que impedir que el emisor quede huerfano.
-    client.on('error', (error: Error) => {
-      this.logger.warn(
-        `Error de socket IMAP contra ${config.host}: ${error.message}`,
-      );
-    });
+    // El oyente de 'error' lo exige la firma de la factoria: sin el, un evento
+    // de socket derribaria el proceso. El fallo ya se refleja en el `NodeResult`
+    // por la via del `catch`, asi que aqui solo se deja traza.
+    const client = createImapClient(
+      config,
+      password,
+      (error: Error) => {
+        this.logger.warn(
+          `Error de socket IMAP contra ${config.host}: ${error.message}`,
+        );
+      },
+      DOWNLOAD_SOCKET_TIMEOUT_MS,
+    );
 
     let lock: MailboxLockObject | undefined;
 
@@ -317,19 +307,18 @@ export class ImapTriggerStrategy implements INodeStrategy {
    * sobrevivirian intactos al checkpoint JSONB.
    */
   private toExtractedEmail(parsed: ParsedMail): ExtractedEmail {
-    const text = asString(parsed.text);
-
     return {
       message_id: asString(parsed.messageId),
       from: extractFromAddress(parsed.from),
       subject: asString(parsed.subject),
+      // Solo la parte `text/plain` del MIME. Un correo que llegue unicamente en
+      // HTML deja esta clave vacia: derivar texto del marcado seria sanitizar,
+      // y eso es competencia de `PARSER_PRE_IA`, no del nodo de ingesta
+      // (`security-and-scope.md` §3 mantiene este nodo sin transformaciones).
+      text: asString(parsed.text),
+      // Cadena vacia y nunca `undefined` cuando falta la cabecera `Date:`, para
+      // que una plantilla que interpole la clave no falle por variable ausente.
       date: parsed.date instanceof Date ? parsed.date.toISOString() : '',
-      // Cascada de degradacion: HTML real, si no la version HTML del texto
-      // plano que genera mailparser, y como ultimo recurso el texto crudo. Un
-      // correo sin cuerpo produce cadena vacia, nunca `undefined`, para que la
-      // plantilla que interpole esta clave no falle por variable ausente.
-      raw_html: asString(parsed.html) || asString(parsed.textAsHtml) || text,
-      text,
     };
   }
 

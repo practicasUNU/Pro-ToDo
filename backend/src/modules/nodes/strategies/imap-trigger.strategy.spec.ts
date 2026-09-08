@@ -1,6 +1,12 @@
 import { ConfigService } from '@nestjs/config';
+import { plainToInstance } from 'class-transformer';
 
 import { NodeType } from '@core/fsm/types/pipeline-schema.types';
+import {
+  ImapTriggerConfigDto,
+  resolveImapConfig,
+} from '@modules/nodes/dto/imap-trigger-config.dto';
+import { ALLOWED_NAMESPACES } from '@modules/templates/templates.service';
 import { createMockStatePayloadContext } from '@test/factories/state-payload-context.factory';
 
 import {
@@ -25,7 +31,7 @@ const { simpleParser } = require('mailparser') as {
 };
 /* eslint-enable @typescript-eslint/no-require-imports */
 
-const OUTPUT_NAMESPACE = 'nodo_trigger';
+const OUTPUT_NAMESPACE = 'raw_email';
 const PASSWORD_ENV_KEY = 'IMAP_PASSWORD';
 const IMAP_PASSWORD = 'clave-de-buzon-solo-para-pruebas';
 const MESSAGE_UID = 42;
@@ -115,7 +121,7 @@ const buildStrategy = (
 };
 
 const buildContext = (): StatePayloadContext =>
-  createMockStatePayloadContext({ currentStep: 'nodo_trigger' });
+  createMockStatePayloadContext({ currentStep: 'trigger_imap' });
 
 describe('ImapTriggerStrategy', () => {
   beforeEach(() => {
@@ -133,7 +139,7 @@ describe('ImapTriggerStrategy', () => {
   });
 
   describe('1. Extraccion del correo UNSEEN', () => {
-    it('1.1 deberia exponer las seis claves deterministas del correo', async () => {
+    it('1.1 deberia exponer las cinco claves deterministas del correo', async () => {
       // 1. Arrange
       const { strategy } = buildStrategy();
 
@@ -146,9 +152,8 @@ describe('ImapTriggerStrategy', () => {
         message_id: '<abc-123@unuware.com>',
         from: 'prensa@unuware.com',
         subject: 'Innovacion en Madrid',
-        date: '2026-03-01T10:30:00.000Z',
-        raw_html: '<h1>Innovacion</h1>',
         text: 'Innovacion en texto plano',
+        date: '2026-03-01T10:30:00.000Z',
       });
     });
 
@@ -175,30 +180,46 @@ describe('ImapTriggerStrategy', () => {
       );
     });
 
-    it('1.3 deberia caer a textAsHtml cuando el correo no trae HTML', async () => {
-      // 1. Arrange
-      simpleParser.mockResolvedValue(buildParsedMail({ html: false }));
-      const { strategy } = buildStrategy();
-
-      // 2. Act
-      const result = await strategy.execute(buildContext(), buildParams());
-
-      // 3. Assert
-      expect(result.data?.raw_html).toBe('<p>Innovacion en texto plano</p>');
-    });
-
-    it('1.4 deberia caer al texto plano cuando no hay HTML ni textAsHtml', async () => {
-      // 1. Arrange
+    it('1.3 no deberia propagar el HTML del correo bajo ninguna clave', async () => {
+      // 1. Arrange: un MIME con marcado en las tres variantes de mailparser.
       simpleParser.mockResolvedValue(
-        buildParsedMail({ html: false, textAsHtml: undefined }),
+        buildParsedMail({
+          html: '<h1 style="color:red">Innovacion</h1>',
+          textAsHtml: '<p>Innovacion en texto plano</p>',
+        }),
       );
       const { strategy } = buildStrategy();
 
       // 2. Act
       const result = await strategy.execute(buildContext(), buildParams());
 
-      // 3. Assert
-      expect(result.data?.raw_html).toBe('Innovacion en texto plano');
+      // 3. Assert: el cuerpo viaja solo como texto plano. El marcado final lo
+      //    aporta la plantilla del gestor, no el correo de origen.
+      expect(Object.keys(result.data ?? {})).toEqual([
+        'message_id',
+        'from',
+        'subject',
+        'text',
+        'date',
+      ]);
+      expect(JSON.stringify(result.data)).not.toContain('<h1');
+      expect(JSON.stringify(result.data)).not.toContain('<p>');
+    });
+
+    it('1.4 deberia dejar text vacio en un correo solo-HTML, sin parte text/plain', async () => {
+      // 1. Arrange
+      simpleParser.mockResolvedValue(
+        buildParsedMail({ text: undefined, textAsHtml: undefined }),
+      );
+      const { strategy } = buildStrategy();
+
+      // 2. Act
+      const result = await strategy.execute(buildContext(), buildParams());
+
+      // 3. Assert: derivar texto del marcado seria sanitizar, y eso es
+      //    competencia de PARSER_PRE_IA. El nodo no transforma nada.
+      expect(result.success).toBe(true);
+      expect(result.data?.text).toBe('');
     });
 
     it('1.5 deberia devolver cadenas vacias y nunca undefined en un correo sin cuerpo', async () => {
@@ -211,14 +232,13 @@ describe('ImapTriggerStrategy', () => {
 
       // 3. Assert: toda clave presente y serializable por `structuredClone`.
       expect(result.success).toBe(true);
-      expect(Object.values(result.data ?? {})).toEqual([
-        '',
-        '',
-        '',
-        '',
-        '',
-        '',
-      ]);
+      expect(result.data).toEqual({
+        message_id: '',
+        from: '',
+        subject: '',
+        text: '',
+        date: '',
+      });
       for (const value of Object.values(result.data ?? {})) {
         expect(typeof value).toBe('string');
       }
@@ -551,6 +571,37 @@ describe('ImapTriggerStrategy', () => {
       expect(result.success).toBe(true);
       expect(context.getAllContext()).toEqual(before);
       expect(context.getNamespace(OUTPUT_NAMESPACE)).toBeUndefined();
+    });
+  });
+
+  describe('8. Namespace de salida', () => {
+    it('8.1 deberia usar raw_email como namespace por defecto', () => {
+      // 1. Arrange & 2. Act
+      const params = buildParams();
+      delete params.outputNamespace;
+      const config = resolveImapConfig(
+        plainToInstance(ImapTriggerConfigDto, params),
+      );
+
+      // 3. Assert: `raw_email` esta en ALLOWED_NAMESPACES, asi que una plantilla
+      //    puede interpolar `{{raw_email.subject}}` sin tocar el gestor.
+      expect(config.outputNamespace).toBe('raw_email');
+      expect(ALLOWED_NAMESPACES).toContain(config.outputNamespace);
+    });
+
+    it('8.2 deberia rechazar un namespace fuera del patron snake_case', async () => {
+      // 1. Arrange
+      const { strategy } = buildStrategy();
+
+      // 2. Act
+      const result = await strategy.execute(
+        buildContext(),
+        buildParams({ outputNamespace: 'Raw-Email' }),
+      );
+
+      // 3. Assert
+      expect(result.success).toBe(false);
+      expect(result.error?.missingFields).toContain('outputNamespace');
     });
   });
 });

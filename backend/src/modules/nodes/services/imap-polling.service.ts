@@ -3,19 +3,20 @@ import { SchedulerRegistry } from '@nestjs/schedule';
 import { InjectRepository } from '@nestjs/typeorm';
 import { plainToInstance } from 'class-transformer';
 import { validate } from 'class-validator';
-import { ImapFlow } from 'imapflow';
 
 import { NodeType } from '@core/fsm/types/pipeline-schema.types';
 import {
   ImapTriggerConfigDto,
   resolveImapConfig,
 } from '@modules/nodes/dto/imap-trigger-config.dto';
+import { createImapClient } from '@modules/nodes/services/imap-client.factory';
 import { Workflow } from '@modules/workflows/entities/workflow.entity';
 import { WorkflowsService } from '@modules/workflows/workflows.service';
 
 import type { OnModuleDestroy, OnModuleInit } from '@nestjs/common';
 import type { ConfigService } from '@nestjs/config';
 import type { ResolvedImapConfig } from '@modules/nodes/dto/imap-trigger-config.dto';
+import type { ImapFlow } from 'imapflow';
 import type { Repository } from 'typeorm';
 
 /** Prefijo de los intervalos que este servicio inscribe en `SchedulerRegistry`. */
@@ -30,9 +31,6 @@ const INTERVAL_PREFIX = 'imap-poll';
  * perderian para el entorno que si toca procesarlos.
  */
 const POLLING_ENABLED_KEY = 'IMAP_POLLING_ENABLED';
-
-/** Espera maxima para conectar y para el saludo del servidor, en el sondeo. */
-const PROBE_TIMEOUT_MS = 15_000;
 
 /** Nombre del intervalo de un flujo concreto. */
 const intervalName = (flowId: string): string => `${INTERVAL_PREFIX}:${flowId}`;
@@ -202,23 +200,7 @@ export class ImapPollingService implements OnModuleInit, OnModuleDestroy {
       return false;
     }
 
-    const client = new ImapFlow({
-      host: config.host,
-      port: config.port,
-      secure: config.secure,
-      auth: { user: config.user, pass: password },
-      // Sin logger: imapflow volcaria la conversacion IMAP completa al stdout.
-      logger: false,
-      emitLogs: false,
-      disableAutoIdle: true,
-      connectionTimeout: PROBE_TIMEOUT_MS,
-      greetingTimeout: PROBE_TIMEOUT_MS,
-      socketTimeout: PROBE_TIMEOUT_MS,
-    });
-
-    // OBLIGATORIO: un evento 'error' sin oyente en este EventEmitter es una
-    // excepcion no capturada que tumba el proceso de Node.
-    client.on('error', (error: Error) => {
+    const client = createImapClient(config, password, (error: Error) => {
       this.logger.warn(
         `Error de socket IMAP durante el sondeo de ${config.host}: ${error.message}`,
       );

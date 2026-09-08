@@ -1366,7 +1366,7 @@ mano y pasan a validarse con `class-validator`.
 | `passwordEnvKey` | sí | — | `@IsString` `@IsNotEmpty` `@Matches(/^IMAP_[A-Z0-9_]*PASSWORD$/)` |
 | `mailbox` | no | `'INBOX'` | `@IsString` `@IsNotEmpty` |
 | `pollIntervalMs` | no | `60000` | `@IsInt` `@IsPositive` `@Min(30000)` |
-| `outputNamespace` | no | `'nodo_trigger'` | `@Matches(OUTPUT_NAMESPACE_PATTERN)` |
+| `outputNamespace` | no | `'raw_email'` | `@Matches(OUTPUT_NAMESPACE_PATTERN)` |
 | `markAsRead` | no | `true` | `@IsBoolean` |
 
 No existe campo `password`. Los defaults **no** se aplican con inicializadores de propiedad —no
@@ -1395,21 +1395,31 @@ a un servidor ajeno. Queda pendiente restringir también `host` a una lista blan
 
 ### 10.3 Payload del namespace de salida
 
+Namespace por defecto: **`raw_email`**, que ya está reservado en `ALLOWED_NAMESPACES` para el correo
+crudo. No confundir con el `nodeId` del nodo, que es una clave de topología: un nodo `trigger_imap`
+escribe en el namespace `raw_email`.
+
 ```jsonc
 {
   "message_id": "<abc-123@unuware.com>",
   "from":       "prensa@unuware.com",   // dirección plana, no el AddressObject
   "subject":    "Innovacion en Madrid",
-  "date":       "2026-03-01T10:30:00.000Z",
-  "raw_html":   "<h1>…</h1>",           // html → textAsHtml → text
-  "text":       "…"
+  "text":       "…",                    // solo la parte text/plain del MIME
+  "date":       "2026-03-01T10:30:00.000Z"
 }
 ```
 
-Seis claves, todas `string`, nunca `undefined`. La restricción viene del contexto:
+Cinco claves, todas `string`, nunca `undefined`. La restricción viene del contexto:
 `StatePayloadContext` clona con `structuredClone` en entrada y salida, así que un `Date`, un `Buffer` o
 un objeto de librería no sobrevivirían intactos al checkpoint JSONB. Un correo sin cuerpo produce
 cadena vacía para que una plantilla que interpole la clave no falle por variable ausente.
+
+**Ninguna clave de marcado.** El HTML del correo no se propaga: arrastraría estilos en línea, imágenes
+incrustadas como `data:` URI y etiquetas del cliente remitente, y el marcado final lo aporta la
+plantilla del gestor, no el correo de origen. `PARSER_PRE_IA` trabaja sobre texto para ahorrar tokens.
+Consecuencia a tener presente al configurar un flujo: un correo que llegue **solo en HTML**, sin parte
+`text/plain`, dejará `text` vacío — derivar texto del marcado sería sanitizar, y eso es competencia del
+escudo pre-IA, no del nodo de ingesta (`security-and-scope.md` §3).
 
 Cuando el buzón no tiene mensajes nuevos, el nodo devuelve `{ status: 'NO_MESSAGES_FOUND' }` con
 `success: true`: el sondeo corre cada minuto y encontrar el buzón vacío es el caso **normal**, no un
@@ -1447,3 +1457,37 @@ es un parámetro **por nodo**, y un decorador se evalúa una sola vez en tiempo 
 |---|---|---|
 | `IMAP_POLLING_ENABLED` (`.env`) | Global | Arrancar el backend en una máquina de desarrollo no debe consumir el buzón real: la estrategia marca `\Seen`. Se exige el valor exacto `'true'`, para que el fallo por omisión sea "no sondea" |
 | `flujos.activo` | Por flujo | La columna existe precisamente para gobernar los disparadores automáticos; el despacho manual la ignora a propósito |
+
+### 10.6 Comprobación de conectividad del asistente (`WizardController`)
+
+`POST /api/wizard/check-imap` valida las credenciales de un nodo **antes** de guardar el
+`pipeline_schema`, para que el operador no descubra que el buzón está mal configurado la primera vez
+que el sondeo dispare el flujo en producción. Es la contrapartida servidor del Poka-Yoke de la interfaz.
+
+| Pieza | Responsabilidad |
+|---|---|
+| `WizardController` | Superficie HTTP. Guards de clase (`JwtAuthGuard`, `RolesGuard`), roles ADMIN y EDITOR |
+| `WizardService.checkImap` | Resuelve el secreto, conecta, comprueba que el buzón existe y traduce el resultado |
+| `createImapClient` | Compartido con la estrategia y el sondeo: las opciones endurecidas no pueden divergir |
+
+Cuatro decisiones:
+
+1. **Reutiliza `ImapTriggerConfigDto`**, no un contrato propio. Si el asistente validase con reglas
+   distintas de las que aplica la estrategia, una configuración podría pasar la comprobación y fallar
+   en la ejecución — justo lo contrario de lo que aporta el paso.
+2. **`ValidationPipe` local con `forbidNonWhitelisted`.** El pipe global de `main.ts` solo lleva
+   `{ whitelist: true, transform: true }`, que **elimina en silencio** las propiedades desconocidas.
+   Aquí hace falta que las **rechace**: un cliente que envíe `password` en el cuerpo debe recibir un
+   400, no un 200 tras haberse descartado el campo sin decir nada.
+3. **Comprueba conexión *y* buzón** (`connect` + `status`). Un `Conexión exitosa` que solo garantice el
+   login sería un falso positivo cuando el `mailbox` no existe.
+4. **Un fallo de conexión es 200 con `success: false`**, no un 4xx. El diagnóstico del servidor de
+   correo forma parte de la respuesta que el asistente debe mostrar; el 400 queda para un cuerpo mal
+   formado. La respuesta **no** incluye `stackTrace`: revelaría rutas del servidor y no aporta nada a
+   quien rellena un formulario. Al `.log` físico sigue yendo completa.
+
+**Por qué el patrón de `passwordEnvKey` importa aún más aquí.** Este endpoint acepta un `host` y un
+`user` arbitrarios, lo que lo convierte en un oráculo de conectividad: sin la restricción
+`IMAP_*PASSWORD`, cualquiera con rol EDITOR podría pedir al backend que enviase `JWT_SECRET` a un
+servidor propio y confirmar el acierto leyendo el `success` de la respuesta. Las tres barreras
+—perímetro de red, JWT+RBAC y el patrón del DTO— son las que hacen que el endpoint sea publicable.

@@ -2410,11 +2410,8 @@ parseo, cierre en `finally` sin enmascarar el error real, inmutabilidad del cont
 
 - [x] ~~`NodeType.TRIGGER_IMAP` sin estrategia real.~~ Resuelto aquí.
 - [x] ~~`main.ts` sin `enableShutdownHooks()`.~~ Resuelto aquí.
-- [ ] **`nodo_trigger` no está en `ALLOWED_NAMESPACES`.** Es el default del DTO, pero el gestor de
-      plantillas rechaza `{{nodo_trigger.raw_html}}`. Mientras no se registre, el nodo debe declarar
-      `outputNamespace: 'raw_email'` en el `pipeline_schema` (ese sí está en la lista blanca). Decidir
-      cuál de los dos nombres es el canónico antes de que existan plantillas guardadas que dependan de
-      uno.
+- [x] ~~`nodo_trigger` no está en `ALLOWED_NAMESPACES`.~~ Resuelto en el commit siguiente: el default
+      pasa a `raw_email`, que ya estaba en la lista blanca, y `nodo_trigger` se retira del código.
 - [ ] **El disparo es en proceso, no encolado.** `architecture-patterns.md` §5 pide BullMQ para la
       ingesta Cron/IMAP. Bloquea el temporizador, nunca el hilo HTTP, y el despliegue todavía no tiene
       Redis. El salto consiste en sustituir el cuerpo de `dispatchFlow`, único punto que conoce el motor.
@@ -2424,5 +2421,100 @@ parseo, cierre en `finally` sin enmascarar el error real, inmutabilidad del cont
 - [ ] **`@nestjs/schedule` es intra-proceso.** Con N réplicas del backend habría N sondeadores sobre el
       mismo buzón. Seguro con el despliegue monoinstancia actual; el día que se replique, el mutex
       `idx_flujo_activo` evita ejecuciones duplicadas pero no las conexiones IMAP redundantes.
-- [ ] **Sin `PARSER_PRE_IA`.** Es el consumidor natural de este payload: `raw_html` viaja sin sanear a
+- [ ] **Sin `PARSER_PRE_IA`.** Es el consumidor natural de este payload: `text` viaja sin sanear a
       propósito, y el escudo pre-IA es quien debe limpiarlo antes de gastar tokens.
+
+---
+
+## 2026-09-07 · Normalización a `raw_email`, retirada de `raw_html` y comprobación del asistente — rama `feat/trigger-imap`
+
+Tres correcciones sobre el nodo de ingesta, más el endpoint que faltaba para que el asistente pueda
+validar credenciales antes de guardar un flujo.
+
+### 1. `raw_email` como namespace canónico
+
+El default del DTO era `nodo_trigger`, un nombre que **no está en `ALLOWED_NAMESPACES`**: una plantilla
+que interpolase `{{nodo_trigger.subject}}` habría sido rechazada por el gestor con un 400, aunque el
+nodo hubiese escrito el dato correctamente en el contexto. Pasa a `raw_email`, que ya estaba reservado
+en esa lista para el correo crudo desde PROT-11.1. Cero cambios en el gestor de plantillas.
+
+`nodo_trigger` se retira del código por completo. Donde aparecía como **`nodeId`** —una clave de
+topología, concepto distinto de un namespace— pasa a `trigger_imap`, que describe el tipo funcional del
+nodo en lugar de su papel en el grafo. Que el mismo string sirviera para dos conceptos es precisamente
+lo que hacía fácil confundirlos:
+
+```
+nodeId: 'trigger_imap'        ← clave del nodo en el grafo
+outputNamespace: 'raw_email'  ← donde escribe en el StatePayloadContext
+```
+
+Se corrige también el ejemplo de Swagger de `PipelineNodeConfigDto.outputNamespace`, que enseñaba el
+nombre equivocado y habría propagado el error a cada flujo creado desde la documentación.
+
+### 2. `raw_html` fuera del payload
+
+El nodo pasa de seis claves a cinco: `message_id`, `from`, `subject`, `text`, `date`. Desaparece
+`raw_html` y con él la cascada `html → textAsHtml → text`.
+
+El motivo es de reparto de responsabilidades: el HTML de un correo arrastra estilos en línea, imágenes
+incrustadas como `data:` URI y etiquetas del cliente remitente, y **nadie aguas abajo lo necesita**.
+`PARSER_PRE_IA` trabaja sobre texto plano justamente para no gastar tokens en marcado, y el HTML final
+lo aporta la plantilla del gestor, no el correo de origen. Propagarlo solo engordaba el checkpoint
+JSONB con datos que ningún nodo iba a consumir.
+
+**Consecuencia que hay que conocer al configurar un flujo:** un correo que llegue únicamente en HTML,
+sin parte `text/plain`, deja `text` vacío. Derivar texto del marcado sería sanitizar, y eso es
+competencia del escudo pre-IA: `security-and-scope.md` §3 mantiene este nodo sin transformaciones. La
+prueba 1.4 fija ese comportamiento para que nadie lo tome por un descuido.
+
+### 3. `POST /api/wizard/check-imap`
+
+Permite validar las credenciales antes de guardar el `pipeline_schema`, en lugar de descubrir el fallo
+la primera vez que el sondeo dispare el flujo.
+
+Comprueba **conexión y buzón** (`connect` + `status`), no solo el login: autenticar correctamente
+contra un `mailbox` que no existe es un falso positivo que el operador debe ver en el asistente. Un
+fallo devuelve 200 con `success: false` y severidad `GRAVE`, no un 4xx — el diagnóstico del servidor de
+correo es parte de la respuesta que la interfaz tiene que mostrar, y un código de error obligaría al
+cliente a distinguir "las credenciales son malas" de "la llamada al backend se rompió". La respuesta
+**no** lleva `stackTrace`: revelaría rutas del servidor sin aportar nada a quien rellena un formulario.
+
+Dos detalles que no son de gusto:
+
+- **`ValidationPipe` local con `forbidNonWhitelisted`.** El pipe global de `main.ts` solo lleva
+  `{ whitelist: true, transform: true }`, que *elimina en silencio* las propiedades desconocidas. Aquí
+  hace falta que las **rechace**: un cliente que envíe `password` en el cuerpo debe recibir un 400, no
+  un 200 tras haberse descartado el campo sin avisar. Es la misma opción que aplica la estrategia a los
+  `params` del nodo, así que asistente y ejecución usan idéntico criterio.
+- **El endpoint es un oráculo de conectividad.** Acepta `host` y `user` arbitrarios, así que sin el
+  patrón `IMAP_*PASSWORD` de `passwordEnvKey` cualquiera con rol EDITOR podría pedir al backend que
+  enviase `JWT_SECRET` a un servidor propio y confirmar el acierto leyendo el `success`. Las tres
+  barreras —perímetro de red, JWT+RBAC y el patrón del DTO— son las que hacen publicable este endpoint.
+
+### 4. `createImapClient`: una sola definición de las opciones endurecidas
+
+Con el wizard, las rutas que hablan IMAP pasaban a ser tres, cada una repitiendo `logger: false`,
+`emitLogs: false`, `disableAutoIdle`, los timeouts y el oyente de `error`. Son decisiones de seguridad
+—sin `logger: false`, `imapflow` vuelca la conversación IMAP con las cabeceras de autenticación al
+stdout del contenedor— y no pueden divergir entre consumidores. Se extraen a una función pura en
+`services/imap-client.factory.ts`.
+
+El oyente de `error` es un **parámetro obligatorio** de la firma, no opcional: `ImapFlow` es un
+`EventEmitter` y un evento `error` sin oyente derriba el proceso de Node. Exigirlo en el tipo convierte
+ese olvido en un error de compilación en lugar de una caída en producción.
+
+Se mantiene como función y no como provider inyectable a propósito: así `WizardModule` la consume por
+importación directa sin tener que importar `NodesModule`, que arrastraría el sondeo periódico, su
+repositorio de `flujos` y `WorkflowsModule` detrás para no usar ninguno de los tres.
+
+### Verificación
+
+```
+npm test          → 23 suites, 375 pruebas en verde (+15)
+tsc --noEmit      → limpio sobre tsconfig.build.json
+eslint            → limpio
+```
+
+Nuevas: 2 del namespace por defecto (incluida la que comprueba que el default está en
+`ALLOWED_NAMESPACES`, para que ambos no puedan separarse sin que falle la suite) y 13 del
+`WizardService`, con tres específicas de no filtración de secretos.

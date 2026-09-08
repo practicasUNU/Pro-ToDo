@@ -56,10 +56,10 @@ const buildWorkflow = (overrides: Partial<Workflow> = {}): Workflow =>
       flowId: FLOW_ID,
       name: 'Noticias entrantes',
       version: '1.0.0',
-      entrypoint: 'nodo_trigger',
+      entrypoint: 'trigger_imap',
       nodes: {
-        nodo_trigger: {
-          nodeId: 'nodo_trigger',
+        trigger_imap: {
+          nodeId: 'trigger_imap',
           nodeType: NodeType.TRIGGER_IMAP,
           outputNamespace: 'raw_email',
           nextStep: null,
@@ -209,7 +209,7 @@ describe('ImapPollingService', () => {
       const schema = workflow.pipelineSchema;
 
       if (schema !== null) {
-        schema.nodes.nodo_trigger.nodeType = NodeType.MAPEADOR_PLANTILLA;
+        schema.nodes.trigger_imap.nodeType = NodeType.MAPEADOR_PLANTILLA;
       }
 
       const { service, registry } = buildHarness({
@@ -230,7 +230,7 @@ describe('ImapPollingService', () => {
       const brokenSchema = broken.pipelineSchema;
 
       if (brokenSchema !== null) {
-        brokenSchema.nodes.nodo_trigger.params = { host: '' };
+        brokenSchema.nodes.trigger_imap.params = { host: '' };
       }
 
       const healthy = buildWorkflow({ id: OTHER_FLOW_ID });

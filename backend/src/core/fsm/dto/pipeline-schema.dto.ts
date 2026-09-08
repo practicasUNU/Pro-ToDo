@@ -84,7 +84,7 @@ export class PipelineNodeConfigDto {
   @ApiProperty({
     description:
       'Namespace bajo el que el nodo escribe en el StatePayloadContext',
-    example: 'nodo_trigger',
+    example: 'raw_email',
     pattern: OUTPUT_NAMESPACE_PATTERN.source,
   })
   @IsString({ message: 'outputNamespace debe ser una cadena.' })
