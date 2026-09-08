@@ -8,20 +8,15 @@ import { InjectRepository } from '@nestjs/typeorm';
 
 import { FsmEngineService } from '@core/fsm/services/fsm-engine.service';
 import { PipelineValidatorService } from '@core/fsm/services/pipeline-validator.service';
+import { buildOrderedTopology } from '@core/fsm/utils/pipeline-topology.util';
 
 import { Workflow } from './entities/workflow.entity';
 
 import type { CreateWorkflowDto } from './dto/create-workflow.dto';
-import type {
-  PipelineStepDto,
-  PipelineSummaryResponseDto,
-} from './dto/pipeline-summary-response.dto';
+import type { PipelineSummaryResponseDto } from './dto/pipeline-summary-response.dto';
 import type { RunWorkflowTestDto } from './dto/run-workflow-test.dto';
 import type { WorkflowExecutionResponseDto } from './dto/workflow-execution-response.dto';
-import type {
-  PipelineNodeConfig,
-  PipelineSchema,
-} from '@core/fsm/types/pipeline-schema.types';
+
 import type { Repository } from 'typeorm';
 
 /**
@@ -182,56 +177,6 @@ export class WorkflowsService {
   }
 
   /**
-   * Proyecta un `pipeline_schema` a la secuencia de pasos EN ORDEN DE EJECUCION.
-   *
-   * El orden NO puede salir de `Object.values(schema.nodes)`: ese mapa esta
-   * indexado por `nodeId` y sus claves conservan el orden de escritura del JSON,
-   * que no tiene por que coincidir con el camino de ejecucion. Un esquema
-   * guardado con los nodos en cualquier orden pintaria un stepper desordenado.
-   * Asi que se recorre el grafo desde `entrypoint` siguiendo `nextStep`.
-   *
-   * El `Set` de visitados no es defensa contra un esquema valido:
-   * `validatePipelineTopology` ya garantiza que el camino activo es aciclico y
-   * termina en un nodo terminal. Cubre el caso de una fila escrita por SQL
-   * directo, que se salta esa validacion — sin el, un `nextStep` circular
-   * colgaria la peticion HTTP en un bucle infinito.
-   *
-   * Un puntero huerfano (apunta a un nodo que no existe) corta el recorrido en
-   * silencio y devuelve lo acumulado: es un esquema roto, pero el catalogo debe
-   * seguir respondiendo para que el operador pueda verlo y arreglarlo.
-   */
-  private buildOrderedTopology(schema: PipelineSchema): PipelineStepDto[] {
-    const steps: PipelineStepDto[] = [];
-    const visited = new Set<string>();
-
-    let cursor: string | null = schema.entrypoint;
-
-    while (cursor !== null && !visited.has(cursor)) {
-      // Anotacion explicita obligada: `cursor` se reasigna desde `node.nextStep`,
-      // asi que sin ella TypeScript entra en inferencia circular (TS7022).
-      const node: PipelineNodeConfig | undefined = schema.nodes[cursor];
-
-      if (node === undefined) {
-        this.logger.warn(
-          `El flujo "${schema.flowId}" apunta al nodo inexistente "${cursor}": la topologia se truncara ahi.`,
-        );
-        break;
-      }
-
-      visited.add(cursor);
-      steps.push({
-        nodeId: node.nodeId,
-        nodeType: node.nodeType,
-        outputNamespace: node.outputNamespace,
-      });
-
-      cursor = node.nextStep;
-    }
-
-    return steps;
-  }
-
-  /**
    * Da de alta un flujo con el pipeline que ensamblo el asistente.
    *
    * El esquema se valida con `PipelineValidatorService` ANTES de tocar la base de
@@ -297,7 +242,11 @@ export class WorkflowsService {
       topology:
         workflow.pipelineSchema === null
           ? []
-          : this.buildOrderedTopology(workflow.pipelineSchema),
+          : buildOrderedTopology(workflow.pipelineSchema, (orphanNodeId) =>
+              this.logger.warn(
+                `El flujo "${workflow.id}" apunta al nodo inexistente "${orphanNodeId}": la topologia se truncara ahi.`,
+              ),
+            ),
     };
   }
 

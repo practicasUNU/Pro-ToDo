@@ -76,6 +76,33 @@ CREATE TABLE plantillas_html (
 );
 
 -- =============================================================================
+-- Tabla: PLANTILLAS_FLUJO (blueprints maestros)
+-- Duplicada en db/migrations/010-plantillas-flujo.sql para las bases de datos ya
+-- creadas: este archivo solo se ejecuta con el volumen de Docker vacío.
+--
+-- Catálogo de topologías base. No se ejecuta nunca: no tiene estado, ni autor,
+-- ni ejecuciones. `flujos` instancia una de estas y guarda el vínculo en
+-- `id_plantilla_origen`. Va declarada ANTES de `flujos` porque su clave ajena la
+-- referencia.
+-- =============================================================================
+
+CREATE TABLE plantillas_flujo (
+    id_plantilla_flujo UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    -- El nombre es lo que el operador reconoce en el selector del asistente:
+    -- dos maestros homónimos serían indistinguibles ahí
+    nombre VARCHAR(100) NOT NULL UNIQUE,
+    -- TEXT y no VARCHAR(255): describe la topología entera
+    descripcion TEXT,
+    -- Borrado lógico: una plantilla retirada sale del selector pero sigue
+    -- explicando de dónde salieron los flujos que la instanciaron
+    activo BOOLEAN NOT NULL DEFAULT TRUE,
+    -- Mismo nombre que en `flujos` porque es el mismo grafo declarativo. Aquí
+    -- NOT NULL: una plantilla sin topología no es una plantilla
+    configuracion_pipeline JSONB NOT NULL,
+    fecha_creacion TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+-- =============================================================================
 -- Tabla: FLUJOS
 -- =============================================================================
 
@@ -85,6 +112,11 @@ CREATE TABLE flujos (
     descripcion VARCHAR(255),
     activo BOOLEAN DEFAULT TRUE,
     configuracion_pipeline JSONB,
+    -- Maestro del que nació este flujo. Nullable: los flujos anteriores a la
+    -- migración 010 no vienen de ninguno, y el asistente debe poder crear uno
+    -- desde cero. ON DELETE SET NULL es la red de seguridad ante un borrado
+    -- físico por SQL directo; la vía prevista es el borrado lógico (`activo`)
+    id_plantilla_origen UUID REFERENCES plantillas_flujo(id_plantilla_flujo) ON DELETE SET NULL,
     id_usuario_creador UUID NOT NULL REFERENCES usuarios(id_usuario),
     fecha_creacion TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
@@ -201,6 +233,9 @@ CREATE INDEX idx_tokens_sesion_id_usuario ON tokens_sesion(id_usuario);
 CREATE INDEX idx_plantillas_html_id_usuario_creador ON plantillas_html(id_usuario_creador);
 CREATE UNIQUE INDEX idx_plantillas_html_nombre ON plantillas_html(nombre);
 CREATE INDEX idx_flujos_id_usuario_creador ON flujos(id_usuario_creador);
+-- Responde "qué flujos salieron de esta plantilla", la consulta obligada antes
+-- de retirar un maestro
+CREATE INDEX idx_flujos_id_plantilla_origen ON flujos(id_plantilla_origen);
 CREATE INDEX idx_nodos_id_flujo ON nodos(id_flujo);
 CREATE INDEX idx_nodos_id_tipo_nodo ON nodos(id_tipo_nodo);
 CREATE INDEX idx_ejecuciones_flujo_id_flujo ON ejecuciones_flujo(id_flujo);

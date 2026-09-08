@@ -1590,3 +1590,22 @@ sesiones guardadas en `localStorage`.
 
 - [ ] **Aplicar `db/migrations/009-tokens-sesion.sql`** — la ejecuta el usuario. Hasta entonces el
       backend no arranca contra la base existente: la entidad ya apunta a `tokens_sesion`.
+
+---
+
+## 15. Separación entre Plantillas de Pipeline (`plantillas_flujo`) y Flujos Operativos
+
+Rama: `feat/trigger-imap`. Introduce el catálogo de blueprints, la relación instancia → maestro y las
+tres vistas que la separación exige. Cierra el pendiente «sin endpoint para activar un flujo».
+
+- [x] 1. Esquema y entidades — migración 010, `init.sql`, `WorkflowTemplate`, relación en `Workflow`, helper `pipeline-topology.util.ts`
+- [ ] 2. Módulo `WorkflowTemplates` — DTOs, servicio, controlador, módulo y pruebas
+- [ ] 3. Flujos — `templateId` en el alta, `updateWorkflow` y `PATCH /api/workflows/:id`
+- [ ] 4. Frontend — tipos, servicios, tres stores, tres vistas, router, layout y pruebas
+
+**Nomenclatura:** identificadores en inglés (`WorkflowTemplate`, `WorkflowTemplatesModule`, ruta
+`/api/workflow-templates`) y esquema en castellano, según `code-conventions.md` §1. PK
+`id_plantilla_flujo` y no `id_plantilla`, que ya es la de `plantillas_html`. La columna JSONB se llama
+`configuracion_pipeline`, igual que en `flujos`: mismo concepto, mismo nombre.
+
+- [ ] **Aplicar `db/migrations/010-plantillas-flujo.sql`** — la ejecuta el usuario.

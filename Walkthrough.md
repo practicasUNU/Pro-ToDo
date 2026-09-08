@@ -3172,3 +3172,65 @@ desarrollador, y el servidor MCP `postgres-protodo` estaba caído en esta sesió
       Los dos `SELECT` finales deben mostrar `id_token_sesion` en primera posición y los cinco
       índices/constraints con prefijo `tokens_sesion` / `idx_tokens_sesion`. Reejecutarla una segunda
       vez debe terminar sin error.
+
+---
+
+## 2026-09-08 · Plantillas de flujo: separación blueprint / instancia — rama `feat/trigger-imap`
+
+### Paso 1 completado — esquema, entidades y helper de topología
+
+| Archivo | Estado |
+|---|---|
+| `db/migrations/010-plantillas-flujo.sql` | creado |
+| `init.sql` | tabla `plantillas_flujo` + `flujos.id_plantilla_origen` + índice |
+| `backend/src/modules/workflow-templates/entities/workflow-template.entity.ts` | creado |
+| `backend/src/modules/workflows/entities/workflow.entity.ts` | `templateId` + `@ManyToOne` |
+| `backend/src/core/fsm/utils/pipeline-topology.util.ts` | creado (extraído del servicio) |
+| `backend/src/core/fsm/utils/pipeline-topology.util.spec.ts` | creado, 7 pruebas |
+| `backend/src/modules/workflows/workflows.service.ts` | consume el helper |
+
+```
+Backend → 405 pruebas (antes 398) · 24 suites · tsc limpio · eslint 0 errores
+```
+
+### El «por qué» de cuatro decisiones
+
+**1. Blueprint e instancia eran la misma fila.** La Fase 0 del asistente listaba flujos ya instanciados
+con esquema (`findSelectablePipelines()`) y clonaba su topología. Consecuencias: editar el flujo del que
+otros partieron cambiaba la plantilla de facto, y no había manera de tener un maestro que no se pudiera
+disparar. `plantillas_flujo` es el catálogo de topologías base y no se ejecuta nunca: no tiene autor,
+ni estado, ni ejecuciones.
+
+**2. `flujos.id_plantilla_origen` es trazabilidad, no dependencia.** El flujo conserva su propia copia
+del grafo en `configuracion_pipeline`, así que editar la plantilla después **no** altera los flujos que
+ya salieron de ella. Esa independencia es el sentido de separar las dos cosas: si el flujo leyese el
+grafo del maestro, retocar un blueprint cambiaría el comportamiento de flujos en producción.
+
+Nullable por dos motivos distintos: los flujos anteriores a la 010 no vienen de ningún maestro, y el
+asistente debe poder crear uno desde cero. Un `NOT NULL` habría obligado a inventar una plantilla para
+las filas históricas. Sin lado inverso `@OneToMany`: nadie navega plantilla → flujos y declararlo
+cerraría un ciclo de imports entre las dos entidades.
+
+**3. La columna JSONB se llama `configuracion_pipeline`, no `pipeline_schema`.** Es una desviación
+deliberada del enunciado: sería la única columna con nombre inglés del esquema, y compartir el nombre
+con `flujos` es lo que hace legible el clonado. Aquí sí es `NOT NULL`, a diferencia de `flujos`: un
+flujo sin esquema es un borrador legítimo del asistente, pero una plantilla sin topología no es una
+plantilla. También `nombre VARCHAR(100)` y no 120 como `plantillas_html`: el nombre del blueprint se
+propone como nombre del flujo, y `flujos.nombre` es `VARCHAR(100)` — con 120 un nombre válido de
+plantilla no cabría en su instancia.
+
+**4. `buildOrderedTopology` sale del servicio.** Era un método `private` de `WorkflowsService`, y las
+plantillas necesitan exactamente el mismo recorrido `entrypoint → nextStep` para exponer su topología al
+selector. Duplicarlo dejaría dos lecturas del mismo grafo divergiendo en silencio. Vive ahora en
+`@core/fsm/utils/` como función pura con un callback `onTruncated` opcional: el aviso del puntero
+huérfano queda en manos del llamante, que es quien sabe si el esquema roto es de un flujo o de una
+plantilla. Su tipo de retorno se declara en el propio util y no se importa de `@modules/workflows`,
+porque `@core` no puede depender de un módulo funcional sin invertir las capas.
+
+Las 7 pruebas nuevas cubren lo que antes solo se probaba de forma indirecta: el orden real frente al de
+las claves del mapa (el fixture declara los nodos en orden inverso al de ejecución), el corte
+anticiclos, el truncado ante un puntero huérfano y el callback de aviso.
+
+**Próximo paso:** paso 2 — `backend/src/modules/workflow-templates/` con sus DTOs, servicio (con
+`PipelineValidatorService` y `assertNameAvailable`), controlador (`@Roles(ADMIN)` en las escrituras vía
+`getAllAndOverride`), módulo, registro en `AppModule` y `workflow-templates.service.spec.ts`.

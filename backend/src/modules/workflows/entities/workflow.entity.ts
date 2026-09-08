@@ -2,8 +2,12 @@ import {
   Column,
   CreateDateColumn,
   Entity,
+  JoinColumn,
+  ManyToOne,
   PrimaryGeneratedColumn,
 } from 'typeorm';
+
+import { WorkflowTemplate } from '@modules/workflow-templates/entities/workflow-template.entity';
 
 import type { PipelineSchema } from '@core/fsm/types/pipeline-schema.types';
 
@@ -53,6 +57,33 @@ export class Workflow {
    */
   @Column({ name: 'configuracion_pipeline', type: 'jsonb', nullable: true })
   pipelineSchema: PipelineSchema | null;
+
+  /**
+   * Plantilla (`plantillas_flujo`) de la que se instancio este flujo.
+   *
+   * NULLABLE por dos motivos distintos: los flujos anteriores a la migracion 010
+   * no nacieron de ningun maestro, y el asistente debe seguir pudiendo crear uno
+   * desde cero. Un `NOT NULL` habria obligado a inventar una plantilla para las
+   * filas historicas.
+   *
+   * Es trazabilidad, no dependencia: el flujo lleva su propia copia del grafo en
+   * `pipelineSchema`, asi que editar la plantilla despues NO altera los flujos
+   * que ya salieron de ella. Esa independencia es justo el sentido de separar
+   * blueprint e instancia.
+   */
+  @Column({ name: 'id_plantilla_origen', type: 'uuid', nullable: true })
+  templateId: string | null;
+
+  /**
+   * Relacion hacia el maestro, para poder mostrar su nombre en el catalogo.
+   *
+   * SIN lado inverso (`@OneToMany` en `WorkflowTemplate`) a proposito: nadie
+   * necesita navegar plantilla -> flujos, y declararlo cerraria un ciclo de
+   * imports entre las dos entidades.
+   */
+  @ManyToOne(() => WorkflowTemplate, { onDelete: 'SET NULL', nullable: true })
+  @JoinColumn({ name: 'id_plantilla_origen' })
+  template: WorkflowTemplate | null;
 
   @Column({ name: 'id_usuario_creador', type: 'uuid' })
   createdById: string;
