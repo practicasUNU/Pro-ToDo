@@ -1530,5 +1530,5 @@ Rama: `feat/trigger-imap`. Cierra los tres pendientes que dejó anotados `Walkth
 - [x] 7. Frontend — contrato `NodeConfigStore` ampliado (`toNodeParams`, `setAvailableUpstreamNamespaces`)
 - [x] 8. Frontend — `assembleAndSaveWorkflow()` y `syncUpstreamNamespaces()` en el draft store
 - [x] 9. Frontend — pruebas del ensamblado ⇒ verificación + commit
-- [ ] 10. Frontend — paso terminal de revisión y guardado en `WizardPage.vue`
-- [ ] 11. Cierre — verificación completa y commit final
+- [x] 10. Frontend — paso terminal de revisión y guardado en `WizardPage.vue`
+- [x] 11. Cierre — verificación completa y commit final

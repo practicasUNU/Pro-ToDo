@@ -2867,3 +2867,62 @@ ejecución en el nodo que falla, que es el comportamiento correcto por defecto (
 campo `name` (requerido) y `description`, resumen de la topología configurada, botón «Crear Flujo»
 (`.pd-btn-primary`, `icon-right="north_east"`, `:loading="draftStore.isLoading"`,
 `:disable="!draftStore.canSave"`), `$q.notify` de éxito y redirección al catálogo.
+
+---
+
+## 2026-09-08 · PROT-12 · Paso terminal de revisión y cierre — rama `feat/trigger-imap`
+
+Última tanda: el asistente ya guarda. Con esto los tres pendientes que arrastraba PROT-12 quedan
+cerrados.
+
+### Pasos 10-11 completados
+
+| Archivo | Estado |
+|---|---|
+| `frontend/src/pages/WizardPage.vue` | +paso terminal de revisión y guardado |
+
+Verificación final:
+
+```
+Backend   → 398 pruebas · tsc limpio · eslint 0 errores
+Frontend  → 108 pruebas · vue-tsc limpio · eslint limpio · quasar build OK
+```
+
+### El «por qué» de tres decisiones
+
+**1. El nombre se pide AL FINAL, no al principio.** Un asistente que abre pidiendo un nombre obliga a
+bautizar algo que todavía no se ha configurado, y el operador acaba escribiendo un placeholder que
+nunca corrige. Al pedirlo en la revisión, ya sabe qué hace el flujo que está nombrando.
+
+**2. El paso de revisión NO es un nodo del grafo.** Su índice se deriva de `pipelineTopology.length`, y
+por eso `goToNextStep()` no lo alcanza: esa acción está pensada para moverse entre nodos y su guarda
+incluye `isLastStep`. El último nodo lleva un botón «Revisar y guardar» que salta al paso terminal con
+`onGoToReview`, y el terminal usa `canSave` en lugar de `isActiveStepValid` porque no tiene store de
+nodo que consultar. Derivar el índice en vez de fijar una constante mantiene el paso final realmente al
+final por muchos nodos que traiga el pipeline.
+
+**3. El aviso de «se creará inactivo» es explícito.** El flujo nace inactivo por decisión de seguridad
+(la estrategia marca `\Seen` y consumiría el buzón), pero eso solo es una buena decisión si el operador
+lo sabe **antes** de pulsar. Un flujo que se guarda y no se dispara nunca, sin explicación, se lee como
+un fallo. El mensaje se repite en la notificación de éxito.
+
+El borrador se limpia antes de navegar: si el operador vuelve al asistente, debe empezar de cero y no
+sobre los restos del flujo anterior.
+
+### Estado de los pendientes de PROT-12
+
+- [x] ~~`upstreamNamespaces` sin conectar al mapeador.~~ Resuelto: `syncUpstreamNamespaces()` lo propaga
+      al elegir el pipeline, y `template-mapper.store.ts` ya no valida contra su lista PROVISIONAL.
+- [x] ~~El asistente no ensambla ni guarda el `pipeline_schema`.~~ Resuelto: `assembleAndSaveWorkflow`
+      + `POST /api/workflows`.
+- [ ] **Solo 2 de los 7 nodos tienen configurador** (`TRIGGER_IMAP`, `MAPEADOR_PLANTILLA`). Un pipeline
+      que incluya cualquiera de los otros cinco no se puede completar: el paso avisa y bloquea el
+      avance. Cuando estén los siete, el `Partial` de ambos registros debe caer para que el compilador
+      exija exhaustividad.
+- [ ] **Sin endpoint para activar un flujo.** Nace inactivo por diseño, pero hoy la única vía de
+      habilitarlo es SQL directo. Falta un `PATCH /api/workflows/:id` con la activación, que además es
+      donde debería vivir la revalidación del esquema antes de exponerlo a los disparadores.
+- [ ] **El disparo sigue siendo en proceso, no encolado** (`architecture-patterns.md` §5 pide BullMQ).
+- [ ] **`host` sin lista blanca** en el nodo IMAP: el patrón de `passwordEnvKey` acota qué secreto se
+      puede leer, pero un EDITOR sigue pudiendo apuntar el nodo a un servidor arbitrario.
+- [ ] `npm run lint` reformatea `src/utils/violation-matcher.spec.ts` (prettier, archivo ajeno).
