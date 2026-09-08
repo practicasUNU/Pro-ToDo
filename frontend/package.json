@@ -29,6 +29,7 @@
     "@lezer/highlight": "^1.2.3",
     "@quasar/extras": "^2.0.4",
     "axios": "^1.19.0",
+    "js-beautify": "^2.0.3",
     "pinia": "^4.0.2",
     "quasar": "^2.25.1",
     "socket.io-client": "^4.8.3",
@@ -38,6 +39,7 @@
   "devDependencies": {
     "@eslint/js": "^10.0.1",
     "@quasar/app-vite": "^3.7.0",
+    "@types/js-beautify": "^1.14.3",
     "@types/node": "^22.19.11",
     "@vue/eslint-config-prettier": "^10.2.0",
     "@vue/eslint-config-typescript": "^14.7.0",

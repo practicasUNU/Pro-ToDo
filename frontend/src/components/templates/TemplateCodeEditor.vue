@@ -16,6 +16,7 @@ import {
 } from '@codemirror/view';
 import { tags } from '@lezer/highlight';
 
+import { formatTemplateHtml } from '@/utils/html-formatter';
 import { locateViolations } from '@/utils/violation-matcher';
 
 import type { Diagnostic } from '@codemirror/lint';
@@ -180,10 +181,9 @@ const setViolations = (violations: TemplateViolation[]): void => {
     return;
   }
 
-  const diagnostics: Diagnostic[] = locateViolations(
-    view.state.doc.toString(),
-    violations,
-  ).map((range) => ({ ...range, severity: 'error' }));
+  const diagnostics: Diagnostic[] = locateViolations(view.state.doc.toString(), violations).map(
+    (range) => ({ ...range, severity: 'error' }),
+  );
 
   view.dispatch(setDiagnostics(view.state, diagnostics));
 };
@@ -210,6 +210,41 @@ const insertTextAtCursor = (text: string, cursorOffset = 0): void => {
   });
 
   // El clic en el chip robo el foco; se devuelve para poder seguir tecleando.
+  view.focus();
+};
+
+/**
+ * Reindenta el documento completo en UNA transaccion.
+ *
+ * Una sola transaccion, y no un reemplazo del `EditorState`, es lo que mantiene
+ * el formateo dentro del historial: `Ctrl+Z` lo deshace de golpe y devuelve el
+ * HTML tal y como lo escribio el autor. Recrear el estado vaciaria la pila de
+ * `history()` y el formateo seria irreversible.
+ *
+ * El store se sincroniza solo, por el `update:modelValue` que emite
+ * `changeListener` al ver `docChanged`; escribir tambien en el store desde aqui
+ * duplicaria el cambio.
+ */
+const formatDocument = (): void => {
+  if (!view) return;
+
+  const rawHtml = view.state.doc.toString();
+  const formattedHtml = formatTemplateHtml(rawHtml);
+
+  // Sin cambio real no se despacha nada: una transaccion vacia sobre un
+  // documento ya formateado apilaria un paso de historial que convierte el
+  // siguiente `Ctrl+Z` en una pulsacion muerta.
+  if (formattedHtml === rawHtml) {
+    view.focus();
+    return;
+  }
+
+  view.dispatch({
+    changes: { from: 0, to: view.state.doc.length, insert: formattedHtml },
+    scrollIntoView: true,
+  });
+
+  // El clic en el boton robo el foco; se devuelve para poder seguir tecleando.
   view.focus();
 };
 
@@ -257,7 +292,7 @@ onBeforeUnmount(() => {
   view = null;
 });
 
-defineExpose({ insertTextAtCursor, setViolations });
+defineExpose({ insertTextAtCursor, setViolations, formatDocument });
 </script>
 
 <template>

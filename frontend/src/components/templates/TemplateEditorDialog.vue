@@ -22,6 +22,7 @@ const TemplateCodeEditor = defineAsyncComponent(
 interface TemplateCodeEditorInstance {
   insertTextAtCursor: (text: string, cursorOffset?: number) => void;
   setViolations: (violations: TemplateViolation[]) => void;
+  formatDocument: () => void;
 }
 
 interface Props {
@@ -88,6 +89,17 @@ const insertNamespace = (namespace: string): void => {
   // Red por si el editor aun no ha resuelto su carga diferida.
   templatesStore.insertMarker(namespace);
 };
+
+/**
+ * Reindenta el HTML del editor.
+ *
+ * Delega en el editor por el mismo motivo que `insertNamespace`: CodeMirror es
+ * el dueno del documento y del historial, asi que el formateo tiene que
+ * despacharse como una transaccion suya. Sin red hacia el store, a diferencia
+ * de la insercion de marcadores: no hay nada que formatear hasta que el editor
+ * este montado y visible.
+ */
+const formatHtmlCode = (): void => codeEditorRef.value?.formatDocument();
 
 const onSubmit = async (): Promise<void> => {
   const { name, description, htmlContent } = templatesStore.activeDraft;
@@ -258,7 +270,21 @@ const onSubmit = async (): Promise<void> => {
           <div class="col-12 col-md-8 pd-editor-main">
             <div class="row items-center justify-between q-mb-xs">
               <span class="pd-label"> Contenido HTML<span class="pd-required">*</span> </span>
-              <span class="pd-mono pd-editor-badge">Editor HTML Handlebars</span>
+              <div class="row items-center q-gutter-xs">
+                <span class="pd-mono pd-editor-badge">Editor HTML Handlebars</span>
+                <q-btn
+                  flat
+                  dense
+                  round
+                  size="sm"
+                  icon="auto_fix_high"
+                  color="primary"
+                  aria-label="Formatear HTML"
+                  @click="formatHtmlCode"
+                >
+                  <q-tooltip>Formatear HTML</q-tooltip>
+                </q-btn>
+              </div>
             </div>
 
             <TemplateCodeEditor
