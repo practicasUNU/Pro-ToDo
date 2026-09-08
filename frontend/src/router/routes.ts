@@ -36,6 +36,12 @@ const routes: RouteRecordRaw[] = [
         // Configurar plantillas es operacion de flujos, no gestion de cuentas.
       },
       {
+        path: 'flujos/nuevo',
+        component: () => import('@/pages/WizardPage.vue'),
+        // SIN requiresAdmin: WorkflowsController admite @Roles(ADMIN, EDITOR).
+        // Configurar flujos es operacion, no gestion de cuentas.
+      },
+      {
         path: 'nodos/config-sandbox',
         component: () => import('@/pages/nodes/NodeConfigSandboxPage.vue'),
       },

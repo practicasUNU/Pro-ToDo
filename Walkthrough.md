@@ -2678,3 +2678,60 @@ salida (prueba 5.3).
 `<q-stepper vertical animated>` montando `<component :is="nodeConfigRegistry[step.nodeType]" :node-id="step.nodeId" />`,
 sin `v-if` por tipo, botón Siguiente con `:disable="!draftStore.isActiveStepValid"`), y registrar la
 ruta en `src/router/routes.ts` más el breadcrumb y el `<q-item>` del drawer en `MainLayout.vue`.
+
+---
+
+## 2026-09-08 · PROT-12.3/12.4 · Anfitrión del asistente y cierre de la tanda — rama `feat/trigger-imap`
+
+Cuarta y última tanda: el anfitrión que monta los configuradores. Con esto el asistente recorre de
+punta a punta la topología que dicta el pipeline elegido.
+
+### Pasos 13-14 completados
+
+| Archivo | Estado |
+|---|---|
+| `frontend/src/components/wizard/PipelineSelector.vue` | creado (Fase 0) |
+| `frontend/src/pages/WizardPage.vue` | creado (Fase 1..N) |
+| `frontend/src/router/routes.ts` | +ruta `flujos/nuevo` |
+| `frontend/src/layouts/MainLayout.vue` | +breadcrumb y `<q-item>` del drawer |
+
+Verificación final de ambos lados:
+
+```
+Backend   → 384 pruebas · tsc limpio · eslint 0 errores
+Frontend  →  93 pruebas · vue-tsc limpio · eslint limpio · quasar build OK
+```
+
+El `quasar build` se ejecutó a propósito además del `typecheck`: `vue-tsc` no compila los templates de
+los SFC con la misma profundidad que el build real, así que es lo único que garantiza que el `<q-stepper>`
+dinámico y el `<component :is>` no tengan errores de plantilla.
+
+### El «por qué» de dos decisiones
+
+**1. Un solo punto de resolución, cero condicionales por tipo.** `resolveStepComponent(step)` es la
+única vía por la que `WizardPage` decide qué montar, y no hay ni un `v-if="step.nodeType === ..."` en la
+plantilla. Añadir un tipo de nodo es añadir una entrada a cada registro; el anfitrión no se toca. Es
+literalmente lo que §3.1 pide y el motivo de que los registros existan.
+
+**2. Un tipo sin configurador avisa, no rompe.** `nodeConfigRegistry` es `Partial` a propósito, así que
+un paso `PARSER_PRE_IA` (hoy sin interfaz) renderiza un panel `.pd-card--accent .pd-accent-grave` con
+`role="alert"` explicando qué falta, y el botón Siguiente queda deshabilitado porque
+`isActiveStepValid` devuelve `false` para un tipo sin store registrado. La alternativa —dejar el paso en
+blanco— habría parecido un fallo de carga.
+
+El selector cubre también el catálogo vacío con un estado explícito: sin él, un backend sin flujos
+configurados dejaría la vista en blanco y se leería como un error de red.
+
+### Pendientes anotados
+
+- **`upstreamNamespaces` aún no está conectado al mapeador.** El draft store ya lo expone, pero
+  `template-mapper.store.ts` sigue usando su lista fija marcada PROVISIONAL. Enlazarlos es una llamada a
+  `setAvailableUpstreamNamespaces(draftStore.upstreamNamespaces(index))` desde el anfitrión, y toca un
+  componente de otra tanda; queda para la siguiente.
+- **El asistente todavía no ensambla ni guarda el `pipeline_schema`.** Recorre y valida los pasos, pero
+  falta el `POST` final que persista el flujo con la `config` de cada store de nodo. Es el cierre natural
+  de PROT-12.
+- **Solo dos de los siete nodos tienen configurador** (`TRIGGER_IMAP`, `MAPEADOR_PLANTILLA`). Cuando
+  estén los siete, el `Partial` de ambos registros debe caer para que el compilador exija exhaustividad.
+- `npm run lint` reformatea `src/utils/violation-matcher.spec.ts` (prettier, archivo ajeno). Se revierte
+  en cada tanda para no mezclarlo.

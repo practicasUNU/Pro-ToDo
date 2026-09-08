@@ -1512,5 +1512,5 @@ pruebas y lint de forma aislada.
 - [x] 10. Frontend — `node-store-registry.ts`
 - [x] 11. Frontend — `stores/flujo-draft.store.ts`
 - [x] 12. Frontend — `flujo-draft.store.spec.ts` ⇒ verificación + commit
-- [ ] 13. Frontend — `PipelineSelector.vue`, `WizardPage.vue`, ruta, breadcrumb y drawer
-- [ ] 14. Cierre — verificación completa de ambos lados y commit final
+- [x] 13. Frontend — `PipelineSelector.vue`, `WizardPage.vue`, ruta, breadcrumb y drawer
+- [x] 14. Cierre — verificación completa de ambos lados y commit final

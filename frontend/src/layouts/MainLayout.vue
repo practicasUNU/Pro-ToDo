@@ -12,6 +12,7 @@ const ROUTE_BREADCRUMBS: Record<string, string> = {
   '/users': 'Gestion de Usuarios',
   '/ip-whitelist': 'Lista Blanca de IPs',
   '/templates': 'Catalogo de Plantillas',
+  '/flujos/nuevo': 'Nuevo Flujo',
   '/nodos/config-sandbox': 'Banco de Pruebas de Nodos',
 };
 
@@ -67,6 +68,13 @@ const toggleLeftDrawer = (): void => {
             <q-icon name="description" size="20px" />
           </q-item-section>
           <q-item-section class="pd-nav">Plantillas</q-item-section>
+        </q-item>
+
+        <q-item to="/flujos/nuevo" clickable v-ripple>
+          <q-item-section avatar>
+            <q-icon name="auto_awesome_motion" size="20px" />
+          </q-item-section>
+          <q-item-section class="pd-nav">Nuevo Flujo</q-item-section>
         </q-item>
 
         <q-item to="/nodos/config-sandbox" clickable v-ripple>
