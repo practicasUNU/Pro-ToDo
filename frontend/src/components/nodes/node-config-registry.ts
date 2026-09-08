@@ -21,6 +21,9 @@ import type { Component } from 'vue';
  * exigira que no falte ninguno.
  */
 export const nodeConfigRegistry: Partial<Record<NodeType, Component>> = {
+  [NodeType.TRIGGER_IMAP]: defineAsyncComponent(
+    () => import('@components/nodes/TriggerImapConfig.vue'),
+  ),
   [NodeType.MAPEADOR_PLANTILLA]: defineAsyncComponent(
     () => import('@components/nodes/TemplateMapperConfig.vue'),
   ),

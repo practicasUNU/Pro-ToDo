@@ -1508,9 +1508,9 @@ pruebas y lint de forma aislada.
 - [x] 6. Frontend — `pipelines.service.ts` y `nodes/trigger-imap.service.ts`
 - [x] 7. Frontend — `stores/nodes/trigger-imap.store.ts`
 - [x] 8. Frontend — `trigger-imap.store.spec.ts` ⇒ verificación + commit
-- [ ] 9. Frontend — `TriggerImapConfig.vue` + entrada en `node-config-registry.ts`
-- [ ] 10. Frontend — `node-store-registry.ts`
-- [ ] 11. Frontend — `stores/flujo-draft.store.ts`
-- [ ] 12. Frontend — `flujo-draft.store.spec.ts` ⇒ verificación + commit
+- [x] 9. Frontend — `TriggerImapConfig.vue` + entrada en `node-config-registry.ts`
+- [x] 10. Frontend — `node-store-registry.ts`
+- [x] 11. Frontend — `stores/flujo-draft.store.ts`
+- [x] 12. Frontend — `flujo-draft.store.spec.ts` ⇒ verificación + commit
 - [ ] 13. Frontend — `PipelineSelector.vue`, `WizardPage.vue`, ruta, breadcrumb y drawer
 - [ ] 14. Cierre — verificación completa de ambos lados y commit final

@@ -2621,3 +2621,60 @@ rama). Se revirtió para no mezclarlo; volverá a aparecer en cualquier `npm run
 HTTP, maquetación calcada de `UserDialog.vue`: `.pd-label` + `.pd-required`, inputs `outlined dense`,
 `passwordEnvKey` con `.pd-mono`, botón `.pd-btn-primary` con `icon-right="north_east"` y
 `:loading="store.isLoading"`) y añadir su entrada a `node-config-registry.ts`.
+
+---
+
+## 2026-09-07 · PROT-12.4 · Componente del trigger, registro de stores y agregador — rama `feat/trigger-imap`
+
+Tercera tanda: la UI del nodo y el agregador del asistente. Con esto el paso 1 del wizard está
+completo salvo el anfitrión que lo monta.
+
+### Pasos 9-12 completados
+
+| Archivo | Estado |
+|---|---|
+| `frontend/src/components/nodes/TriggerImapConfig.vue` | creado |
+| `frontend/src/components/nodes/node-config-registry.ts` | +entrada `TRIGGER_IMAP` |
+| `frontend/src/components/nodes/node-store-registry.ts` | creado |
+| `frontend/src/stores/flujo-draft.store.ts` | creado |
+| `frontend/src/stores/flujo-draft.store.spec.ts` | creado (21 pruebas) |
+
+Verificación: **93 pruebas en verde** (6 archivos, +21), `vue-tsc --noEmit` limpio, `eslint src` limpio.
+
+### El «por qué» de tres decisiones
+
+**1. `node-store-registry.ts` es hermano del de componentes, no un duplicado.** El registro de
+componentes resuelve *qué* pintar; este resuelve *a quién preguntar* si lo pintado es válido. Hacían
+falta los dos: el anfitrión monta el configurador por `nodeType`, pero también tiene que leer el
+`isConfigValid` del nodo activo para habilitar el botón Siguiente, y sin este mapa tendría que importar
+cada store por su nombre y encadenar condicionales por tipo — exactamente lo que §3.1 prohíbe. Cierra
+el TODO que `NodeConfigSandboxPage.vue` dejaba escrito.
+
+El contrato `NodeConfigStore` es deliberadamente estrecho (solo `isConfigValid`): tiparlo así impide que
+el anfitrión acabe inspeccionando la `config` interna de un nodo concreto.
+
+**2. El componente no escribe en `config` directamente.** Todos los `q-input` usan `:model-value` +
+`@update:model-value` contra `store.patchConfig(...)` en lugar de `v-model`. Con `v-model` sobre
+`store.config.host`, Pinia permitiría la mutación pero se saltaría la invalidación de
+`connectionVerified`, y el paso quedaría declarándose válido con unas credenciales que ya no son las
+probadas. Es el mismo motivo por el que el store canaliza todo por `patchConfig`.
+
+**3. La guarda de avance vive en el store, no solo en el `:disable`.** `goToNextStep()` comprueba
+`isActiveStepValid` antes de mover el cursor. El estado del borrador no debe depender de que la vista se
+acuerde de deshabilitar un botón; la prueba 4.1 lo fija llamando a la acción directamente.
+
+Un paso cuyo `nodeType` aún no tiene store registrado devuelve `isActiveStepValid: false` (prueba 3.3,
+sobre `PARSER_PRE_IA`): sin configurador no hay forma de declararlo válido, y dejar avanzar sería
+ensamblar un `pipeline_schema` con un nodo sin configurar.
+
+`upstreamNamespaces(stepIndex)` es la fuente real de lo que `template-mapper.store.ts` tiene hoy como
+lista fija marcada PROVISIONAL. Excluye el paso indicado a propósito: un nodo no puede leer su propia
+salida (prueba 5.3).
+
+### Próximo paso exacto
+
+**Paso 13:** crear `frontend/src/components/wizard/PipelineSelector.vue` (tarjetas con `--pd-gradient`,
+`.pd-h2`, `.pd-subtitle`) y `frontend/src/pages/WizardPage.vue` (Fase 0 vs Fase 1..N con
+`<q-stepper vertical animated>` montando `<component :is="nodeConfigRegistry[step.nodeType]" :node-id="step.nodeId" />`,
+sin `v-if` por tipo, botón Siguiente con `:disable="!draftStore.isActiveStepValid"`), y registrar la
+ruta en `src/router/routes.ts` más el breadcrumb y el `<q-item>` del drawer en `MainLayout.vue`.
