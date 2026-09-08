@@ -1600,7 +1600,7 @@ tres vistas que la separación exige. Cierra el pendiente «sin endpoint para ac
 
 - [x] 1. Esquema y entidades — migración 010, `init.sql`, `WorkflowTemplate`, relación en `Workflow`, helper `pipeline-topology.util.ts`
 - [x] 2. Módulo `WorkflowTemplates` — DTOs, servicio, controlador, módulo y pruebas
-- [ ] 3. Flujos — `templateId` en el alta, `updateWorkflow` y `PATCH /api/workflows/:id`
+- [x] 3. Flujos — `templateId` en el alta, `updateWorkflow` y `PATCH /api/workflows/:id`
 - [ ] 4. Frontend — tipos, servicios, tres stores, tres vistas, router, layout y pruebas
 
 **Nomenclatura:** identificadores en inglés (`WorkflowTemplate`, `WorkflowTemplatesModule`, ruta

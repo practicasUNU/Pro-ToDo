@@ -2,6 +2,7 @@ import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 
 import { FsmModule } from '@core/fsm/fsm.module';
+import { WorkflowTemplatesModule } from '@modules/workflow-templates/workflow-templates.module';
 
 import { Workflow } from './entities/workflow.entity';
 import { WorkflowsController } from './workflows.controller';
@@ -20,7 +21,13 @@ import { WorkflowsService } from './workflows.service';
  * lo que la factoria evita.
  */
 @Module({
-  imports: [TypeOrmModule.forFeature([Workflow]), FsmModule],
+  imports: [
+    TypeOrmModule.forFeature([Workflow]),
+    FsmModule,
+    // Por `WorkflowTemplatesService`: comprueba el `templateId` al instanciar.
+    // La dependencia va en un solo sentido; el catalogo no conoce este modulo.
+    WorkflowTemplatesModule,
+  ],
   controllers: [WorkflowsController],
   providers: [WorkflowsService],
   exports: [WorkflowsService],

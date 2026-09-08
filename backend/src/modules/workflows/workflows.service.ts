@@ -9,10 +9,12 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { FsmEngineService } from '@core/fsm/services/fsm-engine.service';
 import { PipelineValidatorService } from '@core/fsm/services/pipeline-validator.service';
 import { buildOrderedTopology } from '@core/fsm/utils/pipeline-topology.util';
+import { WorkflowTemplatesService } from '@modules/workflow-templates/workflow-templates.service';
 
 import { Workflow } from './entities/workflow.entity';
 
 import type { CreateWorkflowDto } from './dto/create-workflow.dto';
+import type { UpdateWorkflowDto } from './dto/update-workflow.dto';
 import type { PipelineSummaryResponseDto } from './dto/pipeline-summary-response.dto';
 import type { RunWorkflowTestDto } from './dto/run-workflow-test.dto';
 import type { WorkflowExecutionResponseDto } from './dto/workflow-execution-response.dto';
@@ -47,6 +49,7 @@ export class WorkflowsService {
     private readonly workflowRepository: Repository<Workflow>,
     private readonly pipelineValidatorService: PipelineValidatorService,
     private readonly fsmEngineService: FsmEngineService,
+    private readonly workflowTemplatesService: WorkflowTemplatesService,
   ) {}
 
   /**
@@ -205,6 +208,14 @@ export class WorkflowsService {
     createWorkflowDto: CreateWorkflowDto,
     userId: string,
   ): Promise<PipelineSummaryResponseDto> {
+    // La plantilla se comprueba ANTES de validar el grafo: es una consulta
+    // barata y un `templateId` equivocado invalida la peticion entera.
+    if (createWorkflowDto.templateId !== undefined) {
+      await this.workflowTemplatesService.assertInstantiable(
+        createWorkflowDto.templateId,
+      );
+    }
+
     const schema = await this.pipelineValidatorService.validateSchema(
       createWorkflowDto.pipelineSchema,
     );
@@ -214,16 +225,109 @@ export class WorkflowsService {
       description: createWorkflowDto.description ?? null,
       pipelineSchema: schema,
       active: createWorkflowDto.active ?? false,
+      // El grafo se guarda COPIADO en la fila del flujo, no referenciado: editar
+      // la plantilla despues no altera los flujos que ya salieron de ella. La
+      // columna es trazabilidad de la procedencia, no una dependencia viva.
+      templateId: createWorkflowDto.templateId ?? null,
       createdById: userId,
     });
 
     const saved = await this.workflowRepository.save(workflow);
 
     this.logger.log(
-      `Flujo creado: "${saved.name}" (${saved.id}) | nodos=${Object.keys(schema.nodes).length} | activo=${String(saved.active)} | autor=${userId}`,
+      `Flujo creado: "${saved.name}" (${saved.id}) | nodos=${Object.keys(schema.nodes).length} | activo=${String(saved.active)} | plantilla=${saved.templateId ?? 'ninguna'} | autor=${userId}`,
     );
 
     return this.toPipelineSummary(saved);
+  }
+
+  /**
+   * Edita un flujo ya instanciado: nombre, descripcion, estado o grafo.
+   *
+   * Es la via por la que un flujo se HABILITA. Nace inactivo por decision de
+   * seguridad —la estrategia IMAP marca los correos con `\Seen` y consumiria el
+   * buzon real—, y hasta ahora la unica forma de activarlo era SQL directo.
+   *
+   * DOS GUARDAS, y son el motivo de que la activacion viva aqui y no en un
+   * endpoint aparte:
+   *
+   * 1. Un `pipelineSchema` nuevo se revalida por completo antes de escribirse.
+   * 2. Activar exige un esquema valido. Habilitar un flujo lo expone al sondeo
+   *    IMAP, que lo recogera en su reconciliacion periodica sin volver a
+   *    preguntar nada: esta es la ultima oportunidad de detectar un grafo roto
+   *    antes de que un disparador automatico lo ejecute.
+   *
+   * Cada campo se aplica solo si viaja en el cuerpo (`!== undefined`), no si es
+   * veraz: sin eso, `{ active: false }` y una descripcion vacia se ignorarian.
+   *
+   * @param workflowId Identificador de la fila de `flujos`.
+   * @param updateWorkflowDto Campos a modificar; todos opcionales.
+   * @throws NotFoundException Si el flujo no existe.
+   * @throws BadRequestException Si el grafo nuevo no es integro, o si se intenta
+   *         activar un flujo que no tiene esquema.
+   */
+  public async updateWorkflow(
+    workflowId: string,
+    updateWorkflowDto: UpdateWorkflowDto,
+  ): Promise<PipelineSummaryResponseDto> {
+    const workflow = await this.workflowRepository.findOne({
+      where: { id: workflowId },
+    });
+
+    if (!workflow) {
+      throw new NotFoundException(`Flujo con id "${workflowId}" no encontrado`);
+    }
+
+    if (updateWorkflowDto.name !== undefined) {
+      workflow.name = updateWorkflowDto.name.trim();
+    }
+
+    if (updateWorkflowDto.description !== undefined) {
+      workflow.description = updateWorkflowDto.description.trim();
+    }
+
+    if (updateWorkflowDto.pipelineSchema !== undefined) {
+      workflow.pipelineSchema =
+        await this.pipelineValidatorService.validateSchema(
+          updateWorkflowDto.pipelineSchema,
+        );
+    }
+
+    if (updateWorkflowDto.active !== undefined) {
+      if (updateWorkflowDto.active) {
+        await this.assertActivatable(workflow);
+      }
+
+      workflow.active = updateWorkflowDto.active;
+    }
+
+    const saved = await this.workflowRepository.save(workflow);
+
+    this.logger.log(
+      `Flujo actualizado: "${saved.name}" (${saved.id}) | activo=${String(saved.active)}`,
+    );
+
+    return this.toPipelineSummary(saved);
+  }
+
+  /**
+   * Comprueba que un flujo puede exponerse a los disparadores automaticos.
+   *
+   * Un flujo sin esquema es un borrador legitimo del asistente, pero activarlo
+   * dejaria al sondeo IMAP disparando ejecuciones que fallan en el primer paso.
+   * Con esquema, se REVALIDA: la fila pudo escribirse por SQL directo o quedar
+   * obsoleta si el contrato del grafo cambio desde que se guardo.
+   *
+   * @throws BadRequestException Si no hay esquema o el esquema no es integro.
+   */
+  private async assertActivatable(workflow: Workflow): Promise<void> {
+    if (workflow.pipelineSchema === null) {
+      throw new BadRequestException(
+        `El flujo "${workflow.name}" no tiene pipeline_schema y no se puede activar: configuralo antes de habilitarlo.`,
+      );
+    }
+
+    await this.pipelineValidatorService.validateSchema(workflow.pipelineSchema);
   }
 
   /**
@@ -239,6 +343,7 @@ export class WorkflowsService {
       name: workflow.name,
       description: workflow.description,
       active: workflow.active,
+      templateId: workflow.templateId,
       topology:
         workflow.pipelineSchema === null
           ? []

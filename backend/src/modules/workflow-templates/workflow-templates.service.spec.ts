@@ -309,11 +309,15 @@ describe('WorkflowTemplatesService · catalogo de plantillas de flujo', () => {
       repository.findOne
         .mockResolvedValueOnce(null)
         .mockResolvedValue(buildTemplate());
-      const dto: Partial<CreateWorkflowTemplateDto> = buildCreateDto();
-      delete dto.description;
+      // El DTO se construye SIN la clave en vez de borrarla: los campos son
+      // `readonly`, asi que `delete` no compila.
+      const dto: CreateWorkflowTemplateDto = {
+        name: 'Notiweb - correo a CMS',
+        pipelineSchema: buildSchema() as unknown as Record<string, unknown>,
+      };
 
       // 2. Act
-      await service.create(dto as CreateWorkflowTemplateDto);
+      await service.create(dto);
 
       // 3. Assert: la columna es nullable; un `undefined` dejaria el campo sin
       //    definir en la entidad en vez de explicitamente vacio.

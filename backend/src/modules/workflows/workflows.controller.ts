@@ -6,6 +6,7 @@ import {
   HttpStatus,
   Param,
   ParseUUIDPipe,
+  Patch,
   Post,
   UseGuards,
 } from '@nestjs/common';
@@ -29,6 +30,7 @@ import { JwtAuthGuard } from '@modules/auth/guards/jwt-auth.guard';
 import { UserRole } from '@modules/users/enums/user-role.enum';
 
 import { CreateWorkflowDto } from './dto/create-workflow.dto';
+import { UpdateWorkflowDto } from './dto/update-workflow.dto';
 import { PipelineSummaryResponseDto } from './dto/pipeline-summary-response.dto';
 import { RunWorkflowTestDto } from './dto/run-workflow-test.dto';
 import { WorkflowExecutionResponseDto } from './dto/workflow-execution-response.dto';
@@ -118,6 +120,36 @@ export class WorkflowsController {
       createWorkflowDto,
       currentUser.id,
     );
+  }
+
+  /**
+   * Edita un flujo: nombre, descripcion, grafo o estado.
+   *
+   * Es la unica via por la que un flujo se HABILITA. Nace inactivo por decision
+   * de seguridad, y antes de este endpoint solo SQL directo podia activarlo.
+   *
+   * No hay `@Delete`: retirar un flujo es `PATCH { "active": false }`. Un
+   * borrado fisico dejaria las ejecuciones ya trazadas apuntando a un flujo que
+   * no existe.
+   */
+  @Patch(':id')
+  @ApiOperation({
+    summary: 'Actualiza un flujo; tambien lo activa o lo desactiva',
+  })
+  @ApiOkResponse({
+    description: 'Flujo actualizado, con su topologia ordenada',
+    type: PipelineSummaryResponseDto,
+  })
+  @ApiBadRequestResponse({
+    description:
+      'El esquema nuevo no es integro, o se intenta activar un flujo sin pipeline_schema',
+  })
+  @ApiNotFoundResponse({ description: 'No existe ningun flujo con ese id' })
+  public async updateWorkflow(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() updateWorkflowDto: UpdateWorkflowDto,
+  ): Promise<PipelineSummaryResponseDto> {
+    return this.workflowsService.updateWorkflow(id, updateWorkflowDto);
   }
 
   /**

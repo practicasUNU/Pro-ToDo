@@ -6,6 +6,7 @@ import {
   IsObject,
   IsOptional,
   IsString,
+  IsUUID,
   MaxLength,
 } from 'class-validator';
 
@@ -78,4 +79,13 @@ export class CreateWorkflowDto {
   @IsOptional()
   @IsBoolean({ message: 'active debe ser un booleano.' })
   readonly active?: boolean;
+
+  @ApiPropertyOptional({
+    description:
+      'Plantilla (`plantillas_flujo`) de la que parte este flujo. Se registra como trazabilidad: el flujo guarda su PROPIA copia del grafo, asi que editar la plantilla despues no lo altera',
+    format: 'uuid',
+  })
+  @IsOptional()
+  @IsUUID('4', { message: 'templateId debe ser un UUID valido.' })
+  readonly templateId?: string;
 }

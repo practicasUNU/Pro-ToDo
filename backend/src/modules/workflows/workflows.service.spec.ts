@@ -15,6 +15,7 @@ import type { PipelineSchemaDto } from '@core/fsm/dto/pipeline-schema.dto';
 import type { FsmExecution } from '@core/fsm/entities/fsm-execution.entity';
 import type { FsmEngineService } from '@core/fsm/services/fsm-engine.service';
 import type { PipelineValidatorService } from '@core/fsm/services/pipeline-validator.service';
+import type { WorkflowTemplatesService } from '@modules/workflow-templates/workflow-templates.service';
 import type { Workflow } from './entities/workflow.entity';
 import type { Repository } from 'typeorm';
 
@@ -101,6 +102,7 @@ interface ServiceHarness {
   repository: WorkflowRepositoryMock;
   validator: ValidatorMock;
   engine: EngineMock;
+  templates: { assertInstantiable: jest.Mock };
 }
 
 /**
@@ -136,15 +138,22 @@ const buildHarness = (): ServiceHarness => {
     executeWorkflow: jest.fn().mockResolvedValue(buildExecution()),
   };
 
+  // El catalogo de plantillas va mockeado con exito por defecto: `create` solo
+  // lo consulta si llega `templateId`, y las pruebas negativas lo hacen rechazar.
+  const templates = {
+    assertInstantiable: jest.fn().mockResolvedValue({ id: TEMPLATE_ID }),
+  };
+
   const service = new WorkflowsService(
     repository as unknown as Repository<Workflow>,
     validator as unknown as PipelineValidatorService,
     engine as unknown as FsmEngineService,
+    templates as unknown as WorkflowTemplatesService,
   );
   jest.spyOn(service['logger'], 'log').mockImplementation(() => undefined);
   jest.spyOn(service['logger'], 'warn').mockImplementation(() => undefined);
 
-  return { service, repository, validator, engine };
+  return { service, repository, validator, engine, templates };
 };
 
 describe('WorkflowsService (despacho manual, Camino B)', () => {
@@ -634,6 +643,243 @@ describe('WorkflowsService (alta de flujos desde el asistente)', () => {
       const serialized = JSON.stringify(result);
       expect(serialized).not.toContain('IMAP_PASSWORD');
       expect(serialized).not.toContain('imap.unuware.com');
+    });
+  });
+});
+
+describe('WorkflowsService (instanciacion desde plantilla)', () => {
+  describe('9. Procedencia del flujo', () => {
+    it('9.1 deberia persistir el templateId recibido', async () => {
+      // 1. Arrange
+      const { service, repository, templates } = buildHarness();
+
+      // 2. Act
+      await service.createWorkflow(
+        buildCreateDto({ templateId: TEMPLATE_ID }),
+        AUTHOR_ID,
+      );
+
+      // 3. Assert
+      expect(templates.assertInstantiable).toHaveBeenCalledWith(TEMPLATE_ID);
+      expect(repository.create).toHaveBeenCalledWith(
+        expect.objectContaining({ templateId: TEMPLATE_ID }),
+      );
+    });
+
+    it('9.2 deberia guardar templateId en null cuando no llega', async () => {
+      // 1. Arrange
+      const { service, repository, templates } = buildHarness();
+
+      // 2. Act: el asistente puede crear un flujo sin partir de ninguna
+      //    plantilla, y los flujos anteriores a la migracion 010 tampoco tienen.
+      await service.createWorkflow(buildCreateDto(), AUTHOR_ID);
+
+      // 3. Assert
+      expect(templates.assertInstantiable).not.toHaveBeenCalled();
+      expect(repository.create).toHaveBeenCalledWith(
+        expect.objectContaining({ templateId: null }),
+      );
+    });
+
+    it('9.3 deberia propagar el rechazo de una plantilla no instanciable', async () => {
+      // 1. Arrange
+      const { service, repository, validator, templates } = buildHarness();
+      templates.assertInstantiable.mockRejectedValue(
+        new BadRequestException('Plantilla retirada del catalogo'),
+      );
+
+      // 2. Act & 3. Assert
+      await expect(
+        service.createWorkflow(
+          buildCreateDto({ templateId: TEMPLATE_ID }),
+          AUTHOR_ID,
+        ),
+      ).rejects.toThrow(BadRequestException);
+      // La plantilla se comprueba ANTES del grafo: es la consulta barata, y un
+      // templateId equivocado invalida la peticion entera.
+      expect(validator.validateSchema).not.toHaveBeenCalled();
+      expect(repository.save).not.toHaveBeenCalled();
+    });
+
+    it('9.4 deberia exponer la procedencia en la respuesta del alta', async () => {
+      // 1. Arrange
+      const { service, repository } = buildHarness();
+      repository.save.mockResolvedValue(
+        buildWorkflow({ templateId: TEMPLATE_ID }),
+      );
+
+      // 2. Act
+      const summary = await service.createWorkflow(
+        buildCreateDto({ templateId: TEMPLATE_ID }),
+        AUTHOR_ID,
+      );
+
+      // 3. Assert
+      expect(summary.templateId).toBe(TEMPLATE_ID);
+    });
+  });
+});
+
+describe('WorkflowsService (edicion y habilitacion de flujos)', () => {
+  describe('10. Edicion de campos', () => {
+    it('10.1 deberia actualizar nombre y descripcion recortando espacios', async () => {
+      // 1. Arrange
+      const { service, repository } = buildHarness();
+
+      // 2. Act
+      await service.updateWorkflow(WORKFLOW_ID, {
+        name: '  Notiweb v2  ',
+        description: '  Publica noticias  ',
+      });
+
+      // 3. Assert
+      expect(repository.save).toHaveBeenCalledWith(
+        expect.objectContaining({
+          name: 'Notiweb v2',
+          description: 'Publica noticias',
+        }),
+      );
+    });
+
+    it('10.2 no deberia tocar los campos ausentes del cuerpo', async () => {
+      // 1. Arrange
+      const { service, repository } = buildHarness();
+
+      // 2. Act
+      await service.updateWorkflow(WORKFLOW_ID, { name: 'Solo el nombre' });
+
+      // 3. Assert
+      expect(repository.save).toHaveBeenCalledWith(
+        expect.objectContaining({
+          name: 'Solo el nombre',
+          description: null,
+          active: true,
+        }),
+      );
+    });
+
+    it('10.3 deberia revalidar el grafo nuevo antes de escribirlo', async () => {
+      // 1. Arrange
+      const { service, validator } = buildHarness();
+
+      // 2. Act
+      await service.updateWorkflow(WORKFLOW_ID, {
+        pipelineSchema: buildSchema() as unknown as Record<string, unknown>,
+      });
+
+      // 3. Assert
+      expect(validator.validateSchema).toHaveBeenCalledTimes(1);
+    });
+
+    it('10.4 deberia propagar el fallo de validacion del grafo nuevo', async () => {
+      // 1. Arrange
+      const { service, repository, validator } = buildHarness();
+      validator.validateSchema.mockRejectedValue(
+        new BadRequestException({ issues: [{ field: 'entrypoint' }] }),
+      );
+
+      // 2. Act & 3. Assert
+      await expect(
+        service.updateWorkflow(WORKFLOW_ID, {
+          pipelineSchema: buildSchema() as unknown as Record<string, unknown>,
+        }),
+      ).rejects.toThrow(BadRequestException);
+      expect(repository.save).not.toHaveBeenCalled();
+    });
+
+    it('10.5 deberia lanzar NotFoundException sobre un flujo inexistente', async () => {
+      // 1. Arrange
+      const { service, repository } = buildHarness();
+      repository.findOne.mockResolvedValue(null);
+
+      // 2. Act & 3. Assert
+      await expect(
+        service.updateWorkflow(WORKFLOW_ID, { active: true }),
+      ).rejects.toThrow(NotFoundException);
+    });
+  });
+
+  describe('11. Habilitacion frente a los disparadores', () => {
+    it('11.1 deberia revalidar el esquema al activar', async () => {
+      // 1. Arrange
+      const { service, repository, validator } = buildHarness();
+      repository.findOne.mockResolvedValue(buildWorkflow({ active: false }));
+
+      // 2. Act
+      const summary = await service.updateWorkflow(WORKFLOW_ID, {
+        active: true,
+      });
+
+      // 3. Assert: habilitar expone el flujo al sondeo IMAP, que lo recogera en
+      //    su reconciliacion sin volver a preguntar nada. Es la ultima
+      //    oportunidad de detectar un grafo roto.
+      expect(validator.validateSchema).toHaveBeenCalledTimes(1);
+      expect(summary.active).toBe(true);
+    });
+
+    it('11.2 deberia rechazar la activacion de un flujo sin esquema', async () => {
+      // 1. Arrange
+      const { service, repository } = buildHarness();
+      repository.findOne.mockResolvedValue(
+        buildWorkflow({ active: false, pipelineSchema: null }),
+      );
+
+      // 2. Act & 3. Assert: un flujo sin esquema es un borrador legitimo del
+      //    asistente, pero activarlo dejaria al sondeo disparando ejecuciones
+      //    que fallan en el primer paso.
+      await expect(
+        service.updateWorkflow(WORKFLOW_ID, { active: true }),
+      ).rejects.toThrow(BadRequestException);
+      expect(repository.save).not.toHaveBeenCalled();
+    });
+
+    it('11.3 deberia rechazar la activacion si el esquema ya no es integro', async () => {
+      // 1. Arrange
+      const { service, repository, validator } = buildHarness();
+      repository.findOne.mockResolvedValue(buildWorkflow({ active: false }));
+      validator.validateSchema.mockRejectedValue(
+        new BadRequestException({ issues: [{ field: 'nodes.a.nextStep' }] }),
+      );
+
+      // 2. Act & 3. Assert: la fila pudo escribirse por SQL directo o quedar
+      //    obsoleta si el contrato del grafo cambio desde que se guardo.
+      await expect(
+        service.updateWorkflow(WORKFLOW_ID, { active: true }),
+      ).rejects.toThrow(BadRequestException);
+      expect(repository.save).not.toHaveBeenCalled();
+    });
+
+    it('11.4 deberia desactivar sin revalidar nada', async () => {
+      // 1. Arrange
+      const { service, repository, validator } = buildHarness();
+
+      // 2. Act
+      await service.updateWorkflow(WORKFLOW_ID, { active: false });
+
+      // 3. Assert: retirar un flujo de los disparadores nunca puede fallar por
+      //    un esquema roto; si acaso es la via de emergencia para pararlo.
+      expect(validator.validateSchema).not.toHaveBeenCalled();
+      expect(repository.save).toHaveBeenCalledWith(
+        expect.objectContaining({ active: false }),
+      );
+    });
+
+    it('11.5 deberia permitir desactivar un flujo sin esquema', async () => {
+      // 1. Arrange
+      const { service, repository } = buildHarness();
+      repository.findOne.mockResolvedValue(
+        buildWorkflow({ pipelineSchema: null }),
+      );
+
+      // 2. Act
+      const summary = await service.updateWorkflow(WORKFLOW_ID, {
+        active: false,
+      });
+
+      // 3. Assert: la guarda es asimetrica a proposito y solo mira la
+      //    activacion. Un flujo a medio configurar debe poder desactivarse.
+      expect(summary.active).toBe(false);
+      expect(summary.topology).toEqual([]);
     });
   });
 });

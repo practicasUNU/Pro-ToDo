@@ -68,6 +68,14 @@ export class PipelineSummaryResponseDto {
   readonly active: boolean;
 
   @ApiProperty({
+    description:
+      'Plantilla (`plantillas_flujo`) de la que se instancio el flujo, o null si nacio desde cero',
+    nullable: true,
+    format: 'uuid',
+  })
+  readonly templateId: string | null;
+
+  @ApiProperty({
     type: [PipelineStepDto],
     description:
       'Pasos EN ORDEN DE EJECUCION, recorridos desde `entrypoint` por `nextStep`',

@@ -3304,3 +3304,60 @@ columnas) y quedó corregido; los otros 3 son de la misma familia preexistente.
 **Próximo paso:** paso 3 — `templateId` en `CreateWorkflowDto`, `WorkflowsService.createWorkflow`
 validando con `assertInstantiable`, `updateWorkflow` + `UpdateWorkflowDto`, `PATCH /api/workflows/:id`
 con la revalidación al activar, y ampliación de `workflows.service.spec.ts`.
+
+### Paso 3 completado — instanciación desde plantilla y habilitación de flujos
+
+| Archivo | Estado |
+|---|---|
+| `backend/src/modules/workflows/dto/create-workflow.dto.ts` | `templateId?` (`@IsUUID`) |
+| `backend/src/modules/workflows/dto/update-workflow.dto.ts` | creado |
+| `backend/src/modules/workflows/dto/pipeline-summary-response.dto.ts` | expone `templateId` |
+| `backend/src/modules/workflows/workflows.service.ts` | `templateId` en el alta + `updateWorkflow` + `assertActivatable` |
+| `backend/src/modules/workflows/workflows.controller.ts` | `@Patch(':id')` |
+| `backend/src/modules/workflows/workflows.module.ts` | importa `WorkflowTemplatesModule` |
+| `backend/src/modules/workflows/workflows.service.spec.ts` | bloques 9-11, 14 pruebas nuevas |
+
+```
+Backend → 443 pruebas (antes 429) · 25 suites · tsc limpio · eslint 0 errores
+```
+
+### El «por qué» de cuatro decisiones
+
+**1. El grafo se COPIA en el flujo, no se referencia.** `flujos.configuracion_pipeline` sigue llevando
+su propio esquema, e `id_plantilla_origen` es solo trazabilidad de la procedencia. Si el flujo leyese el
+grafo del maestro, retocar un blueprint cambiaría el comportamiento de flujos ya en producción — un
+cambio a distancia y sin aviso. La independencia es el sentido de separar blueprint e instancia, y la
+prueba 9.1 fija que se persiste el vínculo sin que el esquema deje de ser propio.
+
+**2. `UpdateWorkflowDto` no es un `PartialType(CreateWorkflowDto)`.** Ese DTO incluye `templateId`, y el
+maestro del que nació un flujo es un hecho histórico: dejar reescribirlo permitiría falsear la
+procedencia después de crearlo, que es justo lo que la columna existe para registrar. Se declara a mano
+con los cuatro campos editables.
+
+**3. Activar y desactivar no son simétricos.** `assertActivatable` solo se invoca al poner `active:
+true`, y hace dos cosas: rechaza un flujo sin `pipeline_schema` (un borrador legítimo del asistente,
+pero activarlo dejaría al sondeo disparando ejecuciones que fallan en el primer paso) y **revalida** el
+esquema existente, porque la fila pudo escribirse por SQL directo o quedar obsoleta si el contrato del
+grafo cambió. Habilitar un flujo lo expone al sondeo IMAP, que lo recoge en su reconciliación de 60 s
+sin volver a preguntar nada: este es el último punto de control.
+
+Desactivar, en cambio, no valida nada (pruebas 11.4 y 11.5). Retirar un flujo de los disparadores es la
+vía de emergencia para pararlo, y hacerla fallar por un esquema roto sería exactamente lo contrario de
+lo que hace falta en ese momento.
+
+**4. Sin `@Delete` en el controlador.** Retirar un flujo es `PATCH { "active": false }`. Un borrado
+físico dejaría las ejecuciones ya trazadas apuntando a un flujo inexistente, y la trazabilidad es el
+motivo de que `ejecuciones_flujo` exista.
+
+Con esto queda cerrado el pendiente que arrastraba PROT-12: **ya hay endpoint para activar un flujo**.
+Nacía inactivo por diseño y hasta ahora la única vía de habilitarlo era SQL directo.
+
+La comprobación de la plantilla va **antes** de validar el grafo (prueba 9.3 verifica que
+`validateSchema` no llega a llamarse): es una consulta barata y un `templateId` equivocado invalida la
+petición entera. `assertInstantiable` rechaza además las plantillas retiradas, porque permitir
+instanciarlas vaciaría de sentido el borrado lógico.
+
+**Próximo paso:** paso 4 — frontend completo: tipos, `workflow-templates.service.ts`, absorber
+`pipelines.service.ts` en `workflows.service.ts`, tres stores (`workflow-templates`, `workflows` y el
+refactor de `flujo-draft` con clonado inmutable), las vistas `/flujos` y `/plantillas-flujo`, router,
+`MainLayout` y las pruebas de Vitest.
