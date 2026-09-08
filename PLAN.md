@@ -1504,10 +1504,10 @@ pruebas y lint de forma aislada.
 - [x] 2. Backend — `WorkflowsService.findSelectablePipelines()` con recorrido `entrypoint` → `nextStep`
 - [x] 3. Backend — `@Get()` en `WorkflowsController`
 - [x] 4. Backend — pruebas en `workflows.service.spec.ts` ⇒ verificación + commit
-- [ ] 5. Frontend — tipos `PipelineStep`, `PipelineSummary`, `WizardStep`
-- [ ] 6. Frontend — `pipelines.service.ts` y `nodes/trigger-imap.service.ts`
-- [ ] 7. Frontend — `stores/nodes/trigger-imap.store.ts`
-- [ ] 8. Frontend — `trigger-imap.store.spec.ts` ⇒ verificación + commit
+- [x] 5. Frontend — tipos `PipelineStep`, `PipelineSummary`, `WizardStep`
+- [x] 6. Frontend — `pipelines.service.ts` y `nodes/trigger-imap.service.ts`
+- [x] 7. Frontend — `stores/nodes/trigger-imap.store.ts`
+- [x] 8. Frontend — `trigger-imap.store.spec.ts` ⇒ verificación + commit
 - [ ] 9. Frontend — `TriggerImapConfig.vue` + entrada en `node-config-registry.ts`
 - [ ] 10. Frontend — `node-store-registry.ts`
 - [ ] 11. Frontend — `stores/flujo-draft.store.ts`

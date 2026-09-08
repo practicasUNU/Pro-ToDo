@@ -35,3 +35,84 @@ export const NODE_TYPE_LABELS: Record<NodeType, string> = {
  * una plantilla, y por eso el DTO lo rechaza de entrada.
  */
 export const OUTPUT_NAMESPACE_PATTERN = /^[a-z0-9_]+$/;
+
+/**
+ * Un paso del pipeline tal como lo devuelve `GET /api/workflows`.
+ *
+ * Replica de `PipelineStepDto` del backend, que es una proyeccion PARCIAL del
+ * nodo: no trae `params` —ahi viven el host y la clave de entorno del buzon, que
+ * no deben llegar al navegador— ni los punteros del grafo, porque el arreglo ya
+ * llega en orden de ejecucion.
+ */
+export interface PipelineStep {
+  readonly nodeId: string;
+  readonly nodeType: NodeType;
+  readonly outputNamespace: string;
+}
+
+/** Flujo seleccionable como plantilla en la Fase 0 del asistente. */
+export interface PipelineSummary {
+  readonly id: string;
+  readonly name: string;
+  readonly description: string | null;
+  readonly active: boolean;
+  /** Pasos EN ORDEN DE EJECUCION, ya resueltos por el backend. */
+  readonly topology: PipelineStep[];
+}
+
+/**
+ * Paso del asistente: un `PipelineStep` con su etiqueta legible ya resuelta.
+ *
+ * `name` NO viaja desde el backend: `NODE_TYPE_LABELS` ya vive en este archivo,
+ * asi que mandarlo por la red seria duplicar en dos idiomas la misma tabla de
+ * traduccion y arriesgarse a que divergan. Lo deriva `toWizardStep`.
+ */
+export interface WizardStep extends PipelineStep {
+  readonly name: string;
+}
+
+/** Enriquece un paso del backend con su etiqueta legible. */
+export const toWizardStep = (step: PipelineStep): WizardStep => ({
+  ...step,
+  name: NODE_TYPE_LABELS[step.nodeType],
+});
+
+/**
+ * Cuerpo de `POST /api/wizard/check-imap`.
+ *
+ * Replica de `ImapTriggerConfigDto` del backend, sin `outputNamespace` ni
+ * `markAsRead`: la comprobacion solo necesita los datos de conexion.
+ *
+ * NO existe campo `password`, y no es una omision: el backend valida con
+ * `forbidNonWhitelisted`, asi que un cuerpo que lo incluya se rechaza con un
+ * 400. El secreto vive en el `.env` del servidor y aqui solo viaja el NOMBRE de
+ * la variable que lo contiene (`security-and-scope.md` §0.1).
+ */
+export interface CheckImapPayload {
+  readonly host: string;
+  readonly port: number;
+  readonly secure: boolean;
+  readonly user: string;
+  readonly passwordEnvKey: string;
+  readonly mailbox: string;
+  readonly pollIntervalMs: number;
+}
+
+/** Severidad de un fallo, con la misma escala que el motor FSM. */
+export type NodeErrorSeverity = 'LEVE' | 'GRAVE' | 'URGENTE';
+
+/**
+ * Resultado de la comprobacion de conectividad.
+ *
+ * `success: false` llega con status 200: el diagnostico del servidor de correo
+ * es parte de la respuesta, no un fallo de la peticion. No incluye `stackTrace`
+ * porque el backend no lo expone (revelaria rutas del servidor).
+ */
+export interface CheckImapResult {
+  readonly success: boolean;
+  readonly message?: string;
+  readonly error?: {
+    readonly level: NodeErrorSeverity;
+    readonly message: string;
+  };
+}

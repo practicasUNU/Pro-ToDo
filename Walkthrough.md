@@ -2570,3 +2570,54 @@ compilador entra en inferencia circular y falla con TS7022.
 **Paso 5:** extender `frontend/src/types/pipeline.ts` con `PipelineStep`, `PipelineSummary` y
 `WizardStep` (este último enriquecido con `name`, derivado de `NODE_TYPE_LABELS[nodeType]`, que ya
 existe en ese archivo). El enum `NodeType` y `OUTPUT_NAMESPACE_PATTERN` ya están ahí.
+
+---
+
+## 2026-09-07 · PROT-12.4 · Servicios, tipos y store del nodo `TRIGGER_IMAP` — rama `feat/trigger-imap`
+
+Segunda tanda: la mitad no visual del paso 1 del asistente. Réplica de la tríada de §3.1 que el nodo
+mapeador ya estableció, para un segundo tipo de nodo.
+
+### Pasos 5-8 completados
+
+| Archivo | Estado |
+|---|---|
+| `frontend/src/types/pipeline.ts` | +`PipelineStep`, `PipelineSummary`, `WizardStep`, `toWizardStep`, `CheckImapPayload`, `CheckImapResult` |
+| `frontend/src/services/pipelines.service.ts` | creado |
+| `frontend/src/services/nodes/trigger-imap.service.ts` | creado |
+| `frontend/src/stores/nodes/trigger-imap.store.ts` | creado |
+| `frontend/src/stores/nodes/trigger-imap.store.spec.ts` | creado (18 pruebas) |
+
+Verificación: **72 pruebas en verde** (5 archivos, +18), `vue-tsc --noEmit` limpio, lint limpio.
+
+### El «por qué» de tres decisiones
+
+**1. Toda mutación pasa por `patchConfig`.** No es azúcar sintáctico: es lo que garantiza que no exista
+ninguna vía de modificar la configuración sin invalidar `connectionVerified`. Si la vista escribiera en
+`config` directamente, el store afirmaría que la conexión está probada para unos valores que ya no son
+los del formulario. La prueba 4.2 recorre los seis campos de conexión uno a uno.
+
+**2. `isConfigValid` exige conexión verificada, no solo campos válidos.** Unas credenciales con formato
+correcto pero equivocadas no fallarían hasta que el sondeo disparase el flujo en producción, con el
+flujo quedando PAUSADO y un `GRAVE` en la trazabilidad. Obligar a pulsar «Probar Conexión» traslada ese
+descubrimiento al momento de configurar, que es el propósito del paso. La prueba 3.4 fija que campos
+completos **sin probar** no bastan.
+
+**3. `name` del paso no viaja por la red.** `NODE_TYPE_LABELS` ya vive en `types/pipeline.ts`, así que
+mandar la etiqueta desde el backend duplicaría en dos idiomas la misma tabla de traducción, con el
+riesgo de que divergieran. Lo deriva `toWizardStep`.
+
+`PASSWORD_ENV_KEY_PATTERN` y `MIN_POLL_INTERVAL_MS` se replican del DTO backend. La copia no es
+redundante: sin ellas el formulario dejaría enviar valores que el backend rechaza con un 400, y el
+operador vería un error de servidor donde debería haber visto una regla de campo. La prueba 2.4 cubre
+cinco claves de entorno ilegítimas, `JWT_SECRET` incluida.
+
+Nota: `npm run lint` reformatea `src/utils/violation-matcher.spec.ts` (prettier, archivo ajeno a esta
+rama). Se revirtió para no mezclarlo; volverá a aparecer en cualquier `npm run lint` futuro.
+
+### Próximo paso exacto
+
+**Paso 9:** crear `frontend/src/components/nodes/TriggerImapConfig.vue` (prop única `nodeId`, cero
+HTTP, maquetación calcada de `UserDialog.vue`: `.pd-label` + `.pd-required`, inputs `outlined dense`,
+`passwordEnvKey` con `.pd-mono`, botón `.pd-btn-primary` con `icon-right="north_east"` y
+`:loading="store.isLoading"`) y añadir su entrada a `node-config-registry.ts`.
