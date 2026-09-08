@@ -65,7 +65,7 @@ export interface RotatedSession {
 /**
  * Emision, rotacion y revocacion de refresh tokens (PROT-06.4).
  *
- * Unico punto del backend que conoce la tabla `refresh_tokens`. No sabe de HTTP
+ * Unico punto del backend que conoce la tabla `tokens_sesion`. No sabe de HTTP
  * ni de JWT: entrega y valida credenciales opacas; firmar el access token es
  * cosa de `AuthService`.
  */

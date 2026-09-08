@@ -19,13 +19,20 @@ import { User } from '@modules/users/entities/user.entity';
  *
  * En la columna solo vive el SHA-256 del valor: una lectura de la base de datos
  * no entrega credenciales reutilizables.
+ *
+ * La tabla es `tokens_sesion` y la clase `RefreshToken`: no es un renombrado a
+ * medias sino la convencion del proyecto, la misma de `User`/`usuarios` y
+ * `Workflow`/`flujos` — esquema en castellano, identificadores de codigo en
+ * ingles (`code-conventions.md` §1), y el puente en `@Entity()` /
+ * `@Column({ name })`. El nombre viejo de la tabla era `refresh_tokens`; lo
+ * renombra la migracion 009, sin la cual el modulo no arranca.
  */
-@Entity('refresh_tokens')
+@Entity('tokens_sesion')
 export class RefreshToken {
-  @PrimaryGeneratedColumn('uuid', { name: 'id_refresh_token' })
+  @PrimaryGeneratedColumn('uuid', { name: 'id_token_sesion' })
   id: string;
 
-  @Index('idx_refresh_tokens_id_usuario')
+  @Index('idx_tokens_sesion_id_usuario')
   @Column({ name: 'id_usuario', type: 'uuid' })
   userId: string;
 

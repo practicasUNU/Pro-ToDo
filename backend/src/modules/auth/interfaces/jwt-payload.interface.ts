@@ -30,7 +30,7 @@ export interface RequestWithUser {
  * Par de credenciales entregado al validar el OTP y en cada renovacion.
  *
  * `accessToken` es un JWT corto y autocontenido; `refreshToken` es una cadena
- * opaca de larga duracion cuya validez vive en la tabla `refresh_tokens`.
+ * opaca de larga duracion cuya validez vive en la tabla `tokens_sesion`.
  */
 export interface AuthTokenResponse {
   accessToken: string;

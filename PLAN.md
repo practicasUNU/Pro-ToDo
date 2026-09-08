@@ -142,7 +142,7 @@ export class UsersService {
   public async ensureOtpSecret(userId: string, secret: string): Promise<string>;
 }
 
-// @modules/auth/services/refresh-token.service.ts — único punto que conoce `refresh_tokens`
+// @modules/auth/services/refresh-token.service.ts — único punto que conoce `tokens_sesion`
 export class RefreshTokenService {
   /**
    * Devuelve el token EN CLARO; en la tabla solo queda su SHA-256.
@@ -242,9 +242,14 @@ deteccion de reuso), pero una sesion **viva** expulsada por cupo no debe dejar r
 
 ### 2.6 Esquema
 
-Tabla `refresh_tokens` (columnas en español, como el resto de `init.sql`):
-`id_refresh_token`, `id_usuario` (FK `ON DELETE CASCADE`), `id_dispositivo UUID NOT NULL`,
+Tabla `tokens_sesion` (columnas en español, como el resto de `init.sql`):
+`id_token_sesion`, `id_usuario` (FK `ON DELETE CASCADE`), `id_dispositivo UUID NOT NULL`,
 `hash_token CHAR(64) UNIQUE`, `expiracion`, `revocado`, `fecha_creacion`.
+
+La entidad se sigue llamando `RefreshToken` y su archivo `refresh-token.entity.ts`: esquema en
+castellano, identificadores de código en inglés (`code-conventions.md` §1), igual que
+`User`/`usuarios` y `Workflow`/`flujos`. La ruta `POST /auth/refresh` y el campo `refreshToken` del
+contrato HTTP tampoco cambian.
 
 TypeORM corre con `synchronize: false`, así que el DDL se aplica a mano:
 `db/migrations/001-refresh-tokens.sql` (idempotente) para bases ya creadas,
@@ -257,6 +262,13 @@ dos columnas de un diseño anterior de códigos persistidos que ningún código 
 por origen para que emitir uno nuevo revoque solo la sesión anterior de **ese** dispositivo.
 Descarta las filas heredadas (no tienen dispositivo conocido), así que quien tuviera sesión
 abierta al aplicarla vuelve a entrar por OTP.
+
+`db/migrations/009-tokens-sesion.sql` renombra la tabla `refresh_tokens` → `tokens_sesion` y su PK
+`id_refresh_token` → `id_token_sesion`, la última excepción a la nomenclatura castellana del esquema.
+Renombra **seis** objetos y no dos: `ALTER TABLE ... RENAME TO` no arrastra el índice ni las tres
+constraints, que conservan el nombre derivado del nombre viejo, mientras `init.sql` las deriva del
+nuevo — sin ese paso una base migrada divergiría de un clonado nuevo. Las migraciones 001 y 004
+quedan obsoletas a partir de esta y no deben aplicarse después de ella.
 
 `db/migrations/002-bootstrap-admin.sql` rompe el bloqueo circular del RBAC: el CRUD de
 usuarios exige `ADMIN` y crear un usuario pasa por ese mismo CRUD, así que sin ningún
@@ -1555,3 +1567,26 @@ llave recorriendo la topología completa, y `nextStep` ya apunta al `nodeId` sig
 la prueba 8.3 fijaba ya en verde. Lo que sí producía pérdida de configuración eran dos defectos
 adyacentes: la identidad del store por `nodeType` en vez de por `nodeId`, y un `resetDraft()` que no
 limpiaba los stores de nodo. Son esos los que se corrigen.
+
+---
+
+## 14. Estandarización de `refresh_tokens` → `tokens_sesion`
+
+Rama: `feat/trigger-imap`. Renombrado de la última tabla que no seguía la nomenclatura castellana del
+esquema. Alcance limitado a la capa de base de datos.
+
+- [x] 1. `init.sql`: tabla, PK e índice
+- [x] 2. `db/migrations/009-tokens-sesion.sql` con los seis renombrados e idempotencia
+- [x] 3. Nota de obsolescencia en las cabeceras de las migraciones 001 y 004
+- [x] 4. Entidad: `@Entity`, `@PrimaryGeneratedColumn({ name })`, `@Index`
+- [x] 5. Comentarios del servicio y de la interfaz del payload JWT
+- [x] 6. `PLAN.md` §2.6 y entrada en `Walkthrough.md`
+- [x] 7. Verificación (`npm test`, `tsc`, `eslint`) y commit
+
+**Sin cambios de código en inglés ni en el frontend.** La clase `RefreshToken`, los archivos
+`refresh-token.{entity,service,dto}.ts`, `POST /auth/refresh` y el campo `refreshToken` se conservan:
+`code-conventions.md` §1 exige identificadores en inglés, y tocar la ruta o el campo invalidaría las
+sesiones guardadas en `localStorage`.
+
+- [ ] **Aplicar `db/migrations/009-tokens-sesion.sql`** — la ejecuta el usuario. Hasta entonces el
+      backend no arranca contra la base existente: la entidad ya apunta a `tokens_sesion`.

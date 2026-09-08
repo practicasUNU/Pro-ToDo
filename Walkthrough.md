@@ -3080,3 +3080,95 @@ pasa en ambas, que es precisamente su papel de candado.
 **Próximo paso:** ninguno pendiente de esta tanda. Los pendientes abiertos del proyecto siguen siendo
 los cinco listados al cierre de PROT-12, con el `PATCH /api/workflows/:id` de activación como el de
 mayor prioridad: la vía de creación termina hoy en un flujo que nadie puede habilitar desde la interfaz.
+
+---
+
+## 2026-09-08 · Estandarización de `refresh_tokens` → `tokens_sesion` — rama `feat/trigger-imap`
+
+| Archivo | Estado |
+|---|---|
+| `init.sql` | tabla, PK e índice renombrados + nota sobre las constraints |
+| `db/migrations/009-tokens-sesion.sql` | creado |
+| `db/migrations/001-refresh-tokens.sql` | nota de obsolescencia (solo cabecera) |
+| `db/migrations/004-device-id-refresh-tokens.sql` | nota de obsolescencia (solo cabecera) |
+| `backend/src/modules/auth/entities/refresh-token.entity.ts` | `@Entity`, PK e `@Index` |
+| `backend/src/modules/auth/services/refresh-token.service.ts` | comentario |
+| `backend/src/modules/auth/interfaces/jwt-payload.interface.ts` | TSDoc |
+| `PLAN.md` | §2.6, línea 145 y §14 |
+
+```
+Backend → 398 pruebas · 23 suites · tsc limpio · eslint 0 errores
+```
+
+### El «por qué» de cuatro decisiones
+
+**1. El renombrado toca seis objetos, no dos.** `ALTER TABLE … RENAME TO` en PostgreSQL **no arrastra
+los índices ni las constraints**: se quedan con el nombre autogenerado a partir del nombre viejo de la
+tabla. Como `init.sql` no las declara explícitamente, PostgreSQL las deriva allí del nombre nuevo, de
+modo que un clonado nuevo obtiene `tokens_sesion_pkey`, `tokens_sesion_hash_token_key` y
+`tokens_sesion_id_usuario_fkey` mientras una base migrada conservaría los tres `refresh_tokens_*`.
+Renombrar solo tabla y columna habría dejado las dos rutas de creación divergentes — exactamente la
+deriva que este repositorio evita manteniendo el DDL duplicado a propósito en `init.sql` y en
+`db/migrations/`. La 009 renombra tabla, columna PK, índice y las tres constraints.
+
+El nombre del índice además importa desde el código: la entidad lo declara con
+`@Index('idx_tokens_sesion_id_usuario')`.
+
+**2. El código se queda en inglés, y no es un renombrado a medias.** Las columnas de esta tabla ya
+seguían la convención castellana (`id_usuario`, `expiracion`, `revocado`, `fecha_creacion`); lo que
+quedaba fuera era el nombre de la tabla y de su PK, la última excepción del esquema. La clase
+`RefreshToken` **ya cumplía** `code-conventions.md` §1, igual que `User`/`usuarios` y `Workflow`/`flujos`:
+esquema en castellano, identificadores de código en inglés, puente en `@Entity()` / `@Column({ name })`.
+Renombrar la clase, los archivos o el `RefreshTokenService` habría roto la norma en vez de aplicarla, y
+habría dejado esta entidad como la única asimétrica de las nueve.
+
+Por el mismo motivo no se toca el contrato HTTP (`POST /auth/refresh`, `POST /auth/logout`, campo
+`refreshToken`): además de ser identificadores de código, cambiarlos invalidaría las sesiones ya
+guardadas en `localStorage` y obligaría a un cambio coordinado en cinco archivos del frontend para una
+ganancia nula. **Cero cambios en el frontend.** Queda anotado en el TSDoc de la entidad para que el
+próximo lector no interprete la asimetría como un descuido.
+
+**3. No se generó una migración de TypeORM porque el proyecto no tiene ese mecanismo.** No hay
+directorio `migrations/`, ni `DataSource` de CLI, ni scripts `migration:*`, y `app.module.ts` fija
+`synchronize: false` — que debe seguir así. El patrón vigente son archivos `.sql` idempotentes en
+`db/migrations/` que aplica el desarrollador, y la 009 lo sigue. Montar el CLI habría dejado una tabla
+`migrations` que no conoce ninguna de las ocho migraciones ya aplicadas: un registro de estado que
+miente desde el primer día.
+
+Idempotencia: `ALTER TABLE IF EXISTS … RENAME TO` y `ALTER INDEX IF EXISTS` lo son por sí mismos, pero
+`RENAME COLUMN` y `RENAME CONSTRAINT` **no admiten `IF EXISTS`** para su objeto y abortarían al
+reejecutarse. Por eso esos cuatro van dentro de un bloque `DO $$ … END $$;` con guardas contra
+`information_schema` y `pg_constraint`.
+
+**4. Las migraciones 001 y 004 se conservan intactas, solo con una nota.** Son un registro histórico
+ordenado y reescribirlas falsearía lo que se ejecutó; sobre una base antigua el orden correcto sigue
+siendo 001 → 004 → 009. La nota es necesaria porque la 001 es `CREATE TABLE IF NOT EXISTS
+refresh_tokens`: replayarla sobre una base posterior a la 009 no ve `tokens_sesion` y crearía **en
+silencio** una segunda tabla vacía con el nombre viejo.
+
+### Lo que las pruebas NO demuestran
+
+Las 398 pruebas pasan, pero **habrían pasado igual con el nombre de tabla equivocado**: las specs de
+autenticación mockean el repositorio de TypeORM, así que ejercitan la lógica y no el mapeo
+objeto-relacional. Ninguna referencia nombres de tabla, columna o índice (verificado por grep), y por eso
+no hubo ni una spec que adaptar. La única verificación real del renombrado es aplicar la 009 y ejecutar
+un login.
+
+Nada se ha ejecutado contra PostgreSQL: la infraestructura de base de datos la administra el
+desarrollador, y el servidor MCP `postgres-protodo` estaba caído en esta sesión (`CONNECTION_CLOSED`).
+
+### Pendiente inmediato
+
+- [ ] **Aplicar `db/migrations/009-tokens-sesion.sql`.** El repositorio queda en un estado que lo
+      **exige antes de volver a arrancar el backend**: la entidad ya apunta a `tokens_sesion`, así que
+      hasta aplicarla cualquier login o renovación falla con
+      `relation "tokens_sesion" does not exist`. Mismo aviso que llevaba la 004 en su día.
+
+      ```bash
+      sudo docker exec -i protodo_postgres psql -U unuware007 -d 'DB_PRO-TODO' \
+        < db/migrations/009-tokens-sesion.sql
+      ```
+
+      Los dos `SELECT` finales deben mostrar `id_token_sesion` en primera posición y los cinco
+      índices/constraints con prefijo `tokens_sesion` / `idx_tokens_sesion`. Reejecutarla una segunda
+      vez debe terminar sin error.

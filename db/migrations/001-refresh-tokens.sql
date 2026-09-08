@@ -6,6 +6,13 @@
 -- sobre una base de datos ya poblada. Es idempotente (IF NOT EXISTS): volver a
 -- ejecutarla no altera nada.
 --
+-- ⚠️ OBSOLETA A PARTIR DE LA 009: la tabla se llama ahora `tokens_sesion` y su
+-- clave primaria `id_token_sesion`. NO aplicar esta migracion despues de la 009.
+-- Su `CREATE TABLE IF NOT EXISTS refresh_tokens` no ve la tabla renombrada, asi
+-- que crearia en silencio una segunda tabla vacia con el nombre viejo. Se
+-- conserva sin tocar porque es el registro historico de lo que se ejecuto: sobre
+-- una base antigua el orden correcto sigue siendo 001 -> 004 -> 009.
+--
 -- Aplicar con:
 --   docker compose exec -T postgres psql -U "$DB_USER" -d "$DB_NAME" \
 --     < db/migrations/001-refresh-tokens.sql

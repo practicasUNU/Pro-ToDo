@@ -19,6 +19,12 @@
 -- REQUISITO DE ARRANQUE: hasta aplicarla, cualquier login falla con
 -- `column RefreshToken.id_dispositivo does not exist`.
 --
+-- ⚠️ OBSOLETA A PARTIR DE LA 009: la tabla se llama ahora `tokens_sesion`. NO
+-- aplicar esta migracion despues de la 009; sus `ALTER TABLE refresh_tokens`
+-- fallarian con `relation "refresh_tokens" does not exist`. Se conserva sin
+-- tocar porque es el registro historico de lo que se ejecuto: sobre una base
+-- antigua el orden correcto sigue siendo 001 -> 004 -> 009.
+--
 -- Aplicar con:
 --   sudo docker exec -i protodo_postgres psql -U unuware007 -d 'DB_PRO-TODO' \
 --     < db/migrations/004-device-id-refresh-tokens.sql

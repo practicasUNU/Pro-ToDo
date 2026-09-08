@@ -150,14 +150,23 @@ CREATE TABLE alertas_error (
 );
 
 -- =============================================================================
--- Tabla: REFRESH_TOKENS (PROT-06.4)
--- Duplicada en db/migrations/001-refresh-tokens.sql (y 004 para la columna
--- id_dispositivo) para las bases de datos ya creadas: este archivo solo se
--- ejecuta con el volumen de Docker vacío.
+-- Tabla: TOKENS_SESION (PROT-06.4)
+-- Duplicada en db/migrations/001-refresh-tokens.sql (004 para la columna
+-- id_dispositivo y 009 para el renombrado desde `refresh_tokens`) para las
+-- bases de datos ya creadas: este archivo solo se ejecuta con el volumen de
+-- Docker vacío.
+--
+-- Las constraints (PK, UNIQUE de hash_token y FK a usuarios) no se nombran
+-- aquí: PostgreSQL las deriva del nombre de la tabla, así que un clonado nuevo
+-- obtiene `tokens_sesion_pkey`, `tokens_sesion_hash_token_key` y
+-- `tokens_sesion_id_usuario_fkey` sin declararlas. Por eso la migración 009
+-- tiene que renombrarlas a mano en las bases ya existentes: un `RENAME TO` de
+-- la tabla no las arrastra, y sin ese paso una base migrada divergiría de un
+-- clonado nuevo.
 -- =============================================================================
 
-CREATE TABLE refresh_tokens (
-    id_refresh_token UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+CREATE TABLE tokens_sesion (
+    id_token_sesion UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     id_usuario UUID NOT NULL REFERENCES usuarios(id_usuario) ON DELETE CASCADE,
     -- Dispositivo/navegador que abrió la sesión, generado por el cliente. Agrupa
     -- los tokens por origen para revocar solo la sesión anterior de ese equipo
@@ -188,7 +197,7 @@ CREATE TABLE allowed_ips (
 -- Índices de apoyo para claves foráneas de alta consulta
 -- =============================================================================
 
-CREATE INDEX idx_refresh_tokens_id_usuario ON refresh_tokens(id_usuario);
+CREATE INDEX idx_tokens_sesion_id_usuario ON tokens_sesion(id_usuario);
 CREATE INDEX idx_plantillas_html_id_usuario_creador ON plantillas_html(id_usuario_creador);
 CREATE UNIQUE INDEX idx_plantillas_html_nombre ON plantillas_html(nombre);
 CREATE INDEX idx_flujos_id_usuario_creador ON flujos(id_usuario_creador);
