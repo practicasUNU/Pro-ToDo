@@ -1340,3 +1340,110 @@ codificado (`..%2f`) como literal (`--path-as-is`).
 
 El alcance se detiene aquí: **referenciar y servir**. Sin subida, sin recorte, sin compresión y sin
 edición gráfica (`security-and-scope.md` §3). Los archivos los prepara el operador.
+
+---
+
+## 10. Nodo de ingesta `TRIGGER_IMAP` y sondeo periódico (PROT-12)
+
+Rama: `feat/trigger-imap`.
+
+Primera estrategia **productora** del motor. Hasta ahora el pipeline solo se podía disparar a mano
+(Camino B, §8) sembrando el contexto por HTTP; `DummyInputStrategy` ocupaba el hueco de
+`NodeType.TRIGGER_IMAP` devolviendo sus propios `params`. Este nodo lo sustituye con la ingesta real.
+
+### 10.1 Contrato de `ImapTriggerConfigDto`
+
+Primer DTO de configuración de nodo del proyecto: fija el patrón para `PARSER_PRE_IA`, `PROCESADOR_IA`
+y los que vengan. Los `params` de un nodo dejan de ser un `Record<string, unknown>` inspeccionado a
+mano y pasan a validarse con `class-validator`.
+
+| Campo | Obligatorio | Default | Validación |
+|---|---|---|---|
+| `host` | sí | — | `@IsString` `@IsNotEmpty` |
+| `port` | no | `993` | `@IsInt` `@IsPositive` `@Max(65535)` |
+| `secure` | no | `true` | `@IsBoolean` |
+| `user` | sí | — | `@IsString` `@IsNotEmpty` |
+| `passwordEnvKey` | sí | — | `@IsString` `@IsNotEmpty` `@Matches(/^IMAP_[A-Z0-9_]*PASSWORD$/)` |
+| `mailbox` | no | `'INBOX'` | `@IsString` `@IsNotEmpty` |
+| `pollIntervalMs` | no | `60000` | `@IsInt` `@IsPositive` `@Min(30000)` |
+| `outputNamespace` | no | `'nodo_trigger'` | `@Matches(OUTPUT_NAMESPACE_PATTERN)` |
+| `markAsRead` | no | `true` | `@IsBoolean` |
+
+No existe campo `password`. Los defaults **no** se aplican con inicializadores de propiedad —no
+actuarían sin `exposeDefaultValues`— sino en la función pura `resolveImapConfig`, único punto que
+conoce la cadena de `??` y compartido por la estrategia y el sondeo.
+
+### 10.2 Modelo de seguridad híbrido
+
+```
+flujos.configuracion_pipeline (JSONB)          backend/.env
+└── params                                     └── IMAP_PASSWORD=········
+    ├── host, port, secure, user                        ▲
+    ├── mailbox, markAsRead, pollIntervalMs             │ ConfigService.get(passwordEnvKey)
+    └── passwordEnvKey: "IMAP_PASSWORD" ────────────────┘
+```
+
+El nodo guarda el **nombre** de la variable, nunca su valor. `params` se persiste en una columna JSONB
+y viaja al editor de flujos del frontend, así que un secreto ahí quedaría en claro en la base de datos
+y expuesto al cliente (`security-and-scope.md` §0.1).
+
+`passwordEnvKey` está restringido por patrón a claves `IMAP_*PASSWORD`, y **eso es una barrera de
+seguridad, no una validación cosmética**: `params` es editable por un rol EDITOR desde el asistente.
+Sin la restricción, un editor podría declarar `host: imap.atacante.com` junto a
+`passwordEnvKey: JWT_SECRET` y el backend enviaría el secreto de firma de tokens como contraseña IMAP
+a un servidor ajeno. Queda pendiente restringir también `host` a una lista blanca de dominios.
+
+### 10.3 Payload del namespace de salida
+
+```jsonc
+{
+  "message_id": "<abc-123@unuware.com>",
+  "from":       "prensa@unuware.com",   // dirección plana, no el AddressObject
+  "subject":    "Innovacion en Madrid",
+  "date":       "2026-03-01T10:30:00.000Z",
+  "raw_html":   "<h1>…</h1>",           // html → textAsHtml → text
+  "text":       "…"
+}
+```
+
+Seis claves, todas `string`, nunca `undefined`. La restricción viene del contexto:
+`StatePayloadContext` clona con `structuredClone` en entrada y salida, así que un `Date`, un `Buffer` o
+un objeto de librería no sobrevivirían intactos al checkpoint JSONB. Un correo sin cuerpo produce
+cadena vacía para que una plantilla que interpole la clave no falle por variable ausente.
+
+Cuando el buzón no tiene mensajes nuevos, el nodo devuelve `{ status: 'NO_MESSAGES_FOUND' }` con
+`success: true`: el sondeo corre cada minuto y encontrar el buzón vacío es el caso **normal**, no un
+fallo que deba dejar el flujo PAUSADO varias veces por hora.
+
+### 10.4 Topología del disparo
+
+```
+ImapPollingService (@nestjs/schedule)
+  │  SchedulerRegistry.addInterval('imap-poll:<flowId>', pollIntervalMs)
+  │
+  ├─ STATUS(mailbox, {unseen})          ← solo DETECTA: no abre el buzón,
+  │    └─ unseen === 0 → fin              no descarga, no toca banderas
+  │
+  └─ WorkflowsService.runAutomaticWorkflow(flowId)
+       ├─ exige flujos.activo = true
+       ├─ PipelineValidatorService.validateSchema
+       ├─ FsmEngineService.createExecution(flowId, {})   ← sin initialPayload
+       └─ FsmEngineService.executeWorkflow
+            └─ ImapTriggerStrategy.execute()  ← LEE, parsea y marca \Seen
+                 └─ NodeResult.data → context.setNamespace(node.outputNamespace, …)
+```
+
+**Un solo lector del buzón.** El sondeo detecta y la estrategia consume. Si el sondeo leyera el
+mensaje, habría dos rutas compitiendo por marcar `\Seen` y el nodo del pipeline encontraría el buzón
+vacío justo después de que el sondeo lo hubiera vaciado. Como el sondeo no consume nada, un 409 de
+concurrencia (RNF-09) no pierde el correo: sigue `UNSEEN` y el ciclo siguiente lo recoge.
+
+Se usan intervalos dinámicos de `SchedulerRegistry` y no el decorador `@Cron` porque `pollIntervalMs`
+es un parámetro **por nodo**, y un decorador se evalúa una sola vez en tiempo de clase.
+
+### 10.5 Dos interruptores en serie
+
+| Interruptor | Alcance | Motivo |
+|---|---|---|
+| `IMAP_POLLING_ENABLED` (`.env`) | Global | Arrancar el backend en una máquina de desarrollo no debe consumir el buzón real: la estrategia marca `\Seen`. Se exige el valor exacto `'true'`, para que el fallo por omisión sea "no sondea" |
+| `flujos.activo` | Por flujo | La columna existe precisamente para gobernar los disparadores automáticos; el despacho manual la ignora a propósito |

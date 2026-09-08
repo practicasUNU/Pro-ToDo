@@ -99,6 +99,56 @@ export class WorkflowsService {
   }
 
   /**
+   * Dispara un flujo desde un disparador AUTOMATICO (Cron, IMAP).
+   *
+   * Se diferencia de `runWorkflowTest` en dos puntos, y por eso es un metodo
+   * aparte en vez de una bandera:
+   *
+   * 1. EXIGE `activo = true`. La columna existe precisamente para gobernar los
+   *    disparadores automaticos; el Camino B la ignora a proposito para poder
+   *    probar un flujo antes de habilitarlo.
+   * 2. NO siembra `initialPayload`. El contexto lo aporta el propio nodo
+   *    disparador (`TRIGGER_IMAP` escribe el correo en su `outputNamespace`),
+   *    asi que el namespace reservado `trigger` queda sin usar en este camino.
+   *
+   * @param flowId Identificador de la fila de `flujos`.
+   * @returns El identificador de la ejecucion que quedo registrada.
+   * @throws NotFoundException Si el flujo no existe.
+   * @throws BadRequestException Si esta desactivado o no tiene esquema integro.
+   * @throws ConflictException Si el flujo ya tiene una instancia EN_PROCESO
+   *         (RNF-09). Quien sondea debe tratarlo como condicion normal.
+   */
+  public async runAutomaticWorkflow(flowId: string): Promise<string> {
+    const workflow = await this.findOne(flowId);
+
+    if (!workflow.active) {
+      throw new BadRequestException(
+        `El flujo "${workflow.name}" (${workflow.id}) esta desactivado: los disparadores automaticos no deben ejecutarlo.`,
+      );
+    }
+
+    const schema = await this.pipelineValidatorService.validateSchema(
+      this.requirePipelineSchema(workflow),
+    );
+
+    const execution = await this.fsmEngineService.createExecution(
+      workflow.id,
+      {},
+    );
+
+    this.logger.log(
+      `Despacho automatico del flujo "${workflow.name}" (${workflow.id}) | ejecucion=${execution.executionId}`,
+    );
+
+    const finished = await this.fsmEngineService.executeWorkflow(
+      execution.executionId,
+      schema,
+    );
+
+    return finished.executionId;
+  }
+
+  /**
    * Busca un flujo por su identificador.
    *
    * @throws NotFoundException Si no existe ninguna fila con ese `id_flujo`.

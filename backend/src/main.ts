@@ -61,6 +61,11 @@ async function bootstrap() {
   const swaggerDocument = SwaggerModule.createDocument(app, swaggerConfig);
   SwaggerModule.setup(SWAGGER_PATH, app, swaggerDocument);
 
+  // Sin esto, `onModuleDestroy` NO se ejecuta al recibir SIGTERM/SIGINT: los
+  // intervalos del sondeo IMAP sobrevivirian a cada reinicio de `--watch` y el
+  // mismo buzon acabaria sondeado por varias generaciones del proceso.
+  app.enableShutdownHooks();
+
   const port = Number(process.env.PORT);
   await app.listen(port);
 

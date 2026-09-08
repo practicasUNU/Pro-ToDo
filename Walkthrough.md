@@ -2310,3 +2310,119 @@ Carrera real contra PostgreSQL (script desechable):
       dos capas de *diagnóstico* sobre esa barrera, no dos barreras.
 - [ ] **Sin prueba e2e automatizada de la carrera.** La verificación de arriba es un script
       desechable; reproducirla en CI exige dos conexiones concurrentes reales.
+
+---
+
+## 2026-09-07 · Nodo de ingesta `TRIGGER_IMAP` y sondeo periódico — rama `feat/trigger-imap`
+
+Primera estrategia **productora** del motor: hasta ahora todas las piezas reales consumían un contexto
+que alguien había sembrado por HTTP. `DummyInputStrategy` ocupaba el hueco de `NodeType.TRIGGER_IMAP`
+devolviendo sus propios `params`, y su TSDoc anticipaba el relevo: *"el dia que exista la estrategia
+IMAP de verdad ocupara exactamente este hueco"*. Ese día es hoy.
+
+### Estado de la FSM implementado
+
+```
+flujos.activo=true + IMAP_POLLING_ENABLED=true
+        │
+        ▼
+[intervalo imap-poll:<flowId>]  cada pollIntervalMs
+        │
+        ├─ STATUS unseen=0 ──────────────────────────► fin del ciclo (nada que hacer)
+        │
+        └─ STATUS unseen>0
+                 │
+                 ▼
+        createExecution ─── 409 ──► aviso, el correo sigue UNSEEN, próximo ciclo
+                 │
+                 ▼ INACTIVO → EN_PROCESO
+        ImapTriggerStrategy.execute()
+                 ├─ config inválida ────────────► success:false GRAVE → PAUSADO
+                 ├─ passwordEnvKey sin valor ───► success:false GRAVE → PAUSADO
+                 ├─ red / auth / timeout ───────► success:false GRAVE → PAUSADO (reintentable)
+                 ├─ buzón vacío ────────────────► success:true {status:NO_MESSAGES_FOUND}
+                 └─ correo UNSEEN ──────────────► success:true {6 claves} + \Seen
+                                                        │
+                                                        ▼
+                                     setNamespace(node.outputNamespace, data)
+```
+
+### El "por qué" de cuatro decisiones
+
+**1. `validate()` y no `validateOrReject()`.** El enunciado inicial pedía la segunda. No es un detalle
+de estilo: `validateOrReject` lanza, y `FsmEngineService.runNode` captura toda excepción y la normaliza
+a nivel `URGENTE`. Como `canRetry` solo reintenta los `GRAVE`, un `host` mal escrito habría quedado
+**permanentemente irrecuperable** en lugar de PAUSADO y corregible vía CU-09. Se valida con `validate()`
+y se traducen los errores a `NodeResult` GRAVE con `missingFields`, igual que hace el mapeador de
+plantillas con su plantilla ausente.
+
+**2. La contraseña por referencia, y el patrón que la acota.** El modelo híbrido (`passwordEnvKey` en
+`params`, secreto en `.env`) resuelve el problema obvio: no dejar la clave del buzón en la columna JSONB
+ni mandarla al editor de flujos. Pero abre uno menos obvio, y es el hallazgo que más cambió el código:
+`params` lo edita un rol EDITOR, así que con la clave libre un editor podía escribir
+`host: imap.atacante.com` + `passwordEnvKey: JWT_SECRET` y el backend habría entregado el secreto de
+firma de tokens, en claro, a un servidor ajeno, como si fuera una contraseña IMAP. De ahí el
+`@Matches(/^IMAP_[A-Z0-9_]*PASSWORD$/)`: acota lo que el nodo puede llegar a leer del entorno. La
+prueba 3.4 lo blinda comprobando que el rechazo ocurre **antes** de tocar `ConfigService`.
+
+**3. Un solo lector del buzón.** El sondeo podría leer el correo y pasarlo al motor como
+`initialPayload`, ahorrando una reconexión. Se descartó: el sondeo tendría que marcar `\Seen` al leer, y
+entonces cualquier fallo posterior (un 409 de concurrencia, el proceso muriendo entre la lectura y el
+arranque) dejaría el correo consumido **sin nada en el buzón que indique que hay que reprocesarlo**. Y
+si no lo marcase, el ciclo siguiente lo publicaría por segunda vez. No hay tercera opción. Con el
+sondeo limitado a `STATUS` —que no abre el buzón ni toca banderas— el correo permanece `UNSEEN` hasta
+que lo consume la estrategia, así que un ciclo perdido no pierde nada. Efecto secundario deseable: la
+misma estrategia sirve para el disparo manual del Camino B sin cambios.
+
+**4. `SchedulerRegistry`, no `@Cron`.** `pollIntervalMs` es un parámetro por nodo, y un decorador se
+evalúa una vez en tiempo de clase: no admite un periodo distinto por flujo. Tres trampas que el código
+tuvo que cubrir explícitamente:
+- `addInterval` **lanza** si el nombre ya está tomado ⇒ se borra antes de re-registrar.
+- `addInterval` **no** envuelve el callback en try/catch ⇒ `pollInbox` no puede rechazar nunca, o una
+  promesa sin manejar termina el proceso en Node ≥ 18.
+- `main.ts` no llamaba a `enableShutdownHooks()` ⇒ `onModuleDestroy` no corría con SIGTERM y los
+  intervalos habrían sobrevivido a cada recarga de `--watch`, sondeando el mismo buzón con varias
+  generaciones del proceso. Agujero preexistente que esta rama es la primera en convertir en problema
+  real; se añade la línea que faltaba.
+
+### Poka-Yoke: por qué el sondeo nace apagado
+
+`IMAP_POLLING_ENABLED=false` por defecto, y el código exige el literal `'true'` en lugar de
+`!== 'false'`. El motivo no es la prudencia genérica: la estrategia marca `\Seen`. Un backend arrancado
+en el portátil de un desarrollador apuntando al buzón corporativo **consumiría los correos de
+producción**, y el entorno que sí debía procesarlos no volvería a verlos. El fallo por omisión tiene que
+ser "no sondea". Con `flujos.activo` son dos interruptores en serie, uno global y otro por flujo.
+
+### Verificación
+
+```
+npm test          → 22 suites, 360 pruebas en verde (46 nuevas)
+tsc --noEmit      → limpio sobre tsconfig.build.json
+eslint            → limpio
+```
+
+Cobertura nueva: 25 pruebas de la estrategia (extracción, cascada `html → textAsHtml → text`, buzón
+vacío por `[]` y por `false`, resolución del secreto, exfiltración rechazada, `\Seen` posterior al
+parseo, cierre en `finally` sin enmascarar el error real, inmutabilidad del contexto) y 21 del sondeo
+(programación por flujo, filtros de elegibilidad, tick solapado, 409 tolerado, resiliencia del callback).
+
+### Checklist de dependencias restantes
+
+- [x] ~~`NodeType.TRIGGER_IMAP` sin estrategia real.~~ Resuelto aquí.
+- [x] ~~`main.ts` sin `enableShutdownHooks()`.~~ Resuelto aquí.
+- [ ] **`nodo_trigger` no está en `ALLOWED_NAMESPACES`.** Es el default del DTO, pero el gestor de
+      plantillas rechaza `{{nodo_trigger.raw_html}}`. Mientras no se registre, el nodo debe declarar
+      `outputNamespace: 'raw_email'` en el `pipeline_schema` (ese sí está en la lista blanca). Decidir
+      cuál de los dos nombres es el canónico antes de que existan plantillas guardadas que dependan de
+      uno.
+- [ ] **El disparo es en proceso, no encolado.** `architecture-patterns.md` §5 pide BullMQ para la
+      ingesta Cron/IMAP. Bloquea el temporizador, nunca el hilo HTTP, y el despliegue todavía no tiene
+      Redis. El salto consiste en sustituir el cuerpo de `dispatchFlow`, único punto que conoce el motor.
+- [ ] **`host` sin lista blanca.** El patrón de `passwordEnvKey` acota qué secreto puede leerse, pero un
+      EDITOR sigue pudiendo apuntar el nodo a un servidor IMAP arbitrario y ver ahí la contraseña del
+      buzón corporativo. Restringir el dominio contra una lista en `.env`.
+- [ ] **`@nestjs/schedule` es intra-proceso.** Con N réplicas del backend habría N sondeadores sobre el
+      mismo buzón. Seguro con el despliegue monoinstancia actual; el día que se replique, el mutex
+      `idx_flujo_activo` evita ejecuciones duplicadas pero no las conexiones IMAP redundantes.
+- [ ] **Sin `PARSER_PRE_IA`.** Es el consumidor natural de este payload: `raw_html` viaja sin sanear a
+      propósito, y el escudo pre-IA es quien debe limpiarlo antes de gastar tokens.

@@ -1,6 +1,7 @@
 import { Module } from '@nestjs/common';
 import { ConfigModule, ConfigService } from '@nestjs/config';
 import { APP_GUARD } from '@nestjs/core';
+import { ScheduleModule } from '@nestjs/schedule';
 import { ServeStaticModule } from '@nestjs/serve-static';
 import { ThrottlerModule } from '@nestjs/throttler';
 import { TypeOrmModule } from '@nestjs/typeorm';
@@ -48,6 +49,10 @@ const STATIC_UPLOADS_ROUTE = '/static/uploads';
 @Module({
   imports: [
     ConfigModule.forRoot({ isGlobal: true }),
+    // Temporizadores del sondeo IMAP (PROT-12). Expone `SchedulerRegistry` de
+    // forma global, que es lo que permite a `ImapPollingService` inscribir un
+    // intervalo por flujo con el `pollIntervalMs` declarado en cada nodo.
+    ScheduleModule.forRoot(),
     // Entrega de imagenes referenciadas por las plantillas (`{{_assets.base_url}}`).
     // El alcance del MVP es referenciar y servir: nada de recorte, compresion ni
     // edicion grafica (`security-and-scope.md` §3).
