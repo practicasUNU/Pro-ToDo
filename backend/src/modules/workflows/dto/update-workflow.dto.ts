@@ -6,6 +6,7 @@ import {
   IsOptional,
   IsString,
   MaxLength,
+  ValidateIf,
 } from 'class-validator';
 
 /** Longitud de `flujos.nombre` en el esquema SQL. */
@@ -28,13 +29,21 @@ const MAX_DESCRIPTION_LENGTH = 255;
  *
  * Todos los campos son opcionales para que un cambio de estado sea
  * `{ "active": true }` a secas, sin obligar a reenviar el grafo completo.
+ *
+ * Los dos campos de texto usan `@ValidateIf` en lugar de `@IsOptional()`, y no
+ * es cosmetico: `@IsOptional()` omite TODA la validacion cuando el valor es
+ * `undefined` O `null`, y `whitelist: true` no descarta una clave declarada con
+ * `null`. Un `PATCH { "description": null }` colaba entero hasta el servicio,
+ * que ejecutaba `null.trim()` y devolvia un 500 donde correspondia un 400.
+ * `@ValidateIf` solo salta el campo cuando esta AUSENTE, de modo que un `null`
+ * explicito llega a `@IsString()` y se rechaza con su mensaje.
  */
 export class UpdateWorkflowDto {
   @ApiPropertyOptional({
     description: 'Nombre institucional del flujo',
     maxLength: MAX_NAME_LENGTH,
   })
-  @IsOptional()
+  @ValidateIf((_, value: unknown) => value !== undefined)
   @IsString({ message: 'name debe ser una cadena.' })
   @MaxLength(MAX_NAME_LENGTH, {
     message: `name no puede superar ${MAX_NAME_LENGTH} caracteres.`,
@@ -45,7 +54,7 @@ export class UpdateWorkflowDto {
     description: 'Descripcion legible del proposito del flujo',
     maxLength: MAX_DESCRIPTION_LENGTH,
   })
-  @IsOptional()
+  @ValidateIf((_, value: unknown) => value !== undefined)
   @IsString({ message: 'description debe ser una cadena.' })
   @MaxLength(MAX_DESCRIPTION_LENGTH, {
     message: `description no puede superar ${MAX_DESCRIPTION_LENGTH} caracteres.`,
