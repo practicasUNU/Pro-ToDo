@@ -162,6 +162,7 @@ describe('FsmEngineService (PROT-09)', () => {
     configService: ConfigService = new ConfigService({}),
   ): FsmEngineService => {
     const engine = new FsmEngineService(repo, factory, configService);
+    jest.spyOn(engine['logger'], 'log').mockImplementation(() => undefined);
     jest.spyOn(engine['logger'], 'warn').mockImplementation(() => undefined);
     jest.spyOn(engine['logger'], 'error').mockImplementation(() => undefined);
 
@@ -584,7 +585,7 @@ describe('FsmEngineService (PROT-09)', () => {
       const result = await buildEngine(repo).executeWorkflow(
         EXECUTION_ID,
         buildLinearSchema(),
-        { remitente: 'prensa@unuware.com' },
+        { initialPayload: { remitente: 'prensa@unuware.com' } },
       );
 
       // 3. Assert
@@ -592,6 +593,127 @@ describe('FsmEngineService (PROT-09)', () => {
       expect(result.contextPayload[TRIGGER_NAMESPACE]).toEqual({
         remitente: 'prensa@unuware.com',
       });
+    });
+  });
+
+  describe('skipNodeTypes (omision de nodos en modo prueba)', () => {
+    /**
+     * El nodo omitido en estas pruebas es `nodo_a` (TRIGGER_IMAP), que es
+     * exactamente el caso real: el disparador abriria una conexion IMAP y
+     * pisaria el contexto simulado que el despacho de pruebas acaba de sembrar.
+     */
+    const registerDownstreamStrategies = (): void => {
+      factory.registerStrategy(
+        buildStrategy(
+          NodeType.PROCESADOR_IA,
+          jest.fn().mockResolvedValue({ success: true }),
+        ),
+      );
+      factory.registerStrategy(
+        buildStrategy(
+          NodeType.DESTINO_HTTP,
+          jest.fn().mockResolvedValue({ success: true }),
+        ),
+      );
+    };
+
+    it('NO deberia resolver ni ejecutar la estrategia de un tipo omitido', async () => {
+      // 1. Arrange
+      const { repo } = buildRepository(buildExecution());
+      const triggerExecute = jest.fn().mockResolvedValue({ success: true });
+      factory.registerStrategy(
+        buildStrategy(NodeType.TRIGGER_IMAP, triggerExecute),
+      );
+      registerDownstreamStrategies();
+
+      // La factoria es la REAL: si el motor pidiera la estrategia del nodo
+      // omitido, este espia lo delataria aunque la ejecucion siguiera en verde.
+      const getStrategy = jest.spyOn(factory, 'getStrategy');
+
+      // 2. Act
+      const result = await buildEngine(repo).executeWorkflow(
+        EXECUTION_ID,
+        buildLinearSchema(),
+        { skipNodeTypes: [NodeType.TRIGGER_IMAP] },
+      );
+
+      // 3. Assert
+      expect(triggerExecute).not.toHaveBeenCalled();
+      expect(getStrategy).not.toHaveBeenCalledWith(NodeType.TRIGGER_IMAP);
+      expect(result.currentState).toBe(ExecutionState.EXITOSO);
+    });
+
+    it('deberia conservar intacto el namespace ya sembrado del nodo omitido', async () => {
+      // 1. Arrange
+      // El namespace del disparador llega sembrado, como lo deja
+      // `createExecution` con el `mockData` del despacho de pruebas.
+      const seeded = { message_id: '<test-msg-001@madridmasd.es>' };
+      const { repo } = buildRepository(
+        buildExecution({ contextPayload: { salida_a: seeded } }),
+      );
+      factory.registerStrategy(
+        buildStrategy(
+          NodeType.TRIGGER_IMAP,
+          jest.fn().mockResolvedValue({ success: true }),
+        ),
+      );
+      registerDownstreamStrategies();
+
+      // 2. Act
+      const result = await buildEngine(repo).executeWorkflow(
+        EXECUTION_ID,
+        buildLinearSchema(),
+        { skipNodeTypes: [NodeType.TRIGGER_IMAP] },
+      );
+
+      // 3. Assert
+      // Ni pisado con `{}` ni borrado: es el dato simulado que motiva la omision.
+      expect(result.contextPayload.salida_a).toEqual(seeded);
+    });
+
+    it('deberia avanzar el cursor a nextStep y persistir el checkpoint de la transicion', async () => {
+      // 1. Arrange
+      const { repo, update } = buildRepository(buildExecution());
+      factory.registerStrategy(
+        buildStrategy(
+          NodeType.TRIGGER_IMAP,
+          jest.fn().mockResolvedValue({ success: true }),
+        ),
+      );
+      registerDownstreamStrategies();
+
+      // 2. Act
+      await buildEngine(repo).executeWorkflow(EXECUTION_ID, buildLinearSchema(), {
+        skipNodeTypes: [NodeType.TRIGGER_IMAP],
+      });
+
+      // 3. Assert
+      // Un nodo omitido es un salto real del cursor, no una desaparicion: debe
+      // dejar su checkpoint como cualquier otra transicion, para que un reinicio
+      // reanude en `nodo_b` y no vuelva a plantarse en el disparador.
+      const cursors = update.mock.calls.map(
+        (call: unknown[]) =>
+          (call[1] as { activeCursor: string | null }).activeCursor,
+      );
+      expect(cursors).toContain('nodo_b');
+    });
+
+    it('SI deberia ejecutar ese mismo nodo cuando no se declara skipNodeTypes', async () => {
+      // 1. Arrange
+      const { repo } = buildRepository(buildExecution());
+      const triggerExecute = jest.fn().mockResolvedValue({ success: true });
+      factory.registerStrategy(
+        buildStrategy(NodeType.TRIGGER_IMAP, triggerExecute),
+      );
+      registerDownstreamStrategies();
+
+      // 2. Act
+      // Sin opciones: es como despacha `runAutomaticWorkflow`, donde el
+      // disparador SI debe conectarse de verdad.
+      await buildEngine(repo).executeWorkflow(EXECUTION_ID, buildLinearSchema());
+
+      // 3. Assert
+      expect(triggerExecute).toHaveBeenCalledTimes(1);
     });
   });
 

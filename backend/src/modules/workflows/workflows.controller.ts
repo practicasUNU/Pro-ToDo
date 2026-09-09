@@ -32,7 +32,8 @@ import { UserRole } from '@modules/users/enums/user-role.enum';
 import { CreateWorkflowDto } from './dto/create-workflow.dto';
 import { UpdateWorkflowDto } from './dto/update-workflow.dto';
 import { PipelineSummaryResponseDto } from './dto/pipeline-summary-response.dto';
-import { RunWorkflowTestDto } from './dto/run-workflow-test.dto';
+import { WorkflowDetailResponseDto } from './dto/workflow-detail-response.dto';
+import { ExecuteTestWorkflowDto } from './dto/execute-test-workflow.dto';
 import { WorkflowExecutionResponseDto } from './dto/workflow-execution-response.dto';
 import { WorkflowsService } from './workflows.service';
 
@@ -90,9 +91,37 @@ export class WorkflowsController {
   }
 
   /**
+   * Un flujo con su grafo completo, para el asistente de EDICION.
+   *
+   * A diferencia del listado de arriba, este SI devuelve los `params` de cada
+   * nodo, y es deliberado: el listado alimenta un selector que no los necesita,
+   * mientras que esto alimenta el formulario que los edita. Sin ellos el
+   * asistente no podria mostrar el filtro que el operador quiere cambiar, y al
+   * guardar reescribiria el grafo con el formulario en blanco.
+   *
+   * Sigue sin viajar ningun secreto: `passwordEnvKey` es el NOMBRE de la
+   * variable de entorno, no la contrasena. Mismo trato y mismos roles que
+   * `GET /workflow-templates/:id`, que ya expone el esquema completo.
+   */
+  @Get(':id')
+  @ApiOperation({
+    summary: 'Obtiene un flujo con su configuracion_pipeline completa',
+  })
+  @ApiOkResponse({
+    description: 'Flujo con su topologia ordenada y el grafo crudo',
+    type: WorkflowDetailResponseDto,
+  })
+  @ApiNotFoundResponse({ description: 'No existe ningun flujo con ese id' })
+  public async findOneDetail(
+    @Param('id', ParseUUIDPipe) id: string,
+  ): Promise<WorkflowDetailResponseDto> {
+    return this.workflowsService.findOneDetail(id);
+  }
+
+  /**
    * Alta de un flujo con el pipeline que ensamblo el asistente.
    *
-   * Deja el 201 por defecto de `@Post`, a diferencia de `run-test`: aqui SI se
+   * Deja el 201 por defecto de `@Post`, a diferencia de `execute-test`: aqui SI se
    * crea un recurso, y se devuelve con la misma forma que el listado para que el
    * cliente no tenga que tratar de forma distinta el flujo que acaba de crear.
    *
@@ -153,23 +182,27 @@ export class WorkflowsController {
   }
 
   /**
-   * Despacho manual de un flujo (Camino B).
+   * Despacho manual de pruebas de un flujo (Camino B).
    *
    * `HttpStatus.OK` y no el 201 que Nest asigna por defecto a `@Post`: el
    * recurso que interesa al cliente no es la fila creada en `ejecuciones_flujo`,
    * sino el RESULTADO del recorrido, que se devuelve en el mismo cuerpo. La
    * peticion es sincrona: no retorna hasta que el motor alcanza un estado
    * terminal (EXITOSO, PAUSADO o FALLIDO).
+   *
+   * El cuerpo es opcional en la practica: sin `mockData` se aplica el fixture
+   * estandar de `raw_email`, de modo que `POST` con `{}` ya rinde una prueba
+   * completa del pipeline.
    */
-  @Post(':id/run-test')
+  @Post(':id/execute-test')
   @HttpCode(HttpStatus.OK)
   @ApiOperation({
     summary:
-      'Dispara un flujo completo sembrando el contexto a mano, sin el listener IMAP',
+      'Dispara un flujo completo con datos simulados, omitiendo la conexion real del nodo disparador',
   })
   @ApiOkResponse({
     description:
-      'El motor alcanzo un estado terminal; se devuelve el checkpoint',
+      'El motor alcanzo un estado terminal; se devuelve el checkpoint con el contexto acumulado',
     type: WorkflowExecutionResponseDto,
   })
   @ApiNotFoundResponse({ description: 'No existe ningun flujo con ese id' })
@@ -181,10 +214,10 @@ export class WorkflowsController {
     description:
       'Conflicto de concurrencia (RNF-09): el flujo ya tiene una ejecucion EN_PROCESO',
   })
-  public async runWorkflowTest(
+  public async executeTest(
     @Param('id', ParseUUIDPipe) id: string,
-    @Body() runWorkflowTestDto: RunWorkflowTestDto,
+    @Body() executeTestWorkflowDto: ExecuteTestWorkflowDto,
   ): Promise<WorkflowExecutionResponseDto> {
-    return this.workflowsService.runWorkflowTest(id, runWorkflowTestDto);
+    return this.workflowsService.executeTest(id, executeTestWorkflowDto);
   }
 }

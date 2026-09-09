@@ -8,7 +8,11 @@ import { useFlujoDraftStore } from './flujo-draft.store';
 
 import { NodeType } from '@/types/pipeline';
 
-import type { PipelineSummary, WorkflowTemplateSummary } from '@/types/pipeline';
+import type {
+  PipelineSummary,
+  WorkflowDetail,
+  WorkflowTemplateSummary,
+} from '@/types/pipeline';
 
 // Sin esto se cargaria `@boot/axios`, que necesita entorno de navegador.
 vi.mock('@services/workflow-templates.service', () => ({
@@ -16,6 +20,8 @@ vi.mock('@services/workflow-templates.service', () => ({
 }));
 vi.mock('@services/workflows.service', () => ({
   createWorkflow: vi.fn(),
+  fetchWorkflow: vi.fn(),
+  updateWorkflow: vi.fn(),
 }));
 vi.mock('@services/nodes/trigger-imap.service', () => ({
   checkImapConnection: vi.fn(),
@@ -29,6 +35,8 @@ const workflowTemplatesService = await import('@services/workflow-templates.serv
 const fetchWorkflowTemplates = vi.mocked(workflowTemplatesService.fetchWorkflowTemplates);
 
 const workflowsService = await import('@services/workflows.service');
+const fetchWorkflow = vi.mocked(workflowsService.fetchWorkflow);
+const updateWorkflow = vi.mocked(workflowsService.updateWorkflow);
 const createWorkflow = vi.mocked(workflowsService.createWorkflow);
 
 const TEMPLATE_ID = 'b3f1c2d4-5a6b-4c7d-8e9f-0a1b2c3d4e5f';
@@ -39,6 +47,12 @@ const OTHER_TEMPLATE_ID = 'c4a2d3e5-6f7b-4c8d-9e0f-1a2b3c4d5e6f';
 // mirara una instancia vacia distinta de la que el borrador esta usando.
 const TRIGGER_NODE_ID = 'trigger_imap';
 const PARSER_NODE_ID = 'nodo_parser';
+
+/** Flujo YA GUARDADO que el asistente abre en modo edicion. */
+const WORKFLOW_ID = 'e1d2c3b4-a596-4f80-9c1d-2e3f4a5b6c7d';
+
+/** Plantilla HTML que el nodo mapeador tiene elegida en ese flujo. */
+const HTML_TEMPLATE_ID = 'a7b8c9d0-1e2f-4a3b-8c4d-5e6f7a8b9c0d';
 const MAPPER_NODE_ID = 'nodo_mapeador';
 
 /** Plantilla de tres pasos: trigger -> parser -> mapeador. */
@@ -431,8 +445,9 @@ describe('useFlujoDraftStore · agregador del asistente', () => {
       // 2. Act
       const schema = draft.assemblePipelineSchema('Flujo de prueba');
 
-      // 3. Assert: los siete campos de conexion salen del store del trigger, no
-      //    de una copia que mantuviera el agregador.
+      // 3. Assert: la conexion y los criterios de disparo salen del store del
+      //    trigger, no de una copia que mantuviera el agregador. Los filtros
+      //    vacios no viajan; el DTO del backend los rechaza con `@IsNotEmpty()`.
       expect(schema.nodes.trigger_imap?.params).toEqual({
         host: 'imap.unuware.com',
         port: 993,
@@ -441,6 +456,7 @@ describe('useFlujoDraftStore · agregador del asistente', () => {
         passwordEnvKey: 'IMAP_PASSWORD',
         mailbox: 'INBOX',
         pollIntervalMs: 60_000,
+        unreadOnly: true,
       });
     });
 
@@ -794,6 +810,285 @@ describe('useFlujoDraftStore · agregador del asistente', () => {
       //    `PipelineSchemaDto` exige el campo y la plantilla es la referencia
       //    mas honesta hasta que la fila exista.
       expect(schema.flowId).toBe(TEMPLATE_ID);
+    });
+  });
+});
+
+describe('useFlujoDraftStore · modo edicion', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia());
+    vi.clearAllMocks();
+  });
+
+  /** Flujo guardado, con los `params` que el asistente debe repoblar. */
+  const buildWorkflowDetail = (): WorkflowDetail => ({
+    id: WORKFLOW_ID,
+    name: 'Notiweb - publicacion automatica',
+    description: 'Publica noticias entrantes en el CMS',
+    active: true,
+    templateId: TEMPLATE_ID,
+    // Solo los dos tipos con configurador registrado. Un tipo sin store en
+    // `nodeStoreRegistry` no puede declararse valido, asi que un flujo que lo
+    // contenga no se puede guardar desde el asistente: es la misma barrera
+    // Poka-Yoke que ya rige en el alta, no algo propio de la edicion.
+    topology: [
+      {
+        nodeId: TRIGGER_NODE_ID,
+        nodeType: NodeType.TRIGGER_IMAP,
+        outputNamespace: 'raw_email',
+      },
+      {
+        nodeId: MAPPER_NODE_ID,
+        nodeType: NodeType.MAPEADOR_PLANTILLA,
+        outputNamespace: 'rendered_html',
+      },
+    ],
+    pipelineSchema: {
+      flowId: TEMPLATE_ID,
+      name: 'Notiweb - publicacion automatica',
+      version: '1.0.0',
+      entrypoint: TRIGGER_NODE_ID,
+      nodes: {
+        [TRIGGER_NODE_ID]: {
+          nodeId: TRIGGER_NODE_ID,
+          nodeType: NodeType.TRIGGER_IMAP,
+          outputNamespace: 'raw_email',
+          nextStep: MAPPER_NODE_ID,
+          onErrorStep: null,
+          params: {
+            host: 'imap.unuware.com',
+            port: 993,
+            secure: true,
+            user: 'notiweb@unuware.com',
+            passwordEnvKey: 'IMAP_PASSWORD',
+            mailbox: 'INBOX',
+            pollIntervalMs: 60_000,
+            unreadOnly: true,
+            subjectFilter: 'Notiweb',
+          },
+        },
+        [MAPPER_NODE_ID]: {
+          nodeId: MAPPER_NODE_ID,
+          nodeType: NodeType.MAPEADOR_PLANTILLA,
+          outputNamespace: 'rendered_html',
+          nextStep: null,
+          onErrorStep: null,
+          params: { templateId: HTML_TEMPLATE_ID },
+        },
+      },
+    },
+  });
+
+  describe('13. Hidratacion de un flujo existente', () => {
+    it('13.1 deberia reconstruir la topologia en orden', () => {
+      // 1. Arrange
+      const draft = useFlujoDraftStore();
+
+      // 2. Act
+      draft.hydrateForEdit(buildWorkflowDetail());
+
+      // 3. Assert
+      expect(draft.pipelineTopology.map((step) => step.nodeId)).toEqual([
+        TRIGGER_NODE_ID,
+        MAPPER_NODE_ID,
+      ]);
+      expect(draft.activeStep).toBe(0);
+      expect(draft.editingWorkflowId).toBe(WORKFLOW_ID);
+    });
+
+    it('13.2 deberia repoblar los params de cada store de nodo', () => {
+      // 1. Arrange
+      const draft = useFlujoDraftStore();
+
+      // 2. Act
+      draft.hydrateForEdit(buildWorkflowDetail());
+
+      // 3. Assert: sin esto el asistente abriria el formulario en blanco y
+      // guardar borraria la configuracion que se venia a retocar.
+      const trigger = useTriggerImapStore(TRIGGER_NODE_ID);
+      const mapper = useTemplateMapperStore(MAPPER_NODE_ID);
+
+      expect(trigger.config.host).toBe('imap.unuware.com');
+      expect(trigger.config.subjectFilter).toBe('Notiweb');
+      expect(mapper.config.templateId).toBe(HTML_TEMPLATE_ID);
+      expect(mapper.config.outputNamespace).toBe('rendered_html');
+    });
+
+    it('13.3 deberia dar por valido un nodo IMAP ya guardado sin reprobar conexion', () => {
+      // 1. Arrange
+      const draft = useFlujoDraftStore();
+
+      // 2. Act
+      draft.hydrateForEdit(buildWorkflowDetail());
+
+      // 3. Assert: esa configuracion ya supero la prueba cuando se creo el
+      // flujo; exigirla de nuevo obligaria a reprobar el buzon para cambiar una
+      // palabra de un filtro.
+      const trigger = useTriggerImapStore(TRIGGER_NODE_ID);
+
+      expect(trigger.connectionVerified).toBe(true);
+      expect(trigger.isConfigValid).toBe(true);
+    });
+
+    it('13.4 deberia invalidar la verificacion al tocar un campo de conexion', () => {
+      // 1. Arrange
+      const draft = useFlujoDraftStore();
+      draft.hydrateForEdit(buildWorkflowDetail());
+      const trigger = useTriggerImapStore(TRIGGER_NODE_ID);
+
+      // 2. Act
+      trigger.patchConfig({ host: 'otro.servidor.com' });
+
+      // 3. Assert: la garantia Poka-Yoke sigue viva tras hidratar.
+      expect(trigger.connectionVerified).toBe(false);
+      expect(trigger.isConfigValid).toBe(false);
+    });
+
+    it('13.5 NO deberia invalidarla al tocar solo un filtro', () => {
+      // 1. Arrange
+      const draft = useFlujoDraftStore();
+      draft.hydrateForEdit(buildWorkflowDetail());
+      const trigger = useTriggerImapStore(TRIGGER_NODE_ID);
+
+      // 2. Act
+      trigger.patchFilters({ subjectFilter: 'Otro asunto' });
+
+      // 3. Assert: un filtro no interviene en las credenciales.
+      expect(trigger.connectionVerified).toBe(true);
+    });
+
+    it('13.6 deberia tolerar un flujo sin pipelineSchema', () => {
+      // 1. Arrange
+      const draft = useFlujoDraftStore();
+
+      // 2. Act
+      draft.hydrateForEdit({
+        ...buildWorkflowDetail(),
+        topology: [],
+        pipelineSchema: null,
+      });
+
+      // 3. Assert: un borrador a medio crear es un estado legitimo.
+      expect(draft.pipelineTopology).toEqual([]);
+      expect(draft.editingWorkflowId).toBe(WORKFLOW_ID);
+    });
+
+    it('13.7 no deberia arrastrar la config de un flujo editado antes', () => {
+      // 1. Arrange
+      const draft = useFlujoDraftStore();
+      draft.hydrateForEdit(buildWorkflowDetail());
+
+      // 2. Act: se abre otro flujo cuyo nodo IMAP no declara filtro.
+      const other = buildWorkflowDetail();
+      const otherNodes = { ...other.pipelineSchema?.nodes };
+      const triggerNode = otherNodes[TRIGGER_NODE_ID];
+      if (triggerNode !== undefined) {
+        otherNodes[TRIGGER_NODE_ID] = {
+          ...triggerNode,
+          params: { ...triggerNode.params, subjectFilter: undefined },
+        };
+      }
+      draft.hydrateForEdit({
+        ...other,
+        pipelineSchema: { ...other.pipelineSchema!, nodes: otherNodes },
+      });
+
+      // 3. Assert: `toNodeParams()` OMITE los filtros vacios, asi que sin
+      // reponer `''` el valor anterior sobreviviria al cambio de flujo.
+      expect(useTriggerImapStore(TRIGGER_NODE_ID).config.subjectFilter).toBe('');
+    });
+  });
+
+  describe('14. Guardado en modo edicion', () => {
+    it('14.1 deberia actualizar el flujo y NO crear uno nuevo', async () => {
+      // 1. Arrange
+      const draft = useFlujoDraftStore();
+      draft.hydrateForEdit(buildWorkflowDetail());
+      updateWorkflow.mockResolvedValue(buildWorkflow());
+
+      // 2. Act
+      await draft.assembleAndSaveWorkflow('Notiweb revisado', 'Nueva descripcion');
+
+      // 3. Assert
+      expect(createWorkflow).not.toHaveBeenCalled();
+      expect(updateWorkflow).toHaveBeenCalledWith(
+        WORKFLOW_ID,
+        expect.objectContaining({ name: 'Notiweb revisado' }),
+      );
+    });
+
+    it('14.2 deberia enviar el pipelineSchema con los cambios del formulario', async () => {
+      // 1. Arrange
+      const draft = useFlujoDraftStore();
+      draft.hydrateForEdit(buildWorkflowDetail());
+      useTriggerImapStore(TRIGGER_NODE_ID).patchFilters({ subjectFilter: 'Otro asunto' });
+      updateWorkflow.mockResolvedValue(buildWorkflow());
+
+      // 2. Act
+      await draft.assembleAndSaveWorkflow('Notiweb', '');
+
+      // 3. Assert
+      const [, payload] = updateWorkflow.mock.calls[0] ?? [];
+      const params = payload?.pipelineSchema?.nodes[TRIGGER_NODE_ID]?.params;
+
+      expect(params?.subjectFilter).toBe('Otro asunto');
+      expect(params?.host).toBe('imap.unuware.com');
+    });
+
+    it('14.3 NO deberia enviar active ni templateId al editar', async () => {
+      // 1. Arrange
+      const draft = useFlujoDraftStore();
+      draft.hydrateForEdit(buildWorkflowDetail());
+      updateWorkflow.mockResolvedValue(buildWorkflow());
+
+      // 2. Act
+      await draft.assembleAndSaveWorkflow('Notiweb', '');
+
+      // 3. Assert: habilitar es competencia del interruptor del catalogo, y la
+      // procedencia es un hecho historico que `UpdateWorkflowDto` no admite.
+      const [, payload] = updateWorkflow.mock.calls[0] ?? [];
+
+      expect(payload).not.toHaveProperty('active');
+      expect(payload).not.toHaveProperty('templateId');
+    });
+
+    it('14.4 deberia volver a crear tras resetDraft', async () => {
+      // 1. Arrange
+      const draft = useFlujoDraftStore();
+      draft.hydrateForEdit(buildWorkflowDetail());
+
+      // 2. Act
+      draft.resetDraft();
+
+      // 3. Assert: sin limpiar `editingWorkflowId`, el alta siguiente guardaria
+      // ENCIMA del flujo que se estaba editando.
+      expect(draft.editingWorkflowId).toBeNull();
+    });
+  });
+
+  describe('15. Carga desde el backend', () => {
+    it('15.1 deberia pedir el detalle e hidratar con el resultado', async () => {
+      // 1. Arrange
+      const draft = useFlujoDraftStore();
+      fetchWorkflow.mockResolvedValue(buildWorkflowDetail());
+
+      // 2. Act
+      await draft.loadWorkflowForEdit(WORKFLOW_ID);
+
+      // 3. Assert
+      expect(fetchWorkflow).toHaveBeenCalledWith(WORKFLOW_ID);
+      expect(draft.editingWorkflowId).toBe(WORKFLOW_ID);
+      expect(useTriggerImapStore(TRIGGER_NODE_ID).config.host).toBe('imap.unuware.com');
+    });
+
+    it('15.2 deberia propagar el error dejando isLoading apagado', async () => {
+      // 1. Arrange
+      const draft = useFlujoDraftStore();
+      fetchWorkflow.mockRejectedValue(new Error('404'));
+
+      // 2. Act & 3. Assert: el mensaje al usuario lo decide el componente.
+      await expect(draft.loadWorkflowForEdit(WORKFLOW_ID)).rejects.toThrow('404');
+      expect(draft.isLoading).toBe(false);
     });
   });
 });

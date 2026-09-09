@@ -243,16 +243,31 @@ onMounted(loadCatalog);
 
       <template #body-cell-actions="cellProps">
         <q-td :props="cellProps" class="q-gutter-x-xs">
+          <!-- Dos acciones y no una: el asistente edita la CONFIGURACION del
+               pipeline (filtros, plantilla de cada nodo) y el dialogo se queda
+               con el renombrado rapido, que no merece cargar un stepper. -->
+          <q-btn
+            class="pd-btn-icon"
+            outline
+            dense
+            size="sm"
+            icon="tune"
+            :aria-label="`Configurar ${cellProps.row.name}`"
+            :to="`/flujos/${cellProps.row.id}/editar`"
+          >
+            <q-tooltip>Configurar el pipeline en el asistente</q-tooltip>
+          </q-btn>
+
           <q-btn
             class="pd-btn-icon"
             outline
             dense
             size="sm"
             icon="edit"
-            :aria-label="`Editar ${cellProps.row.name}`"
+            :aria-label="`Renombrar ${cellProps.row.name}`"
             @click="openEditDialog(cellProps.row)"
           >
-            <q-tooltip>Editar flujo</q-tooltip>
+            <q-tooltip>Renombrar o cambiar la descripcion</q-tooltip>
           </q-btn>
 
           <!-- Mismo par excluyente que el CRUD de usuarios: desactivar pasa

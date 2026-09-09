@@ -42,7 +42,7 @@ export class Workflow {
   /**
    * Habilitacion del flujo frente a los disparadores AUTOMATICOS (Cron, IMAP).
    *
-   * El despacho manual de `run-test` la ignora a proposito: probar un flujo
+   * El despacho manual de `execute-test` la ignora a proposito: probar un flujo
    * antes de habilitarlo es justo el caso de uso del Camino B.
    */
   @Column({ name: 'activo', type: 'boolean', default: true })

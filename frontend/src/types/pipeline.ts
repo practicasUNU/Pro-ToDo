@@ -69,6 +69,19 @@ export interface PipelineSummary {
 }
 
 /**
+ * Un flujo con su grafo COMPLETO, `params` incluidos (`GET /workflows/:id`).
+ *
+ * Es lo que el asistente de edicion hidrata. El listado (`PipelineSummary`)
+ * elimina los `params` a proposito, asi que no sirve para reconstruir el
+ * formulario: llevaria el host y el buzon en blanco y guardar los borraria.
+ *
+ * `pipelineSchema` es nulo en un flujo a medio crear que aun no tiene grafo.
+ */
+export interface WorkflowDetail extends PipelineSummary {
+  readonly pipelineSchema: AssembledPipelineSchema | null;
+}
+
+/**
  * Plantilla de flujo (blueprint maestro) del catalogo `plantillas_flujo`.
  *
  * Replica de `WorkflowTemplateResponseDto`. Es la fuente de la Fase 0 del

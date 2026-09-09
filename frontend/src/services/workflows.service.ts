@@ -4,6 +4,7 @@ import type {
   CreateWorkflowPayload,
   PipelineSummary,
   UpdateWorkflowPayload,
+  WorkflowDetail,
 } from '@/types/pipeline';
 
 // Unica capa que conoce las rutas de `WorkflowsController`. Retorna la data ya
@@ -23,6 +24,18 @@ import type {
  */
 export const fetchWorkflows = async (): Promise<PipelineSummary[]> => {
   const { data } = await api.get<PipelineSummary[]>('/workflows');
+  return data;
+};
+
+/**
+ * Recupera un flujo con su `configuracion_pipeline` completa.
+ *
+ * Es la unica lectura que trae los `params` de los nodos, y existe para el
+ * asistente de edicion: el listado los elimina, asi que con `fetchWorkflows` no
+ * hay forma de repoblar el formulario de un flujo existente.
+ */
+export const fetchWorkflow = async (id: string): Promise<WorkflowDetail> => {
+  const { data } = await api.get<WorkflowDetail>(`/workflows/${id}`);
   return data;
 };
 

@@ -16,6 +16,7 @@ import { ExecutionState } from '@core/fsm/types/fsm.enums';
 import type { PipelineNodeConfigDto } from '@core/fsm/dto/pipeline-schema.dto';
 import type { PipelineSchemaDto } from '@core/fsm/dto/pipeline-schema.dto';
 import type { NodeResult } from '@core/fsm/types/node-strategy.types';
+import type { NodeType } from '@core/fsm/types/pipeline-schema.types';
 import type { Repository } from 'typeorm';
 import type { QueryDeepPartialEntity } from 'typeorm/query-builder/QueryPartialEntity';
 
@@ -57,6 +58,31 @@ const PG_UNIQUE_VIOLATION = '23505';
 
 /** Intentos ya consumidos por nodo, indexados por `nodeId`. */
 type RetryState = Record<string, number>;
+
+/**
+ * Modificadores del recorrido para una invocacion concreta de `executeWorkflow`.
+ *
+ * Se agrupan en un objeto en vez de encadenar parametros posicionales: el motor
+ * ya tenia `initialPayload` como tercer argumento y anadir un cuarto obligaria a
+ * pasar `undefined` de relleno en cada llamada que solo quisiera el ultimo.
+ */
+export interface ExecuteWorkflowOptions {
+  /** Datos del disparador; aterrizan en el namespace reservado `trigger`. */
+  initialPayload?: Record<string, unknown>;
+
+  /**
+   * Tipos de nodo que el bucle NO despacha a su estrategia.
+   *
+   * Existe para el despacho manual de pruebas: un nodo disparador abriria una
+   * conexion real por red (IMAP) y SOBRESCRIBIRIA con su resultado el namespace
+   * que la prueba acaba de sembrar. Omitirlo deja intacto lo ya sembrado.
+   *
+   * Se declara por TIPO y no por `nodeId` para que el llamador no tenga que
+   * inspeccionar el grafo, y para que un disparador nuevo quede cubierto sin
+   * volver a tocar el motor.
+   */
+  skipNodeTypes?: readonly NodeType[];
+}
 
 /** Campos del checkpoint que el motor reescribe en cada transicion. */
 interface CheckpointPatch {
@@ -165,7 +191,8 @@ export class FsmEngineService {
    *
    * @param executionId Fila de `ejecuciones_flujo` que sostiene el checkpoint.
    * @param schema Esquema ya validado por `PipelineValidatorService`.
-   * @param initialPayload Datos del disparador; se cargan en `trigger`.
+   * @param options Modificadores del recorrido: payload del disparador y
+   *        tipos de nodo a omitir (ver `ExecuteWorkflowOptions`).
    * @returns La entidad con el estado final (EXITOSO, PAUSADO o FALLIDO).
    * @throws NotFoundException Si la ejecucion no existe.
    * @throws ConflictException Si ya hay un bucle atendiendola, o si otro
@@ -174,8 +201,10 @@ export class FsmEngineService {
   public async executeWorkflow(
     executionId: string,
     schema: PipelineSchemaDto,
-    initialPayload?: Record<string, unknown>,
+    options: ExecuteWorkflowOptions = {},
   ): Promise<FsmExecution> {
+    const skippedNodeTypes = new Set<NodeType>(options.skipNodeTypes ?? []);
+
     // --- Validacion previa. Deliberadamente FUERA del try externo: si marcar
     // EN_PROCESO choca contra el mutex `idx_flujo_activo`, la excepcion debe
     // propagarse sin marcar FALLIDO. No ha fallado el flujo; no le tocaba turno.
@@ -201,7 +230,7 @@ export class FsmEngineService {
       schema,
       cursor,
       execution,
-      initialPayload,
+      options.initialPayload,
     );
     let retryState: RetryState = { ...(execution.retryState as RetryState) };
 
@@ -258,6 +287,37 @@ export class FsmEngineService {
           );
           await this.pauseAt(execution, cursor, context, retryState);
           break;
+        }
+
+        // --- Omision en modo prueba. Va ANTES del bucle de reintentos porque un
+        // nodo omitido no se ejecuta en absoluto: no hay `NodeResult` que
+        // evaluar ni intento que contabilizar.
+        //
+        // NO se llama a `setNamespace`: el namespace que este nodo produciria
+        // viene sembrado en `contexto_acumulado` y sobrescribirlo con un objeto
+        // vacio destruiria justo el dato simulado que motiva la omision.
+        if (skippedNodeTypes.has(node.nodeType)) {
+          this.logger.log(
+            `Modo prueba | ejecucion=${executionId} | Se omite el nodo "${node.nodeId}" (${node.nodeType}); se conserva el namespace "${node.outputNamespace}" ya sembrado.`,
+          );
+
+          cursor = node.nextStep;
+
+          // Mismo criterio que la transicion exitosa: con el cursor ya nulo no
+          // se persiste un `EN_PROCESO` intermedio sin significado; se deja
+          // pasar a la finalizacion EXITOSO de abajo.
+          if (cursor === null) {
+            break;
+          }
+
+          context.setCursor(cursor);
+          await this.saveCheckpoint(execution, {
+            currentState: ExecutionState.EN_PROCESO,
+            activeCursor: cursor,
+            contextPayload: context.getAllContext(),
+            retryState,
+          });
+          continue;
         }
 
         // --- Bucle intra-nodo: reintentos SIN mover el cursor, de modo que no

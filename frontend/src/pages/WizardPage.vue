@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, reactive } from 'vue';
 import { useQuasar } from 'quasar';
-import { useRouter } from 'vue-router';
+import { useRoute, useRouter } from 'vue-router';
 
 import { useFlujoDraftStore } from '@stores/flujo-draft.store';
 
@@ -14,8 +14,24 @@ import type { WizardStep } from '@/types/pipeline';
 import type { Component } from 'vue';
 
 const $q = useQuasar();
+const route = useRoute();
 const router = useRouter();
 const draftStore = useFlujoDraftStore();
+
+/**
+ * Flujo que se esta editando, o `null` en un alta.
+ *
+ * El modo lo decide la RUTA y no una prop: `flujos/:id/editar` monta esta misma
+ * pagina, y derivarlo del parametro evita una segunda fuente de verdad que
+ * pudiera contradecir a la barra de direcciones.
+ */
+const editedWorkflowId = computed<string | null>(() => {
+  const { id } = route.params;
+
+  return typeof id === 'string' && id !== '' ? id : null;
+});
+
+const isEditMode = computed<boolean>(() => editedWorkflowId.value !== null);
 
 /**
  * Indice del paso de revision: uno mas que el ultimo nodo.
@@ -33,8 +49,22 @@ const form = reactive<{ name: string; description: string }>({
   description: '',
 });
 
-/** Fase 0 mientras no haya plantilla elegida; Fase 1..N en cuanto la hay. */
-const isSelectingTemplate = computed<boolean>(() => draftStore.selectedTemplateId === null);
+/**
+ * Fase 0 mientras no haya plantilla elegida; Fase 1..N en cuanto la hay.
+ *
+ * En EDICION no se muestra nunca: el flujo ya existe y su topologia es la que
+ * es. Ofrecer ahi el selector permitiria cambiarle la plantilla de origen a un
+ * flujo ya instanciado, que es justo lo que `UpdateWorkflowDto` impide al no
+ * declarar `templateId`.
+ */
+const isSelectingTemplate = computed<boolean>(
+  () => !isEditMode.value && draftStore.selectedTemplateId === null,
+);
+
+/** Rotulo de la accion final, distinto en cada modo. */
+const submitLabel = computed<string>(() =>
+  isEditMode.value ? 'Guardar cambios' : 'Crear Flujo',
+);
 
 /**
  * Configurador del paso indicado, o `null` si su tipo aun no tiene uno.
@@ -73,12 +103,19 @@ const onGoToReview = (): void => {
 };
 
 const onSaveWorkflow = async (): Promise<void> => {
+  const editing = isEditMode.value;
+
   try {
-    const created = await draftStore.assembleAndSaveWorkflow(form.name.trim(), form.description);
+    const saved = await draftStore.assembleAndSaveWorkflow(form.name.trim(), form.description);
 
     $q.notify({
       type: 'positive',
-      message: `Flujo "${created.name}" creado. Queda INACTIVO hasta que lo habilites.`,
+      // Guardar una edicion NO cambia el estado del flujo: `active` no viaja en
+      // el cuerpo, asi que prometer que "queda inactivo" seria falso para un
+      // flujo que ya estaba habilitado.
+      message: editing
+        ? `Flujo "${saved.name}" actualizado.`
+        : `Flujo "${saved.name}" creado. Queda INACTIVO hasta que lo habilites.`,
     });
 
     // El borrador se limpia antes de navegar: si el operador vuelve al
@@ -93,12 +130,41 @@ const onSaveWorkflow = async (): Promise<void> => {
   } catch (error) {
     $q.notify({
       type: 'negative',
-      message: extractApiErrorMessage(error, 'No se pudo crear el flujo'),
+      message: extractApiErrorMessage(
+        error,
+        editing ? 'No se pudo guardar el flujo' : 'No se pudo crear el flujo',
+      ),
     });
   }
 };
 
-onMounted(loadTemplates);
+/**
+ * Trae el flujo a editar y reparte su configuracion a los stores de nodo.
+ *
+ * Rellena tambien el formulario final: en edicion el nombre y la descripcion no
+ * se piden en blanco, se corrigen sobre los que el flujo ya tiene.
+ */
+const loadWorkflowForEdit = async (workflowId: string): Promise<void> => {
+  try {
+    const workflow = await draftStore.loadWorkflowForEdit(workflowId);
+
+    form.name = workflow.name;
+    form.description = workflow.description ?? '';
+  } catch (error) {
+    $q.notify({
+      type: 'negative',
+      message: extractApiErrorMessage(error, 'No se pudo cargar el flujo'),
+    });
+    await router.push('/flujos');
+  }
+};
+
+onMounted(async () => {
+  const workflowId = editedWorkflowId.value;
+
+  // El catalogo de plantillas solo hace falta para la Fase 0 del alta.
+  await (workflowId === null ? loadTemplates() : loadWorkflowForEdit(workflowId));
+});
 </script>
 
 <template>
@@ -113,20 +179,35 @@ onMounted(loadTemplates);
     <section v-else>
       <div class="row items-center no-wrap q-gutter-sm q-mb-md">
         <div>
-          <h1 class="pd-h1 q-mb-none">{{ draftStore.selectedTemplate?.name }}</h1>
+          <h1 class="pd-h1 q-mb-none">
+            {{ isEditMode ? form.name : draftStore.selectedTemplate?.name }}
+          </h1>
           <p class="pd-subtitle q-mb-none">
             Paso {{ draftStore.activeStep + 1 }} de {{ reviewStepIndex + 1 }}
             <span v-if="isReviewStep"> · revision final</span>
           </p>
         </div>
         <q-space />
+        <!-- Solo en alta: en edicion `resetDraft()` vaciaria el borrador recien
+             hidratado, y ademas cambiar la plantilla de un flujo ya instanciado
+             no es una operacion que el backend admita. -->
         <q-btn
+          v-if="!isEditMode"
           flat
           no-caps
           class="pd-btn-secondary"
           label="Cambiar plantilla"
           icon="arrow_back"
           @click="onBackToSelector"
+        />
+        <q-btn
+          v-else
+          flat
+          no-caps
+          class="pd-btn-secondary"
+          label="Volver al catalogo"
+          icon="arrow_back"
+          to="/flujos"
         />
       </div>
 
@@ -251,8 +332,13 @@ onMounted(loadTemplates);
                seguridad y el operador debe saberlo antes de pulsar. -->
           <div class="pd-card pd-card--accent pd-accent-leve q-pa-md q-mt-md">
             <p class="pd-subtitle q-mb-none">
-              El flujo se creara <strong>inactivo</strong>. No consumira el buzon hasta que lo
-              habilites de forma explicita.
+              <template v-if="isEditMode">
+                Guardar no cambia el estado del flujo: se conserva tal y como esta en el catalogo.
+              </template>
+              <template v-else>
+                El flujo se creara <strong>inactivo</strong>. No consumira el buzon hasta que lo
+                habilites de forma explicita.
+              </template>
             </p>
           </div>
 
@@ -273,7 +359,7 @@ onMounted(loadTemplates);
               class="pd-btn-primary"
               unelevated
               no-caps
-              label="Crear Flujo"
+              :label="submitLabel"
               icon-right="north_east"
               :disable="!draftStore.canSave || !form.name.trim()"
               :loading="draftStore.isLoading"

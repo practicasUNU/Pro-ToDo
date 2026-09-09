@@ -5,6 +5,8 @@ import * as templateMapperService from '@services/nodes/template-mapper.service'
 
 import { OUTPUT_NAMESPACE_PATTERN } from '@/types/pipeline';
 
+import type { HydratableNode } from '@stores/nodes/node-store-registry';
+
 import type { HtmlTemplate } from '@/types/html-template';
 
 /** Namespace por defecto, el mismo que asume `TemplateMapperStrategy`. */
@@ -151,6 +153,28 @@ const templateMapperSetup = () => {
     templateId: config.value.templateId,
   });
 
+  /**
+   * Carga la configuracion de un nodo ya guardado en el `pipeline_schema`.
+   *
+   * Reutiliza los setters existentes en vez de escribir `config` directamente,
+   * para no saltarse lo que cada uno protege: `setTemplateId` descarta la vista
+   * previa, que pertenecia a la plantilla anterior.
+   *
+   * `outputNamespace` sale del NODO y no de sus `params`, que es donde vive en el
+   * esquema (ver `toNodeParams`). Si viniera vacio se conserva el valor por
+   * defecto: un namespace en blanco no pasaria `OUTPUT_NAMESPACE_PATTERN` y
+   * dejaria el paso invalido sin que el operador entienda por que.
+   */
+  const hydrateFromNode = (node: HydratableNode): void => {
+    const templateId = node.params.templateId;
+
+    setTemplateId(typeof templateId === 'string' ? templateId : null);
+
+    if (node.outputNamespace !== '') {
+      setOutputNamespace(node.outputNamespace);
+    }
+  };
+
   const resetConfig = (): void => {
     config.value = {
       templateId: null,
@@ -174,6 +198,7 @@ const templateMapperSetup = () => {
     setTemplateId,
     setAvailableUpstreamNamespaces,
     setOutputNamespace,
+    hydrateFromNode,
     loadPreview,
     resetConfig,
   };

@@ -19,7 +19,7 @@ import type { Repository } from 'typeorm';
  *   npm run seed:fsm-runner
  *
  * Deja en la base un flujo de un solo nodo MAPEADOR_PLANTILLA listo para
- * disparar con `POST /api/workflows/:id/run-test`, e imprime el `curl` exacto
+ * disparar con `POST /api/workflows/:id/execute-test`, e imprime el `curl` exacto
  * con el UUID ya sustituido.
  *
  * IDEMPOTENTE: cada paso busca antes de insertar, asi que ejecutarlo dos veces
@@ -212,13 +212,13 @@ const main = async (): Promise<void> => {
     console.log(`
 ===== DESPACHO MANUAL LISTO =====
 
-  POST /api/workflows/${workflow.id}/run-test
+  POST /api/workflows/${workflow.id}/execute-test
 
-  curl -X POST http://localhost:\${PORT}/api/workflows/${workflow.id}/run-test \\
+  curl -X POST http://localhost:\${PORT}/api/workflows/${workflow.id}/execute-test \\
     -H "Content-Type: application/json" \\
     -H "Authorization: Bearer <JWT_ADMIN>" \\
     -d '{
-      "initialPayload": {
+      "mockData": {
         "parsed_email": {
           "clean_title": "Avance en Computacion Cuantica",
           "description": "Investigadores logran hito algoritmico",

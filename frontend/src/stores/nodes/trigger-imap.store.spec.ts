@@ -5,6 +5,7 @@ import {
   DEFAULT_IMAP_PORT,
   DEFAULT_MAILBOX,
   DEFAULT_POLL_INTERVAL_MS,
+  DEFAULT_UNREAD_ONLY,
   MIN_POLL_INTERVAL_MS,
   useTriggerImapStore,
 } from './trigger-imap.store';
@@ -79,10 +80,14 @@ describe('useTriggerImapStore · configuracion del nodo TRIGGER_IMAP', () => {
         passwordEnvKey: '',
         mailbox: DEFAULT_MAILBOX,
         pollIntervalMs: DEFAULT_POLL_INTERVAL_MS,
+        fromFilter: '',
+        subjectFilter: '',
+        unreadOnly: DEFAULT_UNREAD_ONLY,
       });
       expect(DEFAULT_IMAP_PORT).toBe(993);
       expect(DEFAULT_MAILBOX).toBe('INBOX');
       expect(DEFAULT_POLL_INTERVAL_MS).toBe(60_000);
+      expect(DEFAULT_UNREAD_ONLY).toBe(true);
     });
 
     it('1.2 deberia arrancar sin verificar y sin resultado previo', () => {
@@ -317,6 +322,155 @@ describe('useTriggerImapStore · configuracion del nodo TRIGGER_IMAP', () => {
       // 3. Assert: conservarlo mostraria un "Conexión exitosa" que ya no
       //    corresponde a lo que hay en el formulario.
       expect(store.lastCheckResult).toBeNull();
+    });
+  });
+
+  describe('4bis. Filtros de disparo', () => {
+    it('4bis.1 deberia publicar unreadOnly y omitir los filtros vacios', () => {
+      // 1. Arrange
+      const store = buildVerifiedStore();
+
+      // 2. Act
+      const params = store.toNodeParams();
+
+      // 3. Assert: el DTO del backend rechaza un filtro vacio con
+      // `@IsNotEmpty()`, porque en IMAP SEARCH `''` casa con todo.
+      expect(params.unreadOnly).toBe(true);
+      expect(params).not.toHaveProperty('fromFilter');
+      expect(params).not.toHaveProperty('subjectFilter');
+    });
+
+    it('4bis.2 deberia publicar los filtros recortados cuando tienen valor', () => {
+      // 1. Arrange
+      const store = buildVerifiedStore();
+      store.patchFilters({
+        fromFilter: '  redaccion@noticias.es  ',
+        subjectFilter: '  Notiweb  ',
+        unreadOnly: false,
+      });
+
+      // 2. Act
+      const params = store.toNodeParams();
+
+      // 3. Assert
+      expect(params.fromFilter).toBe('redaccion@noticias.es');
+      expect(params.subjectFilter).toBe('Notiweb');
+      expect(params.unreadOnly).toBe(false);
+    });
+
+    it('4bis.3 NO deberia enviar los filtros en la comprobacion de conexion', () => {
+      // 1. Arrange
+      const store = buildVerifiedStore();
+      store.patchFilters({ fromFilter: 'redaccion@noticias.es' });
+
+      // 2. Act
+      const payload = store.checkPayload;
+
+      // 3. Assert: `/wizard/check-imap` valida con `forbidNonWhitelisted`, asi
+      // que un filtro de mas en ese cuerpo devolveria un 400.
+      expect(payload).not.toHaveProperty('fromFilter');
+      expect(payload).not.toHaveProperty('unreadOnly');
+    });
+
+    it('4bis.4 NO deberia invalidar la conexion verificada al cambiar un filtro', () => {
+      // 1. Arrange
+      const store = buildVerifiedStore();
+
+      // 2. Act
+      store.patchFilters({ subjectFilter: 'Notiweb' });
+
+      // 3. Assert: un filtro no interviene en la conexion; obligar a reprobarla
+      // por escribir un asunto seria ruido, no seguridad.
+      expect(store.connectionVerified).toBe(true);
+      expect(store.isConfigValid).toBe(true);
+    });
+
+    it('4bis.5 SI deberia invalidarla al cambiar un campo de conexion', () => {
+      // 1. Arrange
+      const store = buildVerifiedStore();
+
+      // 2. Act
+      store.patchConfig({ host: 'otro.servidor.com' });
+
+      // 3. Assert: contraste con 4bis.4, que es lo que da sentido a la
+      // separacion entre `patchFilters` y `patchConfig`.
+      expect(store.connectionVerified).toBe(false);
+      expect(store.isConfigValid).toBe(false);
+    });
+  });
+
+  describe('4ter. Hidratacion desde un nodo guardado', () => {
+    /** Nodo tal y como viene en el `pipeline_schema` de un flujo existente. */
+    const buildSavedNode = (params: Record<string, unknown> = {}) => ({
+      outputNamespace: 'raw_email',
+      params: {
+        host: VALID_HOST,
+        port: 993,
+        secure: true,
+        user: VALID_USER,
+        passwordEnvKey: VALID_ENV_KEY,
+        mailbox: 'INBOX',
+        pollIntervalMs: 60_000,
+        unreadOnly: true,
+        ...params,
+      },
+    });
+
+    it('4ter.1 deberia reproducir los params originales (ida y vuelta)', () => {
+      // 1. Arrange
+      const store = useTriggerImapStore(NODE_ID);
+      const node = buildSavedNode({
+        fromFilter: 'redaccion@noticias.es',
+        subjectFilter: 'Notiweb',
+      });
+
+      // 2. Act
+      store.hydrateFromNode(node);
+
+      // 3. Assert: el contrato del registro es que hidratar y volver a serializar
+      // devuelva lo mismo. Si no, editar un flujo perderia campos en silencio.
+      expect(store.toNodeParams()).toEqual(node.params);
+    });
+
+    it('4ter.2 deberia reponer los filtros que el esquema omite', () => {
+      // 1. Arrange: `toNodeParams()` OMITE los filtros vacios, asi que un nodo
+      // sin filtrar no trae esas claves.
+      const store = useTriggerImapStore(NODE_ID);
+
+      // 2. Act
+      store.hydrateFromNode(buildSavedNode());
+
+      // 3. Assert: `''` y no `undefined`, que dejaria el `<q-input>` como campo
+      // descontrolado en Vue.
+      expect(store.config.fromFilter).toBe('');
+      expect(store.config.subjectFilter).toBe('');
+    });
+
+    it('4ter.3 deberia dar la configuracion por verificada', () => {
+      // 1. Arrange
+      const store = useTriggerImapStore(NODE_ID);
+
+      // 2. Act
+      store.hydrateFromNode(buildSavedNode());
+
+      // 3. Assert: ya supero la prueba cuando el flujo se creo; volver a
+      // exigirla obligaria a reprobar el buzon por cambiar una palabra.
+      expect(store.connectionVerified).toBe(true);
+      expect(store.isConfigValid).toBe(true);
+    });
+
+    it('4ter.4 deberia recurrir a los defaults ante un esquema incompleto', () => {
+      // 1. Arrange: la columna es `jsonb` y pudo escribirse por SQL directo.
+      const store = useTriggerImapStore(NODE_ID);
+
+      // 2. Act
+      store.hydrateFromNode({ outputNamespace: 'raw_email', params: {} });
+
+      // 3. Assert
+      expect(store.config.port).toBe(DEFAULT_IMAP_PORT);
+      expect(store.config.mailbox).toBe(DEFAULT_MAILBOX);
+      expect(store.config.pollIntervalMs).toBe(DEFAULT_POLL_INTERVAL_MS);
+      expect(store.config.host).toBe('');
     });
   });
 

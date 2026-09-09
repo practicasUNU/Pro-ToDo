@@ -12,6 +12,7 @@ import type {
   AssembledPipelineSchema,
   PipelineSummary,
   WizardStep,
+  WorkflowDetail,
   WorkflowTemplateSummary,
 } from '@/types/pipeline';
 
@@ -41,6 +42,17 @@ export const useFlujoDraftStore = defineStore('flujoDraft', () => {
    */
   const availableTemplates = ref<WorkflowTemplateSummary[]>([]);
   const selectedTemplateId = ref<string | null>(null);
+
+  /**
+   * Flujo que se esta editando, o `null` en un alta.
+   *
+   * Es lo unico que distingue los dos modos del asistente. Vive aqui y no en la
+   * pagina para que `assembleAndSaveWorkflow` pueda decidir entre crear y
+   * actualizar sin que la vista le pase una bandera: si la decision viviera en
+   * la vista, un segundo anfitrion (el banco de pruebas) podria olvidarla y
+   * duplicar el flujo en vez de editarlo.
+   */
+  const editingWorkflowId = ref<string | null>(null);
   const pipelineTopology = ref<WizardStep[]>([]);
 
   /** Cursor del stepper: indice dentro de `pipelineTopology`. */
@@ -151,6 +163,83 @@ export const useFlujoDraftStore = defineStore('flujoDraft', () => {
     // el mapeador necesita saber que namespaces existen ANTES de que el usuario
     // llegue a su paso, o su primera validacion se haria contra una lista vacia.
     syncUpstreamNamespaces();
+  };
+
+  /**
+   * Carga un flujo YA GUARDADO en el borrador del asistente.
+   *
+   * Hermano de `selectTemplate` y con su misma disciplina: resetea los stores de
+   * nodo antes de nada, clona campo a campo (nunca `structuredClone`, que
+   * revienta con el Proxy reactivo de Vue), deja el cursor en el primer paso y
+   * sincroniza los namespaces aguas arriba al final.
+   *
+   * La diferencia esta en el origen de los datos. `selectTemplate` toma una
+   * topologia VACIA de una plantilla del catalogo; esto toma una topologia CON
+   * VALORES y los reparte a cada store con `hydrateFromNode`. El orden sale de
+   * `topology`, que el backend ya devuelve recorrido desde `entrypoint`: aqui no
+   * se vuelve a caminar el grafo, porque una segunda implementacion del recorrido
+   * es una segunda implementacion de la que divergir.
+   *
+   * Un flujo sin `pipelineSchema` (borrador a medio crear) se hidrata igual: la
+   * topologia viene vacia y el asistente no muestra pasos, que es lo correcto.
+   */
+  const hydrateForEdit = (workflow: WorkflowDetail): void => {
+    resetNodeStores();
+
+    editingWorkflowId.value = workflow.id;
+    selectedTemplateId.value = workflow.templateId;
+    pipelineTopology.value = workflow.topology.map((step) =>
+      toWizardStep({
+        nodeId: step.nodeId,
+        nodeType: step.nodeType,
+        outputNamespace: step.outputNamespace,
+      }),
+    );
+    activeStep.value = 0;
+
+    const nodes = workflow.pipelineSchema?.nodes ?? {};
+
+    pipelineTopology.value.forEach((step) => {
+      const node = nodes[step.nodeId];
+
+      // Un nodo presente en la topologia pero ausente del mapa seria un esquema
+      // incoherente; se deja el store en su estado inicial en vez de reventar,
+      // y el paso aparecera invalido, que es el aviso correcto para el operador.
+      if (node === undefined) return;
+
+      resolveNodeStore(step.nodeType, step.nodeId)?.hydrateFromNode({
+        outputNamespace: node.outputNamespace,
+        params: node.params,
+      });
+    });
+
+    syncUpstreamNamespaces();
+  };
+
+  /**
+   * Trae un flujo del backend y lo carga en el borrador.
+   *
+   * Es la accion que consume la vista. `hydrateForEdit` queda como
+   * transformacion PURA y sincrona —sin red, testeable con un objeto a mano— y
+   * este metodo pone la peticion: la cadena obligatoria es componente -> accion
+   * de Pinia -> servicio (`frontend-architecture.md` §2), y un `.vue` tiene
+   * prohibido importar un servicio directamente.
+   *
+   * No captura el error: el store solo garantiza el `finally` que apaga
+   * `isLoading`, y es el componente quien decide el mensaje al usuario (§2.1).
+   */
+  const loadWorkflowForEdit = async (workflowId: string): Promise<WorkflowDetail> => {
+    isLoading.value = true;
+
+    try {
+      const workflow = await workflowsService.fetchWorkflow(workflowId);
+
+      hydrateForEdit(workflow);
+
+      return workflow;
+    } finally {
+      isLoading.value = false;
+    }
   };
 
   /**
@@ -280,22 +369,37 @@ export const useFlujoDraftStore = defineStore('flujoDraft', () => {
 
     isLoading.value = true;
 
+    const trimmedDescription = description?.trim() ?? '';
+    const pipelineSchema = assemblePipelineSchema(name);
+
     try {
-      const created = await workflowsService.createWorkflow({
+      const editedId = editingWorkflowId.value;
+
+      if (editedId !== null) {
+        // Edicion. NO viaja `active`: habilitar un flujo es competencia del
+        // interruptor del catalogo, y colarlo aqui haria que guardar un cambio
+        // de filtro lo pusiera en produccion sin pedirlo.
+        //
+        // Tampoco viaja `templateId`: el maestro del que nacio un flujo es un
+        // hecho historico y `UpdateWorkflowDto` no declara ese campo.
+        return await workflowsService.updateWorkflow(editedId, {
+          name,
+          description: trimmedDescription,
+          pipelineSchema,
+        });
+      }
+
+      return await workflowsService.createWorkflow({
         name,
         // `exactOptionalPropertyTypes`: la clave se omite en vez de enviarse
         // como `undefined`, que el DTO backend rechazaria.
-        ...(description !== undefined && description.trim() !== ''
-          ? { description: description.trim() }
-          : {}),
-        pipelineSchema: assemblePipelineSchema(name),
+        ...(trimmedDescription !== '' ? { description: trimmedDescription } : {}),
+        pipelineSchema,
         // Trazabilidad de la procedencia. El grafo viaja COPIADO en
         // `pipelineSchema`, asi que editar la plantilla despues no altera este
         // flujo. La clave se omite si el flujo no parte de ninguna.
         ...(selectedTemplateId.value !== null ? { templateId: selectedTemplateId.value } : {}),
       });
-
-      return created;
     } finally {
       isLoading.value = false;
     }
@@ -323,6 +427,9 @@ export const useFlujoDraftStore = defineStore('flujoDraft', () => {
   const resetDraft = (): void => {
     resetNodeStores();
 
+    // Sin esto, abandonar una edicion y empezar un alta guardaria el flujo nuevo
+    // ENCIMA del que se estaba editando.
+    editingWorkflowId.value = null;
     selectedTemplateId.value = null;
     pipelineTopology.value = [];
     activeStep.value = 0;
@@ -348,6 +455,9 @@ export const useFlujoDraftStore = defineStore('flujoDraft', () => {
     resetNodeStores,
     loadAvailableTemplates,
     selectTemplate,
+    editingWorkflowId,
+    hydrateForEdit,
+    loadWorkflowForEdit,
     goToNextStep,
     goToPreviousStep,
     resetDraft,

@@ -9,6 +9,8 @@ import { NodeType } from '@core/fsm/types/pipeline-schema.types';
 
 import { WorkflowsService } from './workflows.service';
 
+import { DEFAULT_MOCK_NAMESPACES } from './dto/execute-test-workflow.dto';
+
 import type { CreateWorkflowDto } from './dto/create-workflow.dto';
 
 import type { PipelineSchemaDto } from '@core/fsm/dto/pipeline-schema.dto';
@@ -25,8 +27,8 @@ const AUTHOR_ID = '9c1f7b52-4d3a-4e6b-8f2c-1a0b9d8e7f60';
 const TEMPLATE_ID = '5e2d1c4b-7a89-4f30-b1c2-6d5e4f3a2b10';
 const MAPPER_NODE_ID = 'nodo_mapeador';
 
-/** Namespaces que el disparador manual siembra en el contexto. */
-const INITIAL_PAYLOAD = {
+/** Namespaces simulados que el despacho manual siembra en el contexto. */
+const MOCK_DATA = {
   parsed_email: {
     clean_title: 'Avance en Computacion Cuantica',
     image_path: '/2026/09/laboratorio.jpg',
@@ -75,7 +77,7 @@ const buildExecution = (
   currentState: ExecutionState.EXITOSO,
   activeCursor: null,
   contextPayload: {
-    ...INITIAL_PAYLOAD,
+    ...MOCK_DATA,
     rendered_html: {
       compiled_markup: '<h1>Avance en Computacion Cuantica</h1>',
     },
@@ -132,7 +134,7 @@ const buildHarness = (): ServiceHarness => {
     createExecution: jest.fn().mockResolvedValue(
       buildExecution({
         currentState: ExecutionState.INACTIVO,
-        contextPayload: INITIAL_PAYLOAD,
+        contextPayload: MOCK_DATA,
       }),
     ),
     executeWorkflow: jest.fn().mockResolvedValue(buildExecution()),
@@ -156,54 +158,95 @@ const buildHarness = (): ServiceHarness => {
   return { service, repository, validator, engine, templates };
 };
 
-describe('WorkflowsService (despacho manual, Camino B)', () => {
+describe('WorkflowsService (despacho manual de pruebas, Camino B)', () => {
   describe('1. Caso feliz', () => {
     it('1.1 deberia sembrar los namespaces iniciales y devolver la ejecucion EXITOSO', async () => {
       // 1. Arrange
       const { service, engine } = buildHarness();
 
       // 2. Act
-      const response = await service.runWorkflowTest(WORKFLOW_ID, {
-        initialPayload: INITIAL_PAYLOAD,
+      const response = await service.executeTest(WORKFLOW_ID, {
+        mockData: MOCK_DATA,
       });
 
       // 3. Assert
       expect(engine.createExecution).toHaveBeenCalledWith(
         WORKFLOW_ID,
-        INITIAL_PAYLOAD,
+        MOCK_DATA,
       );
       expect(response).toEqual({
         executionId: EXECUTION_ID,
-        finalState: ExecutionState.EXITOSO,
+        workflowId: WORKFLOW_ID,
+        status: ExecutionState.EXITOSO,
         activeCursor: null,
         context: buildExecution().contextPayload,
       });
     });
 
-    it('1.2 deberia despachar con contexto vacio si no llega initialPayload', async () => {
+    it('1.2 deberia aplicar el fixture estandar de raw_email si no llega mockData', async () => {
       // 1. Arrange
       const { service, engine } = buildHarness();
 
       // 2. Act
-      await service.runWorkflowTest(WORKFLOW_ID, {});
+      await service.executeTest(WORKFLOW_ID, {});
 
-      // 3. Assert
-      expect(engine.createExecution).toHaveBeenCalledWith(WORKFLOW_ID, {});
+      // 3. Assert: sin fixture el contexto arrancaria a cero y el mapeador
+      // fallaria por `missingFields`, que no es el fallo que la prueba busca.
+      expect(engine.createExecution).toHaveBeenCalledWith(
+        WORKFLOW_ID,
+        DEFAULT_MOCK_NAMESPACES,
+      );
     });
 
-    it('1.3 NO deberia pasar el payload tambien como initialPayload del motor', async () => {
+    it('1.2a deberia mantener el fixture alineado con la salida real del nodo IMAP', async () => {
+      // 1. Arrange + 2. Act: el fixture es una constante, no hay que despachar.
+
+      // 3. Assert: si el fixture se desvia de `ImapTriggerOutput`, una plantilla
+      // escrita contra el nodo real deja de renderizar en modo prueba, que es
+      // exactamente lo que el despacho de pruebas deberia detectar y no causar.
+      // Las cinco claves son planas y el cuerpo viaja como `text`, nunca como
+      // marcado: el nodo real no emite HTML a proposito.
+      expect(Object.keys(DEFAULT_MOCK_NAMESPACES.raw_email).sort()).toEqual([
+        'date',
+        'from',
+        'message_id',
+        'subject',
+        'text',
+      ]);
+    });
+
+    it('1.2b NO deberia mezclar el fixture por defecto con el mockData recibido', async () => {
+      // 1. Arrange
+      const { service, engine } = buildHarness();
+
+      // 2. Act
+      await service.executeTest(WORKFLOW_ID, { mockData: MOCK_DATA });
+
+      // 3. Assert: sustitucion, no merge. Colar `raw_email` sin que se pida
+      // enmascararia un `missingFields` legitimo de la plantilla.
+      expect(engine.createExecution).toHaveBeenCalledWith(
+        WORKFLOW_ID,
+        MOCK_DATA,
+      );
+      const [, seeded] = engine.createExecution.mock.calls[0];
+      expect(seeded).not.toHaveProperty('raw_email');
+    });
+
+    it('1.3 deberia omitir el disparador y NO duplicar el payload como initialPayload', async () => {
       // 1. Arrange: duplicarlo lo dejaria ademas bajo el namespace `trigger`
       const { service, engine } = buildHarness();
 
       // 2. Act
-      await service.runWorkflowTest(WORKFLOW_ID, {
-        initialPayload: INITIAL_PAYLOAD,
+      await service.executeTest(WORKFLOW_ID, {
+        mockData: MOCK_DATA,
       });
 
-      // 3. Assert
+      // 3. Assert: sin `skipNodeTypes` el nodo TRIGGER_IMAP abriria una
+      // conexion IMAP real y pisaria con su resultado el `mockData` sembrado.
       expect(engine.executeWorkflow).toHaveBeenCalledWith(
         EXECUTION_ID,
         buildSchema(),
+        { skipNodeTypes: [NodeType.TRIGGER_IMAP] },
       );
     });
 
@@ -218,10 +261,10 @@ describe('WorkflowsService (despacho manual, Camino B)', () => {
       );
 
       // 2. Act
-      const response = await service.runWorkflowTest(WORKFLOW_ID, {});
+      const response = await service.executeTest(WORKFLOW_ID, {});
 
       // 3. Assert: un flujo detenido no es un error HTTP; es un 200 con estado
-      expect(response.finalState).toBe(ExecutionState.PAUSADO);
+      expect(response.status).toBe(ExecutionState.PAUSADO);
       expect(response.activeCursor).toBe(MAPPER_NODE_ID);
     });
   });
@@ -234,7 +277,7 @@ describe('WorkflowsService (despacho manual, Camino B)', () => {
 
       // 2. Act + 3. Assert
       await expect(
-        service.runWorkflowTest(WORKFLOW_ID, {}),
+        service.executeTest(WORKFLOW_ID, {}),
       ).rejects.toBeInstanceOf(NotFoundException);
       expect(validator.validateSchema).not.toHaveBeenCalled();
       expect(engine.createExecution).not.toHaveBeenCalled();
@@ -249,7 +292,7 @@ describe('WorkflowsService (despacho manual, Camino B)', () => {
 
       // 2. Act + 3. Assert
       await expect(
-        service.runWorkflowTest(WORKFLOW_ID, {}),
+        service.executeTest(WORKFLOW_ID, {}),
       ).rejects.toBeInstanceOf(BadRequestException);
       expect(engine.createExecution).not.toHaveBeenCalled();
     });
@@ -263,9 +306,27 @@ describe('WorkflowsService (despacho manual, Camino B)', () => {
 
       // 2. Act + 3. Assert: el orden importa — validar ANTES de tocar la BD
       await expect(
-        service.runWorkflowTest(WORKFLOW_ID, {}),
+        service.executeTest(WORKFLOW_ID, {}),
       ).rejects.toBeInstanceOf(BadRequestException);
       expect(engine.createExecution).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('2b. Aislamiento del modo prueba', () => {
+    it('2b.1 NO deberia omitir ningun nodo en el despacho automatico', async () => {
+      // 1. Arrange
+      const { service, engine } = buildHarness();
+
+      // 2. Act
+      await service.runAutomaticWorkflow(WORKFLOW_ID);
+
+      // 3. Assert: un disparo automatico SI debe conectarse al buzon; heredar
+      // aqui `skipNodeTypes` dejaria el flujo real sin datos de entrada.
+      expect(engine.executeWorkflow).toHaveBeenCalledWith(
+        EXECUTION_ID,
+        buildSchema(),
+      );
+      expect(engine.createExecution).toHaveBeenCalledWith(WORKFLOW_ID, {});
     });
   });
 
@@ -279,7 +340,7 @@ describe('WorkflowsService (despacho manual, Camino B)', () => {
 
       // 2. Act + 3. Assert
       await expect(
-        service.runWorkflowTest(WORKFLOW_ID, {}),
+        service.executeTest(WORKFLOW_ID, {}),
       ).rejects.toBeInstanceOf(ConflictException);
       expect(engine.executeWorkflow).not.toHaveBeenCalled();
     });
@@ -880,6 +941,71 @@ describe('WorkflowsService (edicion y habilitacion de flujos)', () => {
       //    activacion. Un flujo a medio configurar debe poder desactivarse.
       expect(summary.active).toBe(false);
       expect(summary.topology).toEqual([]);
+    });
+  });
+});
+
+describe('WorkflowsService (detalle para el asistente de edicion)', () => {
+  describe('12. Lectura del grafo completo', () => {
+    it('12.1 deberia devolver la topologia ordenada Y el grafo con sus params', async () => {
+      // 1. Arrange
+      const { service } = buildHarness();
+
+      // 2. Act
+      const detail = await service.findOneDetail(WORKFLOW_ID);
+
+      // 3. Assert: las dos vistas del mismo grafo. `topology` da el ORDEN ya
+      // resuelto; `pipelineSchema` da los VALORES que el formulario hidrata.
+      expect(detail.id).toBe(WORKFLOW_ID);
+      expect(detail.topology).toEqual([
+        {
+          nodeId: MAPPER_NODE_ID,
+          nodeType: NodeType.MAPEADOR_PLANTILLA,
+          outputNamespace: 'rendered_html',
+        },
+      ]);
+      expect(detail.pipelineSchema).toEqual(buildSchema());
+    });
+
+    it('12.2 deberia exponer los params que el listado elimina', async () => {
+      // 1. Arrange
+      const { service } = buildHarness();
+
+      // 2. Act
+      const detail = await service.findOneDetail(WORKFLOW_ID);
+      const summaries = await service.findSelectablePipelines();
+
+      // 3. Assert: es la diferencia que justifica que sean dos endpoints. Sin
+      // los `params` el asistente de edicion no tendria nada que hidratar.
+      expect(JSON.stringify(detail.pipelineSchema)).toContain(TEMPLATE_ID);
+      expect(JSON.stringify(summaries)).not.toContain(TEMPLATE_ID);
+    });
+
+    it('12.3 deberia devolver pipelineSchema nulo en un flujo a medio crear', async () => {
+      // 1. Arrange
+      const { service, repository } = buildHarness();
+      repository.findOne.mockResolvedValue(
+        buildWorkflow({ pipelineSchema: null }),
+      );
+
+      // 2. Act
+      const detail = await service.findOneDetail(WORKFLOW_ID);
+
+      // 3. Assert: un borrador del asistente es un estado legitimo; el detalle
+      // debe describirlo, no reventar.
+      expect(detail.pipelineSchema).toBeNull();
+      expect(detail.topology).toEqual([]);
+    });
+
+    it('12.4 deberia lanzar NotFoundException si el flujo no existe', async () => {
+      // 1. Arrange
+      const { service, repository } = buildHarness();
+      repository.findOne.mockResolvedValue(null);
+
+      // 2. Act & 3. Assert
+      await expect(service.findOneDetail(WORKFLOW_ID)).rejects.toBeInstanceOf(
+        NotFoundException,
+      );
     });
   });
 });

@@ -11,12 +11,17 @@ import { PipelineValidatorService } from '@core/fsm/services/pipeline-validator.
 import { buildOrderedTopology } from '@core/fsm/utils/pipeline-topology.util';
 import { WorkflowTemplatesService } from '@modules/workflow-templates/workflow-templates.service';
 
+import { NodeType } from '@core/fsm/types/pipeline-schema.types';
+
+import { DEFAULT_MOCK_NAMESPACES } from './dto/execute-test-workflow.dto';
+
 import { Workflow } from './entities/workflow.entity';
 
 import type { CreateWorkflowDto } from './dto/create-workflow.dto';
 import type { UpdateWorkflowDto } from './dto/update-workflow.dto';
 import type { PipelineSummaryResponseDto } from './dto/pipeline-summary-response.dto';
-import type { RunWorkflowTestDto } from './dto/run-workflow-test.dto';
+import type { WorkflowDetailResponseDto } from './dto/workflow-detail-response.dto';
+import type { ExecuteTestWorkflowDto } from './dto/execute-test-workflow.dto';
 import type { WorkflowExecutionResponseDto } from './dto/workflow-execution-response.dto';
 
 import type { Repository } from 'typeorm';
@@ -40,6 +45,19 @@ import type { Repository } from 'typeorm';
  * `ConflictException` de RNF-09 a 409, que es exactamente el contrato del
  * endpoint.
  */
+/**
+ * Tipos de nodo que el despacho de PRUEBAS no ejecuta.
+ *
+ * Un disparador abre una conexion real por red y escribe su propio resultado en
+ * `raw_email`, pisando el `mockData` que la prueba acaba de sembrar. Omitirlo es
+ * lo que hace que este camino sea reproducible y no dependa de que haya un
+ * correo sin leer en el buzon.
+ *
+ * Solo se aplica aqui: `runAutomaticWorkflow` SI ejecuta el disparador, porque
+ * es de donde saca el correo que dispara el flujo.
+ */
+const TEST_MODE_SKIPPED_NODE_TYPES: readonly NodeType[] = [NodeType.TRIGGER_IMAP];
+
 @Injectable()
 export class WorkflowsService {
   private readonly logger = new Logger(WorkflowsService.name);
@@ -53,19 +71,21 @@ export class WorkflowsService {
   ) {}
 
   /**
-   * Dispara un flujo de principio a fin y devuelve el checkpoint resultante.
+   * Dispara un flujo de principio a fin con datos simulados y devuelve el
+   * checkpoint resultante.
    *
    * @param workflowId Identificador de la fila de `flujos`.
-   * @param runWorkflowTestDto Namespaces iniciales del contexto.
+   * @param executeTestWorkflowDto Namespaces iniciales; si no trae `mockData`
+   *        se aplica `DEFAULT_MOCK_NAMESPACES`.
    * @throws NotFoundException Si el flujo no existe.
    * @throws BadRequestException Si no tiene esquema o el esquema no es integro.
    * @throws ConflictException Por dos vias distintas: la guarda de cupo de
    *         `createExecution`, o la perdida de la carrera contra el mutex
    *         `idx_flujo_activo` ya dentro de `executeWorkflow` (RNF-09).
    */
-  public async runWorkflowTest(
+  public async executeTest(
     workflowId: string,
-    runWorkflowTestDto: RunWorkflowTestDto,
+    executeTestWorkflowDto: ExecuteTestWorkflowDto,
   ): Promise<WorkflowExecutionResponseDto> {
     const workflow = await this.findOne(workflowId);
 
@@ -79,27 +99,32 @@ export class WorkflowsService {
 
     // La guarda de concurrencia (RNF-09) vive aqui dentro: si el flujo ya tiene
     // una instancia EN_PROCESO, esto lanza 409 y no se crea fila alguna.
+    // Sustitucion, no mezcla: si el operador manda `mockData` es porque quiere
+    // ESE contexto exacto, y fundirlo con el fixture le colaria namespaces que
+    // no pidio y que enmascararian un `missingFields` legitimo.
     const execution = await this.fsmEngineService.createExecution(
       workflow.id,
-      runWorkflowTestDto.initialPayload ?? {},
+      executeTestWorkflowDto.mockData ?? DEFAULT_MOCK_NAMESPACES,
     );
 
     this.logger.log(
       `Despacho manual del flujo "${workflow.name}" (${workflow.id}) | ejecucion=${execution.executionId}`,
     );
 
-    // Sin `initialPayload` como tercer argumento a proposito: los namespaces ya
+    // Sin `initialPayload` en las opciones a proposito: los namespaces ya
     // quedaron sembrados en `contexto_acumulado` por `createExecution`, y
     // `buildContext()` los restaura desde ahi. Pasarlos tambien aqui los
     // duplicaria bajo el namespace `trigger`, que ningun nodo espera.
     const finished = await this.fsmEngineService.executeWorkflow(
       execution.executionId,
       schema,
+      { skipNodeTypes: TEST_MODE_SKIPPED_NODE_TYPES },
     );
 
     return {
       executionId: finished.executionId,
-      finalState: finished.currentState,
+      workflowId: workflow.id,
+      status: finished.currentState,
       activeCursor: finished.activeCursor,
       context: finished.contextPayload,
     };
@@ -108,15 +133,18 @@ export class WorkflowsService {
   /**
    * Dispara un flujo desde un disparador AUTOMATICO (Cron, IMAP).
    *
-   * Se diferencia de `runWorkflowTest` en dos puntos, y por eso es un metodo
+   * Se diferencia de `executeTest` en tres puntos, y por eso es un metodo
    * aparte en vez de una bandera:
    *
    * 1. EXIGE `activo = true`. La columna existe precisamente para gobernar los
    *    disparadores automaticos; el Camino B la ignora a proposito para poder
    *    probar un flujo antes de habilitarlo.
-   * 2. NO siembra `initialPayload`. El contexto lo aporta el propio nodo
-   *    disparador (`TRIGGER_IMAP` escribe el correo en su `outputNamespace`),
-   *    asi que el namespace reservado `trigger` queda sin usar en este camino.
+   * 2. NO siembra contexto simulado. Lo aporta el propio nodo disparador
+   *    (`TRIGGER_IMAP` escribe el correo en su `outputNamespace`), asi que el
+   *    namespace reservado `trigger` queda sin usar en este camino.
+   * 3. NO omite ningun tipo de nodo. Ejecutar el disparador de verdad es
+   *    justamente el motivo de este camino; pasarle
+   *    `TEST_MODE_SKIPPED_NODE_TYPES` dejaria el flujo sin datos de entrada.
    *
    * @param flowId Identificador de la fila de `flujos`.
    * @returns El identificador de la ejecucion que quedo registrada.
@@ -352,6 +380,33 @@ export class WorkflowsService {
                 `El flujo "${workflow.id}" apunta al nodo inexistente "${orphanNodeId}": la topologia se truncara ahi.`,
               ),
             ),
+    };
+  }
+
+  /**
+   * Un flujo con su topologia ordenada Y su grafo completo.
+   *
+   * Es la unica lectura que devuelve los `params` de los nodos. Existe para el
+   * asistente de EDICION: sin ellos no hay nada que hidratar, y guardar
+   * reescribiria el grafo con los valores en blanco del formulario.
+   *
+   * Se devuelven las dos vistas del mismo grafo a proposito. El cliente usa
+   * `topology` para el ORDEN —ya resuelto aqui por `buildOrderedTopology`, con
+   * su defensa contra ciclos— y `pipelineSchema` para los VALORES. Asi el
+   * frontend no reimplementa el recorrido de `entrypoint`/`nextStep`, que es
+   * justo donde una segunda implementacion divergiria de esta.
+   *
+   * @throws NotFoundException Si no existe ninguna fila con ese `id_flujo`.
+   */
+  public async findOneDetail(id: string): Promise<WorkflowDetailResponseDto> {
+    const workflow = await this.findOne(id);
+
+    return {
+      ...this.toPipelineSummary(workflow),
+      // El cast es el mismo que usa `WorkflowTemplatesService.findOne`: la
+      // columna es `jsonb` y el DTO la expone sin tipar, porque su forma ya la
+      // garantizo `PipelineValidatorService` al escribirla.
+      pipelineSchema: workflow.pipelineSchema as Record<string, unknown> | null,
     };
   }
 

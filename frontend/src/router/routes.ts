@@ -49,6 +49,18 @@ const routes: RouteRecordRaw[] = [
         // estaticas, asi que no hay riesgo de que una capture a la otra.
       },
       {
+        path: 'flujos/:id/editar',
+        component: () => import('@/pages/WizardPage.vue'),
+        // MISMA pagina que el alta, en modo edicion. Comparten componente a
+        // proposito: duplicar el stepper daria dos asistentes que mantener
+        // sincronizados, y el segundo se quedaria atras en cuanto aparezca un
+        // tipo de nodo nuevo. El modo lo decide `route.params.id`.
+        //
+        // 'flujos/nuevo' se declara ANTES: una ruta estatica gana siempre a una
+        // dinamica en vue-router, asi que '/flujos/nuevo' no cae aqui con
+        // id="nuevo".
+      },
+      {
         path: 'plantillas-flujo',
         component: () => import('@/pages/workflow-templates/WorkflowTemplatesPage.vue'),
         // SIN requiresAdmin a proposito, aunque las ESCRITURAS del backend sean

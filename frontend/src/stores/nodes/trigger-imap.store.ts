@@ -3,6 +3,8 @@ import { computed, ref } from 'vue';
 
 import * as triggerImapService from '@services/nodes/trigger-imap.service';
 
+import type { HydratableNode } from '@stores/nodes/node-store-registry';
+
 import type { CheckImapPayload, CheckImapResult } from '@/types/pipeline';
 
 /** Puerto IMAPS por defecto (TLS implicito), el mismo que asume el backend. */
@@ -10,6 +12,13 @@ export const DEFAULT_IMAP_PORT = 993;
 
 /** Buzon por defecto. */
 export const DEFAULT_MAILBOX = 'INBOX';
+
+/**
+ * Por defecto solo disparan los correos no leidos, igual que el backend.
+ *
+ * Es lo que evita que el primer sondeo reprocese el historico entero del buzon.
+ */
+export const DEFAULT_UNREAD_ONLY = true;
 
 /** Periodo de sondeo por defecto: un minuto. */
 export const DEFAULT_POLL_INTERVAL_MS = 60_000;
@@ -34,8 +43,21 @@ export const MIN_POLL_INTERVAL_MS = 30_000;
  */
 export const PASSWORD_ENV_KEY_PATTERN = /^IMAP_[A-Z0-9_]*PASSWORD$/;
 
+/**
+ * Criterios de disparo del nodo.
+ *
+ * Van aparte de la conexion a proposito: no intervienen en la comprobacion de
+ * credenciales, y cambiarlos no debe invalidar una prueba de conexion correcta
+ * (ver `patchFilters`).
+ */
+export interface TriggerImapFilters {
+  fromFilter: string;
+  subjectFilter: string;
+  unreadOnly: boolean;
+}
+
 /** `params` que el nodo aporta al `pipeline_schema`. */
-export interface TriggerImapConfig {
+export interface TriggerImapConfig extends TriggerImapFilters {
   host: string;
   port: number;
   secure: boolean;
@@ -44,6 +66,20 @@ export interface TriggerImapConfig {
   mailbox: string;
   pollIntervalMs: number;
 }
+
+/**
+ * Lee una cadena de los `params` crudos del esquema.
+ *
+ * La columna es `jsonb` y pudo escribirse por SQL directo, asi que un campo
+ * puede faltar o venir con otro tipo. Se normaliza a `''` en vez de propagar
+ * `undefined`, que dejaria el `<q-input>` como campo descontrolado en Vue.
+ */
+const asText = (value: unknown): string =>
+  typeof value === 'string' ? value : '';
+
+/** Lee un numero de los `params`, con el default del backend como respaldo. */
+const asNumber = (value: unknown, fallback: number): number =>
+  typeof value === 'number' && Number.isFinite(value) ? value : fallback;
 
 /** Configuracion inicial; se reutiliza en `resetConfig`. */
 const buildInitialConfig = (): TriggerImapConfig => ({
@@ -54,6 +90,9 @@ const buildInitialConfig = (): TriggerImapConfig => ({
   passwordEnvKey: '',
   mailbox: DEFAULT_MAILBOX,
   pollIntervalMs: DEFAULT_POLL_INTERVAL_MS,
+  fromFilter: '',
+  subjectFilter: '',
+  unreadOnly: DEFAULT_UNREAD_ONLY,
 });
 
 /** Prefijo del id de Pinia; el sufijo es el `nodeId` del `pipeline_schema`. */
@@ -137,6 +176,18 @@ const triggerImapSetup = () => {
   };
 
   /**
+   * Aplica un cambio en los criterios de disparo SIN invalidar la verificacion.
+   *
+   * Deliberadamente separado de `patchConfig`: un filtro de remitente o de
+   * asunto no interviene en la conexion, asi que obligar a volver a probar el
+   * buzon por escribir un asunto seria ruido, no seguridad. Lo que `patchConfig`
+   * protege es que no se avance con credenciales sin comprobar.
+   */
+  const patchFilters = (patch: Partial<TriggerImapFilters>): void => {
+    config.value = { ...config.value, ...patch };
+  };
+
+  /**
    * Prueba las credenciales contra el servidor de correo.
    *
    * No captura la excepcion: el store solo garantiza el `finally` que apaga
@@ -167,10 +218,67 @@ const triggerImapSetup = () => {
    * el mismo motivo que en `checkPayload`: lo que se guarda debe ser exactamente
    * lo que se probo.
    *
+   * Ya NO es un alias de `checkPayload`, y la diferencia es intencionada:
+   * `/wizard/check-imap` valida con `forbidNonWhitelisted`, de modo que colar un
+   * filtro en esa peticion devolveria un 400. Los filtros son `params` del nodo,
+   * no parte de la comprobacion de credenciales.
+   *
+   * Un filtro vacio se OMITE en vez de enviarse como `''`: el DTO del backend lo
+   * rechaza con `@IsNotEmpty()` porque en IMAP SEARCH una cadena vacia no
+   * significa "sin filtro" sino "coincide con todo".
+   *
    * `outputNamespace` NO va aqui: en el esquema es propiedad del nodo, no de sus
    * `params`, y el agregador lo toma de la topologia.
    */
-  const toNodeParams = (): Record<string, unknown> => ({ ...checkPayload.value });
+  const toNodeParams = (): Record<string, unknown> => {
+    const fromFilter = config.value.fromFilter.trim();
+    const subjectFilter = config.value.subjectFilter.trim();
+
+    return {
+      ...checkPayload.value,
+      unreadOnly: config.value.unreadOnly,
+      ...(fromFilter !== '' ? { fromFilter } : {}),
+      ...(subjectFilter !== '' ? { subjectFilter } : {}),
+    };
+  };
+
+  /**
+   * Carga la configuracion de un nodo ya guardado en el `pipeline_schema`.
+   *
+   * Escribe `config` DIRECTAMENTE y no a traves de `patchConfig`, que invalidaria
+   * la verificacion: aqui no hay nada que invalidar, porque estos valores son
+   * justamente los que ya se probaron cuando el flujo se creo.
+   *
+   * Por eso `connectionVerified` queda en `true`. Un flujo guardado tuvo que
+   * superar la prueba de conexion para llegar a existir, y exigirla otra vez
+   * obligaria a reprobar el buzon para cambiar una palabra de un filtro. La
+   * garantia sigue viva: en cuanto el operador toque un campo de CONEXION,
+   * `patchConfig` la invalida y el asistente vuelve a pedir la prueba;
+   * `patchFilters` no, porque un filtro no afecta a las credenciales.
+   *
+   * Se repone `''` en los filtros ausentes: `toNodeParams()` los OMITE cuando
+   * estan vacios, asi que sin esto el `undefined` del JSON llegaria al `<q-input>`
+   * y el campo quedaria descontrolado.
+   */
+  const hydrateFromNode = (node: HydratableNode): void => {
+    const params = node.params;
+
+    config.value = {
+      host: asText(params.host),
+      port: asNumber(params.port, DEFAULT_IMAP_PORT),
+      secure: params.secure !== false,
+      user: asText(params.user),
+      passwordEnvKey: asText(params.passwordEnvKey),
+      mailbox: asText(params.mailbox) || DEFAULT_MAILBOX,
+      pollIntervalMs: asNumber(params.pollIntervalMs, DEFAULT_POLL_INTERVAL_MS),
+      fromFilter: asText(params.fromFilter),
+      subjectFilter: asText(params.subjectFilter),
+      unreadOnly: params.unreadOnly !== false,
+    };
+
+    connectionVerified.value = true;
+    lastCheckResult.value = null;
+  };
 
   const resetConfig = (): void => {
     config.value = buildInitialConfig();
@@ -188,6 +296,8 @@ const triggerImapSetup = () => {
     checkPayload,
     toNodeParams,
     patchConfig,
+    patchFilters,
+    hydrateFromNode,
     testConnection,
     resetConfig,
   };

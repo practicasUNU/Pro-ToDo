@@ -4,6 +4,19 @@ import { useTriggerImapStore } from '@stores/nodes/trigger-imap.store';
 import { NodeType } from '@/types/pipeline';
 
 /**
+ * Un nodo del `pipeline_schema` tal y como llega del backend, para hidratarlo.
+ *
+ * Se pasa el nodo ENTERO y no solo sus `params` porque los dos campos que un
+ * store necesita restaurar no viven en el mismo sitio: el mapeador guarda
+ * `outputNamespace` en su config, pero en el esquema ese valor es propiedad del
+ * nodo y `toNodeParams()` nunca lo publica (ver el TSDoc de `toNodeParams`).
+ */
+export interface HydratableNode {
+  readonly outputNamespace: string;
+  readonly params: Record<string, unknown>;
+}
+
+/**
  * Contrato minimo que el anfitrion consume de cualquier store de nodo.
  *
  * Deliberadamente estrecho: solo `isConfigValid`. Es lo unico que el asistente
@@ -49,6 +62,25 @@ export interface NodeConfigStore {
    * cualquier store de nodo futuro a implementarlo en vez de dejar la fuga.
    */
   readonly resetConfig: () => void;
+
+  /**
+   * Carga en el estado local los valores de un nodo YA GUARDADO.
+   *
+   * Es la inversa de `toNodeParams()`, y es lo que hace posible editar un flujo
+   * existente en vez de solo crearlo. Sin ella el asistente abriria el
+   * formulario en blanco y guardar borraria la configuracion que el operador
+   * venia a retocar.
+   *
+   * OBLIGATORIO por el mismo motivo que `resetConfig`: un store de nodo futuro
+   * que no lo implemente dejaria un paso del asistente imposible de editar, y un
+   * hueco asi debe ser un error de compilacion y no un descubrimiento en
+   * produccion.
+   *
+   * Contrato de ida y vuelta: `hydrateFromNode(n)` seguido de `toNodeParams()`
+   * debe reproducir `n.params`. Cada store es responsable de reponer lo que su
+   * propio `toNodeParams()` omite.
+   */
+  readonly hydrateFromNode: (node: HydratableNode) => void;
 }
 
 /**

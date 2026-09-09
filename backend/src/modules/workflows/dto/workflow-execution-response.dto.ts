@@ -14,21 +14,27 @@ export class WorkflowExecutionResponseDto {
   readonly executionId: string;
 
   @ApiProperty({
+    description:
+      'Flujo de `flujos` que se despacho. Se devuelve para que el cliente no dependa del id que envio en la ruta',
+  })
+  readonly workflowId: string;
+
+  @ApiProperty({
     enum: ExecutionState,
     description: 'Estado en el que el motor dejo la ejecucion',
   })
-  readonly finalState: ExecutionState;
+  readonly status: ExecutionState;
 
   @ApiProperty({
     description:
-      'Nodo en el que quedo el cursor. Nulo cuando la ejecucion completo el grafo',
+      'Nodo en el que quedo el cursor. Nulo cuando la ejecucion completo el grafo; con PAUSADO o FALLIDO es el nodo culpable',
     nullable: true,
   })
   readonly activeCursor: string | null;
 
   @ApiProperty({
     description:
-      'Volcado de `contexto_acumulado`: los namespaces que dejaron los nodos ejecutados',
+      'Volcado de `contexto_acumulado`: los namespaces que dejaron los nodos ejecutados, incluido `rendered_html.compiled_markup`',
   })
   readonly context: Record<string, Record<string, unknown>>;
 }

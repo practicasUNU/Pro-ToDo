@@ -29,6 +29,11 @@ const PASSWORD_ENV_KEY_HINT =
 
 const POLL_INTERVAL_HINT = `El backend rechaza periodos por debajo de ${MIN_POLL_INTERVAL_MS / 1000} s para no exceder los limites de tasa del proveedor IMAP.`;
 
+const FILTER_HINT = 'Coincidencia por subcadena. Dejalo vacio para no filtrar.';
+
+const UNREAD_ONLY_WARNING =
+  'Con el filtro desactivado el flujo puede volver a procesar un correo ya leido en cada sondeo.';
+
 /** Estado del indicador de conexion, derivado del ultimo resultado del backend. */
 const connectionBadge = computed<{ label: string; classes: string } | null>(() => {
   if (store.connectionVerified) {
@@ -205,6 +210,59 @@ const onTestConnection = async (): Promise<void> => {
           label="Conexion cifrada (TLS implicito)"
           @update:model-value="store.patchConfig({ secure: Boolean($event) })"
         />
+      </div>
+    </div>
+
+    <!-- Filtros de disparo. Separados de la conexion porque no participan en la
+         comprobacion de credenciales: editarlos no invalida una prueba correcta
+         (de ahi `patchFilters` y no `patchConfig`). -->
+    <h3 class="pd-h2 q-mt-lg q-mb-sm">Filtros de disparo</h3>
+    <p class="pd-subtitle q-mb-md">
+      Acotan que correo arranca el flujo. Sin filtros, cualquier mensaje del buzon
+      lo dispara.
+    </p>
+
+    <div class="row q-col-gutter-md">
+      <div class="col-12 col-md-6">
+        <label class="pd-label" for="imap-from-filter">Remitente contiene</label>
+        <q-input
+          id="imap-from-filter"
+          :model-value="store.config.fromFilter"
+          outlined
+          dense
+          clearable
+          class="q-mt-xs"
+          placeholder="redaccion@noticias.es"
+          :hint="FILTER_HINT"
+          @update:model-value="store.patchFilters({ fromFilter: String($event ?? '') })"
+        />
+      </div>
+
+      <div class="col-12 col-md-6">
+        <label class="pd-label" for="imap-subject-filter">Asunto contiene</label>
+        <q-input
+          id="imap-subject-filter"
+          :model-value="store.config.subjectFilter"
+          outlined
+          dense
+          clearable
+          class="q-mt-xs"
+          placeholder="Notiweb"
+          :hint="FILTER_HINT"
+          @update:model-value="store.patchFilters({ subjectFilter: String($event ?? '') })"
+        />
+      </div>
+
+      <div class="col-12">
+        <q-toggle
+          :model-value="store.config.unreadOnly"
+          color="primary"
+          label="Solo correos sin leer"
+          @update:model-value="store.patchFilters({ unreadOnly: Boolean($event) })"
+        />
+        <p v-if="!store.config.unreadOnly" class="pd-subtitle q-mt-xs q-mb-none">
+          {{ UNREAD_ONLY_WARNING }}
+        </p>
       </div>
     </div>
 
