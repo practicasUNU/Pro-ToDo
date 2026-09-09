@@ -371,10 +371,14 @@ body {
   color: var(--pd-shell-text);
 }
 
-// Inactivo NO es un error: es estado neutro, de ahí los tokens de deshabilitado.
+// Inactivo NO es un error: es estado neutro. Consume la superficie subordinada
+// en lugar de los tokens de deshabilitado, que sugerían un control bloqueado —y
+// desde el rediseño de los catálogos (CU-10) el estado ya no es un control sino
+// un indicador. El borde lo separa de la tarjeta, que es de tono cercano.
 .pd-badge--inactive {
-  background: var(--pd-disabled-bg);
-  color: var(--pd-disabled-text);
+  background: var(--pd-surface-muted);
+  color: var(--pd-text-secondary);
+  border: 1px solid var(--pd-border);
 }
 
 // ---- Shell: QHeader + QDrawer (regla §2) ----

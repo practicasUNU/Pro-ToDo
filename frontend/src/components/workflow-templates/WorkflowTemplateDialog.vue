@@ -139,12 +139,23 @@ const onSubmit = async (): Promise<void> => {
             </p>
           </div>
 
-          <q-toggle
-            :model-value="templatesStore.activeDraft.active"
-            color="primary"
-            label="Disponible en el asistente"
-            @update:model-value="templatesStore.patchDraft({ active: $event })"
-          />
+          <!-- Estado SOLO informativo. El interruptor que habia aqui era una
+               tercera via de conmutar `active`, y la unica que se saltaba el
+               temporizador de 5 segundos: guardar el formulario con el toggle
+               apagado retiraba la plantilla sin confirmacion. La conmutacion
+               vive centralizada en la botonera del catalogo (CU-10). El borrador
+               conserva el estado que tenia, asi que guardar no lo altera. -->
+          <div v-if="isEditing" class="row items-center q-gutter-sm">
+            <q-badge
+              class="pd-badge"
+              :class="templatesStore.activeDraft.active ? 'pd-badge--active' : 'pd-badge--inactive'"
+            >
+              {{ templatesStore.activeDraft.active ? 'Activo' : 'Inactivo' }}
+            </q-badge>
+            <span class="pd-subtitle">
+              El estado se cambia desde el catalogo, con la confirmacion correspondiente.
+            </span>
+          </div>
         </q-card-section>
 
         <q-card-actions align="right" class="q-px-md q-pb-md">

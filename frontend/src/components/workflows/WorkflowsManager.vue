@@ -90,14 +90,19 @@ const onWorkflowSaved = (): void => {
 };
 
 /**
- * Habilita el flujo frente a los disparadores automaticos.
+ * Aplica el cambio de estado contra la API.
+ *
+ * UNICO punto que muta el estado, y por eso es privado a las dos acciones de
+ * abajo: no lo invoca ningun control de la tabla directamente. Habilitar entra
+ * por `onActivate` y retirar SOLO por la confirmacion del dialogo, de modo que
+ * no exista ninguna via de desactivar un flujo con un solo clic.
  *
  * El backend revalida el esquema antes de activar y devuelve 400 si el flujo no
- * tiene ninguno, asi que el fallo llega como mensaje concreto y el interruptor
- * se queda donde estaba: el store escribe la respuesta del servidor, no un
- * parche optimista.
+ * tiene ninguno, asi que el fallo llega como mensaje concreto y la fila se queda
+ * como estaba: el store escribe la respuesta del servidor, no un parche
+ * optimista.
  */
-const onToggleActive = async (workflow: PipelineSummary, active: boolean): Promise<void> => {
+const applyActiveState = async (workflow: PipelineSummary, active: boolean): Promise<void> => {
   try {
     await workflowsStore.setActive(workflow.id, active);
     $q.notify({
@@ -114,15 +119,39 @@ const onToggleActive = async (workflow: PipelineSummary, active: boolean): Promi
   }
 };
 
+/**
+ * Habilita el flujo sin confirmacion.
+ *
+ * Asimetria deliberada (Poka-Yoke, CU-10): activar no destruye nada y es
+ * reversible en un clic, asi que interponer un dialogo solo anadiria friccion.
+ * El unico riesgo real —un grafo roto expuesto a los disparadores— lo cubre el
+ * backend, que revalida el esquema antes de habilitar.
+ */
+const onActivate = async (workflow: PipelineSummary): Promise<void> => {
+  await applyActiveState(workflow, true);
+};
+
+/** Abre la confirmacion con temporizador. NO muta nada por si misma. */
 const requestDeactivation = (workflow: PipelineSummary): void => {
   workflowToDeactivate.value = workflow;
   isDeleteDialogOpen.value = true;
 };
 
+/**
+ * Unica via de desactivar un flujo.
+ *
+ * La llama `SafeDeleteModal` tras su cuenta atras de 5 segundos
+ * (`frontend-quasar.md` §4): desactivar corta la ingesta de un flujo en marcha,
+ * y un correo que llega mientras esta retirado no se recupera —queda en el buzon
+ * sin procesar hasta que alguien lo note.
+ *
+ * El estado reactivo lo sincroniza el store con la respuesta del backend, asi
+ * que la tabla y el `q-badge` se repintan sin recargar el catalogo.
+ */
 const confirmDeactivation = async (): Promise<void> => {
   if (!workflowToDeactivate.value) return;
 
-  await onToggleActive(workflowToDeactivate.value, false);
+  await applyActiveState(workflowToDeactivate.value, false);
   workflowToDeactivate.value = null;
 };
 
@@ -200,15 +229,18 @@ onMounted(loadCatalog);
         </q-td>
       </template>
 
+      <!-- La columna de estado solo INFORMA. Antes llevaba un `q-toggle`, que
+           duplicaba la conmutacion con el boton de la botonera y —peor— dejaba
+           desactivar un flujo en marcha con un solo clic, saltandose el
+           temporizador que exige CU-10. -->
       <template #body-cell-status="cellProps">
         <q-td :props="cellProps">
-          <q-toggle
-            :model-value="cellProps.row.active"
-            color="primary"
-            :aria-label="`Habilitar ${cellProps.row.name}`"
-            :disable="workflowsStore.isLoading"
-            @update:model-value="onToggleActive(cellProps.row, $event)"
-          />
+          <q-badge
+            class="pd-badge"
+            :class="cellProps.row.active ? 'pd-badge--active' : 'pd-badge--inactive'"
+          >
+            {{ cellProps.row.active ? 'Activo' : 'Inactivo' }}
+          </q-badge>
           <q-tooltip>
             {{
               cellProps.row.active
@@ -219,6 +251,8 @@ onMounted(loadCatalog);
         </q-td>
       </template>
 
+      <!-- Toda la conmutacion de estado vive AQUI, en un solo control por fila y
+           excluyente: o se ofrece activar, o se ofrece desactivar. -->
       <template #body-cell-actions="cellProps">
         <q-td :props="cellProps" class="q-gutter-x-xs">
           <q-btn
@@ -233,17 +267,38 @@ onMounted(loadCatalog);
             <q-tooltip>Editar flujo</q-tooltip>
           </q-btn>
 
+          <!-- Activar es directo: no destruye nada y es reversible. -->
           <q-btn
-            v-if="cellProps.row.active"
-            class="pd-btn-icon pd-btn-icon--danger"
-            outline
+            v-if="!cellProps.row.active"
+            class="pd-btn-primary"
+            unelevated
             dense
+            no-caps
             size="sm"
-            icon="block"
+            label="Activar"
+            icon-right="play_arrow"
+            :disable="workflowsStore.isLoading"
+            :aria-label="`Activar ${cellProps.row.name}`"
+            @click="onActivate(cellProps.row)"
+          >
+            <q-tooltip>Habilitar frente a los disparadores</q-tooltip>
+          </q-btn>
+
+          <!-- Desactivar es critico y pasa SIEMPRE por la cuenta atras. -->
+          <q-btn
+            v-else
+            class="pd-btn-danger"
+            unelevated
+            dense
+            no-caps
+            size="sm"
+            label="Desactivar"
+            icon-right="block"
+            :disable="workflowsStore.isLoading"
             :aria-label="`Desactivar ${cellProps.row.name}`"
             @click="requestDeactivation(cellProps.row)"
           >
-            <q-tooltip>Desactivar flujo</q-tooltip>
+            <q-tooltip>Requiere confirmacion de 5 segundos</q-tooltip>
           </q-btn>
         </q-td>
       </template>

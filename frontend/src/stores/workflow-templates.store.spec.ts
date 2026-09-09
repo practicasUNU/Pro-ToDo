@@ -294,7 +294,44 @@ describe('useWorkflowTemplatesStore · catalogo de plantillas de flujo', () => {
       expect(store.templates[0]?.name).toBe('Notiweb v2');
     });
 
-    it('3.7 deberia apagar isLoading aunque el guardado falle', async () => {
+    it('3.7 deberia conservar el estado de la plantilla al editarla', async () => {
+      // 1. Arrange: una plantilla RETIRADA que se abre para corregir su grafo.
+      const store = useWorkflowTemplatesStore();
+      store.initDraft(buildDetail({ active: false }));
+      store.patchDraft({ name: 'Notiweb v2' });
+      updateWorkflowTemplate.mockResolvedValue(buildDetail({ active: false }));
+
+      // 2. Act
+      await store.saveDraft();
+
+      // 3. Assert: guardar el formulario NO conmuta la disponibilidad. El
+      //    editor perdio su interruptor a proposito (CU-10): era la unica via de
+      //    retirar una plantilla sin pasar por el temporizador de 5 segundos.
+      expect(updateWorkflowTemplate).toHaveBeenCalledWith(
+        TEMPLATE_ID,
+        expect.objectContaining({ active: false }),
+      );
+    });
+
+    it('3.8 deberia publicar por defecto una plantilla nueva', async () => {
+      // 1. Arrange
+      const store = useWorkflowTemplatesStore();
+      store.initDraft();
+      store.patchDraft({ name: 'Notiweb' });
+      createWorkflowTemplate.mockResolvedValue(buildDetail());
+
+      // 2. Act
+      await store.saveDraft();
+
+      // 3. Assert: sin interruptor en el editor, el alta usa el mismo criterio
+      //    que el backend. Es seguro porque una plantilla no dispara nada: solo
+      //    queda ofrecida en el selector.
+      expect(createWorkflowTemplate).toHaveBeenCalledWith(
+        expect.objectContaining({ active: true }),
+      );
+    });
+
+    it('3.9 deberia apagar isLoading aunque el guardado falle', async () => {
       // 1. Arrange
       const store = useWorkflowTemplatesStore();
       store.initDraft();

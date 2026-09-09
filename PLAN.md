@@ -1609,3 +1609,20 @@ tres vistas que la separación exige. Cierra el pendiente «sin endpoint para ac
 `configuracion_pipeline`, igual que en `flujos`: mismo concepto, mismo nombre.
 
 - [ ] **Aplicar `db/migrations/010-plantillas-flujo.sql`** — la ejecuta el usuario.
+
+---
+
+## 16. Poka-Yoke de la conmutación de estado en los catálogos (CU-10)
+
+Rama: `feat/trigger-imap`. Elimina la redundancia entre el `q-toggle` de la columna de estado y el
+botón de la botonera en `/flujos` y `/plantillas-flujo`.
+
+- [x] 1. Columna de estado: `q-toggle` → `q-badge` informativo (`--pd-positive` / `--pd-surface-muted`)
+- [x] 2. Botonera: botón primario «Activar» si está inactivo; botón crítico con `SafeDeleteModal` si está activo
+- [x] 3. Retirado el `q-toggle` del editor de plantillas, tercera vía que saltaba el temporizador
+- [x] 4. `.pd-badge--inactive` pasa a `--pd-surface-muted` + `--pd-text-secondary` + borde
+- [x] 5. Pruebas 3.7 y 3.8 en `workflow-templates.store.spec.ts` ⇒ verificación + commit
+
+**Invariante que impone el rediseño:** `applyActiveState` es privado a las dos acciones del catálogo.
+Activar entra por `onActivate` (directo, reversible) y desactivar SOLO por `confirmDeactivation`, que
+invoca `SafeDeleteModal`. No queda ninguna vía de retirar un flujo o una plantilla con un solo clic.
