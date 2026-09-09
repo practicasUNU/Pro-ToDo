@@ -6,6 +6,7 @@ import { NodeType } from '@core/fsm/types/pipeline-schema.types';
 import { ImapPollingService } from './imap-polling.service';
 
 import type { ConfigService } from '@nestjs/config';
+import type { ImapTriggerConfigDto } from '@modules/nodes/dto/imap-trigger-config.dto';
 import type { Workflow } from '@modules/workflows/entities/workflow.entity';
 import type { WorkflowsService } from '@modules/workflows/workflows.service';
 import type { Repository } from 'typeorm';
@@ -30,8 +31,8 @@ type RepositoryMock = jest.Mocked<Pick<Repository<Workflow>, 'find'>>;
 
 /** `params` validos del nodo TRIGGER_IMAP. */
 const buildParams = (
-  overrides: Record<string, unknown> = {},
-): Record<string, unknown> => ({
+  overrides: Partial<ImapTriggerConfigDto> = {},
+): ImapTriggerConfigDto => ({
   host: 'imap.unuware.com',
   port: 993,
   secure: true,
@@ -43,8 +44,18 @@ const buildParams = (
   ...overrides,
 });
 
-/** Flujo con un nodo IMAP como entrypoint. */
-const buildWorkflow = (overrides: Partial<Workflow> = {}): Workflow =>
+/**
+ * Flujo con un nodo IMAP como entrypoint.
+ *
+ * Los `params` del nodo entran por parametro y no por `overrides` para no tener
+ * que repetir el `pipeline_schema` entero solo por cambiar un campo. El `as
+ * Workflow` del final es el que absorbe la varianza entre el DTO y el
+ * `Record<string, unknown>` de `PipelineNodeConfig.params`.
+ */
+const buildWorkflow = (
+  overrides: Partial<Workflow> = {},
+  params: ImapTriggerConfigDto = buildParams(),
+): Workflow =>
   ({
     id: FLOW_ID,
     name: 'Noticias entrantes',
@@ -64,20 +75,36 @@ const buildWorkflow = (overrides: Partial<Workflow> = {}): Workflow =>
           outputNamespace: 'raw_email',
           nextStep: null,
           onErrorStep: null,
-          params: buildParams(),
+          params,
         },
       },
     },
     ...overrides,
   }) as Workflow;
 
-/** Doble del cliente IMAP: el sondeo solo usa connect, status y logout. */
-const buildClient = (unseen = 3): Record<string, jest.Mock> => ({
-  connect: jest.fn().mockResolvedValue(undefined),
-  status: jest.fn().mockResolvedValue({ path: 'INBOX', unseen }),
-  logout: jest.fn().mockResolvedValue(undefined),
-  on: jest.fn(),
-});
+/**
+ * Doble del cliente IMAP: el sondeo usa connect, getMailboxLock, search y logout.
+ *
+ * `search` y no `status`: el sondeo debe aplicar los mismos filtros que la
+ * estrategia, y `STATUS` no admite criterios. El coste es seleccionar el buzon,
+ * de ahi el `getMailboxLock`.
+ *
+ * @param matches Cuantos UID devuelve la busqueda; 0 simula "nada que disparar".
+ */
+const buildClient = (matches = 3): Record<string, jest.Mock> => {
+  const release = jest.fn();
+
+  return {
+    connect: jest.fn().mockResolvedValue(undefined),
+    getMailboxLock: jest.fn().mockResolvedValue({ path: 'INBOX', release }),
+    search: jest
+      .fn()
+      .mockResolvedValue(Array.from({ length: matches }, (_, index) => index + 1)),
+    logout: jest.fn().mockResolvedValue(undefined),
+    on: jest.fn(),
+    release,
+  };
+};
 
 interface Harness {
   service: ImapPollingService;
@@ -99,7 +126,7 @@ const buildHarness = (
   options: {
     workflowRows?: Workflow[];
     env?: Record<string, string>;
-    unseen?: number;
+    matches?: number;
   } = {},
 ): Harness => {
   const {
@@ -108,7 +135,7 @@ const buildHarness = (
       IMAP_POLLING_ENABLED: 'true',
       [PASSWORD_ENV_KEY]: IMAP_PASSWORD,
     },
-    unseen = 3,
+    matches = 3,
   } = options;
 
   const workflows: WorkflowsMock = {
@@ -122,7 +149,7 @@ const buildHarness = (
     get: jest.fn((key: string) => env[key]),
   } as unknown as ConfigService;
 
-  const client = buildClient(unseen);
+  const client = buildClient(matches);
   ImapFlow.mockImplementation(() => client);
 
   const service = new ImapPollingService(
@@ -133,6 +160,7 @@ const buildHarness = (
   );
 
   jest.spyOn(service['logger'], 'log').mockImplementation(() => undefined);
+  jest.spyOn(service['logger'], 'debug').mockImplementation(() => undefined);
   jest.spyOn(service['logger'], 'warn').mockImplementation(() => undefined);
   jest.spyOn(service['logger'], 'error').mockImplementation(() => undefined);
 
@@ -303,7 +331,7 @@ describe('ImapPollingService', () => {
   describe('2. Deteccion y disparo', () => {
     it('2.1 deberia disparar el flujo cuando hay correo sin leer', async () => {
       // 1. Arrange
-      const { service, workflows } = buildHarness({ unseen: 2 });
+      const { service, workflows } = buildHarness({ matches: 2 });
 
       // 2. Act
       const dispatched = await service.pollInbox(FLOW_ID, buildParams());
@@ -315,7 +343,7 @@ describe('ImapPollingService', () => {
 
     it('2.2 no deberia disparar el flujo con el buzon vacio', async () => {
       // 1. Arrange
-      const { service, workflows } = buildHarness({ unseen: 0 });
+      const { service, workflows } = buildHarness({ matches: 0 });
 
       // 2. Act
       const dispatched = await service.pollInbox(FLOW_ID, buildParams());
@@ -325,7 +353,7 @@ describe('ImapPollingService', () => {
       expect(workflows.runAutomaticWorkflow).not.toHaveBeenCalled();
     });
 
-    it('2.3 deberia usar STATUS y no descargar ni marcar nada', async () => {
+    it('2.3 deberia detectar con SEARCH y no descargar ni marcar nada', async () => {
       // 1. Arrange
       const { service, client } = buildHarness();
 
@@ -334,9 +362,62 @@ describe('ImapPollingService', () => {
 
       // 3. Assert: un solo lector del buzon. El sondeo detecta; la estrategia
       //    descarga y marca `\Seen`.
-      expect(client.status).toHaveBeenCalledWith('INBOX', { unseen: true });
+      expect(client.search).toHaveBeenCalledWith({ seen: false }, { uid: true });
       expect(client.download).toBeUndefined();
       expect(client.messageFlagsAdd).toBeUndefined();
+    });
+
+    it('2.5 deberia sondear con los MISMOS filtros que usara la estrategia', async () => {
+      // 1. Arrange
+      const { service, client } = buildHarness();
+
+      // 2. Act
+      await service.pollInbox(
+        FLOW_ID,
+        buildParams({
+          fromFilter: 'redaccion@noticias.es',
+          subjectFilter: 'Notiweb',
+        }),
+      );
+
+      // 3. Assert: si detectase con un criterio y la estrategia extrajese con
+      //    otro, cada correo no leido ajeno al filtro arrancaria una ejecucion
+      //    que muere sin datos en el mapeador.
+      expect(client.search).toHaveBeenCalledWith(
+        {
+          seen: false,
+          from: 'redaccion@noticias.es',
+          subject: 'Notiweb',
+        },
+        { uid: true },
+      );
+    });
+
+    it('2.6 NO deberia disparar el flujo si ningun correo casa con los filtros', async () => {
+      // 1. Arrange
+      const { service, workflows } = buildHarness({ matches: 0 });
+
+      // 2. Act
+      const dispatched = await service.pollInbox(
+        FLOW_ID,
+        buildParams({ fromFilter: 'nadie@ejemplo.com' }),
+      );
+
+      // 3. Assert
+      expect(dispatched).toBe(false);
+      expect(workflows.runAutomaticWorkflow).not.toHaveBeenCalled();
+    });
+
+    it('2.7 deberia liberar el buzon tras sondear', async () => {
+      // 1. Arrange
+      const { service, client } = buildHarness();
+
+      // 2. Act
+      await service.pollInbox(FLOW_ID, buildParams());
+
+      // 3. Assert: SEARCH exige seleccionar el buzon; no liberarlo dejaria la
+      //    conexion bloqueada para el siguiente ciclo.
+      expect(client.release).toHaveBeenCalledTimes(1);
     });
 
     it('2.4 deberia cerrar la sesion IMAP tras sondear', async () => {
@@ -384,7 +465,8 @@ describe('ImapPollingService', () => {
       const { service, workflows } = buildHarness();
       ImapFlow.mockImplementation(() => ({
         connect: jest.fn().mockRejectedValue(new Error('ECONNREFUSED')),
-        status: jest.fn(),
+        getMailboxLock: jest.fn(),
+        search: jest.fn(),
         logout: jest.fn().mockResolvedValue(undefined),
         on: jest.fn(),
       }));
@@ -402,7 +484,8 @@ describe('ImapPollingService', () => {
       const { service, client } = buildHarness();
       ImapFlow.mockImplementationOnce(() => ({
         connect: jest.fn().mockRejectedValue(new Error('ECONNREFUSED')),
-        status: jest.fn(),
+        getMailboxLock: jest.fn(),
+        search: jest.fn(),
         logout: jest.fn().mockResolvedValue(undefined),
         on: jest.fn(),
       }));
@@ -414,7 +497,7 @@ describe('ImapPollingService', () => {
       // 3. Assert: el `finally` limpia `inFlight`, asi que el ciclo siguiente
       //    vuelve a intentarlo.
       expect(second).toBe(true);
-      expect(client.status).toHaveBeenCalledTimes(1);
+      expect(client.search).toHaveBeenCalledTimes(1);
     });
 
     it('3.3 deberia descartar un tick solapado del mismo flujo', async () => {
@@ -427,7 +510,10 @@ describe('ImapPollingService', () => {
 
       ImapFlow.mockImplementation(() => ({
         connect: jest.fn().mockReturnValue(pending),
-        status: jest.fn().mockResolvedValue({ unseen: 1 }),
+        getMailboxLock: jest
+          .fn()
+          .mockResolvedValue({ path: 'INBOX', release: jest.fn() }),
+        search: jest.fn().mockResolvedValue([1]),
         logout: jest.fn().mockResolvedValue(undefined),
         on: jest.fn(),
       }));
@@ -560,6 +646,81 @@ describe('ImapPollingService', () => {
         jest.advanceTimersByTimeAsync(60_000),
       ).resolves.toBeUndefined();
       expect(registry.doesExist('interval', 'imap-reconcile')).toBe(true);
+      service.onModuleDestroy();
+    });
+
+    it('4.7 deberia CONSERVAR el temporizador de un flujo que no ha cambiado', async () => {
+      // 1. Arrange
+      const { service, registry } = buildHarness();
+      await service.onModuleInit();
+      const before = registry.getInterval(intervalNameOf(FLOW_ID));
+
+      // 2. Act: la reconciliacion vence y la base de datos devuelve lo mismo.
+      await jest.advanceTimersByTimeAsync(60_000);
+
+      // 3. Assert: EL MISMO objeto Timeout, no uno equivalente. Recrearlo
+      //    reiniciaria su cuenta atras (ver 4.10).
+      expect(registry.getInterval(intervalNameOf(FLOW_ID))).toBe(before);
+      service.onModuleDestroy();
+    });
+
+    it('4.8 deberia reinscribir el temporizador si cambia la configuracion', async () => {
+      // 1. Arrange
+      const { service, repository, registry } = buildHarness();
+      await service.onModuleInit();
+      const before = registry.getInterval(intervalNameOf(FLOW_ID));
+
+      // 2. Act: el asistente cambia el buzon del nodo.
+      repository.find.mockResolvedValue([
+        buildWorkflow({}, buildParams({ mailbox: 'Archivo' })),
+      ]);
+      await jest.advanceTimersByTimeAsync(60_000);
+
+      // 3. Assert: el callback captura la config en su clausura, asi que un
+      //    cambio EXIGE un temporizador nuevo o el worker seguiria con el
+      //    buzon viejo.
+      expect(registry.getInterval(intervalNameOf(FLOW_ID))).not.toBe(before);
+      service.onModuleDestroy();
+    });
+
+    it('4.9 deberia reinscribirlo si cambia el pollIntervalMs', async () => {
+      // 1. Arrange
+      const { service, repository, registry } = buildHarness();
+      await service.onModuleInit();
+      const before = registry.getInterval(intervalNameOf(FLOW_ID));
+
+      // 2. Act
+      repository.find.mockResolvedValue([
+        buildWorkflow({}, buildParams({ pollIntervalMs: 45_000 })),
+      ]);
+      await jest.advanceTimersByTimeAsync(60_000);
+
+      // 3. Assert: el periodo vive en el propio `setInterval`; sin recrearlo el
+      //    cambio no tendria ningun efecto.
+      expect(registry.getInterval(intervalNameOf(FLOW_ID))).not.toBe(before);
+      service.onModuleDestroy();
+    });
+
+    it('4.10 deberia sondear un flujo cuyo periodo supera al de reconciliacion', async () => {
+      // 1. Arrange: sondeo cada 120 s, reconciliacion cada 60 s. Es el caso que
+      //    el barrido y recreacion rompia: al reinscribirse el temporizador en
+      //    cada ciclo de reconciliacion, su cuenta atras volvia a empezar y NUNCA
+      //    llegaba a cumplirse. Con los valores por defecto (60 s y 60 s) la
+      //    carrera se decidia por milisegundos.
+      const { service, workflows, repository } = buildHarness({
+        workflowRows: [
+          buildWorkflow({}, buildParams({ pollIntervalMs: 120_000 })),
+        ],
+      });
+      await service.onModuleInit();
+
+      // 2. Act: dos ciclos de reconciliacion y uno de sondeo.
+      await jest.advanceTimersByTimeAsync(120_000);
+
+      // 3. Assert: el flujo llego a sondearse pese a las reconciliaciones
+      //    intermedias, que es justo lo que antes no ocurria.
+      expect(repository.find).toHaveBeenCalledTimes(3);
+      expect(workflows.runAutomaticWorkflow).toHaveBeenCalledWith(FLOW_ID);
       service.onModuleDestroy();
     });
 

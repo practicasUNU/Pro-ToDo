@@ -14,12 +14,13 @@ import {
   resolveImapConfig,
 } from '@modules/nodes/dto/imap-trigger-config.dto';
 import { createImapClient } from '@modules/nodes/services/imap-client.factory';
+import { buildImapSearchQuery } from '@modules/nodes/strategies/imap-trigger.strategy';
 import { Workflow } from '@modules/workflows/entities/workflow.entity';
 import { WorkflowsService } from '@modules/workflows/workflows.service';
 
 import type { OnModuleDestroy, OnModuleInit } from '@nestjs/common';
 import type { ResolvedImapConfig } from '@modules/nodes/dto/imap-trigger-config.dto';
-import type { ImapFlow } from 'imapflow';
+import type { ImapFlow, MailboxLockObject } from 'imapflow';
 import type { Repository } from 'typeorm';
 
 /** Prefijo de los intervalos que este servicio inscribe en `SchedulerRegistry`. */
@@ -99,6 +100,16 @@ export class ImapPollingService implements OnModuleInit, OnModuleDestroy {
    */
   private readonly inFlight = new Set<string>();
 
+  /**
+   * Configuracion con la que cada flujo quedo programado, indexada por `flowId`.
+   *
+   * `SchedulerRegistry` solo guarda el `Timeout`, no CON QUE se creo, asi que sin
+   * este registro paralelo la reconciliacion no puede distinguir "este flujo ya
+   * esta programado igual" de "esta programado con el buzon antiguo". Es lo que
+   * hace posible el diffing de `refreshSchedules`.
+   */
+  private readonly scheduled = new Map<string, ResolvedImapConfig>();
+
   constructor(
     @InjectRepository(Workflow)
     private readonly workflowRepository: Repository<Workflow>,
@@ -135,24 +146,85 @@ export class ImapPollingService implements OnModuleInit, OnModuleDestroy {
   }
 
   /**
-   * Recarga los intervalos a partir del estado actual de la tabla `flujos`.
+   * Reconcilia los intervalos con el estado actual de la tabla `flujos`.
    *
    * Publico y no solo interno: el `pipeline_schema` de un flujo puede cambiar en
    * caliente desde el asistente, y sin una recarga el sondeo seguiria usando el
    * host, el buzon o el periodo antiguos hasta el siguiente reinicio.
+   *
+   * DIFFING, y no barrido y recreacion. Antes este metodo borraba TODOS los
+   * intervalos y los volvia a crear en cada ciclo, lo que provocaba INANICION:
+   * un flujo con `pollIntervalMs` mayor que el periodo de reconciliacion veia su
+   * temporizador destruido y recreado desde cero antes de llegar a cumplirse, de
+   * modo que no sondeaba NUNCA. Con los valores por defecto (sondeo 60 s,
+   * reconciliacion 60 s) la carrera se decidia por milisegundos.
+   *
+   * Ahora un flujo cuya configuracion no ha cambiado conserva su temporizador
+   * intacto, y solo se tocan las altas, las bajas y los cambios reales.
    */
   public async refreshSchedules(): Promise<void> {
-    this.clearSchedules();
+    this.logger.debug('Sondeo IMAP disparado. Buscando flujos activos...');
 
     const nodes = await this.findImapTriggerNodes();
 
-    for (const node of nodes) {
-      this.registerInterval(node);
+    this.logger.debug(`Flujos IMAP activos encontrados: ${nodes.length}`);
+
+    const desired = new Map<string, ResolvedImapConfig>(
+      nodes.map((node) => [node.flowId, node.config]),
+    );
+
+    const added: string[] = [];
+    const updated: string[] = [];
+    const removed: string[] = [];
+
+    // 1. Bajas: programados que la base de datos ya no devuelve. Cubre tanto el
+    //    flujo desactivado como el borrado o el que perdio su nodo IMAP.
+    for (const flowId of [...this.scheduled.keys()]) {
+      if (!desired.has(flowId)) {
+        this.deleteIntervalIfExists(intervalName(flowId));
+        this.scheduled.delete(flowId);
+        removed.push(flowId);
+      }
+    }
+
+    // 2. Altas y cambios. Un flujo intacto NO se toca: ese es el punto entero.
+    for (const [flowId, config] of desired) {
+      const current = this.scheduled.get(flowId);
+
+      if (current === undefined) {
+        this.registerInterval({ flowId, config });
+        added.push(flowId);
+        continue;
+      }
+
+      if (this.hasConfigChanged(current, config)) {
+        this.registerInterval({ flowId, config });
+        updated.push(flowId);
+      }
     }
 
     this.logger.log(
-      `Sondeo IMAP activo para ${nodes.length} flujo(s): [${nodes.map((node) => node.flowId).join(', ')}].`,
+      `Sondeo IMAP reconciliado: ${this.scheduled.size} flujo(s) programados | altas=${added.length} bajas=${removed.length} cambios=${updated.length} intactos=${this.scheduled.size - added.length - updated.length}.`,
     );
+  }
+
+  /**
+   * Compara dos configuraciones ya resueltas del mismo flujo.
+   *
+   * Se comparan TODOS los campos y no solo `pollIntervalMs`: el callback del
+   * temporizador captura la configuracion en su clausura, asi que un cambio de
+   * buzon o de filtro tambien exige reinscribirlo para que el worker deje de
+   * usar el valor viejo.
+   *
+   * `JSON.stringify` basta porque `ResolvedImapConfig` es un objeto plano de
+   * primitivas y `null`, construido siempre por el mismo literal de
+   * `resolveImapConfig`: el orden de las claves es estable por construccion.
+   */
+  private hasConfigChanged(
+    current: ResolvedImapConfig,
+    next: ResolvedImapConfig,
+  ): boolean {
+    return JSON.stringify(current) !== JSON.stringify(next);
   }
 
   /**
@@ -183,9 +255,9 @@ export class ImapPollingService implements OnModuleInit, OnModuleDestroy {
 
     try {
       const resolved = resolveImapConfig(config);
-      const hasUnseen = await this.hasUnseenMessages(resolved);
+      const hasMatch = await this.hasMatchingMessages(resolved);
 
-      if (!hasUnseen) {
+      if (!hasMatch) {
         return false;
       }
 
@@ -194,8 +266,15 @@ export class ImapPollingService implements OnModuleInit, OnModuleDestroy {
       // Un fallo de sondeo NUNCA se propaga: este metodo corre dentro del
       // callback de un `setInterval`, y una excepcion escapando de ahi termina
       // el proceso de Node entero.
-      this.logger.warn(
-        `Fallo el sondeo IMAP del flujo "${flowId}": ${error instanceof Error ? error.message : String(error)}`,
+      //
+      // Se registra con el STACK como segundo argumento, y no solo el mensaje:
+      // este es el punto donde el disparador falla en silencio (el flujo no
+      // arranca y nadie se entera), asi que sin la traza no hay forma de
+      // distinguir un buzon caido de unas credenciales caducadas o de un error
+      // de programacion en la resolucion de la configuracion.
+      this.logger.error(
+        `[Worker] Falla critica de conexion IMAP en el flujo "${flowId}": ${error instanceof Error ? error.message : String(error)}`,
+        error instanceof Error ? error.stack : undefined,
       );
       return false;
     } finally {
@@ -204,13 +283,20 @@ export class ImapPollingService implements OnModuleInit, OnModuleDestroy {
   }
 
   /**
-   * Pregunta al servidor si el buzon tiene mensajes sin leer.
+   * Pregunta al servidor si el buzon tiene algun mensaje que case con el nodo.
    *
-   * Usa `STATUS` en vez de `SEARCH`: no requiere seleccionar el buzon, no
-   * descarga cuerpos y no altera ninguna bandera. Es la consulta mas barata que
-   * responde a la unica pregunta que le importa al sondeo.
+   * Usa `SEARCH` con la MISMA consulta que la estrategia
+   * (`buildImapSearchQuery`), y no el `STATUS` mas barato que usaba antes. Con
+   * filtros de remitente o asunto, `STATUS unseen` respondia por cualquier
+   * correo no leido: el flujo arrancaba, la estrategia no encontraba
+   * coincidencia y la ejecucion moria en el mapeador sin datos. Detectar y
+   * extraer tienen que compartir criterio o el sondeo miente.
+   *
+   * El precio es seleccionar el buzon (`SEARCH` lo exige y `STATUS` no), asi que
+   * se toma el lock y se libera en el `finally`. Se sigue sin descargar cuerpos
+   * y sin tocar ninguna bandera: eso es trabajo de la estrategia.
    */
-  private async hasUnseenMessages(
+  private async hasMatchingMessages(
     config: ResolvedImapConfig,
   ): Promise<boolean> {
     const password = this.configService.get<string>(config.passwordEnvKey);
@@ -228,13 +314,50 @@ export class ImapPollingService implements OnModuleInit, OnModuleDestroy {
       );
     });
 
-    try {
-      await client.connect();
-      const status = await client.status(config.mailbox, { unseen: true });
+    let lock: MailboxLockObject | undefined;
+    const searchQuery = buildImapSearchQuery(config);
 
-      return (status.unseen ?? 0) > 0;
+    try {
+      // Antes de `connect()` y no despues: si el saludo TLS se cuelga, esta es
+      // la ultima linea que queda en el registro, y con host, puerto y usuario
+      // basta para distinguir un cortafuegos de unas credenciales rechazadas.
+      this.logger.debug(
+        `[Worker] Negociando TLS con ${config.host}:${config.port} para ${config.user}...`,
+      );
+
+      await client.connect();
+      lock = await client.getMailboxLock(config.mailbox);
+
+      // La consulta se registra ENTERA: un filtro mal escrito en el asistente no
+      // produce ningun error, solo un buzon que "nunca tiene correo". Ver la
+      // query es lo unico que distingue ese caso de una bandeja realmente vacia.
+      this.logger.debug(
+        `Ejecutando SEARCH en buzon con query: ${JSON.stringify(searchQuery)}`,
+      );
+
+      const uids = await client.search(searchQuery, {
+        uid: true,
+      });
+
+      return uids !== false && Array.isArray(uids) && uids.length > 0;
     } finally {
+      this.releaseQuietly(lock);
       await this.logoutQuietly(client);
+    }
+  }
+
+  /** Libera el lock del buzon sin dejar que su fallo tape el error original. */
+  private releaseQuietly(lock: MailboxLockObject | undefined): void {
+    if (lock === undefined) {
+      return;
+    }
+
+    try {
+      lock.release();
+    } catch (error: unknown) {
+      this.logger.warn(
+        `No se pudo liberar el buzon tras el sondeo: ${error instanceof Error ? error.message : String(error)}`,
+      );
     }
   }
 
@@ -280,6 +403,15 @@ export class ImapPollingService implements OnModuleInit, OnModuleDestroy {
     const workflows = await this.workflowRepository.find({
       where: { active: true },
     });
+
+    // Se registran los dos recuentos por separado a proposito: la diferencia
+    // entre ellos es el diagnostico. "5 activos, 0 sondeables" apunta al esquema
+    // de los flujos; "0 activos" apunta a que nadie los ha habilitado todavia,
+    // que es un problema distinto y en otra pantalla.
+    this.logger.debug(
+      `Flujos activos en base de datos: ${workflows.length} (los inactivos no se sondean).`,
+    );
+
     const nodes: ImapTriggerNode[] = [];
 
     for (const workflow of workflows) {
@@ -305,7 +437,15 @@ export class ImapPollingService implements OnModuleInit, OnModuleDestroy {
   ): Promise<ResolvedImapConfig | null> {
     const schema = workflow.pipelineSchema;
 
+    // Los dos descartes de abajo eran las fugas silenciosas del servicio: un
+    // flujo activo se quedaba fuera del sondeo sin dejar rastro, y desde fuera
+    // era indistinguible de un buzon vacio. Van en `debug` y no en `warn` porque
+    // ninguno de los dos casos es un error: un flujo sin nodo IMAP simplemente
+    // no se dispara por correo.
     if (schema === null) {
+      this.logger.debug(
+        `El flujo "${workflow.id}" esta activo pero no tiene configuracion_pipeline: no se sondea.`,
+      );
       return null;
     }
 
@@ -314,6 +454,9 @@ export class ImapPollingService implements OnModuleInit, OnModuleDestroy {
     );
 
     if (imapNode === undefined) {
+      this.logger.debug(
+        `El flujo "${workflow.id}" no declara ningun nodo ${NodeType.TRIGGER_IMAP}: no se sondea.`,
+      );
       return null;
     }
 
@@ -333,7 +476,13 @@ export class ImapPollingService implements OnModuleInit, OnModuleDestroy {
     return resolveImapConfig(dto);
   }
 
-  /** Inscribe el intervalo de un flujo con su propio periodo. */
+  /**
+   * Inscribe (o reinscribe) el intervalo de un flujo con su propio periodo.
+   *
+   * Solo debe llamarse desde el diffing de `refreshSchedules`, para un alta o un
+   * cambio real de configuracion: invocarlo sobre un flujo intacto reinicia su
+   * cuenta atras y reintroduce la inanicion que el diffing existe para evitar.
+   */
   private registerInterval(node: ImapTriggerNode): void {
     const name = intervalName(node.flowId);
 
@@ -346,10 +495,17 @@ export class ImapPollingService implements OnModuleInit, OnModuleDestroy {
     // `pollInbox` tiene la obligacion de no rechazar nunca: una promesa
     // rechazada sin manejar termina el proceso en Node >= 18.
     const interval = setInterval(() => {
+      this.logger.debug(
+        `[Worker] Disparando conexion IMAP para flujo: ${node.flowId}`,
+      );
       void this.pollInbox(node.flowId, node.config);
     }, node.config.pollIntervalMs);
 
     this.schedulerRegistry.addInterval(name, interval);
+
+    // El registro paralelo se actualiza AQUI y no en el llamador para que no
+    // pueda quedar desincronizado del temporizador real que acaba de crearse.
+    this.scheduled.set(node.flowId, node.config);
   }
 
   /**
@@ -408,6 +564,11 @@ export class ImapPollingService implements OnModuleInit, OnModuleDestroy {
         this.schedulerRegistry.deleteInterval(name);
       }
     }
+
+    // Sin esto, el registro paralelo afirmaria que hay flujos programados cuyos
+    // temporizadores ya no existen, y la siguiente reconciliacion los daria por
+    // intactos y no volveria a inscribirlos.
+    this.scheduled.clear();
   }
 
   /** Cierra la sesion IMAP sin dejar escapar errores de cierre. */
