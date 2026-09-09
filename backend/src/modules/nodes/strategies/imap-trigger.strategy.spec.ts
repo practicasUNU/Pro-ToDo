@@ -310,6 +310,136 @@ describe('ImapTriggerStrategy', () => {
     });
   });
 
+  describe('1bis. Filtros de disparo (SEARCH)', () => {
+    /**
+     * Se asevera sobre `client.search` y no sobre el correo devuelto porque el
+     * filtrado lo hace el SERVIDOR: filtrar en el cliente obligaria a descargar
+     * el buzon entero para descartarlo, que es justo lo que IMAP SEARCH evita.
+     */
+    it('1bis.1 deberia filtrar por remitente cuando llega fromFilter', async () => {
+      // 1. Arrange
+      const { strategy } = buildStrategy();
+      const client = buildClient();
+      useClient(client);
+      simpleParser.mockResolvedValue(buildParsedMail());
+
+      // 2. Act
+      await strategy.execute(
+        buildContext(),
+        buildParams({ fromFilter: 'redaccion@noticias.es' }),
+      );
+
+      // 3. Assert
+      expect(client.search).toHaveBeenCalledWith(
+        { seen: false, from: 'redaccion@noticias.es' },
+        { uid: true },
+      );
+    });
+
+    it('1bis.2 deberia filtrar por asunto cuando llega subjectFilter', async () => {
+      // 1. Arrange
+      const { strategy } = buildStrategy();
+      const client = buildClient();
+      useClient(client);
+      simpleParser.mockResolvedValue(buildParsedMail());
+
+      // 2. Act
+      await strategy.execute(
+        buildContext(),
+        buildParams({ subjectFilter: 'Notiweb' }),
+      );
+
+      // 3. Assert
+      expect(client.search).toHaveBeenCalledWith(
+        { seen: false, subject: 'Notiweb' },
+        { uid: true },
+      );
+    });
+
+    it('1bis.3 deberia combinar los tres criterios con AND', async () => {
+      // 1. Arrange
+      const { strategy } = buildStrategy();
+      const client = buildClient();
+      useClient(client);
+      simpleParser.mockResolvedValue(buildParsedMail());
+
+      // 2. Act
+      await strategy.execute(
+        buildContext(),
+        buildParams({
+          unreadOnly: true,
+          fromFilter: 'redaccion@noticias.es',
+          subjectFilter: 'Notiweb',
+        }),
+      );
+
+      // 3. Assert
+      expect(client.search).toHaveBeenCalledWith(
+        {
+          seen: false,
+          from: 'redaccion@noticias.es',
+          subject: 'Notiweb',
+        },
+        { uid: true },
+      );
+    });
+
+    it('1bis.4 deberia pedir el buzon entero con unreadOnly false y sin filtros', async () => {
+      // 1. Arrange
+      const { strategy } = buildStrategy();
+      const client = buildClient();
+      useClient(client);
+      simpleParser.mockResolvedValue(buildParsedMail());
+
+      // 2. Act
+      await strategy.execute(buildContext(), buildParams({ unreadOnly: false }));
+
+      // 3. Assert: `{}` seria una sentencia SEARCH invalida (el protocolo exige
+      // al menos un criterio); `all` es la forma explicita de pedirlo todo.
+      expect(client.search).toHaveBeenCalledWith({ all: true }, { uid: true });
+    });
+
+    it('1bis.5 deberia omitir el criterio seen cuando unreadOnly es false pero hay filtros', async () => {
+      // 1. Arrange
+      const { strategy } = buildStrategy();
+      const client = buildClient();
+      useClient(client);
+      simpleParser.mockResolvedValue(buildParsedMail());
+
+      // 2. Act
+      await strategy.execute(
+        buildContext(),
+        buildParams({ unreadOnly: false, fromFilter: 'redaccion@noticias.es' }),
+      );
+
+      // 3. Assert
+      expect(client.search).toHaveBeenCalledWith(
+        { from: 'redaccion@noticias.es' },
+        { uid: true },
+      );
+    });
+
+    it('1bis.6 deberia rechazar un filtro vacio como GRAVE sin abrir conexion', async () => {
+      // 1. Arrange
+      const { strategy } = buildStrategy();
+      const client = buildClient();
+      useClient(client);
+
+      // 2. Act
+      const result = await strategy.execute(
+        buildContext(),
+        buildParams({ fromFilter: '' }),
+      );
+
+      // 3. Assert: una cadena vacia no es "sin filtro"; en IMAP SEARCH seria un
+      // criterio que casa con todo. Quien no quiera filtrar, omite el campo.
+      expect(result.success).toBe(false);
+      expect(result.error?.level).toBe('GRAVE');
+      expect(result.error?.missingFields).toContain('fromFilter');
+      expect(client.connect).not.toHaveBeenCalled();
+    });
+  });
+
   describe('2. Buzon sin mensajes nuevos', () => {
     it('2.1 deberia devolver exito con NO_MESSAGES_FOUND y sin datos residuales', async () => {
       // 1. Arrange

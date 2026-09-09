@@ -22,7 +22,7 @@ import type {
 } from '@core/fsm/types/node-strategy.types';
 import type { ResolvedImapConfig } from '@modules/nodes/dto/imap-trigger-config.dto';
 import type { ValidatorOptions } from 'class-validator';
-import type { ImapFlow, MailboxLockObject } from 'imapflow';
+import type { ImapFlow, MailboxLockObject, SearchObject } from 'imapflow';
 import type { AddressObject, ParsedMail } from 'mailparser';
 
 /**
@@ -98,10 +98,40 @@ const extractFromAddress = (from: AddressObject | undefined): string => {
 };
 
 /**
- * Nodo TRIGGER_IMAP: lee el correo mas reciente sin leer del buzon y lo expone
- * como payload crudo para el resto del pipeline.
+ * Traduce la configuracion del nodo a la consulta de IMAP SEARCH.
  *
- * NO filtra ni sanea nada a proposito: la carga viaja tal cual para alimentar
+ * Se exporta porque `ImapPollingService` la reutiliza: si el sondeo detectase
+ * con un criterio y la estrategia extrajese con otro, el flujo se despertaria
+ * por correos que luego no encuentra, y cada uno de esos ciclos dejaria una
+ * ejecucion muerta en `ejecuciones_flujo`.
+ *
+ * Los criterios se combinan con AND, que es el comportamiento por defecto de
+ * IMAP SEARCH: `from` y `subject` son subcadenas, no coincidencias exactas.
+ */
+export const buildImapSearchQuery = (
+  config: ResolvedImapConfig,
+): SearchObject => {
+  const query: SearchObject = {
+    ...(config.unreadOnly ? { seen: false } : {}),
+    ...(config.fromFilter !== null ? { from: config.fromFilter } : {}),
+    ...(config.subjectFilter !== null
+      ? { subject: config.subjectFilter }
+      : {}),
+  };
+
+  // IMAP SEARCH exige al menos un criterio. Con `unreadOnly: false` y sin
+  // filtros no queda ninguno, y `{}` seria una sentencia invalida: `all` es la
+  // forma explicita de pedir el buzon entero.
+  return Object.keys(query).length === 0 ? { all: true } : query;
+};
+
+/**
+ * Nodo TRIGGER_IMAP: lee el correo mas reciente que casa con los criterios del
+ * nodo (`unreadOnly`, `fromFilter`, `subjectFilter`) y lo expone como payload
+ * crudo para el resto del pipeline.
+ *
+ * Los filtros deciden QUE correo entra, no como se transforma: el contenido no
+ * se sanea a proposito, y viaja tal cual para alimentar
  * tanto la prueba directa contra `TemplateMapperStrategy`
  * (`{{raw_email.subject}}`, `{{raw_email.text}}`) como la sanitizacion posterior
  * en `PARSER_PRE_IA`. Meter aqui reglas de limpieza duplicaria la
@@ -233,7 +263,7 @@ export class ImapTriggerStrategy implements INodeStrategy {
       await client.connect();
       lock = await client.getMailboxLock(config.mailbox);
 
-      const uid = await this.findLatestUnseenUid(client);
+      const uid = await this.findLatestMatchingUid(client, config);
 
       if (uid === null) {
         return { success: true, data: { status: NO_MESSAGES_STATUS } };
@@ -271,14 +301,19 @@ export class ImapTriggerStrategy implements INodeStrategy {
   }
 
   /**
-   * UID del mensaje sin leer mas reciente, o `null` si no hay ninguno.
+   * UID del mensaje coincidente mas reciente, o `null` si no hay ninguno.
    *
    * Se toma el maximo y no el ultimo elemento: el orden de la respuesta del
    * servidor no esta garantizado por el protocolo, mientras que un UID mayor
    * siempre corresponde a un mensaje mas nuevo dentro del mismo UIDVALIDITY.
    */
-  private async findLatestUnseenUid(client: ImapFlow): Promise<number | null> {
-    const uids = await client.search({ seen: false }, { uid: true });
+  private async findLatestMatchingUid(
+    client: ImapFlow,
+    config: ResolvedImapConfig,
+  ): Promise<number | null> {
+    const uids = await client.search(buildImapSearchQuery(config), {
+      uid: true,
+    });
 
     if (uids === false || !Array.isArray(uids) || uids.length === 0) {
       return null;

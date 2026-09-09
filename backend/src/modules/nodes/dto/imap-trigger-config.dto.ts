@@ -39,6 +39,15 @@ export const DEFAULT_OUTPUT_NAMESPACE = 'raw_email';
 /** Por defecto el correo procesado se marca como leido para no reprocesarlo. */
 export const DEFAULT_MARK_AS_READ = true;
 
+/**
+ * Por defecto solo disparan los correos NO leidos.
+ *
+ * Es lo que evita reprocesar el historico del buzon en el primer sondeo: la
+ * bandera `\Seen` es el unico marcador de "ya tratado" que sobrevive a un
+ * reinicio del servicio, porque vive en el servidor de correo y no en memoria.
+ */
+export const DEFAULT_UNREAD_ONLY = true;
+
 /** Por defecto se exige TLS implicito; degradar a texto claro debe ser explicito. */
 export const DEFAULT_SECURE = true;
 
@@ -182,6 +191,37 @@ export class ImapTriggerConfigDto {
   @IsOptional()
   @IsBoolean({ message: 'markAsRead debe ser un booleano.' })
   markAsRead?: boolean;
+
+  @ApiPropertyOptional({
+    description:
+      'Filtra por remitente (subcadena, criterio FROM de IMAP SEARCH). Omitir para no filtrar',
+    example: 'redaccion@noticias.es',
+  })
+  @IsOptional()
+  @IsString({ message: 'fromFilter debe ser una cadena.' })
+  @IsNotEmpty({ message: 'fromFilter no puede estar vacio; omitelo para no filtrar.' })
+  fromFilter?: string;
+
+  @ApiPropertyOptional({
+    description:
+      'Filtra por asunto (subcadena, criterio SUBJECT de IMAP SEARCH). Omitir para no filtrar',
+    example: 'Notiweb',
+  })
+  @IsOptional()
+  @IsString({ message: 'subjectFilter debe ser una cadena.' })
+  @IsNotEmpty({
+    message: 'subjectFilter no puede estar vacio; omitelo para no filtrar.',
+  })
+  subjectFilter?: string;
+
+  @ApiPropertyOptional({
+    description: `Si true, solo considera correos sin la bandera \\Seen. Por defecto ${String(DEFAULT_UNREAD_ONLY)}`,
+    example: DEFAULT_UNREAD_ONLY,
+    default: DEFAULT_UNREAD_ONLY,
+  })
+  @IsOptional()
+  @IsBoolean({ message: 'unreadOnly debe ser un booleano.' })
+  unreadOnly?: boolean;
 }
 
 /**
@@ -201,11 +241,28 @@ export interface ResolvedImapConfig {
   readonly pollIntervalMs: number;
   readonly outputNamespace: string;
   readonly markAsRead: boolean;
+  /** `null` cuando no se filtra por remitente; nunca cadena vacia. */
+  readonly fromFilter: string | null;
+  /** `null` cuando no se filtra por asunto; nunca cadena vacia. */
+  readonly subjectFilter: string | null;
+  readonly unreadOnly: boolean;
 }
 
-/** Aplica los valores por defecto sobre un DTO ya validado. Funcion pura. */
+/**
+ * Aplica los valores por defecto sobre un DTO ya validado. Funcion pura.
+ *
+ * Acepta tambien una config YA resuelta, y es IDEMPOTENTE sobre ella: aplicar
+ * los defaults dos veces da el mismo resultado. `ImapPollingService.pollInbox`
+ * depende de esa propiedad, porque recibe indistintamente lo que extrajo del
+ * `pipeline_schema` (sin resolver) o lo que le pasa una prueba (ya resuelto).
+ *
+ * La union se declara de forma explicita desde que los filtros se normalizan a
+ * `null`: antes el segundo caso colaba por compatibilidad estructural, y una
+ * config resuelta ya no es asignable al DTO (`string | null` frente a
+ * `string | undefined`).
+ */
 export const resolveImapConfig = (
-  dto: ImapTriggerConfigDto,
+  dto: ImapTriggerConfigDto | ResolvedImapConfig,
 ): ResolvedImapConfig => ({
   host: dto.host,
   port: dto.port ?? DEFAULT_IMAP_PORT,
@@ -216,4 +273,10 @@ export const resolveImapConfig = (
   pollIntervalMs: dto.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS,
   outputNamespace: dto.outputNamespace ?? DEFAULT_OUTPUT_NAMESPACE,
   markAsRead: dto.markAsRead ?? DEFAULT_MARK_AS_READ,
+  // A `null` y no a cadena vacia: en IMAP SEARCH un criterio vacio no significa
+  // "sin filtro" sino "coincide con todo", que es justo lo contrario de lo que
+  // esperaria quien borra el campo en el formulario.
+  fromFilter: dto.fromFilter ?? null,
+  subjectFilter: dto.subjectFilter ?? null,
+  unreadOnly: dto.unreadOnly ?? DEFAULT_UNREAD_ONLY,
 });
