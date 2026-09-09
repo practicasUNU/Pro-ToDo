@@ -304,9 +304,10 @@ describe('useWorkflowTemplatesStore · catalogo de plantillas de flujo', () => {
       // 2. Act
       await store.saveDraft();
 
-      // 3. Assert: guardar el formulario NO conmuta la disponibilidad. El
-      //    editor perdio su interruptor a proposito (CU-10): era la unica via de
-      //    retirar una plantilla sin pasar por el temporizador de 5 segundos.
+      // 3. Assert: guardar el formulario NO conmuta la disponibilidad. Es la
+      //    premisa que permite que el editor no exponga interruptor de estado
+      //    —igual que `UserDialog.vue`—: el estado se cambia solo desde la
+      //    botonera del catalogo, con su confirmacion.
       expect(updateWorkflowTemplate).toHaveBeenCalledWith(
         TEMPLATE_ID,
         expect.objectContaining({ active: false }),
@@ -324,8 +325,8 @@ describe('useWorkflowTemplatesStore · catalogo de plantillas de flujo', () => {
       await store.saveDraft();
 
       // 3. Assert: sin interruptor en el editor, el alta usa el mismo criterio
-      //    que el backend. Es seguro porque una plantilla no dispara nada: solo
-      //    queda ofrecida en el selector.
+      //    que el backend. Es seguro porque una plantilla no dispara nada por si
+      //    misma: solo queda ofrecida en el selector.
       expect(createWorkflowTemplate).toHaveBeenCalledWith(
         expect.objectContaining({ active: true }),
       );

@@ -139,12 +139,14 @@ const onSubmit = async (): Promise<void> => {
             </p>
           </div>
 
-          <!-- Estado SOLO informativo. El interruptor que habia aqui era una
-               tercera via de conmutar `active`, y la unica que se saltaba el
-               temporizador de 5 segundos: guardar el formulario con el toggle
-               apagado retiraba la plantilla sin confirmacion. La conmutacion
-               vive centralizada en la botonera del catalogo (CU-10). El borrador
-               conserva el estado que tenia, asi que guardar no lo altera. -->
+          <!-- Estado SOLO informativo, como en `UserDialog.vue`, que tampoco
+               expone `isActive`: el estado se conmuta unicamente desde la tabla.
+               El interruptor que habia aqui era una tercera via de mutar
+               `active` y la unica que se saltaba el temporizador —guardar el
+               formulario con el toggle apagado retiraba la plantilla sin
+               confirmacion. El borrador conserva el estado que traia
+               (`initDraft` lo toma de la plantilla), asi que guardar no lo
+               altera. -->
           <div v-if="isEditing" class="row items-center q-gutter-sm">
             <q-badge
               class="pd-badge"

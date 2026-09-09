@@ -3444,64 +3444,66 @@ topología; comprobar la sintaxis aquí solo evita gastar una petición en un 40
 
 ---
 
-## 2026-09-08 · Poka-Yoke de la conmutación de estado en los catálogos (CU-10) — rama `feat/trigger-imap`
+## 2026-09-08 · Control de estado alineado con el CRUD de usuarios (CU-10) — rama `feat/trigger-imap`
 
 | Archivo | Estado |
 |---|---|
-| `frontend/src/components/workflows/WorkflowsManager.vue` | badge informativo + botonera excluyente |
+| `frontend/src/components/workflows/WorkflowsManager.vue` | badge + par de botones de usuarios |
 | `frontend/src/components/workflow-templates/WorkflowTemplatesManager.vue` | idem |
 | `frontend/src/components/workflow-templates/WorkflowTemplateDialog.vue` | `q-toggle` retirado |
-| `frontend/src/css/app.scss` | `.pd-badge--inactive` sobre `--pd-surface-muted` |
 | `frontend/src/stores/workflow-templates.store.spec.ts` | pruebas 3.7 y 3.8 |
 
 ```
-Frontend → 151 pruebas (antes 149) · 8 archivos · vue-tsc limpio · eslint limpio · quasar build OK
+Frontend → 151 pruebas (antes 149) · 8 archivos · vue-tsc 0 errores · eslint limpio · quasar build OK
 ```
 
-### El «por qué» de cuatro decisiones
+### El patrón replicado, verbatim de `UsersManager.vue`
 
-**1. El `q-toggle` no era solo redundante: era un agujero en CU-10.** Convivía con el botón «block» de
-la botonera, así que había dos controles para la misma mutación —pero solo uno de ellos pasaba por
-`SafeDeleteModal`. El interruptor desactivaba un flujo en marcha con un clic, sin cuenta atrás y sin
-posibilidad de arrepentirse. La regla §4 exige el temporizador para «toda petición de borrado o
-desactivación», y el camino corto la incumplía. Ahora la columna de estado solo **informa** y toda la
-conmutación vive en la botonera, en un control por fila y excluyente: o se ofrece activar, o retirar.
+| Estado | Clases | Icono | Acción |
+|---|---|---|---|
+| Activo | `pd-btn-icon pd-btn-icon--danger` | `block` | `requestDeactivation` → `SafeDeleteModal` (5 s) |
+| Inactivo | `pd-btn-icon pd-btn-icon--positive` | `check_circle` | mutación directa |
 
-**2. `applyActiveState` es privado a las dos acciones.** Ningún control de la tabla lo invoca
-directamente: activar entra por `onActivate` y desactivar SOLO por `confirmDeactivation`. Eso convierte
-la regla en una invariante del componente y no en una convención que el siguiente `q-toggle` pueda
-saltarse por descuido — que es exactamente lo que acababa de pasar.
+Ambos con `outline dense size="sm"`, `aria-label` con el nombre del registro y `q-tooltip`. La columna
+Estado pasa a `q-badge` con `pd-badge--active` / `pd-badge--inactive`, exactamente como
+`body-cell-status` de la tabla de usuarios.
 
-**3. Asimetría deliberada entre activar y desactivar.** Activar no destruye nada, es reversible en un
-clic y su único riesgo real —un grafo roto expuesto a los disparadores— lo cubre el backend, que
-revalida el esquema antes de habilitar. Interponer un diálogo ahí solo añadiría friccion a la acción
-que el operador ejecuta a diario. Desactivar, en cambio, corta la ingesta: un correo que llegue mientras
-el flujo está retirado no se recupera, queda en el buzón sin procesar hasta que alguien lo note. De ahí
-que el botón lleve `.pd-btn-danger` y el tooltip diga explícitamente «Requiere confirmacion de 5
-segundos»: la friccion se anuncia antes de pulsar, no se descubre después.
+### El «por qué» de tres decisiones
 
-**4. El editor de plantillas también perdió su interruptor.** Era una **tercera** vía de conmutar
-`active`, y la más silenciosa: guardar el formulario con el toggle apagado retiraba la plantilla sin
-confirmación de ningún tipo. Se sustituye por un badge de solo lectura que remite al catálogo. El
-borrador conserva el estado que traía (`initDraft` lo toma de la plantilla), así que guardar no lo
-altera nunca; las plantillas nuevas nacen activas, con el mismo criterio que el backend, y publicar una
-plantilla es inocuo porque no dispara nada por sí misma.
+**1. El `q-toggle` no era solo una inconsistencia visual: era un agujero en CU-10.** Convivía con el
+botón `block` de la botonera, así que había dos controles para la misma mutación —pero solo uno pasaba
+por `SafeDeleteModal`. El interruptor desactivaba un flujo en marcha con un clic, sin cuenta atrás. La
+regla §4 exige el temporizador para «toda petición de borrado o desactivación», y el camino corto la
+incumplía. Ahora el estado solo se informa y la conmutación vive en un par de botones excluyentes.
+
+**2. La asimetría entre activar y desactivar es la del CRUD de usuarios, no una invención.**
+`activateUser` muta directo y `requestDeactivation` abre el modal. Tiene el mismo fundamento aquí:
+activar no destruye nada y es reversible, y el único riesgo real —un grafo roto expuesto al sondeo— lo
+cubre el backend, que revalida el esquema antes de habilitar. Desactivar corta la ingesta, y un correo
+que llegue mientras el flujo está retirado se queda en el buzón sin procesar hasta que alguien lo note.
+
+**3. El editor de plantillas también perdió su interruptor, y por precedente explícito.** `UserDialog.vue`
+no expone `isActive`: en el CRUD de usuarios el estado se cambia **solo** desde la tabla. El toggle del
+editor de plantillas era una tercera vía de mutar `active` y la más silenciosa —guardar el formulario
+con el toggle apagado retiraba la plantilla sin confirmación de ningún tipo. Se sustituye por un badge
+de solo lectura que remite al catálogo.
+
+Las pruebas 3.7 y 3.8 son las que hacen sostenible esa retirada: fijan que `saveDraft` conserva el
+`active` existente al editar y que un alta nace publicada. Sin ellas, un cambio futuro en `initDraft`
+podría reintroducir en silencio la mutación de estado al guardar.
 
 ### Lo que las pruebas cubren y lo que no
 
-Vitest corre con `environment: 'node'` y sin `@vue/test-utils`, así que **la asimetría de la botonera no
-es testeable**: es lógica de plantilla y exigiría montar el componente en un DOM. Lo que sí se fija son
-las dos premisas de store sobre las que descansa el rediseño: la 3.7 verifica que `saveDraft` conserva
-el `active` existente al editar —el contrato que permite quitar el toggle del diálogo sin que guardar
-cambie el estado— y la 3.8 que un alta nace publicada. La sincronización reactiva tras la confirmación
-ya estaba cubierta (4.1 y 4.3 en plantillas, 3.2 y 3.3 en flujos): el store escribe la respuesta del
+Vitest corre con `environment: 'node'` y sin `@vue/test-utils`, así que **el par de botones no es
+testeable**: es lógica de plantilla y exigiría montar el componente en un DOM. Lo verificado son las dos
+premisas de store sobre las que descansa el rediseño (3.7 y 3.8) más la sincronización reactiva, que ya
+estaba cubierta (4.1 y 4.3 en plantillas, 3.2 y 3.3 en flujos): el store escribe la respuesta del
 backend y no un parche optimista, de modo que el badge se repinta con lo que de verdad quedó guardado y
 un 400 deja la fila intacta.
 
-### Efecto colateral declarado
+### Nota sobre `.pd-badge--inactive`
 
-`.pd-badge--inactive` es una clase compartida, así que el cambio a `--pd-surface-muted` también afecta a
-los badges «Inactiva» de `/templates` y `/users`. Se ha hecho a propósito en lugar de crear un modificador
-nuevo: es un solo estado semántico, y que «Inactivo» se viera de dos formas distintas según la vista
-sería el defecto real. Los tokens de deshabilitado que usaba antes sugerían un control bloqueado, lectura
-que dejó de tener sentido en cuanto el estado pasó de control a indicador.
+Queda con sus tokens originales (`--pd-disabled-bg` / `--pd-disabled-text`), los mismos que usa el badge
+«Inactivo» de usuarios y plantillas HTML. Un intento anterior de moverlo a `--pd-surface-muted` se
+descartó: es una clase compartida y habría cambiado también `/templates` y `/users`, ajenos a esta
+petición.

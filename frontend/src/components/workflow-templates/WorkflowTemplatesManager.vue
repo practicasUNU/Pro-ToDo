@@ -76,66 +76,55 @@ const onTemplateSaved = (): void => {
   $q.notify({ type: 'positive', message: 'Plantilla guardada correctamente' });
 };
 
-/**
- * Aplica el cambio de estado contra la API.
- *
- * UNICO punto que muta el estado, y privado a las dos acciones de abajo: ningun
- * control de la tabla lo invoca directamente. Publicar entra por `onActivate` y
- * retirar SOLO por la confirmacion del dialogo, de modo que no exista ninguna
- * via de retirar una plantilla con un solo clic.
- *
- * El estado reactivo lo sincroniza el store con la respuesta del backend, no con
- * un parche optimista, asi que la tabla refleja lo que de verdad quedo guardado.
- */
-const applyActiveState = async (
-  template: WorkflowTemplateSummary,
-  active: boolean,
-): Promise<void> => {
-  try {
-    await templatesStore.setActive(template.id, active);
-    $q.notify({
-      type: 'positive',
-      message: active
-        ? `Plantilla "${template.name}" disponible en el asistente.`
-        : `Plantilla "${template.name}" retirada del catalogo.`,
-    });
-  } catch (error) {
-    $q.notify({
-      type: 'negative',
-      message: extractApiErrorMessage(error, 'No se pudo cambiar el estado de la plantilla'),
-    });
-  }
-};
-
-/**
- * Publica la plantilla sin confirmacion.
- *
- * Asimetria deliberada (Poka-Yoke, CU-10): publicar no destruye nada —solo la
- * ofrece en el selector— y es reversible en un clic.
- */
-const onActivate = async (template: WorkflowTemplateSummary): Promise<void> => {
-  await applyActiveState(template, true);
-};
-
-/** Abre la confirmacion con temporizador. NO muta nada por si misma. */
 const requestDeactivation = (template: WorkflowTemplateSummary): void => {
   templateToDeactivate.value = template;
   isDeleteDialogOpen.value = true;
 };
 
 /**
- * Unica via de retirar una plantilla del catalogo.
+ * Retira la plantilla del catalogo (borrado logico del backend).
  *
- * La llama `SafeDeleteModal` tras su cuenta atras de 5 segundos
- * (`frontend-quasar.md` §4): retirarla la saca del asistente y el backend
- * rechaza instanciarla, asi que un operador a medio crear un flujo se queda sin
- * poder terminarlo.
+ * La invoca `SafeDeleteModal` tras su cuenta atras de 5 segundos, igual que la
+ * baja logica de una cuenta en el CRUD de usuarios: retirarla la saca del
+ * selector y el backend rechaza instanciarla, asi que un operador a medio crear
+ * un flujo se queda sin poder terminarlo.
  */
 const confirmDeactivation = async (): Promise<void> => {
   if (!templateToDeactivate.value) return;
 
-  await applyActiveState(templateToDeactivate.value, false);
-  templateToDeactivate.value = null;
+  try {
+    await templatesStore.setActive(templateToDeactivate.value.id, false);
+    $q.notify({ type: 'positive', message: 'Plantilla retirada del catalogo' });
+  } catch (error) {
+    $q.notify({
+      type: 'negative',
+      message: extractApiErrorMessage(error, 'No se pudo retirar la plantilla'),
+    });
+  } finally {
+    templateToDeactivate.value = null;
+  }
+};
+
+/**
+ * Publica la plantilla en el selector del asistente.
+ *
+ * Directa y sin confirmacion, como la reactivacion de una cuenta en el CRUD de
+ * usuarios: publicar no destruye nada —una plantilla no dispara nada por si
+ * misma, solo queda ofrecida— y es reversible.
+ */
+const activateTemplate = async (template: WorkflowTemplateSummary): Promise<void> => {
+  try {
+    await templatesStore.setActive(template.id, true);
+    $q.notify({
+      type: 'positive',
+      message: `Plantilla "${template.name}" disponible en el asistente.`,
+    });
+  } catch (error) {
+    $q.notify({
+      type: 'negative',
+      message: extractApiErrorMessage(error, 'No se pudo activar la plantilla'),
+    });
+  }
 };
 
 onMounted(loadTemplates);
@@ -208,10 +197,10 @@ onMounted(loadTemplates);
         </q-td>
       </template>
 
-      <!-- La columna de estado solo INFORMA. Antes llevaba un `q-toggle`, que
-           duplicaba la conmutacion con el boton de la botonera y —peor— dejaba
-           retirar una plantilla con un solo clic, saltandose el temporizador que
-           exige CU-10. -->
+      <!-- Badge informativo, igual que la columna Estado del CRUD de usuarios.
+           Antes habia aqui un `q-toggle` que duplicaba la conmutacion con la
+           botonera y, ademas, retiraba una plantilla con un solo clic
+           saltandose el temporizador que exige CU-10. -->
       <template #body-cell-status="cellProps">
         <q-td :props="cellProps">
           <q-badge
@@ -230,8 +219,6 @@ onMounted(loadTemplates);
         </q-td>
       </template>
 
-      <!-- Toda la conmutacion de estado vive AQUI, en un solo control por fila y
-           excluyente: o se ofrece publicar, o se ofrece retirar. -->
       <template #body-cell-actions="cellProps">
         <q-td :props="cellProps" class="q-gutter-x-xs">
           <q-btn
@@ -246,38 +233,32 @@ onMounted(loadTemplates);
             <q-tooltip>Editar plantilla</q-tooltip>
           </q-btn>
 
-          <!-- Publicar es directo: no destruye nada y es reversible. -->
+          <!-- Mismo par excluyente que el CRUD de usuarios: retirar pasa por la
+               cuenta atras de `SafeDeleteModal`; publicar es directo. -->
           <q-btn
-            v-if="!cellProps.row.active"
-            class="pd-btn-primary"
-            unelevated
+            v-if="cellProps.row.active"
+            class="pd-btn-icon pd-btn-icon--danger"
+            outline
             dense
-            no-caps
             size="sm"
-            label="Activar"
-            icon-right="play_arrow"
-            :disable="templatesStore.isLoading"
-            :aria-label="`Activar ${cellProps.row.name}`"
-            @click="onActivate(cellProps.row)"
-          >
-            <q-tooltip>Ofrecerla en el selector del asistente</q-tooltip>
-          </q-btn>
-
-          <!-- Retirar es critico y pasa SIEMPRE por la cuenta atras. -->
-          <q-btn
-            v-else
-            class="pd-btn-danger"
-            unelevated
-            dense
-            no-caps
-            size="sm"
-            label="Retirar"
-            icon-right="block"
-            :disable="templatesStore.isLoading"
-            :aria-label="`Retirar ${cellProps.row.name}`"
+            icon="block"
+            :aria-label="`Desactivar ${cellProps.row.name}`"
             @click="requestDeactivation(cellProps.row)"
           >
-            <q-tooltip>Requiere confirmacion de 5 segundos</q-tooltip>
+            <q-tooltip>Desactivar plantilla</q-tooltip>
+          </q-btn>
+
+          <q-btn
+            v-else
+            class="pd-btn-icon pd-btn-icon--positive"
+            outline
+            dense
+            size="sm"
+            icon="check_circle"
+            :aria-label="`Activar ${cellProps.row.name}`"
+            @click="activateTemplate(cellProps.row)"
+          >
+            <q-tooltip>Activar plantilla</q-tooltip>
           </q-btn>
         </q-td>
       </template>

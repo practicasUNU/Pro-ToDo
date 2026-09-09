@@ -1612,17 +1612,17 @@ tres vistas que la separación exige. Cierra el pendiente «sin endpoint para ac
 
 ---
 
-## 16. Poka-Yoke de la conmutación de estado en los catálogos (CU-10)
+## 16. Unificación del control de estado con el CRUD de usuarios (CU-10)
 
-Rama: `feat/trigger-imap`. Elimina la redundancia entre el `q-toggle` de la columna de estado y el
-botón de la botonera en `/flujos` y `/plantillas-flujo`.
+Rama: `feat/trigger-imap`. Sustituye el `q-toggle` de `/flujos` y `/plantillas-flujo` por el patrón de
+botón que ya usa la tabla de usuarios.
 
-- [x] 1. Columna de estado: `q-toggle` → `q-badge` informativo (`--pd-positive` / `--pd-surface-muted`)
-- [x] 2. Botonera: botón primario «Activar» si está inactivo; botón crítico con `SafeDeleteModal` si está activo
-- [x] 3. Retirado el `q-toggle` del editor de plantillas, tercera vía que saltaba el temporizador
-- [x] 4. `.pd-badge--inactive` pasa a `--pd-surface-muted` + `--pd-text-secondary` + borde
-- [x] 5. Pruebas 3.7 y 3.8 en `workflow-templates.store.spec.ts` ⇒ verificación + commit
+- [x] 1. Columna Estado: `q-toggle` → `q-badge` (`pd-badge--active` / `pd-badge--inactive`), como en usuarios
+- [x] 2. Botonera: par excluyente `pd-btn-icon--danger`/`block` y `pd-btn-icon--positive`/`check_circle`
+- [x] 3. `activateWorkflow` / `activateTemplate` mutan directo; desactivar solo vía `SafeDeleteModal`
+- [x] 4. Retirado el `q-toggle` del editor de plantillas (`UserDialog.vue` tampoco expone `isActive`)
+- [x] 5. Pruebas 3.7 y 3.8 en `workflow-templates.store.spec.ts` ⇒ `npm test` + `vue-tsc` en verde
 
-**Invariante que impone el rediseño:** `applyActiveState` es privado a las dos acciones del catálogo.
-Activar entra por `onActivate` (directo, reversible) y desactivar SOLO por `confirmDeactivation`, que
-invoca `SafeDeleteModal`. No queda ninguna vía de retirar un flujo o una plantilla con un solo clic.
+**Referencia del patrón:** `frontend/src/components/users/UsersManager.vue`, columna de acciones
+(`requestDeactivation` + `activateUser`). Se replican clases, iconos, `outline dense size="sm"`,
+`aria-label` y tooltip.
