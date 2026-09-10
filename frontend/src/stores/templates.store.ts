@@ -134,11 +134,17 @@ export const useTemplatesStore = defineStore('templates', () => {
     cursorPosition.value = position + snippet.length - CLOSING_BRACES_LENGTH;
   };
 
-  const fetchTemplates = async (): Promise<void> => {
+  /**
+   * Carga el catalogo.
+   *
+   * @param includeInactive `true` en la tabla administrativa, que muestra las
+   *        retiradas con su badge y permite reactivarlas.
+   */
+  const fetchTemplates = async (includeInactive = false): Promise<void> => {
     isLoading.value = true;
 
     try {
-      templates.value = await templatesService.fetchTemplates();
+      templates.value = await templatesService.fetchTemplates(includeInactive);
     } finally {
       isLoading.value = false;
     }

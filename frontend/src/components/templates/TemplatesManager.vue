@@ -55,7 +55,11 @@ const columns: QTableColumn<HtmlTemplate>[] = [
 
 const loadTemplates = async (): Promise<void> => {
   try {
-    await templatesStore.fetchTemplates();
+    // `true` a proposito: esta es la tabla ADMINISTRATIVA, donde una plantilla
+    // retirada debe seguir viendose (con su badge) para poder reactivarla. El
+    // selector Poka-Yoke del nodo MAPEADOR_PLANTILLA usa el default y solo
+    // recibe las activas.
+    await templatesStore.fetchTemplates(true);
   } catch (error) {
     $q.notify({
       type: 'negative',
@@ -101,6 +105,25 @@ const confirmDeactivation = async (): Promise<void> => {
     });
   } finally {
     templateToDeactivate.value = null;
+  }
+};
+
+/**
+ * Reactiva una plantilla retirada.
+ *
+ * Sin confirmacion diferida, al contrario que la desactivacion: reactivar es
+ * reversible con un clic y no rompe ningun flujo en marcha. La cuenta atras de
+ * `SafeDeleteModal` se reserva para la accion destructiva.
+ */
+const activateTemplate = async (template: HtmlTemplate): Promise<void> => {
+  try {
+    await templatesStore.updateTemplate(template.id, { active: true });
+    $q.notify({ type: 'positive', message: 'Plantilla activada correctamente' });
+  } catch (error) {
+    $q.notify({
+      type: 'negative',
+      message: extractApiErrorMessage(error, 'No se pudo activar la plantilla'),
+    });
   }
 };
 
@@ -213,6 +236,7 @@ onMounted(loadTemplates);
           </q-btn>
 
           <q-btn
+            v-if="cellProps.row.active"
             class="pd-btn-icon pd-btn-icon--danger"
             outline
             dense
@@ -222,6 +246,19 @@ onMounted(loadTemplates);
             @click="requestDeactivation(cellProps.row)"
           >
             <q-tooltip>Desactivar plantilla</q-tooltip>
+          </q-btn>
+
+          <q-btn
+            v-else
+            class="pd-btn-icon pd-btn-icon--positive"
+            outline
+            dense
+            size="sm"
+            icon="check_circle"
+            :aria-label="`Activar ${cellProps.row.name}`"
+            @click="activateTemplate(cellProps.row)"
+          >
+            <q-tooltip>Reactivar plantilla</q-tooltip>
           </q-btn>
         </q-td>
       </template>

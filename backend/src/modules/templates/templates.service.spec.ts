@@ -387,6 +387,58 @@ describe('TemplatesService', () => {
       expect(stored.htmlContent).toBe('<h1>{{parsed_email.clean_title}}</h1>');
       expect(repository.save).not.toHaveBeenCalled();
     });
+
+    // `softDelete` solo sabe apagar la plantilla; reactivarla pasa por aqui. Sin
+    // estos casos, la tabla administrativa mostraria filas inactivas que ninguna
+    // ruta puede recuperar.
+    it('4.3 deberia reactivar una plantilla retirada', async () => {
+      // 1. Arrange
+      const repository = buildRepository();
+      repository.findOne.mockResolvedValue({
+        ...STORED_TEMPLATE,
+        active: false,
+      });
+      const service = buildService(repository);
+
+      // 2. Act
+      const result = await service.update(TEMPLATE_ID, { active: true });
+
+      // 3. Assert
+      expect(result.active).toBe(true);
+      expect(repository.save).toHaveBeenCalledTimes(1);
+    });
+
+    it('4.4 deberia retirar una plantilla activa desde la edicion', async () => {
+      // 1. Arrange
+      const repository = buildRepository();
+      repository.findOne.mockResolvedValue({ ...STORED_TEMPLATE });
+      const service = buildService(repository);
+
+      // 2. Act
+      const result = await service.update(TEMPLATE_ID, { active: false });
+
+      // 3. Assert
+      expect(result.active).toBe(false);
+    });
+
+    it('4.5 NO deberia tocar active cuando el DTO lo omite', async () => {
+      // 1. Arrange: parte de una plantilla ya retirada
+      const repository = buildRepository();
+      repository.findOne.mockResolvedValue({
+        ...STORED_TEMPLATE,
+        active: false,
+      });
+      const service = buildService(repository);
+
+      // 2. Act: se edita solo la descripcion
+      const result = await service.update(TEMPLATE_ID, {
+        description: 'Descripcion nueva',
+      });
+
+      // 3. Assert: editar el texto no puede resucitar una plantilla retirada
+      expect(result.active).toBe(false);
+      expect(result.description).toBe('Descripcion nueva');
+    });
   });
 
   describe('5. Borrado logico', () => {

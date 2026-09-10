@@ -69,17 +69,32 @@ const toggleLeftDrawer = (): void => {
           <q-item-section avatar>
             <q-icon name="description" size="20px" />
           </q-item-section>
-          <q-item-section class="pd-nav">Plantillas</q-item-section>
+          <q-item-section class="pd-nav">Plantillas-HTML</q-item-section>
         </q-item>
 
-        <!-- El catalogo de flujos instanciados. Sustituye a la entrada "Nuevo
-             Flujo": el asistente se alcanza desde aqui con su propio boton, que
-             es el orden natural —primero se ve lo que hay, luego se crea. -->
-        <q-item to="/flujos" clickable v-ripple>
+        <!-- El catalogo de flujos instanciados. Va ANTES del asistente porque
+             ese es el orden natural: primero se ve lo que hay, luego se crea.
+             El boton "Nuevo Flujo" de esta misma vista sigue existiendo; la
+             entrada del menu es el atajo para quien ya sabe que va a crear.
+
+             `exact` es OBLIGATORIO desde que el asistente tiene su propia
+             entrada: sin el, vue-router marca activa esta tambien en
+             /flujos/nuevo y /flujos/:id/editar, y se resaltarian dos items del
+             menu a la vez. -->
+        <q-item to="/flujos" exact clickable v-ripple>
           <q-item-section avatar>
             <q-icon name="auto_awesome_motion" size="20px" />
           </q-item-section>
           <q-item-section class="pd-nav">Flujos</q-item-section>
+        </q-item>
+
+        <!-- Asistente de alta. Aqui `exact` no hace falta: /flujos/nuevo no es
+             padre de ninguna otra ruta, asi que solo casa consigo misma. -->
+        <q-item to="/flujos/nuevo" clickable v-ripple>
+          <q-item-section avatar>
+            <q-icon name="add_circle_outline" size="20px" />
+          </q-item-section>
+          <q-item-section class="pd-nav">Nuevo Flujo</q-item-section>
         </q-item>
 
         <q-item to="/plantillas-flujo" clickable v-ripple>

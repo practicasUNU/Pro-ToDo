@@ -1052,7 +1052,7 @@ describe('useFlujoDraftStore · modo edicion', () => {
       expect(payload).not.toHaveProperty('templateId');
     });
 
-    it('14.4 deberia volver a crear tras resetDraft', async () => {
+    it('14.4 deberia volver a crear tras resetDraft', () => {
       // 1. Arrange
       const draft = useFlujoDraftStore();
       draft.hydrateForEdit(buildWorkflowDetail());

@@ -15,6 +15,9 @@ vi.mock('@services/workflow-templates.service', () => ({
   updateWorkflowTemplate: vi.fn(),
   deactivateWorkflowTemplate: vi.fn(),
 }));
+vi.mock('@services/fsm.service', () => ({
+  validatePipelineSchema: vi.fn(),
+}));
 
 const service = await import('@services/workflow-templates.service');
 const fetchWorkflowTemplates = vi.mocked(service.fetchWorkflowTemplates);
@@ -22,6 +25,9 @@ const fetchWorkflowTemplate = vi.mocked(service.fetchWorkflowTemplate);
 const createWorkflowTemplate = vi.mocked(service.createWorkflowTemplate);
 const updateWorkflowTemplate = vi.mocked(service.updateWorkflowTemplate);
 const deactivateWorkflowTemplate = vi.mocked(service.deactivateWorkflowTemplate);
+
+const fsmService = await import('@services/fsm.service');
+const validatePipelineSchema = vi.mocked(fsmService.validatePipelineSchema);
 
 const TEMPLATE_ID = 'b3f1c2d4-5a6b-4c7d-8e9f-0a1b2c3d4e5f';
 const OTHER_TEMPLATE_ID = 'c4a2d3e5-6f7b-4c8d-9e0f-1a2b3c4d5e6f';
@@ -388,6 +394,66 @@ describe('useWorkflowTemplatesStore · catalogo de plantillas de flujo', () => {
       //    tabla en la que el operador acaba de pulsar, y esa tabla es el unico
       //    sitio desde el que puede volver a activarla.
       expect(store.templates).toHaveLength(1);
+    });
+  });
+
+  describe('4bis. Validacion del grafo contra el motor', () => {
+    it('4bis.1 deberia enviar el esquema PARSEADO, no el texto', async () => {
+      // 1. Arrange
+      const store = useWorkflowTemplatesStore();
+      store.initDraft();
+      validatePipelineSchema.mockResolvedValue({
+        success: true,
+        schema: SCHEMA,
+      } as Awaited<ReturnType<typeof fsmService.validatePipelineSchema>>);
+
+      // 2. Act
+      await store.validateDraftSchema();
+
+      // 3. Assert: el store es el dueno del borrador y el unico que sabe que
+      // `schemaText` es texto de un objeto.
+      const [sent] = validatePipelineSchema.mock.calls[0] ?? [];
+      expect(typeof sent).toBe('object');
+      expect(sent).toHaveProperty('entrypoint');
+    });
+
+    it('4bis.2 NO deberia llamar al backend con un JSON roto', async () => {
+      // 1. Arrange
+      const store = useWorkflowTemplatesStore();
+      store.patchDraft({ schemaText: '{ esto no parsea' });
+
+      // 2. Act & 3. Assert: gastar una peticion en un 400 seguro no aporta
+      // nada, y el mensaje del motor de JS es mas preciso que el del servidor.
+      await expect(store.validateDraftSchema()).rejects.toThrow('no es un JSON valido');
+      expect(validatePipelineSchema).not.toHaveBeenCalled();
+    });
+
+    it('4bis.3 deberia propagar el error del servicio sin capturarlo', async () => {
+      // 1. Arrange
+      const store = useWorkflowTemplatesStore();
+      store.initDraft();
+      validatePipelineSchema.mockRejectedValue(new Error('400'));
+
+      // 2. Act & 3. Assert: el componente necesita el AxiosError intacto para
+      // sacarle los `issues` y pintarlos en el editor (§2.1).
+      await expect(store.validateDraftSchema()).rejects.toThrow('400');
+    });
+
+    it('4bis.4 NO deberia guardar nada al validar', async () => {
+      // 1. Arrange
+      const store = useWorkflowTemplatesStore();
+      store.initDraft();
+      validatePipelineSchema.mockResolvedValue({
+        success: true,
+        schema: SCHEMA,
+      } as Awaited<ReturnType<typeof fsmService.validatePipelineSchema>>);
+
+      // 2. Act
+      await store.validateDraftSchema();
+
+      // 3. Assert: validar es una comprobacion, no una escritura.
+      expect(createWorkflowTemplate).not.toHaveBeenCalled();
+      expect(updateWorkflowTemplate).not.toHaveBeenCalled();
     });
   });
 

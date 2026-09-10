@@ -5,10 +5,14 @@ import { resolveNodeStore } from '@stores/nodes/node-store-registry';
 import * as workflowTemplatesService from '@services/workflow-templates.service';
 import * as workflowsService from '@services/workflows.service';
 
+import {
+  assemblePipelineSchema as buildPipelineSchema,
+  INITIAL_SCHEMA_VERSION,
+} from '@/utils/pipeline-assembler';
+
 import { toWizardStep } from '@/types/pipeline';
 
 import type {
-  AssembledPipelineNode,
   AssembledPipelineSchema,
   PipelineSummary,
   WizardStep,
@@ -28,9 +32,6 @@ import type {
  * activo puede avanzar PREGUNTA al store del nodo por su `isConfigValid`,
  * resolviendolo por `nodeType` a traves de `node-store-registry`.
  */
-/** SemVer inicial de todo esquema que el asistente genera. */
-const INITIAL_SCHEMA_VERSION = '1.0.0';
-
 export const useFlujoDraftStore = defineStore('flujoDraft', () => {
   /**
    * Catalogo de blueprints del que parte el asistente.
@@ -315,31 +316,25 @@ export const useFlujoDraftStore = defineStore('flujoDraft', () => {
    * el comportamiento correcto por defecto.
    */
   const assemblePipelineSchema = (name: string): AssembledPipelineSchema => {
-    const nodes: Record<string, AssembledPipelineNode> = {};
+    // El encadenado (`entrypoint`, `nextStep`, `onErrorStep`) lo hace el helper
+    // compartido: el editor de plantillas ensambla el mismo grafo desde otra
+    // entrada, y dos implementaciones divergirian. Lo que aporta el agregador es
+    // resolver los `params` de cada nodo pidiendoselos a su propio store.
+    const steps = pipelineTopology.value.map((step) => ({
+      nodeId: step.nodeId,
+      nodeType: step.nodeType,
+      outputNamespace: step.outputNamespace,
+      params: resolveNodeStore(step.nodeType, step.nodeId)?.toNodeParams() ?? {},
+    }));
 
-    pipelineTopology.value.forEach((step, index) => {
-      const store = resolveNodeStore(step.nodeType, step.nodeId);
-
-      nodes[step.nodeId] = {
-        nodeId: step.nodeId,
-        nodeType: step.nodeType,
-        outputNamespace: step.outputNamespace,
-        nextStep: pipelineTopology.value[index + 1]?.nodeId ?? null,
-        onErrorStep: null,
-        params: store?.toNodeParams() ?? {},
-      };
-    });
-
-    return {
+    return buildPipelineSchema(steps, {
       // El backend ignora este `flowId` y asigna el de la fila que crea; viaja
       // porque `PipelineSchemaDto` lo exige y la plantilla de origen es la
       // referencia mas honesta hasta que exista la fila nueva.
       flowId: selectedTemplateId.value ?? '',
       name,
       version: INITIAL_SCHEMA_VERSION,
-      entrypoint: pipelineTopology.value[0]?.nodeId ?? '',
-      nodes,
-    };
+    });
   };
 
   /**

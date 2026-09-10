@@ -210,6 +210,14 @@ export class TemplatesService {
       template.htmlContent = updateTemplateDto.htmlContent;
     }
 
+    // Unica via para REACTIVAR una plantilla retirada: `softDelete` solo sabe
+    // apagarla. Sin esto, la tabla administrativa mostraria filas inactivas
+    // imposibles de recuperar. Mismo criterio que `UsersController` con
+    // `isActive`.
+    if (updateTemplateDto.active !== undefined) {
+      template.active = updateTemplateDto.active;
+    }
+
     return this.templateRepository.save(template);
   }
 

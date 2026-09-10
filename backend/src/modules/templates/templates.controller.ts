@@ -9,6 +9,7 @@ import {
   ParseUUIDPipe,
   Post,
   Put,
+  Query,
   UseGuards,
 } from '@nestjs/common';
 import {
@@ -17,6 +18,7 @@ import {
   ApiForbiddenResponse,
   ApiNotFoundResponse,
   ApiOperation,
+  ApiQuery,
   ApiTags,
   ApiUnauthorizedResponse,
 } from '@nestjs/swagger';
@@ -59,9 +61,22 @@ export class TemplatesController {
   constructor(private readonly templatesService: TemplatesService) {}
 
   @Get()
-  @ApiOperation({ summary: 'Lista las plantillas activas' })
-  public async findAll(): Promise<HtmlTemplate[]> {
-    return this.templatesService.findAll();
+  @ApiOperation({
+    summary: 'Lista las plantillas; por defecto solo las activas',
+  })
+  @ApiQuery({
+    name: 'includeInactive',
+    required: false,
+    description:
+      'Incluye las plantillas retiradas. Para la tabla administrativa; el selector Poka-Yoke del nodo MAPEADOR_PLANTILLA las omite',
+  })
+  public async findAll(
+    @Query('includeInactive') includeInactive?: string,
+  ): Promise<HtmlTemplate[]> {
+    // Se exige el literal "true" y no una conversion laxa: un query param mal
+    // escrito debe caer del lado seguro, que es no mostrar las retiradas. Es el
+    // mismo criterio que `WorkflowTemplatesController`.
+    return this.templatesService.findAll(includeInactive !== 'true');
   }
 
   @Get(':id')

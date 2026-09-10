@@ -1,10 +1,16 @@
 import { defineStore, acceptHMRUpdate } from 'pinia';
 import { computed, ref } from 'vue';
 
+import * as fsmService from '@services/fsm.service';
 import * as workflowTemplatesService from '@services/workflow-templates.service';
 
+import { assemblePipelineSchema, disassemblePipelineSchema } from '@/utils/pipeline-assembler';
+
+import type { AssemblerStep } from '@/utils/pipeline-assembler';
 import type {
+  AssembledPipelineSchema,
   CreateWorkflowTemplatePayload,
+  ValidateSchemaResult,
   WorkflowTemplateDetail,
   WorkflowTemplateSummary,
 } from '@/types/pipeline';
@@ -66,6 +72,21 @@ export const useWorkflowTemplatesStore = defineStore('workflowTemplates', () => 
     active: true,
   });
 
+  /**
+   * Secuencia de nodos que compone el ensamblador, EN ORDEN DE EJECUCION.
+   *
+   * Es la segunda cara del mismo grafo que `activeDraft.schemaText`, y la
+   * sincronizacion es de UNA SOLA DIRECCION: la secuencia manda sobre el texto,
+   * nunca al reves. Un `watch` sobre el texto que reconstruyera la secuencia
+   * pelearia con el editor en cada pulsacion —el JSON pasa por estados
+   * intermedios que no parsean— y el cursor saltaria solo.
+   *
+   * El texto sigue siendo editable a mano; lo que se pierde al tocar el selector
+   * despues es la topologia escrita a mano, no los `params`, que se reinyectan
+   * por `nodeId` en `rebuildSchemaFromSequence`.
+   */
+  const sequence = ref<AssemblerStep[]>([]);
+
   /** Solo las disponibles, que son las que el asistente puede instanciar. */
   const activeTemplates = computed<WorkflowTemplateSummary[]>(() =>
     templates.value.filter((template) => template.active),
@@ -117,10 +138,81 @@ export const useWorkflowTemplatesStore = defineStore('workflowTemplates', () => 
       ...(template?.description ? { description: template.description } : {}),
     };
     selectedTemplate.value = template ?? null;
+
+    // La secuencia se DERIVA del grafo que se acaba de cargar, recorriendolo
+    // desde `entrypoint`. Sin esto, editar una plantilla existente mostraria el
+    // selector vacio junto a un JSON lleno, y el primer cambio en el selector
+    // borraria la topologia guardada.
+    sequence.value = readSequenceFrom(activeDraft.value.schemaText);
   };
 
   const patchDraft = (patch: Partial<WorkflowTemplateDraft>): void => {
     activeDraft.value = { ...activeDraft.value, ...patch };
+  };
+
+  /**
+   * Lee la secuencia de un documento JSON, o `[]` si no es un grafo legible.
+   *
+   * Tolera el texto invalido a proposito y sin propagar el error: se invoca al
+   * ABRIR el dialogo, y un grafo corrupto en la base de datos no debe impedir
+   * abrir el editor —que es justamente donde se arregla.
+   */
+  const readSequenceFrom = (schemaText: string): AssemblerStep[] => {
+    try {
+      const parsed = JSON.parse(schemaText) as AssembledPipelineSchema;
+      return disassemblePipelineSchema(parsed);
+    } catch {
+      return [];
+    }
+  };
+
+  /**
+   * Reescribe `schemaText` a partir de la secuencia actual.
+   *
+   * Conserva `flowId`, `name` y `version` del documento vigente en vez de
+   * regenerarlos: son metadatos que el operador puede haber ajustado a mano en
+   * el editor, y el selector solo es dueno de la TOPOLOGIA.
+   *
+   * Se reindenta a dos espacios, igual que `initDraft`.
+   */
+  const rebuildSchemaFromSequence = (): void => {
+    let current: Partial<AssembledPipelineSchema>;
+
+    try {
+      current = JSON.parse(activeDraft.value.schemaText) as AssembledPipelineSchema;
+    } catch {
+      // Un JSON roto no bloquea el ensamblador: se regenera desde cero, que es
+      // exactamente la via por la que el operador sale de un documento invalido.
+      current = {};
+    }
+
+    const schema = assemblePipelineSchema(sequence.value, {
+      flowId: current.flowId ?? 'plantilla-nueva',
+      name: current.name ?? activeDraft.value.name.trim(),
+      ...(current.version !== undefined ? { version: current.version } : {}),
+    });
+
+    patchDraft({ schemaText: JSON.stringify(schema, null, 2) });
+  };
+
+  /**
+   * Sustituye la secuencia completa y regenera el grafo.
+   *
+   * Recibe la secuencia entera y no una operacion (anadir / quitar / mover)
+   * porque el componente ya la manipula como arreglo: exponer aqui las tres
+   * operaciones obligaria a duplicar en el store una logica de lista que Vue ya
+   * resuelve, y a mantener las dos versiones de acuerdo.
+   */
+  const setSequence = (steps: AssemblerStep[]): void => {
+    sequence.value = steps;
+    rebuildSchemaFromSequence();
+  };
+
+  /** Reemplaza los `params` de un nodo concreto y regenera el grafo. */
+  const patchStepParams = (nodeId: string, params: Record<string, unknown>): void => {
+    setSequence(
+      sequence.value.map((step) => (step.nodeId === nodeId ? { ...step, params } : step)),
+    );
   };
 
   const fetchTemplates = async (includeInactive = false): Promise<void> => {
@@ -187,6 +279,29 @@ export const useWorkflowTemplatesStore = defineStore('workflowTemplates', () => 
     }
   };
 
+  /**
+   * Valida el grafo del borrador contra el motor, sin persistirlo.
+   *
+   * El JSON se parsea AQUI por el mismo motivo que en `saveDraft`: el store es
+   * el dueno del borrador, y el componente no debe conocer que `schemaText` es
+   * texto de un objeto.
+   *
+   * No captura el error del servicio (§2.1): el componente necesita el
+   * `AxiosError` intacto para sacarle los `issues` con `extractApiIssues` y
+   * pintarlos en el editor.
+   *
+   * @throws Error Si el JSON del borrador no parsea.
+   */
+  const validateDraftSchema = async (): Promise<ValidateSchemaResult> => {
+    if (schemaSyntaxError.value !== null) {
+      throw new Error(`El esquema no es un JSON valido: ${schemaSyntaxError.value}`);
+    }
+
+    const pipelineSchema = JSON.parse(activeDraft.value.schemaText) as Record<string, unknown>;
+
+    return fsmService.validatePipelineSchema(pipelineSchema);
+  };
+
   /** Cambia la disponibilidad sin abrir el editor, desde el toggle de la tabla. */
   const setActive = async (id: string, active: boolean): Promise<WorkflowTemplateDetail> => {
     isLoading.value = true;
@@ -221,6 +336,7 @@ export const useWorkflowTemplatesStore = defineStore('workflowTemplates', () => 
   const resetDraft = (): void => {
     activeDraft.value = { name: '', schemaText: BLANK_SCHEMA_TEXT, active: true };
     selectedTemplate.value = null;
+    sequence.value = [];
   };
 
   return {
@@ -231,11 +347,16 @@ export const useWorkflowTemplatesStore = defineStore('workflowTemplates', () => 
     activeTemplates,
     schemaSyntaxError,
     isDraftValid,
+    sequence,
     initDraft,
     patchDraft,
+    setSequence,
+    patchStepParams,
+    rebuildSchemaFromSequence,
     fetchTemplates,
     loadForEdit,
     saveDraft,
+    validateDraftSchema,
     setActive,
     resetDraft,
   };

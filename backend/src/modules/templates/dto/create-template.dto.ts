@@ -1,5 +1,11 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
-import { IsNotEmpty, IsOptional, IsString, MaxLength } from 'class-validator';
+import {
+  IsBoolean,
+  IsNotEmpty,
+  IsOptional,
+  IsString,
+  MaxLength,
+} from 'class-validator';
 
 /**
  * Alta de plantilla (PROT-11.1).
@@ -41,4 +47,15 @@ export class CreateTemplateDto {
   @IsString()
   @IsNotEmpty()
   htmlContent: string;
+
+  @ApiPropertyOptional({
+    description:
+      'Disponibilidad de la plantilla. En el alta se ignora (toda plantilla nace activa); ' +
+      'en la edicion es la via para reactivar una retirada desde la tabla administrativa.',
+    example: true,
+    default: true,
+  })
+  @IsOptional()
+  @IsBoolean()
+  active?: boolean;
 }

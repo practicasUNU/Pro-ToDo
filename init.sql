@@ -37,15 +37,40 @@ CREATE TABLE usuarios (
 );
 
 -- =============================================================================
--- Tabla: TIPOS_NODO
+-- Tabla: NODOS (catálogo estático)
+-- Duplicada en db/migrations/011-catalogo-nodos.sql para las bases de datos ya
+-- creadas: este archivo solo se ejecuta con el volumen de Docker vacío.
+--
+-- Es el catálogo de tipos de nodo que el motor sabe ejecutar, NO una tabla de
+-- instancias: la secuencia de pasos de cada flujo vive íntegra en
+-- `flujos.configuracion_pipeline` (JSONB). La tabla de instancias que antes
+-- ocupaba este nombre se eliminó en la migración 011 por describir lo mismo.
+--
+-- `ui_schema` describe el formulario que el frontend pinta para configurar los
+-- `params` de este tipo de nodo. NOT NULL con default '{}' para que el
+-- consumidor no tenga que distinguir "sin descriptor" de "nulo".
+--
+-- Las restricciones se nombran a mano con el nombre de la columna, sin prefijos
+-- (`id_nodo`, no `pk_nodos`): es la convencion del proyecto, y ademas garantiza
+-- que un clonado nuevo desde este archivo y una base migrada con la 011 tengan
+-- exactamente los mismos nombres.
+--
+-- La UNIQUE se llama `nodos_codigo` y no `codigo` a secas por una restriccion de
+-- PostgreSQL: una UNIQUE (y una PRIMARY KEY) crea un indice homonimo, y los
+-- indices comparten un unico espacio de nombres por esquema. `codigo` es una
+-- columna que existe en varias tablas, asi que reservar ese nombre de indice
+-- para `nodos` bloquearia a la siguiente que lo necesitara.
 -- =============================================================================
 
-CREATE TABLE tipos_nodo (
-    id_tipo_nodo UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-    codigo VARCHAR(50) NOT NULL UNIQUE,
+CREATE TABLE nodos (
+    id_nodo UUID DEFAULT uuid_generate_v4(),
+    codigo VARCHAR(50) NOT NULL,
     nombre VARCHAR(100) NOT NULL,
     categoria enum_categoria NOT NULL,
-    descripcion VARCHAR(255)
+    descripcion VARCHAR(255),
+    ui_schema JSONB NOT NULL DEFAULT '{}',
+    CONSTRAINT id_nodo PRIMARY KEY (id_nodo),
+    CONSTRAINT nodos_codigo UNIQUE (codigo)
 );
 
 -- =============================================================================
@@ -122,20 +147,6 @@ CREATE TABLE flujos (
 );
 
 -- =============================================================================
--- Tabla: NODOS
--- =============================================================================
-
-CREATE TABLE nodos (
-    id_nodo UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-    id_flujo UUID NOT NULL REFERENCES flujos(id_flujo) ON DELETE CASCADE,
-    id_tipo_nodo UUID NOT NULL REFERENCES tipos_nodo(id_tipo_nodo),
-    id_plantilla UUID REFERENCES plantillas_html(id_plantilla) ON DELETE SET NULL,
-    orden_paso SMALLINT NOT NULL,
-    nombre VARCHAR(100) NOT NULL,
-    configuracion_parametros JSONB
-);
-
--- =============================================================================
 -- Tabla: EJECUCIONES_FLUJO
 -- =============================================================================
 
@@ -154,17 +165,31 @@ CREATE TABLE ejecuciones_flujo (
 
 -- =============================================================================
 -- Tabla: LOGS_NODO
+--
+-- Restricciones nombradas con el nombre de la columna, sin prefijos, igual que
+-- en `nodos`.
 -- =============================================================================
 
 CREATE TABLE logs_nodo (
-    id_log_nodo UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-    id_ejecucion UUID NOT NULL REFERENCES ejecuciones_flujo(id_ejecucion) ON DELETE CASCADE,
-    id_nodo UUID NOT NULL REFERENCES nodos(id_nodo) ON DELETE CASCADE,
+    id_log_nodo UUID DEFAULT uuid_generate_v4(),
+    id_ejecucion UUID NOT NULL,
+    -- `nodeId` del `configuracion_pipeline`, NO una clave ajena y por eso sin
+    -- `REFERENCES`: el nodo es un objeto del JSONB, y `nodos` es el catálogo de
+    -- TIPOS, no una tabla de instancias donde buscar esta fila. Antes de la
+    -- migración 011 este par de nombres sí era una clave ajena; ya no lo es.
+    --
+    -- VARCHAR(50) es el límite que ya impone `PipelineNodeConfigDto.nodeId`.
+    -- Nullable porque un fallo puede ocurrir antes de que el motor resuelva en
+    -- qué nodo estaba.
+    id_nodo VARCHAR(50),
     estado_nodo enum_estado_nodo NOT NULL,
     codigo_respuesta_http SMALLINT,
     tiempo_ejecucion_ms INTEGER,
     ruta_archivo_log VARCHAR(255),
-    fecha_creacion TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    fecha_creacion TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT id_log_nodo PRIMARY KEY (id_log_nodo),
+    CONSTRAINT id_ejecucion FOREIGN KEY (id_ejecucion)
+        REFERENCES ejecuciones_flujo(id_ejecucion) ON DELETE CASCADE
 );
 
 -- =============================================================================
@@ -236,8 +261,6 @@ CREATE INDEX idx_flujos_id_usuario_creador ON flujos(id_usuario_creador);
 -- Responde "qué flujos salieron de esta plantilla", la consulta obligada antes
 -- de retirar un maestro
 CREATE INDEX idx_flujos_id_plantilla_origen ON flujos(id_plantilla_origen);
-CREATE INDEX idx_nodos_id_flujo ON nodos(id_flujo);
-CREATE INDEX idx_nodos_id_tipo_nodo ON nodos(id_tipo_nodo);
 CREATE INDEX idx_ejecuciones_flujo_id_flujo ON ejecuciones_flujo(id_flujo);
 
 -- Mutex de ejecucion (PROT-08): indice unico PARCIAL. Solo aplica mientras la
@@ -259,7 +282,7 @@ CREATE INDEX idx_alertas_error_id_ejecucion ON alertas_error(id_ejecucion);
 -- `pipeline_schema` puede declarar hoy. `TRIGGER_CRON` y `DESTINO_ACENS` siguen
 -- en el catalogo a la espera de su estrategia; hasta entonces no son
 -- referenciables desde `flujos.configuracion_pipeline` (ver migracion 005).
-INSERT INTO tipos_nodo (codigo, nombre, categoria, descripcion) VALUES
+INSERT INTO nodos (codigo, nombre, categoria, descripcion) VALUES
     ('TRIGGER_IMAP', 'Disparador IMAP', 'TRIGGER', 'Inicia el flujo mediante la lectura de correos entrantes'),
     ('PARSER_PRE_IA', 'Parser Pre-IA', 'PROCESAMIENTO', 'Decodifica el contenido MIME y sanitiza el texto antes de llamar al modelo'),
     ('EXTRACTOR_WEB', 'Extractor Web', 'PROCESAMIENTO', 'Extrae y sanitiza contenido desde una pagina web'),

@@ -31,7 +31,13 @@ export const SEMVER_PATTERN = /^\d+\.\d+\.\d+$/;
  *
  * Es un enum y no un union type porque `@IsEnum()` de class-validator necesita
  * un objeto disponible en runtime. Los valores replican el `codigo` de la tabla
- * `tipos_nodo` (ver `db/migrations/005-tipos-nodo-fsm.sql`).
+ * `nodos`, el catalogo estatico de tipos (ver `db/migrations/011-catalogo-nodos.sql`;
+ * la tabla se llamaba `tipos_nodo` hasta esa migracion).
+ *
+ * El catalogo tiene NUEVE filas y este enum solo declara siete: `TRIGGER_CRON` y
+ * `DESTINO_ACENS` siguen sin estrategia, asi que no son expresables en un
+ * `pipeline_schema`. `GET /api/nodos` los devuelve marcados con
+ * `implemented: false` para que el selector del frontend los deshabilite.
  */
 export enum NodeType {
   TRIGGER_IMAP = 'TRIGGER_IMAP',

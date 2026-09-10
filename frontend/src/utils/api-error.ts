@@ -1,6 +1,7 @@
 import axios from 'axios';
 
 import type { TemplateViolation } from '@/types/html-template';
+import type { SchemaIssue } from '@/types/pipeline';
 
 // Helper puro (frontend-architecture.md §3): sin estado ni I/O, solo lee un
 // error ya resuelto por Axios.
@@ -9,6 +10,7 @@ import type { TemplateViolation } from '@/types/html-template';
 interface ApiErrorBody {
   message?: string | string[];
   violations?: TemplateViolation[];
+  issues?: SchemaIssue[];
 }
 
 /**
@@ -47,4 +49,26 @@ export const extractApiViolations = (error: unknown): TemplateViolation[] => {
   const { violations } = error.response?.data ?? {};
 
   return Array.isArray(violations) ? violations : [];
+};
+
+/**
+ * Extrae los campos invalidos que el validador del FSM adjunta a un 400.
+ *
+ * Hermano de `extractApiViolations` y separado de el a proposito: son dos
+ * contratos distintos de dos endpoints distintos. Las plantillas HTML devuelven
+ * `violations` (con `type` y `target`, que se buscan en el documento), y
+ * `POST /fsm/validate-schema` devuelve `issues` (con `path` y `message`, que se
+ * navegan como ruta JSON). Unificar las claves obligaria a cambiar uno de los
+ * dos backends sin ganar nada.
+ *
+ * Devuelve `[]` —y nunca `undefined`— ante un error de red, un 500 o cualquier
+ * respuesta sin la clave, para que el consumidor no tenga que distinguir "no hay
+ * errores de esquema" de "no se pudo saber".
+ */
+export const extractApiIssues = (error: unknown): SchemaIssue[] => {
+  if (!axios.isAxiosError<ApiErrorBody>(error)) return [];
+
+  const { issues } = error.response?.data ?? {};
+
+  return Array.isArray(issues) ? issues : [];
 };

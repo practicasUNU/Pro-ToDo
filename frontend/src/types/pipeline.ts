@@ -173,6 +173,27 @@ export interface CheckImapPayload {
   readonly pollIntervalMs: number;
 }
 
+/**
+ * Campo invalido devuelto por `POST /fsm/validate-schema`.
+ *
+ * Replica de `SchemaIssueDto` del backend. `path` es una RUTA dentro del
+ * documento JSON (`nodes.trigger_imap.params.mailbox`), no el nombre de un
+ * control: el editor la resuelve a una posicion para dibujar el subrayado.
+ *
+ * Hay un elemento por REGLA incumplida, no por campo: un mismo `path` puede
+ * repetirse con mensajes distintos.
+ */
+export interface SchemaIssue {
+  readonly path: string;
+  readonly message: string;
+}
+
+/** Respuesta 200 de la validacion de un esquema. */
+export interface ValidateSchemaResult {
+  readonly success: true;
+  readonly schema: AssembledPipelineSchema;
+}
+
 /** Severidad de un fallo, con la misma escala que el motor FSM. */
 export type NodeErrorSeverity = 'LEVE' | 'GRAVE' | 'URGENTE';
 

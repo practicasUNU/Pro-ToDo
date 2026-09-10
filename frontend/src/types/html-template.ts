@@ -30,6 +30,11 @@ export interface UpdateHtmlTemplatePayload {
   name?: string;
   description?: string;
   htmlContent?: string;
+  /**
+   * Disponibilidad. Es la unica via para REACTIVAR una plantilla retirada: el
+   * `DELETE` solo sabe apagarla.
+   */
+  active?: boolean;
 }
 
 /**

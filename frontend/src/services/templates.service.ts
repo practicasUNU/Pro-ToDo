@@ -12,8 +12,17 @@ import type {
 // tipo AxiosResponse. Todas las funciones retornan la data ya desestructurada;
 // las excepciones HTTP se propagan hacia el store y de ahi al componente.
 
-export const fetchTemplates = async (): Promise<HtmlTemplate[]> => {
-  const { data } = await api.get<HtmlTemplate[]>('/templates');
+/**
+ * Catalogo de plantillas HTML.
+ *
+ * @param includeInactive `true` trae tambien las retiradas, para la tabla
+ *        administrativa. El selector Poka-Yoke del nodo MAPEADOR_PLANTILLA las
+ *        omite: una plantilla retirada no debe poder configurarse en un flujo.
+ */
+export const fetchTemplates = async (includeInactive = false): Promise<HtmlTemplate[]> => {
+  const { data } = await api.get<HtmlTemplate[]>('/templates', {
+    ...(includeInactive ? { params: { includeInactive: 'true' } } : {}),
+  });
   return data;
 };
 

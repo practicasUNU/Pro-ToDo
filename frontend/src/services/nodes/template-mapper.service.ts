@@ -14,7 +14,13 @@ import type {
 // que el servicio sea la unica capa que conoce las rutas, y se cumple con una
 // sola fuente. Lo que aporta este archivo es el vocabulario del nodo.
 
-/** Plantillas ofrecibles en el selector. El backend ya filtra por `active`. */
+/**
+ * Plantillas ofrecibles en el selector Poka-Yoke del nodo.
+ *
+ * Se llama SIN `includeInactive`: el default del servicio pide solo las activas,
+ * que es justo lo que este selector debe ofrecer. La tabla administrativa es la
+ * unica que pasa `true`, y por eso el filtro sigue siendo del backend.
+ */
 export const fetchSelectableTemplates = async (): Promise<HtmlTemplate[]> =>
   templatesService.fetchTemplates();
 
