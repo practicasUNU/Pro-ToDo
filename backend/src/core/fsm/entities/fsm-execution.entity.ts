@@ -65,6 +65,23 @@ export class FsmExecution {
   @Column({ name: 'retry_state', type: 'jsonb', default: {} })
   retryState: Record<string, unknown>;
 
+  /**
+   * Ruta del volcado forense asociado a un fallo catastrofico.
+   *
+   * Es el eslabon entre los dos destinos de la persistencia hibrida
+   * (`architecture-patterns.md` §4): el stack trace y el payload viven en disco
+   * —demasiado voluminosos para una columna— y aqui queda la referencia que
+   * permite encontrarlos. `null` mientras no haya habido un fallo URGENTE, y
+   * tambien cuando lo hubo pero el volcado a disco no pudo escribirse.
+   */
+  @Column({
+    name: 'ruta_archivo_log',
+    type: 'varchar',
+    length: 255,
+    nullable: true,
+  })
+  logFilePath: string | null;
+
   @CreateDateColumn({ name: 'fecha_inicio', type: 'timestamp' })
   createdAt: Date;
 

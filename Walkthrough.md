@@ -4,6 +4,344 @@ Registro técnico del "por qué" de cada decisión de implementación. Los estad
 
 ---
 
+## 2026-09-09 · Periodo de sondeo por entorno y errores catastróficos URGENTE → FALLIDO — rama `feat/trigger-imap`
+
+### Dos de las tres piezas del encargo ya existían
+
+El encargo pedía retirar un decorador `@Interval()` estático e inyectar `ConfigService` y
+`SchedulerRegistry`. Nada de eso hacía falta: `ImapPollingService` usa intervalos dinámicos desde la
+entrega del diffing, y ambos servicios ya estaban inyectados. El decorador nunca habría servido —
+`pollIntervalMs` es un parámetro POR NODO y un decorador se evalúa una sola vez en tiempo de clase.
+
+Lo que sí faltaba era el valor de **instalación**: el default vivía en un literal de módulo
+(`DEFAULT_POLL_INTERVAL_MS`) y no había forma de mover el ritmo de todos los buzones sin editar el
+esquema de cada flujo. `IMAP_POLLING_INTERVAL_MS` es ahora ese valor de reserva, y solo se aplica
+cuando el nodo NO declara el suyo: el periodo sigue siendo por nodo.
+
+Se le pone el **mismo suelo de 30 s que valida el DTO**. No es purismo: un `0` escrito por error en
+el `.env` martillearía el servidor IMAP hasta que el proveedor cortase la cuenta, y en silencio. El
+DTO ya impone ese suelo a los nodos; la variable de entorno no puede ser la puerta trasera que lo
+evita. De paso se documentó `IMAP_RECONCILE_INTERVAL_MS`, que estaba en `.env` pero no en la
+plantilla versionada.
+
+### `HybridLoggerService` no existía; Winston llevaba instalado sin usarse
+
+`winston` y `winston-daily-rotate-file` estaban en `package.json` y **cero importaciones** en todo
+`src/`. Las variables `LOG_DIR`, `LOG_MAX_FILES` y `LOG_MAX_SIZE` llevaban en `.env.example` desde el
+principio esperando a este servicio. Hubo que construirlo entero.
+
+**Híbrido** son dos destinos con dos propósitos, y por eso es un servicio y no un `logger.error`:
+el archivo guarda el material forense (stack trace, payload, metadatos) y PostgreSQL guarda la
+severidad y la RUTA de ese archivo. De ahí que `logCatastrophicFailure` **devuelva la ruta**: es el
+único eslabón entre ambos. Sin ese valor de retorno la fila sabría que hubo un fallo pero no dónde
+mirar, y el archivo sería un volcado huérfano.
+
+Dos decisiones que parecen detalles y no lo son:
+
+- **Nivel fijo `error`, no `LOG_LEVEL`.** Atarlo al nivel general significaría que subir la
+  aplicación a `warn` haría desaparecer en silencio la traza de los fallos catastróficos, que es
+  justo la que nunca puede faltar.
+- **No lanza nunca.** Se invoca desde el manejador de errores del motor: una excepción aquí
+  sustituiría el fallo real por uno de registro y dejaría la ejecución sin marcar. Si el disco falla
+  devuelve `null`, y el motor lo persiste tal cual — "hubo fallo, no hay archivo" es información
+  honesta.
+
+### La frontera es LANZAR frente a DEVOLVER, no el `level`
+
+Es la decisión de diseño de la entrega. El encargo hablaba de "error del dominio de los nodos" contra
+"excepción no controlada", y la tentación era discriminar por `result.error.level === 'URGENTE'`.
+Habría sido un error: una estrategia que **devuelve** `URGENTE` está diciendo "esto es grave y no
+tiene sentido reintentar", pero controlaba la situación. Una que **lanza** se ha roto, y el motor no
+sabe qué dejó a medias.
+
+Fundir ambos casos habría convertido en terminal un flujo que hoy se pausa y se reanuda con CU-09.
+De ahí el tipo `NodeOutcome`, cuyo `catastrophic` es explícito y no derivado.
+
+| Origen | Clasificación | Estado |
+|---|---|---|
+| `NodeResult{success:false}` devuelto, cualquier `level` | Dominio | `PAUSADO` |
+| `StrategyNotFoundException` lanzada | Dominio (configuración) | `PAUSADO` |
+| `HttpException` lanzada (timeout, validación) | Dominio | `PAUSADO` |
+| Cualquier otro `throw` | Catastrófico | `FALLIDO` |
+
+`StrategyNotFoundException` se queda del lado del dominio a propósito, contra la lectura literal del
+encargo: falta la estrategia de un tipo de nodo, que es un error de configuración del esquema. Marcar
+FALLIDO obligaría a relanzar el flujo desde cero después de corregirlo, cuando el trabajo de los
+nodos anteriores sigue siendo válido. El criterio es *"¿puede un operador arreglar esto sin tocar
+código?"*.
+
+### El desenlace catastrófico ni reintenta ni sigue `onErrorStep`
+
+Son dos cortes deliberados, ambos con prueba:
+
+- **Sin reintento**, aunque el nodo declare `retryPolicy`. No se sabe qué dejó a medias la estrategia
+  rota, así que volver a invocarla es apostar sobre un estado desconocido.
+- **Sin `onErrorStep`.** Esa ruta es una decisión del diseñador del flujo sobre fallos PREVISTOS.
+  Aquí se rompió el propio ejecutor, y encaminar a otro nodo prolongaría el bucle sobre un proceso en
+  estado desconocido — lo contrario de "proteger el hilo".
+
+### El orden disco → base de datos es la propiedad de corrección
+
+En `failCatastrophically` y en el catch externo, el volcado se escribe ANTES de tocar PostgreSQL. El
+escenario típico de un fallo catastrófico es precisamente que la base de datos no responda; al revés,
+un fallo de BD se llevaría por delante también el stack trace y no quedaría rastro del incidente en
+ninguna parte. El cursor se CONSERVA aunque el estado sea terminal: saber en qué nodo se rompió es la
+mitad del diagnóstico.
+
+### Cambio de contrato en una prueba existente
+
+La prueba 7 afirmaba que una excepción no controlada dejaba el flujo en `PAUSADO`. Es exactamente el
+comportamiento que el encargo cambia, así que se reescribió a `FALLIDO` y se acompañó de cinco casos
+nuevos que fijan la frontera en ambos sentidos. Las pruebas 6, 8 y 9 (URGENTE devuelto,
+`StrategyNotFoundException`, circuit breaker) pasan sin tocarlas, que era la señal de que la
+clasificación estaba bien puesta.
+
+### Sin migración SQL
+
+`ejecuciones_flujo.ruta_archivo_log VARCHAR(255)` ya estaba en `init.sql` desde el principio; la
+entidad `FsmExecution` simplemente no la mapeaba. Verificado contra la base real antes de asumirlo.
+
+### Archivos
+
+**Nuevos:** `src/common/services/hybrid-logger.service.ts` (+ spec).
+
+**Modificados:** `.env.example`, `src/common/common.module.ts`,
+`src/core/fsm/services/fsm-engine.service.ts` (+ spec),
+`src/core/fsm/entities/fsm-execution.entity.ts`,
+`src/modules/nodes/services/imap-polling.service.ts` (+ spec).
+
+### Estado de las pruebas
+
+```
+backend · npm test      → 31 suites, 537 tests, 0 fallos  (antes: 30 / 517)
+backend · npm run build → OK
+backend · eslint        → limpio en los archivos tocados
+```
+
+La suite NO escribe en disco: tanto el spec del logger como el del motor simulan el volcado. Se
+verificó borrando `logs/` y relanzando la suite completa; no se recrea.
+
+---
+
+## 2026-09-09 · Catálogo de nodos, visibilidad de plantillas retiradas y ensamblador secuencial — rama `feat/trigger-imap`
+
+Cuatro frentes independientes. Los tres primeros son correcciones acotadas; el cuarto abre el camino
+para componer una topología sin escribir JSON a mano.
+
+### La migración 011 podía destruir el catálogo, y eso solo se vio ejecutándola
+
+Es el hallazgo importante de la sesión. La 011 (sin commitear, ya aplicada a la base local) hacía un
+`DROP TABLE IF EXISTS nodos` incondicional antes de renombrar `tipos_nodo` a `nodos`. En la PRIMERA
+pasada es correcto: `nodos` es todavía la tabla de instancias. En la segunda, `nodos` ya es el
+catálogo — y el `DROP` se lo lleva con sus nueve filas, tras lo cual el renombrado no encuentra
+`tipos_nodo` y la migración muere a mitad.
+
+La migración se anunciaba idempotente y **no lo era**. Lo mismo ocurría con la columna de
+`logs_nodo`: el guard `IF EXISTS (column_name='id_nodo') THEN DROP COLUMN id_nodo` borraba en la
+segunda pasada la columna que la primera acababa de crear, porque `id_nodo` es a la vez el nombre
+viejo y el nuevo.
+
+Los dos casos tienen la misma forma —un nombre que significa dos cosas distintas según el estado— y
+la misma solución: **discriminar por contenido, no por nombre**.
+
+| Guard | Discriminante |
+|---|---|
+| `logs_nodo.id_nodo` | `data_type = 'uuid'` ⇒ es el puntero viejo, se suelta |
+| `DROP TABLE nodos` | existe la columna `id_flujo` ⇒ es la tabla de instancias, se borra |
+
+Ninguna revisión estática lo habría encontrado: el SQL era sintácticamente impecable. Se validó
+canalizando el archivo a `psql` dentro de `BEGIN … ROLLBACK`, primero una vez y luego dos veces
+seguidas en la misma transacción. El DDL de PostgreSQL es transaccional, así que la comprobación no
+deja rastro; se verificó después que la base seguía con `id_tipo_nodo` y sus nueve filas.
+
+### Las constraints se nombran con la columna, sin prefijos
+
+Convención fijada en esta entrega: `id_nodo`, `id_log_nodo`, `id_ejecucion`. Prohibidos `pk_`, `fk_`
+y `uq_`.
+
+La única excepción es la unicidad de `codigo`, que se llama **`nodos_codigo`** y no `codigo` a secas.
+No es estilo: una `UNIQUE` —y una `PRIMARY KEY`— crea un índice con su mismo nombre, y los índices
+comparten un único espacio de nombres por esquema. `codigo` es una columna que aparece en varias
+tablas, así que reservar ese nombre de índice para `nodos` bloquearía a la siguiente que lo pidiera.
+
+Los guards del renombrado se acotan con `conrelid`. Los nombres de constraint son únicos **por
+tabla**, no por esquema, así que un `conname = 'id_ejecucion'` global encontraría la de cualquier
+otra tabla y saltaría el renombrado que toca — `alertas_error` tiene precisamente una clave ajena
+homóloga.
+
+### `logs_nodo.id_nodo` NO es clave ajena, y el comentario existe para decirlo
+
+`nodos` es el catálogo de TIPOS; `logs_nodo.id_nodo` guarda el `nodeId` de la INSTANCIA del pipeline
+(`nodo_parser`), texto libre del JSONB que no existe como fila del catálogo. Una FK ahí rechazaría
+todos los inserts.
+
+El problema es que antes de la 011 ese par de nombres **sí** era una clave ajena. Un lector futuro lo
+dará por supuesto salvo que algo se lo desmienta, y por eso el comentario va en las dos tablas. Es la
+deuda que deja escoger nomenclatura por convención en vez de por semántica; asumida a conciencia.
+
+### Plantillas HTML: mostrar las inactivas exigía poder reactivarlas
+
+El encargo pedía el query param. Al implementarlo apareció que `CreateTemplateDto` no declara
+`active` y que `TemplatesService.update()` nunca lo toca: `softDelete` sabe apagar una plantilla y
+**nada** sabía encenderla. Listar las retiradas sin más habría llenado la tabla de filas visibles e
+irrecuperables.
+
+Se añadió `active?: boolean` al DTO y su rama en `update()`. `create()` no cambia —construye el
+objeto campo a campo, así que `active` se ignora en el alta y toda plantilla nace activa.
+
+El filtro sigue siendo del backend, con `onlyActive = true` por defecto: la tabla administrativa pasa
+`?includeInactive=true` y el selector Poka-Yoke del nodo `MAPEADOR_PLANTILLA` usa el default. Se
+exige el literal `"true"` y no una conversión laxa, porque `Boolean("false")` es `true` y un
+parámetro mal escrito debe caer del lado seguro.
+
+### `exact` en `/flujos`, o dos entradas del menú resaltadas a la vez
+
+Añadir «Nuevo Flujo» al drawer revirtió una decisión documentada (el comentario decía que el
+asistente se alcanzaba desde el botón de `/flujos`), y el comentario se actualizó para que el código
+no se contradiga.
+
+Efecto secundario que el enlace destapó: sin `exact`, vue-router marca `/flujos` como activa también
+en `/flujos/nuevo` y `/flujos/:id/editar`. Con las dos entradas en el menú eso se ve. `exact` en la
+primera lo resuelve; la segunda no lo necesita, porque no es padre de ninguna ruta.
+
+### El ensamblador escribe sobre el JSON en UNA dirección
+
+`NodeSequenceBuilder.vue` compone la topología y regenera `activeDraft.schemaText`. La sincronización
+inversa se descartó: un `watch` sobre el texto que reconstruyera la secuencia pelearía con el editor
+en cada pulsación —el JSON pasa por estados intermedios que no parsean— y el cursor saltaría solo.
+
+Lo que se conserva al reordenar son los `params`, indexados por `nodeId`; lo que se pierde es la
+topología escrita a mano. `rebuildSchemaFromSequence` respeta además `flowId`, `name` y `version` del
+documento vigente: el selector es dueño de la topología, no de los metadatos.
+
+`initDraft` deriva la secuencia recorriendo el grafo desde `entrypoint`. Sin eso, editar una
+plantilla existente mostraría el selector vacío junto a un JSON lleno, y el primer clic borraría la
+topología guardada.
+
+### El recorrido inverso se protege de los ciclos
+
+`disassemblePipelineSchema` lleva un conjunto de visitados. No es defensa teórica: el JSON es
+editable a mano, así que puede llegar con un `nextStep` que apunte hacia atrás, y un bucle infinito
+colgaría la pestaña sin ningún mensaje. Un puntero huérfano trunca el recorrido, que es la misma
+política que `buildOrderedTopology` aplica en el backend.
+
+### El encadenado se extrajo porque ya tenía dos dueños
+
+`flujo-draft.store.ts` construía `entrypoint` y la cadena de `nextStep` en una closure privada. El
+editor de plantillas necesitaba exactamente lo mismo desde otra entrada, y dos copias divergirían en
+cuanto una de las dos vistas cambiara —con el síntoma peor posible: un grafo que el validador rechaza
+solo desde una de ellas.
+
+`@/utils/pipeline-assembler.ts` es puro y no resuelve stores: recibe los `params` ya resueltos. Quien
+conoce el contrato de cada nodo es su propio store (§3.1), así que el anfitrión pregunta con
+`toNodeParams()` antes de llamar. Los 59 tests de `flujo-draft.store.spec.ts` verifican que el
+comportamiento no cambió.
+
+### `implemented` en vez de filtrar el catálogo
+
+La tabla `nodos` tiene nueve filas y el enum `NodeType` declara siete: `TRIGGER_CRON` y
+`DESTINO_ACENS` siguen sin estrategia y `@IsEnum(NodeType)` los rechazaría.
+
+`GET /api/nodos` los devuelve marcados con `implemented: false` en lugar de ocultarlos. Filtrarlos en
+el servidor haría que el endpoint mintiera sobre el contenido del catálogo, y ocultarlos en la UI
+convertiría una limitación conocida en una ausencia inexplicable. El selector los muestra
+deshabilitados: el operador ve que el tipo existe y que todavía no se puede usar.
+
+La autoridad es el enum del backend, no la tabla. El frontend estrecha con `isImplementedNodeType`,
+que se apoya en la marca del servidor y no en un `includes` propio: duplicar esa decisión crearía una
+segunda fuente de verdad que se desincronizaría con la octava estrategia.
+
+### El editor de `params` no propaga JSON a medio escribir
+
+Para los cinco tipos sin configurador dedicado, el sub-editor JSON solo emite cuando el texto parsea
+**y** es un objeto. Propagar un objeto incompleto regeneraría el grafo entero en cada pulsación y
+borraría lo tecleado. Mientras no parsee, el texto vive en el estado local del componente y el nodo
+muestra su error.
+
+---
+
+### Archivos de la sesión
+
+**Backend — nuevos**
+- `src/modules/nodes/entities/node-catalog.entity.ts`, `enums/node-category.enum.ts`
+- `src/modules/nodes/dto/node-catalog-response.dto.ts`
+- `src/modules/nodes/services/node-catalog.service.ts` (+ spec)
+- `src/modules/nodes/node-catalog.controller.ts`
+- `src/modules/templates/templates.controller.spec.ts`
+
+**Backend — modificados**
+- `src/modules/nodes/nodes.module.ts` (primer controlador del módulo)
+- `src/modules/templates/templates.controller.ts`, `templates.service.ts`, `dto/create-template.dto.ts`, `templates.service.spec.ts`
+- `src/core/fsm/types/pipeline-schema.types.ts` (TSDoc: `tipos_nodo` → `nodos`)
+
+**Frontend — nuevos**
+- `src/types/node-catalog.ts`, `src/services/node-catalog.service.ts`, `src/stores/node-catalog.store.ts` (+ spec)
+- `src/utils/pipeline-assembler.ts` (+ spec)
+- `src/components/workflow-templates/NodeSequenceBuilder.vue`
+
+**Frontend — modificados**
+- `src/stores/workflow-templates.store.ts` (secuencia + reconstrucción), `flujo-draft.store.ts` (delega en el helper)
+- `src/services/templates.service.ts`, `src/stores/templates.store.ts`, `src/components/templates/TemplatesManager.vue`
+- `src/layouts/MainLayout.vue`, `src/components/workflow-templates/WorkflowTemplateDialog.vue`
+- `src/types/html-template.ts`, `src/types/pipeline.ts`, `src/services/nodes/template-mapper.service.ts`
+
+**SQL**
+- `init.sql`, `db/migrations/011-catalogo-nodos.sql`
+
+### Estado de las pruebas
+
+```
+backend  · npm test              → 30 suites, 517 tests, 0 fallos
+backend  · npm run build         → OK
+frontend · npx vue-tsc --noEmit  → sin salida (limpio)
+frontend · npx vitest run        → 11 archivos, 210 tests, 0 fallos
+frontend · eslint + prettier     → limpio en los archivos tocados
+```
+
+Deuda de lint **preexistente**, en archivos que esta sesión no tocó: ~30 avisos de `prettier/prettier`
+más un `require-await` en `workflows.service.spec.ts:201` y tres `no-unsafe-assignment` en
+`imap-polling.service.spec.ts`. Se dejan como estaban para no mezclar reformateos con el cambio
+funcional; `npm run lint` los arregla en su mayoría.
+
+### Siguiente paso y reanudación
+
+Rama activa: `feat/trigger-imap`. Nada commiteado todavía.
+
+1. **Aplicar la migración** (la ejecuta el usuario):
+   ```bash
+   sudo docker exec -i protodo_postgres psql -U unuware007 -d 'DB_PRO-TODO' \
+     < db/migrations/011-catalogo-nodos.sql
+   ```
+   La base local está en el estado "una pasada previa de la 011": `nodos` tiene `id_tipo_nodo` y
+   `ui_schema`, `logs_nodo` tiene `node_id`, `tipos_nodo` ya no existe. Es la rama (b) de los guards.
+   Sin aplicarla, `GET /api/nodos` devuelve 500: la entidad mapea `id_nodo` y la columna todavía se
+   llama `id_tipo_nodo`.
+
+2. **Comprobación manual end-to-end**, ya con la migración aplicada:
+   ```bash
+   cd backend && npm run start:dev
+   cd frontend && quasar dev
+   ```
+   «Plantillas de Flujo» → «Nueva Plantilla»: añadir dos o tres nodos y comprobar que el JSON se
+   regenera con `entrypoint` y la cadena de `nextStep`; reordenar y ver que los punteros cambian;
+   desplegar un `TRIGGER_IMAP` (formulario dedicado) y un `PROCESADOR_IA` (editor JSON); pulsar
+   «Validar» y forzar un error —dos nodos con el mismo `outputNamespace`— para ver el subrayado.
+   En «Plantillas»: desactivar una y confirmar que sigue en la tabla con el badge «Inactiva» y que
+   «Activar» la recupera.
+
+3. **Commit** cuando la comprobación manual pase:
+   ```bash
+   git add -A
+   git commit -m "feat(trigger-imap): catalogo de nodos, plantillas inactivas y ensamblador secuencial"
+   ```
+   El hook `commit-msg` exige que el ámbito coincida con el sufijo de la rama.
+
+4. **Pendiente de fondo, no abordado**: `nodos.ui_schema` sigue vacío (`'{}'`) en las nueve filas y
+   nadie lo lee. El editor polimórfico resuelve hoy por registro de componentes con respaldo JSON; el
+   renderizador dirigido por `ui_schema` es lo que permitiría retirar ese respaldo.
+
+---
+
 ## 2026-08-27 · Revocación de sesiones aislada por dispositivo + sincronización multi-pestaña — rama `feat/auth-otp`
 
 Cierra el pendiente que dejó la entrega anterior (*"el backend no persiste `deviceId`"*) y, con él, la deuda multi-pestaña que arrastraba la entrega del endurecimiento del JWT. Las dos mitades van juntas a propósito: la primera, sola, convertiría una pestaña desincronizada en un cierre de sesión global.

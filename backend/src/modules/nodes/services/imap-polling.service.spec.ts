@@ -2,6 +2,10 @@ import { ConflictException } from '@nestjs/common';
 import { SchedulerRegistry } from '@nestjs/schedule';
 
 import { NodeType } from '@core/fsm/types/pipeline-schema.types';
+import {
+  DEFAULT_POLL_INTERVAL_MS,
+  MIN_POLL_INTERVAL_MS,
+} from '@modules/nodes/dto/imap-trigger-config.dto';
 
 import { ImapPollingService } from './imap-polling.service';
 
@@ -735,6 +739,106 @@ describe('ImapPollingService', () => {
       // 3. Assert: sin esto, cada recarga del `--watch` acumularia una recarga
       //    periodica de la generacion anterior del proceso.
       expect(registry.getIntervals()).toHaveLength(0);
+    });
+  });
+
+  describe('5. Periodo por defecto via IMAP_POLLING_INTERVAL_MS', () => {
+    /** Periodo con el que quedo inscrito el flujo, leido del registro paralelo. */
+    const scheduledIntervalOf = (service: ImapPollingService): number | undefined =>
+      service['scheduled'].get(FLOW_ID)?.pollIntervalMs;
+
+    const envWith = (interval?: string): Record<string, string> => ({
+      IMAP_POLLING_ENABLED: 'true',
+      [PASSWORD_ENV_KEY]: IMAP_PASSWORD,
+      ...(interval === undefined ? {} : { IMAP_POLLING_INTERVAL_MS: interval }),
+    });
+
+    /** Nodo que NO declara periodo, para que aplique el de la instalacion. */
+    const workflowWithoutInterval = (): Workflow[] => {
+      const params = buildParams();
+      delete params.pollIntervalMs;
+
+      return [buildWorkflow({}, params)];
+    };
+
+    it('5.1 deberia aplicar la variable a un nodo que no declara pollIntervalMs', async () => {
+      // 1. Arrange
+      const { service } = buildHarness({
+        env: envWith('120000'),
+        workflowRows: workflowWithoutInterval(),
+      });
+
+      // 2. Act
+      await service.onModuleInit();
+
+      // 3. Assert
+      expect(scheduledIntervalOf(service)).toBe(120_000);
+      service.onModuleDestroy();
+    });
+
+    it('5.2 NO deberia pisar el pollIntervalMs que declara el nodo', async () => {
+      // 1. Arrange: el esquema fija su propio periodo
+      const { service } = buildHarness({ env: envWith('120000') });
+
+      // 2. Act
+      await service.onModuleInit();
+
+      // 3. Assert: el periodo es un parametro POR NODO; la variable es solo el
+      //    valor de reserva para quien no lo fija.
+      expect(scheduledIntervalOf(service)).toBe(POLL_INTERVAL_MS);
+      service.onModuleDestroy();
+    });
+
+    it('5.3 deberia caer al valor por defecto sin la variable', async () => {
+      // 1. Arrange
+      const { service } = buildHarness({
+        env: envWith(),
+        workflowRows: workflowWithoutInterval(),
+      });
+
+      // 2. Act
+      await service.onModuleInit();
+
+      // 3. Assert
+      expect(scheduledIntervalOf(service)).toBe(DEFAULT_POLL_INTERVAL_MS);
+      service.onModuleDestroy();
+    });
+
+    // Un `0` o un valor de dos digitos escrito por error martillearia el
+    // servidor IMAP hasta que el proveedor cortase la cuenta, y en silencio. El
+    // DTO ya impone este suelo a los nodos; la variable no puede ser la puerta
+    // trasera que lo evita.
+    it.each(['0', '1000', 'sesenta-mil', '', '60000.5'])(
+      '5.4 deberia rechazar el valor %p y usar el de por defecto',
+      async (rawValue: string) => {
+        // 1. Arrange
+        const { service } = buildHarness({
+          env: envWith(rawValue),
+          workflowRows: workflowWithoutInterval(),
+        });
+
+        // 2. Act
+        await service.onModuleInit();
+
+        // 3. Assert
+        expect(scheduledIntervalOf(service)).toBe(DEFAULT_POLL_INTERVAL_MS);
+        service.onModuleDestroy();
+      },
+    );
+
+    it('5.5 deberia aceptar exactamente el suelo permitido', async () => {
+      // 1. Arrange
+      const { service } = buildHarness({
+        env: envWith(String(MIN_POLL_INTERVAL_MS)),
+        workflowRows: workflowWithoutInterval(),
+      });
+
+      // 2. Act
+      await service.onModuleInit();
+
+      // 3. Assert
+      expect(scheduledIntervalOf(service)).toBe(MIN_POLL_INTERVAL_MS);
+      service.onModuleDestroy();
     });
   });
 });

@@ -1,5 +1,6 @@
 import {
   ConflictException,
+  HttpException,
   Injectable,
   Logger,
   NotFoundException,
@@ -8,8 +9,10 @@ import { ConfigService } from '@nestjs/config';
 import { InjectRepository } from '@nestjs/typeorm';
 import { QueryFailedError } from 'typeorm';
 
+import { HybridLoggerService } from '@common/services/hybrid-logger.service';
 import { StatePayloadContext } from '@core/fsm/context/state-payload.context';
 import { FsmExecution } from '@core/fsm/entities/fsm-execution.entity';
+import { StrategyNotFoundException } from '@core/fsm/exceptions/strategy-not-found.exception';
 import { NodeStrategyFactory } from '@core/fsm/factories/node-strategy.factory';
 import { ExecutionState } from '@core/fsm/types/fsm.enums';
 
@@ -90,6 +93,26 @@ interface CheckpointPatch {
   activeCursor: string | null;
   contextPayload: Record<string, Record<string, unknown>>;
   retryState: RetryState;
+  /** Solo lo escribe el desenlace catastrofico; las transiciones normales no. */
+  logFilePath?: string | null;
+}
+
+/**
+ * Desenlace de un nodo, con la clasificacion que el bucle necesita para decidir.
+ *
+ * `catastrophic` NO se deduce de `result.error.level`, y ese es el punto entero
+ * del tipo. Una estrategia puede DEVOLVER `URGENTE` para decir "esto es grave y
+ * no tiene sentido reintentar", y eso sigue siendo un desenlace del dominio: la
+ * estrategia controlaba la situacion. Catastrofico es que la estrategia se rompa
+ * —que LANCE— y el motor quede sin saber que dejo a medias.
+ *
+ * Fundir ambas cosas en el `level` haria que el primer caso pasara a marcar
+ * FALLIDO, y un flujo que hoy se pausa y se reintenta con CU-09 dejaria de poder
+ * reanudarse.
+ */
+interface NodeOutcome {
+  readonly catastrophic: boolean;
+  readonly result: NodeResult;
 }
 
 /**
@@ -133,6 +156,7 @@ export class FsmEngineService {
     private readonly fsmExecutionRepo: Repository<FsmExecution>,
     private readonly strategyFactory: NodeStrategyFactory,
     private readonly configService: ConfigService,
+    private readonly hybridLogger: HybridLoggerService,
   ) {}
 
   /**
@@ -323,16 +347,20 @@ export class FsmEngineService {
         // --- Bucle intra-nodo: reintentos SIN mover el cursor, de modo que no
         // consumen presupuesto de transiciones. El tope de vueltas lo impone el
         // `@Max(5)` de RetryPolicyDto (capa 1 de la defensa).
-        let result: NodeResult;
+        let outcome: NodeOutcome;
 
         for (;;) {
-          result = await this.runNode(node, context, executionId);
+          outcome = await this.runNode(node, context, executionId);
 
-          if (result.success) {
+          // Corte inmediato: una estrategia que se rompio no admite reintento.
+          // No se sabe que dejo a medias, asi que volver a invocarla es apostar
+          // sobre un estado desconocido.
+          if (outcome.catastrophic || outcome.result.success) {
             break;
           }
 
           const attempts = retryState[node.nodeId] ?? 0;
+          const result = outcome.result;
 
           if (!this.canRetry(node, result, attempts)) {
             break;
@@ -352,6 +380,25 @@ export class FsmEngineService {
 
           await this.waitBackoff(node, attempts + 1);
         }
+
+        // --- Desenlace CATASTROFICO. Va antes que cualquier otra rama, incluida
+        // `onErrorStep`: la ruta de recuperacion es una decision del diseñador
+        // del flujo sobre fallos PREVISTOS, y aqui lo que se rompio es el propio
+        // ejecutor. Encaminar a otro nodo prolongaria el bucle sobre un proceso
+        // en estado desconocido, que es justo lo que hay que evitar.
+        if (outcome.catastrophic) {
+          await this.failCatastrophically(
+            execution,
+            cursor,
+            context,
+            retryState,
+            node.nodeId,
+            outcome.result,
+          );
+          break;
+        }
+
+        const result = outcome.result;
 
         if (result.success) {
           context.setNamespace(node.outputNamespace, result.data ?? {});
@@ -408,9 +455,22 @@ export class FsmEngineService {
       }
     } catch (error) {
       this.logger.error(
-        `Fallo catastrofico en la ejecucion "${executionId}": ${this.describeError(error)}`,
+        `URGENTE | ejecucion=${executionId} | Fallo catastrofico del bucle: ${this.describeError(error)}`,
         error instanceof Error ? error.stack : undefined,
       );
+
+      // El volcado a disco va PRIMERO y fuera del try de persistencia: este
+      // manejador cubre justamente el caso de que PostgreSQL no responda, y
+      // entonces el archivo es el unico rastro que va a quedar del incidente.
+      const logFilePath = this.hybridLogger.logCatastrophicFailure({
+        executionId,
+        flowId: execution.flowId,
+        nodeId: cursor,
+        level: 'URGENTE',
+        message: this.describeError(error),
+        stackTrace: error instanceof Error ? error.stack : undefined,
+        payload: context.getAllContext(),
+      });
 
       // Defensivo: si lo que fallo fue la propia base de datos, este guardado
       // tambien fallara. No debe enmascarar el error original.
@@ -420,6 +480,7 @@ export class FsmEngineService {
           activeCursor: cursor,
           contextPayload: context.getAllContext(),
           retryState,
+          logFilePath,
         });
       } catch (persistError) {
         this.logger.error(
@@ -476,26 +537,89 @@ export class FsmEngineService {
     node: PipelineNodeConfigDto,
     context: StatePayloadContext,
     executionId: string,
-  ): Promise<NodeResult> {
+  ): Promise<NodeOutcome> {
     try {
       const strategy = this.strategyFactory.getStrategy(node.nodeType);
 
-      return await strategy.execute(context, node.params);
+      // Camino del DOMINIO: la estrategia decidio el desenlace y lo devolvio.
+      // Su `level` es un diagnostico suyo, no una senal de que el motor este en
+      // peligro, asi que se respeta tal cual.
+      return {
+        catastrophic: false,
+        result: await strategy.execute(context, node.params),
+      };
     } catch (error) {
+      // Camino EXCEPCIONAL. Se discrimina por el TIPO de la excepcion y no por
+      // el `level` de un `NodeResult`, porque son dos cosas distintas: una
+      // estrategia que DEVUELVE `URGENTE` esta informando de un fallo grave del
+      // dominio; una que LANZA se ha roto, y el motor no puede saber en que
+      // estado dejo lo que tocaba.
+      const domainFailure = this.toDomainFailure(error);
+
+      if (domainFailure !== null) {
+        this.logger.warn(
+          `${domainFailure.error?.level ?? 'GRAVE'} | ejecucion=${executionId} | Nodo "${node.nodeId}": ${this.describeError(error)}`,
+        );
+
+        return { catastrophic: false, result: domainFailure };
+      }
+
       this.logger.error(
-        `Excepcion no controlada en el nodo "${node.nodeId}" (ejecucion=${executionId}): ${this.describeError(error)}`,
+        `URGENTE | ejecucion=${executionId} | Excepcion no controlada en el nodo "${node.nodeId}": ${this.describeError(error)}`,
         error instanceof Error ? error.stack : undefined,
       );
 
       return {
-        success: false,
-        error: {
-          level: 'URGENTE',
-          message: this.describeError(error),
-          stackTrace: error instanceof Error ? error.stack : undefined,
+        catastrophic: true,
+        result: {
+          success: false,
+          error: {
+            level: 'URGENTE',
+            message: this.describeError(error),
+            stackTrace: error instanceof Error ? error.stack : undefined,
+          },
         },
       };
     }
+  }
+
+  /**
+   * Clasifica una excepcion como fallo del DOMINIO de los nodos, o `null` si es
+   * catastrofica.
+   *
+   * La frontera no es cosmetica: decide entre PAUSADO (reanudable con CU-09) y
+   * FALLIDO (terminal). Se pone del lado del dominio lo que un operador puede
+   * arreglar sin tocar codigo:
+   *
+   * - `StrategyNotFoundException`: falta la estrategia de un tipo de nodo. Es un
+   *   error de CONFIGURACION del esquema; marcar FALLIDO obligaria a relanzar el
+   *   flujo desde cero despues de corregirlo, cuando el trabajo de los nodos
+   *   anteriores sigue siendo valido.
+   * - `HttpException`: la familia que usan las estrategias para los timeouts y
+   *   los fallos de validacion de sus `params` —los dos ejemplos que el propio
+   *   contrato del motor cita como errores de dominio.
+   *
+   * Todo lo demas —`TypeError`, `QueryFailedError`, un `Error` pelado— es un
+   * defecto de programacion o una averia de infraestructura: nadie lo arregla
+   * reintentando, y seguir el bucle sobre un proceso en estado desconocido es
+   * peor que abortarlo.
+   */
+  private toDomainFailure(error: unknown): NodeResult | null {
+    if (error instanceof StrategyNotFoundException) {
+      return {
+        success: false,
+        error: { level: 'GRAVE', message: this.describeError(error) },
+      };
+    }
+
+    if (error instanceof HttpException) {
+      return {
+        success: false,
+        error: { level: 'GRAVE', message: this.describeError(error) },
+      };
+    }
+
+    return null;
   }
 
   /**
@@ -530,6 +654,56 @@ export class FsmEngineService {
     const factor = node.retryPolicy?.backoffFactor ?? DEFAULT_BACKOFF_FACTOR;
 
     await sleep(base * factor ** (attempt - 1));
+  }
+
+  /**
+   * Cierra la ejecucion como FALLIDO tras un fallo catastrofico.
+   *
+   * Ejecuta el orden que fija `architecture-patterns.md` §4, y el orden importa:
+   *
+   * 1. **Disco primero.** El volcado forense se escribe ANTES de tocar la base
+   *    de datos, porque el escenario tipico de un fallo catastrofico es
+   *    precisamente que PostgreSQL no responda. Al reves, un fallo de base de
+   *    datos se llevaria por delante tambien el stack trace, y no quedaria
+   *    ningun rastro del incidente en ninguna parte.
+   * 2. **PostgreSQL despues**, con la severidad, la ruta del volcado y el
+   *    checkpoint. El cursor se CONSERVA aunque el estado sea terminal: saber en
+   *    que nodo se rompio es la mitad del diagnostico, y perderlo por dejarlo en
+   *    `null` no ahorra nada.
+   *
+   * FALLIDO y no PAUSADO: PAUSADO significa "reanudable con CU-09", y reanudar
+   * sobre un ejecutor que lanzo una excepcion no controlada repetiria el fallo.
+   * El operador tiene que corregir el codigo y lanzar una ejecucion nueva.
+   */
+  private async failCatastrophically(
+    execution: FsmExecution,
+    cursor: string | null,
+    context: StatePayloadContext,
+    retryState: RetryState,
+    nodeId: string | null,
+    result: NodeResult,
+  ): Promise<void> {
+    const logFilePath = this.hybridLogger.logCatastrophicFailure({
+      executionId: execution.executionId,
+      flowId: execution.flowId,
+      nodeId,
+      level: result.error?.level ?? 'URGENTE',
+      message: result.error?.message ?? 'Fallo catastrofico sin detalle',
+      stackTrace: result.error?.stackTrace,
+      payload: context.getAllContext(),
+    });
+
+    this.logger.error(
+      `URGENTE | ejecucion=${execution.executionId} | Fallo catastrofico en "${nodeId ?? 'desconocido'}". Ejecucion marcada FALLIDO. Volcado: ${logFilePath ?? 'no se pudo escribir'}.`,
+    );
+
+    await this.saveCheckpoint(execution, {
+      currentState: ExecutionState.FALLIDO,
+      activeCursor: cursor,
+      contextPayload: context.getAllContext(),
+      retryState,
+      logFilePath,
+    });
   }
 
   /** Detiene la ejecucion conservando el cursor del nodo que la bloqueo. */

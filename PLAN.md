@@ -1626,3 +1626,139 @@ botón que ya usa la tabla de usuarios.
 **Referencia del patrón:** `frontend/src/components/users/UsersManager.vue`, columna de acciones
 (`requestDeactivation` + `activateUser`). Se replican clases, iconos, `outline dense size="sm"`,
 `aria-label` y tooltip.
+
+---
+
+## 17. Catálogo de nodos, plantillas inactivas y ensamblador secuencial
+
+Rama: `feat/trigger-imap`. Cuatro frentes independientes más el protocolo de cierre de sesión.
+
+### 17.1 Contratos nuevos
+
+```typescript
+// @modules/nodes/entities/node-catalog.entity.ts — tabla `nodos` (catálogo de TIPOS)
+@Entity('nodos')
+export class NodeCatalogEntry {
+  id: string;            // id_nodo   (UUID, PK)
+  code: string;          // codigo    (VARCHAR(50), UNIQUE) — replica NodeType
+  name: string;          // nombre
+  category: NodeCategory;// categoria (enum_categoria)
+  description: string | null;
+  uiSchema: Record<string, unknown>; // ui_schema (jsonb, NOT NULL DEFAULT '{}')
+}
+
+// @modules/nodes/dto/node-catalog-response.dto.ts
+export class NodeCatalogResponseDto {
+  readonly id: string;
+  readonly code: string;
+  readonly name: string;
+  readonly category: NodeCategory;
+  readonly description: string | null;
+  readonly uiSchema: Record<string, unknown>;
+  /** `false` si el tipo NO tiene INodeStrategy: el selector lo deshabilita. */
+  readonly implemented: boolean;
+}
+
+// frontend/src/utils/pipeline-assembler.ts — helper PURO, dos anfitriones
+export const assemblePipelineSchema:
+  (steps: readonly AssemblerStep[], meta: AssemblerMeta) => AssembledPipelineSchema;
+export const disassemblePipelineSchema:
+  (schema: AssembledPipelineSchema) => AssemblerStep[];
+```
+
+### 17.2 Inyección de dependencias
+
+```
+NodesModule
+  ├── TypeOrmModule.forFeature([Workflow, NodeCatalogEntry])
+  ├── NodeCatalogService ◄── Repository<NodeCatalogEntry>
+  └── NodeCatalogController (PRIMER controlador del módulo)
+        └── @UseGuards(JwtAuthGuard, RolesGuard) + @Roles(ADMIN, EDITOR)
+```
+
+### 17.3 Estado de las tareas
+
+- [x] 1. SQL — `init.sql` y `011`: PK `id_nodo`, `logs_nodo.id_nodo VARCHAR(50)` sin FK, constraints sin prefijo (`id_nodo`, `nodos_codigo`, `id_log_nodo`, `id_ejecucion`)
+- [x] 2. Backend plantillas — `?includeInactive`, `active` en el DTO, `update()` conmuta estado, specs de servicio y controlador
+- [x] 3. Frontend plantillas — servicio, store, tabla con badge y botón «Activar»
+- [x] 4. Navegación — `<q-item>` a `/flujos/nuevo` y `exact` en `/flujos`
+- [x] 5. Backend `GET /api/nodos` — entidad, enum, DTO, servicio, controlador y spec
+- [x] 6. Frontend ensamblador — tipos, servicio, store, `pipeline-assembler` (+ refactor de `flujo-draft.store`), `NodeSequenceBuilder.vue`, diálogo
+- [x] 7. Verificación — `npm test` 517/517, `vue-tsc` limpio, `vitest` 210/210, ESLint limpio en lo tocado
+
+**Nomenclatura de constraints:** el nombre de la columna, sin prefijos. La excepción es la UNIQUE de
+`codigo`, que se llama `nodos_codigo`: una `UNIQUE` crea un índice homónimo y los índices comparten un
+único espacio de nombres por esquema, así que `codigo` a secas bloquearía ese nombre para cualquier
+otra tabla con esa columna.
+
+**Sin `fk_logs_nodo_id_nodo`:** `nodos` es el catálogo de TIPOS y `logs_nodo.id_nodo` guarda el
+`nodeId` de la INSTANCIA (texto libre del JSONB), que no existe como fila del catálogo. Una FK ahí
+rechazaría todos los inserts. Antes de la 011 ese par de nombres sí era una clave ajena; el comentario
+de la tabla lo advierte para que nadie lo dé por supuesto.
+
+- [ ] **Aplicar `db/migrations/011-catalogo-nodos.sql`** — la ejecuta el usuario. Verificada contra la
+      base real en transacción revertida, incluida una doble pasada (idempotente).
+
+---
+
+## 18. Periodo de sondeo por entorno y captura de errores catastróficos (URGENTE → FALLIDO)
+
+Rama: `feat/trigger-imap`.
+
+### 18.1 Contratos nuevos
+
+```typescript
+// @common/services/hybrid-logger.service.ts — persistencia híbrida (§4)
+export interface CatastrophicFailureDetails {
+  readonly executionId: string;
+  readonly flowId: string;
+  readonly nodeId: string | null;
+  readonly level: NodeErrorSeverity;
+  readonly message: string;
+  readonly stackTrace?: string | undefined;
+  readonly payload: Record<string, Record<string, unknown>>;
+}
+
+export class HybridLoggerService {
+  /** Vuelca a disco y DEVUELVE la ruta. Nunca lanza; `null` si no pudo escribir. */
+  public logCatastrophicFailure(d: CatastrophicFailureDetails): string | null;
+}
+
+// @core/fsm/services/fsm-engine.service.ts — clasificación del desenlace
+interface NodeOutcome {
+  /** NO se deduce de `result.error.level`: catastrófico es que la estrategia LANCE. */
+  readonly catastrophic: boolean;
+  readonly result: NodeResult;
+}
+```
+
+### 18.2 Frontera dominio / catastrófico
+
+| Origen | Clasificación | Estado final |
+|---|---|---|
+| `NodeResult{success:false}` devuelto (cualquier `level`, URGENTE incluido) | Dominio | `PAUSADO` |
+| `StrategyNotFoundException` lanzada | Dominio (configuración) | `PAUSADO` |
+| `HttpException` lanzada (timeout, validación de `params`) | Dominio | `PAUSADO` |
+| Cualquier otro `throw` (`TypeError`, `QueryFailedError`, `Error`) | **Catastrófico** | **`FALLIDO`** |
+
+El discriminante es **lanzar frente a devolver**, no el `level`. Una estrategia que devuelve
+`URGENTE` controlaba la situación y lo comunicó; una que lanza se rompió y el motor no sabe qué dejó
+a medias. Fundir ambos casos convertiría en terminal un flujo que hoy se reanuda con CU-09.
+
+Un desenlace catastrófico **no reintenta** (aunque el nodo declare `retryPolicy`) y **no sigue
+`onErrorStep`**: esa ruta es una decisión sobre fallos previstos.
+
+### 18.3 Estado de las tareas
+
+- [x] 1. `IMAP_POLLING_INTERVAL_MS` (+ `IMAP_RECONCILE_INTERVAL_MS`, que faltaba) en `.env.example`
+- [x] 2. `ImapPollingService`: periodo por defecto desde entorno, con suelo `MIN_POLL_INTERVAL_MS`
+- [x] 3. `HybridLoggerService` nuevo (Winston + rotación diaria) y registrado en `CommonModule`
+- [x] 4. `FsmExecution.logFilePath` ⇒ columna `ruta_archivo_log`, que ya existía en el esquema
+- [x] 5. Motor: `NodeOutcome`, `toDomainFailure()`, `failCatastrophically()` y volcado en el catch externo
+- [x] 6. Pruebas: 537/537 en 31 suites; `nest build` en verde
+
+**Sin migración SQL**: `ejecuciones_flujo.ruta_archivo_log VARCHAR(255)` ya estaba en `init.sql`;
+la entidad solo la mapeaba a medias. Verificado contra la base real.
+
+**El decorador `@Interval()` ya no existía**: el servicio usaba `SchedulerRegistry.addInterval()`
+desde la entrega del diffing de intervalos. Lo que faltaba era el valor por defecto de instalación.

@@ -1,4 +1,8 @@
-import { ConflictException, NotFoundException } from '@nestjs/common';
+import {
+  BadRequestException,
+  ConflictException,
+  NotFoundException,
+} from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { QueryFailedError } from 'typeorm';
 
@@ -12,6 +16,7 @@ import {
 import { ExecutionState } from '@core/fsm/types/fsm.enums';
 import { NodeType } from '@core/fsm/types/pipeline-schema.types';
 
+import type { HybridLoggerService } from '@common/services/hybrid-logger.service';
 import type { PipelineSchemaDto } from '@core/fsm/dto/pipeline-schema.dto';
 import type { FsmExecution } from '@core/fsm/entities/fsm-execution.entity';
 import type {
@@ -41,6 +46,7 @@ const buildExecution = (
   activeCursor: null,
   contextPayload: {},
   retryState: {},
+  logFilePath: null,
   createdAt: new Date(),
   updatedAt: new Date(),
   ...overrides,
@@ -140,10 +146,27 @@ const buildLinearSchema = (): PipelineSchemaDto => ({
   },
 });
 
+/** Ruta que el doble del volcado forense devuelve, para aseverar sobre ella. */
+const LOG_PATH = 'logs/fsm-2026-09-09.log';
+
 describe('FsmEngineService (PROT-09)', () => {
   let factory: NodeStrategyFactory;
 
+  /**
+   * Doble del volcado hibrido.
+   *
+   * Se simula y no se usa el real porque el real ESCRIBE EN DISCO: una suite que
+   * lo instanciara dejaria un `logs/` sembrado de archivos por cada ejecucion de
+   * `npm test`. Lo que aqui importa es el contrato —que el motor lo invoque con
+   * los datos correctos y persista la ruta que devuelve—, no el formato del
+   * archivo, que se prueba en el spec del propio servicio.
+   */
+  let hybridLogger: { logCatastrophicFailure: jest.Mock };
+
   beforeEach(() => {
+    hybridLogger = {
+      logCatastrophicFailure: jest.fn().mockReturnValue(LOG_PATH),
+    };
     factory = new NodeStrategyFactory();
     jest.spyOn(factory['logger'], 'log').mockImplementation(() => undefined);
     jest.spyOn(factory['logger'], 'warn').mockImplementation(() => undefined);
@@ -161,7 +184,12 @@ describe('FsmEngineService (PROT-09)', () => {
     repo: Repository<FsmExecution>,
     configService: ConfigService = new ConfigService({}),
   ): FsmEngineService => {
-    const engine = new FsmEngineService(repo, factory, configService);
+    const engine = new FsmEngineService(
+      repo,
+      factory,
+      configService,
+      hybridLogger as unknown as HybridLoggerService,
+    );
     jest.spyOn(engine['logger'], 'log').mockImplementation(() => undefined);
     jest.spyOn(engine['logger'], 'warn').mockImplementation(() => undefined);
     jest.spyOn(engine['logger'], 'error').mockImplementation(() => undefined);
@@ -415,8 +443,8 @@ describe('FsmEngineService (PROT-09)', () => {
     });
   });
 
-  describe('7. Aislamiento de excepcion no controlada', () => {
-    it('deberia normalizar la excepcion y pausar sin propagarla', async () => {
+  describe('7. Excepcion no controlada: fallo catastrofico', () => {
+    it('deberia marcar FALLIDO sin propagar la excepcion', async () => {
       // 1. Arrange
       const execution = buildExecution();
       const { repo } = buildRepository(execution);
@@ -432,9 +460,141 @@ describe('FsmEngineService (PROT-09)', () => {
         buildLinearSchema(),
       );
 
-      // 3. Assert
-      expect(result.currentState).toBe(ExecutionState.PAUSADO);
+      // 3. Assert: FALLIDO y NO pausado. Una estrategia que lanza se ha roto, y
+      // reanudarla con CU-09 repetiria el mismo fallo; hay que corregir el
+      // codigo y lanzar una ejecucion nueva. El cursor se conserva porque saber
+      // donde se rompio es la mitad del diagnostico.
+      expect(result.currentState).toBe(ExecutionState.FALLIDO);
       expect(result.activeCursor).toBe('nodo_a');
+    });
+
+    it('deberia volcar el stack trace a disco y persistir su ruta', async () => {
+      // 1. Arrange
+      const execution = buildExecution();
+      const { repo } = buildRepository(execution);
+      const boom = new Error('TypeError: cannot read properties of undefined');
+      factory.registerStrategy(
+        buildStrategy(NodeType.TRIGGER_IMAP, jest.fn().mockRejectedValue(boom)),
+      );
+
+      // 2. Act
+      const result = await buildEngine(repo).executeWorkflow(
+        EXECUTION_ID,
+        buildLinearSchema(),
+      );
+
+      // 3. Assert
+      expect(hybridLogger.logCatastrophicFailure).toHaveBeenCalledTimes(1);
+      expect(hybridLogger.logCatastrophicFailure).toHaveBeenCalledWith(
+        expect.objectContaining({
+          executionId: EXECUTION_ID,
+          flowId: FLOW_ID,
+          nodeId: 'nodo_a',
+          level: 'URGENTE',
+          message: boom.message,
+          stackTrace: boom.stack,
+        }),
+      );
+      // La ruta es el unico eslabon entre el volcado y la fila: sin ella la
+      // traza de la base de datos sabria que hubo fallo pero no donde mirar.
+      expect(result.logFilePath).toBe(LOG_PATH);
+    });
+
+    it('NO deberia reintentar una estrategia que lanza, aunque declare retryPolicy', async () => {
+      // 1. Arrange
+      const execution = buildExecution();
+      const { repo } = buildRepository(execution);
+      const schema = buildLinearSchema();
+      schema.nodes.nodo_a.retryPolicy = { maxRetries: 3 };
+      const executeA = jest.fn().mockRejectedValue(new Error('roto'));
+
+      factory.registerStrategy(buildStrategy(NodeType.TRIGGER_IMAP, executeA));
+
+      // 2. Act
+      await buildEngine(repo).executeWorkflow(EXECUTION_ID, schema);
+
+      // 3. Assert: no se sabe que dejo a medias, asi que volver a invocarla es
+      // apostar sobre un estado desconocido.
+      expect(executeA).toHaveBeenCalledTimes(1);
+    });
+
+    it('NO deberia seguir onErrorStep ante un fallo catastrofico', async () => {
+      // 1. Arrange
+      const execution = buildExecution();
+      const { repo } = buildRepository(execution);
+      const schema = buildLinearSchema();
+      schema.nodes.nodo_a.onErrorStep = 'nodo_c';
+      const executeC = jest.fn().mockResolvedValue({ success: true });
+
+      factory.registerStrategy(
+        buildStrategy(
+          NodeType.TRIGGER_IMAP,
+          jest.fn().mockRejectedValue(new Error('roto')),
+        ),
+      );
+      factory.registerStrategy(buildStrategy(NodeType.DESTINO_HTTP, executeC));
+
+      // 2. Act
+      const result = await buildEngine(repo).executeWorkflow(
+        EXECUTION_ID,
+        schema,
+      );
+
+      // 3. Assert: `onErrorStep` es una decision sobre fallos PREVISTOS; aqui se
+      // rompio el propio ejecutor, y encaminar a otro nodo prolongaria el bucle
+      // sobre un proceso en estado desconocido.
+      expect(executeC).not.toHaveBeenCalled();
+      expect(result.currentState).toBe(ExecutionState.FALLIDO);
+    });
+
+    it('deberia tratar un HttpException de la estrategia como fallo de DOMINIO', async () => {
+      // 1. Arrange: un timeout o un fallo de validacion de `params` viaja asi
+      const execution = buildExecution();
+      const { repo } = buildRepository(execution);
+      factory.registerStrategy(
+        buildStrategy(
+          NodeType.TRIGGER_IMAP,
+          jest
+            .fn()
+            .mockRejectedValue(
+              new BadRequestException('mailbox no puede estar vacio'),
+            ),
+        ),
+      );
+
+      // 2. Act
+      const result = await buildEngine(repo).executeWorkflow(
+        EXECUTION_ID,
+        buildLinearSchema(),
+      );
+
+      // 3. Assert: PAUSADO y reanudable; el operador corrige el esquema y sigue
+      expect(result.currentState).toBe(ExecutionState.PAUSADO);
+      expect(hybridLogger.logCatastrophicFailure).not.toHaveBeenCalled();
+    });
+
+    it('deberia tratar un URGENTE DEVUELTO como fallo de dominio, no catastrofico', async () => {
+      // 1. Arrange
+      const execution = buildExecution();
+      const { repo } = buildRepository(execution);
+      factory.registerStrategy(
+        buildStrategy(
+          NodeType.TRIGGER_IMAP,
+          jest.fn().mockResolvedValue(failure('URGENTE')),
+        ),
+      );
+
+      // 2. Act
+      const result = await buildEngine(repo).executeWorkflow(
+        EXECUTION_ID,
+        buildLinearSchema(),
+      );
+
+      // 3. Assert: la estrategia CONTROLABA la situacion y lo comunico. Que sea
+      // grave no la convierte en catastrofica, y el flujo sigue siendo
+      // reanudable con CU-09.
+      expect(result.currentState).toBe(ExecutionState.PAUSADO);
+      expect(hybridLogger.logCatastrophicFailure).not.toHaveBeenCalled();
     });
   });
 
@@ -683,9 +843,13 @@ describe('FsmEngineService (PROT-09)', () => {
       registerDownstreamStrategies();
 
       // 2. Act
-      await buildEngine(repo).executeWorkflow(EXECUTION_ID, buildLinearSchema(), {
-        skipNodeTypes: [NodeType.TRIGGER_IMAP],
-      });
+      await buildEngine(repo).executeWorkflow(
+        EXECUTION_ID,
+        buildLinearSchema(),
+        {
+          skipNodeTypes: [NodeType.TRIGGER_IMAP],
+        },
+      );
 
       // 3. Assert
       // Un nodo omitido es un salto real del cursor, no una desaparicion: debe
@@ -710,7 +874,10 @@ describe('FsmEngineService (PROT-09)', () => {
       // 2. Act
       // Sin opciones: es como despacha `runAutomaticWorkflow`, donde el
       // disparador SI debe conectarse de verdad.
-      await buildEngine(repo).executeWorkflow(EXECUTION_ID, buildLinearSchema());
+      await buildEngine(repo).executeWorkflow(
+        EXECUTION_ID,
+        buildLinearSchema(),
+      );
 
       // 3. Assert
       expect(triggerExecute).toHaveBeenCalledTimes(1);

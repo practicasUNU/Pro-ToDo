@@ -10,7 +10,9 @@ import { validate } from 'class-validator';
 
 import { NodeType } from '@core/fsm/types/pipeline-schema.types';
 import {
+  DEFAULT_POLL_INTERVAL_MS,
   ImapTriggerConfigDto,
+  MIN_POLL_INTERVAL_MS,
   resolveImapConfig,
 } from '@modules/nodes/dto/imap-trigger-config.dto';
 import { createImapClient } from '@modules/nodes/services/imap-client.factory';
@@ -50,6 +52,16 @@ const DEFAULT_RECONCILE_INTERVAL_MS = 60_000;
 
 /** Variable que permite ajustar el periodo de reconciliacion. */
 const RECONCILE_INTERVAL_KEY = 'IMAP_RECONCILE_INTERVAL_MS';
+
+/**
+ * Variable con el periodo de sondeo POR DEFECTO.
+ *
+ * Es el valor de reserva para los nodos que NO declaran `pollIntervalMs` en su
+ * `pipeline_schema`, no un techo global: el periodo sigue siendo un parametro por
+ * nodo, y un flujo que lo fije manda sobre esta variable. Permite mover de golpe
+ * el ritmo de todos los buzones que no lo hayan fijado sin editar cada esquema.
+ */
+const POLLING_INTERVAL_KEY = 'IMAP_POLLING_INTERVAL_MS';
 
 /** Nombre del intervalo de un flujo concreto. */
 const intervalName = (flowId: string): string => `${INTERVAL_PREFIX}:${flowId}`;
@@ -110,6 +122,15 @@ export class ImapPollingService implements OnModuleInit, OnModuleDestroy {
    */
   private readonly scheduled = new Map<string, ResolvedImapConfig>();
 
+  /**
+   * Periodo de sondeo por defecto, resuelto UNA vez al arrancar.
+   *
+   * Se cachea en un campo en lugar de leer `ConfigService` en cada
+   * `extractImapConfig`: el valor no cambia en caliente y la reconciliacion
+   * recorre todos los flujos en cada ciclo.
+   */
+  private defaultPollIntervalMs = DEFAULT_POLL_INTERVAL_MS;
+
   constructor(
     @InjectRepository(Workflow)
     private readonly workflowRepository: Repository<Workflow>,
@@ -119,6 +140,8 @@ export class ImapPollingService implements OnModuleInit, OnModuleDestroy {
   ) {}
 
   public async onModuleInit(): Promise<void> {
+    this.defaultPollIntervalMs = this.resolveDefaultPollInterval();
+
     if (this.configService.get<string>(POLLING_ENABLED_KEY) !== 'true') {
       this.logger.warn(
         `Sondeo IMAP deshabilitado (${POLLING_ENABLED_KEY} != "true"): no se programara ningun buzon.`,
@@ -143,6 +166,35 @@ export class ImapPollingService implements OnModuleInit, OnModuleDestroy {
   public onModuleDestroy(): void {
     this.clearSchedules();
     this.deleteIntervalIfExists(RECONCILE_INTERVAL_NAME);
+  }
+
+  /**
+   * Lee `IMAP_POLLING_INTERVAL_MS` y lo valida contra el suelo del DTO.
+   *
+   * Se rechaza —y se cae al valor por defecto— todo lo que no sea un entero por
+   * encima de `MIN_POLL_INTERVAL_MS`. La razon no es purismo: un `0` o un valor
+   * de dos digitos escrito por error en el `.env` martillearia el servidor IMAP
+   * hasta que el proveedor cortase la cuenta por exceso de tasa, y eso ocurriria
+   * en silencio. El DTO ya impone ese mismo suelo a los nodos que declaran su
+   * periodo; la variable de entorno no puede ser la puerta trasera que lo evita.
+   */
+  private resolveDefaultPollInterval(): number {
+    const raw = this.configService.get<string>(POLLING_INTERVAL_KEY);
+
+    if (raw === undefined || raw === '') {
+      return DEFAULT_POLL_INTERVAL_MS;
+    }
+
+    const parsed = Number(raw);
+
+    if (!Number.isInteger(parsed) || parsed < MIN_POLL_INTERVAL_MS) {
+      this.logger.warn(
+        `${POLLING_INTERVAL_KEY}="${raw}" no es un entero valido de al menos ${MIN_POLL_INTERVAL_MS} ms; se usara ${DEFAULT_POLL_INTERVAL_MS} ms.`,
+      );
+      return DEFAULT_POLL_INTERVAL_MS;
+    }
+
+    return parsed;
   }
 
   /**
@@ -473,7 +525,17 @@ export class ImapPollingService implements OnModuleInit, OnModuleDestroy {
       return null;
     }
 
-    return resolveImapConfig(dto);
+    const resolved = resolveImapConfig(dto);
+
+    // El default del DTO es un literal de modulo; el de la instalacion vive en
+    // `IMAP_POLLING_INTERVAL_MS`. Solo se sustituye cuando el NODO no fijo el
+    // suyo: un `pollIntervalMs` explicito en el esquema manda siempre, porque el
+    // periodo es un parametro por nodo y no una politica global.
+    if (dto.pollIntervalMs === undefined) {
+      return { ...resolved, pollIntervalMs: this.defaultPollIntervalMs };
+    }
+
+    return resolved;
   }
 
   /**
