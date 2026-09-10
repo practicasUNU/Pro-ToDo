@@ -4,7 +4,7 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { QueryFailedError } from 'typeorm';
+import { In, QueryFailedError } from 'typeorm';
 
 import { StatePayloadContext } from '@core/fsm/context/state-payload.context';
 import { NodeStrategyFactory } from '@core/fsm/factories/node-strategy.factory';
@@ -47,6 +47,7 @@ const buildExecution = (
   contextPayload: {},
   retryState: {},
   logFilePath: null,
+  failureReason: null,
   createdAt: new Date(),
   updatedAt: new Date(),
   ...overrides,
@@ -1152,6 +1153,222 @@ describe('FsmEngineService (PROT-09)', () => {
 
       // 3. Assert
       expect(save).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe('11. Aborto de las ejecuciones de un flujo desactivado', () => {
+    /**
+     * Repositorio con `find`, que es lo que `abortExecutionsForFlow` usa para
+     * saber a que bucles vivos hay que avisar antes del UPDATE masivo.
+     */
+    const buildAbortRepository = (
+      live: Array<Pick<FsmExecution, 'executionId' | 'currentState'>>,
+      execution: FsmExecution = buildExecution(),
+    ): {
+      repo: Repository<FsmExecution>;
+      update: jest.Mock;
+      find: jest.Mock;
+    } => {
+      const findOne = jest.fn().mockResolvedValue(execution);
+      const update = jest.fn().mockResolvedValue({ affected: live.length });
+      const find = jest.fn().mockResolvedValue(live);
+
+      return {
+        repo: { findOne, update, find } as unknown as Repository<FsmExecution>,
+        update,
+        find,
+      };
+    };
+
+    it('11.1 deberia cerrar como FALLIDO las EN_PROCESO y las PAUSADO', async () => {
+      // 1. Arrange
+      const { repo, update, find } = buildAbortRepository([
+        { executionId: EXECUTION_ID, currentState: ExecutionState.EN_PROCESO },
+        { executionId: 'otra', currentState: ExecutionState.PAUSADO },
+      ]);
+
+      // 2. Act
+      const closed = await buildEngine(repo).abortExecutionsForFlow(
+        FLOW_ID,
+        'Flujo padre desactivado',
+      );
+
+      // 3. Assert
+      expect(closed).toBe(2);
+      expect(find).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: {
+            flowId: FLOW_ID,
+            currentState: In([
+              ExecutionState.EN_PROCESO,
+              ExecutionState.PAUSADO,
+            ]),
+          },
+        }),
+      );
+      expect(update).toHaveBeenCalledWith(
+        {
+          flowId: FLOW_ID,
+          currentState: In([ExecutionState.EN_PROCESO, ExecutionState.PAUSADO]),
+        },
+        {
+          currentState: ExecutionState.FALLIDO,
+          failureReason: 'Flujo padre desactivado',
+        },
+      );
+    });
+
+    it('11.2 no deberia escribir nada si el flujo no tiene ejecuciones vivas', async () => {
+      // 1. Arrange: el caso normal al desactivar un flujo que estaba quieto.
+      const { repo, update } = buildAbortRepository([]);
+
+      // 2. Act
+      const closed = await buildEngine(repo).abortExecutionsForFlow(
+        FLOW_ID,
+        'Flujo padre desactivado',
+      );
+
+      // 3. Assert
+      expect(closed).toBe(0);
+      expect(update).not.toHaveBeenCalled();
+    });
+
+    it('11.3 deberia recortar el motivo al ancho de la columna', async () => {
+      // 1. Arrange: el motivo puede interpolar el nombre del flujo, que lo
+      //    escribe un usuario; sin recorte seria un `value too long`.
+      const { repo, update } = buildAbortRepository([
+        { executionId: EXECUTION_ID, currentState: ExecutionState.PAUSADO },
+      ]);
+
+      // 2. Act
+      await buildEngine(repo).abortExecutionsForFlow(FLOW_ID, 'x'.repeat(400));
+
+      // 3. Assert
+      const [, patch] = update.mock.calls[0] as [
+        unknown,
+        { failureReason: string },
+      ];
+      expect(patch.failureReason).toHaveLength(255);
+    });
+
+    it('11.4 deberia detener el bucle vivo sin escribir ningun checkpoint mas', async () => {
+      // 1. Arrange: el nodo A aborta el flujo como efecto lateral, simulando la
+      //    desactivacion que ocurre mientras la ejecucion esta en curso.
+      // La fila arranca INACTIVO: `executeWorkflow` rechaza con 409 una que ya
+      // venga EN_PROCESO, porque eso significaria un segundo bucle.
+      const execution = buildExecution();
+      const { repo, update } = buildAbortRepository(
+        [
+          {
+            executionId: EXECUTION_ID,
+            currentState: ExecutionState.EN_PROCESO,
+          },
+        ],
+        execution,
+      );
+      const engine = buildEngine(repo);
+
+      const executeA = jest.fn().mockImplementation(async () => {
+        await engine.abortExecutionsForFlow(FLOW_ID, 'Flujo padre desactivado');
+        return { success: true, data: { valorA: 1 } };
+      });
+      const executeB = jest.fn().mockResolvedValue({ success: true });
+      const executeC = jest.fn().mockResolvedValue({ success: true });
+
+      factory.registerStrategy(buildStrategy(NodeType.TRIGGER_IMAP, executeA));
+      factory.registerStrategy(buildStrategy(NodeType.PROCESADOR_IA, executeB));
+      factory.registerStrategy(buildStrategy(NodeType.DESTINO_HTTP, executeC));
+
+      // 2. Act
+      await engine.executeWorkflow(EXECUTION_ID, buildLinearSchema());
+
+      // 3. Assert: el bucle abandona en el nodo A, sin llegar a B ni a C.
+      expect(executeB).not.toHaveBeenCalled();
+      expect(executeC).not.toHaveBeenCalled();
+
+      // Y sobre todo, sin resucitar la fila: ningun checkpoint posterior al
+      // UPDATE masivo. Si lo hubiera, la ejecucion volveria a EN_PROCESO y
+      // seguiria reservando el mutex `idx_flujo_activo`.
+      const statesWritten = update.mock.calls
+        .map(
+          ([, patch]) =>
+            (patch as { currentState?: ExecutionState }).currentState,
+        )
+        .filter((state) => state !== undefined);
+      expect(statesWritten).not.toContain(ExecutionState.EXITOSO);
+      expect(statesWritten.at(-1)).toBe(ExecutionState.FALLIDO);
+    });
+
+    it('11.5 deberia devolver la entidad ya marcada FALLIDO al abortar', async () => {
+      // 1. Arrange: `update()` masivo no refresca la instancia cargada, asi que
+      //    sin el ajuste en memoria el llamante recibiria un EN_PROCESO falso.
+      const execution = buildExecution();
+      const { repo } = buildAbortRepository(
+        [
+          {
+            executionId: EXECUTION_ID,
+            currentState: ExecutionState.EN_PROCESO,
+          },
+        ],
+        execution,
+      );
+      const engine = buildEngine(repo);
+
+      const executeA = jest.fn().mockImplementation(async () => {
+        await engine.abortExecutionsForFlow(FLOW_ID, 'Flujo padre desactivado');
+        return { success: true };
+      });
+      factory.registerStrategy(buildStrategy(NodeType.TRIGGER_IMAP, executeA));
+      factory.registerStrategy(
+        buildStrategy(NodeType.PROCESADOR_IA, jest.fn()),
+      );
+      factory.registerStrategy(buildStrategy(NodeType.DESTINO_HTTP, jest.fn()));
+
+      // 2. Act
+      const result = await engine.executeWorkflow(
+        EXECUTION_ID,
+        buildLinearSchema(),
+      );
+
+      // 3. Assert
+      expect(result.currentState).toBe(ExecutionState.FALLIDO);
+      expect(result.failureReason).toBe('Flujo padre desactivado');
+    });
+
+    it('11.6 no deberia abortar un reintento posterior de la misma ejecucion', async () => {
+      // 1. Arrange: una marca superviviente envenenaria el reintento manual de
+      //    CU-09, que reutiliza el mismo `executionId`.
+      const execution = buildExecution({
+        currentState: ExecutionState.PAUSADO,
+      });
+      const { repo } = buildAbortRepository(
+        [
+          {
+            executionId: EXECUTION_ID,
+            currentState: ExecutionState.EN_PROCESO,
+          },
+        ],
+        execution,
+      );
+      const engine = buildEngine(repo);
+      await engine.abortExecutionsForFlow(FLOW_ID, 'Flujo padre desactivado');
+
+      const executeA = jest.fn().mockResolvedValue({ success: true });
+      const executeB = jest.fn().mockResolvedValue({ success: true });
+      const executeC = jest.fn().mockResolvedValue({ success: true });
+      factory.registerStrategy(buildStrategy(NodeType.TRIGGER_IMAP, executeA));
+      factory.registerStrategy(buildStrategy(NodeType.PROCESADOR_IA, executeB));
+      factory.registerStrategy(buildStrategy(NodeType.DESTINO_HTTP, executeC));
+
+      // 2. Act: el flujo se reactiva y se relanza la ejecucion.
+      const result = await engine.executeWorkflow(
+        EXECUTION_ID,
+        buildLinearSchema(),
+      );
+
+      // 3. Assert
+      expect(executeC).toHaveBeenCalledTimes(1);
+      expect(result.currentState).toBe(ExecutionState.EXITOSO);
     });
   });
 });

@@ -6,6 +6,7 @@ import {
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 
+import { FlowPollingCoordinator } from '@common/services/flow-polling.coordinator';
 import { FsmEngineService } from '@core/fsm/services/fsm-engine.service';
 import { PipelineValidatorService } from '@core/fsm/services/pipeline-validator.service';
 import { buildOrderedTopology } from '@core/fsm/utils/pipeline-topology.util';
@@ -68,6 +69,7 @@ export class WorkflowsService {
     private readonly pipelineValidatorService: PipelineValidatorService,
     private readonly fsmEngineService: FsmEngineService,
     private readonly workflowTemplatesService: WorkflowTemplatesService,
+    private readonly flowPollingCoordinator: FlowPollingCoordinator,
   ) {}
 
   /**
@@ -221,12 +223,17 @@ export class WorkflowsService {
    * corporativo —marcando los correos como leidos— sin que nadie hubiera
    * revisado su configuracion. Activarlo es un acto deliberado posterior.
    *
-   * Sobre el registro en `ImapPollingService`: NO se inyecta aqui. `NodesModule`
-   * ya importa `WorkflowsModule` para despachar los flujos que el sondeo
-   * detecta, asi que la dependencia inversa crearia un ciclo de modulos. El
-   * sondeo recoge los flujos nuevos por reconciliacion periodica, que ademas
-   * cubre casos que una notificacion puntual no ve: la edicion de un esquema ya
-   * guardado o una activacion hecha por SQL directo.
+   * Sobre el registro en `ImapPollingService`: sigue sin inyectarse aqui, y no
+   * puede hacerlo. `NodesModule` ya importa `WorkflowsModule` para despachar los
+   * flujos que el sondeo detecta, asi que la dependencia inversa cerraria un
+   * ciclo de modulos. La notificacion puntual que si existe —ver
+   * `updateWorkflow`— viaja por `FlowPollingCoordinator`, el puerto que vive en
+   * el modulo global y al que el sondeo se inscribe solo.
+   *
+   * Un flujo recien creado no la necesita: nace inactivo, asi que no hay nada
+   * que programar. Y la reconciliacion periodica sigue siendo la red de
+   * seguridad para lo que el puerto no ve, como una activacion hecha por SQL
+   * directo.
    *
    * @param createWorkflowDto Nombre, descripcion y grafo del pipeline.
    * @param userId Autor, tomado del token JWT y nunca del cuerpo.
@@ -306,6 +313,11 @@ export class WorkflowsService {
       throw new NotFoundException(`Flujo con id "${workflowId}" no encontrado`);
     }
 
+    // Se captura ANTES de aplicar el DTO: la entidad se muta en sitio mas abajo
+    // y despues ya no hay forma de distinguir un `false -> false` (que no es
+    // transicion y no debe limpiar nada) de la desactivacion real.
+    const wasActive = workflow.active;
+
     if (updateWorkflowDto.name !== undefined) {
       workflow.name = updateWorkflowDto.name.trim();
     }
@@ -335,7 +347,67 @@ export class WorkflowsService {
       `Flujo actualizado: "${saved.name}" (${saved.id}) | activo=${String(saved.active)}`,
     );
 
+    // DESPUES del `save`, nunca antes. El sondeo lee `flujos WHERE activo=true`
+    // y `runAutomaticWorkflow` relee la columna: si limpiaramos con el cambio
+    // aun sin comprometer, una reconciliacion que se colara veria el flujo
+    // todavia activo y reinscribiria el temporizador que acabamos de borrar,
+    // deshaciendo nuestra propia parada.
+    if (wasActive && !saved.active) {
+      await this.releaseDeactivatedFlow(saved);
+    }
+
+    // La activacion no aborta nada —las PAUSADO son la cola de reintento de
+    // CU-09 y sobreviven a proposito—, pero si adelanta la reinscripcion: sin
+    // esto el operador pulsa "Activar" y el flujo no sondea hasta el siguiente
+    // ciclo de reconciliacion, hasta un minuto de silencio inexplicable.
+    if (!wasActive && saved.active) {
+      await this.flowPollingCoordinator.refreshPolling();
+    }
+
     return this.toPipelineSummary(saved);
+  }
+
+  /**
+   * Libera los recursos que un flujo desactivado deja detras.
+   *
+   * Dos residuos distintos y ninguno se limpia solo:
+   *
+   * 1. El temporizador en memoria del sondeo IMAP, que seguiria abriendo
+   *    conexiones contra el buzon hasta la siguiente reconciliacion.
+   * 2. Las ejecuciones vivas en `ejecuciones_flujo`. Una EN_PROCESO huerfana
+   *    reserva el mutex parcial `idx_flujo_activo`, asi que si el flujo vuelve
+   *    a activarse NUNCA podria arrancar otra ejecucion.
+   *
+   * NO PROPAGA. La desactivacion ya esta comprometida en la base de datos
+   * cuando llegamos aqui: convertir un fallo de limpieza en un 500 le diria al
+   * cliente que la operacion fallo cuando si ocurrio, y su reintento seria un
+   * no-op que jamas volveria a intentar la limpieza. Se registra y se sigue; la
+   * reconciliacion periodica borra el intervalo de todos modos, y la guarda
+   * `!active` de `runAutomaticWorkflow` ya impide ejecuciones nuevas.
+   */
+  private async releaseDeactivatedFlow(workflow: Workflow): Promise<void> {
+    // Primero cortar la fuente de trabajo nuevo y despues matar lo que ya
+    // corre: al reves, el intervalo podria disparar un tick mas y crear una
+    // ejecucion fresca justo despues del barrido.
+    this.flowPollingCoordinator.stopPollingForFlow(workflow.id);
+
+    try {
+      const closed = await this.fsmEngineService.abortExecutionsForFlow(
+        workflow.id,
+        'Flujo padre desactivado',
+      );
+
+      if (closed > 0) {
+        this.logger.warn(
+          `Flujo "${workflow.name}" (${workflow.id}) desactivado: ${closed} ejecucion(es) viva(s) cerradas como FALLIDO.`,
+        );
+      }
+    } catch (error) {
+      this.logger.error(
+        `El flujo "${workflow.name}" (${workflow.id}) quedo desactivado, pero no se pudieron cerrar sus ejecuciones vivas: ${error instanceof Error ? error.message : String(error)}`,
+        error instanceof Error ? error.stack : undefined,
+      );
+    }
   }
 
   /**

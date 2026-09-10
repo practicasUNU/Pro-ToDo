@@ -4,6 +4,198 @@ Registro técnico del "por qué" de cada decisión de implementación. Los estad
 
 ---
 
+## 2026-09-09 · Parada inmediata del sondeo IMAP y saneado de ejecuciones huérfanas — rama `feat/trigger-imap`
+
+### Dos premisas del encargo que la auditoría matizó
+
+El diagnóstico de partida hablaba de un ciclo infinito que "sigue corriendo" al desactivar o
+**eliminar** un flujo. Al abrir el código, dos cosas no encajaban.
+
+**No existe borrado de flujos.** `WorkflowsController` lo documenta explícitamente: no hay
+`@Delete` porque un borrado físico arrastraría el histórico de ejecuciones por el
+`ON DELETE CASCADE` de `init.sql:155`. Retirar un flujo es `PATCH { "active": false }`. El
+trabajo se acotó, por tanto, a la desactivación, que es el único camino real.
+
+**La fuga estaba acotada, no era indefinida.** `refreshSchedules()` ya hacía diffing en tres
+fases, y su fase de bajas retira el intervalo de todo flujo que `findImapTriggerNodes()` —que
+filtra `active: true`— deja de devolver. Es decir: el temporizador del flujo desactivado **sí**
+moría, pero en el siguiente ciclo de reconciliación. Con los valores por defecto, hasta 60
+segundos abriendo sockets IMAP contra un buzón que ya nadie debería consultar. Lo que faltaba
+era la parada inmediata, no la parada.
+
+Lo que sí era exactamente como decía el encargo: las ejecuciones huérfanas. Nada las tocaba, y
+una fila `EN_PROCESO` no es solo ruido en la trazabilidad — reserva el índice único parcial
+`idx_flujo_activo`, así que si el flujo se reactivaba **nunca** podría arrancar otra ejecución.
+
+### `NodesModule` ya importaba `WorkflowsModule`, así que la flecha obvia estaba prohibida
+
+`ImapPollingService` inyecta `WorkflowsService` para despachar el flujo cuando detecta correo.
+Inyectar el sondeo dentro de `WorkflowsService` para pararlo habría cerrado el ciclo que el
+TSDoc de ambos módulos evita a propósito — y que de hecho `createWorkflow` documentaba como la
+razón de conformarse con la reconciliación periódica.
+
+Se descartó `forwardRef`: resuelve el ciclo en el contenedor pero lo deja en el diseño, y este
+código lo había evitado deliberadamente. En su lugar, un puerto: `FlowPollingCoordinator` en
+`CommonModule`, que ya es `@Global()` y ya alojaba `HybridLoggerService` por el mismo criterio
+—infraestructura transversal que no pertenece al dominio de ningún módulo—. El sondeo se
+inscribe hacia arriba en su `onModuleInit`; el dominio habla contra una interfaz que no sabe
+nada de IMAP ni de `SchedulerRegistry`. El grafo sigue siendo acíclico.
+
+El registro va **después** de la guarda de `IMAP_POLLING_ENABLED`, no antes. Sin sondeo no hay
+nada que parar, y sobre todo un `refreshPolling()` disparado desde fuera empezaría a inscribir
+temporizadores que ningún ciclo de reconciliación mantiene, saltándose la decisión de que el
+fallo por omisión sea *no* sondear.
+
+### Limpiar el `Map` no era opcional, y el test que lo demuestra tarda 60 segundos simulados
+
+`stopPollingForFlow` tiene que hacer dos cosas: borrar el intervalo **y** limpiar la entrada de
+`scheduled`, el registro paralelo que sostiene el diffing. Omitir lo segundo parece inofensivo
+—el siguiente reconcile se autocura si el flujo sigue desactivado— hasta que el operador
+reactiva el flujo antes de ese ciclo:
+
+| Momento | Estado |
+|---|---|
+| t=0 · desactivar | Intervalo borrado; `scheduled` conserva `flowId → configA` |
+| t=10 s · reactivar | La tabla vuelve a devolver el flujo |
+| t=60 s · reconcile | `desired` lo tiene → no entra en bajas. `scheduled.get()` devuelve `configA` → no es alta. `hasConfigChanged` es `false` → **no se reinscribe** |
+
+Resultado: flujo activo y mudo, para siempre, y el log reportando `intactos=1`. Es el mismo modo
+de fallo que el comentario de `clearSchedules` ya prevenía, reintroducido por la puerta de
+atrás. Por eso el `scheduled.delete` va en un `finally`, no dentro del bloque protegido: el Map
+es la fuente de verdad, y dejarlo sucio es peor que un intervalo huérfano.
+
+De paso se endureció la fase de altas de `refreshSchedules`, que ahora comprueba también
+`doesExist('interval', ...)`. Desde que existe un segundo escritor del par
+`scheduled` ↔ `SchedulerRegistry`, dar la invariante por supuesta es una apuesta; ahora el
+reconcile la repara en lugar de confiar en ella.
+
+### El `UPDATE` masivo era cosmético mientras el bucle siguiera vivo
+
+Marcar `EN_PROCESO → FALLIDO` por SQL no basta: el `while` de `executeWorkflow` puede seguir
+corriendo en este mismo proceso, y su próximo `saveCheckpoint` —un `UPDATE ... WHERE
+id_ejecucion = $1` incondicional, sin columna de versión— resucitaría la fila. Peor: si
+entretanto arrancó otra ejecución del flujo, esa escritura violaría `idx_flujo_activo` con un
+23505 que `saveCheckpoint` no filtra, acabando en volcado forense por algo que no es un fallo.
+
+De ahí la segunda mitad: un `Map` en memoria de `executionId → motivo` que el bucle consulta.
+Y hacía falta consultarlo en **dos** puntos, no en uno:
+
+- **Primera sentencia del `while`**, antes del circuit breaker: captura el aborto llegado
+  mientras se escribía el checkpoint anterior.
+- **Tras el `for(;;)` de reintentos, antes de `outcome.catastrophic`**: captura el caso
+  frecuente, el aborto llegado *mientras el nodo corría*, que es donde el bucle pasa casi todo
+  su tiempo. Comprobar solo arriba habría dejado que la rama de éxito escribiera `EN_PROCESO`
+  antes de salir, devolviendo la fila al mutex.
+
+En ambos se hace `break`, no `throw`: una excepción la atraparía el `catch` externo, que escribe
+volcado forense y vuelve a marcar `FALLIDO`, generando justo el ruido que se quiere evitar. Y
+como el cursor no es nulo al abortar, el `break` esquiva también el checkpoint `EXITOSO`.
+
+Solo se marcan las `EN_PROCESO`. Una `PAUSADO` es, por definición, una ejecución cuyo bucle ya
+terminó: no hay a quien avisar, y su identificador se quedaría en el mapa para siempre. Las que
+sí se marcan se limpian en el `finally` de `executeWorkflow` —que hubo que añadir, porque el
+`try` externo no tenía— y, además, al **entrar** en `executeWorkflow`: una marca superviviente
+envenenaría el reintento manual de CU-09, que reutiliza el mismo `executionId`.
+
+### El motivo no cabía en ninguna columna existente
+
+`ejecuciones_flujo` sabía *qué* había fallado y dónde estaba la autopsia (`ruta_archivo_log`),
+pero no *por qué* en términos legibles. Hasta ahora no hacía falta: todo `FALLIDO` lo decidía el
+motor tras agotar reintentos, y el detalle vivía en el volcado. Una desactivación es un fallo de
+otra naturaleza — no lo provoca ningún nodo y no hay stack trace que volcar.
+
+Se descartó `alertas_error`: esa tabla registra incidencias con severidad que alguien debe
+resolver (`resuelto BOOLEAN`), y una desactivación deliberada no es una incidencia pendiente. El
+motivo pertenece a la fila de la ejecución. Migración `012` + `failureReason` en la entidad, con
+truncado en código a 255: el texto puede interpolar el nombre de un flujo, que lo escribe un
+usuario, y sin recorte una desactivación legítima moriría con `value too long`.
+
+**Es un prerrequisito duro, no un extra.** Con `synchronize: false`, en cuanto la entidad declara
+la propiedad TypeORM enumera `motivo_fallo` en todo `SELECT` de `FsmExecution`, incluido el
+`findOne` de `executeWorkflow`. Entidad y migración se despliegan juntas o el motor no arranca.
+
+### Por qué la limpieza va después del `save`, y no antes
+
+`refreshSchedules` lee `flujos WHERE activo = true` y `runAutomaticWorkflow` relee la columna. Si
+paráramos el temporizador antes de comprometer el cambio, una reconciliación que se colara en
+esa ventana vería el flujo todavía activo, no lo encontraría en `scheduled` y **lo reinscribiría**
+— deshaciendo nuestra propia parada, esta vez sin nadie que la repita. Con `activo = false` ya
+persistido, cualquier ciclo posterior está de acuerdo con la parada y como mucho la repite.
+
+Entre las dos operaciones, primero parar y luego abortar: al revés, el intervalo podría disparar
+un tick más y crear una ejecución fresca justo después del barrido.
+
+Y ninguna de las dos propaga. La desactivación ya está comprometida cuando se ejecutan;
+convertir un fallo de limpieza en un 500 le diría al cliente que la operación falló cuando sí
+ocurrió, y su reintento sería un no-op que jamás volvería a intentar la limpieza.
+
+### La reactivación no aborta nada, pero sí adelanta la reinscripción
+
+Simétricamente, `false → true` **no** cierra ejecuciones: las `PAUSADO` conservan su
+`activeCursor` precisamente para el reintento de CU-09, y el operador que desactiva para
+arreglar algo y reactiva después esperaría encontrarlas. Lo que sí hace es un `refreshPolling()`
+inmediato: sin él, pulsar "Activar" y no ver actividad durante un minuto es el síntoma más
+visible que quedaba.
+
+### Un tick en vuelo acusaba al buzón de algo que no había pasado
+
+Parar el intervalo no cancela un `pollInbox` ya suspendido en la red. Al reanudar, llega a
+`dispatchFlow` y `runAutomaticWorkflow` lo rechaza con un `BadRequestException` — que se
+relanzaba y acababa en el `catch` de `pollInbox` registrado como *"[Worker] Falla critica de
+conexion IMAP"*, a nivel `error` y con stack. Cada desactivación con un tick en vuelo generaba
+una falsa alerta.
+
+Ahora `dispatchFlow` trata cualquier `HttpException` del motor como condición normal, junto al
+409 que ya contemplaba, **conservando el mensaje real**: por esa misma vía llega también el
+esquema corrupto, y ese sí debe quedar legible en la traza aunque deje de disfrazarse de caída
+IMAP. Un fallo que no sea `HttpException` sigue subiendo como `error`, y hay un test para cada
+mitad para que la degradación no se coma las averías de verdad.
+
+No se toca `inFlight`: tiene un único dueño, el `try/finally` de `pollInbox`, y borrarlo desde
+fuera podría habilitar dos conexiones concurrentes al mismo buzón — literalmente lo que esa
+guarda existe para impedir.
+
+### Deuda anotada y no corregida
+
+1. **El barrido cierra también las `PAUSADO`.** Son la cola de reintento de CU-09, que todavía no
+   tiene endpoint, así que hoy no destruye nada usable. Cuando exista, conviene decidir
+   explícitamente si desactivar un flujo debe vaciar su cola.
+2. **La cancelación cooperativa es memoria de proceso.** El `UPDATE` es global; el `Map` solo
+   corta bucles de *este* proceso. Cuando entre BullMQ, un worker de otro proceso seguiría
+   corriendo la ejecución abortada y la resucitaría. El arreglo eventual es un `UPDATE`
+   condicional (`estado <> 'FALLIDO'`) comprobando `affected`, que convierte la cooperación en
+   garantía.
+3. **`motivo_fallo` queda `NULL` en el resto de los `FALLIDO`.** Solo lo rellena el aborto. Si la
+   trazabilidad va a mostrarlo, conviene poblarlo también desde `failCatastrophically`.
+
+### Archivos
+
+**Nuevos:**
+- `backend/src/common/services/flow-polling.coordinator.ts`
+- `backend/src/common/services/flow-polling.coordinator.spec.ts`
+- `db/migrations/012-motivo-fallo-ejecucion.sql`
+
+**Modificados:**
+- `backend/src/common/common.module.ts`
+- `backend/src/core/fsm/entities/fsm-execution.entity.ts`
+- `backend/src/core/fsm/services/fsm-engine.service.ts` (+ spec)
+- `backend/src/modules/nodes/services/imap-polling.service.ts` (+ spec)
+- `backend/src/modules/workflows/workflows.service.ts` (+ spec)
+- `init.sql`
+
+### Estado de las pruebas
+
+```
+backend · npx jest        → 32 suites, 568 tests, 0 fallos  (antes: 31 / 537)
+backend · npx nest build  → limpio
+backend · eslint          → 18 errores preexistentes; 0 nuevos (antes: 25)
+```
+
+Pendiente de verificación manual contra el contenedor: aplicar
+`db/migrations/012-motivo-fallo-ejecucion.sql` (Docker lo levanta el usuario).
+
+---
+
 ## 2026-09-09 · Homologación del marcado de errores en CodeMirror — rama `feat/trigger-imap`
 
 ### Tres premisas del encargo que la auditoría desmintió

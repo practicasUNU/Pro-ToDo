@@ -158,6 +158,9 @@ CREATE TABLE ejecuciones_flujo (
     contexto_acumulado JSONB NOT NULL DEFAULT '{}'::jsonb,
     retry_state JSONB NOT NULL DEFAULT '{}'::jsonb,
     ruta_archivo_log VARCHAR(255),
+    -- Motivo legible cuando el fallo NO lo explica un volcado forense: lo
+    -- decide un operador, no un nodo (ver db/migrations/012).
+    motivo_fallo VARCHAR(255),
     fecha_inicio TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     fecha_actualizacion TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     fecha_fin TIMESTAMP

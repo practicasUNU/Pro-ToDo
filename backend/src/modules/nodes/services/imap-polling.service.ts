@@ -1,4 +1,9 @@
-import { ConflictException, Injectable, Logger } from '@nestjs/common';
+import {
+  ConflictException,
+  HttpException,
+  Injectable,
+  Logger,
+} from '@nestjs/common';
 // Import de VALOR y no `import type`: `ConfigService` se inyecta por constructor, y
 // con `emitDecoratorMetadata` un `import type` se borra al transpilar, dejando
 // `design:paramtypes` en `Object`. Nest no podria resolver la dependencia.
@@ -8,6 +13,7 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { plainToInstance } from 'class-transformer';
 import { validate } from 'class-validator';
 
+import { FlowPollingCoordinator } from '@common/services/flow-polling.coordinator';
 import { NodeType } from '@core/fsm/types/pipeline-schema.types';
 import {
   DEFAULT_POLL_INTERVAL_MS,
@@ -137,6 +143,7 @@ export class ImapPollingService implements OnModuleInit, OnModuleDestroy {
     private readonly workflowsService: WorkflowsService,
     private readonly schedulerRegistry: SchedulerRegistry,
     private readonly configService: ConfigService,
+    private readonly flowPollingCoordinator: FlowPollingCoordinator,
   ) {}
 
   public async onModuleInit(): Promise<void> {
@@ -148,6 +155,17 @@ export class ImapPollingService implements OnModuleInit, OnModuleDestroy {
       );
       return;
     }
+
+    // El registro va DESPUES de la guarda, no antes: si el sondeo esta
+    // deshabilitado no hay nada que parar, y sobre todo no debe poder
+    // reconciliarse desde fuera. Un `refreshPolling()` disparado por la
+    // activacion de un flujo empezaria a inscribir temporizadores que ningun
+    // ciclo de reconciliacion mantiene, saltandose la decision de que el fallo
+    // por omision sea NO sondear.
+    this.flowPollingCoordinator.register({
+      stopPollingForFlow: (flowId: string) => this.stopPollingForFlow(flowId),
+      refreshPolling: () => this.refreshSchedules(),
+    });
 
     // No relanza: no poder programar el sondeo es una degradacion, no un motivo
     // para impedir que la API arranque. La reconciliacion periodica que se
@@ -166,6 +184,12 @@ export class ImapPollingService implements OnModuleInit, OnModuleDestroy {
   public onModuleDestroy(): void {
     this.clearSchedules();
     this.deleteIntervalIfExists(RECONCILE_INTERVAL_NAME);
+
+    // El coordinador vive en `CommonModule`, que es global y sobrevive a este
+    // servicio. Sin esta baja, una recarga del `--watch` dejaria al dominio
+    // hablando con la instancia muerta —cuyo `scheduled` esta vacio, asi que
+    // toda parada seria un no-op silencioso— mientras la nueva no recibe nada.
+    this.flowPollingCoordinator.unregister();
   }
 
   /**
@@ -195,6 +219,44 @@ export class ImapPollingService implements OnModuleInit, OnModuleDestroy {
     }
 
     return parsed;
+  }
+
+  /**
+   * Destruye el temporizador de un flujo AHORA, sin esperar a la reconciliacion.
+   *
+   * El diffing de `refreshSchedules` ya retira los intervalos de los flujos
+   * desactivados, pero solo en su siguiente ciclo: hasta un minuto entero
+   * abriendo conexiones IMAP contra el buzon de un flujo que ya nadie deberia
+   * disparar. Este es el camino rapido para el caso en que sabemos, en el
+   * instante exacto, que un flujo deja de estar operativo.
+   *
+   * NO sustituye a la reconciliacion, que sigue siendo la red de seguridad: un
+   * `activo` cambiado por SQL directo o una fila borrada a mano no pasan por
+   * aqui.
+   *
+   * Idempotente: parar un flujo que no estaba programado no es un error, y de
+   * hecho es el caso normal cuando se desactiva un flujo sin nodo IMAP.
+   */
+  public stopPollingForFlow(flowId: string): void {
+    const name = intervalName(flowId);
+
+    try {
+      this.deleteIntervalIfExists(name);
+    } finally {
+      // En el `finally` a proposito. El Map es la FUENTE DE VERDAD del diffing,
+      // y dejarlo sucio es peor que un intervalo huerfano: al reactivar el flujo
+      // antes del siguiente ciclo, la fase de altas lo veria "ya programado e
+      // intacto" y no volveria a inscribirlo nunca.
+      this.scheduled.delete(flowId);
+    }
+
+    // A nivel `log` y no `debug`: sin esta linea el camino rapido es invisible
+    // —la siguiente reconciliacion reportara `bajas=0` porque el Map ya esta
+    // limpio— mientras que el lento es verboso, y en mitad de un incidente esa
+    // asimetria cuesta cara.
+    this.logger.log(
+      `Sondeo IMAP detenido bajo demanda para el flujo "${flowId}".`,
+    );
   }
 
   /**
@@ -243,7 +305,14 @@ export class ImapPollingService implements OnModuleInit, OnModuleDestroy {
     for (const [flowId, config] of desired) {
       const current = this.scheduled.get(flowId);
 
-      if (current === undefined) {
+      // La segunda condicion repara la invariante "esta en `scheduled` <=>
+      // existe su intervalo" en vez de darla por supuesta. Desde que
+      // `stopPollingForFlow` es un segundo escritor del par, darla por buena
+      // dejaria un flujo activo y mudo si alguna vez se desincronizan.
+      if (
+        current === undefined ||
+        !this.schedulerRegistry.doesExist('interval', intervalName(flowId))
+      ) {
         this.registerInterval({ flowId, config });
         added.push(flowId);
         continue;
@@ -436,6 +505,23 @@ export class ImapPollingService implements OnModuleInit, OnModuleDestroy {
       if (error instanceof ConflictException) {
         this.logger.warn(
           `El flujo "${flowId}" ya tiene una ejecucion EN_PROCESO; el correo queda para el siguiente ciclo.`,
+        );
+        return false;
+      }
+
+      // Cualquier otro rechazo DEL MOTOR tampoco es una averia de este servicio.
+      // El caso que lo motiva: un tick que ya estaba en vuelo cuando alguien
+      // desactivo el flujo llega aqui y `runAutomaticWorkflow` lo rechaza con un
+      // 400. Sin esta rama, `pollInbox` lo registraria como "falla critica de
+      // conexion IMAP" —a nivel `error` y con stack—, acusando al buzon de algo
+      // que no ha pasado.
+      //
+      // Se conserva el MENSAJE REAL en vez de uno generico: por esta misma via
+      // llega tambien el esquema corrupto, y ese si tiene que quedar legible en
+      // la traza aunque deje de disfrazarse de caida IMAP.
+      if (error instanceof HttpException) {
+        this.logger.warn(
+          `El motor rechazo el despacho del flujo "${flowId}": ${error.message}`,
         );
         return false;
       }

@@ -1812,3 +1812,113 @@ reemplaza la lista entera del estado: dos llamadas separadas se pisan.
 **Fuera de alcance, anotado:** `props.readonly` se aplica una sola vez en el montaje
 (`EditorView.editable.of()`), sin `Compartment` ni `watch`, así que cambiarlo en caliente no tiene
 efecto. Hoy no se manifiesta porque los dos anfitriones pasan un literal estático.
+
+---
+
+## 20. Parada inmediata del sondeo y saneado de ejecuciones huérfanas
+
+Rama: `feat/trigger-imap`.
+
+Al desactivar un flujo quedaban dos residuos: el `setInterval` del sondeo IMAP seguía vivo en
+`SchedulerRegistry` con su configuración capturada en la clausura, y las filas de
+`ejecuciones_flujo` en `EN_PROCESO` / `PAUSADO` se quedaban ahí para siempre. La primera es una
+fuga acotada —el diffing de `refreshSchedules` la retira en el siguiente ciclo, hasta 60 s
+después—; la segunda no se resuelve sola, y una `EN_PROCESO` huérfana reserva el mutex parcial
+`idx_flujo_activo`, de modo que el flujo **no podría volver a arrancar nunca** si se reactiva.
+
+### 20.1 Contrato nuevo
+
+```typescript
+// @common/services/flow-polling.coordinator.ts
+export interface FlowPollingPort {
+  stopPollingForFlow(flowId: string): void;
+  refreshPolling(): Promise<void>;
+}
+
+@Injectable()
+export class FlowPollingCoordinator {
+  register(port: FlowPollingPort): void;
+  unregister(): void;
+  stopPollingForFlow(flowId: string): void;   // no-op sin puerto; nunca propaga
+  refreshPolling(): Promise<void>;            // idem
+}
+
+// ImapPollingService — implementación del puerto
+public stopPollingForFlow(flowId: string): void;
+
+// FsmEngineService — integridad de la FSM
+public abortExecutionsForFlow(flowId: string, reason: string): Promise<number>;
+```
+
+### 20.2 Diagrama de inyección: por qué un puerto y no `forwardRef`
+
+```
+NodesModule ──importa──> WorkflowsModule        (ya existía: el sondeo despacha)
+     │                          │
+     │ register()               │ inyecta
+     v                          v
+        CommonModule (@Global) · FlowPollingCoordinator
+```
+
+`WorkflowsService` no puede inyectar `ImapPollingService`: `NodesModule` ya importa
+`WorkflowsModule` y la flecha inversa cerraría el ciclo. El coordinador vive en `CommonModule`
+—global, y ya alojaba `HybridLoggerService` por el mismo criterio de infraestructura
+transversal—, así que el dominio habla contra una interfaz y el implementador se inscribe
+hacia arriba. El grafo de módulos sigue siendo acíclico.
+
+El registro ocurre **solo si `IMAP_POLLING_ENABLED === 'true'`**: con el sondeo deshabilitado no
+hay nada que parar, y sobre todo un `refreshPolling()` externo no debe poder inscribir
+temporizadores que ningún ciclo de reconciliación mantiene.
+
+### 20.3 Cancelación cooperativa (por qué el UPDATE solo no basta)
+
+`abortExecutionsForFlow` tiene dos mitades. El `UPDATE` masivo cierra las filas, pero un bucle
+vivo **en este proceso** volvería a escribir sobre la suya en el siguiente `saveCheckpoint` y la
+resucitaría a `EN_PROCESO`. Por eso los `executionId` en `EN_PROCESO` se marcan además en un
+`Map` en memoria que el `while` de `executeWorkflow` consulta en **dos** puntos:
+
+| Punto | Por qué hace falta |
+|---|---|
+| Primera sentencia del `while` | Aborto llegado mientras se escribía el checkpoint anterior; corta antes del circuit breaker |
+| Tras el `for(;;)` de reintentos, antes de `outcome.catastrophic` | Aborto llegado **mientras el nodo corría**, que es donde el bucle pasa casi todo su tiempo. Sin este punto, la rama de éxito escribiría `EN_PROCESO` y la fila volvería a reservar el mutex |
+
+Solo se marcan las `EN_PROCESO`: una `PAUSADO` es, por definición, una ejecución cuyo bucle ya
+terminó, y dejar su identificador en el mapa sería una fuga que nadie limpiaría.
+
+### 20.4 Esquema
+
+```sql
+-- db/migrations/012-motivo-fallo-ejecucion.sql
+ALTER TABLE ejecuciones_flujo
+    ADD COLUMN IF NOT EXISTS motivo_fallo VARCHAR(255);
+```
+
+Replicada en el `CREATE TABLE` de `init.sql` para los volúmenes vacíos. Es un **prerrequisito
+duro**: con `synchronize: false`, en cuanto `FsmExecution` declara `failureReason` TypeORM
+enumera la columna en todo `SELECT` de la entidad, así que entidad y migración se despliegan
+juntas o el motor revienta al arrancar.
+
+### 20.5 Estado de las tareas
+
+- [x] 1. `FlowPollingCoordinator` + `FlowPollingPort` en `CommonModule` (@Global)
+- [x] 2. `ImapPollingService.stopPollingForFlow`, auto-registro y baja en `onModuleDestroy`
+- [x] 3. Migración 012 + `FsmExecution.failureReason` + `init.sql`
+- [x] 4. `FsmEngineService.abortExecutionsForFlow` con cancelación cooperativa en dos puntos
+- [x] 5. `WorkflowsService.updateWorkflow`: limpieza en `true → false`, recarga en `false → true`
+- [x] 6. Pruebas: 568/568 en 32 suites (antes 537/31); `nest build` en verde; cero errores de lint nuevos
+
+**Endurecimiento colateral:** la fase de altas de `refreshSchedules` comprueba ahora también
+`doesExist('interval', ...)`. Desde que `stopPollingForFlow` es un segundo escritor del par
+`scheduled` ↔ `SchedulerRegistry`, dar la invariante por supuesta dejaría un flujo activo y mudo
+si alguna vez se desincronizan; ahora el reconcile la repara.
+
+**`dispatchFlow` degrada los `HttpException` del motor a `warn`:** un tick que ya estaba en vuelo
+cuando se desactivó el flujo llega con un 400, y antes se registraba como *"falla crítica de
+conexión IMAP"* —a nivel `error` y con stack—, acusando al buzón de algo que no había pasado. Se
+conserva el mensaje real para que un esquema corrupto siga siendo legible en la traza.
+
+**Fuera de alcance, anotado:** (1) el barrido cierra también las `PAUSADO`, que son la cola de
+reintento de CU-09; CU-09 todavía no tiene endpoint, así que hoy no destruye nada usable, pero
+conviene revisarlo cuando exista. (2) La cancelación cooperativa es memoria de proceso: cuando
+entre BullMQ, un worker de otro proceso seguiría corriendo la ejecución abortada. El arreglo
+eventual es un `UPDATE` condicional (`estado <> 'FALLIDO'`) comprobando `affected`.

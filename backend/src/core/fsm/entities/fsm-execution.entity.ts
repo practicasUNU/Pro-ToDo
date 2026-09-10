@@ -82,6 +82,27 @@ export class FsmExecution {
   })
   logFilePath: string | null;
 
+  /**
+   * Motivo legible del fallo cuando NO lo explica un volcado forense.
+   *
+   * Complementa a `logFilePath`, no lo sustituye: aquel apunta al stack trace de
+   * un fallo tecnico, y este describe un fallo que ningun nodo provoco. El caso
+   * que lo motiva es la desactivacion del flujo padre —una decision del
+   * operador, sin excepcion que volcar—, tras la cual las ejecuciones vivas se
+   * cierran como FALLIDO y sin esta columna serian indistinguibles de una averia
+   * cuyo log se hubiera perdido.
+   *
+   * `null` en toda ejecucion que no ha fallado y en la que si lo hizo por la via
+   * tecnica, donde el detalle vive en el fichero.
+   */
+  @Column({
+    name: 'motivo_fallo',
+    type: 'varchar',
+    length: 255,
+    nullable: true,
+  })
+  failureReason: string | null;
+
   @CreateDateColumn({ name: 'fecha_inicio', type: 'timestamp' })
   createdAt: Date;
 

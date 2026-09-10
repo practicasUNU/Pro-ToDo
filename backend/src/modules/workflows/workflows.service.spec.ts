@@ -15,6 +15,7 @@ import type { CreateWorkflowDto } from './dto/create-workflow.dto';
 
 import type { PipelineSchemaDto } from '@core/fsm/dto/pipeline-schema.dto';
 import type { FsmExecution } from '@core/fsm/entities/fsm-execution.entity';
+import type { FlowPollingCoordinator } from '@common/services/flow-polling.coordinator';
 import type { FsmEngineService } from '@core/fsm/services/fsm-engine.service';
 import type { PipelineValidatorService } from '@core/fsm/services/pipeline-validator.service';
 import type { WorkflowTemplatesService } from '@modules/workflow-templates/workflow-templates.service';
@@ -83,6 +84,8 @@ const buildExecution = (
     },
   },
   retryState: {},
+  logFilePath: null,
+  failureReason: null,
   createdAt: new Date('2026-01-01T00:00:00.000Z'),
   updatedAt: new Date('2026-01-01T00:00:00.000Z'),
   ...overrides,
@@ -95,8 +98,17 @@ type ValidatorMock = jest.Mocked<
   Pick<PipelineValidatorService, 'validateSchema'>
 >;
 type EngineMock = jest.Mocked<
-  Pick<FsmEngineService, 'createExecution' | 'executeWorkflow'>
+  Pick<
+    FsmEngineService,
+    'createExecution' | 'executeWorkflow' | 'abortExecutionsForFlow'
+  >
 >;
+/** Miembros `jest.Mock` y no `jest.Mocked<Pick<...>>`: `expect(mock.metodo)`
+ *  sobre metodos de instancia dispara `@typescript-eslint/unbound-method`. */
+interface CoordinatorMock {
+  stopPollingForFlow: jest.Mock;
+  refreshPolling: jest.Mock;
+}
 
 /** Dobles del caso feliz; cada prueba sobrescribe solo lo que le concierne. */
 interface ServiceHarness {
@@ -105,6 +117,8 @@ interface ServiceHarness {
   validator: ValidatorMock;
   engine: EngineMock;
   templates: { assertInstantiable: jest.Mock };
+  coordinator: CoordinatorMock;
+  errorSpy: jest.SpyInstance;
 }
 
 /**
@@ -138,6 +152,14 @@ const buildHarness = (): ServiceHarness => {
       }),
     ),
     executeWorkflow: jest.fn().mockResolvedValue(buildExecution()),
+    abortExecutionsForFlow: jest.fn().mockResolvedValue(0),
+  };
+
+  // El puerto del sondeo va mockeado: la implementacion real vive en
+  // `NodesModule` y lo que aqui se comprueba es QUE se le avisa, no como para.
+  const coordinator: CoordinatorMock = {
+    stopPollingForFlow: jest.fn(),
+    refreshPolling: jest.fn().mockResolvedValue(undefined),
   };
 
   // El catalogo de plantillas va mockeado con exito por defecto: `create` solo
@@ -151,11 +173,23 @@ const buildHarness = (): ServiceHarness => {
     validator as unknown as PipelineValidatorService,
     engine as unknown as FsmEngineService,
     templates as unknown as WorkflowTemplatesService,
+    coordinator as unknown as FlowPollingCoordinator,
   );
   jest.spyOn(service['logger'], 'log').mockImplementation(() => undefined);
   jest.spyOn(service['logger'], 'warn').mockImplementation(() => undefined);
+  const errorSpy = jest
+    .spyOn(service['logger'], 'error')
+    .mockImplementation(() => undefined);
 
-  return { service, repository, validator, engine, templates };
+  return {
+    service,
+    repository,
+    validator,
+    engine,
+    templates,
+    coordinator,
+    errorSpy,
+  };
 };
 
 describe('WorkflowsService (despacho manual de pruebas, Camino B)', () => {
@@ -276,9 +310,9 @@ describe('WorkflowsService (despacho manual de pruebas, Camino B)', () => {
       repository.findOne.mockResolvedValue(null);
 
       // 2. Act + 3. Assert
-      await expect(
-        service.executeTest(WORKFLOW_ID, {}),
-      ).rejects.toBeInstanceOf(NotFoundException);
+      await expect(service.executeTest(WORKFLOW_ID, {})).rejects.toBeInstanceOf(
+        NotFoundException,
+      );
       expect(validator.validateSchema).not.toHaveBeenCalled();
       expect(engine.createExecution).not.toHaveBeenCalled();
     });
@@ -291,9 +325,9 @@ describe('WorkflowsService (despacho manual de pruebas, Camino B)', () => {
       );
 
       // 2. Act + 3. Assert
-      await expect(
-        service.executeTest(WORKFLOW_ID, {}),
-      ).rejects.toBeInstanceOf(BadRequestException);
+      await expect(service.executeTest(WORKFLOW_ID, {})).rejects.toBeInstanceOf(
+        BadRequestException,
+      );
       expect(engine.createExecution).not.toHaveBeenCalled();
     });
 
@@ -305,9 +339,9 @@ describe('WorkflowsService (despacho manual de pruebas, Camino B)', () => {
       );
 
       // 2. Act + 3. Assert: el orden importa — validar ANTES de tocar la BD
-      await expect(
-        service.executeTest(WORKFLOW_ID, {}),
-      ).rejects.toBeInstanceOf(BadRequestException);
+      await expect(service.executeTest(WORKFLOW_ID, {})).rejects.toBeInstanceOf(
+        BadRequestException,
+      );
       expect(engine.createExecution).not.toHaveBeenCalled();
     });
   });
@@ -339,9 +373,9 @@ describe('WorkflowsService (despacho manual de pruebas, Camino B)', () => {
       );
 
       // 2. Act + 3. Assert
-      await expect(
-        service.executeTest(WORKFLOW_ID, {}),
-      ).rejects.toBeInstanceOf(ConflictException);
+      await expect(service.executeTest(WORKFLOW_ID, {})).rejects.toBeInstanceOf(
+        ConflictException,
+      );
       expect(engine.executeWorkflow).not.toHaveBeenCalled();
     });
   });
@@ -941,6 +975,122 @@ describe('WorkflowsService (edicion y habilitacion de flujos)', () => {
       //    activacion. Un flujo a medio configurar debe poder desactivarse.
       expect(summary.active).toBe(false);
       expect(summary.topology).toEqual([]);
+    });
+
+    it('11.6 deberia detener el sondeo y cerrar las ejecuciones vivas al desactivar', async () => {
+      // 1. Arrange
+      const { service, engine, coordinator } = buildHarness();
+      engine.abortExecutionsForFlow.mockResolvedValue(2);
+
+      // 2. Act
+      await service.updateWorkflow(WORKFLOW_ID, { active: false });
+
+      // 3. Assert
+      expect(coordinator.stopPollingForFlow).toHaveBeenCalledWith(WORKFLOW_ID);
+      expect(engine.abortExecutionsForFlow).toHaveBeenCalledWith(
+        WORKFLOW_ID,
+        'Flujo padre desactivado',
+      );
+    });
+
+    it('11.7 deberia limpiar DESPUES de persistir la desactivacion', async () => {
+      // 1. Arrange: el orden no es cosmetico. El sondeo lee `activo` de la base
+      //    de datos, asi que una reconciliacion que se colara entre la parada y
+      //    el `save` veria el flujo todavia activo y reinscribiria el
+      //    temporizador que acabamos de borrar.
+      const { service, repository, coordinator } = buildHarness();
+
+      // 2. Act
+      await service.updateWorkflow(WORKFLOW_ID, { active: false });
+
+      // 3. Assert
+      const savedAt = repository.save.mock.invocationCallOrder[0];
+      const stoppedAt =
+        coordinator.stopPollingForFlow.mock.invocationCallOrder[0];
+      expect(savedAt).toBeLessThan(stoppedAt);
+    });
+
+    it('11.8 no deberia limpiar nada si el flujo ya estaba inactivo', async () => {
+      // 1. Arrange: `false -> false` no es una transicion.
+      const { service, engine, coordinator, repository } = buildHarness();
+      repository.findOne.mockResolvedValue(buildWorkflow({ active: false }));
+
+      // 2. Act
+      await service.updateWorkflow(WORKFLOW_ID, { active: false });
+
+      // 3. Assert
+      expect(coordinator.stopPollingForFlow).not.toHaveBeenCalled();
+      expect(engine.abortExecutionsForFlow).not.toHaveBeenCalled();
+    });
+
+    it('11.9 no deberia limpiar nada al editar solo el nombre', async () => {
+      // 1. Arrange: sin `active` en el cuerpo no hay cambio de habilitacion.
+      const { service, engine, coordinator } = buildHarness();
+
+      // 2. Act
+      await service.updateWorkflow(WORKFLOW_ID, { name: 'Otro nombre' });
+
+      // 3. Assert
+      expect(coordinator.stopPollingForFlow).not.toHaveBeenCalled();
+      expect(engine.abortExecutionsForFlow).not.toHaveBeenCalled();
+    });
+
+    it('11.10 no deberia abortar ejecuciones al activar', async () => {
+      // 1. Arrange: las PAUSADO son la cola de reintento de CU-09 y sobreviven
+      //    a proposito; el operador desactiva para arreglar algo y reactiva.
+      const { service, engine, repository } = buildHarness();
+      repository.findOne.mockResolvedValue(buildWorkflow({ active: false }));
+
+      // 2. Act
+      await service.updateWorkflow(WORKFLOW_ID, { active: true });
+
+      // 3. Assert
+      expect(engine.abortExecutionsForFlow).not.toHaveBeenCalled();
+    });
+
+    it('11.11 deberia adelantar la reinscripcion del sondeo al activar', async () => {
+      // 1. Arrange: sin esto el operador pulsa "Activar" y el flujo no sondea
+      //    hasta el siguiente ciclo de reconciliacion.
+      const { service, coordinator, repository } = buildHarness();
+      repository.findOne.mockResolvedValue(buildWorkflow({ active: false }));
+
+      // 2. Act
+      await service.updateWorkflow(WORKFLOW_ID, { active: true });
+
+      // 3. Assert
+      expect(coordinator.refreshPolling).toHaveBeenCalledTimes(1);
+    });
+
+    it('11.12 no deberia hacer fallar la desactivacion si el aborto revienta', async () => {
+      // 1. Arrange: la fila ya esta comprometida como inactiva. Un 500 aqui
+      //    diria que la operacion fallo cuando si ocurrio, y el reintento del
+      //    cliente seria un no-op que nunca reintenta la limpieza.
+      const { service, engine, errorSpy } = buildHarness();
+      engine.abortExecutionsForFlow.mockRejectedValue(
+        new Error('PostgreSQL no responde'),
+      );
+
+      // 2. Act
+      const summary = await service.updateWorkflow(WORKFLOW_ID, {
+        active: false,
+      });
+
+      // 3. Assert
+      expect(summary.active).toBe(false);
+      expect(errorSpy).toHaveBeenCalled();
+    });
+
+    it('11.13 no deberia detener el sondeo si la persistencia falla', async () => {
+      // 1. Arrange
+      const { service, repository, coordinator } = buildHarness();
+      repository.save.mockRejectedValue(new Error('PostgreSQL no responde'));
+
+      // 2. Act + 3. Assert: el flujo sigue activo en la base de datos, asi que
+      //    pararlo dejaria un flujo habilitado que no sondea.
+      await expect(
+        service.updateWorkflow(WORKFLOW_ID, { active: false }),
+      ).rejects.toThrow('PostgreSQL no responde');
+      expect(coordinator.stopPollingForFlow).not.toHaveBeenCalled();
     });
   });
 });

@@ -7,7 +7,7 @@ import {
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { InjectRepository } from '@nestjs/typeorm';
-import { QueryFailedError } from 'typeorm';
+import { In, QueryFailedError } from 'typeorm';
 
 import { HybridLoggerService } from '@common/services/hybrid-logger.service';
 import { StatePayloadContext } from '@core/fsm/context/state-payload.context';
@@ -127,6 +127,21 @@ interface PostgresDriverError extends Error {
   constraint?: string;
 }
 
+/** Longitud de `ejecuciones_flujo.motivo_fallo`. */
+const FAILURE_REASON_MAX_LENGTH = 255;
+
+/**
+ * Recorta el motivo al ancho de su columna.
+ *
+ * El texto puede interpolar el nombre de un flujo, que lo escribe un usuario:
+ * sin este recorte, un nombre largo convertiria una desactivacion legitima en
+ * un `value too long for type character varying(255)`.
+ */
+const truncateFailureReason = (reason: string): string =>
+  reason.length <= FAILURE_REASON_MAX_LENGTH
+    ? reason
+    : `${reason.slice(0, FAILURE_REASON_MAX_LENGTH - 1)}…`;
+
 /** Espera pasiva; solo se invoca cuando el nodo declara un backoff real. */
 const sleep = (milliseconds: number): Promise<void> =>
   new Promise((resolve) => setTimeout(resolve, milliseconds));
@@ -151,6 +166,22 @@ const sleep = (milliseconds: number): Promise<void> =>
 export class FsmEngineService {
   private readonly logger = new Logger(FsmEngineService.name);
 
+  /**
+   * Ejecuciones que deben abandonar su bucle en la proxima transicion.
+   *
+   * Es el enlace entre `abortExecutionsForFlow` —que cierra las filas por SQL— y
+   * el `while` de `executeWorkflow`, que puede seguir vivo en este mismo
+   * proceso. Sin el, el UPDATE seria puramente cosmetico: el siguiente
+   * `saveCheckpoint` del bucle sobrescribiria el FALLIDO recien escrito y la
+   * ejecucion resucitaria como EN_PROCESO.
+   *
+   * En memoria y no en la base de datos a proposito: solo tiene sentido para el
+   * proceso que sostiene el bucle. Una ejecucion EN_PROCESO huerfana de otro
+   * proceso no tiene bucle que avisar, y de esa ya se ocupa la reconciliacion de
+   * arranque de `FsmModule`.
+   */
+  private readonly abortedExecutions = new Map<string, string>();
+
   constructor(
     @InjectRepository(FsmExecution)
     private readonly fsmExecutionRepo: Repository<FsmExecution>,
@@ -158,6 +189,73 @@ export class FsmEngineService {
     private readonly configService: ConfigService,
     private readonly hybridLogger: HybridLoggerService,
   ) {}
+
+  /**
+   * Cierra como FALLIDO todas las ejecuciones vivas de un flujo.
+   *
+   * Se invoca cuando el flujo padre deja de estar operativo. Una fila que sigue
+   * EN_PROCESO despues de eso no solo es ruido en la trazabilidad: reserva el
+   * mutex parcial `idx_flujo_activo`, de modo que si el flujo vuelve a
+   * activarse NUNCA podra arrancar otra ejecucion. Las PAUSADO se cierran por el
+   * motivo simetrico: conservan su `activeCursor` para un reintento que ya no
+   * puede ocurrir, porque el flujo del que colgaban ya no dispara.
+   *
+   * DOS MITADES, Y LAS DOS HACEN FALTA. El UPDATE cierra las filas, pero un
+   * bucle vivo en este proceso volveria a escribir sobre la suya en el siguiente
+   * checkpoint. Por eso los identificadores se marcan ademas en
+   * `abortedExecutions`, que es lo que el `while` de `executeWorkflow` consulta
+   * antes de cada transicion para abandonar sin persistir nada.
+   *
+   * El metodo vive en el motor y no en `WorkflowsService` porque `FsmModule` no
+   * exporta `Repository<FsmExecution>`: este servicio es su unico dueño, y ya lo
+   * inyecta quien necesita llamar aqui.
+   *
+   * @param flowId Flujo cuyas ejecuciones vivas deben cerrarse.
+   * @param reason Motivo legible que queda en `motivo_fallo`.
+   * @returns Cuantas filas se cerraron.
+   */
+  public async abortExecutionsForFlow(
+    flowId: string,
+    reason: string,
+  ): Promise<number> {
+    const liveStates = [ExecutionState.EN_PROCESO, ExecutionState.PAUSADO];
+    const trimmedReason = truncateFailureReason(reason);
+
+    // Se leen ANTES del UPDATE: despues ya no cumplen el filtro y no habria
+    // forma de saber a que bucles hay que avisar. Solo hacen falta los
+    // EN_PROCESO —ver el marcado de abajo—, pero el estado se pide igualmente
+    // para no tener que hacer dos consultas.
+    const live = await this.fsmExecutionRepo.find({
+      where: { flowId, currentState: In(liveStates) },
+      select: { executionId: true, currentState: true },
+    });
+
+    if (live.length === 0) {
+      return 0;
+    }
+
+    // Se marcan SOLO las EN_PROCESO. Una PAUSADO es, por definicion, una
+    // ejecucion cuyo bucle ya termino: no hay a quien avisar, y dejar su
+    // identificador en el mapa seria una fuga que nadie limpiaria nunca.
+    for (const { executionId, currentState } of live) {
+      if (currentState === ExecutionState.EN_PROCESO) {
+        this.abortedExecutions.set(executionId, trimmedReason);
+      }
+    }
+
+    const { affected } = await this.fsmExecutionRepo.update(
+      { flowId, currentState: In(liveStates) },
+      { currentState: ExecutionState.FALLIDO, failureReason: trimmedReason },
+    );
+
+    const closed = affected ?? live.length;
+
+    this.logger.warn(
+      `Flujo "${flowId}": ${closed} ejecucion(es) viva(s) cerradas como FALLIDO. Motivo: ${trimmedReason}.`,
+    );
+
+    return closed;
+  }
 
   /**
    * Da de alta una ejecucion INACTIVO lista para que `executeWorkflow` la tome.
@@ -288,10 +386,23 @@ export class FsmEngineService {
       throw error;
     }
 
+    // Una marca superviviente de un aborto ANTERIOR envenenaria este arranque:
+    // el reintento manual de CU-09 reutiliza el mismo `executionId`, y sin esta
+    // limpieza moriria en su primera transicion por una desactivacion que ya se
+    // resolvio. Si el aborto es para ESTA vuelta, llegara despues.
+    this.abortedExecutions.delete(executionId);
+
     try {
       let transitions = 0;
 
       while (cursor !== null) {
+        // Aborto llegado mientras se escribia el checkpoint anterior. Va antes
+        // que el circuit breaker para no consumir presupuesto de transiciones
+        // ni disparar el `pauseAt` de un bucle que ya no debe continuar.
+        if (this.consumeAbortMark(execution, cursor)) {
+          break;
+        }
+
         // Capa 2 de la defensa contra ciclos (ver MAX_TRANSITIONS).
         if (++transitions > MAX_TRANSITIONS) {
           this.logger.error(
@@ -379,6 +490,16 @@ export class FsmEngineService {
           });
 
           await this.waitBackoff(node, attempts + 1);
+        }
+
+        // Aborto llegado MIENTRAS el nodo corria: el caso frecuente, porque es
+        // donde el bucle pasa casi todo su tiempo. Comprobarlo solo arriba no
+        // basta —la rama de exito de mas abajo escribiria EN_PROCESO y la fila
+        // volveria a reservar el mutex `idx_flujo_activo` de un flujo que
+        // deberia estar quieto—, asi que se corta aqui, antes de la primera
+        // sentencia que persiste algo.
+        if (this.consumeAbortMark(execution, cursor)) {
+          break;
         }
 
         // --- Desenlace CATASTROFICO. Va antes que cualquier otra rama, incluida
@@ -489,9 +610,49 @@ export class FsmEngineService {
       }
 
       throw error;
+    } finally {
+      // El bucle ya no existe: mantener la marca solo serviria para abortar por
+      // sorpresa un reintento futuro de esta misma ejecucion.
+      this.abortedExecutions.delete(executionId);
     }
 
     return execution;
+  }
+
+  /**
+   * Comprueba si esta ejecucion fue abortada y, de serlo, deja la entidad en
+   * memoria coherente con la fila que ya escribio `abortExecutionsForFlow`.
+   *
+   * NO persiste nada, y ese es el punto entero: la fila ya dice FALLIDO, asi que
+   * cualquier escritura desde aqui solo podria estropearlo. Lo que si hace falta
+   * es el `Object.assign` implicito —`update()` masivo no refresca la instancia
+   * cargada—, o el llamante recibiria una entidad que sigue anunciando
+   * EN_PROCESO sobre una fila que ya no lo esta.
+   *
+   * @returns `true` si el bucle debe abandonar.
+   */
+  private consumeAbortMark(execution: FsmExecution, cursor: string): boolean {
+    const reason = this.abortedExecutions.get(execution.executionId);
+
+    if (reason === undefined) {
+      return false;
+    }
+
+    this.abortedExecutions.delete(execution.executionId);
+
+    // Sin `saveCheckpoint`: `abortExecutionsForFlow` ya dejo la fila en FALLIDO
+    // y escribir aqui solo podria estropearlo. Esto replica en memoria lo que la
+    // base de datos ya sabe, porque un `update()` masivo no refresca la
+    // instancia cargada y el llamante recibiria una entidad que miente.
+    execution.currentState = ExecutionState.FALLIDO;
+    execution.failureReason = reason;
+    execution.activeCursor = cursor;
+
+    this.logger.warn(
+      `Ejecucion "${execution.executionId}" abortada en "${cursor}": ${reason}. El bucle se detiene sin escribir checkpoint.`,
+    );
+
+    return true;
   }
 
   /**
