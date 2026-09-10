@@ -109,7 +109,12 @@ describe('CronTriggerConfigDto', () => {
   });
 
   describe('2. Validacion de la zona horaria', () => {
-    it.each(['Europe/Madrid', 'UTC', 'America/Argentina/Buenos_Aires'])(
+    it.each([
+      'Europe/Madrid',
+      'UTC',
+      'America/Argentina/Buenos_Aires',
+      'America/Caracas',
+    ])(
       '2.1 deberia aceptar la zona IANA "%s"',
       async (timeZone) => {
         // 1. Arrange & 2. Act

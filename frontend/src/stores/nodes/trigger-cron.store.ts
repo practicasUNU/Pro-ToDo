@@ -37,6 +37,7 @@ export const CRON_TIMEZONE_OPTIONS: readonly string[] = [
   'America/New_York',
   'America/Mexico_City',
   'America/Bogota',
+  'America/Caracas',
   'America/Argentina/Buenos_Aires',
 ];
 
