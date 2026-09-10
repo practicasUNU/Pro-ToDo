@@ -280,11 +280,11 @@ CREATE INDEX idx_alertas_error_id_ejecucion ON alertas_error(id_ejecucion);
 -- SEED: Datos iniciales
 -- =============================================================================
 
--- Los 7 primeros codigos replican el enum `NodeType` del backend
+-- Los 8 primeros codigos replican el enum `NodeType` del backend
 -- (`@core/fsm/types/pipeline-schema.types`): son los unicos que un
--- `pipeline_schema` puede declarar hoy. `TRIGGER_CRON` y `DESTINO_ACENS` siguen
--- en el catalogo a la espera de su estrategia; hasta entonces no son
--- referenciables desde `flujos.configuracion_pipeline` (ver migracion 005).
+-- `pipeline_schema` puede declarar hoy. `DESTINO_ACENS` sigue en el catalogo a
+-- la espera de su estrategia; hasta entonces no es referenciable desde
+-- `flujos.configuracion_pipeline` (ver migracion 005).
 INSERT INTO nodos (codigo, nombre, categoria, descripcion) VALUES
     ('TRIGGER_IMAP', 'Disparador IMAP', 'TRIGGER', 'Inicia el flujo mediante la lectura de correos entrantes'),
     ('PARSER_PRE_IA', 'Parser Pre-IA', 'PROCESAMIENTO', 'Decodifica el contenido MIME y sanitiza el texto antes de llamar al modelo'),
@@ -295,3 +295,36 @@ INSERT INTO nodos (codigo, nombre, categoria, descripcion) VALUES
     ('DESTINO_HTTP', 'Destino HTTP', 'DESTINO', 'Publica el resultado final mediante una peticion HTTP (Drupal JSON:API u otro)'),
     ('TRIGGER_CRON', 'Disparador Cron', 'TRIGGER', 'Inicia el flujo mediante una programacion temporal'),
     ('DESTINO_ACENS', 'Destino Acens', 'DESTINO', 'Realiza el envio masivo a traves de Acens');
+
+-- Esquema de UI del disparador programado (espejo de la migracion 013). Es el
+-- unico tipo que hoy lo declara: el resto conserva el `'{}'` por defecto.
+UPDATE nodos
+   SET ui_schema = '{
+     "fields": [
+       {
+         "name": "cronExpression",
+         "type": "text",
+         "label": "Expresion cron",
+         "required": true,
+         "placeholder": "0 9 * * 1-5",
+         "helpText": "Cinco campos: minuto hora dia mes dia-semana. No se admiten segundos ni alias como @daily."
+       },
+       {
+         "name": "timeZone",
+         "type": "select",
+         "label": "Zona horaria",
+         "required": false,
+         "default": "Europe/Madrid",
+         "helpText": "Nombre IANA (Europe/Madrid, UTC). No se admiten desplazamientos fijos: no siguen el horario de verano."
+       },
+       {
+         "name": "outputNamespace",
+         "type": "text",
+         "label": "Namespace de salida",
+         "required": false,
+         "default": "cron_trigger",
+         "helpText": "Namespace declarado del nodo. El efectivo es el del pipeline_schema."
+       }
+     ]
+   }'::jsonb
+ WHERE codigo = 'TRIGGER_CRON';
