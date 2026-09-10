@@ -1,5 +1,10 @@
 -- =============================================================================
--- Migracion 012 · Motivo legible del fallo de una ejecucion
+-- Migracion 012 · Motivo legible del fallo + saneado de ejecuciones pausadas
+--
+-- Dos partes: la columna `motivo_fallo` (DDL) y la limpieza de las ejecuciones
+-- que quedaron residuales en PAUSADO (DML). Van juntas porque describen el
+-- mismo cambio: dejar `ejecuciones_flujo` en un estado que la trazabilidad
+-- pueda mostrar sin mentir.
 --
 -- `ejecuciones_flujo` sabia QUE una ejecucion habia fallado (`estado='FALLIDO'`)
 -- y donde encontrar la autopsia (`ruta_archivo_log`), pero no POR QUE en
@@ -35,3 +40,38 @@ ALTER TABLE ejecuciones_flujo
 COMMENT ON COLUMN ejecuciones_flujo.motivo_fallo IS
     'Motivo legible del fallo cuando no lo explica un volcado en ruta_archivo_log (p. ej. "Flujo padre desactivado").';
 
+-- -----------------------------------------------------------------------------
+-- Saneado de las ejecuciones residuales: PAUSADO -> INACTIVO
+--
+-- PAUSADO significa "se detuvo conservando el cursor culpable, para reintentar
+-- desde ahi". Las filas acumuladas hasta hoy no cumplen esa promesa: proceden de
+-- la reconciliacion de arranque de `FsmModule`, que pasa a PAUSADO todo lo que
+-- encuentra EN_PROCESO al levantar el proceso, sin que nadie las haya reintentado
+-- nunca —CU-09 todavia no tiene endpoint—. Son residuo de reinicios, no una cola
+-- de trabajo, y mientras figuren como PAUSADO la trazabilidad afirma que hay
+-- reintentos pendientes que no existen.
+--
+-- POR QUE TAMBIEN `paso_actual = NULL`, y no solo el estado: el motor arranca con
+-- `execution.activeCursor ?? schema.entrypoint`. Una fila INACTIVO que conservase
+-- su cursor reanudaria a media topologia en lugar de empezar por el entrypoint,
+-- que es justo lo contrario de lo que INACTIVO significa ("el motor todavia no ha
+-- tomado el primer paso"). Dejarlo seria un saneado a medias: el estado diria
+-- "nueva" y el comportamiento seria "reanudada".
+--
+-- IDEMPOTENTE: el propio predicado es la guarda. Tras la primera pasada no queda
+-- ninguna fila en PAUSADO, asi que una reejecucion afecta a 0 filas y termina en
+-- exito. No hace falta `IF EXISTS` ni bloque `DO`.
+--
+-- SIN `BEGIN`/`COMMIT` MANUAL, igual que el resto del directorio (ver la nota de
+-- la migracion 006): psql corre en autocommit y estas migraciones se apoyan en
+-- ello. Las dos sentencias de este archivo son independientes entre si, asi que
+-- no hay atomicidad que preservar.
+--
+-- NO TOCA `contexto_acumulado`: los namespaces ya calculados no estorban y son la
+-- unica evidencia que queda de lo que esas ejecuciones llegaron a hacer.
+-- -----------------------------------------------------------------------------
+
+UPDATE ejecuciones_flujo
+   SET estado = 'INACTIVO',
+       paso_actual = NULL
+ WHERE estado = 'PAUSADO';

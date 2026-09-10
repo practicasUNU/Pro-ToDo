@@ -1891,18 +1891,44 @@ terminó, y dejar su identificador en el mapa sería una fuga que nadie limpiar�
 -- db/migrations/012-motivo-fallo-ejecucion.sql
 ALTER TABLE ejecuciones_flujo
     ADD COLUMN IF NOT EXISTS motivo_fallo VARCHAR(255);
+
+UPDATE ejecuciones_flujo
+   SET estado = 'INACTIVO',
+       paso_actual = NULL
+ WHERE estado = 'PAUSADO';
 ```
 
-Replicada en el `CREATE TABLE` de `init.sql` para los volúmenes vacíos. Es un **prerrequisito
-duro**: con `synchronize: false`, en cuanto `FsmExecution` declara `failureReason` TypeORM
-enumera la columna en todo `SELECT` de la entidad, así que entidad y migración se despliegan
-juntas o el motor revienta al arrancar.
+La columna está replicada en el `CREATE TABLE` de `init.sql` para los volúmenes vacíos. Es un
+**prerrequisito duro**: con `synchronize: false`, en cuanto `FsmExecution` declara
+`failureReason` TypeORM enumera la columna en todo `SELECT` de la entidad, así que entidad y
+migración se despliegan juntas o el motor revienta al arrancar.
+
+El `UPDATE` sanea las ejecuciones residuales. Proceden de la reconciliación de arranque de
+`FsmModule` —que pasa a `PAUSADO` todo lo que encuentra `EN_PROCESO` al levantar el proceso—,
+y como CU-09 todavía no tiene endpoint, nadie las ha reintentado nunca: son residuo de
+reinicios, no una cola de trabajo, y mientras figuren como `PAUSADO` la trazabilidad afirma
+que hay reintentos pendientes que no existen.
+
+**Por qué también `paso_actual = NULL`:** el motor arranca con
+`execution.activeCursor ?? schema.entrypoint`. Una fila `INACTIVO` que conservara su cursor
+reanudaría a media topología en lugar de empezar por el entrypoint — el estado diría "nueva" y
+el comportamiento sería "reanudada". No se toca `contexto_acumulado`: es la única evidencia que
+queda de lo que esas ejecuciones llegaron a hacer.
+
+**Idempotencia:** el predicado es la guarda. Tras la primera pasada no queda ninguna fila en
+`PAUSADO`, así que reejecutar afecta a 0 filas y termina en éxito, sin `IF EXISTS` ni bloque
+`DO`. Sigue sin `BEGIN`/`COMMIT` manual, como el resto del directorio (ver la nota de la
+migración 006): psql corre en autocommit y las dos sentencias son independientes.
+
+**Restricciones:** esta migración no crea ninguna, así que la regla de nomenclatura —cero
+prefijos, la restricción se llama como su columna identificadora (`id_nodo`, `id_log_nodo`,
+`id_ejecucion`)— no tiene aquí nada que revalidar.
 
 ### 20.5 Estado de las tareas
 
 - [x] 1. `FlowPollingCoordinator` + `FlowPollingPort` en `CommonModule` (@Global)
 - [x] 2. `ImapPollingService.stopPollingForFlow`, auto-registro y baja en `onModuleDestroy`
-- [x] 3. Migración 012 + `FsmExecution.failureReason` + `init.sql`
+- [x] 3. Migración 012 (`motivo_fallo` + saneado `PAUSADO → INACTIVO`) + `FsmExecution.failureReason` + `init.sql`
 - [x] 4. `FsmEngineService.abortExecutionsForFlow` con cancelación cooperativa en dos puntos
 - [x] 5. `WorkflowsService.updateWorkflow`: limpieza en `true → false`, recarga en `false → true`
 - [x] 6. Pruebas: 568/568 en 32 suites (antes 537/31); `nest build` en verde; cero errores de lint nuevos

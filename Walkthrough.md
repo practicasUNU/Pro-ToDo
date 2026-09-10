@@ -4,7 +4,7 @@ Registro técnico del "por qué" de cada decisión de implementación. Los estad
 
 ---
 
-## 2026-09-09 · Parada inmediata del sondeo IMAP y saneado de ejecuciones huérfanas — rama `feat/trigger-imap`
+## 2026-09-10 · Parada inmediata del sondeo IMAP y saneado de ejecuciones huérfanas — rama `feat/trigger-imap`
 
 ### Dos premisas del encargo que la auditoría matizó
 
@@ -155,6 +155,31 @@ No se toca `inFlight`: tiene un único dueño, el `try/finally` de `pollInbox`, 
 fuera podría habilitar dos conexiones concurrentes al mismo buzón — literalmente lo que esa
 guarda existe para impedir.
 
+### Las filas en PAUSADO no eran una cola de reintento, eran residuo de reinicios
+
+La migración 012 acabó llevando también un `UPDATE`: todo lo que quedaba en `PAUSADO` pasa a
+`INACTIVO`. La justificación no es cosmética. `PAUSADO` promete "se detuvo conservando el cursor
+culpable, para reintentar desde ahí", pero las filas acumuladas hasta hoy no cumplen esa
+promesa: casi todas proceden de la reconciliación de arranque de `FsmModule`, que pasa a
+`PAUSADO` cuanto encuentra `EN_PROCESO` al levantar el proceso. Como CU-09 todavía no tiene
+endpoint, nadie las ha reintentado nunca. Mientras figuren así, la trazabilidad afirma que hay
+trabajo pendiente que no existe.
+
+Lo que no era obvio al escribir la sentencia: **hacía falta anular también `paso_actual`**. El
+motor arranca con `execution.activeCursor ?? schema.entrypoint`, así que una fila `INACTIVO` que
+conservara su cursor reanudaría a media topología en vez de empezar por el entrypoint — es decir,
+exactamente lo contrario de lo que `INACTIVO` significa según el TSDoc de la propia entidad ("el
+motor todavía no ha tomado el primer paso"). Habría sido un saneado a medias: el estado diciendo
+"nueva" y el comportamiento siendo "reanudada". `contexto_acumulado` sí se conserva: es la única
+evidencia que queda de lo que esas ejecuciones llegaron a hacer, y no estorba.
+
+La idempotencia sale gratis porque el predicado es la guarda: tras la primera pasada no queda
+ninguna fila en `PAUSADO`, así que reejecutar afecta a 0 filas y sale con éxito. No hizo falta
+`IF EXISTS` ni envolverlo en un bloque `DO`. Tampoco se añadió `BEGIN`/`COMMIT`: el directorio
+entero se apoya en el autocommit de psql —la 006 lo documenta explícitamente, porque envolverla
+habría roto el uso de un valor de enum recién añadido— y las dos sentencias de la 012 son
+independientes entre sí, así que no hay atomicidad que preservar.
+
 ### Deuda anotada y no corregida
 
 1. **El barrido cierra también las `PAUSADO`.** Son la cola de reintento de CU-09, que todavía no
@@ -173,7 +198,7 @@ guarda existe para impedir.
 **Nuevos:**
 - `backend/src/common/services/flow-polling.coordinator.ts`
 - `backend/src/common/services/flow-polling.coordinator.spec.ts`
-- `db/migrations/012-motivo-fallo-ejecucion.sql`
+- `db/migrations/012-motivo-fallo-ejecucion.sql` (columna `motivo_fallo` + saneado `PAUSADO → INACTIVO`)
 
 **Modificados:**
 - `backend/src/common/common.module.ts`
@@ -191,8 +216,15 @@ backend · npx nest build  → limpio
 backend · eslint          → 18 errores preexistentes; 0 nuevos (antes: 25)
 ```
 
-Pendiente de verificación manual contra el contenedor: aplicar
-`db/migrations/012-motivo-fallo-ejecucion.sql` (Docker lo levanta el usuario).
+**Pendiente de verificación manual contra el contenedor** (Docker lo levanta el usuario; el
+socket no es accesible desde la sesión de trabajo). Aplicar la migración **dos veces** para
+comprobar la idempotencia: la primera pasada debe reportar `UPDATE <n>`, la segunda `UPDATE 0`,
+y ambas terminar con código de salida 0.
+
+```bash
+docker exec -i protodo_postgres psql -U unuware007 -d 'DB_PRO-TODO' \
+  < db/migrations/012-motivo-fallo-ejecucion.sql
+```
 
 ---
 
