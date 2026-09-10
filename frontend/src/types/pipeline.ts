@@ -8,6 +8,7 @@
  */
 export enum NodeType {
   TRIGGER_IMAP = 'TRIGGER_IMAP',
+  TRIGGER_CRON = 'TRIGGER_CRON',
   PARSER_PRE_IA = 'PARSER_PRE_IA',
   EXTRACTOR_WEB = 'EXTRACTOR_WEB',
   PROCESADOR_IA = 'PROCESADOR_IA',
@@ -19,6 +20,7 @@ export enum NodeType {
 /** Etiquetas legibles para los selectores; el enum viaja crudo al backend. */
 export const NODE_TYPE_LABELS: Record<NodeType, string> = {
   [NodeType.TRIGGER_IMAP]: 'Disparador IMAP',
+  [NodeType.TRIGGER_CRON]: 'Disparador Cron',
   [NodeType.PARSER_PRE_IA]: 'Parser previo a IA',
   [NodeType.EXTRACTOR_WEB]: 'Extractor web',
   [NodeType.PROCESADOR_IA]: 'Procesador IA',

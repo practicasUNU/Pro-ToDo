@@ -9,9 +9,9 @@ import { NodeCatalogEntry } from '@modules/nodes/entities/node-catalog.entity';
 /**
  * Codigos que el motor sabe ejecutar de verdad, resueltos UNA vez.
  *
- * `NodeType` es la autoridad, no el catalogo: la tabla `nodos` conserva filas
- * historicas (`TRIGGER_CRON`, `DESTINO_ACENS`) que no tienen `INodeStrategy` y
- * que `@IsEnum(NodeType)` rechazaria si alguien las metiese en un esquema.
+ * `NodeType` es la autoridad, no el catalogo: la tabla `nodos` conserva una
+ * fila historica (`DESTINO_ACENS`) que no tiene `INodeStrategy` y que
+ * `@IsEnum(NodeType)` rechazaria si alguien la metiese en un esquema.
  */
 const IMPLEMENTED_CODES: ReadonlySet<string> = new Set<string>(
   Object.values(NodeType),

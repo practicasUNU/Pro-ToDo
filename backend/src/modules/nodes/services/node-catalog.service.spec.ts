@@ -64,10 +64,10 @@ describe('NodeCatalogService · lectura del catalogo de tipos de nodo', () => {
       expect(entry?.implemented).toBe(true);
     });
 
-    // `TRIGGER_CRON` y `DESTINO_ACENS` siguen en la tabla desde el seed original
-    // pero no estan en el enum: un pipeline_schema que los declare es rechazado
-    // por `@IsEnum(NodeType)`, asi que el selector debe deshabilitarlos.
-    it.each(['TRIGGER_CRON', 'DESTINO_ACENS'])(
+    // `DESTINO_ACENS` sigue en la tabla desde el seed original pero no esta en
+    // el enum: un pipeline_schema que lo declare es rechazado por
+    // `@IsEnum(NodeType)`, asi que el selector debe deshabilitarlo.
+    it.each(['DESTINO_ACENS'])(
       '2.2 deberia marcar implemented en false para %s, que no tiene estrategia',
       async (code: string) => {
         // 1. Arrange
@@ -86,7 +86,7 @@ describe('NodeCatalogService · lectura del catalogo de tipos de nodo', () => {
       // 1. Arrange
       const repository = buildRepository([
         buildEntry({ code: NodeType.TRIGGER_IMAP }),
-        buildEntry({ code: 'TRIGGER_CRON' }),
+        buildEntry({ code: 'DESTINO_ACENS' }),
       ]);
       const service = buildService(repository);
 

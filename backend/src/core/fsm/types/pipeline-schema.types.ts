@@ -34,13 +34,14 @@ export const SEMVER_PATTERN = /^\d+\.\d+\.\d+$/;
  * `nodos`, el catalogo estatico de tipos (ver `db/migrations/011-catalogo-nodos.sql`;
  * la tabla se llamaba `tipos_nodo` hasta esa migracion).
  *
- * El catalogo tiene NUEVE filas y este enum solo declara siete: `TRIGGER_CRON` y
- * `DESTINO_ACENS` siguen sin estrategia, asi que no son expresables en un
- * `pipeline_schema`. `GET /api/nodos` los devuelve marcados con
- * `implemented: false` para que el selector del frontend los deshabilite.
+ * El catalogo tiene NUEVE filas y este enum declara ocho: `DESTINO_ACENS` sigue
+ * sin estrategia, asi que no es expresable en un `pipeline_schema`.
+ * `GET /api/nodos` lo devuelve marcado con `implemented: false` para que el
+ * selector del frontend lo deshabilite.
  */
 export enum NodeType {
   TRIGGER_IMAP = 'TRIGGER_IMAP',
+  TRIGGER_CRON = 'TRIGGER_CRON',
   PARSER_PRE_IA = 'PARSER_PRE_IA',
   EXTRACTOR_WEB = 'EXTRACTOR_WEB',
   PROCESADOR_IA = 'PROCESADOR_IA',
