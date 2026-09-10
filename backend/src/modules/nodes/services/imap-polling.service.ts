@@ -27,6 +27,7 @@ import { Workflow } from '@modules/workflows/entities/workflow.entity';
 import { WorkflowsService } from '@modules/workflows/workflows.service';
 
 import type { OnModuleDestroy, OnModuleInit } from '@nestjs/common';
+import type { FlowPollingPort } from '@common/services/flow-polling.coordinator';
 import type { ResolvedImapConfig } from '@modules/nodes/dto/imap-trigger-config.dto';
 import type { ImapFlow, MailboxLockObject } from 'imapflow';
 import type { Repository } from 'typeorm';
@@ -129,6 +130,18 @@ export class ImapPollingService implements OnModuleInit, OnModuleDestroy {
   private readonly scheduled = new Map<string, ResolvedImapConfig>();
 
   /**
+   * Puerto inscrito en el coordinador, retenido para poder darse de baja.
+   *
+   * El coordinador guarda un `Set` de puertos, asi que la baja necesita LA MISMA
+   * referencia que se dio de alta. Construir otro literal equivalente en
+   * `onModuleDestroy` no borraria nada, y una recarga del `--watch` acabaria
+   * dejando dos puertos vivos: el nuevo, y uno que apunta a esta instancia
+   * muerta —con su `scheduled` ya vacio— que convertiria toda parada en un
+   * no-op fantasma.
+   */
+  private registeredPort: FlowPollingPort | null = null;
+
+  /**
    * Periodo de sondeo por defecto, resuelto UNA vez al arrancar.
    *
    * Se cachea en un campo en lugar de leer `ConfigService` en cada
@@ -162,10 +175,11 @@ export class ImapPollingService implements OnModuleInit, OnModuleDestroy {
     // activacion de un flujo empezaria a inscribir temporizadores que ningun
     // ciclo de reconciliacion mantiene, saltandose la decision de que el fallo
     // por omision sea NO sondear.
-    this.flowPollingCoordinator.register({
+    this.registeredPort = {
       stopPollingForFlow: (flowId: string) => this.stopPollingForFlow(flowId),
       refreshPolling: () => this.refreshSchedules(),
-    });
+    };
+    this.flowPollingCoordinator.register(this.registeredPort);
 
     // No relanza: no poder programar el sondeo es una degradacion, no un motivo
     // para impedir que la API arranque. La reconciliacion periodica que se
@@ -189,7 +203,10 @@ export class ImapPollingService implements OnModuleInit, OnModuleDestroy {
     // servicio. Sin esta baja, una recarga del `--watch` dejaria al dominio
     // hablando con la instancia muerta —cuyo `scheduled` esta vacio, asi que
     // toda parada seria un no-op silencioso— mientras la nueva no recibe nada.
-    this.flowPollingCoordinator.unregister();
+    if (this.registeredPort !== null) {
+      this.flowPollingCoordinator.unregister(this.registeredPort);
+      this.registeredPort = null;
+    }
   }
 
   /**

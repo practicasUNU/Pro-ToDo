@@ -1018,5 +1018,21 @@ describe('ImapPollingService', () => {
       );
       service.onModuleDestroy();
     });
+
+    it('6.8 deberia dejar de recibir despachos del coordinador tras onModuleDestroy', async () => {
+      // 1. Arrange: el coordinador guarda un `Set` de puertos, asi que la baja
+      //    solo funciona si se le pasa LA MISMA referencia que se inscribio.
+      const { service, coordinator } = buildHarness();
+      await service.onModuleInit();
+      const stopSpy = jest.spyOn(service, 'stopPollingForFlow');
+
+      // 2. Act
+      service.onModuleDestroy();
+      coordinator.stopPollingForFlow(FLOW_ID);
+
+      // 3. Assert: sin la baja, una recarga del `--watch` dejaria este servicio
+      //    muerto atendiendo paradas que nunca llegarian a la instancia viva.
+      expect(stopSpy).not.toHaveBeenCalled();
+    });
   });
 });

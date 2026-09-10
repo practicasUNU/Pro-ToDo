@@ -14,6 +14,11 @@ interface PortMock {
   refreshPolling: jest.Mock;
 }
 
+const buildPort = (): PortMock => ({
+  stopPollingForFlow: jest.fn(),
+  refreshPolling: jest.fn().mockResolvedValue(undefined),
+});
+
 interface Harness {
   coordinator: FlowPollingCoordinator;
   port: PortMock;
@@ -23,10 +28,7 @@ interface Harness {
 /** Coordinador real —no tiene dependencias— con un puerto doble. */
 const buildHarness = (): Harness => {
   const coordinator = new FlowPollingCoordinator();
-  const port: PortMock = {
-    stopPollingForFlow: jest.fn(),
-    refreshPolling: jest.fn().mockResolvedValue(undefined),
-  };
+  const port = buildPort();
 
   const errorSpy = jest
     .spyOn(coordinator['logger'], 'error')
@@ -35,7 +37,7 @@ const buildHarness = (): Harness => {
   return { coordinator, port, errorSpy };
 };
 
-describe('FlowPollingCoordinator (puerto de sondeo, rompe el ciclo de modulos)', () => {
+describe('FlowPollingCoordinator (puertos de disparo, rompe el ciclo de modulos)', () => {
   afterEach(() => {
     jest.clearAllMocks();
   });
@@ -65,22 +67,49 @@ describe('FlowPollingCoordinator (puerto de sondeo, rompe el ciclo de modulos)',
       expect(port.refreshPolling).toHaveBeenCalledTimes(1);
     });
 
-    it('1.3 deberia sustituir el puerto en un segundo registro', () => {
-      // 1. Arrange: simula la recarga del `--watch`, que monta otra instancia.
+    it('1.3 deberia despachar la parada a TODOS los puertos registrados', () => {
+      // 1. Arrange: el caso real de IMAP + CRON conviviendo. Con el puntero
+      //    unico anterior, el segundo registro daba de baja al primero en
+      //    silencio y unos buzones dejaban de mirarse sin ningun sintoma.
       const { coordinator, port } = buildHarness();
-      const replacement: PortMock = {
-        stopPollingForFlow: jest.fn(),
-        refreshPolling: jest.fn().mockResolvedValue(undefined),
-      };
+      const second = buildPort();
       coordinator.register(port);
-      coordinator.register(replacement);
+      coordinator.register(second);
 
       // 2. Act
       coordinator.stopPollingForFlow(FLOW_ID);
 
       // 3. Assert
-      expect(replacement.stopPollingForFlow).toHaveBeenCalledWith(FLOW_ID);
-      expect(port.stopPollingForFlow).not.toHaveBeenCalled();
+      expect(port.stopPollingForFlow).toHaveBeenCalledWith(FLOW_ID);
+      expect(second.stopPollingForFlow).toHaveBeenCalledWith(FLOW_ID);
+    });
+
+    it('1.4 deberia reconciliar todos los puertos registrados', async () => {
+      // 1. Arrange
+      const { coordinator, port } = buildHarness();
+      const second = buildPort();
+      coordinator.register(port);
+      coordinator.register(second);
+
+      // 2. Act
+      await coordinator.refreshPolling();
+
+      // 3. Assert
+      expect(port.refreshPolling).toHaveBeenCalledTimes(1);
+      expect(second.refreshPolling).toHaveBeenCalledTimes(1);
+    });
+
+    it('1.5 no deberia duplicar el despacho al registrar dos veces la misma referencia', () => {
+      // 1. Arrange: el `Set` deduplica por identidad.
+      const { coordinator, port } = buildHarness();
+      coordinator.register(port);
+      coordinator.register(port);
+
+      // 2. Act
+      coordinator.stopPollingForFlow(FLOW_ID);
+
+      // 3. Assert
+      expect(port.stopPollingForFlow).toHaveBeenCalledTimes(1);
     });
   });
 
@@ -105,13 +134,29 @@ describe('FlowPollingCoordinator (puerto de sondeo, rompe el ciclo de modulos)',
       // 1. Arrange
       const { coordinator, port } = buildHarness();
       coordinator.register(port);
-      coordinator.unregister();
+      coordinator.unregister(port);
 
       // 2. Act
       coordinator.stopPollingForFlow(FLOW_ID);
 
       // 3. Assert
       expect(port.stopPollingForFlow).not.toHaveBeenCalled();
+    });
+
+    it('2.4 deberia dar de baja un puerto sin afectar al otro', () => {
+      // 1. Arrange: apagar el disparador CRON no puede callar al IMAP.
+      const { coordinator, port } = buildHarness();
+      const survivor = buildPort();
+      coordinator.register(port);
+      coordinator.register(survivor);
+      coordinator.unregister(port);
+
+      // 2. Act
+      coordinator.stopPollingForFlow(FLOW_ID);
+
+      // 3. Assert
+      expect(port.stopPollingForFlow).not.toHaveBeenCalled();
+      expect(survivor.stopPollingForFlow).toHaveBeenCalledWith(FLOW_ID);
     });
   });
 
@@ -140,6 +185,40 @@ describe('FlowPollingCoordinator (puerto de sondeo, rompe el ciclo de modulos)',
 
       // 2. Act + 3. Assert
       await expect(coordinator.refreshPolling()).resolves.toBeUndefined();
+      expect(errorSpy).toHaveBeenCalled();
+    });
+
+    it('3.3 no deberia impedir la parada del segundo puerto si el primero lanza', () => {
+      // 1. Arrange: el `try/catch` es POR puerto, no alrededor del bucle.
+      const { coordinator, port, errorSpy } = buildHarness();
+      const survivor = buildPort();
+      port.stopPollingForFlow.mockImplementation(() => {
+        throw new Error('SchedulerRegistry roto');
+      });
+      coordinator.register(port);
+      coordinator.register(survivor);
+
+      // 2. Act
+      coordinator.stopPollingForFlow(FLOW_ID);
+
+      // 3. Assert
+      expect(survivor.stopPollingForFlow).toHaveBeenCalledWith(FLOW_ID);
+      expect(errorSpy).toHaveBeenCalled();
+    });
+
+    it('3.4 no deberia impedir la reconciliacion del segundo puerto si el primero rechaza', async () => {
+      // 1. Arrange
+      const { coordinator, port, errorSpy } = buildHarness();
+      const survivor = buildPort();
+      port.refreshPolling.mockRejectedValue(new Error('PostgreSQL no responde'));
+      coordinator.register(port);
+      coordinator.register(survivor);
+
+      // 2. Act
+      await coordinator.refreshPolling();
+
+      // 3. Assert
+      expect(survivor.refreshPolling).toHaveBeenCalledTimes(1);
       expect(errorSpy).toHaveBeenCalled();
     });
   });
