@@ -58,8 +58,14 @@ describe('toIssueContract (contrato publico del validador FSM)', () => {
       // 1. Arrange
       const body = {
         issues: [
-          { field: 'entrypoint', constraints: ['entrypoint no puede estar vacio.'] },
-          { field: 'nodes.nodo_ia.retryPolicy.maxRetries', constraints: ['maxRetries no puede superar 5.'] },
+          {
+            field: 'entrypoint',
+            constraints: ['entrypoint no puede estar vacio.'],
+          },
+          {
+            field: 'nodes.nodo_ia.retryPolicy.maxRetries',
+            constraints: ['maxRetries no puede superar 5.'],
+          },
         ],
       };
 
@@ -107,7 +113,9 @@ describe('toIssueContract (contrato publico del validador FSM)', () => {
         statusCode: 400,
         error: 'PIPELINE_SCHEMA_INVALIDO',
         message: 'El esquema del pipeline no supera la validacion.',
-        issues: [{ field: 'flowId', constraints: ['flowId no puede estar vacio.'] }],
+        issues: [
+          { field: 'flowId', constraints: ['flowId no puede estar vacio.'] },
+        ],
       });
 
       // 2. Act

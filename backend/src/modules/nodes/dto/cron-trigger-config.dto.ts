@@ -59,9 +59,7 @@ export const CRON_EXPRESSION_FIELD_COUNT = 5;
  * configuraciones que el planificador no deberia aceptar nunca.
  */
 @ValidatorConstraint({ name: 'isValidCronExpression', async: false })
-export class IsValidCronExpressionConstraint
-  implements ValidatorConstraintInterface
-{
+export class IsValidCronExpressionConstraint implements ValidatorConstraintInterface {
   public validate(value: unknown): boolean {
     if (typeof value !== 'string') {
       return false;
@@ -85,8 +83,7 @@ export class IsValidCronExpressionConstraint
   }
 
   public defaultMessage(args: ValidationArguments): string {
-    const expression =
-      typeof args.value === 'string' ? args.value.trim() : '';
+    const expression = typeof args.value === 'string' ? args.value.trim() : '';
 
     // El `??` no es defensivo: cuando el rechazo viene de las guardas propias
     // —seis campos o alias— la libreria considera la expresion VALIDA y devuelve

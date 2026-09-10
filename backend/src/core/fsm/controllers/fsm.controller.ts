@@ -75,14 +75,16 @@ export class FsmController {
     type: ValidateSchemaResponseDto,
   })
   @ApiBadRequestResponse({
-    description: 'Esquema invalido: { success: false, issues: [{ path, message }] }',
+    description:
+      'Esquema invalido: { success: false, issues: [{ path, message }] }',
     type: ValidateSchemaErrorDto,
   })
   public async validateSchema(
     @Body() rawJson: unknown,
   ): Promise<ValidateSchemaResponseDto> {
     try {
-      const schema = await this.pipelineValidatorService.validateSchema(rawJson);
+      const schema =
+        await this.pipelineValidatorService.validateSchema(rawJson);
 
       return { success: true, schema };
     } catch (error: unknown) {

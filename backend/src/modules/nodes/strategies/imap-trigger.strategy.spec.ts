@@ -392,7 +392,10 @@ describe('ImapTriggerStrategy', () => {
       simpleParser.mockResolvedValue(buildParsedMail());
 
       // 2. Act
-      await strategy.execute(buildContext(), buildParams({ unreadOnly: false }));
+      await strategy.execute(
+        buildContext(),
+        buildParams({ unreadOnly: false }),
+      );
 
       // 3. Assert: `{}` seria una sentencia SEARCH invalida (el protocolo exige
       // al menos un criterio); `all` es la forma explicita de pedirlo todo.

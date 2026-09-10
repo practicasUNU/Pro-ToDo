@@ -40,7 +40,9 @@ const EXECUTION_RESULT: WorkflowExecutionResponseDto = {
   activeCursor: null,
   context: {
     raw_email: { message_id: '<test-msg-001@madridmasd.es>' },
-    rendered_html: { compiled_markup: '<h1>Avance Cientifico Notiweb 2026</h1>' },
+    rendered_html: {
+      compiled_markup: '<h1>Avance Cientifico Notiweb 2026</h1>',
+    },
   },
 };
 
@@ -126,7 +128,9 @@ describe('WorkflowsController (POST /workflows/:id/execute-test)', () => {
     app = moduleRef.createNestApplication();
     // El mismo ValidationPipe que monta `main.ts`: sin el, ni el `whitelist` ni
     // el `@IsObject()` del DTO estarian bajo prueba.
-    app.useGlobalPipes(new ValidationPipe({ whitelist: true, transform: true }));
+    app.useGlobalPipes(
+      new ValidationPipe({ whitelist: true, transform: true }),
+    );
     await app.init();
   });
 

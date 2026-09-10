@@ -210,7 +210,9 @@ describe('FlowPollingCoordinator (puertos de disparo, rompe el ciclo de modulos)
       // 1. Arrange
       const { coordinator, port, errorSpy } = buildHarness();
       const survivor = buildPort();
-      port.refreshPolling.mockRejectedValue(new Error('PostgreSQL no responde'));
+      port.refreshPolling.mockRejectedValue(
+        new Error('PostgreSQL no responde'),
+      );
       coordinator.register(port);
       coordinator.register(survivor);
 

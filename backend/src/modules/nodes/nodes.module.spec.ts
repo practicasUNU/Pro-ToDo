@@ -3,6 +3,7 @@ import { NodeType } from '@core/fsm/types/pipeline-schema.types';
 import { createTemplateRendererService } from '@test/factories/template-renderer.factory';
 
 import { NodesModule } from './nodes.module';
+import { CronTriggerStrategy } from './strategies/cron-trigger.strategy';
 import { ImapTriggerStrategy } from './strategies/imap-trigger.strategy';
 import { TemplateMapperStrategy } from './strategies/template-mapper.strategy';
 
@@ -17,11 +18,12 @@ import type { TemplatesService } from '@modules/templates/templates.service';
  * MAPEADOR_PLANTILLA reventaria en ejecucion con `StrategyNotFoundException` y
  * no en el arranque, que es justo lo que este test adelanta.
  */
-/** Factoria silenciada mas las dos estrategias reales del modulo. */
+/** Factoria silenciada mas las estrategias reales del modulo. */
 const buildHarness = (): {
   factory: NodeStrategyFactory;
   mapper: TemplateMapperStrategy;
   imap: ImapTriggerStrategy;
+  cron: CronTriggerStrategy;
   module: NodesModule;
 } => {
   const factory = new NodeStrategyFactory();
@@ -32,12 +34,15 @@ const buildHarness = (): {
     createTemplateRendererService(),
   );
   const imap = new ImapTriggerStrategy({} as ConfigService);
+  // Sin dependencias inyectadas: el nodo CRON no hace E/S ni lee secretos.
+  const cron = new CronTriggerStrategy();
 
   return {
     factory,
     mapper,
     imap,
-    module: new NodesModule(factory, mapper, imap),
+    cron,
+    module: new NodesModule(factory, mapper, imap, cron),
   };
 };
 
@@ -63,5 +68,17 @@ describe('NodesModule', () => {
     // 3. Assert: sin esto, el nodo TRIGGER_IMAP reventaria en ejecucion con
     //    `StrategyNotFoundException` y no en el arranque.
     expect(factory.getStrategy(NodeType.TRIGGER_IMAP)).toBe(imap);
+  });
+
+  it('1.3 deberia registrar CronTriggerStrategy en la factoria al iniciarse', () => {
+    // 1. Arrange
+    const { factory, cron, module } = buildHarness();
+
+    // 2. Act
+    module.onModuleInit();
+
+    // 3. Assert: sin esto, el primer vencimiento del planificador moriria en el
+    //    paso 1 con `StrategyNotFoundException`, normalizada a URGENTE.
+    expect(factory.getStrategy(NodeType.TRIGGER_CRON)).toBe(cron);
   });
 });

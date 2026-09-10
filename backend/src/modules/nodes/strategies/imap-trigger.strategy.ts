@@ -114,9 +114,7 @@ export const buildImapSearchQuery = (
   const query: SearchObject = {
     ...(config.unreadOnly ? { seen: false } : {}),
     ...(config.fromFilter !== null ? { from: config.fromFilter } : {}),
-    ...(config.subjectFilter !== null
-      ? { subject: config.subjectFilter }
-      : {}),
+    ...(config.subjectFilter !== null ? { subject: config.subjectFilter } : {}),
   };
 
   // IMAP SEARCH exige al menos un criterio. Con `unreadOnly: false` y sin

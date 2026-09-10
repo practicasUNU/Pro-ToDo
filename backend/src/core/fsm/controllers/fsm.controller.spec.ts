@@ -60,7 +60,9 @@ const buildValidatorError = (): BadRequestException =>
 
 describe('FsmController (POST /fsm/validate-schema)', () => {
   let app: INestApplication;
-  let validatorMock: jest.Mocked<Pick<PipelineValidatorService, 'validateSchema'>>;
+  let validatorMock: jest.Mocked<
+    Pick<PipelineValidatorService, 'validateSchema'>
+  >;
   /** Identidad que el JwtAuthGuard doble inyecta en `req.user`. */
   let currentUser: AuthenticatedUser | undefined;
 
@@ -91,7 +93,9 @@ describe('FsmController (POST /fsm/validate-schema)', () => {
       .compile();
 
     app = moduleRef.createNestApplication();
-    app.useGlobalPipes(new ValidationPipe({ whitelist: true, transform: true }));
+    app.useGlobalPipes(
+      new ValidationPipe({ whitelist: true, transform: true }),
+    );
     await app.init();
   });
 

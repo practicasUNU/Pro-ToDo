@@ -277,10 +277,12 @@ describe('WorkflowsService (despacho manual de pruebas, Camino B)', () => {
 
       // 3. Assert: sin `skipNodeTypes` el nodo TRIGGER_IMAP abriria una
       // conexion IMAP real y pisaria con su resultado el `mockData` sembrado.
+      // TRIGGER_CRON se omite por un motivo distinto: no hace E/S, pero esperar
+      // a su proxima ventana no dice nada sobre si el resto del flujo funciona.
       expect(engine.executeWorkflow).toHaveBeenCalledWith(
         EXECUTION_ID,
         buildSchema(),
-        { skipNodeTypes: [NodeType.TRIGGER_IMAP] },
+        { skipNodeTypes: [NodeType.TRIGGER_IMAP, NodeType.TRIGGER_CRON] },
       );
     });
 

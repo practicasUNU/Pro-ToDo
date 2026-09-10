@@ -49,15 +49,23 @@ import type { Repository } from 'typeorm';
 /**
  * Tipos de nodo que el despacho de PRUEBAS no ejecuta.
  *
- * Un disparador abre una conexion real por red y escribe su propio resultado en
- * `raw_email`, pisando el `mockData` que la prueba acaba de sembrar. Omitirlo es
- * lo que hace que este camino sea reproducible y no dependa de que haya un
- * correo sin leer en el buzon.
+ * Se omiten los DISPARADORES, cada uno por su motivo. `TRIGGER_IMAP` abre una
+ * conexion real por red y escribe su propio resultado en `raw_email`, pisando
+ * el `mockData` que la prueba acaba de sembrar. `TRIGGER_CRON` no hace E/S
+ * alguna, pero esperar a su proxima ventana —o dar por bueno un disparo que
+ * nadie programo— no dice nada sobre si el resto del flujo funciona.
+ *
+ * Contrapartida asumida en `TRIGGER_CRON`: al omitirlo, su namespace no se
+ * deposita, asi que un mapeador que interpole `{{cron_trigger.triggered_at}}`
+ * vera el campo vacio en la prueba manual y no en la ejecucion real.
  *
  * Solo se aplica aqui: `runAutomaticWorkflow` SI ejecuta el disparador, porque
- * es de donde saca el correo que dispara el flujo.
+ * es de donde sale el dato que dispara el flujo.
  */
-const TEST_MODE_SKIPPED_NODE_TYPES: readonly NodeType[] = [NodeType.TRIGGER_IMAP];
+const TEST_MODE_SKIPPED_NODE_TYPES: readonly NodeType[] = [
+  NodeType.TRIGGER_IMAP,
+  NodeType.TRIGGER_CRON,
+];
 
 @Injectable()
 export class WorkflowsService {

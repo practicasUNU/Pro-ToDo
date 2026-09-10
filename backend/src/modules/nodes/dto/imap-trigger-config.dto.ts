@@ -199,7 +199,9 @@ export class ImapTriggerConfigDto {
   })
   @IsOptional()
   @IsString({ message: 'fromFilter debe ser una cadena.' })
-  @IsNotEmpty({ message: 'fromFilter no puede estar vacio; omitelo para no filtrar.' })
+  @IsNotEmpty({
+    message: 'fromFilter no puede estar vacio; omitelo para no filtrar.',
+  })
   fromFilter?: string;
 
   @ApiPropertyOptional({

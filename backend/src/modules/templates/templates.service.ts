@@ -37,6 +37,7 @@ import type { FindOptionsWhere } from 'typeorm';
  */
 export const ALLOWED_NAMESPACES = [
   'raw_email',
+  'cron_trigger',
   'parsed_email',
   'scraped_web',
   'llm_response',

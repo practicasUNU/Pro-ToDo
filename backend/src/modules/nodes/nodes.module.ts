@@ -9,8 +9,10 @@ import { WorkflowsModule } from '@modules/workflows/workflows.module';
 
 import { NodeCatalogEntry } from './entities/node-catalog.entity';
 import { NodeCatalogController } from './node-catalog.controller';
+import { CronSchedulingService } from './services/cron-scheduling.service';
 import { ImapPollingService } from './services/imap-polling.service';
 import { NodeCatalogService } from './services/node-catalog.service';
+import { CronTriggerStrategy } from './strategies/cron-trigger.strategy';
 import { ImapTriggerStrategy } from './strategies/imap-trigger.strategy';
 import { TemplateMapperStrategy } from './strategies/template-mapper.strategy';
 
@@ -53,13 +55,17 @@ import type { OnModuleInit } from '@nestjs/common';
   providers: [
     TemplateMapperStrategy,
     ImapTriggerStrategy,
+    CronTriggerStrategy,
     ImapPollingService,
+    CronSchedulingService,
     NodeCatalogService,
   ],
   exports: [
     TemplateMapperStrategy,
     ImapTriggerStrategy,
+    CronTriggerStrategy,
     ImapPollingService,
+    CronSchedulingService,
     NodeCatalogService,
   ],
 })
@@ -68,10 +74,12 @@ export class NodesModule implements OnModuleInit {
     private readonly strategyFactory: NodeStrategyFactory,
     private readonly templateMapperStrategy: TemplateMapperStrategy,
     private readonly imapTriggerStrategy: ImapTriggerStrategy,
+    private readonly cronTriggerStrategy: CronTriggerStrategy,
   ) {}
 
   public onModuleInit(): void {
     this.strategyFactory.registerStrategy(this.templateMapperStrategy);
     this.strategyFactory.registerStrategy(this.imapTriggerStrategy);
+    this.strategyFactory.registerStrategy(this.cronTriggerStrategy);
   }
 }

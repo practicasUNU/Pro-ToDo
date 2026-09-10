@@ -45,7 +45,9 @@ describe('CronTriggerConfigDto', () => {
 
     it('1.2 deberia rechazar una expresion sin sentido sintactico', async () => {
       // 1. Arrange & 2. Act
-      const errors = await validateParams({ cronExpression: 'todos los lunes' });
+      const errors = await validateParams({
+        cronExpression: 'todos los lunes',
+      });
 
       // 3. Assert
       expect(propertiesOf(errors)).toContain('cronExpression');
