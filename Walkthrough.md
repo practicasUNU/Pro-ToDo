@@ -4,6 +4,130 @@ Registro técnico del "por qué" de cada decisión de implementación. Los estad
 
 ---
 
+## 2026-09-09 · Homologación del marcado de errores en CodeMirror — rama `feat/trigger-imap`
+
+### Tres premisas del encargo que la auditoría desmintió
+
+El encargo pedía replicar de `TemplateCodeEditor.vue` la configuración de `basicSetup`, los
+«compartimientos de temas» y «la instancia del linter de `@codemirror/lint`». **Nada de eso existe**:
+`grep -rn "linter(\|basicSetup\|Compartment" src/` devuelve cero resultados en todo el frontend. El
+patrón real del proyecto es una lista manual de extensiones más `lintGutter()` y despacho manual de
+`setDiagnostics`.
+
+Y la paridad visual **ya existía**: `unuwareTheme` era idéntico *byte a byte* en los dos componentes
+—se verificó comparando los dos bloques extraídos—, `.cm-lintRange-error` y `.cm-lint-marker-error`
+incluidos, ambos sobre `var(--pd-negative)`. No había nada que corregir ahí.
+
+Lo que sí estaba roto era otra cosa, y no la que el encargo señalaba.
+
+### El `changeListener` borraba los diagnósticos en cada pulsación
+
+Esa línea —`clearDiagnostics(update.view)`— es la razón por la que un lint de sintaxis local no
+podía existir: habría desaparecido con la tecla siguiente. El cambio central de la entrega es que
+pase de **limpiar** a **recalcular**.
+
+La distinción entre los dos orígenes se resuelve en el propio recálculo: el error de sintaxis se
+recomputa sobre el texto que acaba de quedar, y los `issues` del backend **no** se reinyectan, porque
+describen un documento anterior.
+
+### Un solo punto de despacho, porque `setDiagnostics` reemplaza la lista entera
+
+Es la restricción que obliga a fundir los dos orígenes en `refreshDiagnostics` en vez de tener una
+función por origen: dos llamadas separadas se pisarían y la segunda borraría lo que pintó la primera.
+
+La precedencia también es una decisión: **si el documento no parsea, los `issues` del backend se
+descartan**. Sus rutas no se pueden resolver sobre un JSON roto —`locateJsonPaths` las tiraría de
+todas formas— y además el mensaje correcto para el operador es uno solo: arregla la sintaxis primero.
+
+El conjunto se ordena por `from` antes de despachar. Cada localizador ordena lo suyo, pero la unión
+de los dos no queda ordenada por construcción, y CodeMirror lo exige.
+
+### V8 emite cuatro formas de `SyntaxError` y solo dos llevan posición
+
+Es el hallazgo que condicionó el diseño del helper. Se comprobó ejecutando `JSON.parse` sobre casos
+reales en Node 24:
+
+| Entrada | Mensaje |
+|---|---|
+| `{\n  "a": 1\n  "b": 2\n}` | `Expected ',' or '}' ... at position 13 (line 3 column 3)` |
+| `{\n  "a": 1,\n}` | `Expected double-quoted property name ... (line 3 column 1)` |
+| `{\n  "a": ,\n}` | `Unexpected token ',', "{...}" is not valid JSON` ← **sin posición** |
+| `   ` | `Unexpected end of JSON input` ← **sin posición** |
+
+El tercer caso es de los errores de tecleo más frecuentes, y V8 dejó de dar su offset: incrusta un
+fragmento del texto en su lugar. Así que parsear `(line X column Y)` cubre la mitad de los casos y la
+política de reserva no es un detalle. Sin posición se subraya el **documento entero**, que es la
+misma convención que `json-path-locator` aplica al centinela `(root)`: honesto —"hay un fallo y no se
+sabe dónde"— en lugar de señalar una línea al azar.
+
+### El rango de anchura cero era un bug silencioso, y lo encontró la prueba
+
+La primera versión mapeaba `to = Math.min(line.to, from + 1)` con reserva a `line.to`. Falla justo en
+el caso más común: V8 señala la coma que falta **después** del último carácter de la línea, así que
+`from` cae exactamente en `line.to` y el rango queda de anchura cero — ni subrayado ni marcador, un
+error que el editor simplemente no pinta.
+
+La corrección es subrayar la **línea entera** cuando eso ocurre: "el fallo está en esta línea" es la
+información útil. Lo destapó el caso 2.3 del spec, no la revisión visual.
+
+### El helper recibe `DocumentLines`, no un `EditorView`
+
+Se declara la forma estructural mínima (`lines`, `length`, `line(n)`) en vez de importar `Text` de
+`@codemirror/state`. `view.state.doc` la cumple tal cual, y a cambio la prueba construye un doble de
+tres propiedades sin arrastrar CodeMirror a una suite que corre con `environment: 'node'`. Es el
+mismo motivo por el que `violation-matcher` y `json-path-locator` viven en `src/utils/`: la lógica
+cuyo fallo es silencioso tiene que ser probable de forma aislada.
+
+### El tema se extrajo porque la paridad era por copia
+
+`unuwareEditorTheme` pasa a `src/utils/codemirror-theme.ts` y lo importan los dos editores. La
+paridad existía, pero la próxima corrección de estilo se habría aplicado a uno solo y el marcado de
+errores habría divergido entre el CRUD de plantillas y el editor de pipelines — que es exactamente lo
+que no puede pasar: el operador tiene que reconocer un error como «un error» en cualquiera de las dos
+pantallas.
+
+`unuwareHighlight` **no** se comparte: los tags de HTML (`tagName`, `attributeName`) y los de JSON
+(`propertyName`, `number`) son legítimamente distintos.
+
+### El despacho se difiere con `queueMicrotask`
+
+Despachar desde dentro de un `updateListener` es reentrante y CodeMirror lo desaconseja. El código ya
+lo hacía, pero limpiar era barato y recalcular más volver a pintar no lo es. El microtask corre antes
+del siguiente repintado, así que no hay latencia perceptible.
+
+### Los anfitriones no cambian
+
+La etiqueta de texto de `WorkflowTemplateDialog` (`schemaSyntaxError`) y la de `NodeSequenceBuilder`
+(`paramsErrorFor`) se conservan: cumplen el papel de resumen, igual que el panel «Errores del
+esquema» para los issues del backend, porque un error puede quedar fuera de la parte visible del
+documento. Dejan de ser el único indicio. El sub-editor de `params` de cada nodo hereda el marcado
+sin tocar una línea de su componente.
+
+`workflow-templates.store.ts` tampoco se toca: `schemaSyntaxError` sigue gobernando `isDraftValid`,
+`saveDraft` y `validateDraftSchema`. El editor calcula su propio rango a partir del texto que ya
+tiene; acoplar el store a las posiciones del documento habría sido peor.
+
+### Deuda anotada y no corregida
+
+`props.readonly` se aplica una sola vez en el montaje (`EditorView.editable.of(!props.readonly)`),
+sin `Compartment` ni `watch`, así que **cambiarlo en caliente no tiene efecto**. Hoy no se manifiesta
+porque los dos anfitriones pasan un literal estático.
+
+### Archivos
+
+**Nuevos:** `src/utils/json-syntax-locator.ts` (+ spec), `src/utils/codemirror-theme.ts`.
+**Modificados:** `src/components/JsonPipelinePreview.vue`, `src/components/templates/TemplateCodeEditor.vue`.
+
+### Estado de las pruebas
+
+```
+frontend · npx vue-tsc --noEmit  → limpio
+frontend · npx vitest run        → 12 archivos, 219 tests, 0 fallos  (antes: 11 / 210)
+frontend · eslint + prettier     → limpios en los archivos tocados
+```
+
+---
+
 ## 2026-09-09 · Periodo de sondeo por entorno y errores catastróficos URGENTE → FALLIDO — rama `feat/trigger-imap`
 
 ### Dos de las tres piezas del encargo ya existían

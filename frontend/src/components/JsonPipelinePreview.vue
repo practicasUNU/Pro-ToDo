@@ -9,7 +9,10 @@ import { EditorState } from '@codemirror/state';
 import { EditorView, keymap, lineNumbers } from '@codemirror/view';
 import { tags } from '@lezer/highlight';
 
+import { unuwareEditorTheme } from '@/utils/codemirror-theme';
+
 import { locateJsonPaths } from '@/utils/json-path-locator';
+import { locateJsonSyntaxError } from '@/utils/json-syntax-locator';
 
 import type { Diagnostic } from '@codemirror/lint';
 import type { ViewUpdate } from '@codemirror/view';
@@ -49,66 +52,6 @@ const editorContainer = ref<HTMLDivElement | null>(null);
 let view: EditorView | null = null;
 
 /**
- * Tema mapeado a los tokens del sistema.
- *
- * Se usan custom properties y no valores literales: como `--pd-*` conmuta solo
- * con `body--dark`, el editor sigue el tema sin reconfigurar extensiones ni
- * observar `$q.dark`. Es la misma decision que en `TemplateCodeEditor`.
- */
-const unuwareTheme = EditorView.theme({
-  '&': {
-    height: '100%',
-    backgroundColor: 'var(--pd-card-bg)',
-    color: 'var(--pd-text-primary)',
-    fontSize: '13px',
-    border: '1px solid var(--pd-border)',
-    borderRadius: '8px',
-  },
-  '.cm-scroller': {
-    fontFamily: "'JetBrains Mono Variable', 'JetBrains Mono', Consolas, ui-monospace, monospace",
-    lineHeight: '1.5',
-  },
-  '.cm-content': { caretColor: 'var(--pd-accent)' },
-  '.cm-cursor, .cm-dropCursor': { borderLeftColor: 'var(--pd-accent)' },
-  '.cm-gutters': {
-    backgroundColor: 'var(--pd-surface-muted)',
-    color: 'var(--pd-disabled-text)',
-    border: 'none',
-    borderTopLeftRadius: '8px',
-    borderBottomLeftRadius: '8px',
-  },
-  '.cm-activeLineGutter': { backgroundColor: 'var(--pd-surface-muted)' },
-  '.cm-activeLine': { backgroundColor: 'transparent' },
-  '&.cm-focused': { outline: 'none' },
-  // CodeMirror pinta la seleccion en una capa propia cuando tiene el foco; hay
-  // que cubrir ambos selectores o la seleccion desaparece al enfocar.
-  '.cm-selectionBackground, &.cm-focused .cm-selectionBackground, ::selection': {
-    backgroundColor: 'var(--pd-accent-selection)',
-  },
-  // Diagnosticos. `background-image: none` es obligatorio: la ondulacion por
-  // defecto de @codemirror/lint es un SVG en data URI con su propio rojo
-  // incrustado, que ninguna propiedad de color puede retintar.
-  '.cm-lintRange-error': {
-    backgroundImage: 'none',
-    textDecoration: 'underline wavy var(--pd-negative)',
-    textUnderlineOffset: '3px',
-  },
-  '.cm-lint-marker-error': { color: 'var(--pd-negative)' },
-  '.cm-tooltip-lint': {
-    backgroundColor: 'var(--pd-surface-muted)',
-    border: '1px solid var(--pd-border)',
-    borderRadius: '6px',
-  },
-  '.cm-diagnostic': {
-    color: 'var(--pd-text-primary)',
-    fontFamily: "'Inter Variable', 'Inter', Roboto, sans-serif",
-    fontSize: '12.5px',
-    padding: '4px 8px',
-  },
-  '.cm-diagnostic-error': { borderLeftColor: 'var(--pd-negative)' },
-});
-
-/**
  * Resaltado de sintaxis JSON sobre tokens ya existentes del sistema.
  *
  * No se usa `defaultHighlightStyle` de CodeMirror: esta pensado para fondo claro
@@ -123,9 +66,37 @@ const unuwareHighlight = HighlightStyle.define([
   { tag: [tags.brace, tags.squareBracket, tags.separator], color: 'var(--pd-text-secondary)' },
 ]);
 
-/** Retira los diagnosticos sin tocar el documento. */
-const clearDiagnostics = (target: EditorView): void => {
-  target.dispatch(setDiagnostics(target.state, []));
+/**
+ * Compone la lista COMPLETA de diagnosticos y la despacha de una sola vez.
+ *
+ * Un solo punto de despacho, y no uno por origen, porque `setDiagnostics`
+ * REEMPLAZA la lista entera del estado: dos llamadas separadas se pisarian y la
+ * segunda borraria lo que pinto la primera. Los dos origenes tienen que
+ * fundirse aqui o no coexisten.
+ *
+ * PRECEDENCIA: si el documento no parsea, los `issues` del backend se
+ * DESCARTAN. Describen un documento anterior que ya no existe, sus rutas no se
+ * pueden resolver —`locateJsonPaths` las tiraria de todas formas— y ademas el
+ * mensaje correcto para el operador es uno solo: arregla la sintaxis primero.
+ *
+ * El orden final es por `from`, como exige CodeMirror. Cada localizador ordena
+ * lo suyo, pero la union de los dos no queda ordenada por construccion.
+ *
+ * @param issues Campos invalidos del backend; se ignoran si hay error de sintaxis.
+ */
+const refreshDiagnostics = (issues: SchemaIssue[]): void => {
+  if (!view) return;
+
+  const doc = view.state.doc.toString();
+  const syntaxError = locateJsonSyntaxError(doc, view.state.doc);
+
+  const ranges = syntaxError !== null ? [syntaxError] : locateJsonPaths(doc, issues);
+
+  const diagnostics: Diagnostic[] = ranges
+    .map((range) => ({ ...range, severity: 'error' as const }))
+    .sort((left, right) => left.from - right.from);
+
+  view.dispatch(setDiagnostics(view.state, diagnostics));
 };
 
 const changeListener = EditorView.updateListener.of((update: ViewUpdate) => {
@@ -133,34 +104,21 @@ const changeListener = EditorView.updateListener.of((update: ViewUpdate) => {
 
   emit('update:modelValue', update.state.doc.toString());
 
-  // Los diagnosticos describen un documento que ya cambio: dejarlos visibles
-  // senalaria posiciones desplazadas. No hay bucle porque `setDiagnostics`
-  // despacha efectos de estado, no cambios de documento.
-  clearDiagnostics(update.view);
+  // Antes esto LIMPIABA los diagnosticos, y esa era la razon por la que un lint
+  // de sintaxis local no podia existir: habria desaparecido con la tecla
+  // siguiente. Ahora se RECALCULA, que es lo que hace que el subrayado aparezca
+  // y desaparezca a medida que se escribe.
+  //
+  // Los `issues` del backend NO se reinyectan: describen el documento anterior.
+  // El de sintaxis, en cambio, se recalcula sobre el texto que acaba de quedar.
+  //
+  // `queueMicrotask` saca el despacho del ciclo de actualizacion en curso.
+  // Despachar desde dentro de un `updateListener` es reentrante y CodeMirror lo
+  // desaconseja; limpiar era barato, pero recalcular y volver a pintar no lo
+  // es. El microtask corre antes del siguiente repintado, asi que no hay
+  // latencia perceptible.
+  queueMicrotask(() => refreshDiagnostics([]));
 });
-
-/**
- * Pinta los campos invalidos que devolvio el backend.
- *
- * La traduccion de `path` a posicion la hace `locateJsonPaths`, que se resuelve
- * contra el TEXTO actual del editor y no contra el que se envio a validar: en
- * modo editable el operador puede haber seguido escribiendo, y una ruta que ya
- * no existe se descarta en vez de subrayar la clave equivocada.
- */
-const applyDiagnostics = (issues: SchemaIssue[]): void => {
-  if (!view) return;
-
-  if (issues.length === 0) {
-    clearDiagnostics(view);
-    return;
-  }
-
-  const diagnostics: Diagnostic[] = locateJsonPaths(view.state.doc.toString(), issues).map(
-    (range) => ({ ...range, severity: 'error' }),
-  );
-
-  view.dispatch(setDiagnostics(view.state, diagnostics));
-};
 
 watch(
   () => props.modelValue,
@@ -178,7 +136,7 @@ watch(
 
 // `deep` porque el anfitrion sustituye el arreglo entero al validar, pero
 // tambien puede vaciarlo en sitio al limpiar.
-watch(() => props.validationErrors, applyDiagnostics, { deep: true });
+watch(() => props.validationErrors, refreshDiagnostics, { deep: true });
 
 onMounted(() => {
   if (!editorContainer.value) return;
@@ -199,7 +157,7 @@ onMounted(() => {
         // `editable` y no `EditorState.readOnly`: readOnly tambien bloquea la
         // seleccion con teclado, y un visor tiene que dejar copiar el grafo.
         EditorView.editable.of(!props.readonly),
-        unuwareTheme,
+        unuwareEditorTheme,
         changeListener,
       ],
     }),
@@ -208,7 +166,7 @@ onMounted(() => {
 
   // Un anfitrion puede montar el visor con errores ya cargados (al reabrir un
   // dialogo, por ejemplo); sin esto no se pintarian hasta el siguiente cambio.
-  applyDiagnostics(props.validationErrors);
+  refreshDiagnostics(props.validationErrors);
 });
 
 onBeforeUnmount(() => {

@@ -1762,3 +1762,53 @@ la entidad solo la mapeaba a medias. Verificado contra la base real.
 
 **El decorador `@Interval()` ya no existía**: el servicio usaba `SchedulerRegistry.addInterval()`
 desde la entrega del diffing de intervalos. Lo que faltaba era el valor por defecto de instalación.
+
+---
+
+## 19. Homologación del marcado de errores en CodeMirror
+
+Rama: `feat/trigger-imap`.
+
+### 19.1 Contrato nuevo
+
+```typescript
+// frontend/src/utils/json-syntax-locator.ts — helper PURO
+export interface SyntaxErrorRange { from: number; to: number; message: string }
+
+/** Lo que el helper necesita de `view.state.doc`, por forma estructural. */
+export interface DocumentLines {
+  readonly lines: number;
+  readonly length: number;
+  readonly line: (lineNumber: number) => { from: number; to: number };
+}
+
+/** `null` si el texto parsea. */
+export const locateJsonSyntaxError:
+  (doc: string, lines: DocumentLines) => SyntaxErrorRange | null;
+
+// frontend/src/utils/codemirror-theme.ts
+export const unuwareEditorTheme: Extension;   // antes duplicado byte a byte
+```
+
+### 19.2 Precedencia de diagnósticos
+
+Un **único** punto de despacho (`refreshDiagnostics`), porque `setDiagnostics`
+reemplaza la lista entera del estado: dos llamadas separadas se pisan.
+
+| Estado del documento | Qué se marca |
+|---|---|
+| No parsea | **Solo** el error de sintaxis; los `issues` del backend se descartan |
+| Parsea | Los `issues` del backend, resueltos por `json-path-locator` |
+| Cambia el texto | Se **recalcula** la sintaxis; los `issues` no se reinyectan |
+
+### 19.3 Estado de las tareas
+
+- [x] 1. `json-syntax-locator.ts` (+ spec, 9 casos) con las cuatro formas reales de `SyntaxError` de V8
+- [x] 2. `codemirror-theme.ts`: tema extraído y consumido por los dos editores
+- [x] 3. `JsonPipelinePreview.vue`: origen local y remoto unificados en un despacho
+- [x] 4. `changeListener` pasa de limpiar a recalcular; despacho diferido con `queueMicrotask`
+- [x] 5. Verificación: `vue-tsc` limpio, vitest 219/219, ESLint y Prettier limpios
+
+**Fuera de alcance, anotado:** `props.readonly` se aplica una sola vez en el montaje
+(`EditorView.editable.of()`), sin `Compartment` ni `watch`, así que cambiarlo en caliente no tiene
+efecto. Hoy no se manifiesta porque los dos anfitriones pasan un literal estático.
