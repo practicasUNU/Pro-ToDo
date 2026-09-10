@@ -1,4 +1,5 @@
 import { useTemplateMapperStore } from '@stores/nodes/template-mapper.store';
+import { useTriggerCronStore } from '@stores/nodes/trigger-cron.store';
 import { useTriggerImapStore } from '@stores/nodes/trigger-imap.store';
 
 import { NodeType } from '@/types/pipeline';
@@ -117,6 +118,7 @@ export type NodeStoreHook = (nodeId: string) => NodeConfigStore;
  */
 export const nodeStoreRegistry: Partial<Record<NodeType, NodeStoreHook>> = {
   [NodeType.TRIGGER_IMAP]: useTriggerImapStore,
+  [NodeType.TRIGGER_CRON]: useTriggerCronStore,
   [NodeType.MAPEADOR_PLANTILLA]: useTemplateMapperStore,
 };
 

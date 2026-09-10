@@ -86,6 +86,7 @@ export interface TemplatePreviewResponse {
  */
 export const TEMPLATE_NAMESPACES = [
   'raw_email',
+  'cron_trigger',
   'parsed_email',
   'scraped_web',
   'llm_response',

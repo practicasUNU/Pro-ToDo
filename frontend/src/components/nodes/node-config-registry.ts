@@ -13,16 +13,19 @@ import type { Component } from 'vue';
  * conocer ningun tipo concreto. Anadir un nodo es anadir una entrada aqui.
  *
  * `defineAsyncComponent` mantiene cada configurador en su propio chunk: un
- * flujo que solo usa dos nodos no descarga los siete.
+ * flujo que solo usa dos nodos no descarga los ocho.
  *
  * `Partial` es deliberado: los tipos aun sin implementar simplemente no estan,
  * y el anfitrion debe contemplar el `undefined` en vez de suponer cobertura
- * total. Cuando se implementen los siete, el `Partial` cae y el compilador
+ * total. Cuando se implementen los ocho, el `Partial` cae y el compilador
  * exigira que no falte ninguno.
  */
 export const nodeConfigRegistry: Partial<Record<NodeType, Component>> = {
   [NodeType.TRIGGER_IMAP]: defineAsyncComponent(
     () => import('@components/nodes/TriggerImapConfig.vue'),
+  ),
+  [NodeType.TRIGGER_CRON]: defineAsyncComponent(
+    () => import('@components/nodes/TriggerCronConfig.vue'),
   ),
   [NodeType.MAPEADOR_PLANTILLA]: defineAsyncComponent(
     () => import('@components/nodes/TemplateMapperConfig.vue'),
