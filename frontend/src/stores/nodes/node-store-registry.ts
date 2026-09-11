@@ -82,6 +82,22 @@ export interface NodeConfigStore {
    * propio `toNodeParams()` omite.
    */
   readonly hydrateFromNode: (node: HydratableNode) => void;
+
+  /**
+   * Avisos que este nodo quiere que el operador confirme ANTES de persistir.
+   *
+   * Es la contrapartida honesta de `isConfigValid`: aquel responde "se puede
+   * guardar", este responde "se puede, pero conviene que sepas esto". Un aviso
+   * NUNCA bloquea; lo que deba impedir el guardado va en `isConfigValid`.
+   *
+   * Sin este canal, el anfitrion tendria que mirar el `connectionVerified` del
+   * store IMAP para decidir si avisa, que es justo la inspeccion de la config
+   * ajena que §3.1 prohibe. Aqui pregunta en vez de espiar.
+   *
+   * OPCIONAL: la mayoria de los nodos no tiene nada que advertir, y obligarles a
+   * devolver `[]` seria ruido en cada store.
+   */
+  readonly configWarnings?: readonly string[];
 }
 
 /**

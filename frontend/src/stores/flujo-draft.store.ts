@@ -35,6 +35,14 @@ export type StepBlockReason =
   /** El nodo tiene configurador y aun no se declara valido. */
   | 'CONFIGURACION_INCOMPLETA';
 
+/** Un aviso que un paso quiere que el operador confirme antes de persistir. */
+export interface StepWarning {
+  readonly step: WizardStep;
+  /** Indice en la topologia, para poder saltar al paso que avisa. */
+  readonly index: number;
+  readonly message: string;
+}
+
 /** Un paso que bloquea el guardado, con su posicion y su motivo. */
 export interface InvalidStep {
   readonly step: WizardStep;
@@ -353,6 +361,25 @@ export const useFlujoDraftStore = defineStore('flujoDraft', () => {
   );
 
   /**
+   * Avisos de TODOS los pasos, no solo del activo.
+   *
+   * Hermano de `invalidSteps` y deliberadamente separado: aquel IMPIDE guardar,
+   * este solo pide confirmacion. Fundirlos obligaria a `InvalidStep` a cargar un
+   * grado de severidad y a que cada consumidor de `invalidSteps` lo filtrase
+   * para no tratar un aviso como un bloqueo.
+   *
+   * Se pregunta al nodo por su contrato (§3.1) en vez de inspeccionar su config:
+   * el agregador no sabe —ni debe— que es `connectionVerified`.
+   */
+  const stepWarnings = computed<StepWarning[]>(() =>
+    pipelineTopology.value.flatMap((step, index) => {
+      const warnings = resolveNodeStore(step.nodeType, step.nodeId)?.configWarnings ?? [];
+
+      return warnings.map((message) => ({ step, index, message }));
+    }),
+  );
+
+  /**
    * Propaga a cada nodo los namespaces que aportan los pasos anteriores.
    *
    * Es la conexion que faltaba: `template-mapper.store.ts` usaba hasta ahora una
@@ -520,6 +547,7 @@ export const useFlujoDraftStore = defineStore('flujoDraft', () => {
     invalidSteps,
     canSave,
     hasUnsupportedNodes,
+    stepWarnings,
     upstreamNamespaces,
     syncUpstreamNamespaces,
     assemblePipelineSchema,

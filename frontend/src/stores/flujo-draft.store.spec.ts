@@ -515,7 +515,7 @@ describe('useFlujoDraftStore · agregador del asistente', () => {
 
   describe('9. Guardado del flujo', () => {
     it('9.1 deberia rechazar el guardado con pasos sin configurar', async () => {
-      // 1. Arrange: el trigger arranca sin probar la conexion.
+      // 1. Arrange: el trigger arranca con los campos sin rellenar.
       const draft = await buildSelectedDraft();
 
       // 2. Act & 3. Assert: la guarda vive en el store y no solo en el
@@ -930,7 +930,7 @@ describe('useFlujoDraftStore · modo edicion', () => {
       expect(trigger.isConfigValid).toBe(true);
     });
 
-    it('13.4 deberia invalidar la verificacion al tocar un campo de conexion', () => {
+    it('13.4 deberia volver a avisar al tocar un campo de conexion', () => {
       // 1. Arrange
       const draft = useFlujoDraftStore();
       draft.hydrateForEdit(buildWorkflowDetail());
@@ -939,9 +939,10 @@ describe('useFlujoDraftStore · modo edicion', () => {
       // 2. Act
       trigger.patchConfig({ host: 'otro.servidor.com' });
 
-      // 3. Assert: la garantia Poka-Yoke sigue viva tras hidratar.
+      // 3. Assert: la garantia sigue viva tras hidratar, pero ya no como
+      //    bloqueo sino como aviso que el operador confirma al guardar.
       expect(trigger.connectionVerified).toBe(false);
-      expect(trigger.isConfigValid).toBe(false);
+      expect(draft.stepWarnings).toHaveLength(1);
     });
 
     it('13.5 NO deberia invalidarla al tocar solo un filtro', () => {
@@ -1140,6 +1141,45 @@ describe('useFlujoDraftStore · modo edicion', () => {
       // 2. Act & 3. Assert
       expect(draft.hasUnsupportedNodes).toBe(true);
       expect(draft.canSave).toBe(false);
+    });
+
+    it('16.6 no deberia contar un aviso como motivo de bloqueo', async () => {
+      // 1. Arrange: el contrato clave de la separacion. Un trigger con los
+      //    campos completos y la conexion sin probar avisa, pero NO bloquea.
+      const draft = await buildSelectedDraft();
+      verifyTriggerStore();
+      useTriggerImapStore(TRIGGER_NODE_ID).connectionVerified = false;
+
+      // 2. Act
+      const reasons = draft.invalidSteps.map((item) => item.step.nodeType);
+
+      // 3. Assert
+      expect(draft.stepWarnings.length).toBeGreaterThan(0);
+      expect(reasons).not.toContain(NodeType.TRIGGER_IMAP);
+    });
+
+    it('16.7 deberia situar el aviso en el paso que lo emite', async () => {
+      // 1. Arrange
+      const draft = await buildSelectedDraft();
+      verifyTriggerStore();
+      useTriggerImapStore(TRIGGER_NODE_ID).connectionVerified = false;
+
+      // 2. Act
+      const [warning] = draft.stepWarnings;
+
+      // 3. Assert: es lo que permite a la vista saltar al paso culpable.
+      expect(warning?.step.nodeId).toBe(TRIGGER_NODE_ID);
+      expect(draft.pipelineTopology[warning?.index ?? -1]?.nodeId).toBe(TRIGGER_NODE_ID);
+    });
+
+    it('16.8 no deberia aportar avisos un nodo que no los declara', async () => {
+      // 1. Arrange: `configWarnings` es opcional en el contrato; el mapeador no
+      //    lo implementa y eso no puede romper la agregacion.
+      const draft = await buildSelectedDraft();
+      verifyTriggerStore();
+
+      // 2. Act & 3. Assert
+      expect(draft.stepWarnings).toEqual([]);
     });
 
     it('16.5 no deberia marcar hasUnsupportedNodes si solo falta completar campos', async () => {

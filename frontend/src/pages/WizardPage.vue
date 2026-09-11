@@ -7,9 +7,11 @@ import { useFlujoDraftStore } from '@stores/flujo-draft.store';
 
 import { nodeConfigRegistry } from '@components/nodes/node-config-registry';
 import PipelineSelector from '@components/wizard/PipelineSelector.vue';
+import SaveWarningsDialog from '@components/wizard/SaveWarningsDialog.vue';
 
 import { extractApiErrorMessage } from '@/utils/api-error';
 
+import type { StepWarning } from '@stores/flujo-draft.store';
 import type { WizardStep } from '@/types/pipeline';
 import type { Component } from 'vue';
 
@@ -138,6 +140,30 @@ const notifyActiveStepBlocked = (): void => {
   });
 };
 
+/**
+ * Pide confirmacion antes de guardar con avisos pendientes.
+ *
+ * `$q.dialog` devuelve un `DialogChainObject` y NO una promesa, asi que hay que
+ * envolverlo: sin esto `onSaveWorkflow` seguiria su curso y persistiria el flujo
+ * mientras el dialogo sigue abierto, sin haber esperado la respuesta.
+ */
+const confirmSaveWithWarnings = (warnings: readonly StepWarning[]): Promise<boolean> =>
+  new Promise<boolean>((resolve) => {
+    $q.dialog({ component: SaveWarningsDialog, componentProps: { warnings } })
+      .onOk(() => {
+        resolve(true);
+      })
+      .onCancel(() => {
+        resolve(false);
+      })
+      // Esc o clic fuera se resuelven como cancelacion. `onDismiss` corre
+      // TAMBIEN tras ok/cancel, pero una promesa ya resuelta ignora la segunda
+      // llamada; sin esta rama, cerrar sin decidir la dejaria colgada.
+      .onDismiss(() => {
+        resolve(false);
+      });
+  });
+
 const onSaveWorkflow = async (): Promise<void> => {
   const editing = isEditMode.value;
 
@@ -150,6 +176,17 @@ const onSaveWorkflow = async (): Promise<void> => {
     $q.notify({ type: 'warning', message: 'El nombre del flujo es obligatorio.' });
     document.getElementById('workflow-name')?.focus();
     return;
+  }
+
+  // Los avisos no bloquean, pero tampoco pasan desapercibidos: es la ultima
+  // oportunidad de ver una conexion sin comprobar antes de persistirla. El
+  // configurador del nodo solo esta montado mientras su paso es el activo, y
+  // aqui ya no lo esta, asi que su aviso en linea no basta.
+  if (draftStore.stepWarnings.length > 0) {
+    const confirmed = await confirmSaveWithWarnings(draftStore.stepWarnings);
+
+    // Cancelar no notifica nada: el operador acaba de leer por que vuelve.
+    if (!confirmed) return;
   }
 
   try {

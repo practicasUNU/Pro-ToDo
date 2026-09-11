@@ -44,6 +44,14 @@ export const MIN_POLL_INTERVAL_MS = 30_000;
 export const PASSWORD_ENV_KEY_PATTERN = /^IMAP_[A-Z0-9_]*PASSWORD$/;
 
 /**
+ * Aviso que el nodo emite cuando sus credenciales no se han comprobado.
+ *
+ * Se exporta para que las pruebas asseveren el texto exacto sin copiarlo.
+ */
+export const UNVERIFIED_CONNECTION_WARNING =
+  'No se ha probado la conexion con el buzon: unas credenciales equivocadas no fallaran hasta el primer sondeo.';
+
+/**
  * Criterios de disparo del nodo.
  *
  * Van aparte de la conexion a proposito: no intervienen en la comprobacion de
@@ -139,17 +147,35 @@ const triggerImapSetup = () => {
   );
 
   /**
-   * Contrato uniforme del nodo. Exige dos cosas:
+   * Contrato uniforme del nodo: campos completos y bien formados.
    *
-   * 1. Que los campos esten completos y bien formados.
-   * 2. Que la conexion se haya PROBADO con exito contra el servidor real.
+   * Hasta ahora exigia ADEMAS que la conexion se hubiera probado con exito. Esa
+   * regla convertia en imposible crear un flujo IMAP en cualquier entorno sin
+   * servidor de correo alcanzable —desarrollo, demo, red cortada—: el
+   * Poka-Yoke dejaba de proteger de un error y pasaba a impedir el trabajo, sin
+   * ninguna via de escape.
    *
-   * El segundo requisito es el Poka-Yoke del paso: unas credenciales con formato
-   * correcto pero equivocadas no fallarian hasta que el sondeo disparase el
-   * flujo en produccion. Obligar a probar traslada ese descubrimiento al momento
-   * de configurar.
+   * La garantia no se pierde, se traslada: la conexion sin probar viaja ahora
+   * como `configWarnings` y el asistente pide confirmacion explicita antes de
+   * persistir. Sigue siendo una decision consciente del operador, pero suya.
    */
-  const isConfigValid = computed<boolean>(() => hasValidFields.value && connectionVerified.value);
+  const isConfigValid = computed<boolean>(() => hasValidFields.value);
+
+  /**
+   * Aviso de credenciales sin comprobar.
+   *
+   * Se condiciona a `hasValidFields`: con el formulario a medio rellenar el paso
+   * ya es invalido y el aviso seria ruido encima de un bloqueo.
+   *
+   * El texto NO nombra al nodo porque el store no sabe en que paso esta ni como
+   * se llama; de anteponer el nombre se encarga el agregador (`stepWarnings` en
+   * `flujo-draft.store.ts`).
+   */
+  const configWarnings = computed<readonly string[]>(() =>
+    hasValidFields.value && !connectionVerified.value
+      ? [UNVERIFIED_CONNECTION_WARNING]
+      : [],
+  );
 
   /** Payload de la comprobacion, derivado de la configuracion actual. */
   const checkPayload = computed<CheckImapPayload>(() => ({
@@ -249,12 +275,11 @@ const triggerImapSetup = () => {
    * la verificacion: aqui no hay nada que invalidar, porque estos valores son
    * justamente los que ya se probaron cuando el flujo se creo.
    *
-   * Por eso `connectionVerified` queda en `true`. Un flujo guardado tuvo que
-   * superar la prueba de conexion para llegar a existir, y exigirla otra vez
-   * obligaria a reprobar el buzon para cambiar una palabra de un filtro. La
-   * garantia sigue viva: en cuanto el operador toque un campo de CONEXION,
-   * `patchConfig` la invalida y el asistente vuelve a pedir la prueba;
-   * `patchFilters` no, porque un filtro no afecta a las credenciales.
+   * Por eso `connectionVerified` queda en `true`: es lo que deja
+   * `configWarnings` vacio al abrir un flujo ya guardado, en vez de reclamar una
+   * prueba por cada edicion de un filtro. En cuanto el operador toque un campo
+   * de CONEXION, `patchConfig` lo invalida y el aviso reaparece; `patchFilters`
+   * no, porque un filtro no afecta a las credenciales.
    *
    * Se repone `''` en los filtros ausentes: `toNodeParams()` los OMITE cuando
    * estan vacios, asi que sin esto el `undefined` del JSON llegaria al `<q-input>`
@@ -293,6 +318,7 @@ const triggerImapSetup = () => {
     lastCheckResult,
     hasValidFields,
     isConfigValid,
+    configWarnings,
     checkPayload,
     toNodeParams,
     patchConfig,

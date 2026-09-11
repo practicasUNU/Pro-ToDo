@@ -7,6 +7,7 @@ import {
   DEFAULT_POLL_INTERVAL_MS,
   DEFAULT_UNREAD_ONLY,
   MIN_POLL_INTERVAL_MS,
+  UNVERIFIED_CONNECTION_WARNING,
   useTriggerImapStore,
 } from './trigger-imap.store';
 
@@ -237,7 +238,7 @@ describe('useTriggerImapStore · configuracion del nodo TRIGGER_IMAP', () => {
       expect(store.lastCheckResult).toEqual(SUCCESS_RESULT);
     });
 
-    it('3.3 no deberia habilitar isConfigValid si el backend responde success false', async () => {
+    it('3.3 no deberia dar por verificada la conexion si el backend responde success false', async () => {
       // 1. Arrange
       const store = useTriggerImapStore(NODE_ID);
       store.patchConfig(VALID_CONFIG);
@@ -247,21 +248,25 @@ describe('useTriggerImapStore · configuracion del nodo TRIGGER_IMAP', () => {
       await store.testConnection();
 
       // 3. Assert: un fallo de credenciales llega como 200, asi que hay que
-      //    mirar el `success` del cuerpo y no solo el status.
+      //    mirar el `success` del cuerpo y no solo el status. La prueba fallida
+      //    NO bloquea el paso —los campos siguen bien formados— pero deja aviso.
       expect(store.connectionVerified).toBe(false);
-      expect(store.isConfigValid).toBe(false);
       expect(store.lastCheckResult?.error?.level).toBe('GRAVE');
+      expect(store.isConfigValid).toBe(true);
+      expect(store.configWarnings).toHaveLength(1);
     });
 
-    it('3.4 deberia mantener isConfigValid en false con campos completos pero sin probar', () => {
+    it('3.4 deberia permitir guardar sin probar, dejando aviso', () => {
       // 1. Arrange & 2. Act
       const store = useTriggerImapStore(NODE_ID);
       store.patchConfig(VALID_CONFIG);
 
-      // 3. Assert: unas credenciales bien formadas pero equivocadas no fallarian
-      //    hasta que el sondeo disparase el flujo en produccion.
+      // 3. Assert: exigir la prueba hacia imposible crear un flujo IMAP en un
+      //    entorno sin servidor alcanzable. La advertencia sigue viva; lo que
+      //    cambia es que decide el operador y no el formulario.
       expect(store.hasValidFields).toBe(true);
-      expect(store.isConfigValid).toBe(false);
+      expect(store.isConfigValid).toBe(true);
+      expect(store.configWarnings).toEqual([UNVERIFIED_CONNECTION_WARNING]);
     });
 
     it('3.5 deberia apagar isLoading aunque el servicio lance', async () => {
@@ -287,10 +292,10 @@ describe('useTriggerImapStore · configuracion del nodo TRIGGER_IMAP', () => {
       // 2. Act
       store.patchConfig({ host: 'imap.atacante.com' });
 
-      // 3. Assert: probar con un host correcto y cambiarlo despues dejaria
-      //    avanzar con una configuracion que nunca se comprobo.
+      // 3. Assert: probar con un host correcto y cambiarlo despues avanzaria
+      //    con una configuracion que nunca se comprobo, asi que el aviso vuelve.
       expect(store.connectionVerified).toBe(false);
-      expect(store.isConfigValid).toBe(false);
+      expect(store.configWarnings).toHaveLength(1);
     });
 
     it('4.2 deberia invalidar la prueba al cambiar cualquier campo de conexion', () => {
@@ -395,7 +400,47 @@ describe('useTriggerImapStore · configuracion del nodo TRIGGER_IMAP', () => {
       // 3. Assert: contraste con 4bis.4, que es lo que da sentido a la
       // separacion entre `patchFilters` y `patchConfig`.
       expect(store.connectionVerified).toBe(false);
+      expect(store.configWarnings).toHaveLength(1);
+    });
+  });
+
+  describe('4quater. Avisos de configuracion', () => {
+    it('4quater.1 no deberia avisar con los campos incompletos', () => {
+      // 1. Arrange & 2. Act: el paso ya es invalido por si solo.
+      const store = useTriggerImapStore(NODE_ID);
+
+      // 3. Assert: avisar encima de un bloqueo seria ruido.
       expect(store.isConfigValid).toBe(false);
+      expect(store.configWarnings).toEqual([]);
+    });
+
+    it('4quater.2 deberia avisar con los campos completos y sin probar', () => {
+      // 1. Arrange & 2. Act
+      const store = useTriggerImapStore(NODE_ID);
+      store.patchConfig(VALID_CONFIG);
+
+      // 3. Assert
+      expect(store.configWarnings).toEqual([UNVERIFIED_CONNECTION_WARNING]);
+    });
+
+    it('4quater.3 no deberia avisar tras una prueba correcta', () => {
+      // 1. Arrange & 2. Act
+      const store = buildVerifiedStore();
+
+      // 3. Assert
+      expect(store.configWarnings).toEqual([]);
+    });
+
+    it('4quater.4 no deberia avisar tras cambiar solo un filtro', () => {
+      // 1. Arrange
+      const store = buildVerifiedStore();
+
+      // 2. Act
+      store.patchFilters({ subjectFilter: 'Notiweb' });
+
+      // 3. Assert: un filtro no toca las credenciales, asi que no hay nada nuevo
+      //    que advertir.
+      expect(store.configWarnings).toEqual([]);
     });
   });
 

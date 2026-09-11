@@ -34,7 +34,14 @@ const FILTER_HINT = 'Coincidencia por subcadena. Dejalo vacio para no filtrar.';
 const UNREAD_ONLY_WARNING =
   'Con el filtro desactivado el flujo puede volver a procesar un correo ya leido en cada sondeo.';
 
-/** Estado del indicador de conexion, derivado del ultimo resultado del backend. */
+/**
+ * Estado del indicador de conexion, derivado del ultimo resultado del backend.
+ *
+ * El tercer estado —"sin comprobar"— es nuevo y no es cosmetico: desde que la
+ * prueba dejo de ser obligatoria para avanzar, la AUSENCIA de badge significaba
+ * "vas a guardar unas credenciales que nadie ha verificado", que es justo lo que
+ * merece decirse en voz alta.
+ */
 const connectionBadge = computed<{ label: string; classes: string } | null>(() => {
   if (store.connectionVerified) {
     return { label: 'Conexion verificada', classes: 'pd-check-badge--ok' };
@@ -42,6 +49,10 @@ const connectionBadge = computed<{ label: string; classes: string } | null>(() =
 
   if (store.lastCheckResult?.success === false) {
     return { label: 'Conexion fallida', classes: 'pd-check-badge--fail' };
+  }
+
+  if (store.hasValidFields) {
+    return { label: 'Sin comprobar', classes: 'pd-check-badge--warn' };
   }
 
   return null;
@@ -266,12 +277,17 @@ const onTestConnection = async (): Promise<void> => {
       </div>
     </div>
 
-    <!-- Poka-Yoke: el paso no se declara valido hasta que la conexion se prueba
-         de verdad. Unas credenciales bien formadas pero equivocadas fallarian en
-         la primera ejecucion del flujo, no aqui. -->
+    <!-- Probar la conexion ya NO es requisito para avanzar: exigirlo hacia
+         imposible crear un flujo IMAP en cualquier entorno sin servidor de
+         correo alcanzable. La garantia no se pierde, se traslada al dialogo de
+         confirmacion del guardado, donde el operador decide a sabiendas. -->
     <div class="row items-center justify-end q-gutter-sm q-mt-md">
-      <span v-if="!store.connectionVerified" class="pd-subtitle pd-test-hint">
-        Prueba la conexion para poder continuar.
+      <span
+        v-if="store.hasValidFields && !store.connectionVerified"
+        class="pd-subtitle pd-test-hint pd-test-hint--warn"
+      >
+        Aun no has probado la conexion. Puedes guardar, pero unas credenciales
+        equivocadas no fallaran hasta el primer sondeo.
       </span>
       <q-btn
         class="pd-btn-primary"
@@ -295,6 +311,15 @@ const onTestConnection = async (): Promise<void> => {
 .pd-test-hint {
   max-width: 320px;
   text-align: right;
+}
+
+.pd-check-badge--warn {
+  background: var(--pd-warning);
+  color: var(--pd-shell-bg);
+}
+
+.pd-test-hint--warn {
+  color: var(--pd-warning);
 }
 
 .pd-check-badge--ok {
