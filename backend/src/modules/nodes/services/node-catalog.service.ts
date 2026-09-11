@@ -2,20 +2,14 @@ import { Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 
-import { NodeType } from '@core/fsm/types/pipeline-schema.types';
+// Import de VALOR: `NodeStrategyFactory` se inyecta por constructor, y con
+// `emitDecoratorMetadata` un `import type` se borra al transpilar dejando a Nest
+// sin el token que necesita para resolver la dependencia.
+import { NodeStrategyFactory } from '@core/fsm/factories/node-strategy.factory';
 import { NodeCatalogResponseDto } from '@modules/nodes/dto/node-catalog-response.dto';
 import { NodeCatalogEntry } from '@modules/nodes/entities/node-catalog.entity';
 
-/**
- * Codigos que el motor sabe ejecutar de verdad, resueltos UNA vez.
- *
- * `NodeType` es la autoridad, no el catalogo: la tabla `nodos` conserva una
- * fila historica (`DESTINO_ACENS`) que no tiene `INodeStrategy` y que
- * `@IsEnum(NodeType)` rechazaria si alguien la metiese en un esquema.
- */
-const IMPLEMENTED_CODES: ReadonlySet<string> = new Set<string>(
-  Object.values(NodeType),
-);
+import type { NodeType } from '@core/fsm/types/pipeline-schema.types';
 
 /**
  * Lectura del catalogo de tipos de nodo (PROT-07).
@@ -30,6 +24,7 @@ export class NodeCatalogService {
   constructor(
     @InjectRepository(NodeCatalogEntry)
     private readonly catalogRepository: Repository<NodeCatalogEntry>,
+    private readonly strategyFactory: NodeStrategyFactory,
   ) {}
 
   /**
@@ -42,16 +37,27 @@ export class NodeCatalogService {
    *
    * Orden por categoria y luego por nombre: reproduce la agrupacion del selector
    * (disparador, procesamiento, control, destino) sin que el cliente ordene.
+   *
+   * El conjunto de tipos ejecutables se pide a la factoria AQUI, en cada
+   * peticion, y no se guarda en un campo al construirse: los providers se
+   * instancian antes de que `NodesModule.onModuleInit` registre las estrategias,
+   * asi que un valor capturado en el constructor seria siempre vacio y todo el
+   * catalogo saldria como no implementado.
    */
   public async findAll(): Promise<NodeCatalogResponseDto[]> {
     const entries = await this.catalogRepository.find({
       order: { category: 'ASC', name: 'ASC' },
     });
 
-    return entries.map((entry) => this.toResponse(entry));
+    const registered = this.strategyFactory.getRegisteredNodeTypes();
+
+    return entries.map((entry) => this.toResponse(entry, registered));
   }
 
-  private toResponse(entry: NodeCatalogEntry): NodeCatalogResponseDto {
+  private toResponse(
+    entry: NodeCatalogEntry,
+    registered: ReadonlySet<NodeType>,
+  ): NodeCatalogResponseDto {
     return {
       id: entry.id,
       code: entry.code,
@@ -59,7 +65,10 @@ export class NodeCatalogService {
       category: entry.category,
       description: entry.description,
       uiSchema: entry.uiSchema,
-      implemented: IMPLEMENTED_CODES.has(entry.code),
+      // El `code` de la tabla es `string` y no `NodeType` porque el catalogo
+      // tiene filas que el enum no declara; el `has` sobre un valor ajeno al
+      // conjunto simplemente devuelve false, que es exactamente lo que se quiere.
+      implemented: registered.has(entry.code as NodeType),
     };
   }
 }

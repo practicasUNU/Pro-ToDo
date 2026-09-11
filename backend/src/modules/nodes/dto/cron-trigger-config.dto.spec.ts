@@ -114,19 +114,16 @@ describe('CronTriggerConfigDto', () => {
       'UTC',
       'America/Argentina/Buenos_Aires',
       'America/Caracas',
-    ])(
-      '2.1 deberia aceptar la zona IANA "%s"',
-      async (timeZone) => {
-        // 1. Arrange & 2. Act
-        const errors = await validateParams({
-          cronExpression: VALID_EXPRESSION,
-          timeZone,
-        });
+    ])('2.1 deberia aceptar la zona IANA "%s"', async (timeZone) => {
+      // 1. Arrange & 2. Act
+      const errors = await validateParams({
+        cronExpression: VALID_EXPRESSION,
+        timeZone,
+      });
 
-        // 3. Assert
-        expect(errors).toHaveLength(0);
-      },
-    );
+      // 3. Assert
+      expect(errors).toHaveLength(0);
+    });
 
     it('2.2 deberia rechazar una zona inexistente', async () => {
       // 1. Arrange & 2. Act

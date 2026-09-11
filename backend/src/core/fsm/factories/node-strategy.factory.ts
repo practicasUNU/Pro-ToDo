@@ -57,4 +57,26 @@ export class NodeStrategyFactory {
 
     return strategy;
   }
+
+  /**
+   * Tipos que tienen estrategia registrada AHORA MISMO.
+   *
+   * Existe para que el catalogo de nodos (`GET /api/nodos`) no prometa mas de lo
+   * que el motor sabe ejecutar. Antes esa marca se derivaba del enum `NodeType`,
+   * que declara ocho tipos mientras que solo tres estan implementados: el
+   * asistente dejaba elegir nodos que despues reventaban con
+   * `StrategyNotFoundException`. Esta es la unica fuente de verdad real.
+   *
+   * Devuelve un `Set` NUEVO en cada llamada y no una vista del interno: con un
+   * `ReadonlyMap` bastaria un cast para recuperar la referencia mutable, y quien
+   * consulta este metodo es un lector que no debe poder alterar el registro.
+   *
+   * Quien lo consuma debe llamarlo EN CADA USO y no cachear el resultado al
+   * construirse: los providers se instancian antes de los `onModuleInit`, que es
+   * justo donde se registran las estrategias, asi que un valor capturado en un
+   * constructor seria siempre el conjunto vacio.
+   */
+  public getRegisteredNodeTypes(): ReadonlySet<NodeType> {
+    return new Set(this.strategies.keys());
+  }
 }
