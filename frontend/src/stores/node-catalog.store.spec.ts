@@ -95,7 +95,7 @@ describe('useNodeCatalogStore · catalogo de tipos de nodo', () => {
   });
 
   describe('2. Tipos ofrecibles en el selector', () => {
-    it('2.1 deberia excluir de selectableEntries los tipos sin estrategia', async () => {
+    it('2.1 deberia distinguir los tipos con estrategia de los que no la tienen', async () => {
       // 1. Arrange
       const store = useNodeCatalogStore();
 
@@ -103,8 +103,29 @@ describe('useNodeCatalogStore · catalogo de tipos de nodo', () => {
       await store.fetchCatalog();
 
       // 3. Assert: el catalogo completo sigue disponible para pintarlos atenuados
-      expect(store.selectableEntries).toEqual([IMPLEMENTED]);
+      expect(store.isNodeTypeImplemented(IMPLEMENTED.code)).toBe(true);
+      expect(store.isNodeTypeImplemented(NOT_IMPLEMENTED.code)).toBe(false);
       expect(store.entries).toHaveLength(2);
+    });
+
+    it('2.2 deberia tratar un codigo desconocido como no implementado', async () => {
+      // 1. Arrange
+      const store = useNodeCatalogStore();
+      await store.fetchCatalog();
+
+      // 2. Act & 3. Assert
+      expect(store.isNodeTypeImplemented('NODO_INVENTADO')).toBe(false);
+    });
+
+    it('2.3 no deberia bloquear nada mientras el catalogo no se haya cargado', () => {
+      // 1. Arrange: con `entries` vacio, responder `false` marcaria TODOS los
+      //    tipos como no ejecutables y bloquearia cada plantilla de la lista
+      //    durante la carga, o para siempre si la peticion falla.
+      const store = useNodeCatalogStore();
+
+      // 2. Act & 3. Assert
+      expect(store.entries).toHaveLength(0);
+      expect(store.isNodeTypeImplemented(NOT_IMPLEMENTED.code)).toBe(true);
     });
   });
 

@@ -1,4 +1,8 @@
 <script setup lang="ts">
+import { onMounted } from 'vue';
+
+import { useNodeCatalogStore } from '@stores/node-catalog.store';
+
 import { NODE_TYPE_LABELS } from '@/types/pipeline';
 
 import type { WorkflowTemplateSummary } from '@/types/pipeline';
@@ -20,6 +24,44 @@ const props = defineProps<Props>();
 const emit = defineEmits<{
   select: [templateId: string];
 }>();
+
+const catalogStore = useNodeCatalogStore();
+
+// El catalogo hace falta para saber que tipos sabe ejecutar el motor. Se pide
+// aqui y no en la pagina porque es este componente quien lo necesita, y la
+// llamada es idempotente: `fetchCatalog` no repite la peticion si ya hay datos.
+onMounted(() => {
+  void catalogStore.fetchCatalog();
+});
+
+/**
+ * Tipos de la plantilla que el motor NO sabe ejecutar.
+ *
+ * Una plantilla puede haberse creado cuando el catalogo marcaba como
+ * implementados tipos que no lo estaban. Instanciarla llevaba al asistente a un
+ * callejon sin salida: los pasos de esos nodos no se pueden validar nunca y el
+ * guardado quedaba bloqueado sin explicacion.
+ */
+const unsupportedTypes = (template: WorkflowTemplateSummary): string[] => [
+  ...new Set(
+    template.topology
+      .filter((step) => !catalogStore.isNodeTypeImplemented(step.nodeType))
+      .map((step) => NODE_TYPE_LABELS[step.nodeType]),
+  ),
+];
+
+/**
+ * Elige la plantilla, salvo que contenga nodos no ejecutables.
+ *
+ * La guarda esta aqui y no solo en el `:disable` del boton porque la tarjeta
+ * entera es clicable: sin ella se podria entrar al asistente por el borde de la
+ * tarjeta esquivando el boton deshabilitado.
+ */
+const onSelect = (template: WorkflowTemplateSummary): void => {
+  if (unsupportedTypes(template).length > 0) return;
+
+  emit('select', template.id);
+};
 
 /**
  * Resumen de la cadena de nodos, para que el operador sepa que va a configurar
@@ -72,7 +114,12 @@ const previewSteps = (template: WorkflowTemplateSummary): string =>
 
     <div v-else class="row q-col-gutter-md">
       <div v-for="template in props.templates" :key="template.id" class="col-12 col-md-6 col-lg-4">
-        <q-card class="pd-card pd-pipeline-card" flat @click="emit('select', template.id)">
+        <q-card
+          class="pd-card pd-pipeline-card"
+          :class="{ 'pd-pipeline-card--blocked': unsupportedTypes(template).length > 0 }"
+          flat
+          @click="onSelect(template)"
+        >
           <div class="pd-pipeline-card__banner">
             <q-icon name="account_tree" size="22px" />
           </div>
@@ -81,8 +128,17 @@ const previewSteps = (template: WorkflowTemplateSummary): string =>
             <div class="row items-center no-wrap q-gutter-xs">
               <div class="pd-h2 ellipsis">{{ template.name }}</div>
               <q-space />
-              <q-badge class="pd-badge pd-badge--active">
-                {{ template.topology.length }} nodos
+              <q-badge
+                class="pd-badge"
+                :class="
+                  unsupportedTypes(template).length > 0 ? 'pd-badge--inactive' : 'pd-badge--active'
+                "
+              >
+                {{
+                  unsupportedTypes(template).length > 0
+                    ? 'No disponible'
+                    : `${template.topology.length} nodos`
+                }}
               </q-badge>
             </div>
 
@@ -91,6 +147,17 @@ const previewSteps = (template: WorkflowTemplateSummary): string =>
             </p>
 
             <div class="pd-mono pd-pipeline-card__steps">{{ previewSteps(template) }}</div>
+
+            <!-- Se bloquea la tarjeta en vez de ocultarla: una plantilla que el
+                 operador creo no debe desaparecer sin decir por que. -->
+            <p
+              v-if="unsupportedTypes(template).length > 0"
+              class="pd-subtitle pd-pipeline-card__blocked q-mt-sm q-mb-none"
+            >
+              Contiene nodos sin estrategia en el motor:
+              {{ unsupportedTypes(template).join(', ') }}. Editala en Plantillas de Flujo para
+              poder usarla.
+            </p>
           </q-card-section>
 
           <q-card-actions align="right" class="q-px-md q-pb-md q-pt-none">
@@ -100,7 +167,8 @@ const previewSteps = (template: WorkflowTemplateSummary): string =>
               no-caps
               label="Configurar"
               icon-right="north_east"
-              @click.stop="emit('select', template.id)"
+              :disable="unsupportedTypes(template).length > 0"
+              @click.stop="onSelect(template)"
             />
           </q-card-actions>
         </q-card>
@@ -137,6 +205,18 @@ const previewSteps = (template: WorkflowTemplateSummary): string =>
   &__steps {
     color: var(--pd-text-secondary);
     word-break: break-word;
+  }
+
+  &__blocked {
+    color: var(--pd-negative);
+  }
+
+  &--blocked {
+    cursor: not-allowed;
+
+    &:hover {
+      border-color: var(--pd-border);
+    }
   }
 
   .q-card__section {

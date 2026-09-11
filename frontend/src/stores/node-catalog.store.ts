@@ -1,9 +1,7 @@
 import { defineStore, acceptHMRUpdate } from 'pinia';
-import { computed, ref } from 'vue';
+import { ref } from 'vue';
 
 import * as nodeCatalogService from '@services/node-catalog.service';
-
-import { isImplementedNodeType } from '@/types/node-catalog';
 
 import type { NodeCatalogEntry } from '@/types/node-catalog';
 
@@ -15,10 +13,25 @@ export const useNodeCatalogStore = defineStore('nodeCatalog', () => {
   const entries = ref<NodeCatalogEntry[]>([]);
   const isLoading = ref(false);
 
-  /** Tipos que el motor sabe ejecutar; el resto se pinta deshabilitado. */
-  const selectableEntries = computed<NodeCatalogEntry[]>(() =>
-    entries.value.filter(isImplementedNodeType),
-  );
+  /**
+   * Si el motor sabe ejecutar un tipo de nodo, por su `code`.
+   *
+   * Sirve para juzgar topologias YA GUARDADAS —una plantilla creada cuando el
+   * catalogo marcaba como implementados tipos que no lo estaban— sin que quien
+   * pregunta tenga que recorrer `entries`.
+   *
+   * Devuelve `true` cuando el catalogo aun no se ha cargado, y esto es
+   * deliberado: con `entries` vacio, responder `false` marcaria TODOS los tipos
+   * como no ejecutables y bloquearia cada plantilla de la lista durante la
+   * carga, o para siempre si la peticion falla. Ante la duda no se bloquea: el
+   * asistente vuelve a explicar el motivo paso a paso, y el backend valida el
+   * esquema de todos modos.
+   */
+  const isNodeTypeImplemented = (code: string): boolean => {
+    if (entries.value.length === 0) return true;
+
+    return findByCode(code)?.implemented ?? false;
+  };
 
   /**
    * Carga el catalogo una sola vez.
@@ -47,7 +60,7 @@ export const useNodeCatalogStore = defineStore('nodeCatalog', () => {
   return {
     entries,
     isLoading,
-    selectableEntries,
+    isNodeTypeImplemented,
     fetchCatalog,
     findByCode,
   };

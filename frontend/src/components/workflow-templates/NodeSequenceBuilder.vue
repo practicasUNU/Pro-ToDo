@@ -45,10 +45,14 @@ const paramsText = ref<Record<string, string>>({});
 /**
  * Opciones agrupadas por categoria.
  *
- * Se recorre el catalogo ENTERO y no `selectableEntries`: los tipos sin
- * estrategia se muestran deshabilitados en vez de ocultarse, para que el
+ * Se recorre el catalogo ENTERO y no solo los tipos ejecutables: los que no
+ * tienen estrategia se muestran deshabilitados en vez de ocultarse, para que el
  * operador vea que existen y que aun no se pueden usar. Ocultarlos convertiria
  * una limitacion conocida en una ausencia inexplicable.
+ *
+ * `implemented` lo decide ahora el registro de estrategias del motor y no el
+ * enum de tipos, asi que esta marca ya no deja pasar tipos que el motor no sabe
+ * ejecutar.
  */
 const groupedOptions = computed(() =>
   catalogStore.entries.map((entry) => ({
