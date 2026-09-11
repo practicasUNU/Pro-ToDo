@@ -1,10 +1,11 @@
 <script setup lang="ts">
-import { computed } from 'vue';
+import { computed, ref } from 'vue';
 
 import {
   CRON_EXPRESSION_FIELD_COUNT,
-  CRON_TIMEZONE_OPTIONS,
+  CRON_TIMEZONE_SUGGESTIONS,
   DEFAULT_CRON_OUTPUT_NAMESPACE,
+  isIanaTimeZone,
   isLikelyCronExpression,
   useTriggerCronStore,
 } from '@stores/nodes/trigger-cron.store';
@@ -25,7 +26,51 @@ const store = useTriggerCronStore(props.nodeId);
 const CRON_EXPRESSION_HINT = `${CRON_EXPRESSION_FIELD_COUNT} campos separados por espacios: minuto hora dia mes dia-semana. No se admiten segundos ni alias como @daily.`;
 
 const TIME_ZONE_HINT =
-  'La expresion se interpreta en esta zona y sigue el horario de verano. Un disparo a las 02:00 no ocurre el dia del salto de primavera, porque esa hora local no existe.';
+  'Escribe cualquier nombre IANA o elige una de las sugerencias. La expresion se interpreta en esta zona y sigue el horario de verano, asi que un disparo a las 02:00 no ocurre el dia del salto de primavera: esa hora local no existe.';
+
+const TIME_ZONE_INVALID_MESSAGE =
+  'Nombre de zona IANA no reconocido (ej. Europe/Madrid, Asia/Tokyo o UTC). No se admiten desplazamientos fijos como +02:00 porque no siguen el horario de verano.';
+
+/** Sugerencias visibles; se acotan al teclear (ver `onFilterTimeZones`). */
+const timeZoneSuggestions = ref<string[]>([...CRON_TIMEZONE_SUGGESTIONS]);
+
+/**
+ * Acota las sugerencias a lo tecleado.
+ *
+ * Quasar EXIGE invocar `update()`: sin esa llamada el menu no se repinta y la
+ * lista se queda congelada en las doce iniciales.
+ */
+const onFilterTimeZones = (
+  inputValue: string,
+  update: (callbackFn: () => void) => void,
+): void => {
+  update(() => {
+    const needle = inputValue.toLowerCase();
+
+    timeZoneSuggestions.value = CRON_TIMEZONE_SUGGESTIONS.filter((zone) =>
+      zone.toLowerCase().includes(needle),
+    );
+  });
+};
+
+/**
+ * Recoge lo TECLEADO aunque no se confirme con Enter ni se elija del menu.
+ *
+ * Es la pieza critica del campo: `update:model-value` solo se emite al
+ * confirmar, asi que sin esto escribir "Asia/Tokyo" y pulsar Guardar
+ * directamente persistiria la zona ANTERIOR mientras la pantalla muestra la
+ * nueva. Seria un fallo silencioso peor que el que este cambio arregla.
+ *
+ * Se ignora la cadena vacia porque QSelect tambien la emite al abrir el menu
+ * con `fill-input`, y eso borraria una zona ya valida.
+ */
+const onTimeZoneInput = (value: string): void => {
+  const typed = value.trim();
+
+  if (typed === '' || typed === store.config.timeZone) return;
+
+  store.patchConfig({ timeZone: typed });
+};
 
 const OUTPUT_NAMESPACE_HINT = `El nodo escribe su marca temporal en el namespace \`${DEFAULT_CRON_OUTPUT_NAMESPACE}\`, interpolable como {{${DEFAULT_CRON_OUTPUT_NAMESPACE}.triggered_at}}.`;
 
@@ -123,19 +168,33 @@ const FIELD_LABELS = ['Minuto', 'Hora', 'Dia', 'Mes', 'Dia de semana'] as const;
         <label class="pd-label" for="cron-timezone">
           Zona horaria<span class="pd-required">*</span>
         </label>
-        <!-- Selector CERRADO (Poka-Yoke §4): un nombre IANA mal escrito no se
-             detecta a simple vista y el flujo se dispararia a otra hora. -->
+        <!-- Selector ABIERTO a proposito. La lista cerrada anterior declaraba
+             invalida cualquier zona que el backend si acepta, y como no se podia
+             escribir, un nodo guardado con `Asia/Tokyo` quedaba imposible de
+             reabrir: bloqueaba el guardado del flujo entero sin via de escape.
+             Las doce sugerencias se mantienen; la validez la decide
+             `isIanaTimeZone`, espejo del DTO del backend. -->
         <q-select
           id="cron-timezone"
           :model-value="store.config.timeZone"
-          :options="CRON_TIMEZONE_OPTIONS"
+          :options="timeZoneSuggestions"
           outlined
           dense
-          emit-value
-          map-options
+          use-input
+          fill-input
+          hide-selected
+          input-debounce="0"
+          new-value-mode="add-unique"
+          lazy-rules
           class="q-mt-xs"
           :hint="TIME_ZONE_HINT"
-          @update:model-value="store.patchConfig({ timeZone: String($event ?? '') })"
+          :rules="[
+            (val: string) => !!val?.trim() || 'La zona horaria es obligatoria',
+            (val: string) => isIanaTimeZone((val ?? '').trim()) || TIME_ZONE_INVALID_MESSAGE,
+          ]"
+          @filter="onFilterTimeZones"
+          @update:model-value="store.patchConfig({ timeZone: String($event ?? '').trim() })"
+          @input-value="onTimeZoneInput"
         />
       </div>
 

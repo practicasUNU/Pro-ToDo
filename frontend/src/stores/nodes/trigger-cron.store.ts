@@ -19,14 +19,16 @@ export const DEFAULT_CRON_OUTPUT_NAMESPACE = 'cron_trigger';
 export const CRON_EXPRESSION_FIELD_COUNT = 5;
 
 /**
- * Zonas horarias ofrecidas por el selector.
+ * Zonas horarias SUGERIDAS por el selector. NO es la lista de validez.
  *
- * Lista cerrada y no entrada libre (Poka-Yoke, `frontend-quasar.md` §4): un
- * nombre IANA mal escrito no se detecta a simple vista, y el fallo aparece
- * mucho despues, cuando el flujo se dispara a la hora equivocada. Se cubren la
- * zona de la organizacion, UTC y las del resto de la peninsula e islas.
+ * Nacio como lista cerrada (Poka-Yoke, `frontend-quasar.md` §4) y eso rompia el
+ * ida y vuelta con el backend, que acepta cualquier nombre IANA: un nodo
+ * guardado con `Asia/Tokyo` se declaraba invalido en el cliente y bloqueaba el
+ * guardado del flujo entero, sin que el selector cerrado permitiera siquiera
+ * recuperar el valor original. La validez la decide ahora `isIanaTimeZone`;
+ * estas doce entradas solo ahorran teclear las zonas frecuentes.
  */
-export const CRON_TIMEZONE_OPTIONS: readonly string[] = [
+export const CRON_TIMEZONE_SUGGESTIONS: readonly string[] = [
   'Europe/Madrid',
   'Atlantic/Canary',
   'UTC',
@@ -66,6 +68,40 @@ export const isLikelyCronExpression = (value: string): boolean => {
   return fields.every((field) => /^[0-9*/,\-A-Za-z]+$/.test(field));
 };
 
+/**
+ * Valida que la zona sea un identificador IANA que el backend vaya a aceptar.
+ *
+ * ESPEJO EXACTO de `IsIanaTimeZoneConstraint`
+ * (`backend/src/modules/nodes/dto/cron-trigger-config.dto.ts`). Divergir aqui
+ * reproduce el fallo que esta funcion viene a arreglar: una lista blanca mas
+ * corta en el cliente dejaba imposible de reguardar un nodo que el servidor si
+ * acepta.
+ *
+ * Se usa `Intl.DateTimeFormat`, que lanza `RangeError` ante un nombre
+ * desconocido, y NO `Intl.supportedValuesOf('timeZone')`: ese listado omite los
+ * alias historicos (`Asia/Calcutta`, `Europe/Kiev`) que luxon si resuelve.
+ *
+ * DEUDA CONOCIDA, compartida con el backend: `Etc/GMT+2` lleva barra y `Intl` lo
+ * resuelve, asi que pasa pese a ser un desplazamiento fijo sin horario de
+ * verano. No se corrige solo aqui: hacerlo recrearia la divergencia entre las
+ * dos capas que este espejo existe para eliminar.
+ */
+export const isIanaTimeZone = (value: string): boolean => {
+  if (value === '') return false;
+
+  // Se descartan los desplazamientos fijos ("+02:00", "UTC+2"): no siguen el
+  // horario de verano, asi que un flujo declarado "a las 8:00" se correria una
+  // hora durante media temporada sin dar ningun error. Misma regla que el DTO.
+  if (value !== 'UTC' && !value.includes('/')) return false;
+
+  try {
+    new Intl.DateTimeFormat('en-US', { timeZone: value });
+    return true;
+  } catch {
+    return false;
+  }
+};
+
 /** `params` que el nodo aporta al `pipeline_schema`. */
 export interface TriggerCronConfig {
   cronExpression: string;
@@ -102,7 +138,7 @@ const triggerCronSetup = () => {
   const isConfigValid = computed<boolean>(
     () =>
       isLikelyCronExpression(config.value.cronExpression) &&
-      CRON_TIMEZONE_OPTIONS.includes(config.value.timeZone),
+      isIanaTimeZone(config.value.timeZone),
   );
 
   const patchConfig = (patch: Partial<TriggerCronConfig>): void => {

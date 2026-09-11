@@ -2,8 +2,9 @@ import { createPinia, setActivePinia } from 'pinia';
 import { beforeEach, describe, expect, it } from 'vitest';
 
 import {
-  CRON_TIMEZONE_OPTIONS,
+  CRON_TIMEZONE_SUGGESTIONS,
   DEFAULT_CRON_TIMEZONE,
+  isIanaTimeZone,
   isLikelyCronExpression,
   useTriggerCronStore,
 } from './trigger-cron.store';
@@ -52,6 +53,40 @@ describe('useTriggerCronStore · configuracion del nodo TRIGGER_CRON', () => {
     });
   });
 
+  describe('1bis. Validacion de la zona horaria', () => {
+    it.each([
+      ['Europe/Madrid', 'zona de la organizacion'],
+      ['UTC', 'el unico nombre valido sin barra'],
+      ['Asia/Tokyo', 'zona fuera de las sugerencias'],
+      ['America/Argentina/Buenos_Aires', 'nombre de tres segmentos'],
+      ['Asia/Calcutta', 'alias historico que supportedValuesOf omite'],
+    ])('1bis.1 deberia aceptar "%s" (%s)', (timeZone) => {
+      // 1. Arrange & 2. Act & 3. Assert
+      expect(isIanaTimeZone(timeZone)).toBe(true);
+    });
+
+    it.each([
+      ['', 'cadena vacia'],
+      ['Marte/Olympus', 'zona inexistente'],
+      ['Europe/Madird', 'nombre mal escrito'],
+      ['+02:00', 'desplazamiento fijo'],
+      ['UTC+2', 'desplazamiento con prefijo UTC'],
+      ['GMT', 'alias sin barra'],
+    ])('1bis.2 deberia rechazar "%s" (%s)', (timeZone) => {
+      // 1. Arrange & 2. Act & 3. Assert
+      expect(isIanaTimeZone(timeZone)).toBe(false);
+    });
+
+    it('1bis.3 deberia dejar pasar Etc/GMT+2, deuda conocida compartida con el backend', () => {
+      // 1. Arrange: lleva barra y `Intl` lo resuelve, asi que la regla no lo
+      //    distingue de una zona real pese a ser un desplazamiento fijo. Se fija
+      //    aqui para que el dia que se corrija se corrija en AMBAS capas: hacerlo
+      //    solo en el cliente recrearia la divergencia que este espejo elimina.
+      // 2. Act & 3. Assert
+      expect(isIanaTimeZone('Etc/GMT+2')).toBe(true);
+    });
+  });
+
   describe('2. Estado inicial y validez', () => {
     it('2.1 deberia arrancar sin expresion y con la zona por defecto', () => {
       // 1. Arrange & 2. Act
@@ -74,9 +109,9 @@ describe('useTriggerCronStore · configuracion del nodo TRIGGER_CRON', () => {
       expect(store.isConfigValid).toBe(true);
     });
 
-    it('2.3 deberia invalidarse con una zona fuera del selector', () => {
-      // 1. Arrange: el selector es cerrado, pero un nodo hidratado desde SQL
-      //    directo puede traer cualquier cosa.
+    it('2.3 deberia invalidarse con una zona que Intl no resuelve', () => {
+      // 1. Arrange: el selector ya no es cerrado, pero un nombre inventado
+      //    —tecleado o llegado por SQL directo— sigue sin ser programable.
       const store = useTriggerCronStore(NODE_ID);
 
       // 2. Act
@@ -89,10 +124,40 @@ describe('useTriggerCronStore · configuracion del nodo TRIGGER_CRON', () => {
       expect(store.isConfigValid).toBe(false);
     });
 
-    it('2.4 deberia ofrecer la zona por defecto entre las opciones', () => {
-      // 1. Arrange & 2. Act & 3. Assert: si no estuviera, el estado inicial
-      //    seria invalido de partida y el selector abriria sin seleccion.
-      expect(CRON_TIMEZONE_OPTIONS).toContain(DEFAULT_CRON_TIMEZONE);
+    it('2.4 deberia ofrecer la zona por defecto entre las sugerencias', () => {
+      // 1. Arrange & 2. Act & 3. Assert: no condiciona la validez —de eso se
+      //    ocupa `isIanaTimeZone`— pero sin ella el selector abriria sin
+      //    destacar la zona con la que el nodo arranca.
+      expect(CRON_TIMEZONE_SUGGESTIONS).toContain(DEFAULT_CRON_TIMEZONE);
+    });
+
+    it('2.5 deberia aceptar una zona IANA fuera de las sugerencias', () => {
+      // 1. Arrange: REGRESION. La lista cerrada declaraba invalida una zona que
+      //    el backend si acepta, y eso bloqueaba el guardado del flujo entero.
+      const store = useTriggerCronStore(NODE_ID);
+
+      // 2. Act
+      store.patchConfig({
+        cronExpression: VALID_EXPRESSION,
+        timeZone: 'Asia/Tokyo',
+      });
+
+      // 3. Assert
+      expect(store.isConfigValid).toBe(true);
+    });
+
+    it('2.6 deberia seguir rechazando un desplazamiento fijo', () => {
+      // 1. Arrange: abrir la entrada no significa aceptar cualquier cosa.
+      const store = useTriggerCronStore(NODE_ID);
+
+      // 2. Act
+      store.patchConfig({
+        cronExpression: VALID_EXPRESSION,
+        timeZone: '+02:00',
+      });
+
+      // 3. Assert
+      expect(store.isConfigValid).toBe(false);
     });
   });
 
@@ -152,6 +217,20 @@ describe('useTriggerCronStore · configuracion del nodo TRIGGER_CRON', () => {
       // 3. Assert
       expect(store.config.timeZone).toBe(DEFAULT_CRON_TIMEZONE);
       expect(store.isConfigValid).toBe(true);
+    });
+
+    it('3.5bis deberia poder reguardar un nodo hidratado con una zona no sugerida', () => {
+      // 1. Arrange: el escenario exacto que bloqueaba el guardado. El nodo se
+      //    guardo con una zona que el backend acepta y el asistente rechazaba.
+      const store = useTriggerCronStore(NODE_ID);
+      const params = { cronExpression: '0 9 * * *', timeZone: 'Asia/Tokyo' };
+
+      // 2. Act
+      store.hydrateFromNode({ outputNamespace: 'cron_trigger', params });
+
+      // 3. Assert
+      expect(store.isConfigValid).toBe(true);
+      expect(store.toNodeParams()).toEqual(params);
     });
 
     it('3.5 deberia devolver el nodo a su estado inicial', () => {

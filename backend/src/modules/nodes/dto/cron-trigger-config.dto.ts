@@ -104,6 +104,15 @@ export class IsValidCronExpressionConstraint implements ValidatorConstraintInter
  * desconocido, y NO con `Intl.supportedValuesOf('timeZone')`: ese listado omite
  * los alias historicos (`Asia/Calcutta`, `Europe/Kiev`) que luxon si acepta, y
  * los rechazaria como falsos negativos.
+ *
+ * TIENE ESPEJO EN EL CLIENTE: `isIanaTimeZone` en
+ * `frontend/src/stores/nodes/trigger-cron.store.ts`. Endurecer esta regla sin
+ * tocar aquella deja al asistente aceptando zonas que luego rechaza el 400, y
+ * relajarla sin tocar aquella deja nodos guardados que el asistente no puede
+ * reabrir. Cualquier cambio va en los dos sitios.
+ *
+ * DEUDA CONOCIDA: `Etc/GMT+2` lleva barra y `Intl` lo resuelve, asi que pasa
+ * pese a ser un desplazamiento fijo sin horario de verano.
  */
 @ValidatorConstraint({ name: 'isIanaTimeZone', async: false })
 export class IsIanaTimeZoneConstraint implements ValidatorConstraintInterface {
