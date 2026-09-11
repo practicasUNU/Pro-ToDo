@@ -95,15 +95,62 @@ const onBackToSelector = (): void => {
   draftStore.resetDraft();
 };
 
-/** Avanza al paso de revision desde el ultimo nodo configurado. */
+/**
+ * Avanza al paso de revision desde el ultimo nodo configurado.
+ *
+ * Antes salia con un `return` mudo si el paso no era valido: el operador pulsaba
+ * y no ocurria absolutamente nada, sin ninguna pista de que faltaba.
+ */
 const onGoToReview = (): void => {
-  if (!draftStore.isActiveStepValid) return;
+  if (!draftStore.isActiveStepValid) {
+    notifyActiveStepBlocked();
+    return;
+  }
 
   draftStore.activeStep = reviewStepIndex.value;
 };
 
+/**
+ * Motivo por el que este paso no es ejecutable, o `null` si lo es.
+ *
+ * Solo devuelve los motivos IRRECUPERABLES: que falten campos por rellenar no
+ * es un problema del nodo y ya lo dice su propio formulario.
+ */
+const unsupportedReasonFor = (step: WizardStep): string | null => {
+  const blocked = draftStore.invalidSteps.find(
+    (item) => item.step.nodeId === step.nodeId,
+  );
+
+  return blocked !== undefined && blocked.reason !== 'CONFIGURACION_INCOMPLETA'
+    ? blocked.message
+    : null;
+};
+
+/** Explica por que el paso activo no deja avanzar. */
+const notifyActiveStepBlocked = (): void => {
+  const blocked = draftStore.invalidSteps.find(
+    (item) => item.index === draftStore.activeStep,
+  );
+
+  $q.notify({
+    type: 'warning',
+    message: blocked?.message ?? 'Completa la configuracion de este paso para continuar.',
+  });
+};
+
 const onSaveWorkflow = async (): Promise<void> => {
   const editing = isEditMode.value;
+
+  // El nombre se comprueba AQUI y ya no en el `:disable` del boton. Con el
+  // nombre vacio y todos los pasos validos, el boton quedaba deshabilitado y el
+  // aviso de pasos pendientes no se pintaba —porque no habia ninguno—, asi que
+  // pulsar Guardar no producia nada en absoluto: ni peticion, ni mensaje, ni
+  // error en consola. Ese era el fallo silencioso.
+  if (form.name.trim() === '') {
+    $q.notify({ type: 'warning', message: 'El nombre del flujo es obligatorio.' });
+    document.getElementById('workflow-name')?.focus();
+    return;
+  }
 
   try {
     const saved = await draftStore.assembleAndSaveWorkflow(form.name.trim(), form.description);
@@ -221,6 +268,20 @@ onMounted(async () => {
           :prefix="index + 1"
           :done="index < draftStore.activeStep"
         >
+          <!-- Un tipo con configurador pero SIN store es el caso enganoso: el
+               formulario se pinta con normalidad y el guardado queda bloqueado
+               para siempre sin que nada lo explique. Se avisa encima del propio
+               configurador en vez de ocultarlo, para que se vea que el problema
+               no es lo que hay escrito en los campos. -->
+          <div
+            v-if="unsupportedReasonFor(step)"
+            class="pd-card pd-card--accent pd-accent-grave q-pa-md q-mb-md"
+            role="alert"
+          >
+            <div class="pd-h2">Nodo no ejecutable</div>
+            <p class="pd-subtitle q-mt-xs q-mb-none">{{ unsupportedReasonFor(step) }}</p>
+          </div>
+
           <!-- Resolucion polimorfica: cero condicionales por tipo de nodo. -->
           <component
             :is="resolveStepComponent(step)"
@@ -342,6 +403,31 @@ onMounted(async () => {
             </p>
           </div>
 
+          <!-- Cada paso pendiente, con su motivo y clicable para ir a el. Antes
+               era una sola linea con las etiquetas de los tipos, que con dos
+               nodos del mismo tipo resultaba ambigua y nunca decia POR QUE. -->
+          <div v-if="!draftStore.canSave" class="pd-blocked-panel q-mb-md" role="alert">
+            <div class="pd-label">
+              {{
+                draftStore.hasUnsupportedNodes
+                  ? 'Este flujo no se puede guardar tal cual'
+                  : 'Faltan pasos por completar'
+              }}
+            </div>
+            <ul class="pd-blocked-list q-mt-xs q-mb-none">
+              <li v-for="item in draftStore.invalidSteps" :key="item.index">
+                <button
+                  type="button"
+                  class="pd-blocked-link"
+                  @click="draftStore.activeStep = item.index"
+                >
+                  {{ item.step.name }}
+                </button>
+                <span class="pd-subtitle">— {{ item.message }}</span>
+              </li>
+            </ul>
+          </div>
+
           <q-stepper-navigation class="row items-center q-gutter-sm">
             <q-btn
               flat
@@ -351,17 +437,17 @@ onMounted(async () => {
               @click="draftStore.goToPreviousStep()"
             />
             <q-space />
-            <span v-if="!draftStore.canSave" class="pd-subtitle pd-review-hint">
-              Faltan pasos por configurar:
-              {{ draftStore.invalidSteps.map((step) => step.name).join(', ') }}
-            </span>
+            <!-- El nombre NO entra en el `:disable`: si lo hiciera, un nombre
+                 vacio con todos los pasos validos dejaria el boton muerto y sin
+                 ningun aviso. Lo comprueba `onSaveWorkflow`, que siempre se
+                 ejecuta y siempre responde algo. -->
             <q-btn
               class="pd-btn-primary"
               unelevated
               no-caps
               :label="submitLabel"
               icon-right="north_east"
-              :disable="!draftStore.canSave || !form.name.trim()"
+              :disable="!draftStore.canSave"
               :loading="draftStore.isLoading"
               @click="onSaveWorkflow"
             />
@@ -416,8 +502,27 @@ onMounted(async () => {
   }
 }
 
-.pd-review-hint {
-  max-width: 420px;
-  text-align: right;
+// Panel de pasos que impiden guardar. Sustituye al `.pd-review-hint`, que era
+// una linea suelta a la derecha del boton y no cabia con el motivo de cada paso.
+.pd-blocked-panel {
+  padding: 12px 16px;
+  border: 1px solid var(--pd-border);
+  border-radius: 8px;
+  background: var(--pd-surface-muted);
+}
+
+.pd-blocked-list {
+  padding-left: 18px;
+  color: var(--pd-text-secondary);
+}
+
+.pd-blocked-link {
+  padding: 0;
+  border: 0;
+  background: none;
+  font: inherit;
+  color: var(--pd-accent-text);
+  cursor: pointer;
+  text-decoration: underline;
 }
 </style>

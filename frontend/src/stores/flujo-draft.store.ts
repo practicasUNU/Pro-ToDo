@@ -1,6 +1,7 @@
 import { defineStore, acceptHMRUpdate } from 'pinia';
 import { computed, ref } from 'vue';
 
+import { nodeConfigRegistry } from '@components/nodes/node-config-registry';
 import { resolveNodeStore } from '@stores/nodes/node-store-registry';
 import * as workflowTemplatesService from '@services/workflow-templates.service';
 import * as workflowsService from '@services/workflows.service';
@@ -19,6 +20,56 @@ import type {
   WorkflowDetail,
   WorkflowTemplateSummary,
 } from '@/types/pipeline';
+
+/**
+ * Por que un paso no deja continuar.
+ *
+ * Los tres casos se ven igual en la interfaz —el boton no responde— pero solo
+ * el ultimo lo puede resolver el operador sin salir del asistente.
+ */
+export type StepBlockReason =
+  /** El tipo no tiene componente de configuracion registrado. */
+  | 'SIN_CONFIGURADOR'
+  /** Hay componente pero no store: el motor no sabe ejecutar este tipo. */
+  | 'SIN_STORE'
+  /** El nodo tiene configurador y aun no se declara valido. */
+  | 'CONFIGURACION_INCOMPLETA';
+
+/** Un paso que bloquea el guardado, con su posicion y su motivo. */
+export interface InvalidStep {
+  readonly step: WizardStep;
+  /** Indice en la topologia, para poder saltar al paso culpable. */
+  readonly index: number;
+  readonly reason: StepBlockReason;
+  readonly message: string;
+}
+
+/** Texto que la vista muestra para cada motivo. */
+const STEP_BLOCK_MESSAGES: Record<StepBlockReason, (step: WizardStep) => string> = {
+  SIN_CONFIGURADOR: (step) =>
+    `El tipo ${step.name} todavia no tiene interfaz de configuracion.`,
+  SIN_STORE: (step) =>
+    `El tipo ${step.name} no tiene estrategia en el motor: este flujo no se puede guardar. Edita la plantilla para retirarlo.`,
+  CONFIGURACION_INCOMPLETA: () => 'Faltan campos por completar en este paso.',
+};
+
+/**
+ * Motivo por el que un paso bloquea, o `null` si es valido.
+ *
+ * El orden de las comprobaciones importa: se mira primero el componente y luego
+ * el store porque un tipo sin componente tampoco tendra store, y anunciar "falta
+ * el configurador" es mas util que "falta el store", que no significa nada para
+ * quien usa el asistente.
+ */
+const resolveStepBlockReason = (step: WizardStep): StepBlockReason | null => {
+  if (nodeConfigRegistry[step.nodeType] === undefined) return 'SIN_CONFIGURADOR';
+
+  const store = resolveNodeStore(step.nodeType, step.nodeId);
+
+  if (store === null) return 'SIN_STORE';
+
+  return store.isConfigValid ? null : 'CONFIGURACION_INCOMPLETA';
+};
 
 /**
  * Borrador del asistente de creacion de flujos (regla frontend-quasar.md §3).
@@ -263,20 +314,42 @@ export const useFlujoDraftStore = defineStore('flujoDraft', () => {
   };
 
   /**
-   * Pasos cuyo store aun no se declara valido.
+   * Pasos que impiden guardar, cada uno con SU motivo.
    *
    * Se pregunta a TODOS y no solo al activo: el asistente permite retroceder, y
    * sin esta comprobacion se podria guardar un flujo tras haber vaciado un paso
    * anterior ya visitado.
+   *
+   * El motivo no es decorativo. Antes esto era una lista de pasos a secas y
+   * mezclaba dos fracasos que el operador vive de forma opuesta: "te falta
+   * rellenar un campo", que se arregla en dos clics, y "este tipo de nodo no
+   * tiene estrategia en el motor", que no tiene arreglo posible desde el
+   * asistente y obliga a editar la plantilla. Presentarlos igual dejaba al
+   * operador reintentando algo imposible sin ninguna pista.
    */
-  const invalidSteps = computed<WizardStep[]>(() =>
-    pipelineTopology.value.filter(
-      (step) => resolveNodeStore(step.nodeType, step.nodeId)?.isConfigValid !== true,
-    ),
+  const invalidSteps = computed<InvalidStep[]>(() =>
+    pipelineTopology.value.flatMap((step, index) => {
+      const reason = resolveStepBlockReason(step);
+
+      if (reason === null) return [];
+
+      return [{ step, index, reason, message: STEP_BLOCK_MESSAGES[reason](step) }];
+    }),
   );
 
   const canSave = computed<boolean>(
     () => pipelineTopology.value.length > 0 && invalidSteps.value.length === 0,
+  );
+
+  /**
+   * Si algun paso esta bloqueado por algo que el operador NO puede arreglar aqui.
+   *
+   * Es lo que separa "termina de rellenar" de "esta plantilla no se puede
+   * guardar tal cual": la vista usa este dato para decidir si ofrece ayuda o
+   * manda a editar la plantilla.
+   */
+  const hasUnsupportedNodes = computed<boolean>(() =>
+    invalidSteps.value.some((item) => item.reason !== 'CONFIGURACION_INCOMPLETA'),
   );
 
   /**
@@ -355,10 +428,13 @@ export const useFlujoDraftStore = defineStore('flujoDraft', () => {
     description?: string,
   ): Promise<PipelineSummary> => {
     if (!canSave.value) {
+      // Se nombra el motivo de cada paso y no solo su etiqueta: este error
+      // termina en un `$q.notify`, y "Disparador IMAP" a secas no dice si falta
+      // rellenar algo o si el tipo no es ejecutable.
       throw new Error(
-        `Hay ${invalidSteps.value.length} paso(s) sin configurar: ${invalidSteps.value
-          .map((step) => step.name)
-          .join(', ')}.`,
+        `Hay ${invalidSteps.value.length} paso(s) que impiden guardar: ${invalidSteps.value
+          .map((item) => `${item.step.name} (${item.message})`)
+          .join(' ')}`,
       );
     }
 
@@ -443,6 +519,7 @@ export const useFlujoDraftStore = defineStore('flujoDraft', () => {
     isActiveStepValid,
     invalidSteps,
     canSave,
+    hasUnsupportedNodes,
     upstreamNamespaces,
     syncUpstreamNamespaces,
     assemblePipelineSchema,

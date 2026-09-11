@@ -522,7 +522,7 @@ describe('useFlujoDraftStore · agregador del asistente', () => {
       //    `:disable` del boton; guardar un flujo a medias dejaria en la BD un
       //    esquema que revienta en su primera ejecucion.
       await expect(draft.assembleAndSaveWorkflow('Flujo incompleto')).rejects.toThrow(
-        /sin configurar/,
+        /impiden guardar/,
       );
       expect(createWorkflow).not.toHaveBeenCalled();
     });
@@ -1089,6 +1089,80 @@ describe('useFlujoDraftStore · modo edicion', () => {
       // 2. Act & 3. Assert: el mensaje al usuario lo decide el componente.
       await expect(draft.loadWorkflowForEdit(WORKFLOW_ID)).rejects.toThrow('404');
       expect(draft.isLoading).toBe(false);
+    });
+  });
+
+  describe('16. Motivo por el que un paso bloquea el guardado', () => {
+    it('16.1 deberia distinguir el nodo sin configurador del que solo esta incompleto', async () => {
+      // 1. Arrange: la plantilla trae TRIGGER_IMAP (con configurador, sin
+      //    probar), PARSER_PRE_IA (sin configurador) y MAPEADOR_PLANTILLA.
+      const draft = await buildSelectedDraft();
+
+      // 2. Act
+      const byType = new Map(
+        draft.invalidSteps.map((item) => [item.step.nodeType, item.reason]),
+      );
+
+      // 3. Assert: presentarlos igual dejaba al operador reintentando algo que
+      //    no tiene arreglo desde el asistente.
+      expect(byType.get(NodeType.PARSER_PRE_IA)).toBe('SIN_CONFIGURADOR');
+      expect(byType.get(NodeType.TRIGGER_IMAP)).toBe('CONFIGURACION_INCOMPLETA');
+    });
+
+    it('16.2 deberia incluir el indice para poder saltar al paso culpable', async () => {
+      // 1. Arrange
+      const draft = await buildSelectedDraft();
+
+      // 2. Act
+      const [first] = draft.invalidSteps;
+
+      // 3. Assert
+      expect(first?.index).toBe(0);
+      expect(draft.pipelineTopology[first?.index ?? -1]?.nodeId).toBe(first?.step.nodeId);
+    });
+
+    it('16.3 deberia acompanar cada motivo de un mensaje no vacio', async () => {
+      // 1. Arrange
+      const draft = await buildSelectedDraft();
+
+      // 2. Act & 3. Assert: es el texto que la vista muestra; vacio devolveria
+      //    el asistente al estado mudo que este bloque existe para evitar.
+      expect(draft.invalidSteps.length).toBeGreaterThan(0);
+      draft.invalidSteps.forEach((item) => {
+        expect(item.message.trim()).not.toBe('');
+      });
+    });
+
+    it('16.4 deberia marcar hasUnsupportedNodes con un tipo sin configurador', async () => {
+      // 1. Arrange
+      const draft = await buildSelectedDraft();
+
+      // 2. Act & 3. Assert
+      expect(draft.hasUnsupportedNodes).toBe(true);
+      expect(draft.canSave).toBe(false);
+    });
+
+    it('16.5 no deberia marcar hasUnsupportedNodes si solo falta completar campos', async () => {
+      // 1. Arrange: topologia con un unico nodo que SI tiene configurador.
+      const draft = useFlujoDraftStore();
+      fetchWorkflowTemplates.mockResolvedValue([
+        buildTemplate({
+          topology: [
+            {
+              nodeId: TRIGGER_NODE_ID,
+              nodeType: NodeType.TRIGGER_IMAP,
+              outputNamespace: 'raw_email',
+            },
+          ],
+        }),
+      ]);
+      await draft.loadAvailableTemplates();
+      draft.selectTemplate(TEMPLATE_ID);
+
+      // 2. Act & 3. Assert: bloquea, pero es corregible sin salir del asistente.
+      expect(draft.canSave).toBe(false);
+      expect(draft.hasUnsupportedNodes).toBe(false);
+      expect(draft.invalidSteps[0]?.reason).toBe('CONFIGURACION_INCOMPLETA');
     });
   });
 });
