@@ -161,13 +161,14 @@ describe('useWorkflowTemplatesStore · catalogo de plantillas de flujo', () => {
       expect(store.isDraftValid).toBe(false);
     });
 
-    it('2.4 deberia declararse valido con nombre y JSON correcto', () => {
-      // 1. Arrange
+    it('2.4 deberia declararse valido con nombre, JSON correcto y al menos un nodo', () => {
+      // 1. Arrange: el esqueleto de alta ya no trae ningun nodo de muestra, asi
+      //    que el nombre por si solo no basta.
       const store = useWorkflowTemplatesStore();
       store.initDraft();
 
       // 2. Act
-      store.patchDraft({ name: 'Notiweb' });
+      store.patchDraft({ name: 'Notiweb', schemaText: JSON.stringify(SCHEMA) });
 
       // 3. Assert
       expect(store.isDraftValid).toBe(true);
@@ -487,5 +488,82 @@ describe('useWorkflowTemplatesStore · catalogo de plantillas de flujo', () => {
       expect(store.selectedTemplate).toBeNull();
       expect(store.activeDraft.name).toBe('');
     });
+  
+  describe('6. Nodos minimos del borrador', () => {
+    it('6.1 no deberia declararse valido con nombre pero sin nodos', () => {
+      // 1. Arrange: guardar asi provoca un 400 del validador —`entrypoint` vacio
+      //    y `nodes` vacio—, y el operador solo veia el error tras la peticion.
+      const store = useWorkflowTemplatesStore();
+      store.initDraft();
+
+      // 2. Act
+      store.patchDraft({ name: 'Notiweb' });
+
+      // 3. Assert
+      expect(store.schemaNodeCount).toBe(0);
+      expect(store.isDraftValid).toBe(false);
+    });
+
+    it('6.2 deberia declararse valido en cuanto la secuencia aporta un nodo', () => {
+      // 1. Arrange
+      const store = useWorkflowTemplatesStore();
+      store.initDraft();
+      store.patchDraft({ name: 'Notiweb' });
+
+      // 2. Act
+      store.setSequence([
+        {
+          nodeId: 'trigger_cron',
+          nodeType: NodeType.TRIGGER_CRON,
+          outputNamespace: 'cron_trigger',
+          params: {},
+        },
+      ]);
+
+      // 3. Assert
+      expect(store.schemaNodeCount).toBe(1);
+      expect(store.isDraftValid).toBe(true);
+    });
+
+    it('6.3 deberia contar los nodos escritos a mano en el texto', () => {
+      // 1. Arrange: el editor JSON es editable directamente y la sincronizacion
+      //    con `sequence` es de una sola direccion. Contar sobre `sequence`
+      //    dejaria el boton bloqueado con un documento que si tiene nodos.
+      const store = useWorkflowTemplatesStore();
+      store.initDraft();
+
+      // 2. Act
+      store.patchDraft({ name: 'Notiweb', schemaText: JSON.stringify(SCHEMA) });
+
+      // 3. Assert
+      expect(store.sequence).toHaveLength(0);
+      expect(store.schemaNodeCount).toBe(1);
+      expect(store.isDraftValid).toBe(true);
+    });
+
+    it('6.4 deberia devolver 0 nodos ante un JSON roto sin lanzar', () => {
+      // 1. Arrange
+      const store = useWorkflowTemplatesStore();
+      store.initDraft();
+
+      // 2. Act
+      store.patchDraft({ name: 'Notiweb', schemaText: '{ "nodes": ' });
+
+      // 3. Assert
+      expect(store.schemaNodeCount).toBe(0);
+    });
+
+    it('6.5 deberia devolver 0 cuando nodes no es un objeto', () => {
+      // 1. Arrange
+      const store = useWorkflowTemplatesStore();
+      store.initDraft();
+
+      // 2. Act
+      store.patchDraft({ name: 'Notiweb', schemaText: '{"nodes": []}' });
+
+      // 3. Assert
+      expect(store.schemaNodeCount).toBe(0);
+    });
   });
+});
 });

@@ -1,10 +1,9 @@
 <script setup lang="ts">
-import { computed, defineAsyncComponent, onMounted, ref, watch } from 'vue';
+import { computed, onMounted, ref } from 'vue';
 import { useQuasar } from 'quasar';
 
-import { nodeConfigRegistry } from '@components/nodes/node-config-registry';
 import { useNodeCatalogStore } from '@stores/node-catalog.store';
-import { resolveNodeStore } from '@stores/nodes/node-store-registry';
+import TemplateNodeCard from '@components/workflow-templates/TemplateNodeCard.vue';
 
 import { extractApiErrorMessage } from '@/utils/api-error';
 
@@ -13,12 +12,6 @@ import { NODE_CATEGORY_LABELS } from '@/types/node-catalog';
 import type { AssemblerStep } from '@/utils/pipeline-assembler';
 import type { NodeCatalogEntry } from '@/types/node-catalog';
 import type { NodeType } from '@/types/pipeline';
-
-// Mismo motivo que en el dialogo anfitrion: CodeMirror pesa cientos de KB y solo
-// hace falta cuando se despliega un nodo SIN configurador dedicado.
-const JsonPipelinePreview = defineAsyncComponent(
-  () => import('@components/JsonPipelinePreview.vue'),
-);
 
 interface Props {
   /** Secuencia actual, en orden de ejecucion. */
@@ -38,9 +31,6 @@ const catalogStore = useNodeCatalogStore();
 
 /** Entrada elegida en el selector, antes de anadirla a la secuencia. */
 const pendingEntry = ref<NodeCatalogEntry | null>(null);
-
-/** Texto JSON de los `params` por nodo, para los tipos sin configurador. */
-const paramsText = ref<Record<string, string>>({});
 
 /**
  * Opciones agrupadas por categoria.
@@ -66,9 +56,6 @@ const groupedOptions = computed(() =>
 const isCatalogEmpty = computed<boolean>(
   () => !catalogStore.isLoading && catalogStore.entries.length === 0,
 );
-
-/** Componente dedicado del tipo, o `undefined` si toca el editor JSON. */
-const configComponentFor = (nodeType: NodeType) => nodeConfigRegistry[nodeType];
 
 /**
  * Deriva un `nodeId` libre a partir del codigo del tipo.
@@ -148,94 +135,6 @@ const updateNamespace = (index: number, value: string): void => {
   );
 };
 
-/**
- * Publica los `params` que el operador escribio en el editor JSON del nodo.
- *
- * Solo se emiten si el texto PARSEA: propagar un objeto a medio escribir
- * regeneraria el grafo entero en cada pulsacion y borraria lo tecleado. Mientras
- * no parsee, el texto se conserva en `paramsText` y el nodo muestra su error.
- */
-const onParamsTextChange = (nodeId: string, value: string): void => {
-  paramsText.value = { ...paramsText.value, [nodeId]: value };
-
-  try {
-    const parsed: unknown = JSON.parse(value);
-
-    if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return;
-
-    emit('update:params', nodeId, parsed as Record<string, unknown>);
-  } catch {
-    // Silencio deliberado: el error se pinta con `paramsErrorFor`, no aqui.
-  }
-};
-
-const paramsErrorFor = (nodeId: string): string | null => {
-  const text = paramsText.value[nodeId];
-
-  if (text === undefined) return null;
-
-  try {
-    const parsed: unknown = JSON.parse(text);
-
-    return typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)
-      ? null
-      : 'Los params deben ser un objeto JSON.';
-  } catch (error) {
-    return error instanceof Error ? error.message : 'JSON invalido.';
-  }
-};
-
-const paramsTextFor = (step: AssemblerStep): string =>
-  paramsText.value[step.nodeId] ?? JSON.stringify(step.params, null, 2);
-
-/**
- * Recoge los `params` del configurador dedicado y los sube al anfitrion.
- *
- * El anfitrion PREGUNTA al store del nodo con `toNodeParams()` en vez de
- * inspeccionar su config (§3.1). Hace falta un disparo explicito porque los
- * componentes de nodo no emiten cambios: escriben en su propio store, que es su
- * unica salida.
- */
-const syncFromNodeStore = (step: AssemblerStep): void => {
-  const store = resolveNodeStore(step.nodeType, step.nodeId);
-
-  if (store === null) return;
-
-  emit('update:params', step.nodeId, store.toNodeParams());
-};
-
-/**
- * Reparte los namespaces aguas arriba a cada store con configurador.
- *
- * Es el mismo contrato que cumple el asistente: el mapeador necesita saber que
- * namespaces existen ANTES de que el operador abra su formulario, o su primera
- * validacion se haria contra una lista vacia.
- */
-const syncUpstreamNamespaces = (): void => {
-  props.modelValue.forEach((step, index) => {
-    resolveNodeStore(step.nodeType, step.nodeId)?.setAvailableUpstreamNamespaces?.(
-      props.modelValue.slice(0, index).map((previous) => previous.outputNamespace),
-    );
-  });
-};
-
-// Hidrata los stores de nodo con lo que ya traiga la secuencia (edicion de una
-// plantilla existente) y mantiene al dia el contrato aguas arriba.
-watch(
-  () => props.modelValue,
-  (steps) => {
-    steps.forEach((step) => {
-      resolveNodeStore(step.nodeType, step.nodeId)?.hydrateFromNode({
-        outputNamespace: step.outputNamespace,
-        params: step.params,
-      });
-    });
-
-    syncUpstreamNamespaces();
-  },
-  { immediate: true, deep: true },
-);
-
 onMounted(async () => {
   try {
     await catalogStore.fetchCatalog();
@@ -311,107 +210,21 @@ onMounted(async () => {
     </p>
 
     <q-list v-else bordered class="pd-sequence-list">
-      <q-expansion-item
+      <!-- Cada nodo es un bloque ESTRUCTURAL: orden, namespace y params base.
+           Los formularios de configuracion viven solo en el asistente, donde el
+           flujo concreto si necesita credenciales y parametros de operacion. -->
+      <TemplateNodeCard
         v-for="(step, index) in props.modelValue"
         :key="step.nodeId"
-        class="pd-sequence-item"
-        expand-separator
-        @show="syncFromNodeStore(step)"
-        @hide="syncFromNodeStore(step)"
-      >
-        <template #header>
-          <q-item-section avatar>
-            <q-badge class="pd-badge">{{ index + 1 }}</q-badge>
-          </q-item-section>
-
-          <q-item-section>
-            <q-item-label class="pd-mono">{{ step.nodeId }}</q-item-label>
-            <q-item-label caption class="pd-mono pd-sequence-namespace">
-              {{ step.outputNamespace }}
-            </q-item-label>
-          </q-item-section>
-
-          <q-item-section side>
-            <div class="row no-wrap q-gutter-xs">
-              <q-btn
-                class="pd-btn-icon"
-                outline
-                dense
-                size="sm"
-                icon="arrow_upward"
-                :disable="index === 0"
-                :aria-label="`Subir ${step.nodeId}`"
-                @click.stop="moveNode(index, -1)"
-              />
-              <q-btn
-                class="pd-btn-icon"
-                outline
-                dense
-                size="sm"
-                icon="arrow_downward"
-                :disable="index === props.modelValue.length - 1"
-                :aria-label="`Bajar ${step.nodeId}`"
-                @click.stop="moveNode(index, 1)"
-              />
-              <q-btn
-                class="pd-btn-icon pd-btn-icon--danger"
-                outline
-                dense
-                size="sm"
-                icon="close"
-                :aria-label="`Quitar ${step.nodeId}`"
-                @click.stop="removeNode(index)"
-              />
-            </div>
-          </q-item-section>
-        </template>
-
-        <div class="pd-sequence-body q-pa-md">
-          <label class="pd-label" :for="`namespace-${step.nodeId}`">
-            Namespace de salida<span class="pd-required">*</span>
-          </label>
-          <q-input
-            :id="`namespace-${step.nodeId}`"
-            :model-value="step.outputNamespace"
-            outlined
-            dense
-            class="q-mt-xs q-mb-md pd-mono"
-            maxlength="50"
-            :rules="[
-              (val: string) => /^[a-z0-9_]+$/.test(val) || 'Solo minusculas, digitos y guion bajo',
-            ]"
-            @update:model-value="updateNamespace(index, String($event ?? ''))"
-          />
-
-          <!-- Resolucion polimorfica (§3.1): el tipo elige el componente, sin un
-               solo v-if por nodeType. Los tipos aun sin configurador caen al
-               editor JSON del else. -->
-          <component
-            :is="configComponentFor(step.nodeType)"
-            v-if="configComponentFor(step.nodeType)"
-            :node-id="step.nodeId"
-            @update:model-value="syncFromNodeStore(step)"
-          />
-
-          <div v-else class="pd-sequence-json">
-            <div class="row items-center justify-between q-mb-xs">
-              <span class="pd-label">Parametros (JSON)</span>
-              <span v-if="paramsErrorFor(step.nodeId)" class="pd-mono pd-sequence-error">
-                {{ paramsErrorFor(step.nodeId) }}
-              </span>
-            </div>
-            <p class="pd-subtitle q-mt-none q-mb-sm">
-              Este tipo de nodo todavia no tiene formulario dedicado; sus `params` se editan
-              directamente.
-            </p>
-            <JsonPipelinePreview
-              :model-value="paramsTextFor(step)"
-              :readonly="false"
-              @update:model-value="onParamsTextChange(step.nodeId, $event)"
-            />
-          </div>
-        </div>
-      </q-expansion-item>
+        :step="step"
+        :position="index + 1"
+        :is-first="index === 0"
+        :is-last="index === props.modelValue.length - 1"
+        @move="moveNode(index, $event)"
+        @remove="removeNode(index)"
+        @update:namespace="updateNamespace(index, $event)"
+        @update:params="emit('update:params', step.nodeId, $event)"
+      />
     </q-list>
   </section>
 </template>
@@ -425,26 +238,6 @@ onMounted(async () => {
 
 .pd-sequence-item + .pd-sequence-item {
   border-top: 1px solid var(--pd-border);
-}
-
-.pd-sequence-namespace {
-  color: var(--pd-text-secondary);
-}
-
-.pd-sequence-body {
-  background: var(--pd-card-bg);
-}
-
-// Altura acotada: el editor de `params` vive dentro de una columna que ya
-// scrollea, asi que sin un techo cada nodo desplegado empujaria a los demas
-// fuera de la vista.
-.pd-sequence-json :deep(.pd-json-preview) {
-  height: 220px;
-}
-
-.pd-sequence-error {
-  color: var(--pd-negative);
-  font-size: 11.5px;
 }
 
 :deep(.q-field--outlined .q-field__control) {

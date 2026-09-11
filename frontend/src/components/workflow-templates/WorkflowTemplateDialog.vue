@@ -145,8 +145,9 @@ const onSubmit = async (): Promise<void> => {
           {{ isEditing ? 'Editar plantilla de flujo' : 'Nueva plantilla de flujo' }}
         </div>
         <p class="pd-subtitle q-mt-xs q-mb-none">
-          La topologia base de la que partiran los flujos. El servidor valida el grafo completo
-          —forma, tipos e integridad— antes de guardarlo.
+          Aqui se define la TOPOLOGIA: que nodos intervienen y en que orden. Los parametros de
+          operacion —credenciales, programaciones, plantillas— se piden despues, en el asistente,
+          al crear cada flujo concreto. El servidor valida el grafo completo antes de guardarlo.
         </p>
       </q-card-section>
 
@@ -277,6 +278,14 @@ const onSubmit = async (): Promise<void> => {
             label="Cancelar"
             @click="emit('update:modelValue', false)"
           />
+          <!-- Motivo del bloqueo junto al boton: sin esto, un borrador sin
+               nodos dejaba el boton apagado sin decir que le faltaba. -->
+          <span
+            v-if="templatesStore.schemaNodeCount === 0 && templatesStore.schemaSyntaxError === null"
+            class="pd-subtitle pd-save-hint"
+          >
+            Anade al menos un nodo para poder guardar.
+          </span>
           <q-btn
             class="pd-btn-primary"
             unelevated
@@ -294,6 +303,11 @@ const onSubmit = async (): Promise<void> => {
 </template>
 
 <style scoped lang="scss">
+.pd-save-hint {
+  max-width: 280px;
+  text-align: right;
+}
+
 // Cadena flex: cabecera y acciones a tamano natural, el cuerpo se queda el resto.
 //
 // `min-height: 0` en CADA eslabon es lo que decide si esto funciona: un item

@@ -34,23 +34,24 @@ export interface WorkflowTemplateDraft {
   active: boolean;
 }
 
-/** Esqueleto que el editor ofrece al crear, para no arrancar de una hoja vacia. */
+/**
+ * Esqueleto que el editor ofrece al crear.
+ *
+ * SIN nodos a proposito. Antes traia un `trigger_imap` de muestra, y eso era
+ * incoherente con un constructor topologico: el operador veia en la secuencia
+ * una tarjeta que no habia anadido, y la guarda de "al menos un nodo" no se
+ * activaba nunca en un alta porque el esqueleto ya cumplia.
+ *
+ * `assemblePipelineSchema` contempla la secuencia vacia, asi que anadir el
+ * primer nodo regenera el documento con su `entrypoint` correcto.
+ */
 const BLANK_SCHEMA_TEXT = JSON.stringify(
   {
     flowId: 'plantilla-nueva',
     name: 'Plantilla nueva',
     version: '1.0.0',
-    entrypoint: 'trigger_imap',
-    nodes: {
-      trigger_imap: {
-        nodeId: 'trigger_imap',
-        nodeType: 'TRIGGER_IMAP',
-        outputNamespace: 'raw_email',
-        nextStep: null,
-        onErrorStep: null,
-        params: {},
-      },
-    },
+    entrypoint: '',
+    nodes: {},
   },
   null,
   2,
@@ -114,8 +115,49 @@ export const useWorkflowTemplatesStore = defineStore('workflowTemplates', () => 
     }
   });
 
+  /**
+   * Nodos del documento vigente, o 0 si no es un grafo legible.
+   *
+   * Se cuenta sobre el TEXTO y no sobre `sequence`: el editor JSON de la derecha
+   * es editable a mano y su sincronizacion con la secuencia es de una sola
+   * direccion, asi que `sequence` puede quedar desfasada mientras el documento
+   * que se va a enviar ya tiene nodos. Se cuenta lo que se envia.
+   */
+  const schemaNodeCount = computed<number>(() => {
+    try {
+      const parsed: unknown = JSON.parse(activeDraft.value.schemaText);
+
+      if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+        return 0;
+      }
+
+      const { nodes } = parsed as { nodes?: unknown };
+
+      return typeof nodes === 'object' && nodes !== null && !Array.isArray(nodes)
+        ? Object.keys(nodes).length
+        : 0;
+    } catch {
+      return 0;
+    }
+  });
+
+  /**
+   * Condiciones minimas para intentar el guardado.
+   *
+   * Las tres son de FORMA, no de negocio: un nombre, un documento parseable y al
+   * menos un nodo. La configuracion de cada nodo no se juzga aqui —una plantilla
+   * es una topologia— y de eso se encarga el asistente al instanciar el flujo.
+   *
+   * La guarda de sintaxis se conserva pese a que `schemaNodeCount` ya la implica:
+   * sin ella, un JSON roto dejaria el boton habilitado para que `saveDraft`
+   * lanzase despues, cambiando un boton deshabilitado con motivo por un aviso de
+   * error. Explicita se lee mejor de lo que cuesta.
+   */
   const isDraftValid = computed<boolean>(
-    () => activeDraft.value.name.trim().length > 0 && schemaSyntaxError.value === null,
+    () =>
+      activeDraft.value.name.trim().length > 0 &&
+      schemaSyntaxError.value === null &&
+      schemaNodeCount.value > 0,
   );
 
   /**
@@ -346,6 +388,7 @@ export const useWorkflowTemplatesStore = defineStore('workflowTemplates', () => 
     activeDraft,
     activeTemplates,
     schemaSyntaxError,
+    schemaNodeCount,
     isDraftValid,
     sequence,
     initDraft,
