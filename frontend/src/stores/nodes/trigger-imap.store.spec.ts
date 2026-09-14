@@ -248,25 +248,72 @@ describe('useTriggerImapStore · configuracion del nodo TRIGGER_IMAP', () => {
       await store.testConnection();
 
       // 3. Assert: un fallo de credenciales llega como 200, asi que hay que
-      //    mirar el `success` del cuerpo y no solo el status. La prueba fallida
-      //    NO bloquea el paso —los campos siguen bien formados— pero deja aviso.
+      //    mirar el `success` del cuerpo y no solo el status. Con la prueba
+      //    fallida y sin reconocimiento, el paso NO avanza: los campos estan
+      //    bien formados, pero se sabe que no sirven.
       expect(store.connectionVerified).toBe(false);
       expect(store.lastCheckResult?.error?.level).toBe('GRAVE');
-      expect(store.isConfigValid).toBe(true);
+      expect(store.isConfigValid).toBe(false);
       expect(store.configWarnings).toHaveLength(1);
     });
 
-    it('3.4 deberia permitir guardar sin probar, dejando aviso', () => {
+    it('3.4 no deberia dar por valido el paso con los campos completos pero sin probar', () => {
       // 1. Arrange & 2. Act
       const store = useTriggerImapStore(NODE_ID);
       store.patchConfig(VALID_CONFIG);
 
-      // 3. Assert: exigir la prueba hacia imposible crear un flujo IMAP en un
-      //    entorno sin servidor alcanzable. La advertencia sigue viva; lo que
-      //    cambia es que decide el operador y no el formulario.
+      // 3. Assert: el Poka-Yoke del paso. Unas credenciales con formato correcto
+      //    pero equivocadas no fallarian hasta el primer sondeo en produccion.
       expect(store.hasValidFields).toBe(true);
+      expect(store.isConfigValid).toBe(false);
+      expect(store.configWarnings).toEqual([UNVERIFIED_CONNECTION_WARNING]);
+    });
+
+    it('3.4.1 deberia desbloquear el paso cuando el operador declara que no comprueba', () => {
+      // 1. Arrange: la valvula de escape para un entorno sin servidor IMAP
+      //    alcanzable, que es lo que hacia inservible el bloqueo sin salida.
+      const store = useTriggerImapStore(NODE_ID);
+      store.patchConfig(VALID_CONFIG);
+
+      // 2. Act
+      store.skipCheckAcknowledged = true;
+
+      // 3. Assert: avanza, pero el aviso NO desaparece: el dialogo de guardado
+      //    sigue pidiendo confirmacion explicita.
       expect(store.isConfigValid).toBe(true);
       expect(store.configWarnings).toEqual([UNVERIFIED_CONNECTION_WARNING]);
+    });
+
+    it('3.4.2 deberia sobrevivir el reconocimiento a un cambio de credenciales', () => {
+      // 1. Arrange
+      const store = useTriggerImapStore(NODE_ID);
+      store.patchConfig(VALID_CONFIG);
+      store.skipCheckAcknowledged = true;
+
+      // 2. Act: corregir el host no cambia que el entorno siga sin servidor.
+      store.patchConfig({ host: 'otro.imap.unuware.com' });
+
+      // 3. Assert: `patchConfig` invalida la VERIFICACION, que es una afirmacion
+      //    sobre unos valores concretos, pero no el RECONOCIMIENTO, que es una
+      //    postura sobre el entorno. Invalidarlo obligaria a remarcarlo en cada
+      //    pulsacion de tecla.
+      expect(store.connectionVerified).toBe(false);
+      expect(store.skipCheckAcknowledged).toBe(true);
+      expect(store.isConfigValid).toBe(true);
+    });
+
+    it('3.4.3 deberia limpiar el reconocimiento en resetConfig', () => {
+      // 1. Arrange
+      const store = useTriggerImapStore(NODE_ID);
+      store.patchConfig(VALID_CONFIG);
+      store.skipCheckAcknowledged = true;
+
+      // 2. Act: esto no es corregir un campo, es empezar un nodo distinto.
+      store.resetConfig();
+
+      // 3. Assert
+      expect(store.skipCheckAcknowledged).toBe(false);
+      expect(store.isConfigValid).toBe(false);
     });
 
     it('3.5 deberia apagar isLoading aunque el servicio lance', async () => {

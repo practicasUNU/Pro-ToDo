@@ -127,6 +127,23 @@ const triggerImapSetup = () => {
    */
   const connectionVerified = ref(false);
 
+  /**
+   * El operador declara a sabiendas que configura sin comprobar el buzon.
+   *
+   * Es la valvula de escape del Poka-Yoke, y NO es lo mismo que
+   * `connectionVerified`: aquel es una afirmacion sobre unos valores concretos
+   * —por eso `patchConfig` lo invalida en cuanto cambia uno—, y este es una
+   * postura sobre el entorno ("aqui no hay servidor de correo alcanzable"), que
+   * no deja de ser cierta porque se corrija una letra del host.
+   *
+   * De ahi que `patchConfig` NO lo toque: invalidarlo en cada pulsacion
+   * obligaria a volver a marcarlo tras cada tecla, y un Poka-Yoke que castiga
+   * escribir se acaba esquivando por otra via. Reconocer sigue sin ocultar nada:
+   * la insignia sigue diciendo "Sin comprobar" y `configWarnings` sigue llevando
+   * el aviso al dialogo de confirmacion del guardado.
+   */
+  const skipCheckAcknowledged = ref(false);
+
   const isLoading = ref(false);
 
   /** Ultimo resultado devuelto por el backend, para que la vista lo muestre. */
@@ -147,19 +164,30 @@ const triggerImapSetup = () => {
   );
 
   /**
-   * Contrato uniforme del nodo: campos completos y bien formados.
+   * Contrato uniforme del nodo: campos bien formados Y conexion resuelta.
    *
-   * Hasta ahora exigia ADEMAS que la conexion se hubiera probado con exito. Esa
-   * regla convertia en imposible crear un flujo IMAP en cualquier entorno sin
-   * servidor de correo alcanzable —desarrollo, demo, red cortada—: el
-   * Poka-Yoke dejaba de proteger de un error y pasaba a impedir el trabajo, sin
-   * ninguna via de escape.
+   * "Resuelta" admite dos vias, y esa es la clave. Unas credenciales con formato
+   * correcto pero equivocadas no fallarian hasta que el sondeo disparase el
+   * flujo en produccion, con el flujo PAUSADO y un GRAVE en la trazabilidad;
+   * obligar a probar traslada ese descubrimiento al momento de configurar, que
+   * es para lo que existe este paso.
    *
-   * La garantia no se pierde, se traslada: la conexion sin probar viaja ahora
-   * como `configWarnings` y el asistente pide confirmacion explicita antes de
-   * persistir. Sigue siendo una decision consciente del operador, pero suya.
+   * Pero exigir SOLO la prueba ya se intento y hubo que retirarlo: hacia
+   * imposible crear un flujo IMAP en cualquier entorno sin servidor de correo
+   * alcanzable —desarrollo, demo, red cortada— y sin ninguna salida, de modo que
+   * el Poka-Yoke dejaba de proteger de un error para impedir el trabajo. De ahi
+   * la segunda via: el operador puede declarar que configura sin comprobar, y
+   * entonces avanza. Lo que no puede es avanzar sin haber hecho ninguna de las
+   * dos cosas, que era el agujero real.
+   *
+   * La via reconocida no queda impune: `configWarnings` sigue emitiendo y el
+   * asistente pide confirmacion explicita antes de persistir.
    */
-  const isConfigValid = computed<boolean>(() => hasValidFields.value);
+  const isConfigValid = computed<boolean>(
+    () =>
+      hasValidFields.value &&
+      (connectionVerified.value || skipCheckAcknowledged.value),
+  );
 
   /**
    * Aviso de credenciales sin comprobar.
@@ -308,12 +336,16 @@ const triggerImapSetup = () => {
   const resetConfig = (): void => {
     config.value = buildInitialConfig();
     connectionVerified.value = false;
+    // El reconocimiento SI se limpia aqui, a diferencia de en `patchConfig`:
+    // esto no es corregir un campo, es empezar un nodo distinto.
+    skipCheckAcknowledged.value = false;
     lastCheckResult.value = null;
   };
 
   return {
     config,
     connectionVerified,
+    skipCheckAcknowledged,
     isLoading,
     lastCheckResult,
     hasValidFields,

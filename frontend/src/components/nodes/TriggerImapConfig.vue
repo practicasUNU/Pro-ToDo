@@ -34,13 +34,22 @@ const FILTER_HINT = 'Coincidencia por subcadena. Dejalo vacio para no filtrar.';
 const UNREAD_ONLY_WARNING =
   'Con el filtro desactivado el flujo puede volver a procesar un correo ya leido en cada sondeo.';
 
+const UNTESTED_BLOCKING_HINT =
+  'Prueba la conexion para continuar. Si configuras sin servidor de correo alcanzable, marca la casilla para avanzar bajo tu responsabilidad.';
+
+const UNTESTED_ACKNOWLEDGED_HINT =
+  'Vas a guardar unas credenciales que nadie ha verificado: si son incorrectas, no fallaran hasta el primer sondeo.';
+
+const SKIP_CHECK_TOOLTIP =
+  'El paso no avanza hasta que la conexion se pruebe con exito o declares que configuras sin comprobarla.';
+
 /**
  * Estado del indicador de conexion, derivado del ultimo resultado del backend.
  *
- * El tercer estado —"sin comprobar"— es nuevo y no es cosmetico: desde que la
- * prueba dejo de ser obligatoria para avanzar, la AUSENCIA de badge significaba
- * "vas a guardar unas credenciales que nadie ha verificado", que es justo lo que
- * merece decirse en voz alta.
+ * El tercer estado —"sin comprobar"— no es cosmetico: es lo que ve el operador
+ * que avanza por la via reconocida, y decir en voz alta "vas a guardar unas
+ * credenciales que nadie ha verificado" es justamente lo que evita que esa via
+ * se convierta en la costumbre.
  */
 const connectionBadge = computed<{ label: string; classes: string } | null>(() => {
   if (store.connectionVerified) {
@@ -277,18 +286,31 @@ const onTestConnection = async (): Promise<void> => {
       </div>
     </div>
 
-    <!-- Probar la conexion ya NO es requisito para avanzar: exigirlo hacia
-         imposible crear un flujo IMAP en cualquier entorno sin servidor de
-         correo alcanzable. La garantia no se pierde, se traslada al dialogo de
-         confirmacion del guardado, donde el operador decide a sabiendas. -->
-    <div class="row items-center justify-end q-gutter-sm q-mt-md">
-      <span
-        v-if="store.hasValidFields && !store.connectionVerified"
-        class="pd-subtitle pd-test-hint pd-test-hint--warn"
+    <!-- Poka-Yoke con salida. El paso no avanza sin probar la conexion, porque
+         unas credenciales bien formadas pero equivocadas no fallarian hasta el
+         primer sondeo en produccion. Pero la exigencia SIN salida ya se intento
+         y hubo que retirarla: dejaba sin poder crear un flujo IMAP en cualquier
+         entorno sin servidor alcanzable. De ahi la casilla: no es un atajo, es
+         una declaracion explicita que ademas sigue viajando al dialogo de
+         confirmacion del guardado. -->
+    <div v-if="store.hasValidFields && !store.connectionVerified" class="q-mt-md">
+      <p
+        class="pd-subtitle q-mb-sm"
+        :class="
+          store.skipCheckAcknowledged ? 'pd-test-hint--warn' : 'pd-test-hint--blocking'
+        "
       >
-        Aun no has probado la conexion. Puedes guardar, pero unas credenciales
-        equivocadas no fallaran hasta el primer sondeo.
-      </span>
+        {{ store.skipCheckAcknowledged ? UNTESTED_ACKNOWLEDGED_HINT : UNTESTED_BLOCKING_HINT }}
+      </p>
+      <q-checkbox
+        v-model="store.skipCheckAcknowledged"
+        dense
+        class="pd-skip-check"
+        label="Configurar sin comprobar la conexion"
+      />
+    </div>
+
+    <div class="row items-center justify-end q-gutter-sm q-mt-md">
       <q-btn
         class="pd-btn-primary"
         unelevated
@@ -298,7 +320,11 @@ const onTestConnection = async (): Promise<void> => {
         :disable="!store.hasValidFields"
         :loading="store.isLoading"
         @click="onTestConnection"
-      />
+      >
+        <q-tooltip v-if="!store.connectionVerified">
+          {{ SKIP_CHECK_TOOLTIP }}
+        </q-tooltip>
+      </q-btn>
     </div>
   </section>
 </template>
@@ -308,11 +334,6 @@ const onTestConnection = async (): Promise<void> => {
   color: var(--pd-primary);
 }
 
-.pd-test-hint {
-  max-width: 320px;
-  text-align: right;
-}
-
 .pd-check-badge--warn {
   background: var(--pd-warning);
   color: var(--pd-shell-bg);
@@ -320,6 +341,14 @@ const onTestConnection = async (): Promise<void> => {
 
 .pd-test-hint--warn {
   color: var(--pd-warning);
+}
+
+.pd-test-hint--blocking {
+  color: var(--pd-negative);
+}
+
+.pd-skip-check {
+  color: var(--pd-text-secondary);
 }
 
 .pd-check-badge--ok {
