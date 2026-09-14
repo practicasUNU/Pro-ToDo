@@ -14,9 +14,10 @@ import {
   TRIGGER_NAMESPACE,
 } from '@core/fsm/services/fsm-engine.service';
 import { ExecutionState } from '@core/fsm/types/fsm.enums';
+import { NodeLogStatus } from '@modules/logs/entities/log-nodo.entity';
 import { NodeType } from '@core/fsm/types/pipeline-schema.types';
 
-import type { HybridLoggerService } from '@common/services/hybrid-logger.service';
+import type { HybridLoggerService } from '@modules/logs/services/hybrid-logger.service';
 import type { PipelineSchemaDto } from '@core/fsm/dto/pipeline-schema.dto';
 import type { FsmExecution } from '@core/fsm/entities/fsm-execution.entity';
 import type {
@@ -170,11 +171,15 @@ describe('FsmEngineService (PROT-09)', () => {
    * los datos correctos y persista la ruta que devuelve—, no el formato del
    * archivo, que se prueba en el spec del propio servicio.
    */
-  let hybridLogger: { logCatastrophicFailure: jest.Mock };
+  let hybridLogger: {
+    logCatastrophicFailure: jest.Mock;
+    logNodeExecution: jest.Mock;
+  };
 
   beforeEach(() => {
     hybridLogger = {
       logCatastrophicFailure: jest.fn().mockReturnValue(LOG_PATH),
+      logNodeExecution: jest.fn().mockResolvedValue(undefined),
     };
     factory = new NodeStrategyFactory();
     jest.spyOn(factory['logger'], 'log').mockImplementation(() => undefined);
@@ -366,6 +371,195 @@ describe('FsmEngineService (PROT-09)', () => {
       // 3. Assert
       expect(executeC).toHaveBeenCalledTimes(1);
       expect(result.currentState).toBe(ExecutionState.EXITOSO);
+    });
+  });
+
+  describe('1.2 Traza por nodo (PROT-18.1)', () => {
+    it('deberia registrar una traza por cada nodo recorrido', async () => {
+      // 1. Arrange
+      const execution = buildExecution();
+      const { repo } = buildRepository(execution);
+      const execute = jest.fn().mockResolvedValue({ success: true });
+
+      factory.registerStrategy(buildStrategy(NodeType.TRIGGER_IMAP, execute));
+      factory.registerStrategy(buildStrategy(NodeType.PROCESADOR_IA, execute));
+      factory.registerStrategy(buildStrategy(NodeType.DESTINO_HTTP, execute));
+
+      // 2. Act
+      await buildEngine(repo).executeWorkflow(
+        EXECUTION_ID,
+        buildLinearSchema(),
+      );
+
+      // 3. Assert
+      expect(hybridLogger.logNodeExecution).toHaveBeenCalledTimes(3);
+      expect(hybridLogger.logNodeExecution).toHaveBeenCalledWith(
+        expect.objectContaining({
+          executionId: EXECUTION_ID,
+          nodeId: 'nodo_a',
+          nodeType: NodeType.TRIGGER_IMAP,
+          status: NodeLogStatus.OK,
+        }),
+      );
+
+      const [firstTrace] = hybridLogger.logNodeExecution.mock.calls[0] as [
+        { durationMs: number },
+      ];
+      expect(typeof firstTrace.durationMs).toBe('number');
+    });
+
+    it('deberia registrar UNA traza por intento, no una por nodo', async () => {
+      // 1. Arrange: con una sola fila final los reintentos fallidos
+      //    desapareceran, y son el dato que explica la incidencia.
+      const execution = buildExecution();
+      const { repo } = buildRepository(execution);
+      const schema = buildLinearSchema();
+      schema.nodes.nodo_a.retryPolicy = { maxRetries: 2 };
+
+      const executeA = jest.fn().mockResolvedValue(failure('GRAVE'));
+      factory.registerStrategy(buildStrategy(NodeType.TRIGGER_IMAP, executeA));
+
+      // 2. Act
+      await buildEngine(repo).executeWorkflow(EXECUTION_ID, schema);
+
+      // 3. Assert: intento inicial + 2 reintentos.
+      expect(executeA).toHaveBeenCalledTimes(3);
+      expect(hybridLogger.logNodeExecution).toHaveBeenCalledTimes(3);
+    });
+
+    it('deberia marcar ADVERTENCIA y no ERROR ante un fallo LEVE', async () => {
+      // 1. Arrange: quien lea la traza tiene que distinguir "fallo y hay que
+      //    mirarlo" de "no pudo y volvera a intentarlo solo".
+      const execution = buildExecution();
+      const { repo } = buildRepository(execution);
+
+      factory.registerStrategy(
+        buildStrategy(
+          NodeType.TRIGGER_IMAP,
+          jest.fn().mockResolvedValue(failure('LEVE')),
+        ),
+      );
+
+      // 2. Act
+      await buildEngine(repo).executeWorkflow(
+        EXECUTION_ID,
+        buildLinearSchema(),
+      );
+
+      // 3. Assert
+      expect(hybridLogger.logNodeExecution).toHaveBeenCalledWith(
+        expect.objectContaining({
+          status: NodeLogStatus.ADVERTENCIA,
+          severity: 'LEVE',
+          errorCode: TEST_ERROR_CODE,
+        }),
+      );
+    });
+
+    it('deberia usar el customMessage de la ruta que atrapa ese codigo', async () => {
+      // 1. Arrange: el mensaje de la estrategia esta escrito para quien depura;
+      //    el customMessage explica por que importa el fallo en ESTE flujo.
+      const execution = buildExecution();
+      const { repo } = buildRepository(execution);
+      const schema = buildLinearSchema();
+      schema.nodes.nodo_a.onErrorStep = {
+        targetNode: 'nodo_c',
+        catchErrors: [TEST_ERROR_CODE],
+        customMessage:
+          'El buzon institucional no responde; se avisa a soporte.',
+      };
+
+      factory.registerStrategy(
+        buildStrategy(
+          NodeType.TRIGGER_IMAP,
+          jest.fn().mockResolvedValue(failure('GRAVE', 'fallo tecnico crudo')),
+        ),
+      );
+      factory.registerStrategy(
+        buildStrategy(
+          NodeType.DESTINO_HTTP,
+          jest.fn().mockResolvedValue({ success: true }),
+        ),
+      );
+
+      // 2. Act
+      await buildEngine(repo).executeWorkflow(EXECUTION_ID, schema);
+
+      // 3. Assert
+      expect(hybridLogger.logNodeExecution).toHaveBeenCalledWith(
+        expect.objectContaining({
+          nodeId: 'nodo_a',
+          message: 'El buzon institucional no responde; se avisa a soporte.',
+        }),
+      );
+    });
+
+    it('NO deberia usar el customMessage de una ruta que no atrapa ese codigo', async () => {
+      // 1. Arrange: sustituir el mensaje real por uno pensado para otro fallo
+      //    seria peor que no tener mensaje personalizado.
+      const execution = buildExecution();
+      const { repo } = buildRepository(execution);
+      const schema = buildLinearSchema();
+      schema.nodes.nodo_a.onErrorStep = {
+        targetNode: 'nodo_c',
+        catchErrors: [OTHER_ERROR_CODE],
+        customMessage: 'no deberia aparecer',
+      };
+
+      factory.registerStrategy(
+        buildStrategy(
+          NodeType.TRIGGER_IMAP,
+          jest.fn().mockResolvedValue(failure('GRAVE', 'fallo tecnico crudo')),
+        ),
+      );
+
+      // 2. Act
+      await buildEngine(repo).executeWorkflow(EXECUTION_ID, schema);
+
+      // 3. Assert
+      expect(hybridLogger.logNodeExecution).toHaveBeenCalledWith(
+        expect.objectContaining({ message: 'fallo tecnico crudo' }),
+      );
+    });
+
+    it('no deberia tumbar la ejecucion si el registro falla', async () => {
+      // 1. Arrange: restriccion explicita del contrato. El servicio no lanza,
+      //    pero esta prueba fija que el motor tampoco depende de ello.
+      const execution = buildExecution();
+      const { repo } = buildRepository(execution);
+      hybridLogger.logNodeExecution.mockRejectedValue(
+        new Error('connection terminated'),
+      );
+
+      factory.registerStrategy(
+        buildStrategy(
+          NodeType.TRIGGER_IMAP,
+          jest.fn().mockResolvedValue({ success: true }),
+        ),
+      );
+      factory.registerStrategy(
+        buildStrategy(
+          NodeType.PROCESADOR_IA,
+          jest.fn().mockResolvedValue({ success: true }),
+        ),
+      );
+      factory.registerStrategy(
+        buildStrategy(
+          NodeType.DESTINO_HTTP,
+          jest.fn().mockResolvedValue({ success: true }),
+        ),
+      );
+
+      // 2. Act
+      const result = await buildEngine(repo).executeWorkflow(
+        EXECUTION_ID,
+        buildLinearSchema(),
+      );
+
+      // 3. Assert: el flujo recorre sus tres nodos y termina bien pese a que
+      //    NINGUNA traza se pudo registrar.
+      expect(result.currentState).toBe(ExecutionState.EXITOSO);
+      expect(hybridLogger.logNodeExecution).toHaveBeenCalledTimes(3);
     });
   });
 

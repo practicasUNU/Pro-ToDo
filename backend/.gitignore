@@ -4,7 +4,10 @@
 /build
 
 # Logs
-logs
+# Anclado con `/`: sin la barra, el patron ignora CUALQUIER directorio llamado
+# `logs` a cualquier profundidad, y eso se tragaba `src/modules/logs/` entero
+# —el modulo de trazabilidad— dejandolo fuera del repositorio sin avisar.
+/logs
 *.log
 npm-debug.log*
 pnpm-debug.log*

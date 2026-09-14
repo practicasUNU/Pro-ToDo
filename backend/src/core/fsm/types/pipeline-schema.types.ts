@@ -130,6 +130,15 @@ export interface SelectiveErrorFallback {
   readonly targetNode: string;
   /** Codigos que esta ruta atrapa. Vacio equivale a no atrapar nada. */
   readonly catchErrors: readonly string[];
+  /**
+   * Descripcion que sustituye al mensaje del fallo al registrar la traza.
+   *
+   * Existe porque el mensaje de una estrategia esta escrito para quien depura
+   * —"Fallo la lectura del buzon X en host Y: ETIMEDOUT"— y quien lee la
+   * trazabilidad suele necesitar otra cosa: por que importa ese fallo en ESTE
+   * flujo. No sustituye al `code`, que sigue siendo lo que identifica el fallo.
+   */
+  readonly customMessage?: string;
 }
 
 /** Configuracion de un nodo dentro del grafo del pipeline. */
@@ -156,7 +165,7 @@ export interface PipelineNodeConfig {
    *   `catchErrors`. Ante cualquier otro codigo el flujo se detiene como si no
    *   hubiera ruta, que es justo lo que hace util declararla.
    *
-   * Quien resuelve la forma es `resolveErrorTarget` (`pipeline-topology.util`);
+   * Quien resuelve la forma es `resolveErrorRoute` (`pipeline-topology.util`);
    * ningun consumidor debe inspeccionar la union por su cuenta.
    */
   onErrorStep: string | SelectiveErrorFallback | null;

@@ -33,7 +33,10 @@ frontend/.env
 # =============================================================================
 # Logs físicos y Depuración
 # =============================================================================
-logs/
+# `backend/logs/` anclado, y NO un `logs/` suelto: sin la ruta, el patron ignora
+# cualquier directorio llamado `logs` a cualquier profundidad, y eso se tragaba
+# `backend/src/modules/logs/` entero —el modulo de trazabilidad— dejandolo fuera
+# del repositorio sin avisar.
 backend/logs/
 *.log
 npm-debug.log*

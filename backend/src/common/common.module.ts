@@ -3,18 +3,17 @@ import { Global, Module } from '@nestjs/common';
 import { RedLocalMiddleware } from '@common/middlewares/red-local.middleware';
 import { EmailService } from '@common/services/email.service';
 import { FlowPollingCoordinator } from '@common/services/flow-polling.coordinator';
-import { HybridLoggerService } from '@common/services/hybrid-logger.service';
 import { IpAccessService } from '@common/services/ip-access.service';
 import { AllowedIpsModule } from '@modules/security/allowed-ips/allowed-ips.module';
 
 /**
  * Infraestructura transversal de seguridad perimetral (PROT-05).
  *
- * Aloja tambien `HybridLoggerService`, el volcado forense del motor FSM: es
- * transversal por naturaleza —cualquier capa puede necesitar dejar constancia de
- * un fallo catastrofico— y no pertenece al dominio de ningun modulo concreto.
+ * `HybridLoggerService` vivia aqui y se mudo a `LogsModule` al ganar un
+ * repositorio propio: una entidad de dominio en la capa comun obligaria a este
+ * modulo a declarar el `forFeature` de una tabla que solo usa aquel servicio.
  *
- * Y por ese mismo criterio aloja `FlowPollingCoordinator`, el puerto que permite
+ * Aloja en cambio `FlowPollingCoordinator`, el puerto que permite
  * a `WorkflowsService` cortar el sondeo IMAP de un flujo sin inyectar
  * `ImapPollingService`: `NodesModule` ya importa `WorkflowsModule`, asi que la
  * dependencia directa cerraria un ciclo de modulos. Que este modulo sea global
@@ -32,14 +31,12 @@ import { AllowedIpsModule } from '@modules/security/allowed-ips/allowed-ips.modu
     IpAccessService,
     RedLocalMiddleware,
     EmailService,
-    HybridLoggerService,
     FlowPollingCoordinator,
   ],
   exports: [
     IpAccessService,
     RedLocalMiddleware,
     EmailService,
-    HybridLoggerService,
     FlowPollingCoordinator,
   ],
 })

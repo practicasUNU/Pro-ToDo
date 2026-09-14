@@ -186,6 +186,19 @@ CREATE TABLE logs_nodo (
     -- qué nodo estaba.
     id_nodo VARCHAR(50),
     estado_nodo enum_estado_nodo NOT NULL,
+    -- Tipo del nodo ejecutado. VARCHAR y no enum: el catalogo de tipos vive en
+    -- la tabla `nodos`, y duplicarlo aqui como enum obligaria a una migracion
+    -- por cada tipo nuevo.
+    tipo_nodo VARCHAR(50),
+    -- Severidad del fallo. Nula cuando el nodo termino con exito: rellenarla con
+    -- un valor de relleno seria inventarse un dato. Reutiliza
+    -- `enum_nivel_error`, que ya coincide 1:1 con `NodeErrorSeverity`.
+    nivel_severidad enum_nivel_error,
+    -- Codigo estable del fallo (`ERR_IMAP_TIMEOUT`...). Va aparte del mensaje
+    -- porque es lo que compara el `catchErrors` de `onErrorStep`: el mensaje se
+    -- puede reescribir, el codigo es contrato.
+    codigo_error VARCHAR(100),
+    mensaje TEXT,
     codigo_respuesta_http SMALLINT,
     tiempo_ejecucion_ms INTEGER,
     ruta_archivo_log VARCHAR(255),

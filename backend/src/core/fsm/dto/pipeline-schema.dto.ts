@@ -65,18 +65,26 @@ class IsErrorRouteConstraint implements ValidatorConstraintInterface {
 
     const route = value as Partial<SelectiveErrorFallback>;
 
+    // `customMessage` es opcional, pero si viene tiene que ser util: una cadena
+    // vacia sustituiria el mensaje real por nada, que es peor que no declararla.
+    const hasValidCustomMessage =
+      route.customMessage === undefined ||
+      (typeof route.customMessage === 'string' &&
+        route.customMessage.trim() !== '');
+
     return (
       typeof route.targetNode === 'string' &&
       route.targetNode.trim() !== '' &&
       Array.isArray(route.catchErrors) &&
       route.catchErrors.every(
         (code) => typeof code === 'string' && code.trim() !== '',
-      )
+      ) &&
+      hasValidCustomMessage
     );
   }
 
   public defaultMessage(args: ValidationArguments): string {
-    return `${args.property} debe ser null, el nodeId destino, o un objeto { targetNode, catchErrors[] }.`;
+    return `${args.property} debe ser null, el nodeId destino, o un objeto { targetNode, catchErrors[], customMessage? }.`;
   }
 }
 

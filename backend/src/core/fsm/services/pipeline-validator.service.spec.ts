@@ -220,6 +220,41 @@ describe('PipelineValidatorService (PROT-07)', () => {
       });
     });
 
+    it('deberia aceptar una ruta selectiva con customMessage', async () => {
+      // 1. Arrange
+      const schema = buildNotiwebSchema();
+      schema.nodes.nodo_ia.onErrorStep = {
+        targetNode: 'nodo_destino',
+        catchErrors: ['ERR_LLM_TIMEOUT'],
+        customMessage: 'El proveedor de IA no respondio a tiempo.',
+      };
+
+      // 2. Act
+      const result = await service.validateSchema(schema);
+
+      // 3. Assert
+      expect(result.nodes.nodo_ia.onErrorStep).toMatchObject({
+        customMessage: 'El proveedor de IA no respondio a tiempo.',
+      });
+    });
+
+    it('deberia rechazar un customMessage vacio', async () => {
+      // 1. Arrange: declararlo en blanco sustituiria el mensaje real por nada,
+      //    que es peor que no declararlo.
+      const schema = buildNotiwebSchema();
+      schema.nodes.nodo_ia.onErrorStep = {
+        targetNode: 'nodo_destino',
+        catchErrors: ['ERR_LLM_TIMEOUT'],
+        customMessage: '   ',
+      };
+
+      // 2. Act
+      const issues = await captureIssues(service, schema);
+
+      // 3. Assert
+      expect(fieldsOf(issues)).toContain('nodes.nodo_ia.onErrorStep');
+    });
+
     it('deberia rechazar una ruta selectiva cuyo targetNode no existe', async () => {
       // 1. Arrange: un destino inexistente rompe el esquema aunque su codigo no
       //    llegue a ocurrir nunca, asi que se valida el destino DECLARADO.

@@ -37,32 +37,53 @@ export const declaredErrorTarget = (route: ErrorRoute): string | null => {
   return isSelectiveFallback(route) ? route.targetNode : null;
 };
 
+/** Ruta EFECTIVA resuelta para un codigo concreto. */
+export interface ResolvedErrorRoute {
+  readonly targetNode: string;
+  /** Mensaje con el que registrar el fallo, si la ruta lo declara. */
+  readonly customMessage?: string;
+}
+
 /**
- * Nodo destino EFECTIVO para un codigo de error concreto.
+ * Ruta de recuperacion EFECTIVA para un codigo de error concreto.
  *
  * Es la pregunta del motor, que ya tiene un fallo entre manos. Devuelve `null`
  * cuando no hay ruta o cuando la ruta no atrapa ESE codigo, y en ambos casos el
  * motor debe comportarse igual: como si no hubiera ruta.
  *
+ * Devuelve la ruta y no solo su destino porque el motor necesita las dos cosas a
+ * la vez —a donde saltar y con que texto registrar el fallo— y resolverlas por
+ * separado abriria la puerta a que una consulta dijera que si y la otra que no.
+ *
  * Existe separado de `declaredErrorTarget` porque las dos preguntas son
  * distintas y confundirlas haria que el validador exigiese un codigo que aun no
  * ha ocurrido, o que el motor desviase por una ruta que no le correspondia.
  */
-export const resolveErrorTarget = (
+export const resolveErrorRoute = (
   route: ErrorRoute,
   errorCode: string,
-): string | null => {
+): ResolvedErrorRoute | null => {
   // La cadena heredada no discrimina: atrapa todo, que es su semantica de
-  // siempre y lo que mantiene ejecutables los esquemas ya guardados.
+  // siempre y lo que mantiene ejecutables los esquemas ya guardados. Tampoco
+  // puede declarar mensaje: una cadena no tiene donde ponerlo.
   if (typeof route === 'string') {
-    return route;
+    return { targetNode: route };
   }
 
   if (!isSelectiveFallback(route) || !Array.isArray(route.catchErrors)) {
     return null;
   }
 
-  return route.catchErrors.includes(errorCode) ? route.targetNode : null;
+  if (!route.catchErrors.includes(errorCode)) {
+    return null;
+  }
+
+  return {
+    targetNode: route.targetNode,
+    ...(route.customMessage !== undefined
+      ? { customMessage: route.customMessage }
+      : {}),
+  };
 };
 
 /**

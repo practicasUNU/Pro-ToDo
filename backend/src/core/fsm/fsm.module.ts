@@ -3,6 +3,7 @@ import { InjectRepository, TypeOrmModule } from '@nestjs/typeorm';
 
 import { FsmController } from '@core/fsm/controllers/fsm.controller';
 import { FsmExecution } from '@core/fsm/entities/fsm-execution.entity';
+import { LogsModule } from '@modules/logs/logs.module';
 import { NodeStrategyFactory } from '@core/fsm/factories/node-strategy.factory';
 import { FsmEngineService } from '@core/fsm/services/fsm-engine.service';
 import { PipelineValidatorService } from '@core/fsm/services/pipeline-validator.service';
@@ -19,7 +20,7 @@ import type { Repository } from 'typeorm';
  * registren sus estrategias contra la misma instancia que consume el motor.
  */
 @Module({
-  imports: [TypeOrmModule.forFeature([FsmExecution])],
+  imports: [TypeOrmModule.forFeature([FsmExecution]), LogsModule],
   controllers: [FsmController],
   providers: [PipelineValidatorService, NodeStrategyFactory, FsmEngineService],
   exports: [PipelineValidatorService, NodeStrategyFactory, FsmEngineService],

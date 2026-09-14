@@ -9,7 +9,7 @@ import { ConfigService } from '@nestjs/config';
 import { InjectRepository } from '@nestjs/typeorm';
 import { In, QueryFailedError } from 'typeorm';
 
-import { HybridLoggerService } from '@common/services/hybrid-logger.service';
+import { HybridLoggerService } from '@modules/logs/services/hybrid-logger.service';
 import { StatePayloadContext } from '@core/fsm/context/state-payload.context';
 import { FsmExecution } from '@core/fsm/entities/fsm-execution.entity';
 import { StrategyNotFoundException } from '@core/fsm/exceptions/strategy-not-found.exception';
@@ -20,7 +20,8 @@ import {
   ERR_NODE_HTTP_FAILURE,
   ERR_STRATEGY_NOT_FOUND,
 } from '@core/fsm/types/node-strategy.types';
-import { resolveErrorTarget } from '@core/fsm/utils/pipeline-topology.util';
+import { resolveErrorRoute } from '@core/fsm/utils/pipeline-topology.util';
+import { NodeLogStatus } from '@modules/logs/entities/log-nodo.entity';
 
 import type { PipelineNodeConfigDto } from '@core/fsm/dto/pipeline-schema.dto';
 import type { PipelineSchemaDto } from '@core/fsm/dto/pipeline-schema.dto';
@@ -469,7 +470,20 @@ export class FsmEngineService {
         let outcome: NodeOutcome;
 
         for (;;) {
+          const startedAt = Date.now();
+
           outcome = await this.runNode(node, context, executionId);
+
+          // La traza va DENTRO del bucle y no fuera: una fila por invocacion
+          // real de la estrategia. Con una sola fila final, los reintentos
+          // fallidos desaparecerian, y son a menudo el dato que explica la
+          // incidencia —"tardo en estabilizarse" frente a "fallo a la primera".
+          await this.logNodeOutcome(
+            executionId,
+            node,
+            outcome,
+            Date.now() - startedAt,
+          );
 
           // Corte inmediato: una estrategia que se rompio no admite reintento.
           // No se sabe que dejo a medias, asi que volver a invocarla es apostar
@@ -589,10 +603,10 @@ export class FsmEngineService {
         // severidad es solo el comportamiento por defecto. Al reves, una ruta
         // declarada para un codigo LEVE no se dispararia jamas, y el sintoma
         // —un nodo de respaldo que nunca corre— seria mudo.
-        const errorTarget = resolveErrorTarget(node.onErrorStep, errorCode);
+        const errorRoute = resolveErrorRoute(node.onErrorStep, errorCode);
 
-        if (errorTarget !== null) {
-          cursor = errorTarget;
+        if (errorRoute !== null) {
+          cursor = errorRoute.targetNode;
           context.setCursor(cursor);
 
           await this.saveCheckpoint(execution, {
@@ -756,6 +770,70 @@ export class FsmEngineService {
     }
 
     return context;
+  }
+
+  /**
+   * Registra el desenlace de una invocacion de nodo en el logger hibrido.
+   *
+   * Traduce el vocabulario del motor al de la tabla: `enum_estado_nodo` tiene
+   * tres valores y el motor maneja severidades. `ADVERTENCIA` para el LEVE no es
+   * cosmetico —es el fallo que cierra sin pausar porque se reintenta solo—, y
+   * quien lea la traza tiene que poder distinguirlo de un `ERROR` que espera a
+   * alguien.
+   *
+   * El `await` es deliberado aunque anada un viaje por nodo: el metodo no lanza
+   * nunca, asi que esperar no arriesga nada, y lanzarlo sin esperar dejaria
+   * rechazos sin manejar y filas escritas fuera de orden.
+   */
+  private async logNodeOutcome(
+    executionId: string,
+    node: PipelineNodeConfigDto,
+    outcome: NodeOutcome,
+    durationMs: number,
+  ): Promise<void> {
+    const { result } = outcome;
+    const failure = result.error;
+
+    const status = result.success
+      ? NodeLogStatus.OK
+      : failure?.level === 'LEVE'
+        ? NodeLogStatus.ADVERTENCIA
+        : NodeLogStatus.ERROR;
+
+    // El mensaje personalizado de la ruta de error gana al del fallo cuando esa
+    // ruta atrapa ESTE codigo. Se resuelve por codigo y no por intento: describe
+    // una CLASE de error, asi que aplicarlo solo al ultimo intento dejaria una
+    // serie ilegible, con el texto real en los cinco primeros y el personalizado
+    // en el sexto.
+    const customMessage =
+      failure === undefined
+        ? null
+        : (resolveErrorRoute(node.onErrorStep, failure.code)?.customMessage ??
+          null);
+
+    // Guarda de contingencia, ADEMAS de la que el propio logger ya tiene. No es
+    // redundancia ociosa: la traza es best-effort por definicion, y un flujo no
+    // puede caerse porque no se pudo anotar que funciono. Sin esto, cualquier
+    // cambio futuro que hiciera lanzar al logger convertiria el registro en un
+    // punto unico de fallo del motor.
+    try {
+      await this.hybridLogger.logNodeExecution({
+        executionId,
+        nodeId: node.nodeId,
+        nodeType: node.nodeType,
+        status,
+        severity: failure?.level,
+        errorCode: failure?.code,
+        message: customMessage ?? failure?.message,
+        stackTrace: failure?.stackTrace,
+        durationMs,
+        payloadSnapshot: result.data,
+      });
+    } catch (error: unknown) {
+      this.logger.warn(
+        `No se pudo registrar la traza del nodo "${node.nodeId}" (ejecucion=${executionId}): ${this.describeError(error)}`,
+      );
+    }
   }
 
   /**

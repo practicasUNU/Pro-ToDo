@@ -1,5 +1,8 @@
 import { NodeType } from '@core/fsm/types/pipeline-schema.types';
-import { buildOrderedTopology } from '@core/fsm/utils/pipeline-topology.util';
+import {
+  buildOrderedTopology,
+  resolveErrorRoute,
+} from '@core/fsm/utils/pipeline-topology.util';
 
 import type {
   PipelineNodeConfig,
@@ -27,6 +30,65 @@ const buildSchema = (
   version: '1.0.0',
   entrypoint,
   nodes: Object.fromEntries(nodes.map((node) => [node.nodeId, node])),
+});
+
+describe('resolveErrorRoute', () => {
+  const CODE = 'ERR_IMAP_TIMEOUT';
+
+  it('3.1 deberia atrapar cualquier codigo con la forma heredada de cadena', () => {
+    // 1. Arrange & 2. Act: es lo que mantiene ejecutables los esquemas ya
+    //    persistidos, que solo conocen esta forma.
+    const route = resolveErrorRoute('nodo_alerta', 'ERR_CUALQUIERA');
+
+    // 3. Assert: una cadena no puede declarar mensaje; no tiene donde ponerlo.
+    expect(route).toEqual({ targetNode: 'nodo_alerta' });
+  });
+
+  it('3.2 deberia devolver el customMessage cuando la ruta atrapa el codigo', () => {
+    // 1. Arrange & 2. Act
+    const route = resolveErrorRoute(
+      {
+        targetNode: 'nodo_alerta',
+        catchErrors: [CODE],
+        customMessage: 'El buzon no responde.',
+      },
+      CODE,
+    );
+
+    // 3. Assert
+    expect(route).toEqual({
+      targetNode: 'nodo_alerta',
+      customMessage: 'El buzon no responde.',
+    });
+  });
+
+  it('3.3 deberia OMITIR la clave cuando la ruta no declara mensaje', () => {
+    // 1. Arrange & 2. Act
+    const route = resolveErrorRoute(
+      { targetNode: 'nodo_alerta', catchErrors: [CODE] },
+      CODE,
+    );
+
+    // 3. Assert: `exactOptionalPropertyTypes` prohibe el `undefined` explicito.
+    expect(route).toEqual({ targetNode: 'nodo_alerta' });
+    expect(Object.hasOwn(route ?? {}, 'customMessage')).toBe(false);
+  });
+
+  it('3.4 deberia devolver null cuando la ruta no atrapa ese codigo', () => {
+    // 1. Arrange & 2. Act: es lo que hace util declarar una ruta selectiva.
+    const route = resolveErrorRoute(
+      { targetNode: 'nodo_alerta', catchErrors: ['ERR_OTRO'] },
+      CODE,
+    );
+
+    // 3. Assert
+    expect(route).toBeNull();
+  });
+
+  it('3.5 deberia devolver null sin ruta declarada', () => {
+    // 1. Arrange & 2. Act & 3. Assert
+    expect(resolveErrorRoute(null, CODE)).toBeNull();
+  });
 });
 
 describe('buildOrderedTopology', () => {
