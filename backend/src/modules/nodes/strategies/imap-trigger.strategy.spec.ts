@@ -10,7 +10,10 @@ import { ALLOWED_NAMESPACES } from '@modules/templates/templates.service';
 import { createMockStatePayloadContext } from '@test/factories/state-payload-context.factory';
 
 import {
+  ERR_IMAP_READ,
+  ERR_IMAP_TIMEOUT,
   ImapTriggerStrategy,
+  MAX_HTML_LENGTH,
   NO_MESSAGES_STATUS,
 } from './imap-trigger.strategy';
 
@@ -139,7 +142,7 @@ describe('ImapTriggerStrategy', () => {
   });
 
   describe('1. Extraccion del correo UNSEEN', () => {
-    it('1.1 deberia exponer las cinco claves deterministas del correo', async () => {
+    it('1.1 deberia exponer las seis claves deterministas del correo', async () => {
       // 1. Arrange
       const { strategy } = buildStrategy();
 
@@ -153,6 +156,7 @@ describe('ImapTriggerStrategy', () => {
         from: 'prensa@unuware.com',
         subject: 'Innovacion en Madrid',
         text: 'Innovacion en texto plano',
+        html: '<h1>Innovacion</h1>',
         date: '2026-03-01T10:30:00.000Z',
       });
     });
@@ -180,8 +184,8 @@ describe('ImapTriggerStrategy', () => {
       );
     });
 
-    it('1.3 no deberia propagar el HTML del correo bajo ninguna clave', async () => {
-      // 1. Arrange: un MIME con marcado en las tres variantes de mailparser.
+    it('1.3 deberia propagar el marcado del correo en su propia clave, sin sanear', async () => {
+      // 1. Arrange: marcado con estilo en linea, como lo emite un cliente real.
       simpleParser.mockResolvedValue(
         buildParsedMail({
           html: '<h1 style="color:red">Innovacion</h1>',
@@ -193,21 +197,37 @@ describe('ImapTriggerStrategy', () => {
       // 2. Act
       const result = await strategy.execute(buildContext(), buildParams());
 
-      // 3. Assert: el cuerpo viaja solo como texto plano. El marcado final lo
-      //    aporta la plantilla del gestor, no el correo de origen.
+      // 3. Assert: el marcado viaja CRUDO y en su propia clave. Limpiarlo es
+      //    competencia de PARSER_PRE_IA; el nodo de ingesta no transforma.
       expect(Object.keys(result.data ?? {})).toEqual([
         'message_id',
         'from',
         'subject',
         'text',
+        'html',
         'date',
       ]);
-      expect(JSON.stringify(result.data)).not.toContain('<h1');
-      expect(JSON.stringify(result.data)).not.toContain('<p>');
+      expect(result.data?.html).toBe('<h1 style="color:red">Innovacion</h1>');
+      // El texto plano sigue siendo el suyo: `html` no lo pisa ni lo sustituye.
+      expect(result.data?.text).toBe('Innovacion en texto plano');
     });
 
-    it('1.4 deberia dejar text vacio en un correo solo-HTML, sin parte text/plain', async () => {
-      // 1. Arrange
+    it('1.3.1 deberia caer a textAsHtml cuando el correo no trae parte HTML', async () => {
+      // 1. Arrange: correo solo-texto; mailparser sintetiza el marcado.
+      simpleParser.mockResolvedValue(buildParsedMail({ html: false }));
+      const { strategy } = buildStrategy();
+
+      // 2. Act
+      const result = await strategy.execute(buildContext(), buildParams());
+
+      // 3. Assert
+      expect(result.data?.html).toBe('<p>Innovacion en texto plano</p>');
+    });
+
+    it('1.4 deberia conservar el marcado de un correo solo-HTML, sin parte text/plain', async () => {
+      // 1. Arrange: el caso que motiva la clave. Un `multipart/alternative` con
+      //    solo la parte HTML deja `text` y `textAsHtml` sin definir, y el unico
+      //    cuerpo disponible es el marcado.
       simpleParser.mockResolvedValue(
         buildParsedMail({ text: undefined, textAsHtml: undefined }),
       );
@@ -216,10 +236,31 @@ describe('ImapTriggerStrategy', () => {
       // 2. Act
       const result = await strategy.execute(buildContext(), buildParams());
 
-      // 3. Assert: derivar texto del marcado seria sanitizar, y eso es
-      //    competencia de PARSER_PRE_IA. El nodo no transforma nada.
+      // 3. Assert: `text` no se rellena derivandolo del marcado —seria contenido
+      //    que el correo no envio— pero el cuerpo ya no se pierde.
       expect(result.success).toBe(true);
       expect(result.data?.text).toBe('');
+      expect(result.data?.html).toBe('<h1>Innovacion</h1>');
+    });
+
+    it('1.4.1 deberia recortar el marcado que supera MAX_HTML_LENGTH y dejar constancia', async () => {
+      // 1. Arrange: un boletin con imagenes incrustadas como `data:` URI puede
+      //    superar el tope; sin el, la fila del checkpoint crece sin limite.
+      const oversized = '<p>'.padEnd(MAX_HTML_LENGTH + 500, 'x');
+      simpleParser.mockResolvedValue(buildParsedMail({ html: oversized }));
+      const { strategy } = buildStrategy();
+      const warn = jest
+        .spyOn(strategy['logger'], 'warn')
+        .mockImplementation(() => undefined);
+
+      // 2. Act
+      const result = await strategy.execute(buildContext(), buildParams());
+
+      // 3. Assert: recorte exacto y aviso, para que el corte no sea silencioso.
+      expect((result.data?.html as string).length).toBe(MAX_HTML_LENGTH);
+      expect(result.data?.html).toBe(oversized.slice(0, MAX_HTML_LENGTH));
+      expect(warn).toHaveBeenCalledTimes(1);
+      expect(warn.mock.calls[0][0]).toContain('<abc-123@unuware.com>');
     });
 
     it('1.5 deberia devolver cadenas vacias y nunca undefined en un correo sin cuerpo', async () => {
@@ -237,6 +278,7 @@ describe('ImapTriggerStrategy', () => {
         from: '',
         subject: '',
         text: '',
+        html: '',
         date: '',
       });
       for (const value of Object.values(result.data ?? {})) {
@@ -456,6 +498,9 @@ describe('ImapTriggerStrategy', () => {
       // 3. Assert: exito, porque un buzon vacio es el caso NORMAL del sondeo.
       expect(result.success).toBe(true);
       expect(result.data).toEqual({ status: NO_MESSAGES_STATUS });
+      // Y parada: sin correo no hay nada que dar a los nodos siguientes, que
+      // reventarian al interpolar un namespace sin las claves que esperan.
+      expect(result.halt).toBeDefined();
       expect(client.download).not.toHaveBeenCalled();
       expect(client.messageFlagsAdd).not.toHaveBeenCalled();
     });
@@ -470,6 +515,20 @@ describe('ImapTriggerStrategy', () => {
 
       // 3. Assert
       expect(result.data).toEqual({ status: NO_MESSAGES_STATUS });
+      expect(result.halt).toBeDefined();
+    });
+
+    it('2.3 NO deberia pedir parada cuando si hay correo', async () => {
+      // 1. Arrange: el camino feliz debe seguir alimentando al nodo siguiente.
+      useClient(buildClient());
+      const { strategy } = buildStrategy();
+
+      // 2. Act
+      const result = await strategy.execute(buildContext(), buildParams());
+
+      // 3. Assert
+      expect(result.success).toBe(true);
+      expect(result.halt).toBeUndefined();
     });
   });
 
@@ -591,9 +650,33 @@ describe('ImapTriggerStrategy', () => {
   });
 
   describe('5. Fallos de red y autenticacion', () => {
+    /**
+     * Error con la forma REAL de imapflow: el `code` adjunto.
+     *
+     * Los fixtures anteriores usaban `new Error('...')` pelados, y por eso no
+     * ejercitaban ninguna discriminacion: una logica basada en `code` habria
+     * pasado por el camino generico sin que ninguna prueba lo notase.
+     */
+    const imapError = (message: string, code?: string): Error => {
+      const error = new Error(message);
+
+      if (code !== undefined) {
+        Object.assign(error, { code });
+      }
+
+      return error;
+    };
+
     it('5.1 deberia devolver GRAVE con stackTrace ante credenciales invalidas', async () => {
-      // 1. Arrange
-      const failure = new Error('Invalid credentials (AUTHENTICATIONFAILED)');
+      // 1. Arrange: imapflow marca la autenticacion con `authenticationFailed`,
+      //    no con `code`, asi que no cae en la rama de timeout.
+      const failure = Object.assign(
+        new Error('Invalid credentials (AUTHENTICATIONFAILED)'),
+        {
+          authenticationFailed: true,
+          serverResponseCode: 'AUTHENTICATIONFAILED',
+        },
+      );
       useClient(buildClient({ connect: jest.fn().mockRejectedValue(failure) }));
       const { strategy } = buildStrategy();
 
@@ -603,17 +686,54 @@ describe('ImapTriggerStrategy', () => {
       // 3. Assert: GRAVE y no URGENTE, para que el motor pueda reintentarlo.
       expect(result.success).toBe(false);
       expect(result.error?.level).toBe('GRAVE');
+      expect(result.error?.code).toBe(ERR_IMAP_READ);
       expect(result.error?.message).toContain('AUTHENTICATIONFAILED');
       expect(result.error?.stackTrace).toBeDefined();
     });
 
-    it('5.2 deberia devolver GRAVE ante un timeout de socket', async () => {
-      // 1. Arrange
+    it.each([
+      ['CONNECT_TIMEOUT', 'Failed to establish connection in required time'],
+      [
+        'GREETING_TIMEOUT',
+        'Failed to receive greeting from server in required time',
+      ],
+      ['ETIMEOUT', 'Socket timeout'],
+      ['ETIMEDOUT', 'connect ETIMEDOUT'],
+    ])(
+      '5.2 deberia devolver LEVE ante un timeout con codigo %s',
+      async (code: string, message: string) => {
+        // 1. Arrange
+        useClient(
+          buildClient({
+            getMailboxLock: jest
+              .fn()
+              .mockRejectedValue(imapError(message, code)),
+          }),
+        );
+        const { strategy } = buildStrategy();
+
+        // 2. Act
+        const result = await strategy.execute(buildContext(), buildParams());
+
+        // 3. Assert: LEVE para que el motor cierre sin pausar. El sondeo vuelve
+        //    en un minuto, asi que nadie tiene que dar un reintento manual.
+        expect(result.success).toBe(false);
+        expect(result.error?.level).toBe('LEVE');
+        expect(result.error?.code).toBe(ERR_IMAP_TIMEOUT);
+        // Sin traza: una caida de red esperable no diagnostica nada.
+        expect(result.error?.stackTrace).toBeUndefined();
+      },
+    );
+
+    it('5.2.1 deberia mantener GRAVE ante un fallo de red que no es timeout', async () => {
+      // 1. Arrange: un DNS que no resuelve no se arregla solo esperando.
       useClient(
         buildClient({
-          getMailboxLock: jest
+          connect: jest
             .fn()
-            .mockRejectedValue(new Error('Socket timeout')),
+            .mockRejectedValue(
+              imapError('getaddrinfo ENOTFOUND imap.unuware.com', 'ENOTFOUND'),
+            ),
         }),
       );
       const { strategy } = buildStrategy();
@@ -622,7 +742,27 @@ describe('ImapTriggerStrategy', () => {
       const result = await strategy.execute(buildContext(), buildParams());
 
       // 3. Assert
-      expect(result.success).toBe(false);
+      expect(result.error?.level).toBe('GRAVE');
+      expect(result.error?.code).toBe(ERR_IMAP_READ);
+      expect(result.error?.stackTrace).toBeDefined();
+    });
+
+    it('5.2.2 deberia mantener GRAVE ante un error sin codigo', async () => {
+      // 1. Arrange: lo desconocido NO se degrada a LEVE. Degradar por defecto
+      //    convertiria cualquier fallo nuevo en una incidencia invisible.
+      useClient(
+        buildClient({
+          getMailboxLock: jest
+            .fn()
+            .mockRejectedValue(new Error('Algo se rompio')),
+        }),
+      );
+      const { strategy } = buildStrategy();
+
+      // 2. Act
+      const result = await strategy.execute(buildContext(), buildParams());
+
+      // 3. Assert
       expect(result.error?.level).toBe('GRAVE');
     });
 

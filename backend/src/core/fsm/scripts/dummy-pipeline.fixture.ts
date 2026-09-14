@@ -34,7 +34,7 @@ export const DUMMY_INPUT_PARAMS: Record<string, unknown> = {
  * resolutor de PROT-10 sobre datos que ya pasaron por el checkpoint.
  */
 export const DUMMY_TEMPLATE =
-  'Noticia: {{ input_data.articulos[0].titulo }} | remitente: {{ input_data.remitente }}';
+  'Noticia: {{ raw_email.articulos[0].titulo }} | remitente: {{ raw_email.remitente }}';
 
 /** Resultado exacto que debe producir la interpolacion de `DUMMY_TEMPLATE`. */
 export const EXPECTED_COMPILED_TEXT =
@@ -56,7 +56,7 @@ export const DUMMY_SCHEMA: PipelineSchemaDto = {
     nodo_input: {
       nodeId: 'nodo_input',
       nodeType: NodeType.TRIGGER_IMAP,
-      outputNamespace: 'input_data',
+      outputNamespace: 'raw_email',
       nextStep: 'nodo_template',
       onErrorStep: null,
       params: DUMMY_INPUT_PARAMS,
@@ -64,7 +64,7 @@ export const DUMMY_SCHEMA: PipelineSchemaDto = {
     nodo_template: {
       nodeId: 'nodo_template',
       nodeType: NodeType.MAPEADOR_PLANTILLA,
-      outputNamespace: 'rendered_message',
+      outputNamespace: 'rendered_html',
       nextStep: 'nodo_dispatch',
       onErrorStep: null,
       params: { template: DUMMY_TEMPLATE },
@@ -72,7 +72,7 @@ export const DUMMY_SCHEMA: PipelineSchemaDto = {
     nodo_dispatch: {
       nodeId: 'nodo_dispatch',
       nodeType: NodeType.DESTINO_HTTP,
-      outputNamespace: 'dispatch_result',
+      outputNamespace: 'http_result',
       nextStep: null,
       onErrorStep: null,
       params: {},
@@ -82,9 +82,9 @@ export const DUMMY_SCHEMA: PipelineSchemaDto = {
 
 /** Namespaces que el pipeline debe haber dejado en `contexto_acumulado`. */
 export const EXPECTED_NAMESPACES = [
-  'input_data',
-  'rendered_message',
-  'dispatch_result',
+  'raw_email',
+  'rendered_html',
+  'http_result',
 ] as const;
 
 /** Devuelve el esquema apuntando al flujo recien sembrado. */

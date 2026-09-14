@@ -35,6 +35,65 @@ import type { AddressObject, ParsedMail } from 'mailparser';
 export const NO_MESSAGES_STATUS = 'NO_MESSAGES_FOUND';
 
 /**
+ * Tope del marcado que viaja en el payload, en caracteres.
+ *
+ * `simpleParser` sustituye las imagenes `cid:` incrustadas por `data:` URI en
+ * base64, y el payload entero acaba en el checkpoint JSONB de PostgreSQL: un
+ * boletin con imagenes puede inflar la fila varios MB en cada ejecucion. No hay
+ * ningun otro tope en el camino —`client.download` no limita bytes y
+ * `DOWNLOAD_SOCKET_TIMEOUT_MS` solo corta la INACTIVIDAD del socket, no el
+ * volumen de un flujo que avanza—, asi que este es el unico.
+ *
+ * 256 KB sobran para el caso que motiva el campo: un correo de aviso o de OTP
+ * pesa unos pocos KB de marcado.
+ */
+export const MAX_HTML_LENGTH = 262_144;
+
+/** Codigos de fallo del nodo. Son lo que un `catchErrors` puede mencionar. */
+export const ERR_IMAP_TIMEOUT = 'ERR_IMAP_TIMEOUT';
+export const ERR_IMAP_CONFIG = 'ERR_IMAP_CONFIG';
+export const ERR_IMAP_READ = 'ERR_IMAP_READ';
+
+/**
+ * Codigos con los que `imapflow` senala un tiempo de espera agotado.
+ *
+ * Se discrimina por `code` y no por el texto del mensaje porque ese texto vive
+ * dentro de la libreria: un retoque suyo reclasificaria el error en silencio, y
+ * ninguna prueba lo notaria.
+ *
+ * `CONNECT_TIMEOUT` cubre mas de lo que aparenta: `connection-deadline.js`
+ * NORMALIZA a ese mismo codigo los vencimientos de DNS y de proxy, justamente
+ * para que quien llama no tenga que saber que fase se bloqueo.
+ *
+ * `ETIMEOUT` y `ETIMEDOUT` NO son el mismo codigo, y hacen falta los dos: el
+ * primero lo emite imapflow ante un socket inactivo y el segundo es el errno de
+ * Node. Escribir solo uno deja fuera la mitad de los casos reales.
+ */
+const TIMEOUT_ERROR_CODES: ReadonlySet<string> = new Set([
+  'CONNECT_TIMEOUT',
+  'GREETING_TIMEOUT',
+  'ETIMEOUT',
+  'ETIMEDOUT',
+]);
+
+/**
+ * Lee el `code` de un error de imapflow.
+ *
+ * Hace falta el guard porque `imap-flow.d.ts` no tipa la propiedad: los errores
+ * de la libreria son `Error` a efectos de TypeScript, y acceder a `.code` sin
+ * comprobar seria un `any` implicito.
+ */
+const errorCodeOf = (error: unknown): string | undefined => {
+  if (!(error instanceof Error)) {
+    return undefined;
+  }
+
+  const { code } = error as Error & { code?: unknown };
+
+  return typeof code === 'string' ? code : undefined;
+};
+
+/**
  * Opciones de validacion canonicas del repositorio (ver `PipelineValidatorService`).
  *
  * `forbidNonWhitelisted` es la pieza que convierte la ausencia de `password` en
@@ -60,18 +119,29 @@ type ImapConfigResolution =
 /**
  * Payload determinista que el nodo expone en su namespace de salida.
  *
- * Cinco claves y ninguna de marcado: el cuerpo viaja SOLO como texto plano. El
- * HTML del correo no se propaga a proposito —traeria estilos en linea, imagenes
- * incrustadas como `data:` URI y etiquetas del cliente remitente— y ni el
- * escudo pre-IA ni el mapeador de plantillas lo necesitan: `PARSER_PRE_IA`
- * trabaja sobre texto para ahorrar tokens, y el marcado final lo aporta la
- * plantilla del gestor, no el correo de origen.
+ * El cuerpo viaja por DUPLICADO, como texto y como marcado, porque hay correos
+ * en los que solo existe una de las dos formas. `mailparser` deriva el texto del
+ * HTML cuando el mensaje es un `text/html` suelto, pero NO cuando el HTML llega
+ * dentro de un `multipart/alternative` sin parte `text/plain` —el caso de los
+ * avisos y OTP institucionales—: ahi `text` queda vacio y el unico cuerpo
+ * disponible es `html`. Exponer solo el texto dejaba esos correos sin contenido
+ * que interpolar.
+ *
+ * Las seis claves son PLANAS y todas `string`, nunca `null` ni `undefined`: el
+ * payload se interpola como `{{raw_email.campo}}`, y una clave ausente rompe la
+ * resolucion mientras que una cadena vacia se resuelve sola.
+ *
+ * Lo que sigue sin hacerse aqui es SANEAR. El marcado viaja crudo, con los
+ * estilos y las etiquetas del cliente remitente, porque limpiarlo es
+ * responsabilidad de `PARSER_PRE_IA`; lo unico que se le aplica es el tope de
+ * `MAX_HTML_LENGTH`, que no es una regla de contenido sino de tamano.
  */
 interface ExtractedEmail {
   readonly message_id: string;
   readonly from: string;
   readonly subject: string;
   readonly text: string;
+  readonly html: string;
   readonly date: string;
 }
 
@@ -135,12 +205,13 @@ export const buildImapSearchQuery = (
  * en `PARSER_PRE_IA`. Meter aqui reglas de limpieza duplicaria la
  * responsabilidad de ese nodo.
  *
- * El cuerpo se expone SOLO como texto plano (`text`), sin marcado. El HTML del
- * correo no se propaga: arrastraria estilos en linea, imagenes incrustadas como
- * `data:` URI y etiquetas del cliente remitente, y el marcado final lo aporta la
- * plantilla del gestor. Consecuencia a tener presente al configurar un flujo: un
- * correo que llegue unicamente en HTML, sin parte `text/plain`, dejara `text`
- * vacio.
+ * El cuerpo se expone por partida doble, `text` y `html`, porque no siempre
+ * existen los dos: un `multipart/alternative` sin parte `text/plain` —lo que
+ * envian los avisos y OTP institucionales— deja `text` vacio, y su unico cuerpo
+ * es el marcado. El HTML viaja crudo, con los estilos y etiquetas del cliente
+ * remitente; lo unico que se le aplica es el tope de `MAX_HTML_LENGTH`, porque
+ * `simpleParser` incrusta las imagenes `cid:` como `data:` URI y el payload
+ * acaba en el checkpoint JSONB.
  *
  * MODELO DE SEGURIDAD HIBRIDO: la contrasena NO esta en `params`. El nodo declara
  * `passwordEnvKey` y esta estrategia resuelve la variable con `ConfigService` en
@@ -205,6 +276,7 @@ export class ImapTriggerStrategy implements INodeStrategy {
       return {
         failure: {
           level: 'GRAVE',
+          code: ERR_IMAP_CONFIG,
           message: `Configuracion invalida del nodo IMAP: ${constraints.join(' ')}`,
           missingFields: invalidFields,
         },
@@ -220,6 +292,7 @@ export class ImapTriggerStrategy implements INodeStrategy {
       return {
         failure: {
           level: 'GRAVE',
+          code: ERR_IMAP_CONFIG,
           message: `La variable de entorno "${config.passwordEnvKey}" referenciada en passwordEnvKey no esta definida o esta vacia.`,
           missingFields: [config.passwordEnvKey],
         },
@@ -264,7 +337,17 @@ export class ImapTriggerStrategy implements INodeStrategy {
       const uid = await this.findLatestMatchingUid(client, config);
 
       if (uid === null) {
-        return { success: true, data: { status: NO_MESSAGES_STATUS } };
+        // Buzon vacio: exito con parada. `success: true` porque no ha fallado
+        // nada —el sondeo corre cada minuto y lo habitual es no encontrar nada—
+        // y `halt` para que el motor cierre la ejecucion en EXITOSO en vez de
+        // pasar al nodo siguiente, que esperaria las claves de un correo.
+        return {
+          success: true,
+          data: { status: NO_MESSAGES_STATUS },
+          halt: {
+            reason: 'El buzon no contiene mensajes nuevos que procesar.',
+          },
+        };
       }
 
       const parsed = await this.downloadAndParse(client, uid);
@@ -277,13 +360,33 @@ export class ImapTriggerStrategy implements INodeStrategy {
 
       return { success: true, data: { ...this.toExtractedEmail(parsed) } };
     } catch (error) {
-      // Red, autenticacion o timeout: GRAVE, no URGENTE, para que el motor lo
-      // reintente segun la `retryPolicy` del nodo.
+      const detail = error instanceof Error ? error.message : String(error);
+      const message = `Fallo la lectura del buzon "${config.mailbox}" en ${config.host}: ${detail}`;
+
+      // Un tiempo de espera agotado es LEVE y no GRAVE. No es una concesion: es
+      // que la incidencia se resuelve sola. El sondeo vuelve dentro de un
+      // minuto, asi que tratarla como bloqueante dejaba el flujo PAUSADO
+      // esperando un reintento manual que nadie tenia que dar, y una fila nueva
+      // por cada tick mientras durase el corte.
+      //
+      // Sin `stackTrace`: una traza de una caida de red esperable no diagnostica
+      // nada y solo ensucia el volcado.
+      if (TIMEOUT_ERROR_CODES.has(errorCodeOf(error) ?? '')) {
+        return {
+          success: false,
+          error: { level: 'LEVE', code: ERR_IMAP_TIMEOUT, message },
+        };
+      }
+
+      // Todo lo demas —autenticacion, DNS, buzon inexistente, MIME corrupto—
+      // sigue siendo GRAVE, para que el motor lo reintente segun la
+      // `retryPolicy` del nodo y quede la traza completa.
       return {
         success: false,
         error: {
           level: 'GRAVE',
-          message: `Fallo la lectura del buzon "${config.mailbox}" en ${config.host}: ${error instanceof Error ? error.message : String(error)}`,
+          code: ERR_IMAP_READ,
+          message,
           ...(error instanceof Error && error.stack !== undefined
             ? { stackTrace: error.stack }
             : {}),
@@ -340,19 +443,51 @@ export class ImapTriggerStrategy implements INodeStrategy {
    * sobrevivirian intactos al checkpoint JSONB.
    */
   private toExtractedEmail(parsed: ParsedMail): ExtractedEmail {
+    const messageId = asString(parsed.messageId);
+
     return {
-      message_id: asString(parsed.messageId),
+      message_id: messageId,
       from: extractFromAddress(parsed.from),
       subject: asString(parsed.subject),
-      // Solo la parte `text/plain` del MIME. Un correo que llegue unicamente en
-      // HTML deja esta clave vacia: derivar texto del marcado seria sanitizar,
-      // y eso es competencia de `PARSER_PRE_IA`, no del nodo de ingesta
-      // (`security-and-scope.md` §3 mantiene este nodo sin transformaciones).
+      // Lo que `mailparser` haya podido extraer como texto: la parte
+      // `text/plain` si existe, o la conversion del marcado si el mensaje era un
+      // `text/html` suelto. Queda vacia en el `multipart/alternative` que solo
+      // trae HTML, y para ese caso esta la clave `html`. No se rellena aqui
+      // derivandola del marcado: seria contenido que el correo no envio, y
+      // distinguir lo que mando el remitente de lo que nos inventamos importa.
       text: asString(parsed.text),
+      // El marcado real primero y la version que `mailparser` sintetiza desde el
+      // texto plano despues: ese orden deja `html` util tanto en el correo que
+      // solo trae HTML como en el que solo trae texto, y `''` si no hay ninguno
+      // de los dos.
+      html: this.clampHtml(
+        asString(parsed.html) || asString(parsed.textAsHtml),
+        messageId,
+      ),
       // Cadena vacia y nunca `undefined` cuando falta la cabecera `Date:`, para
       // que una plantilla que interpole la clave no falle por variable ausente.
       date: parsed.date instanceof Date ? parsed.date.toISOString() : '',
     };
+  }
+
+  /**
+   * Recorta el marcado al tope de `MAX_HTML_LENGTH`.
+   *
+   * El truncado se REGISTRA en vez de aplicarse en silencio: quien vea una
+   * plantilla con el marcado cortado a la mitad necesita poder distinguir un
+   * correo mal formado de un tope nuestro, y el `message_id` es lo que permite
+   * volver al mensaje concreto en el buzon.
+   */
+  private clampHtml(html: string, messageId: string): string {
+    if (html.length <= MAX_HTML_LENGTH) {
+      return html;
+    }
+
+    this.logger.warn(
+      `GRAVE | Marcado recortado a ${MAX_HTML_LENGTH} caracteres (original: ${html.length}) en el mensaje "${messageId}".`,
+    );
+
+    return html.slice(0, MAX_HTML_LENGTH);
   }
 
   /** Libera el bloqueo del buzon sin dejar escapar errores de cierre. */

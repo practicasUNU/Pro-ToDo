@@ -9,7 +9,7 @@ import type {
 } from '@core/fsm/types/node-strategy.types';
 
 /** Namespace del que este nodo lee el texto ya compilado. */
-const RENDERED_NAMESPACE = 'rendered_message';
+const RENDERED_NAMESPACE = 'rendered_html';
 
 /**
  * Estrategia de ANDAMIAJE: sustituye la publicacion HTTP por un volcado a consola.

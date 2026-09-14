@@ -1,8 +1,10 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { Type } from 'class-transformer';
 import {
+  IsBoolean,
   IsEnum,
   IsInt,
+  registerDecorator,
   IsNotEmpty,
   IsNotEmptyObject,
   IsNumber,
@@ -16,6 +18,14 @@ import {
   Min,
   ValidateIf,
   ValidateNested,
+  ValidatorConstraint,
+} from 'class-validator';
+
+import type { SelectiveErrorFallback } from '@core/fsm/types/pipeline-schema.types';
+import type {
+  ValidationArguments,
+  ValidationOptions,
+  ValidatorConstraintInterface,
 } from 'class-validator';
 
 import {
@@ -24,6 +34,82 @@ import {
   OUTPUT_NAMESPACE_PATTERN,
   SEMVER_PATTERN,
 } from '@core/fsm/types/pipeline-schema.types';
+
+/**
+ * Valida la union de `onErrorStep`: `null`, cadena, o ruta selectiva.
+ *
+ * Se escribe a mano porque class-validator no sabe validar uniones con sus
+ * decoradores de serie: `@IsString()` rechazaria el objeto y `@ValidateNested()`
+ * rechazaria la cadena.
+ *
+ * Comprueba el INTERIOR del objeto el mismo, y eso no es opcional: `whitelist`
+ * solo poda las propiedades de clases anidadas declaradas con
+ * `@ValidateNested()`, de modo que un objeto suelto entraria sin que nadie mire
+ * sus claves y el motor acabaria saltando a un `targetNode` que no es una
+ * cadena.
+ */
+@ValidatorConstraint({ name: 'isErrorRoute', async: false })
+class IsErrorRouteConstraint implements ValidatorConstraintInterface {
+  public validate(value: unknown): boolean {
+    if (value === null) {
+      return true;
+    }
+
+    if (typeof value === 'string') {
+      return value.trim() !== '';
+    }
+
+    if (typeof value !== 'object') {
+      return false;
+    }
+
+    const route = value as Partial<SelectiveErrorFallback>;
+
+    return (
+      typeof route.targetNode === 'string' &&
+      route.targetNode.trim() !== '' &&
+      Array.isArray(route.catchErrors) &&
+      route.catchErrors.every(
+        (code) => typeof code === 'string' && code.trim() !== '',
+      )
+    );
+  }
+
+  public defaultMessage(args: ValidationArguments): string {
+    return `${args.property} debe ser null, el nodeId destino, o un objeto { targetNode, catchErrors[] }.`;
+  }
+}
+
+/** Decorador de la union de `onErrorStep`. */
+const IsErrorRoute =
+  (options?: ValidationOptions) =>
+  (object: object, propertyName: string): void => {
+    registerDecorator({
+      target: object.constructor,
+      propertyName,
+      options: options ?? {},
+      validator: IsErrorRouteConstraint,
+    });
+  };
+
+/**
+ * Politica de ejecucion del flujo completo.
+ *
+ * Se declara aqui y no como campo suelto porque `PipelineValidatorService` valida
+ * con `forbidNonWhitelisted`: un `executionPolicy` que no figure en este DTO se
+ * rechaza con un 400 en vez de ignorarse, asi que la unica forma de que la
+ * politica viaje en el esquema es declararla.
+ */
+export class ExecutionPolicyDto {
+  @ApiPropertyOptional({
+    description:
+      'Desactiva el flujo tras la primera ejecucion que recorra el grafo entero con exito',
+    example: true,
+  })
+  @IsOptional()
+  @IsBoolean({ message: 'stopOnFirstSuccess debe ser booleano.' })
+  stopOnFirstSuccess?: boolean;
+}
 
 /** Politica de reintentos declarada por un nodo del pipeline. */
 export class RetryPolicyDto {
@@ -111,14 +197,15 @@ export class PipelineNodeConfigDto {
 
   @ApiProperty({
     description:
-      'Nodo al que saltar ante un fallo, o null para detener la ejecucion',
-    example: 'nodo_alerta',
+      'Ruta de recuperacion: el nodeId destino (respaldo incondicional), un objeto { targetNode, catchErrors } que solo atrapa los codigos declarados, o null para detener la ejecucion',
+    example: { targetNode: 'nodo_alerta', catchErrors: ['ERR_IMAP_TIMEOUT'] },
     nullable: true,
   })
+  // Se conserva el `@ValidateIf` por el mismo motivo que en `nextStep`: `null`
+  // es un valor legitimo y `@IsOptional()` dejaria pasar tambien `undefined`.
   @ValidateIf((_, value: unknown) => value !== null)
-  @IsString({ message: 'onErrorStep debe ser una cadena o null.' })
-  @IsNotEmpty({ message: 'onErrorStep no puede ser una cadena vacia.' })
-  onErrorStep: string | null;
+  @IsErrorRoute()
+  onErrorStep: string | SelectiveErrorFallback | null;
 
   @ApiPropertyOptional({
     description: 'Politica de reintentos; si se omite, el nodo no reintenta',
@@ -195,4 +282,16 @@ export class PipelineSchemaDto {
     { message: 'nodes debe declarar al menos un nodo.' },
   )
   nodes: Record<string, PipelineNodeConfigDto>;
+
+  @ApiPropertyOptional({
+    description:
+      'Politica del flujo completo; si se omite, la ejecucion no altera el flujo',
+    type: ExecutionPolicyDto,
+  })
+  // `@ValidateNested()` SI funciona aqui, a diferencia del `nodes` de arriba:
+  // lo que class-validator no sabe recorrer es un Record, no un objeto suelto.
+  @IsOptional()
+  @ValidateNested()
+  @Type(() => ExecutionPolicyDto)
+  executionPolicy?: ExecutionPolicyDto;
 }

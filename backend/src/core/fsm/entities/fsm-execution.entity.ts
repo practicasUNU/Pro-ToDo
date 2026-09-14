@@ -108,4 +108,20 @@ export class FsmExecution {
 
   @UpdateDateColumn({ name: 'fecha_actualizacion', type: 'timestamp' })
   updatedAt: Date;
+
+  /**
+   * Motivo por el que un nodo detuvo el flujo ANTES de llegar al nodo terminal.
+   *
+   * NO es una columna, y por eso no lleva `@Column`: vive solo en la instancia
+   * que `executeWorkflow` devuelve. Existe porque las dos salidas buenas del
+   * bucle —recorrer el grafo entero y pararse porque no habia nada que hacer—
+   * dejan la fila EXACTAMENTE igual: EXITOSO con el cursor nulo. Quien despacha
+   * necesita separarlas para decidir si aplicar `stopOnFirstSuccess`, y desde la
+   * fila sola es imposible.
+   *
+   * Se deja transitorio a proposito: persistirlo hoy seria una columna con su
+   * migracion y sin un solo lector. Si la trazabilidad llega a mostrar por que
+   * una ejecucion termino en un unico paso, entonces se promueve a columna.
+   */
+  haltReason?: string;
 }

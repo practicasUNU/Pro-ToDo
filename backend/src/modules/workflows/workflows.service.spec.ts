@@ -238,11 +238,12 @@ describe('WorkflowsService (despacho manual de pruebas, Camino B)', () => {
       // 3. Assert: si el fixture se desvia de `ImapTriggerOutput`, una plantilla
       // escrita contra el nodo real deja de renderizar en modo prueba, que es
       // exactamente lo que el despacho de pruebas deberia detectar y no causar.
-      // Las cinco claves son planas y el cuerpo viaja como `text`, nunca como
-      // marcado: el nodo real no emite HTML a proposito.
+      // Las seis claves son planas, cuerpo duplicado incluido: el nodo real
+      // emite `text` y `html` porque hay correos que solo traen uno de los dos.
       expect(Object.keys(DEFAULT_MOCK_NAMESPACES.raw_email).sort()).toEqual([
         'date',
         'from',
+        'html',
         'message_id',
         'subject',
         'text',
@@ -366,6 +367,94 @@ describe('WorkflowsService (despacho manual de pruebas, Camino B)', () => {
     });
   });
 
+  describe('2c. executionPolicy.stopOnFirstSuccess', () => {
+    /** Esquema con la politica activa; el resto del grafo no interviene. */
+    const schemaWithPolicy = (): PipelineSchemaDto => ({
+      ...buildSchema(),
+      executionPolicy: { stopOnFirstSuccess: true },
+    });
+
+    it('2c.1 deberia desactivar el flujo y soltar el sondeo tras un exito completo', async () => {
+      // 1. Arrange
+      const { service, validator, repository, coordinator } = buildHarness();
+      validator.validateSchema.mockResolvedValue(schemaWithPolicy());
+
+      // 2. Act
+      await service.runAutomaticWorkflow(WORKFLOW_ID);
+
+      // 3. Assert: la fila queda inactiva y el temporizador en memoria muere.
+      //    Sin lo segundo, el sondeo seguiria disparando un flujo apagado hasta
+      //    la siguiente reconciliacion.
+      expect(repository.save).toHaveBeenCalledWith(
+        expect.objectContaining({ active: false }),
+      );
+      expect(coordinator.stopPollingForFlow).toHaveBeenCalledWith(WORKFLOW_ID);
+    });
+
+    it('2c.2 NO deberia desactivar una ejecucion detenida por halt', async () => {
+      // 1. Arrange: el disparador no encontro nada que procesar. Cierra en
+      //    EXITOSO igual que un recorrido completo, pero no hizo trabajo alguno.
+      const { service, validator, engine, repository, coordinator } =
+        buildHarness();
+      validator.validateSchema.mockResolvedValue(schemaWithPolicy());
+      engine.executeWorkflow.mockResolvedValue(
+        buildExecution({
+          haltReason: 'El buzon no contiene mensajes nuevos que procesar.',
+        }),
+      );
+
+      // 2. Act
+      await service.runAutomaticWorkflow(WORKFLOW_ID);
+
+      // 3. Assert: es LA razon de ser de `haltReason`. Sin esta guarda, un flujo
+      //    IMAP con la politica activa se apagaria en su primer sondeo en vacio,
+      //    antes de haber procesado un solo correo.
+      expect(repository.save).not.toHaveBeenCalled();
+      expect(coordinator.stopPollingForFlow).not.toHaveBeenCalled();
+    });
+
+    it('2c.3 NO deberia desactivar una ejecucion que no termino en EXITOSO', async () => {
+      // 1. Arrange
+      const { service, validator, engine, repository } = buildHarness();
+      validator.validateSchema.mockResolvedValue(schemaWithPolicy());
+      engine.executeWorkflow.mockResolvedValue(
+        buildExecution({ currentState: ExecutionState.PAUSADO }),
+      );
+
+      // 2. Act
+      await service.runAutomaticWorkflow(WORKFLOW_ID);
+
+      // 3. Assert
+      expect(repository.save).not.toHaveBeenCalled();
+    });
+
+    it('2c.4 NO deberia desactivar un flujo sin politica declarada', async () => {
+      // 1. Arrange: `buildSchema()` no trae `executionPolicy`.
+      const { service, repository, coordinator } = buildHarness();
+
+      // 2. Act
+      await service.runAutomaticWorkflow(WORKFLOW_ID);
+
+      // 3. Assert: la ausencia de politica debe comportarse como siempre.
+      expect(repository.save).not.toHaveBeenCalled();
+      expect(coordinator.stopPollingForFlow).not.toHaveBeenCalled();
+    });
+
+    it('2c.5 NO deberia desactivar desde el despacho manual de pruebas', async () => {
+      // 1. Arrange: el banco de pruebas existe para ITERAR sobre un flujo.
+      const { service, validator, repository, coordinator } = buildHarness();
+      validator.validateSchema.mockResolvedValue(schemaWithPolicy());
+
+      // 2. Act
+      await service.executeTest(WORKFLOW_ID, {});
+
+      // 3. Assert: apagarlo en cada prueba exitosa lo convertiria en un
+      //    interruptor y obligaria a reactivar a mano tras cada iteracion.
+      expect(repository.save).not.toHaveBeenCalled();
+      expect(coordinator.stopPollingForFlow).not.toHaveBeenCalled();
+    });
+  });
+
   describe('3. Concurrencia (RNF-09)', () => {
     it('3.1 deberia propagar el ConflictException de createExecution sin arrancar el motor', async () => {
       // 1. Arrange
@@ -400,7 +489,7 @@ const buildUnorderedSchema = (): PipelineSchemaDto => ({
     nodo_destino: {
       nodeId: 'nodo_destino',
       nodeType: NodeType.DESTINO_HTTP,
-      outputNamespace: 'destino_http',
+      outputNamespace: 'http_result',
       nextStep: null,
       onErrorStep: null,
       params: { url: 'https://drupal.unuware.com/jsonapi/node/article' },

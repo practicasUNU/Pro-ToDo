@@ -46,7 +46,7 @@ const buildNotiwebSchema = (): PipelineSchema => ({
     nodo_ia: {
       nodeId: 'nodo_ia',
       nodeType: NodeType.PROCESADOR_IA,
-      outputNamespace: 'ia_result',
+      outputNamespace: 'llm_response',
       nextStep: 'nodo_escudo',
       onErrorStep: null,
       retryPolicy: { maxRetries: 2 },
@@ -55,7 +55,7 @@ const buildNotiwebSchema = (): PipelineSchema => ({
     nodo_escudo: {
       nodeId: 'nodo_escudo',
       nodeType: NodeType.ESCUDO_POST_IA,
-      outputNamespace: 'nodo_sanitizado',
+      outputNamespace: 'validated_drupal_json',
       nextStep: 'nodo_mapeador',
       onErrorStep: null,
       params: { schemaId: 'noticia_v1' },
@@ -63,7 +63,7 @@ const buildNotiwebSchema = (): PipelineSchema => ({
     nodo_mapeador: {
       nodeId: 'nodo_mapeador',
       nodeType: NodeType.MAPEADOR_PLANTILLA,
-      outputNamespace: 'plantilla_render',
+      outputNamespace: 'rendered_html',
       nextStep: 'nodo_destino',
       onErrorStep: null,
       params: { templateId: 'tpl-1' },
@@ -71,7 +71,7 @@ const buildNotiwebSchema = (): PipelineSchema => ({
     nodo_destino: {
       nodeId: 'nodo_destino',
       nodeType: NodeType.DESTINO_HTTP,
-      outputNamespace: 'destino_http',
+      outputNamespace: 'http_result',
       nextStep: null,
       onErrorStep: null,
       params: { url: 'https://drupal.unuware.com/jsonapi/node/article' },
@@ -132,7 +132,7 @@ describe('PipelineValidatorService (PROT-07)', () => {
       schema.nodes.nodo_huerfano = {
         nodeId: 'nodo_huerfano',
         nodeType: NodeType.EXTRACTOR_WEB,
-        outputNamespace: 'rama_futura',
+        outputNamespace: 'cron_trigger',
         nextStep: null,
         onErrorStep: null,
         params: {},
@@ -185,6 +185,84 @@ describe('PipelineValidatorService (PROT-07)', () => {
         'nodes.nodo_extractor.outputNamespace',
       );
       expect(issues[0].constraints[0]).toContain('nodo_parser');
+    });
+
+    it('deberia rechazar un outputNamespace fuera de la lista blanca', async () => {
+      // 1. Arrange: `resultado_ia` respeta el formato snake_case del DTO, asi
+      // que solo esta regla puede detenerlo. Sin ella pasaria la validacion y
+      // reventaria mas tarde, al guardar una plantilla que lo interpola.
+      const schema = buildNotiwebSchema();
+      schema.nodes.nodo_ia.outputNamespace = 'resultado_ia';
+
+      // 2. Act
+      const issues = await captureIssues(service, schema);
+
+      // 3. Assert
+      expect(fieldsOf(issues)).toContain('nodes.nodo_ia.outputNamespace');
+      expect(issues[0].constraints[0]).toContain('no esta permitido');
+    });
+
+    it('deberia aceptar una ruta de error selectiva', async () => {
+      // 1. Arrange
+      const schema = buildNotiwebSchema();
+      schema.nodes.nodo_ia.onErrorStep = {
+        targetNode: 'nodo_destino',
+        catchErrors: ['ERR_LLM_TIMEOUT'],
+      };
+
+      // 2. Act
+      const result = await service.validateSchema(schema);
+
+      // 3. Assert
+      expect(result.nodes.nodo_ia.onErrorStep).toEqual({
+        targetNode: 'nodo_destino',
+        catchErrors: ['ERR_LLM_TIMEOUT'],
+      });
+    });
+
+    it('deberia rechazar una ruta selectiva cuyo targetNode no existe', async () => {
+      // 1. Arrange: un destino inexistente rompe el esquema aunque su codigo no
+      //    llegue a ocurrir nunca, asi que se valida el destino DECLARADO.
+      const schema = buildNotiwebSchema();
+      schema.nodes.nodo_ia.onErrorStep = {
+        targetNode: 'nodo_fantasma',
+        catchErrors: ['ERR_LLM_TIMEOUT'],
+      };
+
+      // 2. Act
+      const issues = await captureIssues(service, schema);
+
+      // 3. Assert
+      expect(fieldsOf(issues)).toContain('nodes.nodo_ia.onErrorStep');
+      expect(issues[0].constraints[0]).toContain('nodo_fantasma');
+    });
+
+    it('deberia rechazar una ruta con catchErrors que no son cadenas', async () => {
+      // 1. Arrange: `whitelist` no poda el interior de un objeto suelto, asi que
+      //    si el constraint no lo mirase, el motor acabaria comparando numeros.
+      const schema = buildNotiwebSchema();
+      schema.nodes.nodo_ia.onErrorStep = {
+        targetNode: 'nodo_destino',
+        catchErrors: [42],
+      } as unknown as PipelineSchema['nodes'][string]['onErrorStep'];
+
+      // 2. Act
+      const issues = await captureIssues(service, schema);
+
+      // 3. Assert
+      expect(fieldsOf(issues)).toContain('nodes.nodo_ia.onErrorStep');
+    });
+
+    it('deberia rechazar un onErrorStep que no es ninguna de las tres formas', async () => {
+      // 1. Arrange
+      const schema = buildNotiwebSchema();
+      schema.nodes.nodo_ia.onErrorStep = 7 as unknown as string;
+
+      // 2. Act
+      const issues = await captureIssues(service, schema);
+
+      // 3. Assert
+      expect(fieldsOf(issues)).toContain('nodes.nodo_ia.onErrorStep');
     });
 
     it('deberia rechazar una clave de mapa distinta del nodeId del nodo', async () => {
@@ -273,6 +351,37 @@ describe('PipelineValidatorService (PROT-07)', () => {
 
       // 3. Assert
       expect(fieldsOf(issues)).toContain('nodes.nodo_parser.outputNamespace');
+    });
+
+    it('deberia aceptar un esquema con executionPolicy declarada', async () => {
+      // 1. Arrange: `forbidNonWhitelisted` esta activo, asi que un campo raiz no
+      //    declarado en el DTO se rechaza en vez de ignorarse. Esta prueba fija
+      //    que la politica SI esta declarada.
+      const schema = {
+        ...buildNotiwebSchema(),
+        executionPolicy: { stopOnFirstSuccess: true },
+      };
+
+      // 2. Act
+      const result = await service.validateSchema(schema);
+
+      // 3. Assert
+      expect(result.executionPolicy?.stopOnFirstSuccess).toBe(true);
+    });
+
+    it('deberia rechazar un stopOnFirstSuccess que no es booleano', async () => {
+      // 1. Arrange
+      const schema = {
+        ...buildNotiwebSchema(),
+        executionPolicy: { stopOnFirstSuccess: 'si' },
+      };
+
+      // 2. Act
+      const issues = await captureIssues(service, schema);
+
+      // 3. Assert: la ruta llega ANIDADA, que es lo que permite al asistente
+      //    senalar el control exacto en vez de la raiz del esquema.
+      expect(fieldsOf(issues)).toContain('executionPolicy.stopOnFirstSuccess');
     });
 
     it('deberia rechazar una version que no sigue el formato SemVer', async () => {

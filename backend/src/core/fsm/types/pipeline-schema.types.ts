@@ -23,6 +23,36 @@ export const MAX_RETRY_ATTEMPTS = 5;
  */
 export const OUTPUT_NAMESPACE_PATTERN = /^[a-z0-9_]+$/;
 
+/**
+ * Namespaces que un nodo puede declarar como `outputNamespace`.
+ *
+ * Es una lista CERRADA y no un formato libre. El namespace acaba siendo la raiz
+ * de `{{ns.campo}}` en las plantillas HTML, y el gestor de plantillas rechaza
+ * cualquier raiz desconocida: admitir aqui lo que alli se rechaza solo traslada
+ * el fallo del asistente —donde el operador aun puede corregirlo— al guardado de
+ * la plantilla, donde ya no sabe que lo causo.
+ *
+ * Vive en `@core` y no junto a la lista blanca de plantillas porque el validador
+ * de topologia la necesita, y el nucleo no puede importar de `@modules`.
+ * `ALLOWED_NAMESPACES` (`templates.service.ts`) se deriva de esta lista
+ * anadiendo `_assets`, que no lo escribe ningun nodo.
+ */
+export const NODE_OUTPUT_NAMESPACES = [
+  'raw_email',
+  'cron_trigger',
+  'parsed_email',
+  'scraped_web',
+  'llm_response',
+  'validated_drupal_json',
+  'rendered_html',
+  'http_result',
+] as const;
+
+/** Busqueda O(1) para el validador de topologia. */
+export const NODE_OUTPUT_NAMESPACE_SET: ReadonlySet<string> = new Set(
+  NODE_OUTPUT_NAMESPACES,
+);
+
 /** Versionado SemVer estricto del esquema (`MAJOR.MINOR.PATCH`). */
 export const SEMVER_PATTERN = /^\d+\.\d+\.\d+$/;
 
@@ -60,6 +90,48 @@ export interface RetryPolicy {
   backoffFactor?: number;
 }
 
+/**
+ * Politica de ejecucion del flujo COMPLETO.
+ *
+ * Es el contrapunto de `RetryPolicy`, que gobierna un nodo suelto: esta decide
+ * que pasa con el flujo entero una vez la ejecucion termina. Opcional en el
+ * esquema; sin ella, el comportamiento es el de siempre.
+ */
+export interface PipelineExecutionPolicy {
+  /**
+   * Desactiva el flujo (`flujos.activo = false`) tras la primera ejecucion que
+   * recorra el grafo entero con exito.
+   *
+   * NO cuenta como exito una ejecucion detenida por `halt`. Ahi el disparador
+   * concluyo que no habia NADA que procesar —un buzon sin correos nuevos— y la
+   * ejecucion cierra en EXITOSO sin haber hecho ningun trabajo: tratarlo como
+   * "primer exito" apagaria el flujo en su primer sondeo, antes de haber
+   * procesado un solo correo. Quien distingue los dos casos es
+   * `FsmExecution.haltReason`.
+   *
+   * Solo se evalua en el despacho automatico (`runAutomaticWorkflow`). El
+   * despacho manual de pruebas queda fuera a proposito: el operador usa ese
+   * endpoint para iterar sobre una plantilla, y cada prueba exitosa le
+   * obligaria a reactivar el flujo a mano.
+   */
+  readonly stopOnFirstSuccess?: boolean;
+}
+
+/**
+ * Ruta de recuperacion que solo atrapa los codigos de error declarados.
+ *
+ * Es lo que distingue una ruta util de un `onErrorStep` clasico: aquel desvia
+ * ante CUALQUIER fallo, de modo que un nodo de aviso disenado para un timeout
+ * acabaria tragandose tambien un error de configuracion, y el flujo seguiria
+ * adelante sobre un problema que nadie ha visto.
+ */
+export interface SelectiveErrorFallback {
+  /** Nodo al que saltar. Debe existir en el mapa `nodes`. */
+  readonly targetNode: string;
+  /** Codigos que esta ruta atrapa. Vacio equivale a no atrapar nada. */
+  readonly catchErrors: readonly string[];
+}
+
 /** Configuracion de un nodo dentro del grafo del pipeline. */
 export interface PipelineNodeConfig {
   /** Identificador del nodo. Debe coincidir con su clave en `PipelineSchema.nodes`. */
@@ -70,8 +142,24 @@ export interface PipelineNodeConfig {
   outputNamespace: string;
   /** Siguiente nodo del camino activo, o `null` si es el nodo terminal. */
   nextStep: string | null;
-  /** Nodo al que saltar ante un fallo, o `null` para detener la ejecucion. */
-  onErrorStep: string | null;
+  /**
+   * Ruta de recuperacion ante un fallo, o `null` para detener la ejecucion.
+   *
+   * Admite DOS formas, y la clave conserva su nombre historico a proposito: hay
+   * esquemas ya persistidos en `configuracion_pipeline` con la forma
+   * `string | null`, y `PipelineValidatorService` valida con
+   * `forbidNonWhitelisted`, de modo que renombrar el campo habria dejado esas
+   * filas devolviendo un 400 en cada despacho.
+   *
+   * - `string`: respaldo INCONDICIONAL. Es la semantica de siempre.
+   * - `SelectiveErrorFallback`: desvia SOLO si el `code` del fallo figura en
+   *   `catchErrors`. Ante cualquier otro codigo el flujo se detiene como si no
+   *   hubiera ruta, que es justo lo que hace util declararla.
+   *
+   * Quien resuelve la forma es `resolveErrorTarget` (`pipeline-topology.util`);
+   * ningun consumidor debe inspeccionar la union por su cuenta.
+   */
+  onErrorStep: string | SelectiveErrorFallback | null;
   /** Politica de reintentos. Si se omite, el nodo no reintenta. */
   retryPolicy?: RetryPolicy;
   /** Parametros propios del tipo de nodo; cada estrategia valida los suyos. */
@@ -90,4 +178,6 @@ export interface PipelineSchema {
   entrypoint: string;
   /** Mapa de nodos indexado por `nodeId`. */
   nodes: Record<string, PipelineNodeConfig>;
+  /** Politica del flujo completo. Si se omite, la ejecucion no altera el flujo. */
+  executionPolicy?: PipelineExecutionPolicy;
 }

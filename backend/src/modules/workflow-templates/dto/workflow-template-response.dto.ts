@@ -1,6 +1,8 @@
-import { ApiProperty } from '@nestjs/swagger';
+import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 
 import { PipelineStepDto } from '@modules/workflows/dto/pipeline-summary-response.dto';
+
+import type { PipelineExecutionPolicy } from '@core/fsm/types/pipeline-schema.types';
 
 /**
  * Plantilla de flujo tal como la consume el LISTADO: el selector del asistente y
@@ -43,6 +45,17 @@ export class WorkflowTemplateResponseDto {
       'Pasos EN ORDEN DE EJECUCION, recorridos desde `entrypoint` por `nextStep`',
   })
   readonly topology: PipelineStepDto[];
+
+  @ApiPropertyOptional({
+    description:
+      'Politica del flujo completo declarada por la plantilla; ausente si no declara ninguna',
+  })
+  // Se PROYECTA igual que `topology` en vez de viajar dentro del esquema: el
+  // listado no lleva `pipelineSchema` a proposito —expondria el `host` y la
+  // `passwordEnvKey` de cada nodo IMAP en la peticion que el asistente hace al
+  // arrancar— pero el asistente necesita la politica para heredarla al
+  // instanciar un flujo, y un booleano no es un secreto.
+  readonly executionPolicy?: PipelineExecutionPolicy;
 }
 
 /**

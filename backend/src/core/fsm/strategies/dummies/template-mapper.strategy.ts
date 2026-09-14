@@ -33,6 +33,7 @@ export class DummyTemplateMapperStrategy implements INodeStrategy {
         success: false,
         error: {
           level: 'GRAVE',
+          code: 'ERR_DUMMY_TEMPLATE_MISSING',
           message: 'El nodo requiere un parametro "template" de tipo cadena.',
           missingFields: ['template'],
         },

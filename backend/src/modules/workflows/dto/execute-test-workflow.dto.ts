@@ -10,12 +10,13 @@ import { IsObject, IsOptional } from 'class-validator';
  * una peticion con cuerpo vacio arrancaria con el contexto a cero y el mapeador
  * fallaria por `missingFields`, que no es el fallo que la prueba busca observar.
  *
- * Las cinco claves son PLANAS y replican una a una las de `ImapTriggerOutput`,
- * incluido que el cuerpo viaje como `text` y no como marcado: el nodo real no
- * emite HTML a proposito (el procesador de IA trabaja sobre texto plano para
- * ahorrar tokens). Anidar aqui los encabezados o anadir un `raw_html` que en
- * produccion no existe haria pasar la prueba a plantillas que luego fallarian
- * con un correo de verdad, que es justo el fallo que este endpoint debe cazar.
+ * Las seis claves son PLANAS y replican una a una las de `ImapTriggerOutput`,
+ * cuerpo duplicado incluido: el nodo real emite `text` y `html` porque hay
+ * correos en los que solo existe uno de los dos. Anidar aqui los encabezados o
+ * anadir una clave que en produccion no existe haria pasar la prueba a
+ * plantillas que luego fallarian con un correo de verdad, que es justo el fallo
+ * que este endpoint debe cazar. Por el mismo motivo, ampliar el payload del nodo
+ * obliga a ampliar este fixture.
  *
  * `raw_email` figura en `ALLOWED_NAMESPACES` de `TemplatesService`, de modo que
  * una plantilla puede interpolar `{{raw_email.subject}}` contra el.
@@ -29,6 +30,7 @@ export const DEFAULT_MOCK_NAMESPACES: Record<
     from: 'redaccion@noticias.es',
     subject: 'Avance Cientifico Notiweb 2026',
     text: 'Contenido institucional de prueba para Notiweb.',
+    html: '<p>Contenido institucional de prueba para Notiweb.</p>',
     date: '2026-09-08T12:00:00Z',
   },
 };

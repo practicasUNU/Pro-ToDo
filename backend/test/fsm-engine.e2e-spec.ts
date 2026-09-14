@@ -105,7 +105,7 @@ describe('FsmEngineService (integracion con PostgreSQL)', () => {
   it('deberia haber interpolado la plantilla contra el contexto acumulado', async () => {
     // 2. Act
     const persisted = await repository.findOne({ where: { executionId } });
-    const rendered = persisted?.contextPayload.rendered_message;
+    const rendered = persisted?.contextPayload.rendered_html;
 
     // 3. Assert: incluye la ruta compuesta con indice de arreglo de PROT-10,
     // resuelta sobre datos que pasaron por structuredClone y por el checkpoint
@@ -134,7 +134,7 @@ describe('FsmEngineService (integracion con PostgreSQL)', () => {
   it('deberia registrar la salida del nodo despachador', async () => {
     // 2. Act
     const persisted = await repository.findOne({ where: { executionId } });
-    const dispatch = persisted?.contextPayload.dispatch_result;
+    const dispatch = persisted?.contextPayload.http_result;
 
     // 3. Assert
     expect(dispatch?.status).toBe('SUCCESS');

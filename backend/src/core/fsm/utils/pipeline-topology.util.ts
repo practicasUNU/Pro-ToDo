@@ -2,7 +2,68 @@ import type {
   NodeType,
   PipelineNodeConfig,
   PipelineSchema,
+  SelectiveErrorFallback,
 } from '@core/fsm/types/pipeline-schema.types';
+
+/** Las dos formas que admite `PipelineNodeConfig.onErrorStep`, mas la ausencia. */
+type ErrorRoute = string | SelectiveErrorFallback | null | undefined;
+
+/**
+ * Distingue la ruta selectiva de la cadena heredada.
+ *
+ * Comprueba `targetNode` y no solo que sea un objeto: un jsonb editado a mano
+ * puede traer cualquier cosa, y tratarla como ruta valida haria saltar el motor
+ * a `undefined`.
+ */
+const isSelectiveFallback = (
+  route: ErrorRoute,
+): route is SelectiveErrorFallback =>
+  typeof route === 'object' &&
+  route !== null &&
+  typeof route.targetNode === 'string';
+
+/**
+ * Nodo destino DECLARADO, sea cual sea la forma de la ruta.
+ *
+ * Es la pregunta del validador de topologia, al que solo le importa que el
+ * destino exista en el mapa: una ruta que apunta a un nodo inexistente es un
+ * esquema roto, atrape los codigos que atrape.
+ */
+export const declaredErrorTarget = (route: ErrorRoute): string | null => {
+  if (typeof route === 'string') {
+    return route;
+  }
+
+  return isSelectiveFallback(route) ? route.targetNode : null;
+};
+
+/**
+ * Nodo destino EFECTIVO para un codigo de error concreto.
+ *
+ * Es la pregunta del motor, que ya tiene un fallo entre manos. Devuelve `null`
+ * cuando no hay ruta o cuando la ruta no atrapa ESE codigo, y en ambos casos el
+ * motor debe comportarse igual: como si no hubiera ruta.
+ *
+ * Existe separado de `declaredErrorTarget` porque las dos preguntas son
+ * distintas y confundirlas haria que el validador exigiese un codigo que aun no
+ * ha ocurrido, o que el motor desviase por una ruta que no le correspondia.
+ */
+export const resolveErrorTarget = (
+  route: ErrorRoute,
+  errorCode: string,
+): string | null => {
+  // La cadena heredada no discrimina: atrapa todo, que es su semantica de
+  // siempre y lo que mantiene ejecutables los esquemas ya guardados.
+  if (typeof route === 'string') {
+    return route;
+  }
+
+  if (!isSelectiveFallback(route) || !Array.isArray(route.catchErrors)) {
+    return null;
+  }
+
+  return route.catchErrors.includes(errorCode) ? route.targetNode : null;
+};
 
 /**
  * Paso del pipeline en orden de ejecucion.

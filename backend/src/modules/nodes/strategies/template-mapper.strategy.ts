@@ -11,6 +11,15 @@ import type {
   NodeResult,
 } from '@core/fsm/types/node-strategy.types';
 
+/**
+ * Codigos de fallo del nodo. Son lo que un `catchErrors` puede mencionar, y se
+ * separan porque enrutar "faltan variables" a un nodo de aviso es util mientras
+ * que enrutar "la plantilla no existe" al mismo sitio casi nunca lo es.
+ */
+export const ERR_TEMPLATE_NOT_RESOLVED = 'ERR_TEMPLATE_NOT_RESOLVED';
+export const ERR_TEMPLATE_MISSING_VARS = 'ERR_TEMPLATE_MISSING_VARS';
+export const ERR_TEMPLATE_RENDER = 'ERR_TEMPLATE_RENDER';
+
 /** Plantilla lista para compilar, venga de la base de datos o de `rawTemplate`. */
 interface ResolvedTemplate {
   readonly htmlContent: string;
@@ -83,6 +92,7 @@ export class TemplateMapperStrategy implements INodeStrategy {
         success: false,
         error: {
           level: 'GRAVE',
+          code: ERR_TEMPLATE_MISSING_VARS,
           message: `El contexto no aporta ${outcome.missingFields.length} variable(s) que la plantilla requiere.`,
           missingFields: outcome.missingFields,
         },
@@ -94,6 +104,7 @@ export class TemplateMapperStrategy implements INodeStrategy {
         success: false,
         error: {
           level: 'GRAVE',
+          code: ERR_TEMPLATE_RENDER,
           message: `Fallo al compilar la plantilla: ${outcome.failure}`,
           ...(outcome.stackTrace !== undefined
             ? { stackTrace: outcome.stackTrace }
@@ -137,6 +148,7 @@ export class TemplateMapperStrategy implements INodeStrategy {
     return {
       failure: {
         level: 'GRAVE',
+        code: ERR_TEMPLATE_NOT_RESOLVED,
         message:
           'El nodo requiere un parametro "templateId" con el identificador de la plantilla.',
         missingFields: ['templateId'],
@@ -156,6 +168,7 @@ export class TemplateMapperStrategy implements INodeStrategy {
         return {
           failure: {
             level: 'GRAVE',
+            code: ERR_TEMPLATE_NOT_RESOLVED,
             message: `La plantilla "${template.name}" (${templateId}) esta desactivada y no puede usarse.`,
           },
         };
@@ -175,6 +188,7 @@ export class TemplateMapperStrategy implements INodeStrategy {
       return {
         failure: {
           level: 'GRAVE',
+          code: ERR_TEMPLATE_NOT_RESOLVED,
           message: `No se pudo resolver la plantilla "${templateId}": ${error instanceof Error ? error.message : String(error)}`,
         },
       };

@@ -38,7 +38,7 @@ describe('buildOrderedTopology', () => {
         buildNode({
           nodeId: 'destino',
           nodeType: NodeType.DESTINO_HTTP,
-          outputNamespace: 'destino_http',
+          outputNamespace: 'http_result',
         }),
         buildNode({
           nodeId: 'mapeador',

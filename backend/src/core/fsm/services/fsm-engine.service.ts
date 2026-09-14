@@ -15,6 +15,12 @@ import { FsmExecution } from '@core/fsm/entities/fsm-execution.entity';
 import { StrategyNotFoundException } from '@core/fsm/exceptions/strategy-not-found.exception';
 import { NodeStrategyFactory } from '@core/fsm/factories/node-strategy.factory';
 import { ExecutionState } from '@core/fsm/types/fsm.enums';
+import {
+  ERR_NODE_CRASHED,
+  ERR_NODE_HTTP_FAILURE,
+  ERR_STRATEGY_NOT_FOUND,
+} from '@core/fsm/types/node-strategy.types';
+import { resolveErrorTarget } from '@core/fsm/utils/pipeline-topology.util';
 
 import type { PipelineNodeConfigDto } from '@core/fsm/dto/pipeline-schema.dto';
 import type { PipelineSchemaDto } from '@core/fsm/dto/pipeline-schema.dto';
@@ -95,6 +101,8 @@ interface CheckpointPatch {
   retryState: RetryState;
   /** Solo lo escribe el desenlace catastrofico; las transiciones normales no. */
   logFilePath?: string | null;
+  /** Motivo legible del cierre. Lo escribe el desenlace por severidad LEVE. */
+  failureReason?: string | null;
 }
 
 /**
@@ -523,6 +531,32 @@ export class FsmEngineService {
 
         if (result.success) {
           context.setNamespace(node.outputNamespace, result.data ?? {});
+
+          // --- Parada ordenada pedida por el propio nodo. Va ANTES de mirar
+          // `nextStep`: el disparador no encontro nada que procesar, asi que los
+          // pasos siguientes no tienen entrada y ejecutarlos solo produciria un
+          // fallo de interpolacion sobre un namespace incompleto.
+          //
+          // Anular el cursor en vez de terminar aqui reutiliza el cierre EXITOSO
+          // de la salida del bucle, que es el mismo punto donde termina un flujo
+          // que agota su grafo: una sola escritura del checkpoint final.
+          //
+          // El namespace ya escrito se conserva a proposito —lleva el motivo que
+          // devolvio la estrategia— para que la trazabilidad explique por que la
+          // ejecucion termino en un unico paso.
+          if (result.halt !== undefined) {
+            this.logger.log(
+              `ejecucion=${executionId} | Nodo "${node.nodeId}" detiene el flujo: ${result.halt.reason}`,
+            );
+            // Marca TRANSITORIA, no columna: es lo unico que distingue esta
+            // salida de la del nodo terminal, porque ambas dejan la fila en
+            // EXITOSO con el cursor nulo. Quien despacha la lee para no tratar
+            // un "no habia nada que hacer" como un trabajo completado.
+            execution.haltReason = result.halt.reason;
+            cursor = null;
+            break;
+          }
+
           cursor = node.nextStep;
 
           // Con el cursor ya nulo no se persiste nada aqui: el nodo terminal
@@ -543,12 +577,22 @@ export class FsmEngineService {
           continue;
         }
 
+        const errorCode = result.error?.code ?? ERR_NODE_CRASHED;
+
         this.logger.warn(
-          `${result.error?.level ?? 'URGENTE'} | ejecucion=${executionId} | Nodo "${node.nodeId}": ${result.error?.message ?? 'fallo sin detalle'}`,
+          `${result.error?.level ?? 'URGENTE'} | ${errorCode} | ejecucion=${executionId} | Nodo "${node.nodeId}": ${result.error?.message ?? 'fallo sin detalle'}`,
         );
 
-        if (node.onErrorStep !== null) {
-          cursor = node.onErrorStep;
+        // --- 1. Ruta de recuperacion declarada. Va PRIMERO, incluso antes del
+        // cierre por LEVE de abajo: un `catchErrors` que menciona este codigo es
+        // una decision explicita del disenador del flujo, y el cierre por
+        // severidad es solo el comportamiento por defecto. Al reves, una ruta
+        // declarada para un codigo LEVE no se dispararia jamas, y el sintoma
+        // —un nodo de respaldo que nunca corre— seria mudo.
+        const errorTarget = resolveErrorTarget(node.onErrorStep, errorCode);
+
+        if (errorTarget !== null) {
+          cursor = errorTarget;
           context.setCursor(cursor);
 
           await this.saveCheckpoint(execution, {
@@ -560,8 +604,34 @@ export class FsmEngineService {
           continue;
         }
 
-        // Sin ruta de recuperacion: se detiene conservando el cursor culpable,
-        // que es lo que permite el reintento manual de CU-09.
+        // --- 2. Un LEVE no pausa: cierra.
+        //
+        // Pausar reserva el cursor para el reintento manual de CU-09, y una
+        // incidencia transitoria no necesita a nadie: el sondeo vuelve en un
+        // minuto. Sin esto, media hora de red caida deja treinta filas PAUSADO
+        // —una por tick, porque PAUSADO no reserva el mutex `idx_flujo_activo`—
+        // todas reclamando atencion humana que no hace falta.
+        //
+        // FALLIDO y no EXITOSO porque la ejecucion fallo de verdad, y la columna
+        // `estado` es lo que lee despues la trazabilidad. Sin volcado forense:
+        // eso lo reserva `failCatastrophically` para cuando se rompe el propio
+        // ejecutor, y escribir un `.log` por minuto durante una caida seria
+        // ruido que enterraria los incidentes reales.
+        if (result.error?.level === 'LEVE') {
+          await this.saveCheckpoint(execution, {
+            currentState: ExecutionState.FALLIDO,
+            // Sin cursor: no hay nada que reanudar, y dejarlo puesto ofreceria
+            // un reintento manual sobre un fallo que se reintenta solo.
+            activeCursor: null,
+            contextPayload: context.getAllContext(),
+            retryState,
+            failureReason: truncateFailureReason(result.error.message),
+          });
+          break;
+        }
+
+        // --- 3. Sin ruta de recuperacion: se detiene conservando el cursor
+        // culpable, que es lo que permite el reintento manual de CU-09.
         await this.pauseAt(execution, cursor, context, retryState);
         break;
       }
@@ -736,6 +806,7 @@ export class FsmEngineService {
           success: false,
           error: {
             level: 'URGENTE',
+            code: ERR_NODE_CRASHED,
             message: this.describeError(error),
             stackTrace: error instanceof Error ? error.stack : undefined,
           },
@@ -769,14 +840,22 @@ export class FsmEngineService {
     if (error instanceof StrategyNotFoundException) {
       return {
         success: false,
-        error: { level: 'GRAVE', message: this.describeError(error) },
+        error: {
+          level: 'GRAVE',
+          code: ERR_STRATEGY_NOT_FOUND,
+          message: this.describeError(error),
+        },
       };
     }
 
     if (error instanceof HttpException) {
       return {
         success: false,
-        error: { level: 'GRAVE', message: this.describeError(error) },
+        error: {
+          level: 'GRAVE',
+          code: ERR_NODE_HTTP_FAILURE,
+          message: this.describeError(error),
+        },
       };
     }
 

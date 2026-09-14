@@ -17,6 +17,9 @@ import type {
 import type { ResolvedCronTriggerConfig } from '@modules/nodes/dto/cron-trigger-config.dto';
 import type { ValidatorOptions } from 'class-validator';
 
+/** Codigo de fallo del nodo. Es lo que un `catchErrors` puede mencionar. */
+export const ERR_CRON_CONFIG = 'ERR_CRON_CONFIG';
+
 /**
  * Una clave desconocida en `params` es un rechazo y no una omision: un
  * `cronExpresion` mal escrito debe fallar aqui y no dejar el nodo corriendo con
@@ -83,6 +86,7 @@ export class CronTriggerStrategy implements INodeStrategy {
         success: false,
         error: {
           level: 'GRAVE',
+          code: ERR_CRON_CONFIG,
           message: `Configuracion invalida del nodo CRON: ${constraints.join(' ')}`,
           missingFields: errors.map((error) => error.property),
         },

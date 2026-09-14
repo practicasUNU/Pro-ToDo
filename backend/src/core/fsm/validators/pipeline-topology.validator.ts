@@ -1,3 +1,9 @@
+import { declaredErrorTarget } from '@core/fsm/utils/pipeline-topology.util';
+import {
+  NODE_OUTPUT_NAMESPACE_SET,
+  NODE_OUTPUT_NAMESPACES,
+} from '@core/fsm/types/pipeline-schema.types';
+
 import type { PipelineSchemaDto } from '@core/fsm/dto/pipeline-schema.dto';
 
 /**
@@ -11,8 +17,10 @@ export interface SchemaIssue {
   constraints: string[];
 }
 
-/** Punteros de un nodo que deben resolver contra el mapa `nodes`. */
-const NODE_POINTERS = ['nextStep', 'onErrorStep'] as const;
+// `nextStep` y `onErrorStep` ya no se pueden recorrer con un bucle comun: el
+// primero es un `string | null` directo y el segundo admite ademas la forma
+// selectiva `{ targetNode, catchErrors }`. Quien conoce esa union es
+// `declaredErrorTarget`, y este validador le pregunta en vez de inspeccionarla.
 
 /** Comprueba la pertenencia a `nodes` sin heredar claves de `Object.prototype`. */
 const hasNode = (schema: PipelineSchemaDto, nodeId: string): boolean =>
@@ -30,9 +38,13 @@ const hasNode = (schema: PipelineSchemaDto, nodeId: string): boolean =>
  * 2. La clave del mapa coincide con el `nodeId` del nodo (evita que mapa y nodo
  *    se desincronicen: el motor indexa por clave y la estrategia lee `nodeId`).
  * 3. Todo `nextStep` / `onErrorStep` no nulo resuelve a un nodo existente.
- * 4. Ningun `outputNamespace` se repite: dos nodos escribiendo en el mismo
+ * 4. Todo `outputNamespace` pertenece a `NODE_OUTPUT_NAMESPACES`. El formato ya
+ *    lo comprueba el DTO; aqui se comprueba la PERTENENCIA, porque un namespace
+ *    bien formado pero desconocido pasaria el esquema y solo reventaria despues,
+ *    al guardar una plantilla que lo interpola.
+ * 5. Ningun `outputNamespace` se repite: dos nodos escribiendo en el mismo
  *    namespace romperian la inmutabilidad del `StatePayloadContext`.
- * 5. El camino activo desde `entrypoint` siguiendo `nextStep` termina en un nodo
+ * 6. El camino activo desde `entrypoint` siguiendo `nextStep` termina en un nodo
  *    terminal (`nextStep === null`) sin revisitar ninguno.
  *
  * Los nodos inalcanzables desde `entrypoint` se ignoran deliberadamente: un flujo
@@ -58,7 +70,7 @@ export const validatePipelineTopology = (
     });
   }
 
-  // 2, 3 y 4. Recorrido del mapa completo, nodo a nodo.
+  // 2, 3, 4 y 5. Recorrido del mapa completo, nodo a nodo.
   const namespaceOwners = new Map<string, string>();
 
   for (const [key, node] of Object.entries(schema.nodes)) {
@@ -71,17 +83,36 @@ export const validatePipelineTopology = (
       });
     }
 
-    for (const pointer of NODE_POINTERS) {
-      const target = node[pointer];
+    if (node.nextStep !== null && !hasNode(schema, node.nextStep)) {
+      issues.push({
+        field: `nodes.${key}.nextStep`,
+        constraints: [
+          `nextStep apunta a "${node.nextStep}", que no existe en el mapa de nodos.`,
+        ],
+      });
+    }
 
-      if (target !== null && !hasNode(schema, target)) {
-        issues.push({
-          field: `nodes.${key}.${pointer}`,
-          constraints: [
-            `${pointer} apunta a "${target}", que no existe en el mapa de nodos.`,
-          ],
-        });
-      }
+    // Se valida el destino DECLARADO y no el efectivo: que la ruta atrape unos
+    // codigos u otros es indiferente aqui, porque apuntar a un nodo inexistente
+    // rompe el esquema aunque ese codigo no llegue a ocurrir nunca.
+    const errorTarget = declaredErrorTarget(node.onErrorStep);
+
+    if (errorTarget !== null && !hasNode(schema, errorTarget)) {
+      issues.push({
+        field: `nodes.${key}.onErrorStep`,
+        constraints: [
+          `onErrorStep apunta a "${errorTarget}", que no existe en el mapa de nodos.`,
+        ],
+      });
+    }
+
+    if (!NODE_OUTPUT_NAMESPACE_SET.has(node.outputNamespace)) {
+      issues.push({
+        field: `nodes.${key}.outputNamespace`,
+        constraints: [
+          `El namespace "${node.outputNamespace}" no esta permitido. Solo se admiten: ${NODE_OUTPUT_NAMESPACES.join(', ')}.`,
+        ],
+      });
     }
 
     const owner = namespaceOwners.get(node.outputNamespace);

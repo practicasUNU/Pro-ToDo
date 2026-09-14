@@ -12,6 +12,7 @@ import { PipelineValidatorService } from '@core/fsm/services/pipeline-validator.
 import { buildOrderedTopology } from '@core/fsm/utils/pipeline-topology.util';
 import { WorkflowTemplatesService } from '@modules/workflow-templates/workflow-templates.service';
 
+import { ExecutionState } from '@core/fsm/types/fsm.enums';
 import { NodeType } from '@core/fsm/types/pipeline-schema.types';
 
 import { DEFAULT_MOCK_NAMESPACES } from './dto/execute-test-workflow.dto';
@@ -25,6 +26,8 @@ import type { WorkflowDetailResponseDto } from './dto/workflow-detail-response.d
 import type { ExecuteTestWorkflowDto } from './dto/execute-test-workflow.dto';
 import type { WorkflowExecutionResponseDto } from './dto/workflow-execution-response.dto';
 
+import type { FsmExecution } from '@core/fsm/entities/fsm-execution.entity';
+import type { PipelineSchema } from '@core/fsm/types/pipeline-schema.types';
 import type { Repository } from 'typeorm';
 
 /**
@@ -190,7 +193,57 @@ export class WorkflowsService {
       schema,
     );
 
+    await this.applyStopOnFirstSuccess(workflow, schema, finished);
+
     return finished.executionId;
+  }
+
+  /**
+   * Apaga el flujo si su esquema declara `executionPolicy.stopOnFirstSuccess`.
+   *
+   * Tres condiciones, y las tres importan:
+   *
+   * 1. La politica esta declarada y en `true`.
+   * 2. La ejecucion cerro en EXITOSO.
+   * 3. `haltReason` es `undefined`, es decir, recorrio el grafo ENTERO. Una
+   *    ejecucion detenida por `halt` tambien cierra en EXITOSO —un buzon sin
+   *    correos nuevos no es un fallo— pero no hizo ningun trabajo: sin esta
+   *    tercera condicion, un flujo IMAP con la politica activa se apagaria en su
+   *    primer sondeo en vacio, antes de haber procesado un solo correo.
+   *
+   * Vive aqui y no en `FsmEngineService` porque desactivar es tocar la entidad
+   * `Workflow`, que pertenece a `@modules`: el motor esta en `@core` y no puede
+   * importar de ahi. El motor se limita a informar de COMO termino; que hacer
+   * con esa informacion es una decision de negocio.
+   *
+   * Solo se invoca desde el despacho automatico. `executeTestWorkflow` queda
+   * fuera a proposito: el banco de pruebas existe para iterar sobre un flujo, y
+   * apagarlo en cada prueba exitosa lo convertiria en un interruptor.
+   */
+  private async applyStopOnFirstSuccess(
+    workflow: Workflow,
+    schema: PipelineSchema,
+    finished: FsmExecution,
+  ): Promise<void> {
+    if (
+      schema.executionPolicy?.stopOnFirstSuccess !== true ||
+      finished.currentState !== ExecutionState.EXITOSO ||
+      finished.haltReason !== undefined
+    ) {
+      return;
+    }
+
+    workflow.active = false;
+    await this.workflowRepository.save(workflow);
+
+    this.logger.log(
+      `Flujo "${workflow.name}" (${workflow.id}) desactivado automaticamente por executionPolicy.stopOnFirstSuccess | ejecucion=${finished.executionId}`,
+    );
+
+    // Reutiliza la limpieza de la desactivacion manual: el residuo es el mismo
+    // —temporizador en memoria y ejecuciones vivas— y duplicar el orden de esas
+    // dos operaciones seria duplicar tambien la razon por la que va en ese orden.
+    await this.releaseDeactivatedFlow(workflow);
   }
 
   /**

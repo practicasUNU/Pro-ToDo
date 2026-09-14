@@ -7,6 +7,8 @@ import {
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 
+import { NODE_OUTPUT_NAMESPACES } from '@core/fsm/types/pipeline-schema.types';
+
 import { CreateTemplateDto } from './dto/create-template.dto';
 import { PreviewTemplateDto } from './dto/preview-template.dto';
 import { UpdateTemplateDto } from './dto/update-template.dto';
@@ -23,26 +25,25 @@ import type { FindOptionsWhere } from 'typeorm';
 /**
  * Namespaces que una plantilla puede referenciar.
  *
- * Lista CERRADA y ordenada por posicion en el flujo. Es la lista blanca contra
- * la que se valida toda variable de una plantilla: si un namespace no esta
- * aqui, ningun nodo lo escribira nunca y la variable jamas resolveria.
+ * Lista CERRADA. Es la lista blanca contra la que se valida toda variable de una
+ * plantilla: si un namespace no esta aqui, ningun nodo lo escribira nunca y la
+ * variable jamas resolveria.
  *
- * El ultimo, `_assets`, es el unico que NO produce ningun nodo: lo inyecta
- * `TemplateRendererService` desde `ASSETS_BASE_URL` en cada render. Se admite
- * aqui porque, sin el, `{{_assets.base_url}}` seria un namespace desconocido y
- * la plantilla se rechazaria al guardar aunque en ejecucion resolviese
- * perfectamente. El guion bajo inicial lo distingue a simple vista de un
- * namespace de nodo, que `OUTPUT_NAMESPACE_PATTERN` obliga a empezar por
+ * Se DERIVA de `NODE_OUTPUT_NAMESPACES` (`@core/fsm`) en lugar de repetir sus
+ * valores: son la misma lista vista desde dos lados —lo que un nodo puede
+ * escribir y lo que una plantilla puede leer— y mantenerlas por separado
+ * garantizaba que tarde o temprano divergieran.
+ *
+ * `_assets` es el unico anadido, y el unico que NO produce ningun nodo: lo
+ * inyecta `TemplateRendererService` desde `ASSETS_BASE_URL` en cada render. Se
+ * admite aqui porque, sin el, `{{_assets.base_url}}` seria un namespace
+ * desconocido y la plantilla se rechazaria al guardar aunque en ejecucion
+ * resolviese perfectamente. El guion bajo inicial lo distingue a simple vista de
+ * un namespace de nodo, que `OUTPUT_NAMESPACE_PATTERN` obliga a empezar por
  * `[a-z0-9]`.
  */
 export const ALLOWED_NAMESPACES = [
-  'raw_email',
-  'cron_trigger',
-  'parsed_email',
-  'scraped_web',
-  'llm_response',
-  'validated_drupal_json',
-  'rendered_html',
+  ...NODE_OUTPUT_NAMESPACES,
   ASSETS_NAMESPACE,
 ] as const;
 

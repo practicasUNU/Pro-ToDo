@@ -26,6 +26,10 @@ import type {
 } from '@core/fsm/types/node-strategy.types';
 import type { Repository } from 'typeorm';
 
+/** Codigo por defecto de los fallos de prueba; el que `catchErrors` menciona. */
+const TEST_ERROR_CODE = 'ERR_TEST';
+const OTHER_ERROR_CODE = 'ERR_OTRO';
+
 const EXECUTION_ID = 'd4c3b2a1-9f8e-4d7c-8b6a-5e4f3d2c1b0a';
 const FLOW_ID = 'b3f1c2d4-5a6b-4c7d-8e9f-0a1b2c3d4e5f';
 
@@ -104,10 +108,14 @@ const buildStrategy = (
   execute: jest.Mock,
 ): INodeStrategy => ({ nodeType, execute });
 
-/** `NodeResult` fallido con la severidad indicada. */
-const failure = (level: NodeErrorSeverity, message = 'fallo'): NodeResult => ({
+/** `NodeResult` fallido con la severidad y el codigo indicados. */
+const failure = (
+  level: NodeErrorSeverity,
+  message = 'fallo',
+  code = TEST_ERROR_CODE,
+): NodeResult => ({
   success: false,
-  error: { level, message },
+  error: { level, code, message },
 });
 
 /**
@@ -260,6 +268,104 @@ describe('FsmEngineService (PROT-09)', () => {
           patch.activeCursor,
       );
       expect(cursors).toEqual(['nodo_a', 'nodo_b', 'nodo_c', null]);
+    });
+  });
+
+  describe('1.1 Parada ordenada pedida por un nodo (`halt`)', () => {
+    it('deberia cerrar en EXITOSO sin invocar los nodos siguientes', async () => {
+      // 1. Arrange: el disparador no encuentra nada que procesar y pide parar.
+      const execution = buildExecution();
+      const { repo, update } = buildRepository(execution);
+      const executeA = jest.fn().mockResolvedValue({
+        success: true,
+        data: { status: 'NO_MESSAGES_FOUND' },
+        halt: { reason: 'El buzon no contiene mensajes nuevos que procesar.' },
+      });
+      const executeB = jest.fn().mockResolvedValue({ success: true });
+      const executeC = jest.fn().mockResolvedValue({ success: true });
+
+      factory.registerStrategy(buildStrategy(NodeType.TRIGGER_IMAP, executeA));
+      factory.registerStrategy(buildStrategy(NodeType.PROCESADOR_IA, executeB));
+      factory.registerStrategy(buildStrategy(NodeType.DESTINO_HTTP, executeC));
+
+      // 2. Act
+      const result = await buildEngine(repo).executeWorkflow(
+        EXECUTION_ID,
+        buildLinearSchema(),
+      );
+
+      // 3. Assert
+      expect(executeA).toHaveBeenCalledTimes(1);
+      expect(executeB).not.toHaveBeenCalled();
+      expect(executeC).not.toHaveBeenCalled();
+      expect(result.currentState).toBe(ExecutionState.EXITOSO);
+      expect(result.activeCursor).toBeNull();
+      // El motivo queda en el contexto: es lo que explica en trazabilidad por
+      // que la ejecucion termino en un unico paso.
+      expect(result.contextPayload).toEqual({
+        salida_a: { status: 'NO_MESSAGES_FOUND' },
+      });
+      // Marca inicial EN_PROCESO + el checkpoint final. Sin transiciones
+      // intermedias: el cursor nunca llego a avanzar.
+      expect(update).toHaveBeenCalledTimes(2);
+      // La marca transitoria es lo UNICO que distingue esta salida de la del
+      // nodo terminal: ambas dejan la fila en EXITOSO con el cursor nulo.
+      expect(result.haltReason).toBe(
+        'El buzon no contiene mensajes nuevos que procesar.',
+      );
+    });
+
+    it('no deberia marcar haltReason cuando recorre el grafo entero', async () => {
+      // 1. Arrange: la contrapartida del caso anterior. Sin esta prueba, un
+      //    `haltReason` que quedase pegado haria que `stopOnFirstSuccess` no
+      //    desactivase nunca, y el fallo seria invisible.
+      const execution = buildExecution();
+      const { repo } = buildRepository(execution);
+      const execute = jest.fn().mockResolvedValue({ success: true });
+
+      factory.registerStrategy(buildStrategy(NodeType.TRIGGER_IMAP, execute));
+      factory.registerStrategy(buildStrategy(NodeType.PROCESADOR_IA, execute));
+      factory.registerStrategy(buildStrategy(NodeType.DESTINO_HTTP, execute));
+
+      // 2. Act
+      const result = await buildEngine(repo).executeWorkflow(
+        EXECUTION_ID,
+        buildLinearSchema(),
+      );
+
+      // 3. Assert
+      expect(result.currentState).toBe(ExecutionState.EXITOSO);
+      expect(result.haltReason).toBeUndefined();
+    });
+
+    it('deberia ignorar `halt` en un nodo que falla y seguir su ruta de error', async () => {
+      // 1. Arrange: `halt` solo se atiende con `success: true`; aqui manda el
+      // fallo, que tiene sus propias rutas (`onErrorStep`).
+      const execution = buildExecution();
+      const { repo } = buildRepository(execution);
+      const schema = buildLinearSchema();
+      schema.nodes.nodo_a.onErrorStep = 'nodo_c';
+
+      const executeA = jest.fn().mockResolvedValue({
+        ...failure('LEVE'),
+        halt: { reason: 'no deberia atenderse' },
+      });
+      const executeB = jest.fn().mockResolvedValue({ success: true });
+      const executeC = jest.fn().mockResolvedValue({ success: true });
+
+      factory.registerStrategy(buildStrategy(NodeType.TRIGGER_IMAP, executeA));
+      factory.registerStrategy(buildStrategy(NodeType.PROCESADOR_IA, executeB));
+      factory.registerStrategy(buildStrategy(NodeType.DESTINO_HTTP, executeC));
+
+      // 2. Act
+      const result = await buildEngine(repo).executeWorkflow(
+        EXECUTION_ID,
+        schema,
+      );
+
+      // 3. Assert
+      expect(executeC).toHaveBeenCalledTimes(1);
+      expect(result.currentState).toBe(ExecutionState.EXITOSO);
     });
   });
 
@@ -421,14 +527,16 @@ describe('FsmEngineService (PROT-09)', () => {
       expect(result.contextPayload.salida_a).toEqual({ valorA: 1 });
     });
 
-    it('deberia pausar sin reintentar cuando la severidad es LEVE', async () => {
-      // 1. Arrange: LEVE no es reintentable aunque el nodo declare politica
+    it('deberia cerrar sin reintentar ni pausar cuando la severidad es LEVE', async () => {
+      // 1. Arrange: LEVE no es reintentable aunque el nodo declare politica.
       const execution = buildExecution();
       const { repo } = buildRepository(execution);
       const schema = buildLinearSchema();
       schema.nodes.nodo_a.retryPolicy = { maxRetries: 5 };
 
-      const executeA = jest.fn().mockResolvedValue(failure('LEVE'));
+      const executeA = jest
+        .fn()
+        .mockResolvedValue(failure('LEVE', 'Se agoto el tiempo de espera'));
       factory.registerStrategy(buildStrategy(NodeType.TRIGGER_IMAP, executeA));
 
       // 2. Act
@@ -437,10 +545,175 @@ describe('FsmEngineService (PROT-09)', () => {
         schema,
       );
 
-      // 3. Assert
+      // 3. Assert: FALLIDO y no PAUSADO. Pausar reservaria el cursor para el
+      //    reintento manual de CU-09, y una incidencia transitoria se reintenta
+      //    sola en el siguiente sondeo.
       expect(executeA).toHaveBeenCalledTimes(1);
-      expect(result.currentState).toBe(ExecutionState.PAUSADO);
+      expect(result.currentState).toBe(ExecutionState.FALLIDO);
+      expect(result.activeCursor).toBeNull();
+      expect(result.failureReason).toBe('Se agoto el tiempo de espera');
       expect(result.retryState).toEqual({});
+    });
+
+    it('NO deberia volcar un .log forense al cerrar por LEVE', async () => {
+      // 1. Arrange: el volcado lo reserva el desenlace catastrofico. Escribir un
+      //    fichero por minuto durante una caida de red enterraria los
+      //    incidentes reales bajo el ruido.
+      const execution = buildExecution();
+      const { repo } = buildRepository(execution);
+
+      factory.registerStrategy(
+        buildStrategy(
+          NodeType.TRIGGER_IMAP,
+          jest.fn().mockResolvedValue(failure('LEVE')),
+        ),
+      );
+
+      // 2. Act
+      const result = await buildEngine(repo).executeWorkflow(
+        EXECUTION_ID,
+        buildLinearSchema(),
+      );
+
+      // 3. Assert
+      expect(hybridLogger.logCatastrophicFailure).not.toHaveBeenCalled();
+      expect(result.logFilePath).toBeNull();
+    });
+  });
+
+  describe('5bis. Captura selectiva de errores en onErrorStep', () => {
+    /** Registra las tres estrategias del pipeline lineal con un fallo en A. */
+    const registerFailingEntrypoint = (
+      result: NodeResult,
+    ): { executeA: jest.Mock; executeC: jest.Mock } => {
+      const executeA = jest.fn().mockResolvedValue(result);
+      const executeC = jest.fn().mockResolvedValue({ success: true });
+
+      factory.registerStrategy(buildStrategy(NodeType.TRIGGER_IMAP, executeA));
+      factory.registerStrategy(
+        buildStrategy(
+          NodeType.PROCESADOR_IA,
+          jest.fn().mockResolvedValue({ success: true }),
+        ),
+      );
+      factory.registerStrategy(buildStrategy(NodeType.DESTINO_HTTP, executeC));
+
+      return { executeA, executeC };
+    };
+
+    it('5b.1 deberia desviar SIEMPRE con la forma heredada de cadena', async () => {
+      // 1. Arrange: la compatibilidad con los esquemas ya persistidos. Una
+      //    cadena no discrimina: atrapa cualquier codigo.
+      const execution = buildExecution();
+      const { repo } = buildRepository(execution);
+      const schema = buildLinearSchema();
+      schema.nodes.nodo_a.onErrorStep = 'nodo_c';
+      const { executeC } = registerFailingEntrypoint(
+        failure('GRAVE', 'fallo', OTHER_ERROR_CODE),
+      );
+
+      // 2. Act
+      const result = await buildEngine(repo).executeWorkflow(
+        EXECUTION_ID,
+        schema,
+      );
+
+      // 3. Assert
+      expect(executeC).toHaveBeenCalledTimes(1);
+      expect(result.currentState).toBe(ExecutionState.EXITOSO);
+    });
+
+    it('5b.2 deberia desviar cuando catchErrors incluye el codigo', async () => {
+      // 1. Arrange
+      const execution = buildExecution();
+      const { repo } = buildRepository(execution);
+      const schema = buildLinearSchema();
+      schema.nodes.nodo_a.onErrorStep = {
+        targetNode: 'nodo_c',
+        catchErrors: [TEST_ERROR_CODE],
+      };
+      const { executeC } = registerFailingEntrypoint(failure('GRAVE'));
+
+      // 2. Act
+      const result = await buildEngine(repo).executeWorkflow(
+        EXECUTION_ID,
+        schema,
+      );
+
+      // 3. Assert
+      expect(executeC).toHaveBeenCalledTimes(1);
+      expect(result.currentState).toBe(ExecutionState.EXITOSO);
+    });
+
+    it('5b.3 deberia PAUSAR cuando catchErrors no incluye el codigo', async () => {
+      // 1. Arrange: es lo que hace util declarar una ruta selectiva. Si atrapase
+      //    todo seria una cadena con pasos de mas.
+      const execution = buildExecution();
+      const { repo } = buildRepository(execution);
+      const schema = buildLinearSchema();
+      schema.nodes.nodo_a.onErrorStep = {
+        targetNode: 'nodo_c',
+        catchErrors: [OTHER_ERROR_CODE],
+      };
+      const { executeC } = registerFailingEntrypoint(failure('GRAVE'));
+
+      // 2. Act
+      const result = await buildEngine(repo).executeWorkflow(
+        EXECUTION_ID,
+        schema,
+      );
+
+      // 3. Assert
+      expect(executeC).not.toHaveBeenCalled();
+      expect(result.currentState).toBe(ExecutionState.PAUSADO);
+      expect(result.activeCursor).toBe('nodo_a');
+    });
+
+    it('5b.4 deberia dar prioridad a la ruta declarada sobre el cierre por LEVE', async () => {
+      // 1. Arrange: un `catchErrors` que menciona un codigo LEVE es una decision
+      //    explicita del disenador del flujo y debe ganar al comportamiento por
+      //    defecto. Al reves, el nodo de respaldo no correria jamas y el sintoma
+      //    seria mudo.
+      const execution = buildExecution();
+      const { repo } = buildRepository(execution);
+      const schema = buildLinearSchema();
+      schema.nodes.nodo_a.onErrorStep = {
+        targetNode: 'nodo_c',
+        catchErrors: [TEST_ERROR_CODE],
+      };
+      const { executeC } = registerFailingEntrypoint(failure('LEVE'));
+
+      // 2. Act
+      const result = await buildEngine(repo).executeWorkflow(
+        EXECUTION_ID,
+        schema,
+      );
+
+      // 3. Assert
+      expect(executeC).toHaveBeenCalledTimes(1);
+      expect(result.currentState).toBe(ExecutionState.EXITOSO);
+    });
+
+    it('5b.5 deberia ignorar una ruta con catchErrors vacio', async () => {
+      // 1. Arrange: no atrapar nada es una declaracion valida, no un error.
+      const execution = buildExecution();
+      const { repo } = buildRepository(execution);
+      const schema = buildLinearSchema();
+      schema.nodes.nodo_a.onErrorStep = {
+        targetNode: 'nodo_c',
+        catchErrors: [],
+      };
+      const { executeC } = registerFailingEntrypoint(failure('GRAVE'));
+
+      // 2. Act
+      const result = await buildEngine(repo).executeWorkflow(
+        EXECUTION_ID,
+        schema,
+      );
+
+      // 3. Assert
+      expect(executeC).not.toHaveBeenCalled();
+      expect(result.currentState).toBe(ExecutionState.PAUSADO);
     });
   });
 

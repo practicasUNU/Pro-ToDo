@@ -239,6 +239,12 @@ export class WorkflowTemplatesService {
           `La plantilla "${template.id}" apunta al nodo inexistente "${orphanNodeId}": la topologia se truncara ahi.`,
         ),
       ),
+      // La clave se OMITE cuando la plantilla no declara politica, en vez de
+      // viajar como `undefined`: es lo que permite al asistente distinguir
+      // "no hereda nada" sin tener que interpretar un objeto vacio.
+      ...(template.pipelineSchema.executionPolicy !== undefined
+        ? { executionPolicy: template.pipelineSchema.executionPolicy }
+        : {}),
     };
   }
 
