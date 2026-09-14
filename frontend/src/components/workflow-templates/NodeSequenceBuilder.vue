@@ -8,6 +8,7 @@ import TemplateNodeCard from '@components/workflow-templates/TemplateNodeCard.vu
 import { extractApiErrorMessage } from '@/utils/api-error';
 
 import { NODE_CATEGORY_LABELS } from '@/types/node-catalog';
+import { DEFAULT_OUTPUT_NAMESPACE_BY_NODE_TYPE } from '@/types/pipeline';
 
 import type { AssemblerStep } from '@/utils/pipeline-assembler';
 import type { NodeCatalogEntry } from '@/types/node-catalog';
@@ -60,10 +61,15 @@ const isCatalogEmpty = computed<boolean>(
 /**
  * Deriva un `nodeId` libre a partir del codigo del tipo.
  *
- * El codigo en minusculas ya cumple el patron de `outputNamespace`
- * (`^[a-z0-9_]+$`), asi que sirve para los dos campos. El sufijo numerico cubre
- * el caso real de dos nodos del mismo tipo en un flujo (dos destinos HTTP, por
- * ejemplo): sin el, el segundo pisaria la clave del primero en `nodes`.
+ * Sirve SOLO para el `nodeId`. El `outputNamespace` sale de
+ * `DEFAULT_OUTPUT_NAMESPACE_BY_NODE_TYPE` y no de aqui: aunque el codigo en
+ * minusculas cumpla el patron del namespace, pertenecer a la lista blanca es
+ * otra cosa, y reutilizar este valor dejaba a un TRIGGER_IMAP escribiendo en
+ * `trigger_imap`, namespace que ninguna plantilla puede interpolar.
+ *
+ * El sufijo numerico cubre el caso real de dos nodos del mismo tipo en un flujo
+ * (dos destinos HTTP, por ejemplo): sin el, el segundo pisaria la clave del
+ * primero en `nodes`.
  */
 const deriveNodeId = (code: string, taken: readonly string[]): string => {
   const base = code.toLowerCase();
@@ -80,11 +86,21 @@ const emitSequence = (steps: AssemblerStep[]): void => {
   emit('update:modelValue', steps);
 };
 
+/**
+ * Anade el nodo elegido al final de la secuencia.
+ *
+ * El namespace por defecto NO se desambigua con un sufijo como el `nodeId`:
+ * `http_result_2` no esta en la lista blanca y seria un valor invalido con
+ * apariencia de valido. Dos nodos del mismo tipo comparten namespace a
+ * proposito, el validador de topologia lo senala como duplicado y el operador
+ * elige otro en el selector de la tarjeta, que solo ofrece valores legales.
+ */
 const addNode = (): void => {
   const entry = pendingEntry.value;
 
   if (entry === null || !entry.implemented) return;
 
+  const nodeType = entry.code as NodeType;
   const nodeId = deriveNodeId(
     entry.code,
     props.modelValue.map((step) => step.nodeId),
@@ -94,8 +110,8 @@ const addNode = (): void => {
     ...props.modelValue,
     {
       nodeId,
-      nodeType: entry.code as NodeType,
-      outputNamespace: nodeId,
+      nodeType,
+      outputNamespace: DEFAULT_OUTPUT_NAMESPACE_BY_NODE_TYPE[nodeType],
       params: {},
     },
   ]);

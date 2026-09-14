@@ -39,6 +39,51 @@ export const NODE_TYPE_LABELS: Record<NodeType, string> = {
 export const OUTPUT_NAMESPACE_PATTERN = /^[a-z0-9_]+$/;
 
 /**
+ * Namespaces que un nodo puede declarar como `outputNamespace`.
+ *
+ * Replica de `NODE_OUTPUT_NAMESPACES` del backend. Es una lista CERRADA: el
+ * validador de topologia rechaza cualquier valor fuera de ella, asi que el
+ * campo se ofrece como selector y nunca como texto libre (Poka-Yoke).
+ *
+ * `TEMPLATE_NAMESPACES` (`@/types/html-template`) se deriva de esta lista
+ * anadiendo `_assets`, que no lo escribe ningun nodo.
+ */
+export const NODE_OUTPUT_NAMESPACES = [
+  'raw_email',
+  'cron_trigger',
+  'parsed_email',
+  'scraped_web',
+  'llm_response',
+  'validated_drupal_json',
+  'rendered_html',
+  'http_result',
+] as const;
+
+/**
+ * Namespace de salida que se asigna a un nodo recien anadido al flujo.
+ *
+ * Replica de `NODE_OUTPUT_NAMESPACES` (`@core/fsm/types/pipeline-schema.types`)
+ * repartida por tipo. El `outputNamespace` NO se puede derivar del `nodeId`:
+ * son dos identificadores con dominios distintos —el `nodeId` desambigua nodos
+ * dentro del grafo, el namespace es la raiz de `{{ns.campo}}` en las plantillas
+ * y pertenece a una lista cerrada—, y confundirlos dejaba a un TRIGGER_IMAP
+ * escribiendo en `trigger_imap`, que ninguna plantilla puede interpolar.
+ *
+ * Se declara como `Record<NodeType, string>` y no como un mapa parcial para que
+ * el compilador exija una entrada al dar de alta un tipo de nodo nuevo.
+ */
+export const DEFAULT_OUTPUT_NAMESPACE_BY_NODE_TYPE: Record<NodeType, string> = {
+  [NodeType.TRIGGER_IMAP]: 'raw_email',
+  [NodeType.TRIGGER_CRON]: 'cron_trigger',
+  [NodeType.PARSER_PRE_IA]: 'parsed_email',
+  [NodeType.EXTRACTOR_WEB]: 'scraped_web',
+  [NodeType.PROCESADOR_IA]: 'llm_response',
+  [NodeType.ESCUDO_POST_IA]: 'validated_drupal_json',
+  [NodeType.MAPEADOR_PLANTILLA]: 'rendered_html',
+  [NodeType.DESTINO_HTTP]: 'http_result',
+};
+
+/**
  * Un paso del pipeline tal como lo devuelve `GET /api/workflows`.
  *
  * Replica de `PipelineStepDto` del backend, que es una proyeccion PARCIAL del
@@ -97,6 +142,14 @@ export interface WorkflowTemplateSummary {
   readonly description: string | null;
   readonly active: boolean;
   readonly topology: PipelineStep[];
+  /**
+   * Politica que el flujo instanciado hereda de la plantilla.
+   *
+   * Viaja PROYECTADA y no dentro del esquema, por el mismo motivo que
+   * `topology`: el listado no trae `pipelineSchema`. Ausente si la plantilla no
+   * declara ninguna.
+   */
+  readonly executionPolicy?: PipelineExecutionPolicy;
 }
 
 /**
@@ -240,14 +293,48 @@ export interface CreateWorkflowPayload {
   readonly templateId?: string;
 }
 
+/**
+ * Ruta de recuperacion que solo atrapa los codigos de error declarados.
+ *
+ * Replica de `SelectiveErrorFallback` del backend.
+ */
+export interface SelectiveErrorFallback {
+  readonly targetNode: string;
+  readonly catchErrors: readonly string[];
+}
+
 /** Nodo del `pipeline_schema` tal como lo ensambla el asistente. */
 export interface AssembledPipelineNode {
   readonly nodeId: string;
   readonly nodeType: NodeType;
   readonly outputNamespace: string;
   readonly nextStep: string | null;
-  readonly onErrorStep: string | null;
+  /**
+   * Cadena (respaldo incondicional), ruta selectiva, o `null` para detener.
+   *
+   * El asistente solo emite `null`; la union se replica porque el tipo describe
+   * lo que el backend ACEPTA, y un esquema editado a mano en el panel JSON de
+   * plantillas puede traer cualquiera de las tres formas.
+   */
+  readonly onErrorStep: string | SelectiveErrorFallback | null;
   readonly params: Record<string, unknown>;
+}
+
+/**
+ * Politica del flujo COMPLETO, frente a la de reintentos, que es por nodo.
+ *
+ * Replica de `PipelineExecutionPolicy` del backend. Viaja dentro del
+ * `pipeline_schema`, asi que se propaga sola de la plantilla al flujo
+ * instanciado siempre que quien reensambla el esquema la conserve.
+ */
+export interface PipelineExecutionPolicy {
+  /**
+   * Desactiva el flujo tras la primera ejecucion que recorra el grafo entero.
+   *
+   * Una ejecucion detenida por un disparador sin datos NO cuenta: el backend lo
+   * distingue para no apagar un flujo IMAP en su primer sondeo en vacio.
+   */
+  readonly stopOnFirstSuccess?: boolean;
 }
 
 /** Grafo completo que el asistente envia al backend. */
@@ -257,4 +344,5 @@ export interface AssembledPipelineSchema {
   readonly version: string;
   readonly entrypoint: string;
   readonly nodes: Record<string, AssembledPipelineNode>;
+  readonly executionPolicy?: PipelineExecutionPolicy;
 }

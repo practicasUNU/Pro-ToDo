@@ -7,6 +7,8 @@ import {
   stringifyParams,
 } from '@/utils/params-json';
 
+import { NODE_OUTPUT_NAMESPACES } from '@/types/pipeline';
+
 import type { AssemblerStep } from '@/utils/pipeline-assembler';
 
 // CodeMirror pesa cientos de KB y solo hace falta al desplegar un nodo; en
@@ -147,16 +149,18 @@ watch(
       <label class="pd-label" :for="`namespace-${props.step.nodeId}`">
         Namespace de salida<span class="pd-required">*</span>
       </label>
-      <q-input
+      <!-- Selector CERRADO, no entrada libre: el validador de topologia del
+           backend solo acepta los namespaces de la lista blanca, y teclearlos
+           a mano solo servia para descubrirlo con un 400 al guardar. -->
+      <q-select
         :id="`namespace-${props.step.nodeId}`"
         :model-value="props.step.outputNamespace"
+        :options="NODE_OUTPUT_NAMESPACES"
         outlined
         dense
+        emit-value
+        map-options
         class="q-mt-xs q-mb-md pd-mono"
-        maxlength="50"
-        :rules="[
-          (val: string) => /^[a-z0-9_]+$/.test(val) || 'Solo minusculas, digitos y guion bajo',
-        ]"
         @update:model-value="emit('update:namespace', String($event ?? ''))"
       />
 

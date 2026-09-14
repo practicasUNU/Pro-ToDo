@@ -2,6 +2,8 @@
 // Cualquier cambio en el backend debe reflejarse aqui: son el contrato entre
 // ambos lados.
 
+import { NODE_OUTPUT_NAMESPACES } from '@/types/pipeline';
+
 /** Fila de `plantillas_html`. */
 export interface HtmlTemplate {
   id: string;
@@ -85,13 +87,7 @@ export interface TemplatePreviewResponse {
  * para prefijar rutas relativas de imagen.
  */
 export const TEMPLATE_NAMESPACES = [
-  'raw_email',
-  'cron_trigger',
-  'parsed_email',
-  'scraped_web',
-  'llm_response',
-  'validated_drupal_json',
-  'rendered_html',
+  ...NODE_OUTPUT_NAMESPACES,
   '_assets',
 ] as const;
 
