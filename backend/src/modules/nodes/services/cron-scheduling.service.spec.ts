@@ -232,6 +232,63 @@ describe('CronSchedulingService · planificacion de nodos TRIGGER_CRON', () => {
       service.onModuleDestroy();
     });
 
+    it('1.5.1 no deberia programar un nodo CRON que NO es el entrypoint, y avisar', async () => {
+      // 1. Arrange: el disparador existe pero el flujo arranca en otro nodo, asi
+      //    que el motor nunca lo ejecutaria. Antes se programaba igual.
+      const workflow = buildWorkflow();
+      const schema = workflow.pipelineSchema;
+
+      if (schema !== null) {
+        schema.nodes.nodo_previo = {
+          nodeId: 'nodo_previo',
+          nodeType: NodeType.MAPEADOR_PLANTILLA,
+          outputNamespace: 'rendered_html',
+          nextStep: 'trigger_cron',
+          onErrorStep: null,
+          params: {},
+        };
+        schema.entrypoint = 'nodo_previo';
+      }
+
+      const { service, registry, warnSpy } = buildHarness({
+        workflowRows: [workflow],
+      });
+
+      // 2. Act
+      await service.onModuleInit();
+
+      // 3. Assert
+      expect(cronJobsOf(registry)).toHaveLength(0);
+      expect(warnSpy).toHaveBeenCalledTimes(1);
+      expect(warnSpy).toHaveBeenCalledWith(
+        expect.stringContaining('entrypoint'),
+      );
+      service.onModuleDestroy();
+    });
+
+    it('1.5.2 no deberia avisar de un flujo que simplemente no es CRON', async () => {
+      // 1. Arrange: un flujo IMAP pasando por el planificador Cron es el caso
+      //    NORMAL, y avisarlo taparia los avisos reales con ruido.
+      const workflow = buildWorkflow();
+      const schema = workflow.pipelineSchema;
+
+      if (schema !== null) {
+        schema.nodes.trigger_cron.nodeType = NodeType.TRIGGER_IMAP;
+      }
+
+      const { service, registry, warnSpy } = buildHarness({
+        workflowRows: [workflow],
+      });
+
+      // 2. Act
+      await service.onModuleInit();
+
+      // 3. Assert
+      expect(cronJobsOf(registry)).toHaveLength(0);
+      expect(warnSpy).not.toHaveBeenCalled();
+      service.onModuleDestroy();
+    });
+
     it('1.6 no deberia programar un flujo con params invalidos', async () => {
       // 1. Arrange: un esquema a medio escribir no puede impedir que el resto
       //    de los flujos queden programados al arrancar.

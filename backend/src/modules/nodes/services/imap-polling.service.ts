@@ -581,11 +581,23 @@ export class ImapPollingService implements OnModuleInit, OnModuleDestroy {
   }
 
   /**
-   * Localiza el nodo TRIGGER_IMAP de un flujo y valida sus `params`.
+   * Resuelve el nodo de ENTRADA del flujo y valida sus `params` como IMAP.
    *
-   * Devuelve `null` —y no lanza— cuando el flujo no tiene ese nodo o su
-   * configuracion es invalida: un esquema a medio escribir no debe impedir que
-   * el resto de los flujos queden programados al arrancar la aplicacion.
+   * Mira exclusivamente `schema.nodes[schema.entrypoint]`, y no busca un nodo
+   * del tipo por todo el grafo. Buscar por tipo daba tres comportamientos
+   * indeseables a la vez: sondeaba flujos cuyo nodo IMAP era intermedio y por
+   * tanto nunca arrancaba el recorrido; con dos disparadores del mismo tipo
+   * programaba uno no determinista, porque el orden de `Object.values` sobre un
+   * `Record` no esta garantizado; y un flujo con un nodo IMAP y otro Cron
+   * quedaba programado por los DOS servicios de sondeo a la vez.
+   *
+   * Quien decide que dispara un flujo es el `entrypoint`, que es justamente lo
+   * que el motor usa para arrancar el cursor. Este servicio se limita a leer esa
+   * misma fuente de verdad.
+   *
+   * Devuelve `null` —y no lanza— cuando el flujo no arranca por un nodo IMAP o
+   * su configuracion es invalida: un esquema a medio escribir no debe impedir
+   * que el resto de los flujos queden programados al arrancar la aplicacion.
    */
   private async extractImapConfig(
     workflow: Workflow,
@@ -604,18 +616,37 @@ export class ImapPollingService implements OnModuleInit, OnModuleDestroy {
       return null;
     }
 
-    const imapNode = Object.values(schema.nodes ?? {}).find(
-      (node) => node.nodeType === NodeType.TRIGGER_IMAP,
-    );
+    const entryNode = schema.nodes?.[schema.entrypoint];
 
-    if (imapNode === undefined) {
-      this.logger.debug(
-        `El flujo "${workflow.id}" no declara ningun nodo ${NodeType.TRIGGER_IMAP}: no se sondea.`,
+    if (entryNode?.nodeType !== NodeType.TRIGGER_IMAP) {
+      // Un nodo IMAP que existe pero NO es el punto de entrada es una topologia
+      // mal construida: el disparador no dispara nada, porque el motor arranca
+      // el cursor en otro sitio. Merece `warn` y no `debug` porque antes SI se
+      // sondeaba, y sin este aviso el flujo dejaria de ejecutarse sin que nada
+      // lo explique.
+      const hasOrphanTrigger = Object.values(schema.nodes ?? {}).some(
+        (node) => node.nodeType === NodeType.TRIGGER_IMAP,
       );
+
+      if (hasOrphanTrigger) {
+        this.logger.warn(
+          `El flujo "${workflow.id}" declara un nodo ${NodeType.TRIGGER_IMAP} que NO es su entrypoint ("${schema.entrypoint}"): no se sondea. Reordena el flujo para que el disparador sea el primer paso.`,
+        );
+
+        return null;
+      }
+
+      // Sin nodo IMAP en ninguna parte no hay nada que advertir: que un flujo
+      // Cron pase por aqui y no sea asunto nuestro es el caso NORMAL, y avisarlo
+      // llenaria el log de ruido que taparia los avisos de arriba.
+      this.logger.debug(
+        `El flujo "${workflow.id}" no arranca por un nodo ${NodeType.TRIGGER_IMAP}: no se sondea.`,
+      );
+
       return null;
     }
 
-    const dto = plainToInstance(ImapTriggerConfigDto, imapNode.params);
+    const dto = plainToInstance(ImapTriggerConfigDto, entryNode.params);
     const errors = await validate(dto, {
       whitelist: true,
       forbidNonWhitelisted: true,

@@ -294,6 +294,62 @@ describe('ImapPollingService', () => {
       expect(pollIntervalsOf(registry)).toHaveLength(0);
     });
 
+    it('1.5.1 deberia ignorar un nodo IMAP que NO es el entrypoint, y avisar', async () => {
+      // 1. Arrange: el disparador existe pero el flujo arranca en otro nodo, asi
+      //    que el motor nunca lo ejecutaria. Antes se sondeaba igual.
+      const workflow = buildWorkflow();
+      const schema = workflow.pipelineSchema;
+
+      if (schema !== null) {
+        schema.nodes.nodo_previo = {
+          nodeId: 'nodo_previo',
+          nodeType: NodeType.MAPEADOR_PLANTILLA,
+          outputNamespace: 'rendered_html',
+          nextStep: 'trigger_imap',
+          onErrorStep: null,
+          params: {},
+        };
+        schema.entrypoint = 'nodo_previo';
+      }
+
+      const { service, registry, warnSpy } = buildHarness({
+        workflowRows: [workflow],
+      });
+
+      // 2. Act
+      await service.onModuleInit();
+
+      // 3. Assert: no se programa, y el aviso es lo que hace diagnosticable que
+      //    un flujo que antes corria haya dejado de hacerlo.
+      expect(pollIntervalsOf(registry)).toHaveLength(0);
+      expect(warnSpy).toHaveBeenCalledTimes(1);
+      expect(warnSpy).toHaveBeenCalledWith(
+        expect.stringContaining('entrypoint'),
+      );
+    });
+
+    it('1.5.2 no deberia avisar de un flujo que simplemente no es IMAP', async () => {
+      // 1. Arrange: un flujo Cron pasando por el sondeo IMAP es el caso NORMAL;
+      //    avisarlo llenaria el log de ruido que taparia los avisos reales.
+      const workflow = buildWorkflow();
+      const schema = workflow.pipelineSchema;
+
+      if (schema !== null) {
+        schema.nodes.trigger_imap.nodeType = NodeType.TRIGGER_CRON;
+      }
+
+      const { service, registry, warnSpy } = buildHarness({
+        workflowRows: [workflow],
+      });
+
+      // 2. Act
+      await service.onModuleInit();
+
+      // 3. Assert
+      expect(pollIntervalsOf(registry)).toHaveLength(0);
+      expect(warnSpy).not.toHaveBeenCalled();
+    });
+
     it('1.6 deberia ignorar un flujo cuyo nodo IMAP tiene params invalidos', async () => {
       // 1. Arrange: un esquema a medio escribir no debe impedir que el resto
       //    de los flujos queden programados.

@@ -392,11 +392,21 @@ export class CronSchedulingService implements OnModuleInit, OnModuleDestroy {
   }
 
   /**
-   * Localiza el nodo TRIGGER_CRON de un flujo y valida sus `params`.
+   * Resuelve el nodo de ENTRADA del flujo y valida sus `params` como CRON.
    *
-   * Devuelve `null` —y no lanza— cuando el flujo no tiene ese nodo o su
-   * configuracion es invalida: un esquema a medio escribir no debe impedir que
-   * el resto de los flujos queden programados al arrancar la aplicacion.
+   * Mira exclusivamente `schema.nodes[schema.entrypoint]`, igual que su gemelo
+   * `ImapPollingService.extractImapConfig` y por los mismos motivos: buscar por
+   * tipo programaba flujos cuyo nodo Cron era intermedio y por tanto nunca
+   * arrancaba el recorrido, elegia uno no determinista si habia dos, y dejaba
+   * que un flujo con un nodo Cron y otro IMAP fuese programado por los DOS
+   * servicios de sondeo a la vez.
+   *
+   * Quien decide que dispara un flujo es el `entrypoint`, que es lo que el motor
+   * usa para arrancar el cursor.
+   *
+   * Devuelve `null` —y no lanza— cuando el flujo no arranca por un nodo CRON o
+   * su configuracion es invalida: un esquema a medio escribir no debe impedir
+   * que el resto de los flujos queden programados al arrancar la aplicacion.
    */
   private async extractCronConfig(
     workflow: Workflow,
@@ -413,18 +423,35 @@ export class CronSchedulingService implements OnModuleInit, OnModuleDestroy {
       return null;
     }
 
-    const cronNode = Object.values(schema.nodes ?? {}).find(
-      (node) => node.nodeType === NodeType.TRIGGER_CRON,
-    );
+    const entryNode = schema.nodes?.[schema.entrypoint];
 
-    if (cronNode === undefined) {
-      this.logger.debug(
-        `El flujo "${workflow.id}" no declara ningun nodo ${NodeType.TRIGGER_CRON}: no se programa.`,
+    if (entryNode?.nodeType !== NodeType.TRIGGER_CRON) {
+      // Un nodo CRON que existe pero NO es el punto de entrada nunca llegara a
+      // disparar nada: el motor arranca el cursor en otro sitio. `warn` porque
+      // antes SI se programaba, y sin el aviso el flujo dejaria de ejecutarse
+      // sin que nada lo explique.
+      const hasOrphanTrigger = Object.values(schema.nodes ?? {}).some(
+        (node) => node.nodeType === NodeType.TRIGGER_CRON,
       );
+
+      if (hasOrphanTrigger) {
+        this.logger.warn(
+          `El flujo "${workflow.id}" declara un nodo ${NodeType.TRIGGER_CRON} que NO es su entrypoint ("${schema.entrypoint}"): no se programa. Reordena el flujo para que el disparador sea el primer paso.`,
+        );
+
+        return null;
+      }
+
+      // Sin nodo CRON en ninguna parte no hay nada que advertir: un flujo IMAP
+      // pasando por aqui es el caso NORMAL.
+      this.logger.debug(
+        `El flujo "${workflow.id}" no arranca por un nodo ${NodeType.TRIGGER_CRON}: no se programa.`,
+      );
+
       return null;
     }
 
-    const dto = plainToInstance(CronTriggerConfigDto, cronNode.params);
+    const dto = plainToInstance(CronTriggerConfigDto, entryNode.params);
     const errors = await validate(dto, {
       whitelist: true,
       forbidNonWhitelisted: true,
