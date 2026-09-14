@@ -7,7 +7,10 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { createLogger, format } from 'winston';
 import DailyRotateFile from 'winston-daily-rotate-file';
 
+import { AlertaError } from '@modules/logs/entities/alerta-error.entity';
 import { LogNodo, NodeLogStatus } from '@modules/logs/entities/log-nodo.entity';
+
+import type { AlertLevel } from '@modules/logs/entities/alerta-error.entity';
 
 import type { NodeErrorSeverity } from '@core/fsm/types/node-strategy.types';
 import type { Repository } from 'typeorm';
@@ -41,6 +44,37 @@ const EXECUTION_FILE_PREFIX = 'execution';
 
 /** Longitud de `logs_nodo.codigo_error`. */
 const ERROR_CODE_MAX_LENGTH = 100;
+
+/**
+ * Texto de la alerta cuando el fallo no traia mensaje.
+ *
+ * Una alerta sin descripcion seria una fila que el operador no puede ni empezar
+ * a interpretar. El vinculo con `logs_nodo` le dara el nodo y el codigo; esto
+ * solo evita una celda vacia.
+ */
+const DEFAULT_ALERT_MESSAGE = 'Error operativo no tipado';
+
+/**
+ * Severidades que escalan a `alertas_error`.
+ *
+ * `LEVE` NO esta, y no es un olvido: es el fallo que cierra sin pausar porque se
+ * reintenta solo en el siguiente sondeo. Alertar de cada uno llenaria la bandeja
+ * de avisos que nadie tiene que atender —el timeout IMAP por si solo son decenas
+ * al dia— y el ruido acabaria enterrando lo que si importa.
+ */
+const ALERT_LEVELS: readonly NodeErrorSeverity[] = ['GRAVE', 'URGENTE'];
+
+/**
+ * Guarda de tipo sobre `ALERT_LEVELS`.
+ *
+ * Existe porque `Array.includes` comprueba en tiempo de ejecucion pero no
+ * estrecha el tipo: sin esto habria que asegurar el valor con `as AlertLevel`,
+ * y ese aserto sobreviviria a cualquier cambio futuro de la lista sin avisar.
+ */
+const isAlertLevel = (
+  severity: NodeErrorSeverity | undefined,
+): severity is AlertLevel =>
+  severity !== undefined && ALERT_LEVELS.includes(severity);
 
 /**
  * Datos que acompanan a un volcado catastrofico.
@@ -100,6 +134,13 @@ export interface NodeExecutionDetails {
  * El logger de Nest se conserva en paralelo para la salida por consola: en
  * desarrollo nadie mira el archivo, y en produccion el archivo es lo unico que
  * sobrevive al reinicio del contenedor.
+ *
+ * Sobre esos dos destinos hay un TERCERO, condicional: los fallos GRAVE y
+ * URGENTE escalan ademas a `alertas_error`. No es una copia de la traza sino su
+ * contrario — `logs_nodo` es el caudal (una fila por nodo, tambien los que van
+ * bien) y `alertas_error` es la senal, con la marca de atendida que el caudal no
+ * puede tener. Sin esa separacion un fallo grave queda como una fila mas entre
+ * cientos, y nadie revisa un caudal continuo buscando la aguja.
  */
 @Injectable()
 export class HybridLoggerService {
@@ -117,6 +158,8 @@ export class HybridLoggerService {
     private readonly configService: ConfigService,
     @InjectRepository(LogNodo)
     private readonly logNodoRepo: Repository<LogNodo>,
+    @InjectRepository(AlertaError)
+    private readonly alertaRepo: Repository<AlertaError>,
   ) {
     this.logDir =
       this.configService.get<string>(LOG_DIR_KEY) ?? DEFAULT_LOG_DIR;
@@ -226,8 +269,12 @@ export class HybridLoggerService {
   public async logNodeExecution(details: NodeExecutionDetails): Promise<void> {
     const logFilePath = this.writeNodeTrace(details);
 
+    // Declarado FUERA del `try` para seguir siendo visible despues del `catch`:
+    // la alerta se intenta aunque la traza no se haya podido guardar.
+    let savedLog: LogNodo | null = null;
+
     try {
-      await this.logNodoRepo.save(
+      savedLog = await this.logNodoRepo.save(
         this.logNodoRepo.create({
           executionId: details.executionId,
           nodeId: details.nodeId,
@@ -246,6 +293,60 @@ export class HybridLoggerService {
     } catch (error: unknown) {
       this.logger.error(
         `No se pudo persistir la traza del nodo "${details.nodeId ?? 'desconocido'}" (ejecucion "${details.executionId}"): ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    }
+
+    await this.raiseOperationalAlert(details, savedLog);
+  }
+
+  /**
+   * Escala el fallo a `alertas_error` si su severidad lo exige.
+   *
+   * SE DECIDE POR LA SEVERIDAD Y NO POR EL ESTADO: el motor ya mapea `LEVE` a
+   * `ADVERTENCIA` y `GRAVE`/`URGENTE` a `ERROR`, asi que comprobar tambien el
+   * estado seria redundante y crearia dos fuentes de verdad para la misma
+   * decision, que es como se desincronizan.
+   *
+   * UNA ALERTA POR INTENTO, igual que la traza. Colapsarlas en una sola ocultaria
+   * que el motor reintento cinco veces antes de rendirse, que es justo el dato
+   * que distingue un fallo transitorio de uno permanente.
+   *
+   * SE INTENTA AUNQUE LA TRAZA NO SE HAYA GUARDADO, con `logNodeId` nulo. Si la
+   * base de datos esta fallando es cuando menos se puede permitir perder el
+   * aviso; el vinculo es lo prescindible, no la alerta.
+   *
+   * NO LANZA NUNCA, con el mismo criterio que el resto del servicio: se invoca
+   * desde el bucle del motor, y un fallo al registrar la alerta no puede tumbar
+   * la ejecucion que la provoco.
+   */
+  private async raiseOperationalAlert(
+    details: NodeExecutionDetails,
+    savedLog: LogNodo | null,
+  ): Promise<void> {
+    const { severity } = details;
+
+    if (!isAlertLevel(severity)) {
+      return;
+    }
+
+    try {
+      await this.alertaRepo.save(
+        this.alertaRepo.create({
+          executionId: details.executionId,
+          logNodeId: savedLog?.id ?? null,
+          level: severity,
+          // El motor ya resolvio aqui el `customMessage` de la ruta de error
+          // cuando el nodo lo declara para este codigo, asi que lo que llega es
+          // el texto que el operador debe leer.
+          errorMessage: details.message ?? DEFAULT_ALERT_MESSAGE,
+          resolved: false,
+        }),
+      );
+    } catch (error: unknown) {
+      this.logger.error(
+        `No se pudo registrar la alerta ${severity} del nodo "${details.nodeId ?? 'desconocido'}" (ejecucion "${details.executionId}"): ${
           error instanceof Error ? error.message : String(error)
         }`,
       );

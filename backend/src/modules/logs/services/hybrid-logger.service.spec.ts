@@ -2,6 +2,7 @@ import { ConfigService } from '@nestjs/config';
 
 import { HybridLoggerService } from './hybrid-logger.service';
 
+import { AlertaError } from '@modules/logs/entities/alerta-error.entity';
 import { LogNodo, NodeLogStatus } from '@modules/logs/entities/log-nodo.entity';
 
 import type {
@@ -57,21 +58,33 @@ const DETAILS: CatastrophicFailureDetails = {
   payload: { trigger: { subject: 'Avance cientifico' } },
 };
 
+/** Identificador que devuelve el `save` de `logs_nodo` en el caso feliz. */
+const SAVED_LOG_ID = '0f1e2d3c-4b5a-4968-8778-6f5e4d3c2b1a';
+
 /** Repositorio doble: `create` devuelve lo que recibe para aseverar el mapeo. */
-interface RepositoryDouble {
-  repo: Repository<LogNodo>;
-  create: jest.Mock<Partial<LogNodo>, [Partial<LogNodo>]>;
+interface RepositoryDouble<T> {
+  repo: Repository<T>;
+  create: jest.Mock<Partial<T>, [Partial<T>]>;
   save: jest.Mock;
 }
 
-const buildRepository = (): RepositoryDouble => {
-  const create: jest.Mock<Partial<LogNodo>, [Partial<LogNodo>]> = jest.fn(
-    (entity: Partial<LogNodo>) => entity,
+/**
+ * @param savedId Identificador que simula la clave generada por PostgreSQL. Se
+ *                devuelve desde `save` porque es lo que el servicio necesita
+ *                para vincular la alerta con su traza.
+ */
+const buildRepository = <T>(savedId?: string): RepositoryDouble<T> => {
+  const create: jest.Mock<Partial<T>, [Partial<T>]> = jest.fn(
+    (entity: Partial<T>) => entity,
   );
-  const save = jest.fn().mockResolvedValue(undefined);
+  const save = jest.fn((entity: Partial<T>) =>
+    Promise.resolve(
+      savedId === undefined ? entity : { ...entity, id: savedId },
+    ),
+  );
 
   return {
-    repo: { create, save } as unknown as Repository<LogNodo>,
+    repo: { create, save } as unknown as Repository<T>,
     create,
     save,
   };
@@ -80,15 +93,23 @@ const buildRepository = (): RepositoryDouble => {
 /** Silencia el Logger de Nest para que la salida de Jest siga legible. */
 const buildService = (
   env: Record<string, string> = {},
-  repository: RepositoryDouble = buildRepository(),
-): { service: HybridLoggerService; repository: RepositoryDouble } => {
+  repository: RepositoryDouble<LogNodo> = buildRepository<LogNodo>(
+    SAVED_LOG_ID,
+  ),
+  alerts: RepositoryDouble<AlertaError> = buildRepository<AlertaError>(),
+): {
+  service: HybridLoggerService;
+  repository: RepositoryDouble<LogNodo>;
+  alerts: RepositoryDouble<AlertaError>;
+} => {
   const service = new HybridLoggerService(
     new ConfigService(env),
     repository.repo,
+    alerts.repo,
   );
   jest.spyOn(service['logger'], 'error').mockImplementation(() => undefined);
 
-  return { service, repository };
+  return { service, repository, alerts };
 };
 
 describe('HybridLoggerService · volcado forense del motor FSM', () => {
@@ -301,7 +322,7 @@ describe('HybridLoggerService · volcado forense del motor FSM', () => {
 
     it('4.5 deberia escribir en disco aunque falle la base de datos', async () => {
       // 1. Arrange: el caso simetrico del anterior.
-      const repository = buildRepository();
+      const repository = buildRepository<LogNodo>();
       repository.save.mockRejectedValue(new Error('connection terminated'));
       const { service } = buildService({}, repository);
 
@@ -315,7 +336,7 @@ describe('HybridLoggerService · volcado forense del motor FSM', () => {
 
     it('4.6 no deberia lanzar aunque fallen los dos destinos', async () => {
       // 1. Arrange
-      const repository = buildRepository();
+      const repository = buildRepository<LogNodo>();
       repository.save.mockRejectedValue(new Error('connection terminated'));
       const { service } = buildService({}, repository);
       infoSpy.mockImplementation(() => {
@@ -342,6 +363,127 @@ describe('HybridLoggerService · volcado forense del motor FSM', () => {
       // 3. Assert
       const saved = repository.create.mock.calls[0][0];
       expect(saved.errorCode).toHaveLength(100);
+    });
+  });
+
+  describe('5. Escalado a alertas_error', () => {
+    const FAILING_NODE: NodeExecutionDetails = {
+      executionId: 'd4c3b2a1-9f8e-4d7c-8b6a-5e4f3d2c1b0a',
+      nodeId: 'mapeador_plantilla',
+      nodeType: 'MAPEADOR_PLANTILLA',
+      status: NodeLogStatus.ERROR,
+      severity: 'GRAVE',
+      errorCode: 'ERR_TEMPLATE_MISSING_FIELDS',
+      message: 'Falta la clave raw_email.titulo',
+      durationMs: 12,
+    };
+
+    it.each([['GRAVE'], ['URGENTE']])(
+      '5.1 deberia registrar la alerta de un fallo %s vinculada a su traza',
+      async (severity) => {
+        // 1. Arrange
+        const { service, alerts } = buildService();
+
+        // 2. Act
+        await service.logNodeExecution({
+          ...FAILING_NODE,
+          severity: severity as NodeExecutionDetails['severity'],
+        });
+
+        // 3. Assert: la clave ajena es lo que convierte una alerta en
+        //    accionable; sin ella el operador sabe que fallo pero no cual.
+        expect(alerts.save).toHaveBeenCalledTimes(1);
+        expect(alerts.create).toHaveBeenCalledWith({
+          executionId: FAILING_NODE.executionId,
+          logNodeId: SAVED_LOG_ID,
+          level: severity,
+          errorMessage: 'Falta la clave raw_email.titulo',
+          resolved: false,
+        });
+      },
+    );
+
+    it.each([
+      ['un exito', NodeLogStatus.OK, undefined],
+      ['un fallo LEVE', NodeLogStatus.ADVERTENCIA, 'LEVE'],
+    ])(
+      '5.2 no deberia registrar alerta ante %s',
+      async (_caso, status, severity) => {
+        // 1. Arrange: el LEVE cierra sin pausar porque se reintenta solo. Una
+        //    alerta por cada timeout IMAP enterraria lo que si hay que atender.
+        const { service, alerts } = buildService();
+
+        // 2. Act
+        await service.logNodeExecution({
+          ...FAILING_NODE,
+          status,
+          severity: severity as NodeExecutionDetails['severity'],
+        });
+
+        // 3. Assert
+        expect(alerts.save).not.toHaveBeenCalled();
+      },
+    );
+
+    it('5.3 deberia registrar la alerta huerfana si falla el guardado de la traza', async () => {
+      // 1. Arrange: si la base de datos esta fallando es cuando menos se puede
+      //    permitir perder el aviso. El vinculo es lo prescindible.
+      const repository = buildRepository<LogNodo>();
+      repository.save.mockRejectedValue(new Error('connection terminated'));
+      const { service, alerts } = buildService({}, repository);
+
+      // 2. Act
+      await service.logNodeExecution(FAILING_NODE);
+
+      // 3. Assert
+      expect(alerts.save).toHaveBeenCalledTimes(1);
+      const saved = alerts.create.mock.calls[0][0];
+      expect(saved.logNodeId).toBeNull();
+    });
+
+    it('5.4 no deberia lanzar si falla el registro de la alerta', async () => {
+      // 1. Arrange: tercer try/catch, mismo criterio que los otros dos. Un fallo
+      //    al anotar la alerta no puede tumbar la ejecucion que la provoco.
+      const alerts = buildRepository<AlertaError>();
+      alerts.save.mockRejectedValue(new Error('connection terminated'));
+      const { service, repository } = buildService(
+        {},
+        buildRepository<LogNodo>(SAVED_LOG_ID),
+        alerts,
+      );
+
+      // 2. Act & 3. Assert: la traza sobrevive intacta en los dos destinos.
+      await expect(
+        service.logNodeExecution(FAILING_NODE),
+      ).resolves.toBeUndefined();
+      expect(infoSpy).toHaveBeenCalledTimes(1);
+      expect(repository.save).toHaveBeenCalledTimes(1);
+    });
+
+    it('5.5 deberia usar un mensaje por defecto cuando el fallo no traia texto', async () => {
+      // 1. Arrange: una celda vacia no le dice nada a quien abre la bandeja.
+      const { service, alerts } = buildService();
+
+      // 2. Act
+      await service.logNodeExecution({ ...FAILING_NODE, message: undefined });
+
+      // 3. Assert
+      const saved = alerts.create.mock.calls[0][0];
+      expect(saved.errorMessage).toBe('Error operativo no tipado');
+    });
+
+    it('5.6 deberia registrar una alerta por intento', async () => {
+      // 1. Arrange: el motor reintenta los GRAVE, y colapsar los intentos en una
+      //    sola alerta ocultaria cuantas veces se intento antes de rendirse.
+      const { service, alerts } = buildService();
+
+      // 2. Act
+      await service.logNodeExecution(FAILING_NODE);
+      await service.logNodeExecution(FAILING_NODE);
+      await service.logNodeExecution(FAILING_NODE);
+
+      // 3. Assert
+      expect(alerts.save).toHaveBeenCalledTimes(3);
     });
   });
 });

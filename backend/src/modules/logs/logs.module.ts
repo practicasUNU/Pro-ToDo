@@ -1,6 +1,7 @@
 import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 
+import { AlertaError } from '@modules/logs/entities/alerta-error.entity';
 import { LogNodo } from '@modules/logs/entities/log-nodo.entity';
 import { HybridLoggerService } from '@modules/logs/services/hybrid-logger.service';
 
@@ -16,9 +17,14 @@ import { HybridLoggerService } from '@modules/logs/services/hybrid-logger.servic
  * El precio es que ya no llega solo a todas partes: quien lo necesite importa
  * este modulo. Hoy solo lo hace `FsmModule`, y que sea explicito es preferible a
  * que aparezca por arte de magia.
+ *
+ * `AlertaError` viaja junto a `LogNodo` y no en un modulo propio porque el mismo
+ * servicio escribe las dos en la misma llamada: separarlas obligaria a exponer
+ * un repositorio de una tabla a traves de la frontera de otro modulo para
+ * mantener una sola transaccion logica.
  */
 @Module({
-  imports: [TypeOrmModule.forFeature([LogNodo])],
+  imports: [TypeOrmModule.forFeature([LogNodo, AlertaError])],
   providers: [HybridLoggerService],
   exports: [HybridLoggerService],
 })

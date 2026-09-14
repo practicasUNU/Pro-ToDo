@@ -212,14 +212,37 @@ CREATE TABLE logs_nodo (
 -- Tabla: ALERTAS_ERROR
 -- =============================================================================
 
+-- Incidencia que ALGUIEN debe atender, y por eso es una tabla aparte de
+-- `logs_nodo`: aquella es el caudal continuo —una fila por nodo ejecutado,
+-- incluidos los cientos que terminan bien—; esta es solo la senal. Un fallo
+-- LEVE no llega aqui: es el que cierra sin pausar porque se reintenta solo, y
+-- anotarlo saturaria la bandeja con ruido que nadie tiene que mirar.
+--
+-- Duplicada en db/migrations/015-alertas-error-log-nodo.sql para las bases ya
+-- creadas: este archivo solo se ejecuta con el volumen de Docker vacio.
 CREATE TABLE alertas_error (
     id_alerta_error UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     id_ejecucion UUID NOT NULL REFERENCES ejecuciones_flujo(id_ejecucion) ON DELETE CASCADE,
+    -- Traza que la origino. Nullable a proposito: si la escritura en logs_nodo
+    -- falla, la alerta se registra igual y huerfana. Perder el aviso de un fallo
+    -- URGENTE porque no se pudo anotar la traza seria el peor canje posible.
+    --
+    -- Constraint NOMBRADA a mano y no derivada por PostgreSQL: la migracion 015
+    -- la declara con este mismo nombre, y nombrarla en un sitio y derivarla en
+    -- el otro es exactamente como diverge una base clonada de una migrada.
+    --
+    -- SET NULL y no CASCADE: borrar la ejecucion ya se lleva esta fila por la
+    -- clave ajena de arriba. La diferencia aparece el dia que se pode logs_nodo
+    -- por retencion; con CASCADE desapareceria de paso una alerta sin resolver.
+    id_log_nodo UUID,
     nivel enum_nivel_error NOT NULL,
-    modulo_origen VARCHAR(100),
     mensaje_error TEXT,
-    resuelto BOOLEAN DEFAULT FALSE,
-    fecha_creacion TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    -- NOT NULL: es el filtro de la bandeja, y un tercer valor (NULL) no
+    -- significaria nada que FALSE no diga ya.
+    resuelto BOOLEAN NOT NULL DEFAULT FALSE,
+    fecha_creacion TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT fk_alertas_error_log_nodo FOREIGN KEY (id_log_nodo)
+        REFERENCES logs_nodo(id_log_nodo) ON DELETE SET NULL
 );
 
 -- =============================================================================
@@ -288,6 +311,14 @@ CREATE UNIQUE INDEX idx_flujo_activo
 CREATE INDEX idx_logs_nodo_id_ejecucion ON logs_nodo(id_ejecucion);
 CREATE INDEX idx_logs_nodo_id_nodo ON logs_nodo(id_nodo);
 CREATE INDEX idx_alertas_error_id_ejecucion ON alertas_error(id_ejecucion);
+CREATE INDEX idx_alertas_error_id_log_nodo ON alertas_error(id_log_nodo);
+
+-- PARCIAL y no un indice plano sobre `resuelto`: con dos valores posibles el
+-- planificador no lo usaria. La consulta real de la bandeja es "las pendientes,
+-- las mas recientes primero", y eso es justo lo que este indice resuelve.
+CREATE INDEX idx_alertas_error_pendientes
+    ON alertas_error (fecha_creacion DESC)
+ WHERE resuelto = FALSE;
 
 -- =============================================================================
 -- SEED: Datos iniciales
