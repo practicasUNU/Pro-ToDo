@@ -15,6 +15,7 @@ import { toWizardStep } from '@/types/pipeline';
 
 import type {
   AssembledPipelineSchema,
+  PipelineExecutionPolicy,
   PipelineSummary,
   WizardStep,
   WorkflowDetail,
@@ -115,6 +116,16 @@ export const useFlujoDraftStore = defineStore('flujoDraft', () => {
   const editingWorkflowId = ref<string | null>(null);
   const pipelineTopology = ref<WizardStep[]>([]);
 
+  /**
+   * Politica heredada de la plantilla, o la que ya tenia el flujo en edicion.
+   *
+   * Vive en un `ref` propio porque NO se deriva de la topologia: el asistente
+   * reensambla el esquema entero a partir de los pasos y sus `params`, asi que
+   * todo metadato raiz que no se guarde aqui se perderia al guardar. El
+   * asistente no la edita —eso se hace en la plantilla—, solo la conserva.
+   */
+  const executionPolicy = ref<PipelineExecutionPolicy | null>(null);
+
   /** Cursor del stepper: indice dentro de `pipelineTopology`. */
   const activeStep = ref(0);
 
@@ -210,6 +221,7 @@ export const useFlujoDraftStore = defineStore('flujoDraft', () => {
     resetNodeStores();
 
     selectedTemplateId.value = templateId;
+    executionPolicy.value = template.executionPolicy ?? null;
     pipelineTopology.value = template.topology.map((step) =>
       toWizardStep({
         nodeId: step.nodeId,
@@ -248,6 +260,9 @@ export const useFlujoDraftStore = defineStore('flujoDraft', () => {
 
     editingWorkflowId.value = workflow.id;
     selectedTemplateId.value = workflow.templateId;
+    // Del FLUJO y no de su plantilla: la plantilla pudo cambiar despues, y lo
+    // que se esta editando es el grafo que el flujo lleva copiado.
+    executionPolicy.value = workflow.pipelineSchema?.executionPolicy ?? null;
     pipelineTopology.value = workflow.topology.map((step) =>
       toWizardStep({
         nodeId: step.nodeId,
@@ -434,6 +449,12 @@ export const useFlujoDraftStore = defineStore('flujoDraft', () => {
       flowId: selectedTemplateId.value ?? '',
       name,
       version: INITIAL_SCHEMA_VERSION,
+      // Sin esto la politica moriria aqui: el asistente reconstruye el esquema
+      // desde los pasos, de modo que un campo raiz que no se reenvie no llega
+      // nunca al flujo, y configurarla en la plantilla no serviria de nada.
+      ...(executionPolicy.value !== null
+        ? { executionPolicy: executionPolicy.value }
+        : {}),
     });
   };
 
@@ -529,6 +550,7 @@ export const useFlujoDraftStore = defineStore('flujoDraft', () => {
     // ENCIMA del que se estaba editando.
     editingWorkflowId.value = null;
     selectedTemplateId.value = null;
+    executionPolicy.value = null;
     pipelineTopology.value = [];
     activeStep.value = 0;
   };
@@ -536,6 +558,7 @@ export const useFlujoDraftStore = defineStore('flujoDraft', () => {
   return {
     availableTemplates,
     selectedTemplateId,
+    executionPolicy,
     pipelineTopology,
     activeStep,
     isLoading,

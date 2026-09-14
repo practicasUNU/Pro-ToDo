@@ -511,6 +511,37 @@ describe('useFlujoDraftStore · agregador del asistente', () => {
       // 3. Assert: `SEMVER_PATTERN` del backend lo exige.
       expect(schema.version).toBe('1.0.0');
     });
+
+    it('8.6 deberia heredar la executionPolicy de la plantilla elegida', async () => {
+      // 1. Arrange: sin esto la politica moriria en el asistente. El borrador
+      //    reconstruye el esquema desde los pasos, asi que un campo raiz que no
+      //    se reenvie no llega nunca al flujo, y configurarla en la plantilla no
+      //    serviria absolutamente de nada.
+      const draft = useFlujoDraftStore();
+      fetchWorkflowTemplates.mockResolvedValue([
+        buildTemplate({ executionPolicy: { stopOnFirstSuccess: true } }),
+      ]);
+      await draft.loadAvailableTemplates();
+      draft.selectTemplate(TEMPLATE_ID);
+
+      // 2. Act
+      const schema = draft.assemblePipelineSchema('Flujo de prueba');
+
+      // 3. Assert
+      expect(schema.executionPolicy).toEqual({ stopOnFirstSuccess: true });
+    });
+
+    it('8.7 deberia OMITIR la clave cuando la plantilla no declara politica', async () => {
+      // 1. Arrange
+      const draft = await buildSelectedDraft();
+
+      // 2. Act
+      const schema = draft.assemblePipelineSchema('Flujo de prueba');
+
+      // 3. Assert: el backend valida con `forbidNonWhitelisted`; emitir un
+      //    objeto vacio seria una declaracion indistinguible de una a medias.
+      expect(Object.hasOwn(schema, 'executionPolicy')).toBe(false);
+    });
   });
 
   describe('9. Guardado del flujo', () => {
@@ -1144,8 +1175,27 @@ describe('useFlujoDraftStore · modo edicion', () => {
     });
 
     it('16.6 no deberia contar un aviso como motivo de bloqueo', async () => {
-      // 1. Arrange: el contrato clave de la separacion. Un trigger con los
-      //    campos completos y la conexion sin probar avisa, pero NO bloquea.
+      // 1. Arrange: el contrato clave de la separacion. Un trigger cuya conexion
+      //    sigue sin verificar, pero cuyo operador ya declaro que configura sin
+      //    comprobarla, avisa y NO bloquea. Sin el reconocimiento si bloquearia,
+      //    y entonces lo que se estaria probando es el bloqueo, no la separacion.
+      const draft = await buildSelectedDraft();
+      verifyTriggerStore();
+      const triggerStore = useTriggerImapStore(TRIGGER_NODE_ID);
+      triggerStore.connectionVerified = false;
+      triggerStore.skipCheckAcknowledged = true;
+
+      // 2. Act
+      const reasons = draft.invalidSteps.map((item) => item.step.nodeType);
+
+      // 3. Assert
+      expect(draft.stepWarnings.length).toBeGreaterThan(0);
+      expect(reasons).not.toContain(NodeType.TRIGGER_IMAP);
+    });
+
+    it('16.6.1 SI deberia bloquear una conexion sin probar ni reconocer', async () => {
+      // 1. Arrange: la contrapartida de 16.6, para que la separacion entre aviso
+      //    y bloqueo no se lea como "el nodo IMAP nunca bloquea".
       const draft = await buildSelectedDraft();
       verifyTriggerStore();
       useTriggerImapStore(TRIGGER_NODE_ID).connectionVerified = false;
@@ -1154,8 +1204,8 @@ describe('useFlujoDraftStore · modo edicion', () => {
       const reasons = draft.invalidSteps.map((item) => item.step.nodeType);
 
       // 3. Assert
-      expect(draft.stepWarnings.length).toBeGreaterThan(0);
-      expect(reasons).not.toContain(NodeType.TRIGGER_IMAP);
+      expect(reasons).toContain(NodeType.TRIGGER_IMAP);
+      expect(draft.canSave).toBe(false);
     });
 
     it('16.7 deberia situar el aviso en el paso que lo emite', async () => {

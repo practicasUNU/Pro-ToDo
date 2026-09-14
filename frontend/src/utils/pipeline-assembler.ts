@@ -1,4 +1,9 @@
-import type { AssembledPipelineNode, AssembledPipelineSchema, NodeType } from '@/types/pipeline';
+import type {
+  AssembledPipelineNode,
+  AssembledPipelineSchema,
+  NodeType,
+  PipelineExecutionPolicy,
+} from '@/types/pipeline';
 
 // Helper puro (frontend-architecture.md §2.1): transforma un dato en otro, sin
 // estado ni I/O.
@@ -34,6 +39,15 @@ export interface AssemblerMeta {
   readonly flowId: string;
   readonly name: string;
   readonly version?: string;
+  /**
+   * Politica del flujo completo.
+   *
+   * Va en los metadatos y no en los pasos porque NO se deriva de la secuencia:
+   * es una decision del operador que debe sobrevivir a que reordene los nodos.
+   * Quien reensambla el esquema tras un cambio de secuencia esta obligado a
+   * reenviarla aqui, o se borraria en silencio al tocar el selector.
+   */
+  readonly executionPolicy?: PipelineExecutionPolicy;
 }
 
 /**
@@ -48,6 +62,11 @@ export interface AssemblerMeta {
  * configurar caminos de recuperacion, y un puntero inventado seria peor que su
  * ausencia —con `null` el motor detiene la ejecucion en el nodo que falla, que
  * es el comportamiento correcto por defecto.
+ *
+ * El backend acepta ademas una ruta selectiva (`{ targetNode, catchErrors }`),
+ * que hoy solo puede escribirse a mano en el panel JSON del editor de
+ * plantillas. Este ensamblador no la genera, pero `disassemblePipelineSchema`
+ * tampoco la pierde: la topologia solo se reconstruye desde `nextStep`.
  *
  * Una secuencia VACIA produce un esquema con `entrypoint: ''` y `nodes: {}` en
  * vez de lanzar: es el estado legitimo de un borrador recien abierto, y quien
@@ -79,6 +98,12 @@ export const assemblePipelineSchema = (
     version: meta.version ?? INITIAL_SCHEMA_VERSION,
     entrypoint: steps[0]?.nodeId ?? '',
     nodes,
+    // Se OMITE la clave cuando no hay politica en vez de emitir un objeto
+    // vacio: el backend valida con `forbidNonWhitelisted` y un `{}` seria una
+    // declaracion de "no hay politica" indistinguible de una a medio escribir.
+    ...(meta.executionPolicy !== undefined
+      ? { executionPolicy: meta.executionPolicy }
+      : {}),
   };
 };
 

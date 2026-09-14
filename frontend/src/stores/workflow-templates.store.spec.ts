@@ -489,6 +489,84 @@ describe('useWorkflowTemplatesStore · catalogo de plantillas de flujo', () => {
       expect(store.activeDraft.name).toBe('');
     });
   
+  describe('7. executionPolicy del borrador', () => {
+    /** Borrador con nombre y un nodo, listo para conmutar la politica. */
+    const buildDraftWithNode = (): ReturnType<typeof useWorkflowTemplatesStore> => {
+      const store = useWorkflowTemplatesStore();
+      store.initDraft();
+      store.patchDraft({ name: 'Notiweb' });
+      store.setSequence([
+        {
+          nodeId: 'trigger_cron',
+          nodeType: NodeType.TRIGGER_CRON,
+          outputNamespace: 'cron_trigger',
+          params: {},
+        },
+      ]);
+
+      return store;
+    };
+
+    it('7.1 deberia escribir la politica en el documento al marcarla', () => {
+      // 1. Arrange
+      const store = buildDraftWithNode();
+
+      // 2. Act
+      store.setStopOnFirstSuccess(true);
+
+      // 3. Assert
+      expect(store.stopOnFirstSuccess).toBe(true);
+      expect(JSON.parse(store.activeDraft.schemaText).executionPolicy).toEqual({
+        stopOnFirstSuccess: true,
+      });
+    });
+
+    it('7.2 deberia ELIMINAR la clave al desmarcarla, no dejarla en false', () => {
+      // 1. Arrange
+      const store = buildDraftWithNode();
+      store.setStopOnFirstSuccess(true);
+
+      // 2. Act
+      store.setStopOnFirstSuccess(false);
+
+      // 3. Assert: el esquema declara lo que el flujo HACE; una politica
+      //    presente que no hace nada es ruido que ademas habria que mantener
+      //    sincronizado con el default del backend.
+      expect(store.stopOnFirstSuccess).toBe(false);
+      expect(
+        Object.hasOwn(JSON.parse(store.activeDraft.schemaText), 'executionPolicy'),
+      ).toBe(false);
+    });
+
+    it('7.3 deberia SOBREVIVIR a reordenar la secuencia', () => {
+      // 1. Arrange: el caso que de otro modo la borra en silencio. El selector
+      //    reensambla el esquema entero, asi que un campo raiz que no se
+      //    propague desaparece en cuanto se anade o se mueve un nodo.
+      const store = buildDraftWithNode();
+      store.setStopOnFirstSuccess(true);
+
+      // 2. Act
+      store.setSequence([
+        {
+          nodeId: 'trigger_cron',
+          nodeType: NodeType.TRIGGER_CRON,
+          outputNamespace: 'cron_trigger',
+          params: {},
+        },
+        {
+          nodeId: 'nodo_mapeador',
+          nodeType: NodeType.MAPEADOR_PLANTILLA,
+          outputNamespace: 'rendered_html',
+          params: {},
+        },
+      ]);
+
+      // 3. Assert
+      expect(store.schemaNodeCount).toBe(2);
+      expect(store.stopOnFirstSuccess).toBe(true);
+    });
+  });
+
   describe('6. Nodos minimos del borrador', () => {
     it('6.1 no deberia declararse valido con nombre pero sin nodos', () => {
       // 1. Arrange: guardar asi provoca un 400 del validador —`entrypoint` vacio

@@ -199,6 +199,25 @@ const onSubmit = async (): Promise<void> => {
               @update:params="templatesStore.patchStepParams"
             />
 
+            <!-- Politica del flujo COMPLETO, no de un nodo: por eso vive aqui y
+                 no en `NodeSequenceBuilder`. Se escribe sobre `schemaText`, que
+                 es la unica fuente de verdad del borrador, y el store la
+                 reinyecta al reensamblar para que reordenar la secuencia no la
+                 borre. -->
+            <div class="pd-execution-policy">
+              <q-toggle
+                :model-value="templatesStore.stopOnFirstSuccess"
+                dense
+                label="Detener automaticamente tras el primer exito"
+                :disable="templatesStore.schemaSyntaxError !== null"
+                @update:model-value="templatesStore.setStopOnFirstSuccess($event)"
+              />
+              <p class="pd-subtitle q-mt-xs q-mb-none">
+                Desactiva el flujo de trabajo permanentemente luego de una ejecucion exitosa.
+                Una ejecucion que se detiene porque el disparador no encontro datos no cuenta.
+              </p>
+            </div>
+
             <!-- Estado SOLO informativo, como en `UserDialog.vue`: el estado se
                  conmuta unicamente desde la tabla, con su confirmacion. -->
             <div v-if="isEditing" class="row items-center q-gutter-sm">
@@ -303,6 +322,13 @@ const onSubmit = async (): Promise<void> => {
 </template>
 
 <style scoped lang="scss">
+.pd-execution-policy {
+  padding: 12px;
+  border: 1px solid var(--pd-border);
+  border-radius: 8px;
+  background: var(--pd-surface-muted);
+}
+
 .pd-save-hint {
   max-width: 280px;
   text-align: right;

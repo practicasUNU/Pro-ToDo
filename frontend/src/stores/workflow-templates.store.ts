@@ -211,9 +211,12 @@ export const useWorkflowTemplatesStore = defineStore('workflowTemplates', () => 
   /**
    * Reescribe `schemaText` a partir de la secuencia actual.
    *
-   * Conserva `flowId`, `name` y `version` del documento vigente en vez de
-   * regenerarlos: son metadatos que el operador puede haber ajustado a mano en
-   * el editor, y el selector solo es dueno de la TOPOLOGIA.
+   * Conserva `flowId`, `name`, `version` y `executionPolicy` del documento
+   * vigente en vez de regenerarlos: son metadatos que el operador ajusto por su
+   * cuenta, y el selector solo es dueno de la TOPOLOGIA. Un campo raiz que no se
+   * propague aqui desaparece en cuanto se anade o se mueve un nodo, y en
+   * silencio: el operador marcaria la politica, reordenaria la secuencia y la
+   * perderia sin que nada se lo dijera.
    *
    * Se reindenta a dos espacios, igual que `initDraft`.
    */
@@ -232,7 +235,62 @@ export const useWorkflowTemplatesStore = defineStore('workflowTemplates', () => 
       flowId: current.flowId ?? 'plantilla-nueva',
       name: current.name ?? activeDraft.value.name.trim(),
       ...(current.version !== undefined ? { version: current.version } : {}),
+      ...(current.executionPolicy !== undefined
+        ? { executionPolicy: current.executionPolicy }
+        : {}),
     });
+
+    patchDraft({ schemaText: JSON.stringify(schema, null, 2) });
+  };
+
+  /**
+   * Politica declarada por el documento vigente.
+   *
+   * Se lee del `schemaText` y no de un `ref` aparte a proposito: el texto es la
+   * unica fuente de verdad del borrador —el operador puede editarlo a mano en el
+   * panel JSON— y un espejo reactivo se desincronizaria en cuanto lo hiciera.
+   */
+  const stopOnFirstSuccess = computed<boolean>(() => {
+    try {
+      const parsed = JSON.parse(
+        activeDraft.value.schemaText,
+      ) as Partial<AssembledPipelineSchema>;
+
+      return parsed.executionPolicy?.stopOnFirstSuccess === true;
+    } catch {
+      // Documento a medio escribir: sin politica legible, el control se muestra
+      // apagado en vez de romper el editor.
+      return false;
+    }
+  });
+
+  /**
+   * Conmuta la politica reescribiendo el documento.
+   *
+   * Al desmarcar se ELIMINA `executionPolicy` en vez de dejar
+   * `{ stopOnFirstSuccess: false }`: el esquema declara lo que el flujo hace, y
+   * una politica presente que no hace nada es ruido que ademas habria que
+   * mantener sincronizado con el default del backend.
+   */
+  const setStopOnFirstSuccess = (enabled: boolean): void => {
+    let current: Partial<AssembledPipelineSchema>;
+
+    try {
+      current = JSON.parse(activeDraft.value.schemaText) as AssembledPipelineSchema;
+    } catch {
+      // Con el JSON roto no hay documento sobre el que fijar la politica; el
+      // control queda apagado y el operador arregla antes el texto.
+      return;
+    }
+
+    // Se reconstruye SIN la clave en vez de asignarle `false`: el esquema
+    // declara lo que el flujo hace, y una politica presente que no hace nada
+    // seria ruido que ademas habria que mantener a la par del default del
+    // backend.
+    const rest: Record<string, unknown> = { ...current };
+    delete rest.executionPolicy;
+
+    const schema = enabled ? { ...rest, executionPolicy: { stopOnFirstSuccess: true } } : rest;
 
     patchDraft({ schemaText: JSON.stringify(schema, null, 2) });
   };
@@ -391,6 +449,8 @@ export const useWorkflowTemplatesStore = defineStore('workflowTemplates', () => 
     schemaNodeCount,
     isDraftValid,
     sequence,
+    stopOnFirstSuccess,
+    setStopOnFirstSuccess,
     initDraft,
     patchDraft,
     setSequence,
