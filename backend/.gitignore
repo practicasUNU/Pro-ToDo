@@ -7,7 +7,12 @@
 # Anclado con `/`: sin la barra, el patron ignora CUALQUIER directorio llamado
 # `logs` a cualquier profundidad, y eso se tragaba `src/modules/logs/` entero
 # —el modulo de trazabilidad— dejandolo fuera del repositorio sin avisar.
-/logs
+#
+# Y con `/*` —el CONTENIDO— en vez de `/logs` —el directorio—: git no desciende
+# a un directorio excluido, asi que sobre `/logs` la negacion de abajo seria
+# inerte y el `.gitkeep` nunca se versionaria. Mismo patron que `static/uploads`.
+/logs/*
+!/logs/.gitkeep
 *.log
 npm-debug.log*
 pnpm-debug.log*

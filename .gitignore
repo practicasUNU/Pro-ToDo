@@ -33,11 +33,16 @@ frontend/.env
 # =============================================================================
 # Logs físicos y Depuración
 # =============================================================================
-# `backend/logs/` anclado, y NO un `logs/` suelto: sin la ruta, el patron ignora
+# `backend/logs/` con ruta, y NO un `logs/` suelto: sin la ruta, el patron ignora
 # cualquier directorio llamado `logs` a cualquier profundidad, y eso se tragaba
 # `backend/src/modules/logs/` entero —el modulo de trazabilidad— dejandolo fuera
 # del repositorio sin avisar.
-backend/logs/
+#
+# Y apuntando al CONTENIDO (`/*`) y no al directorio: git no desciende a un
+# directorio excluido, asi que sobre `backend/logs/` la negacion de abajo seria
+# inerte y el `.gitkeep` nunca se versionaria.
+backend/logs/*
+!backend/logs/.gitkeep
 *.log
 npm-debug.log*
 yarn-debug.log*
