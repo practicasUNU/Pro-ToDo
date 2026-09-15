@@ -3,6 +3,7 @@ import { TypeOrmModule } from '@nestjs/typeorm';
 
 import { NodeStrategyFactory } from '@core/fsm/factories/node-strategy.factory';
 import { FsmModule } from '@core/fsm/fsm.module';
+import { LogsModule } from '@modules/logs/logs.module';
 import { TemplatesModule } from '@modules/templates/templates.module';
 import { Workflow } from '@modules/workflows/entities/workflow.entity';
 import { WorkflowsModule } from '@modules/workflows/workflows.module';
@@ -36,6 +37,11 @@ import type { OnModuleInit } from '@nestjs/common';
  * describe exactamente lo que este modulo implementa —los nodos ejecutables—, y
  * separarlo dejaria el catalogo y sus estrategias en sitios distintos.
  *
+ * Importa `LogsModule` por `HybridLoggerService`: el worker de sondeo escala a
+ * `alertas_error` la averia que le impide disparar el flujo. No cierra ciclo
+ * —`LogsModule` no importa nada del dominio— y se declara explicito porque ese
+ * modulo dejo de ser global al ganar repositorios propios.
+ *
  * Importa `WorkflowsModule` por `WorkflowsService`, que es quien despacha el
  * flujo cuando el sondeo IMAP detecta correo nuevo. La dependencia va en un solo
  * sentido: `WorkflowsModule` NO importa este modulo a proposito (las estrategias
@@ -45,6 +51,7 @@ import type { OnModuleInit } from '@nestjs/common';
 @Module({
   imports: [
     FsmModule,
+    LogsModule,
     TemplatesModule,
     WorkflowsModule,
     // El sondeo lee `flujos` para descubrir que buzones vigilar; el catalogo

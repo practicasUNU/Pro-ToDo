@@ -23,6 +23,7 @@ import {
 } from '@modules/nodes/dto/imap-trigger-config.dto';
 import { createImapClient } from '@modules/nodes/services/imap-client.factory';
 import { buildImapSearchQuery } from '@modules/nodes/strategies/imap-trigger.strategy';
+import { HybridLoggerService } from '@modules/logs/services/hybrid-logger.service';
 import { Workflow } from '@modules/workflows/entities/workflow.entity';
 import { WorkflowsService } from '@modules/workflows/workflows.service';
 
@@ -142,6 +143,24 @@ export class ImapPollingService implements OnModuleInit, OnModuleDestroy {
   private registeredPort: FlowPollingPort | null = null;
 
   /**
+   * Flujos cuyo sondeo esta fallando ahora mismo.
+   *
+   * Existe para que la bandeja de alertas registre la AVERIA y no cada uno de
+   * sus sintomas: este metodo corre cada minuto, asi que un buzon caido un dia
+   * dejaria 1.440 filas identicas y el operador tendria que atenderlas una por
+   * una para llegar a la misma conclusion. Se alerta en la TRANSICION de sano a
+   * fallando, y no se vuelve a alertar hasta que el flujo se recupere.
+   *
+   * En memoria y no en la base: describe el estado de ESTE proceso sondeando, no
+   * un hecho del dominio. Un reinicio reevalua, que es lo correcto — tras
+   * arrancar de nuevo nadie sabe si la averia sigue en pie hasta el primer tick.
+   *
+   * La consola sigue registrando cada ciclo: ahi el detalle repetido es util
+   * para ver si el fallo es constante o intermitente.
+   */
+  private readonly failingFlows = new Set<string>();
+
+  /**
    * Periodo de sondeo por defecto, resuelto UNA vez al arrancar.
    *
    * Se cachea en un campo en lugar de leer `ConfigService` en cada
@@ -157,6 +176,7 @@ export class ImapPollingService implements OnModuleInit, OnModuleDestroy {
     private readonly schedulerRegistry: SchedulerRegistry,
     private readonly configService: ConfigService,
     private readonly flowPollingCoordinator: FlowPollingCoordinator,
+    private readonly hybridLogger: HybridLoggerService,
   ) {}
 
   public async onModuleInit(): Promise<void> {
@@ -265,6 +285,10 @@ export class ImapPollingService implements OnModuleInit, OnModuleDestroy {
       // antes del siguiente ciclo, la fase de altas lo veria "ya programado e
       // intacto" y no volveria a inscribirlo nunca.
       this.scheduled.delete(flowId);
+      // Y NO `clearFailure`: un flujo que se da de baja no se ha recuperado, asi
+      // que anunciarlo seria mentir. Solo se olvida su estado para que una
+      // reactivacion futura pueda volver a alertar si sigue cayendose.
+      this.failingFlows.delete(flowId);
     }
 
     // A nivel `log` y no `debug`: sin esta linea el camino rapido es invisible
@@ -314,6 +338,7 @@ export class ImapPollingService implements OnModuleInit, OnModuleDestroy {
       if (!desired.has(flowId)) {
         this.deleteIntervalIfExists(intervalName(flowId));
         this.scheduled.delete(flowId);
+        this.failingFlows.delete(flowId);
         removed.push(flowId);
       }
     }
@@ -395,6 +420,10 @@ export class ImapPollingService implements OnModuleInit, OnModuleDestroy {
       const resolved = resolveImapConfig(config);
       const hasMatch = await this.hasMatchingMessages(resolved);
 
+      // El ciclo se completo: si veniamos de una averia, el flujo se recupero y
+      // vuelve a ser elegible para alertar si cae otra vez.
+      this.clearFailure(flowId);
+
       if (!hasMatch) {
         return false;
       }
@@ -410,14 +439,91 @@ export class ImapPollingService implements OnModuleInit, OnModuleDestroy {
       // arranca y nadie se entera), asi que sin la traza no hay forma de
       // distinguir un buzon caido de unas credenciales caducadas o de un error
       // de programacion en la resolucion de la configuracion.
+      const description =
+        error instanceof Error ? error.message : String(error);
+
       this.logger.error(
-        `[Worker] Falla critica de conexion IMAP en el flujo "${flowId}": ${error instanceof Error ? error.message : String(error)}`,
+        `[Worker] Falla critica de conexion IMAP en el flujo "${flowId}": ${description}`,
         error instanceof Error ? error.stack : undefined,
       );
+
+      await this.raiseWorkerAlert(flowId, description, error);
       return false;
     } finally {
       this.inFlight.delete(flowId);
     }
+  }
+
+  /**
+   * Escala la averia del sondeo a `alertas_error`, una sola vez por caida.
+   *
+   * SOLO EN LA TRANSICION de sano a fallando. Repetirla en cada ciclo llenaria
+   * la bandeja con la misma incidencia —un minuto por fila— y obligaria al
+   * operador a atender 1.440 avisos para llegar a la unica conclusion que
+   * importa: que este buzon lleva un dia sin responder. Lo que el operador
+   * necesita saber es que la averia EMPEZO, y eso ocurre una vez.
+   *
+   * GRAVE y no URGENTE: el flujo no se ha perdido nada irreversible, el correo
+   * sigue sin leer en el buzon y el siguiente ciclo lo recogera en cuanto la
+   * conexion vuelva. Lo que se ha perdido es el disparo puntual.
+   *
+   * La alerta se atribuye al FLUJO y no a una ejecucion porque aqui todavia no
+   * hay ninguna: el fallo impidio precisamente que llegara a crearse.
+   */
+  private async raiseWorkerAlert(
+    flowId: string,
+    description: string,
+    error: unknown,
+  ): Promise<void> {
+    if (this.failingFlows.has(flowId)) {
+      return;
+    }
+
+    this.failingFlows.add(flowId);
+
+    // Guarda de contingencia ADEMAS de la que el propio logger ya tiene. No es
+    // redundancia ociosa: esto se ejecuta dentro del `catch` de un callback de
+    // `setInterval`, donde una excepcion que escapara terminaria el proceso de
+    // Node entero. El registro de la alerta es best-effort; el sondeo no.
+    try {
+      await this.hybridLogger.logWorkerFailure({
+        flowId,
+        source: ImapPollingService.name,
+        level: 'GRAVE',
+        message: `Falla critica de conexion IMAP: ${description}`,
+        stackTrace: error instanceof Error ? error.stack : undefined,
+      });
+    } catch (loggingError: unknown) {
+      // Se retira la marca para que el siguiente ciclo REINTENTE la alerta. Si
+      // se dejara puesta, un fallo puntual al registrarla silenciaria la averia
+      // para siempre: la transicion ya habria "ocurrido" sin dejar rastro.
+      this.failingFlows.delete(flowId);
+
+      this.logger.error(
+        `[Worker] No se pudo escalar a alertas_error la averia del flujo "${flowId}": ${
+          loggingError instanceof Error
+            ? loggingError.message
+            : String(loggingError)
+        }`,
+      );
+    }
+  }
+
+  /**
+   * Marca el flujo como recuperado tras un ciclo completado sin excepcion.
+   *
+   * Se registra la recuperacion en la consola SOLO si veniamos de una averia:
+   * anunciar "sigue funcionando" cada minuto seria el mismo ruido que esto
+   * evita, en el otro sentido.
+   */
+  private clearFailure(flowId: string): void {
+    if (!this.failingFlows.delete(flowId)) {
+      return;
+    }
+
+    this.logger.log(
+      `[Worker] El sondeo del flujo "${flowId}" se recupero; vuelve a operar con normalidad.`,
+    );
   }
 
   /**
@@ -765,6 +871,7 @@ export class ImapPollingService implements OnModuleInit, OnModuleDestroy {
     // temporizadores ya no existen, y la siguiente reconciliacion los daria por
     // intactos y no volveria a inscribirlos.
     this.scheduled.clear();
+    this.failingFlows.clear();
   }
 
   /** Cierra la sesion IMAP sin dejar escapar errores de cierre. */

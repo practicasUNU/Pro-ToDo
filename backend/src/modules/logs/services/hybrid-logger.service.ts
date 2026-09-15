@@ -115,6 +115,23 @@ export interface NodeExecutionDetails {
 }
 
 /**
+ * Averia de un proceso que corre FUERA de una ejecucion FSM.
+ *
+ * El caso que la motiva es el worker de sondeo IMAP: si la conexion no responde,
+ * el flujo no llega a despacharse y por tanto no hay `executionId` ni nodo al
+ * que colgar el fallo. Es la averia mas grave que puede tener un disparador y la
+ * unica que nadie ve, porque su sintoma es que no pasa nada.
+ */
+export interface WorkerFailureDetails {
+  readonly flowId: string;
+  /** Proceso que fallo (`ImapPollingService`...). Va al archivo, no a la fila. */
+  readonly source: string;
+  readonly level: AlertLevel;
+  readonly message: string;
+  readonly stackTrace?: string | undefined;
+}
+
+/**
  * Volcado hibrido de fallos del motor FSM (`architecture-patterns.md` §4).
  *
  * HIBRIDO significa dos destinos con dos propositos distintos, y por eso el
@@ -302,6 +319,63 @@ export class HybridLoggerService {
   }
 
   /**
+   * Registra la averia de un worker: al archivo de incidencias y a la bandeja.
+   *
+   * Es el hermano de `logNodeExecution` para lo que ocurre fuera del motor. No
+   * escribe en `logs_nodo` y no podria: esa tabla cuelga de `ejecuciones_flujo`
+   * por clave ajena, y el sentido de este metodo es justamente que no hay
+   * ejecucion. La alerta se atribuye al flujo.
+   *
+   * Va al archivo de INCIDENCIAS (`fsm-%DATE%.log`) y no al de ejecucion: este
+   * no es un eslabon del caudal de nodos sino una autopsia, que es para lo que
+   * existe aquel.
+   *
+   * NO LANZA NUNCA, como el resto del servicio. Se invoca desde el `catch` de un
+   * callback de `setInterval`, donde una excepcion que escapara terminaria el
+   * proceso de Node entero.
+   *
+   * QUIEN DECIDE SI LLAMAR ES EL LLAMANTE, no este metodo: el worker sabe si la
+   * averia es nueva o es el mismo fallo repitiendose cada minuto, y ese dato no
+   * viaja hasta aqui.
+   */
+  public async logWorkerFailure(details: WorkerFailureDetails): Promise<void> {
+    try {
+      this.winston.error({
+        message: details.message,
+        level_fsm: details.level,
+        flowId: details.flowId,
+        source: details.source,
+        stackTrace: details.stackTrace ?? null,
+      });
+    } catch (error: unknown) {
+      this.logger.error(
+        `No se pudo volcar a disco la averia del worker "${details.source}" (flujo "${details.flowId}"): ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    }
+
+    try {
+      await this.alertaRepo.save(
+        this.alertaRepo.create({
+          executionId: null,
+          flowId: details.flowId,
+          logNodeId: null,
+          level: details.level,
+          errorMessage: details.message,
+          resolved: false,
+        }),
+      );
+    } catch (error: unknown) {
+      this.logger.error(
+        `No se pudo registrar la alerta ${details.level} del worker "${details.source}" (flujo "${details.flowId}"): ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    }
+  }
+
+  /**
    * Escala el fallo a `alertas_error` si su severidad lo exige.
    *
    * SE DECIDE POR LA SEVERIDAD Y NO POR EL ESTADO: el motor ya mapea `LEVE` a
@@ -335,6 +409,9 @@ export class HybridLoggerService {
       await this.alertaRepo.save(
         this.alertaRepo.create({
           executionId: details.executionId,
+          // Nulo: esta alerta nacio DENTRO de una ejecucion, asi que ya se
+          // atribuye por ella. `flowId` es para lo que ocurre fuera del motor.
+          flowId: null,
           logNodeId: savedLog?.id ?? null,
           level: severity,
           // El motor ya resolvio aqui el `customMessage` de la ruta de error

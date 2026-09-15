@@ -52,11 +52,26 @@ export class AlertaError {
   /**
    * Ejecucion en la que se produjo el fallo.
    *
+   * NULLABLE, y no por comodidad: el sondeo puede fallar ANTES de que exista
+   * ejecucion alguna —si la conexion IMAP no responde, el worker ni llega a
+   * despachar el flujo—, y obligar a esa alerta a inventarse una clave ajena
+   * seria falsear el dato. Ese caso se atribuye por `flowId`.
+   *
    * `ON DELETE CASCADE` en la clave ajena: purgar `ejecuciones_flujo` arrastra
    * sus alertas y no deja huerfanas.
    */
-  @Column({ name: 'id_ejecucion', type: 'uuid' })
-  executionId: string;
+  @Column({ name: 'id_ejecucion', type: 'uuid', nullable: true })
+  executionId: string | null;
+
+  /**
+   * Flujo afectado cuando el fallo ocurre FUERA de una ejecucion.
+   *
+   * Nulo en las alertas nacidas dentro de un nodo, que ya se atribuyen por
+   * `executionId`. La base impone que al menos una de las dos este presente
+   * (`chk_alertas_error_origen`): una alerta sin ninguna seria inatribuible.
+   */
+  @Column({ name: 'id_flujo', type: 'uuid', nullable: true })
+  flowId: string | null;
 
   /**
    * Traza de `logs_nodo` que origino esta alerta.

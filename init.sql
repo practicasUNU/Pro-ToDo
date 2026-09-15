@@ -222,7 +222,14 @@ CREATE TABLE logs_nodo (
 -- creadas: este archivo solo se ejecuta con el volumen de Docker vacio.
 CREATE TABLE alertas_error (
     id_alerta_error UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-    id_ejecucion UUID NOT NULL REFERENCES ejecuciones_flujo(id_ejecucion) ON DELETE CASCADE,
+    -- NULLABLE, y no por comodidad: el sondeo IMAP puede fallar ANTES de que
+    -- exista ejecucion alguna —si la conexion no responde, el worker ni llega a
+    -- despachar el flujo—, y obligar a esa alerta a inventarse una clave ajena
+    -- seria falsear el dato. Ese caso se atribuye por `id_flujo`.
+    id_ejecucion UUID REFERENCES ejecuciones_flujo(id_ejecucion) ON DELETE CASCADE,
+    -- Flujo afectado cuando el fallo ocurre FUERA de una ejecucion. Nulo en las
+    -- alertas nacidas dentro de un nodo, que ya se atribuyen por `id_ejecucion`.
+    id_flujo UUID,
     -- Traza que la origino. Nullable a proposito: si la escritura en logs_nodo
     -- falla, la alerta se registra igual y huerfana. Perder el aviso de un fallo
     -- URGENTE porque no se pudo anotar la traza seria el peor canje posible.
@@ -242,7 +249,14 @@ CREATE TABLE alertas_error (
     resuelto BOOLEAN NOT NULL DEFAULT FALSE,
     fecha_creacion TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     CONSTRAINT fk_alertas_error_log_nodo FOREIGN KEY (id_log_nodo)
-        REFERENCES logs_nodo(id_log_nodo) ON DELETE SET NULL
+        REFERENCES logs_nodo(id_log_nodo) ON DELETE SET NULL,
+    CONSTRAINT fk_alertas_error_flujo FOREIGN KEY (id_flujo)
+        REFERENCES flujos(id_flujo) ON DELETE CASCADE,
+    -- Una alerta sin ejecucion NI flujo seria inatribuible: el operador leeria
+    -- "algo fallo" sin saber donde. Que lo impida la base es la unica garantia
+    -- que sobrevive a cualquier llamante futuro.
+    CONSTRAINT chk_alertas_error_origen
+        CHECK (id_ejecucion IS NOT NULL OR id_flujo IS NOT NULL)
 );
 
 -- =============================================================================
@@ -312,6 +326,7 @@ CREATE INDEX idx_logs_nodo_id_ejecucion ON logs_nodo(id_ejecucion);
 CREATE INDEX idx_logs_nodo_id_nodo ON logs_nodo(id_nodo);
 CREATE INDEX idx_alertas_error_id_ejecucion ON alertas_error(id_ejecucion);
 CREATE INDEX idx_alertas_error_id_log_nodo ON alertas_error(id_log_nodo);
+CREATE INDEX idx_alertas_error_id_flujo ON alertas_error(id_flujo);
 
 -- PARCIAL y no un indice plano sobre `resuelto`: con dos valores posibles el
 -- planificador no lo usaria. La consulta real de la bandeja es "las pendientes,

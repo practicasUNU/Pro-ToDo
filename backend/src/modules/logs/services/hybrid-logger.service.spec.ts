@@ -395,6 +395,9 @@ describe('HybridLoggerService · volcado forense del motor FSM', () => {
         expect(alerts.save).toHaveBeenCalledTimes(1);
         expect(alerts.create).toHaveBeenCalledWith({
           executionId: FAILING_NODE.executionId,
+          // Nulo: esta alerta nacio DENTRO de una ejecucion y ya se atribuye por
+          // ella. `flowId` es para lo que ocurre fuera del motor.
+          flowId: null,
           logNodeId: SAVED_LOG_ID,
           level: severity,
           errorMessage: 'Falta la clave raw_email.titulo',
@@ -470,6 +473,71 @@ describe('HybridLoggerService · volcado forense del motor FSM', () => {
       // 3. Assert
       const saved = alerts.create.mock.calls[0][0];
       expect(saved.errorMessage).toBe('Error operativo no tipado');
+    });
+
+    it('5.7 deberia registrar la averia de un worker atribuida al flujo', async () => {
+      // 1. Arrange: el fallo ocurre fuera de la FSM, asi que no hay ejecucion ni
+      //    traza de nodo a la que colgarlo.
+      const { service, alerts, repository } = buildService();
+
+      // 2. Act
+      await service.logWorkerFailure({
+        flowId: 'a1b2c3d4-5e6f-4788-9a0b-1c2d3e4f5a6b',
+        source: 'ImapPollingService',
+        level: 'GRAVE',
+        message: 'Falla critica de conexion IMAP: ECONNREFUSED',
+      });
+
+      // 3. Assert: alerta si, `logs_nodo` no — esa tabla cuelga de
+      //    `ejecuciones_flujo` y aqui el sentido es que no hay ejecucion.
+      expect(repository.save).not.toHaveBeenCalled();
+      expect(alerts.create).toHaveBeenCalledWith({
+        executionId: null,
+        flowId: 'a1b2c3d4-5e6f-4788-9a0b-1c2d3e4f5a6b',
+        logNodeId: null,
+        level: 'GRAVE',
+        errorMessage: 'Falla critica de conexion IMAP: ECONNREFUSED',
+        resolved: false,
+      });
+    });
+
+    it('5.8 deberia volcar la averia del worker al archivo de incidencias', async () => {
+      // 1. Arrange: al de INCIDENCIAS y no al de ejecucion. Esto no es un
+      //    eslabon del caudal de nodos sino una autopsia.
+      const { service } = buildService();
+
+      // 2. Act
+      await service.logWorkerFailure({
+        flowId: 'a1b2c3d4-5e6f-4788-9a0b-1c2d3e4f5a6b',
+        source: 'ImapPollingService',
+        level: 'GRAVE',
+        message: 'Falla critica de conexion IMAP: ECONNREFUSED',
+      });
+
+      // 3. Assert
+      expect(errorSpy).toHaveBeenCalledTimes(1);
+      expect(infoSpy).not.toHaveBeenCalled();
+    });
+
+    it('5.9 no deberia lanzar si falla el registro de la averia del worker', async () => {
+      // 1. Arrange: se invoca desde el `catch` de un `setInterval`.
+      const alerts = buildRepository<AlertaError>();
+      alerts.save.mockRejectedValue(new Error('connection terminated'));
+      const { service } = buildService(
+        {},
+        buildRepository<LogNodo>(SAVED_LOG_ID),
+        alerts,
+      );
+
+      // 2. Act & 3. Assert
+      await expect(
+        service.logWorkerFailure({
+          flowId: 'a1b2c3d4-5e6f-4788-9a0b-1c2d3e4f5a6b',
+          source: 'ImapPollingService',
+          level: 'GRAVE',
+          message: 'Falla critica de conexion IMAP: ECONNREFUSED',
+        }),
+      ).resolves.toBeUndefined();
     });
 
     it('5.6 deberia registrar una alerta por intento', async () => {

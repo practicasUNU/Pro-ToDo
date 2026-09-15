@@ -2,6 +2,8 @@ import { BadRequestException, ConflictException } from '@nestjs/common';
 import { SchedulerRegistry } from '@nestjs/schedule';
 
 import { FlowPollingCoordinator } from '@common/services/flow-polling.coordinator';
+
+import type { HybridLoggerService } from '@modules/logs/services/hybrid-logger.service';
 import { NodeType } from '@core/fsm/types/pipeline-schema.types';
 import {
   DEFAULT_POLL_INTERVAL_MS,
@@ -120,6 +122,8 @@ interface Harness {
   registry: SchedulerRegistry;
   client: Record<string, jest.Mock>;
   coordinator: FlowPollingCoordinator;
+  /** Doble del logger hibrido, para aseverar el escalado a `alertas_error`. */
+  hybridLogger: { logWorkerFailure: jest.Mock };
   /** Spies del logger, para aseverar el NIVEL con el que se registra un caso. */
   warnSpy: jest.SpyInstance;
   errorSpy: jest.SpyInstance;
@@ -171,12 +175,19 @@ const buildHarness = (
     .spyOn(coordinator['logger'], 'error')
     .mockImplementation(() => undefined);
 
+  // Doble y no el servicio real: el real abriria transportes de winston y
+  // necesitaria dos repositorios. Lo que aqui interesa es CUANDO se le llama.
+  const hybridLogger = {
+    logWorkerFailure: jest.fn().mockResolvedValue(undefined),
+  };
+
   const service = new ImapPollingService(
     repository as unknown as Repository<Workflow>,
     workflows as unknown as WorkflowsService,
     registry,
     configService,
     coordinator,
+    hybridLogger as unknown as HybridLoggerService,
   );
 
   jest.spyOn(service['logger'], 'log').mockImplementation(() => undefined);
@@ -195,6 +206,7 @@ const buildHarness = (
     registry,
     client,
     coordinator,
+    hybridLogger,
     warnSpy,
     errorSpy,
   };
@@ -1089,6 +1101,143 @@ describe('ImapPollingService', () => {
       // 3. Assert: sin la baja, una recarga del `--watch` dejaria este servicio
       //    muerto atendiendo paradas que nunca llegarian a la instancia viva.
       expect(stopSpy).not.toHaveBeenCalled();
+    });
+  });
+  describe('4. Escalado de la averia del worker a alertas_error', () => {
+    /** Cliente que siempre falla al conectar. */
+    const failingClient = (message = 'ECONNREFUSED') => ({
+      connect: jest.fn().mockRejectedValue(new Error(message)),
+      getMailboxLock: jest.fn(),
+      search: jest.fn(),
+      logout: jest.fn().mockResolvedValue(undefined),
+      on: jest.fn(),
+    });
+
+    it('4.1 deberia registrar una alerta GRAVE atribuida al flujo', async () => {
+      // 1. Arrange: el fallo ocurre ANTES de despachar, asi que no hay ejecucion
+      //    a la que colgar la alerta; se atribuye al flujo.
+      const { service, hybridLogger } = buildHarness();
+      ImapFlow.mockImplementation(() => failingClient());
+
+      // 2. Act
+      await service.pollInbox(FLOW_ID, buildParams());
+
+      // 3. Assert
+      expect(hybridLogger.logWorkerFailure).toHaveBeenCalledTimes(1);
+      expect(hybridLogger.logWorkerFailure).toHaveBeenCalledWith(
+        expect.objectContaining({
+          flowId: FLOW_ID,
+          source: 'ImapPollingService',
+          level: 'GRAVE',
+          message: expect.stringContaining('ECONNREFUSED') as string,
+        }),
+      );
+    });
+
+    it('4.2 deberia alertar UNA sola vez mientras la averia persiste', async () => {
+      // 1. Arrange: el sondeo corre cada minuto. Sin el corte por transicion, un
+      //    buzon caido un dia dejaria 1.440 filas identicas en la bandeja.
+      const { service, hybridLogger, errorSpy } = buildHarness();
+      ImapFlow.mockImplementation(() => failingClient());
+
+      // 2. Act: tres ciclos consecutivos fallando.
+      await service.pollInbox(FLOW_ID, buildParams());
+      await service.pollInbox(FLOW_ID, buildParams());
+      await service.pollInbox(FLOW_ID, buildParams());
+
+      // 3. Assert: una alerta, pero la consola registra los tres ciclos —ahi el
+      //    detalle repetido si sirve para ver si el fallo es constante.
+      expect(hybridLogger.logWorkerFailure).toHaveBeenCalledTimes(1);
+      expect(errorSpy).toHaveBeenCalledTimes(3);
+    });
+
+    it('4.3 deberia volver a alertar tras recuperarse y caer de nuevo', async () => {
+      // 1. Arrange: el corte de ruido no puede silenciar una averia NUEVA.
+      const { service, hybridLogger } = buildHarness();
+
+      // 2. Act: falla, se recupera, vuelve a fallar.
+      ImapFlow.mockImplementationOnce(() => failingClient());
+      await service.pollInbox(FLOW_ID, buildParams());
+      await service.pollInbox(FLOW_ID, buildParams());
+      ImapFlow.mockImplementationOnce(() => failingClient());
+      await service.pollInbox(FLOW_ID, buildParams());
+
+      // 3. Assert
+      expect(hybridLogger.logWorkerFailure).toHaveBeenCalledTimes(2);
+    });
+
+    it('4.4 no deberia alertar por un solapamiento de ejecuciones (409)', async () => {
+      // 1. Arrange: el 409 de RNF-09 es la condicion NORMAL del sondeo, no una
+      //    averia. El correo sigue sin leer y el siguiente ciclo lo recoge.
+      const { service, hybridLogger, workflows } = buildHarness();
+      workflows.runAutomaticWorkflow.mockRejectedValue(
+        new ConflictException('Ya hay una ejecucion EN_PROCESO'),
+      );
+
+      // 2. Act
+      await service.pollInbox(FLOW_ID, buildParams());
+
+      // 3. Assert
+      expect(hybridLogger.logWorkerFailure).not.toHaveBeenCalled();
+    });
+
+    it('4.5 deberia anunciar la recuperacion solo si venia de una averia', async () => {
+      // 1. Arrange: anunciar "sigue funcionando" cada minuto seria el mismo
+      //    ruido que esto evita, en el otro sentido.
+      const { service } = buildHarness();
+      const logSpy = jest.spyOn(service['logger'], 'log');
+
+      // 2. Act: dos ciclos sanos seguidos, sin averia previa.
+      await service.pollInbox(FLOW_ID, buildParams());
+      await service.pollInbox(FLOW_ID, buildParams());
+
+      // 3. Assert
+      expect(logSpy).not.toHaveBeenCalledWith(
+        expect.stringContaining('se recupero'),
+      );
+
+      // 2b. Act: ahora si, una averia seguida de un ciclo sano.
+      ImapFlow.mockImplementationOnce(() => failingClient());
+      await service.pollInbox(FLOW_ID, buildParams());
+      await service.pollInbox(FLOW_ID, buildParams());
+
+      // 3b. Assert
+      expect(logSpy).toHaveBeenCalledWith(
+        expect.stringContaining('se recupero'),
+      );
+    });
+
+    it('4.6 no deberia propagar un fallo del registro de la alerta', async () => {
+      // 1. Arrange: esto corre dentro de un `setInterval`. Una excepcion que
+      //    escapara terminaria el proceso de Node entero.
+      const { service, hybridLogger } = buildHarness();
+      ImapFlow.mockImplementation(() => failingClient());
+      hybridLogger.logWorkerFailure.mockRejectedValue(
+        new Error('connection terminated'),
+      );
+
+      // 2. Act & 3. Assert
+      await expect(
+        service.pollInbox(FLOW_ID, buildParams()),
+      ).resolves.toBe(false);
+    });
+
+    it('4.7 deberia reintentar la alerta si su registro fallo', async () => {
+      // 1. Arrange: sin retirar la marca, un fallo puntual al registrar
+      //    silenciaria la averia para siempre — la transicion ya habria
+      //    "ocurrido" sin dejar rastro en la bandeja.
+      const { service, hybridLogger } = buildHarness();
+      ImapFlow.mockImplementation(() => failingClient());
+      hybridLogger.logWorkerFailure.mockRejectedValueOnce(
+        new Error('connection terminated'),
+      );
+
+      // 2. Act: dos ciclos fallando; el registro del primero se cae.
+      await service.pollInbox(FLOW_ID, buildParams());
+      await service.pollInbox(FLOW_ID, buildParams());
+
+      // 3. Assert: se intento las dos veces, y la segunda si cuajo.
+      expect(hybridLogger.logWorkerFailure).toHaveBeenCalledTimes(2);
     });
   });
 });
