@@ -137,6 +137,98 @@ interface PostgresDriverError extends Error {
 }
 
 /** Longitud de `ejecuciones_flujo.motivo_fallo`. */
+/**
+ * Namespace del correo crudo cuyo binario libera el motor.
+ *
+ * Va como literal y no importando el tipo del nodo IMAP a proposito: `@core` no
+ * puede depender de `@modules` sin invertir la direccion de las dependencias, y
+ * el motor no tiene por que conocer el formato de un correo. La purga es
+ * ESTRUCTURAL: opera sobre el nombre de una clave, no sobre una interfaz.
+ */
+const RAW_EMAIL_NAMESPACE = 'raw_email';
+
+/** Clave, dentro de ese namespace, que guarda el inventario de adjuntos. */
+const ATTACHMENTS_KEY = 'attachments';
+
+/** Clave del binario en base64 que se libera. */
+const BINARY_CONTENT_KEY = 'contentBase64';
+
+/**
+ * Claves con las que un nodo declara haber extraido texto aprovechable.
+ *
+ * Son el disparador de la liberacion de memoria: mientras ningun nodo haya
+ * sacado texto, el binario sigue siendo la UNICA fuente de datos del correo
+ * —un PDF escaneado, un `multipart/alternative` sin parte de texto— y tirarlo
+ * dejaria al flujo sin nada que procesar. En cuanto alguien produce texto, el
+ * binario pasa a ser peso muerto.
+ */
+const EXTRACTED_TEXT_KEYS = ['clean_body', 'text', 'extracted_text'] as const;
+
+/** Marca que sustituye al base64 en la traza de disco. */
+const REDACTED_BINARY_PLACEHOLDER = '[base64 omitido]';
+
+/**
+ * Un nodo produjo texto util si alguna de las claves acordadas trae contenido
+ * real. Una cadena en blanco NO cuenta: es ausencia de texto con otra forma.
+ */
+const hasUsefulText = (data: Record<string, unknown> | undefined): boolean =>
+  data !== undefined &&
+  EXTRACTED_TEXT_KEYS.some((key) => {
+    const value = data[key];
+
+    return typeof value === 'string' && value.trim().length > 0;
+  });
+
+/** Un adjunto todavia por liberar: objeto con `contentBase64` de tipo cadena. */
+const holdsBinaryContent = (value: unknown): boolean =>
+  typeof value === 'object' &&
+  value !== null &&
+  typeof (value as Record<string, unknown>)[BINARY_CONTENT_KEY] === 'string';
+
+/**
+ * Clona el adjunto sustituyendo SOLO `contentBase64`; el resto viaja intacto.
+ *
+ * Se reemplaza la clave en vez de borrarla para que `filename`, `contentType` y
+ * `size` sigan describiendo que venia en el correo: quien audite una ejecucion
+ * necesita saber que hubo un adjunto, aunque sus bytes ya no esten.
+ */
+const withReplacedBinaryContent = (
+  value: unknown,
+  replacement: string | null,
+): unknown => {
+  if (!holdsBinaryContent(value)) {
+    return value;
+  }
+
+  return {
+    ...(value as Record<string, unknown>),
+    [BINARY_CONTENT_KEY]: replacement,
+  };
+};
+
+/**
+ * Devuelve el inventario de adjuntos de un namespace, o `null` si no hay ninguno
+ * pendiente de liberar. `null` significa "no hay nada que hacer aqui".
+ */
+const pendingAttachmentsOf = (
+  namespace: Record<string, unknown> | undefined,
+): unknown[] | null => {
+  if (namespace === undefined) {
+    return null;
+  }
+
+  const attachments = namespace[ATTACHMENTS_KEY];
+
+  if (!Array.isArray(attachments) || attachments.length === 0) {
+    return null;
+  }
+
+  // Si ninguno conserva base64 ya se libero antes. Cortar aqui evita reescribir
+  // el namespace —y con el, clonar el contexto entero dos veces— en cada uno de
+  // los nodos que queden por delante.
+  return attachments.some(holdsBinaryContent) ? attachments : null;
+};
+
 const FAILURE_REASON_MAX_LENGTH = 255;
 
 /**
@@ -546,6 +638,13 @@ export class FsmEngineService {
         if (result.success) {
           context.setNamespace(node.outputNamespace, result.data ?? {});
 
+          // Liberacion de binarios. Va JUSTO aqui, y no repetida en cada rama de
+          // salida, porque este punto domina las tres que siguen —`halt`, nodo
+          // terminal y transicion normal— y todas ellas persisten el checkpoint
+          // leyendo `context.getAllContext()`. Una sola sentencia y ninguna ruta
+          // se escapa.
+          this.releaseAttachmentBinaries(context, result);
+
           // --- Parada ordenada pedida por el propio nodo. Va ANTES de mirar
           // `nextStep`: el disparador no encontro nada que procesar, asi que los
           // pasos siguientes no tienen entrada y ejecutarlos solo produciria un
@@ -785,6 +884,87 @@ export class FsmEngineService {
    * nunca, asi que esperar no arriesga nada, y lanzarlo sin esperar dejaria
    * rechazos sin manejar y filas escritas fuera de orden.
    */
+  /**
+   * Libera el base64 de los adjuntos en cuanto hay texto que los sustituya.
+   *
+   * REGLA: el binario se conserva si y solo si sigue siendo la unica fuente de
+   * datos. Mientras ningun nodo haya extraido texto —el caso del PDF escaneado,
+   * que espera a un nodo multimodal— los bytes se quedan. En cuanto alguno
+   * produce `clean_body`, `text` o `extracted_text` con contenido, el binario es
+   * peso muerto que se arrastraria por el heap de V8 y, sobre todo, se
+   * reserializaria ENTERO en cada checkpoint posterior.
+   *
+   * Vive en el motor y no en los nodos por dos razones. La primera es que un
+   * nodo que escribe en un namespace ajeno rompe "un nodo, un namespace" y
+   * obliga a cada estrategia futura a acordarse de purgar. La segunda es que asi
+   * la regla se aplica aunque el flujo no tenga un `PARSER_PRE_IA`: basta con
+   * que CUALQUIER nodo declare texto.
+   *
+   * Efecto util en el caso comun: el propio `TRIGGER_IMAP` emite `text`, asi que
+   * un correo con cuerpo textual ve sus adjuntos liberados en el MISMO
+   * checkpoint que los escribio por primera vez, y el base64 no llega a tocar
+   * PostgreSQL.
+   */
+  private releaseAttachmentBinaries(
+    context: StatePayloadContext,
+    result: NodeResult,
+  ): void {
+    if (!hasUsefulText(result.data)) {
+      return;
+    }
+
+    const attachments = pendingAttachmentsOf(
+      context.getNamespace(RAW_EMAIL_NAMESPACE),
+    );
+
+    if (attachments === null) {
+      return;
+    }
+
+    // `setNamespace` fusiona por clave de primer nivel, de modo que reescribir
+    // `attachments` reemplaza el arreglo entero y deja intactas las claves
+    // planas del correo (`message_id`, `from`, `subject`, `text`, `html`,
+    // `date`). Es la razon por la que ese payload tenia que quedarse plano.
+    context.setNamespace(RAW_EMAIL_NAMESPACE, {
+      [ATTACHMENTS_KEY]: attachments.map((attachment) =>
+        withReplacedBinaryContent(attachment, null),
+      ),
+    });
+  }
+
+  /**
+   * Sustituye el base64 de los adjuntos por una marca antes de trazar el nodo.
+   *
+   * `payloadSnapshot` se vuelca al archivo `execution-*.log`, que rota por
+   * tamano: sin esto, una sola ejecucion con un adjunto de 5 MiB escribiria
+   * ~6,8 MB de una sola linea y agotaria la rotacion de golpe, llevandose por
+   * delante la traza de todo lo demas.
+   *
+   * Se sustituye por una marca legible en vez de `null` porque en un log
+   * forense importa distinguir "aqui habia bytes que no se han escrito" de "este
+   * adjunto ya venia sin contenido".
+   */
+  private redactSnapshotBinaries(
+    data: Record<string, unknown> | undefined,
+  ): Record<string, unknown> | undefined {
+    if (data === undefined) {
+      return undefined;
+    }
+
+    const attachments = data[ATTACHMENTS_KEY];
+
+    if (!Array.isArray(attachments) || !attachments.some(holdsBinaryContent)) {
+      return data;
+    }
+
+    return {
+      ...data,
+      [ATTACHMENTS_KEY]: attachments.map((attachment) =>
+        withReplacedBinaryContent(attachment, REDACTED_BINARY_PLACEHOLDER),
+      ),
+    };
+  }
+
   private async logNodeOutcome(
     executionId: string,
     node: PipelineNodeConfigDto,
@@ -827,7 +1007,7 @@ export class FsmEngineService {
         message: customMessage ?? failure?.message,
         stackTrace: failure?.stackTrace,
         durationMs,
-        payloadSnapshot: result.data,
+        payloadSnapshot: this.redactSnapshotBinaries(result.data),
       });
     } catch (error: unknown) {
       this.logger.warn(

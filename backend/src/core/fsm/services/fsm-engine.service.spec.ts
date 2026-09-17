@@ -1838,4 +1838,357 @@ describe('FsmEngineService (PROT-09)', () => {
       expect(result.currentState).toBe(ExecutionState.EXITOSO);
     });
   });
+
+  describe('12. Liberacion de binarios de adjuntos', () => {
+    const BASE64 = 'Y29udGVuaWRvLWJpbmFyaW8tZGUtcHJ1ZWJh';
+
+    /** Adjunto tal como lo escribe el nodo IMAP, con su binario todavia vivo. */
+    const buildAttachment = (): Record<string, unknown> => ({
+      filename: 'escaneo.pdf',
+      contentType: 'application/pdf',
+      size: 1024,
+      contentBase64: BASE64,
+    });
+
+    /**
+     * Pipeline de 2 nodos cuyo primer paso escribe en `raw_email`.
+     *
+     * El namespace importa: la purga es estructural y se aplica sobre ese nombre
+     * concreto, no sobre el nodo que lo produjo.
+     */
+    const buildEmailSchema = (): PipelineSchemaDto => ({
+      flowId: FLOW_ID,
+      name: 'Pipeline de correo',
+      version: '1.0.0',
+      entrypoint: 'nodo_a',
+      nodes: {
+        nodo_a: {
+          nodeId: 'nodo_a',
+          nodeType: NodeType.TRIGGER_IMAP,
+          outputNamespace: 'raw_email',
+          nextStep: 'nodo_b',
+          onErrorStep: null,
+          params: {},
+        },
+        nodo_b: {
+          nodeId: 'nodo_b',
+          nodeType: NodeType.PROCESADOR_IA,
+          outputNamespace: 'parsed_email',
+          nextStep: null,
+          onErrorStep: null,
+          params: {},
+        },
+      },
+    });
+
+    /** Todos los `contextPayload` persistidos, en orden. */
+    const checkpointsOf = (update: jest.Mock): unknown[] =>
+      update.mock.calls.map(
+        ([, patch]) => (patch as Record<string, unknown>).contextPayload,
+      );
+
+    const attachmentsIn = (payload: unknown): Record<string, unknown>[] => {
+      const namespaces = payload as Record<string, Record<string, unknown>>;
+
+      return (namespaces.raw_email?.attachments ?? []) as Record<
+        string,
+        unknown
+      >[];
+    };
+
+    it('12.1 deberia liberar el base64 en cuanto el propio nodo IMAP trae texto', async () => {
+      // 1. Arrange: el correo trae cuerpo textual, asi que su adjunto deja de
+      //    ser la unica fuente de datos en el MISMO paso que lo ingirio.
+      const execution = buildExecution();
+      const { repo, update } = buildRepository(execution);
+
+      factory.registerStrategy(
+        buildStrategy(
+          NodeType.TRIGGER_IMAP,
+          jest.fn().mockResolvedValue({
+            success: true,
+            data: {
+              subject: 'Factura',
+              text: 'Cuerpo con contenido aprovechable.',
+              attachments: [buildAttachment()],
+            },
+          }),
+        ),
+      );
+      factory.registerStrategy(
+        buildStrategy(
+          NodeType.PROCESADOR_IA,
+          jest.fn().mockResolvedValue({ success: true, data: {} }),
+        ),
+      );
+
+      // 2. Act
+      const result = await buildEngine(repo).executeWorkflow(
+        EXECUTION_ID,
+        buildEmailSchema(),
+      );
+
+      // 3. Assert: binario liberado y metadatos intactos.
+      expect(attachmentsIn(result.contextPayload)).toEqual([
+        {
+          filename: 'escaneo.pdf',
+          contentType: 'application/pdf',
+          size: 1024,
+          contentBase64: null,
+        },
+      ]);
+      // Y, sobre todo: NINGUN checkpoint llego a escribir el base64 en jsonb.
+      for (const payload of checkpointsOf(update)) {
+        expect(JSON.stringify(payload)).not.toContain(BASE64);
+      }
+    });
+
+    it('12.2 deberia conservar el binario hasta que algun nodo extraiga texto', async () => {
+      // 1. Arrange: correo sin cuerpo textual (PDF escaneado). El texto solo
+      //    aparece en el segundo nodo.
+      const execution = buildExecution();
+      const { repo, update } = buildRepository(execution);
+
+      factory.registerStrategy(
+        buildStrategy(
+          NodeType.TRIGGER_IMAP,
+          jest.fn().mockResolvedValue({
+            success: true,
+            data: { text: '', attachments: [buildAttachment()] },
+          }),
+        ),
+      );
+      factory.registerStrategy(
+        buildStrategy(
+          NodeType.PROCESADOR_IA,
+          jest.fn().mockResolvedValue({
+            success: true,
+            data: { clean_body: 'Texto extraido por el modelo multimodal.' },
+          }),
+        ),
+      );
+
+      // 2. Act
+      const result = await buildEngine(repo).executeWorkflow(
+        EXECUTION_ID,
+        buildEmailSchema(),
+      );
+
+      // 3. Assert: el primer checkpoint SI lleva el binario —era la unica fuente
+      //    de datos y el nodo multimodal lo necesitaba— y al final ya no esta.
+      const payloads = checkpointsOf(update);
+      expect(
+        payloads.some((payload) => JSON.stringify(payload).includes(BASE64)),
+      ).toBe(true);
+      expect(attachmentsIn(result.contextPayload)[0].contentBase64).toBeNull();
+    });
+
+    it('12.3 deberia reconocer extracted_text como senal de texto util', async () => {
+      // 1. Arrange
+      const execution = buildExecution();
+      const { repo } = buildRepository(execution);
+
+      factory.registerStrategy(
+        buildStrategy(
+          NodeType.TRIGGER_IMAP,
+          jest.fn().mockResolvedValue({
+            success: true,
+            data: {
+              extracted_text: 'Texto de un OCR.',
+              attachments: [buildAttachment()],
+            },
+          }),
+        ),
+      );
+      factory.registerStrategy(
+        buildStrategy(
+          NodeType.PROCESADOR_IA,
+          jest.fn().mockResolvedValue({ success: true, data: {} }),
+        ),
+      );
+
+      // 2. Act
+      const result = await buildEngine(repo).executeWorkflow(
+        EXECUTION_ID,
+        buildEmailSchema(),
+      );
+
+      // 3. Assert
+      expect(attachmentsIn(result.contextPayload)[0].contentBase64).toBeNull();
+    });
+
+    it('12.4 NO deberia liberar nada si ningun nodo produce texto', async () => {
+      // 1. Arrange
+      const execution = buildExecution();
+      const { repo } = buildRepository(execution);
+
+      factory.registerStrategy(
+        buildStrategy(
+          NodeType.TRIGGER_IMAP,
+          jest.fn().mockResolvedValue({
+            success: true,
+            data: { text: '', attachments: [buildAttachment()] },
+          }),
+        ),
+      );
+      factory.registerStrategy(
+        buildStrategy(
+          NodeType.PROCESADOR_IA,
+          jest.fn().mockResolvedValue({ success: true, data: { ok: true } }),
+        ),
+      );
+
+      // 2. Act
+      const result = await buildEngine(repo).executeWorkflow(
+        EXECUTION_ID,
+        buildEmailSchema(),
+      );
+
+      // 3. Assert: sigue siendo la unica fuente de datos del correo.
+      expect(attachmentsIn(result.contextPayload)[0].contentBase64).toBe(
+        BASE64,
+      );
+    });
+
+    it('12.5 NO deberia tomar una cadena en blanco por texto util', async () => {
+      // 1. Arrange: espacios y saltos son ausencia de texto con otra forma.
+      const execution = buildExecution();
+      const { repo } = buildRepository(execution);
+
+      factory.registerStrategy(
+        buildStrategy(
+          NodeType.TRIGGER_IMAP,
+          jest.fn().mockResolvedValue({
+            success: true,
+            data: { text: '   \n  ', attachments: [buildAttachment()] },
+          }),
+        ),
+      );
+      factory.registerStrategy(
+        buildStrategy(
+          NodeType.PROCESADOR_IA,
+          jest.fn().mockResolvedValue({ success: true, data: {} }),
+        ),
+      );
+
+      // 2. Act
+      const result = await buildEngine(repo).executeWorkflow(
+        EXECUTION_ID,
+        buildEmailSchema(),
+      );
+
+      // 3. Assert
+      expect(attachmentsIn(result.contextPayload)[0].contentBase64).toBe(
+        BASE64,
+      );
+    });
+
+    it('12.6 deberia ser inocuo en un flujo sin correo ni adjuntos', async () => {
+      // 1. Arrange: pipeline normal, sin namespace `raw_email`.
+      const execution = buildExecution();
+      const { repo } = buildRepository(execution);
+
+      factory.registerStrategy(
+        buildStrategy(
+          NodeType.TRIGGER_IMAP,
+          jest.fn().mockResolvedValue({
+            success: true,
+            data: { text: 'Texto sin adjuntos.' },
+          }),
+        ),
+      );
+      factory.registerStrategy(
+        buildStrategy(
+          NodeType.PROCESADOR_IA,
+          jest.fn().mockResolvedValue({ success: true, data: {} }),
+        ),
+      );
+
+      // 2. Act
+      const result = await buildEngine(repo).executeWorkflow(
+        EXECUTION_ID,
+        buildEmailSchema(),
+      );
+
+      // 3. Assert: nunca se inventa una clave `attachments` que nadie escribio.
+      expect(result.currentState).toBe(ExecutionState.EXITOSO);
+      const namespaces = result.contextPayload;
+      expect(namespaces.raw_email).not.toHaveProperty('attachments');
+    });
+
+    it('12.7 NO deberia liberar el binario cuando el nodo falla', async () => {
+      // 1. Arrange: purgar antes de un fallo dejaria al reintento calculando
+      //    sobre un adjunto ya vaciado.
+      const execution = buildExecution();
+      const { repo } = buildRepository(execution);
+
+      factory.registerStrategy(
+        buildStrategy(
+          NodeType.TRIGGER_IMAP,
+          jest.fn().mockResolvedValue({
+            success: true,
+            data: { text: '', attachments: [buildAttachment()] },
+          }),
+        ),
+      );
+      factory.registerStrategy(
+        buildStrategy(
+          NodeType.PROCESADOR_IA,
+          jest.fn().mockResolvedValue({
+            ...failure('GRAVE'),
+            data: { clean_body: 'texto que nunca se publica' },
+          }),
+        ),
+      );
+
+      // 2. Act
+      const result = await buildEngine(repo).executeWorkflow(
+        EXECUTION_ID,
+        buildEmailSchema(),
+      );
+
+      // 3. Assert
+      expect(result.currentState).toBe(ExecutionState.PAUSADO);
+      expect(attachmentsIn(result.contextPayload)[0].contentBase64).toBe(
+        BASE64,
+      );
+    });
+
+    it('12.8 deberia redactar el base64 en la traza de disco del nodo', async () => {
+      // 1. Arrange: `payloadSnapshot` va al archivo `execution-*.log`, que rota
+      //    por tamano. Una linea de 6,8 MB se llevaria por delante el resto.
+      const execution = buildExecution();
+      const { repo } = buildRepository(execution);
+
+      factory.registerStrategy(
+        buildStrategy(
+          NodeType.TRIGGER_IMAP,
+          jest.fn().mockResolvedValue({
+            success: true,
+            data: { text: 'Cuerpo real.', attachments: [buildAttachment()] },
+          }),
+        ),
+      );
+      factory.registerStrategy(
+        buildStrategy(
+          NodeType.PROCESADOR_IA,
+          jest.fn().mockResolvedValue({ success: true, data: {} }),
+        ),
+      );
+
+      // 2. Act
+      await buildEngine(repo).executeWorkflow(EXECUTION_ID, buildEmailSchema());
+
+      // 3. Assert
+      const [firstTrace] = hybridLogger.logNodeExecution.mock.calls[0] as [
+        Record<string, unknown>,
+      ];
+      const snapshot = JSON.stringify(firstTrace.payloadSnapshot);
+      expect(snapshot).not.toContain(BASE64);
+      expect(snapshot).toContain('[base64 omitido]');
+      // Los metadatos siguen ahi: un log que borra el adjunto entero no permite
+      // saber que venia en el correo.
+      expect(snapshot).toContain('escaneo.pdf');
+    });
+  });
 });
