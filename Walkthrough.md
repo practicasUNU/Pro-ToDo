@@ -4193,3 +4193,104 @@ Queda con sus tokens originales (`--pd-disabled-bg` / `--pd-disabled-text`), los
 «Inactivo» de usuarios y plantillas HTML. Un intento anterior de moverlo a `--pd-surface-muted` se
 descartó: es una clase compartida y habría cambiado también `/templates` y `/users`, ajenos a esta
 petición.
+
+---
+
+## Adjuntos IMAP: por qué el motor libera el binario y no el nodo
+
+### El problema que se resuelve
+
+`ImapTriggerStrategy` descartaba `parsed.attachments` por completo: un correo con factura
+adjunta entraba al pipeline sin su adjunto. Añadir la ingesta es fácil; lo que no es trivial
+es el ciclo de vida de esos bytes. Un adjunto de 5 MiB son ~6,8 MB de base64, y
+`getAllContext()` reserializa el contexto **entero** en cada `saveCheckpoint` —uno por nodo,
+más uno por reintento—. Sin una política de liberación, una sola ejecución escribe decenas de
+MB en `contexto_acumulado`.
+
+### Por qué la purga vive en `FsmEngineService`
+
+La primera versión la puso en `ParserEmailStrategy`, que tras procesar el adjunto haría
+`context.setNamespace('raw_email', { attachments: purgados })`. Se descartó por tres motivos:
+
+1. **No cumplía el objetivo.** El motor persiste el checkpoint tras *cada* nodo. El base64 se
+   escribía en jsonb en el checkpoint posterior al nodo IMAP y solo se limpiaba en el
+   posterior al parser: había una ventana en la que los bytes estaban en la base de datos.
+2. **Rompe «un nodo, un namespace».** Una estrategia que escribe en un namespace ajeno y
+   anterior invierte el contrato de `INodeStrategy`, donde el contexto solo se lee y es el
+   motor quien escribe.
+3. **No se generaliza.** Obligaría a cada estrategia futura a acordarse de purgar, y a que el
+   flujo contuviera un `PARSER_PRE_IA` para que la liberación ocurriese siquiera.
+
+En el motor, la regla se aplica sola a cualquier nodo que declare texto, en un único punto.
+
+### Por qué la condición es «¿hubo texto útil?» y no «¿ya se procesó?»
+
+Purgar incondicionalmente tras el primer nodo destruiría justo el dato que el caso multimodal
+necesita: un PDF escaneado no tiene cuerpo textual, y sus bytes son la única fuente de
+información del correo. La regla acordada —liberar solo si algún nodo produjo `clean_body`,
+`text` o `extracted_text` con contenido— encadena sola:
+
+- Correo **con** cuerpo: el propio `TRIGGER_IMAP` emite `text`, así que los adjuntos se
+  liberan en el **mismo** checkpoint que los escribió. El base64 nunca toca PostgreSQL.
+- Correo **sin** cuerpo: no se purga, el binario sobrevive, y el parser levanta
+  `requires_multimodal_fallback` sobre ese mismo correo. Las dos decisiones coinciden porque
+  miran el mismo hecho.
+
+Una cadena en blanco no cuenta como texto: es ausencia de contenido con otra forma, y tratarla
+como válida vaciaría el adjunto de un correo que solo trae espacios.
+
+### El acoplamiento es un nombre de clave, no una dependencia
+
+`ParserEmailStrategy` no sabe que existe la purga. Publica `clean_body` porque es su salida
+natural, y el motor reconoce ese nombre como señal de «ya hay texto». El parser se puede
+sustituir entero sin tocar el motor, y el motor purga aunque el flujo no tenga parser.
+
+### El escape que casi se pasa por alto
+
+`logNodeOutcome` pasa `payloadSnapshot: result.data` al volcado forense, que escribe en
+`execution-*.log`. Ese archivo rota por tamaño (20m por defecto): una sola línea de 6,8 MB
+habría agotado la rotación de golpe, llevándose por delante la traza de todo lo demás. Por eso
+la redacción del snapshot es parte del mismo cambio, y sustituye el base64 por
+`[base64 omitido]` en vez de por `null`: en un log forense importa distinguir «aquí había
+bytes que no se han escrito» de «este adjunto ya venía vacío».
+
+### Decisiones menores con su porqué
+
+- **Opt-in (`includeAttachments: false`).** El coste no se paga donde se ve. Encenderlo por
+  defecto habría cambiado el peso de cada fila de `ejecuciones_flujo` en todos los flujos IMAP
+  ya guardados sin que nadie lo pidiera.
+- **`@Max` sobre `maxAttachmentBytes`.** El campo solo puede *endurecer* el tope de 5 MiB.
+  Sin techo, un `500000000` escrito desde el asistente —que un rol EDITOR puede editar—
+  convierte una fila en un problema de disco.
+- **Presupuesto acumulado.** `maxAttachmentBytes` acota un adjunto; veinte que lo cumplen
+  individualmente suman ~130 MB. `MAX_TOTAL_ATTACHMENT_BYTES` acota la suma.
+- **Exclusión de los `related`.** `simpleParser` ya incrusta las imágenes referenciadas desde
+  el HTML como `data:` URI dentro de `html`. Publicarlas también en `attachments` duplicaría
+  los mismos bytes en la misma fila. Se mira `related` y no la mera presencia de `cid`: hay
+  clientes que ponen `Content-ID` a adjuntos reales, y esos sí deben viajar.
+- **`attachments: []` y nunca ausente.** El payload ya sostenía la regla de que toda clave
+  está siempre presente. Que la forma del jsonb dependiera de un booleano de configuración
+  haría que cualquier diagnóstico sobre checkpoints históricos empezara por «depende de cómo
+  estuviera configurado ese día».
+
+### Lo que las pruebas cubren y lo que no
+
+El bloque 12 de `fsm-engine.service.spec.ts` es el que sostiene la regla: verifica que ningún
+`contextPayload` persistido contiene el base64 cuando hubo texto, que sí lo contiene mientras
+no lo hubo, que una cadena en blanco no dispara la purga y que un nodo fallido no la dispara
+—purgar antes de un fallo dejaría al reintento calculando sobre un adjunto ya vaciado—.
+
+El bloque 3 de `parser-email.strategy.spec.ts` fija la pureza: tras `execute`, el namespace
+`raw_email` queda byte a byte igual. Es lo que impide que alguien «optimice» devolviendo la
+purga al nodo.
+
+Lo que **no** está cubierto es el extremo a extremo con un buzón real: los dobles de
+`imapflow` y `mailparser` fijan el contrato, no el comportamiento de un servidor IMAP
+concreto ante un MIME malformado.
+
+### Deuda consciente
+
+`PARSER_PRE_IA` pasa a `implemented: true` en `GET /api/nodos` en cuanto se registra, y el
+asistente del frontend lo habilita, aunque el nodo todavía no sanee el marcado. Se asume
+porque el esqueleto ya hace trabajo real —inventario de adjuntos y decisión multimodal— y
+porque `body_source: 'html_pending_sanitize'` declara honestamente lo que falta.

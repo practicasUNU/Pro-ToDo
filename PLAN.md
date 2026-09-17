@@ -1948,3 +1948,92 @@ reintento de CU-09; CU-09 todavía no tiene endpoint, así que hoy no destruye n
 conviene revisarlo cuando exista. (2) La cancelación cooperativa es memoria de proceso: cuando
 entre BullMQ, un worker de otro proceso seguiría corriendo la ejecución abortada. El arreglo
 eventual es un `UPDATE` condicional (`estado <> 'FALLIDO'`) comprobando `affected`.
+
+---
+
+## 21. Ingesta de adjuntos IMAP y liberación de binarios en el motor
+
+### Contrato de datos
+
+`backend/src/modules/nodes/interfaces/raw-email-attachment.interface.ts`
+
+```typescript
+export interface RawEmailAttachment {
+  readonly filename: string;      // del remitente; NUNCA para construir rutas
+  readonly contentType: string;   // def. 'application/octet-stream'
+  readonly size: number;          // bytes DECODIFICADOS, no longitud del base64
+  contentBase64: string | null;   // mutable: es la palanca de liberación
+}
+
+export type RawEmailAttachmentMetadata = Omit<RawEmailAttachment, 'contentBase64'>;
+```
+
+Vive en `@modules/nodes` y no en `@core/fsm/types/` porque `@core` no puede depender de
+`@modules`: el motor libera el binario de forma **estructural**, por el nombre de la clave,
+justamente para no tener que importar esta interfaz.
+
+### Payload de `raw_email` (aditivo)
+
+Las seis claves planas anteriores (`message_id`, `from`, `subject`, `text`, `html`, `date`)
+se conservan sin cambios; se añade `attachments: RawEmailAttachment[]`. La clave está
+**siempre presente** —`[]` cuando la ingesta está apagada— para que la interpolación nunca
+falle por variable ausente. Se descartó la forma anidada (`headers.from`, `raw_html`):
+habría roto toda plantilla guardada que interpole `{{raw_email.subject}}`.
+
+### Configuración del nodo `TRIGGER_IMAP`
+
+| Clave | Def. | Regla |
+|---|---|---|
+| `includeAttachments` | `false` | Opt-in: el coste se paga en cada checkpoint, no donde se ve |
+| `maxAttachmentBytes` | `5_242_880` | `@Max(MAX_ATTACHMENT_BYTES_LIMIT)`: solo puede endurecer el tope |
+
+Más dos límites estructurales no configurables: `MAX_TOTAL_ATTACHMENT_BYTES = 10_485_760`
+(presupuesto acumulado por correo) y la exclusión de los adjuntos `related` (ya incrustados
+como `data:` URI dentro de `html` por `simpleParser`).
+
+### Regla de purga del motor (`FsmEngineService`)
+
+Tras depositar el `data` de un nodo con éxito, y antes de cualquier checkpoint:
+
+```
+si algún valor de EXTRACTED_TEXT_KEYS = ['clean_body','text','extracted_text']
+   es una cadena con contenido tras trim()
+entonces  raw_email.attachments[*].contentBase64 = null   (metadatos intactos)
+si no     se conserva el binario  →  caso multimodal pendiente
+```
+
+El binario se conserva **si y solo si** sigue siendo la única fuente de datos. Un correo con
+cuerpo textual ve sus adjuntos liberados en el mismo checkpoint que los escribió, así que el
+base64 no llega a tocar PostgreSQL; un PDF escaneado los conserva para el nodo multimodal.
+
+`payloadSnapshot` de la traza por nodo recibe el mismo saneado, sustituyendo el base64 por
+`[base64 omitido]`: ese volcado va al archivo `execution-*.log`, que rota por tamaño.
+
+### Nodo `PARSER_PRE_IA` (esqueleto)
+
+`ParserEmailStrategy` es un consumidor **puro**: lee `raw_email`, publica en `parsed_email` y
+no escribe en ningún namespace ajeno. Payload:
+
+```typescript
+{
+  subject: string;
+  clean_body: string | null;          // null si no se extrajo texto
+  body_source: 'text' | 'html_pending_sanitize' | 'none';
+  attachment_count: number;
+  attachments: RawEmailAttachmentMetadata[];   // inventario SIN base64
+  requires_multimodal_fallback: boolean;
+  multimodal_reason: string;          // '' cuando la bandera es false
+}
+```
+
+`requires_multimodal_fallback` exige **ambas** condiciones: adjunto de tipo imagen o PDF
+**y** cuerpo textual por debajo de `minBodyLength` (def. 200). El AND evita gastar una
+llamada multimodal en un boletín que solo trae su logo en PNG.
+
+Esta versión todavía no sanea el marcado: cuando el único cuerpo es HTML lo declara con
+`body_source: 'html_pending_sanitize'` y deja `clean_body` a `null` en vez de fingir texto
+limpio. La rama de `cheerio` / `@mozilla/readability` rellenará esa rama sin cambiar la forma
+del payload.
+
+Códigos de fallo: `ERR_PARSER_CONFIG` y `ERR_PARSER_SOURCE_MISSING`, ambos `GRAVE` para que
+entren en `canRetry` y el flujo quede PAUSADO y reanudable (CU-09).
