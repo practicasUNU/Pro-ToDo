@@ -4,21 +4,25 @@ import { plainToInstance } from 'class-transformer';
 import { NodeType } from '@core/fsm/types/pipeline-schema.types';
 import {
   ImapTriggerConfigDto,
+  MAX_ATTACHMENT_BYTES_LIMIT,
   resolveImapConfig,
 } from '@modules/nodes/dto/imap-trigger-config.dto';
 import { ALLOWED_NAMESPACES } from '@modules/templates/templates.service';
 import { createMockStatePayloadContext } from '@test/factories/state-payload-context.factory';
 
 import {
+  ERR_IMAP_CONFIG,
   ERR_IMAP_READ,
   ERR_IMAP_TIMEOUT,
   ImapTriggerStrategy,
   MAX_HTML_LENGTH,
+  MAX_TOTAL_ATTACHMENT_BYTES,
   NO_MESSAGES_STATUS,
 } from './imap-trigger.strategy';
 
 import type { StatePayloadContext } from '@core/fsm/context/state-payload.context';
-import type { ParsedMail } from 'mailparser';
+import type { RawEmailAttachment } from '@modules/nodes/interfaces/raw-email-attachment.interface';
+import type { Attachment, ParsedMail } from 'mailparser';
 
 // Cero red: `testing-standards.md` §2 prohibe llamadas reales a IMAP. Ambos
 // dobles se declaran antes de importar la estrategia (jest.mock se eleva).
@@ -70,6 +74,17 @@ const buildParsedMail = (overrides: Partial<ParsedMail> = {}): ParsedMail =>
     textAsHtml: '<p>Innovacion en texto plano</p>',
     ...overrides,
   }) as ParsedMail;
+
+/** Adjunto tal como lo entrega `mailparser`; cada prueba ajusta lo suyo. */
+const buildAttachment = (overrides: Partial<Attachment> = {}): Attachment =>
+  ({
+    type: 'attachment',
+    filename: 'factura.pdf',
+    contentType: 'application/pdf',
+    content: Buffer.from('contenido-binario-de-prueba'),
+    related: false,
+    ...overrides,
+  }) as Attachment;
 
 /** Doble del cliente IMAP con las cinco operaciones que el nodo usa. */
 interface ImapClientDouble {
@@ -142,7 +157,7 @@ describe('ImapTriggerStrategy', () => {
   });
 
   describe('1. Extraccion del correo UNSEEN', () => {
-    it('1.1 deberia exponer las seis claves deterministas del correo', async () => {
+    it('1.1 deberia exponer las siete claves deterministas del correo', async () => {
       // 1. Arrange
       const { strategy } = buildStrategy();
 
@@ -158,6 +173,9 @@ describe('ImapTriggerStrategy', () => {
         text: 'Innovacion en texto plano',
         html: '<h1>Innovacion</h1>',
         date: '2026-03-01T10:30:00.000Z',
+        // Sin `includeAttachments` la clave existe igualmente y vale `[]`: el
+        // contrato del namespace no cambia de forma segun la configuracion.
+        attachments: [],
       });
     });
 
@@ -206,6 +224,7 @@ describe('ImapTriggerStrategy', () => {
         'text',
         'html',
         'date',
+        'attachments',
       ]);
       expect(result.data?.html).toBe('<h1 style="color:red">Innovacion</h1>');
       // El texto plano sigue siendo el suyo: `html` no lo pisa ni lo sustituye.
@@ -280,8 +299,14 @@ describe('ImapTriggerStrategy', () => {
         text: '',
         html: '',
         date: '',
+        attachments: [],
       });
-      for (const value of Object.values(result.data ?? {})) {
+      // `attachments` es la unica clave no escalar del payload; el resto sigue
+      // siendo cadena, que es lo que garantiza que `structuredClone` y el
+      // volcado a jsonb no degraden nada.
+      const { attachments, ...scalars } = result.data ?? {};
+      expect(Array.isArray(attachments)).toBe(true);
+      for (const value of Object.values(scalars)) {
         expect(typeof value).toBe('string');
       }
     });
@@ -875,6 +900,232 @@ describe('ImapTriggerStrategy', () => {
       // 3. Assert
       expect(result.success).toBe(false);
       expect(result.error?.missingFields).toContain('outputNamespace');
+    });
+  });
+
+  describe('9. Ingesta de adjuntos (opt-in)', () => {
+    it('9.1 deberia devolver un arreglo vacio sin includeAttachments', async () => {
+      // 1. Arrange: el correo SI trae adjunto; la configuracion no lo pide.
+      const content = Buffer.from('no-debe-codificarse');
+      const toBase64 = jest.spyOn(content, 'toString');
+      simpleParser.mockResolvedValue(
+        buildParsedMail({ attachments: [buildAttachment({ content })] }),
+      );
+      const { strategy } = buildStrategy();
+
+      // 2. Act
+      const result = await strategy.execute(buildContext(), buildParams());
+
+      // 3. Assert: ni se codifica. El opt-in evita el trabajo, no solo la clave.
+      expect(result.data?.attachments).toEqual([]);
+      expect(toBase64).not.toHaveBeenCalled();
+    });
+
+    it('9.2 deberia proyectar el adjunto en base64 plano al activarlo', async () => {
+      // 1. Arrange
+      const content = Buffer.from('contenido-binario-de-prueba');
+      simpleParser.mockResolvedValue(
+        buildParsedMail({ attachments: [buildAttachment({ content })] }),
+      );
+      const { strategy } = buildStrategy();
+
+      // 2. Act
+      const result = await strategy.execute(
+        buildContext(),
+        buildParams({ includeAttachments: true }),
+      );
+
+      // 3. Assert: base64 SIN prefijo `data:`, y `size` en bytes del binario
+      //    decodificado, no en longitud de la cadena codificada.
+      expect(result.data?.attachments).toEqual([
+        {
+          filename: 'factura.pdf',
+          contentType: 'application/pdf',
+          size: content.length,
+          contentBase64: content.toString('base64'),
+        },
+      ]);
+      const [attachment] = result.data?.attachments as RawEmailAttachment[];
+      expect(attachment.contentBase64).not.toContain('data:');
+      expect(attachment.size).not.toBe(attachment.contentBase64?.length);
+    });
+
+    it('9.3 deberia nombrar el adjunto sin filename de forma determinista', async () => {
+      // 1. Arrange
+      simpleParser.mockResolvedValue(
+        buildParsedMail({
+          attachments: [buildAttachment({ filename: undefined })],
+        }),
+      );
+      const { strategy } = buildStrategy();
+
+      // 2. Act
+      const result = await strategy.execute(
+        buildContext(),
+        buildParams({ includeAttachments: true }),
+      );
+
+      // 3. Assert: no se inventa extension a partir del contentType.
+      const [attachment] = result.data?.attachments as RawEmailAttachment[];
+      expect(attachment.filename).toBe('attachment-1');
+    });
+
+    it('9.4 deberia excluir las imagenes incrustadas y conservar el adjunto con cid', async () => {
+      // 1. Arrange: la primera ya viaja como `data:` URI dentro del marcado; la
+      //    segunda lleva Content-ID pero es un adjunto de verdad.
+      simpleParser.mockResolvedValue(
+        buildParsedMail({
+          attachments: [
+            buildAttachment({
+              filename: 'logo.png',
+              contentType: 'image/png',
+              related: true,
+              cid: 'logo@correo',
+            }),
+            buildAttachment({ filename: 'real.pdf', cid: 'real@correo' }),
+          ],
+        }),
+      );
+      const { strategy } = buildStrategy();
+
+      // 2. Act
+      const result = await strategy.execute(
+        buildContext(),
+        buildParams({ includeAttachments: true }),
+      );
+
+      // 3. Assert
+      const attachments = result.data?.attachments as RawEmailAttachment[];
+      expect(attachments).toHaveLength(1);
+      expect(attachments[0].filename).toBe('real.pdf');
+    });
+
+    it('9.5 deberia descartar el adjunto que supera el tope sin romper el flujo', async () => {
+      // 1. Arrange
+      simpleParser.mockResolvedValue(
+        buildParsedMail({
+          attachments: [
+            buildAttachment({
+              filename: 'pesado.pdf',
+              content: Buffer.alloc(2048),
+            }),
+            buildAttachment({ filename: 'ligero.pdf' }),
+          ],
+        }),
+      );
+      const { strategy } = buildStrategy();
+      const warn = jest
+        .spyOn(strategy['logger'], 'warn')
+        .mockImplementation(() => undefined);
+
+      // 2. Act
+      const result = await strategy.execute(
+        buildContext(),
+        buildParams({ includeAttachments: true, maxAttachmentBytes: 1024 }),
+      );
+
+      // 3. Assert: descarte LEVE, nunca bloqueante. El correo entra igual.
+      expect(result.success).toBe(true);
+      const attachments = result.data?.attachments as RawEmailAttachment[];
+      expect(attachments).toHaveLength(1);
+      expect(attachments[0].filename).toBe('ligero.pdf');
+      expect(warn).toHaveBeenCalledTimes(1);
+      expect(warn.mock.calls[0][0]).toContain('pesado.pdf');
+      expect(warn.mock.calls[0][0]).toContain('<abc-123@unuware.com>');
+    });
+
+    it('9.6 deberia cortar la ingesta al agotar el presupuesto acumulado', async () => {
+      // 1. Arrange: cada uno pasa el filtro individual; juntos no caben.
+      const half = Math.ceil(MAX_TOTAL_ATTACHMENT_BYTES / 2);
+      simpleParser.mockResolvedValue(
+        buildParsedMail({
+          attachments: [
+            buildAttachment({ filename: 'a.pdf', content: Buffer.alloc(half) }),
+            buildAttachment({ filename: 'b.pdf', content: Buffer.alloc(half) }),
+            buildAttachment({ filename: 'c.pdf', content: Buffer.alloc(half) }),
+          ],
+        }),
+      );
+      const { strategy } = buildStrategy();
+      const warn = jest
+        .spyOn(strategy['logger'], 'warn')
+        .mockImplementation(() => undefined);
+
+      // 2. Act
+      const result = await strategy.execute(
+        buildContext(),
+        buildParams({
+          includeAttachments: true,
+          maxAttachmentBytes: MAX_ATTACHMENT_BYTES_LIMIT,
+        }),
+      );
+
+      // 3. Assert
+      const attachments = result.data?.attachments as RawEmailAttachment[];
+      expect(attachments).toHaveLength(2);
+      expect(warn.mock.calls[0][0]).toContain('Presupuesto');
+    });
+
+    it('9.7 deberia tolerar un MIME sin la clave attachments', async () => {
+      // 1. Arrange: `@types/mailparser` la declara obligatoria, pero un objeto
+      //    construido con `as ParsedMail` puede no traerla.
+      simpleParser.mockResolvedValue(buildParsedMail());
+      const { strategy } = buildStrategy();
+
+      // 2. Act
+      const result = await strategy.execute(
+        buildContext(),
+        buildParams({ includeAttachments: true }),
+      );
+
+      // 3. Assert
+      expect(result.success).toBe(true);
+      expect(result.data?.attachments).toEqual([]);
+    });
+
+    it('9.8 deberia conservar intactas las seis claves planas con adjuntos', async () => {
+      // 1. Arrange
+      simpleParser.mockResolvedValue(
+        buildParsedMail({ attachments: [buildAttachment()] }),
+      );
+      const { strategy } = buildStrategy();
+
+      // 2. Act
+      const result = await strategy.execute(
+        buildContext(),
+        buildParams({ includeAttachments: true }),
+      );
+
+      // 3. Assert: la ingesta AÑADE, no reorganiza.
+      expect(Object.keys(result.data ?? {})).toEqual([
+        'message_id',
+        'from',
+        'subject',
+        'text',
+        'html',
+        'date',
+        'attachments',
+      ]);
+      expect(result.data?.subject).toBe('Innovacion en Madrid');
+    });
+
+    it('9.9 deberia rechazar un maxAttachmentBytes por encima del techo duro', async () => {
+      // 1. Arrange
+      const { strategy } = buildStrategy();
+
+      // 2. Act
+      const result = await strategy.execute(
+        buildContext(),
+        buildParams({
+          includeAttachments: true,
+          maxAttachmentBytes: MAX_ATTACHMENT_BYTES_LIMIT + 1,
+        }),
+      );
+
+      // 3. Assert: el campo solo puede endurecer el limite, nunca relajarlo.
+      expect(result.success).toBe(false);
+      expect(result.error?.code).toBe(ERR_IMAP_CONFIG);
+      expect(result.error?.missingFields).toContain('maxAttachmentBytes');
     });
   });
 });

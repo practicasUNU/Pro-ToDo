@@ -13,6 +13,10 @@ import {
   createImapClient,
   DOWNLOAD_SOCKET_TIMEOUT_MS,
 } from '@modules/nodes/services/imap-client.factory';
+import {
+  DEFAULT_ATTACHMENT_CONTENT_TYPE,
+  FALLBACK_ATTACHMENT_NAME_PREFIX,
+} from '@modules/nodes/interfaces/raw-email-attachment.interface';
 
 import type { StatePayloadContext } from '@core/fsm/context/state-payload.context';
 import type {
@@ -21,9 +25,10 @@ import type {
   NodeResult,
 } from '@core/fsm/types/node-strategy.types';
 import type { ResolvedImapConfig } from '@modules/nodes/dto/imap-trigger-config.dto';
+import type { RawEmailAttachment } from '@modules/nodes/interfaces/raw-email-attachment.interface';
 import type { ValidatorOptions } from 'class-validator';
 import type { ImapFlow, MailboxLockObject, SearchObject } from 'imapflow';
-import type { AddressObject, ParsedMail } from 'mailparser';
+import type { Attachment, AddressObject, ParsedMail } from 'mailparser';
 
 /**
  * Estado devuelto cuando el buzon no tiene mensajes sin leer.
@@ -48,6 +53,19 @@ export const NO_MESSAGES_STATUS = 'NO_MESSAGES_FOUND';
  * pesa unos pocos KB de marcado.
  */
 export const MAX_HTML_LENGTH = 262_144;
+
+/**
+ * Presupuesto ACUMULADO de adjuntos por correo, en bytes.
+ *
+ * `maxAttachmentBytes` acota UN adjunto; este acota la suma. Sin el, veinte
+ * adjuntos de 5 MiB pasan el filtro individual uno por uno y escriben ~130 MB de
+ * base64 en el mismo checkpoint.
+ *
+ * Vive aqui y no en el DTO por lo mismo que `MAX_HTML_LENGTH`: no es una
+ * preferencia del flujo sino un limite estructural de lo que cabe con sensatez
+ * en una fila de `ejecuciones_flujo`.
+ */
+export const MAX_TOTAL_ATTACHMENT_BYTES = 10_485_760;
 
 /** Codigos de fallo del nodo. Son lo que un `catchErrors` puede mencionar. */
 export const ERR_IMAP_TIMEOUT = 'ERR_IMAP_TIMEOUT';
@@ -127,9 +145,16 @@ type ImapConfigResolution =
  * disponible es `html`. Exponer solo el texto dejaba esos correos sin contenido
  * que interpolar.
  *
- * Las seis claves son PLANAS y todas `string`, nunca `null` ni `undefined`: el
- * payload se interpola como `{{raw_email.campo}}`, y una clave ausente rompe la
- * resolucion mientras que una cadena vacia se resuelve sola.
+ * Las seis claves de CABECERA Y CUERPO son planas y todas `string`, nunca `null`
+ * ni `undefined`: el payload se interpola como `{{raw_email.campo}}`, y una
+ * clave ausente rompe la resolucion mientras que una cadena vacia se resuelve
+ * sola.
+ *
+ * `attachments` es la excepcion a la planitud, y solo a ella: es un INVENTARIO,
+ * no un valor interpolable, y no existe forma sensata de aplanar una lista de
+ * longitud variable. La invariante que si sobrevive es la otra, que es la que de
+ * verdad protege la interpolacion: la clave esta SIEMPRE presente. Con
+ * `includeAttachments` apagado vale `[]`, nunca `undefined`.
  *
  * Lo que sigue sin hacerse aqui es SANEAR. El marcado viaja crudo, con los
  * estilos y las etiquetas del cliente remitente, porque limpiarlo es
@@ -143,6 +168,7 @@ interface ExtractedEmail {
   readonly text: string;
   readonly html: string;
   readonly date: string;
+  readonly attachments: readonly RawEmailAttachment[];
 }
 
 /** Normaliza a cadena un campo que `mailparser` puede dejar sin definir. */
@@ -166,6 +192,22 @@ const extractFromAddress = (from: AddressObject | undefined): string => {
 
   return asString(from?.text);
 };
+
+/**
+ * Nombre estable para un adjunto que no declara `filename`.
+ *
+ * No se fabrica una extension a partir del `contentType`: el tipo ya viaja en su
+ * propia clave, e inventar un ".pdf" seria presentar como dato del correo algo
+ * que el correo no envio. El indice empieza en 1 porque el nombre lo puede leer
+ * un operador en la tabla de trazabilidad.
+ */
+const resolveAttachmentFilename = (
+  attachment: Attachment,
+  index: number,
+): string =>
+  typeof attachment.filename === 'string' && attachment.filename !== ''
+    ? attachment.filename
+    : `${FALLBACK_ATTACHMENT_NAME_PREFIX}-${index + 1}`;
 
 /**
  * Traduce la configuracion del nodo a la consulta de IMAP SEARCH.
@@ -358,7 +400,10 @@ export class ImapTriggerStrategy implements INodeStrategy {
         await client.messageFlagsAdd(String(uid), ['\\Seen'], { uid: true });
       }
 
-      return { success: true, data: { ...this.toExtractedEmail(parsed) } };
+      return {
+        success: true,
+        data: { ...this.toExtractedEmail(parsed, config) },
+      };
     } catch (error) {
       const detail = error instanceof Error ? error.message : String(error);
       const message = `Fallo la lectura del buzon "${config.mailbox}" en ${config.host}: ${detail}`;
@@ -442,7 +487,10 @@ export class ImapTriggerStrategy implements INodeStrategy {
    * `structuredClone` en entrada y salida, asi que un `Date` o un `Buffer` no
    * sobrevivirian intactos al checkpoint JSONB.
    */
-  private toExtractedEmail(parsed: ParsedMail): ExtractedEmail {
+  private toExtractedEmail(
+    parsed: ParsedMail,
+    config: ResolvedImapConfig,
+  ): ExtractedEmail {
     const messageId = asString(parsed.messageId);
 
     return {
@@ -467,7 +515,99 @@ export class ImapTriggerStrategy implements INodeStrategy {
       // Cadena vacia y nunca `undefined` cuando falta la cabecera `Date:`, para
       // que una plantilla que interpole la clave no falle por variable ausente.
       date: parsed.date instanceof Date ? parsed.date.toISOString() : '',
+      attachments: this.collectAttachments(parsed, config, messageId),
     };
+  }
+
+  /**
+   * Proyecta los adjuntos del MIME al inventario del payload.
+   *
+   * Devuelve SIEMPRE un array, vacio cuando no hay nada que ingerir: la clave
+   * forma parte del contrato del namespace y no puede faltar.
+   *
+   * Ningun descarte es bloqueante. Un PDF de 20 MB en el buzon es un problema
+   * del remitente, no una averia del flujo, y dejar la ejecucion PAUSADA
+   * esperando un reintento manual convertiria un correo raro en una incidencia
+   * operativa. Se descarta, se deja traza LEVE y el flujo continua.
+   */
+  private collectAttachments(
+    parsed: ParsedMail,
+    config: ResolvedImapConfig,
+    messageId: string,
+  ): RawEmailAttachment[] {
+    if (!config.includeAttachments) {
+      return [];
+    }
+
+    // Guarda estructural, no cosmetica: `@types/mailparser` declara
+    // `attachments` como obligatorio, pero cualquier objeto construido con
+    // `as ParsedMail` —empezando por los dobles de las pruebas— llega sin la
+    // clave, y recorrer `undefined` derribaria el nodo.
+    const candidates = Array.isArray(parsed.attachments)
+      ? parsed.attachments
+      : [];
+
+    const collected: RawEmailAttachment[] = [];
+    let totalBytes = 0;
+
+    for (const [index, attachment] of candidates.entries()) {
+      // Las imagenes incrustadas ya viajan dentro de `html` como `data:` URI,
+      // puestas ahi por `simpleParser`: repetirlas aqui duplicaria los mismos
+      // bytes en la misma fila. Se mira `related` —que es la marca que pone
+      // mailparser cuando el `Content-ID` esta referenciado desde el marcado— y
+      // no la mera presencia de `cid`, porque hay clientes que le ponen
+      // `Content-ID` a adjuntos de verdad y esos si deben viajar.
+      if (attachment.related === true) {
+        continue;
+      }
+
+      const filename = resolveAttachmentFilename(attachment, index);
+      const { content } = attachment;
+
+      // Sin Buffer no hay nada que codificar. Es defensivo frente a un MIME que
+      // mailparser no logre materializar; se deja traza porque un adjunto que
+      // desaparece en silencio es indistinguible de un correo sin adjuntos.
+      if (!Buffer.isBuffer(content)) {
+        this.logger.warn(
+          `LEVE | Adjunto "${filename}" sin contenido binario utilizable en el mensaje "${messageId}".`,
+        );
+        continue;
+      }
+
+      // La longitud real del Buffer manda sobre `attachment.size`: es lo que de
+      // verdad se va a codificar, y es el numero que hay que contrastar contra
+      // el tope para que el presupuesto signifique algo.
+      const bytes = content.length;
+
+      if (bytes > config.maxAttachmentBytes) {
+        this.logger.warn(
+          `LEVE | Adjunto "${filename}" descartado por tamano (${bytes} B > ${config.maxAttachmentBytes} B) en el mensaje "${messageId}".`,
+        );
+        continue;
+      }
+
+      if (totalBytes + bytes > MAX_TOTAL_ATTACHMENT_BYTES) {
+        this.logger.warn(
+          `LEVE | Presupuesto de adjuntos agotado (${MAX_TOTAL_ATTACHMENT_BYTES} B) en el mensaje "${messageId}": se omiten los restantes.`,
+        );
+        break;
+      }
+
+      totalBytes += bytes;
+
+      collected.push({
+        filename,
+        contentType:
+          asString(attachment.contentType) || DEFAULT_ATTACHMENT_CONTENT_TYPE,
+        size: bytes,
+        // Base64 PLANO: sin prefijo `data:` y sin saltos de linea. Quien lo
+        // consuma decide como envolverlo; anadir el prefijo aqui obligaria a
+        // recortarlo en cada consumidor.
+        contentBase64: content.toString('base64'),
+      });
+    }
+
+    return collected;
   }
 
   /**

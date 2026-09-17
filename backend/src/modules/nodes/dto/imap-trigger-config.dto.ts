@@ -51,6 +51,30 @@ export const DEFAULT_UNREAD_ONLY = true;
 /** Por defecto se exige TLS implicito; degradar a texto claro debe ser explicito. */
 export const DEFAULT_SECURE = true;
 
+/**
+ * Por defecto NO se ingieren adjuntos.
+ *
+ * Es opt-in y no opt-out porque el coste no se paga donde se ve: cada adjunto
+ * viaja en base64 dentro del `contexto_acumulado`, y `getAllContext()` se
+ * reserializa ENTERO en cada checkpoint —uno por nodo, mas uno por reintento—.
+ * Encender esto en un flujo que no los necesita multiplica el peso de cada fila
+ * de `ejecuciones_flujo` sin que nadie lo haya pedido.
+ */
+export const DEFAULT_INCLUDE_ATTACHMENTS = false;
+
+/** Tope por adjunto: 5 MiB de binario son ~6,8 MB de base64 en el payload. */
+export const DEFAULT_MAX_ATTACHMENT_BYTES = 5_242_880;
+
+/**
+ * Techo DURO de `maxAttachmentBytes`. El campo solo puede endurecer el limite.
+ *
+ * Sin el, un `maxAttachmentBytes: 500000000` escrito desde el asistente —que un
+ * rol EDITOR puede editar— convertiria una fila de `ejecuciones_flujo` en un
+ * problema de disco. Que el valor configurable coincida con el defecto es
+ * deliberado: hoy la unica libertad es bajar el tope, nunca subirlo.
+ */
+export const MAX_ATTACHMENT_BYTES_LIMIT = DEFAULT_MAX_ATTACHMENT_BYTES;
+
 /** Numero de puerto TCP mas alto valido. */
 const MAX_TCP_PORT = 65_535;
 
@@ -224,6 +248,29 @@ export class ImapTriggerConfigDto {
   @IsOptional()
   @IsBoolean({ message: 'unreadOnly debe ser un booleano.' })
   unreadOnly?: boolean;
+
+  @ApiPropertyOptional({
+    description: `Si true, ingiere los adjuntos del correo en el payload. Por defecto ${String(DEFAULT_INCLUDE_ATTACHMENTS)}`,
+    example: DEFAULT_INCLUDE_ATTACHMENTS,
+    default: DEFAULT_INCLUDE_ATTACHMENTS,
+  })
+  @IsOptional()
+  @IsBoolean({ message: 'includeAttachments debe ser un booleano.' })
+  includeAttachments?: boolean;
+
+  @ApiPropertyOptional({
+    description: `Tope en bytes por adjunto. Los que lo superen se descartan sin detener el flujo. Por defecto ${DEFAULT_MAX_ATTACHMENT_BYTES}`,
+    example: DEFAULT_MAX_ATTACHMENT_BYTES,
+    default: DEFAULT_MAX_ATTACHMENT_BYTES,
+    maximum: MAX_ATTACHMENT_BYTES_LIMIT,
+  })
+  @IsOptional()
+  @IsInt({ message: 'maxAttachmentBytes debe ser un numero entero.' })
+  @IsPositive({ message: 'maxAttachmentBytes debe ser mayor que cero.' })
+  @Max(MAX_ATTACHMENT_BYTES_LIMIT, {
+    message: `maxAttachmentBytes no puede superar ${MAX_ATTACHMENT_BYTES_LIMIT} bytes.`,
+  })
+  maxAttachmentBytes?: number;
 }
 
 /**
@@ -248,6 +295,9 @@ export interface ResolvedImapConfig {
   /** `null` cuando no se filtra por asunto; nunca cadena vacia. */
   readonly subjectFilter: string | null;
   readonly unreadOnly: boolean;
+  /** Si `false`, `raw_email.attachments` sera siempre `[]`. */
+  readonly includeAttachments: boolean;
+  readonly maxAttachmentBytes: number;
 }
 
 /**
@@ -281,4 +331,11 @@ export const resolveImapConfig = (
   fromFilter: dto.fromFilter ?? null,
   subjectFilter: dto.subjectFilter ?? null,
   unreadOnly: dto.unreadOnly ?? DEFAULT_UNREAD_ONLY,
+  // Las dos ultimas, y en este orden, a proposito:
+  // `ImapPollingService.hasConfigChanged` compara configuraciones con
+  // `JSON.stringify`, que respeta el orden de insercion. Colocarlas en medio
+  // cambiaria la cadena de TODA config ya resuelta y haria que el servicio
+  // creyera modificado cada flujo existente, reprogramando sus sondeos.
+  includeAttachments: dto.includeAttachments ?? DEFAULT_INCLUDE_ATTACHMENTS,
+  maxAttachmentBytes: dto.maxAttachmentBytes ?? DEFAULT_MAX_ATTACHMENT_BYTES,
 });
