@@ -5,6 +5,7 @@ import { createTemplateRendererService } from '@test/factories/template-renderer
 import { NodesModule } from './nodes.module';
 import { CronTriggerStrategy } from './strategies/cron-trigger.strategy';
 import { ImapTriggerStrategy } from './strategies/imap-trigger.strategy';
+import { ParserEmailStrategy } from './strategies/parser-email.strategy';
 import { TemplateMapperStrategy } from './strategies/template-mapper.strategy';
 
 import type { ConfigService } from '@nestjs/config';
@@ -24,6 +25,7 @@ const buildHarness = (): {
   mapper: TemplateMapperStrategy;
   imap: ImapTriggerStrategy;
   cron: CronTriggerStrategy;
+  parser: ParserEmailStrategy;
   module: NodesModule;
 } => {
   const factory = new NodeStrategyFactory();
@@ -36,13 +38,16 @@ const buildHarness = (): {
   const imap = new ImapTriggerStrategy({} as ConfigService);
   // Sin dependencias inyectadas: el nodo CRON no hace E/S ni lee secretos.
   const cron = new CronTriggerStrategy();
+  // Tampoco el parser: solo lee el contexto que le entrega el motor.
+  const parser = new ParserEmailStrategy();
 
   return {
     factory,
     mapper,
     imap,
     cron,
-    module: new NodesModule(factory, mapper, imap, cron),
+    parser,
+    module: new NodesModule(factory, mapper, imap, cron, parser),
   };
 };
 
@@ -80,5 +85,17 @@ describe('NodesModule', () => {
     // 3. Assert: sin esto, el primer vencimiento del planificador moriria en el
     //    paso 1 con `StrategyNotFoundException`, normalizada a URGENTE.
     expect(factory.getStrategy(NodeType.TRIGGER_CRON)).toBe(cron);
+  });
+
+  it('1.4 deberia registrar ParserEmailStrategy en la factoria al iniciarse', () => {
+    // 1. Arrange
+    const { factory, parser, module } = buildHarness();
+
+    // 2. Act
+    module.onModuleInit();
+
+    // 3. Assert: ademas de habilitar el nodo, este registro es lo que hace que
+    //    `GET /api/nodos` devuelva PARSER_PRE_IA como implementado.
+    expect(factory.getStrategy(NodeType.PARSER_PRE_IA)).toBe(parser);
   });
 });

@@ -15,6 +15,7 @@ import { ImapPollingService } from './services/imap-polling.service';
 import { NodeCatalogService } from './services/node-catalog.service';
 import { CronTriggerStrategy } from './strategies/cron-trigger.strategy';
 import { ImapTriggerStrategy } from './strategies/imap-trigger.strategy';
+import { ParserEmailStrategy } from './strategies/parser-email.strategy';
 import { TemplateMapperStrategy } from './strategies/template-mapper.strategy';
 
 import type { OnModuleInit } from '@nestjs/common';
@@ -63,6 +64,7 @@ import type { OnModuleInit } from '@nestjs/common';
     TemplateMapperStrategy,
     ImapTriggerStrategy,
     CronTriggerStrategy,
+    ParserEmailStrategy,
     ImapPollingService,
     CronSchedulingService,
     NodeCatalogService,
@@ -71,6 +73,7 @@ import type { OnModuleInit } from '@nestjs/common';
     TemplateMapperStrategy,
     ImapTriggerStrategy,
     CronTriggerStrategy,
+    ParserEmailStrategy,
     ImapPollingService,
     CronSchedulingService,
     NodeCatalogService,
@@ -82,11 +85,13 @@ export class NodesModule implements OnModuleInit {
     private readonly templateMapperStrategy: TemplateMapperStrategy,
     private readonly imapTriggerStrategy: ImapTriggerStrategy,
     private readonly cronTriggerStrategy: CronTriggerStrategy,
+    private readonly parserEmailStrategy: ParserEmailStrategy,
   ) {}
 
   public onModuleInit(): void {
     this.strategyFactory.registerStrategy(this.templateMapperStrategy);
     this.strategyFactory.registerStrategy(this.imapTriggerStrategy);
     this.strategyFactory.registerStrategy(this.cronTriggerStrategy);
+    this.strategyFactory.registerStrategy(this.parserEmailStrategy);
   }
 }
