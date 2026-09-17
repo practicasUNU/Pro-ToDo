@@ -84,6 +84,32 @@ export const DEFAULT_OUTPUT_NAMESPACE_BY_NODE_TYPE: Record<NodeType, string> = {
 };
 
 /**
+ * `params` base que se siembran al anadir un nodo a una PLANTILLA.
+ *
+ * Son valores de arranque de la topologia, no configuracion de operacion: el
+ * host, el usuario y la clave de un buzon se piden en el asistente al instanciar
+ * el flujo, y no tienen por que vivir en una plantilla que se reutiliza.
+ *
+ * Solo se declara aqui lo que tiene un control dedicado en
+ * `nodeBaseParamsRegistry`, o un default que el operador no deberia teclear. Los
+ * tipos sin parametros base van a `{}` a proposito: desde que el editor JSON
+ * crudo desaparecio, un nodo sin entrada aqui simplemente no pinta controles.
+ *
+ * `Record<NodeType, …>` completo y no parcial, igual que su hermano de arriba,
+ * para que el compilador exija una entrada al dar de alta un tipo nuevo.
+ */
+export const DEFAULT_PARAMS_BY_NODE_TYPE: Record<NodeType, Record<string, unknown>> = {
+  [NodeType.TRIGGER_IMAP]: { mailbox: 'INBOX', includeAttachments: false },
+  [NodeType.TRIGGER_CRON]: {},
+  [NodeType.PARSER_PRE_IA]: {},
+  [NodeType.EXTRACTOR_WEB]: {},
+  [NodeType.PROCESADOR_IA]: {},
+  [NodeType.ESCUDO_POST_IA]: {},
+  [NodeType.MAPEADOR_PLANTILLA]: {},
+  [NodeType.DESTINO_HTTP]: {},
+};
+
+/**
  * Un paso del pipeline tal como lo devuelve `GET /api/workflows`.
  *
  * Replica de `PipelineStepDto` del backend, que es una proyeccion PARCIAL del

@@ -201,6 +201,74 @@ describe('useWorkflowTemplatesStore · catalogo de plantillas de flujo', () => {
     });
   });
 
+  describe('2bis. Parametros base por nodo (Poka-Yoke)', () => {
+    /** Secuencia minima con un disparador IMAP recien sembrado. */
+    const buildImapSequence = () => [
+      {
+        nodeId: 'trigger_imap',
+        nodeType: NodeType.TRIGGER_IMAP,
+        outputNamespace: 'raw_email',
+        params: { mailbox: 'INBOX', includeAttachments: false },
+      },
+    ];
+
+    it('2bis.1 deberia reflejar el toggle en el espejo del pipeline_schema', () => {
+      // 1. Arrange: el editor JSON crudo desaparecio, asi que el unico modo de
+      //    comprobar que el control llega al documento es mirar el texto que
+      //    alimenta el visualizador de la derecha.
+      const store = useWorkflowTemplatesStore();
+      store.initDraft();
+      store.setSequence(buildImapSequence());
+
+      // 2. Act: lo que emite `TriggerImapBaseParams` al encender el toggle.
+      store.patchStepParams('trigger_imap', {
+        mailbox: 'INBOX',
+        includeAttachments: true,
+      });
+
+      // 3. Assert: booleano REAL en el documento, nunca la cadena "true".
+      const schema = JSON.parse(store.activeDraft.schemaText) as {
+        nodes: Record<string, { params: Record<string, unknown> }>;
+      };
+      expect(schema.nodes.trigger_imap?.params).toEqual({
+        mailbox: 'INBOX',
+        includeAttachments: true,
+      });
+      expect(store.activeDraft.schemaText).toContain('"includeAttachments": true');
+    });
+
+    it('2bis.2 deberia conservar las claves que ningun control gestiona', () => {
+      // 1. Arrange: una plantilla con parametros sembrados por el editor JSON
+      //    que se retiro. Ya no se pueden editar desde la interfaz, pero
+      //    borrarlos al accionar un interruptor seria perdida de datos.
+      const store = useWorkflowTemplatesStore();
+      store.initDraft();
+      store.setSequence([
+        {
+          ...buildImapSequence()[0]!,
+          params: { mailbox: 'Archivadas', markAsRead: false },
+        },
+      ]);
+
+      // 2. Act: merge sobre lo existente, que es lo que emite el control.
+      store.patchStepParams('trigger_imap', {
+        mailbox: 'Archivadas',
+        markAsRead: false,
+        includeAttachments: true,
+      });
+
+      // 3. Assert
+      const schema = JSON.parse(store.activeDraft.schemaText) as {
+        nodes: Record<string, { params: Record<string, unknown> }>;
+      };
+      expect(schema.nodes.trigger_imap?.params).toEqual({
+        mailbox: 'Archivadas',
+        markAsRead: false,
+        includeAttachments: true,
+      });
+    });
+  });
+
   describe('3. Guardado del borrador', () => {
     it('3.1 deberia crear cuando no hay plantilla seleccionada', async () => {
       // 1. Arrange
@@ -488,160 +556,160 @@ describe('useWorkflowTemplatesStore · catalogo de plantillas de flujo', () => {
       expect(store.selectedTemplate).toBeNull();
       expect(store.activeDraft.name).toBe('');
     });
-  
-  describe('7. executionPolicy del borrador', () => {
-    /** Borrador con nombre y un nodo, listo para conmutar la politica. */
-    const buildDraftWithNode = (): ReturnType<typeof useWorkflowTemplatesStore> => {
-      const store = useWorkflowTemplatesStore();
-      store.initDraft();
-      store.patchDraft({ name: 'Notiweb' });
-      store.setSequence([
-        {
-          nodeId: 'trigger_cron',
-          nodeType: NodeType.TRIGGER_CRON,
-          outputNamespace: 'cron_trigger',
-          params: {},
-        },
-      ]);
 
-      return store;
-    };
+    describe('7. executionPolicy del borrador', () => {
+      /** Borrador con nombre y un nodo, listo para conmutar la politica. */
+      const buildDraftWithNode = (): ReturnType<typeof useWorkflowTemplatesStore> => {
+        const store = useWorkflowTemplatesStore();
+        store.initDraft();
+        store.patchDraft({ name: 'Notiweb' });
+        store.setSequence([
+          {
+            nodeId: 'trigger_cron',
+            nodeType: NodeType.TRIGGER_CRON,
+            outputNamespace: 'cron_trigger',
+            params: {},
+          },
+        ]);
 
-    it('7.1 deberia escribir la politica en el documento al marcarla', () => {
-      // 1. Arrange
-      const store = buildDraftWithNode();
+        return store;
+      };
 
-      // 2. Act
-      store.setStopOnFirstSuccess(true);
+      it('7.1 deberia escribir la politica en el documento al marcarla', () => {
+        // 1. Arrange
+        const store = buildDraftWithNode();
 
-      // 3. Assert
-      expect(store.stopOnFirstSuccess).toBe(true);
-      expect(JSON.parse(store.activeDraft.schemaText).executionPolicy).toEqual({
-        stopOnFirstSuccess: true,
+        // 2. Act
+        store.setStopOnFirstSuccess(true);
+
+        // 3. Assert
+        expect(store.stopOnFirstSuccess).toBe(true);
+        expect(JSON.parse(store.activeDraft.schemaText).executionPolicy).toEqual({
+          stopOnFirstSuccess: true,
+        });
+      });
+
+      it('7.2 deberia ELIMINAR la clave al desmarcarla, no dejarla en false', () => {
+        // 1. Arrange
+        const store = buildDraftWithNode();
+        store.setStopOnFirstSuccess(true);
+
+        // 2. Act
+        store.setStopOnFirstSuccess(false);
+
+        // 3. Assert: el esquema declara lo que el flujo HACE; una politica
+        //    presente que no hace nada es ruido que ademas habria que mantener
+        //    sincronizado con el default del backend.
+        expect(store.stopOnFirstSuccess).toBe(false);
+        expect(Object.hasOwn(JSON.parse(store.activeDraft.schemaText), 'executionPolicy')).toBe(
+          false,
+        );
+      });
+
+      it('7.3 deberia SOBREVIVIR a reordenar la secuencia', () => {
+        // 1. Arrange: el caso que de otro modo la borra en silencio. El selector
+        //    reensambla el esquema entero, asi que un campo raiz que no se
+        //    propague desaparece en cuanto se anade o se mueve un nodo.
+        const store = buildDraftWithNode();
+        store.setStopOnFirstSuccess(true);
+
+        // 2. Act
+        store.setSequence([
+          {
+            nodeId: 'trigger_cron',
+            nodeType: NodeType.TRIGGER_CRON,
+            outputNamespace: 'cron_trigger',
+            params: {},
+          },
+          {
+            nodeId: 'nodo_mapeador',
+            nodeType: NodeType.MAPEADOR_PLANTILLA,
+            outputNamespace: 'rendered_html',
+            params: {},
+          },
+        ]);
+
+        // 3. Assert
+        expect(store.schemaNodeCount).toBe(2);
+        expect(store.stopOnFirstSuccess).toBe(true);
       });
     });
 
-    it('7.2 deberia ELIMINAR la clave al desmarcarla, no dejarla en false', () => {
-      // 1. Arrange
-      const store = buildDraftWithNode();
-      store.setStopOnFirstSuccess(true);
+    describe('6. Nodos minimos del borrador', () => {
+      it('6.1 no deberia declararse valido con nombre pero sin nodos', () => {
+        // 1. Arrange: guardar asi provoca un 400 del validador —`entrypoint` vacio
+        //    y `nodes` vacio—, y el operador solo veia el error tras la peticion.
+        const store = useWorkflowTemplatesStore();
+        store.initDraft();
 
-      // 2. Act
-      store.setStopOnFirstSuccess(false);
+        // 2. Act
+        store.patchDraft({ name: 'Notiweb' });
 
-      // 3. Assert: el esquema declara lo que el flujo HACE; una politica
-      //    presente que no hace nada es ruido que ademas habria que mantener
-      //    sincronizado con el default del backend.
-      expect(store.stopOnFirstSuccess).toBe(false);
-      expect(
-        Object.hasOwn(JSON.parse(store.activeDraft.schemaText), 'executionPolicy'),
-      ).toBe(false);
-    });
+        // 3. Assert
+        expect(store.schemaNodeCount).toBe(0);
+        expect(store.isDraftValid).toBe(false);
+      });
 
-    it('7.3 deberia SOBREVIVIR a reordenar la secuencia', () => {
-      // 1. Arrange: el caso que de otro modo la borra en silencio. El selector
-      //    reensambla el esquema entero, asi que un campo raiz que no se
-      //    propague desaparece en cuanto se anade o se mueve un nodo.
-      const store = buildDraftWithNode();
-      store.setStopOnFirstSuccess(true);
+      it('6.2 deberia declararse valido en cuanto la secuencia aporta un nodo', () => {
+        // 1. Arrange
+        const store = useWorkflowTemplatesStore();
+        store.initDraft();
+        store.patchDraft({ name: 'Notiweb' });
 
-      // 2. Act
-      store.setSequence([
-        {
-          nodeId: 'trigger_cron',
-          nodeType: NodeType.TRIGGER_CRON,
-          outputNamespace: 'cron_trigger',
-          params: {},
-        },
-        {
-          nodeId: 'nodo_mapeador',
-          nodeType: NodeType.MAPEADOR_PLANTILLA,
-          outputNamespace: 'rendered_html',
-          params: {},
-        },
-      ]);
+        // 2. Act
+        store.setSequence([
+          {
+            nodeId: 'trigger_cron',
+            nodeType: NodeType.TRIGGER_CRON,
+            outputNamespace: 'cron_trigger',
+            params: {},
+          },
+        ]);
 
-      // 3. Assert
-      expect(store.schemaNodeCount).toBe(2);
-      expect(store.stopOnFirstSuccess).toBe(true);
-    });
-  });
+        // 3. Assert
+        expect(store.schemaNodeCount).toBe(1);
+        expect(store.isDraftValid).toBe(true);
+      });
 
-  describe('6. Nodos minimos del borrador', () => {
-    it('6.1 no deberia declararse valido con nombre pero sin nodos', () => {
-      // 1. Arrange: guardar asi provoca un 400 del validador —`entrypoint` vacio
-      //    y `nodes` vacio—, y el operador solo veia el error tras la peticion.
-      const store = useWorkflowTemplatesStore();
-      store.initDraft();
+      it('6.3 deberia contar los nodos escritos a mano en el texto', () => {
+        // 1. Arrange: el editor JSON es editable directamente y la sincronizacion
+        //    con `sequence` es de una sola direccion. Contar sobre `sequence`
+        //    dejaria el boton bloqueado con un documento que si tiene nodos.
+        const store = useWorkflowTemplatesStore();
+        store.initDraft();
 
-      // 2. Act
-      store.patchDraft({ name: 'Notiweb' });
+        // 2. Act
+        store.patchDraft({ name: 'Notiweb', schemaText: JSON.stringify(SCHEMA) });
 
-      // 3. Assert
-      expect(store.schemaNodeCount).toBe(0);
-      expect(store.isDraftValid).toBe(false);
-    });
+        // 3. Assert
+        expect(store.sequence).toHaveLength(0);
+        expect(store.schemaNodeCount).toBe(1);
+        expect(store.isDraftValid).toBe(true);
+      });
 
-    it('6.2 deberia declararse valido en cuanto la secuencia aporta un nodo', () => {
-      // 1. Arrange
-      const store = useWorkflowTemplatesStore();
-      store.initDraft();
-      store.patchDraft({ name: 'Notiweb' });
+      it('6.4 deberia devolver 0 nodos ante un JSON roto sin lanzar', () => {
+        // 1. Arrange
+        const store = useWorkflowTemplatesStore();
+        store.initDraft();
 
-      // 2. Act
-      store.setSequence([
-        {
-          nodeId: 'trigger_cron',
-          nodeType: NodeType.TRIGGER_CRON,
-          outputNamespace: 'cron_trigger',
-          params: {},
-        },
-      ]);
+        // 2. Act
+        store.patchDraft({ name: 'Notiweb', schemaText: '{ "nodes": ' });
 
-      // 3. Assert
-      expect(store.schemaNodeCount).toBe(1);
-      expect(store.isDraftValid).toBe(true);
-    });
+        // 3. Assert
+        expect(store.schemaNodeCount).toBe(0);
+      });
 
-    it('6.3 deberia contar los nodos escritos a mano en el texto', () => {
-      // 1. Arrange: el editor JSON es editable directamente y la sincronizacion
-      //    con `sequence` es de una sola direccion. Contar sobre `sequence`
-      //    dejaria el boton bloqueado con un documento que si tiene nodos.
-      const store = useWorkflowTemplatesStore();
-      store.initDraft();
+      it('6.5 deberia devolver 0 cuando nodes no es un objeto', () => {
+        // 1. Arrange
+        const store = useWorkflowTemplatesStore();
+        store.initDraft();
 
-      // 2. Act
-      store.patchDraft({ name: 'Notiweb', schemaText: JSON.stringify(SCHEMA) });
+        // 2. Act
+        store.patchDraft({ name: 'Notiweb', schemaText: '{"nodes": []}' });
 
-      // 3. Assert
-      expect(store.sequence).toHaveLength(0);
-      expect(store.schemaNodeCount).toBe(1);
-      expect(store.isDraftValid).toBe(true);
-    });
-
-    it('6.4 deberia devolver 0 nodos ante un JSON roto sin lanzar', () => {
-      // 1. Arrange
-      const store = useWorkflowTemplatesStore();
-      store.initDraft();
-
-      // 2. Act
-      store.patchDraft({ name: 'Notiweb', schemaText: '{ "nodes": ' });
-
-      // 3. Assert
-      expect(store.schemaNodeCount).toBe(0);
-    });
-
-    it('6.5 deberia devolver 0 cuando nodes no es un objeto', () => {
-      // 1. Arrange
-      const store = useWorkflowTemplatesStore();
-      store.initDraft();
-
-      // 2. Act
-      store.patchDraft({ name: 'Notiweb', schemaText: '{"nodes": []}' });
-
-      // 3. Assert
-      expect(store.schemaNodeCount).toBe(0);
+        // 3. Assert
+        expect(store.schemaNodeCount).toBe(0);
+      });
     });
   });
-});
 });

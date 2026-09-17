@@ -34,6 +34,9 @@ const FILTER_HINT = 'Coincidencia por subcadena. Dejalo vacio para no filtrar.';
 const UNREAD_ONLY_WARNING =
   'Con el filtro desactivado el flujo puede volver a procesar un correo ya leido en cada sondeo.';
 
+const ATTACHMENTS_HINT =
+  'Los adjuntos que superen el limite se descartan sin detener el flujo. El contenido binario se libera en cuanto algun nodo extrae texto aprovechable.';
+
 const UNTESTED_BLOCKING_HINT =
   'Prueba la conexion para continuar. Si configuras sin servidor de correo alcanzable, marca la casilla para avanzar bajo tu responsabilidad.';
 
@@ -238,8 +241,7 @@ const onTestConnection = async (): Promise<void> => {
          (de ahi `patchFilters` y no `patchConfig`). -->
     <h3 class="pd-h2 q-mt-lg q-mb-sm">Filtros de disparo</h3>
     <p class="pd-subtitle q-mb-md">
-      Acotan que correo arranca el flujo. Sin filtros, cualquier mensaje del buzon
-      lo dispara.
+      Acotan que correo arranca el flujo. Sin filtros, cualquier mensaje del buzon lo dispara.
     </p>
 
     <div class="row q-col-gutter-md">
@@ -284,6 +286,18 @@ const onTestConnection = async (): Promise<void> => {
           {{ UNREAD_ONLY_WARNING }}
         </p>
       </div>
+
+      <div class="col-12">
+        <q-toggle
+          :model-value="store.config.includeAttachments"
+          color="primary"
+          label="Procesar adjuntos (imagenes/documentos <= 5 MB)"
+          @update:model-value="store.patchConfig({ includeAttachments: Boolean($event) })"
+        />
+        <p v-if="store.config.includeAttachments" class="pd-subtitle q-mt-xs q-mb-none">
+          {{ ATTACHMENTS_HINT }}
+        </p>
+      </div>
     </div>
 
     <!-- Poka-Yoke con salida. El paso no avanza sin probar la conexion, porque
@@ -296,9 +310,7 @@ const onTestConnection = async (): Promise<void> => {
     <div v-if="store.hasValidFields && !store.connectionVerified" class="q-mt-md">
       <p
         class="pd-subtitle q-mb-sm"
-        :class="
-          store.skipCheckAcknowledged ? 'pd-test-hint--warn' : 'pd-test-hint--blocking'
-        "
+        :class="store.skipCheckAcknowledged ? 'pd-test-hint--warn' : 'pd-test-hint--blocking'"
       >
         {{ store.skipCheckAcknowledged ? UNTESTED_ACKNOWLEDGED_HINT : UNTESTED_BLOCKING_HINT }}
       </p>

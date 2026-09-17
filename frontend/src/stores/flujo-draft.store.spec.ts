@@ -8,11 +8,7 @@ import { useFlujoDraftStore } from './flujo-draft.store';
 
 import { NodeType } from '@/types/pipeline';
 
-import type {
-  PipelineSummary,
-  WorkflowDetail,
-  WorkflowTemplateSummary,
-} from '@/types/pipeline';
+import type { PipelineSummary, WorkflowDetail, WorkflowTemplateSummary } from '@/types/pipeline';
 
 // Sin esto se cargaria `@boot/axios`, que necesita entorno de navegador.
 vi.mock('@services/workflow-templates.service', () => ({
@@ -457,6 +453,10 @@ describe('useFlujoDraftStore · agregador del asistente', () => {
         mailbox: 'INBOX',
         pollIntervalMs: 60_000,
         unreadOnly: true,
+        // Llega hasta aqui porque el store del trigger lo publica: es la prueba
+        // de que el toggle de la plantilla sobrevive al instanciar el flujo, en
+        // vez de perderse al reconstruir los `params`.
+        includeAttachments: false,
       });
     });
 
@@ -1131,9 +1131,7 @@ describe('useFlujoDraftStore · modo edicion', () => {
       const draft = await buildSelectedDraft();
 
       // 2. Act
-      const byType = new Map(
-        draft.invalidSteps.map((item) => [item.step.nodeType, item.reason]),
-      );
+      const byType = new Map(draft.invalidSteps.map((item) => [item.step.nodeType, item.reason]));
 
       // 3. Assert: presentarlos igual dejaba al operador reintentando algo que
       //    no tiene arreglo desde el asistente.

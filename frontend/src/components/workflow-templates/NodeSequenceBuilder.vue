@@ -8,6 +8,8 @@ import TemplateNodeCard from '@components/workflow-templates/TemplateNodeCard.vu
 import { extractApiErrorMessage } from '@/utils/api-error';
 
 import { NODE_CATEGORY_LABELS } from '@/types/node-catalog';
+import { withBaseParamDefaults } from '@/utils/node-base-params';
+
 import { DEFAULT_OUTPUT_NAMESPACE_BY_NODE_TYPE } from '@/types/pipeline';
 
 import type { AssemblerStep } from '@/utils/pipeline-assembler';
@@ -112,7 +114,10 @@ const addNode = (): void => {
       nodeId,
       nodeType,
       outputNamespace: DEFAULT_OUTPUT_NAMESPACE_BY_NODE_TYPE[nodeType],
-      params: {},
+      // Devuelve un objeto NUEVO en cada alta: el mapa de defaults es un literal
+      // compartido de modulo, y pasarlo por referencia haria que dos nodos del
+      // mismo tipo acabaran escribiendo sobre el mismo `params`.
+      params: withBaseParamDefaults(nodeType, {}),
     },
   ]);
 

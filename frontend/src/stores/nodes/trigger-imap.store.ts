@@ -73,6 +73,13 @@ export interface TriggerImapConfig extends TriggerImapFilters {
   passwordEnvKey: string;
   mailbox: string;
   pollIntervalMs: number;
+  /**
+   * Ingesta de adjuntos del correo.
+   *
+   * Opt-in por lo mismo que en el backend: cada adjunto viaja en base64 dentro
+   * del contexto, y ese contexto se reserializa entero en cada checkpoint.
+   */
+  includeAttachments: boolean;
 }
 
 /**
@@ -82,8 +89,7 @@ export interface TriggerImapConfig extends TriggerImapFilters {
  * puede faltar o venir con otro tipo. Se normaliza a `''` en vez de propagar
  * `undefined`, que dejaria el `<q-input>` como campo descontrolado en Vue.
  */
-const asText = (value: unknown): string =>
-  typeof value === 'string' ? value : '';
+const asText = (value: unknown): string => (typeof value === 'string' ? value : '');
 
 /** Lee un numero de los `params`, con el default del backend como respaldo. */
 const asNumber = (value: unknown, fallback: number): number =>
@@ -101,6 +107,7 @@ const buildInitialConfig = (): TriggerImapConfig => ({
   fromFilter: '',
   subjectFilter: '',
   unreadOnly: DEFAULT_UNREAD_ONLY,
+  includeAttachments: false,
 });
 
 /** Prefijo del id de Pinia; el sufijo es el `nodeId` del `pipeline_schema`. */
@@ -184,9 +191,7 @@ const triggerImapSetup = () => {
    * asistente pide confirmacion explicita antes de persistir.
    */
   const isConfigValid = computed<boolean>(
-    () =>
-      hasValidFields.value &&
-      (connectionVerified.value || skipCheckAcknowledged.value),
+    () => hasValidFields.value && (connectionVerified.value || skipCheckAcknowledged.value),
   );
 
   /**
@@ -200,9 +205,7 @@ const triggerImapSetup = () => {
    * `flujo-draft.store.ts`).
    */
   const configWarnings = computed<readonly string[]>(() =>
-    hasValidFields.value && !connectionVerified.value
-      ? [UNVERIFIED_CONNECTION_WARNING]
-      : [],
+    hasValidFields.value && !connectionVerified.value ? [UNVERIFIED_CONNECTION_WARNING] : [],
   );
 
   /** Payload de la comprobacion, derivado de la configuracion actual. */
@@ -291,6 +294,11 @@ const triggerImapSetup = () => {
     return {
       ...checkPayload.value,
       unreadOnly: config.value.unreadOnly,
+      // FUERA del spread de `checkPayload` a proposito: aquel es el cuerpo de
+      // `POST /api/wizard/check-imap`, una prueba de conectividad a la que los
+      // adjuntos no le aportan nada. Aqui si, porque esto son los `params` que
+      // acaban en el `pipeline_schema`.
+      includeAttachments: config.value.includeAttachments,
       ...(fromFilter !== '' ? { fromFilter } : {}),
       ...(subjectFilter !== '' ? { subjectFilter } : {}),
     };
@@ -327,6 +335,11 @@ const triggerImapSetup = () => {
       fromFilter: asText(params.fromFilter),
       subjectFilter: asText(params.subjectFilter),
       unreadOnly: params.unreadOnly !== false,
+      // Comparacion estricta y no `!== false` como el de arriba: aquel es un
+      // opt-OUT cuyo defecto es `true`, y este un opt-IN cuyo defecto es
+      // `false`. Ademas descarta la cadena `'false'` que pudo dejar una escritura
+      // por SQL, que en JavaScript seria *truthy*.
+      includeAttachments: params.includeAttachments === true,
     };
 
     connectionVerified.value = true;

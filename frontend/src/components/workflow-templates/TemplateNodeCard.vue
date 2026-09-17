@@ -1,21 +1,11 @@
 <script setup lang="ts">
-import { computed, defineAsyncComponent, ref, watch } from 'vue';
+import { computed } from 'vue';
 
-import {
-  areParamsEqual,
-  parseParamsObject,
-  stringifyParams,
-} from '@/utils/params-json';
+import { nodeBaseParamsRegistry } from '@components/nodes/node-base-params-registry';
 
 import { NODE_OUTPUT_NAMESPACES } from '@/types/pipeline';
 
 import type { AssemblerStep } from '@/utils/pipeline-assembler';
-
-// CodeMirror pesa cientos de KB y solo hace falta al desplegar un nodo; en
-// diferido se descarga una unica vez para todos los que se abran.
-const JsonPipelinePreview = defineAsyncComponent(
-  () => import('@components/JsonPipelinePreview.vue'),
-);
 
 interface Props {
   /** Paso que este bloque representa. */
@@ -37,56 +27,14 @@ const emit = defineEmits<{
 }>();
 
 /**
- * Texto EN CURSO del editor.
+ * Control de parametros base que corresponde a ESTE tipo de nodo.
  *
- * Vive aqui y no en el anfitrion a proposito: un JSON a medio escribir no es un
- * dato del grafo, y elevarlo obligaria al constructor a distinguir el texto
- * valido del que todavia no parsea. Ademas muere con la instancia, lo que evita
- * que el texto de un nodo borrado reaparezca en otro nodo que reutilice su
- * `nodeId`.
+ * Resolucion polimorfica contra el registro (frontend-quasar.md §3.1): la ficha
+ * no compara `nodeType` con ninguna cadena, asi que dar de alta un tipo nuevo no
+ * la obliga a cambiar. `undefined` para los tipos sin parametros base, y
+ * entonces no se pinta ningun control.
  */
-const paramsText = ref<string>(stringifyParams(props.step.params));
-
-const paramsError = computed<string | null>(() => {
-  const result = parseParamsObject(paramsText.value);
-
-  return result.ok ? null : result.message;
-});
-
-/**
- * Publica SOLO lo que parsea.
- *
- * Emitir a medio escribir regeneraria el grafo entero en cada pulsacion y el
- * documento resultante volveria aqui, borrando lo tecleado.
- */
-const onParamsTextChange = (value: string): void => {
-  paramsText.value = value;
-
-  const result = parseParamsObject(value);
-
-  if (result.ok) {
-    emit('update:params', result.value);
-  }
-};
-
-/**
- * Guarda de eco.
- *
- * El anfitrion devuelve el mismo objeto que acabamos de emitir; reserializarlo
- * destruiria el formato del autor y la posicion de su cursor. Solo se repone el
- * texto cuando el valor entrante es OTRO, que es lo que ocurre al reabrir el
- * dialogo con una plantilla distinta que reutiliza este `nodeId`.
- */
-watch(
-  () => props.step.params,
-  (incoming) => {
-    const current = parseParamsObject(paramsText.value);
-
-    if (current.ok && areParamsEqual(current.value, incoming)) return;
-
-    paramsText.value = stringifyParams(incoming);
-  },
-);
+const baseParamsComponent = computed(() => nodeBaseParamsRegistry[props.step.nodeType]);
 </script>
 
 <template>
@@ -101,13 +49,6 @@ watch(
         <q-item-label caption class="pd-mono pd-sequence-namespace">
           {{ props.step.outputNamespace }}
         </q-item-label>
-      </q-item-section>
-
-      <!-- El aviso va en la CABECERA para que siga viendose con el nodo
-           plegado: un JSON roto no impide guardar, asi que si solo se pintase
-           dentro del panel el operador podria persistir sin enterarse. -->
-      <q-item-section v-if="paramsError" side>
-        <q-badge class="pd-badge pd-params-badge--error">JSON invalido</q-badge>
       </q-item-section>
 
       <q-item-section side>
@@ -164,24 +105,18 @@ watch(
         @update:model-value="emit('update:namespace', String($event ?? ''))"
       />
 
-      <!-- Editor crudo para TODOS los tipos: una plantilla declara la topologia,
-           y los parametros de operacion se piden en el asistente al instanciar
-           el flujo. Aqui solo se siembran valores base opcionales. -->
-      <div class="pd-sequence-json">
-        <div class="row items-center justify-between q-mb-xs">
-          <span class="pd-label">Parametros base (JSON)</span>
-          <span v-if="paramsError" class="pd-mono pd-sequence-error">{{ paramsError }}</span>
-        </div>
-        <p class="pd-subtitle q-mt-none q-mb-sm">
-          Opcionales. Deja <span class="pd-mono">{}</span> si el nodo no necesita ninguno: el
-          asistente pedira los parametros de operacion al crear el flujo.
-        </p>
-        <JsonPipelinePreview
-          :model-value="paramsText"
-          :readonly="false"
-          @update:model-value="onParamsTextChange"
-        />
-      </div>
+      <!-- Controles DEDICADOS, nunca JSON a mano (RNF-04). Una plantilla declara
+           la topologia, y los parametros de operacion se piden en el asistente
+           al instanciar el flujo; aqui solo se siembran valores base. Los tipos
+           sin entrada en el registro no pintan nada, que es lo correcto: no
+           tienen ningun parametro base que sembrar. -->
+      <component
+        :is="baseParamsComponent"
+        v-if="baseParamsComponent"
+        :params="props.step.params"
+        :node-id="props.step.nodeId"
+        @update:params="emit('update:params', $event)"
+      />
     </div>
   </q-expansion-item>
 </template>
@@ -195,18 +130,6 @@ watch(
   background: var(--pd-card-bg);
 }
 
-// Altura acotada: el editor de `params` vive dentro de una columna que ya
-// scrollea, asi que sin un techo cada nodo desplegado empujaria a los demas
-// fuera de la vista.
-.pd-sequence-json :deep(.pd-json-preview) {
-  height: 220px;
-}
-
-.pd-sequence-error {
-  color: var(--pd-negative);
-  font-size: 11.5px;
-}
-
 // El campo del namespace vive ahora aqui, asi que su fondo tambien.
 :deep(.q-field--outlined .q-field__control) {
   background: var(--pd-card-bg);
@@ -214,10 +137,5 @@ watch(
   &::before {
     border-color: var(--pd-border);
   }
-}
-
-.pd-params-badge--error {
-  background: var(--pd-negative);
-  color: #ffffff;
 }
 </style>

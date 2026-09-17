@@ -84,6 +84,9 @@ describe('useTriggerImapStore · configuracion del nodo TRIGGER_IMAP', () => {
         fromFilter: '',
         subjectFilter: '',
         unreadOnly: DEFAULT_UNREAD_ONLY,
+        // Opt-IN, al reves que `unreadOnly`: el base64 de los adjuntos se
+        // reserializa en cada checkpoint, asi que se activa a proposito.
+        includeAttachments: false,
       });
       expect(DEFAULT_IMAP_PORT).toBe(993);
       expect(DEFAULT_MAILBOX).toBe('INBOX');
@@ -504,6 +507,7 @@ describe('useTriggerImapStore · configuracion del nodo TRIGGER_IMAP', () => {
         mailbox: 'INBOX',
         pollIntervalMs: 60_000,
         unreadOnly: true,
+        includeAttachments: false,
         ...params,
       },
     });
@@ -563,6 +567,77 @@ describe('useTriggerImapStore · configuracion del nodo TRIGGER_IMAP', () => {
       expect(store.config.mailbox).toBe(DEFAULT_MAILBOX);
       expect(store.config.pollIntervalMs).toBe(DEFAULT_POLL_INTERVAL_MS);
       expect(store.config.host).toBe('');
+    });
+  });
+
+  describe('4quinquies. Ingesta de adjuntos', () => {
+    it('4quinquies.1 deberia hidratar el valor guardado como true', () => {
+      // 1. Arrange
+      const store = useTriggerImapStore(NODE_ID);
+
+      // 2. Act
+      store.hydrateFromNode({
+        outputNamespace: 'raw_email',
+        params: { includeAttachments: true },
+      });
+
+      // 3. Assert
+      expect(store.config.includeAttachments).toBe(true);
+    });
+
+    it('4quinquies.2 deberia caer a false cuando el esquema omite la clave', () => {
+      // 1. Arrange: los flujos guardados antes de que el campo existiera.
+      const store = useTriggerImapStore(NODE_ID);
+
+      // 2. Act
+      store.hydrateFromNode({ outputNamespace: 'raw_email', params: {} });
+
+      // 3. Assert
+      expect(store.config.includeAttachments).toBe(false);
+    });
+
+    it('4quinquies.3 NO deberia tomar la cadena "false" por un true', () => {
+      // 1. Arrange: `configuracion_pipeline` es jsonb y pudo escribirse por SQL
+      // directo. Una cadena no vacia es *truthy* en JavaScript, asi que sin la
+      // comparacion estricta el operador veria encendida una ingesta que el
+      // backend interpreta como apagada.
+      const store = useTriggerImapStore(NODE_ID);
+
+      // 2. Act
+      store.hydrateFromNode({
+        outputNamespace: 'raw_email',
+        params: { includeAttachments: 'false' },
+      });
+
+      // 3. Assert
+      expect(store.config.includeAttachments).toBe(false);
+    });
+
+    it('4quinquies.4 deberia emitirlo como booleano real en los params', () => {
+      // 1. Arrange
+      const store = useTriggerImapStore(NODE_ID);
+      store.patchConfig({ ...VALID_CONFIG, includeAttachments: true });
+
+      // 2. Act
+      const params = store.toNodeParams();
+
+      // 3. Assert: el DTO del backend lo valida con `@IsBoolean()`; una cadena
+      // haria fallar el nodo entero al ejecutarse.
+      expect(params.includeAttachments).toBe(true);
+      expect(typeof params.includeAttachments).toBe('boolean');
+    });
+
+    it('4quinquies.5 NO deberia viajar en el payload de la prueba de conexion', () => {
+      // 1. Arrange: `POST /api/wizard/check-imap` solo comprueba que el buzon
+      // responde; los adjuntos no le aportan nada.
+      const store = useTriggerImapStore(NODE_ID);
+      store.patchConfig({ ...VALID_CONFIG, includeAttachments: true });
+
+      // 2. Act
+      const payload = store.checkPayload;
+
+      // 3. Assert
+      expect(payload).not.toHaveProperty('includeAttachments');
     });
   });
 
