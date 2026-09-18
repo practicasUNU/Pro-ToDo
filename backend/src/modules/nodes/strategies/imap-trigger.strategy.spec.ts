@@ -15,6 +15,7 @@ import {
   ERR_IMAP_READ,
   ERR_IMAP_TIMEOUT,
   ImapTriggerStrategy,
+  INLINE_ATTACHMENT_MARKER,
   MAX_HTML_LENGTH,
   MAX_TOTAL_ATTACHMENT_BYTES,
   NO_MESSAGES_STATUS,
@@ -1126,6 +1127,205 @@ describe('ImapTriggerStrategy', () => {
       expect(result.success).toBe(false);
       expect(result.error?.code).toBe(ERR_IMAP_CONFIG);
       expect(result.error?.missingFields).toContain('maxAttachmentBytes');
+    });
+  });
+
+  describe('10. Imagenes inline del marcado', () => {
+    /** PNG minimo en base64; 12 caracteres que codifican 8 bytes. */
+    const PNG_BASE64 = 'iVBORw0KGgo=';
+    const PNG_BYTES = 8;
+    const dataUri = (base64 = PNG_BASE64, type = 'image/png'): string =>
+      `data:${type};base64,${base64}`;
+
+    it('10.1 deberia extraer la imagen al inventario y purgar el marcado', async () => {
+      // 1. Arrange
+      simpleParser.mockResolvedValue(
+        buildParsedMail({ html: `<p>Hola</p><img src="${dataUri()}">` }),
+      );
+      const { strategy } = buildStrategy();
+
+      // 2. Act
+      const result = await strategy.execute(
+        buildContext(),
+        buildParams({ includeAttachments: true }),
+      );
+
+      // 3. Assert: el binario sale del marcado y entra en el inventario.
+      const html = String(result.data?.html);
+      expect(html).not.toContain('data:image');
+      expect(html).toContain('src="inline-image-1.png"');
+      expect(html).toContain(
+        `${INLINE_ATTACHMENT_MARKER}="inline-image-1.png"`,
+      );
+      expect(result.data?.attachments).toEqual([
+        {
+          filename: 'inline-image-1.png',
+          contentType: 'image/png',
+          size: PNG_BYTES,
+          contentBase64: PNG_BASE64,
+        },
+      ]);
+    });
+
+    it('10.2 deberia purgar igualmente con la ingesta apagada, sin marcador', async () => {
+      // 1. Arrange: la purga protege el checkpoint, asi que no depende del
+      //    opt-in; guardar el binario si.
+      simpleParser.mockResolvedValue(
+        buildParsedMail({ html: `<img src="${dataUri()}">` }),
+      );
+      const { strategy } = buildStrategy();
+
+      // 2. Act
+      const result = await strategy.execute(buildContext(), buildParams());
+
+      // 3. Assert: sin adjunto detras, el marcador NO se pone; una referencia
+      //    que no apunta a nada es peor que ninguna.
+      const html = String(result.data?.html);
+      expect(html).not.toContain('data:image');
+      expect(html).toContain('src="inline-image-1.png"');
+      expect(html).not.toContain(INLINE_ATTACHMENT_MARKER);
+      expect(result.data?.attachments).toEqual([]);
+    });
+
+    it('10.3 deberia devolver intacto un marcado sin imagenes incrustadas', async () => {
+      // 1. Arrange: la guarda de salida temprana evita el round-trip por el DOM.
+      const html = '<h1>Innovacion</h1>';
+      simpleParser.mockResolvedValue(buildParsedMail({ html }));
+      const { strategy } = buildStrategy();
+
+      // 2. Act
+      const result = await strategy.execute(
+        buildContext(),
+        buildParams({ includeAttachments: true }),
+      );
+
+      // 3. Assert: byte a byte. El nodo promete entregar el marcado CRUDO, y
+      //    normalizarlo sin necesidad romperia esa promesa.
+      expect(result.data?.html).toBe(html);
+    });
+
+    it('10.4 deberia purgar pero no adjuntar la imagen que supera el tope', async () => {
+      // 1. Arrange
+      simpleParser.mockResolvedValue(
+        buildParsedMail({ html: `<img src="${dataUri()}">` }),
+      );
+      const { strategy } = buildStrategy();
+      const warn = jest
+        .spyOn(strategy['logger'], 'warn')
+        .mockImplementation(() => undefined);
+
+      // 2. Act
+      const result = await strategy.execute(
+        buildContext(),
+        buildParams({ includeAttachments: true, maxAttachmentBytes: 4 }),
+      );
+
+      // 3. Assert: no bloquea, y el marcado queda limpio de todas formas.
+      expect(result.success).toBe(true);
+      expect(result.data?.attachments).toEqual([]);
+      const html = String(result.data?.html);
+      expect(html).not.toContain('data:image');
+      expect(html).not.toContain(INLINE_ATTACHMENT_MARKER);
+      expect(warn.mock.calls[0]?.[0]).toContain('inline-image-1.png');
+    });
+
+    it('10.5 deberia compartir el presupuesto con los adjuntos del MIME', async () => {
+      // 1. Arrange: dos adjuntos de 5 MiB agotan el presupuesto acumulado, asi
+      //    que la imagen del marcado ya no cabe. Con un contador por fase, este
+      //    correo colaria el doble del tope declarado.
+      const half = MAX_TOTAL_ATTACHMENT_BYTES / 2;
+      simpleParser.mockResolvedValue(
+        buildParsedMail({
+          html: `<img src="${dataUri()}">`,
+          attachments: [
+            buildAttachment({ filename: 'a.pdf', content: Buffer.alloc(half) }),
+            buildAttachment({ filename: 'b.pdf', content: Buffer.alloc(half) }),
+          ],
+        }),
+      );
+      const { strategy } = buildStrategy();
+      jest
+        .spyOn(strategy['logger'], 'warn')
+        .mockImplementation(() => undefined);
+
+      // 2. Act
+      const result = await strategy.execute(
+        buildContext(),
+        buildParams({
+          includeAttachments: true,
+          maxAttachmentBytes: MAX_ATTACHMENT_BYTES_LIMIT,
+        }),
+      );
+
+      // 3. Assert: solo los dos del MIME; la imagen se purga sin inventariar.
+      const attachments = result.data?.attachments as RawEmailAttachment[];
+      expect(attachments.map((item) => item.filename)).toEqual([
+        'a.pdf',
+        'b.pdf',
+      ]);
+      expect(String(result.data?.html)).not.toContain('data:image');
+    });
+
+    it('10.6 deberia numerar correlativamente y respetar un src mal formado', async () => {
+      // 1. Arrange: el del medio no trae base64, asi que no se reconoce.
+      simpleParser.mockResolvedValue(
+        buildParsedMail({
+          html: [
+            `<img src="${dataUri()}">`,
+            '<img src="data:image/png,sin-base64">',
+            `<img src="${dataUri(PNG_BASE64, 'image/jpeg')}">`,
+          ].join(''),
+        }),
+      );
+      const { strategy } = buildStrategy();
+
+      // 2. Act
+      const result = await strategy.execute(
+        buildContext(),
+        buildParams({ includeAttachments: true }),
+      );
+
+      // 3. Assert: la numeracion cuenta solo las reconocidas, sin abrir huecos,
+      //    y lo que no se entiende se deja como estaba.
+      const attachments = result.data?.attachments as RawEmailAttachment[];
+      expect(attachments.map((item) => item.filename)).toEqual([
+        'inline-image-1.png',
+        'inline-image-2.jpeg',
+      ]);
+      expect(String(result.data?.html)).toContain('data:image/png,sin-base64');
+    });
+
+    it('10.7 deberia medir MAX_HTML_LENGTH sobre el marcado YA purgado', async () => {
+      // 1. Arrange: una sola imagen mas pesada que el tope del marcado. Antes de
+      //    la purga, `clampHtml` la cortaba a media `data:` URI y dejaba un
+      //    marcado roto con una imagen inservible.
+      const huge = 'A'.repeat(MAX_HTML_LENGTH + 10_000);
+      simpleParser.mockResolvedValue(
+        buildParsedMail({ html: `<img src="${dataUri(huge)}">` }),
+      );
+      const { strategy } = buildStrategy();
+      const warn = jest
+        .spyOn(strategy['logger'], 'warn')
+        .mockImplementation(() => undefined);
+
+      // 2. Act
+      const result = await strategy.execute(
+        buildContext(),
+        buildParams({ includeAttachments: true }),
+      );
+
+      // 3. Assert: el marcado cabe de sobra y nadie recorto nada.
+      const html = String(result.data?.html);
+      expect(html.length).toBeLessThan(200);
+      expect(html).not.toContain('data:image');
+      expect(
+        warn.mock.calls.some(([message]) =>
+          String(message).includes('recortado'),
+        ),
+      ).toBe(false);
+      const attachments = result.data?.attachments as RawEmailAttachment[];
+      expect(attachments).toHaveLength(1);
+      expect(attachments[0]?.contentBase64).toBe(huge);
     });
   });
 });

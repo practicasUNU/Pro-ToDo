@@ -2,6 +2,7 @@ import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { plainToInstance } from 'class-transformer';
 import { validate } from 'class-validator';
+import * as cheerio from 'cheerio';
 import { simpleParser } from 'mailparser';
 
 import { NodeType } from '@core/fsm/types/pipeline-schema.types';
@@ -42,15 +43,18 @@ export const NO_MESSAGES_STATUS = 'NO_MESSAGES_FOUND';
 /**
  * Tope del marcado que viaja en el payload, en caracteres.
  *
- * `simpleParser` sustituye las imagenes `cid:` incrustadas por `data:` URI en
- * base64, y el payload entero acaba en el checkpoint JSONB de PostgreSQL: un
- * boletin con imagenes puede inflar la fila varios MB en cada ejecucion. No hay
- * ningun otro tope en el camino —`client.download` no limita bytes y
- * `DOWNLOAD_SOCKET_TIMEOUT_MS` solo corta la INACTIVIDAD del socket, no el
- * volumen de un flujo que avanza—, asi que este es el unico.
+ * Ya NO es la defensa contra las imagenes incrustadas: de esas se ocupa
+ * `extractInlineImages`, que las saca del marcado antes de llegar aqui. Era una
+ * mala defensa ademas, porque `slice()` corta a media `data:` URI y deja un
+ * marcado roto con una imagen truncada que no sirve a nadie.
  *
- * 256 KB sobran para el caso que motiva el campo: un correo de aviso o de OTP
- * pesa unos pocos KB de marcado.
+ * Lo que queda es la red de seguridad para un marcado desmesurado SIN imagenes
+ * —una firma corporativa con tablas anidadas, un boletin con estilos en linea—,
+ * y sigue siendo el unico tope del camino: `client.download` no limita bytes, y
+ * `DOWNLOAD_SOCKET_TIMEOUT_MS` solo corta la INACTIVIDAD del socket, no el
+ * volumen de un flujo que avanza.
+ *
+ * 256 KB sobran para eso: un correo de aviso o de OTP pesa unos pocos KB.
  */
 export const MAX_HTML_LENGTH = 262_144;
 
@@ -66,6 +70,57 @@ export const MAX_HTML_LENGTH = 262_144;
  * en una fila de `ejecuciones_flujo`.
  */
 export const MAX_TOTAL_ATTACHMENT_BYTES = 10_485_760;
+
+/**
+ * Atributo que marca una `<img>` cuyo binario SI acabo en `attachments`.
+ *
+ * El contrato es un SI Y SOLO SI: esta presente exactamente cuando el adjunto
+ * existe. Una imagen purgada del marcado pero no inventariada —ingesta apagada,
+ * o fuera de presupuesto— no lo lleva, para que un nodo posterior no siga una
+ * referencia que no apunta a nada.
+ */
+export const INLINE_ATTACHMENT_MARKER = 'data-attachment';
+
+/** Raiz del nombre de las imagenes extraidas del marcado. */
+const INLINE_IMAGE_NAME_PREFIX = 'inline-image';
+
+/**
+ * `data:image/png;base64,iVBOR...` -> [, 'image/png', 'iVBOR...'].
+ *
+ * El segundo grupo usa `[\s\S]` y no `.` porque el valor del atributo puede
+ * traer los saltos de linea con los que venia plegado en el MIME, y `.` no los
+ * cruza: con `.` un `data:` URI multilinea no casaria y la imagen se quedaria
+ * incrustada, que es justo lo que este nodo existe para evitar.
+ */
+const DATA_URI_PATTERN = /^data:([^;,]+);base64,([\s\S]+)$/;
+
+/**
+ * Bytes reales que representa una cadena base64.
+ *
+ * Cada 4 caracteres codifican 3 bytes, menos los que ocupe el relleno. La
+ * aproximacion habitual `length * 0.75` ignora ese relleno y se desvia hasta 2
+ * bytes; aqui importa porque `size` es lo que se contrasta contra el tope y lo
+ * que un operador lee en la trazabilidad.
+ */
+const base64ByteLength = (base64: string): number => {
+  const padding = base64.endsWith('==') ? 2 : base64.endsWith('=') ? 1 : 0;
+
+  return Math.floor((base64.length * 3) / 4) - padding;
+};
+
+/**
+ * Extension de archivo derivada del tipo MIME (`image/png` -> `png`).
+ *
+ * No se inventa nada cuando el subtipo no es utilizable —`image/svg+xml`, o un
+ * tipo con parametros—: se cae a `bin`, porque un nombre con una extension
+ * equivocada es peor que uno sin ella. El `contentType` real viaja intacto en su
+ * propia clave del adjunto.
+ */
+const extensionFromContentType = (contentType: string): string => {
+  const subtype = contentType.split('/')[1] ?? '';
+
+  return /^[a-z0-9]+$/i.test(subtype) ? subtype.toLowerCase() : 'bin';
+};
 
 /** Codigos de fallo del nodo. Son lo que un `catchErrors` puede mencionar. */
 export const ERR_IMAP_TIMEOUT = 'ERR_IMAP_TIMEOUT';
@@ -130,6 +185,19 @@ const VALIDATION_OPTIONS: ValidatorOptions = {
  * Union discriminada en vez de excepciones, igual que en `TemplateMapperStrategy`:
  * mantiene el fallo en el unico canal que el motor interpreta.
  */
+/**
+ * Inventario de adjuntos en construccion, con su presupuesto ya consumido.
+ *
+ * Existe porque el presupuesto tiene que sobrevivir a DOS fases —los adjuntos
+ * del MIME y las imagenes extraidas del marcado— y ambas deben competir por los
+ * mismos bytes. Con un contador local en cada una, un correo podria colar el
+ * doble del tope declarado sin que ninguna de las dos lo notara.
+ */
+interface AttachmentCollection {
+  readonly items: RawEmailAttachment[];
+  usedBytes: number;
+}
+
 type ImapConfigResolution =
   | { readonly config: ResolvedImapConfig; readonly password: string }
   | { readonly failure: NodeErrorDetail };
@@ -493,6 +561,28 @@ export class ImapTriggerStrategy implements INodeStrategy {
   ): ExtractedEmail {
     const messageId = asString(parsed.messageId);
 
+    // El ORDEN de estos tres pasos es la mitad del cambio, no un detalle de
+    // estilo:
+    //   1. los adjuntos del MIME reservan su parte del presupuesto,
+    //   2. las imagenes del marcado compiten por lo que queda y se purgan,
+    //   3. y solo entonces se mide la longitud.
+    // Medir antes de purgar era lo que hacia que un correo de una sola imagen
+    // acabase recortado a media `data:` URI.
+    const collection: AttachmentCollection = { items: [], usedBytes: 0 };
+
+    this.collectAttachments(parsed, collection, config, messageId);
+
+    // El marcado real primero y la version que `mailparser` sintetiza desde el
+    // texto plano despues: ese orden deja `html` util tanto en el correo que
+    // solo trae HTML como en el que solo trae texto, y `''` si no hay ninguno
+    // de los dos.
+    const purgedHtml = this.extractInlineImages(
+      asString(parsed.html) || asString(parsed.textAsHtml),
+      collection,
+      config,
+      messageId,
+    );
+
     return {
       message_id: messageId,
       from: extractFromAddress(parsed.from),
@@ -504,18 +594,11 @@ export class ImapTriggerStrategy implements INodeStrategy {
       // derivandola del marcado: seria contenido que el correo no envio, y
       // distinguir lo que mando el remitente de lo que nos inventamos importa.
       text: asString(parsed.text),
-      // El marcado real primero y la version que `mailparser` sintetiza desde el
-      // texto plano despues: ese orden deja `html` util tanto en el correo que
-      // solo trae HTML como en el que solo trae texto, y `''` si no hay ninguno
-      // de los dos.
-      html: this.clampHtml(
-        asString(parsed.html) || asString(parsed.textAsHtml),
-        messageId,
-      ),
+      html: this.clampHtml(purgedHtml, messageId),
       // Cadena vacia y nunca `undefined` cuando falta la cabecera `Date:`, para
       // que una plantilla que interpole la clave no falle por variable ausente.
       date: parsed.date instanceof Date ? parsed.date.toISOString() : '',
-      attachments: this.collectAttachments(parsed, config, messageId),
+      attachments: collection.items,
     };
   }
 
@@ -532,11 +615,12 @@ export class ImapTriggerStrategy implements INodeStrategy {
    */
   private collectAttachments(
     parsed: ParsedMail,
+    collection: AttachmentCollection,
     config: ResolvedImapConfig,
     messageId: string,
-  ): RawEmailAttachment[] {
+  ): void {
     if (!config.includeAttachments) {
-      return [];
+      return;
     }
 
     // Guarda estructural, no cosmetica: `@types/mailparser` declara
@@ -546,9 +630,6 @@ export class ImapTriggerStrategy implements INodeStrategy {
     const candidates = Array.isArray(parsed.attachments)
       ? parsed.attachments
       : [];
-
-    const collected: RawEmailAttachment[] = [];
-    let totalBytes = 0;
 
     for (const [index, attachment] of candidates.entries()) {
       // Las imagenes incrustadas ya viajan dentro de `html` como `data:` URI,
@@ -579,35 +660,164 @@ export class ImapTriggerStrategy implements INodeStrategy {
       // el tope para que el presupuesto signifique algo.
       const bytes = content.length;
 
-      if (bytes > config.maxAttachmentBytes) {
-        this.logger.warn(
-          `LEVE | Adjunto "${filename}" descartado por tamano (${bytes} B > ${config.maxAttachmentBytes} B) en el mensaje "${messageId}".`,
-        );
-        continue;
-      }
+      const admitted = this.tryCollect(
+        collection,
+        {
+          filename,
+          contentType:
+            asString(attachment.contentType) || DEFAULT_ATTACHMENT_CONTENT_TYPE,
+          size: bytes,
+          // Base64 PLANO: sin prefijo `data:` y sin saltos de linea. Quien lo
+          // consuma decide como envolverlo; anadir el prefijo aqui obligaria a
+          // recortarlo en cada consumidor.
+          contentBase64: content.toString('base64'),
+        },
+        config,
+        messageId,
+      );
 
-      if (totalBytes + bytes > MAX_TOTAL_ATTACHMENT_BYTES) {
-        this.logger.warn(
-          `LEVE | Presupuesto de adjuntos agotado (${MAX_TOTAL_ATTACHMENT_BYTES} B) en el mensaje "${messageId}": se omiten los restantes.`,
-        );
+      // Agotar el presupuesto corta el recorrido: los adjuntos que siguen
+      // tampoco van a caber, y probarlos uno a uno solo repetiria la traza.
+      if (
+        !admitted &&
+        collection.usedBytes + bytes > MAX_TOTAL_ATTACHMENT_BYTES
+      ) {
         break;
       }
+    }
+  }
 
-      totalBytes += bytes;
+  /**
+   * Admite un adjunto si cabe, y deja traza si no.
+   *
+   * Punto UNICO donde se aplican las reglas de tamano, compartido por los
+   * adjuntos del MIME y por las imagenes extraidas del marcado. Tenerlas en un
+   * solo sitio es lo que garantiza que una imagen inline no pueda esquivar el
+   * tope que si se le exige a un PDF.
+   *
+   * Ningun descarte es bloqueante: se registra LEVE y el flujo continua.
+   *
+   * @returns `true` si el adjunto entro en el inventario.
+   */
+  private tryCollect(
+    collection: AttachmentCollection,
+    candidate: RawEmailAttachment,
+    config: ResolvedImapConfig,
+    messageId: string,
+  ): boolean {
+    const { filename, size } = candidate;
 
-      collected.push({
-        filename,
-        contentType:
-          asString(attachment.contentType) || DEFAULT_ATTACHMENT_CONTENT_TYPE,
-        size: bytes,
-        // Base64 PLANO: sin prefijo `data:` y sin saltos de linea. Quien lo
-        // consuma decide como envolverlo; anadir el prefijo aqui obligaria a
-        // recortarlo en cada consumidor.
-        contentBase64: content.toString('base64'),
-      });
+    if (size > config.maxAttachmentBytes) {
+      this.logger.warn(
+        `LEVE | Adjunto "${filename}" descartado por tamano (${size} B > ${config.maxAttachmentBytes} B) en el mensaje "${messageId}".`,
+      );
+
+      return false;
     }
 
-    return collected;
+    if (collection.usedBytes + size > MAX_TOTAL_ATTACHMENT_BYTES) {
+      this.logger.warn(
+        `LEVE | Presupuesto de adjuntos agotado (${MAX_TOTAL_ATTACHMENT_BYTES} B) en el mensaje "${messageId}": se omiten los restantes.`,
+      );
+
+      return false;
+    }
+
+    collection.usedBytes += size;
+    collection.items.push(candidate);
+
+    return true;
+  }
+
+  /**
+   * Saca del marcado las imagenes incrustadas y deja el DOM limpio.
+   *
+   * `simpleParser` sustituye cada imagen `cid:` por una `data:` URI en base64
+   * dentro del HTML. Ese marcado acaba integro en el checkpoint JSONB, que el
+   * motor reserializa ENTERO en cada transicion: un boletin con tres imagenes
+   * infla la fila varios MB por ejecucion.
+   *
+   * LA PURGA ES INCONDICIONAL Y LA INGESTA NO. Limpiar el DOM es lo que protege
+   * al motor, asi que ocurre siempre; guardar la imagen como adjunto depende de
+   * `includeAttachments`, que es el opt-in acordado para los binarios. Con la
+   * ingesta apagada la imagen se pierde, y es deliberado: antes de este cambio
+   * tampoco sobrevivia intacta, porque `clampHtml` la cortaba a media cadena.
+   *
+   * No duplica bytes con `collectAttachments`: aquel EXCLUYE los adjuntos
+   * `related`, que son exactamente estos. Cada imagen entra una sola vez, por
+   * una via o por la otra.
+   */
+  private extractInlineImages(
+    html: string,
+    collection: AttachmentCollection,
+    config: ResolvedImapConfig,
+    messageId: string,
+  ): string {
+    // Salida temprana, y no es solo ahorro de CPU: evita que el round-trip por
+    // el DOM normalice el marcado de todos los correos que no tienen ninguna
+    // imagen que extraer. El nodo promete entregar el HTML CRUDO, y reescribirlo
+    // sin necesidad romperia esa promesa.
+    if (!html.includes('data:image')) {
+      return html;
+    }
+
+    // Misma invocacion que `TemplateRendererService.auditPublishableMarkup`, y
+    // por las mismas razones: `xml` como OBJETO elige htmlparser2 sin activar el
+    // modo XML sensible a mayusculas, y el tercer parametro `false` es el modo
+    // fragmento. Con parse5 en modo documento, `$.html()` sintetizaria
+    // `<html><head><body>` en un correo que llego como fragmento.
+    const $ = cheerio.load(html, { xml: { xmlMode: false } }, false);
+
+    let recognized = 0;
+
+    $('img[src^="data:image"]').each((_index, element) => {
+      const image = $(element);
+      // Los espacios se retiran ANTES de casar: un `data:` URI plegado en varias
+      // lineas dentro del MIME llega con saltos que no forman parte del base64.
+      const source = (image.attr('src') ?? '').replace(/\s+/g, '');
+      const match = DATA_URI_PATTERN.exec(source);
+
+      // Un `src` que empieza por `data:image` pero no casa el patron —base64
+      // ausente, o una URI mal formada— se deja INTACTO. No se sabe que hay ahi,
+      // y adivinar es peor que no tocarlo.
+      if (match === null) {
+        return;
+      }
+
+      const [, contentType = '', base64 = ''] = match;
+
+      recognized += 1;
+
+      const filename = `${INLINE_IMAGE_NAME_PREFIX}-${recognized}.${extensionFromContentType(contentType)}`;
+
+      // La numeracion cuenta solo las imagenes RECONOCIDAS, no la posicion en el
+      // DOM: asi un `src` mal formado no abre un hueco en la serie y los nombres
+      // siguen siendo correlativos.
+      const admitted =
+        config.includeAttachments &&
+        this.tryCollect(
+          collection,
+          {
+            filename,
+            contentType,
+            size: base64ByteLength(base64),
+            contentBase64: base64,
+          },
+          config,
+          messageId,
+        );
+
+      // El `src` se reescribe SIEMPRE: purgar no depende de que el binario se
+      // haya guardado. El atributo marcador, en cambio, solo se pone cuando de
+      // verdad hay un adjunto detras, para que nadie siga una referencia muerta.
+      image.attr('src', filename);
+
+      if (admitted) {
+        image.attr(INLINE_ATTACHMENT_MARKER, filename);
+      }
+    });
+
+    return $.html();
   }
 
   /**
