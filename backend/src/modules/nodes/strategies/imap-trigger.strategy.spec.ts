@@ -11,6 +11,7 @@ import { ALLOWED_NAMESPACES } from '@modules/templates/templates.service';
 import { createMockStatePayloadContext } from '@test/factories/state-payload-context.factory';
 
 import {
+  ALLOWED_ATTACHMENT_MIME_TYPES,
   ERR_IMAP_CONFIG,
   ERR_IMAP_READ,
   ERR_IMAP_TIMEOUT,
@@ -1326,6 +1327,256 @@ describe('ImapTriggerStrategy', () => {
       const attachments = result.data?.attachments as RawEmailAttachment[];
       expect(attachments).toHaveLength(1);
       expect(attachments[0]?.contentBase64).toBe(huge);
+    });
+  });
+
+  describe('11. Lista blanca de tipos MIME', () => {
+    /** Tipos bloqueados representativos: ejecutable, contenedor y multimedia. */
+    const BLOCKED_TYPES = [
+      { filename: 'instalador.exe', contentType: 'application/x-msdownload' },
+      { filename: 'archivo.zip', contentType: 'application/zip' },
+      { filename: 'audio.mp3', contentType: 'audio/mpeg' },
+    ];
+
+    it('11.1 deberia admitir TODOS los tipos de la lista blanca', async () => {
+      // 1. Arrange: se recorre la lista exportada, no una copia. Anadir un tipo
+      //    nuevo queda cubierto por esta prueba sin tocarla.
+      const allowed = [...ALLOWED_ATTACHMENT_MIME_TYPES];
+      simpleParser.mockResolvedValue(
+        buildParsedMail({
+          attachments: allowed.map((contentType, index) =>
+            buildAttachment({ filename: `fichero-${index}`, contentType }),
+          ),
+        }),
+      );
+      const { strategy } = buildStrategy();
+
+      // 2. Act
+      const result = await strategy.execute(
+        buildContext(),
+        buildParams({ includeAttachments: true }),
+      );
+
+      // 3. Assert
+      const attachments = result.data?.attachments as RawEmailAttachment[];
+      expect(attachments).toHaveLength(allowed.length);
+      expect(attachments.map((item) => item.contentType)).toEqual(allowed);
+    });
+
+    it.each(BLOCKED_TYPES)(
+      '11.2 deberia descartar $contentType sin detener el flujo',
+      async ({ filename, contentType }) => {
+        // 1. Arrange
+        simpleParser.mockResolvedValue(
+          buildParsedMail({
+            attachments: [buildAttachment({ filename, contentType })],
+          }),
+        );
+        const { strategy } = buildStrategy();
+        const warn = jest
+          .spyOn(strategy['logger'], 'warn')
+          .mockImplementation(() => undefined);
+
+        // 2. Act
+        const result = await strategy.execute(
+          buildContext(),
+          buildParams({ includeAttachments: true }),
+        );
+
+        // 3. Assert: descarte LEVE, nunca bloqueante. El correo entra igual.
+        expect(result.success).toBe(true);
+        expect(result.data?.attachments).toEqual([]);
+        expect(warn).toHaveBeenCalledTimes(1);
+        expect(warn.mock.calls[0]?.[0]).toContain(filename);
+        expect(warn.mock.calls[0]?.[0]).toContain(contentType);
+      },
+    );
+
+    it('11.3 deberia conservar los permitidos y descartar el resto, en orden', async () => {
+      // 1. Arrange
+      simpleParser.mockResolvedValue(
+        buildParsedMail({
+          attachments: [
+            buildAttachment({
+              filename: 'factura.pdf',
+              contentType: 'application/pdf',
+            }),
+            buildAttachment({
+              filename: 'virus.exe',
+              contentType: 'application/x-msdownload',
+            }),
+            buildAttachment({
+              filename: 'notas.txt',
+              contentType: 'text/plain',
+            }),
+          ],
+        }),
+      );
+      const { strategy } = buildStrategy();
+      jest
+        .spyOn(strategy['logger'], 'warn')
+        .mockImplementation(() => undefined);
+
+      // 2. Act
+      const result = await strategy.execute(
+        buildContext(),
+        buildParams({ includeAttachments: true }),
+      );
+
+      // 3. Assert
+      const attachments = result.data?.attachments as RawEmailAttachment[];
+      expect(attachments.map((item) => item.filename)).toEqual([
+        'factura.pdf',
+        'notas.txt',
+      ]);
+    });
+
+    it('11.4 deberia descartar el adjunto sin Content-Type declarado', async () => {
+      // 1. Arrange: la lista blanca falla CERRADO. No saber que es algo no es
+      //    razon para dejarlo entrar.
+      simpleParser.mockResolvedValue(
+        buildParsedMail({
+          attachments: [
+            buildAttachment({ filename: 'misterio', contentType: undefined }),
+          ],
+        }),
+      );
+      const { strategy } = buildStrategy();
+      const warn = jest
+        .spyOn(strategy['logger'], 'warn')
+        .mockImplementation(() => undefined);
+
+      // 2. Act
+      const result = await strategy.execute(
+        buildContext(),
+        buildParams({ includeAttachments: true }),
+      );
+
+      // 3. Assert
+      expect(result.data?.attachments).toEqual([]);
+      expect(warn.mock.calls[0]?.[0]).toContain('sin declarar');
+    });
+
+    it('11.5 deberia normalizar mayusculas y parametros antes de comparar', async () => {
+      // 1. Arrange: bloquear un `APPLICATION/PDF` valido por no normalizar seria
+      //    un falso negativo de la lista blanca.
+      simpleParser.mockResolvedValue(
+        buildParsedMail({
+          attachments: [
+            buildAttachment({
+              filename: 'factura.pdf',
+              contentType: 'APPLICATION/PDF; charset=utf-8',
+            }),
+          ],
+        }),
+      );
+      const { strategy } = buildStrategy();
+
+      // 2. Act
+      const result = await strategy.execute(
+        buildContext(),
+        buildParams({ includeAttachments: true }),
+      );
+
+      // 3. Assert: admitido, y lo que se persiste es el valor ya saneado.
+      const attachments = result.data?.attachments as RawEmailAttachment[];
+      expect(attachments).toHaveLength(1);
+      expect(attachments[0]?.contentType).toBe('application/pdf');
+    });
+
+    it('11.6 NO deberia codificar a base64 un adjunto bloqueado', async () => {
+      // 1. Arrange: convertir 5 MiB de un `.exe` para tirarlo en la linea
+      //    siguiente es trabajo y memoria regalados, y base64 infla un 33%
+      //    mientras dura.
+      const content = Buffer.from('carga-util-que-no-debe-codificarse');
+      const toBase64 = jest.spyOn(content, 'toString');
+      simpleParser.mockResolvedValue(
+        buildParsedMail({
+          attachments: [
+            buildAttachment({
+              filename: 'virus.exe',
+              contentType: 'application/x-msdownload',
+              content,
+            }),
+          ],
+        }),
+      );
+      const { strategy } = buildStrategy();
+      jest
+        .spyOn(strategy['logger'], 'warn')
+        .mockImplementation(() => undefined);
+
+      // 2. Act
+      await strategy.execute(
+        buildContext(),
+        buildParams({ includeAttachments: true }),
+      );
+
+      // 3. Assert: la guarda va ANTES de la conversion.
+      expect(toBase64).not.toHaveBeenCalled();
+    });
+
+    it('11.7 deberia aplicar la lista tambien a las imagenes incrustadas', async () => {
+      // 1. Arrange: webp esta en la lista, gif no.
+      const base64 = 'iVBORw0KGgo=';
+      simpleParser.mockResolvedValue(
+        buildParsedMail({
+          html: [
+            `<img src="data:image/webp;base64,${base64}">`,
+            `<img src="data:image/gif;base64,${base64}">`,
+          ].join(''),
+        }),
+      );
+      const { strategy } = buildStrategy();
+      const warn = jest
+        .spyOn(strategy['logger'], 'warn')
+        .mockImplementation(() => undefined);
+
+      // 2. Act
+      const result = await strategy.execute(
+        buildContext(),
+        buildParams({ includeAttachments: true }),
+      );
+
+      // 3. Assert: la webp se inventaria; la gif se purga igual del marcado
+      //    —limpiar protege el checkpoint— pero no se guarda ni deja marcador.
+      const attachments = result.data?.attachments as RawEmailAttachment[];
+      expect(attachments.map((item) => item.filename)).toEqual([
+        'inline-image-1.webp',
+      ]);
+      const html = String(result.data?.html);
+      expect(html).not.toContain('data:image');
+      expect(html).toContain(
+        `${INLINE_ATTACHMENT_MARKER}="inline-image-1.webp"`,
+      );
+      expect(html).not.toContain(
+        `${INLINE_ATTACHMENT_MARKER}="inline-image-2.gif"`,
+      );
+      expect(warn.mock.calls[0]?.[0]).toContain('inline-image-2.gif');
+    });
+
+    it('11.8 NO deberia inventariar un SVG incrustado', async () => {
+      // 1. Arrange: un SVG puede llevar `<script>`; es el hueco que la lista
+      //    blanca cierra en la via del marcado.
+      simpleParser.mockResolvedValue(
+        buildParsedMail({
+          html: '<img src="data:image/svg+xml;base64,PHN2Zz48L3N2Zz4=">',
+        }),
+      );
+      const { strategy } = buildStrategy();
+      jest
+        .spyOn(strategy['logger'], 'warn')
+        .mockImplementation(() => undefined);
+
+      // 2. Act
+      const result = await strategy.execute(
+        buildContext(),
+        buildParams({ includeAttachments: true }),
+      );
+
+      // 3. Assert
+      expect(result.data?.attachments).toEqual([]);
+      expect(String(result.data?.html)).not.toContain('data:image');
     });
   });
 });

@@ -14,10 +14,7 @@ import {
   createImapClient,
   DOWNLOAD_SOCKET_TIMEOUT_MS,
 } from '@modules/nodes/services/imap-client.factory';
-import {
-  DEFAULT_ATTACHMENT_CONTENT_TYPE,
-  FALLBACK_ATTACHMENT_NAME_PREFIX,
-} from '@modules/nodes/interfaces/raw-email-attachment.interface';
+import { FALLBACK_ATTACHMENT_NAME_PREFIX } from '@modules/nodes/interfaces/raw-email-attachment.interface';
 
 import type { StatePayloadContext } from '@core/fsm/context/state-payload.context';
 import type {
@@ -70,6 +67,56 @@ export const MAX_HTML_LENGTH = 262_144;
  * en una fila de `ejecuciones_flujo`.
  */
 export const MAX_TOTAL_ATTACHMENT_BYTES = 10_485_760;
+
+/**
+ * Tipos MIME que este nodo acepta ingerir. Lista CERRADA y falla cerrado.
+ *
+ * El nodo alimenta un pipeline que publica en un CMS: los unicos adjuntos con
+ * sentido ahi son documentos ofimaticos, texto e imagenes. Todo lo demas —un
+ * `.exe`, un `.zip`, un `.mp3`— seria a la vez superficie de ataque y peso
+ * muerto, porque acabaria codificado en base64 dentro de `contexto_acumulado` y
+ * se reserializaria en cada checkpoint.
+ *
+ * Es una lista blanca y no una negra a proposito: enumerar lo prohibido deja
+ * fuera por defecto todo lo que nadie penso en anadir, que es exactamente al
+ * reves de lo que conviene aqui.
+ *
+ * `image/gif` esta AUSENTE deliberadamente. Tiene consecuencia: como la purga
+ * del marcado es incondicional, un GIF incrustado se borra del HTML y tampoco se
+ * inventaria, asi que se pierde. Es la politica acordada, no un descuido.
+ *
+ * Constante de modulo y no propiedad de clase, igual que `TIMEOUT_ERROR_CODES`:
+ * consultarla no necesita `this`, y exportarla deja que las pruebas aseveren
+ * contra la lista REAL en vez de contra una copia que se desincroniza.
+ */
+export const ALLOWED_ATTACHMENT_MIME_TYPES: ReadonlySet<string> = new Set([
+  'application/pdf',
+  // .docx
+  'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  // .xlsx
+  'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  'text/csv',
+  'text/plain',
+  'image/png',
+  'image/jpeg',
+  'image/webp',
+]);
+
+/**
+ * Reduce un `Content-Type` a su `tipo/subtipo` comparable.
+ *
+ * `APPLICATION/PDF; charset=utf-8` -> `application/pdf`.
+ *
+ * `mailparser` ya entrega el tipo sin parametros y en minusculas, asi que para
+ * los adjuntos del MIME esto es defensivo. Para las imagenes del marcado no lo
+ * es en absoluto: ese valor sale de una `data:` URI que escribio el cliente
+ * remitente, y ahi puede llegar con mayusculas o con parametros. Comparar sin
+ * normalizar bloquearia un `IMAGE/PNG` perfectamente valido.
+ */
+const normalizeContentType = (value: unknown): string =>
+  typeof value === 'string'
+    ? (value.split(';')[0] ?? '').trim().toLowerCase()
+    : '';
 
 /**
  * Atributo que marca una `<img>` cuyo binario SI acabo en `attachments`.
@@ -655,6 +702,22 @@ export class ImapTriggerStrategy implements INodeStrategy {
         continue;
       }
 
+      // Lista blanca ANTES de codificar. El orden importa: convertir 5 MiB de
+      // un `.exe` a base64 —que ademas infla un 33% mientras dura— para tirarlo
+      // en la linea siguiente es trabajo y memoria regalados.
+      //
+      // Un adjunto sin `Content-Type` declarado normaliza a cadena vacia y cae
+      // aqui: la lista blanca falla CERRADO, y no saber que es algo no es razon
+      // para dejarlo entrar.
+      const contentType = normalizeContentType(attachment.contentType);
+
+      if (!ALLOWED_ATTACHMENT_MIME_TYPES.has(contentType)) {
+        this.logger.warn(
+          `LEVE | Adjunto "${filename}" descartado por tipo MIME no autorizado (${contentType === '' ? 'sin declarar' : contentType}) en el mensaje "${messageId}".`,
+        );
+        continue;
+      }
+
       // La longitud real del Buffer manda sobre `attachment.size`: es lo que de
       // verdad se va a codificar, y es el numero que hay que contrastar contra
       // el tope para que el presupuesto signifique algo.
@@ -664,8 +727,9 @@ export class ImapTriggerStrategy implements INodeStrategy {
         collection,
         {
           filename,
-          contentType:
-            asString(attachment.contentType) || DEFAULT_ATTACHMENT_CONTENT_TYPE,
+          // El ya normalizado, no el crudo: lo que se persiste debe ser el mismo
+          // valor contra el que se decidio admitirlo.
+          contentType,
           size: bytes,
           // Base64 PLANO: sin prefijo `data:` y sin saltos de linea. Quien lo
           // consuma decide como envolverlo; anadir el prefijo aqui obligaria a
@@ -784,16 +848,31 @@ export class ImapTriggerStrategy implements INodeStrategy {
         return;
       }
 
-      const [, contentType = '', base64 = ''] = match;
+      const [, rawContentType = '', base64 = ''] = match;
+      const contentType = normalizeContentType(rawContentType);
 
       recognized += 1;
 
       const filename = `${INLINE_IMAGE_NAME_PREFIX}-${recognized}.${extensionFromContentType(contentType)}`;
 
+      // La misma lista blanca que los adjuntos del MIME. Es lo que cierra el
+      // hueco por el que un `image/svg+xml` incrustado —y un SVG puede llevar
+      // `<script>`— habria entrado en el inventario sin que nadie lo mirase.
+      if (!ALLOWED_ATTACHMENT_MIME_TYPES.has(contentType)) {
+        this.logger.warn(
+          `LEVE | Imagen incrustada "${filename}" descartada por tipo MIME no autorizado (${contentType === '' ? 'sin declarar' : contentType}) en el mensaje "${messageId}".`,
+        );
+      }
+
       // La numeracion cuenta solo las imagenes RECONOCIDAS, no la posicion en el
       // DOM: asi un `src` mal formado no abre un hueco en la serie y los nombres
       // siguen siendo correlativos.
+      //
+      // Que el tipo no este permitido NO cancela la purga de mas abajo: limpiar
+      // el marcado protege el checkpoint, y eso es independiente de si el
+      // binario merece guardarse. Solo cancela el inventariado.
       const admitted =
+        ALLOWED_ATTACHMENT_MIME_TYPES.has(contentType) &&
         config.includeAttachments &&
         this.tryCollect(
           collection,

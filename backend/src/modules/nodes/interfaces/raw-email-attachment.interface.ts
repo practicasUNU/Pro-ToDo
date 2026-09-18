@@ -35,7 +35,15 @@ export interface RawEmailAttachment {
    */
   readonly filename: string;
 
-  /** Tipo MIME declarado, o `DEFAULT_ATTACHMENT_CONTENT_TYPE` si falta. */
+  /**
+   * Tipo MIME normalizado a `tipo/subtipo`, en minusculas y sin parametros.
+   *
+   * Quien INGIERE el adjunto lo valida antes contra su lista blanca, asi que en
+   * la practica solo llegan aqui tipos autorizados; nunca
+   * `DEFAULT_ATTACHMENT_CONTENT_TYPE`, que se reserva para reconstruir un
+   * inventario leido de la columna jsonb, donde el valor pudo escribirse por
+   * otra via y faltar.
+   */
   readonly contentType: string;
 
   /**
