@@ -24,6 +24,8 @@ import { ImapTriggerConfigDto } from '@modules/nodes/dto/imap-trigger-config.dto
 import { UserRole } from '@modules/users/enums/user-role.enum';
 
 import { CheckImapResponseDto } from './dto/check-imap-response.dto';
+import { CheckParserResponseDto } from './dto/check-parser-response.dto';
+import { CheckParserDto } from './dto/check-parser.dto';
 import { WizardService } from './wizard.service';
 
 /**
@@ -100,5 +102,41 @@ export class WizardController {
     @Body(STRICT_VALIDATION) imapTriggerConfigDto: ImapTriggerConfigDto,
   ): Promise<CheckImapResponseDto> {
     return this.wizardService.checkImap(imapTriggerConfigDto);
+  }
+
+  /**
+   * Sanea un correo de prueba con la misma logica del nodo PARSER_PRE_IA.
+   *
+   * `HttpStatus.OK` por el mismo motivo que el anterior: no se crea ningun
+   * recurso, se devuelve el resultado de una comprobacion. Y tampoco persiste
+   * nada: el correo de prueba vive solo el tiempo de la peticion.
+   *
+   * Hereda los guards y los roles declarados a nivel de CLASE, que es
+   * exactamente el motivo por el que estan ahi: un endpoint anadido despues no
+   * puede quedar desprotegido por olvido.
+   *
+   * A diferencia de `check-imap` este endpoint NO es un oraculo de red —la
+   * composicion es pura y no abre un solo socket—, pero si es un consumidor de
+   * CPU: de ahi los topes de longitud del DTO, que son su unica barrera real.
+   */
+  @Post('check-parser')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary:
+      'Sanea un correo de prueba con la misma logica del nodo PARSER_PRE_IA y devuelve el payload de parsed_email',
+  })
+  @ApiOkResponse({
+    description:
+      'Correo procesado. `parsed` trae las doce claves deterministas del nodo',
+    type: CheckParserResponseDto,
+  })
+  @ApiBadRequestResponse({
+    description:
+      'Cuerpo invalido: `minBodyLength` no positivo, un cuerpo por encima del tope de caracteres, o una propiedad no permitida como `sourceNamespace` o `contentBase64`',
+  })
+  public checkParser(
+    @Body(STRICT_VALIDATION) checkParserDto: CheckParserDto,
+  ): CheckParserResponseDto {
+    return this.wizardService.checkParser(checkParserDto);
   }
 }

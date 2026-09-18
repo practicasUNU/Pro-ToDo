@@ -4,6 +4,7 @@ import { validate } from 'class-validator';
 import { ImapTriggerConfigDto } from '@modules/nodes/dto/imap-trigger-config.dto';
 
 import { CHECK_IMAP_SUCCESS_MESSAGE } from './dto/check-imap-response.dto';
+import { CheckParserDto } from './dto/check-parser.dto';
 import { WizardService } from './wizard.service';
 
 import type { ConfigService } from '@nestjs/config';
@@ -288,6 +289,180 @@ describe('WizardService', () => {
       // 3. Assert: `forbidNonWhitelisted` lo RECHAZA en vez de descartarlo en
       //    silencio, que es lo que haria el pipe global de `main.ts`.
       expect(errors.map((error) => error.property)).toContain('password');
+    });
+  });
+
+  describe('4. Banco de pruebas del parser', () => {
+    /** Cuerpo de la peticion, ya como instancia del DTO. */
+    const buildParserDto = (
+      overrides: Record<string, unknown> = {},
+    ): CheckParserDto => plainToInstance(CheckParserDto, overrides);
+
+    it('4.1 deberia devolver las doce claves del payload del nodo', async () => {
+      // 1. Arrange
+      const { service } = buildService();
+
+      // 2. Act
+      const result = service.checkParser(
+        buildParserDto({
+          subject: 'Fwd: Re: Nueva sede',
+          html: '<h1>Nueva sede</h1><p>La compania abre en Madrid.</p>',
+        }),
+      );
+
+      // 3. Assert: el orden es contrato publico y lo replica el frontend.
+      expect(result.success).toBe(true);
+      expect(Object.keys(result.parsed ?? {})).toEqual([
+        'subject',
+        'clean_title',
+        'clean_body',
+        'body_source',
+        'character_count',
+        'original_character_count',
+        'reduction_percentage',
+        'extracted_urls',
+        'attachment_count',
+        'attachments',
+        'requires_multimodal_fallback',
+        'multimodal_reason',
+      ]);
+      expect(result.parsed?.clean_title).toBe('Nueva sede');
+      await Promise.resolve();
+    });
+
+    it('4.2 deberia sanear con la MISMA logica que ejecutara el nodo', () => {
+      // 1. Arrange: si el asistente reimplementase el saneado, el banco de
+      //    pruebas anunciaria una reduccion que la ejecucion real no produce.
+      const { service } = buildService();
+      const html =
+        '<style>.a{color:red}</style><p>La compania abre una sede en Madrid.</p>' +
+        '<p><a href="https://unuware.com/n?utm_source=boletin&id=7">Nota</a></p>' +
+        '<p><a href="https://twitter.com/unuware">Twitter</a></p>' +
+        '<p>AVISO LEGAL: este mensaje es confidencial.</p>';
+
+      // 2. Act
+      const result = service.checkParser(buildParserDto({ html }));
+
+      // 3. Assert
+      expect(result.parsed?.clean_body).not.toContain('AVISO LEGAL');
+      expect(result.parsed?.clean_body).not.toContain('color:red');
+      expect(result.parsed?.extracted_urls).toEqual([
+        'https://unuware.com/n?id=7',
+      ]);
+      expect(result.parsed?.reduction_percentage).toBeGreaterThan(50);
+    });
+
+    it('4.3 deberia aplicar el umbral por defecto cuando se omite', () => {
+      // 1. Arrange: 50 caracteres, el mismo defecto que aplica la estrategia.
+      const { service } = buildService();
+
+      // 2. Act
+      const result = service.checkParser(
+        buildParserDto({
+          text: 'Ver adjunto.',
+          attachments: [
+            { filename: 'e.pdf', contentType: 'application/pdf', size: 9 },
+          ],
+        }),
+      );
+
+      // 3. Assert
+      expect(result.parsed?.requires_multimodal_fallback).toBe(true);
+      expect(result.parsed?.multimodal_reason).toContain('umbral 50');
+    });
+
+    it('4.4 deberia respetar el umbral recibido', () => {
+      // 1. Arrange
+      const { service } = buildService();
+
+      // 2. Act
+      const result = service.checkParser(
+        buildParserDto({
+          minBodyLength: 500,
+          text: 'Un cuerpo corto pero por encima del umbral por defecto de cincuenta.',
+          attachments: [
+            { filename: 'e.pdf', contentType: 'application/pdf', size: 9 },
+          ],
+        }),
+      );
+
+      // 3. Assert
+      expect(result.parsed?.requires_multimodal_fallback).toBe(true);
+      expect(result.warnings).toContain(result.parsed?.multimodal_reason);
+    });
+
+    it('4.5 NO deberia emitir warnings cuando no hay nada que advertir', () => {
+      // 1. Arrange: el arreglo se omite en vez de viajar vacio en cada respuesta.
+      const { service } = buildService();
+
+      // 2. Act
+      const result = service.checkParser(
+        buildParserDto({
+          text: 'Un cuerpo largo y perfectamente normal para el modelo.',
+        }),
+      );
+
+      // 3. Assert
+      expect(result.warnings).toBeUndefined();
+    });
+
+    it('4.6 deberia tratar un correo sin cuerpo como exito, no como fallo', () => {
+      // 1. Arrange: la estrategia degrada ese caso a `none`, y el asistente debe
+      //    reproducir la decision o estaria mintiendo sobre lo que pasara en
+      //    produccion.
+      const { service } = buildService();
+
+      // 2. Act
+      const result = service.checkParser(buildParserDto({}));
+
+      // 3. Assert
+      expect(result.success).toBe(true);
+      expect(result.parsed?.body_source).toBe('none');
+      expect(result.parsed?.character_count).toBe(0);
+      expect(result.error).toBeUndefined();
+    });
+
+    it('4.7 NO deberia abrir ninguna conexion de red', () => {
+      // 1. Arrange: la composicion es pura. Este endpoint no es un oraculo de
+      //    conectividad, a diferencia de `check-imap`.
+      const { service, get } = buildService();
+
+      // 2. Act
+      service.checkParser(buildParserDto({ html: '<p>Hola</p>' }));
+
+      // 3. Assert
+      expect(ImapFlow).not.toHaveBeenCalled();
+      expect(get).not.toHaveBeenCalled();
+    });
+
+    it('4.8 deberia devolver GRAVE si la composicion lanza', () => {
+      // 1. Arrange: un fallo inesperado no debe propagarse como 500.
+      const { service } = buildService();
+      const composer = jest
+        .spyOn(
+          // eslint-disable-next-line @typescript-eslint/no-require-imports
+          require('@modules/nodes/utils/parsed-email-payload.util') as {
+            buildParsedEmail: (...args: unknown[]) => unknown;
+          },
+          'buildParsedEmail',
+        )
+        .mockImplementation(() => {
+          throw new Error('fallo inesperado');
+        });
+      jest
+        .spyOn(service['logger'], 'error')
+        .mockImplementation(() => undefined);
+
+      // 2. Act
+      const result = service.checkParser(buildParserDto({ html: '<p>x</p>' }));
+
+      // 3. Assert
+      expect(result.success).toBe(false);
+      expect(result.error?.level).toBe('GRAVE');
+      expect(result.error?.message).toContain('fallo inesperado');
+      expect(result.parsed).toBeUndefined();
+
+      composer.mockRestore();
     });
   });
 });

@@ -1,3 +1,4 @@
+import { useParserEmailStore } from '@stores/nodes/parser-email.store';
 import { useTemplateMapperStore } from '@stores/nodes/template-mapper.store';
 import { useTriggerCronStore } from '@stores/nodes/trigger-cron.store';
 import { useTriggerImapStore } from '@stores/nodes/trigger-imap.store';
@@ -135,6 +136,7 @@ export type NodeStoreHook = (nodeId: string) => NodeConfigStore;
 export const nodeStoreRegistry: Partial<Record<NodeType, NodeStoreHook>> = {
   [NodeType.TRIGGER_IMAP]: useTriggerImapStore,
   [NodeType.TRIGGER_CRON]: useTriggerCronStore,
+  [NodeType.PARSER_PRE_IA]: useParserEmailStore,
   [NodeType.MAPEADOR_PLANTILLA]: useTemplateMapperStore,
 };
 

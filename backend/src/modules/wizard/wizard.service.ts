@@ -2,12 +2,16 @@ import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 
 import { resolveImapConfig } from '@modules/nodes/dto/imap-trigger-config.dto';
+import { resolveParserEmailConfig } from '@modules/nodes/dto/parser-email-config.dto';
 import { createImapClient } from '@modules/nodes/services/imap-client.factory';
+import { buildParsedEmail } from '@modules/nodes/utils/parsed-email-payload.util';
 
 import { CHECK_IMAP_SUCCESS_MESSAGE } from './dto/check-imap-response.dto';
 
 import type { ImapTriggerConfigDto } from '@modules/nodes/dto/imap-trigger-config.dto';
 import type { CheckImapResponseDto } from './dto/check-imap-response.dto';
+import type { CheckParserDto } from './dto/check-parser.dto';
+import type { CheckParserResponseDto } from './dto/check-parser-response.dto';
 import type { ImapFlow } from 'imapflow';
 
 /**
@@ -95,6 +99,81 @@ export class WizardService {
       };
     } finally {
       await this.logoutQuietly(client);
+    }
+  }
+
+  /**
+   * Sanea un correo de prueba con la MISMA logica que ejecutara el nodo.
+   *
+   * SINCRONO y sin `async`, a diferencia de `checkImap`: aqui no hay socket ni
+   * nada que esperar, y devolver una promesa por simetria obligaria al lector a
+   * buscar una espera que no existe.
+   *
+   * Invoca `buildParsedEmail`, que es exactamente la funcion que consume
+   * `ParserEmailStrategy`. Esa unicidad es la razon de ser del endpoint: si aqui
+   * se reimplementase la cascada o las metricas, divergirian en la primera
+   * correccion y el banco de pruebas anunciaria una reduccion que la ejecucion
+   * real no produce. Es el mismo criterio por el que `checkImap` reutiliza el
+   * DTO del nodo en vez de declarar su propio contrato.
+   *
+   * Un correo sin texto aprovechable NO es un fallo: se devuelve 200 con
+   * `body_source: 'none'`, igual que en produccion. Solo una excepcion
+   * inesperada de la composicion produce `success: false`.
+   */
+  public checkParser(checkParserDto: CheckParserDto): CheckParserResponseDto {
+    // `sourceNamespace` no se pasa: el correo viaja en el propio cuerpo y no hay
+    // contexto del que leer. El defecto que aplica la funcion es irrelevante
+    // aqui, y por eso el DTO de entrada ni siquiera acepta el campo.
+    const config = resolveParserEmailConfig({
+      minBodyLength: checkParserDto.minBodyLength,
+    });
+    const warnings: string[] = [];
+
+    // Se reconstruye la FORMA del namespace `raw_email` que deja
+    // `ImapTriggerStrategy`, que es lo unico que `buildParsedEmail` sabe leer.
+    // Las claves son las mismas que siembra `DEFAULT_MOCK_NAMESPACES`.
+    const source: Record<string, unknown> = {
+      subject: checkParserDto.subject ?? '',
+      text: checkParserDto.text ?? '',
+      html: checkParserDto.html ?? '',
+      attachments: checkParserDto.attachments ?? [],
+    };
+
+    try {
+      const parsed = buildParsedEmail(source, config, {
+        onSanitizeFailure: (reason) => {
+          this.logger.warn(
+            `Banco de pruebas del parser: marcado no saneable (${reason}).`,
+          );
+          warnings.push(
+            `No se pudo sanear el marcado del correo (${reason}). El nodo continuaria sin cuerpo.`,
+          );
+        },
+        onMultimodalFallback: (reason) => warnings.push(reason),
+      });
+
+      // El arreglo se omite cuando esta vacio en vez de enviarse como `[]`: es
+      // la unica clave que el asistente anade sobre la ejecucion real, y una
+      // lista vacia en cada respuesta seria ruido en el contrato.
+      return warnings.length > 0
+        ? { success: true, parsed, warnings }
+        : { success: true, parsed };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+
+      this.logger.error(
+        `Fallo inesperado en el banco de pruebas del parser: ${message}`,
+      );
+
+      return {
+        success: false,
+        error: {
+          // GRAVE con la misma escala que usa el nodo: es un correo de prueba
+          // corregible por el operador, no una averia de la plataforma.
+          level: 'GRAVE',
+          message: `No se pudo procesar el correo de prueba: ${message}`,
+        },
+      };
     }
   }
 

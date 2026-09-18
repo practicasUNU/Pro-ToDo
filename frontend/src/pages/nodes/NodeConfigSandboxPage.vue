@@ -1,12 +1,14 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue';
+import { computed, ref, watch } from 'vue';
 
-import { useTemplateMapperStore } from '@stores/nodes/template-mapper.store';
+import { resolveNodeStore } from '@stores/nodes/node-store-registry';
 
 import { configurableNodeTypes, nodeConfigRegistry } from '@components/nodes/node-config-registry';
 
 import { TEMPLATE_NAMESPACES } from '@/types/html-template';
 import { NODE_TYPE_LABELS, NodeType } from '@/types/pipeline';
+
+import type { NodeConfigStore } from '@stores/nodes/node-store-registry';
 
 // Banco de pruebas de la resolucion polimorfica (regla frontend-quasar.md §3.1).
 //
@@ -18,16 +20,19 @@ import { NODE_TYPE_LABELS, NodeType } from '@/types/pipeline';
 /**
  * `nodeId` del nodo simulado.
  *
- * Constante compartida por el componente y por el store que este banco inspecciona:
- * los stores de nodo se instancian POR `nodeId`, asi que montar el configurador con
- * uno y leer el store de otro dejaria el panel de estado mirando una instancia
- * vacia distinta de la que el formulario esta editando.
+ * Constante compartida por el configurador montado y por el store que este banco
+ * inspecciona: los stores de nodo se instancian POR `nodeId`, asi que montar el
+ * formulario con uno y leer el store de otro dejaria el panel de estado mirando
+ * una instancia vacia distinta de la que se esta editando.
+ *
+ * Un UNICO id para todos los tipos es correcto y no colisiona: cada store usa su
+ * propio prefijo de Pinia (`node-parser-email:nodo_demo`,
+ * `templateMapperNode:nodo_demo`), de modo que son instancias distintas. Ademas
+ * es lo que permite alternar entre tipos sin perder lo escrito en cada uno.
  */
-const SANDBOX_NODE_ID = 'nodo_mapeador_demo';
+const SANDBOX_NODE_ID = 'nodo_demo';
 
 const selectedNodeType = ref<NodeType>(NodeType.MAPEADOR_PLANTILLA);
-
-const templateMapperStore = useTemplateMapperStore(SANDBOX_NODE_ID);
 
 const nodeTypeOptions = computed(() =>
   configurableNodeTypes.map((nodeType) => ({
@@ -40,29 +45,67 @@ const nodeTypeOptions = computed(() =>
 const resolvedComponent = computed(() => nodeConfigRegistry[selectedNodeType.value] ?? null);
 
 /**
+ * Store del tipo activo, resuelto por REGISTRO igual que el componente.
+ *
+ * Antes se importaba `useTemplateMapperStore` directamente, y el panel de estado
+ * se quedaba mirando al mapeador aunque el selector montara otro configurador.
+ *
+ * `resolveNodeStore` no es solo comodidad: invoca el hook de Pinia, que exige una
+ * instancia activa, y por eso la resolucion vive aqui y no en el modulo.
+ */
+const activeStore = computed<NodeConfigStore | null>(() =>
+  resolveNodeStore(selectedNodeType.value, SANDBOX_NODE_ID),
+);
+
+/** El nodo activo declara depender del contexto que dejan los nodos previos. */
+const acceptsUpstream = computed<boolean>(
+  () => activeStore.value?.setAvailableUpstreamNamespaces !== undefined,
+);
+
+/**
  * Namespaces que se simula que aportan los nodos previos.
  *
- * Con el asistente sin construir no hay pipeline del que deducirlos, asi que se
- * marcan a mano. Es lo que permite comprobar en vivo que `isConfigValid` conmuta
- * cuando el flujo deja de suministrar un namespace que la plantilla exige.
+ * La fuente de verdad es este `ref` local y no el store: `availableUpstreamNamespaces`
+ * no forma parte de `NodeConfigStore`, y leerlo desde el anfitrion era justo la
+ * inspeccion de la configuracion ajena que §3.1 prohibe.
  */
-const simulatedUpstream = computed<string[]>({
-  get: () => templateMapperStore.availableUpstreamNamespaces,
-  set: (namespaces) => templateMapperStore.setAvailableUpstreamNamespaces(namespaces),
-});
+const simulatedUpstream = ref<string[]>([...TEMPLATE_NAMESPACES]);
 
-// Lo que el asistente inspeccionaria del nodo activo. De momento solo hay un
-// configurador, asi que se lee su store directamente; cuando haya varios, el
-// anfitrion resolvera tambien el store por tipo.
+/**
+ * Propaga la simulacion al store activo.
+ *
+ * `immediate` y con el store entre las fuentes: al cambiar de tipo, el store
+ * nuevo arranca sin saber nada del contexto simulado, y sin esto el panel
+ * mostraria un `isConfigValid` calculado contra una lista vacia.
+ *
+ * `?.()` porque el metodo es OPCIONAL en el contrato: un disparador es el primero
+ * del grafo y no tiene nada aguas arriba que declarar.
+ */
+watch(
+  [activeStore, simulatedUpstream],
+  ([store, namespaces]) => store?.setAvailableUpstreamNamespaces?.([...namespaces]),
+  { immediate: true, deep: true },
+);
+
+/**
+ * Lo que el asistente inspeccionaria del nodo activo.
+ *
+ * SOLO lo que el contrato `NodeConfigStore` expone. Antes se leian
+ * `requiredVariables`, `missingRequiredVariables` y `availableUpstreamNamespaces`,
+ * que son campos privados del mapeador: ataban el banco a un tipo concreto, que
+ * es lo contrario de lo que este banco existe para demostrar.
+ *
+ * `toNodeParams()` dentro de un `computed` se reevalua con cada cambio de la
+ * configuracion. Es correcto porque el metodo es puro y sin E/S: publica lo que
+ * el nodo aportaria al `pipeline_schema`, sin tocar nada.
+ */
 const inspectedState = computed(() =>
   JSON.stringify(
     {
       nodeType: selectedNodeType.value,
-      config: templateMapperStore.config,
-      isConfigValid: templateMapperStore.isConfigValid,
-      requiredVariables: templateMapperStore.requiredVariables,
-      availableUpstreamNamespaces: templateMapperStore.availableUpstreamNamespaces,
-      missingRequiredVariables: templateMapperStore.missingRequiredVariables,
+      isConfigValid: activeStore.value?.isConfigValid ?? null,
+      params: activeStore.value?.toNodeParams() ?? null,
+      configWarnings: activeStore.value?.configWarnings ?? [],
     },
     null,
     2,
@@ -113,9 +156,9 @@ const inspectedState = computed(() =>
 
         <q-badge
           class="pd-badge q-mb-sm"
-          :class="templateMapperStore.isConfigValid ? 'pd-badge--active' : 'pd-badge--inactive'"
+          :class="activeStore?.isConfigValid ? 'pd-badge--active' : 'pd-badge--inactive'"
         >
-          isConfigValid: {{ templateMapperStore.isConfigValid }}
+          isConfigValid: {{ activeStore?.isConfigValid ?? 'sin store registrado' }}
         </q-badge>
 
         <pre class="pd-mono sandbox-state">{{ inspectedState }}</pre>
@@ -129,6 +172,11 @@ const inspectedState = computed(() =>
           <span class="pd-mono">false</span>.
         </p>
 
+        <p v-if="!acceptsUpstream" class="pd-subtitle q-mb-sm">
+          Este tipo de nodo no declara dependencias aguas arriba, asi que la simulacion no le
+          afecta.
+        </p>
+
         <div class="sandbox-namespaces">
           <q-checkbox
             v-for="namespace in TEMPLATE_NAMESPACES"
@@ -136,6 +184,7 @@ const inspectedState = computed(() =>
             v-model="simulatedUpstream"
             :val="namespace"
             dense
+            :disable="!acceptsUpstream"
             class="pd-mono sandbox-namespace"
             :label="namespace"
           />

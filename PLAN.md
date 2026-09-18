@@ -879,16 +879,24 @@ const isConfigValid: ComputedRef<boolean>;
 ```typescript
 // src/components/nodes/node-config-registry.ts
 export const nodeConfigRegistry: Partial<Record<NodeType, Component>> = {
-  [NodeType.MAPEADOR_PLANTILLA]: defineAsyncComponent(
-    () => import('@components/nodes/TemplateMapperConfig.vue'),
-  ),
+  [NodeType.TRIGGER_IMAP]:      defineAsyncComponent(() => import('@components/nodes/TriggerImapConfig.vue')),
+  [NodeType.TRIGGER_CRON]:      defineAsyncComponent(() => import('@components/nodes/TriggerCronConfig.vue')),
+  [NodeType.PARSER_PRE_IA]:     defineAsyncComponent(() => import('@components/nodes/ParserEmailConfig.vue')),
+  [NodeType.MAPEADOR_PLANTILLA]:defineAsyncComponent(() => import('@components/nodes/TemplateMapperConfig.vue')),
 };
 ```
 
 El anfitrión monta con `<component :is="nodeConfigRegistry[node.nodeType]" />`. Añadir un tipo de
 nodo es añadir una entrada; el anfitrión no cambia. `Partial` es deliberado: los tipos aún sin
 implementar simplemente no están, y el anfitrión debe contemplar el `undefined`. Cuando existan los
-siete, el `Partial` cae y el compilador exigirá cobertura total.
+ocho, el `Partial` cae y el compilador exigirá cobertura total.
+
+**Son DOS registros, y hacen falta los dos.** `nodeConfigRegistry` resuelve el COMPONENTE;
+`src/stores/nodes/node-store-registry.ts` resuelve el STORE que el agregador consulta. Dar de alta
+solo el primero deja un nodo que pinta su formulario con normalidad pero que `flujo-draft.store` marca
+como `SIN_STORE`: el asistente muestra «Nodo no ejecutable» y `canSave` queda bloqueado para siempre
+sin que nada explique por qué. Implementados a 2026-09-18: `TRIGGER_IMAP`, `TRIGGER_CRON`,
+`PARSER_PRE_IA` y `MAPEADOR_PLANTILLA`.
 
 El campo es **`nodeType`** (inglés, camelCase), como en `PipelineNodeConfigDto`. `tipo_nodo` es el
 nombre de la columna SQL y no aparece en el JSON del esquema ni en el frontend.
@@ -1503,6 +1511,47 @@ Cuatro decisiones:
 `IMAP_*PASSWORD`, cualquiera con rol EDITOR podría pedir al backend que enviase `JWT_SECRET` a un
 servidor propio y confirmar el acierto leyendo el `success` de la respuesta. Las tres barreras
 —perímetro de red, JWT+RBAC y el patrón del DTO— son las que hacen que el endpoint sea publicable.
+
+### 10.7 Banco de pruebas del parser (`POST /api/wizard/check-parser`)
+
+Segundo endpoint del asistente, con el mismo molde que el anterior: `@HttpCode(OK)`, el
+`STRICT_VALIDATION` local, guards y roles heredados de la clase, y un fallo del nodo como 200 con
+`success: false` en vez de un 4xx. Sanea un correo de prueba y devuelve el payload de doce claves que
+el nodo depositaría en `parsed_email`.
+
+**Una sola implementación de la composición.** `ParserEmailStrategy` es `@Injectable` y su
+`execute()` exige un `StatePayloadContext`, así que invocarla desde el asistente habría obligado a
+importar `NodesModule` —que el TSDoc de `WizardModule` prohíbe— *y además* a fabricar un contexto
+falso. Por eso la composición se extrajo a `@modules/nodes/utils/parsed-email-payload.util.ts`
+(`buildParsedEmail`, `extractEmailBody`), función pura que consumen la estrategia y el asistente. La
+alternativa —duplicarla— habría producido un banco de pruebas que anuncia una reducción que la
+ejecución real no produce, y divergirían en la primera corrección.
+
+**Canales de aviso en vez de un `Logger` dentro.** `ParsedEmailHooks` (`onSanitizeFailure`,
+`onMultimodalFallback`) es lo que permite que la función siga siendo pura: la estrategia los enchufa
+a su logger y el asistente los devuelve al navegador en `warnings`. Es el mismo patrón que
+`createImapClient(config, password, onError)`. Efecto útil: el aviso «no se pudo sanear el marcado»,
+que en producción solo existe en el `.log` del servidor, aquí se ve.
+
+| Diferencia con `check-imap` | Motivo |
+|---|---|
+| **Síncrono**, sin `async` | No hay socket ni nada que esperar; una promesa por simetría haría buscar una espera que no existe |
+| Topes `@MaxLength` en el cuerpo | `sanitizeEmailHtml` monta un DOM con cheerio, **síncrono y en el único hilo**: un correo de 20 MB sería una denegación de servicio de una sola petición. `MAX_CHECK_PARSER_BODY_CHARS = 50_000`, calibrado **por debajo** del límite de 100 kB de `express.json()` que `main.ts` no eleva, contando el escapado JSON |
+| Adjuntos **sin `contentBase64`** | La decisión multimodal solo mira `contentType`; con `forbidNonWhitelisted`, mandar base64 da 400. Una ruta de asistente nunca acepta megabytes |
+| `sourceNamespace` **rechazado** | El correo viaja en el cuerpo y no hay contexto del que leer: aceptarlo sería admitir un campo que no hace nada |
+
+**Un HTML impresentable NO es `success: false`.** La estrategia lo degrada a `body_source: 'none'`, y
+el asistente reproduce esa decisión exactamente; hacerlo de otro modo sería mentir sobre lo que
+ocurrirá en producción. El `success: false` queda reservado a una excepción inesperada.
+
+**Umbral `minBodyLength`: alineación sin relajar el backend.** `ParserEmailConfigDto` conserva
+`@IsInt` + `@IsPositive`, que impone exactamente `>= 1`. El frontend replica ese mínimo en
+`MIN_BODY_LENGTH = 1` con la regla «El umbral debe ser mayor o igual a 1» y `min="1"` en el campo. Se
+descartó relajar el backend a `@Min(0)`: un `0` haría la condición `bodyLength < minBodyLength`
+imposible de satisfacer, de modo que `requires_multimodal_fallback` nunca se activaría y un correo
+cuyo único contenido es un PDF escaneado pasaría al modelo sin nada que leer. Es el mismo criterio por
+el que `trigger-imap.store.ts` replica el `@Min(30000)` en `MIN_POLL_INTERVAL_MS`: sin la copia, el
+operador vería un 400 de servidor donde debería haber visto una regla de campo.
 
 ---
 
@@ -2225,3 +2274,52 @@ correo mal formado no puede llevarse por delante la ejecución entera.
 
 Códigos de fallo: `ERR_PARSER_CONFIG` y `ERR_PARSER_SOURCE_MISSING`, ambos `GRAVE` para que
 entren en `canRetry` y el flujo quede PAUSADO y reanudable (CU-09).
+
+#### Artefactos del nodo (a 2026-09-18)
+
+| Capa | Archivo |
+|---|---|
+| Composición pura | `backend/src/modules/nodes/utils/parsed-email-payload.util.ts` |
+| Limpieza de texto | `backend/src/modules/nodes/utils/email-sanitizer.util.ts` |
+| Estrategia | `backend/src/modules/nodes/strategies/parser-email.strategy.ts` |
+| Configuración | `backend/src/modules/nodes/dto/parser-email-config.dto.ts` |
+| Banco de pruebas | `backend/src/modules/wizard/dto/check-parser{,-response}.dto.ts` + `WizardService.checkParser` |
+| Tipos del cliente | `frontend/src/types/parser-email.ts` |
+| Servicio | `frontend/src/services/nodes/parser-email.service.ts` |
+| Store | `frontend/src/stores/nodes/parser-email.store.ts` |
+| Componente | `frontend/src/components/nodes/ParserEmailConfig.vue` |
+
+---
+
+## 20. Seguimiento — Tríada frontend de `PARSER_PRE_IA` y endpoint de saneado
+
+Rama: `feat/parser-email-ui`, a partir de `feat/parser-email`. El detalle del «por qué» queda en
+`Walkthrough.md`.
+
+- [x] 1. Backend — extraer la composición a `parsed-email-payload.util.ts` (`ParsedEmailPayload`
+      exportada, `ParsedEmailHooks`, `extractEmailBody`, `buildParsedEmail`)
+- [x] 2. Backend — adelgazar `ParserEmailStrategy` al contrato del nodo, con los hooks al `logger`
+- [x] 3. Backend — `parser-email.strategy.spec.ts` en verde **sin tocar una sola aserción** (red de
+      regresión de la extracción: 43/43)
+- [x] 4. Backend — `check-parser.dto.ts` (`PickType` sobre `minBodyLength`, topes de longitud,
+      adjuntos sin `contentBase64`) y `check-parser-response.dto.ts`
+- [x] 5. Backend — `WizardService.checkParser()` síncrono y `POST /api/wizard/check-parser`
+- [x] 6. Backend — `parsed-email-payload.util.spec.ts` (21), bloque 4 de `wizard.service.spec.ts` (8)
+      y `check-parser.dto.spec.ts` (14)
+- [x] 7. Frontend — tipos en `src/types/parser-email.ts`
+- [x] 8. Frontend — `parser-email.service.ts`
+- [x] 9. Frontend — `parser-email.store.ts` memoizado por `nodeId` (`node-parser-email:${nodeId}`)
+- [x] 10. Frontend — `ParserEmailConfig.vue` con el campo único y el banco de pruebas
+- [x] 11. Frontend — alta en `node-config-registry.ts` **y** en `node-store-registry.ts`
+- [x] 12. Frontend — retargeteo de las pruebas 3.3, 16.1 y 16.4 de `flujo-draft.store.spec.ts` a
+      `EXTRACTOR_WEB`, más la nueva 16.4.1 que fija el desbloqueo
+- [x] 13. Frontend — `NodeConfigSandboxPage.vue` resuelve el store con `resolveNodeStore` y acota
+      `inspectedState` al contrato público
+- [x] 14. Frontend — `parser-email.store.spec.ts` (25)
+- [x] 15. Verificación — backend 40 suites / 913 pruebas; frontend 15 ficheros / 321 pruebas;
+      `tsc --noEmit -p tsconfig.build.json`, `vue-tsc --noEmit`, `quasar build` y lint en verde
+
+**Desbloqueo funcional:** hasta esta tanda, cualquier plantilla de flujo que incluyera un
+`PARSER_PRE_IA` era **imposible de guardar** — el asistente pintaba «Configurador no disponible» y
+`canSave` quedaba en `false` para siempre. La prueba 16.4.1 de `flujo-draft.store.spec.ts` es la que
+fija ese cambio.

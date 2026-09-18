@@ -27,6 +27,9 @@ export const nodeConfigRegistry: Partial<Record<NodeType, Component>> = {
   [NodeType.TRIGGER_CRON]: defineAsyncComponent(
     () => import('@components/nodes/TriggerCronConfig.vue'),
   ),
+  [NodeType.PARSER_PRE_IA]: defineAsyncComponent(
+    () => import('@components/nodes/ParserEmailConfig.vue'),
+  ),
   [NodeType.MAPEADOR_PLANTILLA]: defineAsyncComponent(
     () => import('@components/nodes/TemplateMapperConfig.vue'),
   ),

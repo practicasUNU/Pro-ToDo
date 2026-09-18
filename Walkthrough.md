@@ -4529,3 +4529,186 @@ correos. Las heurísticas están calibradas contra fixtures escritos a mano, as�
 anti-falso-positivo del RGPD protege el caso que sabemos nombrar, no los que todavía no hemos visto.
 El primer buzón real será el que diga si los 800 caracteres del tope y la lista de patrones legales
 están donde tienen que estar.
+
+---
+
+## 2026-09-18 · Saneado de correo pre-IA en Wizard: tríada modular, endpoint de verificación y banco de pruebas — rama `feat/parser-email-ui`
+
+El nodo `PARSER_PRE_IA` llevaba funcionando desde el commit anterior, pero **no tenía interfaz**, y
+eso no era un detalle estético: `WizardPage` lo resolvía contra `nodeConfigRegistry`, no lo
+encontraba, y pintaba el panel «Configurador no disponible / No se puede continuar más allá de este
+paso». Cualquier plantilla de flujo que incluyera un parser era **imposible de guardar**. Ése era el
+desbloqueo real de esta tanda; todo lo demás es lo que hizo falta para que el desbloqueo fuese
+honesto.
+
+### Por qué la composición salió de la estrategia
+
+El encargo pedía un servicio de frontend que llamase a «los endpoints de prueba del nodo en NestJS».
+No existía ninguno: los once controladores del backend no tocan `ParserEmailStrategy`, y la única vía
+HTTP de ejecutarla era `POST /workflows/:id/execute-test`, que exige un flujo persistido, corre el
+pipeline entero y choca con el mutex de RNF-09. Había que crear el endpoint, y ahí apareció la
+decisión de verdad.
+
+`ParserEmailStrategy` es `@Injectable`, así que invocarla desde `WizardService` obligaba a importar
+`NodesModule` — que el TSDoc de `WizardModule` prohíbe explícitamente, porque arrastraría el sondeo
+periódico, su repositorio de `flujos` y `WorkflowsModule` detrás. Y había un segundo coste que ese
+TSDoc aún no conocía: `INodeStrategy.execute()` exige un `StatePayloadContext`, de modo que el
+asistente habría tenido que **fabricar un contexto falso** solo para poder llamar al nodo. Eso no es
+reutilizar la lógica, es simular el motor dentro del asistente.
+
+La alternativa perezosa —duplicar la cascada `text→html→none`, el AND multimodal y las métricas en el
+service del wizard— es exactamente lo que el TSDoc de `wizard.service.ts` existe para prohibir, y el
+síntoma habría sido el peor posible: un banco de pruebas anunciando «reducción 87 %» y la ejecución
+real produciendo otra cosa, divergiendo desde la primera corrección.
+
+Así que la composición se extrajo a `parsed-email-payload.util.ts` —`buildParsedEmail`,
+`extractEmailBody` y todo lo que era privado de la estrategia— y la consumen las dos capas. **Fichero
+nuevo y no dentro de `email-sanitizer.util.ts`** a propósito: el saneador es limpieza de texto y no
+depende de nada del módulo, mientras que la composición necesita `ResolvedParserEmailConfig` y
+`RawEmailAttachmentMetadata`. Son dos estratos, y el propio TSDoc de la estrategia ya lo afirmaba
+(«la maquinaria de limpieza vive en el saneador; aquí queda la composición y el contrato del nodo»).
+
+La prueba de que la extracción no cambió nada es que **`parser-email.strategy.spec.ts` pasa sus 43
+casos sin tocar una sola aserción**. Ése fue el primer comando ejecutado tras el refactor, y es la
+red que hace la operación defendible.
+
+### Los hooks, o por qué la función no puede tener un `Logger` dentro
+
+Para consumirse desde el wizard sin cablear DI, `buildParsedEmail` tiene que ser pura. Pero la
+estrategia sí registraba dos cosas útiles: el aviso de marcado no saneable y el motivo del respaldo
+multimodal. La salida es `ParsedEmailHooks`, con `onSanitizeFailure` y `onMultimodalFallback`, que el
+llamante enchufa donde quiera. Es el mismo patrón que `createImapClient(config, password, onError)`,
+que ya se consumía desde `WizardService` por esta misma razón.
+
+Y tiene un efecto que no era el objetivo pero resultó ser lo mejor del banco de pruebas: el aviso «no
+se pudo sanear el marcado», que en producción solo existe en el `.log` del servidor y que nadie que
+rellene un formulario llega a ver nunca, aquí viaja en `warnings` y se muestra.
+
+### Por qué `minBodyLength` exige `>= 1` en las dos capas
+
+La especificación inicial pedía `>= 0` en el frontend. El backend tiene `@IsInt` + `@IsPositive`, que
+impone `>= 1`, así que un `0` habría pasado la validación del formulario y reventado con un 400 al
+guardar. Había dos salidas, y la elegida fue **alinear el cliente sin desvirtuar el DTO**.
+
+Relajar el backend a `@Min(0)` era defendible sobre el papel —«0 significa: no activar nunca el
+respaldo multimodal»— pero es una lectura peligrosa: con umbral cero la condición
+`bodyLength < minBodyLength` es **imposible de satisfacer**, de modo que un correo cuyo único
+contenido real es un PDF escaneado pasaría al modelo de lenguaje sin absolutamente nada que leer, y
+el motor habría liberado sus binarios. El `@IsPositive()` no era una restricción arbitraria que
+estorbase al formulario: era la que impide configurar un nodo que no puede hacer su trabajo.
+
+De modo que el store replica el mínimo en `MIN_BODY_LENGTH = 1` y el campo lleva `min="1"` con la
+regla «El umbral debe ser mayor o igual a 1». Es el mismo criterio con el que
+`trigger-imap.store.ts` replica el `@Min(30000)` del backend en `MIN_POLL_INTERVAL_MS`, y por el
+mismo motivo declarado allí: **sin la copia, el operador vería un error de servidor donde debería
+haber visto una regla de campo**.
+
+### Por qué el sandbox simula el adjunto con un interruptor
+
+El panel de resultados tenía que mostrar `requires_multimodal_fallback`, y esa bandera exige **las
+dos** condiciones: cuerpo corto **y** un adjunto de imagen o PDF. Con un banco de pruebas que solo
+aceptase texto y HTML, el indicador habría sido una constante muerta en `false`, explicando una regla
+que era incapaz de demostrar. Por el mismo motivo se añadió el campo de asunto: sin él `clean_title`
+salía siempre vacío, y era otra de las cuatro cosas que el panel debía mostrar.
+
+La forma de simularlo es un `QToggle`, no un selector de ficheros, y la razón es que **la decisión del
+nodo solo mira `contentType`, nunca los bytes**. Subir un PDF real al asistente sería pagar megabytes
+de base64 —ida y vuelta por la red, más el coste de codificarlo— para producir un booleano. El DTO lo
+formaliza: `CheckParserAttachmentDto` no declara `contentBase64`, y como el endpoint valida con
+`forbidNonWhitelisted`, enviarlo devuelve un 400. No es una omisión, es una barrera: esta ruta del
+asistente no puede aceptar binarios por mucho que alguien lo intente.
+
+Ese mismo razonamiento gobierna los topes de longitud, que `check-imap` no necesita y éste sí.
+`sanitizeEmailHtml` monta un árbol DOM con cheerio, **síncrono y en el único hilo del proceso**: un
+correo de veinte megabytes bloquearía el bucle de eventos del backend entero durante segundos, y
+cualquier EDITOR autenticado tendría una denegación de servicio de una sola petición. Los
+`MAX_CHECK_PARSER_BODY_CHARS = 50_000` no son un número redondo elegido al azar: `main.ts` **no
+eleva** el límite de `express.json()`, así que su defecto de 100 kB sigue vigente, y un cuerpo por
+encima devolvería un 413 crudo de Express **sin** el mensaje en castellano del DTO. El tope tiene que
+quedar por debajo contando el escapado JSON, que casi dobla el tamaño en el peor caso.
+
+### Dos registros, y el que se olvida es el caro
+
+La especificación mencionaba `node-config-registry.ts`. Hay un segundo registro obligatorio,
+`stores/nodes/node-store-registry.ts`, y dar de alta solo el primero produce el fallo más
+desconcertante posible: el formulario se pinta con toda normalidad, el operador rellena los campos, y
+el guardado queda bloqueado para siempre con un «Nodo no ejecutable» que no tiene nada que ver con lo
+que hay escrito en la pantalla. `flujo-draft.store.ts` lo distingue explícitamente
+(`SIN_CONFIGURADOR` frente a `SIN_STORE`) precisamente porque son dos averías distintas.
+
+### El efecto colateral que registrar el nodo provoca
+
+`flujo-draft.store.spec.ts` usaba `PARSER_PRE_IA` como **el ejemplo canónico de tipo sin
+configurador**, así que registrarlo rompía tres pruebas con total certeza: la 3.3, la 16.1 y la 16.4.
+No era un accidente a parchear, era la señal de que el mundo cambió.
+
+El arreglo elegido **no toca `buildTemplate()`**, porque las pruebas de namespaces aguas arriba
+dependen de que el parser siga aportando `parsed_email` antes del mapeador. En su lugar se añadió una
+`UNSUPPORTED_TOPOLOGY` local con `EXTRACTOR_WEB`, que sigue sin triada, y se retargetearon solo esas
+tres. El criterio: el caso «nodo no ejecutable» tiene que probarse contra un tipo que de verdad no
+tenga store, o la prueba pasaría a verificar lo contrario de lo que su nombre dice.
+
+Y se añadió la **16.4.1**, que es el reverso y la que fija el desbloqueo: con la topología por
+defecto, `hasUnsupportedNodes` pasa a `false` y ningún paso reporta ya `SIN_CONFIGURADOR`. Sigue
+habiendo pasos incompletos —el disparador no se ha configurado— pero eso es una tarea del operador,
+no un muro.
+
+### El banco de pruebas mentía, y de paso se arregló
+
+`NodeConfigSandboxPage.vue` importaba `useTemplateMapperStore` directamente, de modo que elegir otro
+tipo en el selector montaba su formulario pero dejaba el panel de estado mostrando el del mapeador. El
+propio comentario del archivo lo anticipaba («cuando haya varios, el anfitrión resolverá también el
+store por tipo»), y la pieza para hacerlo —`resolveNodeStore`— ya existía.
+
+Al arreglarlo apareció algo más: `inspectedState` leía `requiredVariables`,
+`missingRequiredVariables` y `availableUpstreamNamespaces`, que **no están en `NodeConfigStore`**. Era
+justo la inspección de la configuración ajena que §3.1 prohíbe, y ataba el banco a un tipo concreto,
+que es lo contrario de lo que el banco existe para demostrar. Ahora el panel muestra solo el contrato
+público, y `setAvailableUpstreamNamespaces` se invoca con `?.()` porque es opcional: un disparador es
+el primero del grafo y no tiene nada aguas arriba que declarar. El `SANDBOX_NODE_ID` pasó de
+`'nodo_mapeador_demo'` a `'nodo_demo'` por lo mismo — un id único compartido no colisiona, porque cada
+store lleva su propio prefijo de Pinia, y es lo que permite alternar entre tipos sin perder lo escrito
+en cada uno.
+
+### Detalles menores con razón detrás
+
+- **`toNodeParams()` emite `sourceNamespace` solo si difiere de `raw_email`.** Emitirlo siempre
+  congelaría el defecto de hoy dentro de cada `pipeline_schema` guardado, que es el mismo fallo que
+  documenta el recalibrado de `DEFAULT_MIN_BODY_LENGTH` de 200 a 50. Omitirlo siempre reescribiría en
+  silencio un nodo de autoría manual que leyese de `scraped_web`, dejándolo fallando con
+  `ERR_PARSER_SOURCE_MISSING` sin que nadie lo pidiera. La prueba 3.2 del store fija el ida y vuelta.
+- **El store del parser no exige haber probado el saneado.** El disparador IMAP sí lo exige, y con
+  motivo: unas credenciales equivocadas no fallarían hasta el primer sondeo. Aquí no hay credenciales,
+  ni red, ni nada que pueda estar mal sin que el formulario lo vea, y copiar ese Poka-Yoke haría
+  imposible guardar un flujo con parser sin tener a mano un correo de ejemplo — una barrera sin
+  peligro detrás. La prueba 1.2 existe para que nadie lo «arregle» por simetría.
+- **`clean_body` se muestra en un `<pre>`.** Conserva los saltos de párrafo que el saneador
+  normalizó, y aplanarlos ocultaría justo la estructura que el nodo produce y que el modelo va a
+  recibir.
+- **El badge de reducción es verde a partir del 50 % y ámbar por debajo.** Es el criterio de RNF-01
+  hecho visible sobre el correo concreto que el operador acaba de pegar. Ámbar y no rojo: quedarse
+  corto no es un error suyo, es una propiedad de ese correo.
+- **`ParsedEmailPayload` pasó de interfaz privada a exportada.** Era el objetivo —el frontend la
+  replica en `types/parser-email.ts`— pero convierte el orden de las doce claves en contrato público.
+  La nota está en el TSDoc del util, y la prueba 1.1 de la estrategia es lo único que impide que un
+  reordenado pase inadvertido.
+
+### Lo que las pruebas cubren y lo que no
+
+Backend: **40 suites, 913 pruebas**. Añadidas en esta tanda,
+`parsed-email-payload.util.spec.ts` (21: las doce claves en orden, la cascada, la división por cero,
+el AND multimodal en sus cuatro ramas, los hooks y la degradación ante marcado patológico), el bloque
+4 de `wizard.service.spec.ts` (8, incluida la que verifica que este endpoint **no abre ninguna
+conexión de red**, a diferencia de su hermano) y `check-parser.dto.spec.ts` (14: el `0` y el decimal
+rechazados, los topes con mensaje en castellano, y `sourceNamespace` y `contentBase64` rechazados por
+la lista blanca).
+
+Frontend: **15 ficheros, 321 pruebas**. `parser-email.store.spec.ts` aporta 25 en seis bloques, con
+el aislamiento por `nodeId` y el contrato de ida y vuelta como los más valiosos.
+
+Lo que **no** está cubierto: `NodeConfigSandboxPage.vue` y `ParserEmailConfig.vue` no tienen prueba
+automatizada. Vitest corre con `environment: 'node'` y sin DOM, así que el arreglo del banco y el
+render del configurador se verifican a mano. Y sigue sin haber corpus real de correos: las heurísticas
+del saneador están calibradas contra fixtures escritos a mano, de modo que el banco de pruebas es hoy
+la única forma de enfrentarlas a un boletín de verdad — que es, precisamente, para lo que se
+construyó.
