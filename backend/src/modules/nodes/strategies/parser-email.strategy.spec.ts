@@ -12,8 +12,52 @@ import type { RawEmailAttachment } from '@modules/nodes/interfaces/raw-email-att
 
 const BASE64_CONTENT = 'Y29udGVuaWRvLWJpbmFyaW8=';
 
-/** Cuerpo largo que supera con holgura el umbral por defecto (200). */
+/** Cuerpo largo que supera con holgura el umbral por defecto (50). */
 const LONG_BODY = 'Texto suficiente para un modelo de lenguaje. '.repeat(10);
+
+/** Cuerpo que se queda por debajo del umbral por defecto. */
+const SHORT_BODY = 'Adjunto la nota de prensa.';
+
+/** Cuerpo que lo supera por poco: fija el nuevo defecto contra una regresion. */
+const BODY_OVER_THRESHOLD =
+  'Adjunto la nota de prensa institucional del gabinete para su publicacion.';
+
+/**
+ * Correo HTML realista: tabla de Outlook, hoja de estilos, enlaces de todas las
+ * familias, firma y aviso legal. Sostiene a la vez los bloques 6, 7 y 9.3.
+ */
+const OUTLOOK_HTML = `
+  <style type="text/css">
+    .MsoNormal { margin: 0cm; font-family: Calibri, sans-serif; font-size: 11pt; }
+    table.MsoTableGrid { border-collapse: collapse; border: none; }
+  </style>
+  <script>window.track('open');</script>
+  <table class="MsoTableGrid" width="100%" cellpadding="0" cellspacing="0">
+    <tr><td><h1>Nueva sede corporativa en Madrid</h1></td></tr>
+    <tr><td>
+      <p class="MsoNormal">La compania inaugura su nueva sede en Madrid.&nbsp;La
+      instalacion generar&aacute; m&aacute;s de doscientos empleos directos en la
+      region durante el proximo ejercicio.</p>
+      <p class="MsoNormal">El acto de apertura se celebrar&aacute; en marzo con
+      representantes institucionales.<br>Mas informacion en la
+      <a href="https://unuware.com/notas/sede?utm_source=boletin&id=42">nota completa</a>
+      y en el <a href="https://unuware.com/notas/sede?utm_content=b&id=42">dossier</a>.</p>
+    </td></tr>
+  </table>
+  <p>
+    <a href="https://twitter.com/unuware">Twitter</a> |
+    <a href="https://www.linkedin.com/company/unuware">LinkedIn</a> |
+    <a href="https://unuware.com/unsubscribe?u=9f2a">Cancelar suscripcion</a> |
+    <a href="/notas/relativa">Version interna</a> |
+    <a href="mailto:prensa@unuware.com">Escribenos</a>
+  </p>
+  <div class="gmail_signature">
+    Juan Perez &mdash; Gabinete de Prensa
+    <a href="https://firma.example/perfil">Perfil</a>
+  </div>
+  <p>AVISO LEGAL: este mensaje es confidencial y va dirigido unicamente a su
+  destinatario.</p>
+`;
 
 /** Adjunto ya proyectado por el nodo IMAP. */
 const buildAttachment = (
@@ -64,19 +108,24 @@ describe('ParserEmailStrategy', () => {
   });
 
   describe('1. Proyeccion del payload', () => {
-    it('1.1 deberia exponer las siete claves deterministas', async () => {
+    it('1.1 deberia exponer las doce claves deterministas', async () => {
       // 1. Arrange
       const strategy = new ParserEmailStrategy();
 
       // 2. Act
       const result = await strategy.execute(buildContext(), {});
 
-      // 3. Assert
+      // 3. Assert: el ORDEN es parte del contrato del payload.
       expect(result.success).toBe(true);
       expect(Object.keys(result.data ?? {})).toEqual([
         'subject',
+        'clean_title',
         'clean_body',
         'body_source',
+        'character_count',
+        'original_character_count',
+        'reduction_percentage',
+        'extracted_urls',
         'attachment_count',
         'attachments',
         'requires_multimodal_fallback',
@@ -94,20 +143,25 @@ describe('ParserEmailStrategy', () => {
       // 3. Assert
       expect(result.data?.body_source).toBe('text');
       expect(result.data?.clean_body).toBe(LONG_BODY.trim());
+      // El original se mide contra la fuente CONSUMIDA, que aqui es `text`.
+      expect(result.data?.original_character_count).toBe(LONG_BODY.length);
+      expect(result.data?.character_count).toBe(LONG_BODY.trim().length);
     });
 
-    it('1.3 deberia declarar el marcado pendiente de sanear si no hay texto', async () => {
-      // 1. Arrange: el caso del multipart/alternative sin parte text/plain.
+    it('1.3 deberia sanear el marcado cuando no hay parte de texto plano', async () => {
+      // 1. Arrange: el caso del multipart/alternative sin parte text/plain, que
+      //    es el habitual de un boletin institucional.
       const strategy = new ParserEmailStrategy();
       const context = buildContext(buildRawEmail({ text: '' }));
 
       // 2. Act
       const result = await strategy.execute(context, {});
 
-      // 3. Assert: `clean_body` a null en vez de volcar el HTML crudo, que
-      //    envenenaria el prompt del nodo de inferencia con etiquetas.
-      expect(result.data?.body_source).toBe('html_pending_sanitize');
-      expect(result.data?.clean_body).toBeNull();
+      // 3. Assert: texto real, nunca el marcado crudo, que envenenaria el prompt
+      //    del nodo de inferencia con etiquetas.
+      expect(result.data?.body_source).toBe('html');
+      expect(result.data?.clean_body).toBe('Innovacion');
+      expect(result.data?.clean_body).not.toContain('<');
     });
 
     it('1.4 deberia declarar body_source "none" en un correo sin cuerpo', async () => {
@@ -118,9 +172,14 @@ describe('ParserEmailStrategy', () => {
       // 2. Act
       const result = await strategy.execute(context, {});
 
-      // 3. Assert
+      // 3. Assert: cadena vacia y no `null`. Interpolar un `null` lanzaba igual
+      //    que una variable ausente; una cadena vacia no, asi que las plantillas
+      //    montadas sobre este nodo son seguras por construccion.
       expect(result.data?.body_source).toBe('none');
-      expect(result.data?.clean_body).toBeNull();
+      expect(result.data?.clean_body).toBe('');
+      expect(result.data?.character_count).toBe(0);
+      expect(result.data?.original_character_count).toBe(0);
+      expect(result.data?.reduction_percentage).toBe(0);
     });
 
     it('1.5 deberia inventariar los adjuntos SIN reintroducir el base64', async () => {
@@ -229,6 +288,31 @@ describe('ParserEmailStrategy', () => {
       expect(result.data?.requires_multimodal_fallback).toBe(true);
       expect(result.data?.multimodal_reason).toContain('100000');
     });
+
+    it('2.6 deberia usar el umbral por defecto de 50 caracteres', async () => {
+      // 1. Arrange: fija el recalibrado de 200 a 50 contra una regresion
+      //    silenciosa. Va en pareja con `FSM_MIN_USEFUL_TEXT_LENGTH` del motor.
+      const strategy = new ParserEmailStrategy();
+      const below = buildContext(
+        buildRawEmail({ text: SHORT_BODY, attachments: [buildAttachment()] }),
+      );
+      const above = buildContext(
+        buildRawEmail({
+          text: BODY_OVER_THRESHOLD,
+          attachments: [buildAttachment()],
+        }),
+      );
+
+      // 2. Act
+      const shortResult = await strategy.execute(below, {});
+      const longResult = await strategy.execute(above, {});
+
+      // 3. Assert
+      expect(SHORT_BODY.length).toBeLessThan(50);
+      expect(BODY_OVER_THRESHOLD.length).toBeGreaterThanOrEqual(50);
+      expect(shortResult.data?.requires_multimodal_fallback).toBe(true);
+      expect(longResult.data?.requires_multimodal_fallback).toBe(false);
+    });
   });
 
   describe('3. Pureza: no muta namespaces ajenos', () => {
@@ -315,6 +399,371 @@ describe('ParserEmailStrategy', () => {
       expect(result.error?.level).toBe('GRAVE');
       expect(result.error?.code).toBe(ERR_PARSER_SOURCE_MISSING);
       expect(result.error?.missingFields).toContain('raw_email');
+    });
+  });
+
+  describe('6. Saneado del cuerpo', () => {
+    it('6.1 deberia eliminar script y style con su contenido', async () => {
+      // 1. Arrange
+      const strategy = new ParserEmailStrategy();
+      const context = buildContext(
+        buildRawEmail({ text: '', html: OUTLOOK_HTML }),
+      );
+
+      // 2. Act
+      const result = await strategy.execute(context, {});
+      const body = result.data?.clean_body as string;
+
+      // 3. Assert: el texto interior de `style` acabaria en el prompt como si
+      //    fuera prosa.
+      expect(body).not.toContain('MsoTableGrid');
+      expect(body).not.toContain('window.track');
+      expect(body).not.toContain('<');
+    });
+
+    it('6.2 deberia conservar el texto util con parrafos coherentes', async () => {
+      // 1. Arrange
+      const strategy = new ParserEmailStrategy();
+      const context = buildContext(
+        buildRawEmail({ text: '', html: OUTLOOK_HTML }),
+      );
+
+      // 2. Act
+      const result = await strategy.execute(context, {});
+      const body = result.data?.clean_body as string;
+
+      // 3. Assert
+      expect(body).toContain('Nueva sede corporativa en Madrid');
+      expect(body).toContain('doscientos empleos directos');
+      expect(body).not.toMatch(/\n{3,}/);
+    });
+
+    it('6.3 deberia decodificar entidades sin dejar espacios duros', async () => {
+      // 1. Arrange: `&nbsp;` decodifica a U+00A0, que no es un espacio ASCII;
+      //    sin normalizarlo el recuento de caracteres queda inflado.
+      const strategy = new ParserEmailStrategy();
+      const context = buildContext(
+        buildRawEmail({ text: '', html: OUTLOOK_HTML }),
+      );
+
+      // 2. Act
+      const result = await strategy.execute(context, {});
+      const body = result.data?.clean_body as string;
+
+      // 3. Assert
+      expect(body).toContain('generará más de doscientos');
+      expect(body).not.toContain('\u00A0');
+      expect(body).not.toContain('&nbsp;');
+    });
+
+    it('6.4 deberia cortar la cadena de respuesta en el divisor de Outlook', async () => {
+      // 1. Arrange
+      const strategy = new ParserEmailStrategy();
+      const html =
+        '<p>Os envio la nota de prensa adjunta.</p>' +
+        '<p>-----Mensaje original-----</p><p>hilo citado que sobra</p>';
+      const context = buildContext(buildRawEmail({ text: '', html }));
+
+      // 2. Act
+      const result = await strategy.execute(context, {});
+
+      // 3. Assert
+      expect(result.data?.clean_body).toBe(
+        'Os envio la nota de prensa adjunta.',
+      );
+    });
+
+    it('6.5 deberia cortar en la linea de atribucion "El ... escribio:"', async () => {
+      // 1. Arrange
+      const strategy = new ParserEmailStrategy();
+      const text = [
+        'Os envio la nota de prensa adjunta.',
+        '',
+        'El 12/03/2026, Ana <ana@ext.com> escribio:',
+        '> hilo citado que sobra',
+      ].join('\n');
+      const context = buildContext(buildRawEmail({ text }));
+
+      // 2. Act
+      const result = await strategy.execute(context, {});
+
+      // 3. Assert
+      expect(result.data?.clean_body).toBe(
+        'Os envio la nota de prensa adjunta.',
+      );
+    });
+
+    it('6.6 deberia retirar la firma y el aviso legal del final', async () => {
+      // 1. Arrange
+      const strategy = new ParserEmailStrategy();
+      const context = buildContext(
+        buildRawEmail({ text: '', html: OUTLOOK_HTML }),
+      );
+
+      // 2. Act
+      const result = await strategy.execute(context, {});
+      const body = result.data?.clean_body as string;
+
+      // 3. Assert
+      expect(body).not.toContain('Gabinete de Prensa');
+      expect(body).not.toContain('AVISO LEGAL');
+    });
+
+    it('6.7 NO deberia retirar un parrafo que menciona el RGPD en mitad del cuerpo', async () => {
+      // 1. Arrange: el anti-falso-positivo que sostiene toda la heuristica. El
+      //    corpus son notas de prensa institucionales, donde un comunicado puede
+      //    hablar de proteccion de datos como CONTENIDO. Solo se barre la racha
+      //    FINAL de parrafos, nunca el cuerpo entero.
+      const strategy = new ParserEmailStrategy();
+      const text = [
+        'La compania abre una nueva sede en Madrid.',
+        '',
+        'La nueva normativa aplica el RGPD a todo el sector publico afectado.',
+        '',
+        'El acto de inauguracion se celebrara el proximo mes de marzo.',
+      ].join('\n');
+      const context = buildContext(buildRawEmail({ text }));
+
+      // 2. Act
+      const result = await strategy.execute(context, {});
+      const body = result.data?.clean_body as string;
+
+      // 3. Assert
+      expect(body).toContain('RGPD');
+      expect(body).toContain('inauguracion');
+    });
+
+    it('6.8 NO deberia vaciar un reenvio cuyo unico contenido es la cita', async () => {
+      // 1. Arrange: es preferible entregar la cita que entregar la nada.
+      const strategy = new ParserEmailStrategy();
+      const text =
+        '-----Mensaje original-----\nLa nota de prensa iba integramente aqui.';
+      const context = buildContext(buildRawEmail({ text }));
+
+      // 2. Act
+      const result = await strategy.execute(context, {});
+
+      // 3. Assert
+      expect(result.data?.clean_body).toContain('La nota de prensa iba');
+    });
+  });
+
+  describe('7. Extraccion de enlaces', () => {
+    /** Lista de enlaces del correo realista, ya filtrada por el nodo. */
+    const extractUrls = async (): Promise<readonly string[]> => {
+      const strategy = new ParserEmailStrategy();
+      const context = buildContext(
+        buildRawEmail({ text: '', html: OUTLOOK_HTML }),
+      );
+      const result = await strategy.execute(context, {});
+
+      return result.data?.extracted_urls as readonly string[];
+    };
+
+    it('7.1 deberia recoger los enlaces de contenido sin duplicados', async () => {
+      // 1. Arrange / 2. Act
+      const urls = await extractUrls();
+
+      // 3. Assert: los dos enlaces al mismo articulo solo diferian en el
+      //    parametro de campana, asi que colapsan en uno.
+      expect(urls).toEqual(['https://unuware.com/notas/sede?id=42']);
+    });
+
+    it('7.2 deberia descartar el enlace de desuscripcion', async () => {
+      // 1. Arrange / 2. Act
+      const urls = await extractUrls();
+
+      // 3. Assert
+      expect(urls.join(' ')).not.toContain('unsubscribe');
+    });
+
+    it('7.3 deberia descartar Twitter/X, Facebook, LinkedIn e Instagram', async () => {
+      // 1. Arrange / 2. Act
+      const urls = await extractUrls();
+
+      // 3. Assert
+      expect(urls.join(' ')).not.toContain('twitter.com');
+      expect(urls.join(' ')).not.toContain('linkedin.com');
+    });
+
+    it('7.4 deberia descartar mailto y las rutas relativas', async () => {
+      // 1. Arrange: un correo no tiene documento base, y EXTRACTOR_WEB solo
+      //    sabe navegar http(s).
+      const urls = await extractUrls();
+
+      // 3. Assert
+      expect(urls.join(' ')).not.toContain('mailto');
+      expect(urls.join(' ')).not.toContain('relativa');
+    });
+
+    it('7.5 deberia retirar los parametros utm_* conservando los funcionales', async () => {
+      // 1. Arrange / 2. Act
+      const urls = await extractUrls();
+
+      // 3. Assert
+      expect(urls[0]).not.toContain('utm_');
+      expect(urls[0]).toContain('id=42');
+    });
+
+    it('7.6 NO deberia recoger enlaces que vivian dentro de la firma eliminada', async () => {
+      // 1. Arrange: la recoleccion va DESPUES de podar, de modo que el cuerpo y
+      //    la lista de enlaces describan el mismo documento.
+      const urls = await extractUrls();
+
+      // 3. Assert
+      expect(urls.join(' ')).not.toContain('firma.example');
+    });
+
+    it('7.7 deberia devolver una lista vacia en la ruta de texto plano', async () => {
+      // 1. Arrange: el texto plano parte las URLs a 78 columnas (RFC 5322) y
+      //    rescatarlas produciria direcciones truncadas. Vacio y honesto.
+      const strategy = new ParserEmailStrategy();
+
+      // 2. Act
+      const result = await strategy.execute(buildContext(), {});
+
+      // 3. Assert
+      expect(result.data?.extracted_urls).toEqual([]);
+    });
+  });
+
+  describe('8. Normalizacion del asunto', () => {
+    /** Ejecuta el nodo con un asunto concreto y devuelve el titulo limpio. */
+    const titleOf = async (subject: string): Promise<unknown> => {
+      const strategy = new ParserEmailStrategy();
+      const result = await strategy.execute(
+        buildContext(buildRawEmail({ subject })),
+        {},
+      );
+
+      return result.data?.clean_title;
+    };
+
+    it('8.1 deberia reducir "Fwd: Re: Noticia" a "Noticia"', async () => {
+      // 1. Arrange / 2. Act / 3. Assert
+      await expect(titleOf('Fwd: Re: Noticia')).resolves.toBe('Noticia');
+    });
+
+    it('8.2 deberia deshacer una cadena larga de prefijos', async () => {
+      // 1. Arrange / 2. Act / 3. Assert
+      await expect(titleOf('RV: ENC: Re[2]: FW: Noticia')).resolves.toBe(
+        'Noticia',
+      );
+    });
+
+    it('8.3 deberia ser insensible a mayusculas y a los espacios sueltos', async () => {
+      // 1. Arrange / 2. Act / 3. Assert
+      await expect(titleOf('  re:   RV:  Noticia  ')).resolves.toBe('Noticia');
+    });
+
+    it('8.4 deberia dejar intacto un asunto sin prefijos', async () => {
+      // 1. Arrange / 2. Act / 3. Assert
+      await expect(titleOf('Nueva sede en Madrid')).resolves.toBe(
+        'Nueva sede en Madrid',
+      );
+    });
+
+    it('8.5 NO deberia vaciar el asunto cuando solo habia prefijos', async () => {
+      // 1. Arrange: un titulo vacio rompe cualquier plantilla que lo interpole.
+      // 2. Act / 3. Assert
+      await expect(titleOf('Re:')).resolves.toBe('Re:');
+    });
+
+    it('8.6 deberia conservar el asunto crudo en la clave subject', async () => {
+      // 1. Arrange: la traza forense necesita poder reconstruir que llego. Son
+      //    dos datos distintos, no uno normalizado.
+      const strategy = new ParserEmailStrategy();
+      const context = buildContext(buildRawEmail({ subject: 'Fwd: Noticia' }));
+
+      // 2. Act
+      const result = await strategy.execute(context, {});
+
+      // 3. Assert
+      expect(result.data?.subject).toBe('Fwd: Noticia');
+      expect(result.data?.clean_title).toBe('Noticia');
+    });
+  });
+
+  describe('9. Metricas de reduccion (RNF-01)', () => {
+    it('9.1 deberia igualar character_count a la longitud de clean_body', async () => {
+      // 1. Arrange
+      const strategy = new ParserEmailStrategy();
+      const context = buildContext(
+        buildRawEmail({ text: '', html: OUTLOOK_HTML }),
+      );
+
+      // 2. Act
+      const result = await strategy.execute(context, {});
+
+      // 3. Assert
+      expect(result.data?.character_count).toBe(
+        (result.data?.clean_body as string).length,
+      );
+    });
+
+    it('9.2 deberia medir el original contra la fuente consumida', async () => {
+      // 1. Arrange: la pareja (original, final) tiene que ser la entrada y la
+      //    salida de la MISMA transformacion, no del correo entero.
+      const strategy = new ParserEmailStrategy();
+      const context = buildContext(
+        buildRawEmail({ text: '', html: OUTLOOK_HTML }),
+      );
+
+      // 2. Act
+      const result = await strategy.execute(context, {});
+
+      // 3. Assert
+      expect(result.data?.body_source).toBe('html');
+      expect(result.data?.original_character_count).toBe(OUTLOOK_HTML.length);
+    });
+
+    it('9.3 deberia reducir mas del 50% de un correo HTML realista', async () => {
+      // 1. Arrange: es el criterio verificable de RNF-01. El nodo existe para
+      //    que el PROCESADOR_IA no pague por etiquetas, estilos, firmas ni
+      //    avisos legales.
+      const strategy = new ParserEmailStrategy();
+      const context = buildContext(
+        buildRawEmail({ text: '', html: OUTLOOK_HTML }),
+      );
+
+      // 2. Act
+      const result = await strategy.execute(context, {});
+
+      // 3. Assert
+      expect(result.data?.reduction_percentage).toBeGreaterThan(50);
+      expect(result.data?.character_count).toBeLessThan(
+        result.data?.original_character_count as number,
+      );
+    });
+
+    it('9.4 deberia devolver 0 y no NaN cuando el original es cero', async () => {
+      // 1. Arrange: `NaN` se serializa a `null` en el jsonb y romperia en
+      //    silencio la regla de "toda clave presente CON SU TIPO".
+      const strategy = new ParserEmailStrategy();
+      const context = buildContext(buildRawEmail({ text: '', html: '' }));
+
+      // 2. Act
+      const result = await strategy.execute(context, {});
+
+      // 3. Assert
+      expect(result.data?.reduction_percentage).toBe(0);
+      expect(Number.isNaN(result.data?.reduction_percentage)).toBe(false);
+    });
+
+    it('9.5 deberia acotar el porcentaje al rango 0..100', async () => {
+      // 1. Arrange
+      const strategy = new ParserEmailStrategy();
+      const context = buildContext(
+        buildRawEmail({ text: '', html: OUTLOOK_HTML }),
+      );
+
+      // 2. Act
+      const result = await strategy.execute(context, {});
+      const percentage = result.data?.reduction_percentage as number;
+
+      // 3. Assert
+      expect(percentage).toBeGreaterThanOrEqual(0);
+      expect(percentage).toBeLessThanOrEqual(100);
     });
   });
 });

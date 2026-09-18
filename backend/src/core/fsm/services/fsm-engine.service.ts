@@ -168,16 +168,71 @@ const EXTRACTED_TEXT_KEYS = ['clean_body', 'text', 'extracted_text'] as const;
 const REDACTED_BINARY_PLACEHOLDER = '[base64 omitido]';
 
 /**
- * Un nodo produjo texto util si alguna de las claves acordadas trae contenido
- * real. Una cadena en blanco NO cuenta: es ausencia de texto con otra forma.
+ * Claves con las que un nodo declara que el binario TODAVIA hace falta.
+ *
+ * Es el contrapeso de `EXTRACTED_TEXT_KEYS` y vive en el mismo plano: un
+ * vocabulario de NOMBRES DE CLAVE, no de nodos. El motor sigue sin saber que
+ * existe un `PARSER_PRE_IA`, igual que ya no sabia quien escribe `clean_body`.
+ * Cualquier nodo futuro —un OCR, un transcriptor de audio— puede levantar la
+ * misma bandera para conservar sus bytes sin tocar una linea de `@core`.
+ *
+ * Va como arreglo y no como literal suelto por la misma razon que aquel: el
+ * vocabulario crece, la regla no.
  */
-const hasUsefulText = (data: Record<string, unknown> | undefined): boolean =>
+const BINARY_RETENTION_KEYS = ['requires_multimodal_fallback'] as const;
+
+/** Variable de entorno que ajusta el listado de "texto util". */
+const MIN_USEFUL_TEXT_LENGTH_KEY = 'FSM_MIN_USEFUL_TEXT_LENGTH';
+
+/**
+ * Longitud minima, en caracteres, para que el texto de un nodo libere el binario.
+ *
+ * Calibrado contra el `minBodyLength` del nodo PARSER_PRE_IA, que usa el mismo
+ * 50 para decidir si el cuerpo alcanza para un modelo de lenguaje. Los dos
+ * numeros tienen que moverse juntos: si el motor purgase con menos texto del que
+ * el parser considera suficiente, quedaria abierta la ventana en la que un
+ * correo declara texto bastante para tirar los bytes y a la vez insuficiente
+ * para el modelo, que es justo el caso del PDF escaneado con un "Ver adjunto"
+ * por cuerpo.
+ */
+const DEFAULT_MIN_USEFUL_TEXT_LENGTH = 50;
+
+/**
+ * Un nodo produjo texto util si alguna de las claves acordadas trae contenido
+ * real POR ENCIMA del listado.
+ *
+ * El umbral llega por parametro y no se lee aqui dentro para que la funcion siga
+ * siendo pura: quien la llama ya resolvio la configuracion una sola vez.
+ *
+ * Una cadena en blanco nunca cuenta —es ausencia de texto con otra forma— y
+ * desde el recalibrado tampoco cuenta un "Ver adjunto" de doce caracteres: no es
+ * prosa aprovechable, y mientras no la haya el binario sigue siendo la UNICA
+ * fuente de datos del correo.
+ */
+const hasUsefulText = (
+  data: Record<string, unknown> | undefined,
+  minLength: number,
+): boolean =>
   data !== undefined &&
   EXTRACTED_TEXT_KEYS.some((key) => {
     const value = data[key];
 
-    return typeof value === 'string' && value.trim().length > 0;
+    return typeof value === 'string' && value.trim().length >= minLength;
   });
+
+/**
+ * Un nodo veto la liberacion si declaro alguna de esas claves con el booleano
+ * `true` EXACTO.
+ *
+ * La comparacion estricta no es celo: el `data` se rehidrata desde una columna
+ * jsonb, donde la cadena `"false"` es truthy. Un veto que se pudiera levantar
+ * por accidente desactivaria en silencio la politica de memoria de toda la
+ * plataforma, y nadie lo notaria hasta ver crecer `contexto_acumulado`.
+ */
+const vetoesBinaryRelease = (
+  data: Record<string, unknown> | undefined,
+): boolean =>
+  data !== undefined && BINARY_RETENTION_KEYS.some((key) => data[key] === true);
 
 /** Un adjunto todavia por liberar: objeto con `contentBase64` de tipo cadena. */
 const holdsBinaryContent = (value: unknown): boolean =>
@@ -282,6 +337,15 @@ export class FsmEngineService {
    * arranque de `FsmModule`.
    */
   private readonly abortedExecutions = new Map<string, string>();
+
+  /**
+   * Umbral de `FSM_MIN_USEFUL_TEXT_LENGTH`, resuelto en la primera lectura.
+   *
+   * Perezoso y no resuelto en el constructor para que construir el motor no
+   * tenga efectos: un valor mal escrito avisa por el log la primera vez que
+   * importa, no al arrancar el modulo.
+   */
+  private cachedMinUsefulTextLength: number | null = null;
 
   constructor(
     @InjectRepository(FsmExecution)
@@ -905,11 +969,56 @@ export class FsmEngineService {
    * checkpoint que los escribio por primera vez, y el base64 no llega a tocar
    * PostgreSQL.
    */
+  /** Umbral de texto util, resuelto una sola vez por instancia. */
+  private get minUsefulTextLength(): number {
+    this.cachedMinUsefulTextLength ??= this.resolveMinUsefulTextLength();
+
+    return this.cachedMinUsefulTextLength;
+  }
+
+  /**
+   * Lee `FSM_MIN_USEFUL_TEXT_LENGTH` y cae al valor por defecto si no sirve.
+   *
+   * Se admite el `0` explicito —restaura el comportamiento anterior, en el que
+   * cualquier texto no vacio purgaba— pero se rechaza lo que no sea un entero no
+   * negativo. Un valor absurdo no puede decidir en silencio si se destruye el
+   * unico contenido de un correo.
+   */
+  private resolveMinUsefulTextLength(): number {
+    const raw = this.configService.get<string>(MIN_USEFUL_TEXT_LENGTH_KEY);
+
+    if (raw === undefined || raw === '') {
+      return DEFAULT_MIN_USEFUL_TEXT_LENGTH;
+    }
+
+    const parsed = Number(raw);
+
+    if (!Number.isInteger(parsed) || parsed < 0) {
+      this.logger.warn(
+        `${MIN_USEFUL_TEXT_LENGTH_KEY}="${raw}" no es un entero no negativo; se usara ${DEFAULT_MIN_USEFUL_TEXT_LENGTH}.`,
+      );
+
+      return DEFAULT_MIN_USEFUL_TEXT_LENGTH;
+    }
+
+    return parsed;
+  }
+
   private releaseAttachmentBinaries(
     context: StatePayloadContext,
     result: NodeResult,
   ): void {
-    if (!hasUsefulText(result.data)) {
+    // El veto va PRIMERO y gana sobre el texto. La asimetria es deliberada: el
+    // texto es la afirmacion "el binario ya sobra"; la bandera es la afirmacion
+    // contraria, y cuando llegan juntas manda la conservadora. El coste de
+    // equivocarse no es simetrico —un binario no liberado pesa unos bytes en una
+    // fila; uno liberado de mas destruye la UNICA copia del dato, y el
+    // checkpoint ya esta escrito: no hay vuelta atras.
+    if (vetoesBinaryRelease(result.data)) {
+      return;
+    }
+
+    if (!hasUsefulText(result.data, this.minUsefulTextLength)) {
       return;
     }
 

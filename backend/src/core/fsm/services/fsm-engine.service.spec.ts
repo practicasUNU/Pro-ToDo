@@ -1909,7 +1909,7 @@ describe('FsmEngineService (PROT-09)', () => {
             success: true,
             data: {
               subject: 'Factura',
-              text: 'Cuerpo con contenido aprovechable.',
+              text: 'Cuerpo con contenido textual mas que suficiente para el modelo.',
               attachments: [buildAttachment()],
             },
           }),
@@ -1963,7 +1963,10 @@ describe('FsmEngineService (PROT-09)', () => {
           NodeType.PROCESADOR_IA,
           jest.fn().mockResolvedValue({
             success: true,
-            data: { clean_body: 'Texto extraido por el modelo multimodal.' },
+            data: {
+              clean_body:
+                'Texto extraido por el modelo multimodal a partir del PDF escaneado.',
+            },
           }),
         ),
       );
@@ -1994,7 +1997,8 @@ describe('FsmEngineService (PROT-09)', () => {
           jest.fn().mockResolvedValue({
             success: true,
             data: {
-              extracted_text: 'Texto de un OCR.',
+              extracted_text:
+                'Texto reconocido por el OCR sobre la pagina escaneada del documento.',
               attachments: [buildAttachment()],
             },
           }),
@@ -2189,6 +2193,195 @@ describe('FsmEngineService (PROT-09)', () => {
       // Los metadatos siguen ahi: un log que borra el adjunto entero no permite
       // saber que venia en el correo.
       expect(snapshot).toContain('escaneo.pdf');
+    });
+
+    it('12.9 NO deberia liberar el binario si el nodo declara el respaldo multimodal', async () => {
+      // 1. Arrange: el correo trae texto de sobra, pero el nodo declara que el
+      //    binario sigue haciendo falta. El veto gana sobre el texto: liberar de
+      //    mas destruye la UNICA copia del dato y el checkpoint ya esta escrito.
+      const execution = buildExecution();
+      const { repo } = buildRepository(execution);
+
+      factory.registerStrategy(
+        buildStrategy(
+          NodeType.TRIGGER_IMAP,
+          jest.fn().mockResolvedValue({
+            success: true,
+            data: { text: '', attachments: [buildAttachment()] },
+          }),
+        ),
+      );
+      factory.registerStrategy(
+        buildStrategy(
+          NodeType.PROCESADOR_IA,
+          jest.fn().mockResolvedValue({
+            success: true,
+            data: {
+              clean_body:
+                'Texto suficiente para superar el listado del motor sin problema.',
+              requires_multimodal_fallback: true,
+            },
+          }),
+        ),
+      );
+
+      // 2. Act
+      const result = await buildEngine(repo).executeWorkflow(
+        EXECUTION_ID,
+        buildEmailSchema(),
+      );
+
+      // 3. Assert
+      expect(attachmentsIn(result.contextPayload)[0].contentBase64).toBe(
+        BASE64,
+      );
+    });
+
+    it('12.10 deberia liberar el binario cuando la bandera llega en false', async () => {
+      // 1. Arrange: el veto es POSITIVO-ONLY. Una bandera apagada no puede
+      //    bloquear la politica de memoria de la plataforma.
+      const execution = buildExecution();
+      const { repo } = buildRepository(execution);
+
+      factory.registerStrategy(
+        buildStrategy(
+          NodeType.TRIGGER_IMAP,
+          jest.fn().mockResolvedValue({
+            success: true,
+            data: { text: '', attachments: [buildAttachment()] },
+          }),
+        ),
+      );
+      factory.registerStrategy(
+        buildStrategy(
+          NodeType.PROCESADOR_IA,
+          jest.fn().mockResolvedValue({
+            success: true,
+            data: {
+              clean_body:
+                'Texto suficiente para superar el listado del motor sin problema.',
+              requires_multimodal_fallback: false,
+            },
+          }),
+        ),
+      );
+
+      // 2. Act
+      const result = await buildEngine(repo).executeWorkflow(
+        EXECUTION_ID,
+        buildEmailSchema(),
+      );
+
+      // 3. Assert
+      expect(attachmentsIn(result.contextPayload)[0].contentBase64).toBeNull();
+    });
+
+    it('12.11 NO deberia tomar por veto un valor que no sea el booleano true', async () => {
+      // 1. Arrange: el `data` se rehidrata desde jsonb, donde la cadena "false"
+      //    tambien es truthy. Sin la comparacion estricta, un veto accidental
+      //    desactivaria la purga y nadie lo notaria hasta ver crecer la tabla.
+      const execution = buildExecution();
+      const { repo } = buildRepository(execution);
+
+      factory.registerStrategy(
+        buildStrategy(
+          NodeType.TRIGGER_IMAP,
+          jest.fn().mockResolvedValue({
+            success: true,
+            data: { text: '', attachments: [buildAttachment()] },
+          }),
+        ),
+      );
+      factory.registerStrategy(
+        buildStrategy(
+          NodeType.PROCESADOR_IA,
+          jest.fn().mockResolvedValue({
+            success: true,
+            data: {
+              clean_body:
+                'Texto suficiente para superar el listado del motor sin problema.',
+              requires_multimodal_fallback: 'true',
+            },
+          }),
+        ),
+      );
+
+      // 2. Act
+      const result = await buildEngine(repo).executeWorkflow(
+        EXECUTION_ID,
+        buildEmailSchema(),
+      );
+
+      // 3. Assert: la cadena NO veta, asi que el binario se libera.
+      expect(attachmentsIn(result.contextPayload)[0].contentBase64).toBeNull();
+    });
+
+    it('12.12 NO deberia liberar el binario con un texto por debajo del listado', async () => {
+      // 1. Arrange: ES EL CASO QUE MOTIVA EL LISTADO. El nodo IMAP emite `text`
+      //    y corre ANTES del parser, asi que un "Ver adjunto." de doce
+      //    caracteres purgaba los bytes del PDF escaneado antes de que nadie
+      //    pudiera vetarlo, y el veto del parser llegaba sobre un adjunto vacio.
+      const execution = buildExecution();
+      const { repo } = buildRepository(execution);
+
+      factory.registerStrategy(
+        buildStrategy(
+          NodeType.TRIGGER_IMAP,
+          jest.fn().mockResolvedValue({
+            success: true,
+            data: { text: 'Ver adjunto.', attachments: [buildAttachment()] },
+          }),
+        ),
+      );
+      factory.registerStrategy(
+        buildStrategy(
+          NodeType.PROCESADOR_IA,
+          jest.fn().mockResolvedValue({ success: true, data: {} }),
+        ),
+      );
+
+      // 2. Act
+      const result = await buildEngine(repo).executeWorkflow(
+        EXECUTION_ID,
+        buildEmailSchema(),
+      );
+
+      // 3. Assert: el binario llega intacto al nodo que puede interpretarlo.
+      expect(attachmentsIn(result.contextPayload)[0].contentBase64).toBe(
+        BASE64,
+      );
+    });
+
+    it('12.13 deberia respetar el listado configurado en FSM_MIN_USEFUL_TEXT_LENGTH', async () => {
+      // 1. Arrange: el MISMO texto corto del caso anterior, pero con el listado
+      //    bajado por entorno. Fija que la variable se lee de verdad.
+      const execution = buildExecution();
+      const { repo } = buildRepository(execution);
+
+      factory.registerStrategy(
+        buildStrategy(
+          NodeType.TRIGGER_IMAP,
+          jest.fn().mockResolvedValue({
+            success: true,
+            data: { text: 'Ver adjunto.', attachments: [buildAttachment()] },
+          }),
+        ),
+      );
+      factory.registerStrategy(
+        buildStrategy(
+          NodeType.PROCESADOR_IA,
+          jest.fn().mockResolvedValue({ success: true, data: {} }),
+        ),
+      );
+
+      // 2. Act
+      const result = await buildEngine(
+        repo,
+        new ConfigService({ FSM_MIN_USEFUL_TEXT_LENGTH: '5' }),
+      ).executeWorkflow(EXECUTION_ID, buildEmailSchema());
+
+      // 3. Assert
+      expect(attachmentsIn(result.contextPayload)[0].contentBase64).toBeNull();
     });
   });
 });

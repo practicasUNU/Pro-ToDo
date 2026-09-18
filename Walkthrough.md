@@ -3153,6 +3153,12 @@ sin parte `text/plain`, deja `text` vacío. Derivar texto del marcado sería san
 competencia del escudo pre-IA: `security-and-scope.md` §3 mantiene este nodo sin transformaciones. La
 prueba 1.4 fija ese comportamiento para que nadie lo tome por un descuido.
 
+> *Cumplido en la entrada del 2026-09-18:* el escudo pre-IA ya deriva el texto de ese marcado. La
+> prueba 1.4 de `imap-trigger.strategy.spec.ts` sigue vigente sin cambios, porque el reparto no se ha
+> movido: el nodo de ingesta continúa sin transformar nada.
+
+
+
 ### 3. `POST /api/wizard/check-imap`
 
 Permite validar las credenciales antes de guardar el `pipeline_schema`, en lugar de descubrir el fallo
@@ -4239,11 +4245,39 @@ información del correo. La regla acordada —liberar solo si algún nodo produj
 Una cadena en blanco no cuenta como texto: es ausencia de contenido con otra forma, y tratarla
 como válida vaciaría el adjunto de un correo que solo trae espacios.
 
+#### La condición no bastó (actualización del 2026-09-18)
+
+Lo anterior se sostenía sobre una coincidencia que dejó de darse. Mientras el parser devolvía
+`clean_body: null` en la rama HTML, el correo multimodal conservaba su binario **por
+accidente**: nadie declaraba texto. En cuanto el saneador empezó a producir texto real desde
+el marcado, ese mismo correo pasó a *declarar* un `clean_body` corto pero no vacío, y para el
+motor eso era texto útil. La regla habría purgado los bytes del único correo que los
+necesitaba.
+
+Por eso el vocabulario del motor creció en dos direcciones: una clave de **retención**
+(`requires_multimodal_fallback`) que veta la liberación, y un **listón de longitud**
+(`FSM_MIN_USEFUL_TEXT_LENGTH`, def. 50) por debajo del cual el texto no cuenta. El listón hace
+falta además del veto porque `TRIGGER_IMAP` emite `text` y corre *antes* del parser: un
+`"Ver adjunto."` de doce caracteres purgaba el PDF escaneado antes de que nadie pudiera
+vetarlo, y el veto del parser llegaba sobre un adjunto ya vacío. Ese hueco lo fija la prueba
+12.12.
+
+El veto gana sobre el texto cuando llegan juntos. La asimetría es deliberada: un binario no
+liberado pesa unos bytes en una fila; uno liberado de más destruye la única copia del dato con
+el checkpoint ya escrito.
+
 ### El acoplamiento es un nombre de clave, no una dependencia
 
 `ParserEmailStrategy` no sabe que existe la purga. Publica `clean_body` porque es su salida
 natural, y el motor reconoce ese nombre como señal de «ya hay texto». El parser se puede
 sustituir entero sin tocar el motor, y el motor purga aunque el flujo no tenga parser.
+
+Con el veto siguen siendo nombres de clave, solo que ahora son **dos vocabularios**: uno
+positivo (`EXTRACTED_TEXT_KEYS`) y uno negativo (`BINARY_RETENTION_KEYS`). La dirección de las
+dependencias no cambia —`@core` no importa nada de `@modules`, los literales se declaran en el
+motor y `@modules/nodes` no importa nada del motor para esto—, y cualquier nodo futuro (un
+OCR, un transcriptor de audio) puede levantar la misma bandera sin tocar una línea de `@core`.
+La única novedad es que el vocabulario, que solo sabía afirmar, ahora también sabe negar.
 
 ### El escape que casi se pasa por alto
 
@@ -4288,9 +4322,210 @@ Lo que **no** está cubierto es el extremo a extremo con un buzón real: los dob
 `imapflow` y `mailparser` fijan el contrato, no el comportamiento de un servidor IMAP
 concreto ante un MIME malformado.
 
-### Deuda consciente
+Con el saneador se añaden: las pruebas 12.9 a 12.13 del motor —el veto, que sea *positivo
+only*, que una cadena `"true"` del jsonb no vete, el listón de longitud y que la variable de
+entorno se lea de verdad—, los bloques 6 a 9 de `parser-email.strategy.spec.ts` (saneado,
+enlaces, asunto y métricas) y la spec nueva `email-sanitizer.util.spec.ts`, donde viven los
+casos exhaustivos de cada expresión regular. El reparto es deliberado: la spec de la
+estrategia comprueba que el nodo *compone* bien; la del util, que cada heurística *decide*
+bien.
 
-`PARSER_PRE_IA` pasa a `implemented: true` en `GET /api/nodos` en cuanto se registra, y el
-asistente del frontend lo habilita, aunque el nodo todavía no sanee el marcado. Se asume
-porque el esqueleto ya hace trabajo real —inventario de adjuntos y decisión multimodal— y
-porque `body_source: 'html_pending_sanitize'` declara honestamente lo que falta.
+Sigue sin cubrirse un corpus real de correos. Las heurísticas están calibradas contra fixtures
+escritos a mano, y ese es el riesgo de producto de la rama: el anti-falso-positivo del RGPD
+(prueba 6.7) protege el caso que sabemos nombrar, no los que todavía no hemos visto.
+
+### Deuda consciente — saldada el 2026-09-18
+
+En su día se asumió que `PARSER_PRE_IA` figurase como `implemented: true` en `GET /api/nodos`
+sin sanear el marcado, apoyándose en que el esqueleto ya hacía trabajo real (inventario de
+adjuntos y decisión multimodal) y en que `body_source: 'html_pending_sanitize'` declaraba
+honestamente lo que faltaba.
+
+Esa deuda está saldada: el nodo sanea, `'html_pending_sanitize'` desapareció de la unión —el
+valor describía una etapa del roadmap, y mantenerlo sería una mentira en el checkpoint— y el
+`implemented: true` pasa a ser honesto sin matices. Queda un residuo sin migración: las filas
+ya escritas de `ejecuciones_flujo.contexto_acumulado` pueden contener el literal viejo, así
+que cualquier lector futuro que ramifique sobre `body_source` debe tolerar valores fuera de la
+unión. Está anotado en el TSDoc del tipo.
+
+
+---
+
+## 2026-09-18 · Saneado de marcado, enlaces y métricas en `PARSER_PRE_IA` — rama `feat/parser-email`
+
+Cierra la rama que el esqueleto del nodo había dejado abierta: convertir el marcado en texto
+aprovechable, extraer los enlaces de contenido, normalizar el asunto y medir la reducción de
+caracteres (RNF-01). El payload crece de siete claves a doce y `clean_body` deja de admitir `null`.
+
+### Por qué `cheerio` y no `@mozilla/readability`
+
+Readability está instalado desde hace semanas y era el candidato natural. Se descartó por cuatro
+motivos, y el orden importa:
+
+1. Exige un `Document` real, es decir **jsdom completo** dentro del proceso que sostiene el motor.
+   Construir un `JSDOM` sobre marcado hostil de correo, en cada correo del sondeo y cada minuto, es
+   un sumidero de CPU que se paga donde no se ve.
+2. Su algoritmo puntúa densidad de `<p>` y **penaliza tablas**. Un correo de Outlook es,
+   estructuralmente, tablas anidadas: el resultado típico es `null` por no alcanzar el
+   `charThreshold`, o el pie de página.
+3. Necesita `doc.documentURI` para resolver URIs relativas. Un correo no tiene URL base.
+4. El payload de `parsed_email` es contrato y tiene que ser **reproducible**. El *scoring* de
+   Readability no es estable entre versiones menores.
+
+Hay además un argumento práctico: `transformIgnorePatterns` de Jest ya contempla toda la familia de
+`htmlparser2`, y cheerio ya se carga en verde en dos specs. jsdom y Readability son ESM, y el
+incidente de `htmlparser2@12` documentado más arriba dice bastante sobre lo que cuesta esa pelea.
+Ambos siguen reservados para `EXTRACTOR_WEB`, donde sí hay un artículo y sí hay URL base.
+
+Tampoco se usó `sanitize-html`: es el saneador de lista blanca para marcado **publicable**, y aquí no
+se produce marcado sino texto. Se descartan etiquetas enteras, no se filtran atributos.
+
+### El DOM resuelve la estructura; el regex resuelve la prosa
+
+Es la división de trabajo de todo el saneador, y evita el error de intentar hacerlo todo con una de
+las dos herramientas. Los contenedores de firma y cita (`.gmail_signature`, `#appendonsend`) son
+**estructura**: se resuelven con selectores. `-----Mensaje original-----` y `El … escribió:` son
+**prosa**: son texto plano, ningún `blockquote` los envuelve de forma fiable, y buscarlos en el DOM
+es perder el tiempo.
+
+Un detalle que costó una prueba: los marcadores de Outlook no *envuelven* la cita, la **preceden**
+como hermanos. Borrar el nodo deja el hilo entero dentro del cuerpo. Hay que subir por los ancestros
+barriendo los hermanos posteriores en cada nivel — y el barrido va **antes** de comprobar si queda
+padre, porque en modo fragmento `parent()` de un elemento de primer nivel devuelve vacío y
+comprobarlo en la condición del bucle deja sin barrer justo el último nivel.
+
+El aplanado muta el árbol insertando separadores y lee `$.root().text()`, en vez de recorrerlo
+recursivamente. Un *walk* obligaría a tipar los nodos con `Element` de `domhandler`, que es
+dependencia transitiva y no declarada — la misma razón por la que `TemplateRendererService` se
+estrecha con `'tagName' in element`. Mutar y leer solo necesita selectores.
+
+Las celdas de tabla se separan con **espacio** y no con salto: con `\n` una fila horizontal se
+convierte en una columna y una tabla de datos pierde la única estructura que tenía.
+
+### El fallo silencioso del espacio duro
+
+`&nbsp;` decodifica a **U+00A0**, que no es un espacio ASCII. Si la normalización del espacio duro va
+después del colapso horizontal, `/[ \t]+/` no lo toca y el cuerpo acaba lleno de blancos invisibles
+que inflan `character_count` sin que nada falle. El orden de los siete pasos de `normalizeWhitespace`
+está fijado por la prueba 0.6 justamente por esto.
+
+### Por qué la racha final y no todo el cuerpo
+
+La decisión más importante de la rama, y es de producto, no de ingeniería. El corpus son **notas de
+prensa institucionales**. Un comunicado sobre una nueva sede que mencione «RGPD» o «protección de
+datos» en su tercer párrafo es perfectamente esperable, y barrer por todo el cuerpo destruiría justo
+el contenido que el nodo existe para conservar.
+
+Por eso `stripTrailingBoilerplate` recorre **desde el final hacia atrás** y se detiene en el primer
+párrafo que no case o que supere los 800 caracteres. Que nada en mitad del artículo se pierda no es
+una expectativa: es una propiedad de la construcción. La prueba 6.7 la fija.
+
+El tope de longitud es la segunda red, para el aviso legal pegado al cuerpo sin línea en blanco de
+por medio: el párrafo resultante es largo, no se retira, y se prefiere conservar ruido a perder
+contenido. Por el mismo criterio se descartaron las heurísticas de teléfono, dirección y cargo para
+detectar firmas: en un corpus donde el último párrafo suele ser el contacto del gabinete de prensa,
+ese contacto a menudo **es** información que el flujo quiere.
+
+Hay una tercera guarda, simétrica, en el corte de citas: si cortar deja la cabeza vacía **no se
+corta**. Un reenvío puro —cuerpo vacío, toda la sustancia dentro de la cita— se quedaría sin nada, y
+es preferible entregar la cita que entregar la nada.
+
+### Por qué las URLs relativas se descartan
+
+Un correo no tiene documento base. Absolutizar contra el dominio del remitente fabricaría una
+dirección que puede no existir, y `EXTRACTOR_WEB` la descargaría, fallaría y levantaría su alerta.
+Las *protocol-relative* (`//host/ruta`) sí se rescatan promoviendo a `https:`, porque ahí el host es
+explícito y no se inventa nada.
+
+La recolección va **después** de podar el árbol y **antes** de aplanarlo. Así un enlace de
+desuscripción que vivía dentro de una firma ya eliminada no reaparece, y `clean_body` y
+`extracted_urls` describen el mismo documento. Devolver ambas salidas juntas desde una sola pasada no
+es solo ahorro: parsear dos veces permitiría que discrepasen sobre qué se eliminó.
+
+Los parámetros `utm_*` se retiran por un motivo operativo, no estético: dos enlaces al mismo artículo
+que solo difieren en `utm_content` sobreviven a la deduplicación por `Set`, y `EXTRACTOR_WEB` acaba
+pagando **dos navegaciones de Playwright** por la misma página. `ref` y `spm` se conservan porque hay
+sitios que los usan para enrutar.
+
+**YouTube, TikTok, Threads, WhatsApp y Telegram quedan fuera de la lista social a propósito.** Una
+nota de prensa que enlaza un vídeo institucional está enlazando contenido, y este pipeline es de
+recorte de prensa. Que nadie los añada «por simetría».
+
+En la ruta de texto plano la lista queda vacía. Rescatar enlaces con un `https?://\S+` es posible,
+pero el texto plano parte las URLs con saltos de línea a 78 columnas (RFC 5322) y produciría
+direcciones truncadas. Un arreglo vacío y honesto es mejor que una lista de enlaces rotos.
+
+### Por qué `original_character_count` depende de `body_source`
+
+Podría haber sido siempre `html.length`, y habría sido más simple. Sería también inútil: en un correo
+`text/plain` puro `html` está vacío, y el porcentaje saldría 0 % por división por cero, ocultando una
+reducción real. Al revés, medir siempre contra `text` daría 0 % en la ruta HTML — justo donde la
+reducción es del 80-95 % y donde RNF-01 tiene algo que medir.
+
+La pareja `(original, final)` tiene que ser la entrada y la salida de la **misma** transformación. Al
+atarla a `body_source`, ambas son auto-consistentes; y comparar dos correos con `body_source` distinto
+es comparar cosas distintas, que es precisamente para lo que existe esa clave.
+
+Consecuencia que conviene conocer: **la ruta `'text'` dejó de ser un `trim()`**. También pasa por el
+corte de citas, firma y pie legal. Si no, un `text/plain` con cuarenta líneas de hilo citado y un
+aviso de confidencialidad entraría entero al prompt, que es exactamente el gasto que el nodo existe
+para evitar.
+
+### Por qué el DTO no crece
+
+Se valoraron `stripSignatures` y `filterSocialUrls`, y se descartaron los dos. Cada interruptor
+multiplica las formas posibles del payload **histórico**: un `extracted_urls: []` significaría a veces
+«no había enlaces» y a veces «alguien apagó la extracción ese día», y ningún checkpoint de hace seis
+meses puede distinguirlas. Es literalmente el mismo argumento que ya se escribió para
+`attachments: []`.
+
+Además, `stripSignatures: false` no tiene caso de uso: un flujo que quiera la firma quiere el correo
+crudo, y ese sigue intacto en `raw_email`. Y `filterSocialUrls` es indecidible desde fuera: quien
+configura el flujo no sabe qué enlaces trae el correo. La política «un enlace social no es contenido»
+es del nodo, y si algún día resulta equivocada se corrige para todos, no flujo a flujo.
+
+`MAX_EXTRACTED_URLS = 50` va como constante por lo mismo: es un límite de integridad —el arreglo se
+reserializa entero en cada checkpoint posterior— y no una preferencia.
+
+Sí cambió un valor: `minBodyLength` baja de 200 a 50. Los 200 estaban calibrados contra texto **sin
+sanear**, donde una firma y un pie legal sumaban solos unos 300 caracteres y casi cualquier correo
+superaba el listón por puro ruido. Con el saneador, `clean_body` es texto útil.
+
+### El veto de purga y por qué gana sobre el texto
+
+Está desarrollado arriba, en «La condición no bastó». Lo que merece quedar dicho aquí es que **la
+regresión la introdujo esta rama**: mientras el parser devolvía `null`, el correo multimodal
+conservaba sus bytes por accidente. El veto y el listón no son una mejora oportunista colada en el
+commit, son la reparación de lo que el saneador rompía.
+
+Y que el listón de longitud (`FSM_MIN_USEFUL_TEXT_LENGTH`) hace falta **además** del veto, porque
+`TRIGGER_IMAP` corre antes que el parser y ya emitía `text`. Va calibrado contra el `minBodyLength`
+del nodo, y los dos números tienen que moverse juntos: cualquier hueco entre ellos reabre la ventana
+en la que un correo declara texto bastante para tirar los bytes e insuficiente para el modelo.
+
+### Dónde vive el código y por qué
+
+Las heurísticas salieron de la estrategia a `src/modules/nodes/utils/email-sanitizer.util.ts`, con el
+precedente de `@core/fsm/utils` y `@common/utils`. Son funciones `string → string`: probarlas a
+través de `strategy.execute()` obligaría a construir un `StatePayloadContext` y un `raw_email`
+completo en cada assert, y a navegar `result.data?.clean_body` con `?.` para comprobar una expresión
+regular. Con el util, `expect(cleanSubject(x)).toBe(y)` cabe en una línea y falla señalando la
+heurística, no «el nodo».
+
+Un solo archivo y no tres: las tres piezas comparten la misma pasada de DOM, y partirlo obligaría a
+exponer el `CheerioAPI` entre módulos. Vive en `@modules/nodes/utils` y no en `@common` porque es
+dominio correo y DOM, no transporte — y porque `EXTRACTOR_WEB` va a necesitar exactamente el aplanado
+y la normalización de URLs.
+
+### Lo que las pruebas cubren y lo que no
+
+870 pruebas en 38 suites, todas en verde. El reparto es deliberado: `email-sanitizer.util.spec.ts`
+(63 casos) comprueba que cada heurística **decide** bien, con sus tablas `it.each`;
+`parser-email.strategy.spec.ts` (43) comprueba que el nodo **compone** bien, con un fixture de correo
+de Outlook realista que sostiene a la vez los bloques de saneado, enlaces y métricas.
+
+Lo que **no** está cubierto sigue siendo lo mismo, y conviene no olvidarlo: no hay corpus real de
+correos. Las heurísticas están calibradas contra fixtures escritos a mano, así que el
+anti-falso-positivo del RGPD protege el caso que sabemos nombrar, no los que todavía no hemos visto.
+El primer buzón real será el que diga si los 800 caracteres del tope y la lista de patrones legales
+están donde tienen que estar.

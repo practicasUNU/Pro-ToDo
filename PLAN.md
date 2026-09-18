@@ -1996,8 +1996,11 @@ como `data:` URI dentro de `html` por `simpleParser`).
 Tras depositar el `data` de un nodo con éxito, y antes de cualquier checkpoint:
 
 ```
-si algún valor de EXTRACTED_TEXT_KEYS = ['clean_body','text','extracted_text']
-   es una cadena con contenido tras trim()
+si algún valor de BINARY_RETENTION_KEYS = ['requires_multimodal_fallback']
+   es el booleano true EXACTO
+entonces  se conserva el binario                    ← veto, gana sobre el texto
+si no, si algún valor de EXTRACTED_TEXT_KEYS = ['clean_body','text','extracted_text']
+   es una cadena cuyo trim() alcanza FSM_MIN_USEFUL_TEXT_LENGTH (def. 50)
 entonces  raw_email.attachments[*].contentBase64 = null   (metadatos intactos)
 si no     se conserva el binario  →  caso multimodal pendiente
 ```
@@ -2006,19 +2009,54 @@ El binario se conserva **si y solo si** sigue siendo la única fuente de datos. 
 cuerpo textual ve sus adjuntos liberados en el mismo checkpoint que los escribió, así que el
 base64 no llega a tocar PostgreSQL; un PDF escaneado los conserva para el nodo multimodal.
 
+**El veto gana sobre el texto, y la asimetría es deliberada.** El texto es la afirmación «el
+binario ya sobra»; la bandera es la afirmación contraria, y cuando llegan juntas manda la
+conservadora: un binario no liberado pesa unos bytes en una fila, mientras que uno liberado
+de más destruye la única copia del dato con el checkpoint ya escrito. No hay vuelta atrás.
+
+**La comparación con `true` es estricta**, y no es celo: el `data` se rehidrata desde una
+columna `jsonb`, donde la cadena `"false"` es *truthy*. Un veto que se pudiera levantar por
+accidente desactivaría en silencio la política de memoria de toda la plataforma, y nadie lo
+notaría hasta ver crecer `contexto_acumulado`.
+
+**El listón de longitud cierra el caso del texto corto.** `TRIGGER_IMAP` emite `text` en su
+propio `data` y corre *antes* del parser: sin listón, un `"Ver adjunto."` de doce caracteres
+purgaba los bytes del PDF escaneado antes de que ningún nodo pudiera vetarlo, y el veto del
+parser llegaba sobre un adjunto ya vacío. `FSM_MIN_USEFUL_TEXT_LENGTH` va calibrado contra el
+`minBodyLength` de `PARSER_PRE_IA` (ambos 50): los dos números deben moverse juntos, porque
+cualquier hueco entre ellos reabre esa ventana. Un `0` restaura el comportamiento anterior.
+
 `payloadSnapshot` de la traza por nodo recibe el mismo saneado, sustituyendo el base64 por
 `[base64 omitido]`: ese volcado va al archivo `execution-*.log`, que rota por tamaño.
 
-### Nodo `PARSER_PRE_IA` (esqueleto)
+| Variable | Uso | Política si falta o no sirve |
+|---|---|---|
+| `FSM_MIN_USEFUL_TEXT_LENGTH` | Caracteres mínimos para que el texto de un nodo libere el binario | Cae a `50`; se rechaza con `warn` lo que no sea un entero ≥ 0 |
+
+Se resuelve **una sola vez por instancia**, de forma perezosa: un valor mal escrito avisa por
+el log la primera vez que importa, no al arrancar el módulo, para que construir el motor no
+tenga efectos. El `0` explícito se admite y restaura el comportamiento anterior.
+
+### Nodo `PARSER_PRE_IA`
 
 `ParserEmailStrategy` es un consumidor **puro**: lee `raw_email`, publica en `parsed_email` y
-no escribe en ningún namespace ajeno. Payload:
+no escribe en ningún namespace ajeno. Artefactos: la estrategia, su DTO
+(`parser-email-config.dto.ts`) y las heurísticas de limpieza, que viven aparte como funciones
+puras en `src/modules/nodes/utils/email-sanitizer.util.ts`.
+
+Payload de doce claves. **El orden es parte del contrato** (la prueba 1.1 lo compara
+posicionalmente) y todas están siempre presentes con su tipo:
 
 ```typescript
 {
-  subject: string;
-  clean_body: string | null;          // null si no se extrajo texto
-  body_source: 'text' | 'html_pending_sanitize' | 'none';
+  subject: string;                    // asunto crudo, tal cual llegó
+  clean_title: string;                // sin prefijos de respuesta/reenvío
+  clean_body: string;                 // SIEMPRE cadena; '' = sin texto
+  body_source: 'text' | 'html' | 'none';
+  character_count: number;            // === clean_body.length
+  original_character_count: number;   // longitud de la FUENTE consumida
+  reduction_percentage: number;       // 0..100 con dos decimales
+  extracted_urls: string[];           // enlaces de contenido, máx. 50
   attachment_count: number;
   attachments: RawEmailAttachmentMetadata[];   // inventario SIN base64
   requires_multimodal_fallback: boolean;
@@ -2026,14 +2064,164 @@ no escribe en ningún namespace ajeno. Payload:
 }
 ```
 
-`requires_multimodal_fallback` exige **ambas** condiciones: adjunto de tipo imagen o PDF
-**y** cuerpo textual por debajo de `minBodyLength` (def. 200). El AND evita gastar una
-llamada multimodal en un boletín que solo trae su logo en PNG.
+`clean_body` dejó de admitir `null`, y no es cosmético: interpolar
+`{{parsed_email.clean_body}}` sobre un `null` lanzaba igual que sobre una variable ausente,
+mientras que una cadena vacía no lanza. Las plantillas montadas sobre este nodo pasan a ser
+seguras por construcción. Para ramificar hay que seguir mirando `body_source`, que es la
+clave que explica *por qué* el cuerpo está como está.
 
-Esta versión todavía no sanea el marcado: cuando el único cuerpo es HTML lo declara con
-`body_source: 'html_pending_sanitize'` y deja `clean_body` a `null` en vez de fingir texto
-limpio. La rama de `cheerio` / `@mozilla/readability` rellenará esa rama sin cambiar la forma
-del payload.
+#### Pipeline de saneado
+
+El texto plano manda cuando existe —ya es texto, y saltarse el DOM ahorra la operación más
+cara del nodo—; el marcado es el plan B del `multipart/alternative` sin parte `text/plain`,
+que es el caso habitual de un boletín institucional. En la ruta HTML, trece pasos
+deterministas y sin ramas:
+
+1. `cheerio.load(html, { xml: { xmlMode: false } }, false)` — misma invocación que el resto
+   del repositorio: htmlparser2 sin modo XML, y modo fragmento para que parse5 no sintetice
+   `<html><head><body>`.
+2. Borrado del ruido estructural: `script`, `style`, `noscript`, `iframe`, `object`, `embed`,
+   `svg`, `head`, `meta`, `link`, `title`, `[aria-hidden]`, `[hidden]`.
+3. Marcadores de corte de Outlook (`#appendonsend`, `#divRplyFwdMsg`): se borra el marcador
+   **y todo lo que le sigue**, subiendo por los ancestros. No envuelven la cita, la preceden.
+4. Contenedores de firma y cita conocidos (`.gmail_signature`, `.moz-cite-prefix`,
+   `blockquote[type="cite"]`, `.yahoo_quoted`…).
+5. **Recolección de URLs**, sobre el árbol ya podado (ver más abajo por qué aquí).
+6. `<br>` → `\n`.
+7. `td`/`th` → separador de **espacio**: con `\n` una fila horizontal se volvería columna.
+8. Elementos de bloque → `\n` antes y después.
+9. `$.root().text()` — htmlparser2 ya decodificó las entidades durante el parseo.
+10. `normalizeWhitespace`: CRLF, espacios duros, invisibles, colapso y máximo una línea en
+    blanco. **El orden importa**: `&nbsp;` decodifica a U+00A0, que no es un espacio ASCII, y
+    si no se convierte antes del colapso el recuento queda inflado con blancos invisibles.
+11. Corte de la cadena de cita (`-----Mensaje original-----`, `El … escribió:`, la regla de
+    guiones bajos, las cabeceras `De:`/`Enviado el:`) y del delimitador de firma de la
+    RFC 3676.
+12. Retirada de la **racha final** de párrafos que son aviso legal o pie de cortesía.
+13. `trim()`.
+
+**El DOM resuelve la estructura; el regex resuelve la prosa.** `-----Mensaje original-----` y
+`El … escribió:` son texto, no marcado, y ningún `blockquote` los envuelve de forma fiable.
+
+Dos guardas impiden que el saneado destruya contenido. La primera: si cortar por una cita
+deja la cabeza vacía **no se corta** —un reenvío puro, con el cuerpo vacío y toda la
+sustancia dentro de la cita, se quedaría sin nada—. La segunda: el barrido de avisos legales
+recorre **desde el final hacia atrás** y se detiene en el primer párrafo que no case o que
+supere los 800 caracteres. Esto último es una decisión de producto, no una optimización: el
+corpus son notas de prensa institucionales, donde un comunicado puede mencionar el RGPD o la
+protección de datos **como contenido**. Barrer todo el cuerpo destruiría justo lo que el nodo
+existe para conservar; limitarse a la racha final lo garantiza por construcción.
+
+Se descartaron a propósito las heurísticas de teléfono, dirección y cargo para detectar
+firmas: producen falsos positivos garantizados en un corpus donde el último párrafo suele ser
+el contacto del gabinete de prensa, y ese contacto a menudo **es** información que el flujo
+quiere.
+
+**Por qué `cheerio` y no `@mozilla/readability`**, aunque esté instalado: Readability exige
+un `Document` real de jsdom, penaliza las tablas (y un correo de Outlook es,
+estructuralmente, tablas anidadas), necesita un `documentURI` que un correo no tiene, y su
+sistema de puntuación no es estable entre versiones menores —mientras que este payload es
+contrato y tiene que ser reproducible—. Readability y jsdom siguen reservados para
+`EXTRACTOR_WEB`, donde sí hay un artículo y sí hay URL base.
+
+#### Política de `extracted_urls`
+
+Se recolectan en el paso 5, **después** de podar y **antes** de aplanar a texto. Ese orden no
+es casual: un enlace de desuscripción que vivía dentro de una firma ya eliminada no debe
+reaparecer, y así `clean_body` y `extracted_urls` describen el mismo documento.
+
+- Solo `http:` y `https:`. El consumidor natural es `EXTRACTOR_WEB`, que solo sabe navegar
+  http(s); un `mailto:` ahí es una descarga fallida con su reintento y su alerta.
+- **Relativas: descartadas.** Un correo no tiene documento base, y absolutizar contra el
+  dominio del remitente fabricaría una dirección que puede no existir.
+- **Protocol-relative (`//host/ruta`): rescatadas** promoviendo a `https:`. Ahí el host es
+  explícito y no se inventa nada.
+- Descarte por host: redirectores de campaña (`list-manage.com`, `sendgrid.net`,
+  `awstrack.me`, `bit.ly`…) y las cuatro familias sociales pedidas con sus acortadores
+  (`twitter.com`, `x.com`, `t.co`, `facebook.com`, `linkedin.com`, `lnkd.in`,
+  `instagram.com`…). **YouTube, TikTok, Threads, WhatsApp y Telegram quedan fuera de esa
+  lista a propósito**: una nota de prensa que enlaza un vídeo institucional está enlazando
+  contenido, y este pipeline es de recorte de prensa.
+- Descarte de desuscripción: se mira la ruta y el query **y además el texto del ancla**.
+  Muchos boletines esconden el enlace tras un redirector opaco donde la ruta es un
+  identificador ilegible y solo el texto («Darse de baja») delata la función.
+- Se retiran los parámetros de campaña (`utm_*`, `gclid`, `fbclid`, `mc_cid`…). El motivo es
+  operativo: dos enlaces al mismo artículo que solo difieren en `utm_content` sobreviven a la
+  deduplicación por `Set`, y `EXTRACTOR_WEB` acabaría pagando **dos navegaciones de
+  Playwright** por la misma página. `ref` y `spm` se conservan: hay sitios que los usan para
+  enrutar, y quitarlos cambiaría la página que se descarga.
+- Tope de `MAX_EXTRACTED_URLS = 50`. Un boletín puede traer trescientos enlaces, y el arreglo
+  se reserializa entero en `contexto_acumulado` en cada checkpoint posterior: es el mismo
+  argumento de peso que motivó la purga de binarios, a otra escala.
+
+En la ruta de texto plano `extracted_urls` queda **vacío** a propósito. Rescatar enlaces con
+un `https?://\S+` es posible, pero el texto plano de un correo parte las URLs con saltos de
+línea a 78 columnas (RFC 5322) y produciría direcciones truncadas que `EXTRACTOR_WEB`
+intentaría descargar y fallaría. Un arreglo vacío y honesto es mejor que enlaces rotos.
+
+#### Métricas de reducción (RNF-01)
+
+> **RNF-01 · Economía de tokens pre-IA.** El nodo `PARSER_PRE_IA` debe reducir **al menos un
+> 50 %** los caracteres de un correo HTML realista antes de la llamada al modelo de lenguaje.
+> Cada ejecución publica su medida en `parsed_email.reduction_percentage`, de modo que el
+> requisito es auditable sobre cualquier checkpoint y no solo en pruebas.
+> Verificado por `parser-email.strategy.spec.ts` 9.3, cuyo fixture es un correo de Outlook con
+> hoja de estilos, tabla anidada, firma y aviso legal.
+
+Se da de alta aquí, junto a la única implementación que lo cumple, por el mismo criterio con
+el que RNF-09 vive en §8.4: un requisito sin el código que lo satisface al lado envejece mal.
+
+`reduction_percentage = round(clamp((original - final) / original, 0, 1) * 10000) / 100`.
+
+Dos guardas: si `original <= 0` devuelve `0` y no `NaN` —`NaN` se serializa a `null` al
+escribir el `jsonb` y rompería en silencio la regla de «toda clave presente **con su
+tipo**»—, y el resultado va acotado a `[0, 100]` para que un futuro separador que añadiera
+texto no deje un porcentaje negativo que nadie sepa leer seis meses después.
+
+`original_character_count` es la longitud de la **fuente consumida**, no la del correo
+entero:
+
+| `body_source` | `original_character_count` |
+|---|---|
+| `'text'` | `raw_email.text.length` |
+| `'html'` | `raw_email.html.length` |
+| `'none'` | `0` |
+
+La pareja `(original, final)` tiene que ser la entrada y la salida de la **misma**
+transformación. Medir siempre contra `html` daría una división por cero en un correo
+`text/plain` puro; medir siempre contra `text` daría 0 % en la ruta HTML, que es justo donde
+la reducción es del 80-95 % y donde RNF-01 tiene algo que medir. Comparar dos correos con
+`body_source` distinto es comparar cosas distintas, y para eso existe esa clave.
+
+Consecuencia de diseño: **la ruta `'text'` dejó de ser un `trim()`**. También pasa por el
+corte de citas, firma y pie legal; si no, un `text/plain` con cuarenta líneas de hilo citado
+y un aviso de confidencialidad entraría entero al prompt, que es el gasto que el nodo existe
+para evitar.
+
+#### Decisión multimodal y errores
+
+`requires_multimodal_fallback` exige **ambas** condiciones: adjunto de tipo imagen o PDF **y**
+cuerpo textual por debajo de `minBodyLength` (def. **50**, recalibrado desde 200). El AND
+evita gastar una llamada multimodal en un boletín que solo trae su logo en PNG.
+
+El recalibrado no es arbitrario: los 200 originales estaban medidos contra texto **sin
+sanear**, donde una firma y un pie legal sumaban solos unos 300 caracteres y casi cualquier
+correo superaba el listón por puro ruido. Con el saneador, `clean_body` es texto útil: 50
+caracteres son una frase con sujeto y predicado, y un «Adjunto la nota de prensa» (25) se
+queda debajo, que es donde tiene que quedarse. Va en sincronía con
+`FSM_MIN_USEFUL_TEXT_LENGTH` del motor.
+
+El nodo **no expone las heurísticas como opciones** —no hay `stripSignatures` ni
+`filterSocialUrls`—: cada interruptor multiplica las formas posibles del payload histórico,
+y un `extracted_urls: []` significaría a veces «no había enlaces» y a veces «alguien apagó la
+extracción ese día», sin que ningún checkpoint de hace seis meses pueda distinguirlas. Es el
+mismo argumento ya escrito para `attachments: []`. Un flujo que quiera la firma quiere el
+correo crudo, y ese sigue intacto en `raw_email`.
+
+Si el saneado del marcado lanzase sobre un correo patológico, el nodo **degrada**: registra
+un `warn`, devuelve `body_source: 'none'` y conserva el inventario de adjuntos y la decisión
+multimodal. El motor normaliza toda excepción a `URGENTE`, que `canRetry` nunca reintenta; un
+correo mal formado no puede llevarse por delante la ejecución entera.
 
 Códigos de fallo: `ERR_PARSER_CONFIG` y `ERR_PARSER_SOURCE_MISSING`, ambos `GRAVE` para que
 entren en `canRetry` y el flujo quede PAUSADO y reanudable (CU-09).

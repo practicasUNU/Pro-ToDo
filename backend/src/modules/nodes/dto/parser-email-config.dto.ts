@@ -10,22 +10,38 @@ export const DEFAULT_PARSER_SOURCE_NAMESPACE = 'raw_email';
  * Longitud minima, en caracteres, para dar por bueno un cuerpo textual.
  *
  * Por debajo de este umbral se considera que el correo no trae texto que un
- * modelo de lenguaje pueda aprovechar. 200 caracteres son unas tres frases: un
- * pie de firma o un "ver adjunto" se quedan claramente por debajo, y cualquier
- * aviso real lo supera con holgura.
+ * modelo de lenguaje pueda aprovechar.
+ *
+ * RECALIBRADO DE 200 A 50 al entrar el saneador. Los 200 originales estaban
+ * medidos contra texto SIN sanear, donde una firma y un pie legal sumaban solos
+ * unos 300 caracteres y casi cualquier correo superaba el listado por puro
+ * ruido. Ahora `clean_body` es texto util: 50 caracteres son una frase con
+ * sujeto y predicado, y un "Adjunto la nota de prensa" (25) se queda debajo,
+ * que es exactamente donde tiene que quedarse.
+ *
+ * Va en sincronia con `FSM_MIN_USEFUL_TEXT_LENGTH` del motor, que decide con el
+ * mismo listado si libera el binario de los adjuntos. Moverlo aqui sin mover
+ * aquel reabre la ventana en la que el correo declara texto suficiente para
+ * purgar y a la vez insuficiente para el modelo.
  */
-export const DEFAULT_MIN_BODY_LENGTH = 200;
+export const DEFAULT_MIN_BODY_LENGTH = 50;
 
 /**
  * Configuracion del nodo `PARSER_PRE_IA`.
  *
- * Minima a proposito: esta version todavia no sanea el marcado —eso llega con
- * `cheerio` / `@mozilla/readability`— y solo necesita saber de donde lee y con
- * que umbral decide. Aun asi tiene DTO propio, y no es ceremonia: el esquema
- * valida `params` como objeto libre, asi que la unica estrictez real es la que
- * aplica la estrategia. Sin el, un `minBodyLenght` mal escrito se ignoraria en
- * silencio y el criterio multimodal quedaria decidido por un defecto que nadie
- * pidio.
+ * Minima a proposito, y sigue siendolo despues del saneador: el nodo solo
+ * necesita saber DE DONDE lee y CON QUE umbral decide. Las heuristicas de
+ * limpieza no se exponen como opciones —no hay `stripSignatures` ni
+ * `filterSocialUrls`— porque cada interruptor multiplica las formas posibles del
+ * payload historico: un `extracted_urls: []` significaria a veces "no habia
+ * enlaces" y a veces "alguien apago la extraccion ese dia", y ningun checkpoint
+ * de hace seis meses puede distinguirlas. Ademas, un flujo que quiera la firma
+ * quiere el correo crudo, y ese sigue intacto en `raw_email`.
+ *
+ * Aun asi tiene DTO propio, y no es ceremonia: el esquema valida `params` como
+ * objeto libre, asi que la unica estrictez real es la que aplica la estrategia.
+ * Sin el, un `minBodyLenght` mal escrito se ignoraria en silencio y el criterio
+ * multimodal quedaria decidido por un defecto que nadie pidio.
  */
 export class ParserEmailConfigDto {
   @ApiPropertyOptional({
@@ -43,7 +59,7 @@ export class ParserEmailConfigDto {
   sourceNamespace?: string;
 
   @ApiPropertyOptional({
-    description: `Umbral de caracteres por debajo del cual el cuerpo se considera insuficiente. Por defecto ${DEFAULT_MIN_BODY_LENGTH}`,
+    description: `Umbral de caracteres del cuerpo YA SANEADO por debajo del cual se considera insuficiente para un modelo de lenguaje. Por defecto ${DEFAULT_MIN_BODY_LENGTH}`,
     example: DEFAULT_MIN_BODY_LENGTH,
     default: DEFAULT_MIN_BODY_LENGTH,
   })
