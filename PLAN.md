@@ -2124,7 +2124,7 @@ puras, en `src/modules/nodes/utils/document-extractor.util.ts`:
 | Tipo MIME | Vía | Librería |
 |---|---|---|
 | `text/plain`, `text/csv` | `buffer.toString('utf-8')` | ninguna |
-| `application/pdf` | texto nativo del PDF | `pdf-parse@1.1.1` |
+| `application/pdf` | texto nativo del PDF | `pdf-parse@1.x` |
 | `…wordprocessingml.document` | `extractRawText` | `mammoth` |
 | `…spreadsheetml.sheet` | filas aplanadas, celdas por `, ` | `exceljs` |
 | `image/*` y cualquier otro | `''` inmediato | ninguna |
@@ -2135,9 +2135,12 @@ de ser la primera respuesta y pasa a ser la última.
 
 Tres decisiones de contorno:
 
-- **`pdf-parse` pinado a 1.1.1.** La 2.x arrastra `pdfjs-dist` y `@napi-rs/canvas`, un módulo
-  NAPI nativo cuya única razón de ser es rasterizar páginas — algo que sin OCR no hace falta.
-  La 1.1.1 depende de `debug` y `node-ensure`, JS puro.
+- **`pdf-parse` en la línea 1.x, no en la 2.x.** La 2.x arrastra `pdfjs-dist` y `@napi-rs/canvas`,
+  un módulo NAPI nativo cuya única razón de ser es rasterizar páginas — algo que sin OCR no hace
+  falta. La 1.x depende únicamente de `node-ensure`, JS puro. La línea estuvo siete años parada
+  (1.1.1 es de 2018) y revivió en octubre de 2025 con la 1.1.4, publicada por el mismo mantenedor
+  y el mismo día que la 2.4.5; esa 1.1.4 elimina la dependencia `debug` y el bloque de depuración
+  de `index.js` que leía un PDF de prueba del propio paquete.
 - **`exceljs` y no `xlsx`.** `xlsx` quedó congelado en npm en la 0.18.5 y `npm audit` lo marca
   **high sin parche disponible** (prototype pollution GHSA-4r6h-8v6p-xvw6 y ReDoS
   GHSA-5pgg-2g8v-p4x9); SheetJS solo publica las correcciones en su propio CDN. En una ruta

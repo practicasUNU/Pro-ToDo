@@ -4,6 +4,72 @@ Registro técnico del "por qué" de cada decisión de implementación. Los estad
 
 ---
 
+## 2026-09-19 · `npm audit` a cero sin tocar el major de NestJS — rama `feat/auditoria-dependencias`
+
+### Diecisiete avisos, cuatro causas
+
+El informe daba 17 vulnerabilidades y a primera vista parecía que el monolito entero estaba podrido:
+once de las entradas eran paquetes `@nestjs/*`. No lo estaban. Al leer el campo `via` de cada aviso,
+las once colgaban de una sola raíz — `@nestjs/platform-express` depende de `multer`, y `multer`
+arrastraba cuatro CVE de denegación de servicio— y el resto se agrupaba en tres más: `fast-uri`,
+`js-yaml`/`qs` y `nodemailer` (que a su vez marcaba `mailparser`).
+
+Cuatro arreglos, no diecisiete. Y ninguno exigía subir de major.
+
+### Por qué `--force` habría sido un desastre
+
+`npm audit fix --force` proponía `@nestjs/core@12.0.3`, `@nestjs/platform-express@12.0.3`,
+`@nestjs/swagger@12.0.1`, `@nestjs/typeorm@12.0.1` y cinco más: el salto de la 11 a la 12 en todo el
+monolito, y todo ello **para arreglar `multer`**, que este proyecto ni siquiera importa
+(`grep FileInterceptor` no da un solo resultado). Habría sido cambiar diecisiete avisos por una
+migración de framework no pedida.
+
+### El reparto: `audit fix` primero, override solo donde hacía falta
+
+`npm audit fix` sin `--force` resolvió por sí solo `fast-uri` (3.1.5 → 3.1.8), `js-yaml` (4.3.1 →
+4.3.2, y la copia 3.15.1 del árbol de cobertura a 3.15.2) y `qs` (6.15.3 → 6.16.0). De 17 a 13.
+
+Las dos que quedaban se trataron de forma distinta **a propósito**:
+
+- **`nodemailer` es dependencia DIRECTA.** Lo correcto ahí es corregir el rango declarado en
+  `dependencies` (`^9.0.5` → `^9.1.1`), no añadir un override. Un override sobre una dependencia
+  propia esconde el rango real: el `package.json` seguiría anunciando que acepta una versión
+  vulnerable y el arreglo viviría en otro sitio. Esto además cerró `mailparser`, que solo estaba
+  marcada por arrastrarla.
+- **`multer` sí necesitaba un override**, y es el único caso legítimo: `@nestjs/platform-express`
+  la fija en `"multer": "2.2.0"` **exacto**, sin caret, de modo que `audit fix` no tiene margen
+  para moverla por mucho que exista la 2.4.0. El override es la única vía, y es un salto *menor*
+  dentro de la 2.x.
+
+Todos los parches existían **dentro del major vigente**. Eso se comprobó versión a versión antes de
+escribir nada, precisamente para no acabar justificando un major a posteriori.
+
+### Verificación de que el override de `multer` no rompe nada
+
+Que la suite pase no demuestra que `platform-express` siga hablándose con un `multer` que no es el
+que declaró. El punto de contacto real es `FileInterceptor`, así que se comprobó directamente: se
+carga, se instancia y el `multer` efectivo es el 2.4.0. `nest build` compila y `@nestjs/*` se queda
+íntegro en 11.x, sin un solo major movido.
+
+### Un efecto lateral que resultó ser una mejora
+
+`npm audit fix` también movió `pdf-parse` de 1.1.1 a **1.1.4**, y conviene decir que fue a mejor:
+pierde la dependencia `debug` y elimina el bloque `isDebugMode = !module.parent` de su `index.js`
+—el cebo que obligó a montar una prueba de humo al introducir la librería el día anterior—. La
+entrada del 2026-09-18 afirmaba que la línea 1.x estaba «sin mantenimiento desde 2019»; era cierto
+al escribirla y ha dejado de serlo. Queda corregida allí con su fecha.
+
+### Estado final
+
+`npm audit` → **found 0 vulnerabilities**. `npx tsc --noEmit -p tsconfig.build.json` limpio,
+`nest build` en verde, **41 suites / 936 pruebas**.
+
+Lo que **no** se ha hecho: arrancar la aplicación contra la base de datos. La comprobación de
+`multer` es de integración de módulos, no de una subida de fichero real — algo que hoy no existe en
+el proyecto, pero que habría que ejercitar de verdad si algún día se añade un endpoint de carga.
+
+---
+
 ## 2026-09-18 · Extracción nativa de texto de adjuntos en `PARSER_PRE_IA` — rama `feat/extractor-adjuntos`
 
 ### El problema: pagar visión por un PDF que ya traía su texto
@@ -38,11 +104,16 @@ alcanzable desde aquí, porque ExcelJS llama a `uuid.v4()` sin búfer y en la ru
 cerrado de todos modos con un `overrides`. Los tres paquetes nuevos aportan **cero** avisos al
 proyecto; los 17 que `npm audit` sigue reportando son los preexistentes de la cadena de NestJS.
 
-**`pdf-parse` pinado a 1.1.1 y no a la 2.x.** La 2.x está mantenida, pero arrastra `pdfjs-dist` y
-`@napi-rs/canvas`, un módulo NAPI nativo que existe para rasterizar páginas. Sin OCR no hay nada que
-rasterizar. La 1.1.1 depende de `debug` y `node-ensure`: JS puro. Es un cambio de mantenimiento por
-superficie, y queda anotado: si un PDF real rompe la 1.1.1, la salida es la 2.x con su API de clase,
-ya verificada bajo este `tsconfig`.
+**`pdf-parse` en la línea 1.x y no en la 2.x.** La 2.x arrastra `pdfjs-dist` y `@napi-rs/canvas`, un
+módulo NAPI nativo que existe para rasterizar páginas. Sin OCR no hay nada que rasterizar. La 1.x
+depende solo de `node-ensure`: JS puro. Queda anotado: si un PDF real rompe la 1.x, la salida es la
+2.x con su API de clase, ya verificada bajo este `tsconfig`.
+
+> **Corregido el 2026-09-19.** Esta entrada decía que la 1.x llevaba «sin mantenimiento desde 2019».
+> Era cierto al escribirla y dejó de serlo: la línea revivió en octubre de 2025 y la instalada es la
+> **1.1.4**, del mismo mantenedor y el mismo día que la 2.4.5. Mejora en lo que aquí importaba:
+> pierde la dependencia `debug` y elimina el bloque `isDebugMode = !module.parent` de `index.js`
+> —el cebo que motivó la prueba de humo del paso 0— que intentaba leer un PDF del propio paquete.
 
 **Un CSV no pasa por el analizador de hojas de cálculo.** Ya es texto. Leerlo con `exceljs` para
 volver a serializarlo como CSV es un viaje de ida y vuelta que solo puede perder información, y de
@@ -113,7 +184,7 @@ Dos conmutadores quedaron anotados como prohibidos al regenerarlo, comprobados v
 
 Por ese mismo motivo, las suites del nodo y del asistente **doblan `pdf-parse`**. Examinan la regla
 —qué texto cuenta y cuándo sube la bandera—, no la capacidad de pdf.js de leer un fichero;
-ejercitarlo de verdad allí ataba el resultado a una librería sin mantenimiento y dejaba su worker
+ejercitarlo de verdad allí ataba el resultado a una versión concreta de pdf.js y dejaba su worker
 vivo tras el *teardown* de Jest, lo que tumbaba el proceso hijo. La extracción real se prueba donde
 corresponde, en `document-extractor.util.spec.ts`, contra ficheros de verdad.
 
