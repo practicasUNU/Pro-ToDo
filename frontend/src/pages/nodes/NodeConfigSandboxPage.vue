@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue';
+import { computed, ref, shallowRef, watch } from 'vue';
 
 import { resolveNodeStore } from '@stores/nodes/node-store-registry';
 
@@ -45,17 +45,58 @@ const nodeTypeOptions = computed(() =>
 const resolvedComponent = computed(() => nodeConfigRegistry[selectedNodeType.value] ?? null);
 
 /**
+ * Namespaces que se simula que aportan los nodos previos.
+ *
+ * La fuente de verdad es este `ref` local y no el store: `availableUpstreamNamespaces`
+ * no forma parte de `NodeConfigStore`, y leerlo desde el anfitrion era justo la
+ * inspeccion de la configuracion ajena que §3.1 prohibe.
+ *
+ * Se declara ANTES que el store activo porque `syncActiveStore` lo lee y el
+ * `watch` que lo invoca es `immediate`: en `<script setup>` el orden de
+ * declaracion es el de ejecucion.
+ */
+const simulatedUpstream = ref<string[]>([...TEMPLATE_NAMESPACES]);
+
+/**
  * Store del tipo activo, resuelto por REGISTRO igual que el componente.
  *
  * Antes se importaba `useTemplateMapperStore` directamente, y el panel de estado
  * se quedaba mirando al mapeador aunque el selector montara otro configurador.
  *
- * `resolveNodeStore` no es solo comodidad: invoca el hook de Pinia, que exige una
- * instancia activa, y por eso la resolucion vive aqui y no en el modulo.
+ * `shallowRef` y no `ref`: el valor es el proxy de un store que YA es reactivo, y
+ * envolverlo en reactividad profunda solo anadiria una travesia inutil de todo su
+ * estado en cada reasignacion.
  */
-const activeStore = computed<NodeConfigStore | null>(() =>
-  resolveNodeStore(selectedNodeType.value, SANDBOX_NODE_ID),
-);
+const activeStore = shallowRef<NodeConfigStore | null>(null);
+
+/**
+ * Reapunta el store activo y le traslada el contexto simulado.
+ *
+ * Deliberadamente IMPERATIVO y no un `computed`: `resolveNodeStore` invoca un
+ * hook de Pinia, que registra la instancia en `pinia.state.value`. Un getter con
+ * un efecto colateral dentro es un contrato roto aunque no siempre estalle.
+ *
+ * Sin `try/catch` a proposito: `resolveNodeStore` devuelve `null` cuando el tipo
+ * no esta registrado y no lanza, asi que un `catch` seria una rama inalcanzable
+ * fingiendo manejar un fallo que el contrato no produce.
+ *
+ * `?.()` porque el metodo es OPCIONAL en el contrato: un disparador es el primero
+ * del grafo y no tiene nada aguas arriba que declarar.
+ */
+const syncActiveStore = (nodeType: NodeType): void => {
+  const store = resolveNodeStore(nodeType, SANDBOX_NODE_ID);
+
+  activeStore.value = store;
+  store?.setAvailableUpstreamNamespaces?.([...simulatedUpstream.value]);
+};
+
+// Solo el cambio de TIPO reapunta el store. Antes esto era un
+// `watch([activeStore, simulatedUpstream], ..., { deep: true })`, y el `deep`
+// sobre el propio store suscribia el vigilante a todo el estado que su callback
+// escribia: como el setter del mapeador asigna un array NUEVO en cada llamada, el
+// ciclo no tenia punto fijo y reventaba al montar con
+// `Maximum recursive updates exceeded`.
+watch(selectedNodeType, syncActiveStore, { immediate: true });
 
 /** El nodo activo declara depender del contexto que dejan los nodos previos. */
 const acceptsUpstream = computed<boolean>(
@@ -63,29 +104,16 @@ const acceptsUpstream = computed<boolean>(
 );
 
 /**
- * Namespaces que se simula que aportan los nodos previos.
+ * Unico punto de escritura de la simulacion aguas arriba.
  *
- * La fuente de verdad es este `ref` local y no el store: `availableUpstreamNamespaces`
- * no forma parte de `NodeConfigStore`, y leerlo desde el anfitrion era justo la
- * inspeccion de la configuracion ajena que §3.1 prohibe.
+ * Reemplaza al vigilante circular: aqui la escritura la origina un evento de la
+ * interfaz y no una dependencia reactiva del propio dato escrito, de modo que la
+ * realimentacion es imposible por construccion.
  */
-const simulatedUpstream = ref<string[]>([...TEMPLATE_NAMESPACES]);
-
-/**
- * Propaga la simulacion al store activo.
- *
- * `immediate` y con el store entre las fuentes: al cambiar de tipo, el store
- * nuevo arranca sin saber nada del contexto simulado, y sin esto el panel
- * mostraria un `isConfigValid` calculado contra una lista vacia.
- *
- * `?.()` porque el metodo es OPCIONAL en el contrato: un disparador es el primero
- * del grafo y no tiene nada aguas arriba que declarar.
- */
-watch(
-  [activeStore, simulatedUpstream],
-  ([store, namespaces]) => store?.setAvailableUpstreamNamespaces?.([...namespaces]),
-  { immediate: true, deep: true },
-);
+const onUpstreamToggle = (namespaces: string[]): void => {
+  simulatedUpstream.value = namespaces;
+  activeStore.value?.setAvailableUpstreamNamespaces?.([...namespaces]);
+};
 
 /**
  * Lo que el asistente inspeccionaria del nodo activo.
@@ -181,12 +209,13 @@ const inspectedState = computed(() =>
           <q-checkbox
             v-for="namespace in TEMPLATE_NAMESPACES"
             :key="namespace"
-            v-model="simulatedUpstream"
+            :model-value="simulatedUpstream"
             :val="namespace"
             dense
             :disable="!acceptsUpstream"
             class="pd-mono sandbox-namespace"
             :label="namespace"
+            @update:model-value="onUpstreamToggle"
           />
         </div>
       </aside>
