@@ -42,6 +42,16 @@ export interface ParsedEmailPayload {
   readonly extracted_urls: readonly string[];
   readonly attachment_count: number;
   readonly attachments: readonly ParsedEmailAttachment[];
+  /**
+   * Texto NATIVO de los adjuntos legibles (.pdf, .docx, .xlsx, .csv, .txt).
+   *
+   * Sin OCR: una imagen o un PDF escaneado no aportan nada aqui, y es
+   * precisamente eso lo que levanta `requires_multimodal_fallback`.
+   *
+   * SIEMPRE vacio en la respuesta del banco de pruebas, que no recibe los
+   * binarios de los adjuntos. El backend lo advierte en `warnings`.
+   */
+  readonly extracted_documents_text: string;
   readonly requires_multimodal_fallback: boolean;
   readonly multimodal_reason: string;
 }

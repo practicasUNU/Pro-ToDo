@@ -1,4 +1,5 @@
 import { DEFAULT_ATTACHMENT_CONTENT_TYPE } from '@modules/nodes/interfaces/raw-email-attachment.interface';
+import { extractTextFromBuffer } from '@modules/nodes/utils/document-extractor.util';
 import {
   cleanSubject,
   reductionPercentage,
@@ -58,6 +59,7 @@ export interface ParsedEmailPayload {
   readonly extracted_urls: readonly string[];
   readonly attachment_count: number;
   readonly attachments: readonly RawEmailAttachmentMetadata[];
+  readonly extracted_documents_text: string;
   readonly requires_multimodal_fallback: boolean;
   readonly multimodal_reason: string;
 }
@@ -87,6 +89,16 @@ export interface ExtractedBody {
 export interface ParsedEmailHooks {
   readonly onSanitizeFailure?: (reason: string) => void;
   readonly onMultimodalFallback?: (reason: string) => void;
+  /**
+   * Un adjunto del que no se pudo sacar texto por estar ilegible.
+   *
+   * Ni bloquea ni levanta la bandera multimodal: un `.docx` corrupto no lo
+   * arregla un modelo con vision, de modo que conservar sus megabytes para
+   * mandarselos seria pagar la llamada mas cara del pipeline por un fichero
+   * roto. Es el mismo trato no bloqueante que `ImapTriggerStrategy` da a un
+   * adjunto descartado por tipo MIME.
+   */
+  readonly onDocumentFailure?: (filename: string, reason: string) => void;
 }
 
 /** Normaliza a cadena un valor de namespace de tipo desconocido. */
@@ -114,11 +126,6 @@ const toAttachmentMetadata = (value: unknown): RawEmailAttachmentMetadata => {
     size: typeof size === 'number' ? size : 0,
   };
 };
-
-/** Un adjunto que solo un modelo con vision puede interpretar. */
-const isMultimodalCandidate = (
-  attachment: RawEmailAttachmentMetadata,
-): boolean => MULTIMODAL_CONTENT_TYPE_PATTERN.test(attachment.contentType);
 
 /**
  * Resuelve la cascada texto -> marcado -> nada y devuelve todo lo derivado.
@@ -173,6 +180,90 @@ export const extractEmailBody = (
   return { source: 'none', clean: '', urls: [], originalLength: 0 };
 };
 
+/** Texto de los adjuntos legibles mas el recuento de candidatos a vision. */
+interface DocumentsExtraction {
+  readonly text: string;
+  readonly visualCandidateCount: number;
+}
+
+/**
+ * Decodifica el binario de un adjunto, o `null` si no hay nada que decodificar.
+ *
+ * `contentBase64` es `string | null` por contrato, y el `null` NO es un caso
+ * raro: el motor lo pone ahi en cuanto algun nodo anterior emitio texto util. Un
+ * adjunto ya liberado no se puede evaluar, y tratarlo como "sin texto" lo
+ * convertiria en candidato a vision cuando lo unico que pasa es que su binario
+ * ya no esta.
+ */
+const decodeAttachment = (value: unknown): Buffer | null => {
+  if (typeof value !== 'string' || value.trim().length === 0) {
+    return null;
+  }
+
+  const buffer = Buffer.from(value, 'base64');
+
+  return buffer.length > 0 ? buffer : null;
+};
+
+/**
+ * Extrae el texto nativo de cada adjunto legible. CERO OCR.
+ *
+ * Devuelve ademas cuantos adjuntos quedaron SIN texto siendo de un tipo que solo
+ * un modelo con vision puede interpretar. Esa cuenta es la segunda mitad del AND
+ * de `requires_multimodal_fallback`, y se calcula aqui porque depende del
+ * resultado de la extraccion: un PDF con texto nativo deja de ser candidato en
+ * cuanto se le saca el contenido, que es justo el ahorro que persigue este nodo.
+ *
+ * El separador nombra el fichero a proposito: el destinatario del texto es un
+ * modelo de lenguaje, y sin la marca no podria atribuir una cifra al documento
+ * del que salio cuando el correo trae tres adjuntos distintos.
+ */
+const extractAttachmentDocuments = async (
+  rawAttachments: readonly unknown[],
+  hooks: ParsedEmailHooks,
+): Promise<DocumentsExtraction> => {
+  const chunks: string[] = [];
+  let visualCandidateCount = 0;
+
+  for (const raw of rawAttachments) {
+    const record =
+      typeof raw === 'object' && raw !== null
+        ? (raw as Record<string, unknown>)
+        : {};
+    const filename = asString(record.filename);
+    const contentType =
+      asString(record.contentType) || DEFAULT_ATTACHMENT_CONTENT_TYPE;
+    const buffer = decodeAttachment(record.contentBase64);
+
+    if (buffer === null) {
+      continue;
+    }
+
+    const extraction = await extractTextFromBuffer(buffer, contentType);
+
+    if (extraction.failure !== null) {
+      hooks.onDocumentFailure?.(filename, extraction.failure);
+    }
+
+    const text = extraction.text.trim();
+
+    if (text.length > 0) {
+      chunks.push(`--- Documento: ${filename} ---\n\n${text}`);
+      continue;
+    }
+
+    // Sin texto. Solo cuenta como candidato a vision si el TIPO lo justifica:
+    // una imagen o un PDF escaneado los lee un modelo multimodal, pero un
+    // `.docx` corrupto o un `.xlsx` ilegible no los arregla nadie, y contarlos
+    // aqui retendria sus megabytes para una llamada que no puede servir.
+    if (MULTIMODAL_CONTENT_TYPE_PATTERN.test(contentType)) {
+      visualCandidateCount += 1;
+    }
+  }
+
+  return { text: chunks.join('\n\n'), visualCandidateCount };
+};
+
 /**
  * Proyecta un correo crudo al payload determinista de `parsed_email`.
  *
@@ -191,15 +282,15 @@ export const extractEmailBody = (
  * @param config Configuracion del nodo con los valores por defecto aplicados.
  * @param hooks Canales de aviso; ver `ParsedEmailHooks`.
  */
-export const buildParsedEmail = (
+export const buildParsedEmail = async (
   source: Record<string, unknown>,
   config: ResolvedParserEmailConfig,
   hooks: ParsedEmailHooks = {},
-): ParsedEmailPayload => {
-  const rawAttachments = source.attachments;
-  const attachments = Array.isArray(rawAttachments)
-    ? rawAttachments.map(toAttachmentMetadata)
+): Promise<ParsedEmailPayload> => {
+  const rawAttachments = Array.isArray(source.attachments)
+    ? (source.attachments as readonly unknown[])
     : [];
+  const attachments = rawAttachments.map(toAttachmentMetadata);
 
   const subject = asString(source.subject);
   const body = extractEmailBody(
@@ -208,21 +299,27 @@ export const buildParsedEmail = (
     hooks,
   );
 
-  const multimodalCandidates = attachments.filter(isMultimodalCandidate);
+  const documents = await extractAttachmentDocuments(rawAttachments, hooks);
   const bodyLength = body.clean.length;
+
+  // El texto UTIL suma cuerpo y documentos. Es el cambio que hace barato el
+  // caso mas comun del corpus —la nota de prensa que viaja entera en un PDF
+  // adjunto con un "Ver adjunto." por cuerpo—: antes se iba a un modelo con
+  // vision, y ahora basta con el texto nativo que el propio PDF ya traia.
+  const usefulLength = bodyLength + documents.text.length;
 
   // La bandera exige AMBAS condiciones. El AND es deliberado: un boletin con
   // el logo en PNG y cinco mil caracteres de texto no necesita vision, y
   // gastarla ahi seria la llamada mas cara del pipeline sin motivo. El caso
   // que si la merece es el contrario: un correo cuyo unico contenido real es
-  // un PDF escaneado o una captura.
+  // un PDF escaneado o una captura, de los que no se saco ni un caracter.
   const requiresMultimodal =
-    multimodalCandidates.length > 0 && bodyLength < config.minBodyLength;
+    documents.visualCandidateCount > 0 && usefulLength < config.minBodyLength;
 
   // Cadena vacia y nunca `null` cuando la bandera es `false`: un booleano
   // suelto en el checkpoint no explica nada seis horas despues.
   const multimodalReason = requiresMultimodal
-    ? `Cuerpo de ${bodyLength} caracteres (umbral ${config.minBodyLength}) con ${multimodalCandidates.length} adjunto(s) de tipo imagen o PDF.`
+    ? `Texto util de ${usefulLength} caracteres (cuerpo ${bodyLength} + documentos ${documents.text.length}, umbral ${config.minBodyLength}) con ${documents.visualCandidateCount} adjunto(s) de tipo imagen o PDF sin texto extraible.`
     : '';
 
   if (requiresMultimodal) {
@@ -253,6 +350,9 @@ export const buildParsedEmail = (
     // `contexto_acumulado`, y ademas los reintroduciria despues de que el
     // motor los hubiese liberado de `raw_email`.
     attachments,
+    // Texto NATIVO de los adjuntos, sin OCR. Va detras del inventario porque de
+    // el se deriva, y delante de la bandera porque es lo que la decide.
+    extracted_documents_text: documents.text,
     requires_multimodal_fallback: requiresMultimodal,
     multimodal_reason: multimodalReason,
   };

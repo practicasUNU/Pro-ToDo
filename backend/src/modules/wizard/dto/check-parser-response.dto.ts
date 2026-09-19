@@ -20,7 +20,7 @@ export class ParsedEmailAttachmentDto implements RawEmailAttachmentMetadata {
 }
 
 /**
- * Proyeccion documentada de `ParsedEmailPayload`, las doce claves EN ORDEN.
+ * Proyeccion documentada de `ParsedEmailPayload`, las trece claves EN ORDEN.
  *
  * Existe porque una `interface` de TypeScript no genera esquema de Swagger. El
  * `implements` no es decorativo: ata esta clase al contrato real del nodo, de
@@ -81,7 +81,15 @@ export class ParsedEmailPreviewDto implements ParsedEmailPayload {
 
   @ApiProperty({
     description:
-      'Exige AMBAS condiciones: adjunto de imagen o PDF Y cuerpo por debajo del umbral',
+      'Texto NATIVO de los adjuntos legibles (.pdf, .docx, .xlsx, .csv, .txt), sin OCR. ' +
+      'Siempre vacio en este endpoint, que no recibe los binarios',
+  })
+  extracted_documents_text: string;
+
+  @ApiProperty({
+    description:
+      'Exige AMBAS condiciones: adjunto de imagen o PDF sin texto extraible Y texto util ' +
+      '(cuerpo + documentos) por debajo del umbral',
   })
   requires_multimodal_fallback: boolean;
 

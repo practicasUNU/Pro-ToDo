@@ -4,6 +4,132 @@ Registro técnico del "por qué" de cada decisión de implementación. Los estad
 
 ---
 
+## 2026-09-18 · Extracción nativa de texto de adjuntos en `PARSER_PRE_IA` — rama `feat/extractor-adjuntos`
+
+### El problema: pagar visión por un PDF que ya traía su texto
+
+El corpus del proyecto son notas de prensa institucionales, y su forma más habitual es un correo
+con un `Ver adjunto.` por cuerpo y el comunicado entero dentro de un PDF. Hasta ahora el nodo solo
+sabía leer el cuerpo del correo: `clean_body` salía con doce caracteres, `requires_multimodal_fallback`
+se levantaba y el flujo acababa mandando el binario a un modelo con visión — la llamada más cara
+del pipeline — para leer un documento cuyo texto estaba ahí, seleccionable, sin necesidad de mirarlo.
+
+Ahora ese texto se extrae en local. La bandera multimodal deja de ser la primera respuesta y pasa a
+ser la última: solo se levanta cuando de un adjunto de imagen o PDF no se sacó **ni un carácter**.
+
+### Cero OCR, y no por falta de ganas
+
+La extracción es estrictamente nativa. Una imagen devuelve cadena vacía sin que nadie toque el
+búfer, y esa ausencia es *informativa*: es justo lo que convierte al adjunto en candidato a visión.
+Meter un motor de OCR aquí habría hecho lo contrario de lo que el nodo persigue —gastar CPU para
+adivinar un texto que luego habría que mandar igualmente a revisar— además de arrastrar
+`tesseract.js`, que descarga ~10 MB de datos de idioma desde un CDN de terceros en la primera
+ejecución.
+
+### Tres decisiones de dependencia que no son de gusto
+
+**`xlsx` se descartó por seguridad, no por preferencia.** Es la librería obvia para hojas de
+cálculo, pero quedó congelada en npm en la 0.18.5 (2022) y `npm audit` la marca **high, sin parche
+disponible**: prototype pollution (GHSA-4r6h-8v6p-xvw6) y ReDoS (GHSA-5pgg-2g8v-p4x9). SheetJS
+publicó las correcciones solo en su CDN y nunca las devolvió a npm. Esta ruta analiza ficheros que
+manda cualquiera que sepa la dirección del buzón; una vulnerabilidad permanente ahí no es una deuda,
+es una puerta. Se usa `exceljs`, que trae un aviso **moderado** transitivo por `uuid@8` —no
+alcanzable desde aquí, porque ExcelJS llama a `uuid.v4()` sin búfer y en la ruta de *escritura*—
+cerrado de todos modos con un `overrides`. Los tres paquetes nuevos aportan **cero** avisos al
+proyecto; los 17 que `npm audit` sigue reportando son los preexistentes de la cadena de NestJS.
+
+**`pdf-parse` pinado a 1.1.1 y no a la 2.x.** La 2.x está mantenida, pero arrastra `pdfjs-dist` y
+`@napi-rs/canvas`, un módulo NAPI nativo que existe para rasterizar páginas. Sin OCR no hay nada que
+rasterizar. La 1.1.1 depende de `debug` y `node-ensure`: JS puro. Es un cambio de mantenimiento por
+superficie, y queda anotado: si un PDF real rompe la 1.1.1, la salida es la 2.x con su API de clase,
+ya verificada bajo este `tsconfig`.
+
+**Un CSV no pasa por el analizador de hojas de cálculo.** Ya es texto. Leerlo con `exceljs` para
+volver a serializarlo como CSV es un viaje de ida y vuelta que solo puede perder información, y de
+paso expone la ruta al analizador con el ReDoS conocido.
+
+### La composición se volvió asíncrona, y eso se notó en cuatro sitios
+
+`buildParsedEmail` era síncrona y pura. Leer un PDF no lo es. La onda llegó exactamente donde se
+esperaba: la estrategia (ya `async`, solo añadió el `await`), el controlador del asistente, y
+`WizardService.checkParser`, que era **el único método del servicio sin `async`** y cuyo TSDoc lo
+justificaba explícitamente. Esa nota se reescribió: ahora sí hay algo que esperar.
+
+`extractEmailBody` se quedó síncrona a propósito. No toca adjuntos, y volverla asíncrona por simetría
+habría obligado a todo lector a buscar una espera que no existe.
+
+### Lo que el banco de pruebas puede y no puede demostrar
+
+`POST /wizard/check-parser` sigue **rechazando `contentBase64`**, con su tope de 50 kB. Una ruta del
+asistente no debe tragarse megabytes, y ese límite está calibrado por debajo del defecto de 100 kB de
+`express.json()` para que un cuerpo excesivo dé un 400 en castellano y no un 413 crudo de Express.
+
+La consecuencia es que ahí la extracción documental **no puede ocurrir**. Se resolvió diciéndolo, no
+disimulándolo: si la petición declara adjuntos, la respuesta trae un aviso explícito de que los
+binarios no se simulan. Lo que **no** se hizo fue forzar `requires_multimodal_fallback` a `false`
+desde el asistente. Una rama «estoy en el banco de pruebas» dentro de `buildParsedEmail` habría
+destruido su única razón de ser —ser la misma implementación que corre en producción— y habría
+metido en el núcleo un concepto que el núcleo no debe conocer. No hizo falta: sin `contentBase64` no
+hay candidatos visuales, y la bandera sale `false` por construcción. El aviso dice la verdad y el
+cálculo no miente.
+
+### Un adjunto ya purgado no es un adjunto sin texto
+
+La condición «trae `contentBase64` utilizable» de la regla multimodal parece defensiva y no lo es.
+El motor pone `contentBase64: null` en cuanto un nodo anterior emite texto útil, así que el parser
+puede encontrarse perfectamente con adjuntos ya liberados. Contarlos como «sin texto» los habría
+convertido en candidatos a visión, es decir, en una petición a un modelo multimodal sobre bytes que
+ya no existen: condenada a fallar. Queda fijado en la prueba 7.6.
+
+Esto obligó a recalibrar los *fixtures*, no la regla: `PDF_ATTACHMENT` modelaba un adjunto sin
+`contentBase64`, una forma que `ImapTriggerStrategy` no produce nunca. Se añadió `SCANNED_PDF`, que
+es el adjunto tal y como sale del disparador.
+
+### El motor tenía que enterarse
+
+`extracted_documents_text` se sumó a `EXTRACTED_TEXT_KEYS`. La nota de arquitectura del encargo daba
+por hecho que con la bandera en `false` el motor purgaría el Base64, y **no era cierto**: el motor
+decide con un vocabulario cerrado de claves, y sin la nueva en la lista el correo de cuerpo vacío con
+todo su contenido en un PDF dejaba `clean_body` vacío, `hasUsefulText` devolvía `false` y los
+megabytes se quedaban en `contexto_acumulado` para siempre, aun habiéndose extraído ya todo su texto.
+Una línea, y la nota pasa a ser verdad. (Matiz: el motor no hace `delete`; sustituye el valor por
+`null` y conserva `filename`, `contentType` y `size`, para que el inventario siga siendo legible en
+la traza forense.)
+
+### Por qué hay un PDF versionado en `test/fixtures/`
+
+La primera versión de la prueba generaba el PDF dentro del propio test, para no meter un binario
+opaco en el repositorio. No funcionó, y el motivo merece quedar escrito: `pdf-parse@1.1.1` empaqueta
+pdf.js **v1.10**, cuya recuperación de una tabla `xref` imperfecta es heurística. El fixture hecho a
+mano tenía entradas de 19 bytes donde la norma exige 20, pdf.js descartaba la tabla, la reconstruía
+por su cuenta, y **el resultado dependía de la cadena concreta del fixture**: `'Nota de prensa
+institucional'` extraía bien y `'UNUWARE'` devolvía vacío. Corregido el `xref`, seguía fallando de
+forma distinta según el texto.
+
+Se dejó de pelear con ello: hay un PDF real generado con Ghostscript, y su fuente PostScript de
+cuatro líneas se versiona al lado (`nota-nativa.ps`) para que el binario no sea opaco en una revisión.
+Dos conmutadores quedaron anotados como prohibidos al regenerarlo, comprobados variante a variante:
+`-dOmitID` deja a pdf.js sin extraer texto, y `-dOmitXMP` falla **solo bajo Jest**.
+
+Por ese mismo motivo, las suites del nodo y del asistente **doblan `pdf-parse`**. Examinan la regla
+—qué texto cuenta y cuándo sube la bandera—, no la capacidad de pdf.js de leer un fichero;
+ejercitarlo de verdad allí ataba el resultado a una librería sin mantenimiento y dejaba su worker
+vivo tras el *teardown* de Jest, lo que tumbaba el proceso hijo. La extracción real se prueba donde
+corresponde, en `document-extractor.util.spec.ts`, contra ficheros de verdad.
+
+### Verificación
+
+Backend **41 suites / 936 pruebas** (antes 40/913), `tsc --noEmit` limpio y `npm audit` sin aportar
+un solo aviso nuevo. Frontend **15 ficheros / 321 pruebas**, `vue-tsc` limpio y `quasar build` en
+verde.
+
+Lo que **no** está cubierto: no hay ninguna prueba que ejecute un flujo completo con un correo real
+con adjunto. La extracción documental de punta a punta —disparador IMAP, parser, purga del motor—
+solo se ha verificado por partes, y conviene ejercitarla sobre un buzón de verdad antes de darla por
+buena en producción.
+
+---
+
 ## 2026-09-10 · Parada inmediata del sondeo IMAP y saneado de ejecuciones huérfanas — rama `feat/trigger-imap`
 
 ### Dos premisas del encargo que la auditoría matizó

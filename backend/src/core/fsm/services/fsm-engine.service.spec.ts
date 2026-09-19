@@ -2021,6 +2021,47 @@ describe('FsmEngineService (PROT-09)', () => {
       expect(attachmentsIn(result.contextPayload)[0].contentBase64).toBeNull();
     });
 
+    it('12.3.1 deberia reconocer extracted_documents_text como texto util', async () => {
+      // 1. Arrange: el caso que mas pesa del corpus, el correo de cuerpo vacio
+      //    cuyo contenido entero viaja en un PDF adjunto. `PARSER_PRE_IA` saca
+      //    su texto NATIVO, sin OCR, y lo publica bajo esta clave. Sin ella en
+      //    `EXTRACTED_TEXT_KEYS`, `clean_body` quedaba vacio, `hasUsefulText`
+      //    daba `false` y los megabytes se quedaban en `contexto_acumulado`
+      //    para siempre, aun habiendose extraido ya todo su texto.
+      const execution = buildExecution();
+      const { repo } = buildRepository(execution);
+
+      factory.registerStrategy(
+        buildStrategy(
+          NodeType.TRIGGER_IMAP,
+          jest.fn().mockResolvedValue({
+            success: true,
+            data: {
+              clean_body: '',
+              extracted_documents_text:
+                '--- Documento: nota.pdf ---\n\nLa compania abre una nueva sede en Madrid.',
+              attachments: [buildAttachment()],
+            },
+          }),
+        ),
+      );
+      factory.registerStrategy(
+        buildStrategy(
+          NodeType.PROCESADOR_IA,
+          jest.fn().mockResolvedValue({ success: true, data: {} }),
+        ),
+      );
+
+      // 2. Act
+      const result = await buildEngine(repo).executeWorkflow(
+        EXECUTION_ID,
+        buildEmailSchema(),
+      );
+
+      // 3. Assert
+      expect(attachmentsIn(result.contextPayload)[0].contentBase64).toBeNull();
+    });
+
     it('12.4 NO deberia liberar nada si ningun nodo produce texto', async () => {
       // 1. Arrange
       const execution = buildExecution();

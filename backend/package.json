@@ -47,16 +47,19 @@
     "class-transformer": "^0.5.1",
     "class-validator": "^0.15.1",
     "cron": "4.4.0",
+    "exceljs": "^4.4.0",
     "handlebars": "^4.7.9",
     "imapflow": "^1.7.1",
     "ip-range-check": "^0.2.1",
     "jsdom": "^30.0.1",
     "mailparser": "^3.9.8",
+    "mammoth": "^1.12.3",
     "nodemailer": "^9.0.5",
     "openai": "^7.5.0",
     "otplib": "^13.4.1",
     "passport": "^0.7.0",
     "passport-jwt": "^4.0.1",
+    "pdf-parse": "^1.1.1",
     "pg": "^8.23.0",
     "playwright": "^1.62.1",
     "reflect-metadata": "^0.2.2",
@@ -82,6 +85,7 @@
     "@types/node": "^24.0.0",
     "@types/nodemailer": "^8.0.1",
     "@types/passport-jwt": "^4.0.1",
+    "@types/pdf-parse": "^1.1.5",
     "@types/sanitize-html": "^2.16.1",
     "@types/supertest": "^7.0.0",
     "@types/validator": "^13.15.10",
@@ -101,7 +105,8 @@
     "typescript-eslint": "^8.20.0"
   },
   "overrides": {
-    "html-to-text": "^10.0.1"
+    "html-to-text": "^10.0.1",
+    "uuid": "^11.1.1"
   },
   "jest": {
     "moduleFileExtensions": [

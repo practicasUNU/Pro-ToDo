@@ -26,7 +26,7 @@ const checkParser = vi.mocked(parserEmailService.checkParser);
  */
 const NODE_ID = 'parser_pre_ia';
 
-/** Payload que el backend devolveria, con las doce claves. */
+/** Payload que el backend devolveria, con las trece claves. */
 const buildParsedPayload = (overrides: Partial<ParsedEmailPayload> = {}): ParsedEmailPayload => ({
   subject: 'Fwd: Nueva sede',
   clean_title: 'Nueva sede',
@@ -38,6 +38,7 @@ const buildParsedPayload = (overrides: Partial<ParsedEmailPayload> = {}): Parsed
   extracted_urls: ['https://unuware.com/nota'],
   attachment_count: 0,
   attachments: [],
+  extracted_documents_text: '',
   requires_multimodal_fallback: false,
   multimodal_reason: '',
   ...overrides,

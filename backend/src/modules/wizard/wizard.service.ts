@@ -105,9 +105,9 @@ export class WizardService {
   /**
    * Sanea un correo de prueba con la MISMA logica que ejecutara el nodo.
    *
-   * SINCRONO y sin `async`, a diferencia de `checkImap`: aqui no hay socket ni
-   * nada que esperar, y devolver una promesa por simetria obligaria al lector a
-   * buscar una espera que no existe.
+   * ASINCRONO, aunque aqui no haya ni socket ni red: `buildParsedEmail` extrae
+   * el texto nativo de los adjuntos y esa lectura si es asincrona. Lo fue
+   * sincrono mientras la composicion no tocaba binarios.
    *
    * Invoca `buildParsedEmail`, que es exactamente la funcion que consume
    * `ParserEmailStrategy`. Esa unicidad es la razon de ser del endpoint: si aqui
@@ -120,7 +120,9 @@ export class WizardService {
    * `body_source: 'none'`, igual que en produccion. Solo una excepcion
    * inesperada de la composicion produce `success: false`.
    */
-  public checkParser(checkParserDto: CheckParserDto): CheckParserResponseDto {
+  public async checkParser(
+    checkParserDto: CheckParserDto,
+  ): Promise<CheckParserResponseDto> {
     // `sourceNamespace` no se pasa: el correo viaja en el propio cuerpo y no hay
     // contexto del que leer. El defecto que aplica la funcion es irrelevante
     // aqui, y por eso el DTO de entrada ni siquiera acepta el campo.
@@ -128,6 +130,19 @@ export class WizardService {
       minBodyLength: checkParserDto.minBodyLength,
     });
     const warnings: string[] = [];
+
+    // El DTO de entrada NO acepta `contentBase64` a proposito: una ruta del
+    // asistente no debe tragarse megabytes. La consecuencia es que aqui la
+    // extraccion documental no puede ocurrir, y callarlo dejaria al operador
+    // creyendo que un adjunto suyo no aporta texto cuando lo que pasa es que
+    // este endpoint nunca lo ha visto.
+    if ((checkParserDto.attachments?.length ?? 0) > 0) {
+      warnings.push(
+        'El banco de pruebas no recibe los binarios de los adjuntos: ' +
+          '"extracted_documents_text" sale vacio y la bandera multimodal no es ' +
+          'representativa de lo que hara la ejecucion real.',
+      );
+    }
 
     // Se reconstruye la FORMA del namespace `raw_email` que deja
     // `ImapTriggerStrategy`, que es lo unico que `buildParsedEmail` sabe leer.
@@ -140,7 +155,7 @@ export class WizardService {
     };
 
     try {
-      const parsed = buildParsedEmail(source, config, {
+      const parsed = await buildParsedEmail(source, config, {
         onSanitizeFailure: (reason) => {
           this.logger.warn(
             `Banco de pruebas del parser: marcado no saneable (${reason}).`,
@@ -150,6 +165,10 @@ export class WizardService {
           );
         },
         onMultimodalFallback: (reason) => warnings.push(reason),
+        onDocumentFailure: (filename, reason) =>
+          warnings.push(
+            `No se pudo extraer texto del adjunto "${filename}" (${reason}).`,
+          ),
       });
 
       // El arreglo se omite cuando esta vacio en vez de enviarse como `[]`: es

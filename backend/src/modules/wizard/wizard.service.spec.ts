@@ -298,12 +298,12 @@ describe('WizardService', () => {
       overrides: Record<string, unknown> = {},
     ): CheckParserDto => plainToInstance(CheckParserDto, overrides);
 
-    it('4.1 deberia devolver las doce claves del payload del nodo', async () => {
+    it('4.1 deberia devolver las trece claves del payload del nodo', async () => {
       // 1. Arrange
       const { service } = buildService();
 
       // 2. Act
-      const result = service.checkParser(
+      const result = await service.checkParser(
         buildParserDto({
           subject: 'Fwd: Re: Nueva sede',
           html: '<h1>Nueva sede</h1><p>La compania abre en Madrid.</p>',
@@ -323,6 +323,7 @@ describe('WizardService', () => {
         'extracted_urls',
         'attachment_count',
         'attachments',
+        'extracted_documents_text',
         'requires_multimodal_fallback',
         'multimodal_reason',
       ]);
@@ -330,7 +331,7 @@ describe('WizardService', () => {
       await Promise.resolve();
     });
 
-    it('4.2 deberia sanear con la MISMA logica que ejecutara el nodo', () => {
+    it('4.2 deberia sanear con la MISMA logica que ejecutara el nodo', async () => {
       // 1. Arrange: si el asistente reimplementase el saneado, el banco de
       //    pruebas anunciaria una reduccion que la ejecucion real no produce.
       const { service } = buildService();
@@ -341,7 +342,7 @@ describe('WizardService', () => {
         '<p>AVISO LEGAL: este mensaje es confidencial.</p>';
 
       // 2. Act
-      const result = service.checkParser(buildParserDto({ html }));
+      const result = await service.checkParser(buildParserDto({ html }));
 
       // 3. Assert
       expect(result.parsed?.clean_body).not.toContain('AVISO LEGAL');
@@ -352,12 +353,16 @@ describe('WizardService', () => {
       expect(result.parsed?.reduction_percentage).toBeGreaterThan(50);
     });
 
-    it('4.3 deberia aplicar el umbral por defecto cuando se omite', () => {
-      // 1. Arrange: 50 caracteres, el mismo defecto que aplica la estrategia.
+    it('4.3 deberia advertir de que no simula los binarios de los adjuntos', async () => {
+      // 1. Arrange: el DTO de entrada NO acepta `contentBase64` a proposito
+      //    —una ruta del asistente no debe tragarse megabytes—, asi que aqui la
+      //    extraccion documental no puede ocurrir. Callarlo dejaria al operador
+      //    creyendo que su adjunto no aporta texto cuando lo que pasa es que
+      //    este endpoint nunca lo ha visto.
       const { service } = buildService();
 
       // 2. Act
-      const result = service.checkParser(
+      const result = await service.checkParser(
         buildParserDto({
           text: 'Ver adjunto.',
           attachments: [
@@ -367,19 +372,28 @@ describe('WizardService', () => {
       );
 
       // 3. Assert
-      expect(result.parsed?.requires_multimodal_fallback).toBe(true);
-      expect(result.parsed?.multimodal_reason).toContain('umbral 50');
+      expect(result.success).toBe(true);
+      expect(result.warnings?.join(' ')).toContain(
+        'no recibe los binarios de los adjuntos',
+      );
     });
 
-    it('4.4 deberia respetar el umbral recibido', () => {
-      // 1. Arrange
+    it('4.4 NO deberia levantar la bandera multimodal sin binarios que evaluar', async () => {
+      // 1. Arrange: cuerpo corto y un PDF declarado. En la ejecucion real esto
+      //    subiria la bandera; aqui sale `false` por construccion, porque un
+      //    adjunto sin `contentBase64` no se puede evaluar.
+      //
+      //    La bandera NO se fuerza desde el asistente: si `buildParsedEmail`
+      //    tuviese una rama "estoy en el banco de pruebas" dejaria de ser la
+      //    UNICA implementacion compartida con la ejecucion real, que es toda
+      //    su razon de ser. El aviso de 4.3 dice la verdad; el calculo no miente.
       const { service } = buildService();
 
       // 2. Act
-      const result = service.checkParser(
+      const result = await service.checkParser(
         buildParserDto({
           minBodyLength: 500,
-          text: 'Un cuerpo corto pero por encima del umbral por defecto de cincuenta.',
+          text: 'Ver adjunto.',
           attachments: [
             { filename: 'e.pdf', contentType: 'application/pdf', size: 9 },
           ],
@@ -387,16 +401,16 @@ describe('WizardService', () => {
       );
 
       // 3. Assert
-      expect(result.parsed?.requires_multimodal_fallback).toBe(true);
-      expect(result.warnings).toContain(result.parsed?.multimodal_reason);
+      expect(result.parsed?.requires_multimodal_fallback).toBe(false);
+      expect(result.parsed?.extracted_documents_text).toBe('');
     });
 
-    it('4.5 NO deberia emitir warnings cuando no hay nada que advertir', () => {
+    it('4.5 NO deberia emitir warnings cuando no hay nada que advertir', async () => {
       // 1. Arrange: el arreglo se omite en vez de viajar vacio en cada respuesta.
       const { service } = buildService();
 
       // 2. Act
-      const result = service.checkParser(
+      const result = await service.checkParser(
         buildParserDto({
           text: 'Un cuerpo largo y perfectamente normal para el modelo.',
         }),
@@ -406,14 +420,14 @@ describe('WizardService', () => {
       expect(result.warnings).toBeUndefined();
     });
 
-    it('4.6 deberia tratar un correo sin cuerpo como exito, no como fallo', () => {
+    it('4.6 deberia tratar un correo sin cuerpo como exito, no como fallo', async () => {
       // 1. Arrange: la estrategia degrada ese caso a `none`, y el asistente debe
       //    reproducir la decision o estaria mintiendo sobre lo que pasara en
       //    produccion.
       const { service } = buildService();
 
       // 2. Act
-      const result = service.checkParser(buildParserDto({}));
+      const result = await service.checkParser(buildParserDto({}));
 
       // 3. Assert
       expect(result.success).toBe(true);
@@ -422,20 +436,21 @@ describe('WizardService', () => {
       expect(result.error).toBeUndefined();
     });
 
-    it('4.7 NO deberia abrir ninguna conexion de red', () => {
+    it('4.7 NO deberia abrir ninguna conexion de red', async () => {
       // 1. Arrange: la composicion es pura. Este endpoint no es un oraculo de
-      //    conectividad, a diferencia de `check-imap`.
+      //    conectividad, a diferencia de `check-imap`. Que ahora sea asincrono
+      //    es por la lectura de documentos adjuntos, no por la red.
       const { service, get } = buildService();
 
       // 2. Act
-      service.checkParser(buildParserDto({ html: '<p>Hola</p>' }));
+      await service.checkParser(buildParserDto({ html: '<p>Hola</p>' }));
 
       // 3. Assert
       expect(ImapFlow).not.toHaveBeenCalled();
       expect(get).not.toHaveBeenCalled();
     });
 
-    it('4.8 deberia devolver GRAVE si la composicion lanza', () => {
+    it('4.8 deberia devolver GRAVE si la composicion lanza', async () => {
       // 1. Arrange: un fallo inesperado no debe propagarse como 500.
       const { service } = buildService();
       const composer = jest
@@ -446,15 +461,17 @@ describe('WizardService', () => {
           },
           'buildParsedEmail',
         )
-        .mockImplementation(() => {
-          throw new Error('fallo inesperado');
-        });
+        .mockImplementation(() =>
+          Promise.reject(new Error('fallo inesperado')),
+        );
       jest
         .spyOn(service['logger'], 'error')
         .mockImplementation(() => undefined);
 
       // 2. Act
-      const result = service.checkParser(buildParserDto({ html: '<p>x</p>' }));
+      const result = await service.checkParser(
+        buildParserDto({ html: '<p>x</p>' }),
+      );
 
       // 3. Assert
       expect(result.success).toBe(false);

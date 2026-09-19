@@ -161,8 +161,23 @@ const BINARY_CONTENT_KEY = 'contentBase64';
  * —un PDF escaneado, un `multipart/alternative` sin parte de texto— y tirarlo
  * dejaria al flujo sin nada que procesar. En cuanto alguien produce texto, el
  * binario pasa a ser peso muerto.
+ *
+ * `extracted_documents_text` es el texto NATIVO que `PARSER_PRE_IA` saca de los
+ * adjuntos legibles (.pdf, .docx, .xlsx, .csv, .txt). Sin ella en esta lista, el
+ * caso que mas pesa —el correo de cuerpo vacio cuyo contenido entero viaja en un
+ * PDF— dejaba `clean_body` vacio, `hasUsefulText` daba `false` y los megabytes
+ * se quedaban en `contexto_acumulado` para siempre, aun habiendose extraido ya
+ * todo su texto.
+ *
+ * La lista es ESTRUCTURAL, por nombre de clave: es lo que permite al motor
+ * decidir sin importar ni una interfaz de `@modules`.
  */
-const EXTRACTED_TEXT_KEYS = ['clean_body', 'text', 'extracted_text'] as const;
+const EXTRACTED_TEXT_KEYS = [
+  'clean_body',
+  'text',
+  'extracted_text',
+  'extracted_documents_text',
+] as const;
 
 /** Marca que sustituye al base64 en la traza de disco. */
 const REDACTED_BINARY_PLACEHOLDER = '[base64 omitido]';

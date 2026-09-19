@@ -2093,7 +2093,7 @@ no escribe en ningún namespace ajeno. Artefactos: la estrategia, su DTO
 (`parser-email-config.dto.ts`) y las heurísticas de limpieza, que viven aparte como funciones
 puras en `src/modules/nodes/utils/email-sanitizer.util.ts`.
 
-Payload de doce claves. **El orden es parte del contrato** (la prueba 1.1 lo compara
+Payload de **trece** claves. **El orden es parte del contrato** (la prueba 1.1 lo compara
 posicionalmente) y todas están siempre presentes con su tipo:
 
 ```typescript
@@ -2108,10 +2108,79 @@ posicionalmente) y todas están siempre presentes con su tipo:
   extracted_urls: string[];           // enlaces de contenido, máx. 50
   attachment_count: number;
   attachments: RawEmailAttachmentMetadata[];   // inventario SIN base64
+  extracted_documents_text: string;   // texto NATIVO de los adjuntos, CERO OCR
   requires_multimodal_fallback: boolean;
   multimodal_reason: string;          // '' cuando la bandera es false
 }
 ```
+
+#### Extracción nativa de documentos adjuntos (cero OCR)
+
+`extracted_documents_text` concatena el texto que se saca de cada adjunto legible, con un
+separador que nombra el fichero (`--- Documento: nota.pdf ---`) para que un modelo pueda
+atribuir cada cifra al documento del que salió. Las heurísticas viven aparte, como funciones
+puras, en `src/modules/nodes/utils/document-extractor.util.ts`:
+
+| Tipo MIME | Vía | Librería |
+|---|---|---|
+| `text/plain`, `text/csv` | `buffer.toString('utf-8')` | ninguna |
+| `application/pdf` | texto nativo del PDF | `pdf-parse@1.1.1` |
+| `…wordprocessingml.document` | `extractRawText` | `mammoth` |
+| `…spreadsheetml.sheet` | filas aplanadas, celdas por `, ` | `exceljs` |
+| `image/*` y cualquier otro | `''` inmediato | ninguna |
+
+**Ni una línea de OCR, por diseño.** Una imagen devuelve cadena vacía sin tocar el búfer, y es
+justo esa ausencia de texto la que levanta la bandera multimodal: el respaldo con visión deja
+de ser la primera respuesta y pasa a ser la última.
+
+Tres decisiones de contorno:
+
+- **`pdf-parse` pinado a 1.1.1.** La 2.x arrastra `pdfjs-dist` y `@napi-rs/canvas`, un módulo
+  NAPI nativo cuya única razón de ser es rasterizar páginas — algo que sin OCR no hace falta.
+  La 1.1.1 depende de `debug` y `node-ensure`, JS puro.
+- **`exceljs` y no `xlsx`.** `xlsx` quedó congelado en npm en la 0.18.5 y `npm audit` lo marca
+  **high sin parche disponible** (prototype pollution GHSA-4r6h-8v6p-xvw6 y ReDoS
+  GHSA-5pgg-2g8v-p4x9); SheetJS solo publica las correcciones en su propio CDN. En una ruta
+  que analiza ficheros de remitentes externos eso no es aceptable. `exceljs` arrastra un aviso
+  moderado transitivo por `uuid@8`, cerrado con `"overrides": { "uuid": "^11.1.1" }`.
+- **Un CSV no pasa por el analizador de hojas de cálculo.** Ya es texto; leerlo para volver a
+  serializarlo como CSV es un viaje de ida y vuelta que solo puede perder información.
+
+Nada de esto lanza. `extractTextFromBuffer` devuelve `{ text, failure }`, y un documento
+corrupto sale con `text: ''` y su motivo por el hook `onDocumentFailure`, que la estrategia
+enchufa a un `logger.warn('LEVE | …')`. Un adjunto ilegible no puede tumbar la ejecución: el
+motor normaliza toda excepción a URGENTE, que `canRetry` nunca reintenta.
+
+#### La regla multimodal, con el texto documental dentro
+
+```
+requires_multimodal_fallback =
+      (clean_body.length + extracted_documents_text.length) < minBodyLength
+  AND  existe ≥ 1 adjunto que cumple LAS TRES:
+         · trae contentBase64 utilizable (no null)
+         · su extracción salió en blanco
+         · su contentType es image/* o application/pdf
+```
+
+Las tres condiciones del segundo operando son deliberadas:
+
+1. **`contentBase64` no nulo.** El `null` no es un caso raro: lo pone el motor en cuanto un
+   nodo anterior emite texto útil. Un adjunto ya liberado no se puede evaluar, y tratarlo como
+   «sin texto» pediría visión sobre bytes que ya no existen.
+2. **Extracción en blanco.** Un PDF con texto nativo deja de ser candidato en cuanto se le saca
+   el contenido. Ése es el ahorro que persigue el nodo.
+3. **Tipo visual.** Un `.docx` corrupto o un `.xlsx` ilegible también devuelven cadena vacía, y
+   **no** cuentan: no los arregla un modelo con visión, y retener sus megabytes para una
+   llamada que no puede servir sería pagar lo más caro del pipeline por un fichero roto. Salen
+   por `onDocumentFailure`, que es donde pertenecen.
+
+#### Efecto sobre la purga de binarios del motor
+
+`extracted_documents_text` se añadió a `EXTRACTED_TEXT_KEYS` en `fsm-engine.service.ts`. Sin
+ella, el caso que más pesa —el correo de cuerpo vacío cuyo contenido entero viaja en un PDF—
+dejaba `clean_body` vacío, `hasUsefulText` devolvía `false` y los megabytes se quedaban en
+`contexto_acumulado` para siempre, **aun habiéndose extraído ya todo su texto**. El veto por
+`requires_multimodal_fallback === true` sigue mandando sobre el texto.
 
 `clean_body` dejó de admitir `null`, y no es cosmético: interpolar
 `{{parsed_email.clean_body}}` sobre un `null` lanzaba igual que sobre una variable ausente,

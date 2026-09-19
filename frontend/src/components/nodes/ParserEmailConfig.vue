@@ -30,7 +30,7 @@ const store = useParserEmailStore(props.nodeId);
 const MIN_BODY_LENGTH_HINT = `Caracteres del cuerpo YA SANEADO por debajo de los cuales se considera que el correo no trae texto aprovechable. Por defecto ${DEFAULT_MIN_BODY_LENGTH}.`;
 
 const MULTIMODAL_TOOLTIP =
-  'Si el texto limpio resultante tiene menos de este numero de caracteres y existen adjuntos (imagenes o PDF), el motor FSM preservara los binarios para el procesamiento multimodal por IA.';
+  'Si el texto util resultante —cuerpo limpio MAS el texto nativo extraido de los adjuntos— tiene menos de este numero de caracteres y queda algun adjunto de imagen o PDF del que no se saco ni un caracter, el motor FSM preservara los binarios para el procesamiento multimodal por IA.';
 
 const MULTIMODAL_RULE =
   'El nodo solo pide un modelo con vision cuando se cumplen LAS DOS condiciones a la vez: que el correo traiga al menos un adjunto de tipo imagen o PDF, Y que el cuerpo saneado quede por debajo del umbral.';
@@ -329,6 +329,15 @@ const onRunSandboxTest = async (): Promise<void> => {
         produciria direcciones truncadas por el corte a 78 columnas de la RFC 5322.
       </p>
 
+      <div class="pd-label q-mb-xs">Texto nativo de los adjuntos</div>
+      <p class="pd-subtitle q-mb-xs">
+        Extraccion SIN OCR de .pdf, .docx, .xlsx, .csv y .txt. En este banco de pruebas sale siempre
+        vacio: el endpoint no recibe los binarios de los adjuntos, solo sus metadatos.
+      </p>
+      <pre class="pd-mono pd-body-preview q-mb-md">{{
+        parsed.extracted_documents_text || '(sin texto documental)'
+      }}</pre>
+
       <div class="pd-label q-mb-xs">Respaldo multimodal</div>
       <q-banner v-if="parsed.requires_multimodal_fallback" dense class="pd-warn-banner">
         <template #avatar>
@@ -337,8 +346,8 @@ const onRunSandboxTest = async (): Promise<void> => {
         {{ parsed.multimodal_reason }}
       </q-banner>
       <p v-else class="pd-subtitle q-mb-none">
-        No hace falta: hay texto suficiente, o el correo no trae ningun adjunto que solo un modelo
-        con vision pueda interpretar.
+        No hace falta: entre el cuerpo y los adjuntos hay texto suficiente, o no queda ningun
+        adjunto de imagen o PDF del que no se haya podido extraer texto.
       </p>
     </q-card>
   </section>

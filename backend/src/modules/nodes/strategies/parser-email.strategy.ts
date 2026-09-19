@@ -100,12 +100,18 @@ export class ParserEmailStrategy implements INodeStrategy {
     // Los avisos de la composicion se enchufan al logger del nodo. El asistente
     // enchufa los mismos hooks a su respuesta HTTP, que es lo que permite que el
     // banco de pruebas muestre lo que aqui solo llega al archivo `.log`.
-    const parsed = buildParsedEmail(source, config, {
+    const parsed = await buildParsedEmail(source, config, {
       onSanitizeFailure: (reason) =>
         this.logger.warn(
           `No se pudo sanear el marcado del correo: ${reason}. Se continua sin cuerpo.`,
         ),
       onMultimodalFallback: (reason) => this.logger.log(reason),
+      // LEVE y no bloqueante, igual que los descartes de `ImapTriggerStrategy`:
+      // un adjunto ilegible no puede tumbar la ejecucion del flujo entero.
+      onDocumentFailure: (filename, reason) =>
+        this.logger.warn(
+          `LEVE | No se pudo extraer texto del adjunto "${filename}": ${reason}. Se continua sin el.`,
+        ),
     });
 
     return { success: true, data: { ...parsed } };

@@ -127,16 +127,16 @@ export class WizardController {
   })
   @ApiOkResponse({
     description:
-      'Correo procesado. `parsed` trae las doce claves deterministas del nodo',
+      'Correo procesado. `parsed` trae las trece claves deterministas del nodo',
     type: CheckParserResponseDto,
   })
   @ApiBadRequestResponse({
     description:
       'Cuerpo invalido: `minBodyLength` no positivo, un cuerpo por encima del tope de caracteres, o una propiedad no permitida como `sourceNamespace` o `contentBase64`',
   })
-  public checkParser(
+  public async checkParser(
     @Body(STRICT_VALIDATION) checkParserDto: CheckParserDto,
-  ): CheckParserResponseDto {
+  ): Promise<CheckParserResponseDto> {
     return this.wizardService.checkParser(checkParserDto);
   }
 }

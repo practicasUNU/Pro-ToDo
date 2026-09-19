@@ -1,4 +1,15 @@
 import { NodeType } from '@core/fsm/types/pipeline-schema.types';
+
+// El motor de PDF se dobla: esta suite examina el CONTRATO del nodo, no la
+// capacidad de pdf.js de leer un fichero. La extraccion real se prueba en
+// `document-extractor.util.spec.ts` contra un PDF versionado.
+jest.mock('pdf-parse', () =>
+  jest.fn(() => Promise.reject(new Error('Invalid PDF structure.'))),
+);
+
+/* eslint-disable @typescript-eslint/no-require-imports */
+const pdfParse = require('pdf-parse') as jest.Mock;
+/* eslint-enable @typescript-eslint/no-require-imports */
 import { createMockStatePayloadContext } from '@test/factories/state-payload-context.factory';
 
 import {
@@ -108,7 +119,7 @@ describe('ParserEmailStrategy', () => {
   });
 
   describe('1. Proyeccion del payload', () => {
-    it('1.1 deberia exponer las doce claves deterministas', async () => {
+    it('1.1 deberia exponer las trece claves deterministas', async () => {
       // 1. Arrange
       const strategy = new ParserEmailStrategy();
 
@@ -128,6 +139,7 @@ describe('ParserEmailStrategy', () => {
         'extracted_urls',
         'attachment_count',
         'attachments',
+        'extracted_documents_text',
         'requires_multimodal_fallback',
         'multimodal_reason',
       ]);
@@ -312,6 +324,48 @@ describe('ParserEmailStrategy', () => {
       expect(BODY_OVER_THRESHOLD.length).toBeGreaterThanOrEqual(50);
       expect(shortResult.data?.requires_multimodal_fallback).toBe(true);
       expect(longResult.data?.requires_multimodal_fallback).toBe(false);
+    });
+  });
+
+  describe('2bis. Extraccion de texto de los adjuntos', () => {
+    it('2bis.1 deberia publicar el texto nativo del PDF y NO pedir vision', async () => {
+      // 1. Arrange: la nota de prensa viaja entera en el PDF y el cuerpo es un
+      //    "Ver adjunto.". Antes esto gastaba un modelo con vision.
+      const strategy = new ParserEmailStrategy();
+      const nativeText =
+        'La compania abre una nueva sede en Madrid que generara doscientos empleos.';
+      pdfParse.mockResolvedValueOnce({ text: nativeText });
+      const context = buildContext(
+        buildRawEmail({
+          text: 'Ver adjunto.',
+          attachments: [buildAttachment()],
+        }),
+      );
+
+      // 2. Act
+      const result = await strategy.execute(context, {});
+
+      // 3. Assert
+      expect(result.data?.extracted_documents_text).toContain(nativeText);
+      expect(result.data?.requires_multimodal_fallback).toBe(false);
+    });
+
+    it('2bis.2 deberia dejar la bandera alta si del PDF no salio ni un caracter', async () => {
+      // 1. Arrange: el PDF escaneado, que es el caso que la bandera cubre.
+      const strategy = new ParserEmailStrategy();
+      const context = buildContext(
+        buildRawEmail({
+          text: 'Ver adjunto.',
+          attachments: [buildAttachment()],
+        }),
+      );
+
+      // 2. Act
+      const result = await strategy.execute(context, {});
+
+      // 3. Assert
+      expect(result.data?.extracted_documents_text).toBe('');
+      expect(result.data?.requires_multimodal_fallback).toBe(true);
     });
   });
 
