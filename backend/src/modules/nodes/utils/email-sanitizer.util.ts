@@ -503,6 +503,29 @@ export const sanitizeEmailText = (text: string): string => finalizeText(text);
  * de puntuacion no es estable entre versiones menores, mientras que este payload
  * es contrato y tiene que ser reproducible.
  */
+/**
+ * Enlaces del marcado, SIN aplanarlo a texto.
+ *
+ * Existe para la ruta de TEXTO PLANO de `extractEmailBody`: ese cuerpo no tiene
+ * enlaces rescatables —el texto plano de un correo parte las URLs a 78 columnas
+ * (RFC 5322) y extraerlas produce direcciones truncadas—, pero la parte HTML del
+ * MISMO correo si los declara bien marcados en `<a href>`. Sin esta funcion, un
+ * correo de Gmail (que siempre trae las dos partes) devolvia `extracted_urls`
+ * vacio por el mero hecho de que el cuerpo salia del texto.
+ *
+ * Se salta la fase cara de `sanitizeEmailHtml` —poda del DOM, `br`, espaciado de
+ * bloques y las tres podas de prosa de `finalizeText`— porque aqui no se quiere
+ * el texto, solo los enlaces. Aun asi NO es gratis: paga el parseo del marcado
+ * que la rama de texto plano se ahorraba.
+ *
+ * Aplica exactamente los mismos filtros que `sanitizeEmailHtml`, porque invoca
+ * el mismo `collectUrls`.
+ */
+export const extractEmailUrls = (html: string): readonly string[] =>
+  html.trim().length === 0
+    ? []
+    : collectUrls(cheerio.load(html, { xml: { xmlMode: false } }, false));
+
 export const sanitizeEmailHtml = (html: string): SanitizedEmailBody => {
   if (html.trim().length === 0) {
     return { text: '', urls: [] };
@@ -514,11 +537,24 @@ export const sanitizeEmailHtml = (html: string): SanitizedEmailBody => {
   // —un correo llega como fragmento y parse5 le sintetizaria <html><head><body>.
   const $ = cheerio.load(html, { xml: { xmlMode: false } }, false);
 
+  // Los enlaces se recogen ANTES de podar, y esto invierte la decision original.
+  //
+  // El motivo es el pipeline Notiweb: un correo REENVIADO lleva su contenido
+  // —y con el sus referencias bibliograficas— dentro del `<blockquote>` que
+  // `QUOTE_AND_SIGNATURE_SELECTORS` retira, de modo que recogerlos despues los
+  // perdia enteros y `EXTRACTOR_WEB` se quedaba sin nada que escrapear.
+  //
+  // El precio, asumido: un enlace que viva en una firma tambien entra, aunque su
+  // texto no aparezca en `clean_body`. `extracted_urls` deja por tanto de
+  // describir el MISMO documento que el cuerpo. Lo que acota el ruido es el
+  // filtrado por host y por patron de `collectUrls`, que no cambia: redes
+  // sociales, redirectores de campana, desuscripciones y avisos legales siguen
+  // fuera.
+  const urls = collectUrls($);
+
   $(NOISE_SELECTORS).remove();
   dropFromHereOnwards($, CUT_MARKER_SELECTORS);
   $(QUOTE_AND_SIGNATURE_SELECTORS).remove();
-
-  const urls = collectUrls($);
 
   // Se MUTA el arbol insertando separadores y luego se lee `.text()`, en vez de
   // recorrerlo recursivamente. Un walk obligaria a tipar los nodos con `Element`

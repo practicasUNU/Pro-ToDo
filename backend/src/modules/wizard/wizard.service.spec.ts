@@ -405,6 +405,45 @@ describe('WizardService', () => {
       expect(result.parsed?.extracted_documents_text).toBe('');
     });
 
+    it('4.4.1 deberia advertir cuando el marcado no declara ningun enlace', async () => {
+      // 1. Arrange: `EXTRACTOR_WEB` se quedaria sin nada que escrapear, y sin
+      //    este aviso el operador solo veria un arreglo vacio sin explicacion.
+      const { service } = buildService();
+
+      // 2. Act
+      const result = await service.checkParser(
+        buildParserDto({ html: '<p>Una nota sin un solo enlace dentro.</p>' }),
+      );
+
+      // 3. Assert
+      expect(result.parsed?.extracted_urls).toEqual([]);
+      expect(result.warnings?.join(' ')).toContain(
+        'no declaraba ningun enlace aprovechable',
+      );
+    });
+
+    it('4.4.2 deberia recoger los enlaces del marcado con cuerpo de texto plano', async () => {
+      // 1. Arrange: el banco de pruebas tiene que reproducir EXACTAMENTE lo que
+      //    hara la ejecucion real, incluida la lectura de enlaces desde el
+      //    marcado aunque el cuerpo salga del texto.
+      const { service } = buildService();
+
+      // 2. Act
+      const result = await service.checkParser(
+        buildParserDto({
+          text: 'Mira estos links de prueba.',
+          html: '<div>1. <a href="https://www.youtube.com/">YouTube</a></div>',
+        }),
+      );
+
+      // 3. Assert
+      expect(result.parsed?.body_source).toBe('text');
+      expect(result.parsed?.extracted_urls).toEqual([
+        'https://www.youtube.com/',
+      ]);
+      expect(result.warnings).toBeUndefined();
+    });
+
     it('4.5 NO deberia emitir warnings cuando no hay nada que advertir', async () => {
       // 1. Arrange: el arreglo se omite en vez de viajar vacio en cada respuesta.
       const { service } = buildService();

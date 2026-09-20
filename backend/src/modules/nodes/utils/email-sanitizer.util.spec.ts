@@ -1,6 +1,7 @@
 import {
   MAX_EXTRACTED_URLS,
   cleanSubject,
+  extractEmailUrls,
   normalizeWhitespace,
   reductionPercentage,
   sanitizeEmailHtml,
@@ -439,17 +440,71 @@ describe('email-sanitizer.util', () => {
       ]);
     });
 
-    it('5.12 NO deberia recoger enlaces que vivian dentro de la firma', () => {
-      // 1. Arrange: la recoleccion va DESPUES de podar, de modo que `clean_body`
-      //    y `extracted_urls` describan el mismo documento.
+    it('5.12 SI deberia recoger enlaces que vivian dentro de la firma', () => {
+      // 1. Arrange: la recoleccion va ANTES de podar, y eso INVIERTE lo que esta
+      //    prueba afirmaba. El motivo es el pipeline Notiweb: un correo
+      //    reenviado lleva sus referencias dentro del `<blockquote>` que la poda
+      //    retira, y recogerlas despues las perdia enteras. El precio asumido es
+      //    que un enlace de firma tambien entra, aunque su texto ya no aparezca
+      //    en `clean_body`.
       const html =
         '<p><a href="https://unuware.com/nota">Nota</a></p>' +
         '<div class="gmail_signature"><a href="https://oculto.test/x">web</a></div>';
 
-      // 2. Act / 3. Assert
-      expect(sanitizeEmailHtml(html).urls).toEqual([
+      // 2. Act
+      const result = sanitizeEmailHtml(html);
+
+      // 3. Assert: los enlaces dejan de describir el MISMO documento que el
+      //    cuerpo, y eso es deliberado.
+      expect(result.urls).toEqual([
         'https://unuware.com/nota',
+        'https://oculto.test/x',
       ]);
+      expect(result.text).not.toContain('web');
+    });
+
+    it('5.14 deberia recoger los enlaces de un correo REENVIADO', () => {
+      // 1. Arrange: el caso que motiva todo el cambio. El contenido citado —y
+      //    con el sus referencias bibliograficas— vive dentro del blockquote.
+      const html =
+        '<p>Os reenvio la nota.</p>' +
+        '<blockquote class="gmail_quote">' +
+        '<p>Mas informacion en <a href="https://unuware.com/notas/sede">la nota</a>.</p>' +
+        '</blockquote>';
+
+      // 2. Act
+      const result = sanitizeEmailHtml(html);
+
+      // 3. Assert: antes se perdian las dos cosas; ahora el cuerpo sigue sin la
+      //    cita pero `EXTRACTOR_WEB` recibe su URL.
+      expect(result.urls).toEqual(['https://unuware.com/notas/sede']);
+      expect(result.text).not.toContain('Mas informacion');
+    });
+
+    it('5.15 deberia descartar un href con sintaxis Markdown', () => {
+      // 1. Arrange: documenta un descarte que hoy es invisible. Este valor
+      //    aparece de verdad en `raw_email.html` de algunas ejecuciones, y el
+      //    origen de ese dato es un problema APARTE, aguas arriba de este nodo.
+      const html =
+        '<a href="[https://www.youtube.com/](https://www.youtube.com/)">video</a>';
+
+      // 2. Act / 3. Assert: `new URL()` lanza porque un esquema URI debe empezar
+      //    por letra ASCII y este empieza por `[`. Descartarlo es correcto:
+      //    `EXTRACTOR_WEB` fallaria al intentar descargarlo.
+      expect(sanitizeEmailHtml(html).urls).toEqual([]);
+    });
+
+    it('5.16 deberia exponer los enlaces sin aplanar el marcado', () => {
+      // 1. Arrange: `extractEmailUrls` es lo que consume la rama de texto plano,
+      //    que no necesita el cuerpo del marcado sino solo sus enlaces.
+      const html = '<p><a href="https://unuware.com/nota">Nota</a></p>';
+
+      // 2. Act / 3. Assert: mismos filtros, porque invoca el mismo `collectUrls`.
+      expect(extractEmailUrls(html)).toEqual(['https://unuware.com/nota']);
+      expect(extractEmailUrls('   ')).toEqual([]);
+      expect(extractEmailUrls('<a href="mailto:x@y.com">correo</a>')).toEqual(
+        [],
+      );
     });
 
     it('5.13 deberia acotar la lista a MAX_EXTRACTED_URLS', () => {

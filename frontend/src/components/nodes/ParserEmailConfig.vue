@@ -325,8 +325,10 @@ const onRunSandboxTest = async (): Promise<void> => {
         />
       </div>
       <p v-else class="pd-subtitle q-mb-md">
-        Sin enlaces de contenido. En la ruta de texto plano es lo esperado: rescatarlos del texto
-        produciria direcciones truncadas por el corte a 78 columnas de la RFC 5322.
+        Sin enlaces de contenido. Los enlaces se leen siempre del marcado, aunque el cuerpo venga
+        del texto plano, asi que un correo sin parte HTML o cuyo marcado no declare ningun
+        <span class="pd-mono">&lt;a href&gt;</span> valido sale vacio. El nodo
+        <span class="pd-mono">EXTRACTOR_WEB</span> no recibiria nada que escrapear.
       </p>
 
       <div class="pd-label q-mb-xs">Texto nativo de los adjuntos</div>

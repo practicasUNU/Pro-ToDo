@@ -111,6 +111,8 @@ describe('parsed-email-payload.util', () => {
       // 3. Assert
       expect(payload.body_source).toBe('text');
       expect(payload.clean_body).toBe(LONG_BODY.trim());
+      // Vacio porque este marcado no declara enlaces, NO por venir de la rama de
+      // texto plano: los enlaces se leen del marcado gane quien gane el cuerpo.
       expect(payload.extracted_urls).toEqual([]);
     });
 
@@ -374,6 +376,57 @@ describe('parsed-email-payload.util', () => {
       expect(payload.clean_body).toBe('');
 
       sanitizer.mockRestore();
+    });
+
+    it('5.5 deberia invocar onNoUrlsFound con marcado pero sin enlaces', async () => {
+      // 1. Arrange: el caso que deja a `EXTRACTOR_WEB` sin trabajo. Sin este
+      //    aviso el operador solo veria un arreglo vacio, sin explicacion.
+      const onNoUrlsFound = jest.fn();
+      const source = buildSource({
+        text: '',
+        html: '<p>Una nota de prensa sin un solo enlace dentro.</p>',
+      });
+
+      // 2. Act
+      const payload = await buildParsedEmail(source, buildConfig(), {
+        onNoUrlsFound,
+      });
+
+      // 3. Assert
+      expect(onNoUrlsFound).toHaveBeenCalledTimes(1);
+      expect(payload.extracted_urls).toEqual([]);
+    });
+
+    it('5.6 NO deberia invocar onNoUrlsFound en un correo sin marcado', async () => {
+      // 1. Arrange: un correo `text/plain` puro no tiene ningun `<a>` que
+      //    recoger. Avisar aqui convertiria la senal en ruido constante.
+      const onNoUrlsFound = jest.fn();
+
+      // 2. Act
+      await buildParsedEmail(buildSource({ html: '' }), buildConfig(), {
+        onNoUrlsFound,
+      });
+
+      // 3. Assert
+      expect(onNoUrlsFound).not.toHaveBeenCalled();
+    });
+
+    it('5.7 NO deberia invocar onNoUrlsFound cuando si hay enlaces', async () => {
+      // 1. Arrange
+      const onNoUrlsFound = jest.fn();
+      const source = buildSource({
+        text: '',
+        html: '<p><a href="https://unuware.com/n">Nota</a></p>',
+      });
+
+      // 2. Act
+      const payload = await buildParsedEmail(source, buildConfig(), {
+        onNoUrlsFound,
+      });
+
+      // 3. Assert
+      expect(onNoUrlsFound).not.toHaveBeenCalled();
+      expect(payload.extracted_urls).toEqual(['https://unuware.com/n']);
     });
 
     it('5.4 NO deberia exigir hooks: son opcionales', async () => {

@@ -2,6 +2,7 @@ import { DEFAULT_ATTACHMENT_CONTENT_TYPE } from '@modules/nodes/interfaces/raw-e
 import { extractTextFromBuffer } from '@modules/nodes/utils/document-extractor.util';
 import {
   cleanSubject,
+  extractEmailUrls,
   reductionPercentage,
   sanitizeEmailHtml,
   sanitizeEmailText,
@@ -56,6 +57,14 @@ export interface ParsedEmailPayload {
   readonly character_count: number;
   readonly original_character_count: number;
   readonly reduction_percentage: number;
+  /**
+   * Enlaces de contenido que `EXTRACTOR_WEB` escrapeara.
+   *
+   * Salen SIEMPRE del marcado, con independencia de que el cuerpo lo aporte el
+   * texto plano: son dos representaciones del mismo correo, y solo el marcado
+   * declara los enlaces sin partirlos a 78 columnas (RFC 5322). Por eso NO
+   * describen necesariamente el mismo documento que `clean_body`.
+   */
   readonly extracted_urls: readonly string[];
   readonly attachment_count: number;
   readonly attachments: readonly RawEmailAttachmentMetadata[];
@@ -99,6 +108,16 @@ export interface ParsedEmailHooks {
    * adjunto descartado por tipo MIME.
    */
   readonly onDocumentFailure?: (filename: string, reason: string) => void;
+  /**
+   * Habia marcado que mirar y aun asi no salio ni un enlace aprovechable.
+   *
+   * Se dispara SOLO cuando existia HTML: un correo `text/plain` puro no tiene
+   * ningun `<a>` que recoger, y avisar ahi convertiria el aviso en ruido
+   * constante en vez de en una senal. Ni bloquea ni cambia el payload —
+   * `extracted_urls` sigue siendo `[]`, nunca `null`—: existe para que el
+   * operador sepa POR QUE `EXTRACTOR_WEB` no va a recibir nada.
+   */
+  readonly onNoUrlsFound?: () => void;
 }
 
 /** Normaliza a cadena un valor de namespace de tipo desconocido. */
@@ -128,6 +147,30 @@ const toAttachmentMetadata = (value: unknown): RawEmailAttachmentMetadata => {
 };
 
 /**
+ * Enlaces del marcado, degradando a `[]` si cheerio no puede con el.
+ *
+ * Mismo criterio que la rama HTML de `extractEmailBody`: el motor normaliza toda
+ * excepcion a URGENTE, que `canRetry` nunca reintenta, y un correo con marcado
+ * patologico no puede llevarse por delante la ejecucion entera. Aqui la
+ * degradacion es ademas menos grave, porque el CUERPO ya esta resuelto desde el
+ * texto plano: lo unico que se pierde son los enlaces.
+ */
+const safeExtractUrls = (
+  html: string,
+  hooks: ParsedEmailHooks,
+): readonly string[] => {
+  try {
+    return extractEmailUrls(html);
+  } catch (error) {
+    hooks.onSanitizeFailure?.(
+      error instanceof Error ? error.message : String(error),
+    );
+
+    return [];
+  }
+};
+
+/**
  * Resuelve la cascada texto -> marcado -> nada y devuelve todo lo derivado.
  *
  * El texto plano manda cuando existe: ya es texto, y saltarse el DOM ahorra la
@@ -135,11 +178,13 @@ const toAttachmentMetadata = (value: unknown): RawEmailAttachmentMetadata => {
  * `multipart/alternative` sin parte `text/plain`, que es justamente el caso
  * habitual de un boletin institucional.
  *
- * En la ruta de texto plano `urls` queda VACIO a proposito. Rescatar enlaces
- * con un `https?://\S+` es posible, pero el texto plano de un correo parte las
- * URLs con saltos de linea a 78 columnas (RFC 5322) y produciria direcciones
- * truncadas que `EXTRACTOR_WEB` intentaria descargar y fallaria. Un arreglo
- * vacio y honesto es mejor que una lista de enlaces rotos.
+ * Los ENLACES, en cambio, salen siempre del marcado, gane quien gane el cuerpo.
+ * Rescatarlos del texto plano con un `https?://\S+` es posible pero inutil: ese
+ * texto parte las URLs a 78 columnas (RFC 5322) y produciria direcciones
+ * truncadas que `EXTRACTOR_WEB` intentaria descargar y fallaria. El marcado del
+ * MISMO correo las declara enteras en `<a href>`, asi que se leen de ahi. Antes
+ * quedaban vacias en esta rama, y como un correo de Gmail siempre trae las dos
+ * partes, eso dejaba a `EXTRACTOR_WEB` sin nada que escrapear.
  */
 export const extractEmailBody = (
   text: string,
@@ -150,7 +195,7 @@ export const extractEmailBody = (
     return {
       source: 'text',
       clean: sanitizeEmailText(text),
-      urls: [],
+      urls: safeExtractUrls(html, hooks),
       originalLength: text.length,
     };
   }
@@ -293,11 +338,16 @@ export const buildParsedEmail = async (
   const attachments = rawAttachments.map(toAttachmentMetadata);
 
   const subject = asString(source.subject);
-  const body = extractEmailBody(
-    asString(source.text),
-    asString(source.html),
-    hooks,
-  );
+  const html = asString(source.html);
+  const body = extractEmailBody(asString(source.text), html, hooks);
+
+  // El aviso se condiciona a que HUBIERA marcado: sin el no hay ningun `<a>` que
+  // recoger, y disparar aqui en cada correo de texto plano convertiria la senal
+  // en ruido. Con marcado y cero enlaces si hay algo que contar, porque es justo
+  // el caso en que `EXTRACTOR_WEB` se va a quedar sin trabajo.
+  if (html.trim().length > 0 && body.urls.length === 0) {
+    hooks.onNoUrlsFound?.();
+  }
 
   const documents = await extractAttachmentDocuments(rawAttachments, hooks);
   const bodyLength = body.clean.length;

@@ -2105,7 +2105,7 @@ posicionalmente) y todas están siempre presentes con su tipo:
   character_count: number;            // === clean_body.length
   original_character_count: number;   // longitud de la FUENTE consumida
   reduction_percentage: number;       // 0..100 con dos decimales
-  extracted_urls: string[];           // enlaces de contenido, máx. 50
+  extracted_urls: string[];           // del MARCADO siempre, máx. 50
   attachment_count: number;
   attachments: RawEmailAttachmentMetadata[];   // inventario SIN base64
   extracted_documents_text: string;   // texto NATIVO de los adjuntos, CERO OCR
@@ -2247,9 +2247,14 @@ contrato y tiene que ser reproducible—. Readability y jsdom siguen reservados 
 
 #### Política de `extracted_urls`
 
-Se recolectan en el paso 5, **después** de podar y **antes** de aplanar a texto. Ese orden no
-es casual: un enlace de desuscripción que vivía dentro de una firma ya eliminada no debe
-reaparecer, y así `clean_body` y `extracted_urls` describen el mismo documento.
+Se recolectan **antes de podar el DOM**, nada más cargar el marcado. Ese orden se invirtió por
+el pipeline Notiweb: un correo **reenviado** lleva su contenido —y con él sus referencias
+bibliográficas— dentro del `<blockquote>` que la poda retira, de modo que recogerlos después
+los perdía enteros y `EXTRACTOR_WEB` se quedaba sin nada que escrapear.
+
+El precio, asumido: un enlace que vivía en una firma también entra, aunque su texto ya no
+aparezca en `clean_body`. **`extracted_urls` deja por tanto de describir el mismo documento
+que el cuerpo.** Lo que acota el ruido es el filtrado de `collectUrls`, que no cambió:
 
 - Solo `http:` y `https:`. El consumidor natural es `EXTRACTOR_WEB`, que solo sabe navegar
   http(s); un `mailto:` ahí es una descarga fallida con su reintento y su alerta.
@@ -2275,10 +2280,23 @@ reaparecer, y así `clean_body` y `extracted_urls` describen el mismo documento.
   se reserializa entero en `contexto_acumulado` en cada checkpoint posterior: es el mismo
   argumento de peso que motivó la purga de binarios, a otra escala.
 
-En la ruta de texto plano `extracted_urls` queda **vacío** a propósito. Rescatar enlaces con
-un `https?://\S+` es posible, pero el texto plano de un correo parte las URLs con saltos de
-línea a 78 columnas (RFC 5322) y produciría direcciones truncadas que `EXTRACTOR_WEB`
-intentaría descargar y fallaría. Un arreglo vacío y honesto es mejor que enlaces rotos.
+Los enlaces salen **siempre del marcado**, gane quien gane la cascada del cuerpo. Un correo de
+Gmail trae parte de texto y parte HTML; la cascada elige el texto —es más barato que el DOM—
+pero antes eso dejaba `extracted_urls` vacío en el caso más común. Del texto plano no se
+rescata nada, y eso no cambia: ese texto parte las URLs a 78 columnas (RFC 5322) y produciría
+direcciones truncadas que `EXTRACTOR_WEB` intentaría descargar y fallaría. El marcado del
+MISMO correo las declara enteras en `<a href>`, así que se leen de ahí, vía
+`extractEmailUrls`, que se salta el aplanado a texto por innecesario.
+
+Cuando hay marcado y aun así no sale ni un enlace, se emite un aviso **LEVE** no bloqueante
+(`onNoUrlsFound`): `extracted_urls` sigue siendo `[]` —nunca `null`—, pero el operador ve en
+el log y en el banco de pruebas por qué `EXTRACTOR_WEB` no va a recibir nada. No se avisa en
+un correo sin HTML: ahí no hay ningún `<a>` que recoger y el aviso sería ruido constante.
+
+Un `href` que no parsee como URL http(s) se descarta sin más. En particular, `new URL()` lanza
+sobre valores como `[https://ejemplo.com](https://ejemplo.com)` —un esquema URI debe empezar
+por letra ASCII— y descartarlos es lo correcto: no son navegables. Si aparecen en
+`raw_email.html`, el problema está **aguas arriba**, en lo que escribe ese namespace.
 
 #### Métricas de reducción (RNF-01)
 

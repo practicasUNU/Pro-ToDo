@@ -101,9 +101,13 @@ export class ParserEmailStrategy implements INodeStrategy {
     // enchufa los mismos hooks a su respuesta HTTP, que es lo que permite que el
     // banco de pruebas muestre lo que aqui solo llega al archivo `.log`.
     const parsed = await buildParsedEmail(source, config, {
+      // El mensaje NO promete "se continua sin cuerpo": desde que los enlaces se
+      // leen del marcado aunque el cuerpo venga del texto plano, este aviso
+      // puede dispararse con el cuerpo perfectamente intacto y solo los enlaces
+      // perdidos.
       onSanitizeFailure: (reason) =>
         this.logger.warn(
-          `No se pudo sanear el marcado del correo: ${reason}. Se continua sin cuerpo.`,
+          `No se pudo sanear el marcado del correo: ${reason}. Se continua con lo que si pudo procesarse.`,
         ),
       onMultimodalFallback: (reason) => this.logger.log(reason),
       // LEVE y no bloqueante, igual que los descartes de `ImapTriggerStrategy`:
@@ -111,6 +115,13 @@ export class ParserEmailStrategy implements INodeStrategy {
       onDocumentFailure: (filename, reason) =>
         this.logger.warn(
           `LEVE | No se pudo extraer texto del adjunto "${filename}": ${reason}. Se continua sin el.`,
+        ),
+      // Tampoco bloquea: un correo sin enlaces es legitimo. El aviso existe
+      // porque `EXTRACTOR_WEB` se quedara sin nada que escrapear y, sin esta
+      // linea, el operador solo veria un arreglo vacio sin explicacion.
+      onNoUrlsFound: () =>
+        this.logger.warn(
+          'LEVE | El marcado del correo no declaraba ningun enlace aprovechable: "extracted_urls" queda vacio.',
         ),
     });
 

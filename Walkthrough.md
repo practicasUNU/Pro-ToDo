@@ -4,6 +4,100 @@ Registro técnico del "por qué" de cada decisión de implementación. Los estad
 
 ---
 
+## 2026-09-19 · `extracted_urls` deja de salir vacío: enlaces para el pipeline Notiweb — rama `feat/enlaces-parser`
+
+### Dos causas, y arreglar una sola no servía de nada
+
+`EXTRACTOR_WEB` recibía `parsed_email.extracted_urls` vacío y no tenía nada que escrapear antes de
+que la IA redactase. El diagnóstico de partida apuntaba al orden de recolección, y era cierto a
+medias: había **dos** causas independientes y corregir solo una dejaba el arreglo igual de vacío.
+
+**La primera, y la que de verdad mordía: la cascada del cuerpo.** Un correo de Gmail trae parte de
+texto y parte HTML. `extractEmailBody` prefiere el texto plano —es más barato que montar el DOM— y
+esa rama devolvía `urls: []` **sin llegar a abrir el marcado**. Mientras eso siguiera así, cambiar
+cuándo se podan las firmas era irrelevante: nadie miraba el HTML. Ahora los enlaces se leen siempre
+del marcado, gane quien gane el cuerpo, vía una `extractEmailUrls` nueva que se salta el aplanado a
+texto porque aquí no hace falta.
+
+Del texto plano se sigue sin rescatar nada, y esa parte de la decisión original se mantiene: ese
+texto parte las URLs a 78 columnas (RFC 5322) y un `https?://\S+` produciría direcciones truncadas.
+El marcado del mismo correo las declara enteras.
+
+**La segunda: el momento de la recolección.** Se recogían después de retirar citas y firmas, para que
+`clean_body` y `extracted_urls` describieran el mismo documento. Buena regla para un boletín y mala
+para un recorte de prensa: en un correo **reenviado** el contenido entero —y con él las referencias
+bibliográficas— vive dentro del `<blockquote>` que la poda elimina. Se perdían todas.
+
+### Lo que se rompe a cambio, dicho sin adornos
+
+Recoger antes de podar significa que un enlace de una firma entra en `extracted_urls` aunque su texto
+ya no aparezca en el cuerpo. **Los enlaces dejan de describir el mismo documento que `clean_body`.**
+Es una pérdida real de una invariante que existía a propósito, y se acepta porque la alternativa
+—perder las referencias de todo correo reenviado— es peor para lo que este pipeline hace.
+
+Lo que acota el ruido es que **los diez filtros de `collectUrls` no se tocaron**. La especificación
+recibida pedía filtrar solo vacías, `mailto:` y `tel:`; leída al pie de la letra habría dejado pasar
+desuscripciones, redes sociales, redirectores de campaña y duplicados, sin tope. `EXTRACTOR_WEB`
+descarga cada URL con Playwright: mandarle la baja del boletín o el LinkedIn del remitente es gasto
+puro y ruido en la redacción.
+
+Tres pruebas afirmaban el comportamiento anterior y se **invirtieron**, no se borraron: 7.1 y 7.6 de
+la estrategia y 5.12 del saneador. Cada una lleva escrito en su `Arrange` por qué dice ahora lo
+contrario.
+
+### El aviso que faltaba
+
+Un `extracted_urls: []` era mudo: no distinguía «este correo no traía enlaces» de «algo va mal». Se
+añade `onNoUrlsFound`, cuarto hook de la serie, que emite un LEVE no bloqueante cuando **había
+marcado** y aun así no salió ni un enlace. La condición importa: en un correo `text/plain` puro no
+hay ningún `<a>` que recoger, y avisar ahí convertiría la señal en ruido constante. La estrategia lo
+manda a `logger.warn('LEVE | …')` y el asistente a `warnings[]`, que es lo que lo hace visible en el
+banco de pruebas.
+
+### Lo que este cambio NO arregla
+
+El correo que originó el encargo guarda en `raw_email.html` literalmente
+`href="[https://www.youtube.com/](https://www.youtube.com/)"`, con sintaxis Markdown dentro del
+atributo. Ese valor muere en `parseAbsoluteUrl` porque `new URL()` lanza —un esquema URI debe empezar
+por letra ASCII— y **el descarte es correcto**: `[https://…` no es navegable y el extractor fallaría
+al intentar descargarlo. Ese correo seguirá dando `[]`.
+
+Queda **pendiente, fuera de este cambio**: averiguar qué escribe esos `href`. `ImapTriggerStrategy`
+usa `simpleParser` de `mailparser`, que no markdowniza nada. Se dejó constancia del descarte en dos
+pruebas (7.10 y 5.15) para que la próxima persona que lo vea no lo confunda con un fallo del parser.
+
+### Normalización del texto documental (RNF-01)
+
+Arrastrado del mismo encargo: el texto que se saca de los adjuntos se normaliza antes de recortarlo.
+El orden no es indiferente —recortar primero gastaría parte del presupuesto de 100 000 caracteres en
+saltos de línea que iban a colapsarse igualmente— y se reutiliza `normalizeWhitespace`, ya exportada
+y probada, en vez de escribir un `\n{3,}` nuevo: hace un superconjunto de lo pedido (CRLF, espacios
+duros, rachas de espacio horizontal) y todo ello es exactamente economía de tokens. Cada lector pasa
+a devolver texto crudo y la normalización vive en un único sitio, para que un lector futuro no pueda
+olvidarse de aplicarla.
+
+### Lo que NO se implementó de la especificación
+
+- **`context.setNamespace('parsed_email', …)` desde la estrategia.** El contrato lo prohíbe, y no
+  habría fallado de forma ruidosa: `setNamespace` *fusiona*, así que habría dejado un `parsed_email`
+  de dos claves en lugar de trece, en silencio, perdiendo `clean_body` y
+  `requires_multimodal_fallback` —las dos que el motor lee para decidir la purga del base64—. La
+  inmutabilidad ya estaba garantizada: la estrategia devuelve `data` y el motor la deposita.
+- **`validator.normalizeEmail` sobre las URLs.** Normaliza direcciones de correo, no URLs. La
+  normalización real ya la hacían `parseAbsoluteUrl` y `withoutTrackingParams`.
+- **`extracted_urls` como propiedad nueva.** Ya existía: es la clave 8 de las 13.
+
+### Verificación
+
+**41 suites / 950 pruebas** (antes 936), `tsc --noEmit` limpio. Frontend **15 ficheros / 321
+pruebas**.
+
+Lo que **no** está cubierto: ninguna prueba ejecuta la cadena completa
+`TRIGGER_IMAP → PARSER_PRE_IA → EXTRACTOR_WEB`. Que el extractor reciba de verdad la lista solo se ha
+verificado por partes.
+
+---
+
 ## 2026-09-19 · `npm audit` a cero sin tocar el major de NestJS — rama `feat/auditoria-dependencias`
 
 ### Diecisiete avisos, cuatro causas

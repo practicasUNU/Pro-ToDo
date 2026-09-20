@@ -161,13 +161,17 @@ export class WizardService {
             `Banco de pruebas del parser: marcado no saneable (${reason}).`,
           );
           warnings.push(
-            `No se pudo sanear el marcado del correo (${reason}). El nodo continuaria sin cuerpo.`,
+            `No se pudo sanear el marcado del correo (${reason}). El nodo continuaria con lo que si pudo procesarse.`,
           );
         },
         onMultimodalFallback: (reason) => warnings.push(reason),
         onDocumentFailure: (filename, reason) =>
           warnings.push(
             `No se pudo extraer texto del adjunto "${filename}" (${reason}).`,
+          ),
+        onNoUrlsFound: () =>
+          warnings.push(
+            'El marcado del correo no declaraba ningun enlace aprovechable: "extracted_urls" queda vacio y EXTRACTOR_WEB no recibiria nada que escrapear.',
           ),
       });
 

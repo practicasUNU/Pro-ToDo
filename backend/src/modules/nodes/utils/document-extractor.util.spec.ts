@@ -197,6 +197,54 @@ describe('document-extractor.util', () => {
     });
   });
 
+  describe('5bis. Normalizacion del texto (RNF-01)', () => {
+    it('5bis.1 deberia colapsar las rachas de saltos de linea y recortar los bordes', async () => {
+      // 1. Arrange: los extractores de PDF y de Word devuelven rachas de saltos
+      //    por cada salto de pagina o de seccion. Cada uno de esos caracteres lo
+      //    paga el `PROCESADOR_IA` en tokens.
+      const buffer = Buffer.from(
+        '\n\n  Primer parrafo.\n\n\n\n\nSegundo parrafo.\n\n\n  ',
+        'utf-8',
+      );
+
+      // 2. Act
+      const result = await extractTextFromBuffer(buffer, 'text/plain');
+
+      // 3. Assert: como maximo un parrafo en blanco, y sin bordes sobrantes.
+      expect(result.text).toBe('Primer parrafo.\n\nSegundo parrafo.');
+      expect(result.text).not.toMatch(/\n{3,}/);
+    });
+
+    it('5bis.2 deberia colapsar las rachas de espacio horizontal', async () => {
+      // 1. Arrange: un PDF maquetado en columnas llega con decenas de espacios
+      //    seguidos que no significan nada para un modelo de lenguaje.
+      const buffer = Buffer.from('Titulo        Fecha', 'utf-8');
+
+      // 2. Act
+      const result = await extractTextFromBuffer(buffer, 'text/plain');
+
+      // 3. Assert
+      expect(result.text).toBe('Titulo Fecha');
+    });
+
+    it('5bis.3 deberia normalizar ANTES de recortar', async () => {
+      // 1. Arrange: el orden importa. Si se recortase primero, parte del
+      //    presupuesto de caracteres se gastaria en saltos que iban a
+      //    colapsarse igualmente y el documento se truncaria antes de tiempo.
+      const padding = '\n'.repeat(1_000);
+      const body = 'a'.repeat(MAX_EXTRACTED_DOCUMENT_CHARS - 10);
+      const buffer = Buffer.from(`${padding}${body}`, 'utf-8');
+
+      // 2. Act
+      const result = await extractTextFromBuffer(buffer, 'text/plain');
+
+      // 3. Assert: los 1000 saltos se colapsan y luego se recortan por delante,
+      //    asi que el texto cabe entero y NO se trunca.
+      expect(result.text).toBe(body);
+      expect(result.text).not.toContain(TRUNCATION_NOTICE);
+    });
+  });
+
   describe('6. Tope de longitud', () => {
     it('6.1 deberia recortar y dejar constancia al superar el tope', async () => {
       // 1. Arrange: una hoja de 10 MB se expande a megabytes de texto que

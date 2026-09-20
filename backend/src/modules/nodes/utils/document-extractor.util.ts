@@ -2,6 +2,8 @@ import { Workbook } from 'exceljs';
 import mammoth from 'mammoth';
 import pdfParse from 'pdf-parse';
 
+import { normalizeWhitespace } from '@modules/nodes/utils/email-sanitizer.util';
+
 /**
  * Tipos MIME de documento de los que se sabe sacar texto SIN OCR.
  *
@@ -109,6 +111,41 @@ const extractFromWorkbook = async (buffer: Buffer): Promise<string> => {
 };
 
 /**
+ * Despacha al lector que corresponda y devuelve el texto CRUDO.
+ *
+ * Separada de `extractTextFromBuffer` para que la normalizacion y el recorte
+ * ocurran en UN solo sitio y no repetidos en cada rama: asi no puede aparecer un
+ * lector nuevo que se olvide de aplicarlos.
+ */
+const extractRawText = async (
+  buffer: Buffer,
+  contentType: string,
+): Promise<string> => {
+  switch (contentType) {
+    case 'text/plain':
+    case 'text/csv':
+      // Un CSV ya es texto. Pasarlo por un analizador de hojas de calculo para
+      // volver a serializarlo como CSV seria un viaje de ida y vuelta que solo
+      // puede perder informacion.
+      return buffer.toString('utf-8');
+
+    case PDF_CONTENT_TYPE:
+      return (await pdfParse(buffer)).text;
+
+    case DOCX_CONTENT_TYPE:
+      return (await mammoth.extractRawText({ buffer })).value;
+
+    case XLSX_CONTENT_TYPE:
+      return extractFromWorkbook(buffer);
+
+    default:
+      // Tipo sin lector. No es un fallo: es un formato del que este nodo no
+      // sabe sacar texto, y decirlo asi evita que se contabilice como averia.
+      return '';
+  }
+};
+
+/**
  * Extrae el texto nativo de un documento adjunto. CERO OCR.
  *
  * Pura y sin estado: no toca el contexto, no registra nada y NO LANZA. Un
@@ -138,37 +175,13 @@ export const extractTextFromBuffer = async (
   }
 
   try {
-    switch (contentType) {
-      case 'text/plain':
-      case 'text/csv':
-        // Un CSV ya es texto. Pasarlo por un analizador de hojas de calculo
-        // para volver a serializarlo como CSV seria un viaje de ida y vuelta
-        // que solo puede perder informacion.
-        return { text: truncate(buffer.toString('utf-8')), failure: null };
+    const raw = await extractRawText(buffer, contentType);
 
-      case PDF_CONTENT_TYPE: {
-        const data = await pdfParse(buffer);
-
-        return { text: truncate(data.text), failure: null };
-      }
-
-      case DOCX_CONTENT_TYPE: {
-        const result = await mammoth.extractRawText({ buffer });
-
-        return { text: truncate(result.value), failure: null };
-      }
-
-      case XLSX_CONTENT_TYPE:
-        return {
-          text: truncate(await extractFromWorkbook(buffer)),
-          failure: null,
-        };
-
-      default:
-        // Tipo sin lector. No es un fallo: es un formato del que este nodo no
-        // sabe sacar texto, y decirlo asi evita que se contabilice como averia.
-        return { text: '', failure: null };
-    }
+    // El ORDEN importa: primero normalizar y despues recortar. Al reves, parte
+    // del presupuesto de caracteres se gastaria en rachas de saltos de linea y
+    // de espacios que iban a colapsarse de todas formas, y el documento se
+    // truncaria antes de lo necesario.
+    return { text: truncate(normalizeWhitespace(raw)), failure: null };
   } catch (error) {
     return {
       text: '',

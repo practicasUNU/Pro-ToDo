@@ -619,8 +619,12 @@ describe('ParserEmailStrategy', () => {
       const urls = await extractUrls();
 
       // 3. Assert: los dos enlaces al mismo articulo solo diferian en el
-      //    parametro de campana, asi que colapsan en uno.
-      expect(urls).toEqual(['https://unuware.com/notas/sede?id=42']);
+      //    parametro de campana, asi que colapsan en uno. El de la firma entra
+      //    desde que la recoleccion va ANTES de podar (ver 7.6).
+      expect(urls).toEqual([
+        'https://unuware.com/notas/sede?id=42',
+        'https://firma.example/perfil',
+      ]);
     });
 
     it('7.2 deberia descartar el enlace de desuscripcion', async () => {
@@ -659,24 +663,113 @@ describe('ParserEmailStrategy', () => {
       expect(urls[0]).toContain('id=42');
     });
 
-    it('7.6 NO deberia recoger enlaces que vivian dentro de la firma eliminada', async () => {
-      // 1. Arrange: la recoleccion va DESPUES de podar, de modo que el cuerpo y
-      //    la lista de enlaces describan el mismo documento.
+    it('7.6 SI deberia recoger enlaces que vivian dentro de la firma eliminada', async () => {
+      // 1. Arrange: esta prueba afirmaba lo contrario y se invirtio a proposito.
+      //    La recoleccion pasa a ir ANTES de podar porque un correo REENVIADO
+      //    lleva sus referencias bibliograficas dentro del blockquote que la
+      //    poda retira, y perderlas dejaba a `EXTRACTOR_WEB` sin trabajo (7.9).
+      //    El coste es este: los enlaces dejan de describir el MISMO documento
+      //    que `clean_body`.
       const urls = await extractUrls();
 
       // 3. Assert
-      expect(urls.join(' ')).not.toContain('firma.example');
+      expect(urls.join(' ')).toContain('firma.example');
     });
 
-    it('7.7 deberia devolver una lista vacia en la ruta de texto plano', async () => {
-      // 1. Arrange: el texto plano parte las URLs a 78 columnas (RFC 5322) y
-      //    rescatarlas produciria direcciones truncadas. Vacio y honesto.
+    it('7.7 deberia recoger los enlaces del MARCADO aunque el cuerpo sea texto plano', async () => {
+      // 1. Arrange: el caso real de Gmail, que envia SIEMPRE las dos partes. La
+      //    cascada elige el texto para el cuerpo —es mas barato que el DOM— pero
+      //    ese texto parte las URLs a 78 columnas (RFC 5322) y rescatarlas de
+      //    ahi daria direcciones truncadas. El marcado del MISMO correo las
+      //    declara enteras, asi que los enlaces salen de ahi.
       const strategy = new ParserEmailStrategy();
+      const context = buildContext(
+        buildRawEmail({
+          text: '1. https://www.youtube.com/\n2. https://fast.com/\nMira estos links',
+          html:
+            '<div><div>1. <a href="https://www.youtube.com/">YouTube</a></div>' +
+            '<div>2. <a href="https://fast.com/">Fast</a></div></div>',
+        }),
+      );
 
       // 2. Act
-      const result = await strategy.execute(buildContext(), {});
+      const result = await strategy.execute(context, {});
+
+      // 3. Assert: antes de este cambio salia `[]` y `EXTRACTOR_WEB` se quedaba
+      //    sin nada que escrapear.
+      expect(result.data?.body_source).toBe('text');
+      expect(result.data?.extracted_urls).toEqual([
+        'https://www.youtube.com/',
+        'https://fast.com/',
+      ]);
+      // El cuerpo y la bandera multimodal no se tocan.
+      expect(result.data?.clean_body).toContain('Mira estos links');
+      expect(result.data?.requires_multimodal_fallback).toBe(false);
+    });
+
+    it('7.8 deberia devolver una lista vacia en un correo sin marcado', async () => {
+      // 1. Arrange: delimita el alcance de 7.7. Sin HTML no hay ningun `<a>` que
+      //    recoger, y del texto plano no se rescata nada por lo dicho alli.
+      const strategy = new ParserEmailStrategy();
+      const context = buildContext(
+        buildRawEmail({
+          text: 'Un cuerpo de texto plano con https://unuware.com dentro.',
+          html: '',
+        }),
+      );
+
+      // 2. Act
+      const result = await strategy.execute(context, {});
 
       // 3. Assert
+      expect(result.data?.body_source).toBe('text');
+      expect(result.data?.extracted_urls).toEqual([]);
+    });
+
+    it('7.9 deberia recoger las referencias de un correo REENVIADO', async () => {
+      // 1. Arrange: el caso que motiva el cambio de orden. El contenido citado
+      //    —y con el las referencias bibliograficas— vive dentro del blockquote
+      //    que la poda retira del cuerpo.
+      const strategy = new ParserEmailStrategy();
+      const context = buildContext(
+        buildRawEmail({
+          text: '',
+          html:
+            '<p>Os reenvio la convocatoria.</p>' +
+            '<blockquote class="gmail_quote">' +
+            '<p>Bases completas en <a href="https://unuware.com/bases">este enlace</a>.</p>' +
+            '</blockquote>',
+        }),
+      );
+
+      // 2. Act
+      const result = await strategy.execute(context, {});
+
+      // 3. Assert: el cuerpo sigue SIN la cita, pero la URL llega al extractor.
+      expect(result.data?.clean_body).not.toContain('Bases completas');
+      expect(result.data?.extracted_urls).toEqual([
+        'https://unuware.com/bases',
+      ]);
+    });
+
+    it('7.10 deberia descartar un href con sintaxis Markdown', async () => {
+      // 1. Arrange: valor que aparece de verdad en `raw_email.html` de algunas
+      //    ejecuciones. Su ORIGEN es un problema aparte, aguas arriba de este
+      //    nodo; aqui solo se fija que el descarte ocurre y por que.
+      const strategy = new ParserEmailStrategy();
+      const context = buildContext(
+        buildRawEmail({
+          text: '',
+          html: '<a href="[https://www.youtube.com/](https://www.youtube.com/)">video</a>',
+        }),
+      );
+
+      // 2. Act
+      const result = await strategy.execute(context, {});
+
+      // 3. Assert: `new URL()` lanza porque un esquema URI debe empezar por
+      //    letra ASCII. Descartarlo es correcto: `EXTRACTOR_WEB` fallaria al
+      //    intentar descargar `[https://...`.
       expect(result.data?.extracted_urls).toEqual([]);
     });
   });
