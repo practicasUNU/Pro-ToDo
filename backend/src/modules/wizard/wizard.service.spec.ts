@@ -8,6 +8,10 @@ import { CheckParserDto } from './dto/check-parser.dto';
 import { WizardService } from './wizard.service';
 
 import type { ConfigService } from '@nestjs/config';
+import type {
+  ScrapeOutcome,
+  WebScraperRunner,
+} from '@modules/nodes/services/web-scraper.runner';
 
 // Cero red: `testing-standards.md` §2 prohibe conexiones reales a IMAP.
 jest.mock('imapflow');
@@ -57,14 +61,44 @@ const useClient = (client: Record<string, jest.Mock>): void => {
  */
 const buildService = (
   env: Record<string, string> = { [PASSWORD_ENV_KEY]: IMAP_PASSWORD },
-): { service: WizardService; get: jest.Mock } => {
+  scrapeOutcome: ScrapeOutcome = buildScrapeSuccess(),
+): { service: WizardService; get: jest.Mock; run: jest.Mock } => {
   const get = jest.fn((key: string) => env[key]);
+  // Doble del runner: el asistente comparte con la estrategia EXACTAMENTE esta
+  // pieza, asi que probarlo aqui contra un navegador real solo repetiria lo que
+  // ya cubre `web-scraper.runner.spec.ts`, y encima por red.
+  const run = jest.fn().mockResolvedValue(scrapeOutcome);
 
   return {
-    service: new WizardService({ get } as unknown as ConfigService),
+    service: new WizardService(
+      { get } as unknown as ConfigService,
+      {
+        run,
+      } as unknown as WebScraperRunner,
+    ),
     get,
+    run,
   };
 };
+
+const SCRAPE_URL = 'https://www.ejemplo.es/noticias/nota-de-prensa';
+
+/** Desenlace exitoso del runner, con un articulo aprovechable. */
+function buildScrapeSuccess(
+  overrides: Partial<ScrapeOutcome> = {},
+): ScrapeOutcome {
+  return {
+    success: true,
+    sourceUrl: SCRAPE_URL,
+    article: {
+      title: 'Titular de la nota',
+      byline: 'Redaccion Local',
+      content: 'Primer parrafo.\n\nSegundo parrafo.',
+    },
+    attempts: 1,
+    ...overrides,
+  } as ScrapeOutcome;
+}
 
 describe('WizardService', () => {
   beforeEach(() => {
@@ -519,6 +553,147 @@ describe('WizardService', () => {
       expect(result.parsed).toBeUndefined();
 
       composer.mockRestore();
+    });
+  });
+
+  describe('5. Banco de pruebas del extractor web', () => {
+    it('5.1 deberia devolver las cinco claves de scraped_web', async () => {
+      // 1. Arrange
+      const { service } = buildService();
+
+      // 2. Act
+      const result = await service.checkScraper({ targetUrl: SCRAPE_URL });
+
+      // 3. Assert: son las claves que una plantilla interpola como
+      //    `{{scraped_web.full_article_content}}`; camelizarlas mostraria nombres
+      //    que ninguna plantilla puede escribir.
+      expect(result.success).toBe(true);
+      expect(Object.keys(result.preview ?? {}).sort()).toEqual([
+        'article_title',
+        'byline',
+        'full_article_content',
+        'scraped_at',
+        'source_url',
+      ]);
+      expect(result.preview?.article_title).toBe('Titular de la nota');
+      expect(result.preview?.byline).toBe('Redaccion Local');
+    });
+
+    it('5.2 deberia delegar la navegacion en el runner compartido', async () => {
+      // 1. Arrange
+      const { service, run } = buildService();
+
+      // 2. Act
+      await service.checkScraper({ targetUrl: SCRAPE_URL, timeoutMs: 30_000 });
+
+      // 3. Assert: no hay navegacion propia aqui. Si la hubiera, el asistente
+      //    aprobaria un intersticial que la ejecucion real rechaza.
+      expect(run).toHaveBeenCalledTimes(1);
+      expect((run.mock.calls[0]?.[0] as URL).toString()).toBe(SCRAPE_URL);
+      expect(run.mock.calls[0]?.[1]).toEqual({
+        timeoutMs: 30_000,
+        maxRetries: 2,
+        retryDelayMs: 2_000,
+      });
+    });
+
+    it('5.3 deberia devolver 200 con success false ante un bloqueo', async () => {
+      // 1. Arrange
+      const { service } = buildService(undefined, {
+        success: false,
+        code: 'ERR_ACCESS_DENIED_BLOCK_DETECTED',
+        message: 'Acceso denegado: muro de pago.',
+        sourceUrl: SCRAPE_URL,
+        attempts: 1,
+      });
+
+      // 2. Act & 3. Assert: el diagnostico del portal ES la respuesta que el
+      //    asistente muestra; un 4xx obligaria al cliente a distinguir "el medio
+      //    bloqueo" de "la llamada al backend se rompio".
+      const result = await service.checkScraper({ targetUrl: SCRAPE_URL });
+
+      expect(result.success).toBe(false);
+      expect(result.error?.code).toBe('ERR_ACCESS_DENIED_BLOCK_DETECTED');
+      expect(result.error?.level).toBe('GRAVE');
+      expect(result.preview).toBeUndefined();
+    });
+
+    it('5.4 deberia devolver metricas tambien cuando fracasa', async () => {
+      // 1. Arrange
+      const { service } = buildService(undefined, {
+        success: false,
+        code: 'ERR_SCRAPING_TIMEOUT_EXCEEDED',
+        message: 'Se agotaron los reintentos.',
+        attempts: 3,
+      });
+
+      // 2. Act
+      const result = await service.checkScraper({ targetUrl: SCRAPE_URL });
+
+      // 3. Assert: sin el tiempo real medido, el operador calibra `timeoutMs` a
+      //    ojo, que es justo lo que el banco de pruebas viene a evitar.
+      expect(result.metrics?.attempts).toBe(3);
+      expect(typeof result.metrics?.elapsedMs).toBe('number');
+      expect(result.metrics?.contentLength).toBe(0);
+    });
+
+    it('5.5 deberia avisar de una redireccion a otra URL', async () => {
+      // 1. Arrange
+      const finalUrl = 'https://www.ejemplo.es/2026/nota-ampliada';
+      const { service } = buildService(
+        undefined,
+        buildScrapeSuccess({ sourceUrl: finalUrl }),
+      );
+
+      // 2. Act
+      const result = await service.checkScraper({ targetUrl: SCRAPE_URL });
+
+      // 3. Assert: es la URL FINAL, y no la escrita, la que el nodo publicara en
+      //    `source_url` y la que acabara citada en el articulo de destino.
+      expect(result.metrics?.redirected).toBe(true);
+      expect(result.warnings?.join(' ')).toContain(finalUrl);
+    });
+
+    it('5.6 deberia omitir warnings cuando no hay ninguno', async () => {
+      // 1. Arrange
+      const { service } = buildService();
+
+      // 2. Act
+      const result = await service.checkScraper({ targetUrl: SCRAPE_URL });
+
+      // 3. Assert: se omite en vez de enviarse como `[]`, igual que en
+      //    `checkParser`: una lista vacia en cada respuesta seria ruido.
+      expect(result.warnings).toBeUndefined();
+    });
+
+    it('5.7 deberia recoger los avisos de extraccion del runner', async () => {
+      // 1. Arrange: el runner encadena sus hooks a los del llamante, que es lo
+      //    que permite mostrar aqui lo que en produccion solo llega al `.log`.
+      const { service, run } = buildService();
+      run.mockImplementation(
+        async (
+          _url: URL,
+          _options: unknown,
+          hooks: { onContentTooShort?: (length: number) => void },
+        ) => {
+          hooks.onContentTooShort?.(42);
+
+          return {
+            success: false,
+            code: 'ERR_SCRAPER_EMPTY_CONTENT',
+            message: 'Sin articulo.',
+            sourceUrl: SCRAPE_URL,
+            attempts: 1,
+          };
+        },
+      );
+
+      // 2. Act
+      const result = await service.checkScraper({ targetUrl: SCRAPE_URL });
+
+      // 3. Assert
+      expect(result.warnings?.join(' ')).toContain('42 caracteres');
+      expect(result.error?.code).toBe('ERR_SCRAPER_EMPTY_CONTENT');
     });
   });
 });

@@ -26,6 +26,8 @@ import { UserRole } from '@modules/users/enums/user-role.enum';
 import { CheckImapResponseDto } from './dto/check-imap-response.dto';
 import { CheckParserResponseDto } from './dto/check-parser-response.dto';
 import { CheckParserDto } from './dto/check-parser.dto';
+import { CheckScraperResponseDto } from './dto/check-scraper-response.dto';
+import { CheckScraperDto } from './dto/check-scraper.dto';
 import { WizardService } from './wizard.service';
 
 /**
@@ -138,5 +140,43 @@ export class WizardController {
     @Body(STRICT_VALIDATION) checkParserDto: CheckParserDto,
   ): Promise<CheckParserResponseDto> {
     return this.wizardService.checkParser(checkParserDto);
+  }
+
+  /**
+   * Extrae un articulo de una URL real con la misma logica del nodo EXTRACTOR_WEB.
+   *
+   * `HttpStatus.OK` por el mismo motivo que los dos anteriores: no se crea
+   * ningun recurso, se devuelve el resultado de una comprobacion, y nada
+   * persiste mas alla de la peticion.
+   *
+   * AVISO DE SEGURIDAD: a diferencia de `check-parser`, este endpoint SI es un
+   * oraculo de red. Acepta una URL arbitraria y navega a ella desde el servidor,
+   * de modo que un EDITOR autenticado puede usarlo para sondear hosts internos
+   * (`http://intranet/...`) que no serian alcanzables desde su puesto. Lo que lo
+   * contiene son las tres barreras de esta clase —lista blanca de IP perimetral,
+   * JWT y rol— mas la lista blanca de esquemas del DTO, que cierra `file:` y
+   * `data:`. Es la misma exposicion que ya asume `check-imap`, y merece la misma
+   * franqueza: quien pueda llamar aqui puede mapear la red del servidor.
+   */
+  @Post('check-scraper')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: 'Extrae un articulo de una URL de prueba',
+    description:
+      'Recorre la MISMA navegacion, deteccion de bloqueo y extraccion que ejecutara el nodo EXTRACTOR_WEB, y devuelve lo que depositaria en el namespace `scraped_web`. Un portal caido o un muro de pago se devuelven como 200 con `success: false`, no como error de la peticion.',
+  })
+  @ApiOkResponse({
+    description:
+      'Resultado de la extraccion. `success: false` describe el diagnostico del portal',
+    type: CheckScraperResponseDto,
+  })
+  @ApiBadRequestResponse({
+    description:
+      'Cuerpo invalido: `targetUrl` no es una URL http/https absoluta —las plantillas `{{...}}` se rechazan aqui, porque el banco de pruebas no tiene contexto que interpolar—, un parametro esta fuera de rango, o se envio una propiedad no permitida',
+  })
+  public async checkScraper(
+    @Body(STRICT_VALIDATION) checkScraperDto: CheckScraperDto,
+  ): Promise<CheckScraperResponseDto> {
+    return this.wizardService.checkScraper(checkScraperDto);
   }
 }

@@ -8,9 +8,9 @@ import { TemplatesModule } from '@modules/templates/templates.module';
 import { Workflow } from '@modules/workflows/entities/workflow.entity';
 import { WorkflowsModule } from '@modules/workflows/workflows.module';
 
+import { BrowserModule } from './browser.module';
 import { NodeCatalogEntry } from './entities/node-catalog.entity';
 import { NodeCatalogController } from './node-catalog.controller';
-import { BrowserPoolService } from './services/browser-pool.service';
 import { CronSchedulingService } from './services/cron-scheduling.service';
 import { ImapPollingService } from './services/imap-polling.service';
 import { NodeCatalogService } from './services/node-catalog.service';
@@ -53,6 +53,10 @@ import type { OnModuleInit } from '@nestjs/common';
  */
 @Module({
   imports: [
+    // Modulo hoja con el Chromium compartido. Va aparte y no como provider
+    // propio para que `WizardModule` pueda consumirlo sin importar este modulo
+    // entero (ver el TSDoc de `BrowserModule`).
+    BrowserModule,
     FsmModule,
     LogsModule,
     TemplatesModule,
@@ -68,7 +72,6 @@ import type { OnModuleInit } from '@nestjs/common';
     CronTriggerStrategy,
     ParserEmailStrategy,
     WebScraperStrategy,
-    BrowserPoolService,
     ImapPollingService,
     CronSchedulingService,
     NodeCatalogService,
@@ -79,10 +82,12 @@ import type { OnModuleInit } from '@nestjs/common';
     CronTriggerStrategy,
     ParserEmailStrategy,
     WebScraperStrategy,
-    BrowserPoolService,
     ImapPollingService,
     CronSchedulingService,
     NodeCatalogService,
+    // Se re-exporta para no romper a quien ya importaba este modulo esperando
+    // encontrar el navegador.
+    BrowserModule,
   ],
 })
 export class NodesModule implements OnModuleInit {

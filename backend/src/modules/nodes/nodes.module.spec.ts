@@ -10,7 +10,7 @@ import { TemplateMapperStrategy } from './strategies/template-mapper.strategy';
 import { WebScraperStrategy } from './strategies/web-scraper.strategy';
 
 import type { ConfigService } from '@nestjs/config';
-import type { BrowserPoolService } from '@modules/nodes/services/browser-pool.service';
+import type { WebScraperRunner } from '@modules/nodes/services/web-scraper.runner';
 import type { TemplatesService } from '@modules/templates/templates.service';
 
 /**
@@ -43,9 +43,9 @@ const buildHarness = (): {
   const cron = new CronTriggerStrategy();
   // Tampoco el parser: solo lee el contexto que le entrega el motor.
   const parser = new ParserEmailStrategy();
-  // El pool va vacio: inscribir la estrategia no abre ningun navegador, y el
+  // El runner va vacio: inscribir la estrategia no navega a ningun sitio, y el
   // arranque de Chromium es perezoso (primera llamada a `createContext`).
-  const scraper = new WebScraperStrategy({} as BrowserPoolService);
+  const scraper = new WebScraperStrategy({} as WebScraperRunner);
 
   return {
     factory,

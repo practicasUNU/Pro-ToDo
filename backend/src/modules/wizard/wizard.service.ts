@@ -3,7 +3,9 @@ import { ConfigService } from '@nestjs/config';
 
 import { resolveImapConfig } from '@modules/nodes/dto/imap-trigger-config.dto';
 import { resolveParserEmailConfig } from '@modules/nodes/dto/parser-email-config.dto';
+import { resolveWebScraperConfig } from '@modules/nodes/dto/web-scraper-config.dto';
 import { createImapClient } from '@modules/nodes/services/imap-client.factory';
+import { WebScraperRunner } from '@modules/nodes/services/web-scraper.runner';
 import { buildParsedEmail } from '@modules/nodes/utils/parsed-email-payload.util';
 
 import { CHECK_IMAP_SUCCESS_MESSAGE } from './dto/check-imap-response.dto';
@@ -12,6 +14,8 @@ import type { ImapTriggerConfigDto } from '@modules/nodes/dto/imap-trigger-confi
 import type { CheckImapResponseDto } from './dto/check-imap-response.dto';
 import type { CheckParserDto } from './dto/check-parser.dto';
 import type { CheckParserResponseDto } from './dto/check-parser-response.dto';
+import type { CheckScraperResponseDto } from './dto/check-scraper-response.dto';
+import type { CheckScraperDto } from './dto/check-scraper.dto';
 import type { ImapFlow } from 'imapflow';
 
 /**
@@ -31,7 +35,10 @@ import type { ImapFlow } from 'imapflow';
 export class WizardService {
   private readonly logger = new Logger(WizardService.name);
 
-  constructor(private readonly configService: ConfigService) {}
+  constructor(
+    private readonly configService: ConfigService,
+    private readonly webScraperRunner: WebScraperRunner,
+  ) {}
 
   /**
    * Verifica que las credenciales conectan y que el buzon indicado existe.
@@ -209,5 +216,113 @@ export class WizardService {
         `No se pudo cerrar la sesion IMAP de la comprobacion: ${error instanceof Error ? error.message : String(error)}`,
       );
     }
+  }
+
+  /**
+   * Navega a una URL real y devuelve lo que el nodo depositaria en `scraped_web`.
+   *
+   * Reutiliza `WebScraperRunner`, que es EXACTAMENTE la pieza que ejecuta
+   * `WebScraperStrategy`: no queda aqui ni una linea de navegacion propia. El
+   * criterio es el mismo que llevo a compartir `buildParsedEmail` con el parser,
+   * y aqui pesa aun mas, porque lo que se comparte incluye la deteccion de
+   * bloqueo: un banco de pruebas que navegase "simple" aprobaria un intersticial
+   * de Cloudflare que la ejecucion real rechaza, y estaria mintiendo justo en el
+   * modo de fallo mas frecuente del nodo.
+   *
+   * NUNCA lanza por un fallo de red ni por un muro: eso es un 200 con
+   * `success: false`, porque el diagnostico del portal ES la respuesta que el
+   * asistente tiene que mostrar. El 4xx queda para un cuerpo mal formado.
+   */
+  public async checkScraper(
+    checkScraperDto: CheckScraperDto,
+  ): Promise<CheckScraperResponseDto> {
+    const config = resolveWebScraperConfig({
+      targetUrl: checkScraperDto.targetUrl,
+      ...(checkScraperDto.timeoutMs === undefined
+        ? {}
+        : { timeoutMs: checkScraperDto.timeoutMs }),
+      ...(checkScraperDto.maxRetries === undefined
+        ? {}
+        : { maxRetries: checkScraperDto.maxRetries }),
+      ...(checkScraperDto.retryDelayMs === undefined
+        ? {}
+        : { retryDelayMs: checkScraperDto.retryDelayMs }),
+    });
+
+    const warnings: string[] = [];
+    const startedAt = Date.now();
+
+    // `new URL` sin `try`: el `@IsUrl` del DTO ya garantizo la forma, y un
+    // `catch` aqui seria una rama inalcanzable fingiendo manejar un fallo que el
+    // contrato no puede producir.
+    const url = new URL(checkScraperDto.targetUrl);
+
+    // Los avisos de la extraccion se recogen aqui ademas de irse al `.log`: son
+    // justo los que explican por que una pagina que cargo bien no produjo
+    // articulo, y en la ejecucion real el operador no llega a verlos nunca.
+    const outcome = await this.webScraperRunner.run(
+      url,
+      {
+        timeoutMs: config.timeoutMs,
+        maxRetries: config.maxRetries,
+        retryDelayMs: config.retryDelayMs,
+      },
+      {
+        onReadabilityFailure: (reason) =>
+          warnings.push(`Readability no pudo aislar el articulo: ${reason}`),
+        onContentTooShort: (length) =>
+          warnings.push(
+            `El contenido aislado tiene ${length} caracteres, por debajo del minimo que el nodo exige para tratarlo como articulo.`,
+          ),
+      },
+    );
+
+    const finalUrl = outcome.success ? outcome.sourceUrl : outcome.sourceUrl;
+    const redirected =
+      finalUrl !== undefined && finalUrl !== checkScraperDto.targetUrl;
+
+    const metrics = {
+      elapsedMs: Date.now() - startedAt,
+      attempts: outcome.attempts,
+      redirected,
+      contentLength: outcome.success ? outcome.article.content.length : 0,
+    };
+
+    if (!outcome.success) {
+      this.logger.warn(
+        `Banco de pruebas del extractor: "${checkScraperDto.targetUrl}" fallo con ${outcome.code}.`,
+      );
+
+      return {
+        success: false,
+        metrics,
+        ...(warnings.length > 0 ? { warnings } : {}),
+        error: { level: 'GRAVE', code: outcome.code, message: outcome.message },
+      };
+    }
+
+    // El aviso de redireccion NO es cosmetico: es la URL final, y no la que el
+    // operador escribio, la que el nodo publicara en `source_url` y la que
+    // acabara citada en el articulo de destino.
+    if (redirected) {
+      warnings.push(
+        `El portal redirigio a "${finalUrl}". Es esa URL, y no la introducida, la que el nodo publicaria en "source_url".`,
+      );
+    }
+
+    return {
+      success: true,
+      preview: {
+        source_url: outcome.sourceUrl,
+        article_title: outcome.article.title,
+        full_article_content: outcome.article.content,
+        byline: outcome.article.byline,
+        scraped_at: new Date().toISOString(),
+      },
+      metrics,
+      // El arreglo se omite cuando esta vacio en vez de enviarse como `[]`,
+      // igual que en `checkParser`.
+      ...(warnings.length > 0 ? { warnings } : {}),
+    };
   }
 }
