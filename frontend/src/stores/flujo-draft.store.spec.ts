@@ -29,6 +29,9 @@ vi.mock('@services/nodes/template-mapper.service', () => ({
 vi.mock('@services/nodes/parser-email.service', () => ({
   checkParser: vi.fn(),
 }));
+vi.mock('@services/nodes/web-scraper.service', () => ({
+  checkScraper: vi.fn(),
+}));
 
 const workflowTemplatesService = await import('@services/workflow-templates.service');
 const fetchWorkflowTemplates = vi.mocked(workflowTemplatesService.fetchWorkflowTemplates);
@@ -85,15 +88,17 @@ const buildTemplate = (
 /**
  * Topologia con un tipo de nodo que SIGUE sin configurador.
  *
- * Existe porque `PARSER_PRE_IA` dejo de serlo al implementarse su triada. El
- * caso "nodo no ejecutable" tiene que probarse contra un tipo que de verdad no
- * tenga store registrado, o la prueba pasaria a verificar lo contrario de lo que
- * su nombre dice. `EXTRACTOR_WEB` es el siguiente de la lista.
+ * Existe porque `PARSER_PRE_IA` dejo de serlo al implementarse su triada, y
+ * `EXTRACTOR_WEB` acaba de dejar de serlo por lo mismo. El caso "nodo no
+ * ejecutable" tiene que probarse contra un tipo que de verdad no tenga store
+ * registrado, o la prueba pasaria a verificar lo contrario de lo que su nombre
+ * dice. `PROCESADOR_IA` es el siguiente de la lista, y esta constante seguira
+ * rotando conforme cada tipo reciba su triada.
  *
  * La topologia por defecto NO se toca: las pruebas de namespaces aguas arriba
  * dependen de que el parser siga aportando `parsed_email` antes del mapeador.
  */
-const UNSUPPORTED_NODE_ID = 'nodo_extractor';
+const UNSUPPORTED_NODE_ID = 'nodo_procesador_ia';
 
 const UNSUPPORTED_TOPOLOGY = [
   {
@@ -103,8 +108,8 @@ const UNSUPPORTED_TOPOLOGY = [
   },
   {
     nodeId: UNSUPPORTED_NODE_ID,
-    nodeType: NodeType.EXTRACTOR_WEB,
-    outputNamespace: 'scraped_web',
+    nodeType: NodeType.PROCESADOR_IA,
+    outputNamespace: 'llm_response',
   },
 ];
 
@@ -272,10 +277,10 @@ describe('useFlujoDraftStore · agregador del asistente', () => {
     });
 
     it('3.3 deberia ser invalido en un paso cuyo tipo no tiene store registrado', async () => {
-      // 1. Arrange: topologia con EXTRACTOR_WEB, que sigue sin configurador.
-      //    Antes se probaba contra PARSER_PRE_IA, pero ese ya tiene triada: si
-      //    no se cambiara el fixture, esta prueba pasaria a verificar lo
-      //    contrario de lo que su nombre dice.
+      // 1. Arrange: topologia con PROCESADOR_IA, que sigue sin configurador.
+      //    Antes se probaba contra PARSER_PRE_IA y despues contra EXTRACTOR_WEB,
+      //    pero los dos ya tienen triada: sin rotar el fixture, esta prueba
+      //    pasaria a verificar lo contrario de lo que su nombre dice.
       const draft = useFlujoDraftStore();
       fetchWorkflowTemplates.mockResolvedValue([buildTemplate({ topology: UNSUPPORTED_TOPOLOGY })]);
       await draft.loadAvailableTemplates();
@@ -287,7 +292,7 @@ describe('useFlujoDraftStore · agregador del asistente', () => {
 
       // 3. Assert: sin configurador no hay forma de declararlo valido, y dejar
       //    avanzar seria ensamblar un pipeline con un nodo sin configurar.
-      expect(draft.activeStepDefinition?.nodeType).toBe(NodeType.EXTRACTOR_WEB);
+      expect(draft.activeStepDefinition?.nodeType).toBe(NodeType.PROCESADOR_IA);
       expect(draft.isActiveStepValid).toBe(false);
     });
 
@@ -1161,7 +1166,7 @@ describe('useFlujoDraftStore · modo edicion', () => {
 
   describe('16. Motivo por el que un paso bloquea el guardado', () => {
     it('16.1 deberia distinguir el nodo sin configurador del que solo esta incompleto', async () => {
-      // 1. Arrange: TRIGGER_IMAP (con configurador, sin probar) y EXTRACTOR_WEB
+      // 1. Arrange: TRIGGER_IMAP (con configurador, sin probar) y PROCESADOR_IA
       //    (sin configurador). Se usa la topologia alternativa porque
       //    PARSER_PRE_IA dejo de ser un tipo sin configurador.
       const draft = useFlujoDraftStore();
@@ -1174,7 +1179,7 @@ describe('useFlujoDraftStore · modo edicion', () => {
 
       // 3. Assert: presentarlos igual dejaba al operador reintentando algo que
       //    no tiene arreglo desde el asistente.
-      expect(byType.get(NodeType.EXTRACTOR_WEB)).toBe('SIN_CONFIGURADOR');
+      expect(byType.get(NodeType.PROCESADOR_IA)).toBe('SIN_CONFIGURADOR');
       expect(byType.get(NodeType.TRIGGER_IMAP)).toBe('CONFIGURACION_INCOMPLETA');
     });
 
@@ -1203,7 +1208,7 @@ describe('useFlujoDraftStore · modo edicion', () => {
     });
 
     it('16.4 deberia marcar hasUnsupportedNodes con un tipo sin configurador', async () => {
-      // 1. Arrange: topologia con EXTRACTOR_WEB, que sigue sin triada.
+      // 1. Arrange: topologia con PROCESADOR_IA, que sigue sin triada.
       const draft = useFlujoDraftStore();
       fetchWorkflowTemplates.mockResolvedValue([buildTemplate({ topology: UNSUPPORTED_TOPOLOGY })]);
       await draft.loadAvailableTemplates();

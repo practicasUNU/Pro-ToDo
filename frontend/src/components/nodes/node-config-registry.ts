@@ -30,6 +30,9 @@ export const nodeConfigRegistry: Partial<Record<NodeType, Component>> = {
   [NodeType.PARSER_PRE_IA]: defineAsyncComponent(
     () => import('@components/nodes/ParserEmailConfig.vue'),
   ),
+  [NodeType.EXTRACTOR_WEB]: defineAsyncComponent(
+    () => import('@components/nodes/WebScraperConfig.vue'),
+  ),
   [NodeType.MAPEADOR_PLANTILLA]: defineAsyncComponent(
     () => import('@components/nodes/TemplateMapperConfig.vue'),
   ),

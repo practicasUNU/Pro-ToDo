@@ -2,6 +2,7 @@ import { useParserEmailStore } from '@stores/nodes/parser-email.store';
 import { useTemplateMapperStore } from '@stores/nodes/template-mapper.store';
 import { useTriggerCronStore } from '@stores/nodes/trigger-cron.store';
 import { useTriggerImapStore } from '@stores/nodes/trigger-imap.store';
+import { useWebScraperStore } from '@stores/nodes/web-scraper.store';
 
 import { NodeType } from '@/types/pipeline';
 
@@ -137,6 +138,7 @@ export const nodeStoreRegistry: Partial<Record<NodeType, NodeStoreHook>> = {
   [NodeType.TRIGGER_IMAP]: useTriggerImapStore,
   [NodeType.TRIGGER_CRON]: useTriggerCronStore,
   [NodeType.PARSER_PRE_IA]: useParserEmailStore,
+  [NodeType.EXTRACTOR_WEB]: useWebScraperStore,
   [NodeType.MAPEADOR_PLANTILLA]: useTemplateMapperStore,
 };
 
