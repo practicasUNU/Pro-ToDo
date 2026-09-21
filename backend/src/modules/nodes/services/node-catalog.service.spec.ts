@@ -25,7 +25,7 @@ const buildEntry = (
 });
 
 /**
- * Estrategias registradas por defecto: las tres que el modulo inscribe hoy.
+ * Estrategias registradas por defecto: las que `NodesModule` inscribe hoy.
  *
  * Se declaran aqui y no se derivan de `NodeType` a proposito: derivarlas
  * reproduciria en la prueba el mismo error que este servicio acaba de dejar de
@@ -34,6 +34,8 @@ const buildEntry = (
 const REGISTERED_TYPES: readonly NodeType[] = [
   NodeType.TRIGGER_IMAP,
   NodeType.TRIGGER_CRON,
+  NodeType.PARSER_PRE_IA,
+  NodeType.EXTRACTOR_WEB,
   NodeType.MAPEADOR_PLANTILLA,
 ];
 
@@ -101,7 +103,7 @@ describe('NodeCatalogService · lectura del catalogo de tipos de nodo', () => {
     it.each([
       'DESTINO_ACENS',
       NodeType.PROCESADOR_IA,
-      NodeType.EXTRACTOR_WEB,
+      NodeType.ESCUDO_POST_IA,
       NodeType.DESTINO_HTTP,
     ])(
       '2.2 deberia marcar implemented en false para %s, que no tiene estrategia',

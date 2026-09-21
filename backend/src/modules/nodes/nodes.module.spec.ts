@@ -7,8 +7,10 @@ import { CronTriggerStrategy } from './strategies/cron-trigger.strategy';
 import { ImapTriggerStrategy } from './strategies/imap-trigger.strategy';
 import { ParserEmailStrategy } from './strategies/parser-email.strategy';
 import { TemplateMapperStrategy } from './strategies/template-mapper.strategy';
+import { WebScraperStrategy } from './strategies/web-scraper.strategy';
 
 import type { ConfigService } from '@nestjs/config';
+import type { BrowserPoolService } from '@modules/nodes/services/browser-pool.service';
 import type { TemplatesService } from '@modules/templates/templates.service';
 
 /**
@@ -26,6 +28,7 @@ const buildHarness = (): {
   imap: ImapTriggerStrategy;
   cron: CronTriggerStrategy;
   parser: ParserEmailStrategy;
+  scraper: WebScraperStrategy;
   module: NodesModule;
 } => {
   const factory = new NodeStrategyFactory();
@@ -40,6 +43,9 @@ const buildHarness = (): {
   const cron = new CronTriggerStrategy();
   // Tampoco el parser: solo lee el contexto que le entrega el motor.
   const parser = new ParserEmailStrategy();
+  // El pool va vacio: inscribir la estrategia no abre ningun navegador, y el
+  // arranque de Chromium es perezoso (primera llamada a `createContext`).
+  const scraper = new WebScraperStrategy({} as BrowserPoolService);
 
   return {
     factory,
@@ -47,7 +53,8 @@ const buildHarness = (): {
     imap,
     cron,
     parser,
-    module: new NodesModule(factory, mapper, imap, cron, parser),
+    scraper,
+    module: new NodesModule(factory, mapper, imap, cron, parser, scraper),
   };
 };
 
@@ -97,5 +104,17 @@ describe('NodesModule', () => {
     // 3. Assert: ademas de habilitar el nodo, este registro es lo que hace que
     //    `GET /api/nodos` devuelva PARSER_PRE_IA como implementado.
     expect(factory.getStrategy(NodeType.PARSER_PRE_IA)).toBe(parser);
+  });
+
+  it('1.5 deberia registrar WebScraperStrategy en la factoria al iniciarse', () => {
+    // 1. Arrange
+    const { factory, scraper, module } = buildHarness();
+
+    // 2. Act
+    module.onModuleInit();
+
+    // 3. Assert: es ademas lo que hace que `GET /api/nodos` pase EXTRACTOR_WEB a
+    //    `implemented: true`, porque el catalogo deriva esa marca de la factoria.
+    expect(factory.getStrategy(NodeType.EXTRACTOR_WEB)).toBe(scraper);
   });
 });
