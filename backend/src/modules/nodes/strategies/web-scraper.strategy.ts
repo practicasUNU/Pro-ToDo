@@ -41,6 +41,14 @@ export {
   classifyNavigationError,
 } from '@modules/nodes/services/web-scraper.runner';
 
+/**
+ * Namespace que se exige cuando `targetUrl` no declara ninguno.
+ *
+ * Es el del PARSER_PRE_IA porque es el unico predecesor plausible de este nodo:
+ * los enlaces que extrae salen de `parsed_email.extracted_urls`.
+ */
+export const FALLBACK_SCRAPER_NAMESPACE = 'parsed_email';
+
 /** Opciones de validacion canonicas del repositorio. */
 const VALIDATION_OPTIONS: ValidatorOptions = {
   whitelist: true,
@@ -162,16 +170,39 @@ export class WebScraperStrategy implements INodeStrategy {
    * interpolacion real, de modo que lo que aqui se exige y lo que alli se
    * resuelve no puedan discrepar.
    *
-   * Devuelve un arreglo VACIO cuando `targetUrl` es una URL literal —el caso del
-   * flujo que vigila siempre la misma portada—: ese nodo no depende de nada
-   * aguas arriba y exigirle un namespace lo haria inejecutable.
+   * NUNCA devuelve un arreglo vacio. Cuando `targetUrl` no nombra ningun
+   * namespace —una URL literal, una cadena vacia, un valor que ni siquiera es
+   * texto— cae a `FALLBACK_SCRAPER_NAMESPACE`. Esa garantia es el motivo de
+   * ser del fallback: un extractor sin dependencias declaradas deja a la regla 7
+   * del validador de topologia sin nada que comprobar, y el nodo podria
+   * colocarse en cualquier punto del grafo —detras de un TRIGGER_CRON, por
+   * ejemplo— sin que nadie lo objetara.
+   *
+   * EL PRECIO, y conviene que este escrito: el fallback NO es una lectura de la
+   * configuracion, es una suposicion. Un nodo heredado cuyo `targetUrl` literal
+   * apuntase a un portal fijo quedara bloqueado con
+   * `ERR_MISSING_UPSTREAM_CONTEXT` nombrando `parsed_email`, un namespace que
+   * esa configuracion nunca cito; el operador leera un diagnostico que no
+   * describe su problema real, que es que ese `targetUrl` ya no es admisible
+   * (ver el `@Matches` de `WebScraperConfigDto`). Se asume a cambio de que la
+   * garantia de arriba no tenga excepciones.
+   *
+   * El fallback se dispara por EXTRACCION VACIA y no por "no casa el patron
+   * anclado", que son cosas distintas: una plantilla compuesta como
+   * `{{llm_response.base}}/{{llm_response.slug}}` no casa el patron y sin
+   * embargo declara perfectamente de quien depende. Sustituir esto por un
+   * `INTERPOLATION_ONLY_PATTERN.test(...)` le asignaria `parsed_email` y romperia
+   * el caso 5.5 de su spec, que existe para impedir esa "simplificacion".
    */
   public getRequiredNamespaces(
     params: Record<string, unknown>,
   ): readonly string[] {
-    return typeof params.targetUrl === 'string'
-      ? extractNamespaceRoots(params.targetUrl)
-      : [];
+    const roots =
+      typeof params.targetUrl === 'string'
+        ? extractNamespaceRoots(params.targetUrl)
+        : [];
+
+    return roots.length > 0 ? roots : [FALLBACK_SCRAPER_NAMESPACE];
   }
 
   /**

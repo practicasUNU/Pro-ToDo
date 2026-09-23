@@ -4,6 +4,7 @@ import { createMockStatePayloadContext } from '@test/factories/state-payload-con
 import {
   ERR_ACCESS_DENIED_BLOCK_DETECTED,
   ERR_SCRAPER_CONFIG,
+  FALLBACK_SCRAPER_NAMESPACE,
   ERR_SCRAPER_URL_MALFORMED,
   ERR_SCRAPER_URL_UNRESOLVED,
   WebScraperStrategy,
@@ -377,18 +378,21 @@ describe('WebScraperStrategy', () => {
       ).toEqual(['parsed_email']);
     });
 
-    it('5.2 no deberia exigir nada ante una URL literal', () => {
+    it('5.2 deberia caer al namespace del parser ante una URL literal', () => {
       // 1. Arrange & 2. Act
       const { strategy } = createHarness();
 
-      // 3. Assert: el metodo sigue siendo una LECTURA HONESTA de la config —un
-      //    literal no menciona namespace alguno, luego no depende de nadie— y
-      //    no se le hace mentir devolviendo una dependencia inventada. Quien
-      //    rechaza ese nodo es el `@Matches` del DTO (ver 1.5), que da el
-      //    diagnostico correcto y senala el campo exacto; un fallback aqui
-      //    bloquearia nombrando un namespace que esa configuracion nunca cito.
+      // 3. Assert: el metodo NUNCA devuelve vacio. Un extractor sin
+      //    dependencias declaradas dejaria a la regla 7 del validador de
+      //    topologia sin nada que comprobar, y el nodo podria colocarse en
+      //    cualquier punto del grafo sin que nadie lo objetara.
+      //
+      //    El fallback es una SUPOSICION y no una lectura: este `targetUrl` no
+      //    menciona `parsed_email` por ningun lado. Se acepta el diagnostico
+      //    impreciso a cambio de que la garantia no tenga excepciones; quien da
+      //    el mensaje correcto es el `@Matches` del DTO (ver 1.5).
       expect(strategy.getRequiredNamespaces({ targetUrl: TARGET_URL })).toEqual(
-        [],
+        [FALLBACK_SCRAPER_NAMESPACE],
       );
     });
 
@@ -405,13 +409,39 @@ describe('WebScraperStrategy', () => {
       ).toEqual(['parsed_email']);
     });
 
-    it('5.4 no deberia exigir nada si targetUrl no es una cadena', () => {
+    it('5.4 deberia caer al fallback si targetUrl no es una cadena', () => {
       // 1. Arrange & 2. Act: validar el DTO es competencia de `execute`; aqui
-      //    adelantarlo daria dos mensajes para el mismo error.
+      //    adelantarlo daria dos mensajes para el mismo error. Lo que si se
+      //    sostiene es la garantia: ni con `params` vacios se devuelve `[]`.
       const { strategy } = createHarness();
 
       // 3. Assert
-      expect(strategy.getRequiredNamespaces({})).toEqual([]);
+      expect(strategy.getRequiredNamespaces({})).toEqual([
+        FALLBACK_SCRAPER_NAMESPACE,
+      ]);
+      expect(strategy.getRequiredNamespaces({ targetUrl: '' })).toEqual([
+        FALLBACK_SCRAPER_NAMESPACE,
+      ]);
+      expect(strategy.getRequiredNamespaces({ targetUrl: 42 })).toEqual([
+        FALLBACK_SCRAPER_NAMESPACE,
+      ]);
+    });
+
+    it('5.5 no deberia caer al fallback si la plantilla nombra otro namespace', () => {
+      // 1. Arrange & 2. Act: una plantilla COMPUESTA no casa el patron anclado
+      //    del DTO, pero declara perfectamente de quien depende.
+      const { strategy } = createHarness();
+
+      // 3. Assert: el fallback se dispara por EXTRACCION VACIA y no por "no
+      //    casa la regex". Cambiarlo por un `INTERPOLATION_ONLY_PATTERN.test()`
+      //    devolveria aqui `parsed_email` y mandaria al operador a anadir un
+      //    parser que este flujo no necesita. Este caso existe para impedir esa
+      //    "simplificacion".
+      expect(
+        strategy.getRequiredNamespaces({
+          targetUrl: '{{llm_response.base_url}}/{{llm_response.slug}}',
+        }),
+      ).toEqual(['llm_response']);
     });
   });
 });
