@@ -52,6 +52,9 @@ const groupedOptions = computed(() =>
     entry,
     label: entry.name,
     category: NODE_CATEGORY_LABELS[entry.category],
+    // Es `string | null` en el contrato del catalogo, asi que se propaga tal
+    // cual y es la plantilla quien decide si hay linea que pintar.
+    description: entry.description,
     disable: !entry.implemented,
   })),
 );
@@ -201,6 +204,14 @@ onMounted(async () => {
               <q-item-label caption class="pd-subtitle">
                 {{ scope.opt.category }}
                 <span v-if="scope.opt.disable"> · sin estrategia todavia</span>
+              </q-item-label>
+              <!--
+                La descripcion llega del catalogo desde siempre y hasta ahora se
+                descartaba. Va en su propia linea y con `v-if`: es anulable, y
+                una linea vacia desalinearia el resto de opciones de la lista.
+              -->
+              <q-item-label v-if="scope.opt.description !== null" caption class="pd-subtitle">
+                {{ scope.opt.description }}
               </q-item-label>
             </q-item-section>
           </q-item>

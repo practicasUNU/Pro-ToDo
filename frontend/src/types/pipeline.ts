@@ -21,7 +21,7 @@ export enum NodeType {
 export const NODE_TYPE_LABELS: Record<NodeType, string> = {
   [NodeType.TRIGGER_IMAP]: 'Disparador IMAP',
   [NodeType.TRIGGER_CRON]: 'Disparador Cron',
-  [NodeType.PARSER_PRE_IA]: 'Parser previo a IA',
+  [NodeType.PARSER_PRE_IA]: 'Parser de Correo',
   [NodeType.EXTRACTOR_WEB]: 'Extractor web',
   [NodeType.PROCESADOR_IA]: 'Procesador IA',
   [NodeType.ESCUDO_POST_IA]: 'Escudo posterior a IA',

@@ -346,7 +346,7 @@ CREATE INDEX idx_alertas_error_pendientes
 -- `flujos.configuracion_pipeline` (ver migracion 005).
 INSERT INTO nodos (codigo, nombre, categoria, descripcion) VALUES
     ('TRIGGER_IMAP', 'Disparador IMAP', 'TRIGGER', 'Inicia el flujo mediante la lectura de correos entrantes'),
-    ('PARSER_PRE_IA', 'Parser Pre-IA', 'PROCESAMIENTO', 'Decodifica el contenido MIME y sanitiza el texto antes de llamar al modelo'),
+    ('PARSER_PRE_IA', 'Parser de Correo', 'PROCESAMIENTO', 'Procesa y limpia correos entrantes, extrayendo asunto, texto plano sin firmas y URLs de referencia.'),
     ('EXTRACTOR_WEB', 'Extractor Web', 'PROCESAMIENTO', 'Extrae y sanitiza contenido desde una pagina web'),
     ('PROCESADOR_IA', 'Procesador de IA', 'PROCESAMIENTO', 'Ejecuta inferencia mediante un modelo de lenguaje'),
     ('ESCUDO_POST_IA', 'Escudo Post-IA', 'CONTROL', 'Valida la salida del modelo contra el esquema esperado antes de propagarla'),

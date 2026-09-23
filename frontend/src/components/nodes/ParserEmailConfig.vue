@@ -11,6 +11,8 @@ import {
 
 import { extractApiErrorMessage } from '@/utils/api-error';
 
+import { NODE_TYPE_LABELS, NodeType } from '@/types/pipeline';
+
 import type { BodySource } from '@/types/parser-email';
 
 interface Props {
@@ -110,7 +112,7 @@ const onRunSandboxTest = async (): Promise<void> => {
         <q-icon name="cleaning_services" size="20px" class="pd-node-icon" />
       </span>
       <div>
-        <div class="pd-h2">Parser previo a IA</div>
+        <div class="pd-h2">{{ NODE_TYPE_LABELS[NodeType.PARSER_PRE_IA] }}</div>
         <div class="pd-subtitle">
           Limpia el correo, extrae sus enlaces de contenido y decide si el flujo puede seguir con
           texto o necesita un modelo con vision.
