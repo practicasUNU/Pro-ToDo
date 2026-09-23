@@ -18,7 +18,7 @@
  * Exigir al menos un segmento deja fuera `{{ parsed_email }}` a proposito: un
  * namespace entero no es un valor interpolable.
  */
-const INTERPOLATION_PATTERN =
+export const INTERPOLATION_PATTERN =
   /\{\{\s*([a-zA-Z0-9_]+(?:\.[a-zA-Z0-9_]+|\[\d+\])+)\s*\}\}/g;
 
 /** Normaliza `urls[0]` a `urls.0`: una sola gramatica que recorrer. */
@@ -105,6 +105,46 @@ export const resolvePath = (
   }
 
   return resolved;
+};
+
+/**
+ * Namespaces raiz que una plantilla necesita para poder interpolarse.
+ *
+ * Funcion PURA, y deliberadamente basada en el MISMO `INTERPOLATION_PATTERN` que
+ * usa `getInterpolatedValue`: una segunda expresion regular equivalente acabaria
+ * divergiendo de la que de verdad interpola, y entonces la validacion aprobaria
+ * plantillas que la ejecucion no sabe resolver, o al reves.
+ *
+ * Devuelve solo la RAIZ de cada ruta (`parsed_email` de
+ * `{{parsed_email.extracted_urls[0]}}`), sin duplicados y en orden de aparicion.
+ * Una plantilla sin marcas —una URL literal, por ejemplo— no necesita nada y
+ * devuelve un arreglo vacio.
+ *
+ * `{{parsed_email}}` a secas NO se reconoce, y es correcto que no se reconozca:
+ * el patron exige al menos un segmento porque un namespace entero no es un valor
+ * interpolable.
+ */
+export const extractNamespaceRoots = (template: string): readonly string[] => {
+  const roots = new Set<string>();
+
+  // El patron es global y con estado (`lastIndex`), asi que se consume con
+  // `matchAll`, que trabaja sobre un clon interno y no deja el literal
+  // compartido a medio recorrer para el siguiente llamante.
+  for (const match of template.matchAll(INTERPOLATION_PATTERN)) {
+    const rawPath = match[1];
+
+    if (rawPath === undefined) {
+      continue;
+    }
+
+    const [root] = rawPath.replace(BRACKET_INDEX_PATTERN, '.$1').split('.');
+
+    if (root !== undefined && root.length > 0) {
+      roots.add(root);
+    }
+  }
+
+  return [...roots];
 };
 
 /**

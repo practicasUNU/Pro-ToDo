@@ -55,6 +55,20 @@ type TemplateResolution =
  * desde aqui duplicaria el payload en dos namespaces y contradiria el contrato
  * de `INodeStrategy`, donde el contexto es de solo lectura para la estrategia.
  */
+/*
+ * NOTA: este nodo NO implementa `getRequiredNamespaces`, y no es un olvido.
+ *
+ * Sus variables requeridas no estan en `params`: viven en la columna
+ * `requiredVariables` de la fila de `plantillas_html` que el nodo tenga elegida,
+ * asi que derivarlas exigiria una consulta a base de datos y volveria asincrono
+ * un metodo que los otros cuatro nodos resuelven mirando un objeto.
+ *
+ * Y sobre todo no hace falta: `TemplateRendererService.renderStrict` ya hace un
+ * pre-chequeo que devuelve TODAS las variables ausentes de una vez y con la ruta
+ * completa (`parsed_email.clean_title`), que es un diagnostico estrictamente
+ * mejor que un nombre de namespace suelto. Anadir aqui la guarda generica solo
+ * adelantaria un mensaje peor.
+ */
 @Injectable()
 export class TemplateMapperStrategy implements INodeStrategy {
   public readonly nodeType = NodeType.MAPEADOR_PLANTILLA;

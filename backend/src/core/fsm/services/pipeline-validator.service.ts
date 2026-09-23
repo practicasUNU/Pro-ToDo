@@ -6,6 +6,10 @@ import {
   PipelineNodeConfigDto,
   PipelineSchemaDto,
 } from '@core/fsm/dto/pipeline-schema.dto';
+// Import de VALOR: `NodeStrategyFactory` se inyecta por constructor, y con
+// `emitDecoratorMetadata` un `import type` se borra al transpilar dejando a Nest
+// sin el token que necesita para resolver la dependencia.
+import { NodeStrategyFactory } from '@core/fsm/factories/node-strategy.factory';
 import { validatePipelineTopology } from '@core/fsm/validators/pipeline-topology.validator';
 
 import type { SchemaIssue } from '@core/fsm/validators/pipeline-topology.validator';
@@ -59,6 +63,8 @@ const flattenValidationErrors = (
  */
 @Injectable()
 export class PipelineValidatorService {
+  constructor(private readonly strategyFactory: NodeStrategyFactory) {}
+
   /**
    * Convierte un JSON arbitrario en un `PipelineSchemaDto` validado.
    *
@@ -89,7 +95,11 @@ export class PipelineValidatorService {
 
     // La topologia presupone forma y tipos correctos (ver el TSDoc del validador).
     if (issues.length === 0) {
-      issues.push(...validatePipelineTopology(schema));
+      issues.push(
+        ...validatePipelineTopology(schema, (node) =>
+          this.resolveNodeDependencies(node),
+        ),
+      );
     }
 
     if (issues.length > 0) {
@@ -97,6 +107,27 @@ export class PipelineValidatorService {
     }
 
     return schema;
+  }
+
+  /**
+   * Namespaces que un nodo declara necesitar, preguntando a su estrategia.
+   *
+   * Un tipo sin estrategia registrada devuelve un arreglo vacio en vez de
+   * propagar la excepcion de la factoria: que el nodo no sea ejecutable es un
+   * problema distinto y lo reporta el motor con `ERR_STRATEGY_NOT_FOUND`;
+   * convertirlo aqui en un fallo de dependencias daria un diagnostico que manda
+   * al operador a reordenar un flujo cuyo orden esta bien.
+   */
+  private resolveNodeDependencies(
+    node: PipelineNodeConfigDto,
+  ): readonly string[] {
+    try {
+      const strategy = this.strategyFactory.getStrategy(node.nodeType);
+
+      return strategy.getRequiredNamespaces?.(node.params) ?? [];
+    } catch {
+      return [];
+    }
   }
 
   /**

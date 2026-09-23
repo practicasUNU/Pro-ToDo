@@ -1,6 +1,7 @@
 import { BadRequestException } from '@nestjs/common';
 
 import { PipelineSchemaDto } from '@core/fsm/dto/pipeline-schema.dto';
+import { NodeStrategyFactory } from '@core/fsm/factories/node-strategy.factory';
 import { PipelineValidatorService } from '@core/fsm/services/pipeline-validator.service';
 import { NodeType } from '@core/fsm/types/pipeline-schema.types';
 
@@ -109,7 +110,12 @@ describe('PipelineValidatorService (PROT-07)', () => {
   let service: PipelineValidatorService;
 
   beforeEach(() => {
-    service = new PipelineValidatorService();
+    // Factoria VACIA a proposito: sin estrategias registradas, todos los nodos
+    // declaran cero dependencias y la regla 7 no interviene. Estas pruebas
+    // examinan las otras seis reglas, y sembrar estrategias aqui las acoplaria a
+    // la configuracion de unos nodos que no vienen al caso. La regla 7 tiene su
+    // propio bloque, con su doble.
+    service = new PipelineValidatorService(new NodeStrategyFactory());
   });
 
   describe('esquema valido', () => {
@@ -469,6 +475,121 @@ describe('PipelineValidatorService (PROT-07)', () => {
 
       // 3. Assert
       expect(fieldsOf(issues)).toEqual(['(root)']);
+    });
+  });
+
+  describe('regla 7: namespaces requeridos aguas arriba', () => {
+    /**
+     * Servicio con una factoria sembrada de estrategias que SI declaran
+     * dependencias.
+     *
+     * Se registran dobles y no las estrategias reales para que estas pruebas
+     * examinen la REGLA y no la configuracion de un nodo concreto: si manana el
+     * parser cambiara su `sourceNamespace` por defecto, estas pruebas no deben
+     * ponerse rojas por ello.
+     */
+    const buildServiceWith = (
+      requirements: Partial<Record<NodeType, readonly string[]>>,
+    ): PipelineValidatorService => {
+      const factory = new NodeStrategyFactory();
+      jest.spyOn(factory['logger'], 'log').mockImplementation(() => undefined);
+
+      for (const [nodeType, namespaces] of Object.entries(requirements)) {
+        factory.registerStrategy({
+          nodeType: nodeType as NodeType,
+          execute: jest.fn(),
+          getRequiredNamespaces: () => namespaces,
+        });
+      }
+
+      return new PipelineValidatorService(factory);
+    };
+
+    it('deberia rechazar un nodo que necesita un namespace que nadie escribe antes', async () => {
+      // 1. Arrange: el parser va PRIMERO, asi que nadie ha escrito `raw_email`.
+      const schema = buildNotiwebSchema();
+      const service = buildServiceWith({
+        [NodeType.PARSER_PRE_IA]: ['raw_email'],
+      });
+      schema.entrypoint = 'nodo_parser';
+
+      // 2. Act
+      const issues = await captureIssues(service, schema);
+
+      // 3. Assert: el flujo ni siquiera llega a persistirse, que es la mejora
+      //    sobre la guarda del motor: alli se descubre con la ejecucion creada.
+      expect(fieldsOf(issues)).toContain('nodes.nodo_parser.params');
+      expect(issues[0].constraints[0]).toContain('raw_email');
+    });
+
+    it('deberia aceptar el flujo cuando un paso anterior escribe el namespace', async () => {
+      // 1. Arrange: orden correcto, el trigger escribe `raw_email` antes.
+      const service = buildServiceWith({
+        [NodeType.PARSER_PRE_IA]: ['raw_email'],
+      });
+
+      // 2. Act
+      const result = await service.validateSchema(buildNotiwebSchema());
+
+      // 3. Assert
+      expect(result.entrypoint).toBe('trigger_imap');
+    });
+
+    it('no deberia exigir nada a un tipo de nodo sin estrategia registrada', async () => {
+      // 1. Arrange: que el nodo no sea ejecutable es otro problema, y lo reporta
+      //    el motor con ERR_STRATEGY_NOT_FOUND. Convertirlo aqui en un fallo de
+      //    dependencias mandaria al operador a reordenar un flujo bien ordenado.
+      const service = buildServiceWith({});
+
+      // 2. Act
+      const result = await service.validateSchema(buildNotiwebSchema());
+
+      // 3. Assert
+      expect(result.nodes.nodo_parser.nodeId).toBe('nodo_parser');
+    });
+
+    it('no deberia juzgar un nodo alcanzable solo por onErrorStep', async () => {
+      // 1. Arrange: un nodo colgado unicamente de una ruta de error tiene un
+      //    conjunto de predecesores distinto segun por donde se entre, asi que
+      //    afirmar sobre el al guardar seria adivinar. Lo cubre el motor.
+      const schema = buildNotiwebSchema();
+      const service = buildServiceWith({
+        [NodeType.DESTINO_HTTP]: ['namespace_inventado'],
+      });
+      const terminal = Object.values(schema.nodes).find(
+        (node) => node.nodeType === NodeType.DESTINO_HTTP,
+      );
+
+      if (terminal !== undefined) {
+        // Se descuelga del camino activo: solo se llega por la ruta de error.
+        for (const node of Object.values(schema.nodes)) {
+          if (node.nextStep === terminal.nodeId) {
+            node.nextStep = null;
+            node.onErrorStep = terminal.nodeId;
+          }
+        }
+      }
+
+      // 2. Act
+      const result = await service.validateSchema(schema);
+
+      // 3. Assert
+      expect(result.entrypoint).toBe('trigger_imap');
+    });
+
+    it('no deberia exigir el namespace reservado del disparador', async () => {
+      // 1. Arrange: `trigger` lo siembra el motor al crear la ejecucion, y
+      //    ningun nodo lo declara como salida.
+      const service = buildServiceWith({
+        [NodeType.PARSER_PRE_IA]: ['trigger'],
+      });
+
+      // 2. Act
+      const result = await service.validateSchema(buildNotiwebSchema());
+
+      // 3. Assert: exigir que algun nodo lo produzca lo haria irresoluble por
+      //    construccion.
+      expect(result.entrypoint).toBe('trigger_imap');
     });
   });
 });

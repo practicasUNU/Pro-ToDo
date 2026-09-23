@@ -103,11 +103,23 @@ const buildQueryFailedError = (
   );
 };
 
-/** Estrategia falsa: la factoria real la registra e indexa por `nodeType`. */
+/**
+ * Estrategia falsa: la factoria real la registra e indexa por `nodeType`.
+ *
+ * `getRequiredNamespaces` se omite por defecto para que las pruebas que no van
+ * de dependencias no tengan que declarar nada: la interfaz lo tiene opcional
+ * justo porque un disparador no exige contexto alguno.
+ */
 const buildStrategy = (
   nodeType: NodeType,
   execute: jest.Mock,
-): INodeStrategy => ({ nodeType, execute });
+  getRequiredNamespaces?: (
+    params: Record<string, unknown>,
+  ) => readonly string[],
+): INodeStrategy =>
+  getRequiredNamespaces === undefined
+    ? { nodeType, execute }
+    : { nodeType, execute, getRequiredNamespaces };
 
 /** `NodeResult` fallido con la severidad y el codigo indicados. */
 const failure = (
@@ -155,6 +167,30 @@ const buildLinearSchema = (): PipelineSchemaDto => ({
     },
   },
 });
+
+/**
+ * Ultimo checkpoint persistido, ya tipado.
+ *
+ * `update.mock.calls` es `any[]`, y el lint del repositorio rechaza navegarlo a
+ * pelo. Se anota la tupla en un solo sitio en vez de repetir el aserto en cada
+ * prueba, que es el mismo idioma que usan los `cursors` de los bloques previos.
+ */
+const lastPatch = (
+  update: jest.Mock,
+): { currentState: ExecutionState; activeCursor: string | null } => {
+  const calls = update.mock.calls as [
+    string,
+    { currentState: ExecutionState; activeCursor: string | null },
+  ][];
+
+  const last = calls.at(-1);
+
+  if (last === undefined) {
+    throw new Error('No se persistio ningun checkpoint.');
+  }
+
+  return last[1];
+};
 
 /** Ruta que el doble del volcado forense devuelve, para aseverar sobre ella. */
 const LOG_PATH = 'logs/fsm-2026-09-09.log';
@@ -2423,6 +2459,200 @@ describe('FsmEngineService (PROT-09)', () => {
 
       // 3. Assert
       expect(attachmentsIn(result.contextPayload)[0].contentBase64).toBeNull();
+    });
+  });
+
+  describe('31. Namespaces requeridos aguas arriba', () => {
+    it('31.1 deberia ejecutar el nodo cuando su namespace requerido esta presente', async () => {
+      // 1. Arrange: `nodo_a` escribe `salida_a` y `nodo_b` la exige.
+      const execA = jest
+        .fn()
+        .mockResolvedValue({ success: true, data: { ok: 1 } });
+      const execB = jest
+        .fn()
+        .mockResolvedValue({ success: true, data: { ok: 2 } });
+      const execC = jest.fn().mockResolvedValue({ success: true });
+      factory.registerStrategy(buildStrategy(NodeType.TRIGGER_IMAP, execA));
+      factory.registerStrategy(
+        buildStrategy(NodeType.PROCESADOR_IA, execB, () => ['salida_a']),
+      );
+      factory.registerStrategy(buildStrategy(NodeType.DESTINO_HTTP, execC));
+      const execution = buildExecution();
+      const { repo, update } = buildRepository(execution);
+
+      // 2. Act
+      await buildEngine(repo).executeWorkflow(
+        EXECUTION_ID,
+        buildLinearSchema(),
+      );
+
+      // 3. Assert
+      expect(execB).toHaveBeenCalledTimes(1);
+      expect(lastPatch(update).currentState).toBe(ExecutionState.EXITOSO);
+    });
+
+    it('31.2 no deberia invocar la estrategia si falta un namespace requerido', async () => {
+      // 1. Arrange: `nodo_b` exige algo que ningun nodo anterior escribe.
+      const execA = jest
+        .fn()
+        .mockResolvedValue({ success: true, data: { ok: 1 } });
+      const execB = jest.fn().mockResolvedValue({ success: true });
+      factory.registerStrategy(buildStrategy(NodeType.TRIGGER_IMAP, execA));
+      factory.registerStrategy(
+        buildStrategy(NodeType.PROCESADOR_IA, execB, () => ['llm_response']),
+      );
+      factory.registerStrategy(buildStrategy(NodeType.DESTINO_HTTP, jest.fn()));
+      const execution = buildExecution();
+      const { repo, update } = buildRepository(execution);
+
+      // 2. Act
+      await buildEngine(repo).executeWorkflow(
+        EXECUTION_ID,
+        buildLinearSchema(),
+      );
+
+      // 3. Assert: la guarda corta ANTES de invocar, que es todo el objetivo:
+      //    un nodo sin su contexto no debe llegar a intentarlo.
+      expect(execB).not.toHaveBeenCalled();
+
+      const last = lastPatch(update);
+
+      expect(last.currentState).toBe(ExecutionState.PAUSADO);
+      // El cursor se conserva en el nodo culpable para que CU-09 pueda reanudar
+      // ahi mismo tras corregir la topologia.
+      expect(last.activeCursor).toBe('nodo_b');
+    });
+
+    it('31.3 deberia registrar el fallo como GRAVE con los namespaces que faltan', async () => {
+      // 1. Arrange
+      factory.registerStrategy(
+        buildStrategy(
+          NodeType.TRIGGER_IMAP,
+          jest.fn().mockResolvedValue({ success: true }),
+        ),
+      );
+      factory.registerStrategy(
+        buildStrategy(NodeType.PROCESADOR_IA, jest.fn(), () => [
+          'llm_response',
+          'scraped_web',
+        ]),
+      );
+      factory.registerStrategy(buildStrategy(NodeType.DESTINO_HTTP, jest.fn()));
+      const { repo } = buildRepository(buildExecution());
+
+      // 2. Act
+      await buildEngine(repo).executeWorkflow(
+        EXECUTION_ID,
+        buildLinearSchema(),
+      );
+
+      // 3. Assert: GRAVE y no URGENTE para que `canRetry` lo contemple y el
+      //    operador pueda reanudar; el codigo es lo que un `catchErrors` enruta.
+      const nodeLog = hybridLogger.logNodeExecution.mock.calls
+        .map(
+          ([details]: [
+            { nodeId: string; errorCode?: string; severity?: string },
+          ]) => details,
+        )
+        .find((details) => details.nodeId === 'nodo_b');
+
+      expect(nodeLog?.errorCode).toBe('ERR_MISSING_UPSTREAM_CONTEXT');
+      expect(nodeLog?.severity).toBe('GRAVE');
+      expect(nodeLog?.message).toContain('scraped_web');
+    });
+
+    it('31.4 deberia dar por satisfecho un namespace escrito vacio', async () => {
+      // 1. Arrange: `nodo_a` termina bien SIN devolver `data`, asi que el motor
+      //    escribe `{}` en su namespace.
+      const execB = jest.fn().mockResolvedValue({ success: true });
+      factory.registerStrategy(
+        buildStrategy(
+          NodeType.TRIGGER_IMAP,
+          jest.fn().mockResolvedValue({ success: true }),
+        ),
+      );
+      factory.registerStrategy(
+        buildStrategy(NodeType.PROCESADOR_IA, execB, () => ['salida_a']),
+      );
+      factory.registerStrategy(
+        buildStrategy(
+          NodeType.DESTINO_HTTP,
+          jest.fn().mockResolvedValue({ success: true }),
+        ),
+      );
+      const { repo } = buildRepository(buildExecution());
+
+      // 2. Act
+      await buildEngine(repo).executeWorkflow(
+        EXECUTION_ID,
+        buildLinearSchema(),
+      );
+
+      // 3. Assert: la guarda pregunta "corrio el nodo que produce esto", no
+      //    "trae los campos que espero". Lo segundo solo lo sabe la estrategia
+      //    consumidora, y juzgarlo aqui bloquearia nodos que devuelven vacio de
+      //    forma legitima.
+      expect(execB).toHaveBeenCalledTimes(1);
+    });
+
+    it('31.5 deberia respetar el onErrorStep declarado para el codigo', async () => {
+      // 1. Arrange
+      const execC = jest.fn().mockResolvedValue({ success: true });
+      factory.registerStrategy(
+        buildStrategy(
+          NodeType.TRIGGER_IMAP,
+          jest.fn().mockResolvedValue({ success: true }),
+        ),
+      );
+      factory.registerStrategy(
+        buildStrategy(NodeType.PROCESADOR_IA, jest.fn(), () => [
+          'llm_response',
+        ]),
+      );
+      factory.registerStrategy(buildStrategy(NodeType.DESTINO_HTTP, execC));
+
+      const schema = buildLinearSchema();
+      schema.nodes.nodo_b.onErrorStep = {
+        targetNode: 'nodo_c',
+        catchErrors: ['ERR_MISSING_UPSTREAM_CONTEXT'],
+      };
+      const { repo, update } = buildRepository(buildExecution());
+
+      // 2. Act
+      await buildEngine(repo).executeWorkflow(EXECUTION_ID, schema);
+
+      // 3. Assert: el fallo entra por el mismo camino que cualquier otro del
+      //    dominio, que es la razon de poner la guarda dentro de `runNode`.
+      expect(execC).toHaveBeenCalledTimes(1);
+      expect(lastPatch(update).currentState).toBe(ExecutionState.EXITOSO);
+    });
+
+    it('31.6 deberia ejecutar sin exigir nada una estrategia que no declara el metodo', async () => {
+      // 1. Arrange: es el caso de los disparadores, primeros del grafo.
+      const execA = jest.fn().mockResolvedValue({ success: true });
+      factory.registerStrategy(buildStrategy(NodeType.TRIGGER_IMAP, execA));
+      factory.registerStrategy(
+        buildStrategy(
+          NodeType.PROCESADOR_IA,
+          jest.fn().mockResolvedValue({ success: true }),
+        ),
+      );
+      factory.registerStrategy(
+        buildStrategy(
+          NodeType.DESTINO_HTTP,
+          jest.fn().mockResolvedValue({ success: true }),
+        ),
+      );
+      const { repo } = buildRepository(buildExecution());
+
+      // 2. Act
+      await buildEngine(repo).executeWorkflow(
+        EXECUTION_ID,
+        buildLinearSchema(),
+      );
+
+      // 3. Assert
+      expect(execA).toHaveBeenCalledTimes(1);
     });
   });
 });

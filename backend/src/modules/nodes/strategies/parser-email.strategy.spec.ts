@@ -14,7 +14,6 @@ import { createMockStatePayloadContext } from '@test/factories/state-payload-con
 
 import {
   ERR_PARSER_CONFIG,
-  ERR_PARSER_SOURCE_MISSING,
   ParserEmailStrategy,
 } from './parser-email.strategy';
 
@@ -102,10 +101,6 @@ const buildContext = (
     currentStep: 'parser_pre_ia',
     namespaces: { raw_email: rawEmail },
   });
-
-/** Contexto en el que ningun nodo anterior escribio `raw_email`. */
-const buildEmptyContext = (): StatePayloadContext =>
-  createMockStatePayloadContext({ currentStep: 'parser_pre_ia' });
 
 describe('ParserEmailStrategy', () => {
   describe('0. Identidad del nodo', () => {
@@ -439,20 +434,39 @@ describe('ParserEmailStrategy', () => {
     });
   });
 
-  describe('5. Namespace de origen ausente', () => {
-    it('5.1 deberia fallar como GRAVE si ningun nodo escribio el origen', async () => {
-      // 1. Arrange
+  describe('5. Namespaces requeridos', () => {
+    it('5.1 deberia declarar raw_email por defecto', () => {
+      // 1. Arrange & 2. Act
       const strategy = new ParserEmailStrategy();
 
-      // 2. Act
-      const result = await strategy.execute(buildEmptyContext(), {});
+      // 3. Assert: es lo que el motor comprueba ANTES de invocar el nodo, y lo
+      //    que el validador de topologia comprueba antes de guardar el flujo.
+      //    Sustituye a la antigua guarda `ERR_PARSER_SOURCE_MISSING`, que era
+      //    reactiva: se descubria con la ejecucion ya creada.
+      expect(strategy.getRequiredNamespaces({})).toEqual(['raw_email']);
+    });
 
-      // 3. Assert: GRAVE y no URGENTE para que el flujo quede PAUSADO y
-      //    reanudable tras corregir la topologia (CU-09).
-      expect(result.success).toBe(false);
-      expect(result.error?.level).toBe('GRAVE');
-      expect(result.error?.code).toBe(ERR_PARSER_SOURCE_MISSING);
-      expect(result.error?.missingFields).toContain('raw_email');
+    it('5.2 deberia declarar el namespace que el esquema configure', () => {
+      // 1. Arrange & 2. Act
+      const strategy = new ParserEmailStrategy();
+
+      // 3. Assert: `sourceNamespace` es configurable, y por eso el requisito se
+      //    DERIVA de `params` en vez de ser una constante de clase: una
+      //    constante rechazaria esta configuracion, que es legitima.
+      expect(
+        strategy.getRequiredNamespaces({ sourceNamespace: 'scraped_web' }),
+      ).toEqual(['scraped_web']);
+    });
+
+    it('5.3 deberia caer al defecto ante unos params mal formados', () => {
+      // 1. Arrange & 2. Act
+      const strategy = new ParserEmailStrategy();
+
+      // 3. Assert: validar el DTO es competencia de `execute`; adelantarlo aqui
+      //    daria dos mensajes distintos para el mismo error.
+      expect(strategy.getRequiredNamespaces({ sourceNamespace: 42 })).toEqual([
+        'raw_email',
+      ]);
     });
   });
 

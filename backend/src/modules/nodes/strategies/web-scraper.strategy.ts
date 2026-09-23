@@ -2,7 +2,10 @@ import { Injectable } from '@nestjs/common';
 import { plainToInstance } from 'class-transformer';
 import { validate } from 'class-validator';
 
-import { MissingContextVariableException } from '@core/fsm/context/state-payload.context';
+import {
+  MissingContextVariableException,
+  extractNamespaceRoots,
+} from '@core/fsm/context/state-payload.context';
 import { NodeType } from '@core/fsm/types/pipeline-schema.types';
 import {
   WebScraperConfigDto,
@@ -140,6 +143,25 @@ export class WebScraperStrategy implements INodeStrategy {
         scraped_at: new Date().toISOString(),
       },
     };
+  }
+
+  /**
+   * Namespaces que la plantilla de `targetUrl` necesita para resolverse.
+   *
+   * Se derivan leyendo la plantilla con el MISMO extractor que alimenta la
+   * interpolacion real, de modo que lo que aqui se exige y lo que alli se
+   * resuelve no puedan discrepar.
+   *
+   * Devuelve un arreglo VACIO cuando `targetUrl` es una URL literal —el caso del
+   * flujo que vigila siempre la misma portada—: ese nodo no depende de nada
+   * aguas arriba y exigirle un namespace lo haria inejecutable.
+   */
+  public getRequiredNamespaces(
+    params: Record<string, unknown>,
+  ): readonly string[] {
+    return typeof params.targetUrl === 'string'
+      ? extractNamespaceRoots(params.targetUrl)
+      : [];
   }
 
   /**

@@ -4,6 +4,7 @@ import { validate } from 'class-validator';
 
 import { NodeType } from '@core/fsm/types/pipeline-schema.types';
 import {
+  DEFAULT_PARSER_SOURCE_NAMESPACE,
   ParserEmailConfigDto,
   resolveParserEmailConfig,
 } from '@modules/nodes/dto/parser-email-config.dto';
@@ -18,9 +19,15 @@ import type {
 import type { ResolvedParserEmailConfig } from '@modules/nodes/dto/parser-email-config.dto';
 import type { ValidatorOptions } from 'class-validator';
 
-/** Codigos de fallo del nodo. Son lo que un `catchErrors` puede mencionar. */
+/**
+ * Codigos de fallo del nodo. Son lo que un `catchErrors` puede mencionar.
+ *
+ * Ya no hay `ERR_PARSER_SOURCE_MISSING`: la ausencia del namespace de origen la
+ * detecta ahora el motor ANTES de invocar al nodo, mediante
+ * `getRequiredNamespaces`, y la emite como `ERR_MISSING_UPSTREAM_CONTEXT`. Un
+ * esquema cuyo `catchErrors` mencionase el codigo antiguo debe actualizarse.
+ */
 export const ERR_PARSER_CONFIG = 'ERR_PARSER_CONFIG';
-export const ERR_PARSER_SOURCE_MISSING = 'ERR_PARSER_SOURCE_MISSING';
 
 /**
  * Opciones de validacion canonicas del repositorio (ver `PipelineValidatorService`).
@@ -81,21 +88,13 @@ export class ParserEmailStrategy implements INodeStrategy {
     }
 
     const { config } = resolution;
-    const source = context.getNamespace(config.sourceNamespace);
 
-    // Guarda de precondicion: sin correo que leer no hay nada que decidir, y
-    // continuar produciria un payload de ceros indistinguible de un correo vacio.
-    if (source === undefined) {
-      return {
-        success: false,
-        error: {
-          level: 'GRAVE',
-          code: ERR_PARSER_SOURCE_MISSING,
-          message: `El namespace "${config.sourceNamespace}" no existe en el contexto: ningun nodo anterior lo ha escrito.`,
-          missingFields: [config.sourceNamespace],
-        },
-      };
-    }
+    // Sin guarda de precondicion sobre el namespace: la garantiza el motor, que
+    // no llega a invocar este metodo si `getRequiredNamespaces` no se satisface.
+    // El `?? {}` cubre el unico hueco que queda —una invocacion directa fuera
+    // del motor, como la del banco de pruebas— sin volver a duplicar el
+    // diagnostico.
+    const source = context.getNamespace(config.sourceNamespace) ?? {};
 
     // Los avisos de la composicion se enchufan al logger del nodo. El asistente
     // enchufa los mismos hooks a su respuesta HTTP, que es lo que permite que el
@@ -126,6 +125,30 @@ export class ParserEmailStrategy implements INodeStrategy {
     });
 
     return { success: true, data: { ...parsed } };
+  }
+
+  /**
+   * Namespace del que este nodo lee el correo crudo.
+   *
+   * Se deriva de `params` y no de una constante porque `sourceNamespace` es
+   * configurable: el defecto es `raw_email`, pero un flujo puede apuntar el
+   * parser a otro namespace de la lista cerrada, y declararlo fijo rechazaria
+   * esa configuracion perfectamente valida.
+   *
+   * Si `params` viene mal formado se devuelve el defecto en vez de lanzar: la
+   * validacion del DTO es competencia de `execute`, y adelantarla aqui daria dos
+   * mensajes distintos para el mismo error.
+   */
+  public getRequiredNamespaces(
+    params: Record<string, unknown>,
+  ): readonly string[] {
+    const sourceNamespace =
+      typeof params.sourceNamespace === 'string' &&
+      params.sourceNamespace.length > 0
+        ? params.sourceNamespace
+        : DEFAULT_PARSER_SOURCE_NAMESPACE;
+
+    return [sourceNamespace];
   }
 
   /**

@@ -124,7 +124,9 @@ describe('WebScraperStrategy', () => {
       await strategy.execute(buildContext(), { targetUrl: TARGET_URL });
 
       // 3. Assert
-      expect(run.mock.calls[0]?.[1]).toEqual({
+      const [, options] = run.mock.calls[0] as [URL, Record<string, number>];
+
+      expect(options).toEqual({
         timeoutMs: 20_000,
         maxRetries: 2,
         retryDelayMs: 2_000,
@@ -148,7 +150,10 @@ describe('WebScraperStrategy', () => {
 
       // 3. Assert
       expect(result.success).toBe(true);
-      expect((run.mock.calls[0]?.[0] as URL).toString()).toBe(TARGET_URL);
+
+      const [url] = run.mock.calls[0] as [URL];
+
+      expect(url.toString()).toBe(TARGET_URL);
     });
 
     it('2.2 deberia fallar como GRAVE si la variable no existe en el contexto', async () => {
@@ -299,6 +304,55 @@ describe('WebScraperStrategy', () => {
       // 3. Assert: nodo PURO. Devuelve `data` y es el motor quien la deposita en
       //    el `outputNamespace`.
       expect(context.getAllContext()).toEqual(before);
+    });
+  });
+
+  describe('5. Namespaces requeridos', () => {
+    it('5.1 deberia extraer la raiz de la plantilla de targetUrl', () => {
+      // 1. Arrange & 2. Act
+      const { strategy } = createHarness();
+
+      // 3. Assert: es lo que el motor comprueba ANTES de invocar el nodo. Se
+      //    declara el NAMESPACE, no la ruta completa: la pregunta es "corrio el
+      //    parser", no "trae ese indice del arreglo".
+      expect(
+        strategy.getRequiredNamespaces({
+          targetUrl: '{{parsed_email.extracted_urls[0]}}',
+        }),
+      ).toEqual(['parsed_email']);
+    });
+
+    it('5.2 no deberia exigir nada ante una URL literal', () => {
+      // 1. Arrange & 2. Act
+      const { strategy } = createHarness();
+
+      // 3. Assert: es el flujo que vigila siempre la misma portada. Exigirle un
+      //    namespace lo haria inejecutable.
+      expect(strategy.getRequiredNamespaces({ targetUrl: TARGET_URL })).toEqual(
+        [],
+      );
+    });
+
+    it('5.3 no deberia duplicar un namespace citado dos veces', () => {
+      // 1. Arrange & 2. Act
+      const { strategy } = createHarness();
+
+      // 3. Assert
+      expect(
+        strategy.getRequiredNamespaces({
+          targetUrl:
+            '{{parsed_email.base_url}}/{{parsed_email.extracted_urls[0]}}',
+        }),
+      ).toEqual(['parsed_email']);
+    });
+
+    it('5.4 no deberia exigir nada si targetUrl no es una cadena', () => {
+      // 1. Arrange & 2. Act: validar el DTO es competencia de `execute`; aqui
+      //    adelantarlo daria dos mensajes para el mismo error.
+      const { strategy } = createHarness();
+
+      // 3. Assert
+      expect(strategy.getRequiredNamespaces({})).toEqual([]);
     });
   });
 });

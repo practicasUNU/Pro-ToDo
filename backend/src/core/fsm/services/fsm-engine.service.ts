@@ -16,6 +16,7 @@ import { StrategyNotFoundException } from '@core/fsm/exceptions/strategy-not-fou
 import { NodeStrategyFactory } from '@core/fsm/factories/node-strategy.factory';
 import { ExecutionState } from '@core/fsm/types/fsm.enums';
 import {
+  ERR_MISSING_UPSTREAM_CONTEXT,
   ERR_NODE_CRASHED,
   ERR_NODE_HTTP_FAILURE,
   ERR_STRATEGY_NOT_FOUND,
@@ -25,7 +26,10 @@ import { NodeLogStatus } from '@modules/logs/entities/log-nodo.entity';
 
 import type { PipelineNodeConfigDto } from '@core/fsm/dto/pipeline-schema.dto';
 import type { PipelineSchemaDto } from '@core/fsm/dto/pipeline-schema.dto';
-import type { NodeResult } from '@core/fsm/types/node-strategy.types';
+import type {
+  INodeStrategy,
+  NodeResult,
+} from '@core/fsm/types/node-strategy.types';
 import type { NodeType } from '@core/fsm/types/pipeline-schema.types';
 import type { Repository } from 'typeorm';
 import type { QueryDeepPartialEntity } from 'typeorm/query-builder/QueryPartialEntity';
@@ -1146,6 +1150,44 @@ export class FsmEngineService {
    * Incluye la resolucion de la estrategia: una `StrategyNotFoundException` es
    * un error de configuracion que debe pausar el flujo, no derribar el proceso.
    */
+
+  /**
+   * Namespaces que el nodo declara necesitar y el contexto no trae.
+   *
+   * Una estrategia sin `getRequiredNamespaces` no declara nada y siempre pasa:
+   * es el caso de los disparadores, que son el primer nodo del grafo y no tienen
+   * nada aguas arriba que exigir.
+   *
+   * Se compara contra las CLAVES del contexto y no contra su contenido, asi que
+   * un namespace escrito vacio cuenta como presente. Es deliberado: el motor
+   * escribe `result.data ?? {}` para todo nodo que termina bien sin devolver
+   * datos, y la pregunta que responde esta capa es "corrio el nodo que produce
+   * esto", no "trae el campo que espero". Lo segundo solo puede juzgarlo la
+   * estrategia consumidora, que es la unica que sabe que campos necesita.
+   *
+   * El namespace reservado del disparador (`TRIGGER_NAMESPACE`) se excluye:
+   * ningun nodo lo declara como salida, lo siembra el motor al crear la
+   * ejecucion, y exigirlo aqui lo haria irresoluble por construccion.
+   */
+  private findMissingNamespaces(
+    strategy: INodeStrategy,
+    node: PipelineNodeConfigDto,
+    context: StatePayloadContext,
+  ): readonly string[] {
+    if (strategy.getRequiredNamespaces === undefined) {
+      return [];
+    }
+
+    const available = new Set(Object.keys(context.getAllContext()));
+
+    return strategy
+      .getRequiredNamespaces(node.params)
+      .filter(
+        (namespace) =>
+          namespace !== TRIGGER_NAMESPACE && !available.has(namespace),
+      );
+  }
+
   private async runNode(
     node: PipelineNodeConfigDto,
     context: StatePayloadContext,
@@ -1153,6 +1195,32 @@ export class FsmEngineService {
   ): Promise<NodeOutcome> {
     try {
       const strategy = this.strategyFactory.getStrategy(node.nodeType);
+      const missing = this.findMissingNamespaces(strategy, node, context);
+
+      // Guarda de PRECONDICION. Va aqui, entre resolver la estrategia e
+      // invocarla, y no en el bucle de `executeWorkflow`: asi el `NodeResult`
+      // que produce entra por el mismo camino que cualquier otro fallo del
+      // dominio —traza en `logNodeOutcome`, politica de reintentos,
+      // `onErrorStep`, pausa conservando el cursor— sin duplicar una sola linea
+      // de ese protocolo.
+      if (missing.length > 0) {
+        this.logger.warn(
+          `GRAVE | ${ERR_MISSING_UPSTREAM_CONTEXT} | ejecucion=${executionId} | Nodo "${node.nodeId}": faltan ${missing.join(', ')}.`,
+        );
+
+        return {
+          catastrophic: false,
+          result: {
+            success: false,
+            error: {
+              level: 'GRAVE',
+              code: ERR_MISSING_UPSTREAM_CONTEXT,
+              message: `Faltan namespaces requeridos en el contexto: ${missing.join(', ')}.`,
+              missingFields: [...missing],
+            },
+          },
+        };
+      }
 
       // Camino del DOMINIO: la estrategia decidio el desenlace y lo devolvio.
       // Su `level` es un diagnostico suyo, no una senal de que el motor este en

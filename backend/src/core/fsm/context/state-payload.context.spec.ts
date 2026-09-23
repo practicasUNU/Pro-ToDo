@@ -1,4 +1,5 @@
 import {
+  extractNamespaceRoots,
   MissingContextVariableException,
   resolvePath,
   StatePayloadContext,
@@ -496,6 +497,62 @@ describe('StatePayloadContext (PROT-08)', () => {
 
       // 3. Assert
       expect(namespaces).toEqual(snapshot);
+    });
+  });
+
+  describe('extractNamespaceRoots', () => {
+    it('deberia devolver la raiz de una ruta con indice de arreglo', () => {
+      // 1. Arrange & 2. Act & 3. Assert
+      expect(
+        extractNamespaceRoots('{{parsed_email.extracted_urls[0]}}'),
+      ).toEqual(['parsed_email']);
+    });
+
+    it('deberia devolver la raiz de una ruta anidada', () => {
+      // 1. Arrange & 2. Act & 3. Assert
+      expect(
+        extractNamespaceRoots('{{llm_response.articles[1].title}}'),
+      ).toEqual(['llm_response']);
+    });
+
+    it('deberia deduplicar y conservar el orden de aparicion', () => {
+      // 1. Arrange
+      const template =
+        '{{scraped_web.article_title}} - {{parsed_email.subject}} ({{scraped_web.source_url}})';
+
+      // 2. Act & 3. Assert
+      expect(extractNamespaceRoots(template)).toEqual([
+        'scraped_web',
+        'parsed_email',
+      ]);
+    });
+
+    it('deberia devolver vacio para un texto sin marcas', () => {
+      // 1. Arrange & 2. Act & 3. Assert: es el caso de una URL literal, que no
+      //    depende de nada aguas arriba.
+      expect(extractNamespaceRoots('https://www.ejemplo.es/nota')).toEqual([]);
+    });
+
+    it('no deberia reconocer un namespace suelto sin segmento', () => {
+      // 1. Arrange & 2. Act & 3. Assert: el patron exige al menos un segmento
+      //    porque un namespace entero no es un valor interpolable. Reconocerlo
+      //    aqui exigiria un requisito que `getInterpolatedValue` no sabe
+      //    resolver.
+      expect(extractNamespaceRoots('{{parsed_email}}')).toEqual([]);
+    });
+
+    it('deberia ser reejecutable sin arrastrar el estado del patron global', () => {
+      // 1. Arrange: `INTERPOLATION_PATTERN` lleva la bandera `g` y por tanto
+      //    `lastIndex`. Si se consumiera con `exec` en bucle, la segunda llamada
+      //    empezaria a medio texto y devolveria menos raices que la primera.
+      const template = '{{parsed_email.subject}}';
+
+      // 2. Act
+      const first = extractNamespaceRoots(template);
+      const second = extractNamespaceRoots(template);
+
+      // 3. Assert
+      expect(second).toEqual(first);
     });
   });
 });

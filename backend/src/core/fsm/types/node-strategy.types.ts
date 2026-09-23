@@ -28,6 +28,15 @@ export const ERR_NODE_CRASHED = 'ERR_NODE_CRASHED';
 export const ERR_STRATEGY_NOT_FOUND = 'ERR_STRATEGY_NOT_FOUND';
 export const ERR_NODE_HTTP_FAILURE = 'ERR_NODE_HTTP_FAILURE';
 
+/**
+ * El nodo declaro necesitar namespaces que el contexto acumulado no trae.
+ *
+ * Es del MOTOR y no de una estrategia porque lo emite la guarda de `runNode`,
+ * antes de invocar a nadie: cuando se decide, todavia no hay estrategia que
+ * pueda haberlo producido.
+ */
+export const ERR_MISSING_UPSTREAM_CONTEXT = 'ERR_MISSING_UPSTREAM_CONTEXT';
+
 /** Detalle del fallo devuelto por una estrategia. */
 export interface NodeErrorDetail {
   level: NodeErrorSeverity;
@@ -91,6 +100,36 @@ export interface NodeResult {
 export interface INodeStrategy {
   /** Tipo con el que la factoria indexa esta estrategia. */
   readonly nodeType: NodeType;
+
+  /**
+   * Namespaces del contexto sin los cuales este nodo no puede operar.
+   *
+   * Es un METODO y no una propiedad constante porque la dependencia de casi
+   * todos los nodos se deduce de SU CONFIGURACION, no de su tipo: el parser lee
+   * del `sourceNamespace` que declare el esquema, y el extractor web de la raiz
+   * de la plantilla de `targetUrl`. Una constante de clase acertaria solo con
+   * los valores por defecto, y rechazaria como invalido un nodo legitimamente
+   * reconfigurado —que es exactamente el fallo que esta guarda existe para
+   * evitar, cometido por la propia guarda.
+   *
+   * PURO Y SINCRONO: solo mira `params`. Esa restriccion es deliberada y tiene
+   * consecuencias: el nodo MAPEADOR_PLANTILLA no puede implementarlo, porque
+   * sus variables requeridas viven en la tabla `plantillas_html` y derivarlas
+   * exigiria una consulta. Volver el metodo asincrono por un solo nodo obligaria
+   * a los otros cuatro a pagar una promesa por nada, y ese nodo ya diagnostica
+   * el problema mejor por su cuenta (ver su TSDoc).
+   *
+   * OPCIONAL: un disparador es el primero del grafo y no tiene nada aguas
+   * arriba. El motor comprueba su existencia antes de llamarlo.
+   *
+   * Lo que se declara son NOMBRES DE NAMESPACE, no rutas: la pregunta que
+   * responde esta capa es "corrio el nodo que produce esto", no "trae el campo
+   * que espero". Lo segundo es competencia de la estrategia, que es la unica que
+   * sabe que campos necesita.
+   */
+  readonly getRequiredNamespaces?: (
+    params: Record<string, unknown>,
+  ) => readonly string[];
 
   /**
    * Ejecuta el nodo contra el contexto acumulado.

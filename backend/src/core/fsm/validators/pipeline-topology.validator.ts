@@ -4,7 +4,23 @@ import {
   NODE_OUTPUT_NAMESPACES,
 } from '@core/fsm/types/pipeline-schema.types';
 
-import type { PipelineSchemaDto } from '@core/fsm/dto/pipeline-schema.dto';
+import type {
+  PipelineNodeConfigDto,
+  PipelineSchemaDto,
+} from '@core/fsm/dto/pipeline-schema.dto';
+
+/**
+ * Resuelve los namespaces que un nodo necesita para poder ejecutarse.
+ *
+ * Se recibe como PARAMETRO y no se importa: este validador es una funcion pura y
+ * debe seguir siendolo. Quien conoce las estrategias es
+ * `PipelineValidatorService`, que si es un provider y puede inyectar la
+ * factoria; pasarselo aqui deja la regla comprobable con un doble de una linea y
+ * evita que un validador de topologia acabe dependiendo del contenedor de Nest.
+ */
+export type NodeDependencyResolver = (
+  node: PipelineNodeConfigDto,
+) => readonly string[];
 
 /**
  * Campo invalido detectado durante la validacion de un `pipeline_schema`.
@@ -46,6 +62,10 @@ const hasNode = (schema: PipelineSchemaDto, nodeId: string): boolean =>
  *    namespace romperian la inmutabilidad del `StatePayloadContext`.
  * 6. El camino activo desde `entrypoint` siguiendo `nextStep` termina en un nodo
  *    terminal (`nextStep === null`) sin revisitar ninguno.
+ * 7. Todo namespace que un nodo del camino activo declara necesitar lo escribe
+ *    algun nodo ANTERIOR de ese mismo camino. Solo se aplica si se recibe el
+ *    `resolveDependencies`, y es lo que convierte un flujo mal ordenado en un
+ *    400 al guardar en vez de una ejecucion PAUSADA en produccion.
  *
  * Los nodos inalcanzables desde `entrypoint` se ignoran deliberadamente: un flujo
  * puede conservar ramas en construccion sin que eso invalide el esquema.
@@ -53,10 +73,14 @@ const hasNode = (schema: PipelineSchemaDto, nodeId: string): boolean =>
  * legitimo de reintento o recuperacion.
  *
  * @param schema Esquema con forma y tipos ya validados.
+ * @param resolveDependencies Namespaces requeridos por nodo. Omitirlo desactiva
+ *                            la regla 7, que es lo que hacen las pruebas de las
+ *                            otras seis.
  * @returns Lista de incidencias; vacia si el grafo es integro.
  */
 export const validatePipelineTopology = (
   schema: PipelineSchemaDto,
+  resolveDependencies?: NodeDependencyResolver,
 ): SchemaIssue[] => {
   const issues: SchemaIssue[] = [];
 
@@ -131,6 +155,78 @@ export const validatePipelineTopology = (
   }
 
   issues.push(...detectActivePathCycle(schema));
+
+  if (resolveDependencies !== undefined) {
+    issues.push(...detectUnreachableNamespaces(schema, resolveDependencies));
+  }
+
+  return issues;
+};
+
+/**
+ * Namespaces que el motor siembra por su cuenta y que ningun nodo declara.
+ *
+ * `trigger` lo escribe el motor con el `initialPayload` al crear la ejecucion, y
+ * `_assets` lo inyecta el renderizador de plantillas. Exigir que algun nodo los
+ * produzca los haria irresolubles por construccion.
+ */
+const ENGINE_PROVIDED_NAMESPACES: ReadonlySet<string> = new Set([
+  'trigger',
+  '_assets',
+]);
+
+/**
+ * Comprueba que cada nodo del camino activo encuentre lo que necesita.
+ *
+ * Recorre `entrypoint -> nextStep` acumulando los `outputNamespace` ya escritos,
+ * de modo que un nodo solo puede depender de lo que producen sus PREDECESORES.
+ * Es la misma pregunta que la guarda del motor responde en ejecucion, adelantada
+ * al momento de guardar.
+ *
+ * DOS ACOTACIONES DELIBERADAS, ambas para no rechazar flujos validos:
+ *
+ * 1. Solo el camino activo. Un nodo al que solo se llega por `onErrorStep` tiene
+ *    un conjunto de predecesores distinto segun por donde se entre, y afirmar
+ *    algo sobre el aqui seria adivinar. Esos nodos quedan cubiertos por la
+ *    guarda del motor, que si sabe que contexto hay de verdad.
+ * 2. Se para en seco si un puntero no resuelve o si el camino cicla. Los dos
+ *    fallos ya los reportan las reglas 3 y 6, y duplicarlos anadiria ruido sobre
+ *    el error real.
+ */
+const detectUnreachableNamespaces = (
+  schema: PipelineSchemaDto,
+  resolveDependencies: NodeDependencyResolver,
+): SchemaIssue[] => {
+  const issues: SchemaIssue[] = [];
+  const produced = new Set<string>();
+  const visited = new Set<string>();
+  let cursor: string | null = schema.entrypoint;
+
+  while (cursor !== null) {
+    if (!hasNode(schema, cursor) || visited.has(cursor)) {
+      break;
+    }
+
+    visited.add(cursor);
+
+    const node: PipelineNodeConfigDto = schema.nodes[cursor];
+    const missing = resolveDependencies(node).filter(
+      (namespace) =>
+        !ENGINE_PROVIDED_NAMESPACES.has(namespace) && !produced.has(namespace),
+    );
+
+    if (missing.length > 0) {
+      issues.push({
+        field: `nodes.${node.nodeId}.params`,
+        constraints: [
+          `El nodo necesita los namespaces [${missing.join(', ')}], que ningun paso anterior del flujo escribe. Reordena el flujo o anade el nodo que los produce.`,
+        ],
+      });
+    }
+
+    produced.add(node.outputNamespace);
+    cursor = node.nextStep;
+  }
 
   return issues;
 };
