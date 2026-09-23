@@ -4,6 +4,9 @@ import { PipelineSchemaDto } from '@core/fsm/dto/pipeline-schema.dto';
 import { NodeStrategyFactory } from '@core/fsm/factories/node-strategy.factory';
 import { PipelineValidatorService } from '@core/fsm/services/pipeline-validator.service';
 import { NodeType } from '@core/fsm/types/pipeline-schema.types';
+import { WebScraperStrategy } from '@modules/nodes/strategies/web-scraper.strategy';
+
+import type { WebScraperRunner } from '@modules/nodes/services/web-scraper.runner';
 
 import type { PipelineSchema } from '@core/fsm/types/pipeline-schema.types';
 import type { SchemaIssue } from '@core/fsm/validators/pipeline-topology.validator';
@@ -493,6 +496,11 @@ describe('PipelineValidatorService (PROT-07)', () => {
     ): PipelineValidatorService => {
       const factory = new NodeStrategyFactory();
       jest.spyOn(factory['logger'], 'log').mockImplementation(() => undefined);
+      // Los tipos que esta prueba no siembra hacen que la factoria registre un
+      // ERROR por consulta. Es ruido esperado y taparia un fallo real.
+      jest
+        .spyOn(factory['logger'], 'error')
+        .mockImplementation(() => undefined);
 
       for (const [nodeType, namespaces] of Object.entries(requirements)) {
         factory.registerStrategy({
@@ -590,6 +598,111 @@ describe('PipelineValidatorService (PROT-07)', () => {
       // 3. Assert: exigir que algun nodo lo produzca lo haria irresoluble por
       //    construccion.
       expect(result.entrypoint).toBe('trigger_imap');
+    });
+  });
+
+  describe('validacion de params contra el DTO de la estrategia', () => {
+    /**
+     * Servicio con la estrategia REAL del extractor registrada.
+     *
+     * Aqui si se usa la real y no un doble, al reves que en el bloque anterior:
+     * lo que se examina es precisamente que el DTO del nodo corra al guardar, y
+     * con un doble la prueba solo aseveraria sobre el doble.
+     */
+    const buildServiceWithScraper = (): PipelineValidatorService => {
+      const factory = new NodeStrategyFactory();
+      jest.spyOn(factory['logger'], 'log').mockImplementation(() => undefined);
+      // Tambien el `error`: los otros seis nodos del esquema no tienen
+      // estrategia aqui, y la factoria registra un ERROR por cada consulta. Es
+      // ruido esperado que taparia un fallo real en la salida de Jest.
+      jest
+        .spyOn(factory['logger'], 'error')
+        .mockImplementation(() => undefined);
+      factory.registerStrategy(
+        new WebScraperStrategy({} as unknown as WebScraperRunner),
+      );
+
+      return new PipelineValidatorService(factory);
+    };
+
+    /** Esquema con el extractor ya bien configurado, listo para estropearlo. */
+    const buildScraperSchema = (
+      params: Record<string, unknown>,
+    ): PipelineSchema => {
+      const schema = buildNotiwebSchema();
+
+      schema.nodes.nodo_extractor.params = params;
+
+      return schema;
+    };
+
+    it('deberia rechazar al GUARDAR un targetUrl literal', async () => {
+      // 1. Arrange
+      const service = buildServiceWithScraper();
+      const schema = buildScraperSchema({
+        targetUrl: 'https://portal.es/noticias',
+      });
+
+      // 2. Act
+      const issues = await captureIssues(service, schema);
+
+      // 3. Assert: esta es la mejora. Antes `params` solo se comprobaba como
+      //    "es un objeto", el esquema se persistia y el fallo aparecia en la
+      //    primera ejecucion con el flujo ya PAUSADO.
+      expect(fieldsOf(issues)).toContain(
+        'nodes.nodo_extractor.params.targetUrl',
+      );
+      expect(issues[0].constraints[0]).toContain('variable interpolada');
+    });
+
+    it('deberia rechazar una clave que el DTO del nodo no declara', async () => {
+      // 1. Arrange
+      const service = buildServiceWithScraper();
+      const schema = buildScraperSchema({
+        targetUrl: '{{parsed_email.extracted_urls[0]}}',
+        selecctor: 'article',
+      });
+
+      // 2. Act
+      const issues = await captureIssues(service, schema);
+
+      // 3. Assert: `forbidNonWhitelisted` evita que una clave mal escrita se
+      //    descarte en silencio y el nodo corra con una configuracion que nadie
+      //    pidio.
+      expect(fieldsOf(issues)).toContain(
+        'nodes.nodo_extractor.params.selecctor',
+      );
+    });
+
+    it('deberia aceptar un extractor bien configurado', async () => {
+      // 1. Arrange
+      const service = buildServiceWithScraper();
+      const schema = buildScraperSchema({
+        targetUrl: '{{parsed_email.extracted_urls[0]}}',
+        timeoutMs: 30_000,
+      });
+
+      // 2. Act
+      const result = await service.validateSchema(schema);
+
+      // 3. Assert
+      expect(result.nodes.nodo_extractor.params.timeoutMs).toBe(30_000);
+    });
+
+    it('no deberia tocar los params de un nodo sin estrategia registrada', async () => {
+      // 1. Arrange: los otros seis nodos del esquema no tienen estrategia en
+      //    esta factoria, y sus `params` (`{ promptKey: ... }`, `{ tplId: ... }`)
+      //    no seguirian ningun DTO. Deben pasar igual.
+      const service = buildServiceWithScraper();
+      const schema = buildScraperSchema({
+        targetUrl: '{{parsed_email.extracted_urls[0]}}',
+      });
+
+      // 2. Act
+      const result = await service.validateSchema(schema);
+
+      // 3. Assert
+      expect(result.nodes.nodo_ia.params.promptKey).toBe('extract_news');
     });
   });
 });

@@ -17,6 +17,17 @@ import type {
 
 const TARGET_URL = 'https://diario.example/nota-de-prensa';
 
+/**
+ * Lo que el nodo declara en su `pipeline_schema`.
+ *
+ * Desde que `targetUrl` lleva `@Matches(INTERPOLATION_ONLY_PATTERN)`, una URL
+ * literal ya no supera el DTO: todo extractor debe nombrar el namespace del que
+ * sale su enlace, que es lo que permite a la regla 7 de la topologia juzgar su
+ * posicion en el grafo. Por eso los casos que antes pasaban `TARGET_URL` a
+ * secas pasan ahora la plantilla, y resuelven contra el contexto.
+ */
+const TARGET_TEMPLATE = '{{parsed_email.extracted_urls[0]}}';
+
 /** Desenlace exitoso del runner, que es lo unico que la estrategia traduce. */
 const successOutcome = (
   overrides: Partial<ScrapeOutcome> = {},
@@ -55,6 +66,10 @@ const buildContext = (
 ): StatePayloadContext =>
   createMockStatePayloadContext({ currentStep: 'extractor_web', namespaces });
 
+/** Contexto con el enlace ya puesto donde `TARGET_TEMPLATE` lo busca. */
+const contextWithUrl = (url: string = TARGET_URL): StatePayloadContext =>
+  buildContext({ parsed_email: { extracted_urls: [url] } });
+
 describe('WebScraperStrategy', () => {
   afterEach(() => {
     jest.restoreAllMocks();
@@ -91,8 +106,8 @@ describe('WebScraperStrategy', () => {
       const { strategy } = createHarness();
 
       // 2. Act
-      const result = await strategy.execute(buildContext(), {
-        targetUrl: TARGET_URL,
+      const result = await strategy.execute(contextWithUrl(), {
+        targetUrl: TARGET_TEMPLATE,
         timeoutMs: 100,
       });
 
@@ -107,8 +122,8 @@ describe('WebScraperStrategy', () => {
 
       // 2. Act: `forbidNonWhitelisted` evita que un "selecctor" mal escrito se
       //    ignore en silencio y el nodo corra con una configuracion que nadie pidio.
-      const result = await strategy.execute(buildContext(), {
-        targetUrl: TARGET_URL,
+      const result = await strategy.execute(contextWithUrl(), {
+        targetUrl: TARGET_TEMPLATE,
         selector: 'article',
       });
 
@@ -116,12 +131,49 @@ describe('WebScraperStrategy', () => {
       expect(result.error?.code).toBe(ERR_SCRAPER_CONFIG);
     });
 
+    it('1.5 deberia rechazar una URL literal', async () => {
+      // 1. Arrange
+      const { strategy, run } = createHarness();
+
+      // 2. Act
+      const result = await strategy.execute(buildContext(), {
+        targetUrl: TARGET_URL,
+      });
+
+      // 3. Assert: el motivo no es de formato —esa URL es perfectamente
+      //    navegable— sino topologico: un literal no nombra ningun namespace,
+      //    de modo que este nodo no declararia dependencia alguna y la regla 7
+      //    del validador de topologia se quedaria sin nada que comprobar.
+      expect(result.success).toBe(false);
+      expect(result.error?.code).toBe(ERR_SCRAPER_CONFIG);
+      expect(result.error?.missingFields).toContain('targetUrl');
+      expect(run).not.toHaveBeenCalled();
+    });
+
+    it('1.6 deberia rechazar una URL que solo CONTIENE una marca', async () => {
+      // 1. Arrange
+      const { strategy, run } = createHarness();
+
+      // 2. Act
+      const result = await strategy.execute(buildContext(), {
+        targetUrl: 'https://otro-portal.es/?x={{parsed_email.subject}}',
+      });
+
+      // 3. Assert: es lo que cubre el anclaje de `INTERPOLATION_ONLY_PATTERN`.
+      //    Sin `^...$` esto pasaria el filtro y seria un literal disfrazado: el
+      //    destino real lo fija quien escribio el esquema, no el correo.
+      expect(result.error?.code).toBe(ERR_SCRAPER_CONFIG);
+      expect(run).not.toHaveBeenCalled();
+    });
+
     it('1.4 deberia pasar al runner los valores por defecto del DTO', async () => {
       // 1. Arrange
       const { strategy, run } = createHarness();
 
       // 2. Act
-      await strategy.execute(buildContext(), { targetUrl: TARGET_URL });
+      await strategy.execute(contextWithUrl(), {
+        targetUrl: TARGET_TEMPLATE,
+      });
 
       // 3. Assert
       const [, options] = run.mock.calls[0] as [URL, Record<string, number>];
@@ -176,12 +228,14 @@ describe('WebScraperStrategy', () => {
     });
 
     it('2.3 deberia rechazar una cadena que no es una URL', async () => {
-      // 1. Arrange
+      // 1. Arrange: el valor malo entra por el CONTEXTO y no por los `params`.
+      //    Es el unico camino que queda —el DTO ya no admite un literal— y es
+      //    tambien el realista: la cadena la escribio un correo de fuera.
       const { strategy } = createHarness();
 
       // 2. Act
-      const result = await strategy.execute(buildContext(), {
-        targetUrl: 'no-es-una-url',
+      const result = await strategy.execute(contextWithUrl('no-es-una-url'), {
+        targetUrl: TARGET_TEMPLATE,
       });
 
       // 3. Assert
@@ -193,9 +247,10 @@ describe('WebScraperStrategy', () => {
       const { strategy, run } = createHarness();
 
       // 2. Act
-      const result = await strategy.execute(buildContext(), {
-        targetUrl: 'file:///etc/passwd',
-      });
+      const result = await strategy.execute(
+        contextWithUrl('file:///etc/passwd'),
+        { targetUrl: TARGET_TEMPLATE },
+      );
 
       // 3. Assert: la URL viene interpolada de un correo EXTERNO; sin la lista
       //    blanca de esquemas, un `file:` seria una lectura arbitraria del disco
@@ -211,8 +266,8 @@ describe('WebScraperStrategy', () => {
       const { strategy } = createHarness();
 
       // 2. Act
-      const result = await strategy.execute(buildContext(), {
-        targetUrl: TARGET_URL,
+      const result = await strategy.execute(contextWithUrl(), {
+        targetUrl: TARGET_TEMPLATE,
       });
 
       // 3. Assert: se comprueban las claves y luego cada valor, en vez de un
@@ -238,8 +293,8 @@ describe('WebScraperStrategy', () => {
       );
 
       // 2. Act
-      const result = await strategy.execute(buildContext(), {
-        targetUrl: TARGET_URL,
+      const result = await strategy.execute(contextWithUrl(), {
+        targetUrl: TARGET_TEMPLATE,
       });
 
       // 3. Assert
@@ -256,8 +311,8 @@ describe('WebScraperStrategy', () => {
       });
 
       // 2. Act
-      const result = await strategy.execute(buildContext(), {
-        targetUrl: TARGET_URL,
+      const result = await strategy.execute(contextWithUrl(), {
+        targetUrl: TARGET_TEMPLATE,
       });
 
       // 3. Assert: el codigo viaja intacto porque es contra lo que compara el
@@ -278,8 +333,8 @@ describe('WebScraperStrategy', () => {
       });
 
       // 2. Act
-      const result = await strategy.execute(buildContext(), {
-        targetUrl: TARGET_URL,
+      const result = await strategy.execute(contextWithUrl(), {
+        targetUrl: TARGET_TEMPLATE,
       });
 
       // 3. Assert: el protocolo de resiliencia la vuelca al `.log` fisico.
@@ -326,8 +381,12 @@ describe('WebScraperStrategy', () => {
       // 1. Arrange & 2. Act
       const { strategy } = createHarness();
 
-      // 3. Assert: es el flujo que vigila siempre la misma portada. Exigirle un
-      //    namespace lo haria inejecutable.
+      // 3. Assert: el metodo sigue siendo una LECTURA HONESTA de la config —un
+      //    literal no menciona namespace alguno, luego no depende de nadie— y
+      //    no se le hace mentir devolviendo una dependencia inventada. Quien
+      //    rechaza ese nodo es el `@Matches` del DTO (ver 1.5), que da el
+      //    diagnostico correcto y senala el campo exacto; un fallback aqui
+      //    bloquearia nombrando un namespace que esa configuracion nunca cito.
       expect(strategy.getRequiredNamespaces({ targetUrl: TARGET_URL })).toEqual(
         [],
       );

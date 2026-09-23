@@ -90,6 +90,16 @@ const stackTraceOf = (error: unknown): { stackTrace?: string } =>
 export class WebScraperStrategy implements INodeStrategy {
   public readonly nodeType = NodeType.EXTRACTOR_WEB;
 
+  /**
+   * El mismo DTO que valida `execute`, ahora tambien al GUARDAR el esquema.
+   *
+   * Es lo que hace que el `@Matches` de `targetUrl` muerda donde importa: sin
+   * esto, `PipelineValidatorService` solo comprueba que `params` sea un objeto,
+   * y un extractor con una URL literal se persistia sin protestar para fallar
+   * en la primera ejecucion con el flujo ya PAUSADO.
+   */
+  public readonly paramsSchema = WebScraperConfigDto;
+
   constructor(private readonly runner: WebScraperRunner) {}
 
   public async execute(

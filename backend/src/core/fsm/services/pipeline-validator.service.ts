@@ -12,6 +12,7 @@ import {
 import { NodeStrategyFactory } from '@core/fsm/factories/node-strategy.factory';
 import { validatePipelineTopology } from '@core/fsm/validators/pipeline-topology.validator';
 
+import type { INodeStrategy } from '@core/fsm/types/node-strategy.types';
 import type { SchemaIssue } from '@core/fsm/validators/pipeline-topology.validator';
 import type { ValidationError, ValidatorOptions } from 'class-validator';
 
@@ -121,12 +122,30 @@ export class PipelineValidatorService {
   private resolveNodeDependencies(
     node: PipelineNodeConfigDto,
   ): readonly string[] {
-    try {
-      const strategy = this.strategyFactory.getStrategy(node.nodeType);
+    return (
+      this.tryGetStrategy(node.nodeType)?.getRequiredNamespaces?.(
+        node.params,
+      ) ?? []
+    );
+  }
 
-      return strategy.getRequiredNamespaces?.(node.params) ?? [];
+  /**
+   * La estrategia de un tipo, o `null` si no hay ninguna registrada.
+   *
+   * Engulle la `StrategyNotFoundException` de la factoria en vez de propagarla,
+   * y lo hace en un solo sitio para los dos consumidores que la necesitan. Que
+   * un nodo no sea ejecutable es un problema distinto y ya lo reporta el motor
+   * con `ERR_STRATEGY_NOT_FOUND`; convertirlo aqui en un fallo de dependencias
+   * o de params daria un diagnostico que manda al operador a corregir algo que
+   * esta bien.
+   */
+  private tryGetStrategy(
+    nodeType: PipelineNodeConfigDto['nodeType'],
+  ): INodeStrategy | null {
+    try {
+      return this.strategyFactory.getStrategy(nodeType);
     } catch {
-      return [];
+      return null;
     }
   }
 
@@ -155,10 +174,44 @@ export class PipelineValidatorService {
       const node = plainToInstance(PipelineNodeConfigDto, rawNode);
       const nodeErrors = await validate(node, VALIDATION_OPTIONS);
 
-      issues.push(...flattenValidationErrors(nodeErrors, `nodes.${key}`));
+      if (nodeErrors.length > 0) {
+        issues.push(...flattenValidationErrors(nodeErrors, `nodes.${key}`));
+        continue;
+      }
+
+      issues.push(...(await this.validateNodeParams(key, node)));
     }
 
     return issues;
+  }
+
+  /**
+   * Valida los `params` del nodo contra el DTO que declare su estrategia.
+   *
+   * Solo se llega aqui con el nodo ya correcto en forma y tipos: sobre un
+   * `nodeType` invalido la factoria no resolveria nada, y sobre unos `params`
+   * que ni siquiera son un objeto el DTO devolveria un error por cada clave
+   * imaginaria, enterrando el fallo real.
+   *
+   * Una estrategia sin `paramsSchema` no se comprueba, y es correcto que no se
+   * compruebe: sus params los sigue validando su `execute`, como hasta ahora.
+   */
+  private async validateNodeParams(
+    key: string,
+    node: PipelineNodeConfigDto,
+  ): Promise<SchemaIssue[]> {
+    const paramsSchema = this.tryGetStrategy(node.nodeType)?.paramsSchema;
+
+    if (paramsSchema === undefined || !isPlainObject(node.params)) {
+      return [];
+    }
+
+    const dto = plainToInstance(paramsSchema, node.params);
+
+    return flattenValidationErrors(
+      await validate(dto, VALIDATION_OPTIONS),
+      `nodes.${key}.params`,
+    );
   }
 
   /** Lanza la excepcion estructurada. Tipada como `never` para cortar el flujo. */

@@ -1,4 +1,5 @@
 import { declaredErrorTarget } from '@core/fsm/utils/pipeline-topology.util';
+import { ERR_MISSING_UPSTREAM_CONTEXT } from '@core/fsm/types/node-strategy.types';
 import {
   NODE_OUTPUT_NAMESPACE_SET,
   NODE_OUTPUT_NAMESPACES,
@@ -30,6 +31,16 @@ export type NodeDependencyResolver = (
  */
 export interface SchemaIssue {
   field: string;
+  /**
+   * Codigo estable del fallo, cuando lo tiene.
+   *
+   * OPCIONAL, y hoy solo lo declara la regla 7. Es deliberadamente el MISMO
+   * `ERR_MISSING_UPSTREAM_CONTEXT` que emite el motor ante la misma causa: el
+   * asistente puede entonces conmutar sobre el codigo en vez de sobre el texto
+   * del mensaje, que esta escrito para leerse y puede reescribirse sin previo
+   * aviso.
+   */
+  code?: string;
   constraints: string[];
 }
 
@@ -218,6 +229,7 @@ const detectUnreachableNamespaces = (
     if (missing.length > 0) {
       issues.push({
         field: `nodes.${node.nodeId}.params`,
+        code: ERR_MISSING_UPSTREAM_CONTEXT,
         constraints: [
           `El nodo necesita los namespaces [${missing.join(', ')}], que ningun paso anterior del flujo escribe. Reordena el flujo o anade el nodo que los produce.`,
         ],

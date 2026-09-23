@@ -21,6 +21,24 @@
 export const INTERPOLATION_PATTERN =
   /\{\{\s*([a-zA-Z0-9_]+(?:\.[a-zA-Z0-9_]+|\[\d+\])+)\s*\}\}/g;
 
+/**
+ * Variante ANCLADA: la cadena ENTERA debe ser una sola marca y nada mas.
+ *
+ * Vive aqui, junto al patron que de verdad interpola, y no dentro del DTO que la
+ * usa: uno decide QUE se resuelve y el otro QUE se admite, y si dejaran de
+ * coincidir el sistema aceptaria al guardar plantillas que el motor no sabe
+ * resolver, o al reves.
+ *
+ * El anclaje no es cosmetico. Sin `^...$` bastaria con CONTENER una marca, y
+ * `https://otro-portal.es/?x={{ns.campo}}` pasaria el filtro: seria una URL
+ * literal disfrazada, que es justo lo que el campo deja de admitir.
+ *
+ * Sin grupo de captura, a diferencia de su hermano: aqui solo se responde si o
+ * no. De extraer la raiz se encarga `extractNamespaceRoots`.
+ */
+export const INTERPOLATION_ONLY_PATTERN =
+  /^\{\{\s*[a-zA-Z0-9_]+(?:\.[a-zA-Z0-9_]+|\[\d+\])+\s*\}\}$/;
+
 /** Normaliza `urls[0]` a `urls.0`: una sola gramatica que recorrer. */
 const BRACKET_INDEX_PATTERN = /\[(\d+)\]/g;
 

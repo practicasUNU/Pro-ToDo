@@ -1,5 +1,6 @@
 import type { StatePayloadContext } from '@core/fsm/context/state-payload.context';
 import type { NodeType } from '@core/fsm/types/pipeline-schema.types';
+import type { ClassConstructor } from 'class-transformer';
 
 /**
  * Contrato polimorfico de los nodos del motor FSM.
@@ -130,6 +131,28 @@ export interface INodeStrategy {
   readonly getRequiredNamespaces?: (
     params: Record<string, unknown>,
   ) => readonly string[];
+
+  /**
+   * DTO con el que se validan los `params` de este nodo AL GUARDAR el esquema.
+   *
+   * Hasta ahora cada estrategia validaba los suyos solo dentro de `execute`, de
+   * modo que un nodo mal configurado se guardaba sin protestar y el operador se
+   * enteraba con el flujo ya PAUSADO, horas despues y en produccion. Declarar
+   * aqui el DTO adelanta ese rechazo al 400 de la peticion que lo guarda.
+   *
+   * Se declara la CLASE y no un metodo validador a proposito: asi la
+   * instanciacion, el aplanado del arbol de `ValidationError` y el prefijo
+   * `nodes.<id>.params.` los hace UNA sola vez `PipelineValidatorService`, que
+   * ya tiene esa maquinaria montada para el propio `PipelineNodeConfigDto`. Un
+   * metodo por estrategia la duplicaria cinco veces.
+   *
+   * OPCIONAL, y hoy solo lo declara el extractor web. Enchufar las otras cuatro
+   * es una linea cada una, pero endurece tambien la REVALIDACION que hace
+   * `assertActivatable`: un flujo heredado podria quedarse sin poder activarse
+   * por un motivo ajeno al cambio que lo introdujo, asi que cada una merece su
+   * propia pasada de regresion.
+   */
+  readonly paramsSchema?: ClassConstructor<object>;
 
   /**
    * Ejecuta el nodo contra el contexto acumulado.

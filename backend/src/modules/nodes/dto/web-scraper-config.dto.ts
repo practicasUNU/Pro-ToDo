@@ -4,9 +4,12 @@ import {
   IsNotEmpty,
   IsOptional,
   IsString,
+  Matches,
   Max,
   Min,
 } from 'class-validator';
+
+import { INTERPOLATION_ONLY_PATTERN } from '@core/fsm/context/state-payload.context';
 
 /** Espera maxima por defecto para que la pagina cargue: veinte segundos. */
 export const DEFAULT_SCRAPER_TIMEOUT_MS = 20_000;
@@ -66,14 +69,30 @@ export const MAX_SCRAPER_RETRY_DELAY_MS = 10_000;
 export class WebScraperConfigDto {
   @ApiProperty({
     description:
-      'URL del articulo a extraer. Admite interpolacion contra el contexto acumulado, p. ej. "{{parsed_email.extracted_urls[0]}}".',
+      'URL del articulo a extraer. DEBE ser una variable interpolada contra el contexto acumulado, p. ej. "{{parsed_email.extracted_urls[0]}}".',
     example: '{{parsed_email.extracted_urls[0]}}',
   })
   @IsString({ message: 'targetUrl debe ser una cadena.' })
   @IsNotEmpty({ message: 'targetUrl no puede estar vacio.' })
-  // NO se usa `@IsUrl()`: el valor habitual es una plantilla `{{ns.campo}}`, que
-  // no es una URL hasta que el contexto la resuelve. La validacion del formato
-  // se hace en la estrategia, sobre el valor YA interpolado.
+  // NO se usa `@IsUrl()` y nunca se uso: aqui el valor no es una URL hasta que
+  // el contexto lo resuelve. Quien valida el formato es la estrategia, sobre el
+  // valor YA interpolado.
+  //
+  // Lo que SI cambia es que una URL literal deja de admitirse. El motivo es
+  // topologico y no de formato: un `targetUrl` literal no menciona ningun
+  // namespace, de modo que `getRequiredNamespaces` devuelve un arreglo vacio y
+  // la regla 7 del validador de topologia se queda sin nada que comprobar. Ese
+  // nodo podia entonces colocarse en cualquier punto del grafo —detras de un
+  // TRIGGER_CRON, por ejemplo— y el esquema se guardaba igual. Exigiendo la
+  // interpolacion, todo extractor declara de quien depende y esa laguna se
+  // cierra en el momento de guardar.
+  //
+  // Precio asumido y decidido: el flujo que vigilaba siempre la misma portada
+  // con una URL fija deja de ser expresable.
+  @Matches(INTERPOLATION_ONLY_PATTERN, {
+    message:
+      'La URL objetivo debe ser una variable interpolada (ej. {{namespace.campo}}).',
+  })
   targetUrl!: string;
 
   @ApiPropertyOptional({
