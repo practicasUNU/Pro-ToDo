@@ -9,6 +9,7 @@ import { WebScraperStrategy } from '@modules/nodes/strategies/web-scraper.strate
 import type { WebScraperRunner } from '@modules/nodes/services/web-scraper.runner';
 
 import type { PipelineSchema } from '@core/fsm/types/pipeline-schema.types';
+import type { ValidateSchemaOptions } from '@core/fsm/services/pipeline-validator.service';
 import type { SchemaIssue } from '@core/fsm/validators/pipeline-topology.validator';
 
 /**
@@ -87,9 +88,10 @@ const buildNotiwebSchema = (): PipelineSchema => ({
 const captureIssues = async (
   service: PipelineValidatorService,
   schema: unknown,
+  options?: ValidateSchemaOptions,
 ): Promise<SchemaIssue[]> => {
   try {
-    await service.validateSchema(schema);
+    await service.validateSchema(schema, options);
   } catch (error) {
     expect(error).toBeInstanceOf(BadRequestException);
 
@@ -113,10 +115,12 @@ describe('PipelineValidatorService (PROT-07)', () => {
   let service: PipelineValidatorService;
 
   beforeEach(() => {
-    // Factoria VACIA a proposito: sin estrategias registradas, todos los nodos
-    // declaran cero dependencias y la regla 7 no interviene. Estas pruebas
-    // examinan las otras seis reglas, y sembrar estrategias aqui las acoplaria a
-    // la configuracion de unos nodos que no vienen al caso. La regla 7 tiene su
+    // Factoria VACIA a proposito: sin estrategias registradas ningun nodo
+    // declara dependencias, y como los `params` de `buildNotiwebSchema` no
+    // interpolan nada, el barrido por marcas tampoco encuentra ninguna: la regla
+    // 7 no interviene por ninguno de sus dos canales. Estas pruebas examinan las
+    // otras seis reglas, y sembrar estrategias aqui las acoplaria a la
+    // configuracion de unos nodos que no vienen al caso. La regla 7 tiene su
     // propio bloque, con su doble.
     service = new PipelineValidatorService(new NodeStrategyFactory());
   });
@@ -547,6 +551,8 @@ describe('PipelineValidatorService (PROT-07)', () => {
       // 1. Arrange: que el nodo no sea ejecutable es otro problema, y lo reporta
       //    el motor con ERR_STRATEGY_NOT_FOUND. Convertirlo aqui en un fallo de
       //    dependencias mandaria al operador a reordenar un flujo bien ordenado.
+      //    Sus `params` no interpolan nada, asi que el segundo canal tampoco
+      //    tiene nada que decir.
       const service = buildServiceWith({});
 
       // 2. Act
@@ -554,6 +560,83 @@ describe('PipelineValidatorService (PROT-07)', () => {
 
       // 3. Assert
       expect(result.nodes.nodo_parser.nodeId).toBe('nodo_parser');
+    });
+
+    it('deberia detectar por interpolacion la dependencia de un nodo que no la declara', async () => {
+      // 1. Arrange: el mapeador NO implementa `getRequiredNamespaces` —sus
+      //    variables viven en `plantillas_html` y derivarlas exigiria una
+      //    consulta—, y su `params` interpola un namespace que escribe un nodo
+      //    POSTERIOR. Sin el barrido por marcas esto se guardaba sin protestar.
+      const schema = buildNotiwebSchema();
+      const service = buildServiceWith({});
+      schema.nodes.nodo_mapeador.params = {
+        templateId: 'tpl-1',
+        asunto: '{{http_result.status}}',
+      };
+
+      // 2. Act
+      const issues = await captureIssues(service, schema);
+
+      // 3. Assert
+      expect(fieldsOf(issues)).toContain('nodes.nodo_mapeador.params');
+      expect(issues[0].constraints[0]).toContain('http_result');
+    });
+
+    it('deberia encontrar la marca en cualquier clave anidada de params', async () => {
+      // 1. Arrange: el barrido no privilegia ningun campo. Un `targetUrl` lo
+      //    sabe leer la estrategia del extractor, pero una cabecera dentro de un
+      //    objeto anidado no la mira nadie mas.
+      const schema = buildNotiwebSchema();
+      const service = buildServiceWith({});
+      schema.nodes.nodo_destino.params = {
+        url: 'https://drupal.unuware.com/jsonapi/node/article',
+        headers: { 'X-Origen': '{{namespace_inventado.campo}}' },
+      };
+
+      // 2. Act
+      const issues = await captureIssues(service, schema);
+
+      // 3. Assert
+      expect(fieldsOf(issues)).toContain('nodes.nodo_destino.params');
+      expect(issues[0].constraints[0]).toContain('namespace_inventado');
+    });
+
+    it('deberia aceptar una interpolacion que un paso anterior si escribe', async () => {
+      // 1. Arrange: el mapeador lee del escudo, que va justo antes.
+      const schema = buildNotiwebSchema();
+      const service = buildServiceWith({});
+      schema.nodes.nodo_mapeador.params = {
+        templateId: 'tpl-1',
+        cuerpo: '{{validated_drupal_json.title}}',
+      };
+
+      // 2. Act
+      const result = await service.validateSchema(schema);
+
+      // 3. Assert
+      expect(result.entrypoint).toBe('trigger_imap');
+    });
+
+    it('no deberia duplicar un namespace que declaran las dos fuentes a la vez', async () => {
+      // 1. Arrange: el extractor web deriva su dependencia justamente de
+      //    `targetUrl`, asi que lo declarado y lo barrido coinciden. Sin
+      //    deduplicar, el mensaje nombraria `parsed_email` dos veces.
+      const schema = buildNotiwebSchema();
+      const service = buildServiceWith({
+        [NodeType.EXTRACTOR_WEB]: ['parsed_email'],
+      });
+      schema.entrypoint = 'nodo_extractor';
+      schema.nodes.nodo_extractor.params = {
+        targetUrl: '{{parsed_email.extracted_urls[0]}}',
+      };
+
+      // 2. Act
+      const issues = await captureIssues(service, schema);
+
+      // 3. Assert
+      const [constraint] = issues[0].constraints;
+      expect(constraint).toContain('parsed_email');
+      expect(constraint.match(/parsed_email/g)).toHaveLength(1);
     });
 
     it('no deberia juzgar un nodo alcanzable solo por onErrorStep', async () => {
@@ -621,6 +704,16 @@ describe('PipelineValidatorService (PROT-07)', () => {
       factory.registerStrategy(
         new WebScraperStrategy({} as unknown as WebScraperRunner),
       );
+      // Doble del parser, y hace falta: el extractor declara
+      // `requiredUpstreamFieldTypes` y la regla 8 exige que alguien publique un
+      // campo de tipo URL antes que el. Sin este doble, todas las pruebas de
+      // este bloque fallarian por topologia en vez de por lo que examinan, que
+      // es la validacion de `params` contra el DTO de la estrategia.
+      factory.registerStrategy({
+        nodeType: NodeType.PARSER_PRE_IA,
+        execute: jest.fn(),
+        outputFields: [{ name: 'extracted_urls', type: 'url[]' }],
+      });
 
       return new PipelineValidatorService(factory);
     };
@@ -703,6 +796,106 @@ describe('PipelineValidatorService (PROT-07)', () => {
 
       // 3. Assert
       expect(result.nodes.nodo_ia.params.promptKey).toBe('extract_news');
+    });
+  });
+
+  describe('plantillas de flujo: guardar a medias vs activar', () => {
+    /**
+     * Servicio con el extractor REAL y un parser doblado que publica enlaces.
+     *
+     * El parser va doblado y no real porque lo que se examina es la asimetria
+     * entre guardar y activar, no su configuracion; lo unico que hace falta de
+     * el es que satisfaga la regla 8.
+     */
+    const buildService = (): PipelineValidatorService => {
+      const factory = new NodeStrategyFactory();
+      jest.spyOn(factory['logger'], 'log').mockImplementation(() => undefined);
+      jest
+        .spyOn(factory['logger'], 'error')
+        .mockImplementation(() => undefined);
+      factory.registerStrategy(
+        new WebScraperStrategy({} as unknown as WebScraperRunner),
+      );
+      factory.registerStrategy({
+        nodeType: NodeType.PARSER_PRE_IA,
+        execute: jest.fn(),
+        outputFields: [{ name: 'extracted_urls', type: 'url[]' }],
+      });
+
+      return new PipelineValidatorService(factory);
+    };
+
+    /** Esquema con el extractor SIN operativa, como lo trae una plantilla. */
+    const buildTemplateSchema = (): PipelineSchema => {
+      const schema = buildNotiwebSchema();
+
+      schema.nodes.nodo_extractor.params = {};
+
+      return schema;
+    };
+
+    it('deberia GUARDAR una plantilla con el extractor sin targetUrl', async () => {
+      // 1. Arrange: es el caso que fallaba con tres constraints a la vez
+      //    —incluido "debe ser una cadena", que delata que el campo ni siquiera
+      //    estaba—. Una plantilla declara topologia; la operativa se elige al
+      //    instanciar el flujo en el asistente.
+      const service = buildService();
+
+      // 2. Act
+      const result = await service.validateSchema(buildTemplateSchema());
+
+      // 3. Assert
+      expect(result.nodes.nodo_extractor.params).toEqual({});
+    });
+
+    it('NO deberia dejar ACTIVAR ese mismo esquema', async () => {
+      // 1. Arrange
+      const service = buildService();
+
+      // 2. Act
+      const issues = await captureIssues(service, buildTemplateSchema(), {
+        requireRunnableParams: true,
+      });
+
+      // 3. Assert: la red esta en `assertActivatable`. Guardar es un borrador;
+      //    activar es ponerlo a disparar.
+      expect(fieldsOf(issues)).toContain('nodes.nodo_extractor.params');
+      expect(issues[0].code).toBe('ERR_INCOMPLETE_NODE_PARAMS');
+      expect(issues[0].constraints[0]).toContain('targetUrl');
+    });
+
+    it('deberia dejar activar el esquema una vez elegido el origen', async () => {
+      // 1. Arrange
+      const service = buildService();
+      const schema = buildTemplateSchema();
+      schema.nodes.nodo_extractor.params = {
+        targetUrl: '{{parsed_email.extracted_urls[0]}}',
+      };
+
+      // 2. Act
+      const result = await service.validateSchema(schema, {
+        requireRunnableParams: true,
+      });
+
+      // 3. Assert
+      expect(result.entrypoint).toBe('trigger_imap');
+    });
+
+    it('deberia rechazar TRIGGER_IMAP -> EXTRACTOR_WEB por la regla 8', async () => {
+      // 1. Arrange: sin parser por delante no hay de donde sacar un enlace, y
+      //    eso es un problema de TOPOLOGIA aunque el nodo estuviera configurado.
+      const service = buildService();
+      const schema = buildTemplateSchema();
+      schema.nodes.trigger_imap.nextStep = 'nodo_extractor';
+
+      // 2. Act
+      const issues = await captureIssues(service, schema);
+
+      // 3. Assert: el mensaje describe el flujo, no el campo. Antes el operador
+      //    recibia "targetUrl debe ser una cadena", que no dice nada del orden.
+      expect(fieldsOf(issues)).toContain('nodes.nodo_extractor.params');
+      expect(issues[0].code).toBe('ERR_MISSING_UPSTREAM_FIELD_TYPE');
+      expect(issues[0].constraints[0]).toContain('Ningun paso anterior');
     });
   });
 });

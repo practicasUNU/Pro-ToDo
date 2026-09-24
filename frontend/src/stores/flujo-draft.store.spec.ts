@@ -6,8 +6,10 @@ import { useTriggerImapStore } from '@stores/nodes/trigger-imap.store';
 
 import { useFlujoDraftStore } from './flujo-draft.store';
 
+import { NodeCategory } from '@/types/node-catalog';
 import { NodeType } from '@/types/pipeline';
 
+import type { NodeCatalogEntry } from '@/types/node-catalog';
 import type { PipelineSummary, WorkflowDetail, WorkflowTemplateSummary } from '@/types/pipeline';
 
 // Sin esto se cargaria `@boot/axios`, que necesita entorno de navegador.
@@ -32,9 +34,16 @@ vi.mock('@services/nodes/parser-email.service', () => ({
 vi.mock('@services/nodes/web-scraper.service', () => ({
   checkScraper: vi.fn(),
 }));
+// El agregador consulta el catalogo de nodos para componer `upstreamContext`.
+vi.mock('@services/node-catalog.service', () => ({
+  fetchNodeCatalog: vi.fn(),
+}));
 
 const workflowTemplatesService = await import('@services/workflow-templates.service');
 const fetchWorkflowTemplates = vi.mocked(workflowTemplatesService.fetchWorkflowTemplates);
+
+const nodeCatalogService = await import('@services/node-catalog.service');
+const fetchNodeCatalog = vi.mocked(nodeCatalogService.fetchNodeCatalog);
 
 const workflowsService = await import('@services/workflows.service');
 const fetchWorkflow = vi.mocked(workflowsService.fetchWorkflow);
@@ -131,9 +140,40 @@ const buildWorkflow = (overrides: Partial<PipelineSummary> = {}): PipelineSummar
 });
 
 /** Borrador con el catalogo cargado y un pipeline ya elegido. */
+/**
+ * Catalogo doble: solo los dos tipos cuyos campos interesan a las pruebas.
+ *
+ * Se siembra en `buildSelectedDraft` porque `loadAvailableTemplates` lo pide en
+ * paralelo con las plantillas: es de ahi de donde `upstreamContext` saca los
+ * campos de cada namespace.
+ */
+const CATALOG_ENTRIES: NodeCatalogEntry[] = [
+  {
+    id: 'cat-trigger',
+    code: NodeType.TRIGGER_IMAP,
+    name: 'Disparador IMAP',
+    category: NodeCategory.TRIGGER,
+    description: null,
+    uiSchema: {},
+    implemented: true,
+    outputFields: [{ name: 'subject', type: 'text' }],
+  },
+  {
+    id: 'cat-parser',
+    code: NodeType.PARSER_PRE_IA,
+    name: 'Parser pre-IA',
+    category: NodeCategory.PROCESAMIENTO,
+    description: null,
+    uiSchema: {},
+    implemented: true,
+    outputFields: [{ name: 'extracted_urls', type: 'url[]' }],
+  },
+];
+
 const buildSelectedDraft = async (): Promise<ReturnType<typeof useFlujoDraftStore>> => {
   const draft = useFlujoDraftStore();
   fetchWorkflowTemplates.mockResolvedValue([buildTemplate()]);
+  fetchNodeCatalog.mockResolvedValue(CATALOG_ENTRIES);
   await draft.loadAvailableTemplates();
   draft.selectTemplate(TEMPLATE_ID);
 
@@ -392,6 +432,56 @@ describe('useFlujoDraftStore · agregador del asistente', () => {
 
       // 3. Assert: un nodo no puede leer su propia salida.
       expect(draft.upstreamNamespaces(2)).not.toContain('rendered_html');
+    });
+
+    it('5.4 deberia cruzar cada namespace anterior con sus campos del catalogo', async () => {
+      // 1. Arrange & 2. Act
+      const draft = await buildSelectedDraft();
+
+      // 3. Assert: el frontend NO replica la forma de ningun payload; pregunta
+      //    al catalogo, que publica lo que declara cada estrategia. Viaja tambien
+      //    el `nodeType`, con el que el consumidor etiqueta el origen.
+      expect(draft.upstreamContext(2)).toEqual([
+        {
+          namespace: 'raw_email',
+          nodeType: NodeType.TRIGGER_IMAP,
+          fields: [{ name: 'subject', type: 'text' }],
+        },
+        {
+          namespace: 'parsed_email',
+          nodeType: NodeType.PARSER_PRE_IA,
+          fields: [{ name: 'extracted_urls', type: 'url[]' }],
+        },
+      ]);
+    });
+
+    it('5.5 tampoco deberia incluir el propio paso en el contexto rico', async () => {
+      // 1. Arrange & 2. Act
+      const draft = await buildSelectedDraft();
+
+      // 3. Assert: misma regla que `upstreamNamespaces`, y el disparador no
+      //    tiene nada por delante.
+      expect(draft.upstreamContext(0)).toEqual([]);
+      expect(draft.upstreamContext(2).map((item) => item.namespace)).not.toContain('rendered_html');
+    });
+
+    it('5.6 deberia devolver campos vacios para un tipo que el catalogo no cubre', async () => {
+      // 1. Arrange: es lo que pasa con un tipo sin estrategia, o si el catalogo
+      //    aun no ha cargado.
+      const draft = useFlujoDraftStore();
+      fetchWorkflowTemplates.mockResolvedValue([buildTemplate()]);
+      fetchNodeCatalog.mockResolvedValue([]);
+
+      // 2. Act
+      await draft.loadAvailableTemplates();
+      draft.selectTemplate(TEMPLATE_ID);
+
+      // 3. Assert: vacio significa "no hay nada que ofrecer todavia", nunca un
+      //    error; el namespace sigue estando.
+      expect(draft.upstreamContext(2)).toEqual([
+        { namespace: 'raw_email', nodeType: NodeType.TRIGGER_IMAP, fields: [] },
+        { namespace: 'parsed_email', nodeType: NodeType.PARSER_PRE_IA, fields: [] },
+      ]);
     });
   });
 

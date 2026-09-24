@@ -4,7 +4,6 @@ import { createMockStatePayloadContext } from '@test/factories/state-payload-con
 import {
   ERR_ACCESS_DENIED_BLOCK_DETECTED,
   ERR_SCRAPER_CONFIG,
-  FALLBACK_SCRAPER_NAMESPACE,
   ERR_SCRAPER_URL_MALFORMED,
   ERR_SCRAPER_URL_UNRESOLVED,
   WebScraperStrategy,
@@ -378,21 +377,24 @@ describe('WebScraperStrategy', () => {
       ).toEqual(['parsed_email']);
     });
 
-    it('5.2 deberia caer al namespace del parser ante una URL literal', () => {
+    it('5.2 no deberia declarar nada ante una URL literal', () => {
       // 1. Arrange & 2. Act
       const { strategy } = createHarness();
 
-      // 3. Assert: el metodo NUNCA devuelve vacio. Un extractor sin
-      //    dependencias declaradas dejaria a la regla 7 del validador de
-      //    topologia sin nada que comprobar, y el nodo podria colocarse en
-      //    cualquier punto del grafo sin que nadie lo objetara.
+      // 3. Assert: se devuelve VACIO, y ese es el cambio. Antes caia a un
+      //    `FALLBACK_SCRAPER_NAMESPACE = 'parsed_email'` para que ningun
+      //    extractor quedara sin dependencias declaradas, pero era una
+      //    SUPOSICION: este `targetUrl` no menciona `parsed_email` por ningun
+      //    lado, y el operador leia una acusacion sobre un namespace que su
+      //    esquema nunca cito.
       //
-      //    El fallback es una SUPOSICION y no una lectura: este `targetUrl` no
-      //    menciona `parsed_email` por ningun lado. Se acepta el diagnostico
-      //    impreciso a cambio de que la garantia no tenga excepciones; quien da
-      //    el mensaje correcto es el `@Matches` del DTO (ver 1.5).
+      //    La garantia no se ha perdido, ha cambiado de sitio y de pregunta: la
+      //    sostiene `requiredUpstreamFieldTypes` a traves de la regla 8, que
+      //    comprueba que haya DE DONDE sacar una URL en vez de adivinar de
+      //    cual. Y a una URL literal la sigue rechazando el `@Matches` del DTO
+      //    (ver 1.5), que es quien da el mensaje correcto.
       expect(strategy.getRequiredNamespaces({ targetUrl: TARGET_URL })).toEqual(
-        [FALLBACK_SCRAPER_NAMESPACE],
+        [],
       );
     });
 
@@ -409,39 +411,94 @@ describe('WebScraperStrategy', () => {
       ).toEqual(['parsed_email']);
     });
 
-    it('5.4 deberia caer al fallback si targetUrl no es una cadena', () => {
+    it('5.4 no deberia declarar nada si targetUrl falta o no es una cadena', () => {
       // 1. Arrange & 2. Act: validar el DTO es competencia de `execute`; aqui
-      //    adelantarlo daria dos mensajes para el mismo error. Lo que si se
-      //    sostiene es la garantia: ni con `params` vacios se devuelve `[]`.
+      //    adelantarlo daria dos mensajes para el mismo error.
       const { strategy } = createHarness();
 
-      // 3. Assert
-      expect(strategy.getRequiredNamespaces({})).toEqual([
-        FALLBACK_SCRAPER_NAMESPACE,
-      ]);
-      expect(strategy.getRequiredNamespaces({ targetUrl: '' })).toEqual([
-        FALLBACK_SCRAPER_NAMESPACE,
-      ]);
-      expect(strategy.getRequiredNamespaces({ targetUrl: 42 })).toEqual([
-        FALLBACK_SCRAPER_NAMESPACE,
-      ]);
+      // 3. Assert: `params: {}` es exactamente lo que trae una PLANTILLA de
+      //    flujo, que declara topologia y elige los valores despues. Inventarle
+      //    una dependencia la hacia irrepresentable: ninguna plantilla podia
+      //    contener un EXTRACTOR_WEB.
+      expect(strategy.getRequiredNamespaces({})).toEqual([]);
+      expect(strategy.getRequiredNamespaces({ targetUrl: '' })).toEqual([]);
+      expect(strategy.getRequiredNamespaces({ targetUrl: 42 })).toEqual([]);
     });
 
-    it('5.5 no deberia caer al fallback si la plantilla nombra otro namespace', () => {
+    it('5.5 deberia leer el namespace de una plantilla compuesta', () => {
       // 1. Arrange & 2. Act: una plantilla COMPUESTA no casa el patron anclado
       //    del DTO, pero declara perfectamente de quien depende.
       const { strategy } = createHarness();
 
-      // 3. Assert: el fallback se dispara por EXTRACCION VACIA y no por "no
-      //    casa la regex". Cambiarlo por un `INTERPOLATION_ONLY_PATTERN.test()`
-      //    devolveria aqui `parsed_email` y mandaria al operador a anadir un
-      //    parser que este flujo no necesita. Este caso existe para impedir esa
-      //    "simplificacion".
+      // 3. Assert: se lee lo que la plantilla DICE, no lo que casa el patron
+      //    anclado. Sustituir esto por un `INTERPOLATION_ONLY_PATTERN.test()`
+      //    dejaria este `targetUrl` sin dependencias y mandaria al operador a
+      //    anadir un nodo que este flujo no necesita.
       expect(
         strategy.getRequiredNamespaces({
           targetUrl: '{{llm_response.base_url}}/{{llm_response.slug}}',
         }),
       ).toEqual(['llm_response']);
+    });
+  });
+
+  describe('6. Contrato de configurabilidad y completitud', () => {
+    it('6.1 deberia declarar que solo puede apuntar a campos de tipo URL', () => {
+      // 1. Arrange & 2. Act
+      const { strategy } = createHarness();
+
+      // 3. Assert: es lo que la regla 8 del validador de topologia consulta
+      //    para exigir que algun paso anterior publique una fuente de enlaces.
+      expect(strategy.requiredUpstreamFieldTypes).toEqual(['url', 'url[]']);
+    });
+
+    it('6.2 deberia declarar incompleto un nodo sin targetUrl', () => {
+      // 1. Arrange & 2. Act
+      const { strategy } = createHarness();
+
+      // 3. Assert: guardar y activar son dos exigencias distintas. El esquema se
+      //    persiste asi —es un borrador, y una plantilla ni siquiera trae
+      //    operativa—, pero `assertActivatable` lo frena antes de habilitarlo.
+      expect(strategy.getIncompleteParams({})).toEqual(['targetUrl']);
+      expect(strategy.getIncompleteParams({ targetUrl: '' })).toEqual([
+        'targetUrl',
+      ]);
+      expect(strategy.getIncompleteParams({ targetUrl: '   ' })).toEqual([
+        'targetUrl',
+      ]);
+    });
+
+    it('6.3 deberia dar por completo un nodo con targetUrl elegido', () => {
+      // 1. Arrange & 2. Act
+      const { strategy } = createHarness();
+
+      // 3. Assert
+      expect(
+        strategy.getIncompleteParams({
+          targetUrl: '{{parsed_email.extracted_urls[0]}}',
+        }),
+      ).toEqual([]);
+    });
+
+    it('6.4 deberia fallar al ejecutarse sin targetUrl, con codigo de config', async () => {
+      // 1. Arrange: el DTO admite la ausencia para que una plantilla exista, asi
+      //    que este camino es alcanzable si alguien activa por SQL directo.
+      const { strategy } = createHarness();
+      const context = createMockStatePayloadContext({
+        executionId: 'exec-sin-url',
+        currentStep: 'nodo_extractor',
+        namespaces: {},
+      });
+
+      // 2. Act
+      const result = await strategy.execute(context, {});
+
+      // 3. Assert: se nombra el problema real en vez de dejar que `new URL('')`
+      //    reviente mas abajo como un fallo de FORMATO, que mandaria a revisar
+      //    una URL que nadie escribio.
+      expect(result.success).toBe(false);
+      expect(result.error?.code).toBe(ERR_SCRAPER_CONFIG);
+      expect(result.error?.missingFields).toEqual(['targetUrl']);
     });
   });
 });

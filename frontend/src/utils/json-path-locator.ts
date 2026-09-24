@@ -15,8 +15,7 @@ export interface IssueRange {
 }
 
 /** Neutraliza los metacaracteres de un segmento que se inserta en un `RegExp`. */
-const escapeForRegExp = (value: string): string =>
-  value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+const escapeForRegExp = (value: string): string => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
 /**
  * Final del valor que abre en `openIndex`, equilibrando llaves y corchetes.
@@ -122,9 +121,20 @@ const locateKey = (
  * El sentinela `(root)` que el backend usa para "el payload entero no es un
  * objeto JSON" no es una ruta navegable: se resuelve al documento completo.
  *
- * @returns El rango de la clave, o `null` si la ruta no existe en el documento.
+ * LA GUARDA DE ENTRADA NO ES PARANOIA, aunque el tipo diga `string`. Este dato
+ * no lo produce TypeScript: sale del cuerpo de un 400, y `extractApiIssues`
+ * comprueba que `issues` sea un arreglo pero no la forma de cada elemento. Un
+ * endpoint que devolviera los issues en la forma interna del validador
+ * —`field`, no `path`— dejaba aqui un `undefined` y el `split` reventaba dentro
+ * del `watch` de CodeMirror, tirando la vista entera en vez de perder un
+ * subrayado. Que el backend haya dejado de hacerlo no quita que esta funcion
+ * deba resistirlo: es la unica capa que puede.
+ *
+ * @returns El rango de la clave, o `null` si la ruta no existe o no es usable.
  */
 const locatePath = (doc: string, path: string): { from: number; to: number } | null => {
+  if (typeof path !== 'string' || path.length === 0) return null;
+
   if (path === '(root)') {
     return { from: 0, to: doc.length };
   }
@@ -159,12 +169,18 @@ const locatePath = (doc: string, path: string): { from: number; to: number } | n
  * validación, y buscar la ruta es lo único que sigue funcionando —o que falla
  * limpiamente— cuando eso ocurre.
  *
+ * Un issue sin `message` utilizable se descarta junto con los que no resuelven:
+ * un subrayado cuyo tooltip dijera `undefined` no informa de nada y oculta el
+ * texto del editor que tapa.
+ *
  * @returns Rangos ordenados por posición, como exige CodeMirror.
  */
 export const locateJsonPaths = (doc: string, issues: SchemaIssue[]): IssueRange[] => {
   const ranges: IssueRange[] = [];
 
   for (const issue of issues) {
+    if (typeof issue?.message !== 'string' || issue.message.length === 0) continue;
+
     const range = locatePath(doc, issue.path);
 
     if (range === null) continue;

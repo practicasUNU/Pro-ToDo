@@ -23,6 +23,7 @@ import {
 } from '@nestjs/swagger';
 
 import { Roles } from '@common/decorators/roles.decorator';
+import { toIssueContractException } from '@core/fsm/utils/schema-issue-contract.util';
 import { RolesGuard } from '@common/guards/roles.guard';
 import { JwtAuthGuard } from '@modules/auth/guards/jwt-auth.guard';
 import { UserRole } from '@modules/users/enums/user-role.enum';
@@ -109,7 +110,13 @@ export class WorkflowTemplatesController {
   public async create(
     @Body() createDto: CreateWorkflowTemplateDto,
   ): Promise<WorkflowTemplateDetailResponseDto> {
-    return this.workflowTemplatesService.create(createDto);
+    try {
+      return await this.workflowTemplatesService.create(createDto);
+    } catch (error: unknown) {
+      // `await` dentro del `try`, y no un `return` de la promesa: sin el, el
+      // rechazo escapa de este bloque y los issues volverian a salir crudos.
+      throw toIssueContractException(error);
+    }
   }
 
   @Put(':id')
@@ -130,7 +137,11 @@ export class WorkflowTemplatesController {
     @Param('id', ParseUUIDPipe) id: string,
     @Body() updateDto: UpdateWorkflowTemplateDto,
   ): Promise<WorkflowTemplateDetailResponseDto> {
-    return this.workflowTemplatesService.update(id, updateDto);
+    try {
+      return await this.workflowTemplatesService.update(id, updateDto);
+    } catch (error: unknown) {
+      throw toIssueContractException(error);
+    }
   }
 
   // Borrado logico: los flujos instanciados apuntan a esta fila con

@@ -38,6 +38,52 @@ export const ERR_NODE_HTTP_FAILURE = 'ERR_NODE_HTTP_FAILURE';
  */
 export const ERR_MISSING_UPSTREAM_CONTEXT = 'ERR_MISSING_UPSTREAM_CONTEXT';
 
+/**
+ * El flujo no ofrece aguas arriba ningun campo del tipo que el nodo necesita.
+ *
+ * Hermano de `ERR_MISSING_UPSTREAM_CONTEXT` y distinto de el: aquel dice "falta
+ * el namespace X", este dice "no hay de donde sacar una URL". Solo lo emite la
+ * regla 8 del validador de topologia, al GUARDAR; el motor no lo usa, porque en
+ * ejecucion la pregunta relevante vuelve a ser si el valor concreto se resuelve.
+ */
+export const ERR_MISSING_UPSTREAM_FIELD_TYPE =
+  'ERR_MISSING_UPSTREAM_FIELD_TYPE';
+
+/**
+ * El nodo se puede guardar pero no ejecutar: le faltan params por elegir.
+ *
+ * Lo emite `PipelineValidatorService` solo cuando se le pide validar para
+ * ACTIVAR. Es la contrapartida de que el DTO de un nodo admita valores ausentes
+ * al guardar, que es lo que permite que una plantilla de flujo exista.
+ */
+export const ERR_INCOMPLETE_NODE_PARAMS = 'ERR_INCOMPLETE_NODE_PARAMS';
+
+/**
+ * Tipo semantico de un campo del payload que un nodo deposita en su namespace.
+ *
+ * NO es el tipo de TypeScript, es para que sirve: `url` y `url[]` son los dos
+ * que hoy consume el selector determinista del extractor web, que solo puede
+ * ofrecer campos de los que salga una direccion. `text` y un numero son ambos
+ * interpolables, pero ofrecer `character_count` como origen de una URL seria
+ * exactamente el error de tipeo que el selector viene a impedir.
+ */
+export type NodeOutputFieldType =
+  'url' | 'url[]' | 'text' | 'number' | 'boolean' | 'object';
+
+/**
+ * Campo del payload de un nodo, tal como se interpola.
+ *
+ * `name` va en `snake_case` porque asi viaja y asi se escribe en una plantilla
+ * (`{{parsed_email.extracted_urls}}`); camelizarlo aqui mostraria al operador un
+ * nombre que ninguna interpolacion puede resolver.
+ */
+export interface NodeOutputField {
+  readonly name: string;
+  readonly type: NodeOutputFieldType;
+  /** Proposito del campo, para el `label` del selector. */
+  readonly description?: string;
+}
+
 /** Detalle del fallo devuelto por una estrategia. */
 export interface NodeErrorDetail {
   level: NodeErrorSeverity;
@@ -153,6 +199,73 @@ export interface INodeStrategy {
    * propia pasada de regresion.
    */
   readonly paramsSchema?: ClassConstructor<object>;
+
+  /**
+   * Campos que este nodo deposita en su `outputNamespace`.
+   *
+   * Es el INVENTARIO de lo que los nodos de aguas abajo pueden interpolar, y la
+   * contrapartida exacta de `getRequiredNamespaces`: aquel declara lo que el
+   * nodo consume, este lo que produce. Con los dos, el asistente puede componer
+   * un selector cerrado de `{{namespace.campo}}` sin que ningun componente del
+   * frontend tenga que replicar la forma de un payload.
+   *
+   * Se declara en la ESTRATEGIA y no en la tabla `nodos` porque es la estrategia
+   * quien construye el payload: una fila de catalogo y un `*-payload.util.ts`
+   * son dos fuentes que se desincronizan en cuanto alguien anade una clave, y la
+   * que manda en ejecucion es siempre la segunda.
+   *
+   * PROPIEDAD CONSTANTE, a diferencia de `getRequiredNamespaces`: lo que un nodo
+   * produce depende de su tipo y no de su configuracion. El parser devuelve las
+   * mismas doce claves lea del namespace que lea.
+   *
+   * OPCIONAL: una estrategia que no lo declare simplemente no aporta opciones al
+   * selector, igual que una sin `paramsSchema` no aporta validacion de params.
+   */
+  readonly outputFields?: readonly NodeOutputField[];
+
+  /**
+   * Tipos de campo que este nodo necesita poder APUNTAR aguas arriba.
+   *
+   * Contrapartida de `outputFields`: aquel declara lo que el nodo publica, este
+   * la clase de dato sin el cual el nodo no es configurable. El extractor web
+   * declara `['url', 'url[]']` porque su `targetUrl` solo puede referenciar un
+   * campo del que salga una direccion.
+   *
+   * Lo consume la regla 8 del validador de topologia, que comprueba que algun
+   * paso ANTERIOR publique al menos un campo de alguno de estos tipos. Esa
+   * comprobacion no puede vivir en el DTO del nodo: `class-validator` valida un
+   * nodo AISLADO y no tiene forma de saber quien va delante.
+   *
+   * Es lo que permite que `targetUrl` sea opcional al guardar sin perder la
+   * garantia topologica. Antes esa garantia la sostenia un fallback dentro de
+   * `getRequiredNamespaces` que, a falta de configuracion, SUPONIA `parsed_email`
+   * y acusaba al operador de un namespace que su esquema nunca cito. Preguntar
+   * por el tipo de campo sustituye la suposicion por un hecho.
+   *
+   * OPCIONAL: la mayoria de los nodos consume el contexto entero y no depende de
+   * ningun campo en particular.
+   */
+  readonly requiredUpstreamFieldTypes?: readonly NodeOutputFieldType[];
+
+  /**
+   * `params` que faltan para que el nodo pueda EJECUTARSE, no solo guardarse.
+   *
+   * Existe porque guardar y activar son dos exigencias distintas, y confundirlas
+   * tenia un coste concreto: una PLANTILLA de flujo es una topologia sin
+   * operativa —sus `params` van vacios a proposito, y el valor concreto se elige
+   * despues, en el asistente—, asi que exigir el campo en el DTO hacia que
+   * ninguna plantilla pudiera contener un EXTRACTOR_WEB.
+   *
+   * El DTO valida entonces la FORMA de lo que haya (`@IsOptional` + `@Matches`:
+   * si viene, debe ser una interpolacion) y este metodo responde a la otra
+   * pregunta, la que solo importa al activar: "esta completo". `assertActivatable`
+   * es quien lo consulta.
+   *
+   * @returns Nombres de los params ausentes o vacios. Vacio si el nodo puede correr.
+   */
+  readonly getIncompleteParams?: (
+    params: Record<string, unknown>,
+  ) => readonly string[];
 
   /**
    * Ejecuta el nodo contra el contexto acumulado.

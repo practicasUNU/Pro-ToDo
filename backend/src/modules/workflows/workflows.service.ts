@@ -488,7 +488,17 @@ export class WorkflowsService {
       );
     }
 
-    await this.pipelineValidatorService.validateSchema(workflow.pipelineSchema);
+    // `requireRunnableParams` es la asimetria deliberada entre guardar y activar.
+    // Un flujo se GUARDA a medio configurar —es un borrador, y su plantilla de
+    // origen ni siquiera trae operativa—, pero activarlo es ponerlo a disparar:
+    // sin esto, un extractor web sin `targetUrl` elegido se habilitaria y
+    // fallaria en la primera ejecucion con el flujo ya PAUSADO.
+    await this.pipelineValidatorService.validateSchema(
+      workflow.pipelineSchema,
+      {
+        requireRunnableParams: true,
+      },
+    );
   }
 
   /**

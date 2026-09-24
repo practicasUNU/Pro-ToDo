@@ -3,7 +3,7 @@ import { computed, ref } from 'vue';
 
 import * as webScraperService from '@services/nodes/web-scraper.service';
 
-import type { HydratableNode } from '@stores/nodes/node-store-registry';
+import type { HydratableNode, UpstreamNamespace } from '@stores/nodes/node-store-registry';
 
 import type {
   CheckScraperMetrics,
@@ -33,14 +33,8 @@ export const DEFAULT_SCRAPER_RETRY_DELAY_MS = 2_000;
 export const MIN_SCRAPER_RETRY_DELAY_MS = 500;
 export const MAX_SCRAPER_RETRY_DELAY_MS = 10_000;
 
-/** Namespace del que salen las URLs: el que publica PARSER_PRE_IA. */
-export const URL_SOURCE_NAMESPACE = 'parsed_email';
-
-/** Campo del payload del parser que contiene los enlaces de contenido. */
-export const URL_SOURCE_FIELD = 'extracted_urls';
-
 /**
- * Cuantas posiciones de `extracted_urls` ofrece el selector.
+ * Cuantas posiciones ofrece el selector por cada campo de tipo `url[]`.
  *
  * DIEZ, y no las cincuenta que el backend admite como tope: el selector no es un
  * inventario del correo, es una eleccion de POSICION, y una lista de cincuenta
@@ -49,6 +43,22 @@ export const URL_SOURCE_FIELD = 'extracted_urls';
  * deja de ser una referencia estable entre un correo y el siguiente.
  */
 export const SELECTABLE_URL_SLOTS = 10;
+
+/**
+ * Forma que debe tener `targetUrl`: una unica marca `{{raiz.campo}}`.
+ *
+ * Replica `INTERPOLATION_ONLY_PATTERN` del backend, que es el que de verdad
+ * decide (`@Matches` de `WebScraperConfigDto`). El anclaje no es cosmetico: sin
+ * el bastaria con CONTENER una marca y `https://otro-portal.es/?x={{ns.campo}}`
+ * pasaria el filtro, que es una URL literal disfrazada.
+ *
+ * NO sustituye a la comprobacion de pertenencia a `urlOptions`, la acompana.
+ * El patron dice que la forma es resoluble; la lista dice que ESE namespace
+ * existe de verdad aguas arriba. Un `targetUrl` heredado puede cumplir lo
+ * primero y no lo segundo.
+ */
+export const INTERPOLATION_ONLY_PATTERN =
+  /^\{\{\s*[a-zA-Z0-9_]+(?:\.[a-zA-Z0-9_]+|\[\d+\])+\s*\}\}$/;
 
 /** Textos de las reglas de campo. Se exportan para que las pruebas los aseveren. */
 export const TIMEOUT_RULE = `La espera debe estar entre ${MIN_SCRAPER_TIMEOUT_MS} y ${MAX_SCRAPER_TIMEOUT_MS} ms`;
@@ -61,33 +71,76 @@ export interface TargetUrlOption {
   readonly value: string;
 }
 
-/** Plantilla de interpolacion de la posicion `index` del arreglo de enlaces. */
-export const urlTemplateFor = (index: number): string =>
-  `{{${URL_SOURCE_NAMESPACE}.${URL_SOURCE_FIELD}[${index}]}}`;
+/** Plantilla de interpolacion de un campo escalar. */
+export const urlTemplateFor = (namespace: string, field: string): string =>
+  `{{${namespace}.${field}}}`;
+
+/** Plantilla de interpolacion de la posicion `index` de un campo de arreglo. */
+export const indexedUrlTemplateFor = (namespace: string, field: string, index: number): string =>
+  `{{${namespace}.${field}[${index}]}}`;
 
 /**
- * Opciones del selector: POSICIONES, no URLs.
+ * Opciones del selector: POSICIONES del contexto, no URLs.
  *
- * Aqui esta la decision central del nodo. En tiempo de diseno el flujo no se ha
- * ejecutado, no hay `StatePayloadContext` y por tanto NO existe ningun
- * `extracted_urls` real que ofrecer. El unico canal que el anfitrion expone,
- * `setAvailableUpstreamNamespaces`, entrega NOMBRES de namespace y no su
- * contenido.
+ * Aqui esta la decision central del nodo, y tiene dos mitades.
  *
- * Y esta bien que asi sea: lo que el nodo debe guardar nunca es una URL, es una
- * POSICION. El flujo se ejecutara sobre correos distintos cada dia, asi que
- * anclar la configuracion a la URL concreta de un correo de ejemplo produciria
- * un `targetUrl` literal que en produccion apunta a una noticia caducada.
+ * LA PRIMERA: lo que se guarda nunca es una URL, es una REFERENCIA. En tiempo de
+ * diseno el flujo no se ha ejecutado, no hay `StatePayloadContext` y por tanto no
+ * existe ningun enlace real que ofrecer. El flujo correra sobre correos distintos
+ * cada dia, asi que anclar la configuracion a la URL concreta de un correo de
+ * ejemplo produciria un `targetUrl` que en produccion apunta a una noticia
+ * caducada.
+ *
+ * LA SEGUNDA: de donde sale el catalogo. Las opciones se derivan de la TOPOLOGIA
+ * que el anfitrion declara, cruzada con los campos que cada tipo de nodo publica
+ * segun el catalogo del backend. No hay ningun namespace escrito a mano en este
+ * archivo, y es la diferencia con la version anterior: aquella ofrecia diez
+ * posiciones fijas de `parsed_email.extracted_urls` pasara lo que pasara, de modo
+ * que un flujo que extrajera sus enlaces de cualquier otro nodo era
+ * inconfigurable, y uno sin parser aguas arriba ofrecia diez opciones que ninguna
+ * ejecucion podria resolver.
+ *
+ * Solo se ofrecen los campos de tipo URL. Un `character_count` es interpolable
+ * igual que cualquier otro, pero ofrecerlo como origen de una direccion seria el
+ * error de tipeo que el selector existe para impedir.
+ *
+ * Un `url[]` se despliega en `SELECTABLE_URL_SLOTS` posiciones; un `url` escalar
+ * aporta una sola opcion.
  */
-const buildUrlOptions = (): readonly TargetUrlOption[] =>
-  Array.from({ length: SELECTABLE_URL_SLOTS }, (_, index) => ({
-    label: `Enlace ${index + 1} del correo`,
-    value: urlTemplateFor(index),
-  }));
+const buildUrlOptions = (context: readonly UpstreamNamespace[]): readonly TargetUrlOption[] =>
+  context.flatMap(({ namespace, fields }) =>
+    fields.flatMap((field) => {
+      const suffix = field.description === undefined ? '' : ` — ${field.description}`;
 
-/** Config inicial: el primer enlace del correo y los tres defectos del backend. */
+      if (field.type === 'url') {
+        return [
+          {
+            label: `${namespace}.${field.name}${suffix}`,
+            value: urlTemplateFor(namespace, field.name),
+          },
+        ];
+      }
+
+      if (field.type !== 'url[]') return [];
+
+      return Array.from({ length: SELECTABLE_URL_SLOTS }, (_, index) => ({
+        label: `${namespace}.${field.name} — posicion ${index + 1}`,
+        value: indexedUrlTemplateFor(namespace, field.name, index),
+      }));
+    }),
+  );
+
+/**
+ * Config inicial: SIN `targetUrl` y con los tres defectos del backend.
+ *
+ * La cadena vacia y no una plantilla concreta: ya no existe un origen por
+ * defecto que valga para todo flujo, porque el catalogo de opciones depende de
+ * quien vaya delante. Un valor prefijado aqui seria una eleccion que el operador
+ * no ha hecho, y que `isConfigValid` tendria que rechazar acto seguido en cuanto
+ * la topologia no lo respaldara.
+ */
 const buildInitialConfig = (): WebScraperConfigDto => ({
-  targetUrl: urlTemplateFor(0),
+  targetUrl: '',
   timeoutMs: DEFAULT_SCRAPER_TIMEOUT_MS,
   maxRetries: DEFAULT_SCRAPER_MAX_RETRIES,
   retryDelayMs: DEFAULT_SCRAPER_RETRY_DELAY_MS,
@@ -108,13 +161,16 @@ const webScraperSetup = () => {
   const config = ref<WebScraperConfigDto>(buildInitialConfig());
 
   /**
-   * Namespaces que declaran los nodos anteriores del flujo.
+   * Namespaces anteriores del flujo, con los campos que publica cada uno.
    *
-   * Arranca con el del parser como defecto PROVISIONAL, mismo criterio que
-   * `template-mapper.store.ts`: un anfitrion que no llame al setter no debe
-   * dejar el nodo bloqueado sin explicacion.
+   * Arranca VACIO, y aqui se cambia de criterio respecto a la version anterior,
+   * que sembraba `parsed_email` como defecto provisional. Sembrar un defecto
+   * significaba ofrecer opciones sobre un nodo que quiza no esta en el flujo: el
+   * operador podia elegir una y avanzar el asistente con una referencia que
+   * ninguna ejecucion sabria resolver. Vacio el selector se deshabilita y el
+   * banner dice por que, que es un bloqueo explicado en vez de una trampa.
    */
-  const availableUpstreamNamespaces = ref<string[]>([URL_SOURCE_NAMESPACE]);
+  const availableUpstreamContext = ref<UpstreamNamespace[]>([]);
 
   /** URL REAL del banco de pruebas. NO forma parte de los `params` del nodo. */
   const sandboxUrl = ref<string>('');
@@ -124,20 +180,38 @@ const webScraperSetup = () => {
   const sandboxWarnings = ref<string[]>([]);
   const loading = ref<boolean>(false);
 
-  const urlOptions = computed<readonly TargetUrlOption[]>(buildUrlOptions);
+  const urlOptions = computed<readonly TargetUrlOption[]>(() =>
+    buildUrlOptions(availableUpstreamContext.value),
+  );
 
   /**
-   * El flujo produce el namespace del que el selector lee las URLs.
+   * Algun nodo anterior publica un campo del que pueda salir una URL.
    *
    * Es la condicion que hace resoluble cualquiera de las opciones ofrecidas: sin
-   * un PARSER_PRE_IA aguas arriba, `{{parsed_email.extracted_urls[0]}}` no
-   * existe en el contexto y el nodo fallaria con ERR_SCRAPER_URL_UNRESOLVED en
-   * la primera ejecucion. Mismo criterio que `missingRequiredVariables` del
+   * un origen aguas arriba no hay nada que interpolar, el nodo fallaria con
+   * ERR_SCRAPER_URL_UNRESOLVED en la primera ejecucion, y el selector no tiene
+   * nada honesto que mostrar. Mismo criterio que `missingRequiredVariables` del
    * mapeador: detectarlo al configurar es la diferencia entre corregirlo ahora o
    * descubrirlo en produccion con el flujo PAUSADO.
+   *
+   * Se deriva de las OPCIONES y no de la lista de namespaces: un nodo anterior
+   * que solo publique texto esta presente y aun asi no sirve de origen.
    */
-  const hasUrlSource = computed<boolean>(() =>
-    availableUpstreamNamespaces.value.includes(URL_SOURCE_NAMESPACE),
+  const hasUrlSource = computed<boolean>(() => urlOptions.value.length > 0);
+
+  /**
+   * El `targetUrl` guardado ya no figura entre las opciones ofrecibles.
+   *
+   * Distingue "no has elegido nada" de "lo que elegiste dejo de existir", que
+   * son dos bloqueos con causas opuestas: el primero se resuelve eligiendo, el
+   * segundo reordenando el flujo o recuperando el nodo que producia ese
+   * namespace. Sin esta distincion, reabrir un flujo heredado mostraria un
+   * selector en blanco sin decir que se acaba de perder una configuracion.
+   */
+  const hasStaleTargetUrl = computed<boolean>(
+    () =>
+      config.value.targetUrl.length > 0 &&
+      !urlOptions.value.some((option) => option.value === config.value.targetUrl),
   );
 
   /**
@@ -146,12 +220,18 @@ const webScraperSetup = () => {
    * Los tres rangos numericos replican los `@Min`/`@Max` del DTO del backend,
    * que queda intacto; esta copia solo adelanta el rechazo al formulario.
    *
-   * `targetUrl` se valida contra la lista CERRADA de opciones y no con una
-   * expresion regular: el selector no admite texto libre (regla
-   * frontend-quasar.md §4), asi que el conjunto de valores legitimos es
-   * exactamente el que este store ofrece. Comprobarlo contra un patron dejaria
-   * pasar una plantilla bien formada hacia un namespace que este nodo nunca
-   * propone, y con ella un flujo que solo fallaria al ejecutarse.
+   * `targetUrl` pasa TRES filtros, y ninguno sobra:
+   *
+   * 1. No vacio. Es el estado inicial del nodo: nadie ha elegido todavia.
+   * 2. Casa el patron anclado de interpolacion. Replica el `@Matches` del DTO
+   *    del backend, de modo que un `targetUrl` heredado con una URL literal
+   *    —admisible en una version anterior— se rechace aqui con una regla de
+   *    campo en vez de con un 400 al guardar.
+   * 3. Pertenece a `urlOptions`. Es el filtro fuerte, y el patron no lo
+   *    sustituye: una plantilla bien formada hacia un namespace que el flujo no
+   *    produce es sintacticamente impecable y aun asi irresoluble. La lista ya
+   *    no es fija, es la proyeccion de la topologia declarada por el anfitrion,
+   *    asi que comprobarla es comprobar el flujo real.
    *
    * NO exige haber probado la extraccion, a diferencia del disparador IMAP.
    * Alli la comprobacion protege de unas credenciales que no fallarian hasta el
@@ -161,8 +241,9 @@ const webScraperSetup = () => {
    */
   const isConfigValid = computed<boolean>(
     () =>
+      config.value.targetUrl.length > 0 &&
+      INTERPOLATION_ONLY_PATTERN.test(config.value.targetUrl) &&
       urlOptions.value.some((option) => option.value === config.value.targetUrl) &&
-      hasUrlSource.value &&
       isIntegerInRange(config.value.timeoutMs, MIN_SCRAPER_TIMEOUT_MS, MAX_SCRAPER_TIMEOUT_MS) &&
       isIntegerInRange(config.value.maxRetries, 0, MAX_SCRAPER_RETRIES) &&
       isIntegerInRange(
@@ -180,6 +261,12 @@ const webScraperSetup = () => {
    */
   const configWarnings = computed<readonly string[]>(() => {
     const warnings: string[] = [];
+
+    if (hasStaleTargetUrl.value) {
+      warnings.push(
+        `El origen guardado "${config.value.targetUrl}" ya no lo produce ningun paso anterior del flujo. Se conserva tal cual para no reescribir en silencio lo que alguien configuro, pero hay que elegir uno nuevo o reordenar el flujo.`,
+      );
+    }
 
     if (sandboxResult.value === null) {
       warnings.push(
@@ -252,8 +339,16 @@ const webScraperSetup = () => {
     invalidateSandboxResult();
   };
 
-  const setAvailableUpstreamNamespaces = (namespaces: string[]): void => {
-    availableUpstreamNamespaces.value = [...namespaces];
+  /**
+   * Canal rico del anfitrion: namespaces anteriores CON sus campos.
+   *
+   * Es el unico que este nodo implementa. `setAvailableUpstreamNamespaces`, que
+   * solo entrega nombres, no le sirve: para componer `{{namespace.campo}}` hace
+   * falta el campo, y adivinarlo seria volver al `extracted_urls` escrito a mano
+   * que esta version elimina.
+   */
+  const setAvailableUpstreamContext = (context: UpstreamNamespace[]): void => {
+    availableUpstreamContext.value = [...context];
   };
 
   /**
@@ -304,9 +399,18 @@ const webScraperSetup = () => {
    * reescribiria en silencio un nodo que alguien redacto a mano sin esas claves.
    */
   const toNodeParams = (): Record<string, unknown> => {
-    const params: Record<string, unknown> = {
-      targetUrl: config.value.targetUrl,
-    };
+    const params: Record<string, unknown> = {};
+
+    // `targetUrl` se OMITE cuando no se ha elegido, en vez de publicarse como
+    // cadena vacia. Un nodo sin origen es un nodo sin configurar, y asi es como
+    // lo declara una plantilla de flujo: por ausencia. Publicar `''` seria
+    // afirmar que hay un valor, y el `@IsNotEmpty` del DTO lo rechazaria al
+    // guardar —que es justo lo que impedia que una plantilla contuviera este
+    // nodo—. El paso sigue bloqueado por `isConfigValid`; lo que cambia es que
+    // el esquema se puede persistir a medias, como borrador.
+    if (config.value.targetUrl.length > 0) {
+      params.targetUrl = config.value.targetUrl;
+    }
 
     if (config.value.timeoutMs !== DEFAULT_SCRAPER_TIMEOUT_MS) {
       params.timeoutMs = config.value.timeoutMs;
@@ -329,13 +433,20 @@ const webScraperSetup = () => {
    * Las coerciones no son paranoia: `pipeline_schema` es una columna `jsonb` y
    * pudo escribirse por SQL directo o por una version anterior del asistente.
    *
+   * `targetUrl` se restaura VERBATIM, aunque no figure entre las opciones que la
+   * topologia actual ofrece. La version anterior caia a `urlTemplateFor(0)` en
+   * ese caso, y eso era reescribir en silencio la configuracion que el operador
+   * venia a revisar: abria el formulario afirmando una eleccion que nadie hizo y
+   * guardar la persistia. Conservarlo deja el nodo bloqueado por `isConfigValid`
+   * y explicado por `configWarnings`, que es el fallo honesto.
+   *
    * La URL del banco NO se toca: es material de prueba, no del nodo.
    */
   const hydrateFromNode = (node: HydratableNode): void => {
     const params = node.params;
 
     config.value = {
-      targetUrl: asText(params.targetUrl) || urlTemplateFor(0),
+      targetUrl: asText(params.targetUrl),
       timeoutMs: asNumber(params.timeoutMs, DEFAULT_SCRAPER_TIMEOUT_MS),
       maxRetries: asNumber(params.maxRetries, DEFAULT_SCRAPER_MAX_RETRIES),
       retryDelayMs: asNumber(params.retryDelayMs, DEFAULT_SCRAPER_RETRY_DELAY_MS),
@@ -358,13 +469,14 @@ const webScraperSetup = () => {
     loading,
     urlOptions,
     hasUrlSource,
+    hasStaleTargetUrl,
     isConfigValid,
     configWarnings,
     canRunSandbox,
     sandboxPayload,
     updateConfig,
     setSandboxUrl,
-    setAvailableUpstreamNamespaces,
+    setAvailableUpstreamContext,
     runSandboxTest,
     toNodeParams,
     hydrateFromNode,

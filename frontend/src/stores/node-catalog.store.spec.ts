@@ -24,6 +24,7 @@ const buildEntry = (overrides: Partial<NodeCatalogEntry> = {}): NodeCatalogEntry
   description: null,
   uiSchema: {},
   implemented: true,
+  outputFields: [],
   ...overrides,
 });
 

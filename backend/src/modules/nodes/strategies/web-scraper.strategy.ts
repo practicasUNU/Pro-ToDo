@@ -17,6 +17,8 @@ import type { StatePayloadContext } from '@core/fsm/context/state-payload.contex
 import type {
   INodeStrategy,
   NodeErrorDetail,
+  NodeOutputField,
+  NodeOutputFieldType,
   NodeResult,
 } from '@core/fsm/types/node-strategy.types';
 import type { ResolvedWebScraperConfig } from '@modules/nodes/dto/web-scraper-config.dto';
@@ -40,14 +42,6 @@ export {
   ERR_SCRAPING_TIMEOUT_EXCEEDED,
   classifyNavigationError,
 } from '@modules/nodes/services/web-scraper.runner';
-
-/**
- * Namespace que se exige cuando `targetUrl` no declara ninguno.
- *
- * Es el del PARSER_PRE_IA porque es el unico predecesor plausible de este nodo:
- * los enlaces que extrae salen de `parsed_email.extracted_urls`.
- */
-export const FALLBACK_SCRAPER_NAMESPACE = 'parsed_email';
 
 /** Opciones de validacion canonicas del repositorio. */
 const VALIDATION_OPTIONS: ValidatorOptions = {
@@ -99,6 +93,33 @@ export class WebScraperStrategy implements INodeStrategy {
   public readonly nodeType = NodeType.EXTRACTOR_WEB;
 
   /**
+   * Las cinco claves que este nodo deposita en su namespace.
+   *
+   * Replican el `data` que devuelve `execute`. `source_url` es la URL FINAL tras
+   * los redirectos, asi que un segundo extractor encadenado puede tomarla como
+   * origen: por eso se declara `url` y no `text`.
+   */
+  public readonly outputFields: readonly NodeOutputField[] = [
+    {
+      name: 'source_url',
+      type: 'url',
+      description: 'URL final tras los redirectos',
+    },
+    {
+      name: 'article_title',
+      type: 'text',
+      description: 'Titular del articulo',
+    },
+    {
+      name: 'full_article_content',
+      type: 'text',
+      description: 'Cuerpo del articulo aislado',
+    },
+    { name: 'byline', type: 'text', description: 'Firma, o nulo si no hay' },
+    { name: 'scraped_at', type: 'text', description: 'Marca de tiempo ISO' },
+  ];
+
+  /**
    * El mismo DTO que valida `execute`, ahora tambien al GUARDAR el esquema.
    *
    * Es lo que hace que el `@Matches` de `targetUrl` muerda donde importa: sin
@@ -107,6 +128,21 @@ export class WebScraperStrategy implements INodeStrategy {
    * en la primera ejecucion con el flujo ya PAUSADO.
    */
   public readonly paramsSchema = WebScraperConfigDto;
+
+  /**
+   * Este nodo solo puede apuntar a un campo del que salga una direccion.
+   *
+   * Lo consume la regla 8 del validador de topologia: exige que algun paso
+   * ANTERIOR publique un `url` o un `url[]`. Es la garantia que antes sostenia
+   * un fallback dentro de `getRequiredNamespaces`, y la sostiene mejor: aquel
+   * SUPONIA `parsed_email` cuando no habia configuracion y acusaba al operador
+   * de un namespace que su esquema nunca menciono; este pregunta por el tipo de
+   * campo y responde con el hecho.
+   */
+  public readonly requiredUpstreamFieldTypes: readonly NodeOutputFieldType[] = [
+    'url',
+    'url[]',
+  ];
 
   constructor(private readonly runner: WebScraperRunner) {}
 
@@ -170,39 +206,44 @@ export class WebScraperStrategy implements INodeStrategy {
    * interpolacion real, de modo que lo que aqui se exige y lo que alli se
    * resuelve no puedan discrepar.
    *
-   * NUNCA devuelve un arreglo vacio. Cuando `targetUrl` no nombra ningun
-   * namespace —una URL literal, una cadena vacia, un valor que ni siquiera es
-   * texto— cae a `FALLBACK_SCRAPER_NAMESPACE`. Esa garantia es el motivo de
-   * ser del fallback: un extractor sin dependencias declaradas deja a la regla 7
-   * del validador de topologia sin nada que comprobar, y el nodo podria
-   * colocarse en cualquier punto del grafo —detras de un TRIGGER_CRON, por
-   * ejemplo— sin que nadie lo objetara.
+   * DEVUELVE VACIO cuando no hay `targetUrl` configurado, y ese cambio es
+   * deliberado. Antes caia a un `FALLBACK_SCRAPER_NAMESPACE = 'parsed_email'`
+   * para que un extractor sin dependencias declaradas no pudiera colocarse en
+   * cualquier punto del grafo. El fallback no era una lectura de la
+   * configuracion, era una SUPOSICION, y su propio TSDoc reconocia el precio:
+   * un nodo sin `targetUrl` quedaba bloqueado con `ERR_MISSING_UPSTREAM_CONTEXT`
+   * nombrando un namespace que su esquema nunca cito, un diagnostico que no
+   * describe el problema real.
    *
-   * EL PRECIO, y conviene que este escrito: el fallback NO es una lectura de la
-   * configuracion, es una suposicion. Un nodo heredado cuyo `targetUrl` literal
-   * apuntase a un portal fijo quedara bloqueado con
-   * `ERR_MISSING_UPSTREAM_CONTEXT` nombrando `parsed_email`, un namespace que
-   * esa configuracion nunca cito; el operador leera un diagnostico que no
-   * describe su problema real, que es que ese `targetUrl` ya no es admisible
-   * (ver el `@Matches` de `WebScraperConfigDto`). Se asume a cambio de que la
-   * garantia de arriba no tenga excepciones.
-   *
-   * El fallback se dispara por EXTRACCION VACIA y no por "no casa el patron
-   * anclado", que son cosas distintas: una plantilla compuesta como
-   * `{{llm_response.base}}/{{llm_response.slug}}` no casa el patron y sin
-   * embargo declara perfectamente de quien depende. Sustituir esto por un
-   * `INTERPOLATION_ONLY_PATTERN.test(...)` le asignaria `parsed_email` y romperia
-   * el caso 5.5 de su spec, que existe para impedir esa "simplificacion".
+   * Esa garantia la sostiene ahora `requiredUpstreamFieldTypes` a traves de la
+   * regla 8, que comprueba lo que de verdad importa —que haya de donde sacar
+   * una URL— en vez de adivinar de cual. Con un `targetUrl` presente el
+   * comportamiento no cambia: el `@Matches` del DTO ya garantiza que sea una
+   * interpolacion, asi que la extraccion nunca sale vacia.
    */
   public getRequiredNamespaces(
     params: Record<string, unknown>,
   ): readonly string[] {
-    const roots =
-      typeof params.targetUrl === 'string'
-        ? extractNamespaceRoots(params.targetUrl)
-        : [];
+    return typeof params.targetUrl === 'string'
+      ? extractNamespaceRoots(params.targetUrl)
+      : [];
+  }
 
-    return roots.length > 0 ? roots : [FALLBACK_SCRAPER_NAMESPACE];
+  /**
+   * `targetUrl` es lo unico que falta para poder ejecutar el nodo.
+   *
+   * Los tres numericos tienen defecto en el DTO; este no puede tenerlo, porque
+   * el origen depende del flujo concreto. Lo consulta `assertActivatable`: un
+   * flujo se GUARDA a medias —es un borrador— pero no se ACTIVA sin origen.
+   */
+  public getIncompleteParams(
+    params: Record<string, unknown>,
+  ): readonly string[] {
+    const targetUrl = params.targetUrl;
+
+    return typeof targetUrl === 'string' && targetUrl.trim().length > 0
+      ? []
+      : ['targetUrl'];
   }
 
   /**
@@ -232,7 +273,26 @@ export class WebScraperStrategy implements INodeStrategy {
       };
     }
 
-    return { config: resolveWebScraperConfig(dto) };
+    const config = resolveWebScraperConfig(dto);
+
+    // El DTO admite la ausencia de `targetUrl` para que una plantilla de flujo
+    // pueda declarar este nodo sin operativa. Ejecutarlo asi no tiene sentido, y
+    // el fallo se nombra AQUI en vez de dejar que `new URL('')` reviente mas
+    // abajo como ERR_SCRAPER_URL_MALFORMED, que mandaria a revisar un formato
+    // cuando lo que pasa es que nadie eligio el origen.
+    if (config.targetUrl.length === 0) {
+      return {
+        failure: {
+          level: 'GRAVE',
+          code: ERR_SCRAPER_CONFIG,
+          message:
+            'El nodo extractor web no tiene "targetUrl" configurado: elige el origen del enlace en el asistente antes de activar el flujo.',
+          missingFields: ['targetUrl'],
+        },
+      };
+    }
+
+    return { config };
   }
 
   /**

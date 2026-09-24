@@ -1,3 +1,5 @@
+import { BadRequestException } from '@nestjs/common';
+
 import type { SchemaIssueDto } from '@core/fsm/dto/validate-schema-response.dto';
 import type { SchemaIssue } from '@core/fsm/validators/pipeline-topology.validator';
 
@@ -65,4 +67,47 @@ export const toIssueContract = (body: unknown): SchemaIssueDto[] => {
       message,
     }));
   });
+};
+
+/**
+ * Traduce un fallo del validador a la excepcion que el cliente debe recibir.
+ *
+ * EL PORQUE DE QUE EXISTA: `PipelineValidatorService` lanza sus issues en la
+ * forma INTERNA `{ field, code, constraints }`, y hasta ahora solo
+ * `FsmController` los traducia. El alta y la edicion de flujos y de plantillas
+ * llaman al mismo validador a traves de sus servicios, y como el backend no
+ * tiene ningun `ExceptionFilter`, esa forma interna viajaba tal cual al cliente.
+ * El editor JSON del frontend lee `issue.path`, que alli no existe: recibia
+ * `undefined` y reventaba al resolver la ruta, dejando la vista de plantillas
+ * inservible en vez de senalar el campo culpable.
+ *
+ * Se traduce en el CONTROLADOR y no en el servicio a proposito, manteniendo la
+ * decision que ya documentaba `FsmController`: el validador lo comparten cuatro
+ * llamadores y cambiar su contrato lo cambiaria para todos a la vez.
+ *
+ * DEVUELVE la excepcion en vez de lanzarla, y el llamador escribe
+ * `throw toIssueContractException(error)`. Una funcion que lanzara por dentro
+ * obligaria a TypeScript a deducir que el `catch` no continua, y esa deduccion
+ * no cruza la frontera del modulo: los cinco `catch` que la usan fallarian con
+ * TS2366 por no terminar en un `return`. Con el `throw` a la vista del
+ * compilador el problema no existe, y ademas se lee lo que pasa.
+ *
+ * Lo que no sea un fallo del validador se devuelve INTACTO: un 500, un conflicto
+ * de nombre o un 400 del `ValidationPipe` global sobre el DTO de la peticion no
+ * tienen issues que traducir, y envolverlos les quitaria su `message`, que es lo
+ * unico que esos errores tienen que decir.
+ *
+ * @param error Excepcion capturada alrededor de una llamada al validador.
+ * @returns La excepcion a relanzar: traducida si traia issues, o la original.
+ */
+export const toIssueContractException = (error: unknown): unknown => {
+  if (!(error instanceof BadRequestException)) {
+    return error;
+  }
+
+  const issues = toIssueContract(error.getResponse());
+
+  return issues.length > 0
+    ? new BadRequestException({ success: false, issues })
+    : error;
 };

@@ -3,6 +3,8 @@ import { ApiProperty } from '@nestjs/swagger';
 import { NodeType } from '@core/fsm/types/pipeline-schema.types';
 import { NodeCategory } from '@modules/nodes/enums/node-category.enum';
 
+import type { NodeOutputField } from '@core/fsm/types/node-strategy.types';
+
 /**
  * Entrada del catalogo tal como la ve el frontend (`GET /api/nodos`).
  *
@@ -58,4 +60,13 @@ export class NodeCatalogResponseDto {
     example: true,
   })
   readonly implemented: boolean;
+
+  @ApiProperty({
+    description:
+      'Campos que el nodo deposita en su `outputNamespace`, para componer ' +
+      'selectores de `{{namespace.campo}}`. Arreglo vacio si la estrategia no ' +
+      'los declara, o si el tipo no tiene estrategia',
+    example: [{ name: 'extracted_urls', type: 'url[]' }],
+  })
+  readonly outputFields: readonly NodeOutputField[];
 }

@@ -2,6 +2,7 @@ import { BadRequestException, Injectable } from '@nestjs/common';
 import { plainToInstance } from 'class-transformer';
 import { validate } from 'class-validator';
 
+import { collectNamespaceRoots } from '@core/fsm/context/state-payload.context';
 import {
   PipelineNodeConfigDto,
   PipelineSchemaDto,
@@ -10,6 +11,7 @@ import {
 // `emitDecoratorMetadata` un `import type` se borra al transpilar dejando a Nest
 // sin el token que necesita para resolver la dependencia.
 import { NodeStrategyFactory } from '@core/fsm/factories/node-strategy.factory';
+import { ERR_INCOMPLETE_NODE_PARAMS } from '@core/fsm/types/node-strategy.types';
 import { validatePipelineTopology } from '@core/fsm/validators/pipeline-topology.validator';
 
 import type { INodeStrategy } from '@core/fsm/types/node-strategy.types';
@@ -18,6 +20,20 @@ import type { ValidationError, ValidatorOptions } from 'class-validator';
 
 /** Codigo de error del cuerpo de la excepcion; el frontend conmuta sobre el. */
 const SCHEMA_ERROR_CODE = 'PIPELINE_SCHEMA_INVALIDO';
+
+/**
+ * Hasta donde llega la validacion.
+ *
+ * Por defecto se valida para GUARDAR: forma, tipos y grafo. Una plantilla de
+ * flujo o un borrador a medio configurar deben poder persistirse, porque el
+ * valor concreto de muchos `params` se elige despues, en el asistente.
+ *
+ * `requireRunnableParams` sube el liston a EJECUTABLE y solo lo pide
+ * `assertActivatable`. Es la asimetria deliberada entre guardar y activar.
+ */
+export interface ValidateSchemaOptions {
+  readonly requireRunnableParams?: boolean;
+}
 
 /**
  * `forbidNonWhitelisted` convierte cualquier propiedad no declarada en un error
@@ -70,10 +86,15 @@ export class PipelineValidatorService {
    * Convierte un JSON arbitrario en un `PipelineSchemaDto` validado.
    *
    * @param rawJson Payload sin tipar, tal y como llega del cliente o de la BD.
+   * @param options `requireRunnableParams` exige ademas que ningun nodo tenga
+   *                params a medias. Ver `ValidateSchemaOptions`.
    * @returns La instancia validada del esquema.
    * @throws BadRequestException Con la lista exacta de campos invalidos.
    */
-  public async validateSchema(rawJson: unknown): Promise<PipelineSchemaDto> {
+  public async validateSchema(
+    rawJson: unknown,
+    options: ValidateSchemaOptions = {},
+  ): Promise<PipelineSchemaDto> {
     if (!isPlainObject(rawJson)) {
       this.rejectWith([
         {
@@ -97,10 +118,19 @@ export class PipelineValidatorService {
     // La topologia presupone forma y tipos correctos (ver el TSDoc del validador).
     if (issues.length === 0) {
       issues.push(
-        ...validatePipelineTopology(schema, (node) =>
-          this.resolveNodeDependencies(node),
-        ),
+        ...validatePipelineTopology(schema, {
+          dependencies: (node) => this.resolveNodeDependencies(node),
+          outputFields: (node) =>
+            this.tryGetStrategy(node.nodeType)?.outputFields ?? [],
+          requiredFieldTypes: (node) =>
+            this.tryGetStrategy(node.nodeType)?.requiredUpstreamFieldTypes ??
+            [],
+        }),
       );
+    }
+
+    if (options.requireRunnableParams === true) {
+      issues.push(...this.collectIncompleteParams(schema));
     }
 
     if (issues.length > 0) {
@@ -111,22 +141,82 @@ export class PipelineValidatorService {
   }
 
   /**
-   * Namespaces que un nodo declara necesitar, preguntando a su estrategia.
+   * Nodos cuyos `params` estan a medias para EJECUTARSE.
    *
-   * Un tipo sin estrategia registrada devuelve un arreglo vacio en vez de
-   * propagar la excepcion de la factoria: que el nodo no sea ejecutable es un
-   * problema distinto y lo reporta el motor con `ERR_STRATEGY_NOT_FOUND`;
-   * convertirlo aqui en un fallo de dependencias daria un diagnostico que manda
-   * al operador a reordenar un flujo cuyo orden esta bien.
+   * Separado de la validacion normal porque guardar y activar son dos
+   * exigencias distintas. Una plantilla de flujo declara topologia y deja los
+   * `params` vacios a proposito —el valor concreto se elige al instanciar—, asi
+   * que exigir aqui la completitud haria inexpresable cualquier nodo que la
+   * necesite. Se pide solo desde `assertActivatable`, que es el unico punto por
+   * el que un flujo pasa a poder dispararse.
+   *
+   * Se recorre el mapa ENTERO y no solo el camino activo: activar un flujo con
+   * una rama de error a medio configurar es exactamente el fallo que se
+   * descubriria de madrugada, cuando esa rama se use por primera vez.
+   */
+  private collectIncompleteParams(schema: PipelineSchemaDto): SchemaIssue[] {
+    if (!isPlainObject(schema.nodes)) {
+      return [];
+    }
+
+    return Object.entries(schema.nodes).flatMap(([key, node]) => {
+      const missing =
+        this.tryGetStrategy(node.nodeType)?.getIncompleteParams?.(
+          node.params,
+        ) ?? [];
+
+      if (missing.length === 0) {
+        return [];
+      }
+
+      return [
+        {
+          field: `nodes.${key}.params`,
+          code: ERR_INCOMPLETE_NODE_PARAMS,
+          constraints: [
+            `Faltan por configurar [${missing.join(', ')}]. El flujo se puede guardar asi, pero no activar: completalo en el asistente.`,
+          ],
+        },
+      ];
+    });
+  }
+
+  /**
+   * Namespaces que un nodo necesita: los que DECLARA y los que se le LEEN.
+   *
+   * Dos fuentes que se suman, y ninguna sobra:
+   *
+   * 1. `getRequiredNamespaces` es la fuente autorizada cuando existe, porque la
+   *    estrategia sabe cosas que el texto de `params` no dice. El parser depende
+   *    de `raw_email` aunque su `sourceNamespace` no aparezca escrito por
+   *    ninguna parte, al ser el valor por defecto, y el extractor web impone su
+   *    `FALLBACK_SCRAPER_NAMESPACE` cuando la plantilla no nombra a nadie.
+   * 2. El barrido por interpolacion cubre a TODOS los demas. El metodo es
+   *    opcional y hoy solo lo implementan dos de los ocho tipos: sin este
+   *    segundo canal, un MAPEADOR_PLANTILLA —que deliberadamente no lo
+   *    implementa— o un tipo aun sin estrategia podia interpolar
+   *    `{{scraped_web.url}}` en cualquier clave de sus `params` y guardarse sin
+   *    que nadie comprobara que ese namespace llega a existir.
+   *
+   * Un tipo sin estrategia registrada no propaga la excepcion de la factoria:
+   * que el nodo no sea ejecutable es un problema distinto y lo reporta el motor
+   * con `ERR_STRATEGY_NOT_FOUND`; convertirlo aqui en un fallo de dependencias
+   * daria un diagnostico que manda al operador a reordenar un flujo cuyo orden
+   * esta bien. Sus `params` si se barren, porque el texto se lee igual.
+   *
+   * La union se deduplica: las dos fuentes coinciden a menudo —el extractor web
+   * deriva la suya justamente de `targetUrl`— y un namespace repetido saldria
+   * dos veces en el mensaje de la regla 7.
    */
   private resolveNodeDependencies(
     node: PipelineNodeConfigDto,
   ): readonly string[] {
-    return (
+    const declared =
       this.tryGetStrategy(node.nodeType)?.getRequiredNamespaces?.(
         node.params,
-      ) ?? []
-    );
+      ) ?? [];
+
+    return [...new Set([...declared, ...collectNamespaceRoots(node.params)])];
   }
 
   /**

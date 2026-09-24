@@ -6,6 +6,8 @@ import { useWebScraperStore } from '@stores/nodes/web-scraper.store';
 
 import { NodeType } from '@/types/pipeline';
 
+import type { NodeOutputField } from '@/types/node-catalog';
+
 /**
  * Un nodo del `pipeline_schema` tal y como llega del backend, para hidratarlo.
  *
@@ -17,6 +19,35 @@ import { NodeType } from '@/types/pipeline';
 export interface HydratableNode {
   readonly outputNamespace: string;
   readonly params: Record<string, unknown>;
+}
+
+/**
+ * Un namespace disponible aguas arriba, con el inventario de lo que publica.
+ *
+ * Los `fields` salen del catalogo de nodos del backend, que los declara la
+ * estrategia que construye el payload. Vienen vacios cuando el tipo de nodo no
+ * los declara o cuando el catalogo aun no ha cargado: quien los consuma debe
+ * tratar el vacio como "no hay nada que ofrecer todavia", nunca como un error.
+ */
+export interface UpstreamNamespace {
+  readonly namespace: string;
+  /**
+   * Tipo del nodo que escribe este namespace.
+   *
+   * El namespace dice DONDE esta el valor; el `nodeType` dice QUIEN lo produjo,
+   * y es con lo unico que se puede etiquetar el grupo de un desplegable de forma
+   * que el operador reconozca el paso del que habla. Va aqui y no se deduce del
+   * namespace en cada consumidor porque la relacion namespace -> tipo es una
+   * CONVENCION (`DEFAULT_OUTPUT_NAMESPACE_BY_NODE_TYPE`) y no una regla: un
+   * esquema puede declarar otro `outputNamespace`, e invertir el mapa donde se
+   * consume lo daria por bueno igualmente.
+   *
+   * OPCIONAL porque no todo namespace lo escribe un nodo: `_assets` lo inyecta
+   * el backend en cada render, y el banco de pruebas lo simula. Quien etiquete
+   * con el debe tolerar su ausencia.
+   */
+  readonly nodeType?: NodeType;
+  readonly fields: readonly NodeOutputField[];
 }
 
 /**
@@ -53,6 +84,24 @@ export interface NodeConfigStore {
    * existencia antes de llamarlo.
    */
   readonly setAvailableUpstreamNamespaces?: (namespaces: string[]) => void;
+
+  /**
+   * Declara los namespaces anteriores CON los campos que publica cada uno.
+   *
+   * Hermano del anterior y NO su sustituto. Los dos conviven porque responden a
+   * preguntas distintas: el mapeador solo necesita saber si un namespace existe
+   * —sus variables requeridas se las da el backend con la plantilla—, mientras
+   * que el extractor web tiene que COMPONER las opciones de un selector cerrado
+   * y para eso no le basta el nombre, necesita el inventario de campos.
+   *
+   * Sustituir aquel por este obligaria al mapeador a desempaquetar una
+   * estructura de la que ignora la mitad, y a los disparadores a recibir un
+   * contexto que no usan. Se anade en vez de reemplazar.
+   *
+   * OPCIONAL por el mismo motivo: el anfitrion comprueba su existencia antes de
+   * llamarlo, y un nodo que no componga interpolaciones no lo implementa.
+   */
+  readonly setAvailableUpstreamContext?: (context: UpstreamNamespace[]) => void;
 
   /**
    * Devuelve el nodo a su configuracion inicial.

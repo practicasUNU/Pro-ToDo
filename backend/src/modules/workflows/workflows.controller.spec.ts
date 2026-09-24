@@ -356,6 +356,89 @@ describe('WorkflowsController (POST /workflows/:id/execute-test)', () => {
     });
   });
 
+  describe('3quater. Traduccion de los issues del validador de esquemas', () => {
+    /**
+     * Cuerpo TAL CUAL lo lanza `PipelineValidatorService.rejectWith`.
+     *
+     * Forma INTERNA —`field` y `constraints`—, que es justo la que hasta ahora
+     * se escapaba al cliente por esta ruta: el editor JSON del frontend lee
+     * `issue.path`, recibia `undefined` y reventaba al resolver la ruta.
+     */
+    const validatorRejection = (): BadRequestException =>
+      new BadRequestException({
+        statusCode: 400,
+        error: 'PIPELINE_SCHEMA_INVALIDO',
+        message: 'El esquema del pipeline no supera la validacion.',
+        issues: [
+          {
+            field: 'nodes.nodo_extractor.params',
+            code: 'ERR_MISSING_UPSTREAM_CONTEXT',
+            constraints: ['El nodo necesita los namespaces [parsed_email].'],
+          },
+        ],
+      });
+
+    it('3quater.1 deberia devolver los issues con path y message, nunca field ni constraints', async () => {
+      // 1. Arrange
+      workflowsServiceMock.updateWorkflow.mockRejectedValue(
+        validatorRejection(),
+      );
+
+      // 2. Act
+      const response = await request(httpServer())
+        .patch(`/workflows/${WORKFLOW_ID}`)
+        .send({ pipelineSchema: WORKFLOW_DETAIL.pipelineSchema });
+
+      // 3. Assert: es el contrato que `locateJsonPaths` sabe navegar.
+      expect(response.status).toBe(400);
+      expect(response.body).toEqual({
+        success: false,
+        issues: [
+          {
+            path: 'nodes.nodo_extractor.params',
+            message: 'El nodo necesita los namespaces [parsed_email].',
+          },
+        ],
+      });
+    });
+
+    it('3quater.2 deberia dejar intacto un 400 que no traiga issues', async () => {
+      // 1. Arrange: un conflicto de nombre o un fallo del ValidationPipe global
+      //    no tienen issues que traducir, y envolverlos les quitaria su
+      //    `message`, que es lo unico que esos errores tienen que decir.
+      workflowsServiceMock.updateWorkflow.mockRejectedValue(
+        new BadRequestException('El flujo no tiene configuracion_pipeline'),
+      );
+
+      // 2. Act
+      const response = await request(httpServer())
+        .patch(`/workflows/${WORKFLOW_ID}`)
+        .send({ active: true });
+
+      // 3. Assert
+      const body = response.body as { message?: string; issues?: unknown };
+
+      expect(response.status).toBe(400);
+      expect(body.message).toBe('El flujo no tiene configuracion_pipeline');
+      expect(body).not.toHaveProperty('issues');
+    });
+
+    it('3quater.3 no deberia tocar una excepcion que no sea un 400', async () => {
+      // 1. Arrange
+      workflowsServiceMock.updateWorkflow.mockRejectedValue(
+        new NotFoundException('flujo inexistente'),
+      );
+
+      // 2. Act
+      const response = await request(httpServer())
+        .patch(`/workflows/${WORKFLOW_ID}`)
+        .send({ active: true });
+
+      // 3. Assert
+      expect(response.status).toBe(404);
+    });
+  });
+
   describe('4. Autorizacion (PROT-04.2)', () => {
     it('4.1 deberia responder 403 si no se pudo determinar la identidad', async () => {
       // 1. Arrange: el RolesGuard va REAL, asi que sin `req.user` deniega.

@@ -9,6 +9,7 @@ import { NodeStrategyFactory } from '@core/fsm/factories/node-strategy.factory';
 import { NodeCatalogResponseDto } from '@modules/nodes/dto/node-catalog-response.dto';
 import { NodeCatalogEntry } from '@modules/nodes/entities/node-catalog.entity';
 
+import type { NodeOutputField } from '@core/fsm/types/node-strategy.types';
 import type { NodeType } from '@core/fsm/types/pipeline-schema.types';
 
 /**
@@ -69,6 +70,29 @@ export class NodeCatalogService {
       // tiene filas que el enum no declara; el `has` sobre un valor ajeno al
       // conjunto simplemente devuelve false, que es exactamente lo que se quiere.
       implemented: registered.has(entry.code as NodeType),
+      outputFields: this.resolveOutputFields(entry.code),
     };
+  }
+
+  /**
+   * Campos de salida que declara la estrategia del tipo, o vacio si no hay.
+   *
+   * Se pide a la factoria EN CADA PETICION, por el mismo motivo que
+   * `getRegisteredNodeTypes` en `findAll`: las estrategias se registran en el
+   * `onModuleInit` de `NodesModule`, despues de que este provider se construya.
+   *
+   * Los dos caminos a vacio —tipo sin estrategia y estrategia que no declara sus
+   * campos— se funden a proposito en el mismo `[]`: para el selector del
+   * asistente son el mismo hecho, que es que no hay nada que ofrecer. El caso
+   * "no tiene estrategia" ya lo distingue `implemented`.
+   */
+  private resolveOutputFields(code: string): readonly NodeOutputField[] {
+    try {
+      return (
+        this.strategyFactory.getStrategy(code as NodeType).outputFields ?? []
+      );
+    } catch {
+      return [];
+    }
   }
 }

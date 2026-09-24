@@ -5,6 +5,7 @@ import { NodeCategory } from '../enums/node-category.enum';
 import { NodeCatalogService } from './node-catalog.service';
 
 import type { NodeStrategyFactory } from '@core/fsm/factories/node-strategy.factory';
+import type { NodeOutputField } from '@core/fsm/types/node-strategy.types';
 import type { Repository } from 'typeorm';
 
 type CatalogRepositoryMock = jest.Mocked<
@@ -39,12 +40,30 @@ const REGISTERED_TYPES: readonly NodeType[] = [
   NodeType.MAPEADOR_PLANTILLA,
 ];
 
-/** Doble de la factoria que solo responde al listado de tipos registrados. */
+/**
+ * Doble de la factoria: listado de tipos registrados y resolucion de estrategia.
+ *
+ * `getStrategy` LANZA para un tipo no registrado, igual que la factoria real:
+ * es esa excepcion la que el servicio engulle para devolver `[]`, y un doble que
+ * devolviera `undefined` no probaria ese camino.
+ */
 const buildFactory = (
   registered: readonly NodeType[] = REGISTERED_TYPES,
+  outputFieldsByType: Partial<
+    Record<NodeType, readonly NodeOutputField[]>
+  > = {},
 ): NodeStrategyFactory =>
   ({
     getRegisteredNodeTypes: jest.fn(() => new Set(registered)),
+    getStrategy: jest.fn((nodeType: NodeType) => {
+      if (!registered.includes(nodeType)) {
+        throw new Error(`Sin estrategia para ${nodeType}`);
+      }
+
+      const outputFields = outputFieldsByType[nodeType];
+
+      return outputFields === undefined ? {} : { outputFields };
+    }),
   }) as unknown as NodeStrategyFactory;
 
 const buildService = (
@@ -162,6 +181,7 @@ describe('NodeCatalogService · lectura del catalogo de tipos de nodo', () => {
       const registered: NodeType[] = [];
       const factory = {
         getRegisteredNodeTypes: jest.fn(() => new Set(registered)),
+        getStrategy: jest.fn(() => ({})),
       } as unknown as NodeStrategyFactory;
       const service = buildService(repository, factory);
 
@@ -198,7 +218,49 @@ describe('NodeCatalogService · lectura del catalogo de tipos de nodo', () => {
         description: null,
         uiSchema: { fields: ['mailbox'] },
         implemented: true,
+        outputFields: [],
       });
+    });
+
+    it('3.2 deberia exponer los campos de salida que declara la estrategia', async () => {
+      // 1. Arrange
+      const fields: readonly NodeOutputField[] = [
+        { name: 'extracted_urls', type: 'url[]' },
+        { name: 'clean_body', type: 'text' },
+      ];
+      const entry = buildEntry({
+        code: NodeType.PARSER_PRE_IA,
+        name: 'Parser pre-IA',
+      });
+      const repository = buildRepository([entry]);
+      const service = buildService(
+        repository,
+        buildFactory(REGISTERED_TYPES, { [NodeType.PARSER_PRE_IA]: fields }),
+      );
+
+      // 2. Act
+      const [result] = await service.findAll();
+
+      // 3. Assert: es el inventario que alimenta el selector de interpolaciones
+      expect(result?.outputFields).toEqual(fields);
+    });
+
+    it('3.3 deberia devolver campos vacios para un tipo sin estrategia registrada', async () => {
+      // 1. Arrange: DESTINO_ACENS esta en el catalogo pero no tiene estrategia
+      const entry = buildEntry({
+        code: 'DESTINO_ACENS',
+        name: 'Destino Acens',
+        category: NodeCategory.DESTINO,
+      });
+      const repository = buildRepository([entry]);
+      const service = buildService(repository);
+
+      // 2. Act
+      const [result] = await service.findAll();
+
+      // 3. Assert: `implemented` es quien distingue este caso, no un campo nulo
+      expect(result?.implemented).toBe(false);
+      expect(result?.outputFields).toEqual([]);
     });
   });
 });

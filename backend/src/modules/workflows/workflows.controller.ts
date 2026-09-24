@@ -25,6 +25,7 @@ import {
 
 import { CurrentUser } from '@common/decorators/current-user.decorator';
 import { Roles } from '@common/decorators/roles.decorator';
+import { toIssueContractException } from '@core/fsm/utils/schema-issue-contract.util';
 import { RolesGuard } from '@common/guards/roles.guard';
 import { JwtAuthGuard } from '@modules/auth/guards/jwt-auth.guard';
 import { UserRole } from '@modules/users/enums/user-role.enum';
@@ -145,10 +146,16 @@ export class WorkflowsController {
     @Body() createWorkflowDto: CreateWorkflowDto,
     @CurrentUser() currentUser: AuthenticatedUser,
   ): Promise<PipelineSummaryResponseDto> {
-    return this.workflowsService.createWorkflow(
-      createWorkflowDto,
-      currentUser.id,
-    );
+    try {
+      // `await` dentro del `try`, y no un `return` de la promesa: sin el, el
+      // rechazo escapa de este bloque y los issues volverian a salir crudos.
+      return await this.workflowsService.createWorkflow(
+        createWorkflowDto,
+        currentUser.id,
+      );
+    } catch (error: unknown) {
+      throw toIssueContractException(error);
+    }
   }
 
   /**
@@ -178,7 +185,11 @@ export class WorkflowsController {
     @Param('id', ParseUUIDPipe) id: string,
     @Body() updateWorkflowDto: UpdateWorkflowDto,
   ): Promise<PipelineSummaryResponseDto> {
-    return this.workflowsService.updateWorkflow(id, updateWorkflowDto);
+    try {
+      return await this.workflowsService.updateWorkflow(id, updateWorkflowDto);
+    } catch (error: unknown) {
+      throw toIssueContractException(error);
+    }
   }
 
   /**
@@ -218,6 +229,13 @@ export class WorkflowsController {
     @Param('id', ParseUUIDPipe) id: string,
     @Body() executeTestWorkflowDto: ExecuteTestWorkflowDto,
   ): Promise<WorkflowExecutionResponseDto> {
-    return this.workflowsService.executeTest(id, executeTestWorkflowDto);
+    try {
+      return await this.workflowsService.executeTest(
+        id,
+        executeTestWorkflowDto,
+      );
+    } catch (error: unknown) {
+      throw toIssueContractException(error);
+    }
   }
 }

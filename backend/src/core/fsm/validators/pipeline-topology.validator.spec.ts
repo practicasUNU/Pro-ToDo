@@ -3,7 +3,14 @@ import { NodeType } from '@core/fsm/types/pipeline-schema.types';
 import { validatePipelineTopology } from './pipeline-topology.validator';
 
 import type { PipelineSchemaDto } from '@core/fsm/dto/pipeline-schema.dto';
-import type { SchemaIssue } from './pipeline-topology.validator';
+import type {
+  PipelineTopologyResolvers,
+  SchemaIssue,
+} from './pipeline-topology.validator';
+import type {
+  NodeOutputField,
+  NodeOutputFieldType,
+} from '@core/fsm/types/node-strategy.types';
 
 /**
  * Prueba DIRECTA de la funcion pura, complementaria a la de
@@ -231,16 +238,22 @@ describe('validatePipelineTopology', () => {
 
   describe('7. Namespaces requeridos aguas arriba', () => {
     /**
-     * Resolvedor de dependencias doblado.
+     * Resolvedores doblados, con solo el de dependencias poblado.
      *
-     * El validador lo recibe como PARAMETRO y no lo importa, que es lo que le
-     * permite seguir siendo una funcion pura. Aqui eso se cobra: un doble de dos
-     * lineas basta, sin factoria de estrategias ni contenedor de Nest.
+     * El validador los recibe como PARAMETRO y no los importa, que es lo que le
+     * permite seguir siendo una funcion pura. Aqui eso se cobra barato: un doble
+     * de dos lineas, sin factoria de estrategias ni contenedor de Nest.
+     *
+     * Devuelve el objeto ENTERO y no la lambda suelta para que `outputFields` y
+     * `requiredFieldTypes` queden sin poblar: este bloque examina la regla 7, y
+     * dejar activa tambien la 8 mezclaria dos reglas en los mismos issues.
      */
-    const requiring =
-      (byType: Partial<Record<NodeType, readonly string[]>>) =>
-      (node: { nodeType: NodeType }): readonly string[] =>
-        byType[node.nodeType] ?? [];
+    const requiring = (
+      byType: Partial<Record<NodeType, readonly string[]>>,
+    ): PipelineTopologyResolvers => ({
+      dependencies: (node: { nodeType: NodeType }): readonly string[] =>
+        byType[node.nodeType] ?? [],
+    });
 
     it('7.1 no deberia aplicarse si no se pasa el resolvedor', () => {
       // 1. Arrange: el parametro es opcional, y omitirlo desactiva la regla.
@@ -389,6 +402,175 @@ describe('validatePipelineTopology', () => {
       //    sobre un valor que nadie documento.
       expect(issues).toHaveLength(1);
       expect(issues[0].code).toBeUndefined();
+    });
+  });
+
+  describe('8. Tipos de campo requeridos aguas arriba', () => {
+    /**
+     * Resolvedores de la regla 8, con el de dependencias SIN poblar.
+     *
+     * Espejo de `requiring`: cada bloque activa solo su regla para que los
+     * issues que se aseveran sean inequivocamente suyos.
+     *
+     * @param publishing Campos que publica cada tipo de nodo.
+     * @param needing Tipos de campo que cada tipo de nodo exige aguas arriba.
+     */
+    const withFields = (
+      publishing: Partial<Record<NodeType, readonly NodeOutputField[]>>,
+      needing: Partial<Record<NodeType, readonly NodeOutputFieldType[]>>,
+    ): PipelineTopologyResolvers => ({
+      outputFields: (node: { nodeType: NodeType }) =>
+        publishing[node.nodeType] ?? [],
+      requiredFieldTypes: (node: { nodeType: NodeType }) =>
+        needing[node.nodeType] ?? [],
+    });
+
+    /** El parser publicando su arreglo de enlaces, que es el caso real. */
+    const PARSER_PUBLISHES_URLS = {
+      [NodeType.PARSER_PRE_IA]: [
+        { name: 'extracted_urls', type: 'url[]' },
+      ] as readonly NodeOutputField[],
+    };
+
+    /** El extractor exigiendo poder apuntar a una URL, que es el caso real. */
+    const SCRAPER_NEEDS_URL = {
+      [NodeType.EXTRACTOR_WEB]: [
+        'url',
+        'url[]',
+      ] as readonly NodeOutputFieldType[],
+    };
+
+    it('8.1 no deberia aplicarse si faltan los resolvedores', () => {
+      // 1. Arrange: hacen falta LOS DOS; con uno solo la regla no puede
+      //    decidir nada y debe callarse en vez de suponer.
+      const schema = buildSchema();
+      schema.entrypoint = 'nodo_extractor';
+      schema.nodes.nodo_extractor.nextStep = null;
+
+      // 2. Act
+      const issues = validatePipelineTopology(schema, {
+        requiredFieldTypes: () => ['url'],
+      });
+
+      // 3. Assert
+      expect(issues).toEqual([]);
+    });
+
+    it('8.2 deberia rechazar un extractor sin ninguna fuente de URL por delante', () => {
+      // 1. Arrange: TRIGGER_IMAP -> EXTRACTOR_WEB. El disparador publica
+      //    `raw_email`, pero ninguno de sus campos es una direccion.
+      const schema = buildSchema();
+      schema.nodes.nodo_trigger.nextStep = 'nodo_extractor';
+
+      // 2. Act
+      const issues = validatePipelineTopology(
+        schema,
+        withFields(PARSER_PUBLISHES_URLS, SCRAPER_NEEDS_URL),
+      );
+
+      // 3. Assert: es el diagnostico que sustituye a los tres constraints del
+      //    DTO, y dice lo que de verdad pasa.
+      expect(fieldsOf(issues)).toContain('nodes.nodo_extractor.params');
+      expect(issues[0].code).toBe('ERR_MISSING_UPSTREAM_FIELD_TYPE');
+      expect(issues[0].constraints[0]).toContain('url');
+    });
+
+    it('8.3 deberia aceptar el flujo cuando un paso anterior publica una URL', () => {
+      // 1. Arrange & 2. Act: PARSER_PRE_IA -> EXTRACTOR_WEB, el orden correcto.
+      const issues = validatePipelineTopology(
+        buildSchema(),
+        withFields(PARSER_PUBLISHES_URLS, SCRAPER_NEEDS_URL),
+      );
+
+      // 3. Assert
+      expect(issues).toEqual([]);
+    });
+
+    it('8.4 deberia aceptarlo aunque el nodo no tenga targetUrl elegido', () => {
+      // 1. Arrange: `params: {}` es exactamente lo que trae una PLANTILLA de
+      //    flujo, que declara topologia y elige la operativa despues.
+      const schema = buildSchema();
+      schema.nodes.nodo_extractor.params = {};
+
+      // 2. Act
+      const issues = validatePipelineTopology(
+        schema,
+        withFields(PARSER_PUBLISHES_URLS, SCRAPER_NEEDS_URL),
+      );
+
+      // 3. Assert: la regla comprueba que el flujo PODRIA configurarse, no que
+      //    lo este. De la completitud responde `getIncompleteParams`, al activar.
+      expect(issues).toEqual([]);
+    });
+
+    it('8.5 no deberia dar por buena la salida del propio nodo', () => {
+      // 1. Arrange: un extractor que publicara URLs no puede satisfacerse a si
+      //    mismo. Su salida se acumula DESPUES de comprobarlo.
+      const schema = buildSchema();
+      schema.nodes.nodo_trigger.nextStep = 'nodo_extractor';
+
+      // 2. Act
+      const issues = validatePipelineTopology(
+        schema,
+        withFields(
+          {
+            [NodeType.EXTRACTOR_WEB]: [{ name: 'source_url', type: 'url' }],
+          },
+          SCRAPER_NEEDS_URL,
+        ),
+      );
+
+      // 3. Assert
+      expect(fieldsOf(issues)).toContain('nodes.nodo_extractor.params');
+    });
+
+    it('8.6 deberia bastar con que UNO de los tipos exigidos exista', () => {
+      // 1. Arrange: el extractor admite `url` o `url[]`; el parser solo publica
+      //    el escalar.
+      const schema = buildSchema();
+
+      // 2. Act
+      const issues = validatePipelineTopology(
+        schema,
+        withFields(
+          {
+            [NodeType.PARSER_PRE_IA]: [{ name: 'source_url', type: 'url' }],
+          },
+          SCRAPER_NEEDS_URL,
+        ),
+      );
+
+      // 3. Assert
+      expect(issues).toEqual([]);
+    });
+
+    it('8.7 no deberia exigir nada a un nodo que no declara necesitarlo', () => {
+      // 1. Arrange & 2. Act: la mayoria de los nodos consume el contexto entero
+      //    y no depende de ningun campo en particular.
+      const issues = validatePipelineTopology(
+        buildSchema(),
+        withFields({}, {}),
+      );
+
+      // 3. Assert
+      expect(issues).toEqual([]);
+    });
+
+    it('8.8 no deberia juzgar un nodo alcanzable solo por onErrorStep', () => {
+      // 1. Arrange: mismo criterio que la regla 7. Sus predecesores dependen de
+      //    por donde se entre, y afirmar algo aqui seria adivinar.
+      const schema = buildSchema();
+      schema.nodes.nodo_trigger.nextStep = null;
+      schema.nodes.nodo_trigger.onErrorStep = 'nodo_extractor';
+
+      // 2. Act
+      const issues = validatePipelineTopology(
+        schema,
+        withFields(PARSER_PUBLISHES_URLS, SCRAPER_NEEDS_URL),
+      );
+
+      // 3. Assert
+      expect(issues).toEqual([]);
     });
   });
 });

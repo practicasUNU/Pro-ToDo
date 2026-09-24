@@ -12,7 +12,6 @@ import {
   MIN_SCRAPER_TIMEOUT_MS,
   RETRY_DELAY_RULE,
   TIMEOUT_RULE,
-  URL_SOURCE_NAMESPACE,
   useWebScraperStore,
 } from '@stores/nodes/web-scraper.store';
 
@@ -31,9 +30,13 @@ const store = useWebScraperStore(props.nodeId);
 const MIN_ARTICLE_LENGTH = 200;
 
 const TARGET_URL_HINT =
-  'Se elige una POSICION del arreglo de enlaces, no una direccion concreta: el flujo se ejecutara sobre correos distintos cada dia.';
+  'Se elige una REFERENCIA al contexto, no una direccion concreta: el flujo se ejecutara sobre correos distintos cada dia. La lista la componen los campos de tipo URL que publican los pasos anteriores.';
 
-const MISSING_SOURCE_WARNING = `Ningun nodo anterior escribe en "${URL_SOURCE_NAMESPACE}". Sin un PARSER_PRE_IA por delante, el enlace elegido no existira en el contexto y el nodo fallara en la primera ejecucion.`;
+const MISSING_SOURCE_WARNING =
+  'Ningun paso anterior de este flujo publica un campo del que pueda salir una URL. Coloca por delante un nodo que la produzca —un PARSER_PRE_IA extrae los enlaces del correo— o reordena el flujo; mientras tanto no hay nada que este nodo pueda extraer.';
+
+const DISABLED_SELECT_HINT =
+  'Sin origenes disponibles aguas arriba. El selector se habilita en cuanto un paso anterior publique un campo de tipo URL.';
 
 const RETRY_TOOLTIP =
   'Reintento rapido de red: cubre el corte puntual de conexion. Es independiente del "retryPolicy" del flujo, y las dos capas se multiplican.';
@@ -119,7 +122,7 @@ const onRunSandboxTest = async (): Promise<void> => {
       />
     </div>
 
-    <!-- Aviso de topologia: el namespace de origen no existe en este flujo -->
+    <!-- Aviso de topologia: ningun paso anterior publica un campo de tipo URL -->
     <div
       v-if="!store.hasUrlSource"
       class="pd-warn-banner q-pa-md q-mb-md row items-start no-wrap q-gutter-sm"
@@ -142,7 +145,8 @@ const onRunSandboxTest = async (): Promise<void> => {
       data-test="target-url-select"
       :model-value="store.config.targetUrl"
       :options="store.urlOptions"
-      :hint="TARGET_URL_HINT"
+      :disable="!store.hasUrlSource"
+      :hint="store.hasUrlSource ? TARGET_URL_HINT : DISABLED_SELECT_HINT"
       class="q-mb-md"
       @update:model-value="onTargetUrlChange"
     >

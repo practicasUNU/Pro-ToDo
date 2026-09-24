@@ -58,9 +58,7 @@ describe('locateJsonPaths · rutas del validador sobre el documento JSON', () =>
 
     it('1.2 deberia descender hasta una clave anidada en un nodo', () => {
       // 2. Act
-      const [range] = locateJsonPaths(DOC, [
-        issue('nodes.trigger_imap.params.mailbox'),
-      ]);
+      const [range] = locateJsonPaths(DOC, [issue('nodes.trigger_imap.params.mailbox')]);
 
       // 3. Assert
       expect(range).toBeDefined();
@@ -69,9 +67,7 @@ describe('locateJsonPaths · rutas del validador sobre el documento JSON', () =>
 
     it('1.3 deberia distinguir dos claves homonimas en ramas distintas', () => {
       // 1. Arrange: `templateId` solo existe dentro del segundo nodo.
-      const [range] = locateJsonPaths(DOC, [
-        issue('nodes.mapeador.params.templateId'),
-      ]);
+      const [range] = locateJsonPaths(DOC, [issue('nodes.mapeador.params.templateId')]);
 
       // 3. Assert: si el descenso no acotara el ambito al nodo `mapeador`, el
       // primer `params` del documento capturaria la busqueda y el subrayado
@@ -94,9 +90,7 @@ describe('locateJsonPaths · rutas del validador sobre el documento JSON', () =>
   describe('2. Rutas irresolubles', () => {
     it('2.1 deberia descartar una ruta cuyo ultimo segmento no existe', () => {
       // 2. Act
-      const ranges = locateJsonPaths(DOC, [
-        issue('nodes.trigger_imap.params.inexistente'),
-      ]);
+      const ranges = locateJsonPaths(DOC, [issue('nodes.trigger_imap.params.inexistente')]);
 
       // 3. Assert: senalar el ultimo tramo que si se encontro (`params`) seria
       // subrayar la clave equivocada, que es peor que no subrayar nada.
@@ -114,9 +108,7 @@ describe('locateJsonPaths · rutas del validador sobre el documento JSON', () =>
     it('2.3 NO deberia buscar fuera del ambito del padre', () => {
       // 1. Arrange: `templateId` existe en el documento, pero NO dentro de
       // `trigger_imap`.
-      const ranges = locateJsonPaths(DOC, [
-        issue('nodes.trigger_imap.params.templateId'),
-      ]);
+      const ranges = locateJsonPaths(DOC, [issue('nodes.trigger_imap.params.templateId')]);
 
       // 3. Assert: es la garantia que convierte el localizador en fiable. Sin el
       // corte por ambito, esta ruta resolveria al `templateId` del otro nodo.
@@ -176,9 +168,7 @@ describe('locateJsonPaths · rutas del validador sobre el documento JSON', () =>
       );
 
       // 2. Act
-      const [range] = locateJsonPaths(doc, [
-        issue('nodes.trigger_imap.params.mailbox'),
-      ]);
+      const [range] = locateJsonPaths(doc, [issue('nodes.trigger_imap.params.mailbox')]);
 
       // 3. Assert: si el recuento de llaves no ignorara las que van dentro de
       // una cadena, el ambito del primer nodo se cerraria antes de tiempo y la
@@ -189,6 +179,59 @@ describe('locateJsonPaths · rutas del validador sobre el documento JSON', () =>
 
     it('4.2 deberia tolerar un documento vacio sin lanzar', () => {
       expect(locateJsonPaths('', [issue('version')])).toEqual([]);
+    });
+  });
+
+  describe('5. Issues mal formados', () => {
+    /**
+     * El tipo dice `path: string`, pero el dato sale del cuerpo de un 400 y
+     * `extractApiIssues` solo comprueba que `issues` sea un arreglo, no la forma
+     * de cada elemento. El casteo reproduce lo que de verdad llegaba cuando un
+     * endpoint devolvia los issues en la forma interna del validador (`field`).
+     */
+    const malformed = (value: unknown): SchemaIssue => value as SchemaIssue;
+
+    it('5.1 no deberia lanzar ante un issue sin path', () => {
+      // 1. Arrange: la forma interna del validador, la que tiraba la vista.
+      const issues = [
+        malformed({
+          field: 'nodes.trigger_imap.params',
+          constraints: ['El nodo necesita [parsed_email].'],
+        }),
+      ];
+
+      // 2. Act & 3. Assert: se descarta en vez de reventar en `path.split`
+      expect(() => locateJsonPaths(DOC, issues)).not.toThrow();
+      expect(locateJsonPaths(DOC, issues)).toEqual([]);
+    });
+
+    it('5.2 deberia descartar un path vacio', () => {
+      // 2. Act & 3. Assert: no hay nada que localizar
+      expect(locateJsonPaths(DOC, [issue('')])).toEqual([]);
+    });
+
+    it('5.3 deberia descartar un issue sin message utilizable', () => {
+      // 1. Arrange: la ruta SI resuelve; lo que falta es el texto del tooltip.
+      const issues = [malformed({ path: 'version' })];
+
+      // 2. Act & 3. Assert: un subrayado que dijera `undefined` no informa de
+      //    nada y encima tapa el texto del editor.
+      expect(locateJsonPaths(DOC, issues)).toEqual([]);
+    });
+
+    it('5.4 deberia conservar los issues validos que acompanan a uno roto', () => {
+      // 1. Arrange
+      const issues = [
+        malformed({ field: 'nodes.trigger_imap.params' }),
+        issue('version', 'La version debe seguir el formato semver.'),
+      ];
+
+      // 2. Act
+      const ranges = locateJsonPaths(DOC, issues);
+
+      // 3. Assert: descartar el roto no puede costar los que si sirven
+      expect(ranges).toHaveLength(1);
+      expect(ranges[0]?.message).toBe('La version debe seguir el formato semver.');
     });
   });
 });

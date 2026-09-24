@@ -1,5 +1,4 @@
 import {
-  BadRequestException,
   Body,
   Controller,
   HttpCode,
@@ -24,7 +23,7 @@ import {
   ValidateSchemaResponseDto,
 } from '@core/fsm/dto/validate-schema-response.dto';
 import { PipelineValidatorService } from '@core/fsm/services/pipeline-validator.service';
-import { toIssueContract } from '@core/fsm/utils/schema-issue-contract.util';
+import { toIssueContractException } from '@core/fsm/utils/schema-issue-contract.util';
 import { JwtAuthGuard } from '@modules/auth/guards/jwt-auth.guard';
 
 /**
@@ -88,17 +87,11 @@ export class FsmController {
 
       return { success: true, schema };
     } catch (error: unknown) {
-      // La traduccion vive AQUI y no en el servicio a proposito: el validador lo
-      // comparten el alta y la edicion de flujos y de plantillas, que conservan
-      // su contrato de error. Cambiarlo alli lo cambiaria para todos.
-      if (error instanceof BadRequestException) {
-        throw new BadRequestException({
-          success: false,
-          issues: toIssueContract(error.getResponse()),
-        });
-      }
-
-      throw error;
+      // La traduccion vive en los CONTROLADORES y no en el servicio a proposito:
+      // el validador lo comparten el alta y la edicion de flujos y de plantillas,
+      // y cambiarlo alli lo cambiaria para todos a la vez. Los otros dos
+      // controladores llaman al mismo helper.
+      throw toIssueContractException(error);
     }
   }
 }

@@ -1,5 +1,8 @@
 import { declaredErrorTarget } from '@core/fsm/utils/pipeline-topology.util';
-import { ERR_MISSING_UPSTREAM_CONTEXT } from '@core/fsm/types/node-strategy.types';
+import {
+  ERR_MISSING_UPSTREAM_CONTEXT,
+  ERR_MISSING_UPSTREAM_FIELD_TYPE,
+} from '@core/fsm/types/node-strategy.types';
 import {
   NODE_OUTPUT_NAMESPACE_SET,
   NODE_OUTPUT_NAMESPACES,
@@ -9,6 +12,10 @@ import type {
   PipelineNodeConfigDto,
   PipelineSchemaDto,
 } from '@core/fsm/dto/pipeline-schema.dto';
+import type {
+  NodeOutputField,
+  NodeOutputFieldType,
+} from '@core/fsm/types/node-strategy.types';
 
 /**
  * Resuelve los namespaces que un nodo necesita para poder ejecutarse.
@@ -22,6 +29,34 @@ import type {
 export type NodeDependencyResolver = (
   node: PipelineNodeConfigDto,
 ) => readonly string[];
+
+/** Campos que un nodo publica en su `outputNamespace`. Regla 8. */
+export type NodeOutputFieldsResolver = (
+  node: PipelineNodeConfigDto,
+) => readonly NodeOutputField[];
+
+/** Tipos de campo que un nodo necesita poder apuntar aguas arriba. Regla 8. */
+export type NodeRequiredFieldTypesResolver = (
+  node: PipelineNodeConfigDto,
+) => readonly NodeOutputFieldType[];
+
+/**
+ * Lo que el validador necesita preguntar a las estrategias.
+ *
+ * Se agrupan en un objeto en vez de encadenar parametros posicionales: son tres
+ * preguntas distintas, dos de ellas nuevas, y una lista de lambdas sueltas en la
+ * llamada no dice cual es cual. Cada una se pasa por separado y todas son
+ * opcionales, de modo que omitir una desactiva solo su regla — que es lo que
+ * hacen las pruebas de las reglas 1 a 6.
+ */
+export interface PipelineTopologyResolvers {
+  /** Regla 7. */
+  readonly dependencies?: NodeDependencyResolver;
+  /** Regla 8; hace falta junto con `requiredFieldTypes`. */
+  readonly outputFields?: NodeOutputFieldsResolver;
+  /** Regla 8; hace falta junto con `outputFields`. */
+  readonly requiredFieldTypes?: NodeRequiredFieldTypesResolver;
+}
 
 /**
  * Campo invalido detectado durante la validacion de un `pipeline_schema`.
@@ -75,8 +110,19 @@ const hasNode = (schema: PipelineSchemaDto, nodeId: string): boolean =>
  *    terminal (`nextStep === null`) sin revisitar ninguno.
  * 7. Todo namespace que un nodo del camino activo declara necesitar lo escribe
  *    algun nodo ANTERIOR de ese mismo camino. Solo se aplica si se recibe el
- *    `resolveDependencies`, y es lo que convierte un flujo mal ordenado en un
+ *    resolutor `dependencies`, y es lo que convierte un flujo mal ordenado en un
  *    400 al guardar en vez de una ejecucion PAUSADA en produccion.
+ * 8. Todo nodo que declare necesitar un TIPO de campo aguas arriba (ej. el
+ *    extractor web, que solo puede apuntar a un `url` o un `url[]`) encuentra al
+ *    menos uno entre los que publican sus predecesores. Es la regla 7 un nivel
+ *    mas fino: aquella pregunta "corrio el nodo que produce esto", esta pregunta
+ *    "hay de donde sacar lo que necesito".
+ *
+ *    Existe porque la alternativa era exigir el campo en el DTO del nodo, y eso
+ *    hacia que una PLANTILLA de flujo —topologia sin operativa, `params` vacios
+ *    a proposito— no pudiera contener un EXTRACTOR_WEB. La comprobacion se
+ *    mueve aqui porque es la unica capa que conoce el grafo: `class-validator`
+ *    valida un nodo AISLADO y no puede saber quien va delante.
  *
  * Los nodos inalcanzables desde `entrypoint` se ignoran deliberadamente: un flujo
  * puede conservar ramas en construccion sin que eso invalide el esquema.
@@ -84,14 +130,13 @@ const hasNode = (schema: PipelineSchemaDto, nodeId: string): boolean =>
  * legitimo de reintento o recuperacion.
  *
  * @param schema Esquema con forma y tipos ya validados.
- * @param resolveDependencies Namespaces requeridos por nodo. Omitirlo desactiva
- *                            la regla 7, que es lo que hacen las pruebas de las
- *                            otras seis.
+ * @param resolvers Lo que se pregunta a cada estrategia. Omitir uno desactiva su
+ *                  regla, que es lo que hacen las pruebas de las reglas 1 a 6.
  * @returns Lista de incidencias; vacia si el grafo es integro.
  */
 export const validatePipelineTopology = (
   schema: PipelineSchemaDto,
-  resolveDependencies?: NodeDependencyResolver,
+  resolvers: PipelineTopologyResolvers = {},
 ): SchemaIssue[] => {
   const issues: SchemaIssue[] = [];
 
@@ -167,8 +212,21 @@ export const validatePipelineTopology = (
 
   issues.push(...detectActivePathCycle(schema));
 
-  if (resolveDependencies !== undefined) {
-    issues.push(...detectUnreachableNamespaces(schema, resolveDependencies));
+  if (resolvers.dependencies !== undefined) {
+    issues.push(...detectUnreachableNamespaces(schema, resolvers.dependencies));
+  }
+
+  if (
+    resolvers.outputFields !== undefined &&
+    resolvers.requiredFieldTypes !== undefined
+  ) {
+    issues.push(
+      ...detectMissingUpstreamFieldTypes(
+        schema,
+        resolvers.outputFields,
+        resolvers.requiredFieldTypes,
+      ),
+    );
   }
 
   return issues;
@@ -237,6 +295,75 @@ const detectUnreachableNamespaces = (
     }
 
     produced.add(node.outputNamespace);
+    cursor = node.nextStep;
+  }
+
+  return issues;
+};
+
+/**
+ * Comprueba que cada nodo encuentre aguas arriba el TIPO de campo que necesita.
+ *
+ * Recorre el camino activo acumulando los campos que publica cada predecesor,
+ * indexados por su `outputNamespace`, y para cada nodo que declare
+ * `requiredUpstreamFieldTypes` comprueba que al menos uno de esos tipos exista
+ * entre lo acumulado.
+ *
+ * ES DELIBERADAMENTE MAS DEBIL QUE PEDIR EL VALOR. No afirma que el nodo este
+ * configurado —un `targetUrl` vacio la supera sin problema—, solo que el flujo
+ * PODRIA configurarse. Es la distincion entre guardar y activar: una plantilla
+ * de flujo declara topologia y elige los valores despues, asi que bloquear aqui
+ * por falta de valor haria inexpresable el nodo. De la completitud responde
+ * `getIncompleteParams`, que consulta `assertActivatable`.
+ *
+ * Comparte las dos acotaciones de la regla 7 y por los mismos motivos: solo el
+ * camino activo —un nodo alcanzable unicamente por `onErrorStep` tiene
+ * predecesores distintos segun por donde se entre— y parada en seco si un
+ * puntero no resuelve o el camino cicla, porque eso ya lo reportan las reglas 3
+ * y 6.
+ *
+ * Un nodo cuya estrategia no declare campos de salida aporta un arreglo vacio y
+ * simplemente no ayuda a satisfacer a nadie. No es un fallo: hoy solo dos de las
+ * ocho estrategias los declaran, y tratar el silencio como ausencia rechazaria
+ * flujos correctos.
+ */
+const detectMissingUpstreamFieldTypes = (
+  schema: PipelineSchemaDto,
+  resolveOutputFields: NodeOutputFieldsResolver,
+  resolveRequiredFieldTypes: NodeRequiredFieldTypesResolver,
+): SchemaIssue[] => {
+  const issues: SchemaIssue[] = [];
+  const availableTypes = new Set<string>();
+  const visited = new Set<string>();
+  let cursor: string | null = schema.entrypoint;
+
+  while (cursor !== null) {
+    if (!hasNode(schema, cursor) || visited.has(cursor)) {
+      break;
+    }
+
+    visited.add(cursor);
+
+    const node: PipelineNodeConfigDto = schema.nodes[cursor];
+    const required = resolveRequiredFieldTypes(node);
+
+    if (
+      required.length > 0 &&
+      !required.some((fieldType) => availableTypes.has(fieldType))
+    ) {
+      issues.push({
+        field: `nodes.${node.nodeId}.params`,
+        code: ERR_MISSING_UPSTREAM_FIELD_TYPE,
+        constraints: [
+          `Ningun paso anterior del flujo publica un campo de tipo [${required.join(', ')}], que es lo que este nodo necesita poder referenciar. Coloca por delante un nodo que lo produzca o reordena el flujo.`,
+        ],
+      });
+    }
+
+    for (const field of resolveOutputFields(node)) {
+      availableTypes.add(field.type);
+    }
+
     cursor = node.nextStep;
   }
 

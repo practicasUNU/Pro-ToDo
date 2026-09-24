@@ -1,4 +1,5 @@
 import {
+  collectNamespaceRoots,
   extractNamespaceRoots,
   MissingContextVariableException,
   resolvePath,
@@ -553,6 +554,74 @@ describe('StatePayloadContext (PROT-08)', () => {
 
       // 3. Assert
       expect(second).toEqual(first);
+    });
+  });
+
+  describe('collectNamespaceRoots', () => {
+    it('deberia recolectar las raices de cualquier clave de un objeto', () => {
+      // 1. Arrange: unos `params` cuyas marcas no estan en `targetUrl`, que es
+      //    el unico campo que el extractor web sabe mirar por su cuenta.
+      const params = {
+        endpoint: '{{scraped_web.source_url}}',
+        method: 'POST',
+        timeoutMs: 20_000,
+      };
+
+      // 2. Act & 3. Assert
+      expect(collectNamespaceRoots(params)).toEqual(['scraped_web']);
+    });
+
+    it('deberia descender por objetos y arreglos anidados', () => {
+      // 1. Arrange
+      const params = {
+        headers: { Authorization: '{{llm_response.token}}' },
+        body: [{ titulo: '{{parsed_email.clean_title}}' }, 'literal'],
+      };
+
+      // 2. Act & 3. Assert
+      expect(collectNamespaceRoots(params)).toEqual([
+        'llm_response',
+        'parsed_email',
+      ]);
+    });
+
+    it('deberia deduplicar las raices repetidas en varias claves', () => {
+      // 1. Arrange
+      const params = {
+        titulo: '{{parsed_email.clean_title}}',
+        cuerpo: '{{parsed_email.clean_body}}',
+      };
+
+      // 2. Act & 3. Assert
+      expect(collectNamespaceRoots(params)).toEqual(['parsed_email']);
+    });
+
+    it('deberia ignorar numeros, booleanos y nulos', () => {
+      // 1. Arrange & 2. Act & 3. Assert: no pueden contener una marca
+      expect(
+        collectNamespaceRoots({ a: 1, b: true, c: null, d: undefined }),
+      ).toEqual([]);
+    });
+
+    it('deberia devolver vacio para unos params sin ninguna interpolacion', () => {
+      // 1. Arrange & 2. Act & 3. Assert
+      expect(
+        collectNamespaceRoots({ mailbox: 'INBOX', includeAttachments: false }),
+      ).toEqual([]);
+    });
+
+    it('deberia detenerse al agotar la profundidad maxima', () => {
+      // 1. Arrange: `params` es una columna jsonb y pudo escribirse por SQL
+      //    directo, asi que el tope existe para que un anidamiento absurdo no
+      //    convierta la validacion en un recorrido interminable.
+      let deep: Record<string, unknown> = { url: '{{parsed_email.subject}}' };
+
+      for (let level = 0; level < 10; level += 1) {
+        deep = { nested: deep };
+      }
+
+      // 2. Act & 3. Assert: la marca queda por debajo del tope y no se ve
+      expect(collectNamespaceRoots(deep)).toEqual([]);
     });
   });
 });

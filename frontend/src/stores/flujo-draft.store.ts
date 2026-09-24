@@ -2,6 +2,7 @@ import { defineStore, acceptHMRUpdate } from 'pinia';
 import { computed, ref } from 'vue';
 
 import { nodeConfigRegistry } from '@components/nodes/node-config-registry';
+import { useNodeCatalogStore } from '@stores/node-catalog.store';
 import { resolveNodeStore } from '@stores/nodes/node-store-registry';
 import * as workflowTemplatesService from '@services/workflow-templates.service';
 import * as workflowsService from '@services/workflows.service';
@@ -12,6 +13,8 @@ import {
 } from '@/utils/pipeline-assembler';
 
 import { toWizardStep } from '@/types/pipeline';
+
+import type { UpstreamNamespace } from '@stores/nodes/node-store-registry';
 
 import type {
   AssembledPipelineSchema,
@@ -55,8 +58,7 @@ export interface InvalidStep {
 
 /** Texto que la vista muestra para cada motivo. */
 const STEP_BLOCK_MESSAGES: Record<StepBlockReason, (step: WizardStep) => string> = {
-  SIN_CONFIGURADOR: (step) =>
-    `El tipo ${step.name} todavia no tiene interfaz de configuracion.`,
+  SIN_CONFIGURADOR: (step) => `El tipo ${step.name} todavia no tiene interfaz de configuracion.`,
   SIN_STORE: (step) =>
     `El tipo ${step.name} no tiene estrategia en el motor: este flujo no se puede guardar. Edita la plantilla para retirarlo.`,
   CONFIGURACION_INCOMPLETA: () => 'Faltan campos por completar en este paso.',
@@ -180,12 +182,60 @@ export const useFlujoDraftStore = defineStore('flujoDraft', () => {
   const upstreamNamespaces = (stepIndex: number): string[] =>
     pipelineTopology.value.slice(0, Math.max(stepIndex, 0)).map((step) => step.outputNamespace);
 
-  /** Solo las plantillas disponibles: una retirada no se puede instanciar. */
+  /**
+   * Lo mismo que `upstreamNamespaces`, pero CON los campos de cada namespace.
+   *
+   * Hermano del anterior y no su sustituto, porque responden a preguntas
+   * distintas. El de nombres basta para saber si un namespace existe; este es el
+   * que permite COMPONER `{{namespace.campo}}` en un selector cerrado, y para
+   * eso el nombre no basta: hace falta saber que campos publica cada nodo y de
+   * que tipo son. Lo consumen el extractor web —que solo puede apuntar a un
+   * campo de tipo URL— y el mapeador de plantillas —que contrasta las variables
+   * que la plantilla exige contra las que el flujo publica de verdad.
+   *
+   * Viaja tambien el `nodeType`, que el paso ya tiene: es lo que permite al
+   * consumidor etiquetar el origen de una variable con el nodo que la produce y
+   * no solo con el namespace en el que aterriza.
+   *
+   * Los campos salen del catalogo de nodos, que es donde el backend publica lo
+   * que declara cada estrategia. El frontend NO replica la forma de ningun
+   * payload: pregunta. Si el catalogo aun no ha cargado, o si el tipo de nodo no
+   * declara sus campos, se devuelve el namespace con `fields` vacio — que para
+   * el consumidor significa "no hay nada que ofrecer todavia", nunca un error.
+   */
+  const upstreamContext = (stepIndex: number): UpstreamNamespace[] => {
+    const catalog = useNodeCatalogStore();
+
+    return pipelineTopology.value.slice(0, Math.max(stepIndex, 0)).map((step) => ({
+      namespace: step.outputNamespace,
+      nodeType: step.nodeType,
+      fields: catalog.findByCode(step.nodeType)?.outputFields ?? [],
+    }));
+  };
+
+  /**
+   * Solo las plantillas disponibles: una retirada no se puede instanciar.
+   *
+   * Aprovecha para asegurar el catalogo de nodos, del que `upstreamContext`
+   * saca los campos de cada namespace. `fetchCatalog` se memoiza tras la primera
+   * llamada —son datos de instalacion—, asi que no cuesta una peticion por
+   * apertura del asistente. Sin esta linea, `selectTemplate` sincronizaria un
+   * contexto con `fields` vacios y el selector del extractor web saldria
+   * permanentemente deshabilitado sin motivo aparente.
+   *
+   * Se pide en PARALELO con las plantillas: son dos lecturas independientes y
+   * encadenarlas solo sumaria latencia.
+   */
   const loadAvailableTemplates = async (): Promise<void> => {
     isLoading.value = true;
 
     try {
-      availableTemplates.value = await workflowTemplatesService.fetchWorkflowTemplates();
+      const [templates] = await Promise.all([
+        workflowTemplatesService.fetchWorkflowTemplates(),
+        useNodeCatalogStore().fetchCatalog(),
+      ]);
+
+      availableTemplates.value = templates;
     } finally {
       isLoading.value = false;
     }
@@ -307,7 +357,14 @@ export const useFlujoDraftStore = defineStore('flujoDraft', () => {
     isLoading.value = true;
 
     try {
-      const workflow = await workflowsService.fetchWorkflow(workflowId);
+      // El catalogo ANTES de hidratar, por el mismo motivo que en
+      // `loadAvailableTemplates`: `hydrateForEdit` termina sincronizando el
+      // contexto aguas arriba, y sin los campos ya cargados lo sincronizaria
+      // vacio.
+      const [workflow] = await Promise.all([
+        workflowsService.fetchWorkflow(workflowId),
+        useNodeCatalogStore().fetchCatalog(),
+      ]);
 
       hydrateForEdit(workflow);
 
@@ -406,14 +463,19 @@ export const useFlujoDraftStore = defineStore('flujoDraft', () => {
    *
    * Se llama sobre todos los pasos y no solo el activo para que retroceder no
    * deje a un nodo con el contrato de otra posicion.
+   *
+   * Se empujan LOS DOS canales y cada store implementa el que necesita: el
+   * mapeador solo el de nombres, el extractor web solo el de campos. Ambos son
+   * opcionales en el contrato, asi que un nodo que no implemente ninguno —un
+   * disparador, que es el primero del grafo y no tiene nada aguas arriba— no
+   * paga nada por ello.
    */
   const syncUpstreamNamespaces = (): void => {
     pipelineTopology.value.forEach((step, index) => {
-      // El metodo es opcional en el contrato: un disparador es el primero del
-      // grafo y no tiene nada aguas arriba que declarar.
-      resolveNodeStore(step.nodeType, step.nodeId)?.setAvailableUpstreamNamespaces?.(
-        upstreamNamespaces(index),
-      );
+      const store = resolveNodeStore(step.nodeType, step.nodeId);
+
+      store?.setAvailableUpstreamNamespaces?.(upstreamNamespaces(index));
+      store?.setAvailableUpstreamContext?.(upstreamContext(index));
     });
   };
 
@@ -452,9 +514,7 @@ export const useFlujoDraftStore = defineStore('flujoDraft', () => {
       // Sin esto la politica moriria aqui: el asistente reconstruye el esquema
       // desde los pasos, de modo que un campo raiz que no se reenvie no llega
       // nunca al flujo, y configurarla en la plantilla no serviria de nada.
-      ...(executionPolicy.value !== null
-        ? { executionPolicy: executionPolicy.value }
-        : {}),
+      ...(executionPolicy.value !== null ? { executionPolicy: executionPolicy.value } : {}),
     });
   };
 
@@ -572,6 +632,7 @@ export const useFlujoDraftStore = defineStore('flujoDraft', () => {
     hasUnsupportedNodes,
     stepWarnings,
     upstreamNamespaces,
+    upstreamContext,
     syncUpstreamNamespaces,
     assemblePipelineSchema,
     assembleAndSaveWorkflow,

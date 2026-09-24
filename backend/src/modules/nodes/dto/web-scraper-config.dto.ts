@@ -1,4 +1,4 @@
-import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
+import { ApiPropertyOptional } from '@nestjs/swagger';
 import {
   IsInt,
   IsNotEmpty,
@@ -67,11 +67,27 @@ export const MAX_SCRAPER_RETRY_DELAY_MS = 10_000;
  * contexto acumulado en cada vuelta.
  */
 export class WebScraperConfigDto {
-  @ApiProperty({
+  @ApiPropertyOptional({
     description:
-      'URL del articulo a extraer. DEBE ser una variable interpolada contra el contexto acumulado, p. ej. "{{parsed_email.extracted_urls[0]}}".',
+      'URL del articulo a extraer. Si viene, DEBE ser una variable interpolada contra el contexto acumulado, p. ej. "{{parsed_email.extracted_urls[0]}}". Opcional al GUARDAR (una plantilla de flujo declara topologia, no operativa) y obligatorio al ACTIVAR, que es donde lo exige `getIncompleteParams`.',
     example: '{{parsed_email.extracted_urls[0]}}',
   })
+  // OPCIONAL, y esto es una decision sobre QUE significa guardar. Una plantilla
+  // de flujo es un blueprint sin operativa: sus `params` van vacios a proposito
+  // porque el valor concreto se elige despues, al instanciar el flujo en el
+  // asistente. Con el campo obligatorio aqui, `PipelineValidatorService` —que
+  // aplica este `paramsSchema` a plantillas y flujos por igual— hacia que
+  // NINGUNA plantilla pudiera contener un EXTRACTOR_WEB: los tres constraints
+  // saltaban a la vez sobre un `params: {}`.
+  //
+  // Lo que se valida aqui es la FORMA de lo que haya. Las otras dos preguntas
+  // viven donde hay informacion para responderlas:
+  //   - "hay de donde sacar una URL en este flujo" -> regla 8 de la topologia,
+  //     via `requiredUpstreamFieldTypes`. Un DTO valida un nodo AISLADO y no
+  //     puede saber quien va delante.
+  //   - "esta completo para ejecutarse" -> `getIncompleteParams`, que consulta
+  //     `assertActivatable` antes de habilitar un flujo.
+  @IsOptional()
   @IsString({ message: 'targetUrl debe ser una cadena.' })
   @IsNotEmpty({ message: 'targetUrl no puede estar vacio.' })
   // NO se usa `@IsUrl()` y nunca se uso: aqui el valor no es una URL hasta que
@@ -93,7 +109,7 @@ export class WebScraperConfigDto {
     message:
       'La URL objetivo debe ser una variable interpolada (ej. {{namespace.campo}}).',
   })
-  targetUrl!: string;
+  targetUrl?: string;
 
   @ApiPropertyOptional({
     description: `Espera maxima de carga de la pagina, en milisegundos. Por defecto ${DEFAULT_SCRAPER_TIMEOUT_MS}`,
@@ -154,7 +170,10 @@ export interface ResolvedWebScraperConfig {
 export const resolveWebScraperConfig = (
   dto: WebScraperConfigDto | ResolvedWebScraperConfig,
 ): ResolvedWebScraperConfig => ({
-  targetUrl: dto.targetUrl,
+  // `?? ''` y no un lanzamiento: el DTO admite la ausencia al guardar, asi que
+  // aqui hay que representarla. Quien la convierte en un fallo diagnosticado es
+  // la guarda de `resolveConfig`, que emite ERR_SCRAPER_CONFIG antes de navegar.
+  targetUrl: dto.targetUrl ?? '',
   timeoutMs: dto.timeoutMs ?? DEFAULT_SCRAPER_TIMEOUT_MS,
   maxRetries: dto.maxRetries ?? DEFAULT_SCRAPER_MAX_RETRIES,
   retryDelayMs: dto.retryDelayMs ?? DEFAULT_SCRAPER_RETRY_DELAY_MS,

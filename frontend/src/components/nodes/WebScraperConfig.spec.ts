@@ -23,11 +23,12 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import WebScraperConfig from '@components/nodes/WebScraperConfig.vue';
 import {
+  indexedUrlTemplateFor,
   SELECTABLE_URL_SLOTS,
-  urlTemplateFor,
   useWebScraperStore,
 } from '@stores/nodes/web-scraper.store';
 
+import type { UpstreamNamespace } from '@stores/nodes/node-store-registry';
 import type { CheckScraperResult } from '@/types/web-scraper';
 
 // Mismo doble que en el spec del store: sin esto se cargaria `@boot/axios`, y
@@ -41,6 +42,18 @@ const checkScraper = vi.mocked(webScraperService.checkScraper);
 
 const NODE_ID = 'extractor_web';
 const SANDBOX_URL = 'https://www.ejemplo.es/noticias/nota-de-prensa';
+
+/** Contexto que dejaria un PARSER_PRE_IA aguas arriba del extractor. */
+const PARSER_UPSTREAM: UpstreamNamespace[] = [
+  {
+    namespace: 'parsed_email',
+    fields: [{ name: 'extracted_urls', type: 'url[]' }],
+  },
+];
+
+/** Plantilla de la posicion `index` de los enlaces del parser. */
+const parsedEmailUrl = (index: number): string =>
+  indexedUrlTemplateFor('parsed_email', 'extracted_urls', index);
 
 const buildResult = (): CheckScraperResult => ({
   success: true,
@@ -122,15 +135,35 @@ describe('WebScraperConfig · configurador del nodo EXTRACTOR_WEB', () => {
       expect(select.find('input').attributes('readonly')).toBeDefined();
     });
 
-    it('1.2 deberia ofrecer una opcion por posicion del arreglo de enlaces', () => {
+    it('1.2 deberia ofrecer una opcion por posicion del campo de enlaces', () => {
       // 1. Arrange
       mountComponent();
       const store = useWebScraperStore(NODE_ID);
 
-      // 2. Act & 3. Assert: las opciones son POSICIONES, no URLs: en tiempo de
-      //    diseno el correo todavia no ha llegado.
+      // 2. Act: las opciones las compone la TOPOLOGIA, no una constante.
+      store.setAvailableUpstreamContext(PARSER_UPSTREAM);
+
+      // 3. Assert: son POSICIONES, no URLs: en tiempo de diseno el correo
+      //    todavia no ha llegado.
       expect(store.urlOptions).toHaveLength(SELECTABLE_URL_SLOTS);
-      expect(store.urlOptions[0]?.value).toBe(urlTemplateFor(0));
+      expect(store.urlOptions[0]?.value).toBe(parsedEmailUrl(0));
+    });
+
+    it('1.3 deberia deshabilitar el selector sin origenes aguas arriba', async () => {
+      // 1. Arrange
+      const wrapper = mountComponent();
+      const store = useWebScraperStore(NODE_ID);
+
+      // 2. Act & 3. Assert: un selector habilitado y vacio invita a pensar que
+      //    falta cargar algo; deshabilitado con su aviso dice lo que pasa.
+      expect(wrapper.findComponent({ name: 'QSelect' }).props('disable')).toBe(true);
+      expect(wrapper.find('[data-test="missing-source-warning"]').exists()).toBe(true);
+
+      store.setAvailableUpstreamContext(PARSER_UPSTREAM);
+      await wrapper.vm.$nextTick();
+
+      expect(wrapper.findComponent({ name: 'QSelect' }).props('disable')).toBe(false);
+      expect(wrapper.find('[data-test="missing-source-warning"]').exists()).toBe(false);
     });
   });
 
@@ -139,26 +172,33 @@ describe('WebScraperConfig · configurador del nodo EXTRACTOR_WEB', () => {
       // 1. Arrange
       const wrapper = mountComponent();
       const store = useWebScraperStore(NODE_ID);
+      store.setAvailableUpstreamContext(PARSER_UPSTREAM);
 
       // 2. Act: se emite el evento que emitiria el `QSelect` al elegir la
       //    tercera posicion, que es el contrato que el componente escucha.
       await wrapper
         .findComponent({ name: 'QSelect' })
-        .vm.$emit('update:model-value', urlTemplateFor(2));
+        .vm.$emit('update:model-value', parsedEmailUrl(2));
 
       // 3. Assert: el componente no guarda estado propio; el dueno de la
       //    configuracion es el store (regla §5).
-      expect(store.config.targetUrl).toBe(urlTemplateFor(2));
+      expect(store.config.targetUrl).toBe(parsedEmailUrl(2));
     });
 
     it('2.2 deberia reflejar en el badge la validez que declara el store', async () => {
       // 1. Arrange
       const wrapper = mountComponent();
       const store = useWebScraperStore(NODE_ID);
+      store.setAvailableUpstreamContext(PARSER_UPSTREAM);
+      store.updateConfig({ targetUrl: parsedEmailUrl(0) });
+      await wrapper.vm.$nextTick();
+      expect(wrapper.text()).toContain('Configurado');
 
-      // 2. Act: sin el namespace del parser aguas arriba, el enlace elegido no
-      //    existira en el contexto.
-      store.setAvailableUpstreamNamespaces(['raw_email']);
+      // 2. Act: el operador reordena el flujo y el parser deja de ir delante,
+      //    asi que el enlace elegido ya no existira en el contexto.
+      store.setAvailableUpstreamContext([
+        { namespace: 'raw_email', fields: [{ name: 'subject', type: 'text' }] },
+      ]);
       await wrapper.vm.$nextTick();
 
       // 3. Assert

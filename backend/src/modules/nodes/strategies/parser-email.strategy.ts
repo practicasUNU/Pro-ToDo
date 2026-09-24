@@ -14,6 +14,7 @@ import type { StatePayloadContext } from '@core/fsm/context/state-payload.contex
 import type {
   INodeStrategy,
   NodeErrorDetail,
+  NodeOutputField,
   NodeResult,
 } from '@core/fsm/types/node-strategy.types';
 import type { ResolvedParserEmailConfig } from '@modules/nodes/dto/parser-email-config.dto';
@@ -74,6 +75,42 @@ type ParserConfigResolution =
 @Injectable()
 export class ParserEmailStrategy implements INodeStrategy {
   public readonly nodeType = NodeType.PARSER_PRE_IA;
+
+  /**
+   * Las trece claves que `buildParsedEmail` deposita en el namespace del nodo.
+   *
+   * El ORDEN y los nombres replican `ParsedEmailPayload`
+   * (`parsed-email-payload.util.ts`), que es quien las construye. Declararlas
+   * aqui es lo que permite al asistente ofrecer `{{parsed_email.campo}}` en un
+   * selector cerrado sin que el frontend replique la forma del payload.
+   *
+   * `extracted_urls` es el unico `url[]`: es el arreglo del que el EXTRACTOR_WEB
+   * toma una POSICION, y por eso el selector de aquel nodo lo despliega en
+   * entradas indexadas mientras que a los demas campos ni los mira.
+   */
+  public readonly outputFields: readonly NodeOutputField[] = [
+    {
+      name: 'subject',
+      type: 'text',
+      description: 'Asunto original del correo',
+    },
+    { name: 'clean_title', type: 'text', description: 'Titular saneado' },
+    { name: 'clean_body', type: 'text', description: 'Cuerpo sin marcado' },
+    { name: 'body_source', type: 'text', description: 'Origen del cuerpo' },
+    { name: 'character_count', type: 'number' },
+    { name: 'original_character_count', type: 'number' },
+    { name: 'reduction_percentage', type: 'number' },
+    {
+      name: 'extracted_urls',
+      type: 'url[]',
+      description: 'Enlaces de contenido del correo',
+    },
+    { name: 'attachment_count', type: 'number' },
+    { name: 'attachments', type: 'object' },
+    { name: 'extracted_documents_text', type: 'text' },
+    { name: 'requires_multimodal_fallback', type: 'boolean' },
+    { name: 'multimodal_reason', type: 'text' },
+  ];
 
   private readonly logger = new Logger(ParserEmailStrategy.name);
 

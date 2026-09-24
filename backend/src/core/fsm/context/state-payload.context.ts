@@ -166,6 +166,57 @@ export const extractNamespaceRoots = (template: string): readonly string[] => {
 };
 
 /**
+ * Profundidad maxima a la que se desciende dentro de unos `params`.
+ *
+ * `params` es una columna `jsonb` y puede haberse escrito por SQL directo, asi
+ * que no hay garantia de que sea razonable. Un tope fijo evita que un objeto
+ * absurdamente anidado convierta una validacion en un recorrido interminable.
+ * Seis niveles cubren con holgura cualquier configuracion de nodo real.
+ */
+const MAX_PARAMS_DEPTH = 6;
+
+/**
+ * Namespaces raiz que interpola CUALQUIER cadena dentro de un valor compuesto.
+ *
+ * Es la version recursiva de `extractNamespaceRoots`, y se apoya en ella en vez
+ * de repetir la expresion regular: por el mismo motivo que aquella comparte
+ * `INTERPOLATION_PATTERN` con `getInterpolatedValue`, una segunda regex
+ * equivalente acabaria divergiendo de la que de verdad resuelve.
+ *
+ * Existe porque `getRequiredNamespaces` es OPCIONAL en `INodeStrategy` y solo lo
+ * implementan las estrategias que saben deducir su dependencia de un campo
+ * concreto. Un nodo cuyo `params` interpole `{{scraped_web.url}}` en una clave
+ * cualquiera —o cuyo tipo aun no tenga estrategia— no declararia nada, y la
+ * regla 7 del validador de topologia se quedaria sin nada que comprobar.
+ *
+ * Recorre objetos y arreglos; ignora numeros, booleanos y nulos, que no pueden
+ * contener una marca. Sin duplicados y en orden de aparicion.
+ */
+export const collectNamespaceRoots = (
+  value: unknown,
+  depth: number = MAX_PARAMS_DEPTH,
+): readonly string[] => {
+  if (typeof value === 'string') {
+    return extractNamespaceRoots(value);
+  }
+
+  if (depth <= 0 || typeof value !== 'object' || value === null) {
+    return [];
+  }
+
+  const roots = new Set<string>();
+  const children = Array.isArray(value) ? value : Object.values(value);
+
+  for (const child of children) {
+    for (const root of collectNamespaceRoots(child, depth - 1)) {
+      roots.add(root);
+    }
+  }
+
+  return [...roots];
+};
+
+/**
  * Convierte un valor del contexto en el texto que va a la plantilla.
  *
  * Las ramas se escriben con `typeof` explicito en vez de un `String(value)`
