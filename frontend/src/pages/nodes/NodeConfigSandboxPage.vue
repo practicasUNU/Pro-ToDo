@@ -1,14 +1,17 @@
 <script setup lang="ts">
-import { computed, ref, shallowRef, watch } from 'vue';
+import { computed, onMounted, ref, shallowRef, watch } from 'vue';
 
+import { useNodeCatalogStore } from '@stores/node-catalog.store';
 import { resolveNodeStore } from '@stores/nodes/node-store-registry';
 
 import { configurableNodeTypes, nodeConfigRegistry } from '@components/nodes/node-config-registry';
 
+import { buildContextForNamespaces } from '@/utils/upstream-catalog';
+
 import { TEMPLATE_NAMESPACES } from '@/types/html-template';
 import { NODE_TYPE_LABELS, NodeType } from '@/types/pipeline';
 
-import type { NodeConfigStore } from '@stores/nodes/node-store-registry';
+import type { NodeConfigStore, UpstreamNamespace } from '@stores/nodes/node-store-registry';
 
 // Banco de pruebas de la resolucion polimorfica (regla frontend-quasar.md §3.1).
 //
@@ -69,6 +72,23 @@ const simulatedUpstream = ref<string[]>([...TEMPLATE_NAMESPACES]);
  */
 const activeStore = shallowRef<NodeConfigStore | null>(null);
 
+const nodeCatalogStore = useNodeCatalogStore();
+
+/**
+ * Contexto rico equivalente a los namespaces marcados en el banco.
+ *
+ * Sin esto, un nodo que solo implemente el canal rico —el extractor web— saldria
+ * del banco con el selector permanentemente deshabilitado: recibiria los nombres
+ * por un canal que no escucha y nada por el que si.
+ *
+ * La resolucion nombre -> campos vive en `@/utils/upstream-catalog`, compartida
+ * con el explorador de variables del editor de plantillas: es la misma pregunta
+ * —"que publicaria este namespace"— y dos copias de la inversion del mapa de
+ * defectos acabarian discrepando.
+ */
+const buildSimulatedContext = (namespaces: string[]): UpstreamNamespace[] =>
+  buildContextForNamespaces(namespaces, nodeCatalogStore.findByCode);
+
 /**
  * Reapunta el store activo y le traslada el contexto simulado.
  *
@@ -88,6 +108,7 @@ const syncActiveStore = (nodeType: NodeType): void => {
 
   activeStore.value = store;
   store?.setAvailableUpstreamNamespaces?.([...simulatedUpstream.value]);
+  store?.setAvailableUpstreamContext?.(buildSimulatedContext(simulatedUpstream.value));
 };
 
 // Solo el cambio de TIPO reapunta el store. Antes esto era un
@@ -98,9 +119,33 @@ const syncActiveStore = (nodeType: NodeType): void => {
 // `Maximum recursive updates exceeded`.
 watch(selectedNodeType, syncActiveStore, { immediate: true });
 
-/** El nodo activo declara depender del contexto que dejan los nodos previos. */
+/**
+ * Carga el catalogo y REPITE la sincronizacion cuando llega.
+ *
+ * El `watch` de arriba es `immediate`, asi que la primera sincronizacion ocurre
+ * con el catalogo todavia vacio y el contexto sale sin campos. Resincronizar al
+ * resolverse es lo que hace que el selector del extractor web aparezca poblado
+ * sin que el operador tenga que cambiar de tipo de nodo y volver.
+ *
+ * `fetchCatalog` se memoiza, de modo que entrar y salir del banco no repite la
+ * peticion.
+ */
+onMounted(async () => {
+  await nodeCatalogStore.fetchCatalog();
+  syncActiveStore(selectedNodeType.value);
+});
+
+/**
+ * El nodo activo declara depender del contexto que dejan los nodos previos.
+ *
+ * Basta con que implemente UNO de los dos canales: el mapeador solo escucha el
+ * de nombres y el extractor web solo el de campos, y ambos dependen del
+ * contexto igual.
+ */
 const acceptsUpstream = computed<boolean>(
-  () => activeStore.value?.setAvailableUpstreamNamespaces !== undefined,
+  () =>
+    activeStore.value?.setAvailableUpstreamNamespaces !== undefined ||
+    activeStore.value?.setAvailableUpstreamContext !== undefined,
 );
 
 /**
@@ -113,6 +158,7 @@ const acceptsUpstream = computed<boolean>(
 const onUpstreamToggle = (namespaces: string[]): void => {
   simulatedUpstream.value = namespaces;
   activeStore.value?.setAvailableUpstreamNamespaces?.([...namespaces]);
+  activeStore.value?.setAvailableUpstreamContext?.(buildSimulatedContext(namespaces));
 };
 
 /**

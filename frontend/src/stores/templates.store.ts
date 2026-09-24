@@ -56,8 +56,9 @@ export const useTemplatesStore = defineStore('templates', () => {
    * Indice de insercion dentro de `htmlContent`.
    *
    * Es un ESPEJO del cursor de CodeMirror, que es quien manda: el editor lo
-   * empuja con su evento `cursorChange`. Solo lo consume `insertMarker`, y solo
-   * cuando el editor todavia no esta montado.
+   * empuja con su evento `cursorChange`. Solo lo consume el fallback de
+   * insercion (`insertTextAtCursor`), y solo cuando el editor todavia no esta
+   * montado.
    */
   const cursorPosition = ref(0);
 
@@ -112,15 +113,22 @@ export const useTemplatesStore = defineStore('templates', () => {
   };
 
   /**
-   * Inserta `{{namespace.}}` en `cursorPosition` y deja el caret antes de `}}`.
+   * Inserta texto literal en `cursorPosition` y deja ahi el caret.
    *
-   * FALLBACK: en condiciones normales el chip despacha una transaccion sobre el
-   * `EditorView`, que es el dueno del cursor. Esto solo entra cuando el editor
-   * aun no esta montado, y por eso empalma strings: sin vista, no hay
-   * transaccion que despachar.
+   * FALLBACK: en condiciones normales quien inserta es el `EditorView`, que es
+   * el dueno del cursor y despacha una transaccion. Esto solo entra cuando el
+   * editor —de carga diferida— aun no esta montado, y por eso empalma strings:
+   * sin vista, no hay transaccion que despachar.
+   *
+   * No conoce la gramatica del marcador: recibe el texto ya compuesto. Asi el
+   * explorador de variables puede insertar una ruta completa por la misma via
+   * que `insertMarker` inserta un namespace a medias.
+   *
+   * @param text Texto a insertar, tal cual.
+   * @param caretOffset Desplazamiento del caret respecto al final del texto;
+   *                    negativo para dejarlo dentro de lo insertado.
    */
-  const insertMarker = (namespace: string): void => {
-    const snippet = `{{${namespace}.}}`;
+  const insertTextAtCursor = (text: string, caretOffset = 0): void => {
     const { htmlContent } = activeDraft.value;
 
     // El espejo puede haber quedado por delante del contenido (p. ej. tras un
@@ -129,9 +137,20 @@ export const useTemplatesStore = defineStore('templates', () => {
 
     activeDraft.value = {
       ...activeDraft.value,
-      htmlContent: `${htmlContent.slice(0, position)}${snippet}${htmlContent.slice(position)}`,
+      htmlContent: `${htmlContent.slice(0, position)}${text}${htmlContent.slice(position)}`,
     };
-    cursorPosition.value = position + snippet.length - CLOSING_BRACES_LENGTH;
+    cursorPosition.value = position + text.length + caretOffset;
+  };
+
+  /**
+   * Inserta `{{namespace.}}` en `cursorPosition` y deja el caret antes de `}}`.
+   *
+   * Mismo fallback que el anterior, del que solo se diferencia en componer el
+   * marcador a medias y retroceder el caret para que el autor termine el nombre
+   * del campo.
+   */
+  const insertMarker = (namespace: string): void => {
+    insertTextAtCursor(`{{${namespace}.}}`, -CLOSING_BRACES_LENGTH);
   };
 
   /**
@@ -229,6 +248,7 @@ export const useTemplatesStore = defineStore('templates', () => {
     updateHtmlContent,
     setCursorPosition,
     insertMarker,
+    insertTextAtCursor,
     fetchTemplates,
     createTemplate,
     updateTemplate,

@@ -299,4 +299,64 @@ describe('useTemplatesStore · borrador de edicion', () => {
       expect(store.detectedVariables).toEqual(['parsed_email.clean_title']);
     });
   });
+
+  describe('5. insertTextAtCursor (fallback generico)', () => {
+    it('5.1 deberia insertar un marcador completo y dejar el caret detras', () => {
+      // 1. Arrange: es lo que usa el explorador de variables cuando el editor
+      // diferido aun no ha resuelto su carga.
+      const store = useTemplatesStore();
+      store.initDraft();
+      store.updateHtmlContent('<h1></h1>');
+      store.setCursorPosition('<h1>'.length);
+
+      // 2. Act
+      store.insertTextAtCursor('{{parsed_email.clean_title}}');
+
+      // 3. Assert: sin retroceso, a diferencia de `insertMarker`: la ruta esta
+      // completa y no falta nada que escribir dentro de las llaves.
+      expect(store.activeDraft.htmlContent).toBe('<h1>{{parsed_email.clean_title}}</h1>');
+      expect(store.cursorPosition).toBe('<h1>{{parsed_email.clean_title}}'.length);
+    });
+
+    it('5.2 deberia respetar un desplazamiento negativo del caret', () => {
+      // 1. Arrange
+      const store = useTemplatesStore();
+      store.initDraft();
+      store.setCursorPosition(0);
+
+      // 2. Act
+      store.insertTextAtCursor('{{raw_email.}}', -2);
+
+      // 3. Assert: es exactamente lo que `insertMarker` delega.
+      expect(store.cursorPosition).toBe('{{raw_email.'.length);
+    });
+
+    it('5.3 deberia acotar un cursor por delante del contenido', () => {
+      // 1. Arrange
+      const store = useTemplatesStore();
+      store.initDraft();
+      store.updateHtmlContent('<p></p>');
+
+      // 2. Act
+      store.setCursorPosition(999);
+      store.insertTextAtCursor('{{_assets.base_url}}');
+
+      // 3. Assert: al final, sin dejar un hueco
+      expect(store.activeDraft.htmlContent).toBe('<p></p>{{_assets.base_url}}');
+    });
+
+    it('5.4 deberia alimentar detectedVariables con la ruta completa', () => {
+      // 1. Arrange
+      const store = useTemplatesStore();
+      store.initDraft();
+      store.setCursorPosition(0);
+
+      // 2. Act
+      store.insertTextAtCursor('{{parsed_email.clean_title}}');
+
+      // 3. Assert: a diferencia del marcador a medias, esta ya es una ruta
+      // valida y aparece sin que el autor escriba nada mas.
+      expect(store.detectedVariables).toEqual(['parsed_email.clean_title']);
+    });
+  });
 });

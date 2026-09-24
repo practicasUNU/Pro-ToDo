@@ -2413,3 +2413,307 @@ Rama: `feat/parser-email-ui`, a partir de `feat/parser-email`. El detalle del «
 `PARSER_PRE_IA` era **imposible de guardar** — el asistente pintaba «Configurador no disponible» y
 `canSave` quedaba en `false` para siempre. La prueba 16.4.1 de `flujo-draft.store.spec.ts` es la que
 fija ese cambio.
+
+---
+
+## Tanda actual — Contrato de issues, inventario de salida y selector del EXTRACTOR_WEB
+
+### Contratos nuevos
+
+```typescript
+// @core/fsm/types/node-strategy.types.ts — que PRODUCE un nodo
+export type NodeOutputFieldType = 'url' | 'url[]' | 'text' | 'number' | 'boolean' | 'object';
+
+export interface NodeOutputField {
+  readonly name: string;            // snake_case: asi viaja y asi se interpola
+  readonly type: NodeOutputFieldType;
+  readonly description?: string;
+}
+
+export interface INodeStrategy {
+  readonly outputFields?: readonly NodeOutputField[];   // NUEVO
+  readonly getRequiredNamespaces?: (params: Record<string, unknown>) => readonly string[];
+  // ...
+}
+```
+
+`outputFields` es la contrapartida de `getRequiredNamespaces`: aquel declara lo que el nodo
+**consume**, este lo que **produce**. Es propiedad constante y no metodo porque lo que un nodo
+publica depende de su tipo, no de su configuracion. Viaja al frontend por `GET /api/nodos`
+(`NodeCatalogResponseDto.outputFields`), resuelto contra la factoria **en cada peticion** — las
+estrategias se registran en `onModuleInit`, despues de que el provider se construya.
+
+```typescript
+// @stores/nodes/node-store-registry.ts — canal anfitrion -> nodo
+export interface UpstreamNamespace {
+  readonly namespace: string;
+  readonly fields: readonly NodeOutputField[];
+}
+
+export interface NodeConfigStore {
+  readonly setAvailableUpstreamNamespaces?: (namespaces: string[]) => void;  // ya existia
+  readonly setAvailableUpstreamContext?: (context: UpstreamNamespace[]) => void;  // NUEVO
+}
+```
+
+Los dos canales **conviven**. El mapeador solo pregunta si un namespace existe; el extractor web
+tiene que componer `{{namespace.campo}}` y necesita el inventario. `flujo-draft.store` empuja ambos
+en `syncUpstreamNamespaces()` y cada store implementa el que usa.
+
+### Dependencias de un nodo: union de dos fuentes
+
+`PipelineValidatorService.resolveNodeDependencies()` pasa a devolver
+`getRequiredNamespaces(params) ∪ collectNamespaceRoots(params)`, deduplicado. El segundo canal
+—barrido recursivo de las marcas `{{ns.campo}}` en cualquier clave de `params`, con tope de
+profundidad— cubre los seis tipos de nodo que no implementan el primero. La regla 7 de
+`validatePipelineTopology` no cambia: recibe el resolutor por parametro.
+
+### Checklist
+
+- [x] 1. Backend — `NodeOutputField` / `NodeOutputFieldType` y `INodeStrategy.outputFields`
+- [x] 2. Backend — `outputFields` declarados en `ParserEmailStrategy` (13 claves) y
+      `WebScraperStrategy` (5)
+- [x] 3. Backend — `NodeCatalogResponseDto.outputFields` y `NodeCatalogService.resolveOutputFields()`
+- [x] 4. Backend — `collectNamespaceRoots()` en `state-payload.context.ts`, reutilizando
+      `extractNamespaceRoots` y su `INTERPOLATION_PATTERN`
+- [x] 5. Backend — union de fuentes en `resolveNodeDependencies()`
+- [x] 6. Backend — `toIssueContractException()` y su aplicacion en los controladores de flujos,
+      plantillas y FSM (causa raiz del crash)
+- [x] 7. Frontend — guardas en `locatePath` y `locateJsonPaths`
+- [x] 8. Frontend — `NodeOutputField` y `outputFields` replicados en `types/node-catalog.ts`
+- [x] 9. Frontend — `UpstreamNamespace` y `setAvailableUpstreamContext` en el contrato del store
+- [x] 10. Frontend — `upstreamContext(index)` en el agregador, cruzando topologia y catalogo;
+      `fetchCatalog()` en paralelo en los dos cargadores asincronos
+- [x] 11. Frontend — `web-scraper.store.ts` sin `URL_SOURCE_NAMESPACE` ni `URL_SOURCE_FIELD`:
+      opciones derivadas, `hasStaleTargetUrl`, `isConfigValid` de tres filtros
+- [x] 12. Frontend — `WebScraperConfig.vue` con selector deshabilitado y banner reescrito
+- [x] 13. Frontend — `NodeConfigSandboxPage.vue` alimenta el canal rico y carga el catalogo
+- [x] 14. Verificacion — backend 47 suites / 1089 pruebas; frontend 17 ficheros / 379 pruebas;
+      `vue-tsc --noEmit` y lint de ambos lados en verde
+
+### Correccion — El EXTRACTOR_WEB no era expresable en una plantilla
+
+`WebScraperConfigDto.targetUrl` era obligatorio y `PipelineValidatorService` aplica los
+`paramsSchema` a plantillas y flujos por igual, asi que un `params: {}` —lo que trae toda
+plantilla, que declara topologia y no operativa— disparaba los tres constraints a la vez.
+EXTRACTOR_WEB es el unico de los ocho tipos con `paramsSchema`, de ahi que fuera el unico
+afectado.
+
+La exigencia se reparte en tres capas, cada una con la informacion que necesita:
+
+```typescript
+// 1. DTO — la FORMA de lo que haya. Un nodo AISLADO no sabe quien va delante.
+@IsOptional()
+@Matches(INTERPOLATION_ONLY_PATTERN)
+targetUrl?: string;
+
+// 2. INodeStrategy — dos hooks nuevos
+readonly requiredUpstreamFieldTypes?: readonly NodeOutputFieldType[];   // regla 8
+readonly getIncompleteParams?: (params) => readonly string[];           // activacion
+
+// 3. Topologia — regla 8, la unica capa que conoce el grafo
+validatePipelineTopology(schema, {
+  dependencies, outputFields, requiredFieldTypes,   // objeto, no posicionales
+});
+```
+
+`getRequiredNamespaces` del extractor **deja de caer** a `FALLBACK_SCRAPER_NAMESPACE`
+(`'parsed_email'`): era una suposicion que acusaba al operador de un namespace que su esquema
+nunca cito, y su propio TSDoc reconocia el precio. La garantia la sostiene ahora la regla 8,
+que pregunta si hay DE DONDE sacar una URL en vez de adivinar de cual.
+
+`assertActivatable` pasa `{ requireRunnableParams: true }`: guardar es un borrador, activar es
+ponerlo a disparar.
+
+- [x] 15. Backend — `targetUrl` opcional en el DTO, con `@Matches` intacto
+- [x] 16. Backend — `requiredUpstreamFieldTypes` y `getIncompleteParams` en `INodeStrategy`,
+      declarados por `WebScraperStrategy`; retirado `FALLBACK_SCRAPER_NAMESPACE`
+- [x] 17. Backend — regla 8 (`detectMissingUpstreamFieldTypes`) y `PipelineTopologyResolvers`
+- [x] 18. Backend — `ValidateSchemaOptions.requireRunnableParams` y su uso en `assertActivatable`
+- [x] 19. Backend — guarda de ejecucion: sin `targetUrl`, `ERR_SCRAPER_CONFIG` con el mensaje real
+- [x] 20. Frontend — `toNodeParams()` OMITE `targetUrl` vacio en vez de publicar `''`
+- [x] 21. Verificacion — backend 47 suites / 1105 pruebas; frontend 17 ficheros / 380 pruebas
+
+---
+
+## Tanda actual — Inventario de salida completo: de 2/5 a 5/5 estrategias
+
+### Por que NO se creo `NODE_OUTPUT_CATALOG` ni `GET /api/fsm/nodes/catalog`
+
+La peticion describia una constante estatica en `src/modules/fsm/constants/` expuesta por un
+endpoint nuevo. Se descarta por dos motivos, en este orden:
+
+1. **Ya existe el mecanismo.** `INodeStrategy.outputFields` -> `NodeCatalogService.resolveOutputFields()`
+   -> `NodeCatalogResponseDto.outputFields` -> `GET /api/nodos`. El frontend lo consume de punta a
+   punta desde la tanda anterior.
+2. **Una constante seria una segunda fuente de verdad.** Es el argumento que ya esta escrito en el
+   TSDoc del contrato y que no ha cambiado: la lista escrita a mano y el `data` que construye la
+   estrategia se desincronizan en cuanto alguien anade una clave, y la que manda en ejecucion es
+   siempre la segunda.
+
+`src/modules/fsm/` tampoco existe: el motor es `@core/fsm` y el catalogo `@modules/nodes`.
+
+### Lo que si faltaba
+
+Tres de las cinco estrategias registradas no declaraban su inventario:
+
+| Estrategia | `outputFields` | Tipos |
+|---|---|---|
+| `CronTriggerStrategy` | `triggered_at`, `cron_expression`, `time_zone`, `next_run_at` | los cuatro `text` |
+| `ImapTriggerStrategy` | `message_id`, `from`, `subject`, `text`, `html`, `date`, `attachments` | seis `text` + un `object` |
+| `TemplateMapperStrategy` | `compiled_markup`, `mapped_at` | los dos `text` |
+
+Dos invariantes que se declaran por escrito en el TSDoc de cada propiedad:
+
+- **`status` queda fuera del IMAP.** Solo existe en la via del buzon vacio, que devuelve `halt`:
+  el motor cierra en EXITOSO y nadie aguas abajo interpola. Declararla prometeria un campo que
+  nunca esta cuando hay algo que mapear.
+- **Ningun campo del IMAP es `url`.** `html` y `text` contienen enlaces pero no son una direccion;
+  extraerlas es trabajo de `PARSER_PRE_IA` (`extracted_urls: url[]`). `TRIGGER_IMAP -> EXTRACTOR_WEB`
+  sigue emitiendo `ERR_MISSING_UPSTREAM_FIELD_TYPE`, y ahora por lectura del inventario en vez de
+  por ausencia de inventario.
+
+No se toca `NodeOutputFieldType`: `text` es contrato vivo de la regla 8, del store del extractor y
+de `frontend/src/types/node-catalog.ts`. Renombrarlo a `string` no compra nada.
+
+### Checklist
+
+- [x] 22. Backend — `outputFields` en `CronTriggerStrategy` (4 claves)
+- [x] 23. Backend — `outputFields` en `ImapTriggerStrategy` (7 claves, sin `status`, ninguna `url`)
+- [x] 24. Backend — `outputFields` en `TemplateMapperStrategy` (2 claves)
+- [x] 25. Backend — prueba de sincronizacion por estrategia: `Object.keys(result.data)` contra los
+      `name` declarados, para que anadir una clave sin declararla rompa el spec
+- [x] 26. Docs — TSDoc de `ParserEmailStrategy` decia "doce claves" sobre un arreglo de trece
+- [x] 27. Verificacion — backend 47 suites / 1114 pruebas; frontend 17 ficheros / 380 pruebas (sin
+      cambios); `nest build` en verde
+- [x] 28. `DEFAULT_UPSTREAM_NAMESPACES` en `template-mapper.store.ts` — cerrado en la tanda
+      siguiente (ver "Selector determinista de variables en el MAPEADOR_PLANTILLA")
+
+---
+
+## Tanda actual — Selector determinista de variables en el MAPEADOR_PLANTILLA
+
+### Por que NO se creo el servicio ni el getter del enunciado
+
+El enunciado pedia `getNodeCatalog()` contra `GET /api/fsm/nodes/catalog` y, en el agregador,
+`nodeCatalog` + `fetchNodeCatalog()` + `availableInterpolationVariables(currentNodeId)`. Las tres
+ya existen, repartidas donde las reglas las quieren: `node-catalog.service.ts` (contra `GET /nodos`,
+que es la ruta real), `node-catalog.store.ts`, y `upstreamContext(stepIndex)` +
+`syncUpstreamNamespaces()`, que desde la tanda anterior empuja los dos canales a todos los stores.
+
+Componer las opciones en el agregador ademas lo obligaria a conocer la forma de la configuracion de
+un tipo de nodo concreto, que es lo que §3.1 prohibe. El getter va en el store del nodo, como
+`buildUrlOptions()` en el extractor web.
+
+### Contrato ampliado
+
+```typescript
+// @stores/nodes/node-store-registry.ts
+export interface UpstreamNamespace {
+  readonly namespace: string;
+  readonly nodeType?: NodeType;   // NUEVO; opcional porque `_assets` no lo escribe ningun nodo
+  readonly fields: readonly NodeOutputField[];
+}
+
+// @stores/nodes/template-mapper.store.ts
+export interface InterpolationVariableOption {
+  readonly label: string;   // `clean_title (text)`
+  readonly value: string;   // `{{parsed_email.clean_title}}`
+  readonly group: string;   // `parsed_email (PARSER_PRE_IA)`
+}
+```
+
+### Las tres reglas de `missingRequiredVariables`
+
+| # | Situacion | Veredicto |
+|---|---|---|
+| 1 | Ningun paso anterior escribe ese namespace | Falta (ya existia) |
+| 2 | El namespace existe y se conoce su inventario, pero no publica ese campo | Falta (**nuevo**) |
+| 3 | El namespace existe y llega con `fields: []` | Satisfecha |
+
+La 3 no es una concesion: vacio significa "aun no se que publica" —catalogo viajando, o tipo sin
+`outputFields`—, y tratarlo como fallo pintaria de rojo todas las plantillas durante la carga.
+Rutas profundas: se juzgan por los dos primeros segmentos, que es lo que el nodo publica.
+
+`isConfigValid` NO incorpora "hay variables disponibles": una plantilla estatica es legitima. De la
+ausencia avisa `hasUpstreamVariables`, sin bloquear.
+
+### Checklist
+
+- [x] 29. Frontend — `nodeType` opcional en `UpstreamNamespace`, propagado por `upstreamContext()`
+      y por `buildSimulatedContext()` del banco de pruebas
+- [x] 30. Frontend — `setAvailableUpstreamContext`, `variableOptions`, `hasUpstreamVariables`,
+      `missingUpstreamNamespaces` y `missingUpstreamFields` en `template-mapper.store.ts`;
+      retirado `DEFAULT_UPSTREAM_NAMESPACES` (cierra la pendiente 28)
+- [x] 31. Frontend — `TemplateMapperConfig.vue`: `outputNamespace` a `q-select` cerrado, selector
+      de variables con `use-input` y agrupacion, aviso ambar no bloqueante, banner rojo que
+      distingue el fallo de namespace del de campo
+- [x] 32. Frontend — `TemplateEditorDialog.vue`: prop opcional `upstreamContext`; con ella los
+      chips insertan `{{ns.campo}}` completo con offset 0
+- [x] 33. Frontend — `TemplateMapperConfig.spec.ts` (nuevo, 10 pruebas) y 15 pruebas nuevas en el
+      spec del store; `flujo-draft.store.spec.ts` actualizado por el `nodeType`
+- [x] 34. Verificacion — frontend 18 ficheros / 405 pruebas; `vue-tsc --noEmit` y lint en verde
+- [x] 35. Prueba de componente de `TemplateEditorDialog` — cerrada en la tanda siguiente (ver
+      "Explorador jerarquico de variables en el editor de plantillas")
+
+---
+
+## Tanda actual — Explorador jerarquico de variables en el editor de plantillas
+
+### El hueco: el backend no valida el campo
+
+`TemplatesService.extractAndValidateVariables` comprueba el NAMESPACE de cada `{{ns.campo}}`
+contra `ALLOWED_NAMESPACES` y acepta el resto de la ruta tal cual. Un
+`{{parsed_email.clean_bodyy}}` se persiste sin protesta y falla en render con un GRAVE. Los chips
+del editor, que insertaban `{{ns.}}` y dejaban al autor escribiendo el campo, eran la via directa a
+esa errata.
+
+### Contratos nuevos
+
+```typescript
+// @/types/html-template — unico namespace que no sale del catalogo
+export const ASSETS_NAMESPACE = '_assets';
+export const ASSETS_FIELDS: readonly NodeOutputField[];   // [{ name: 'base_url', type: 'text' }]
+
+// @/utils/upstream-catalog — helpers puros, sin Pinia ni E/S
+export const NODE_TYPE_BY_NAMESPACE: Readonly<Record<string, NodeType>>;
+export const buildContextForNamespaces: (
+  namespaces: readonly string[],
+  findByCode: (code: string) => NodeCatalogEntry | null,
+) => UpstreamNamespace[];
+
+// @stores/templates.store — fallback sin gramatica propia
+insertTextAtCursor(text: string, caretOffset?: number): void;   // insertMarker delega en el
+```
+
+### Origen de los datos por anfitrion
+
+| Anfitrion | Origenes ofrecidos |
+|---|---|
+| `TemplateMapperConfig` | `upstreamContext`: lo que ese flujo publica de verdad |
+| `TemplatesManager` | Catalogo global: los ocho namespaces mas `_assets` |
+
+La prop gana porque es la respuesta mas especifica. El catalogo se pide con
+`nodeCatalogStore.fetchCatalog()` AL ABRIR el dialogo (memoizada), no en `onMounted`.
+
+No se creo `getNodeCatalog()` en `templates.service.ts`: la ruta del enunciado
+(`GET /api/fsm/nodes/catalog`) no existe y `node-catalog.service.ts` ya consume la real.
+Tampoco se alcanza el `EditorView`: `insertTextAtCursor` del editor ya despacha esa transaccion, y
+la vista es privada a proposito.
+
+### Checklist
+
+- [x] 36. Frontend — `ASSETS_NAMESPACE` y `ASSETS_FIELDS` en `@/types/html-template`
+- [x] 37. Frontend — `@/utils/upstream-catalog` con la inversion UNICA del mapa de defectos;
+      `NodeConfigSandboxPage.vue` pasa a usarlo y borra su copia privada
+- [x] 38. Frontend — `insertTextAtCursor(text, caretOffset)` en `templates.store.ts`;
+      `insertMarker` delega y retira el `replace` con el que el dialogo degradaba un marcador
+- [x] 39. Frontend — `TemplateEditorDialog.vue`: fuera los dos bloques de chips; dos `q-select`
+      encadenados, tarjeta de detalle con badge de tipo y botones Copiar / Insertar
+- [x] 40. Frontend — `upstream-catalog.spec.ts` (9), `TemplateEditorDialog.spec.ts` (11, cierra la
+      pendiente 35) y 4 pruebas nuevas del fallback del store
+- [x] 41. Verificacion — frontend 20 ficheros / 429 pruebas; `vue-tsc --noEmit`, eslint y prettier
+      en verde
+- [ ] 42. Pendiente (fuera de alcance) — no hay prueba con CodeMirror real: el spec del dialogo
+      sustituye el editor por un doble de modulo, asi que la insercion efectiva solo se comprueba a
+      mano

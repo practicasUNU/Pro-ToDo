@@ -5003,3 +5003,528 @@ render del configurador se verifican a mano. Y sigue sin haber corpus real de co
 del saneador están calibradas contra fixtures escritos a mano, de modo que el banco de pruebas es hoy
 la única forma de enfrentarlas a un boletín de verdad — que es, precisamente, para lo que se
 construyó.
+
+---
+
+## Tanda actual — La fuga del contrato de issues y el selector que dejo de adivinar
+
+### El crash de la vista de plantillas no estaba donde parecia
+
+El sintoma era un `TypeError` en el editor JSON al guardar una plantilla invalida, y el arreglo
+evidente —una guarda en `locatePath`— tapaba el sintoma sin tocar la causa. La causa es un contrato
+que se escapaba por tres rutas de cinco.
+
+`PipelineValidatorService.rejectWith()` lanza sus incidencias en forma **interna**,
+`{ field, code, constraints }`. `FsmController` las traducia al contrato publico
+`{ path, message }` con `toIssueContract()`, y esa traduccion estaba **solo ahi**: el alta y la
+edicion de flujos y de plantillas llaman al mismo validador a traves de sus servicios, y como el
+backend no tiene ningun `ExceptionFilter`, el cuerpo interno viajaba literalmente al cliente.
+`extractApiIssues()` comprueba que `issues` sea un arreglo pero no la forma de cada elemento, asi que
+los dejaba pasar; `locateJsonPaths` leia `issue.path`, recibia `undefined`, y el `split` reventaba
+dentro del `watch` de CodeMirror. Se perdia la vista entera en vez de un subrayado. Y la lista de
+errores del dialogo, que pinta `issue.path` y `issue.message`, salia en blanco por el mismo motivo.
+
+Se arreglo en las dos capas, y las dos hacen falta:
+
+- **La causa.** `toIssueContractException()` en `schema-issue-contract.util.ts`, invocado desde los
+  tres controladores. La traduccion sigue viviendo en el controlador y no en el servicio, que es la
+  decision que ya documentaba `FsmController`: cuatro llamadores comparten el validador y cambiarlo
+  alli lo cambiaria para todos a la vez.
+- **La defensa.** La guarda en `locatePath`. Que el backend haya dejado de emitir esa forma no quita
+  que el dato venga de un cuerpo HTTP que TypeScript no puede garantizar, y esta funcion es la unica
+  capa que puede resistirlo.
+
+**El helper DEVUELVE la excepcion en vez de lanzarla**, y el llamador escribe
+`throw toIssueContractException(error)`. Se intento primero con un `(error: unknown): never` que
+lanzaba por dentro, y TypeScript no propaga ese `never` a traves de la frontera del modulo: los cinco
+`catch` fallaban con TS2366 por no terminar en un `return`. Anotar el tipo en el `const` tampoco
+basto. Con el `throw` a la vista del compilador el problema desaparece y ademas se lee lo que pasa.
+
+Un 400 **sin** issues se devuelve intacto. Un conflicto de nombre o un fallo del `ValidationPipe`
+global sobre el DTO de la peticion no tienen nada que traducir, y envolverlos les quitaria su
+`message`, que es lo unico que esos errores tienen que decir.
+
+### El extractor web ya no supone quien va delante
+
+`web-scraper.store.ts` declaraba `URL_SOURCE_NAMESPACE = 'parsed_email'` y
+`URL_SOURCE_FIELD = 'extracted_urls'`, y ofrecia diez posiciones fijas pasara lo que pasara.
+`availableUpstreamNamespaces` —que el asistente ya alimentaba con la topologia real— solo servia para
+decidir si pintar un aviso. Consecuencia: un flujo que extrajera sus enlaces de cualquier otro nodo
+era inconfigurable, y uno sin parser delante ofrecia diez opciones que ninguna ejecucion podria
+resolver.
+
+Ahora las opciones son la **proyeccion de la topologia**: por cada namespace anterior, los campos de
+tipo `url` (una opcion) y `url[]` (diez posiciones). Ningun namespace escrito a mano en el archivo.
+
+**El inventario de campos se pidio al backend en vez de replicarlo.** La alternativa era una tabla
+`namespace -> campos` en el frontend, derivada de `ParsedEmailPayload` y `ScrapedWebPayload`. Se
+descarto: esos payloads los construye la estrategia, y una segunda tabla acaba discrepando de la
+primera en cuanto alguien anade una clave. `outputFields` se declara junto al codigo que lo produce y
+viaja por el catalogo, que es el canal que ya existia para "que sabe ejecutar el motor".
+
+**Se anadio un canal nuevo en vez de ampliar el existente.** `setAvailableUpstreamNamespaces` entrega
+nombres y le basta al mapeador; `setAvailableUpstreamContext` entrega nombres **y** campos y es lo que
+el extractor necesita. Sustituir aquel por este obligaria al mapeador a desempaquetar una estructura
+de la que ignora la mitad. Ambos son opcionales, el anfitrion empuja los dos, y un disparador —que no
+implementa ninguno— no paga nada.
+
+**El componente NO inyecta `useFlujoDraftStore`.** Era la via directa, y rompia dos cosas: el
+contrato §3.1 (un configurador consume solo su store) y `NodeConfigSandboxPage.vue`, que monta el
+nodo sin asistente y habria mostrado el selector permanentemente deshabilitado. El anfitrion empuja,
+el nodo no tira.
+
+### Tres decisiones que cambian comportamiento existente
+
+- **`buildInitialConfig()` arranca con `targetUrl: ''`.** Ya no hay un origen por defecto que valga
+  para todo flujo. Un valor prefijado seria una eleccion que el operador no ha hecho y que
+  `isConfigValid` tendria que rechazar acto seguido.
+- **`hydrateFromNode` conserva el `targetUrl` guardado VERBATIM.** Antes caia a
+  `urlTemplateFor(0)` cuando no reconocia el valor, lo que era reescribir en silencio la
+  configuracion que el operador venia a revisar: abria el formulario afirmando una eleccion que nadie
+  hizo, y guardar la persistia. Ahora se conserva, `hasStaleTargetUrl` lo distingue de "no has
+  elegido nada" y `configWarnings` explica que hay que reordenar el flujo o elegir otro origen. El
+  paso queda bloqueado, pero **explicado**.
+- **`isConfigValid` pasa a tres filtros** y ninguno sobra: no vacio; casa el patron anclado de
+  interpolacion (replica del `@Matches` del DTO, de modo que una URL literal heredada se rechace con
+  una regla de campo y no con un 400); y pertenece a `urlOptions`. El patron no sustituye a la lista:
+  una plantilla hacia un namespace que el flujo no produce es sintacticamente impecable e igual de
+  irresoluble.
+
+### El hueco que el validador de topologia tenia abierto
+
+Las directrices pedian construir la validacion DAG desde cero. Ya estaba: `validatePipelineTopology`
+implementa siete reglas, incluida la 7 (`detectUnreachableNamespaces`, recorrido
+`entrypoint -> nextStep` acumulando lo producido, emitiendo `ERR_MISSING_UPSTREAM_CONTEXT`) y la
+guarda de ciclos con un `Set` de visitados, que es mas fuerte que un tope de profundidad.
+
+El hueco real estaba en el **origen** de las dependencias: salian solo de `getRequiredNamespaces`,
+que de ocho tipos implementan dos. Un `MAPEADOR_PLANTILLA` —que deliberadamente no lo implementa,
+porque sus variables viven en `plantillas_html` y derivarlas seria asincrono— o un tipo aun sin
+estrategia podia interpolar `{{scraped_web.url}}` en cualquier clave de sus `params` y guardarse sin
+que nadie comprobara nada.
+
+`collectNamespaceRoots` cierra ese hueco barriendo recursivamente los `params`. **Reutiliza
+`extractNamespaceRoots` en vez de escribir una regex nueva**, por el mismo motivo que aquella comparte
+`INTERPOLATION_PATTERN` con `getInterpolatedValue`: dos expresiones equivalentes acaban divergiendo, y
+entonces la validacion aprueba esquemas que la ejecucion no sabe resolver, o al reves. Las dos fuentes
+se **suman y deduplican**: `getRequiredNamespaces` sabe cosas que el texto no dice —el parser depende
+de `raw_email` aunque su `sourceNamespace` sea implicito, el extractor impone su
+`FALLBACK_SCRAPER_NAMESPACE`— y el barrido cubre a todos los demas.
+
+No se creo el decorador de clase `@ValidatePipelineTopology()` ni la `SchemaValidationException` que
+las directrices sugerian. El decorador duplicaria la regla 7 y no podria iterar `nodes`, que es un
+`Record` y class-validator 0.15.1 solo recorre Array/Set/Map — ese es justamente el motivo
+documentado de que la topologia viva en el servicio. La excepcion romperia el contrato
+`{ statusCode, error, message, issues }` que cuatro llamadores ya consumen.
+
+### Lo que las pruebas cubren y lo que no
+
+Backend: **47 suites, 1089 pruebas**. Nuevas: seis de `collectNamespaceRoots` (anidamiento, arreglos,
+deduplicacion, tipos no textuales y el tope de profundidad), cuatro del segundo canal de la regla 7
+—incluida la que fija que un namespace declarado por ambas fuentes aparezca **una sola vez** en el
+mensaje—, dos de `outputFields` en el catalogo, y tres de contrato HTTP en
+`workflows.controller.spec.ts` que son la regresion directa del crash: reproducen el cuerpo interno
+que lanzaba el validador y aseveran que lo que sale lleva `path`/`message` y nunca
+`field`/`constraints`.
+
+Frontend: **17 ficheros, 379 pruebas**. `json-path-locator.spec.ts` suma cuatro casos de issues mal
+formados, incluido el que conserva los validos que acompanan a uno roto. `web-scraper.store.spec.ts`
+pasa de 30 a 42 y es donde esta el grueso: opciones derivadas de `url` y `url[]`, el rechazo de los
+campos que no son URL, la reaccion a un cambio de topologia sin recrear el store, la URL literal y la
+marca embebida, y la conservacion verbatim de un `targetUrl` huerfano.
+
+Lo que **no** esta cubierto: `NodeConfigSandboxPage.vue` sigue sin prueba automatizada, asi que el
+arreglo del banco —que ahora alimenta el canal rico y carga el catalogo al montar— se verifica a
+mano. Tampoco hay prueba de extremo a extremo que recorra guardar una plantilla invalida desde la
+interfaz hasta el subrayado; las dos mitades del arreglo del crash estan probadas por separado, la
+costura no.
+
+---
+
+## Correccion — Tres preguntas distintas que un solo decorador intentaba responder
+
+El sintoma enganaba: los tres constraints de `targetUrl` saltaban **a la vez**, incluido
+"debe ser una cadena", y eso solo pasa cuando la propiedad no existe. No era un `targetUrl: ''`,
+era un `params: {}` — exactamente lo que `DEFAULT_PARAMS_BY_NODE_TYPE[EXTRACTOR_WEB]` produce.
+
+Chocaban dos cosas que el codigo ya tenia escritas por separado. Una plantilla de flujo es un
+blueprint **sin operativa**: lo dice su propio dialogo, y por eso sus `params` van vacios. Pero
+`PipelineValidatorService` aplica los `paramsSchema` a plantillas y flujos por igual, y
+`WebScraperConfigDto` exigia `targetUrl`. Como EXTRACTOR_WEB es el **unico** de los ocho tipos
+que declara `paramsSchema`, era el unico nodo del catalogo que no podia aparecer en una
+plantilla. No "con el campo vacio fallaba": no era expresable.
+
+El arreglo no fue relajar el decorador, sino **separar tres preguntas** que estaban fundidas en
+el, y poner cada una donde hay informacion para responderla:
+
+| Pregunta | Capa | Por que ahi |
+|---|---|---|
+| "esto tiene forma de interpolacion" | DTO (`@Matches`) | Es lo unico que se puede decidir viendo un nodo AISLADO |
+| "hay de donde sacar una URL en este flujo" | Regla 8 de la topologia | `class-validator` no puede saber quien va delante |
+| "esta completo para ejecutarse" | `getIncompleteParams`, al activar | Guardar y activar son dos exigencias distintas |
+
+### El fallback que adivinaba
+
+`getRequiredNamespaces` caia a `FALLBACK_SCRAPER_NAMESPACE = 'parsed_email'` cuando no habia
+`targetUrl`, para que ningun extractor quedara sin dependencias declaradas y la regla 7 tuviera
+algo que comprobar. Su propio TSDoc reconocia el precio: el fallback **no era una lectura, era
+una suposicion**, y el operador acababa leyendo `ERR_MISSING_UPSTREAM_CONTEXT` sobre un namespace
+que su esquema nunca menciono.
+
+Se retira. La garantia no se pierde, cambia de pregunta: `requiredUpstreamFieldTypes` declara
+`['url', 'url[]']` y la regla 8 comprueba que algun predecesor publique uno de esos tipos,
+apoyandose en los `outputFields` que el catalogo ya expone. Se sustituye una suposicion por un
+hecho, y el diagnostico pasa de *"necesita [parsed_email]"* a *"ningun paso anterior publica un
+campo de tipo [url, url[]]"*, que describe el problema real: el ORDEN del flujo.
+
+La regla 8 es **deliberadamente mas debil** que pedir el valor. No afirma que el nodo este
+configurado —un `params: {}` la supera—, solo que el flujo PODRIA configurarse. Esa es justo la
+distincion que hacia falta para que una plantilla exista.
+
+### Por que un objeto de resolutores y no un tercer parametro
+
+`validatePipelineTopology(schema, resolvers)` pasa a recibir `{ dependencies, outputFields,
+requiredFieldTypes }`. Tres lambdas posicionales en la llamada no dicen cual es cual, y cada una
+sigue siendo opcional por separado, de modo que omitir una desactiva solo su regla — que es lo
+que permite a las pruebas de las reglas 1 a 6 seguir llamando `validatePipelineTopology(schema)`
+a secas, y a las de la 7 no arrastrar issues de la 8.
+
+### La asimetria entre guardar y activar
+
+`ValidateSchemaOptions.requireRunnableParams` lo pide **solo** `assertActivatable`. Un flujo se
+guarda a medias porque eso es un borrador, y porque la plantilla de la que nace ni siquiera trae
+operativa; activarlo es ponerlo a disparar cada minuto. Se recorre el mapa entero y no solo el
+camino activo: activar con una rama de `onErrorStep` a medio configurar es el fallo que se
+descubre de madrugada, la primera vez que esa rama se usa.
+
+Se anadio ademas una guarda en `resolveConfig` del extractor: sin `targetUrl` devuelve
+`ERR_SCRAPER_CONFIG` nombrando el campo, en vez de dejar que `new URL('')` reviente mas abajo
+como `ERR_SCRAPER_URL_MALFORMED` y mande a revisar el formato de una URL que nadie escribio.
+
+### Comportamiento verificado sobre los dos casos reportados
+
+| Escenario | Antes | Ahora |
+|---|---|---|
+| `TRIGGER_IMAP -> EXTRACTOR_WEB`, plantilla | 3 constraints sobre `targetUrl` | `ERR_MISSING_UPSTREAM_FIELD_TYPE`: ningun paso anterior publica una URL |
+| `PARSER -> EXTRACTOR_WEB`, plantilla, guardar | 3 constraints sobre `targetUrl` | Se guarda |
+| El mismo esquema, activar | — | `ERR_INCOMPLETE_NODE_PARAMS`: falta `targetUrl` |
+
+Backend **47 suites / 1105 pruebas**; frontend **17 ficheros / 380 pruebas**. Nuevas: ocho de la
+regla 8 (incluidas la que exige los DOS resolutores, la que impide que un nodo se satisfaga a si
+mismo y la que acepta un `params: {}`), cuatro de la asimetria guardar/activar, y cuatro del
+contrato de la estrategia.
+
+Lo que **no** esta cubierto: la costura HTTP sigue sin prueba de extremo a extremo. Y el
+frontend no distingue todavia `ERR_MISSING_UPSTREAM_FIELD_TYPE` de los demas issues del esquema:
+los pinta en la lista del dialogo como cualquier otro, sin llevar al operador al paso culpable.
+
+---
+
+## Tanda actual — Los tres nodos que producian sin declarar lo que producian
+
+La peticion pedia un endpoint nuevo, `GET /api/fsm/nodes/catalog`, alimentado por una constante
+`NODE_OUTPUT_CATALOG` escrita a mano en `src/modules/fsm/constants/`. No se hizo, y conviene
+dejar escrito por que: ese directorio no existe —el motor vive en `@core/fsm` y el catalogo en
+`@modules/nodes`— y, sobre todo, **la funcionalidad ya estaba, construida al reves**.
+
+`GET /api/nodos` sirve `outputFields` por tipo desde la tanda anterior, y los resuelve
+preguntandole a `NodeStrategyFactory` en cada peticion. El argumento contra la tabla estatica ya
+estaba escrito en el TSDoc de `INodeStrategy.outputFields` y no ha cambiado: *una fila de catalogo
+y un `*-payload.util.ts` son dos fuentes que se desincronizan en cuanto alguien anade una clave, y
+la que manda en ejecucion es siempre la segunda*. Una constante habria sido esa segunda fuente.
+
+### El hueco real: 2 de 5
+
+De las cinco estrategias que `NodesModule.onModuleInit` registra, solo `PARSER_PRE_IA` y
+`EXTRACTOR_WEB` declaraban su inventario. `TRIGGER_CRON`, `TRIGGER_IMAP` y `MAPEADOR_PLANTILLA`
+llegaban al catalogo con `[]` pese a tener claves `data` perfectamente deterministas, escritas
+literalmente en el `return` de su `execute`. No era una decision: era el trabajo a medias.
+
+| Nodo | Claves declaradas ahora |
+|---|---|
+| `TRIGGER_CRON` | `triggered_at`, `cron_expression`, `time_zone`, `next_run_at` |
+| `TRIGGER_IMAP` | `message_id`, `from`, `subject`, `text`, `html`, `date`, `attachments` |
+| `MAPEADOR_PLANTILLA` | `compiled_markup`, `mapped_at` |
+
+Dos de esas claves no estaban en el enunciado y si en el payload real: `time_zone` en el cron y
+`attachments` en el IMAP. Se declaran, porque el inventario describe lo que el nodo escribe, no lo
+que alguien recordaba que escribia.
+
+### Por que `status` se queda fuera del inventario de IMAP
+
+`ImapTriggerStrategy` tiene dos vias de exito. La del correo encontrado devuelve las siete claves
+de `ExtractedEmail`; la del buzon vacio devuelve `{ status: 'NO_MESSAGES_FOUND' }` **acompanado de
+`halt`**. Esa segunda no produce contexto para nadie: el motor cierra la ejecucion en EXITOSO y
+ningun nodo de aguas abajo llega a interpolar. Declarar `status` pondria en el selector del
+asistente un campo que nunca esta presente cuando hay algo que mapear —un `{{raw_email.status}}`
+que resuelve siempre a cadena vacia—, que es la clase de promesa falsa que el Poka-Yoke existe
+para no hacer.
+
+### Por que ningun campo de IMAP es `url`
+
+`html` y `text` vienen llenos de enlaces. Aun asi se declaran `text`: contienen direcciones, pero
+no **son** una direccion, y extraerlas es trabajo de `PARSER_PRE_IA`, que para eso publica
+`extracted_urls` como `url[]`. Declarar `html` como `url` colaria el cuerpo entero de un correo en
+el desplegable del EXTRACTOR_WEB, que es exactamente el error de tipeo que la regla 8 del
+validador de topologia viene a impedir.
+
+La consecuencia visible es que `TRIGGER_IMAP -> EXTRACTOR_WEB` sigue emitiendo
+`ERR_MISSING_UPSTREAM_FIELD_TYPE`, igual que en la entrada anterior. La diferencia es que antes el
+diagnostico era correcto por accidente —no habia inventario que consultar— y ahora lo es por
+lectura: el inventario existe, se miro, y no hay ninguna URL en el.
+
+### La prueba que de verdad sostiene esto
+
+Declarar una lista a mano junto al codigo que construye el payload sigue siendo dos escrituras que
+pueden separarse. Lo que impide que se separen es una prueba por estrategia que ejecuta `execute`
+con los dobles que el spec ya montaba y contrasta `Object.keys(result.data)` contra los `name`
+declarados. Si manana alguien anade una clave al `data` sin declararla, el spec cae con el nombre
+de la clave delante. Es la unica forma de que el inventario no envejezca en silencio, que es como
+envejecen los inventarios.
+
+De paso se corrigio el TSDoc de `ParserEmailStrategy`, que decia "las doce claves" sobre un arreglo
+de trece desde que se anadieron `requires_multimodal_fallback` y `multimodal_reason`.
+
+### Lo que las pruebas cubren y lo que no
+
+Backend **47 suites / 1114 pruebas** (nueve nuevas); frontend **17 ficheros / 380 pruebas**, sin
+cambios: `frontend/src/types/node-catalog.ts` ya replicaba el contrato y ningun store asumia que
+tipos publican campos.
+
+Lo que **no** esta cubierto: la costura HTTP sigue sin prueba de extremo a extremo, asi que el
+`GET /api/nodos` con los cinco inventarios llenos hay que comprobarlo a mano. Y queda abierta la
+deuda de `DEFAULT_UPSTREAM_NAMESPACES` en `template-mapper.store.ts`, que sigue siendo el ultimo
+mock del frontend: ahora que los cinco nodos publican campos, el editor de plantillas podria
+ofrecer `{{namespace.campo}}` completo en vez de solo el nombre del namespace.
+
+---
+
+## Tanda actual — El mapeador dejo de fiarse del nombre del namespace
+
+La peticion pedia un `getNodeCatalog()` en el servicio del nodo contra
+`GET /api/fsm/nodes/catalog`, y en `flujo-draft.store.ts` un estado `nodeCatalog`, una accion
+`fetchNodeCatalog()` y un getter `availableInterpolationVariables(currentNodeId)`. No se hizo nada
+de eso, y el motivo es el mismo de la tanda anterior: **ya existia, y anadirlo habria creado
+segundas fuentes**.
+
+| Lo pedido | Donde ya vivia |
+|---|---|
+| `getNodeCatalog()` | `node-catalog.service.ts::fetchNodeCatalog()` → `GET /nodos` (la ruta del enunciado no existe) |
+| `nodeCatalog` + `fetchNodeCatalog()` | `node-catalog.store.ts`, cargado en paralelo con las plantillas en `loadAvailableTemplates()` |
+| Recorrido entrypoint → nodo anterior, cruzado con el catalogo | `upstreamContext(stepIndex)` |
+| Empuje a cada nodo | `syncUpstreamNamespaces()`, que ya empujaba los DOS canales a TODOS los stores |
+
+Y una razon de reparto: componer las opciones de `{{ns.campo}}` en el agregador lo obligaria a
+saber que forma tiene la configuracion de UN tipo de nodo concreto, que es exactamente lo que
+§3.1 prohibe. El getter va en el store del nodo, como `buildUrlOptions()` en el extractor web.
+
+### De "existe el namespace" a "existe el campo"
+
+`missingRequiredVariables` comparaba solo la RAIZ de cada ruta: `path.split('.')[0]` contra la
+lista de namespaces. Con eso, una plantilla que interpolara `{{parsed_email.clean_bodyy}}` se daba
+por buena con que hubiera un parser aguas arriba. El error sobrevivia a la configuracion, al
+guardado y a la activacion, y aparecia en la primera ejecucion como un GRAVE con el flujo PAUSADO.
+
+Ahora hay tres reglas, y la tercera es la que importa:
+
+1. Ningun paso anterior escribe ese namespace → falta. Es lo que ya hacia.
+2. El namespace existe y **se conoce su inventario**, pero no publica ese campo → falta. Es el
+   grano fino que `outputFields` hizo posible.
+3. El namespace existe pero llega con `fields: []` → **se da por satisfecha**.
+
+La tercera no es una concesion: un inventario vacio significa "aun no se que publica" —el catalogo
+viajando, o un tipo de nodo que no declara sus campos—, y asi lo fija el contrato de
+`UpstreamNamespace`. Tratarlo como fallo pintaria de rojo todas las plantillas mientras dura la
+peticion, y para siempre si falla. Es la misma politica que `isNodeTypeImplemented`: ante la duda
+no se bloquea.
+
+Las rutas profundas (`llm_response.articles.0.title`) se juzgan por sus **dos primeros
+segmentos**. Lo que el nodo publica es `articles`; lo de dentro es la forma de ese objeto, que
+ninguna estrategia declara campo a campo, y comparar la ruta entera daria por ausente toda
+variable que navegue una estructura.
+
+### El default que mentia
+
+`DEFAULT_UPSTREAM_NAMESPACES = ['parsed_email', 'scraped_web', 'llm_response']` sembraba el store
+al construirse. Su TSDoc lo marcaba PROVISIONAL "hasta que exista el asistente", y el asistente
+lleva dos tandas empujando el contexto de verdad. Habia dejado de ser un apano para ser una
+mentira: hasta la primera sincronizacion el nodo se validaba contra un flujo inventado, y un flujo
+que arranca en TRIGGER_CRON daba por resoluble un `{{parsed_email.x}}`. Se retira, igual que se
+retiro el `URL_SOURCE_NAMESPACE` del extractor web.
+
+### Por que el aviso de "no hay variables" NO bloquea
+
+El enunciado pedia `isConfigValid = false` cuando no hubiera variables aguas arriba. No se hizo:
+una plantilla **estatica** —un pie corporativo, un aviso de cabecera fija— no interpola nada y es
+legitima en un flujo que no publique un solo campo. Exigirle contexto seria inventar un requisito
+que el motor no tiene. El aviso ambar se muestra (`data-test="no-upstream-variables"`), explica que
+una plantilla con variables no podra resolverse ahi, y deja el badge de validez en paz. Lo que si
+bloquea sigue siendo el contrato roto, que ahora se detecta mejor.
+
+### Dos fallos, dos mensajes
+
+El banner rojo fundia los dos casos en "faltan estos namespaces". Se separan porque el arreglo es
+distinto: si falta el namespace entero hay que **anadir o reordenar un nodo**; si el namespace esta
+y el campo no, hay que **corregir la plantilla**. Mandar al operador a revisar la topologia por una
+errata en un nombre de campo es hacerle perder la tarde. De ahi `missingUpstreamNamespaces` y
+`missingUpstreamFields` como dos derivados distintos, y el tooltip del chip diciendo cual de los
+dos es.
+
+### El editor inserta la ruta entera
+
+Los chips de `TemplateEditorDialog` insertaban `{{namespace.}}` y dejaban el caret dentro de las
+llaves para que el autor terminara el nombre a mano — que es justo donde se cometia la errata que
+el punto anterior detecta. Con un flujo detras, el dialogo recibe `upstreamContext` por prop y
+ofrece la ruta completa, insertada con offset `0` porque ya no falta nada que escribir.
+
+La prop es **opcional a proposito**: el gestor de plantillas abre el mismo dialogo sin ningun flujo
+detras, y ahi no hay topologia que consultar. Sin contexto se conservan los chips de namespace de
+siempre. No es un degradado, es el otro caso de uso.
+
+### Detalles con razon detras
+
+- **`UpstreamNamespace` gana `nodeType`**, opcional. Es lo que permite agrupar el desplegable por
+  `parsed_email (PARSER_PRE_IA)` en vez de por el namespace a secas. Opcional porque `_assets` no
+  lo escribe ningun nodo. No se deduce invirtiendo `DEFAULT_OUTPUT_NAMESPACE_BY_NODE_TYPE` en el
+  consumidor: esa relacion es una CONVENCION y un esquema puede declarar otro `outputNamespace`.
+- **`outputNamespace` pasa a `q-select` cerrado.** Era el ultimo campo de texto libre del nodo
+  sobre una lista cerrada; una mayuscula o un guion ahi eran un 400 al guardar el flujo entero.
+- **El selector de variables NO filtra por tipo**, a diferencia del extractor web: una plantilla
+  interpola cualquier cosa que sepa convertirse en texto. El tipo va en la etiqueta —`subject
+  (text)`, `attachments (object)`— para que el operador sepa que esta insertando.
+- **El componente no carga el catalogo.** El enunciado pedia `fetchNodeCatalog()` en su
+  `onMounted`; se omitio porque el catalogo es estado del ANFITRION y los dos que existen ya lo
+  piden. Un tercer cargador desde el componente lo haria alcanzar un store global que no es el
+  suyo.
+- **`data-test` en el contenedor y no en el `<q-select>`.** Quasar derrama los atributos sobre un
+  div interno (`.q-field__native`), no sobre la raiz del componente, asi que
+  `findComponent('[data-test=…]')` no encuentra nada. Localizar por posicion habria funcionado
+  hasta el primer reordenamiento del formulario.
+
+### Lo que las pruebas cubren y lo que no
+
+Frontend **18 ficheros / 405 pruebas** (25 nuevas): 15 en el spec del store —canal rico,
+`variableOptions`, las tres reglas del grano fino, `hasUpstreamVariables`— y 10 en
+`TemplateMapperConfig.spec.ts`, que no existia. Backend sin cambios.
+
+Lo que **no** esta cubierto: los chips del editor de plantillas con contexto no tienen prueba de
+componente —`TemplateEditorDialog` arrastra CodeMirror y el spec del mapeador lo sustituye por un
+stub—, y la costura HTTP sigue sin prueba de extremo a extremo.
+
+---
+
+## Tanda actual — El editor de plantillas dejo de pedir que se teclee el campo
+
+Los chips del editor insertaban `{{namespace.}}` y dejaban el caret dentro de las llaves para que
+el autor terminara el nombre **a mano**. El coste de ese "a mano" esta medido: el backend valida
+solo el NAMESPACE de cada variable, nunca el campo. `extractAndValidateVariables` comprueba el
+grupo 1 contra `ALLOWED_NAMESPACES` y acepta el resto de la ruta tal cual —lo dice su propio
+TSDoc: *"Se valida la RAIZ de la ruta a cualquier profundidad"*—, asi que un
+`{{parsed_email.clean_bodyy}}` se guarda sin protesta y falla en render.
+
+La tanda anterior ensenio a detectar esa errata en el nodo mapeador, cruzando las
+`requiredVariables` de la plantilla contra los campos reales del flujo. Esta la impide cometer.
+
+### Un explorador en vez de tres vias de insercion
+
+Se retiran los dos bloques de chips —los planos de `TEMPLATE_NAMESPACES` y los de ruta completa
+que la tanda anterior anadio— y en su lugar va una sola secuencia:
+
+```
+1. Selecciona Origen / Namespace   ->  2. Campo a inyectar  ->  tarjeta con el token
+                                                                 [Copiar] [Insertar]
+```
+
+Tres vias conviviendo en una barra lateral que ya compite con el editor no son tres comodidades,
+son ruido. Y la mas rapida de las tres era justamente la que permitia la errata.
+
+### De donde salen los origenes: la prop gana al catalogo
+
+El dialogo lo abren dos sitios, y necesitan respuestas distintas:
+
+| Anfitrion | Origenes que ofrece |
+|---|---|
+| `TemplateMapperConfig` (hay flujo) | Los del `upstreamContext`: lo que ESE flujo publica de verdad |
+| `TemplatesManager` (no hay flujo) | El catalogo global: los ocho namespaces mas `_assets` |
+
+La prop manda cuando viene con algo porque es la respuesta mas **especifica**: un flujo concreto
+sabe que namespaces tiene y con que campos; el catalogo solo sabe que publicaria cada tipo de nodo
+si alguien lo colocara. Y el gestor necesita justo eso ultimo, porque una plantilla suya tiene que
+poder escribirse para cualquier flujo futuro.
+
+### La inversion del mapa, subida a `src/utils/`
+
+Resolver "namespace -> campos" sin topologia exige invertir
+`DEFAULT_OUTPUT_NAMESPACE_BY_NODE_TYPE`. Esa inversion ya existia **una vez**, como `const` privada
+dentro de `NodeConfigSandboxPage.vue`. Hacia falta una segunda, asi que se sube a
+`@/utils/upstream-catalog` y el banco pasa a usarla: dos tablas que responden lo mismo discrepan en
+cuanto se anade un tipo de nodo, y el TSDoc de `UpstreamNamespace` ya avisaba contra invertir el
+mapa "en cada consumidor".
+
+La advertencia sigue en pie y el helper no la contradice. Cuando hay flujo se usa su topologia, que
+sabe quien escribe que. El helper responde la otra pregunta, la de quien no tiene flujo: *si
+alguien escribiera `parsed_email`, que publicaria*.
+
+`findByCode` entra **por parametro** y no importando el store, para que el helper quede puro y su
+spec no necesite Pinia.
+
+### `_assets` tenia que declararse a mano
+
+Es el unico namespace que no publica ningun nodo: lo inyecta `TemplateRendererService` en cada
+render, y su unica clave —`base_url`— no esta en el catalogo ni en ninguna lista; solo vivia en la
+prosa de un TSDoc y en una linea del renderer. Quitar los chips planos la habria dejado sin
+ninguna forma de insertarse. Se declara `ASSETS_FIELDS` en `@/types/html-template`, junto a
+`TEMPLATE_NAMESPACES`, asumiendo que es una replica y diciendolo por escrito.
+
+### Por que no se alcanza el `EditorView`
+
+El enunciado pedia tomar la instancia de CodeMirror y despachar la transaccion desde el dialogo.
+No hace falta y ademas no se puede: `TemplateCodeEditor` guarda su `view` en una variable privada
+del `setup` —con un TSDoc explicando que envolver una instancia imperativa en un proxy reactivo de
+Vue es fuente conocida de rarezas— y `defineExpose` publica solo tres metodos. Uno de ellos,
+`insertTextAtCursor`, ya hace exactamente lo pedido: reemplaza el rango de
+`view.state.selection.main`, recoloca el caret, hace `scrollIntoView` y devuelve el foco que el
+clic en el boton acaba de robar.
+
+La seleccion de CodeMirror sobrevive a perder el foco, asi que "la ultima posicion conocida" del
+enunciado es precisamente lo que ese metodo usa. El unico caso degradado real es un editor que
+nunca ha tenido el foco: ahi la seleccion es `{0,0}` y se inserta al principio, que para una
+plantilla nueva es el mismo sitio.
+
+Tampoco habia que tocar nada para que `requiredVariables` se actualice: la insercion despacha una
+transaccion -> `docChanged` -> `update:modelValue` -> `updateHtmlContent`, y `detectedVariables` es
+un `computed` sobre el borrador. El cableado ya estaba.
+
+### El fallback del store se generalizo
+
+`insertMarker(namespace)` solo sabia componer `{{ns.}}`, asi que la tanda anterior habia dejado en
+el dialogo un `marker.replace(/^\{\{|\.[^.]*\}\}$/g, '')` para degradar un marcador completo a su
+raiz. Feo y facil de romper. Ahora el store expone `insertTextAtCursor(text, caretOffset)`, que no
+conoce la gramatica del marcador, e `insertMarker` delega en el. Sus cuatro pruebas siguen pasando
+sin tocarlas.
+
+### Detalles con razon detras
+
+- **El catalogo se pide AL ABRIR, no en `onMounted`.** El dialogo vive montado y cerrado en el
+  arbol de sus dos anfitriones; pedirlo al montar seria pedirlo con el gestor recien pintado y
+  nadie mirando. La llamada es memoizada, asi que si el asistente ya lo cargo no cuesta peticion.
+- **El componente consume el store del catalogo, no su servicio.** La frontera HTTP sigue siendo
+  `node-catalog.service.ts`. Es distinto del caso del nodo mapeador, donde se omitio la carga
+  porque ahi SI hay un anfitrion que la hace; el gestor de plantillas no tiene ninguno.
+- **Cambiar de origen limpia el campo.** Conservarlo compondria un marcador que mezcla dos
+  namespaces.
+- **El badge de tipo usa `.pd-badge--role` de `app.scss`**, que tenia exactamente los tres valores
+  que la `.pd-namespace-chip` scoped duplicaba. Esa clase se va con los chips.
+- **El doble de CodeMirror se mockea a nivel de MODULO**, no con `stubs`: el dialogo lo carga con
+  `defineAsyncComponent` y en el arbol no hay un nombre contra el que casar. El mock necesita
+  `__esModule: true` o Vue toma el modulo entero por el componente.
+
+### Lo que las pruebas cubren y lo que no
+
+Frontend **20 ficheros / 429 pruebas** (24 nuevas): 9 del helper puro, 11 del dialogo —primer spec
+de componente de `src/components/templates/`, que cierra la pendiente 35— y 4 del fallback
+generico del store.
+
+Lo que **no** esta cubierto: el camino con CodeMirror real sigue sin prueba (el doble sustituye al
+editor), asi que la insercion de verdad solo se comprueba a mano; y `copyToClipboard` no se
+asevera, porque el portapapeles exige contexto seguro y su fallo ya degrada a un aviso.

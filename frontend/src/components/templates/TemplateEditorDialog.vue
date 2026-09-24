@@ -1,16 +1,22 @@
 <script setup lang="ts">
 import { computed, defineAsyncComponent, ref, watch } from 'vue';
-import { useQuasar } from 'quasar';
+import { copyToClipboard, useQuasar } from 'quasar';
 
+import { useNodeCatalogStore } from '@stores/node-catalog.store';
 import { useTemplatesStore } from '@stores/templates.store';
 
 import { extractApiErrorMessage, extractApiViolations } from '@/utils/api-error';
+import { buildContextForNamespaces } from '@/utils/upstream-catalog';
 
 import {
   TEMPLATE_NAMESPACES,
   type HtmlTemplate,
   type TemplateViolation,
 } from '@/types/html-template';
+
+import type { UpstreamNamespace } from '@stores/nodes/node-store-registry';
+
+import type { NodeOutputField } from '@/types/node-catalog';
 
 // CodeMirror pesa unos cientos de KB y este dialogo lo importan dos componentes
 // distintos; en diferido solo se descarga al abrir el editor.
@@ -28,9 +34,18 @@ interface TemplateCodeEditorInstance {
 interface Props {
   modelValue: boolean;
   template: HtmlTemplate | null;
+  /**
+   * Namespaces del flujo desde el que se abre el dialogo, con sus campos.
+   *
+   * OPCIONAL, y su ausencia no es un caso degradado: el gestor de plantillas
+   * abre este mismo dialogo sin ningun flujo detras, y ahi no hay topologia que
+   * consultar. Con contexto, el explorador ofrece lo que ESE flujo publica de
+   * verdad; sin el, cae al catalogo global (ver `variableContext`).
+   */
+  upstreamContext?: readonly UpstreamNamespace[];
 }
 
-const props = defineProps<Props>();
+const props = withDefaults(defineProps<Props>(), { upstreamContext: () => [] });
 
 const emit = defineEmits<{
   'update:modelValue': [value: boolean];
@@ -39,6 +54,9 @@ const emit = defineEmits<{
 
 const $q = useQuasar();
 const templatesStore = useTemplatesStore();
+// El catalogo es estado compartido y este componente lo consume de su store, no
+// de un servicio: la frontera HTTP sigue siendo `node-catalog.service.ts`.
+const nodeCatalogStore = useNodeCatalogStore();
 
 // Los ejemplos con llaves viven aqui y no en la plantilla: el compilador de Vue
 // no sabe distinguir unas llaves literales de una interpolacion anidada.
@@ -46,12 +64,15 @@ const VARIABLE_SYNTAX_EXAMPLE = '{{namespace.campo}}';
 const FORBIDDEN_BLOCK_EXAMPLE = '{{#if}}';
 const FORBIDDEN_TRIPLE_STASH_EXAMPLE = '{{{}}}';
 
-/** Retroceso del caret tras insertar, para dejarlo en `{{namespace.|}}`. */
-const CARET_OFFSET_INSIDE_BRACES = -2;
-
 // `InstanceType<typeof ...>` no resuelve a traves de defineAsyncComponent, de
 // ahi la interfaz explicita.
 const codeEditorRef = ref<TemplateCodeEditorInstance | null>(null);
+
+// Seleccion del explorador de variables. Se declara antes del `watch` de
+// apertura porque ese lo lee: en `<script setup>` el orden de declaracion es el
+// de ejecucion.
+const selectedNamespace = ref<string | null>(null);
+const selectedField = ref<NodeOutputField | null>(null);
 
 const isEditMode = computed(() => !!props.template);
 
@@ -60,44 +81,124 @@ watch(
   (isOpen) => {
     // El borrador se inicializa AL ABRIR, no al montar: el dialogo permanece en
     // el arbol cerrado, y `props.template` cambia entre un alta y una edicion.
-    if (isOpen) templatesStore.initDraft(props.template ?? undefined);
+    if (!isOpen) return;
+
+    templatesStore.initDraft(props.template ?? undefined);
+    selectedNamespace.value = null;
+    selectedField.value = null;
+
+    // Tambien al abrir y no en `onMounted`, por lo mismo: montado esta desde que
+    // se pinta el gestor, y ahi no hay nadie mirando el explorador. La llamada
+    // es memoizada, asi que si el asistente ya cargo el catalogo no cuesta una
+    // peticion.
+    void nodeCatalogStore.fetchCatalog();
   },
 );
+
+/**
+ * De donde salen los origenes que el explorador ofrece.
+ *
+ * La prop MANDA cuando viene con algo, porque es la respuesta mas especifica:
+ * un flujo concreto sabe que namespaces publica de verdad y con que campos. El
+ * catalogo global solo sabe que publicaria cada tipo de nodo SI alguien lo
+ * colocara, que es exactamente lo que necesita el gestor de plantillas —donde no
+ * hay flujo y la plantilla debe poder escribirse para cualquiera.
+ */
+const variableContext = computed<readonly UpstreamNamespace[]>(() =>
+  props.upstreamContext.length > 0
+    ? props.upstreamContext
+    : buildContextForNamespaces(TEMPLATE_NAMESPACES, nodeCatalogStore.findByCode),
+);
+
+/** Paso 1 del explorador. El `nodeType` va en la etiqueta, no en el valor. */
+const namespaceOptions = computed(() =>
+  variableContext.value.map(({ namespace, nodeType }) => ({
+    label: nodeType === undefined ? namespace : `${namespace} (${nodeType})`,
+    value: namespace,
+  })),
+);
+
+/**
+ * Paso 2: campos del origen elegido.
+ *
+ * Vacio mientras no haya origen, y tambien cuando el origen no declara campos
+ * —un tipo sin `outputFields`, o el catalogo aun viajando—. El selector queda
+ * entonces sin opciones, que es honesto: no hay nada que ofrecer todavia.
+ */
+const availableFields = computed<readonly NodeOutputField[]>(
+  () =>
+    variableContext.value.find(({ namespace }) => namespace === selectedNamespace.value)?.fields ??
+    [],
+);
+
+/** Marcador resultante, o cadena vacia mientras la eleccion este incompleta. */
+const interpolatedToken = computed<string>(() =>
+  selectedNamespace.value !== null && selectedField.value !== null
+    ? `{{${selectedNamespace.value}.${selectedField.value.name}}}`
+    : '',
+);
+
+// Cambiar de origen invalida el campo: pertenecia al anterior, y dejarlo
+// compondria un marcador que mezcla dos namespaces.
+watch(selectedNamespace, () => {
+  selectedField.value = null;
+});
 
 const onDialogToggle = (value: boolean): void => emit('update:modelValue', value);
 
 const closeDialog = (): void => emit('update:modelValue', false);
 
+/** Copia el marcador al portapapeles, para pegarlo donde el autor decida. */
+const handleCopyToken = async (): Promise<void> => {
+  if (interpolatedToken.value === '') return;
+
+  try {
+    await copyToClipboard(interpolatedToken.value);
+    $q.notify({ type: 'positive', message: 'Marcador copiado al portapapeles' });
+  } catch {
+    // El portapapeles exige contexto seguro y permiso del navegador. Si lo
+    // niega, el marcador sigue a la vista en la tarjeta: se copia a mano.
+    $q.notify({
+      type: 'warning',
+      message: `Copia manualmente: ${interpolatedToken.value}`,
+    });
+  }
+};
+
 /**
- * Inserta `{{namespace.}}` en el cursor (Poka-Yoke).
+ * Inserta el marcador completo en el cursor del editor (Poka-Yoke).
  *
- * El autor elige el namespace de la lista blanca en vez de teclearlo: es la
- * unica forma de no equivocarse ANTES de que el backend rechace la plantilla.
+ * Se despacha sobre el EDITOR y no sobre el store porque CodeMirror es el dueno
+ * del cursor y del historial: `insertTextAtCursor` reemplaza el rango de
+ * `view.state.selection.main` —que sobrevive a perder el foco, asi que el clic
+ * en el boton no lo pierde— y el store se sincroniza solo por
+ * `update:modelValue`. Escribir tambien en el store insertaria el texto dos
+ * veces.
  *
- * CodeMirror es el dueno del cursor, asi que la insercion se despacha sobre el
- * editor y el store se sincroniza solo por `update:modelValue`. Hacerlo tambien
- * desde el store insertaria el texto dos veces.
+ * Offset `0`: el marcador esta completo y el caret debe quedar DETRAS. La
+ * version anterior insertaba `{{ns.}}` y retrocedia dos posiciones para que el
+ * autor escribiera el campo — que es justo la errata que el explorador elimina.
  */
-const insertNamespace = (namespace: string): void => {
-  const snippet = `{{${namespace}.}}`;
+const handleInsertToken = (): void => {
+  if (interpolatedToken.value === '') return;
 
   if (codeEditorRef.value) {
-    codeEditorRef.value.insertTextAtCursor(snippet, CARET_OFFSET_INSIDE_BRACES);
+    codeEditorRef.value.insertTextAtCursor(interpolatedToken.value, 0);
     return;
   }
 
   // Red por si el editor aun no ha resuelto su carga diferida.
-  templatesStore.insertMarker(namespace);
+  templatesStore.insertTextAtCursor(interpolatedToken.value);
 };
 
 /**
  * Reindenta el HTML del editor.
  *
- * Delega en el editor por el mismo motivo que `insertNamespace`: CodeMirror es
+ * Delega en el editor por el mismo motivo que `handleInsertToken`: CodeMirror es
  * el dueno del documento y del historial, asi que el formateo tiene que
  * despacharse como una transaccion suya. Sin red hacia el store, a diferencia
- * de la insercion de marcadores: no hay nada que formatear hasta que el editor
- * este montado y visible.
+ * de la insercion: no hay nada que formatear hasta que el editor este montado y
+ * visible.
  */
 const formatHtmlCode = (): void => codeEditorRef.value?.formatDocument();
 
@@ -187,21 +288,69 @@ const onSubmit = async (): Promise<void> => {
               />
             </div>
 
-            <!-- Chips Poka-Yoke: el namespace se elige, no se teclea -->
-            <div class="q-mb-md">
-              <div class="pd-label">Namespaces disponibles</div>
+            <!-- Explorador Poka-Yoke: origen y campo se eligen, no se teclean -->
+            <div class="q-mb-md" data-test="variable-explorer">
+              <div class="pd-label">Variables disponibles</div>
               <p class="pd-subtitle q-mt-xs q-mb-sm">
-                Pulsa uno para insertarlo en el cursor. Solo estos estan permitidos.
+                Elige el origen y el campo. El marcador se compone solo.
               </p>
-              <div class="pd-chip-bar">
-                <q-chip
-                  v-for="namespace in TEMPLATE_NAMESPACES"
-                  :key="namespace"
-                  clickable
+
+              <div data-test="namespace-field">
+                <q-select
+                  v-model="selectedNamespace"
+                  :options="namespaceOptions"
+                  label="1. Selecciona Origen / Namespace"
                   dense
-                  class="pd-namespace-chip pd-mono"
-                  :label="namespace"
-                  @click="insertNamespace(namespace)"
+                  outlined
+                  emit-value
+                  map-options
+                  class="q-mb-sm"
+                />
+              </div>
+
+              <div data-test="variable-field">
+                <q-select
+                  v-model="selectedField"
+                  :options="availableFields"
+                  option-label="name"
+                  label="2. Campo a inyectar"
+                  dense
+                  outlined
+                  :disable="selectedNamespace === null"
+                />
+              </div>
+
+              <div v-if="selectedField" class="pd-token-card q-mt-sm" data-test="token-detail">
+                <div class="pd-mono pd-token-value">{{ interpolatedToken }}</div>
+                <div class="row items-center q-gutter-xs q-mt-xs">
+                  <span class="pd-badge pd-badge--role">{{ selectedField.type }}</span>
+                  <span v-if="selectedField.description" class="col pd-subtitle q-mb-none">
+                    {{ selectedField.description }}
+                  </span>
+                </div>
+              </div>
+
+              <div class="row q-gutter-sm q-mt-sm">
+                <q-btn
+                  icon="content_copy"
+                  label="Copiar"
+                  outline
+                  no-caps
+                  dense
+                  class="pd-btn-secondary"
+                  data-test="copy-token"
+                  :disable="!interpolatedToken"
+                  @click="handleCopyToken"
+                />
+                <q-btn
+                  icon="add"
+                  label="Insertar en plantilla"
+                  no-caps
+                  dense
+                  class="pd-btn-primary"
+                  data-test="insert-token"
+                  :disable="!interpolatedToken"
+                  @click="handleInsertToken"
                 />
               </div>
             </div>
@@ -382,10 +531,17 @@ const onSubmit = async (): Promise<void> => {
   gap: 4px;
 }
 
-.pd-namespace-chip {
+// Tarjeta del marcador compuesto: lo que se va a insertar, antes de insertarlo.
+.pd-token-card {
   background: var(--pd-surface-muted);
-  color: var(--pd-accent-text);
   border: 1px solid var(--pd-border);
+  border-radius: $generic-border-radius;
+  padding: 10px 12px;
+}
+
+.pd-token-value {
+  color: var(--pd-accent-text);
+  word-break: break-all;
 }
 
 // Detectadas: mismo lenguaje visual que el chip del editor, para que se lean

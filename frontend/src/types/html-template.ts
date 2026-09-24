@@ -4,6 +4,8 @@
 
 import { NODE_OUTPUT_NAMESPACES } from '@/types/pipeline';
 
+import type { NodeOutputField } from '@/types/node-catalog';
+
 /** Fila de `plantillas_html`. */
 export interface HtmlTemplate {
   id: string;
@@ -86,9 +88,27 @@ export interface TemplatePreviewResponse {
  * cada render desde `ASSETS_BASE_URL`, y expone una sola clave, `base_url`,
  * para prefijar rutas relativas de imagen.
  */
-export const TEMPLATE_NAMESPACES = [
-  ...NODE_OUTPUT_NAMESPACES,
-  '_assets',
-] as const;
+export const ASSETS_NAMESPACE = '_assets';
+
+export const TEMPLATE_NAMESPACES = [...NODE_OUTPUT_NAMESPACES, ASSETS_NAMESPACE] as const;
 
 export type TemplateNamespace = (typeof TEMPLATE_NAMESPACES)[number];
+
+/**
+ * Campos de `_assets`, el unico namespace que no sale del catalogo de nodos.
+ *
+ * No lo publica ninguna estrategia: lo inyecta `TemplateRendererService` en cada
+ * render desde `ASSETS_BASE_URL`, asi que no hay `outputFields` que preguntar y
+ * la lista tiene que declararse aqui. Se escribe en el frontend a sabiendas de
+ * que es una replica —la fuente es `withAssetsNamespace` en el renderer— porque
+ * la alternativa es que el explorador de variables no pueda ofrecerlo y el autor
+ * tenga que teclear `{{_assets.base_url}}` a mano, que es justo lo que el
+ * selector determinista existe para evitar.
+ */
+export const ASSETS_FIELDS: readonly NodeOutputField[] = [
+  {
+    name: 'base_url',
+    type: 'text',
+    description: 'Prefijo absoluto de los archivos subidos, para rutas de imagen',
+  },
+];
