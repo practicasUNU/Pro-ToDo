@@ -1217,9 +1217,9 @@ describe('ImapPollingService', () => {
       );
 
       // 2. Act & 3. Assert
-      await expect(
-        service.pollInbox(FLOW_ID, buildParams()),
-      ).resolves.toBe(false);
+      await expect(service.pollInbox(FLOW_ID, buildParams())).resolves.toBe(
+        false,
+      );
     });
 
     it('4.7 deberia reintentar la alerta si su registro fallo', async () => {

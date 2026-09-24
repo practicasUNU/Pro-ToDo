@@ -12,6 +12,7 @@ import {
 import type { StatePayloadContext } from '@core/fsm/context/state-payload.context';
 import type {
   INodeStrategy,
+  NodeOutputField,
   NodeResult,
 } from '@core/fsm/types/node-strategy.types';
 import type { ResolvedCronTriggerConfig } from '@modules/nodes/dto/cron-trigger-config.dto';
@@ -64,6 +65,47 @@ const VALIDATION_OPTIONS: ValidatorOptions = {
 @Injectable()
 export class CronTriggerStrategy implements INodeStrategy {
   public readonly nodeType = NodeType.TRIGGER_CRON;
+
+  /**
+   * Las cuatro claves que este nodo deposita en su namespace.
+   *
+   * El ORDEN y los nombres replican el `data` que construye `execute`, que es
+   * la unica fuente: declarar aqui una lista que se escriba a mano por separado
+   * es exactamente la desincronizacion que `INodeStrategy.outputFields` existe
+   * para evitar.
+   *
+   * `next_run_at` se declara `text` aunque `resolveNextRun` degrade a `null`
+   * cuando `CronTime` no sabe calcular el vencimiento: el tipo describe QUE ES
+   * el campo para quien lo interpola, no si puede faltar. Una interpolacion de
+   * un valor nulo resuelve a cadena vacia, que es el comportamiento de
+   * `getInterpolatedValue` para cualquier clave ausente.
+   *
+   * Ninguna es `url`: una expresion cron y tres marcas de tiempo no son
+   * direcciones, y ofrecerlas al selector del EXTRACTOR_WEB seria el error de
+   * tipeo que la regla 8 del validador de topologia viene a impedir.
+   */
+  public readonly outputFields: readonly NodeOutputField[] = [
+    {
+      name: 'triggered_at',
+      type: 'text',
+      description: 'Marca ISO del instante de ejecucion, no del tick',
+    },
+    {
+      name: 'cron_expression',
+      type: 'text',
+      description: 'Programacion configurada en el nodo',
+    },
+    {
+      name: 'time_zone',
+      type: 'text',
+      description: 'Zona horaria con la que se interpreta la expresion',
+    },
+    {
+      name: 'next_run_at',
+      type: 'text',
+      description: 'Proximo vencimiento en ISO, o vacio si no se pudo calcular',
+    },
+  ];
 
   private readonly logger = new Logger(CronTriggerStrategy.name);
 

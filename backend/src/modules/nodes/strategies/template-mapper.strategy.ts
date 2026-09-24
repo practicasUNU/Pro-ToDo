@@ -8,6 +8,7 @@ import type { StatePayloadContext } from '@core/fsm/context/state-payload.contex
 import type {
   INodeStrategy,
   NodeErrorDetail,
+  NodeOutputField,
   NodeResult,
 } from '@core/fsm/types/node-strategy.types';
 
@@ -72,6 +73,31 @@ type TemplateResolution =
 @Injectable()
 export class TemplateMapperStrategy implements INodeStrategy {
   public readonly nodeType = NodeType.MAPEADOR_PLANTILLA;
+
+  /**
+   * Las dos claves que este nodo deposita en su namespace.
+   *
+   * Se declaran aunque hoy el mapeador sea el ultimo paso de todos los flujos:
+   * `outputFields` describe lo que el nodo PRODUCE, no lo que alguien consume, y
+   * esa es la misma razon por la que es una propiedad constante y no un metodo
+   * que mire `params`. El dia que un DESTINO_HTTP tenga que enviar el marcado ya
+   * compilado, el selector lo encontrara sin tocar esta estrategia.
+   *
+   * `compiled_markup` es `text` y no `object`: es la cadena HTML que devuelve
+   * Handlebars, interpolable tal cual.
+   */
+  public readonly outputFields: readonly NodeOutputField[] = [
+    {
+      name: 'compiled_markup',
+      type: 'text',
+      description: 'Marcado HTML con las variables ya sustituidas',
+    },
+    {
+      name: 'mapped_at',
+      type: 'text',
+      description: 'Marca ISO del instante en que se compilo la plantilla',
+    },
+  ];
 
   constructor(
     private readonly templatesService: TemplatesService,

@@ -20,6 +20,7 @@ import type { StatePayloadContext } from '@core/fsm/context/state-payload.contex
 import type {
   INodeStrategy,
   NodeErrorDetail,
+  NodeOutputField,
   NodeResult,
 } from '@core/fsm/types/node-strategy.types';
 import type { ResolvedImapConfig } from '@modules/nodes/dto/imap-trigger-config.dto';
@@ -387,6 +388,61 @@ export const buildImapSearchQuery = (
 @Injectable()
 export class ImapTriggerStrategy implements INodeStrategy {
   public readonly nodeType = NodeType.TRIGGER_IMAP;
+
+  /**
+   * Las siete claves que este nodo deposita en su namespace.
+   *
+   * Replican `ExtractedEmail`, que es el contrato del payload y no una lista
+   * paralela: el orden y los nombres son los mismos, y `toExtractedEmail`
+   * garantiza que TODAS esten siempre presentes —cadena vacia o arreglo vacio
+   * antes que `undefined`— para que una plantilla que las interpole no falle por
+   * variable ausente.
+   *
+   * `status` NO se declara, y no es un olvido. Esa clave solo existe en la rama
+   * del buzon vacio, que devuelve `halt`: el motor cierra la ejecucion en
+   * EXITOSO y ningun nodo de aguas abajo llega a interpolar nada. Ofrecerla en
+   * el selector prometeria un campo que nunca esta cuando hay algo que mapear.
+   *
+   * Ningun campo es `url`, pese a que `html` y `text` vienen llenos de enlaces.
+   * Contienen direcciones, pero no SON una direccion, y extraerlas es trabajo de
+   * PARSER_PRE_IA, que para eso publica `extracted_urls` como `url[]`. Declarar
+   * `html` como `url` colaria el cuerpo entero de un correo en el selector del
+   * EXTRACTOR_WEB, que es justo el error de tipeo que la regla 8 del validador
+   * de topologia existe para impedir.
+   */
+  public readonly outputFields: readonly NodeOutputField[] = [
+    {
+      name: 'message_id',
+      type: 'text',
+      description: 'Identificador del mensaje en el buzon',
+    },
+    {
+      name: 'from',
+      type: 'text',
+      description: 'Direccion del remitente, ya aplanada a cadena',
+    },
+    { name: 'subject', type: 'text', description: 'Asunto del correo' },
+    {
+      name: 'text',
+      type: 'text',
+      description: 'Parte text/plain, vacia si el correo solo traia marcado',
+    },
+    {
+      name: 'html',
+      type: 'text',
+      description: 'Marcado crudo sin sanear, con las imagenes ya purgadas',
+    },
+    {
+      name: 'date',
+      type: 'text',
+      description: 'Cabecera Date en ISO, vacia si el MIME no la trae',
+    },
+    {
+      name: 'attachments',
+      type: 'object',
+      description: 'Inventario de adjuntos ingeridos; arreglo vacio si no hay',
+    },
+  ];
 
   private readonly logger = new Logger(ImapTriggerStrategy.name);
 

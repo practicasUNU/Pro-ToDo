@@ -189,4 +189,48 @@ describe('CronTriggerStrategy', () => {
       expect(context.getAllContext()).toEqual(before);
     });
   });
+
+  describe('4. Inventario de salida (outputFields)', () => {
+    it('4.1 deberia declarar las cuatro claves en el orden del payload', () => {
+      // 1. Arrange & 2. Act
+      const strategy = new CronTriggerStrategy();
+
+      // 3. Assert: es lo que el catalogo sirve al selector del asistente.
+      expect(strategy.outputFields.map((field) => field.name)).toEqual([
+        'triggered_at',
+        'cron_expression',
+        'time_zone',
+        'next_run_at',
+      ]);
+    });
+
+    it('4.2 deberia coincidir exactamente con las claves que emite execute', async () => {
+      // 1. Arrange: la guarda contra la desincronizacion entre el inventario
+      // declarado y el `data` real. Anadir una clave sin declararla rompe aqui.
+      const strategy = new CronTriggerStrategy();
+
+      // 2. Act
+      const result = await strategy.execute(buildContext(), {
+        cronExpression: VALID_EXPRESSION,
+      });
+
+      // 3. Assert
+      expect(Object.keys(result.data ?? {}).sort()).toEqual(
+        strategy.outputFields.map((field) => field.name).sort(),
+      );
+    });
+
+    it('4.3 no deberia ofrecer ningun campo como origen de URL', () => {
+      // 1. Arrange & 2. Act
+      const strategy = new CronTriggerStrategy();
+
+      // 3. Assert: una expresion cron y tres marcas de tiempo no son
+      // direcciones; la regla 8 del validador debe seguir rechazando un
+      // EXTRACTOR_WEB que solo tenga este nodo aguas arriba.
+      const urlFields = strategy.outputFields.filter(
+        (field) => field.type === 'url' || field.type === 'url[]',
+      );
+      expect(urlFields).toEqual([]);
+    });
+  });
 });

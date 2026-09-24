@@ -443,4 +443,35 @@ describe('TemplateMapperStrategy', () => {
       expect(renderer.renderStrict).not.toHaveBeenCalled();
     });
   });
+
+  describe('5. Inventario de salida (outputFields)', () => {
+    it('5.1 deberia declarar las dos claves en el orden del payload', () => {
+      // 1. Arrange & 2. Act
+      const strategy = buildStrategy(buildService());
+
+      // 3. Assert: es lo que el catalogo sirve al selector del asistente.
+      expect(strategy.outputFields.map((field) => field.name)).toEqual([
+        'compiled_markup',
+        'mapped_at',
+      ]);
+    });
+
+    it('5.2 deberia coincidir exactamente con las claves que emite execute', async () => {
+      // 1. Arrange: la guarda contra la desincronizacion entre el inventario
+      // declarado y el `data` real. Anadir una clave sin declararla rompe aqui.
+      const service = buildService();
+      service.findOne.mockResolvedValue(buildTemplate());
+      const strategy = buildStrategy(service);
+
+      // 2. Act
+      const result = await strategy.execute(buildContext(), {
+        templateId: TEMPLATE_ID,
+      });
+
+      // 3. Assert
+      expect(Object.keys(result.data ?? {}).sort()).toEqual(
+        strategy.outputFields.map((field) => field.name).sort(),
+      );
+    });
+  });
 });

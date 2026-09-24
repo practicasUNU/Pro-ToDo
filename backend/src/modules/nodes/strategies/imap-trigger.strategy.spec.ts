@@ -1579,4 +1579,67 @@ describe('ImapTriggerStrategy', () => {
       expect(String(result.data?.html)).not.toContain('data:image');
     });
   });
+
+  describe('12. Inventario de salida (outputFields)', () => {
+    it('12.1 deberia declarar las siete claves de ExtractedEmail en orden', () => {
+      // 1. Arrange & 2. Act
+      const { strategy } = buildStrategy();
+
+      // 3. Assert: es lo que el catalogo sirve al selector del asistente.
+      expect(strategy.outputFields?.map((field) => field.name)).toEqual([
+        'message_id',
+        'from',
+        'subject',
+        'text',
+        'html',
+        'date',
+        'attachments',
+      ]);
+    });
+
+    it('12.2 deberia coincidir exactamente con las claves que emite execute', async () => {
+      // 1. Arrange: la guarda contra la desincronizacion entre el inventario
+      // declarado y el `data` real. Se contrasta contra la via del correo
+      // encontrado, que es la unica que alimenta a los nodos de aguas abajo.
+      const { strategy } = buildStrategy();
+
+      // 2. Act
+      const result = await strategy.execute(buildContext(), buildParams());
+
+      // 3. Assert
+      expect(Object.keys(result.data ?? {}).sort()).toEqual(
+        (strategy.outputFields ?? []).map((field) => field.name).sort(),
+      );
+    });
+
+    it('12.3 NO deberia declarar status, que solo existe con halt', async () => {
+      // 1. Arrange: buzon vacio, la unica via que emite esa clave.
+      useClient(buildClient({ search: jest.fn().mockResolvedValue([]) }));
+      const { strategy } = buildStrategy();
+
+      // 2. Act
+      const result = await strategy.execute(buildContext(), buildParams());
+
+      // 3. Assert: el motor cierra en EXITOSO y nadie aguas abajo interpola,
+      //    asi que ofrecerla en el selector prometeria un campo que nunca esta
+      //    cuando hay algo que mapear.
+      expect(result.data).toEqual({ status: NO_MESSAGES_STATUS });
+      expect(result.halt).toBeDefined();
+      expect(strategy.outputFields?.map((field) => field.name)).not.toContain(
+        'status',
+      );
+    });
+
+    it('12.4 no deberia ofrecer html ni text como origen de URL', () => {
+      // 1. Arrange & 2. Act
+      const { strategy } = buildStrategy();
+
+      // 3. Assert: contienen enlaces, pero no SON una direccion. Extraerlos es
+      //    trabajo de PARSER_PRE_IA, que publica `extracted_urls` como `url[]`.
+      const urlFields = (strategy.outputFields ?? []).filter(
+        (field) => field.type === 'url' || field.type === 'url[]',
+      );
+      expect(urlFields).toEqual([]);
+    });
+  });
 });
