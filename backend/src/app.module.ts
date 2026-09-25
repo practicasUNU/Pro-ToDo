@@ -15,6 +15,7 @@ import {
 } from '@common/constants/throttler.constants';
 import { IpWhitelistGuard } from '@common/guards/ip-whitelist.guard';
 import { FsmModule } from '@core/fsm/fsm.module';
+import { AiPromptsModule } from '@modules/ai-prompts/ai-prompts.module';
 import { AuthModule } from '@modules/auth/auth.module';
 import { HealthModule } from '@modules/health/health.module';
 import { NodesModule } from '@modules/nodes/nodes.module';
@@ -114,6 +115,7 @@ const STATIC_UPLOADS_ROUTE = '/static/uploads';
     UsersModule,
     AllowedIpsModule,
     TemplatesModule,
+    AiPromptsModule,
     NodesModule,
     WorkflowTemplatesModule,
     WorkflowsModule,

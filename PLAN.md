@@ -2717,3 +2717,68 @@ la vista es privada a proposito.
 - [ ] 42. Pendiente (fuera de alcance) — no hay prueba con CodeMirror real: el spec del dialogo
       sustituye el editor por un doble de modulo, asi que la insercion efectiva solo se comprueba a
       mano
+
+---
+
+## Tanda actual — PROT-15.2 · Repositorio desacoplado de prompts de IA
+
+### El hueco: el prompt vivia dentro del flujo
+
+La instruccion que recibe el modelo viajaba incrustada en los `params` del nodo `PROCESADOR_IA`,
+dentro de `configuracion_pipeline`. Dos flujos que comparten la misma instruccion la duplicaban, y
+corregir una frase obligaba a editar el JSON de cada uno. Es exactamente el problema que PROT-11.1
+resolvio para el HTML del mapeador con `plantillas_html`, y se resuelve igual: una tabla propia.
+
+### Desacoplamiento estricto
+
+`prompts_ia` NO guarda `provider`, `model`, `temperature`, `max_tokens` ni referencia a ninguna
+plantilla HTML. Un prompt es un activo de TEXTO. Que modelo lo ejecuta lo decide la configuracion
+del nodo; el contexto lo aporta el `StatePayloadContext` en ejecucion. Guardar el modelo aqui
+ataria el texto a un proveedor e impediria reutilizar el mismo prompt con Claude y con ChatGPT,
+que es el motivo de extraerlo.
+
+### Contratos nuevos
+
+```typescript
+// @modules/ai-prompts/entities/ai-prompt.entity — tabla `prompts_ia`
+export class AiPrompt {
+  id: string;                    // id_prompt
+  name: string;                  // nombre VARCHAR(120) UNIQUE
+  description: string | null;    // descripcion VARCHAR(255)
+  promptText: string;            // texto_prompt TEXT
+  active: boolean;               // activo — borrado logico
+  createdById: string;           // id_usuario_creador → usuarios(id_usuario) ON DELETE RESTRICT
+  createdBy: User;               // relacion, NUNCA serializada (User lleva secreto_otp)
+  createdAt: Date;               // fecha_creacion TIMESTAMPTZ
+  updatedAt: Date;               // fecha_actualizacion TIMESTAMPTZ
+}
+
+// @modules/ai-prompts/ai-prompts.service
+findAll(onlyActive = true): Promise<AiPromptResponseDto[]>      // sin promptText
+findOne(id): Promise<AiPromptDetailResponseDto>                 // con promptText
+findOneEntity(id): Promise<AiPrompt>                            // NotFoundException
+findByName(name): Promise<AiPrompt | null>                      // para PROT-15.3
+create(dto, createdById): Promise<AiPromptDetailResponseDto>
+update(id, dto): Promise<AiPromptDetailResponseDto>
+softDelete(id): Promise<AiPromptDetailResponseDto>
+```
+
+`AiPromptsModule` no importa ningun otro modulo y exporta su servicio: ese aislamiento es el
+objetivo de la subtarea, no una casualidad.
+
+### Rutas
+
+`/api/ai-prompts` — `GET /`, `GET /:id`, `POST /`, `PATCH /:id`, `DELETE /:id` (logico).
+`@UseGuards(JwtAuthGuard, RolesGuard)` y `@Roles(ADMIN, EDITOR)` a nivel de clase: curar prompts es
+operacion de flujos, y la unica frontera reservada al ADMIN es la gestion de cuentas.
+
+### Checklist
+
+- [x] 43. BD — `db/migrations/018-prompts-ia.sql` idempotente y el mismo DDL en `init.sql`
+- [x] 44. Backend — entidad `AiPrompt`, DTOs create/update/response y `AiPromptsModule` en `AppModule`
+- [x] 45. Backend — `AiPromptsService` con borrado logico y `assertNameAvailable`; controlador con
+      autoria desde `@CurrentUser()`
+- [x] 46. Pruebas — `ai-prompts.service.spec.ts` (17), suite completa 48 ficheros / 1136 pruebas
+- [ ] 47. Pendiente — aplicar la migracion 018 en el contenedor (la ejecuta el usuario)
+- [ ] 48. Pendiente (PROT-15.3) — conectar `findByName` a la estrategia del `PROCESADOR_IA` y
+      decidir alli si `promptId` o `promptName` es lo que guarda el nodo en sus `params`

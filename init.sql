@@ -101,6 +101,48 @@ CREATE TABLE plantillas_html (
 );
 
 -- =============================================================================
+-- Tabla: PROMPTS_IA (PROT-15.2)
+-- Duplicada en db/migrations/018-prompts-ia.sql para las bases de datos ya
+-- creadas: este archivo solo se ejecuta con el volumen de Docker vacío.
+--
+-- Repositorio de instrucciones reutilizables para el nodo PROCESADOR_IA. Saca el
+-- prompt de los `params` del nodo, igual que `plantillas_html` hizo con el HTML.
+--
+-- DESACOPLADA a propósito: no guarda proveedor, modelo, temperatura ni
+-- max_tokens. Un prompt es un activo de TEXTO; qué modelo lo ejecuta lo decide
+-- la configuración del nodo. Atarlo aquí a un proveedor impediría reutilizar el
+-- mismo texto con Claude y con ChatGPT.
+-- =============================================================================
+
+CREATE TABLE prompts_ia (
+    id_prompt UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+
+    -- Único: es lo que el operador reconoce en el selector del nodo IA, y la
+    -- clave por la que lo resuelve `AiPromptsService.findByName()`.
+    nombre VARCHAR(120) NOT NULL UNIQUE,
+    descripcion VARCHAR(255),
+
+    -- La instrucción: texto puro o plantilla con marcadores {{nodo.campo}}.
+    -- TEXT y no VARCHAR porque no tiene longitud previsible.
+    texto_prompt TEXT NOT NULL,
+
+    -- Borrado lógico: un prompt retirado sigue explicando la salida de las
+    -- ejecuciones que lo usaron.
+    activo BOOLEAN NOT NULL DEFAULT TRUE,
+
+    -- Poblado desde el JWT (`@CurrentUser()`), no desde el DTO.
+    -- RESTRICT y no CASCADE: los prompts son patrimonio del equipo, y dar de
+    -- baja a una persona no puede borrar las instrucciones que dejó en producción.
+    id_usuario_creador UUID NOT NULL REFERENCES usuarios(id_usuario) ON DELETE RESTRICT,
+
+    fecha_creacion TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    fecha_actualizacion TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX idx_prompts_ia_id_usuario_creador
+    ON prompts_ia(id_usuario_creador);
+
+-- =============================================================================
 -- Tabla: PLANTILLAS_FLUJO (blueprints maestros)
 -- Duplicada en db/migrations/010-plantillas-flujo.sql para las bases de datos ya
 -- creadas: este archivo solo se ejecuta con el volumen de Docker vacío.

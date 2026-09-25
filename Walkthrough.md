@@ -5528,3 +5528,83 @@ generico del store.
 Lo que **no** esta cubierto: el camino con CodeMirror real sigue sin prueba (el doble sustituye al
 editor), asi que la insercion de verdad solo se comprueba a mano; y `copyToClipboard` no se
 asevera, porque el portapapeles exige contexto seguro y su fallo ya degrada a un aviso.
+
+---
+
+## Tanda actual — PROT-15.2: el prompt dejo de ser un campo del flujo
+
+### Tres divergencias del enunciado, todas por la misma razon
+
+El enunciado pedia una migracion TypeORM (`MigrationInterface`) en
+`backend/src/database/migrations/`, columnas en ingles (`ai_prompts`, `prompt_text`,
+`created_by_id`) y un `DELETE` fisico. Las tres se cambiaron tras consultarlo, porque las tres
+chocaban con una convencion que el repo ya tenia resuelta:
+
+1. **Migracion en SQL plano.** El runner de TypeORM no existe aqui: no hay `data-source.ts`, la
+   config de `TypeOrmModule` no declara `migrations` y no hay scripts npm. Las 17 migraciones
+   anteriores son `.sql` numerados que se aplican con `psql`. Una clase habria sido codigo que
+   nadie ejecuta, con la tabla sin crear y la falsa sensacion de que si.
+2. **Columnas en espanol.** Las diez tablas del esquema son snake_case en espanol y la FK apuntaba
+   a una tabla `users` que no existe — se llama `usuarios`, con PK `id_usuario`. La regla real es
+   la de `code-conventions.md` §1: identificadores en ingles, columnas en espanol. La entidad
+   expone `promptText` y `createdById`; la tabla, `texto_prompt` e `id_usuario_creador`.
+3. **Borrado logico.** Las dos tablas analogas de contenido curado (`plantillas_html`,
+   `plantillas_flujo`) usan `activo`, y por el mismo motivo: una ejecucion ya trazada apunta al
+   prompt con el que se genero su salida. Un `DELETE` fisico dejaria la auditoria sin la pieza que
+   explica el resultado.
+
+### Por que la tabla no guarda el modelo
+
+Es la decision de diseno de la subtarea, no una simplificacion. Si `prompts_ia` tuviera `provider`
+y `model`, el texto quedaria atado a un proveedor y el mismo prompt no podria probarse con Claude y
+con ChatGPT sin duplicar la fila. El modelo es configuracion de EJECUCION y pertenece al nodo; el
+prompt es un activo de CONTENIDO y pertenece al repositorio. Separarlos es lo que permite que
+PROT-15.3 conecte cualquier prompt a cualquier nodo de IA.
+
+### El servicio devuelve DTOs y no la entidad
+
+`TemplatesService` devuelve `HtmlTemplate` cruda, y su TSDoc lo justifica: "aqui no hay ninguna
+columna que deba quedar oculta". `AiPrompt` si la tiene, de forma indirecta: la relacion `createdBy`
+apunta a `User`, que lleva `secreto_otp`. Hoy no se carga, pero basta con que alguien anada un
+`relations: ['createdBy']` a una consulta para que ese campo viaje al cliente. Devolver un DTO
+cierra esa puerta antes de que se abra, y de paso deja el listado sin `promptText`: la tabla muestra
+decenas de filas y una instruccion puede ocupar kilobytes.
+
+`findByName` y `findOneEntity` son la excepcion y devuelven la entidad, porque su consumidor no es
+la API sino la estrategia del nodo IA.
+
+### `findByName` devuelve null en vez de lanzar
+
+Los demas buscadores del repo lanzan `NotFoundException`. Aqui no, y es deliberado: quien va a
+llamarlo es la estrategia del `PROCESADOR_IA`, que ante un prompt ausente debe producir un
+`NodeResult` con `success: false` y su nivel de severidad, no una excepcion HTTP que el motor
+tendria que atrapar para traducirla. El que lanza es `findOneEntity`, que es el que sirve al CRUD.
+
+### `ON DELETE RESTRICT` y no `CASCADE`
+
+`tokens_sesion` usa CASCADE porque una credencial de renovacion no tiene sentido sin su dueno. Un
+prompt si: es patrimonio del equipo. Dar de baja a quien lo escribio no puede llevarse por delante
+las instrucciones que dejo en produccion, asi que la FK bloquea el borrado del usuario. El indice
+`idx_prompts_ia_id_usuario_creador` esta justamente para poder responder "que prompts dejo esta
+persona" antes de intentarlo.
+
+### `active` en el DTO de alta, pero ignorado
+
+`CreateAiPromptDto` declara `active?: boolean` y `create()` no lo lee: todo prompt nace activo. El
+campo existe porque `UpdateAiPromptDto` es un `PartialType` del de alta, y es la UNICA via para
+reactivar un prompt retirado — `softDelete` solo sabe apagar. Sin el, la tabla administrativa
+mostraria filas inactivas imposibles de recuperar. Mismo criterio que `TemplatesService`. La
+prueba 3.2 fija ese comportamiento para que nadie lo "arregle" propagandolo.
+
+### Lo que las pruebas cubren y lo que no
+
+17 pruebas sobre el servicio con el repositorio doblado, patron AAA: listado (filtro por activo,
+orden alfabetico, ausencia de `promptText`), detalle y `NotFoundException`, `findByName` con
+recorte y `null`, alta (autoria del JWT, `active` ignorado, descripcion a `null`, colision de
+nombre), edicion (campos omitidos intactos, reactivacion, conservar el propio nombre, colision con
+otro, inexistente) y retirada logica.
+
+NO se cubre: el controlador no tiene spec propio —los guards y `@CurrentUser()` son declarativos y
+el patron del repo no los prueba por separado—, y la migracion no se ha aplicado todavia contra el
+contenedor, asi que la correspondencia entre `init.sql` y la entidad esta verificada por lectura y
+no por ejecucion.
