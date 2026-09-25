@@ -36,6 +36,13 @@ const routes: RouteRecordRaw[] = [
         // Configurar plantillas es operacion de flujos, no gestion de cuentas.
       },
       {
+        path: 'prompts',
+        name: 'ai-prompts',
+        component: () => import('@/pages/AiPromptsPage.vue'),
+        // SIN requiresAdmin: AiPromptsController admite @Roles(ADMIN, EDITOR).
+        // Curar prompts es operacion de flujos, no gestion de cuentas.
+      },
+      {
         path: 'flujos',
         component: () => import('@/pages/workflows/WorkflowsPage.vue'),
         // SIN requiresAdmin: WorkflowsController admite @Roles(ADMIN, EDITOR).
