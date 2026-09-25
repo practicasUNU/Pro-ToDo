@@ -185,6 +185,26 @@ describe('PipelineValidatorService (PROT-07)', () => {
       expect(issues[0].constraints[0]).toContain('ciclo infinito');
     });
 
+    it('deberia rechazar un pipeline cuyo entry point no sea TRIGGER', async () => {
+      // 1. Arrange: el mapeador abre el flujo. Nadie escribe `trigger`, asi que
+      //    en ejecucion el motor arrancaria sobre un contexto vacio.
+      const schema = buildNotiwebSchema();
+      schema.entrypoint = 'nodo_mapeador';
+      schema.nodes.nodo_mapeador.nextStep = null;
+
+      // 2. Act
+      const issues = await captureIssues(service, schema);
+
+      // 3. Assert: el 400 llega desde el servicio, no solo desde la funcion pura.
+      const issue = issues.find(
+        (candidate) => candidate.field === 'nodes.nodo_mapeador.nodeType',
+      );
+
+      expect(issue?.constraints).toEqual([
+        'El nodo inicial (Entry Point) debe ser un disparador de categoria TRIGGER',
+      ]);
+    });
+
     it('deberia rechazar dos nodos que escriben en el mismo outputNamespace', async () => {
       // 1. Arrange
       const schema = buildNotiwebSchema();
@@ -530,8 +550,12 @@ describe('PipelineValidatorService (PROT-07)', () => {
 
       // 3. Assert: el flujo ni siquiera llega a persistirse, que es la mejora
       //    sobre la guarda del motor: alli se descubre con la ejecucion creada.
-      expect(fieldsOf(issues)).toContain('nodes.nodo_parser.params');
-      expect(issues[0].constraints[0]).toContain('raw_email');
+      const issue = issues.find(
+        (candidate) => candidate.field === 'nodes.nodo_parser.params',
+      );
+
+      expect(issue).toBeDefined();
+      expect(issue?.constraints[0]).toContain('raw_email');
     });
 
     it('deberia aceptar el flujo cuando un paso anterior escribe el namespace', async () => {
@@ -634,7 +658,9 @@ describe('PipelineValidatorService (PROT-07)', () => {
       const issues = await captureIssues(service, schema);
 
       // 3. Assert
-      const [constraint] = issues[0].constraints;
+      const [constraint] = issues.find(
+        (candidate) => candidate.field === 'nodes.nodo_extractor.params',
+      )!.constraints;
       expect(constraint).toContain('parsed_email');
       expect(constraint.match(/parsed_email/g)).toHaveLength(1);
     });

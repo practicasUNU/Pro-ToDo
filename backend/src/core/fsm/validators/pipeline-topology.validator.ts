@@ -6,6 +6,7 @@ import {
 import {
   NODE_OUTPUT_NAMESPACE_SET,
   NODE_OUTPUT_NAMESPACES,
+  TRIGGER_NODE_TYPES,
 } from '@core/fsm/types/pipeline-schema.types';
 
 import type {
@@ -123,6 +124,12 @@ const hasNode = (schema: PipelineSchemaDto, nodeId: string): boolean =>
  *    a proposito— no pudiera contener un EXTRACTOR_WEB. La comprobacion se
  *    mueve aqui porque es la unica capa que conoce el grafo: `class-validator`
  *    valida un nodo AISLADO y no puede saber quien va delante.
+ * 9. El nodo al que apunta `entrypoint` es de categoria TRIGGER
+ *    (`TRIGGER_NODE_TYPES`). Un flujo que arranca por un mapeador o un destino
+ *    se guardaba sin protestar y solo reventaba en ejecucion, al pedir un
+ *    namespace `trigger` que nadie habia escrito. La regla mira solo el primer
+ *    nodo: un disparador en una posicion posterior es raro pero no se prohibe,
+ *    para no invalidar plantillas ya guardadas.
  *
  * Los nodos inalcanzables desde `entrypoint` se ignoran deliberadamente: un flujo
  * puede conservar ramas en construccion sin que eso invalide el esquema.
@@ -146,6 +153,21 @@ export const validatePipelineTopology = (
       field: 'entrypoint',
       constraints: [
         `El entrypoint "${schema.entrypoint}" no existe en el mapa de nodos.`,
+      ],
+    });
+  }
+
+  // 9. El punto de partida tiene que ser ademas un DISPARADOR.
+  //
+  // Solo se comprueba si el nodo existe: con un entrypoint colgado ya se emitio
+  // la regla 1, y anadir aqui un segundo issue seria ruido sobre el error real.
+  const entryNode = schema.nodes[schema.entrypoint];
+
+  if (entryNode !== undefined && !TRIGGER_NODE_TYPES.has(entryNode.nodeType)) {
+    issues.push({
+      field: `nodes.${schema.entrypoint}.nodeType`,
+      constraints: [
+        'El nodo inicial (Entry Point) debe ser un disparador de categoria TRIGGER',
       ],
     });
   }

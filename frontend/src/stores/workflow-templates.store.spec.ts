@@ -199,6 +199,49 @@ describe('useWorkflowTemplatesStore · catalogo de plantillas de flujo', () => {
       // 3. Assert
       expect(store.schemaSyntaxError).toBe('El esquema debe ser un objeto JSON.');
     });
+
+    it('2.7 deberia bloquear el guardado si el entry point no es un disparador', () => {
+      // 1. Arrange: el mapeador abre el flujo.
+      const store = useWorkflowTemplatesStore();
+      store.initDraft();
+
+      // 2. Act
+      store.patchDraft({
+        name: 'Notiweb',
+        schemaText: JSON.stringify({
+          ...SCHEMA,
+          entrypoint: 'mapeador',
+          nodes: {
+            mapeador: {
+              nodeId: 'mapeador',
+              nodeType: 'MAPEADOR_PLANTILLA',
+              outputNamespace: 'rendered_html',
+              nextStep: null,
+              onErrorStep: null,
+              params: {},
+            },
+          },
+        }),
+      });
+
+      // 3. Assert: replica la regla 9 del backend para no gastar un 400 seguro.
+      expect(store.entryPointIssue).toBe(
+        'El nodo inicial (Entry Point) debe ser un disparador de categoria TRIGGER',
+      );
+      expect(store.isDraftValid).toBe(false);
+    });
+
+    it('2.8 no deberia objetar nada cuando el entry point si es un disparador', () => {
+      // 1. Arrange
+      const store = useWorkflowTemplatesStore();
+      store.initDraft();
+
+      // 2. Act
+      store.patchDraft({ name: 'Notiweb', schemaText: JSON.stringify(SCHEMA) });
+
+      // 3. Assert
+      expect(store.entryPointIssue).toBeNull();
+    });
   });
 
   describe('2bis. Parametros base por nodo (Poka-Yoke)', () => {

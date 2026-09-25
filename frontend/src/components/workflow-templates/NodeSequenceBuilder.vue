@@ -7,10 +7,10 @@ import TemplateNodeCard from '@components/workflow-templates/TemplateNodeCard.vu
 
 import { extractApiErrorMessage } from '@/utils/api-error';
 
-import { NODE_CATEGORY_LABELS } from '@/types/node-catalog';
+import { NODE_CATEGORY_LABELS, NodeCategory } from '@/types/node-catalog';
 import { withBaseParamDefaults } from '@/utils/node-base-params';
 
-import { DEFAULT_OUTPUT_NAMESPACE_BY_NODE_TYPE } from '@/types/pipeline';
+import { DEFAULT_OUTPUT_NAMESPACE_BY_NODE_TYPE, TRIGGER_NODE_TYPES } from '@/types/pipeline';
 
 import type { AssemblerStep } from '@/utils/pipeline-assembler';
 import type { NodeCatalogEntry } from '@/types/node-catalog';
@@ -47,16 +47,44 @@ const pendingEntry = ref<NodeCatalogEntry | null>(null);
  * enum de tipos, asi que esta marca ya no deja pasar tipos que el motor no sabe
  * ejecutar.
  */
+/**
+ * Mensaje unico de la regla del Entry Point.
+ *
+ * Replica literalmente el de la regla 9 del validador del backend, que es la
+ * autoridad: la UI solo se adelanta para no gastar un 400 seguro.
+ */
+const ENTRY_POINT_MESSAGE =
+  'El nodo inicial (Entry Point) debe ser un disparador de categoria TRIGGER';
+
+/** La primera posicion es el Entry Point y solo admite disparadores. */
+const isEntryPointSlot = computed<boolean>(() => props.modelValue.length === 0);
+
+/**
+ * Un paso ya en la secuencia es disparador.
+ *
+ * Pregunta al enum y no al catalogo: `findByCode` devuelve `undefined` mientras
+ * `GET /api/nodos` esta en vuelo, y eso convertiria un disparador legitimo en un
+ * movimiento rechazado por una carrera de arranque.
+ */
+const isTriggerStep = (step: AssemblerStep): boolean => TRIGGER_NODE_TYPES.has(step.nodeType);
+
 const groupedOptions = computed(() =>
-  catalogStore.entries.map((entry) => ({
-    entry,
-    label: entry.name,
-    category: NODE_CATEGORY_LABELS[entry.category],
-    // Es `string | null` en el contrato del catalogo, asi que se propaga tal
-    // cual y es la plantilla quien decide si hay linea que pintar.
-    description: entry.description,
-    disable: !entry.implemented,
-  })),
+  catalogStore.entries
+    // Poka-Yoke: con la secuencia vacia lo que se anade ES el punto de entrada,
+    // asi que los demas ni se ofrecen. Se FILTRA en vez de deshabilitar, al
+    // contrario que `implemented`: un nodo sin estrategia es una limitacion
+    // temporal que conviene ver; un destino en la posicion 0 no es una opcion
+    // futura, es un error de concepto.
+    .filter((entry) => !isEntryPointSlot.value || entry.category === NodeCategory.TRIGGER)
+    .map((entry) => ({
+      entry,
+      label: entry.name,
+      category: NODE_CATEGORY_LABELS[entry.category],
+      // Es `string | null` en el contrato del catalogo, asi que se propaga tal
+      // cual y es la plantilla quien decide si hay linea que pintar.
+      description: entry.description,
+      disable: !entry.implemented,
+    })),
 );
 
 const isCatalogEmpty = computed<boolean>(
@@ -127,8 +155,33 @@ const addNode = (): void => {
   pendingEntry.value = null;
 };
 
+/**
+ * Rechaza una secuencia que dejaria un no-disparador abriendo el flujo.
+ *
+ * Se comprueba sobre el RESULTADO y no sobre la operacion: mover, subir y
+ * eliminar pueden desalojar al disparador de la posicion 0 de tres formas
+ * distintas, y juzgarlas por separado dejaria un hueco en cuanto se anada una
+ * cuarta.
+ */
+const rejectsEntryPoint = (steps: readonly AssemblerStep[]): boolean => {
+  const [first] = steps;
+
+  // La secuencia vacia es legitima: se esta desmontando la plantilla entera.
+  if (first === undefined) return false;
+
+  if (isTriggerStep(first)) return false;
+
+  $q.notify({ type: 'warning', message: ENTRY_POINT_MESSAGE });
+
+  return true;
+};
+
 const removeNode = (index: number): void => {
-  emitSequence(props.modelValue.filter((_, current) => current !== index));
+  const steps = props.modelValue.filter((_, current) => current !== index);
+
+  if (rejectsEntryPoint(steps)) return;
+
+  emitSequence(steps);
 };
 
 /**
@@ -148,6 +201,9 @@ const moveNode = (index: number, offset: number): void => {
   if (moved === undefined) return;
 
   steps.splice(target, 0, moved);
+
+  if (rejectsEntryPoint(steps)) return;
+
   emitSequence(steps);
 };
 
@@ -195,7 +251,12 @@ onMounted(async () => {
         option-disable="disable"
         :options="groupedOptions"
         :loading="catalogStore.isLoading"
-        label="Anadir nodo"
+        :label="isEntryPointSlot ? 'Elige el disparador inicial' : 'Anadir nodo'"
+        :hint="
+          isEntryPointSlot
+            ? 'Solo se ofrecen disparadores: son los unicos que pueden abrir un flujo.'
+            : ''
+        "
       >
         <template #option="scope">
           <q-item v-bind="scope.itemProps">

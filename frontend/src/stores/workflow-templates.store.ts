@@ -6,6 +6,8 @@ import * as workflowTemplatesService from '@services/workflow-templates.service'
 
 import { assemblePipelineSchema, disassemblePipelineSchema } from '@/utils/pipeline-assembler';
 
+import { TRIGGER_NODE_TYPES } from '@/types/pipeline';
+
 import type { AssemblerStep } from '@/utils/pipeline-assembler';
 import type {
   AssembledPipelineSchema,
@@ -56,6 +58,15 @@ const BLANK_SCHEMA_TEXT = JSON.stringify(
   null,
   2,
 );
+
+/**
+ * Unico texto de la regla Poka-Yoke del Entry Point.
+ *
+ * Replica el mensaje que emite la regla 9 del validador de topologia del
+ * backend, que es quien manda: la UI solo se adelanta para ahorrar el viaje.
+ */
+const ENTRY_POINT_MESSAGE =
+  'El nodo inicial (Entry Point) debe ser un disparador de categoria TRIGGER';
 
 // Logica de negocio y estado compartido del catalogo de plantillas de flujo.
 // Esta capa no conoce Axios ni rutas (`frontend-architecture.md` §2.1): invoca
@@ -142,6 +153,42 @@ export const useWorkflowTemplatesStore = defineStore('workflowTemplates', () => 
   });
 
   /**
+   * Motivo por el que el Entry Point no es valido, o `null` si lo es.
+   *
+   * Se deriva del TEXTO por el mismo motivo que `schemaNodeCount`: el editor JSON
+   * es editable a mano y `sequence` puede quedar desfasada, asi que se juzga lo
+   * que se va a enviar.
+   *
+   * Ante cualquier documento que no se pueda leer devuelve `null` y deja pasar:
+   * el JSON roto o el grafo a medio escribir ya los cubren `schemaSyntaxError` y
+   * `schemaNodeCount`, y la autoridad final sigue siendo el backend.
+   */
+  const entryPointIssue = computed<string | null>(() => {
+    let parsed: unknown;
+
+    try {
+      parsed = JSON.parse(activeDraft.value.schemaText);
+    } catch {
+      return null;
+    }
+
+    if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+      return null;
+    }
+
+    const { entrypoint, nodes } = parsed as { entrypoint?: unknown; nodes?: unknown };
+
+    if (typeof entrypoint !== 'string' || entrypoint.length === 0) return null;
+    if (typeof nodes !== 'object' || nodes === null || Array.isArray(nodes)) return null;
+
+    const entryNode = (nodes as Record<string, { nodeType?: unknown }>)[entrypoint];
+
+    if (entryNode === undefined || typeof entryNode.nodeType !== 'string') return null;
+
+    return TRIGGER_NODE_TYPES.has(entryNode.nodeType) ? null : ENTRY_POINT_MESSAGE;
+  });
+
+  /**
    * Condiciones minimas para intentar el guardado.
    *
    * Las tres son de FORMA, no de negocio: un nombre, un documento parseable y al
@@ -157,7 +204,8 @@ export const useWorkflowTemplatesStore = defineStore('workflowTemplates', () => 
     () =>
       activeDraft.value.name.trim().length > 0 &&
       schemaSyntaxError.value === null &&
-      schemaNodeCount.value > 0,
+      schemaNodeCount.value > 0 &&
+      entryPointIssue.value === null,
   );
 
   /**
@@ -252,9 +300,7 @@ export const useWorkflowTemplatesStore = defineStore('workflowTemplates', () => 
    */
   const stopOnFirstSuccess = computed<boolean>(() => {
     try {
-      const parsed = JSON.parse(
-        activeDraft.value.schemaText,
-      ) as Partial<AssembledPipelineSchema>;
+      const parsed = JSON.parse(activeDraft.value.schemaText) as Partial<AssembledPipelineSchema>;
 
       return parsed.executionPolicy?.stopOnFirstSuccess === true;
     } catch {
@@ -448,6 +494,7 @@ export const useWorkflowTemplatesStore = defineStore('workflowTemplates', () => 
     schemaSyntaxError,
     schemaNodeCount,
     isDraftValid,
+    entryPointIssue,
     sequence,
     stopOnFirstSuccess,
     setStopOnFirstSuccess,

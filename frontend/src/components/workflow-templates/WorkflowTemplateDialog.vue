@@ -146,8 +146,8 @@ const onSubmit = async (): Promise<void> => {
         </div>
         <p class="pd-subtitle q-mt-xs q-mb-none">
           Aqui se define la TOPOLOGIA: que nodos intervienen y en que orden. Los parametros de
-          operacion —credenciales, programaciones, plantillas— se piden despues, en el asistente,
-          al crear cada flujo concreto. El servidor valida el grafo completo antes de guardarlo.
+          operacion —credenciales, programaciones, plantillas— se piden despues, en el asistente, al
+          crear cada flujo concreto. El servidor valida el grafo completo antes de guardarlo.
         </p>
       </q-card-section>
 
@@ -213,8 +213,8 @@ const onSubmit = async (): Promise<void> => {
                 @update:model-value="templatesStore.setStopOnFirstSuccess($event)"
               />
               <p class="pd-subtitle q-mt-xs q-mb-none">
-                Desactiva el flujo de trabajo permanentemente luego de una ejecucion exitosa.
-                Una ejecucion que se detiene porque el disparador no encontro datos no cuenta.
+                Desactiva el flujo de trabajo permanentemente luego de una ejecucion exitosa. Una
+                ejecucion que se detiene porque el disparador no encontro datos no cuenta.
               </p>
             </div>
 
@@ -304,6 +304,15 @@ const onSubmit = async (): Promise<void> => {
             class="pd-subtitle pd-save-hint"
           >
             Anade al menos un nodo para poder guardar.
+          </span>
+          <!-- Mismo criterio para la regla del Entry Point: el backend la
+               rechazaria igual, pero el motivo se lee aqui antes de gastar el
+               viaje. -->
+          <span
+            v-else-if="templatesStore.entryPointIssue !== null"
+            class="pd-subtitle pd-save-hint"
+          >
+            {{ templatesStore.entryPointIssue }}
           </span>
           <q-btn
             class="pd-btn-primary"

@@ -33,6 +33,17 @@ const fieldsOf = (issues: SchemaIssue[]): string[] =>
   issues.map((issue) => issue.field);
 
 /**
+ * Descarta el issue de la regla 9 (el entry point debe ser un disparador).
+ *
+ * Las reglas 7 y 8 se aislan poniendo el EXTRACTOR_WEB como entrypoint —es la
+ * unica forma de dejarlo sin predecesores—, lo que activa de paso la regla 9.
+ * Filtrarla aqui mantiene esas pruebas centradas en lo suyo; la regla 9 tiene su
+ * propio bloque.
+ */
+const withoutEntryPointRule = (issues: SchemaIssue[]): SchemaIssue[] =>
+  issues.filter((issue) => !issue.field.endsWith('.nodeType'));
+
+/**
  * Pipeline lineal minimo y VALIDO: disparador -> parser -> extractor.
  *
  * Devuelve un literal nuevo en cada llamada para que cada prueba mute su propia
@@ -266,7 +277,7 @@ describe('validatePipelineTopology', () => {
       const issues = validatePipelineTopology(schema);
 
       // 3. Assert
-      expect(issues).toEqual([]);
+      expect(withoutEntryPointRule(issues)).toEqual([]);
     });
 
     it('7.2 deberia rechazar un nodo cuyo namespace no lo escribe nadie antes', () => {
@@ -284,8 +295,12 @@ describe('validatePipelineTopology', () => {
 
       // 3. Assert: detectarlo al guardar es la diferencia entre corregirlo ahora
       //    o descubrirlo con el flujo PAUSADO en produccion.
-      expect(fieldsOf(issues)).toContain('nodes.nodo_extractor.params');
-      expect(issues[0].constraints[0]).toContain('parsed_email');
+      const issue = issues.find(
+        (candidate) => candidate.field === 'nodes.nodo_extractor.params',
+      );
+
+      expect(issue).toBeDefined();
+      expect(issue?.constraints[0]).toContain('parsed_email');
     });
 
     it('7.3 deberia aceptar el flujo cuando un paso anterior lo escribe', () => {
@@ -453,7 +468,7 @@ describe('validatePipelineTopology', () => {
       });
 
       // 3. Assert
-      expect(issues).toEqual([]);
+      expect(withoutEntryPointRule(issues)).toEqual([]);
     });
 
     it('8.2 deberia rechazar un extractor sin ninguna fuente de URL por delante', () => {
@@ -568,6 +583,69 @@ describe('validatePipelineTopology', () => {
         schema,
         withFields(PARSER_PUBLISHES_URLS, SCRAPER_NEEDS_URL),
       );
+
+      // 3. Assert
+      expect(issues).toEqual([]);
+    });
+  });
+
+  describe('9. El entry point debe ser un disparador', () => {
+    it('9.1 deberia rechazar un pipeline cuyo entry point no sea TRIGGER', () => {
+      // 1. Arrange: se invierte la topologia para que el mapeador abra el flujo.
+      const schema = buildSchema();
+      schema.nodes.nodo_parser.nodeType = NodeType.MAPEADOR_PLANTILLA;
+      schema.nodes.nodo_parser.outputNamespace = 'rendered_html';
+      schema.entrypoint = 'nodo_parser';
+
+      // 2. Act
+      const issues = validatePipelineTopology(schema);
+
+      // 3. Assert: un flujo que arranca por un mapeador se guardaria sin
+      //    protestar y solo reventaria en ejecucion.
+      expect(fieldsOf(issues)).toContain('nodes.nodo_parser.nodeType');
+      expect(
+        issues.find((issue) => issue.field === 'nodes.nodo_parser.nodeType')
+          ?.constraints,
+      ).toEqual([
+        'El nodo inicial (Entry Point) debe ser un disparador de categoria TRIGGER',
+      ]);
+    });
+
+    it('9.2 deberia aceptar TRIGGER_CRON como entry point', () => {
+      // 1. Arrange
+      const schema = buildSchema();
+      schema.nodes.nodo_trigger.nodeType = NodeType.TRIGGER_CRON;
+      schema.nodes.nodo_trigger.outputNamespace = 'cron_trigger';
+
+      // 2. Act
+      const issues = validatePipelineTopology(schema);
+
+      // 3. Assert
+      expect(issues).toEqual([]);
+    });
+
+    it('9.3 no deberia anadir ruido cuando el entrypoint ni siquiera existe', () => {
+      // 1. Arrange: ese caso ya lo cubre la regla 1; un segundo issue sobre un
+      //    nodo inexistente solo taparia el error real.
+      const schema = buildSchema();
+      schema.entrypoint = 'nodo_fantasma';
+
+      // 2. Act
+      const issues = validatePipelineTopology(schema);
+
+      // 3. Assert
+      expect(fieldsOf(issues)).not.toContain('nodes.nodo_fantasma.nodeType');
+    });
+
+    it('9.4 no deberia prohibir un disparador en una posicion posterior', () => {
+      // 1. Arrange: la regla mira SOLO el primer nodo, para no invalidar
+      //    plantillas ya guardadas.
+      const schema = buildSchema();
+      schema.nodes.nodo_extractor.nodeType = NodeType.TRIGGER_CRON;
+      schema.nodes.nodo_extractor.outputNamespace = 'cron_trigger';
+
+      // 2. Act
+      const issues = validatePipelineTopology(schema);
 
       // 3. Assert
       expect(issues).toEqual([]);

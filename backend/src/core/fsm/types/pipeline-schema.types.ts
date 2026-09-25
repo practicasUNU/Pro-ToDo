@@ -80,6 +80,20 @@ export enum NodeType {
   DESTINO_HTTP = 'DESTINO_HTTP',
 }
 
+/**
+ * Tipos de nodo que pueden abrir un flujo (Entry Point).
+ *
+ * Se declara aqui y NO se deriva de `NodeCategory`: esa categoria es la columna
+ * `enum_categoria` y vive en `@modules/nodes`, de donde el nucleo no puede
+ * importar. La lista es cerrada, y anadir un disparador nuevo obliga a tocar
+ * tambien el enum `NodeType` de este mismo fichero, asi que no se pueden
+ * desincronizar en silencio.
+ */
+export const TRIGGER_NODE_TYPES: ReadonlySet<NodeType> = new Set([
+  NodeType.TRIGGER_IMAP,
+  NodeType.TRIGGER_CRON,
+]);
+
 /** Politica de reintentos de un nodo ante un `NodeResult` fallido. */
 export interface RetryPolicy {
   /** Reintentos adicionales tras el primer intento. Entre 0 y `MAX_RETRY_ATTEMPTS`. */

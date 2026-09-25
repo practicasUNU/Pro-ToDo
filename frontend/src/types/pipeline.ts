@@ -39,6 +39,19 @@ export const NODE_TYPE_LABELS: Record<NodeType, string> = {
 export const OUTPUT_NAMESPACE_PATTERN = /^[a-z0-9_]+$/;
 
 /**
+ * Tipos de nodo que pueden abrir un flujo (Entry Point).
+ *
+ * Replica de `TRIGGER_NODE_TYPES` (`@core/fsm/types/pipeline-schema.types`), que
+ * es la autoridad: aqui solo sirve para adelantar el veredicto y no gastar un
+ * 400 seguro. Se declara sobre el enum y NO sobre la categoria del catalogo
+ * porque asi la comprobacion no depende de que `GET /api/nodos` haya respondido.
+ */
+export const TRIGGER_NODE_TYPES: ReadonlySet<string> = new Set<string>([
+  NodeType.TRIGGER_IMAP,
+  NodeType.TRIGGER_CRON,
+]);
+
+/**
  * Namespaces que un nodo puede declarar como `outputNamespace`.
  *
  * Replica de `NODE_OUTPUT_NAMESPACES` del backend. Es una lista CERRADA: el
