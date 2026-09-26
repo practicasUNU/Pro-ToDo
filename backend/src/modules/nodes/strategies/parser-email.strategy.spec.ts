@@ -14,6 +14,7 @@ import { createMockStatePayloadContext } from '@test/factories/state-payload-con
 
 import {
   ERR_PARSER_CONFIG,
+  ERR_PARSER_UNEXTRACTABLE_MEDIA,
   ParserEmailStrategy,
 } from './parser-email.strategy';
 
@@ -319,6 +320,131 @@ describe('ParserEmailStrategy', () => {
       expect(BODY_OVER_THRESHOLD.length).toBeGreaterThanOrEqual(50);
       expect(shortResult.data?.requires_multimodal_fallback).toBe(true);
       expect(longResult.data?.requires_multimodal_fallback).toBe(false);
+    });
+  });
+
+  describe('2ter. Bifurcacion declarada (failOnUnextractableMedia)', () => {
+    it('2ter.1 por defecto NO deberia fallar aunque la bandera este levantada', async () => {
+      // 1. Arrange 📐: el caso del PDF escaneado, SIN declarar el interruptor.
+      //    Es la prueba de regresion que protege a los flujos ya guardados:
+      //    activar esta entrega no debe convertirlos en PAUSADO de golpe.
+      const strategy = new ParserEmailStrategy();
+      const context = buildContext(
+        buildRawEmail({
+          text: 'Ver adjunto.',
+          attachments: [buildAttachment()],
+        }),
+      );
+
+      // 2. Act ⚙️
+      const result = await strategy.execute(context, {});
+
+      // 3. Assert 🎯
+      expect(result.success).toBe(true);
+      expect(result.error).toBeUndefined();
+      expect(result.data?.requires_multimodal_fallback).toBe(true);
+    });
+
+    it('2ter.2 deberia fallar en GRAVE con el interruptor puesto y la bandera levantada', async () => {
+      // 1. Arrange 📐
+      const strategy = new ParserEmailStrategy();
+      jest
+        .spyOn(strategy['logger'], 'warn')
+        .mockImplementation(() => undefined);
+      const context = buildContext(
+        buildRawEmail({
+          text: 'Ver adjunto.',
+          attachments: [buildAttachment()],
+        }),
+      );
+
+      // 2. Act ⚙️
+      const result = await strategy.execute(context, {
+        failOnUnextractableMedia: true,
+      });
+
+      // 3. Assert 🎯: GRAVE y no URGENTE. Es el unico nivel que el motor
+      //    reintenta y, sobre todo, el que deja la ejecucion PAUSADA y
+      //    reanudable si el esquema no llega a declarar ninguna ruta.
+      expect(result.success).toBe(false);
+      expect(result.error?.code).toBe(ERR_PARSER_UNEXTRACTABLE_MEDIA);
+      expect(result.error?.level).toBe('GRAVE');
+      expect(result.error?.message).toContain('imagen o PDF');
+    });
+
+    it('2ter.3 deberia llevar el payload completo en el fallo, para error_context', async () => {
+      // 1. Arrange 📐
+      const strategy = new ParserEmailStrategy();
+      jest
+        .spyOn(strategy['logger'], 'warn')
+        .mockImplementation(() => undefined);
+      const context = buildContext(
+        buildRawEmail({
+          text: 'Ver adjunto.',
+          attachments: [buildAttachment()],
+        }),
+      );
+
+      // 2. Act ⚙️
+      const result = await strategy.execute(context, {
+        failOnUnextractableMedia: true,
+      });
+
+      // 3. Assert 🎯: el motor no publicara esto en `parsed_email` —un nodo que
+      //    falla no escribe su namespace— pero lo traslada a
+      //    `error_context.partial_data`, y de ahi lo lee el nodo de respaldo. Sin
+      //    el inventario de adjuntos, un nodo de vision tendria que volver a
+      //    deducir del correo crudo lo que aqui ya esta resuelto.
+      expect(result.data?.requires_multimodal_fallback).toBe(true);
+      expect(result.data?.attachment_count).toBe(1);
+      expect(Array.isArray(result.data?.attachments)).toBe(true);
+    });
+
+    it('2ter.4 NO deberia fallar con el interruptor puesto si la bandera no se levanta', async () => {
+      // 1. Arrange 📐: cuerpo largo. El interruptor no convierte en fallo
+      //    cualquier correo, solo el que carece de texto aprovechable.
+      const strategy = new ParserEmailStrategy();
+      const context = buildContext(
+        buildRawEmail({ attachments: [buildAttachment()] }),
+      );
+
+      // 2. Act ⚙️
+      const result = await strategy.execute(context, {
+        failOnUnextractableMedia: true,
+      });
+
+      // 3. Assert 🎯
+      expect(result.success).toBe(true);
+      expect(result.data?.requires_multimodal_fallback).toBe(false);
+    });
+
+    it('2ter.5 deberia declarar el codigo inalcanzable sin el interruptor', () => {
+      // 1. Arrange 📐: es lo que consulta la regla 10 del validador de
+      //    topologia, el unico punto donde el interruptor y el `onErrorStep` son
+      //    visibles a la vez. La estrategia no ve su propia ruta de error.
+      const strategy = new ParserEmailStrategy();
+
+      // 2. Act ⚙️ + 3. Assert 🎯
+      expect(strategy.getUnreachableErrorCodes({})).toEqual([
+        ERR_PARSER_UNEXTRACTABLE_MEDIA,
+      ]);
+      expect(
+        strategy.getUnreachableErrorCodes({ failOnUnextractableMedia: true }),
+      ).toEqual([]);
+    });
+
+    it('2ter.6 deberia exigir el booleano exacto, no un valor truthy del jsonb', () => {
+      // 1. Arrange 📐: `params` se rehidrata desde una columna jsonb, donde la
+      //    cadena "false" es truthy. Un interruptor que se encendiera solo
+      //    desactivaria en silencio la unica guarda que protege esta ruta.
+      const strategy = new ParserEmailStrategy();
+
+      // 2. Act ⚙️ + 3. Assert 🎯
+      expect(
+        strategy.getUnreachableErrorCodes({
+          failOnUnextractableMedia: 'false',
+        }),
+      ).toEqual([ERR_PARSER_UNEXTRACTABLE_MEDIA]);
     });
   });
 

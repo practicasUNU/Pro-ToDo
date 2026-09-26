@@ -100,7 +100,8 @@ export class LlmExtractorConfigDto {
   @ApiPropertyOptional({
     description:
       'Instruccion escrita directamente en el nodo, con marcadores {{namespace.campo}}. Alternativa a `templatePromptId` para prompts que no se reutilizan.',
-    example: 'Redacta una noticia a partir de {{scraped_web.full_article_content}}',
+    example:
+      'Redacta una noticia a partir de {{scraped_web.full_article_content}}',
   })
   @IsOptional()
   @IsString({ message: 'inlinePrompt debe ser una cadena.' })

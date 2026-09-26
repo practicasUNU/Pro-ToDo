@@ -4,6 +4,7 @@ import { RedLocalMiddleware } from '@common/middlewares/red-local.middleware';
 import { EmailService } from '@common/services/email.service';
 import { FlowPollingCoordinator } from '@common/services/flow-polling.coordinator';
 import { IpAccessService } from '@common/services/ip-access.service';
+import { SmtpNodeMailerService } from '@common/services/smtp-node-mailer.service';
 import { AllowedIpsModule } from '@modules/security/allowed-ips/allowed-ips.module';
 
 /**
@@ -31,12 +32,14 @@ import { AllowedIpsModule } from '@modules/security/allowed-ips/allowed-ips.modu
     IpAccessService,
     RedLocalMiddleware,
     EmailService,
+    SmtpNodeMailerService,
     FlowPollingCoordinator,
   ],
   exports: [
     IpAccessService,
     RedLocalMiddleware,
     EmailService,
+    SmtpNodeMailerService,
     FlowPollingCoordinator,
   ],
 })

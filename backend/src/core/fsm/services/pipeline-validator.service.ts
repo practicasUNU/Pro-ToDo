@@ -125,6 +125,10 @@ export class PipelineValidatorService {
           requiredFieldTypes: (node) =>
             this.tryGetStrategy(node.nodeType)?.requiredUpstreamFieldTypes ??
             [],
+          unreachableErrorCodes: (node) =>
+            this.tryGetStrategy(node.nodeType)?.getUnreachableErrorCodes?.(
+              node.params,
+            ) ?? [],
         }),
       );
     }

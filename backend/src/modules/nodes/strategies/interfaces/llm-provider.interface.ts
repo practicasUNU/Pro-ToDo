@@ -31,6 +31,32 @@ export enum LlmProvider {
   MOCK = 'MOCK',
 }
 
+/**
+ * Adjunto que el modelo lee directamente, sin pasar por texto.
+ *
+ * Es la entrada del modo VISION: el correo cuyo unico contenido real es una
+ * imagen o un PDF escaneado no produce `clean_body` que enviar, y hasta ahora el
+ * pipeline se quedaba ahi. `PARSER_PRE_IA` ya sabia detectar ese caso —lo marca
+ * con `requires_multimodal_fallback`— pero no habia quien lo atendiese.
+ *
+ * `contentBase64` viaja tal cual lo deposito `TRIGGER_IMAP` en
+ * `raw_email.attachments[]`. Que siga ahi cuando el nodo de vision corre no es
+ * casualidad: la politica de liberacion de binarios del motor conserva los bytes
+ * mientras ningun nodo haya extraido texto, y ademas nunca purga en la rama de
+ * fallo, que es por donde se llega aqui.
+ *
+ * `snake_case` en `contentBase64`? No: esta interfaz es codigo TypeScript y no
+ * un payload de namespace. La frontera de nomenclatura esta en `LlmResponsePayload`,
+ * cuyas claves si acaban en el contexto.
+ */
+export interface LlmInlineAttachment {
+  readonly filename: string;
+  /** MIME real del adjunto: `image/*` o `application/pdf`. */
+  readonly contentType: string;
+  /** Contenido en base64, sin el prefijo `data:`. */
+  readonly contentBase64: string;
+}
+
 /** Parametros de ejecucion que el nodo traslada al cliente en cada llamada. */
 export interface LlmExecutionOptions {
   /** Identificador del modelo concreto del proveedor (ej. `gemini-1.5-flash`). */
@@ -79,10 +105,16 @@ export interface ILlmProviderClient {
    * deliberado: la excepcion es la senal que alimenta el contador del freno de
    * emergencia de la estrategia, que necesita distinguir "el proveedor no
    * responde" de "el proveedor respondio algo que no sirve".
+   *
+   * `attachments` es OPCIONAL, y esa opcionalidad es lo que permite anadir el
+   * modo vision sin tocar los clientes que no lo soportan: un proveedor que lo
+   * ignore sigue cumpliendo el contrato y sigue compilando. Quien decide si hay
+   * proveedor capaz es la estrategia, no esta interfaz.
    */
   generateCompletion(
     prompt: string,
     systemPrompt?: string,
     config?: LlmExecutionOptions,
+    attachments?: readonly LlmInlineAttachment[],
   ): Promise<LlmResponsePayload>;
 }

@@ -1,9 +1,13 @@
-import { declaredErrorTarget } from '@core/fsm/utils/pipeline-topology.util';
+import {
+  catchesErrorExplicitly,
+  declaredErrorTarget,
+} from '@core/fsm/utils/pipeline-topology.util';
 import {
   ERR_MISSING_UPSTREAM_CONTEXT,
   ERR_MISSING_UPSTREAM_FIELD_TYPE,
 } from '@core/fsm/types/node-strategy.types';
 import {
+  ERROR_CONTEXT_NAMESPACE,
   NODE_OUTPUT_NAMESPACE_SET,
   NODE_OUTPUT_NAMESPACES,
   TRIGGER_NODE_TYPES,
@@ -41,6 +45,11 @@ export type NodeRequiredFieldTypesResolver = (
   node: PipelineNodeConfigDto,
 ) => readonly NodeOutputFieldType[];
 
+/** Codigos que el nodo NO puede emitir con sus `params` actuales. Regla 10. */
+export type NodeUnreachableErrorCodesResolver = (
+  node: PipelineNodeConfigDto,
+) => readonly string[];
+
 /**
  * Lo que el validador necesita preguntar a las estrategias.
  *
@@ -57,6 +66,8 @@ export interface PipelineTopologyResolvers {
   readonly outputFields?: NodeOutputFieldsResolver;
   /** Regla 8; hace falta junto con `outputFields`. */
   readonly requiredFieldTypes?: NodeRequiredFieldTypesResolver;
+  /** Regla 10. */
+  readonly unreachableErrorCodes?: NodeUnreachableErrorCodesResolver;
 }
 
 /**
@@ -208,6 +219,30 @@ export const validatePipelineTopology = (
       });
     }
 
+    // 10. Una ruta declarada contra un codigo que el nodo no puede emitir.
+    //
+    // Se comprueba solo la forma SELECTIVA (`catchesErrorExplicitly`): un
+    // `onErrorStep: "alerta"` generico esta ahi para los demas fallos del nodo y
+    // rechazarlo seria un falso positivo. Mencionar el codigo a mano en
+    // `catchErrors`, en cambio, es una declaracion inequivoca de intencion, y si
+    // los `params` la desmienten el operador se queda con un nodo de respaldo
+    // que jamas corre — sin excepcion, sin traza y sin forma de notarlo hasta
+    // que el correo que debia desviarse siga de largo en produccion.
+    if (resolvers.unreachableErrorCodes !== undefined) {
+      const unreachable = resolvers
+        .unreachableErrorCodes(node)
+        .filter((code) => catchesErrorExplicitly(node.onErrorStep, code));
+
+      if (unreachable.length > 0) {
+        issues.push({
+          field: `nodes.${key}.onErrorStep`,
+          constraints: [
+            `La ruta de error atrapa ${unreachable.join(', ')}, que este nodo no puede emitir con sus params actuales: nunca se disparara.`,
+          ],
+        });
+      }
+    }
+
     if (!NODE_OUTPUT_NAMESPACE_SET.has(node.outputNamespace)) {
       issues.push({
         field: `nodes.${key}.outputNamespace`,
@@ -257,13 +292,22 @@ export const validatePipelineTopology = (
 /**
  * Namespaces que el motor siembra por su cuenta y que ningun nodo declara.
  *
- * `trigger` lo escribe el motor con el `initialPayload` al crear la ejecucion, y
- * `_assets` lo inyecta el renderizador de plantillas. Exigir que algun nodo los
+ * `trigger` lo escribe el motor con el `initialPayload` al crear la ejecucion,
+ * `_assets` lo inyecta el renderizador de plantillas, y `error_context` lo
+ * siembra el motor al desviar por `onErrorStep`. Exigir que algun nodo los
  * produzca los haria irresolubles por construccion.
+ *
+ * `error_context` tiene ademas un matiz propio: solo existe en las ejecuciones
+ * que se desviaron. Un nodo de respaldo puede interpolarlo con garantias porque
+ * a el solo se llega por esa ruta, pero declararlo en `NODE_OUTPUT_NAMESPACES`
+ * seria mentir —ninguna estrategia lo escribe— y de paso lo colaria en
+ * `ALLOWED_NAMESPACES`, habilitandolo en plantillas HTML que se renderizan en
+ * ejecuciones donde no existe.
  */
 const ENGINE_PROVIDED_NAMESPACES: ReadonlySet<string> = new Set([
   'trigger',
   '_assets',
+  ERROR_CONTEXT_NAMESPACE,
 ]);
 
 /**

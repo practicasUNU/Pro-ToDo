@@ -19,6 +19,8 @@ import { NodeCatalogService } from './services/node-catalog.service';
 import { CronTriggerStrategy } from './strategies/cron-trigger.strategy';
 import { ImapTriggerStrategy } from './strategies/imap-trigger.strategy';
 import { LlmExtractorStrategy } from './strategies/llm-extractor.strategy';
+import { SmtpAlertStrategy } from './strategies/smtp-alert.strategy';
+import { AiDefaultsConfig } from '@core/config/ai-defaults.config';
 import { ParserEmailStrategy } from './strategies/parser-email.strategy';
 import { GeminiLlmProvider } from './strategies/providers/gemini-llm.provider';
 import { MockLlmProvider } from './strategies/providers/mock-llm.provider';
@@ -84,6 +86,8 @@ import type { OnModuleInit } from '@nestjs/common';
     ParserEmailStrategy,
     WebScraperStrategy,
     LlmExtractorStrategy,
+    SmtpAlertStrategy,
+    AiDefaultsConfig,
     // Los clientes de LLM son providers del contenedor y no instancias que la
     // estrategia construya: `GeminiLlmProvider` necesita `HttpClientService` y
     // `ConfigService`, y fabricarlo a mano dejaria sin inyectar ambos.
@@ -100,6 +104,7 @@ import type { OnModuleInit } from '@nestjs/common';
     ParserEmailStrategy,
     WebScraperStrategy,
     LlmExtractorStrategy,
+    SmtpAlertStrategy,
     ImapPollingService,
     CronSchedulingService,
     NodeCatalogService,
@@ -117,6 +122,7 @@ export class NodesModule implements OnModuleInit {
     private readonly parserEmailStrategy: ParserEmailStrategy,
     private readonly webScraperStrategy: WebScraperStrategy,
     private readonly llmExtractorStrategy: LlmExtractorStrategy,
+    private readonly smtpAlertStrategy: SmtpAlertStrategy,
   ) {}
 
   public onModuleInit(): void {
@@ -126,5 +132,6 @@ export class NodesModule implements OnModuleInit {
     this.strategyFactory.registerStrategy(this.parserEmailStrategy);
     this.strategyFactory.registerStrategy(this.webScraperStrategy);
     this.strategyFactory.registerStrategy(this.llmExtractorStrategy);
+    this.strategyFactory.registerStrategy(this.smtpAlertStrategy);
   }
 }

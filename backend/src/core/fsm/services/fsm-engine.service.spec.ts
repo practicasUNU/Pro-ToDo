@@ -15,7 +15,10 @@ import {
 } from '@core/fsm/services/fsm-engine.service';
 import { ExecutionState } from '@core/fsm/types/fsm.enums';
 import { NodeLogStatus } from '@modules/logs/entities/log-nodo.entity';
-import { NodeType } from '@core/fsm/types/pipeline-schema.types';
+import {
+  ERROR_CONTEXT_NAMESPACE,
+  NodeType,
+} from '@core/fsm/types/pipeline-schema.types';
 
 import type { HybridLoggerService } from '@modules/logs/services/hybrid-logger.service';
 import type { PipelineSchemaDto } from '@core/fsm/dto/pipeline-schema.dto';
@@ -728,6 +731,199 @@ describe('FsmEngineService (PROT-09)', () => {
       expect(executeC).toHaveBeenCalledTimes(1);
       expect(result.currentState).toBe(ExecutionState.EXITOSO);
       expect(result.contextPayload.salida_c).toEqual({ recuperado: true });
+    });
+  });
+
+  describe('5ter. Contexto del error entregado al nodo de respaldo', () => {
+    /**
+     * Captura el contexto tal y como lo VE el nodo de respaldo.
+     *
+     * Se lee dentro de su `execute` y no del checkpoint final a proposito: lo
+     * que importa es que el namespace este disponible en el momento en que el
+     * respaldo corre, no que acabe persistido despues.
+     */
+    const captureFallbackContext = (): {
+      readonly executeC: jest.Mock;
+      readonly seen: Record<string, unknown>[];
+    } => {
+      const seen: Record<string, unknown>[] = [];
+      const executeC = jest
+        .fn()
+        .mockImplementation((context: StatePayloadContext) => {
+          seen.push(context.getNamespace(ERROR_CONTEXT_NAMESPACE) ?? {});
+
+          return Promise.resolve({ success: true });
+        });
+
+      factory.registerStrategy(
+        buildStrategy(
+          NodeType.PROCESADOR_IA,
+          jest.fn().mockResolvedValue({ success: true }),
+        ),
+      );
+      factory.registerStrategy(buildStrategy(NodeType.DESTINO_HTTP, executeC));
+
+      return { executeC, seen };
+    };
+
+    it('5t.1 deberia sembrar error_context con los metadatos del fallo', async () => {
+      // 1. Arrange 📐
+      const execution = buildExecution();
+      const { repo } = buildRepository(execution);
+      const schema = buildLinearSchema();
+      schema.nodes.nodo_a.onErrorStep = 'nodo_c';
+
+      factory.registerStrategy(
+        buildStrategy(
+          NodeType.TRIGGER_IMAP,
+          jest.fn().mockResolvedValue({
+            ...failure('GRAVE', 'el buzon no responde'),
+            data: { parcial: true },
+          }),
+        ),
+      );
+      const { seen } = captureFallbackContext();
+
+      // 2. Act ⚙️
+      await buildEngine(repo).executeWorkflow(EXECUTION_ID, schema);
+
+      // 3. Assert 🎯: sin esto la rama de recuperacion es ciega. El nodo de
+      //    respaldo sabria que le toca correr, pero no que fallo ni donde.
+      expect(seen).toHaveLength(1);
+      expect(seen[0]).toMatchObject({
+        failed_node_id: 'nodo_a',
+        failed_node_type: NodeType.TRIGGER_IMAP,
+        error_code: TEST_ERROR_CODE,
+        error_level: 'GRAVE',
+        error_message: 'el buzon no responde',
+        missing_fields: [],
+        attempts: 0,
+        partial_data: { parcial: true },
+      });
+      expect(typeof seen[0]?.failed_at).toBe('string');
+    });
+
+    it('5t.2 deberia preferir el customMessage de la ruta al mensaje del fallo', async () => {
+      // 1. Arrange 📐
+      const execution = buildExecution();
+      const { repo } = buildRepository(execution);
+      const schema = buildLinearSchema();
+      schema.nodes.nodo_a.onErrorStep = {
+        targetNode: 'nodo_c',
+        catchErrors: [TEST_ERROR_CODE],
+        customMessage: 'El buzon institucional lleva caido desde ayer',
+      };
+
+      factory.registerStrategy(
+        buildStrategy(
+          NodeType.TRIGGER_IMAP,
+          jest.fn().mockResolvedValue(failure('GRAVE', 'ETIMEDOUT en host X')),
+        ),
+      );
+      const { seen } = captureFallbackContext();
+
+      // 2. Act ⚙️
+      await buildEngine(repo).executeWorkflow(EXECUTION_ID, schema);
+
+      // 3. Assert 🎯: mismo criterio que `logNodeOutcome`. Ese texto existe para
+      //    explicar el fallo a quien lo va a leer, y el nodo de respaldo —que
+      //    normalmente redacta el aviso— es el primero de esos lectores.
+      expect(seen[0]?.error_message).toBe(
+        'El buzon institucional lleva caido desde ayer',
+      );
+      // El `code` NO se sustituye: es lo que identifica el fallo.
+      expect(seen[0]?.error_code).toBe(TEST_ERROR_CODE);
+    });
+
+    it('5t.3 NO deberia sembrarlo cuando la ruta no atrapa el codigo', async () => {
+      // 1. Arrange 📐
+      const execution = buildExecution();
+      const { repo } = buildRepository(execution);
+      const schema = buildLinearSchema();
+      schema.nodes.nodo_a.onErrorStep = {
+        targetNode: 'nodo_c',
+        catchErrors: [OTHER_ERROR_CODE],
+      };
+
+      factory.registerStrategy(
+        buildStrategy(
+          NodeType.TRIGGER_IMAP,
+          jest.fn().mockResolvedValue(failure('GRAVE')),
+        ),
+      );
+      const { executeC } = captureFallbackContext();
+
+      // 2. Act ⚙️
+      const result = await buildEngine(repo).executeWorkflow(
+        EXECUTION_ID,
+        schema,
+      );
+
+      // 3. Assert 🎯: sin desvio no hay contexto de error que sembrar, y el
+      //    checkpoint de la pausa no debe arrastrar un namespace que nadie pidio.
+      expect(executeC).not.toHaveBeenCalled();
+      expect(result.currentState).toBe(ExecutionState.PAUSADO);
+      expect(result.contextPayload[ERROR_CONTEXT_NAMESPACE]).toBeUndefined();
+    });
+
+    it('5t.4 deberia pisar por completo el contexto de un desvio anterior', async () => {
+      // 1. Arrange 📐: dos desvios en la misma ejecucion. `setNamespace` fusiona
+      //    por clave, asi que el segundo fallo tiene que sobrescribir TODAS las
+      //    del primero: un `missing_fields` heredado acusaria al nodo de
+      //    respaldo de un campo ausente que no tiene nada que ver con su error.
+      const execution = buildExecution();
+      const { repo } = buildRepository(execution);
+      const schema = buildLinearSchema();
+      schema.nodes.nodo_a.onErrorStep = 'nodo_b';
+      schema.nodes.nodo_b.onErrorStep = 'nodo_c';
+
+      factory.registerStrategy(
+        buildStrategy(
+          NodeType.TRIGGER_IMAP,
+          jest.fn().mockResolvedValue({
+            success: false,
+            error: {
+              level: 'GRAVE',
+              code: TEST_ERROR_CODE,
+              message: 'primer fallo',
+              missingFields: ['parsed_email.clean_body'],
+            },
+          }),
+        ),
+      );
+
+      const seen: Record<string, unknown>[] = [];
+      factory.registerStrategy(
+        buildStrategy(
+          NodeType.PROCESADOR_IA,
+          jest
+            .fn()
+            .mockResolvedValue(
+              failure('GRAVE', 'segundo fallo', OTHER_ERROR_CODE),
+            ),
+        ),
+      );
+      factory.registerStrategy(
+        buildStrategy(
+          NodeType.DESTINO_HTTP,
+          jest.fn().mockImplementation((context: StatePayloadContext) => {
+            seen.push(context.getNamespace(ERROR_CONTEXT_NAMESPACE) ?? {});
+
+            return Promise.resolve({ success: true });
+          }),
+        ),
+      );
+
+      // 2. Act ⚙️
+      await buildEngine(repo).executeWorkflow(EXECUTION_ID, schema);
+
+      // 3. Assert 🎯
+      expect(seen[0]).toMatchObject({
+        failed_node_id: 'nodo_b',
+        error_code: OTHER_ERROR_CODE,
+        error_message: 'segundo fallo',
+        missing_fields: [],
+      });
     });
   });
 

@@ -7,10 +7,13 @@ import { CronTriggerStrategy } from './strategies/cron-trigger.strategy';
 import { ImapTriggerStrategy } from './strategies/imap-trigger.strategy';
 import { LlmExtractorStrategy } from './strategies/llm-extractor.strategy';
 import { ParserEmailStrategy } from './strategies/parser-email.strategy';
+import { SmtpAlertStrategy } from './strategies/smtp-alert.strategy';
 import { TemplateMapperStrategy } from './strategies/template-mapper.strategy';
 import { WebScraperStrategy } from './strategies/web-scraper.strategy';
 
 import type { ConfigService } from '@nestjs/config';
+import type { AiDefaultsConfig } from '@core/config/ai-defaults.config';
+import type { SmtpNodeMailerService } from '@common/services/smtp-node-mailer.service';
 import type { AiPromptTemplatesService } from '@modules/ai-prompt-templates/ai-prompt-templates.service';
 import type { WebScraperRunner } from '@modules/nodes/services/web-scraper.runner';
 import type { GeminiLlmProvider } from '@modules/nodes/strategies/providers/gemini-llm.provider';
@@ -34,6 +37,7 @@ const buildHarness = (): {
   parser: ParserEmailStrategy;
   scraper: WebScraperStrategy;
   llm: LlmExtractorStrategy;
+  smtp: SmtpAlertStrategy;
   module: NodesModule;
 } => {
   const factory = new NodeStrategyFactory();
@@ -57,7 +61,11 @@ const buildHarness = (): {
     {} as AiPromptTemplatesService,
     {} as MockLlmProvider,
     {} as GeminiLlmProvider,
+    {} as AiDefaultsConfig,
   );
+  // El transporte va vacio: inscribir la estrategia no abre ninguna conexion
+  // SMTP, y el pool de nodemailer es perezoso hasta el primer envio.
+  const smtp = new SmtpAlertStrategy({} as SmtpNodeMailerService);
 
   return {
     factory,
@@ -67,7 +75,17 @@ const buildHarness = (): {
     parser,
     scraper,
     llm,
-    module: new NodesModule(factory, mapper, imap, cron, parser, scraper, llm),
+    smtp,
+    module: new NodesModule(
+      factory,
+      mapper,
+      imap,
+      cron,
+      parser,
+      scraper,
+      llm,
+      smtp,
+    ),
   };
 };
 
@@ -143,5 +161,19 @@ describe('NodesModule', () => {
     //    y reventaba en ejecucion con `StrategyNotFoundException`. Este registro
     //    es ademas lo que lo pasa a `implemented: true` en `GET /api/nodos`.
     expect(factory.getStrategy(NodeType.PROCESADOR_IA)).toBe(llm);
+  });
+
+  it('1.7 deberia registrar SmtpAlertStrategy en la factoria al iniciarse', () => {
+    // 1. Arrange 📐
+    const { factory, smtp, module } = buildHarness();
+
+    // 2. Act ⚙️
+    module.onModuleInit();
+
+    // 3. Assert 🎯: sin este registro, un `onErrorStep` que apuntara al nodo de
+    //    alerta desviaria el cursor hacia un `StrategyNotFoundException`, de
+    //    modo que el fallo original quedaria enterrado bajo un segundo fallo
+    //    —y sin avisar a nadie, que es justo lo contrario de lo que se pedia.
+    expect(factory.getStrategy(NodeType.DESTINO_SMTP)).toBe(smtp);
   });
 });

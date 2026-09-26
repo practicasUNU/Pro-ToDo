@@ -31,6 +31,21 @@ import type { ValidatorOptions } from 'class-validator';
 export const ERR_PARSER_CONFIG = 'ERR_PARSER_CONFIG';
 
 /**
+ * El correo no trae texto aprovechable: solo imagen o PDF escaneado.
+ *
+ * NO se emite por defecto. El nodo senala ese caso con la bandera
+ * `requires_multimodal_fallback` y deja seguir el flujo; solo lo convierte en
+ * fallo cuando `params.failOnUnextractableMedia` es `true`, que es como el
+ * disenador del flujo declara que ahi hay una bifurcacion que atender.
+ *
+ * Es el codigo que un `catchErrors` menciona para desviar a un nodo de alerta o
+ * a uno de vision. Que sea un fallo DECLARADO y no la bandera a secas es lo que
+ * lo hace enrutable: `onErrorStep` solo se consulta en la rama de fallo del
+ * motor, y un nodo que devuelve exito nunca llega a ella.
+ */
+export const ERR_PARSER_UNEXTRACTABLE_MEDIA = 'ERR_PARSER_UNEXTRACTABLE_MEDIA';
+
+/**
  * Opciones de validacion canonicas del repositorio (ver `PipelineValidatorService`).
  */
 const VALIDATION_OPTIONS: ValidatorOptions = {
@@ -161,6 +176,38 @@ export class ParserEmailStrategy implements INodeStrategy {
         ),
     });
 
+    // --- Bifurcacion declarada. El payload viaja TAMBIEN en el fallo: el motor
+    // no lo publicara en `parsed_email` —un nodo que falla no escribe su
+    // namespace— pero lo traslada a `error_context.partial_data`, y de ahi lo
+    // lee el nodo de respaldo. Sin el, un nodo de vision tendria que volver a
+    // deducir del correo crudo el inventario de adjuntos que aqui ya esta
+    // resuelto, y una alerta no podria citar el `multimodal_reason`.
+    //
+    // GRAVE, como el resto de fallos de este nodo: es el unico nivel que entra
+    // en la politica de reintentos del motor, y sobre todo el unico que deja la
+    // ejecucion PAUSADA y reanudable si el esquema no declara ninguna ruta. Un
+    // flujo que bifurque por aqui deberia declarar `retryPolicy: { maxRetries:
+    // 0 }`: el fallo es determinista sobre el mismo correo, asi que reintentarlo
+    // solo retrasa el desvio.
+    if (
+      config.failOnUnextractableMedia &&
+      parsed.requires_multimodal_fallback
+    ) {
+      this.logger.warn(
+        `GRAVE | ${ERR_PARSER_UNEXTRACTABLE_MEDIA} | ${parsed.multimodal_reason}`,
+      );
+
+      return {
+        success: false,
+        data: { ...parsed },
+        error: {
+          level: 'GRAVE',
+          code: ERR_PARSER_UNEXTRACTABLE_MEDIA,
+          message: parsed.multimodal_reason,
+        },
+      };
+    }
+
     return { success: true, data: { ...parsed } };
   }
 
@@ -186,6 +233,30 @@ export class ParserEmailStrategy implements INodeStrategy {
         : DEFAULT_PARSER_SOURCE_NAMESPACE;
 
     return [sourceNamespace];
+  }
+
+  /**
+   * `ERR_PARSER_UNEXTRACTABLE_MEDIA` es inalcanzable sin el interruptor puesto.
+   *
+   * Es la otra mitad de `failOnUnextractableMedia`, y hace falta porque la
+   * estrategia NO ve el `onErrorStep` de su nodo: `execute` recibe el contexto y
+   * los `params`, nada mas. El unico punto donde el interruptor y la ruta son
+   * visibles a la vez es la validacion del esquema, asi que es alli donde se
+   * rechaza la combinacion incoherente — declarar la ruta y dejar el interruptor
+   * apagado — antes de que el flujo llegue a produccion con un respaldo muerto.
+   *
+   * Se lee `params` en crudo y no el DTO resuelto porque el metodo es sincrono
+   * por contrato y `resolveConfig` es asincrono. La comparacion es estricta
+   * contra `true`: `params` viene de una columna jsonb, donde la cadena
+   * `"false"` es truthy, y un interruptor que se encendiera solo desactivaria en
+   * silencio la unica guarda que protege esta ruta.
+   */
+  public getUnreachableErrorCodes(
+    params: Record<string, unknown>,
+  ): readonly string[] {
+    return params.failOnUnextractableMedia === true
+      ? []
+      : [ERR_PARSER_UNEXTRACTABLE_MEDIA];
   }
 
   /**

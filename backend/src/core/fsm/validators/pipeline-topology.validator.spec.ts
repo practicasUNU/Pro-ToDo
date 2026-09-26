@@ -651,4 +651,104 @@ describe('validatePipelineTopology', () => {
       expect(issues).toEqual([]);
     });
   });
+  describe('10. Rutas de error que el nodo nunca podra disparar', () => {
+    const UNREACHABLE_CODE = 'ERR_PARSER_UNEXTRACTABLE_MEDIA';
+
+    /**
+     * Resolutor que declara un codigo inalcanzable salvo que el nodo lleve
+     * puesto su interruptor, replicando lo que hace `ParserEmailStrategy`.
+     */
+    const resolvers: PipelineTopologyResolvers = {
+      unreachableErrorCodes: (node) =>
+        node.params.failOnUnextractableMedia === true ? [] : [UNREACHABLE_CODE],
+    };
+
+    it('10.1 deberia rechazar catchErrors con un codigo que el nodo no emite', () => {
+      // 1. Arrange 📐: la ruta se declara, pero el interruptor que hace posible
+      //    ese fallo se queda apagado.
+      const schema = buildSchema();
+      schema.nodes.nodo_parser.onErrorStep = {
+        targetNode: 'nodo_extractor',
+        catchErrors: [UNREACHABLE_CODE],
+      };
+
+      // 2. Act ⚙️
+      const issues = validatePipelineTopology(schema, resolvers);
+
+      // 3. Assert 🎯: el sintoma sin esta regla seria mudo — ni excepcion ni
+      //    traza, solo un nodo de respaldo que no corre nunca y un correo que
+      //    sigue de largo.
+      expect(fieldsOf(issues)).toContain('nodes.nodo_parser.onErrorStep');
+      expect(
+        issues.find((issue) => issue.field === 'nodes.nodo_parser.onErrorStep')
+          ?.constraints[0],
+      ).toContain(UNREACHABLE_CODE);
+    });
+
+    it('10.2 deberia aceptarla cuando los params si permiten ese fallo', () => {
+      // 1. Arrange 📐
+      const schema = buildSchema();
+      schema.nodes.nodo_parser.params = { failOnUnextractableMedia: true };
+      schema.nodes.nodo_parser.onErrorStep = {
+        targetNode: 'nodo_extractor',
+        catchErrors: [UNREACHABLE_CODE],
+      };
+
+      // 2. Act ⚙️
+      const issues = validatePipelineTopology(schema, resolvers);
+
+      // 3. Assert 🎯
+      expect(issues).toEqual([]);
+    });
+
+    it('10.3 NO deberia tocar la forma heredada de cadena', () => {
+      // 1. Arrange 📐: un respaldo generico esta ahi para los DEMAS fallos del
+      //    nodo. Rechazarlo porque no emite cierto codigo seria un falso
+      //    positivo que dejaria sin respaldo a un flujo correcto.
+      const schema = buildSchema();
+      schema.nodes.nodo_parser.onErrorStep = 'nodo_extractor';
+
+      // 2. Act ⚙️
+      const issues = validatePipelineTopology(schema, resolvers);
+
+      // 3. Assert 🎯
+      expect(issues).toEqual([]);
+    });
+
+    it('10.4 deberia quedar inerte sin el resolutor', () => {
+      // 1. Arrange 📐: igual que las reglas 7 y 8, omitir el resolutor desactiva
+      //    solo su regla. Es lo que permite probar las demas en aislamiento.
+      const schema = buildSchema();
+      schema.nodes.nodo_parser.onErrorStep = {
+        targetNode: 'nodo_extractor',
+        catchErrors: [UNREACHABLE_CODE],
+      };
+
+      // 2. Act ⚙️
+      const issues = validatePipelineTopology(schema);
+
+      // 3. Assert 🎯
+      expect(issues).toEqual([]);
+    });
+  });
+
+  describe('11. Namespaces que siembra el motor', () => {
+    it('11.1 deberia aceptar error_context como dependencia sin nodo productor', () => {
+      // 1. Arrange 📐: un nodo de respaldo que interpola
+      //    `{{error_context.error_message}}`. Ese namespace lo siembra el motor
+      //    al desviar, asi que exigir un nodo que lo produzca lo haria
+      //    irresoluble por construccion — igual que `trigger`.
+      const schema = buildSchema();
+      const resolvers: PipelineTopologyResolvers = {
+        dependencies: (node) =>
+          node.nodeId === 'nodo_extractor' ? ['error_context'] : [],
+      };
+
+      // 2. Act ⚙️
+      const issues = validatePipelineTopology(schema, resolvers);
+
+      // 3. Assert 🎯
+      expect(issues).toEqual([]);
+    });
+  });
 });

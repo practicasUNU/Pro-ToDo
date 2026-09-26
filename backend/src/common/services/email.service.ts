@@ -10,7 +10,14 @@ import { createTransport } from 'nodemailer';
 
 import type { Transporter } from 'nodemailer';
 
-/** Puerto SMTP por defecto si `SMTP_PORT` no esta definido (envio con STARTTLS). */
+/**
+ * Puerto SMTP por defecto si `SMTP_OTP_PORT` no esta definido (STARTTLS).
+ *
+ * Las variables llevan el infijo `OTP_` desde la separacion de transportes: este
+ * servicio y el nodo `DESTINO_SMTP` pueden salir por buzones distintos, y con un
+ * unico bloque `SMTP_*` cambiar el remitente de las alertas del sistema habria
+ * cambiado tambien el de los codigos de acceso. Ver `SmtpNodeMailerService`.
+ */
 const DEFAULT_SMTP_PORT = 587;
 
 /** Puerto SMTP implicito de TLS directo: solo en el 465 se conecta ya cifrado. */
@@ -34,8 +41,15 @@ const FONT_STACK =
   "-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif";
 
 /**
- * Unico punto del backend que conoce SMTP. Los servicios de negocio piden "envia
- * este codigo a este correo" y no saben nada del transporte.
+ * Unico punto del backend que conoce el SMTP de AUTENTICACION. Los servicios de
+ * negocio piden "envia este codigo a este correo" y no saben nada del
+ * transporte.
+ *
+ * Su gemelo es `SmtpNodeMailerService`, que atiende al nodo `DESTINO_SMTP`. Son
+ * dos servicios y dos pools y no uno parametrizado a proposito: el correo de
+ * login y el de una alerta de flujo tienen publicos, volumenes y remitentes
+ * distintos, y compartir transporte ataba las dos decisiones. Aqui el volumen es
+ * un mensaje por inicio de sesion; alli, uno por incidencia.
  */
 @Injectable()
 export class EmailService implements OnModuleDestroy {
@@ -45,17 +59,17 @@ export class EmailService implements OnModuleDestroy {
 
   constructor(private readonly configService: ConfigService) {
     const port =
-      this.configService.get<number>('SMTP_PORT') ?? DEFAULT_SMTP_PORT;
-    const user = this.configService.get<string>('SMTP_USER');
-    const password = this.configService.get<string>('SMTP_PASSWORD');
+      this.configService.get<number>('SMTP_OTP_PORT') ?? DEFAULT_SMTP_PORT;
+    const user = this.configService.get<string>('SMTP_OTP_USER');
+    const password = this.configService.get<string>('SMTP_OTP_PASS');
 
     this.sender =
-      this.configService.get<string>('SMTP_FROM') ??
+      this.configService.get<string>('SMTP_OTP_FROM') ??
       user ??
       'no-reply@unuware.com';
 
     this.transporter = createTransport({
-      host: this.configService.get<string>('SMTP_HOST'),
+      host: this.configService.get<string>('SMTP_OTP_HOST'),
       port: Number(port),
       // Solo el 465 habla TLS desde el saludo; el 587 negocia STARTTLS.
       secure: Number(port) === IMPLICIT_TLS_PORT,

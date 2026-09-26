@@ -15,6 +15,7 @@ import { FsmExecution } from '@core/fsm/entities/fsm-execution.entity';
 import { StrategyNotFoundException } from '@core/fsm/exceptions/strategy-not-found.exception';
 import { NodeStrategyFactory } from '@core/fsm/factories/node-strategy.factory';
 import { ExecutionState } from '@core/fsm/types/fsm.enums';
+import { ERROR_CONTEXT_NAMESPACE } from '@core/fsm/types/pipeline-schema.types';
 import {
   ERR_MISSING_UPSTREAM_CONTEXT,
   ERR_NODE_CRASHED,
@@ -30,6 +31,7 @@ import type {
   INodeStrategy,
   NodeResult,
 } from '@core/fsm/types/node-strategy.types';
+import type { ResolvedErrorRoute } from '@core/fsm/utils/pipeline-topology.util';
 import type { NodeType } from '@core/fsm/types/pipeline-schema.types';
 import type { Repository } from 'typeorm';
 import type { QueryDeepPartialEntity } from 'typeorm/query-builder/QueryPartialEntity';
@@ -788,6 +790,17 @@ export class FsmEngineService {
         const errorRoute = resolveErrorRoute(node.onErrorStep, errorCode);
 
         if (errorRoute !== null) {
+          // El contexto del fallo se siembra ANTES de mover el cursor, de modo
+          // que el checkpoint de esta misma transicion ya lo lleve: si el
+          // proceso muere entre ambas sentencias, la reanudacion entra al nodo
+          // de respaldo con la misma informacion que habria tenido sin la
+          // caida. Sembrarlo despues dejaria una ventana en la que el cursor
+          // apunta al respaldo y el contexto todavia no explica por que.
+          context.setNamespace(
+            ERROR_CONTEXT_NAMESPACE,
+            this.buildErrorContext(node, result, errorRoute, retryState),
+          );
+
           cursor = errorRoute.targetNode;
           context.setCursor(cursor);
 
@@ -919,6 +932,49 @@ export class FsmEngineService {
     );
 
     return true;
+  }
+
+  /**
+   * Metadatos del fallo que el nodo de respaldo recibe en `error_context`.
+   *
+   * TODAS las claves se escriben SIEMPRE, incluso vacias. `setNamespace` fusiona
+   * por clave de primer nivel, asi que un segundo desvio en la misma ejecucion
+   * tiene que pisar lo que dejo el primero: omitir `missing_fields` porque este
+   * fallo no los trae dejaria en pie los del fallo ANTERIOR, y el nodo de
+   * respaldo acusaria de un campo ausente que no tiene nada que ver con el
+   * error que lo invoco.
+   *
+   * `snake_case` en las claves, como en cualquier otro namespace: son lo que se
+   * escribe en un `{{error_context.error_message}}`, y camelizarlas mostraria al
+   * operador un nombre que la interpolacion no resuelve.
+   *
+   * `error_message` toma el `customMessage` de la ruta cuando la ruta lo
+   * declara, con el mismo criterio que `logNodeOutcome`: ese texto existe
+   * precisamente para explicar el fallo a quien lo va a leer, y el nodo de
+   * respaldo es el primero de esos lectores.
+   *
+   * `partial_data` es lo que el nodo alcanzo a producir antes de fallar. El
+   * motor NO lo deposita en el `outputNamespace` —un nodo que falla no publica—
+   * pero tirarlo perderia justo lo que hace accionable la rama: el inventario de
+   * adjuntos y el `multimodal_reason` con los que el respaldo decide que hacer.
+   */
+  private buildErrorContext(
+    node: PipelineNodeConfigDto,
+    result: NodeResult,
+    route: ResolvedErrorRoute,
+    retryState: RetryState,
+  ): Record<string, unknown> {
+    return {
+      failed_node_id: node.nodeId,
+      failed_node_type: node.nodeType,
+      error_code: result.error?.code ?? ERR_NODE_CRASHED,
+      error_level: result.error?.level ?? 'URGENTE',
+      error_message: route.customMessage ?? result.error?.message ?? '',
+      missing_fields: result.error?.missingFields ?? [],
+      attempts: retryState[node.nodeId] ?? 0,
+      failed_at: new Date().toISOString(),
+      partial_data: result.data ?? {},
+    };
   }
 
   /**

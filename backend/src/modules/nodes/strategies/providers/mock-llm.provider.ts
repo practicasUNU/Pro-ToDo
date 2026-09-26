@@ -5,6 +5,7 @@ import { LlmProvider } from '@modules/nodes/strategies/interfaces/llm-provider.i
 import type {
   ILlmProviderClient,
   LlmExecutionOptions,
+  LlmInlineAttachment,
   LlmResponsePayload,
 } from '@modules/nodes/strategies/interfaces/llm-provider.interface';
 
@@ -63,13 +64,23 @@ export class MockLlmProvider implements ILlmProviderClient {
    * El `systemPrompt` y la `config` se aceptan por contrato y se ignoran: no hay
    * modelo al que trasladarlos. `modelUsed` reporta `mock-engine` y NO el modelo
    * que pidiera la configuracion, porque lo que ejecuto la inferencia fue esto.
+   *
+   * `attachments` SI se mira, aunque no haya nada que leer en ellos. El motivo
+   * es el modo vision: ahi el prompt llega practicamente vacio —el contenido del
+   * correo esta en el PDF— y una simulacion que solo mirase el texto devolveria
+   * "Contenido simulado sin titular", que no se distingue de un fallo. Nombrar
+   * los adjuntos deja claro que la simulacion los recibio, que es justo lo que
+   * un desarrollador sin `GEMINI_API_KEY` necesita comprobar.
    */
   public generateCompletion(
     prompt: string,
     _systemPrompt?: string,
     _config?: LlmExecutionOptions,
+    attachments: readonly LlmInlineAttachment[] = [],
   ): Promise<LlmResponsePayload> {
-    const paragraphs = this.splitParagraphs(prompt);
+    const paragraphs = this.splitParagraphs(
+      this.describeAttachments(prompt, attachments),
+    );
     const [firstParagraph] = paragraphs;
     const flattened = paragraphs.join(' ');
 
@@ -91,6 +102,27 @@ export class MockLlmProvider implements ILlmProviderClient {
         isMock: true,
       },
     });
+  }
+
+  /**
+   * Antepone al prompt una linea que nombra los adjuntos recibidos.
+   *
+   * Sin adjuntos devuelve el prompt INTACTO, de modo que la simulacion de
+   * siempre no cambia ni un caracter y las pruebas que la afirman siguen valiendo.
+   */
+  private describeAttachments(
+    prompt: string,
+    attachments: readonly LlmInlineAttachment[],
+  ): string {
+    if (attachments.length === 0) {
+      return prompt;
+    }
+
+    const names = attachments
+      .map((attachment) => `${attachment.filename} (${attachment.contentType})`)
+      .join(', ');
+
+    return `Contenido simulado a partir de ${attachments.length} adjunto(s): ${names}.\n\n${prompt}`;
   }
 
   /**

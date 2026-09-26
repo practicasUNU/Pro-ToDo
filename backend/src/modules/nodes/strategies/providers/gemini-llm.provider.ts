@@ -8,6 +8,7 @@ import { MockLlmProvider } from '@modules/nodes/strategies/providers/mock-llm.pr
 import type {
   ILlmProviderClient,
   LlmExecutionOptions,
+  LlmInlineAttachment,
   LlmResponsePayload,
 } from '@modules/nodes/strategies/interfaces/llm-provider.interface';
 
@@ -92,6 +93,7 @@ export class GeminiLlmProvider implements ILlmProviderClient {
     prompt: string,
     systemPrompt?: string,
     config?: LlmExecutionOptions,
+    attachments: readonly LlmInlineAttachment[] = [],
   ): Promise<LlmResponsePayload> {
     const apiKey = this.configService.get<string>(GEMINI_API_KEY_VAR)?.trim();
 
@@ -102,7 +104,12 @@ export class GeminiLlmProvider implements ILlmProviderClient {
         `${GEMINI_API_KEY_VAR} no esta definida en el entorno. Se degrada a simulacion de coste cero; la salida llevara isMock: true.`,
       );
 
-      return this.mockProvider.generateCompletion(prompt, systemPrompt, config);
+      return this.mockProvider.generateCompletion(
+        prompt,
+        systemPrompt,
+        config,
+        attachments,
+      );
     }
 
     const model = config?.model ?? 'gemini-1.5-flash';
@@ -118,7 +125,9 @@ export class GeminiLlmProvider implements ILlmProviderClient {
           'x-goog-api-key': apiKey,
         },
         data: {
-          contents: [{ role: 'user', parts: [{ text: prompt }] }],
+          contents: [
+            { role: 'user', parts: this.buildParts(prompt, attachments) },
+          ],
           // La instruccion del operador y el contrato de formato viajan
           // JUNTAS en `systemInstruction`, y el contrato va el ultimo para que
           // sea lo mas reciente que el modelo lee antes de responder.
@@ -135,7 +144,9 @@ export class GeminiLlmProvider implements ILlmProviderClient {
         },
       },
       {
-        ...(config?.timeoutMs === undefined ? {} : { timeoutMs: config.timeoutMs }),
+        ...(config?.timeoutMs === undefined
+          ? {}
+          : { timeoutMs: config.timeoutMs }),
         ...(config?.maxRetries === undefined
           ? {}
           : { maxRetries: config.maxRetries }),
@@ -152,6 +163,37 @@ export class GeminiLlmProvider implements ILlmProviderClient {
     }
 
     return this.toPayload(outcome.data, model);
+  }
+
+  /**
+   * Compone las partes del turno del usuario: el texto y, si los hay, los
+   * adjuntos que el modelo debe mirar.
+   *
+   * `inline_data` con el base64 va en `snake_case` porque es el nombre del campo
+   * en la API REST de Google, no una eleccion de este repositorio; el SDK lo
+   * expone camelizado, pero aqui se habla REST directamente.
+   *
+   * El TEXTO va SIEMPRE primero, aunque venga vacio. El orden de las partes es
+   * significativo para el modelo: la instruccion de que hacer con la imagen debe
+   * leerse antes que la imagen, o el modelo la describe en vez de extraer lo que
+   * se le pide.
+   *
+   * Sin adjuntos el cuerpo queda EXACTAMENTE como estaba —una sola parte de
+   * texto—, de modo que el modo de siempre no cambia ni un byte.
+   */
+  private buildParts(
+    prompt: string,
+    attachments: readonly LlmInlineAttachment[],
+  ): readonly Record<string, unknown>[] {
+    return [
+      { text: prompt },
+      ...attachments.map((attachment) => ({
+        inline_data: {
+          mime_type: attachment.contentType,
+          data: attachment.contentBase64,
+        },
+      })),
+    ];
   }
 
   /** Une la instruccion del operador con el contrato de formato obligatorio. */
@@ -200,7 +242,7 @@ export class GeminiLlmProvider implements ILlmProviderClient {
         throw new Error('el JSON recibido no es un objeto');
       }
 
-      return parsed as GeminiGeneratedContract;
+      return parsed;
     } catch (error) {
       throw new GeminiProviderException(
         `Gemini devolvio un cuerpo que no respeta el contrato JSON: ${

@@ -2967,3 +2967,224 @@ relanzar el flujo desde cero y tirando el trabajo válido de los nodos anteriore
 - [ ] 67. Pendiente — `npm run test:e2e` falla al importar `sanitize-html`; ya fallaba en la rama
       base (verificado con `git stash`), ajeno a esta tanda
 - [ ] 68. Pendiente — `ESCUDO_POST_IA`, validador natural de la salida de este nodo
+
+---
+
+## Tanda actual — PROT-16 · Bifurcación de errores, nodo `DESTINO_SMTP` y visión multimodal
+
+Rama `feat/bifurcacion-errores`, creada desde `feat/llm-extractor-node`.
+
+El motor ya sabía desviar por `onErrorStep` desde PROT-07, pero la rama de recuperación era **ciega**:
+el salto movía el cursor y persistía el checkpoint sin entregar al nodo de respaldo un solo dato sobre
+el fallo que lo invocaba. En paralelo, `PARSER_PRE_IA` ya detectaba el correo cuyo único contenido es
+una imagen o un PDF escaneado —lo marca con `requires_multimodal_fallback`— pero esa bandera no tenía
+consumidor: el nodo de IA solo hablaba texto y no existía ningún nodo capaz de avisar a una persona.
+La detección terminaba en un booleano que nadie leía.
+
+Esta tanda cierra el circuito: el parser puede declarar ese caso como fallo enrutable, el motor
+entrega el contexto del error al respaldo, y existen los dos destinos que dan sentido a la
+bifurcación —una alerta SMTP y una inferencia con visión.
+
+### Contratos nuevos
+
+```typescript
+// @core/fsm/types/pipeline-schema.types.ts
+// Namespace reservado que el motor siembra al desviar. No figura en
+// NODE_OUTPUT_NAMESPACES porque ningún nodo lo escribe: va en
+// ENGINE_PROVIDED_NAMESPACES del validador, como `trigger`.
+export const ERROR_CONTEXT_NAMESPACE = 'error_context';
+
+export enum NodeType {
+  /* ...ocho anteriores... */
+  DESTINO_SMTP = 'DESTINO_SMTP',
+}
+
+export const NODE_OUTPUT_NAMESPACES = [
+  /* ...ocho anteriores... */
+  'smtp_result',
+] as const;
+
+// @core/fsm/types/node-strategy.types.ts
+// El negativo de "qué puedo fallar": qué he apagado. Lo consulta la regla 10.
+export interface INodeStrategy {
+  readonly getUnreachableErrorCodes?: (
+    params: Record<string, unknown>,
+  ) => readonly string[];
+}
+
+// @core/fsm/utils/pipeline-topology.util.ts
+// Distinta de resolveErrorRoute: la forma heredada de cadena atrapa TODO, así
+// que aquella diría que sí para cualquier código. Ésta pregunta si alguien
+// escribió ese código a mano.
+export const catchesErrorExplicitly: (
+  route: ErrorRoute,
+  errorCode: string,
+) => boolean;
+
+// @modules/nodes/strategies/interfaces/llm-provider.interface.ts
+export interface LlmInlineAttachment {
+  readonly filename: string;
+  readonly contentType: string;   // image/* o application/pdf
+  readonly contentBase64: string;
+}
+
+export interface ILlmProviderClient {
+  generateCompletion(
+    prompt: string,
+    systemPrompt?: string,
+    config?: LlmExecutionOptions,
+    attachments?: readonly LlmInlineAttachment[],   // ← opcional: los clientes que
+  ): Promise<LlmResponsePayload>;                   //   lo ignoren siguen cumpliendo
+}
+
+// @modules/nodes/strategies/parser-email.strategy.ts
+export const ERR_PARSER_UNEXTRACTABLE_MEDIA = 'ERR_PARSER_UNEXTRACTABLE_MEDIA';
+
+// @modules/nodes/strategies/smtp-alert.strategy.ts
+export const ERR_SMTP_CONFIG = 'ERR_SMTP_CONFIG';
+export const ERR_SMTP_INTERPOLATION = 'ERR_SMTP_INTERPOLATION';
+export const ERR_SMTP_SEND_FAILURE = 'ERR_SMTP_SEND_FAILURE';
+
+// @core/config/ai-defaults.config.ts
+export interface AiDefaultPair {
+  readonly provider: string | null;   // string y no LlmProvider: @core no
+  readonly model: string | null;      // puede importar de @modules
+}
+```
+
+El payload de `error_context`, en `snake_case` porque es lo que se interpola:
+
+| Clave | Contenido |
+|---|---|
+| `failed_node_id` / `failed_node_type` | Quién falló |
+| `error_code` / `error_level` | El código es contrato; el nivel, diagnóstico |
+| `error_message` | El `customMessage` de la ruta si lo declara; si no, el del fallo |
+| `missing_fields` | Rutas `{{ns.campo}}` que se esperaban y no llegaron |
+| `attempts` | Reintentos consumidos antes de desviar |
+| `failed_at` | Marca ISO-8601 |
+| `partial_data` | Lo que el nodo alcanzó a producir (`NodeResult.data` del fallo) |
+
+**Todas se escriben siempre**, incluso vacías: `setNamespace` fusiona por clave de primer nivel, así
+que un segundo desvío debe pisar las del primero. Omitir `missing_fields` porque este fallo no los
+trae dejaría en pie los del anterior, y el respaldo acusaría de un campo ausente ajeno a su error.
+
+### Diagrama de inyección de dependencias
+
+```
+CommonModule (@Global)
+ ├── EmailService ─────────── SMTP_OTP_*   (login, pool de 1 conexión)
+ └── SmtpNodeMailerService ── SMTP_NODE_*  (alertas, pool de 2)
+
+NodesModule
+ ├── providers: …, SmtpAlertStrategy, AiDefaultsConfig
+ ├── SmtpAlertStrategy ──────── SmtpNodeMailerService
+ ├── LlmExtractorStrategy ───── AiPromptTemplatesService, MockLlmProvider,
+ │                              GeminiLlmProvider, AiDefaultsConfig
+ └── onModuleInit(): registerStrategy(smtpAlertStrategy)   ← séptima estrategia
+
+FsmModule
+ └── PipelineValidatorService ── resolvers.unreachableErrorCodes
+                                  └── strategy.getUnreachableErrorCodes?.(params)
+```
+
+### Esquema
+
+Migración `db/migrations/021-nodo-destino-smtp.sql`: décima fila del catálogo `nodos`
+(`DESTINO_SMTP`, categoría `DESTINO`), con `ON CONFLICT (codigo) DO NOTHING` sobre la UNIQUE
+`nodos_codigo` que dejó la 011. `init.sql` se actualiza en el mismo commit; sin eso, un volumen de
+Docker nuevo nacería sin la fila y la migración haría falta para siempre —el error que la 013
+documenta haber cometido.
+
+Sin columnas nuevas: `ui_schema` desapareció en la 020 y el `error_context` vive en el jsonb
+`contexto_acumulado` que ya existía.
+
+### Variables de entorno
+
+Los cinco `SMTP_*` se parten en dos bloques (`SMTP_OTP_*` y `SMTP_NODE_*`). Es un **renombrado que
+rompe el arranque** si no se acompaña del `.env` real: con los nombres viejos, el login OTP se queda
+sin transporte. `--watch` no recarga el entorno, así que hay que reiniciar Nest.
+
+Cuatro variables nuevas de IA, en dos pares. Son el último escalón, nunca el primero: un nodo que
+declara su `provider` o `model` en los `params` sigue mandando.
+
+```
+AI_DEFAULT_PROVIDER=anthropic          AI_OCR_DEFAULT_PROVIDER=google_gemini
+AI_DEFAULT_MODEL=claude-3-5-…          AI_OCR_DEFAULT_MODEL=gemini-1.5-flash
+```
+
+Precedencia: `params` del nodo → par OCR si hay adjuntos de visión → par de texto → constantes del DTO.
+
+### Por qué el parser no falla SIEMPRE ante un correo sin texto
+
+Es lo que pedía el encargo literal, y habría roto tres cosas a la vez. El motor solo escribe el
+`outputNamespace` en la rama de éxito, así que `parsed_email` dejaría de publicarse para todos los
+flujos, incluidos los que hoy atraviesan tranquilamente un correo de solo imagen. La bandera
+`requires_multimodal_fallback` quedaría sin uso y con ella el veto de `BINARY_RETENTION_KEYS`, que es
+lo único que impide al motor purgar el base64 del único contenido del correo. Y `WizardService`
+comparte `buildParsedEmail` para el banco de pruebas, que pasaría a anunciar un fallo donde el
+operador espera ver un payload.
+
+El interruptor `failOnUnextractableMedia` (defecto `false`) deja la decisión donde corresponde: en el
+diseñador del flujo, no en el despliegue.
+
+### Por qué la bifurcación no se declara desde la estrategia
+
+El encargo pedía emitir el fallo «si el nodo tiene configurado un `onErrorStep`». No es expresable:
+`INodeStrategy.execute(context, params)` **no recibe `onErrorStep`**, y dárselo rompería el
+aislamiento que permite a un mismo nodo reutilizarse en dos flujos con topologías distintas.
+
+El único punto donde el interruptor y la ruta son visibles a la vez es la validación del esquema, así
+que la intención se entrega ahí, como Poka-Yoke al guardar (regla 10): si un nodo declara
+`catchErrors: ['ERR_PARSER_UNEXTRACTABLE_MEDIA']` y no lleva el `param` puesto, se rechaza. Sin esa
+regla el síntoma sería mudo —ni excepción ni traza, solo un nodo de respaldo que no corre nunca.
+
+El mecanismo es genérico (`getUnreachableErrorCodes`), no un caso especial del parser: `@core` no
+puede conocer códigos de `@modules`, y centralizarlos obligaría a tocar el núcleo con cada nodo nuevo.
+
+### Por qué la regla 10 ignora la forma heredada de cadena
+
+Un `onErrorStep: "alerta"` atrapa cualquier código y está ahí para los DEMÁS fallos del nodo.
+Rechazarlo porque el nodo no emite uno concreto sería un falso positivo que dejaría sin respaldo a un
+flujo correcto. Mencionar el código a mano en `catchErrors`, en cambio, es una declaración inequívoca.
+
+### Riesgo aceptado: `ANTHROPIC`/`OPENAI` degradan al simulador
+
+Antes devolvían `ERR_LLM_PROVIDER_UNSUPPORTED` para que una redacción simulada no llegase al
+`MAPEADOR_PLANTILLA` disfrazada de real. Con los defaults por entorno, `AI_DEFAULT_PROVIDER` puede
+nombrar un proveedor aún sin cliente, y fallar habría pausado de golpe todo flujo que no declarase el
+suyo —incluidos los que hoy corren sobre el defecto `MOCK`.
+
+Lo que sostiene ahora la auditoría es `metadata.isMock`, que viaja en el namespace y queda en la
+traza. **Quien publique a producción debería mirarlo.** Es además el criterio que ya aplicaba
+`GeminiLlmProvider` al faltar `GEMINI_API_KEY`. La prueba 2.6 del spec cambió de sentido en
+consecuencia.
+
+### Estado de las tareas
+
+- [x] 69. Motor — `ERROR_CONTEXT_NAMESPACE` y `buildErrorContext()`; siembra ANTES de mover el
+      cursor para que el checkpoint de esa misma transición ya lo lleve
+- [x] 70. Contratos — `NodeResult.data` documentado en su segundo destino
+      (`error_context.partial_data`); `getUnreachableErrorCodes` en `INodeStrategy`
+- [x] 71. Validador — `error_context` en `ENGINE_PROVIDED_NAMESPACES`; regla 10 con su resolutor,
+      cableado desde `PipelineValidatorService`
+- [x] 72. Parser — `failOnUnextractableMedia` (defecto `false`) y `ERR_PARSER_UNEXTRACTABLE_MEDIA`
+      con el payload completo en el fallo
+- [x] 73. BD — migración 021 + `init.sql`; `NodeType.DESTINO_SMTP` y namespace `smtp_result`
+- [x] 74. Backend — `SmtpAlertConfigDto`, `SmtpAlertStrategy` y `SmtpNodeMailerService`; registro en
+      `NodesModule.onModuleInit()`
+- [x] 75. Entorno — `SMTP_*` partido en `SMTP_OTP_*` / `SMTP_NODE_*`; cuatro variables `AI_*` y
+      `AiDefaultsConfig` con su tabla de alias
+- [x] 76. Visión — `LlmInlineAttachment`, `inline_data` en Gemini, modo visión en
+      `LlmExtractorStrategy` con tope de 3 adjuntos
+- [x] 77. Pruebas — backend 53 suites / 1223 pruebas (+51), con tres specs nuevos (`smtp-alert`,
+      `gemini-llm.provider`, `ai-defaults.config`); frontend 23 archivos / 461 pruebas, sin cambios
+- [x] 77b. Frontend — `src/types/pipeline.ts` replica `DESTINO_SMTP` y `smtp_result` (enum, etiqueta
+      y los tres `Record<NodeType, …>`). Solo el contrato de tipos; el configurador queda fuera
+- [ ] 78. Pendiente — aplicar la 021 en el contenedor (la ejecuta el usuario) y actualizar el `.env`
+      real con los dos bloques SMTP y las cuatro `AI_*`, reiniciando Nest
+- [ ] 79. Pendiente — configurador Quasar del nodo `DESTINO_SMTP`. Fuera de alcance por decisión
+      explícita; `PROCESADOR_IA` tampoco lo tiene, así que `node-config-registry.ts` sigue
+      cubriendo 5 de 9 tipos
+- [ ] 80. Pendiente — cliente `AnthropicLlmProvider`. Mientras no exista,
+      `AI_DEFAULT_PROVIDER=anthropic` degrada al simulador (ver el riesgo aceptado). Sustituye y
+      concreta al pendiente 66

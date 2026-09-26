@@ -6,7 +6,11 @@ import {
   MissingContextVariableException,
   extractNamespaceRoots,
 } from '@core/fsm/context/state-payload.context';
-import { NodeType } from '@core/fsm/types/pipeline-schema.types';
+import { AiDefaultsConfig } from '@core/config/ai-defaults.config';
+import {
+  ERROR_CONTEXT_NAMESPACE,
+  NodeType,
+} from '@core/fsm/types/pipeline-schema.types';
 import { AiPromptTemplatesService } from '@modules/ai-prompt-templates/ai-prompt-templates.service';
 import {
   LlmExtractorConfigDto,
@@ -15,6 +19,8 @@ import {
 import { LlmProvider } from '@modules/nodes/strategies/interfaces/llm-provider.interface';
 import { GeminiLlmProvider } from '@modules/nodes/strategies/providers/gemini-llm.provider';
 import { MockLlmProvider } from '@modules/nodes/strategies/providers/mock-llm.provider';
+import { ERR_PARSER_UNEXTRACTABLE_MEDIA } from '@modules/nodes/strategies/parser-email.strategy';
+import { MULTIMODAL_CONTENT_TYPE_PATTERN } from '@modules/nodes/utils/parsed-email-payload.util';
 
 import type { StatePayloadContext } from '@core/fsm/context/state-payload.context';
 import type {
@@ -26,6 +32,7 @@ import type {
 import type { ResolvedLlmExtractorConfig } from '@modules/nodes/dto/llm-extractor-config.dto';
 import type {
   ILlmProviderClient,
+  LlmInlineAttachment,
   LlmResponsePayload,
 } from '@modules/nodes/strategies/interfaces/llm-provider.interface';
 import type { ValidatorOptions } from 'class-validator';
@@ -35,6 +42,13 @@ export const ERR_LLM_CONFIG = 'ERR_LLM_CONFIG';
 export const ERR_LLM_MISSING_INPUT_TEXT = 'ERR_LLM_MISSING_INPUT_TEXT';
 export const ERR_LLM_PROMPT_UNRESOLVED = 'ERR_LLM_PROMPT_UNRESOLVED';
 export const ERR_LLM_INTERPOLATION = 'ERR_LLM_INTERPOLATION';
+/**
+ * @deprecated Ya no se emite: desde los defaults por entorno, un proveedor sin
+ * cliente degrada al simulador con un aviso en vez de fallar (ver
+ * `resolveProvider`). Se conserva exportado porque puede figurar en el
+ * `catchErrors` de esquemas ya guardados, y retirarlo dejaria esas rutas
+ * apuntando a una constante inexistente.
+ */
 export const ERR_LLM_PROVIDER_UNSUPPORTED = 'ERR_LLM_PROVIDER_UNSUPPORTED';
 export const ERR_LLM_PROVIDER_FAILURE = 'ERR_LLM_PROVIDER_FAILURE';
 export const ERR_LLM_EMERGENCY_BRAKE = 'ERR_LLM_EMERGENCY_BRAKE';
@@ -71,6 +85,22 @@ const INPUT_TEXT_SOURCES = [
   { namespace: 'scraped_web', field: 'full_article_content' },
 ] as const;
 
+/** Namespace del correo crudo, del que el modo vision toma los binarios. */
+const RAW_EMAIL_NAMESPACE = 'raw_email';
+
+/** Clave del inventario de adjuntos dentro de ese namespace. */
+const ATTACHMENTS_KEY = 'attachments';
+
+/**
+ * Tope de adjuntos que se envian en una sola inferencia.
+ *
+ * Tres, porque cada uno se factura como miles de tokens y el caso real —una
+ * nota de prensa escaneada— cabe de sobra: los correos que traen diez imagenes
+ * son firmas y logotipos, no contenido. Sin tope, un correo con veinte capturas
+ * convertiria una incidencia rutinaria en la llamada mas cara del mes.
+ */
+const MAX_VISION_ATTACHMENTS = 3;
+
 /** Union discriminada: o hay configuracion, o hay un fallo que devolver. */
 type LlmConfigResolution =
   | { readonly config: ResolvedLlmExtractorConfig }
@@ -78,8 +108,7 @@ type LlmConfigResolution =
 
 /** Union discriminada del prompt ya resuelto contra la base de datos. */
 type PromptResolution =
-  | { readonly prompt: string }
-  | { readonly failure: NodeErrorDetail };
+  { readonly prompt: string } | { readonly failure: NodeErrorDetail };
 
 /** Traza completa del error, si la hay, lista para fusionar en el detalle. */
 const stackTraceOf = (error: unknown): { stackTrace?: string } =>
@@ -163,6 +192,7 @@ export class LlmExtractorStrategy implements INodeStrategy {
     private readonly aiPromptTemplatesService: AiPromptTemplatesService,
     private readonly mockProvider: MockLlmProvider,
     private readonly geminiProvider: GeminiLlmProvider,
+    private readonly aiDefaults: AiDefaultsConfig,
   ) {}
 
   public async execute(
@@ -175,15 +205,30 @@ export class LlmExtractorStrategy implements INodeStrategy {
       return { success: false, error: resolution.failure };
     }
 
-    const { config } = resolution;
     const brakeKey = this.buildBrakeKey(context);
+
+    // --- Modo VISION. Se decide ANTES que nada porque cambia las dos preguntas
+    // siguientes: que cuenta como entrada suficiente, y con que proveedor y
+    // modelo se resuelve. Depende del CONTEXTO y no de los `params`, asi que no
+    // puede vivir en el DTO ni en `getRequiredNamespaces`.
+    const attachments = this.collectVisionAttachments(context);
+    const config = this.applyEnvironmentDefaults(
+      resolution.config,
+      params,
+      attachments.length > 0,
+    );
 
     // Guarda de CONTENIDO. Va antes de resolver el prompt porque es la mas
     // barata de las dos —mira el contexto que ya esta en memoria— y porque sin
     // texto de entrada no hay inferencia que preparar, tenga o no plantilla.
+    //
+    // Con adjuntos de vision el texto DEJA de ser obligatorio, y esa excepcion
+    // es el motivo entero del modo: el correo cuyo unico contenido es un PDF
+    // escaneado no tiene `clean_body` que ofrecer, y exigirselo aqui abortaria
+    // justo el caso que la rama de recuperacion existe para atender.
     const inputText = this.resolveInputText(context);
 
-    if (inputText === null) {
+    if (inputText === null && attachments.length === 0) {
       this.consecutiveFailures.delete(brakeKey);
 
       return {
@@ -216,21 +261,9 @@ export class LlmExtractorStrategy implements INodeStrategy {
       return { success: false, error: interpolated.failure };
     }
 
+    // Siempre devuelve cliente: un proveedor sin implementar degrada al
+    // simulador con un aviso (ver `resolveProvider`).
     const client = this.resolveProvider(config);
-
-    if (client === null) {
-      this.consecutiveFailures.delete(brakeKey);
-
-      return {
-        success: false,
-        error: {
-          level: 'GRAVE',
-          code: ERR_LLM_PROVIDER_UNSUPPORTED,
-          message: `El proveedor "${config.provider}" todavia no tiene cliente implementado. Usa ${LlmProvider.GEMINI} o ${LlmProvider.MOCK}.`,
-          missingFields: ['provider'],
-        },
-      };
-    }
 
     let response: LlmResponsePayload;
 
@@ -242,13 +275,14 @@ export class LlmExtractorStrategy implements INodeStrategy {
       // no menciona ningun namespace. Con el reparto contrario, ese prompt
       // facturaria una inferencia sobre ningun contenido.
       response = await client.generateCompletion(
-        inputText,
+        inputText ?? '',
         interpolated.prompt,
         {
           model: config.model,
           timeoutMs: config.timeoutMs,
           maxRetries: config.maxRetries,
         },
+        attachments,
       );
     } catch (error) {
       return this.registerFailure(brakeKey, config, error);
@@ -450,21 +484,32 @@ export class LlmExtractorStrategy implements INodeStrategy {
   }
 
   /**
-   * Elige el cliente, o `null` si el proveedor no tiene uno implementado.
+   * Elige el cliente que ejecutara la inferencia.
    *
    * `dryRun` gana a `provider`: es el interruptor explicito de coste cero, y un
    * operador que lo activa esta diciendo "no gastes", no "gasta si el proveedor
    * configurado es de pago".
    *
-   * ANTHROPIC y OPENAI devuelven `null` y NO caen al simulador. La tentacion es
-   * evidente —"al menos el flujo termina"— y es justo lo que no debe pasar: la
-   * salida simulada seguiria hasta el `MAPEADOR_PLANTILLA`, que la publicaria en
-   * Drupal como si fuera una redaccion real. Un fallo ruidoso es infinitamente
-   * preferible a una noticia inventada en produccion.
+   * ANTHROPIC y OPENAI DEGRADAN al simulador con un aviso, en lugar de devolver
+   * `null` y fallar con `ERR_LLM_PROVIDER_UNSUPPORTED` como hacian antes. El
+   * cambio llega con los defaults por entorno: `AI_DEFAULT_PROVIDER` puede
+   * nombrar un proveedor todavia sin cliente, y con el comportamiento anterior
+   * cualquier nodo que no declarase el suyo habria pasado a fallar de golpe
+   * —incluidos los flujos ya guardados que hoy corren sobre el defecto MOCK.
+   *
+   * RIESGO QUE ESTO ACEPTA, y conviene tenerlo escrito: una redaccion simulada
+   * puede ahora llegar al `MAPEADOR_PLANTILLA` y de ahi a un destino real. Lo
+   * unico que la distingue es `metadata.isMock`, que viaja en el namespace y
+   * queda en la traza de la ejecucion. Quien publique a produccion deberia
+   * mirarlo; la alternativa —fallar— tiene el coste simetrico de pausar flujos
+   * sanos por una variable de entorno que mira al futuro.
+   *
+   * Es ademas el mismo criterio que ya aplicaba `GeminiLlmProvider` cuando falta
+   * `GEMINI_API_KEY`: degradar con aviso y marcar la salida, no reventar.
    */
   private resolveProvider(
     config: ResolvedLlmExtractorConfig,
-  ): ILlmProviderClient | null {
+  ): ILlmProviderClient {
     if (config.dryRun || config.provider === LlmProvider.MOCK) {
       return this.mockProvider;
     }
@@ -473,7 +518,163 @@ export class LlmExtractorStrategy implements INodeStrategy {
       return this.geminiProvider;
     }
 
-    return null;
+    this.logger.warn(
+      `El proveedor "${config.provider}" todavia no tiene cliente implementado. Se degrada a simulacion de coste cero; la salida llevara isMock: true.`,
+    );
+
+    return this.mockProvider;
+  }
+
+  /**
+   * Adjuntos que este nodo debe enviar al modelo para que los MIRE.
+   *
+   * Solo se recolectan cuando el nodo fue alcanzado por la ruta de recuperacion
+   * del parser, y esa condicion es deliberadamente estrecha. La alternativa
+   * —mirar si hay adjuntos en `raw_email` y mandarlos siempre— convertiria en
+   * una llamada con vision cualquier boletin con el logotipo en PNG, que es la
+   * inferencia mas cara del pipeline gastada en nada. El `error_code` es la
+   * afirmacion explicita de que NO hay texto y los bytes son la unica fuente.
+   *
+   * Los binarios siguen ahi por dos garantias que se suman: la politica de
+   * liberacion del motor conserva el base64 mientras ningun nodo declare texto
+   * util, y ademas no llega a evaluarse en la rama de fallo, que es por donde se
+   * entra aqui.
+   *
+   * Se filtra POR TIPO con la misma expresion que uso el parser para levantar la
+   * bandera: pedirle a un modelo con vision que lea un `.docx` corrupto no lo
+   * arregla, y pagarlo seria tirar el dinero dos veces.
+   */
+  private collectVisionAttachments(
+    context: StatePayloadContext,
+  ): readonly LlmInlineAttachment[] {
+    const errorContext = context.getNamespace(ERROR_CONTEXT_NAMESPACE);
+
+    if (errorContext?.error_code !== ERR_PARSER_UNEXTRACTABLE_MEDIA) {
+      return [];
+    }
+
+    const rawAttachments =
+      context.getNamespace(RAW_EMAIL_NAMESPACE)?.[ATTACHMENTS_KEY];
+
+    if (!Array.isArray(rawAttachments)) {
+      return [];
+    }
+
+    const collected: LlmInlineAttachment[] = [];
+
+    for (const raw of rawAttachments) {
+      if (collected.length >= MAX_VISION_ATTACHMENTS) {
+        break;
+      }
+
+      const record =
+        typeof raw === 'object' && raw !== null
+          ? (raw as Record<string, unknown>)
+          : {};
+      const contentBase64 = record.contentBase64;
+      const contentType = record.contentType;
+
+      // El base64 puede ser `null` —el motor lo libero, o el adjunto nunca se
+      // ingirio— y entonces no hay nada que mirar. Comprobar el TIPO ademas del
+      // contenido evita mandar un `.xlsx` ilegible a un modelo con vision.
+      if (
+        typeof contentBase64 !== 'string' ||
+        contentBase64.length === 0 ||
+        typeof contentType !== 'string' ||
+        !MULTIMODAL_CONTENT_TYPE_PATTERN.test(contentType)
+      ) {
+        continue;
+      }
+
+      collected.push({
+        filename:
+          typeof record.filename === 'string' ? record.filename : 'adjunto',
+        contentType,
+        contentBase64,
+      });
+    }
+
+    if (collected.length > 0) {
+      this.logger.log(
+        `Modo vision: se envian ${collected.length} adjunto(s) al modelo tras ${ERR_PARSER_UNEXTRACTABLE_MEDIA}.`,
+      );
+    }
+
+    return collected;
+  }
+
+  /**
+   * Completa proveedor y modelo con los defaults del entorno.
+   *
+   * PRECEDENCIA, de mas fuerte a mas debil: los `params` del nodo, el par del
+   * `.env` que corresponda al modo, y las constantes del DTO. El nodo manda
+   * siempre: quien configuro un `provider` concreto tomo una decision que una
+   * variable de entorno no debe revocar a sus espaldas.
+   *
+   * DOS PARES Y NO UNO porque redactar y leer un escaneado son trabajos
+   * distintos: el modelo bueno escribiendo no tiene por que ser el bueno —ni el
+   * barato— haciendo OCR, y con una sola variable elegir uno obligaba a aceptar
+   * el otro.
+   *
+   * `dryRun` no se toca aqui: es el interruptor explicito de coste cero y lo
+   * resuelve `resolveProvider`, que tiene la ultima palabra sobre el cliente.
+   *
+   * El proveedor del entorno se valida contra el enum antes de aplicarlo. Llega
+   * como cadena porque `AiDefaultsConfig` vive en `@core` y no puede importar el
+   * enum de `@modules`; un valor que no case se ignora, y `AiDefaultsConfig` ya
+   * dejo el aviso en el log.
+   *
+   * SE MIRAN LOS `params` CRUDOS y no la configuracion resuelta. La razon es que
+   * `resolveLlmExtractorConfig` ya aplico los defectos, de modo que a esa altura
+   * no queda rastro de si el valor lo eligio el nodo o lo puso la constante.
+   * Comparar contra la constante casi funciona, y falla justo donde importa: un
+   * nodo que declara `provider: MOCK` —el mismo valor que el defecto— habria
+   * pasado por no haber declarado nada, y el entorno le habria cambiado el
+   * proveedor a sus espaldas.
+   */
+  private applyEnvironmentDefaults(
+    config: ResolvedLlmExtractorConfig,
+    params: Record<string, unknown>,
+    isVisionMode: boolean,
+  ): ResolvedLlmExtractorConfig {
+    const declaresProvider = this.declaresParam(params.provider);
+    const declaresModel = this.declaresParam(params.model);
+
+    // Si el nodo declaro las dos cosas no hay nada que completar, y ni siquiera
+    // se lee el entorno.
+    if (declaresProvider && declaresModel) {
+      return config;
+    }
+
+    const defaults = isVisionMode
+      ? this.aiDefaults.getOcrDefaults()
+      : this.aiDefaults.getTextDefaults();
+
+    const envProvider = this.toProvider(defaults.provider);
+
+    return {
+      ...config,
+      provider: declaresProvider
+        ? config.provider
+        : (envProvider ?? config.provider),
+      model: declaresModel ? config.model : (defaults.model ?? config.model),
+    };
+  }
+
+  /** El nodo escribio este `param` de verdad, con un valor no vacio. */
+  private declaresParam(value: unknown): boolean {
+    return typeof value === 'string' && value.trim().length > 0;
+  }
+
+  /** Cadena del entorno a valor del enum, o `null` si no corresponde a ninguno. */
+  private toProvider(value: string | null): LlmProvider | null {
+    if (value === null) {
+      return null;
+    }
+
+    return Object.values(LlmProvider).includes(value as LlmProvider)
+      ? (value as LlmProvider)
+      : null;
   }
 
   /**

@@ -1,5 +1,11 @@
 import { ApiPropertyOptional } from '@nestjs/swagger';
-import { IsIn, IsInt, IsOptional, IsPositive } from 'class-validator';
+import {
+  IsBoolean,
+  IsIn,
+  IsInt,
+  IsOptional,
+  IsPositive,
+} from 'class-validator';
 
 import { NODE_OUTPUT_NAMESPACES } from '@core/fsm/types/pipeline-schema.types';
 
@@ -67,12 +73,26 @@ export class ParserEmailConfigDto {
   @IsInt({ message: 'minBodyLength debe ser un numero entero.' })
   @IsPositive({ message: 'minBodyLength debe ser mayor que cero.' })
   minBodyLength?: number;
+
+  @ApiPropertyOptional({
+    description:
+      'Convierte el correo sin texto aprovechable (solo imagen o PDF escaneado) en un fallo ERR_PARSER_UNEXTRACTABLE_MEDIA, para poder desviarlo con `onErrorStep`. Por defecto false: el caso se senala con la bandera `requires_multimodal_fallback` y el flujo continua.',
+    default: false,
+  })
+  // El defecto es `false`, y no es timidez: sin el, activar esta entrega
+  // convertiria en PAUSADO todos los flujos ya guardados que hoy atraviesan
+  // tranquilamente un correo de solo imagen, sin que nadie hubiera pedido ese
+  // cambio. Bifurcar es una decision del disenador del flujo, no del despliegue.
+  @IsOptional()
+  @IsBoolean({ message: 'failOnUnextractableMedia debe ser un booleano.' })
+  failOnUnextractableMedia?: boolean;
 }
 
 /** Configuracion del parser con los valores por defecto ya aplicados. */
 export interface ResolvedParserEmailConfig {
   readonly sourceNamespace: string;
   readonly minBodyLength: number;
+  readonly failOnUnextractableMedia: boolean;
 }
 
 /** Aplica los valores por defecto sobre un DTO ya validado. Funcion pura. */
@@ -81,4 +101,5 @@ export const resolveParserEmailConfig = (
 ): ResolvedParserEmailConfig => ({
   sourceNamespace: dto.sourceNamespace ?? DEFAULT_PARSER_SOURCE_NAMESPACE,
   minBodyLength: dto.minBodyLength ?? DEFAULT_MIN_BODY_LENGTH,
+  failOnUnextractableMedia: dto.failOnUnextractableMedia ?? false,
 });

@@ -37,6 +37,27 @@ export const declaredErrorTarget = (route: ErrorRoute): string | null => {
   return isSelectiveFallback(route) ? route.targetNode : null;
 };
 
+/**
+ * La ruta nombra EXPLICITAMENTE ese codigo en su `catchErrors`.
+ *
+ * Distinta de `resolveErrorRoute`, y la diferencia esta toda en la forma
+ * heredada: una cadena atrapa cualquier codigo, asi que `resolveErrorRoute`
+ * diria que si para todos. Esta pregunta es otra —"alguien escribio este codigo
+ * a mano aqui"— y solo la forma selectiva puede responderla que si.
+ *
+ * La usa la regla 10 del validador, que necesita distinguir una declaracion
+ * deliberada de un respaldo generico: rechazar un `onErrorStep: "alerta"` porque
+ * el nodo no emite cierto codigo seria un falso positivo, ya que esa ruta esta
+ * ahi para los OTROS fallos del nodo.
+ */
+export const catchesErrorExplicitly = (
+  route: ErrorRoute,
+  errorCode: string,
+): boolean =>
+  isSelectiveFallback(route) &&
+  Array.isArray(route.catchErrors) &&
+  route.catchErrors.includes(errorCode);
+
 /** Ruta EFECTIVA resuelta para un codigo concreto. */
 export interface ResolvedErrorRoute {
   readonly targetNode: string;

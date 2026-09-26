@@ -15,6 +15,7 @@ export enum NodeType {
   ESCUDO_POST_IA = 'ESCUDO_POST_IA',
   MAPEADOR_PLANTILLA = 'MAPEADOR_PLANTILLA',
   DESTINO_HTTP = 'DESTINO_HTTP',
+  DESTINO_SMTP = 'DESTINO_SMTP',
 }
 
 /** Etiquetas legibles para los selectores; el enum viaja crudo al backend. */
@@ -27,6 +28,7 @@ export const NODE_TYPE_LABELS: Record<NodeType, string> = {
   [NodeType.ESCUDO_POST_IA]: 'Escudo posterior a IA',
   [NodeType.MAPEADOR_PLANTILLA]: 'Mapeador de plantilla',
   [NodeType.DESTINO_HTTP]: 'Destino HTTP',
+  [NodeType.DESTINO_SMTP]: 'Alerta por correo',
 };
 
 /**
@@ -70,6 +72,7 @@ export const NODE_OUTPUT_NAMESPACES = [
   'validated_drupal_json',
   'rendered_html',
   'http_result',
+  'smtp_result',
 ] as const;
 
 /**
@@ -94,6 +97,7 @@ export const DEFAULT_OUTPUT_NAMESPACE_BY_NODE_TYPE: Record<NodeType, string> = {
   [NodeType.ESCUDO_POST_IA]: 'validated_drupal_json',
   [NodeType.MAPEADOR_PLANTILLA]: 'rendered_html',
   [NodeType.DESTINO_HTTP]: 'http_result',
+  [NodeType.DESTINO_SMTP]: 'smtp_result',
 };
 
 /**
@@ -120,6 +124,7 @@ export const DEFAULT_PARAMS_BY_NODE_TYPE: Record<NodeType, Record<string, unknow
   [NodeType.ESCUDO_POST_IA]: {},
   [NodeType.MAPEADOR_PLANTILLA]: {},
   [NodeType.DESTINO_HTTP]: {},
+  [NodeType.DESTINO_SMTP]: {},
 };
 
 /**

@@ -17,8 +17,15 @@ import type { RawEmailAttachmentMetadata } from '@modules/nodes/interfaces/raw-e
  * Las hojas de calculo y los CSV quedan FUERA a proposito: son texto que otro
  * nodo puede decodificar sin gastar un modelo multimodal, que es con diferencia
  * la llamada mas cara del pipeline.
+ *
+ * Se EXPORTA porque hay dos lados de la misma decision y tienen que usar el
+ * mismo criterio: aqui se cuenta que adjuntos justifican levantar la bandera
+ * `requires_multimodal_fallback`, y en `LlmExtractorStrategy` se elige cuales se
+ * envian de verdad al modelo. Con dos expresiones separadas, el dia que alguien
+ * anadiera `image/heic` a una de ellas el parser pediria vision para un fichero
+ * que el nodo de IA despues descartaria, y el flujo se quedaria sin entrada.
  */
-const MULTIMODAL_CONTENT_TYPE_PATTERN = /^(?:image\/|application\/pdf$)/;
+export const MULTIMODAL_CONTENT_TYPE_PATTERN = /^(?:image\/|application\/pdf$)/;
 
 /**
  * Origen del cuerpo textual que el parser saneo.

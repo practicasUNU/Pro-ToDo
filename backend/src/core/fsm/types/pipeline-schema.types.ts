@@ -46,7 +46,27 @@ export const NODE_OUTPUT_NAMESPACES = [
   'validated_drupal_json',
   'rendered_html',
   'http_result',
+  'smtp_result',
 ] as const;
+
+/**
+ * Namespace reservado con los metadatos del fallo que provoco un desvio.
+ *
+ * Lo siembra el motor JUSTO antes de saltar por `onErrorStep`, y es lo unico
+ * que distingue una rama de recuperacion util de una ciega: sin el, el nodo de
+ * respaldo se entera de que le toca correr pero no de por que. Un nodo de
+ * alerta no podria decir que fallo, y uno de IA no sabria que se espera de el.
+ *
+ * `snake_case` como todos sus hermanos (`raw_email`, `parsed_email`,
+ * `trigger`): el nombre acaba siendo la raiz de un `{{ns.campo}}`, y
+ * `OUTPUT_NAMESPACE_PATTERN` solo admite `[a-z0-9_]`.
+ *
+ * NO figura en `NODE_OUTPUT_NAMESPACES` porque ningun nodo lo escribe. Se
+ * declara en `ENGINE_PROVIDED_NAMESPACES` del validador de topologia, igual que
+ * `trigger`, para que un nodo de respaldo pueda interpolarlo sin que el
+ * validador exija un productor que no existe.
+ */
+export const ERROR_CONTEXT_NAMESPACE = 'error_context';
 
 /** Busqueda O(1) para el validador de topologia. */
 export const NODE_OUTPUT_NAMESPACE_SET: ReadonlySet<string> = new Set(
@@ -64,10 +84,15 @@ export const SEMVER_PATTERN = /^\d+\.\d+\.\d+$/;
  * `nodos`, el catalogo estatico de tipos (ver `db/migrations/011-catalogo-nodos.sql`;
  * la tabla se llamaba `tipos_nodo` hasta esa migracion).
  *
- * El catalogo tiene NUEVE filas y este enum declara ocho: `DESTINO_ACENS` sigue
+ * El catalogo tiene DIEZ filas y este enum declara nueve: `DESTINO_ACENS` sigue
  * sin estrategia, asi que no es expresable en un `pipeline_schema`.
  * `GET /api/nodos` lo devuelve marcado con `implemented: false` para que el
  * selector del frontend lo deshabilite.
+ *
+ * `DESTINO_SMTP` (migracion 021) es la alerta por correo que da destino a las
+ * rutas de `onErrorStep`. Lleva el prefijo `DESTINO_` y la categoria `DESTINO`
+ * porque el criterio de esa familia es escribir FUERA del sistema, que es lo que
+ * hace, aunque su contenido sea un aviso y no una publicacion.
  */
 export enum NodeType {
   TRIGGER_IMAP = 'TRIGGER_IMAP',
@@ -78,6 +103,7 @@ export enum NodeType {
   ESCUDO_POST_IA = 'ESCUDO_POST_IA',
   MAPEADOR_PLANTILLA = 'MAPEADOR_PLANTILLA',
   DESTINO_HTTP = 'DESTINO_HTTP',
+  DESTINO_SMTP = 'DESTINO_SMTP',
 }
 
 /**

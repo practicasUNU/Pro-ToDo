@@ -116,7 +116,27 @@ export interface NodeErrorDetail {
  */
 export interface NodeResult {
   success: boolean;
-  /** Datos a escribir en el `outputNamespace` del nodo si `success` es true. */
+  /**
+   * Payload producido por el nodo. Su DESTINO depende de `success`.
+   *
+   * - `success: true`: el motor lo deposita en el `outputNamespace` del nodo.
+   * - `success: false`: NO se publica —un nodo que falla no escribe su
+   *   namespace, o los de aguas abajo leerian un resultado a medias— pero, si
+   *   el fallo se desvia por `onErrorStep`, viaja intacto a
+   *   `error_context.partial_data`.
+   *
+   * Esa segunda mitad es lo que vuelve accionable una rama de recuperacion.
+   * `PARSER_PRE_IA` es el caso que la motiva: cuando declara un correo sin texto
+   * aprovechable, su payload trae el inventario de adjuntos y el
+   * `multimodal_reason`, que es exactamente lo que el nodo de respaldo necesita
+   * para decidir si manda una alerta o invoca un modelo con vision. Tirarlo
+   * obligaria al respaldo a volver a deducir del correo crudo lo que el parser
+   * ya habia deducido.
+   *
+   * Sigue siendo OPCIONAL en un fallo: la mayoria de las estrategias no alcanzan
+   * a producir nada antes de abortar, y `error_context.partial_data` recibe
+   * entonces un objeto vacio.
+   */
   data?: Record<string, unknown>;
   /**
    * Fin ordenado del flujo pedido por el propio nodo.
@@ -264,6 +284,35 @@ export interface INodeStrategy {
    * @returns Nombres de los params ausentes o vacios. Vacio si el nodo puede correr.
    */
   readonly getIncompleteParams?: (
+    params: Record<string, unknown>,
+  ) => readonly string[];
+
+  /**
+   * Codigos de fallo que este nodo NUNCA emitira con estos `params`.
+   *
+   * Existe porque hay nodos cuyo repertorio de fallos depende de su
+   * configuracion, y una ruta de error declarada contra un codigo que el nodo no
+   * puede producir es un nodo de respaldo que jamas corre. El sintoma es mudo:
+   * no hay excepcion, no hay traza, simplemente el correo que debia desviarse
+   * sigue de largo. `PARSER_PRE_IA` es el caso de hoy —solo emite
+   * `ERR_PARSER_UNEXTRACTABLE_MEDIA` si `failOnUnextractableMedia` esta puesto—
+   * y lo que este metodo permite es rechazar esa combinacion al GUARDAR.
+   *
+   * Es el negativo de la pregunta que la estrategia ya sabe responder: no "que
+   * puedo fallar", que seria un inventario que nadie mantiene al dia, sino "que
+   * he apagado", que es una sola condicion junto al `param` que la gobierna.
+   *
+   * PURO Y SINCRONO, como `getRequiredNamespaces`: solo mira `params`. Lo
+   * consulta la regla 10 del validador de topologia, que es una funcion pura y
+   * recibe el resolutor por parametro para no depender del contenedor de Nest.
+   *
+   * Vive AQUI y no como una lista en `@core` por la misma razon que los codigos
+   * de cada estrategia viven junto a ella: el nucleo no debe conocerlos, y
+   * centralizarlos obligaria a tocar `@core` cada vez que se anade un nodo.
+   *
+   * OPCIONAL: la mayoria de los nodos emite siempre el mismo repertorio.
+   */
+  readonly getUnreachableErrorCodes?: (
     params: Record<string, unknown>,
   ) => readonly string[];
 
