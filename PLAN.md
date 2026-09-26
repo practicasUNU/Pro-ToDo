@@ -2782,3 +2782,66 @@ operacion de flujos, y la unica frontera reservada al ADMIN es la gestion de cue
 - [ ] 47. Pendiente — aplicar la migracion 018 en el contenedor (la ejecuta el usuario)
 - [ ] 48. Pendiente (PROT-15.3) — conectar `findByName` a la estrategia del `PROCESADOR_IA` y
       decidir alli si `promptId` o `promptName` es lo que guarda el nodo en sus `params`
+
+---
+
+## Tanda actual — Plantillas de Prompts IA y selector Poka-Yoke de namespaces
+
+### Dos cosas a la vez
+
+1. **Renombrado de dominio.** `prompts_ia` -> `plantillas_prompts_ia`, y con ella el modulo, la
+   ruta REST y toda la capa Vue. Lo que se guarda lleva marcadores `{{nodo.campo}}` sin resolver:
+   es una PLANTILLA, y el prompt real es lo que sale de interpolarla contra el
+   `StatePayloadContext` de una ejecucion concreta.
+2. **El explorador determinista.** El autor tecleaba la ruta a mano; un `clean_bodyy` se guardaba
+   sin protesta y reventaba en ejecucion con un GRAVE.
+
+### Por que NO hubo trabajo de `output_schema`
+
+El enunciado pedia "asegurar que los nodos tengan definido su output_schema". No existe ni debe
+existir esa columna: `GET /api/nodos` ya sirve `outputFields` por nodo, resueltos en cada peticion
+desde `INodeStrategy.outputFields`. El TSDoc de la interfaz lo declara explicitamente asi para que
+tabla y estrategia no puedan desincronizarse. Los campos citados ya estaban: `parsed_email` publica
+13 y `raw_email` 7. Lo unico vacio es `PROCESADOR_IA` y `ESCUDO_POST_IA`, y eso se arregla
+escribiendo sus estrategias, no tocando SQL.
+
+### Contratos nuevos
+
+```typescript
+// @/utils/prompt-namespaces — helpers puros, sin estado ni E/S
+export const PROMPT_EXCLUDED_NODE_TYPES: ReadonlySet<string>;   // IA, ESCUDO, MAPEADOR
+export const buildPromptContextFromCatalog: (entries: readonly NodeCatalogEntry[]) => UpstreamNamespace[];
+export const filterPromptContext: (context: readonly UpstreamNamespace[]) => UpstreamNamespace[];
+
+// @components/shared/VariableExplorer.vue — extraido de TemplateEditorDialog
+interface Props { context: readonly UpstreamNamespace[]; insertLabel?: string }
+emits: { insert: [token: string] }
+defineExpose({ reset })
+```
+
+### Los dos escenarios del filtro
+
+| Escenario | Origen del contexto | Quien lo invoca |
+|---|---|---|
+| A — CRUD global | `buildPromptContextFromCatalog(catalog.entries)` | El gestor de plantillas de prompt |
+| B — dentro del asistente | prop `upstreamContext`, pasada por `filterPromptContext` | PENDIENTE: PROT-15.3 |
+
+Escenario A deja exactamente cuatro origenes: `raw_email`, `cron_trigger`, `parsed_email` y
+`scraped_web`. Los destinos se excluyen por CATEGORIA (`DESTINO`) y no por nombre, para que el
+tercer destino que se anada no obligue a acordarse de ninguna lista.
+
+### Checklist
+
+- [x] 49. BD — `019-renombrar-plantillas-prompts-ia.sql` idempotente (6 objetos, no 2) e `init.sql`
+- [x] 50. Backend — `ai-prompts` -> `ai-prompt-templates` con `git mv`; `AiPromptTemplate`,
+      `@Controller('ai-prompt-templates')`, `AiPromptTemplatesModule` en `AppModule`
+- [x] 51. Frontend — renombrado de tipos, servicio, store, pagina, dialogo y manager; ruta
+      `/plantillas-prompts-ia`, drawer y `ROUTE_BREADCRUMBS`
+- [x] 52. Frontend — `VariableExplorer.vue` extraido; `TemplateEditorDialog` pasa a consumirlo con
+      sus 11 pruebas intactas
+- [x] 53. Frontend — `prompt-namespaces.ts` y su cableado en `AiPromptTemplateDialog`, con
+      insercion sobre el caret real del textarea
+- [x] 54. Pruebas — 11 de `prompt-namespaces`, 10 de `VariableExplorer`; frontend 461, backend 1136
+- [ ] 55. Pendiente — aplicar la 019 en el contenedor (la ejecuta el usuario)
+- [ ] 56. Pendiente (PROT-15.3) — estrategia y triada del `PROCESADOR_IA`; al montarlo, pasar
+      `upstream-context` al dialogo y cerrar el Escenario B

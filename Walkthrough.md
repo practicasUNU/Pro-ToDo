@@ -5608,3 +5608,105 @@ NO se cubre: el controlador no tiene spec propio —los guards y `@CurrentUser()
 el patron del repo no los prueba por separado—, y la migracion no se ha aplicado todavia contra el
 contenedor, asi que la correspondencia entre `init.sql` y la entidad esta verificada por lectura y
 no por ejecucion.
+
+---
+
+## Tanda actual — El prompt dejo de escribirse a ciegas
+
+### Renombrar una tabla son seis objetos, no dos
+
+`ALTER TABLE ... RENAME TO` no arrastra los nombres derivados. Sin renombrar tambien la PK, el
+UNIQUE del nombre, la clave ajena y el indice, una base migrada habria conservado
+`prompts_ia_pkey` mientras un clonado nuevo desde `init.sql` tendria
+`plantillas_prompts_ia_pkey` — y, peor, un error de nombre duplicado habria citado una tabla que ya
+no existe, mandando a quien depure al sitio equivocado. Es la tercera vez que el proyecto tropieza
+con lo mismo (009 y 011), asi que la 019 lo hace explicito en su cabecera.
+
+Cada paso va en un bloque `DO $$` porque `RENAME` no admite `IF EXISTS`. La clave ajena no se
+recrea: `ON DELETE RESTRICT` sobrevive al renombrado, y volver a declararla solo abriria la puerta
+a cambiar la regla sin darse cuenta.
+
+### La PK se sigue llamando `id`
+
+El enunciado pedia `idPlantillaPromptIa`. Se mantuvo `id` con
+`@PrimaryGeneratedColumn('uuid', { name: 'id_plantilla_prompt_ia' })`. `code-conventions.md` §1
+exige identificadores en ingles, y las diez entidades del proyecto ya mapean `id_flujo`,
+`id_usuario` e `id_plantilla` a una propiedad `id`. Aceptarlo habria dejado el unico identificador
+en espanol del backend y habria cambiado la forma del JSON, obligando al frontend a hablar espanol
+en sus tipos.
+
+### Lo que el enunciado daba por hacer y ya estaba hecho
+
+"Asegurar que los nodos tengan definido su output_schema" no era trabajo pendiente: no existe esa
+columna y no debe existir. `INodeStrategy.outputFields` es la fuente, y `NodeCatalogService` la
+resuelve en cada peticion contra la factoria de estrategias. Su TSDoc explica el porque: una copia
+en la tabla se desincronizaria con la estrategia a la primera. Los campos citados en el encargo
+—`clean_body`, `clean_title`, `extracted_urls`, `subject`, `from`— llevaban declarados desde la
+tanda de los cinco inventarios de salida.
+
+### El explorador se extrajo en vez de duplicarse
+
+Vivia en linea dentro de `TemplateEditorDialog` con 11 pruebas encima. Copiarlo al dialogo de
+prompts habria dejado dos gramaticas `{{ns.campo}}` que divergirian a la primera correccion, asi
+que se saco a `components/shared/VariableExplorer.vue` y el dialogo HTML pasa a consumirlo.
+
+**Las 11 pruebas de `TemplateEditorDialog.spec.ts` no se tocaron, y siguen pasando.** Era el
+criterio de aceptacion de la extraccion: si hubiera hecho falta editarlas, el comportamiento habria
+cambiado. Los `data-test` se conservan todos, y por eso las consultas del spec siguen resolviendo
+aunque ahora atraviesen un componente hijo.
+
+El componente NO decide que origenes se ofrecen; los recibe filtrados. Cada anfitrion tiene sus
+reglas —la plantilla HTML admite `_assets`, el prompt prohibe los destinos— y meterlas dentro
+habria convertido un componente de presentacion en el juez de dos dominios. Tampoco inserta: emite
+`insert` y que el anfitrion escriba donde sepa, porque uno despacha una transaccion de CodeMirror y
+el otro manipula el caret de un textarea.
+
+### Por que los destinos se excluyen por categoria y los otros tres por nombre
+
+Un destino cierra el flujo: su salida es el acuse de la publicacion y nada corre despues. Esa es
+una propiedad de la CATEGORIA, y hoy son dos filas pero manana seran tres — enumerarlas habria
+obligado a acordarse de la lista al anadir la siguiente.
+
+`PROCESADOR_IA`, `ESCUDO_POST_IA` y `MAPEADOR_PLANTILLA` son de PROCESAMIENTO y CONTROL, categorias
+que si se admiten, asi que a esos hay que nombrarlos. Los tres comparten motivo: consumen lo que
+produce la IA. Citarlos desde el prompt seria pedirle al modelo el resultado de procesar su propia
+respuesta, y `llm_response` es literalmente la salida del nodo que esta leyendo el prompt.
+
+Nota sobre las categorias del enunciado: pedia `'PROCESSING'` y `'DESTINATION'`. El enum real es
+`TRIGGER | PROCESAMIENTO | CONTROL | DESTINO`, el tipo PostgreSQL `enum_categoria`. Y "permitir
+CONTROL" resulta vacio en la practica: `ESCUDO_POST_IA` es el unico nodo de esa categoria y esta
+excluido por nombre.
+
+### El Escenario B esta listo pero nadie lo invoca todavia
+
+`AiPromptTemplateDialog` acepta `upstreamContext` con el mismo contrato que `TemplateEditorDialog`,
+y `filterPromptContext` lo depura. Pero hoy no hay quien se lo pase: `PROCESADOR_IA` no tiene
+estrategia en el backend, ni componente en `nodeConfigRegistry`, ni store en `nodeStoreRegistry`.
+La prop queda probada y documentada para que PROT-15.3 solo tenga que conectarla; construir ahi
+toda la triada del nodo habria sido meter PROT-15.3 entera en esta tanda, y el nodo seguiria sin
+poder ejecutarse.
+
+### La insercion en el textarea hubo que escribirla
+
+No hay `insertTextAtCursor` que reutilizar: el prompt se edita en un `q-input type="textarea"` y no
+en CodeMirror. Se toma la referencia del QInput, se lee `selectionStart`/`selectionEnd` del elemento
+nativo y se recompone la cadena. Se usan los DOS extremos y no solo el inicio para que un texto
+seleccionado quede REEMPLAZADO, que es lo que espera cualquiera que seleccione algo antes de pulsar
+Insertar.
+
+El caret se recoloca dentro de un `setTimeout(0)`: cuando la funcion termina, Vue todavia no ha
+propagado el `v-model` al DOM, y fijar la posicion antes la perderia en el repintado. Sin
+referencia al textarea —que no deberia ocurrir— se anade al final en vez de descartar la insercion.
+
+### Lo que las pruebas cubren y lo que no
+
+21 pruebas nuevas: 11 de `prompt-namespaces` (los cuatro origenes exactos del Escenario A, la
+exclusion por categoria con un destino inventado, el mapeador pese a ser de PROCESAMIENTO, la
+propia salida de la IA, los nodos sin campos, y en el Escenario B que el contexto recibido no se
+muta) y 10 de `VariableExplorer` (etiquetas, encadenado de los dos selects, limpieza al cambiar de
+origen, el marcador emitido y el `reset` imperativo).
+
+NO se cubre: la insercion real en el textarea no tiene prueba automatica —`selectionStart` sobre un
+QInput montado en happy-dom no reproduce el caret de un navegador de verdad—, asi que el punto 3 de
+la verificacion manual es el que la valida. Tampoco hay prueba del Escenario B de punta a punta,
+porque no existe el anfitrion que lo dispare.

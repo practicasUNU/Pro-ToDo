@@ -11,7 +11,7 @@ import { ApiProperty } from '@nestjs/swagger';
  * `fecha_creacion`: la frontera del JSON es contrato con la UI, no reflejo del
  * esquema.
  */
-export class AiPromptResponseDto {
+export class AiPromptTemplateResponseDto {
   @ApiProperty({ description: 'Identificador del prompt' })
   readonly id: string;
 
@@ -43,7 +43,7 @@ export class AiPromptResponseDto {
 }
 
 /** Detalle de un prompt: el resumen mas la instruccion completa. */
-export class AiPromptDetailResponseDto extends AiPromptResponseDto {
+export class AiPromptTemplateDetailResponseDto extends AiPromptTemplateResponseDto {
   @ApiProperty({
     description:
       'Instruccion completa, con sus marcadores {{nodo.campo}} sin resolver',

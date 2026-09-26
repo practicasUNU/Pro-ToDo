@@ -11,7 +11,11 @@ import {
 import { User } from '@modules/users/entities/user.entity';
 
 /**
- * Prompt reutilizable para el nodo `PROCESADOR_IA` (PROT-15.2).
+ * Plantilla de prompt reutilizable para el nodo `PROCESADOR_IA` (PROT-15.2).
+ *
+ * Se llama PLANTILLA y no prompt a secas porque lo que se guarda lleva
+ * marcadores `{{nodo.campo}}` sin resolver; el prompt real es lo que sale de
+ * interpolarla contra el `StatePayloadContext` de una ejecucion concreta.
  *
  * Sustituye a la instruccion incrustada en los `params` del nodo: dos flujos que
  * comparten la misma instruccion la duplicaban, y corregirla obligaba a editar
@@ -30,16 +34,16 @@ import { User } from '@modules/users/entities/user.entity';
  * TypeORM no altera el esquema, asi que una discrepancia aqui no se corregiria
  * sola, se convertiria en una mentira en el codigo.
  */
-@Entity('prompts_ia')
-export class AiPrompt {
-  @PrimaryGeneratedColumn('uuid', { name: 'id_prompt' })
+@Entity('plantillas_prompts_ia')
+export class AiPromptTemplate {
+  @PrimaryGeneratedColumn('uuid', { name: 'id_plantilla_prompt_ia' })
   id: string;
 
   /**
    * Identificador humano del prompt.
    *
    * UNIQUE: es lo que el operador reconoce en el selector del nodo IA, y la
-   * clave por la que lo resuelve `AiPromptsService.findByName()`.
+   * clave por la que lo resuelve `AiPromptTemplatesService.findByName()`.
    */
   @Column({ name: 'nombre', type: 'varchar', length: 120, unique: true })
   name: string;

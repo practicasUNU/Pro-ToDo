@@ -101,12 +101,17 @@ CREATE TABLE plantillas_html (
 );
 
 -- =============================================================================
--- Tabla: PROMPTS_IA (PROT-15.2)
--- Duplicada en db/migrations/018-prompts-ia.sql para las bases de datos ya
--- creadas: este archivo solo se ejecuta con el volumen de Docker vacío.
+-- Tabla: PLANTILLAS_PROMPTS_IA (PROT-15.2)
+-- Duplicada en db/migrations/018-prompts-ia.sql y renombrada por la
+-- 019-renombrar-plantillas-prompts-ia.sql para las bases de datos ya creadas:
+-- este archivo solo se ejecuta con el volumen de Docker vacío.
 --
 -- Repositorio de instrucciones reutilizables para el nodo PROCESADOR_IA. Saca el
 -- prompt de los `params` del nodo, igual que `plantillas_html` hizo con el HTML.
+--
+-- Se llama PLANTILLA y no prompt a secas porque lo que se guarda lleva
+-- marcadores {{nodo.campo}} sin resolver; el prompt real es lo que sale de
+-- interpolarla contra el contexto de la ejecución.
 --
 -- DESACOPLADA a propósito: no guarda proveedor, modelo, temperatura ni
 -- max_tokens. Un prompt es un activo de TEXTO; qué modelo lo ejecuta lo decide
@@ -114,11 +119,11 @@ CREATE TABLE plantillas_html (
 -- mismo texto con Claude y con ChatGPT.
 -- =============================================================================
 
-CREATE TABLE prompts_ia (
-    id_prompt UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+CREATE TABLE plantillas_prompts_ia (
+    id_plantilla_prompt_ia UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
 
     -- Único: es lo que el operador reconoce en el selector del nodo IA, y la
-    -- clave por la que lo resuelve `AiPromptsService.findByName()`.
+    -- clave por la que lo resuelve `AiPromptTemplatesService.findByName()`.
     nombre VARCHAR(120) NOT NULL UNIQUE,
     descripcion VARCHAR(255),
 
@@ -139,8 +144,8 @@ CREATE TABLE prompts_ia (
     fecha_actualizacion TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
-CREATE INDEX idx_prompts_ia_id_usuario_creador
-    ON prompts_ia(id_usuario_creador);
+CREATE INDEX idx_plantillas_prompts_ia_id_usuario_creador
+    ON plantillas_prompts_ia(id_usuario_creador);
 
 -- =============================================================================
 -- Tabla: PLANTILLAS_FLUJO (blueprints maestros)

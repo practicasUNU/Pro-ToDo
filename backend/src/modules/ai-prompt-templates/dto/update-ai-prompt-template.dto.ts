@@ -1,6 +1,6 @@
 import { PartialType } from '@nestjs/mapped-types';
 
-import { CreateAiPromptDto } from './create-ai-prompt.dto';
+import { CreateAiPromptTemplateDto } from './create-ai-prompt-template.dto';
 
 /**
  * Edicion parcial de un prompt.
@@ -9,4 +9,6 @@ import { CreateAiPromptDto } from './create-ai-prompt.dto';
  * el resto de los modulos: es el que usa `ValidationPipe` para heredar los
  * decoradores de `class-validator` marcandolos opcionales.
  */
-export class UpdateAiPromptDto extends PartialType(CreateAiPromptDto) {}
+export class UpdateAiPromptTemplateDto extends PartialType(
+  CreateAiPromptTemplateDto,
+) {}

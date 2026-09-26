@@ -1,16 +1,18 @@
 import { ConflictException, NotFoundException } from '@nestjs/common';
 
-import { AiPromptsService } from './ai-prompts.service';
+import { AiPromptTemplatesService } from './ai-prompt-templates.service';
 
-import type { AiPrompt } from './entities/ai-prompt.entity';
-import type { CreateAiPromptDto } from './dto/create-ai-prompt.dto';
+import type { AiPromptTemplate } from './entities/ai-prompt-template.entity';
+import type { CreateAiPromptTemplateDto } from './dto/create-ai-prompt-template.dto';
 import type { Repository } from 'typeorm';
 
 const PROMPT_ID = '3c9a1f52-8b47-4d21-9e06-5a7b8c9d0e1f';
 const OTHER_PROMPT_ID = '9f8e7d6c-5b4a-4321-8765-1a2b3c4d5e6f';
 const AUTHOR_ID = 'd4e5f6a7-b8c9-4012-a345-6b7c8d9e0f12';
 
-const buildPrompt = (overrides: Partial<AiPrompt> = {}): AiPrompt =>
+const buildPrompt = (
+  overrides: Partial<AiPromptTemplate> = {},
+): AiPromptTemplate =>
   ({
     id: PROMPT_ID,
     name: 'extraccion-noticia-es',
@@ -21,11 +23,11 @@ const buildPrompt = (overrides: Partial<AiPrompt> = {}): AiPrompt =>
     createdAt: new Date('2026-01-01T00:00:00.000Z'),
     updatedAt: new Date('2026-01-01T00:00:00.000Z'),
     ...overrides,
-  }) as AiPrompt;
+  }) as AiPromptTemplate;
 
 const buildCreateDto = (
-  overrides: Partial<CreateAiPromptDto> = {},
-): CreateAiPromptDto => ({
+  overrides: Partial<CreateAiPromptTemplateDto> = {},
+): CreateAiPromptTemplateDto => ({
   name: 'extraccion-noticia-es',
   description: 'Extrae titular y resumen de un correo en espanol',
   promptText: 'Extrae el titular de: {{parsed_email.clean_body}}',
@@ -33,7 +35,7 @@ const buildCreateDto = (
 });
 
 interface Harness {
-  readonly service: AiPromptsService;
+  readonly service: AiPromptTemplatesService;
   readonly repository: {
     find: jest.Mock;
     findOne: jest.Mock;
@@ -53,18 +55,20 @@ const buildHarness = (): Harness => {
   const repository = {
     find: jest.fn(),
     findOne: jest.fn(),
-    create: jest.fn((partial: Partial<AiPrompt>) => buildPrompt(partial)),
-    save: jest.fn((entity: AiPrompt) => Promise.resolve(entity)),
+    create: jest.fn((partial: Partial<AiPromptTemplate>) =>
+      buildPrompt(partial),
+    ),
+    save: jest.fn((entity: AiPromptTemplate) => Promise.resolve(entity)),
   };
 
-  const service = new AiPromptsService(
-    repository as unknown as Repository<AiPrompt>,
+  const service = new AiPromptTemplatesService(
+    repository as unknown as Repository<AiPromptTemplate>,
   );
 
   return { service, repository };
 };
 
-describe('AiPromptsService · repositorio de prompts de IA', () => {
+describe('AiPromptTemplatesService · repositorio de prompts de IA', () => {
   describe('1. Listado', () => {
     it('1.1 deberia filtrar por activo y ordenar por nombre', async () => {
       // 1. Arrange
@@ -244,7 +248,7 @@ describe('AiPromptsService · repositorio de prompts de IA', () => {
       await service.update(PROMPT_ID, { promptText: 'Resume: {{x.y}}' });
 
       // 3. Assert
-      const [saved] = repository.save.mock.calls[0] as [AiPrompt];
+      const [saved] = repository.save.mock.calls[0] as [AiPromptTemplate];
       expect(saved.promptText).toBe('Resume: {{x.y}}');
       expect(saved.name).toBe('extraccion-noticia-es');
       expect(saved.description).toBe(
@@ -261,7 +265,7 @@ describe('AiPromptsService · repositorio de prompts de IA', () => {
       await service.update(PROMPT_ID, { active: true });
 
       // 3. Assert
-      const [saved] = repository.save.mock.calls[0] as [AiPrompt];
+      const [saved] = repository.save.mock.calls[0] as [AiPromptTemplate];
       expect(saved.active).toBe(true);
     });
 
@@ -312,7 +316,7 @@ describe('AiPromptsService · repositorio de prompts de IA', () => {
 
       // 3. Assert: una ejecucion ya trazada apunta al prompt con el que se
       //    genero su salida; borrarlo dejaria la auditoria coja.
-      const [saved] = repository.save.mock.calls[0] as [AiPrompt];
+      const [saved] = repository.save.mock.calls[0] as [AiPromptTemplate];
       expect(saved.active).toBe(false);
       expect(saved.id).toBe(PROMPT_ID);
     });

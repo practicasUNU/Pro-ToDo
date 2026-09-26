@@ -7,10 +7,10 @@ import {
   MaxLength,
 } from 'class-validator';
 
-/** Replica `prompts_ia.nombre VARCHAR(120)`. */
+/** Replica `plantillas_prompts_ia.nombre VARCHAR(120)`. */
 const MAX_NAME_LENGTH = 120;
 
-/** Replica `prompts_ia.descripcion VARCHAR(255)`. */
+/** Replica `plantillas_prompts_ia.descripcion VARCHAR(255)`. */
 const MAX_DESCRIPTION_LENGTH = 255;
 
 /**
@@ -23,7 +23,7 @@ const MAX_DESCRIPTION_LENGTH = 255;
  * desacoplamiento del modulo empieza aqui. Un prompt es texto reutilizable; el
  * modelo que lo ejecuta lo elige el nodo.
  */
-export class CreateAiPromptDto {
+export class CreateAiPromptTemplateDto {
   @ApiProperty({
     description: 'Nombre unico del prompt, visible en el selector del nodo IA',
     example: 'extraccion-noticia-es',

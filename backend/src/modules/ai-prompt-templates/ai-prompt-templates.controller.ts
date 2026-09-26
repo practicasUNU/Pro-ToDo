@@ -28,14 +28,14 @@ import { RolesGuard } from '@common/guards/roles.guard';
 import { JwtAuthGuard } from '@modules/auth/guards/jwt-auth.guard';
 import { UserRole } from '@modules/users/enums/user-role.enum';
 
-import { AiPromptsService } from './ai-prompts.service';
-import { CreateAiPromptDto } from './dto/create-ai-prompt.dto';
-import { UpdateAiPromptDto } from './dto/update-ai-prompt.dto';
+import { AiPromptTemplatesService } from './ai-prompt-templates.service';
+import { CreateAiPromptTemplateDto } from './dto/create-ai-prompt-template.dto';
+import { UpdateAiPromptTemplateDto } from './dto/update-ai-prompt-template.dto';
 
 import type {
-  AiPromptDetailResponseDto,
-  AiPromptResponseDto,
-} from './dto/ai-prompt-response.dto';
+  AiPromptTemplateDetailResponseDto,
+  AiPromptTemplateResponseDto,
+} from './dto/ai-prompt-template-response.dto';
 import type { AuthenticatedUser } from '@modules/auth/interfaces/jwt-payload.interface';
 
 /**
@@ -48,7 +48,7 @@ import type { AuthenticatedUser } from '@modules/auth/interfaces/jwt-payload.int
  * desprotegido por olvido (Poka-Yoke). El perimetro de red lo cubre aparte
  * `IpWhitelistGuard`, registrado como guard global en `AppModule`.
  */
-@ApiTags('ai-prompts')
+@ApiTags('ai-prompt-templates')
 @ApiBearerAuth()
 @ApiUnauthorizedResponse({ description: 'Token ausente, expirado o invalido' })
 @ApiForbiddenResponse({
@@ -56,9 +56,11 @@ import type { AuthenticatedUser } from '@modules/auth/interfaces/jwt-payload.int
 })
 @UseGuards(JwtAuthGuard, RolesGuard)
 @Roles(UserRole.ADMIN, UserRole.EDITOR)
-@Controller('ai-prompts')
-export class AiPromptsController {
-  constructor(private readonly aiPromptsService: AiPromptsService) {}
+@Controller('ai-prompt-templates')
+export class AiPromptTemplatesController {
+  constructor(
+    private readonly aiPromptTemplatesService: AiPromptTemplatesService,
+  ) {}
 
   @Get()
   @ApiOperation({ summary: 'Lista los prompts; por defecto solo los activos' })
@@ -70,10 +72,10 @@ export class AiPromptsController {
   })
   public async findAll(
     @Query('includeInactive') includeInactive?: string,
-  ): Promise<AiPromptResponseDto[]> {
+  ): Promise<AiPromptTemplateResponseDto[]> {
     // Se exige el literal "true" y no una conversion laxa: un query param mal
     // escrito debe caer del lado seguro, que es no mostrar los retirados.
-    return this.aiPromptsService.findAll(includeInactive !== 'true');
+    return this.aiPromptTemplatesService.findAll(includeInactive !== 'true');
   }
 
   @Get(':id')
@@ -81,8 +83,8 @@ export class AiPromptsController {
   @ApiNotFoundResponse({ description: 'No existe ningun prompt con ese id' })
   public async findOne(
     @Param('id', ParseUUIDPipe) id: string,
-  ): Promise<AiPromptDetailResponseDto> {
-    return this.aiPromptsService.findOne(id);
+  ): Promise<AiPromptTemplateDetailResponseDto> {
+    return this.aiPromptTemplatesService.findOne(id);
   }
 
   @Post()
@@ -92,11 +94,14 @@ export class AiPromptsController {
   })
   @ApiConflictResponse({ description: 'Ya existe un prompt con ese nombre' })
   public async create(
-    @Body() createAiPromptDto: CreateAiPromptDto,
+    @Body() createAiPromptTemplateDto: CreateAiPromptTemplateDto,
     @CurrentUser() currentUser: AuthenticatedUser,
-  ): Promise<AiPromptDetailResponseDto> {
+  ): Promise<AiPromptTemplateDetailResponseDto> {
     // La autoria se toma del token, nunca del cuerpo: asi no se puede suplantar.
-    return this.aiPromptsService.create(createAiPromptDto, currentUser.id);
+    return this.aiPromptTemplatesService.create(
+      createAiPromptTemplateDto,
+      currentUser.id,
+    );
   }
 
   @Patch(':id')
@@ -108,9 +113,9 @@ export class AiPromptsController {
   @ApiNotFoundResponse({ description: 'No existe ningun prompt con ese id' })
   public async update(
     @Param('id', ParseUUIDPipe) id: string,
-    @Body() updateAiPromptDto: UpdateAiPromptDto,
-  ): Promise<AiPromptDetailResponseDto> {
-    return this.aiPromptsService.update(id, updateAiPromptDto);
+    @Body() updateAiPromptTemplateDto: UpdateAiPromptTemplateDto,
+  ): Promise<AiPromptTemplateDetailResponseDto> {
+    return this.aiPromptTemplatesService.update(id, updateAiPromptTemplateDto);
   }
 
   // Borrado logico: preserva la trazabilidad de las ejecuciones que lo usaron.
@@ -119,7 +124,7 @@ export class AiPromptsController {
   @ApiNotFoundResponse({ description: 'No existe ningun prompt con ese id' })
   public async remove(
     @Param('id', ParseUUIDPipe) id: string,
-  ): Promise<AiPromptDetailResponseDto> {
-    return this.aiPromptsService.softDelete(id);
+  ): Promise<AiPromptTemplateDetailResponseDto> {
+    return this.aiPromptTemplatesService.softDelete(id);
   }
 }

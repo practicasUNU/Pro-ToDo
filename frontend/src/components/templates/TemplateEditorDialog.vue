@@ -1,9 +1,10 @@
 <script setup lang="ts">
 import { computed, defineAsyncComponent, ref, watch } from 'vue';
-import { copyToClipboard, useQuasar } from 'quasar';
+import { useQuasar } from 'quasar';
 
 import { useNodeCatalogStore } from '@stores/node-catalog.store';
 import { useTemplatesStore } from '@stores/templates.store';
+import VariableExplorer from '@components/shared/VariableExplorer.vue';
 
 import { extractApiErrorMessage, extractApiViolations } from '@/utils/api-error';
 import { buildContextForNamespaces } from '@/utils/upstream-catalog';
@@ -15,8 +16,6 @@ import {
 } from '@/types/html-template';
 
 import type { UpstreamNamespace } from '@stores/nodes/node-store-registry';
-
-import type { NodeOutputField } from '@/types/node-catalog';
 
 // CodeMirror pesa unos cientos de KB y este dialogo lo importan dos componentes
 // distintos; en diferido solo se descarga al abrir el editor.
@@ -71,8 +70,12 @@ const codeEditorRef = ref<TemplateCodeEditorInstance | null>(null);
 // Seleccion del explorador de variables. Se declara antes del `watch` de
 // apertura porque ese lo lee: en `<script setup>` el orden de declaracion es el
 // de ejecucion.
-const selectedNamespace = ref<string | null>(null);
-const selectedField = ref<NodeOutputField | null>(null);
+/** Contrato imperativo de `VariableExplorer`, para reiniciarlo al abrir. */
+interface VariableExplorerInstance {
+  reset: () => void;
+}
+
+const variableExplorerRef = ref<VariableExplorerInstance | null>(null);
 
 const isEditMode = computed(() => !!props.template);
 
@@ -84,8 +87,7 @@ watch(
     if (!isOpen) return;
 
     templatesStore.initDraft(props.template ?? undefined);
-    selectedNamespace.value = null;
-    selectedField.value = null;
+    variableExplorerRef.value?.reset();
 
     // Tambien al abrir y no en `onMounted`, por lo mismo: montado esta desde que
     // se pinta el gestor, y ahi no hay nadie mirando el explorador. La llamada
@@ -110,60 +112,9 @@ const variableContext = computed<readonly UpstreamNamespace[]>(() =>
     : buildContextForNamespaces(TEMPLATE_NAMESPACES, nodeCatalogStore.findByCode),
 );
 
-/** Paso 1 del explorador. El `nodeType` va en la etiqueta, no en el valor. */
-const namespaceOptions = computed(() =>
-  variableContext.value.map(({ namespace, nodeType }) => ({
-    label: nodeType === undefined ? namespace : `${namespace} (${nodeType})`,
-    value: namespace,
-  })),
-);
-
-/**
- * Paso 2: campos del origen elegido.
- *
- * Vacio mientras no haya origen, y tambien cuando el origen no declara campos
- * —un tipo sin `outputFields`, o el catalogo aun viajando—. El selector queda
- * entonces sin opciones, que es honesto: no hay nada que ofrecer todavia.
- */
-const availableFields = computed<readonly NodeOutputField[]>(
-  () =>
-    variableContext.value.find(({ namespace }) => namespace === selectedNamespace.value)?.fields ??
-    [],
-);
-
-/** Marcador resultante, o cadena vacia mientras la eleccion este incompleta. */
-const interpolatedToken = computed<string>(() =>
-  selectedNamespace.value !== null && selectedField.value !== null
-    ? `{{${selectedNamespace.value}.${selectedField.value.name}}}`
-    : '',
-);
-
-// Cambiar de origen invalida el campo: pertenecia al anterior, y dejarlo
-// compondria un marcador que mezcla dos namespaces.
-watch(selectedNamespace, () => {
-  selectedField.value = null;
-});
-
 const onDialogToggle = (value: boolean): void => emit('update:modelValue', value);
 
 const closeDialog = (): void => emit('update:modelValue', false);
-
-/** Copia el marcador al portapapeles, para pegarlo donde el autor decida. */
-const handleCopyToken = async (): Promise<void> => {
-  if (interpolatedToken.value === '') return;
-
-  try {
-    await copyToClipboard(interpolatedToken.value);
-    $q.notify({ type: 'positive', message: 'Marcador copiado al portapapeles' });
-  } catch {
-    // El portapapeles exige contexto seguro y permiso del navegador. Si lo
-    // niega, el marcador sigue a la vista en la tarjeta: se copia a mano.
-    $q.notify({
-      type: 'warning',
-      message: `Copia manualmente: ${interpolatedToken.value}`,
-    });
-  }
-};
 
 /**
  * Inserta el marcador completo en el cursor del editor (Poka-Yoke).
@@ -179,16 +130,14 @@ const handleCopyToken = async (): Promise<void> => {
  * version anterior insertaba `{{ns.}}` y retrocedia dos posiciones para que el
  * autor escribiera el campo — que es justo la errata que el explorador elimina.
  */
-const handleInsertToken = (): void => {
-  if (interpolatedToken.value === '') return;
-
+const handleInsertToken = (token: string): void => {
   if (codeEditorRef.value) {
-    codeEditorRef.value.insertTextAtCursor(interpolatedToken.value, 0);
+    codeEditorRef.value.insertTextAtCursor(token, 0);
     return;
   }
 
   // Red por si el editor aun no ha resuelto su carga diferida.
-  templatesStore.insertTextAtCursor(interpolatedToken.value);
+  templatesStore.insertTextAtCursor(token);
 };
 
 /**
@@ -289,71 +238,13 @@ const onSubmit = async (): Promise<void> => {
             </div>
 
             <!-- Explorador Poka-Yoke: origen y campo se eligen, no se teclean -->
-            <div class="q-mb-md" data-test="variable-explorer">
-              <div class="pd-label">Variables disponibles</div>
-              <p class="pd-subtitle q-mt-xs q-mb-sm">
-                Elige el origen y el campo. El marcador se compone solo.
-              </p>
-
-              <div data-test="namespace-field">
-                <q-select
-                  v-model="selectedNamespace"
-                  :options="namespaceOptions"
-                  label="1. Selecciona Origen / Namespace"
-                  dense
-                  outlined
-                  emit-value
-                  map-options
-                  class="q-mb-sm"
-                />
-              </div>
-
-              <div data-test="variable-field">
-                <q-select
-                  v-model="selectedField"
-                  :options="availableFields"
-                  option-label="name"
-                  label="2. Campo a inyectar"
-                  dense
-                  outlined
-                  :disable="selectedNamespace === null"
-                />
-              </div>
-
-              <div v-if="selectedField" class="pd-token-card q-mt-sm" data-test="token-detail">
-                <div class="pd-mono pd-token-value">{{ interpolatedToken }}</div>
-                <div class="row items-center q-gutter-xs q-mt-xs">
-                  <span class="pd-badge pd-badge--role">{{ selectedField.type }}</span>
-                  <span v-if="selectedField.description" class="col pd-subtitle q-mb-none">
-                    {{ selectedField.description }}
-                  </span>
-                </div>
-              </div>
-
-              <div class="row q-gutter-sm q-mt-sm">
-                <q-btn
-                  icon="content_copy"
-                  label="Copiar"
-                  outline
-                  no-caps
-                  dense
-                  class="pd-btn-secondary"
-                  data-test="copy-token"
-                  :disable="!interpolatedToken"
-                  @click="handleCopyToken"
-                />
-                <q-btn
-                  icon="add"
-                  label="Insertar en plantilla"
-                  no-caps
-                  dense
-                  class="pd-btn-primary"
-                  data-test="insert-token"
-                  :disable="!interpolatedToken"
-                  @click="handleInsertToken"
-                />
-              </div>
-            </div>
+            <VariableExplorer
+              ref="variableExplorerRef"
+              class="q-mb-md"
+              :context="variableContext"
+              insert-label="Insertar en plantilla"
+              @insert="handleInsertToken"
+            />
 
             <div>
               <div class="pd-label">Variables detectadas</div>

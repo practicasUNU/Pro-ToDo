@@ -12,7 +12,7 @@ const ROUTE_BREADCRUMBS: Record<string, string> = {
   '/users': 'Gestion de Usuarios',
   '/ip-whitelist': 'Lista Blanca de IPs',
   '/templates': 'Catalogo de Plantillas',
-  '/prompts': 'Prompts de IA',
+  '/plantillas-prompts-ia': 'Plantillas Prompts IA',
   '/flujos': 'Flujos',
   '/flujos/nuevo': 'Nuevo Flujo',
   '/plantillas-flujo': 'Plantillas de Flujo',
@@ -75,11 +75,11 @@ const toggleLeftDrawer = (): void => {
 
         <!-- Junto a las plantillas HTML y no junto a los flujos: un prompt es
              contenido reutilizable que se cura aparte, igual que ellas. -->
-        <q-item to="/prompts" clickable v-ripple>
+        <q-item to="/plantillas-prompts-ia" clickable v-ripple>
           <q-item-section avatar>
             <q-icon name="psychology" size="20px" />
           </q-item-section>
-          <q-item-section class="pd-nav">Prompts de IA</q-item-section>
+          <q-item-section class="pd-nav">Plantillas Prompts IA</q-item-section>
         </q-item>
 
         <!-- El catalogo de flujos instanciados. Va ANTES del asistente porque

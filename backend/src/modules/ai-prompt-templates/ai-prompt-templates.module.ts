@@ -1,9 +1,9 @@
 import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 
-import { AiPromptsController } from './ai-prompts.controller';
-import { AiPromptsService } from './ai-prompts.service';
-import { AiPrompt } from './entities/ai-prompt.entity';
+import { AiPromptTemplatesController } from './ai-prompt-templates.controller';
+import { AiPromptTemplatesService } from './ai-prompt-templates.service';
+import { AiPromptTemplate } from './entities/ai-prompt-template.entity';
 
 /**
  * Repositorio de prompts de IA (PROT-15.2).
@@ -16,9 +16,9 @@ import { AiPrompt } from './entities/ai-prompt.entity';
  * nodo `PROCESADOR_IA`, que resolvera el prompt por nombre o por id.
  */
 @Module({
-  imports: [TypeOrmModule.forFeature([AiPrompt])],
-  controllers: [AiPromptsController],
-  providers: [AiPromptsService],
-  exports: [AiPromptsService],
+  imports: [TypeOrmModule.forFeature([AiPromptTemplate])],
+  controllers: [AiPromptTemplatesController],
+  providers: [AiPromptTemplatesService],
+  exports: [AiPromptTemplatesService],
 })
-export class AiPromptsModule {}
+export class AiPromptTemplatesModule {}

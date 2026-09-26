@@ -2,20 +2,20 @@
 import { onMounted, ref } from 'vue';
 import { useQuasar } from 'quasar';
 
-import { useAiPromptsStore } from '@stores/ai-prompts.store';
-import AiPromptDialog from '@components/ai-prompts/AiPromptDialog.vue';
+import { useAiPromptTemplatesStore } from '@stores/ai-prompt-templates.store';
+import AiPromptTemplateDialog from '@components/ai-prompt-templates/AiPromptTemplateDialog.vue';
 import SafeDeleteModal from '@components/shared/SafeDeleteModal.vue';
 
 import { extractApiErrorMessage } from '@/utils/api-error';
 import { formatDateTime } from '@/utils/date-format';
 
-import type { AiPrompt, AiPromptDetail } from '@/types/ai-prompt';
+import type { AiPromptTemplate, AiPromptTemplateDetail } from '@/types/ai-prompt-template';
 import type { QTableColumn } from 'quasar';
 
 const $q = useQuasar();
-const aiPromptsStore = useAiPromptsStore();
+const aiPromptTemplatesStore = useAiPromptTemplatesStore();
 
-const columns: QTableColumn<AiPrompt>[] = [
+const columns: QTableColumn<AiPromptTemplate>[] = [
   { name: 'name', label: 'Nombre', field: 'name', align: 'left', sortable: true },
   { name: 'description', label: 'Descripcion', field: 'description', align: 'left' },
   { name: 'status', label: 'Estado', field: 'active', align: 'center', sortable: true },
@@ -37,10 +37,10 @@ const columns: QTableColumn<AiPrompt>[] = [
 const filter = ref<string | null>('');
 
 const isDialogOpen = ref(false);
-const selectedPrompt = ref<AiPromptDetail | null>(null);
+const selectedPrompt = ref<AiPromptTemplateDetail | null>(null);
 
 const isDeleteDialogOpen = ref(false);
-const promptToDeactivate = ref<AiPrompt | null>(null);
+const promptToDeactivate = ref<AiPromptTemplate | null>(null);
 
 /**
  * Carga la tabla INCLUYENDO los retirados.
@@ -51,7 +51,7 @@ const promptToDeactivate = ref<AiPrompt | null>(null);
  */
 const loadPrompts = async (): Promise<void> => {
   try {
-    await aiPromptsStore.loadPrompts(false);
+    await aiPromptTemplatesStore.loadPrompts(false);
   } catch (error) {
     $q.notify({
       type: 'negative',
@@ -72,9 +72,9 @@ const openCreateDialog = (): void => {
  * asi que abrir el dialogo con ella dejaria el textarea vacio y guardar borraria
  * la instruccion.
  */
-const openEditDialog = async (prompt: AiPrompt): Promise<void> => {
+const openEditDialog = async (prompt: AiPromptTemplate): Promise<void> => {
   try {
-    selectedPrompt.value = await aiPromptsStore.loadPromptById(prompt.id);
+    selectedPrompt.value = await aiPromptTemplatesStore.loadPromptById(prompt.id);
     isDialogOpen.value = true;
   } catch (error) {
     $q.notify({
@@ -88,7 +88,7 @@ const onPromptSaved = (): void => {
   $q.notify({ type: 'positive', message: 'Prompt guardado correctamente' });
 };
 
-const requestDeactivation = (prompt: AiPrompt): void => {
+const requestDeactivation = (prompt: AiPromptTemplate): void => {
   promptToDeactivate.value = prompt;
   isDeleteDialogOpen.value = true;
 };
@@ -97,7 +97,7 @@ const confirmDeactivation = async (): Promise<void> => {
   if (!promptToDeactivate.value) return;
 
   try {
-    await aiPromptsStore.deletePrompt(promptToDeactivate.value.id);
+    await aiPromptTemplatesStore.deletePrompt(promptToDeactivate.value.id);
     $q.notify({ type: 'positive', message: 'Prompt retirado correctamente' });
   } catch (error) {
     $q.notify({
@@ -112,9 +112,9 @@ const confirmDeactivation = async (): Promise<void> => {
 // Reactivar NO pasa por SafeDeleteModal: es reversible con un clic, y exigir
 // cinco segundos para algo inofensivo entrena al operador a ignorar la espera
 // justo donde si importa.
-const activatePrompt = async (prompt: AiPrompt): Promise<void> => {
+const activatePrompt = async (prompt: AiPromptTemplate): Promise<void> => {
   try {
-    await aiPromptsStore.updatePrompt(prompt.id, { active: true });
+    await aiPromptTemplatesStore.updatePrompt(prompt.id, { active: true });
     $q.notify({ type: 'positive', message: 'Prompt reactivado correctamente' });
   } catch (error) {
     $q.notify({
@@ -152,10 +152,10 @@ onMounted(loadPrompts);
     <q-table
       class="pd-card pd-table"
       flat
-      :rows="aiPromptsStore.prompts"
+      :rows="aiPromptTemplatesStore.prompts"
       :columns="columns"
       row-key="id"
-      :loading="aiPromptsStore.isLoading"
+      :loading="aiPromptTemplatesStore.isLoading"
       :filter="filter"
       no-data-label="Aun no hay prompts registrados"
       no-results-label="Ningun resultado para la busqueda"
@@ -261,7 +261,11 @@ onMounted(loadPrompts);
       </template>
     </q-table>
 
-    <AiPromptDialog v-model="isDialogOpen" :prompt="selectedPrompt" @saved="onPromptSaved" />
+    <AiPromptTemplateDialog
+      v-model="isDialogOpen"
+      :prompt="selectedPrompt"
+      @saved="onPromptSaved"
+    />
 
     <!-- Cuenta regresiva de 5 segundos (CU-10). El modal se cierra solo; el
          anfitrion solo ejecuta la accion. -->
@@ -276,6 +280,9 @@ onMounted(loadPrompts);
 </template>
 
 <style scoped lang="scss">
+.pd-page {
+  margin: 1.75%;
+}
 // Solo maquetacion: el color proviene de las clases .pd-* globales.
 .prompts-header {
   display: flex;

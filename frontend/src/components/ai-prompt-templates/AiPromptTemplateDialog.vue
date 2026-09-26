@@ -1,14 +1,19 @@
 <script setup lang="ts">
-import { computed, reactive, watch } from 'vue';
+import { computed, reactive, ref, watch } from 'vue';
 import { useQuasar } from 'quasar';
 
-import { useAiPromptsStore } from '@stores/ai-prompts.store';
+import { useAiPromptTemplatesStore } from '@stores/ai-prompt-templates.store';
+import { useNodeCatalogStore } from '@stores/node-catalog.store';
+import VariableExplorer from '@components/shared/VariableExplorer.vue';
 
 import { extractApiErrorMessage } from '@/utils/api-error';
+import { buildPromptContextFromCatalog, filterPromptContext } from '@/utils/prompt-namespaces';
 
-import type { AiPromptDetail } from '@/types/ai-prompt';
+import type { AiPromptTemplateDetail } from '@/types/ai-prompt-template';
+import type { QInput } from 'quasar';
+import type { UpstreamNamespace } from '@stores/nodes/node-store-registry';
 
-/** Replican los limites de `prompts_ia` y del DTO del backend. */
+/** Replican los limites de `plantillas_prompts_ia` y del DTO del backend. */
 const MAX_NAME_LENGTH = 120;
 const MAX_DESCRIPTION_LENGTH = 255;
 
@@ -21,13 +26,31 @@ const MAX_DESCRIPTION_LENGTH = 255;
  */
 const MARKER_EXAMPLE = '{{nodo.campo}}';
 
-interface Props {
-  modelValue: boolean;
-  /** Prompt a editar, con su instruccion ya cargada; `null` para un alta. */
-  prompt: AiPromptDetail | null;
+/** Contrato imperativo de `VariableExplorer`. */
+interface VariableExplorerInstance {
+  reset: () => void;
 }
 
-const props = defineProps<Props>();
+interface Props {
+  modelValue: boolean;
+  /** Plantilla a editar, con su instruccion ya cargada; `null` para un alta. */
+  prompt: AiPromptTemplateDetail | null;
+  /**
+   * Escenario B: lo que publican los nodos ANTERIORES al de IA en el flujo.
+   *
+   * OPCIONAL, y su ausencia no es un caso degradado: el gestor de plantillas
+   * abre este mismo dialogo sin ningun flujo detras, y entonces cae al catalogo
+   * global (Escenario A). La prop MANDA cuando viene con algo, porque un flujo
+   * concreto sabe que namespaces publica de verdad y con que campos.
+   *
+   * Hoy nadie la pasa: `PROCESADOR_IA` todavia no tiene componente de
+   * configuracion ni entrada en `nodeConfigRegistry`. Queda lista para que
+   * PROT-15.3 la conecte al montar ese nodo.
+   */
+  upstreamContext?: readonly UpstreamNamespace[];
+}
+
+const props = withDefaults(defineProps<Props>(), { upstreamContext: () => [] });
 
 const emit = defineEmits<{
   'update:modelValue': [value: boolean];
@@ -35,7 +58,11 @@ const emit = defineEmits<{
 }>();
 
 const $q = useQuasar();
-const aiPromptsStore = useAiPromptsStore();
+const aiPromptTemplatesStore = useAiPromptTemplatesStore();
+const nodeCatalogStore = useNodeCatalogStore();
+
+const promptTextRef = ref<QInput | null>(null);
+const variableExplorerRef = ref<VariableExplorerInstance | null>(null);
 
 const form = reactive<{ name: string; description: string; promptText: string }>({
   name: '',
@@ -59,9 +86,71 @@ const resetForm = (): void => {
 watch(
   () => props.modelValue,
   (isOpen) => {
-    if (isOpen) resetForm();
+    if (!isOpen) return;
+
+    resetForm();
+    variableExplorerRef.value?.reset();
+
+    // Al abrir y no en `onMounted`: montado esta desde que se pinta el gestor, y
+    // ahi no hay nadie mirando el explorador. La llamada esta memoizada, asi que
+    // si el asistente ya cargo el catalogo no cuesta una peticion.
+    void nodeCatalogStore.fetchCatalog();
   },
 );
+
+/**
+ * Origenes que el explorador puede ofrecer.
+ *
+ * Con flujo detras (Escenario B) manda la prop, ya filtrada; sin el
+ * (Escenario A) se cae al catalogo global. Ambas ramas pasan por el mismo filtro
+ * Poka-Yoke, que es lo que garantiza que un destino o el propio `llm_response`
+ * no se cuelen por ninguna de las dos.
+ */
+const variableContext = computed<readonly UpstreamNamespace[]>(() =>
+  props.upstreamContext.length > 0
+    ? filterPromptContext(props.upstreamContext)
+    : buildPromptContextFromCatalog(nodeCatalogStore.entries),
+);
+
+/**
+ * Inserta el marcador en la posicion del cursor del textarea.
+ *
+ * Se escribe a mano porque aqui NO hay CodeMirror: el prompt se edita en un
+ * `q-input type="textarea"`, asi que no existe un `insertTextAtCursor` que
+ * despachar. Se lee el caret real del elemento nativo —y no un espejo en el
+ * store, como hace el fallback de `templates.store`— porque el textarea es el
+ * unico que lo conoce.
+ *
+ * `selectionStart`/`selectionEnd` cubren tambien el caso de que haya texto
+ * seleccionado: el marcador lo REEMPLAZA, que es lo que espera cualquiera que
+ * seleccione algo antes de pulsar Insertar.
+ *
+ * El caret se recoloca en un `setTimeout` de 0: Vue todavia no ha propagado el
+ * `v-model` al DOM cuando esta funcion termina, y fijar la posicion antes la
+ * perderia al repintar.
+ */
+const handleInsertToken = (token: string): void => {
+  const input = promptTextRef.value?.nativeEl as HTMLTextAreaElement | undefined;
+
+  if (!input) {
+    // Sin referencia al textarea no hay cursor que respetar; se anade al final
+    // en vez de descartar la insercion.
+    form.promptText = `${form.promptText}${token}`;
+    return;
+  }
+
+  const start = input.selectionStart ?? form.promptText.length;
+  const end = input.selectionEnd ?? start;
+
+  form.promptText = `${form.promptText.slice(0, start)}${token}${form.promptText.slice(end)}`;
+
+  const caret = start + token.length;
+
+  setTimeout(() => {
+    input.focus();
+    input.setSelectionRange(caret, caret);
+  }, 0);
+};
 
 const onDialogToggle = (value: boolean): void => emit('update:modelValue', value);
 
@@ -74,13 +163,13 @@ const onSubmit = async (): Promise<void> => {
 
   try {
     if (isEditMode.value && props.prompt) {
-      await aiPromptsStore.updatePrompt(props.prompt.id, {
+      await aiPromptTemplatesStore.updatePrompt(props.prompt.id, {
         name: form.name.trim(),
         description,
         promptText: form.promptText,
       });
     } else {
-      await aiPromptsStore.createPrompt({
+      await aiPromptTemplatesStore.createPrompt({
         name: form.name.trim(),
         description,
         promptText: form.promptText,
@@ -158,6 +247,7 @@ const onSubmit = async (): Promise<void> => {
             </label>
             <q-input
               id="prompt-text"
+              ref="promptTextRef"
               v-model="form.promptText"
               type="textarea"
               outlined
@@ -168,10 +258,20 @@ const onSubmit = async (): Promise<void> => {
               placeholder="Extrae el titular de: {{parsed_email.clean_body}}"
               :rules="[(val: string) => !!val.trim() || 'La instruccion es obligatoria']"
             />
-            <p class="pd-subtitle q-mt-xs q-mb-none">
+            <p class="pd-subtitle q-mt-xs q-mb-sm">
               Admite marcadores <span class="pd-mono">{{ MARKER_EXAMPLE }}</span
               >, que el motor resuelve contra el contexto en tiempo de ejecucion.
             </p>
+
+            <!-- Explorador determinista: el mismo que el editor de plantillas
+                 HTML. Los origenes llegan ya filtrados, sin destinos ni la
+                 propia salida de la IA. -->
+            <VariableExplorer
+              ref="variableExplorerRef"
+              :context="variableContext"
+              insert-label="Insertar en el prompt"
+              @insert="handleInsertToken"
+            />
           </div>
         </q-card-section>
 
@@ -184,7 +284,7 @@ const onSubmit = async (): Promise<void> => {
             label="Guardar"
             icon-right="north_east"
             type="submit"
-            :loading="aiPromptsStore.isLoading"
+            :loading="aiPromptTemplatesStore.isLoading"
           />
         </q-card-actions>
       </q-form>

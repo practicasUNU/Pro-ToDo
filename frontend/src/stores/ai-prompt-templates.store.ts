@@ -1,14 +1,14 @@
 import { defineStore, acceptHMRUpdate } from 'pinia';
 import { ref } from 'vue';
 
-import * as aiPromptsService from '@services/ai-prompts.service';
+import * as aiPromptTemplatesService from '@services/ai-prompt-templates.service';
 
 import type {
-  AiPrompt,
-  AiPromptDetail,
-  CreateAiPromptPayload,
-  UpdateAiPromptPayload,
-} from '@/types/ai-prompt';
+  AiPromptTemplate,
+  AiPromptTemplateDetail,
+  CreateAiPromptTemplatePayload,
+  UpdateAiPromptTemplatePayload,
+} from '@/types/ai-prompt-template';
 
 // Logica de negocio y estado compartido del dominio Prompts de IA. Esta capa no
 // conoce Axios ni rutas del backend (ver frontend-architecture.md §2.1): solo
@@ -16,17 +16,17 @@ import type {
 //
 // Los errores NO se capturan aqui: el store solo garantiza el `finally` que
 // apaga `isLoading`, y es el componente quien decide el mensaje al usuario.
-export const useAiPromptsStore = defineStore('aiPrompts', () => {
-  const prompts = ref<AiPrompt[]>([]);
+export const useAiPromptTemplatesStore = defineStore('aiPromptTemplates', () => {
+  const prompts = ref<AiPromptTemplate[]>([]);
 
   /**
    * Prompt abierto en el dialogo, CON su instruccion.
    *
    * Vive aparte de `prompts` porque el listado no trae `promptText`: son dos
    * formas distintas del mismo recurso, y meter el detalle en el arreglo
-   * obligaria a que `AiPrompt` mintiera sobre lo que siempre tiene.
+   * obligaria a que `AiPromptTemplate` mintiera sobre lo que siempre tiene.
    */
-  const activePrompt = ref<AiPromptDetail | null>(null);
+  const activePrompt = ref<AiPromptTemplateDetail | null>(null);
 
   const isLoading = ref(false);
 
@@ -34,17 +34,17 @@ export const useAiPromptsStore = defineStore('aiPrompts', () => {
     isLoading.value = true;
 
     try {
-      prompts.value = await aiPromptsService.fetchAiPrompts(onlyActive);
+      prompts.value = await aiPromptTemplatesService.fetchAiPromptTemplates(onlyActive);
     } finally {
       isLoading.value = false;
     }
   };
 
-  const loadPromptById = async (id: string): Promise<AiPromptDetail> => {
+  const loadPromptById = async (id: string): Promise<AiPromptTemplateDetail> => {
     isLoading.value = true;
 
     try {
-      const detail = await aiPromptsService.fetchAiPromptById(id);
+      const detail = await aiPromptTemplatesService.fetchAiPromptTemplateById(id);
       activePrompt.value = detail;
       return detail;
     } finally {
@@ -52,11 +52,13 @@ export const useAiPromptsStore = defineStore('aiPrompts', () => {
     }
   };
 
-  const createPrompt = async (payload: CreateAiPromptPayload): Promise<AiPromptDetail> => {
+  const createPrompt = async (
+    payload: CreateAiPromptTemplatePayload,
+  ): Promise<AiPromptTemplateDetail> => {
     isLoading.value = true;
 
     try {
-      const created = await aiPromptsService.createAiPrompt(payload);
+      const created = await aiPromptTemplatesService.createAiPromptTemplate(payload);
       prompts.value = [...prompts.value, created];
       return created;
     } finally {
@@ -66,12 +68,12 @@ export const useAiPromptsStore = defineStore('aiPrompts', () => {
 
   const updatePrompt = async (
     id: string,
-    payload: UpdateAiPromptPayload,
-  ): Promise<AiPromptDetail> => {
+    payload: UpdateAiPromptTemplatePayload,
+  ): Promise<AiPromptTemplateDetail> => {
     isLoading.value = true;
 
     try {
-      const updated = await aiPromptsService.updateAiPrompt(id, payload);
+      const updated = await aiPromptTemplatesService.updateAiPromptTemplate(id, payload);
       prompts.value = prompts.value.map((prompt) => (prompt.id === id ? updated : prompt));
       return updated;
     } finally {
@@ -87,11 +89,11 @@ export const useAiPromptsStore = defineStore('aiPrompts', () => {
    * unica via para reactivarla desde la interfaz. Mismo criterio que
    * `users.store`, no el de `templates.store`.
    */
-  const deletePrompt = async (id: string): Promise<AiPromptDetail> => {
+  const deletePrompt = async (id: string): Promise<AiPromptTemplateDetail> => {
     isLoading.value = true;
 
     try {
-      const deactivated = await aiPromptsService.deactivateAiPrompt(id);
+      const deactivated = await aiPromptTemplatesService.deactivateAiPromptTemplate(id);
       prompts.value = prompts.value.map((prompt) => (prompt.id === id ? deactivated : prompt));
       return deactivated;
     } finally {
@@ -112,5 +114,5 @@ export const useAiPromptsStore = defineStore('aiPrompts', () => {
 });
 
 if (import.meta.hot) {
-  import.meta.hot.accept(acceptHMRUpdate(useAiPromptsStore, import.meta.hot));
+  import.meta.hot.accept(acceptHMRUpdate(useAiPromptTemplatesStore, import.meta.hot));
 }
