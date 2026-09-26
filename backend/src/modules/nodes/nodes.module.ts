@@ -3,6 +3,8 @@ import { TypeOrmModule } from '@nestjs/typeorm';
 
 import { NodeStrategyFactory } from '@core/fsm/factories/node-strategy.factory';
 import { FsmModule } from '@core/fsm/fsm.module';
+import { HttpCoreModule } from '@core/http/http-core.module';
+import { AiPromptTemplatesModule } from '@modules/ai-prompt-templates/ai-prompt-templates.module';
 import { LogsModule } from '@modules/logs/logs.module';
 import { TemplatesModule } from '@modules/templates/templates.module';
 import { Workflow } from '@modules/workflows/entities/workflow.entity';
@@ -16,7 +18,10 @@ import { ImapPollingService } from './services/imap-polling.service';
 import { NodeCatalogService } from './services/node-catalog.service';
 import { CronTriggerStrategy } from './strategies/cron-trigger.strategy';
 import { ImapTriggerStrategy } from './strategies/imap-trigger.strategy';
+import { LlmExtractorStrategy } from './strategies/llm-extractor.strategy';
 import { ParserEmailStrategy } from './strategies/parser-email.strategy';
+import { GeminiLlmProvider } from './strategies/providers/gemini-llm.provider';
+import { MockLlmProvider } from './strategies/providers/mock-llm.provider';
 import { TemplateMapperStrategy } from './strategies/template-mapper.strategy';
 import { WebScraperStrategy } from './strategies/web-scraper.strategy';
 
@@ -61,6 +66,12 @@ import type { OnModuleInit } from '@nestjs/common';
     LogsModule,
     TemplatesModule,
     WorkflowsModule,
+    // `HttpCoreModule` aporta el cliente saliente del proveedor de IA;
+    // `AiPromptTemplatesModule` exporta `AiPromptTemplatesService`, que la
+    // estrategia consulta para resolver `templatePromptId`. Ninguno de los dos
+    // importa este modulo, asi que el grafo sigue siendo aciclico.
+    HttpCoreModule,
+    AiPromptTemplatesModule,
     // El sondeo lee `flujos` para descubrir que buzones vigilar; el catalogo
     // sirve `GET /api/nodos`.
     TypeOrmModule.forFeature([Workflow, NodeCatalogEntry]),
@@ -72,6 +83,12 @@ import type { OnModuleInit } from '@nestjs/common';
     CronTriggerStrategy,
     ParserEmailStrategy,
     WebScraperStrategy,
+    LlmExtractorStrategy,
+    // Los clientes de LLM son providers del contenedor y no instancias que la
+    // estrategia construya: `GeminiLlmProvider` necesita `HttpClientService` y
+    // `ConfigService`, y fabricarlo a mano dejaria sin inyectar ambos.
+    MockLlmProvider,
+    GeminiLlmProvider,
     ImapPollingService,
     CronSchedulingService,
     NodeCatalogService,
@@ -82,6 +99,7 @@ import type { OnModuleInit } from '@nestjs/common';
     CronTriggerStrategy,
     ParserEmailStrategy,
     WebScraperStrategy,
+    LlmExtractorStrategy,
     ImapPollingService,
     CronSchedulingService,
     NodeCatalogService,
@@ -98,6 +116,7 @@ export class NodesModule implements OnModuleInit {
     private readonly cronTriggerStrategy: CronTriggerStrategy,
     private readonly parserEmailStrategy: ParserEmailStrategy,
     private readonly webScraperStrategy: WebScraperStrategy,
+    private readonly llmExtractorStrategy: LlmExtractorStrategy,
   ) {}
 
   public onModuleInit(): void {
@@ -106,5 +125,6 @@ export class NodesModule implements OnModuleInit {
     this.strategyFactory.registerStrategy(this.cronTriggerStrategy);
     this.strategyFactory.registerStrategy(this.parserEmailStrategy);
     this.strategyFactory.registerStrategy(this.webScraperStrategy);
+    this.strategyFactory.registerStrategy(this.llmExtractorStrategy);
   }
 }

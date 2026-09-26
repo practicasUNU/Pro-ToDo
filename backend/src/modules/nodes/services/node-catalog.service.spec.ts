@@ -21,7 +21,6 @@ const buildEntry = (
   name: 'Disparador IMAP',
   category: NodeCategory.TRIGGER,
   description: 'Inicia el flujo mediante la lectura de correos entrantes',
-  uiSchema: {},
   ...overrides,
 });
 
@@ -199,10 +198,7 @@ describe('NodeCatalogService · lectura del catalogo de tipos de nodo', () => {
   describe('3. Proyeccion', () => {
     it('3.1 deberia propagar los campos del catalogo tal cual', async () => {
       // 1. Arrange
-      const entry = buildEntry({
-        description: null,
-        uiSchema: { fields: ['mailbox'] },
-      });
+      const entry = buildEntry({ description: null });
       const repository = buildRepository([entry]);
       const service = buildService(repository);
 
@@ -216,7 +212,6 @@ describe('NodeCatalogService · lectura del catalogo de tipos de nodo', () => {
         name: entry.name,
         category: NodeCategory.TRIGGER,
         description: null,
-        uiSchema: { fields: ['mailbox'] },
         implemented: true,
         outputFields: [],
       });

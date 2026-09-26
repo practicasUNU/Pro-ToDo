@@ -48,13 +48,6 @@ export class NodeCatalogResponseDto {
 
   @ApiProperty({
     description:
-      'Descriptor del formulario de `params`. Objeto vacio si el tipo aun no declara uno',
-    example: {},
-  })
-  readonly uiSchema: Record<string, unknown>;
-
-  @ApiProperty({
-    description:
       '`false` cuando el tipo esta en el catalogo pero NO tiene estrategia: no es ' +
       'expresable en un pipeline_schema y el selector debe deshabilitarlo',
     example: true,

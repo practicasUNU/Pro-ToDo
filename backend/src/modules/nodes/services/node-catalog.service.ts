@@ -65,7 +65,6 @@ export class NodeCatalogService {
       name: entry.name,
       category: entry.category,
       description: entry.description,
-      uiSchema: entry.uiSchema,
       // El `code` de la tabla es `string` y no `NodeType` porque el catalogo
       // tiene filas que el enum no declara; el `has` sobre un valor ajeno al
       // conjunto simplemente devuelve false, que es exactamente lo que se quiere.

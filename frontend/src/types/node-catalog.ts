@@ -58,7 +58,6 @@ export interface NodeCatalogEntry {
   readonly name: string;
   readonly category: NodeCategory;
   readonly description: string | null;
-  readonly uiSchema: Record<string, unknown>;
   readonly implemented: boolean;
   readonly outputFields: readonly NodeOutputField[];
 }

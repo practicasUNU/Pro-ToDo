@@ -1693,7 +1693,10 @@ export class NodeCatalogEntry {
   name: string;          // nombre
   category: NodeCategory;// categoria (enum_categoria)
   description: string | null;
-  uiSchema: Record<string, unknown>; // ui_schema (jsonb, NOT NULL DEFAULT '{}')
+  // NO hay `uiSchema`: la columna `ui_schema` se retiro en la migracion 020.
+  // El formulario de cada tipo lo resuelve el frontend con componentes tipados
+  // (`node-config-registry.ts`) y el contrato de SALIDA vive en los
+  // `outputFields` de la `INodeStrategy`.
 }
 
 // @modules/nodes/dto/node-catalog-response.dto.ts
@@ -1703,7 +1706,6 @@ export class NodeCatalogResponseDto {
   readonly name: string;
   readonly category: NodeCategory;
   readonly description: string | null;
-  readonly uiSchema: Record<string, unknown>;
   /** `false` si el tipo NO tiene INodeStrategy: el selector lo deshabilita. */
   readonly implemented: boolean;
 }
@@ -2845,3 +2847,123 @@ tercer destino que se anada no obligue a acordarse de ninguna lista.
 - [ ] 55. Pendiente — aplicar la 019 en el contenedor (la ejecuta el usuario)
 - [ ] 56. Pendiente (PROT-15.3) — estrategia y triada del `PROCESADOR_IA`; al montarlo, pasar
       `upstream-context` al dialogo y cerrar el Escenario B
+
+---
+
+## Tanda actual — PROT-15.1 + PROT-15.3 · Nodo `PROCESADOR_IA`, cliente HTTP base y retirada de `ui_schema`
+
+### Tres cosas a la vez
+
+1. **Retirada de `ui_schema`.** Migración 020 + cascada en entidad, DTO, servicio y el tipo del
+   frontend. La columna prometía ser el contrato declarativo del formulario y nunca se llenó; el
+   formulario lo resuelve `node-config-registry.ts` con componentes tipados.
+2. **Cliente HTTP base (`@core/http/`).** Primer consumidor de `@nestjs/axios` en el proyecto.
+3. **Estrategia del `PROCESADOR_IA`** con freno de emergencia y simulación de coste cero.
+
+### Contratos nuevos
+
+```typescript
+// @core/http/http-client.service.ts
+export type HttpClientOutcome<T> =
+  | { readonly data: T }
+  | { readonly failure: NodeErrorDetail };
+
+export interface HttpClientOptions {
+  readonly timeoutMs?: number;   // por defecto 15_000
+  readonly maxRetries?: number;  // por defecto 3
+  readonly baseDelayMs?: number; // por defecto 500, factor 2
+}
+
+export class HttpClientService {
+  request<T>(config: AxiosRequestConfig, options?: HttpClientOptions):
+    Promise<HttpClientOutcome<T>>;
+}
+// Códigos: ERR_HTTP_TIMEOUT, ERR_HTTP_UPSTREAM_UNAVAILABLE, ERR_HTTP_CLIENT_REJECTED.
+// Los tres son GRAVE: solo los GRAVE entran en `FsmEngineService.canRetry`.
+// `ERR_HTTP_CLIENT_REJECTED` (4xx de cliente) es el único que NO se reintenta.
+
+// @modules/nodes/strategies/interfaces/llm-provider.interface.ts
+export enum LlmProvider { GEMINI, ANTHROPIC, OPENAI, MOCK }
+
+export interface LlmResponsePayload {
+  headline: string;
+  summary: string;
+  body_paragraphs: string[];
+  metadata: {
+    tokensPrompt: number; tokensCompletion: number;
+    modelUsed: string; isMock: boolean;
+  };
+}
+
+export interface ILlmProviderClient {
+  readonly provider: LlmProvider;
+  // LANZA ante fallo, al revés que una INodeStrategy: la excepción es la señal
+  // que alimenta el contador del freno de emergencia.
+  generateCompletion(prompt: string, systemPrompt?: string,
+    config?: LlmExecutionOptions): Promise<LlmResponsePayload>;
+}
+
+// @modules/nodes/strategies/llm-extractor.strategy.ts
+export const LLM_OUTPUT_KEYS =
+  ['headline', 'summary', 'body_paragraphs', 'metadata'] as const;
+// Códigos: ERR_LLM_CONFIG, ERR_LLM_MISSING_INPUT_TEXT, ERR_LLM_PROMPT_UNRESOLVED,
+//          ERR_LLM_INTERPOLATION, ERR_LLM_PROVIDER_UNSUPPORTED,
+//          ERR_LLM_PROVIDER_FAILURE, ERR_LLM_EMERGENCY_BRAKE.
+```
+
+### Diagrama de inyección
+
+```
+HttpCoreModule (imports HttpModule)     AiPromptTemplatesModule
+      └── exports HttpClientService           └── exports AiPromptTemplatesService
+                    │                                      │
+                    ▼                                      │
+          GeminiLlmProvider ──┐                            │
+            (+ ConfigService, │                            │
+             + MockLlmProvider)                            │
+                              ▼                            ▼
+                        LlmExtractorStrategy ◄─────────────┘
+                              │
+                              ▼  onModuleInit() de NodesModule
+                        NodeStrategyFactory.registerStrategy(...)
+```
+
+`NodesModule` importa ambos módulos; ninguno de los dos lo importa a él, de modo que el grafo sigue
+siendo acíclico. `GeminiLlmProvider` recibe `MockLlmProvider` inyectado, no construido: la
+degradación sin API key tiene que reusar el mismo singleton que la ruta de `dryRun`.
+
+### Por qué el freno cuenta por ejecución y no por instancia
+
+La estrategia es un singleton de Nest compartido por todas las ejecuciones concurrentes. Un contador
+único haría que un flujo agotara su umbral y pausara el nodo de IA de otro flujo sano que entrara
+después, y el operador vería una ejecución pausada sin un solo fallo propio que la explique. La clave
+es `${executionId}:${cursor}`, y la entrada se borra en cuanto el nodo cierra —acierte, falle o
+frene— para no acumular claves de ejecuciones muertas. Lo exige `testing-standards.md` §4.
+
+El freno **devuelve** `URGENTE`, no lo lanza: `runNode` respeta el `level` del `NodeResult` devuelto
+y `canRetry` solo reintenta `GRAVE`, así que la ejecución queda `PAUSADO` con el cursor intacto.
+Lanzar la clasificaría `toDomainFailure` como catastrófica y daría `FALLIDO` terminal, obligando a
+relanzar el flujo desde cero y tirando el trabajo válido de los nodos anteriores.
+
+### Estado de las tareas
+
+- [x] 57. BD — migración `020-eliminar-ui-schema-nodos.sql` + `init.sql` (CREATE TABLE y el UPDATE
+      que la 013 sembró para `TRIGGER_CRON`)
+- [x] 58. Backend — `uiSchema` fuera de `NodeCatalogEntry`, `NodeCatalogResponseDto` y
+      `NodeCatalogService`
+- [x] 59. Frontend — `uiSchema` fuera de `types/node-catalog.ts` y de los 5 specs que lo construían
+- [x] 60. Backend — `HttpClientService` + `HttpCoreModule` con timeout, backoff exponencial y
+      traducción a `NodeErrorDetail`; 11 pruebas
+- [x] 61. Backend — `ILlmProviderClient`, `LlmExtractorConfigDto`, `MockLlmProvider`,
+      `GeminiLlmProvider` con degradación sin `GEMINI_API_KEY`
+- [x] 62. Backend — `LlmExtractorStrategy` con guardas, interpolación y freno de emergencia;
+      registro en `NodesModule.onModuleInit()`
+- [x] 63. Pruebas — 24 de la estrategia, 11 del cliente HTTP, 1 nueva en `nodes.module.spec.ts`;
+      backend 1172, frontend 461
+- [x] 64. `.env.example` — `GEMINI_API_KEY` documentada
+- [ ] 65. Pendiente — aplicar la 020 en el contenedor (la ejecuta el usuario)
+- [ ] 66. Pendiente — unificar `ANTHROPIC_API_KEY` (`.env`) vs `CLAUDE_API_KEY` (`.env.example`)
+      cuando se escriba el proveedor correspondiente
+- [ ] 67. Pendiente — `npm run test:e2e` falla al importar `sanitize-html`; ya fallaba en la rama
+      base (verificado con `git stash`), ajeno a esta tanda
+- [ ] 68. Pendiente — `ESCUDO_POST_IA`, validador natural de la salida de este nodo

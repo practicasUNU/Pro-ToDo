@@ -46,9 +46,12 @@ CREATE TABLE usuarios (
 -- `flujos.configuracion_pipeline` (JSONB). La tabla de instancias que antes
 -- ocupaba este nombre se eliminó en la migración 011 por describir lo mismo.
 --
--- `ui_schema` describe el formulario que el frontend pinta para configurar los
--- `params` de este tipo de nodo. NOT NULL con default '{}' para que el
--- consumidor no tenga que distinguir "sin descriptor" de "nulo".
+-- NO hay columna para el formulario del frontend. La `ui_schema` que la
+-- migracion 011 introdujo se retiro en la 020: el formulario de cada tipo de
+-- nodo lo resuelve el frontend con componentes tipados via
+-- `node-config-registry.ts`, y los contratos de salida viven en `outputFields`
+-- de la `INodeStrategy` correspondiente. Un descriptor jsonb paralelo solo
+-- creaba una segunda definicion que se desincronizaba.
 --
 -- Las restricciones se nombran a mano con el nombre de la columna, sin prefijos
 -- (`id_nodo`, no `pk_nodos`): es la convencion del proyecto, y ademas garantiza
@@ -68,7 +71,6 @@ CREATE TABLE nodos (
     nombre VARCHAR(100) NOT NULL,
     categoria enum_categoria NOT NULL,
     descripcion VARCHAR(255),
-    ui_schema JSONB NOT NULL DEFAULT '{}',
     CONSTRAINT id_nodo PRIMARY KEY (id_nodo),
     CONSTRAINT nodos_codigo UNIQUE (codigo)
 );
@@ -402,35 +404,3 @@ INSERT INTO nodos (codigo, nombre, categoria, descripcion) VALUES
     ('TRIGGER_CRON', 'Disparador Cron', 'TRIGGER', 'Inicia el flujo mediante una programacion temporal'),
     ('DESTINO_ACENS', 'Destino Acens', 'DESTINO', 'Realiza el envio masivo a traves de Acens');
 
--- Esquema de UI del disparador programado (espejo de la migracion 013). Es el
--- unico tipo que hoy lo declara: el resto conserva el `'{}'` por defecto.
-UPDATE nodos
-   SET ui_schema = '{
-     "fields": [
-       {
-         "name": "cronExpression",
-         "type": "text",
-         "label": "Expresion cron",
-         "required": true,
-         "placeholder": "0 9 * * 1-5",
-         "helpText": "Cinco campos: minuto hora dia mes dia-semana. No se admiten segundos ni alias como @daily."
-       },
-       {
-         "name": "timeZone",
-         "type": "select",
-         "label": "Zona horaria",
-         "required": false,
-         "default": "Europe/Madrid",
-         "helpText": "Nombre IANA (Europe/Madrid, UTC). No se admiten desplazamientos fijos: no siguen el horario de verano."
-       },
-       {
-         "name": "outputNamespace",
-         "type": "text",
-         "label": "Namespace de salida",
-         "required": false,
-         "default": "cron_trigger",
-         "helpText": "Namespace declarado del nodo. El efectivo es el del pipeline_schema."
-       }
-     ]
-   }'::jsonb
- WHERE codigo = 'TRIGGER_CRON';

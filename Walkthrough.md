@@ -4,6 +4,112 @@ Registro técnico del "por qué" de cada decisión de implementación. Los estad
 
 ---
 
+## 2026-09-26 · Nodo `PROCESADOR_IA`, cliente HTTP base y retirada de `ui_schema` — rama `feat/llm-extractor-node`
+
+### El eslabón que faltaba, y por qué no se podía añadir sin frenos
+
+`PROCESADOR_IA` llevaba declarado en el enum `NodeType` desde la migración 011 sin ninguna
+`INodeStrategy` registrada: un `pipeline_schema` que lo incluyera se guardaba sin protestar y
+reventaba en la primera ejecución con `StrategyNotFoundException`. Entre `EXTRACTOR_WEB` /
+`PARSER_PRE_IA`, que ya publican texto limpio, y `MAPEADOR_PLANTILLA`, que ya interpola variables,
+no había nada.
+
+Lo que hacía el hueco incómodo de rellenar no era la inferencia, sino el dinero. El motor reintenta
+los fallos `GRAVE` con backoff y checkpoint, y un cliente HTTP razonable reintenta también la
+petición. Las dos capas se **multiplican**, y en este nodo cada vuelta se factura. Un proveedor
+intermitente podía convertir una sola ejecución de un flujo en decenas de inferencias que nadie
+autorizó. De ahí que el nodo llegue con tres piezas que no son accesorias:
+
+- **`HttpClientService` (`@core/http/`)**, primer consumidor de `@nestjs/axios` en el proyecto.
+  Centraliza timeout (15 s por defecto), backoff exponencial y la traducción del error de Axios a
+  `NodeErrorDetail`. Reintenta timeouts, errores de red, `429` y `5xx`; **nunca** un `4xx` de
+  cliente, que es determinista y solo gastaría tiempo. Devuelve una unión discriminada en lugar de
+  lanzar: una excepción la clasificaría `toDomainFailure` como catastrófica y marcaría la ejecución
+  `FALLIDO`, cuando un portal caído es exactamente lo que el operador reintenta con el flujo
+  `PAUSADO` (CU-09).
+- **Freno de emergencia**, indexado por `${executionId}:${cursor}` en un `Map`. **No** es un contador
+  de instancia, y ese detalle es el que importa: la estrategia es un singleton de Nest compartido por
+  todas las ejecuciones concurrentes, así que un único número habría hecho que un flujo agotara el
+  umbral y pausara el nodo de IA de otro flujo sano que entrara después. El operador vería una
+  ejecución pausada sin un solo fallo propio que lo explique (`testing-standards.md` §4).
+  Al alcanzar el umbral devuelve `URGENTE` —que `canRetry` rechaza— **devolviéndolo, no lanzándolo**:
+  lanzar daría `FALLIDO` terminal y obligaría a relanzar el flujo desde cero, tirando el trabajo
+  válido de los nodos anteriores.
+- **Simulación de coste cero** (`MockLlmProvider`), determinista. Se activa con `dryRun: true`, con
+  `provider: MOCK` —que es el **defecto**, para que un nodo recién creado no pueda gastar por
+  omisión— y cuando `GEMINI_API_KEY` falta en el entorno. En ese último caso `GeminiLlmProvider`
+  degrada con un aviso en el log en vez de fallar: la ausencia de la clave es un estado normal en
+  desarrollo, y lo contrario obligaría a repartir credenciales de pago para probar una topología.
+
+### Lo que NO se hizo: caer al simulador cuando el proveedor no existe
+
+`ANTHROPIC` y `OPENAI` están en el enum pero no tienen cliente. La tentación era delegar en el mock
+—«al menos el flujo termina»— y es justo lo que no puede pasar: esa salida simulada seguiría hasta
+el `MAPEADOR_PLANTILLA`, que la publicaría en Drupal como si fuera una redacción real. Devuelven
+`ERR_LLM_PROVIDER_UNSUPPORTED` en `GRAVE`. Un fallo ruidoso es preferible a una noticia inventada en
+producción.
+
+Tampoco se construyó un rescatador de JSON a base de expresiones regulares sobre texto libre: se le
+pide el JSON al propio modelo con `responseMimeType: 'application/json'`. Lo otro es un parser de
+formato ad hoc, que `security-and-scope.md` §3 prohíbe.
+
+### El nodo no escribe en el contexto, y el `outputNamespace` no es suyo
+
+`outputNamespace` ya es campo de `PipelineNodeConfigDto`, validado contra `NODE_OUTPUT_NAMESPACES`
+—que incluye `llm_response`— y único por flujo, y `FsmEngineService` ya hace
+`context.setNamespace(node.outputNamespace, result.data)`. Declararlo también en el DTO del nodo
+habría creado una segunda fuente de verdad invisible para el validador de topología, y dos
+escrituras que divergen en cuanto los dos valores no coinciden. La estrategia devuelve `data` y
+punto, como las otras cinco.
+
+Detalle del reparto de los dos textos: el **contenido** viaja como `prompt` y la **instrucción** como
+`systemPrompt`, no al revés. Así el texto llega al modelo aunque la instrucción del operador no
+interpole ningún marcador —«resume esto en tres párrafos» es un prompt perfectamente válido y no
+menciona ningún namespace—. Con el reparto contrario, ese prompt facturaría una inferencia sobre
+ningún contenido.
+
+### `ui_schema`: retirada completa, no columna vacía
+
+La columna nació en la 011 prometiendo ser el contrato declarativo del formulario del frontend. Las
+nueve filas siguen con `'{}'` y el formulario lo resuelve `node-config-registry.ts` con componentes
+tipados. Quedaba como deuda registrada en la entrada del 2026-09-08 de esta bitácora.
+
+Se borra en lugar de dejarla vacía porque una columna que dice ser la fuente de verdad de la UI y no
+lo es acaba siendo usada por alguien, y desde ahí el formulario de un nodo queda definido en dos
+sitios que se desincronizan en la primera modificación. El mismo argumento por el que los contratos
+de **salida** viven en `outputFields` de la `INodeStrategy` y no en un jsonb.
+
+La retirada es en cascada —migración 020, `init.sql` (incluido el `UPDATE` que la 013 sembró para
+`TRIGGER_CRON`), entidad, `NodeCatalogResponseDto`, `NodeCatalogService`, el tipo del frontend y los
+seis specs que lo construían— porque dejar el DTO prometiendo un campo que la entidad ya no tiene
+devolvería `undefined` por `GET /api/nodos` con el tipo afirmando lo contrario.
+
+### Estado de la verificación
+
+- `npx tsc --noEmit`: 45 errores, los mismos 45 preexistentes de la rama base (todos en specs, fuera
+  de `tsconfig.build.json`). Cero nuevos.
+- Backend: 50 suites, 1172 pruebas en verde, incluidas las 24 nuevas de la estrategia y las 11 del
+  cliente HTTP.
+- Frontend: 23 archivos, 461 pruebas en verde; `vue-tsc --noEmit` limpio.
+- **`npm run test:e2e` falla, y ya fallaba antes de esta rama**: las dos suites revientan al importar
+  `sanitize-html` (problema de transformación ESM en `jest-e2e.json`). Verificado con `git stash`
+  contra la rama base. Queda como deuda ajena a este trabajo.
+
+### Pendiente
+
+- Aplicar la migración 020 contra el contenedor (la ejecuta el usuario):
+  ```bash
+  sudo docker exec -i protodo_postgres psql -U unuware007 -d 'DB_PRO-TODO' \
+    < db/migrations/020-eliminar-ui-schema-nodos.sql
+  ```
+- Unificar el nombre de la credencial de Anthropic: el `.env` real declara `ANTHROPIC_API_KEY` y
+  `.env.example` `CLAUDE_API_KEY`. Ninguno se lee todavía —no hay proveedor Anthropic—, así que se
+  resuelve cuando se escriba.
+- `ESCUDO_POST_IA` sigue sin estrategia. Es el validador natural de la salida de este nodo antes de
+  que el mapeador la propague.
+
+---
+
 ## 2026-09-19 · `extracted_urls` deja de salir vacío: enlaces para el pipeline Notiweb — rama `feat/enlaces-parser`
 
 ### Dos causas, y arreglar una sola no servía de nada

@@ -22,7 +22,6 @@ const buildEntry = (overrides: Partial<NodeCatalogEntry> = {}): NodeCatalogEntry
   name: 'Disparador IMAP',
   category: NodeCategory.TRIGGER,
   description: null,
-  uiSchema: {},
   implemented: true,
   outputFields: [],
   ...overrides,

@@ -13,7 +13,6 @@ const buildEntry = (code: NodeType, outputFields: NodeOutputField[]): NodeCatalo
   name: code,
   category: NodeCategory.PROCESAMIENTO,
   description: null,
-  uiSchema: {},
   implemented: true,
   outputFields,
 });

@@ -5,12 +5,16 @@ import { createTemplateRendererService } from '@test/factories/template-renderer
 import { NodesModule } from './nodes.module';
 import { CronTriggerStrategy } from './strategies/cron-trigger.strategy';
 import { ImapTriggerStrategy } from './strategies/imap-trigger.strategy';
+import { LlmExtractorStrategy } from './strategies/llm-extractor.strategy';
 import { ParserEmailStrategy } from './strategies/parser-email.strategy';
 import { TemplateMapperStrategy } from './strategies/template-mapper.strategy';
 import { WebScraperStrategy } from './strategies/web-scraper.strategy';
 
 import type { ConfigService } from '@nestjs/config';
+import type { AiPromptTemplatesService } from '@modules/ai-prompt-templates/ai-prompt-templates.service';
 import type { WebScraperRunner } from '@modules/nodes/services/web-scraper.runner';
+import type { GeminiLlmProvider } from '@modules/nodes/strategies/providers/gemini-llm.provider';
+import type { MockLlmProvider } from '@modules/nodes/strategies/providers/mock-llm.provider';
 import type { TemplatesService } from '@modules/templates/templates.service';
 
 /**
@@ -29,6 +33,7 @@ const buildHarness = (): {
   cron: CronTriggerStrategy;
   parser: ParserEmailStrategy;
   scraper: WebScraperStrategy;
+  llm: LlmExtractorStrategy;
   module: NodesModule;
 } => {
   const factory = new NodeStrategyFactory();
@@ -46,6 +51,13 @@ const buildHarness = (): {
   // El runner va vacio: inscribir la estrategia no navega a ningun sitio, y el
   // arranque de Chromium es perezoso (primera llamada a `createContext`).
   const scraper = new WebScraperStrategy({} as WebScraperRunner);
+  // Los tres colaboradores van vacios: inscribir la estrategia no consulta la
+  // base de datos ni sale a ningun proveedor.
+  const llm = new LlmExtractorStrategy(
+    {} as AiPromptTemplatesService,
+    {} as MockLlmProvider,
+    {} as GeminiLlmProvider,
+  );
 
   return {
     factory,
@@ -54,7 +66,8 @@ const buildHarness = (): {
     cron,
     parser,
     scraper,
-    module: new NodesModule(factory, mapper, imap, cron, parser, scraper),
+    llm,
+    module: new NodesModule(factory, mapper, imap, cron, parser, scraper, llm),
   };
 };
 
@@ -116,5 +129,19 @@ describe('NodesModule', () => {
     // 3. Assert: es ademas lo que hace que `GET /api/nodos` pase EXTRACTOR_WEB a
     //    `implemented: true`, porque el catalogo deriva esa marca de la factoria.
     expect(factory.getStrategy(NodeType.EXTRACTOR_WEB)).toBe(scraper);
+  });
+
+  it('1.6 deberia registrar LlmExtractorStrategy en la factoria al iniciarse', () => {
+    // 1. Arrange
+    const { factory, llm, module } = buildHarness();
+
+    // 2. Act
+    module.onModuleInit();
+
+    // 3. Assert: PROCESADOR_IA llevaba desde la migracion 011 declarado en el
+    //    enum y sin estrategia, asi que un esquema que lo incluyera se guardaba
+    //    y reventaba en ejecucion con `StrategyNotFoundException`. Este registro
+    //    es ademas lo que lo pasa a `implemented: true` en `GET /api/nodos`.
+    expect(factory.getStrategy(NodeType.PROCESADOR_IA)).toBe(llm);
   });
 });

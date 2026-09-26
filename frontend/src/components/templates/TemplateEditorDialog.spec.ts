@@ -78,7 +78,6 @@ const PARSER_ENTRY: NodeCatalogEntry = {
   name: 'Parser pre-IA',
   category: NodeCategory.PROCESAMIENTO,
   description: null,
-  uiSchema: {},
   implemented: true,
   outputFields: [
     { name: 'clean_title', type: 'text', description: 'Titular saneado' },

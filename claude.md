@@ -55,7 +55,9 @@ Pro-ToDo/
 - ✅ Motor FSM (`FsmEngineService`), `StatePayloadContext` inmutable y protocolo de resiliencia (log en disco vía Winston → checkpoint en PostgreSQL → pausa del cursor) — implementado y operativo.
 - ✅ Tríada de nodos (servicio/store/componente) completa para `TRIGGER_IMAP`, `PARSER_PRE_IA`, `EXTRACTOR_WEB`, `MAPEADOR_PLANTILLA`. `TRIGGER_CRON` no tiene `.service.ts` por diseño (validación resuelta enteramente en cliente).
 - ⏳ **Pendiente:** `NotificationGateway` (WebSocket) y `useExecutionStore` en frontend — las dependencias (`socket.io`, `@nestjs/websockets`, `socket.io-client`) están instaladas pero no existe ningún gateway, listener ni sala `flow_${id}` implementados. El contrato sigue vigente en `rules/architecture-patterns.md` y `rules/frontend-quasar.md` como arquitectura objetivo.
-- ⏳ **Pendiente:** estrategias `PROCESADOR_IA` y `ESCUDO_POST_IA` — declaradas en el enum `NodeType` pero sin `INodeStrategy` registrada en `NodeStrategyFactory`.
+- ✅ Estrategia `PROCESADOR_IA` (`LlmExtractorStrategy`) registrada en `NodeStrategyFactory`, con freno de emergencia por ejecución y simulación de coste cero (`MockLlmProvider`). Solo `MOCK` y `GEMINI` tienen cliente; `ANTHROPIC` y `OPENAI` se rechazan en ejecución con `ERR_LLM_PROVIDER_UNSUPPORTED` en vez de caer al simulador.
+- ✅ Cliente HTTP saliente compartido `HttpClientService` (`@core/http/`, exportado por `HttpCoreModule`): timeout, backoff exponencial y traducción de errores de Axios a `NodeErrorDetail`. Es el primer consumidor de `@nestjs/axios`.
+- ⏳ **Pendiente:** estrategia `ESCUDO_POST_IA` — declarada en el enum `NodeType` pero sin `INodeStrategy` registrada en `NodeStrategyFactory`. Es el validador natural de la salida de `PROCESADOR_IA`.
 - ⏳ **Pendiente:** nodo `DESTINO_ACENS` — existe como fila de catálogo en PostgreSQL pero sin valor de enum ni estrategia (`GET /api/nodos` lo marca `implemented: false`).
 - 📄 Detalle de contratos/DTOs por implementar: `PLAN.md`. Bitácora de desarrollo paso a paso: `Walkthrough.md`.
 

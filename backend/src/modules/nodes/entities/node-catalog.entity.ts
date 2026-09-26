@@ -45,14 +45,10 @@ export class NodeCatalogEntry {
   @Column({ name: 'descripcion', type: 'varchar', length: 255, nullable: true })
   description: string | null;
 
-  /**
-   * Descriptor del formulario que el frontend pinta para los `params` del tipo.
-   *
-   * `NOT NULL` con default `'{}'` para que el consumidor nunca tenga que
-   * distinguir "sin descriptor" de "nulo": un objeto vacio ya significa "este
-   * tipo no declara formulario todavia", que es el estado de las nueve filas
-   * mientras el editor polimorfico resuelva por registro de componentes.
-   */
-  @Column({ name: 'ui_schema', type: 'jsonb', default: () => "'{}'" })
-  uiSchema: Record<string, unknown>;
+  // NO hay propiedad para el formulario del frontend. La columna `ui_schema`
+  // se retiro en la migracion 020: el formulario de cada tipo lo resuelve el
+  // frontend con componentes tipados via `node-config-registry.ts`, y el
+  // contrato de SALIDA del nodo vive en los `outputFields` de su
+  // `INodeStrategy`. Un descriptor jsonb paralelo era una segunda definicion
+  // del mismo formulario, destinada a desincronizarse de la primera.
 }

@@ -20,7 +20,6 @@ const buildEntry = (overrides: Partial<NodeCatalogEntry> = {}): NodeCatalogEntry
   name: 'Parser de Correo',
   category: NodeCategory.PROCESAMIENTO,
   description: null,
-  uiSchema: {},
   implemented: true,
   outputFields: [FIELD],
   ...overrides,
