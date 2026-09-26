@@ -14,7 +14,7 @@
 
 ## 2. 🧩 Patrón Estrategia y Fábrica (`INodeStrategy` & `NodeStrategyFactory`)
 
-Todo nodo funcional debe implementar la interfaz `INodeStrategy` y registrarse en la fábrica para permitir resolución polimórfica:
+Todo nodo funcional debe implementar la interfaz `INodeStrategy` y registrarse en la fábrica para permitir resolución polimórfica. El estado de avance de qué `NodeType` tienen ya una estrategia registrada en `NodeStrategyFactory` se rastrea en `claude.md` (sección "Estado de Avance"), no en esta regla — este contrato aplica a todo tipo de nodo, esté o no implementado todavía.
 
 ```typescript
 // Contrato estándar de salida de nodo
@@ -108,6 +108,8 @@ Cuando un nodo retorna `success: false` o lanza una excepción no controlada, el
 
 * **Colas Productor-Consumidor:** Las ejecuciones pesadas o disparadas por Cron/IMAP deben enviarse a colas de BullMQ para no bloquear el hilo de peticiones HTTP.
 * **WebSockets Gateway:** Cada flujo ejecutándose debe emitir eventos (`node_started`, `node_completed`, `flow_finished`, `flow_failed`) a la sala correspondiente (`flow_${flowId}`).
+
+> Estado de avance: este contrato es la arquitectura objetivo. Las dependencias (`socket.io`, `@nestjs/websockets`, `@nestjs/platform-socket.io`) ya están instaladas, pero a la fecha no existe ningún `@WebSocketGateway` implementado en `backend/src`. Ver `claude.md` → "Estado de Avance" antes de asumir que este canal ya emite eventos.
 
 ---
 

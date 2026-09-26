@@ -10,7 +10,7 @@ Actúas como un Arquitecto Frontend experto. Al generar o refactorizar código p
 ## 2. Sistema de Diseño y Tokens (Modo Claro/Oscuro)
 
 - **Identidad de marca:** paleta institucional UNUWARE (azules corporativos sobre neutros estructurados). El azul de marca y los acentos se mantienen idénticos entre modos para preservar consistencia identitaria.
-- **Modo por defecto:** Dark mode first. La app inicia en oscuro (`$q.dark = true` por defecto en `quasar.config.ts`), con toggle a modo claro persistido (p. ej. en `useSessionStore` o `localStorage`).
+- **Modo por defecto:** Dark mode first es el objetivo de marca. Estado real en código: `quasar.config.ts` usa `dark: 'auto'` (sigue la preferencia del SO), con el toggle persistido en `localStorage` vía `useThemeStore` (`theme.store.ts`, clave `proto-do:theme-mode`) — no en `useSessionStore`. Esta divergencia entre el objetivo ("siempre inicia oscuro") y el comportamiento real (`'auto'`) queda pendiente de resolver por el equipo; no asumir que ya fuerza oscuro por defecto.
 - **Aislamiento de Color:** Prohibido *hardcodear* colores hexadecimales en la lógica de los componentes.
 - **Variables CSS:** Custom Properties definidas en `app.scss`, mapeadas 1:1 a la paleta UNUWARE. La lista es cerrada — cualquier color nuevo se añade primero como token, nunca inline:
 
@@ -35,6 +35,12 @@ Actúas como un Arquitecto Frontend experto. Al generar o refactorizar código p
   | `--pd-warning` | `#F59E0B` | `#F59E0B` | Severidad GRAVE, estados en pausa |
   | `--pd-positive` | `#10B981` | `#10B981` | Transiciones exitosas, estados operativos |
   | `--pd-shell-bg` / `--pd-shell-text` | `#12142E` / `#FFFFFF` | *(idéntico)* | `QHeader` / `QDrawer` — fijos, **no** conmutan con el tema |
+  | `--pd-shell-alt` | `#1C2049` | *(idéntico)* | Variante de superficie dentro del `QHeader`/`QDrawer` (hover de ítems de menú, subcabeceras del shell) |
+  | `--pd-shell-text-secondary` | `#B8C0DE` | *(idéntico)* | Texto secundario sobre `--pd-shell-bg` (metadatos de menú, subtítulos del drawer) |
+  | `--pd-gradient` | `linear-gradient(90deg, var(--pd-primary) 0%, var(--pd-primary-light) 100%)` | *(idéntico)* | Token nombrado del degradado obligatorio de cabecera y botones primarios (ver §2, regla de Header) |
+  | `--pd-row-urgente` | `#2B1A1D` | `#FBECEB` | Fondo de fila `.row-urgente` en `<q-table>` del Módulo de Trazabilidad |
+  | `--pd-row-grave` | `#2C2418` | `#FDF4E3` | Fondo de fila `.row-grave` en `<q-table>` del Módulo de Trazabilidad |
+  | `--pd-row-exitoso` | `#142B2A` | `#E7F7F1` | Fondo de fila `.row-exitoso` en `<q-table>` del Módulo de Trazabilidad |
 
 - **Regla de contraste:** `--pd-accent` (`#5B8CE8`) tiene un ratio de contraste insuficiente (~3:1) para texto pequeño sobre fondos claros (WCAG AA). Se reserva para hover de superficies grandes, iconos e interacciones. Para enlaces de texto y elementos interactivos en modo claro, usar siempre `--pd-accent-text`.
 - **Modo claro:** a diferencia de un esquema "papel blanco puro", las superficies elevadas usan `--pd-card-bg` (`#EEF1FA`) y `--pd-surface-muted` (`#E4EAFB`) como fondos tintados de marca — no solo distinción por borde. Prohibido usar las clases `bg-grey-N` / `text-grey-N` de Quasar como sustituto de un token.
@@ -70,7 +76,7 @@ Actúas como un Arquitecto Frontend experto. Al generar o refactorizar código p
 - **Mapeo de Stores:**
   - `useSessionStore`: Administra JWT, `user`, y estado `otpVerified`.
   - `useFlujoDraftStore`: **Agregador** del asistente (Vista 3+4). NO guarda los campos de cada nodo — de eso es dueño el store del propio nodo (ver §3.1). Posee únicamente la **topología** del flujo (orden de los pasos, `nextStep`, `onErrorStep`), el autosave, y el ensamblado del `pipeline_schema` final leyendo la `config` de cada store de nodo. Duplicar aquí el estado de un nodo crea dos fuentes de verdad que se desincronizan en cuanto el usuario retrocede un paso.
-  - `useExecutionStore`: Debe inyectar el cliente de Socket.io al montarse. Escucha el `NotificationGateway` del backend (salas `flow_${id}`) y parchea vía `$patch` el `pasoActual` (Cursor FSM) y el estado global.
+  - `useExecutionStore`: Debe inyectar el cliente de Socket.io al montarse. Escucha el `NotificationGateway` del backend (salas `flow_${id}`) y parchea vía `$patch` el `pasoActual` (Cursor FSM) y el estado global. **Pendiente de implementación:** este store no existe todavía en `frontend/src/stores/` (`socket.io-client` está instalado pero sin uso); ver `claude.md` → "Estado de Avance".
 - **Inmutabilidad:** El payload recibido desde el backend (`StatePayloadContext`) debe tratarse como inmutable en la UI.
 
 ---
