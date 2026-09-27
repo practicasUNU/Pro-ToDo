@@ -8,6 +8,8 @@ import {
   useParserEmailStore,
 } from './parser-email.store';
 
+import { ERR_PARSER_UNEXTRACTABLE_MEDIA } from '@/types/nodes/error-branch.types';
+
 import type { CheckParserResult, ParsedEmailPayload } from '@/types/parser-email';
 
 // Sin esto se cargaria `@boot/axios`, que necesita entorno de navegador.
@@ -370,6 +372,92 @@ describe('useParserEmailStore · configuracion del nodo PARSER_PRE_IA', () => {
 
       // 3. Assert
       expect(second.sandboxInput.text).toBe('Compartido');
+    });
+  });
+
+  describe('7. Interruptor de la ruta de contingencia', () => {
+    it('7.1 deberia arrancar apagado', () => {
+      // 1. Arrange 📐 + 2. Act ⚙️: el defecto del backend es `false`, y
+      //    encenderlo sin tener a donde desviarse convertiria en PAUSADO un
+      //    flujo que hoy atraviesa tranquilamente un correo de solo imagen.
+      const store = useParserEmailStore('parser_rama_1');
+
+      // 3. Assert 🎯
+      expect(store.config.failOnUnextractableMedia).toBe(false);
+      expect(store.toNodeParams()).not.toHaveProperty('failOnUnextractableMedia');
+    });
+
+    it('7.2 deberia encenderlo al declarar el codigo del parser', () => {
+      // 1. Arrange 📐
+      const store = useParserEmailStore('parser_rama_2');
+
+      // 2. Act ⚙️
+      store.declareCaughtErrorCodes([ERR_PARSER_UNEXTRACTABLE_MEDIA]);
+
+      // 3. Assert 🎯: sin esto la regla 10 del validador rechaza el esquema al
+      //    guardar, porque la ruta atraparia un codigo que el nodo no emite.
+      expect(store.config.failOnUnextractableMedia).toBe(true);
+      expect(store.toNodeParams().failOnUnextractableMedia).toBe(true);
+    });
+
+    it('7.3 deberia apagarlo al retirar la rama', () => {
+      // 1. Arrange 📐: reversible a proposito. Dejar el interruptor puesto tras
+      //    quitar el desvio dejaria el flujo fallando ante un correo de solo
+      //    imagen sin nadie que recogiera el fallo.
+      const store = useParserEmailStore('parser_rama_3');
+      store.declareCaughtErrorCodes([ERR_PARSER_UNEXTRACTABLE_MEDIA]);
+
+      // 2. Act ⚙️
+      store.declareCaughtErrorCodes([]);
+
+      // 3. Assert 🎯
+      expect(store.config.failOnUnextractableMedia).toBe(false);
+    });
+
+    it('7.4 no deberia encenderlo con codigos de otro nodo', () => {
+      // 1. Arrange 📐
+      const store = useParserEmailStore('parser_rama_4');
+
+      // 2. Act ⚙️
+      store.declareCaughtErrorCodes(['ERR_SMTP_SEND_FAILURE']);
+
+      // 3. Assert 🎯
+      expect(store.config.failOnUnextractableMedia).toBe(false);
+    });
+
+    it('7.5 deberia sobrevivir a la ida y vuelta del esquema', () => {
+      // 1. Arrange 📐: contrato de ida y vuelta del registro de stores. Sin esto,
+      //    reabrir un flujo con rama y guardarlo apagaria el interruptor y la
+      //    rama quedaria muerta.
+      const store = useParserEmailStore('parser_rama_5');
+
+      // 2. Act ⚙️
+      store.hydrateFromNode({
+        outputNamespace: 'parsed_email',
+        params: { minBodyLength: 50, failOnUnextractableMedia: true },
+      });
+
+      // 3. Assert 🎯
+      expect(store.config.failOnUnextractableMedia).toBe(true);
+      expect(store.toNodeParams()).toEqual({
+        minBodyLength: 50,
+        failOnUnextractableMedia: true,
+      });
+    });
+
+    it('7.6 deberia tratar la cadena "false" del jsonb como apagado', () => {
+      // 1. Arrange 📐: la columna se puede escribir por SQL directo, y en
+      //    JavaScript la cadena "false" es un valor veraz.
+      const store = useParserEmailStore('parser_rama_6');
+
+      // 2. Act ⚙️
+      store.hydrateFromNode({
+        outputNamespace: 'parsed_email',
+        params: { failOnUnextractableMedia: 'false' },
+      });
+
+      // 3. Assert 🎯
+      expect(store.config.failOnUnextractableMedia).toBe(false);
     });
   });
 });

@@ -7,23 +7,40 @@ import { resolveNodeStore } from '@stores/nodes/node-store-registry';
 import * as workflowTemplatesService from '@services/workflow-templates.service';
 import * as workflowsService from '@services/workflows.service';
 
+import { useSmtpAlertStore } from '@stores/nodes/smtp-alert.store';
+
 import {
   assemblePipelineSchema as buildPipelineSchema,
+  errorRouteTarget,
   INITIAL_SCHEMA_VERSION,
 } from '@/utils/pipeline-assembler';
 
-import { toWizardStep } from '@/types/pipeline';
+import { DEFAULT_OUTPUT_NAMESPACE_BY_NODE_TYPE, NodeType, toWizardStep } from '@/types/pipeline';
+import {
+  ERROR_BRANCH_ACTIONS,
+  ERROR_BRANCH_TRIGGERS,
+  SHARED_ALERT_NODE_ID,
+} from '@/types/nodes/error-branch.types';
 
 import type { UpstreamNamespace } from '@stores/nodes/node-store-registry';
 
+import type { AssemblerStep } from '@/utils/pipeline-assembler';
+
 import type {
+  AssembledPipelineNode,
   AssembledPipelineSchema,
   PipelineExecutionPolicy,
   PipelineSummary,
+  SelectiveErrorFallback,
   WizardStep,
   WorkflowDetail,
   WorkflowTemplateSummary,
 } from '@/types/pipeline';
+import type {
+  ErrorBranch,
+  ErrorBranchAction,
+  ErrorBranchTrigger,
+} from '@/types/nodes/error-branch.types';
 
 /**
  * Por que un paso no deja continuar.
@@ -37,7 +54,9 @@ export type StepBlockReason =
   /** Hay componente pero no store: el motor no sabe ejecutar este tipo. */
   | 'SIN_STORE'
   /** El nodo tiene configurador y aun no se declara valido. */
-  | 'CONFIGURACION_INCOMPLETA';
+  | 'CONFIGURACION_INCOMPLETA'
+  /** El paso declara una ruta de contingencia cuyo nodo destino esta a medias. */
+  | 'RAMA_DE_ERROR_INCOMPLETA';
 
 /** Un aviso que un paso quiere que el operador confirme antes de persistir. */
 export interface StepWarning {
@@ -62,6 +81,8 @@ const STEP_BLOCK_MESSAGES: Record<StepBlockReason, (step: WizardStep) => string>
   SIN_STORE: (step) =>
     `El tipo ${step.name} no tiene estrategia en el motor: este flujo no se puede guardar. Edita la plantilla para retirarlo.`,
   CONFIGURACION_INCOMPLETA: () => 'Faltan campos por completar en este paso.',
+  RAMA_DE_ERROR_INCOMPLETA: () =>
+    'La ruta de contingencia de este paso apunta a un nodo de alerta sin destinatarios.',
 };
 
 /**
@@ -72,14 +93,21 @@ const STEP_BLOCK_MESSAGES: Record<StepBlockReason, (step: WizardStep) => string>
  * el configurador" es mas util que "falta el store", que no significa nada para
  * quien usa el asistente.
  */
-const resolveStepBlockReason = (step: WizardStep): StepBlockReason | null => {
+const resolveStepBlockReason = (
+  step: WizardStep,
+  hasIncompleteBranch: boolean,
+): StepBlockReason | null => {
   if (nodeConfigRegistry[step.nodeType] === undefined) return 'SIN_CONFIGURADOR';
 
   const store = resolveNodeStore(step.nodeType, step.nodeId);
 
   if (store === null) return 'SIN_STORE';
 
-  return store.isConfigValid ? null : 'CONFIGURACION_INCOMPLETA';
+  if (!store.isConfigValid) return 'CONFIGURACION_INCOMPLETA';
+
+  // La rama se mira DESPUES de la config propia: un paso al que le falta su
+  // propio campo obligatorio debe decirlo antes que hablar de su desvio.
+  return hasIncompleteBranch ? 'RAMA_DE_ERROR_INCOMPLETA' : null;
 };
 
 /**
@@ -127,6 +155,21 @@ export const useFlujoDraftStore = defineStore('flujoDraft', () => {
    * asistente no la edita —eso se hace en la plantilla—, solo la conserva.
    */
   const executionPolicy = ref<PipelineExecutionPolicy | null>(null);
+
+  /**
+   * Rutas de contingencia declaradas, indexadas por el `nodeId` que se desvia.
+   *
+   * VIVEN APARTE de `pipelineTopology` y no como un campo de `WizardStep`, y no
+   * es una comodidad: el orden de ese arreglo ES la topologia —`nextStep` es el
+   * elemento siguiente—, asi que un nodo de alerta metido ahi acabaria en el
+   * camino feliz, ejecutandose en cada pasada en vez de solo al fallar algo.
+   *
+   * La rama guarda la INTENCION (que dispara, que se hace) y no el puntero. El
+   * `targetNode` se resuelve al ensamblar, porque depende de la topologia
+   * completa: la alerta reutiliza el `DESTINO_SMTP` del flujo si lo hay, y la
+   * ruta de vision apunta al `PROCESADOR_IA` que ya exista.
+   */
+  const errorBranches = ref<Record<string, ErrorBranch>>({});
 
   /** Cursor del stepper: indice dentro de `pipelineTopology`. */
   const activeStep = ref(0);
@@ -338,7 +381,63 @@ export const useFlujoDraftStore = defineStore('flujoDraft', () => {
       });
     });
 
+    hydrateErrorBranches(nodes);
     syncUpstreamNamespaces();
+  };
+
+  /**
+   * Reconstruye las ramas y el satelite desde el grafo guardado.
+   *
+   * Es imprescindible para poder EDITAR un flujo con contingencias: `topology`
+   * solo trae el camino activo, asi que sin esto el asistente abriria sin ramas
+   * y guardar las borraria junto con su nodo de alerta — el operador perderia la
+   * configuracion con solo abrir el flujo y volver a cerrarlo.
+   *
+   * La intencion se deduce de la forma de la ruta, que es la inversa exacta de
+   * `buildErrorRoute`: una cadena solo puede venir de "cualquier fallo", y un
+   * objeto selectivo se reconoce por el codigo que nombra. Una ruta escrita a
+   * mano que no encaje en el catalogo se IGNORA en vez de adivinarse: el
+   * asistente no la mostraria bien, y reensamblarla desde una intencion
+   * equivocada la reescribiria en el esquema.
+   */
+  const hydrateErrorBranches = (nodes: Record<string, AssembledPipelineNode>): void => {
+    const recovered: Record<string, ErrorBranch> = {};
+
+    for (const step of pipelineTopology.value) {
+      const route = nodes[step.nodeId]?.onErrorStep;
+      const targetNode = errorRouteTarget(route);
+
+      if (targetNode === null) continue;
+
+      const action = (Object.keys(ERROR_BRANCH_ACTIONS) as ErrorBranchAction[]).find(
+        (candidate) =>
+          nodes[targetNode]?.nodeType === ERROR_BRANCH_ACTIONS[candidate].targetNodeType,
+      );
+
+      if (action === undefined) continue;
+
+      const catchCode = typeof route === 'string' ? null : (route?.catchErrors[0] ?? null);
+      const trigger = (Object.keys(ERROR_BRANCH_TRIGGERS) as ErrorBranchTrigger[]).find(
+        (candidate) => ERROR_BRANCH_TRIGGERS[candidate].catchCode === catchCode,
+      );
+
+      if (trigger === undefined) continue;
+
+      recovered[step.nodeId] = { trigger, action };
+    }
+
+    errorBranches.value = recovered;
+
+    // El satelite no esta en `topology` —solo se llega a el por la ruta—, asi
+    // que su configuracion hay que ir a buscarla al mapa de nodos.
+    const alertNode = nodes[SHARED_ALERT_NODE_ID];
+
+    if (alertNode !== undefined) {
+      useSmtpAlertStore(SHARED_ALERT_NODE_ID).hydrateFromNode({
+        outputNamespace: alertNode.outputNamespace,
+        params: alertNode.params,
+      });
+    }
   };
 
   /**
@@ -407,9 +506,72 @@ export const useFlujoDraftStore = defineStore('flujoDraft', () => {
    * asistente y obliga a editar la plantilla. Presentarlos igual dejaba al
    * operador reintentando algo imposible sin ninguna pista.
    */
+  /** Primer paso del flujo de un tipo dado, o `null`. */
+  const findStepByType = (nodeType: NodeType): WizardStep | null =>
+    pipelineTopology.value.find((step) => step.nodeType === nodeType) ?? null;
+
+  /**
+   * Nodo que atiende una accion de respaldo, o `null` si no es expresable.
+   *
+   * La alerta reutiliza el `DESTINO_SMTP` de la topologia cuando la plantilla ya
+   * lo trae y solo entonces provisiona el satelite compartido: la regla 5 del
+   * validador prohibe que dos nodos escriban `smtp_result`, asi que crear uno
+   * nuevo junto a un destino existente devolveria un 400.
+   *
+   * La vision NO provisiona nunca. Un `PROCESADOR_IA` satelite chocaria con el
+   * del flujo en `llm_response` por la misma regla, y ademas ese tipo todavia no
+   * tiene configurador con el que rellenar su prompt. Se apunta al que ya hay, y
+   * si no hay ninguno la accion simplemente no esta disponible.
+   */
+  const resolveBranchTarget = (action: ErrorBranchAction): string | null => {
+    const { targetNodeType, canProvision } = ERROR_BRANCH_ACTIONS[action];
+    const existing = findStepByType(targetNodeType);
+
+    if (existing !== null) return existing.nodeId;
+
+    return canProvision ? SHARED_ALERT_NODE_ID : null;
+  };
+
+  /** Acciones que este flujo puede ofrecer, dada su topologia. */
+  const availableBranchActions = computed<ErrorBranchAction[]>(() =>
+    (Object.keys(ERROR_BRANCH_ACTIONS) as ErrorBranchAction[]).filter(
+      (action) => resolveBranchTarget(action) !== null,
+    ),
+  );
+
+  /** Si alguna rama obliga a crear el nodo de alerta compartido. */
+  const needsProvisionedAlertNode = computed<boolean>(() =>
+    Object.values(errorBranches.value).some(
+      (branch) => branch.action === 'ALERTA_SMTP' && findStepByType(NodeType.DESTINO_SMTP) === null,
+    ),
+  );
+
+  /**
+   * Si el nodo de alerta provisionado esta a medio configurar.
+   *
+   * No es un adorno del cliente: `collectIncompleteParams` del backend recorre el
+   * mapa ENTERO al activar el flujo, satelites incluidos, precisamente porque
+   * «activar un flujo con una rama de error a medio configurar es el fallo que se
+   * descubriria de madrugada». Sin esta comprobacion el asistente dejaria guardar
+   * un flujo que despues no se puede encender, y el operador tendria que adivinar
+   * por que.
+   */
+  const hasIncompleteAlertNode = computed<boolean>(
+    () => needsProvisionedAlertNode.value && !useSmtpAlertStore(SHARED_ALERT_NODE_ID).isConfigValid,
+  );
+
+  /** Pasos cuya rama apunta al satelite compartido y este esta incompleto. */
+  const stepHasIncompleteBranch = (nodeId: string): boolean => {
+    const branch = errorBranches.value[nodeId];
+
+    if (branch === undefined || branch.action !== 'ALERTA_SMTP') return false;
+
+    return hasIncompleteAlertNode.value;
+  };
+
   const invalidSteps = computed<InvalidStep[]>(() =>
     pipelineTopology.value.flatMap((step, index) => {
-      const reason = resolveStepBlockReason(step);
+      const reason = resolveStepBlockReason(step, stepHasIncompleteBranch(step.nodeId));
 
       if (reason === null) return [];
 
@@ -420,6 +582,63 @@ export const useFlujoDraftStore = defineStore('flujoDraft', () => {
   const canSave = computed<boolean>(
     () => pipelineTopology.value.length > 0 && invalidSteps.value.length === 0,
   );
+
+  /**
+   * Declara o retira la ruta de contingencia de un paso.
+   *
+   * Pasar `null` la retira. Al hacerlo se resetea el store del satelite si ya no
+   * queda ninguna rama que lo use: dejarlo poblado haria que la siguiente rama
+   * arrancase con los destinatarios de la anterior sin que nadie los pidiera.
+   *
+   * El interruptor del nodo fuente se mueve A LA VEZ, y tiene que ser asi: la
+   * regla 10 del validador rechaza al guardar una ruta que atrapa un codigo que
+   * el nodo, con sus `params`, no puede emitir. Se le pide al propio store con
+   * `declareCaughtErrorCodes` en vez de escribirle la config —§3.1 prohibe al
+   * agregador conocer la forma interna de un nodo—, y se le pasa la lista
+   * completa, vacia incluida, para que retirar la rama tambien lo apague.
+   */
+  const setErrorBranch = (sourceNodeId: string, branch: ErrorBranch | null): void => {
+    const next = { ...errorBranches.value };
+
+    if (branch === null) {
+      delete next[sourceNodeId];
+    } else {
+      next[sourceNodeId] = branch;
+    }
+
+    errorBranches.value = next;
+
+    const step = pipelineTopology.value.find((candidate) => candidate.nodeId === sourceNodeId);
+    const catchCode = branch === null ? null : ERROR_BRANCH_TRIGGERS[branch.trigger].catchCode;
+
+    if (step !== undefined) {
+      resolveNodeStore(step.nodeType, step.nodeId)?.declareCaughtErrorCodes?.(
+        catchCode === null ? [] : [catchCode],
+      );
+    }
+
+    if (!needsProvisionedAlertNode.value) {
+      useSmtpAlertStore(SHARED_ALERT_NODE_ID).resetConfig();
+    }
+  };
+
+  /** Ruta de un paso en la forma que espera el esquema, o `null` si no la hay. */
+  const buildErrorRoute = (nodeId: string): string | SelectiveErrorFallback | null => {
+    const branch = errorBranches.value[nodeId];
+
+    if (branch === undefined) return null;
+
+    const targetNode = resolveBranchTarget(branch.action);
+
+    if (targetNode === null) return null;
+
+    const { catchCode } = ERROR_BRANCH_TRIGGERS[branch.trigger];
+
+    // La CADENA y no un objeto con un codigo comodin: es la unica forma que el
+    // motor trata como "atrapa cualquier fallo". Un `catchErrors` con un codigo
+    // inventado se guarda sin protestar y no se dispara jamas.
+    return catchCode === null ? targetNode : { targetNode, catchErrors: [catchCode] };
+  };
 
   /**
    * Si algun paso esta bloqueado por algo que el operador NO puede arreglar aqui.
@@ -487,10 +706,14 @@ export const useFlujoDraftStore = defineStore('flujoDraft', () => {
    * la topologia, que ya viene ordenada del backend, asi que `nextStep` es
    * simplemente el nodo siguiente del arreglo.
    *
-   * `onErrorStep` queda en `null` en todos los nodos: el asistente todavia no
-   * ofrece configurar caminos de recuperacion, y un puntero inventado seria peor
-   * que su ausencia —el motor detendria la ejecucion en el nodo que falla, que es
-   * el comportamiento correcto por defecto.
+   * `onErrorStep` sale de `errorBranches`, traducido a la forma que el motor
+   * espera: cadena para el respaldo incondicional, objeto selectivo cuando la
+   * rama nombra un codigo concreto, y `null` en los pasos sin rama —que sigue
+   * siendo el defecto correcto: el motor detiene la ejecucion donde falla.
+   *
+   * El nodo de alerta compartido se anade como SATELITE y no como un paso mas:
+   * el encadenado es posicional, y colarlo en la secuencia lo pondria en el
+   * camino feliz, enviando un aviso en cada ejecucion correcta.
    */
   const assemblePipelineSchema = (name: string): AssembledPipelineSchema => {
     // El encadenado (`entrypoint`, `nextStep`, `onErrorStep`) lo hace el helper
@@ -502,20 +725,36 @@ export const useFlujoDraftStore = defineStore('flujoDraft', () => {
       nodeType: step.nodeType,
       outputNamespace: step.outputNamespace,
       params: resolveNodeStore(step.nodeType, step.nodeId)?.toNodeParams() ?? {},
+      onErrorStep: buildErrorRoute(step.nodeId),
     }));
 
-    return buildPipelineSchema(steps, {
-      // El backend ignora este `flowId` y asigna el de la fila que crea; viaja
-      // porque `PipelineSchemaDto` lo exige y la plantilla de origen es la
-      // referencia mas honesta hasta que exista la fila nueva.
-      flowId: selectedTemplateId.value ?? '',
-      name,
-      version: INITIAL_SCHEMA_VERSION,
-      // Sin esto la politica moriria aqui: el asistente reconstruye el esquema
-      // desde los pasos, de modo que un campo raiz que no se reenvie no llega
-      // nunca al flujo, y configurarla en la plantilla no serviria de nada.
-      ...(executionPolicy.value !== null ? { executionPolicy: executionPolicy.value } : {}),
-    });
+    const satellites: AssemblerStep[] = needsProvisionedAlertNode.value
+      ? [
+          {
+            nodeId: SHARED_ALERT_NODE_ID,
+            nodeType: NodeType.DESTINO_SMTP,
+            outputNamespace: DEFAULT_OUTPUT_NAMESPACE_BY_NODE_TYPE[NodeType.DESTINO_SMTP],
+            params: useSmtpAlertStore(SHARED_ALERT_NODE_ID).toNodeParams(),
+          },
+        ]
+      : [];
+
+    return buildPipelineSchema(
+      steps,
+      {
+        // El backend ignora este `flowId` y asigna el de la fila que crea; viaja
+        // porque `PipelineSchemaDto` lo exige y la plantilla de origen es la
+        // referencia mas honesta hasta que exista la fila nueva.
+        flowId: selectedTemplateId.value ?? '',
+        name,
+        version: INITIAL_SCHEMA_VERSION,
+        // Sin esto la politica moriria aqui: el asistente reconstruye el esquema
+        // desde los pasos, de modo que un campo raiz que no se reenvie no llega
+        // nunca al flujo, y configurarla en la plantilla no serviria de nada.
+        ...(executionPolicy.value !== null ? { executionPolicy: executionPolicy.value } : {}),
+      },
+      satellites,
+    );
   };
 
   /**
@@ -601,6 +840,12 @@ export const useFlujoDraftStore = defineStore('flujoDraft', () => {
     pipelineTopology.value.forEach((step) => {
       resolveNodeStore(step.nodeType, step.nodeId)?.resetConfig();
     });
+
+    // El satelite tambien, y por el mismo motivo: su instancia sobrevive a la
+    // topologia que la creo, asi que sin esto un flujo nuevo arrancaria con los
+    // destinatarios del anterior ya puestos.
+    useSmtpAlertStore(SHARED_ALERT_NODE_ID).resetConfig();
+    errorBranches.value = {};
   };
 
   const resetDraft = (): void => {
@@ -631,6 +876,12 @@ export const useFlujoDraftStore = defineStore('flujoDraft', () => {
     canSave,
     hasUnsupportedNodes,
     stepWarnings,
+    errorBranches,
+    availableBranchActions,
+    needsProvisionedAlertNode,
+    hasIncompleteAlertNode,
+    setErrorBranch,
+    resolveBranchTarget,
     upstreamNamespaces,
     upstreamContext,
     syncUpstreamNamespaces,

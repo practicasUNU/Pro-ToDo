@@ -4,6 +4,123 @@ Registro técnico del "por qué" de cada decisión de implementación. Los estad
 
 ---
 
+## 2026-09-26 · Bifurcaciones de contingencia en el asistente — rama `feat/ui-error-branching-smtp`
+
+### El destino existía y era inalcanzable
+
+Tres tandas construyendo la misma capacidad por partes: PROT-16 hizo que el motor supiera desviarse
+y entregara `error_context` al nodo de respaldo, PROT-17 construyó el nodo que avisa a una persona.
+Y sin embargo, hasta hoy, **nadie podía apuntar a ese nodo**. Un `grep` de `onErrorStep` en todo
+`frontend/src` devolvía el tipo, el literal `null` del ensamblador y prosa: ni una línea de producto
+que lo escribiera.
+
+El síntoma más elocuente estaba dentro del propio nodo de alerta: `SmtpAlertConfig.vue` habla de «la
+ruta declarada con onErrorStep» y su asunto por defecto interpola `{{error_context.failed_node_id}}`,
+un namespace que **solo existe si se llega por esa vía**. Un formulario describiendo un camino que no
+se podía trazar.
+
+### El comodín que no podía existir
+
+El encargo proponía un catálogo con `{ code: 'ANY_GRAVE_ERROR', label: 'Cualquier error grave' }`.
+Ese código no existe en el repositorio, y la cuestión no es que faltara darlo de alta: **no puede
+existir**. El DTO exige que `catchErrors` sea un array y `resolveErrorRoute` compara el código
+literal del fallo contra su contenido. Una ruta con un comodín inventado se habría guardado sin
+protestar, habría aparecido en la interfaz como configurada, y no se habría disparado nunca.
+
+Es exactamente el fallo mudo que la regla 10 del validador existe para impedir —y que ni la regla 10
+habría atrapado, porque solo pregunta por códigos que el nodo no puede emitir **con sus params**, no
+por códigos que no existen—. El correo que debía desviarse seguiría de largo, sin excepción, sin
+traza y sin forma de notarlo.
+
+La salida ya estaba escrita en el motor: la **forma de cadena**. `onErrorStep: "alerta_smtp"` es el
+respaldo incondicional de toda la vida, y su TSDoc dice literalmente que «atrapa todo». El precio es
+que una cadena no tiene dónde llevar `customMessage`, así que ese campo desapareció del formulario.
+No se echa de menos: `customMessage` SUSTITUYE al mensaje real del fallo en la traza —se queda uno
+sin saber qué pasó— y la nota que el operador quiera añadir al aviso ya tiene su sitio en el nodo de
+alerta desde PROT-17.
+
+### Un solo nodo de alerta, porque los namespaces son únicos
+
+El encargo pedía un satélite por nodo fuente, `${nodeId}_error_smtp`. Habría funcionado con una rama
+y devuelto un 400 con la segunda: la regla 5 del validador prohíbe que dos nodos escriban el mismo
+`outputNamespace`, y en la lista cerrada hay un único `smtp_result`. Con un `DESTINO_SMTP` ya
+colocado como destino principal, habría fallado incluso con la primera.
+
+Así que hay **un solo nodo de alerta por flujo**, compartido por todas las rutas. Y resulta que no es
+una concesión a la restricción, es mejor diseño: se configuran los destinatarios una vez, y como
+`error_context` ya lleva `failed_node_id`, la misma carta dice igualmente qué paso se detuvo. Si la
+plantilla ya trae un `DESTINO_SMTP`, se reutiliza ese y no se provisiona nada.
+
+La ruta de visión va más lejos y **no crea ningún nodo**. Un `PROCESADOR_IA` satélite chocaría con el
+del flujo en `llm_response` por la misma regla, y ese tipo sigue sin configurador, así que nadie
+podría rellenarle el prompt. Apunta al nodo de IA que el flujo ya tiene — que es precisamente el
+escenario para el que se escribió `collectVisionAttachments`: el modo visión se enciende solo al ver
+el código del parser en `error_context`. Sin nodo de IA en el flujo, la opción no se ofrece.
+
+### Declarar la ruta y configurar el nodo tienen que moverse juntos
+
+La rama «documento sin texto» solo funciona si el parser lleva `failOnUnextractableMedia: true`; si
+no, la regla 10 rechaza el esquema al guardar, y con razón. Pero el agregador no puede encender ese
+interruptor: §3.1 le prohíbe conocer la forma interna de la config de un nodo, y el nombre del campo
+es privado del parser.
+
+Se resolvió añadiendo al contrato `NodeConfigStore` un método opcional,
+`declareCaughtErrorCodes(codes)`, que es el espejo exacto del `getUnreachableErrorCodes` del backend
+—aquel responde «qué he apagado», este dice «esto es lo que mi ruta atrapa, ajústate»—. El agregador
+pregunta en vez de escribir, y un nodo futuro con la misma necesidad no obliga a tocarlo.
+
+Es reversible, y eso importa tanto como encenderlo: retirar la rama pasa una lista vacía y apaga el
+interruptor. Dejarlo puesto convertiría en `PAUSADO` un flujo que hoy atraviesa tranquilamente un
+correo de solo imagen, y el fallo no lo recogería ya nadie.
+
+### Un bug que llevaba meses esperando
+
+Al abrir el ensamblador apareció otra cosa: `AssemblerStep` no declaraba `onErrorStep`, así que un
+`assemble → disassemble → assemble` lo reescribía a `null`. Cualquier ruta escrita a mano en el panel
+JSON del editor de plantillas se **borraba al volver a guardar**, junto con los nodos satélite, que no
+están en el camino de `nextStep` y por tanto el desensamblador nunca los veía.
+
+Era latente porque nadie escribía rutas. Esta entrega las escribe, así que se arregló de paso: el
+paso transporta su ruta, `collectErrorSatellites` recupera los nodos que el recorrido no visita, y hay
+dos pruebas de regresión. El TSDoc que afirmaba «tampoco la pierde» era cierto solo para la
+reconstrucción del orden, no para el dato.
+
+### Dónde vive el panel
+
+En `WizardPage.vue`, dentro del `q-step` y bajo el configurador del nodo. No dentro de cada
+configurador: el anfitrión pasa solo `:node-id`, y meterlo en los seis habría obligado a editarlos
+todos y a que cada tipo nuevo se acordara. Una inserción lo da para los seis y para los que vengan.
+
+Las ramas tampoco viven en `pipelineTopology`, y no es un detalle de organización: el orden de ese
+arreglo ES la topología —`nextStep` es el elemento siguiente—, así que un nodo de alerta metido ahí
+acabaría en el camino feliz, enviando un aviso en cada ejecución correcta.
+
+### Lo que NO se hizo
+
+- **Sin `customMessage` en el formulario.** Incompatible con la forma de cadena, y sustituye al
+  mensaje real del fallo.
+- **Sin satélite de `PROCESADOR_IA`.** Colisión de namespace y, sobre todo, un nodo cuyo prompt nadie
+  podría configurar.
+- **Sin tocar el editor de plantillas.** Puede colocar un `DESTINO_SMTP` como destino normal desde
+  antes de esta tanda; lo que le falta es que el catálogo lo marque `implemented`, y eso depende de
+  la migración 021.
+- **Sin tocar el backend.** Las 55 suites siguen exactamente donde estaban.
+
+### Estado de la verificación
+
+Frontend **27 archivos / 547 pruebas** (desde 26 / 506), `vue-tsc` sin errores y eslint en cero.
+Backend **55 suites / 1265**, sin cambios. Los siete archivos que `prettier --check` señala son
+todos ajenos a esta rama.
+
+### Pendiente
+
+- La migración 021 y el `.env`, arrastrados desde PROT-16. **Sin ellos `DESTINO_SMTP` llega con
+  `implemented: false`** y el editor de plantillas lo deshabilita.
+- Configurador de `PROCESADOR_IA`: mientras no exista, la ruta de visión depende de que la plantilla
+  ya coloque ese nodo.
+
+---
+
 ## 2026-09-26 · Configurador de `DESTINO_SMTP` y carta institucional de alerta — rama `feat/smtp-alert-ui`
 
 ### Un nodo que funcionaba y que nadie podía configurar

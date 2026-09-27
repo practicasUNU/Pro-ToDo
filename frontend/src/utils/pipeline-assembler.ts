@@ -3,6 +3,7 @@ import type {
   AssembledPipelineSchema,
   NodeType,
   PipelineExecutionPolicy,
+  SelectiveErrorFallback,
 } from '@/types/pipeline';
 
 // Helper puro (frontend-architecture.md §2.1): transforma un dato en otro, sin
@@ -20,6 +21,21 @@ import type {
 export const INITIAL_SCHEMA_VERSION = '1.0.0';
 
 /**
+ * Nodo destino de una ruta de error, sea cual sea su forma.
+ *
+ * Replica de `declaredErrorTarget` del backend, y por el mismo motivo por el que
+ * alli existe: la union tiene tres formas y ningun consumidor debe inspeccionarla
+ * por su cuenta. Responde "a donde apunta", no "que codigos atrapa".
+ */
+export const errorRouteTarget = (
+  route: string | SelectiveErrorFallback | null | undefined,
+): string | null => {
+  if (typeof route === 'string') return route;
+
+  return typeof route === 'object' && route !== null ? route.targetNode : null;
+};
+
+/**
  * Paso ya resuelto: identidad, tipo, namespace y `params`.
  *
  * Los `params` llegan RESUELTOS y no como referencia a un store: quien conoce el
@@ -32,6 +48,19 @@ export interface AssemblerStep {
   readonly nodeType: NodeType;
   readonly outputNamespace: string;
   readonly params: Record<string, unknown>;
+  /**
+   * Ruta de contingencia del paso. Ausente equivale a `null`.
+   *
+   * Viaja en el paso y no en los metadatos porque es propiedad del NODO: dos
+   * pasos del mismo flujo pueden desviarse a sitios distintos, o solo uno de
+   * ellos declarar rama.
+   *
+   * Que este campo exista es lo que impide que un round-trip destruya el dato.
+   * Antes `disassemblePipelineSchema` no lo devolvia y `assemblePipelineSchema`
+   * lo reescribia a `null`, de modo que abrir una plantilla con una ruta escrita
+   * a mano en el panel JSON y volver a guardarla la borraba en silencio.
+   */
+  readonly onErrorStep?: string | SelectiveErrorFallback | null;
 }
 
 /** Metadatos del esquema que no salen de la secuencia de pasos. */
@@ -58,15 +87,17 @@ export interface AssemblerMeta {
  * ningun grafo aqui —eso lo hace el backend al devolver `topology`, o el propio
  * operador al reordenar la lista.
  *
- * `onErrorStep` queda en `null` en todos los nodos: ninguna vista ofrece todavia
- * configurar caminos de recuperacion, y un puntero inventado seria peor que su
- * ausencia —con `null` el motor detiene la ejecucion en el nodo que falla, que
- * es el comportamiento correcto por defecto.
+ * `onErrorStep` sale de cada paso, y cada una de sus TRES formas significa algo
+ * distinto: la cadena es el respaldo incondicional —la unica que atrapa
+ * cualquier codigo—, el objeto selectivo desvia solo ante los codigos que
+ * nombra, y `null` detiene la ejecucion en el nodo que falla, que es el defecto
+ * correcto de un paso sin rama declarada.
  *
- * El backend acepta ademas una ruta selectiva (`{ targetNode, catchErrors }`),
- * que hoy solo puede escribirse a mano en el panel JSON del editor de
- * plantillas. Este ensamblador no la genera, pero `disassemblePipelineSchema`
- * tampoco la pierde: la topologia solo se reconstruye desde `nextStep`.
+ * Los SATELITES van aparte de la secuencia y no al final del arreglo. El
+ * encadenado es posicional, asi que un nodo de alerta metido entre los pasos
+ * heredaria un `nextStep` y acabaria en el camino feliz, ejecutandose en cada
+ * pasada en vez de solo cuando algo falla. Se emiten con `nextStep: null`: son
+ * terminales por definicion.
  *
  * Una secuencia VACIA produce un esquema con `entrypoint: ''` y `nodes: {}` en
  * vez de lanzar: es el estado legitimo de un borrador recien abierto, y quien
@@ -74,10 +105,12 @@ export interface AssemblerMeta {
  *
  * @param steps Pasos en orden de ejecucion.
  * @param meta `flowId`, `name` y, opcionalmente, la version del esquema.
+ * @param satellites Nodos alcanzables SOLO por una ruta de error.
  */
 export const assemblePipelineSchema = (
   steps: readonly AssemblerStep[],
   meta: AssemblerMeta,
+  satellites: readonly AssemblerStep[] = [],
 ): AssembledPipelineSchema => {
   const nodes: Record<string, AssembledPipelineNode> = {};
 
@@ -87,8 +120,24 @@ export const assemblePipelineSchema = (
       nodeType: step.nodeType,
       outputNamespace: step.outputNamespace,
       nextStep: steps[index + 1]?.nodeId ?? null,
-      onErrorStep: null,
+      onErrorStep: step.onErrorStep ?? null,
       params: step.params,
+    };
+  });
+
+  // Despues de los pasos y no antes: si un satelite compartiera `nodeId` con un
+  // paso del camino activo, debe ganar el paso. Sobrescribir el nodo real por
+  // uno terminal partiria el flujo en dos sin ningun aviso.
+  satellites.forEach((satellite) => {
+    if (nodes[satellite.nodeId] !== undefined) return;
+
+    nodes[satellite.nodeId] = {
+      nodeId: satellite.nodeId,
+      nodeType: satellite.nodeType,
+      outputNamespace: satellite.outputNamespace,
+      nextStep: null,
+      onErrorStep: satellite.onErrorStep ?? null,
+      params: satellite.params,
     };
   });
 
@@ -101,9 +150,7 @@ export const assemblePipelineSchema = (
     // Se OMITE la clave cuando no hay politica en vez de emitir un objeto
     // vacio: el backend valida con `forbidNonWhitelisted` y un `{}` seria una
     // declaracion de "no hay politica" indistinguible de una a medio escribir.
-    ...(meta.executionPolicy !== undefined
-      ? { executionPolicy: meta.executionPolicy }
-      : {}),
+    ...(meta.executionPolicy !== undefined ? { executionPolicy: meta.executionPolicy } : {}),
   };
 };
 
@@ -138,10 +185,63 @@ export const disassemblePipelineSchema = (schema: AssembledPipelineSchema): Asse
       nodeType: node.nodeType,
       outputNamespace: node.outputNamespace,
       params: node.params,
+      onErrorStep: node.onErrorStep,
     });
 
     cursor = node.nextStep;
   }
 
   return steps;
+};
+
+/**
+ * Nodos a los que solo se llega por una ruta de error.
+ *
+ * El recorrido de `disassemblePipelineSchema` sigue unicamente `nextStep`, asi
+ * que un nodo de alerta no aparece en sus pasos. Sin esta funcion se perderia al
+ * reensamblar: el esquema saldria con las rutas apuntando a un `targetNode` que
+ * ya no existe en el mapa, y el backend lo rechazaria con la regla 3.
+ *
+ * Va SEPARADA del desensamblador en vez de cambiarle la firma para no obligar al
+ * editor de plantillas —su otro consumidor— a desempaquetar algo que no usa.
+ *
+ * Se resuelve por DIFERENCIA con el camino activo y no persiguiendo cada
+ * `onErrorStep`: una ruta puede apuntar hacia atras, a un nodo que ya esta en la
+ * secuencia, y ese no es un satelite sino un reintento por otro camino.
+ *
+ * @param schema Grafo completo.
+ * @param activeSteps Lo que devolvio `disassemblePipelineSchema` sobre el mismo.
+ */
+export const collectErrorSatellites = (
+  schema: AssembledPipelineSchema,
+  activeSteps: readonly AssemblerStep[],
+): AssemblerStep[] => {
+  const inActivePath = new Set(activeSteps.map((step) => step.nodeId));
+  const referenced = new Set<string>();
+
+  for (const node of Object.values(schema.nodes)) {
+    const target = errorRouteTarget(node.onErrorStep);
+
+    if (target !== null && !inActivePath.has(target)) {
+      referenced.add(target);
+    }
+  }
+
+  return [...referenced].flatMap((nodeId) => {
+    const node = schema.nodes[nodeId];
+
+    // Una ruta que apunta fuera del mapa es un esquema roto, y lo reporta el
+    // backend con su regla 3. Aqui se omite en vez de inventar un nodo.
+    if (node === undefined) return [];
+
+    return [
+      {
+        nodeId: node.nodeId,
+        nodeType: node.nodeType,
+        outputNamespace: node.outputNamespace,
+        params: node.params,
+        onErrorStep: node.onErrorStep,
+      },
+    ];
+  });
 };

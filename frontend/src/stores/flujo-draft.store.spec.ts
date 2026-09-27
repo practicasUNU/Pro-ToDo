@@ -1,6 +1,8 @@
 import { createPinia, setActivePinia } from 'pinia';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { useParserEmailStore } from '@stores/nodes/parser-email.store';
+import { useSmtpAlertStore } from '@stores/nodes/smtp-alert.store';
 import { useTemplateMapperStore } from '@stores/nodes/template-mapper.store';
 import { useTriggerImapStore } from '@stores/nodes/trigger-imap.store';
 
@@ -8,6 +10,7 @@ import { useFlujoDraftStore } from './flujo-draft.store';
 
 import { NodeCategory } from '@/types/node-catalog';
 import { NodeType } from '@/types/pipeline';
+import { SHARED_ALERT_NODE_ID } from '@/types/nodes/error-branch.types';
 
 import type { NodeCatalogEntry } from '@/types/node-catalog';
 import type { PipelineSummary, WorkflowDetail, WorkflowTemplateSummary } from '@/types/pipeline';
@@ -615,15 +618,16 @@ describe('useFlujoDraftStore · agregador del asistente', () => {
       expect(schema.nodes.nodo_mapeador?.nextStep).toBeNull();
     });
 
-    it('8.4 deberia dejar onErrorStep en null en todos los nodos', async () => {
+    it('8.4 deberia dejar onErrorStep en null sin ramas declaradas', async () => {
       // 1. Arrange
       const draft = await buildSelectedDraft();
 
       // 2. Act
       const schema = draft.assemblePipelineSchema('Flujo de prueba');
 
-      // 3. Assert: el asistente aun no ofrece caminos de recuperacion, y un
-      //    puntero inventado seria peor que su ausencia.
+      // 3. Assert: `null` es el defecto CORRECTO y no una limitacion. Sin rama,
+      //    el motor detiene la ejecucion en el nodo que falla, que es lo que
+      //    debe pasar mientras nadie declare a donde desviarse.
       for (const node of Object.values(schema.nodes)) {
         expect(node.onErrorStep).toBeNull();
       }
@@ -937,6 +941,252 @@ describe('useFlujoDraftStore · agregador del asistente', () => {
         PARSER_NODE_ID,
         MAPPER_NODE_ID,
       ]);
+    });
+  });
+
+  describe('17. Rutas de contingencia (onErrorStep)', () => {
+    const ALERT_RECIPIENT = 'guardia@unuware.com';
+
+    /** Deja el nodo de alerta compartido en estado valido. */
+    const configureAlertNode = (): void => {
+      useSmtpAlertStore(SHARED_ALERT_NODE_ID).updateConfig({ to: [ALERT_RECIPIENT] });
+    };
+
+    it('17.1 deberia emitir la forma de CADENA para cualquier fallo', async () => {
+      // 1. Arrange 📐: es la unica forma que el motor trata como "atrapa todo".
+      //    Un `catchErrors` con un codigo comodin inventado se guardaria sin
+      //    protestar y no se dispararia jamas.
+      const draft = await buildSelectedDraft();
+      draft.setErrorBranch(MAPPER_NODE_ID, {
+        trigger: 'CUALQUIER_FALLO',
+        action: 'ALERTA_SMTP',
+      });
+      configureAlertNode();
+
+      // 2. Act ⚙️
+      const schema = draft.assemblePipelineSchema('Flujo de prueba');
+
+      // 3. Assert 🎯
+      expect(schema.nodes[MAPPER_NODE_ID]?.onErrorStep).toBe(SHARED_ALERT_NODE_ID);
+    });
+
+    it('17.2 deberia emitir la forma SELECTIVA para un fallo concreto', async () => {
+      // 1. Arrange 📐
+      const draft = await buildSelectedDraft();
+
+      // 2. Act ⚙️
+      draft.setErrorBranch(PARSER_NODE_ID, {
+        trigger: 'SIN_TEXTO_EXTRAIBLE',
+        action: 'ALERTA_SMTP',
+      });
+      const schema = draft.assemblePipelineSchema('Flujo de prueba');
+
+      // 3. Assert 🎯
+      expect(schema.nodes[PARSER_NODE_ID]?.onErrorStep).toEqual({
+        targetNode: SHARED_ALERT_NODE_ID,
+        catchErrors: ['ERR_PARSER_UNEXTRACTABLE_MEDIA'],
+      });
+    });
+
+    it('17.3 deberia encender el interruptor del nodo fuente a la vez', async () => {
+      // 1. Arrange 📐: sin esto la regla 10 del validador rechaza el esquema al
+      //    guardar, porque la ruta atraparia un codigo que el parser, con sus
+      //    `params`, no puede emitir.
+      const draft = await buildSelectedDraft();
+
+      // 2. Act ⚙️
+      draft.setErrorBranch(PARSER_NODE_ID, {
+        trigger: 'SIN_TEXTO_EXTRAIBLE',
+        action: 'ALERTA_SMTP',
+      });
+
+      // 3. Assert 🎯
+      expect(useParserEmailStore(PARSER_NODE_ID).config.failOnUnextractableMedia).toBe(true);
+      expect(
+        draft.assemblePipelineSchema('F').nodes[PARSER_NODE_ID]?.params.failOnUnextractableMedia,
+      ).toBe(true);
+    });
+
+    it('17.4 deberia apagarlo al retirar la rama', async () => {
+      // 1. Arrange 📐: dejarlo puesto convertiria en PAUSADO un flujo que hoy
+      //    atraviesa tranquilamente un correo de solo imagen.
+      const draft = await buildSelectedDraft();
+      draft.setErrorBranch(PARSER_NODE_ID, {
+        trigger: 'SIN_TEXTO_EXTRAIBLE',
+        action: 'ALERTA_SMTP',
+      });
+
+      // 2. Act ⚙️
+      draft.setErrorBranch(PARSER_NODE_ID, null);
+
+      // 3. Assert 🎯
+      expect(useParserEmailStore(PARSER_NODE_ID).config.failOnUnextractableMedia).toBe(false);
+      expect(draft.assemblePipelineSchema('F').nodes[PARSER_NODE_ID]?.onErrorStep).toBeNull();
+    });
+
+    it('17.5 deberia provisionar UN SOLO nodo de alerta para dos ramas', async () => {
+      // 1. Arrange 📐: la regla 5 del validador prohibe que dos nodos escriban
+      //    `smtp_result`, y la lista cerrada solo tiene uno. Un satelite por paso
+      //    devolveria un 400 en cuanto hubiera dos ramas.
+      const draft = await buildSelectedDraft();
+
+      // 2. Act ⚙️
+      draft.setErrorBranch(PARSER_NODE_ID, {
+        trigger: 'SIN_TEXTO_EXTRAIBLE',
+        action: 'ALERTA_SMTP',
+      });
+      draft.setErrorBranch(MAPPER_NODE_ID, {
+        trigger: 'CUALQUIER_FALLO',
+        action: 'ALERTA_SMTP',
+      });
+      configureAlertNode();
+      const schema = draft.assemblePipelineSchema('Flujo de prueba');
+
+      // 3. Assert 🎯
+      const smtpNodes = Object.values(schema.nodes).filter(
+        (node) => node.outputNamespace === 'smtp_result',
+      );
+
+      expect(smtpNodes).toHaveLength(1);
+      expect(smtpNodes[0]?.nodeId).toBe(SHARED_ALERT_NODE_ID);
+    });
+
+    it('17.6 deberia emitir el satelite como nodo terminal fuera del encadenado', async () => {
+      // 1. Arrange 📐: colarlo en la secuencia lo pondria en el camino feliz,
+      //    enviando un aviso en cada ejecucion correcta.
+      const draft = await buildSelectedDraft();
+      draft.setErrorBranch(MAPPER_NODE_ID, {
+        trigger: 'CUALQUIER_FALLO',
+        action: 'ALERTA_SMTP',
+      });
+      configureAlertNode();
+
+      // 2. Act ⚙️
+      const schema = draft.assemblePipelineSchema('Flujo de prueba');
+
+      // 3. Assert 🎯
+      expect(schema.nodes[SHARED_ALERT_NODE_ID]?.nextStep).toBeNull();
+      expect(schema.nodes[MAPPER_NODE_ID]?.nextStep).toBeNull();
+      expect(schema.nodes[PARSER_NODE_ID]?.nextStep).toBe(MAPPER_NODE_ID);
+    });
+
+    it('17.7 deberia llevar al satelite los params de su propio store', async () => {
+      // 1. Arrange 📐
+      const draft = await buildSelectedDraft();
+      draft.setErrorBranch(MAPPER_NODE_ID, {
+        trigger: 'CUALQUIER_FALLO',
+        action: 'ALERTA_SMTP',
+      });
+      configureAlertNode();
+
+      // 2. Act ⚙️
+      const schema = draft.assemblePipelineSchema('Flujo de prueba');
+
+      // 3. Assert 🎯
+      expect(schema.nodes[SHARED_ALERT_NODE_ID]?.params.to).toEqual([ALERT_RECIPIENT]);
+    });
+
+    it('17.8 deberia BLOQUEAR el guardado con el nodo de alerta a medias', async () => {
+      // 1. Arrange 📐: `collectIncompleteParams` del backend recorre el mapa
+      //    ENTERO al activar, satelites incluidos. Dejar guardar aqui produciria
+      //    un flujo que despues no se puede encender, sin decir por que.
+      const draft = await buildSelectedDraft();
+      verifyTriggerStore();
+      useTemplateMapperStore(MAPPER_NODE_ID).setTemplateId(HTML_TEMPLATE_ID);
+
+      // 2. Act ⚙️
+      draft.setErrorBranch(MAPPER_NODE_ID, {
+        trigger: 'CUALQUIER_FALLO',
+        action: 'ALERTA_SMTP',
+      });
+
+      // 3. Assert 🎯
+      expect(draft.canSave).toBe(false);
+      expect(draft.invalidSteps.map((item) => item.reason)).toContain('RAMA_DE_ERROR_INCOMPLETA');
+    });
+
+    it('17.9 deberia desbloquearlo al completar el nodo de alerta', async () => {
+      // 1. Arrange 📐
+      const draft = await buildSelectedDraft();
+      verifyTriggerStore();
+      useTemplateMapperStore(MAPPER_NODE_ID).setTemplateId(HTML_TEMPLATE_ID);
+      draft.setErrorBranch(MAPPER_NODE_ID, {
+        trigger: 'CUALQUIER_FALLO',
+        action: 'ALERTA_SMTP',
+      });
+
+      // 2. Act ⚙️
+      configureAlertNode();
+
+      // 3. Assert 🎯
+      expect(draft.hasIncompleteAlertNode).toBe(false);
+      expect(draft.canSave).toBe(true);
+    });
+
+    it('17.10 NO deberia ofrecer la vision sin un nodo de IA en el flujo', async () => {
+      // 1. Arrange 📐: un PROCESADOR_IA satelite chocaria con el del flujo en
+      //    `llm_response` (regla 5), y ese tipo aun no tiene configurador. La
+      //    ruta apunta al que ya exista, o no se ofrece.
+      const draft = await buildSelectedDraft();
+
+      // 2. Act ⚙️ + 3. Assert 🎯
+      expect(draft.availableBranchActions).toEqual(['ALERTA_SMTP']);
+      expect(draft.resolveBranchTarget('VISION_IA')).toBeNull();
+    });
+
+    it('17.11 deberia reutilizar el DESTINO_SMTP que trae la plantilla', async () => {
+      // 1. Arrange 📐: provisionar otro junto a el seria un 400 por la regla 5.
+      const draft = useFlujoDraftStore();
+      fetchWorkflowTemplates.mockResolvedValue([
+        buildTemplate({
+          topology: [
+            {
+              nodeId: TRIGGER_NODE_ID,
+              nodeType: NodeType.TRIGGER_IMAP,
+              outputNamespace: 'raw_email',
+            },
+            {
+              nodeId: 'destino_correo',
+              nodeType: NodeType.DESTINO_SMTP,
+              outputNamespace: 'smtp_result',
+            },
+          ],
+        }),
+      ]);
+      fetchNodeCatalog.mockResolvedValue(CATALOG_ENTRIES);
+      await draft.loadAvailableTemplates();
+      draft.selectTemplate(TEMPLATE_ID);
+
+      // 2. Act ⚙️
+      draft.setErrorBranch(TRIGGER_NODE_ID, {
+        trigger: 'CUALQUIER_FALLO',
+        action: 'ALERTA_SMTP',
+      });
+      const schema = draft.assemblePipelineSchema('Flujo de prueba');
+
+      // 3. Assert 🎯
+      expect(draft.needsProvisionedAlertNode).toBe(false);
+      expect(schema.nodes[TRIGGER_NODE_ID]?.onErrorStep).toBe('destino_correo');
+      expect(schema.nodes[SHARED_ALERT_NODE_ID]).toBeUndefined();
+    });
+
+    it('17.12 deberia limpiar las ramas al resetear el borrador', async () => {
+      // 1. Arrange 📐: la instancia del satelite sobrevive a la topologia, asi
+      //    que sin esto un flujo nuevo arrancaria con los destinatarios del
+      //    anterior ya puestos.
+      const draft = await buildSelectedDraft();
+      draft.setErrorBranch(MAPPER_NODE_ID, {
+        trigger: 'CUALQUIER_FALLO',
+        action: 'ALERTA_SMTP',
+      });
+      configureAlertNode();
+
+      // 2. Act ⚙️
+      draft.resetDraft();
+
+      // 3. Assert 🎯
+      expect(draft.errorBranches).toEqual({});
+      expect(useSmtpAlertStore(SHARED_ALERT_NODE_ID).config.to).toEqual([]);
     });
   });
 
@@ -1398,6 +1648,114 @@ describe('useFlujoDraftStore · modo edicion', () => {
       expect(draft.canSave).toBe(false);
       expect(draft.hasUnsupportedNodes).toBe(false);
       expect(draft.invalidSteps[0]?.reason).toBe('CONFIGURACION_INCOMPLETA');
+    });
+  });
+
+  describe('18. Ida y vuelta de las rutas de contingencia', () => {
+    /** Flujo guardado CON una rama y su nodo de alerta satelite. */
+    const buildBranchedDetail = (): WorkflowDetail => {
+      const base = buildWorkflowDetail();
+      const nodes = base.pipelineSchema?.nodes ?? {};
+
+      return {
+        ...base,
+        pipelineSchema: {
+          ...(base.pipelineSchema as NonNullable<WorkflowDetail['pipelineSchema']>),
+          nodes: {
+            ...nodes,
+            [TRIGGER_NODE_ID]: {
+              ...(nodes[TRIGGER_NODE_ID] as NonNullable<(typeof nodes)[string]>),
+              onErrorStep: SHARED_ALERT_NODE_ID,
+            },
+            [SHARED_ALERT_NODE_ID]: {
+              nodeId: SHARED_ALERT_NODE_ID,
+              nodeType: NodeType.DESTINO_SMTP,
+              outputNamespace: 'smtp_result',
+              nextStep: null,
+              onErrorStep: null,
+              params: { to: ['guardia@unuware.com'], subject: 'Incidencia' },
+            },
+          },
+        },
+      };
+    };
+
+    it('18.1 deberia recuperar la rama al abrir el flujo', () => {
+      // 1. Arrange 📐: `topology` solo trae el camino activo, asi que sin
+      //    reconstruirlas el asistente abriria sin ramas.
+      const draft = useFlujoDraftStore();
+      fetchNodeCatalog.mockResolvedValue(CATALOG_ENTRIES);
+
+      // 2. Act ⚙️
+      draft.hydrateForEdit(buildBranchedDetail());
+
+      // 3. Assert 🎯
+      expect(draft.errorBranches[TRIGGER_NODE_ID]).toEqual({
+        trigger: 'CUALQUIER_FALLO',
+        action: 'ALERTA_SMTP',
+      });
+    });
+
+    it('18.2 deberia repoblar el nodo de alerta satelite', () => {
+      // 1. Arrange 📐: no esta en `topology` —solo se llega a el por la ruta—,
+      //    asi que su configuracion hay que buscarla en el mapa de nodos.
+      const draft = useFlujoDraftStore();
+      fetchNodeCatalog.mockResolvedValue(CATALOG_ENTRIES);
+
+      // 2. Act ⚙️
+      draft.hydrateForEdit(buildBranchedDetail());
+
+      // 3. Assert 🎯
+      expect(useSmtpAlertStore(SHARED_ALERT_NODE_ID).config.to).toEqual(['guardia@unuware.com']);
+    });
+
+    it('18.3 NO deberia perder la rama al reensamblar', () => {
+      // 1. Arrange 📐: REGRESION del caso que motiva esta entrega. Sin la ida y
+      //    vuelta, abrir un flujo con contingencia y volver a guardarlo borraria
+      //    la ruta y su nodo de alerta, y el operador perderia la configuracion
+      //    con solo mirar el flujo.
+      const draft = useFlujoDraftStore();
+      fetchNodeCatalog.mockResolvedValue(CATALOG_ENTRIES);
+      draft.hydrateForEdit(buildBranchedDetail());
+
+      // 2. Act ⚙️
+      const schema = draft.assemblePipelineSchema('Notiweb');
+
+      // 3. Assert 🎯
+      expect(schema.nodes[TRIGGER_NODE_ID]?.onErrorStep).toBe(SHARED_ALERT_NODE_ID);
+      expect(schema.nodes[SHARED_ALERT_NODE_ID]?.params.to).toEqual(['guardia@unuware.com']);
+      expect(schema.nodes[SHARED_ALERT_NODE_ID]?.nextStep).toBeNull();
+    });
+
+    it('18.4 deberia ignorar una ruta que no encaja en el catalogo', () => {
+      // 1. Arrange 📐: el panel JSON del editor de plantillas permite escribir
+      //    rutas a mano. Adivinar una intencion equivocada la reescribiria en el
+      //    esquema con otro significado, que es peor que no mostrarla.
+      const draft = useFlujoDraftStore();
+      fetchNodeCatalog.mockResolvedValue(CATALOG_ENTRIES);
+      const detail = buildBranchedDetail();
+      const nodes = detail.pipelineSchema?.nodes ?? {};
+
+      // 2. Act ⚙️
+      draft.hydrateForEdit({
+        ...detail,
+        pipelineSchema: {
+          ...(detail.pipelineSchema as NonNullable<WorkflowDetail['pipelineSchema']>),
+          nodes: {
+            ...nodes,
+            [TRIGGER_NODE_ID]: {
+              ...(nodes[TRIGGER_NODE_ID] as NonNullable<(typeof nodes)[string]>),
+              onErrorStep: {
+                targetNode: SHARED_ALERT_NODE_ID,
+                catchErrors: ['ERR_ESCRITO_A_MANO'],
+              },
+            },
+          },
+        },
+      });
+
+      // 3. Assert 🎯
+      expect(draft.errorBranches[TRIGGER_NODE_ID]).toBeUndefined();
     });
   });
 });

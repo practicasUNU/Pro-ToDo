@@ -3337,4 +3337,119 @@ mientras la pantalla lo sigue mostrando.
       `.env` real con los dos bloques SMTP y las cuatro `AI_*`, reiniciando Nest. **Sin esto el nodo
       no aparece en `GET /api/nodos` y el login OTP se queda sin transporte**
 - [ ] 89. Pendiente — configurador Quasar de `PROCESADOR_IA`, el último tipo con estrategia pero sin
-      formulario. `node-config-registry.ts` cubre ya 6 de 9
+      formulario. `node-config-registry.ts` cubre ya 6 de 9. **Reaparece como pendiente 97**: sin él,
+      la ruta de contingencia por visión depende de que la plantilla ya coloque ese nodo
+
+---
+
+## Tanda actual — PROT-18 · Bifurcaciones de contingencia (`onErrorStep`) en el asistente
+
+PROT-16 construyó el mecanismo de desvío y PROT-17 el nodo al que desviar. Faltaba la pieza que los
+une: **nadie podía apuntar a ese nodo**. El `grep` de `onErrorStep` en `frontend/src` no devolvía una
+sola línea de producto que lo escribiera — solo el tipo, el literal `null` del ensamblador y prosa.
+`SmtpAlertConfig.vue` ya hablaba de «la ruta declarada con onErrorStep» y su asunto por defecto
+interpolaba `{{error_context.failed_node_id}}`, un namespace que solo existe si se llega por esa vía.
+El destino estaba implementado y era inalcanzable.
+
+### Contratos nuevos
+
+```ts
+// @/types/nodes/error-branch.types.ts
+export type ErrorBranchTrigger = 'CUALQUIER_FALLO' | 'SIN_TEXTO_EXTRAIBLE';
+export type ErrorBranchAction = 'ALERTA_SMTP' | 'VISION_IA';
+export interface ErrorBranch { trigger: ErrorBranchTrigger; action: ErrorBranchAction }
+export const SHARED_ALERT_NODE_ID = 'alerta_smtp';
+
+// @stores/nodes/node-store-registry.ts — contrato NodeConfigStore
+readonly declareCaughtErrorCodes?: (codes: readonly string[]) => void;
+
+// @/utils/pipeline-assembler.ts
+export const errorRouteTarget: (route) => string | null;
+export const collectErrorSatellites: (schema, activeSteps) => AssemblerStep[];
+assemblePipelineSchema(steps, meta, satellites = []);
+```
+
+### Diagrama de inyección
+
+```
+WizardPage.vue  (anfitrion, una sola insercion por paso)
+   ├── <component :is=nodeConfigRegistry[nodeType]>   ← configurador del nodo
+   └── <NodeErrorBranchConfig :node-id :node-type>
+             │
+             ├── useFlujoDraftStore()            ← duena de la TOPOLOGIA y las ramas
+             │      ├── setErrorBranch() ──► store del nodo fuente
+             │      │                          .declareCaughtErrorCodes()
+             │      └── assemblePipelineSchema() ──► pipeline-assembler
+             └── <SmtpAlertConfig :node-id=SHARED_ALERT_NODE_ID>   (incrustado)
+```
+
+### Por qué «cualquier error» es la forma de CADENA y no un código comodín
+
+El encargo proponía `catchErrors: ['ANY_GRAVE_ERROR']`. Ese código no existe en el repositorio, y no
+puede existir: el DTO exige que `catchErrors` sea un array y `resolveErrorRoute` compara el código
+**literal**. La ruta se habría guardado sin protestar y **no se habría disparado jamás** — el fallo
+mudo que la regla 10 del validador existe precisamente para impedir, y que ni siquiera la regla 10
+habría detectado, porque solo consulta códigos que el nodo no puede emitir con sus `params`.
+
+La forma de cadena (`onErrorStep: "alerta_smtp"`) es la que el motor documenta como «atrapa
+cualquier código». A cambio no puede llevar `customMessage` —«una cadena no tiene donde ponerlo»—,
+así que ese campo no se pide en el formulario. No se pierde nada práctico: `customMessage` SUSTITUYE
+al mensaje real del fallo en la traza, y la nota que el operador quiera añadir al aviso ya tiene su
+sitio en los `params` del nodo de alerta.
+
+### Por qué un solo nodo de alerta por flujo
+
+La regla 5 del validador prohíbe que dos nodos escriban el mismo `outputNamespace`, y la lista
+cerrada tiene un único `smtp_result`. Un satélite por nodo fuente (`${nodeId}_error_smtp`, como pedía
+el encargo) devuelve un 400 en cuanto hay dos ramas, o una rama más un `DESTINO_SMTP` como destino
+principal.
+
+Compartirlo tampoco pierde información: `error_context` ya lleva `failed_node_id`, así que la misma
+carta sirve para cualquier rama y el destinatario sabe igualmente qué paso se detuvo. Si la plantilla
+ya trae un `DESTINO_SMTP`, se reutiliza ese y no se provisiona nada.
+
+### Por qué la ruta de visión NO crea un nodo
+
+Un `PROCESADOR_IA` satélite chocaría con el del flujo en `llm_response` por la misma regla 5, y ese
+tipo además sigue sin configurador (pendiente 89), así que nadie podría rellenar su prompt. La ruta
+apunta al `PROCESADOR_IA` **que el flujo ya tiene** — que es exactamente el escenario para el que se
+escribió `collectVisionAttachments` en PROT-16: el modo visión se activa solo al ver
+`error_context.error_code === ERR_PARSER_UNEXTRACTABLE_MEDIA`. Sin nodo de IA en el flujo, la opción
+no se ofrece.
+
+### Por qué el interruptor del parser lo mueve el propio nodo
+
+La rama `SIN_TEXTO_EXTRAIBLE` exige `failOnUnextractableMedia: true`, o la regla 10 rechaza el
+esquema al guardar. El agregador no puede escribirlo: §3.1 le prohíbe conocer la forma interna de una
+config, y el nombre del interruptor es privado del parser. Se añadió al contrato `NodeConfigStore` el
+método opcional `declareCaughtErrorCodes(codes)` —espejo del `getUnreachableErrorCodes` del backend,
+que responde la pregunta inversa— y el agregador pregunta en vez de escribir. Es reversible: retirar
+la rama pasa `[]` y apaga el interruptor, porque dejarlo puesto convertiría en `PAUSADO` un flujo que
+hoy atraviesa tranquilamente un correo de solo imagen.
+
+### Bug corregido de paso: el round-trip destruía las rutas
+
+`AssemblerStep` no declaraba `onErrorStep` y `assemblePipelineSchema` lo reescribía a `null`, así que
+un `assemble → disassemble → assemble` **borraba cualquier ruta** escrita a mano en el panel JSON del
+editor de plantillas, y perdía los nodos satélite —que no están en el camino de `nextStep`—. Era
+latente desde que existe ese panel; con esta entrega habría dejado de serlo en cuanto alguien
+declarase una rama. El TSDoc que afirmaba «tampoco la pierde» era cierto solo para la reconstrucción
+del orden, no para el dato.
+
+### Estado de las tareas
+
+- [x] 90. Contratos — `error-branch.types.ts` con el catálogo de DISPARADORES (no de códigos);
+      `customMessage` en `SelectiveErrorFallback` por fidelidad
+- [x] 91. Ensamblador — `onErrorStep` en `AssemblerStep`, satélites fuera del encadenado,
+      `collectErrorSatellites`, y el round-trip deja de perder el dato
+- [x] 92. Contrato de nodo — `declareCaughtErrorCodes`; el parser expone
+      `failOnUnextractableMedia` en su config, `toNodeParams` e `hydrateFromNode`
+- [x] 93. Agregador — `errorBranches`, `setErrorBranch`, resolución del destino, satélite compartido,
+      motivo `RAMA_DE_ERROR_INCOMPLETA` e hidratación en modo edición
+- [x] 94. Interfaz — `NodeErrorBranchConfig.vue` montado desde `WizardPage`, con `SmtpAlertConfig`
+      incrustado
+- [x] 95. Pruebas — frontend 27 archivos / 547 (+1 archivo, +41); backend intacto en 55 / 1265
+- [ ] 96. Pendiente — arrastrado del 88: aplicar la migración 021 y actualizar el `.env` real. **Sin
+      ella `DESTINO_SMTP` llega con `implemented: false` y el editor de plantillas lo deshabilita**
+- [ ] 97. Pendiente — configurador Quasar de `PROCESADOR_IA`. Mientras no exista, la ruta de visión
+      solo se ofrece si la plantilla ya coloca ese nodo, y su prompt se configura fuera del asistente

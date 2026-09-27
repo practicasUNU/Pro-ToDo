@@ -344,7 +344,27 @@ export interface CreateWorkflowPayload {
  */
 export interface SelectiveErrorFallback {
   readonly targetNode: string;
+  /**
+   * Codigos que esta ruta atrapa. VACIO EQUIVALE A NO ATRAPAR NADA.
+   *
+   * No es opcional, y el backend tampoco lo admite ausente: su DTO exige el
+   * arreglo en cuanto se usa la forma de objeto. Un arreglo vacio, en cambio, SI
+   * se guarda sin protestar y produce una ruta que no se dispara jamas, asi que
+   * quien componga una de estas debe poner al menos un codigo real.
+   *
+   * Para un respaldo incondicional NO se usa esta forma: se usa la cadena suelta
+   * (`onErrorStep: "nodo"`), que es la que el motor trata como "atrapa todo". No
+   * existe ningun codigo comodin.
+   */
   readonly catchErrors: readonly string[];
+  /**
+   * Texto que sustituye al mensaje del fallo al registrar la traza.
+   *
+   * Se replica por fidelidad con el backend; el asistente NO lo emite. Sustituye
+   * al mensaje real de la estrategia, y la nota que el operador quiera anadir al
+   * aviso ya tiene su sitio en los `params` del nodo de alerta.
+   */
+  readonly customMessage?: string;
 }
 
 /** Nodo del `pipeline_schema` tal como lo ensambla el asistente. */
@@ -356,9 +376,11 @@ export interface AssembledPipelineNode {
   /**
    * Cadena (respaldo incondicional), ruta selectiva, o `null` para detener.
    *
-   * El asistente solo emite `null`; la union se replica porque el tipo describe
-   * lo que el backend ACEPTA, y un esquema editado a mano en el panel JSON de
-   * plantillas puede traer cualquiera de las tres formas.
+   * Desde PROT-18 el asistente emite las TRES formas, segun lo que declare la
+   * ruta de contingencia del paso: la cadena para "cualquier fallo" —es la unica
+   * que atrapa todo— y la forma selectiva cuando el operador elige un fallo
+   * concreto. `null` sigue siendo el defecto de un nodo sin rama, y es el
+   * comportamiento correcto: el motor detiene la ejecucion donde falla.
    */
   readonly onErrorStep: string | SelectiveErrorFallback | null;
   readonly params: Record<string, unknown>;

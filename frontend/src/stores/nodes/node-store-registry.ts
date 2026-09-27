@@ -136,6 +136,29 @@ export interface NodeConfigStore {
   readonly hydrateFromNode: (node: HydratableNode) => void;
 
   /**
+   * Ajusta los `params` para poder emitir los codigos que su ruta de error atrapa.
+   *
+   * Espejo del `getUnreachableErrorCodes` del backend, que responde la pregunta
+   * inversa: "que codigos he apagado". La regla 10 del validador de topologia
+   * RECHAZA al guardar un nodo cuya ruta declara un codigo que sus `params` le
+   * impiden emitir —una rama que no se dispararia jamas—, asi que declarar la
+   * ruta y configurar el nodo tienen que moverse a la vez.
+   *
+   * Hace falta que sea un metodo del NODO y no una escritura del agregador
+   * porque el interruptor concreto es privado de cada tipo: el parser lo llama
+   * `failOnUnextractableMedia`, y §3.1 prohibe que el anfitrion conozca la forma
+   * interna de ninguna config. Aqui pregunta en vez de escribir.
+   *
+   * Recibe la lista COMPLETA de codigos que la ruta atrapa, vacia incluida: un
+   * arreglo vacio significa "ya no atrapo nada", y el nodo debe poder volver a
+   * su estado anterior. Sin eso, retirar una rama dejaria el interruptor puesto.
+   *
+   * OPCIONAL: la mayoria de los nodos emite siempre el mismo repertorio de
+   * fallos y no tiene nada que ajustar.
+   */
+  readonly declareCaughtErrorCodes?: (codes: readonly string[]) => void;
+
+  /**
    * Avisos que este nodo quiere que el operador confirme ANTES de persistir.
    *
    * Es la contrapartida honesta de `isConfigValid`: aquel responde "se puede

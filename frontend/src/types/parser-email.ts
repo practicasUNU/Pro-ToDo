@@ -67,6 +67,19 @@ export interface ParsedEmailPayload {
 export interface ParserEmailConfigDto {
   minBodyLength: number;
   sourceNamespace: string;
+  /**
+   * Convierte el correo sin texto aprovechable en un fallo ENRUTABLE.
+   *
+   * Con `false` —el defecto del backend— el caso se senala con la bandera
+   * `requires_multimodal_fallback` y el flujo continua. Con `true` el nodo emite
+   * `ERR_PARSER_UNEXTRACTABLE_MEDIA`, que es lo unico que permite desviarlo con
+   * `onErrorStep`.
+   *
+   * No lo toca el formulario del parser: lo enciende la ruta de contingencia al
+   * declararse, porque activarlo sin tener a donde desviarse solo convertiria en
+   * PAUSADO un flujo que hoy atraviesa tranquilamente un correo de solo imagen.
+   */
+  failOnUnextractableMedia: boolean;
 }
 
 /**

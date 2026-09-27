@@ -13,6 +13,8 @@ import type {
   ParserEmailConfigDto,
 } from '@/types/parser-email';
 
+import { ERR_PARSER_UNEXTRACTABLE_MEDIA } from '@/types/nodes/error-branch.types';
+
 /** Namespace del que el parser lee el correo crudo, el mismo que asume el backend. */
 export const DEFAULT_PARSER_SOURCE_NAMESPACE = 'raw_email';
 
@@ -81,6 +83,9 @@ const asNumber = (value: unknown, fallback: number): number =>
 const buildInitialConfig = (): ParserEmailConfigDto => ({
   minBodyLength: DEFAULT_MIN_BODY_LENGTH,
   sourceNamespace: DEFAULT_PARSER_SOURCE_NAMESPACE,
+  // El mismo defecto que el backend, y por el mismo motivo: bifurcar es una
+  // decision del disenador del flujo, no del despliegue.
+  failOnUnextractableMedia: false,
 });
 
 /** Correo de prueba inicial: vacio, para no sugerir un ejemplo que nadie pidio. */
@@ -162,6 +167,29 @@ const parserEmailSetup = () => {
     invalidateSandboxResult();
   };
 
+  /**
+   * Ajusta el nodo a los codigos que su ruta de contingencia declara atrapar.
+   *
+   * Implementa el metodo opcional del contrato `NodeConfigStore`. El agregador
+   * no puede encender `failOnUnextractableMedia` por su cuenta —§3.1 le prohibe
+   * conocer la forma interna de esta config—, y sin encenderlo la regla 10 del
+   * validador de topologia rechaza el esquema al guardar: la ruta atraparia un
+   * codigo que el nodo, con estos `params`, no puede emitir.
+   *
+   * Es IDEMPOTENTE y reversible: una lista sin el codigo lo apaga. Retirar la
+   * rama tiene que devolver el nodo a su comportamiento anterior, o el flujo se
+   * quedaria fallando ante un correo de solo imagen sin nadie que lo recogiera.
+   *
+   * El correo de prueba NO se invalida: esto no cambia como se sanea el correo,
+   * solo si el nodo declara el caso como fallo.
+   */
+  const declareCaughtErrorCodes = (codes: readonly string[]): void => {
+    config.value = {
+      ...config.value,
+      failOnUnextractableMedia: codes.includes(ERR_PARSER_UNEXTRACTABLE_MEDIA),
+    };
+  };
+
   /** Igual, para el correo de ejemplo: cambiar la entrada caduca la salida. */
   const updateSandboxInput = (partial: Partial<ParserSandboxInput>): void => {
     sandboxInput.value = { ...sandboxInput.value, ...partial };
@@ -223,6 +251,11 @@ const parserEmailSetup = () => {
     ...(config.value.sourceNamespace !== DEFAULT_PARSER_SOURCE_NAMESPACE
       ? { sourceNamespace: config.value.sourceNamespace }
       : {}),
+    // Se publica solo cuando esta ENCENDIDO, con el mismo criterio que
+    // `sourceNamespace`: el defecto del backend es `false`, asi que emitirlo
+    // apagado solo anadiria ruido a cada esquema guardado. Encendido SI tiene
+    // que viajar, porque es lo que hace legal la ruta de error que lo acompana.
+    ...(config.value.failOnUnextractableMedia ? { failOnUnextractableMedia: true } : {}),
   });
 
   /**
@@ -238,6 +271,9 @@ const parserEmailSetup = () => {
     config.value = {
       minBodyLength: asNumber(params.minBodyLength, DEFAULT_MIN_BODY_LENGTH),
       sourceNamespace: asText(params.sourceNamespace) || DEFAULT_PARSER_SOURCE_NAMESPACE,
+      // `=== true` y no un cast: la columna es `jsonb` y pudo escribirse por SQL
+      // directo, donde la cadena "false" es un valor veraz.
+      failOnUnextractableMedia: params.failOnUnextractableMedia === true,
     };
     invalidateSandboxResult();
   };
@@ -258,6 +294,7 @@ const parserEmailSetup = () => {
     canRunSandbox,
     sandboxPayload,
     updateConfig,
+    declareCaughtErrorCodes,
     updateSandboxInput,
     runSandboxTest,
     toNodeParams,

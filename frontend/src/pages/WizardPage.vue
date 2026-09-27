@@ -6,10 +6,13 @@ import { useRoute, useRouter } from 'vue-router';
 import { useFlujoDraftStore } from '@stores/flujo-draft.store';
 
 import { nodeConfigRegistry } from '@components/nodes/node-config-registry';
+import NodeErrorBranchConfig from '@components/nodes/common/NodeErrorBranchConfig.vue';
 import PipelineSelector from '@components/wizard/PipelineSelector.vue';
 import SaveWarningsDialog from '@components/wizard/SaveWarningsDialog.vue';
 
 import { extractApiErrorMessage } from '@/utils/api-error';
+
+import { NodeType } from '@/types/pipeline';
 
 import type { StepWarning } from '@stores/flujo-draft.store';
 import type { WizardStep } from '@/types/pipeline';
@@ -64,9 +67,7 @@ const isSelectingTemplate = computed<boolean>(
 );
 
 /** Rotulo de la accion final, distinto en cada modo. */
-const submitLabel = computed<string>(() =>
-  isEditMode.value ? 'Guardar cambios' : 'Crear Flujo',
-);
+const submitLabel = computed<string>(() => (isEditMode.value ? 'Guardar cambios' : 'Crear Flujo'));
 
 /**
  * Configurador del paso indicado, o `null` si su tipo aun no tiene uno.
@@ -119,9 +120,7 @@ const onGoToReview = (): void => {
  * es un problema del nodo y ya lo dice su propio formulario.
  */
 const unsupportedReasonFor = (step: WizardStep): string | null => {
-  const blocked = draftStore.invalidSteps.find(
-    (item) => item.step.nodeId === step.nodeId,
-  );
+  const blocked = draftStore.invalidSteps.find((item) => item.step.nodeId === step.nodeId);
 
   return blocked !== undefined && blocked.reason !== 'CONFIGURACION_INCOMPLETA'
     ? blocked.message
@@ -130,9 +129,7 @@ const unsupportedReasonFor = (step: WizardStep): string | null => {
 
 /** Explica por que el paso activo no deja avanzar. */
 const notifyActiveStepBlocked = (): void => {
-  const blocked = draftStore.invalidSteps.find(
-    (item) => item.index === draftStore.activeStep,
-  );
+  const blocked = draftStore.invalidSteps.find((item) => item.index === draftStore.activeStep);
 
   $q.notify({
     type: 'warning',
@@ -337,6 +334,18 @@ onMounted(async () => {
               este paso.
             </p>
           </div>
+
+          <!-- Ruta de contingencia del paso. Se monta AQUI, en el anfitrion, y
+               no dentro de cada configurador: el registro pasa solo `node-id`, y
+               meterlo en los seis obligaria a editarlos todos y a que cada tipo
+               nuevo se acordase. Una sola insercion lo da para todos.
+
+               No se ofrece sobre un nodo de alerta: se desviaria a si mismo. -->
+          <NodeErrorBranchConfig
+            v-if="resolveStepComponent(step) && step.nodeType !== NodeType.DESTINO_SMTP"
+            :node-id="step.nodeId"
+            :node-type="step.nodeType"
+          />
 
           <q-stepper-navigation class="row items-center q-gutter-sm">
             <q-btn
