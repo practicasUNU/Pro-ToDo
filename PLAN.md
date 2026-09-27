@@ -3182,9 +3182,159 @@ consecuencia.
       y los tres `Record<NodeType, …>`). Solo el contrato de tipos; el configurador queda fuera
 - [ ] 78. Pendiente — aplicar la 021 en el contenedor (la ejecuta el usuario) y actualizar el `.env`
       real con los dos bloques SMTP y las cuatro `AI_*`, reiniciando Nest
-- [ ] 79. Pendiente — configurador Quasar del nodo `DESTINO_SMTP`. Fuera de alcance por decisión
-      explícita; `PROCESADOR_IA` tampoco lo tiene, así que `node-config-registry.ts` sigue
-      cubriendo 5 de 9 tipos
+- [x] 79. Configurador Quasar del nodo `DESTINO_SMTP` — **cerrado en PROT-17** (ver la tanda
+      siguiente). `PROCESADOR_IA` sigue sin el suyo: el registro cubre ahora 6 de 9 tipos
 - [ ] 80. Pendiente — cliente `AnthropicLlmProvider`. Mientras no exista,
       `AI_DEFAULT_PROVIDER=anthropic` degrada al simulador (ver el riesgo aceptado). Sustituye y
       concreta al pendiente 66
+
+---
+
+## Tanda actual — PROT-17 · Configurador Quasar de `DESTINO_SMTP` y carta institucional de alerta
+
+PROT-16 dejó el nodo operativo en backend pero **inconfigurable desde la interfaz**: la única forma
+de declarar destinatarios era escribir el `pipeline_schema` a mano, que es justo lo que RNF-04
+prohíbe. Y el aviso salía como un párrafo de texto suelto, mientras el correo de OTP ya tenía carta
+institucional desde hacía meses.
+
+Esta tanda cierra las dos cosas bajo un mismo criterio: **el operador configura a quién avisar, con
+qué asunto y qué nota añadir; no escribe ni una etiqueta HTML.** La carta la compone el sistema.
+
+### Contratos nuevos
+
+```ts
+// @common/utils/alert-email.template.ts
+export interface AlertEmailParams {
+  readonly flowId: string;          // context.getWorkflowId()
+  readonly timestamp: string;
+  readonly failedNodeId?: string;   // todo lo del fallo es OPCIONAL
+  readonly failedNodeType?: string;
+  readonly errorCode?: string;
+  readonly errorLevel?: string;
+  readonly errorMessage?: string;
+  readonly customNote?: string;
+  readonly partialData?: Record<string, unknown>;
+  readonly unresolvedSubjectVariable?: string;
+}
+
+export const buildAlertEmailHtml: (params: AlertEmailParams) => string;
+export const buildAlertEmailText: (params: AlertEmailParams) => string;
+
+// @common/utils/escape-html.util.ts
+export const escapeHtml: (value: string) => string;
+
+// @modules/nodes/strategies/smtp-alert.strategy.ts
+export const DEFAULT_ALERT_SUBJECT =
+  '[ALERTA PROTO-DO] Notificacion de incidencia en flujo {{trigger.flow_name}}';
+export const SAFE_FALLBACK_SUBJECT =
+  '[ALERTA PROTO-DO] Notificacion de incidencia en el flujo';
+```
+
+`SmtpAlertConfigDto` pierde `bodyTemplate` y gana `customMessage` (`MAX_ALERT_NOTE_LENGTH = 2000`).
+`NodeMailMessage` gana `html?: string`.
+
+### Diagrama de inyección de dependencias
+
+```
+CommonModule
+  └── SmtpNodeMailerService  (pool SMTP_NODE_*, ahora con parte HTML)
+            ▲
+NodesModule │
+  └── SmtpAlertStrategy ──> buildAlertEmailHtml / buildAlertEmailText  (funciones puras)
+                                        └──> escapeHtml                (función pura)
+
+Frontend (sin capa de servicios, como TRIGGER_CRON)
+  SmtpAlertConfig.vue ──> useSmtpAlertStore(nodeId) ──> isEmailAddress
+  node-config-registry ─┐
+  node-store-registry  ─┴─> los dos, o el asistente monta el formulario y nunca habilita "Siguiente"
+```
+
+### Por qué el aviso se envía aunque el asunto no resuelva
+
+`getInterpolatedValue` lanza ante una ruta ausente, y en cualquier otro nodo eso debe detener el
+flujo: publicar una noticia con el titular en blanco es peor que no publicarla. **Aquí la aritmética
+se invierte.** Este nodo es la última vía por la que una persona se entera de la incidencia, así que
+negarse a enviar por una errata en el asunto deja el fallo original sin testigo además de sin
+arreglar.
+
+No es un caso rebuscado: el defecto cita `{{trigger.flow_name}}` y **`trigger` no lo siembra nadie en
+los dos caminos reales de ejecución** — `WorkflowsService` no pasa `initialPayload` en ninguna de sus
+dos llamadas, y hay un comentario en el propio motor explicando por qué. Con interpolación estricta,
+el nodo recién configurado no enviaría ni un correo.
+
+El diagnóstico no se pierde, cambia de sitio: la variable culpable viaja al pie de la carta y al log.
+En vez de un flujo `PAUSADO` que nadie mira, la misconfiguración llega impresa en el correo que la
+persona ya está leyendo.
+
+### Por qué desaparece `ERR_SMTP_INTERPOLATION`
+
+Era el código de `bodyTemplate`, que ya no existe, y el asunto ya no puede fallar. Mantenerlo
+exportado dejaría un código que `catchErrors` puede declarar y que no se dispararía jamás — el fallo
+mudo que la regla 10 del validador de topología existe precisamente para impedir.
+
+### Por qué NO se revierte la regla «solo texto plano», se acota
+
+El TSDoc de `SmtpNodeMailerService` y el del DTO prohibían el HTML citando la inyección de marcado, y
+ese razonamiento **sigue siendo correcto**. Lo que protegía era que el OPERADOR aportase marcado;
+nada de lo que él escribe llega al buzón como HTML, ni siquiera su nota. Lo que se añade es HTML de
+plantilla fija cuyos huecos pasan todos por `escapeHtml`.
+
+El peligro nunca fue el HTML: era el HTML de procedencia ajena. Y buena parte de los datos de esta
+carta la tienen — `error_message` cita el asunto del correo entrante y `partial_data` lleva los
+nombres de los adjuntos, que los escribe cualquiera que sepa la dirección del buzón del flujo. Por
+eso el escapado es obligatorio sobre **todo** dato dinámico, sin excepción.
+
+### Por qué la vista previa no imita la carta real
+
+Replicar en Vue los colores y textos del HTML del backend crearía una segunda plantilla, en otro
+lenguaje, que diverge en cuanto alguien toque el generador — y entonces la vista previa mentiría, que
+es peor que no tenerla. La maqueta es **estructural**: cabecera con el degradado, badge de ejemplo y
+recuadros punteados rotulados con lo que el motor rellenará. Lo único que refleja de verdad es
+**dónde cae la nota del operador**, que es lo que él necesita saber.
+
+### Por qué `customMessage` no se interpola
+
+Se describió como «una nota en texto plano». Tratarlo como plantilla le añadiría un modo de fallo a
+un campo cuyo propósito es que siempre se lea. Un `{{...}}` escrito ahí sale literal, y el `hint` del
+campo lo dice.
+
+### Por qué `hydrateFromNode` NO repone el asunto por defecto
+
+El defecto es para nodos NUEVOS. Un nodo guardado sin asunto lo está porque el operador lo borró a
+propósito; reponerlo al reabrirlo cambiaría su configuración con solo mirarla, y al cerrar el paso se
+persistiría sin que nadie lo pidiera.
+
+### Por qué el frontend NO tiene `smtp-alert.service.ts`
+
+No hay endpoint que consultar. Validar un buzón de destino exigiría enviar un correo real a una
+persona real cada vez que alguien reabre el paso del asistente, así que `isConfigValid` se resuelve
+entero en el cliente. `TRIGGER_CRON` es el precedente explícito, y un servicio que no conoce ninguna
+ruta del backend contradice su propia definición (`frontend-architecture.md` §2.1).
+
+### Excepción Poka-Yoke registrada
+
+`frontend-quasar.md` §4 prohíbe el texto libre en `QSelect`. Los dos selectores de direcciones lo
+usan porque **no existe ni puede existir** una lista cerrada de correos. Es el segundo caso del
+proyecto tras la zona horaria del cron, y de él se copia la pieza crítica: el manejador
+`@input-value`, sin el cual un correo tecleado y no confirmado con Enter se pierde al guardar
+mientras la pantalla lo sigue mostrando.
+
+### Estado de las tareas
+
+- [x] 81. Backend — `email-brand.constants.ts` con la paleta compartida; `email.service.ts` deja de
+      declararla y su plantilla no cambia ni un carácter
+- [x] 82. Backend — `escapeHtml` (no existía nada equivalente) y `buildAlertEmailHtml` /
+      `buildAlertEmailText`, las dos versiones en el mismo módulo para que no diverjan
+- [x] 83. Backend — `bodyTemplate` → `customMessage`; `getIncompleteParams` pasa a exigir solo `to`;
+      asunto con defecto y respaldo; `ERR_SMTP_INTERPOLATION` retirado
+- [x] 84. Backend — `NodeMailMessage.html` y multipart texto + HTML; TSDoc de la regla reescrito
+- [x] 85. Frontend — `types/nodes/smtp-alert.types.ts`, `utils/email-address.ts`,
+      `stores/nodes/smtp-alert.store.ts` y `components/nodes/SmtpAlertConfig.vue`
+- [x] 86. Frontend — alta en los DOS registros (`node-config-registry` y `node-store-registry`)
+- [x] 87. Pruebas — backend 55 suites / 1265 (+2 suites, +42); frontend 26 archivos / 506 (+3
+      archivos, +45)
+- [ ] 88. Pendiente — arrastrado del 78: aplicar la migración 021 en el contenedor y actualizar el
+      `.env` real con los dos bloques SMTP y las cuatro `AI_*`, reiniciando Nest. **Sin esto el nodo
+      no aparece en `GET /api/nodos` y el login OTP se queda sin transporte**
+- [ ] 89. Pendiente — configurador Quasar de `PROCESADOR_IA`, el último tipo con estrategia pero sin
+      formulario. `node-config-registry.ts` cubre ya 6 de 9

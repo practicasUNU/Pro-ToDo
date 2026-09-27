@@ -6,13 +6,21 @@ import {
   MissingContextVariableException,
   extractNamespaceRoots,
 } from '@core/fsm/context/state-payload.context';
-import { NodeType } from '@core/fsm/types/pipeline-schema.types';
+import {
+  ERROR_CONTEXT_NAMESPACE,
+  NodeType,
+} from '@core/fsm/types/pipeline-schema.types';
 import { SmtpNodeMailerService } from '@common/services/smtp-node-mailer.service';
+import {
+  buildAlertEmailHtml,
+  buildAlertEmailText,
+} from '@common/utils/alert-email.template';
 import {
   SmtpAlertConfigDto,
   resolveSmtpAlertConfig,
 } from '@modules/nodes/dto/smtp-alert-config.dto';
 
+import type { AlertEmailParams } from '@common/utils/alert-email.template';
 import type { StatePayloadContext } from '@core/fsm/context/state-payload.context';
 import type {
   INodeStrategy,
@@ -25,8 +33,28 @@ import type { ValidatorOptions } from 'class-validator';
 
 /** Codigos de fallo propios de este nodo. */
 export const ERR_SMTP_CONFIG = 'ERR_SMTP_CONFIG';
-export const ERR_SMTP_INTERPOLATION = 'ERR_SMTP_INTERPOLATION';
 export const ERR_SMTP_SEND_FAILURE = 'ERR_SMTP_SEND_FAILURE';
+
+/**
+ * Asunto que se aplica cuando el nodo no declara ninguno.
+ *
+ * Lleva marcador a proposito: cuando el flujo lo puede resolver, el asunto dice
+ * de que flujo habla, que es lo unico que se lee en la lista del buzon antes de
+ * abrir nada. Cuando no lo puede resolver, entra `SAFE_FALLBACK_SUBJECT` y el
+ * aviso sale igual.
+ */
+export const DEFAULT_ALERT_SUBJECT =
+  '[ALERTA PROTO-DO] Notificacion de incidencia en flujo {{trigger.flow_name}}';
+
+/**
+ * Respaldo cuando el asunto efectivo no resuelve contra el contexto.
+ *
+ * Es un asunto COMPLETO y no el original con huecos: un
+ * "Incidencia en flujo  - Nodo " con dos agujeros parece un correo roto del
+ * sistema, y quien lo recibe desconfia del aviso entero.
+ */
+export const SAFE_FALLBACK_SUBJECT =
+  '[ALERTA PROTO-DO] Notificacion de incidencia en el flujo';
 
 /** Opciones de validacion canonicas del repositorio. */
 const VALIDATION_OPTIONS: ValidatorOptions = {
@@ -39,16 +67,44 @@ type SmtpConfigResolution =
   | { readonly config: ResolvedSmtpAlertConfig }
   | { readonly failure: NodeErrorDetail };
 
-/** Union discriminada del mensaje ya interpolado contra el contexto. */
-type MessageResolution =
-  | { readonly subject: string; readonly text: string }
-  | { readonly failure: NodeErrorDetail };
+/** Asunto ya resuelto, con la variable que fallo si hubo respaldo. */
+interface ResolvedSubject {
+  readonly subject: string;
+  readonly unresolvedVariable?: string;
+}
 
 /** Traza completa del error, si la hay, lista para fusionar en el detalle. */
 const stackTraceOf = (error: unknown): { stackTrace?: string } =>
   error instanceof Error && error.stack !== undefined
     ? { stackTrace: error.stack }
     : {};
+
+/** Lee una clave de texto del namespace del fallo, si existe y es cadena. */
+const readText = (
+  source: Record<string, unknown> | undefined,
+  key: string,
+): string | undefined => {
+  const value = source?.[key];
+
+  return typeof value === 'string' && value.trim().length > 0
+    ? value
+    : undefined;
+};
+
+/** Lee `partial_data`, que el motor siembra siempre pero puede venir vacio. */
+const readPartialData = (
+  source: Record<string, unknown> | undefined,
+): Record<string, unknown> | undefined => {
+  const value = source?.partial_data;
+
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    return undefined;
+  }
+
+  const payload = value as Record<string, unknown>;
+
+  return Object.keys(payload).length > 0 ? payload : undefined;
+};
 
 /**
  * Nodo `DESTINO_SMTP`: avisa por correo de lo que esta pasando en el flujo.
@@ -58,21 +114,26 @@ const stackTraceOf = (error: unknown): { stackTrace?: string } =>
  * otro nodo automatico: no habia forma de que una incidencia alcanzase a una
  * persona sin que alguien abriese la trazabilidad por su cuenta. Su pareja
  * natural es el namespace `error_context`, que el motor siembra justo antes de
- * saltar y del que este nodo interpola el que, el donde y el por que.
+ * saltar y del que este nodo saca el que, el donde y el por que.
  *
  * NO esta limitado a la rama de error: es un nodo mas del grafo y puede
  * colocarse en el camino feliz para confirmar una publicacion. Lo que no hace es
  * decidir nada — es terminal por vocacion, y de ahi su categoria `DESTINO`.
  *
- * NODO PURO: no escribe en el contexto ni conoce el transporte. Interpola,
- * delega en `SmtpNodeMailerService` y devuelve `data`; es `FsmEngineService`
- * quien la deposita en el `outputNamespace`.
+ * EL OPERADOR NO REDACTA EL AVISO. Configura destinatarios, asunto y una nota;
+ * la carta la compone `buildAlertEmailHtml` con la identidad institucional y con
+ * los datos del fallo leidos del contexto. El cuerpo libre que existia antes
+ * (`bodyTemplate`) obligaba a reproducir en cada nodo lo que el sistema ya sabe
+ * decir, y producia avisos que omitian justo el dato que hacia falta.
+ *
+ * NODO PURO: no escribe en el contexto ni conoce el transporte. Resuelve,
+ * compone, delega en `SmtpNodeMailerService` y devuelve `data`; es
+ * `FsmEngineService` quien la deposita en el `outputNamespace`.
  *
  * TODOS los fallos son GRAVE. Es el unico nivel que entra en la politica de
- * reintentos del motor, y los tres desenlaces malos de este nodo lo justifican:
- * una configuracion incompleta y un marcador que no resuelve los corrige el
- * operador con el flujo PAUSADO (CU-09), y un SMTP que no responde es el caso
- * de manual para un reintento con backoff.
+ * reintentos del motor, y los dos desenlaces malos que quedan lo justifican: una
+ * configuracion incompleta la corrige el operador con el flujo PAUSADO (CU-09),
+ * y un SMTP que no responde es el caso de manual para un reintento con backoff.
  */
 @Injectable()
 export class SmtpAlertStrategy implements INodeStrategy {
@@ -118,19 +179,20 @@ export class SmtpAlertStrategy implements INodeStrategy {
     }
 
     const { config } = resolution;
-    const message = this.buildMessage(context, config);
-
-    if ('failure' in message) {
-      return { success: false, error: message.failure };
-    }
+    const { subject, unresolvedVariable } = this.resolveSubject(
+      context,
+      config,
+    );
+    const letter = this.buildLetterParams(context, config, unresolvedVariable);
 
     try {
       const receipt = await this.mailer.sendNodeAlert({
         to: config.to,
         cc: config.cc,
         ...(config.replyTo !== null ? { replyTo: config.replyTo } : {}),
-        subject: message.subject,
-        text: message.text,
+        subject,
+        text: buildAlertEmailText(letter),
+        html: buildAlertEmailHtml(letter),
       });
 
       this.logger.log(
@@ -141,7 +203,7 @@ export class SmtpAlertStrategy implements INodeStrategy {
         success: true,
         data: {
           sent_to: [...config.to],
-          subject: message.subject,
+          subject,
           message_id: receipt.messageId,
           accepted_count: receipt.accepted.length,
           rejected_count: receipt.rejected.length,
@@ -165,59 +227,47 @@ export class SmtpAlertStrategy implements INodeStrategy {
   }
 
   /**
-   * Namespaces que este nodo necesita, derivados de sus propias plantillas.
+   * Namespaces que este nodo necesita, derivados de su propio asunto.
    *
    * No hay lista fija porque no la puede haber: lo que el nodo lee depende por
-   * completo de los marcadores que el operador haya escrito en el asunto y el
-   * cuerpo. Un aviso que solo cite `{{error_context.error_message}}` depende de
-   * `error_context`; uno que resuma la publicacion, de `llm_response`. Declarar
-   * un conjunto fijo rechazaria como invalido cualquiera de los dos.
+   * completo de los marcadores que el operador haya escrito. Declarar un
+   * conjunto fijo rechazaria como invalido un asunto legitimamente distinto.
    *
-   * PURO Y SINCRONO, como exige el contrato: solo mira `params`. `to`, `cc` y
-   * `replyTo` no se inspeccionan porque son direcciones literales, no plantillas.
+   * Solo mira `params.subject`. `customMessage` no se interpola, y `to`, `cc` y
+   * `replyTo` son direcciones literales: que lo sigan siendo es lo que impide
+   * que quien escribe al buzon del flujo elija a quien avisa el sistema.
+   *
+   * Un nodo SIN `subject` declarado no exige nada, aunque acabe usando
+   * `DEFAULT_ALERT_SUBJECT` y este cite `trigger`. Es correcto por dos motivos
+   * que se refuerzan: el motor ya excluye el namespace reservado del disparador
+   * de esta comprobacion, y el asunto por defecto tiene respaldo, asi que no
+   * poder resolverlo nunca impide la ejecucion.
+   *
+   * PURO Y SINCRONO, como exige el contrato.
    */
   public getRequiredNamespaces(
     params: Record<string, unknown>,
   ): readonly string[] {
-    const templates = [params.subject, params.bodyTemplate].filter(
-      (value): value is string => typeof value === 'string',
-    );
-
-    // `Set` para no declarar dos veces el mismo namespace cuando el asunto y el
-    // cuerpo citan ambos `error_context`, que es el caso corriente.
-    return [
-      ...new Set(
-        templates.flatMap((template) => extractNamespaceRoots(template)),
-      ),
-    ];
+    return typeof params.subject === 'string'
+      ? [...new Set(extractNamespaceRoots(params.subject))]
+      : [];
   }
 
   /**
-   * Sin destinatario, asunto o cuerpo no hay aviso que enviar.
+   * Sin destinatario no hay aviso que enviar.
    *
-   * Los tres son decisiones operativas concretas del flujo y no admiten defecto:
-   * a quien avisar no lo puede adivinar el sistema. Lo consulta
-   * `assertActivatable`, de modo que el flujo se GUARDA a medias —es un
-   * borrador, y una plantilla de flujo lo esta siempre— pero no se ACTIVA asi.
+   * Es el UNICO obligatorio. A quien avisar no lo puede adivinar el sistema; el
+   * asunto si —`DEFAULT_ALERT_SUBJECT`— y el cuerpo lo compone entero. Exigir el
+   * asunto bloquearia el asistente por un campo que el backend sabe rellenar,
+   * que es un Poka-Yoke al reves.
+   *
+   * Lo consulta `assertActivatable`, de modo que el flujo se GUARDA a medias
+   * —es un borrador, y una plantilla de flujo lo esta siempre— pero no se ACTIVA.
    */
   public getIncompleteParams(
     params: Record<string, unknown>,
   ): readonly string[] {
-    const missing: string[] = [];
-
-    if (!Array.isArray(params.to) || params.to.length === 0) {
-      missing.push('to');
-    }
-
-    for (const field of ['subject', 'bodyTemplate'] as const) {
-      const value = params[field];
-
-      if (typeof value !== 'string' || value.trim().length === 0) {
-        missing.push(field);
-      }
-    }
-
-    return missing;
+    return Array.isArray(params.to) && params.to.length > 0 ? [] : ['to'];
   }
 
   /**
@@ -245,8 +295,6 @@ export class SmtpAlertStrategy implements INodeStrategy {
       };
     }
 
-    const config = resolveSmtpAlertConfig(dto);
-
     // Guarda de COMPLETITUD, distinta de la del DTO. El DTO valida la forma de
     // lo que haya, y admite la ausencia para que una plantilla de flujo pueda
     // contener este nodo; esta comprobacion responde la otra pregunta, la que
@@ -266,45 +314,109 @@ export class SmtpAlertStrategy implements INodeStrategy {
       };
     }
 
-    return { config };
+    return { config: resolveSmtpAlertConfig(dto) };
   }
 
   /**
-   * Interpola asunto y cuerpo contra el contexto acumulado.
+   * Resuelve el asunto efectivo contra el contexto, SIN poder fallar.
    *
-   * `getInterpolatedValue` LANZA si la ruta no resuelve, de modo que la
-   * excepcion se captura aqui y se traduce a GRAVE: dejarla salir la
-   * normalizaria el motor a URGENTE, que `canRetry` nunca reintenta y que el
-   * operador no puede corregir desde el flujo PAUSADO.
+   * Dos escalones. El primero elige que se interpola: lo que el operador
+   * declaro, o `DEFAULT_ALERT_SUBJECT` si lo dejo vacio —borrar el campo es una
+   * accion legitima, no un error—.
    *
-   * Los dos campos se resuelven juntos y el primer fallo corta: enviar un aviso
-   * con el asunto bueno y el cuerpo a medias seria peor que no enviarlo, porque
-   * quien lo reciba creeria estar leyendo la incidencia completa.
+   * El segundo es el que define este nodo. `getInterpolatedValue` LANZA cuando
+   * una ruta no resuelve, y en cualquier otro nodo eso debe detener el flujo:
+   * publicar una noticia con el titular en blanco es peor que no publicarla.
+   * Aqui la aritmetica se invierte. Este nodo es la ULTIMA via por la que una
+   * persona se entera de la incidencia, asi que negarse a enviar por una errata
+   * en el asunto deja el fallo original sin testigo ademas de sin arreglar. Se
+   * envia con el asunto de respaldo.
+   *
+   * El diagnostico no se pierde, cambia de sitio: la variable culpable viaja al
+   * pie de la carta y al log. En vez de un flujo PAUSADO que nadie mira, la
+   * misconfiguracion llega impresa en el correo que la persona ya esta leyendo.
+   *
+   * Es tambien el motivo de que `ERR_SMTP_INTERPOLATION` ya no exista: era el
+   * codigo de `bodyTemplate`, y mantenerlo exportado sin nada que lo emitiera
+   * dejaria un codigo que `catchErrors` puede declarar y que no se disparara
+   * jamas — el fallo mudo que la regla 10 del validador existe para impedir.
    */
-  private buildMessage(
+  private resolveSubject(
     context: StatePayloadContext,
     config: ResolvedSmtpAlertConfig,
-  ): MessageResolution {
+  ): ResolvedSubject {
+    const declared = config.subject?.trim() ?? '';
+    const effective = declared.length > 0 ? declared : DEFAULT_ALERT_SUBJECT;
+
     try {
-      return {
-        subject: context.getInterpolatedValue(config.subject ?? ''),
-        text: context.getInterpolatedValue(config.bodyTemplate ?? ''),
-      };
+      const subject = context.getInterpolatedValue(effective);
+
+      // Una plantilla que interpola a nada deja el buzon con una linea en
+      // blanco donde deberia estar el aviso. No puede pasar por resolver.
+      return subject.trim().length > 0
+        ? { subject }
+        : { subject: SAFE_FALLBACK_SUBJECT };
     } catch (error) {
-      if (error instanceof MissingContextVariableException) {
-        return {
-          failure: {
-            level: 'GRAVE',
-            code: ERR_SMTP_INTERPOLATION,
-            message: `No se pudo resolver el aviso contra el contexto: ${error.message}`,
-            missingFields: [error.variable],
-            ...stackTraceOf(error),
-          },
-        };
+      if (!(error instanceof MissingContextVariableException)) {
+        // Imprevisto de verdad: que lo normalice el motor a URGENTE.
+        throw error;
       }
 
-      // Imprevisto de verdad: que lo normalice el motor a URGENTE.
-      throw error;
+      this.logger.warn(
+        `El asunto del aviso cita "${error.variable}", que no existe en el contexto. Se envia con el asunto de respaldo.`,
+      );
+
+      return {
+        subject: SAFE_FALLBACK_SUBJECT,
+        unresolvedVariable: error.variable,
+      };
     }
+  }
+
+  /**
+   * Reune lo que la carta necesita del contexto.
+   *
+   * Todo lo del fallo es OPCIONAL y se omite si no esta. `error_context` solo
+   * existe cuando el motor desvio por `onErrorStep`; un `DESTINO_SMTP` en el
+   * camino feliz llega aqui sin nada de eso, y la carta debe salir igual sin
+   * escribir `undefined` en el correo que lee una persona.
+   *
+   * El identificador del flujo sale de `getWorkflowId()` y no de un namespace:
+   * ni `trigger` ni `error_context` llevan identidad del flujo, y el getter es
+   * el unico sitio donde esta.
+   */
+  private buildLetterParams(
+    context: StatePayloadContext,
+    config: ResolvedSmtpAlertConfig,
+    unresolvedSubjectVariable?: string,
+  ): AlertEmailParams {
+    const errorContext = context.getNamespace(ERROR_CONTEXT_NAMESPACE);
+    const partialData = readPartialData(errorContext);
+    const note = config.customMessage?.trim() ?? '';
+
+    return {
+      flowId: context.getWorkflowId(),
+      timestamp: new Date().toISOString(),
+      ...(readText(errorContext, 'failed_node_id') !== undefined
+        ? { failedNodeId: readText(errorContext, 'failed_node_id') }
+        : {}),
+      ...(readText(errorContext, 'failed_node_type') !== undefined
+        ? { failedNodeType: readText(errorContext, 'failed_node_type') }
+        : {}),
+      ...(readText(errorContext, 'error_code') !== undefined
+        ? { errorCode: readText(errorContext, 'error_code') }
+        : {}),
+      ...(readText(errorContext, 'error_level') !== undefined
+        ? { errorLevel: readText(errorContext, 'error_level') }
+        : {}),
+      ...(readText(errorContext, 'error_message') !== undefined
+        ? { errorMessage: readText(errorContext, 'error_message') }
+        : {}),
+      ...(note.length > 0 ? { customNote: note } : {}),
+      ...(partialData !== undefined ? { partialData } : {}),
+      ...(unresolvedSubjectVariable !== undefined
+        ? { unresolvedSubjectVariable }
+        : {}),
+    };
   }
 }

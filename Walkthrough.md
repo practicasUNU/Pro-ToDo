@@ -4,6 +4,150 @@ Registro técnico del "por qué" de cada decisión de implementación. Los estad
 
 ---
 
+## 2026-09-26 · Configurador de `DESTINO_SMTP` y carta institucional de alerta — rama `feat/smtp-alert-ui`
+
+### Un nodo que funcionaba y que nadie podía configurar
+
+PROT-16 dejó el nodo listo: estrategia registrada, transporte propio, migración escrita. Y con eso
+lo dejó inservible en la práctica, porque la única forma de decirle a quién avisar era escribir el
+`pipeline_schema` a mano — que es exactamente lo que RNF-04 prohíbe y lo que el asistente existe para
+evitar. El aviso, además, salía como un párrafo de texto suelto, mientras el correo de acceso llevaba
+meses con su carta institucional.
+
+Las dos cosas se cierran bajo un mismo criterio, y conviene enunciarlo porque es el que decide casi
+todo lo demás: **el operador dice a quién avisar, con qué asunto y qué nota añadir. No escribe ni una
+etiqueta.** La carta la compone el sistema, con los datos que el motor ya dejó en `error_context`.
+
+De ahí sale la primera baja: `bodyTemplate`, que era obligatorio. Pedirle al operador que redactase
+el aviso entero en un `textarea` era pedirle que reprodujese en cada nodo lo que el sistema ya sabe
+decir, y el resultado previsible eran avisos que omitían justo el dato que hacía falta.
+
+### El asunto por defecto que no podía funcionar
+
+El encargo proponía pre-poblar el campo con
+`[ALERTA PROTO-DO] ... flujo {{trigger.flow_name}} - Nodo {{error_context.failed_node_id}}`. Es un
+asunto razonable y no habría enviado ni un correo.
+
+`getInterpolatedValue` **lanza** ante una ruta ausente —decisión deliberada del contexto, documentada
+en su propio TSDoc: interpolar en silencio publicaría una noticia con el titular en blanco—, y la
+estrategia traducía esa excepción a un fallo antes de abrir conexión. Y resulta que `trigger` **no lo
+siembra nadie** en los dos caminos reales de ejecución: `WorkflowsService` no pasa `initialPayload`
+en ninguna de sus dos llamadas, con un comentario en el motor explicando por qué. `error_context`,
+por su parte, solo existe si el nodo se alcanzó por `onErrorStep`, y este nodo puede colocarse
+perfectamente en el camino feliz para confirmar una publicación.
+
+Así que el nodo recién configurado, con el defecto puesto, habría fallado siempre.
+
+La salida no fue quitar el marcador, sino **invertir la aritmética del fallo en este nodo concreto**.
+En cualquier otro, no poder resolver una plantilla debe detener el flujo. Aquí no: este es la última
+vía por la que una persona se entera de la incidencia, y negarse a enviar por una errata en el asunto
+deja el fallo original sin testigo además de sin arreglar. Se envía con un asunto de respaldo
+—completo, no el original con agujeros, que parecería un correo roto del sistema— y la variable
+culpable viaja al pie de la carta y al log.
+
+El diagnóstico no se pierde: cambia de sitio. En vez de un flujo `PAUSADO` que nadie mira, la
+misconfiguración llega impresa en el correo que la persona ya está leyendo. Como efecto colateral,
+`ERR_SMTP_INTERPOLATION` desaparece: era el código de `bodyTemplate` y ya no queda nada que pueda
+emitirlo. Dejarlo exportado habría sido un código que `catchErrors` puede declarar y que no se
+dispara jamás — el fallo mudo que la regla 10 del validador existe para impedir.
+
+### Acotar una decisión de seguridad sin revertirla
+
+El transporte del nodo llevaba escrito «SOLO TEXTO PLANO», y el DTO, «NO hay campo de HTML». Las dos
+citaban la inyección de marcado. Enviar una carta HTML parecía contradecirlas.
+
+No las contradice, y la distinción importa lo bastante como para dejarla escrita en el TSDoc nuevo:
+lo que aquella regla protegía era que **el operador** aportase marcado, y eso sigue sin poder pasar
+—su nota se escapa carácter a carácter como cualquier otro dato—. Lo que se añade es HTML de
+plantilla fija cuyos huecos pasan todos por `escapeHtml`.
+
+El peligro nunca fue el HTML: era el HTML de procedencia ajena. Y esta carta lleva bastante:
+`error_message` cita el asunto del correo entrante, `partial_data` arrastra los nombres de los
+adjuntos. Los escribe cualquiera que sepa la dirección del buzón del flujo. Por eso el escapado es
+obligatorio sobre todo dato dinámico y hay dos pruebas que lo vigilan con un `<img onerror>` y un
+`<script>` dentro del payload.
+
+`sanitize-html`, que el proyecto ya tiene, no servía: retira etiquetas de un documento, mientras que
+aquí hace falta conservar el texto y volverlo inofensivo; y con `allowedTags: []` re-escapa lo que ya
+era texto plano, que es el defecto documentado en `article-extractor.util.ts`. Se escribió el util.
+
+### Lo que la maqueta del correo no hace
+
+La vista previa del configurador **no imita la carta**. Replicar en Vue sus colores y textos crearía
+una segunda plantilla, en otro lenguaje, que diverge en cuanto alguien toque el generador del
+backend — y entonces la vista previa mentiría, que es peor que no tenerla. Es una maqueta
+estructural: cabecera con el degradado, badge de ejemplo y recuadros punteados rotulados con lo que
+el motor rellenará. Lo único que refleja de verdad es **dónde cae la nota**, que es lo que el
+operador necesita saber.
+
+Por el mismo motivo usa tokens `--pd-*` y no los hex de la carta: esto se lee dentro de la
+aplicación, que sí conmuta con el tema.
+
+### Dos registros, no uno
+
+El encargo pedía dar de alta el componente en `node-config-registry.ts`. Con eso solo, el formulario
+se habría montado y el botón «Siguiente» no se habría habilitado nunca: hay un segundo registro,
+`node-store-registry.ts`, que es donde el anfitrión pregunta por `isConfigValid`. Uno resuelve qué
+pintar; el otro, a quién preguntar si lo pintado vale.
+
+El contrato del store tampoco admitía la forma propuesta (`configs` indexado por `nodeId`,
+`getConfig(nodeId)`, `isConfigValid(nodeId)`). Los stores de nodo **se instancian uno por nodo** —la
+indexación ya vive un nivel más arriba, en el id de Pinia— y el contrato exige además
+`toNodeParams`, `hydrateFromNode` y `resetConfig`. Los dos últimos no son ceremonia: sin
+`hydrateFromNode` el nodo sería imposible de reeditar, y guardar borraría los destinatarios que el
+operador venía a corregir.
+
+Un detalle de ese contrato que costó pensarlo: **`hydrateFromNode` NO repone el asunto por defecto**.
+El defecto es para nodos nuevos; un nodo guardado sin asunto lo está porque alguien lo borró a
+propósito, y reponerlo al reabrirlo cambiaría su configuración con solo mirarla. Su prueba está
+escrita.
+
+### La excepción Poka-Yoke, y la trampa que ya conocíamos
+
+`frontend-quasar.md` §4 prohíbe el texto libre en `QSelect`. Los dos campos de direcciones lo usan,
+porque no existe ni puede existir una lista cerrada de correos. Es el segundo caso del proyecto tras
+la zona horaria del cron, y de él se copió la pieza que de verdad importa: el manejador
+`@input-value`. `update:model-value` solo se emite al confirmar, así que sin él un correo tecleado y
+no convertido en chip se pierde al pulsar Guardar **mientras la pantalla lo sigue mostrando**. Con
+chips es aún más fácil de provocar, porque nada indica que al texto le falte convertirse en uno.
+
+También se añadió `isEmailAddress`: no había ninguna validación de formato de correo en el frontend.
+`isCorporateEmail` no servía —comprueba que el dominio esté entre los autorizados para iniciar
+sesión— y el destinatario de una alerta puede ser perfectamente externo, un proveedor o una guardia
+subcontratada. Justo el destinatario más probable de una incidencia de integración.
+
+### Lo que NO se hizo
+
+- **Sin `smtp-alert.service.ts`.** No hay endpoint que consultar, y validar un buzón de destino
+  exigiría enviar correo real a una persona real cada vez que alguien reabre el paso. `TRIGGER_CRON`
+  es el precedente explícito.
+- **Sin entrada en `nodeBaseParamsRegistry`.** Los destinatarios son operativa del flujo, no
+  topología: meterlos en una plantilla reutilizable los compartiría entre despliegues.
+- **Sin interpolación en `customMessage`.** Es una nota en texto plano; tratarla como plantilla le
+  añadiría un modo de fallo a un campo cuyo propósito es que siempre se lea.
+- **Sin tocar la migración 021 ni el `.env`.** Siguen pendientes de PROT-16, y sin ellos el nodo no
+  aparece en `GET /api/nodos`.
+
+### Estado de la verificación
+
+Backend **55 suites / 1265 pruebas** (desde 53 / 1223), `tsc --noEmit -p tsconfig.build.json` sin
+errores. Frontend **26 archivos / 506 pruebas** (desde 23 / 461), `vue-tsc --noEmit` sin errores y
+eslint en cero, que era su estado de partida.
+
+Se añadió spec de montaje del componente además del store: `use-chips` no se usaba en ningún otro
+sitio del proyecto, y un selector que revienta al renderizar no lo detecta `vue-tsc`.
+
+### Pendiente
+
+- Aplicar la migración 021 y actualizar el `.env` real (arrastrado de PROT-16). **El renombrado a
+  `SMTP_OTP_*` deja el login sin transporte hasta que se haga.**
+- Configurador de `PROCESADOR_IA`, el último tipo con estrategia y sin formulario. El registro cubre
+  6 de 9.
+- `types/nodes/` estrena subdirectorio; la convención hasta hoy era plana (`types/parser-email.ts`).
+  Queda anotado para que el próximo nodo elija a sabiendas y no por inercia.
+
+---
+
 ## 2026-09-26 · Bifurcación de errores, nodo `DESTINO_SMTP` y visión multimodal — rama `feat/bifurcacion-errores`
 
 ### Tres piezas que existían por separado y no se tocaban

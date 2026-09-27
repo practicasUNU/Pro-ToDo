@@ -23,8 +23,15 @@ export const MAX_ALERT_RECIPIENTS = 10;
 /** Longitud maxima del asunto YA interpolado la impone el propio SMTP. */
 export const MAX_ALERT_SUBJECT_LENGTH = 255;
 
-/** Longitud maxima del cuerpo declarado, antes de interpolar. */
-export const MAX_ALERT_BODY_LENGTH = 5_000;
+/**
+ * Longitud maxima de la nota del operador.
+ *
+ * Dos mil y no los cinco mil del antiguo `bodyTemplate`: aquello era el cuerpo
+ * ENTERO del aviso y tenia que caber todo; esto es una acotacion que acompana a
+ * una carta que el sistema ya compone. Una nota mas larga que la propia carta
+ * deja de ser una nota.
+ */
+export const MAX_ALERT_NOTE_LENGTH = 2_000;
 
 /**
  * Configuracion del nodo `DESTINO_SMTP`.
@@ -35,16 +42,22 @@ export const MAX_ALERT_BODY_LENGTH = 5_000;
  * contuviera este nodo. La pregunta "esta completo para ejecutarse" vive en
  * `getIncompleteParams`, que solo se consulta al ACTIVAR.
  *
- * `subject` y `bodyTemplate` admiten marcadores `{{namespace.campo}}`, que la
- * estrategia resuelve contra el `StatePayloadContext`. El caso que motiva el
- * nodo es citar `{{error_context.error_message}}` y `{{error_context.failed_node_id}}`
- * en el aviso, para que quien lo reciba sepa que flujo se detuvo y por que sin
- * tener que abrir la trazabilidad.
+ * NO HAY CUERPO. Lo hubo —`bodyTemplate`, obligatorio— y se retiro: el cuerpo lo
+ * compone ahora `buildAlertEmailHtml` como carta institucional, de modo que el
+ * operador configura A QUIEN avisar, CON QUE asunto y QUE nota anadir, y no
+ * escribe ni una etiqueta. Redactar el aviso entero a mano en un `textarea` era
+ * pedirle que reprodujese en cada nodo lo que el sistema ya sabe decir, y el
+ * resultado eran avisos que omitian justo el dato que hacia falta.
  *
- * NO hay campo de HTML. El cuerpo lo escribe el operador y aceptarlo como
- * marcado lo convertiria en una via de inyeccion en el buzon de quien lo recibe;
- * ademas, el correo institucional con plantilla ya lo produce
- * `MAPEADOR_PLANTILLA`, que si valida su HTML contra la lista de namespaces.
+ * `subject` admite marcadores `{{namespace.campo}}` que la estrategia resuelve
+ * contra el `StatePayloadContext`, y tiene defecto propio: ver
+ * `DEFAULT_ALERT_SUBJECT`. `customMessage` NO se interpola —es una nota en texto
+ * plano— para no anadirle un modo de fallo a un campo cuyo proposito es que
+ * siempre se lea.
+ *
+ * Sigue sin haber campo de HTML, y por el mismo motivo de siempre: el marcado
+ * que aporta el operador es una via de inyeccion en el buzon de quien recibe la
+ * alerta. La nota se escapa caracter a caracter antes de incrustarse.
  */
 export class SmtpAlertConfigDto {
   @ApiPropertyOptional({
@@ -101,18 +114,21 @@ export class SmtpAlertConfigDto {
 
   @ApiPropertyOptional({
     description:
-      'Cuerpo del aviso en texto plano. Admite marcadores {{namespace.campo}}.',
+      'Nota del operador en TEXTO PLANO, incrustada en la carta de alerta. No se interpola: un {{...}} escrito aqui sale literal.',
     example:
-      'El nodo {{error_context.failed_node_id}} fallo: {{error_context.error_message}}',
-    maxLength: MAX_ALERT_BODY_LENGTH,
+      'Avisar tambien al responsable de guardia si se repite tres veces.',
+    maxLength: MAX_ALERT_NOTE_LENGTH,
   })
   @IsOptional()
-  @IsString({ message: 'bodyTemplate debe ser una cadena.' })
-  @IsNotEmpty({ message: 'bodyTemplate no puede estar vacio.' })
-  @MaxLength(MAX_ALERT_BODY_LENGTH, {
-    message: `bodyTemplate no puede superar ${MAX_ALERT_BODY_LENGTH} caracteres.`,
+  @IsString({ message: 'customMessage debe ser una cadena.' })
+  @MaxLength(MAX_ALERT_NOTE_LENGTH, {
+    message: `customMessage no puede superar ${MAX_ALERT_NOTE_LENGTH} caracteres.`,
   })
-  bodyTemplate?: string;
+  // Sin `@IsNotEmpty`, a diferencia de `subject`: una nota vacia es una nota que
+  // el operador borro, y la carta simplemente no pinta ese bloque. Rechazarla
+  // obligaria al cliente a distinguir entre no enviar la clave y enviarla vacia,
+  // que es justo la clase de detalle que acaba en un 400 incomprensible.
+  customMessage?: string;
 }
 
 /** Configuracion del nodo con los valores por defecto ya aplicados. */
@@ -121,7 +137,7 @@ export interface ResolvedSmtpAlertConfig {
   readonly cc: readonly string[];
   readonly replyTo: string | null;
   readonly subject: string | null;
-  readonly bodyTemplate: string | null;
+  readonly customMessage: string | null;
 }
 
 /** Aplica los valores por defecto sobre un DTO ya validado. Funcion pura. */
@@ -135,5 +151,5 @@ export const resolveSmtpAlertConfig = (
   // la guarda de `execute`, que emite ERR_SMTP_CONFIG antes de abrir conexion.
   replyTo: dto.replyTo ?? null,
   subject: dto.subject ?? null,
-  bodyTemplate: dto.bodyTemplate ?? null,
+  customMessage: dto.customMessage ?? null,
 });

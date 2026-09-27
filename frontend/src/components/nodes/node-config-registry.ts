@@ -36,6 +36,9 @@ export const nodeConfigRegistry: Partial<Record<NodeType, Component>> = {
   [NodeType.MAPEADOR_PLANTILLA]: defineAsyncComponent(
     () => import('@components/nodes/TemplateMapperConfig.vue'),
   ),
+  [NodeType.DESTINO_SMTP]: defineAsyncComponent(
+    () => import('@components/nodes/SmtpAlertConfig.vue'),
+  ),
 };
 
 /** Tipos de nodo con configurador disponible, para poblar selectores. */

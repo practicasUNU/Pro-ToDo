@@ -56,7 +56,21 @@ export interface NodeMailMessage {
   readonly cc?: readonly string[];
   readonly replyTo?: string;
   readonly subject: string;
+  /**
+   * Version en texto plano. OBLIGATORIA, tambien cuando viaja el HTML.
+   *
+   * No es cortesia con clientes antiguos: es lo que hace legible el aviso en un
+   * reloj, en la notificacion del movil y en un cliente con el marcado
+   * bloqueado, que es una configuracion corriente en correo corporativo.
+   */
   readonly text: string;
+  /**
+   * Carta HTML que GENERA EL SISTEMA. Opcional; si falta, sale solo el texto.
+   *
+   * Ver el TSDoc de la clase: lo que esta prohibido es el marcado que aporta el
+   * operador, no el que compone el propio backend con datos escapados.
+   */
+  readonly html?: string;
 }
 
 /** Lo que el proveedor confirma de un envio, para la trazabilidad del nodo. */
@@ -79,10 +93,21 @@ export interface NodeMailReceipt {
  * frontera de siempre: la estrategia decide QUE se dice y a quien, y no sabe
  * nada de pools, de STARTTLS ni de `nodemailer`.
  *
- * SOLO TEXTO PLANO. El cuerpo lo escribe el operador en los `params` del nodo, y
- * aceptarlo como HTML convertiria ese campo en una via de inyeccion de marcado
- * en el buzon de quien recibe la alerta. El correo institucional con plantilla
- * es competencia de `MAPEADOR_PLANTILLA`, que si valida su HTML.
+ * EL OPERADOR NO APORTA MARCADO. La regla nacio como "solo texto plano" y sigue
+ * vigente en lo que de verdad protegia: ningun campo que el operador escriba en
+ * los `params` del nodo llega al buzon como HTML. Su nota se escapa caracter a
+ * caracter como cualquier otro dato.
+ *
+ * Lo que SI viaja como HTML es la carta institucional que compone el propio
+ * backend (`buildAlertEmailHtml`), cuya plantilla es fija y cuyos huecos pasan
+ * todos por `escapeHtml`. La distincion es la que importa y conviene no
+ * deshacerla en la proxima lectura: el peligro nunca fue el HTML, era el HTML de
+ * procedencia ajena. Varios datos de esa carta —el mensaje de error del parser,
+ * los nombres de los adjuntos— vienen del correo ENTRANTE, que escribe
+ * cualquiera; por eso el escapado es obligatorio y no una precaucion.
+ *
+ * El correo institucional CON PLANTILLA DE USUARIO sigue siendo competencia de
+ * `MAPEADOR_PLANTILLA`, que valida su HTML contra la lista de namespaces.
  */
 @Injectable()
 export class SmtpNodeMailerService implements OnModuleDestroy {
@@ -143,6 +168,10 @@ export class SmtpNodeMailerService implements OnModuleDestroy {
         ...(message.replyTo !== undefined ? { replyTo: message.replyTo } : {}),
         subject: message.subject,
         text: message.text,
+        // Se omite la clave cuando no hay carta en vez de pasar `undefined`:
+        // nodemailer la interpretaria como parte HTML vacia y compondria un
+        // multipart con una mitad en blanco.
+        ...(message.html !== undefined ? { html: message.html } : {}),
       })) as SentMailAcknowledgement;
 
       return {

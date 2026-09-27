@@ -1,4 +1,5 @@
 import { useParserEmailStore } from '@stores/nodes/parser-email.store';
+import { useSmtpAlertStore } from '@stores/nodes/smtp-alert.store';
 import { useTemplateMapperStore } from '@stores/nodes/template-mapper.store';
 import { useTriggerCronStore } from '@stores/nodes/trigger-cron.store';
 import { useTriggerImapStore } from '@stores/nodes/trigger-imap.store';
@@ -189,6 +190,7 @@ export const nodeStoreRegistry: Partial<Record<NodeType, NodeStoreHook>> = {
   [NodeType.PARSER_PRE_IA]: useParserEmailStore,
   [NodeType.EXTRACTOR_WEB]: useWebScraperStore,
   [NodeType.MAPEADOR_PLANTILLA]: useTemplateMapperStore,
+  [NodeType.DESTINO_SMTP]: useSmtpAlertStore,
 };
 
 /**

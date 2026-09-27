@@ -8,6 +8,16 @@ import type { OnModuleDestroy } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { createTransport } from 'nodemailer';
 
+import {
+  BRAND_BORDER,
+  BRAND_PRIMARY,
+  BRAND_PRIMARY_LIGHT,
+  BRAND_SURFACE,
+  BRAND_TEXT,
+  BRAND_TEXT_MUTED,
+  FONT_STACK,
+} from '@common/constants/email-brand.constants';
+
 import type { Transporter } from 'nodemailer';
 
 /**
@@ -28,17 +38,6 @@ const MAX_SMTP_CONNECTIONS = 1;
 
 /** Mensajes por conexion antes de reciclarla. */
 const MAX_MESSAGES_PER_CONNECTION = 100;
-
-/** Paleta institucional embebida: los clientes de correo ignoran las hojas externas. */
-const BRAND_PRIMARY = '#2C4FC7';
-const BRAND_PRIMARY_LIGHT = '#4E74E8';
-const BRAND_TEXT = '#12142E';
-const BRAND_TEXT_MUTED = '#4A4F6B';
-const BRAND_SURFACE = '#EEF1FA';
-const BRAND_BORDER = '#D3D8EE';
-
-const FONT_STACK =
-  "-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif";
 
 /**
  * Unico punto del backend que conoce el SMTP de AUTENTICACION. Los servicios de
@@ -133,8 +132,12 @@ export class EmailService implements OnModuleDestroy {
    * Todo el CSS va EN LINEA y la maquetacion usa tablas a proposito: Gmail y
    * Outlook descartan las hojas de estilo externas y `<style>` del `<head>`, y su
    * soporte de flex/grid es irregular. Es la unica parte del proyecto exenta de
-   * la regla de tokens CSS — los `var(--pd-*)` no existen en un cliente de correo,
-   * asi que la paleta se replica como constantes de este archivo.
+   * la regla de tokens CSS — los `var(--pd-*)` no existen en un cliente de correo.
+   *
+   * La paleta vivia como constantes de este archivo y se mudo a
+   * `@common/constants/email-brand.constants` al aparecer la segunda carta, la de
+   * incidencia del nodo `DESTINO_SMTP`: dos copias de `#2C4FC7` divergen a la
+   * primera revision de marca.
    */
   private buildOtpTemplate(code: string): string {
     return `

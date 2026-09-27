@@ -2,19 +2,26 @@ import { NodeType } from '@core/fsm/types/pipeline-schema.types';
 import { createMockStatePayloadContext } from '@test/factories/state-payload-context.factory';
 
 import {
+  DEFAULT_ALERT_SUBJECT,
   ERR_SMTP_CONFIG,
-  ERR_SMTP_INTERPOLATION,
   ERR_SMTP_SEND_FAILURE,
+  SAFE_FALLBACK_SUBJECT,
   SmtpAlertStrategy,
 } from './smtp-alert.strategy';
 
-import type { SmtpNodeMailerService } from '@common/services/smtp-node-mailer.service';
+import type {
+  NodeMailMessage,
+  SmtpNodeMailerService,
+} from '@common/services/smtp-node-mailer.service';
 import type { StatePayloadContext } from '@core/fsm/context/state-payload.context';
 
 /** Doble del transporte, acotado al unico metodo que la estrategia invoca. */
 type MailerMock = jest.Mocked<Pick<SmtpNodeMailerService, 'sendNodeAlert'>>;
 
 const RECIPIENT = 'guardia@unuware.com';
+
+/** `workflowId` que la factoria de contexto asigna por defecto. */
+const FLOW_ID = 'flow-00000000-0000-4000-8000-000000000000';
 
 const buildMailer = (overrides: Partial<MailerMock> = {}): MailerMock => ({
   sendNodeAlert: jest.fn().mockResolvedValue({
@@ -28,6 +35,23 @@ const buildMailer = (overrides: Partial<MailerMock> = {}): MailerMock => ({
 const buildStrategy = (mailer: MailerMock = buildMailer()): SmtpAlertStrategy =>
   new SmtpAlertStrategy(mailer as unknown as SmtpNodeMailerService);
 
+/** Silencia las trazas del nodo: la suite asevera sobre el correo, no sobre el log. */
+const muteLogger = (strategy: SmtpAlertStrategy): void => {
+  jest.spyOn(strategy['logger'], 'log').mockImplementation(() => undefined);
+  jest.spyOn(strategy['logger'], 'warn').mockImplementation(() => undefined);
+};
+
+/** El mensaje que recibio el transporte, tipado para no indexar a ciegas. */
+const sentMessage = (mailer: MailerMock): NodeMailMessage => {
+  const [message] = mailer.sendNodeAlert.mock.calls[0] ?? [];
+
+  if (message === undefined) {
+    throw new Error('El transporte no recibio ningun mensaje.');
+  }
+
+  return message;
+};
+
 /**
  * Contexto tal y como lo deja el motor tras desviar por `onErrorStep`.
  *
@@ -38,8 +62,11 @@ const buildContext = (
   namespaces: Record<string, Record<string, unknown>> = {
     error_context: {
       failed_node_id: 'nodo_parser',
+      failed_node_type: 'PARSER_PRE_IA',
       error_code: 'ERR_PARSER_UNEXTRACTABLE_MEDIA',
+      error_level: 'GRAVE',
       error_message: 'El correo solo trae un PDF escaneado',
+      partial_data: { attachment_count: 1 },
     },
   },
 ): StatePayloadContext =>
@@ -54,7 +81,6 @@ const buildParams = (
 ): Record<string, unknown> => ({
   to: [RECIPIENT],
   subject: 'Flujo detenido en {{error_context.failed_node_id}}',
-  bodyTemplate: 'Motivo: {{error_context.error_message}}',
   ...overrides,
 });
 
@@ -68,23 +94,22 @@ describe('SmtpAlertStrategy', () => {
   });
 
   describe('1. Envio correcto', () => {
-    it('1.1 deberia interpolar asunto y cuerpo antes de entregarlos', async () => {
+    it('1.1 deberia interpolar el asunto antes de entregarlo', async () => {
       // 1. Arrange 📐
       const mailer = buildMailer();
       const strategy = buildStrategy(mailer);
-      jest.spyOn(strategy['logger'], 'log').mockImplementation(() => undefined);
+      muteLogger(strategy);
 
       // 2. Act ⚙️
       await strategy.execute(buildContext(), buildParams());
 
       // 3. Assert 🎯: el transporte recibe texto resuelto, nunca un marcador.
-      //    Un aviso que llegue con `{{error_context.error_message}}` literal es
+      //    Un aviso que llegue con `{{error_context.failed_node_id}}` literal es
       //    peor que ninguno: parece un correo roto del sistema.
       expect(mailer.sendNodeAlert).toHaveBeenCalledWith(
         expect.objectContaining({
           to: [RECIPIENT],
           subject: 'Flujo detenido en nodo_parser',
-          text: 'Motivo: El correo solo trae un PDF escaneado',
         }),
       );
     });
@@ -100,7 +125,7 @@ describe('SmtpAlertStrategy', () => {
           }),
         }),
       );
-      jest.spyOn(strategy['logger'], 'log').mockImplementation(() => undefined);
+      muteLogger(strategy);
 
       // 2. Act ⚙️
       const result = await strategy.execute(buildContext(), buildParams());
@@ -122,15 +147,32 @@ describe('SmtpAlertStrategy', () => {
       //    la clave igualmente, y algunos servidores la rechazan vacia.
       const mailer = buildMailer();
       const strategy = buildStrategy(mailer);
-      jest.spyOn(strategy['logger'], 'log').mockImplementation(() => undefined);
+      muteLogger(strategy);
 
       // 2. Act ⚙️
       await strategy.execute(buildContext(), buildParams());
 
       // 3. Assert 🎯
-      expect(mailer.sendNodeAlert.mock.calls[0]?.[0]).not.toHaveProperty(
-        'replyTo',
-      );
+      expect(sentMessage(mailer)).not.toHaveProperty('replyTo');
+    });
+
+    it('1.4 deberia entregar SIEMPRE las dos versiones del aviso', async () => {
+      // 1. Arrange 📐
+      const mailer = buildMailer();
+      const strategy = buildStrategy(mailer);
+      muteLogger(strategy);
+
+      // 2. Act ⚙️
+      await strategy.execute(buildContext(), buildParams());
+
+      // 3. Assert 🎯: el texto plano no es cortesia con clientes antiguos. Es lo
+      //    que hace legible el aviso en un reloj o en un cliente con el marcado
+      //    bloqueado, que es configuracion corriente en correo corporativo.
+      const message = sentMessage(mailer);
+
+      expect(message.html).toContain('<table');
+      expect(message.text).not.toContain('<table');
+      expect(message.text).toContain('PROTO-DO');
     });
   });
 
@@ -153,45 +195,39 @@ describe('SmtpAlertStrategy', () => {
       expect(mailer.sendNodeAlert).not.toHaveBeenCalled();
     });
 
-    it('2.2 deberia rechazar params incompletos aunque su forma sea valida', async () => {
+    it('2.2 deberia rechazar params sin destinatario aunque su forma sea valida', async () => {
       // 1. Arrange 📐: el DTO admite la ausencia para que una plantilla de flujo
-      //    pueda contener este nodo. La completitud es otra pregunta.
+      //    pueda contener este nodo. La completitud es otra pregunta, y desde
+      //    que el asunto tiene defecto y el cuerpo lo compone el sistema, `to`
+      //    es lo unico que el sistema no puede adivinar.
       const mailer = buildMailer();
       const strategy = buildStrategy(mailer);
 
       // 2. Act ⚙️
-      const result = await strategy.execute(buildContext(), {
-        to: [RECIPIENT],
-      });
+      const result = await strategy.execute(buildContext(), {});
 
       // 3. Assert 🎯
       expect(result.success).toBe(false);
       expect(result.error?.code).toBe(ERR_SMTP_CONFIG);
-      expect(result.error?.missingFields).toEqual(['subject', 'bodyTemplate']);
+      expect(result.error?.missingFields).toEqual(['to']);
       expect(mailer.sendNodeAlert).not.toHaveBeenCalled();
     });
 
-    it('2.3 deberia traducir un marcador sin resolver a un codigo propio', async () => {
-      // 1. Arrange 📐: `getInterpolatedValue` LANZA, y dejar salir la excepcion
-      //    la normalizaria el motor a URGENTE, que nunca se reintenta y que el
-      //    operador no puede corregir desde el flujo PAUSADO.
+    it('2.3 deberia rechazar una nota mas larga que el tope', async () => {
+      // 1. Arrange 📐
       const mailer = buildMailer();
       const strategy = buildStrategy(mailer);
 
       // 2. Act ⚙️
       const result = await strategy.execute(
         buildContext(),
-        buildParams({ bodyTemplate: 'Motivo: {{error_context.inexistente}}' }),
+        buildParams({ customMessage: 'x'.repeat(2_001) }),
       );
 
       // 3. Assert 🎯
       expect(result.success).toBe(false);
-      expect(result.error?.code).toBe(ERR_SMTP_INTERPOLATION);
-      expect(result.error?.level).toBe('GRAVE');
-      expect(result.error?.missingFields).toEqual([
-        'error_context.inexistente',
-      ]);
-      expect(mailer.sendNodeAlert).not.toHaveBeenCalled();
+      expect(result.error?.code).toBe(ERR_SMTP_CONFIG);
+      expect(result.error?.missingFields).toEqual(['customMessage']);
     });
 
     it('2.4 deberia traducir un fallo del transporte sin dejarlo escapar', async () => {
@@ -203,6 +239,7 @@ describe('SmtpAlertStrategy', () => {
             .mockRejectedValue(new Error('ECONNREFUSED smtp.example.com:587')),
         }),
       );
+      muteLogger(strategy);
 
       // 2. Act ⚙️
       const result = await strategy.execute(buildContext(), buildParams());
@@ -222,7 +259,7 @@ describe('SmtpAlertStrategy', () => {
       const context = buildContext();
       const before = context.getAllContext();
       const strategy = buildStrategy();
-      jest.spyOn(strategy['logger'], 'log').mockImplementation(() => undefined);
+      muteLogger(strategy);
 
       // 2. Act ⚙️
       await strategy.execute(context, buildParams());
@@ -234,61 +271,83 @@ describe('SmtpAlertStrategy', () => {
   });
 
   describe('4. Namespaces requeridos', () => {
-    it('4.1 deberia derivarlos de las plantillas, sin repetirlos', () => {
+    it('4.1 deberia derivarlos del asunto, sin repetirlos', () => {
       // 1. Arrange 📐 + 2. Act ⚙️
       const required = buildStrategy().getRequiredNamespaces(
         buildParams({
-          subject: 'Fallo en {{error_context.failed_node_id}}',
-          bodyTemplate:
-            '{{error_context.error_message}} sobre {{parsed_email.subject}}',
+          subject:
+            '{{error_context.failed_node_id}} sobre {{parsed_email.subject}} ({{error_context.error_code}})',
         }),
       );
 
-      // 3. Assert 🎯: el asunto y el cuerpo suelen citar ambos `error_context`,
-      //    y declararlo dos veces solo ensuciaria el diagnostico del motor.
+      // 3. Assert 🎯: un asunto suele citar `error_context` mas de una vez, y
+      //    declararlo dos veces solo ensuciaria el diagnostico del motor.
       expect([...required].sort()).toEqual(['error_context', 'parsed_email']);
     });
 
-    it('4.2 NO deberia mirar los destinatarios', () => {
+    it('4.2 NO deberia mirar los destinatarios ni la nota', () => {
       // 1. Arrange 📐: `to`, `cc` y `replyTo` son direcciones literales, no
       //    plantillas. Que lo sigan siendo es lo que impide que quien escribe al
-      //    buzon del flujo elija a quien avisa el sistema.
+      //    buzon del flujo elija a quien avisa el sistema. `customMessage`
+      //    tampoco se interpola.
       const required = buildStrategy().getRequiredNamespaces({
         to: ['{{error_context.error_message}}'],
         subject: 'Fijo',
-        bodyTemplate: 'Fijo',
+        customMessage: '{{parsed_email.subject}}',
       });
 
       // 2. Act ⚙️ + 3. Assert 🎯
       expect(required).toEqual([]);
     });
+
+    it('4.3 no deberia exigir nada cuando el nodo no declara asunto', () => {
+      // 1. Arrange 📐 + 2. Act ⚙️: acabara usando DEFAULT_ALERT_SUBJECT, que cita
+      //    `trigger`. Declararlo seria inutil —el motor excluye ese namespace de
+      //    la comprobacion— y enganoso, porque el defecto tiene respaldo.
+      const required = buildStrategy().getRequiredNamespaces({
+        to: [RECIPIENT],
+      });
+
+      // 3. Assert 🎯
+      expect(required).toEqual([]);
+    });
   });
 
   describe('5. Completitud para activar', () => {
-    it('5.1 deberia nombrar los tres params sin los que no hay aviso', () => {
+    it('5.1 deberia nombrar solo el destinatario', () => {
       // 1. Arrange 📐 + 2. Act ⚙️
       const missing = buildStrategy().getIncompleteParams({});
 
       // 3. Assert 🎯
-      expect(missing).toEqual(['to', 'subject', 'bodyTemplate']);
+      expect(missing).toEqual(['to']);
     });
 
-    it('5.2 no deberia declarar nada incompleto con los tres puestos', () => {
+    it('5.2 no deberia declarar nada incompleto con un destinatario', () => {
       // 1. Arrange 📐 + 2. Act ⚙️
-      const missing = buildStrategy().getIncompleteParams(buildParams());
+      const missing = buildStrategy().getIncompleteParams({ to: [RECIPIENT] });
 
       // 3. Assert 🎯
       expect(missing).toEqual([]);
     });
 
-    it('5.3 deberia tratar una cadena de solo espacios como ausencia', () => {
-      // 1. Arrange 📐 + 2. Act ⚙️
-      const missing = buildStrategy().getIncompleteParams(
-        buildParams({ subject: '   ' }),
-      );
+    it('5.3 no deberia exigir el asunto: tiene defecto', () => {
+      // 1. Arrange 📐 + 2. Act ⚙️: bloquear el asistente por un campo que el
+      //    backend sabe rellenar seria un Poka-Yoke al reves.
+      const missing = buildStrategy().getIncompleteParams({
+        to: [RECIPIENT],
+        subject: '   ',
+      });
 
       // 3. Assert 🎯
-      expect(missing).toEqual(['subject']);
+      expect(missing).toEqual([]);
+    });
+
+    it('5.4 deberia tratar un arreglo de destinatarios vacio como ausencia', () => {
+      // 1. Arrange 📐 + 2. Act ⚙️
+      const missing = buildStrategy().getIncompleteParams({ to: [] });
+
+      // 3. Assert 🎯
+      expect(missing).toEqual(['to']);
     });
   });
 
@@ -296,7 +355,7 @@ describe('SmtpAlertStrategy', () => {
     it('6.1 deberia coincidir con las claves que emite execute', async () => {
       // 1. Arrange 📐
       const strategy = buildStrategy();
-      jest.spyOn(strategy['logger'], 'log').mockImplementation(() => undefined);
+      muteLogger(strategy);
 
       // 2. Act ⚙️
       const result = await strategy.execute(buildContext(), buildParams());
@@ -307,6 +366,224 @@ describe('SmtpAlertStrategy', () => {
       expect(strategy.outputFields.map((field) => field.name)).toEqual(
         Object.keys(result.data ?? {}),
       );
+    });
+  });
+
+  describe('7. Asunto por defecto y respaldo', () => {
+    it('7.1 deberia aplicar el defecto cuando el nodo no declara asunto', async () => {
+      // 1. Arrange 📐: el defecto cita `{{trigger.flow_name}}`, que este contexto
+      //    SI resuelve.
+      const mailer = buildMailer();
+      const strategy = buildStrategy(mailer);
+      muteLogger(strategy);
+
+      // 2. Act ⚙️
+      await strategy.execute(
+        buildContext({ trigger: { flow_name: 'Notas de prensa' } }),
+        { to: [RECIPIENT] },
+      );
+
+      // 3. Assert 🎯
+      expect(sentMessage(mailer).subject).toBe(
+        '[ALERTA PROTO-DO] Notificacion de incidencia en flujo Notas de prensa',
+      );
+    });
+
+    it('7.2 deberia tratar un asunto en blanco como ausencia', async () => {
+      // 1. Arrange 📐: borrar el campo desde la interfaz es una accion legitima,
+      //    no un error de configuracion.
+      const mailer = buildMailer();
+      const strategy = buildStrategy(mailer);
+      muteLogger(strategy);
+
+      // 2. Act ⚙️
+      const result = await strategy.execute(
+        buildContext({ trigger: { flow_name: 'Notas de prensa' } }),
+        { to: [RECIPIENT], subject: '   ' },
+      );
+
+      // 3. Assert 🎯
+      expect(result.success).toBe(true);
+      expect(sentMessage(mailer).subject).toContain('Notas de prensa');
+    });
+
+    it('7.3 deberia ENVIAR el aviso aunque el asunto no resuelva', async () => {
+      // 1. Arrange 📐: es el caso corriente, porque `trigger` no lo siembra nadie
+      //    en los dos caminos reales de ejecucion. Este nodo es la ultima via por
+      //    la que una persona se entera de la incidencia: negarse a enviar por
+      //    una errata en el asunto dejaria el fallo original sin testigo ademas
+      //    de sin arreglar.
+      const mailer = buildMailer();
+      const strategy = buildStrategy(mailer);
+      muteLogger(strategy);
+
+      // 2. Act ⚙️
+      const result = await strategy.execute(buildContext(), {
+        to: [RECIPIENT],
+      });
+
+      // 3. Assert 🎯
+      expect(result.success).toBe(true);
+      expect(sentMessage(mailer).subject).toBe(SAFE_FALLBACK_SUBJECT);
+      expect(mailer.sendNodeAlert).toHaveBeenCalledTimes(1);
+    });
+
+    it('7.4 deberia denunciar en la carta la variable que no resolvio', async () => {
+      // 1. Arrange 📐: el diagnostico no se pierde, cambia de sitio. En vez de un
+      //    flujo PAUSADO que nadie mira, la misconfiguracion llega impresa en el
+      //    correo que la persona ya esta leyendo.
+      const mailer = buildMailer();
+      const strategy = buildStrategy(mailer);
+      muteLogger(strategy);
+
+      // 2. Act ⚙️
+      await strategy.execute(
+        buildContext(),
+        buildParams({ subject: 'Fallo en {{error_context.inexistente}}' }),
+      );
+
+      // 3. Assert 🎯
+      const message = sentMessage(mailer);
+
+      expect(message.subject).toBe(SAFE_FALLBACK_SUBJECT);
+      expect(message.html).toContain('error_context.inexistente');
+      expect(message.text).toContain('error_context.inexistente');
+    });
+
+    it('7.5 deberia avisar en el log del respaldo aplicado', async () => {
+      // 1. Arrange 📐
+      const strategy = buildStrategy();
+      jest.spyOn(strategy['logger'], 'log').mockImplementation(() => undefined);
+      const warn = jest
+        .spyOn(strategy['logger'], 'warn')
+        .mockImplementation(() => undefined);
+
+      // 2. Act ⚙️
+      await strategy.execute(buildContext(), {
+        to: [RECIPIENT],
+        subject: 'Fallo en {{sin_namespace.campo}}',
+      });
+
+      // 3. Assert 🎯
+      expect(warn).toHaveBeenCalledWith(
+        expect.stringContaining('sin_namespace.campo'),
+      );
+    });
+
+    it('7.6 deberia conservar el marcador en el defecto exportado', () => {
+      // 1. Arrange 📐 + 2. Act ⚙️ + 3. Assert 🎯: el frontend replica esta misma
+      //    constante para pre-poblar el campo. Si divergen, el operador ve en el
+      //    formulario un asunto distinto del que se envia al dejarlo vacio.
+      expect(DEFAULT_ALERT_SUBJECT).toContain('{{trigger.flow_name}}');
+    });
+  });
+
+  describe('8. Contenido de la carta', () => {
+    it('8.1 deberia incrustar la nota del operador', async () => {
+      // 1. Arrange 📐
+      const mailer = buildMailer();
+      const strategy = buildStrategy(mailer);
+      muteLogger(strategy);
+
+      // 2. Act ⚙️
+      await strategy.execute(
+        buildContext(),
+        buildParams({ customMessage: 'Avisar al responsable de guardia.' }),
+      );
+
+      // 3. Assert 🎯
+      const message = sentMessage(mailer);
+
+      expect(message.html).toContain('Avisar al responsable de guardia.');
+      expect(message.html).toContain('Nota del operador');
+      expect(message.text).toContain('Avisar al responsable de guardia.');
+    });
+
+    it('8.2 deberia volcar el diagnostico que dejo el motor', async () => {
+      // 1. Arrange 📐
+      const mailer = buildMailer();
+      const strategy = buildStrategy(mailer);
+      muteLogger(strategy);
+
+      // 2. Act ⚙️
+      await strategy.execute(buildContext(), buildParams());
+
+      // 3. Assert 🎯
+      const { html } = sentMessage(mailer);
+
+      expect(html).toContain('ERR_PARSER_UNEXTRACTABLE_MEDIA');
+      expect(html).toContain('GRAVE');
+      expect(html).toContain('nodo_parser');
+      expect(html).toContain(FLOW_ID);
+    });
+
+    it('8.3 NO deberia escribir undefined sin error_context', async () => {
+      // 1. Arrange 📐: el nodo puede colocarse en el camino feliz para confirmar
+      //    una publicacion, y ahi el motor nunca siembra `error_context`.
+      const mailer = buildMailer();
+      const strategy = buildStrategy(mailer);
+      muteLogger(strategy);
+
+      // 2. Act ⚙️
+      const result = await strategy.execute(buildContext({}), {
+        to: [RECIPIENT],
+        subject: 'Publicacion completada',
+      });
+
+      // 3. Assert 🎯
+      const message = sentMessage(mailer);
+
+      expect(result.success).toBe(true);
+      expect(message.html).not.toContain('undefined');
+      expect(message.text).not.toContain('undefined');
+      expect(message.html).not.toContain('Codigo de error');
+    });
+
+    it('8.4 deberia escapar el marcado que llega del correo entrante', async () => {
+      // 1. Arrange 📐: `error_message` cita el asunto del correo original, que lo
+      //    escribe cualquiera que sepa la direccion del buzon del flujo. Sin
+      //    escapar, ese texto inyecta marcado en el buzon de quien esta de
+      //    guardia.
+      const mailer = buildMailer();
+      const strategy = buildStrategy(mailer);
+      muteLogger(strategy);
+
+      // 2. Act ⚙️
+      await strategy.execute(
+        buildContext({
+          error_context: {
+            error_message: '<img src=x onerror="alert(1)">',
+            partial_data: { subject: '<script>robar()</script>' },
+          },
+        }),
+        { to: [RECIPIENT], subject: 'Fijo' },
+      );
+
+      // 3. Assert 🎯
+      const { html } = sentMessage(mailer);
+
+      expect(html).not.toContain('<img src=x');
+      expect(html).not.toContain('<script>');
+      expect(html).toContain('&lt;img src=x');
+      expect(html).toContain('&lt;script&gt;');
+    });
+
+    it('8.5 deberia escapar tambien la nota del operador', async () => {
+      // 1. Arrange 📐: el operador es de confianza, pero el campo viaja en un
+      //    `jsonb` que se puede escribir por SQL directo, y una plantilla de
+      //    flujo compartida lo arrastra a otros despliegues.
+      const mailer = buildMailer();
+      const strategy = buildStrategy(mailer);
+      muteLogger(strategy);
+
+      // 2. Act ⚙️
+      await strategy.execute(
+        buildContext(),
+        buildParams({ customMessage: '<b>urgente</b>' }),
+      );
+
+      // 3. Assert 🎯
+      expect(sentMessage(mailer).html).toContain('&lt;b&gt;urgente&lt;/b&gt;');
     });
   });
 });
