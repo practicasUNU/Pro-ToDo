@@ -38,6 +38,12 @@ vi.mock('@services/nodes/web-scraper.service', () => ({
   checkScraper: vi.fn(),
 }));
 // El agregador consulta el catalogo de nodos para componer `upstreamContext`.
+// El store del nodo de IA consume el catalogo de prompts, asi que el
+// registro de stores lo arrastra hasta aqui.
+vi.mock('@services/ai-prompt-templates.service', () => ({
+  fetchAiPromptTemplates: vi.fn(),
+  fetchAiPromptTemplateById: vi.fn(),
+}));
 vi.mock('@services/node-catalog.service', () => ({
   fetchNodeCatalog: vi.fn(),
 }));
@@ -100,17 +106,19 @@ const buildTemplate = (
 /**
  * Topologia con un tipo de nodo que SIGUE sin configurador.
  *
- * Existe porque `PARSER_PRE_IA` dejo de serlo al implementarse su triada, y
- * `EXTRACTOR_WEB` acaba de dejar de serlo por lo mismo. El caso "nodo no
- * ejecutable" tiene que probarse contra un tipo que de verdad no tenga store
- * registrado, o la prueba pasaria a verificar lo contrario de lo que su nombre
- * dice. `PROCESADOR_IA` es el siguiente de la lista, y esta constante seguira
- * rotando conforme cada tipo reciba su triada.
+ * Existe porque `PARSER_PRE_IA`, `EXTRACTOR_WEB` y ahora `PROCESADOR_IA` fueron
+ * dejando de serlo al implementarse sus triadas. El caso "nodo no ejecutable"
+ * tiene que probarse contra un tipo que de verdad no tenga store registrado, o
+ * la prueba pasaria a verificar lo contrario de lo que su nombre dice.
+ *
+ * Toca ahora a `ESCUDO_POST_IA`, que ademas no tiene estrategia en el motor, asi
+ * que su turno tardara. La constante seguira rotando conforme cada tipo reciba
+ * su triada; el ultimo de la cola es `DESTINO_HTTP`.
  *
  * La topologia por defecto NO se toca: las pruebas de namespaces aguas arriba
  * dependen de que el parser siga aportando `parsed_email` antes del mapeador.
  */
-const UNSUPPORTED_NODE_ID = 'nodo_procesador_ia';
+const UNSUPPORTED_NODE_ID = 'nodo_escudo';
 
 const UNSUPPORTED_TOPOLOGY = [
   {
@@ -120,8 +128,8 @@ const UNSUPPORTED_TOPOLOGY = [
   },
   {
     nodeId: UNSUPPORTED_NODE_ID,
-    nodeType: NodeType.PROCESADOR_IA,
-    outputNamespace: 'llm_response',
+    nodeType: NodeType.ESCUDO_POST_IA,
+    outputNamespace: 'validated_drupal_json',
   },
 ];
 
@@ -333,7 +341,7 @@ describe('useFlujoDraftStore · agregador del asistente', () => {
 
       // 3. Assert: sin configurador no hay forma de declararlo valido, y dejar
       //    avanzar seria ensamblar un pipeline con un nodo sin configurar.
-      expect(draft.activeStepDefinition?.nodeType).toBe(NodeType.PROCESADOR_IA);
+      expect(draft.activeStepDefinition?.nodeType).toBe(NodeType.ESCUDO_POST_IA);
       expect(draft.isActiveStepValid).toBe(false);
     });
 
@@ -1100,9 +1108,72 @@ describe('useFlujoDraftStore · agregador del asistente', () => {
         action: 'ALERTA_SMTP',
       });
 
-      // 3. Assert 🎯
+      // 3. Assert 🎯: el bloqueo se senala en EL PASO DE CONTINGENCIAS, no en
+      //    cada nodo que declara la rama: desde que el formulario vive en un
+      //    solo sitio, repartirlo mandaria al operador a corregirlo donde ya no
+      //    esta.
+      const blocked = draft.invalidSteps.find((item) => item.reason === 'ALERTA_INCOMPLETA');
+
       expect(draft.canSave).toBe(false);
-      expect(draft.invalidSteps.map((item) => item.reason)).toContain('RAMA_DE_ERROR_INCOMPLETA');
+      expect(blocked?.index).toBe(draft.alertStepIndex);
+      expect(blocked?.step.nodeId).toBe(SHARED_ALERT_NODE_ID);
+    });
+
+    it('17.8bis deberia anadir el paso de contingencias solo con rama SMTP', async () => {
+      // 1. Arrange 📐
+      const draft = await buildSelectedDraft();
+
+      // 2. Act ⚙️ + 3. Assert 🎯
+      expect(draft.hasAlertContingencyStep).toBe(false);
+      expect(draft.configurableStepCount).toBe(draft.pipelineTopology.length);
+
+      draft.setErrorBranch(MAPPER_NODE_ID, {
+        trigger: 'CUALQUIER_FALLO',
+        action: 'ALERTA_SMTP',
+      });
+
+      expect(draft.hasAlertContingencyStep).toBe(true);
+      expect(draft.alertStepIndex).toBe(draft.pipelineTopology.length);
+      expect(draft.configurableStepCount).toBe(draft.pipelineTopology.length + 1);
+    });
+
+    it('17.8ter deberia mover el final del stepper al paso de contingencias', async () => {
+      // 1. Arrange 📐: sin esto, el boton del ultimo nodo diria "Revisar y
+      //    guardar" y saltaria por encima del formulario de destinatarios.
+      const draft = await buildSelectedDraft();
+      draft.setErrorBranch(MAPPER_NODE_ID, {
+        trigger: 'CUALQUIER_FALLO',
+        action: 'ALERTA_SMTP',
+      });
+
+      // 2. Act ⚙️: cursor en el ultimo NODO.
+      draft.activeStep = draft.pipelineTopology.length - 1;
+
+      // 3. Assert 🎯
+      expect(draft.isLastStep).toBe(false);
+
+      draft.activeStep = draft.alertStepIndex;
+
+      expect(draft.isLastStep).toBe(true);
+      expect(draft.isAlertStep).toBe(true);
+    });
+
+    it('17.8quater deberia validar el paso de contingencias con su nodo', async () => {
+      // 1. Arrange 📐: ese paso no esta en la topologia, asi que su validez es
+      //    la del nodo de alerta compartido.
+      const draft = await buildSelectedDraft();
+      draft.setErrorBranch(MAPPER_NODE_ID, {
+        trigger: 'CUALQUIER_FALLO',
+        action: 'ALERTA_SMTP',
+      });
+      draft.activeStep = draft.alertStepIndex;
+
+      // 2. Act ⚙️ + 3. Assert 🎯
+      expect(draft.isActiveStepValid).toBe(false);
+
+      configureAlertNode();
+
+      expect(draft.isActiveStepValid).toBe(true);
     });
 
     it('17.9 deberia desbloquearlo al completar el nodo de alerta', async () => {
@@ -1219,6 +1290,98 @@ describe('useFlujoDraftStore · agregador del asistente', () => {
       //    `PipelineSchemaDto` exige el campo y la plantilla es la referencia
       //    mas honesta hasta que la fila exista.
       expect(schema.flowId).toBe(TEMPLATE_ID);
+    });
+  });
+
+  describe('19. Lectura de las ramas desde la vista', () => {
+    it('19.1 deberia devolver la rama declarada de un paso', async () => {
+      // 1. Arrange 📐
+      const draft = await buildSelectedDraft();
+      const branch = { trigger: 'CUALQUIER_FALLO', action: 'ALERTA_SMTP' } as const;
+
+      // 2. Act ⚙️
+      draft.setErrorBranch(MAPPER_NODE_ID, branch);
+
+      // 3. Assert 🎯
+      expect(draft.getNodeErrorBranch(MAPPER_NODE_ID)).toEqual(branch);
+      expect(draft.getNodeErrorBranch(PARSER_NODE_ID)).toBeNull();
+    });
+
+    it('19.2 NO deberia contar la alerta como recuperacion contextual', async () => {
+      // 1. Arrange 📐: una alerta es TERMINAL —avisa a una persona— y se
+      //    configura en el paso de contingencias, no junto al nodo que la
+      //    declara. Solo la recuperacion funcional se dibuja ahi.
+      const draft = await buildSelectedDraft();
+
+      // 2. Act ⚙️
+      draft.setErrorBranch(MAPPER_NODE_ID, {
+        trigger: 'CUALQUIER_FALLO',
+        action: 'ALERTA_SMTP',
+      });
+
+      // 3. Assert 🎯
+      expect(draft.hasContextualRecoveryBranch(MAPPER_NODE_ID)).toBe(false);
+    });
+
+    it('19.3 SI deberia contar la ruta de vision', async () => {
+      // 1. Arrange 📐
+      const draft = useFlujoDraftStore();
+      fetchWorkflowTemplates.mockResolvedValue([
+        buildTemplate({
+          topology: [
+            {
+              nodeId: TRIGGER_NODE_ID,
+              nodeType: NodeType.TRIGGER_IMAP,
+              outputNamespace: 'raw_email',
+            },
+            {
+              nodeId: PARSER_NODE_ID,
+              nodeType: NodeType.PARSER_PRE_IA,
+              outputNamespace: 'parsed_email',
+            },
+            {
+              nodeId: 'nodo_ia',
+              nodeType: NodeType.PROCESADOR_IA,
+              outputNamespace: 'llm_response',
+            },
+          ],
+        }),
+      ]);
+      fetchNodeCatalog.mockResolvedValue(CATALOG_ENTRIES);
+      await draft.loadAvailableTemplates();
+      draft.selectTemplate(TEMPLATE_ID);
+
+      // 2. Act ⚙️
+      draft.setErrorBranch(PARSER_NODE_ID, {
+        trigger: 'SIN_TEXTO_EXTRAIBLE',
+        action: 'VISION_IA',
+      });
+
+      // 3. Assert 🎯
+      expect(draft.hasContextualRecoveryBranch(PARSER_NODE_ID)).toBe(true);
+      expect(draft.resolveBranchTarget('VISION_IA')).toBe('nodo_ia');
+    });
+
+    it('19.4 deberia llevar el cursor al paso de un nodo concreto', async () => {
+      // 1. Arrange 📐
+      const draft = await buildSelectedDraft();
+
+      // 2. Act ⚙️
+      draft.goToNodeStep(MAPPER_NODE_ID);
+
+      // 3. Assert 🎯
+      expect(draft.activeStepDefinition?.nodeId).toBe(MAPPER_NODE_ID);
+    });
+
+    it('19.5 no deberia mover el cursor hacia un nodo que no existe', async () => {
+      // 1. Arrange 📐
+      const draft = await buildSelectedDraft();
+
+      // 2. Act ⚙️
+      draft.goToNodeStep('nodo_inventado');
+
+      // 3. Assert 🎯
+      expect(draft.activeStep).toBe(0);
     });
   });
 });
@@ -1504,9 +1667,10 @@ describe('useFlujoDraftStore · modo edicion', () => {
 
   describe('16. Motivo por el que un paso bloquea el guardado', () => {
     it('16.1 deberia distinguir el nodo sin configurador del que solo esta incompleto', async () => {
-      // 1. Arrange: TRIGGER_IMAP (con configurador, sin probar) y PROCESADOR_IA
+      // 1. Arrange: TRIGGER_IMAP (con configurador, sin probar) y ESCUDO_POST_IA
       //    (sin configurador). Se usa la topologia alternativa porque
-      //    PARSER_PRE_IA dejo de ser un tipo sin configurador.
+      //    PARSER_PRE_IA y PROCESADOR_IA fueron dejando de ser tipos sin
+      //    configurador al recibir su triada.
       const draft = useFlujoDraftStore();
       fetchWorkflowTemplates.mockResolvedValue([buildTemplate({ topology: UNSUPPORTED_TOPOLOGY })]);
       await draft.loadAvailableTemplates();
@@ -1517,7 +1681,7 @@ describe('useFlujoDraftStore · modo edicion', () => {
 
       // 3. Assert: presentarlos igual dejaba al operador reintentando algo que
       //    no tiene arreglo desde el asistente.
-      expect(byType.get(NodeType.PROCESADOR_IA)).toBe('SIN_CONFIGURADOR');
+      expect(byType.get(NodeType.ESCUDO_POST_IA)).toBe('SIN_CONFIGURADOR');
       expect(byType.get(NodeType.TRIGGER_IMAP)).toBe('CONFIGURACION_INCOMPLETA');
     });
 

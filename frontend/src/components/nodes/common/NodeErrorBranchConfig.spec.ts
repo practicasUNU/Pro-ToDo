@@ -35,6 +35,12 @@ vi.mock('@services/workflows.service', () => ({
   fetchWorkflow: vi.fn(),
   updateWorkflow: vi.fn(),
 }));
+// El store del nodo de IA consume el catalogo de prompts, asi que el
+// registro de stores lo arrastra hasta aqui.
+vi.mock('@services/ai-prompt-templates.service', () => ({
+  fetchAiPromptTemplates: vi.fn(),
+  fetchAiPromptTemplateById: vi.fn(),
+}));
 vi.mock('@services/node-catalog.service', () => ({ fetchNodeCatalog: vi.fn() }));
 vi.mock('@services/nodes/trigger-imap.service', () => ({ checkImapConnection: vi.fn() }));
 vi.mock('@services/nodes/parser-email.service', () => ({ checkParser: vi.fn() }));
@@ -315,10 +321,11 @@ describe('NodeErrorBranchConfig · ruta de contingencia de un paso', () => {
     });
   });
 
-  describe('5. Configurador del nodo de alerta incrustado', () => {
-    it('5.1 deberia aparecer cuando la rama provisiona el satelite', async () => {
-      // 1. Arrange 📐: el operador declara la ruta y la parametriza en el mismo
-      //    paso, sin buscar otro sitio donde poner los destinatarios.
+  describe('5. Remision al paso de contingencias', () => {
+    it('5.1 deberia remitir al paso final en vez de incrustar el formulario', async () => {
+      // 1. Arrange 📐: el formulario se repetia en CADA paso que declaraba rama,
+      //    y todos editaban el mismo nodo. Ahora vive una sola vez en el paso de
+      //    contingencias y aqui solo queda la indicacion de donde esta.
       const draft = await buildDraft();
       draft.setErrorBranch(PARSER_NODE_ID, {
         trigger: 'CUALQUIER_FALLO',
@@ -329,16 +336,16 @@ describe('NodeErrorBranchConfig · ruta de contingencia de un paso', () => {
       const wrapper = mountPanel();
 
       // 3. Assert 🎯
-      const embedded = wrapper.find('[data-test="embedded-alert-config"]');
+      const hint = wrapper.find('[data-test="alert-step-hint"]');
 
-      expect(embedded.exists()).toBe(true);
-      expect(embedded.find(`[data-node-id="${SHARED_ALERT_NODE_ID}"]`).exists()).toBe(true);
+      expect(hint.exists()).toBe(true);
+      expect(hint.text()).toContain('Contingencias por correo');
+      expect(wrapper.find(`[data-node-id="${SHARED_ALERT_NODE_ID}"]`).exists()).toBe(false);
     });
 
-    it('5.2 NO deberia aparecer si el flujo ya trae un nodo de alerta', async () => {
-      // 1. Arrange 📐: entonces la ruta apunta a ese, que se configura en su
-      //    propio paso del asistente. Duplicar el formulario ofreceria dos sitios
-      //    para la misma configuracion.
+    it('5.2 NO deberia remitir a ningun sitio si el flujo ya trae su alerta', async () => {
+      // 1. Arrange 📐: entonces la ruta apunta a ese nodo, que ya tiene su propio
+      //    paso en el asistente, y no se provisiona ningun satelite.
       const draft = await buildDraft([
         ...TOPOLOGY_SIN_IA,
         {
@@ -356,7 +363,7 @@ describe('NodeErrorBranchConfig · ruta de contingencia de un paso', () => {
       const wrapper = mountPanel();
 
       // 3. Assert 🎯
-      expect(wrapper.find('[data-test="embedded-alert-config"]').exists()).toBe(false);
+      expect(wrapper.find('[data-test="alert-step-hint"]').exists()).toBe(false);
     });
   });
 });

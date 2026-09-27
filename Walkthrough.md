@@ -4,6 +4,113 @@ Registro técnico del "por qué" de cada decisión de implementación. Los estad
 
 ---
 
+## 2026-09-26 · Nodo de IA configurable y paso de contingencias — rama `feat/ui-contextual-branching`
+
+### Dos costuras de la tanda anterior
+
+PROT-18 dejó las rutas declarables, y con ellas dos cosas que se veían mal en cuanto se usaban. La
+primera: el formulario de destinatarios se incrustaba en **cada** paso que declaraba una rama, y
+todos editaban el mismo nodo. Con dos ramas el operador veía el mismo campo dos veces sin saber cuál
+mandaba (mandaban los dos: era la misma instancia de store). La segunda: la rama de visión apuntaba a
+un `PROCESADOR_IA` que seguía sin configurador, así que el asistente lo pintaba con el cartel
+«Configurador no disponible» y bloqueaba el guardado del flujo entero.
+
+### El nodo de IA no era un satélite
+
+El encargo pedía desplegar la configuración de ese «nodo satélite» dentro del paso del parser,
+conectada con un panel de bifurcación. Al ir a hacerlo apareció que la premisa no se sostiene.
+
+La ruta del parser apunta **hacia adelante**, al nodo que el flujo iba a ejecutar de todas formas:
+`TRIGGER → PARSER → IA → MAPEADOR`. Lo que cambia al desviarse no es el destino, es que el motor
+siembra `error_context` y eso conmuta el nodo a modo visión. La rama no es un desvío: es «sigue, pero
+leyendo la imagen en vez del texto». Dibujarla como una caja colgando del parser diría que ese nodo
+solo corre cuando algo falla, y es lo contrario de lo que pasa.
+
+Había además un argumento estructural. `WizardPage` es enteramente polimórfico —resuelve componente y
+store por `nodeType`—, así que en cuanto `PROCESADOR_IA` entró en los dos registros pasó a tener **su
+propio paso**, con su formulario completo, sin tocar una línea del anfitrión. Anidarlo bajo el parser
+habría pintado el mismo formulario del mismo nodo dos veces: exactamente la costura que esta misma
+tanda venía a quitar del SMTP.
+
+Así que `NodeBranchCard` quedó como **referencia cruzada**: dice que la rama existe, qué código
+atrapa, qué paso la recibe, y lleva hasta allí con un botón. Una sola configuración, en un solo
+sitio, y la topología legible desde los dos extremos.
+
+### Construir el nodo de IA era la mitad del trabajo
+
+Ocho campos, y ninguno inocente. El DTO del backend dedica más líneas a advertir que a describir, y
+esas advertencias no se deducen mirando un formulario, así que acabaron en `configWarnings` —el canal
+del contrato §3.1 que hasta ahora solo usaba el disparador IMAP—:
+
+- **Proveedor de pago sin simular**: cada ejecución del flujo factura tokens.
+- **Proveedor sin cliente**: desde PROT-16, elegir Claude u OpenAI no falla, **simula**. Lo único que
+  distingue una redacción real de una simulada es `metadata.isMock`. Elegirlo creyendo que escribe
+  Claude es el fallo caro, y ahora el formulario lo dice.
+- **Reintentos altos**: esta capa y el `retryPolicy` del esquema **se multiplican**. El TSDoc del DTO
+  advierte de hasta treinta y seis inferencias facturadas por una sola ejecución.
+
+El defecto del proveedor es el simulador, igual que en el backend y por el mismo motivo: un nodo al
+que nadie ha mirado la configuración no debe poder gastar dinero por omisión.
+
+Un detalle del contrato que costó decidir: **los numéricos se publican siempre**, aunque coincidan con
+el defecto. En el nodo de alerta lo vacío se omite, porque el respaldo del backend se activa con la
+clave ausente. Aquí es al revés: el valor tiene consecuencias económicas, y dejarlo implícito
+significaría que cambiar un defecto del backend cambia en silencio el coste de flujos ya guardados.
+
+### El paso que no es un nodo
+
+Los destinatarios se piden ahora una sola vez, en un paso «Contingencias por correo» que aparece
+entre el último nodo y la revisión, y solo si alguna rama provisiona el nodo de alerta. No podía
+derivarse de la topología —ese nodo se provisiona al ensamblar, no está en `pipelineTopology`—, así
+que es un paso sintético con un `WizardStep` fabricado, para que el panel de bloqueos de la revisión
+siga siendo clicable sin tocar su código. El mismo recurso que ya usaba «Revisión y guardado».
+
+La consecuencia menos obvia estaba en `isLastStep`, que se medía contra la longitud de la topología:
+sin reencuadrarlo, el botón del último nodo decía «Revisar y guardar» y saltaba por encima del
+formulario de destinatarios. Y el bloqueo por alerta incompleta dejó de repartirse entre los nodos
+fuente para señalar **el paso donde ahora está el formulario**; repartirlo mandaría al operador a
+corregirlo donde ya no se corrige.
+
+### Medio suite caído por un reexport
+
+`MULTIMODAL_FALLBACK_CODE` tenía que vivir en `types/pipeline.ts` según el encargo, y el reexport
+parecía lo limpio: una sola cadena, un solo sitio. Pero `error-branch.types.ts` ya importa `NodeType`
+de `pipeline.ts`, así que el reexport cerró un ciclo y el enum quedó `undefined` en tiempo de
+evaluación. Catorce archivos de prueba cayeron a la vez con
+`Cannot read properties of undefined (reading 'PARSER_PRE_IA')`, ninguno de ellos relacionado con el
+cambio. La constante se quedó junto al catálogo de disparadores, que es quien la usa.
+
+### Lo que NO se hizo
+
+- **Sin formulario anidado en la tarjeta de bifurcación** ni prop `is-embedded`: no se anida ningún
+  formulario, así que tocar el contrato uniforme de §3.1 no compraba nada.
+- **`getStepValidationStatus` no se enchufó al botón «Siguiente»**, aunque el encargo lo pedía. El
+  nodo que recibe la recuperación es un paso POSTERIOR: bloquear el avance del paso que la declara
+  dejaría el asistente en punto muerto, porque a ese nodo solo se llega pasando por este.
+- **Sin servicio propio para el nodo de IA.** Necesita el catálogo de prompts, pero ya lo sirven
+  `ai-prompt-templates.service` y su store de dominio; reexportarlos habría sido la capa vacía que
+  §2.1 desaconseja.
+- **Sin tocar el backend.** Las 55 suites siguen donde estaban.
+
+### Estado de la verificación
+
+Frontend **30 archivos / 599 pruebas** (desde 27 / 547), `vue-tsc` y eslint en cero. Backend
+**55 suites / 1265**, sin cambios. Los siete archivos que `prettier --check` señala son los mismos
+de siempre, todos ajenos a esta rama.
+
+El tipo que las pruebas usan como «sin configurador» rotó de `PROCESADOR_IA` a `ESCUDO_POST_IA`. El
+comentario de esa constante lo anticipaba desde la tanda del parser, y seguirá rotando: el último de
+la cola es `DESTINO_HTTP`.
+
+### Pendiente
+
+- La migración 021 y el `.env`, arrastrados desde PROT-16. **Sin ellos `DESTINO_SMTP` llega con
+  `implemented: false`.**
+- `ESCUDO_POST_IA` y `DESTINO_HTTP` son los dos tipos que quedan sin configurador, y ninguno tiene
+  estrategia en el motor: su turno va detrás del backend.
+
+---
+
 ## 2026-09-26 · Bifurcaciones de contingencia en el asistente — rama `feat/ui-error-branching-smtp`
 
 ### El destino existía y era inalcanzable

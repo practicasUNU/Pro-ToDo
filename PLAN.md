@@ -3451,5 +3451,114 @@ del orden, no para el dato.
 - [x] 95. Pruebas — frontend 27 archivos / 547 (+1 archivo, +41); backend intacto en 55 / 1265
 - [ ] 96. Pendiente — arrastrado del 88: aplicar la migración 021 y actualizar el `.env` real. **Sin
       ella `DESTINO_SMTP` llega con `implemented: false` y el editor de plantillas lo deshabilita**
-- [ ] 97. Pendiente — configurador Quasar de `PROCESADOR_IA`. Mientras no exista, la ruta de visión
-      solo se ofrece si la plantilla ya coloca ese nodo, y su prompt se configura fuera del asistente
+- [x] 97. Configurador Quasar de `PROCESADOR_IA` — **cerrado en PROT-19** (ver la tanda siguiente).
+      El registro cubre ahora 7 de 9 tipos
+
+---
+
+## Tanda actual — PROT-19 · Configurador de `PROCESADOR_IA` y bifurcaciones contextuales
+
+PROT-18 dejó las rutas declarables y con dos costuras visibles: el formulario de destinatarios se
+repetía en **cada** paso que declaraba rama —todos editando el mismo nodo—, y la rama de visión
+apuntaba a un `PROCESADOR_IA` que seguía sin configurador, así que el asistente lo pintaba con el
+cartel «Configurador no disponible» y bloqueaba el guardado del flujo entero.
+
+### Contratos nuevos
+
+```ts
+// @/types/nodes/llm-extractor.types.ts — replica de LlmExtractorConfigDto
+export enum LlmProvider { MOCK, GEMINI, ANTHROPIC, OPENAI }
+export const IMPLEMENTED_LLM_PROVIDERS: ReadonlySet<LlmProvider>;  // MOCK y GEMINI
+export interface LlmExtractorNodeConfig { templatePromptId: string | null; inlinePrompt: string;
+  provider: LlmProvider; model: string; dryRun: boolean; timeoutMs: number;
+  maxRetries: number; emergencyBrakeThreshold: number }
+
+// @/types/nodes/error-branch.types.ts
+export const MULTIMODAL_FALLBACK_CODE = ERR_PARSER_UNEXTRACTABLE_MEDIA;
+
+// flujo-draft.store.ts
+hasAlertContingencyStep / alertStepIndex / configurableStepCount / isAlertStep
+getNodeErrorBranch / hasContextualRecoveryBranch / getStepValidationStatus / goToNodeStep
+StepBlockReason: 'RAMA_DE_ERROR_INCOMPLETA' → 'ALERTA_INCOMPLETA'
+```
+
+### Diagrama de inyección
+
+```
+WizardPage.vue
+ ├── q-step por nodo
+ │     ├── <component :is=nodeConfigRegistry[nodeType]>   ← ahora incluye PROCESADOR_IA
+ │     ├── <NodeErrorBranchConfig>                        ← solo DECLARA la ruta
+ │     └── <NodeBranchCard>  (si la rama es de recuperacion funcional)
+ │              └── draftStore.goToNodeStep(targetNodeId)
+ ├── q-step "Contingencias por correo"  (solo si hasAlertContingencyStep)
+ │     └── <SmtpAlertConfig :node-id=SHARED_ALERT_NODE_ID>   ← UNICA copia
+ └── q-step "Revision y guardado"
+
+useLlmExtractorStore(nodeId) ──> useAiPromptTemplatesStore  (catalogo de prompts, compartido)
+```
+
+### Por qué el nodo de IA NO se anida en el paso del parser
+
+El encargo pedía desplegar la config del «nodo satélite» dentro del paso emisor. **Ese nodo no es un
+satélite.** La ruta del parser apunta *hacia adelante*, al nodo que el flujo iba a ejecutar de todas
+formas (`TRIGGER → PARSER → IA → MAPEADOR`); lo que cambia al desviarse no es el destino, sino que el
+motor siembra `error_context` y eso conmuta el nodo a modo visión. La rama no es un desvío: es
+«sigue, pero leyendo la imagen».
+
+Dibujarlo colgando del parser diría que solo corre cuando algo falla, y es falso. Además `WizardPage`
+es enteramente polimórfico, así que en cuanto `PROCESADOR_IA` entró en los dos registros pasó a tener
+**su propio paso** con su formulario: anidarlo habría pintado el mismo formulario del mismo nodo dos
+veces, justo lo que se acaba de eliminar para el SMTP. `NodeBranchCard` es por eso una referencia
+cruzada con salto al paso, no un segundo formulario.
+
+### Por qué el paso de contingencias es sintético
+
+El nodo de alerta compartido no está en `pipelineTopology` —se provisiona al ensamblar—, así que no
+podía tener un `q-step` derivado como los demás. Se añade uno entre el último nodo y la revisión, con
+un `WizardStep` sintético para que el panel de bloqueos siga siendo clicable sin tocar su código. Es
+el mismo recurso que ya usaba «Revisión y guardado», que tampoco corresponde a ningún nodo del grafo.
+
+`isLastStep` pasa a medirse contra `configurableStepCount` y no contra la longitud de la topología:
+sin eso, el botón del último nodo decía «Revisar y guardar» y saltaba por encima del formulario de
+destinatarios.
+
+### Por qué `getStepValidationStatus` no se enchufa al botón «Siguiente»
+
+El encargo lo pedía. El nodo que recibe la recuperación es un paso **posterior**, así que bloquear el
+avance del paso que la declara dejaría el asistente en punto muerto: a ese nodo solo se llega pasando
+por este. El getter existe y se expone, pero la conjunción se aplica donde sí corresponde, en
+`canSave`, que mira todos los pasos a la vez.
+
+### Por qué `MULTIMODAL_FALLBACK_CODE` no vive en `types/pipeline.ts`
+
+Se intentó, con un `export { ... } from`. `error-branch.types.ts` ya importa `NodeType` de
+`pipeline.ts`, así que el reexport cerró un ciclo y el enum quedó `undefined` en tiempo de
+evaluación: **medio suite cayó** con `Cannot read properties of undefined (reading 'PARSER_PRE_IA')`.
+La constante se queda junto al catálogo de disparadores, que es quien la pone en `catchErrors`, y el
+alias se exporta desde ahí.
+
+### Por qué el catálogo de prompts se memoiza en el nodo y no en su store de dominio
+
+`node-catalog.store` lleva la guarda dentro porque son datos de instalación. Los prompts, en cambio,
+se crean y editan desde su propia pantalla, y el gestor llama a `loadPrompts()` tras cada alta
+esperando releer: memoizarlo allí dejaría la tabla administrativa mostrando la fila anterior. El
+nodo solo necesita poblar un selector, y sin guarda un flujo con dos inferencias haría dos peticiones
+idénticas al montar sus dos pasos.
+
+### Estado de las tareas
+
+- [x] 98. Tríada de `PROCESADOR_IA` — tipos, store y `LlmExtractorConfig.vue` con los ocho campos del
+      DTO; alta en los dos registros. **Cierra el pendiente 97**
+- [x] 99. Avisos de coste en `configWarnings`: proveedor de pago sin simular, proveedor sin cliente
+      que degrada al simulador, y el efecto multiplicativo de los reintentos
+- [x] 100. Paso sintético «Contingencias por correo» con la ÚNICA copia de `SmtpAlertConfig`;
+      `isLastStep` y `reviewStepIndex` reencuadrados; motivo `ALERTA_INCOMPLETA`
+- [x] 101. `NodeBranchCard.vue` como referencia cruzada con salto al paso destino
+- [x] 102. Getters `getNodeErrorBranch`, `hasContextualRecoveryBranch`, `getStepValidationStatus` y
+      `goToNodeStep`
+- [x] 103. Pruebas — frontend 30 archivos / 599 (+3 archivos, +52); backend intacto en 55 / 1265.
+      El tipo «sin configurador» de las pruebas rota de `PROCESADOR_IA` a `ESCUDO_POST_IA`
+- [ ] 104. Pendiente — arrastrado del 96: aplicar la migración 021 y actualizar el `.env` real
+- [ ] 105. Pendiente — `ESCUDO_POST_IA` y `DESTINO_HTTP`, los dos tipos que quedan sin configurador.
+      Ninguno tiene estrategia en el motor, así que su turno va detrás del backend

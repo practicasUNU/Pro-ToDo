@@ -55,8 +55,8 @@ export type StepBlockReason =
   | 'SIN_STORE'
   /** El nodo tiene configurador y aun no se declara valido. */
   | 'CONFIGURACION_INCOMPLETA'
-  /** El paso declara una ruta de contingencia cuyo nodo destino esta a medias. */
-  | 'RAMA_DE_ERROR_INCOMPLETA';
+  /** El paso de contingencias existe pero su nodo de alerta esta sin completar. */
+  | 'ALERTA_INCOMPLETA';
 
 /** Un aviso que un paso quiere que el operador confirme antes de persistir. */
 export interface StepWarning {
@@ -75,14 +75,16 @@ export interface InvalidStep {
   readonly message: string;
 }
 
+/** Etiqueta del paso sintetico de contingencias. */
+export const ALERT_STEP_NAME = 'Contingencias por correo';
+
 /** Texto que la vista muestra para cada motivo. */
 const STEP_BLOCK_MESSAGES: Record<StepBlockReason, (step: WizardStep) => string> = {
   SIN_CONFIGURADOR: (step) => `El tipo ${step.name} todavia no tiene interfaz de configuracion.`,
   SIN_STORE: (step) =>
     `El tipo ${step.name} no tiene estrategia en el motor: este flujo no se puede guardar. Edita la plantilla para retirarlo.`,
   CONFIGURACION_INCOMPLETA: () => 'Faltan campos por completar en este paso.',
-  RAMA_DE_ERROR_INCOMPLETA: () =>
-    'La ruta de contingencia de este paso apunta a un nodo de alerta sin destinatarios.',
+  ALERTA_INCOMPLETA: () => 'Indica al menos un destinatario para las alertas de contingencia.',
 };
 
 /**
@@ -93,21 +95,14 @@ const STEP_BLOCK_MESSAGES: Record<StepBlockReason, (step: WizardStep) => string>
  * el configurador" es mas util que "falta el store", que no significa nada para
  * quien usa el asistente.
  */
-const resolveStepBlockReason = (
-  step: WizardStep,
-  hasIncompleteBranch: boolean,
-): StepBlockReason | null => {
+const resolveStepBlockReason = (step: WizardStep): StepBlockReason | null => {
   if (nodeConfigRegistry[step.nodeType] === undefined) return 'SIN_CONFIGURADOR';
 
   const store = resolveNodeStore(step.nodeType, step.nodeId);
 
   if (store === null) return 'SIN_STORE';
 
-  if (!store.isConfigValid) return 'CONFIGURACION_INCOMPLETA';
-
-  // La rama se mira DESPUES de la config propia: un paso al que le falta su
-  // propio campo obligatorio debe decirlo antes que hablar de su desvio.
-  return hasIncompleteBranch ? 'RAMA_DE_ERROR_INCOMPLETA' : null;
+  return store.isConfigValid ? null : 'CONFIGURACION_INCOMPLETA';
 };
 
 /**
@@ -188,9 +183,21 @@ export const useFlujoDraftStore = defineStore('flujoDraft', () => {
 
   const isFirstStep = computed<boolean>(() => activeStep.value === 0);
 
+  /**
+   * Si el cursor esta en el ultimo paso CONFIGURABLE.
+   *
+   * Se mide contra `configurableStepCount` y no contra la longitud de la
+   * topologia porque el paso de contingencias, cuando existe, va detras del
+   * ultimo nodo: sin esto, el boton del ultimo nodo diria "Revisar y guardar" y
+   * saltaria por encima del formulario de destinatarios.
+   */
   const isLastStep = computed<boolean>(
-    () =>
-      pipelineTopology.value.length > 0 && activeStep.value === pipelineTopology.value.length - 1,
+    () => configurableStepCount.value > 0 && activeStep.value === configurableStepCount.value - 1,
+  );
+
+  /** Si el cursor esta sobre el paso sintetico de contingencias. */
+  const isAlertStep = computed<boolean>(
+    () => alertStepIndex.value !== -1 && activeStep.value === alertStepIndex.value,
   );
 
   /**
@@ -205,6 +212,12 @@ export const useFlujoDraftStore = defineStore('flujoDraft', () => {
    * ensamblar un `pipeline_schema` con un nodo sin configurar.
    */
   const isActiveStepValid = computed<boolean>(() => {
+    // El paso de contingencias no esta en la topologia: su validez es la del
+    // nodo de alerta compartido, que es lo unico que se configura ahi.
+    if (isAlertStep.value) {
+      return useSmtpAlertStore(SHARED_ALERT_NODE_ID).isConfigValid;
+    }
+
     const step = activeStepDefinition.value;
 
     if (step === null) return false;
@@ -485,6 +498,15 @@ export const useFlujoDraftStore = defineStore('flujoDraft', () => {
     activeStep.value += 1;
   };
 
+  /** Lleva el cursor al paso que configura un nodo concreto, si existe. */
+  const goToNodeStep = (nodeId: string): void => {
+    const index = pipelineTopology.value.findIndex((step) => step.nodeId === nodeId);
+
+    if (index === -1) return;
+
+    activeStep.value = index;
+  };
+
   /** Retrocede sin validar: volver atras a corregir siempre debe ser posible. */
   const goToPreviousStep = (): void => {
     if (isFirstStep.value) return;
@@ -560,24 +582,69 @@ export const useFlujoDraftStore = defineStore('flujoDraft', () => {
     () => needsProvisionedAlertNode.value && !useSmtpAlertStore(SHARED_ALERT_NODE_ID).isConfigValid,
   );
 
-  /** Pasos cuya rama apunta al satelite compartido y este esta incompleto. */
-  const stepHasIncompleteBranch = (nodeId: string): boolean => {
-    const branch = errorBranches.value[nodeId];
+  /**
+   * Si el asistente muestra el paso final de contingencias.
+   *
+   * Solo cuando hay rama SMTP y el flujo NO trae ya un `DESTINO_SMTP` propio: en
+   * ese caso el nodo de alerta ya tiene su paso en la topologia y anadir otro lo
+   * duplicaria.
+   */
+  const hasAlertContingencyStep = computed<boolean>(() => needsProvisionedAlertNode.value);
 
-    if (branch === undefined || branch.action !== 'ALERTA_SMTP') return false;
+  /**
+   * Paso sintetico de contingencias, o `null` si no aplica.
+   *
+   * Se declara como un `WizardStep` completo aunque no sea un nodo de la
+   * topologia para que los consumidores —el panel de bloqueos de la revision,
+   * que salta al paso culpable— no tengan que distinguirlo del resto. El mismo
+   * truco que usa el paso de revision, que tampoco corresponde a ningun nodo.
+   */
+  const alertContingencyStep = computed<WizardStep | null>(() =>
+    hasAlertContingencyStep.value
+      ? {
+          nodeId: SHARED_ALERT_NODE_ID,
+          nodeType: NodeType.DESTINO_SMTP,
+          outputNamespace: DEFAULT_OUTPUT_NAMESPACE_BY_NODE_TYPE[NodeType.DESTINO_SMTP],
+          name: ALERT_STEP_NAME,
+        }
+      : null,
+  );
 
-    return hasIncompleteAlertNode.value;
-  };
+  /** Indice del paso de contingencias, o `-1` si no se muestra. */
+  const alertStepIndex = computed<number>(() =>
+    hasAlertContingencyStep.value ? pipelineTopology.value.length : -1,
+  );
 
-  const invalidSteps = computed<InvalidStep[]>(() =>
-    pipelineTopology.value.flatMap((step, index) => {
-      const reason = resolveStepBlockReason(step, stepHasIncompleteBranch(step.nodeId));
+  /** Numero total de pasos CONFIGURABLES, sin contar la revision final. */
+  const configurableStepCount = computed<number>(
+    () => pipelineTopology.value.length + (hasAlertContingencyStep.value ? 1 : 0),
+  );
+
+  const invalidSteps = computed<InvalidStep[]>(() => {
+    const steps = pipelineTopology.value.flatMap<InvalidStep>((step, index) => {
+      const reason = resolveStepBlockReason(step);
 
       if (reason === null) return [];
 
       return [{ step, index, reason, message: STEP_BLOCK_MESSAGES[reason](step) }];
-    }),
-  );
+    });
+
+    // El nodo de alerta se senala en SU paso y no en cada paso que lo invoca:
+    // desde que el formulario vive en un solo sitio, repartir el bloqueo entre
+    // los nodos fuente mandaria al operador a corregirlo donde ya no esta.
+    const alertStep = alertContingencyStep.value;
+
+    if (alertStep !== null && hasIncompleteAlertNode.value) {
+      steps.push({
+        step: alertStep,
+        index: alertStepIndex.value,
+        reason: 'ALERTA_INCOMPLETA',
+        message: STEP_BLOCK_MESSAGES.ALERTA_INCOMPLETA(alertStep),
+      });
+    }
+
+    return steps;
+  });
 
   const canSave = computed<boolean>(
     () => pipelineTopology.value.length > 0 && invalidSteps.value.length === 0,
@@ -620,6 +687,50 @@ export const useFlujoDraftStore = defineStore('flujoDraft', () => {
     if (!needsProvisionedAlertNode.value) {
       useSmtpAlertStore(SHARED_ALERT_NODE_ID).resetConfig();
     }
+  };
+
+  /** Ruta de contingencia declarada para un paso, o `null`. */
+  const getNodeErrorBranch = (nodeId: string): ErrorBranch | null =>
+    errorBranches.value[nodeId] ?? null;
+
+  /**
+   * Si el paso se desvia a un nodo de PROCESAMIENTO y no a una alerta.
+   *
+   * Es lo que distingue una recuperacion funcional —el flujo sigue adelante por
+   * otra via— de un aviso a una persona, que es terminal. Solo la primera se
+   * dibuja junto al paso que la declara.
+   */
+  const hasContextualRecoveryBranch = (nodeId: string): boolean =>
+    getNodeErrorBranch(nodeId)?.action === 'VISION_IA';
+
+  /**
+   * Validez de un paso CONTANDO la de su rama contextual.
+   *
+   * NO se enchufa al boton "Siguiente", y es deliberado: el nodo que recibe la
+   * recuperacion es un paso POSTERIOR del asistente, asi que bloquear el avance
+   * del paso que la declara dejaria el asistente en punto muerto —a ese nodo
+   * solo se llega pasando por este—. La conjuncion se aplica donde si
+   * corresponde, en `canSave`, que mira todos los pasos a la vez.
+   */
+  const getStepValidationStatus = (nodeId: string): boolean => {
+    const step = pipelineTopology.value.find((candidate) => candidate.nodeId === nodeId);
+
+    if (step === undefined) return false;
+
+    const ownValidity = resolveNodeStore(step.nodeType, step.nodeId)?.isConfigValid ?? false;
+
+    if (!ownValidity || !hasContextualRecoveryBranch(nodeId)) return ownValidity;
+
+    const branch = getNodeErrorBranch(nodeId);
+    const targetId = branch === null ? null : resolveBranchTarget(branch.action);
+    const targetStep =
+      targetId === null
+        ? null
+        : (pipelineTopology.value.find((candidate) => candidate.nodeId === targetId) ?? null);
+
+    return targetStep === null
+      ? ownValidity
+      : (resolveNodeStore(targetStep.nodeType, targetStep.nodeId)?.isConfigValid ?? false);
   };
 
   /** Ruta de un paso en la forma que espera el esquema, o `null` si no la hay. */
@@ -880,8 +991,17 @@ export const useFlujoDraftStore = defineStore('flujoDraft', () => {
     availableBranchActions,
     needsProvisionedAlertNode,
     hasIncompleteAlertNode,
+    hasAlertContingencyStep,
+    alertContingencyStep,
+    alertStepIndex,
+    configurableStepCount,
+    isAlertStep,
     setErrorBranch,
     resolveBranchTarget,
+    getNodeErrorBranch,
+    hasContextualRecoveryBranch,
+    getStepValidationStatus,
+    goToNodeStep,
     upstreamNamespaces,
     upstreamContext,
     syncUpstreamNamespaces,

@@ -1,0 +1,402 @@
+import { createPinia, setActivePinia } from 'pinia';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+
+import { useAiPromptTemplatesStore } from '@stores/ai-prompt-templates.store';
+
+import {
+  DEFAULT_LLM_EMERGENCY_BRAKE_THRESHOLD,
+  DEFAULT_LLM_MAX_RETRIES,
+  DEFAULT_LLM_MODEL,
+  DEFAULT_LLM_TIMEOUT_MS,
+  LlmProvider,
+  MAX_LLM_TIMEOUT_MS,
+} from '@/types/nodes/llm-extractor.types';
+
+import { useLlmExtractorStore } from './llm-extractor.store';
+
+import type { AiPromptTemplate } from '@/types/ai-prompt-template';
+
+// Sin esto se cargaria `@boot/axios`, que necesita entorno de navegador.
+vi.mock('@services/ai-prompt-templates.service', () => ({
+  fetchAiPromptTemplates: vi.fn(),
+  fetchAiPromptTemplateById: vi.fn(),
+}));
+
+const aiPromptTemplatesService = await import('@services/ai-prompt-templates.service');
+const fetchAiPromptTemplates = vi.mocked(aiPromptTemplatesService.fetchAiPromptTemplates);
+
+const PROMPT_ID = 'a7b8c9d0-1e2f-4a3b-8c4d-5e6f7a8b9c0d';
+
+/**
+ * `nodeId` unico por prueba.
+ *
+ * Las definiciones de Pinia se memoizan en un `Map` de MODULO que sobrevive
+ * entre pruebas, asi que reutilizar un id arrastraria el estado de la anterior.
+ */
+let nodeCounter = 0;
+const nextNodeId = (): string => `procesador_ia_${(nodeCounter += 1)}`;
+
+const buildPrompt = (overrides: Partial<AiPromptTemplate> = {}): AiPromptTemplate => ({
+  id: PROMPT_ID,
+  name: 'Redaccion de nota de prensa',
+  description: 'Convierte una nota en noticia publicable',
+  active: true,
+  createdById: 'user-1',
+  createdAt: '2026-09-01T00:00:00.000Z',
+  updatedAt: '2026-09-01T00:00:00.000Z',
+  ...overrides,
+});
+
+describe('useLlmExtractorStore · configuracion del nodo PROCESADOR_IA', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia());
+    vi.clearAllMocks();
+  });
+
+  describe('1. Estado inicial', () => {
+    it('1.1 deberia arrancar en el simulador, sin poder gastar dinero', () => {
+      // 1. Arrange 📐 + 2. Act ⚙️: mismo defecto que el backend. Un nodo al que
+      //    nadie ha mirado la configuracion no debe poder facturar por omision.
+      const store = useLlmExtractorStore(nextNodeId());
+
+      // 3. Assert 🎯
+      expect(store.config.provider).toBe(LlmProvider.MOCK);
+      expect(store.config.model).toBe(DEFAULT_LLM_MODEL);
+      expect(store.config.dryRun).toBe(false);
+    });
+
+    it('1.2 deberia arrancar sin instruccion y por tanto invalido', () => {
+      // 1. Arrange 📐 + 2. Act ⚙️
+      const store = useLlmExtractorStore(nextNodeId());
+
+      // 3. Assert 🎯
+      expect(store.config.templatePromptId).toBeNull();
+      expect(store.config.inlinePrompt).toBe('');
+      expect(store.isConfigValid).toBe(false);
+    });
+
+    it('1.3 deberia traer los defectos numericos del backend', () => {
+      // 1. Arrange 📐 + 2. Act ⚙️
+      const store = useLlmExtractorStore(nextNodeId());
+
+      // 3. Assert 🎯
+      expect(store.config.timeoutMs).toBe(DEFAULT_LLM_TIMEOUT_MS);
+      expect(store.config.maxRetries).toBe(DEFAULT_LLM_MAX_RETRIES);
+      expect(store.config.emergencyBrakeThreshold).toBe(DEFAULT_LLM_EMERGENCY_BRAKE_THRESHOLD);
+    });
+  });
+
+  describe('2. Validez: la instruccion', () => {
+    it('2.1 deberia bastar una plantilla de prompt', () => {
+      // 1. Arrange 📐: replica exacta del criterio de `getIncompleteParams`.
+      const store = useLlmExtractorStore(nextNodeId());
+
+      // 2. Act ⚙️
+      store.updateConfig({ templatePromptId: PROMPT_ID });
+
+      // 3. Assert 🎯
+      expect(store.isConfigValid).toBe(true);
+    });
+
+    it('2.2 deberia bastar una instruccion en linea', () => {
+      // 1. Arrange 📐
+      const store = useLlmExtractorStore(nextNodeId());
+
+      // 2. Act ⚙️
+      store.updateConfig({ inlinePrompt: 'Redacta a partir de {{parsed_email.clean_body}}' });
+
+      // 3. Assert 🎯
+      expect(store.isConfigValid).toBe(true);
+    });
+
+    it('2.3 no deberia aceptar una instruccion de solo espacios', () => {
+      // 1. Arrange 📐: el DTO la rechaza con `@IsNotEmpty`.
+      const store = useLlmExtractorStore(nextNodeId());
+
+      // 2. Act ⚙️
+      store.updateConfig({ inlinePrompt: '   ' });
+
+      // 3. Assert 🎯
+      expect(store.isConfigValid).toBe(false);
+    });
+
+    it('2.4 deberia senalar el conflicto sin invalidarlo', () => {
+      // 1. Arrange 📐: el backend resuelve eligiendo la PLANTILLA. No es un
+      //    error, pero el operador tiene que saberlo antes de ejecutar y no
+      //    despues de leer una redaccion que no esperaba.
+      const store = useLlmExtractorStore(nextNodeId());
+
+      // 2. Act ⚙️
+      store.updateConfig({ templatePromptId: PROMPT_ID, inlinePrompt: 'Otra cosa' });
+
+      // 3. Assert 🎯
+      expect(store.hasConflictingPrompts).toBe(true);
+      expect(store.isConfigValid).toBe(true);
+    });
+  });
+
+  describe('3. Validez: los rangos numericos', () => {
+    it.each([
+      ['timeoutMs', { timeoutMs: 999 }],
+      ['timeoutMs', { timeoutMs: MAX_LLM_TIMEOUT_MS + 1 }],
+      ['maxRetries', { maxRetries: -1 }],
+      ['maxRetries', { maxRetries: 6 }],
+      ['emergencyBrakeThreshold', { emergencyBrakeThreshold: 0 }],
+      ['emergencyBrakeThreshold', { emergencyBrakeThreshold: 6 }],
+    ])('3.1 deberia invalidar un %s fuera de rango', (_field, patch) => {
+      // 1. Arrange 📐: el DTO los rechaza con un 400 sobre el esquema ENTERO, y
+      //    el operador veria un error de guardado sin saber que campo lo causa.
+      const store = useLlmExtractorStore(nextNodeId());
+      store.updateConfig({ templatePromptId: PROMPT_ID });
+
+      // 2. Act ⚙️
+      store.updateConfig(patch);
+
+      // 3. Assert 🎯
+      expect(store.isConfigValid).toBe(false);
+    });
+
+    it('3.2 deberia invalidar un modelo vacio', () => {
+      // 1. Arrange 📐
+      const store = useLlmExtractorStore(nextNodeId());
+      store.updateConfig({ templatePromptId: PROMPT_ID });
+
+      // 2. Act ⚙️
+      store.updateConfig({ model: '  ' });
+
+      // 3. Assert 🎯
+      expect(store.isConfigValid).toBe(false);
+    });
+  });
+
+  describe('4. Avisos de coste', () => {
+    it('4.1 deberia avisar del gasto real con un proveedor de pago', () => {
+      // 1. Arrange 📐
+      const store = useLlmExtractorStore(nextNodeId());
+
+      // 2. Act ⚙️
+      store.updateConfig({ provider: LlmProvider.GEMINI, dryRun: false });
+
+      // 3. Assert 🎯
+      expect(store.configWarnings.join(' ')).toContain('tokens facturables');
+    });
+
+    it('4.2 no deberia avisar con la simulacion activada', () => {
+      // 1. Arrange 📐
+      const store = useLlmExtractorStore(nextNodeId());
+
+      // 2. Act ⚙️
+      store.updateConfig({ provider: LlmProvider.GEMINI, dryRun: true });
+
+      // 3. Assert 🎯
+      expect(store.configWarnings).toEqual([]);
+    });
+
+    it('4.3 deberia avisar de que un proveedor sin cliente degrada al simulador', () => {
+      // 1. Arrange 📐: desde PROT-16 no falla, simula. Lo unico que distingue
+      //    una redaccion real de una simulada es `metadata.isMock`, y elegir
+      //    Claude creyendo que escribe Claude es el fallo caro.
+      const store = useLlmExtractorStore(nextNodeId());
+
+      // 2. Act ⚙️
+      store.updateConfig({ provider: LlmProvider.ANTHROPIC });
+
+      // 3. Assert 🎯
+      const warnings = store.configWarnings.join(' ');
+
+      expect(warnings).toContain('simulador');
+      expect(warnings).toContain('isMock');
+    });
+
+    it('4.4 deberia avisar del efecto multiplicativo de los reintentos', () => {
+      // 1. Arrange 📐: el TSDoc del DTO advierte de hasta 36 inferencias
+      //    facturadas por una sola ejecucion del flujo.
+      const store = useLlmExtractorStore(nextNodeId());
+
+      // 2. Act ⚙️
+      store.updateConfig({ maxRetries: 5 });
+
+      // 3. Assert 🎯
+      expect(store.configWarnings.join(' ')).toContain('MULTIPLICAN');
+    });
+
+    it('4.5 no deberia avisar con los reintentos por defecto', () => {
+      // 1. Arrange 📐 + 2. Act ⚙️
+      const store = useLlmExtractorStore(nextNodeId());
+
+      // 3. Assert 🎯
+      expect(store.configWarnings).toEqual([]);
+    });
+  });
+
+  describe('5. Contrato con el pipeline_schema', () => {
+    it('5.1 deberia omitir la instruccion que no se usa', () => {
+      // 1. Arrange 📐: el DTO valida `@IsUUID` sobre `templatePromptId` y
+      //    `@IsNotEmpty` sobre `inlinePrompt` si la clave viene, asi que
+      //    publicar `null` o `''` devolveria un 400 sobre el flujo entero.
+      const store = useLlmExtractorStore(nextNodeId());
+      store.updateConfig({ inlinePrompt: 'Redacta algo' });
+
+      // 2. Act ⚙️
+      const params = store.toNodeParams();
+
+      // 3. Assert 🎯
+      expect(params).not.toHaveProperty('templatePromptId');
+      expect(params.inlinePrompt).toBe('Redacta algo');
+    });
+
+    it('5.2 deberia publicar SIEMPRE los numericos, aunque sean el defecto', () => {
+      // 1. Arrange 📐: a diferencia del asunto del nodo de alerta, aqui el valor
+      //    tiene consecuencias economicas. Dejarlo implicito significaria que
+      //    cambiar un defecto del backend cambia en silencio el coste de flujos
+      //    ya guardados.
+      const store = useLlmExtractorStore(nextNodeId());
+      store.updateConfig({ templatePromptId: PROMPT_ID });
+
+      // 2. Act ⚙️
+      const params = store.toNodeParams();
+
+      // 3. Assert 🎯
+      expect(params).toMatchObject({
+        provider: LlmProvider.MOCK,
+        model: DEFAULT_LLM_MODEL,
+        dryRun: false,
+        timeoutMs: DEFAULT_LLM_TIMEOUT_MS,
+        maxRetries: DEFAULT_LLM_MAX_RETRIES,
+        emergencyBrakeThreshold: DEFAULT_LLM_EMERGENCY_BRAKE_THRESHOLD,
+      });
+    });
+
+    it('5.3 deberia reproducir los params al hidratar y volver a publicar', () => {
+      // 1. Arrange 📐: contrato de ida y vuelta del registro de stores.
+      const store = useLlmExtractorStore(nextNodeId());
+      const params = {
+        templatePromptId: PROMPT_ID,
+        provider: LlmProvider.GEMINI,
+        model: 'gemini-1.5-pro',
+        dryRun: true,
+        timeoutMs: 30_000,
+        maxRetries: 1,
+        emergencyBrakeThreshold: 2,
+      };
+
+      // 2. Act ⚙️
+      store.hydrateFromNode({ outputNamespace: 'llm_response', params });
+
+      // 3. Assert 🎯
+      expect(store.toNodeParams()).toEqual(params);
+      expect(store.isConfigValid).toBe(true);
+    });
+
+    it('5.4 deberia sobrevivir a unos params escritos por SQL directo', () => {
+      // 1. Arrange 📐: la columna es `jsonb`. Un proveedor inventado dejaria el
+      //    selector sin seleccion, y un timeout textual lo convertiria en NaN.
+      const store = useLlmExtractorStore(nextNodeId());
+
+      // 2. Act ⚙️
+      store.hydrateFromNode({
+        outputNamespace: 'llm_response',
+        params: { provider: 'LLAMA', timeoutMs: 'mucho', dryRun: 'false' },
+      });
+
+      // 3. Assert 🎯
+      expect(store.config.provider).toBe(LlmProvider.MOCK);
+      expect(store.config.timeoutMs).toBe(DEFAULT_LLM_TIMEOUT_MS);
+      expect(store.config.dryRun).toBe(false);
+    });
+
+    it('5.5 deberia devolver el nodo a su estado inicial', () => {
+      // 1. Arrange 📐: la instancia del store sobrevive a la topologia que la
+      //    creo, asi que sin esto un flujo nuevo arrancaria con el prompt y el
+      //    proveedor del anterior.
+      const store = useLlmExtractorStore(nextNodeId());
+      store.updateConfig({ templatePromptId: PROMPT_ID, provider: LlmProvider.GEMINI });
+
+      // 2. Act ⚙️
+      store.resetConfig();
+
+      // 3. Assert 🎯
+      expect(store.config.templatePromptId).toBeNull();
+      expect(store.config.provider).toBe(LlmProvider.MOCK);
+      expect(store.isConfigValid).toBe(false);
+    });
+  });
+
+  describe('6. Catalogo de prompts y variables', () => {
+    it('6.1 deberia poblar el selector con los prompts activos', async () => {
+      // 1. Arrange 📐: `loadPrompts()` pide solo los activos por defecto, que es
+      //    lo que el backend documenta para el selector del nodo IA.
+      const store = useLlmExtractorStore(nextNodeId());
+      fetchAiPromptTemplates.mockResolvedValue([buildPrompt()]);
+
+      // 2. Act ⚙️
+      await store.loadPrompts();
+
+      // 3. Assert 🎯
+      expect(fetchAiPromptTemplates).toHaveBeenCalledWith(true);
+      expect(store.promptOptions).toEqual([
+        {
+          label: 'Redaccion de nota de prensa',
+          value: PROMPT_ID,
+          description: 'Convierte una nota en noticia publicable',
+        },
+      ]);
+    });
+
+    it('6.2 deberia componer las variables del contexto aguas arriba', () => {
+      // 1. Arrange 📐: sin esto el operador tendria que recordar de memoria que
+      //    publica cada paso anterior.
+      const store = useLlmExtractorStore(nextNodeId());
+
+      // 2. Act ⚙️
+      store.setAvailableUpstreamContext([
+        {
+          namespace: 'parsed_email',
+          fields: [{ name: 'clean_body', type: 'text' }],
+        },
+      ]);
+
+      // 3. Assert 🎯
+      expect(store.promptVariableOptions).toEqual([
+        {
+          label: 'clean_body (text)',
+          value: '{{parsed_email.clean_body}}',
+          group: 'parsed_email',
+        },
+      ]);
+    });
+
+    it('6.3 deberia compartir el catalogo entre dos nodos de IA', async () => {
+      // 1. Arrange 📐: el catalogo es estado de DOMINIO y vive en su propio
+      //    store, memoizado. Dos nodos no deben provocar dos peticiones.
+      fetchAiPromptTemplates.mockResolvedValue([buildPrompt()]);
+      const first = useLlmExtractorStore(nextNodeId());
+      const second = useLlmExtractorStore(nextNodeId());
+
+      // 2. Act ⚙️
+      await first.loadPrompts();
+      await second.loadPrompts();
+
+      // 3. Assert 🎯
+      expect(fetchAiPromptTemplates).toHaveBeenCalledTimes(1);
+      expect(second.promptOptions).toHaveLength(1);
+      expect(useAiPromptTemplatesStore().prompts).toHaveLength(1);
+    });
+  });
+
+  describe('7. Aislamiento entre nodos', () => {
+    it('7.1 no deberia compartir configuracion entre dos inferencias del flujo', () => {
+      // 1. Arrange 📐: un flujo puede encadenar una redaccion y un resumen con
+      //    prompts y presupuestos distintos.
+      const redaccion = useLlmExtractorStore(nextNodeId());
+      const resumen = useLlmExtractorStore(nextNodeId());
+
+      // 2. Act ⚙️
+      redaccion.updateConfig({ provider: LlmProvider.GEMINI, maxRetries: 0 });
+
+      // 3. Assert 🎯
+      expect(resumen.config.provider).toBe(LlmProvider.MOCK);
+      expect(resumen.config.maxRetries).toBe(DEFAULT_LLM_MAX_RETRIES);
+    });
+  });
+});

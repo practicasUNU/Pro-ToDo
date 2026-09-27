@@ -18,6 +18,21 @@ export type ErrorBranchAction = 'ALERTA_SMTP' | 'VISION_IA';
 /** Codigo formal del parser cuando el correo no trae texto aprovechable. */
 export const ERR_PARSER_UNEXTRACTABLE_MEDIA = 'ERR_PARSER_UNEXTRACTABLE_MEDIA';
 
+/**
+ * Alias del codigo anterior, para leerlo por lo que significa en la interfaz.
+ *
+ * VIVE AQUI y no en `@/types/pipeline`, que es donde encajaria por tema: aquel
+ * archivo no puede importar de este porque este ya importa `NodeType` de aquel,
+ * y reexportarlo cerraba un ciclo que dejaba el enum `undefined` en tiempo de
+ * evaluacion — el sintoma fue medio suite cayendo con
+ * "Cannot read properties of undefined (reading 'PARSER_PRE_IA')".
+ *
+ * Es un alias y no una segunda constante: dos cadenas iguales divergen a la
+ * primera edicion, y el sintoma seria una ruta que se guarda bien y no se
+ * dispara nunca.
+ */
+export const MULTIMODAL_FALLBACK_CODE = ERR_PARSER_UNEXTRACTABLE_MEDIA;
+
 /** Definicion de un disparador para el selector cerrado. */
 export interface ErrorBranchTriggerOption {
   readonly label: string;

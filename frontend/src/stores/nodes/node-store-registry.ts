@@ -1,3 +1,4 @@
+import { useLlmExtractorStore } from '@stores/nodes/llm-extractor.store';
 import { useParserEmailStore } from '@stores/nodes/parser-email.store';
 import { useSmtpAlertStore } from '@stores/nodes/smtp-alert.store';
 import { useTemplateMapperStore } from '@stores/nodes/template-mapper.store';
@@ -213,6 +214,7 @@ export const nodeStoreRegistry: Partial<Record<NodeType, NodeStoreHook>> = {
   [NodeType.PARSER_PRE_IA]: useParserEmailStore,
   [NodeType.EXTRACTOR_WEB]: useWebScraperStore,
   [NodeType.MAPEADOR_PLANTILLA]: useTemplateMapperStore,
+  [NodeType.PROCESADOR_IA]: useLlmExtractorStore,
   [NodeType.DESTINO_SMTP]: useSmtpAlertStore,
 };
 

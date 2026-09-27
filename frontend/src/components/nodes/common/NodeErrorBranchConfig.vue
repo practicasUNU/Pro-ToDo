@@ -3,13 +3,10 @@ import { computed } from 'vue';
 
 import { useFlujoDraftStore } from '@stores/flujo-draft.store';
 
-import SmtpAlertConfig from '@components/nodes/SmtpAlertConfig.vue';
-
 import type { NodeType } from '@/types/pipeline';
 import {
   ERROR_BRANCH_ACTIONS,
   ERROR_BRANCH_TRIGGERS,
-  SHARED_ALERT_NODE_ID,
   triggersForNodeType,
 } from '@/types/nodes/error-branch.types';
 
@@ -32,7 +29,7 @@ const PANEL_HINT =
   'Sin ruta declarada, un fallo de este paso detiene el flujo y lo deja en PAUSADO a la espera de que alguien lo mire. Con ella, el motor salta al nodo indicado y le entrega que fallo, con que codigo y el payload parcial.';
 
 const PROVISION_HINT =
-  'Se creara un unico nodo de alerta para todo el flujo. Todas las rutas que declares apuntaran a el, y la carta ya dice cual de los pasos ha fallado.';
+  'Se creara un unico nodo de alerta para todo el flujo: todas las rutas que declares apuntaran a el, y la carta ya dice cual de los pasos ha fallado. Los destinatarios se indican al final del asistente, en el paso "Contingencias por correo".';
 
 const NO_VISION_HINT =
   'Para reintentar con vision IA, el flujo tiene que incluir un nodo Procesador IA: la ruta apunta al que ya exista, no crea uno nuevo.';
@@ -207,21 +204,17 @@ const onActionChange = (action: ErrorBranchAction): void => {
           {{ NO_VISION_HINT }}
         </q-banner>
 
-        <template v-if="showsAlertConfig">
-          <q-banner dense class="pd-info-banner q-mt-md">
-            <template #avatar>
-              <q-icon name="alternate_email" size="20px" class="pd-branch-hint-icon" />
-            </template>
-            {{ PROVISION_HINT }}
-          </q-banner>
-
-          <!-- El configurador del nodo de alerta, incrustado: el operador
-               declara la ruta y la parametriza en el mismo paso, sin tener que
-               buscar otro sitio donde poner los destinatarios. -->
-          <div class="q-mt-md" data-test="embedded-alert-config">
-            <SmtpAlertConfig :node-id="SHARED_ALERT_NODE_ID" />
-          </div>
-        </template>
+        <q-banner
+          v-if="showsAlertConfig"
+          dense
+          class="pd-info-banner q-mt-md"
+          data-test="alert-step-hint"
+        >
+          <template #avatar>
+            <q-icon name="alternate_email" size="20px" class="pd-branch-hint-icon" />
+          </template>
+          {{ PROVISION_HINT }}
+        </q-banner>
       </template>
     </div>
   </q-expansion-item>

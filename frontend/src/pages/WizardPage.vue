@@ -6,13 +6,16 @@ import { useRoute, useRouter } from 'vue-router';
 import { useFlujoDraftStore } from '@stores/flujo-draft.store';
 
 import { nodeConfigRegistry } from '@components/nodes/node-config-registry';
+import NodeBranchCard from '@components/nodes/common/NodeBranchCard.vue';
 import NodeErrorBranchConfig from '@components/nodes/common/NodeErrorBranchConfig.vue';
+import SmtpAlertConfig from '@components/nodes/SmtpAlertConfig.vue';
 import PipelineSelector from '@components/wizard/PipelineSelector.vue';
 import SaveWarningsDialog from '@components/wizard/SaveWarningsDialog.vue';
 
 import { extractApiErrorMessage } from '@/utils/api-error';
 
 import { NodeType } from '@/types/pipeline';
+import { MULTIMODAL_FALLBACK_CODE, SHARED_ALERT_NODE_ID } from '@/types/nodes/error-branch.types';
 
 import type { StepWarning } from '@stores/flujo-draft.store';
 import type { WizardStep } from '@/types/pipeline';
@@ -39,14 +42,29 @@ const editedWorkflowId = computed<string | null>(() => {
 const isEditMode = computed<boolean>(() => editedWorkflowId.value !== null);
 
 /**
- * Indice del paso de revision: uno mas que el ultimo nodo.
+ * Indice del paso de revision: uno mas que el ultimo paso configurable.
  *
- * Se deriva de la topologia en vez de ser una constante para que el paso final
- * siga siendo el ultimo por muchos nodos que traiga el pipeline elegido.
+ * Se deriva del store y no de la longitud de la topologia porque entre el ultimo
+ * nodo y la revision puede haber un paso mas —el de contingencias—, que tampoco
+ * corresponde a ningun nodo del grafo.
  */
-const reviewStepIndex = computed<number>(() => draftStore.pipelineTopology.length);
+const reviewStepIndex = computed<number>(() => draftStore.configurableStepCount);
 
 const isReviewStep = computed<boolean>(() => draftStore.activeStep === reviewStepIndex.value);
+
+/**
+ * Nodo que recibe la recuperacion funcional de un paso, o `null`.
+ *
+ * Devuelve `null` tambien cuando la rama es una alerta: esa es terminal y se
+ * configura en el paso de contingencias, no junto al nodo que la declara.
+ */
+const branchTargetFor = (nodeId: string): string | null => {
+  if (!draftStore.hasContextualRecoveryBranch(nodeId)) return null;
+
+  const branch = draftStore.getNodeErrorBranch(nodeId);
+
+  return branch === null ? null : draftStore.resolveBranchTarget(branch.action);
+};
 
 /** Datos del flujo a crear; se piden al final, no al principio. */
 const form = reactive<{ name: string; description: string }>({
@@ -347,6 +365,18 @@ onMounted(async () => {
             :node-type="step.nodeType"
           />
 
+          <!-- Recuperacion FUNCIONAL: el flujo sigue por otra via en vez de
+               avisar a una persona. Se dibuja junto al paso que la declara
+               porque es ahi donde tiene sentido leerla, pero el nodo destino se
+               configura en su propio paso: esta en el camino normal del flujo y
+               pintar aqui su formulario lo mostraria dos veces. -->
+          <NodeBranchCard
+            v-if="branchTargetFor(step.nodeId)"
+            :source-node-id="step.nodeId"
+            :target-node-id="branchTargetFor(step.nodeId) ?? ''"
+            :error-code="MULTIMODAL_FALLBACK_CODE"
+          />
+
           <q-stepper-navigation class="row items-center q-gutter-sm">
             <q-btn
               v-if="!draftStore.isFirstStep"
@@ -371,6 +401,41 @@ onMounted(async () => {
                  nodo del pipeline y por eso no lo cubre `goToNextStep`. -->
             <q-btn
               v-else
+              class="pd-btn-primary"
+              unelevated
+              no-caps
+              label="Revisar y guardar"
+              icon-right="north_east"
+              :disable="!draftStore.isActiveStepValid"
+              @click="onGoToReview"
+            />
+          </q-stepper-navigation>
+        </q-step>
+
+        <!-- Paso de contingencias: tampoco es un nodo del grafo, y solo aparece
+             si alguna rama provisiona el nodo de alerta compartido. Los
+             destinatarios se piden UNA vez aqui y no dentro de cada panel de
+             rama, donde antes se repetian tantas veces como rutas hubiera. -->
+        <q-step
+          v-if="draftStore.hasAlertContingencyStep"
+          :name="draftStore.alertStepIndex"
+          title="Contingencias por correo"
+          caption="Destinatarios de las alertas"
+          :prefix="draftStore.alertStepIndex + 1"
+          icon="crisis_alert"
+        >
+          <SmtpAlertConfig :node-id="SHARED_ALERT_NODE_ID" />
+
+          <q-stepper-navigation class="row items-center q-gutter-sm">
+            <q-btn
+              flat
+              no-caps
+              class="pd-btn-secondary"
+              label="Anterior"
+              @click="draftStore.goToPreviousStep()"
+            />
+            <q-space />
+            <q-btn
               class="pd-btn-primary"
               unelevated
               no-caps

@@ -36,6 +36,9 @@ export const nodeConfigRegistry: Partial<Record<NodeType, Component>> = {
   [NodeType.MAPEADOR_PLANTILLA]: defineAsyncComponent(
     () => import('@components/nodes/TemplateMapperConfig.vue'),
   ),
+  [NodeType.PROCESADOR_IA]: defineAsyncComponent(
+    () => import('@components/nodes/LlmExtractorConfig.vue'),
+  ),
   [NodeType.DESTINO_SMTP]: defineAsyncComponent(
     () => import('@components/nodes/SmtpAlertConfig.vue'),
   ),
