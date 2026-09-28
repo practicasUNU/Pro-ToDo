@@ -10,14 +10,20 @@ import { useFlujoDraftStore } from './flujo-draft.store';
 
 import { NodeCategory } from '@/types/node-catalog';
 import { NodeType } from '@/types/pipeline';
-import { SHARED_ALERT_NODE_ID } from '@/types/nodes/error-branch.types';
+import { MULTIMODAL_FALLBACK_CODE, SHARED_ALERT_NODE_ID } from '@/types/nodes/error-branch.types';
 
 import type { NodeCatalogEntry } from '@/types/node-catalog';
-import type { PipelineSummary, WorkflowDetail, WorkflowTemplateSummary } from '@/types/pipeline';
+import type {
+  PipelineSummary,
+  WorkflowDetail,
+  WorkflowTemplateDetail,
+  WorkflowTemplateSummary,
+} from '@/types/pipeline';
 
 // Sin esto se cargaria `@boot/axios`, que necesita entorno de navegador.
 vi.mock('@services/workflow-templates.service', () => ({
   fetchWorkflowTemplates: vi.fn(),
+  fetchWorkflowTemplate: vi.fn(),
 }));
 vi.mock('@services/workflows.service', () => ({
   createWorkflow: vi.fn(),
@@ -50,6 +56,7 @@ vi.mock('@services/node-catalog.service', () => ({
 
 const workflowTemplatesService = await import('@services/workflow-templates.service');
 const fetchWorkflowTemplates = vi.mocked(workflowTemplatesService.fetchWorkflowTemplates);
+const fetchWorkflowTemplate = vi.mocked(workflowTemplatesService.fetchWorkflowTemplate);
 
 const nodeCatalogService = await import('@services/node-catalog.service');
 const fetchNodeCatalog = vi.mocked(nodeCatalogService.fetchNodeCatalog);
@@ -179,12 +186,109 @@ const CATALOG_ENTRIES: NodeCatalogEntry[] = [
   },
 ];
 
+/**
+ * Detalle de plantilla con las rutas de contingencia que se le indiquen.
+ *
+ * Desde que `onErrorStep` es propiedad de la PLANTILLA, esta es la unica via por
+ * la que el asistente conoce una rama: el store ya no expone ningun `setter`, y
+ * seguir escribiendo `errorBranches` a mano en las pruebas comprobaria un camino
+ * que la aplicacion no recorre.
+ *
+ * El nodo satelite se declara solo si alguna ruta lo nombra, igual que hace el
+ * editor de plantillas.
+ *
+ * @param routes Ruta por `nodeId` que se desvia.
+ * @param template Topologia de la que derivar el mapa de nodos.
+ */
+const buildTemplateDetail = (
+  routes: Record<string, unknown> = {},
+  template: WorkflowTemplateSummary = buildTemplate(),
+): WorkflowTemplateDetail => {
+  const steps = template.topology;
+  const nodes: Record<string, unknown> = {};
+
+  steps.forEach((step, index) => {
+    nodes[step.nodeId] = {
+      nodeId: step.nodeId,
+      nodeType: step.nodeType,
+      outputNamespace: step.outputNamespace,
+      nextStep: steps[index + 1]?.nodeId ?? null,
+      onErrorStep: routes[step.nodeId] ?? null,
+      params: {},
+    };
+  });
+
+  const referencesAlert = Object.values(routes).some((route) =>
+    typeof route === 'string'
+      ? route === SHARED_ALERT_NODE_ID
+      : (route as { targetNode?: string } | null)?.targetNode === SHARED_ALERT_NODE_ID,
+  );
+
+  if (referencesAlert) {
+    nodes[SHARED_ALERT_NODE_ID] = {
+      nodeId: SHARED_ALERT_NODE_ID,
+      nodeType: NodeType.DESTINO_SMTP,
+      outputNamespace: 'smtp_result',
+      nextStep: null,
+      onErrorStep: null,
+      params: {},
+    };
+  }
+
+  return {
+    ...template,
+    pipelineSchema: {
+      flowId: 'plantilla',
+      name: template.name,
+      version: '1.0.0',
+      entrypoint: steps[0]?.nodeId ?? '',
+      nodes,
+    },
+  };
+};
+
+/** Ruta incondicional hacia el nodo de alerta compartido. */
+const ALERT_ROUTE = SHARED_ALERT_NODE_ID;
+
+/** Ruta selectiva de vision, la unica que atrapa el codigo del parser. */
+const VISION_ROUTE = {
+  targetNode: 'nodo_ia',
+  catchErrors: [MULTIMODAL_FALLBACK_CODE],
+};
+
+/**
+ * Borrador con las rutas de contingencia que declara su PLANTILLA.
+ *
+ * Es la unica via por la que el asistente conoce una rama desde que
+ * `onErrorStep` pertenece a la plantilla: el store dejo de exponer un `setter`,
+ * asi que escribir `errorBranches` a mano aqui comprobaria un camino que la
+ * aplicacion ya no recorre.
+ *
+ * @param routes Ruta por `nodeId` que se desvia.
+ * @param template Topologia de la que partir; por defecto la de tres pasos.
+ */
+const buildDraftWithBranches = async (
+  routes: Record<string, unknown>,
+  template: WorkflowTemplateSummary = buildTemplate(),
+): Promise<ReturnType<typeof useFlujoDraftStore>> => {
+  const draft = useFlujoDraftStore();
+
+  fetchWorkflowTemplates.mockResolvedValue([template]);
+  fetchNodeCatalog.mockResolvedValue(CATALOG_ENTRIES);
+  fetchWorkflowTemplate.mockResolvedValue(buildTemplateDetail(routes, template));
+
+  await draft.loadAvailableTemplates();
+  await draft.selectTemplate(template.id);
+
+  return draft;
+};
+
 const buildSelectedDraft = async (): Promise<ReturnType<typeof useFlujoDraftStore>> => {
   const draft = useFlujoDraftStore();
   fetchWorkflowTemplates.mockResolvedValue([buildTemplate()]);
   fetchNodeCatalog.mockResolvedValue(CATALOG_ENTRIES);
   await draft.loadAvailableTemplates();
-  draft.selectTemplate(TEMPLATE_ID);
+  await draft.selectTemplate(TEMPLATE_ID);
 
   return draft;
 };
@@ -210,6 +314,9 @@ describe('useFlujoDraftStore · agregador del asistente', () => {
   beforeEach(() => {
     setActivePinia(createPinia());
     vi.clearAllMocks();
+    // Por defecto, una plantilla SIN rutas de contingencia: `selectTemplate`
+    // pide el detalle para hidratarlas, y sin este doble toda seleccion fallaria.
+    fetchWorkflowTemplate.mockResolvedValue(buildTemplateDetail());
   });
 
   describe('1. Carga del catalogo', () => {
@@ -278,13 +385,13 @@ describe('useFlujoDraftStore · agregador del asistente', () => {
         buildTemplate({ id: OTHER_TEMPLATE_ID, name: 'Otro flujo' }),
       ]);
       await draft.loadAvailableTemplates();
-      draft.selectTemplate(TEMPLATE_ID);
+      await draft.selectTemplate(TEMPLATE_ID);
       verifyTriggerStore();
       draft.goToNextStep();
       expect(draft.activeStep).toBe(1);
 
       // 2. Act
-      draft.selectTemplate(OTHER_TEMPLATE_ID);
+      await draft.selectTemplate(OTHER_TEMPLATE_ID);
 
       // 3. Assert: arrastrar el cursor mostraria el paso 2 de un flujo distinto.
       expect(draft.activeStep).toBe(0);
@@ -296,7 +403,7 @@ describe('useFlujoDraftStore · agregador del asistente', () => {
       const draft = await buildSelectedDraft();
 
       // 2. Act
-      draft.selectTemplate('id-inexistente');
+      await draft.selectTemplate('id-inexistente');
 
       // 3. Assert
       expect(draft.selectedTemplateId).toBe(TEMPLATE_ID);
@@ -333,7 +440,7 @@ describe('useFlujoDraftStore · agregador del asistente', () => {
       const draft = useFlujoDraftStore();
       fetchWorkflowTemplates.mockResolvedValue([buildTemplate({ topology: UNSUPPORTED_TOPOLOGY })]);
       await draft.loadAvailableTemplates();
-      draft.selectTemplate(TEMPLATE_ID);
+      await draft.selectTemplate(TEMPLATE_ID);
       verifyTriggerStore();
 
       // 2. Act
@@ -483,7 +590,7 @@ describe('useFlujoDraftStore · agregador del asistente', () => {
 
       // 2. Act
       await draft.loadAvailableTemplates();
-      draft.selectTemplate(TEMPLATE_ID);
+      await draft.selectTemplate(TEMPLATE_ID);
 
       // 3. Assert: vacio significa "no hay nada que ofrecer todavia", nunca un
       //    error; el namespace sigue estando.
@@ -558,10 +665,10 @@ describe('useFlujoDraftStore · agregador del asistente', () => {
       });
       fetchWorkflowTemplates.mockResolvedValue([buildTemplate(), shortPipeline]);
       await draft.loadAvailableTemplates();
-      draft.selectTemplate(TEMPLATE_ID);
+      await draft.selectTemplate(TEMPLATE_ID);
 
       // 2. Act
-      draft.selectTemplate(OTHER_TEMPLATE_ID);
+      await draft.selectTemplate(OTHER_TEMPLATE_ID);
 
       // 3. Assert: en el pipeline corto el mapeador es el primero, asi que no
       //    tiene nada aguas arriba. Arrastrar la lista anterior le haria creer
@@ -662,7 +769,7 @@ describe('useFlujoDraftStore · agregador del asistente', () => {
         buildTemplate({ executionPolicy: { stopOnFirstSuccess: true } }),
       ]);
       await draft.loadAvailableTemplates();
-      draft.selectTemplate(TEMPLATE_ID);
+      await draft.selectTemplate(TEMPLATE_ID);
 
       // 2. Act
       const schema = draft.assemblePipelineSchema('Flujo de prueba');
@@ -831,7 +938,7 @@ describe('useFlujoDraftStore · agregador del asistente', () => {
         buildTemplate({ id: OTHER_TEMPLATE_ID, topology: TWIN_TRIGGER_TOPOLOGY }),
       ]);
       await draft.loadAvailableTemplates();
-      draft.selectTemplate(OTHER_TEMPLATE_ID);
+      await draft.selectTemplate(OTHER_TEMPLATE_ID);
       verifyTriggerStore('trigger_principal', 'imap.principal.com');
       verifyTriggerStore('trigger_secundario', 'imap.backup.com');
 
@@ -874,7 +981,7 @@ describe('useFlujoDraftStore · agregador del asistente', () => {
       draft.resetDraft();
       // El catalogo sobrevive al reseteo (prueba 6.2), asi que el operador puede
       // empezar otro flujo del mismo pipeline sin recargar la vista.
-      draft.selectTemplate(TEMPLATE_ID);
+      await draft.selectTemplate(TEMPLATE_ID);
 
       // 3. Assert: el borrador nuevo arranca en blanco. La instancia del store
       //    vive en Pinia y sobrevive a la topologia, asi que sin la limpieza
@@ -894,11 +1001,11 @@ describe('useFlujoDraftStore · agregador del asistente', () => {
         buildTemplate({ id: OTHER_TEMPLATE_ID, topology: TWIN_TRIGGER_TOPOLOGY }),
       ]);
       await draft.loadAvailableTemplates();
-      draft.selectTemplate(TEMPLATE_ID);
+      await draft.selectTemplate(TEMPLATE_ID);
       verifyTriggerStore();
 
       // 2. Act
-      draft.selectTemplate(OTHER_TEMPLATE_ID);
+      await draft.selectTemplate(OTHER_TEMPLATE_ID);
 
       // 3. Assert: el trigger del pipeline abandonado queda limpio, y los dos
       //    del nuevo arrancan sin configurar.
@@ -940,7 +1047,7 @@ describe('useFlujoDraftStore · agregador del asistente', () => {
 
       // 2. Act: volver al selector y elegir la MISMA plantilla.
       draft.resetDraft();
-      draft.selectTemplate(TEMPLATE_ID);
+      await draft.selectTemplate(TEMPLATE_ID);
 
       // 3. Assert: arranca de la plantilla intacta, no del recorte anterior.
       expect(draft.pipelineTopology).toHaveLength(3);
@@ -955,20 +1062,22 @@ describe('useFlujoDraftStore · agregador del asistente', () => {
   describe('17. Rutas de contingencia (onErrorStep)', () => {
     const ALERT_RECIPIENT = 'guardia@unuware.com';
 
+    /** Ruta selectiva de alerta, la que atrapa solo el codigo del parser. */
+    const SELECTIVE_ALERT_ROUTE = {
+      targetNode: SHARED_ALERT_NODE_ID,
+      catchErrors: [MULTIMODAL_FALLBACK_CODE],
+    };
+
     /** Deja el nodo de alerta compartido en estado valido. */
     const configureAlertNode = (): void => {
       useSmtpAlertStore(SHARED_ALERT_NODE_ID).updateConfig({ to: [ALERT_RECIPIENT] });
     };
 
-    it('17.1 deberia emitir la forma de CADENA para cualquier fallo', async () => {
+    it('17.1 deberia conservar la forma de CADENA para cualquier fallo', async () => {
       // 1. Arrange 📐: es la unica forma que el motor trata como "atrapa todo".
       //    Un `catchErrors` con un codigo comodin inventado se guardaria sin
       //    protestar y no se dispararia jamas.
-      const draft = await buildSelectedDraft();
-      draft.setErrorBranch(MAPPER_NODE_ID, {
-        trigger: 'CUALQUIER_FALLO',
-        action: 'ALERTA_SMTP',
-      });
+      const draft = await buildDraftWithBranches({ [MAPPER_NODE_ID]: ALERT_ROUTE });
       configureAlertNode();
 
       // 2. Act ⚙️
@@ -978,76 +1087,59 @@ describe('useFlujoDraftStore · agregador del asistente', () => {
       expect(schema.nodes[MAPPER_NODE_ID]?.onErrorStep).toBe(SHARED_ALERT_NODE_ID);
     });
 
-    it('17.2 deberia emitir la forma SELECTIVA para un fallo concreto', async () => {
+    it('17.2 deberia conservar la forma SELECTIVA para un fallo concreto', async () => {
       // 1. Arrange 📐
-      const draft = await buildSelectedDraft();
+      const draft = await buildDraftWithBranches({ [PARSER_NODE_ID]: SELECTIVE_ALERT_ROUTE });
+      configureAlertNode();
 
       // 2. Act ⚙️
-      draft.setErrorBranch(PARSER_NODE_ID, {
-        trigger: 'SIN_TEXTO_EXTRAIBLE',
-        action: 'ALERTA_SMTP',
-      });
       const schema = draft.assemblePipelineSchema('Flujo de prueba');
 
       // 3. Assert 🎯
       expect(schema.nodes[PARSER_NODE_ID]?.onErrorStep).toEqual({
         targetNode: SHARED_ALERT_NODE_ID,
-        catchErrors: ['ERR_PARSER_UNEXTRACTABLE_MEDIA'],
+        catchErrors: [MULTIMODAL_FALLBACK_CODE],
       });
     });
 
-    it('17.3 deberia encender el interruptor del nodo fuente a la vez', async () => {
+    it('17.3 deberia encender el interruptor del nodo fuente al hidratar', async () => {
       // 1. Arrange 📐: sin esto la regla 10 del validador rechaza el esquema al
       //    guardar, porque la ruta atraparia un codigo que el parser, con sus
       //    `params`, no puede emitir.
-      const draft = await buildSelectedDraft();
+      const draft = await buildDraftWithBranches({ [PARSER_NODE_ID]: SELECTIVE_ALERT_ROUTE });
 
       // 2. Act ⚙️
-      draft.setErrorBranch(PARSER_NODE_ID, {
-        trigger: 'SIN_TEXTO_EXTRAIBLE',
-        action: 'ALERTA_SMTP',
-      });
+      const schema = draft.assemblePipelineSchema('F');
 
       // 3. Assert 🎯
       expect(useParserEmailStore(PARSER_NODE_ID).config.failOnUnextractableMedia).toBe(true);
-      expect(
-        draft.assemblePipelineSchema('F').nodes[PARSER_NODE_ID]?.params.failOnUnextractableMedia,
-      ).toBe(true);
+      expect(schema.nodes[PARSER_NODE_ID]?.params.failOnUnextractableMedia).toBe(true);
     });
 
-    it('17.4 deberia apagarlo al retirar la rama', async () => {
-      // 1. Arrange 📐: dejarlo puesto convertiria en PAUSADO un flujo que hoy
-      //    atraviesa tranquilamente un correo de solo imagen.
-      const draft = await buildSelectedDraft();
-      draft.setErrorBranch(PARSER_NODE_ID, {
-        trigger: 'SIN_TEXTO_EXTRAIBLE',
-        action: 'ALERTA_SMTP',
-      });
+    it('17.4 deberia dejarlo apagado cuando la plantilla no declara la ruta', async () => {
+      // 1. Arrange 📐: encenderlo sin ruta convertiria en PAUSADO un flujo que
+      //    hoy atraviesa tranquilamente un correo de solo imagen.
+      const draft = await buildDraftWithBranches({ [MAPPER_NODE_ID]: ALERT_ROUTE });
 
       // 2. Act ⚙️
-      draft.setErrorBranch(PARSER_NODE_ID, null);
+      const schema = draft.assemblePipelineSchema('F');
 
       // 3. Assert 🎯
       expect(useParserEmailStore(PARSER_NODE_ID).config.failOnUnextractableMedia).toBe(false);
-      expect(draft.assemblePipelineSchema('F').nodes[PARSER_NODE_ID]?.onErrorStep).toBeNull();
+      expect(schema.nodes[PARSER_NODE_ID]?.onErrorStep).toBeNull();
     });
 
-    it('17.5 deberia provisionar UN SOLO nodo de alerta para dos ramas', async () => {
+    it('17.5 deberia reunir DOS ramas en un solo nodo de alerta', async () => {
       // 1. Arrange 📐: la regla 5 del validador prohibe que dos nodos escriban
       //    `smtp_result`, y la lista cerrada solo tiene uno. Un satelite por paso
       //    devolveria un 400 en cuanto hubiera dos ramas.
-      const draft = await buildSelectedDraft();
-
-      // 2. Act ⚙️
-      draft.setErrorBranch(PARSER_NODE_ID, {
-        trigger: 'SIN_TEXTO_EXTRAIBLE',
-        action: 'ALERTA_SMTP',
-      });
-      draft.setErrorBranch(MAPPER_NODE_ID, {
-        trigger: 'CUALQUIER_FALLO',
-        action: 'ALERTA_SMTP',
+      const draft = await buildDraftWithBranches({
+        [PARSER_NODE_ID]: SELECTIVE_ALERT_ROUTE,
+        [MAPPER_NODE_ID]: ALERT_ROUTE,
       });
       configureAlertNode();
+
+      // 2. Act ⚙️
       const schema = draft.assemblePipelineSchema('Flujo de prueba');
 
       // 3. Assert 🎯
@@ -1062,11 +1154,7 @@ describe('useFlujoDraftStore · agregador del asistente', () => {
     it('17.6 deberia emitir el satelite como nodo terminal fuera del encadenado', async () => {
       // 1. Arrange 📐: colarlo en la secuencia lo pondria en el camino feliz,
       //    enviando un aviso en cada ejecucion correcta.
-      const draft = await buildSelectedDraft();
-      draft.setErrorBranch(MAPPER_NODE_ID, {
-        trigger: 'CUALQUIER_FALLO',
-        action: 'ALERTA_SMTP',
-      });
+      const draft = await buildDraftWithBranches({ [MAPPER_NODE_ID]: ALERT_ROUTE });
       configureAlertNode();
 
       // 2. Act ⚙️
@@ -1080,11 +1168,7 @@ describe('useFlujoDraftStore · agregador del asistente', () => {
 
     it('17.7 deberia llevar al satelite los params de su propio store', async () => {
       // 1. Arrange 📐
-      const draft = await buildSelectedDraft();
-      draft.setErrorBranch(MAPPER_NODE_ID, {
-        trigger: 'CUALQUIER_FALLO',
-        action: 'ALERTA_SMTP',
-      });
+      const draft = await buildDraftWithBranches({ [MAPPER_NODE_ID]: ALERT_ROUTE });
       configureAlertNode();
 
       // 2. Act ⚙️
@@ -1098,22 +1182,17 @@ describe('useFlujoDraftStore · agregador del asistente', () => {
       // 1. Arrange 📐: `collectIncompleteParams` del backend recorre el mapa
       //    ENTERO al activar, satelites incluidos. Dejar guardar aqui produciria
       //    un flujo que despues no se puede encender, sin decir por que.
-      const draft = await buildSelectedDraft();
+      const draft = await buildDraftWithBranches({ [MAPPER_NODE_ID]: ALERT_ROUTE });
       verifyTriggerStore();
       useTemplateMapperStore(MAPPER_NODE_ID).setTemplateId(HTML_TEMPLATE_ID);
 
       // 2. Act ⚙️
-      draft.setErrorBranch(MAPPER_NODE_ID, {
-        trigger: 'CUALQUIER_FALLO',
-        action: 'ALERTA_SMTP',
-      });
+      const blocked = draft.invalidSteps.find((item) => item.reason === 'ALERTA_INCOMPLETA');
 
       // 3. Assert 🎯: el bloqueo se senala en EL PASO DE CONTINGENCIAS, no en
       //    cada nodo que declara la rama: desde que el formulario vive en un
       //    solo sitio, repartirlo mandaria al operador a corregirlo donde ya no
       //    esta.
-      const blocked = draft.invalidSteps.find((item) => item.reason === 'ALERTA_INCOMPLETA');
-
       expect(draft.canSave).toBe(false);
       expect(blocked?.index).toBe(draft.alertStepIndex);
       expect(blocked?.step.nodeId).toBe(SHARED_ALERT_NODE_ID);
@@ -1121,30 +1200,25 @@ describe('useFlujoDraftStore · agregador del asistente', () => {
 
     it('17.8bis deberia anadir el paso de contingencias solo con rama SMTP', async () => {
       // 1. Arrange 📐
-      const draft = await buildSelectedDraft();
+      const sinRama = await buildDraftWithBranches({});
 
       // 2. Act ⚙️ + 3. Assert 🎯
-      expect(draft.hasAlertContingencyStep).toBe(false);
-      expect(draft.configurableStepCount).toBe(draft.pipelineTopology.length);
+      expect(sinRama.hasAlertContingencyStep).toBe(false);
+      expect(sinRama.configurableStepCount).toBe(sinRama.pipelineTopology.length);
 
-      draft.setErrorBranch(MAPPER_NODE_ID, {
-        trigger: 'CUALQUIER_FALLO',
-        action: 'ALERTA_SMTP',
-      });
+      setActivePinia(createPinia());
 
-      expect(draft.hasAlertContingencyStep).toBe(true);
-      expect(draft.alertStepIndex).toBe(draft.pipelineTopology.length);
-      expect(draft.configurableStepCount).toBe(draft.pipelineTopology.length + 1);
+      const conRama = await buildDraftWithBranches({ [MAPPER_NODE_ID]: ALERT_ROUTE });
+
+      expect(conRama.hasAlertContingencyStep).toBe(true);
+      expect(conRama.alertStepIndex).toBe(conRama.pipelineTopology.length);
+      expect(conRama.configurableStepCount).toBe(conRama.pipelineTopology.length + 1);
     });
 
     it('17.8ter deberia mover el final del stepper al paso de contingencias', async () => {
       // 1. Arrange 📐: sin esto, el boton del ultimo nodo diria "Revisar y
       //    guardar" y saltaria por encima del formulario de destinatarios.
-      const draft = await buildSelectedDraft();
-      draft.setErrorBranch(MAPPER_NODE_ID, {
-        trigger: 'CUALQUIER_FALLO',
-        action: 'ALERTA_SMTP',
-      });
+      const draft = await buildDraftWithBranches({ [MAPPER_NODE_ID]: ALERT_ROUTE });
 
       // 2. Act ⚙️: cursor en el ultimo NODO.
       draft.activeStep = draft.pipelineTopology.length - 1;
@@ -1161,11 +1235,7 @@ describe('useFlujoDraftStore · agregador del asistente', () => {
     it('17.8quater deberia validar el paso de contingencias con su nodo', async () => {
       // 1. Arrange 📐: ese paso no esta en la topologia, asi que su validez es
       //    la del nodo de alerta compartido.
-      const draft = await buildSelectedDraft();
-      draft.setErrorBranch(MAPPER_NODE_ID, {
-        trigger: 'CUALQUIER_FALLO',
-        action: 'ALERTA_SMTP',
-      });
+      const draft = await buildDraftWithBranches({ [MAPPER_NODE_ID]: ALERT_ROUTE });
       draft.activeStep = draft.alertStepIndex;
 
       // 2. Act ⚙️ + 3. Assert 🎯
@@ -1178,13 +1248,9 @@ describe('useFlujoDraftStore · agregador del asistente', () => {
 
     it('17.9 deberia desbloquearlo al completar el nodo de alerta', async () => {
       // 1. Arrange 📐
-      const draft = await buildSelectedDraft();
+      const draft = await buildDraftWithBranches({ [MAPPER_NODE_ID]: ALERT_ROUTE });
       verifyTriggerStore();
       useTemplateMapperStore(MAPPER_NODE_ID).setTemplateId(HTML_TEMPLATE_ID);
-      draft.setErrorBranch(MAPPER_NODE_ID, {
-        trigger: 'CUALQUIER_FALLO',
-        action: 'ALERTA_SMTP',
-      });
 
       // 2. Act ⚙️
       configureAlertNode();
@@ -1194,21 +1260,21 @@ describe('useFlujoDraftStore · agregador del asistente', () => {
       expect(draft.canSave).toBe(true);
     });
 
-    it('17.10 NO deberia ofrecer la vision sin un nodo de IA en el flujo', async () => {
+    it('17.10 NO deberia resolver la vision sin un nodo de IA en el flujo', async () => {
       // 1. Arrange 📐: un PROCESADOR_IA satelite chocaria con el del flujo en
-      //    `llm_response` (regla 5), y ese tipo aun no tiene configurador. La
-      //    ruta apunta al que ya exista, o no se ofrece.
+      //    `llm_response` (regla 5). La ruta apunta al que ya exista, o no hay
+      //    destino que resolver.
       const draft = await buildSelectedDraft();
 
       // 2. Act ⚙️ + 3. Assert 🎯
-      expect(draft.availableBranchActions).toEqual(['ALERTA_SMTP']);
       expect(draft.resolveBranchTarget('VISION_IA')).toBeNull();
+      expect(draft.resolveBranchTarget('ALERTA_SMTP')).toBe(SHARED_ALERT_NODE_ID);
     });
 
     it('17.11 deberia reutilizar el DESTINO_SMTP que trae la plantilla', async () => {
       // 1. Arrange 📐: provisionar otro junto a el seria un 400 por la regla 5.
-      const draft = useFlujoDraftStore();
-      fetchWorkflowTemplates.mockResolvedValue([
+      const draft = await buildDraftWithBranches(
+        { [TRIGGER_NODE_ID]: 'destino_correo' },
         buildTemplate({
           topology: [
             {
@@ -1223,16 +1289,9 @@ describe('useFlujoDraftStore · agregador del asistente', () => {
             },
           ],
         }),
-      ]);
-      fetchNodeCatalog.mockResolvedValue(CATALOG_ENTRIES);
-      await draft.loadAvailableTemplates();
-      draft.selectTemplate(TEMPLATE_ID);
+      );
 
       // 2. Act ⚙️
-      draft.setErrorBranch(TRIGGER_NODE_ID, {
-        trigger: 'CUALQUIER_FALLO',
-        action: 'ALERTA_SMTP',
-      });
       const schema = draft.assemblePipelineSchema('Flujo de prueba');
 
       // 3. Assert 🎯
@@ -1245,11 +1304,7 @@ describe('useFlujoDraftStore · agregador del asistente', () => {
       // 1. Arrange 📐: la instancia del satelite sobrevive a la topologia, asi
       //    que sin esto un flujo nuevo arrancaria con los destinatarios del
       //    anterior ya puestos.
-      const draft = await buildSelectedDraft();
-      draft.setErrorBranch(MAPPER_NODE_ID, {
-        trigger: 'CUALQUIER_FALLO',
-        action: 'ALERTA_SMTP',
-      });
+      const draft = await buildDraftWithBranches({ [MAPPER_NODE_ID]: ALERT_ROUTE });
       configureAlertNode();
 
       // 2. Act ⚙️
@@ -1258,6 +1313,17 @@ describe('useFlujoDraftStore · agregador del asistente', () => {
       // 3. Assert 🎯
       expect(draft.errorBranches).toEqual({});
       expect(useSmtpAlertStore(SHARED_ALERT_NODE_ID).config.to).toEqual([]);
+    });
+
+    it('17.13 NO deberia exponer ninguna via para declarar una rama', async () => {
+      // 1. Arrange 📐: `onErrorStep` es TOPOLOGIA, y su unica autoridad es la
+      //    plantilla. Si el asistente recuperase un `setter`, una instancia
+      //    podria inventarse un grafo que su plantilla no declara y dos flujos
+      //    de la misma plantilla saldrian distintos sin que nada lo explicara.
+      const draft = await buildSelectedDraft();
+
+      // 2. Act ⚙️ + 3. Assert 🎯
+      expect('setErrorBranch' in draft).toBe(false);
     });
   });
 
@@ -1294,16 +1360,15 @@ describe('useFlujoDraftStore · agregador del asistente', () => {
   });
 
   describe('19. Lectura de las ramas desde la vista', () => {
-    it('19.1 deberia devolver la rama declarada de un paso', async () => {
+    it('19.1 deberia devolver la rama declarada por la plantilla', async () => {
       // 1. Arrange 📐
-      const draft = await buildSelectedDraft();
-      const branch = { trigger: 'CUALQUIER_FALLO', action: 'ALERTA_SMTP' } as const;
+      const draft = await buildDraftWithBranches({ [MAPPER_NODE_ID]: ALERT_ROUTE });
 
-      // 2. Act ⚙️
-      draft.setErrorBranch(MAPPER_NODE_ID, branch);
-
-      // 3. Assert 🎯
-      expect(draft.getNodeErrorBranch(MAPPER_NODE_ID)).toEqual(branch);
+      // 2. Act ⚙️ + 3. Assert 🎯
+      expect(draft.getNodeErrorBranch(MAPPER_NODE_ID)).toEqual({
+        trigger: 'CUALQUIER_FALLO',
+        action: 'ALERTA_SMTP',
+      });
       expect(draft.getNodeErrorBranch(PARSER_NODE_ID)).toBeNull();
     });
 
@@ -1311,22 +1376,16 @@ describe('useFlujoDraftStore · agregador del asistente', () => {
       // 1. Arrange 📐: una alerta es TERMINAL —avisa a una persona— y se
       //    configura en el paso de contingencias, no junto al nodo que la
       //    declara. Solo la recuperacion funcional se dibuja ahi.
-      const draft = await buildSelectedDraft();
+      const draft = await buildDraftWithBranches({ [MAPPER_NODE_ID]: ALERT_ROUTE });
 
-      // 2. Act ⚙️
-      draft.setErrorBranch(MAPPER_NODE_ID, {
-        trigger: 'CUALQUIER_FALLO',
-        action: 'ALERTA_SMTP',
-      });
-
-      // 3. Assert 🎯
+      // 2. Act ⚙️ + 3. Assert 🎯
       expect(draft.hasContextualRecoveryBranch(MAPPER_NODE_ID)).toBe(false);
     });
 
     it('19.3 SI deberia contar la ruta de vision', async () => {
       // 1. Arrange 📐
-      const draft = useFlujoDraftStore();
-      fetchWorkflowTemplates.mockResolvedValue([
+      const draft = await buildDraftWithBranches(
+        { [PARSER_NODE_ID]: VISION_ROUTE },
         buildTemplate({
           topology: [
             {
@@ -1346,18 +1405,9 @@ describe('useFlujoDraftStore · agregador del asistente', () => {
             },
           ],
         }),
-      ]);
-      fetchNodeCatalog.mockResolvedValue(CATALOG_ENTRIES);
-      await draft.loadAvailableTemplates();
-      draft.selectTemplate(TEMPLATE_ID);
+      );
 
-      // 2. Act ⚙️
-      draft.setErrorBranch(PARSER_NODE_ID, {
-        trigger: 'SIN_TEXTO_EXTRAIBLE',
-        action: 'VISION_IA',
-      });
-
-      // 3. Assert 🎯
+      // 2. Act ⚙️ + 3. Assert 🎯
       expect(draft.hasContextualRecoveryBranch(PARSER_NODE_ID)).toBe(true);
       expect(draft.resolveBranchTarget('VISION_IA')).toBe('nodo_ia');
     });
@@ -1390,6 +1440,9 @@ describe('useFlujoDraftStore · modo edicion', () => {
   beforeEach(() => {
     setActivePinia(createPinia());
     vi.clearAllMocks();
+    // Por defecto, una plantilla SIN rutas de contingencia: `selectTemplate`
+    // pide el detalle para hidratarlas, y sin este doble toda seleccion fallaria.
+    fetchWorkflowTemplate.mockResolvedValue(buildTemplateDetail());
   });
 
   /** Flujo guardado, con los `params` que el asistente debe repoblar. */
@@ -1674,7 +1727,7 @@ describe('useFlujoDraftStore · modo edicion', () => {
       const draft = useFlujoDraftStore();
       fetchWorkflowTemplates.mockResolvedValue([buildTemplate({ topology: UNSUPPORTED_TOPOLOGY })]);
       await draft.loadAvailableTemplates();
-      draft.selectTemplate(TEMPLATE_ID);
+      await draft.selectTemplate(TEMPLATE_ID);
 
       // 2. Act
       const byType = new Map(draft.invalidSteps.map((item) => [item.step.nodeType, item.reason]));
@@ -1714,7 +1767,7 @@ describe('useFlujoDraftStore · modo edicion', () => {
       const draft = useFlujoDraftStore();
       fetchWorkflowTemplates.mockResolvedValue([buildTemplate({ topology: UNSUPPORTED_TOPOLOGY })]);
       await draft.loadAvailableTemplates();
-      draft.selectTemplate(TEMPLATE_ID);
+      await draft.selectTemplate(TEMPLATE_ID);
 
       // 2. Act & 3. Assert
       expect(draft.hasUnsupportedNodes).toBe(true);
@@ -1806,7 +1859,7 @@ describe('useFlujoDraftStore · modo edicion', () => {
         }),
       ]);
       await draft.loadAvailableTemplates();
-      draft.selectTemplate(TEMPLATE_ID);
+      await draft.selectTemplate(TEMPLATE_ID);
 
       // 2. Act & 3. Assert: bloquea, pero es corregible sin salir del asistente.
       expect(draft.canSave).toBe(false);

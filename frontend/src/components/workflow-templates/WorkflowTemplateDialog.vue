@@ -8,6 +8,7 @@ import { useWorkflowTemplatesStore } from '@stores/workflow-templates.store';
 import { extractApiErrorMessage, extractApiIssues } from '@/utils/api-error';
 
 import type { SchemaIssue, WorkflowTemplateSummary } from '@/types/pipeline';
+import type { ErrorBranchAction } from '@/types/nodes/error-branch.types';
 
 // CodeMirror pesa unos cientos de KB y este dialogo no siempre se abre; en
 // diferido solo se descarga cuando el operador entra a editar.
@@ -33,6 +34,19 @@ const $q = useQuasar();
 const templatesStore = useWorkflowTemplatesStore();
 
 const isEditing = computed<boolean>(() => props.template !== null);
+
+/**
+ * Accion de contingencia de cada paso, indexada por `nodeId`.
+ *
+ * Se resuelve AQUI, en el anfitrion, y se pasa a la lista: `NodeSequenceBuilder`
+ * y su ficha reciben ya la secuencia por prop, y dejarles consultar el store por
+ * su cuenta permitiria que las dos mitades del mismo estado discrepasen.
+ */
+const errorBranches = computed<Record<string, ErrorBranchAction | null>>(() =>
+  Object.fromEntries(
+    templatesStore.sequence.map((step) => [step.nodeId, templatesStore.errorBranchOf(step.nodeId)]),
+  ),
+);
 
 /**
  * Campos que el backend rechazo en la ultima validacion.
@@ -195,8 +209,11 @@ const onSubmit = async (): Promise<void> => {
                  editable a mano, pero tocar el selector reescribe el grafo. -->
             <NodeSequenceBuilder
               :model-value="templatesStore.sequence"
+              :error-branches="errorBranches"
+              :can-offer-vision="templatesStore.visionTargetNodeId !== null"
               @update:model-value="templatesStore.setSequence($event)"
               @update:params="templatesStore.patchStepParams"
+              @update:error-branch="templatesStore.setStepErrorBranch"
             />
 
             <!-- Politica del flujo COMPLETO, no de un nodo: por eso vive aqui y
@@ -215,6 +232,23 @@ const onSubmit = async (): Promise<void> => {
               <p class="pd-subtitle q-mt-xs q-mb-none">
                 Desactiva el flujo de trabajo permanentemente luego de una ejecucion exitosa. Una
                 ejecucion que se detiene porque el disparador no encontro datos no cuenta.
+              </p>
+
+              <!-- Respaldo del flujo COMPLETO. No pisa las rutas ya declaradas
+                   paso a paso: solo cubre los que no tienen ninguna. -->
+              <q-toggle
+                :model-value="templatesStore.notifyAllErrors"
+                dense
+                class="q-mt-md"
+                label="Notificar por correo (SMTP) ante cualquier error no manejado"
+                data-test="notify-all-errors-toggle"
+                :disable="templatesStore.schemaSyntaxError !== null"
+                @update:model-value="templatesStore.setNotifyAllErrors($event)"
+              />
+              <p class="pd-subtitle q-mt-xs q-mb-none">
+                Asigna la alerta por correo a todo paso que no tenga ya una contingencia propia. Se
+                crea un unico nodo de alerta para el flujo entero; los destinatarios se piden
+                despues, en el asistente.
               </p>
             </div>
 

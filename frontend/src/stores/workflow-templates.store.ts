@@ -4,13 +4,30 @@ import { computed, ref } from 'vue';
 import * as fsmService from '@services/fsm.service';
 import * as workflowTemplatesService from '@services/workflow-templates.service';
 
-import { assemblePipelineSchema, disassemblePipelineSchema } from '@/utils/pipeline-assembler';
+import {
+  assemblePipelineSchema,
+  collectErrorSatellites,
+  disassemblePipelineSchema,
+  errorRouteTarget,
+} from '@/utils/pipeline-assembler';
+import { withBaseParamDefaults } from '@/utils/node-base-params';
 
-import { TRIGGER_NODE_TYPES } from '@/types/pipeline';
+import {
+  DEFAULT_OUTPUT_NAMESPACE_BY_NODE_TYPE,
+  NodeType,
+  TRIGGER_NODE_TYPES,
+} from '@/types/pipeline';
+import {
+  ERROR_BRANCH_ACTIONS,
+  MULTIMODAL_FALLBACK_CODE,
+  SHARED_ALERT_NODE_ID,
+} from '@/types/nodes/error-branch.types';
 
 import type { AssemblerStep } from '@/utils/pipeline-assembler';
+import type { ErrorBranchAction } from '@/types/nodes/error-branch.types';
 import type {
   AssembledPipelineSchema,
+  SelectiveErrorFallback,
   CreateWorkflowTemplatePayload,
   ValidateSchemaResult,
   WorkflowTemplateDetail,
@@ -98,6 +115,21 @@ export const useWorkflowTemplatesStore = defineStore('workflowTemplates', () => 
    * por `nodeId` en `rebuildSchemaFromSequence`.
    */
   const sequence = ref<AssemblerStep[]>([]);
+
+  /**
+   * Nodos alcanzables SOLO por una ruta de error (`onErrorStep`).
+   *
+   * Viven APARTE de `sequence` y no al final de ella porque el encadenado de
+   * `assemblePipelineSchema` es posicional: un nodo de alerta metido entre los
+   * pasos heredaria un `nextStep` y acabaria ejecutandose en el camino feliz, en
+   * cada pasada y no solo cuando algo falla.
+   *
+   * Sin este estado, `rebuildSchemaFromSequence` reensamblaba con la lista de
+   * satelites vacia y BORRABA el nodo destino del mapa en cuanto el operador
+   * tocaba el selector: el esquema salia con una ruta apuntando a un nodo
+   * inexistente y el backend lo rechazaba con su regla 3.
+   */
+  const satellites = ref<AssemblerStep[]>([]);
 
   /** Solo las disponibles, que son las que el asistente puede instanciar. */
   const activeTemplates = computed<WorkflowTemplateSummary[]>(() =>
@@ -234,6 +266,7 @@ export const useWorkflowTemplatesStore = defineStore('workflowTemplates', () => 
     // selector vacio junto a un JSON lleno, y el primer cambio en el selector
     // borraria la topologia guardada.
     sequence.value = readSequenceFrom(activeDraft.value.schemaText);
+    satellites.value = readSatellitesFrom(activeDraft.value.schemaText, sequence.value);
   };
 
   const patchDraft = (patch: Partial<WorkflowTemplateDraft>): void => {
@@ -251,6 +284,28 @@ export const useWorkflowTemplatesStore = defineStore('workflowTemplates', () => 
     try {
       const parsed = JSON.parse(schemaText) as AssembledPipelineSchema;
       return disassemblePipelineSchema(parsed);
+    } catch {
+      return [];
+    }
+  };
+
+  /**
+   * Lee los nodos que solo alcanza una ruta de error, o `[]` si no se puede.
+   *
+   * Hermano de `readSequenceFrom` y con su misma tolerancia al texto invalido:
+   * se invoca al ABRIR el dialogo, y un grafo corrupto debe poder abrirse, que
+   * es justamente donde se arregla.
+   *
+   * @param schemaText Documento vigente.
+   * @param activeSteps Lo que devolvio `readSequenceFrom` sobre el mismo texto.
+   */
+  const readSatellitesFrom = (
+    schemaText: string,
+    activeSteps: readonly AssemblerStep[],
+  ): AssemblerStep[] => {
+    try {
+      const parsed = JSON.parse(schemaText) as AssembledPipelineSchema;
+      return collectErrorSatellites(parsed, activeSteps);
     } catch {
       return [];
     }
@@ -279,14 +334,18 @@ export const useWorkflowTemplatesStore = defineStore('workflowTemplates', () => 
       current = {};
     }
 
-    const schema = assemblePipelineSchema(sequence.value, {
-      flowId: current.flowId ?? 'plantilla-nueva',
-      name: current.name ?? activeDraft.value.name.trim(),
-      ...(current.version !== undefined ? { version: current.version } : {}),
-      ...(current.executionPolicy !== undefined
-        ? { executionPolicy: current.executionPolicy }
-        : {}),
-    });
+    const schema = assemblePipelineSchema(
+      sequence.value,
+      {
+        flowId: current.flowId ?? 'plantilla-nueva',
+        name: current.name ?? activeDraft.value.name.trim(),
+        ...(current.version !== undefined ? { version: current.version } : {}),
+        ...(current.executionPolicy !== undefined
+          ? { executionPolicy: current.executionPolicy }
+          : {}),
+      },
+      satellites.value,
+    );
 
     patchDraft({ schemaText: JSON.stringify(schema, null, 2) });
   };
@@ -352,6 +411,179 @@ export const useWorkflowTemplatesStore = defineStore('workflowTemplates', () => 
   const setSequence = (steps: AssemblerStep[]): void => {
     sequence.value = steps;
     rebuildSchemaFromSequence();
+  };
+
+  /**
+   * Nodo de la secuencia que puede atender un desvio de vision, o `null`.
+   *
+   * El fallback multimodal apunta al `PROCESADOR_IA` que la topologia YA tiene y
+   * nunca crea uno nuevo: un segundo nodo de IA chocaria con el existente en el
+   * namespace `llm_response`, que la regla 5 del validador declara unico.
+   */
+  const visionTargetNodeId = computed<string | null>(
+    () => sequence.value.find((step) => step.nodeType === NodeType.PROCESADOR_IA)?.nodeId ?? null,
+  );
+
+  /**
+   * Accion de contingencia declarada por un paso, o `null` si no tiene ruta.
+   *
+   * Se deriva de la SECUENCIA —donde vive `onErrorStep`— y se resuelve por el
+   * tipo del nodo destino, no por su identificador: la forma de la ruta dice a
+   * donde va, y quien decide que significa eso es el catalogo de acciones.
+   */
+  const errorBranchOf = (nodeId: string): ErrorBranchAction | null => {
+    const step = sequence.value.find((candidate) => candidate.nodeId === nodeId);
+
+    if (step === undefined) return null;
+
+    const targetNode = errorRouteTarget(step.onErrorStep);
+
+    if (targetNode === null) return null;
+
+    const targetType =
+      targetNode === SHARED_ALERT_NODE_ID
+        ? NodeType.DESTINO_SMTP
+        : (sequence.value.find((candidate) => candidate.nodeId === targetNode)?.nodeType ??
+          satellites.value.find((candidate) => candidate.nodeId === targetNode)?.nodeType ??
+          null);
+
+    if (targetType === null) return null;
+
+    return (
+      (Object.keys(ERROR_BRANCH_ACTIONS) as ErrorBranchAction[]).find(
+        (action) => ERROR_BRANCH_ACTIONS[action].targetNodeType === targetType,
+      ) ?? null
+    );
+  };
+
+  /**
+   * Ruta en la forma que espera el motor, o `null` si la accion no es aplicable.
+   *
+   * La CADENA y no un objeto con un codigo comodin para la alerta: es la unica
+   * forma que el motor trata como "atrapa cualquier fallo". El fallback de
+   * vision usa la forma selectiva porque solo debe dispararse ante el codigo del
+   * parser; un respaldo incondicional hacia la IA mandaria alli tambien los
+   * fallos de configuracion, que no es lo que nadie quiso decir.
+   */
+  const buildErrorRoute = (action: ErrorBranchAction): string | SelectiveErrorFallback | null => {
+    if (action === 'ALERTA_SMTP') return SHARED_ALERT_NODE_ID;
+
+    const targetNode = visionTargetNodeId.value;
+
+    return targetNode === null ? null : { targetNode, catchErrors: [MULTIMODAL_FALLBACK_CODE] };
+  };
+
+  /**
+   * Reconcilia el satelite de alerta con las rutas vigentes.
+   *
+   * UNO POR FLUJO, compartido por todas las ramas: la regla 5 del validador
+   * prohibe que dos nodos escriban en `smtp_result`, asi que un satelite por
+   * paso devolveria un 400 en cuanto hubiera dos rutas.
+   *
+   * Los `params` se siembran con los defaults del tipo y NADA mas: los
+   * destinatarios son configuracion de OPERACION y se piden en el asistente, al
+   * instanciar el flujo. Una plantilla que los llevara dentro impondria los
+   * mismos a todos los flujos que partieran de ella.
+   *
+   * @param steps Secuencia ya actualizada sobre la que juzgar.
+   */
+  const reconcileAlertSatellite = (steps: readonly AssemblerStep[]): void => {
+    const isReferenced = steps.some(
+      (step) => errorRouteTarget(step.onErrorStep) === SHARED_ALERT_NODE_ID,
+    );
+    const exists = satellites.value.some((satellite) => satellite.nodeId === SHARED_ALERT_NODE_ID);
+
+    if (isReferenced && !exists) {
+      satellites.value = [
+        ...satellites.value,
+        {
+          nodeId: SHARED_ALERT_NODE_ID,
+          nodeType: NodeType.DESTINO_SMTP,
+          outputNamespace: DEFAULT_OUTPUT_NAMESPACE_BY_NODE_TYPE[NodeType.DESTINO_SMTP],
+          params: withBaseParamDefaults(NodeType.DESTINO_SMTP, {}),
+          onErrorStep: null,
+        },
+      ];
+      return;
+    }
+
+    // Se retira solo el satelite que ESTE store provisiona. Otro nodo suelto que
+    // el operador escribiera a mano en el panel JSON no es asunto del selector.
+    if (!isReferenced && exists) {
+      satellites.value = satellites.value.filter(
+        (satellite) => satellite.nodeId !== SHARED_ALERT_NODE_ID,
+      );
+    }
+  };
+
+  /**
+   * Declara —o retira— la ruta de contingencia de un paso.
+   *
+   * Es la UNICA via por la que se escribe `onErrorStep`: el asistente solo lee
+   * estas rutas, porque la topologia es propiedad de la plantilla y una
+   * instancia no debe poder inventarse una que su plantilla no declara.
+   *
+   * @param nodeId Paso que se desviaria.
+   * @param action Accion de respaldo, o `null` para quitar la ruta.
+   */
+  const setStepErrorBranch = (nodeId: string, action: ErrorBranchAction | null): void => {
+    const route = action === null ? null : buildErrorRoute(action);
+
+    const steps = sequence.value.map<AssemblerStep>((step) =>
+      step.nodeId === nodeId ? { ...step, onErrorStep: route } : step,
+    );
+
+    // ANTES de reensamblar: `rebuildSchemaFromSequence` lee `satellites.value`,
+    // asi que provisionar el nodo despues lo dejaria fuera del documento hasta
+    // el siguiente cambio del selector.
+    reconcileAlertSatellite(steps);
+    setSequence(steps);
+  };
+
+  /**
+   * Si TODO paso desviable declara ya una ruta de contingencia.
+   *
+   * Se deriva de la secuencia y no de un `ref` aparte, por el mismo motivo que
+   * `stopOnFirstSuccess`: el documento es la unica fuente de verdad, y un espejo
+   * reactivo se desincronizaria en cuanto alguien editase el JSON a mano.
+   *
+   * Los `DESTINO_SMTP` quedan fuera del recuento: desviarlos seria mandarlos a
+   * si mismos.
+   */
+  const notifyAllErrors = computed<boolean>(() => {
+    const divertible = sequence.value.filter((step) => step.nodeType !== NodeType.DESTINO_SMTP);
+
+    return (
+      divertible.length > 0 &&
+      divertible.every((step) => errorRouteTarget(step.onErrorStep) !== null)
+    );
+  });
+
+  /**
+   * Conmuta el respaldo por correo de todo el flujo.
+   *
+   * Al activar NO pisa las rutas ya declaradas: el fallback de vision que el
+   * operador eligio para el parser sobrevive, y solo los pasos sin ruta reciben
+   * la alerta. Al desactivar se retiran unicamente las rutas de alerta; una de
+   * vision es una decision distinta y se quita desde su propio selector.
+   */
+  const setNotifyAllErrors = (enabled: boolean): void => {
+    const steps = sequence.value.map<AssemblerStep>((step) => {
+      if (step.nodeType === NodeType.DESTINO_SMTP) return step;
+
+      if (enabled) {
+        return errorRouteTarget(step.onErrorStep) === null
+          ? { ...step, onErrorStep: SHARED_ALERT_NODE_ID }
+          : step;
+      }
+
+      return errorRouteTarget(step.onErrorStep) === SHARED_ALERT_NODE_ID
+        ? { ...step, onErrorStep: null }
+        : step;
+    });
+
+    reconcileAlertSatellite(steps);
+    setSequence(steps);
   };
 
   /** Reemplaza los `params` de un nodo concreto y regenera el grafo. */
@@ -483,6 +715,7 @@ export const useWorkflowTemplatesStore = defineStore('workflowTemplates', () => 
     activeDraft.value = { name: '', schemaText: BLANK_SCHEMA_TEXT, active: true };
     selectedTemplate.value = null;
     sequence.value = [];
+    satellites.value = [];
   };
 
   return {
@@ -502,6 +735,12 @@ export const useWorkflowTemplatesStore = defineStore('workflowTemplates', () => 
     patchDraft,
     setSequence,
     patchStepParams,
+    satellites,
+    visionTargetNodeId,
+    errorBranchOf,
+    setStepErrorBranch,
+    notifyAllErrors,
+    setNotifyAllErrors,
     rebuildSchemaFromSequence,
     fetchTemplates,
     loadForEdit,

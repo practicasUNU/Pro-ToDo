@@ -163,6 +163,13 @@ export const useFlujoDraftStore = defineStore('flujoDraft', () => {
    * `targetNode` se resuelve al ensamblar, porque depende de la topologia
    * completa: la alerta reutiliza el `DESTINO_SMTP` del flujo si lo hay, y la
    * ruta de vision apunta al `PROCESADOR_IA` que ya exista.
+   *
+   * ESTADO DERIVADO, nunca escrito por la interfaz: se hidrata desde el
+   * `pipeline_schema` de la plantilla —o del flujo, al editar— y el asistente
+   * solo lo lee. `onErrorStep` es topologia, y su unica autoridad es la
+   * plantilla: dejar que una instancia la mutara permitia inventarse un grafo
+   * que su plantilla no declara, y la siguiente instancia de la misma plantilla
+   * salia distinta sin que nada lo explicara.
    */
   const errorBranches = ref<Record<string, ErrorBranch>>({});
 
@@ -316,7 +323,7 @@ export const useFlujoDraftStore = defineStore('flujoDraft', () => {
    * La topologia se toma del catalogo ya cargado en vez de pedirla otra vez: el
    * backend la devuelve completa y ordenada en el listado.
    */
-  const selectTemplate = (templateId: string): void => {
+  const selectTemplate = async (templateId: string): Promise<void> => {
     const template = availableTemplates.value.find((candidate) => candidate.id === templateId);
 
     if (template === undefined) return;
@@ -341,6 +348,24 @@ export const useFlujoDraftStore = defineStore('flujoDraft', () => {
     // el mapeador necesita saber que namespaces existen ANTES de que el usuario
     // llegue a su paso, o su primera validacion se haria contra una lista vacia.
     syncUpstreamNamespaces();
+
+    // El DETALLE y no el resumen: `WorkflowTemplateSummary.topology` es el camino
+    // activo recorrido desde `entrypoint`, asi que no trae ni los `onErrorStep`
+    // ni el nodo satelite que los atiende. Sin esta segunda lectura el asistente
+    // abriria sin ramas y el flujo instanciado perderia la contingencia que su
+    // plantilla declara.
+    //
+    // No se captura el error (§2.1): el componente decide el mensaje.
+    isLoading.value = true;
+
+    try {
+      const detail = await workflowTemplatesService.fetchWorkflowTemplate(templateId);
+      const schema = detail.pipelineSchema as unknown as Partial<AssembledPipelineSchema>;
+
+      hydrateErrorBranches(schema.nodes ?? {});
+    } finally {
+      isLoading.value = false;
+    }
   };
 
   /**
@@ -440,6 +465,21 @@ export const useFlujoDraftStore = defineStore('flujoDraft', () => {
     }
 
     errorBranches.value = recovered;
+
+    // El interruptor del nodo fuente se mueve A LA VEZ, y tiene que ser asi: la
+    // regla 10 del validador rechaza al guardar una ruta que atrapa un codigo
+    // que el nodo, con sus `params`, no puede emitir. Se le pide al propio store
+    // con `declareCaughtErrorCodes` en vez de escribirle la config —§3.1 prohibe
+    // al agregador conocer la forma interna de un nodo—, y se le pasa la lista
+    // completa, vacia incluida, para que un paso SIN ruta tambien quede apagado.
+    for (const step of pipelineTopology.value) {
+      const catchCode =
+        ERROR_BRANCH_TRIGGERS[recovered[step.nodeId]?.trigger ?? 'CUALQUIER_FALLO'].catchCode;
+      const declared =
+        recovered[step.nodeId] === undefined || catchCode === null ? [] : [catchCode];
+
+      resolveNodeStore(step.nodeType, step.nodeId)?.declareCaughtErrorCodes?.(declared);
+    }
 
     // El satelite no esta en `topology` —solo se llega a el por la ruta—, asi
     // que su configuracion hay que ir a buscarla al mapa de nodos.
@@ -554,13 +594,6 @@ export const useFlujoDraftStore = defineStore('flujoDraft', () => {
     return canProvision ? SHARED_ALERT_NODE_ID : null;
   };
 
-  /** Acciones que este flujo puede ofrecer, dada su topologia. */
-  const availableBranchActions = computed<ErrorBranchAction[]>(() =>
-    (Object.keys(ERROR_BRANCH_ACTIONS) as ErrorBranchAction[]).filter(
-      (action) => resolveBranchTarget(action) !== null,
-    ),
-  );
-
   /** Si alguna rama obliga a crear el nodo de alerta compartido. */
   const needsProvisionedAlertNode = computed<boolean>(() =>
     Object.values(errorBranches.value).some(
@@ -649,45 +682,6 @@ export const useFlujoDraftStore = defineStore('flujoDraft', () => {
   const canSave = computed<boolean>(
     () => pipelineTopology.value.length > 0 && invalidSteps.value.length === 0,
   );
-
-  /**
-   * Declara o retira la ruta de contingencia de un paso.
-   *
-   * Pasar `null` la retira. Al hacerlo se resetea el store del satelite si ya no
-   * queda ninguna rama que lo use: dejarlo poblado haria que la siguiente rama
-   * arrancase con los destinatarios de la anterior sin que nadie los pidiera.
-   *
-   * El interruptor del nodo fuente se mueve A LA VEZ, y tiene que ser asi: la
-   * regla 10 del validador rechaza al guardar una ruta que atrapa un codigo que
-   * el nodo, con sus `params`, no puede emitir. Se le pide al propio store con
-   * `declareCaughtErrorCodes` en vez de escribirle la config —§3.1 prohibe al
-   * agregador conocer la forma interna de un nodo—, y se le pasa la lista
-   * completa, vacia incluida, para que retirar la rama tambien lo apague.
-   */
-  const setErrorBranch = (sourceNodeId: string, branch: ErrorBranch | null): void => {
-    const next = { ...errorBranches.value };
-
-    if (branch === null) {
-      delete next[sourceNodeId];
-    } else {
-      next[sourceNodeId] = branch;
-    }
-
-    errorBranches.value = next;
-
-    const step = pipelineTopology.value.find((candidate) => candidate.nodeId === sourceNodeId);
-    const catchCode = branch === null ? null : ERROR_BRANCH_TRIGGERS[branch.trigger].catchCode;
-
-    if (step !== undefined) {
-      resolveNodeStore(step.nodeType, step.nodeId)?.declareCaughtErrorCodes?.(
-        catchCode === null ? [] : [catchCode],
-      );
-    }
-
-    if (!needsProvisionedAlertNode.value) {
-      useSmtpAlertStore(SHARED_ALERT_NODE_ID).resetConfig();
-    }
-  };
 
   /** Ruta de contingencia declarada para un paso, o `null`. */
   const getNodeErrorBranch = (nodeId: string): ErrorBranch | null =>
@@ -988,7 +982,6 @@ export const useFlujoDraftStore = defineStore('flujoDraft', () => {
     hasUnsupportedNodes,
     stepWarnings,
     errorBranches,
-    availableBranchActions,
     needsProvisionedAlertNode,
     hasIncompleteAlertNode,
     hasAlertContingencyStep,
@@ -996,7 +989,6 @@ export const useFlujoDraftStore = defineStore('flujoDraft', () => {
     alertStepIndex,
     configurableStepCount,
     isAlertStep,
-    setErrorBranch,
     resolveBranchTarget,
     getNodeErrorBranch,
     hasContextualRecoveryBranch,

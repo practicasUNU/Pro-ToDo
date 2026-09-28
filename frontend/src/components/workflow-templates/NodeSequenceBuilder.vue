@@ -15,10 +15,21 @@ import { DEFAULT_OUTPUT_NAMESPACE_BY_NODE_TYPE, TRIGGER_NODE_TYPES } from '@/typ
 import type { AssemblerStep } from '@/utils/pipeline-assembler';
 import type { NodeCatalogEntry } from '@/types/node-catalog';
 import type { NodeType } from '@/types/pipeline';
+import type { ErrorBranchAction } from '@/types/nodes/error-branch.types';
 
 interface Props {
   /** Secuencia actual, en orden de ejecucion. */
   modelValue: readonly AssemblerStep[];
+  /**
+   * Accion de contingencia por `nodeId`, resuelta por el anfitrion.
+   *
+   * Llega RESUELTA en vez de importar el store aqui: este componente ya recibe
+   * la secuencia por prop, y leer la mitad del estado por una via y la otra
+   * mitad por otra abriria la puerta a que discrepasen.
+   */
+  errorBranches: Readonly<Record<string, ErrorBranchAction | null>>;
+  /** Si la topologia tiene un `PROCESADOR_IA` al que desviar. */
+  canOfferVision: boolean;
 }
 
 const props = defineProps<Props>();
@@ -26,6 +37,7 @@ const props = defineProps<Props>();
 const emit = defineEmits<{
   'update:modelValue': [value: AssemblerStep[]];
   'update:params': [nodeId: string, params: Record<string, unknown>];
+  'update:errorBranch': [nodeId: string, action: ErrorBranchAction | null];
 }>();
 
 const $q = useQuasar();
@@ -315,8 +327,11 @@ onMounted(async () => {
         :is-last="index === props.modelValue.length - 1"
         @move="moveNode(index, $event)"
         @remove="removeNode(index)"
+        :error-branch="props.errorBranches[step.nodeId] ?? null"
+        :can-offer-vision="props.canOfferVision"
         @update:namespace="updateNamespace(index, $event)"
         @update:params="emit('update:params', step.nodeId, $event)"
+        @update:error-branch="emit('update:errorBranch', step.nodeId, $event)"
       />
     </q-list>
   </section>

@@ -4,8 +4,13 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { useWorkflowTemplatesStore } from './workflow-templates.store';
 
 import { NodeType } from '@/types/pipeline';
+import { MULTIMODAL_FALLBACK_CODE, SHARED_ALERT_NODE_ID } from '@/types/nodes/error-branch.types';
 
-import type { WorkflowTemplateDetail, WorkflowTemplateSummary } from '@/types/pipeline';
+import type {
+  AssembledPipelineSchema,
+  WorkflowTemplateDetail,
+  WorkflowTemplateSummary,
+} from '@/types/pipeline';
 
 // Sin esto se cargaria `@boot/axios`, que necesita entorno de navegador.
 vi.mock('@services/workflow-templates.service', () => ({
@@ -675,6 +680,267 @@ describe('useWorkflowTemplatesStore · catalogo de plantillas de flujo', () => {
         // 3. Assert
         expect(store.schemaNodeCount).toBe(2);
         expect(store.stopOnFirstSuccess).toBe(true);
+      });
+    });
+
+    describe('8. Rutas de contingencia (onErrorStep)', () => {
+      const PARSER_ID = 'nodo_parser';
+      const MAPPER_ID = 'nodo_mapeador';
+      const IA_ID = 'nodo_ia';
+
+      /** Borrador de cuatro pasos: trigger, parser, IA y mapeador. */
+      const buildDraftWithPipeline = (): ReturnType<typeof useWorkflowTemplatesStore> => {
+        const store = useWorkflowTemplatesStore();
+        store.initDraft();
+        store.patchDraft({ name: 'Notiweb' });
+        store.setSequence([
+          {
+            nodeId: 'trigger_imap',
+            nodeType: NodeType.TRIGGER_IMAP,
+            outputNamespace: 'raw_email',
+            params: {},
+          },
+          {
+            nodeId: PARSER_ID,
+            nodeType: NodeType.PARSER_PRE_IA,
+            outputNamespace: 'parsed_email',
+            params: {},
+          },
+          {
+            nodeId: IA_ID,
+            nodeType: NodeType.PROCESADOR_IA,
+            outputNamespace: 'llm_response',
+            params: {},
+          },
+          {
+            nodeId: MAPPER_ID,
+            nodeType: NodeType.MAPEADOR_PLANTILLA,
+            outputNamespace: 'rendered_html',
+            params: {},
+          },
+        ]);
+
+        return store;
+      };
+
+      /** Documento vigente del borrador, ya parseado. */
+      const readSchema = (
+        store: ReturnType<typeof useWorkflowTemplatesStore>,
+      ): AssembledPipelineSchema =>
+        JSON.parse(store.activeDraft.schemaText) as AssembledPipelineSchema;
+
+      it('8.1 deberia escribir la forma de CADENA para la alerta', () => {
+        // 1. Arrange 📐: es la unica forma que el motor trata como "atrapa
+        //    todo". Un `catchErrors` con un comodin inventado se guardaria sin
+        //    protestar y no se dispararia jamas.
+        const store = buildDraftWithPipeline();
+
+        // 2. Act ⚙️
+        store.setStepErrorBranch(MAPPER_ID, 'ALERTA_SMTP');
+
+        // 3. Assert 🎯
+        expect(readSchema(store).nodes[MAPPER_ID]?.onErrorStep).toBe(SHARED_ALERT_NODE_ID);
+        expect(store.errorBranchOf(MAPPER_ID)).toBe('ALERTA_SMTP');
+      });
+
+      it('8.2 deberia provisionar el satelite de alerta como nodo terminal', () => {
+        // 1. Arrange 📐: sin el nodo en el mapa, la ruta apunta fuera y el
+        //    backend rechaza el esquema con su regla 3.
+        const store = buildDraftWithPipeline();
+
+        // 2. Act ⚙️
+        store.setStepErrorBranch(MAPPER_ID, 'ALERTA_SMTP');
+
+        // 3. Assert 🎯: terminal y fuera del encadenado; colarlo en la secuencia
+        //    lo pondria en el camino feliz, avisando en cada ejecucion correcta.
+        const alert = readSchema(store).nodes[SHARED_ALERT_NODE_ID];
+
+        expect(alert?.nodeType).toBe(NodeType.DESTINO_SMTP);
+        expect(alert?.outputNamespace).toBe('smtp_result');
+        expect(alert?.nextStep).toBeNull();
+      });
+
+      it('8.3 deberia escribir la forma SELECTIVA para el fallback de vision', () => {
+        // 1. Arrange 📐: un respaldo incondicional hacia la IA mandaria alli
+        //    tambien los fallos de configuracion, que no es lo que nadie quiso.
+        const store = buildDraftWithPipeline();
+
+        // 2. Act ⚙️
+        store.setStepErrorBranch(PARSER_ID, 'VISION_IA');
+
+        // 3. Assert 🎯: apunta al PROCESADOR_IA que la topologia YA tiene; uno
+        //    nuevo chocaria con el en `llm_response` (regla 5).
+        expect(readSchema(store).nodes[PARSER_ID]?.onErrorStep).toEqual({
+          targetNode: IA_ID,
+          catchErrors: [MULTIMODAL_FALLBACK_CODE],
+        });
+        expect(store.errorBranchOf(PARSER_ID)).toBe('VISION_IA');
+      });
+
+      it('8.4 deberia retirar la ruta y su satelite al desactivarla', () => {
+        // 1. Arrange 📐
+        const store = buildDraftWithPipeline();
+        store.setStepErrorBranch(MAPPER_ID, 'ALERTA_SMTP');
+
+        // 2. Act ⚙️
+        store.setStepErrorBranch(MAPPER_ID, null);
+
+        // 3. Assert 🎯: un satelite huerfano es un nodo inalcanzable que el
+        //    validador rechaza.
+        expect(readSchema(store).nodes[MAPPER_ID]?.onErrorStep).toBeNull();
+        expect(readSchema(store).nodes[SHARED_ALERT_NODE_ID]).toBeUndefined();
+        expect(store.errorBranchOf(MAPPER_ID)).toBeNull();
+      });
+
+      it('8.5 deberia SOBREVIVIR a reordenar la secuencia', () => {
+        // 1. Arrange 📐: el caso que antes borraba el satelite en silencio.
+        //    `rebuildSchemaFromSequence` reensamblaba con la lista vacia, y el
+        //    grafo salia con una ruta apuntando a un nodo inexistente.
+        const store = buildDraftWithPipeline();
+        store.setStepErrorBranch(MAPPER_ID, 'ALERTA_SMTP');
+
+        // 2. Act ⚙️: quitar el ultimo paso reensambla el documento entero.
+        store.setSequence(store.sequence.slice(0, 3));
+
+        // 3. Assert 🎯
+        expect(readSchema(store).nodes[SHARED_ALERT_NODE_ID]?.nodeId).toBe(SHARED_ALERT_NODE_ID);
+      });
+
+      it('8.6 deberia conservar una ruta escrita a mano en el panel JSON', () => {
+        // 1. Arrange 📐: el editor de la derecha sigue siendo editable, y abrir
+        //    una plantilla para tocar un toggle no debe borrar lo que trae.
+        const store = useWorkflowTemplatesStore();
+        store.initDraft({
+          ...buildSummary(),
+          pipelineSchema: {
+            flowId: 'plantilla',
+            name: 'Notiweb',
+            version: '1.0.0',
+            entrypoint: 'trigger_imap',
+            nodes: {
+              trigger_imap: {
+                nodeId: 'trigger_imap',
+                nodeType: NodeType.TRIGGER_IMAP,
+                outputNamespace: 'raw_email',
+                nextStep: null,
+                onErrorStep: SHARED_ALERT_NODE_ID,
+                params: {},
+              },
+              [SHARED_ALERT_NODE_ID]: {
+                nodeId: SHARED_ALERT_NODE_ID,
+                nodeType: NodeType.DESTINO_SMTP,
+                outputNamespace: 'smtp_result',
+                nextStep: null,
+                onErrorStep: null,
+                params: { to: ['guardia@unuware.com'] },
+              },
+            },
+          },
+        });
+
+        // 2. Act ⚙️: cualquier cambio del selector reensambla el documento.
+        store.setSequence(store.sequence);
+
+        // 3. Assert 🎯
+        expect(readSchema(store).nodes.trigger_imap?.onErrorStep).toBe(SHARED_ALERT_NODE_ID);
+        expect(readSchema(store).nodes[SHARED_ALERT_NODE_ID]?.params.to).toEqual([
+          'guardia@unuware.com',
+        ]);
+      });
+
+      it('8.7 deberia cubrir con la alerta los pasos sin ruta propia', () => {
+        // 1. Arrange 📐
+        const store = buildDraftWithPipeline();
+        store.setStepErrorBranch(PARSER_ID, 'VISION_IA');
+
+        // 2. Act ⚙️
+        store.setNotifyAllErrors(true);
+
+        // 3. Assert 🎯: NO pisa la de vision, que es una decision distinta que
+        //    el operador tomo a proposito.
+        const { nodes } = readSchema(store);
+
+        expect(nodes[PARSER_ID]?.onErrorStep).toEqual({
+          targetNode: IA_ID,
+          catchErrors: [MULTIMODAL_FALLBACK_CODE],
+        });
+        expect(nodes.trigger_imap?.onErrorStep).toBe(SHARED_ALERT_NODE_ID);
+        expect(nodes[MAPPER_ID]?.onErrorStep).toBe(SHARED_ALERT_NODE_ID);
+        expect(store.notifyAllErrors).toBe(true);
+      });
+
+      it('8.8 NO deberia desviar un nodo de alerta hacia si mismo', () => {
+        // 1. Arrange 📐: un DESTINO_SMTP con `onErrorStep` a la alerta seria un
+        //    bucle, y el paso terminal del flujo no tiene a donde escalar.
+        const store = useWorkflowTemplatesStore();
+        store.initDraft();
+        store.patchDraft({ name: 'Notiweb' });
+        store.setSequence([
+          {
+            nodeId: 'trigger_imap',
+            nodeType: NodeType.TRIGGER_IMAP,
+            outputNamespace: 'raw_email',
+            params: {},
+          },
+          {
+            nodeId: 'destino_correo',
+            nodeType: NodeType.DESTINO_SMTP,
+            outputNamespace: 'smtp_result',
+            params: {},
+          },
+        ]);
+
+        // 2. Act ⚙️
+        store.setNotifyAllErrors(true);
+
+        // 3. Assert 🎯
+        expect(readSchema(store).nodes.destino_correo?.onErrorStep).toBeNull();
+        expect(readSchema(store).nodes.trigger_imap?.onErrorStep).toBe(SHARED_ALERT_NODE_ID);
+      });
+
+      it('8.9 deberia retirar solo las rutas de alerta al desactivar el global', () => {
+        // 1. Arrange 📐
+        const store = buildDraftWithPipeline();
+        store.setStepErrorBranch(PARSER_ID, 'VISION_IA');
+        store.setNotifyAllErrors(true);
+
+        // 2. Act ⚙️
+        store.setNotifyAllErrors(false);
+
+        // 3. Assert 🎯: la de vision es una decision propia del operador y se
+        //    quita desde su propio selector, no barriendola con el global.
+        const { nodes } = readSchema(store);
+
+        expect(nodes.trigger_imap?.onErrorStep).toBeNull();
+        expect(nodes[MAPPER_ID]?.onErrorStep).toBeNull();
+        expect(nodes[PARSER_ID]?.onErrorStep).toEqual({
+          targetNode: IA_ID,
+          catchErrors: [MULTIMODAL_FALLBACK_CODE],
+        });
+        expect(nodes[SHARED_ALERT_NODE_ID]).toBeUndefined();
+      });
+
+      it('8.10 NO deberia resolver la vision sin un PROCESADOR_IA en la topologia', () => {
+        // 1. Arrange 📐: crear uno nuevo chocaria con el existente en
+        //    `llm_response`, y la lista blanca de namespaces no tiene otro.
+        const store = useWorkflowTemplatesStore();
+        store.initDraft();
+        store.patchDraft({ name: 'Notiweb' });
+        store.setSequence([
+          {
+            nodeId: PARSER_ID,
+            nodeType: NodeType.PARSER_PRE_IA,
+            outputNamespace: 'parsed_email',
+            params: {},
+          },
+        ]);
+
+        // 2. Act ⚙️
+        store.setStepErrorBranch(PARSER_ID, 'VISION_IA');
+
+        // 3. Assert 🎯
+        expect(store.visionTargetNodeId).toBeNull();
+        expect(readSchema(store).nodes[PARSER_ID]?.onErrorStep).toBeNull();
       });
     });
 

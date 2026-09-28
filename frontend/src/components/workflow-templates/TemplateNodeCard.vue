@@ -3,9 +3,11 @@ import { computed } from 'vue';
 
 import { nodeBaseParamsRegistry } from '@components/nodes/node-base-params-registry';
 
-import { NODE_OUTPUT_NAMESPACES } from '@/types/pipeline';
+import { NODE_OUTPUT_NAMESPACES, NodeType } from '@/types/pipeline';
+import { ERROR_BRANCH_ACTIONS } from '@/types/nodes/error-branch.types';
 
 import type { AssemblerStep } from '@/utils/pipeline-assembler';
+import type { ErrorBranchAction } from '@/types/nodes/error-branch.types';
 
 interface Props {
   /** Paso que este bloque representa. */
@@ -14,6 +16,15 @@ interface Props {
   position: number;
   isFirst: boolean;
   isLast: boolean;
+  /** Accion de contingencia declarada por el paso, o `null` si no tiene. */
+  errorBranch: ErrorBranchAction | null;
+  /**
+   * Si la topologia tiene un `PROCESADOR_IA` al que desviar.
+   *
+   * Llega como prop y no se deduce aqui: la ficha solo conoce SU paso, y el
+   * fallback de vision depende del grafo entero.
+   */
+  canOfferVision: boolean;
 }
 
 const props = defineProps<Props>();
@@ -24,7 +35,44 @@ const emit = defineEmits<{
   remove: [];
   'update:namespace': [value: string];
   'update:params': [params: Record<string, unknown>];
+  'update:errorBranch': [action: ErrorBranchAction | null];
 }>();
+
+const NO_VISION_HINT =
+  'Para reintentar con vision IA, la topologia tiene que incluir un nodo Procesador IA: la ruta apunta al que ya exista, no crea uno nuevo.';
+
+/**
+ * Un nodo de alerta no puede declarar contingencia: se desviaria a si mismo.
+ */
+const supportsErrorBranch = computed<boolean>(() => props.step.nodeType !== NodeType.DESTINO_SMTP);
+
+const hasErrorBranch = computed<boolean>(() => props.errorBranch !== null);
+
+/**
+ * Acciones que ESTE paso puede ofrecer (selector cerrado, `frontend-quasar.md` §4).
+ *
+ * La vision solo aparece en el parser y solo si hay un Procesador IA al que
+ * apuntar: ofrecerla en otro tipo crearia una rama muerta que ninguna regla del
+ * backend detecta, porque el codigo que la dispara solo lo emite el parser.
+ */
+const actionOptions = computed(() =>
+  (Object.keys(ERROR_BRANCH_ACTIONS) as ErrorBranchAction[])
+    .filter(
+      (action) =>
+        action !== 'VISION_IA' ||
+        (props.step.nodeType === NodeType.PARSER_PRE_IA && props.canOfferVision),
+    )
+    .map((action) => ({
+      label: ERROR_BRANCH_ACTIONS[action].label,
+      value: action,
+      description: ERROR_BRANCH_ACTIONS[action].hint,
+    })),
+);
+
+/** Al activar se cae a la alerta, que siempre es una accion valida. */
+const onToggleErrorBranch = (enabled: boolean): void => {
+  emit('update:errorBranch', enabled ? 'ALERTA_SMTP' : null);
+};
 
 /**
  * Control de parametros base que corresponde a ESTE tipo de nodo.
@@ -117,6 +165,72 @@ const baseParamsComponent = computed(() => nodeBaseParamsRegistry[props.step.nod
         :node-id="props.step.nodeId"
         @update:params="emit('update:params', $event)"
       />
+
+      <!-- Ruta de contingencia. Vive AQUI y no en el asistente: `onErrorStep` es
+           topologia, y la plantilla es su unica autoridad. El asistente solo la
+           lee y pide los parametros de operacion del nodo que la atiende. -->
+      <div v-if="supportsErrorBranch" class="pd-branch-block q-mt-md q-pa-sm">
+        <q-toggle
+          :model-value="hasErrorBranch"
+          dense
+          class="pd-branch-toggle"
+          label="Habilitar ruta de contingencia (onErrorStep)"
+          :data-test="`error-branch-toggle-${props.step.nodeId}`"
+          @update:model-value="onToggleErrorBranch(Boolean($event))"
+        />
+
+        <p class="pd-subtitle q-mt-xs q-mb-none">
+          Sin ruta declarada, un fallo de este paso detiene el flujo y lo deja en PAUSADO. Con ella,
+          el motor salta al nodo indicado y le entrega que fallo, con que codigo y el payload
+          parcial.
+        </p>
+
+        <!-- Selector CERRADO (Poka-Yoke §4): sin entrada de texto libre, solo
+             las acciones del catalogo que el motor sabe atender.
+
+             La marca `data-test` va en el CONTENEDOR y no en el propio
+             `q-select`: Quasar derrama los atributos sobre un div interno, asi
+             que marcarlo a el no sirve para localizar el componente. -->
+        <div v-if="hasErrorBranch" :data-test="`error-branch-action-${props.step.nodeId}`">
+          <q-select
+            :id="`error-branch-${props.step.nodeId}`"
+            :model-value="props.errorBranch"
+            :options="actionOptions"
+            outlined
+            dense
+            emit-value
+            map-options
+            class="q-mt-sm"
+            label="Que hacer al fallar este paso"
+            @update:model-value="emit('update:errorBranch', $event as ErrorBranchAction)"
+          >
+            <template #option="scope">
+              <q-item v-bind="scope.itemProps">
+                <q-item-section>
+                  <q-item-label>{{ scope.opt.label }}</q-item-label>
+                  <q-item-label caption class="pd-subtitle">{{
+                    scope.opt.description
+                  }}</q-item-label>
+                </q-item-section>
+              </q-item>
+            </template>
+          </q-select>
+        </div>
+
+        <!-- La vision no se puede ofrecer sin un nodo de IA al que apuntar: uno
+             nuevo chocaria con el del flujo en el namespace `llm_response`. -->
+        <p
+          v-if="
+            hasErrorBranch &&
+            props.step.nodeType === NodeType.PARSER_PRE_IA &&
+            !props.canOfferVision
+          "
+          class="pd-subtitle q-mt-sm q-mb-none"
+          :data-test="`no-vision-hint-${props.step.nodeId}`"
+        >
+          {{ NO_VISION_HINT }}
+        </p>
+      </div>
     </div>
   </q-expansion-item>
 </template>
@@ -128,6 +242,19 @@ const baseParamsComponent = computed(() => nodeBaseParamsRegistry[props.step.nod
 
 .pd-sequence-body {
   background: var(--pd-card-bg);
+}
+
+// Franja de acento a la izquierda: se lee como una derivacion del paso y no
+// como otro campo obligatorio mas. El color sale del token, nunca de un hex.
+.pd-branch-block {
+  background: var(--pd-surface-muted);
+  border: 1px solid var(--pd-border);
+  border-left: 3px solid var(--pd-warning);
+  border-radius: $generic-border-radius;
+}
+
+.pd-branch-toggle {
+  color: var(--pd-text-primary);
 }
 
 // El campo del namespace vive ahora aqui, asi que su fondo tambien.

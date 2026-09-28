@@ -8,13 +8,14 @@ import NodeBranchCard from '@components/nodes/common/NodeBranchCard.vue';
 import { useFlujoDraftStore } from '@stores/flujo-draft.store';
 
 import { NodeType } from '@/types/pipeline';
-import { MULTIMODAL_FALLBACK_CODE } from '@/types/nodes/error-branch.types';
+import { MULTIMODAL_FALLBACK_CODE, SHARED_ALERT_NODE_ID } from '@/types/nodes/error-branch.types';
 
-import type { WorkflowTemplateSummary } from '@/types/pipeline';
+import type { WorkflowTemplateDetail, WorkflowTemplateSummary } from '@/types/pipeline';
 
 // Sin esto se cargaria `@boot/axios`, que necesita entorno de navegador.
 vi.mock('@services/workflow-templates.service', () => ({
   fetchWorkflowTemplates: vi.fn(),
+  fetchWorkflowTemplate: vi.fn(),
 }));
 vi.mock('@services/workflows.service', () => ({
   createWorkflow: vi.fn(),
@@ -36,6 +37,7 @@ vi.mock('@services/nodes/template-mapper.service', () => ({
 
 const workflowTemplatesService = await import('@services/workflow-templates.service');
 const fetchWorkflowTemplates = vi.mocked(workflowTemplatesService.fetchWorkflowTemplates);
+const fetchWorkflowTemplate = vi.mocked(workflowTemplatesService.fetchWorkflowTemplate);
 
 const nodeCatalogService = await import('@services/node-catalog.service');
 const fetchNodeCatalog = vi.mocked(nodeCatalogService.fetchNodeCatalog);
@@ -53,30 +55,85 @@ const TOPOLOGY: WorkflowTemplateSummary['topology'] = [
   { nodeId: IA_NODE_ID, nodeType: NodeType.PROCESADOR_IA, outputNamespace: 'llm_response' },
 ];
 
-const buildDraft = async (): Promise<ReturnType<typeof useFlujoDraftStore>> => {
-  const draft = useFlujoDraftStore();
-  fetchWorkflowTemplates.mockResolvedValue([
-    {
-      id: TEMPLATE_ID,
-      name: 'Notiweb',
-      description: null,
-      active: true,
-      topology: TOPOLOGY,
+const TEMPLATE: WorkflowTemplateSummary = {
+  id: TEMPLATE_ID,
+  name: 'Notiweb',
+  description: null,
+  active: true,
+  topology: TOPOLOGY,
+};
+
+/** Ruta selectiva de vision: la unica que atrapa el codigo del parser. */
+const VISION_ROUTE = { targetNode: IA_NODE_ID, catchErrors: [MULTIMODAL_FALLBACK_CODE] };
+
+/**
+ * Detalle de la plantilla con la ruta que la tarjeta representa.
+ *
+ * `selectTemplate` pide el DETALLE para hidratar las ramas: el resumen solo trae
+ * el camino activo, sin `onErrorStep` ni el nodo satelite que lo atiende.
+ *
+ * @param route Ruta declarada por el parser.
+ */
+const buildDetail = (route: unknown): WorkflowTemplateDetail => {
+  const nodes: Record<string, unknown> = Object.fromEntries(
+    TOPOLOGY.map((step, index) => [
+      step.nodeId,
+      {
+        nodeId: step.nodeId,
+        nodeType: step.nodeType,
+        outputNamespace: step.outputNamespace,
+        nextStep: TOPOLOGY[index + 1]?.nodeId ?? null,
+        onErrorStep: step.nodeId === PARSER_NODE_ID ? route : null,
+        params: {},
+      },
+    ]),
+  );
+
+  if (route === SHARED_ALERT_NODE_ID) {
+    nodes[SHARED_ALERT_NODE_ID] = {
+      nodeId: SHARED_ALERT_NODE_ID,
+      nodeType: NodeType.DESTINO_SMTP,
+      outputNamespace: 'smtp_result',
+      nextStep: null,
+      onErrorStep: null,
+      params: {},
+    };
+  }
+
+  return {
+    ...TEMPLATE,
+    pipelineSchema: {
+      flowId: 'plantilla',
+      name: TEMPLATE.name,
+      version: '1.0.0',
+      entrypoint: TOPOLOGY[0]?.nodeId ?? '',
+      nodes,
     },
-  ]);
+  };
+};
+
+const buildDraft = async (
+  route: unknown = VISION_ROUTE,
+): Promise<ReturnType<typeof useFlujoDraftStore>> => {
+  const draft = useFlujoDraftStore();
+  fetchWorkflowTemplates.mockResolvedValue([TEMPLATE]);
+  fetchWorkflowTemplate.mockResolvedValue(buildDetail(route));
   fetchNodeCatalog.mockResolvedValue([]);
   await draft.loadAvailableTemplates();
-  draft.selectTemplate(TEMPLATE_ID);
+  await draft.selectTemplate(TEMPLATE_ID);
 
   return draft;
 };
 
-const mountCard = (targetNodeId = IA_NODE_ID): ReturnType<typeof mount> =>
+const mountCard = (
+  targetNodeId = IA_NODE_ID,
+  errorCode: string | null = MULTIMODAL_FALLBACK_CODE,
+): ReturnType<typeof mount> =>
   mount(NodeBranchCard, {
     props: {
       sourceNodeId: PARSER_NODE_ID,
       targetNodeId,
-      errorCode: MULTIMODAL_FALLBACK_CODE,
+      errorCode,
     },
     global: { plugins: [Quasar], components: QUASAR_COMPONENTS },
   });
@@ -141,7 +198,26 @@ describe('NodeBranchCard · referencia a la ruta de recuperacion', () => {
     });
   });
 
-  describe('3. Destino inexistente', () => {
+  describe('3. Rama de alerta', () => {
+    it('3.0 deberia nombrar el paso de contingencias como destino', async () => {
+      // 1. Arrange 📐: el satelite NO esta en `pipelineTopology` —solo se llega
+      //    a el por la ruta—, asi que nombrarlo por ahi diria que "ya no forma
+      //    parte de este flujo", que es falso y ademas alarmante.
+      await buildDraft(SHARED_ALERT_NODE_ID);
+
+      // 2. Act ⚙️: sin codigo, que es la forma de cadena: atrapa cualquier fallo.
+      const wrapper = mountCard(SHARED_ALERT_NODE_ID, null);
+
+      // 3. Assert 🎯
+      expect(wrapper.get('[data-test="branch-notice"]').text()).toContain(
+        'Contingencias por correo',
+      );
+      expect(wrapper.find('[data-test="branch-error-code"]').exists()).toBe(false);
+      expect(wrapper.find('[data-test="branch-jump"]').exists()).toBe(true);
+    });
+  });
+
+  describe('4. Destino inexistente', () => {
     it('3.1 deberia avisar en vez de pintar un boton muerto', async () => {
       // 1. Arrange 📐: una ruta que apunta fuera de la topologia es un esquema
       //    roto, y el backend lo rechaza con su regla 3. Aqui se dice.

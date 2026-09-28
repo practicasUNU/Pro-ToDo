@@ -7,14 +7,12 @@ import { useFlujoDraftStore } from '@stores/flujo-draft.store';
 
 import { nodeConfigRegistry } from '@components/nodes/node-config-registry';
 import NodeBranchCard from '@components/nodes/common/NodeBranchCard.vue';
-import NodeErrorBranchConfig from '@components/nodes/common/NodeErrorBranchConfig.vue';
 import SmtpAlertConfig from '@components/nodes/SmtpAlertConfig.vue';
 import PipelineSelector from '@components/wizard/PipelineSelector.vue';
 import SaveWarningsDialog from '@components/wizard/SaveWarningsDialog.vue';
 
 import { extractApiErrorMessage } from '@/utils/api-error';
 
-import { NodeType } from '@/types/pipeline';
 import { MULTIMODAL_FALLBACK_CODE, SHARED_ALERT_NODE_ID } from '@/types/nodes/error-branch.types';
 
 import type { StepWarning } from '@stores/flujo-draft.store';
@@ -53,14 +51,14 @@ const reviewStepIndex = computed<number>(() => draftStore.configurableStepCount)
 const isReviewStep = computed<boolean>(() => draftStore.activeStep === reviewStepIndex.value);
 
 /**
- * Nodo que recibe la recuperacion funcional de un paso, o `null`.
+ * Nodo que recibe el desvio de un paso, o `null` si no declara ninguno.
  *
- * Devuelve `null` tambien cuando la rama es una alerta: esa es terminal y se
- * configura en el paso de contingencias, no junto al nodo que la declara.
+ * Cubre AMBAS formas de rama —la recuperacion funcional y la alerta terminal—
+ * porque desde que la topologia la fija la plantilla, el asistente ya no ofrece
+ * declararlas: lo unico que puede hacer es decir a donde van, y ocultar la de
+ * alerta dejaba al operador sin saber que ese paso tenia contingencia.
  */
 const branchTargetFor = (nodeId: string): string | null => {
-  if (!draftStore.hasContextualRecoveryBranch(nodeId)) return null;
-
   const branch = draftStore.getNodeErrorBranch(nodeId);
 
   return branch === null ? null : draftStore.resolveBranchTarget(branch.action);
@@ -108,8 +106,23 @@ const loadTemplates = async (): Promise<void> => {
   }
 };
 
-const onSelectTemplate = (templateId: string): void => {
-  draftStore.selectTemplate(templateId);
+/**
+ * Elige la plantilla y espera a que el borrador quede hidratado.
+ *
+ * Es asincrono porque el store necesita el DETALLE de la plantilla para conocer
+ * sus rutas de contingencia: el listado solo trae el camino activo. Un fallo
+ * aqui deja el asistente sin ramas, asi que se avisa en vez de seguir en
+ * silencio.
+ */
+const onSelectTemplate = async (templateId: string): Promise<void> => {
+  try {
+    await draftStore.selectTemplate(templateId);
+  } catch (error) {
+    $q.notify({
+      type: 'negative',
+      message: extractApiErrorMessage(error, 'No se pudo cargar la contingencia de la plantilla'),
+    });
+  }
 };
 
 const onBackToSelector = (): void => {
@@ -353,28 +366,17 @@ onMounted(async () => {
             </p>
           </div>
 
-          <!-- Ruta de contingencia del paso. Se monta AQUI, en el anfitrion, y
-               no dentro de cada configurador: el registro pasa solo `node-id`, y
-               meterlo en los seis obligaria a editarlos todos y a que cada tipo
-               nuevo se acordase. Una sola insercion lo da para todos.
-
-               No se ofrece sobre un nodo de alerta: se desviaria a si mismo. -->
-          <NodeErrorBranchConfig
-            v-if="resolveStepComponent(step) && step.nodeType !== NodeType.DESTINO_SMTP"
-            :node-id="step.nodeId"
-            :node-type="step.nodeType"
-          />
-
-          <!-- Recuperacion FUNCIONAL: el flujo sigue por otra via en vez de
-               avisar a una persona. Se dibuja junto al paso que la declara
-               porque es ahi donde tiene sentido leerla, pero el nodo destino se
-               configura en su propio paso: esta en el camino normal del flujo y
-               pintar aqui su formulario lo mostraria dos veces. -->
+          <!-- Ruta de contingencia en modo LECTURA. El asistente no puede
+               declararla ni cambiarla: `onErrorStep` es topologia y su unica
+               autoridad es la plantilla de flujo. Aqui solo se informa a donde
+               va, y el nodo destino se configura en su propio paso. -->
           <NodeBranchCard
             v-if="branchTargetFor(step.nodeId)"
             :source-node-id="step.nodeId"
             :target-node-id="branchTargetFor(step.nodeId) ?? ''"
-            :error-code="MULTIMODAL_FALLBACK_CODE"
+            :error-code="
+              draftStore.hasContextualRecoveryBranch(step.nodeId) ? MULTIMODAL_FALLBACK_CODE : null
+            "
           />
 
           <q-stepper-navigation class="row items-center q-gutter-sm">

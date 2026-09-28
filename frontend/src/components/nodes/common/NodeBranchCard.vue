@@ -3,23 +3,36 @@ import { computed } from 'vue';
 
 import { useFlujoDraftStore } from '@stores/flujo-draft.store';
 
+import { ALERT_STEP_NAME } from '@stores/flujo-draft.store';
+import { SHARED_ALERT_NODE_ID } from '@/types/nodes/error-branch.types';
+
 interface Props {
   /** Nodo que se desvia. */
   sourceNodeId: string;
   /** Nodo que recibe el desvio. */
   targetNodeId: string;
-  /** Codigo de error que dispara la ruta. */
-  errorCode: string;
+  /**
+   * Codigo que dispara la ruta, o `null` si atrapa cualquier fallo.
+   *
+   * `null` NO es "sin codigo declarado": es la forma de CADENA de `onErrorStep`,
+   * la unica que el motor trata como respaldo incondicional. Pintar ahi una
+   * insignia con un codigo inventado prometeria un desvio selectivo que el
+   * esquema no declara.
+   */
+  errorCode: string | null;
 }
 
 const props = defineProps<Props>();
 
 const draftStore = useFlujoDraftStore();
 
-const CARD_TITLE = 'Ruta de Recuperacion Automatica (onErrorStep)';
+const CARD_TITLE = 'Ruta de Contingencia (onErrorStep)';
 
-const EXPLANATION =
-  'Este paso no se detiene ante ese fallo: el motor salta al nodo indicado y le entrega el contexto del error, que es lo que activa su modo de vision. El nodo sigue formando parte del camino normal del flujo, asi que se configura en su propio paso.';
+const READ_ONLY_HINT =
+  'La declara la plantilla de flujo y aqui no se puede cambiar: la topologia es propiedad de la plantilla, no de cada flujo que parte de ella. Este paso no se detiene ante el fallo; el motor salta al nodo indicado y le entrega el contexto del error.';
+
+/** Si el desvio va al nodo de alerta compartido, que no esta en la topologia. */
+const isAlertTarget = computed<boolean>(() => props.targetNodeId === SHARED_ALERT_NODE_ID);
 
 /** Paso del asistente que recibe el desvio, con su posicion. */
 const targetStep = computed(() => {
@@ -28,7 +41,31 @@ const targetStep = computed(() => {
   return index === -1 ? null : { step: draftStore.pipelineTopology[index], index };
 });
 
+/**
+ * Como se nombra el destino en el aviso.
+ *
+ * El satelite de alerta no aparece en `pipelineTopology` —solo se llega a el por
+ * la ruta—, asi que se nombra por su paso del asistente. Sin esta rama el aviso
+ * decia que el nodo "ya no forma parte de este flujo", que era falso y ademas
+ * alarmante.
+ */
+const targetLabel = computed<string>(() => {
+  if (isAlertTarget.value) return ALERT_STEP_NAME;
+
+  return targetStep.value?.step?.name ?? props.targetNodeId;
+});
+
+/** Si hay un paso del asistente al que saltar para configurar el destino. */
+const canJumpToTarget = computed<boolean>(() =>
+  isAlertTarget.value ? draftStore.alertStepIndex !== -1 : targetStep.value !== null,
+);
+
 const onGoToTarget = (): void => {
+  if (isAlertTarget.value) {
+    draftStore.activeStep = draftStore.alertStepIndex;
+    return;
+  }
+
   draftStore.goToNodeStep(props.targetNodeId);
 };
 </script>
@@ -43,19 +80,33 @@ const onGoToTarget = (): void => {
       <q-icon name="alt_route" size="22px" class="pd-branch-card__icon" />
       <div class="pd-label">{{ CARD_TITLE }}</div>
       <q-space />
-      <q-badge class="pd-badge pd-mono pd-branch-card__code" data-test="branch-error-code">
+      <!-- Solo la forma selectiva nombra un codigo; la cadena atrapa cualquier
+           fallo y una insignia ahi prometeria una selectividad inexistente. -->
+      <q-badge
+        v-if="errorCode"
+        class="pd-badge pd-mono pd-branch-card__code"
+        data-test="branch-error-code"
+      >
         {{ errorCode }}
       </q-badge>
     </header>
 
-    <p class="pd-subtitle q-mt-sm q-mb-md">{{ EXPLANATION }}</p>
+    <p class="pd-label q-mt-sm q-mb-xs" data-test="branch-notice">
+      Ruta de contingencia configurada hacia: {{ targetLabel }}
+    </p>
 
-    <div v-if="targetStep" class="row items-center no-wrap q-gutter-sm" data-test="branch-target">
+    <p class="pd-subtitle q-mb-md">{{ READ_ONLY_HINT }}</p>
+
+    <div
+      v-if="canJumpToTarget"
+      class="row items-center no-wrap q-gutter-sm"
+      data-test="branch-target"
+    >
       <div>
         <div class="pd-label">Recibe el desvio</div>
         <div class="pd-subtitle">
-          Paso {{ targetStep.index + 1 }} ·
-          <span class="pd-mono">{{ targetStep.step?.nodeId }}</span>
+          <template v-if="targetStep">Paso {{ targetStep.index + 1 }} · </template>
+          <span class="pd-mono">{{ targetNodeId }}</span>
         </div>
       </div>
       <q-space />
@@ -65,7 +116,7 @@ const onGoToTarget = (): void => {
         no-caps
         dense
         icon-right="north_east"
-        :label="`Ir a ${targetStep.step?.name}`"
+        :label="`Ir a ${targetLabel}`"
         data-test="branch-jump"
         @click="onGoToTarget"
       />
@@ -75,7 +126,7 @@ const onGoToTarget = (): void => {
          backend con su regla 3. Aqui se avisa en vez de pintar un boton muerto. -->
     <p v-else class="pd-subtitle q-mb-none" data-test="branch-target-missing">
       El nodo <span class="pd-mono">{{ targetNodeId }}</span> ya no forma parte de este flujo.
-      Revisa la ruta de contingencia de este paso.
+      Revisa la ruta de contingencia en la plantilla de origen.
     </p>
   </section>
 </template>
