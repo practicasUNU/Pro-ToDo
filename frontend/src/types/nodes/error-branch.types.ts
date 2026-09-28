@@ -71,6 +71,27 @@ export const ERROR_BRANCH_TRIGGERS: Record<ErrorBranchTrigger, ErrorBranchTrigge
   },
 };
 
+/**
+ * Identificador del nodo de alerta que el asistente provisiona.
+ *
+ * UNO POR FLUJO, compartido por todas las ramas, y no uno por nodo fuente. La
+ * regla 5 del validador de topologia prohibe que dos nodos escriban el mismo
+ * `outputNamespace`, y `smtp_result` es uno solo en la lista cerrada: un
+ * satelite por paso devolveria un 400 en cuanto hubiera dos ramas. Compartirlo
+ * tampoco pierde informacion, porque `error_context` ya dice que nodo fallo.
+ */
+export const SHARED_ALERT_NODE_ID = 'alerta_smtp';
+
+/**
+ * Identificador del nodo de transcripcion que el editor provisiona.
+ *
+ * UNO POR FLUJO, igual que el de alerta y por el mismo motivo: `ocr_result` es
+ * un namespace de la lista cerrada y la regla 5 del validador lo declara de un
+ * solo dueno, asi que un satelite por paso devolveria un 400 en cuanto hubiera
+ * dos ramas de vision.
+ */
+export const SHARED_OCR_NODE_ID = 'ocr_ia';
+
 /** Definicion de una accion de respaldo para el selector cerrado. */
 export interface ErrorBranchActionOption {
   readonly label: string;
@@ -80,12 +101,29 @@ export interface ErrorBranchActionOption {
   /**
    * Si el asistente puede CREAR el nodo destino cuando el flujo no lo tiene.
    *
-   * Solo la alerta por correo lo permite. La ruta de vision apunta al
-   * `PROCESADOR_IA` que el flujo YA tiene: crear uno nuevo chocaria con el
-   * existente en el namespace `llm_response` (regla 5 del validador), y ademas
-   * ese tipo todavia no tiene configurador con el que rellenar su prompt.
+   * Las DOS acciones lo permiten desde que la transcripcion tiene tipo propio.
+   * Antes no: la vision apuntaba al `PROCESADOR_IA` del flujo porque un segundo
+   * nodo de IA chocaria con el en `llm_response`, y eso obligaba a ofrecer la
+   * opcion solo si la topologia ya traia uno. `PROCESADOR_OCR` escribe en
+   * `ocr_result` y no colisiona con nadie.
    */
   readonly canProvision: boolean;
+  /**
+   * `nodeId` del satelite que se provisiona, cuando `canProvision` es cierto.
+   *
+   * Va en el catalogo y no cableado en el store porque ya son dos: atarlo a
+   * `SHARED_ALERT_NODE_ID` obligaba a un `if` por accion en cada sitio que
+   * resuelve un destino.
+   */
+  readonly provisionedNodeId: string | null;
+  /**
+   * Si el satelite REINCORPORA el flujo en vez de terminarlo.
+   *
+   * La alerta es terminal —avisa a una persona y ahi acaba—, mientras que la
+   * transcripcion devuelve el flujo al curso que llevaba el paso que fallo. Es
+   * lo unico que distingue las dos formas de satelite al ensamblar el grafo.
+   */
+  readonly rejoinsFlow: boolean;
   /**
    * Tipos de nodo que pueden declarar esta accion; vacio significa todos.
    *
@@ -131,6 +169,8 @@ export const ERROR_BRANCH_ACTIONS: Record<ErrorBranchAction, ErrorBranchActionOp
     hint: 'Envia una carta con el nodo que fallo, su codigo y el payload parcial a las personas que indiques.',
     targetNodeType: NodeType.DESTINO_SMTP,
     canProvision: true,
+    provisionedNodeId: SHARED_ALERT_NODE_ID,
+    rejoinsFlow: false,
     onlyForNodeTypes: [],
     // La forma de CADENA atrapa cualquier fallo, asi que no hay codigo concreto
     // que el nodo deba poder emitir: la regla 10 ni siquiera la mira.
@@ -139,9 +179,11 @@ export const ERROR_BRANCH_ACTIONS: Record<ErrorBranchAction, ErrorBranchActionOp
   },
   VISION_IA: {
     label: 'Extraccion con vision IA',
-    hint: 'Reenvia el correo al nodo de IA del flujo, que leera la imagen o el PDF escaneado en vez del texto.',
-    targetNodeType: NodeType.PROCESADOR_IA,
-    canProvision: false,
+    hint: 'Anade un nodo de transcripcion que leera la imagen o el PDF escaneado y devolvera el flujo a su curso con el texto recuperado.',
+    targetNodeType: NodeType.PROCESADOR_OCR,
+    canProvision: true,
+    provisionedNodeId: SHARED_OCR_NODE_ID,
+    rejoinsFlow: true,
     // El fallo por medios sin texto solo lo emite el parser; ofrecer la vision
     // en otro tipo crearia una rama muerta que ninguna regla del backend ve.
     onlyForNodeTypes: [NodeType.PARSER_PRE_IA],
@@ -149,17 +191,6 @@ export const ERROR_BRANCH_ACTIONS: Record<ErrorBranchAction, ErrorBranchActionOp
     upstreamParams: { [NodeType.TRIGGER_IMAP]: { includeAttachments: true } },
   },
 };
-
-/**
- * Identificador del nodo de alerta que el asistente provisiona.
- *
- * UNO POR FLUJO, compartido por todas las ramas, y no uno por nodo fuente. La
- * regla 5 del validador de topologia prohibe que dos nodos escriban el mismo
- * `outputNamespace`, y `smtp_result` es uno solo en la lista cerrada: un
- * satelite por paso devolveria un 400 en cuanto hubiera dos ramas. Compartirlo
- * tampoco pierde informacion, porque `error_context` ya dice que nodo fallo.
- */
-export const SHARED_ALERT_NODE_ID = 'alerta_smtp';
 
 /** Ruta de contingencia declarada para un paso del asistente. */
 export interface ErrorBranch {

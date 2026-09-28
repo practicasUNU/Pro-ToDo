@@ -421,19 +421,13 @@ export const useWorkflowTemplatesStore = defineStore('workflowTemplates', () => 
    */
   const setSequence = (steps: AssemblerStep[]): void => {
     sequence.value = steps;
+    // ANTES de reensamblar, y aqui y no solo al tocar el selector de rutas:
+    // reordenar la secuencia cambia a donde devuelve el flujo un satelite que
+    // reincorpora, y sin recalcularlo quedaria apuntando al nodo que ocupaba esa
+    // posicion antes del cambio.
+    reconcileSatellites(steps);
     rebuildSchemaFromSequence();
   };
-
-  /**
-   * Nodo de la secuencia que puede atender un desvio de vision, o `null`.
-   *
-   * El fallback multimodal apunta al `PROCESADOR_IA` que la topologia YA tiene y
-   * nunca crea uno nuevo: un segundo nodo de IA chocaria con el existente en el
-   * namespace `llm_response`, que la regla 5 del validador declara unico.
-   */
-  const visionTargetNodeId = computed<string | null>(
-    () => sequence.value.find((step) => step.nodeType === NodeType.PROCESADOR_IA)?.nodeId ?? null,
-  );
 
   /**
    * Accion de contingencia declarada por un paso, o `null` si no tiene ruta.
@@ -451,12 +445,19 @@ export const useWorkflowTemplatesStore = defineStore('workflowTemplates', () => 
 
     if (targetNode === null) return null;
 
+    // Se pregunta PRIMERO al catalogo: un satelite provisionado puede no estar
+    // todavia en `satellites` —el documento se acaba de abrir a mano— y su
+    // identificador es el unico dato fiable que trae la ruta.
+    const provisioned = (Object.keys(ERROR_BRANCH_ACTIONS) as ErrorBranchAction[]).find(
+      (action) => ERROR_BRANCH_ACTIONS[action].provisionedNodeId === targetNode,
+    );
+
+    if (provisioned !== undefined) return provisioned;
+
     const targetType =
-      targetNode === SHARED_ALERT_NODE_ID
-        ? NodeType.DESTINO_SMTP
-        : (sequence.value.find((candidate) => candidate.nodeId === targetNode)?.nodeType ??
-          satellites.value.find((candidate) => candidate.nodeId === targetNode)?.nodeType ??
-          null);
+      sequence.value.find((candidate) => candidate.nodeId === targetNode)?.nodeType ??
+      satellites.value.find((candidate) => candidate.nodeId === targetNode)?.nodeType ??
+      null;
 
     if (targetType === null) return null;
 
@@ -477,54 +478,78 @@ export const useWorkflowTemplatesStore = defineStore('workflowTemplates', () => 
    * fallos de configuracion, que no es lo que nadie quiso decir.
    */
   const buildErrorRoute = (action: ErrorBranchAction): string | SelectiveErrorFallback | null => {
-    if (action === 'ALERTA_SMTP') return SHARED_ALERT_NODE_ID;
+    const targetNode = ERROR_BRANCH_ACTIONS[action].provisionedNodeId;
 
-    const targetNode = visionTargetNodeId.value;
+    if (targetNode === null) return null;
 
-    return targetNode === null ? null : { targetNode, catchErrors: [MULTIMODAL_FALLBACK_CODE] };
+    if (action === 'ALERTA_SMTP') return targetNode;
+
+    return { targetNode, catchErrors: [MULTIMODAL_FALLBACK_CODE] };
   };
 
   /**
-   * Reconcilia el satelite de alerta con las rutas vigentes.
+   * Reconcilia los satelites provisionados con las rutas vigentes.
    *
-   * UNO POR FLUJO, compartido por todas las ramas: la regla 5 del validador
-   * prohibe que dos nodos escriban en `smtp_result`, asi que un satelite por
-   * paso devolveria un 400 en cuanto hubiera dos rutas.
+   * UNO POR FLUJO Y POR ACCION, compartido por todas las ramas que lo invocan:
+   * la regla 5 del validador prohibe que dos nodos escriban el mismo
+   * `outputNamespace`, asi que un satelite por paso devolveria un 400 en cuanto
+   * hubiera dos rutas de la misma clase.
    *
-   * Los `params` se siembran con los defaults del tipo y NADA mas: los
-   * destinatarios son configuracion de OPERACION y se piden en el asistente, al
-   * instanciar el flujo. Una plantilla que los llevara dentro impondria los
-   * mismos a todos los flujos que partieran de ella.
+   * Hay DOS clases y se distinguen por `rejoinsFlow`. La alerta es terminal
+   * —avisa a una persona y ahi acaba—; la transcripcion devuelve el flujo al
+   * curso que llevaba el paso que fallo, asi que su `nextStep` se copia de ese
+   * paso y se RECALCULA en cada pasada: si el operador reordena la secuencia, el
+   * satelite debe seguir apuntando a donde ahora va el nodo que lo invoca, o
+   * quedaria colgando de un nodo que cambio de sitio.
+   *
+   * Los `params` se siembran con los defaults del tipo y NADA mas: lo demas es
+   * configuracion de OPERACION y se pide en el asistente. Una plantilla que
+   * llevara dentro los destinatarios o el modelo impondria los mismos a todos
+   * los flujos que partieran de ella.
    *
    * @param steps Secuencia ya actualizada sobre la que juzgar.
    */
-  const reconcileAlertSatellite = (steps: readonly AssemblerStep[]): void => {
-    const isReferenced = steps.some(
-      (step) => errorRouteTarget(step.onErrorStep) === SHARED_ALERT_NODE_ID,
-    );
-    const exists = satellites.value.some((satellite) => satellite.nodeId === SHARED_ALERT_NODE_ID);
+  const reconcileSatellites = (steps: readonly AssemblerStep[]): void => {
+    let next = [...satellites.value];
 
-    if (isReferenced && !exists) {
-      satellites.value = [
-        ...satellites.value,
+    for (const action of Object.keys(ERROR_BRANCH_ACTIONS) as ErrorBranchAction[]) {
+      const option = ERROR_BRANCH_ACTIONS[action];
+      const { provisionedNodeId } = option;
+
+      if (provisionedNodeId === null) continue;
+
+      // El paso que invoca la ruta manda: de el sale el `nextStep` del satelite
+      // que reincorpora. Si hay varios, el primero — todos comparten satelite y
+      // el grafo solo admite un puntero.
+      const caller = steps.find((step) => errorRouteTarget(step.onErrorStep) === provisionedNodeId);
+
+      // Se CONSERVAN los `params` del satelite que ya estaba: pudo escribirlos
+      // alguien a mano en el panel JSON, y reconstruirlo desde cero en cada
+      // reordenacion se los llevaria por delante sin decir nada.
+      const existing = next.find((satellite) => satellite.nodeId === provisionedNodeId);
+
+      next = next.filter((satellite) => satellite.nodeId !== provisionedNodeId);
+
+      if (caller === undefined) continue;
+
+      const callerIndex = steps.indexOf(caller);
+
+      next = [
+        ...next,
         {
-          nodeId: SHARED_ALERT_NODE_ID,
-          nodeType: NodeType.DESTINO_SMTP,
-          outputNamespace: DEFAULT_OUTPUT_NAMESPACE_BY_NODE_TYPE[NodeType.DESTINO_SMTP],
-          params: withBaseParamDefaults(NodeType.DESTINO_SMTP, {}),
+          nodeId: provisionedNodeId,
+          nodeType: option.targetNodeType,
+          outputNamespace: DEFAULT_OUTPUT_NAMESPACE_BY_NODE_TYPE[option.targetNodeType],
+          params: withBaseParamDefaults(option.targetNodeType, existing?.params ?? {}),
           onErrorStep: null,
+          // El `nextStep` del paso que la invoca sale del ORDEN del arreglo, no
+          // de un campo suyo: es la misma regla que aplica `assemblePipelineSchema`.
+          nextStep: option.rejoinsFlow ? (steps[callerIndex + 1]?.nodeId ?? null) : null,
         },
       ];
-      return;
     }
 
-    // Se retira solo el satelite que ESTE store provisiona. Otro nodo suelto que
-    // el operador escribiera a mano en el panel JSON no es asunto del selector.
-    if (!isReferenced && exists) {
-      satellites.value = satellites.value.filter(
-        (satellite) => satellite.nodeId !== SHARED_ALERT_NODE_ID,
-      );
-    }
+    satellites.value = next;
   };
 
   /**
@@ -603,10 +628,7 @@ export const useWorkflowTemplatesStore = defineStore('workflowTemplates', () => 
       return required === undefined ? step : { ...step, params: { ...step.params, ...required } };
     });
 
-    // ANTES de reensamblar: `rebuildSchemaFromSequence` lee `satellites.value`,
-    // asi que provisionar el nodo despues lo dejaria fuera del documento hasta
-    // el siguiente cambio del selector.
-    reconcileAlertSatellite(steps);
+    // `setSequence` reconcilia los satelites antes de reensamblar.
     setSequence(steps);
   };
 
@@ -663,7 +685,6 @@ export const useWorkflowTemplatesStore = defineStore('workflowTemplates', () => 
         : step;
     });
 
-    reconcileAlertSatellite(steps);
     setSequence(steps);
   };
 
@@ -817,7 +838,6 @@ export const useWorkflowTemplatesStore = defineStore('workflowTemplates', () => 
     setSequence,
     patchStepParams,
     satellites,
-    visionTargetNodeId,
     errorBranchOf,
     setStepErrorBranch,
     notifyAllErrors,

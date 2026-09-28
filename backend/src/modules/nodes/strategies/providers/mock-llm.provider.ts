@@ -21,6 +21,18 @@ const MOCK_HEADLINE_LENGTH = 120;
 /** Parrafos que como mucho devuelve la simulacion. */
 const MOCK_MAX_PARAGRAPHS = 5;
 
+/**
+ * Transcripcion que devuelve la simulacion en modo OCR.
+ *
+ * Literal y no derivada del prompt, al contrario que la redaccion simulada: el
+ * prompt de OCR es siempre el mismo texto del sistema, asi que derivar de el
+ * produciria una "transcripcion" que repite la instruccion en vez de parecerse
+ * a lo que devolveria un modelo de verdad. La marca entre corchetes esta para
+ * que nadie confunda esto con contenido real si acaba publicado por error.
+ */
+const MOCK_OCR_TRANSCRIPTION =
+  '[TRANSCRIPCIÓN MOCK OCR]: Texto recuperado de imagen adjunta.';
+
 /** Recorta en el ultimo espacio anterior al limite, para no partir palabras. */
 const truncate = (text: string, limit: number): string => {
   if (text.length <= limit) {
@@ -75,9 +87,13 @@ export class MockLlmProvider implements ILlmProviderClient {
   public generateCompletion(
     prompt: string,
     _systemPrompt?: string,
-    _config?: LlmExecutionOptions,
+    config?: LlmExecutionOptions,
     attachments: readonly LlmInlineAttachment[] = [],
   ): Promise<LlmResponsePayload> {
+    if (config?.mode === 'ocr') {
+      return Promise.resolve(this.buildOcrPayload());
+    }
+
     const paragraphs = this.splitParagraphs(
       this.describeAttachments(prompt, attachments),
     );
@@ -102,6 +118,32 @@ export class MockLlmProvider implements ILlmProviderClient {
         isMock: true,
       },
     });
+  }
+
+  /**
+   * Respuesta simulada de una transcripcion.
+   *
+   * Va en `body_paragraphs` y en `summary` a la vez porque el contrato
+   * `LlmResponsePayload` esta pensado para una redaccion y quien consume esto
+   * —`OcrProcessorStrategy.flattenTranscription`— prefiere los parrafos y cae al
+   * resumen. Poblar ambos deja la simulacion correcta lea por donde lea.
+   *
+   * `headline` lleva la misma marca en vez de un titular inventado: una
+   * transcripcion no tiene titular, y rellenarlo con algo verosimil invitaria a
+   * publicarlo.
+   */
+  private buildOcrPayload(): LlmResponsePayload {
+    return {
+      headline: MOCK_OCR_TRANSCRIPTION,
+      summary: MOCK_OCR_TRANSCRIPTION,
+      body_paragraphs: [MOCK_OCR_TRANSCRIPTION],
+      metadata: {
+        tokensPrompt: 0,
+        tokensCompletion: 0,
+        modelUsed: MOCK_LLM_MODEL,
+        isMock: true,
+      },
+    };
   }
 
   /**

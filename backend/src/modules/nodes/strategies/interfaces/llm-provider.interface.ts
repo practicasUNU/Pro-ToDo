@@ -67,6 +67,21 @@ export interface LlmExecutionOptions {
 
   /** Reintentos rapidos de red, adicionales al primer intento. */
   readonly maxRetries: number;
+
+  /**
+   * Para que se pide la inferencia: redactar o transcribir.
+   *
+   * OPCIONAL y con `'text'` implicito, de modo que ninguna llamada existente
+   * cambia. Existe porque el simulador necesita distinguirlas: una
+   * transcripcion vacia y una redaccion vacia se parecen demasiado, y un
+   * desarrollador sin clave de API no podria saber si el rescate por OCR
+   * funciono o si el nodo no llego a recibir los adjuntos.
+   *
+   * Se declara como MODO y no se deduce del prompt: comparar el texto del
+   * prompt ataria el proveedor a una constante de otra capa, y bastaria retocar
+   * una coma en ese texto para que la simulacion dejase de reconocerse.
+   */
+  readonly mode?: 'text' | 'ocr';
 }
 
 /**

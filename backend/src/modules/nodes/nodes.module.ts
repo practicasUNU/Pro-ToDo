@@ -19,6 +19,7 @@ import { NodeCatalogService } from './services/node-catalog.service';
 import { CronTriggerStrategy } from './strategies/cron-trigger.strategy';
 import { ImapTriggerStrategy } from './strategies/imap-trigger.strategy';
 import { LlmExtractorStrategy } from './strategies/llm-extractor.strategy';
+import { OcrProcessorStrategy } from './strategies/ocr-processor.strategy';
 import { SmtpAlertStrategy } from './strategies/smtp-alert.strategy';
 import { AiDefaultsConfig } from '@core/config/ai-defaults.config';
 import { ParserEmailStrategy } from './strategies/parser-email.strategy';
@@ -87,6 +88,7 @@ import type { OnModuleInit } from '@nestjs/common';
     WebScraperStrategy,
     LlmExtractorStrategy,
     SmtpAlertStrategy,
+    OcrProcessorStrategy,
     AiDefaultsConfig,
     // Los clientes de LLM son providers del contenedor y no instancias que la
     // estrategia construya: `GeminiLlmProvider` necesita `HttpClientService` y
@@ -105,6 +107,7 @@ import type { OnModuleInit } from '@nestjs/common';
     WebScraperStrategy,
     LlmExtractorStrategy,
     SmtpAlertStrategy,
+    OcrProcessorStrategy,
     ImapPollingService,
     CronSchedulingService,
     NodeCatalogService,
@@ -123,6 +126,7 @@ export class NodesModule implements OnModuleInit {
     private readonly webScraperStrategy: WebScraperStrategy,
     private readonly llmExtractorStrategy: LlmExtractorStrategy,
     private readonly smtpAlertStrategy: SmtpAlertStrategy,
+    private readonly ocrProcessorStrategy: OcrProcessorStrategy,
   ) {}
 
   public onModuleInit(): void {
@@ -133,5 +137,6 @@ export class NodesModule implements OnModuleInit {
     this.strategyFactory.registerStrategy(this.webScraperStrategy);
     this.strategyFactory.registerStrategy(this.llmExtractorStrategy);
     this.strategyFactory.registerStrategy(this.smtpAlertStrategy);
+    this.strategyFactory.registerStrategy(this.ocrProcessorStrategy);
   }
 }

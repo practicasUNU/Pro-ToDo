@@ -6,11 +6,16 @@ import { useSmtpAlertStore } from '@stores/nodes/smtp-alert.store';
 import { useTemplateMapperStore } from '@stores/nodes/template-mapper.store';
 import { useTriggerImapStore } from '@stores/nodes/trigger-imap.store';
 
-import { useFlujoDraftStore } from './flujo-draft.store';
+import { OCR_STEP_NAME, useFlujoDraftStore } from './flujo-draft.store';
+import { useOcrProcessorStore } from '@stores/nodes/ocr-processor.store';
 
 import { NodeCategory } from '@/types/node-catalog';
 import { NodeType } from '@/types/pipeline';
-import { MULTIMODAL_FALLBACK_CODE, SHARED_ALERT_NODE_ID } from '@/types/nodes/error-branch.types';
+import {
+  MULTIMODAL_FALLBACK_CODE,
+  SHARED_ALERT_NODE_ID,
+  SHARED_OCR_NODE_ID,
+} from '@/types/nodes/error-branch.types';
 
 import type { NodeCatalogEntry } from '@/types/node-catalog';
 import type {
@@ -224,6 +229,24 @@ const buildTemplateDetail = (
       : (route as { targetNode?: string } | null)?.targetNode === SHARED_ALERT_NODE_ID,
   );
 
+  const referencesOcr = Object.values(routes).some(
+    (route) =>
+      typeof route === 'object' &&
+      (route as { targetNode?: string } | null)?.targetNode === SHARED_OCR_NODE_ID,
+  );
+
+  if (referencesOcr) {
+    nodes[SHARED_OCR_NODE_ID] = {
+      nodeId: SHARED_OCR_NODE_ID,
+      nodeType: NodeType.PROCESADOR_OCR,
+      outputNamespace: 'ocr_result',
+      // REINCORPORA: a diferencia de la alerta, devuelve el flujo a su curso.
+      nextStep: steps[1]?.nodeId ?? null,
+      onErrorStep: null,
+      params: {},
+    };
+  }
+
   if (referencesAlert) {
     nodes[SHARED_ALERT_NODE_ID] = {
       nodeId: SHARED_ALERT_NODE_ID,
@@ -252,7 +275,7 @@ const ALERT_ROUTE = SHARED_ALERT_NODE_ID;
 
 /** Ruta selectiva de vision, la unica que atrapa el codigo del parser. */
 const VISION_ROUTE = {
-  targetNode: 'nodo_ia',
+  targetNode: SHARED_OCR_NODE_ID,
   catchErrors: [MULTIMODAL_FALLBACK_CODE],
 };
 
@@ -1203,14 +1226,14 @@ describe('useFlujoDraftStore · agregador del asistente', () => {
       const sinRama = await buildDraftWithBranches({});
 
       // 2. Act ⚙️ + 3. Assert 🎯
-      expect(sinRama.hasAlertContingencyStep).toBe(false);
+      expect(sinRama.contingencySteps).toHaveLength(0);
       expect(sinRama.configurableStepCount).toBe(sinRama.pipelineTopology.length);
 
       setActivePinia(createPinia());
 
       const conRama = await buildDraftWithBranches({ [MAPPER_NODE_ID]: ALERT_ROUTE });
 
-      expect(conRama.hasAlertContingencyStep).toBe(true);
+      expect(conRama.contingencySteps).toHaveLength(1);
       expect(conRama.alertStepIndex).toBe(conRama.pipelineTopology.length);
       expect(conRama.configurableStepCount).toBe(conRama.pipelineTopology.length + 1);
     });
@@ -1229,7 +1252,7 @@ describe('useFlujoDraftStore · agregador del asistente', () => {
       draft.activeStep = draft.alertStepIndex;
 
       expect(draft.isLastStep).toBe(true);
-      expect(draft.isAlertStep).toBe(true);
+      expect(draft.isContingencyStep).toBe(true);
     });
 
     it('17.8quater deberia validar el paso de contingencias con su nodo', async () => {
@@ -1256,18 +1279,18 @@ describe('useFlujoDraftStore · agregador del asistente', () => {
       configureAlertNode();
 
       // 3. Assert 🎯
-      expect(draft.hasIncompleteAlertNode).toBe(false);
+      expect(draft.incompleteContingencySteps).toHaveLength(0);
       expect(draft.canSave).toBe(true);
     });
 
-    it('17.10 NO deberia resolver la vision sin un nodo de IA en el flujo', async () => {
-      // 1. Arrange 📐: un PROCESADOR_IA satelite chocaria con el del flujo en
-      //    `llm_response` (regla 5). La ruta apunta al que ya exista, o no hay
-      //    destino que resolver.
+    it('17.10 deberia resolver la vision al satelite de OCR', async () => {
+      // 1. Arrange 📐: antes devolvia `null` sin un PROCESADOR_IA en el flujo,
+      //    porque un segundo nodo de IA chocaria con el en `llm_response`. Con
+      //    `ocr_result` propio se auto-aprovisiona como la alerta.
       const draft = await buildSelectedDraft();
 
       // 2. Act ⚙️ + 3. Assert 🎯
-      expect(draft.resolveBranchTarget('VISION_IA')).toBeNull();
+      expect(draft.resolveBranchTarget('VISION_IA')).toBe(SHARED_OCR_NODE_ID);
       expect(draft.resolveBranchTarget('ALERTA_SMTP')).toBe(SHARED_ALERT_NODE_ID);
     });
 
@@ -1295,7 +1318,7 @@ describe('useFlujoDraftStore · agregador del asistente', () => {
       const schema = draft.assemblePipelineSchema('Flujo de prueba');
 
       // 3. Assert 🎯
-      expect(draft.needsProvisionedAlertNode).toBe(false);
+      expect(draft.contingencySteps).toHaveLength(0);
       expect(schema.nodes[TRIGGER_NODE_ID]?.onErrorStep).toBe('destino_correo');
       expect(schema.nodes[SHARED_ALERT_NODE_ID]).toBeUndefined();
     });
@@ -1356,6 +1379,95 @@ describe('useFlujoDraftStore · agregador del asistente', () => {
       //    `PipelineSchemaDto` exige el campo y la plantilla es la referencia
       //    mas honesta hasta que la fila exista.
       expect(schema.flowId).toBe(TEMPLATE_ID);
+    });
+  });
+
+  describe('21. Paso de contingencia del satelite OCR', () => {
+    /** Topologia con el nodo de IA, para que el rescate tenga a donde volver. */
+    const buildVisionTemplate = (): WorkflowTemplateSummary =>
+      buildTemplate({
+        topology: [
+          {
+            nodeId: TRIGGER_NODE_ID,
+            nodeType: NodeType.TRIGGER_IMAP,
+            outputNamespace: 'raw_email',
+          },
+          {
+            nodeId: PARSER_NODE_ID,
+            nodeType: NodeType.PARSER_PRE_IA,
+            outputNamespace: 'parsed_email',
+          },
+          {
+            nodeId: 'nodo_ia',
+            nodeType: NodeType.PROCESADOR_IA,
+            outputNamespace: 'llm_response',
+          },
+        ],
+      });
+
+    it('21.1 deberia instanciar un paso propio para ocr_ia', async () => {
+      // 1. Arrange 📐: el satelite no esta en `pipelineTopology` —solo se llega
+      //    a el por la ruta de error—, asi que sin un paso sintetico el operador
+      //    no tendria donde configurarlo.
+      const draft = await buildDraftWithBranches(
+        { [PARSER_NODE_ID]: VISION_ROUTE },
+        buildVisionTemplate(),
+      );
+
+      // 2. Act ⚙️ + 3. Assert 🎯
+      expect(draft.contingencySteps).toHaveLength(1);
+      expect(draft.contingencySteps[0]?.nodeId).toBe(SHARED_OCR_NODE_ID);
+      expect(draft.contingencySteps[0]?.nodeType).toBe(NodeType.PROCESADOR_OCR);
+      expect(draft.contingencySteps[0]?.name).toBe(OCR_STEP_NAME);
+    });
+
+    it('21.2 deberia contarlo en los pasos configurables', async () => {
+      // 1. Arrange 📐: de `configurableStepCount` salen el indice del paso de
+      //    revision y los botones "Siguiente"/"Revisar" del stepper.
+      const draft = await buildDraftWithBranches(
+        { [PARSER_NODE_ID]: VISION_ROUTE },
+        buildVisionTemplate(),
+      );
+
+      // 2. Act ⚙️ + 3. Assert 🎯
+      expect(draft.configurableStepCount).toBe(draft.pipelineTopology.length + 1);
+      expect(draft.contingencyStepIndex(SHARED_OCR_NODE_ID)).toBe(draft.pipelineTopology.length);
+    });
+
+    it('21.3 deberia aislar sus params de los del nodo de IA', async () => {
+      // 1. Arrange 📐: los dos hablan con un modelo, y compartir store haria que
+      //    cambiar el de transcripcion moviera el de redaccion sin avisar.
+      const draft = await buildDraftWithBranches(
+        { [PARSER_NODE_ID]: VISION_ROUTE },
+        buildVisionTemplate(),
+      );
+
+      // 2. Act ⚙️
+      useOcrProcessorStore(SHARED_OCR_NODE_ID).updateConfig({
+        model: 'gemini-2.0-flash',
+      });
+
+      const schema = draft.assemblePipelineSchema('Flujo con rescate');
+
+      // 3. Assert 🎯
+      expect(schema.nodes[SHARED_OCR_NODE_ID]?.params.model).toBe('gemini-2.0-flash');
+      expect(schema.nodes.nodo_ia?.params.model).not.toBe('gemini-2.0-flash');
+    });
+
+    it('21.4 deberia emitir el satelite REINCORPORANDO el flujo', async () => {
+      // 1. Arrange 📐: es lo que lo separa del satelite de alerta. Emitirlo
+      //    terminal dejaria el flujo muerto justo despues del rescate.
+      const draft = await buildDraftWithBranches(
+        { [PARSER_NODE_ID]: VISION_ROUTE },
+        buildVisionTemplate(),
+      );
+
+      // 2. Act ⚙️
+      const schema = draft.assemblePipelineSchema('Flujo con rescate');
+
+      // 3. Assert 🎯: el parser iba a `nodo_ia`, asi que ahi vuelve.
+      expect(schema.nodes[SHARED_OCR_NODE_ID]?.nextStep).toBe('nodo_ia');
+      expect(schema.nodes[SHARED_OCR_NODE_ID]?.outputNamespace).toBe('ocr_result');
     });
   });
 
@@ -1444,8 +1556,10 @@ describe('useFlujoDraftStore · agregador del asistente', () => {
       );
 
       // 2. Act ⚙️ + 3. Assert 🎯
+      // El destino es el SATELITE y ya no el nodo de IA del flujo: transcribir
+      // y redactar son trabajos distintos y cada uno tiene el suyo.
       expect(draft.hasContextualRecoveryBranch(PARSER_NODE_ID)).toBe(true);
-      expect(draft.resolveBranchTarget('VISION_IA')).toBe('nodo_ia');
+      expect(draft.resolveBranchTarget('VISION_IA')).toBe(SHARED_OCR_NODE_ID);
     });
 
     it('19.4 deberia llevar el cursor al paso de un nodo concreto', async () => {

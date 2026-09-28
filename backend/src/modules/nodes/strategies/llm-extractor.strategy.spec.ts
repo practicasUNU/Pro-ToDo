@@ -9,7 +9,6 @@ import {
   LLM_OUTPUT_KEYS,
   LlmExtractorStrategy,
 } from '@modules/nodes/strategies/llm-extractor.strategy';
-import { ERR_PARSER_UNEXTRACTABLE_MEDIA } from '@modules/nodes/strategies/parser-email.strategy';
 import { MockLlmProvider } from '@modules/nodes/strategies/providers/mock-llm.provider';
 import { createMockStatePayloadContext } from '@test/factories/state-payload-context.factory';
 
@@ -19,7 +18,6 @@ import type { AiDefaultsConfig } from '@core/config/ai-defaults.config';
 import type { AiPromptTemplatesService } from '@modules/ai-prompt-templates/ai-prompt-templates.service';
 import type {
   ILlmProviderClient,
-  LlmInlineAttachment,
   LlmResponsePayload,
 } from '@modules/nodes/strategies/interfaces/llm-provider.interface';
 import type { GeminiLlmProvider } from '@modules/nodes/strategies/providers/gemini-llm.provider';
@@ -243,7 +241,6 @@ describe('LlmExtractorStrategy', () => {
         CLEAN_BODY,
         'Redacta una noticia breve y objetiva.',
         expect.anything(),
-        [],
       );
     });
 
@@ -285,6 +282,7 @@ describe('LlmExtractorStrategy', () => {
       expect(result.error?.code).toBe(ERR_LLM_MISSING_INPUT_TEXT);
       expect(result.error?.message).toContain('Falta contenido textual previo');
       expect(result.error?.missingFields).toEqual([
+        'ocr_result.clean_body',
         'parsed_email.clean_body',
         'scraped_web.full_article_content',
       ]);
@@ -585,7 +583,6 @@ describe('LlmExtractorStrategy', () => {
         'Redacta sobre "Plan de innovacion 2027" con rigor.',
         expect.anything(),
         // Sin adjuntos: fuera del modo vision el cuarto argumento va vacio.
-        [],
       );
     });
 
@@ -686,216 +683,109 @@ describe('LlmExtractorStrategy', () => {
       ).toEqual([]);
     });
   });
-  describe('7. Modo vision (adjuntos del correo)', () => {
-    const SCAN_BASE64 = 'JVBERi0xLjQKJSVFT0Y=';
-
-    /** Namespaces tal y como los deja el motor al desviar desde el parser. */
-    const buildVisionNamespaces = (
-      attachments: unknown[] = [
-        {
-          filename: 'nota.pdf',
-          contentType: 'application/pdf',
-          size: 2048,
-          contentBase64: SCAN_BASE64,
-        },
-      ],
-      errorCode = ERR_PARSER_UNEXTRACTABLE_MEDIA,
-    ): Record<string, Record<string, unknown>> => ({
-      error_context: { error_code: errorCode },
-      raw_email: { attachments },
-    });
-
-    /**
-     * Adjuntos con los que se invoco al proveedor en su primera llamada.
-     *
-     * Se extraen con un tipo explicito y no leyendo `mock.calls[0][3]` a pelo:
-     * ese indice devuelve `any`, y aseverar sobre el desactivaria justo la
-     * comprobacion que estas pruebas existen para hacer.
-     */
-    const attachmentsOf = (
-      generateCompletion: jest.Mock,
-    ): readonly LlmInlineAttachment[] => {
-      const call = generateCompletion.mock.calls[0] as
-        | [string, string | undefined, unknown, readonly LlmInlineAttachment[]]
-        | undefined;
-
-      return call?.[3] ?? [];
-    };
-
-    /** Proveedor espia que captura los cuatro argumentos de la llamada. */
-    const buildSpyProvider = (): {
-      provider: Partial<ILlmProviderClient>;
-      generateCompletion: jest.Mock;
-    } => {
+  describe('7. Rescate por OCR', () => {
+    it('7.1 deberia dar PRIORIDAD a ocr_result sobre parsed_email', async () => {
+      // 1. Arrange 📐: si `ocr_result` existe es porque el parser no encontro
+      //    texto aprovechable y el nodo de transcripcion lo recupero de los
+      //    adjuntos. Un `clean_body` residual del parser —el "Ver adjunto" que
+      //    a veces acompana a un escaneo— no debe ganarle.
       const generateCompletion = jest.fn().mockResolvedValue({
-        headline: 'Titular',
-        summary: 'Resumen',
-        body_paragraphs: ['Parrafo'],
+        headline: 'h',
+        summary: 's',
+        body_paragraphs: [],
         metadata: {
-          tokensPrompt: 1,
-          tokensCompletion: 1,
+          tokensPrompt: 0,
+          tokensCompletion: 0,
           modelUsed: 'gemini-1.5-flash',
           isMock: false,
         },
       });
-
-      return {
-        provider: { provider: LlmProvider.GEMINI, generateCompletion },
+      const strategy = buildStrategy(buildPromptService(), {
+        provider: LlmProvider.GEMINI,
         generateCompletion,
-      };
-    };
-
-    it('7.1 deberia enviar los adjuntos cuando llega por la ruta del parser', async () => {
-      // 1. Arrange 📐
-      const { provider, generateCompletion } = buildSpyProvider();
-      const strategy = buildStrategy(buildPromptService(), provider);
-      jest.spyOn(strategy['logger'], 'log').mockImplementation(() => undefined);
+      });
+      const context = buildContext({
+        parsed_email: { clean_body: 'Ver adjunto.' },
+        ocr_result: {
+          clean_body: 'Texto completo recuperado del PDF escaneado.',
+        },
+      });
 
       // 2. Act ⚙️
-      await strategy.execute(buildContext(buildVisionNamespaces()), {
-        inlinePrompt: 'Extrae la nota de prensa del documento.',
+      const result = await strategy.execute(context, {
+        inlinePrompt: 'Redacta una noticia breve y objetiva.',
         provider: LlmProvider.GEMINI,
       });
 
       // 3. Assert 🎯
+      expect(result.success).toBe(true);
       expect(generateCompletion).toHaveBeenCalledWith(
-        '',
-        'Extrae la nota de prensa del documento.',
+        'Texto completo recuperado del PDF escaneado.',
+        'Redacta una noticia breve y objetiva.',
         expect.anything(),
-        [
-          {
-            filename: 'nota.pdf',
-            contentType: 'application/pdf',
-            contentBase64: SCAN_BASE64,
-          },
-        ],
       );
     });
 
-    it('7.2 deberia relajar la guarda de texto solo cuando hay adjuntos', async () => {
-      // 1. Arrange 📐: sin `clean_body` ni `full_article_content`. Es justo la
-      //    situacion del PDF escaneado, y exigir texto aqui abortaria el caso
-      //    que la rama de recuperacion existe para atender.
-      const { provider } = buildSpyProvider();
-      const strategy = buildStrategy(buildPromptService(), provider);
-      jest.spyOn(strategy['logger'], 'log').mockImplementation(() => undefined);
+    it('7.2 NO deberia recolectar adjuntos por su cuenta', async () => {
+      // 1. Arrange 📐: el modo vision interno se retiro. Transcribir es trabajo
+      //    del nodo PROCESADOR_OCR, que tiene su propio modelo, su propio prompt
+      //    y su propio presupuesto. Dos caminos para el mismo rescate eran dos
+      //    sitios donde arreglarlo.
+      const generateCompletion = jest.fn().mockResolvedValue({
+        headline: 'h',
+        summary: 's',
+        body_paragraphs: [],
+        metadata: {
+          tokensPrompt: 0,
+          tokensCompletion: 0,
+          modelUsed: 'gemini-1.5-flash',
+          isMock: false,
+        },
+      });
+      const strategy = buildStrategy(buildPromptService(), {
+        provider: LlmProvider.GEMINI,
+        generateCompletion,
+      });
+      const context = buildContext({
+        parsed_email: { clean_body: 'Cuerpo aprovechable del correo.' },
+        raw_email: {
+          attachments: [
+            {
+              filename: 'escaneo.png',
+              contentType: 'image/png',
+              contentBase64: 'QUJD',
+            },
+          ],
+        },
+      });
 
       // 2. Act ⚙️
-      const result = await strategy.execute(
-        buildContext(buildVisionNamespaces()),
-        { inlinePrompt: 'Extrae la nota.', provider: LlmProvider.GEMINI },
-      );
+      await strategy.execute(context, {
+        inlinePrompt: 'Redacta.',
+        provider: LlmProvider.GEMINI,
+      });
 
-      // 3. Assert 🎯
-      expect(result.success).toBe(true);
+      // 3. Assert 🎯: tres argumentos, sin cuarto de adjuntos.
+      expect(generateCompletion).toHaveBeenCalledWith(
+        'Cuerpo aprovechable del correo.',
+        'Redacta.',
+        expect.anything(),
+      );
     });
 
-    it('7.3 deberia seguir fallando sin texto NI adjuntos', async () => {
-      // 1. Arrange 📐
+    it('7.3 deberia seguir fallando sin ningun texto de entrada', async () => {
+      // 1. Arrange 📐: la guarda de siempre sigue en pie, y ahora sin excepcion
+      //    por adjuntos: sin texto no hay inferencia que preparar.
       const strategy = buildStrategy(buildPromptService());
 
       // 2. Act ⚙️
-      const result = await strategy.execute(
-        buildContext(buildVisionNamespaces([])),
-        { inlinePrompt: 'Extrae la nota.' },
-      );
+      const result = await strategy.execute(buildContext({}), {
+        inlinePrompt: 'Extrae la nota.',
+      });
 
-      // 3. Assert 🎯: la guarda de siempre sigue en pie donde tenia sentido.
+      // 3. Assert 🎯
       expect(result.success).toBe(false);
       expect(result.error?.code).toBe(ERR_LLM_MISSING_INPUT_TEXT);
-    });
-
-    it('7.4 NO deberia recolectar nada fuera de la ruta del parser', async () => {
-      // 1. Arrange 📐: hay adjuntos, pero el desvio fue por otro codigo. Mandar
-      //    a un modelo con vision el logotipo de cualquier boletin seria la
-      //    inferencia mas cara del pipeline gastada en nada.
-      const { provider, generateCompletion } = buildSpyProvider();
-      const strategy = buildStrategy(buildPromptService(), provider);
-
-      // 2. Act ⚙️
-      await strategy.execute(
-        buildContext({
-          ...buildVisionNamespaces(undefined, 'ERR_OTRO'),
-          parsed_email: { clean_body: CLEAN_BODY },
-        }),
-        { inlinePrompt: 'Redacta.', provider: LlmProvider.GEMINI },
-      );
-
-      // 3. Assert 🎯
-      expect(generateCompletion).toHaveBeenCalledWith(
-        CLEAN_BODY,
-        'Redacta.',
-        expect.anything(),
-        [],
-      );
-    });
-
-    it('7.5 deberia descartar los adjuntos sin binario o de tipo no visual', async () => {
-      // 1. Arrange 📐: el base64 puede venir a `null` —el motor lo libero— y un
-      //    `.docx` corrupto no lo arregla ningun modelo con vision.
-      const { provider, generateCompletion } = buildSpyProvider();
-      const strategy = buildStrategy(buildPromptService(), provider);
-      jest.spyOn(strategy['logger'], 'log').mockImplementation(() => undefined);
-
-      // 2. Act ⚙️
-      await strategy.execute(
-        buildContext(
-          buildVisionNamespaces([
-            {
-              filename: 'liberado.pdf',
-              contentType: 'application/pdf',
-              contentBase64: null,
-            },
-            {
-              filename: 'hoja.xlsx',
-              contentType:
-                'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-              contentBase64: SCAN_BASE64,
-            },
-            {
-              filename: 'captura.png',
-              contentType: 'image/png',
-              contentBase64: SCAN_BASE64,
-            },
-          ]),
-        ),
-        { inlinePrompt: 'Extrae.', provider: LlmProvider.GEMINI },
-      );
-
-      // 3. Assert 🎯
-      expect(attachmentsOf(generateCompletion)).toEqual([
-        {
-          filename: 'captura.png',
-          contentType: 'image/png',
-          contentBase64: SCAN_BASE64,
-        },
-      ]);
-    });
-
-    it('7.6 deberia respetar el tope de adjuntos por inferencia', async () => {
-      // 1. Arrange 📐: cada adjunto se factura como miles de tokens, y un correo
-      //    con veinte capturas convertiria una incidencia rutinaria en la
-      //    llamada mas cara del mes.
-      const { provider, generateCompletion } = buildSpyProvider();
-      const strategy = buildStrategy(buildPromptService(), provider);
-      jest.spyOn(strategy['logger'], 'log').mockImplementation(() => undefined);
-
-      // 2. Act ⚙️
-      await strategy.execute(
-        buildContext(
-          buildVisionNamespaces(
-            Array.from({ length: 8 }, (_, index) => ({
-              filename: `captura-${index}.png`,
-              contentType: 'image/png',
-              contentBase64: SCAN_BASE64,
-            })),
-          ),
-        ),
-        { inlinePrompt: 'Extrae.', provider: LlmProvider.GEMINI },
-      );
-
-      // 3. Assert 🎯
-      expect(attachmentsOf(generateCompletion)).toHaveLength(3);
     });
   });
 
@@ -950,20 +840,10 @@ describe('LlmExtractorStrategy', () => {
       });
     });
 
-    it('8.2 deberia usar el par de OCR en modo vision', async () => {
-      // 1. Arrange 📐: redactar y leer un escaneado son trabajos distintos, y el
-      //    modelo bueno escribiendo no tiene por que ser el bueno haciendo OCR.
-      const generateCompletion = jest.fn().mockResolvedValue({
-        headline: 'T',
-        summary: 'S',
-        body_paragraphs: [],
-        metadata: {
-          tokensPrompt: 0,
-          tokensCompletion: 0,
-          modelUsed: 'x',
-          isMock: false,
-        },
-      });
+    it('8.2 NO deberia leer el par de OCR: ya no transcribe', async () => {
+      // 1. Arrange 📐: `AI_OCR_DEFAULT_*` pertenece ahora a OcrProcessorStrategy.
+      //    Que este nodo siguiera consultandolo dejaria dos duenos para la misma
+      //    variable, y el que la cambiase moveria el modelo del otro sin saberlo.
       const aiDefaults = buildAiDefaults({
         getOcrDefaults: jest
           .fn()
@@ -971,35 +851,20 @@ describe('LlmExtractorStrategy', () => {
       });
       const strategy = buildStrategy(
         buildPromptService(),
-        { provider: LlmProvider.GEMINI, generateCompletion },
+        undefined,
         new MockLlmProvider(),
         aiDefaults,
       );
-      jest.spyOn(strategy['logger'], 'log').mockImplementation(() => undefined);
 
       // 2. Act ⚙️
       await strategy.execute(
-        buildContext({
-          error_context: { error_code: ERR_PARSER_UNEXTRACTABLE_MEDIA },
-          raw_email: {
-            attachments: [
-              {
-                filename: 'nota.pdf',
-                contentType: 'application/pdf',
-                contentBase64: 'JVBERi0=',
-              },
-            ],
-          },
-        }),
-        { inlinePrompt: 'Extrae.' },
+        buildContext({ parsed_email: { clean_body: CLEAN_BODY } }),
+        { inlinePrompt: 'Redacta.' },
       );
 
       // 3. Assert 🎯
-      expect(aiDefaults.getOcrDefaults).toHaveBeenCalledTimes(1);
-      expect(aiDefaults.getTextDefaults).not.toHaveBeenCalled();
-      expect(optionsOf(generateCompletion)).toMatchObject({
-        model: 'gemini-1.5-flash',
-      });
+      expect(aiDefaults.getOcrDefaults).not.toHaveBeenCalled();
+      expect(aiDefaults.getTextDefaults).toHaveBeenCalled();
     });
 
     it('8.3 NO deberia consultar el entorno si el nodo declara proveedor y modelo', async () => {

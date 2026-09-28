@@ -7,6 +7,7 @@ import { CronTriggerStrategy } from './strategies/cron-trigger.strategy';
 import { ImapTriggerStrategy } from './strategies/imap-trigger.strategy';
 import { LlmExtractorStrategy } from './strategies/llm-extractor.strategy';
 import { ParserEmailStrategy } from './strategies/parser-email.strategy';
+import { OcrProcessorStrategy } from './strategies/ocr-processor.strategy';
 import { SmtpAlertStrategy } from './strategies/smtp-alert.strategy';
 import { TemplateMapperStrategy } from './strategies/template-mapper.strategy';
 import { WebScraperStrategy } from './strategies/web-scraper.strategy';
@@ -66,6 +67,12 @@ const buildHarness = (): {
   // El transporte va vacio: inscribir la estrategia no abre ninguna conexion
   // SMTP, y el pool de nodemailer es perezoso hasta el primer envio.
   const smtp = new SmtpAlertStrategy({} as SmtpNodeMailerService);
+  // Mismo criterio: inscribirla no llama a ningun modelo.
+  const ocr = new OcrProcessorStrategy(
+    {} as MockLlmProvider,
+    {} as GeminiLlmProvider,
+    {} as AiDefaultsConfig,
+  );
 
   return {
     factory,
@@ -76,6 +83,7 @@ const buildHarness = (): {
     scraper,
     llm,
     smtp,
+    ocr,
     module: new NodesModule(
       factory,
       mapper,
@@ -85,6 +93,7 @@ const buildHarness = (): {
       scraper,
       llm,
       smtp,
+      ocr,
     ),
   };
 };
@@ -175,5 +184,18 @@ describe('NodesModule', () => {
     //    modo que el fallo original quedaria enterrado bajo un segundo fallo
     //    —y sin avisar a nadie, que es justo lo contrario de lo que se pedia.
     expect(factory.getStrategy(NodeType.DESTINO_SMTP)).toBe(smtp);
+  });
+
+  it('1.8 deberia registrar OcrProcessorStrategy en la factoria al iniciarse', () => {
+    // 1. Arrange
+    const { factory, ocr, module } = buildHarness();
+
+    // 2. Act
+    module.onModuleInit();
+
+    // 3. Assert: sin este registro, un flujo con la rama de contingencia se
+    //    guardaria sin protestar y reventaria al ejecutarla con
+    //    `StrategyNotFoundException`.
+    expect(factory.getStrategy(NodeType.PROCESADOR_OCR)).toBe(ocr);
   });
 });

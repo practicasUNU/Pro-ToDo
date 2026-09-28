@@ -19,13 +19,6 @@ interface Props {
   /** Accion de contingencia declarada por el paso, o `null` si no tiene. */
   errorBranch: ErrorBranchAction | null;
   /**
-   * Si la topologia tiene un `PROCESADOR_IA` al que desviar.
-   *
-   * Llega como prop y no se deduce aqui: la ficha solo conoce SU paso, y el
-   * fallback de vision depende del grafo entero.
-   */
-  canOfferVision: boolean;
-  /**
    * La topologia impone los `params` base de este nodo.
    *
    * Llega como prop y no se deduce aqui: depende de que otro paso del flujo haya
@@ -45,9 +38,6 @@ const emit = defineEmits<{
   'update:errorBranch': [action: ErrorBranchAction | null];
 }>();
 
-const NO_VISION_HINT =
-  'Para reintentar con vision IA, la topologia tiene que incluir un nodo Procesador IA: la ruta apunta al que ya exista, no crea uno nuevo.';
-
 /**
  * Un nodo de alerta no puede declarar contingencia: se desviaria a si mismo.
  */
@@ -64,9 +54,9 @@ const hasErrorBranch = computed<boolean>(() => props.errorBranch !== null);
  */
 const actionOptions = computed(() =>
   actionsForNodeType(props.step.nodeType)
-    // El catalogo ya acota por tipo; aqui solo queda la condicion que depende
-    // del GRAFO: sin un Procesador IA al que apuntar no hay vision que ofrecer.
-    .filter((action) => action !== 'VISION_IA' || props.canOfferVision)
+    // Sin filtro adicional: el catalogo ya acota por tipo de nodo, y desde que
+    // la transcripcion se auto-aprovisiona no hay ninguna condicion del GRAFO
+    // que cumplir —antes habia que tener un Procesador IA al que apuntar—.
     .map((action) => ({
       label: ERROR_BRANCH_ACTIONS[action].label,
       value: action,
@@ -222,20 +212,6 @@ const baseParamsComponent = computed(() => nodeBaseParamsRegistry[props.step.nod
             </template>
           </q-select>
         </div>
-
-        <!-- La vision no se puede ofrecer sin un nodo de IA al que apuntar: uno
-             nuevo chocaria con el del flujo en el namespace `llm_response`. -->
-        <p
-          v-if="
-            hasErrorBranch &&
-            props.step.nodeType === NodeType.PARSER_PRE_IA &&
-            !props.canOfferVision
-          "
-          class="pd-subtitle q-mt-sm q-mb-none"
-          :data-test="`no-vision-hint-${props.step.nodeId}`"
-        >
-          {{ NO_VISION_HINT }}
-        </p>
       </div>
     </div>
   </q-expansion-item>

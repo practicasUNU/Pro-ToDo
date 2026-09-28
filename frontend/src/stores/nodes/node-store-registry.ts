@@ -1,5 +1,6 @@
 import { useLlmExtractorStore } from '@stores/nodes/llm-extractor.store';
 import { useParserEmailStore } from '@stores/nodes/parser-email.store';
+import { useOcrProcessorStore } from '@stores/nodes/ocr-processor.store';
 import { useSmtpAlertStore } from '@stores/nodes/smtp-alert.store';
 import { useTemplateMapperStore } from '@stores/nodes/template-mapper.store';
 import { useTriggerCronStore } from '@stores/nodes/trigger-cron.store';
@@ -234,6 +235,7 @@ export const nodeStoreRegistry: Partial<Record<NodeType, NodeStoreHook>> = {
   [NodeType.MAPEADOR_PLANTILLA]: useTemplateMapperStore,
   [NodeType.PROCESADOR_IA]: useLlmExtractorStore,
   [NodeType.DESTINO_SMTP]: useSmtpAlertStore,
+  [NodeType.PROCESADOR_OCR]: useOcrProcessorStore,
 };
 
 /**

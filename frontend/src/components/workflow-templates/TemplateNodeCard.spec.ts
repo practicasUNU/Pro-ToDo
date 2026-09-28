@@ -76,14 +76,12 @@ const buildStep = (nodeId: string, nodeType: NodeType, outputNamespace: string):
 interface MountOptions {
   step: AssemblerStep;
   errorBranch?: ErrorBranchAction | null;
-  canOfferVision?: boolean;
   baseParamsLocked?: boolean;
 }
 
 const mountCard = ({
   step,
   errorBranch = null,
-  canOfferVision = false,
   baseParamsLocked = false,
 }: MountOptions): ReturnType<typeof mount> =>
   mount(TemplateNodeCard, {
@@ -93,7 +91,6 @@ const mountCard = ({
       isFirst: true,
       isLast: false,
       errorBranch,
-      canOfferVision,
       baseParamsLocked,
     },
     // El cuerpo del `q-expansion-item` se monta en diferido; sin esto los
@@ -152,7 +149,6 @@ describe('TemplateNodeCard · ruta de contingencia de un paso', () => {
       const wrapper = mountCard({
         step: buildStep(MAPPER_ID, NodeType.MAPEADOR_PLANTILLA, 'rendered_html'),
         errorBranch: 'ALERTA_SMTP',
-        canOfferVision: true,
       });
 
       // 2. Act ⚙️
@@ -170,7 +166,6 @@ describe('TemplateNodeCard · ruta de contingencia de un paso', () => {
       const wrapper = mountCard({
         step: buildStep(PARSER_ID, NodeType.PARSER_PRE_IA, 'parsed_email'),
         errorBranch: 'ALERTA_SMTP',
-        canOfferVision: true,
       });
 
       // 2. Act ⚙️
@@ -183,13 +178,14 @@ describe('TemplateNodeCard · ruta de contingencia de un paso', () => {
       expect(options.map((option) => option.value)).toEqual(['ALERTA_SMTP', 'VISION_IA']);
     });
 
-    it('2.3 NO deberia ofrecer la vision sin un nodo de IA al que apuntar', () => {
-      // 1. Arrange 📐: uno nuevo chocaria con el del flujo en `llm_response`
-      //    (regla 5 del validador), asi que la ruta apunta al que ya exista.
+    it('2.3 deberia ofrecer la vision sin depender del resto del grafo', () => {
+      // 1. Arrange 📐: antes hacia falta un PROCESADOR_IA en la secuencia al que
+      //    apuntar, porque un segundo nodo de IA chocaria con el en
+      //    `llm_response`. Desde que la transcripcion tiene tipo y namespace
+      //    propios se auto-aprovisiona, y la condicion desaparece.
       const wrapper = mountCard({
         step: buildStep(PARSER_ID, NodeType.PARSER_PRE_IA, 'parsed_email'),
         errorBranch: 'ALERTA_SMTP',
-        canOfferVision: false,
       });
 
       // 2. Act ⚙️
@@ -198,9 +194,9 @@ describe('TemplateNodeCard · ruta de contingencia de un paso', () => {
         .findComponent(QSelect)
         .props('options') as { value: string }[];
 
-      // 3. Assert 🎯: y se explica por que, en vez de callar la opcion sin mas.
-      expect(options.map((option) => option.value)).toEqual(['ALERTA_SMTP']);
-      expect(wrapper.find(`[data-test="no-vision-hint-${PARSER_ID}"]`).exists()).toBe(true);
+      // 3. Assert 🎯
+      expect(options.map((option) => option.value)).toEqual(['ALERTA_SMTP', 'VISION_IA']);
+      expect(wrapper.find(`[data-test="no-vision-hint-${PARSER_ID}"]`).exists()).toBe(false);
     });
 
     it('2.4 NO deberia admitir texto libre en el selector', () => {

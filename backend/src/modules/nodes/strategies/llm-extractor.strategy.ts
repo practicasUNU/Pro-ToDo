@@ -7,10 +7,7 @@ import {
   extractNamespaceRoots,
 } from '@core/fsm/context/state-payload.context';
 import { AiDefaultsConfig } from '@core/config/ai-defaults.config';
-import {
-  ERROR_CONTEXT_NAMESPACE,
-  NodeType,
-} from '@core/fsm/types/pipeline-schema.types';
+import { NodeType } from '@core/fsm/types/pipeline-schema.types';
 import { AiPromptTemplatesService } from '@modules/ai-prompt-templates/ai-prompt-templates.service';
 import {
   LlmExtractorConfigDto,
@@ -19,8 +16,6 @@ import {
 import { LlmProvider } from '@modules/nodes/strategies/interfaces/llm-provider.interface';
 import { GeminiLlmProvider } from '@modules/nodes/strategies/providers/gemini-llm.provider';
 import { MockLlmProvider } from '@modules/nodes/strategies/providers/mock-llm.provider';
-import { ERR_PARSER_UNEXTRACTABLE_MEDIA } from '@modules/nodes/strategies/parser-email.strategy';
-import { MULTIMODAL_CONTENT_TYPE_PATTERN } from '@modules/nodes/utils/parsed-email-payload.util';
 
 import type { StatePayloadContext } from '@core/fsm/context/state-payload.context';
 import type {
@@ -32,7 +27,6 @@ import type {
 import type { ResolvedLlmExtractorConfig } from '@modules/nodes/dto/llm-extractor-config.dto';
 import type {
   ILlmProviderClient,
-  LlmInlineAttachment,
   LlmResponsePayload,
 } from '@modules/nodes/strategies/interfaces/llm-provider.interface';
 import type { ValidatorOptions } from 'class-validator';
@@ -81,25 +75,14 @@ const VALIDATION_OPTIONS: ValidatorOptions = {
  * arranca por cron no tiene correo y cae al segundo sin mas.
  */
 const INPUT_TEXT_SOURCES = [
+  // El rescate por OCR va PRIMERO: si existe, es porque el parser no encontro
+  // texto aprovechable y el nodo de transcripcion lo recupero de los adjuntos.
+  // Dejarlo detras haria que un `clean_body` residual del parser —el "Ver
+  // adjunto" que a veces acompana a un escaneo— ganase a la transcripcion real.
+  { namespace: 'ocr_result', field: 'clean_body' },
   { namespace: 'parsed_email', field: 'clean_body' },
   { namespace: 'scraped_web', field: 'full_article_content' },
 ] as const;
-
-/** Namespace del correo crudo, del que el modo vision toma los binarios. */
-const RAW_EMAIL_NAMESPACE = 'raw_email';
-
-/** Clave del inventario de adjuntos dentro de ese namespace. */
-const ATTACHMENTS_KEY = 'attachments';
-
-/**
- * Tope de adjuntos que se envian en una sola inferencia.
- *
- * Tres, porque cada uno se factura como miles de tokens y el caso real —una
- * nota de prensa escaneada— cabe de sobra: los correos que traen diez imagenes
- * son firmas y logotipos, no contenido. Sin tope, un correo con veinte capturas
- * convertiria una incidencia rutinaria en la llamada mas cara del mes.
- */
-const MAX_VISION_ATTACHMENTS = 3;
 
 /** Union discriminada: o hay configuracion, o hay un fallo que devolver. */
 type LlmConfigResolution =
@@ -207,28 +190,18 @@ export class LlmExtractorStrategy implements INodeStrategy {
 
     const brakeKey = this.buildBrakeKey(context);
 
-    // --- Modo VISION. Se decide ANTES que nada porque cambia las dos preguntas
-    // siguientes: que cuenta como entrada suficiente, y con que proveedor y
-    // modelo se resuelve. Depende del CONTEXTO y no de los `params`, asi que no
-    // puede vivir en el DTO ni en `getRequiredNamespaces`.
-    const attachments = this.collectVisionAttachments(context);
-    const config = this.applyEnvironmentDefaults(
-      resolution.config,
-      params,
-      attachments.length > 0,
-    );
+    const config = this.applyEnvironmentDefaults(resolution.config, params);
 
     // Guarda de CONTENIDO. Va antes de resolver el prompt porque es la mas
     // barata de las dos —mira el contexto que ya esta en memoria— y porque sin
     // texto de entrada no hay inferencia que preparar, tenga o no plantilla.
     //
-    // Con adjuntos de vision el texto DEJA de ser obligatorio, y esa excepcion
-    // es el motivo entero del modo: el correo cuyo unico contenido es un PDF
-    // escaneado no tiene `clean_body` que ofrecer, y exigirselo aqui abortaria
-    // justo el caso que la rama de recuperacion existe para atender.
+    // Ya no hay excepcion por adjuntos: el correo cuyo unico contenido es un PDF
+    // escaneado lo atiende ahora el nodo PROCESADOR_OCR, que publica su
+    // transcripcion en `ocr_result` y la deja como primer origen de esta lista.
     const inputText = this.resolveInputText(context);
 
-    if (inputText === null && attachments.length === 0) {
+    if (inputText === null) {
       this.consecutiveFailures.delete(brakeKey);
 
       return {
@@ -275,14 +248,13 @@ export class LlmExtractorStrategy implements INodeStrategy {
       // no menciona ningun namespace. Con el reparto contrario, ese prompt
       // facturaria una inferencia sobre ningun contenido.
       response = await client.generateCompletion(
-        inputText ?? '',
+        inputText,
         interpolated.prompt,
         {
           model: config.model,
           timeoutMs: config.timeoutMs,
           maxRetries: config.maxRetries,
         },
-        attachments,
       );
     } catch (error) {
       return this.registerFailure(brakeKey, config, error);
@@ -526,84 +498,6 @@ export class LlmExtractorStrategy implements INodeStrategy {
   }
 
   /**
-   * Adjuntos que este nodo debe enviar al modelo para que los MIRE.
-   *
-   * Solo se recolectan cuando el nodo fue alcanzado por la ruta de recuperacion
-   * del parser, y esa condicion es deliberadamente estrecha. La alternativa
-   * —mirar si hay adjuntos en `raw_email` y mandarlos siempre— convertiria en
-   * una llamada con vision cualquier boletin con el logotipo en PNG, que es la
-   * inferencia mas cara del pipeline gastada en nada. El `error_code` es la
-   * afirmacion explicita de que NO hay texto y los bytes son la unica fuente.
-   *
-   * Los binarios siguen ahi por dos garantias que se suman: la politica de
-   * liberacion del motor conserva el base64 mientras ningun nodo declare texto
-   * util, y ademas no llega a evaluarse en la rama de fallo, que es por donde se
-   * entra aqui.
-   *
-   * Se filtra POR TIPO con la misma expresion que uso el parser para levantar la
-   * bandera: pedirle a un modelo con vision que lea un `.docx` corrupto no lo
-   * arregla, y pagarlo seria tirar el dinero dos veces.
-   */
-  private collectVisionAttachments(
-    context: StatePayloadContext,
-  ): readonly LlmInlineAttachment[] {
-    const errorContext = context.getNamespace(ERROR_CONTEXT_NAMESPACE);
-
-    if (errorContext?.error_code !== ERR_PARSER_UNEXTRACTABLE_MEDIA) {
-      return [];
-    }
-
-    const rawAttachments =
-      context.getNamespace(RAW_EMAIL_NAMESPACE)?.[ATTACHMENTS_KEY];
-
-    if (!Array.isArray(rawAttachments)) {
-      return [];
-    }
-
-    const collected: LlmInlineAttachment[] = [];
-
-    for (const raw of rawAttachments) {
-      if (collected.length >= MAX_VISION_ATTACHMENTS) {
-        break;
-      }
-
-      const record =
-        typeof raw === 'object' && raw !== null
-          ? (raw as Record<string, unknown>)
-          : {};
-      const contentBase64 = record.contentBase64;
-      const contentType = record.contentType;
-
-      // El base64 puede ser `null` —el motor lo libero, o el adjunto nunca se
-      // ingirio— y entonces no hay nada que mirar. Comprobar el TIPO ademas del
-      // contenido evita mandar un `.xlsx` ilegible a un modelo con vision.
-      if (
-        typeof contentBase64 !== 'string' ||
-        contentBase64.length === 0 ||
-        typeof contentType !== 'string' ||
-        !MULTIMODAL_CONTENT_TYPE_PATTERN.test(contentType)
-      ) {
-        continue;
-      }
-
-      collected.push({
-        filename:
-          typeof record.filename === 'string' ? record.filename : 'adjunto',
-        contentType,
-        contentBase64,
-      });
-    }
-
-    if (collected.length > 0) {
-      this.logger.log(
-        `Modo vision: se envian ${collected.length} adjunto(s) al modelo tras ${ERR_PARSER_UNEXTRACTABLE_MEDIA}.`,
-      );
-    }
-
-    return collected;
-  }
-
-  /**
    * Completa proveedor y modelo con los defaults del entorno.
    *
    * PRECEDENCIA, de mas fuerte a mas debil: los `params` del nodo, el par del
@@ -635,7 +529,6 @@ export class LlmExtractorStrategy implements INodeStrategy {
   private applyEnvironmentDefaults(
     config: ResolvedLlmExtractorConfig,
     params: Record<string, unknown>,
-    isVisionMode: boolean,
   ): ResolvedLlmExtractorConfig {
     const declaresProvider = this.declaresParam(params.provider);
     const declaresModel = this.declaresParam(params.model);
@@ -646,9 +539,9 @@ export class LlmExtractorStrategy implements INodeStrategy {
       return config;
     }
 
-    const defaults = isVisionMode
-      ? this.aiDefaults.getOcrDefaults()
-      : this.aiDefaults.getTextDefaults();
+    // Siempre el par de TEXTO: la transcripcion es trabajo del nodo
+    // PROCESADOR_OCR, que lee `AI_OCR_DEFAULT_*` por su cuenta.
+    const defaults = this.aiDefaults.getTextDefaults();
 
     const envProvider = this.toProvider(defaults.provider);
 

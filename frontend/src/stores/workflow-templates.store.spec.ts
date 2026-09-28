@@ -4,7 +4,11 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { useWorkflowTemplatesStore } from './workflow-templates.store';
 
 import { NodeType } from '@/types/pipeline';
-import { MULTIMODAL_FALLBACK_CODE, SHARED_ALERT_NODE_ID } from '@/types/nodes/error-branch.types';
+import {
+  MULTIMODAL_FALLBACK_CODE,
+  SHARED_ALERT_NODE_ID,
+  SHARED_OCR_NODE_ID,
+} from '@/types/nodes/error-branch.types';
 
 import type {
   AssembledPipelineSchema,
@@ -771,7 +775,7 @@ describe('useWorkflowTemplatesStore · catalogo de plantillas de flujo', () => {
         // 3. Assert 🎯: apunta al PROCESADOR_IA que la topologia YA tiene; uno
         //    nuevo chocaria con el en `llm_response` (regla 5).
         expect(readSchema(store).nodes[PARSER_ID]?.onErrorStep).toEqual({
-          targetNode: IA_ID,
+          targetNode: SHARED_OCR_NODE_ID,
           catchErrors: [MULTIMODAL_FALLBACK_CODE],
         });
         expect(store.errorBranchOf(PARSER_ID)).toBe('VISION_IA');
@@ -797,13 +801,28 @@ describe('useWorkflowTemplatesStore · catalogo de plantillas de flujo', () => {
         //    `rebuildSchemaFromSequence` reensamblaba con la lista vacia, y el
         //    grafo salia con una ruta apuntando a un nodo inexistente.
         const store = buildDraftWithPipeline();
-        store.setStepErrorBranch(MAPPER_ID, 'ALERTA_SMTP');
+        store.setStepErrorBranch('trigger_imap', 'ALERTA_SMTP');
 
-        // 2. Act ⚙️: quitar el ultimo paso reensambla el documento entero.
+        // 2. Act ⚙️: quitar el ultimo paso reensambla el documento entero. El
+        //    nodo que declara la ruta sigue en la secuencia.
         store.setSequence(store.sequence.slice(0, 3));
 
         // 3. Assert 🎯
         expect(readSchema(store).nodes[SHARED_ALERT_NODE_ID]?.nodeId).toBe(SHARED_ALERT_NODE_ID);
+      });
+
+      it('8.5bis deberia RETIRARLO si se elimina el paso que lo invocaba', () => {
+        // 1. Arrange 📐: la ruta se va con el nodo que la declaraba, y un
+        //    satelite al que ya no apunta nadie es un nodo inalcanzable que el
+        //    validador rechaza.
+        const store = buildDraftWithPipeline();
+        store.setStepErrorBranch(MAPPER_ID, 'ALERTA_SMTP');
+
+        // 2. Act ⚙️
+        store.setSequence(store.sequence.filter((step) => step.nodeId !== MAPPER_ID));
+
+        // 3. Assert 🎯
+        expect(readSchema(store).nodes[SHARED_ALERT_NODE_ID]).toBeUndefined();
       });
 
       it('8.6 deberia conservar una ruta escrita a mano en el panel JSON', () => {
@@ -861,7 +880,7 @@ describe('useWorkflowTemplatesStore · catalogo de plantillas de flujo', () => {
         const { nodes } = readSchema(store);
 
         expect(nodes[PARSER_ID]?.onErrorStep).toEqual({
-          targetNode: IA_ID,
+          targetNode: SHARED_OCR_NODE_ID,
           catchErrors: [MULTIMODAL_FALLBACK_CODE],
         });
         expect(nodes.trigger_imap?.onErrorStep).toBe(SHARED_ALERT_NODE_ID);
@@ -914,7 +933,7 @@ describe('useWorkflowTemplatesStore · catalogo de plantillas de flujo', () => {
         expect(nodes.trigger_imap?.onErrorStep).toBeNull();
         expect(nodes[MAPPER_ID]?.onErrorStep).toBeNull();
         expect(nodes[PARSER_ID]?.onErrorStep).toEqual({
-          targetNode: IA_ID,
+          targetNode: SHARED_OCR_NODE_ID,
           catchErrors: [MULTIMODAL_FALLBACK_CODE],
         });
         expect(nodes[SHARED_ALERT_NODE_ID]).toBeUndefined();
@@ -1028,29 +1047,31 @@ describe('useWorkflowTemplatesStore · catalogo de plantillas de flujo', () => {
         });
       });
 
-      it('8.18 NO deberia sembrar nada si la ruta no se puede resolver', () => {
-        // 1. Arrange 📐: pedir vision sin un PROCESADOR_IA al que apuntar deja el
-        //    paso sin ruta. Encender el interruptor entonces dejaria el flujo en
-        //    PAUSADO ante un correo de solo imagen, sin nadie que lo recogiera:
-        //    peor que no hacer nada.
-        const store = useWorkflowTemplatesStore();
-        store.initDraft();
-        store.patchDraft({ name: 'Notiweb' });
-        store.setSequence([
-          {
-            nodeId: PARSER_ID,
-            nodeType: NodeType.PARSER_PRE_IA,
-            outputNamespace: 'parsed_email',
-            params: {},
-          },
-        ]);
+      it('8.18 deberia REINCORPORAR el flujo tras la transcripcion', () => {
+        // 1. Arrange 📐: es lo que separa este satelite del de alerta. La alerta
+        //    avisa y termina; la transcripcion devuelve el flujo al curso que
+        //    llevaba el paso que fallo, o el rescate no publicaria nada.
+        const store = buildDraftWithPipeline();
 
         // 2. Act ⚙️
         store.setStepErrorBranch(PARSER_ID, 'VISION_IA');
 
+        // 3. Assert 🎯: el parser iba a `nodo_ia`, asi que ahi vuelve.
+        expect(readSchema(store).nodes[SHARED_OCR_NODE_ID]?.nextStep).toBe(IA_ID);
+      });
+
+      it('8.18bis deberia RECALCULAR ese destino al reordenar la secuencia', () => {
+        // 1. Arrange 📐: el caso que de otro modo deja el satelite colgando de
+        //    un nodo que cambio de sitio, con el grafo apuntando a donde ya no
+        //    toca.
+        const store = buildDraftWithPipeline();
+        store.setStepErrorBranch(PARSER_ID, 'VISION_IA');
+
+        // 2. Act ⚙️: se retira el nodo de IA que seguia al parser.
+        store.setSequence(store.sequence.filter((step) => step.nodeId !== IA_ID));
+
         // 3. Assert 🎯
-        expect(readSchema(store).nodes[PARSER_ID]?.onErrorStep).toBeNull();
-        expect(readSchema(store).nodes[PARSER_ID]?.params.failOnUnextractableMedia).not.toBe(true);
+        expect(readSchema(store).nodes[SHARED_OCR_NODE_ID]?.nextStep).toBe(MAPPER_ID);
       });
 
       it('8.19 deberia sembrar los defaults del tipo al reensamblar', () => {
@@ -1066,9 +1087,11 @@ describe('useWorkflowTemplatesStore · catalogo de plantillas de flujo', () => {
         expect(nodes.trigger_imap?.params).toEqual({ mailbox: 'INBOX', includeAttachments: false });
       });
 
-      it('8.10 NO deberia resolver la vision sin un PROCESADOR_IA en la topologia', () => {
-        // 1. Arrange 📐: crear uno nuevo chocaria con el existente en
-        //    `llm_response`, y la lista blanca de namespaces no tiene otro.
+      it('8.10 deberia PROVISIONAR el satelite de OCR sin depender del grafo', () => {
+        // 1. Arrange 📐: antes la vision solo se podia ofrecer si la topologia ya
+        //    traia un PROCESADOR_IA al que apuntar, porque un segundo nodo de IA
+        //    chocaria con el en `llm_response`. Con `ocr_result` propio no
+        //    colisiona con nadie y se auto-aprovisiona como la alerta.
         const store = useWorkflowTemplatesStore();
         store.initDraft();
         store.patchDraft({ name: 'Notiweb' });
@@ -1085,8 +1108,25 @@ describe('useWorkflowTemplatesStore · catalogo de plantillas de flujo', () => {
         store.setStepErrorBranch(PARSER_ID, 'VISION_IA');
 
         // 3. Assert 🎯
-        expect(store.visionTargetNodeId).toBeNull();
-        expect(readSchema(store).nodes[PARSER_ID]?.onErrorStep).toBeNull();
+        const satellite = readSchema(store).nodes[SHARED_OCR_NODE_ID];
+
+        expect(satellite?.nodeType).toBe(NodeType.PROCESADOR_OCR);
+        expect(satellite?.outputNamespace).toBe('ocr_result');
+        expect(store.errorBranchOf(PARSER_ID)).toBe('VISION_IA');
+      });
+
+      it('8.20 deberia RETIRAR el satelite de OCR al revocar la vision', () => {
+        // 1. Arrange 📐: un satelite huerfano es un nodo inalcanzable que el
+        //    validador rechaza.
+        const store = buildDraftWithPipeline();
+        store.setStepErrorBranch(PARSER_ID, 'VISION_IA');
+
+        // 2. Act ⚙️
+        store.setStepErrorBranch(PARSER_ID, null);
+
+        // 3. Assert 🎯
+        expect(readSchema(store).nodes[SHARED_OCR_NODE_ID]).toBeUndefined();
+        expect(store.errorBranchOf(PARSER_ID)).toBeNull();
       });
     });
 

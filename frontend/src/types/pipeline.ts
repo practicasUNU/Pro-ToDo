@@ -16,6 +16,7 @@ export enum NodeType {
   MAPEADOR_PLANTILLA = 'MAPEADOR_PLANTILLA',
   DESTINO_HTTP = 'DESTINO_HTTP',
   DESTINO_SMTP = 'DESTINO_SMTP',
+  PROCESADOR_OCR = 'PROCESADOR_OCR',
 }
 
 /** Etiquetas legibles para los selectores; el enum viaja crudo al backend. */
@@ -29,6 +30,7 @@ export const NODE_TYPE_LABELS: Record<NodeType, string> = {
   [NodeType.MAPEADOR_PLANTILLA]: 'Mapeador de plantilla',
   [NodeType.DESTINO_HTTP]: 'Destino HTTP',
   [NodeType.DESTINO_SMTP]: 'Alerta por correo',
+  [NodeType.PROCESADOR_OCR]: 'Procesador OCR',
 };
 
 /**
@@ -73,6 +75,7 @@ export const NODE_OUTPUT_NAMESPACES = [
   'rendered_html',
   'http_result',
   'smtp_result',
+  'ocr_result',
 ] as const;
 
 /**
@@ -98,6 +101,7 @@ export const DEFAULT_OUTPUT_NAMESPACE_BY_NODE_TYPE: Record<NodeType, string> = {
   [NodeType.MAPEADOR_PLANTILLA]: 'rendered_html',
   [NodeType.DESTINO_HTTP]: 'http_result',
   [NodeType.DESTINO_SMTP]: 'smtp_result',
+  [NodeType.PROCESADOR_OCR]: 'ocr_result',
 };
 
 /**
@@ -125,6 +129,7 @@ export const DEFAULT_PARAMS_BY_NODE_TYPE: Record<NodeType, Record<string, unknow
   [NodeType.MAPEADOR_PLANTILLA]: {},
   [NodeType.DESTINO_HTTP]: {},
   [NodeType.DESTINO_SMTP]: {},
+  [NodeType.PROCESADOR_OCR]: {},
 };
 
 /**

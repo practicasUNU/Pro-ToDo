@@ -710,6 +710,93 @@ describe('PipelineValidatorService (PROT-07)', () => {
     });
   });
 
+  describe('satelite OCR fuera del camino activo', () => {
+    /** Grafo con `ocr_ia` alcanzable SOLO por la ruta de error del parser. */
+    const buildOcrSchema = (): Record<string, unknown> => ({
+      flowId: 'b3f1c2d4-5a6b-4c7d-8e9f-0a1b2c3d4e5f',
+      name: 'Rescate por OCR',
+      version: '1.0.0',
+      entrypoint: 'trigger_imap',
+      nodes: {
+        trigger_imap: {
+          nodeId: 'trigger_imap',
+          nodeType: NodeType.TRIGGER_IMAP,
+          outputNamespace: 'raw_email',
+          nextStep: 'parser_pre_ia',
+          onErrorStep: null,
+          params: {},
+        },
+        parser_pre_ia: {
+          nodeId: 'parser_pre_ia',
+          nodeType: NodeType.PARSER_PRE_IA,
+          outputNamespace: 'parsed_email',
+          nextStep: 'procesador_ia',
+          onErrorStep: {
+            targetNode: 'ocr_ia',
+            catchErrors: ['ERR_PARSER_UNEXTRACTABLE_MEDIA'],
+          },
+          params: { failOnUnextractableMedia: true },
+        },
+        ocr_ia: {
+          nodeId: 'ocr_ia',
+          nodeType: NodeType.PROCESADOR_OCR,
+          outputNamespace: 'ocr_result',
+          nextStep: 'procesador_ia',
+          onErrorStep: null,
+          params: {},
+        },
+        procesador_ia: {
+          nodeId: 'procesador_ia',
+          nodeType: NodeType.PROCESADOR_IA,
+          outputNamespace: 'llm_response',
+          nextStep: null,
+          onErrorStep: null,
+          params: { inlinePrompt: 'Redacta.' },
+        },
+      },
+    });
+
+    it('deberia ACEPTAR el grafo completo del rescate', async () => {
+      // 1. Arrange 📐: cubre de una vez las cuatro reglas que tocan al satelite
+      //    —3 (destinos existentes), 4 (namespace en la lista cerrada), 5 (sin
+      //    duplicados) y 10 (el parser SI puede emitir el codigo que la ruta
+      //    atrapa, porque lleva `failOnUnextractableMedia`)—.
+      const schema = buildOcrSchema();
+
+      // 2. Act ⚙️ + 3. Assert 🎯
+      await expect(service.validateSchema(schema)).resolves.toBeDefined();
+    });
+
+    it('deberia RECHAZAR que el satelite comparta namespace con el parser', async () => {
+      // 1. Arrange 📐: es la razon de que `PROCESADOR_OCR` tenga `ocr_result`
+      //    propio. Sin el, el satelite chocaria con algun nodo del camino y la
+      //    rama de contingencia no podria auto-aprovisionarse.
+      const schema = buildOcrSchema();
+      const nodes = schema.nodes as Record<string, { outputNamespace: string }>;
+
+      nodes.ocr_ia.outputNamespace = 'parsed_email';
+
+      // 2. Act ⚙️ + 3. Assert 🎯
+      await expect(service.validateSchema(schema)).rejects.toThrow(
+        BadRequestException,
+      );
+    });
+
+    it('deberia RECHAZAR un satelite que apunta fuera del mapa', async () => {
+      // 1. Arrange 📐: regla 3 sobre `nextStep`. Un satelite que reincorpora a
+      //    ningun sitio dejaria el flujo muerto justo despues del rescate.
+      const schema = buildOcrSchema();
+      const nodes = schema.nodes as Record<string, { nextStep: string | null }>;
+
+      nodes.ocr_ia.nextStep = 'nodo_que_no_existe';
+
+      // 2. Act ⚙️ + 3. Assert 🎯
+      await expect(service.validateSchema(schema)).rejects.toThrow(
+        BadRequestException,
+      );
+    });
+  });
+
   describe('validacion de params contra el DTO de la estrategia', () => {
     /**
      * Servicio con la estrategia REAL del extractor registrada.

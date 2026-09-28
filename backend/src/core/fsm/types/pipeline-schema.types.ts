@@ -47,6 +47,7 @@ export const NODE_OUTPUT_NAMESPACES = [
   'rendered_html',
   'http_result',
   'smtp_result',
+  'ocr_result',
 ] as const;
 
 /**
@@ -84,7 +85,7 @@ export const SEMVER_PATTERN = /^\d+\.\d+\.\d+$/;
  * `nodos`, el catalogo estatico de tipos (ver `db/migrations/011-catalogo-nodos.sql`;
  * la tabla se llamaba `tipos_nodo` hasta esa migracion).
  *
- * El catalogo tiene DIEZ filas y este enum declara nueve: `DESTINO_ACENS` sigue
+ * El catalogo tiene ONCE filas y este enum declara diez: `DESTINO_ACENS` sigue
  * sin estrategia, asi que no es expresable en un `pipeline_schema`.
  * `GET /api/nodos` lo devuelve marcado con `implemented: false` para que el
  * selector del frontend lo deshabilite.
@@ -93,6 +94,14 @@ export const SEMVER_PATTERN = /^\d+\.\d+\.\d+$/;
  * rutas de `onErrorStep`. Lleva el prefijo `DESTINO_` y la categoria `DESTINO`
  * porque el criterio de esa familia es escribir FUERA del sistema, que es lo que
  * hace, aunque su contenido sea un aviso y no una publicacion.
+ *
+ * `PROCESADOR_OCR` (migracion 022) transcribe los adjuntos de un correo que no
+ * trae texto aprovechable. Es un tipo APARTE de `PROCESADOR_IA` y no un modo
+ * suyo: transcribir una imagen y redactar una noticia son trabajos distintos,
+ * con modelo, prompt y presupuesto distintos, y fundirlos obligaba a un solo
+ * juego de `params` para los dos. Tenerlo aparte le da ademas su propio
+ * `ocr_result`, sin el cual un segundo nodo de IA chocaria con el primero en
+ * `llm_response` (regla 5 del validador).
  */
 export enum NodeType {
   TRIGGER_IMAP = 'TRIGGER_IMAP',
@@ -104,6 +113,7 @@ export enum NodeType {
   MAPEADOR_PLANTILLA = 'MAPEADOR_PLANTILLA',
   DESTINO_HTTP = 'DESTINO_HTTP',
   DESTINO_SMTP = 'DESTINO_SMTP',
+  PROCESADOR_OCR = 'PROCESADOR_OCR',
 }
 
 /**

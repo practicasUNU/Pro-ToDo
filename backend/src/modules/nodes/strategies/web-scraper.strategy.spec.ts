@@ -208,21 +208,46 @@ describe('WebScraperStrategy', () => {
       expect(url.toString()).toBe(TARGET_URL);
     });
 
-    it('2.2 deberia fallar como GRAVE si la variable no existe en el contexto', async () => {
-      // 1. Arrange
+    it('2.2 deberia SALTARSE el nodo si la lista de enlaces viene vacia', async () => {
+      // 1. Arrange 📐: es el estado normal de un correo sin enlaces, y desde que
+      //    existe el rescate por OCR es ademas el frecuente —la transcripcion de
+      //    un escaneo rara vez trae URLs—. Fallar aqui rompia el flujo justo
+      //    despues de haberlo rescatado.
       const { strategy, run } = createHarness();
 
-      // 2. Act
+      // 2. Act ⚙️
       const result = await strategy.execute(buildContext(), {
         targetUrl: '{{parsed_email.extracted_urls[0]}}',
       });
 
-      // 3. Assert: `getInterpolatedValue` LANZA, y dejar salir la excepcion la
-      //    normalizaria el motor a URGENTE, que `canRetry` nunca reintenta.
+      // 3. Assert 🎯: exito VACIO, no fallo. El nodo de IA que va detras se
+      //    queda con el texto que ya tenia, y nadie tiene que cerrar a mano una
+      //    incidencia por un correo que simplemente no llevaba enlaces.
+      expect(result.success).toBe(true);
+      expect(result.data).toEqual({
+        source_url: null,
+        full_article_content: '',
+      });
+      expect(run).not.toHaveBeenCalled();
+    });
+
+    it('2.2bis deberia seguir fallando GRAVE ante una variable ESCALAR ausente', async () => {
+      // 1. Arrange 📐: la otra mitad de la distincion. Un `targetUrl` que apunta
+      //    a un namespace que nadie escribe es un flujo mal compuesto, y
+      //    degradarlo silenciaria un error de diseno en vez de mostrarlo.
+      const { strategy, run } = createHarness();
+
+      // 2. Act ⚙️
+      const result = await strategy.execute(buildContext(), {
+        targetUrl: '{{parsed_email.enlace_principal}}',
+      });
+
+      // 3. Assert 🎯
+      expect(result.success).toBe(false);
       expect(result.error?.code).toBe(ERR_SCRAPER_URL_UNRESOLVED);
       expect(result.error?.level).toBe('GRAVE');
       expect(result.error?.missingFields).toEqual([
-        'parsed_email.extracted_urls[0]',
+        'parsed_email.enlace_principal',
       ]);
       expect(run).not.toHaveBeenCalled();
     });

@@ -39,6 +39,9 @@ export const nodeConfigRegistry: Partial<Record<NodeType, Component>> = {
   [NodeType.PROCESADOR_IA]: defineAsyncComponent(
     () => import('@components/nodes/LlmExtractorConfig.vue'),
   ),
+  [NodeType.PROCESADOR_OCR]: defineAsyncComponent(
+    () => import('@components/nodes/OcrProcessorConfig.vue'),
+  ),
   [NodeType.DESTINO_SMTP]: defineAsyncComponent(
     () => import('@components/nodes/SmtpAlertConfig.vue'),
   ),

@@ -388,7 +388,7 @@ CREATE INDEX idx_alertas_error_pendientes
 -- SEED: Datos iniciales
 -- =============================================================================
 
--- Los 8 primeros codigos replican el enum `NodeType` del backend
+-- Los 10 codigos con estrategia replican el enum `NodeType` del backend
 -- (`@core/fsm/types/pipeline-schema.types`): son los unicos que un
 -- `pipeline_schema` puede declarar hoy. `DESTINO_ACENS` sigue en el catalogo a
 -- la espera de su estrategia; hasta entonces no es referenciable desde
@@ -403,5 +403,6 @@ INSERT INTO nodos (codigo, nombre, categoria, descripcion) VALUES
     ('DESTINO_HTTP', 'Destino HTTP', 'DESTINO', 'Publica el resultado final mediante una peticion HTTP (Drupal JSON:API u otro)'),
     ('TRIGGER_CRON', 'Disparador Cron', 'TRIGGER', 'Inicia el flujo mediante una programacion temporal'),
     ('DESTINO_ACENS', 'Destino Acens', 'DESTINO', 'Realiza el envio masivo a traves de Acens'),
-    ('DESTINO_SMTP', 'Alerta por Correo', 'DESTINO', 'Envia un correo de aviso interpolando datos del flujo. Pensado como destino de las rutas de recuperacion ante error.');
+    ('DESTINO_SMTP', 'Alerta por Correo', 'DESTINO', 'Envia un correo de aviso interpolando datos del flujo. Pensado como destino de las rutas de recuperacion ante error.'),
+    ('PROCESADOR_OCR', 'Procesador OCR', 'PROCESAMIENTO', 'Transcribe los adjuntos de un correo sin texto aprovechable (imagen o PDF escaneado). Pensado como destino de la ruta de contingencia del parser.');
 

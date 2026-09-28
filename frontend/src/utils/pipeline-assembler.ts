@@ -61,6 +61,15 @@ export interface AssemblerStep {
    * a mano en el panel JSON y volver a guardarla la borraba en silencio.
    */
   readonly onErrorStep?: string | SelectiveErrorFallback | null;
+  /**
+   * Solo para SATELITES: a donde devuelven el flujo, o `null` si son terminales.
+   *
+   * Los pasos del camino activo lo ignoran —su `nextStep` sale del ORDEN del
+   * arreglo, que es la topologia— pero un satelite no esta en ese arreglo y
+   * necesita decirlo por su cuenta. La alerta es terminal; la transcripcion
+   * reincorpora el flujo al curso que llevaba el paso que fallo.
+   */
+  readonly nextStep?: string | null;
 }
 
 /** Metadatos del esquema que no salen de la secuencia de pasos. */
@@ -96,8 +105,9 @@ export interface AssemblerMeta {
  * Los SATELITES van aparte de la secuencia y no al final del arreglo. El
  * encadenado es posicional, asi que un nodo de alerta metido entre los pasos
  * heredaria un `nextStep` y acabaria en el camino feliz, ejecutandose en cada
- * pasada en vez de solo cuando algo falla. Se emiten con `nextStep: null`: son
- * terminales por definicion.
+ * pasada en vez de solo cuando algo falla. Su `nextStep` lo declara cada
+ * satelite: `null` en la alerta, que es terminal, y el del paso que fallo en la
+ * transcripcion, que devuelve el flujo a su curso.
  *
  * Una secuencia VACIA produce un esquema con `entrypoint: ''` y `nodes: {}` en
  * vez de lanzar: es el estado legitimo de un borrador recien abierto, y quien
@@ -135,7 +145,10 @@ export const assemblePipelineSchema = (
       nodeId: satellite.nodeId,
       nodeType: satellite.nodeType,
       outputNamespace: satellite.outputNamespace,
-      nextStep: null,
+      // Ya no es `null` a ciegas: hay dos clases de satelite. El de alerta sigue
+      // siendo terminal; el de transcripcion devuelve el flujo a su curso, y
+      // forzarle un `null` aqui lo dejaria muerto justo despues del rescate.
+      nextStep: satellite.nextStep ?? null,
       onErrorStep: satellite.onErrorStep ?? null,
       params: satellite.params,
     };
@@ -241,6 +254,10 @@ export const collectErrorSatellites = (
         outputNamespace: node.outputNamespace,
         params: node.params,
         onErrorStep: node.onErrorStep,
+        // Se RECUPERA del grafo: sin esto, un satelite que reincorporaba el
+        // flujo salia terminal del primer round-trip y el rescate dejaba de
+        // publicar nada.
+        nextStep: node.nextStep,
       },
     ];
   });

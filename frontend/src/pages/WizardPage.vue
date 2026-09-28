@@ -7,13 +7,12 @@ import { useFlujoDraftStore } from '@stores/flujo-draft.store';
 
 import { nodeConfigRegistry } from '@components/nodes/node-config-registry';
 import NodeBranchCard from '@components/nodes/common/NodeBranchCard.vue';
-import SmtpAlertConfig from '@components/nodes/SmtpAlertConfig.vue';
 import PipelineSelector from '@components/wizard/PipelineSelector.vue';
 import SaveWarningsDialog from '@components/wizard/SaveWarningsDialog.vue';
 
 import { extractApiErrorMessage } from '@/utils/api-error';
 
-import { MULTIMODAL_FALLBACK_CODE, SHARED_ALERT_NODE_ID } from '@/types/nodes/error-branch.types';
+import { MULTIMODAL_FALLBACK_CODE } from '@/types/nodes/error-branch.types';
 
 import type { StepWarning } from '@stores/flujo-draft.store';
 import type { WizardStep } from '@/types/pipeline';
@@ -414,19 +413,26 @@ onMounted(async () => {
           </q-stepper-navigation>
         </q-step>
 
-        <!-- Paso de contingencias: tampoco es un nodo del grafo, y solo aparece
-             si alguna rama provisiona el nodo de alerta compartido. Los
-             destinatarios se piden UNA vez aqui y no dentro de cada panel de
-             rama, donde antes se repetian tantas veces como rutas hubiera. -->
+        <!-- Pasos de contingencia: no son nodos del camino activo —solo se
+             llega a ellos por una ruta de error— y por eso el `v-for` va sobre
+             la lista del store y no sobre la topologia. Son dos clases: la
+             alerta, que avisa y termina, y la transcripcion, que devuelve el
+             flujo a su curso. Cada una monta SU configurador por el registro,
+             igual que los pasos normales. -->
         <q-step
-          v-if="draftStore.hasAlertContingencyStep"
-          :name="draftStore.alertStepIndex"
-          title="Contingencias por correo"
-          caption="Destinatarios de las alertas"
-          :prefix="draftStore.alertStepIndex + 1"
+          v-for="(step, offset) in draftStore.contingencySteps"
+          :key="step.nodeId"
+          :name="draftStore.pipelineTopology.length + offset"
+          :title="step.name"
+          :caption="step.outputNamespace"
+          :prefix="draftStore.pipelineTopology.length + offset + 1"
           icon="crisis_alert"
         >
-          <SmtpAlertConfig :node-id="SHARED_ALERT_NODE_ID" />
+          <component
+            :is="resolveStepComponent(step)"
+            v-if="resolveStepComponent(step)"
+            :node-id="step.nodeId"
+          />
 
           <q-stepper-navigation class="row items-center q-gutter-sm">
             <q-btn
@@ -437,7 +443,20 @@ onMounted(async () => {
               @click="draftStore.goToPreviousStep()"
             />
             <q-space />
+            <!-- Con varios satelites, el ultimo es el que lleva a la revision;
+                 los anteriores siguen avanzando dentro del bloque. -->
             <q-btn
+              v-if="offset < draftStore.contingencySteps.length - 1"
+              class="pd-btn-primary"
+              unelevated
+              no-caps
+              label="Siguiente"
+              icon-right="north_east"
+              :disable="!draftStore.isActiveStepValid"
+              @click="draftStore.activeStep += 1"
+            />
+            <q-btn
+              v-else
               class="pd-btn-primary"
               unelevated
               no-caps

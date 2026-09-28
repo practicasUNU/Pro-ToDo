@@ -57,6 +57,16 @@ type ScraperConfigResolution =
 /** Esquemas navegables. Ver la guarda de `resolveTargetUrl`. */
 const ALLOWED_PROTOCOLS: ReadonlySet<string> = new Set(['http:', 'https:']);
 
+/**
+ * La plantilla apunta a un ELEMENTO de un arreglo (`{{ns.campo[0]}}`).
+ *
+ * Es lo que distingue "la lista venia vacia" de "el namespace no existe". Solo
+ * la primera merece que el nodo se salte en silencio: la segunda es un flujo
+ * mal compuesto y tiene que verse.
+ */
+const referencesArrayIndex = (template: string): boolean =>
+  /\[\d+\]\s*\}\}/.test(template);
+
 /** Traza completa del error, si la hay, lista para fusionar en el detalle. */
 const stackTraceOf = (error: unknown): { stackTrace?: string } =>
   error instanceof Error && error.stack !== undefined
@@ -161,6 +171,17 @@ export class WebScraperStrategy implements INodeStrategy {
 
     if ('failure' in target) {
       return { success: false, error: target.failure };
+    }
+
+    // Exito VACIO y no un fallo: el flujo continua con los campos en blanco, y
+    // el nodo de IA que va detras se queda con el texto que ya tenia. La
+    // alternativa —parar el flujo— convertiria "este correo no traia enlaces"
+    // en una incidencia que alguien tendria que cerrar a mano.
+    if ('skip' in target) {
+      return {
+        success: true,
+        data: { source_url: null, full_article_content: '' },
+      };
     }
 
     // Se pasan SOLO los tres campos de navegacion y no la config entera: el
@@ -306,13 +327,32 @@ export class WebScraperStrategy implements INodeStrategy {
   private resolveTargetUrl(
     context: StatePayloadContext,
     config: ResolvedWebScraperConfig,
-  ): { readonly url: URL } | { readonly failure: NodeErrorDetail } {
+  ):
+    | { readonly url: URL }
+    | { readonly failure: NodeErrorDetail }
+    | { readonly skip: true } {
     let interpolated: string;
 
     try {
       interpolated = context.getInterpolatedValue(config.targetUrl);
     } catch (error) {
       if (error instanceof MissingContextVariableException) {
+        // NO HABIA ENLACE QUE SEGUIR, que no es lo mismo que estar mal
+        // configurado. Un indice de arreglo sin resolver —`extracted_urls[0]`
+        // sobre una lista vacia— es el estado normal de un correo sin enlaces,
+        // y desde que existe el rescate por OCR es ademas el caso FRECUENTE: la
+        // transcripcion de un escaneo rara vez trae URLs. Fallar aqui rompia el
+        // flujo justo despues de haberlo rescatado.
+        //
+        // Una variable ESCALAR ausente sigue siendo GRAVE: eso es un nodo que
+        // apunta a un namespace que nadie escribe, y degradarlo silenciaria un
+        // error de diseno del flujo.
+        // Sin log propio: `logNodeOutcome` ya deja una fila por invocacion en
+        // `logs_nodo`, y el `source_url: null` de la salida dice lo mismo.
+        if (referencesArrayIndex(config.targetUrl)) {
+          return { skip: true };
+        }
+
         return {
           failure: {
             level: 'GRAVE',

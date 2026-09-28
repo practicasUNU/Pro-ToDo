@@ -28,8 +28,6 @@ interface Props {
    * mitad por otra abriria la puerta a que discrepasen.
    */
   errorBranches: Readonly<Record<string, ErrorBranchAction | null>>;
-  /** Si la topologia tiene un `PROCESADOR_IA` al que desviar. */
-  canOfferVision: boolean;
   /**
    * Si alguna ruta de contingencia impone los `params` base de los pasos.
    *
@@ -335,7 +333,6 @@ onMounted(async () => {
         @move="moveNode(index, $event)"
         @remove="removeNode(index)"
         :error-branch="props.errorBranches[step.nodeId] ?? null"
-        :can-offer-vision="props.canOfferVision"
         :base-params-locked="props.baseParamsLocked"
         @update:namespace="updateNamespace(index, $event)"
         @update:params="emit('update:params', step.nodeId, $event)"

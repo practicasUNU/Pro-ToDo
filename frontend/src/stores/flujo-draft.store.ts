@@ -15,7 +15,7 @@ import {
   INITIAL_SCHEMA_VERSION,
 } from '@/utils/pipeline-assembler';
 
-import { DEFAULT_OUTPUT_NAMESPACE_BY_NODE_TYPE, NodeType, toWizardStep } from '@/types/pipeline';
+import { DEFAULT_OUTPUT_NAMESPACE_BY_NODE_TYPE, toWizardStep } from '@/types/pipeline';
 import {
   ERROR_BRANCH_ACTIONS,
   ERROR_BRANCH_TRIGGERS,
@@ -35,6 +35,7 @@ import type {
   WizardStep,
   WorkflowDetail,
   WorkflowTemplateSummary,
+  NodeType,
 } from '@/types/pipeline';
 import type {
   ErrorBranch,
@@ -77,6 +78,15 @@ export interface InvalidStep {
 
 /** Etiqueta del paso sintetico de contingencias. */
 export const ALERT_STEP_NAME = 'Contingencias por correo';
+
+/** Rotulo del paso del satelite de transcripcion. */
+export const OCR_STEP_NAME = 'OCR de Contingencia';
+
+/** Rotulo del paso sintetico de cada accion que provisiona satelite. */
+const CONTINGENCY_STEP_NAMES: Record<ErrorBranchAction, string> = {
+  ALERTA_SMTP: ALERT_STEP_NAME,
+  VISION_IA: OCR_STEP_NAME,
+};
 
 /** Texto que la vista muestra para cada motivo. */
 const STEP_BLOCK_MESSAGES: Record<StepBlockReason, (step: WizardStep) => string> = {
@@ -203,8 +213,10 @@ export const useFlujoDraftStore = defineStore('flujoDraft', () => {
   );
 
   /** Si el cursor esta sobre el paso sintetico de contingencias. */
-  const isAlertStep = computed<boolean>(
-    () => alertStepIndex.value !== -1 && activeStep.value === alertStepIndex.value,
+  const isContingencyStep = computed<boolean>(
+    () =>
+      activeStep.value >= pipelineTopology.value.length &&
+      activeStep.value < configurableStepCount.value,
   );
 
   /**
@@ -219,10 +231,14 @@ export const useFlujoDraftStore = defineStore('flujoDraft', () => {
    * ensamblar un `pipeline_schema` con un nodo sin configurar.
    */
   const isActiveStepValid = computed<boolean>(() => {
-    // El paso de contingencias no esta en la topologia: su validez es la del
-    // nodo de alerta compartido, que es lo unico que se configura ahi.
-    if (isAlertStep.value) {
-      return useSmtpAlertStore(SHARED_ALERT_NODE_ID).isConfigValid;
+    // Los pasos de contingencia no estan en la topologia: su validez es la del
+    // store del satelite que cada uno configura.
+    if (isContingencyStep.value) {
+      const step = contingencySteps.value[activeStep.value - pipelineTopology.value.length];
+
+      return step === undefined
+        ? false
+        : (resolveNodeStore(step.nodeType, step.nodeId)?.isConfigValid ?? false);
     }
 
     const step = activeStepDefinition.value;
@@ -616,71 +632,107 @@ export const useFlujoDraftStore = defineStore('flujoDraft', () => {
    * si no hay ninguno la accion simplemente no esta disponible.
    */
   const resolveBranchTarget = (action: ErrorBranchAction): string | null => {
-    const { targetNodeType, canProvision } = ERROR_BRANCH_ACTIONS[action];
+    const { targetNodeType, canProvision, provisionedNodeId } = ERROR_BRANCH_ACTIONS[action];
     const existing = findStepByType(targetNodeType);
 
     if (existing !== null) return existing.nodeId;
 
-    return canProvision ? SHARED_ALERT_NODE_ID : null;
+    // Cada accion trae su propio satelite: desde que son dos, devolver siempre
+    // el de alerta mandaba la ruta de vision al nodo equivocado.
+    return canProvision ? provisionedNodeId : null;
   };
 
-  /** Si alguna rama obliga a crear el nodo de alerta compartido. */
-  const needsProvisionedAlertNode = computed<boolean>(() =>
-    Object.values(errorBranches.value).some(
-      (branch) => branch.action === 'ALERTA_SMTP' && findStepByType(NodeType.DESTINO_SMTP) === null,
-    ),
-  );
-
   /**
-   * Si el nodo de alerta provisionado esta a medio configurar.
+   * Acciones declaradas que obligan a provisionar su satelite.
    *
-   * No es un adorno del cliente: `collectIncompleteParams` del backend recorre el
-   * mapa ENTERO al activar el flujo, satelites incluidos, precisamente porque
-   * «activar un flujo con una rama de error a medio configurar es el fallo que se
-   * descubriria de madrugada». Sin esta comprobacion el asistente dejaria guardar
-   * un flujo que despues no se puede encender, y el operador tendria que adivinar
-   * por que.
+   * Una accion cuyo destino YA esta en la topologia no aporta paso: el nodo
+   * tiene el suyo propio y anadir otro lo duplicaria.
    */
-  const hasIncompleteAlertNode = computed<boolean>(
-    () => needsProvisionedAlertNode.value && !useSmtpAlertStore(SHARED_ALERT_NODE_ID).isConfigValid,
-  );
+  const provisionedBranchActions = computed<ErrorBranchAction[]>(() => {
+    const declared = new Set(Object.values(errorBranches.value).map((branch) => branch.action));
+
+    return (Object.keys(ERROR_BRANCH_ACTIONS) as ErrorBranchAction[]).filter(
+      (action) =>
+        declared.has(action) &&
+        ERROR_BRANCH_ACTIONS[action].provisionedNodeId !== null &&
+        findStepByType(ERROR_BRANCH_ACTIONS[action].targetNodeType) === null,
+    );
+  });
 
   /**
-   * Si el asistente muestra el paso final de contingencias.
+   * Pasos sinteticos de los satelites provisionados, en orden estable.
    *
-   * Solo cuando hay rama SMTP y el flujo NO trae ya un `DESTINO_SMTP` propio: en
-   * ese caso el nodo de alerta ya tiene su paso en la topologia y anadir otro lo
-   * duplicaria.
-   */
-  const hasAlertContingencyStep = computed<boolean>(() => needsProvisionedAlertNode.value);
-
-  /**
-   * Paso sintetico de contingencias, o `null` si no aplica.
-   *
-   * Se declara como un `WizardStep` completo aunque no sea un nodo de la
+   * Se declaran como `WizardStep` completos aunque no sean nodos de la
    * topologia para que los consumidores —el panel de bloqueos de la revision,
-   * que salta al paso culpable— no tengan que distinguirlo del resto. El mismo
+   * que salta al paso culpable— no tengan que distinguirlos del resto. El mismo
    * truco que usa el paso de revision, que tampoco corresponde a ningun nodo.
+   *
+   * Son una LISTA y ya no un caso especial: desde que la transcripcion tiene
+   * tipo propio hay dos satelites posibles, y un flujo puede declarar los dos.
    */
-  const alertContingencyStep = computed<WizardStep | null>(() =>
-    hasAlertContingencyStep.value
-      ? {
-          nodeId: SHARED_ALERT_NODE_ID,
-          nodeType: NodeType.DESTINO_SMTP,
-          outputNamespace: DEFAULT_OUTPUT_NAMESPACE_BY_NODE_TYPE[NodeType.DESTINO_SMTP],
-          name: ALERT_STEP_NAME,
-        }
-      : null,
+  const contingencySteps = computed<WizardStep[]>(() =>
+    provisionedBranchActions.value.flatMap<WizardStep>((action) => {
+      const { provisionedNodeId, targetNodeType } = ERROR_BRANCH_ACTIONS[action];
+
+      if (provisionedNodeId === null) return [];
+
+      return [
+        {
+          nodeId: provisionedNodeId,
+          nodeType: targetNodeType,
+          outputNamespace: DEFAULT_OUTPUT_NAMESPACE_BY_NODE_TYPE[targetNodeType],
+          name: CONTINGENCY_STEP_NAMES[action],
+        },
+      ];
+    }),
   );
 
-  /** Indice del paso de contingencias, o `-1` si no se muestra. */
-  const alertStepIndex = computed<number>(() =>
-    hasAlertContingencyStep.value ? pipelineTopology.value.length : -1,
+  /**
+   * A donde devuelve el flujo un satelite que reincorpora.
+   *
+   * Es el `nextStep` del paso que lo invoca, y sale del ORDEN de la topologia:
+   * el paso que fallo ya no se reejecuta, asi que el rescate continua por donde
+   * el iba. `null` si lo invoca el ultimo paso —no hay nada despues— o si
+   * ninguna ruta lo nombra.
+   */
+  const resolveRejoinTarget = (satelliteNodeId: string): string | null => {
+    const callerIndex = pipelineTopology.value.findIndex(
+      (step) =>
+        resolveBranchTarget(getNodeErrorBranch(step.nodeId)?.action ?? 'ALERTA_SMTP') ===
+          satelliteNodeId && getNodeErrorBranch(step.nodeId) !== null,
+    );
+
+    return callerIndex === -1 ? null : (pipelineTopology.value[callerIndex + 1]?.nodeId ?? null);
+  };
+
+  /** Indice absoluto del paso de un satelite, o `-1` si no se muestra. */
+  const contingencyStepIndex = (nodeId: string): number => {
+    const offset = contingencySteps.value.findIndex((step) => step.nodeId === nodeId);
+
+    return offset === -1 ? -1 : pipelineTopology.value.length + offset;
+  };
+
+  /** Indice del paso de alerta, o `-1`. Lo consulta la tarjeta de la rama. */
+  const alertStepIndex = computed<number>(() => contingencyStepIndex(SHARED_ALERT_NODE_ID));
+
+  /**
+   * Satelites a medio configurar.
+   *
+   * No es un adorno del cliente: `collectIncompleteParams` del backend recorre
+   * el mapa ENTERO al activar el flujo, satelites incluidos, precisamente porque
+   * «activar un flujo con una rama de error a medio configurar es el fallo que
+   * se descubriria de madrugada». Sin esto el asistente dejaria guardar un flujo
+   * que despues no se puede encender, y el operador tendria que adivinar por que.
+   */
+  const incompleteContingencySteps = computed<WizardStep[]>(() =>
+    contingencySteps.value.filter(
+      (step) => !(resolveNodeStore(step.nodeType, step.nodeId)?.isConfigValid ?? false),
+    ),
   );
 
   /** Numero total de pasos CONFIGURABLES, sin contar la revision final. */
   const configurableStepCount = computed<number>(
-    () => pipelineTopology.value.length + (hasAlertContingencyStep.value ? 1 : 0),
+    () => pipelineTopology.value.length + contingencySteps.value.length,
   );
 
   const invalidSteps = computed<InvalidStep[]>(() => {
@@ -692,17 +744,15 @@ export const useFlujoDraftStore = defineStore('flujoDraft', () => {
       return [{ step, index, reason, message: STEP_BLOCK_MESSAGES[reason](step) }];
     });
 
-    // El nodo de alerta se senala en SU paso y no en cada paso que lo invoca:
-    // desde que el formulario vive en un solo sitio, repartir el bloqueo entre
-    // los nodos fuente mandaria al operador a corregirlo donde ya no esta.
-    const alertStep = alertContingencyStep.value;
-
-    if (alertStep !== null && hasIncompleteAlertNode.value) {
+    // Cada satelite se senala en SU paso y no en cada paso que lo invoca: desde
+    // que el formulario vive en un solo sitio, repartir el bloqueo entre los
+    // nodos fuente mandaria al operador a corregirlo donde ya no esta.
+    for (const step of incompleteContingencySteps.value) {
       steps.push({
-        step: alertStep,
-        index: alertStepIndex.value,
+        step,
+        index: contingencyStepIndex(step.nodeId),
         reason: 'ALERTA_INCOMPLETA',
-        message: STEP_BLOCK_MESSAGES.ALERTA_INCOMPLETA(alertStep),
+        message: STEP_BLOCK_MESSAGES.ALERTA_INCOMPLETA(step),
       });
     }
 
@@ -863,16 +913,23 @@ export const useFlujoDraftStore = defineStore('flujoDraft', () => {
       onErrorStep: buildErrorRoute(step.nodeId),
     }));
 
-    const satellites: AssemblerStep[] = needsProvisionedAlertNode.value
-      ? [
-          {
-            nodeId: SHARED_ALERT_NODE_ID,
-            nodeType: NodeType.DESTINO_SMTP,
-            outputNamespace: DEFAULT_OUTPUT_NAMESPACE_BY_NODE_TYPE[NodeType.DESTINO_SMTP],
-            params: useSmtpAlertStore(SHARED_ALERT_NODE_ID).toNodeParams(),
-          },
-        ]
-      : [];
+    // Un satelite por accion provisionada. El `nextStep` distingue las dos
+    // clases: la alerta es terminal, y la transcripcion devuelve el flujo al
+    // curso que llevaba el paso que la invoca.
+    const satellites: AssemblerStep[] = contingencySteps.value.map((step) => {
+      const action = provisionedBranchActions.value.find(
+        (candidate) => ERROR_BRANCH_ACTIONS[candidate].provisionedNodeId === step.nodeId,
+      );
+      const rejoins = action !== undefined && ERROR_BRANCH_ACTIONS[action].rejoinsFlow;
+
+      return {
+        nodeId: step.nodeId,
+        nodeType: step.nodeType,
+        outputNamespace: step.outputNamespace,
+        params: resolveNodeStore(step.nodeType, step.nodeId)?.toNodeParams() ?? {},
+        nextStep: rejoins ? resolveRejoinTarget(step.nodeId) : null,
+      };
+    });
 
     return buildPipelineSchema(
       steps,
@@ -1012,13 +1069,13 @@ export const useFlujoDraftStore = defineStore('flujoDraft', () => {
     hasUnsupportedNodes,
     stepWarnings,
     errorBranches,
-    needsProvisionedAlertNode,
-    hasIncompleteAlertNode,
-    hasAlertContingencyStep,
-    alertContingencyStep,
+    provisionedBranchActions,
+    contingencySteps,
+    contingencyStepIndex,
+    incompleteContingencySteps,
     alertStepIndex,
     configurableStepCount,
-    isAlertStep,
+    isContingencyStep,
     resolveBranchTarget,
     getNodeErrorBranch,
     hasContextualRecoveryBranch,
