@@ -84,6 +84,8 @@ const openEditDialog = async (prompt: AiPromptTemplate): Promise<void> => {
   }
 };
 
+// El argumento del evento se ignora a proposito: aqui el gestor ya tiene el
+// listado a la vista y no necesita seleccionar nada.
 const onPromptSaved = (): void => {
   $q.notify({ type: 'positive', message: 'Prompt guardado correctamente' });
 };

@@ -106,6 +106,24 @@ export interface NodeConfigStore {
   readonly setAvailableUpstreamContext?: (context: UpstreamNamespace[]) => void;
 
   /**
+   * Aplica los `params` base que la PLANTILLA sembró para este nodo.
+   *
+   * Canal SEPARADO de `hydrateFromNode`, y tiene que serlo: aquel reconstruye un
+   * nodo ya guardado y da por probada la conexion (`connectionVerified = true`),
+   * lo que sobre una plantilla seria mentira —nadie ha probado ese buzon
+   * todavia—. Aqui solo llegan los valores estructurales que la topologia impone.
+   *
+   * Lo que la plantilla fija, ademas, queda BLOQUEADO en la interfaz: son
+   * decisiones del diseñador del flujo, no del operador que lo instancia. El
+   * caso vivo es `includeAttachments`, que la ruta de contingencia de vision IA
+   * exige encendido: dejarlo editable aqui permitiria desactivar desde el
+   * asistente justo lo que hace que esa ruta sirva para algo.
+   *
+   * OPCIONAL, como sus hermanos: un tipo sin `params` base no lo implementa.
+   */
+  readonly applyTemplateParams?: (params: Record<string, unknown>) => void;
+
+  /**
    * Devuelve el nodo a su configuracion inicial.
    *
    * OBLIGATORIO en el contrato, y no opcional como el anterior: el agregador lo

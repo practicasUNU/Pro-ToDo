@@ -3,7 +3,7 @@ import { computed } from 'vue';
 
 import { useSmtpAlertStore } from '@stores/nodes/smtp-alert.store';
 
-import { isEmailAddress } from '@/utils/email-address';
+import { isEmailAddress, parseEmailList } from '@/utils/email-address';
 
 import { NODE_TYPE_LABELS, NodeType } from '@/types/pipeline';
 import {
@@ -54,12 +54,44 @@ const invalidSummary = computed<string>(() => store.invalidRecipients.join(', ')
  * pantalla lo sigue mostrando. Con chips es aun mas facil de provocar, porque
  * nada indica que al texto le falte convertirse en uno.
  */
-const commitTypedAddress = (field: 'to' | 'cc', value: string): void => {
-  const typed = value.trim();
+const commitTypedAddress = (value: string): void => {
+  addRecipients(parseEmailList(value));
+};
 
-  if (typed === '' || store.config[field].includes(typed)) return;
+/**
+ * Anade direcciones ya validadas, sin repetir y respetando el tope.
+ *
+ * Centraliza las dos vias de entrada —lo tecleado y lo pegado— para que no
+ * puedan divergir: si solo una saneara, el operador tendria una forma de colar
+ * basura y ninguna pista de cual de las dos era.
+ */
+const addRecipients = (candidates: readonly string[]): void => {
+  const merged = [...new Set([...store.config.to, ...candidates])].slice(0, MAX_ALERT_RECIPIENTS);
 
-  store.updateConfig({ [field]: [...store.config[field], typed] });
+  if (merged.length === store.config.to.length) return;
+
+  store.updateConfig({ to: merged });
+};
+
+/**
+ * Intercepta el pegado de una lista de correos.
+ *
+ * Sin esto, pegar "a@x.com, b@y.com" registraba la cadena ENTERA como una unica
+ * direccion: `new-value-mode="add-unique"` no parte por separadores, y el chip
+ * resultante solo se descubria invalido al guardar, con un 400 del backend
+ * sobre el esquema completo.
+ */
+const onPasteRecipients = (event: ClipboardEvent): void => {
+  const raw = event.clipboardData?.getData('text') ?? '';
+  const parsed = parseEmailList(raw);
+
+  // Sin direcciones reconocibles se deja pasar el pegado tal cual: puede ser un
+  // correo unico a medio escribir que el operador va a completar a mano, y
+  // tragarselo en silencio seria peor que mostrarlo.
+  if (parsed.length === 0) return;
+
+  event.preventDefault();
+  addRecipients(parsed);
 };
 </script>
 
@@ -105,29 +137,8 @@ const commitTypedAddress = (field: 'to' | 'cc', value: string): void => {
             (val: string[]) => val.every(isEmailAddress) || RECIPIENTS_RULE,
           ]"
           @update:model-value="store.updateConfig({ to: [...($event as string[])] })"
-          @input-value="commitTypedAddress('to', $event)"
-        />
-      </div>
-
-      <div class="col-12 col-md-6" data-test="cc-field">
-        <label class="pd-label" for="smtp-alert-cc">En copia</label>
-        <q-select
-          id="smtp-alert-cc"
-          :model-value="store.config.cc"
-          outlined
-          dense
-          multiple
-          use-input
-          use-chips
-          hide-dropdown-icon
-          new-value-mode="add-unique"
-          input-debounce="0"
-          class="q-mt-xs"
-          :max-values="MAX_ALERT_RECIPIENTS"
-          hint="Opcional. Mismo formato que los destinatarios."
-          :rules="[(val: string[]) => val.every(isEmailAddress) || RECIPIENTS_RULE]"
-          @update:model-value="store.updateConfig({ cc: [...($event as string[])] })"
-          @input-value="commitTypedAddress('cc', $event)"
+          @input-value="commitTypedAddress($event)"
+          @paste="onPasteRecipients"
         />
       </div>
     </div>

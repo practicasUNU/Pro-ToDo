@@ -39,7 +39,6 @@ describe('useSmtpAlertStore · configuracion del nodo DESTINO_SMTP', () => {
       // 3. Assert 🎯: sin esto el boton Siguiente del asistente se habilitaria
       //    sobre un nodo que no avisa a nadie.
       expect(store.config.to).toEqual([]);
-      expect(store.config.cc).toEqual([]);
       expect(store.config.customMessage).toBe('');
       expect(store.isConfigValid).toBe(false);
     });
@@ -84,12 +83,12 @@ describe('useSmtpAlertStore · configuracion del nodo DESTINO_SMTP', () => {
       expect(store.invalidRecipients).toEqual(['esto-no-es-un-correo']);
     });
 
-    it('2.4 deberia invalidar tambien por una copia mal formada', () => {
-      // 1. Arrange 📐: `cc` es opcional, pero si viene tiene que ser valido.
+    it('2.4 deberia invalidar por una sola direccion mal formada', () => {
+      // 1. Arrange 📐: basta una para que el aviso no llegue a alguien.
       const store = useSmtpAlertStore(nextNodeId());
 
       // 2. Act ⚙️
-      store.updateConfig({ to: [RECIPIENT], cc: ['jefe@'] });
+      store.updateConfig({ to: [RECIPIENT, 'jefe@'] });
 
       // 3. Assert 🎯
       expect(store.isConfigValid).toBe(false);
@@ -102,7 +101,7 @@ describe('useSmtpAlertStore · configuracion del nodo DESTINO_SMTP', () => {
       const store = useSmtpAlertStore(nextNodeId());
 
       // 2. Act ⚙️
-      store.updateConfig({ to: [RECIPIENT, 'roto'], cc: ['tambien@roto'] });
+      store.updateConfig({ to: [RECIPIENT, 'roto', 'tambien@roto'] });
 
       // 3. Assert 🎯
       expect(store.invalidRecipients).toEqual(['roto', 'tambien@roto']);
@@ -183,7 +182,6 @@ describe('useSmtpAlertStore · configuracion del nodo DESTINO_SMTP', () => {
       const store = useSmtpAlertStore(nextNodeId());
       const params = {
         to: [RECIPIENT],
-        cc: ['jefatura@unuware.com'],
         subject: 'Fallo en {{error_context.failed_node_id}}',
         customMessage: 'Llamar al movil de guardia.',
       };
@@ -226,7 +224,6 @@ describe('useSmtpAlertStore · configuracion del nodo DESTINO_SMTP', () => {
 
       // 3. Assert 🎯
       expect(store.config.to).toEqual([RECIPIENT]);
-      expect(store.config.cc).toEqual([]);
       expect(store.config.subject).toBe('');
     });
 

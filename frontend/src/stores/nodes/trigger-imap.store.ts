@@ -135,6 +135,22 @@ const triggerImapSetup = () => {
   const connectionVerified = ref(false);
 
   /**
+   * Campos cuyo valor impone la PLANTILLA y el operador no puede cambiar.
+   *
+   * Un `Set` y no un booleano por campo: la lista crecera conforme mas rutas de
+   * contingencia exijan parametros del disparador, y una bandera por cada uno
+   * obligaria a tocar el store —y su contrato— en cada alta.
+   *
+   * Vive en el store y no en el componente porque es un hecho de la TOPOLOGIA,
+   * no un estado de la vista: sobrevive a que el operador navegue a otro paso
+   * del asistente y vuelva.
+   */
+  const templateLockedFields = ref<ReadonlySet<string>>(new Set());
+
+  /** Si la plantilla fija este campo. Lo consulta la vista para deshabilitarlo. */
+  const isFieldLockedByTemplate = (field: string): boolean => templateLockedFields.value.has(field);
+
+  /**
    * El operador declara a sabiendas que configura sin comprobar el buzon.
    *
    * Es la valvula de escape del Poka-Yoke, y NO es lo mismo que
@@ -321,6 +337,24 @@ const triggerImapSetup = () => {
    * estan vacios, asi que sin esto el `undefined` del JSON llegaria al `<q-input>`
    * y el campo quedaria descontrolado.
    */
+  /**
+   * Aplica los `params` base que la plantilla sembro, y los deja bloqueados.
+   *
+   * Solo `includeAttachments`, y solo cuando la plantilla lo pide ENCENDIDO: es
+   * el unico valor del disparador del que hoy depende otra pieza del grafo —la
+   * ruta de contingencia de vision IA lee `raw_email.attachments`—. Un `false`
+   * de la plantilla no bloquea nada: no sostiene ninguna ruta, y bloquearlo solo
+   * le quitaria al operador una decision que es suya.
+   *
+   * NO toca `connectionVerified`: la plantilla no prueba ninguna conexion.
+   */
+  const applyTemplateParams = (params: Record<string, unknown>): void => {
+    if (params.includeAttachments !== true) return;
+
+    config.value = { ...config.value, includeAttachments: true };
+    templateLockedFields.value = new Set([...templateLockedFields.value, 'includeAttachments']);
+  };
+
   const hydrateFromNode = (node: HydratableNode): void => {
     const params = node.params;
 
@@ -347,6 +381,10 @@ const triggerImapSetup = () => {
   };
 
   const resetConfig = (): void => {
+    // El bloqueo pertenece a la plantilla que se acaba de abandonar: conservarlo
+    // dejaria un campo deshabilitado en un flujo que ya no lo exige.
+    templateLockedFields.value = new Set();
+
     config.value = buildInitialConfig();
     connectionVerified.value = false;
     // El reconocimiento SI se limpia aqui, a diferencia de en `patchConfig`:
@@ -369,6 +407,8 @@ const triggerImapSetup = () => {
     patchConfig,
     patchFilters,
     hydrateFromNode,
+    applyTemplateParams,
+    isFieldLockedByTemplate,
     testConnection,
     resetConfig,
   };

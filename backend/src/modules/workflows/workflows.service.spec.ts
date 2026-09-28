@@ -283,7 +283,10 @@ describe('WorkflowsService (despacho manual de pruebas, Camino B)', () => {
       expect(engine.executeWorkflow).toHaveBeenCalledWith(
         EXECUTION_ID,
         buildSchema(),
-        { skipNodeTypes: [NodeType.TRIGGER_IMAP, NodeType.TRIGGER_CRON] },
+        {
+          skipNodeTypes: [NodeType.TRIGGER_IMAP, NodeType.TRIGGER_CRON],
+          flowName: expect.any(String),
+        },
       );
     });
 
@@ -358,10 +361,12 @@ describe('WorkflowsService (despacho manual de pruebas, Camino B)', () => {
       await service.runAutomaticWorkflow(WORKFLOW_ID);
 
       // 3. Assert: un disparo automatico SI debe conectarse al buzon; heredar
-      // aqui `skipNodeTypes` dejaria el flujo real sin datos de entrada.
+      // aqui `skipNodeTypes` dejaria el flujo real sin datos de entrada. El
+      // nombre del flujo SI viaja: lo interpola la plantilla de alerta.
       expect(engine.executeWorkflow).toHaveBeenCalledWith(
         EXECUTION_ID,
         buildSchema(),
+        { flowName: expect.any(String) },
       );
       expect(engine.createExecution).toHaveBeenCalledWith(WORKFLOW_ID, {});
     });
@@ -438,6 +443,45 @@ describe('WorkflowsService (despacho manual de pruebas, Camino B)', () => {
       // 3. Assert: la ausencia de politica debe comportarse como siempre.
       expect(repository.save).not.toHaveBeenCalled();
       expect(coordinator.stopPollingForFlow).not.toHaveBeenCalled();
+    });
+
+    it('2c.6 NO deberia desactivar una ejecucion que se desvio por contingencia', async () => {
+      // 1. Arrange: una recuperacion funcional cierra EXITOSO con razon —el
+      //    trabajo se hizo—, pero esta politica describe un flujo que YA
+      //    funciona sin incidencias, y una ejecucion que necesito un desvio no
+      //    lo demuestra.
+      const { service, validator, engine, repository, coordinator } =
+        buildHarness();
+      validator.validateSchema.mockResolvedValue(schemaWithPolicy());
+      engine.executeWorkflow.mockResolvedValue(
+        buildExecution({ tookContingency: true }),
+      );
+
+      // 2. Act
+      await service.runAutomaticWorkflow(WORKFLOW_ID);
+
+      // 3. Assert: apagarlo aqui enterraria el fallo junto con el flujo, y
+      //    nadie volveria a mirar ninguno de los dos.
+      expect(repository.save).not.toHaveBeenCalled();
+      expect(coordinator.stopPollingForFlow).not.toHaveBeenCalled();
+    });
+
+    it('2c.7 deberia pasar el nombre del flujo al motor', async () => {
+      // 1. Arrange: el asunto por defecto de la alerta institucional interpola
+      //    `{{trigger.flow_name}}`, y el motor no puede leerlo de la entidad
+      //    `Workflow` —vive en `@modules` y el motor en `@core`—.
+      const { service, validator, engine } = buildHarness();
+      validator.validateSchema.mockResolvedValue(schemaWithPolicy());
+
+      // 2. Act
+      await service.runAutomaticWorkflow(WORKFLOW_ID);
+
+      // 3. Assert
+      expect(engine.executeWorkflow).toHaveBeenCalledWith(
+        expect.any(String),
+        expect.anything(),
+        expect.objectContaining({ flowName: expect.any(String) }),
+      );
     });
 
     it('2c.5 NO deberia desactivar desde el despacho manual de pruebas', async () => {

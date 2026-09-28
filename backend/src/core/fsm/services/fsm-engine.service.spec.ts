@@ -2851,4 +2851,385 @@ describe('FsmEngineService (PROT-09)', () => {
       expect(execA).toHaveBeenCalledTimes(1);
     });
   });
+
+  describe('32. Desenlace de una ejecucion desviada por onErrorStep', () => {
+    /**
+     * Grafo con una alerta TERMINAL colgando de la ruta de error de `nodo_b`.
+     *
+     * `nodo_alerta` es `DESTINO_SMTP` con `nextStep: null`: es el satelite que
+     * el editor de plantillas provisiona, alcanzable SOLO por la ruta de error.
+     */
+    const buildSchemaWithAlert = (): PipelineSchemaDto => {
+      const schema = buildLinearSchema();
+
+      schema.nodes.nodo_b.onErrorStep = 'nodo_alerta';
+      schema.nodes.nodo_alerta = {
+        nodeId: 'nodo_alerta',
+        nodeType: NodeType.DESTINO_SMTP,
+        outputNamespace: 'smtp_result',
+        nextStep: null,
+        onErrorStep: null,
+        params: {},
+      };
+
+      return schema;
+    };
+
+    /** Registra las tres estrategias del grafo con alerta. */
+    const registerAlertStrategies = (
+      executeB: jest.Mock,
+      executeAlert: jest.Mock,
+    ): void => {
+      factory.registerStrategy(
+        buildStrategy(
+          NodeType.TRIGGER_IMAP,
+          jest.fn().mockResolvedValue({ success: true, data: { ok: true } }),
+        ),
+      );
+      factory.registerStrategy(buildStrategy(NodeType.PROCESADOR_IA, executeB));
+      factory.registerStrategy(
+        buildStrategy(NodeType.DESTINO_SMTP, executeAlert),
+      );
+    };
+
+    it('32.1 deberia PAUSAR en el nodo que fallo si el error era GRAVE', async () => {
+      // 1. Arrange 📐: es el caso que antes cerraba EXITOSO. La rama muere en
+      //    una alerta: nadie recupero nada, solo se aviso, asi que la ejecucion
+      //    fallo. GRAVE es el unico nivel que merece un reintento (mismo
+      //    criterio que `canRetry`), y PAUSADO es el estado que lo conserva.
+      const execution = buildExecution();
+      const { repo, update } = buildRepository(execution);
+      const executeAlert = jest
+        .fn()
+        .mockResolvedValue({ success: true, data: { enviado: true } });
+
+      registerAlertStrategies(
+        jest.fn().mockResolvedValue(failure('GRAVE')),
+        executeAlert,
+      );
+
+      // 2. Act ⚙️
+      const result = await buildEngine(repo).executeWorkflow(
+        EXECUTION_ID,
+        buildSchemaWithAlert(),
+      );
+
+      // 3. Assert 🎯: el cursor queda en `nodo_b` y NO en la alerta. El
+      //    reintento manual de CU-09 tiene que repetir el paso que se rompio,
+      //    no volver a mandar el correo que ya se mando.
+      expect(executeAlert).toHaveBeenCalledTimes(1);
+      expect(result.currentState).toBe(ExecutionState.PAUSADO);
+      expect(lastPatch(update).activeCursor).toBe('nodo_b');
+    });
+
+    it('32.2 deberia FALLAR sin cursor si el error era URGENTE', async () => {
+      // 1. Arrange 📐: irrecuperable. Ofrecer un reintento sobre el seria
+      //    prometer algo que no puede salir bien.
+      const execution = buildExecution();
+      const { repo, update } = buildRepository(execution);
+
+      registerAlertStrategies(
+        jest.fn().mockResolvedValue(failure('URGENTE')),
+        jest.fn().mockResolvedValue({ success: true, data: {} }),
+      );
+
+      // 2. Act ⚙️
+      const result = await buildEngine(repo).executeWorkflow(
+        EXECUTION_ID,
+        buildSchemaWithAlert(),
+      );
+
+      // 3. Assert 🎯
+      expect(result.currentState).toBe(ExecutionState.FALLIDO);
+      expect(lastPatch(update).activeCursor).toBeNull();
+    });
+
+    it('32.3 deberia FALLAR sin cursor si el error era LEVE', async () => {
+      // 1. Arrange 📐: un LEVE no justifica insistir. La ruta declarada gana
+      //    sobre el cierre por severidad (se recorre la alerta), pero el
+      //    desenlace sigue siendo un fallo sin reintento que ofrecer.
+      const execution = buildExecution();
+      const { repo, update } = buildRepository(execution);
+
+      registerAlertStrategies(
+        jest.fn().mockResolvedValue(failure('LEVE')),
+        jest.fn().mockResolvedValue({ success: true, data: {} }),
+      );
+
+      // 2. Act ⚙️
+      const result = await buildEngine(repo).executeWorkflow(
+        EXECUTION_ID,
+        buildSchemaWithAlert(),
+      );
+
+      // 3. Assert 🎯
+      expect(result.currentState).toBe(ExecutionState.FALLIDO);
+      expect(lastPatch(update).activeCursor).toBeNull();
+    });
+
+    it('32.4 deberia cerrar EXITOSO una recuperacion FUNCIONAL', async () => {
+      // 1. Arrange 📐: la rama NO muere en una alerta —reincorpora el flujo y
+      //    llega al terminal—, que es el caso del fallback de vision. El trabajo
+      //    se hizo, asi que marcarlo fallido pediria intervencion humana sobre
+      //    un flujo que publico correctamente.
+      const execution = buildExecution();
+      const { repo, update } = buildRepository(execution);
+      const schema = buildLinearSchema();
+
+      schema.nodes.nodo_a.onErrorStep = 'nodo_b';
+
+      factory.registerStrategy(
+        buildStrategy(
+          NodeType.TRIGGER_IMAP,
+          jest.fn().mockResolvedValue(failure('GRAVE')),
+        ),
+      );
+      factory.registerStrategy(
+        buildStrategy(
+          NodeType.PROCESADOR_IA,
+          jest.fn().mockResolvedValue({ success: true, data: { via: 'ia' } }),
+        ),
+      );
+      factory.registerStrategy(
+        buildStrategy(
+          NodeType.DESTINO_HTTP,
+          jest.fn().mockResolvedValue({ success: true, data: { pub: true } }),
+        ),
+      );
+
+      // 2. Act ⚙️
+      const result = await buildEngine(repo).executeWorkflow(
+        EXECUTION_ID,
+        schema,
+      );
+
+      // 3. Assert 🎯
+      expect(result.currentState).toBe(ExecutionState.EXITOSO);
+      expect(lastPatch(update).activeCursor).toBeNull();
+    });
+
+    it('32.5 deberia decidir por la severidad del ULTIMO desvio', async () => {
+      // 1. Arrange 📐: dos desvios encadenados. `nodo_a` falla URGENTE y deriva
+      //    a `nodo_b`; `nodo_b` falla GRAVE y deriva a la alerta. Manda el
+      //    GRAVE: es el fallo que dejo la ejecucion parada y el que corresponde
+      //    al cursor que se preserva. Un URGENTE del que el flujo ya se
+      //    recupero no debe condenar la ejecucion a FALLIDO.
+      const execution = buildExecution();
+      const { repo, update } = buildRepository(execution);
+      const schema = buildSchemaWithAlert();
+
+      schema.nodes.nodo_a.onErrorStep = 'nodo_b';
+
+      factory.registerStrategy(
+        buildStrategy(
+          NodeType.TRIGGER_IMAP,
+          jest.fn().mockResolvedValue(failure('URGENTE')),
+        ),
+      );
+      factory.registerStrategy(
+        buildStrategy(
+          NodeType.PROCESADOR_IA,
+          jest.fn().mockResolvedValue(failure('GRAVE')),
+        ),
+      );
+      factory.registerStrategy(
+        buildStrategy(
+          NodeType.DESTINO_SMTP,
+          jest.fn().mockResolvedValue({ success: true, data: {} }),
+        ),
+      );
+
+      // 2. Act ⚙️
+      const result = await buildEngine(repo).executeWorkflow(
+        EXECUTION_ID,
+        schema,
+      );
+
+      // 3. Assert 🎯
+      expect(result.currentState).toBe(ExecutionState.PAUSADO);
+      expect(lastPatch(update).activeCursor).toBe('nodo_b');
+    });
+
+    it('32.6 deberia conservar los namespaces previos al pausar', async () => {
+      // 1. Arrange 📐: la inmutabilidad del `StatePayloadContext` es lo que hace
+      //    util el reintento. Si pausar perdiera lo que los pasos anteriores ya
+      //    produjeron, CU-09 reanudaria sobre un contexto mutilado.
+      const execution = buildExecution();
+      const { repo } = buildRepository(execution);
+
+      registerAlertStrategies(
+        jest.fn().mockResolvedValue(failure('GRAVE')),
+        jest.fn().mockResolvedValue({ success: true, data: { enviado: true } }),
+      );
+
+      // 2. Act ⚙️
+      const result = await buildEngine(repo).executeWorkflow(
+        EXECUTION_ID,
+        buildSchemaWithAlert(),
+      );
+
+      // 3. Assert 🎯: el paso previo y la alerta conviven con el contexto del
+      //    fallo, sin que ninguno haya pisado a otro.
+      expect(result.currentState).toBe(ExecutionState.PAUSADO);
+      expect(result.contextPayload.salida_a).toEqual({ ok: true });
+      expect(result.contextPayload.smtp_result).toEqual({ enviado: true });
+      expect(result.contextPayload.error_context).toBeDefined();
+    });
+
+    it('32.7 deberia marcar la contingencia para el despachador', async () => {
+      // 1. Arrange 📐: marca TRANSITORIA que lee `applyStopOnFirstSuccess`. Sin
+      //    ella, una recuperacion funcional cierra EXITOSO y apagaria el flujo,
+      //    enterrando el fallo junto con el.
+      const execution = buildExecution();
+      const { repo } = buildRepository(execution);
+      const schema = buildLinearSchema();
+
+      schema.nodes.nodo_a.onErrorStep = 'nodo_b';
+
+      factory.registerStrategy(
+        buildStrategy(
+          NodeType.TRIGGER_IMAP,
+          jest.fn().mockResolvedValue(failure('GRAVE')),
+        ),
+      );
+      factory.registerStrategy(
+        buildStrategy(
+          NodeType.PROCESADOR_IA,
+          jest.fn().mockResolvedValue({ success: true, data: {} }),
+        ),
+      );
+      factory.registerStrategy(
+        buildStrategy(
+          NodeType.DESTINO_HTTP,
+          jest.fn().mockResolvedValue({ success: true, data: {} }),
+        ),
+      );
+
+      // 2. Act ⚙️
+      const result = await buildEngine(repo).executeWorkflow(
+        EXECUTION_ID,
+        schema,
+      );
+
+      // 3. Assert 🎯
+      expect(result.currentState).toBe(ExecutionState.EXITOSO);
+      expect(result.tookContingency).toBe(true);
+    });
+
+    it('32.8 NO deberia marcarla en un recorrido nominal', async () => {
+      // 1. Arrange 📐: la guarda del despachador solo debe morder cuando de
+      //    verdad hubo desvio; si no, ningun flujo con la politica se apagaria.
+      const execution = buildExecution();
+      const { repo } = buildRepository(execution);
+
+      factory.registerStrategy(
+        buildStrategy(
+          NodeType.TRIGGER_IMAP,
+          jest.fn().mockResolvedValue({ success: true, data: {} }),
+        ),
+      );
+      factory.registerStrategy(
+        buildStrategy(
+          NodeType.PROCESADOR_IA,
+          jest.fn().mockResolvedValue({ success: true, data: {} }),
+        ),
+      );
+      factory.registerStrategy(
+        buildStrategy(
+          NodeType.DESTINO_HTTP,
+          jest.fn().mockResolvedValue({ success: true, data: {} }),
+        ),
+      );
+
+      // 2. Act ⚙️
+      const result = await buildEngine(repo).executeWorkflow(
+        EXECUTION_ID,
+        buildLinearSchema(),
+      );
+
+      // 3. Assert 🎯
+      expect(result.currentState).toBe(ExecutionState.EXITOSO);
+      expect(result.tookContingency).toBeUndefined();
+    });
+  });
+
+  describe('33. Telemetria del namespace trigger', () => {
+    it('33.1 deberia sembrar flow_name para las plantillas institucionales', async () => {
+      // 1. Arrange 📐: el asunto por defecto de la alerta interpola
+      //    `{{trigger.flow_name}}`. Sin esto se compilaba contra un namespace
+      //    que nadie escribia y el correo salia con un hueco donde va el flujo.
+      const execution = buildExecution();
+      const { repo } = buildRepository(execution);
+
+      factory.registerStrategy(
+        buildStrategy(
+          NodeType.TRIGGER_IMAP,
+          jest.fn().mockResolvedValue({ success: true, data: {} }),
+        ),
+      );
+      factory.registerStrategy(
+        buildStrategy(
+          NodeType.PROCESADOR_IA,
+          jest.fn().mockResolvedValue({ success: true, data: {} }),
+        ),
+      );
+      factory.registerStrategy(
+        buildStrategy(
+          NodeType.DESTINO_HTTP,
+          jest.fn().mockResolvedValue({ success: true, data: {} }),
+        ),
+      );
+
+      // 2. Act ⚙️
+      const result = await buildEngine(repo).executeWorkflow(
+        EXECUTION_ID,
+        buildLinearSchema(),
+        { flowName: 'Notiweb - correo a CMS' },
+      );
+
+      // 3. Assert 🎯
+      expect(result.contextPayload.trigger).toEqual({
+        flow_name: 'Notiweb - correo a CMS',
+      });
+    });
+
+    it('33.2 deberia FUSIONARLO con el payload del disparador, no pisarlo', async () => {
+      // 1. Arrange 📐: `setNamespace` fusiona, y de eso depende que el nombre
+      //    del flujo no borre lo que el disparador dejo en `trigger`.
+      const execution = buildExecution();
+      const { repo } = buildRepository(execution);
+
+      factory.registerStrategy(
+        buildStrategy(
+          NodeType.TRIGGER_IMAP,
+          jest.fn().mockResolvedValue({ success: true, data: {} }),
+        ),
+      );
+      factory.registerStrategy(
+        buildStrategy(
+          NodeType.PROCESADOR_IA,
+          jest.fn().mockResolvedValue({ success: true, data: {} }),
+        ),
+      );
+      factory.registerStrategy(
+        buildStrategy(
+          NodeType.DESTINO_HTTP,
+          jest.fn().mockResolvedValue({ success: true, data: {} }),
+        ),
+      );
+
+      // 2. Act ⚙️
+      const result = await buildEngine(repo).executeWorkflow(
+        EXECUTION_ID,
+        buildLinearSchema(),
+        { initialPayload: { asunto: 'Prueba' }, flowName: 'Notiweb' },
+      );
+
+      // 3. Assert 🎯
+      expect(result.contextPayload.trigger).toEqual({
+        asunto: 'Prueba',
+        flow_name: 'Notiweb',
+      });
+    });
+  });
 });

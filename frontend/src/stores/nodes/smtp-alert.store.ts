@@ -26,7 +26,6 @@ const asAddressList = (value: unknown): string[] =>
 /** Configuracion inicial; se reutiliza en `resetConfig`. */
 const buildInitialConfig = (): SmtpAlertNodeConfig => ({
   to: [],
-  cc: [],
   // Pre-poblado y editable. El operador ve desde el primer momento el asunto que
   // se enviara si no toca nada, y puede borrarlo: el backend tiene el mismo
   // defecto y ademas un respaldo si el marcador no resuelve.
@@ -56,7 +55,7 @@ const smtpAlertSetup = () => {
    * mal" obliga al operador a revisarlos todos a ojo. El componente los nombra.
    */
   const invalidRecipients = computed<string[]>(() =>
-    [...config.value.to, ...config.value.cc].filter((address) => !isEmailAddress(address)),
+    config.value.to.filter((address) => !isEmailAddress(address)),
   );
 
   /**
@@ -98,7 +97,6 @@ const smtpAlertSetup = () => {
 
     return {
       to: [...config.value.to],
-      ...(config.value.cc.length > 0 ? { cc: [...config.value.cc] } : {}),
       ...(subject.length > 0 ? { subject } : {}),
       ...(customMessage.length > 0 ? { customMessage } : {}),
     };
@@ -119,7 +117,6 @@ const smtpAlertSetup = () => {
 
     config.value = {
       to: asAddressList(params.to),
-      cc: asAddressList(params.cc),
       subject: asText(params.subject),
       customMessage: asText(params.customMessage),
     };

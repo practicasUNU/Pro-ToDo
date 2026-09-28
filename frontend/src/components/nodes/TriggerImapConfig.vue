@@ -34,6 +34,8 @@ const FILTER_HINT = 'Coincidencia por subcadena. Dejalo vacio para no filtrar.';
 const UNREAD_ONLY_WARNING =
   'Con el filtro desactivado el flujo puede volver a procesar un correo ya leido en cada sondeo.';
 
+const ATTACHMENTS_LOCKED_HINT = 'Activado obligatoriamente por la plantilla de flujo.';
+
 const ATTACHMENTS_HINT =
   'Los adjuntos que superen el limite se descartan sin detener el flujo. El contenido binario se libera en cuanto algun nodo extrae texto aprovechable.';
 
@@ -54,6 +56,17 @@ const SKIP_CHECK_TOOLTIP =
  * credenciales que nadie ha verificado" es justamente lo que evita que esa via
  * se convierta en la costumbre.
  */
+/**
+ * La plantilla impone la ingesta de adjuntos y el operador no puede apagarla.
+ *
+ * Lo decide el STORE y no una prop: es un hecho de la topologia del flujo —la
+ * ruta de contingencia de vision IA lee `raw_email.attachments`— y sobrevive a
+ * que el operador navegue a otro paso del asistente y vuelva.
+ */
+const isAttachmentsLocked = computed<boolean>(() =>
+  store.isFieldLockedByTemplate('includeAttachments'),
+);
+
 const connectionBadge = computed<{ label: string; classes: string } | null>(() => {
   if (store.connectionVerified) {
     return { label: 'Conexion verificada', classes: 'pd-check-badge--ok' };
@@ -292,9 +305,21 @@ const onTestConnection = async (): Promise<void> => {
           :model-value="store.config.includeAttachments"
           color="primary"
           label="Procesar adjuntos (imagenes/documentos <= 5 MB)"
+          :disable="isAttachmentsLocked"
+          data-test="include-attachments-toggle"
           @update:model-value="store.patchConfig({ includeAttachments: Boolean($event) })"
         />
-        <p v-if="store.config.includeAttachments" class="pd-subtitle q-mt-xs q-mb-none">
+        <!-- Se dice POR QUE esta bloqueado: un control apagado sin explicacion
+             se lee como una averia, y el operador buscaria el fallo donde no
+             esta. -->
+        <p
+          v-if="isAttachmentsLocked"
+          class="pd-subtitle q-mt-xs q-mb-none"
+          data-test="attachments-locked-hint"
+        >
+          {{ ATTACHMENTS_LOCKED_HINT }}
+        </p>
+        <p v-else-if="store.config.includeAttachments" class="pd-subtitle q-mt-xs q-mb-none">
           {{ ATTACHMENTS_HINT }}
         </p>
       </div>

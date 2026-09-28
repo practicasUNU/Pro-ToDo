@@ -1,12 +1,17 @@
 <script setup lang="ts">
-import { computed, onMounted } from 'vue';
+import { computed, onMounted, ref } from 'vue';
 import { copyToClipboard, useQuasar } from 'quasar';
 
 import { useLlmExtractorStore } from '@stores/nodes/llm-extractor.store';
+import { useAiPromptTemplatesStore } from '@stores/ai-prompt-templates.store';
+
+import AiPromptPreviewDialog from '@components/ai-prompt-templates/AiPromptPreviewDialog.vue';
+import AiPromptTemplateDialog from '@components/ai-prompt-templates/AiPromptTemplateDialog.vue';
 
 import { extractApiErrorMessage } from '@/utils/api-error';
 
 import { NODE_TYPE_LABELS, NodeType } from '@/types/pipeline';
+import type { AiPromptTemplateDetail } from '@/types/ai-prompt-template';
 import {
   IMPLEMENTED_LLM_PROVIDERS,
   LLM_PROVIDER_LABELS,
@@ -30,14 +35,20 @@ const $q = useQuasar();
 // El store se resuelve POR NODO: un flujo puede encadenar dos inferencias —una
 // para redactar y otra para resumir— con prompts y presupuestos distintos.
 const store = useLlmExtractorStore(props.nodeId);
+// El catalogo de prompts es COMPARTIDO entre nodos y flujos, asi que vive en su
+// propio store y no en el del nodo.
+const promptsStore = useAiPromptTemplatesStore();
 
-const PROMPT_RULE = 'Elige una plantilla de prompt o escribe una instruccion en linea';
+const isPreviewOpen = ref(false);
+const isEditorOpen = ref(false);
+
+const PROMPT_RULE = 'Elige una plantilla de prompt para que este nodo tenga algo que ejecutar';
 
 const CONFLICT_NOTICE =
   'Hay una plantilla elegida Y una instruccion en linea. El motor usara LA PLANTILLA: es un activo compartido y revisado, mientras que el texto en linea suele ser el resto de una prueba anterior. Borra uno de los dos para que no haya duda.';
 
-const INLINE_HINT =
-  'Admite marcadores {{namespace.campo}} que se resuelven contra el contexto del flujo. Usa el selector de abajo para copiarlos sin teclearlos.';
+const LEGACY_INLINE_NOTICE =
+  'Este flujo se creo cuando se podia escribir la instruccion aqui. Se conserva tal cual para no alterarlo, pero ya no se edita: elige una plantilla de prompt y pasara a mandar ella.';
 
 const MODEL_HINT =
   'Texto libre a proposito: los proveedores publican modelos nuevos cada pocas semanas, y una lista cerrada obligaria a desplegar el backend para poder escribir el ultimo. Un modelo inexistente lo rechaza el proveedor.';
@@ -81,6 +92,28 @@ const onCopyVariable = async (marker: string): Promise<void> => {
   } catch {
     $q.notify({ type: 'warning', message: `Copia manualmente: ${marker}` });
   }
+};
+
+/**
+ * Recoge la plantilla recien creada y la deja seleccionada.
+ *
+ * Recarga por el STORE DE PROMPTS y no por `store.loadPrompts()`: aquel lleva
+ * una guarda memoizada —`if (promptsStore.prompts.length > 0) return;`— pensada
+ * para no repetir la peticion al montar cada nodo, y aqui se tragaria justo la
+ * recarga que hace falta. Es la misma trampa que `TemplateMapperConfig` esquiva.
+ */
+const onPromptCreated = async (prompt: AiPromptTemplateDetail): Promise<void> => {
+  try {
+    await promptsStore.loadPrompts();
+  } catch (error) {
+    $q.notify({
+      type: 'negative',
+      message: extractApiErrorMessage(error, 'No se pudo recargar el catalogo de prompts'),
+    });
+  }
+
+  store.updateConfig({ templatePromptId: prompt.id });
+  $q.notify({ type: 'positive', message: 'Plantilla creada y seleccionada' });
 };
 
 onMounted(loadPrompts);
@@ -134,20 +167,41 @@ onMounted(loadPrompts);
       </q-select>
     </div>
 
-    <div class="q-mt-md" data-test="inline-prompt-field">
-      <label class="pd-label" for="llm-inline-prompt">Instruccion en linea</label>
-      <q-input
-        id="llm-inline-prompt"
-        :model-value="store.config.inlinePrompt"
-        type="textarea"
-        rows="4"
-        outlined
+    <!-- Acciones sobre la plantilla elegida, mismo par que en el mapeador:
+         comprobar que es la que se creia, y crear una sin salir del asistente. -->
+    <div class="row items-center q-gutter-sm q-mt-md">
+      <q-btn
+        class="pd-btn-icon"
+        outline
+        no-caps
         dense
-        class="q-mt-xs pd-mono"
-        :hint="INLINE_HINT"
-        placeholder="Redacta una noticia a partir de {{parsed_email.clean_body}}"
-        @update:model-value="store.updateConfig({ inlinePrompt: String($event ?? '') })"
+        icon-right="north_east"
+        label="Previsualizar"
+        data-test="preview-prompt"
+        :disable="store.config.templatePromptId === null"
+        @click="isPreviewOpen = true"
       />
+      <q-btn
+        class="pd-btn-icon"
+        outline
+        no-caps
+        dense
+        icon-right="north_east"
+        label="Nueva plantilla"
+        data-test="create-prompt"
+        @click="isEditorOpen = true"
+      />
+    </div>
+
+    <!-- Instruccion en linea HEREDADA. Ya no se puede escribir una: el prompt es
+         un activo compartido y revisado, y el texto suelto por flujo se volvia
+         un resto de pruebas que nadie repasaba. Se MUESTRA en solo lectura, sin
+         borrarla: guardar el flujo sin ella se la llevaria por delante sin que
+         nadie lo hubiera pedido. -->
+    <div v-if="store.hasInlinePrompt" class="q-mt-md" data-test="legacy-inline-prompt">
+      <label class="pd-label">Instruccion en linea (heredada)</label>
+      <pre class="pd-mono pd-legacy-prompt q-mt-xs">{{ store.config.inlinePrompt }}</pre>
+      <p class="pd-subtitle q-mt-xs q-mb-none">{{ LEGACY_INLINE_NOTICE }}</p>
     </div>
 
     <!-- Bloquea el avance: sin instruccion no hay nodo que ejecutar. -->
@@ -164,7 +218,8 @@ onMounted(loadPrompts);
       {{ PROMPT_RULE }}
     </q-banner>
 
-    <!-- No bloquea: el backend resuelve el conflicto, pero en silencio. -->
+    <!-- No bloquea, y solo puede darse en un flujo heredado: el backend
+         resuelve el conflicto eligiendo la plantilla, pero en silencio. -->
     <q-banner
       v-if="store.hasConflictingPrompts"
       dense
@@ -352,10 +407,39 @@ onMounted(loadPrompts);
       </template>
       {{ warning }}
     </q-banner>
+    <!-- Previsualizacion de SOLO LECTURA: comprobar que la plantilla elegida es
+         la que se creia. Editarla desde aqui tocaria un activo que comparten
+         varios flujos sin decirlo. -->
+    <AiPromptPreviewDialog v-model="isPreviewOpen" :prompt-id="store.config.templatePromptId" />
+
+    <!-- El alta reutiliza el MISMO dialogo del gestor de prompts: duplicar aqui
+         el formulario duplicaria tambien sus reglas, que divergirian. Se le
+         entrega el contexto aguas arriba de ESTE flujo para que los chips de
+         marcadores ofrezcan lo que de verdad publica, y no el catalogo global. -->
+    <AiPromptTemplateDialog
+      v-model="isEditorOpen"
+      :prompt="null"
+      :upstream-context="store.availableUpstreamContext"
+      @saved="onPromptCreated"
+    />
   </section>
 </template>
 
 <style scoped lang="scss">
+// Superficie de SOLO LECTURA, distinta de un campo: se ve que no se edita antes
+// de intentar escribir en ella. `pre` conserva los saltos, que en una
+// instruccion son parte de su significado.
+.pd-legacy-prompt {
+  margin: 0;
+  padding: 12px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  background: var(--pd-surface-muted);
+  border: 1px solid var(--pd-border);
+  border-radius: $generic-border-radius;
+  color: var(--pd-text-secondary);
+}
+
 .pd-node-icon {
   color: var(--pd-primary);
 }

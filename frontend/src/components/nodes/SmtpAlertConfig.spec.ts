@@ -42,7 +42,7 @@ describe('SmtpAlertConfig · configurador del nodo DESTINO_SMTP', () => {
   });
 
   describe('1. Montaje', () => {
-    it('1.1 deberia pintar los cuatro campos configurables', () => {
+    it('1.1 deberia pintar los tres campos configurables', () => {
       // 1. Arrange 📐 + 2. Act ⚙️: `use-chips` no se usaba en ningun otro sitio
       //    del proyecto, y un selector que revienta al renderizar no lo detecta
       //    `vue-tsc`.
@@ -50,9 +50,31 @@ describe('SmtpAlertConfig · configurador del nodo DESTINO_SMTP', () => {
 
       // 3. Assert 🎯
       expect(wrapper.find('[data-test="recipients-field"]').exists()).toBe(true);
-      expect(wrapper.find('[data-test="cc-field"]').exists()).toBe(true);
       expect(wrapper.find('[data-test="subject-field"]').exists()).toBe(true);
       expect(wrapper.find('[data-test="custom-message-field"]').exists()).toBe(true);
+      // La copia se retiro: un aviso de incidencia tiene destinatarios, y "en
+      // copia" solo multiplicaba las direcciones que sanear sin anadir nada.
+      expect(wrapper.find('[data-test="cc-field"]').exists()).toBe(false);
+    });
+
+    it('1.1bis deberia sanear una lista pegada en el campo de destinatarios', async () => {
+      // 1. Arrange 📐: sin interceptar el pegado, `new-value-mode="add-unique"`
+      //    registraba la cadena ENTERA como una sola direccion, y el chip solo
+      //    se descubria invalido al guardar, con un 400 del backend.
+      const nodeId = nextNodeId();
+      const wrapper = mountComponent(nodeId);
+      const store = useSmtpAlertStore(nodeId);
+
+      // 2. Act ⚙️
+      await wrapper
+        .get('[data-test="recipients-field"]')
+        .find('input')
+        .trigger('paste', {
+          clipboardData: { getData: () => 'a@x.com, b@y.com;; basura c@z.com' },
+        });
+
+      // 3. Assert 🎯: tres direcciones limpias y el fragmento suelto descartado.
+      expect(store.config.to).toEqual(['a@x.com', 'b@y.com', 'c@z.com']);
     });
 
     it('1.2 deberia mostrar el asunto por defecto ya escrito', () => {
@@ -153,7 +175,7 @@ describe('SmtpAlertConfig · configurador del nodo DESTINO_SMTP', () => {
       const store = useSmtpAlertStore(nodeId);
 
       // 2. Act ⚙️
-      store.updateConfig({ to: [RECIPIENT, 'roto'], cc: ['tambien@roto'] });
+      store.updateConfig({ to: [RECIPIENT, 'roto', 'tambien@roto'] });
       await wrapper.vm.$nextTick();
 
       // 3. Assert 🎯

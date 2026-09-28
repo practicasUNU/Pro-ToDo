@@ -1,7 +1,8 @@
 // @vitest-environment happy-dom
-import { config, mount } from '@vue/test-utils';
+import { config, flushPromises, mount } from '@vue/test-utils';
 import { createPinia, setActivePinia } from 'pinia';
 import {
+  Notify,
   QBanner,
   QIcon,
   QInput,
@@ -22,10 +23,17 @@ import { LlmProvider } from '@/types/nodes/llm-extractor.types';
 
 import type { AiPromptTemplate } from '@/types/ai-prompt-template';
 
+// El configurador monta ahora los dialogos de prompt, que arrastran el store de
+// prompts y el catalogo de nodos. Sin estos dobles se cargaria `@boot/axios`,
+// que necesita entorno de navegador.
 vi.mock('@services/ai-prompt-templates.service', () => ({
   fetchAiPromptTemplates: vi.fn(),
   fetchAiPromptTemplateById: vi.fn(),
+  createAiPromptTemplate: vi.fn(),
+  updateAiPromptTemplate: vi.fn(),
+  deactivateAiPromptTemplate: vi.fn(),
 }));
+vi.mock('@services/node-catalog.service', () => ({ fetchNodeCatalog: vi.fn() }));
 
 const aiPromptTemplatesService = await import('@services/ai-prompt-templates.service');
 const fetchAiPromptTemplates = vi.mocked(aiPromptTemplatesService.fetchAiPromptTemplates);
@@ -60,7 +68,13 @@ const PROMPT: AiPromptTemplate = {
 const mountComponent = (nodeId: string): ReturnType<typeof mount> =>
   mount(LlmExtractorConfig, {
     props: { nodeId },
-    global: { plugins: [Quasar], components: QUASAR_COMPONENTS },
+    // `Notify` se instala explicitamente: el alta de plantilla avisa al
+    // terminar, y sin el plugin `$q.notify` lanza fuera del ciclo de la prueba
+    // —pasa igual pero deja un error sin atender en la salida.
+    global: {
+      plugins: [[Quasar, { plugins: { Notify } }]],
+      components: QUASAR_COMPONENTS,
+    },
   });
 
 /** El control de un campo, por el `data-test` de su CONTENEDOR. */
@@ -83,7 +97,6 @@ describe('LlmExtractorConfig · configurador del nodo PROCESADOR_IA', () => {
       // 3. Assert 🎯
       for (const field of [
         'template-prompt-field',
-        'inline-prompt-field',
         'provider-field',
         'model-field',
         'timeout-field',
@@ -92,6 +105,13 @@ describe('LlmExtractorConfig · configurador del nodo PROCESADOR_IA', () => {
       ]) {
         expect(wrapper.find(`[data-test="${field}"]`).exists()).toBe(true);
       }
+
+      // La entrada libre se retiro: el prompt es un activo compartido y
+      // revisado, y el texto suelto por flujo se volvia un resto de pruebas que
+      // nadie repasaba.
+      expect(wrapper.find('[data-test="inline-prompt-field"]').exists()).toBe(false);
+      expect(wrapper.find('[data-test="preview-prompt"]').exists()).toBe(true);
+      expect(wrapper.find('[data-test="create-prompt"]').exists()).toBe(true);
     });
 
     it('1.2 deberia pedir el catalogo de prompts al montarse', () => {
@@ -236,6 +256,82 @@ describe('LlmExtractorConfig · configurador del nodo PROCESADOR_IA', () => {
       // 3. Assert 🎯
       expect(store.config.templatePromptId).toBeNull();
       expect(store.toNodeParams()).not.toHaveProperty('templatePromptId');
+    });
+  });
+
+  describe('5. Alta de plantilla sin salir del asistente', () => {
+    it('5.1 deberia recargar el catalogo y seleccionar la recien creada', async () => {
+      // 1. Arrange 📐: la recarga va por el STORE DE PROMPTS y no por
+      //    `store.loadPrompts()`, que lleva una guarda memoizada pensada para no
+      //    repetir la peticion al montar cada nodo y que aqui se tragaria justo
+      //    la recarga que hace falta.
+      const nodeId = nextNodeId();
+      const created = {
+        id: 'e7c9a1b2-3d4e-4f50-8a6b-7c8d9e0f1a2b',
+        name: 'Redaccion institucional',
+        description: null,
+        active: true,
+        createdById: 'u1',
+        createdAt: '2026-09-28T00:00:00.000Z',
+        updatedAt: '2026-09-28T00:00:00.000Z',
+        promptText: 'Redacta a partir de {{parsed_email.clean_body}}',
+      };
+
+      fetchAiPromptTemplates.mockResolvedValue([created]);
+
+      const wrapper = mountComponent(nodeId);
+      const store = useLlmExtractorStore(nodeId);
+
+      // 2. Act ⚙️: el dialogo anuncia lo que acaba de guardar.
+      await wrapper.findComponent({ name: 'AiPromptTemplateDialog' }).vm.$emit('saved', created);
+      await flushPromises();
+
+      // 3. Assert 🎯
+      expect(fetchAiPromptTemplates).toHaveBeenCalled();
+      expect(store.config.templatePromptId).toBe(created.id);
+    });
+
+    it('5.2 deberia entregar al dialogo el contexto aguas arriba de ESTE flujo', async () => {
+      // 1. Arrange 📐: sin la prop, el dialogo cae al catalogo global de nodos y
+      //    ofreceria marcadores de namespaces que este flujo no publica.
+      const nodeId = nextNodeId();
+      const wrapper = mountComponent(nodeId);
+      const store = useLlmExtractorStore(nodeId);
+
+      // 2. Act ⚙️
+      store.setAvailableUpstreamContext([
+        { namespace: 'parsed_email', fields: [{ name: 'clean_body', type: 'text' }] },
+      ]);
+      await wrapper.vm.$nextTick();
+
+      // 3. Assert 🎯
+      expect(
+        wrapper.findComponent({ name: 'AiPromptTemplateDialog' }).props('upstreamContext'),
+      ).toEqual([{ namespace: 'parsed_email', fields: [{ name: 'clean_body', type: 'text' }] }]);
+    });
+  });
+
+  describe('6. Instruccion en linea heredada', () => {
+    it('6.1 deberia mostrarla en solo lectura sin permitir editarla', async () => {
+      // 1. Arrange 📐: borrarla al guardar se llevaria por delante la unica
+      //    instruccion de un flujo antiguo sin que nadie lo hubiera pedido.
+      const nodeId = nextNodeId();
+      const wrapper = mountComponent(nodeId);
+      const store = useLlmExtractorStore(nodeId);
+
+      // 2. Act ⚙️
+      store.hydrateFromNode({
+        outputNamespace: 'llm_response',
+        params: { inlinePrompt: 'Instruccion antigua', model: 'claude-sonnet-5' },
+      });
+      await wrapper.vm.$nextTick();
+
+      // 3. Assert 🎯: se ve, no se edita, y sigue viajando en los params.
+      expect(wrapper.get('[data-test="legacy-inline-prompt"]').text()).toContain(
+        'Instruccion antigua',
+      );
+      expect(wrapper.find('[data-test="inline-prompt-field"]').exists()).toBe(false);
+      expect(store.toNodeParams().inlinePrompt).toBe('Instruccion antigua');
     });
   });
 });

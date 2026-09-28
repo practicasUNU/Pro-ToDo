@@ -658,4 +658,60 @@ describe('useTriggerImapStore · configuracion del nodo TRIGGER_IMAP', () => {
       expect(store.isConfigValid).toBe(false);
     });
   });
+
+  describe('Parametros impuestos por la plantilla', () => {
+    it('deberia encender y BLOQUEAR la ingesta de adjuntos que pide la plantilla', () => {
+      // 1. Arrange 📐: la ruta de contingencia de vision IA lee
+      //    `raw_email.attachments`. Si el operador pudiera apagarlos desde el
+      //    asistente, el desvio pasaria la validacion y llamaria al modelo sin
+      //    nada que leer: un respaldo mudo.
+      const store = useTriggerImapStore('trigger_plantilla');
+
+      // 2. Act ⚙️
+      store.applyTemplateParams({ includeAttachments: true });
+
+      // 3. Assert 🎯
+      expect(store.config.includeAttachments).toBe(true);
+      expect(store.isFieldLockedByTemplate('includeAttachments')).toBe(true);
+    });
+
+    it('NO deberia bloquear nada si la plantilla lo deja apagado', () => {
+      // 1. Arrange 📐: un `false` no sostiene ninguna ruta, y bloquearlo solo
+      //    le quitaria al operador una decision que es suya.
+      const store = useTriggerImapStore('trigger_sin_adjuntos');
+
+      // 2. Act ⚙️
+      store.applyTemplateParams({ includeAttachments: false });
+
+      // 3. Assert 🎯
+      expect(store.isFieldLockedByTemplate('includeAttachments')).toBe(false);
+    });
+
+    it('NO deberia dar por probada la conexion', () => {
+      // 1. Arrange 📐: es la razon de que este sea un canal APARTE de
+      //    `hydrateFromNode`. Una plantilla no prueba ningun buzon, y darlo por
+      //    verificado dejaria pasar unas credenciales que nadie ha comprobado.
+      const store = useTriggerImapStore('trigger_sin_verificar');
+
+      // 2. Act ⚙️
+      store.applyTemplateParams({ includeAttachments: true });
+
+      // 3. Assert 🎯
+      expect(store.connectionVerified).toBe(false);
+    });
+
+    it('deberia soltar el bloqueo al resetear el nodo', () => {
+      // 1. Arrange 📐: el bloqueo pertenece a la plantilla que se abandona;
+      //    conservarlo dejaria un campo deshabilitado en un flujo que ya no lo
+      //    exige.
+      const store = useTriggerImapStore('trigger_reset');
+      store.applyTemplateParams({ includeAttachments: true });
+
+      // 2. Act ⚙️
+      store.resetConfig();
+
+      // 3. Assert 🎯
+      expect(store.isFieldLockedByTemplate('includeAttachments')).toBe(false);
+    });
+  });
 });

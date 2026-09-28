@@ -363,6 +363,7 @@ export const useFlujoDraftStore = defineStore('flujoDraft', () => {
       const schema = detail.pipelineSchema as unknown as Partial<AssembledPipelineSchema>;
 
       hydrateErrorBranches(schema.nodes ?? {});
+      applyTemplateParams(schema.nodes ?? {});
     } finally {
       isLoading.value = false;
     }
@@ -490,6 +491,35 @@ export const useFlujoDraftStore = defineStore('flujoDraft', () => {
         outputNamespace: alertNode.outputNamespace,
         params: alertNode.params,
       });
+    }
+  };
+
+  /**
+   * Reparte a cada store de nodo los `params` base que sembro la plantilla.
+   *
+   * Hasta ahora el asistente los ignoraba por completo: `selectTemplate` arma la
+   * topologia desde `template.topology`, que es una proyeccion PARCIAL sin
+   * `params`. El resultado era que una plantilla podia fijar un valor
+   * estructural —el buzon, la ingesta de adjuntos— y el flujo instanciado nacia
+   * sin el.
+   *
+   * Importa mas desde que una ruta de contingencia puede DEPENDER de uno: la
+   * vision IA lee `raw_email.attachments`, que solo existen si el disparador los
+   * ingiere. Sin este reparto, el asistente creaba flujos con la ruta declarada
+   * y la ingesta apagada — pasaban la validacion y fallaban mudos.
+   *
+   * Canal aparte de `hydrateFromNode` a proposito (ver `applyTemplateParams` en
+   * el contrato de `node-store-registry.ts`).
+   *
+   * @param nodes Mapa de nodos del `pipeline_schema` de la plantilla.
+   */
+  const applyTemplateParams = (nodes: Record<string, AssembledPipelineNode>): void => {
+    for (const step of pipelineTopology.value) {
+      const params = nodes[step.nodeId]?.params;
+
+      if (params === undefined) continue;
+
+      resolveNodeStore(step.nodeType, step.nodeId)?.applyTemplateParams?.(params);
     }
   };
 

@@ -43,9 +43,9 @@ interface Props {
    * global (Escenario A). La prop MANDA cuando viene con algo, porque un flujo
    * concreto sabe que namespaces publica de verdad y con que campos.
    *
-   * Hoy nadie la pasa: `PROCESADOR_IA` todavia no tiene componente de
-   * configuracion ni entrada en `nodeConfigRegistry`. Queda lista para que
-   * PROT-15.3 la conecte al montar ese nodo.
+   * La pasa `LlmExtractorConfig.vue` al abrir este dialogo desde el paso de IA
+   * del asistente, con los namespaces que publican los nodos anteriores de ESE
+   * flujo.
    */
   upstreamContext?: readonly UpstreamNamespace[];
 }
@@ -54,7 +54,15 @@ const props = withDefaults(defineProps<Props>(), { upstreamContext: () => [] });
 
 const emit = defineEmits<{
   'update:modelValue': [value: boolean];
-  saved: [];
+  /**
+   * La plantilla guardada, con su `promptText`.
+   *
+   * Viaja con CARGA, igual que en `TemplateEditorDialog`: quien abre este
+   * dialogo desde el configurador de un nodo necesita seleccionar lo que acaba
+   * de crear, y sin el identificador tendria que adivinarlo diffeando el
+   * listado. El gestor de plantillas simplemente ignora el argumento.
+   */
+  saved: [prompt: AiPromptTemplateDetail];
 }>();
 
 const $q = useQuasar();
@@ -162,21 +170,20 @@ const onSubmit = async (): Promise<void> => {
   const description = form.description.trim();
 
   try {
-    if (isEditMode.value && props.prompt) {
-      await aiPromptTemplatesStore.updatePrompt(props.prompt.id, {
-        name: form.name.trim(),
-        description,
-        promptText: form.promptText,
-      });
-    } else {
-      await aiPromptTemplatesStore.createPrompt({
-        name: form.name.trim(),
-        description,
-        promptText: form.promptText,
-      });
-    }
+    const saved =
+      isEditMode.value && props.prompt
+        ? await aiPromptTemplatesStore.updatePrompt(props.prompt.id, {
+            name: form.name.trim(),
+            description,
+            promptText: form.promptText,
+          })
+        : await aiPromptTemplatesStore.createPrompt({
+            name: form.name.trim(),
+            description,
+            promptText: form.promptText,
+          });
 
-    emit('saved');
+    emit('saved', saved);
     closeDialog();
   } catch (error) {
     $q.notify({

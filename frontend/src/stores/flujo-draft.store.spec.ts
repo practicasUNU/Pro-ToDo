@@ -1359,6 +1359,42 @@ describe('useFlujoDraftStore · agregador del asistente', () => {
     });
   });
 
+  describe('20. Parametros base que impone la plantilla', () => {
+    it('20.1 deberia repartir a cada nodo los params de su plantilla', async () => {
+      // 1. Arrange 📐: `template.topology` es una proyeccion PARCIAL sin
+      //    `params`, asi que el asistente los ignoraba por completo: una
+      //    plantilla podia fijar la ingesta de adjuntos y el flujo instanciado
+      //    nacia sin ella, dejando muda la ruta de contingencia de vision.
+      const template = buildTemplate();
+      const detail = buildTemplateDetail({}, template);
+      const nodes = detail.pipelineSchema.nodes as Record<
+        string,
+        { params: Record<string, unknown> }
+      >;
+
+      nodes[TRIGGER_NODE_ID] = {
+        ...nodes[TRIGGER_NODE_ID],
+        params: { includeAttachments: true },
+      };
+
+      const draft = useFlujoDraftStore();
+      fetchWorkflowTemplates.mockResolvedValue([template]);
+      fetchNodeCatalog.mockResolvedValue(CATALOG_ENTRIES);
+      fetchWorkflowTemplate.mockResolvedValue(detail);
+
+      await draft.loadAvailableTemplates();
+
+      // 2. Act ⚙️
+      await draft.selectTemplate(template.id);
+
+      // 3. Assert 🎯
+      const trigger = useTriggerImapStore(TRIGGER_NODE_ID);
+
+      expect(trigger.config.includeAttachments).toBe(true);
+      expect(trigger.isFieldLockedByTemplate('includeAttachments')).toBe(true);
+    });
+  });
+
   describe('19. Lectura de las ramas desde la vista', () => {
     it('19.1 deberia devolver la rama declarada por la plantilla', async () => {
       // 1. Arrange 📐

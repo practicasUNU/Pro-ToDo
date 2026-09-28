@@ -124,4 +124,20 @@ export class FsmExecution {
    * una ejecucion termino en un unico paso, entonces se promueve a columna.
    */
   haltReason?: string;
+
+  /**
+   * Si la ejecucion se desvio alguna vez por una ruta `onErrorStep`.
+   *
+   * Transitorio por el mismo motivo que `haltReason`, y con la misma disciplina:
+   * persistirlo seria una columna con su migracion, y hoy tiene un unico lector
+   * —`applyStopOnFirstSuccess`—, que corre en el mismo proceso que lo escribe.
+   *
+   * Existe porque el desenlace por si solo no lo cuenta todo. Una recuperacion
+   * funcional —el fallback de vision que reincorpora el flujo— cierra EXITOSO
+   * con razon: el trabajo se hizo. Pero la politica de "apagar tras el primer
+   * exito" describe un flujo que YA funciona sin incidencias, y una ejecucion
+   * que necesito un desvio no lo demuestra: apagarlo ahi lo dejaria enterrado
+   * junto con el fallo que nadie ha mirado.
+   */
+  tookContingency?: boolean;
 }

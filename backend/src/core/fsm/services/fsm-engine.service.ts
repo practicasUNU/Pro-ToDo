@@ -15,7 +15,10 @@ import { FsmExecution } from '@core/fsm/entities/fsm-execution.entity';
 import { StrategyNotFoundException } from '@core/fsm/exceptions/strategy-not-found.exception';
 import { NodeStrategyFactory } from '@core/fsm/factories/node-strategy.factory';
 import { ExecutionState } from '@core/fsm/types/fsm.enums';
-import { ERROR_CONTEXT_NAMESPACE } from '@core/fsm/types/pipeline-schema.types';
+import {
+  ERROR_CONTEXT_NAMESPACE,
+  NodeType,
+} from '@core/fsm/types/pipeline-schema.types';
 import {
   ERR_MISSING_UPSTREAM_CONTEXT,
   ERR_NODE_CRASHED,
@@ -29,10 +32,10 @@ import type { PipelineNodeConfigDto } from '@core/fsm/dto/pipeline-schema.dto';
 import type { PipelineSchemaDto } from '@core/fsm/dto/pipeline-schema.dto';
 import type {
   INodeStrategy,
+  NodeErrorSeverity,
   NodeResult,
 } from '@core/fsm/types/node-strategy.types';
 import type { ResolvedErrorRoute } from '@core/fsm/utils/pipeline-topology.util';
-import type { NodeType } from '@core/fsm/types/pipeline-schema.types';
 import type { Repository } from 'typeorm';
 import type { QueryDeepPartialEntity } from 'typeorm/query-builder/QueryPartialEntity';
 
@@ -98,6 +101,19 @@ export interface ExecuteWorkflowOptions {
    * volver a tocar el motor.
    */
   skipNodeTypes?: readonly NodeType[];
+
+  /**
+   * Nombre legible del flujo, para el namespace reservado `trigger`.
+   *
+   * Lo entrega el LLAMANTE y no lo lee el motor de la entidad `Workflow`: esa
+   * vive en `@modules` y `@core` no puede importar de ahi. El motor solo sabe
+   * que alguien le dio un nombre que las plantillas pueden interpolar.
+   *
+   * Sin el, el asunto por defecto de la alerta institucional —que interpola
+   * `{{trigger.flow_name}}`— se compilaba contra un namespace que nadie
+   * escribia, y el correo salia con un hueco donde deberia ir el flujo.
+   */
+  flowName?: string;
 }
 
 /** Campos del checkpoint que el motor reescribe en cada transicion. */
@@ -539,6 +555,7 @@ export class FsmEngineService {
       cursor,
       execution,
       options.initialPayload,
+      options.flowName,
     );
     let retryState: RetryState = { ...(execution.retryState as RetryState) };
 
@@ -580,6 +597,30 @@ export class FsmEngineService {
 
     try {
       let transitions = 0;
+
+      /**
+       * Ultimo desvio por `onErrorStep` de esta ejecucion, o `null`.
+       *
+       * Se REASIGNA en cada desvio y no se acumula: cuando una ejecucion se
+       * desvia dos veces, el fallo que decide el desenlace es el que la dejo
+       * parada —el que corresponde al cursor que se preserva para el reintento—,
+       * no uno del que el flujo ya se recupero por otra via.
+       *
+       * Guarda el nodo QUE FALLO y no el de respaldo: es el que CU-09 reintenta.
+       */
+      let contingency: {
+        severity: NodeErrorSeverity;
+        failedNodeId: string;
+      } | null = null;
+
+      /**
+       * Tipo del ultimo nodo que completo con exito.
+       *
+       * Es lo que distingue una alerta terminal de una recuperacion funcional:
+       * si la rama muere en un nodo de notificacion, la ejecucion fallo y solo
+       * avisa; si reincorpora el flujo y llega al nodo final, el trabajo se hizo.
+       */
+      let lastCompletedNodeType: NodeType | null = null;
 
       while (cursor !== null) {
         // Aborto llegado mientras se escribia el checkpoint anterior. Va antes
@@ -722,6 +763,7 @@ export class FsmEngineService {
 
         if (result.success) {
           context.setNamespace(node.outputNamespace, result.data ?? {});
+          lastCompletedNodeType = node.nodeType;
 
           // Liberacion de binarios. Va JUSTO aqui, y no repetida en cada rama de
           // salida, porque este punto domina las tres que siguen —`halt`, nodo
@@ -801,6 +843,15 @@ export class FsmEngineService {
             this.buildErrorContext(node, result, errorRoute, retryState),
           );
 
+          // El desvio se anota ANTES de mover el cursor, con el nodo que fallo
+          // y la severidad de SU error: al llegar al final del grafo ya no habra
+          // forma de saber que esta ejecucion no siguio el camino nominal.
+          contingency = {
+            severity: result.error?.level ?? 'URGENTE',
+            failedNodeId: node.nodeId,
+          };
+          execution.tookContingency = true;
+
           cursor = errorRoute.targetNode;
           context.setCursor(cursor);
 
@@ -846,12 +897,13 @@ export class FsmEngineService {
       }
 
       if (cursor === null) {
-        await this.saveCheckpoint(execution, {
-          currentState: ExecutionState.EXITOSO,
-          activeCursor: null,
-          contextPayload: context.getAllContext(),
+        await this.closeTerminalState(
+          execution,
+          context,
           retryState,
-        });
+          contingency,
+          lastCompletedNodeType,
+        );
       }
     } catch (error) {
       this.logger.error(
@@ -990,6 +1042,7 @@ export class FsmEngineService {
     cursorStart: string,
     execution: FsmExecution,
     initialPayload?: Record<string, unknown>,
+    flowName?: string,
   ): StatePayloadContext {
     const context = new StatePayloadContext(
       executionId,
@@ -1005,6 +1058,14 @@ export class FsmEngineService {
 
     if (initialPayload !== undefined) {
       context.setNamespace(TRIGGER_NAMESPACE, initialPayload);
+    }
+
+    // Despues del payload y en una llamada aparte: `setNamespace` FUSIONA en vez
+    // de reemplazar, asi que el nombre se suma a lo que trajo el disparador sin
+    // pisarlo. Se siembra aunque no haya `initialPayload` —un disparador Cron no
+    // trae ninguno— porque la plantilla de alerta lo interpola igual.
+    if (flowName !== undefined) {
+      context.setNamespace(TRIGGER_NAMESPACE, { flow_name: flowName });
     }
 
     return context;
@@ -1449,6 +1510,77 @@ export class FsmEngineService {
       contextPayload: context.getAllContext(),
       retryState,
       logFilePath,
+    });
+  }
+
+  /**
+   * Escribe el desenlace de un bucle que agoto su grafo.
+   *
+   * Hasta aqui solo se llega con el cursor nulo, que hasta ahora significaba
+   * EXITOSO sin mas. No basta: un desvio por `onErrorStep` tambien acaba
+   * agotando el grafo —el nodo de respaldo no tiene `nextStep`—, y cerrar eso
+   * como un exito borraba de la columna `estado` la unica senal de que la
+   * ejecucion habia fallado. Un flujo con `stopOnFirstSuccess` llegaba a
+   * apagarse solo despues de una ejecucion que en realidad solo supo avisar.
+   *
+   * La distincion la marca el TIPO del ultimo nodo completado, no su `nodeId`:
+   * una plantilla puede llamar a su nodo de alerta como quiera, y atarse a la
+   * constante `alerta_smtp` dejaria fuera cualquier otra.
+   *
+   * @param contingency Ultimo desvio, o `null` si el recorrido fue nominal.
+   * @param lastCompletedNodeType Tipo del ultimo nodo que completo con exito.
+   */
+  private async closeTerminalState(
+    execution: FsmExecution,
+    context: StatePayloadContext,
+    retryState: RetryState,
+    contingency: { severity: NodeErrorSeverity; failedNodeId: string } | null,
+    lastCompletedNodeType: NodeType | null,
+  ): Promise<void> {
+    // Recuperacion FUNCIONAL: la rama reincorporo el flujo y este llego al
+    // final. El trabajo se hizo —el correo con la imagen acabo publicado—, asi
+    // que marcarlo FALLIDO pediria intervencion humana sobre un flujo que
+    // funciono. La incidencia queda en `logs_nodo` y en `error_context`.
+    if (
+      contingency === null ||
+      lastCompletedNodeType !== NodeType.DESTINO_SMTP
+    ) {
+      await this.saveCheckpoint(execution, {
+        currentState: ExecutionState.EXITOSO,
+        activeCursor: null,
+        contextPayload: context.getAllContext(),
+        retryState,
+      });
+      return;
+    }
+
+    // --- La rama MURIO en un nodo de notificacion: nadie recupero nada, solo
+    // se aviso. El desenlace lo decide la severidad del fallo original, con el
+    // mismo criterio que `canRetry`: solo un GRAVE merece que alguien vuelva a
+    // intentarlo.
+    if (contingency.severity === 'GRAVE') {
+      // Se pausa en el nodo QUE FALLO y no en el de alerta: el reintento manual
+      // de CU-09 tiene que repetir el paso que se rompio, no volver a mandar el
+      // correo que ya se mando.
+      await this.pauseAt(
+        execution,
+        contingency.failedNodeId,
+        context,
+        retryState,
+      );
+      return;
+    }
+
+    // URGENTE es irrecuperable y LEVE no justifica insistir: ni uno ni otro
+    // ofrecen un reintento, asi que se cierra sin cursor.
+    await this.saveCheckpoint(execution, {
+      currentState: ExecutionState.FALLIDO,
+      activeCursor: null,
+      contextPayload: context.getAllContext(),
+      retryState,
+      failureReason: truncateFailureReason(
+        `El nodo "${contingency.failedNodeId}" fallo (${contingency.severity}) y la ruta de contingencia solo notifico.`,
+      ),
     });
   }
 

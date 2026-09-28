@@ -40,7 +40,6 @@ export const MAX_ALERT_NOTE_LENGTH = 2000;
  */
 export interface SmtpAlertNodeConfig {
   to: string[];
-  cc: string[];
   subject: string;
   customMessage: string;
 }

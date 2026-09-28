@@ -28,3 +28,33 @@ const EMAIL_PATTERN = /^[^\s@]+@[^\s@.]+(?:\.[^\s@.]+)+$/;
  * destinatario mas probable de una incidencia de integracion.
  */
 export const isEmailAddress = (value: string): boolean => EMAIL_PATTERN.test(value.trim());
+
+/**
+ * Extrae las direcciones VALIDAS de un texto pegado o tecleado.
+ *
+ * Existe porque el campo de destinatarios es uno de los dos selectores de
+ * entrada libre del proyecto, y pegar una lista de correos es justo lo que hace
+ * un operador con una guardia ya definida en otro sitio. Sin esto, pegar
+ * "a@x.com, b@y.com" registraba la cadena ENTERA como una unica direccion, y
+ * cada fragmento a medio teclear entraba como un chip suelto que el backend
+ * rechazaba despues con un 400 sobre el esquema completo.
+ *
+ * Se DESCARTA lo que no valida en vez de conservarlo marcado: el proposito es
+ * que no llegue basura al chip, y un fragmento incompleto —"a@", "guardia"— no
+ * es una direccion que el operador quiera corregir, es ruido del pegado.
+ *
+ * Deduplica preservando el orden de aparicion: el mismo correo dos veces en la
+ * lista de origen no es un error que merezca un aviso, pero mandar dos copias
+ * del aviso si molesta a quien lo recibe.
+ *
+ * @param raw Texto en crudo, con separadores arbitrarios.
+ * @returns Direcciones validas, sin repetir y en su orden original.
+ */
+export const parseEmailList = (raw: string): string[] => [
+  ...new Set(
+    raw
+      .split(/[\s,;]+/)
+      .map((fragment) => fragment.trim())
+      .filter((fragment) => fragment !== '' && isEmailAddress(fragment)),
+  ),
+];

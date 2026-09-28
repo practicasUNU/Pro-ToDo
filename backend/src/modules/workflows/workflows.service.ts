@@ -131,7 +131,10 @@ export class WorkflowsService {
     const finished = await this.fsmEngineService.executeWorkflow(
       execution.executionId,
       schema,
-      { skipNodeTypes: TEST_MODE_SKIPPED_NODE_TYPES },
+      {
+        skipNodeTypes: TEST_MODE_SKIPPED_NODE_TYPES,
+        flowName: workflow.name,
+      },
     );
 
     return {
@@ -191,6 +194,7 @@ export class WorkflowsService {
     const finished = await this.fsmEngineService.executeWorkflow(
       execution.executionId,
       schema,
+      { flowName: workflow.name },
     );
 
     await this.applyStopOnFirstSuccess(workflow, schema, finished);
@@ -210,6 +214,11 @@ export class WorkflowsService {
    *    correos nuevos no es un fallo— pero no hizo ningun trabajo: sin esta
    *    tercera condicion, un flujo IMAP con la politica activa se apagaria en su
    *    primer sondeo en vacio, antes de haber procesado un solo correo.
+   * 4. `tookContingency` no esta puesto, es decir, no se desvio por ninguna
+   *    ruta de error. Una recuperacion funcional cierra EXITOSO con razon —el
+   *    trabajo se hizo— pero esta politica describe un flujo que ya funciona sin
+   *    incidencias, y una ejecucion que necesito un desvio no lo demuestra.
+   *    Apagarlo ahi enterraria el fallo junto con el flujo.
    *
    * Vive aqui y no en `FsmEngineService` porque desactivar es tocar la entidad
    * `Workflow`, que pertenece a `@modules`: el motor esta en `@core` y no puede
@@ -228,7 +237,8 @@ export class WorkflowsService {
     if (
       schema.executionPolicy?.stopOnFirstSuccess !== true ||
       finished.currentState !== ExecutionState.EXITOSO ||
-      finished.haltReason !== undefined
+      finished.haltReason !== undefined ||
+      finished.tookContingency === true
     ) {
       return;
     }
