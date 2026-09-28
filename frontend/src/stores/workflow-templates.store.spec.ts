@@ -920,6 +920,152 @@ describe('useWorkflowTemplatesStore · catalogo de plantillas de flujo', () => {
         expect(nodes[SHARED_ALERT_NODE_ID]).toBeUndefined();
       });
 
+      it('8.11 deberia encender `failOnUnextractableMedia` al elegir la vision', () => {
+        // 1. Arrange 📐: es la regresion del 400 reportado. La regla 10 delega en
+        //    `ParserEmailStrategy.getUnreachableErrorCodes`, que devuelve el
+        //    codigo como inalcanzable salvo que este interruptor este en `true`:
+        //    la ruta selectiva quedaba desmentida por los propios `params` del
+        //    nodo, y `validate-schema` la rechazaba con `params: {}`.
+        const store = buildDraftWithPipeline();
+
+        // 2. Act ⚙️
+        store.setStepErrorBranch(PARSER_ID, 'VISION_IA');
+
+        // 3. Assert 🎯: la condicion EXACTA que comprueba el backend.
+        expect(readSchema(store).nodes[PARSER_ID]?.params.failOnUnextractableMedia).toBe(true);
+      });
+
+      it('8.12 deberia ingerir los adjuntos en el disparador aguas arriba', () => {
+        // 1. Arrange 📐: `collectVisionAttachments` lee `raw_email.attachments`,
+        //    que solo existe si el disparador los ingiere. Sin esto la ruta pasa
+        //    la validacion, se dispara en produccion y llama al modelo con cero
+        //    adjuntos: un respaldo mudo.
+        const store = buildDraftWithPipeline();
+
+        // 2. Act ⚙️
+        store.setStepErrorBranch(PARSER_ID, 'VISION_IA');
+
+        // 3. Assert 🎯
+        expect(readSchema(store).nodes.trigger_imap?.params.includeAttachments).toBe(true);
+        expect(store.hasVisionBranch).toBe(true);
+      });
+
+      it('8.13 deberia apagar el interruptor del parser al retirar la vision', () => {
+        // 1. Arrange 📐: dejarlo en `true` sin ruta que lo recoja convertiria en
+        //    PAUSADO un flujo que hoy atraviesa tranquilamente un correo de solo
+        //    imagen. Es la misma semantica reversible de `declareCaughtErrorCodes`.
+        const store = buildDraftWithPipeline();
+        store.setStepErrorBranch(PARSER_ID, 'VISION_IA');
+
+        // 2. Act ⚙️
+        store.setStepErrorBranch(PARSER_ID, null);
+
+        // 3. Assert 🎯
+        expect(readSchema(store).nodes[PARSER_ID]?.params.failOnUnextractableMedia).toBe(false);
+      });
+
+      it('8.14 NO deberia apagar los adjuntos al retirar la vision', () => {
+        // 1. Arrange 📐: ingerir adjuntos es util por si mismo, y apagarlo seria
+        //    una perdida silenciosa de algo que el operador pudo querer aparte.
+        //    Se revierte lo que se impuso para satisfacer una regla, no lo demas.
+        const store = buildDraftWithPipeline();
+        store.setStepErrorBranch(PARSER_ID, 'VISION_IA');
+
+        // 2. Act ⚙️
+        store.setStepErrorBranch(PARSER_ID, null);
+
+        // 3. Assert 🎯
+        expect(readSchema(store).nodes.trigger_imap?.params.includeAttachments).toBe(true);
+        expect(store.hasVisionBranch).toBe(false);
+      });
+
+      it('8.15 deberia apagarlo tambien al cambiar de vision a alerta', () => {
+        // 1. Arrange 📐: el hueco que deja mirar solo el caso `null`. La alerta
+        //    usa la forma de cadena, que no atrapa ese codigo, asi que el
+        //    interruptor quedaria encendido sin nadie que recogiera el fallo.
+        const store = buildDraftWithPipeline();
+        store.setStepErrorBranch(PARSER_ID, 'VISION_IA');
+
+        // 2. Act ⚙️
+        store.setStepErrorBranch(PARSER_ID, 'ALERTA_SMTP');
+
+        // 3. Assert 🎯
+        expect(readSchema(store).nodes[PARSER_ID]?.params.failOnUnextractableMedia).toBe(false);
+        expect(readSchema(store).nodes[PARSER_ID]?.onErrorStep).toBe(SHARED_ALERT_NODE_ID);
+      });
+
+      it('8.16 NO deberia sembrar claves ajenas al contrato del tipo', () => {
+        // 1. Arrange 📐: `failOnUnextractableMedia` solo existe en
+        //    `ParserEmailConfigDto`. Escribirlo en un mapeador lo haria rechazar
+        //    por `forbidNonWhitelisted`: se cambiaria un 400 por otro.
+        const store = buildDraftWithPipeline();
+
+        // 2. Act ⚙️
+        store.setStepErrorBranch(MAPPER_ID, 'ALERTA_SMTP');
+
+        // 3. Assert 🎯
+        expect(
+          Object.hasOwn(
+            readSchema(store).nodes[MAPPER_ID]?.params ?? {},
+            'failOnUnextractableMedia',
+          ),
+        ).toBe(false);
+      });
+
+      it('8.17 deberia conservar los params que no toca el contrato', () => {
+        // 1. Arrange 📐: el operador pudo retocar el buzon a mano en el panel
+        //    JSON, y sembrar un interruptor no es motivo para perderlo.
+        const store = buildDraftWithPipeline();
+        store.patchStepParams('trigger_imap', { mailbox: 'ARCHIVE' });
+
+        // 2. Act ⚙️
+        store.setStepErrorBranch(PARSER_ID, 'VISION_IA');
+
+        // 3. Assert 🎯
+        expect(readSchema(store).nodes.trigger_imap?.params).toEqual({
+          mailbox: 'ARCHIVE',
+          includeAttachments: true,
+        });
+      });
+
+      it('8.18 NO deberia sembrar nada si la ruta no se puede resolver', () => {
+        // 1. Arrange 📐: pedir vision sin un PROCESADOR_IA al que apuntar deja el
+        //    paso sin ruta. Encender el interruptor entonces dejaria el flujo en
+        //    PAUSADO ante un correo de solo imagen, sin nadie que lo recogiera:
+        //    peor que no hacer nada.
+        const store = useWorkflowTemplatesStore();
+        store.initDraft();
+        store.patchDraft({ name: 'Notiweb' });
+        store.setSequence([
+          {
+            nodeId: PARSER_ID,
+            nodeType: NodeType.PARSER_PRE_IA,
+            outputNamespace: 'parsed_email',
+            params: {},
+          },
+        ]);
+
+        // 2. Act ⚙️
+        store.setStepErrorBranch(PARSER_ID, 'VISION_IA');
+
+        // 3. Assert 🎯
+        expect(readSchema(store).nodes[PARSER_ID]?.onErrorStep).toBeNull();
+        expect(readSchema(store).nodes[PARSER_ID]?.params.failOnUnextractableMedia).not.toBe(true);
+      });
+
+      it('8.19 deberia sembrar los defaults del tipo al reensamblar', () => {
+        // 1. Arrange 📐: un paso puede llegar con `params: {}` desde un JSON
+        //    editado a mano o desde una plantilla anterior al registro de
+        //    defaults, y salir sin ellos al guardar.
+        const store = buildDraftWithPipeline();
+
+        // 2. Act ⚙️
+        const { nodes } = readSchema(store);
+
+        // 3. Assert 🎯
+        expect(nodes.trigger_imap?.params).toEqual({ mailbox: 'INBOX', includeAttachments: false });
+      });
+
       it('8.10 NO deberia resolver la vision sin un PROCESADOR_IA en la topologia', () => {
         // 1. Arrange 📐: crear uno nuevo chocaria con el existente en
         //    `llm_response`, y la lista blanca de namespaces no tiene otro.

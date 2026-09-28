@@ -211,6 +211,7 @@ const onSubmit = async (): Promise<void> => {
               :model-value="templatesStore.sequence"
               :error-branches="errorBranches"
               :can-offer-vision="templatesStore.visionTargetNodeId !== null"
+              :base-params-locked="templatesStore.hasVisionBranch"
               @update:model-value="templatesStore.setSequence($event)"
               @update:params="templatesStore.patchStepParams"
               @update:error-branch="templatesStore.setStepErrorBranch"

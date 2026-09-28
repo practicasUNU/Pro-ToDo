@@ -21,6 +21,12 @@ import type { Component } from 'vue';
  * `Partial` es deliberado, igual que en el registro hermano: la mayoria de tipos
  * no tiene ningun parametro base que sembrar, y el anfitrion debe contemplar el
  * `undefined` —simplemente no pinta controles— en vez de suponer cobertura.
+ *
+ * CONTRATO UNIFORME de todo control registrado aqui: recibe `params`, `nodeId` y
+ * `locked`, y emite `update:params` con el objeto COMPLETO. `locked` significa
+ * "la topologia impone estos valores": una ruta de contingencia puede exigir un
+ * parametro del nodo, y dejarlo editable permitiria desactivar desde aqui lo que
+ * hace que esa ruta sirva para algo.
  */
 export const nodeBaseParamsRegistry: Partial<Record<NodeType, Component>> = {
   [NodeType.TRIGGER_IMAP]: defineAsyncComponent(

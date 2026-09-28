@@ -30,6 +30,13 @@ interface Props {
   errorBranches: Readonly<Record<string, ErrorBranchAction | null>>;
   /** Si la topologia tiene un `PROCESADOR_IA` al que desviar. */
   canOfferVision: boolean;
+  /**
+   * Si alguna ruta de contingencia impone los `params` base de los pasos.
+   *
+   * Es una propiedad del GRAFO y no de un paso: la ruta de vision la declara el
+   * parser, pero quien queda atado es el disparador que ingiere los adjuntos.
+   */
+  baseParamsLocked: boolean;
 }
 
 const props = defineProps<Props>();
@@ -329,6 +336,7 @@ onMounted(async () => {
         @remove="removeNode(index)"
         :error-branch="props.errorBranches[step.nodeId] ?? null"
         :can-offer-vision="props.canOfferVision"
+        :base-params-locked="props.baseParamsLocked"
         @update:namespace="updateNamespace(index, $event)"
         @update:params="emit('update:params', step.nodeId, $event)"
         @update:error-branch="emit('update:errorBranch', step.nodeId, $event)"

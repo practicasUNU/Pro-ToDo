@@ -15,14 +15,41 @@ import {
   QToggle,
   Quasar,
 } from 'quasar';
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import TemplateNodeCard from '@components/workflow-templates/TemplateNodeCard.vue';
 
 import { NodeType } from '@/types/pipeline';
 
 import type { AssemblerStep } from '@/utils/pipeline-assembler';
+import type { PropType } from 'vue';
 import type { ErrorBranchAction } from '@/types/nodes/error-branch.types';
+
+/**
+ * Doble del control de params base, con el mismo contrato uniforme.
+ *
+ * El registro real resuelve con `defineAsyncComponent`, que no esta montado
+ * cuando la asercion corre. Lo que esta ficha debe garantizar es que ENTREGA las
+ * props correctas; que el toggle se deshabilite con `locked` lo cubre
+ * `TriggerImapBaseParams.spec.ts`.
+ */
+const { BaseParamsProbe } = vi.hoisted(() => ({
+  BaseParamsProbe: {
+    props: {
+      params: { type: Object as PropType<Record<string, unknown>>, required: true },
+      nodeId: { type: String, required: true },
+      locked: { type: Boolean, required: true },
+    },
+    template: '<div data-test="base-params-probe" />',
+  },
+}));
+
+// `vi.mock` se iza por encima de las constantes, asi que el doble se construye
+// DENTRO de la factory: referenciar `BaseParamsProbe` aqui fuera lo leeria antes
+// de su inicializacion.
+vi.mock('@components/nodes/node-base-params-registry', () => ({
+  nodeBaseParamsRegistry: { TRIGGER_IMAP: BaseParamsProbe },
+}));
 
 const PARSER_ID = 'nodo_parser';
 const MAPPER_ID = 'nodo_mapeador';
@@ -50,12 +77,14 @@ interface MountOptions {
   step: AssemblerStep;
   errorBranch?: ErrorBranchAction | null;
   canOfferVision?: boolean;
+  baseParamsLocked?: boolean;
 }
 
 const mountCard = ({
   step,
   errorBranch = null,
   canOfferVision = false,
+  baseParamsLocked = false,
 }: MountOptions): ReturnType<typeof mount> =>
   mount(TemplateNodeCard, {
     props: {
@@ -65,6 +94,7 @@ const mountCard = ({
       isLast: false,
       errorBranch,
       canOfferVision,
+      baseParamsLocked,
     },
     // El cuerpo del `q-expansion-item` se monta en diferido; sin esto los
     // controles de dentro no existen todavia cuando la prueba los busca.
@@ -192,7 +222,41 @@ describe('TemplateNodeCard · ruta de contingencia de un paso', () => {
     });
   });
 
-  describe('3. Emision de cambios', () => {
+  describe('3. Parametros base impuestos por la topologia', () => {
+    it('3.0 deberia propagar `locked` al control de params base', () => {
+      // 1. Arrange 📐: el toggle de adjuntos vive en el TRIGGER_IMAP, pero quien
+      //    lo exige es la ruta de vision que declara el parser. Sin propagarlo,
+      //    el operador podria apagar los adjuntos y dejar el desvio llamando al
+      //    modelo sin nada que leer.
+      //
+      //    Se comprueba la PROP que la ficha entrega, no el control renderizado:
+      //    el registro lo resuelve con `defineAsyncComponent`, y montar el real
+      //    aqui probaria el toggle de otro componente —que tiene su propio spec.
+      const wrapper = mountCard({
+        step: buildStep('trigger_imap', NodeType.TRIGGER_IMAP, 'raw_email'),
+        baseParamsLocked: true,
+      });
+
+      // 2. Act ⚙️
+      const control = wrapper.findComponent(BaseParamsProbe);
+
+      // 3. Assert 🎯
+      expect(control.props('locked')).toBe(true);
+      expect(control.props('nodeId')).toBe('trigger_imap');
+    });
+
+    it('3.0bis deberia dejarlo editable sin ruta de vision', () => {
+      // 1. Arrange 📐
+      const wrapper = mountCard({
+        step: buildStep('trigger_imap', NodeType.TRIGGER_IMAP, 'raw_email'),
+      });
+
+      // 2. Act ⚙️ + 3. Assert 🎯
+      expect(wrapper.findComponent(BaseParamsProbe).props('locked')).toBe(false);
+    });
+  });
+
+  describe('4. Emision de cambios', () => {
     it('3.1 deberia caer a la alerta al activar el interruptor', async () => {
       // 1. Arrange 📐: siempre es una accion valida, a diferencia de la vision.
       const wrapper = mountCard({

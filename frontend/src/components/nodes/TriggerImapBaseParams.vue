@@ -4,6 +4,14 @@ interface Props {
   params: Record<string, unknown>;
   /** Identidad del nodo, para los `id`/`for` de los controles. */
   nodeId: string;
+  /**
+   * La topologia impone el valor y el operador no puede cambiarlo.
+   *
+   * Hoy lo activa la ruta de contingencia de vision IA, que lee los adjuntos de
+   * `raw_email`: sin ellos el desvio llama al modelo con nada que leer, pasa la
+   * validacion del backend y falla mudo en produccion.
+   */
+  locked: boolean;
 }
 
 const props = defineProps<Props>();
@@ -31,6 +39,9 @@ const includeAttachments = (): boolean => props.params.includeAttachments === tr
  * derecha—: reconstruir `params` desde cero las borraria en silencio al
  * accionar un simple interruptor.
  */
+const LOCKED_HINT =
+  'Lo exige la ruta de contingencia de vision IA de este flujo: el desvio lee los adjuntos del correo, y sin ingerirlos el modelo no tendria nada que leer.';
+
 const onToggle = (value: boolean): void => {
   emit('update:params', { ...props.params, includeAttachments: value });
 };
@@ -44,8 +55,16 @@ const onToggle = (value: boolean): void => {
       color="primary"
       label="Procesar adjuntos (imagenes/documentos <= 5 MB)"
       :aria-label="`Procesar adjuntos en ${props.nodeId}`"
+      :disable="props.locked"
+      data-test="include-attachments-toggle"
       @update:model-value="onToggle"
     />
+
+    <!-- Se dice POR QUE esta bloqueado. Un control apagado sin explicacion se
+         lee como una averia, y el operador buscaria el fallo donde no esta. -->
+    <p v-if="props.locked" class="pd-subtitle q-mt-xs q-mb-none" data-test="locked-hint">
+      {{ LOCKED_HINT }}
+    </p>
     <p class="pd-subtitle q-mt-xs q-mb-none">
       Los adjuntos que superen el limite se descartan sin detener el flujo. El contenido binario se
       libera en cuanto algun nodo extrae texto aprovechable, asi que solo viaja hasta donde de

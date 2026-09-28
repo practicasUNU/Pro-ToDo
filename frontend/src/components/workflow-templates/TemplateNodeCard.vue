@@ -4,7 +4,7 @@ import { computed } from 'vue';
 import { nodeBaseParamsRegistry } from '@components/nodes/node-base-params-registry';
 
 import { NODE_OUTPUT_NAMESPACES, NodeType } from '@/types/pipeline';
-import { ERROR_BRANCH_ACTIONS } from '@/types/nodes/error-branch.types';
+import { actionsForNodeType, ERROR_BRANCH_ACTIONS } from '@/types/nodes/error-branch.types';
 
 import type { AssemblerStep } from '@/utils/pipeline-assembler';
 import type { ErrorBranchAction } from '@/types/nodes/error-branch.types';
@@ -25,6 +25,13 @@ interface Props {
    * fallback de vision depende del grafo entero.
    */
   canOfferVision: boolean;
+  /**
+   * La topologia impone los `params` base de este nodo.
+   *
+   * Llega como prop y no se deduce aqui: depende de que otro paso del flujo haya
+   * declarado una ruta de contingencia, y la ficha solo conoce el suyo.
+   */
+  baseParamsLocked: boolean;
 }
 
 const props = defineProps<Props>();
@@ -56,12 +63,10 @@ const hasErrorBranch = computed<boolean>(() => props.errorBranch !== null);
  * backend detecta, porque el codigo que la dispara solo lo emite el parser.
  */
 const actionOptions = computed(() =>
-  (Object.keys(ERROR_BRANCH_ACTIONS) as ErrorBranchAction[])
-    .filter(
-      (action) =>
-        action !== 'VISION_IA' ||
-        (props.step.nodeType === NodeType.PARSER_PRE_IA && props.canOfferVision),
-    )
+  actionsForNodeType(props.step.nodeType)
+    // El catalogo ya acota por tipo; aqui solo queda la condicion que depende
+    // del GRAFO: sin un Procesador IA al que apuntar no hay vision que ofrecer.
+    .filter((action) => action !== 'VISION_IA' || props.canOfferVision)
     .map((action) => ({
       label: ERROR_BRANCH_ACTIONS[action].label,
       value: action,
@@ -163,6 +168,7 @@ const baseParamsComponent = computed(() => nodeBaseParamsRegistry[props.step.nod
         v-if="baseParamsComponent"
         :params="props.step.params"
         :node-id="props.step.nodeId"
+        :locked="props.baseParamsLocked"
         @update:params="emit('update:params', $event)"
       />
 

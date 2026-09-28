@@ -18,6 +18,7 @@ import {
   TRIGGER_NODE_TYPES,
 } from '@/types/pipeline';
 import {
+  actionsForNodeType,
   ERROR_BRANCH_ACTIONS,
   MULTIMODAL_FALLBACK_CODE,
   SHARED_ALERT_NODE_ID,
@@ -334,8 +335,18 @@ export const useWorkflowTemplatesStore = defineStore('workflowTemplates', () => 
       current = {};
     }
 
+    // Los defaults del tipo se siembran AQUI y no solo al anadir el nodo: un paso
+    // puede llegar con `params: {}` desde un JSON editado a mano o desde una
+    // plantilla anterior al registro de defaults, y salir sin ellos al guardar.
+    // El spread de `withBaseParamDefaults` deja ganar al valor existente, asi que
+    // esto nunca pisa lo que `setStepErrorBranch` acaba de imponer.
+    const steps = sequence.value.map<AssemblerStep>((step) => ({
+      ...step,
+      params: withBaseParamDefaults(step.nodeType, step.params),
+    }));
+
     const schema = assemblePipelineSchema(
-      sequence.value,
+      steps,
       {
         flowId: current.flowId ?? 'plantilla-nueva',
         name: current.name ?? activeDraft.value.name.trim(),
@@ -517,6 +528,45 @@ export const useWorkflowTemplatesStore = defineStore('workflowTemplates', () => 
   };
 
   /**
+   * Aplica al nodo fuente los `params` que su accion exige, o los revierte.
+   *
+   * Es la pieza que faltaba tras mover `onErrorStep` al editor de plantillas: en
+   * el asistente lo hacia `declareCaughtErrorCodes` del store del parser, y aqui
+   * no hay stores de nodo. Sin ella, el editor escribia una ruta selectiva sobre
+   * un nodo con `params: {}` y `validate-schema` devolvia un 400 —la regla 10
+   * rechaza una ruta que atrapa un codigo que el nodo no puede emitir.
+   *
+   * REVERSIBLE y por VALOR, no por ausencia: retirar la rama devuelve la clave a
+   * su valor `off` en vez de borrarla, y siempre se recorren las claves de TODAS
+   * las acciones para que cambiar de vision a alerta apague lo que la vision
+   * habia encendido. Dejarlo puesto convertiria en PAUSADO un flujo que hoy
+   * atraviesa tranquilamente un correo de solo imagen, sin nadie que lo recoja.
+   *
+   * Solo toca las claves declaradas en el catalogo, y solo las de las acciones
+   * que ESTE tipo de nodo puede declarar; el resto sobrevive intacto. La
+   * acotacion por tipo no es cosmetica: `failOnUnextractableMedia` solo existe
+   * en `ParserEmailConfigDto`, y escribirlo en un mapeador lo haria rechazar por
+   * `forbidNonWhitelisted` — se cambiaria un 400 por otro.
+   *
+   * @param step Paso cuyos `params` se recalculan.
+   * @param action Accion vigente, o `null` si el paso se queda sin ruta.
+   */
+  const applySourceParams = (
+    step: AssemblerStep,
+    action: ErrorBranchAction | null,
+  ): Record<string, unknown> => {
+    const next = { ...step.params };
+
+    for (const candidate of actionsForNodeType(step.nodeType)) {
+      for (const [key, values] of Object.entries(ERROR_BRANCH_ACTIONS[candidate].sourceParams)) {
+        next[key] = candidate === action ? values.on : values.off;
+      }
+    }
+
+    return next;
+  };
+
+  /**
    * Declara —o retira— la ruta de contingencia de un paso.
    *
    * Es la UNICA via por la que se escribe `onErrorStep`: el asistente solo lee
@@ -528,10 +578,30 @@ export const useWorkflowTemplatesStore = defineStore('workflowTemplates', () => 
    */
   const setStepErrorBranch = (nodeId: string, action: ErrorBranchAction | null): void => {
     const route = action === null ? null : buildErrorRoute(action);
+    // La ruta puede no resolverse —pedir vision sin un PROCESADOR_IA al que
+    // apuntar—, y entonces tampoco se siembran sus `params`: encender el
+    // interruptor del parser sin ruta que lo recoja dejaria el flujo en PAUSADO
+    // ante un correo de solo imagen, que es peor que no hacer nada.
+    const applied = route === null ? null : action;
+    const sourceIndex = sequence.value.findIndex((step) => step.nodeId === nodeId);
 
-    const steps = sequence.value.map<AssemblerStep>((step) =>
-      step.nodeId === nodeId ? { ...step, onErrorStep: route } : step,
-    );
+    const steps = sequence.value.map<AssemblerStep>((step, index) => {
+      if (step.nodeId === nodeId) {
+        return {
+          ...step,
+          onErrorStep: route,
+          params: applySourceParams(step, applied),
+        };
+      }
+
+      // Aguas arriba del nodo fuente: solo esos alimentan el namespace que la
+      // accion necesita leer. Un disparador posterior no aporta nada al desvio.
+      if (applied === null || sourceIndex === -1 || index >= sourceIndex) return step;
+
+      const required = ERROR_BRANCH_ACTIONS[applied].upstreamParams[step.nodeType];
+
+      return required === undefined ? step : { ...step, params: { ...step.params, ...required } };
+    });
 
     // ANTES de reensamblar: `rebuildSchemaFromSequence` lee `satellites.value`,
     // asi que provisionar el nodo despues lo dejaria fuera del documento hasta
@@ -539,6 +609,17 @@ export const useWorkflowTemplatesStore = defineStore('workflowTemplates', () => 
     reconcileAlertSatellite(steps);
     setSequence(steps);
   };
+
+  /**
+   * Si algun paso declara el respaldo de vision.
+   *
+   * Lo consulta la vista para bloquear el toggle de adjuntos del disparador: la
+   * vision lee los adjuntos de `raw_email`, y dejar apagarlos convertiria la
+   * ruta en un respaldo mudo que llama al modelo sin nada que leer.
+   */
+  const hasVisionBranch = computed<boolean>(() =>
+    sequence.value.some((step) => errorBranchOf(step.nodeId) === 'VISION_IA'),
+  );
 
   /**
    * Si TODO paso desviable declara ya una ruta de contingencia.
@@ -740,6 +821,7 @@ export const useWorkflowTemplatesStore = defineStore('workflowTemplates', () => 
     errorBranchOf,
     setStepErrorBranch,
     notifyAllErrors,
+    hasVisionBranch,
     setNotifyAllErrors,
     rebuildSchemaFromSequence,
     fetchTemplates,

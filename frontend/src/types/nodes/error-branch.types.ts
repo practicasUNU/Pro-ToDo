@@ -86,6 +86,43 @@ export interface ErrorBranchActionOption {
    * ese tipo todavia no tiene configurador con el que rellenar su prompt.
    */
   readonly canProvision: boolean;
+  /**
+   * Tipos de nodo que pueden declarar esta accion; vacio significa todos.
+   *
+   * Acota tambien a que nodos se les aplican los `sourceParams`, y eso no es un
+   * detalle: `failOnUnextractableMedia` solo existe en `ParserEmailConfigDto`, y
+   * escribirlo en un mapeador lo haria rechazar por `forbidNonWhitelisted`.
+   */
+  readonly onlyForNodeTypes: readonly NodeType[];
+  /**
+   * `params` que el nodo FUENTE debe declarar para poder emitir el codigo que
+   * la ruta atrapa, con el valor al que vuelven al retirarla.
+   *
+   * Vive AQUI, junto a la accion que lo exige, y no como una cadena suelta en
+   * el store: la regla 10 del validador rechaza una ruta selectiva cuyos
+   * `params` la desmienten, y mantener las dos mitades en archivos distintos es
+   * justo lo que las hizo divergir —el editor escribia la ruta y nadie encendia
+   * el interruptor, asi que `validate-schema` devolvia un 400 con `params: {}`.
+   *
+   * El valor de reversion es explicito y no una ausencia: borrar la clave la
+   * dejaria al defecto del DTO, que hoy coincide pero no tiene por que seguir
+   * haciendolo.
+   */
+  readonly sourceParams: Readonly<Record<string, { readonly on: unknown; readonly off: unknown }>>;
+  /**
+   * `params` que la accion exige AGUAS ARRIBA, indexados por tipo de nodo.
+   *
+   * La vision lee los adjuntos de `raw_email`
+   * (`LlmExtractorStrategy.collectVisionAttachments`), y esos solo existen si el
+   * disparador los ingiere. Sin esto la ruta pasa la validacion, se dispara en
+   * produccion y llama al modelo con cero adjuntos: un respaldo mudo, que es el
+   * mismo fallo silencioso que la regla 10 evita por el otro lado.
+   *
+   * NO se revierte al retirar la rama, a diferencia de `sourceParams`: ingerir
+   * adjuntos es util por si mismo, y apagarlo seria una perdida silenciosa de
+   * algo que el operador pudo querer aparte.
+   */
+  readonly upstreamParams: Readonly<Partial<Record<NodeType, Record<string, unknown>>>>;
 }
 
 export const ERROR_BRANCH_ACTIONS: Record<ErrorBranchAction, ErrorBranchActionOption> = {
@@ -94,12 +131,22 @@ export const ERROR_BRANCH_ACTIONS: Record<ErrorBranchAction, ErrorBranchActionOp
     hint: 'Envia una carta con el nodo que fallo, su codigo y el payload parcial a las personas que indiques.',
     targetNodeType: NodeType.DESTINO_SMTP,
     canProvision: true,
+    onlyForNodeTypes: [],
+    // La forma de CADENA atrapa cualquier fallo, asi que no hay codigo concreto
+    // que el nodo deba poder emitir: la regla 10 ni siquiera la mira.
+    sourceParams: {},
+    upstreamParams: {},
   },
   VISION_IA: {
     label: 'Extraccion con vision IA',
     hint: 'Reenvia el correo al nodo de IA del flujo, que leera la imagen o el PDF escaneado en vez del texto.',
     targetNodeType: NodeType.PROCESADOR_IA,
     canProvision: false,
+    // El fallo por medios sin texto solo lo emite el parser; ofrecer la vision
+    // en otro tipo crearia una rama muerta que ninguna regla del backend ve.
+    onlyForNodeTypes: [NodeType.PARSER_PRE_IA],
+    sourceParams: { failOnUnextractableMedia: { on: true, off: false } },
+    upstreamParams: { [NodeType.TRIGGER_IMAP]: { includeAttachments: true } },
   },
 };
 
@@ -119,6 +166,14 @@ export interface ErrorBranch {
   readonly trigger: ErrorBranchTrigger;
   readonly action: ErrorBranchAction;
 }
+
+/** Acciones de respaldo que un tipo de nodo puede ofrecer. */
+export const actionsForNodeType = (nodeType: NodeType): ErrorBranchAction[] =>
+  (Object.keys(ERROR_BRANCH_ACTIONS) as ErrorBranchAction[]).filter((action) => {
+    const { onlyForNodeTypes } = ERROR_BRANCH_ACTIONS[action];
+
+    return onlyForNodeTypes.length === 0 || onlyForNodeTypes.includes(nodeType);
+  });
 
 /** Disparadores que un tipo de nodo puede ofrecer. */
 export const triggersForNodeType = (nodeType: NodeType): ErrorBranchTrigger[] =>
