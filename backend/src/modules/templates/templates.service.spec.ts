@@ -5,6 +5,7 @@ import {
 } from '@nestjs/common';
 
 import { createTemplateRendererService } from '@test/factories/template-renderer.factory';
+import { MADRID_D_TEMPLATE_HTML } from '@test/fixtures/madrid-d-template.fixture';
 
 import { ALLOWED_NAMESPACES, TemplatesService } from './templates.service';
 
@@ -747,6 +748,25 @@ describe('TemplatesService', () => {
       ]);
       expect(stored.htmlContent).toBe('<h1>{{parsed_email.clean_title}}</h1>');
       expect(repository.save).not.toHaveBeenCalled();
+    });
+
+    it('7.7 deberia persistir el marcado institucional de Madrid+D', async () => {
+      // 1. Arrange: caso de aceptacion del requisito. Este HTML real devolvia
+      //    400 por `<u>`, `title` en `<img>`, `data-olk-copy-source` e `id`.
+      const repository = buildRepository();
+      const service = buildService(repository);
+
+      // 2. Act
+      const result = await service.create(
+        { name: 'licitacion-madrid-d', htmlContent: MADRID_D_TEMPLATE_HTML },
+        AUTHOR_ID,
+      );
+
+      // 3. Assert: se guarda VERBATIM y el marcador queda declarado como
+      //    variable requerida, aunque figure tambien dentro de un `href`.
+      expect(result.htmlContent).toBe(MADRID_D_TEMPLATE_HTML);
+      expect(result.requiredVariables).toEqual(['raw_email.from']);
+      expect(repository.save).toHaveBeenCalledTimes(1);
     });
   });
 

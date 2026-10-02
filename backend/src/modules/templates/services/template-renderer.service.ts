@@ -83,6 +83,10 @@ export const TEMPLATE_SANITIZER_CONFIG: sanitizeHtml.IOptions = {
     'i',
     'strong',
     'em',
+    // Subrayado institucional: Madrid+D lo emplea para destacar plazos y fechas
+    // de convocatoria ("Hasta el dia 8 de octubre"). Es presentacion pura, sin
+    // superficie de ataque, y su ausencia rechazaba el marcado real completo.
+    'u',
     'ul',
     'ol',
     'li',
@@ -110,9 +114,16 @@ export const TEMPLATE_SANITIZER_CONFIG: sanitizeHtml.IOptions = {
     'time',
   ],
   allowedAttributes: {
-    '*': ['class', 'style'],
+    // `style` sube al global: el marcado institucional lleva maquetacion en
+    // linea en casi cualquier etiqueta. NO se declara `allowedStyles` a
+    // proposito; hacerlo ENDURECERIA la regla actual (hoy cualquier propiedad
+    // CSS pasa) y rechazaria `border`, `vertical-align` o `line-height`
+    // legitimos. `data-*` usa el comodin nativo de la libreria: los clientes de
+    // correo inyectan atributos propios (`data-olk-copy-source`) que son
+    // metadatos inertes, no ejecutables.
+    '*': ['id', 'class', 'style', 'data-*'],
     a: ['href', 'title', 'target', 'rel'],
-    img: ['src', 'alt', 'width', 'height', 'style'],
+    img: ['src', 'alt', 'title', 'width', 'height'],
     time: ['datetime'],
   },
   // Sin `javascript:` ni `data:`: el primero ejecuta, el segundo permite
@@ -201,6 +212,51 @@ const URL_SCHEME_PATTERN = /^\s*([a-z][a-z0-9+.-]*)\s*:/i;
 
 /** Atributo de evento en linea (`onerror`, `onclick`). */
 const EVENT_ATTRIBUTE_PATTERN = /^on[a-z]+$/i;
+
+/**
+ * Marcador de interpolacion del motor como valor COMPLETO de un atributo.
+ *
+ * Anclado en los dos extremos a proposito: `javascript:{{raw_email.from}}` o
+ * `data:text/html;{{...}}` NO encajan, asi que siguen cayendo en la
+ * comprobacion de protocolo. Solo exime al valor que es exclusivamente un
+ * marcador, cuyo esquema real no se conoce hasta la interpolacion en ejecucion.
+ *
+ * La gramatica replica la de `TEMPLATE_VARIABLE_PATTERN` del gestor de
+ * plantillas (raiz, un campo y un indice opcional), que es la unica que el
+ * motor sabe resolver.
+ */
+const CONTEXT_MARKER_PATTERN =
+  /^\{\{\s*[a-zA-Z0-9_]+\.[a-zA-Z0-9_]+(\[[0-9]+\])?\s*\}\}$/;
+
+/**
+ * Compara un atributo contra un patron de la lista blanca admitiendo comodines
+ * prefijados (`data-*`), como hace `sanitize-html`.
+ *
+ * Se replica aqui porque la libreria no expone su emparejador, y el auditor
+ * tiene que aceptar EXACTAMENTE lo mismo que el saneador: si no, marcaria como
+ * infraccion un `data-olk-copy-source` que la puerta ya deja pasar, y el autor
+ * recibiria un 400 por algo que en realidad se publica.
+ *
+ * El comodin universal `*` se rechaza: en el mapa de `allowedAttributes` esa
+ * clave designa "cualquier ETIQUETA", no "cualquier atributo", y tratarla como
+ * comodin abriria la lista blanca entera.
+ */
+const matchesAllowedAttribute = (
+  pattern: string,
+  attribute: string,
+): boolean => {
+  if (pattern === '*') {
+    return false;
+  }
+
+  if (pattern.endsWith('*')) {
+    const prefix = pattern.slice(0, -1);
+
+    return prefix.length > 0 && attribute.startsWith(prefix);
+  }
+
+  return pattern === attribute;
+};
 
 /**
  * Salida del render, como union discriminada.
@@ -393,25 +449,46 @@ export class TemplateRendererService {
         return;
       }
 
-      const allowedForTag = new Set([
+      // Array y no `Set`: la lista puede contener comodines (`data-*`), que
+      // exigen comparacion por patron en vez de busqueda exacta.
+      const allowedForTag = [
         ...(ALLOWED_ATTRIBUTES['*'] ?? []),
         ...(ALLOWED_ATTRIBUTES[tagName] ?? []),
-      ]);
+      ];
 
       for (const [rawName, rawValue] of Object.entries(element.attribs)) {
         const attribute = rawName.toLowerCase();
 
-        if (!allowedForTag.has(attribute)) {
+        // Clausula de guarda: los eventos en linea se evaluan ANTES que la
+        // lista blanca. Defensa en profundidad frente a un comodin que algun
+        // dia se ampliara de mas; un `onerror` jamas debe poder colarse por
+        // coincidir con un patron.
+        if (EVENT_ATTRIBUTE_PATTERN.test(attribute)) {
           register(
             attribute,
             'attribute',
-            EVENT_ATTRIBUTE_PATTERN.test(attribute)
-              ? `Atributo de evento '${attribute}' no permitido`
-              : `Atributo '${attribute}' no permitido en <${tagName}>`,
+            `Atributo de evento '${attribute}' no permitido`,
+          );
+        } else if (
+          !allowedForTag.some((pattern) =>
+            matchesAllowedAttribute(pattern, attribute),
+          )
+        ) {
+          register(
+            attribute,
+            'attribute',
+            `Atributo '${attribute}' no permitido en <${tagName}>`,
           );
         }
 
         if (!URL_ATTRIBUTES.has(attribute)) {
+          continue;
+        }
+
+        // Un marcador del motor como valor INTEGRO del atributo no se juzga
+        // aqui: el esquema que acabara teniendo depende del contexto en
+        // ejecucion, y el saneador del render lo revisara ya interpolado.
+        if (CONTEXT_MARKER_PATTERN.test(rawValue)) {
           continue;
         }
 

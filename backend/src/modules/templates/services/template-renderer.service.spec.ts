@@ -1,3 +1,4 @@
+import { MADRID_D_TEMPLATE_HTML } from '@test/fixtures/madrid-d-template.fixture';
 import {
   createTemplateRendererService,
   TEST_ASSETS_BASE_URL,
@@ -641,6 +642,130 @@ describe('TemplateRendererService', () => {
 
       // 3. Assert
       expect(outcome).toEqual({ markup: `<p>${TEST_ASSETS_BASE_URL}</p>` });
+    });
+  });
+  describe('8. Marcado institucional Madrid+D (Drupal / Outlook)', () => {
+    /** Mismo atajo que el bloque 6: casi todo se afirma por par. */
+    const audit = (html: string): Array<{ type: string; target: string }> =>
+      renderer
+        .auditPublishableMarkup(html)
+        .map(({ type, target }) => ({ type, target }));
+
+    it('8.1 deberia aceptar el fixture real que provocaba el 400', () => {
+      // 1. Arrange & 2. Act: caso de aceptacion del requisito.
+      const { wasFiltered } = renderer.inspectPublishableMarkup(
+        MADRID_D_TEMPLATE_HTML,
+      );
+
+      // 3. Assert: la puerta no recorta nada y el localizador no senala nada.
+      expect(wasFiltered).toBe(false);
+      expect(renderer.auditPublishableMarkup(MADRID_D_TEMPLATE_HTML)).toEqual(
+        [],
+      );
+    });
+
+    it('8.2 deberia admitir cada construccion institucional por separado', () => {
+      // 1. Arrange: una muestra por motivo de rechazo anterior.
+      const samples = [
+        '<p><u>Hasta el dia 8 de octubre de 2026</u></p>',
+        '<img src="/modules/logo.png" alt="x" title="Fundacion madri+d">',
+        '<span data-olk-copy-source="MessageBody">texto</span>',
+        '<div id="licitacion-panel" class="panel-body">texto</div>',
+        '<p style="font-size:14px;line-height:1.5;border:0;vertical-align:middle">x</p>',
+      ];
+
+      // 2. Act & 3. Assert
+      for (const html of samples) {
+        expect(renderer.inspectPublishableMarkup(html).wasFiltered).toBe(false);
+        expect(audit(html)).toEqual([]);
+      }
+    });
+
+    it('8.3 deberia eximir un marcador del motor usado como href completo', () => {
+      // 1. Arrange: el esquema real no se conoce hasta la interpolacion.
+      const html = '<a href="{{raw_email.from}}">Escribir</a>';
+
+      // 2. Act & 3. Assert
+      expect(audit(html)).toEqual([]);
+    });
+
+    it('8.4 deberia rechazar un esquema prohibido aunque lleve un marcador', () => {
+      // 1. Arrange: el patron del marcador esta anclado, asi que estas dos
+      //    combinaciones NO lo satisfacen y siguen juzgandose por protocolo.
+      const samples = [
+        '<a href="javascript:{{raw_email.from}}">x</a>',
+        '<a href="data:text/html;{{raw_email.from}}">x</a>',
+      ];
+
+      // 2. Act & 3. Assert
+      for (const html of samples) {
+        expect(audit(html)).toEqual([
+          {
+            target: html.includes('javascript') ? 'javascript:' : 'data:',
+            type: 'protocol',
+          },
+        ]);
+      }
+    });
+
+    it('8.5 deberia seguir bloqueando el marcado peligroso tras ampliar la lista', () => {
+      // 1. Arrange: regresiones de seguridad, una por tipo de infraccion.
+      const samples: Array<[string, { type: string; target: string }]> = [
+        ['<script>alert(1)</script>', { target: 'script', type: 'tag' }],
+        [
+          '<iframe src="https://x.es"></iframe>',
+          { target: 'iframe', type: 'tag' },
+        ],
+        [
+          '<p onclick="alert(1)">x</p>',
+          { target: 'onclick', type: 'attribute' },
+        ],
+        [
+          '<img src="a.png" alt="x" onload="alert(1)">',
+          { target: 'onload', type: 'attribute' },
+        ],
+        [
+          '<img src="a.png" alt="x" onerror="alert(1)">',
+          { target: 'onerror', type: 'attribute' },
+        ],
+        [
+          '<a href="javascript:void(0)">x</a>',
+          { target: 'javascript:', type: 'protocol' },
+        ],
+        // No empieza por `data-`, luego el comodin no lo alcanza.
+        [
+          '<img src="a.png" alt="x" srcset="b.png 2x">',
+          { target: 'srcset', type: 'attribute' },
+        ],
+      ];
+
+      // 2. Act & 3. Assert
+      for (const [html, expected] of samples) {
+        expect(renderer.inspectPublishableMarkup(html).wasFiltered).toBe(true);
+        expect(audit(html)).toContainEqual(expected);
+      }
+    });
+
+    it('8.6 deberia mantener el acuerdo entre la sonda y la auditoria', () => {
+      // 1. Arrange: mismo invariante del 6.12, ahora sobre las construcciones
+      //    nuevas; divergir significaria rechazar sin poder senalar.
+      const samples = [
+        MADRID_D_TEMPLATE_HTML,
+        '<span data-olk-copy-source="MessageBody">x</span>',
+        '<u>plazo</u>',
+        '<img src="/a.png" alt="x" title="t">',
+        '<img src="a.png" alt="x" srcset="b.png 2x">',
+        '<p onclick="alert(1)">x</p>',
+      ];
+
+      // 2. Act & 3. Assert
+      for (const html of samples) {
+        const { wasFiltered } = renderer.inspectPublishableMarkup(html);
+
+        expect(renderer.auditPublishableMarkup(html).length > 0).toBe(
+          wasFiltered,
+        );
+      }
     });
   });
 });
