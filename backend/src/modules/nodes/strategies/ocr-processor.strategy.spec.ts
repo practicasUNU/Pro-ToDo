@@ -2,6 +2,7 @@ import { describe, expect, it, jest } from '@jest/globals';
 
 import { NodeType } from '@core/fsm/types/pipeline-schema.types';
 import { LlmProvider } from '@modules/nodes/strategies/interfaces/llm-provider.interface';
+import { LlmProviderFactory } from '@modules/nodes/strategies/llm-provider.factory';
 import { MockLlmProvider } from '@modules/nodes/strategies/providers/mock-llm.provider';
 import {
   ERR_OCR_CONFIG,
@@ -14,6 +15,7 @@ import {
 import { createMockStatePayloadContext } from '../../../../test/factories/state-payload-context.factory';
 
 import type { AiDefaultsConfig } from '@core/config/ai-defaults.config';
+import type { AnthropicLlmProvider } from '@modules/nodes/strategies/providers/anthropic-llm.provider';
 import type { GeminiLlmProvider } from '@modules/nodes/strategies/providers/gemini-llm.provider';
 import type { LlmResponsePayload } from '@modules/nodes/strategies/interfaces/llm-provider.interface';
 import type { StatePayloadContext } from '@core/fsm/context/state-payload.context';
@@ -40,13 +42,40 @@ const buildAiDefaults = (): AiDefaultsConfig =>
     getTextDefaults: jest.fn().mockReturnValue({ provider: null, model: null }),
   }) as unknown as AiDefaultsConfig;
 
+/**
+ * Factoria REAL con los clientes doblados.
+ *
+ * Se construye la factoria de verdad en vez de doblarla: su unica logica es un
+ * mapeo, y un doble devolveria lo que se le dijera, con lo que la prueba
+ * dejaria de notar que un proveedor desaparece del indice. Lo que si va
+ * doblado es Gemini, que sale a la red; `AnthropicLlmProvider` va vacio porque
+ * las pruebas de este nodo no lo ejercen.
+ */
+const buildProviderFactory = (
+  mock: MockLlmProvider,
+  gemini: Partial<GeminiLlmProvider>,
+  anthropic: Partial<AnthropicLlmProvider> = {},
+): LlmProviderFactory => {
+  const factory = new LlmProviderFactory(
+    mock,
+    gemini as GeminiLlmProvider,
+    anthropic as AnthropicLlmProvider,
+  );
+
+  jest.spyOn(factory['logger'], 'warn').mockImplementation(() => undefined);
+
+  return factory;
+};
+
 const buildStrategy = (
   gemini: Partial<GeminiLlmProvider> = {},
   aiDefaults: AiDefaultsConfig = buildAiDefaults(),
+  anthropic: Partial<AnthropicLlmProvider> = {},
 ): OcrProcessorStrategy => {
+  const mockProvider = new MockLlmProvider();
   const strategy = new OcrProcessorStrategy(
-    new MockLlmProvider(),
-    gemini as GeminiLlmProvider,
+    mockProvider,
+    buildProviderFactory(mockProvider, gemini, anthropic),
     aiDefaults,
   );
 
@@ -259,6 +288,63 @@ describe('OcrProcessorStrategy · nodo satelite PROCESADOR_OCR', () => {
       // 3. Assert 🎯
       expect(result.success).toBe(false);
       expect(result.error?.code).toBe(ERR_OCR_EMPTY_TRANSCRIPTION);
+    });
+  });
+
+  describe('5. Resolucion del proveedor', () => {
+    it('5.1 deberia usar el cliente de ANTHROPIC y no degradar al simulador', async () => {
+      // 1. Arrange 📐: REGRESION de PROT-21. Este nodo resolvia el proveedor
+      //    con una copia propia del mapeo que nunca llego a conocer
+      //    `ANTHROPIC`, asi que un OCR configurado con Claude caia al
+      //    simulador aunque el cliente existiera desde PROT-20 — y lo hacia
+      //    por la misma via que un proveedor inexistente, indistinguible en
+      //    el log. Ahora el mapeo lo resuelve `LlmProviderFactory`.
+      const generateCompletion = jest.fn<() => Promise<LlmResponsePayload>>(
+        () =>
+          Promise.resolve({
+            headline: 'Transcripcion',
+            summary: 'Texto recuperado del escaneo',
+            body_paragraphs: ['Contenido del documento'],
+            metadata: {
+              tokensPrompt: 10,
+              tokensCompletion: 20,
+              modelUsed: 'claude-sonnet-5-5',
+              isMock: false,
+            },
+          }),
+      );
+      const strategy = buildStrategy({}, buildAiDefaults(), {
+        provider: LlmProvider.ANTHROPIC,
+        generateCompletion,
+      } as unknown as AnthropicLlmProvider);
+
+      // 2. Act ⚙️
+      const result = await strategy.execute(buildContext(), {
+        provider: LlmProvider.ANTHROPIC,
+      });
+
+      // 3. Assert 🎯: se comprueba que respondio el cliente doblado y no el
+      //    simulador. No vale mirar `isMock`: a diferencia de PROCESADOR_IA,
+      //    este nodo no publica metadatos del proveedor en su namespace, asi
+      //    que la unica senal observable es el propio texto transcrito.
+      expect(generateCompletion).toHaveBeenCalledTimes(1);
+      expect(result.success).toBe(true);
+      expect(result.data?.clean_body).not.toContain('MOCK OCR');
+    });
+
+    it('5.2 deberia seguir degradando al simulador un proveedor sin cliente', async () => {
+      // 1. Arrange 📐: OPENAI es el unico que queda sin cliente. La
+      //    degradacion se conserva a proposito (criterio de PROT-16).
+      const strategy = buildStrategy();
+
+      // 2. Act ⚙️
+      const result = await strategy.execute(buildContext(), {
+        provider: LlmProvider.OPENAI,
+      });
+
+      // 3. Assert 🎯
+      expect(result.success).toBe(true);
+      expect(result.data?.clean_body).toContain('MOCK OCR');
     });
   });
 });

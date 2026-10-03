@@ -366,6 +366,7 @@ describe('AnthropicLlmProvider · cliente de Claude sobre la Messages API', () =
       const http = buildHttp();
       http.request.mockResolvedValue({
         failure: {
+          level: 'GRAVE',
           code: 'ERR_NODE_HTTP_TIMEOUT',
           message: 'se agoto la espera',
         },

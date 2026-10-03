@@ -1,6 +1,7 @@
 import { defineStore, acceptHMRUpdate } from 'pinia';
 import { computed, ref } from 'vue';
 
+import * as llmExtractorService from '@services/nodes/llm-extractor.service';
 import { useAiPromptTemplatesStore } from '@stores/ai-prompt-templates.store';
 
 import {
@@ -19,17 +20,34 @@ import {
   MIN_LLM_EMERGENCY_BRAKE_THRESHOLD,
   MIN_LLM_RETRIES,
   MIN_LLM_TIMEOUT_MS,
+  resolveModelAvailability,
 } from '@/types/nodes/llm-extractor.types';
 
 import type { HydratableNode, UpstreamNamespace } from '@stores/nodes/node-store-registry';
 
-import type { LlmExtractorNodeConfig } from '@/types/nodes/llm-extractor.types';
+import type {
+  LlmExtractorNodeConfig,
+  LlmModelAvailability,
+  LlmModelDescriptor,
+  LlmTestConnectionResult,
+} from '@/types/nodes/llm-extractor.types';
 
 /** Opcion de variable interpolable que el prompt en linea puede citar. */
 export interface PromptVariableOption {
   readonly label: string;
   readonly value: string;
   readonly group: string;
+}
+
+/** Opcion del selector de modelo, ya resuelta para pintar su distintivo. */
+export interface LlmModelOption {
+  readonly label: string;
+  readonly value: string;
+  readonly provider: LlmProvider;
+  readonly availability: LlmModelAvailability;
+  readonly contextWindow: number;
+  /** true si no figura en el catalogo del backend. Ver `modelOptions`. */
+  readonly isUncatalogued: boolean;
 }
 
 /** Marcador de un campo, tal y como se interpola en el prompt. */
@@ -55,6 +73,11 @@ const isWithin = (value: number, min: number, max: number): boolean =>
 /** Configuracion inicial; se reutiliza en `resetConfig`. */
 const buildInitialConfig = (): LlmExtractorNodeConfig => ({
   templatePromptId: null,
+  // El asistente no lo ofrece: el codigo es la via portable para que una
+  // PLANTILLA de flujo o una semilla citen un prompt sin fijar un UUID. Se
+  // conserva para que `hydrateFromNode` + `toNodeParams` sigan siendo un viaje
+  // de ida y vuelta fiel sobre un flujo creado asi.
+  promptCode: '',
   inlinePrompt: '',
   // El mismo defecto que el backend, y por el mismo motivo: un nodo al que
   // todavia nadie ha mirado la configuracion no debe poder gastar dinero por
@@ -72,17 +95,22 @@ const STORE_ID_PREFIX = 'llmExtractorNode';
 
 // Estado reactivo del nodo PROCESADOR_IA (regla frontend-quasar.md §3.1).
 //
-// SIN capa de servicios propia, y esta vez no por el motivo del disparador Cron.
-// Este nodo SI necesita datos del backend —el catalogo de prompts—, pero ya los
-// sirve `ai-prompt-templates.service.ts` a traves de su store de dominio, cuyo
-// `loadPrompts()` devuelve por defecto solo los activos, que es exactamente lo
-// que el selector necesita. Un `services/nodes/llm-extractor.service.ts` que
-// reexportase eso seria la capa vacia que `frontend-architecture.md` §2.1
-// desaconseja; el precedente contrario es `template-mapper.service.ts`, que si
-// existe porque adapta DOS llamadas distintas del dominio de plantillas.
+// CON capa de servicios propia DESDE PROT-21, revirtiendo lo que este mismo
+// comentario sostenia antes. El argumento anterior era correcto mientras lo
+// fue: lo unico que el nodo pedia al backend eran las plantillas de prompt, que
+// ya sirve `ai-prompt-templates.service.ts` por su store de dominio, y
+// envolverlas habria sido la capa vacia que `frontend-architecture.md` §2.1
+// desaconseja. Ahora hay dos rutas que no pertenecen a ningun otro dominio —el
+// catalogo de modelos y el banco de pruebas de conectividad— y alguien tiene
+// que poseerlas; los prompts se siguen pidiendo por donde se pedian.
 const llmExtractorSetup = () => {
   const config = ref<LlmExtractorNodeConfig>(buildInitialConfig());
   const availableUpstreamContext = ref<UpstreamNamespace[]>([]);
+
+  const availableModels = ref<LlmModelDescriptor[]>([]);
+  const isLoadingModels = ref<boolean>(false);
+  const isTestingConnection = ref<boolean>(false);
+  const lastConnectionResult = ref<LlmTestConnectionResult | null>(null);
 
   const promptsStore = useAiPromptTemplatesStore();
 
@@ -110,6 +138,68 @@ const llmExtractorSetup = () => {
         group: nodeType === undefined ? namespace : `${namespace} (${nodeType})`,
       })),
     ),
+  );
+
+  /**
+   * Opciones del selector de modelo, con los disponibles arriba.
+   *
+   * ORDEN y no filtrado: un modelo sin credencial se ve, se puede elegir y
+   * explica por que su salida saldria simulada. Esconderlo dejaria el mismo
+   * sintoma sin ninguna pista, que es el estado del que viene esta pantalla.
+   *
+   * EL MODELO GUARDADO SIEMPRE APARECE, aunque el catalogo no lo incluya. Sin
+   * esto, un selector cerrado dejaria en blanco la configuracion de cualquier
+   * flujo que apunte a un modelo retirado de la tabla curada —y el `.env` de
+   * esta instalacion ya puede traer uno por `AI_DEFAULT_MODEL`—, de modo que
+   * abrir el paso para mirarlo bastaria para romperlo al guardar.
+   */
+  const modelOptions = computed<LlmModelOption[]>(() => {
+    const catalogued = availableModels.value.map<LlmModelOption>((descriptor) => ({
+      label: descriptor.label,
+      value: descriptor.model,
+      provider: descriptor.provider,
+      availability: resolveModelAvailability(descriptor),
+      contextWindow: descriptor.contextWindow,
+      isUncatalogued: false,
+    }));
+
+    const current = config.value.model.trim();
+    const isListed = current === '' || catalogued.some((option) => option.value === current);
+
+    const options = isListed
+      ? catalogued
+      : [
+          ...catalogued,
+          {
+            label: `${current} (no catalogado)`,
+            value: current,
+            provider: config.value.provider,
+            // No se puede afirmar que este configurado: el backend no lo
+            // conoce, asi que no ha podido comprobar ninguna credencial.
+            availability: 'MISSING_KEY' as LlmModelAvailability,
+            contextWindow: 0,
+            isUncatalogued: true,
+          },
+        ];
+
+    // Estable y sin mutar el array de origen: `sort` ordena en el sitio, y
+    // hacerlo sobre `catalogued` reordenaria el estado en cada recalculo.
+    return [...options].sort(
+      (left, right) =>
+        Number(right.availability === 'AVAILABLE') - Number(left.availability === 'AVAILABLE'),
+    );
+  });
+
+  /** Estado del modelo elegido, para el distintivo junto al selector. */
+  const selectedModelAvailability = computed<LlmModelAvailability | null>(
+    () =>
+      modelOptions.value.find((option) => option.value === config.value.model.trim())
+        ?.availability ?? null,
+  );
+
+  /** Falso mientras no haya modelo elegido o ya se este probando. */
+  const canTestConnection = computed<boolean>(
+    () => config.value.model.trim() !== '' && !isTestingConnection.value,
   );
 
   const hasTemplatePrompt = computed<boolean>(
@@ -183,6 +273,14 @@ const llmExtractorSetup = () => {
 
   const updateConfig = (patch: Partial<LlmExtractorNodeConfig>): void => {
     config.value = { ...config.value, ...patch };
+
+    // Un resultado de prueba no puede sobrevivir al par que lo produjo: dejar
+    // "conexion correcta" en pantalla despues de cambiar de proveedor es peor
+    // que no haber probado nunca. Mismo criterio que el banco de pruebas del
+    // extractor web con su `invalidateSandboxResult`.
+    if (patch.provider !== undefined || patch.model !== undefined) {
+      lastConnectionResult.value = null;
+    }
   };
 
   const setAvailableUpstreamContext = (context: UpstreamNamespace[]): void => {
@@ -209,6 +307,53 @@ const llmExtractorSetup = () => {
   };
 
   /**
+   * Trae el catalogo de modelos.
+   *
+   * SIN memoizar, al contrario que `loadPrompts`. La disponibilidad depende de
+   * variables de entorno del servidor, y el caso que esta pantalla viene a
+   * resolver es precisamente el de alguien que acaba de poner una credencial
+   * que faltaba: cachearlo le mostraria el estado anterior hasta recargar la
+   * aplicacion entera. La peticion no toca la base de datos.
+   *
+   * Sin `try/catch`: la excepcion sube al componente, que es quien decide el
+   * mensaje (`frontend-architecture.md` §2.1). El `finally` solo apaga el
+   * indicador.
+   */
+  const fetchAvailableModels = async (): Promise<void> => {
+    isLoadingModels.value = true;
+
+    try {
+      availableModels.value = await llmExtractorService.fetchLlmModels();
+    } finally {
+      isLoadingModels.value = false;
+    }
+  };
+
+  /**
+   * Prueba la conexion con el proveedor y el modelo elegidos ahora mismo.
+   *
+   * Un fallo diagnosticado llega como 200 con `success: false` y se guarda
+   * como resultado, no se lanza: es la respuesta que el formulario tiene que
+   * mostrar. Solo una peticion rota propaga excepcion.
+   */
+  const testConnection = async (): Promise<LlmTestConnectionResult> => {
+    isTestingConnection.value = true;
+
+    try {
+      const result = await llmExtractorService.testLlmConnection({
+        provider: config.value.provider,
+        model: config.value.model.trim(),
+      });
+
+      lastConnectionResult.value = result;
+
+      return result;
+    } finally {
+      isTestingConnection.value = false;
+    }
+  };
+
+  /**
    * `params` del nodo para el `pipeline_schema`.
    *
    * LO VACIO SE OMITE: el DTO valida `@IsNotEmpty` sobre `inlinePrompt` y
@@ -223,9 +368,11 @@ const llmExtractorSetup = () => {
   const toNodeParams = (): Record<string, unknown> => {
     const inlinePrompt = config.value.inlinePrompt.trim();
     const templatePromptId = config.value.templatePromptId?.trim() ?? '';
+    const promptCode = config.value.promptCode.trim();
 
     return {
       ...(templatePromptId !== '' ? { templatePromptId } : {}),
+      ...(promptCode !== '' ? { promptCode } : {}),
       ...(inlinePrompt !== '' ? { inlinePrompt } : {}),
       provider: config.value.provider,
       model: config.value.model.trim(),
@@ -246,10 +393,15 @@ const llmExtractorSetup = () => {
    */
   const hydrateFromNode = (node: HydratableNode): void => {
     const { params } = node;
+
+    // Mismo motivo que en `updateConfig`: el resultado de una prueba anterior
+    // no describe la configuracion que se acaba de cargar.
+    lastConnectionResult.value = null;
     const templatePromptId = asText(params.templatePromptId);
 
     config.value = {
       templatePromptId: templatePromptId === '' ? null : templatePromptId,
+      promptCode: asText(params.promptCode),
       inlinePrompt: asText(params.inlinePrompt),
       provider: asProvider(params.provider),
       model: asText(params.model) || DEFAULT_LLM_MODEL,
@@ -266,11 +418,19 @@ const llmExtractorSetup = () => {
   const resetConfig = (): void => {
     config.value = buildInitialConfig();
     availableUpstreamContext.value = [];
+    lastConnectionResult.value = null;
   };
 
   return {
     config,
     availableUpstreamContext,
+    availableModels,
+    isLoadingModels,
+    isTestingConnection,
+    lastConnectionResult,
+    modelOptions,
+    selectedModelAvailability,
+    canTestConnection,
     promptOptions,
     promptVariableOptions,
     hasTemplatePrompt,
@@ -281,6 +441,8 @@ const llmExtractorSetup = () => {
     updateConfig,
     setAvailableUpstreamContext,
     loadPrompts,
+    fetchAvailableModels,
+    testConnection,
     toNodeParams,
     hydrateFromNode,
     resetConfig,

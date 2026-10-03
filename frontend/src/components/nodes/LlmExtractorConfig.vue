@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue';
-import { copyToClipboard, useQuasar } from 'quasar';
+import { useQuasar } from 'quasar';
 
 import { useLlmExtractorStore } from '@stores/nodes/llm-extractor.store';
 import { useAiPromptTemplatesStore } from '@stores/ai-prompt-templates.store';
@@ -12,8 +12,11 @@ import { extractApiErrorMessage } from '@/utils/api-error';
 
 import { NODE_TYPE_LABELS, NodeType } from '@/types/pipeline';
 import type { AiPromptTemplateDetail } from '@/types/ai-prompt-template';
+import type { LlmModelAvailability } from '@/types/nodes/llm-extractor.types';
 import {
   IMPLEMENTED_LLM_PROVIDERS,
+  LLM_AVAILABILITY_LABELS,
+  LLM_AVAILABILITY_TOKENS,
   LLM_PROVIDER_LABELS,
   LlmProvider,
   MAX_LLM_EMERGENCY_BRAKE_THRESHOLD,
@@ -51,17 +54,18 @@ const LEGACY_INLINE_NOTICE =
   'Este flujo se creo cuando se podia escribir la instruccion aqui. Se conserva tal cual para no alterarlo, pero ya no se edita: elige una plantilla de prompt y pasara a mandar ella.';
 
 const MODEL_HINT =
-  'Texto libre a proposito: los proveedores publican modelos nuevos cada pocas semanas, y una lista cerrada obligaria a desplegar el backend para poder escribir el ultimo. Un modelo inexistente lo rechaza el proveedor.';
+  'El distintivo dice si el proveedor tiene su clave de API puesta en el servidor. Un modelo sin ella no falla: degrada al simulador y la salida sale marcada como simulada.';
+
+const NO_MODELS_HINT = 'No se pudo cargar el catalogo de modelos';
+
+const UNCATALOGUED_NOTICE =
+  'Este flujo apunta a un modelo que no figura en el catalogo del servidor. Se conserva tal cual para no alterarlo, pero no se ha podido comprobar que siga existiendo: pruebalo con el boton de abajo antes de confiar en el.';
 
 const RETRIES_HINT =
   'Reintentos RAPIDOS DE RED, distintos del retryPolicy del esquema. Los dos niveles se multiplican y cada vuelta factura tokens.';
 
 const BRAKE_HINT =
   'Fallos consecutivos del proveedor que pausan el flujo. Es el corte de la espiral de gasto: al alcanzarlo, la ejecucion queda PAUSADA con el cursor intacto.';
-
-const VARIABLES_HINT = 'Elige una para copiar su marcador y pegarlo en la instruccion';
-
-const NO_VARIABLES_HINT = 'Sin pasos anteriores que publiquen campos';
 
 /** Selector cerrado del proveedor (Poka-Yoke §4). */
 const providerOptions = computed(() =>
@@ -74,6 +78,75 @@ const providerOptions = computed(() =>
   })),
 );
 
+/** Color del distintivo, resuelto sobre los tokens de la paleta (§2). */
+const availabilityToken = (availability: LlmModelAvailability): string =>
+  LLM_AVAILABILITY_TOKENS[availability];
+
+const availabilityLabel = (availability: LlmModelAvailability): string =>
+  LLM_AVAILABILITY_LABELS[availability];
+
+/** true si el modelo guardado no esta en el catalogo que sirvio el backend. */
+const isModelUncatalogued = computed<boolean>(
+  () =>
+    store.modelOptions.find((option) => option.value === store.config.model.trim())
+      ?.isUncatalogued === true,
+);
+
+const loadModels = async (): Promise<void> => {
+  try {
+    await store.fetchAvailableModels();
+  } catch (error) {
+    $q.notify({
+      type: 'negative',
+      message: extractApiErrorMessage(error, 'No se pudo cargar el catalogo de modelos'),
+    });
+  }
+};
+
+/**
+ * Prueba la conexion y traduce el resultado a uno de tres mensajes.
+ *
+ * Las tres ramas son necesarias y no decorativas. Un `success: true` con
+ * `isMock: true` es el caso que esta pantalla existe para delatar: el
+ * proveedor "responde" porque le falta la credencial y contesto el simulador,
+ * asi que anunciarlo como conexion correcta repetiria el engano que veniamos a
+ * eliminar.
+ */
+const onTestConnection = async (): Promise<void> => {
+  try {
+    const result = await store.testConnection();
+
+    if (!result.success) {
+      $q.notify({
+        type: 'warning',
+        message: 'No se pudo conectar con el proveedor',
+        caption: result.error?.message ?? 'Revisa el proveedor y el modelo elegidos.',
+      });
+      return;
+    }
+
+    if (result.isMock) {
+      $q.notify({
+        type: 'warning',
+        message: 'Respondio el simulador, no el proveedor real',
+        caption: `Falta la clave de API de ${LLM_PROVIDER_LABELS[store.config.provider]} en el servidor. El flujo se ejecutaria, pero la salida seria simulada.`,
+      });
+      return;
+    }
+
+    $q.notify({
+      type: 'positive',
+      message: `Conexion correcta en ${result.latencyMs} ms`,
+      caption: result.outputPreview,
+    });
+  } catch (error) {
+    $q.notify({
+      type: 'negative',
+      message: extractApiErrorMessage(error, 'No se pudo contactar con el banco de pruebas.'),
+    });
+  }
+};
+
 const loadPrompts = async (): Promise<void> => {
   try {
     await store.loadPrompts();
@@ -82,15 +155,6 @@ const loadPrompts = async (): Promise<void> => {
       type: 'negative',
       message: extractApiErrorMessage(error, 'No se pudieron cargar los prompts de IA'),
     });
-  }
-};
-
-const onCopyVariable = async (marker: string): Promise<void> => {
-  try {
-    await copyToClipboard(marker);
-    $q.notify({ type: 'positive', message: `${marker} copiado al portapapeles` });
-  } catch {
-    $q.notify({ type: 'warning', message: `Copia manualmente: ${marker}` });
   }
 };
 
@@ -116,7 +180,11 @@ const onPromptCreated = async (prompt: AiPromptTemplateDetail): Promise<void> =>
   $q.notify({ type: 'positive', message: 'Plantilla creada y seleccionada' });
 };
 
-onMounted(loadPrompts);
+onMounted(async () => {
+  // En paralelo: son dos recursos independientes y encadenarlos solo sumaria
+  // latencias al abrir el paso.
+  await Promise.all([loadPrompts(), loadModels()]);
+});
 </script>
 
 <template>
@@ -232,35 +300,6 @@ onMounted(loadPrompts);
       {{ CONFLICT_NOTICE }}
     </q-banner>
 
-    <!-- Inventario real de lo que el flujo publica, como en el mapeador. -->
-    <div class="q-mt-md" data-test="prompt-variables-field">
-      <label class="pd-label" for="llm-variables">Variables disponibles</label>
-      <q-select
-        id="llm-variables"
-        :model-value="null"
-        :options="store.promptVariableOptions"
-        outlined
-        dense
-        emit-value
-        map-options
-        class="q-mt-xs"
-        :disable="store.promptVariableOptions.length === 0"
-        :hint="store.promptVariableOptions.length > 0 ? VARIABLES_HINT : NO_VARIABLES_HINT"
-        @update:model-value="onCopyVariable(String($event))"
-      >
-        <template #option="scope">
-          <q-item v-bind="scope.itemProps">
-            <q-item-section>
-              <q-item-label>{{ scope.opt.label }}</q-item-label>
-              <q-item-label caption class="pd-mono pd-variable-option">
-                {{ scope.opt.value }}
-              </q-item-label>
-            </q-item-section>
-          </q-item>
-        </template>
-      </q-select>
-    </div>
-
     <h3 class="pd-h2 q-mt-lg q-mb-md">Proveedor y presupuesto</h3>
 
     <div class="row q-col-gutter-md items-start">
@@ -290,16 +329,88 @@ onMounted(loadPrompts);
 
       <div class="col-12 col-md-6" data-test="model-field">
         <label class="pd-label" for="llm-model">Modelo<span class="pd-required">*</span></label>
-        <q-input
+        <q-select
           id="llm-model"
           :model-value="store.config.model"
+          :options="store.modelOptions"
+          :loading="store.isLoadingModels"
           outlined
           dense
-          class="q-mt-xs pd-mono"
-          :hint="MODEL_HINT"
+          emit-value
+          map-options
+          class="q-mt-xs"
+          :hint="store.modelOptions.length > 0 ? MODEL_HINT : NO_MODELS_HINT"
           :rules="[(val: string) => !!val?.trim() || 'El modelo es obligatorio']"
           @update:model-value="store.updateConfig({ model: String($event ?? '') })"
-        />
+        >
+          <!-- Distintivo junto al valor elegido: el estado del modelo tiene
+               que verse con el selector cerrado, no solo al desplegarlo. -->
+          <template #append>
+            <q-badge
+              v-if="store.selectedModelAvailability !== null"
+              :style="{ backgroundColor: availabilityToken(store.selectedModelAvailability) }"
+              class="pd-badge"
+              data-test="model-availability-badge"
+            >
+              {{ availabilityLabel(store.selectedModelAvailability) }}
+            </q-badge>
+          </template>
+
+          <template #option="scope">
+            <q-item v-bind="scope.itemProps">
+              <q-item-section>
+                <q-item-label class="pd-mono">{{ scope.opt.value }}</q-item-label>
+                <q-item-label caption class="pd-subtitle">
+                  {{ scope.opt.label }}
+                  <span v-if="scope.opt.contextWindow > 0">
+                    · {{ (scope.opt.contextWindow / 1000).toLocaleString('es-ES') }}k de contexto
+                  </span>
+                </q-item-label>
+              </q-item-section>
+              <q-item-section side>
+                <q-badge
+                  :style="{ backgroundColor: availabilityToken(scope.opt.availability) }"
+                  class="pd-badge"
+                >
+                  {{ availabilityLabel(scope.opt.availability) }}
+                </q-badge>
+              </q-item-section>
+            </q-item>
+          </template>
+
+          <template #no-option>
+            <q-item>
+              <q-item-section class="pd-subtitle">{{ NO_MODELS_HINT }}</q-item-section>
+            </q-item>
+          </template>
+        </q-select>
+
+        <q-banner v-if="isModelUncatalogued" dense class="pd-warn-banner q-mt-sm">
+          <template #avatar>
+            <q-icon name="help_outline" class="pd-warn-icon" />
+          </template>
+          {{ UNCATALOGUED_NOTICE }}
+        </q-banner>
+
+        <!-- Banco de pruebas, junto al par que verifica. AVISA del coste en el
+             propio boton: contra un proveedor de pago cada pulsacion factura. -->
+        <q-btn
+          flat
+          no-caps
+          dense
+          icon="bolt"
+          label="Probar conexion"
+          class="q-mt-sm pd-btn-secondary"
+          data-test="test-connection-btn"
+          :disable="!store.canTestConnection"
+          :loading="store.isTestingConnection"
+          @click="onTestConnection"
+        >
+          <q-tooltip>
+            Ejecuta una inferencia minima contra el proveedor elegido. Con un proveedor de pago,
+            esta prueba factura tokens.
+          </q-tooltip>
+        </q-btn>
       </div>
 
       <div class="col-12">
@@ -454,10 +565,6 @@ onMounted(loadPrompts);
   border-left: 3px solid var(--pd-warning);
   border-radius: $generic-border-radius;
   color: var(--pd-text-primary);
-}
-
-.pd-variable-option {
-  color: var(--pd-accent-text);
 }
 
 // Campos e inputs sobre los tokens del sistema (regla §2, Formularios). Sexta

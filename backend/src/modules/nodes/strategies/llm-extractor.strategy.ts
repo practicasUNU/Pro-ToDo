@@ -14,8 +14,7 @@ import {
   resolveLlmExtractorConfig,
 } from '@modules/nodes/dto/llm-extractor-config.dto';
 import { LlmProvider } from '@modules/nodes/strategies/interfaces/llm-provider.interface';
-import { AnthropicLlmProvider } from '@modules/nodes/strategies/providers/anthropic-llm.provider';
-import { GeminiLlmProvider } from '@modules/nodes/strategies/providers/gemini-llm.provider';
+import { LlmProviderFactory } from '@modules/nodes/strategies/llm-provider.factory';
 import { MockLlmProvider } from '@modules/nodes/strategies/providers/mock-llm.provider';
 
 import type { StatePayloadContext } from '@core/fsm/context/state-payload.context';
@@ -175,8 +174,7 @@ export class LlmExtractorStrategy implements INodeStrategy {
   constructor(
     private readonly aiPromptTemplatesService: AiPromptTemplatesService,
     private readonly mockProvider: MockLlmProvider,
-    private readonly geminiProvider: GeminiLlmProvider,
-    private readonly anthropicProvider: AnthropicLlmProvider,
+    private readonly providerFactory: LlmProviderFactory,
     private readonly aiDefaults: AiDefaultsConfig,
   ) {}
 
@@ -526,23 +524,15 @@ export class LlmExtractorStrategy implements INodeStrategy {
   private resolveProvider(
     config: ResolvedLlmExtractorConfig,
   ): ILlmProviderClient {
+    // La guarda de coste cero se queda AQUI y no en la factoria: es una
+    // decision del nodo sobre su propia configuracion, no una propiedad del
+    // proveedor. El resto del mapeo lo resuelve la factoria, que es la unica
+    // que conoce que clientes existen.
     if (config.dryRun || config.provider === LlmProvider.MOCK) {
       return this.mockProvider;
     }
 
-    if (config.provider === LlmProvider.GEMINI) {
-      return this.geminiProvider;
-    }
-
-    if (config.provider === LlmProvider.ANTHROPIC) {
-      return this.anthropicProvider;
-    }
-
-    this.logger.warn(
-      `El proveedor "${config.provider}" todavia no tiene cliente implementado. Se degrada a simulacion de coste cero; la salida llevara isMock: true.`,
-    );
-
-    return this.mockProvider;
+    return this.providerFactory.getClient(config.provider);
   }
 
   /**

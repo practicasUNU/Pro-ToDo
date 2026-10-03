@@ -11,6 +11,7 @@ import {
   LLM_OUTPUT_KEYS,
   LlmExtractorStrategy,
 } from '@modules/nodes/strategies/llm-extractor.strategy';
+import { LlmProviderFactory } from '@modules/nodes/strategies/llm-provider.factory';
 import { MockLlmProvider } from '@modules/nodes/strategies/providers/mock-llm.provider';
 import { createMockStatePayloadContext } from '@test/factories/state-payload-context.factory';
 
@@ -121,14 +122,25 @@ const buildStrategy = (
   mock: ILlmProviderClient = new MockLlmProvider(),
   aiDefaults: AiDefaultsMock = buildAiDefaults(),
   anthropic: Partial<ILlmProviderClient> = {},
-): LlmExtractorStrategy =>
-  new LlmExtractorStrategy(
-    promptService as unknown as AiPromptTemplatesService,
+): LlmExtractorStrategy => {
+  // Factoria REAL con los clientes doblados: su unica logica es un mapeo, y
+  // doblarla devolveria lo que se le dijese, con lo que la prueba dejaria de
+  // notar que un proveedor desaparece del indice.
+  const factory = new LlmProviderFactory(
     mock as MockLlmProvider,
     gemini as GeminiLlmProvider,
     anthropic as AnthropicLlmProvider,
+  );
+
+  jest.spyOn(factory['logger'], 'warn').mockImplementation(() => undefined);
+
+  return new LlmExtractorStrategy(
+    promptService as unknown as AiPromptTemplatesService,
+    mock as MockLlmProvider,
+    factory,
     aiDefaults as unknown as AiDefaultsConfig,
   );
+};
 
 /** Proveedor que siempre revienta, para ejercer el freno de emergencia. */
 const buildFailingProvider = (): ILlmProviderClient => ({
@@ -376,9 +388,6 @@ describe('LlmExtractorStrategy', () => {
     it('2.6 deberia degradar al simulador un proveedor sin cliente, no fallar', async () => {
       // 1. Arrange 📐
       const strategy = buildStrategy(buildPromptService());
-      const warn = jest
-        .spyOn(strategy['logger'], 'warn')
-        .mockImplementation(() => undefined);
       const context = buildContext({
         parsed_email: { clean_body: CLEAN_BODY },
       });
@@ -399,13 +408,16 @@ describe('LlmExtractorStrategy', () => {
       //
       //    Se ejerce con OPENAI porque desde PROT-20 es el UNICO proveedor sin
       //    cliente: ANTHROPIC ya tiene el suyo y lo cubre el bloque 10.
+      //
+      //    El AVISO en el log ya no se comprueba aqui: desde PROT-21 lo emite
+      //    `LlmProviderFactory`, que es quien conoce el indice de clientes, y
+      //    su propia suite lo fija (bloque 2.1). Lo que sigue siendo
+      //    responsabilidad de esta estrategia es que la ejecucion no caiga y
+      //    que la salida quede marcada.
       expect(result.success).toBe(true);
       expect(
         (result.data?.metadata as { isMock?: boolean } | undefined)?.isMock,
       ).toBe(true);
-      expect(warn).toHaveBeenCalledWith(
-        expect.stringContaining(LlmProvider.OPENAI),
-      );
     });
 
     it('2.7 deberia devolver GRAVE en el primer fallo del proveedor', async () => {

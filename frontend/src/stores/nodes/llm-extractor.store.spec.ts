@@ -15,15 +15,27 @@ import {
 import { useLlmExtractorStore } from './llm-extractor.store';
 
 import type { AiPromptTemplate } from '@/types/ai-prompt-template';
+import type {
+  LlmModelDescriptor,
+  LlmTestConnectionResult,
+} from '@/types/nodes/llm-extractor.types';
 
 // Sin esto se cargaria `@boot/axios`, que necesita entorno de navegador.
 vi.mock('@services/ai-prompt-templates.service', () => ({
   fetchAiPromptTemplates: vi.fn(),
   fetchAiPromptTemplateById: vi.fn(),
 }));
+vi.mock('@services/nodes/llm-extractor.service', () => ({
+  fetchLlmModels: vi.fn(),
+  testLlmConnection: vi.fn(),
+}));
 
 const aiPromptTemplatesService = await import('@services/ai-prompt-templates.service');
 const fetchAiPromptTemplates = vi.mocked(aiPromptTemplatesService.fetchAiPromptTemplates);
+
+const llmExtractorService = await import('@services/nodes/llm-extractor.service');
+const fetchLlmModels = vi.mocked(llmExtractorService.fetchLlmModels);
+const testLlmConnection = vi.mocked(llmExtractorService.testLlmConnection);
 
 const PROMPT_ID = 'a7b8c9d0-1e2f-4a3b-8c4d-5e6f7a8b9c0d';
 
@@ -35,6 +47,27 @@ const PROMPT_ID = 'a7b8c9d0-1e2f-4a3b-8c4d-5e6f7a8b9c0d';
  */
 let nodeCounter = 0;
 const nextNodeId = (): string => `procesador_ia_${(nodeCounter += 1)}`;
+
+const buildDescriptor = (overrides: Partial<LlmModelDescriptor> = {}): LlmModelDescriptor => ({
+  provider: LlmProvider.ANTHROPIC,
+  model: 'claude-sonnet-5-5',
+  label: 'Claude Sonnet 5.5',
+  isAvailable: true,
+  isTestOnly: false,
+  supportsVision: true,
+  contextWindow: 1_000_000,
+  ...overrides,
+});
+
+const buildConnectionResult = (
+  overrides: Partial<LlmTestConnectionResult> = {},
+): LlmTestConnectionResult => ({
+  success: true,
+  latencyMs: 120,
+  isMock: false,
+  outputPreview: 'Conexion verificada',
+  ...overrides,
+});
 
 const buildPrompt = (overrides: Partial<AiPromptTemplate> = {}): AiPromptTemplate => ({
   id: PROMPT_ID,
@@ -51,6 +84,7 @@ describe('useLlmExtractorStore · configuracion del nodo PROCESADOR_IA', () => {
   beforeEach(() => {
     setActivePinia(createPinia());
     vi.clearAllMocks();
+    fetchLlmModels.mockResolvedValue([]);
   });
 
   describe('1. Estado inicial', () => {
@@ -195,11 +229,15 @@ describe('useLlmExtractorStore · configuracion del nodo PROCESADOR_IA', () => {
     it('4.3 deberia avisar de que un proveedor sin cliente degrada al simulador', () => {
       // 1. Arrange 📐: desde PROT-16 no falla, simula. Lo unico que distingue
       //    una redaccion real de una simulada es `metadata.isMock`, y elegir
-      //    Claude creyendo que escribe Claude es el fallo caro.
+      //    un proveedor creyendo que escribe el es el fallo caro.
+      //
+      //    Se ejerce con OPENAI y ya no con ANTHROPIC: desde PROT-20 Claude
+      //    tiene cliente, asi que su aviso correcto ahora es el del gasto
+      //    facturable, no el de la simulacion.
       const store = useLlmExtractorStore(nextNodeId());
 
       // 2. Act ⚙️
-      store.updateConfig({ provider: LlmProvider.ANTHROPIC });
+      store.updateConfig({ provider: LlmProvider.OPENAI });
 
       // 3. Assert 🎯
       const warnings = store.configWarnings.join(' ');
@@ -381,6 +419,162 @@ describe('useLlmExtractorStore · configuracion del nodo PROCESADOR_IA', () => {
       expect(fetchAiPromptTemplates).toHaveBeenCalledTimes(1);
       expect(second.promptOptions).toHaveLength(1);
       expect(useAiPromptTemplatesStore().prompts).toHaveLength(1);
+    });
+  });
+
+  describe('8. Catalogo de modelos', () => {
+    it('8.1 deberia ordenar los disponibles por delante de los que no lo estan', () => {
+      // 1. Arrange 📐: ORDEN y no filtrado. Un modelo sin credencial se ve y
+      //    se puede elegir, porque esconderlo dejaria sin pista a quien se
+      //    pregunte por que su salida sale simulada.
+      const store = useLlmExtractorStore(nextNodeId());
+      store.availableModels = [
+        buildDescriptor({ model: 'sin-clave', isAvailable: false }),
+        buildDescriptor({ model: 'mock-engine', isAvailable: true, isTestOnly: true }),
+        buildDescriptor({ model: 'con-clave', isAvailable: true }),
+      ];
+      // El modelo elegido tiene que ser uno del catalogo: si no, el store le
+      // anadiria con razon una cuarta opcion "no catalogado" (ver 8.3).
+      store.updateConfig({ model: 'con-clave' });
+
+      // 2. Act ⚙️
+      const values = store.modelOptions.map((option) => option.value);
+
+      // 3. Assert 🎯
+      expect(values[0]).toBe('con-clave');
+      expect(values).toHaveLength(3);
+    });
+
+    it('8.2 deberia clasificar el simulador como prueba aunque este disponible', () => {
+      // 1. Arrange 📐: `isTestOnly` manda sobre `isAvailable`; si no, el
+      //    simulador saldria con el distintivo verde de "Configurado" y
+      //    pareceria un proveedor real.
+      const store = useLlmExtractorStore(nextNodeId());
+      store.availableModels = [
+        buildDescriptor({ model: 'mock-engine', isAvailable: true, isTestOnly: true }),
+      ];
+      store.updateConfig({ model: 'mock-engine' });
+
+      // 2. Act ⚙️ & 3. Assert 🎯
+      expect(store.modelOptions[0]?.availability).toBe('TEST_ONLY');
+    });
+
+    it('8.3 deberia conservar un modelo guardado que no figure en el catalogo', async () => {
+      // 1. Arrange 📐: sin esto, un selector cerrado dejaria en blanco la
+      //    configuracion de cualquier flujo que apunte a un modelo retirado de
+      //    la tabla curada, y abrir el paso para mirarlo bastaria para
+      //    romperlo al guardar.
+      const store = useLlmExtractorStore(nextNodeId());
+      fetchLlmModels.mockResolvedValue([buildDescriptor({ model: 'con-clave' })]);
+      await store.fetchAvailableModels();
+
+      // 2. Act ⚙️
+      store.hydrateFromNode({
+        outputNamespace: 'llm_response',
+        params: { model: 'claude-3-5-sonnet-20241022', inlinePrompt: 'Redacta.' },
+      });
+
+      // 3. Assert 🎯: sigue elegible, marcado, y el viaje de vuelta lo conserva.
+      const uncatalogued = store.modelOptions.find(
+        (option) => option.value === 'claude-3-5-sonnet-20241022',
+      );
+
+      expect(uncatalogued?.isUncatalogued).toBe(true);
+      expect(uncatalogued?.label).toContain('no catalogado');
+      expect(store.toNodeParams().model).toBe('claude-3-5-sonnet-20241022');
+    });
+
+    it('8.4 NO deberia memorizar el catalogo entre llamadas', async () => {
+      // 1. Arrange 📐: el caso que esta pantalla resuelve es el de alguien que
+      //    acaba de poner una credencial que faltaba. Cachearlo le mostraria
+      //    el estado anterior hasta recargar la aplicacion entera.
+      const store = useLlmExtractorStore(nextNodeId());
+
+      // 2. Act ⚙️
+      await store.fetchAvailableModels();
+      await store.fetchAvailableModels();
+
+      // 3. Assert 🎯
+      expect(fetchLlmModels).toHaveBeenCalledTimes(2);
+    });
+  });
+
+  describe('9. Prueba de conectividad', () => {
+    it('9.1 deberia enviar el par proveedor/modelo elegido y guardar el resultado', async () => {
+      // 1. Arrange 📐
+      const store = useLlmExtractorStore(nextNodeId());
+      store.updateConfig({ provider: LlmProvider.ANTHROPIC, model: '  claude-sonnet-5-5  ' });
+      testLlmConnection.mockResolvedValue(buildConnectionResult());
+
+      // 2. Act ⚙️
+      const result = await store.testConnection();
+
+      // 3. Assert 🎯: el modelo viaja recortado, como en `toNodeParams`.
+      expect(testLlmConnection).toHaveBeenCalledWith({
+        provider: LlmProvider.ANTHROPIC,
+        model: 'claude-sonnet-5-5',
+      });
+      expect(result.success).toBe(true);
+      expect(store.lastConnectionResult).toEqual(result);
+      expect(store.isTestingConnection).toBe(false);
+    });
+
+    it('9.2 deberia guardar un fallo diagnosticado en vez de lanzarlo', async () => {
+      // 1. Arrange 📐: llega como 200 con `success: false`; es la respuesta
+      //    que el formulario tiene que mostrar, no una excepcion.
+      const store = useLlmExtractorStore(nextNodeId());
+      testLlmConnection.mockResolvedValue(
+        buildConnectionResult({
+          success: false,
+          error: { level: 'GRAVE', message: 'El proveedor rechazo la peticion' },
+        }),
+      );
+
+      // 2. Act ⚙️
+      const result = await store.testConnection();
+
+      // 3. Assert 🎯
+      expect(result.success).toBe(false);
+      expect(store.lastConnectionResult?.error?.message).toContain('rechazo');
+    });
+
+    it('9.3 deberia apagar el indicador aunque la peticion reviente', async () => {
+      // 1. Arrange 📐: el store solo garantiza el `finally`; traducir el error
+      //    es cosa del componente (`frontend-architecture.md` §2.1).
+      const store = useLlmExtractorStore(nextNodeId());
+      testLlmConnection.mockRejectedValue(new Error('Network Error'));
+
+      // 2. Act ⚙️ & 3. Assert 🎯
+      await expect(store.testConnection()).rejects.toThrow('Network Error');
+      expect(store.isTestingConnection).toBe(false);
+    });
+
+    it('9.4 deberia invalidar el resultado al cambiar de proveedor o de modelo', async () => {
+      // 1. Arrange 📐: dejar "conexion correcta" en pantalla despues de
+      //    cambiar el par que la produjo es peor que no haber probado nunca.
+      const store = useLlmExtractorStore(nextNodeId());
+      testLlmConnection.mockResolvedValue(buildConnectionResult());
+      await store.testConnection();
+      expect(store.lastConnectionResult).not.toBeNull();
+
+      // 2. Act ⚙️
+      store.updateConfig({ provider: LlmProvider.GEMINI });
+
+      // 3. Assert 🎯
+      expect(store.lastConnectionResult).toBeNull();
+    });
+
+    it('9.5 no deberia invalidarlo al tocar un campo ajeno al par', async () => {
+      // 1. Arrange 📐: subir el timeout no cambia si la credencial sirve.
+      const store = useLlmExtractorStore(nextNodeId());
+      testLlmConnection.mockResolvedValue(buildConnectionResult());
+      await store.testConnection();
+
+      // 2. Act ⚙️
+      store.updateConfig({ timeoutMs: MAX_LLM_TIMEOUT_MS });
+
+      // 3. Assert 🎯
+      expect(store.lastConnectionResult).not.toBeNull();
     });
   });
 

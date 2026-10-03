@@ -45,6 +45,10 @@ vi.mock('@services/nodes/template-mapper.service', () => ({
 vi.mock('@services/nodes/parser-email.service', () => ({
   checkParser: vi.fn(),
 }));
+vi.mock('@services/nodes/llm-extractor.service', () => ({
+  fetchLlmModels: vi.fn(),
+  testLlmConnection: vi.fn(),
+}));
 vi.mock('@services/nodes/web-scraper.service', () => ({
   checkScraper: vi.fn(),
 }));

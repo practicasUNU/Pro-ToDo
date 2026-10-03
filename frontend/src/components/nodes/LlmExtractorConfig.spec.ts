@@ -3,7 +3,9 @@ import { config, flushPromises, mount } from '@vue/test-utils';
 import { createPinia, setActivePinia } from 'pinia';
 import {
   Notify,
+  QBadge,
   QBanner,
+  QBtn,
   QIcon,
   QInput,
   QItem,
@@ -22,6 +24,7 @@ import { useLlmExtractorStore } from '@stores/nodes/llm-extractor.store';
 import { LlmProvider } from '@/types/nodes/llm-extractor.types';
 
 import type { AiPromptTemplate } from '@/types/ai-prompt-template';
+import type { LlmModelDescriptor } from '@/types/nodes/llm-extractor.types';
 
 // El configurador monta ahora los dialogos de prompt, que arrastran el store de
 // prompts y el catalogo de nodos. Sin estos dobles se cargaria `@boot/axios`,
@@ -34,6 +37,14 @@ vi.mock('@services/ai-prompt-templates.service', () => ({
   deactivateAiPromptTemplate: vi.fn(),
 }));
 vi.mock('@services/node-catalog.service', () => ({ fetchNodeCatalog: vi.fn() }));
+vi.mock('@services/nodes/llm-extractor.service', () => ({
+  fetchLlmModels: vi.fn(),
+  testLlmConnection: vi.fn(),
+}));
+
+const llmExtractorService = await import('@services/nodes/llm-extractor.service');
+const fetchLlmModels = vi.mocked(llmExtractorService.fetchLlmModels);
+const testLlmConnection = vi.mocked(llmExtractorService.testLlmConnection);
 
 const aiPromptTemplatesService = await import('@services/ai-prompt-templates.service');
 const fetchAiPromptTemplates = vi.mocked(aiPromptTemplatesService.fetchAiPromptTemplates);
@@ -44,7 +55,9 @@ let nodeCounter = 0;
 const nextNodeId = (): string => `procesador_ia_view_${(nodeCounter += 1)}`;
 
 const QUASAR_COMPONENTS = {
+  QBadge,
   QBanner,
+  QBtn,
   QIcon,
   QInput,
   QItem,
@@ -64,6 +77,17 @@ const PROMPT: AiPromptTemplate = {
   createdAt: '2026-09-01T00:00:00.000Z',
   updatedAt: '2026-09-01T00:00:00.000Z',
 };
+
+const buildDescriptor = (overrides: Partial<LlmModelDescriptor> = {}): LlmModelDescriptor => ({
+  provider: LlmProvider.ANTHROPIC,
+  model: 'claude-sonnet-5-5',
+  label: 'Claude Sonnet 5.5',
+  isAvailable: true,
+  isTestOnly: false,
+  supportsVision: true,
+  contextWindow: 1_000_000,
+  ...overrides,
+});
 
 const mountComponent = (nodeId: string): ReturnType<typeof mount> =>
   mount(LlmExtractorConfig, {
@@ -87,6 +111,8 @@ describe('LlmExtractorConfig · configurador del nodo PROCESADOR_IA', () => {
     config.global.plugins = [];
     vi.clearAllMocks();
     fetchAiPromptTemplates.mockResolvedValue([]);
+    // Catalogo vacio por defecto: cada prueba que necesite modelos los declara.
+    fetchLlmModels.mockResolvedValue([]);
   });
 
   describe('1. Montaje', () => {
@@ -212,13 +238,15 @@ describe('LlmExtractorConfig · configurador del nodo PROCESADOR_IA', () => {
       expect(warnings[0]?.text()).toContain('tokens facturables');
     });
 
-    it('3.3 deberia avisar de que Claude degrada al simulador', async () => {
-      // 1. Arrange 📐: elegirlo creyendo que escribe Claude es el fallo caro.
+    it('3.3 deberia avisar de que un proveedor sin cliente degrada al simulador', async () => {
+      // 1. Arrange 📐: elegirlo creyendo que escribe el proveedor real es el
+      //    fallo caro. Se ejerce con OPENAI y ya no con ANTHROPIC, que desde
+      //    PROT-20 tiene cliente y cuyo aviso correcto es el del gasto.
       const nodeId = nextNodeId();
       const wrapper = mountComponent(nodeId);
 
       // 2. Act ⚙️
-      useLlmExtractorStore(nodeId).updateConfig({ provider: LlmProvider.ANTHROPIC });
+      useLlmExtractorStore(nodeId).updateConfig({ provider: LlmProvider.OPENAI });
       await wrapper.vm.$nextTick();
 
       // 3. Assert 🎯
@@ -332,6 +360,141 @@ describe('LlmExtractorConfig · configurador del nodo PROCESADOR_IA', () => {
       );
       expect(wrapper.find('[data-test="inline-prompt-field"]').exists()).toBe(false);
       expect(store.toNodeParams().inlinePrompt).toBe('Instruccion antigua');
+    });
+  });
+
+  describe('6. Catalogo de modelos y prueba de conexion', () => {
+    it('6.1 deberia pedir el catalogo al montar', async () => {
+      // 1. Arrange 📐 & 2. Act ⚙️
+      mountComponent(nextNodeId());
+      await flushPromises();
+
+      // 3. Assert 🎯
+      expect(fetchLlmModels).toHaveBeenCalledTimes(1);
+    });
+
+    it('6.2 deberia pintar el distintivo del modelo elegido', async () => {
+      // 1. Arrange 📐: el estado tiene que verse con el selector CERRADO, no
+      //    solo al desplegarlo.
+      fetchLlmModels.mockResolvedValue([buildDescriptor()]);
+      const nodeId = nextNodeId();
+      const wrapper = mountComponent(nodeId);
+      await flushPromises();
+
+      // 2. Act ⚙️
+      useLlmExtractorStore(nodeId).updateConfig({ model: 'claude-sonnet-5-5' });
+      await wrapper.vm.$nextTick();
+
+      // 3. Assert 🎯
+      expect(wrapper.get('[data-test="model-availability-badge"]').text()).toBe('Configurado');
+    });
+
+    it('6.3 deberia marcar "Falta API Key" cuando el backend lo da por no disponible', async () => {
+      // 1. Arrange 📐: es el caso que esta pantalla existe para delatar.
+      fetchLlmModels.mockResolvedValue([buildDescriptor({ isAvailable: false })]);
+      const nodeId = nextNodeId();
+      const wrapper = mountComponent(nodeId);
+      await flushPromises();
+
+      // 2. Act ⚙️
+      useLlmExtractorStore(nodeId).updateConfig({ model: 'claude-sonnet-5-5' });
+      await wrapper.vm.$nextTick();
+
+      // 3. Assert 🎯
+      expect(wrapper.get('[data-test="model-availability-badge"]').text()).toBe('Falta API Key');
+    });
+
+    it('6.4 deberia avisar de que el modelo guardado no esta en el catalogo', async () => {
+      // 1. Arrange 📐: el aviso es lo que evita que un selector cerrado parezca
+      //    haber perdido la configuracion de un flujo heredado.
+      fetchLlmModels.mockResolvedValue([buildDescriptor()]);
+      const nodeId = nextNodeId();
+      const wrapper = mountComponent(nodeId);
+      await flushPromises();
+
+      // 2. Act ⚙️
+      useLlmExtractorStore(nodeId).updateConfig({ model: 'modelo-retirado' });
+      await wrapper.vm.$nextTick();
+
+      // 3. Assert 🎯
+      expect(wrapper.text()).toContain('no figura en el catalogo');
+    });
+
+    it('6.5 deberia probar la conexion con el par elegido', async () => {
+      // 1. Arrange 📐
+      const nodeId = nextNodeId();
+      const wrapper = mountComponent(nodeId);
+      await flushPromises();
+      useLlmExtractorStore(nodeId).updateConfig({
+        provider: LlmProvider.ANTHROPIC,
+        model: 'claude-sonnet-5-5',
+      });
+      testLlmConnection.mockResolvedValue({
+        success: true,
+        latencyMs: 90,
+        isMock: false,
+        outputPreview: 'Conexion verificada',
+      });
+      await wrapper.vm.$nextTick();
+
+      // 2. Act ⚙️
+      await wrapper.get('[data-test="test-connection-btn"]').trigger('click');
+      await flushPromises();
+
+      // 3. Assert 🎯
+      expect(testLlmConnection).toHaveBeenCalledWith({
+        provider: LlmProvider.ANTHROPIC,
+        model: 'claude-sonnet-5-5',
+      });
+    });
+
+    it('6.6 deberia conservar el isMock de una respuesta simulada', async () => {
+      // 1. Arrange 📐: `success: true` con `isMock: true` NO es una conexion
+      //    correcta —respondio el simulador porque falta la credencial—, y el
+      //    componente lo traduce a un aviso y no a un positivo. Lo que se fija
+      //    aqui es que el dato llegue intacto: el `$q.notify` real no se puede
+      //    interceptar desde fuera, porque el componente captura `$q` al
+      //    montarse, y ninguna otra suite del repositorio lo intenta.
+      const nodeId = nextNodeId();
+      const wrapper = mountComponent(nodeId);
+      await flushPromises();
+      const store = useLlmExtractorStore(nodeId);
+      store.updateConfig({ provider: LlmProvider.ANTHROPIC });
+      testLlmConnection.mockResolvedValue({
+        success: true,
+        latencyMs: 12,
+        isMock: true,
+        outputPreview: '',
+      });
+      await wrapper.vm.$nextTick();
+
+      // 2. Act ⚙️
+      await wrapper.get('[data-test="test-connection-btn"]').trigger('click');
+      await flushPromises();
+
+      // 3. Assert 🎯
+      expect(store.lastConnectionResult?.isMock).toBe(true);
+    });
+
+    it('6.7 deberia absorber una peticion rota sin dejar el boton girando', async () => {
+      // 1. Arrange 📐: una excepcion del servicio no es un diagnostico del
+      //    proveedor, es que no se pudo hablar con el banco de pruebas. El
+      //    componente la traduce a un aviso negativo; lo verificable desde
+      //    aqui es que no se propague ni deje el indicador encendido.
+      const nodeId = nextNodeId();
+      const wrapper = mountComponent(nodeId);
+      await flushPromises();
+      const store = useLlmExtractorStore(nodeId);
+      testLlmConnection.mockRejectedValue(new Error('Network Error'));
+
+      // 2. Act ⚙️
+      await wrapper.get('[data-test="test-connection-btn"]').trigger('click');
+      await flushPromises();
+
+      // 3. Assert 🎯
+      expect(testLlmConnection).toHaveBeenCalledTimes(1);
+      expect(store.isTestingConnection).toBe(false);
+      expect(store.lastConnectionResult).toBeNull();
     });
   });
 });

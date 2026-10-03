@@ -10,7 +10,7 @@ import {
   resolveOcrProcessorConfig,
 } from '@modules/nodes/dto/ocr-processor-config.dto';
 import { LlmProvider } from '@modules/nodes/strategies/interfaces/llm-provider.interface';
-import { GeminiLlmProvider } from '@modules/nodes/strategies/providers/gemini-llm.provider';
+import { LlmProviderFactory } from '@modules/nodes/strategies/llm-provider.factory';
 import { MockLlmProvider } from '@modules/nodes/strategies/providers/mock-llm.provider';
 import { MULTIMODAL_CONTENT_TYPE_PATTERN } from '@modules/nodes/utils/parsed-email-payload.util';
 
@@ -109,7 +109,7 @@ export class OcrProcessorStrategy implements INodeStrategy {
 
   constructor(
     private readonly mockProvider: MockLlmProvider,
-    private readonly geminiProvider: GeminiLlmProvider,
+    private readonly providerFactory: LlmProviderFactory,
     private readonly aiDefaults: AiDefaultsConfig,
   ) {}
 
@@ -353,6 +353,13 @@ export class OcrProcessorStrategy implements INodeStrategy {
    * Un proveedor sin implementar DEGRADA al simulador con un aviso en vez de
    * fallar: el flujo sigue y la salida queda marcada con `isMock`, que es mas
    * util que un nodo caido por una variable de entorno mal escrita.
+   *
+   * Delega en `LlmProviderFactory` desde PROT-21. Antes repetia el mapeo a
+   * mano y se habia quedado atras: no conocia `ANTHROPIC`, asi que un OCR
+   * configurado con Claude degradaba al simulador aunque el cliente existiera
+   * desde PROT-20, y lo hacia por la misma via que un proveedor inexistente —
+   * indistinguible en el log. La guarda de `dryRun` se queda aqui porque es
+   * una decision de este nodo, no del proveedor.
    */
   private resolveProvider(
     config: ResolvedOcrProcessorConfig,
@@ -361,14 +368,6 @@ export class OcrProcessorStrategy implements INodeStrategy {
       return this.mockProvider;
     }
 
-    if (config.provider === LlmProvider.GEMINI) {
-      return this.geminiProvider;
-    }
-
-    this.logger.warn(
-      `El proveedor "${config.provider}" todavia no tiene cliente implementado. Se degrada a simulacion de coste cero; la salida llevara isMock: true.`,
-    );
-
-    return this.mockProvider;
+    return this.providerFactory.getClient(config.provider);
   }
 }

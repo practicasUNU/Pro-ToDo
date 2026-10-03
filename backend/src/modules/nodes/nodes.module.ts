@@ -12,7 +12,8 @@ import { WorkflowsModule } from '@modules/workflows/workflows.module';
 
 import { BrowserModule } from './browser.module';
 import { NodeCatalogEntry } from './entities/node-catalog.entity';
-import { NodeCatalogController } from './node-catalog.controller';
+import { LlmCatalogController } from './controllers/llm-catalog.controller';
+import { NodeCatalogController } from './controllers/node-catalog.controller';
 import { CronSchedulingService } from './services/cron-scheduling.service';
 import { ImapPollingService } from './services/imap-polling.service';
 import { NodeCatalogService } from './services/node-catalog.service';
@@ -23,6 +24,8 @@ import { OcrProcessorStrategy } from './strategies/ocr-processor.strategy';
 import { SmtpAlertStrategy } from './strategies/smtp-alert.strategy';
 import { AiDefaultsConfig } from '@core/config/ai-defaults.config';
 import { ParserEmailStrategy } from './strategies/parser-email.strategy';
+import { LlmProviderFactory } from './strategies/llm-provider.factory';
+import { LlmProviderCatalogService } from './services/llm-provider-catalog.service';
 import { AnthropicLlmProvider } from './strategies/providers/anthropic-llm.provider';
 import { GeminiLlmProvider } from './strategies/providers/gemini-llm.provider';
 import { MockLlmProvider } from './strategies/providers/mock-llm.provider';
@@ -80,7 +83,7 @@ import type { OnModuleInit } from '@nestjs/common';
     // sirve `GET /api/nodos`.
     TypeOrmModule.forFeature([Workflow, NodeCatalogEntry]),
   ],
-  controllers: [NodeCatalogController],
+  controllers: [NodeCatalogController, LlmCatalogController],
   providers: [
     TemplateMapperStrategy,
     ImapTriggerStrategy,
@@ -97,6 +100,8 @@ import type { OnModuleInit } from '@nestjs/common';
     MockLlmProvider,
     GeminiLlmProvider,
     AnthropicLlmProvider,
+    LlmProviderFactory,
+    LlmProviderCatalogService,
     ImapPollingService,
     CronSchedulingService,
     NodeCatalogService,
@@ -113,6 +118,10 @@ import type { OnModuleInit } from '@nestjs/common';
     ImapPollingService,
     CronSchedulingService,
     NodeCatalogService,
+    // La factoria si se exporta, al contrario que los clientes sueltos: es el
+    // punto por el que otro modulo deberia pedir un cliente de LLM el dia que
+    // lo necesite, sin volver a replicar el mapeo que PROT-21 acaba de unificar.
+    LlmProviderFactory,
     // Se re-exporta para no romper a quien ya importaba este modulo esperando
     // encontrar el navegador.
     BrowserModule,

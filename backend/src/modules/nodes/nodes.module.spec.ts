@@ -17,8 +17,7 @@ import type { AiDefaultsConfig } from '@core/config/ai-defaults.config';
 import type { SmtpNodeMailerService } from '@common/services/smtp-node-mailer.service';
 import type { AiPromptTemplatesService } from '@modules/ai-prompt-templates/ai-prompt-templates.service';
 import type { WebScraperRunner } from '@modules/nodes/services/web-scraper.runner';
-import type { AnthropicLlmProvider } from '@modules/nodes/strategies/providers/anthropic-llm.provider';
-import type { GeminiLlmProvider } from '@modules/nodes/strategies/providers/gemini-llm.provider';
+import type { LlmProviderFactory } from '@modules/nodes/strategies/llm-provider.factory';
 import type { MockLlmProvider } from '@modules/nodes/strategies/providers/mock-llm.provider';
 import type { TemplatesService } from '@modules/templates/templates.service';
 
@@ -62,8 +61,7 @@ const buildHarness = (): {
   const llm = new LlmExtractorStrategy(
     {} as AiPromptTemplatesService,
     {} as MockLlmProvider,
-    {} as GeminiLlmProvider,
-    {} as AnthropicLlmProvider,
+    {} as LlmProviderFactory,
     {} as AiDefaultsConfig,
   );
   // El transporte va vacio: inscribir la estrategia no abre ninguna conexion
@@ -72,7 +70,7 @@ const buildHarness = (): {
   // Mismo criterio: inscribirla no llama a ningun modelo.
   const ocr = new OcrProcessorStrategy(
     {} as MockLlmProvider,
-    {} as GeminiLlmProvider,
+    {} as LlmProviderFactory,
     {} as AiDefaultsConfig,
   );
 
