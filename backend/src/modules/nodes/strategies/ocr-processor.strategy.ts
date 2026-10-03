@@ -9,7 +9,14 @@ import {
   PROMPT_OCR_MULTIMODAL,
   resolveOcrProcessorConfig,
 } from '@modules/nodes/dto/ocr-processor-config.dto';
-import { LlmProvider } from '@modules/nodes/strategies/interfaces/llm-provider.interface';
+import {
+  LlmProvider,
+  LlmProviderException,
+} from '@modules/nodes/strategies/interfaces/llm-provider.interface';
+import {
+  buildProviderAttempts,
+  isFallbackWorthy,
+} from '@modules/nodes/strategies/provider-fallback';
 import { LlmProviderFactory } from '@modules/nodes/strategies/llm-provider.factory';
 import { MockLlmProvider } from '@modules/nodes/strategies/providers/mock-llm.provider';
 import { LlmProviderCatalogService } from '@modules/nodes/services/llm-provider-catalog.service';
@@ -23,6 +30,7 @@ import type {
   NodeResult,
 } from '@core/fsm/types/node-strategy.types';
 import type { ResolvedOcrProcessorConfig } from '@modules/nodes/dto/ocr-processor-config.dto';
+import type { ProviderAttempt } from '@modules/nodes/strategies/provider-fallback';
 import type {
   ILlmProviderClient,
   LlmInlineAttachment,
@@ -80,26 +88,6 @@ const lastLineOf = (text: string): string => {
   const lines = text.split('\n');
 
   return lines[lines.length - 1] ?? '';
-};
-
-/**
- * A quien recurrir cuando el proveedor elegido no tiene credencial.
- *
- * Es un mapa y no un `if` porque el par proveedor/modelo va junto: conmutar de
- * proveedor conservando el modelo produce una peticion a un modelo que no
- * existe en el destino. Solo se declara el salto que tiene sentido hoy; sin
- * entrada, el cliente degrada al simulador como siempre.
- */
-const OCR_PROVIDER_FALLBACKS: Partial<
-  Record<
-    LlmProvider,
-    { readonly provider: LlmProvider; readonly model: string }
-  >
-> = {
-  [LlmProvider.GEMINI]: {
-    provider: LlmProvider.ANTHROPIC,
-    model: 'claude-haiku-4-5',
-  },
 };
 
 /** Traza completa del error, si la hay, lista para fusionar en el detalle. */
@@ -199,40 +187,67 @@ export class OcrProcessorStrategy implements INodeStrategy {
       };
     }
 
-    const config = this.resolveUsableProvider(
-      this.applyEnvironmentDefaults(resolution.config, params),
-    );
-    const client = this.resolveProvider(config);
+    const config = this.applyEnvironmentDefaults(resolution.config, params);
+    const attempts = this.resolveAttempts(config);
 
-    let response: LlmResponsePayload;
+    let response: LlmResponsePayload | undefined;
+    let usedProvider = config.provider;
+    let usedModel = config.model;
+    let lastError: unknown;
 
-    try {
-      response = await client.generateCompletion(
-        PROMPT_OCR_MULTIMODAL,
-        undefined,
-        {
-          model: config.model,
-          timeoutMs: config.timeoutMs,
-          maxRetries: config.maxRetries,
-          // La temperatura se resolvia y se tiraba hasta PROT-22: el nodo
-          // declaraba 0.1 para transcribir con fidelidad y la llamada corria
-          // con el defecto del modelo.
-          temperature: config.temperature,
-          maxTokens: config.maxTokens,
-          mode: 'ocr',
-        },
-        attachments,
-      );
-    } catch (error) {
-      return {
-        success: false,
-        error: {
-          level: 'GRAVE',
-          code: ERR_OCR_PROVIDER_FAILURE,
-          message: `El proveedor de OCR fallo: ${error instanceof Error ? error.message : String(error)}`,
-          ...stackTraceOf(error),
-        },
-      };
+    // Bucle de RESILIENCIA ACTIVA. Hasta ahora la cascada se decidia una sola
+    // vez antes de llamar, mirando si existia la variable de entorno: un
+    // proveedor saturado tiene su credencial perfectamente puesta, asi que un
+    // 429 de cuota tumbaba el nodo con una alternativa viva al lado.
+    for (const [index, attempt] of attempts.entries()) {
+      try {
+        response = await this.resolveClient(
+          attempt.provider,
+          config.dryRun,
+        ).generateCompletion(
+          PROMPT_OCR_MULTIMODAL,
+          undefined,
+          {
+            model: attempt.model,
+            timeoutMs: config.timeoutMs,
+            maxRetries: config.maxRetries,
+            // La temperatura se resolvia y se tiraba hasta PROT-22: el nodo
+            // declaraba 0.1 para transcribir con fidelidad y la llamada corria
+            // con el defecto del modelo.
+            temperature: config.temperature,
+            maxTokens: config.maxTokens,
+            mode: 'ocr',
+          },
+          attachments,
+        );
+
+        usedProvider = attempt.provider;
+        usedModel = attempt.model;
+        break;
+      } catch (error) {
+        lastError = error;
+
+        const code =
+          error instanceof LlmProviderException ? error.code : undefined;
+        const next = attempts[index + 1];
+
+        // Se rinde ante un fallo que otro proveedor repetiria igual —un payload
+        // invalido, una credencial mala— y cuando ya no queda a quien recurrir.
+        if (!isFallbackWorthy(code) || next === undefined) {
+          return this.providerFailure(error);
+        }
+
+        this.logger.warn(
+          `${attempt.provider} no pudo atender la transcripcion (${code}): ` +
+            `se reintenta con ${next.provider} y ${next.model}.`,
+        );
+      }
+    }
+
+    // Defensivo: el bucle solo sale por `break` o por `return`. Si la lista de
+    // intentos llegase vacia, rendirse es mejor que publicar un exito sin texto.
+    if (response === undefined) {
+      return this.providerFailure(lastError);
     }
 
     const cleanBody = this.flattenTranscription(response);
@@ -270,11 +285,17 @@ export class OcrProcessorStrategy implements INodeStrategy {
         // despues: la noticia salia publicada con texto inventado y nada en el
         // contexto permitia auditarlo. El nodo de redaccion ya lo publicaba.
         metadata: {
-          provider: config.provider,
+          provider: usedProvider,
           model: response.metadata.modelUsed,
           tokensPrompt: response.metadata.tokensPrompt,
           tokensCompletion: response.metadata.tokensCompletion,
           isMock: response.metadata.isMock,
+          // Solo cuando respondio OTRO: una transcripcion pagada en Anthropic
+          // seria indistinguible de una gratuita en Gemini al auditar, que es
+          // el mismo motivo por el que existe `isMock`.
+          ...(usedProvider === config.provider
+            ? {}
+            : { fallbackFrom: config.provider, fallbackModel: usedModel }),
         },
       },
     };
@@ -476,55 +497,70 @@ export class OcrProcessorStrategy implements INodeStrategy {
    * una decision de este nodo, no del proveedor.
    */
   /**
-   * Conmuta a otro proveedor REAL antes de resignarse al simulador.
+   * Proveedores a los que llamar, en orden.
    *
-   * Cada cliente degrada al simulador cuando le falta SU credencial, y eso
-   * basta para que el flujo no se caiga, pero deja un hueco concreto: un
-   * despliegue con `ANTHROPIC_API_KEY` y sin `GEMINI_API_KEY` transcribia con
-   * el simulador —texto inventado publicado como transcripcion— teniendo un
-   * proveedor de verdad a mano. La cascada es GEMINI → ANTHROPIC → simulador.
+   * Cubre las DOS razones por las que un proveedor se descarta, que antes
+   * vivian en sitios distintos: la credencial ausente —conocida antes de
+   * llamar— y el servicio saturado o caido, que solo se descubre llamando.
    *
-   * EL MODELO CAMBIA CON EL PROVEEDOR. `gemini-3.6-flash` no existe en
-   * Anthropic; mandarlo tal cual daria un 404 del proveedor y un GRAVE que
-   * parece un fallo de red. Por eso la conmutacion arrastra el modelo de vision
-   * mas barato de Claude.
+   * Simular no es un fallo del que haya que recuperarse, asi que `dryRun` y
+   * `MOCK` producen un unico intento. Y si no queda ningun proveedor usable, se
+   * conserva el intento configurado para que `resolveClient` degrade al
+   * simulador como siempre: que un entorno SIN NINGUNA clave siga transcribiendo
+   * (marcado con `isMock`) es el comportamiento de PROT-22 y no cambia aqui. Lo
+   * que no puede pasar es que el simulador recoja un fallo de EJECUCION, porque
+   * entonces publicaria texto inventado tapando una incidencia real.
    */
-  private resolveUsableProvider(
+  private resolveAttempts(
     config: ResolvedOcrProcessorConfig,
-  ): ResolvedOcrProcessorConfig {
+  ): readonly ProviderAttempt[] {
+    const configured: ProviderAttempt = {
+      provider: config.provider,
+      model: config.model,
+    };
+
     if (config.dryRun || config.provider === LlmProvider.MOCK) {
-      return config;
+      return [configured];
     }
 
-    if (this.providerCatalog.isProviderUsable(config.provider)) {
-      return config;
-    }
-
-    const fallback = OCR_PROVIDER_FALLBACKS[config.provider];
-
-    if (
-      fallback === undefined ||
-      !this.providerCatalog.isProviderUsable(fallback.provider)
-    ) {
-      return config;
-    }
-
-    this.logger.warn(
-      `El proveedor ${config.provider} no tiene credencial en este entorno: ` +
-        `la transcripcion pasa a ${fallback.provider} con ${fallback.model}. ` +
-        'Revisa las claves del .env si no era lo esperado.',
+    const attempts = buildProviderAttempts(configured, (provider) =>
+      this.providerCatalog.isProviderUsable(provider),
     );
 
-    return { ...config, provider: fallback.provider, model: fallback.model };
+    if (attempts.length === 0) {
+      this.logger.warn(
+        `Ningun proveedor usable para la transcripcion (configurado: ${config.provider}). ` +
+          'Respondera el simulador y la salida ira marcada con isMock. ' +
+          'Revisa las claves del .env si no era lo esperado.',
+      );
+
+      return [configured];
+    }
+
+    return attempts;
   }
 
-  private resolveProvider(
-    config: ResolvedOcrProcessorConfig,
+  private resolveClient(
+    provider: LlmProvider,
+    dryRun: boolean,
   ): ILlmProviderClient {
-    if (config.dryRun || config.provider === LlmProvider.MOCK) {
+    if (dryRun || provider === LlmProvider.MOCK) {
       return this.mockProvider;
     }
 
-    return this.providerFactory.getClient(config.provider);
+    return this.providerFactory.getClient(provider);
+  }
+
+  /** Mismo `NodeResult` de siempre, ahora desde dos sitios del bucle. */
+  private providerFailure(error: unknown): NodeResult {
+    return {
+      success: false,
+      error: {
+        level: 'GRAVE',
+        code: ERR_OCR_PROVIDER_FAILURE,
+        message: `El proveedor de OCR fallo: ${error instanceof Error ? error.message : String(error)}`,
+        ...stackTraceOf(error),
+      },
+    };
   }
 }

@@ -4,6 +4,11 @@ import { NodeType } from '@core/fsm/types/pipeline-schema.types';
 import { LlmProvider } from '@modules/nodes/strategies/interfaces/llm-provider.interface';
 import { LlmProviderFactory } from '@modules/nodes/strategies/llm-provider.factory';
 import { MockLlmProvider } from '@modules/nodes/strategies/providers/mock-llm.provider';
+import { GeminiProviderException } from '@modules/nodes/strategies/providers/gemini-llm.provider';
+import {
+  ERR_HTTP_CLIENT_REJECTED,
+  ERR_HTTP_UPSTREAM_UNAVAILABLE,
+} from '@core/http/http-client.service';
 import { DEFAULT_OCR_MODEL } from '@modules/nodes/dto/ocr-processor-config.dto';
 import {
   ERR_OCR_CONFIG,
@@ -807,6 +812,149 @@ describe('OcrProcessorStrategy · nodo satelite PROCESADOR_OCR', () => {
 
       // 3. Assert 🎯
       expect(cleanBody).toBe('Texto del resumen');
+    });
+  });
+
+  describe('9. Respaldo dinamico ante un proveedor saturado', () => {
+    /** Cliente que revienta con el codigo que le pasemos. */
+    const buildThrowingProvider = (
+      code: string,
+    ): jest.Mock<() => Promise<LlmResponsePayload>> =>
+      jest.fn<() => Promise<LlmResponsePayload>>(() =>
+        Promise.reject(
+          new GeminiProviderException(`${code}: el remoto no atiende`, code),
+        ),
+      );
+
+    it('9.1 deberia conmutar a ANTHROPIC ante un 429 de cuota', async () => {
+      // 1. Arrange 📐: el incidente real. La credencial de Gemini esta puesta,
+      //    asi que la cascada por credencial ausente no se dispara: el nodo
+      //    llamaba, recibia el 429 y se rendia con una alternativa viva al lado.
+      const geminiCompletion = buildThrowingProvider(
+        ERR_HTTP_UPSTREAM_UNAVAILABLE,
+      );
+      const anthropicCompletion = buildSpyGeminiForCascade();
+      const strategy = buildStrategy(
+        {
+          provider: LlmProvider.GEMINI,
+          generateCompletion: geminiCompletion,
+        } as unknown as GeminiLlmProvider,
+        buildAiDefaults(),
+        {
+          provider: LlmProvider.ANTHROPIC,
+          generateCompletion: anthropicCompletion,
+        } as unknown as AnthropicLlmProvider,
+      );
+
+      // 2. Act ⚙️
+      const result = await strategy.execute(buildContext(), {
+        provider: LlmProvider.GEMINI,
+      });
+
+      // 3. Assert 🎯
+      expect(geminiCompletion).toHaveBeenCalledTimes(1);
+      expect(anthropicCompletion).toHaveBeenCalledTimes(1);
+      expect(result.success).toBe(true);
+      // El rastro: sin el, una transcripcion pagada en Anthropic seria
+      // indistinguible de una gratuita en Gemini al auditar.
+      expect(result.data?.metadata).toMatchObject({
+        provider: LlmProvider.ANTHROPIC,
+        fallbackFrom: LlmProvider.GEMINI,
+      });
+    });
+
+    it('9.2 NO deberia conmutar ante un fallo que el destino repetiria', async () => {
+      // 1. Arrange 📐: un 400 de payload o una credencial mala fallan igual en
+      //    el siguiente proveedor. Conmutar seria pagar dos veces el mismo
+      //    error y tardar el doble en avisar.
+      const geminiCompletion = buildThrowingProvider(ERR_HTTP_CLIENT_REJECTED);
+      const anthropicCompletion = buildSpyGeminiForCascade();
+      const strategy = buildStrategy(
+        {
+          provider: LlmProvider.GEMINI,
+          generateCompletion: geminiCompletion,
+        } as unknown as GeminiLlmProvider,
+        buildAiDefaults(),
+        {
+          provider: LlmProvider.ANTHROPIC,
+          generateCompletion: anthropicCompletion,
+        } as unknown as AnthropicLlmProvider,
+      );
+
+      // 2. Act ⚙️
+      const result = await strategy.execute(buildContext(), {
+        provider: LlmProvider.GEMINI,
+      });
+
+      // 3. Assert 🎯
+      expect(anthropicCompletion).not.toHaveBeenCalled();
+      expect(result.success).toBe(false);
+      expect(result.error?.code).toBe(ERR_OCR_PROVIDER_FAILURE);
+    });
+
+    it('9.3 deberia rendirse con el ultimo error al agotar la cadena', async () => {
+      // 1. Arrange 📐: los dos saturados. El nodo debe FALLAR para que la FSM
+      //    resuelva su `onErrorStep` y alguien se entere.
+      const geminiCompletion = buildThrowingProvider(
+        ERR_HTTP_UPSTREAM_UNAVAILABLE,
+      );
+      const anthropicCompletion = buildThrowingProvider(
+        ERR_HTTP_UPSTREAM_UNAVAILABLE,
+      );
+      const strategy = buildStrategy(
+        {
+          provider: LlmProvider.GEMINI,
+          generateCompletion: geminiCompletion,
+        } as unknown as GeminiLlmProvider,
+        buildAiDefaults(),
+        {
+          provider: LlmProvider.ANTHROPIC,
+          generateCompletion: anthropicCompletion,
+        } as unknown as AnthropicLlmProvider,
+      );
+
+      // 2. Act ⚙️
+      const result = await strategy.execute(buildContext(), {
+        provider: LlmProvider.GEMINI,
+      });
+
+      // 3. Assert 🎯
+      expect(geminiCompletion).toHaveBeenCalledTimes(1);
+      expect(anthropicCompletion).toHaveBeenCalledTimes(1);
+      expect(result.success).toBe(false);
+      expect(result.error?.level).toBe('GRAVE');
+    });
+
+    it('9.4 NO deberia recoger el fallo con el simulador', async () => {
+      // 1. Arrange 📐: es la linea que no se cruza. Sin ANTHROPIC_API_KEY, un
+      //    429 de Gemini debe terminar en fallo; completar la transcripcion con
+      //    el simulador publicaria texto inventado tapando la incidencia.
+      const geminiCompletion = buildThrowingProvider(
+        ERR_HTTP_UPSTREAM_UNAVAILABLE,
+      );
+      const anthropicCompletion = buildSpyGeminiForCascade();
+      const strategy = buildStrategy(
+        {
+          provider: LlmProvider.GEMINI,
+          generateCompletion: geminiCompletion,
+        } as unknown as GeminiLlmProvider,
+        buildAiDefaults(),
+        {
+          provider: LlmProvider.ANTHROPIC,
+          generateCompletion: anthropicCompletion,
+        } as unknown as AnthropicLlmProvider,
+        buildProviderCatalog([LlmProvider.GEMINI]),
+      );
+
+      // 2. Act ⚙️
+      const result = await strategy.execute(buildContext(), {
+        provider: LlmProvider.GEMINI,
+      });
+
+      // 3. Assert 🎯
+      expect(anthropicCompletion).not.toHaveBeenCalled();
+      expect(result.success).toBe(false);
+      expect(result.data?.clean_body).toBeUndefined();
     });
   });
 });

@@ -13,7 +13,13 @@ import {
   MATERIAL_IN_INSTRUCTIONS_NOTICE,
 } from '@modules/nodes/strategies/llm-extractor.strategy';
 import { LlmProviderFactory } from '@modules/nodes/strategies/llm-provider.factory';
+import { LlmProviderCatalogService } from '@modules/nodes/services/llm-provider-catalog.service';
 import { MockLlmProvider } from '@modules/nodes/strategies/providers/mock-llm.provider';
+import { GeminiProviderException } from '@modules/nodes/strategies/providers/gemini-llm.provider';
+import {
+  ERR_HTTP_CLIENT_REJECTED,
+  ERR_HTTP_UPSTREAM_UNAVAILABLE,
+} from '@core/http/http-client.service';
 import { createMockStatePayloadContext } from '@test/factories/state-payload-context.factory';
 
 import type { StatePayloadContext } from '@core/fsm/context/state-payload.context';
@@ -117,12 +123,32 @@ const buildAiDefaults = (
   ...overrides,
 });
 
+/**
+ * Doble del catalogo, acotado a lo unico que la estrategia le pregunta.
+ *
+ * Por defecto TODOS los proveedores son usables, que es el escenario de la
+ * mayoria de las pruebas: asi el respaldo dinamico esta disponible y cada caso
+ * decide si lo ejerce o no. Restringir la lista es lo que permite comprobar que
+ * sin alternativa usable el nodo falla en vez de inventarse una.
+ */
+const buildProviderCatalog = (
+  usableProviders: readonly LlmProvider[] = Object.values(LlmProvider),
+): LlmProviderCatalogService =>
+  ({
+    isProviderUsable: jest
+      .fn()
+      .mockImplementation((provider: LlmProvider) =>
+        usableProviders.includes(provider),
+      ),
+  }) as unknown as LlmProviderCatalogService;
+
 const buildStrategy = (
   promptService: PromptServiceMock,
   gemini: Partial<ILlmProviderClient> = {},
   mock: ILlmProviderClient = new MockLlmProvider(),
   aiDefaults: AiDefaultsMock = buildAiDefaults(),
   anthropic: Partial<ILlmProviderClient> = {},
+  providerCatalog: LlmProviderCatalogService = buildProviderCatalog(),
 ): LlmExtractorStrategy => {
   // Factoria REAL con los clientes doblados: su unica logica es un mapeo, y
   // doblarla devolveria lo que se le dijese, con lo que la prueba dejaria de
@@ -140,6 +166,7 @@ const buildStrategy = (
     mock as MockLlmProvider,
     factory,
     aiDefaults as unknown as AiDefaultsConfig,
+    providerCatalog,
   );
 };
 
@@ -1330,6 +1357,150 @@ describe('LlmExtractorStrategy', () => {
 
       // 3. Assert 🎯
       expect(warn).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('11. Respaldo dinamico ante un proveedor saturado', () => {
+    /** Cliente que revienta con el codigo indicado, como haria el real. */
+    const buildThrowingProvider = (code: string): ILlmProviderClient => ({
+      provider: LlmProvider.GEMINI,
+      generateCompletion: jest
+        .fn<Promise<LlmResponsePayload>, []>()
+        .mockRejectedValue(
+          new GeminiProviderException(`${code}: el remoto no atiende`, code),
+        ),
+    });
+
+    /**
+     * Cliente que responde correctamente, con su espia APARTE.
+     *
+     * El espia se devuelve suelto en vez de leerlo del objeto porque
+     * `expect(cliente.generateCompletion)` separa el metodo de su objeto y le
+     * quita el `this` (regla `unbound-method`).
+     */
+    const buildWorkingProvider = (): {
+      client: ILlmProviderClient;
+      completion: jest.Mock<Promise<LlmResponsePayload>, []>;
+    } => {
+      const completion = jest
+        .fn<Promise<LlmResponsePayload>, []>()
+        .mockResolvedValue({
+          headline: 'Titular',
+          summary: 'Resumen',
+          body_paragraphs: ['Parrafo'],
+          metadata: {
+            tokensPrompt: 1,
+            tokensCompletion: 2,
+            modelUsed: 'claude-haiku-4-5',
+            isMock: false,
+          },
+        });
+
+      return {
+        client: {
+          provider: LlmProvider.ANTHROPIC,
+          generateCompletion: completion,
+        },
+        completion,
+      };
+    };
+
+    const PARAMS = {
+      inlinePrompt: 'Redacta una noticia breve.',
+      provider: LlmProvider.GEMINI,
+    };
+
+    const buildBody = (): ReturnType<typeof buildContext> =>
+      buildContext({ parsed_email: { clean_body: CLEAN_BODY } });
+
+    it('11.1 deberia completar la inferencia con el siguiente proveedor', async () => {
+      // 1. Arrange 📐: este nodo no tenia NINGUNA cascada; un 429 de cuota lo
+      //    tumbaba aunque hubiera otro proveedor con credencial.
+      const anthropic = buildWorkingProvider();
+      const strategy = buildStrategy(
+        buildPromptService(),
+        buildThrowingProvider(ERR_HTTP_UPSTREAM_UNAVAILABLE),
+        new MockLlmProvider(),
+        buildAiDefaults(),
+        anthropic.client,
+      );
+
+      // 2. Act ⚙️
+      const result = await strategy.execute(buildBody(), PARAMS);
+
+      // 3. Assert 🎯
+      expect(anthropic.completion).toHaveBeenCalledTimes(1);
+      expect(result.success).toBe(true);
+      expect(result.data?.metadata).toMatchObject({
+        provider: LlmProvider.ANTHROPIC,
+        fallbackFrom: LlmProvider.GEMINI,
+      });
+    });
+
+    it('11.2 NO deberia mover el freno con un fallo del que se salio', async () => {
+      // 1. Arrange 📐: el freno existe para detectar un proveedor que no
+      //    responde. Aqui SI se respondio, y contar cada intento lo activaria
+      //    —umbral 3— dentro de una sola ejecucion del nodo.
+      const strategy = buildStrategy(
+        buildPromptService(),
+        buildThrowingProvider(ERR_HTTP_UPSTREAM_UNAVAILABLE),
+        new MockLlmProvider(),
+        buildAiDefaults(),
+        buildWorkingProvider().client,
+      );
+      const context = buildBody();
+      const params = { ...PARAMS, emergencyBrakeThreshold: 1 };
+
+      // 2. Act ⚙️: tres pasadas, todas rescatadas.
+      await strategy.execute(context, params);
+      await strategy.execute(context, params);
+      const result = await strategy.execute(context, params);
+
+      // 3. Assert 🎯
+      expect(result.success).toBe(true);
+      expect(result.error).toBeUndefined();
+    });
+
+    it('11.3 deberia contar UN solo fallo al agotar la cadena entera', async () => {
+      // 1. Arrange 📐: con el umbral en 2, dos proveedores caidos no pueden
+      //    frenar en la primera pasada; si el contador subiera por intento, si.
+      const strategy = buildStrategy(
+        buildPromptService(),
+        buildThrowingProvider(ERR_HTTP_UPSTREAM_UNAVAILABLE),
+        new MockLlmProvider(),
+        buildAiDefaults(),
+        buildThrowingProvider(ERR_HTTP_UPSTREAM_UNAVAILABLE),
+      );
+      const context = buildBody();
+      const params = { ...PARAMS, emergencyBrakeThreshold: 2 };
+
+      // 2. Act ⚙️
+      const first = await strategy.execute(context, params);
+      const second = await strategy.execute(context, params);
+
+      // 3. Assert 🎯
+      expect(first.error?.code).toBe(ERR_LLM_PROVIDER_FAILURE);
+      expect(second.error?.code).toBe(ERR_LLM_EMERGENCY_BRAKE);
+    });
+
+    it('11.4 NO deberia conmutar ante un fallo que el destino repetiria', async () => {
+      // 1. Arrange 📐
+      const anthropic = buildWorkingProvider();
+      const strategy = buildStrategy(
+        buildPromptService(),
+        buildThrowingProvider(ERR_HTTP_CLIENT_REJECTED),
+        new MockLlmProvider(),
+        buildAiDefaults(),
+        anthropic.client,
+      );
+
+      // 2. Act ⚙️
+      const result = await strategy.execute(buildBody(), PARAMS);
+
+      // 3. Assert 🎯
+      expect(anthropic.completion).not.toHaveBeenCalled();
+      expect(result.success).toBe(false);
+      expect(result.error?.code).toBe(ERR_LLM_PROVIDER_FAILURE);
     });
   });
 });

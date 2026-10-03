@@ -2,7 +2,11 @@ import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 
 import { HttpClientService } from '@core/http/http-client.service';
-import { LlmProvider } from '@modules/nodes/strategies/interfaces/llm-provider.interface';
+import {
+  ERR_LLM_PROVIDER_CONTRACT,
+  LlmProvider,
+  LlmProviderException,
+} from '@modules/nodes/strategies/interfaces/llm-provider.interface';
 import { MockLlmProvider } from '@modules/nodes/strategies/providers/mock-llm.provider';
 
 import type {
@@ -70,9 +74,9 @@ interface GeminiGeneratedContract {
 }
 
 /** Error del proveedor. Lo captura la estrategia para mover el freno. */
-export class GeminiProviderException extends Error {
-  constructor(message: string) {
-    super(message);
+export class GeminiProviderException extends LlmProviderException {
+  constructor(message: string, code: string) {
+    super(message, code);
     this.name = 'GeminiProviderException';
   }
 }
@@ -185,6 +189,10 @@ export class GeminiLlmProvider implements ILlmProviderClient {
     if ('failure' in outcome) {
       throw new GeminiProviderException(
         `${outcome.failure.code}: ${outcome.failure.message}`,
+        // El codigo viaja APARTE del mensaje: es lo que decide si conviene
+        // probar con otro proveedor o si repetir seria gastar dos veces el
+        // mismo error.
+        outcome.failure.code,
       );
     }
 
@@ -241,6 +249,7 @@ export class GeminiLlmProvider implements ILlmProviderClient {
     if (rawText === undefined || rawText.trim().length === 0) {
       throw new GeminiProviderException(
         'Gemini devolvio una respuesta sin contenido generado.',
+        ERR_LLM_PROVIDER_CONTRACT,
       );
     }
 
@@ -274,6 +283,7 @@ export class GeminiLlmProvider implements ILlmProviderClient {
         `Gemini devolvio un cuerpo que no respeta el contrato JSON: ${
           error instanceof Error ? error.message : String(error)
         }`,
+        ERR_LLM_PROVIDER_CONTRACT,
       );
     }
   }

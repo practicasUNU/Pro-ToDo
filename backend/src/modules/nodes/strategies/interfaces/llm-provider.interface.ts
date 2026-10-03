@@ -58,6 +58,42 @@ export interface LlmInlineAttachment {
   readonly contentBase64: string;
 }
 
+/**
+ * Codigo de un fallo que NO viene del transporte HTTP.
+ *
+ * Los de transporte ya los nombra `HttpClientService` (`ERR_HTTP_*`) y se
+ * propagan tal cual; este cubre lo que falla DESPUES de una respuesta 200: un
+ * cuerpo sin contenido generado o que no respeta el contrato JSON. Se separa
+ * porque la decision de respaldo depende de esa distincion —cambiar de
+ * proveedor tiene sentido ante una saturacion, no ante un contrato roto, que
+ * volveria a romperse igual.
+ */
+export const ERR_LLM_PROVIDER_CONTRACT = 'ERR_LLM_PROVIDER_CONTRACT';
+
+/**
+ * Fallo de un cliente de proveedor, con el codigo que lo origino.
+ *
+ * Existe para que la estrategia pueda DECIDIR sin leer el mensaje. Hasta ahora
+ * el codigo del cliente HTTP se aplanaba dentro del texto
+ * (`` `${failure.code}: ${failure.message}` ``) y distinguir un 429 de cuota de
+ * un 400 de payload habria exigido un `message.includes(...)`: un parser ad hoc
+ * que envejece mal —ya dejo una rama muerta en `translateFailure`, buscando un
+ * `ERR_NODE_HTTP_TIMEOUT` que no existe en ninguna parte—.
+ *
+ * El MENSAJE no cambia de forma: sigue llevando el codigo por delante, porque
+ * es lo que acaba en el `.log` de disco y en la traza del nodo.
+ */
+export class LlmProviderException extends Error {
+  constructor(
+    message: string,
+    /** `ERR_HTTP_*` del cliente, o `ERR_LLM_PROVIDER_CONTRACT`. */
+    readonly code: string,
+  ) {
+    super(message);
+    this.name = 'LlmProviderException';
+  }
+}
+
 /** Parametros de ejecucion que el nodo traslada al cliente en cada llamada. */
 export interface LlmExecutionOptions {
   /** Identificador del modelo concreto del proveedor (ej. `gemini-3.6-flash`). */

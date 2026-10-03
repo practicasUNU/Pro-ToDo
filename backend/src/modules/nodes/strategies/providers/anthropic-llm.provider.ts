@@ -2,7 +2,11 @@ import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 
 import { HttpClientService } from '@core/http/http-client.service';
-import { LlmProvider } from '@modules/nodes/strategies/interfaces/llm-provider.interface';
+import {
+  ERR_LLM_PROVIDER_CONTRACT,
+  LlmProvider,
+  LlmProviderException,
+} from '@modules/nodes/strategies/interfaces/llm-provider.interface';
 import { MockLlmProvider } from '@modules/nodes/strategies/providers/mock-llm.provider';
 
 import type {
@@ -92,9 +96,9 @@ interface AnthropicGeneratedContract {
 }
 
 /** Error del proveedor. Lo captura la estrategia para mover el freno. */
-export class AnthropicProviderException extends Error {
-  constructor(message: string) {
-    super(message);
+export class AnthropicProviderException extends LlmProviderException {
+  constructor(message: string, code: string) {
+    super(message, code);
     this.name = 'AnthropicProviderException';
   }
 }
@@ -206,6 +210,10 @@ export class AnthropicLlmProvider implements ILlmProviderClient {
     if ('failure' in outcome) {
       throw new AnthropicProviderException(
         `${outcome.failure.code}: ${outcome.failure.message}`,
+        // El codigo viaja APARTE del mensaje: es lo que decide si conviene
+        // probar con otro proveedor o si repetir seria gastar dos veces el
+        // mismo error.
+        outcome.failure.code,
       );
     }
 
@@ -270,6 +278,7 @@ export class AnthropicLlmProvider implements ILlmProviderClient {
         `Anthropic devolvio una respuesta sin contenido generado (stop_reason: ${
           response.stop_reason ?? 'desconocido'
         }).`,
+        ERR_LLM_PROVIDER_CONTRACT,
       );
     }
 
@@ -303,6 +312,7 @@ export class AnthropicLlmProvider implements ILlmProviderClient {
         `Anthropic devolvio un cuerpo que no respeta el contrato JSON: ${
           error instanceof Error ? error.message : String(error)
         }`,
+        ERR_LLM_PROVIDER_CONTRACT,
       );
     }
   }

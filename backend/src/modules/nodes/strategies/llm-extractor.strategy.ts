@@ -13,8 +13,16 @@ import {
   LlmExtractorConfigDto,
   resolveLlmExtractorConfig,
 } from '@modules/nodes/dto/llm-extractor-config.dto';
-import { LlmProvider } from '@modules/nodes/strategies/interfaces/llm-provider.interface';
+import {
+  LlmProvider,
+  LlmProviderException,
+} from '@modules/nodes/strategies/interfaces/llm-provider.interface';
 import { LlmProviderFactory } from '@modules/nodes/strategies/llm-provider.factory';
+import { LlmProviderCatalogService } from '@modules/nodes/services/llm-provider-catalog.service';
+import {
+  buildProviderAttempts,
+  isFallbackWorthy,
+} from '@modules/nodes/strategies/provider-fallback';
 import { MockLlmProvider } from '@modules/nodes/strategies/providers/mock-llm.provider';
 
 import type { StatePayloadContext } from '@core/fsm/context/state-payload.context';
@@ -25,6 +33,7 @@ import type {
   NodeResult,
 } from '@core/fsm/types/node-strategy.types';
 import type { ResolvedLlmExtractorConfig } from '@modules/nodes/dto/llm-extractor-config.dto';
+import type { ProviderAttempt } from '@modules/nodes/strategies/provider-fallback';
 import type {
   ILlmProviderClient,
   LlmResponsePayload,
@@ -215,6 +224,9 @@ export class LlmExtractorStrategy implements INodeStrategy {
     private readonly mockProvider: MockLlmProvider,
     private readonly providerFactory: LlmProviderFactory,
     private readonly aiDefaults: AiDefaultsConfig,
+    // Responde si un proveedor tiene cliente Y credencial. Hasta ahora este
+    // nodo no lo preguntaba: llamaba al configurado y, si fallaba, se rendia.
+    private readonly providerCatalog: LlmProviderCatalogService,
   ) {}
 
   public async execute(
@@ -280,30 +292,58 @@ export class LlmExtractorStrategy implements INodeStrategy {
       return { success: false, error: interpolated.failure };
     }
 
-    // Siempre devuelve cliente: un proveedor sin implementar degrada al
-    // simulador con un aviso (ver `resolveProvider`).
-    const client = this.resolveProvider(config);
+    const attempts = this.resolveAttempts(config);
 
-    let response: LlmResponsePayload;
+    let response: LlmResponsePayload | undefined;
+    let usedProvider = config.provider;
+    let lastError: unknown;
 
-    try {
-      // El TEXTO va como prompt y la INSTRUCCION como systemPrompt, y no al
-      // reves. El motivo es que asi el contenido llega al modelo aunque la
-      // instruccion del operador no incluya ningun marcador que lo interpole:
-      // un prompt como "resume esto en tres parrafos" es perfectamente valido y
-      // no menciona ningun namespace. Con el reparto contrario, ese prompt
-      // facturaria una inferencia sobre ningun contenido.
-      response = await client.generateCompletion(
-        inputText,
-        interpolated.prompt,
-        {
-          model: config.model,
+    // Bucle de RESILIENCIA ACTIVA, hermano del que corre el nodo de OCR: ante
+    // un proveedor saturado (429 de cuota) o caido (5xx) se prueba el
+    // siguiente en vez de rendirse. El freno de emergencia NO se mueve aqui
+    // dentro: un fallo del que se salio con otro proveedor no es un proveedor
+    // que no responde, y contarlo por intento activaria el freno —umbral 3—
+    // dentro de una sola ejecucion del nodo.
+    for (const [index, attempt] of attempts.entries()) {
+      try {
+        // El TEXTO va como prompt y la INSTRUCCION como systemPrompt, y no al
+        // reves. El motivo es que asi el contenido llega al modelo aunque la
+        // instruccion del operador no incluya ningun marcador que lo interpole:
+        // un prompt como "resume esto en tres parrafos" es perfectamente valido
+        // y no menciona ningun namespace. Con el reparto contrario, ese prompt
+        // facturaria una inferencia sobre ningun contenido.
+        response = await this.resolveClient(
+          attempt.provider,
+          config.dryRun,
+        ).generateCompletion(inputText, interpolated.prompt, {
+          model: attempt.model,
           timeoutMs: config.timeoutMs,
           maxRetries: config.maxRetries,
-        },
-      );
-    } catch (error) {
-      return this.registerFailure(brakeKey, config, error);
+        });
+
+        usedProvider = attempt.provider;
+        break;
+      } catch (error) {
+        lastError = error;
+
+        const code =
+          error instanceof LlmProviderException ? error.code : undefined;
+        const next = attempts[index + 1];
+
+        if (!isFallbackWorthy(code) || next === undefined) {
+          return this.registerFailure(brakeKey, config, error);
+        }
+
+        this.logger.warn(
+          `${attempt.provider} no pudo completar la inferencia (${code}): ` +
+            `se reintenta con ${next.provider} y ${next.model}.`,
+        );
+      }
+    }
+
+    // Defensivo: el bucle solo sale por `break` o por `return`.
+    if (response === undefined) {
+      return this.registerFailure(brakeKey, config, lastError);
     }
 
     // Exito: el contador se reinicia. El freno cuenta fallos CONSECUTIVOS, y una
@@ -317,7 +357,16 @@ export class LlmExtractorStrategy implements INodeStrategy {
         headline: response.headline,
         summary: response.summary,
         body_paragraphs: response.body_paragraphs,
-        metadata: response.metadata,
+        metadata: {
+          ...response.metadata,
+          provider: usedProvider,
+          // Solo cuando respondio OTRO: sin esta marca, una redaccion pagada en
+          // Anthropic seria indistinguible de una gratuita en Gemini al
+          // auditar la ejecucion.
+          ...(usedProvider === config.provider
+            ? {}
+            : { fallbackFrom: config.provider }),
+        },
       },
     };
   }
@@ -666,18 +715,47 @@ export class LlmExtractorStrategy implements INodeStrategy {
    * aqui no garantiza, por tanto, una inferencia real; `metadata.isMock` sigue
    * siendo la unica senal fiable.
    */
-  private resolveProvider(
-    config: ResolvedLlmExtractorConfig,
+  private resolveClient(
+    provider: LlmProvider,
+    dryRun: boolean,
   ): ILlmProviderClient {
     // La guarda de coste cero se queda AQUI y no en la factoria: es una
     // decision del nodo sobre su propia configuracion, no una propiedad del
     // proveedor. El resto del mapeo lo resuelve la factoria, que es la unica
     // que conoce que clientes existen.
-    if (config.dryRun || config.provider === LlmProvider.MOCK) {
+    if (dryRun || provider === LlmProvider.MOCK) {
       return this.mockProvider;
     }
 
-    return this.providerFactory.getClient(config.provider);
+    return this.providerFactory.getClient(provider);
+  }
+
+  /**
+   * Proveedores a los que llamar, en orden. Gemelo del que usa el nodo de OCR.
+   *
+   * Simular no es un fallo del que recuperarse, asi que `dryRun` y `MOCK` dan
+   * un unico intento. Sin ningun proveedor usable se conserva el configurado
+   * para que `resolveClient` degrade al simulador con aviso, que es el
+   * comportamiento documentado de este nodo; lo que el respaldo NO hace nunca
+   * es recoger con el simulador un fallo de ejecucion.
+   */
+  private resolveAttempts(
+    config: ResolvedLlmExtractorConfig,
+  ): readonly ProviderAttempt[] {
+    const configured: ProviderAttempt = {
+      provider: config.provider,
+      model: config.model,
+    };
+
+    if (config.dryRun || config.provider === LlmProvider.MOCK) {
+      return [configured];
+    }
+
+    const attempts = buildProviderAttempts(configured, (provider) =>
+      this.providerCatalog.isProviderUsable(provider),
+    );
+
+    return attempts.length === 0 ? [configured] : attempts;
   }
 
   /**
