@@ -9,12 +9,14 @@ import type { Repository } from 'typeorm';
 const PROMPT_ID = '3c9a1f52-8b47-4d21-9e06-5a7b8c9d0e1f';
 const OTHER_PROMPT_ID = '9f8e7d6c-5b4a-4321-8765-1a2b3c4d5e6f';
 const AUTHOR_ID = 'd4e5f6a7-b8c9-4012-a345-6b7c8d9e0f12';
+const PROMPT_CODE = 'EXTRACCION_NOTICIA_ES';
 
 const buildPrompt = (
   overrides: Partial<AiPromptTemplate> = {},
 ): AiPromptTemplate =>
   ({
     id: PROMPT_ID,
+    code: PROMPT_CODE,
     name: 'extraccion-noticia-es',
     description: 'Extrae titular y resumen de un correo en espanol',
     promptText: 'Extrae el titular de: {{parsed_email.clean_body}}',
@@ -28,6 +30,7 @@ const buildPrompt = (
 const buildCreateDto = (
   overrides: Partial<CreateAiPromptTemplateDto> = {},
 ): CreateAiPromptTemplateDto => ({
+  code: PROMPT_CODE,
   name: 'extraccion-noticia-es',
   description: 'Extrae titular y resumen de un correo en espanol',
   promptText: 'Extrae el titular de: {{parsed_email.clean_body}}',
@@ -171,6 +174,7 @@ describe('AiPromptTemplatesService · repositorio de prompts de IA', () => {
       const { service, repository } = buildHarness();
       repository.findOne
         .mockResolvedValueOnce(null) // assertNameAvailable: nombre libre
+        .mockResolvedValueOnce(null) // assertCodeAvailable: codigo libre
         .mockResolvedValueOnce(buildPrompt()); // findOne final
 
       // 2. Act
@@ -193,6 +197,7 @@ describe('AiPromptTemplatesService · repositorio de prompts de IA', () => {
       const { service, repository } = buildHarness();
       repository.findOne
         .mockResolvedValueOnce(null)
+        .mockResolvedValueOnce(null)
         .mockResolvedValueOnce(buildPrompt());
 
       // 2. Act
@@ -210,6 +215,7 @@ describe('AiPromptTemplatesService · repositorio de prompts de IA', () => {
       const { service, repository } = buildHarness();
       repository.findOne
         .mockResolvedValueOnce(null)
+        .mockResolvedValueOnce(null)
         .mockResolvedValueOnce(buildPrompt());
       const dto = buildCreateDto();
       delete (dto as { description?: string }).description;
@@ -224,7 +230,23 @@ describe('AiPromptTemplatesService · repositorio de prompts de IA', () => {
       );
     });
 
-    it('3.4 deberia rechazar un nombre ya registrado', async () => {
+    it('3.4 deberia rechazar un codigo ya registrado', async () => {
+      // 1. Arrange 📐: el nombre esta libre y el codigo no. Las dos guardas son
+      //    independientes, asi que se encadenan las respuestas del repositorio
+      //    en el orden en que el servicio las consulta.
+      const { service, repository } = buildHarness();
+      repository.findOne
+        .mockResolvedValueOnce(null)
+        .mockResolvedValueOnce(buildPrompt());
+
+      // 2. Act ⚙️ & 3. Assert 🎯
+      await expect(service.create(buildCreateDto(), AUTHOR_ID)).rejects.toThrow(
+        ConflictException,
+      );
+      expect(repository.save).not.toHaveBeenCalled();
+    });
+
+    it('3.5 deberia rechazar un nombre ya registrado', async () => {
       // 1. Arrange: no hay filtro global del 23505, asi que sin esta guarda el
       //    error de constraint subiria como 500.
       const { service, repository } = buildHarness();
@@ -331,6 +353,93 @@ describe('AiPromptTemplatesService · repositorio de prompts de IA', () => {
         NotFoundException,
       );
       expect(repository.save).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('6. Resolucion por clave de maquina', () => {
+    it('6.1 findByCode deberia devolver la entidad buscando por codigo', async () => {
+      // 1. Arrange 📐
+      const { service, repository } = buildHarness();
+      repository.findOne.mockResolvedValue(buildPrompt());
+
+      // 2. Act ⚙️
+      const prompt = await service.findByCode(PROMPT_CODE);
+
+      // 3. Assert 🎯
+      expect(repository.findOne).toHaveBeenCalledWith({
+        where: { code: PROMPT_CODE },
+      });
+      expect(prompt.code).toBe(PROMPT_CODE);
+      // Entidad y no DTO: el consumidor es interno (la estrategia del nodo IA).
+      expect(prompt.promptText).toBeDefined();
+    });
+
+    it('6.2 findByCode deberia LANZAR con un codigo inexistente', async () => {
+      // 1. Arrange 📐: al reves que `findByName`, que devuelve null. Un codigo
+      //    escrito en los params de un nodo que no resuelve es configuracion
+      //    rota, no una busqueda sin resultados.
+      const { service, repository } = buildHarness();
+      repository.findOne.mockResolvedValue(null);
+
+      // 2. Act ⚙️ & 3. Assert 🎯
+      await expect(service.findByCode('NO_EXISTE')).rejects.toThrow(
+        NotFoundException,
+      );
+    });
+
+    it('6.3 findOneByCode deberia derivar los namespaces del texto del prompt', async () => {
+      // 1. Arrange 📐: dos marcadores de dos namespaces distintos, mas uno
+      //    repetido, para comprobar que se deduplica.
+      const { service, repository } = buildHarness();
+      repository.findOne.mockResolvedValue(
+        buildPrompt({
+          promptText:
+            'Redacta {{parsed_email.clean_body}} con {{scraped_web.full_article_content}} y {{parsed_email.clean_title}}.',
+        }),
+      );
+
+      // 2. Act ⚙️
+      const detail = await service.findOneByCode(PROMPT_CODE);
+
+      // 3. Assert 🎯
+      expect(detail.requiredNamespaces).toEqual([
+        'parsed_email',
+        'scraped_web',
+      ]);
+    });
+
+    it('6.4 deberia devolver una lista vacia si el prompt no lleva marcadores', async () => {
+      // 1. Arrange 📐: un prompt puede ser texto fijo; eso no es un error.
+      const { service, repository } = buildHarness();
+      repository.findOne.mockResolvedValue(
+        buildPrompt({ promptText: 'Resume el material recibido.' }),
+      );
+
+      // 2. Act ⚙️
+      const detail = await service.findOneByCode(PROMPT_CODE);
+
+      // 3. Assert 🎯
+      expect(detail.requiredNamespaces).toEqual([]);
+    });
+  });
+
+  describe('7. Inmutabilidad del codigo', () => {
+    it('7.1 update NO deberia cambiar el codigo aunque venga en el DTO', async () => {
+      // 1. Arrange 📐: cambiarlo dejaria a cada flujo que lo cita en sus
+      //    `params` apuntando a un prompt inexistente, y el fallo no saldria
+      //    hasta la siguiente ejecucion.
+      const { service, repository } = buildHarness();
+      repository.findOne.mockResolvedValue(buildPrompt());
+
+      // 2. Act ⚙️
+      await service.update(PROMPT_ID, {
+        code: 'OTRO_CODIGO',
+      });
+
+      // 3. Assert 🎯
+      expect(repository.save).toHaveBeenCalledWith(
+        expect.objectContaining({ code: PROMPT_CODE }),
+      );
     });
   });
 });

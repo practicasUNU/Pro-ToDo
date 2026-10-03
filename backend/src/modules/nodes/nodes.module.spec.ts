@@ -17,6 +17,7 @@ import type { AiDefaultsConfig } from '@core/config/ai-defaults.config';
 import type { SmtpNodeMailerService } from '@common/services/smtp-node-mailer.service';
 import type { AiPromptTemplatesService } from '@modules/ai-prompt-templates/ai-prompt-templates.service';
 import type { WebScraperRunner } from '@modules/nodes/services/web-scraper.runner';
+import type { AnthropicLlmProvider } from '@modules/nodes/strategies/providers/anthropic-llm.provider';
 import type { GeminiLlmProvider } from '@modules/nodes/strategies/providers/gemini-llm.provider';
 import type { MockLlmProvider } from '@modules/nodes/strategies/providers/mock-llm.provider';
 import type { TemplatesService } from '@modules/templates/templates.service';
@@ -62,6 +63,7 @@ const buildHarness = (): {
     {} as AiPromptTemplatesService,
     {} as MockLlmProvider,
     {} as GeminiLlmProvider,
+    {} as AnthropicLlmProvider,
     {} as AiDefaultsConfig,
   );
   // El transporte va vacio: inscribir la estrategia no abre ninguna conexion

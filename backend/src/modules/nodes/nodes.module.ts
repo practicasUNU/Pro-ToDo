@@ -23,6 +23,7 @@ import { OcrProcessorStrategy } from './strategies/ocr-processor.strategy';
 import { SmtpAlertStrategy } from './strategies/smtp-alert.strategy';
 import { AiDefaultsConfig } from '@core/config/ai-defaults.config';
 import { ParserEmailStrategy } from './strategies/parser-email.strategy';
+import { AnthropicLlmProvider } from './strategies/providers/anthropic-llm.provider';
 import { GeminiLlmProvider } from './strategies/providers/gemini-llm.provider';
 import { MockLlmProvider } from './strategies/providers/mock-llm.provider';
 import { TemplateMapperStrategy } from './strategies/template-mapper.strategy';
@@ -95,6 +96,7 @@ import type { OnModuleInit } from '@nestjs/common';
     // `ConfigService`, y fabricarlo a mano dejaria sin inyectar ambos.
     MockLlmProvider,
     GeminiLlmProvider,
+    AnthropicLlmProvider,
     ImapPollingService,
     CronSchedulingService,
     NodeCatalogService,

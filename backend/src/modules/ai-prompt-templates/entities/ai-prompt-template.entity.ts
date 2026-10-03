@@ -40,7 +40,23 @@ export class AiPromptTemplate {
   id: string;
 
   /**
-   * Identificador humano del prompt.
+   * Clave de MAQUINA del prompt (migracion 023).
+   *
+   * Es la unica referencia estable: el UUID se regenera en cada clonado de la
+   * base y `name` es texto que el operador edita desde la tabla administrativa.
+   * Un `pipeline_schema` versionado, una semilla o un test solo pueden citar un
+   * prompt por aqui. Lo consume `promptCode` en los `params` del nodo
+   * `PROCESADOR_IA`, que lo resuelve con `findByCode()`.
+   *
+   * INMUTABLE por contrato: el servicio descarta cualquier intento de
+   * cambiarlo en una edicion. Renombrar la etiqueta visible es legitimo;
+   * cambiar la clave romperia en silencio todos los flujos que la citan.
+   */
+  @Column({ name: 'codigo', type: 'varchar', length: 50, unique: true })
+  code: string;
+
+  /**
+   * Etiqueta HUMANA del prompt.
    *
    * UNIQUE: es lo que el operador reconoce en el selector del nodo IA, y la
    * clave por la que lo resuelve `AiPromptTemplatesService.findByName()`.

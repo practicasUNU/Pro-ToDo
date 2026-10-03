@@ -1,3 +1,5 @@
+import { NotFoundException } from '@nestjs/common';
+
 import { NodeType } from '@core/fsm/types/pipeline-schema.types';
 import { LlmProvider } from '@modules/nodes/strategies/interfaces/llm-provider.interface';
 import {
@@ -20,6 +22,7 @@ import type {
   ILlmProviderClient,
   LlmResponsePayload,
 } from '@modules/nodes/strategies/interfaces/llm-provider.interface';
+import type { AnthropicLlmProvider } from '@modules/nodes/strategies/providers/anthropic-llm.provider';
 import type { GeminiLlmProvider } from '@modules/nodes/strategies/providers/gemini-llm.provider';
 
 const EXECUTION_ID = 'exec-11111111-1111-4111-8111-111111111111';
@@ -27,6 +30,7 @@ const OTHER_EXECUTION_ID = 'exec-22222222-2222-4222-8222-222222222222';
 const WORKFLOW_ID = 'flow-33333333-3333-4333-8333-333333333333';
 const NODE_ID = 'nodo_ia';
 const TEMPLATE_ID = '9f1b2c3d-4e5f-4a6b-8c7d-0e1f2a3b4c5d';
+const TEMPLATE_CODE = 'LICITACION_DEFAULT';
 const AUTHOR_ID = '1a2b3c4d-5e6f-4071-8283-94a5b6c7d8e9';
 
 /** Cuerpo de correo tipico que `PARSER_PRE_IA` deja en su namespace. */
@@ -38,16 +42,18 @@ const ARTICLE_CONTENT = 'La comision presento el informe tecnico esta manana.';
 /**
  * Doble de `AiPromptTemplatesService` acotado por `Pick`.
  *
- * Solo `findOneEntity` participa: la estrategia no usa `findByName` ni el CRUD,
- * y un mock de la clase entera obligaria a mantener metodos que esta prueba no
- * ejerce.
+ * Solo participan las dos vias de resolucion que usa la estrategia
+ * (`findOneEntity` por UUID y `findByCode` por clave de maquina): no toca
+ * `findByName` ni el CRUD, y un mock de la clase entera obligaria a mantener
+ * metodos que esta prueba no ejerce.
  */
 type PromptServiceMock = jest.Mocked<
-  Pick<AiPromptTemplatesService, 'findOneEntity'>
+  Pick<AiPromptTemplatesService, 'findOneEntity' | 'findByCode'>
 >;
 
 const buildPromptService = (): PromptServiceMock => ({
   findOneEntity: jest.fn(),
+  findByCode: jest.fn(),
 });
 
 /** Plantilla de prompt con los campos que la estrategia lee. */
@@ -56,6 +62,7 @@ const buildTemplate = (
 ): AiPromptTemplate =>
   ({
     id: TEMPLATE_ID,
+    code: TEMPLATE_CODE,
     name: 'Redaccion periodistica',
     description: null,
     promptText: 'Redacta una noticia breve y objetiva.',
@@ -113,11 +120,13 @@ const buildStrategy = (
   gemini: Partial<ILlmProviderClient> = {},
   mock: ILlmProviderClient = new MockLlmProvider(),
   aiDefaults: AiDefaultsMock = buildAiDefaults(),
+  anthropic: Partial<ILlmProviderClient> = {},
 ): LlmExtractorStrategy =>
   new LlmExtractorStrategy(
     promptService as unknown as AiPromptTemplatesService,
     mock as MockLlmProvider,
     gemini as GeminiLlmProvider,
+    anthropic as AnthropicLlmProvider,
     aiDefaults as unknown as AiDefaultsConfig,
   );
 
@@ -336,6 +345,7 @@ describe('LlmExtractorStrategy', () => {
       expect(result.error?.code).toBe(ERR_LLM_PROMPT_UNRESOLVED);
       expect(result.error?.missingFields).toEqual([
         'templatePromptId',
+        'promptCode',
         'inlinePrompt',
       ]);
     });
@@ -376,7 +386,7 @@ describe('LlmExtractorStrategy', () => {
       // 2. Act ⚙️
       const result = await strategy.execute(context, {
         inlinePrompt: 'Redacta una noticia breve.',
-        provider: LlmProvider.ANTHROPIC,
+        provider: LlmProvider.OPENAI,
       });
 
       // 3. Assert 🎯: cambio de criterio deliberado. Antes devolvia
@@ -386,12 +396,15 @@ describe('LlmExtractorStrategy', () => {
       //    cliente, y fallar habria pausado de golpe todo flujo que no declarase
       //    el suyo. Lo que sostiene ahora la auditoria es `isMock`, que viaja en
       //    el namespace, mas el aviso en el log.
+      //
+      //    Se ejerce con OPENAI porque desde PROT-20 es el UNICO proveedor sin
+      //    cliente: ANTHROPIC ya tiene el suyo y lo cubre el bloque 10.
       expect(result.success).toBe(true);
       expect(
         (result.data?.metadata as { isMock?: boolean } | undefined)?.isMock,
       ).toBe(true);
       expect(warn).toHaveBeenCalledWith(
-        expect.stringContaining(LlmProvider.ANTHROPIC),
+        expect.stringContaining(LlmProvider.OPENAI),
       );
     });
 
@@ -667,10 +680,12 @@ describe('LlmExtractorStrategy', () => {
       const incomplete = strategy.getIncompleteParams({});
 
       // 3. Assert
-      expect(incomplete).toEqual(['templatePromptId | inlinePrompt']);
+      expect(incomplete).toEqual([
+        'templatePromptId | promptCode | inlinePrompt',
+      ]);
     });
 
-    it('6.2 deberia considerarlo completo con cualquiera de las dos vias', () => {
+    it('6.2 deberia considerarlo completo con cualquiera de las tres vias', () => {
       // 1. Arrange
       const strategy = buildStrategy(buildPromptService());
 
@@ -681,6 +696,150 @@ describe('LlmExtractorStrategy', () => {
       expect(
         strategy.getIncompleteParams({ templatePromptId: TEMPLATE_ID }),
       ).toEqual([]);
+      expect(
+        strategy.getIncompleteParams({ promptCode: TEMPLATE_CODE }),
+      ).toEqual([]);
+    });
+  });
+
+  describe('9. Resolucion del prompt por codigo', () => {
+    it('9.1 deberia resolver promptCode e interpolar antes de llamar al proveedor', async () => {
+      // 1. Arrange 📐: la plantilla de la base lleva un marcador sin resolver,
+      //    que es justo lo que distingue una plantilla de un texto fijo.
+      const promptService = buildPromptService();
+      promptService.findByCode.mockResolvedValue(
+        buildTemplate({
+          promptText:
+            'Extrae los datos de licitacion de "{{parsed_email.clean_title}}".',
+        }),
+      );
+      const generateCompletion = jest.fn().mockResolvedValue({
+        headline: 'h',
+        summary: 's',
+        body_paragraphs: [],
+        metadata: {
+          tokensPrompt: 1,
+          tokensCompletion: 2,
+          modelUsed: 'gemini-1.5-flash',
+          isMock: false,
+        },
+      });
+      const strategy = buildStrategy(promptService, {
+        provider: LlmProvider.GEMINI,
+        generateCompletion,
+      });
+      const context = buildContext({
+        parsed_email: {
+          clean_body: CLEAN_BODY,
+          clean_title: 'Expediente 2027/014',
+        },
+      });
+
+      // 2. Act ⚙️
+      const result = await strategy.execute(context, {
+        promptCode: TEMPLATE_CODE,
+        provider: LlmProvider.GEMINI,
+      });
+
+      // 3. Assert 🎯
+      expect(result.success).toBe(true);
+      expect(promptService.findByCode).toHaveBeenCalledWith(TEMPLATE_CODE);
+      // Lo que viaja al proveedor es el texto YA interpolado, no el marcador.
+      expect(generateCompletion).toHaveBeenCalledWith(
+        CLEAN_BODY,
+        'Extrae los datos de licitacion de "Expediente 2027/014".',
+        expect.anything(),
+      );
+    });
+
+    it('9.2 deberia dar PRIORIDAD a templatePromptId sobre promptCode', async () => {
+      // 1. Arrange 📐: declarar los dos es un error de configuracion, pero el
+      //    desempate tiene que ser estable. Gana el UUID, la referencia mas
+      //    especifica.
+      const promptService = buildPromptService();
+      promptService.findOneEntity.mockResolvedValue(
+        buildTemplate({ promptText: 'Instruccion resuelta por UUID.' }),
+      );
+      const strategy = buildStrategy(promptService);
+      const context = buildContext({
+        parsed_email: { clean_body: CLEAN_BODY },
+      });
+
+      // 2. Act ⚙️
+      const result = await strategy.execute(context, {
+        templatePromptId: TEMPLATE_ID,
+        promptCode: TEMPLATE_CODE,
+      });
+
+      // 3. Assert 🎯
+      expect(result.success).toBe(true);
+      expect(promptService.findOneEntity).toHaveBeenCalledWith(TEMPLATE_ID);
+      expect(promptService.findByCode).not.toHaveBeenCalled();
+    });
+
+    it('9.3 deberia fallar en GRAVE cuando el codigo no existe', async () => {
+      // 1. Arrange 📐
+      const promptService = buildPromptService();
+      promptService.findByCode.mockRejectedValue(
+        new NotFoundException('Prompt con codigo "NO_EXISTE" no encontrado'),
+      );
+      const strategy = buildStrategy(promptService);
+      const context = buildContext({
+        parsed_email: { clean_body: CLEAN_BODY },
+      });
+
+      // 2. Act ⚙️
+      const result = await strategy.execute(context, {
+        promptCode: 'NO_EXISTE',
+      });
+
+      // 3. Assert 🎯: se nombra el `code` propio del nodo, y no el cajon comun
+      //    de errores HTTP, para que un `catchErrors` del esquema pueda enrutar.
+      expect(result.success).toBe(false);
+      expect(result.error?.level).toBe('GRAVE');
+      expect(result.error?.code).toBe(ERR_LLM_PROMPT_UNRESOLVED);
+      expect(result.error?.missingFields).toContain('promptCode');
+    });
+  });
+
+  describe('10. Proveedor ANTHROPIC', () => {
+    it('10.1 deberia enrutar al cliente de Anthropic sin degradar al simulador', async () => {
+      // 1. Arrange 📐: desde que existe `AnthropicLlmProvider`, declarar este
+      //    proveedor ya no cae en la rama de degradacion de `resolveProvider`.
+      const generateCompletion = jest.fn().mockResolvedValue({
+        headline: 'Titular real',
+        summary: 'Entradilla real',
+        body_paragraphs: ['Parrafo'],
+        metadata: {
+          tokensPrompt: 10,
+          tokensCompletion: 20,
+          modelUsed: 'claude-sonnet-5-5',
+          isMock: false,
+        },
+      });
+      const strategy = buildStrategy(
+        buildPromptService(),
+        {},
+        new MockLlmProvider(),
+        buildAiDefaults(),
+        { provider: LlmProvider.ANTHROPIC, generateCompletion },
+      );
+      const context = buildContext({
+        parsed_email: { clean_body: CLEAN_BODY },
+      });
+
+      // 2. Act ⚙️
+      const result = await strategy.execute(context, {
+        inlinePrompt: 'Redacta la noticia.',
+        provider: LlmProvider.ANTHROPIC,
+      });
+
+      // 3. Assert 🎯
+      expect(result.success).toBe(true);
+      expect(generateCompletion).toHaveBeenCalledTimes(1);
+      expect(
+        (result.data?.metadata as { isMock?: boolean } | undefined)?.isMock,
+      ).toBe(false);
     });
   });
   describe('7. Rescate por OCR', () => {

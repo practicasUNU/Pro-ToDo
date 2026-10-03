@@ -124,8 +124,14 @@ CREATE TABLE plantillas_html (
 CREATE TABLE plantillas_prompts_ia (
     id_plantilla_prompt_ia UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
 
-    -- Único: es lo que el operador reconoce en el selector del nodo IA, y la
-    -- clave por la que lo resuelve `AiPromptTemplatesService.findByName()`.
+    -- Clave de MÁQUINA (migración 023): mayúsculas, inmutable, es lo que cita
+    -- `promptCode` en los `params` del nodo PROCESADOR_IA. El UUID cambia en
+    -- cada clonado y `nombre` lo edita el operador; ninguno de los dos sirve
+    -- para que un flujo versionado se refiera a un prompt.
+    codigo VARCHAR(50) NOT NULL UNIQUE,
+
+    -- Etiqueta HUMANA: es lo que el operador reconoce en el selector del nodo
+    -- IA, y la clave por la que lo resuelve `AiPromptTemplatesService.findByName()`.
     nombre VARCHAR(120) NOT NULL UNIQUE,
     descripcion VARCHAR(255),
 
@@ -148,6 +154,14 @@ CREATE TABLE plantillas_prompts_ia (
 
 CREATE INDEX idx_plantillas_prompts_ia_id_usuario_creador
     ON plantillas_prompts_ia(id_usuario_creador);
+
+CREATE INDEX idx_plantillas_prompts_ia_codigo
+    ON plantillas_prompts_ia(codigo);
+
+-- LAS SEMILLAS DE PROMPTS NO VAN AQUÍ. `id_usuario_creador` es NOT NULL con FK
+-- RESTRICT y este archivo no crea ningún usuario, así que no hay autor al que
+-- atribuirlas. Viven en db/migrations/023-codigo-plantillas-prompts-ia.sql, que
+-- se aplica DESPUÉS de 002-bootstrap-admin.sql.
 
 -- =============================================================================
 -- Tabla: PLANTILLAS_FLUJO (blueprints maestros)

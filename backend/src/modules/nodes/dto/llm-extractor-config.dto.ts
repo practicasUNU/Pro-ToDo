@@ -7,10 +7,12 @@ import {
   IsOptional,
   IsString,
   IsUUID,
+  Matches,
   Max,
   Min,
 } from 'class-validator';
 
+import { CODE_PATTERN } from '@modules/ai-prompt-templates/dto/create-ai-prompt-template.dto';
 import { LlmProvider } from '@modules/nodes/strategies/interfaces/llm-provider.interface';
 
 /** Proveedor por defecto: simulacion de coste cero. Ver la nota de la clase. */
@@ -99,6 +101,22 @@ export class LlmExtractorConfigDto {
 
   @ApiPropertyOptional({
     description:
+      'Codigo inmutable de la plantilla en `plantillas_prompts_ia`. Alternativa ' +
+      'portable a `templatePromptId`: el UUID se regenera en cada clonado de la base ' +
+      'y este literal no, asi que es la forma de que una plantilla de flujo o una ' +
+      'semilla citen un prompt. Cede ante `templatePromptId` si vienen los dos.',
+    example: 'LICITACION_DEFAULT',
+  })
+  @IsOptional()
+  @IsString({ message: 'promptCode debe ser una cadena.' })
+  @IsNotEmpty({ message: 'promptCode no puede estar vacio.' })
+  @Matches(CODE_PATTERN, {
+    message: 'promptCode solo admite mayusculas, digitos y guion bajo.',
+  })
+  promptCode?: string;
+
+  @ApiPropertyOptional({
+    description:
       'Instruccion escrita directamente en el nodo, con marcadores {{namespace.campo}}. Alternativa a `templatePromptId` para prompts que no se reutilizan.',
     example:
       'Redacta una noticia a partir de {{scraped_web.full_article_content}}',
@@ -110,7 +128,7 @@ export class LlmExtractorConfigDto {
 
   @ApiPropertyOptional({
     description:
-      'Proveedor que ejecuta la inferencia. Solo MOCK y GEMINI tienen cliente implementado; ANTHROPIC y OPENAI se rechazan en ejecucion.',
+      'Proveedor que ejecuta la inferencia. MOCK, GEMINI y ANTHROPIC tienen cliente; OPENAI degrada al simulador con un aviso en el log.',
     enum: LlmProvider,
     default: DEFAULT_LLM_PROVIDER,
   })
@@ -195,6 +213,7 @@ export class LlmExtractorConfigDto {
 /** Configuracion del nodo de IA con los valores por defecto ya aplicados. */
 export interface ResolvedLlmExtractorConfig {
   readonly templatePromptId: string | null;
+  readonly promptCode: string | null;
   readonly inlinePrompt: string | null;
   readonly provider: LlmProvider;
   readonly model: string;
@@ -213,6 +232,7 @@ export const resolveLlmExtractorConfig = (
   // la guarda de `resolvePrompt`, que emite ERR_LLM_PROMPT_UNRESOLVED antes de
   // llamar a ningun proveedor.
   templatePromptId: dto.templatePromptId ?? null,
+  promptCode: dto.promptCode ?? null,
   inlinePrompt: dto.inlinePrompt ?? null,
   provider: dto.provider ?? DEFAULT_LLM_PROVIDER,
   model: dto.model ?? DEFAULT_LLM_MODEL,

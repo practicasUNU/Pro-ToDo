@@ -14,6 +14,7 @@ import {
   resolveLlmExtractorConfig,
 } from '@modules/nodes/dto/llm-extractor-config.dto';
 import { LlmProvider } from '@modules/nodes/strategies/interfaces/llm-provider.interface';
+import { AnthropicLlmProvider } from '@modules/nodes/strategies/providers/anthropic-llm.provider';
 import { GeminiLlmProvider } from '@modules/nodes/strategies/providers/gemini-llm.provider';
 import { MockLlmProvider } from '@modules/nodes/strategies/providers/mock-llm.provider';
 
@@ -175,6 +176,7 @@ export class LlmExtractorStrategy implements INodeStrategy {
     private readonly aiPromptTemplatesService: AiPromptTemplatesService,
     private readonly mockProvider: MockLlmProvider,
     private readonly geminiProvider: GeminiLlmProvider,
+    private readonly anthropicProvider: AnthropicLlmProvider,
     private readonly aiDefaults: AiDefaultsConfig,
   ) {}
 
@@ -282,8 +284,9 @@ export class LlmExtractorStrategy implements INodeStrategy {
    * Se derivan con el MISMO extractor que alimenta la interpolacion real, de
    * modo que lo que aqui se exige y lo que alli se resuelve no discrepen.
    *
-   * DEVUELVE VACIO con `templatePromptId`, y es inevitable: el texto de la
-   * plantilla vive en `plantillas_prompts_ia` y leerlo seria I/O, mientras que
+   * DEVUELVE VACIO con `templatePromptId` o `promptCode`, y es inevitable: el
+   * texto de la plantilla vive en `plantillas_prompts_ia` y leerlo seria I/O,
+   * mientras que
    * el contrato de `INodeStrategy` exige que este metodo sea PURO y SINCRONO.
    * La comprobacion no se pierde, se mueve: un marcador que no resuelva se
    * diagnostica en ejecucion como `ERR_LLM_INTERPOLATION`, nombrando la
@@ -311,11 +314,16 @@ export class LlmExtractorStrategy implements INodeStrategy {
     const hasTemplate =
       typeof params.templatePromptId === 'string' &&
       params.templatePromptId.trim().length > 0;
+    const hasCode =
+      typeof params.promptCode === 'string' &&
+      params.promptCode.trim().length > 0;
     const hasInline =
       typeof params.inlinePrompt === 'string' &&
       params.inlinePrompt.trim().length > 0;
 
-    return hasTemplate || hasInline ? [] : ['templatePromptId | inlinePrompt'];
+    return hasTemplate || hasCode || hasInline
+      ? []
+      : ['templatePromptId | promptCode | inlinePrompt'];
   }
 
   /**
@@ -370,9 +378,15 @@ export class LlmExtractorStrategy implements INodeStrategy {
   /**
    * Resuelve la instruccion: plantilla de la base de datos o texto en linea.
    *
-   * `templatePromptId` tiene PRIORIDAD sobre `inlinePrompt` cuando vienen los
-   * dos. Es la eleccion mas conservadora: la plantilla es un activo compartido y
-   * revisado, y el texto en linea suele ser un resto de una prueba anterior.
+   * PRECEDENCIA: `templatePromptId` > `promptCode` > `inlinePrompt`.
+   *
+   * Las dos plantillas van antes que el texto en linea por la eleccion mas
+   * conservadora: la plantilla es un activo compartido y revisado, y el texto
+   * en linea suele ser un resto de una prueba anterior. Entre las dos gana el
+   * UUID por ser la referencia mas especifica —apunta a UNA fila concreta—
+   * mientras que el codigo es la forma portable de nombrar la misma plantilla.
+   * En la practica declarar ambos es un error de configuracion; lo que importa
+   * es que el desempate sea estable y este escrito.
    */
   private async resolvePrompt(
     config: ResolvedLlmExtractorConfig,
@@ -404,6 +418,32 @@ export class LlmExtractorStrategy implements INodeStrategy {
       }
     }
 
+    if (config.promptCode !== null) {
+      try {
+        const template = await this.aiPromptTemplatesService.findByCode(
+          config.promptCode,
+        );
+
+        return { prompt: template.promptText };
+      } catch (error) {
+        // Misma traduccion que la rama del UUID, y por el mismo motivo: sin
+        // ella el fallo subiria como ERR_NODE_HTTP_FAILURE, el cajon comun de
+        // todas las estrategias, sobre el que un `catchErrors` del esquema no
+        // puede enrutar.
+        return {
+          failure: {
+            level: 'GRAVE',
+            code: ERR_LLM_PROMPT_UNRESOLVED,
+            message: `No se pudo recuperar la plantilla de prompt con codigo "${config.promptCode}": ${
+              error instanceof Error ? error.message : String(error)
+            }`,
+            missingFields: ['promptCode'],
+            ...stackTraceOf(error),
+          },
+        };
+      }
+    }
+
     if (config.inlinePrompt !== null && config.inlinePrompt.trim().length > 0) {
       return { prompt: config.inlinePrompt };
     }
@@ -418,7 +458,7 @@ export class LlmExtractorStrategy implements INodeStrategy {
         code: ERR_LLM_PROMPT_UNRESOLVED,
         message:
           'El nodo procesador de IA no tiene instruccion: elige una plantilla de prompt o escribe una en el asistente antes de activar el flujo.',
-        missingFields: ['templatePromptId', 'inlinePrompt'],
+        missingFields: ['templatePromptId', 'promptCode', 'inlinePrompt'],
       },
     };
   }
@@ -462,8 +502,9 @@ export class LlmExtractorStrategy implements INodeStrategy {
    * operador que lo activa esta diciendo "no gastes", no "gasta si el proveedor
    * configurado es de pago".
    *
-   * ANTHROPIC y OPENAI DEGRADAN al simulador con un aviso, en lugar de devolver
-   * `null` y fallar con `ERR_LLM_PROVIDER_UNSUPPORTED` como hacian antes. El
+   * OPENAI —el unico que queda sin cliente— DEGRADA al simulador con un aviso,
+   * en lugar de devolver `null` y fallar con `ERR_LLM_PROVIDER_UNSUPPORTED`
+   * como hacia antes. El
    * cambio llega con los defaults por entorno: `AI_DEFAULT_PROVIDER` puede
    * nombrar un proveedor todavia sin cliente, y con el comportamiento anterior
    * cualquier nodo que no declarase el suyo habria pasado a fallar de golpe
@@ -476,8 +517,11 @@ export class LlmExtractorStrategy implements INodeStrategy {
    * mirarlo; la alternativa —fallar— tiene el coste simetrico de pausar flujos
    * sanos por una variable de entorno que mira al futuro.
    *
-   * Es ademas el mismo criterio que ya aplicaba `GeminiLlmProvider` cuando falta
-   * `GEMINI_API_KEY`: degradar con aviso y marcar la salida, no reventar.
+   * Es ademas el mismo criterio que aplican `GeminiLlmProvider` y
+   * `AnthropicLlmProvider` cuando falta su clave de API: degradar con aviso y
+   * marcar la salida, no reventar. Que el proveedor tenga cliente registrado
+   * aqui no garantiza, por tanto, una inferencia real; `metadata.isMock` sigue
+   * siendo la unica senal fiable.
    */
   private resolveProvider(
     config: ResolvedLlmExtractorConfig,
@@ -488,6 +532,10 @@ export class LlmExtractorStrategy implements INodeStrategy {
 
     if (config.provider === LlmProvider.GEMINI) {
       return this.geminiProvider;
+    }
+
+    if (config.provider === LlmProvider.ANTHROPIC) {
+      return this.anthropicProvider;
     }
 
     this.logger.warn(

@@ -4,8 +4,21 @@ import {
   IsNotEmpty,
   IsOptional,
   IsString,
+  Matches,
   MaxLength,
 } from 'class-validator';
+
+/** Replica `plantillas_prompts_ia.codigo VARCHAR(50)`. */
+export const MAX_CODE_LENGTH = 50;
+
+/**
+ * Forma admitida de un codigo: mayusculas, digitos y guion bajo.
+ *
+ * Se cierra la forma a proposito. El codigo acaba escrito a mano dentro de los
+ * `params` de un nodo, y un `licitacion default` con espacios o acentos seria
+ * imposible de teclear igual dos veces.
+ */
+export const CODE_PATTERN = /^[A-Z0-9_]+$/;
 
 /** Replica `plantillas_prompts_ia.nombre VARCHAR(120)`. */
 const MAX_NAME_LENGTH = 120;
@@ -24,6 +37,25 @@ const MAX_DESCRIPTION_LENGTH = 255;
  * modelo que lo ejecuta lo elige el nodo.
  */
 export class CreateAiPromptTemplateDto {
+  @ApiProperty({
+    description:
+      'Clave de maquina del prompt, inmutable. Es lo que cita `promptCode` en los ' +
+      'params del nodo PROCESADOR_IA, y la unica referencia que sobrevive a un ' +
+      'clonado de la base o a un renombrado de la etiqueta visible.',
+    example: 'LICITACION_DEFAULT',
+    maxLength: MAX_CODE_LENGTH,
+    pattern: CODE_PATTERN.source,
+  })
+  @IsString({ message: 'code debe ser una cadena.' })
+  @IsNotEmpty({ message: 'code no puede estar vacio.' })
+  @MaxLength(MAX_CODE_LENGTH, {
+    message: `code no puede superar ${MAX_CODE_LENGTH} caracteres.`,
+  })
+  @Matches(CODE_PATTERN, {
+    message: 'code solo admite mayusculas, digitos y guion bajo.',
+  })
+  readonly code: string;
+
   @ApiProperty({
     description: 'Nombre unico del prompt, visible en el selector del nodo IA',
     example: 'extraccion-noticia-es',

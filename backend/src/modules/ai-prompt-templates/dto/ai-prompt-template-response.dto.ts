@@ -16,6 +16,13 @@ export class AiPromptTemplateResponseDto {
   readonly id: string;
 
   @ApiProperty({
+    description:
+      'Clave de maquina, inmutable. Es la que citan los params del nodo IA',
+    example: 'LICITACION_DEFAULT',
+  })
+  readonly code: string;
+
+  @ApiProperty({
     description: 'Nombre unico, visible en el selector del nodo IA',
   })
   readonly name: string;
@@ -49,4 +56,21 @@ export class AiPromptTemplateDetailResponseDto extends AiPromptTemplateResponseD
       'Instruccion completa, con sus marcadores {{nodo.campo}} sin resolver',
   })
   readonly promptText: string;
+
+  /**
+   * Namespaces que el prompt necesita encontrar en el contexto al ejecutarse.
+   *
+   * Se DERIVA del texto, no se almacena: una copia en columna se
+   * desincronizaria en cuanto alguien editase un marcador. El consumidor es el
+   * asistente, que con esto puede avisar de que un prompt pide
+   * `scraped_web.*` en un flujo que no tiene nodo EXTRACTOR_WEB, antes de
+   * gastar una inferencia en descubrirlo.
+   */
+  @ApiProperty({
+    description:
+      'Raices de namespace que aparecen en los marcadores {{nodo.campo}} del prompt',
+    example: ['parsed_email', 'scraped_web'],
+    type: [String],
+  })
+  readonly requiredNamespaces: readonly string[];
 }

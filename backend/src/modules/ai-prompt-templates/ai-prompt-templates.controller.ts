@@ -78,6 +78,30 @@ export class AiPromptTemplatesController {
     return this.aiPromptTemplatesService.findAll(includeInactive !== 'true');
   }
 
+  /**
+   * Resolucion por clave de maquina.
+   *
+   * VA ANTES de `@Get(':id')` y eso es obligatorio, no estilistico: Nest casa
+   * las rutas en orden de declaracion, asi que con el orden inverso
+   * `/code/LICITACION_DEFAULT` entraria por `:id`, el `ParseUUIDPipe` veria
+   * "code" y devolveria un 400 en lugar del prompt.
+   */
+  @Get('code/:code')
+  @ApiOperation({
+    summary: 'Obtiene un prompt por su codigo inmutable',
+    description:
+      'Resolucion que usan el asistente y la FSM: el codigo sobrevive a un clonado ' +
+      'de la base y a un renombrado de la etiqueta visible, el UUID y el nombre no.',
+  })
+  @ApiNotFoundResponse({
+    description: 'No existe ningun prompt con ese codigo',
+  })
+  public async findOneByCode(
+    @Param('code') code: string,
+  ): Promise<AiPromptTemplateDetailResponseDto> {
+    return this.aiPromptTemplatesService.findOneByCode(code);
+  }
+
   @Get(':id')
   @ApiOperation({ summary: 'Obtiene un prompt con su instruccion completa' })
   @ApiNotFoundResponse({ description: 'No existe ningun prompt con ese id' })
