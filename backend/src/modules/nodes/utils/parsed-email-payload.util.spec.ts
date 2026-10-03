@@ -1,3 +1,5 @@
+import { Workbook } from 'exceljs';
+
 import { resolveParserEmailConfig } from '@modules/nodes/dto/parser-email-config.dto';
 
 import {
@@ -608,6 +610,170 @@ describe('parsed-email-payload.util', () => {
       expect(payload.extracted_documents_text).toContain('Primero.');
       expect(payload.extracted_documents_text).toContain('Segundo.');
       expect(payload.extracted_documents_text).toContain('notas.txt');
+    });
+  });
+
+  describe('8. Cabecera, etiqueta y avisos del documento', () => {
+    /** Libro de calculo real, en base64, tal y como llega del nodo IMAP. */
+    const buildWorkbookAttachment = async (
+      sheets: readonly { readonly name: string; readonly rows: string[][] }[],
+    ): Promise<Record<string, unknown>> => {
+      const workbook = new Workbook();
+
+      for (const { name, rows } of sheets) {
+        const sheet = workbook.addWorksheet(name);
+
+        for (const row of rows) {
+          sheet.addRow(row);
+        }
+      }
+
+      const written = Buffer.from(await workbook.xlsx.writeBuffer());
+
+      return {
+        filename: 'paneles.xlsx',
+        contentType:
+          'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        size: written.length,
+        contentBase64: written.toString('base64'),
+      };
+    };
+
+    it('8.1 deberia nombrar la hoja dentro de la cabecera del documento', async () => {
+      // 1. Arrange: sin la etiqueta, el modelo no sabe de que pestana salieron
+      //    las cifras que esta leyendo.
+      const attachment = await buildWorkbookAttachment([
+        {
+          name: 'Datos Principales',
+          rows: [
+            ['titulo', 'empleos'],
+            ['Nueva sede', '200'],
+          ],
+        },
+      ]);
+
+      // 2. Act
+      const payload = await buildParsedEmail(
+        buildSource({ attachments: [attachment] }),
+        buildConfig(),
+      );
+
+      // 3. Assert
+      expect(payload.extracted_documents_text).toContain(
+        '--- Documento: paneles.xlsx (Hoja: Datos Principales) ---',
+      );
+      expect(payload.extracted_documents_text).toContain(
+        '| titulo | empleos |',
+      );
+    });
+
+    it('8.2 deberia invocar onDocumentNotice con las hojas ignoradas', async () => {
+      // 1. Arrange: el aviso llega al logger del nodo y al banco de pruebas del
+      //    asistente; el extractor no puede escribirlo porque tiene que seguir
+      //    siendo puro.
+      const onDocumentNotice = jest.fn();
+      const attachment = await buildWorkbookAttachment([
+        {
+          name: 'Datos',
+          rows: [
+            ['a', 'b'],
+            ['uno', 'dos'],
+          ],
+        },
+        {
+          name: 'Borrador',
+          rows: [
+            ['x', 'y'],
+            ['1', '2'],
+          ],
+        },
+      ]);
+
+      // 2. Act
+      await buildParsedEmail(
+        buildSource({ attachments: [attachment] }),
+        buildConfig(),
+        { onDocumentNotice },
+      );
+
+      // 3. Assert
+      expect(onDocumentNotice).toHaveBeenCalledTimes(1);
+      expect(onDocumentNotice).toHaveBeenCalledWith(
+        'paneles.xlsx',
+        expect.stringContaining('1 hoja(s) secundaria(s)'),
+      );
+    });
+
+    it('8.3 NO deberia anadir etiqueta a un documento que no la tiene', async () => {
+      // 1. Arrange: la cabecera de un PDF queda byte a byte como estaba.
+      pdfParse.mockResolvedValueOnce({ text: 'Contenido de la nota.' });
+
+      // 2. Act
+      const payload = await buildParsedEmail(
+        buildSource({ attachments: [SCANNED_PDF] }),
+        buildConfig(),
+      );
+
+      // 3. Assert
+      expect(payload.extracted_documents_text).toContain(
+        '--- Documento: escaneo.pdf ---',
+      );
+      expect(payload.extracted_documents_text).not.toContain('(');
+    });
+
+    it('8.4 deberia propagar el nombre para desambiguar por extension', async () => {
+      // 1. Arrange: `application/vnd.ms-excel` lo pone Excel tanto a un `.xls`
+      //    binario como al `.csv` que el mismo exporta. Sin el nombre, este
+      //    adjunto se declararia formato heredado y se perderia.
+      const csv = Buffer.from('titulo,ciudad\nApertura,Madrid', 'utf-8');
+
+      // 2. Act
+      const payload = await buildParsedEmail(
+        buildSource({
+          attachments: [
+            {
+              filename: 'datos.csv',
+              contentType: 'application/vnd.ms-excel',
+              size: csv.length,
+              contentBase64: csv.toString('base64'),
+            },
+          ],
+        }),
+        buildConfig(),
+      );
+
+      // 3. Assert
+      expect(payload.extracted_documents_text).toContain('| titulo | ciudad |');
+    });
+
+    it('8.5 deberia declarar sin soporte un binario heredado', async () => {
+      // 1. Arrange
+      const onDocumentFailure = jest.fn();
+
+      // 2. Act
+      const payload = await buildParsedEmail(
+        buildSource({
+          attachments: [
+            {
+              filename: 'informe.doc',
+              contentType: 'application/msword',
+              size: 10,
+              contentBase64: Buffer.from('binario').toString('base64'),
+            },
+          ],
+        }),
+        buildConfig(),
+        { onDocumentFailure },
+      );
+
+      // 3. Assert: no bloquea y NO cuenta como candidato a vision, porque un
+      //    `.doc` no lo arregla ningun modelo multimodal.
+      expect(onDocumentFailure).toHaveBeenCalledWith(
+        'informe.doc',
+        expect.stringContaining('heredado'),
+      );
+      expect(payload.extracted_documents_text).toBe('');
+      expect(payload.requires_multimodal_fallback).toBe(false);
     });
   });
 });

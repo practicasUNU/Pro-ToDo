@@ -82,6 +82,13 @@ export const MAX_TOTAL_ATTACHMENT_BYTES = 10_485_760;
  * fuera por defecto todo lo que nadie penso en anadir, que es exactamente al
  * reves de lo que conviene aqui.
  *
+ * `application/msword` y `application/vnd.ms-powerpoint` estan FUERA, y no por
+ * descuido: de un binario de Office 97-2003 no se sabe sacar texto, de modo que
+ * admitirlo solo escribiria megabytes de base64 en `contexto_acumulado` —
+ * reserializados en cada checkpoint posterior— para un fichero del que se sabe
+ * de antemano que no va a aportar nada. El operador se entera igual, y antes:
+ * el descarte de mas abajo deja su propio aviso LEVE con el tipo concreto.
+ *
  * `image/gif` esta AUSENTE deliberadamente. Tiene consecuencia: como la purga
  * del marcado es incondicional, un GIF incrustado se borra del HTML y tampoco se
  * inventaria, asi que se pierde. Es la politica acordada, no un descuido.
@@ -96,6 +103,15 @@ export const ALLOWED_ATTACHMENT_MIME_TYPES: ReadonlySet<string> = new Set([
   'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
   // .xlsx
   'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  // .pptx
+  'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+  // Excel y Outlook ponen este tipo tanto a un `.xls` binario como al `.csv`
+  // que la propia hoja de calculo acaba de exportar. Sin el, esos CSV se
+  // tiraban en la ingesta y el extractor nunca llegaba a verlos: la
+  // desambiguacion por extension de `extractTextFromBuffer` solo sirve si el
+  // fichero ENTRA. El `.xls` autentico que se cuele por aqui queda acotado por
+  // `maxAttachmentBytes` y sale con su motivo de formato heredado.
+  'application/vnd.ms-excel',
   'text/csv',
   'text/plain',
   'image/png',

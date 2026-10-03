@@ -116,6 +116,18 @@ export interface ParsedEmailHooks {
    */
   readonly onDocumentFailure?: (filename: string, reason: string) => void;
   /**
+   * Aviso no bloqueante sobre un adjunto que SI se pudo leer.
+   *
+   * Hoy lo dispara el libro de calculo con varias hojas, del que solo se
+   * extrae la primera. No es un fallo —hay texto, y es el bueno—, pero el
+   * operador tiene que poder enterarse de que el fichero traia mas.
+   *
+   * Existe por la misma razon que los demas: `extractTextFromBuffer` tiene que
+   * seguir siendo pura para poder consumirse desde `WizardService` sin cablear
+   * inyeccion de dependencias, asi que no puede tener un `Logger` dentro.
+   */
+  readonly onDocumentNotice?: (filename: string, notice: string) => void;
+  /**
    * Habia marcado que mirar y aun asi no salio ni un enlace aprovechable.
    *
    * Se dispara SOLO cuando existia HTML: un correo `text/plain` puro no tiene
@@ -291,16 +303,40 @@ const extractAttachmentDocuments = async (
       continue;
     }
 
-    const extraction = await extractTextFromBuffer(buffer, contentType);
+    // El nombre viaja al extractor para desempatar por extension: el tipo
+    // `application/vnd.ms-excel` lo ponen los clientes tanto a un `.xls`
+    // binario como al `.csv` que Excel acaba de exportar, y
+    // `application/octet-stream` —que es ademas el valor por defecto de un
+    // inventario rehidratado desde jsonb— no dice nada en absoluto.
+    const extraction = await extractTextFromBuffer(
+      buffer,
+      contentType,
+      filename,
+    );
 
     if (extraction.failure !== null) {
       hooks.onDocumentFailure?.(filename, extraction.failure);
     }
 
+    for (const notice of extraction.notices) {
+      hooks.onDocumentNotice?.(filename, notice);
+    }
+
     const text = extraction.text.trim();
 
     if (text.length > 0) {
-      chunks.push(`--- Documento: ${filename} ---\n\n${text}`);
+      // La etiqueta nombra el origen DENTRO del fichero (`Hoja: Datos`,
+      // `Presentación`). La cabecera se compone aqui y no en el extractor
+      // porque este bloque solo se emite cuando hay texto: si el extractor
+      // devolviera el texto ya encabezado, una extraccion vacia dejaria de ser
+      // la cadena vacia y se romperian tanto esta guarda como el recuento de
+      // candidatos a vision de mas abajo.
+      const header =
+        extraction.label === null
+          ? `--- Documento: ${filename} ---`
+          : `--- Documento: ${filename} (${extraction.label}) ---`;
+
+      chunks.push(`${header}\n\n${text}`);
       continue;
     }
 

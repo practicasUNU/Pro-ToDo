@@ -3562,3 +3562,119 @@ idénticas al montar sus dos pasos.
 - [ ] 104. Pendiente — arrastrado del 96: aplicar la migración 021 y actualizar el `.env` real
 - [ ] 105. Pendiente — `ESCUDO_POST_IA` y `DESTINO_HTTP`, los dos tipos que quedan sin configurador.
       Ninguno tiene estrategia en el motor, así que su turno va detrás del backend
+
+## Tanda actual — Serializacion de tablas a Markdown y ampliacion de formatos ofimaticos
+
+### Problema
+
+El nodo `PARSER_PRE_IA` destruia la estructura tabular en los tres sitios donde aparece, y el
+nodo de inferencia aguas abajo no podia atribuir un valor a su columna:
+
+1. **Hojas de calculo** — aplanadas con `CELL_SEPARATOR = ', '`. Dos columnas contiguas
+   `PRESIDENTE` (nombre y universidad) colapsaban en un par de valores indistinguibles, y
+   cualquier celda con una coma interna rompia el delimitador. `row.eachCell` sin `includeEmpty`
+   ademas DESPLAZABA a la izquierda todo lo que venia tras un hueco.
+2. **Documentos Word** — `mammoth.extractRawText` concatena las celdas de `<table>` sin ningun
+   delimitador.
+3. **Cuerpo HTML del correo** — `CELL_SELECTORS` inserta un espacio tras cada celda, de modo que
+   un cuadro de datos salia como prosa corrida.
+
+Y `.pptx` caia en el `default` del switch, en silencio y sin `failure`.
+
+### Contratos nuevos
+
+```typescript
+// src/modules/nodes/utils/markdown-table.util.ts — puro, sin DOM ni exceljs
+export const escapeTableCell: (value: string) => string;
+export const normalizeCellText: (value: string) => string;
+export const buildHeaderNames: (rawHeaders: readonly string[]) => readonly string[];
+export const rowsToMarkdownTable: (
+  rows: readonly (readonly string[])[],
+  maxChars?: number,
+) => string;
+export const rowsToFlatText: (rows: readonly (readonly string[])[]) => string;
+
+// src/modules/nodes/utils/html-markdown.util.ts — capa de cheerio
+export type HtmlElements = ReturnType<ReturnType<CheerioAPI['root']>['find']>;
+export const convertHtmlTableToMarkdown: (
+  $: CheerioAPI,
+  table: HtmlElements,
+) => string | null;
+export const convertDocumentHtmlToMarkdown: (html: string) => string;
+
+// src/modules/nodes/utils/delimited-text.util.ts — RFC 4180 sin coercion de tipos
+export const parseDelimitedDocument: (text: string) => string[][];
+
+// src/modules/nodes/utils/document-extractor.util.ts
+export interface DocumentExtraction {
+  readonly text: string;
+  readonly failure: string | null;
+  readonly label: string | null;        // `Hoja: Datos Principales`, `Presentación`
+  readonly notices: readonly string[];  // avisos no bloqueantes
+}
+export const extractTextFromBuffer: (
+  buffer: Buffer,
+  contentType: string,
+  filename?: string,
+) => Promise<DocumentExtraction>;
+export const convertWorksheetToMarkdownTable: (
+  worksheet: Worksheet,
+  maxChars?: number,
+) => string;
+export const extractCellValue: (cell: Cell) => string;
+
+// src/modules/nodes/utils/parsed-email-payload.util.ts
+interface ParsedEmailHooks {
+  readonly onDocumentNotice?: (filename: string, notice: string) => void;
+}
+```
+
+### Diagrama de dependencias
+
+```
+delimited-text.util ─┐
+markdown-table.util ─┼─> document-extractor.util ─> parsed-email-payload.util ─┬─> ParserEmailStrategy
+html-markdown.util  ─┘           ^                                             └─> WizardService
+         └──────────> email-sanitizer.util ────────┘
+```
+
+`markdown-table.util` NO importa `email-sanitizer.util` —lleva su propio `normalizeCellText`—
+porque el saneador importa la capa HTML y el ciclo seria inmediato.
+
+### Por que las tablas del cuerpo pasan por una heuristica
+
+Un correo de Outlook es, estructuralmente, tablas anidadas de maquetacion; lo documenta el propio
+`email-sanitizer.util.ts`. Convertirlas todas llenaria `clean_body` de barras verticales sin
+significado. Se serializa solo la que no contiene otra `<table>`, no declara
+`role="presentation"`, no usa `rowspan`, tiene al menos dos filas y dos columnas, no contiene
+prosa en sus celdas, y o bien es rectangular o bien declara algun `<th>`. El criterio es el mismo
+de `SUBJECT_PREFIX_PATTERN`: falso negativo antes que falso positivo.
+
+### Por que solo se lee la PRIMERA hoja del libro
+
+Un libro de trabajo real trae la hoja buena y detras un `Borrador`, una `Hoja2` vacia y los datos
+auxiliares de un grafico. Concatenarlas metia ese ruido en el prompt y repartia el presupuesto de
+caracteres entre hojas que nadie iba a leer. Se avisa de cuantas se ignoraron.
+
+### Por que el presupuesto de la hoja corta en frontera de fila
+
+`MAX_XLSX_CHARS = 30 000` se aplica ANTES de concatenar cada fila, no con un `slice()` sobre el
+texto final: una rejilla GFM con una linea coja deja de ser una tabla para cualquier lector.
+
+### Por que los binarios heredados no se soportan
+
+`officeparser` cubre OOXML y ODF pero NO el binario BIFF/CFB de Office 97-2003. `.doc`, `.xls` y
+`.ppt` devuelven un `failure` nombrado, no bloqueante, que viaja por `onDocumentFailure`. No
+levantan la bandera multimodal: un `.doc` no lo arregla ningun modelo con vision.
+
+### Estado de las tareas
+
+- [x] Serializador GFM compartido, con desambiguacion de encabezados y corte por presupuesto.
+- [x] Tablas de datos en `clean_body`, con heuristica anti-maquetacion.
+- [x] XLSX a tabla Markdown, una sola hoja, alineacion por numero de columna.
+- [x] CSV con analizador RFC 4180 propio (sin coercion de tipos).
+- [x] DOCX via `convertToHtml` + cheerio, con tablas GFM.
+- [x] PPTX via `officeparser`, cargado bajo demanda.
+- [x] Enrutamiento por tipo MIME cruzado con extension.
+- [x] Lista blanca de ingesta ampliada con `.pptx` y `application/vnd.ms-excel`.
+- [ ] Hojas ocultas (`worksheet.state === 'veryHidden'`): hoy se leerian si fuesen la primera.

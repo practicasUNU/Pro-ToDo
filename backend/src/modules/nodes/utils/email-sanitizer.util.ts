@@ -1,5 +1,7 @@
 import * as cheerio from 'cheerio';
 
+import { convertHtmlTableToMarkdown } from '@modules/nodes/utils/html-markdown.util';
+
 import type { CheerioAPI } from 'cheerio';
 
 /** Resultado de una unica pasada de saneado sobre un cuerpo HTML. */
@@ -237,6 +239,15 @@ const SUBJECT_PREFIX_PATTERN =
 
 /** Separador de parrafo tras `normalizeWhitespace`: una linea en blanco. */
 const PARAGRAPH_SEPARATOR = '\n\n';
+
+/**
+ * Tope de tablas de datos que se convierten a Markdown en un mismo correo.
+ *
+ * Un boletin maquetado puede traer doscientas tablas, y aunque la heuristica
+ * rechace casi todas, evaluarlas cuesta. Mas alla de este tope las restantes
+ * conservan el aplanado de siempre: el cuerpo ya tiene estructura de sobra.
+ */
+const MAX_CONVERTED_TABLES = 20;
 
 /**
  * Elimina el elemento y todo lo que viene DESPUES de el en el documento.
@@ -562,6 +573,58 @@ export const sanitizeEmailHtml = (html: string): SanitizedEmailBody => {
   // nota de `TemplateRendererService.auditPublishableMarkup`). Mutar y leer solo
   // necesita selectores, y con `noImplicitAny` esa es la diferencia entre codigo
   // limpio y un `as` por nodo.
+  // --- Fase de TABLAS DE DATOS ---------------------------------------------
+  //
+  // Va DESPUES de la poda —no se serializa lo que ya se borro: una tabla
+  // dentro de una firma o de un hilo citado no existe a estas alturas— y
+  // ANTES de los tres pasos de aplanado, que destruirian la rejilla: `br`
+  // partiria una celda en dos lineas, `CELL_SELECTORS` pegaria un espacio tras
+  // cada barra y `BLOCK_SELECTORS` —que incluye `table` y `tr`— meteria saltos
+  // de linea DENTRO del bloque.
+  //
+  // DEPENDE ademas de que `collectUrls` corra antes, como corre hoy:
+  // serializar una tabla borra sus `<a href>`, y moverlo detras de esta fase
+  // perderia los enlaces de toda tabla convertida.
+  const tables = $('table');
+  const conversions = new Map<number, string>();
+
+  // DOS pasadas sobre LA MISMA seleccion, y no una sola con mutacion. Si se
+  // reemplazara sobre la marcha, al llegar a una tabla CONTENEDORA su hija ya
+  // no estaria en el arbol, `find('table')` devolveria cero y la tabla de
+  // maquetacion pasaria la heuristica que acababa de suspender. Los indices de
+  // `each` son los mismos en las dos pasadas, asi que basta con guardar el
+  // numero y no el nodo —que obligaria a tipar `domhandler`.
+  tables.each((index, element) => {
+    if (conversions.size >= MAX_CONVERTED_TABLES) {
+      return;
+    }
+
+    const markdown = convertHtmlTableToMarkdown($, $(element));
+
+    if (markdown !== null) {
+      conversions.set(index, markdown);
+    }
+  });
+
+  tables.each((index, element) => {
+    const markdown = conversions.get(index);
+
+    if (markdown === undefined) {
+      return;
+    }
+
+    // El Markdown entra como TEXTO de un `<div>`, nunca como marcado.
+    // `replaceWith(cadena)` PARSEA la cadena, de modo que cualquier `<` salido
+    // de una celda se convertiria en un elemento y los pasos siguientes lo
+    // tocarian. Con `.text()` queda en un unico nodo que ningun selector
+    // alcanza, y el `<div>` esta en `BLOCK_SELECTORS`, asi que recibe sus
+    // saltos y la tabla queda separada de la prosa que la rodea.
+    const holder = $('<div></div>');
+
+    holder.text(`\n${markdown}\n`);
+    $(element).replaceWith(holder);
+  });
+
   $('br').replaceWith('\n');
   $(CELL_SELECTORS).each((_index, element) => {
     $(element).after(' ');

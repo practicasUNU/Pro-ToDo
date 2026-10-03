@@ -55,6 +55,7 @@
     "mailparser": "^3.9.8",
     "mammoth": "^1.12.3",
     "nodemailer": "^9.1.1",
+    "officeparser": "^8.1.0",
     "openai": "^7.5.0",
     "otplib": "^13.4.1",
     "passport": "^0.7.0",

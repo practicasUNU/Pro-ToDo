@@ -176,6 +176,8 @@ export class WizardService {
           warnings.push(
             `No se pudo extraer texto del adjunto "${filename}" (${reason}).`,
           ),
+        onDocumentNotice: (filename, notice) =>
+          warnings.push(`Adjunto "${filename}": ${notice}`),
         onNoUrlsFound: () =>
           warnings.push(
             'El marcado del correo no declaraba ningun enlace aprovechable: "extracted_urls" queda vacio y EXTRACTOR_WEB no recibiria nada que escrapear.',

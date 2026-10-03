@@ -1053,4 +1053,95 @@ describe('ParserEmailStrategy', () => {
       expect(percentage).toBeLessThanOrEqual(100);
     });
   });
+
+  describe('10. Tablas del cuerpo en clean_body', () => {
+    it('10.1 deberia publicar una tabla del correo como rejilla Markdown', async () => {
+      // 1. Arrange: el cuadro de datos llega al nodo de inferencia con sus
+      //    columnas, no como una ristra de valores sin etiqueta.
+      const strategy = new ParserEmailStrategy();
+      const html =
+        '<table>' +
+        '<tr><th>Concepto</th><th>Valor</th></tr>' +
+        '<tr><td>Dato 1</td><td>Dato 2</td></tr>' +
+        '</table>';
+      const context = buildContext(buildRawEmail({ text: '', html }));
+
+      // 2. Act
+      const result = await strategy.execute(context, {});
+      const body = result.data?.clean_body as string;
+
+      // 3. Assert
+      expect(body).toContain('| Concepto | Valor |');
+      expect(body).toContain('| --- | --- |');
+      expect(body).toContain('| Dato 1 | Dato 2 |');
+    });
+
+    it('10.2 NO deberia meter barras en el cuerpo de un correo maquetado', async () => {
+      // 1. Arrange: regresion clave. `OUTLOOK_HTML` es una MsoTableGrid de dos
+      //    filas y UNA columna, es decir maquetacion; convertirla llenaria el
+      //    cuerpo de barras verticales sin significado.
+      const strategy = new ParserEmailStrategy();
+      const context = buildContext(
+        buildRawEmail({ text: '', html: OUTLOOK_HTML }),
+      );
+
+      // 2. Act
+      const result = await strategy.execute(context, {});
+      const body = result.data?.clean_body as string;
+
+      // 3. Assert
+      expect(body).not.toContain('|');
+      expect(body).toContain('Nueva sede corporativa en Madrid');
+    });
+
+    it('10.3 deberia mantener las trece claves con una tabla en el cuerpo', async () => {
+      // 1. Arrange: el contrato del payload no cambia por serializar tablas.
+      const strategy = new ParserEmailStrategy();
+      const html =
+        '<table>' +
+        '<tr><th>Concepto</th><th>Valor</th></tr>' +
+        '<tr><td>Uno</td><td>Dos</td></tr>' +
+        '</table>';
+      const context = buildContext(buildRawEmail({ text: '', html }));
+
+      // 2. Act
+      const result = await strategy.execute(context, {});
+
+      // 3. Assert
+      expect(Object.keys(result.data ?? {})).toEqual([
+        'subject',
+        'clean_title',
+        'clean_body',
+        'body_source',
+        'character_count',
+        'original_character_count',
+        'reduction_percentage',
+        'extracted_urls',
+        'attachment_count',
+        'attachments',
+        'extracted_documents_text',
+        'requires_multimodal_fallback',
+        'multimodal_reason',
+      ]);
+    });
+
+    it('10.4 deberia seguir calculando el porcentaje dentro de rango', async () => {
+      // 1. Arrange: la rejilla ANADE caracteres, asi que la reduccion baja y
+      //    podria llegar a ser negativa. `reductionPercentage` ya la acota.
+      const strategy = new ParserEmailStrategy();
+      const html =
+        '<table><tr><th>A</th><th>B</th></tr><tr><td>1</td><td>2</td></tr></table>';
+      const context = buildContext(buildRawEmail({ text: '', html }));
+
+      // 2. Act
+      const result = await strategy.execute(context, {});
+      const percentage = result.data?.reduction_percentage as number;
+      const body = result.data?.clean_body as string;
+
+      // 3. Assert
+      expect(percentage).toBeGreaterThanOrEqual(0);
+      expect(percentage).toBeLessThanOrEqual(100);
+      expect(result.data?.character_count).toBe(body.length);
+    });
+  });
 });

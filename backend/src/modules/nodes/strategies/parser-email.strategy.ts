@@ -167,6 +167,11 @@ export class ParserEmailStrategy implements INodeStrategy {
         this.logger.warn(
           `LEVE | No se pudo extraer texto del adjunto "${filename}": ${reason}. Se continua sin el.`,
         ),
+      // Tampoco bloquea ni degrada nada: hay texto y es el bueno. El aviso
+      // existe porque el adjunto traia MAS de lo que se extrajo, y el operador
+      // tiene que poder enterarse sin abrir el fichero.
+      onDocumentNotice: (filename, notice) =>
+        this.logger.warn(`LEVE | Adjunto "${filename}": ${notice}`),
       // Tampoco bloquea: un correo sin enlaces es legitimo. El aviso existe
       // porque `EXTRACTOR_WEB` se quedara sin nada que escrapear y, sin esta
       // linea, el operador solo veria un arreglo vacio sin explicacion.

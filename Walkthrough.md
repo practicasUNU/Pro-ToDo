@@ -6341,3 +6341,154 @@ NO se cubre: la insercion real en el textarea no tiene prueba automatica —`sel
 QInput montado en happy-dom no reproduce el caret de un navegador de verdad—, asi que el punto 3 de
 la verificacion manual es el que la valida. Tampoco hay prueba del Escenario B de punta a punta,
 porque no existe el anfitrion que lo dispare.
+
+## Tanda actual — La tabla que llegaba al modelo convertida en una ristra de valores
+
+El sintoma venia de `Paneles de septiembre 2026-WEB.xlsx`: una hoja con las columnas
+`PRESIDENTE, PRESIDENTE, SECRETARIO, SECRETARIO`, donde la primera de cada par es el nombre de la
+persona y la segunda su universidad. `extractFromWorkbook` las aplanaba con `', '` y al modelo le
+llegaba `Ana Ruiz, Universidad A, Luis Paz, Universidad B`. No es que el modelo alucinara: es que
+no habia forma de saber cual era cual. Y una celda con una coma dentro —`Madrid, Espana`— valia
+por dos columnas.
+
+El mismo fallo aparecia tres veces en el mismo nodo: en Word, porque `mammoth.extractRawText`
+pega las celdas de un `<table>` sin delimitador; y en el cuerpo del correo, porque
+`CELL_SELECTORS` mete un espacio tras cada celda y el cuadro sale como prosa.
+
+### Por que un serializador y no tres
+
+Las tres rutas acaban en el mismo problema —una matriz de celdas que hay que escribir como
+rejilla— y resolverlas por separado garantiza que diverjan en la primera correccion. El
+serializador vive en `markdown-table.util.ts` y es PURO: no conoce cheerio, no conoce exceljs y no
+importa el saneador. Lo ultimo no es estetico: `email-sanitizer.util.ts` importa la capa HTML, y
+reutilizar su `normalizeWhitespace` desde el serializador cerraba el ciclo. Lleva el suyo,
+`normalizeCellText`, y la duplicacion es aparente: aquella CONSERVA los saltos de linea porque
+separan parrafos, y aqui un salto dentro de una celda rompe la rejilla.
+
+### El invariante que gobierna todo lo demas
+
+`normalizeWhitespace` se aplica despues, sobre todo el texto extraido. Colapsa `[ \t]+` a un
+espacio y recorta los bordes de cada linea. Si la tabla llevara relleno de alineacion —las
+columnas cuadradas que se ven bien en un editor— esa pasada lo destruiria y el texto dejaria de
+ser identico a si mismo. Por eso la celda vacia se emite como `| |` y nunca como `|  |`, y por eso
+las barras exteriores van pegadas al contenido.
+
+Esta decidido por una prueba y no por un comentario: `markdown-table.util.spec.ts` 4.1 asevera
+`normalizeWhitespace(tabla) === tabla`. El dia que alguien alinee las columnas "para que se lea
+mejor", esa prueba lo para antes de que lo pare un correo en produccion.
+
+### Las cuatro trampas que costaron una reescritura
+
+**1. `replaceWith(cadena)` PARSEA la cadena.** La primera version devolvia el Markdown al arbol de
+cheerio como texto suelto; cualquier `<` salido de una celda se habria convertido en un elemento y
+los pasos de aplanado posteriores lo habrian tocado. Ahora entra como `.text()` de un `<div>`, que
+es un unico nodo que ningun selector alcanza. Esto decide, de rebote, que el salto de linea dentro
+de una celda sea un espacio y no un `<br>`: un `<br>` escrito por nosotros se convertiria en
+elemento y `$('br').replaceWith('\n')` —que corre justo despues— lo volveria un salto DENTRO de la
+tabla.
+
+**2. Una sola pasada sobre `$('table')` deja pasar la maquetacion.** Si se reemplaza sobre la
+marcha, al llegar a una tabla CONTENEDORA su hija ya no esta en el arbol, `find('table')` devuelve
+cero y la tabla de maquetacion pasa la heuristica que acababa de suspender. Se hacen dos pasadas
+sobre la misma seleccion, guardando el indice —no el nodo, que obligaria a tipar `domhandler`.
+
+**3. `row.getCell(n)` CREA la celda.** El encargo pedia iterar por indice de columna con
+`worksheet.getRow(n)` y `row.getCell(c)` para no desalinear. Leyendo `exceljs/lib/doc/row.js`
+resulta que tanto `getCell` como `eachCell({ includeEmpty: true })` son "get OR CREATE" y
+materializan en memoria las celdas inexistentes —exactamente la hoja con mil columnas formateadas
+que el comentario original decia querer evitar. `eachCell` SIN `includeEmpty` ya entrega el
+`colNumber` real (`index + 1`), asi que colocar por indice da la misma alineacion sin ese coste.
+Ni `columnCount` ni `actualColumnCount` sirven como ancho: el primero cuenta huecos nulos y el
+segundo columnas distintas.
+
+**4. Leer una celda mutando el arbol vivo rompe la tabla que luego se rechaza.** Parte de la
+heuristica se decide DESPUES de leer las celdas. `readCellText` trabaja sobre un clon; sin eso,
+los `<br>` de una tabla de maquetacion rechazada dejaban de ser elementos y `sanitizeEmailHtml` ya
+no los convertia en saltos de linea. Es una regresion silenciosa en el caso mas comun del corpus,
+y la fija la prueba 1.8 de `html-markdown.util.spec.ts`.
+
+### Por que el CSV no pasa por exceljs
+
+Era el camino obvio teniendo ya la libreria. Su conversor por defecto
+(`exceljs/lib/csv/csv.js`) pasa `"00123"` a `123` —adios al codigo postal, al NIF y al numero de
+expediente—, convierte las fechas a `Date` segun SUS formatos y no los del fichero, traduce `#N/A`
+a un objeto de error, no retira el BOM y solo entiende la coma, de modo que un CSV espanol de
+Excel cae entero en una sola columna. Es literalmente "el viaje de ida y vuelta que solo puede
+perder informacion" contra el que avisaba el comentario original. Son cincuenta lineas de
+analizador propio, cero dependencias y cero coercion.
+
+### Tres premisas del encargo que no se sostenian
+
+**`officeparser` no lee binarios heredados.** Soporta `docx/pptx/xlsx/odt/ods/odp/pdf/rtf/csv/md/
+html/epub/tex`; `.doc`, `.xls` y `.ppt` de Office 97-2003 quedan fuera. Devuelven un `failure`
+nombrado que no bloquea y que no levanta la bandera multimodal —un `.doc` no lo arregla ningun
+modelo con vision, y contarlo retendria sus megabytes para una llamada que no puede servir.
+
+**El contrato de trece claves ya existia y ya se cumplia.** Esta en `ParsedEmailPayload` y la
+prueba 1.1 de `parser-email.strategy.spec.ts` lo compara posicionalmente. No habia nada que
+anadir: solo que no se rompiera, y hay dos pruebas nuevas que lo reafirman con una tabla dentro
+del cuerpo.
+
+**La logica no vive en `parser-email.strategy.ts`.** Esa clase es contrato de nodo y nada mas; de
+ella solo cambia el mapa de hooks.
+
+### Por que el aviso de hojas ignoradas no usa un Logger
+
+El encargo pedia registrarlo en el logger. `document-extractor.util.ts` esta documentado como
+puro y sin estado, y esa pureza es lo que permite que `WizardService` lo consuma sin cablear
+inyeccion de dependencias —igual que `buildParsedEmail`. El canal ya existia: `ParsedEmailHooks`.
+Se anade `onDocumentNotice`, que `ParserEmailStrategy` enchufa a `this.logger.warn` —el aviso SI
+acaba en el log, como se pedia— y `WizardService` empuja a su arreglo `warnings`, de modo que el
+operador lo ve tambien en el banco de pruebas del asistente, que es donde de verdad lo va a mirar.
+
+### Por que la cabecera se compone en el llamante
+
+El encargo pedia que el extractor emitiera
+`--- Documento: <fichero> (Hoja: <hoja>) ---`. El extractor no conoce el nombre del fichero, y
+hacer que lo conociera tenia un efecto peor: el bloque solo se emite cuando hay texto, asi que un
+texto ya encabezado dejaria de ser la cadena vacia cuando no hubiera contenido, y se romperian
+tanto esa guarda como el recuento de candidatos a vision. El extractor devuelve una `label`
+(`Hoja: Datos Principales`, `Presentación`) y `extractAttachmentDocuments` compone la cabecera. El
+formato resultante es el pedido, y un PDF sigue dando `--- Documento: nota.pdf ---` byte a byte.
+
+### El `import()` que funcionaba en produccion y en ninguna prueba
+
+`officeparser` se carga bajo demanda porque arrastra `pdfjs-dist` y `tesseract.js`. La version
+natural era `await import('officeparser')` dentro de la rama. Con `module: nodenext` TypeScript
+PRESERVA ese `import()` en la salida CommonJS —ese es su proposito— y la VM de Jest lo rechaza sin
+`--experimental-vm-modules`: `ERR_VM_DYNAMIC_IMPORT_CALLBACK_MISSING_FLAG`. El resultado era una
+rama que funcionaba en produccion y que ninguna prueba podia recorrer, que es la peor combinacion
+posible. Se usa `require` tipado con `typeof import(...)`: igual de perezoso, mismo camino en los
+dos sitios. Y `fileType: 'pptx'` es obligatorio porque sin el officeparser detecta por firma
+cargando `file-type`, que es ESM puro.
+
+### Por que `.doc` y `.ppt` NO entran en la lista blanca de ingesta
+
+Se planteo admitirlos para que el operador viera el fallo. Resulta que ya lo ve, antes y mas
+barato: `ImapTriggerStrategy` registra `LEVE | Adjunto "informe.doc" descartado por tipo MIME no
+autorizado` en el momento de la ingesta. Admitirlos solo cambiaria DONDE aparece el aviso, a
+cambio de escribir megabytes de base64 en `contexto_acumulado` reserializados en cada checkpoint
+para un fichero del que se sabe de antemano que no aporta nada. Si entra `.pptx`, porque se lee; y
+entra `application/vnd.ms-excel`, porque Excel se lo pone tambien a los `.csv` que el mismo
+exporta y asi se recuperan: la desambiguacion por extension solo sirve si el fichero ENTRA.
+
+### Fixtures sin binarios del sistema
+
+`tabla-simple.docx` y `presentacion-minima.pptx` se versionan en `test/fixtures/` con su generador
+de Python al lado (`*.gen.py`, solo biblioteca estandar), igual que `nota-nativa.ps` acompana a
+`nota-nativa.pdf`. No hace falta LibreOffice. Construirlos dentro de la prueba habria atado el
+fixture a la misma libreria que se quiere ejercitar.
+
+### Lo que las pruebas cubren y lo que no
+
+94 pruebas nuevas y 2 reescritas, con la suite completa en 1400: 23 del serializador puro, 19 de
+la capa HTML, 10 del analizador delimitado, 27 del extractor (desambiguacion, alineacion con
+huecos, hoja unica, corte seguro, legados, enrutamiento por extension, DOCX y PPTX reales), 6 del
+saneador, 4 de la estrategia y 5 del payload. Las dos que cambiaron de expectativa son la 0.2 (el
+CSV ya no sale verbatim) y la 2.1 (el XLSX ya no sale aplanado con comas).
+
+NO se cubre: las hojas ocultas (`worksheet.state`), que hoy se leerian si fuesen la primera del
+libro; `colspan` en XLSX mas alla de resolver la celda combinada contra su maestra; y el riesgo
+conocido de que una tabla que sea el ULTIMO parrafo del cuerpo, mida menos de 800 caracteres y
+contenga una palabra de aviso legal, la retire `stripTrailingBoilerplate` entera —es el mismo
+trato que recibe cualquier parrafo final y no se le anade excepcion.

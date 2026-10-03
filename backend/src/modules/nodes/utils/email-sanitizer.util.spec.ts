@@ -611,4 +611,107 @@ describe('email-sanitizer.util', () => {
       );
     });
   });
+
+  describe('9. Tablas de datos del cuerpo', () => {
+    it('9.1 deberia serializar una tabla de datos como rejilla GFM', () => {
+      // 1. Arrange: antes, `CELL_SELECTORS` pegaba un espacio tras cada celda
+      //    y el cuadro salia como prosa corrida.
+      const html =
+        '<table>' +
+        '<tr><th>Ciudad</th><th>Empleos</th></tr>' +
+        '<tr><td>Dato 1</td><td>Dato 2</td></tr>' +
+        '</table>';
+
+      // 2. Act
+      const { text } = sanitizeEmailHtml(html);
+
+      // 3. Assert
+      expect(text).toContain('| Ciudad | Empleos |');
+      expect(text).toContain('| --- | --- |');
+      expect(text).toContain('| Dato 1 | Dato 2 |');
+    });
+
+    it('9.2 NO deberia tocar la maquetacion anidada de Outlook', () => {
+      // 1. Arrange: un correo de Outlook es, estructuralmente, tablas anidadas
+      //    de una columna. Convertirlas llenaria el cuerpo de barras sin
+      //    significado, que es el fallo que la heuristica existe para evitar.
+      const html =
+        '<table><tr><td>' +
+        '<table><tr><td><h1>Titular</h1></td></tr>' +
+        '<tr><td><p>Cuerpo del comunicado.</p></td></tr></table>' +
+        '</td></tr></table>';
+
+      // 2. Act
+      const { text } = sanitizeEmailHtml(html);
+
+      // 3. Assert
+      expect(text).not.toContain('|');
+      expect(text).toContain('Titular');
+      expect(text).toContain('Cuerpo del comunicado.');
+    });
+
+    it('9.3 NO deberia convertir una tabla declarada de presentacion', () => {
+      // 1. Arrange: el autor del correo ya dijo que es maquetacion.
+      const html =
+        '<table role="presentation">' +
+        '<tr><td>Madrid</td><td>2026</td></tr>' +
+        '<tr><td>Sevilla</td><td>2027</td></tr>' +
+        '</table>';
+
+      // 2. Act
+      const { text } = sanitizeEmailHtml(html);
+
+      // 3. Assert
+      expect(text).not.toContain('|');
+    });
+
+    it('9.4 deberia conservar la rejilla intacta tras finalizeText', () => {
+      // 1. Arrange: `normalizeWhitespace` colapsa espacio horizontal y recorta
+      //    los bordes de cada linea. La tabla se construye ya normalizada para
+      //    atravesar esa pasada sin deformarse.
+      const html =
+        '<p>Resumen de la nota.</p>' +
+        '<table>' +
+        '<tr><th>Ciudad</th><th>Empleos</th></tr>' +
+        '<tr><td>Madrid</td><td>200</td></tr>' +
+        '</table>';
+
+      // 2. Act
+      const { text } = sanitizeEmailHtml(html);
+
+      // 3. Assert
+      expect(text).toBe(
+        'Resumen de la nota.\n\n| Ciudad | Empleos |\n| --- | --- |\n| Madrid | 200 |',
+      );
+    });
+
+    it('9.5 deberia conservar los enlaces de una tabla convertida', () => {
+      // 1. Arrange: serializar la tabla borra sus `<a href>`, pero
+      //    `collectUrls` corre ANTES de esta fase. Esta prueba fija ese orden.
+      const html =
+        '<table>' +
+        '<tr><th>Nota</th><th>Enlace</th></tr>' +
+        '<tr><td>Sede</td><td><a href="https://unuware.com/sede">Ver</a></td></tr>' +
+        '</table>';
+
+      // 2. Act
+      const { text, urls } = sanitizeEmailHtml(html);
+
+      // 3. Assert
+      expect(urls).toEqual(['https://unuware.com/sede']);
+      expect(text).toContain('| Sede | Ver |');
+    });
+
+    it('9.6 NO deberia convertir una tabla de una sola fila', () => {
+      // 1. Arrange: es una linea de texto con celdas, no una tabla. Es ademas
+      //    lo que mantiene valido el caso 1.4.
+      const html = '<table><tr><td>Madrid</td><td>2026</td></tr></table>';
+
+      // 2. Act
+      const { text } = sanitizeEmailHtml(html);
+
+      // 3. Assert
+      expect(text).toBe('Madrid 2026');
+    });
+  });
 });
