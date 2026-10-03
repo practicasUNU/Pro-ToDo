@@ -10,6 +10,7 @@ import {
   ERR_LLM_PROVIDER_FAILURE,
   LLM_OUTPUT_KEYS,
   LlmExtractorStrategy,
+  MATERIAL_IN_INSTRUCTIONS_NOTICE,
 } from '@modules/nodes/strategies/llm-extractor.strategy';
 import { LlmProviderFactory } from '@modules/nodes/strategies/llm-provider.factory';
 import { MockLlmProvider } from '@modules/nodes/strategies/providers/mock-llm.provider';
@@ -305,6 +306,7 @@ describe('LlmExtractorStrategy', () => {
       expect(result.error?.missingFields).toEqual([
         'ocr_result.clean_body',
         'parsed_email.clean_body',
+        'parsed_email.extracted_documents_text',
         'scraped_web.full_article_content',
       ]);
     });
@@ -888,13 +890,18 @@ describe('LlmExtractorStrategy', () => {
         provider: LlmProvider.GEMINI,
       });
 
-      // 3. Assert 🎯
+      // 3. Assert 🎯: la transcripcion ENCABEZA el material. Ya no es una
+      //    cascada excluyente —el "Ver adjunto." tambien viaja—, pero el orden
+      //    sigue siendo el que importa: lo primero que lee el modelo es el
+      //    texto real recuperado del escaneo, no la linea residual del parser.
       expect(result.success).toBe(true);
-      expect(generateCompletion).toHaveBeenCalledWith(
-        'Texto completo recuperado del PDF escaneado.',
-        'Redacta una noticia breve y objetiva.',
-        expect.anything(),
-      );
+
+      const [material] = generateCompletion.mock.calls[0] as [string];
+
+      expect(material.indexOf('Texto completo recuperado del PDF escaneado.')) //
+        .toBeLessThan(material.indexOf('Ver adjunto.'));
+      expect(material).toContain('Transcripcion OCR:');
+      expect(material).toContain('Correo:');
     });
 
     it('7.2 NO deberia recolectar adjuntos por su cuenta', async () => {
@@ -1092,6 +1099,237 @@ describe('LlmExtractorStrategy', () => {
       expect(
         (result.data?.metadata as { isMock?: boolean } | undefined)?.isMock,
       ).toBe(true);
+    });
+  });
+
+  describe('11. Materia prima acumulada', () => {
+    /** Tabla ofimatica tipica que `PARSER_PRE_IA` serializa desde un .docx. */
+    const DOCUMENTS_TABLE = [
+      '| Expediente | Importe |',
+      '| --- | --- |',
+      '| 2027/014 | 48500.00 |',
+    ].join('\n');
+
+    /** Proveedor doblado que solo sirve para capturar sus argumentos. */
+    const buildSpyProvider = (): jest.Mock =>
+      jest.fn().mockResolvedValue({
+        headline: 'h',
+        summary: 's',
+        body_paragraphs: [],
+        metadata: {
+          tokensPrompt: 0,
+          tokensCompletion: 0,
+          modelUsed: 'gemini-1.5-flash',
+          isMock: false,
+        },
+      });
+
+    /** Primer argumento de la llamada: la materia prima ya ensamblada. */
+    const materialOf = (generateCompletion: jest.Mock): string =>
+      (generateCompletion.mock.calls[0] as [string])[0];
+
+    it('11.1 deberia enviar el correo Y el texto de los adjuntos', async () => {
+      // 1. Arrange 📐: el caso que motivo el cambio. El cuerpo del correo no
+      //    dice nada por si solo —el dato esta en el adjunto— y hasta ahora
+      //    ganaba la cascada y el adjunto no viajaba.
+      const generateCompletion = buildSpyProvider();
+      const strategy = buildStrategy(buildPromptService(), {
+        provider: LlmProvider.GEMINI,
+        generateCompletion,
+      });
+      const context = buildContext({
+        parsed_email: {
+          clean_body: 'Usando el adjunto',
+          extracted_documents_text: DOCUMENTS_TABLE,
+          attachment_count: 1,
+        },
+      });
+
+      // 2. Act ⚙️: prompt en linea, SIN marcadores. Es el caso del operador que
+      //    escribe la instruccion a mano y no cita ningun namespace.
+      const result = await strategy.execute(context, {
+        inlinePrompt: 'Extrae el importe.',
+        provider: LlmProvider.GEMINI,
+      });
+
+      // 3. Assert 🎯
+      expect(result.success).toBe(true);
+
+      const material = materialOf(generateCompletion);
+
+      expect(material).toContain('Correo:');
+      expect(material).toContain('Usando el adjunto');
+      expect(material).toContain('Documentos adjuntos:');
+      expect(material).toContain(DOCUMENTS_TABLE);
+      expect(material.indexOf('Usando el adjunto')).toBeLessThan(
+        material.indexOf(DOCUMENTS_TABLE),
+      );
+    });
+
+    it('11.2 deberia acumular correo, adjuntos y articulo en ese orden', async () => {
+      // 1. Arrange 📐
+      const generateCompletion = buildSpyProvider();
+      const strategy = buildStrategy(buildPromptService(), {
+        provider: LlmProvider.GEMINI,
+        generateCompletion,
+      });
+      const context = buildContext({
+        parsed_email: {
+          clean_body: CLEAN_BODY,
+          extracted_documents_text: DOCUMENTS_TABLE,
+        },
+        scraped_web: { full_article_content: ARTICLE_CONTENT },
+      });
+
+      // 2. Act ⚙️
+      await strategy.execute(context, {
+        inlinePrompt: 'Redacta.',
+        provider: LlmProvider.GEMINI,
+      });
+
+      // 3. Assert 🎯
+      const material = materialOf(generateCompletion);
+
+      expect(material.indexOf(CLEAN_BODY)).toBeLessThan(
+        material.indexOf(DOCUMENTS_TABLE),
+      );
+      expect(material.indexOf(DOCUMENTS_TABLE)).toBeLessThan(
+        material.indexOf(ARTICLE_CONTENT),
+      );
+      expect(material).toContain('Articulo original:');
+    });
+
+    it('11.3 NO deberia repetir lo que el prompt ya interpola', async () => {
+      // 1. Arrange 📐: duplicar el texto no aporta un dato nuevo y si duplica
+      //    los tokens facturados de cada llamada. `LICITACION_DEFAULT` cita los
+      //    adjuntos, asi que solo el correo debe ir como materia prima.
+      const generateCompletion = buildSpyProvider();
+      const promptService = buildPromptService();
+
+      promptService.findByCode.mockResolvedValue(
+        buildTemplate({
+          promptText:
+            'Extrae los importes de:\n{{parsed_email.extracted_documents_text}}',
+        }),
+      );
+
+      const strategy = buildStrategy(promptService, {
+        provider: LlmProvider.GEMINI,
+        generateCompletion,
+      });
+      const context = buildContext({
+        parsed_email: {
+          clean_body: CLEAN_BODY,
+          extracted_documents_text: DOCUMENTS_TABLE,
+        },
+      });
+
+      // 2. Act ⚙️
+      await strategy.execute(context, {
+        promptCode: TEMPLATE_CODE,
+        provider: LlmProvider.GEMINI,
+      });
+
+      // 3. Assert 🎯
+      const [material, instruction] = generateCompletion.mock.calls[0] as [
+        string,
+        string,
+      ];
+
+      expect(material).toContain(CLEAN_BODY);
+      expect(material).not.toContain(DOCUMENTS_TABLE);
+      // Y sigue llegando al modelo: por la via del marcador, una sola vez.
+      expect(instruction).toContain(DOCUMENTS_TABLE);
+    });
+
+    it('11.4 deberia avisar donde esta el material si el prompt lo cita todo', async () => {
+      // 1. Arrange 📐: el caso de `PANELES_UEM_DEFAULT`, que interpola su unico
+      //    origen. Mandar el `prompt` vacio dejaria una peticion sin contenido.
+      const generateCompletion = buildSpyProvider();
+      const promptService = buildPromptService();
+
+      promptService.findByCode.mockResolvedValue(
+        buildTemplate({
+          promptText:
+            'Procesa los paneles:\n{{parsed_email.extracted_documents_text}}',
+        }),
+      );
+
+      const strategy = buildStrategy(promptService, {
+        provider: LlmProvider.GEMINI,
+        generateCompletion,
+      });
+      const context = buildContext({
+        parsed_email: { extracted_documents_text: DOCUMENTS_TABLE },
+      });
+
+      // 2. Act ⚙️
+      await strategy.execute(context, {
+        promptCode: TEMPLATE_CODE,
+        provider: LlmProvider.GEMINI,
+      });
+
+      // 3. Assert 🎯
+      expect(materialOf(generateCompletion)).toBe(
+        MATERIAL_IN_INSTRUCTIONS_NOTICE,
+      );
+    });
+
+    it('11.5 deberia avisar de adjuntos que no aportaron texto, SIN fallar', async () => {
+      // 1. Arrange 📐: un PDF escaneado no deja texto, y eso lo atiende
+      //    PROCESADOR_OCR. Fallar aqui pausaria flujos correctos; callar deja
+      //    al operador sin saber que el modelo no vio el adjunto.
+      const generateCompletion = buildSpyProvider();
+      const strategy = buildStrategy(buildPromptService(), {
+        provider: LlmProvider.GEMINI,
+        generateCompletion,
+      });
+      const warn = jest
+        .spyOn(strategy['logger'], 'warn')
+        .mockImplementation(() => undefined);
+      const context = buildContext({
+        parsed_email: {
+          clean_body: CLEAN_BODY,
+          extracted_documents_text: '',
+          attachment_count: 2,
+        },
+      });
+
+      // 2. Act ⚙️
+      const result = await strategy.execute(context, {
+        inlinePrompt: 'Redacta.',
+        provider: LlmProvider.GEMINI,
+      });
+
+      // 3. Assert 🎯
+      expect(result.success).toBe(true);
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining('2 adjunto'));
+    });
+
+    it('11.6 NO deberia avisar cuando el OCR ya rescato el adjunto', async () => {
+      // 1. Arrange 📐: ahi el adjunto SI aporto texto, por otra via. Avisar
+      //    llenaria el log de advertencias sobre un flujo que funciona.
+      const generateCompletion = buildSpyProvider();
+      const strategy = buildStrategy(buildPromptService(), {
+        provider: LlmProvider.GEMINI,
+        generateCompletion,
+      });
+      const warn = jest
+        .spyOn(strategy['logger'], 'warn')
+        .mockImplementation(() => undefined);
+      const context = buildContext({
+        parsed_email: { clean_body: 'Ver adjunto.', attachment_count: 1 },
+        ocr_result: { clean_body: 'Transcripcion del escaneo.' },
+      });
+
+      // 2. Act ⚙️
+      await strategy.execute(context, {
+        inlinePrompt: 'Redacta.',
+        provider: LlmProvider.GEMINI,
+      });
+
+      // 3. Assert 🎯
+      expect(warn).not.toHaveBeenCalled();
     });
   });
 });

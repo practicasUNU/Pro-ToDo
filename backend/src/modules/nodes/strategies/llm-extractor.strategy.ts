@@ -68,21 +68,60 @@ const VALIDATION_OPTIONS: ValidatorOptions = {
 };
 
 /**
- * Origenes del texto a procesar, EN ORDEN DE PRIORIDAD.
+ * Origenes del texto a procesar, EN ORDEN DE PRESENTACION.
  *
- * `parsed_email.clean_body` primero porque, cuando ambos existen, el correo es
- * el disparador del flujo y la pagina extraida solo lo amplia. Un flujo que
- * arranca por cron no tiene correo y cae al segundo sin mas.
+ * YA NO ES UNA CASCADA EXCLUYENTE. Hasta PROT-21 esta lista se recorria
+ * devolviendo el primer origen con contenido, y eso descartaba en silencio todo
+ * lo demas: un correo con cuerpo Y adjuntos ofimaticos mandaba al modelo solo el
+ * cuerpo, aunque el dato que el operador buscaba estuviese en el adjunto. Ahora
+ * se acumulan todos los que aporten algo, cada uno bajo su etiqueta, y el orden
+ * de esta lista es el orden en que aparecen en la materia prima.
+ *
+ * El rescate por OCR va PRIMERO: si existe, es porque el parser no encontro
+ * texto aprovechable y el nodo de transcripcion lo recupero de los adjuntos.
+ * Dejarlo detras haria que un `clean_body` residual del parser —el "Ver
+ * adjunto" que a veces acompana a un escaneo— encabezase la transcripcion real.
+ *
+ * `label` es lo que encabeza cada bloque, en espanol porque lo lee el modelo (y
+ * el operador cuando audita la ejecucion), no el codigo.
  */
 const INPUT_TEXT_SOURCES = [
-  // El rescate por OCR va PRIMERO: si existe, es porque el parser no encontro
-  // texto aprovechable y el nodo de transcripcion lo recupero de los adjuntos.
-  // Dejarlo detras haria que un `clean_body` residual del parser —el "Ver
-  // adjunto" que a veces acompana a un escaneo— ganase a la transcripcion real.
-  { namespace: 'ocr_result', field: 'clean_body' },
-  { namespace: 'parsed_email', field: 'clean_body' },
-  { namespace: 'scraped_web', field: 'full_article_content' },
+  { namespace: 'ocr_result', field: 'clean_body', label: 'Transcripcion OCR' },
+  { namespace: 'parsed_email', field: 'clean_body', label: 'Correo' },
+  {
+    namespace: 'parsed_email',
+    field: 'extracted_documents_text',
+    label: 'Documentos adjuntos',
+  },
+  {
+    namespace: 'scraped_web',
+    field: 'full_article_content',
+    label: 'Articulo original',
+  },
 ] as const;
+
+/**
+ * Materia prima cuando TODOS los bloques ya viajan dentro de la instruccion.
+ *
+ * Pasa con plantillas como `PANELES_UEM_DEFAULT`, que interpola el unico origen
+ * poblado. Mandar el `prompt` vacio dejaria al proveedor una peticion sin
+ * contenido —algunos la rechazan— y al operador un log ilegible; esta linea dice
+ * explicitamente donde esta el material.
+ */
+export const MATERIAL_IN_INSTRUCTIONS_NOTICE =
+  'El material a procesar figura integro en las instrucciones.';
+
+/**
+ * Marcador `{{namespace.campo}}` de un origen concreto.
+ *
+ * Misma gramatica que `StatePayloadContext.getInterpolatedValue`
+ * (`architecture-patterns.md` §3), espacios interiores incluidos, para que lo
+ * que aqui se detecta como "ya interpolado" y lo que alli se sustituye no
+ * discrepen. Sustitucion determinista: ni AST ni evaluacion dinamica
+ * (`security-and-scope.md` §3).
+ */
+const markerPattern = (namespace: string, field: string): RegExp =>
+  new RegExp(`\\{\\{\\s*${namespace}\\.${field}\\s*\\}\\}`);
 
 /** Union discriminada: o hay configuracion, o hay un fallo que devolver. */
 type LlmConfigResolution =
@@ -195,13 +234,13 @@ export class LlmExtractorStrategy implements INodeStrategy {
     // Guarda de CONTENIDO. Va antes de resolver el prompt porque es la mas
     // barata de las dos —mira el contexto que ya esta en memoria— y porque sin
     // texto de entrada no hay inferencia que preparar, tenga o no plantilla.
+    // Solo comprueba que EXISTA material; ensamblarlo viene despues, porque el
+    // ensamblado depende de que cite el prompt.
     //
     // Ya no hay excepcion por adjuntos: el correo cuyo unico contenido es un PDF
     // escaneado lo atiende ahora el nodo PROCESADOR_OCR, que publica su
     // transcripcion en `ocr_result` y la deja como primer origen de esta lista.
-    const inputText = this.resolveInputText(context);
-
-    if (inputText === null) {
+    if (!this.hasAnyInputText(context)) {
       this.consecutiveFailures.delete(brakeKey);
 
       return {
@@ -225,6 +264,13 @@ export class LlmExtractorStrategy implements INodeStrategy {
 
       return { success: false, error: promptResolution.failure };
     }
+
+    // La materia prima se ensambla AQUI y no en la guarda de arriba porque
+    // necesita el prompt SIN interpolar: es lo unico que permite saber que
+    // origenes ya viajan dentro de la instruccion y no hay que repetir.
+    const inputText = this.buildInputText(context, promptResolution.prompt);
+
+    this.warnOnOrphanAttachments(context);
 
     const interpolated = this.interpolate(context, promptResolution.prompt);
 
@@ -355,22 +401,121 @@ export class LlmExtractorStrategy implements INodeStrategy {
   }
 
   /**
-   * Texto a procesar, o `null` si ningun origen lo aporta.
+   * Valor util de un origen, o `null` si no aporta nada.
    *
-   * Recorre `INPUT_TEXT_SOURCES` en orden y devuelve el primero con contenido.
    * Una cadena de solo espacios cuenta como ausencia: mandarla al modelo
    * facturaria tokens por procesar nada.
    */
-  private resolveInputText(context: StatePayloadContext): string | null {
-    for (const source of INPUT_TEXT_SOURCES) {
-      const value = context.getNamespace(source.namespace)?.[source.field];
+  private readSource(
+    context: StatePayloadContext,
+    namespace: string,
+    field: string,
+  ): string | null {
+    const value = context.getNamespace(namespace)?.[field];
 
-      if (typeof value === 'string' && value.trim().length > 0) {
-        return value;
+    return typeof value === 'string' && value.trim().length > 0 ? value : null;
+  }
+
+  /**
+   * ¿Hay algun origen con contenido?
+   *
+   * Alimenta la GUARDA temprana de `execute`, que corre antes de resolver el
+   * prompt por ser la comprobacion mas barata: mira el contexto que ya esta en
+   * memoria y evita un viaje a `plantillas_prompts_ia` cuando no hay nada que
+   * procesar. El ensamblado real es `buildInputText`, y necesita el texto del
+   * prompt, que en ese punto todavia no se ha leido.
+   */
+  private hasAnyInputText(context: StatePayloadContext): boolean {
+    return INPUT_TEXT_SOURCES.some(
+      (source) =>
+        this.readSource(context, source.namespace, source.field) !== null,
+    );
+  }
+
+  /**
+   * Materia prima: todos los origenes con contenido, etiquetados y en orden.
+   *
+   * OMITE el origen que el prompt YA cita como marcador. Sin esta regla, una
+   * plantilla como `LICITACION_DEFAULT` —que interpola `clean_body` y
+   * `extracted_documents_text`— mandaria ambos textos dos veces, duplicando los
+   * tokens de cada llamada sin aportar un solo dato nuevo. La comprobacion va
+   * contra el prompt SIN interpolar, que es donde el marcador todavia existe.
+   *
+   * Si no sobrevive ningun bloque, el material esta integro en la instruccion y
+   * se devuelve `MATERIAL_IN_INSTRUCTIONS_NOTICE` en lugar de una cadena vacia.
+   */
+  private buildInputText(
+    context: StatePayloadContext,
+    rawPrompt: string,
+  ): string {
+    const blocks: { readonly label: string; readonly value: string }[] = [];
+
+    for (const source of INPUT_TEXT_SOURCES) {
+      const value = this.readSource(context, source.namespace, source.field);
+
+      if (value === null) {
+        continue;
       }
+
+      if (markerPattern(source.namespace, source.field).test(rawPrompt)) {
+        continue;
+      }
+
+      blocks.push({ label: source.label, value });
     }
 
-    return null;
+    if (blocks.length === 0) {
+      return MATERIAL_IN_INSTRUCTIONS_NOTICE;
+    }
+
+    // UN SOLO BLOQUE VA SIN ETIQUETA. La cabecera existe para que el modelo
+    // sepa que esta leyendo dos cosas distintas; con una sola fuente no separa
+    // nada y si estorba: encabeza el texto con una linea que no es del material
+    // —y el simulador, que titula con la primera linea, acabaria devolviendo
+    // "Correo:" como titular—.
+    const [only] = blocks;
+
+    if (blocks.length === 1 && only !== undefined) {
+      return only.value;
+    }
+
+    return blocks
+      .map((block) => `${block.label}:\n${block.value}`)
+      .join('\n\n');
+  }
+
+  /**
+   * Avisa de adjuntos que no han dejado texto en ninguna parte.
+   *
+   * NO falla el nodo, y es deliberado: un adjunto puede ser un PDF escaneado sin
+   * capa de texto, que es exactamente el caso que `PROCESADOR_OCR` existe para
+   * atender. Convertirlo en GRAVE pausaria flujos correctos. Lo que se corrige
+   * es la ceguera: hasta ahora ese correo se procesaba como si no hubiera
+   * llevado adjunto alguno y no quedaba rastro de ello en ningun sitio.
+   */
+  private warnOnOrphanAttachments(context: StatePayloadContext): void {
+    const attachmentCount =
+      context.getNamespace('parsed_email')?.attachment_count;
+
+    if (typeof attachmentCount !== 'number' || attachmentCount <= 0) {
+      return;
+    }
+
+    const hasDocumentsText =
+      this.readSource(context, 'parsed_email', 'extracted_documents_text') !==
+      null;
+    const hasOcrRescue =
+      this.readSource(context, 'ocr_result', 'clean_body') !== null;
+
+    if (hasDocumentsText || hasOcrRescue) {
+      return;
+    }
+
+    this.logger.warn(
+      `La ejecucion ${context.getExecutionId()} declara ${attachmentCount} adjunto(s) ` +
+        'pero ninguno ha aportado texto: el modelo procesara el correo sin ellos. ' +
+        'Si son documentos escaneados, encadena un nodo PROCESADOR_OCR antes de este.',
+    );
   }
 
   /**

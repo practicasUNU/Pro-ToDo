@@ -400,6 +400,12 @@ CREATE INDEX idx_alertas_error_pendientes
 
 -- =============================================================================
 -- SEED: Datos iniciales
+--
+-- SOLO EL CATALOGO DE NODOS. Las semillas de `plantillas_prompts_ia` (los tres
+-- casos de Madrid+D) NO pueden ir aqui: `id_usuario_creador` es NOT NULL con FK
+-- RESTRICT y en este punto no existe ningun usuario todavia —el ADMIN lo siembra
+-- la migracion 002—. Viven en `db/migrations/023` y `024`, que se aplican
+-- despues. Un volumen recien creado nace, por tanto, sin prompts.
 -- =============================================================================
 
 -- Los 10 codigos con estrategia replican el enum `NodeType` del backend

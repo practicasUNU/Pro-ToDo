@@ -56,6 +56,19 @@
 -- volumen de Docker vacio, asi que sin la copia una base nueva naceria sin la
 -- columna ni las semillas.
 --
+-- MATIZ: a `init.sql` va la COLUMNA, no las semillas, y no es un descuido. Ese
+-- archivo corre con el volumen vacio, cuando todavia no existe ningun usuario
+-- —el ADMIN lo siembra la migracion 002—, y `id_usuario_creador` es NOT NULL
+-- con FK RESTRICT. Copiar alli este INSERT solo produciria el RAISE WARNING de
+-- mas abajo en cada arranque limpio. Las semillas son, por tanto, un paso de
+-- migracion y hay que aplicarlas despues de la 002.
+--
+-- CORRECCION POSTERIOR (migracion 024). `NOTIWEB_DEFAULT` nacio sin el bloque
+-- de documentos adjuntos que sus dos hermanas si traian. Aqui ya figura, para
+-- las bases que se creen desde cero; una base YA sembrada no cambia con este
+-- archivo —`ON CONFLICT DO NOTHING`— y por eso ese ajuste necesita su propia
+-- migracion con un UPDATE.
+--
 -- Aplicar con:
 --   sudo docker exec -i protodo_postgres psql -U unuware007 -d 'DB_PRO-TODO' \
 --     < db/migrations/023-codigo-plantillas-prompts-ia.sql
@@ -186,7 +199,9 @@ BEGIN
             'Directiva del editor:' || E'\n' ||
             '{{parsed_email.clean_body}}' || E'\n\n' ||
             'Articulo original:' || E'\n' ||
-            '{{scraped_web.full_article_content}}',
+            '{{scraped_web.full_article_content}}' || E'\n\n' ||
+            'Documentos adjuntos:' || E'\n' ||
+            '{{parsed_email.extracted_documents_text}}',
             autor
         ),
         (
