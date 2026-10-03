@@ -1,3 +1,9 @@
+// @vitest-environment happy-dom
+//
+// Necesita DOM porque el store del nodo consulta `useSessionStore` para saber
+// si el usuario puede elegir modelos de pago, y esa cadena llega a
+// `LocalStorage` de Quasar, que toca `window`.
+
 import { createPinia, setActivePinia } from 'pinia';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -26,6 +32,16 @@ import type {
 } from '@/types/pipeline';
 
 // Sin esto se cargaria `@boot/axios`, que necesita entorno de navegador.
+// `useSessionStore` llega aqui por el selector de modelo, que consulta el rol
+// para deshabilitar los modelos de pago. Se dobla el SERVICIO y no axios:
+// `@boot/axios` importa `#q-app`, que no resuelve fuera del build de Quasar.
+vi.mock('@services/auth.service', () => ({
+  requestOtp: vi.fn(),
+  verifyOtp: vi.fn(),
+  refreshSession: vi.fn(),
+  logout: vi.fn(),
+}));
+
 vi.mock('@services/workflow-templates.service', () => ({
   fetchWorkflowTemplates: vi.fn(),
   fetchWorkflowTemplate: vi.fn(),

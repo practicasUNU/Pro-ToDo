@@ -13,6 +13,16 @@ import { MULTIMODAL_FALLBACK_CODE, SHARED_ALERT_NODE_ID } from '@/types/nodes/er
 import type { WorkflowTemplateDetail, WorkflowTemplateSummary } from '@/types/pipeline';
 
 // Sin esto se cargaria `@boot/axios`, que necesita entorno de navegador.
+// `useSessionStore` llega aqui por el selector de modelo, que consulta el rol
+// para deshabilitar los modelos de pago. Se dobla el SERVICIO y no axios:
+// `@boot/axios` importa `#q-app`, que no resuelve fuera del build de Quasar.
+vi.mock('@services/auth.service', () => ({
+  requestOtp: vi.fn(),
+  verifyOtp: vi.fn(),
+  refreshSession: vi.fn(),
+  logout: vi.fn(),
+}));
+
 vi.mock('@services/workflow-templates.service', () => ({
   fetchWorkflowTemplates: vi.fn(),
   fetchWorkflowTemplate: vi.fn(),

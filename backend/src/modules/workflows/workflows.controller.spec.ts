@@ -312,6 +312,9 @@ describe('WorkflowsController (POST /workflows/:id/execute-test)', () => {
           name: 'Notiweb revisado',
           pipelineSchema: WORKFLOW_DETAIL.pipelineSchema,
         },
+        // El rol viaja tambien en la edicion: los modelos de pago estan
+        // reservados al ADMIN y un PATCH es otra via de meter uno.
+        UserRole.EDITOR,
       );
     });
 
@@ -340,6 +343,7 @@ describe('WorkflowsController (POST /workflows/:id/execute-test)', () => {
       expect(workflowsServiceMock.updateWorkflow).toHaveBeenCalledWith(
         WORKFLOW_ID,
         { active: true },
+        UserRole.EDITOR,
       );
     });
 

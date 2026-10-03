@@ -1,4 +1,6 @@
 import {
+  ArrayNotEmpty,
+  IsArray,
   IsBoolean,
   IsEnum,
   IsInt,
@@ -30,7 +32,17 @@ export const DEFAULT_OCR_TEMPERATURE = 0.1;
 export const MIN_OCR_TEMPERATURE = 0;
 export const MAX_OCR_TEMPERATURE = 1;
 
-export const DEFAULT_OCR_PROVIDER = LlmProvider.MOCK;
+/**
+ * Proveedor por defecto: Gemini.
+ *
+ * Fue `MOCK` hasta PROT-22, y el par era incoherente —el modelo por defecto ya
+ * era `gemini-1.5-flash`—. Peor que incoherente: un nodo de OCR que simula en
+ * silencio publica texto inventado como si fuera una transcripcion, y el fallo
+ * no aparece hasta que alguien lee la noticia publicada. El free tier de Google
+ * AI Studio cuesta $0, y sin `GEMINI_API_KEY` el cliente degrada igualmente al
+ * simulador, asi que el cambio no puede abrir ninguna factura.
+ */
+export const DEFAULT_OCR_PROVIDER = LlmProvider.GEMINI;
 export const DEFAULT_OCR_MODEL = 'gemini-1.5-flash';
 export const DEFAULT_OCR_TIMEOUT_MS = 30_000;
 export const MIN_OCR_TIMEOUT_MS = 1_000;
@@ -38,6 +50,25 @@ export const MAX_OCR_TIMEOUT_MS = 120_000;
 export const DEFAULT_OCR_MAX_RETRIES = 2;
 export const MIN_OCR_RETRIES = 0;
 export const MAX_OCR_RETRIES = 5;
+
+/** Tope de la respuesta. Una transcripcion larga cabe de sobra en 4096. */
+export const DEFAULT_OCR_MAX_TOKENS = 4_096;
+export const MIN_OCR_MAX_TOKENS = 256;
+export const MAX_OCR_MAX_TOKENS = 32_768;
+
+/**
+ * Tipos de adjunto que un modelo multimodal sabe mirar.
+ *
+ * Es la lista por defecto; el nodo puede recortarla con `allowedMimeTypes`
+ * —nunca ampliarla a algo que el proveedor no entienda, porque el filtro final
+ * sigue siendo esta constante—.
+ */
+export const DEFAULT_OCR_ALLOWED_MIME_TYPES: readonly string[] = [
+  'image/png',
+  'image/jpeg',
+  'image/webp',
+  'application/pdf',
+];
 
 /**
  * `params` del nodo `PROCESADOR_OCR`.
@@ -100,6 +131,36 @@ export class OcrProcessorConfigDto {
   })
   maxRetries?: number;
 
+  @ApiPropertyOptional({ default: DEFAULT_OCR_MAX_TOKENS })
+  @IsOptional()
+  @IsInt({ message: 'maxTokens debe ser un entero.' })
+  @Min(MIN_OCR_MAX_TOKENS, {
+    message: `maxTokens no puede ser menor que ${MIN_OCR_MAX_TOKENS}.`,
+  })
+  @Max(MAX_OCR_MAX_TOKENS, {
+    message: `maxTokens no puede ser mayor que ${MAX_OCR_MAX_TOKENS}.`,
+  })
+  maxTokens?: number;
+
+  @ApiPropertyOptional({
+    description:
+      'Tipos de adjunto que este nodo acepta. Solo sirve para RECORTAR la lista por defecto: un tipo que no este en ella se ignora igualmente, porque el proveedor no sabria que hacer con el.',
+    isArray: true,
+    type: String,
+    default: DEFAULT_OCR_ALLOWED_MIME_TYPES,
+  })
+  @IsOptional()
+  @IsArray({ message: 'allowedMimeTypes debe ser un arreglo.' })
+  @ArrayNotEmpty({
+    message:
+      'allowedMimeTypes no puede ser un arreglo vacio: omitelo para aceptar todos los tipos soportados.',
+  })
+  @IsString({
+    each: true,
+    message: 'allowedMimeTypes solo admite cadenas.',
+  })
+  allowedMimeTypes?: string[];
+
   @ApiPropertyOptional({
     description:
       'Fuerza la simulacion de coste cero, igual que en el nodo de redaccion.',
@@ -117,6 +178,8 @@ export interface ResolvedOcrProcessorConfig {
   readonly temperature: number;
   readonly timeoutMs: number;
   readonly maxRetries: number;
+  readonly maxTokens: number;
+  readonly allowedMimeTypes: readonly string[];
   readonly dryRun: boolean;
 }
 
@@ -129,5 +192,7 @@ export const resolveOcrProcessorConfig = (
   temperature: dto.temperature ?? DEFAULT_OCR_TEMPERATURE,
   timeoutMs: dto.timeoutMs ?? DEFAULT_OCR_TIMEOUT_MS,
   maxRetries: dto.maxRetries ?? DEFAULT_OCR_MAX_RETRIES,
+  maxTokens: dto.maxTokens ?? DEFAULT_OCR_MAX_TOKENS,
+  allowedMimeTypes: dto.allowedMimeTypes ?? DEFAULT_OCR_ALLOWED_MIME_TYPES,
   dryRun: dto.dryRun ?? false,
 });

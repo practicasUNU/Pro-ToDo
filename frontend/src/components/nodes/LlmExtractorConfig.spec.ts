@@ -29,6 +29,16 @@ import type { LlmModelDescriptor } from '@/types/nodes/llm-extractor.types';
 // El configurador monta ahora los dialogos de prompt, que arrastran el store de
 // prompts y el catalogo de nodos. Sin estos dobles se cargaria `@boot/axios`,
 // que necesita entorno de navegador.
+//
+// `auth.service` entra por `useSessionStore`, que el selector de modelo
+// consulta para saber si el rol alcanza a los modelos de pago.
+vi.mock('@services/auth.service', () => ({
+  requestOtp: vi.fn(),
+  verifyOtp: vi.fn(),
+  refreshSession: vi.fn(),
+  logout: vi.fn(),
+}));
+
 vi.mock('@services/ai-prompt-templates.service', () => ({
   fetchAiPromptTemplates: vi.fn(),
   fetchAiPromptTemplateById: vi.fn(),

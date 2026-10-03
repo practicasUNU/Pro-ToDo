@@ -152,6 +152,7 @@ export class WorkflowsController {
       return await this.workflowsService.createWorkflow(
         createWorkflowDto,
         currentUser.id,
+        currentUser.role,
       );
     } catch (error: unknown) {
       throw toIssueContractException(error);
@@ -181,12 +182,24 @@ export class WorkflowsController {
       'El esquema nuevo no es integro, o se intenta activar un flujo sin pipeline_schema',
   })
   @ApiNotFoundResponse({ description: 'No existe ningun flujo con ese id' })
+  @ApiForbiddenResponse({
+    description:
+      'El esquema usa un modelo de pago y el rol no es ADMIN, o la IP esta fuera de la red corporativa',
+  })
   public async updateWorkflow(
     @Param('id', ParseUUIDPipe) id: string,
     @Body() updateWorkflowDto: UpdateWorkflowDto,
+    // El rol se recoge aqui aunque este endpoint no registre autoria: los
+    // modelos de pago estan reservados al ADMIN y editar un flujo es otra via
+    // de meter uno. Sin esto, la restriccion del alta se saltaria con un PATCH.
+    @CurrentUser() currentUser: AuthenticatedUser,
   ): Promise<PipelineSummaryResponseDto> {
     try {
-      return await this.workflowsService.updateWorkflow(id, updateWorkflowDto);
+      return await this.workflowsService.updateWorkflow(
+        id,
+        updateWorkflowDto,
+        currentUser.role,
+      );
     } catch (error: unknown) {
       throw toIssueContractException(error);
     }

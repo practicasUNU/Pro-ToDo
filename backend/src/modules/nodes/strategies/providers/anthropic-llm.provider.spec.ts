@@ -214,6 +214,41 @@ describe('AnthropicLlmProvider · cliente de Claude sobre la Messages API', () =
     });
   });
 
+  describe('6. Presupuesto de la llamada', () => {
+    it('6.1 deberia enviar la temperatura cuando el nodo la declara', async () => {
+      // 1. Arrange 📐: el nodo de OCR fija 0.1 para transcribir con fidelidad.
+      //    Hasta PROT-22 ese valor no salia de la configuracion.
+      const http = buildHttp();
+
+      // 2. Act ⚙️
+      await buildProvider(http).generateCompletion(PROMPT, undefined, {
+        model: 'claude-haiku-4-5',
+        timeoutMs: 30_000,
+        maxRetries: 2,
+        temperature: 0.1,
+        maxTokens: 2_048,
+      });
+
+      // 3. Assert 🎯
+      expect(sentBody(http).temperature).toBe(0.1);
+      expect(sentBody(http).max_tokens).toBe(2_048);
+    });
+
+    it('6.2 deberia OMITIR la temperatura cuando el nodo no la declara', async () => {
+      // 1. Arrange 📐: el defecto lo publica Anthropic y cambia con el modelo.
+      //    `max_tokens`, en cambio, es OBLIGATORIO en esta API y no se puede
+      //    omitir: ahi manda el tope del repositorio.
+      const http = buildHttp();
+
+      // 2. Act ⚙️
+      await buildProvider(http).generateCompletion(PROMPT);
+
+      // 3. Assert 🎯
+      expect(sentBody(http)).not.toHaveProperty('temperature');
+      expect(sentBody(http).max_tokens).toBe(4_096);
+    });
+  });
+
   describe('2. Entrada multimodal', () => {
     it('2.1 deberia dejar un solo bloque de texto cuando no hay adjuntos', async () => {
       // 1. Arrange 📐: el modo de siempre no debe cambiar.

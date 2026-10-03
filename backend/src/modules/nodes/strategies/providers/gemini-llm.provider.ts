@@ -140,6 +140,16 @@ export class GeminiLlmProvider implements ILlmProviderClient {
             // parser de formato ad hoc, justo lo que `security-and-scope.md` §3
             // prohibe construir.
             responseMimeType: 'application/json',
+            // Ambos se OMITEN cuando el nodo no los declara, en vez de
+            // mandarse con un valor propio: el defecto de cada modelo lo
+            // publica Google y cambia con el modelo, y fijarlo aqui seria
+            // congelar hoy una decision que no es de este repositorio.
+            ...(config?.temperature === undefined
+              ? {}
+              : { temperature: config.temperature }),
+            ...(config?.maxTokens === undefined
+              ? {}
+              : { maxOutputTokens: config.maxTokens }),
           },
         },
       },

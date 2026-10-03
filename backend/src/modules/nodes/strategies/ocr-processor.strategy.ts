@@ -12,6 +12,7 @@ import {
 import { LlmProvider } from '@modules/nodes/strategies/interfaces/llm-provider.interface';
 import { LlmProviderFactory } from '@modules/nodes/strategies/llm-provider.factory';
 import { MockLlmProvider } from '@modules/nodes/strategies/providers/mock-llm.provider';
+import { LlmProviderCatalogService } from '@modules/nodes/services/llm-provider-catalog.service';
 import { MULTIMODAL_CONTENT_TYPE_PATTERN } from '@modules/nodes/utils/parsed-email-payload.util';
 
 import type { StatePayloadContext } from '@core/fsm/context/state-payload.context';
@@ -53,6 +54,26 @@ const MAX_OCR_ATTACHMENTS = 3;
 
 /** Estado con el que el nodo declara que la transcripcion salio adelante. */
 const OCR_STATUS_COMPLETED = 'COMPLETED';
+
+/**
+ * A quien recurrir cuando el proveedor elegido no tiene credencial.
+ *
+ * Es un mapa y no un `if` porque el par proveedor/modelo va junto: conmutar de
+ * proveedor conservando el modelo produce una peticion a un modelo que no
+ * existe en el destino. Solo se declara el salto que tiene sentido hoy; sin
+ * entrada, el cliente degrada al simulador como siempre.
+ */
+const OCR_PROVIDER_FALLBACKS: Partial<
+  Record<
+    LlmProvider,
+    { readonly provider: LlmProvider; readonly model: string }
+  >
+> = {
+  [LlmProvider.GEMINI]: {
+    provider: LlmProvider.ANTHROPIC,
+    model: 'claude-haiku-4-5',
+  },
+};
 
 /** Traza completa del error, si la hay, lista para fusionar en el detalle. */
 const stackTraceOf = (error: unknown): { stackTrace?: string } =>
@@ -105,12 +126,18 @@ export class OcrProcessorStrategy implements INodeStrategy {
     { name: 'clean_body', type: 'text' },
     { name: 'character_count', type: 'number' },
     { name: 'ocr_status', type: 'text' },
+    {
+      name: 'metadata',
+      type: 'object',
+      description: 'Proveedor, modelo, tokens consumidos y marca isMock',
+    },
   ];
 
   constructor(
     private readonly mockProvider: MockLlmProvider,
     private readonly providerFactory: LlmProviderFactory,
     private readonly aiDefaults: AiDefaultsConfig,
+    private readonly providerCatalog: LlmProviderCatalogService,
   ) {}
 
   public async execute(
@@ -123,7 +150,10 @@ export class OcrProcessorStrategy implements INodeStrategy {
       return { success: false, error: resolution.failure };
     }
 
-    const attachments = this.collectAttachments(context);
+    const attachments = this.collectAttachments(
+      context,
+      resolution.config.allowedMimeTypes,
+    );
 
     // Sin adjuntos legibles no hay nada que transcribir. Es GRAVE y no LEVE
     // porque a este nodo solo se llega por una ruta de contingencia: si el
@@ -142,7 +172,9 @@ export class OcrProcessorStrategy implements INodeStrategy {
       };
     }
 
-    const config = this.applyEnvironmentDefaults(resolution.config, params);
+    const config = this.resolveUsableProvider(
+      this.applyEnvironmentDefaults(resolution.config, params),
+    );
     const client = this.resolveProvider(config);
 
     let response: LlmResponsePayload;
@@ -155,6 +187,11 @@ export class OcrProcessorStrategy implements INodeStrategy {
           model: config.model,
           timeoutMs: config.timeoutMs,
           maxRetries: config.maxRetries,
+          // La temperatura se resolvia y se tiraba hasta PROT-22: el nodo
+          // declaraba 0.1 para transcribir con fidelidad y la llamada corria
+          // con el defecto del modelo.
+          temperature: config.temperature,
+          maxTokens: config.maxTokens,
           mode: 'ocr',
         },
         attachments,
@@ -200,6 +237,18 @@ export class OcrProcessorStrategy implements INodeStrategy {
         // mentira a la primera edicion del texto.
         character_count: cleanBody.length,
         ocr_status: OCR_STATUS_COMPLETED,
+        // `metadata` SE PUBLICA, y `isMock` es el motivo. Hasta PROT-22 este
+        // nodo descartaba la metadata del proveedor, asi que una transcripcion
+        // SIMULADA era indistinguible de una real para todo lo que viniera
+        // despues: la noticia salia publicada con texto inventado y nada en el
+        // contexto permitia auditarlo. El nodo de redaccion ya lo publicaba.
+        metadata: {
+          provider: config.provider,
+          model: response.metadata.modelUsed,
+          tokensPrompt: response.metadata.tokensPrompt,
+          tokensCompletion: response.metadata.tokensCompletion,
+          isMock: response.metadata.isMock,
+        },
       },
     };
   }
@@ -214,6 +263,7 @@ export class OcrProcessorStrategy implements INodeStrategy {
    */
   private collectAttachments(
     context: StatePayloadContext,
+    allowedMimeTypes: readonly string[],
   ): readonly LlmInlineAttachment[] {
     const rawAttachments =
       context.getNamespace(RAW_EMAIL_NAMESPACE)?.[ATTACHMENTS_KEY];
@@ -236,11 +286,16 @@ export class OcrProcessorStrategy implements INodeStrategy {
       const contentBase64 = record.contentBase64;
       const contentType = record.contentType;
 
+      // DOS filtros, y el orden no es casual. El patron es el techo —lo que un
+      // modelo multimodal sabe mirar— y la lista del nodo solo puede RECORTAR
+      // dentro de el. Al reves, declarar `text/csv` en los params colaria un
+      // adjunto que el proveedor rechazaria con un error que nadie sabria leer.
       if (
         typeof contentBase64 !== 'string' ||
         contentBase64.length === 0 ||
         typeof contentType !== 'string' ||
-        !MULTIMODAL_CONTENT_TYPE_PATTERN.test(contentType)
+        !MULTIMODAL_CONTENT_TYPE_PATTERN.test(contentType) ||
+        !allowedMimeTypes.includes(contentType)
       ) {
         continue;
       }
@@ -361,6 +416,49 @@ export class OcrProcessorStrategy implements INodeStrategy {
    * indistinguible en el log. La guarda de `dryRun` se queda aqui porque es
    * una decision de este nodo, no del proveedor.
    */
+  /**
+   * Conmuta a otro proveedor REAL antes de resignarse al simulador.
+   *
+   * Cada cliente degrada al simulador cuando le falta SU credencial, y eso
+   * basta para que el flujo no se caiga, pero deja un hueco concreto: un
+   * despliegue con `ANTHROPIC_API_KEY` y sin `GEMINI_API_KEY` transcribia con
+   * el simulador —texto inventado publicado como transcripcion— teniendo un
+   * proveedor de verdad a mano. La cascada es GEMINI → ANTHROPIC → simulador.
+   *
+   * EL MODELO CAMBIA CON EL PROVEEDOR. `gemini-1.5-flash` no existe en
+   * Anthropic; mandarlo tal cual daria un 404 del proveedor y un GRAVE que
+   * parece un fallo de red. Por eso la conmutacion arrastra el modelo de vision
+   * mas barato de Claude.
+   */
+  private resolveUsableProvider(
+    config: ResolvedOcrProcessorConfig,
+  ): ResolvedOcrProcessorConfig {
+    if (config.dryRun || config.provider === LlmProvider.MOCK) {
+      return config;
+    }
+
+    if (this.providerCatalog.isProviderUsable(config.provider)) {
+      return config;
+    }
+
+    const fallback = OCR_PROVIDER_FALLBACKS[config.provider];
+
+    if (
+      fallback === undefined ||
+      !this.providerCatalog.isProviderUsable(fallback.provider)
+    ) {
+      return config;
+    }
+
+    this.logger.warn(
+      `El proveedor ${config.provider} no tiene credencial en este entorno: ` +
+        `la transcripcion pasa a ${fallback.provider} con ${fallback.model}. ` +
+        'Revisa las claves del .env si no era lo esperado.',
+    );
+
+    return { ...config, provider: fallback.provider, model: fallback.model };
+  }
+
   private resolveProvider(
     config: ResolvedOcrProcessorConfig,
   ): ILlmProviderClient {

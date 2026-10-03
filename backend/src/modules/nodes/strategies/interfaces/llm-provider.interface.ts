@@ -19,10 +19,11 @@
  * Es un enum y no un union type porque `@IsEnum()` de class-validator necesita
  * un objeto disponible en runtime, el mismo motivo por el que `NodeType` lo es.
  *
- * Los cuatro valores se declaran, pero solo `MOCK` y `GEMINI` tienen cliente
- * implementado hoy. Los otros dos existen aqui para que el contrato del DTO no
- * cambie cuando lleguen —y porque un `@IsEnum` que los rechazase al guardar
- * obligaria a migrar los `params` de los flujos ya escritos.
+ * Los cuatro valores se declaran, pero solo `MOCK`, `GEMINI` y `ANTHROPIC`
+ * tienen cliente implementado hoy; `OPENAI` no. Existe aqui igualmente para que
+ * el contrato del DTO no cambie cuando llegue —y porque un `@IsEnum` que lo
+ * rechazase al guardar obligaria a migrar los `params` de los flujos ya
+ * escritos. `LlmProviderFactory` degrada al simulador lo que no tiene cliente.
  */
 export enum LlmProvider {
   GEMINI = 'GEMINI',
@@ -82,6 +83,25 @@ export interface LlmExecutionOptions {
    * una coma en ese texto para que la simulacion dejase de reconocerse.
    */
   readonly mode?: 'text' | 'ocr';
+
+  /**
+   * Aleatoriedad del muestreo, entre 0 y 1.
+   *
+   * OPCIONAL, y omitirla deja decidir al proveedor —que es lo que venia
+   * pasando sin que nadie lo dijera: el nodo de OCR resolvia una temperatura de
+   * `0.1` para transcribir con fidelidad y luego no la enviaba a ninguna parte,
+   * asi que todas las transcripciones corrian con el valor por defecto del
+   * modelo. Transcribir no es redactar, y la diferencia es exactamente esta.
+   */
+  readonly temperature?: number;
+
+  /**
+   * Tope de tokens de la respuesta.
+   *
+   * OPCIONAL: cada cliente aplica el suyo cuando falta. Es un limite de COSTE
+   * ademas de de longitud, y por eso lo decide el nodo y no el proveedor.
+   */
+  readonly maxTokens?: number;
 }
 
 /**

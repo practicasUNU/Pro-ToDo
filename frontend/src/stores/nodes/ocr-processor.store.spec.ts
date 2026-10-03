@@ -1,10 +1,73 @@
+// @vitest-environment happy-dom
+//
+// Necesita DOM porque el store del nodo consulta `useSessionStore` para saber
+// si el usuario puede elegir modelos de pago, y esa cadena llega a
+// `LocalStorage` de Quasar, que toca `window`.
+
 import { createPinia, setActivePinia } from 'pinia';
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+
+import { useSessionStore } from '@stores/session.store';
+import * as llmExtractorService from '@services/nodes/llm-extractor.service';
 
 import { useOcrProcessorStore } from './ocr-processor.store';
 
 import { LlmProvider } from '@/types/nodes/llm-extractor.types';
 import { DEFAULT_OCR_MODEL, DEFAULT_OCR_TEMPERATURE } from '@/types/nodes/ocr-processor.types';
+import { UserRole } from '@/types/user';
+
+import type { LlmModelDescriptor } from '@/types/nodes/llm-extractor.types';
+
+// `useSessionStore` llega aqui por el selector de modelo, que consulta el rol
+// para deshabilitar los modelos de pago. Se dobla el SERVICIO y no axios:
+// `@boot/axios` importa `#q-app`, que no resuelve fuera del build de Quasar.
+vi.mock('@services/auth.service', () => ({
+  requestOtp: vi.fn(),
+  verifyOtp: vi.fn(),
+  refreshSession: vi.fn(),
+  logout: vi.fn(),
+}));
+
+// El catalogo de modelos lo sirve el servicio del nodo de IA: la ruta
+// `/llm/models` es del catalogo y ya la posee ese archivo.
+vi.mock('@services/nodes/llm-extractor.service', () => ({
+  fetchLlmModels: vi.fn(),
+  testLlmConnection: vi.fn(),
+}));
+
+const fetchLlmModels = vi.mocked(llmExtractorService.fetchLlmModels);
+
+/** Catalogo doblado: un modelo gratuito y uno reservado al ADMIN. */
+const CATALOG: LlmModelDescriptor[] = [
+  {
+    provider: LlmProvider.GEMINI,
+    model: 'gemini-1.5-flash',
+    label: 'Gemini 1.5 Flash',
+    isAvailable: true,
+    isTestOnly: false,
+    supportsVision: true,
+    contextWindow: 1_000_000,
+  },
+  {
+    provider: LlmProvider.ANTHROPIC,
+    model: 'claude-haiku-4-5',
+    label: 'Claude Haiku 4.5',
+    isAvailable: true,
+    isTestOnly: false,
+    supportsVision: true,
+    contextWindow: 200_000,
+    minRoleRequired: UserRole.ADMIN,
+  },
+];
+
+/** Deja la sesion con el rol indicado. */
+const signInAs = (role: UserRole): void => {
+  useSessionStore().user = {
+    id: 'u1',
+    email: role === UserRole.ADMIN ? 'admin@unuware.com' : 'editor@unuware.com',
+    role,
+  };
+};
 
 /** `nodeId` unico por prueba: las definiciones de Pinia se memoizan por modulo. */
 let nodeCounter = 0;
@@ -13,6 +76,8 @@ const nextNodeId = (): string => `ocr_ia_${(nodeCounter += 1)}`;
 describe('useOcrProcessorStore · configuracion del nodo PROCESADOR_OCR', () => {
   beforeEach(() => {
     setActivePinia(createPinia());
+    vi.clearAllMocks();
+    fetchLlmModels.mockResolvedValue([]);
   });
 
   describe('1. Estado inicial', () => {
@@ -106,6 +171,86 @@ describe('useOcrProcessorStore · configuracion del nodo PROCESADOR_OCR', () => 
 
       // 3. Assert 🎯
       expect(otro.config.model).toBe(DEFAULT_OCR_MODEL);
+    });
+  });
+
+  describe('5. Modelos reservados al rol ADMIN', () => {
+    it('5.1 deberia marcar como deshabilitado un modelo de pago para un EDITOR', async () => {
+      // 1. Arrange 📐: es COMODIDAD, no la barrera. Quien decide es el backend
+      //    al guardar; aqui solo se evita que el operador rellene el
+      //    formulario entero para toparse con un 403.
+      signInAs(UserRole.EDITOR);
+      fetchLlmModels.mockResolvedValue(CATALOG);
+      const store = useOcrProcessorStore(nextNodeId());
+
+      // 2. Act ⚙️
+      await store.fetchAvailableModels();
+
+      // 3. Assert 🎯
+      const paid = store.modelOptions.find((option) => option.value === 'claude-haiku-4-5');
+      const free = store.modelOptions.find((option) => option.value === 'gemini-1.5-flash');
+
+      expect(paid?.disable).toBe(true);
+      expect(free?.disable).toBe(false);
+    });
+
+    it('5.2 deberia habilitarlo para un ADMIN', async () => {
+      // 1. Arrange 📐
+      signInAs(UserRole.ADMIN);
+      fetchLlmModels.mockResolvedValue(CATALOG);
+      const store = useOcrProcessorStore(nextNodeId());
+
+      // 2. Act ⚙️
+      await store.fetchAvailableModels();
+
+      // 3. Assert 🎯
+      expect(
+        store.modelOptions.find((option) => option.value === 'claude-haiku-4-5')?.disable,
+      ).toBe(false);
+    });
+
+    it('5.3 deberia INVALIDAR el paso si el modelo elegido esta vetado', async () => {
+      // 1. Arrange 📐: sin esto el asistente dejaria avanzar hasta el final y
+      //    el flujo moriria con un 403 al guardar, que es exactamente el fallo
+      //    que el Poka-Yoke viene a evitar.
+      signInAs(UserRole.EDITOR);
+      fetchLlmModels.mockResolvedValue(CATALOG);
+      const store = useOcrProcessorStore(nextNodeId());
+      await store.fetchAvailableModels();
+
+      // 2. Act ⚙️
+      store.updateConfig({ model: 'claude-haiku-4-5' });
+
+      // 3. Assert 🎯
+      expect(store.isSelectedModelForbidden).toBe(true);
+      expect(store.isConfigValid).toBe(false);
+    });
+
+    it('5.4 NO deberia vetar un modelo guardado que no figura en el catalogo', async () => {
+      // 1. Arrange 📐: es el valor que el flujo YA tiene. Bloquearlo impediria
+      //    abrir el paso para cambiarlo por otro.
+      signInAs(UserRole.EDITOR);
+      fetchLlmModels.mockResolvedValue(CATALOG);
+      const store = useOcrProcessorStore(nextNodeId());
+      await store.fetchAvailableModels();
+
+      // 2. Act ⚙️
+      store.updateConfig({ model: 'modelo-retirado' });
+
+      // 3. Assert 🎯
+      expect(store.isSelectedModelForbidden).toBe(false);
+      expect(store.isConfigValid).toBe(true);
+    });
+
+    it('5.5 deberia apagar el indicador de carga aunque el catalogo falle', async () => {
+      // 1. Arrange 📐: el store solo garantiza el `finally`; el mensaje al
+      //    usuario lo decide el componente (`frontend-architecture.md` §2.1).
+      fetchLlmModels.mockRejectedValue(new Error('503'));
+      const store = useOcrProcessorStore(nextNodeId());
+
+      // 2. Act ⚙️ & 3. Assert 🎯
+      await expect(store.fetchAvailableModels()).rejects.toThrow('503');
+      expect(store.isLoadingModels).toBe(false);
     });
   });
 });

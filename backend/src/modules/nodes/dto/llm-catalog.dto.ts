@@ -2,6 +2,7 @@ import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { IsEnum, IsNotEmpty, IsString, MaxLength } from 'class-validator';
 
 import { LlmProvider } from '@modules/nodes/strategies/interfaces/llm-provider.interface';
+import { UserRole } from '@modules/users/enums/user-role.enum';
 
 import type { NodeErrorSeverity } from '@core/fsm/types/node-strategy.types';
 
@@ -77,6 +78,28 @@ export class LlmModelDescriptor {
     example: 1_000_000,
   })
   contextWindow: number;
+
+  /**
+   * Rol minimo para poder usar el modelo en un flujo.
+   *
+   * AUSENTE significa sin restriccion, que es el caso del free tier de Google
+   * y del simulador. Lo llevan los modelos FACTURABLES: elegir uno compromete
+   * presupuesto en cada ejecucion del flujo, y esa es una decision de
+   * administracion, no de configuracion.
+   *
+   * El catalogo se sirve ENTERO a los dos roles y este campo solo lo marca. Es
+   * deliberado: ocultarlos dejaria al EDITOR sin entender por que un flujo
+   * ajeno usa un modelo que el no ve en la lista. La prohibicion de verdad la
+   * aplica `WorkflowsService` al guardar; esto es lo que permite a la interfaz
+   * deshabilitar la opcion antes de llegar al 403.
+   */
+  @ApiPropertyOptional({
+    enum: UserRole,
+    description:
+      'Rol minimo exigido. Ausente = sin restriccion. Lo llevan los modelos de pago.',
+    example: UserRole.ADMIN,
+  })
+  minRoleRequired?: UserRole;
 }
 
 /**

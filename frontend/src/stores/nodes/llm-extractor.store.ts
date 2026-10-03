@@ -20,8 +20,10 @@ import {
   MIN_LLM_EMERGENCY_BRAKE_THRESHOLD,
   MIN_LLM_RETRIES,
   MIN_LLM_TIMEOUT_MS,
-  resolveModelAvailability,
 } from '@/types/nodes/llm-extractor.types';
+
+import { useSessionStore } from '@stores/session.store';
+import { buildModelOptions } from '@/utils/llm-model-options';
 
 import type { HydratableNode, UpstreamNamespace } from '@stores/nodes/node-store-registry';
 
@@ -29,25 +31,20 @@ import type {
   LlmExtractorNodeConfig,
   LlmModelAvailability,
   LlmModelDescriptor,
+  LlmModelOption,
   LlmTestConnectionResult,
 } from '@/types/nodes/llm-extractor.types';
+
+// Se RE-EXPORTA porque el tipo vivia aqui hasta PROT-22 y varios componentes lo
+// importan de este modulo. Su sitio es `types/`, ahora que lo comparten los dos
+// nodos que consumen un LLM.
+export type { LlmModelOption };
 
 /** Opcion de variable interpolable que el prompt en linea puede citar. */
 export interface PromptVariableOption {
   readonly label: string;
   readonly value: string;
   readonly group: string;
-}
-
-/** Opcion del selector de modelo, ya resuelta para pintar su distintivo. */
-export interface LlmModelOption {
-  readonly label: string;
-  readonly value: string;
-  readonly provider: LlmProvider;
-  readonly availability: LlmModelAvailability;
-  readonly contextWindow: number;
-  /** true si no figura en el catalogo del backend. Ver `modelOptions`. */
-  readonly isUncatalogued: boolean;
 }
 
 /** Marcador de un campo, tal y como se interpola en el prompt. */
@@ -104,6 +101,7 @@ const STORE_ID_PREFIX = 'llmExtractorNode';
 // catalogo de modelos y el banco de pruebas de conectividad— y alguien tiene
 // que poseerlas; los prompts se siguen pidiendo por donde se pedian.
 const llmExtractorSetup = () => {
+  const sessionStore = useSessionStore();
   const config = ref<LlmExtractorNodeConfig>(buildInitialConfig());
   const availableUpstreamContext = ref<UpstreamNamespace[]>([]);
 
@@ -153,42 +151,14 @@ const llmExtractorSetup = () => {
    * esta instalacion ya puede traer uno por `AI_DEFAULT_MODEL`—, de modo que
    * abrir el paso para mirarlo bastaria para romperlo al guardar.
    */
-  const modelOptions = computed<LlmModelOption[]>(() => {
-    const catalogued = availableModels.value.map<LlmModelOption>((descriptor) => ({
-      label: descriptor.label,
-      value: descriptor.model,
-      provider: descriptor.provider,
-      availability: resolveModelAvailability(descriptor),
-      contextWindow: descriptor.contextWindow,
-      isUncatalogued: false,
-    }));
-
-    const current = config.value.model.trim();
-    const isListed = current === '' || catalogued.some((option) => option.value === current);
-
-    const options = isListed
-      ? catalogued
-      : [
-          ...catalogued,
-          {
-            label: `${current} (no catalogado)`,
-            value: current,
-            provider: config.value.provider,
-            // No se puede afirmar que este configurado: el backend no lo
-            // conoce, asi que no ha podido comprobar ninguna credencial.
-            availability: 'MISSING_KEY' as LlmModelAvailability,
-            contextWindow: 0,
-            isUncatalogued: true,
-          },
-        ];
-
-    // Estable y sin mutar el array de origen: `sort` ordena en el sitio, y
-    // hacerlo sobre `catalogued` reordenaria el estado en cada recalculo.
-    return [...options].sort(
-      (left, right) =>
-        Number(right.availability === 'AVAILABLE') - Number(left.availability === 'AVAILABLE'),
-    );
-  });
+  const modelOptions = computed<LlmModelOption[]>(() =>
+    buildModelOptions(
+      availableModels.value,
+      config.value.model,
+      config.value.provider,
+      sessionStore.isAdmin,
+    ),
+  );
 
   /** Estado del modelo elegido, para el distintivo junto al selector. */
   const selectedModelAvailability = computed<LlmModelAvailability | null>(

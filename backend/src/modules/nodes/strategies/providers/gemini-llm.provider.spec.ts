@@ -77,6 +77,14 @@ const buildProvider = (
     new MockLlmProvider(),
   );
 
+/** `generationConfig` tal y como salio en la peticion. */
+const generationConfigOf = (http: HttpMock): Record<string, unknown> => {
+  const [config] = http.request.mock.calls[0] as [AxiosRequestConfig];
+  const data = config.data as { generationConfig: Record<string, unknown> };
+
+  return data.generationConfig;
+};
+
 /** Partes del turno del usuario tal y como salieron en la peticion. */
 const partsOf = (http: HttpMock): Record<string, unknown>[] => {
   const [config] = http.request.mock.calls[0] as [AxiosRequestConfig];
@@ -142,6 +150,47 @@ describe('GeminiLlmProvider', () => {
 
       // 3. Assert 🎯
       expect(partsOf(http)).toEqual([{ text: 'Redacta una noticia.' }]);
+    });
+  });
+
+  describe('3. Presupuesto de la llamada', () => {
+    it('3.1 deberia enviar temperatura y tope de tokens cuando el nodo los declara', async () => {
+      // 1. Arrange 📐: el nodo de OCR fija 0.1 para transcribir con fidelidad.
+      //    Hasta PROT-22 ese valor no salia de la configuracion.
+      const http = buildHttp();
+      const provider = buildProvider(http);
+
+      // 2. Act ⚙️
+      await provider.generateCompletion('Transcribe.', undefined, {
+        model: 'gemini-1.5-flash',
+        timeoutMs: 30_000,
+        maxRetries: 2,
+        temperature: 0.1,
+        maxTokens: 4_096,
+      });
+
+      // 3. Assert 🎯
+      expect(generationConfigOf(http)).toEqual({
+        responseMimeType: 'application/json',
+        temperature: 0.1,
+        maxOutputTokens: 4_096,
+      });
+    });
+
+    it('3.2 deberia OMITIRLOS cuando el nodo no los declara', async () => {
+      // 1. Arrange 📐: el defecto de cada modelo lo publica Google y cambia con
+      //    el modelo. Fijar aqui un valor propio congelaria una decision que no
+      //    es de este repositorio.
+      const http = buildHttp();
+      const provider = buildProvider(http);
+
+      // 2. Act ⚙️
+      await provider.generateCompletion('Redacta.');
+
+      // 3. Assert 🎯
+      expect(generationConfigOf(http)).toEqual({
+        responseMimeType: 'application/json',
+      });
     });
   });
 

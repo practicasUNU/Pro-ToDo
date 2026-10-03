@@ -10,7 +10,10 @@ import { FlowPollingCoordinator } from '@common/services/flow-polling.coordinato
 import { FsmEngineService } from '@core/fsm/services/fsm-engine.service';
 import { PipelineValidatorService } from '@core/fsm/services/pipeline-validator.service';
 import { buildOrderedTopology } from '@core/fsm/utils/pipeline-topology.util';
+import { ADMIN_ONLY_MODELS } from '@modules/nodes/services/llm-provider-catalog.service';
+import { UserRole } from '@modules/users/enums/user-role.enum';
 import { WorkflowTemplatesService } from '@modules/workflow-templates/workflow-templates.service';
+import { assertModelPermissions } from './validators/model-permissions.validator';
 
 import { ExecutionState } from '@core/fsm/types/fsm.enums';
 import { NodeType } from '@core/fsm/types/pipeline-schema.types';
@@ -313,6 +316,7 @@ export class WorkflowsService {
   public async createWorkflow(
     createWorkflowDto: CreateWorkflowDto,
     userId: string,
+    userRole: UserRole,
   ): Promise<PipelineSummaryResponseDto> {
     // La plantilla se comprueba ANTES de validar el grafo: es una consulta
     // barata y un `templateId` equivocado invalida la peticion entera.
@@ -325,6 +329,13 @@ export class WorkflowsService {
     const schema = await this.pipelineValidatorService.validateSchema(
       createWorkflowDto.pipelineSchema,
     );
+
+    // DESPUES de validar y no antes, aunque sea una comprobacion mas barata:
+    // `pipelineSchema` llega como `Record<string, unknown>` y solo el validador
+    // lo convierte en un grafo tipado. Adelantarla obligaria a recorrer JSON
+    // crudo adivinando la forma, que es exactamente el trabajo que el validador
+    // ya hace. El coste es que un esquema mal formado da 400 antes que 403.
+    this.assertModelPermissions(schema, userRole);
 
     const workflow = this.workflowRepository.create({
       name: createWorkflowDto.name,
@@ -375,6 +386,7 @@ export class WorkflowsService {
   public async updateWorkflow(
     workflowId: string,
     updateWorkflowDto: UpdateWorkflowDto,
+    userRole: UserRole,
   ): Promise<PipelineSummaryResponseDto> {
     const workflow = await this.workflowRepository.findOne({
       where: { id: workflowId },
@@ -398,10 +410,13 @@ export class WorkflowsService {
     }
 
     if (updateWorkflowDto.pipelineSchema !== undefined) {
-      workflow.pipelineSchema =
-        await this.pipelineValidatorService.validateSchema(
-          updateWorkflowDto.pipelineSchema,
-        );
+      const schema = await this.pipelineValidatorService.validateSchema(
+        updateWorkflowDto.pipelineSchema,
+      );
+
+      this.assertModelPermissions(schema, userRole);
+
+      workflow.pipelineSchema = schema;
     }
 
     if (updateWorkflowDto.active !== undefined) {
@@ -592,5 +607,18 @@ export class WorkflowsService {
     }
 
     return workflow.pipelineSchema;
+  }
+  /**
+   * Envoltorio sobre la guarda de modelos de pago.
+   *
+   * La lista de modelos restringidos se IMPORTA del catalogo, que es la unica
+   * fuente de verdad sobre que modelos existen; reescribirla aqui crearia una
+   * segunda lista que se desincroniza al anadir el primer modelo nuevo.
+   */
+  private assertModelPermissions(
+    schema: PipelineSchema,
+    userRole: UserRole,
+  ): void {
+    assertModelPermissions(schema, userRole, ADMIN_ONLY_MODELS);
   }
 }

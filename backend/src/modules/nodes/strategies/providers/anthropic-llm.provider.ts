@@ -169,7 +169,15 @@ export class AnthropicLlmProvider implements ILlmProviderClient {
         },
         data: {
           model,
-          max_tokens: ANTHROPIC_MAX_TOKENS,
+          // `max_tokens` es OBLIGATORIO en esta API, al reves que en Gemini, de
+          // modo que aqui no se puede omitir: el nodo manda si lo declara y si
+          // no queda el tope del repositorio.
+          max_tokens: config?.maxTokens ?? ANTHROPIC_MAX_TOKENS,
+          // La temperatura si se omite cuando el nodo no la declara: el defecto
+          // lo publica Anthropic y cambia con el modelo.
+          ...(config?.temperature === undefined
+            ? {}
+            : { temperature: config.temperature }),
           // La instruccion del operador y el contrato de formato viajan juntos
           // en `system`, con el contrato el ultimo para que sea lo mas reciente
           // que el modelo lee antes de responder.

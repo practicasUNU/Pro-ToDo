@@ -7,6 +7,7 @@ import {
   LlmTestConnectionResponseDto,
 } from '@modules/nodes/dto/llm-catalog.dto';
 import { LlmProvider } from '@modules/nodes/strategies/interfaces/llm-provider.interface';
+import { UserRole } from '@modules/users/enums/user-role.enum';
 import { LlmProviderFactory } from '@modules/nodes/strategies/llm-provider.factory';
 import { ANTHROPIC_API_KEY_VAR } from '@modules/nodes/strategies/providers/anthropic-llm.provider';
 import { GEMINI_API_KEY_VAR } from '@modules/nodes/strategies/providers/gemini-llm.provider';
@@ -52,6 +53,7 @@ const CURATED_MODELS: readonly CuratedModel[] = [
     isTestOnly: false,
     supportsVision: true,
     contextWindow: 1_000_000,
+    minRoleRequired: UserRole.ADMIN,
   },
   {
     provider: LlmProvider.ANTHROPIC,
@@ -60,6 +62,7 @@ const CURATED_MODELS: readonly CuratedModel[] = [
     isTestOnly: false,
     supportsVision: true,
     contextWindow: 1_000_000,
+    minRoleRequired: UserRole.ADMIN,
   },
   {
     provider: LlmProvider.ANTHROPIC,
@@ -68,6 +71,7 @@ const CURATED_MODELS: readonly CuratedModel[] = [
     isTestOnly: false,
     supportsVision: true,
     contextWindow: 200_000,
+    minRoleRequired: UserRole.ADMIN,
   },
   {
     provider: LlmProvider.GEMINI,
@@ -76,6 +80,7 @@ const CURATED_MODELS: readonly CuratedModel[] = [
     isTestOnly: false,
     supportsVision: true,
     contextWindow: 2_000_000,
+    minRoleRequired: UserRole.ADMIN,
   },
   {
     provider: LlmProvider.GEMINI,
@@ -96,6 +101,7 @@ const CURATED_MODELS: readonly CuratedModel[] = [
     isTestOnly: false,
     supportsVision: true,
     contextWindow: 128_000,
+    minRoleRequired: UserRole.ADMIN,
   },
   {
     provider: LlmProvider.MOCK,
@@ -108,6 +114,25 @@ const CURATED_MODELS: readonly CuratedModel[] = [
     contextWindow: 0,
   },
 ];
+
+/**
+ * Modelos cuyo uso exige rol ADMIN, derivados de la tabla curada.
+ *
+ * Se DERIVA y no se escribe aparte: dos listas se desincronizan en cuanto
+ * alguien anade un modelo a una sola de ellas, y el sintoma seria un modelo de
+ * pago que nadie bloquea.
+ *
+ * Es una constante de modulo y no un metodo del servicio A PROPOSITO. La
+ * consume `WorkflowsService`, y `WorkflowsModule` evita deliberadamente
+ * importar `NodesModule` (ver su docblock); inyectar el servicio obligaria a
+ * acoplarlos. Importar una constante pura es justo lo que ya hace
+ * `WizardModule` con los DTOs de este modulo.
+ */
+export const ADMIN_ONLY_MODELS: ReadonlySet<string> = new Set(
+  CURATED_MODELS.filter(
+    (curated) => curated.minRoleRequired === UserRole.ADMIN,
+  ).map((curated) => curated.model),
+);
 
 /**
  * Instruccion fija de la prueba de conectividad.
@@ -243,7 +268,7 @@ export class LlmProviderCatalogService {
    * simulador, que para quien rellena el formulario es tan inservible como no
    * tener cliente.
    */
-  private isProviderUsable(provider: LlmProvider): boolean {
+  public isProviderUsable(provider: LlmProvider): boolean {
     if (!this.providerFactory.hasClient(provider)) {
       return false;
     }

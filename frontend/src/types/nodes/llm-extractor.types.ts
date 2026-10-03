@@ -1,3 +1,5 @@
+import type { UserRole } from '@/types/user';
+
 // Replica de `LlmExtractorConfigDto` (@modules/nodes/dto/llm-extractor-config.dto.ts).
 // Cualquier cambio alli debe reflejarse aqui.
 
@@ -122,6 +124,15 @@ export interface LlmModelDescriptor {
   readonly isTestOnly: boolean;
   readonly supportsVision: boolean;
   readonly contextWindow: number;
+  /**
+   * Rol minimo para poder usar el modelo. Ausente = sin restriccion.
+   *
+   * Lo llevan los modelos FACTURABLES: elegir uno compromete presupuesto en
+   * cada ejecucion del flujo. El catalogo se sirve entero a los dos roles y
+   * este campo solo lo marca, para que la interfaz pueda deshabilitar la
+   * opcion; la prohibicion de verdad la aplica el backend al guardar.
+   */
+  readonly minRoleRequired?: UserRole;
 }
 
 /** Cuerpo de `POST /api/llm/test-connection`. */
@@ -171,6 +182,39 @@ export const LLM_AVAILABILITY_TOKENS: Record<LlmModelAvailability, string> = {
   TEST_ONLY: 'var(--pd-warning)',
   MISSING_KEY: 'var(--pd-negative)',
 };
+
+/**
+ * Opcion del selector de modelo, ya resuelta para pintar su distintivo.
+ *
+ * Vive en `types/` y no en el store del nodo de IA —donde nacio— porque desde
+ * PROT-22 la comparten los dos nodos que consumen un LLM.
+ */
+export interface LlmModelOption {
+  readonly label: string;
+  readonly value: string;
+  readonly provider: LlmProvider;
+  readonly availability: LlmModelAvailability;
+  readonly contextWindow: number;
+  /** true si no figura en el catalogo del backend. Ver `buildModelOptions`. */
+  readonly isUncatalogued: boolean;
+  /**
+   * El rol actual no alcanza para este modelo.
+   *
+   * Se llama `disable` y no `isForbidden` porque es el nombre que espera
+   * `option-disable` de `QSelect`: renombrarlo obligaria a un `map` extra en
+   * cada componente para traducirlo de vuelta.
+   */
+  readonly disable: boolean;
+}
+
+/**
+ * Insignia de los modelos reservados al ADMIN.
+ *
+ * Token de la paleta, nunca un color de Quasar ni un hexadecimal
+ * (`frontend-quasar.md` §2).
+ */
+export const ADMIN_ONLY_LABEL = 'Solo Admin';
+export const ADMIN_ONLY_TOKEN = 'var(--pd-warning)';
 
 /** Clasifica un modelo del catalogo. El simulador manda sobre la credencial. */
 export const resolveModelAvailability = (

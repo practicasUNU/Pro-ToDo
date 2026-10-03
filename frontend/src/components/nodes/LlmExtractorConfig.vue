@@ -14,6 +14,8 @@ import { NODE_TYPE_LABELS, NodeType } from '@/types/pipeline';
 import type { AiPromptTemplateDetail } from '@/types/ai-prompt-template';
 import type { LlmModelAvailability } from '@/types/nodes/llm-extractor.types';
 import {
+  ADMIN_ONLY_LABEL,
+  ADMIN_ONLY_TOKEN,
   IMPLEMENTED_LLM_PROVIDERS,
   LLM_AVAILABILITY_LABELS,
   LLM_AVAILABILITY_TOKENS,
@@ -338,6 +340,7 @@ onMounted(async () => {
           dense
           emit-value
           map-options
+          option-disable="disable"
           class="q-mt-xs"
           :hint="store.modelOptions.length > 0 ? MODEL_HINT : NO_MODELS_HINT"
           :rules="[(val: string) => !!val?.trim() || 'El modelo es obligatorio']"
@@ -368,7 +371,20 @@ onMounted(async () => {
                 </q-item-label>
               </q-item-section>
               <q-item-section side>
+                <!-- La restriccion de rol MANDA sobre la disponibilidad: de
+                     nada sirve saber que el modelo esta configurado si este
+                     usuario no lo puede elegir. -->
                 <q-badge
+                  v-if="scope.opt.disable"
+                  :style="{ backgroundColor: ADMIN_ONLY_TOKEN }"
+                  text-color="black"
+                  class="pd-badge"
+                  data-test="admin-only-badge"
+                >
+                  {{ ADMIN_ONLY_LABEL }}
+                </q-badge>
+                <q-badge
+                  v-else
                   :style="{ backgroundColor: availabilityToken(scope.opt.availability) }"
                   class="pd-badge"
                 >

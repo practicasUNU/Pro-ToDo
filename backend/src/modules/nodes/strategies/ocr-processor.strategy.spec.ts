@@ -17,6 +17,7 @@ import { createMockStatePayloadContext } from '../../../../test/factories/state-
 import type { AiDefaultsConfig } from '@core/config/ai-defaults.config';
 import type { AnthropicLlmProvider } from '@modules/nodes/strategies/providers/anthropic-llm.provider';
 import type { GeminiLlmProvider } from '@modules/nodes/strategies/providers/gemini-llm.provider';
+import type { LlmProviderCatalogService } from '@modules/nodes/services/llm-provider-catalog.service';
 import type { LlmResponsePayload } from '@modules/nodes/strategies/interfaces/llm-provider.interface';
 import type { StatePayloadContext } from '@core/fsm/context/state-payload.context';
 
@@ -67,16 +68,54 @@ const buildProviderFactory = (
   return factory;
 };
 
+/**
+ * Catalogo doblado: que proveedores tienen credencial en "este entorno".
+ *
+ * Por defecto TODOS la tienen, de modo que la cascada no se dispara y las
+ * pruebas que no la ejercen miden lo mismo que antes de existir. Las que si la
+ * ejercen declaran explicitamente quien se queda sin clave.
+ */
+const buildProviderCatalog = (
+  usableProviders: readonly LlmProvider[] = Object.values(LlmProvider),
+): LlmProviderCatalogService =>
+  ({
+    isProviderUsable: jest
+      .fn()
+      .mockImplementation((provider: LlmProvider) =>
+        usableProviders.includes(provider),
+      ),
+  }) as unknown as LlmProviderCatalogService;
+
+/** Doble de proveedor que responde siempre lo mismo, para la cascada. */
+const buildSpyGeminiForCascade = (): jest.Mock<
+  () => Promise<LlmResponsePayload>
+> =>
+  jest.fn<() => Promise<LlmResponsePayload>>(() =>
+    Promise.resolve({
+      headline: 'Transcripcion',
+      summary: 'Texto',
+      body_paragraphs: ['Contenido'],
+      metadata: {
+        tokensPrompt: 1,
+        tokensCompletion: 2,
+        modelUsed: 'modelo',
+        isMock: false,
+      },
+    }),
+  );
+
 const buildStrategy = (
   gemini: Partial<GeminiLlmProvider> = {},
   aiDefaults: AiDefaultsConfig = buildAiDefaults(),
   anthropic: Partial<AnthropicLlmProvider> = {},
+  providerCatalog: LlmProviderCatalogService = buildProviderCatalog(),
 ): OcrProcessorStrategy => {
   const mockProvider = new MockLlmProvider();
   const strategy = new OcrProcessorStrategy(
     mockProvider,
     buildProviderFactory(mockProvider, gemini, anthropic),
     aiDefaults,
+    providerCatalog,
   );
 
   jest.spyOn(strategy['logger'], 'log').mockImplementation(() => undefined);
@@ -107,17 +146,28 @@ describe('OcrProcessorStrategy · nodo satelite PROCESADOR_OCR', () => {
         'clean_body',
         'character_count',
         'ocr_status',
+        'metadata',
       ]);
     });
   });
 
+  /**
+   * Estas pruebas DECLARAN `provider: MOCK` en vez de pasar `{}`.
+   *
+   * Hasta PROT-22 el defecto del DTO era `MOCK` y un `params` vacio bastaba
+   * para simular. Ahora el defecto es `GEMINI` —un nodo que simulaba en
+   * silencio publicaba texto inventado como transcripcion—, asi que pedir el
+   * simulador es algo que hay que decir.
+   */
   describe('2. Transcripcion con el simulador', () => {
     it('2.1 deberia devolver la transcripcion determinista', async () => {
       // 1. Arrange 📐
       const strategy = buildStrategy();
 
       // 2. Act ⚙️
-      const result = await strategy.execute(buildContext(), {});
+      const result = await strategy.execute(buildContext(), {
+        provider: LlmProvider.MOCK,
+      });
 
       // 3. Assert 🎯
       expect(result.success).toBe(true);
@@ -133,7 +183,9 @@ describe('OcrProcessorStrategy · nodo satelite PROCESADOR_OCR', () => {
       const strategy = buildStrategy();
 
       // 2. Act ⚙️
-      const result = await strategy.execute(buildContext(), {});
+      const result = await strategy.execute(buildContext(), {
+        provider: LlmProvider.MOCK,
+      });
 
       // 3. Assert 🎯
       expect(result.data?.character_count).toBe(
@@ -148,7 +200,9 @@ describe('OcrProcessorStrategy · nodo satelite PROCESADOR_OCR', () => {
       const strategy = buildStrategy();
 
       // 2. Act ⚙️
-      const result = await strategy.execute(buildContext(), {});
+      const result = await strategy.execute(buildContext(), {
+        provider: LlmProvider.MOCK,
+      });
 
       // 3. Assert 🎯
       expect(result.data?.requires_multimodal_fallback).toBeUndefined();
@@ -323,13 +377,15 @@ describe('OcrProcessorStrategy · nodo satelite PROCESADOR_OCR', () => {
         provider: LlmProvider.ANTHROPIC,
       });
 
-      // 3. Assert 🎯: se comprueba que respondio el cliente doblado y no el
-      //    simulador. No vale mirar `isMock`: a diferencia de PROCESADOR_IA,
-      //    este nodo no publica metadatos del proveedor en su namespace, asi
-      //    que la unica senal observable es el propio texto transcrito.
+      // 3. Assert 🎯: respondio el cliente doblado y no el simulador. Desde
+      //    PROT-22 hay dos senales y se comprueban las dos: el texto
+      //    transcrito y el `isMock` del namespace, que antes se descartaba.
       expect(generateCompletion).toHaveBeenCalledTimes(1);
       expect(result.success).toBe(true);
       expect(result.data?.clean_body).not.toContain('MOCK OCR');
+      expect(
+        (result.data?.metadata as { isMock?: boolean } | undefined)?.isMock,
+      ).toBe(false);
     });
 
     it('5.2 deberia seguir degradando al simulador un proveedor sin cliente', async () => {
@@ -345,6 +401,253 @@ describe('OcrProcessorStrategy · nodo satelite PROCESADOR_OCR', () => {
       // 3. Assert 🎯
       expect(result.success).toBe(true);
       expect(result.data?.clean_body).toContain('MOCK OCR');
+    });
+  });
+
+  describe('6. Presupuesto de la llamada', () => {
+    /** Doble que solo sirve para capturar las opciones con que se le llama. */
+    const buildSpyGemini = (): jest.Mock<() => Promise<LlmResponsePayload>> =>
+      jest.fn<() => Promise<LlmResponsePayload>>(() =>
+        Promise.resolve({
+          headline: 'Transcripcion',
+          summary: 'Texto',
+          body_paragraphs: ['Contenido del documento'],
+          metadata: {
+            tokensPrompt: 1,
+            tokensCompletion: 2,
+            modelUsed: 'gemini-1.5-flash',
+            isMock: false,
+          },
+        }),
+      );
+
+    it('6.1 deberia enviar la temperatura al proveedor', async () => {
+      // 1. Arrange 📐: hasta PROT-22 el DTO resolvia 0.1 para transcribir con
+      //    fidelidad y la estrategia no lo pasaba a ninguna parte, asi que
+      //    todas las transcripciones corrian con el defecto del modelo.
+      const generateCompletion = buildSpyGemini();
+      const strategy = buildStrategy({
+        provider: LlmProvider.GEMINI,
+        generateCompletion,
+      } as unknown as GeminiLlmProvider);
+
+      // 2. Act ⚙️
+      await strategy.execute(buildContext(), { provider: LlmProvider.GEMINI });
+
+      // 3. Assert 🎯
+      const options = generateCompletion.mock.calls[0]?.[2] as
+        { temperature?: number; maxTokens?: number } | undefined;
+
+      expect(options?.temperature).toBe(0.1);
+      expect(options?.maxTokens).toBe(4_096);
+    });
+
+    it('6.2 deberia respetar la temperatura declarada en el nodo', async () => {
+      // 1. Arrange 📐
+      const generateCompletion = buildSpyGemini();
+      const strategy = buildStrategy({
+        provider: LlmProvider.GEMINI,
+        generateCompletion,
+      } as unknown as GeminiLlmProvider);
+
+      // 2. Act ⚙️
+      await strategy.execute(buildContext(), {
+        provider: LlmProvider.GEMINI,
+        temperature: 0.7,
+      });
+
+      // 3. Assert 🎯
+      const options = generateCompletion.mock.calls[0]?.[2] as
+        { temperature?: number } | undefined;
+
+      expect(options?.temperature).toBe(0.7);
+    });
+
+    it('6.3 deberia recortar los adjuntos con allowedMimeTypes', async () => {
+      // 1. Arrange 📐: el nodo puede estrechar la lista por defecto cuando se
+      //    sabe que los PDF de ese buzon no son escaneos sino facturas.
+      const generateCompletion = buildSpyGemini();
+      const strategy = buildStrategy({
+        provider: LlmProvider.GEMINI,
+        generateCompletion,
+      } as unknown as GeminiLlmProvider);
+      const context = buildContext([
+        SCAN_ATTACHMENT,
+        {
+          filename: 'contrato.pdf',
+          contentType: 'application/pdf',
+          contentBase64: 'UERGMQ==',
+        },
+      ]);
+
+      // 2. Act ⚙️
+      await strategy.execute(context, {
+        provider: LlmProvider.GEMINI,
+        allowedMimeTypes: ['image/png'],
+      });
+
+      // 3. Assert 🎯: el PDF, que el patron por defecto si admite, se queda
+      //    fuera porque el nodo lo excluyo.
+      const attachments = generateCompletion.mock.calls[0]?.[3] as
+        readonly { contentType: string }[] | undefined;
+
+      expect(attachments).toHaveLength(1);
+      expect(attachments?.[0]?.contentType).toBe('image/png');
+    });
+
+    it('6.4 NO deberia admitir un tipo que el proveedor no entiende', async () => {
+      // 1. Arrange 📐: `allowedMimeTypes` solo puede RECORTAR. Declarar
+      //    `text/csv` colaria un adjunto que el proveedor rechazaria con un
+      //    error que nadie sabria leer.
+      const generateCompletion = buildSpyGemini();
+      const strategy = buildStrategy({
+        provider: LlmProvider.GEMINI,
+        generateCompletion,
+      } as unknown as GeminiLlmProvider);
+      const context = buildContext([
+        {
+          filename: 'datos.csv',
+          contentType: 'text/csv',
+          contentBase64: 'YSxiLGM=',
+        },
+      ]);
+
+      // 2. Act ⚙️
+      const result = await strategy.execute(context, {
+        provider: LlmProvider.GEMINI,
+        allowedMimeTypes: ['text/csv'],
+      });
+
+      // 3. Assert 🎯
+      expect(result.success).toBe(false);
+      expect(result.error?.code).toBe(ERR_OCR_NO_ATTACHMENTS);
+      expect(generateCompletion).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('7. Cascada entre proveedores', () => {
+    it('7.1 deberia conmutar a ANTHROPIC cuando falta la clave de GEMINI', async () => {
+      // 1. Arrange 📐: cada cliente degrada al simulador si le falta SU clave,
+      //    y eso dejaba un hueco concreto: un entorno con ANTHROPIC_API_KEY y
+      //    sin GEMINI_API_KEY transcribia con el simulador —texto inventado
+      //    publicado como transcripcion— teniendo un proveedor real a mano.
+      const generateCompletion = jest.fn<() => Promise<LlmResponsePayload>>(
+        () =>
+          Promise.resolve({
+            headline: 'Transcripcion',
+            summary: 'Texto',
+            body_paragraphs: ['Contenido real'],
+            metadata: {
+              tokensPrompt: 1,
+              tokensCompletion: 2,
+              modelUsed: 'claude-haiku-4-5',
+              isMock: false,
+            },
+          }),
+      );
+      const strategy = buildStrategy(
+        {},
+        buildAiDefaults(),
+        {
+          provider: LlmProvider.ANTHROPIC,
+          generateCompletion,
+        } as unknown as AnthropicLlmProvider,
+        buildProviderCatalog([LlmProvider.ANTHROPIC, LlmProvider.MOCK]),
+      );
+
+      // 2. Act ⚙️
+      const result = await strategy.execute(buildContext(), {
+        provider: LlmProvider.GEMINI,
+      });
+
+      // 3. Assert 🎯: y el MODELO cambia con el proveedor. Arrastrar
+      //    `gemini-1.5-flash` a Anthropic daria un 404 que parece un fallo de
+      //    red.
+      expect(generateCompletion).toHaveBeenCalledTimes(1);
+      expect(
+        (
+          generateCompletion.mock.calls[0]?.[2] as
+            { model?: string } | undefined
+        )?.model,
+      ).toBe('claude-haiku-4-5');
+      expect(result.data?.clean_body).toBe('Contenido real');
+    });
+
+    it('7.2 NO deberia conmutar si no hay ninguna credencial alternativa', async () => {
+      // 1. Arrange 📐: sin un segundo proveedor usable la cascada no tiene a
+      //    donde saltar y deja el proveedor pedido intacto. Quien degrada
+      //    entonces es el propio cliente, que al no encontrar su clave delega
+      //    en el simulador —comportamiento de PROT-16 que esta capa no toca—.
+      //    Aqui se fija justamente eso: que la cascada no se invente un salto.
+      const geminiCompletion = buildSpyGeminiForCascade();
+      const anthropicCompletion = buildSpyGeminiForCascade();
+      const strategy = buildStrategy(
+        {
+          provider: LlmProvider.GEMINI,
+          generateCompletion: geminiCompletion,
+        } as unknown as GeminiLlmProvider,
+        buildAiDefaults(),
+        {
+          provider: LlmProvider.ANTHROPIC,
+          generateCompletion: anthropicCompletion,
+        } as unknown as AnthropicLlmProvider,
+        buildProviderCatalog([LlmProvider.MOCK]),
+      );
+
+      // 2. Act ⚙️
+      await strategy.execute(buildContext(), {
+        provider: LlmProvider.GEMINI,
+      });
+
+      // 3. Assert 🎯: sigue yendo a Gemini con su modelo, no a Anthropic.
+      expect(anthropicCompletion).not.toHaveBeenCalled();
+      expect(
+        (geminiCompletion.mock.calls[0]?.[2] as { model?: string } | undefined)
+          ?.model,
+      ).toBe('gemini-1.5-flash');
+    });
+
+    it('7.4 deberia publicar isMock cuando responde el simulador', async () => {
+      // 1. Arrange 📐: el motivo por el que `metadata` sale al namespace. Sin
+      //    esto, una transcripcion simulada y una real son indistinguibles
+      //    aguas abajo y la noticia se publica con texto inventado.
+      const strategy = buildStrategy();
+
+      // 2. Act ⚙️
+      const result = await strategy.execute(buildContext(), {
+        provider: LlmProvider.MOCK,
+      });
+
+      // 3. Assert 🎯
+      expect(result.success).toBe(true);
+      expect(
+        (result.data?.metadata as { isMock?: boolean } | undefined)?.isMock,
+      ).toBe(true);
+    });
+
+    it('7.3 NO deberia conmutar cuando el proveedor pedido si tiene clave', async () => {
+      // 1. Arrange 📐
+      const geminiCompletion = buildSpyGeminiForCascade();
+      const anthropicCompletion = buildSpyGeminiForCascade();
+      const strategy = buildStrategy(
+        {
+          provider: LlmProvider.GEMINI,
+          generateCompletion: geminiCompletion,
+        } as unknown as GeminiLlmProvider,
+        buildAiDefaults(),
+        {
+          provider: LlmProvider.ANTHROPIC,
+          generateCompletion: anthropicCompletion,
+        } as unknown as AnthropicLlmProvider,
+        buildProviderCatalog([LlmProvider.GEMINI, LlmProvider.ANTHROPIC]),
+      );
+
+      // 2. Act ⚙️
+      await strategy.execute(buildContext(), { provider: LlmProvider.GEMINI });
+
+      // 3. Assert 🎯
+      expect(geminiCompletion).toHaveBeenCalledTimes(1);
+      expect(anthropicCompletion).not.toHaveBeenCalled();
     });
   });
 });

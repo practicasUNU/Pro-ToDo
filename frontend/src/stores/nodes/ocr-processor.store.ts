@@ -15,8 +15,13 @@ import {
   MIN_OCR_TIMEOUT_MS,
 } from '@/types/nodes/ocr-processor.types';
 
+import { useSessionStore } from '@stores/session.store';
+import { fetchLlmModels } from '@services/nodes/llm-extractor.service';
+import { buildModelOptions, isModelForbidden } from '@/utils/llm-model-options';
+
 import type { HydratableNode } from '@stores/nodes/node-store-registry';
 import type { OcrProcessorNodeConfig } from '@/types/nodes/ocr-processor.types';
+import type { LlmModelDescriptor, LlmModelOption } from '@/types/nodes/llm-extractor.types';
 
 /** Lee una cadena de los `params` crudos del esquema. */
 const asText = (value: unknown): string => (typeof value === 'string' ? value : '');
@@ -30,7 +35,7 @@ const isWithin = (value: number, min: number, max: number): boolean =>
   Number.isFinite(value) && value >= min && value <= max;
 
 const buildInitialConfig = (): OcrProcessorNodeConfig => ({
-  provider: LlmProvider.MOCK,
+  provider: LlmProvider.GEMINI,
   model: DEFAULT_OCR_MODEL,
   temperature: DEFAULT_OCR_TEMPERATURE,
   timeoutMs: DEFAULT_OCR_TIMEOUT_MS,
@@ -43,11 +48,50 @@ const STORE_ID_PREFIX = 'ocrProcessorNode';
 
 // Estado reactivo del nodo PROCESADOR_OCR (regla frontend-quasar.md §3.1).
 //
-// SIN capa de servicios: no hay endpoint que probar. Una simulacion de OCR desde
-// el asistente facturaria una inferencia por cada vez que alguien reabre el
+// SIGUE SIN BOTON DE PRUEBA, y por el motivo de siempre: una simulacion de OCR
+// desde el asistente facturaria una inferencia cada vez que alguien reabre el
 // paso, y el banco de pruebas del flujo completo ya cubre esa necesidad.
+//
+// Si CONSUME el catalogo de modelos desde PROT-22. No es una capa de servicios
+// propia: la ruta `/llm/models` es del catalogo y ya la posee
+// `services/nodes/llm-extractor.service.ts`; envolverla aqui seria la capa
+// vacia que `frontend-architecture.md` §2.1 desaconseja.
 const ocrProcessorSetup = () => {
+  const sessionStore = useSessionStore();
   const config = ref<OcrProcessorNodeConfig>(buildInitialConfig());
+  const availableModels = ref<LlmModelDescriptor[]>([]);
+  const isLoadingModels = ref(false);
+
+  /** Opciones del selector, con los de pago marcados segun el rol. */
+  const modelOptions = computed<LlmModelOption[]>(() =>
+    buildModelOptions(
+      availableModels.value,
+      config.value.model,
+      config.value.provider,
+      sessionStore.isAdmin,
+    ),
+  );
+
+  /**
+   * ¿El modelo elegido esta vetado para este rol?
+   *
+   * Invalida el paso para que el asistente NO deje avanzar hasta chocar con el
+   * 403 del backend: llegar al final del formulario y descubrir alli que el
+   * modelo no se podia usar es el fallo que el Poka-Yoke viene a evitar.
+   */
+  const isSelectedModelForbidden = computed<boolean>(() =>
+    isModelForbidden(modelOptions.value, config.value.model),
+  );
+
+  const fetchAvailableModels = async (): Promise<void> => {
+    isLoadingModels.value = true;
+
+    try {
+      availableModels.value = await fetchLlmModels();
+    } finally {
+      isLoadingModels.value = false;
+    }
+  };
 
   /**
    * Contrato Poka-Yoke que el stepper consulta para habilitar "Siguiente".
@@ -62,7 +106,8 @@ const ocrProcessorSetup = () => {
       config.value.model.trim() !== '' &&
       isWithin(config.value.temperature, MIN_OCR_TEMPERATURE, MAX_OCR_TEMPERATURE) &&
       isWithin(config.value.timeoutMs, MIN_OCR_TIMEOUT_MS, MAX_OCR_TIMEOUT_MS) &&
-      isWithin(config.value.maxRetries, MIN_OCR_RETRIES, MAX_OCR_RETRIES),
+      isWithin(config.value.maxRetries, MIN_OCR_RETRIES, MAX_OCR_RETRIES) &&
+      !isSelectedModelForbidden.value,
   );
 
   /**
@@ -109,7 +154,7 @@ const ocrProcessorSetup = () => {
     config.value = {
       provider: Object.values(LlmProvider).includes(provider as LlmProvider)
         ? (provider as LlmProvider)
-        : LlmProvider.MOCK,
+        : LlmProvider.GEMINI,
       model: asText(params.model) || DEFAULT_OCR_MODEL,
       temperature: asNumber(params.temperature, DEFAULT_OCR_TEMPERATURE),
       timeoutMs: asNumber(params.timeoutMs, DEFAULT_OCR_TIMEOUT_MS),
@@ -124,6 +169,11 @@ const ocrProcessorSetup = () => {
 
   return {
     config,
+    availableModels,
+    isLoadingModels,
+    modelOptions,
+    isSelectedModelForbidden,
+    fetchAvailableModels,
     isConfigValid,
     configWarnings,
     updateConfig,
