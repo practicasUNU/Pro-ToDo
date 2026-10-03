@@ -70,6 +70,7 @@ const QUASAR_COMPONENTS = {
 
 const PROMPT: AiPromptTemplate = {
   id: PROMPT_ID,
+  code: 'REDACCION_DE_NOTA_DE_PRENSA',
   name: 'Redaccion de nota de prensa',
   description: 'Convierte una nota en noticia publicable',
   active: true,
@@ -296,6 +297,7 @@ describe('LlmExtractorConfig · configurador del nodo PROCESADOR_IA', () => {
       const nodeId = nextNodeId();
       const created = {
         id: 'e7c9a1b2-3d4e-4f50-8a6b-7c8d9e0f1a2b',
+        code: 'REDACCION_INSTITUCIONAL',
         name: 'Redaccion institucional',
         description: null,
         active: true,

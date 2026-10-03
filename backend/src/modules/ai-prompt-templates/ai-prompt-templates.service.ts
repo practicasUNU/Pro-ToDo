@@ -10,6 +10,8 @@ import { extractNamespaceRoots } from '@core/fsm/context/state-payload.context';
 
 import { AiPromptTemplate } from './entities/ai-prompt-template.entity';
 
+import { MAX_CODE_LENGTH } from './dto/create-ai-prompt-template.dto';
+
 import type { CreateAiPromptTemplateDto } from './dto/create-ai-prompt-template.dto';
 import type {
   AiPromptTemplateDetailResponseDto,
@@ -29,6 +31,54 @@ import type { FindOptionsWhere, Repository } from 'typeorm';
  * porque sus consumidores son internos: la estrategia del nodo `PROCESADOR_IA`
  * que se conecta en PROT-15.3.
  */
+/** Codigo de ultimo recurso cuando el nombre no deja un solo alfanumerico. */
+const FALLBACK_CODE = 'PROMPT';
+
+/**
+ * Tope de intentos al desempatar un codigo derivado.
+ *
+ * Un `while (true)` consultando la base de datos es un bucle infinito esperando
+ * a ocurrir. Cincuenta plantillas con nombres que colapsan al mismo slug es un
+ * escenario que ya no se arregla con otro sufijo.
+ */
+const MAX_CODE_ATTEMPTS = 50;
+
+/** Marcas diacriticas que deja la descomposicion NFD. */
+const DIACRITICS = /[\u0300-\u036f]/g;
+
+/**
+ * Deriva una clave de maquina a partir del nombre visible.
+ *
+ * "Extraccion de noticias (ES)" → `EXTRACCION_DE_NOTICIAS_ES`.
+ *
+ * Los simbolos pasan a `_` en vez de borrarse: borrarlos pegaria las palabras
+ * ("Plan de innovacion" → `PLANDEINNOVACION`), que es ilegible justo donde el
+ * codigo tiene que leerse —escrito a mano en los `params` de un nodo—.
+ *
+ * DIVERGE A PROPOSITO DEL BACKFILL de la migracion 023, que usaba
+ * `[^a-zA-Z0-9]` y convertia los acentos en `_` ("Extraccion" → `EXTRACCI_N`).
+ * Aquel era un rescate puntual de filas preexistentes escrito en SQL, donde
+ * plegar diacriticos no sale gratis; este es el camino permanente y puede
+ * permitirse el NFD.
+ *
+ * Exportada para poder probarla sin instanciar el servicio: no toca estado ni
+ * base de datos.
+ */
+export const deriveCodeFromName = (name: string): string => {
+  const normalized = name
+    .normalize('NFD')
+    .replace(DIACRITICS, '')
+    .toUpperCase()
+    .replace(/[^A-Z0-9]+/g, '_');
+
+  // Los `_` de los extremos se recortan ANTES del corte, y el respaldo se
+  // aplica DESPUES: un nombre que sea todo simbolos ("¿?") colapsa a cadena
+  // vacia, y `CODE_PATTERN` exige al menos un caracter.
+  const trimmed = normalized.replace(/^_+|_+$/g, '').slice(0, MAX_CODE_LENGTH);
+
+  return trimmed.length > 0 ? trimmed : FALLBACK_CODE;
+};
+
 @Injectable()
 export class AiPromptTemplatesService {
   private readonly logger = new Logger(AiPromptTemplatesService.name);
@@ -143,10 +193,24 @@ export class AiPromptTemplatesService {
     createdById: string,
   ): Promise<AiPromptTemplateDetailResponseDto> {
     const name = createAiPromptTemplateDto.name.trim();
-    const code = createAiPromptTemplateDto.code.trim();
+    const providedCode = createAiPromptTemplateDto.code?.trim();
 
     await this.assertNameAvailable(name);
-    await this.assertCodeAvailable(code);
+
+    // DOS CAMINOS, Y LA DIFERENCIA IMPORTA. Un codigo SUMINISTRADO que choque
+    // da 409 y no se renombra: ahi una persona eligio ese literal, muy
+    // probablemente porque ya lo cita un `pipeline_schema`, y cambiarselo a su
+    // espalda romperia el flujo que venia a configurar. Un codigo DERIVADO no
+    // expresa ninguna intencion, asi que desempatarlo con un sufijo es
+    // preferible a negarle el alta a quien solo escribio un nombre.
+    let code: string;
+
+    if (providedCode !== undefined && providedCode.length > 0) {
+      code = providedCode.toUpperCase();
+      await this.assertCodeAvailable(code);
+    } else {
+      code = await this.resolveAvailableCode(deriveCodeFromName(name));
+    }
 
     // `active` del DTO se ignora en el alta: todo prompt nace activo. El campo
     // existe en el DTO solo para que la edicion pueda reactivar uno retirado.
@@ -292,6 +356,39 @@ export class AiPromptTemplatesService {
    * inmutable, asi que la unica vez que se comprueba es en el alta y nunca hay
    * una fila propia de la que desentenderse.
    */
+  /**
+   * Primer codigo libre a partir de una base derivada.
+   *
+   * Desempata con `_2`, `_3`… recortando LA BASE a `MAX_CODE_LENGTH` menos lo
+   * que ocupa el sufijo, no el resultado: al reves, un nombre que ya rozase los
+   * 50 caracteres perderia el sufijo en el truncado y volveria a colisionar
+   * indefinidamente. Es el mismo criterio del bucle de la migracion 023.
+   *
+   * El indice UNIQUE de la columna sigue siendo la ultima palabra: entre
+   * comprobar y guardar cabe otra alta simultanea, y ahi quien decide es la
+   * base de datos.
+   */
+  private async resolveAvailableCode(baseCode: string): Promise<string> {
+    for (let attempt = 1; attempt <= MAX_CODE_ATTEMPTS; attempt += 1) {
+      const suffix = attempt === 1 ? '' : `_${attempt}`;
+      const candidate =
+        baseCode.slice(0, MAX_CODE_LENGTH - suffix.length) + suffix;
+
+      const existing = await this.aiPromptTemplateRepository.findOne({
+        where: { code: candidate },
+      });
+
+      if (!existing) {
+        return candidate;
+      }
+    }
+
+    throw new ConflictException(
+      `No se pudo derivar un codigo libre a partir de "${baseCode}": ` +
+        'elige un nombre mas distintivo o suministra el codigo a mano.',
+    );
+  }
+
   private async assertCodeAvailable(code: string): Promise<void> {
     const existing = await this.aiPromptTemplateRepository.findOne({
       where: { code },

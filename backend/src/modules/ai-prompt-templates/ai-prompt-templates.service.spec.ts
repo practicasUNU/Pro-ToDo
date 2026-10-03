@@ -1,6 +1,9 @@
 import { ConflictException, NotFoundException } from '@nestjs/common';
 
-import { AiPromptTemplatesService } from './ai-prompt-templates.service';
+import {
+  AiPromptTemplatesService,
+  deriveCodeFromName,
+} from './ai-prompt-templates.service';
 
 import type { AiPromptTemplate } from './entities/ai-prompt-template.entity';
 import type { CreateAiPromptTemplateDto } from './dto/create-ai-prompt-template.dto';
@@ -257,6 +260,136 @@ describe('AiPromptTemplatesService · repositorio de prompts de IA', () => {
         ConflictException,
       );
       expect(repository.save).not.toHaveBeenCalled();
+    });
+
+    it('3.6 deberia derivar el codigo del nombre cuando no se suministra', async () => {
+      // 1. Arrange: el formulario de Quasar no tiene el campo, asi que esta es
+      //    la forma en que llega CUALQUIER alta hecha desde el navegador. Antes
+      //    se iba en un 400 que no explicaba nada.
+      const { service, repository } = buildHarness();
+      repository.findOne
+        .mockResolvedValueOnce(null) // assertNameAvailable
+        .mockResolvedValueOnce(null) // resolveAvailableCode: primer intento
+        .mockResolvedValueOnce(buildPrompt()); // findOne final
+      const dto = buildCreateDto({ name: 'Extraccion noticia ES' });
+      delete (dto as { code?: string }).code;
+
+      // 2. Act
+      await service.create(dto, AUTHOR_ID);
+
+      // 3. Assert
+      expect(repository.create).toHaveBeenCalledWith(
+        expect.objectContaining({ code: 'EXTRACCION_NOTICIA_ES' }),
+      );
+    });
+
+    it('3.7 deberia plegar acentos y simbolos del nombre derivado', async () => {
+      // 1. Arrange
+      const { service, repository } = buildHarness();
+      repository.findOne
+        .mockResolvedValueOnce(null)
+        .mockResolvedValueOnce(null)
+        .mockResolvedValueOnce(buildPrompt());
+      const dto = buildCreateDto({ name: 'Extraccion de noticias (ES)' });
+      delete (dto as { code?: string }).code;
+
+      // 2. Act
+      await service.create(dto, AUTHOR_ID);
+
+      // 3. Assert: los simbolos pasan a `_`, no se borran; borrarlos pegaria
+      //    las palabras y el codigo se lee a mano en los params de un nodo.
+      expect(repository.create).toHaveBeenCalledWith(
+        expect.objectContaining({ code: 'EXTRACCION_DE_NOTICIAS_ES' }),
+      );
+    });
+
+    it('3.8 deberia desempatar con sufijo un codigo derivado ya ocupado', async () => {
+      // 1. Arrange: un codigo DERIVADO no expresa ninguna intencion del
+      //    operador, asi que desempatarlo es preferible a negarle el alta a
+      //    quien solo escribio un nombre parecido a otro.
+      const { service, repository } = buildHarness();
+      repository.findOne
+        .mockResolvedValueOnce(null) // nombre libre
+        .mockResolvedValueOnce(buildPrompt()) // EXTRACCION_NOTICIA_ES ocupado
+        .mockResolvedValueOnce(null) // EXTRACCION_NOTICIA_ES_2 libre
+        .mockResolvedValueOnce(buildPrompt()); // findOne final
+      const dto = buildCreateDto({ name: 'Extraccion noticia ES' });
+      delete (dto as { code?: string }).code;
+
+      // 2. Act
+      await service.create(dto, AUTHOR_ID);
+
+      // 3. Assert
+      expect(repository.create).toHaveBeenCalledWith(
+        expect.objectContaining({ code: 'EXTRACCION_NOTICIA_ES_2' }),
+      );
+    });
+
+    it('3.9 NO deberia desempatar un codigo suministrado: debe dar conflicto', async () => {
+      // 1. Arrange: ahi una persona eligio ese literal, muy probablemente
+      //    porque ya lo cita un `pipeline_schema`. Renombrarlo a su espalda
+      //    romperia el flujo que venia a configurar.
+      const { service, repository } = buildHarness();
+      repository.findOne
+        .mockResolvedValueOnce(null)
+        .mockResolvedValueOnce(buildPrompt());
+
+      // 2. Act & 3. Assert
+      await expect(
+        service.create(buildCreateDto({ code: PROMPT_CODE }), AUTHOR_ID),
+      ).rejects.toThrow(ConflictException);
+      expect(repository.save).not.toHaveBeenCalled();
+    });
+
+    it('3.10 deberia normalizar a mayusculas un codigo suministrado', async () => {
+      // 1. Arrange
+      const { service, repository } = buildHarness();
+      repository.findOne
+        .mockResolvedValueOnce(null)
+        .mockResolvedValueOnce(null)
+        .mockResolvedValueOnce(buildPrompt());
+
+      // 2. Act
+      await service.create(
+        buildCreateDto({ code: '  licitacion_default  ' }),
+        AUTHOR_ID,
+      );
+
+      // 3. Assert
+      expect(repository.create).toHaveBeenCalledWith(
+        expect.objectContaining({ code: 'LICITACION_DEFAULT' }),
+      );
+    });
+  });
+
+  describe('8. Derivacion del codigo (funcion pura)', () => {
+    it.each([
+      ['Extraccion de noticias (ES)', 'EXTRACCION_DE_NOTICIAS_ES'],
+      ['Licitacion   publica', 'LICITACION_PUBLICA'],
+      ['  margenes  ', 'MARGENES'],
+      ['ya_es_un_codigo', 'YA_ES_UN_CODIGO'],
+    ])('8.1 deberia derivar "%s" en %s', (name, expected) => {
+      // 1. Arrange & 2. Act & 3. Assert
+      expect(deriveCodeFromName(name)).toBe(expected);
+    });
+
+    it('8.2 deberia caer en PROMPT si el nombre no deja alfanumericos', () => {
+      // 1. Arrange: `CODE_PATTERN` exige al menos un caracter, asi que una
+      //    cadena vacia produciria una fila invalida.
+      // 2. Act & 3. Assert
+      expect(deriveCodeFromName('---')).toBe('PROMPT');
+    });
+
+    it('8.3 deberia recortar un nombre larguisimo al limite de la columna', () => {
+      // 1. Arrange
+      const name = 'palabra '.repeat(20);
+
+      // 2. Act
+      const code = deriveCodeFromName(name);
+
+      // 3. Assert
+      expect(code.length).toBeLessThanOrEqual(50);
+      expect(code.startsWith('PALABRA_PALABRA')).toBe(true);
     });
   });
 

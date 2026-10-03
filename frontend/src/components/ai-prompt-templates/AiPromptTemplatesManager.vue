@@ -17,6 +17,11 @@ const aiPromptTemplatesStore = useAiPromptTemplatesStore();
 
 const columns: QTableColumn<AiPromptTemplate>[] = [
   { name: 'name', label: 'Nombre', field: 'name', align: 'left', sortable: true },
+  // El codigo se muestra porque es lo que el operador tiene que teclear en el
+  // `promptCode` del nodo PROCESADOR_IA. El backend lo deriva del nombre cuando
+  // el alta no lo suministra, asi que sin esta columna no habria forma de
+  // saber con cual quedo la plantilla.
+  { name: 'code', label: 'Codigo', field: 'code', align: 'left', sortable: true },
   { name: 'description', label: 'Descripcion', field: 'description', align: 'left' },
   { name: 'status', label: 'Estado', field: 'active', align: 'center', sortable: true },
   {
@@ -185,6 +190,12 @@ onMounted(loadPrompts);
           <q-tooltip anchor="top middle" self="bottom middle">
             <span class="pd-mono">{{ cellProps.row.id }}</span>
           </q-tooltip>
+        </q-td>
+      </template>
+
+      <template #body-cell-code="cellProps">
+        <q-td :props="cellProps">
+          <span class="pd-mono">{{ cellProps.value }}</span>
         </q-td>
       </template>
 

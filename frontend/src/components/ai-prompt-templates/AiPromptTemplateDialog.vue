@@ -7,6 +7,12 @@ import { useNodeCatalogStore } from '@stores/node-catalog.store';
 import VariableExplorer from '@components/shared/VariableExplorer.vue';
 
 import { extractApiErrorMessage } from '@/utils/api-error';
+import {
+  CODE_PATTERN,
+  MAX_CODE_LENGTH,
+  deriveCodeFromName,
+  sanitizeCodeInput,
+} from '@/utils/prompt-code';
 import { buildPromptContextFromCatalog, filterPromptContext } from '@/utils/prompt-namespaces';
 
 import type { AiPromptTemplateDetail } from '@/types/ai-prompt-template';
@@ -72,15 +78,60 @@ const nodeCatalogStore = useNodeCatalogStore();
 const promptTextRef = ref<QInput | null>(null);
 const variableExplorerRef = ref<VariableExplorerInstance | null>(null);
 
-const form = reactive<{ name: string; description: string; promptText: string }>({
+const form = reactive<{
+  code: string;
+  name: string;
+  description: string;
+  promptText: string;
+}>({
+  code: '',
   name: '',
   description: '',
   promptText: '',
 });
 
+/**
+ * ¿Ha tocado el operador el codigo a mano?
+ *
+ * Mientras valga `false`, el codigo sigue al nombre. En cuanto se teclea en el
+ * campo deja de seguirlo para siempre (hasta cerrar el dialogo): sobrescribir
+ * lo que alguien acaba de escribir es la peor clase de ayuda.
+ */
+const isCodeTouched = ref(false);
+
 const isEditMode = computed(() => !!props.prompt);
 
+/**
+ * Enlace saneado del campo de codigo.
+ *
+ * Es un `computed` con setter y no un `@update:model-value` junto al `v-model`:
+ * eso serian dos escrituras sobre la misma propiedad, y el valor que entrega
+ * `QInput` llega tipado `string | number | null`, que en modo estricto no
+ * admite `.toUpperCase()` sin mas.
+ */
+const codeInput = computed<string>({
+  get: () => form.code,
+  set: (value: string) => {
+    isCodeTouched.value = true;
+    form.code = sanitizeCodeInput(value);
+  },
+});
+
+// El codigo sigue al nombre mientras nadie lo haya tocado. Solo en el alta: en
+// la edicion es inmutable y el servicio lo ignora, asi que moverlo seria
+// ensenar algo que no se va a guardar.
+watch(
+  () => form.name,
+  (name) => {
+    if (isCodeTouched.value || isEditMode.value) return;
+
+    form.code = deriveCodeFromName(name);
+  },
+);
+
 const resetForm = (): void => {
+  form.code = props.prompt?.code ?? '';
+  isCodeTouched.value = false;
   form.name = props.prompt?.name ?? '';
   // La columna es nullable pero el input necesita una cadena: se normaliza aqui
   // y se vuelve a convertir al enviar.
@@ -168,6 +219,7 @@ const onSubmit = async (): Promise<void> => {
   // Una descripcion vaciada se envia como cadena vacia y no se omite: omitirla
   // dejaria la anterior intacta, que es lo contrario de lo que pidio el usuario.
   const description = form.description.trim();
+  const code = form.code.trim();
 
   try {
     const saved =
@@ -181,6 +233,10 @@ const onSubmit = async (): Promise<void> => {
             name: form.name.trim(),
             description,
             promptText: form.promptText,
+            // Un codigo vacio se OMITE en vez de enviarse: `@IsOptional` del
+            // backend salta con `undefined`, pero una cadena vacia llegaria al
+            // `@Matches` y daria 400. Omitido, lo deriva el servicio.
+            ...(code.length > 0 && { code }),
           });
 
     emit('saved', saved);
@@ -223,6 +279,29 @@ const onSubmit = async (): Promise<void> => {
                 (val: string) => !!val.trim() || 'El nombre es obligatorio',
                 (val: string) =>
                   val.length <= MAX_NAME_LENGTH || `Maximo ${MAX_NAME_LENGTH} caracteres`,
+              ]"
+            />
+          </div>
+
+          <div>
+            <label class="pd-label" for="prompt-code">Codigo identificador</label>
+            <q-input
+              id="prompt-code"
+              v-model="codeInput"
+              outlined
+              dense
+              class="q-mt-xs pd-mono"
+              placeholder="NOTIWEB_DEFAULT"
+              :maxlength="MAX_CODE_LENGTH"
+              :disable="isEditMode"
+              :hint="
+                isEditMode
+                  ? 'Inmutable: identifica esta plantilla en los flujos ya guardados'
+                  : 'Lo que escribiras en promptCode del nodo de IA. Vacio, se deriva del nombre'
+              "
+              :rules="[
+                (val: string) =>
+                  !val || CODE_PATTERN.test(val) || 'Solo mayusculas, digitos y guion bajo',
               ]"
             />
           </div>

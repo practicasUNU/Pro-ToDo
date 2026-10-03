@@ -27,6 +27,7 @@ const AUTHOR_ID = 'd4e5f6a7-b8c9-4012-a345-6b7c8d9e0f12';
 
 const buildPrompt = (overrides: Partial<AiPromptTemplate> = {}): AiPromptTemplate => ({
   id: PROMPT_ID,
+  code: 'EXTRACCION_NOTICIA_ES',
   name: 'extraccion-noticia-es',
   description: 'Extrae titular y resumen de un correo',
   active: true,

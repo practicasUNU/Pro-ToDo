@@ -71,6 +71,7 @@ const buildConnectionResult = (
 
 const buildPrompt = (overrides: Partial<AiPromptTemplate> = {}): AiPromptTemplate => ({
   id: PROMPT_ID,
+  code: 'REDACCION_DE_NOTA_DE_PRENSA',
   name: 'Redaccion de nota de prensa',
   description: 'Convierte una nota en noticia publicable',
   active: true,

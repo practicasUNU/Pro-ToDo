@@ -13,6 +13,13 @@
  */
 export interface AiPromptTemplate {
   id: string;
+  /**
+   * Clave de maquina, inmutable. Es lo que se teclea en `promptCode` del nodo
+   * PROCESADOR_IA, asi que la interfaz tiene que mostrarla: el backend la
+   * deriva del nombre cuando no se suministra, y sin verla el operador no
+   * sabria con que codigo quedo su plantilla.
+   */
+  code: string;
   name: string;
   description: string | null;
   active: boolean;
@@ -34,12 +41,20 @@ export interface AiPromptTemplateDetail extends AiPromptTemplate {
  * configuracion del nodo.
  */
 export interface CreateAiPromptTemplatePayload {
+  /** Omitirlo hace que el backend lo derive del nombre. */
+  code?: string;
   name: string;
   description?: string;
   promptText: string;
 }
 
-/** Edicion parcial; todo opcional, como el `PartialType` del backend. */
+/**
+ * Edicion parcial; todo opcional, como el `PartialType` del backend.
+ *
+ * SIN `code` a proposito, aunque el `PartialType` del backend lo herede: el
+ * codigo es inmutable y el servicio lo ignora en la edicion. Declararlo aqui
+ * invitaria a enviarlo para que lo tirasen en silencio.
+ */
 export interface UpdateAiPromptTemplatePayload {
   name?: string;
   description?: string;
