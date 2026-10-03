@@ -88,11 +88,11 @@ describe('assertModelPermissions · modelos de pago reservados al ADMIN', () => 
       ).toThrow(/claude-haiku-4-5/);
     });
 
-    it('1.4 deberia dejar pasar gemini-1.5-flash', () => {
+    it('1.4 deberia dejar pasar gemini-3.6-flash', () => {
       // 1. Arrange 📐: el free tier es coste cero, y es con lo que un EDITOR
       //    tiene que poder trabajar sin pedir permiso a nadie.
       const schema = buildSchema(NodeType.PROCESADOR_OCR, {
-        model: 'gemini-1.5-flash',
+        model: 'gemini-3.6-flash',
       });
 
       // 2. Act ⚙️ & 3. Assert 🎯

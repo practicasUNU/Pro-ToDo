@@ -27,7 +27,11 @@ export const DEFAULT_OCR_TEMPERATURE = 0.1;
 export const MIN_OCR_TEMPERATURE = 0;
 export const MAX_OCR_TEMPERATURE = 1;
 
-export const DEFAULT_OCR_MODEL = 'gemini-1.5-flash';
+// Espejo de `DEFAULT_OCR_MODEL` del backend, que a su vez sale de
+// `DEFAULT_GEMINI_MODEL`. Se mueven A LA VEZ: Google retiro `gemini-1.5-flash`
+// de `v1beta`, y un formulario que proponga un modelo muerto crea flujos que
+// fallan con un 404 en la primera ejecucion.
+export const DEFAULT_OCR_MODEL = 'gemini-3.6-flash';
 
 export const DEFAULT_OCR_TIMEOUT_MS = 30_000;
 export const MIN_OCR_TIMEOUT_MS = 1_000;

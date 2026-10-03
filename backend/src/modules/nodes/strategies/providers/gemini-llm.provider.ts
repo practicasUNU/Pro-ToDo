@@ -20,6 +20,22 @@ export const GEMINI_API_BASE_URL =
   'https://generativelanguage.googleapis.com/v1beta/models';
 
 /**
+ * Modelo por defecto del proveedor, y UNICA fuente de ese identificador.
+ *
+ * Centralizado desde PROT-23. Antes el literal estaba repetido en el `??` de
+ * este cliente, en `DEFAULT_OCR_MODEL` y en `DEFAULT_LLM_MODEL`, y esa
+ * dispersion es lo que permitio que caducara por partes: Google retiro
+ * `gemini-1.5-flash` de `v1beta` y el nodo de OCR empezo a recibir un 404 de
+ * «modelo no encontrado» que parecia un fallo de URL.
+ *
+ * El identificador va en el PATH de la peticion, no en el cuerpo, asi que un
+ * modelo inexistente aqui no da un 400 de validacion sino un 404 de ruta —el
+ * mismo que daria una URL mal construida—. Es la razon por la que conviene que
+ * lo declare un solo sitio y que las pruebas fijen la URL completa.
+ */
+export const DEFAULT_GEMINI_MODEL = 'gemini-3.6-flash';
+
+/**
  * Instruccion de formato que se antepone al prompt del operador.
  *
  * Va aqui y no en la plantilla de `plantillas_prompts_ia` porque describe el
@@ -112,7 +128,7 @@ export class GeminiLlmProvider implements ILlmProviderClient {
       );
     }
 
-    const model = config?.model ?? 'gemini-1.5-flash';
+    const model = config?.model ?? DEFAULT_GEMINI_MODEL;
 
     const outcome = await this.httpClient.request<GeminiApiResponse>(
       {

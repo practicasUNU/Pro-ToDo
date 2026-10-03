@@ -31,6 +31,17 @@ export const DEFAULT_HTTP_BASE_DELAY_MS = 500;
 export const HTTP_BACKOFF_FACTOR = 2;
 
 /**
+ * Tope de caracteres del cuerpo remoto que se copia al mensaje de error.
+ *
+ * El tope no es cosmetico. Ese mensaje acaba en el `.log` de disco —que rota
+ * por TAMANO, de modo que un cuerpo desmesurado se llevaria por delante la
+ * traza de todo lo demas— y en la columna de trazabilidad de PostgreSQL. Se
+ * copia el principio porque es donde los proveedores ponen el codigo y el
+ * motivo; el resto suele ser relleno.
+ */
+export const MAX_REMOTE_BODY_CHARS = 500;
+
+/**
  * Codigos de estado que SI merecen otro intento.
  *
  * `429` porque el proveedor esta pidiendo explicitamente que se espere, y la
@@ -58,8 +69,7 @@ export interface HttpClientOptions {
  * PAUSADO (CU-09).
  */
 export type HttpClientOutcome<T> =
-  | { readonly data: T }
-  | { readonly failure: NodeErrorDetail };
+  { readonly data: T } | { readonly failure: NodeErrorDetail };
 
 /** Espera pasiva entre reintentos. */
 const sleep = (milliseconds: number): Promise<void> =>
@@ -192,7 +202,7 @@ export class HttpClientService {
       return {
         level: 'GRAVE',
         code: ERR_HTTP_UPSTREAM_UNAVAILABLE,
-        message: `El servicio remoto respondio ${status}: ${this.describe(error)}`,
+        message: `El servicio remoto respondio ${status}: ${this.describe(error)}${this.describeRemoteBody(axiosError)}`,
         ...(stackTrace === undefined ? {} : { stackTrace }),
       };
     }
@@ -200,7 +210,7 @@ export class HttpClientService {
     return {
       level: 'GRAVE',
       code: ERR_HTTP_CLIENT_REJECTED,
-      message: `El servicio remoto rechazo la peticion con ${status}: ${this.describe(error)}`,
+      message: `El servicio remoto rechazo la peticion con ${status}: ${this.describe(error)}${this.describeRemoteBody(axiosError)}`,
       ...(stackTrace === undefined ? {} : { stackTrace }),
     };
   }
@@ -222,5 +232,51 @@ export class HttpClientService {
     }
 
     return String(error);
+  }
+
+  /**
+   * Cuerpo de la respuesta remota, listo para concatenar al mensaje.
+   *
+   * Existe porque sin el, el diagnostico del proveedor se perdia entero. El
+   * caso que lo motiva: Google devolvia un 404 cuyo cuerpo decia «models/... is
+   * not found for API version v1beta», y lo unico que llegaba al log era el
+   * `Request failed with status code 404` de Axios — indistinguible de una URL
+   * mal construida, y por eso hubo que auditar a mano lo que el remoto ya habia
+   * explicado.
+   *
+   * Devuelve cadena VACIA cuando no hay nada que contar, para que el llamante
+   * lo concatene sin condicionales. Un cuerpo que no se puede serializar
+   * —referencias ciclicas, un `Buffer`— se omite en vez de propagar la
+   * excepcion: esta funcion corre dentro de la traduccion de UN error, y
+   * reventar aqui sustituiria el fallo real por otro.
+   */
+  private describeRemoteBody(error: AxiosError): string {
+    const body = error.response?.data;
+
+    if (body === undefined || body === null || body === '') {
+      return '';
+    }
+
+    let serialized: string;
+
+    try {
+      serialized =
+        typeof body === 'string' ? body : (JSON.stringify(body) ?? '');
+    } catch {
+      return '';
+    }
+
+    const trimmed = serialized.trim();
+
+    if (trimmed.length === 0) {
+      return '';
+    }
+
+    const clipped =
+      trimmed.length > MAX_REMOTE_BODY_CHARS
+        ? `${trimmed.slice(0, MAX_REMOTE_BODY_CHARS)}...[truncado]`
+        : trimmed;
+
+    return ` | Respuesta del remoto: ${clipped}`;
   }
 }

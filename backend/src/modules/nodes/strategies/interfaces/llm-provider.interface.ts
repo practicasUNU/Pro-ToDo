@@ -60,7 +60,7 @@ export interface LlmInlineAttachment {
 
 /** Parametros de ejecucion que el nodo traslada al cliente en cada llamada. */
 export interface LlmExecutionOptions {
-  /** Identificador del modelo concreto del proveedor (ej. `gemini-1.5-flash`). */
+  /** Identificador del modelo concreto del proveedor (ej. `gemini-3.6-flash`). */
   readonly model: string;
 
   /** Espera maxima de la peticion saliente, en milisegundos. */

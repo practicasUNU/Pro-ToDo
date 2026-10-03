@@ -50,8 +50,8 @@ export const LLM_PROVIDER_LABELS: Record<LlmProvider, string> = {
 /** Defecto del backend: simulacion de coste cero. */
 export const DEFAULT_LLM_PROVIDER = LlmProvider.MOCK;
 
-/** Modelo por defecto cuando el nodo no declara uno. */
-export const DEFAULT_LLM_MODEL = 'gemini-1.5-flash';
+/** Modelo por defecto cuando el nodo no declara uno. Espejo del backend. */
+export const DEFAULT_LLM_MODEL = 'gemini-3.6-flash';
 
 /** Espera maxima por defecto de la inferencia, en milisegundos. */
 export const DEFAULT_LLM_TIMEOUT_MS = 15_000;

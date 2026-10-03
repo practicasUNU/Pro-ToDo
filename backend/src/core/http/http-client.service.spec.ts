@@ -6,6 +6,7 @@ import {
   ERR_HTTP_TIMEOUT,
   ERR_HTTP_UPSTREAM_UNAVAILABLE,
   HttpClientService,
+  MAX_REMOTE_BODY_CHARS,
 } from '@core/http/http-client.service';
 
 import type { HttpService } from '@nestjs/axios';
@@ -39,9 +40,7 @@ const buildResponse = <T>(data: T): AxiosResponse<T> =>
  * ponerlo para que el servicio entre por la rama que se quiere probar sin
  * arrastrar la construccion real de un `AxiosError`.
  */
-const buildAxiosError = (
-  overrides: Partial<AxiosError> = {},
-): AxiosError => {
+const buildAxiosError = (overrides: Partial<AxiosError> = {}): AxiosError => {
   const error = new Error(
     overrides.message ?? 'fallo simulado',
   ) as unknown as AxiosError;
@@ -54,6 +53,13 @@ const buildStatusError = (status: number): AxiosError =>
   buildAxiosError({
     message: `respuesta ${status}`,
     response: { status } as AxiosError['response'],
+  });
+
+/** Igual que el anterior, pero con cuerpo: lo que de verdad manda un proveedor. */
+const buildStatusErrorWithBody = (status: number, data: unknown): AxiosError =>
+  buildAxiosError({
+    message: `respuesta ${status}`,
+    response: { status, data } as AxiosError['response'],
   });
 
 describe('HttpClientService', () => {
@@ -103,7 +109,10 @@ describe('HttpClientService', () => {
 
       // 2. Act
       await runPending(
-        client.request({ url: TARGET_URL, method: 'POST' }, { timeoutMs: 7_000 }),
+        client.request(
+          { url: TARGET_URL, method: 'POST' },
+          { timeoutMs: 7_000 },
+        ),
       );
 
       // 3. Assert
@@ -305,6 +314,115 @@ describe('HttpClientService', () => {
         ERR_HTTP_UPSTREAM_UNAVAILABLE,
       );
       expect('failure' in outcome && outcome.failure.stackTrace).toBeDefined();
+    });
+  });
+
+  describe('5. Diagnostico del remoto', () => {
+    /** Mensaje del fallo, o cadena vacia si el desenlace fue exitoso. */
+    const messageOf = (outcome: unknown): string =>
+      typeof outcome === 'object' &&
+      outcome !== null &&
+      'failure' in outcome &&
+      typeof (outcome as { failure: { message: unknown } }).failure.message ===
+        'string'
+        ? (outcome as { failure: { message: string } }).failure.message
+        : '';
+
+    it('5.1 deberia copiar el cuerpo de un 4xx al mensaje del fallo', async () => {
+      // 1. Arrange 📐: es el caso que motiva todo esto. Google explica en el
+      //    cuerpo que el modelo no existe, y hasta ahora solo llegaba al log el
+      //    "Request failed with status code 404" de Axios, indistinguible de
+      //    una URL mal construida.
+      const httpService = buildHttpService();
+      httpService.request.mockReturnValue(
+        throwError(() =>
+          buildStatusErrorWithBody(404, {
+            error: {
+              code: 404,
+              message:
+                'models/modelo-retirado is not found for API version v1beta',
+              status: 'NOT_FOUND',
+            },
+          }),
+        ),
+      );
+      const client = buildClient(httpService);
+
+      // 2. Act ⚙️
+      const outcome = await runPending(
+        client.request({ url: TARGET_URL }, { maxRetries: 0 }),
+      );
+
+      // 3. Assert 🎯
+      expect('failure' in outcome && outcome.failure.code).toBe(
+        ERR_HTTP_CLIENT_REJECTED,
+      );
+      expect(messageOf(outcome)).toContain('is not found for API version');
+    });
+
+    it('5.2 deberia truncar un cuerpo desmesurado', async () => {
+      // 1. Arrange 📐: el mensaje acaba en el `.log` de disco, que rota por
+      //    TAMANO: un cuerpo sin tope se llevaria por delante la traza de todo
+      //    lo demas justo cuando hace falta leerla.
+      const httpService = buildHttpService();
+      httpService.request.mockReturnValue(
+        throwError(() =>
+          buildStatusErrorWithBody(400, 'x'.repeat(MAX_REMOTE_BODY_CHARS * 3)),
+        ),
+      );
+      const client = buildClient(httpService);
+
+      // 2. Act ⚙️
+      const outcome = await runPending(
+        client.request({ url: TARGET_URL }, { maxRetries: 0 }),
+      );
+
+      // 3. Assert 🎯
+      const message = messageOf(outcome);
+
+      expect(message).toContain('[truncado]');
+      expect(message.length).toBeLessThan(MAX_REMOTE_BODY_CHARS * 2);
+    });
+
+    it('5.3 deberia copiar tambien el cuerpo de un 5xx reintentable', async () => {
+      // 1. Arrange 📐: un 503 con cuerpo suele traer la cuota o la ventana de
+      //    espera, y es lo que decide si conviene reintentar a mano.
+      const httpService = buildHttpService();
+      httpService.request.mockReturnValue(
+        throwError(() =>
+          buildStatusErrorWithBody(503, { error: 'quota exhausted' }),
+        ),
+      );
+      const client = buildClient(httpService);
+
+      // 2. Act ⚙️
+      const outcome = await runPending(
+        client.request({ url: TARGET_URL }, { maxRetries: 0 }),
+      );
+
+      // 3. Assert 🎯
+      expect('failure' in outcome && outcome.failure.code).toBe(
+        ERR_HTTP_UPSTREAM_UNAVAILABLE,
+      );
+      expect(messageOf(outcome)).toContain('quota exhausted');
+    });
+
+    it('5.4 no deberia alterar el mensaje de un fallo SIN cuerpo', async () => {
+      // 1. Arrange 📐: la mayoria de los 4xx no traen nada que contar, y el
+      //    mensaje no debe ganar un sufijo vacio.
+      const httpService = buildHttpService();
+      httpService.request.mockReturnValue(
+        throwError(() => buildStatusError(404)),
+      );
+      const client = buildClient(httpService);
+
+      // 2. Act ⚙️
+      const outcome = await runPending(
+        client.request({ url: TARGET_URL }, { maxRetries: 0 }),
+      );
+
+      // 3. Assert 🎯
+      expect(messageOf(outcome)).not.toContain('Respuesta del remoto');
     });
   });
 });

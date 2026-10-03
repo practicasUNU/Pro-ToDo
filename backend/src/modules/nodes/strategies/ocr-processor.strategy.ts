@@ -484,7 +484,7 @@ export class OcrProcessorStrategy implements INodeStrategy {
    * el simulador —texto inventado publicado como transcripcion— teniendo un
    * proveedor de verdad a mano. La cascada es GEMINI → ANTHROPIC → simulador.
    *
-   * EL MODELO CAMBIA CON EL PROVEEDOR. `gemini-1.5-flash` no existe en
+   * EL MODELO CAMBIA CON EL PROVEEDOR. `gemini-3.6-flash` no existe en
    * Anthropic; mandarlo tal cual daria un 404 del proveedor y un GRAVE que
    * parece un fallo de red. Por eso la conmutacion arrastra el modelo de vision
    * mas barato de Claude.

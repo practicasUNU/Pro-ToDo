@@ -238,7 +238,7 @@ describe('LlmExtractorStrategy', () => {
         metadata: {
           tokensPrompt: 1,
           tokensCompletion: 2,
-          modelUsed: 'gemini-1.5-flash',
+          modelUsed: 'gemini-3.6-flash',
           isMock: false,
         },
       });
@@ -510,7 +510,7 @@ describe('LlmExtractorStrategy', () => {
           metadata: {
             tokensPrompt: 1,
             tokensCompletion: 2,
-            modelUsed: 'gemini-1.5-flash',
+            modelUsed: 'gemini-3.6-flash',
             isMock: false,
           },
         })
@@ -583,7 +583,7 @@ describe('LlmExtractorStrategy', () => {
         metadata: {
           tokensPrompt: 1,
           tokensCompletion: 2,
-          modelUsed: 'gemini-1.5-flash',
+          modelUsed: 'gemini-3.6-flash',
           isMock: false,
         },
       });
@@ -734,7 +734,7 @@ describe('LlmExtractorStrategy', () => {
         metadata: {
           tokensPrompt: 1,
           tokensCompletion: 2,
-          modelUsed: 'gemini-1.5-flash',
+          modelUsed: 'gemini-3.6-flash',
           isMock: false,
         },
       });
@@ -869,7 +869,7 @@ describe('LlmExtractorStrategy', () => {
         metadata: {
           tokensPrompt: 0,
           tokensCompletion: 0,
-          modelUsed: 'gemini-1.5-flash',
+          modelUsed: 'gemini-3.6-flash',
           isMock: false,
         },
       });
@@ -916,7 +916,7 @@ describe('LlmExtractorStrategy', () => {
         metadata: {
           tokensPrompt: 0,
           tokensCompletion: 0,
-          modelUsed: 'gemini-1.5-flash',
+          modelUsed: 'gemini-3.6-flash',
           isMock: false,
         },
       });
@@ -1025,7 +1025,7 @@ describe('LlmExtractorStrategy', () => {
       const aiDefaults = buildAiDefaults({
         getOcrDefaults: jest
           .fn()
-          .mockReturnValue({ provider: 'GEMINI', model: 'gemini-1.5-flash' }),
+          .mockReturnValue({ provider: 'GEMINI', model: 'gemini-3.6-flash' }),
       });
       const strategy = buildStrategy(
         buildPromptService(),
@@ -1119,7 +1119,7 @@ describe('LlmExtractorStrategy', () => {
         metadata: {
           tokensPrompt: 0,
           tokensCompletion: 0,
-          modelUsed: 'gemini-1.5-flash',
+          modelUsed: 'gemini-3.6-flash',
           isMock: false,
         },
       });

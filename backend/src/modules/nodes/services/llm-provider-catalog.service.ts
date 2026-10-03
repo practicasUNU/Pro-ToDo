@@ -10,7 +10,10 @@ import { LlmProvider } from '@modules/nodes/strategies/interfaces/llm-provider.i
 import { UserRole } from '@modules/users/enums/user-role.enum';
 import { LlmProviderFactory } from '@modules/nodes/strategies/llm-provider.factory';
 import { ANTHROPIC_API_KEY_VAR } from '@modules/nodes/strategies/providers/anthropic-llm.provider';
-import { GEMINI_API_KEY_VAR } from '@modules/nodes/strategies/providers/gemini-llm.provider';
+import {
+  DEFAULT_GEMINI_MODEL,
+  GEMINI_API_KEY_VAR,
+} from '@modules/nodes/strategies/providers/gemini-llm.provider';
 import { MOCK_LLM_MODEL } from '@modules/nodes/strategies/providers/mock-llm.provider';
 
 import type { LlmTestConnectionDto } from '@modules/nodes/dto/llm-catalog.dto';
@@ -73,22 +76,29 @@ const CURATED_MODELS: readonly CuratedModel[] = [
     contextWindow: 200_000,
     minRoleRequired: UserRole.ADMIN,
   },
+  // Los dos relevos de la gama 1.5, retirada de `v1beta` por Google. Citar un
+  // modelo que ya no se sirve no da un error de validacion sino un 404 de ruta
+  // —el identificador viaja en el PATH—, asi que el catalogo tiene que
+  // envejecer con la API. Limites tomados de `GET /v1beta/models`.
   {
     provider: LlmProvider.GEMINI,
-    model: 'gemini-1.5-pro',
-    label: 'Gemini 1.5 Pro',
+    model: 'gemini-3.8-flash',
+    label: 'Gemini 3.8 Flash',
     isTestOnly: false,
     supportsVision: true,
-    contextWindow: 2_000_000,
+    contextWindow: 1_048_576,
+    // Releva a `gemini-1.5-pro` en el puesto de gama alta reservada a ADMIN. Se
+    // prefiere a `gemini-3.1-pro-preview` porque un modelo en preview puede
+    // renombrarse sin aviso, que es como se llego hasta aqui.
     minRoleRequired: UserRole.ADMIN,
   },
   {
     provider: LlmProvider.GEMINI,
-    model: 'gemini-1.5-flash',
-    label: 'Gemini 1.5 Flash',
+    model: DEFAULT_GEMINI_MODEL,
+    label: 'Gemini 3.6 Flash',
     isTestOnly: false,
     supportsVision: true,
-    contextWindow: 1_000_000,
+    contextWindow: 1_048_576,
   },
   {
     // Se lista aunque no tenga cliente, y no es un descuido: el enum lo admite

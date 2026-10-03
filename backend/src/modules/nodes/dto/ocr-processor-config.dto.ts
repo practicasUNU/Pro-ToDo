@@ -13,6 +13,7 @@ import {
 import { ApiPropertyOptional } from '@nestjs/swagger';
 
 import { LlmProvider } from '@modules/nodes/strategies/interfaces/llm-provider.interface';
+import { DEFAULT_GEMINI_MODEL } from '@modules/nodes/strategies/providers/gemini-llm.provider';
 
 /**
  * Prompt del sistema con el que se pide la transcripcion.
@@ -65,7 +66,7 @@ export const MAX_OCR_TEMPERATURE = 1;
  * simulador, asi que el cambio no puede abrir ninguna factura.
  */
 export const DEFAULT_OCR_PROVIDER = LlmProvider.GEMINI;
-export const DEFAULT_OCR_MODEL = 'gemini-1.5-flash';
+export const DEFAULT_OCR_MODEL = DEFAULT_GEMINI_MODEL;
 export const DEFAULT_OCR_TIMEOUT_MS = 30_000;
 export const MIN_OCR_TIMEOUT_MS = 1_000;
 export const MAX_OCR_TIMEOUT_MS = 120_000;

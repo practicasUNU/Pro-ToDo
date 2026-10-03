@@ -1,4 +1,8 @@
-import { GEMINI_API_KEY_VAR, GeminiLlmProvider } from './gemini-llm.provider';
+import {
+  DEFAULT_GEMINI_MODEL,
+  GEMINI_API_KEY_VAR,
+  GeminiLlmProvider,
+} from './gemini-llm.provider';
 import { MockLlmProvider } from './mock-llm.provider';
 
 import type { HttpClientService } from '@core/http/http-client.service';
@@ -95,7 +99,67 @@ const partsOf = (http: HttpMock): Record<string, unknown>[] => {
   return data.contents[0]?.parts ?? [];
 };
 
+/** Peticion saliente completa, tal y como se paso al cliente HTTP. */
+const requestOf = (http: HttpMock): AxiosRequestConfig => {
+  const [config] = http.request.mock.calls[0] as [AxiosRequestConfig];
+
+  return config;
+};
+
 describe('GeminiLlmProvider', () => {
+  describe('0. Direccion de la peticion', () => {
+    it('0.1 deberia llamar a v1beta con el separador ":" antes de generateContent', async () => {
+      // 1. Arrange 📐: el modelo viaja en el PATH, no en el cuerpo, asi que un
+      //    error aqui no da un 400 de validacion sino un 404 de ruta. Hasta
+      //    PROT-23 ninguna prueba miraba la URL, y por ese hueco paso un 404
+      //    real que costo una auditoria entera distinguir de una URL rota.
+      const http = buildHttp();
+      const provider = buildProvider(http);
+
+      // 2. Act ⚙️
+      await provider.generateCompletion('Extrae la nota.');
+
+      // 3. Assert 🎯: dos puntos y NO barra; si fuera `/generateContent`,
+      //    Google lo interpretaria como otro recurso y devolveria 404.
+      expect(requestOf(http).url).toBe(
+        `https://generativelanguage.googleapis.com/v1beta/models/${DEFAULT_GEMINI_MODEL}:generateContent`,
+      );
+    });
+
+    it('0.2 deberia usar el modelo que declara el nodo por encima del defecto', async () => {
+      // 1. Arrange 📐
+      const http = buildHttp();
+      const provider = buildProvider(http);
+
+      // 2. Act ⚙️
+      await provider.generateCompletion('Extrae la nota.', undefined, {
+        model: 'gemini-3.8-flash',
+      });
+
+      // 3. Assert 🎯
+      expect(requestOf(http).url).toContain(
+        '/models/gemini-3.8-flash:generateContent',
+      );
+    });
+
+    it('0.3 deberia llevar la clave en cabecera y nunca en el query string', async () => {
+      // 1. Arrange 📐: un `?key=` acaba en los logs de acceso de cualquier
+      //    proxy que haya por el camino.
+      const http = buildHttp();
+      const provider = buildProvider(http);
+
+      // 2. Act ⚙️
+      await provider.generateCompletion('Extrae la nota.');
+
+      // 3. Assert 🎯
+      const request = requestOf(http);
+
+      expect(request.headers?.['x-goog-api-key']).toBe(API_KEY);
+      expect(request.url).not.toContain('key=');
+      expect(request.url).not.toContain(API_KEY);
+    });
+  });
+
   describe('1. Entrada multimodal', () => {
     it('1.1 deberia anadir una parte inline_data por adjunto', async () => {
       // 1. Arrange 📐
@@ -162,7 +226,7 @@ describe('GeminiLlmProvider', () => {
 
       // 2. Act ⚙️
       await provider.generateCompletion('Transcribe.', undefined, {
-        model: 'gemini-1.5-flash',
+        model: 'gemini-3.6-flash',
         timeoutMs: 30_000,
         maxRetries: 2,
         temperature: 0.1,

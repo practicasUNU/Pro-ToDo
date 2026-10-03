@@ -14,12 +14,13 @@ import {
 
 import { CODE_PATTERN } from '@modules/ai-prompt-templates/dto/create-ai-prompt-template.dto';
 import { LlmProvider } from '@modules/nodes/strategies/interfaces/llm-provider.interface';
+import { DEFAULT_GEMINI_MODEL } from '@modules/nodes/strategies/providers/gemini-llm.provider';
 
 /** Proveedor por defecto: simulacion de coste cero. Ver la nota de la clase. */
 export const DEFAULT_LLM_PROVIDER = LlmProvider.MOCK;
 
 /** Modelo por defecto cuando el nodo no declara uno. */
-export const DEFAULT_LLM_MODEL = 'gemini-1.5-flash';
+export const DEFAULT_LLM_MODEL = DEFAULT_GEMINI_MODEL;
 
 /** Espera maxima por defecto de la inferencia: quince segundos. */
 export const DEFAULT_LLM_TIMEOUT_MS = 15_000;

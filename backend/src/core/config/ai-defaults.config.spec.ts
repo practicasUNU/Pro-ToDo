@@ -27,7 +27,7 @@ describe('AiDefaultsConfig', () => {
         [AI_DEFAULT_PROVIDER_VAR]: 'anthropic',
         [AI_DEFAULT_MODEL_VAR]: 'claude-3-5-sonnet-20241022',
         [AI_OCR_DEFAULT_PROVIDER_VAR]: 'google_gemini',
-        [AI_OCR_DEFAULT_MODEL_VAR]: 'gemini-1.5-flash',
+        [AI_OCR_DEFAULT_MODEL_VAR]: 'gemini-3.6-flash',
       });
 
       // 2. Act ⚙️ + 3. Assert 🎯
@@ -37,7 +37,7 @@ describe('AiDefaultsConfig', () => {
       });
       expect(resolver.getOcrDefaults()).toEqual({
         provider: 'GEMINI',
-        model: 'gemini-1.5-flash',
+        model: 'gemini-3.6-flash',
       });
     });
 

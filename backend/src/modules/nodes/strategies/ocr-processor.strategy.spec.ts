@@ -4,6 +4,7 @@ import { NodeType } from '@core/fsm/types/pipeline-schema.types';
 import { LlmProvider } from '@modules/nodes/strategies/interfaces/llm-provider.interface';
 import { LlmProviderFactory } from '@modules/nodes/strategies/llm-provider.factory';
 import { MockLlmProvider } from '@modules/nodes/strategies/providers/mock-llm.provider';
+import { DEFAULT_OCR_MODEL } from '@modules/nodes/dto/ocr-processor-config.dto';
 import {
   ERR_OCR_CONFIG,
   ERR_OCR_EMPTY_TRANSCRIPTION,
@@ -222,7 +223,7 @@ describe('OcrProcessorStrategy · nodo satelite PROCESADOR_OCR', () => {
         metadata: {
           tokensPrompt: 0,
           tokensCompletion: 0,
-          modelUsed: 'gemini-1.5-flash',
+          modelUsed: 'gemini-3.6-flash',
           isMock: false,
         },
       });
@@ -325,7 +326,7 @@ describe('OcrProcessorStrategy · nodo satelite PROCESADOR_OCR', () => {
         metadata: {
           tokensPrompt: 0,
           tokensCompletion: 0,
-          modelUsed: 'gemini-1.5-flash',
+          modelUsed: 'gemini-3.6-flash',
           isMock: false,
         },
       });
@@ -415,7 +416,7 @@ describe('OcrProcessorStrategy · nodo satelite PROCESADOR_OCR', () => {
           metadata: {
             tokensPrompt: 1,
             tokensCompletion: 2,
-            modelUsed: 'gemini-1.5-flash',
+            modelUsed: 'gemini-3.6-flash',
             isMock: false,
           },
         }),
@@ -561,7 +562,7 @@ describe('OcrProcessorStrategy · nodo satelite PROCESADOR_OCR', () => {
       });
 
       // 3. Assert 🎯: y el MODELO cambia con el proveedor. Arrastrar
-      //    `gemini-1.5-flash` a Anthropic daria un 404 que parece un fallo de
+      //    `gemini-3.6-flash` a Anthropic daria un 404 que parece un fallo de
       //    red.
       expect(generateCompletion).toHaveBeenCalledTimes(1);
       expect(
@@ -599,12 +600,15 @@ describe('OcrProcessorStrategy · nodo satelite PROCESADOR_OCR', () => {
         provider: LlmProvider.GEMINI,
       });
 
-      // 3. Assert 🎯: sigue yendo a Gemini con su modelo, no a Anthropic.
+      // 3. Assert 🎯: sigue yendo a Gemini con su modelo, no a Anthropic. Se
+      //    compara contra la CONSTANTE y no contra un literal: el identificador
+      //    caduca cuando Google retira el modelo, y un literal aqui dejaria la
+      //    prueba en verde mientras produccion recibe 404.
       expect(anthropicCompletion).not.toHaveBeenCalled();
       expect(
         (geminiCompletion.mock.calls[0]?.[2] as { model?: string } | undefined)
           ?.model,
-      ).toBe('gemini-1.5-flash');
+      ).toBe(DEFAULT_OCR_MODEL);
     });
 
     it('7.4 deberia publicar isMock cuando responde el simulador', async () => {
@@ -666,7 +670,7 @@ describe('OcrProcessorStrategy · nodo satelite PROCESADOR_OCR', () => {
         metadata: {
           tokensPrompt: 0,
           tokensCompletion: 0,
-          modelUsed: 'gemini-1.5-flash',
+          modelUsed: 'gemini-3.6-flash',
           isMock: false,
         },
       });

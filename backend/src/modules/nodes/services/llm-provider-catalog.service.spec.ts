@@ -3,7 +3,10 @@ import { describe, expect, it, jest } from '@jest/globals';
 import { LlmProvider } from '@modules/nodes/strategies/interfaces/llm-provider.interface';
 import { LlmProviderFactory } from '@modules/nodes/strategies/llm-provider.factory';
 import { ANTHROPIC_API_KEY_VAR } from '@modules/nodes/strategies/providers/anthropic-llm.provider';
-import { GEMINI_API_KEY_VAR } from '@modules/nodes/strategies/providers/gemini-llm.provider';
+import {
+  DEFAULT_GEMINI_MODEL,
+  GEMINI_API_KEY_VAR,
+} from '@modules/nodes/strategies/providers/gemini-llm.provider';
 import {
   MOCK_LLM_MODEL,
   MockLlmProvider,
@@ -25,7 +28,7 @@ import type { LlmResponsePayload } from '@modules/nodes/strategies/interfaces/ll
  */
 
 const ANTHROPIC_MODEL = 'claude-sonnet-5-5';
-const GEMINI_MODEL = 'gemini-1.5-flash';
+const GEMINI_MODEL = 'gemini-3.6-flash';
 
 /** Respuesta valida de un proveedor real. */
 const buildPayload = (isMock = false): LlmResponsePayload => ({
@@ -323,6 +326,26 @@ describe('LlmProviderCatalogService · catalogo de modelos y conectividad', () =
       // 3. Assert 🎯
       expect(result.success).toBe(true);
       expect(result.isMock).toBe(true);
+    });
+  });
+
+  describe('4. Coherencia con los defectos del sistema', () => {
+    it('4.1 deberia listar el modelo Gemini que el sistema usa por defecto', () => {
+      // 1. Arrange 📐: el catalogo es lo que el selector del asistente ofrece.
+      //    Si el defecto no figura en el, un nodo recien creado nace citando un
+      //    modelo que la interfaz marca «no catalogado» — y, cuando el defecto
+      //    ademas esta retirado, con un 404 asegurado en la primera ejecucion.
+      //    Es exactamente la divergencia que dejo `gemini-1.5-flash` vivo en
+      //    tres constantes despues de que Google lo retirase.
+      const { service } = buildHarness();
+
+      // 2. Act ⚙️
+      const models = service.getAvailableModels();
+
+      // 3. Assert 🎯
+      expect(models.some((model) => model.model === DEFAULT_GEMINI_MODEL)).toBe(
+        true,
+      );
     });
   });
 });
