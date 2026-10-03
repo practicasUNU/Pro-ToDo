@@ -1128,6 +1128,58 @@ describe('useWorkflowTemplatesStore · catalogo de plantillas de flujo', () => {
         expect(readSchema(store).nodes[SHARED_OCR_NODE_ID]).toBeUndefined();
         expect(store.errorBranchOf(PARSER_ID)).toBeNull();
       });
+
+      it('8.21 deberia desviar el fallo del satelite de OCR hacia la alerta', () => {
+        // 1. Arrange 📐: la transcripcion tambien falla —sin adjuntos, 503 del
+        //    proveedor, cero caracteres—. Con `onErrorStep: null` a ciegas el
+        //    motor no encontraba ruta y PAUSABA el flujo teniendo al lado la
+        //    alerta que el propio borrador acaba de provisionar.
+        const store = buildDraftWithPipeline();
+
+        // 2. Act ⚙️: dos ramas, una por satelite.
+        store.setStepErrorBranch(PARSER_ID, 'VISION_IA');
+        store.setStepErrorBranch(MAPPER_ID, 'ALERTA_SMTP');
+
+        // 3. Assert 🎯: forma de CADENA, la unica que atrapa cualquier codigo.
+        const { nodes } = readSchema(store);
+
+        expect(nodes[SHARED_OCR_NODE_ID]?.onErrorStep).toBe(SHARED_ALERT_NODE_ID);
+        // La alerta sigue terminal: apuntarse a si misma seria un bucle.
+        expect(nodes[SHARED_ALERT_NODE_ID]?.onErrorStep).toBeNull();
+      });
+
+      it('8.22 deberia conservar esa ruta al REORDENAR la secuencia', () => {
+        // 1. Arrange 📐: `reconcileSatellites` reconstruye el satelite entero en
+        //    cada cambio de orden, asi que la ruta tiene que recalcularse con el
+        //    o se perderia en el primer uso de las flechas.
+        const store = buildDraftWithPipeline();
+        store.setStepErrorBranch(PARSER_ID, 'VISION_IA');
+        store.setStepErrorBranch(MAPPER_ID, 'ALERTA_SMTP');
+
+        // 2. Act ⚙️: se retira el nodo de IA que seguia al parser.
+        store.setSequence(store.sequence.filter((step) => step.nodeId !== IA_ID));
+
+        // 3. Assert 🎯: el destino del rescate se mueve, la ruta de fallo no.
+        const { nodes } = readSchema(store);
+
+        expect(nodes[SHARED_OCR_NODE_ID]?.nextStep).toBe(MAPPER_ID);
+        expect(nodes[SHARED_OCR_NODE_ID]?.onErrorStep).toBe(SHARED_ALERT_NODE_ID);
+      });
+
+      it('8.23 deberia dejar el satelite sin ruta si el flujo no tiene alerta', () => {
+        // 1. Arrange 📐: inventar el destino romperia la regla 3 del validador
+        //    —todo `onErrorStep` no nulo resuelve a un nodo existente—.
+        const store = buildDraftWithPipeline();
+
+        // 2. Act ⚙️
+        store.setStepErrorBranch(PARSER_ID, 'VISION_IA');
+
+        // 3. Assert 🎯
+        const { nodes } = readSchema(store);
+
+        expect(nodes[SHARED_ALERT_NODE_ID]).toBeUndefined();
+        expect(nodes[SHARED_OCR_NODE_ID]?.onErrorStep).toBeNull();
+      });
     });
 
     describe('6. Nodos minimos del borrador', () => {

@@ -11,6 +11,7 @@ import {
   errorRouteTarget,
 } from '@/utils/pipeline-assembler';
 import { withBaseParamDefaults } from '@/utils/node-base-params';
+import { resolveSatelliteErrorRoute } from '@/utils/satellite-error-route';
 
 import {
   DEFAULT_OUTPUT_NAMESPACE_BY_NODE_TYPE,
@@ -512,6 +513,18 @@ export const useWorkflowTemplatesStore = defineStore('workflowTemplates', () => 
   const reconcileSatellites = (steps: readonly AssemblerStep[]): void => {
     let next = [...satellites.value];
 
+    // Se resuelve ANTES del bucle y no dentro: la ruta de un satelite depende de
+    // si OTRO esta provisionado, y calcularlo sobre la marcha ataria el
+    // resultado al orden en que `Object.keys` devuelva las acciones.
+    const provisionedActions = (Object.keys(ERROR_BRANCH_ACTIONS) as ErrorBranchAction[]).filter(
+      (candidate) =>
+        steps.some(
+          (step) =>
+            errorRouteTarget(step.onErrorStep) ===
+            ERROR_BRANCH_ACTIONS[candidate].provisionedNodeId,
+        ),
+    );
+
     for (const action of Object.keys(ERROR_BRANCH_ACTIONS) as ErrorBranchAction[]) {
       const option = ERROR_BRANCH_ACTIONS[action];
       const { provisionedNodeId } = option;
@@ -541,7 +554,9 @@ export const useWorkflowTemplatesStore = defineStore('workflowTemplates', () => 
           nodeType: option.targetNodeType,
           outputNamespace: DEFAULT_OUTPUT_NAMESPACE_BY_NODE_TYPE[option.targetNodeType],
           params: withBaseParamDefaults(option.targetNodeType, existing?.params ?? {}),
-          onErrorStep: null,
+          // Ya no es `null` a ciegas: un satelite tambien falla, y sin ruta el
+          // motor PAUSA el flujo teniendo al lado una alerta provisionada.
+          onErrorStep: resolveSatelliteErrorRoute(action, provisionedActions),
           // El `nextStep` del paso que la invoca sale del ORDEN del arreglo, no
           // de un campo suyo: es la misma regla que aplica `assemblePipelineSchema`.
           nextStep: option.rejoinsFlow ? (steps[callerIndex + 1]?.nodeId ?? null) : null,

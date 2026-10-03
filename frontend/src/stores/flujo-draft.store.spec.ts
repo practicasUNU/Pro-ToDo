@@ -1489,6 +1489,43 @@ describe('useFlujoDraftStore · agregador del asistente', () => {
       expect(schema.nodes[SHARED_OCR_NODE_ID]?.nextStep).toBe('nodo_ia');
       expect(schema.nodes[SHARED_OCR_NODE_ID]?.outputNamespace).toBe('ocr_result');
     });
+
+    it('21.5 deberia desviar el fallo del propio satelite hacia la alerta', async () => {
+      // 1. Arrange 📐: el satelite tambien falla —sin adjuntos, 503 del
+      //    proveedor, transcripcion vacia—. Con `onErrorStep: null` el motor no
+      //    encontraba ruta y PAUSABA el flujo teniendo al lado una alerta cuyo
+      //    unico cometido es que una persona se entere.
+      const draft = await buildDraftWithBranches(
+        { [PARSER_NODE_ID]: VISION_ROUTE, nodo_ia: ALERT_ROUTE },
+        buildVisionTemplate(),
+      );
+      useSmtpAlertStore(SHARED_ALERT_NODE_ID).updateConfig({ to: ['guardia@unuware.com'] });
+
+      // 2. Act ⚙️
+      const schema = draft.assemblePipelineSchema('Flujo con rescate');
+
+      // 3. Assert 🎯: forma de CADENA, la unica que atrapa cualquier codigo.
+      expect(schema.nodes[SHARED_OCR_NODE_ID]?.onErrorStep).toBe(SHARED_ALERT_NODE_ID);
+      // La alerta sigue siendo terminal: apuntarse a si misma seria un bucle.
+      expect(schema.nodes[SHARED_ALERT_NODE_ID]?.onErrorStep).toBeNull();
+    });
+
+    it('21.6 deberia dejar el satelite sin ruta si el flujo no tiene alerta', async () => {
+      // 1. Arrange 📐: inventar el destino romperia la regla 3 del validador
+      //    —todo `onErrorStep` no nulo resuelve a un nodo existente— y
+      //    convertiria un guardado correcto en un 400.
+      const draft = await buildDraftWithBranches(
+        { [PARSER_NODE_ID]: VISION_ROUTE },
+        buildVisionTemplate(),
+      );
+
+      // 2. Act ⚙️
+      const schema = draft.assemblePipelineSchema('Flujo con rescate');
+
+      // 3. Assert 🎯
+      expect(schema.nodes[SHARED_ALERT_NODE_ID]).toBeUndefined();
+      expect(schema.nodes[SHARED_OCR_NODE_ID]?.onErrorStep).toBeNull();
+    });
   });
 
   describe('20. Parametros base que impone la plantilla', () => {

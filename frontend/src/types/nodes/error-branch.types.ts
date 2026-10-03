@@ -148,6 +148,26 @@ export interface ErrorBranchActionOption {
    */
   readonly sourceParams: Readonly<Record<string, { readonly on: unknown; readonly off: unknown }>>;
   /**
+   * Accion que atiende el fallo DEL PROPIO SATELITE, o `null` si es terminal.
+   *
+   * Un satelite tambien puede fallar: la transcripcion se queda sin adjuntos,
+   * el proveedor devuelve un 503 o el modelo no saca una sola letra. Sin esta
+   * ruta el motor no encuentra a donde desviarse y PAUSA el flujo conservando
+   * el cursor —y lo hace aunque el flujo tenga una alerta provisionada cuyo
+   * unico cometido es que una persona se entere—. El rescate se quedaba mudo
+   * justo cuando fallaba el rescate.
+   *
+   * Es una ACCION y no un `nodeId` para no cablear `alerta_smtp` por segunda
+   * vez: el identificador sale de `provisionedNodeId` de la accion nombrada,
+   * que ya es el unico dueno de ese dato.
+   *
+   * `null` en la alerta a proposito: es terminal, y apuntarse a si misma seria
+   * un bucle que la regla 6 del validador ni siquiera mira —`onErrorStep` queda
+   * fuera de su recorrido—, asi que solo se descubriria en ejecucion.
+   */
+  readonly satelliteFallbackAction: ErrorBranchAction | null;
+
+  /**
    * `params` que la accion exige AGUAS ARRIBA, indexados por tipo de nodo.
    *
    * La vision lee los adjuntos de `raw_email`
@@ -176,6 +196,8 @@ export const ERROR_BRANCH_ACTIONS: Record<ErrorBranchAction, ErrorBranchActionOp
     // que el nodo deba poder emitir: la regla 10 ni siquiera la mira.
     sourceParams: {},
     upstreamParams: {},
+    // Terminal: avisa a una persona y ahi acaba.
+    satelliteFallbackAction: null,
   },
   VISION_IA: {
     label: 'Extraccion con vision IA',
@@ -189,6 +211,8 @@ export const ERROR_BRANCH_ACTIONS: Record<ErrorBranchAction, ErrorBranchActionOp
     onlyForNodeTypes: [NodeType.PARSER_PRE_IA],
     sourceParams: { failOnUnextractableMedia: { on: true, off: false } },
     upstreamParams: { [NodeType.TRIGGER_IMAP]: { includeAttachments: true } },
+    // Si la transcripcion no saca texto, que al menos lo cuente.
+    satelliteFallbackAction: 'ALERTA_SMTP',
   },
 };
 

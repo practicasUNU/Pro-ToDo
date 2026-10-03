@@ -14,6 +14,7 @@ import {
   errorRouteTarget,
   INITIAL_SCHEMA_VERSION,
 } from '@/utils/pipeline-assembler';
+import { resolveSatelliteErrorRoute } from '@/utils/satellite-error-route';
 
 import { DEFAULT_OUTPUT_NAMESPACE_BY_NODE_TYPE, toWizardStep } from '@/types/pipeline';
 import {
@@ -928,6 +929,13 @@ export const useFlujoDraftStore = defineStore('flujoDraft', () => {
         outputNamespace: step.outputNamespace,
         params: resolveNodeStore(step.nodeType, step.nodeId)?.toNodeParams() ?? {},
         nextStep: rejoins ? resolveRejoinTarget(step.nodeId) : null,
+        // Un satelite tambien falla, y hasta ahora salia con `onErrorStep: null`
+        // a ciegas: si la transcripcion no sacaba texto, el motor no encontraba
+        // ruta y PAUSABA el flujo teniendo al lado una alerta provisionada.
+        onErrorStep:
+          action === undefined
+            ? null
+            : resolveSatelliteErrorRoute(action, provisionedBranchActions.value),
       };
     });
 
