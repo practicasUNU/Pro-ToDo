@@ -650,4 +650,159 @@ describe('OcrProcessorStrategy · nodo satelite PROCESADOR_OCR', () => {
       expect(anthropicCompletion).not.toHaveBeenCalled();
     });
   });
+
+  describe('8. Transcripcion en Markdown', () => {
+    /** Construye una estrategia cuyo proveedor devuelve estos parrafos. */
+    const buildStrategyReturning = (
+      bodyParagraphs: string[],
+      summary = 'resumen',
+    ): OcrProcessorStrategy => {
+      const generateCompletion = jest.fn<() => Promise<LlmResponsePayload>>();
+
+      generateCompletion.mockResolvedValue({
+        headline: 'h',
+        summary,
+        body_paragraphs: bodyParagraphs,
+        metadata: {
+          tokensPrompt: 0,
+          tokensCompletion: 0,
+          modelUsed: 'gemini-1.5-flash',
+          isMock: false,
+        },
+      });
+
+      return buildStrategy({
+        provider: LlmProvider.GEMINI,
+        generateCompletion,
+      } as unknown as GeminiLlmProvider);
+    };
+
+    const transcribe = async (
+      bodyParagraphs: string[],
+      summary?: string,
+    ): Promise<string> => {
+      const strategy = buildStrategyReturning(bodyParagraphs, summary);
+      const result = await strategy.execute(buildContext(), {
+        provider: LlmProvider.GEMINI,
+      });
+
+      return String(result.data?.clean_body);
+    };
+
+    it('8.1 deberia conservar titulos y lineas en blanco del texto corrido', async () => {
+      // 1. Arrange 📐: el caso facil, y el que no debe romperse al arreglar el
+      //    de las tablas.
+      const markdown =
+        '## Acta de la sesion\n\nPrimer parrafo.\n\nSegundo parrafo.';
+
+      // 2. Act ⚙️
+      const cleanBody = await transcribe([markdown]);
+
+      // 3. Assert 🎯
+      expect(cleanBody).toBe(markdown);
+    });
+
+    it('8.2 deberia conservar una tabla GFM entregada en un solo bloque', async () => {
+      // 1. Arrange 📐: es lo que el prompt pide expresamente (directiva 3).
+      const table = [
+        '| Centro | Panel |',
+        '| --- | --- |',
+        '| UEM | P-01 |',
+      ].join('\n');
+
+      // 2. Act ⚙️
+      const cleanBody = await transcribe([table]);
+
+      // 3. Assert 🎯
+      expect(cleanBody).toBe(table);
+    });
+
+    it('8.3 deberia reensamblar una tabla troceada SIN lineas en blanco', async () => {
+      // 1. Arrange 📐: LA PRUEBA QUE DE VERDAD PROTEGE. Si el modelo desobedece
+      //    la directiva 3 y manda una fila por elemento, la union de siempre
+      //    —linea en blanco— separaria el `|---|` de las filas y GFM dejaria de
+      //    reconocer la tabla. Y no hay vuelta atras: cuando el motor ve texto
+      //    util libera los binarios del adjunto.
+      const rows = ['| Centro | Panel |', '| --- | --- |', '| UEM | P-01 |'];
+
+      // 2. Act ⚙️
+      const cleanBody = await transcribe(rows);
+
+      // 3. Assert 🎯
+      expect(cleanBody).toBe(rows.join('\n'));
+      expect(cleanBody).not.toContain('\n\n');
+    });
+
+    it('8.4 deberia purgar la valla de bloque que envuelve la respuesta', async () => {
+      // 1. Arrange 📐: el prompt se lo prohibe al modelo, pero una valla que se
+      //    cuele acaba publicada tal cual: nada mas abajo vuelve a mirar el
+      //    texto.
+      // 2. Act ⚙️
+      const cleanBody = await transcribe([
+        '```markdown\n# Titulo\n\nCuerpo del documento.\n```',
+      ]);
+
+      // 3. Assert 🎯
+      expect(cleanBody).toBe('# Titulo\n\nCuerpo del documento.');
+      expect(cleanBody).not.toContain('```');
+    });
+
+    it('8.5 deberia purgar una valla REPARTIDA entre el primer y el ultimo bloque', async () => {
+      // 1. Arrange 📐: con la salida troceada, la apertura viene en un elemento
+      //    y el cierre en otro. Un unico regex sobre la cadena ya unida solo
+      //    acertaria cuando el arreglo trae un elemento.
+      // 2. Act ⚙️
+      const cleanBody = await transcribe([
+        '```markdown',
+        '| Centro | Panel |',
+        '| --- | --- |',
+        '```',
+      ]);
+
+      // 3. Assert 🎯
+      expect(cleanBody).not.toContain('```');
+      expect(cleanBody).toBe('| Centro | Panel |\n| --- | --- |');
+    });
+
+    it('8.6 NO deberia pegar dos parrafos que no son tabla', async () => {
+      // 1. Arrange 📐: la union consciente de tablas no puede llevarse por
+      //    delante la separacion normal de parrafos.
+      // 2. Act ⚙️
+      const cleanBody = await transcribe([
+        'Primer parrafo.',
+        'Segundo parrafo.',
+      ]);
+
+      // 3. Assert 🎯
+      expect(cleanBody).toBe('Primer parrafo.\n\nSegundo parrafo.');
+    });
+
+    it('8.7 deberia derivar character_count del texto YA saneado', async () => {
+      // 1. Arrange 📐: contarlo sobre el crudo inflaria la cifra con unos
+      //    delimitadores que no estan en la transcripcion.
+      const strategy = buildStrategyReturning(['```\nABC\n```']);
+
+      // 2. Act ⚙️
+      const result = await strategy.execute(buildContext(), {
+        provider: LlmProvider.GEMINI,
+      });
+
+      // 3. Assert 🎯
+      expect(result.data?.clean_body).toBe('ABC');
+      expect(result.data?.character_count).toBe(3);
+    });
+
+    it('8.8 deberia sanear tambien el respaldo por summary', async () => {
+      // 1. Arrange 📐: sin parragos se cae al resumen, y ese camino tenia que
+      //    quedar igual de limpio que el principal.
+      // 2. Act ⚙️
+      const cleanBody = await transcribe(
+        [],
+        '```markdown\nTexto del resumen\n```',
+      );
+
+      // 3. Assert 🎯
+      expect(cleanBody).toBe('Texto del resumen');
+    });
+  });
 });

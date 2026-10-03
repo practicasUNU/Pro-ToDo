@@ -56,6 +56,33 @@ const MAX_OCR_ATTACHMENTS = 3;
 const OCR_STATUS_COMPLETED = 'COMPLETED';
 
 /**
+ * Valla de bloque de codigo al principio o al final de un fragmento.
+ *
+ * El prompt se lo prohibe expresamente al modelo, pero esto es la red: una
+ * valla que se cuele acaba PUBLICADA tal cual en la noticia, porque nada mas
+ * abajo en el pipeline vuelve a mirar el texto.
+ *
+ * Solo caza los extremos a proposito. Un ``` en mitad del texto puede ser
+ * contenido legitimo del documento transcrito, y borrarlo seria destruir
+ * justamente lo que este nodo viene a conservar.
+ */
+const CODE_FENCE_PATTERN = /^```(?:[a-zA-Z]*)?[ \t]*\n?|\n?[ \t]*```$/g;
+
+/** Fila de tabla GFM: una linea que empieza por `|`. */
+const TABLE_ROW_PATTERN = /^\s*\|/;
+
+/** Quita las vallas de los extremos y el espacio sobrante. */
+const stripCodeFence = (text: string): string =>
+  text.replace(CODE_FENCE_PATTERN, '').trim();
+
+/** Ultima linea no vacia de un bloque, para decidir como unirlo con el siguiente. */
+const lastLineOf = (text: string): string => {
+  const lines = text.split('\n');
+
+  return lines[lines.length - 1] ?? '';
+};
+
+/**
  * A quien recurrir cuando el proveedor elegido no tiene credencial.
  *
  * Es un mapa y no un `if` porque el par proveedor/modelo va junto: conmutar de
@@ -318,14 +345,46 @@ export class OcrProcessorStrategy implements INodeStrategy {
    * pensado para una REDACCION (titular, resumen, parrafos). Una transcripcion
    * no tiene titular, asi que se recompone desde los parrafos y se cae al
    * resumen cuando el proveedor no los desglosa.
+   *
+   * LA UNION ES CONSCIENTE DE TABLAS, y de ahi depende que el nodo sirva para
+   * algo con un documento tabulado. El prompt pide la transcripcion entera en
+   * un unico elemento, pero si el modelo la trocea por filas —una lectura
+   * natural de "array de strings"— unirlas con la linea en blanco de siempre
+   * rompe la tabla: el separador `|---|` deja de tocar las filas y GFM ya no la
+   * reconoce. Cuando cualquiera de los dos lados de la costura es una fila de
+   * tabla se usa un salto simple. Es una comparacion de prefijo literal, no un
+   * parser de Markdown: construir uno seria exactamente lo que
+   * `security-and-scope.md` §3 prohibe.
+   *
+   * EL SANEAMIENTO VA POR ELEMENTO ADEMAS DE AL FINAL. Con la salida troceada,
+   * la valla de apertura puede venir en el primer fragmento y la de cierre en
+   * el ultimo; limpiar solo la cadena ya unida acertaria unicamente cuando el
+   * arreglo trae un elemento.
    */
   private flattenTranscription(response: LlmResponsePayload): string {
-    const paragraphs = response.body_paragraphs
-      .filter((paragraph) => paragraph.trim().length > 0)
-      .join('\n\n')
-      .trim();
+    const blocks = response.body_paragraphs
+      .map((paragraph) => stripCodeFence(paragraph))
+      .filter((paragraph) => paragraph.length > 0);
 
-    return paragraphs.length > 0 ? paragraphs : response.summary.trim();
+    const joined = blocks.reduce((accumulated, block, index) => {
+      if (index === 0) {
+        return block;
+      }
+
+      const separator =
+        TABLE_ROW_PATTERN.test(lastLineOf(accumulated)) ||
+        TABLE_ROW_PATTERN.test(block)
+          ? '\n'
+          : '\n\n';
+
+      return `${accumulated}${separator}${block}`;
+    }, '');
+
+    const transcription = stripCodeFence(joined);
+
+    return transcription.length > 0
+      ? transcription
+      : stripCodeFence(response.summary);
   }
 
   private async resolveConfig(

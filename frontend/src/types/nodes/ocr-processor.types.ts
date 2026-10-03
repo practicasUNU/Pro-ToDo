@@ -3,14 +3,25 @@ import type { LlmProvider } from '@/types/nodes/llm-extractor.types';
 /**
  * Prompt del sistema con el que se pide la transcripcion.
  *
- * REPLICA del backend (`ocr-processor-config.dto.ts`) y se muestra en SOLO
- * LECTURA: aqui no hay criterio editorial que ajustar —se pide el texto que hay
- * en la imagen, ni mas ni menos— y dejarlo abierto invitaria a pedirle al modelo
- * que resumiera, que es justo lo que arruinaria el rescate. El nodo de IA que va
- * detras ya se encarga de la redaccion, y ese si elige su plantilla.
+ * REPLICA LITERAL del backend (`ocr-processor-config.dto.ts`): cualquier cambio
+ * alli debe copiarse aqui, o la interfaz enseñaria al operador un prompt que ya
+ * no se usa.
+ *
+ * Se muestra en SOLO LECTURA. Aqui no hay criterio editorial que ajustar —se
+ * pide el texto que hay en la imagen, ni mas ni menos— y dejarlo abierto
+ * invitaria a pedirle al modelo que resumiera, que es justo lo que arruinaria
+ * el rescate. El nodo de IA que va detras ya se encarga de la redaccion, y ese
+ * si elige su plantilla.
  */
-export const PROMPT_OCR_MULTIMODAL =
-  'Transcribe literalmente todo el texto visible en los documentos adjuntos. No resumas, no interpretes y no anadas comentarios: devuelve unicamente el texto tal como aparece, conservando el orden de lectura y los saltos de parrafo.';
+export const PROMPT_OCR_MULTIMODAL = [
+  'Eres un motor de transcripcion documental. Transcribe integramente el texto visible en los documentos adjuntos usando Markdown GFM.',
+  '',
+  '1. TEXTO CORRIDO: parrafos separados por una linea en blanco. Usa encabezados (# y ##) solo donde el documento original tenga titulos.',
+  '2. TABLAS: sintaxis GFM, con fila de cabecera y separador (|---|). Si una celda esta combinada verticalmente y abarca varias filas, REPITE su valor en cada una de esas filas; no dejes huecos.',
+  '3. UN SOLO BLOQUE: devuelve la transcripcion completa como un unico elemento, con sus saltos de linea dentro. No la repartas en fragmentos.',
+  '4. PROHIBIDO: saludos, notas introductorias, comentarios sobre lo que has hecho y delimitadores de bloque de codigo (```), salvo que el documento original los contenga.',
+  '5. No resumas, no interpretes y no completes lo que no se lea. Respeta el orden de lectura y la grafia de nombres propios tal y como figuran.',
+].join('\n');
 
 export const DEFAULT_OCR_TEMPERATURE = 0.1;
 export const MIN_OCR_TEMPERATURE = 0;
