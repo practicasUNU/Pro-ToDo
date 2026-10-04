@@ -6492,3 +6492,110 @@ libro; `colspan` en XLSX mas alla de resolver la celda combinada contra su maest
 conocido de que una tabla que sea el ULTIMO parrafo del cuerpo, mida menos de 800 caracteres y
 contenga una palabra de aviso legal, la retire `stripTrailingBoilerplate` entera —es el mismo
 trato que recibe cualquier parrafo final y no se le anade excepcion.
+
+---
+
+## PROT-23 · El mapeador de plantillas pasa de compilar a inyectar
+
+Rama `feat/mapeador-inyeccion`. Cambia de dueno el contenido: hasta ahora el nodo compilaba la
+plantilla con Handlebars contra el contexto acumulado y era el ULTIMO paso del flujo; ahora es la
+IA quien estructura e inyecta el contenido, asi que el mapeador se coloca DELANTE del
+`PROCESADOR_IA` y su trabajo es resolver la plantilla, sanearla y verificar su estructura.
+
+### Lo que el encargo daba por hecho y no existia
+
+El encargo pedia eliminar un mapeador de pares `QSelectFieldMapper` y crear la triada en
+`backend/src/strategies/template-mapper/`. Nada de eso estaba en el repositorio: no hay ni ha
+habido un mapeador de pares (`grep` de `FieldMapper|fieldMap|keyValue|pair` sobre `frontend/src`
+no devuelve nada), `variableMapping` solo aparecia en un ejemplo obsoleto de
+`.claude/rules/testing-standards.md`, el configurador YA era un `q-select` cerrado de `templateId`
+con previsualizacion, y `backend/src/strategies/` no existe —el alias `@strategies/*` apunta a un
+directorio fantasma—. El trabajo real era solo el cambio semantico, y hacerlo donde ya vivia el
+codigo.
+
+### Por que el saneado no se reimplanto en la estrategia
+
+El encargo traia `sanitizeHtml` y `cheerio` en linea dentro del nodo. `TemplateRendererService` ya
+tenia la lista blanca endurecida que el gestor de plantillas aplica al guardar. Dos listas que
+describen la misma regla divergen en cuanto alguien toca una sola: el editor aceptaria markup que
+el nodo recorta, o al reves. Se anadieron alli `prepareInjectableMarkup` y `auditStructure`, y la
+estrategia se quedo con la traduccion al contrato `NodeResult`.
+
+### `ERR_TEMPLATE_PENDING_VARS`: lo que hace segura la sustitucion
+
+Sustituir el camino de compilacion tiene un modo de fallo que no es un test rojo sino corrupcion
+silenciosa. Un flujo ya guardado cuya plantilla interpole `{{parsed_email.clean_title}}` seguiria
+resolviendose, nadie sustituiria nada, y esas llaves viajarian literales hasta el articulo
+publicado en Drupal: sin excepcion, sin `PAUSADO`, sin alerta. La guarda corta ANTES de sanear y
+devuelve un GRAVE con las rutas pendientes en `missingFields`. Romper en voz alta y de forma
+corregible, que es la doctrina del resto del motor.
+
+Esa guarda es tambien la razon de que se tocara `test-fsm-runner.seed.ts`: su fixture era
+integramente interpolacion y hoy caeria en ella. Pasa a ser un esqueleto con tres ranuras
+(`h1.titular`, `p.entradilla`, `div.cuerpo`) que el nodo exige por `requiredSelectors`, de modo
+que la semilla demuestra ahora el contrato estructural en vez de la compilacion. El `mockData` del
+despacho manual se conserva A PROPOSITO aunque el nodo ya no lea el contexto: si apareciera en el
+markup, habria una compilacion donde no deberia haberla.
+
+### Por que `compiled_markup` conserva un nombre que ya miente
+
+La clave contiene ahora markup SIN compilar. Renombrarla era lo limpio y se descarto: dejaria sin
+dato a todo consumidor de `rendered_html.compiled_markup`, incluido el `DESTINO_HTTP` de cualquier
+flujo guardado. El precio —un nombre que no describe su contenido— se paga en la `description` del
+`outputField`, que es lo que leen `GET /api/nodos` y el selector de variables del asistente: quien
+audita una ejecucion lee la descripcion, no el identificador. La migracion 025 hace lo propio con
+la fila del catalogo, que seguia anunciando "interpola variables dinamicas".
+
+### Por que `allowedTags` solo puede restar
+
+Es un SUBCONJUNTO de la lista blanca del saneador, nunca una ampliacion. Pedir una etiqueta que no
+figura en ella devuelve `ERR_TEMPLATE_UNSUPPORTED_TAGS` en vez de concederla: permitir `script` por
+parametro convertiria la configuracion de un nodo en una via de XSS. `prepareInjectableMarkup`
+sanea con la interseccion aunque el llamante pida de mas, de modo que el fallo nunca deja markup
+peor del que habria salido sin el parametro.
+
+Y la auditoria estructural corre sobre el markup YA saneado, no sobre el crudo. Si el saneador se
+llevo por delante la ranura que el selector busca, eso tiene que verse al ejecutar el nodo y no
+cuando la IA devuelva un hueco sin rellenar.
+
+### Por que `requiredSelectors` son selectores y no marcadores
+
+`TemplatesService` rechaza al guardar cualquier marcador que no sea un `{{namespace.campo}}` de la
+lista blanca (`RESIDUAL_MARKER_PATTERN`). Un "hueco a rellenar por la IA" NO es expresable como
+`{{TITULAR}}`: la unica forma de nombrar una ranura es por su posicion en el DOM. De ahi que el
+contrato estructural sean selectores CSS.
+
+### Lo que se borro del frontend, y por que no se degrado a aviso
+
+Desaparece el aparato "contrato plantilla <-> topologia" entero: `missingRequiredVariables`,
+`missingUpstreamNamespaces`, `missingUpstreamFields`, el selector copia-al-portapapeles y el banner
+rojo que bloqueaba el avance. Conservarlo como advertencia habria mantenido un diagnostico cuyo
+enunciado es FALSO bajo la semantica nueva —"el flujo no provee X" cuando el nodo no necesita X— y
+habria marcado en ambar toda plantilla legada. Lo que sobrevive, reformulado, son dos avisos no
+bloqueantes: la plantilla trae marcadores que aqui ya nadie resuelve (redactado con el codigo
+`ERR_TEMPLATE_PENDING_VARS`, para que se reconozca el mismo problema en la trazabilidad), y el
+`PROCESADOR_IA` esta colocado ANTES de este nodo, que es el aviso que ensena el orden nuevo.
+
+Se conserva `availableUpstreamContext` pese a que el nodo ya no interpole: alimenta
+`:upstream-context` de `TemplateEditorDialog`, que es superficie de AUTORIA compartida con el
+gestor —la plantilla que se escribe ahi puede usarse en un nodo que si lea el contexto— y permite
+detectar el orden invertido. El canal de solo-NOMBRES si se retira; es opcional en
+`NodeConfigStore` y todos sus llamadores usan `?.()`, asi que ningun anfitrion cambia.
+
+Tambien cae `compilePreview` del servicio del nodo y `loadPreview` del store: ya eran codigo
+muerto, porque `TemplatePreviewDialog` compila por `useTemplatesStore()`.
+
+### `paramsSchema` queda pendiente, deliberadamente
+
+El DTO existe y esta probado, pero conectarlo como `paramsSchema` lo somete a
+`whitelist: true, forbidNonWhitelisted: true`: cualquier `params` historico con una clave no
+declarada pasaria a dar 400 al guardar Y al activar. Eso exige auditar antes `configuracion_pipeline`
+en PostgreSQL, no suponerlo. Hasta entonces la estrategia funciona igual; solo se pierde el 400
+temprano.
+
+### Cobertura
+
+Backend 1597 pruebas en verde (32 de la estrategia, 16 del DTO nuevo, 11 anadidas al renderer).
+Frontend 703 en verde. Dos pruebas de `flujo-draft.store.spec.ts` cambian de canal —preguntan por
+`availableUpstreamContext` en vez del de nombres— porque lo que vigilan es que el ANFITRION
+recalcule al cambiar de pipeline, no por que canal viaja el dato.

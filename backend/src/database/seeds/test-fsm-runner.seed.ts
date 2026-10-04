@@ -57,20 +57,43 @@ const TEST_FLOW_NAME = '[E2E] Mapeador de plantilla';
 const MAPPER_NODE_ID = 'nodo_mapeador';
 
 /**
- * Plantilla del fixture.
+ * Plantilla ESQUELETO del fixture.
  *
- * Combina a proposito el namespace sintetico `_assets` con una ruta relativa del
- * contexto (`parsed_email.image_path`), que es la pareja que ejercita la
- * normalizacion de barras de `TemplateRendererService`. Todo el markup cabe en
- * la lista blanca del saneador, de modo que `TemplatesService.create()` no lo
- * rechaza.
+ * Deliberadamente SIN marcadores. El nodo ya no interpola: entrega el esqueleto
+ * saneado para que un `PROCESADOR_IA` posterior lo rellene, y una plantilla con
+ * `{{...}}` caeria en la guarda `ERR_TEMPLATE_PENDING_VARS` — que es justo lo
+ * que impide publicar llaves literales en el articulo final.
+ *
+ * Las ranuras se nombran por CLASE y no por marcador porque `TemplatesService`
+ * rechaza al guardar cualquier marcador que no sea un `{{namespace.campo}}` de
+ * la lista blanca: un hueco a rellenar solo es expresable como posicion del DOM.
+ * Esas mismas clases son las que el nodo exige en `requiredSelectors`, de modo
+ * que el fixture ejercita el contrato estructural de punta a punta.
+ *
+ * Todo el markup cabe en la lista blanca del saneador, de modo que
+ * `TemplatesService.create()` no lo rechaza.
  */
-const TEST_TEMPLATE_HTML = `<h1>{{parsed_email.clean_title}}</h1>
-<p>{{parsed_email.description}}</p>
-<img src="{{_assets.base_url}}/{{parsed_email.image_path}}" alt="{{parsed_email.clean_title}}" width="600" height="400" />
-<div class="body">{{parsed_email.clean_body}}</div>`;
+const TEST_TEMPLATE_HTML = `<h1 class="titular"></h1>
+<p class="entradilla"></p>
+<div class="cuerpo"></div>`;
 
-/** Pipeline de un solo nodo: entra el contexto sembrado, sale el markup. */
+/**
+ * Contrato estructural que el nodo exige sobre la plantilla ya saneada.
+ *
+ * Coincide con las tres ranuras de `TEST_TEMPLATE_HTML`: si alguien edita la
+ * plantilla y se lleva una por delante, la siembra falla con
+ * `ERR_TEMPLATE_STRUCTURE` en vez de sembrar un flujo que publicaria un hueco.
+ */
+const TEST_REQUIRED_SELECTORS = ['h1.titular', 'p.entradilla', 'div.cuerpo'];
+
+/**
+ * Pipeline de un solo nodo: entra la plantilla del gestor, sale el esqueleto.
+ *
+ * El `mockData` del despacho manual se conserva aunque este nodo YA NO lea el
+ * contexto: sirve precisamente para comprobarlo. Si el markup resultante
+ * contuviera cualquier rastro de esos valores, la inyeccion estaria compilando
+ * por detras.
+ */
 const buildTestSchema = (templateId: string): PipelineSchema => ({
   flowId: TEST_FLOW_ID,
   name: 'Pipeline de verificacion del mapeador de plantillas',
@@ -83,7 +106,7 @@ const buildTestSchema = (templateId: string): PipelineSchema => ({
       outputNamespace: 'rendered_html',
       nextStep: null,
       onErrorStep: null,
-      params: { templateId },
+      params: { templateId, requiredSelectors: TEST_REQUIRED_SELECTORS },
     },
   },
 });
@@ -227,6 +250,9 @@ const main = async (): Promise<void> => {
         }
       }
     }'
+
+  El mockData es deliberadamente IRRELEVANTE para este nodo: ya no interpola.
+  Si aparece en el markup, hay una compilacion donde no deberia haberla.
 
   Inspeccion posterior:
     SELECT estado, paso_actual, contexto_acumulado

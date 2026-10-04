@@ -2,20 +2,10 @@
 //
 // Directiva POR ARCHIVO, igual que en `WebScraperConfig.spec.ts`: los specs de
 // store no necesitan DOM y arrancan mas rapido sin el.
-import { config, mount } from '@vue/test-utils';
+import { config, flushPromises, mount } from '@vue/test-utils';
 import { defineComponent } from 'vue';
 import { createPinia, setActivePinia } from 'pinia';
-import {
-  QBtn,
-  QChip,
-  QIcon,
-  QItem,
-  QItemLabel,
-  QItemSection,
-  QSelect,
-  QTooltip,
-  Quasar,
-} from 'quasar';
+import { QBanner, QBtn, QIcon, QSelect, Quasar } from 'quasar';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import TemplateMapperConfig from '@components/nodes/TemplateMapperConfig.vue';
@@ -31,7 +21,6 @@ import type { HtmlTemplate } from '@/types/html-template';
 // red ni en pruebas: todo lo pide por su store.
 vi.mock('@services/nodes/template-mapper.service', () => ({
   fetchSelectableTemplates: vi.fn(),
-  compilePreview: vi.fn(),
 }));
 
 // Los dos dialogos que el componente importa arrastran `templates.store`, y con
@@ -93,14 +82,10 @@ const buildTemplate = (requiredVariables: string[]): HtmlTemplate => ({
  * prueba 1.1 pasaria por el motivo equivocado.
  */
 const QUASAR_COMPONENTS = {
+  QBanner,
   QBtn,
-  QChip,
   QIcon,
-  QItem,
-  QItemLabel,
-  QItemSection,
   QSelect,
-  QTooltip,
 };
 
 /**
@@ -127,10 +112,15 @@ const buildStore = (
   context: UpstreamNamespace[],
 ): ReturnType<typeof useTemplateMapperStore> => {
   const store = useTemplateMapperStore(NODE_ID);
+  const template = buildTemplate(requiredVariables);
 
-  store.availableTemplates = [buildTemplate(requiredVariables)];
+  // Tambien se ceba el servicio: el componente recarga el catalogo en su
+  // `onMounted`, asi que sin esto la respuesta vacia del mock borraria la
+  // plantilla recien sembrada y `selectedTemplate` quedaria en null.
+  fetchSelectableTemplates.mockResolvedValue([template]);
+
+  store.availableTemplates = [template];
   store.setTemplateId(TEMPLATE_ID);
-  store.setAvailableUpstreamNamespaces(context.map(({ namespace }) => namespace));
   store.setAvailableUpstreamContext(context);
 
   return store;
@@ -176,93 +166,47 @@ describe('TemplateMapperConfig · configurador del nodo MAPEADOR_PLANTILLA', () 
       expect(select.props('options')).toContain('rendered_html');
       expect(select.props('useInput')).toBeFalsy();
     });
-
-    it('1.2 deberia ofrecer una opcion por campo publicado aguas arriba', () => {
-      // 1. Arrange
-      buildStore([], UPSTREAM);
-
-      // 2. Act
-      const wrapper = mountComponent();
-      const options = selectByField(wrapper, 'upstream-variables-field').props('options');
-
-      // 3. Assert: el marcador viaja como `value`, listo para pegarlo.
-      expect(options).toEqual([
-        {
-          label: 'subject (text)',
-          value: '{{raw_email.subject}}',
-          group: 'raw_email (TRIGGER_IMAP)',
-        },
-        {
-          label: 'clean_title (text)',
-          value: '{{parsed_email.clean_title}}',
-          group: 'parsed_email (PARSER_PRE_IA)',
-        },
-      ]);
-    });
-
-    it('1.3 deberia deshabilitar el selector de variables sin contexto', () => {
-      // 1. Arrange
-      buildStore([], []);
-
-      // 2. Act
-      const wrapper = mountComponent();
-
-      // 3. Assert
-      expect(selectByField(wrapper, 'upstream-variables-field').props('disable')).toBe(true);
-    });
   });
 
-  describe('2. Avisos y bloqueos', () => {
-    it('2.1 deberia avisar sin bloquear cuando no hay variables aguas arriba', () => {
-      // 1. Arrange: una plantilla estatica es legitima, asi que el aviso informa
-      //    pero no puede invalidar el paso.
-      const store = buildStore([], []);
-
-      // 2. Act
-      const wrapper = mountComponent();
-
-      // 3. Assert
-      expect(wrapper.find('[data-test="no-upstream-variables"]').exists()).toBe(true);
-      expect(store.isConfigValid).toBe(true);
-    });
-
-    it('2.2 no deberia avisar en cuanto un paso anterior publique campos', () => {
-      // 1. Arrange
-      buildStore([], UPSTREAM);
-
-      // 2. Act
-      const wrapper = mountComponent();
-
-      // 3. Assert
-      expect(wrapper.find('[data-test="no-upstream-variables"]').exists()).toBe(false);
-    });
-
-    it('2.3 deberia nombrar la RUTA COMPLETA cuando falla el campo, no el namespace', () => {
-      // 1. Arrange: `parsed_email` esta aguas arriba, pero no publica
-      //    `clean_body`. Antes esto pasaba por bueno y reventaba en ejecucion.
+  describe('2. Avisos no bloqueantes', () => {
+    it('2.1 NO deberia bloquear por variables que el flujo no provee', async () => {
+      // 1. Arrange: PRUEBA DE REGRESION del banner suprimido. El nodo ya no
+      //    interpola, asi que el contrato plantilla<->topologia dejo de existir.
       const store = buildStore(['parsed_email.clean_body'], UPSTREAM);
 
       // 2. Act
       const wrapper = mountComponent();
-      const banner = wrapper.find('[data-test="broken-contract-banner"]');
+      await flushPromises();
 
       // 3. Assert
-      expect(banner.exists()).toBe(true);
-      expect(banner.text()).toContain('parsed_email.clean_body');
-      expect(store.isConfigValid).toBe(false);
+      expect(wrapper.find('[data-test="broken-contract-banner"]').exists()).toBe(false);
+      expect(store.isConfigValid).toBe(true);
     });
 
-    it('2.4 deberia nombrar el namespace cuando es el namespace entero el que falta', () => {
+    it('2.2 deberia avisar de la plantilla que aun trae marcadores', async () => {
       // 1. Arrange
-      buildStore(['validated_drupal_json.body'], UPSTREAM);
+      buildStore(['parsed_email.clean_title'], UPSTREAM);
 
       // 2. Act
-      const banner = mountComponent().find('[data-test="broken-contract-banner"]');
+      const wrapper = mountComponent();
+      await flushPromises();
 
-      // 3. Assert: el arreglo es otro —anadir un nodo, no corregir la plantilla—
-      //    y el mensaje tiene que distinguirlo.
-      expect(banner.text()).toContain('no provee los namespaces requeridos');
-      expect(banner.text()).toContain('validated_drupal_json');
+      // 3. Assert
+      const warning = wrapper.find('[data-test="template-mapper-warning"]');
+      expect(warning.exists()).toBe(true);
+      expect(warning.text()).toContain('parsed_email.clean_title');
+    });
+
+    it('2.3 no deberia avisar de nada con una plantilla esqueleto', async () => {
+      // 1. Arrange
+      buildStore([], UPSTREAM);
+
+      // 2. Act
+      const wrapper = mountComponent();
+      await flushPromises();
+
+      // 3. Assert
+      expect(wrapper.find('[data-test="template-mapper-warning"]').exists()).toBe(false);
     });
   });
 

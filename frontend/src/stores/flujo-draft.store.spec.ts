@@ -56,7 +56,6 @@ vi.mock('@services/nodes/trigger-imap.service', () => ({
 }));
 vi.mock('@services/nodes/template-mapper.service', () => ({
   fetchSelectableTemplates: vi.fn(),
-  compilePreview: vi.fn(),
 }));
 vi.mock('@services/nodes/parser-email.service', () => ({
   checkParser: vi.fn(),
@@ -680,8 +679,14 @@ describe('useFlujoDraftStore · agregador del asistente', () => {
       // 3. Assert: el mapeador es el tercer paso, asi que recibe los namespaces
       //    de los dos anteriores. Antes de esta conexion usaba una lista fija
       //    marcada PROVISIONAL y validaba contra namespaces inventados.
+      // Se comprueba por el canal RICO: el mapeador dejo de implementar el de
+      // solo-nombres al retirarse su contrato de variables, y lo que esta
+      // prueba vigila es que el ANFITRION recalcule, no por que canal viaja.
       const mapper = useTemplateMapperStore(MAPPER_NODE_ID);
-      expect(mapper.availableUpstreamNamespaces).toEqual(['raw_email', 'parsed_email']);
+      expect(mapper.availableUpstreamContext.map(({ namespace }) => namespace)).toEqual([
+        'raw_email',
+        'parsed_email',
+      ]);
     });
 
     it('7.2 no deberia fallar con nodos que no declaran el metodo', async () => {
@@ -717,7 +722,7 @@ describe('useFlujoDraftStore · agregador del asistente', () => {
       //    tiene nada aguas arriba. Arrastrar la lista anterior le haria creer
       //    que `raw_email` existe en un flujo donde nadie lo produce.
       const mapper = useTemplateMapperStore(MAPPER_NODE_ID);
-      expect(mapper.availableUpstreamNamespaces).toEqual([]);
+      expect(mapper.availableUpstreamContext).toEqual([]);
     });
   });
 

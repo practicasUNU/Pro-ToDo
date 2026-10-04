@@ -4,7 +4,15 @@ import { StatePayloadContext } from '@core/fsm/context/state-payload.context';
 import { NodeType } from '@core/fsm/types/pipeline-schema.types';
 import { createTemplateRendererService } from '@test/factories/template-renderer.factory';
 
-import { TemplateMapperStrategy } from './template-mapper.strategy';
+import {
+  ERR_TEMPLATE_MISSING_VARS,
+  ERR_TEMPLATE_NOT_RESOLVED,
+  ERR_TEMPLATE_PENDING_VARS,
+  ERR_TEMPLATE_RENDER,
+  ERR_TEMPLATE_STRUCTURE,
+  ERR_TEMPLATE_UNSUPPORTED_TAGS,
+  TemplateMapperStrategy,
+} from './template-mapper.strategy';
 
 import type { HtmlTemplate } from '@modules/templates/entities/html-template.entity';
 import type { TemplateRendererService } from '@modules/templates/services/template-renderer.service';
@@ -16,18 +24,24 @@ const INITIAL_STEP = 'mapeador_plantilla';
 const TEMPLATE_ID = '5e2d1c4b-7a89-4f30-b1c2-6d5e4f3a2b10';
 const AUTHOR_ID = '9c1f7b52-4d3a-4e6b-8f2c-1a0b9d8e7f60';
 
+/** Esqueleto institucional: ranuras vacias, cero marcadores. */
+const SKELETON_HTML =
+  '<h1 class="titular"></h1><div class="cuerpo"><p></p></div>';
+
 type TemplatesServiceMock = jest.Mocked<Pick<TemplatesService, 'findOne'>>;
 
-/** Plantilla completa; los tests sobrescriben solo lo que les concierne. */
+/**
+ * Plantilla ESQUELETO, que es la forma que el nodo admite desde el cambio de
+ * semantica: sin `requiredVariables`, porque ya no interpola nada.
+ */
 const buildTemplate = (
   overrides: Partial<HtmlTemplate> = {},
 ): HtmlTemplate => ({
   id: TEMPLATE_ID,
   name: 'noticia-basica',
   description: null,
-  htmlContent:
-    '<h1>{{parsed_email.clean_title}}</h1><p>{{llm_response.summary}}</p>',
-  requiredVariables: ['parsed_email.clean_title', 'llm_response.summary'],
+  htmlContent: SKELETON_HTML,
+  requiredVariables: [],
   createdById: AUTHOR_ID,
   active: true,
   createdAt: new Date('2026-01-01T00:00:00.000Z'),
@@ -35,26 +49,40 @@ const buildTemplate = (
   ...overrides,
 });
 
+/** Plantilla HEREDADA de la etapa en que el nodo compilaba. */
+const buildInterpolatedTemplate = (): HtmlTemplate =>
+  buildTemplate({
+    htmlContent:
+      '<h1>{{parsed_email.clean_title}}</h1><p>{{llm_response.summary}}</p>',
+    requiredVariables: ['parsed_email.clean_title', 'llm_response.summary'],
+  });
+
 const buildService = (): TemplatesServiceMock => ({ findOne: jest.fn() });
 
 type TemplateRendererMock = jest.Mocked<
-  Pick<TemplateRendererService, 'renderStrict'>
+  Pick<TemplateRendererService, 'prepareInjectableMarkup' | 'auditStructure'>
 >;
 
 /** Doble del renderer, solo para el bloque que verifica la delegacion. */
 const buildRendererMock = (): TemplateRendererMock => ({
-  renderStrict: jest.fn(),
+  prepareInjectableMarkup: jest.fn().mockReturnValue({
+    sanitized: SKELETON_HTML,
+    wasFiltered: false,
+    unsupportedTags: [],
+  }),
+  auditStructure: jest.fn().mockReturnValue({ missing: [], invalid: [] }),
 });
 
 /**
  * Instancia la estrategia. El renderer va REAL por defecto a proposito.
  *
- * Mockearlo en todas las pruebas volveria tautologicas las de compilacion,
- * escapado y rutas anidadas: comprobarian que un doble devuelve lo que se le
- * dijo, no que Handlebars haga su trabajo — justo la cobertura que impide que la
- * vista previa del gestor mienta. Como el renderer es puro (sin repositorio, red
- * ni estado), usarlo de verdad no introduce acoplamiento alguno. El bloque 4
- * si lo mockea, porque alli lo que se verifica es el contrato de delegacion.
+ * Mockearlo en todas las pruebas volveria tautologicas las de saneado y las del
+ * contrato estructural: comprobarian que un doble devuelve lo que se le dijo, no
+ * que la lista blanca recorte de verdad ni que cheerio encuentre el selector —
+ * justo la cobertura que impide que el nodo publique markup que el gestor habria
+ * rechazado. Como el renderer es puro (sin repositorio, red ni estado), usarlo
+ * de verdad no introduce acoplamiento alguno. El bloque 4 si lo mockea, porque
+ * alli lo que se verifica es el contrato de delegacion.
  */
 const buildStrategy = (
   service: TemplatesServiceMock,
@@ -67,7 +95,12 @@ const buildStrategy = (
     renderer as TemplateRendererService,
   );
 
-/** Contexto con los namespaces que la plantilla por defecto espera. */
+/**
+ * Contexto con namespaces poblados.
+ *
+ * Se siembra A PROPOSITO aunque el nodo ya no lo lea: varias pruebas verifican
+ * justamente que su contenido no influye en la salida.
+ */
 const buildContext = (): StatePayloadContext => {
   const context = new StatePayloadContext(
     EXECUTION_ID,
@@ -94,8 +127,8 @@ describe('TemplateMapperStrategy', () => {
     expect(strategy.nodeType).toBe(NodeType.MAPEADOR_PLANTILLA);
   });
 
-  describe('1. Compilacion contra el contexto', () => {
-    it('1.1 deberia interpolar la plantilla almacenada', async () => {
+  describe('1. Inyeccion de la plantilla base', () => {
+    it('1.1 deberia inyectar el esqueleto saneado de la plantilla almacenada', async () => {
       // 1. Arrange
       const service = buildService();
       service.findOne.mockResolvedValue(buildTemplate());
@@ -108,13 +141,11 @@ describe('TemplateMapperStrategy', () => {
 
       // 3. Assert
       expect(result.success).toBe(true);
-      expect(result.data?.compiled_markup).toBe(
-        '<h1>Innovacion en Madrid</h1><p>Resumen estructurado del articulo.</p>',
-      );
+      expect(result.data?.compiled_markup).toBe(SKELETON_HTML);
       expect(service.findOne).toHaveBeenCalledWith(TEMPLATE_ID);
     });
 
-    it('1.2 deberia sellar la ejecucion con un mapped_at en ISO 8601', async () => {
+    it('1.2 deberia sellar mapped_at con una marca ISO', async () => {
       // 1. Arrange
       const service = buildService();
       service.findOne.mockResolvedValue(buildTemplate());
@@ -126,59 +157,56 @@ describe('TemplateMapperStrategy', () => {
       });
 
       // 3. Assert
-      const mappedAt = result.data?.mapped_at;
-      expect(typeof mappedAt).toBe('string');
-      expect(new Date(mappedAt as string).toISOString()).toBe(mappedAt);
+      expect(result.data?.mapped_at).toMatch(
+        /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/,
+      );
     });
 
-    it('1.3 deberia resolver rutas anidadas con indice', async () => {
+    it('1.3 NO deberia leer el contexto: un contexto vacio da el mismo markup', async () => {
+      // 1. Arrange: la prueba central del cambio de semantica
+      const service = buildService();
+      service.findOne.mockResolvedValue(buildTemplate());
+      const strategy = buildStrategy(service);
+      const emptyContext = new StatePayloadContext(
+        EXECUTION_ID,
+        WORKFLOW_ID,
+        INITIAL_STEP,
+      );
+
+      // 2. Act
+      const withContext = await strategy.execute(buildContext(), {
+        templateId: TEMPLATE_ID,
+      });
+      const withoutContext = await strategy.execute(emptyContext, {
+        templateId: TEMPLATE_ID,
+      });
+
+      // 3. Assert
+      expect(withoutContext.success).toBe(true);
+      expect(withoutContext.data?.compiled_markup).toBe(
+        withContext.data?.compiled_markup,
+      );
+    });
+
+    it('1.4 deberia descartar el markup que la lista blanca prohibe', async () => {
       // 1. Arrange
       const service = buildService();
       service.findOne.mockResolvedValue(
         buildTemplate({
-          htmlContent: '<h2>{{llm_response.articles.[0].title}}</h2>',
-          requiredVariables: ['llm_response.articles.0.title'],
+          htmlContent: `${SKELETON_HTML}<script>alert(1)</script>`,
         }),
       );
       const strategy = buildStrategy(service);
-      const context = buildContext();
-      context.setNamespace('llm_response', {
-        articles: [{ title: 'Primer titular' }],
-      });
 
       // 2. Act
-      const result = await strategy.execute(context, {
+      const result = await strategy.execute(buildContext(), {
         templateId: TEMPLATE_ID,
       });
 
       // 3. Assert
       expect(result.success).toBe(true);
-      expect(result.data?.compiled_markup).toBe('<h2>Primer titular</h2>');
-    });
-
-    it('1.4 deberia escapar el HTML que llegue en un valor del contexto', async () => {
-      // 1. Arrange
-      const service = buildService();
-      service.findOne.mockResolvedValue(
-        buildTemplate({
-          htmlContent: '<h1>{{parsed_email.clean_title}}</h1>',
-          requiredVariables: ['parsed_email.clean_title'],
-        }),
-      );
-      const strategy = buildStrategy(service);
-      const context = buildContext();
-      context.setNamespace('parsed_email', {
-        clean_title: '<script>alert(1)</script>',
-      });
-
-      // 2. Act
-      const result = await strategy.execute(context, {
-        templateId: TEMPLATE_ID,
-      });
-
-      // 3. Assert: sin triple-stash, ningun valor puede inyectar markup
       expect(result.data?.compiled_markup).not.toContain('<script>');
-      expect(result.data?.compiled_markup).toContain('&lt;script&gt;');
+      expect(result.data?.compiled_markup).toContain('titular');
     });
 
     it('1.5 deberia admitir rawTemplate como fallback sin base de datos', async () => {
@@ -188,60 +216,33 @@ describe('TemplateMapperStrategy', () => {
 
       // 2. Act
       const result = await strategy.execute(buildContext(), {
-        rawTemplate: '<p>{{llm_response.summary}}</p>',
+        rawTemplate: '<p class="pie">Aviso institucional</p>',
       });
 
       // 3. Assert
       expect(result.success).toBe(true);
-      expect(result.data?.compiled_markup).toBe(
-        '<p>Resumen estructurado del articulo.</p>',
-      );
+      expect(result.data?.compiled_markup).toContain('Aviso institucional');
       expect(service.findOne).not.toHaveBeenCalled();
     });
-  });
 
-  describe('2. Fallos GRAVE', () => {
-    it('2.1 deberia fallar GRAVE si el templateId no existe', async () => {
-      // 1. Arrange
-      const service = buildService();
-      service.findOne.mockRejectedValue(
-        new NotFoundException(
-          `Plantilla con id "${TEMPLATE_ID}" no encontrada`,
-        ),
-      );
-      const strategy = buildStrategy(service);
+    it('1.6 deberia sanear tambien el markup de rawTemplate', async () => {
+      // 1. Arrange: `rawTemplate` no pasa por el gestor, asi que es el unico
+      //    origen que podria colar markup nunca revisado.
+      const strategy = buildStrategy(buildService());
 
       // 2. Act
       const result = await strategy.execute(buildContext(), {
-        templateId: TEMPLATE_ID,
-      });
-
-      // 3. Assert: GRAVE y no URGENTE, para que el motor pueda reintentarlo
-      expect(result.success).toBe(false);
-      expect(result.error?.level).toBe('GRAVE');
-      expect(result.error?.message).toContain(
-        'No se pudo resolver la plantilla',
-      );
-    });
-
-    it('2.2 deberia fallar GRAVE si la plantilla esta desactivada', async () => {
-      // 1. Arrange
-      const service = buildService();
-      service.findOne.mockResolvedValue(buildTemplate({ active: false }));
-      const strategy = buildStrategy(service);
-
-      // 2. Act
-      const result = await strategy.execute(buildContext(), {
-        templateId: TEMPLATE_ID,
+        rawTemplate: '<p>Texto</p><script>alert(1)</script>',
       });
 
       // 3. Assert
-      expect(result.success).toBe(false);
-      expect(result.error?.level).toBe('GRAVE');
-      expect(result.error?.message).toContain('desactivada');
+      expect(result.success).toBe(true);
+      expect(result.data?.compiled_markup).not.toContain('script');
     });
+  });
 
-    it('2.3 deberia fallar GRAVE sin templateId ni rawTemplate', async () => {
+  describe('2. Fallos GRAVE al resolver la plantilla', () => {
+    it('2.1 deberia fallar sin templateId ni rawTemplate', async () => {
       // 1. Arrange
       const strategy = buildStrategy(buildService());
 
@@ -251,149 +252,157 @@ describe('TemplateMapperStrategy', () => {
       // 3. Assert
       expect(result.success).toBe(false);
       expect(result.error?.level).toBe('GRAVE');
+      expect(result.error?.code).toBe(ERR_TEMPLATE_NOT_RESOLVED);
       expect(result.error?.missingFields).toContain('templateId');
     });
 
-    it('2.4 deberia reportar TODAS las variables ausentes del contexto', async () => {
+    it('2.2 deberia fallar cuando la plantilla no existe', async () => {
       // 1. Arrange
       const service = buildService();
-      service.findOne.mockResolvedValue(
-        buildTemplate({
-          htmlContent:
-            '<h1>{{scraped_web.headline}}</h1><p>{{raw_email.body}}</p>',
-          requiredVariables: ['scraped_web.headline', 'raw_email.body'],
-        }),
+      service.findOne.mockRejectedValue(
+        new NotFoundException(`Plantilla con id "${TEMPLATE_ID}" no encontrada`),
       );
       const strategy = buildStrategy(service);
 
-      // 2. Act: el contexto solo trae parsed_email y llm_response
+      // 2. Act
       const result = await strategy.execute(buildContext(), {
         templateId: TEMPLATE_ID,
       });
 
-      // 3. Assert: el pre-chequeo informa de las dos de golpe, no solo de la
-      // primera, que es lo unico que daria Handlebars en modo estricto
+      // 3. Assert: GRAVE y no URGENTE, para que entre en la politica de reintento
       expect(result.success).toBe(false);
       expect(result.error?.level).toBe('GRAVE');
-      expect(result.error?.missingFields).toEqual([
-        'scraped_web.headline',
-        'raw_email.body',
-      ]);
+      expect(result.error?.code).toBe(ERR_TEMPLATE_NOT_RESOLVED);
     });
 
-    it('2.5 deberia fallar GRAVE si rawTemplate referencia una variable ausente', async () => {
+    it('2.3 deberia rechazar una plantilla desactivada', async () => {
       // 1. Arrange
-      const strategy = buildStrategy(buildService());
+      const service = buildService();
+      service.findOne.mockResolvedValue(buildTemplate({ active: false }));
+      const strategy = buildStrategy(service);
 
-      // 2. Act: sin requiredVariables, el corte lo pone el modo estricto
+      // 2. Act
       const result = await strategy.execute(buildContext(), {
-        rawTemplate: '<p>{{scraped_web.headline}}</p>',
+        templateId: TEMPLATE_ID,
+      });
+
+      // 3. Assert
+      expect(result.success).toBe(false);
+      expect(result.error?.code).toBe(ERR_TEMPLATE_NOT_RESOLVED);
+      expect(result.error?.message).toContain('desactivada');
+    });
+
+    it('2.4 deberia rechazar en voz alta una plantilla que aun interpola', async () => {
+      // 1. Arrange: la guarda anti-corrupcion. Sin ella, estas llaves saldrian
+      //    literales en el articulo publicado y nadie se enteraria.
+      const service = buildService();
+      service.findOne.mockResolvedValue(buildInterpolatedTemplate());
+      const strategy = buildStrategy(service);
+
+      // 2. Act
+      const result = await strategy.execute(buildContext(), {
+        templateId: TEMPLATE_ID,
       });
 
       // 3. Assert
       expect(result.success).toBe(false);
       expect(result.error?.level).toBe('GRAVE');
-      expect(result.error?.message).toContain('Fallo al compilar la plantilla');
+      expect(result.error?.code).toBe(ERR_TEMPLATE_PENDING_VARS);
+      expect(result.error?.missingFields).toEqual([
+        'parsed_email.clean_title',
+        'llm_response.summary',
+      ]);
+    });
+
+    it('2.5 NO deberia resolver los marcadores aunque el contexto los tenga', async () => {
+      // 1. Arrange: el contexto trae AMBOS valores; antes se habrian compilado.
+      const service = buildService();
+      service.findOne.mockResolvedValue(buildInterpolatedTemplate());
+      const strategy = buildStrategy(service);
+
+      // 2. Act
+      const result = await strategy.execute(buildContext(), {
+        templateId: TEMPLATE_ID,
+      });
+
+      // 3. Assert: falla igual, porque ya no es su trabajo
+      expect(result.success).toBe(false);
+      expect(result.data).toBeUndefined();
     });
   });
 
   describe('3. Inmutabilidad del contexto', () => {
-    it('3.1 no deberia mutar el contexto: escribir el resultado es del motor', async () => {
+    it('3.1 no deberia escribir en el contexto: eso es cosa del motor', async () => {
       // 1. Arrange
       const service = buildService();
       service.findOne.mockResolvedValue(buildTemplate());
       const strategy = buildStrategy(service);
-      const context = buildContext();
-      const before = context.getAllContext();
-
-      // 2. Act
-      const result = await strategy.execute(context, {
-        templateId: TEMPLATE_ID,
-        outputNamespace: 'rendered_html',
-      });
-
-      // 3. Assert: el markup viaja en `data` y el contexto queda intacto;
-      // `FsmEngineService` lo depositara en el `outputNamespace` del nodo
-      expect(result.success).toBe(true);
-      expect(context.getAllContext()).toEqual(before);
-      expect(context.getNamespace('rendered_html')).toBeUndefined();
-    });
-  });
-
-  describe('4. Delegacion en TemplateRendererService', () => {
-    it('4.1 deberia invocar renderStrict con html, variables requeridas y namespaces', async () => {
-      // 1. Arrange
-      const service = buildService();
-      service.findOne.mockResolvedValue(buildTemplate());
-      const renderer = buildRendererMock();
-      renderer.renderStrict.mockReturnValue({ markup: '<p>ok</p>' });
-      const strategy = buildStrategy(service, renderer);
       const context = buildContext();
 
       // 2. Act
       await strategy.execute(context, { templateId: TEMPLATE_ID });
 
-      // 3. Assert: la estrategia no compila nada por su cuenta, delega
-      expect(renderer.renderStrict).toHaveBeenCalledTimes(1);
-      expect(renderer.renderStrict).toHaveBeenCalledWith(
-        '<h1>{{parsed_email.clean_title}}</h1><p>{{llm_response.summary}}</p>',
-        ['parsed_email.clean_title', 'llm_response.summary'],
-        context.getAllContext(),
+      // 3. Assert
+      expect(context.getNamespace('rendered_html')).toBeUndefined();
+    });
+  });
+
+  describe('4. Delegacion en TemplateRendererService', () => {
+    it('4.1 deberia delegar el saneado y pasarle los allowedTags declarados', async () => {
+      // 1. Arrange
+      const service = buildService();
+      service.findOne.mockResolvedValue(buildTemplate());
+      const renderer = buildRendererMock();
+      const strategy = buildStrategy(service, renderer);
+
+      // 2. Act
+      await strategy.execute(buildContext(), {
+        templateId: TEMPLATE_ID,
+        allowedTags: ['h1', 'div'],
+      });
+
+      // 3. Assert
+      expect(renderer.prepareInjectableMarkup).toHaveBeenCalledWith(
+        SKELETON_HTML,
+        ['h1', 'div'],
       );
     });
 
-    it('4.2 deberia traducir { markup } a un NodeResult exitoso', async () => {
-      // 1. Arrange
+    it('4.2 deberia auditar la estructura sobre el markup YA saneado', async () => {
+      // 1. Arrange: el saneador devuelve algo DISTINTO del original, de modo que
+      //    la prueba distingue cual de los dos se audita.
       const service = buildService();
       service.findOne.mockResolvedValue(buildTemplate());
       const renderer = buildRendererMock();
-      renderer.renderStrict.mockReturnValue({ markup: '<h1>Compilado</h1>' });
-      const strategy = buildStrategy(service, renderer);
-
-      // 2. Act
-      const result = await strategy.execute(buildContext(), {
-        templateId: TEMPLATE_ID,
-      });
-
-      // 3. Assert
-      expect(result.success).toBe(true);
-      expect(result.data?.compiled_markup).toBe('<h1>Compilado</h1>');
-      expect(typeof result.data?.mapped_at).toBe('string');
-    });
-
-    it('4.3 deberia traducir { missingFields } a un fallo GRAVE que las conserva', async () => {
-      // 1. Arrange
-      const service = buildService();
-      service.findOne.mockResolvedValue(buildTemplate());
-      const renderer = buildRendererMock();
-      renderer.renderStrict.mockReturnValue({
-        missingFields: ['scraped_web.headline', 'raw_email.body'],
+      renderer.prepareInjectableMarkup.mockReturnValue({
+        sanitized: '<h1 class="titular"></h1>',
+        wasFiltered: true,
+        unsupportedTags: [],
       });
       const strategy = buildStrategy(service, renderer);
 
       // 2. Act
-      const result = await strategy.execute(buildContext(), {
+      await strategy.execute(buildContext(), {
         templateId: TEMPLATE_ID,
+        requiredSelectors: ['h1.titular'],
       });
 
       // 3. Assert
-      expect(result.success).toBe(false);
-      expect(result.error?.level).toBe('GRAVE');
-      expect(result.error?.missingFields).toEqual([
-        'scraped_web.headline',
-        'raw_email.body',
-      ]);
-      expect(result.error?.message).toContain('2 variable(s)');
+      expect(renderer.auditStructure).toHaveBeenCalledWith(
+        '<h1 class="titular"></h1>',
+        ['h1.titular'],
+      );
     });
 
-    it('4.4 deberia traducir { failure } a un fallo GRAVE propagando el stackTrace', async () => {
+    it('4.3 deberia devolver el markup que el renderer saneo, sin retocarlo', async () => {
       // 1. Arrange
       const service = buildService();
       service.findOne.mockResolvedValue(buildTemplate());
       const renderer = buildRendererMock();
-      renderer.renderStrict.mockReturnValue({
-        failure: 'Parse error on line 3',
-        stackTrace: 'Error: Parse error on line 3\n    at compile',
+      renderer.prepareInjectableMarkup.mockReturnValue({
+        sanitized: '<p>saneado por el doble</p>',
+        wasFiltered: true,
+        unsupportedTags: [],
       });
       const strategy = buildStrategy(service, renderer);
 
@@ -403,53 +412,32 @@ describe('TemplateMapperStrategy', () => {
       });
 
       // 3. Assert
-      expect(result.success).toBe(false);
-      expect(result.error?.level).toBe('GRAVE');
-      expect(result.error?.message).toContain('Parse error on line 3');
-      expect(result.error?.stackTrace).toContain('at compile');
+      expect(result.data?.compiled_markup).toBe('<p>saneado por el doble</p>');
     });
 
-    it('4.5 no deberia inventar un stackTrace si el renderer no lo aporta', async () => {
-      // 1. Arrange
+    it('4.4 no deberia sanear siquiera si la plantilla aun interpola', async () => {
+      // 1. Arrange: la guarda del paso 2 corta antes de gastar el saneado
       const service = buildService();
-      service.findOne.mockResolvedValue(buildTemplate());
+      service.findOne.mockResolvedValue(buildInterpolatedTemplate());
       const renderer = buildRendererMock();
-      renderer.renderStrict.mockReturnValue({ failure: 'fallo sin traza' });
       const strategy = buildStrategy(service, renderer);
 
       // 2. Act
-      const result = await strategy.execute(buildContext(), {
-        templateId: TEMPLATE_ID,
-      });
+      await strategy.execute(buildContext(), { templateId: TEMPLATE_ID });
 
       // 3. Assert
-      expect(result.error?.stackTrace).toBeUndefined();
-    });
-
-    it('4.6 no deberia llamar al renderer si la plantilla no se pudo resolver', async () => {
-      // 1. Arrange
-      const service = buildService();
-      service.findOne.mockResolvedValue(buildTemplate({ active: false }));
-      const renderer = buildRendererMock();
-      const strategy = buildStrategy(service, renderer);
-
-      // 2. Act
-      const result = await strategy.execute(buildContext(), {
-        templateId: TEMPLATE_ID,
-      });
-
-      // 3. Assert: compilar una plantilla desactivada seria trabajo tirado
-      expect(result.success).toBe(false);
-      expect(renderer.renderStrict).not.toHaveBeenCalled();
+      expect(renderer.prepareInjectableMarkup).not.toHaveBeenCalled();
+      expect(renderer.auditStructure).not.toHaveBeenCalled();
     });
   });
 
   describe('5. Inventario de salida (outputFields)', () => {
-    it('5.1 deberia declarar las dos claves en el orden del payload', () => {
+    it('5.1 deberia declarar las dos claves historicas del namespace', () => {
       // 1. Arrange & 2. Act
       const strategy = buildStrategy(buildService());
 
-      // 3. Assert: es lo que el catalogo sirve al selector del asistente.
+      // 3. Assert: los nombres se CONSERVAN pese al cambio de contenido, para no
+      //    dejar sin dato a los consumidores de rendered_html.compiled_markup
       expect(strategy.outputFields.map((field) => field.name)).toEqual([
         'compiled_markup',
         'mapped_at',
@@ -457,8 +445,7 @@ describe('TemplateMapperStrategy', () => {
     });
 
     it('5.2 deberia coincidir exactamente con las claves que emite execute', async () => {
-      // 1. Arrange: la guarda contra la desincronizacion entre el inventario
-      // declarado y el `data` real. Anadir una clave sin declararla rompe aqui.
+      // 1. Arrange
       const service = buildService();
       service.findOne.mockResolvedValue(buildTemplate());
       const strategy = buildStrategy(service);
@@ -472,6 +459,203 @@ describe('TemplateMapperStrategy', () => {
       expect(Object.keys(result.data ?? {}).sort()).toEqual(
         strategy.outputFields.map((field) => field.name).sort(),
       );
+    });
+
+    it('5.3 deberia describir compiled_markup como markup SIN interpolar', () => {
+      // 1. Arrange & 2. Act
+      const strategy = buildStrategy(buildService());
+      const field = strategy.outputFields.find(
+        ({ name }) => name === 'compiled_markup',
+      );
+
+      // 3. Assert: el nombre ya no describe el contenido, asi que la descripcion
+      //    es lo unico que evita que un auditor lea mal el namespace
+      expect(field?.description).toMatch(/SIN interpolar/);
+    });
+  });
+
+  describe('6. Contrato estructural y lista blanca', () => {
+    it('6.1 deberia aceptar la plantilla que contiene los selectores exigidos', async () => {
+      // 1. Arrange
+      const service = buildService();
+      service.findOne.mockResolvedValue(buildTemplate());
+      const strategy = buildStrategy(service);
+
+      // 2. Act
+      const result = await strategy.execute(buildContext(), {
+        templateId: TEMPLATE_ID,
+        requiredSelectors: ['h1.titular', 'div.cuerpo'],
+      });
+
+      // 3. Assert
+      expect(result.success).toBe(true);
+    });
+
+    it('6.2 deberia fallar nombrando el selector ausente', async () => {
+      // 1. Arrange
+      const service = buildService();
+      service.findOne.mockResolvedValue(buildTemplate());
+      const strategy = buildStrategy(service);
+
+      // 2. Act
+      const result = await strategy.execute(buildContext(), {
+        templateId: TEMPLATE_ID,
+        requiredSelectors: ['h1.titular', 'div.pie'],
+      });
+
+      // 3. Assert
+      expect(result.success).toBe(false);
+      expect(result.error?.level).toBe('GRAVE');
+      expect(result.error?.code).toBe(ERR_TEMPLATE_STRUCTURE);
+      expect(result.error?.missingFields).toEqual(['div.pie']);
+    });
+
+    it('6.3 deberia contar como ausente el selector que el saneado elimino', async () => {
+      // 1. Arrange: `<script>` cae con la lista blanca, asi que exigirlo no
+      //    puede cumplirse por mucho que este en el HTML original. Auditar el
+      //    markup crudo habria dado esta plantilla por valida.
+      const service = buildService();
+      service.findOne.mockResolvedValue(
+        buildTemplate({ htmlContent: `${SKELETON_HTML}<script></script>` }),
+      );
+      const strategy = buildStrategy(service);
+
+      // 2. Act
+      const result = await strategy.execute(buildContext(), {
+        templateId: TEMPLATE_ID,
+        requiredSelectors: ['script'],
+      });
+
+      // 3. Assert
+      expect(result.success).toBe(false);
+      expect(result.error?.code).toBe(ERR_TEMPLATE_STRUCTURE);
+    });
+
+    it('6.4 deberia recortar la plantilla con los allowedTags declarados', async () => {
+      // 1. Arrange
+      const service = buildService();
+      service.findOne.mockResolvedValue(buildTemplate());
+      const strategy = buildStrategy(service);
+
+      // 2. Act
+      const result = await strategy.execute(buildContext(), {
+        templateId: TEMPLATE_ID,
+        allowedTags: ['h1'],
+      });
+
+      // 3. Assert: el <div class="cuerpo"> desaparece por no estar en la lista
+      expect(result.success).toBe(true);
+      expect(result.data?.compiled_markup).toContain('titular');
+      expect(result.data?.compiled_markup).not.toContain('<div');
+    });
+
+    it('6.5 deberia rechazar un allowedTags que intente AMPLIAR la lista blanca', async () => {
+      // 1. Arrange: conceder `script` por parametro seria abrir XSS
+      const service = buildService();
+      service.findOne.mockResolvedValue(buildTemplate());
+      const strategy = buildStrategy(service);
+
+      // 2. Act
+      const result = await strategy.execute(buildContext(), {
+        templateId: TEMPLATE_ID,
+        allowedTags: ['h1', 'script'],
+      });
+
+      // 3. Assert
+      expect(result.success).toBe(false);
+      expect(result.error?.level).toBe('GRAVE');
+      expect(result.error?.code).toBe(ERR_TEMPLATE_UNSUPPORTED_TAGS);
+      expect(result.error?.missingFields).toEqual(['script']);
+    });
+
+    it('6.6 deberia separar el selector invalido del simplemente ausente', async () => {
+      // 1. Arrange: los dos arreglos son distintos — uno se corrige en la
+      //    plantilla, el otro en la configuracion del nodo.
+      const service = buildService();
+      service.findOne.mockResolvedValue(buildTemplate());
+      const strategy = buildStrategy(service);
+
+      // 2. Act
+      const result = await strategy.execute(buildContext(), {
+        templateId: TEMPLATE_ID,
+        requiredSelectors: ['div[[['],
+      });
+
+      // 3. Assert
+      expect(result.success).toBe(false);
+      expect(result.error?.code).toBe(ERR_TEMPLATE_STRUCTURE);
+      expect(result.error?.message).toContain('no son selectores validos');
+    });
+
+    it('6.7 no deberia exigir estructura alguna sin requiredSelectors', async () => {
+      // 1. Arrange
+      const service = buildService();
+      service.findOne.mockResolvedValue(
+        buildTemplate({ htmlContent: '<p>Solo un parrafo</p>' }),
+      );
+      const strategy = buildStrategy(service);
+
+      // 2. Act
+      const result = await strategy.execute(buildContext(), {
+        templateId: TEMPLATE_ID,
+      });
+
+      // 3. Assert
+      expect(result.success).toBe(true);
+    });
+  });
+
+  describe('7. Contratos declarativos para el validador', () => {
+    it('7.1 deberia declarar templateId incompleto sin ningun origen', () => {
+      // 1. Arrange & 2. Act
+      const strategy = buildStrategy(buildService());
+
+      // 3. Assert
+      expect(strategy.getIncompleteParams({})).toEqual(['templateId']);
+    });
+
+    it('7.2 no deberia declarar nada incompleto con templateId', () => {
+      // 1. Arrange & 2. Act
+      const strategy = buildStrategy(buildService());
+
+      // 3. Assert
+      expect(strategy.getIncompleteParams({ templateId: TEMPLATE_ID })).toEqual(
+        [],
+      );
+    });
+
+    it('7.3 deberia dar por completo un nodo que use rawTemplate', () => {
+      // 1. Arrange & 2. Act
+      const strategy = buildStrategy(buildService());
+
+      // 3. Assert
+      expect(strategy.getIncompleteParams({ rawTemplate: '<p></p>' })).toEqual(
+        [],
+      );
+    });
+
+    it('7.4 deberia declarar inalcanzables los codigos de la etapa de compilacion', () => {
+      // 1. Arrange & 2. Act
+      const strategy = buildStrategy(buildService());
+
+      // 3. Assert: asi la regla 10 rechaza al GUARDAR una ruta onErrorStep que
+      //    los cite, en vez de dejarla como un respaldo que jamas correria
+      expect(strategy.getUnreachableErrorCodes({})).toEqual([
+        ERR_TEMPLATE_MISSING_VARS,
+        ERR_TEMPLATE_RENDER,
+      ]);
+    });
+
+    it('7.5 no deberia declarar inalcanzable ningun codigo que si emite', () => {
+      // 1. Arrange & 2. Act
+      const strategy = buildStrategy(buildService());
+      const unreachable = strategy.getUnreachableErrorCodes({});
+
+      // 3. Assert
+      expect(unreachable).not.toContain(ERR_TEMPLATE_NOT_RESOLVED);
+      expect(unreachable).not.toContain(ERR_TEMPLATE_PENDING_VARS);
+      expect(unreachable).not.toContain(ERR_TEMPLATE_STRUCTURE);
+      expect(unreachable).not.toContain(ERR_TEMPLATE_UNSUPPORTED_TAGS);
     });
   });
 });

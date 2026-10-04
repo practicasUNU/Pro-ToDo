@@ -768,4 +768,120 @@ describe('TemplateRendererService', () => {
       }
     });
   });
+  describe('prepareInjectableMarkup', () => {
+    const SKELETON = '<h1 class="titular"></h1><div class="cuerpo"><p></p></div>';
+
+    it('deberia conservar el esqueleto que ya cabe en la lista blanca', () => {
+      // 1. Arrange & 2. Act
+      const { sanitized, wasFiltered, unsupportedTags } =
+        renderer.prepareInjectableMarkup(SKELETON);
+
+      // 3. Assert
+      expect(sanitized).toBe(SKELETON);
+      expect(wasFiltered).toBe(false);
+      expect(unsupportedTags).toEqual([]);
+    });
+
+    it('deberia descartar lo que la lista blanca prohibe', () => {
+      // 1. Arrange & 2. Act
+      const { sanitized, wasFiltered } = renderer.prepareInjectableMarkup(
+        `${SKELETON}<script>alert(1)</script>`,
+      );
+
+      // 3. Assert
+      expect(sanitized).not.toContain('script');
+      expect(wasFiltered).toBe(true);
+    });
+
+    it('deberia ESTRECHAR la lista blanca con los allowedTags recibidos', () => {
+      // 1. Arrange & 2. Act
+      const { sanitized } = renderer.prepareInjectableMarkup(SKELETON, ['h1']);
+
+      // 3. Assert: el <div> cae aunque la lista global si lo admita
+      expect(sanitized).toContain('titular');
+      expect(sanitized).not.toContain('<div');
+    });
+
+    it('NO deberia ampliar la lista blanca, y deberia delatar el intento', () => {
+      // 1. Arrange & 2. Act: conceder `script` por parametro seria abrir XSS
+      const { sanitized, unsupportedTags } = renderer.prepareInjectableMarkup(
+        '<h1></h1><script>alert(1)</script>',
+        ['h1', 'script'],
+      );
+
+      // 3. Assert
+      expect(unsupportedTags).toEqual(['script']);
+      expect(sanitized).not.toContain('script');
+    });
+
+    it('deberia normalizar las etiquetas pedidas a minusculas', () => {
+      // 1. Arrange & 2. Act
+      const { sanitized, unsupportedTags } = renderer.prepareInjectableMarkup(
+        SKELETON,
+        ['H1'],
+      );
+
+      // 3. Assert
+      expect(unsupportedTags).toEqual([]);
+      expect(sanitized).toContain('titular');
+    });
+
+    it('deberia tratar la lista vacia como "toda la lista blanca"', () => {
+      // 1. Arrange & 2. Act: vacio NUNCA significa "ninguna etiqueta"
+      const { sanitized } = renderer.prepareInjectableMarkup(SKELETON, []);
+
+      // 3. Assert
+      expect(sanitized).toBe(SKELETON);
+    });
+  });
+
+  describe('auditStructure', () => {
+    const SKELETON = '<h1 class="titular"></h1><div class="cuerpo"></div>';
+
+    it('no deberia reportar nada sin selectores exigidos', () => {
+      // 1. Arrange & 2. Act
+      const audit = renderer.auditStructure(SKELETON, []);
+
+      // 3. Assert
+      expect(audit).toEqual({ missing: [], invalid: [] });
+    });
+
+    it('deberia dar por buenos los selectores presentes', () => {
+      // 1. Arrange & 2. Act
+      const audit = renderer.auditStructure(SKELETON, [
+        'h1.titular',
+        'div.cuerpo',
+      ]);
+
+      // 3. Assert
+      expect(audit.missing).toEqual([]);
+    });
+
+    it('deberia reportar el selector sin coincidencia', () => {
+      // 1. Arrange & 2. Act
+      const audit = renderer.auditStructure(SKELETON, ['div.pie']);
+
+      // 3. Assert
+      expect(audit.missing).toEqual(['div.pie']);
+      expect(audit.invalid).toEqual([]);
+    });
+
+    it('deberia separar el selector malformado del ausente', () => {
+      // 1. Arrange & 2. Act: uno se corrige en la plantilla, el otro en el nodo
+      const audit = renderer.auditStructure(SKELETON, ['div.pie', 'div[[[']);
+
+      // 3. Assert
+      expect(audit.missing).toEqual(['div.pie']);
+      expect(audit.invalid).toEqual(['div[[[']);
+    });
+
+    it('NO deberia sintetizar <body> ni <html> en un fragmento', () => {
+      // 1. Arrange & 2. Act: con parse5 en modo documento, `body` casaria
+      //    siempre y el contrato estructural seria inservible.
+      const audit = renderer.auditStructure(SKELETON, ['body']);
+
+      // 3. Assert
+      expect(audit.missing).toEqual(['body']);
+    });
+  });
 });

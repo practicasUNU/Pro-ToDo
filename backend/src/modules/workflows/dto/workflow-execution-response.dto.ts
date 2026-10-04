@@ -34,7 +34,7 @@ export class WorkflowExecutionResponseDto {
 
   @ApiProperty({
     description:
-      'Volcado de `contexto_acumulado`: los namespaces que dejaron los nodos ejecutados, incluido `rendered_html.compiled_markup`',
+      'Volcado de `contexto_acumulado`: los namespaces que dejaron los nodos ejecutados, incluido `rendered_html.compiled_markup` (que desde el cambio de semantica del MAPEADOR_PLANTILLA contiene la plantilla base saneada SIN interpolar, no markup compilado)',
   })
   readonly context: Record<string, Record<string, unknown>>;
 }

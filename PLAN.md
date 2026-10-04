@@ -810,6 +810,12 @@ escriban sobre la misma que consume `FsmEngineService`.
 { success: true, data: { compiled_markup: string, mapped_at: string } }
 ```
 
+> Desde PROT-23 `compiled_markup` contiene la plantilla base **saneada y sin interpolar**, no
+> markup compilado: el nodo dejo de resolver `{{nodo.campo}}` y entrega el esqueleto para que lo
+> rellene un `PROCESADOR_IA` posterior. La clave conserva el nombre para no dejar sin dato a los
+> consumidores de `rendered_html.compiled_markup`; el aviso vive en la `description` de su
+> `outputField`.
+
 y es `FsmEngineService` quien lo deposita en el `outputNamespace` declarado por el nodo. Escribir
 también desde la estrategia duplicaría el payload en dos namespaces (`params.outputNamespace` y
 `node.outputNamespace`) y contradiría el contrato de `INodeStrategy`, donde el contexto es de solo
@@ -2563,7 +2569,7 @@ Tres de las cinco estrategias registradas no declaraban su inventario:
 |---|---|---|
 | `CronTriggerStrategy` | `triggered_at`, `cron_expression`, `time_zone`, `next_run_at` | los cuatro `text` |
 | `ImapTriggerStrategy` | `message_id`, `from`, `subject`, `text`, `html`, `date`, `attachments` | seis `text` + un `object` |
-| `TemplateMapperStrategy` | `compiled_markup`, `mapped_at` | los dos `text` |
+| `TemplateMapperStrategy` | `compiled_markup`, `mapped_at` | los dos `text`. `compiled_markup` es la plantilla base SIN interpolar desde PROT-23 |
 
 Dos invariantes que se declaran por escrito en el TSDoc de cada propiedad:
 

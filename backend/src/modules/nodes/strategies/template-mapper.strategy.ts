@@ -4,6 +4,8 @@ import { NodeType } from '@core/fsm/types/pipeline-schema.types';
 import { TemplateRendererService } from '@modules/templates/services/template-renderer.service';
 import { TemplatesService } from '@modules/templates/templates.service';
 
+import { resolveTemplateMapperConfig } from '../dto/template-mapper-config.dto';
+
 import type { StatePayloadContext } from '@core/fsm/context/state-payload.context';
 import type {
   INodeStrategy,
@@ -11,20 +13,40 @@ import type {
   NodeOutputField,
   NodeResult,
 } from '@core/fsm/types/node-strategy.types';
+import type { TemplateMapperConfigDto } from '../dto/template-mapper-config.dto';
 
 /**
  * Codigos de fallo del nodo. Son lo que un `catchErrors` puede mencionar, y se
- * separan porque enrutar "faltan variables" a un nodo de aviso es util mientras
- * que enrutar "la plantilla no existe" al mismo sitio casi nunca lo es.
+ * separan porque enrutar "la plantilla trae marcadores" a un nodo de aviso es
+ * util mientras que enrutar "la plantilla no existe" al mismo sitio casi nunca
+ * lo es.
  */
 export const ERR_TEMPLATE_NOT_RESOLVED = 'ERR_TEMPLATE_NOT_RESOLVED';
+export const ERR_TEMPLATE_PENDING_VARS = 'ERR_TEMPLATE_PENDING_VARS';
+export const ERR_TEMPLATE_STRUCTURE = 'ERR_TEMPLATE_STRUCTURE';
+export const ERR_TEMPLATE_UNSUPPORTED_TAGS = 'ERR_TEMPLATE_UNSUPPORTED_TAGS';
+
+/**
+ * Codigos de la etapa en que este nodo COMPILABA la plantilla.
+ *
+ * Se conservan exportados —y declarados en `getUnreachableErrorCodes`— en vez de
+ * borrarse: son contrato publico y un flujo guardado puede tener una ruta
+ * `onErrorStep` que los cite. Borrarlos convertiria ese esquema en un fallo de
+ * importacion opaco; declararlos inalcanzables hace que la regla 10 del
+ * validador de topologia los rechace al guardar, nombrando el codigo muerto.
+ *
+ * @deprecated El nodo ya no compila: ningun camino de `execute` los emite.
+ */
 export const ERR_TEMPLATE_MISSING_VARS = 'ERR_TEMPLATE_MISSING_VARS';
+/** @deprecated Ver {@link ERR_TEMPLATE_MISSING_VARS}. */
 export const ERR_TEMPLATE_RENDER = 'ERR_TEMPLATE_RENDER';
 
-/** Plantilla lista para compilar, venga de la base de datos o de `rawTemplate`. */
+/** Plantilla lista para inyectar, venga de la base de datos o de `rawTemplate`. */
 interface ResolvedTemplate {
   readonly htmlContent: string;
-  /** Rutas a comprobar antes de renderizar; vacio en el modo `rawTemplate`. */
+  /** Nombre legible, para que el diagnostico no sea solo un UUID. */
+  readonly name: string;
+  /** Rutas que la plantilla interpola; vacio en el modo `rawTemplate`. */
   readonly requiredVariables: readonly string[];
 }
 
@@ -39,36 +61,40 @@ type TemplateResolution =
   | { readonly failure: NodeErrorDetail };
 
 /**
- * Nodo MAPEADOR_PLANTILLA (PROT-11.2): compila una plantilla del gestor contra
- * el contexto acumulado de la ejecucion.
+ * Nodo MAPEADOR_PLANTILLA: entrega la plantilla base del gestor, ya saneada,
+ * para que un `PROCESADOR_IA` posterior la rellene.
  *
- * Sustituye a `DummyTemplateMapperStrategy`, que recibia el HTML incrustado en
- * `params.template`. Aqui el nodo solo declara `params.templateId` y la
- * plantilla vive en `plantillas_html`, reutilizable y auditable.
+ * CAMBIO DE RESPONSABILIDAD. Hasta ahora este nodo COMPILABA la plantilla con
+ * Handlebars contra el contexto acumulado y era el ultimo paso del flujo. Ahora
+ * es la IA quien estructura e inyecta el contenido, de modo que el mapeador pasa
+ * a ir DELANTE de la inferencia y su trabajo es otro: resolver la plantilla,
+ * sanearla y verificar que conserva la estructura minima que el flujo da por
+ * hecha. No sustituye ninguna variable.
  *
- * La compilacion se DELEGA en `TemplateRendererService`, compartido con el
- * endpoint de previsualizacion del gestor: con dos implementaciones de
- * Handlebars, la vista previa podria divergir de lo que el nodo genera de verdad.
- * Aqui solo queda la traduccion de su `RenderOutcome` al contrato `NodeResult`.
+ * De ahi la guarda de `ERR_TEMPLATE_PENDING_VARS`. Una plantilla heredada llena
+ * de `{{parsed_email.clean_title}}` seguiria resolviendose aqui sin que nadie
+ * interpole nada, y esas llaves viajarian literales hasta el articulo publicado:
+ * sin excepcion, sin PAUSADO y sin alerta. El nodo prefiere romper en voz alta y
+ * de forma corregible antes que publicar markup corrupto en silencio.
+ *
+ * El saneado y la comprobacion estructural se DELEGAN en
+ * `TemplateRendererService`, compartido con el gestor de plantillas: con dos
+ * listas blancas, lo que el editor acepta al guardar y lo que el nodo publica al
+ * ejecutar divergirian en cuanto alguien tocara una sola.
  *
  * NO escribe en el contexto: devuelve `data` y es `FsmEngineService` quien la
- * deposita en el `outputNamespace` declarado por el nodo. Escribir tambien
- * desde aqui duplicaria el payload en dos namespaces y contradiria el contrato
- * de `INodeStrategy`, donde el contexto es de solo lectura para la estrategia.
+ * deposita en el `outputNamespace` declarado por el nodo. Escribir tambien desde
+ * aqui duplicaria el payload en dos namespaces y contradiria el contrato de
+ * `INodeStrategy`, donde el contexto es de solo lectura para la estrategia.
  */
 /*
- * NOTA: este nodo NO implementa `getRequiredNamespaces`, y no es un olvido.
+ * NOTA: este nodo NO implementa `getRequiredNamespaces`, y ahora menos que nunca.
  *
- * Sus variables requeridas no estan en `params`: viven en la columna
- * `requiredVariables` de la fila de `plantillas_html` que el nodo tenga elegida,
- * asi que derivarlas exigiria una consulta a base de datos y volveria asincrono
- * un metodo que los otros cuatro nodos resuelven mirando un objeto.
- *
- * Y sobre todo no hace falta: `TemplateRendererService.renderStrict` ya hace un
- * pre-chequeo que devuelve TODAS las variables ausentes de una vez y con la ruta
- * completa (`parsed_email.clean_title`), que es un diagnostico estrictamente
- * mejor que un nombre de namespace suelto. Anadir aqui la guarda generica solo
- * adelantaria un mensaje peor.
+ * Antes la ausencia se justificaba porque el pre-chequeo de `renderStrict` daba
+ * un diagnostico mejor. Hoy el motivo es mas simple y mas fuerte: el nodo NO LEE
+ * EL CONTEXTO en absoluto. No depende de ningun namespace anterior, asi que no
+ * hay nada que declarar. Su unica dependencia es la fila de `plantillas_html`
+ * que tenga elegida, y esa no es una dependencia de topologia.
  */
 @Injectable()
 export class TemplateMapperStrategy implements INodeStrategy {
@@ -77,25 +103,26 @@ export class TemplateMapperStrategy implements INodeStrategy {
   /**
    * Las dos claves que este nodo deposita en su namespace.
    *
-   * Se declaran aunque hoy el mapeador sea el ultimo paso de todos los flujos:
-   * `outputFields` describe lo que el nodo PRODUCE, no lo que alguien consume, y
-   * esa es la misma razon por la que es una propiedad constante y no un metodo
-   * que mire `params`. El dia que un DESTINO_HTTP tenga que enviar el marcado ya
-   * compilado, el selector lo encontrara sin tocar esta estrategia.
-   *
-   * `compiled_markup` es `text` y no `object`: es la cadena HTML que devuelve
-   * Handlebars, interpolable tal cual.
+   * `compiled_markup` CONSERVA SU NOMBRE pese a contener ahora markup sin
+   * compilar. Es una concesion deliberada a la compatibilidad: renombrarlo
+   * dejaria sin dato a todo consumidor de `rendered_html.compiled_markup`,
+   * incluido el `DESTINO_HTTP` de cualquier flujo ya guardado. El precio es que
+   * el nombre ya no describe el contenido, y por eso la `description` —que es lo
+   * que leen `GET /api/nodos` y el selector de variables del asistente— lo dice
+   * de forma explicita: quien audite una ejecucion lee la descripcion, no el
+   * identificador.
    */
   public readonly outputFields: readonly NodeOutputField[] = [
     {
       name: 'compiled_markup',
       type: 'text',
-      description: 'Marcado HTML con las variables ya sustituidas',
+      description:
+        'Plantilla base ya saneada y SIN interpolar, lista para que un PROCESADOR_IA la rellene',
     },
     {
       name: 'mapped_at',
       type: 'text',
-      description: 'Marca ISO del instante en que se compilo la plantilla',
+      description: 'Marca ISO del instante en que se resolvio la plantilla',
     },
   ];
 
@@ -105,50 +132,75 @@ export class TemplateMapperStrategy implements INodeStrategy {
   ) {}
 
   public async execute(
-    context: StatePayloadContext,
+    _context: StatePayloadContext,
     params: Record<string, unknown>,
   ): Promise<NodeResult> {
+    const config = resolveTemplateMapperConfig(
+      params as TemplateMapperConfigDto,
+    );
+
     // 1. Resolver la plantilla (base de datos o fallback de pruebas).
-    const resolution = await this.resolveTemplate(params);
+    const resolution = await this.resolveTemplate(config);
 
     if ('failure' in resolution) {
       return { success: false, error: resolution.failure };
     }
 
-    const { htmlContent, requiredVariables } = resolution.template;
+    const { htmlContent, name, requiredVariables } = resolution.template;
 
-    // 2. Compilar sobre el volcado completo de memoria.
-    const outcome = this.templateRendererService.renderStrict(
-      htmlContent,
-      requiredVariables,
-      context.getAllContext(),
-    );
-
-    // 3. Traducir la salida del renderer al contrato del motor. Los tres fallos
-    //    son GRAVE y nunca URGENTE: son errores corregibles, y solo GRAVE entra
-    //    en la politica de reintentos de `FsmEngineService.canRetry`.
-    if ('missingFields' in outcome) {
+    // 2. Guarda anti-corrupcion. Va la PRIMERA de las tres porque es la unica
+    //    que protege de un fallo silencioso: las otras dos solo evitan publicar
+    //    una plantilla mal recortada, esta evita publicar llaves literales.
+    if (requiredVariables.length > 0) {
       return {
         success: false,
         error: {
           level: 'GRAVE',
-          code: ERR_TEMPLATE_MISSING_VARS,
-          message: `El contexto no aporta ${outcome.missingFields.length} variable(s) que la plantilla requiere.`,
-          missingFields: outcome.missingFields,
+          code: ERR_TEMPLATE_PENDING_VARS,
+          message: `Este nodo ya no interpola variables y la plantilla "${name}" declara ${requiredVariables.length}. Retira los marcadores de la plantilla para que el PROCESADOR_IA rellene los huecos.`,
+          missingFields: [...requiredVariables],
         },
       };
     }
 
-    if ('failure' in outcome) {
+    // 3. Sanear con la lista blanca compartida, recortada por `allowedTags`.
+    const { sanitized, unsupportedTags } =
+      this.templateRendererService.prepareInjectableMarkup(
+        htmlContent,
+        config.allowedTags,
+      );
+
+    if (unsupportedTags.length > 0) {
+      // Fallo de CONFIGURACION del nodo, no de la plantilla: el operador pidio
+      // permitir algo que la lista blanca global no admite. Concederlo seria
+      // abrir una via de XSS por parametro.
       return {
         success: false,
         error: {
           level: 'GRAVE',
-          code: ERR_TEMPLATE_RENDER,
-          message: `Fallo al compilar la plantilla: ${outcome.failure}`,
-          ...(outcome.stackTrace !== undefined
-            ? { stackTrace: outcome.stackTrace }
-            : {}),
+          code: ERR_TEMPLATE_UNSUPPORTED_TAGS,
+          message: `El parametro "allowedTags" solo puede RESTRINGIR la lista blanca del saneador, y pide etiquetas que no figuran en ella: ${unsupportedTags.join(', ')}.`,
+          missingFields: unsupportedTags,
+        },
+      };
+    }
+
+    // 4. Contrato estructural, sobre el markup YA saneado. Si el saneador se
+    //    llevo por delante la ranura que el selector busca, el fallo tiene que
+    //    verse ahora y no cuando la IA devuelva un hueco sin rellenar.
+    const { missing, invalid } = this.templateRendererService.auditStructure(
+      sanitized,
+      config.requiredSelectors,
+    );
+
+    if (missing.length > 0 || invalid.length > 0) {
+      return {
+        success: false,
+        error: {
+          level: 'GRAVE',
+          code: ERR_TEMPLATE_STRUCTURE,
+          message: this.buildStructureMessage(name, missing, invalid),
+          missingFields: [...missing, ...invalid],
         },
       };
     }
@@ -156,31 +208,89 @@ export class TemplateMapperStrategy implements INodeStrategy {
     return {
       success: true,
       data: {
-        compiled_markup: outcome.markup,
+        compiled_markup: sanitized,
         mapped_at: new Date().toISOString(),
       },
     };
   }
 
   /**
-   * Obtiene el HTML a compilar a partir de los `params` del nodo.
+   * Parametros sin los que el nodo no puede ejecutarse.
+   *
+   * Lo consulta `assertActivatable` para impedir ACTIVAR un flujo incompleto,
+   * mientras que guardarlo sigue permitido: una plantilla de flujo declara
+   * topologia, no operativa. Sin esto, la ausencia de plantilla solo se
+   * descubria en ejecucion, con el flujo ya PAUSADO.
+   */
+  public getIncompleteParams(params: Record<string, unknown>): readonly string[] {
+    const { templateId, rawTemplate } = resolveTemplateMapperConfig(
+      params as TemplateMapperConfigDto,
+    );
+
+    return templateId === '' && rawTemplate === null ? ['templateId'] : [];
+  }
+
+  /**
+   * Codigos que este nodo NO puede emitir (regla 10 del validador de topologia).
+   *
+   * Son los de la etapa en que compilaba. Declararlos hace que una ruta
+   * `onErrorStep` que los capture se rechace AL GUARDAR, nombrando el codigo,
+   * en vez de quedarse como un respaldo que jamas se ejecutaria.
+   */
+  public getUnreachableErrorCodes(
+    _params: Record<string, unknown>,
+  ): readonly string[] {
+    return [ERR_TEMPLATE_MISSING_VARS, ERR_TEMPLATE_RENDER];
+  }
+
+  /** Mensaje que separa el selector ausente del que ni siquiera es valido. */
+  private buildStructureMessage(
+    templateName: string,
+    missing: readonly string[],
+    invalid: readonly string[],
+  ): string {
+    const parts: string[] = [];
+
+    if (missing.length > 0) {
+      parts.push(`no contiene ${missing.join(', ')}`);
+    }
+
+    if (invalid.length > 0) {
+      parts.push(`no son selectores validos: ${invalid.join(', ')}`);
+    }
+
+    return `La estructura de la plantilla "${templateName}" incumple el contrato del nodo: ${parts.join('; ')}.`;
+  }
+
+  /**
+   * Obtiene el HTML a inyectar a partir de la configuracion del nodo.
    *
    * Prioriza `templateId` (el modo de produccion) y admite `rawTemplate` como
-   * fallback para probar la estrategia sin base de datos. En el modo
-   * `rawTemplate` no hay `requiredVariables` precalculadas, asi que la deteccion
-   * de variables ausentes recae por completo en el modo estricto de Handlebars.
+   * fallback para probar la estrategia sin base de datos. El markup de
+   * `rawTemplate` no ha pasado por la lista blanca que `TemplatesService` aplica
+   * al guardar, pero eso no lo deja sin sanear: `prepareInjectableMarkup` corre
+   * igual sobre los dos origenes.
    */
   private async resolveTemplate(
-    params: Record<string, unknown>,
+    config: ReturnType<typeof resolveTemplateMapperConfig>,
   ): Promise<TemplateResolution> {
-    const { templateId, rawTemplate } = params;
+    const { templateId, rawTemplate } = config;
 
-    if (typeof templateId === 'string' && templateId.trim() !== '') {
+    if (templateId !== '') {
       return this.resolveStoredTemplate(templateId.trim());
     }
 
-    if (typeof rawTemplate === 'string') {
-      return { template: { htmlContent: rawTemplate, requiredVariables: [] } };
+    if (rawTemplate !== null) {
+      return {
+        template: {
+          htmlContent: rawTemplate,
+          name: 'rawTemplate',
+          // Sin fila en base de datos no hay columna `variables_esperadas` que
+          // consultar, asi que no se puede afirmar que la plantilla interpole
+          // nada. La guarda de marcadores pendientes no aplica a este origen.
+          requiredVariables: [],
+        },
+      };
     }
 
     // Guarda de configuracion, no excepcion: el flujo esta mal declarado y debe
@@ -217,6 +327,7 @@ export class TemplateMapperStrategy implements INodeStrategy {
       return {
         template: {
           htmlContent: template.htmlContent,
+          name: template.name,
           requiredVariables: template.requiredVariables,
         },
       };

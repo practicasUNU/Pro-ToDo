@@ -12,7 +12,6 @@ import type { HtmlTemplate } from '@/types/html-template';
 // Sin esto se cargaria `@boot/axios`, que necesita entorno de navegador.
 vi.mock('@services/nodes/template-mapper.service', () => ({
   fetchSelectableTemplates: vi.fn(),
-  compilePreview: vi.fn(),
 }));
 
 /**
@@ -26,20 +25,10 @@ const NODE_ID = 'nodo_mapeador';
 const TEMPLATE_ID = '5e2d1c4b-7a89-4f30-b1c2-6d5e4f3a2b10';
 
 /**
- * Namespaces que el anfitrion declara por el canal de NOMBRES.
- *
- * Se siembran en cada prueba en vez de venir de un default del store: el store
- * arranca vacio a proposito desde que el asistente empuja el contexto de verdad,
- * y un default no vacio validaba el nodo contra un flujo inventado.
- */
-const SEEDED_NAMESPACES = ['parsed_email', 'scraped_web', 'llm_response'];
-
-/**
  * Contexto RICO, con el inventario que el catalogo publica por tipo de nodo.
  *
- * `raw_email` entra con campos y `scraped_web` sin ellos a proposito: son los
- * dos caminos que `missingRequiredVariables` distingue —inventario conocido
- * frente a "aun no se que publica"— y el segundo no debe reportar nada.
+ * Desde el cambio de semantica ya no alimenta ninguna validacion: solo viaja al
+ * editor de plantillas y sirve para detectar el orden invertido del flujo.
  */
 const RICH_UPSTREAM: UpstreamNamespace[] = [
   {
@@ -65,7 +54,7 @@ const buildTemplate = (requiredVariables: string[]): HtmlTemplate => ({
   id: TEMPLATE_ID,
   name: 'noticia-basica',
   description: null,
-  htmlContent: '<h1>x</h1>',
+  htmlContent: '<h1 class="titular"></h1>',
   requiredVariables,
   createdById: '9c1f7b52-4d3a-4e6b-8f2c-1a0b9d8e7f60',
   active: true,
@@ -73,178 +62,165 @@ const buildTemplate = (requiredVariables: string[]): HtmlTemplate => ({
   updatedAt: '2026-01-01T00:00:00.000Z',
 });
 
-/** Store con una plantilla ya seleccionada y sus variables requeridas. */
+/** Store con una plantilla ya seleccionada. */
 const buildStoreWithTemplate = (
-  requiredVariables: string[],
-  namespaces: string[] = SEEDED_NAMESPACES,
+  requiredVariables: string[] = [],
 ): ReturnType<typeof useTemplateMapperStore> => {
   const store = useTemplateMapperStore(NODE_ID);
 
   store.availableTemplates = [buildTemplate(requiredVariables)];
   store.setTemplateId(TEMPLATE_ID);
-  store.setAvailableUpstreamNamespaces(namespaces);
 
   return store;
 };
 
-/** Store con los dos canales sembrados: nombres e inventario. */
+/** Store con la plantilla elegida y el inventario del flujo sembrado. */
 const buildStoreWithContext = (
-  requiredVariables: string[],
+  requiredVariables: string[] = [],
   context: UpstreamNamespace[] = RICH_UPSTREAM,
 ): ReturnType<typeof useTemplateMapperStore> => {
-  const store = buildStoreWithTemplate(
-    requiredVariables,
-    context.map(({ namespace }) => namespace),
-  );
+  const store = buildStoreWithTemplate(requiredVariables);
 
   store.setAvailableUpstreamContext(context);
 
   return store;
 };
 
-describe('useTemplateMapperStore · contrato de namespaces', () => {
+describe('useTemplateMapperStore · inyeccion de plantilla base', () => {
   beforeEach(() => {
     setActivePinia(createPinia());
   });
 
-  describe('1. missingRequiredVariables', () => {
-    it('1.1 no deberia reportar nada si el flujo provee todas las raices', () => {
-      // 1. Arrange & 2. Act
-      const store = buildStoreWithTemplate(['parsed_email.clean_title', 'llm_response.summary']);
-
-      // 3. Assert: ambas raices estan entre las declaradas por el anfitrion
-      expect(store.missingRequiredVariables).toEqual([]);
-    });
-
-    it('1.2 deberia reportar la variable cuya raiz no produce ningun nodo previo', () => {
-      // 1. Arrange & 2. Act
-      const store = buildStoreWithTemplate([
-        'parsed_email.clean_title',
-        'validated_drupal_json.body',
-      ]);
-
-      // 3. Assert
-      expect(store.missingRequiredVariables).toEqual(['validated_drupal_json.body']);
-    });
-
-    it('1.3 deberia validar la RAIZ de una ruta profunda, no la ruta entera', () => {
-      // 1. Arrange & 2. Act
-      const store = buildStoreWithTemplate(['llm_response.articles.0.title']);
-
-      // 3. Assert: `llm_response` si lo provee el flujo, asi que la ruta vale
-      expect(store.missingRequiredVariables).toEqual([]);
-    });
-
-    it('1.4 deberia estar vacio sin plantilla seleccionada', () => {
-      // 1. Arrange & 2. Act
-      const store = useTemplateMapperStore(NODE_ID);
-
-      // 3. Assert
-      expect(store.missingRequiredVariables).toEqual([]);
-    });
-
-    it('1.5 deberia recalcularse al cambiar los namespaces disponibles', () => {
+  describe('1. isConfigValid', () => {
+    it('1.1 deberia ser falso sin plantilla', () => {
       // 1. Arrange
-      const store = buildStoreWithTemplate(['scraped_web.headline']);
-      expect(store.missingRequiredVariables).toEqual([]);
-
-      // 2. Act
-      store.setAvailableUpstreamNamespaces(['parsed_email']);
-
-      // 3. Assert
-      expect(store.missingRequiredVariables).toEqual(['scraped_web.headline']);
-    });
-
-    it('1.6 deberia arrancar SIN namespaces y no dar nada por resoluble', () => {
-      // 1. Arrange: sin sembrar. Antes el store nacia con tres namespaces
-      // inventados y validaba el nodo contra un flujo que no existe.
       const store = useTemplateMapperStore(NODE_ID);
-      store.availableTemplates = [buildTemplate(['parsed_email.clean_title'])];
-      store.setTemplateId(TEMPLATE_ID);
 
       // 2. Act & 3. Assert
-      expect(store.availableUpstreamNamespaces).toEqual([]);
-      expect(store.missingRequiredVariables).toEqual(['parsed_email.clean_title']);
-    });
-  });
-
-  describe('2. isConfigValid', () => {
-    it('2.1 deberia ser falso sin plantilla', () => {
-      // 1. Arrange & 2. Act
-      const store = useTemplateMapperStore(NODE_ID);
-
-      // 3. Assert
       expect(store.isConfigValid).toBe(false);
     });
 
-    it('2.2 deberia ser verdadero con plantilla, namespace valido y contrato completo', () => {
-      // 1. Arrange & 2. Act
-      const store = buildStoreWithTemplate(['parsed_email.clean_title']);
+    it('1.2 deberia ser verdadero con plantilla y namespace valido', () => {
+      // 1. Arrange
+      const store = buildStoreWithTemplate();
 
-      // 3. Assert
+      // 2. Act & 3. Assert
       expect(store.isConfigValid).toBe(true);
     });
 
-    it('2.3 deberia ser falso con un outputNamespace que el backend rechazaria', () => {
-      // 1. Arrange
-      const store = buildStoreWithTemplate(['parsed_email.clean_title']);
+    it('1.3 deberia ser falso con un outputNamespace que el backend rechazaria', () => {
+      // 1. Arrange: validarlo aqui evita un 400 sobre el esquema entero
+      const store = buildStoreWithTemplate();
 
-      // 2. Act: OUTPUT_NAMESPACE_PATTERN no admite guiones
+      // 2. Act
       store.setOutputNamespace('rendered-html');
 
       // 3. Assert
       expect(store.isConfigValid).toBe(false);
     });
 
-    it('2.4 deberia ser falso si falta un namespace requerido', () => {
-      // 1. Arrange & 2. Act
-      const store = buildStoreWithTemplate(['raw_email.body']);
+    it('1.4 deberia ser verdadero aunque el flujo no provea las variables de la plantilla', () => {
+      // 1. Arrange: PRUEBA DE REGRESION del bloqueo suprimido. Antes esto era
+      //    `false` y detenia el asistente; el nodo ya no interpola, asi que lo
+      //    que la plantilla pidiera al contexto no es precondicion suya.
+      const store = buildStoreWithContext(['raw_email.body_inexistente']);
 
-      // 3. Assert: Poka-Yoke — no se avanza con un contrato que se sabe roto
-      expect(store.isConfigValid).toBe(false);
+      // 2. Act & 3. Assert
+      expect(store.isConfigValid).toBe(true);
     });
 
-    it('2.5 deberia conmutar en vivo al quitar y devolver un namespace', () => {
+    it('1.5 no deberia reaccionar a un cambio de topologia', () => {
       // 1. Arrange
-      const store = buildStoreWithTemplate(['scraped_web.headline']);
+      const store = buildStoreWithContext(['parsed_email.clean_title']);
       expect(store.isConfigValid).toBe(true);
 
-      // 2. Act & 3. Assert: es lo que el banco de pruebas deja verificar a mano
-      store.setAvailableUpstreamNamespaces(['parsed_email', 'llm_response']);
-      expect(store.isConfigValid).toBe(false);
+      // 2. Act: se vacia el flujo entero aguas arriba
+      store.setAvailableUpstreamContext([]);
 
-      store.setAvailableUpstreamNamespaces(['parsed_email', 'scraped_web', 'llm_response']);
+      // 3. Assert: la validez del paso no depende de quien va delante
       expect(store.isConfigValid).toBe(true);
     });
 
-    it('2.6 deberia ser verdadero con una plantilla sin variables', () => {
-      // 1. Arrange & 2. Act
+    it('1.6 deberia ser verdadero con una plantilla sin variables', () => {
+      // 1. Arrange
       const store = buildStoreWithTemplate([]);
 
-      // 3. Assert: una plantilla estatica no exige nada al contexto
+      // 2. Act & 3. Assert
       expect(store.isConfigValid).toBe(true);
     });
   });
 
-  describe('3. Canal rico del anfitrion', () => {
-    it('3.1 deberia arrancar sin contexto y sin opciones que ofrecer', () => {
-      // 1. Arrange & 2. Act
+  describe('2. configWarnings', () => {
+    it('2.1 deberia avisar, SIN bloquear, de una plantilla que aun interpola', () => {
+      // 1. Arrange: espejo en diseno de la guarda del backend
+      const store = buildStoreWithTemplate(['parsed_email.clean_title']);
+
+      // 2. Act & 3. Assert
+      expect(store.configWarnings).toHaveLength(1);
+      expect(store.configWarnings[0]).toContain('ERR_TEMPLATE_PENDING_VARS');
+      expect(store.configWarnings[0]).toContain('parsed_email.clean_title');
+      expect(store.isConfigValid).toBe(true);
+    });
+
+    it('2.2 no deberia avisar de nada con una plantilla esqueleto', () => {
+      // 1. Arrange
+      const store = buildStoreWithContext([]);
+
+      // 2. Act & 3. Assert
+      expect(store.configWarnings).toEqual([]);
+    });
+
+    it('2.3 deberia avisar si el PROCESADOR_IA va por delante de este nodo', () => {
+      // 1. Arrange: con la inferencia aguas arriba, nadie rellena la plantilla
+      const store = buildStoreWithContext(
+        [],
+        [{ namespace: 'llm_response', nodeType: NodeType.PROCESADOR_IA, fields: [] }],
+      );
+
+      // 2. Act & 3. Assert
+      expect(store.configWarnings).toHaveLength(1);
+      expect(store.configWarnings[0]).toContain('ANTES de este nodo');
+      expect(store.isConfigValid).toBe(true);
+    });
+
+    it('2.4 deberia acumular los dos avisos cuando concurren', () => {
+      // 1. Arrange
+      const store = buildStoreWithContext(
+        ['parsed_email.clean_title'],
+        [{ namespace: 'llm_response', nodeType: NodeType.PROCESADOR_IA, fields: [] }],
+      );
+
+      // 2. Act & 3. Assert
+      expect(store.configWarnings).toHaveLength(2);
+      expect(store.isConfigValid).toBe(true);
+    });
+
+    it('2.5 no deberia avisar sin plantilla elegida', () => {
+      // 1. Arrange
       const store = useTemplateMapperStore(NODE_ID);
 
-      // 3. Assert
+      // 2. Act & 3. Assert
+      expect(store.configWarnings).toEqual([]);
+    });
+  });
+
+  describe('3. Canal rico del anfitrion', () => {
+    it('3.1 deberia arrancar sin contexto declarado', () => {
+      // 1. Arrange
+      const store = useTemplateMapperStore(NODE_ID);
+
+      // 2. Act & 3. Assert
       expect(store.availableUpstreamContext).toEqual([]);
-      expect(store.variableOptions).toEqual([]);
-      expect(store.hasUpstreamVariables).toBe(false);
     });
 
     it('3.2 deberia copiar el contexto recibido y no guardar la referencia', () => {
-      // 1. Arrange: el anfitrion reconstruye su arreglo en cada sincronizacion.
+      // 1. Arrange: el anfitrion reconstruye su arreglo en cada sincronizacion
       const store = useTemplateMapperStore(NODE_ID);
       const context: UpstreamNamespace[] = [...RICH_UPSTREAM];
 
       // 2. Act
       store.setAvailableUpstreamContext(context);
-      context.push({ namespace: 'http_result', nodeType: NodeType.DESTINO_HTTP, fields: [] });
+      context.length = 0;
 
       // 3. Assert
       expect(store.availableUpstreamContext).toHaveLength(RICH_UPSTREAM.length);
@@ -253,144 +229,65 @@ describe('useTemplateMapperStore · contrato de namespaces', () => {
     it('3.3 deberia reaccionar a un cambio de topologia sin recrear el store', () => {
       // 1. Arrange
       const store = buildStoreWithContext([]);
-      expect(store.hasUpstreamVariables).toBe(true);
 
-      // 2. Act: el operador retrocede y quita el nodo que publicaba campos
+      // 2. Act
       store.setAvailableUpstreamContext([]);
 
       // 3. Assert
-      expect(store.variableOptions).toEqual([]);
-      expect(store.hasUpstreamVariables).toBe(false);
+      expect(store.availableUpstreamContext).toEqual([]);
     });
   });
 
-  describe('4. variableOptions', () => {
-    it('4.1 deberia componer label, value y group de cada campo publicado', () => {
-      // 1. Arrange & 2. Act
-      const store = buildStoreWithContext([]);
+  describe('4. Contrato con el anfitrion', () => {
+    it('4.1 deberia publicar solo templateId en los params del esquema', () => {
+      // 1. Arrange: `outputNamespace` es propiedad del NODO, no de sus params;
+      //    duplicarlo crearia dos fuentes de verdad en el mismo JSON.
+      const store = buildStoreWithTemplate();
 
-      // 3. Assert: `value` es el marcador listo para pegar en la plantilla.
-      expect(store.variableOptions[0]).toEqual({
-        label: 'subject (text)',
-        value: '{{raw_email.subject}}',
-        group: 'raw_email (TRIGGER_IMAP)',
-      });
+      // 2. Act & 3. Assert
+      expect(store.toNodeParams()).toEqual({ templateId: TEMPLATE_ID });
     });
 
-    it('4.2 deberia ofrecer una opcion por campo de TODOS los namespaces', () => {
-      // 1. Arrange & 2. Act
-      const store = buildStoreWithContext([]);
-
-      // 3. Assert: dos de `raw_email` y dos de `parsed_email`; `scraped_web` no
-      // aporta ninguna porque llega sin inventario.
-      expect(store.variableOptions.map((option) => option.value)).toEqual([
-        '{{raw_email.subject}}',
-        '{{raw_email.attachments}}',
-        '{{parsed_email.clean_title}}',
-        '{{parsed_email.extracted_urls}}',
-      ]);
-    });
-
-    it('4.3 NO deberia filtrar por tipo, a diferencia del extractor web', () => {
-      // 1. Arrange & 2. Act
-      const store = buildStoreWithContext([]);
-
-      // 3. Assert: una plantilla interpola cualquier cosa que sepa convertirse
-      // en texto, asi que el `object` y el `url[]` tambien se ofrecen.
-      expect(store.variableOptions.map((option) => option.label)).toContain('attachments (object)');
-      expect(store.variableOptions.map((option) => option.label)).toContain(
-        'extracted_urls (url[])',
-      );
-    });
-
-    it('4.4 deberia etiquetar sin parentesis un namespace sin tipo de nodo', () => {
-      // 1. Arrange: `_assets` no lo escribe ningun nodo; lo inyecta el backend.
+    it('4.2 deberia rehidratar un nodo ya guardado y reproducir sus params', () => {
+      // 1. Arrange
       const store = useTemplateMapperStore(NODE_ID);
 
       // 2. Act
-      store.setAvailableUpstreamContext([
-        { namespace: '_assets', fields: [{ name: 'base_url', type: 'text' }] },
-      ]);
+      store.hydrateFromNode({
+        outputNamespace: 'rendered_html',
+        params: { templateId: TEMPLATE_ID },
+      });
 
       // 3. Assert
-      expect(store.variableOptions[0]?.group).toBe('_assets');
+      expect(store.toNodeParams()).toEqual({ templateId: TEMPLATE_ID });
+      expect(store.config.outputNamespace).toBe('rendered_html');
     });
-  });
 
-  describe('5. Grano fino de missingRequiredVariables', () => {
-    it('5.1 deberia reportar el campo que el namespace presente NO publica', () => {
-      // 1. Arrange & 2. Act: `parsed_email` esta aguas arriba, pero no publica
-      // `clean_body`. Hasta ahora esto pasaba por bueno y reventaba en ejecucion.
-      const store = buildStoreWithContext(['parsed_email.clean_body']);
+    it('4.3 deberia conservar el namespace por defecto si llega vacio', () => {
+      // 1. Arrange: un namespace en blanco no pasaria el patron y dejaria el
+      //    paso invalido sin que el operador entienda por que.
+      const store = useTemplateMapperStore(NODE_ID);
+
+      // 2. Act
+      store.hydrateFromNode({
+        outputNamespace: '',
+        params: { templateId: TEMPLATE_ID },
+      });
 
       // 3. Assert
-      expect(store.missingRequiredVariables).toEqual(['parsed_email.clean_body']);
+      expect(store.config.outputNamespace).toBe('rendered_html');
+    });
+
+    it('4.4 deberia dejar el paso invalido al reiniciar la configuracion', () => {
+      // 1. Arrange
+      const store = buildStoreWithTemplate();
+
+      // 2. Act
+      store.resetConfig();
+
+      // 3. Assert
+      expect(store.config.templateId).toBeNull();
       expect(store.isConfigValid).toBe(false);
-    });
-
-    it('5.2 no deberia reportar un campo que si esta en el inventario', () => {
-      // 1. Arrange & 2. Act
-      const store = buildStoreWithContext(['parsed_email.clean_title', 'raw_email.subject']);
-
-      // 3. Assert
-      expect(store.missingRequiredVariables).toEqual([]);
-      expect(store.isConfigValid).toBe(true);
-    });
-
-    it('5.3 no deberia reportar nada de un namespace con inventario vacio', () => {
-      // 1. Arrange & 2. Act: `scraped_web` llega sin campos. Vacio significa "aun
-      // no se que publica" —catalogo sin cargar, o tipo sin declarar—, nunca un
-      // error: tratarlo como fallo marcaria en rojo cada plantilla al arrancar.
-      const store = buildStoreWithContext(['scraped_web.article_title']);
-
-      // 3. Assert
-      expect(store.missingRequiredVariables).toEqual([]);
-      expect(store.isConfigValid).toBe(true);
-    });
-
-    it('5.4 deberia juzgar una ruta profunda por sus dos primeros segmentos', () => {
-      // 1. Arrange: lo que el nodo publica es `attachments`; `.0.filename` es la
-      // forma de DENTRO del objeto, que ninguna estrategia declara campo a campo.
-      const store = buildStoreWithContext([
-        'raw_email.attachments.0.filename',
-        'raw_email.no_existe.0.x',
-      ]);
-
-      // 2. Act & 3. Assert
-      expect(store.missingRequiredVariables).toEqual(['raw_email.no_existe.0.x']);
-    });
-
-    it('5.5 deberia separar el fallo de namespace del fallo de campo', () => {
-      // 1. Arrange & 2. Act: los dos arreglos son distintos —anadir un nodo, o
-      // corregir la plantilla— y el componente los enuncia por separado.
-      const store = buildStoreWithContext([
-        'validated_drupal_json.body',
-        'parsed_email.clean_body',
-      ]);
-
-      // 3. Assert
-      expect(store.missingUpstreamNamespaces).toEqual(['validated_drupal_json']);
-      expect(store.missingUpstreamFields).toEqual(['parsed_email.clean_body']);
-    });
-  });
-
-  describe('6. hasUpstreamVariables', () => {
-    it('6.1 no deberia invalidar una plantilla estatica sin nada aguas arriba', () => {
-      // 1. Arrange & 2. Act: un pie corporativo no interpola nada, y exigirle
-      // contexto seria inventar un requisito que el motor no tiene.
-      const store = buildStoreWithTemplate([], []);
-
-      // 3. Assert
-      expect(store.hasUpstreamVariables).toBe(false);
-      expect(store.isConfigValid).toBe(true);
-    });
-
-    it('6.2 deberia ser verdadero en cuanto un paso anterior publique un campo', () => {
-      // 1. Arrange & 2. Act
-      const store = buildStoreWithContext([]);
-
-      // 3. Assert
-      expect(store.hasUpstreamVariables).toBe(true);
     });
   });
 });

@@ -265,6 +265,30 @@ const matchesAllowedAttribute = (
  * necesita para construir su propia respuesta —un `NodeResult` en la estrategia,
  * una excepcion HTTP en el controlador—, sin que el renderer conozca a ninguno.
  */
+/** Resultado de preparar markup para inyectarlo en el contexto de un flujo. */
+export interface InjectableMarkupOutcome {
+  /** Markup tras aplicar la lista blanca efectiva. */
+  readonly sanitized: string;
+  /** Si la lista blanca elimino algo respecto del original. */
+  readonly wasFiltered: boolean;
+  /**
+   * Etiquetas pedidas por el llamante que la lista blanca global NO admite.
+   *
+   * Se informan en vez de concederse: `allowedTags` solo puede RESTAR. Ampliar
+   * la lista por parametro convertiria la configuracion de un nodo en una via
+   * para reintroducir etiquetas que el saneador prohibe a conciencia.
+   */
+  readonly unsupportedTags: string[];
+}
+
+/** Resultado de comprobar que un markup conserva la estructura esperada. */
+export interface StructureAudit {
+  /** Selectores validos que no encuentran ningun nodo. */
+  readonly missing: string[];
+  /** Selectores que el motor de consultas no sabe interpretar. */
+  readonly invalid: string[];
+}
+
 export type RenderOutcome =
   | { readonly markup: string }
   | { readonly missingFields: string[] }
@@ -380,6 +404,92 @@ export class TemplateRendererService {
     const normalized = sanitizeHtml(html, PUBLISHABLE_MARKUP_PROBE_CONFIG);
 
     return { sanitized, wasFiltered: sanitized !== normalized };
+  }
+
+  /**
+   * Prepara un markup para inyectarlo tal cual en el contexto de la ejecucion.
+   *
+   * Lo usa `TemplateMapperStrategy`: el nodo ya no compila la plantilla, la
+   * entrega saneada para que un `PROCESADOR_IA` posterior la rellene. El
+   * saneado vive aqui y no en la estrategia a proposito, para que exista UNA
+   * sola lista blanca en el backend; una segunda copia divergiria del gestor en
+   * cuanto alguien tocara solo una de las dos.
+   *
+   * @param html Markup a preparar, sin compilar.
+   * @param allowedTags Subconjunto con el que ESTRECHAR la lista blanca. Vacio
+   *        deja la lista completa. Nunca la amplia: lo que no este en
+   *        `TEMPLATE_SANITIZER_CONFIG` se devuelve en `unsupportedTags`.
+   */
+  public prepareInjectableMarkup(
+    html: string,
+    allowedTags: readonly string[] = [],
+  ): InjectableMarkupOutcome {
+    const requested = allowedTags.map((tag) => tag.toLowerCase());
+    const unsupportedTags = [
+      ...new Set(requested.filter((tag) => !ALLOWED_TAGS.has(tag))),
+    ];
+
+    // Interseccion y no lo pedido a secas: aunque el llamante nombre una
+    // etiqueta prohibida, el saneado corre igualmente con la lista recortada.
+    // Quien decide si `unsupportedTags` aborta la operacion es el consumidor.
+    const effectiveTags = requested.filter((tag) => ALLOWED_TAGS.has(tag));
+
+    const options: sanitizeHtml.IOptions =
+      effectiveTags.length > 0
+        ? { ...TEMPLATE_SANITIZER_CONFIG, allowedTags: effectiveTags }
+        : TEMPLATE_SANITIZER_CONFIG;
+
+    const sanitized = sanitizeHtml(html, options);
+
+    // Misma tecnica de dos pasadas que `inspectPublishableMarkup`, y no una
+    // comparacion contra el original: el saneador normaliza comillas y cierres
+    // aunque no filtre nada, y compararlo crudo daria `wasFiltered` siempre.
+    const normalized = sanitizeHtml(html, PUBLISHABLE_MARKUP_PROBE_CONFIG);
+
+    return { sanitized, wasFiltered: sanitized !== normalized, unsupportedTags };
+  }
+
+  /**
+   * Comprueba que un markup conserva los selectores que el flujo da por hechos.
+   *
+   * Es el contrato estructural del nodo MAPEADOR_PLANTILLA. Hace falta porque
+   * `TemplatesService` prohibe los marcadores libres: una ranura que la IA debe
+   * rellenar no se puede nombrar con `{{hueco}}`, solo por su posicion en el DOM.
+   *
+   * No lanza, igual que `auditPublishableMarkup`: este servicio devuelve datos y
+   * es el consumidor quien construye el `NodeResult` o la excepcion HTTP.
+   *
+   * @param html Markup a examinar, preferiblemente YA saneado: un selector que
+   *        apunte a una etiqueta que la lista blanca descarta debe contar como
+   *        ausente, no como presente.
+   * @param requiredSelectors Selectores CSS exigidos.
+   */
+  public auditStructure(
+    html: string,
+    requiredSelectors: readonly string[],
+  ): StructureAudit {
+    if (requiredSelectors.length === 0) return { missing: [], invalid: [] };
+
+    // Mismo parser y mismas banderas que `auditPublishableMarkup`; el porque
+    // esta documentado en extenso en ese metodo (htmlparser2 no sintetiza
+    // `<html>`/`<body>`, y `xml` como objeto evita el modo sensible a mayusculas).
+    const $ = cheerio.load(html, { xml: { xmlMode: false } }, false);
+
+    const missing: string[] = [];
+    const invalid: string[] = [];
+
+    for (const selector of requiredSelectors) {
+      try {
+        if ($(selector).length === 0) missing.push(selector);
+      } catch {
+        // Un selector que el motor no sabe parsear no es "ausente": es un error
+        // de configuracion del nodo, y mezclarlo con los ausentes mandaria al
+        // operador a mirar la plantilla en vez de su propia lista.
+        invalid.push(selector);
+      }
+    }
+
+    return { missing, invalid };
   }
 
   /**

@@ -1,10 +1,6 @@
 import * as templatesService from '@services/templates.service';
 
-import type {
-  HtmlTemplate,
-  PreviewTemplatePayload,
-  TemplatePreviewResponse,
-} from '@/types/html-template';
+import type { HtmlTemplate } from '@/types/html-template';
 
 // Frontera HTTP del nodo MAPEADOR_PLANTILLA (regla frontend-quasar.md §3.1).
 //
@@ -23,9 +19,3 @@ import type {
  */
 export const fetchSelectableTemplates = async (): Promise<HtmlTemplate[]> =>
   templatesService.fetchTemplates();
-
-/** Prueba de compilacion con un payload simulado, para el boton de vista previa. */
-export const compilePreview = async (
-  templateId: string,
-  payload: PreviewTemplatePayload = {},
-): Promise<TemplatePreviewResponse> => templatesService.previewTemplate(templateId, payload);

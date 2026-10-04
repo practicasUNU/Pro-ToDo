@@ -46,7 +46,6 @@ vi.mock('@services/nodes/llm-extractor.service', () => ({
 }));
 vi.mock('@services/nodes/template-mapper.service', () => ({
   fetchSelectableTemplates: vi.fn(),
-  compilePreview: vi.fn(),
 }));
 
 const workflowTemplatesService = await import('@services/workflow-templates.service');
