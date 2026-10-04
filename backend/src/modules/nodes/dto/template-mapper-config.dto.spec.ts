@@ -208,8 +208,58 @@ describe('TemplateMapperConfigDto', () => {
     });
   });
 
-  describe('5. resolveTemplateMapperConfig', () => {
-    it('5.1 deberia representar la ausencia sin lanzar', async () => {
+  describe('5. outputNamespace tolerado', () => {
+    it('5.1 deberia admitir su ausencia, que es lo normal hoy', async () => {
+      // 1. Arrange 📐: el asistente nunca lo escribe en `params`
+      const params = { templateId: TEMPLATE_ID };
+
+      // 2. Act ⚙️
+      const errors = await validateParams(params);
+
+      // 3. Assert 🎯
+      expect(errors).toHaveLength(0);
+    });
+
+    it('5.2 deberia admitir el campo heredado sin rechazar el esquema', async () => {
+      // 1. Arrange 📐: es la razon de existir del campo. Sin declararlo, enlazar
+      //    `paramsSchema` convertiria este flujo historico en un 400.
+      const params = { templateId: TEMPLATE_ID, outputNamespace: 'rendered_html' };
+
+      // 2. Act ⚙️
+      const errors = await validateParams(params);
+
+      // 3. Assert 🎯
+      expect(errors).toHaveLength(0);
+    });
+
+    it('5.3 deberia rechazar un namespace que el validador de topologia no aceptaria', async () => {
+      // 1. Arrange 📐: tolerar el campo no es tolerar cualquier contenido
+      const params = { outputNamespace: 'rendered-html' };
+
+      // 2. Act ⚙️
+      const errors = await validateParams(params);
+
+      // 3. Assert 🎯
+      expect(errors).toHaveLength(1);
+      expect(errors[0]?.property).toBe('outputNamespace');
+    });
+
+    it('5.4 NO deberia asomar en la configuracion resuelta', async () => {
+      // 1. Arrange 📐 & 2. Act ⚙️: se tolera para no romper el guardado, pero el
+      //    namespace efectivo es el del NODO. Exponerlo aqui crearia la segunda
+      //    fuente de verdad que el DTO del PROCESADOR_IA prohibe por escrito.
+      const config = resolveTemplateMapperConfig({
+        templateId: TEMPLATE_ID,
+        outputNamespace: 'rendered_html',
+      });
+
+      // 3. Assert 🎯
+      expect(config).not.toHaveProperty('outputNamespace');
+    });
+  });
+
+  describe('6. resolveTemplateMapperConfig', () => {
+    it('6.1 deberia representar la ausencia sin lanzar', async () => {
       // 1. Arrange 📐 & 2. Act ⚙️
       const config = resolveTemplateMapperConfig({});
 
@@ -222,7 +272,7 @@ describe('TemplateMapperConfigDto', () => {
       });
     });
 
-    it('5.2 deberia conservar los valores declarados', async () => {
+    it('6.2 deberia conservar los valores declarados', async () => {
       // 1. Arrange 📐 & 2. Act ⚙️
       const config = resolveTemplateMapperConfig({
         templateId: TEMPLATE_ID,

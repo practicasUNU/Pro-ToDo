@@ -49,17 +49,19 @@ const namespacesOf = (context: readonly UpstreamNamespace[]): string[] =>
 
 describe('prompt-namespaces · filtro Poka-Yoke de origenes', () => {
   describe('1. Escenario A: catalogo global', () => {
-    it('1.1 deberia dejar exactamente los cuatro origenes citables', () => {
+    it('1.1 deberia dejar exactamente los cinco origenes citables', () => {
       // 1. Arrange & 2. Act
       const context = buildPromptContextFromCatalog(FULL_CATALOG);
 
       // 3. Assert: es el contrato completo de la vista general. Si alguien
       //    anade un nodo al catalogo, esta lista lo delata antes que la UI.
+      //    `rendered_html` entro con el cambio de semantica del mapeador.
       expect(namespacesOf(context)).toEqual([
         'raw_email',
         'cron_trigger',
         'parsed_email',
         'scraped_web',
+        'rendered_html',
       ]);
     });
 
@@ -75,13 +77,15 @@ describe('prompt-namespaces · filtro Poka-Yoke de origenes', () => {
       expect(context).toEqual([]);
     });
 
-    it('1.3 deberia excluir el mapeador pese a ser de PROCESAMIENTO', () => {
+    it('1.3 deberia OFRECER el mapeador, que ahora precede a la IA', () => {
       // 1. Arrange & 2. Act
       const context = buildPromptContextFromCatalog(FULL_CATALOG);
 
-      // 3. Assert: consume lo que produce la IA, asi que en ejecucion no habra
-      //    corrido cuando toque resolver el prompt.
-      expect(namespacesOf(context)).not.toContain('rendered_html');
+      // 3. Assert: INVERSA de la regla anterior, y a proposito. Mientras el
+      //    nodo compilaba iba detras y citarlo era imposible; desde el cambio
+      //    de semantica publica el esqueleto que la instruccion debe mandar
+      //    rellenar, asi que esconderlo obligaba a teclear el marcador a mano.
+      expect(namespacesOf(context)).toContain('rendered_html');
     });
 
     it('1.4 deberia excluir la propia salida de la IA', () => {
@@ -129,8 +133,28 @@ describe('prompt-namespaces · filtro Poka-Yoke de origenes', () => {
       expect(namespacesOf(context)).toEqual(['raw_email', 'parsed_email']);
     });
 
-    it('2.2 deberia caerse un destino aunque el flujo lo coloque antes', () => {
-      // 1. Arrange: topologia legal pero origen sin sentido para la instruccion.
+    it('2.2 deberia caerse el escudo aunque el flujo lo coloque antes', () => {
+      // 1. Arrange: topologia legal pero origen sin sentido para la instruccion,
+      //    porque el escudo valida la salida que esta misma inferencia produce.
+      const upstream: UpstreamNamespace[] = [
+        { namespace: 'parsed_email', nodeType: NodeType.PARSER_PRE_IA, fields: [FIELD] },
+        {
+          namespace: 'validated_drupal_json',
+          nodeType: NodeType.ESCUDO_POST_IA,
+          fields: [FIELD],
+        },
+      ];
+
+      // 2. Act
+      const context = filterPromptContext(upstream);
+
+      // 3. Assert
+      expect(namespacesOf(context)).toEqual(['parsed_email']);
+    });
+
+    it('2.5 deberia conservar el mapeador colocado delante de la IA', () => {
+      // 1. Arrange: es la topologia PREVISTA desde el cambio de semantica, no
+      //    una rareza que haya que tolerar.
       const upstream: UpstreamNamespace[] = [
         { namespace: 'parsed_email', nodeType: NodeType.PARSER_PRE_IA, fields: [FIELD] },
         { namespace: 'rendered_html', nodeType: NodeType.MAPEADOR_PLANTILLA, fields: [FIELD] },
@@ -140,7 +164,7 @@ describe('prompt-namespaces · filtro Poka-Yoke de origenes', () => {
       const context = filterPromptContext(upstream);
 
       // 3. Assert
-      expect(namespacesOf(context)).toEqual(['parsed_email']);
+      expect(namespacesOf(context)).toEqual(['parsed_email', 'rendered_html']);
     });
 
     it('2.3 no deberia mutar el arreglo recibido', () => {
@@ -169,12 +193,12 @@ describe('prompt-namespaces · filtro Poka-Yoke de origenes', () => {
   });
 
   describe('3. La lista de exclusiones', () => {
-    it('3.1 deberia cubrir los tres tipos nominales', () => {
+    it('3.1 deberia cubrir los dos tipos nominales', () => {
       // 1. Arrange & 2. Act & 3. Assert: los destinos NO estan aqui a
-      //    proposito; se excluyen por categoria.
+      //    proposito; se excluyen por categoria. Y el MAPEADOR_PLANTILLA
+      //    tampoco: salio de la lista al pasar a ejecutarse ANTES de la IA.
       expect([...PROMPT_EXCLUDED_NODE_TYPES].sort()).toEqual([
         NodeType.ESCUDO_POST_IA,
-        NodeType.MAPEADOR_PLANTILLA,
         NodeType.PROCESADOR_IA,
       ]);
     });

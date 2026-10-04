@@ -13,12 +13,20 @@ import type { UpstreamNamespace } from '@stores/nodes/node-store-registry';
 /**
  * Tipos de nodo cuyo namespace NO puede alimentar una plantilla de prompt.
  *
- * `MAPEADOR_PLANTILLA` y `ESCUDO_POST_IA` consumen lo que produce la IA, asi que
- * citarlos desde el prompt seria pedirle al modelo el resultado de procesar su
- * propia respuesta: en ejecucion ninguno de los dos habra corrido todavia.
+ * `ESCUDO_POST_IA` consume lo que produce la IA, asi que citarlo desde el prompt
+ * seria pedirle al modelo el resultado de procesar su propia respuesta: en
+ * ejecucion no habra corrido todavia.
  *
  * `PROCESADOR_IA` por lo mismo, un paso mas cerca: `llm_response` es su PROPIA
  * salida, y un prompt que se cita a si mismo no resuelve nunca.
+ *
+ * `MAPEADOR_PLANTILLA` ESTUVO AQUI y ya no esta, y la asimetria es deliberada.
+ * Mientras el nodo compilaba la plantilla consumia la salida de la IA y iba
+ * detras, de modo que citarlo era imposible. Desde el cambio de semantica va
+ * DELANTE: publica en `rendered_html.compiled_markup` el esqueleto HTML saneado
+ * que la instruccion debe pedir al modelo que rellene. Es, de hecho, el origen
+ * con mas sentido para un prompt de redaccion, y esconderlo obligaba al operador
+ * a teclear el marcador de memoria.
  *
  * Los destinos no estan aqui sino en `isExcludedCategory`: son dos hoy
  * (`DESTINO_HTTP`, `DESTINO_ACENS`) pero la regla es "todo lo que cierre el
@@ -28,7 +36,6 @@ import type { UpstreamNamespace } from '@stores/nodes/node-store-registry';
 export const PROMPT_EXCLUDED_NODE_TYPES: ReadonlySet<string> = new Set<string>([
   NodeType.PROCESADOR_IA,
   NodeType.ESCUDO_POST_IA,
-  NodeType.MAPEADOR_PLANTILLA,
 ]);
 
 /**
@@ -74,8 +81,8 @@ export const buildPromptContextFromCatalog = (
  *
  * El anfitrion ya ha resuelto la precedencia (`flujo-draft.store.upstreamContext`),
  * asi que aqui solo queda quitar lo que un prompt no debe citar aunque vaya
- * delante — un mapeador colocado antes del nodo de IA es una topologia legal
- * pero un origen sin sentido para la instruccion.
+ * delante: hoy, un `ESCUDO_POST_IA` mal colocado. El mapeador YA NO se filtra —
+ * colocado antes del nodo de IA no solo es una topologia legal, es la prevista.
  */
 export const filterPromptContext = (context: readonly UpstreamNamespace[]): UpstreamNamespace[] =>
   context.filter(({ nodeType }) => !isExcludedNodeType(nodeType)).map((entry) => ({ ...entry }));

@@ -4,6 +4,8 @@ import { StatePayloadContext } from '@core/fsm/context/state-payload.context';
 import { NodeType } from '@core/fsm/types/pipeline-schema.types';
 import { createTemplateRendererService } from '@test/factories/template-renderer.factory';
 
+import { TemplateMapperConfigDto } from '../dto/template-mapper-config.dto';
+
 import {
   ERR_TEMPLATE_MISSING_VARS,
   ERR_TEMPLATE_NOT_RESOLVED,
@@ -644,6 +646,32 @@ describe('TemplateMapperStrategy', () => {
         ERR_TEMPLATE_MISSING_VARS,
         ERR_TEMPLATE_RENDER,
       ]);
+    });
+
+    it('7.5 deberia someter sus params a validacion estricta', () => {
+      // 1. Arrange & 2. Act
+      const strategy = buildStrategy(buildService());
+
+      // 3. Assert: con esto `PipelineValidatorService` rechaza al guardar una
+      //    clave que el DTO no declare, en vez de dejarla pasar en silencio
+      expect(strategy.paramsSchema).toBe(TemplateMapperConfigDto);
+    });
+
+    it('7.6 deberia tolerar el outputNamespace heredado dentro de params', async () => {
+      // 1. Arrange: la auditoria lo encontro en flujos historicos. El nodo lo
+      //    IGNORA —el namespace efectivo es el del nodo— pero no debe atragantarse.
+      const service = buildService();
+      service.findOne.mockResolvedValue(buildTemplate());
+      const strategy = buildStrategy(service);
+
+      // 2. Act
+      const result = await strategy.execute(buildContext(), {
+        templateId: TEMPLATE_ID,
+        outputNamespace: 'rendered_html',
+      });
+
+      // 3. Assert
+      expect(result.success).toBe(true);
     });
 
     it('7.5 no deberia declarar inalcanzable ningun codigo que si emite', () => {

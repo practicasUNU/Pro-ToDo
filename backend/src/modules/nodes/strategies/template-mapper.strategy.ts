@@ -4,7 +4,10 @@ import { NodeType } from '@core/fsm/types/pipeline-schema.types';
 import { TemplateRendererService } from '@modules/templates/services/template-renderer.service';
 import { TemplatesService } from '@modules/templates/templates.service';
 
-import { resolveTemplateMapperConfig } from '../dto/template-mapper-config.dto';
+import {
+  TemplateMapperConfigDto,
+  resolveTemplateMapperConfig,
+} from '../dto/template-mapper-config.dto';
 
 import type { StatePayloadContext } from '@core/fsm/context/state-payload.context';
 import type {
@@ -13,7 +16,6 @@ import type {
   NodeOutputField,
   NodeResult,
 } from '@core/fsm/types/node-strategy.types';
-import type { TemplateMapperConfigDto } from '../dto/template-mapper-config.dto';
 
 /**
  * Codigos de fallo del nodo. Son lo que un `catchErrors` puede mencionar, y se
@@ -112,6 +114,24 @@ export class TemplateMapperStrategy implements INodeStrategy {
    * de forma explicita: quien audite una ejecucion lee la descripcion, no el
    * identificador.
    */
+  /**
+   * Validacion estricta de los `params` al guardar y al activar.
+   *
+   * Lo aplica `PipelineValidatorService.validateNodeParams` con
+   * `whitelist: true, forbidNonWhitelisted: true`, de modo que una clave que el
+   * DTO no declare deja de colarse en silencio y sale como
+   * `nodes.<nodeId>.params.<clave>` — la ruta con la que el asistente senala el
+   * control concreto. `assertActivatable` revalida el esquema entero, asi que la
+   * comprobacion ocurre tambien antes de habilitar el flujo.
+   *
+   * Se conecta AHORA y no con el resto del cambio de semantica porque antes
+   * hacia falta auditar `configuracion_pipeline`: con `forbidNonWhitelisted`,
+   * cualquier `params` historico con una clave de mas pasaba a ser un 400 sobre
+   * un flujo que hasta entonces se guardaba. La auditoria encontro
+   * `outputNamespace`, y por eso el DTO lo declara como tolerado.
+   */
+  public readonly paramsSchema = TemplateMapperConfigDto;
+
   public readonly outputFields: readonly NodeOutputField[] = [
     {
       name: 'compiled_markup',

@@ -6599,3 +6599,73 @@ Backend 1597 pruebas en verde (32 de la estrategia, 16 del DTO nuevo, 11 anadida
 Frontend 703 en verde. Dos pruebas de `flujo-draft.store.spec.ts` cambian de canal —preguntan por
 `availableUpstreamContext` en vez del de nombres— porque lo que vigilan es que el ANFITRION
 recalcule al cambiar de pipeline, no por que canal viaja el dato.
+
+---
+
+## PROT-23b · Validacion estricta del mapeador y la plantilla base en el prompt
+
+Cierra lo que PROT-23 dejo abierto, en la misma rama `feat/mapeador-inyeccion`.
+
+### La auditoria era la condicion, no un tramite
+
+`paramsSchema` quedo sin conectar porque `PipelineValidatorService` valida con
+`forbidNonWhitelisted: true`: una clave historica no declarada deja de ser un campo ignorado y pasa
+a ser un 400 al guardar Y al activar (`assertActivatable` revalida el esquema entero). La auditoria
+encontro `outputNamespace` dentro de `params`, que es justo el caso que habria roto flujos que hasta
+ahora se guardaban sin problema.
+
+### Tolerado, validado, y deliberadamente NO resuelto
+
+El proyecto tiene las dos posturas por escrito: los DTO de `TRIGGER_CRON` y `TRIGGER_IMAP` aceptan
+`outputNamespace` en `params`, y el de `PROCESADOR_IA` lo prohibe porque "crearia una segunda fuente
+de verdad que el validador de topologia no ve". Aqui se toma una tercera, que es la union de lo
+bueno de ambas: se DECLARA (para que el esquema historico siga guardandose) y se VALIDA contra
+`OUTPUT_NAMESPACE_PATTERN` (tolerar el campo no es tolerar cualquier contenido), pero **no entra en
+`ResolvedTemplateMapperConfig`**. Lo que no se resuelve no se puede leer por accidente, y el
+namespace efectivo sigue siendo uno solo: el del nodo.
+
+La migracion 026 retira la clave de `flujos` y `plantillas_flujo`, y se entrega SIN aplicar. El
+orden importa en una sola direccion: se puede aplicar cuando se quiera, pero el campo no puede
+salir del DTO antes de aplicarla.
+
+### El fixture dummy no se rompe, y por que conviene saberlo
+
+`dummy-pipeline.fixture.ts` declara `params: { template: DUMMY_TEMPLATE }`, una clave que el DTO no
+tiene, y tanto `run-dummy-e2e.ts` como la e2e del motor validan ese esquema. No rompe porque ambos
+llaman a `registerDummyStrategies(factory)` ANTES, y `registerStrategy` reemplaza al duplicado: el
+`MAPEADOR_PLANTILLA` que resuelve la factoria es el dummy, que no declara `paramsSchema`. Es una
+dependencia del ORDEN de registro, no una propiedad estable, y por eso queda anotada.
+
+### El PASO 3 del encargo ya estaba hecho
+
+Se pedia que `LlmExtractorStrategy` leyera `compiled_markup` del contexto y lo inyectara en el
+prompt con un `.replace()`. Resulta que la estrategia YA interpola el prompt entero contra el
+contexto (`interpolate` -> `getInterpolatedValue` -> `resolvePath`, que recorre todos los namespaces
+sin lista blanca), asi que `{{rendered_html.compiled_markup}}` se resuelve hoy, y da igual que el
+prompt venga de `inlinePrompt`, de `templatePromptId` o de `promptCode`: la interpolacion ocurre
+despues de resolverlo, sobre la cadena. `getRequiredNamespaces` ademas ya extrae las raices del
+`inlinePrompt`, de modo que la regla 7 valida la dependencia al guardar.
+
+Escribirlo habria anadido cuatro defectos: un namespace `template_base` que no existe en la lista
+cerrada —el mapeador escribe en `rendered_html`—, un error sin `code` que no compila y que dejaria
+el fallo inenrutable, una plantilla OBLIGATORIA que rompe el rescate OCR (`PARSER -> OCR ->
+PROCESADOR_IA`, sin mapeador) y cualquier nodo de IA recien anadido, y un `.replace()` literal mas
+fragil que la interpolacion a la que sustituia, porque no tolera `{{ ns.campo }}` con espacios.
+
+### Lo que si faltaba: que la interfaz lo ofreciera
+
+`PROMPT_EXCLUDED_NODE_TYPES` escondia el mapeador del explorador de variables, con este motivo:
+"consumen lo que produce la IA... en ejecucion ninguno de los dos habra corrido todavia". Era cierto
+mientras el nodo compilaba e iba al final. Desde que precede a la inferencia es falso, y de hecho
+`rendered_html.compiled_markup` es el origen con MAS sentido para una instruccion de redaccion.
+Sale de la lista; `PROCESADOR_IA` (que seria citarse a si mismo) y `ESCUDO_POST_IA` (que valida la
+salida de esta misma inferencia) se quedan.
+
+La prueba 1.3 del spec se invierte literalmente —de `not.toContain('rendered_html')` a
+`toContain(...)`— y la 2.2 cambia de sujeto al escudo, porque su enunciado ("un origen sin sentido
+aunque el flujo lo coloque antes") ya no describe al mapeador.
+
+### Cobertura
+
+Backend 1603 en verde (34 de la estrategia, 20 del DTO). Frontend 704. `npx tsc --noEmit` mantiene
+los 89 errores preexistentes, ninguno nuevo. Build de Quasar correcto.

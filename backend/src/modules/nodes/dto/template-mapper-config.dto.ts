@@ -10,6 +10,8 @@ import {
   MaxLength,
 } from 'class-validator';
 
+import { OUTPUT_NAMESPACE_PATTERN } from '@core/fsm/types/pipeline-schema.types';
+
 /**
  * Techo de selectores estructurales por nodo.
  *
@@ -119,6 +121,32 @@ export class TemplateMapperConfigDto {
       'Cada etiqueta debe ser un nombre HTML en minusculas (ej. "h1", "div").',
   })
   allowedTags?: string[];
+
+  @ApiPropertyOptional({
+    description:
+      'TOLERADO POR COMPATIBILIDAD y deliberadamente IGNORADO. El namespace efectivo es el `outputNamespace` del NODO en el pipeline_schema, que es el que usa FsmEngineService para depositar el resultado.',
+    pattern: OUTPUT_NAMESPACE_PATTERN.source,
+  })
+  // Existe SOLO para que `forbidNonWhitelisted` no rechace los esquemas
+  // historicos que lo guardaron aqui. Una auditoria de `configuracion_pipeline`
+  // confirmo que hay nodos con el campo dentro de `params`; sin declararlo,
+  // enlazar `paramsSchema` convertiria esos flujos en un 400 al guardar Y al
+  // activar, que es justo lo que freno la conexion en el commit anterior.
+  //
+  // Mismo trato que en `cron-trigger-config.dto.ts` e `imap-trigger-config.dto.ts`,
+  // con UNA diferencia deliberada: alli el valor se resuelve y se usa, y aqui NO
+  // entra en `ResolvedTemplateMapperConfig`. Declararlo y leerlo crearia la
+  // segunda fuente de verdad que denuncia `llm-extractor-config.dto.ts`: dos
+  // sitios donde mirar el namespace, y el validador de topologia solo ve uno.
+  //
+  // Se valida contra el patron igualmente. Aceptar cualquier cadena convertiria
+  // un campo tolerado en una puerta para guardar basura que nadie revisara.
+  @IsOptional()
+  @IsString({ message: 'outputNamespace debe ser una cadena.' })
+  @Matches(OUTPUT_NAMESPACE_PATTERN, {
+    message: 'outputNamespace debe ser snake_case alfanumerico en minusculas.',
+  })
+  outputNamespace?: string;
 }
 
 /** Configuracion del mapeador con los valores por defecto ya aplicados. */
