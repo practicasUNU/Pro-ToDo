@@ -48,7 +48,10 @@ const { BaseParamsProbe } = vi.hoisted(() => ({
 // DENTRO de la factory: referenciar `BaseParamsProbe` aqui fuera lo leeria antes
 // de su inicializacion.
 vi.mock('@components/nodes/node-base-params-registry', () => ({
-  nodeBaseParamsRegistry: { TRIGGER_IMAP: BaseParamsProbe },
+  nodeBaseParamsRegistry: {
+    TRIGGER_IMAP: BaseParamsProbe,
+    EXTRACTOR_WEB: BaseParamsProbe,
+  },
 }));
 
 const PARSER_ID = 'nodo_parser';
@@ -239,6 +242,23 @@ describe('TemplateNodeCard · ruta de contingencia de un paso', () => {
       // 3. Assert 🎯
       expect(control.props('locked')).toBe(true);
       expect(control.props('nodeId')).toBe('trigger_imap');
+    });
+
+    it('3.0ter deberia montar el control del EXTRACTOR_WEB y propagar sus cambios', async () => {
+      // 1. Arrange 📐: el tipo tiene ya su propia entrada en el registro, que es
+      //    lo que hace visible el interruptor de omision dentro de la plantilla.
+      //    Antes no se pintaba nada y la contingencia OCR era indeclarable.
+      const wrapper = mountCard({
+        step: buildStep('nodo_extractor', NodeType.EXTRACTOR_WEB, 'scraped_web'),
+      });
+      const control = wrapper.findComponent(BaseParamsProbe);
+
+      // 2. Act ⚙️: el control emite el objeto COMPLETO, por contrato.
+      expect(control.exists()).toBe(true);
+      await control.vm.$emit('update:params', { skipIfEmpty: false });
+
+      // 3. Assert 🎯: la ficha solo reenvia; quien reemplaza el paso es el store.
+      expect(wrapper.emitted('update:params')?.[0]?.[0]).toEqual({ skipIfEmpty: false });
     });
 
     it('3.0bis deberia dejarlo editable sin ruta de vision', () => {

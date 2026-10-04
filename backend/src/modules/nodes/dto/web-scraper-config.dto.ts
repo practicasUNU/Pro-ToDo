@@ -1,5 +1,6 @@
 import { ApiPropertyOptional } from '@nestjs/swagger';
 import {
+  IsBoolean,
   IsInt,
   IsNotEmpty,
   IsOptional,
@@ -46,6 +47,18 @@ export const MIN_SCRAPER_RETRY_DELAY_MS = 500;
 
 /** Techo de la espera entre reintentos. */
 export const MAX_SCRAPER_RETRY_DELAY_MS = 10_000;
+
+/**
+ * Por defecto, un extractor sin origen se SALTA en vez de romper el flujo.
+ *
+ * Se elige este defecto porque el modo de fallo que cubre —el correo que no
+ * traia enlaces, la contingencia OCR que nunca publica una URL— es rutinario, y
+ * convertirlo en una incidencia que alguien tiene que cerrar a mano cuesta mas
+ * que el riesgo contrario. El precio esta asumido: un operador que olvide elegir
+ * el origen obtiene un flujo que se salta la extraccion en silencio, y por eso
+ * el asistente lo avisa de forma no bloqueante en vez de callarselo.
+ */
+export const DEFAULT_SCRAPER_SKIP_IF_EMPTY = true;
 
 /**
  * Configuracion del nodo `EXTRACTOR_WEB`.
@@ -156,6 +169,15 @@ export class WebScraperConfigDto {
     message: `retryDelayMs no puede superar ${MAX_SCRAPER_RETRY_DELAY_MS}.`,
   })
   retryDelayMs?: number;
+
+  @ApiPropertyOptional({
+    description:
+      'Si es true, un "targetUrl" ausente deja de ser un fallo: el nodo devuelve el payload neutro (las cinco claves en blanco) y el flujo continua. Ademas exime a este nodo de la regla 8 de topologia, de modo que puede declararse en un flujo donde ningun paso anterior publica una URL (contingencia OCR).',
+    default: DEFAULT_SCRAPER_SKIP_IF_EMPTY,
+  })
+  @IsOptional()
+  @IsBoolean({ message: 'skipIfEmpty debe ser un booleano.' })
+  skipIfEmpty?: boolean;
 }
 
 /** Configuracion del extractor con los valores por defecto ya aplicados. */
@@ -164,6 +186,7 @@ export interface ResolvedWebScraperConfig {
   readonly timeoutMs: number;
   readonly maxRetries: number;
   readonly retryDelayMs: number;
+  readonly skipIfEmpty: boolean;
 }
 
 /** Aplica los valores por defecto sobre un DTO ya validado. Funcion pura. */
@@ -177,4 +200,5 @@ export const resolveWebScraperConfig = (
   timeoutMs: dto.timeoutMs ?? DEFAULT_SCRAPER_TIMEOUT_MS,
   maxRetries: dto.maxRetries ?? DEFAULT_SCRAPER_MAX_RETRIES,
   retryDelayMs: dto.retryDelayMs ?? DEFAULT_SCRAPER_RETRY_DELAY_MS,
+  skipIfEmpty: dto.skipIfEmpty ?? DEFAULT_SCRAPER_SKIP_IF_EMPTY,
 });

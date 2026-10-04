@@ -30,6 +30,17 @@ export const DEFAULT_SCRAPER_MAX_RETRIES = 2;
 export const MAX_SCRAPER_RETRIES = 3;
 
 export const DEFAULT_SCRAPER_RETRY_DELAY_MS = 2_000;
+
+/**
+ * Replica de `DEFAULT_SCRAPER_SKIP_IF_EMPTY` del DTO del backend.
+ *
+ * Por defecto un extractor sin origen se SALTA en vez de romper el flujo: el
+ * modo de fallo que cubre —el correo sin enlaces, la contingencia OCR que no
+ * publica ninguna URL— es rutinario. El precio esta asumido: un operador que
+ * olvide elegir el origen obtiene un nodo que no extrae nada, y por eso
+ * `configWarnings` se lo dice sin bloquearle el paso.
+ */
+export const DEFAULT_SCRAPER_SKIP_IF_EMPTY = true;
 export const MIN_SCRAPER_RETRY_DELAY_MS = 500;
 export const MAX_SCRAPER_RETRY_DELAY_MS = 10_000;
 
@@ -144,6 +155,7 @@ const buildInitialConfig = (): WebScraperConfigDto => ({
   timeoutMs: DEFAULT_SCRAPER_TIMEOUT_MS,
   maxRetries: DEFAULT_SCRAPER_MAX_RETRIES,
   retryDelayMs: DEFAULT_SCRAPER_RETRY_DELAY_MS,
+  skipIfEmpty: DEFAULT_SCRAPER_SKIP_IF_EMPTY,
 });
 
 /** Coercion defensiva de una clave textual del `jsonb`. */
@@ -152,6 +164,10 @@ const asText = (value: unknown): string => (typeof value === 'string' ? value : 
 /** Coercion defensiva de una clave numerica del `jsonb`. */
 const asNumber = (value: unknown, fallback: number): number =>
   typeof value === 'number' && Number.isFinite(value) ? value : fallback;
+
+/** Coercion defensiva de una clave booleana del `jsonb`. */
+const asBoolean = (value: unknown, fallback: boolean): boolean =>
+  typeof value === 'boolean' ? value : fallback;
 
 /** Entero dentro de un rango cerrado. */
 const isIntegerInRange = (value: number, min: number, max: number): boolean =>
@@ -222,7 +238,13 @@ const webScraperSetup = () => {
    *
    * `targetUrl` pasa TRES filtros, y ninguno sobra:
    *
-   * 1. No vacio. Es el estado inicial del nodo: nadie ha elegido todavia.
+   * 1. No vacio, SALVO que `skipIfEmpty` este activo. Esa bandera declara que
+   *    la ausencia de origen es una decision —el flujo de contingencia OCR no
+   *    tiene de donde sacar una URL— y no un olvido. Ojo a la asimetria: exime
+   *    al campo VACIO, nunca al campo MAL PUESTO. Un `targetUrl` obsoleto sigue
+   *    bloqueando con la bandera activa, porque "omitir si no hay" no es
+   *    "omitir si esta mal", y tratarlos igual convertiria una configuracion
+   *    rota en una omision silenciosa.
    * 2. Casa el patron anclado de interpolacion. Replica el `@Matches` del DTO
    *    del backend, de modo que un `targetUrl` heredado con una URL literal
    *    —admisible en una version anterior— se rechace aqui con una regla de
@@ -239,11 +261,17 @@ const webScraperSetup = () => {
    * posicion dentro de un contexto futuro—, asi que no hay nada que un banco de
    * pruebas pueda verificar sobre ella. Ese aviso vive en `configWarnings`.
    */
+  const isUrlSourceValid = computed<boolean>(
+    () =>
+      INTERPOLATION_ONLY_PATTERN.test(config.value.targetUrl) &&
+      urlOptions.value.some((option) => option.value === config.value.targetUrl),
+  );
+
   const isConfigValid = computed<boolean>(
     () =>
-      config.value.targetUrl.length > 0 &&
-      INTERPOLATION_ONLY_PATTERN.test(config.value.targetUrl) &&
-      urlOptions.value.some((option) => option.value === config.value.targetUrl) &&
+      (config.value.targetUrl.length === 0
+        ? config.value.skipIfEmpty
+        : isUrlSourceValid.value) &&
       isIntegerInRange(config.value.timeoutMs, MIN_SCRAPER_TIMEOUT_MS, MAX_SCRAPER_TIMEOUT_MS) &&
       isIntegerInRange(config.value.maxRetries, 0, MAX_SCRAPER_RETRIES) &&
       isIntegerInRange(
@@ -265,6 +293,12 @@ const webScraperSetup = () => {
     if (hasStaleTargetUrl.value) {
       warnings.push(
         `El origen guardado "${config.value.targetUrl}" ya no lo produce ningun paso anterior del flujo. Se conserva tal cual para no reescribir en silencio lo que alguien configuro, pero hay que elegir uno nuevo o reordenar el flujo.`,
+      );
+    }
+
+    if (config.value.skipIfEmpty && config.value.targetUrl.length === 0) {
+      warnings.push(
+        'Este nodo se saltara: no hay origen seleccionado y "Omitir extraccion" esta activo. El flujo continuara con los campos de "scraped_web" en blanco.',
       );
     }
 
@@ -295,6 +329,35 @@ const webScraperSetup = () => {
 
     return warnings;
   });
+
+  /**
+   * El operador no puede apagar la omision cuando no hay de donde extraer.
+   *
+   * No se mira lo que diga la plantilla —a diferencia de `trigger-imap`, que
+   * bloquea `includeAttachments` porque una ruta de contingencia lo exige—, sino
+   * la TOPOLOGIA real: sin ningun campo de tipo URL aguas arriba, cualquier
+   * valor distinto de `true` produce un esquema que la regla 8 rechaza al
+   * guardar. Dejarlo editable seria ofrecer una eleccion cuyo unico desenlace es
+   * un 400 del backend.
+   */
+  const isSkipIfEmptyLocked = computed<boolean>(() => !hasUrlSource.value);
+
+  /**
+   * Recoge lo que la PLANTILLA sembro al declarar la topologia.
+   *
+   * Canal aparte de `hydrateFromNode`: aquel restaura un flujo ya guardado y
+   * este trae las decisiones del disenador del flujo al instanciarlo. Sin esta
+   * implementacion, el `skipIfEmpty` que la plantilla escribio se perdia al
+   * abrir el asistente y el flujo de contingencia volvia a ser irrepresentable.
+   *
+   * Se ignora lo que no sea booleano: `configuracion_pipeline` es `jsonb` y pudo
+   * escribirse por SQL directo, donde la cadena `'false'` es *truthy*.
+   */
+  const applyTemplateParams = (params: Record<string, unknown>): void => {
+    if (typeof params.skipIfEmpty !== 'boolean') return;
+
+    config.value = { ...config.value, skipIfEmpty: params.skipIfEmpty };
+  };
 
   /** Se puede probar cuando hay una URL real escrita y no hay otra prueba en vuelo. */
   const canRunSandbox = computed<boolean>(
@@ -412,6 +475,16 @@ const webScraperSetup = () => {
       params.targetUrl = config.value.targetUrl;
     }
 
+    // SIEMPRE, y aqui se rompe a proposito el criterio de los tres numericos.
+    // `skipIfEmpty` no es un valor de calibracion sino una declaracion con
+    // consecuencia TOPOLOGICA: la regla 8 del validador solo exime al nodo si
+    // encuentra el `true` escrito en el esquema. Omitirlo por coincidir con el
+    // defecto dejaba al operador viendo un toggle encendido mientras el flujo
+    // de contingencia seguia siendo rechazado al guardar, sin nada en el
+    // esquema que explicara por que. Una exencion que no esta escrita tampoco
+    // es auditable por quien revise la plantilla despues.
+    params.skipIfEmpty = config.value.skipIfEmpty;
+
     if (config.value.timeoutMs !== DEFAULT_SCRAPER_TIMEOUT_MS) {
       params.timeoutMs = config.value.timeoutMs;
     }
@@ -450,6 +523,7 @@ const webScraperSetup = () => {
       timeoutMs: asNumber(params.timeoutMs, DEFAULT_SCRAPER_TIMEOUT_MS),
       maxRetries: asNumber(params.maxRetries, DEFAULT_SCRAPER_MAX_RETRIES),
       retryDelayMs: asNumber(params.retryDelayMs, DEFAULT_SCRAPER_RETRY_DELAY_MS),
+      skipIfEmpty: asBoolean(params.skipIfEmpty, DEFAULT_SCRAPER_SKIP_IF_EMPTY),
     };
     invalidateSandboxResult();
   };
@@ -470,6 +544,8 @@ const webScraperSetup = () => {
     urlOptions,
     hasUrlSource,
     hasStaleTargetUrl,
+    isUrlSourceValid,
+    isSkipIfEmptyLocked,
     isConfigValid,
     configWarnings,
     canRunSandbox,
@@ -479,6 +555,7 @@ const webScraperSetup = () => {
     setAvailableUpstreamContext,
     runSandboxTest,
     toNodeParams,
+    applyTemplateParams,
     hydrateFromNode,
     resetConfig,
   };

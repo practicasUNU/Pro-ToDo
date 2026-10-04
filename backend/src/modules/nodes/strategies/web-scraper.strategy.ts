@@ -52,7 +52,8 @@ const VALIDATION_OPTIONS: ValidatorOptions = {
 /** Union discriminada: o hay configuracion, o hay un fallo que devolver. */
 type ScraperConfigResolution =
   | { readonly config: ResolvedWebScraperConfig }
-  | { readonly failure: NodeErrorDetail };
+  | { readonly failure: NodeErrorDetail }
+  | { readonly skip: true };
 
 /** Esquemas navegables. Ver la guarda de `resolveTargetUrl`. */
 const ALLOWED_PROTOCOLS: ReadonlySet<string> = new Set(['http:', 'https:']);
@@ -66,6 +67,23 @@ const ALLOWED_PROTOCOLS: ReadonlySet<string> = new Set(['http:', 'https:']);
  */
 const referencesArrayIndex = (template: string): boolean =>
   /\[\d+\]\s*\}\}/.test(template);
+
+/**
+ * Las CINCO claves de `outputFields` en blanco.
+ *
+ * Se emiten todas y no solo las dos que el camino de omision necesita, porque un
+ * nodo posterior que interpole `{{scraped_web.article_title}}` recibiria un
+ * `MissingContextVariableException` por una clave que el contrato promete. Un
+ * campo declarado y ausente es indistinguible de un flujo mal compuesto, que es
+ * justo la confusion que este nodo viene evitando.
+ */
+const buildNeutralPayload = (): Record<string, unknown> => ({
+  source_url: null,
+  article_title: '',
+  full_article_content: '',
+  byline: null,
+  scraped_at: new Date().toISOString(),
+});
 
 /** Traza completa del error, si la hay, lista para fusionar en el detalle. */
 const stackTraceOf = (error: unknown): { stackTrace?: string } =>
@@ -166,6 +184,12 @@ export class WebScraperStrategy implements INodeStrategy {
       return { success: false, error: resolution.failure };
     }
 
+    // No hay origen configurado y el nodo esta declarado como omitible: se sale
+    // antes de tocar el navegador. Ver `buildNeutralPayload`.
+    if ('skip' in resolution) {
+      return { success: true, data: buildNeutralPayload() };
+    }
+
     const { config } = resolution;
     const target = this.resolveTargetUrl(context, config);
 
@@ -178,10 +202,7 @@ export class WebScraperStrategy implements INodeStrategy {
     // alternativa —parar el flujo— convertiria "este correo no traia enlaces"
     // en una incidencia que alguien tendria que cerrar a mano.
     if ('skip' in target) {
-      return {
-        success: true,
-        data: { source_url: null, full_article_content: '' },
-      };
+      return { success: true, data: buildNeutralPayload() };
     }
 
     // Se pasan SOLO los tres campos de navegacion y no la config entera: el
@@ -260,11 +281,33 @@ export class WebScraperStrategy implements INodeStrategy {
   public getIncompleteParams(
     params: Record<string, unknown>,
   ): readonly string[] {
+    // Con `skipIfEmpty` la ausencia de origen es una DECISION y no un olvido:
+    // el flujo de contingencia tiene que poder ACTIVARSE sin elegir URL.
+    if (params.skipIfEmpty === true) {
+      return [];
+    }
+
     const targetUrl = params.targetUrl;
 
     return typeof targetUrl === 'string' && targetUrl.trim().length > 0
       ? []
       : ['targetUrl'];
+  }
+
+  /**
+   * La exigencia de la regla 8 deja de ser absoluta: depende de `skipIfEmpty`.
+   *
+   * Con la bandera activa el nodo declara un fallback neutro EXPLICITO, asi que
+   * un flujo sin ninguna URL aguas arriba —la contingencia OCR, donde el texto
+   * viene de una imagen y no de un correo— es una topologia legitima y no un
+   * esquema mal compuesto. Sin ella se conserva la garantia de siempre: quien
+   * pretenda extraer de verdad tiene que tener de donde sacar la direccion, y se
+   * entera al GUARDAR y no en la primera ejecucion con el flujo ya PAUSADO.
+   */
+  public getRequiredUpstreamFieldTypes(
+    params: Record<string, unknown>,
+  ): readonly NodeOutputFieldType[] {
+    return params.skipIfEmpty === true ? [] : this.requiredUpstreamFieldTypes;
   }
 
   /**
@@ -302,6 +345,12 @@ export class WebScraperStrategy implements INodeStrategy {
     // abajo como ERR_SCRAPER_URL_MALFORMED, que mandaria a revisar un formato
     // cuando lo que pasa es que nadie eligio el origen.
     if (config.targetUrl.length === 0) {
+      // Omitible por configuracion: la ausencia de origen es una decision
+      // declarada, no una laguna, y el flujo continua con el payload neutro.
+      if (config.skipIfEmpty) {
+        return { skip: true };
+      }
+
       return {
         failure: {
           level: 'GRAVE',

@@ -20,7 +20,8 @@ import type { NodeErrorSeverity } from '@/types/pipeline';
  * escribir.
  */
 export interface ScrapedWebPayload {
-  readonly source_url: string;
+  /** `null` cuando el nodo se omitio por `skipIfEmpty` y no navego a nada. */
+  readonly source_url: string | null;
   readonly article_title: string;
   readonly full_article_content: string;
   /** `null` es "sin firma", distinto de una cadena vacia. */
@@ -41,6 +42,13 @@ export interface WebScraperConfigDto {
   timeoutMs: number;
   maxRetries: number;
   retryDelayMs: number;
+  /**
+   * Un `targetUrl` ausente deja de ser un fallo: el nodo publica el payload
+   * neutro y el flujo continua. Exime ademas al nodo de la regla 8 de
+   * topologia, de modo que puede declararse donde ningun paso anterior publica
+   * una URL (contingencia OCR).
+   */
+  skipIfEmpty: boolean;
 }
 
 /**

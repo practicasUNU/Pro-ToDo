@@ -38,6 +38,12 @@ const MISSING_SOURCE_WARNING =
 const DISABLED_SELECT_HINT =
   'Sin origenes disponibles aguas arriba. El selector se habilita en cuanto un paso anterior publique un campo de tipo URL.';
 
+const SKIP_IF_EMPTY_HINT =
+  'Pensado para flujos de contingencia —un OCR que trabaja sobre una imagen y nunca publica enlaces—. Con la bandera activa el nodo puede guardarse y activarse sin origen: en ejecucion devuelve "scraped_web" con los campos en blanco y el flujo sigue. Nunca encubre un origen MAL configurado: ese sigue bloqueando.';
+
+const SKIP_IF_EMPTY_LOCKED_HINT =
+  'No se puede apagar: ningun paso anterior de este flujo publica una URL, asi que un extractor que exigiera origen no superaria la validacion del esquema al guardar.';
+
 const RETRY_TOOLTIP =
   'Reintento rapido de red: cubre el corte puntual de conexion. Es independiente del "retryPolicy" del flujo, y las dos capas se multiplican.';
 
@@ -57,6 +63,10 @@ const contentBadgeClass = computed<string>(() =>
 
 const onTargetUrlChange = (targetUrl: string): void => {
   store.updateConfig({ targetUrl });
+};
+
+const onSkipIfEmptyChange = (skipIfEmpty: boolean): void => {
+  store.updateConfig({ skipIfEmpty });
 };
 
 const onNumberChange = (
@@ -122,19 +132,29 @@ const onRunSandboxTest = async (): Promise<void> => {
       />
     </div>
 
-    <!-- Aviso de topologia: ningun paso anterior publica un campo de tipo URL -->
+    <!-- Aviso de topologia: ningun paso anterior publica un campo de tipo URL.
+         Con `skipIfEmpty` sigue mostrandose, pero como dato y no como bloqueo:
+         el flujo de contingencia es legitimo y no hay nada que corregir. -->
     <div
       v-if="!store.hasUrlSource"
-      class="pd-warn-banner q-pa-md q-mb-md row items-start no-wrap q-gutter-sm"
+      :class="store.config.skipIfEmpty ? 'pd-info-banner' : 'pd-warn-banner'"
+      class="q-pa-md q-mb-md row items-start no-wrap q-gutter-sm"
       data-test="missing-source-warning"
     >
-      <q-icon name="warning_amber" size="20px" class="pd-warn-icon" />
-      <span class="col">{{ MISSING_SOURCE_WARNING }}</span>
+      <q-icon
+        :name="store.config.skipIfEmpty ? 'info_outline' : 'warning_amber'"
+        size="20px"
+        class="pd-warn-icon"
+      />
+      <span class="col">{{
+        store.config.skipIfEmpty ? SKIP_IF_EMPTY_HINT : MISSING_SOURCE_WARNING
+      }}</span>
     </div>
 
     <!-- Campo 1: seleccion determinista de la URL (Poka-Yoke) -->
     <label class="pd-label" for="target-url">
-      Enlace a extraer <span class="pd-required">*</span>
+      Enlace a extraer
+      <span v-if="!store.config.skipIfEmpty" class="pd-required">*</span>
     </label>
     <q-select
       id="target-url"
@@ -164,6 +184,29 @@ const onRunSandboxTest = async (): Promise<void> => {
         </q-item>
       </template>
     </q-select>
+
+    <!-- Campo 1b: fallback neutro declarado (contingencia OCR) -->
+    <q-toggle
+      :model-value="store.config.skipIfEmpty"
+      :disable="store.isSkipIfEmptyLocked"
+      :class="store.isSkipIfEmptyLocked ? undefined : 'q-mb-md'"
+      data-test="skip-if-empty-toggle"
+      label="Omitir extraccion si la URL no existe (fallback para OCR)"
+      color="primary"
+      @update:model-value="onSkipIfEmptyChange"
+    >
+      <q-tooltip>{{ SKIP_IF_EMPTY_HINT }}</q-tooltip>
+    </q-toggle>
+
+    <!-- Se dice POR QUE esta bloqueado. Un control apagado sin explicacion se
+         lee como una averia, y el operador buscaria el fallo donde no esta. -->
+    <p
+      v-if="store.isSkipIfEmptyLocked"
+      class="pd-subtitle q-mt-xs q-mb-md"
+      data-test="skip-if-empty-locked-hint"
+    >
+      {{ SKIP_IF_EMPTY_LOCKED_HINT }}
+    </p>
 
     <!-- Campo 2: espera de carga -->
     <label class="pd-label" for="timeout-ms">Espera maxima de carga</label>

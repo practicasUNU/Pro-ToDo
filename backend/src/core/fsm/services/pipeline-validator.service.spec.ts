@@ -1010,5 +1010,23 @@ describe('PipelineValidatorService (PROT-07)', () => {
       expect(issues[0].code).toBe('ERR_MISSING_UPSTREAM_FIELD_TYPE');
       expect(issues[0].constraints[0]).toContain('Ningun paso anterior');
     });
+
+    it('deberia ACEPTAR ese mismo flujo si el extractor es omitible', async () => {
+      // 1. Arrange 📐: la contingencia OCR. No hay de donde sacar un enlace y el
+      //    nodo lo DECLARA con `skipIfEmpty`, de modo que la exigencia de la
+      //    regla 8 deja de aplicarle: es una topologia legitima, no un olvido.
+      const service = buildService();
+      const schema = buildTemplateSchema();
+      schema.nodes.trigger_imap.nextStep = 'nodo_extractor';
+      schema.nodes.nodo_extractor.params = { skipIfEmpty: true };
+
+      // 2. Act ⚙️
+      const result = await service.validateSchema(schema, {
+        requireRunnableParams: true,
+      });
+
+      // 3. Assert 🎯: guarda Y activa. El nodo publicara su payload neutro.
+      expect(result.nodes.nodo_extractor.params).toEqual({ skipIfEmpty: true });
+    });
   });
 });

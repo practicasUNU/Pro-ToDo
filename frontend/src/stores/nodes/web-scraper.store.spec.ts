@@ -200,11 +200,13 @@ describe('useWebScraperStore · configuracion del nodo EXTRACTOR_WEB', () => {
     });
 
     it('2.2 NO deberia ser valido solo por tener contexto, sin elegir origen', () => {
-      // 1. Arrange
+      // 1. Arrange: `skipIfEmpty: false` explicito. Con el defecto (`true`) la
+      //    ausencia de origen es una decision declarada; ver el bloque 7.
       const store = useWebScraperStore(NODE_ID);
 
       // 2. Act
       store.setAvailableUpstreamContext(PARSER_UPSTREAM);
+      store.updateConfig({ skipIfEmpty: false });
 
       // 3. Assert: hay opciones, pero nadie ha elegido ninguna.
       expect(store.urlOptions.length).toBeGreaterThan(0);
@@ -216,7 +218,7 @@ describe('useWebScraperStore · configuracion del nodo EXTRACTOR_WEB', () => {
       const store = buildConfiguredStore();
 
       // 2. Act
-      store.updateConfig({ targetUrl });
+      store.updateConfig({ targetUrl, skipIfEmpty: false });
 
       // 3. Assert
       expect(store.isConfigValid).toBe(false);
@@ -340,7 +342,11 @@ describe('useWebScraperStore · configuracion del nodo EXTRACTOR_WEB', () => {
 
       // 3. Assert: congelar el defecto de hoy en cada esquema guardado haria que
       //    cambiarlo manana no alcanzase a ningun flujo existente.
-      expect(store.toNodeParams()).toEqual({ targetUrl: parsedEmailUrl(0) });
+      expect(store.toNodeParams()).toEqual({
+        targetUrl: parsedEmailUrl(0),
+        // Los numericos se omiten; `skipIfEmpty` NO. Ver el bloque 7.
+        skipIfEmpty: true,
+      });
     });
 
     it('4.1bis deberia OMITIR targetUrl cuando no se ha elegido origen', () => {
@@ -352,7 +358,7 @@ describe('useWebScraperStore · configuracion del nodo EXTRACTOR_WEB', () => {
       //    ausencia. Publicar la cadena vacia seria afirmar que hay un valor, y
       //    el `@IsNotEmpty` del DTO lo rechazaria al guardar — que es justo lo
       //    que impedia que una plantilla contuviera este nodo.
-      expect(store.toNodeParams()).toEqual({});
+      expect(store.toNodeParams()).toEqual({ skipIfEmpty: true });
     });
 
     it('4.2 deberia publicar los numericos que difieren del defecto', () => {
@@ -367,6 +373,7 @@ describe('useWebScraperStore · configuracion del nodo EXTRACTOR_WEB', () => {
         targetUrl: parsedEmailUrl(0),
         timeoutMs: 45_000,
         maxRetries: 0,
+        skipIfEmpty: true,
       });
     });
 
@@ -384,7 +391,10 @@ describe('useWebScraperStore · configuracion del nodo EXTRACTOR_WEB', () => {
 
       // 3. Assert: es el contrato que hace posible EDITAR un flujo en vez de
       //    solo crearlo; sin el, guardar borraria lo que se venia a retocar.
-      expect(store.toNodeParams()).toEqual(params);
+      //    `skipIfEmpty` se SUMA aunque el nodo guardado no lo trajera: es
+      //    exactamente la reparacion de este cambio —un esquema anterior a la
+      //    bandera queda explicito en cuanto alguien lo reabre y lo guarda.
+      expect(store.toNodeParams()).toEqual({ ...params, skipIfEmpty: true });
     });
 
     it('4.4 deberia tolerar un jsonb con el tipo equivocado', () => {
@@ -642,6 +652,137 @@ describe('useWebScraperStore · configuracion del nodo EXTRACTOR_WEB', () => {
       // 3. Assert: si guardara la referencia, que el anfitrion reutilizara su
       //    arreglo vaciaria el selector por la espalda.
       expect(store.urlOptions.length).toBeGreaterThan(0);
+    });
+  });
+
+  describe('7. Fallback neutro declarado (skipIfEmpty)', () => {
+    it('7.1 deberia venir activo por defecto', () => {
+      // 1. Arrange & 2. Act
+      const store = useWebScraperStore(NODE_ID);
+
+      // 3. Assert: replica `DEFAULT_SCRAPER_SKIP_IF_EMPTY` del DTO del backend.
+      expect(store.config.skipIfEmpty).toBe(true);
+    });
+
+    it('7.2 deberia validar sin origen cuando la bandera esta activa', () => {
+      // 1. Arrange: la contingencia OCR. No hay nada aguas arriba que publique
+      //    una URL, y el stepper tiene que dejar avanzar igualmente.
+      const store = useWebScraperStore(NODE_ID);
+
+      // 2. Act
+      store.setAvailableUpstreamContext([]);
+
+      // 3. Assert
+      expect(store.urlOptions).toEqual([]);
+      expect(store.isConfigValid).toBe(true);
+    });
+
+    it('7.3 NO deberia encubrir un targetUrl obsoleto', () => {
+      // 1. Arrange: la asimetria que sostiene el Poka-Yoke. "Omitir si no hay"
+      //    no es "omitir si esta mal": una configuracion rota tiene que verse.
+      const store = buildConfiguredStore();
+
+      // 2. Act: el operador retrocede y quita de en medio al productor.
+      store.setAvailableUpstreamContext([]);
+
+      // 3. Assert
+      expect(store.hasStaleTargetUrl).toBe(true);
+      expect(store.config.skipIfEmpty).toBe(true);
+      expect(store.isConfigValid).toBe(false);
+    });
+
+    it('7.4 no deberia eximir de los rangos numericos', () => {
+      // 1. Arrange
+      const store = useWebScraperStore(NODE_ID);
+
+      // 2. Act: la bandera habla del ORIGEN, no de los tiempos.
+      store.updateConfig({ timeoutMs: 100 });
+
+      // 3. Assert
+      expect(store.isConfigValid).toBe(false);
+    });
+
+    it('7.5 deberia avisar sin bloquear cuando el nodo se va a saltar', () => {
+      // 1. Arrange & 2. Act
+      const store = useWebScraperStore(NODE_ID);
+
+      // 3. Assert: el precio del defecto `true` se paga aqui, en voz alta.
+      expect(store.isConfigValid).toBe(true);
+      expect(store.configWarnings.join(' ')).toContain('Este nodo se saltara');
+    });
+
+    it('7.6 deberia publicar skipIfEmpty SIEMPRE, tambien con el defecto', () => {
+      // 1. Arrange 📐: este aserto es la reparacion del fallo reportado. Con el
+      //    criterio de los numericos —publicar solo si difiere del defecto— la
+      //    clave no se escribia nunca en el caso normal, y la regla 8 del
+      //    backend, que exige el `true` LITERAL, seguia rechazando el flujo de
+      //    contingencia con el toggle visiblemente encendido.
+      const store = buildConfiguredStore();
+
+      // 2. Act & 3. Assert
+      expect(store.toNodeParams().skipIfEmpty).toBe(true);
+
+      store.updateConfig({ skipIfEmpty: false });
+
+      expect(store.toNodeParams().skipIfEmpty).toBe(false);
+    });
+
+    it('7.8 deberia recoger el skipIfEmpty que sembro la plantilla', () => {
+      // 1. Arrange 📐: canal aparte de `hydrateFromNode`. Son las decisiones
+      //    del disenador del flujo llegando al operador que lo instancia.
+      const store = useWebScraperStore(NODE_ID);
+
+      // 2. Act
+      store.applyTemplateParams({ skipIfEmpty: false });
+
+      // 3. Assert
+      expect(store.config.skipIfEmpty).toBe(false);
+    });
+
+    it('7.9 deberia ignorar un skipIfEmpty de plantilla que no sea booleano', () => {
+      // 1. Arrange 📐: la cadena `'false'` es *truthy*, y un `jsonb` escrito a
+      //    mano puede traerla.
+      const store = useWebScraperStore(NODE_ID);
+
+      // 2. Act
+      store.applyTemplateParams({ skipIfEmpty: 'false' });
+
+      // 3. Assert
+      expect(store.config.skipIfEmpty).toBe(true);
+    });
+
+    it('7.10 deberia bloquear el toggle sin origen aguas arriba', () => {
+      // 1. Arrange
+      const store = useWebScraperStore(NODE_ID);
+
+      // 2. Act & 3. Assert: apagarlo produciria un esquema que la regla 8
+      //    rechaza al guardar, asi que no se ofrece la eleccion.
+      expect(store.isSkipIfEmptyLocked).toBe(true);
+
+      store.setAvailableUpstreamContext(PARSER_UPSTREAM);
+
+      expect(store.isSkipIfEmptyLocked).toBe(false);
+    });
+
+    it('7.7 deberia restaurar skipIfEmpty desde el nodo guardado', () => {
+      // 1. Arrange
+      const store = buildConfiguredStore();
+
+      // 2. Act
+      store.hydrateFromNode({
+        outputNamespace: 'scraped_web',
+        params: { skipIfEmpty: false },
+      });
+
+      // 3. Assert: y la coercion defensiva cubre un `jsonb` escrito a mano.
+      expect(store.config.skipIfEmpty).toBe(false);
+
+      store.hydrateFromNode({
+        outputNamespace: 'scraped_web',
+        params: { skipIfEmpty: 'si' },
+      });
+
+      expect(store.config.skipIfEmpty).toBe(true);
     });
   });
 });

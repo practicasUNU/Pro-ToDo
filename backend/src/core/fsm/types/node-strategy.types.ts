@@ -287,6 +287,24 @@ export interface INodeStrategy {
   readonly requiredUpstreamFieldTypes?: readonly NodeOutputFieldType[];
 
   /**
+   * Variante de `requiredUpstreamFieldTypes` que DEPENDE de la configuracion.
+   *
+   * Existe porque para algunos nodos la exigencia dejo de ser una propiedad del
+   * TIPO de nodo y paso a ser una propiedad de ESTE nodo concreto. El extractor
+   * web es el caso: con `skipIfEmpty` activo declara un fallback neutro
+   * explicito, de modo que un flujo de contingencia —un OCR que no publica
+   * ninguna URL aguas arriba— es una topologia legitima y no un esquema mal
+   * compuesto. Preguntarle a la propiedad estatica no permitiria distinguirlos.
+   *
+   * La consume el mismo resolver de la regla 8, que la PREFIERE sobre la
+   * propiedad cuando existe. Una estrategia cuya exigencia no varie no lo
+   * declara y sigue respondiendo con la propiedad.
+   */
+  readonly getRequiredUpstreamFieldTypes?: (
+    params: Record<string, unknown>,
+  ) => readonly NodeOutputFieldType[];
+
+  /**
    * `params` que faltan para que el nodo pueda EJECUTARSE, no solo guardarse.
    *
    * Existe porque guardar y activar son dos exigencias distintas, y confundirlas

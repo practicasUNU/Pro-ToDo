@@ -123,7 +123,11 @@ export const DEFAULT_PARAMS_BY_NODE_TYPE: Record<NodeType, Record<string, unknow
   [NodeType.TRIGGER_IMAP]: { mailbox: 'INBOX', includeAttachments: false },
   [NodeType.TRIGGER_CRON]: {},
   [NodeType.PARSER_PRE_IA]: {},
-  [NodeType.EXTRACTOR_WEB]: {},
+  // Se siembra ESCRITO y no se deja al defecto del backend: la regla 8 del
+  // validador de topologia solo exime al nodo si encuentra el `true` en el
+  // esquema, asi que una plantilla con `params: {}` seguiria sin poder declarar
+  // un extractor detras de una contingencia OCR.
+  [NodeType.EXTRACTOR_WEB]: { skipIfEmpty: true },
   [NodeType.PROCESADOR_IA]: {},
   [NodeType.ESCUDO_POST_IA]: {},
   [NodeType.MAPEADOR_PLANTILLA]: {},

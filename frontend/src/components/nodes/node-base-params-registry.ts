@@ -32,4 +32,7 @@ export const nodeBaseParamsRegistry: Partial<Record<NodeType, Component>> = {
   [NodeType.TRIGGER_IMAP]: defineAsyncComponent(
     () => import('@components/nodes/TriggerImapBaseParams.vue'),
   ),
+  [NodeType.EXTRACTOR_WEB]: defineAsyncComponent(
+    () => import('@components/nodes/WebScraperBaseParams.vue'),
+  ),
 };

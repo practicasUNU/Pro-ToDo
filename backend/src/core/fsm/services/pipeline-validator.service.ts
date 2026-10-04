@@ -122,9 +122,18 @@ export class PipelineValidatorService {
           dependencies: (node) => this.resolveNodeDependencies(node),
           outputFields: (node) =>
             this.tryGetStrategy(node.nodeType)?.outputFields ?? [],
-          requiredFieldTypes: (node) =>
-            this.tryGetStrategy(node.nodeType)?.requiredUpstreamFieldTypes ??
-            [],
+          // Se prefiere el metodo sobre la propiedad: hay nodos cuya exigencia
+          // aguas arriba depende de sus propios `params` (ver `skipIfEmpty` del
+          // extractor web) y la propiedad estatica no puede expresarlo.
+          requiredFieldTypes: (node) => {
+            const strategy = this.tryGetStrategy(node.nodeType);
+
+            return (
+              strategy?.getRequiredUpstreamFieldTypes?.(node.params) ??
+              strategy?.requiredUpstreamFieldTypes ??
+              []
+            );
+          },
           unreachableErrorCodes: (node) =>
             this.tryGetStrategy(node.nodeType)?.getUnreachableErrorCodes?.(
               node.params,

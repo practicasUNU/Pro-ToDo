@@ -16,6 +16,7 @@ import {
   QItemLabel,
   QItemSection,
   QSelect,
+  QToggle,
   QTooltip,
   Quasar,
 } from 'quasar';
@@ -90,6 +91,7 @@ const QUASAR_COMPONENTS = {
   QItemLabel,
   QItemSection,
   QSelect,
+  QToggle,
   QTooltip,
 };
 
@@ -164,6 +166,72 @@ describe('WebScraperConfig · configurador del nodo EXTRACTOR_WEB', () => {
 
       expect(wrapper.findComponent({ name: 'QSelect' }).props('disable')).toBe(false);
       expect(wrapper.find('[data-test="missing-source-warning"]').exists()).toBe(false);
+    });
+
+    it('1.4 deberia exponer el toggle de omision reflejando el store', async () => {
+      // 1. Arrange
+      const wrapper = mountComponent();
+      const store = useWebScraperStore(NODE_ID);
+      const toggle = wrapper.findComponent({ name: 'QToggle' });
+
+      // 2. Act & 3. Assert: nace activo, como el defecto del DTO del backend.
+      expect(toggle.exists()).toBe(true);
+      expect(toggle.props('modelValue')).toBe(true);
+
+      store.updateConfig({ skipIfEmpty: false });
+      await wrapper.vm.$nextTick();
+
+      expect(
+        wrapper.findComponent({ name: 'QToggle' }).props('modelValue'),
+      ).toBe(false);
+    });
+
+    it('1.5 deberia escribir en el store al conmutar el toggle', async () => {
+      // 1. Arrange
+      const wrapper = mountComponent();
+      const store = useWebScraperStore(NODE_ID);
+
+      // 2. Act
+      await wrapper
+        .findComponent({ name: 'QToggle' })
+        .vm.$emit('update:model-value', false);
+
+      // 3. Assert: el componente no guarda estado propio; el store es el dueno.
+      expect(store.config.skipIfEmpty).toBe(false);
+    });
+
+    it('1.7 deberia bloquear el toggle mientras no haya origen aguas arriba', async () => {
+      // 1. Arrange 📐: apagarlo produciria un esquema que la regla 8 del backend
+      //    rechaza al guardar, asi que no se ofrece la eleccion.
+      const wrapper = mountComponent();
+      const store = useWebScraperStore(NODE_ID);
+
+      // 2. Act & 3. Assert
+      expect(wrapper.findComponent({ name: 'QToggle' }).props('disable')).toBe(true);
+      expect(wrapper.find('[data-test="skip-if-empty-locked-hint"]').exists()).toBe(true);
+
+      store.setAvailableUpstreamContext(PARSER_UPSTREAM);
+      await wrapper.vm.$nextTick();
+
+      expect(wrapper.findComponent({ name: 'QToggle' }).props('disable')).toBe(false);
+      expect(wrapper.find('[data-test="skip-if-empty-locked-hint"]').exists()).toBe(false);
+    });
+
+    it('1.6 deberia degradar el aviso de topologia a informativo con la bandera', async () => {
+      // 1. Arrange: sin origenes aguas arriba el aviso se muestra en los dos
+      //    casos, pero no significa lo mismo: con la bandera activa el flujo de
+      //    contingencia es legitimo y no hay nada que corregir.
+      const wrapper = mountComponent();
+      const store = useWebScraperStore(NODE_ID);
+      const banner = () => wrapper.find('[data-test="missing-source-warning"]');
+
+      // 2. Act & 3. Assert
+      expect(banner().classes()).toContain('pd-info-banner');
+
+      store.updateConfig({ skipIfEmpty: false });
+      await wrapper.vm.$nextTick();
+
+      expect(banner().classes()).toContain('pd-warn-banner');
     });
   });
 

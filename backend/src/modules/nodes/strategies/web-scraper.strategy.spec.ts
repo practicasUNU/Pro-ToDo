@@ -28,6 +28,18 @@ const TARGET_URL = 'https://diario.example/nota-de-prensa';
  */
 const TARGET_TEMPLATE = '{{parsed_email.extracted_urls[0]}}';
 
+/**
+ * Las cinco claves en blanco que publica cualquier camino de omision.
+ *
+ * `scraped_at` se compara aparte porque es una marca de tiempo viva.
+ */
+const NEUTRAL_PAYLOAD = {
+  source_url: null,
+  article_title: '',
+  full_article_content: '',
+  byline: null,
+};
+
 /** Desenlace exitoso del runner, que es lo unico que la estrategia traduce. */
 const successOutcome = (
   overrides: Partial<ScrapeOutcome> = {},
@@ -86,12 +98,16 @@ describe('WebScraperStrategy', () => {
   });
 
   describe('1. Validacion de configuracion', () => {
-    it('1.1 deberia fallar como GRAVE si falta targetUrl', async () => {
-      // 1. Arrange
+    it('1.1 deberia fallar como GRAVE si falta targetUrl y no es omitible', async () => {
+      // 1. Arrange 📐: `skipIfEmpty: false` explicito. Con el defecto (`true`)
+      //    la ausencia de origen es una DECISION declarada y no un fallo; ver
+      //    el bloque 7.
       const { strategy, run } = createHarness();
 
       // 2. Act
-      const result = await strategy.execute(buildContext(), {});
+      const result = await strategy.execute(buildContext(), {
+        skipIfEmpty: false,
+      });
 
       // 3. Assert
       expect(result.success).toBe(false);
@@ -224,10 +240,8 @@ describe('WebScraperStrategy', () => {
       //    queda con el texto que ya tenia, y nadie tiene que cerrar a mano una
       //    incidencia por un correo que simplemente no llevaba enlaces.
       expect(result.success).toBe(true);
-      expect(result.data).toEqual({
-        source_url: null,
-        full_article_content: '',
-      });
+      expect(result.data).toMatchObject(NEUTRAL_PAYLOAD);
+      expect(typeof result.data?.scraped_at).toBe('string');
       expect(run).not.toHaveBeenCalled();
     });
 
@@ -493,6 +507,15 @@ describe('WebScraperStrategy', () => {
       ]);
     });
 
+    it('6.2bis no deberia exigir targetUrl cuando el nodo es omitible', () => {
+      // 1. Arrange & 2. Act
+      const { strategy } = createHarness();
+
+      // 3. Assert 🎯: un flujo de contingencia —OCR sin enlaces— tiene que
+      //    poder ACTIVARSE sin origen, que es lo que `assertActivatable` mira.
+      expect(strategy.getIncompleteParams({ skipIfEmpty: true })).toEqual([]);
+    });
+
     it('6.3 deberia dar por completo un nodo con targetUrl elegido', () => {
       // 1. Arrange & 2. Act
       const { strategy } = createHarness();
@@ -516,7 +539,7 @@ describe('WebScraperStrategy', () => {
       });
 
       // 2. Act
-      const result = await strategy.execute(context, {});
+      const result = await strategy.execute(context, { skipIfEmpty: false });
 
       // 3. Assert: se nombra el problema real en vez de dejar que `new URL('')`
       //    reviente mas abajo como un fallo de FORMATO, que mandaria a revisar
@@ -524,6 +547,93 @@ describe('WebScraperStrategy', () => {
       expect(result.success).toBe(false);
       expect(result.error?.code).toBe(ERR_SCRAPER_CONFIG);
       expect(result.error?.missingFields).toEqual(['targetUrl']);
+    });
+  });
+
+  describe('7. Fallback neutro declarado (skipIfEmpty)', () => {
+    it('7.1 deberia omitirse con exito y payload neutro sin targetUrl', async () => {
+      // 1. Arrange 📐: el flujo de contingencia OCR. Nadie aguas arriba publica
+      //    una URL, y el nodo lo declara en vez de romperse al llegar.
+      const { strategy, run } = createHarness();
+
+      // 2. Act ⚙️
+      const result = await strategy.execute(buildContext(), {
+        skipIfEmpty: true,
+      });
+
+      // 3. Assert 🎯
+      expect(result.success).toBe(true);
+      expect(result.data).toMatchObject(NEUTRAL_PAYLOAD);
+      expect(run).not.toHaveBeenCalled();
+    });
+
+    it('7.2 deberia publicar las CINCO claves que declara outputFields', async () => {
+      // 1. Arrange 📐: un nodo posterior que interpole
+      //    `{{scraped_web.article_title}}` recibiria un fallo de contexto si la
+      //    omision dejara fuera una clave que el contrato promete.
+      const { strategy } = createHarness();
+
+      // 2. Act ⚙️
+      const result = await strategy.execute(buildContext(), {
+        skipIfEmpty: true,
+      });
+
+      // 3. Assert 🎯
+      expect(Object.keys(result.data ?? {}).sort()).toEqual(
+        strategy.outputFields.map((field) => field.name).sort(),
+      );
+    });
+
+    it('7.3 deberia eximir de la regla 8 solo cuando la bandera esta activa', () => {
+      // 1. Arrange & 2. Act
+      const { strategy } = createHarness();
+
+      // 3. Assert 🎯: sin la bandera se conserva la garantia topologica de
+      //    siempre; con ella el flujo de contingencia es expresable.
+      expect(
+        strategy.getRequiredUpstreamFieldTypes({ skipIfEmpty: true }),
+      ).toEqual([]);
+      expect(strategy.getRequiredUpstreamFieldTypes({})).toEqual([
+        'url',
+        'url[]',
+      ]);
+      expect(
+        strategy.getRequiredUpstreamFieldTypes({ skipIfEmpty: false }),
+      ).toEqual(['url', 'url[]']);
+    });
+
+    it('7.4 no deberia encubrir un targetUrl MAL PUESTO', async () => {
+      // 1. Arrange 📐: la asimetria que sostiene el Poka-Yoke. "Omitir si no
+      //    hay" no es "omitir si esta mal": un origen escalar ausente sigue
+      //    siendo un flujo mal compuesto y tiene que verse.
+      const { strategy, run } = createHarness();
+
+      // 2. Act ⚙️
+      const result = await strategy.execute(buildContext(), {
+        targetUrl: '{{parsed_email.url_unica}}',
+        skipIfEmpty: true,
+      });
+
+      // 3. Assert 🎯
+      expect(result.success).toBe(false);
+      expect(result.error?.code).toBe(ERR_SCRAPER_URL_UNRESOLVED);
+      expect(result.error?.level).toBe('GRAVE');
+      expect(run).not.toHaveBeenCalled();
+    });
+
+    it('7.5 deberia rechazar un skipIfEmpty que no sea booleano', async () => {
+      // 1. Arrange 📐
+      const { strategy } = createHarness();
+
+      // 2. Act ⚙️
+      const result = await strategy.execute(buildContext(), {
+        skipIfEmpty: 'si',
+      });
+
+      // 3. Assert 🎯
+      expect(result.success).toBe(false);
+      expect(result.error?.code).toBe(ERR_SCRAPER_CONFIG);
+      expect(result.error?.missingFields).toContain('skipIfEmpty');
     });
   });
 });
