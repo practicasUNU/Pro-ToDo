@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { computed } from 'vue';
+import { computed, ref } from 'vue';
+import { useQuasar } from 'quasar';
 
 import { useSmtpAlertStore } from '@stores/nodes/smtp-alert.store';
 
@@ -24,9 +25,20 @@ const props = defineProps<Props>();
 // tecnico, otra al responsable del contenido— tienen cada una sus destinatarios.
 const store = useSmtpAlertStore(props.nodeId);
 
+const $q = useQuasar();
+
+/**
+ * Lo que hay escrito en el campo y todavia NO es un chip.
+ *
+ * QSelect no lo expone: `update:model-value` solo se emite al confirmar, asi
+ * que sin espejarlo aqui un correo tecleado y no confirmado se pierde al pulsar
+ * Guardar mientras la pantalla lo sigue mostrando.
+ */
+const typedRecipient = ref('');
+
 // Mensajes como constantes: varios los comparten la regla del campo y la ayuda
 // bajo el input, y duplicarlos los dejaria divergir.
-const RECIPIENTS_HINT = `Escribe una direccion y pulsa Enter para anadirla. Hasta ${MAX_ALERT_RECIPIENTS} destinatarios.`;
+const RECIPIENTS_HINT = `Escribe una direccion y pulsa Enter o coma para anadirla. Hasta ${MAX_ALERT_RECIPIENTS} destinatarios.`;
 
 const RECIPIENTS_RULE = 'Todas las direcciones deben tener formato de correo valido';
 
@@ -46,16 +58,46 @@ const FREE_TEXT_NOTICE =
 const invalidSummary = computed<string>(() => store.invalidRecipients.join(', '));
 
 /**
- * Anade una direccion tecleada sin confirmar con Enter.
+ * Confirma lo tecleado como chip, avisando si no tiene forma de correo.
  *
- * Es la pieza critica de los dos selectores, aprendida del campo de zona horaria
- * del cron: `update:model-value` solo se emite al confirmar, asi que sin esto un
- * correo escrito y no confirmado se pierde al pulsar Guardar mientras la
- * pantalla lo sigue mostrando. Con chips es aun mas facil de provocar, porque
- * nada indica que al texto le falte convertirse en uno.
+ * `notify` es la diferencia con el pegado: aqui el operador ha pulsado Enter o
+ * coma, es decir, ha AFIRMADO que eso es una direccion. Descartarla en silencio
+ * —como se hace con el ruido de un pegado— dejaria el campo vacio sin explicar
+ * por que, que es justo el fallo que el Poka-Yoke debe evitar.
  */
-const commitTypedAddress = (value: string): void => {
-  addRecipients(parseEmailList(value));
+const commitTypedAddress = (): void => {
+  const raw = typedRecipient.value.trim();
+
+  if (raw === '') return;
+
+  const parsed = parseEmailList(raw);
+
+  if (parsed.length === 0) {
+    $q.notify({
+      type: 'negative',
+      message: `"${raw}" no tiene formato de correo valido`,
+    });
+    return;
+  }
+
+  addRecipients(parsed);
+  typedRecipient.value = '';
+};
+
+/**
+ * Intercepta Enter y la coma para cerrar el chip.
+ *
+ * La coma entra aqui porque es el separador con el que la gente escribe una
+ * lista de correos de memoria; sin interceptarla quedaria DENTRO del chip
+ * ("a@x.com,") y el backend devolveria un 400 sobre el esquema entero.
+ */
+const onRecipientKeydown = (event: KeyboardEvent): void => {
+  if (event.key !== 'Enter' && event.key !== ',') return;
+
+  // Se corta el comportamiento nativo de QSelect: `new-value-mode` registraria
+  // la cadena cruda, sin recortar ni validar, antes de que esto la revise.
+  event.preventDefault();
+  commitTypedAddress();
 };
 
 /**
@@ -66,7 +108,9 @@ const commitTypedAddress = (value: string): void => {
  * basura y ninguna pista de cual de las dos era.
  */
 const addRecipients = (candidates: readonly string[]): void => {
-  const merged = [...new Set([...store.config.to, ...candidates])].slice(0, MAX_ALERT_RECIPIENTS);
+  const merged = [
+    ...new Set([...store.config.to, ...candidates].map((address) => address.trim())),
+  ].slice(0, MAX_ALERT_RECIPIENTS);
 
   if (merged.length === store.config.to.length) return;
 
@@ -77,7 +121,7 @@ const addRecipients = (candidates: readonly string[]): void => {
  * Intercepta el pegado de una lista de correos.
  *
  * Sin esto, pegar "a@x.com, b@y.com" registraba la cadena ENTERA como una unica
- * direccion: `new-value-mode="add-unique"` no parte por separadores, y el chip
+ * direccion: `new-value-mode` no parte por separadores, y el chip
  * resultante solo se descubria invalido al guardar, con un 400 del backend
  * sobre el esquema completo.
  */
@@ -91,6 +135,7 @@ const onPasteRecipients = (event: ClipboardEvent): void => {
   if (parsed.length === 0) return;
 
   event.preventDefault();
+  typedRecipient.value = '';
   addRecipients(parsed);
 };
 </script>
@@ -127,7 +172,7 @@ const onPasteRecipients = (event: ClipboardEvent): void => {
           use-input
           use-chips
           hide-dropdown-icon
-          new-value-mode="add-unique"
+          new-value-mode="add"
           input-debounce="0"
           class="q-mt-xs"
           :max-values="MAX_ALERT_RECIPIENTS"
@@ -137,7 +182,9 @@ const onPasteRecipients = (event: ClipboardEvent): void => {
             (val: string[]) => val.every(isEmailAddress) || RECIPIENTS_RULE,
           ]"
           @update:model-value="store.updateConfig({ to: [...($event as string[])] })"
-          @input-value="commitTypedAddress($event)"
+          @input-value="typedRecipient = $event"
+          @keydown="onRecipientKeydown"
+          @blur="commitTypedAddress"
           @paste="onPasteRecipients"
         />
       </div>

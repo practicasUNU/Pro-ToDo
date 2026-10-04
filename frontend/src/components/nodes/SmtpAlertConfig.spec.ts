@@ -4,8 +4,8 @@
 // store no necesitan DOM y arrancan mas rapido sin el.
 import { config, mount } from '@vue/test-utils';
 import { createPinia, setActivePinia } from 'pinia';
-import { QBanner, QIcon, QInput, QSelect, Quasar } from 'quasar';
-import { beforeEach, describe, expect, it } from 'vitest';
+import { Notify, QBanner, QIcon, QInput, QSelect, Quasar } from 'quasar';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import SmtpAlertConfig from '@components/nodes/SmtpAlertConfig.vue';
 import { useSmtpAlertStore } from '@stores/nodes/smtp-alert.store';
@@ -23,7 +23,7 @@ const QUASAR_COMPONENTS = { QBanner, QIcon, QInput, QSelect };
 const mountComponent = (nodeId: string): ReturnType<typeof mount> =>
   mount(SmtpAlertConfig, {
     props: { nodeId },
-    global: { plugins: [Quasar], components: QUASAR_COMPONENTS },
+    global: { plugins: [[Quasar, { plugins: { Notify } }]], components: QUASAR_COMPONENTS },
   });
 
 /**
@@ -118,26 +118,10 @@ describe('SmtpAlertConfig · configurador del nodo DESTINO_SMTP', () => {
       });
     });
 
-    it('2.2 deberia recoger un correo tecleado sin confirmar con Enter', async () => {
-      // 1. Arrange 📐: la pieza critica del campo, aprendida del selector de zona
-      //    horaria del cron. `update:model-value` solo se emite al confirmar, asi
-      //    que sin `@input-value` un correo escrito y no convertido en chip se
-      //    perderia al pulsar Guardar mientras la pantalla lo sigue mostrando.
-      const nodeId = nextNodeId();
-      const wrapper = mountComponent(nodeId);
-      const store = useSmtpAlertStore(nodeId);
-
-      // 2. Act ⚙️
-      await selectByField(wrapper, 'recipients-field').vm.$emit('input-value', RECIPIENT);
-
-      // 3. Assert 🎯
-      expect(store.config.to).toEqual([RECIPIENT]);
-      expect(store.isConfigValid).toBe(true);
-    });
-
-    it('2.3 no deberia duplicar un destinatario ya presente', async () => {
-      // 1. Arrange 📐: QSelect emite `input-value` mientras se teclea, asi que el
-      //    manejador se invoca muchas veces con prefijos del mismo texto.
+    it('2.2 deberia cerrar el chip al pulsar Enter sobre lo tecleado', async () => {
+      // 1. Arrange 📐: `update:model-value` solo se emite al confirmar, asi que
+      //    el componente espeja lo tecleado con `@input-value` y lo convierte en
+      //    chip al pulsar Enter, ya recortado y validado.
       const nodeId = nextNodeId();
       const wrapper = mountComponent(nodeId);
       const store = useSmtpAlertStore(nodeId);
@@ -145,10 +129,89 @@ describe('SmtpAlertConfig · configurador del nodo DESTINO_SMTP', () => {
 
       // 2. Act ⚙️
       await recipients.vm.$emit('input-value', RECIPIENT);
-      await recipients.vm.$emit('input-value', RECIPIENT);
+      await recipients.vm.$emit('keydown', new KeyboardEvent('keydown', { key: 'Enter' }));
 
       // 3. Assert 🎯
       expect(store.config.to).toEqual([RECIPIENT]);
+      expect(store.isConfigValid).toBe(true);
+    });
+
+    it('2.2b deberia cerrar el chip con la coma, el separador que se teclea de memoria', async () => {
+      // 1. Arrange 📐: sin interceptarla la coma quedaria DENTRO del chip y el
+      //    backend devolveria un 400 sobre el esquema entero.
+      const nodeId = nextNodeId();
+      const wrapper = mountComponent(nodeId);
+      const store = useSmtpAlertStore(nodeId);
+      const recipients = selectByField(wrapper, 'recipients-field');
+
+      // 2. Act ⚙️
+      await recipients.vm.$emit('input-value', RECIPIENT);
+      await recipients.vm.$emit('keydown', new KeyboardEvent('keydown', { key: ',' }));
+
+      // 3. Assert 🎯
+      expect(store.config.to).toEqual([RECIPIENT]);
+    });
+
+    it('2.2c deberia recoger al salir del campo un correo tecleado y no confirmado', async () => {
+      // 1. Arrange 📐: la pieza critica, aprendida del selector de zona horaria
+      //    del cron: sin esto el texto a medio confirmar se perderia al pulsar
+      //    Guardar mientras la pantalla lo sigue mostrando.
+      const nodeId = nextNodeId();
+      const wrapper = mountComponent(nodeId);
+      const store = useSmtpAlertStore(nodeId);
+      const recipients = selectByField(wrapper, 'recipients-field');
+
+      // 2. Act ⚙️
+      await recipients.vm.$emit('input-value', RECIPIENT);
+      await recipients.vm.$emit('blur');
+
+      // 3. Assert 🎯
+      expect(store.config.to).toEqual([RECIPIENT]);
+    });
+
+    it('2.3 no deberia duplicar un destinatario ya presente', async () => {
+      // 1. Arrange 📐: confirmar dos veces el mismo texto es trivial de provocar
+      //    —Enter repetido— y no debe dejar dos chips iguales.
+      const nodeId = nextNodeId();
+      const wrapper = mountComponent(nodeId);
+      const store = useSmtpAlertStore(nodeId);
+      const recipients = selectByField(wrapper, 'recipients-field');
+
+      // 2. Act ⚙️
+      await recipients.vm.$emit('input-value', RECIPIENT);
+      await recipients.vm.$emit('keydown', new KeyboardEvent('keydown', { key: 'Enter' }));
+      await recipients.vm.$emit('input-value', RECIPIENT);
+      await recipients.vm.$emit('keydown', new KeyboardEvent('keydown', { key: 'Enter' }));
+
+      // 3. Assert 🎯
+      expect(store.config.to).toEqual([RECIPIENT]);
+    });
+
+    it('2.3b deberia avisar y no crear chip si lo confirmado no es un correo', async () => {
+      // 1. Arrange 📐: al pulsar Enter el operador AFIRMA que eso es una
+      //    direccion; descartarla en silencio —como el ruido de un pegado—
+      //    dejaria el campo vacio sin explicar por que.
+      const nodeId = nextNodeId();
+      const wrapper = mountComponent(nodeId);
+      const store = useSmtpAlertStore(nodeId);
+      // Se dobla `notify` SOBRE el objeto `$q` que `useQuasar()` ya resolvio: el
+      // setup guarda ese objeto, no la funcion, asi que sustituir la propiedad
+      // si alcanza a la llamada real.
+      const notifySpy = vi.fn();
+      (
+        wrapper.vm.$.appContext.config.globalProperties.$q as unknown as {
+          notify: typeof notifySpy;
+        }
+      ).notify = notifySpy;
+      const recipients = selectByField(wrapper, 'recipients-field');
+
+      // 2. Act ⚙️
+      await recipients.vm.$emit('input-value', 'guardia@unuware');
+      await recipients.vm.$emit('keydown', new KeyboardEvent('keydown', { key: 'Enter' }));
+
+      // 3. Assert 🎯
+      expect(store.config.to).toEqual([]);
+      expect(notifySpy).toHaveBeenCalledWith(expect.objectContaining({ type: 'negative' }));
     });
 
     it('2.4 deberia ignorar una entrada en blanco', async () => {
