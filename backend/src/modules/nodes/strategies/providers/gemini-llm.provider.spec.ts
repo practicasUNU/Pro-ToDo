@@ -3,6 +3,10 @@ import {
   GEMINI_API_KEY_VAR,
   GeminiLlmProvider,
 } from './gemini-llm.provider';
+import {
+  ERR_LLM_PROVIDER_CONTRACT,
+  ERR_LLM_PROVIDER_TRUNCATED,
+} from '@modules/nodes/strategies/interfaces/llm-provider.interface';
 import { MockLlmProvider } from './mock-llm.provider';
 
 import type { HttpClientService } from '@core/http/http-client.service';
@@ -230,14 +234,78 @@ describe('GeminiLlmProvider', () => {
         timeoutMs: 30_000,
         maxRetries: 2,
         temperature: 0.1,
-        maxTokens: 4_096,
+        maxTokens: 8_192,
       });
 
       // 3. Assert 🎯
       expect(generationConfigOf(http)).toEqual({
         responseMimeType: 'application/json',
         temperature: 0.1,
-        maxOutputTokens: 4_096,
+        maxOutputTokens: 8_192,
+      });
+    });
+
+    it('3.3 deberia anidar el nivel de pensamiento donde la API lo espera', async () => {
+      // 1. Arrange 📐: el nombre de campo importa y esta comprobado contra el
+      //    endpoint real. Ni `thinkingLevel` suelto ni `thinking_level` existen
+      //    en `generationConfig`: los dos devuelven un 400 "Cannot find field"
+      //    que parece un error de payload del nodo.
+      const http = buildHttp();
+      const provider = buildProvider(http);
+
+      // 2. Act ⚙️
+      await provider.generateCompletion('Transcribe.', undefined, {
+        model: 'gemini-3.6-flash',
+        timeoutMs: 30_000,
+        maxRetries: 2,
+        thinkingLevel: 'minimal',
+      });
+
+      // 3. Assert 🎯
+      expect(generationConfigOf(http)).toEqual({
+        responseMimeType: 'application/json',
+        thinkingConfig: { thinkingLevel: 'minimal' },
+      });
+    });
+
+    it('3.4 deberia rebajar a low el modelo que no admite minimal', async () => {
+      // 1. Arrange 📐: `minimal` solo lo admiten las familias 3.5 y 3.6. En una
+      //    3.8 seria un 400; rebajar conserva la intencion del nodo —pensar lo
+      //    menos posible— en vez de convertirla en un fallo.
+      const http = buildHttp();
+      const provider = buildProvider(http);
+
+      // 2. Act ⚙️
+      await provider.generateCompletion('Transcribe.', undefined, {
+        model: 'gemini-3.8-flash',
+        timeoutMs: 30_000,
+        maxRetries: 2,
+        thinkingLevel: 'minimal',
+      });
+
+      // 3. Assert 🎯
+      expect(generationConfigOf(http)).toMatchObject({
+        thinkingConfig: { thinkingLevel: 'low' },
+      });
+    });
+
+    it('3.5 deberia respetar un nivel superior tal cual', async () => {
+      // 1. Arrange 📐: la rebaja solo aplica a `minimal`; el resto de la escala
+      //    la admite toda la gama.
+      const http = buildHttp();
+      const provider = buildProvider(http);
+
+      // 2. Act ⚙️
+      await provider.generateCompletion('Redacta.', undefined, {
+        model: 'gemini-3.8-flash',
+        timeoutMs: 15_000,
+        maxRetries: 3,
+        thinkingLevel: 'high',
+      });
+
+      // 3. Assert 🎯
+      expect(generationConfigOf(http)).toMatchObject({
+        thinkingConfig: { thinkingLevel: 'high' },
       });
     });
 
@@ -282,6 +350,136 @@ describe('GeminiLlmProvider', () => {
       expect(http.request).not.toHaveBeenCalled();
       expect(result.metadata.isMock).toBe(true);
       expect(result.summary).toContain('nota.pdf');
+    });
+  });
+
+  describe('4. Decodificacion de la respuesta', () => {
+    /** Contrato valido, para envolverlo de distintas formas. */
+    const CONTRACT = JSON.stringify({
+      headline: 'Titular',
+      summary: 'Resumen',
+      body_paragraphs: ['Parrafo'],
+    });
+
+    /** Respuesta con las partes y el motivo de corte que se quieran. */
+    const buildResponse = (
+      parts: readonly Record<string, unknown>[],
+      finishReason = 'STOP',
+      usageMetadata: Record<string, unknown> = {},
+    ): { data: unknown } => ({
+      data: {
+        candidates: [{ content: { parts }, finishReason }],
+        usageMetadata: {
+          promptTokenCount: 10,
+          candidatesTokenCount: 20,
+          ...usageMetadata,
+        },
+      },
+    });
+
+    /** Cliente HTTP que devuelve una respuesta concreta. */
+    const httpReturning = (response: { data: unknown }): HttpMock => ({
+      request: jest.fn().mockResolvedValue(response),
+    });
+
+    it('4.1 deberia parsear un contrato envuelto en vallas Markdown', async () => {
+      // 1. Arrange 📐: se le pide JSON puro, pero a veces lo entrega dentro de
+      //    ```json ... ```. Eso reventaba el parseo con un error que acusaba al
+      //    contrato en vez de a la envoltura.
+      const http = httpReturning(
+        buildResponse([{ text: '```json\n' + CONTRACT + '\n```' }]),
+      );
+      const provider = buildProvider(http);
+
+      // 2. Act ⚙️
+      const result = await provider.generateCompletion('Transcribe.');
+
+      // 3. Assert 🎯
+      expect(result.headline).toBe('Titular');
+      expect(result.body_paragraphs).toEqual(['Parrafo']);
+    });
+
+    it('4.2 deberia concatenar TODAS las partes antes de parsear', async () => {
+      // 1. Arrange 📐: una salida larga se trocea, y quedarse con `parts[0]`
+      //    entregaba al parser un JSON cortado por la mitad.
+      const half = Math.floor(CONTRACT.length / 2);
+      const http = httpReturning(
+        buildResponse([
+          { text: CONTRACT.slice(0, half) },
+          { text: CONTRACT.slice(half) },
+        ]),
+      );
+      const provider = buildProvider(http);
+
+      // 2. Act ⚙️
+      const result = await provider.generateCompletion('Transcribe.');
+
+      // 3. Assert 🎯
+      expect(result.summary).toBe('Resumen');
+    });
+
+    it('4.3 deberia descartar las partes de deliberacion', async () => {
+      // 1. Arrange 📐: el razonamiento del modelo no es contenido, y colarlo en
+      //    la cadena a parsear la invalida entera.
+      const http = httpReturning(
+        buildResponse([
+          { text: 'Primero leo el documento...', thought: true },
+          { text: CONTRACT },
+        ]),
+      );
+      const provider = buildProvider(http);
+
+      // 2. Act ⚙️
+      const result = await provider.generateCompletion('Transcribe.');
+
+      // 3. Assert 🎯
+      expect(result.headline).toBe('Titular');
+    });
+
+    it('4.4 deberia nombrar el corte por tope en vez de acusar al contrato', async () => {
+      // 1. Arrange 📐: es el incidente. El tope cubre tambien el pensamiento,
+      //    asi que la respuesta sale a medias y `JSON.parse` falla con
+      //    "Unterminated string" — un mensaje que manda a revisar el prompt
+      //    cuando lo que falta es presupuesto.
+      const http = httpReturning(
+        buildResponse(
+          [{ text: '{"headline":"Titular","summary":"Resu' }],
+          'MAX_TOKENS',
+          { thoughtsTokenCount: 960 },
+        ),
+      );
+      const provider = buildProvider(http);
+
+      // 2. Act ⚙️ + 3. Assert 🎯
+      await expect(
+        provider.generateCompletion('Transcribe.', undefined, {
+          model: 'gemini-3.6-flash',
+          timeoutMs: 30_000,
+          maxRetries: 2,
+          maxTokens: 4_096,
+        }),
+      ).rejects.toMatchObject({ code: ERR_LLM_PROVIDER_TRUNCATED });
+
+      await expect(
+        provider.generateCompletion('Transcribe.', undefined, {
+          model: 'gemini-3.6-flash',
+          timeoutMs: 30_000,
+          maxRetries: 2,
+          maxTokens: 4_096,
+        }),
+      ).rejects.toThrow(/MAX_TOKENS.*4096.*960/s);
+    });
+
+    it('4.5 deberia seguir distinguiendo una respuesta vacia', async () => {
+      // 1. Arrange 📐: sin texto no hay nada que truncar; el diagnostico es
+      //    otro y el codigo tambien.
+      const http = httpReturning(buildResponse([], 'SAFETY'));
+      const provider = buildProvider(http);
+
+      // 2. Act ⚙️ + 3. Assert 🎯
+      await expect(
+        provider.generateCompletion('Transcribe.'),
+      ).rejects.toMatchObject({ code: ERR_LLM_PROVIDER_CONTRACT });
     });
   });
 });

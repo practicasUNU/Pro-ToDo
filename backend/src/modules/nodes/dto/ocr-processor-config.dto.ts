@@ -75,7 +75,13 @@ export const MIN_OCR_RETRIES = 0;
 export const MAX_OCR_RETRIES = 5;
 
 /** Tope de la respuesta. Una transcripcion larga cabe de sobra en 4096. */
-export const DEFAULT_OCR_MAX_TOKENS = 4_096;
+// 8192 y no 4096 desde PROT-24. En la gama Gemini 3.x este tope cubre TAMBIEN
+// los tokens de pensamiento, asi que no es el tamano de la respuesta sino el
+// presupuesto total: con 4096, el modelo gastaba ~1000 deliberando y la
+// transcripcion salia cortada a media cadena JSON (`finishReason: MAX_TOKENS`).
+// Se acota ademas el pensamiento en la propia llamada; las dos cosas hacen
+// falta, porque subir el tope sin acotarlo solo aplaza el corte.
+export const DEFAULT_OCR_MAX_TOKENS = 8_192;
 export const MIN_OCR_MAX_TOKENS = 256;
 export const MAX_OCR_MAX_TOKENS = 32_768;
 

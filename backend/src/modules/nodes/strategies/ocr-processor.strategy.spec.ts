@@ -9,7 +9,10 @@ import {
   ERR_HTTP_CLIENT_REJECTED,
   ERR_HTTP_UPSTREAM_UNAVAILABLE,
 } from '@core/http/http-client.service';
-import { DEFAULT_OCR_MODEL } from '@modules/nodes/dto/ocr-processor-config.dto';
+import {
+  DEFAULT_OCR_MAX_TOKENS,
+  DEFAULT_OCR_MODEL,
+} from '@modules/nodes/dto/ocr-processor-config.dto';
 import {
   ERR_OCR_CONFIG,
   ERR_OCR_EMPTY_TRANSCRIPTION,
@@ -442,10 +445,37 @@ describe('OcrProcessorStrategy · nodo satelite PROCESADOR_OCR', () => {
 
       // 3. Assert 🎯
       const options = generateCompletion.mock.calls[0]?.[2] as
-        { temperature?: number; maxTokens?: number } | undefined;
+        | {
+            temperature?: number;
+            maxTokens?: number;
+            thinkingLevel?: string;
+          }
+        | undefined;
 
       expect(options?.temperature).toBe(0.1);
-      expect(options?.maxTokens).toBe(4_096);
+      // Contra la CONSTANTE: el valor sube cuando sube el presupuesto, y un
+      // literal aqui convertiria ese cambio en una prueba roja sin informacion.
+      expect(options?.maxTokens).toBe(DEFAULT_OCR_MAX_TOKENS);
+    });
+
+    it('6.1bis deberia pedir el pensamiento MINIMO para transcribir', async () => {
+      // 1. Arrange 📐: en Gemini 3.x lo que el modelo piensa sale del mismo
+      //    presupuesto que lo que escribe. Con el tope en 4096 gastaba ~1000
+      //    deliberando y la transcripcion salia cortada a media cadena JSON.
+      const generateCompletion = buildSpyGemini();
+      const strategy = buildStrategy({
+        provider: LlmProvider.GEMINI,
+        generateCompletion,
+      } as unknown as GeminiLlmProvider);
+
+      // 2. Act ⚙️
+      await strategy.execute(buildContext(), { provider: LlmProvider.GEMINI });
+
+      // 3. Assert 🎯
+      const options = generateCompletion.mock.calls[0]?.[2] as
+        { thinkingLevel?: string } | undefined;
+
+      expect(options?.thinkingLevel).toBe('minimal');
     });
 
     it('6.2 deberia respetar la temperatura declarada en el nodo', async () => {

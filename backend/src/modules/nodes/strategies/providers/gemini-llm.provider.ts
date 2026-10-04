@@ -4,9 +4,11 @@ import { ConfigService } from '@nestjs/config';
 import { HttpClientService } from '@core/http/http-client.service';
 import {
   ERR_LLM_PROVIDER_CONTRACT,
+  ERR_LLM_PROVIDER_TRUNCATED,
   LlmProvider,
   LlmProviderException,
 } from '@modules/nodes/strategies/interfaces/llm-provider.interface';
+import { stripCodeFence } from '@modules/nodes/utils/code-fence.util';
 import { MockLlmProvider } from '@modules/nodes/strategies/providers/mock-llm.provider';
 
 import type {
@@ -14,6 +16,7 @@ import type {
   LlmExecutionOptions,
   LlmInlineAttachment,
   LlmResponsePayload,
+  LlmThinkingLevel,
 } from '@modules/nodes/strategies/interfaces/llm-provider.interface';
 
 /** Variable de entorno que porta la credencial. Ver `backend/.env.example`. */
@@ -40,6 +43,28 @@ export const GEMINI_API_BASE_URL =
 export const DEFAULT_GEMINI_MODEL = 'gemini-3.6-flash';
 
 /**
+ * Modelos que admiten el nivel de pensamiento `minimal`.
+ *
+ * Las familias 3.7 y 3.8 empiezan en `low`, y mandarles `minimal` devuelve un
+ * 400 `INVALID_ARGUMENT` que parece un error de payload. Se rebaja en vez de
+ * fallar: el nodo pidio "piensa lo menos posible" y `low` es lo mas cerca que
+ * ese modelo puede estar de eso.
+ *
+ * Se comprueba por PREFIJO para que las variantes fechadas del mismo modelo
+ * —`-preview-09-2025` y similares— no queden fuera por el sufijo.
+ */
+const MODELS_SUPPORTING_MINIMAL_THINKING: readonly string[] = [
+  'gemini-3.5-flash',
+  'gemini-3.6-flash',
+];
+
+/** Nivel al que se rebaja `minimal` en los modelos que no lo admiten. */
+const FALLBACK_THINKING_LEVEL = 'low';
+
+/** Motivo de corte que significa "el modelo termino de hablar". */
+const HEALTHY_FINISH_REASON = 'STOP';
+
+/**
  * Instruccion de formato que se antepone al prompt del operador.
  *
  * Va aqui y no en la plantilla de `plantillas_prompts_ia` porque describe el
@@ -57,12 +82,27 @@ const RESPONSE_CONTRACT_INSTRUCTION = [
 interface GeminiApiResponse {
   readonly candidates?: readonly {
     readonly content?: {
-      readonly parts?: readonly { readonly text?: string }[];
+      readonly parts?: readonly {
+        readonly text?: string;
+        /** Marca las partes de deliberacion, que no forman parte de la respuesta. */
+        readonly thought?: boolean;
+      }[];
     };
+    /**
+     * Por que dejo de generar el modelo.
+     *
+     * Se declara DESDE PROT-24. Sin el, un corte por `MAX_TOKENS` llegaba al
+     * parser como JSON a medias y se reportaba como contrato roto, que manda a
+     * revisar el prompt en vez del presupuesto. Anthropic ya declaraba su
+     * `stop_reason` por este mismo motivo.
+     */
+    readonly finishReason?: string;
   }[];
   readonly usageMetadata?: {
     readonly promptTokenCount?: number;
     readonly candidatesTokenCount?: number;
+    /** Tokens gastados deliberando; salen del mismo presupuesto que la respuesta. */
+    readonly thoughtsTokenCount?: number;
   };
 }
 
@@ -170,6 +210,20 @@ export class GeminiLlmProvider implements ILlmProviderClient {
             ...(config?.maxTokens === undefined
               ? {}
               : { maxOutputTokens: config.maxTokens }),
+            // El nombre de campo NO es `thinkingLevel` suelto ni
+            // `thinking_level`: la API los rechaza con un 400 "Cannot find
+            // field". La forma que acepta es este objeto anidado, comprobada
+            // contra el endpoint real.
+            ...(config?.thinkingLevel === undefined
+              ? {}
+              : {
+                  thinkingConfig: {
+                    thinkingLevel: this.resolveThinkingLevel(
+                      config.thinkingLevel,
+                      model,
+                    ),
+                  },
+                }),
           },
         },
       },
@@ -196,7 +250,7 @@ export class GeminiLlmProvider implements ILlmProviderClient {
       );
     }
 
-    return this.toPayload(outcome.data, model);
+    return this.toPayload(outcome.data, model, config?.maxTokens);
   }
 
   /**
@@ -230,6 +284,29 @@ export class GeminiLlmProvider implements ILlmProviderClient {
     ];
   }
 
+  /**
+   * Acota el nivel pedido a lo que el modelo concreto admite.
+   *
+   * Rebajar en vez de fallar: el nodo pidio "piensa lo menos posible", y en un
+   * modelo que no conoce `minimal` lo mas cerca de eso es `low`. Fallar aqui
+   * convertiria una preferencia de coste en un 400 que parece un error de
+   * payload.
+   */
+  private resolveThinkingLevel(
+    requested: LlmThinkingLevel,
+    model: string,
+  ): LlmThinkingLevel {
+    if (requested !== 'minimal') {
+      return requested;
+    }
+
+    const supportsMinimal = MODELS_SUPPORTING_MINIMAL_THINKING.some(
+      (supported) => model.startsWith(supported),
+    );
+
+    return supportsMinimal ? requested : FALLBACK_THINKING_LEVEL;
+  }
+
   /** Une la instruccion del operador con el contrato de formato obligatorio. */
   private buildSystemInstruction(systemPrompt?: string): string {
     const operatorInstruction = systemPrompt?.trim() ?? '';
@@ -243,12 +320,47 @@ export class GeminiLlmProvider implements ILlmProviderClient {
   private toPayload(
     response: GeminiApiResponse,
     model: string,
+    maxTokens?: number,
   ): LlmResponsePayload {
-    const rawText = response.candidates?.[0]?.content?.parts?.[0]?.text;
+    const candidate = response.candidates?.[0];
 
-    if (rawText === undefined || rawText.trim().length === 0) {
+    // El texto sale de TODAS las partes, no de `parts[0]`. Los modelos de
+    // pensamiento anaden partes propias y una salida larga se trocea; quedarse
+    // con la primera entregaba al parser un JSON cortado por la mitad.
+    const rawText = (candidate?.content?.parts ?? [])
+      .filter((part) => part.thought !== true)
+      .map((part) => part.text ?? '')
+      .join('');
+
+    // ANTES de parsear: un corte por tope de tokens produce un JSON a medias, y
+    // diagnosticarlo como contrato roto manda a revisar el prompt cuando lo que
+    // falta es presupuesto. Se nombra el motivo y el tope vigente para que la
+    // causa se lea en el log en vez de deducirse.
+    const finishReason = candidate?.finishReason;
+
+    if (
+      finishReason !== undefined &&
+      finishReason !== HEALTHY_FINISH_REASON &&
+      rawText.trim().length > 0
+    ) {
       throw new GeminiProviderException(
-        'Gemini devolvio una respuesta sin contenido generado.',
+        `Gemini corto la respuesta (finishReason: ${finishReason}` +
+          `${maxTokens === undefined ? '' : `, maxOutputTokens: ${maxTokens}`}` +
+          `${
+            response.usageMetadata?.thoughtsTokenCount === undefined
+              ? ''
+              : `, tokens de pensamiento: ${response.usageMetadata.thoughtsTokenCount}`
+          }). ` +
+          'Sube el tope de tokens del nodo o baja su nivel de pensamiento.',
+        ERR_LLM_PROVIDER_TRUNCATED,
+      );
+    }
+
+    if (rawText.trim().length === 0) {
+      throw new GeminiProviderException(
+        `Gemini devolvio una respuesta sin contenido generado (finishReason: ${
+          finishReason ?? 'desconocido'
+        }).`,
         ERR_LLM_PROVIDER_CONTRACT,
       );
     }
@@ -271,7 +383,10 @@ export class GeminiLlmProvider implements ILlmProviderClient {
   /** `JSON.parse` con el fallo traducido al error del proveedor. */
   private parseContract(rawText: string): GeminiGeneratedContract {
     try {
-      const parsed: unknown = JSON.parse(rawText);
+      // El modelo a veces entrega el objeto envuelto en ```json ... ``` pese a
+      // pedirsele JSON puro, y eso reventaba el parseo con un error que acusaba
+      // al contrato en vez de a la envoltura.
+      const parsed: unknown = JSON.parse(stripCodeFence(rawText));
 
       if (typeof parsed !== 'object' || parsed === null) {
         throw new Error('el JSON recibido no es un objeto');

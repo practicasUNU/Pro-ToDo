@@ -21,6 +21,7 @@ import { LlmProviderFactory } from '@modules/nodes/strategies/llm-provider.facto
 import { MockLlmProvider } from '@modules/nodes/strategies/providers/mock-llm.provider';
 import { LlmProviderCatalogService } from '@modules/nodes/services/llm-provider-catalog.service';
 import { MULTIMODAL_CONTENT_TYPE_PATTERN } from '@modules/nodes/utils/parsed-email-payload.util';
+import { stripCodeFence } from '@modules/nodes/utils/code-fence.util';
 
 import type { StatePayloadContext } from '@core/fsm/context/state-payload.context';
 import type {
@@ -63,25 +64,8 @@ const MAX_OCR_ATTACHMENTS = 3;
 /** Estado con el que el nodo declara que la transcripcion salio adelante. */
 const OCR_STATUS_COMPLETED = 'COMPLETED';
 
-/**
- * Valla de bloque de codigo al principio o al final de un fragmento.
- *
- * El prompt se lo prohibe expresamente al modelo, pero esto es la red: una
- * valla que se cuele acaba PUBLICADA tal cual en la noticia, porque nada mas
- * abajo en el pipeline vuelve a mirar el texto.
- *
- * Solo caza los extremos a proposito. Un ``` en mitad del texto puede ser
- * contenido legitimo del documento transcrito, y borrarlo seria destruir
- * justamente lo que este nodo viene a conservar.
- */
-const CODE_FENCE_PATTERN = /^```(?:[a-zA-Z]*)?[ \t]*\n?|\n?[ \t]*```$/g;
-
 /** Fila de tabla GFM: una linea que empieza por `|`. */
 const TABLE_ROW_PATTERN = /^\s*\|/;
-
-/** Quita las vallas de los extremos y el espacio sobrante. */
-const stripCodeFence = (text: string): string =>
-  text.replace(CODE_FENCE_PATTERN, '').trim();
 
 /** Ultima linea no vacia de un bloque, para decidir como unirlo con el siguiente. */
 const lastLineOf = (text: string): string => {
@@ -216,6 +200,11 @@ export class OcrProcessorStrategy implements INodeStrategy {
             // con el defecto del modelo.
             temperature: config.temperature,
             maxTokens: config.maxTokens,
+            // Transcribir no es deliberar: se quiere fidelidad a lo que pone en
+            // el documento, no razonamiento. Y en Gemini 3.x lo que el modelo
+            // piensa sale del mismo presupuesto que lo que escribe, asi que
+            // cada token deliberado es texto que no se transcribe.
+            thinkingLevel: 'minimal',
             mode: 'ocr',
           },
           attachments,

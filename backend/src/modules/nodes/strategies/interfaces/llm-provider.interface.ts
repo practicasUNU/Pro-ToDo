@@ -71,6 +71,33 @@ export interface LlmInlineAttachment {
 export const ERR_LLM_PROVIDER_CONTRACT = 'ERR_LLM_PROVIDER_CONTRACT';
 
 /**
+ * La respuesta del modelo se corto antes de terminar.
+ *
+ * Codigo PROPIO y no `ERR_LLM_PROVIDER_CONTRACT`, aunque el sintoma sea un
+ * `JSON.parse` que falla: el contrato roto acusa al formato de la respuesta y
+ * manda a mirar el prompt, cuando lo que hay que subir es el tope de tokens o
+ * bajar el nivel de pensamiento. Confundirlos costo una auditoria entera.
+ *
+ * NO es motivo de respaldo dinamico (`provider-fallback.ts`): un tope corto lo
+ * seria igual en el proveedor siguiente.
+ */
+export const ERR_LLM_PROVIDER_TRUNCATED = 'ERR_LLM_PROVIDER_TRUNCATED';
+
+/**
+ * Cuanto se le deja deliberar al modelo antes de responder.
+ *
+ * En la gama Gemini 3.x los tokens de pensamiento CUENTAN contra
+ * `maxOutputTokens`, que es un corte duro sobre la suma de ambos. Un nodo que
+ * transcribe no gana nada deliberando y si lo pierde todo: con el tope en 4096,
+ * el modelo gastaba ~1000 tokens pensando y la transcripcion salia cortada a
+ * media cadena JSON.
+ *
+ * `minimal` solo lo admiten las familias 3.5 y 3.6; el resto de la gama empieza
+ * en `low` (ver `MODELS_SUPPORTING_MINIMAL_THINKING` en el cliente de Gemini).
+ */
+export type LlmThinkingLevel = 'minimal' | 'low' | 'medium' | 'high';
+
+/**
  * Fallo de un cliente de proveedor, con el codigo que lo origino.
  *
  * Existe para que la estrategia pueda DECIDIR sin leer el mensaje. Hasta ahora
@@ -136,8 +163,21 @@ export interface LlmExecutionOptions {
    *
    * OPCIONAL: cada cliente aplica el suyo cuando falta. Es un limite de COSTE
    * ademas de de longitud, y por eso lo decide el nodo y no el proveedor.
+   *
+   * CUIDADO: en Gemini 3.x este tope cubre tambien los tokens de pensamiento,
+   * asi que no es el tamano de la respuesta sino el presupuesto total. Ver
+   * `thinkingLevel`.
    */
   readonly maxTokens?: number;
+
+  /**
+   * Cuanto deliberar antes de responder.
+   *
+   * OPCIONAL y omitido por defecto, por el mismo motivo que `temperature` y
+   * `maxTokens`: el defecto lo publica cada proveedor y cambia con el modelo.
+   * Hoy solo lo entiende el cliente de Gemini; el resto lo ignora sin romperse.
+   */
+  readonly thinkingLevel?: LlmThinkingLevel;
 }
 
 /**

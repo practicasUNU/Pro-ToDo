@@ -2,6 +2,7 @@ import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 
 import { HttpClientService } from '@core/http/http-client.service';
+import { stripCodeFence } from '@modules/nodes/utils/code-fence.util';
 import {
   ERR_LLM_PROVIDER_CONTRACT,
   LlmProvider,
@@ -300,7 +301,9 @@ export class AnthropicLlmProvider implements ILlmProviderClient {
   /** `JSON.parse` con el fallo traducido al error del proveedor. */
   private parseContract(rawText: string): AnthropicGeneratedContract {
     try {
-      const parsed: unknown = JSON.parse(rawText);
+      // Misma red que en el cliente de Gemini: un objeto entregado dentro de
+      // ```json ... ``` reventaba el parseo acusando al contrato.
+      const parsed: unknown = JSON.parse(stripCodeFence(rawText));
 
       if (typeof parsed !== 'object' || parsed === null) {
         throw new Error('el JSON recibido no es un objeto');
