@@ -323,7 +323,54 @@ describe('Satelite OCR · desvio, reincorporacion y purga binaria', () => {
         character_count: TRANSCRIPTION.length,
         ocr_status: 'COMPLETED',
       });
+      // El parser de ESTA prueba falla sin payload, que es el caso de la
+      // mayoria de las estrategias; por eso su namespace no llega a existir.
+      // Que si exista cuando el parser SI produce algo lo cubre 3.4.
       expect(result.contextPayload.parsed_email).toBeUndefined();
+    });
+
+    it('3.4 deberia publicar parsed_email con el payload neutro del parser', async () => {
+      // 1. Arrange 📐: el parser real NO se va de vacio —emite sus trece claves
+      //    con `extracted_urls: []` y el inventario de adjuntos— y el motor las
+      //    publica pese al `success: false`. Sin eso, el MAPEADOR_PLANTILLA que
+      //    viene despues del rescate interpolaba un `{{parsed_email.*}}` que no
+      //    existia, y el flujo moria por una contingencia que SI se atendio.
+      const execution = buildExecution();
+      const { repo } = buildRepository(execution);
+      registerStrategies();
+
+      const neutralPayload = {
+        subject: 'Nota de prensa',
+        clean_body: '',
+        extracted_urls: [],
+        attachment_count: 1,
+        requires_multimodal_fallback: true,
+      };
+
+      factory.registerStrategy(
+        buildStrategy(
+          NodeType.PARSER_PRE_IA,
+          jest.fn().mockResolvedValue({
+            success: false,
+            data: { ...neutralPayload },
+            error: {
+              level: 'GRAVE',
+              code: ERR_PARSER_UNEXTRACTABLE_MEDIA,
+              message: 'El correo no trae texto aprovechable.',
+            },
+          }),
+        ),
+      );
+
+      // 2. Act ⚙️
+      const result = await buildEngine(repo).executeWorkflow(
+        EXECUTION_ID,
+        buildSchemaWithOcr(),
+      );
+
+      // 3. Assert 🎯
+      expect(result.contextPayload.parsed_email).toEqual(neutralPayload);
+      expect(result.currentState).toBe(ExecutionState.EXITOSO);
     });
 
     it('3.3 NO deberia reejecutar el parser que ya fallo', async () => {

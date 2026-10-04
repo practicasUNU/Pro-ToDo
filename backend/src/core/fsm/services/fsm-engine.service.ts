@@ -761,8 +761,32 @@ export class FsmEngineService {
 
         const result = outcome.result;
 
-        if (result.success) {
+        // --- Publicacion del payload, DESACOPLADA del exito del nodo.
+        //
+        // Un nodo que se desvia por `onErrorStep` deja igualmente su payload en
+        // el `outputNamespace` que el resto del grafo tiene contratado. El caso
+        // que lo motiva es `PARSER_PRE_IA` ante un correo sin texto
+        // aprovechable: el satelite de OCR lo rescata y devuelve el flujo a su
+        // curso, pero los nodos de aguas abajo seguian interpolando un
+        // `parsed_email` que nunca se habia escrito. El sintoma era un
+        // `ERR_MISSING_UPSTREAM_CONTEXT` —o una excepcion de interpolacion en el
+        // MAPEADOR_PLANTILLA— sobre una topologia correcta, y la regla 7 del
+        // validador no podia anticiparlo porque no recorre las ramas de error.
+        //
+        // La condicion NO es solo `result.data`: en la rama de exito se conserva
+        // el `?? {}` de siempre, porque un nodo que termina bien sin payload
+        // tiene que seguir creando su namespace vacio —`findMissingNamespaces`
+        // cuenta esa clave como presente, y perderla bloquearia a quien la
+        // declare en `getRequiredNamespaces`.
+        //
+        // La rama catastrofica ya salio del bucle mas arriba, asi que un
+        // `ERR_NODE_CRASHED` sigue sin publicar nada: de un ejecutor que se
+        // rompio no se sabe que dejo a medias.
+        if (result.success || result.data !== undefined) {
           context.setNamespace(node.outputNamespace, result.data ?? {});
+        }
+
+        if (result.success) {
           lastCompletedNodeType = node.nodeType;
 
           // Liberacion de binarios. Va JUSTO aqui, y no repetida en cada rama de

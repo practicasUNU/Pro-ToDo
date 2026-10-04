@@ -3232,4 +3232,196 @@ describe('FsmEngineService (PROT-09)', () => {
       });
     });
   });
+
+  describe('34. Publicacion del namespace desacoplada del exito', () => {
+    /**
+     * Payload neutro con la forma que emite `PARSER_PRE_IA` al fallar.
+     *
+     * Se reducen las trece claves reales a las tres que importan aqui: la
+     * coleccion vacia que impide que el extractor web reviente, el texto en
+     * blanco y la bandera que explica por que el nodo se rindio.
+     */
+    const NEUTRAL_PAYLOAD = {
+      clean_body: '',
+      extracted_urls: [],
+      requires_multimodal_fallback: true,
+    };
+
+    /** `NodeResult` fallido que SI trae payload, como el del parser. */
+    const failureWithData = (): NodeResult => ({
+      ...failure('GRAVE'),
+      data: { ...NEUTRAL_PAYLOAD },
+    });
+
+    /** Registra el disparador y el terminal; `nodo_b` lo pone cada prueba. */
+    const registerEdges = (terminal: jest.Mock): void => {
+      factory.registerStrategy(
+        buildStrategy(
+          NodeType.TRIGGER_IMAP,
+          jest.fn().mockResolvedValue({ success: true, data: {} }),
+        ),
+      );
+      factory.registerStrategy(buildStrategy(NodeType.DESTINO_HTTP, terminal));
+    };
+
+    /** Grafo lineal con `nodo_b` desviando hacia el terminal. */
+    const buildDivertedSchema = (): PipelineSchemaDto => {
+      const schema = buildLinearSchema();
+      schema.nodes.nodo_b.onErrorStep = {
+        targetNode: 'nodo_c',
+        catchErrors: [TEST_ERROR_CODE],
+      };
+
+      return schema;
+    };
+
+    it('34.1 deberia publicar el payload de un nodo que falla y se desvia', async () => {
+      // 1. Arrange 📐: es el caso del parser ante un correo sin texto. El
+      //    satelite lo rescata y devuelve el flujo a su curso, asi que el
+      //    namespace que el esquema prometio tiene que existir igualmente.
+      const { repo } = buildRepository(buildExecution());
+      registerEdges(jest.fn().mockResolvedValue({ success: true, data: {} }));
+      factory.registerStrategy(
+        buildStrategy(
+          NodeType.PROCESADOR_IA,
+          jest.fn().mockResolvedValue(failureWithData()),
+        ),
+      );
+
+      // 2. Act ⚙️
+      const result = await buildEngine(repo).executeWorkflow(
+        EXECUTION_ID,
+        buildDivertedSchema(),
+      );
+
+      // 3. Assert 🎯
+      expect(result.contextPayload.salida_b).toEqual(NEUTRAL_PAYLOAD);
+    });
+
+    it('34.2 deberia publicarlo ANTES de entrar al nodo de respaldo', async () => {
+      // 1. Arrange 📐: el aserto se hace DENTRO de la llamada al respaldo, no
+      //    sobre el contexto final. Publicar despues del desvio dejaria pasar
+      //    la prueba anterior y seguiria rompiendo al nodo que se interpola.
+      const { repo } = buildRepository(buildExecution());
+      let seenOnEntry: Record<string, unknown> | undefined;
+
+      registerEdges(
+        jest.fn().mockImplementation((context: StatePayloadContext) => {
+          seenOnEntry = context.getNamespace('salida_b');
+
+          return Promise.resolve({ success: true, data: {} });
+        }),
+      );
+      factory.registerStrategy(
+        buildStrategy(
+          NodeType.PROCESADOR_IA,
+          jest.fn().mockResolvedValue(failureWithData()),
+        ),
+      );
+
+      // 2. Act ⚙️
+      await buildEngine(repo).executeWorkflow(
+        EXECUTION_ID,
+        buildDivertedSchema(),
+      );
+
+      // 3. Assert 🎯
+      expect(seenOnEntry).toEqual(NEUTRAL_PAYLOAD);
+    });
+
+    it('34.3 deberia publicarlo tambien cuando el fallo PAUSA sin ruta', async () => {
+      // 1. Arrange 📐: sin `onErrorStep` el motor pausa, y el checkpoint de la
+      //    pausa es lo que leera el reintento manual de CU-09. Dejar fuera lo
+      //    que el nodo alcanzo a producir obligaria a recalcularlo.
+      const { repo, update } = buildRepository(buildExecution());
+      registerEdges(jest.fn());
+      factory.registerStrategy(
+        buildStrategy(
+          NodeType.PROCESADOR_IA,
+          jest.fn().mockResolvedValue(failureWithData()),
+        ),
+      );
+
+      // 2. Act ⚙️
+      const result = await buildEngine(repo).executeWorkflow(
+        EXECUTION_ID,
+        buildLinearSchema(),
+      );
+
+      // 3. Assert 🎯
+      expect(lastPatch(update).currentState).toBe(ExecutionState.PAUSADO);
+      expect(result.contextPayload.salida_b).toEqual(NEUTRAL_PAYLOAD);
+    });
+
+    it('34.4 NO deberia crear el namespace de un nodo que falla sin payload', async () => {
+      // 1. Arrange 📐: es la mayoria de los fallos. Escribir un `{}` fingiria
+      //    que el nodo corrio y desactivaria la guarda de namespaces para quien
+      //    lo declare aguas abajo.
+      const { repo } = buildRepository(buildExecution());
+      registerEdges(jest.fn());
+      factory.registerStrategy(
+        buildStrategy(
+          NodeType.PROCESADOR_IA,
+          jest.fn().mockResolvedValue(failure('GRAVE')),
+        ),
+      );
+
+      // 2. Act ⚙️
+      const result = await buildEngine(repo).executeWorkflow(
+        EXECUTION_ID,
+        buildLinearSchema(),
+      );
+
+      // 3. Assert 🎯
+      expect(result.contextPayload.salida_b).toBeUndefined();
+    });
+
+    it('34.5 deberia seguir creando el namespace vacio de un nodo que acierta sin payload', async () => {
+      // 1. Arrange 📐: no-regresion. `findMissingNamespaces` cuenta la clave
+      //    vacia como presente; perderla bloquearia al nodo siguiente con un
+      //    ERR_MISSING_UPSTREAM_CONTEXT sobre un nodo que fue bien.
+      const { repo } = buildRepository(buildExecution());
+      registerEdges(jest.fn().mockResolvedValue({ success: true, data: {} }));
+      factory.registerStrategy(
+        buildStrategy(
+          NodeType.PROCESADOR_IA,
+          jest.fn().mockResolvedValue({ success: true }),
+        ),
+      );
+
+      // 2. Act ⚙️
+      const result = await buildEngine(repo).executeWorkflow(
+        EXECUTION_ID,
+        buildLinearSchema(),
+      );
+
+      // 3. Assert 🎯
+      expect(result.contextPayload.salida_b).toEqual({});
+    });
+
+    it('34.6 deberia seguir copiando el payload en error_context.partial_data', async () => {
+      // 1. Arrange 📐: no-regresion. Las dos vias coexisten: el namespace es el
+      //    estado vivo —reescribible por un nodo posterior— y `partial_data` es
+      //    la instantanea del fallo que cita la carta de la alerta SMTP.
+      const { repo } = buildRepository(buildExecution());
+      registerEdges(jest.fn().mockResolvedValue({ success: true, data: {} }));
+      factory.registerStrategy(
+        buildStrategy(
+          NodeType.PROCESADOR_IA,
+          jest.fn().mockResolvedValue(failureWithData()),
+        ),
+      );
+
+      // 2. Act ⚙️
+      const result = await buildEngine(repo).executeWorkflow(
+        EXECUTION_ID,
+        buildDivertedSchema(),
+      );
+
+      // 3. Assert 🎯
+      expect(result.contextPayload[ERROR_CONTEXT_NAMESPACE]).toMatchObject({
+        partial_data: NEUTRAL_PAYLOAD,
+      });
+    });
+  });
 });

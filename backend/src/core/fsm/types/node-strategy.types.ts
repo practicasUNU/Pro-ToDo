@@ -117,25 +117,44 @@ export interface NodeErrorDetail {
 export interface NodeResult {
   success: boolean;
   /**
-   * Payload producido por el nodo. Su DESTINO depende de `success`.
+   * Payload producido por el nodo. Se publica en su `outputNamespace`.
    *
-   * - `success: true`: el motor lo deposita en el `outputNamespace` del nodo.
-   * - `success: false`: NO se publica —un nodo que falla no escribe su
-   *   namespace, o los de aguas abajo leerian un resultado a medias— pero, si
-   *   el fallo se desvia por `onErrorStep`, viaja intacto a
-   *   `error_context.partial_data`.
+   * La publicacion esta DESACOPLADA de `success`, y ese desacoplamiento es el
+   * contrato:
    *
-   * Esa segunda mitad es lo que vuelve accionable una rama de recuperacion.
-   * `PARSER_PRE_IA` es el caso que la motiva: cuando declara un correo sin texto
-   * aprovechable, su payload trae el inventario de adjuntos y el
-   * `multimodal_reason`, que es exactamente lo que el nodo de respaldo necesita
-   * para decidir si manda una alerta o invoca un modelo con vision. Tirarlo
-   * obligaria al respaldo a volver a deducir del correo crudo lo que el parser
-   * ya habia deducido.
+   * - `success: true`: se deposita siempre, con `{}` si el nodo no produjo
+   *   nada. El namespace vacio no es un descuido: `findMissingNamespaces`
+   *   cuenta la clave como presente, y es lo que permite que un nodo posterior
+   *   lo declare en `getRequiredNamespaces` sin bloquearse.
+   * - `success: false`: se deposita TAMBIEN, si el nodo alcanzo a producir
+   *   algo. Un fallo desviado por `onErrorStep` no exime al nodo de su contrato
+   *   de datos: la rama de recuperacion reincorpora el flujo a su curso, y los
+   *   pasos de aguas abajo siguen interpolando el namespace que el esquema les
+   *   prometio. El nodo que falla es ademas el UNICO que sabe que forma neutra
+   *   satisface a sus consumidores —`WebScraperStrategy` hace lo mismo por su
+   *   cuenta con `buildNeutralPayload`, emitiendo en blanco las cinco claves de
+   *   sus `outputFields`.
+   *
+   * Un fallo CATASTROFICO es la excepcion y no publica: de un ejecutor que se
+   * rompio no se sabe que dejo a medias, asi que el motor corta antes.
+   *
+   * Ademas, y no en lugar de lo anterior, un fallo desviado copia este mismo
+   * payload en `error_context.partial_data`. Las dos vias coexisten a proposito
+   * y no son redundantes: el namespace es el estado VIVO, que un nodo posterior
+   * puede reescribir, mientras que `partial_data` es la instantanea del fallo
+   * concreto, y es de ahi —y no del namespace— de donde la carta de
+   * `SmtpAlertStrategy` saca lo que cuenta.
+   *
+   * `PARSER_PRE_IA` es el caso que lo motiva todo: ante un correo sin texto
+   * aprovechable emite sus trece claves con el inventario real de adjuntos y el
+   * `multimodal_reason`, que es lo que el nodo de respaldo necesita para decidir
+   * si manda una alerta o invoca un modelo con vision. Tirarlo obligaria al
+   * respaldo a volver a deducir del correo crudo lo que el parser ya dedujo.
    *
    * Sigue siendo OPCIONAL en un fallo: la mayoria de las estrategias no alcanzan
-   * a producir nada antes de abortar, y `error_context.partial_data` recibe
-   * entonces un objeto vacio.
+   * a producir nada antes de abortar. Entonces el namespace NO se crea —no se
+   * escribe un `{}` que fingiria que el nodo corrio— y
+   * `error_context.partial_data` recibe un objeto vacio.
    */
   data?: Record<string, unknown>;
   /**
@@ -236,7 +255,7 @@ export interface INodeStrategy {
    *
    * PROPIEDAD CONSTANTE, a diferencia de `getRequiredNamespaces`: lo que un nodo
    * produce depende de su tipo y no de su configuracion. El parser devuelve las
-   * mismas doce claves lea del namespace que lea.
+   * mismas trece claves lea del namespace que lea.
    *
    * OPCIONAL: una estrategia que no lo declare simplemente no aporta opciones al
    * selector, igual que una sin `paramsSchema` no aporta validacion de params.
