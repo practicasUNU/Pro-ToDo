@@ -69,6 +69,22 @@ export const MIN_LLM_EMERGENCY_BRAKE_THRESHOLD = 1;
 export const MAX_LLM_EMERGENCY_BRAKE_THRESHOLD = 5;
 
 /**
+ * Presupuesto de tokens cuando el nodo debe devolver la plantilla rellena.
+ *
+ * REPLICA de `DEFAULT_LLM_MARKUP_MAX_TOKENS` (backend). Solo se aplica en ese
+ * caso: el backend lo resuelve en `resolveMaxTokens` y, SIN plantilla, no envia
+ * tope ninguno —fijar una cifra ahi recortaria flujos que hoy redactan largo con
+ * el defecto que aplica cada proveedor—.
+ *
+ * Por eso el campo del cliente es `number | null` y su defecto es `null`: aqui
+ * `null` no significa "sin limite", significa "decide tu", que es una tercera
+ * opcion que un numero no puede expresar.
+ */
+export const DEFAULT_LLM_MARKUP_MAX_TOKENS = 8_192;
+export const MIN_LLM_MAX_TOKENS = 256;
+export const MAX_LLM_MAX_TOKENS = 32_768;
+
+/**
  * Umbral de `maxRetries` a partir del cual se avisa del efecto multiplicativo.
  *
  * Tres es el defecto del backend y no merece aviso. Por encima, el TSDoc del DTO
@@ -102,6 +118,14 @@ export interface LlmExtractorNodeConfig {
   timeoutMs: number;
   maxRetries: number;
   emergencyBrakeThreshold: number;
+  /**
+   * Tope de tokens de la respuesta, o `null` para dejar decidir al nodo.
+   *
+   * `null` y no un numero por defecto: el backend distingue tres escalones —lo
+   * que declare el nodo, el tope de marcado cuando toca devolver una plantilla,
+   * y el defecto del proveedor— y un numero aqui colapsaria los dos ultimos.
+   */
+  maxTokens: number | null;
 }
 
 /**

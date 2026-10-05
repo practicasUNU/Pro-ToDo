@@ -7134,3 +7134,119 @@ tanda no toca.
   esquema historico puede traerla, pero conviene confirmar que ninguno trae otras.
 - **Triada Quasar de `ESCUDO_POST_IA`**, y exponer `maxTokens` en el configurador del `PROCESADOR_IA`:
   hoy el campo existe en el DTO y no tiene control en el asistente.
+
+---
+
+## PROT-27 · El escudo gana interfaz y el presupuesto de tokens deja de ser invisible
+
+Misma rama `feat/mapeador-inyeccion`. Cierra el slice vertical: PROT-25 puso la estrategia, PROT-26
+le dio algo que auditar, y hasta ahora el nodo seguia siendo inusable desde el asistente — el
+registro de componentes no lo conocia, asi que `resolveStepBlockReason` lo marcaba
+`SIN_CONFIGURADOR` y `canSave` era imposible en cualquier flujo que lo incluyera.
+
+### Cuatro cosas del encargo que no existian
+
+Mas de la mitad de las rutas y nombres del encargo eran ficticios, y dos habrian roto la compilacion:
+
+**`LlmProcessorConfig.vue` y `llm-processor.store.ts` no existen.** El nodo `PROCESADOR_IA` se
+implementa como `LlmExtractorConfig.vue` y `llm-extractor.store.ts` — el nombre sigue a la ESTRATEGIA
+(`LlmExtractorStrategy`), no al tipo de nodo.
+
+**`NodeType.DESTINO_ACENS` no existe**, y su ausencia esta documentada: el catalogo tiene once filas y
+el enum declara diez, porque `DESTINO_ACENS` no tiene estrategia y por tanto no es expresable en un
+`pipeline_schema`. El encargo lo proponia como nuevo nodo canonico «sin configurador»; el unico que
+de verdad queda es `DESTINO_HTTP`.
+
+**El endpoint `POST /nodos/validar-config` no existe.** `@Controller('nodos')` expone exactamente una
+ruta, `GET /api/nodos`, de solo lectura. El servicio propuesto habria sido codigo muerto contra un
+404. Y no es un descuido del backend: no hay ningun endpoint que valide los `params` de un nodo
+SUELTO, porque la validacion real la hace `paramsSchema` al guardar el esquema entero. El escudo se
+queda, por tanto, como PAR store+componente, igual que `TRIGGER_CRON` y `DESTINO_SMTP` y por el mismo
+motivo escrito en la cabecera de aquel: un servicio que no conoce ninguna ruta contradice su propia
+definicion.
+
+**El store propuesto no cumplia el contrato.** Era un singleton (`defineStore('post-ia-sanitizer')`)
+y los stores de nodo se instancian POR `nodeId` —`NodeStoreHook = (nodeId: string) => NodeConfigStore`—,
+de modo que dos escudos en el mismo flujo habrian compartido selectores. Y le faltaban `toNodeParams`
+y `hydrateFromNode`, los dos OBLIGATORIOS: sin el primero el nodo no aporta nada al
+`pipeline_schema` y sin el segundo el asistente abre el formulario en blanco al editar un flujo
+existente, de modo que guardar borraria lo que el operador venia a retocar.
+
+### Texto libre donde §4 exige lista cerrada
+
+El encargo pintaba `sourceNamespace` y `sourceField` como dos `q-input` de texto. Es exactamente lo
+que `frontend-quasar.md` §4 prohibe, y aqui el coste es concreto: un namespace tecleado a mano que no
+exista no falla al escribirlo ni al guardar, falla en EJECUCION con
+`ERR_POST_IA_MISSING_PAYLOAD` y el flujo ya PAUSADO.
+
+Los dos pasan a ser selectores cerrados alimentados por `setAvailableUpstreamContext`, que el
+agregador ya sincroniza para todos los nodos y que sale del catalogo (`GET /api/nodos` → los
+`outputFields` que declara cada estrategia). Es ademas la primera cosecha visible de PROT-26: como
+`filled_markup` entro en los `outputFields` del extractor, aparece solo en el segundo selector sin
+que este nodo tenga que saber nada de el.
+
+`allowedTags` tambien es cerrado, contra una replica de `TEMPLATE_SANITIZER_CONFIG.allowedTags`. La
+replica se paga —hay que acordarse de ella si alguien amplia la lista del saneador— y compensa:
+pedir una etiqueta que la lista global no admite es `ERR_POST_IA_UNSUPPORTED_TAGS`, y con entrada
+libre el operador lo descubriria al guardar el flujo entero en vez de al elegir.
+
+### El aviso que ata PROT-26 con la interfaz
+
+`configWarnings` levanta tres, y el segundo es el que de verdad aporta: **si no hay un
+`MAPEADOR_PLANTILLA` por delante, el escudo no tendra nada que auditar**. Es consecuencia directa de
+la auto-deteccion de PROT-26 — el `PROCESADOR_IA` solo rellena `filled_markup` cuando su instruccion
+cita una plantilla base— y sin decirlo aqui, el operador montaria un escudo perfectamente configurado
+que falla siempre con `ERR_POST_IA_EMPTY_HTML` sin pista de por que.
+
+Se detecta por el CAMPO `compiled_markup` y no por el tipo de nodo ni por el namespace, con el mismo
+argumento que `BASE_TEMPLATE_MARKER_PATTERN` en el backend: el `outputNamespace` lo elige el esquema,
+no el tipo.
+
+El tercer aviso —«sin selectores no detectare que la IA se haya llevado el titular»— existe porque un
+escudo recien anadido es valido y parece proteger mas de lo que protege: sanea y rechaza marcadores,
+pero no vigila ninguna ranura.
+
+### El fixture rota por cuarta vez, y es la ultima
+
+`UNSUPPORTED_TOPOLOGY` lleva rotando desde `PARSER_PRE_IA` → `EXTRACTOR_WEB` → `PROCESADOR_IA` →
+`ESCUDO_POST_IA`, y su TSDoc ya anunciaba que `DESTINO_HTTP` era «el ultimo de la cola». Ahora lo es
+de verdad: es el UNICO tipo del enum sin configurador. Se deja escrito que cuando reciba el suyo esta
+constante se queda sin candidato, y habra que decidir entre retirar las pruebas que la usan o
+declarar un tipo ficticio solo para ellas. De paso se corrigieron tres comentarios que ya mentian
+—seguian hablando de `PROCESADOR_IA` cuando el fixture usaba `ESCUDO_POST_IA` desde hacia dos tandas.
+
+### `maxTokens`: por que su defecto es `null` y no un numero
+
+Es el unico numerico del nodo que se OMITE de `toNodeParams` cuando no se declara. Los otros tres
+viajan siempre, y por un motivo escrito: tienen consecuencias economicas, y dejarlos implicitos
+significaria que cambiar un defecto del backend cambiaria en silencio el coste de flujos ya guardados.
+
+Aqui es al reves, y la diferencia esta en lo que significa la ausencia. El backend resuelve este
+campo en TRES escalones —lo que declare el nodo, el tope de marcado cuando hay plantilla, y el
+defecto del proveedor—, y el unico modo de pedir el segundo y el tercero es no mandar la clave.
+Publicar un numero fijaria el presupuesto para siempre y desactivaria la subida automatica, que es
+justo la proteccion que PROT-26 anadio contra el JSON cortado a media cadena. De ahi `number | null`
+en vez de `number`, y de ahi el `clearable` del control: vaciarlo es la unica forma de volver a
+`null`.
+
+El rango solo se exige cuando hay valor: `null` es valido y es el caso normal.
+
+### Cobertura
+
+Frontend **758 pruebas en 39 archivos**, en verde (+42 y +2 archivos: 23 del store del escudo, 11 de
+su componente, 6 de `maxTokens` en el store del extractor y 2 en su configurador). Backend **1734 en
+72 suites**, intacto. `vue-tsc --noEmit` limpio —el frontend no arrastra deuda de tipos, a diferencia
+del backend— y `quasar build` sin avisos. ESLint sin avisos en lo nuevo.
+
+### Lo que sigue abierto
+
+- **`DESTINO_HTTP` es lo unico que queda.** Sin estrategia en el motor y sin triada; su turno va
+  detras del backend, como ya le paso al escudo.
+- **Sigue sin verificacion de extremo a extremo.** El circuito completo
+  `MAPEADOR_PLANTILLA → PROCESADOR_IA (dryRun) → ESCUDO_POST_IA` esta cubierto por pruebas unitarias
+  en las tres capas, pero no se ha recorrido contra una base de datos real: Docker lo levanta el
+  usuario y el servidor MCP de PostgreSQL no conecta en esta sesion.
+- **La auditoria de `configuracion_pipeline`** que PROT-25 dejo abierta sigue pendiente.
+- **`SANITIZER_ALLOWED_TAGS` es una replica manual** de la lista del saneador. Hoy no hay nada que
+  vigile que no diverjan; una prueba de contrato que las compare exigiria exponer la lista por la API
+  del catalogo, que es una tanda en si misma.

@@ -22,9 +22,12 @@ import {
   LLM_PROVIDER_LABELS,
   LlmProvider,
   MAX_LLM_EMERGENCY_BRAKE_THRESHOLD,
+  DEFAULT_LLM_MARKUP_MAX_TOKENS,
+  MAX_LLM_MAX_TOKENS,
   MAX_LLM_RETRIES,
   MAX_LLM_TIMEOUT_MS,
   MIN_LLM_EMERGENCY_BRAKE_THRESHOLD,
+  MIN_LLM_MAX_TOKENS,
   MIN_LLM_RETRIES,
   MIN_LLM_TIMEOUT_MS,
 } from '@/types/nodes/llm-extractor.types';
@@ -65,6 +68,9 @@ const UNCATALOGUED_NOTICE =
 
 const RETRIES_HINT =
   'Reintentos RAPIDOS DE RED, distintos del retryPolicy del esquema. Los dos niveles se multiplican y cada vuelta factura tokens.';
+
+const MAX_TOKENS_HINT =
+  'Dejalo VACIO salvo que sepas lo que haces: el nodo lo resuelve solo, y sube el presupuesto a 8192 cuando su instruccion cita una plantilla base, que es cuando la respuesta tiene que traer el HTML entero. Un tope corto no acorta la respuesta: la parte a media cadena JSON y el nodo muere por contrato.';
 
 const BRAKE_HINT =
   'Fallos consecutivos del proveedor que pausan el flujo. Es el corte de la espiral de gasto: al alcanzarlo, la ejecucion queda PAUSADA con el cursor intacto.';
@@ -516,6 +522,40 @@ onMounted(async () => {
               `Entre ${MIN_LLM_EMERGENCY_BRAKE_THRESHOLD} y ${MAX_LLM_EMERGENCY_BRAKE_THRESHOLD}`,
           ]"
           @update:model-value="store.updateConfig({ emergencyBrakeThreshold: Number($event) })"
+        />
+      </div>
+
+      <!-- Fila propia: los tres de arriba son col-md-4 y suman 12 exactos.
+           `clearable` es el control, y no un adorno: vaciarlo es la unica forma
+           de devolver el campo a `null`, que es lo que activa la resolucion
+           automatica del backend. -->
+      <div class="col-12 col-md-4" data-test="max-tokens-field">
+        <label class="pd-label" for="llm-max-tokens">Presupuesto de tokens</label>
+        <q-input
+          id="llm-max-tokens"
+          :model-value="store.config.maxTokens"
+          type="number"
+          :min="MIN_LLM_MAX_TOKENS"
+          :max="MAX_LLM_MAX_TOKENS"
+          step="256"
+          outlined
+          dense
+          clearable
+          class="q-mt-xs"
+          :placeholder="String(DEFAULT_LLM_MARKUP_MAX_TOKENS)"
+          :hint="MAX_TOKENS_HINT"
+          :rules="[
+            (val: number | string | null) =>
+              val === null ||
+              val === '' ||
+              (Number(val) >= MIN_LLM_MAX_TOKENS && Number(val) <= MAX_LLM_MAX_TOKENS) ||
+              `Entre ${MIN_LLM_MAX_TOKENS} y ${MAX_LLM_MAX_TOKENS}`,
+          ]"
+          @update:model-value="
+            store.updateConfig({
+              maxTokens: $event === null || $event === '' ? null : Number($event),
+            })
+          "
         />
       </div>
     </div>

@@ -1,5 +1,6 @@
 import { useLlmExtractorStore } from '@stores/nodes/llm-extractor.store';
 import { useParserEmailStore } from '@stores/nodes/parser-email.store';
+import { usePostIaSanitizerStore } from '@stores/nodes/post-ia-sanitizer.store';
 import { useOcrProcessorStore } from '@stores/nodes/ocr-processor.store';
 import { useSmtpAlertStore } from '@stores/nodes/smtp-alert.store';
 import { useTemplateMapperStore } from '@stores/nodes/template-mapper.store';
@@ -236,6 +237,7 @@ export const nodeStoreRegistry: Partial<Record<NodeType, NodeStoreHook>> = {
   [NodeType.PROCESADOR_IA]: useLlmExtractorStore,
   [NodeType.DESTINO_SMTP]: useSmtpAlertStore,
   [NodeType.PROCESADOR_OCR]: useOcrProcessorStore,
+  [NodeType.ESCUDO_POST_IA]: usePostIaSanitizerStore,
 };
 
 /**

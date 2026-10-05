@@ -15,7 +15,9 @@ import {
   DEFAULT_LLM_MODEL,
   DEFAULT_LLM_TIMEOUT_MS,
   LlmProvider,
+  MAX_LLM_MAX_TOKENS,
   MAX_LLM_TIMEOUT_MS,
+  MIN_LLM_MAX_TOKENS,
 } from '@/types/nodes/llm-extractor.types';
 
 import { useLlmExtractorStore } from './llm-extractor.store';
@@ -217,6 +219,73 @@ describe('useLlmExtractorStore · configuracion del nodo PROCESADOR_IA', () => {
 
       // 3. Assert 🎯
       expect(store.isConfigValid).toBe(false);
+    });
+
+    it('3.3 deberia admitir un maxTokens sin declarar', () => {
+      // 1. Arrange 📐: `null` no es "sin limite", es "decide tu". Es el caso
+      //    NORMAL: el backend sube el presupuesto solo si hay plantilla.
+      const store = useLlmExtractorStore(nextNodeId());
+      store.updateConfig({ templatePromptId: PROMPT_ID });
+
+      // 2. Act ⚙️ + 3. Assert 🎯
+      expect(store.config.maxTokens).toBeNull();
+      expect(store.isConfigValid).toBe(true);
+    });
+
+    it.each([
+      ['por debajo del minimo', MIN_LLM_MAX_TOKENS - 1],
+      ['por encima del maximo', MAX_LLM_MAX_TOKENS + 1],
+    ])('3.4 deberia invalidar un maxTokens %s', (_caso, maxTokens) => {
+      // 1. Arrange 📐
+      const store = useLlmExtractorStore(nextNodeId());
+      store.updateConfig({ templatePromptId: PROMPT_ID });
+
+      // 2. Act ⚙️
+      store.updateConfig({ maxTokens });
+
+      // 3. Assert 🎯
+      expect(store.isConfigValid).toBe(false);
+    });
+  });
+
+  describe('3b. Presupuesto de tokens en el pipeline_schema', () => {
+    it('3b.1 NO deberia publicar maxTokens cuando no se declara', () => {
+      // 1. Arrange 📐: la AUSENCIA de la clave es lo que activa la resolucion en
+      //    tres escalones del backend. Publicar un numero fijaria el presupuesto
+      //    y desactivaria la subida automatica ante una plantilla.
+      const store = useLlmExtractorStore(nextNodeId());
+      store.updateConfig({ templatePromptId: PROMPT_ID });
+
+      // 2. Act ⚙️ + 3. Assert 🎯
+      expect(store.toNodeParams()).not.toHaveProperty('maxTokens');
+    });
+
+    it('3b.2 deberia publicar el tope que declare el operador', () => {
+      // 1. Arrange 📐
+      const store = useLlmExtractorStore(nextNodeId());
+      store.updateConfig({ templatePromptId: PROMPT_ID });
+
+      // 2. Act ⚙️
+      store.updateConfig({ maxTokens: 16_384 });
+
+      // 3. Assert 🎯
+      expect(store.toNodeParams().maxTokens).toBe(16_384);
+    });
+
+    it('3b.3 deberia devolverlo a null al hidratar un nodo que no lo traia', () => {
+      // 1. Arrange 📐: contrato de ida y vuelta. Reponerlo con el tope de marcado
+      //    cambiaria la configuracion de un flujo con solo abrirlo y cerrarlo.
+      const store = useLlmExtractorStore(nextNodeId());
+
+      // 2. Act ⚙️
+      store.hydrateFromNode({
+        outputNamespace: 'llm_response',
+        params: { templatePromptId: PROMPT_ID },
+      });
+
+      // 3. Assert 🎯
+      expect(store.config.maxTokens).toBeNull();
+      expect(store.toNodeParams()).not.toHaveProperty('maxTokens');
     });
   });
 

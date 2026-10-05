@@ -3970,3 +3970,105 @@ se parece en nada a su causa. 8192 y no 4096 para el caso con plantilla por la l
       `PROCESADOR_IA`
 - [ ] Pendiente — verificacion de extremo a extremo contra la base de datos (Docker lo levanta el
       usuario; el MCP de PostgreSQL no conecta en esta sesion)
+
+---
+
+## Tanda actual — PROT-27 · Triada Quasar del escudo y presupuesto de tokens en el asistente
+
+### Problema
+
+PROT-25 y PROT-26 cerraron el backend del circuito, pero `ESCUDO_POST_IA` seguia sin interfaz: el
+asistente lo marcaba `SIN_CONFIGURADOR` y hacia `canSave` imposible en cualquier flujo que lo
+incluyera. Y el `maxTokens` que PROT-26 anadio al DTO existia sin control que lo escribiera.
+
+### Contratos nuevos
+
+```typescript
+// @/types/nodes/post-ia-sanitizer.types.ts — replica del DTO del backend
+export const DEFAULT_POST_IA_SOURCE_NAMESPACE = 'llm_response';
+export const DEFAULT_POST_IA_SOURCE_FIELD = 'filled_markup';
+export const MAX_REQUIRED_SELECTORS = 10;
+export const MAX_SELECTOR_LENGTH = 120;
+export const MAX_ALLOWED_TAGS = 40;
+export const SANITIZER_ALLOWED_TAGS: readonly string[];  // replica de TEMPLATE_SANITIZER_CONFIG
+
+export interface PostIaSanitizerNodeConfig {
+  sourceNamespace: string;
+  sourceField: string;
+  requiredSelectors: string[];
+  allowedTags: string[];
+}
+```
+
+```typescript
+// @stores/nodes/post-ia-sanitizer.store.ts — cumple NodeConfigStore
+usePostIaSanitizerStore(nodeId): {
+  // obligatorios del contrato
+  isConfigValid, toNodeParams, hydrateFromNode, resetConfig,
+  // opcionales que este nodo si implementa
+  setAvailableUpstreamContext, configWarnings,
+  // derivados propios
+  namespaceOptions, fieldOptions, hasStaleSource, hasBaseTemplateUpstream,
+  oversizedSelectors, unsupportedTags, updateConfig,
+}
+```
+
+```typescript
+// @/types/nodes/llm-extractor.types.ts — ampliacion
+export const DEFAULT_LLM_MARKUP_MAX_TOKENS = 8_192;
+export const MIN_LLM_MAX_TOKENS = 256;
+export const MAX_LLM_MAX_TOKENS = 32_768;
+// `LlmExtractorNodeConfig` gana `maxTokens: number | null`
+```
+
+### Diagrama de inyeccion de dependencias
+
+```
+flujo-draft.store (anfitrion)
+  ├── nodeConfigRegistry[ESCUDO_POST_IA] ──► PostIaSanitizerConfig.vue
+  └── nodeStoreRegistry[ESCUDO_POST_IA]  ──► usePostIaSanitizerStore(nodeId)
+            │
+            └── setAvailableUpstreamContext(upstreamContext(index))
+                      │  namespaces y campos de los pasos ANTERIORES,
+                      │  sacados de GET /api/nodos (outputFields de cada estrategia)
+                      ▼
+              selectores CERRADOS de origen (§4)
+
+PostIaSanitizerConfig.vue ──► su store, y NADA MAS. Sin capa de servicios:
+                              no hay endpoint que validar.
+```
+
+### Por que no hay servicio
+
+`@Controller('nodos')` expone UNA ruta, `GET /api/nodos`, de solo lectura. No existe
+`POST /nodos/validar-config` ni ningun endpoint que valide los `params` de un nodo suelto; lo mas
+cercano es `POST /api/fsm/validate-schema`, cuyo grano es el esquema ENTERO. Un servicio que no
+conociera ninguna ruta contradiria su propia definicion (`frontend-architecture.md` §2.1), y uno que
+inventara una seria un 404 en produccion. Mismo criterio y mismo precedente que `smtp-alert` y
+`trigger-cron`.
+
+### Por que los selectores son cerrados
+
+`frontend-quasar.md` §4 lo exige, y aqui el coste de incumplirlo es concreto: un namespace tecleado a
+mano que no exista produce `ERR_POST_IA_MISSING_PAYLOAD` en ejecucion, con el flujo ya PAUSADO. Lo
+mismo con `allowedTags`: pedir una etiqueta fuera de la lista blanca global es
+`ERR_POST_IA_UNSUPPORTED_TAGS`, y con entrada libre el operador lo descubriria al guardar el flujo
+entero en vez de al elegir.
+
+### Por que `maxTokens` se omite cuando es null
+
+Al reves que los demas numericos del nodo, que viajan siempre porque tienen consecuencias economicas.
+Aqui la AUSENCIA de la clave es lo que activa la resolucion en tres escalones del backend: publicar
+un numero fijaria el presupuesto para siempre y desactivaria la subida automatica ante una plantilla.
+
+### Estado de las tareas
+
+- [x] Tipos, store y componente del escudo; alta en los DOS registros
+- [x] Selectores cerrados de origen y de etiquetas, alimentados por el catalogo
+- [x] Aviso de «no hay mapeador por delante», detectado por el CAMPO `compiled_markup`
+- [x] Fixture del asistente rotado de `ESCUDO_POST_IA` a `DESTINO_HTTP`
+- [x] `maxTokens` en tipos, store y configurador del `PROCESADOR_IA`
+- [x] Frontend 758 pruebas en 39 archivos (+42); backend 1734 intacto; `vue-tsc` y `quasar build` limpios
+- [ ] Pendiente — configurador de `DESTINO_HTTP`, el ultimo sin triada y sin estrategia
+- [ ] Pendiente — verificacion de extremo a extremo contra la base de datos (Docker lo levanta el
+      usuario; el MCP de PostgreSQL no conecta en esta sesion)

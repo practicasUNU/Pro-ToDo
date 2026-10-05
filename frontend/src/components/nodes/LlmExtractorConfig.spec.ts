@@ -296,6 +296,40 @@ describe('LlmExtractorConfig · configurador del nodo PROCESADOR_IA', () => {
       expect(store.config.templatePromptId).toBeNull();
       expect(store.toNodeParams()).not.toHaveProperty('templatePromptId');
     });
+
+    it('4.3 deberia registrar el presupuesto de tokens que se escriba', async () => {
+      // 1. Arrange 📐
+      const nodeId = nextNodeId();
+      const wrapper = mountComponent(nodeId);
+
+      // 2. Act ⚙️
+      await wrapper
+        .get('[data-test="max-tokens-field"]')
+        .findComponent(QInput)
+        .vm.$emit('update:modelValue', '16384');
+
+      // 3. Assert 🎯
+      expect(useLlmExtractorStore(nodeId).config.maxTokens).toBe(16_384);
+    });
+
+    it('4.4 deberia volver a la resolucion automatica al vaciarlo', async () => {
+      // 1. Arrange 📐: `clearable` emite `null`, y tiene que guardarse como
+      //    AUSENCIA. Un 0 ahi seria un presupuesto de cero tokens.
+      const nodeId = nextNodeId();
+      const store = useLlmExtractorStore(nodeId);
+      store.updateConfig({ maxTokens: 16_384 });
+      const wrapper = mountComponent(nodeId);
+
+      // 2. Act ⚙️
+      await wrapper
+        .get('[data-test="max-tokens-field"]')
+        .findComponent(QInput)
+        .vm.$emit('update:modelValue', null);
+
+      // 3. Assert 🎯
+      expect(store.config.maxTokens).toBeNull();
+      expect(store.toNodeParams()).not.toHaveProperty('maxTokens');
+    });
   });
 
   describe('5. Alta de plantilla sin salir del asistente', () => {

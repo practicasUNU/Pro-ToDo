@@ -15,9 +15,11 @@ import {
   LLM_RETRIES_WARNING_THRESHOLD,
   LlmProvider,
   MAX_LLM_EMERGENCY_BRAKE_THRESHOLD,
+  MAX_LLM_MAX_TOKENS,
   MAX_LLM_RETRIES,
   MAX_LLM_TIMEOUT_MS,
   MIN_LLM_EMERGENCY_BRAKE_THRESHOLD,
+  MIN_LLM_MAX_TOKENS,
   MIN_LLM_RETRIES,
   MIN_LLM_TIMEOUT_MS,
 } from '@/types/nodes/llm-extractor.types';
@@ -85,6 +87,8 @@ const buildInitialConfig = (): LlmExtractorNodeConfig => ({
   timeoutMs: DEFAULT_LLM_TIMEOUT_MS,
   maxRetries: DEFAULT_LLM_MAX_RETRIES,
   emergencyBrakeThreshold: DEFAULT_LLM_EMERGENCY_BRAKE_THRESHOLD,
+  // `null` = "decide tu". Ver el TSDoc del campo en los tipos.
+  maxTokens: null,
 });
 
 /** Prefijo del id de Pinia; el sufijo es el `nodeId` del `pipeline_schema`. */
@@ -208,7 +212,12 @@ const llmExtractorSetup = () => {
         config.value.emergencyBrakeThreshold,
         MIN_LLM_EMERGENCY_BRAKE_THRESHOLD,
         MAX_LLM_EMERGENCY_BRAKE_THRESHOLD,
-      ),
+      ) &&
+      // `null` es valido y es el caso normal: significa que el nodo no declara
+      // tope y lo resuelve el backend. Solo se comprueba el rango cuando el
+      // operador escribe un numero, que es cuando el DTO puede rechazarlo.
+      (config.value.maxTokens === null ||
+        isWithin(config.value.maxTokens, MIN_LLM_MAX_TOKENS, MAX_LLM_MAX_TOKENS)),
   );
 
   /**
@@ -350,6 +359,11 @@ const llmExtractorSetup = () => {
       timeoutMs: config.value.timeoutMs,
       maxRetries: config.value.maxRetries,
       emergencyBrakeThreshold: config.value.emergencyBrakeThreshold,
+      // SE OMITE cuando es `null`, al reves que los demas numericos: aqui la
+      // ausencia de la clave es lo que activa la resolucion en tres escalones
+      // del backend. Publicar un numero fijaria el presupuesto para siempre y
+      // desactivaria la subida automatica ante una plantilla.
+      ...(config.value.maxTokens === null ? {} : { maxTokens: config.value.maxTokens }),
     };
   };
 
@@ -382,6 +396,9 @@ const llmExtractorSetup = () => {
         params.emergencyBrakeThreshold,
         DEFAULT_LLM_EMERGENCY_BRAKE_THRESHOLD,
       ),
+      // Ausente vuelve a `null` y NO al tope de marcado: el contrato de ida y
+      // vuelta exige que un nodo guardado sin la clave la siga omitiendo.
+      maxTokens: typeof params.maxTokens === 'number' ? params.maxTokens : null,
     };
   };
 
