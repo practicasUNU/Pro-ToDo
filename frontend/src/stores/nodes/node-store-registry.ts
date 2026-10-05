@@ -1,3 +1,4 @@
+import { useDrupalHttpStore } from '@stores/nodes/drupal-http.store';
 import { useLlmExtractorStore } from '@stores/nodes/llm-extractor.store';
 import { useParserEmailStore } from '@stores/nodes/parser-email.store';
 import { usePostIaSanitizerStore } from '@stores/nodes/post-ia-sanitizer.store';
@@ -180,6 +181,41 @@ export interface NodeConfigStore {
   readonly declareCaughtErrorCodes?: (codes: readonly string[]) => void;
 
   /**
+   * Marcado base que este nodo pone a disposicion de los pasos POSTERIORES.
+   *
+   * Lo implementa el MAPEADOR_PLANTILLA, que es quien conoce la plantilla
+   * elegida. No es lo mismo que `outputFields`: aquel declara QUE claves
+   * publicara en ejecucion, y esto entrega el HTML concreto que el operador ya
+   * ha escogido, en tiempo de DISENO, cuando todavia se puede usar para
+   * configurar los nodos de detras.
+   *
+   * Hermano de `setUpstreamBaseMarkup` y NO su otra mitad: son dos papeles
+   * distintos y ningun nodo hace los dos. El mapeador produce marcado y no lo
+   * consume; el escudo lo consume y no lo produce. Un unico metodo
+   * bidireccional obligaria a cada uno a implementar la mitad que no le toca.
+   *
+   * OPCIONAL: la mayoria de los nodos no aporta ninguna plantilla base.
+   */
+  readonly getStructuralMarkup?: () => string | null;
+
+  /**
+   * Declara el marcado base que aporta un paso ANTERIOR, si lo hay.
+   *
+   * Es el canal por el que el ESCUDO_POST_IA puede sugerir ranuras reales en
+   * vez de pedir selectores CSS a ciegas. Va por el anfitrion y no leyendo el
+   * store del mapeador porque §3.1 prohibe que un nodo conozca la forma interna
+   * de otro: aqui el agregador PREGUNTA al productor y EMPUJA al consumidor,
+   * igual que ya hace con `setAvailableUpstreamContext`.
+   *
+   * `null` significa "no hay plantilla base aguas arriba", que es lo mismo que
+   * "todavia no se ha elegido": el consumidor debe tratarlo como ausencia de
+   * sugerencias y nunca como un error.
+   *
+   * OPCIONAL: solo lo necesita quien audite la estructura del marcado.
+   */
+  readonly setUpstreamBaseMarkup?: (markup: string | null) => void;
+
+  /**
    * Avisos que este nodo quiere que el operador confirme ANTES de persistir.
    *
    * Es la contrapartida honesta de `isConfigValid`: aquel responde "se puede
@@ -224,9 +260,10 @@ export type NodeStoreHook = (nodeId: string) => NodeConfigStore;
  * Anadir un tipo de nodo son dos entradas en dos registros, y el anfitrion no
  * cambia.
  *
- * `Partial` por el mismo motivo que en el registro de componentes: los tipos aun
- * sin implementar simplemente no estan, y el anfitrion debe contemplar el
- * `undefined` en vez de suponer cobertura total.
+ * `Partial` por el mismo motivo que en el registro de componentes, y que sigue
+ * en pie ahora que el mapa cubre los diez tipos: la ausencia es un valor del
+ * dominio que `resolveStepBlockReason` lee para separar «no hay interfaz» de
+ * «no hay estrategia», no un hueco pendiente de rellenar.
  */
 export const nodeStoreRegistry: Partial<Record<NodeType, NodeStoreHook>> = {
   [NodeType.TRIGGER_IMAP]: useTriggerImapStore,
@@ -238,6 +275,7 @@ export const nodeStoreRegistry: Partial<Record<NodeType, NodeStoreHook>> = {
   [NodeType.DESTINO_SMTP]: useSmtpAlertStore,
   [NodeType.PROCESADOR_OCR]: useOcrProcessorStore,
   [NodeType.ESCUDO_POST_IA]: usePostIaSanitizerStore,
+  [NodeType.DESTINO_HTTP]: useDrupalHttpStore,
 };
 
 /**

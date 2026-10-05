@@ -5,9 +5,11 @@
 // `LocalStorage` de Quasar, que toca `window`.
 
 import { createPinia, setActivePinia } from 'pinia';
+import { nextTick } from 'vue';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { useParserEmailStore } from '@stores/nodes/parser-email.store';
+import { usePostIaSanitizerStore } from '@stores/nodes/post-ia-sanitizer.store';
 import { useSmtpAlertStore } from '@stores/nodes/smtp-alert.store';
 import { useTemplateMapperStore } from '@stores/nodes/template-mapper.store';
 import { useTriggerImapStore } from '@stores/nodes/trigger-imap.store';
@@ -23,6 +25,7 @@ import {
   SHARED_OCR_NODE_ID,
 } from '@/types/nodes/error-branch.types';
 
+import type { HtmlTemplate } from '@/types/html-template';
 import type { NodeCatalogEntry } from '@/types/node-catalog';
 import type {
   PipelineSummary,
@@ -85,6 +88,9 @@ const fetchWorkflowTemplate = vi.mocked(workflowTemplatesService.fetchWorkflowTe
 const nodeCatalogService = await import('@services/node-catalog.service');
 const fetchNodeCatalog = vi.mocked(nodeCatalogService.fetchNodeCatalog);
 
+const templateMapperService = await import('@services/nodes/template-mapper.service');
+const fetchSelectableTemplates = vi.mocked(templateMapperService.fetchSelectableTemplates);
+
 const workflowsService = await import('@services/workflows.service');
 const fetchWorkflow = vi.mocked(workflowsService.fetchWorkflow);
 const updateWorkflow = vi.mocked(workflowsService.updateWorkflow);
@@ -135,23 +141,37 @@ const buildTemplate = (
 });
 
 /**
- * Topologia con un tipo de nodo que SIGUE sin configurador.
+ * Tipo de nodo que NO existe en el enum, declarado solo para estas pruebas.
  *
- * Existe porque `PARSER_PRE_IA`, `EXTRACTOR_WEB`, `PROCESADOR_IA` y ahora
- * `ESCUDO_POST_IA` fueron dejando de serlo al implementarse sus triadas. El caso
- * "nodo no ejecutable" tiene que probarse contra un tipo que de verdad no tenga
- * store registrado, o la prueba pasaria a verificar lo contrario de lo que su
- * nombre dice.
+ * El papel lo fue haciendo el ultimo tipo real sin triada —`PARSER_PRE_IA`,
+ * `EXTRACTOR_WEB`, `PROCESADOR_IA`, `ESCUDO_POST_IA` y por ultimo
+ * `DESTINO_HTTP`—, y rotarlo a mano era trabajo recurrente. Ya no quedan: los
+ * diez tipos del enum tienen configurador, asi que el fixture se queda sin
+ * candidato real y hay que elegir entre retirar las pruebas o declarar un
+ * doble. Se declara el doble.
  *
- * Toca ahora a `DESTINO_HTTP`, que era "el ultimo de la cola" y ya lo es de
- * verdad: es el UNICO tipo del enum sin configurador. Cuando reciba el suyo, esta
- * constante se queda sin candidato y habra que decidir entre retirar las pruebas
- * que la usan o declarar un tipo de nodo ficticio solo para ellas.
+ * El motivo es que el camino `SIN_CONFIGURADOR` NO ha muerto con la ultima
+ * triada: lo recorre cualquier tipo de nodo nuevo, que nace con fila de
+ * catalogo y sin interfaz. Retirar las pruebas dejaria sin red justo la rama
+ * que distingue «te falta rellenar un campo» de «este tipo no se puede
+ * configurar desde aqui», que es la que evita que el operador reintente algo
+ * imposible. Atarla a un tipo real la hacia caducar en cada entrega.
+ *
+ * El `as unknown as NodeType` es deliberado: el valor tiene que ser ajeno al
+ * enum para no estar en ningun registro. Como consecuencia `toWizardStep` deja
+ * el paso con `name: undefined` —`NODE_TYPE_LABELS` no tiene esa clave—, lo que
+ * no afecta a ninguna asercion: la unica prueba que mira el mensaje (16.3) corre
+ * sobre la topologia por defecto.
+ */
+const UNREGISTERED_NODE_TYPE = 'NODO_INEXISTENTE' as unknown as NodeType;
+
+/**
+ * Topologia con un tipo de nodo sin configurador.
  *
  * La topologia por defecto NO se toca: las pruebas de namespaces aguas arriba
  * dependen de que el parser siga aportando `parsed_email` antes del mapeador.
  */
-const UNSUPPORTED_NODE_ID = 'nodo_destino_http';
+const UNSUPPORTED_NODE_ID = 'nodo_sin_configurador';
 
 const UNSUPPORTED_TOPOLOGY = [
   {
@@ -161,7 +181,7 @@ const UNSUPPORTED_TOPOLOGY = [
   },
   {
     nodeId: UNSUPPORTED_NODE_ID,
-    nodeType: NodeType.DESTINO_HTTP,
+    nodeType: UNREGISTERED_NODE_TYPE,
     outputNamespace: 'http_result',
   },
 ];
@@ -477,10 +497,9 @@ describe('useFlujoDraftStore · agregador del asistente', () => {
     });
 
     it('3.3 deberia ser invalido en un paso cuyo tipo no tiene store registrado', async () => {
-      // 1. Arrange: topologia con DESTINO_HTTP, el unico tipo que sigue sin
-      //    configurador. Antes se probo contra PARSER_PRE_IA, EXTRACTOR_WEB,
-      //    PROCESADOR_IA y ESCUDO_POST_IA: sin rotar el fixture, esta prueba
-      //    pasaria a verificar lo contrario de lo que su nombre dice.
+      // 1. Arrange: topologia con un tipo ficticio, que es el unico que puede
+      //    faltar en los registros ahora que los diez del enum tienen triada
+      //    (ver `UNREGISTERED_NODE_TYPE`).
       const draft = useFlujoDraftStore();
       fetchWorkflowTemplates.mockResolvedValue([buildTemplate({ topology: UNSUPPORTED_TOPOLOGY })]);
       await draft.loadAvailableTemplates();
@@ -492,7 +511,7 @@ describe('useFlujoDraftStore · agregador del asistente', () => {
 
       // 3. Assert: sin configurador no hay forma de declararlo valido, y dejar
       //    avanzar seria ensamblar un pipeline con un nodo sin configurar.
-      expect(draft.activeStepDefinition?.nodeType).toBe(NodeType.DESTINO_HTTP);
+      expect(draft.activeStepDefinition?.nodeType).toBe(UNREGISTERED_NODE_TYPE);
       expect(draft.isActiveStepValid).toBe(false);
     });
 
@@ -1934,10 +1953,9 @@ describe('useFlujoDraftStore · modo edicion', () => {
 
   describe('16. Motivo por el que un paso bloquea el guardado', () => {
     it('16.1 deberia distinguir el nodo sin configurador del que solo esta incompleto', async () => {
-      // 1. Arrange: TRIGGER_IMAP (con configurador, sin probar) y DESTINO_HTTP
-      //    (sin configurador). Se usa la topologia alternativa porque
-      //    PARSER_PRE_IA, PROCESADOR_IA y ESCUDO_POST_IA fueron dejando de ser
-      //    tipos sin configurador al recibir su triada.
+      // 1. Arrange: TRIGGER_IMAP (con configurador, sin probar) y un tipo
+      //    ficticio (sin configurador). Se usa la topologia alternativa porque
+      //    ya no queda ningun tipo real del enum sin triada.
       const draft = useFlujoDraftStore();
       fetchWorkflowTemplates.mockResolvedValue([buildTemplate({ topology: UNSUPPORTED_TOPOLOGY })]);
       await draft.loadAvailableTemplates();
@@ -1948,7 +1966,7 @@ describe('useFlujoDraftStore · modo edicion', () => {
 
       // 3. Assert: presentarlos igual dejaba al operador reintentando algo que
       //    no tiene arreglo desde el asistente.
-      expect(byType.get(NodeType.DESTINO_HTTP)).toBe('SIN_CONFIGURADOR');
+      expect(byType.get(UNREGISTERED_NODE_TYPE)).toBe('SIN_CONFIGURADOR');
       expect(byType.get(NodeType.TRIGGER_IMAP)).toBe('CONFIGURACION_INCOMPLETA');
     });
 
@@ -1977,7 +1995,7 @@ describe('useFlujoDraftStore · modo edicion', () => {
     });
 
     it('16.4 deberia marcar hasUnsupportedNodes con un tipo sin configurador', async () => {
-      // 1. Arrange: topologia con DESTINO_HTTP, que sigue sin triada.
+      // 1. Arrange: topologia con el tipo ficticio, que no esta en ningun registro.
       const draft = useFlujoDraftStore();
       fetchWorkflowTemplates.mockResolvedValue([buildTemplate({ topology: UNSUPPORTED_TOPOLOGY })]);
       await draft.loadAvailableTemplates();
@@ -2187,6 +2205,139 @@ describe('useFlujoDraftStore · modo edicion', () => {
 
       // 3. Assert 🎯
       expect(draft.errorBranches[TRIGGER_NODE_ID]).toBeUndefined();
+    });
+  });
+
+  describe('17. Marcado base aguas arriba', () => {
+    /** Topologia que SI tiene un escudo detras del mapeador. */
+    const SHIELD_NODE_ID = 'nodo_escudo';
+
+    const SHIELD_TOPOLOGY = [
+      {
+        nodeId: TRIGGER_NODE_ID,
+        nodeType: NodeType.TRIGGER_IMAP,
+        outputNamespace: 'raw_email',
+      },
+      {
+        nodeId: MAPPER_NODE_ID,
+        nodeType: NodeType.MAPEADOR_PLANTILLA,
+        outputNamespace: 'rendered_html',
+      },
+      {
+        nodeId: SHIELD_NODE_ID,
+        nodeType: NodeType.ESCUDO_POST_IA,
+        outputNamespace: 'validated_drupal_json',
+      },
+    ];
+
+    const BASE_MARKUP = '<h1 class="titular"></h1><p class="resumen"></p>';
+
+    /** Deja el mapeador con una plantilla elegida, como tras visitar su paso. */
+    const buildDraftWithTemplate = async (
+      htmlContent = BASE_MARKUP,
+    ): Promise<ReturnType<typeof useFlujoDraftStore>> => {
+      const draft = useFlujoDraftStore();
+      fetchWorkflowTemplates.mockResolvedValue([buildTemplate({ topology: SHIELD_TOPOLOGY })]);
+      fetchNodeCatalog.mockResolvedValue(CATALOG_ENTRIES);
+      await draft.loadAvailableTemplates();
+      await draft.selectTemplate(TEMPLATE_ID);
+
+      const mapper = useTemplateMapperStore(MAPPER_NODE_ID);
+      fetchSelectableTemplates.mockResolvedValue([
+        {
+          id: HTML_TEMPLATE_ID,
+          name: 'Notiweb base',
+          description: null,
+          htmlContent,
+          requiredVariables: [],
+          createdById: 'autor',
+          active: true,
+          createdAt: '2026-01-01T00:00:00.000Z',
+          updatedAt: '2026-01-01T00:00:00.000Z',
+        },
+      ]);
+      await mapper.loadTemplates();
+      mapper.setTemplateId(HTML_TEMPLATE_ID);
+
+      return draft;
+    };
+
+    it('17.1 deberia preguntar al mapeador por el HTML de su plantilla', async () => {
+      // 1. Arrange
+      const draft = await buildDraftWithTemplate();
+
+      // 2. Act: el escudo es el paso con indice 2.
+      const markup = draft.upstreamBaseMarkup(2);
+
+      // 3. Assert: el dato NO esta en la topologia —el esquema guarda un
+      //    `templateId`— asi que se le pide al nodo que lo conoce.
+      expect(markup).toBe(BASE_MARKUP);
+    });
+
+    it('17.2 NO deberia ver el marcado de un mapeador POSTERIOR', async () => {
+      // 1. Arrange
+      const draft = await buildDraftWithTemplate();
+
+      // 2. Act: desde el propio mapeador (indice 1) solo hay trigger delante.
+      const markup = draft.upstreamBaseMarkup(1);
+
+      // 3. Assert: un nodo no puede configurarse con lo que produce el de atras.
+      expect(markup).toBeNull();
+    });
+
+    it('17.3 deberia devolver null mientras el mapeador no tenga plantilla', async () => {
+      // 1. Arrange
+      const draft = useFlujoDraftStore();
+      fetchWorkflowTemplates.mockResolvedValue([buildTemplate({ topology: SHIELD_TOPOLOGY })]);
+      fetchNodeCatalog.mockResolvedValue(CATALOG_ENTRIES);
+      await draft.loadAvailableTemplates();
+      await draft.selectTemplate(TEMPLATE_ID);
+
+      // 2. Act & 3. Assert: es lo mismo que no haber llegado a ese paso, y las
+      //    dos cosas significan "sin sugerencias".
+      expect(draft.upstreamBaseMarkup(2)).toBeNull();
+    });
+
+    it('17.4 deberia empujar el marcado al escudo al cambiar de paso', async () => {
+      // 1. Arrange: el reenganche es lo que hace util todo lo demas. El unico
+      //    `syncUpstreamNamespaces()` de `selectTemplate` corre ANTES de que el
+      //    operador elija la plantilla, asi que sin esto el escudo no veria
+      //    nunca el marcado.
+      const draft = await buildDraftWithTemplate();
+      const shield = usePostIaSanitizerStore(SHIELD_NODE_ID);
+      expect(shield.detectedSelectorOptions).toEqual([]);
+
+      // 2. Act: avanzar el cursor, como al pasar al panel del escudo.
+      draft.goToNodeStep(SHIELD_NODE_ID);
+      await nextTick();
+
+      // 3. Assert
+      expect(shield.detectedSelectorOptions).toEqual(['h1', '.titular', '.resumen']);
+    });
+
+    it('17.5 deberia reflejar un cambio de plantilla al volver al escudo', async () => {
+      // 1. Arrange: el operador retrocede, cambia de plantilla y vuelve.
+      const draft = await buildDraftWithTemplate();
+      const shield = usePostIaSanitizerStore(SHIELD_NODE_ID);
+      draft.goToNodeStep(SHIELD_NODE_ID);
+      await nextTick();
+
+      // 2. Act
+      const mapper = useTemplateMapperStore(MAPPER_NODE_ID);
+      mapper.availableTemplates = [
+        {
+          ...(mapper.availableTemplates[0] as HtmlTemplate),
+          htmlContent: '<table class="cuerpo"></table>',
+        },
+      ];
+      draft.goToNodeStep(MAPPER_NODE_ID);
+      await nextTick();
+      draft.goToNodeStep(SHIELD_NODE_ID);
+      await nextTick();
+
+      // 3. Assert: el canal es una FUNCION y no una propiedad precisamente para
+      //    que devuelva la plantilla vigente en cada sincronizacion.
+      expect(shield.detectedSelectorOptions).toEqual(['table', '.cuerpo']);
     });
   });
 });

@@ -146,6 +146,25 @@ const templateMapperSetup = () => {
   };
 
   /**
+   * HTML de la plantilla elegida, para los pasos POSTERIORES (contrato §3.1).
+   *
+   * Lo consume hoy el ESCUDO_POST_IA, que sin esto tendria que pedir sus
+   * selectores estructurales a ciegas: el `pipeline_schema` guarda un
+   * `templateId`, no el marcado, de modo que el borrador no puede saber que
+   * ranuras existen. Quien SI lo sabe es este store, porque ya tiene el
+   * catalogo cargado para su propio selector.
+   *
+   * Es una funcion y no una propiedad a proposito: el anfitrion la invoca al
+   * cambiar de paso, y asi devuelve siempre la plantilla vigente en ese momento
+   * —si el operador la cambia y vuelve atras, el escudo recibe la nueva.
+   *
+   * `null` mientras no haya plantilla elegida o el catalogo no haya cargado.
+   * Son dos ausencias distintas para este store y la misma para quien lo
+   * consume: no hay marcado que ofrecer.
+   */
+  const getStructuralMarkup = (): string | null => selectedTemplate.value?.htmlContent ?? null;
+
+  /**
    * `params` del nodo para el `pipeline_schema`.
    *
    * Solo `templateId`: es lo unico que este store gobierna de los `params` que
@@ -198,6 +217,7 @@ const templateMapperSetup = () => {
     isConfigValid,
     configWarnings,
     toNodeParams,
+    getStructuralMarkup,
     loadTemplates,
     setTemplateId,
     setAvailableUpstreamContext,

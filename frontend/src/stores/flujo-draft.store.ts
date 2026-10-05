@@ -1,5 +1,5 @@
 import { defineStore, acceptHMRUpdate } from 'pinia';
-import { computed, ref } from 'vue';
+import { computed, ref, watch } from 'vue';
 
 import { nodeConfigRegistry } from '@components/nodes/node-config-registry';
 import { useNodeCatalogStore } from '@stores/node-catalog.store';
@@ -875,14 +875,58 @@ export const useFlujoDraftStore = defineStore('flujoDraft', () => {
    * disparador, que es el primero del grafo y no tiene nada aguas arriba— no
    * paga nada por ello.
    */
+  /**
+   * Marcado base que aportan los pasos anteriores al indicado, si alguno lo hace.
+   *
+   * Tercer canal aguas arriba, junto a `upstreamNamespaces` y `upstreamContext`,
+   * y responde a una pregunta que ninguno de los dos puede: no "que namespaces
+   * hay delante" ni "que campos publican", sino "cual es el HTML concreto que
+   * este flujo va a maquetar". Ese dato no esta en la topologia —el esquema
+   * guarda un `templateId`, no el marcado— asi que se le PIDE al nodo que lo
+   * conoce, en vez de que el consumidor vaya a buscarlo a su store (§3.1).
+   *
+   * Se queda con el ULTIMO mapeador de los que haya delante y no con el primero:
+   * si un flujo encadenara dos, el que manda sobre lo que llega al escudo es el
+   * mas cercano. `findLast` y no un bucle inverso porque es exactamente eso.
+   */
+  const upstreamBaseMarkup = (stepIndex: number): string | null =>
+    pipelineTopology.value
+      .slice(0, Math.max(stepIndex, 0))
+      .map((step) => resolveNodeStore(step.nodeType, step.nodeId)?.getStructuralMarkup?.() ?? null)
+      .findLast((markup) => markup !== null) ?? null;
+
   const syncUpstreamNamespaces = (): void => {
     pipelineTopology.value.forEach((step, index) => {
       const store = resolveNodeStore(step.nodeType, step.nodeId);
 
       store?.setAvailableUpstreamNamespaces?.(upstreamNamespaces(index));
       store?.setAvailableUpstreamContext?.(upstreamContext(index));
+      store?.setUpstreamBaseMarkup?.(upstreamBaseMarkup(index));
     });
   };
+
+  /**
+   * Resincroniza el contexto aguas arriba en cada cambio de cursor.
+   *
+   * `syncUpstreamNamespaces()` corria UNA sola vez, al elegir la plantilla o al
+   * hidratar para editar, y eso bastaba mientras el contexto se derivaba solo de
+   * la topologia —que no cambia—. Deja de bastar desde que uno de los canales
+   * depende de lo que el operador CONFIGURA: la plantilla base la elige en el
+   * paso del mapeador, mucho despues de aquel unico empujon, de modo que el
+   * escudo no veria nunca su marcado.
+   *
+   * Cuelga de `activeStep` y no de `goToNextStep` / `goToPreviousStep` /
+   * `goToNodeStep` porque esos tres no son todas las vias: `WizardPage` monta el
+   * `q-stepper` con `v-model`, asi que pulsar la cabecera de un paso escribe el
+   * cursor directamente y se saltaria el reenganche.
+   *
+   * El coste es recorrer la topologia —media docena de pasos— al cambiar de
+   * panel. Los setters COPIAN lo que reciben, asi que no se encadena ninguna
+   * reaccion.
+   */
+  watch(activeStep, () => {
+    syncUpstreamNamespaces();
+  });
 
   /**
    * Ensambla el `pipeline_schema` a partir de la topologia y los stores de nodo.
@@ -1091,6 +1135,7 @@ export const useFlujoDraftStore = defineStore('flujoDraft', () => {
     goToNodeStep,
     upstreamNamespaces,
     upstreamContext,
+    upstreamBaseMarkup,
     syncUpstreamNamespaces,
     assemblePipelineSchema,
     assembleAndSaveWorkflow,

@@ -1,3 +1,8 @@
+// @vitest-environment happy-dom
+//
+// Directiva POR ARCHIVO, como en `llm-extractor.store.spec.ts`: las ranuras
+// sugeridas se derivan parseando el HTML de la plantilla base con `DOMParser`,
+// que no existe en el entorno `node` por defecto de vitest.
 import { createPinia, setActivePinia } from 'pinia';
 import { beforeEach, describe, expect, it } from 'vitest';
 
@@ -136,9 +141,9 @@ describe('usePostIaSanitizerStore · configuracion del nodo ESCUDO_POST_IA', () 
       // 3. Assert 🎯: no se borra en silencio, se senala. Borrarlo cambiaria la
       //    configuracion de un flujo sin que nadie lo pidiera.
       expect(store.hasStaleSource).toBe(true);
-      expect(store.configWarnings.some((text) => text.includes('ERR_POST_IA_MISSING_PAYLOAD'))).toBe(
-        true,
-      );
+      expect(
+        store.configWarnings.some((text) => text.includes('ERR_POST_IA_MISSING_PAYLOAD')),
+      ).toBe(true);
     });
 
     it('3.3 deberia avisar si no hay plantilla base por delante', () => {
@@ -346,8 +351,129 @@ describe('usePostIaSanitizerStore · configuracion del nodo ESCUDO_POST_IA', () 
     });
   });
 
-  describe('6. Aislamiento entre nodos', () => {
-    it('6.1 no deberia compartir estado entre dos escudos del mismo flujo', () => {
+  describe('6. Ranuras sugeridas desde la plantilla base', () => {
+    const BASE_MARKUP =
+      '<h1 class="titular"></h1><p class="resumen"></p><div class="row"></div><table></table>';
+
+    it('6.1 NO deberia sugerir nada sin plantilla base aguas arriba', () => {
+      // 1. Arrange 📐 & 2. Act ⚙️
+      const store = usePostIaSanitizerStore(nextNodeId());
+
+      // 3. Assert 🎯: es lo mismo que no haber llegado al paso del mapeador, y
+      //    las dos cosas significan "todavia no hay nada que ofrecer".
+      expect(store.detectedSelectorOptions).toEqual([]);
+    });
+
+    it('6.2 deberia derivar las ranuras del marcado que empuja el anfitrion', () => {
+      // 1. Arrange 📐
+      const store = usePostIaSanitizerStore(nextNodeId());
+
+      // 2. Act ⚙️
+      store.setUpstreamBaseMarkup(BASE_MARKUP);
+
+      // 3. Assert 🎯: `.row` es maquetacion, no una ranura que rellenar.
+      expect(store.detectedSelectorOptions).toEqual(['h1', 'table', '.titular', '.resumen']);
+    });
+
+    it('6.3 NO deberia volver a ofrecer una ranura ya elegida', () => {
+      // 1. Arrange 📐
+      const store = usePostIaSanitizerStore(nextNodeId());
+      store.setUpstreamBaseMarkup(BASE_MARKUP);
+
+      // 2. Act ⚙️
+      store.updateConfig({ requiredSelectors: ['h1'] });
+
+      // 3. Assert 🎯: ofrecer lo que ya es un chip hace que el desplegable
+      //    parezca no responder al pulsarlo.
+      expect(store.detectedSelectorOptions).not.toContain('h1');
+    });
+
+    it('6.4 deberia vaciar las sugerencias si el flujo pierde la plantilla', () => {
+      // 1. Arrange 📐: el operador vuelve atras y deselecciona la plantilla.
+      const store = usePostIaSanitizerStore(nextNodeId());
+      store.setUpstreamBaseMarkup(BASE_MARKUP);
+
+      // 2. Act ⚙️
+      store.setUpstreamBaseMarkup(null);
+
+      // 3. Assert 🎯
+      expect(store.detectedSelectorOptions).toEqual([]);
+    });
+  });
+
+  describe('7. Autocompletado de ranuras', () => {
+    it('7.1 deberia cargar las ranuras detectadas', () => {
+      // 1. Arrange 📐
+      const store = usePostIaSanitizerStore(nextNodeId());
+      store.setUpstreamBaseMarkup('<h1 class="titular"></h1>');
+
+      // 2. Act ⚙️
+      store.autoPopulateCriticalSelectors();
+
+      // 3. Assert 🎯
+      expect(store.config.requiredSelectors).toEqual(['h1', '.titular']);
+    });
+
+    it('7.2 deberia ANADIR sin perder lo que el operador ya escribio', () => {
+      // 1. Arrange 📐: una ranura que la plantilla no declara pero que el
+      //    operador espera del modelo tiene que sobrevivir al boton.
+      const store = usePostIaSanitizerStore(nextNodeId());
+      store.updateConfig({ requiredSelectors: ['.pie-de-foto'] });
+      store.setUpstreamBaseMarkup('<h1></h1>');
+
+      // 2. Act ⚙️
+      store.autoPopulateCriticalSelectors();
+
+      // 3. Assert 🎯: reemplazar convertiria un atajo en una trampa.
+      expect(store.config.requiredSelectors).toEqual(['.pie-de-foto', 'h1']);
+    });
+
+    it('7.3 deberia cortar en el tope en vez de rechazar la operacion', () => {
+      // 1. Arrange 📐: mas candidatos que huecos libres.
+      const store = usePostIaSanitizerStore(nextNodeId());
+      const markup = Array.from(
+        { length: MAX_REQUIRED_SELECTORS + 5 },
+        (_, index) => `<div class="titular-${index}"></div>`,
+      ).join('');
+      store.setUpstreamBaseMarkup(markup);
+
+      // 2. Act ⚙️
+      store.autoPopulateCriticalSelectors();
+
+      // 3. Assert 🎯: llenar hasta el tope es lo que el operador ha pedido;
+      //    fallar porque sobran candidatos no le acerca a su objetivo.
+      expect(store.config.requiredSelectors).toHaveLength(MAX_REQUIRED_SELECTORS);
+      expect(store.isConfigValid).toBe(true);
+    });
+
+    it('7.4 NO deberia tocar nada con el cupo ya lleno', () => {
+      // 1. Arrange 📐
+      const store = usePostIaSanitizerStore(nextNodeId());
+      const full = Array.from({ length: MAX_REQUIRED_SELECTORS }, (_, i) => `.ranura-${i}`);
+      store.updateConfig({ requiredSelectors: full });
+      store.setUpstreamBaseMarkup('<h1></h1>');
+
+      // 2. Act ⚙️
+      store.autoPopulateCriticalSelectors();
+
+      // 3. Assert 🎯
+      expect(store.config.requiredSelectors).toEqual(full);
+    });
+
+    it('7.5 NO deberia hacer nada sin plantilla base', () => {
+      // 1. Arrange 📐
+      const store = usePostIaSanitizerStore(nextNodeId());
+
+      // 2. Act ⚙️
+      store.autoPopulateCriticalSelectors();
+
+      // 3. Assert 🎯
+      expect(store.config.requiredSelectors).toEqual([]);
+    });
+  });
+
+  describe('8. Aislamiento entre nodos', () => {
+    it('8.1 no deberia compartir estado entre dos escudos del mismo flujo', () => {
       // 1. Arrange 📐
       const tras_redaccion = usePostIaSanitizerStore(nextNodeId());
       const tras_vision = usePostIaSanitizerStore(nextNodeId());

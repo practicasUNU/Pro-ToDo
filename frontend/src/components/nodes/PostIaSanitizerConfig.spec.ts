@@ -1,13 +1,14 @@
 // @vitest-environment happy-dom
 import { config, mount } from '@vue/test-utils';
 import { createPinia, setActivePinia } from 'pinia';
-import { QBanner, QIcon, QSelect, Quasar } from 'quasar';
+import { QBanner, QBtn, QIcon, QSelect, Quasar } from 'quasar';
 import { beforeEach, describe, expect, it } from 'vitest';
 
 import PostIaSanitizerConfig from '@components/nodes/PostIaSanitizerConfig.vue';
 import { usePostIaSanitizerStore } from '@stores/nodes/post-ia-sanitizer.store';
 
 import { NodeType } from '@/types/pipeline';
+import { MAX_REQUIRED_SELECTORS } from '@/types/nodes/post-ia-sanitizer.types';
 
 import type { UpstreamNamespace } from '@stores/nodes/node-store-registry';
 
@@ -19,7 +20,7 @@ const NODE_ID = 'nodo_escudo';
  * Se registran a mano porque el plugin `Quasar` instala directivas y plugins
  * pero NO componentes.
  */
-const QUASAR_COMPONENTS = { QBanner, QIcon, QSelect };
+const QUASAR_COMPONENTS = { QBanner, QBtn, QIcon, QSelect };
 
 const UPSTREAM: UpstreamNamespace[] = [
   {
@@ -208,6 +209,82 @@ describe('PostIaSanitizerConfig · configurador del nodo ESCUDO_POST_IA', () => 
 
       // 3. Assert: no se borra en silencio, se nombra para que el operador decida.
       expect(wrapper.get('[data-test="unlisted-namespace"]').text()).toContain('ocr_result');
+    });
+  });
+
+  describe('5. Sugerencia de ranuras desde la plantilla base', () => {
+    const BASE_MARKUP = '<h1 class="titular"></h1><p class="resumen"></p>';
+
+    const suggestButton = (wrapper: ReturnType<typeof mount>) =>
+      wrapper.get('[data-test="suggest-selectors"]').findComponent(QBtn);
+
+    it('5.1 deberia ofrecer como opciones las ranuras que detecta el store', async () => {
+      // 1. Arrange
+      const wrapper = mountComponent();
+      const store = usePostIaSanitizerStore(NODE_ID);
+
+      // 2. Act
+      store.setUpstreamBaseMarkup(BASE_MARKUP);
+      await wrapper.vm.$nextTick();
+
+      // 3. Assert: el campo deja de pedir un selector CSS a ciegas.
+      expect(selectByField(wrapper, 'required-selectors-field').props('options')).toEqual([
+        'h1',
+        '.titular',
+        '.resumen',
+      ]);
+    });
+
+    it('5.2 deberia deshabilitar el atajo sin plantilla base', () => {
+      // 1. Arrange & 2. Act
+      const wrapper = mountComponent();
+
+      // 3. Assert: un boton que no puede hacer nada no debe parecer que si.
+      expect(suggestButton(wrapper).props('disable')).toBe(true);
+    });
+
+    it('5.3 deberia explicar en la ayuda por que no hay sugerencias', () => {
+      // 1. Arrange & 2. Act
+      const wrapper = mountComponent();
+
+      // 3. Assert: la causa esta en OTRO paso, y sin decirlo el operador
+      //    buscaria el problema en este.
+      expect(selectByField(wrapper, 'required-selectors-field').props('hint')).toContain(
+        'paso del mapeador',
+      );
+    });
+
+    it('5.4 deberia cargar las ranuras al pulsar el atajo', async () => {
+      // 1. Arrange
+      const wrapper = mountComponent();
+      const store = usePostIaSanitizerStore(NODE_ID);
+      store.setUpstreamBaseMarkup(BASE_MARKUP);
+      await wrapper.vm.$nextTick();
+
+      // 2. Act
+      await suggestButton(wrapper).trigger('click');
+
+      // 3. Assert
+      expect(store.config.requiredSelectors).toEqual(['h1', '.titular', '.resumen']);
+    });
+
+    it('5.5 deberia deshabilitar el atajo con el cupo ya lleno', async () => {
+      // 1. Arrange
+      const wrapper = mountComponent();
+      const store = usePostIaSanitizerStore(NODE_ID);
+      store.setUpstreamBaseMarkup(BASE_MARKUP);
+
+      // 2. Act
+      store.updateConfig({
+        requiredSelectors: Array.from(
+          { length: MAX_REQUIRED_SELECTORS },
+          (_, index) => `.ranura-${index}`,
+        ),
+      });
+      await wrapper.vm.$nextTick();
+
+      // 3. Assert
+      expect(suggestButton(wrapper).props('disable')).toBe(true);
     });
   });
 });

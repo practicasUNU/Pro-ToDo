@@ -36,7 +36,10 @@ const NAMESPACE_HINT =
 const FIELD_HINT =
   'El campo del que se lee el HTML. El PROCESADOR_IA publica filled_markup, y solo lo rellena cuando su instruccion cita una plantilla base.';
 
-const SELECTORS_HINT = `Escribe un selector CSS y pulsa Enter para anadirlo. Hasta ${MAX_REQUIRED_SELECTORS}, de ${MAX_SELECTOR_LENGTH} caracteres como mucho.`;
+const SELECTORS_HINT = `Elige una ranura sugerida o escribe un selector CSS y pulsa Enter. Hasta ${MAX_REQUIRED_SELECTORS}, de ${MAX_SELECTOR_LENGTH} caracteres como mucho.`;
+
+const NO_SUGGESTIONS_HINT =
+  'No hay plantilla base en este flujo todavia, asi que no se puede sugerir ninguna ranura. Elige la plantilla en el paso del mapeador, o escribe los selectores a mano.';
 
 const SELECTORS_NOTICE =
   'Si alguno falta, no es un selector valido o queda en blanco, el flujo se detiene en PAUSADO con ERR_POST_IA_DOM_MUTATED. Una ranura cuyo unico contenido sea una imagen, una tabla o un separador cuenta como rellena.';
@@ -72,6 +75,19 @@ const selectorRules = [
 ];
 
 /**
+ * El autocompletado no tiene nada que aportar.
+ *
+ * Dos causas distintas y el mismo desenlace: no hay plantilla base de la que
+ * leer ranuras, o ya no cabe ninguna mas. Se separan en la ayuda del campo
+ * —`NO_SUGGESTIONS_HINT` explica la primera— pero no en el estado del boton.
+ */
+const canSuggestSelectors = computed<boolean>(
+  () =>
+    store.detectedSelectorOptions.length > 0 &&
+    store.config.requiredSelectors.length < MAX_REQUIRED_SELECTORS,
+);
+
+/**
  * Confirma lo tecleado al perder el foco.
  *
  * QSelect solo emite `update:model-value` al confirmar con Enter, asi que sin
@@ -100,8 +116,8 @@ const commitTypedSelector = (): void => {
       <div>
         <div class="pd-h2">{{ NODE_TYPE_LABELS[NodeType.ESCUDO_POST_IA] }}</div>
         <div class="pd-subtitle">
-          Audita lo que devuelve el modelo antes de que llegue al destino. Nada de lo que no pase por
-          aqui deberia publicarse.
+          Audita lo que devuelve el modelo antes de que llegue al destino. Nada de lo que no pase
+          por aqui deberia publicarse.
         </div>
       </div>
     </header>
@@ -178,34 +194,56 @@ const commitTypedSelector = (): void => {
       </div>
       <p class="pd-subtitle pd-mono q-mb-none">{{ store.config.sourceNamespace }}</p>
     </q-banner>
-
+    <br />
     <h3 class="pd-h2 q-mt-lg q-mb-xs">Ranuras que la IA debe respetar</h3>
     <p class="pd-subtitle q-mb-md">{{ SELECTORS_NOTICE }}</p>
 
     <div data-test="required-selectors-field">
-      <label class="pd-label" for="post-ia-selectors">Selectores estructurales</label>
+      <div class="row items-center justify-between no-wrap q-gutter-sm">
+        <label class="pd-label" for="post-ia-selectors">Selectores estructurales</label>
+
+        <!-- Atajo, no sustituto: rellena de una vez las ranuras que la plantilla
+             base declara de verdad. Sin el, el operador tendria que abrir el
+             HTML en otra pestana y copiarlas a mano. -->
+        <q-btn
+          flat
+          dense
+          no-caps
+          icon="auto_fix_high"
+          label="Sugerir ranuras de plantilla"
+          class="pd-suggest-btn"
+          data-test="suggest-selectors"
+          :disable="!canSuggestSelectors"
+          @click="store.autoPopulateCriticalSelectors()"
+        />
+      </div>
+
+      <!-- Hibrido a proposito, y es la excepcion consciente al selector CERRADO
+           de §4: un selector CSS no pertenece a ninguna lista cerrada conocible
+           de antemano —la plantilla puede marcar sus ranuras como quiera—, asi
+           que las sugerencias AMPLIAN la entrada manual en vez de sustituirla. -->
       <q-select
         id="post-ia-selectors"
         :model-value="store.config.requiredSelectors"
+        :options="store.detectedSelectorOptions"
         outlined
         dense
         multiple
         use-input
         use-chips
-        hide-dropdown-icon
         new-value-mode="add-unique"
         input-debounce="0"
         class="q-mt-xs pd-mono"
         placeholder="h1.titular"
         :max-values="MAX_REQUIRED_SELECTORS"
-        :hint="SELECTORS_HINT"
+        :hint="store.detectedSelectorOptions.length > 0 ? SELECTORS_HINT : NO_SUGGESTIONS_HINT"
         :rules="selectorRules"
         @update:model-value="store.updateConfig({ requiredSelectors: [...($event as string[])] })"
         @input-value="typedSelector = $event"
         @blur="commitTypedSelector"
       />
     </div>
-
+    <br />
     <h3 class="pd-h2 q-mt-lg q-mb-xs">Etiquetas publicables</h3>
     <p class="pd-subtitle q-mb-md">{{ TAGS_NOTICE }}</p>
 
@@ -259,6 +297,10 @@ const commitTypedSelector = (): void => {
 
 .pd-warn-icon {
   color: var(--pd-warning);
+}
+
+.pd-suggest-btn {
+  color: var(--pd-accent-text);
 }
 
 .pd-info-banner {

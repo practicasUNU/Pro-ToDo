@@ -11,6 +11,8 @@ import {
   SANITIZER_ALLOWED_TAGS,
 } from '@/types/nodes/post-ia-sanitizer.types';
 
+import { extractStructuralSelectors } from '@/utils/structural-selectors';
+
 import type { HydratableNode, UpstreamNamespace } from '@stores/nodes/node-store-registry';
 
 import type { PostIaSanitizerNodeConfig } from '@/types/nodes/post-ia-sanitizer.types';
@@ -63,6 +65,19 @@ const postIaSanitizerSetup = () => {
 
   /** Namespaces que publican los pasos ANTERIORES, con sus campos. */
   const availableUpstreamContext = ref<UpstreamNamespace[]>([]);
+
+  /**
+   * HTML de la plantilla base que aporta un MAPEADOR_PLANTILLA anterior.
+   *
+   * Lo empuja el anfitrion (`setUpstreamBaseMarkup`), que se lo pide al nodo que
+   * lo conoce. Este store NO va a buscarlo al store del mapeador: §3.1 prohibe
+   * que un nodo conozca la forma interna de otro, y hacerlo ataria los dos
+   * configuradores entre si.
+   *
+   * `null` mientras no haya plantilla elegida. Es lo mismo que no haber llegado
+   * todavia a ese paso, y las dos cosas significan "sin sugerencias".
+   */
+  const upstreamBaseMarkup = ref<string | null>(null);
 
   /**
    * Opciones del selector de namespace de origen.
@@ -126,6 +141,23 @@ const postIaSanitizerSetup = () => {
       entry.fields.some((field) => field.name === BASE_TEMPLATE_FIELD),
     ),
   );
+
+  /**
+   * Ranuras que la plantilla base declara de verdad, para sugerirlas.
+   *
+   * Es la diferencia entre pedir un selector CSS a ciegas y ofrecer los que el
+   * documento tiene. El parseo vive en `@/utils/structural-selectors` y no aqui
+   * porque no depende de este nodo —es "dado este HTML, que ranuras hay"— y
+   * desde `src/utils/` se prueba aislado (`frontend-architecture.md` §2.1).
+   *
+   * Las ya elegidas se excluyen: ofrecer de nuevo lo que ya es un chip hace que
+   * el desplegable parezca no responder al pulsarlo.
+   */
+  const detectedSelectorOptions = computed<readonly string[]>(() => {
+    const detected = extractStructuralSelectors(upstreamBaseMarkup.value ?? '');
+
+    return detected.filter((selector) => !config.value.requiredSelectors.includes(selector));
+  });
 
   /** Selectores que superan el limite de longitud del DTO. */
   const oversizedSelectors = computed<readonly string[]>(() =>
@@ -223,6 +255,35 @@ const postIaSanitizerSetup = () => {
   };
 
   /** Declara los namespaces anteriores CON los campos que publica cada uno. */
+  /** Canal del marcado base; lo invoca el anfitrion al sincronizar un paso. */
+  const setUpstreamBaseMarkup = (markup: string | null): void => {
+    upstreamBaseMarkup.value = markup;
+  };
+
+  /**
+   * Carga de golpe las ranuras detectadas que quepan bajo el tope.
+   *
+   * ANADE, no reemplaza: lo que el operador ya haya escrito a mano —una ranura
+   * que la plantilla no declara pero que el espera del modelo— sobrevive al
+   * boton. Reemplazar convertiria un atajo en una trampa.
+   *
+   * Corta en `MAX_REQUIRED_SELECTORS` en vez de rechazar la operacion entera:
+   * llenar hasta el tope es exactamente lo que el operador ha pedido, y fallar
+   * porque sobran dos candidatos no le acerca a su objetivo.
+   */
+  const autoPopulateCriticalSelectors = (): void => {
+    const free = MAX_REQUIRED_SELECTORS - config.value.requiredSelectors.length;
+
+    if (free <= 0) return;
+
+    updateConfig({
+      requiredSelectors: [
+        ...config.value.requiredSelectors,
+        ...detectedSelectorOptions.value.slice(0, free),
+      ],
+    });
+  };
+
   const setAvailableUpstreamContext = (context: UpstreamNamespace[]): void => {
     availableUpstreamContext.value = [...context];
   };
@@ -252,13 +313,16 @@ const postIaSanitizerSetup = () => {
   const resetConfig = (): void => {
     config.value = buildInitialConfig();
     availableUpstreamContext.value = [];
+    upstreamBaseMarkup.value = null;
   };
 
   return {
     config,
     availableUpstreamContext,
+    upstreamBaseMarkup,
     namespaceOptions,
     fieldOptions,
+    detectedSelectorOptions,
     hasStaleSource,
     hasBaseTemplateUpstream,
     oversizedSelectors,
@@ -266,7 +330,9 @@ const postIaSanitizerSetup = () => {
     isConfigValid,
     configWarnings,
     updateConfig,
+    autoPopulateCriticalSelectors,
     setAvailableUpstreamContext,
+    setUpstreamBaseMarkup,
     toNodeParams,
     hydrateFromNode,
     resetConfig,

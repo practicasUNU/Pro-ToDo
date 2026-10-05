@@ -15,10 +15,13 @@ import type { Component } from 'vue';
  * `defineAsyncComponent` mantiene cada configurador en su propio chunk: un
  * flujo que solo usa dos nodos no descarga los ocho.
  *
- * `Partial` es deliberado: los tipos aun sin implementar simplemente no estan,
- * y el anfitrion debe contemplar el `undefined` en vez de suponer cobertura
- * total. Cuando se implementen los ocho, el `Partial` cae y el compilador
- * exigira que no falte ninguno.
+ * `Partial` SE CONSERVA aunque el mapa ya cubra los diez tipos del enum, al
+ * reves de lo que decia este comentario cuando faltaban. El motivo es que el
+ * `undefined` no es un hueco transitorio, es un VALOR del dominio:
+ * `resolveStepBlockReason` distingue `SIN_CONFIGURADOR` de `SIN_STORE`
+ * leyendolo, y con un `Record` total el compilador tiparia el acceso como
+ * `Component` y daria esa rama por inalcanzable. Un tipo de nodo nuevo nace sin
+ * configurador, asi que el camino tiene que seguir existiendo.
  */
 export const nodeConfigRegistry: Partial<Record<NodeType, Component>> = {
   [NodeType.TRIGGER_IMAP]: defineAsyncComponent(
@@ -47,6 +50,9 @@ export const nodeConfigRegistry: Partial<Record<NodeType, Component>> = {
   ),
   [NodeType.DESTINO_SMTP]: defineAsyncComponent(
     () => import('@components/nodes/SmtpAlertConfig.vue'),
+  ),
+  [NodeType.DESTINO_HTTP]: defineAsyncComponent(
+    () => import('@components/nodes/DrupalHttpConfig.vue'),
   ),
 };
 
