@@ -11,7 +11,15 @@ Esta guía operativa documenta los contratos de red, bundles, rutas de API y est
   - `Authorization: Bearer ${DRUPAL_API_TOKEN}`
   - `Accept: application/vnd.api+json`
   - `Content-Type: application/vnd.api+json`
-- **Base URL:** `https://www.madrimasd.org/jsonapi`
+- **Variables de entorno oficiales** (todas en `backend/.env`, leídas vía `ConfigService`; plantilla en `backend/.env.example`):
+
+  | Variable | Valor de referencia | Notas |
+  |---|---|---|
+  | `DRUPAL_API_BASE_URL` | `https://www.madrimasd.org/jsonapi` | Incluye el sufijo `/jsonapi` a propósito: es la raíz sobre la que la estrategia concatena `/node/page/{uuid}`. Sin ella el nodo falla con `ERR_DRUPAL_CONFIG`. |
+  | `DRUPAL_API_TOKEN` | *(bearer emitido por Drupal)* | Sin token el nodo falla con `ERR_DRUPAL_CONFIG` **antes** de emitir ninguna petición. |
+  | `DRUPAL_API_TIMEOUT_MS` | `15000` | Timeout por petición HTTP. |
+  | `DRUPAL_API_USER` | `example_api` | Reservada; la autenticación aprobada es Bearer y la estrategia no la consume. |
+
 - **Aislamiento:** Las credenciales operan exclusivamente en `backend/.env` vía `ConfigService`. Prohibido exponer tokens en frontend o en `pipeline_schema`.
 
 ---
@@ -95,13 +103,19 @@ Las licitaciones residen acumuladas en el campo `body.value` de una página agre
 
 Mueve una licitación activa a la página de cerradas. No requiere inferencia de IA.
 
-* **Flujo Operativo:**
-1. `GET` a la página de abiertas (`uuid_abiertas`).
-2. Cheerio: Aislar el bloque correspondiente mediante el selector de expediente (ej. `[data-expediente="S_2026_015"]` o búsqueda por texto), guardar su HTML y removerlo (`$(selector).remove()`).
-3. `PATCH` a la página de abiertas con el HTML resultante.
-4. `GET` a la página de cerradas (`uuid_cerradas`).
-5. Cheerio: Prepend del bloque extraído en la página de cerradas.
-6. `PATCH` a la página de cerradas con el HTML actualizado.
+* **Parámetros obligatorios:** `targetNodeUuid` (abiertas, origen), `destinationNodeUuid` (cerradas, destino) e `itemSelector`. La ausencia de cualquiera corta la ejecución con `ERR_DRUPAL_MISSING_PAYLOAD`.
+
+* **Flujo Operativo (orden invertido: se escribe PRIMERO en cerradas):**
+1. `GET` a la página de **abiertas** (`targetNodeUuid`) y aislamiento del bloque con `itemSelector` (ej. `[data-expediente="S_2026_015"]`), guardando su HTML.
+2. `GET` a la página de **cerradas** (`destinationNodeUuid`) con **guarda de idempotencia**: si el selector ya encuentra el bloque en destino, se salta por completo la escritura en cerradas. Si además el bloque ya no está en origen, el traslado se da por completado y se devuelve `success: true` sin emitir ningún `PATCH`. Si no aparece en ninguna de las dos páginas, se falla con `ERR_DRUPAL_DOM_TARGET` sin modificar nada.
+3. `PATCH` a **cerradas** con el bloque inyectado (prepend sobre el `body.value` existente).
+4. `PATCH` a **abiertas** con el bloque ya removido del DOM.
+
+* **Por qué el orden invertido (garantía At-Least-Once + idempotencia):**
+  JSON:API no ofrece transacción multi-entidad, así que la ventana de fallo entre las dos escrituras no se puede eliminar: solo se puede elegir de qué lado cae.
+  - Orden «natural» (retirar de origen → escribir en destino): un fallo de red en la segunda escritura **pierde** el bloque. Como solo existía dentro del `body.value` de la agregadora —no es una entidad con revisiones—, la pérdida es silenciosa e irreversible.
+  - Orden invertido (destino → origen): el único fallo posible deja el bloque **duplicado**, visible en ambas páginas. Es detectable, reparable a mano y, sobre todo, **autoconvergente**: el reintento ejecuta la guarda del paso 2, detecta que cerradas ya lo tiene, se salta esa escritura y solo retira de abiertas.
+  - Ese fallo parcial no se oculta: la estrategia devuelve `success: false` **con `data`**, marcando `operationApplied: "TRANSFER_HTML_BLOCK_PARTIAL"`, de modo que el motor publique el namespace y copie los UUID en `error_context.partial_data` para que la alerta indique exactamente qué página hay que limpiar.
 
 ### Modo D: `UPLOAD_ATTACHMENT` (Archivos Binarios PDF/PPT)
 
@@ -119,5 +133,5 @@ Los adjuntos son activos descargables, no fuentes de extracción de texto.
 
 ## 6. Manejo de Errores y Resiliencia en FSM
 
-* **Timeouts:** 15.000 ms (`DRUPAL_TIMEOUT_MS`).
+* **Timeouts:** 15.000 ms (`DRUPAL_API_TIMEOUT_MS`).
 * **Nivel de Severidad:** Todo fallo HTTP (`4xx`, `5xx`) debe capturarse en la estrategia y reportarse como error `GRAVE` (`ERR_DRUPAL_HTTP_FAILURE`), congelando la FSM en `PAUSADO` para inspección forense en `contexto_acumulado` sin abortar el contenedor Docker.

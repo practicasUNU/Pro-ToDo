@@ -114,10 +114,13 @@ describe('NodeCatalogService · lectura del catalogo de tipos de nodo', () => {
 
     // Dos familias distintas de "sin estrategia", y las dos deben salir en
     // `false`: `DESTINO_ACENS` ni siquiera esta en el enum, mientras que
-    // `PROCESADOR_IA` y compania SI lo estan pero nadie las ha registrado en la
-    // factoria. Esta segunda familia es la que antes se marcaba como
-    // implementada y dejaba al asistente elegir nodos que reventaban al
-    // ejecutarse.
+    // `PROCESADOR_IA` y `DESTINO_HTTP` SI lo estan y en produccion YA tienen
+    // estrategia registrada (`LlmExtractorStrategy` y `DrupalHttpStrategy`),
+    // pero aqui la factoria doble no las inscribe: `REGISTERED_TYPES` es un
+    // conjunto reducido a proposito. Esa es justo la propiedad bajo prueba —la
+    // marca sigue a la factoria, no al enum ni a lo que hoy este implementado—,
+    // y es la que antes se incumplia dejando al asistente elegir nodos que
+    // reventaban al ejecutarse.
     it.each([
       'DESTINO_ACENS',
       NodeType.PROCESADOR_IA,
