@@ -729,9 +729,9 @@ describe('LlmExtractorStrategy', () => {
       const strategy = buildStrategy(buildPromptService());
 
       // 3. Assert
-      expect(strategy.getPromptReferences({ promptCode: TEMPLATE_CODE })).toEqual([
-        { kind: 'code', value: TEMPLATE_CODE },
-      ]);
+      expect(
+        strategy.getPromptReferences({ promptCode: TEMPLATE_CODE }),
+      ).toEqual([{ kind: 'code', value: TEMPLATE_CODE }]);
     });
 
     it('12.3 deberia respetar la precedencia de resolvePrompt', () => {
@@ -756,7 +756,9 @@ describe('LlmExtractorStrategy', () => {
 
       // 3. Assert
       expect(
-        strategy.getPromptReferences({ inlinePrompt: 'Redacta {{parsed_email.clean_body}}' }),
+        strategy.getPromptReferences({
+          inlinePrompt: 'Redacta {{parsed_email.clean_body}}',
+        }),
       ).toEqual([]);
     });
 
@@ -1567,6 +1569,255 @@ describe('LlmExtractorStrategy', () => {
       expect(anthropic.completion).not.toHaveBeenCalled();
       expect(result.success).toBe(false);
       expect(result.error?.code).toBe(ERR_LLM_PROVIDER_FAILURE);
+    });
+  });
+
+  /**
+   * El circuito MAPEADOR_PLANTILLA -> PROCESADOR_IA -> ESCUDO_POST_IA.
+   *
+   * Lo que se verifica aqui es la BISAGRA: que el nodo reconozca que su prompt
+   * lleva una plantilla base y, solo entonces, pida el marcado y eleve el
+   * presupuesto de tokens.
+   */
+  describe('13. Plantilla base y filled_markup', () => {
+    const MARKUP =
+      '<h1 class="titular">Titular</h1><div class="cuerpo"><p>Texto.</p></div>';
+
+    /** Doble que captura las opciones con las que se le invoca. */
+    const buildCapturingProvider = (
+      filledMarkup?: string,
+    ): { client: ILlmProviderClient; completion: jest.Mock } => {
+      const completion = jest.fn().mockResolvedValue({
+        headline: 'h',
+        summary: 's',
+        body_paragraphs: [],
+        ...(filledMarkup === undefined ? {} : { filled_markup: filledMarkup }),
+        metadata: {
+          tokensPrompt: 0,
+          tokensCompletion: 0,
+          modelUsed: 'gemini-3.6-flash',
+          isMock: false,
+        },
+      });
+
+      return {
+        client: {
+          provider: LlmProvider.GEMINI,
+          generateCompletion: completion,
+        },
+        completion,
+      };
+    };
+
+    /** Tercer argumento de la llamada: las opciones de ejecucion. */
+    const optionsOf = (completion: jest.Mock): Record<string, unknown> =>
+      (
+        completion.mock.calls[0] as [string, string, Record<string, unknown>]
+      )[2];
+
+    it('13.1 deberia pedir el marcado cuando el prompt cita la plantilla base', async () => {
+      // 1. Arrange
+      const { client, completion } = buildCapturingProvider(MARKUP);
+      const strategy = buildStrategy(buildPromptService(), client);
+      const context = buildContext({
+        parsed_email: { clean_body: CLEAN_BODY },
+        rendered_html: { compiled_markup: '<h1 class="titular"></h1>' },
+      });
+
+      // 2. Act
+      const result = await strategy.execute(context, {
+        inlinePrompt:
+          'Rellena {{rendered_html.compiled_markup}} con la noticia.',
+        provider: LlmProvider.GEMINI,
+      });
+
+      // 3. Assert
+      expect(optionsOf(completion).expectsFilledMarkup).toBe(true);
+      expect(result.success).toBe(true);
+      expect(result.data?.filled_markup).toBe(MARKUP);
+    });
+
+    it('13.2 deberia publicar null cuando el prompt no cita ninguna plantilla', async () => {
+      // 1. Arrange
+      const { client, completion } = buildCapturingProvider();
+      const strategy = buildStrategy(buildPromptService(), client);
+      const context = buildContext({
+        parsed_email: { clean_body: CLEAN_BODY },
+      });
+
+      // 2. Act
+      const result = await strategy.execute(context, {
+        inlinePrompt: 'Redacta una noticia breve.',
+        provider: LlmProvider.GEMINI,
+      });
+
+      // 3. Assert: la clave se publica IGUAL, para que el namespace no cambie
+      //    de forma segun la configuracion
+      expect(optionsOf(completion).expectsFilledMarkup).toBe(false);
+      expect(result.success).toBe(true);
+      expect(result.data?.filled_markup).toBeNull();
+    });
+
+    it('13.3 deberia detectar la plantilla venga del namespace que venga', async () => {
+      // 1. Arrange: el `outputNamespace` es propiedad del NODO, no de su tipo, y
+      //    `rendered_html` es solo el defecto que propone el asistente. La
+      //    deteccion es LEXICA y no comprueba la lista cerrada a proposito: la
+      //    regla 4 del validador de topologia ya la verifico al guardar.
+      const { client, completion } = buildCapturingProvider(MARKUP);
+      const strategy = buildStrategy(buildPromptService(), client);
+      const context = buildContext({
+        parsed_email: { clean_body: CLEAN_BODY },
+        validated_drupal_json: { compiled_markup: '<h1></h1>' },
+      });
+
+      // 2. Act
+      const result = await strategy.execute(context, {
+        inlinePrompt: 'Rellena {{validated_drupal_json.compiled_markup}}.',
+        provider: LlmProvider.GEMINI,
+      });
+
+      // 3. Assert
+      expect(optionsOf(completion).expectsFilledMarkup).toBe(true);
+      expect(result.data?.filled_markup).toBe(MARKUP);
+    });
+
+    it('13.4 deberia detectarla tambien por un prompt guardado', async () => {
+      // 1. Arrange: `getRequiredNamespaces` no llega aqui —es puro y sincrono y
+      //    solo ve `inlinePrompt`—, pero `execute` resuelve el texto antes de
+      //    decidir, asi que la deteccion si alcanza las tres vias.
+      const promptService = buildPromptService();
+      promptService.findByCode.mockResolvedValue({
+        promptText: 'Rellena {{rendered_html.compiled_markup}} con la noticia.',
+      } as AiPromptTemplate);
+      const { client, completion } = buildCapturingProvider(MARKUP);
+      const strategy = buildStrategy(promptService, client);
+      const context = buildContext({
+        parsed_email: { clean_body: CLEAN_BODY },
+        rendered_html: { compiled_markup: '<h1></h1>' },
+      });
+
+      // 2. Act
+      await strategy.execute(context, {
+        promptCode: 'NOTIWEB_DEFAULT',
+        provider: LlmProvider.GEMINI,
+      });
+
+      // 3. Assert
+      expect(optionsOf(completion).expectsFilledMarkup).toBe(true);
+    });
+
+    it('13.5 deberia elevar el presupuesto de tokens solo con plantilla', async () => {
+      // 1. Arrange: quedarse corto corta la respuesta a media cadena JSON, y el
+      //    nodo muere por contrato sin que el mensaje hable de presupuesto.
+      const conPlantilla = buildCapturingProvider(MARKUP);
+      const sinPlantilla = buildCapturingProvider();
+      const context = buildContext({
+        parsed_email: { clean_body: CLEAN_BODY },
+        rendered_html: { compiled_markup: '<h1></h1>' },
+      });
+
+      // 2. Act
+      await buildStrategy(buildPromptService(), conPlantilla.client).execute(
+        context,
+        {
+          inlinePrompt: 'Rellena {{rendered_html.compiled_markup}}.',
+          provider: LlmProvider.GEMINI,
+        },
+      );
+      await buildStrategy(buildPromptService(), sinPlantilla.client).execute(
+        context,
+        { inlinePrompt: 'Redacta.', provider: LlmProvider.GEMINI },
+      );
+
+      // 3. Assert: sin plantilla se OMITE, no se fija un numero. Fijarlo
+      //    recortaria en silencio flujos que hoy redactan articulos largos con
+      //    el tope de 4096 que Anthropic aplica por su cuenta.
+      expect(optionsOf(conPlantilla.completion).maxTokens).toBe(8_192);
+      expect(optionsOf(sinPlantilla.completion)).not.toHaveProperty(
+        'maxTokens',
+      );
+    });
+
+    it('13.6 deberia respetar un maxTokens declarado por el nodo', async () => {
+      // 1. Arrange
+      const { client, completion } = buildCapturingProvider(MARKUP);
+      const strategy = buildStrategy(buildPromptService(), client);
+      const context = buildContext({
+        parsed_email: { clean_body: CLEAN_BODY },
+        rendered_html: { compiled_markup: '<h1></h1>' },
+      });
+
+      // 2. Act
+      await strategy.execute(context, {
+        inlinePrompt: 'Rellena {{rendered_html.compiled_markup}}.',
+        provider: LlmProvider.GEMINI,
+        maxTokens: 16_384,
+      });
+
+      // 3. Assert: lo que declara el nodo manda sobre el tope de marcado
+      expect(optionsOf(completion).maxTokens).toBe(16_384);
+    });
+
+    it('13.7 deberia publicar null si el modelo devuelve marcado vacio', async () => {
+      // 1. Arrange: una cadena en blanco no es markup, y publicarla dejaria al
+      //    escudo auditando el vacio en vez de diagnosticarlo.
+      const { client } = buildCapturingProvider('   ');
+      const strategy = buildStrategy(buildPromptService(), client);
+      const context = buildContext({
+        parsed_email: { clean_body: CLEAN_BODY },
+        rendered_html: { compiled_markup: '<h1></h1>' },
+      });
+
+      // 2. Act
+      const result = await strategy.execute(context, {
+        inlinePrompt: 'Rellena {{rendered_html.compiled_markup}}.',
+        provider: LlmProvider.GEMINI,
+      });
+
+      // 3. Assert
+      expect(result.success).toBe(true);
+      expect(result.data?.filled_markup).toBeNull();
+    });
+
+    it('13.8 deberia maquetar tambien con el simulador, para el banco de pruebas', async () => {
+      // 1. Arrange: MOCK es el proveedor por defecto y el destino de dryRun. Si
+      //    no maquetara, el escudo no podria ejercitarse sin una clave de pago.
+      const strategy = buildStrategy(buildPromptService());
+      const context = buildContext({
+        parsed_email: { clean_body: CLEAN_BODY },
+        rendered_html: { compiled_markup: '<h1></h1>' },
+      });
+
+      // 2. Act
+      const result = await strategy.execute(context, {
+        inlinePrompt: 'Rellena {{rendered_html.compiled_markup}}.',
+        provider: LlmProvider.MOCK,
+      });
+
+      // 3. Assert
+      expect(result.success).toBe(true);
+      expect(result.data?.filled_markup).toContain('<h1>');
+    });
+
+    it('13.9 deberia coincidir exactamente con las claves que emite execute', async () => {
+      // 1. Arrange: el invariante que faltaba. `LLM_OUTPUT_KEYS` y
+      //    `outputFields` eran dos fuentes paralelas del mismo contrato sin nada
+      //    que las atara; el test 1.1 solo miraba la primera.
+      const strategy = buildStrategy(buildPromptService());
+      const context = buildContext({
+        parsed_email: { clean_body: CLEAN_BODY },
+      });
+
+      // 2. Act
+      const result = await strategy.execute(context, {
+        inlinePrompt: 'Redacta una noticia breve.',
+        provider: LlmProvider.MOCK,
+      });
+
+      // 3. Assert
+      expect(Object.keys(result.data ?? {}).sort()).toEqual(
+        strategy.outputFields.map((field) => field.name).sort(),
+      );
     });
   });
 });

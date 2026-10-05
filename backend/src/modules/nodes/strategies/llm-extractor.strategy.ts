@@ -10,6 +10,7 @@ import { AiDefaultsConfig } from '@core/config/ai-defaults.config';
 import { NodeType } from '@core/fsm/types/pipeline-schema.types';
 import { AiPromptTemplatesService } from '@modules/ai-prompt-templates/ai-prompt-templates.service';
 import {
+  DEFAULT_LLM_MARKUP_MAX_TOKENS,
   LlmExtractorConfigDto,
   resolveLlmExtractorConfig,
 } from '@modules/nodes/dto/llm-extractor-config.dto';
@@ -68,6 +69,7 @@ export const LLM_OUTPUT_KEYS = [
   'headline',
   'summary',
   'body_paragraphs',
+  'filled_markup',
   'metadata',
 ] as const;
 
@@ -132,6 +134,28 @@ export const MATERIAL_IN_INSTRUCTIONS_NOTICE =
  */
 const markerPattern = (namespace: string, field: string): RegExp =>
   new RegExp(`\\{\\{\\s*${namespace}\\.${field}\\s*\\}\\}`);
+
+/**
+ * Marcador de una plantilla base, venga del namespace que venga.
+ *
+ * DELIBERADAMENTE NO usa `markerPattern('rendered_html', 'compiled_markup')`.
+ * El `outputNamespace` es una propiedad del NODO en el `pipeline_schema`, no de
+ * su tipo: `rendered_html` es solo el valor que el asistente propone por
+ * defecto, y la regla 4 del validador de topologia admite cualquier entrada de
+ * `NODE_OUTPUT_NAMESPACES`. Atar la deteccion al literal significaria que un
+ * MAPEADOR_PLANTILLA reconfigurado deja de recibir la directiva de maquetado
+ * —en silencio, porque el prompt se interpolaria igual de bien— y el escudo
+ * posterior acabaria culpando a la IA de no devolver markup que nunca se le
+ * pidio.
+ *
+ * Lo que identifica a una plantilla base es el CAMPO, `compiled_markup`, que es
+ * la clave que publica `TemplateMapperStrategy` y nadie mas.
+ *
+ * `[a-z0-9_]+` replica `OUTPUT_NAMESPACE_PATTERN`, de modo que no reconoce como
+ * namespace nada que el motor no pudiera resolver.
+ */
+const BASE_TEMPLATE_MARKER_PATTERN =
+  /\{\{\s*[a-z0-9_]+\.compiled_markup\s*\}\}/;
 
 /** Union discriminada: o hay configuracion, o hay un fallo que devolver. */
 type LlmConfigResolution =
@@ -211,6 +235,12 @@ export class LlmExtractorStrategy implements INodeStrategy {
       description: 'Parrafos del cuerpo, en orden',
     },
     {
+      name: 'filled_markup',
+      type: 'text',
+      description:
+        'La plantilla base devuelta ya rellena, o null si el prompt no cito ninguna',
+    },
+    {
       name: 'metadata',
       type: 'object',
       description: 'Tokens consumidos, modelo usado y marca isMock',
@@ -283,6 +313,17 @@ export class LlmExtractorStrategy implements INodeStrategy {
     // origenes ya viajan dentro de la instruccion y no hay que repetir.
     const inputText = this.buildInputText(context, promptResolution.prompt);
 
+    // Deteccion de plantilla base. Se hace sobre el prompt RESUELTO pero SIN
+    // INTERPOLAR, y el orden no es negociable: `getInterpolatedValue` sustituye
+    // el marcador por el HTML, de modo que despues de interpolar ya no queda
+    // nada que detectar. Cubre las tres vias del prompt —`inlinePrompt`,
+    // `promptCode` y `templatePromptId`—, que es mas de lo que alcanza
+    // `getRequiredNamespaces`: aquel es puro y sincrono por contrato y solo ve
+    // el prompt en linea, mientras que aqui el texto guardado ya esta resuelto.
+    const expectsFilledMarkup = BASE_TEMPLATE_MARKER_PATTERN.test(
+      promptResolution.prompt,
+    );
+
     this.warnOnOrphanAttachments(context);
 
     const interpolated = this.interpolate(context, promptResolution.prompt);
@@ -313,6 +354,8 @@ export class LlmExtractorStrategy implements INodeStrategy {
         // un prompt como "resume esto en tres parrafos" es perfectamente valido
         // y no menciona ningun namespace. Con el reparto contrario, ese prompt
         // facturaria una inferencia sobre ningun contenido.
+        const maxTokens = this.resolveMaxTokens(config, expectsFilledMarkup);
+
         response = await this.resolveClient(
           attempt.provider,
           config.dryRun,
@@ -320,6 +363,11 @@ export class LlmExtractorStrategy implements INodeStrategy {
           model: attempt.model,
           timeoutMs: config.timeoutMs,
           maxRetries: config.maxRetries,
+          expectsFilledMarkup,
+          // Se OMITE cuando no hay nada que decir, en vez de mandar un numero:
+          // asi el defecto lo sigue publicando cada proveedor, que es como ha
+          // funcionado hasta hoy. Ver `resolveMaxTokens`.
+          ...(maxTokens === null ? {} : { maxTokens }),
         });
 
         usedProvider = attempt.provider;
@@ -358,6 +406,12 @@ export class LlmExtractorStrategy implements INodeStrategy {
         headline: response.headline,
         summary: response.summary,
         body_paragraphs: response.body_paragraphs,
+        // La clave se publica SIEMPRE, tambien cuando no hay plantilla: un
+        // namespace cuyas claves cambian segun la configuracion obligaria a
+        // cada consumidor a comprobar la existencia antes de interpolar. `null`
+        // es ademas lo que `PostIaSanitizerStrategy` lee como
+        // ERR_POST_IA_EMPTY_HTML, que es el diagnostico correcto.
+        filled_markup: this.normalizeMarkup(response.filled_markup),
         metadata: {
           ...response.metadata,
           provider: usedProvider,
@@ -417,7 +471,10 @@ export class LlmExtractorStrategy implements INodeStrategy {
   ): readonly PromptReference[] {
     const { templatePromptId, promptCode } = params;
 
-    if (typeof templatePromptId === 'string' && templatePromptId.trim() !== '') {
+    if (
+      typeof templatePromptId === 'string' &&
+      templatePromptId.trim() !== ''
+    ) {
       return [{ kind: 'id', value: templatePromptId.trim() }];
     }
 
@@ -750,6 +807,51 @@ export class LlmExtractorStrategy implements INodeStrategy {
    * aqui no garantiza, por tanto, una inferencia real; `metadata.isMock` sigue
    * siendo la unica senal fiable.
    */
+  /**
+   * Presupuesto de tokens de la respuesta, o `null` para dejar mandar al proveedor.
+   *
+   * Tres escalones, de mayor a menor precedencia: lo que declare el nodo, el
+   * tope de marcado cuando toca devolver una plantilla, y el defecto del
+   * proveedor.
+   *
+   * EL TERCER ESCALON ES `null` Y NO UN NUMERO, A PROPOSITO. Fijar aqui un tope
+   * para las inferencias SIN plantilla no seria conservador, seria un cambio de
+   * conducta: hoy este nodo no envia `maxTokens` en absoluto, de modo que
+   * Anthropic aplica su propio tope de 4096 y Gemini el del modelo. Cualquier
+   * cifra que se escribiera aqui por debajo de eso recortaria en silencio
+   * flujos que llevan meses redactando articulos largos sin problema, y el
+   * sintoma —una noticia cortada a media frase— no se parece en nada a su causa.
+   * Subir el presupuesto cuando hace falta es seguro; bajarlo no.
+   */
+  private resolveMaxTokens(
+    config: ResolvedLlmExtractorConfig,
+    expectsFilledMarkup: boolean,
+  ): number | null {
+    if (config.maxTokens !== null) {
+      return config.maxTokens;
+    }
+
+    return expectsFilledMarkup ? DEFAULT_LLM_MARKUP_MAX_TOKENS : null;
+  }
+
+  /**
+   * Normaliza el marcado del proveedor a lo que se publica en el namespace.
+   *
+   * El cliente devuelve `undefined` cuando el modelo no emitio la clave; aqui se
+   * convierte en `null` porque es un valor del contexto, y `undefined` no
+   * sobrevive a una serializacion JSON —el contexto se persiste como `jsonb` en
+   * el checkpoint, y la clave desapareceria al releerla.
+   */
+  private normalizeMarkup(value: string | undefined): string | null {
+    if (typeof value !== 'string') {
+      return null;
+    }
+
+    const trimmed = value.trim();
+
+    return trimmed.length > 0 ? trimmed : null;
+  }
+
   private resolveClient(
     provider: LlmProvider,
     dryRun: boolean,

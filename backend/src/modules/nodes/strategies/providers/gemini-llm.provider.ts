@@ -7,6 +7,7 @@ import {
   ERR_LLM_PROVIDER_TRUNCATED,
   LlmProvider,
   LlmProviderException,
+  buildResponseContractInstruction,
 } from '@modules/nodes/strategies/interfaces/llm-provider.interface';
 import { stripCodeFence } from '@modules/nodes/utils/code-fence.util';
 import { MockLlmProvider } from '@modules/nodes/strategies/providers/mock-llm.provider';
@@ -64,19 +65,14 @@ const FALLBACK_THINKING_LEVEL = 'low';
 /** Motivo de corte que significa "el modelo termino de hablar". */
 const HEALTHY_FINISH_REASON = 'STOP';
 
-/**
- * Instruccion de formato que se antepone al prompt del operador.
- *
- * Va aqui y no en la plantilla de `plantillas_prompts_ia` porque describe el
- * CONTRATO TECNICO de salida, no la intencion editorial. Si viviera en la
- * plantilla, cada prompt que alguien escribiera tendria que acordarse de
- * repetirla, y el primero que la olvidase rompería el nodo.
+/*
+ * La frase del contrato ya NO vive aqui: la construye
+ * `buildResponseContractInstruction` en `llm-provider.interface.ts`, porque
+ * desde `filled_markup` el contrato es CONDICIONAL y una rama escrita dos veces
+ * diverge en silencio. Este cliente no adjunta esquema —la API de Gemini no lo
+ * admite y se conforma con `responseMimeType`—, asi que la frase es TODO lo que
+ * le dice al modelo que forma debe tener la respuesta.
  */
-const RESPONSE_CONTRACT_INSTRUCTION = [
-  'Responde EXCLUSIVAMENTE con un objeto JSON valido, sin texto adicional',
-  'ni marcas de bloque de codigo, con exactamente estas claves:',
-  '"headline" (string), "summary" (string) y "body_paragraphs" (array de strings).',
-].join(' ');
 
 /** Forma parcial de la respuesta de Gemini que este cliente consume. */
 interface GeminiApiResponse {
@@ -111,6 +107,7 @@ interface GeminiGeneratedContract {
   readonly headline?: unknown;
   readonly summary?: unknown;
   readonly body_paragraphs?: unknown;
+  readonly filled_markup?: unknown;
 }
 
 /** Error del proveedor. Lo captura la estrategia para mover el freno. */
@@ -192,7 +189,14 @@ export class GeminiLlmProvider implements ILlmProviderClient {
           // JUNTAS en `systemInstruction`, y el contrato va el ultimo para que
           // sea lo mas reciente que el modelo lee antes de responder.
           systemInstruction: {
-            parts: [{ text: this.buildSystemInstruction(systemPrompt) }],
+            parts: [
+              {
+                text: this.buildSystemInstruction(
+                  systemPrompt,
+                  config?.expectsFilledMarkup ?? false,
+                ),
+              },
+            ],
           },
           generationConfig: {
             // Se le pide JSON al propio modelo en lugar de rescatarlo de un
@@ -308,12 +312,16 @@ export class GeminiLlmProvider implements ILlmProviderClient {
   }
 
   /** Une la instruccion del operador con el contrato de formato obligatorio. */
-  private buildSystemInstruction(systemPrompt?: string): string {
+  private buildSystemInstruction(
+    systemPrompt: string | undefined,
+    expectsFilledMarkup: boolean,
+  ): string {
     const operatorInstruction = systemPrompt?.trim() ?? '';
+    const contract = buildResponseContractInstruction(expectsFilledMarkup);
 
     return operatorInstruction.length === 0
-      ? RESPONSE_CONTRACT_INSTRUCTION
-      : `${operatorInstruction}\n\n${RESPONSE_CONTRACT_INSTRUCTION}`;
+      ? contract
+      : `${operatorInstruction}\n\n${contract}`;
   }
 
   /** Extrae el contrato formal de la respuesta cruda de la API. */
@@ -367,10 +375,15 @@ export class GeminiLlmProvider implements ILlmProviderClient {
 
     const generated = this.parseContract(rawText);
 
+    const filledMarkup = this.asOptionalText(generated.filled_markup);
+
     return {
       headline: this.asText(generated.headline),
       summary: this.asText(generated.summary),
       body_paragraphs: this.asParagraphs(generated.body_paragraphs),
+      // Condicional, igual que en Anthropic: sin la clave, el payload sigue
+      // describiendo literalmente el contrato de tres claves.
+      ...(filledMarkup === undefined ? {} : { filled_markup: filledMarkup }),
       metadata: {
         tokensPrompt: response.usageMetadata?.promptTokenCount ?? 0,
         tokensCompletion: response.usageMetadata?.candidatesTokenCount ?? 0,
@@ -406,6 +419,23 @@ export class GeminiLlmProvider implements ILlmProviderClient {
   /** Normaliza a cadena. Lo ausente se representa vacio, nunca `undefined`. */
   private asText(value: unknown): string {
     return typeof value === 'string' ? value.trim() : '';
+  }
+
+  /**
+   * Hermano de `asText` que distingue "no vino" de "vino vacio".
+   *
+   * `asText` colapsa los dos casos en `''`, correcto para un titular
+   * obligatorio y justo lo contrario de lo que hace falta aqui: una cadena
+   * vacia en `filled_markup` significa que el modelo no maqueto nada.
+   */
+  private asOptionalText(value: unknown): string | undefined {
+    if (typeof value !== 'string') {
+      return undefined;
+    }
+
+    const trimmed = value.trim();
+
+    return trimmed.length > 0 ? trimmed : undefined;
   }
 
   /** Normaliza a arreglo de cadenas no vacias, descartando lo demas. */

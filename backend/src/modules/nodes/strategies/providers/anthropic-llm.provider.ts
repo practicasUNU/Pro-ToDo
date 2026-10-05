@@ -7,6 +7,8 @@ import {
   ERR_LLM_PROVIDER_CONTRACT,
   LlmProvider,
   LlmProviderException,
+  buildResponseContractInstruction,
+  buildResponseJsonSchema,
 } from '@modules/nodes/strategies/interfaces/llm-provider.interface';
 import { MockLlmProvider } from '@modules/nodes/strategies/providers/mock-llm.provider';
 
@@ -44,37 +46,14 @@ export const DEFAULT_ANTHROPIC_MODEL = 'claude-sonnet-5-5';
  */
 const ANTHROPIC_MAX_TOKENS = 4_096;
 
-/**
- * Instruccion de formato que se antepone al prompt del operador.
- *
- * Duplicada respecto a `GeminiLlmProvider` a proposito, y no extraida a un
- * modulo comun: describe el contrato tal y como lo entiende ESTE proveedor, y
- * compartir el literal invitaria a ajustarlo para uno rompiendo al otro. La
- * frontera de reutilizacion del nodo es `ILlmProviderClient`, no el texto.
+/*
+ * La frase del contrato y el esquema de salida ya NO viven aqui: los construyen
+ * `buildResponseContractInstruction` y `buildResponseJsonSchema`, en
+ * `llm-provider.interface.ts`, porque desde `filled_markup` el contrato es
+ * CONDICIONAL y una rama escrita dos veces diverge en silencio. El razonamiento
+ * completo —y por que revierte la decision anterior de duplicarlos a proposito—
+ * esta en el TSDoc de esos dos constructores.
  */
-const RESPONSE_CONTRACT_INSTRUCTION = [
-  'Responde EXCLUSIVAMENTE con un objeto JSON valido, sin texto adicional',
-  'ni marcas de bloque de codigo, con exactamente estas claves:',
-  '"headline" (string), "summary" (string) y "body_paragraphs" (array de strings).',
-].join(' ');
-
-/**
- * Esquema que se adjunta en `output_config.format`.
- *
- * Se le exige el JSON al modelo por esquema en lugar de rescatarlo de un texto
- * libre a base de expresiones regulares: eso ultimo es un parser de formato ad
- * hoc, justo lo que `security-and-scope.md` §3 prohibe construir.
- */
-const RESPONSE_JSON_SCHEMA = {
-  type: 'object',
-  properties: {
-    headline: { type: 'string' },
-    summary: { type: 'string' },
-    body_paragraphs: { type: 'array', items: { type: 'string' } },
-  },
-  required: ['headline', 'summary', 'body_paragraphs'],
-  additionalProperties: false,
-} as const;
 
 /** Forma parcial de la respuesta de Anthropic que este cliente consume. */
 interface AnthropicApiResponse {
@@ -94,6 +73,7 @@ interface AnthropicGeneratedContract {
   readonly headline?: unknown;
   readonly summary?: unknown;
   readonly body_paragraphs?: unknown;
+  readonly filled_markup?: unknown;
 }
 
 /** Error del proveedor. Lo captura la estrategia para mover el freno. */
@@ -186,12 +166,20 @@ export class AnthropicLlmProvider implements ILlmProviderClient {
           // La instruccion del operador y el contrato de formato viajan juntos
           // en `system`, con el contrato el ultimo para que sea lo mas reciente
           // que el modelo lee antes de responder.
-          system: this.buildSystemInstruction(systemPrompt),
+          system: this.buildSystemInstruction(
+            systemPrompt,
+            config?.expectsFilledMarkup ?? false,
+          ),
           messages: [
             { role: 'user', content: this.buildContent(prompt, attachments) },
           ],
           output_config: {
-            format: { type: 'json_schema', schema: RESPONSE_JSON_SCHEMA },
+            format: {
+              type: 'json_schema',
+              schema: buildResponseJsonSchema(
+                config?.expectsFilledMarkup ?? false,
+              ),
+            },
           },
         },
       },
@@ -254,12 +242,16 @@ export class AnthropicLlmProvider implements ILlmProviderClient {
   }
 
   /** Une la instruccion del operador con el contrato de formato obligatorio. */
-  private buildSystemInstruction(systemPrompt?: string): string {
+  private buildSystemInstruction(
+    systemPrompt: string | undefined,
+    expectsFilledMarkup: boolean,
+  ): string {
     const operatorInstruction = systemPrompt?.trim() ?? '';
+    const contract = buildResponseContractInstruction(expectsFilledMarkup);
 
     return operatorInstruction.length === 0
-      ? RESPONSE_CONTRACT_INSTRUCTION
-      : `${operatorInstruction}\n\n${RESPONSE_CONTRACT_INSTRUCTION}`;
+      ? contract
+      : `${operatorInstruction}\n\n${contract}`;
   }
 
   /** Extrae el contrato formal de la respuesta cruda de la API. */
@@ -285,10 +277,16 @@ export class AnthropicLlmProvider implements ILlmProviderClient {
 
     const generated = this.parseContract(rawText);
 
+    const filledMarkup = this.asOptionalText(generated.filled_markup);
+
     return {
       headline: this.asText(generated.headline),
       summary: this.asText(generated.summary),
       body_paragraphs: this.asParagraphs(generated.body_paragraphs),
+      // Propagacion CONDICIONAL de la clave: cuando el modelo no la emite, el
+      // payload no la menciona en vez de llevarla a `undefined` explicito. Asi
+      // el contrato de tres claves sigue siendo literalmente el de tres claves.
+      ...(filledMarkup === undefined ? {} : { filled_markup: filledMarkup }),
       metadata: {
         tokensPrompt: response.usage?.input_tokens ?? 0,
         tokensCompletion: response.usage?.output_tokens ?? 0,
@@ -323,6 +321,24 @@ export class AnthropicLlmProvider implements ILlmProviderClient {
   /** Normaliza a cadena. Lo ausente se representa vacio, nunca `undefined`. */
   private asText(value: unknown): string {
     return typeof value === 'string' ? value.trim() : '';
+  }
+
+  /**
+   * Hermano de `asText` que distingue "no vino" de "vino vacio".
+   *
+   * `asText` colapsa los dos casos en `''`, que es lo correcto para un titular
+   * obligatorio y lo contrario de lo que hace falta aqui: una cadena vacia en
+   * `filled_markup` significa que el modelo no maqueto nada, y publicarla como
+   * si fuera markup dejaria al escudo auditando el vacio.
+   */
+  private asOptionalText(value: unknown): string | undefined {
+    if (typeof value !== 'string') {
+      return undefined;
+    }
+
+    const trimmed = value.trim();
+
+    return trimmed.length > 0 ? trimmed : undefined;
   }
 
   /** Normaliza a arreglo de cadenas no vacias, descartando lo demas. */

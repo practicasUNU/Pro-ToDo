@@ -93,6 +93,16 @@ const generationConfigOf = (http: HttpMock): Record<string, unknown> => {
   return data.generationConfig;
 };
 
+/** Instruccion de sistema tal y como salio en la peticion. */
+const systemInstructionOf = (http: HttpMock): string => {
+  const [config] = http.request.mock.calls[0] as [AxiosRequestConfig];
+  const data = config.data as {
+    systemInstruction: { parts: { text: string }[] };
+  };
+
+  return data.systemInstruction.parts[0]?.text ?? '';
+};
+
 /** Partes del turno del usuario tal y como salieron en la peticion. */
 const partsOf = (http: HttpMock): Record<string, unknown>[] => {
   const [config] = http.request.mock.calls[0] as [AxiosRequestConfig];
@@ -218,6 +228,48 @@ describe('GeminiLlmProvider', () => {
 
       // 3. Assert 🎯
       expect(partsOf(http)).toEqual([{ text: 'Redacta una noticia.' }]);
+    });
+  });
+
+  describe('3b. Contrato condicional de salida', () => {
+    it('3b.1 deberia pedir filled_markup cuando se espera plantilla', async () => {
+      // 1. Arrange 📐: Gemini NO admite esquema JSON, asi que esta frase es TODO
+      //    lo que le dice al modelo la forma que debe tener la respuesta.
+      const http = buildHttp();
+
+      // 2. Act ⚙️
+      await buildProvider(http).generateCompletion(
+        'Redacta una noticia.',
+        'Eres un redactor institucional.',
+        {
+          model: 'gemini-3.6-flash',
+          timeoutMs: 1_000,
+          maxRetries: 0,
+          expectsFilledMarkup: true,
+        },
+      );
+
+      // 3. Assert 🎯
+      const system = systemInstructionOf(http);
+      expect(system).toContain('"filled_markup"');
+      expect(system).toContain('Respeta estrictamente');
+    });
+
+    it('3b.2 NO deberia mencionarlo sin plantilla delante', async () => {
+      // 1. Arrange 📐: pedirlo siempre obligaria a inventar HTML a un flujo sin
+      //    plantilla ninguna.
+      const http = buildHttp();
+
+      // 2. Act ⚙️
+      await buildProvider(http).generateCompletion(
+        'Redacta una noticia.',
+        'Eres un redactor institucional.',
+      );
+
+      // 3. Assert 🎯
+      const system = systemInstructionOf(http);
+      expect(system).not.toContain('filled_markup');
+      expect(system).toContain('"body_paragraphs"');
     });
   });
 

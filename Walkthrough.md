@@ -6977,3 +6977,160 @@ toca, y se deja estar para no colar un reformateo ajeno en el commit.
   lo levanta el usuario y el servidor MCP de PostgreSQL no conecto. Es la misma trampa que freno la
   conexion del mapeador en PROT-23 y que PROT-23b resolvio con una consulta previa; el fixture del
   validador usaba `schemaId`, asi que la clave es verosimil.
+
+---
+
+## PROT-26 · La IA aprende a devolver la plantilla rellena
+
+Misma rama `feat/mapeador-inyeccion`. PROT-25 dejo el escudo montado y apuntando a
+`llm_response.filled_markup`, una clave que **no publicaba nadie**. El nodo quedaba en una posicion
+incomoda: implementado, registrado, en el catalogo como `implemented: true`, y cayendo siempre en
+`ERR_POST_IA_EMPTY_HTML` en cuanto alguien lo colocaba en un flujo.
+
+No era un olvido sino una frontera real. El contrato de salida del `PROCESADOR_IA` estaba congelado a
+tres claves en dos sitios distintos, y el de Anthropic ademas con `additionalProperties: false`, que
+no es una omision sino una **prohibicion expresa**: sin declarar la propiedad en el esquema, el modelo
+tiene vetado emitirla por mucho que la instruccion de texto se la pida.
+
+### Lo que el encargo daba por hecho y no existia
+
+Tres cuartas partes de los simbolos del encargo no estaban en el repositorio. `LlmStructuredOutput`
+(es `LlmResponsePayload`), `ILlmProvider` (es `ILlmProviderClient`), `LLM_OUTPUT_JSON_SCHEMA`
+compartido (no existia ninguno: Anthropic tenia el suyo privado y **Gemini no tiene esquema en
+absoluto**, solo `responseMimeType` y una frase), `mockFilledMarkup`, `openai-llm.provider.ts` y la
+ruta `modules/nodes/providers/`. Tambien situaba el contrato de SALIDA dentro del DTO de
+configuracion de ENTRADA.
+
+Dos desviaciones eran de fondo:
+
+**`type: 'array'` no existe.** `NodeOutputFieldType` es `url | url[] | text | number | boolean |
+object`. El propio TSDoc de `outputFields` ya explicaba por que `body_paragraphs` se declara `object`
+pese a ser un arreglo: ampliar el union arrastraria al validador de topologia, a
+`requiredUpstreamFieldTypes` de todos los nodos y al DTO de respuesta del catalogo.
+
+**`LLM_OUTPUT_KEYS` no se mencionaba.** Es la tupla contra la que el test 1.1 compara las claves
+publicadas. Anadir la clave sin tocarla deja la suite en rojo, y tocarla sin anadir la clave tambien:
+es, de hecho, la unica puerta de entrada real al namespace `llm_response`.
+
+### La deteccion no puede mirar el namespace
+
+La primera version del encargo —y la primera mia— ataba la deteccion a
+`markerPattern('rendered_html', 'compiled_markup')`. Esta mal, y el motivo es el mismo que ya obligo a
+prohibir los nombres ordinales de componente en el frontend: `outputNamespace` es propiedad del NODO
+en el `pipeline_schema`, no de su tipo. `rendered_html` es solo el valor que el asistente propone por
+defecto, y la regla 4 del validador admite cualquier entrada de `NODE_OUTPUT_NAMESPACES`.
+
+Con la version atada al literal, un `MAPEADOR_PLANTILLA` reconfigurado dejaria de recibir la directiva
+de maquetado **en silencio**: el prompt se interpolaria igual de bien, el modelo devolveria su JSON de
+tres claves, y el escudo acabaria acusando a la IA de no entregar un markup que nunca se le pidio. Lo
+que identifica a una plantilla base no es donde esta, es QUE ES: el campo `compiled_markup`, que
+publica `TemplateMapperStrategy` y nadie mas.
+
+De ahi `BASE_TEMPLATE_MARKER_PATTERN`, con `[a-z0-9_]+` replicando `OUTPUT_NAMESPACE_PATTERN` para no
+reconocer como namespace nada que el motor no pudiera resolver. La deteccion es LEXICA y no comprueba
+la pertenencia a la lista cerrada a proposito: la regla 4 ya lo hizo al guardar, y repetirlo aqui
+seria validar dos veces lo mismo en capas distintas.
+
+### Sobre el prompt resuelto, pero sin interpolar
+
+El orden dentro de `execute` no es negociable y es facil de romper: `getInterpolatedValue` sustituye
+el marcador por el HTML de la plantilla, asi que **despues de interpolar ya no queda nada que
+detectar**. La comprobacion va justo detras de `buildInputText`, que por el mismo motivo tambien
+recibe el prompt sin interpolar.
+
+Tiene un efecto secundario que conviene nombrar porque no era obvio: la deteccion alcanza las TRES
+vias del prompt, incluidas `promptCode` y `templatePromptId`. `getRequiredNamespaces` no puede —es
+puro y sincrono por contrato, y el texto de un prompt guardado vive en base de datos—, pero `execute`
+ya lo ha resuelto cuando llega aqui. Lo que alla se resolvio con un puerto y una pre-resolucion en el
+validador (PROT-24), aqui sale gratis.
+
+### Se revierte una decision que estaba escrita
+
+La frase del contrato estaba duplicada byte a byte en los dos clientes, con un TSDoc que prohibia
+expresamente extraerla: *"compartir el literal invitaria a ajustarlo para uno rompiendo al otro; la
+frontera de reutilizacion del nodo es `ILlmProviderClient`, no el texto"*.
+
+Ese argumento valia para un contrato FIJO. Dos literales constantes e identicos se mantienen
+sincronizados de un vistazo, y el coste de compartirlos —acoplar dos clientes que hablan APIs
+distintas— no compensaba. Con `filled_markup` el contrato pasa a tener una RAMA, y el calculo se
+invierte: el dia que alguien tocara solo una de las dos ramas, el sintoma seria un flujo con plantilla
+que funciona con Gemini y falla con Anthropic, sin una sola excepcion que lo delate —el escudo se
+limitaria a decir que no llego markup—. Esa clase de divergencia es justo la que ya costo una tanda
+en `LlmProviderFactory`, donde la copia de OCR nunca conocio `ANTHROPIC`.
+
+Lo que se centraliza es el CONTRATO, que por definicion tiene que ser el mismo para los dos. El
+COMPORTAMIENTO sigue separado: Anthropic adjunta ademas el esquema, y Gemini se queda solo con la
+frase porque su API no admite otra cosa. El TSDoc viejo se reescribio explicando el cambio en vez de
+borrarlo; un lector futuro merece saber que la duplicacion fue deliberada y por que dejo de serlo.
+
+### `required` condicional, que es lo contrario de lo que yo habia planeado
+
+El plan decia "`filled_markup` entra en `properties` pero **nunca** en `required`", razonando que
+exigirlo impediria responder a un flujo sin plantilla. El razonamiento era correcto para un esquema
+ESTATICO y dejo de serlo en cuanto el esquema se construye por llamada: cuando el indicador esta
+activo hay plantilla por definicion, y entonces exigirlo es justo lo que hay que hacer.
+
+Dejarlo opcional ahi tenia un fallo concreto: bajo un prompt largo —y uno que lleva una plantilla HTML
+entera lo es— un campo meramente opcional es el primero que un modelo omite. El sintoma seria un
+`ERR_POST_IA_EMPTY_HTML` intermitente, de los que no se reproducen a voluntad.
+
+### El presupuesto de tokens solo sube
+
+Quedarse corto no produce una respuesta mas breve: produce una respuesta **cortada a media cadena
+JSON**, que muere como `ERR_LLM_PROVIDER_CONTRACT` o `ERR_LLM_PROVIDER_TRUNCATED` sin que el mensaje
+mencione el presupuesto. Una plantilla institucional completa dentro de una cadena JSON no cabe en los
+defectos pensados para un resumen.
+
+Son 8192 y no 4096 por la leccion que ya costo una tanda en el nodo de OCR (ver
+`DEFAULT_OCR_MAX_TOKENS`): en la gama Gemini 3.x este tope cubre TAMBIEN los tokens de pensamiento, y
+con 4096 el modelo gastaba un millar deliberando y la respuesta salia cortada. Una plantilla HTML es
+bastante mas larga que una transcripcion.
+
+Y solo se aplica CON plantilla. El encargo proponia `expectsFilledMarkup ? 4096 : 1500`, y ese `1500`
+habria sido un cambio de conducta silencioso: hoy el nodo no envia `maxTokens` en absoluto, de modo
+que Anthropic aplica su propio tope de 4096. Fijar 1500 lo habria **recortado** para todos los flujos
+sin plantilla —que son la mayoria— y el sintoma, una noticia cortada a media frase, no se parece en
+nada a su causa. Subir el presupuesto cuando hace falta es seguro; bajarlo no. El tercer escalon es
+`null`, que significa "deja mandar al proveedor", y el operador puede fijarlo con el `maxTokens` nuevo
+del DTO.
+
+### Por que el simulador maqueta
+
+`MOCK` es el proveedor por defecto del DTO y el destino de `dryRun`. Sin un esqueleto simulado, el
+circuito `MAPEADOR_PLANTILLA → PROCESADOR_IA → ESCUDO_POST_IA` no se podria recorrer entero sin una
+clave de API de pago: el escudo caeria siempre en `ERR_POST_IA_EMPTY_HTML` y nadie podria distinguir
+"la auditoria funciona" de "el banco de pruebas no llega".
+
+Se compone con el titular y los parrafos que el propio mock ya produce, y NO recortando la plantilla
+real que viaja interpolada dentro del `systemPrompt`. Lo segundo seria mas realista y ataria el
+simulador al formato del prompt de otra capa, que es exactamente el atajo que el TSDoc de
+`LlmExecutionOptions.mode` rechaza para el modo OCR. Determinista como todo lo demas de ese archivo.
+
+### El invariante que faltaba
+
+`LLM_OUTPUT_KEYS` y `outputFields` eran dos fuentes paralelas del mismo contrato **sin nada que las
+atara**: el test 1.1 solo miraba la primera, de modo que editar `outputFields` sin tocar la tupla —o
+al reves— no lo notaba nadie. Las otras cinco estrategias si tienen la comprobacion. Se anade aqui,
+copiada de `post-ia-sanitizer.strategy.spec.ts`.
+
+### Cobertura
+
+Backend **1734 pruebas en 72 suites**, en verde (+14: nueve del bloque 13 de la estrategia, tres del
+contrato condicional de Anthropic y dos del de Gemini). Frontend **716 en 37 archivos**, intacto y en
+verde sin tocar nada. `npx tsc --noEmit` mantiene los **89 errores preexistentes** —verificado contra
+`HEAD` con `git stash`: los dos que mencionan estos archivos ya estaban, solo cambia el numero de
+linea— y ninguno nuevo. `nest build` limpio. ESLint sin avisos en lo nuevo; queda una deuda de
+`unbound-method` en `llm-extractor.strategy.spec.ts:313`, identica en `HEAD` y en codigo que esta
+tanda no toca.
+
+### Lo que sigue abierto
+
+- **Verificacion de extremo a extremo sin hacer.** El circuito completo con `dryRun` deberia terminar
+  en `EXITOSO` con `validated_drupal_json.audit_status === 'PASSED'`, y el mismo flujo sin la cita a
+  la plantilla deberia fallar en el escudo. Docker lo levanta el usuario y el servidor MCP de
+  PostgreSQL no conecta en esta sesion, asi que solo esta cubierto por pruebas unitarias.
+- **Sigue pendiente la auditoria de `configuracion_pipeline`** que PROT-25 dejo abierta, y ahora con
+  un motivo mas: `maxTokens` es una clave nueva del DTO del `PROCESADOR_IA`, de modo que ningun
+  esquema historico puede traerla, pero conviene confirmar que ninguno trae otras.
+- **Triada Quasar de `ESCUDO_POST_IA`**, y exponer `maxTokens` en el configurador del `PROCESADOR_IA`:
+  hoy el campo existe en el DTO y no tiene control en el asistente.

@@ -178,7 +178,111 @@ export interface LlmExecutionOptions {
    * Hoy solo lo entiende el cliente de Gemini; el resto lo ignora sin romperse.
    */
   readonly thinkingLevel?: LlmThinkingLevel;
+
+  /**
+   * Si la respuesta debe traer ademas la plantilla base ya rellena.
+   *
+   * Gobierna el CONTRATO que se le pide al modelo, no solo una preferencia: con
+   * el activo, `buildResponseContractInstruction` anade la directiva de
+   * maquetado y `buildResponseJsonSchema` declara —y exige— `filled_markup`.
+   *
+   * Se declara como INDICADOR y no se deduce del texto del prompt, por el mismo
+   * motivo que `mode`: comparar el prompt ataria el proveedor a una constante de
+   * otra capa. Quien decide es la estrategia, que es la unica que sabe si su
+   * instruccion cita una plantilla base.
+   *
+   * OPCIONAL, con `false` implicito: las llamadas que no lo pasan —el nodo de
+   * OCR, la prueba de conectividad del catalogo— siguen recibiendo exactamente
+   * el contrato de tres claves de siempre.
+   */
+  readonly expectsFilledMarkup?: boolean;
 }
+
+/**
+ * Frase que describe al modelo la forma exacta de la respuesta.
+ *
+ * POR QUE VIVE AQUI Y NO EN CADA CLIENTE. Hasta ahora este literal estaba
+ * duplicado byte a byte en `GeminiLlmProvider` y `AnthropicLlmProvider`, y la
+ * duplicacion era DELIBERADA: el TSDoc de Anthropic argumentaba que compartirlo
+ * invitaria a ajustarlo para un proveedor rompiendo al otro, y que la frontera
+ * de reutilizacion del nodo es `ILlmProviderClient`, no el texto.
+ *
+ * Ese calculo cambio cuando el contrato dejo de ser fijo. Dos literales
+ * CONSTANTES e identicos se mantienen sincronizados de un vistazo; dos literales
+ * con una RAMA condicional, no. El dia que alguien tocara solo uno, el sintoma
+ * seria que un flujo con plantilla funciona con Gemini y falla con Anthropic
+ * —o al reves— sin una sola excepcion que lo delate, porque el escudo
+ * posterior se limitaria a decir que no llego markup. La frontera sigue siendo
+ * `ILlmProviderClient` para el COMPORTAMIENTO; lo que se centraliza es el
+ * CONTRATO, que por definicion tiene que ser el mismo para los dos.
+ *
+ * Cada cliente conserva lo suyo: Anthropic ademas adjunta el esquema de
+ * `buildResponseJsonSchema`, y Gemini se queda solo con esta frase mas su
+ * `responseMimeType`, porque su API no admite esquema.
+ */
+export const buildResponseContractInstruction = (
+  expectsFilledMarkup: boolean,
+): string => {
+  const base = [
+    'Responde EXCLUSIVAMENTE con un objeto JSON valido, sin texto adicional',
+    'ni marcas de bloque de codigo, con exactamente estas claves:',
+    '"headline" (string), "summary" (string) y "body_paragraphs" (array de strings).',
+  ].join(' ');
+
+  if (!expectsFilledMarkup) {
+    return base;
+  }
+
+  // La directiva de maquetado es imperativa a proposito: "respeta" y no
+  // "procura respetar". Lo que esta en juego son los selectores que el
+  // ESCUDO_POST_IA audita despues, y un modelo que reescriba la estructura a su
+  // gusto deja el flujo PAUSADO con ERR_POST_IA_DOM_MUTATED.
+  return [
+    base,
+    'Se te ha suministrado ademas una plantilla HTML base dentro de las instrucciones.',
+    'Incluye una clave adicional "filled_markup" (string) con esa MISMA plantilla',
+    'y el contenido redactado ya inyectado dentro de sus contenedores semanticos.',
+    'Respeta estrictamente sus etiquetas, clases CSS e imagenes: no anadas,',
+    'renombres ni elimines elementos, y no envuelvas el HTML en bloques de codigo.',
+  ].join(' ');
+};
+
+/**
+ * Esquema de salida para los proveedores que admiten JSON Schema (hoy, Anthropic).
+ *
+ * `additionalProperties: false` es lo que obliga a declarar aqui cualquier clave
+ * nueva: sin figurar en `properties`, el modelo tiene PROHIBIDO emitirla, por
+ * mucho que la instruccion de texto se la pida.
+ *
+ * `filled_markup` entra en `required` SOLO cuando se espera. Es la diferencia
+ * entre pedirlo y confiar: bajo un prompt largo —y uno que lleva una plantilla
+ * HTML completa lo es— un campo meramente opcional es justo el que el modelo
+ * omite, y el sintoma seria un `ERR_POST_IA_EMPTY_HTML` intermitente, de los que
+ * no se reproducen a voluntad. Cuando NO se espera, exigirlo seria peor:
+ * obligaria a inventar markup a un flujo que no tiene plantilla ninguna.
+ */
+export const buildResponseJsonSchema = (expectsFilledMarkup: boolean) =>
+  ({
+    type: 'object',
+    properties: {
+      headline: { type: 'string' },
+      summary: { type: 'string' },
+      body_paragraphs: { type: 'array', items: { type: 'string' } },
+      ...(expectsFilledMarkup
+        ? {
+            filled_markup: {
+              type: 'string',
+              description:
+                'La plantilla HTML base suministrada, con el contenido redactado ya inyectado en sus contenedores semanticos.',
+            },
+          }
+        : {}),
+    },
+    required: expectsFilledMarkup
+      ? ['headline', 'summary', 'body_paragraphs', 'filled_markup']
+      : ['headline', 'summary', 'body_paragraphs'],
+    additionalProperties: false,
+  }) as const;
 
 /**
  * Contrato FORMAL de salida del nodo de IA.
@@ -197,6 +301,23 @@ export interface LlmResponsePayload {
   headline: string;
   summary: string;
   body_paragraphs: string[];
+  /**
+   * Plantilla base devuelta ya rellena, cuando se pidio con
+   * `LlmExecutionOptions.expectsFilledMarkup`.
+   *
+   * OPCIONAL y no obligatoria. Lo es por dos razones distintas y las dos
+   * mandan: la primera es que una inferencia sin plantilla delante no tiene
+   * nada que devolver aqui; la segunda es que este tipo lo construyen literales
+   * completos en las pruebas del nodo de OCR y del catalogo de proveedores, que
+   * no tienen nada que ver con el maquetado y no deberian dejar de compilar por
+   * un campo que jamas van a usar.
+   *
+   * `undefined` y no `null` cuando falta: la normalizacion a `null` —que es lo
+   * que acaba publicado en el namespace— la hace la estrategia, no el cliente.
+   * Asi un `toEqual` sobre el payload de un proveedor que no lo emite sigue
+   * describiendo el contrato de tres claves sin mencionarlo.
+   */
+  filled_markup?: string;
   metadata: {
     tokensPrompt: number;
     tokensCompletion: number;

@@ -49,6 +49,27 @@ export const DEFAULT_LLM_MAX_RETRIES = 3;
 /** Techo de reintentos internos. Ver el AVISO sobre los dos niveles. */
 export const MAX_LLM_RETRIES = 5;
 
+/**
+ * Presupuesto de tokens cuando el nodo debe devolver ademas la plantilla rellena.
+ *
+ * Solo se aplica en ese caso: ver `resolveMaxTokens` en la estrategia. Un
+ * resumen de texto plano cabe de sobra en el defecto de cada proveedor, pero una
+ * plantilla institucional completa ENTERA dentro de una cadena JSON no, y el
+ * fallo que produce quedarse corto es el peor posible: la respuesta se corta a
+ * media cadena, el JSON deja de ser valido y el nodo muere con
+ * `ERR_LLM_PROVIDER_CONTRACT` o `ERR_LLM_PROVIDER_TRUNCATED` sin que el mensaje
+ * diga que lo que falto fue presupuesto.
+ *
+ * 8192 y no 4096 por la leccion que ya costo una tanda en el nodo de OCR (ver
+ * `DEFAULT_OCR_MAX_TOKENS`): en la gama Gemini 3.x este tope cubre TAMBIEN los
+ * tokens de pensamiento, de modo que el modelo puede gastar un millar
+ * deliberando antes de escribir un solo caracter de la respuesta. Y una
+ * plantilla HTML es bastante mas larga que una transcripcion.
+ */
+export const DEFAULT_LLM_MARKUP_MAX_TOKENS = 8_192;
+export const MIN_LLM_MAX_TOKENS = 256;
+export const MAX_LLM_MAX_TOKENS = 32_768;
+
 /** Fallos consecutivos que activan el freno de emergencia por defecto. */
 export const DEFAULT_LLM_EMERGENCY_BRAKE_THRESHOLD = 3;
 
@@ -209,6 +230,22 @@ export class LlmExtractorConfigDto {
     message: `emergencyBrakeThreshold no puede superar ${MAX_LLM_EMERGENCY_BRAKE_THRESHOLD}.`,
   })
   emergencyBrakeThreshold?: number;
+
+  @ApiPropertyOptional({
+    description:
+      'Tope de tokens de la respuesta. Omitido, el nodo decide: eleva el presupuesto solo cuando su prompt cita una plantilla base, y por lo demas deja mandar al defecto de cada proveedor.',
+    minimum: MIN_LLM_MAX_TOKENS,
+    maximum: MAX_LLM_MAX_TOKENS,
+  })
+  @IsOptional()
+  @IsInt({ message: 'maxTokens debe ser un entero.' })
+  @Min(MIN_LLM_MAX_TOKENS, {
+    message: `maxTokens no puede ser menor que ${MIN_LLM_MAX_TOKENS}.`,
+  })
+  @Max(MAX_LLM_MAX_TOKENS, {
+    message: `maxTokens no puede ser mayor que ${MAX_LLM_MAX_TOKENS}.`,
+  })
+  maxTokens?: number;
 }
 
 /** Configuracion del nodo de IA con los valores por defecto ya aplicados. */
@@ -222,6 +259,15 @@ export interface ResolvedLlmExtractorConfig {
   readonly timeoutMs: number;
   readonly maxRetries: number;
   readonly emergencyBrakeThreshold: number;
+  /**
+   * `null` significa NO DECLARADO, no "sin tope".
+   *
+   * Hace falta distinguirlo porque el defecto de este campo no se puede resolver
+   * aqui: depende de si el prompt cita una plantilla base, y esta funcion es
+   * pura sobre `params` y no ve el prompt ya resuelto. Quien aplica el defecto
+   * es `resolveMaxTokens`, en la estrategia.
+   */
+  readonly maxTokens: number | null;
 }
 
 /** Aplica los valores por defecto sobre un DTO ya validado. Funcion pura. */
@@ -242,4 +288,5 @@ export const resolveLlmExtractorConfig = (
   maxRetries: dto.maxRetries ?? DEFAULT_LLM_MAX_RETRIES,
   emergencyBrakeThreshold:
     dto.emergencyBrakeThreshold ?? DEFAULT_LLM_EMERGENCY_BRAKE_THRESHOLD,
+  maxTokens: dto.maxTokens ?? null,
 });

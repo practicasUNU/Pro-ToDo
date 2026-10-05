@@ -3832,3 +3832,141 @@ relativo. Los enlaces con `target` conservan ademas el `rel="noopener noreferrer
 - [ ] Pendiente — triada Quasar del nodo (`EscudoPostIaConfig.vue` + store + los dos registros)
 - [ ] Pendiente — auditar `configuracion_pipeline` en busca de nodos `ESCUDO_POST_IA` historicos con
       `params` que el DTO no declare: con `forbidNonWhitelisted` serian un 400 al guardar y al activar
+
+---
+
+## Tanda actual — PROT-26 · `filled_markup`: la IA devuelve la plantilla rellena
+
+### Problema
+
+PROT-25 dejo `ESCUDO_POST_IA` implementado y **sin nada que auditar**. Su defecto apunta a
+`llm_response.filled_markup` y nadie publicaba esa clave: el contrato de salida estaba CONGELADO a
+tres claves en los dos clientes, y el de Anthropic con `additionalProperties: false`, que no es una
+omision sino una prohibicion expresa — sin declarar la propiedad, el modelo tiene vetado emitirla.
+
+### Contratos nuevos
+
+```typescript
+// @modules/nodes/strategies/interfaces/llm-provider.interface.ts
+export interface LlmResponsePayload {
+  headline: string;
+  summary: string;
+  body_paragraphs: string[];
+  filled_markup?: string;   // OPCIONAL: ver "Por que opcional"
+  metadata: { /* sin cambios */ };
+}
+
+export interface LlmExecutionOptions {
+  // ... model, timeoutMs, maxRetries, mode, temperature, maxTokens, thinkingLevel
+  readonly expectsFilledMarkup?: boolean;
+}
+
+export const buildResponseContractInstruction: (expectsFilledMarkup: boolean) => string;
+export const buildResponseJsonSchema: (expectsFilledMarkup: boolean) => { /* JSON Schema */ };
+```
+
+```typescript
+// @modules/nodes/dto/llm-extractor-config.dto.ts
+export const DEFAULT_LLM_MARKUP_MAX_TOKENS = 8_192;
+export const MIN_LLM_MAX_TOKENS = 256;
+export const MAX_LLM_MAX_TOKENS = 32_768;
+// `LlmExtractorConfigDto` gana `maxTokens?: number`
+// `ResolvedLlmExtractorConfig` gana `maxTokens: number | null`  (null = NO DECLARADO)
+```
+
+```typescript
+// @modules/nodes/strategies/llm-extractor.strategy.ts
+const BASE_TEMPLATE_MARKER_PATTERN = /\{\{\s*[a-z0-9_]+\.compiled_markup\s*\}\}/;
+
+export const LLM_OUTPUT_KEYS = [
+  'headline', 'summary', 'body_paragraphs', 'filled_markup', 'metadata',
+] as const;
+
+private resolveMaxTokens(config, expectsFilledMarkup): number | null;
+private normalizeMarkup(value: string | undefined): string | null;
+```
+
+### Diagrama de inyeccion de dependencias
+
+```
+llm-provider.interface.ts
+  buildResponseContractInstruction(flag)      buildResponseJsonSchema(flag)
+          │                 │                            │
+          ▼                 ▼                            ▼
+   GeminiLlmProvider   AnthropicLlmProvider ◄─────────────┘
+   (solo la frase;     (frase + esquema en
+    su API no admite    output_config.format)
+    esquema)
+          ▲                 ▲
+          └────────┬────────┘
+                   │  LlmExecutionOptions.expectsFilledMarkup
+          LlmExtractorStrategy
+                   │  detecta sobre el prompt RESUELTO y SIN INTERPOLAR
+                   ▼
+          data.filled_markup: string | null  ──►  validated por ESCUDO_POST_IA
+```
+
+### Por que la deteccion no mira el namespace
+
+`outputNamespace` es propiedad del NODO en el `pipeline_schema`, no de su tipo: `rendered_html` es
+solo el valor que el asistente propone por defecto, y la regla 4 del validador admite cualquier
+entrada de `NODE_OUTPUT_NAMESPACES`. Un `markerPattern('rendered_html', 'compiled_markup')` dejaria
+sin maquetar a un mapeador reconfigurado **en silencio** —el prompt se interpolaria igual de bien— y
+el escudo acabaria culpando a la IA de no devolver un markup que nunca se le pidio. Lo que identifica
+a una plantilla base es el CAMPO, `compiled_markup`, que publica `TemplateMapperStrategy` y nadie mas.
+
+### Por que sobre el prompt sin interpolar
+
+`getInterpolatedValue` sustituye el marcador por el HTML. Despues de interpolar no queda nada que
+detectar, asi que el orden dentro de `execute` no es negociable. Como contrapartida, la deteccion
+alcanza las TRES vias del prompt —incluidas `promptCode` y `templatePromptId`—, que es mas de lo que
+cubre `getRequiredNamespaces`, puro y sincrono por contrato.
+
+### Por que se centraliza un literal que estaba duplicado a proposito
+
+El TSDoc de Anthropic prohibia extraerlo: "compartir el literal invitaria a ajustarlo para uno
+rompiendo al otro". Ese calculo valia para un contrato FIJO, que se sincroniza de un vistazo. Con una
+rama condicional no: el dia que alguien tocara solo uno, el sintoma seria un flujo con plantilla que
+funciona con Gemini y falla con Anthropic, sin una sola excepcion que lo delate. La frontera sigue
+siendo `ILlmProviderClient` para el COMPORTAMIENTO; lo que se centraliza es el CONTRATO, que por
+definicion tiene que ser el mismo para los dos.
+
+### Por que `required` condicional y no opcional siempre
+
+Bajo un prompt largo —y uno que lleva una plantilla HTML entera lo es— un campo meramente opcional es
+justo el que el modelo omite. El sintoma seria un `ERR_POST_IA_EMPTY_HTML` intermitente, de los que
+no se reproducen a voluntad. Exigirlo SIEMPRE seria peor: obligaria a inventar markup a un flujo sin
+plantilla ninguna.
+
+### Por que opcional en el tipo y `null` en el namespace
+
+`filled_markup?: string` en `LlmResponsePayload` evita romper la compilacion de tres suites ajenas al
+maquetado que construyen literales completos (OCR, catalogo de proveedores). En el namespace se
+publica SIEMPRE como `string | null`: un namespace cuyas claves cambian segun la configuracion
+obligaria a cada consumidor a comprobar la existencia antes de interpolar, y `undefined` ni siquiera
+sobreviviria al checkpoint `jsonb`.
+
+### Por que el tope SOLO sube
+
+Este nodo no enviaba `maxTokens` en absoluto, de modo que Anthropic aplicaba su tope de 4096 y Gemini
+el del modelo. Fijar una cifra para las inferencias SIN plantilla no seria conservador: recortaria en
+silencio flujos que llevan meses redactando articulos largos, y una noticia cortada a media frase no
+se parece en nada a su causa. 8192 y no 4096 para el caso con plantilla por la leccion de
+`DEFAULT_OCR_MAX_TOKENS`: en Gemini 3.x el tope cubre tambien los tokens de pensamiento.
+
+### Estado de las tareas
+
+- [x] `filled_markup` y `expectsFilledMarkup` en el contrato compartido
+- [x] `buildResponseContractInstruction` / `buildResponseJsonSchema` centralizados, con el TSDoc que
+      documenta la reversion
+- [x] Los dos clientes construyen su contrato por llamada; `asOptionalText` distingue "no vino" de
+      "vino vacio"
+- [x] `maxTokens` en el DTO (cotas 256..32768) y `resolveMaxTokens` de tres escalones
+- [x] Deteccion por campo, agnostica del namespace, sobre el prompt sin interpolar
+- [x] Esqueleto determinista en `MockLlmProvider`, para el banco de pruebas de coste cero
+- [x] Invariante `data` ↔ `outputFields`, que faltaba en esta spec
+- [x] Backend 1734 pruebas en 72 suites (+14); frontend 716 intacto; `tsc --noEmit` sin errores nuevos
+- [ ] Pendiente — triada Quasar de `ESCUDO_POST_IA`, y exponer `maxTokens` en el configurador del
+      `PROCESADOR_IA`
+- [ ] Pendiente — verificacion de extremo a extremo contra la base de datos (Docker lo levanta el
+      usuario; el MCP de PostgreSQL no conecta en esta sesion)

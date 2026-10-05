@@ -199,6 +199,71 @@ describe('AnthropicLlmProvider · cliente de Claude sobre la Messages API', () =
       expect(system.trim().startsWith('Responde')).toBe(true);
     });
 
+    it('1.7 deberia declarar y EXIGIR filled_markup cuando se espera plantilla', async () => {
+      // 1. Arrange 📐: `additionalProperties: false` significa que sin figurar en
+      //    `properties` el modelo tiene PROHIBIDO emitirlo, por mucho que la
+      //    instruccion de texto se lo pida.
+      const http = buildHttp();
+
+      // 2. Act ⚙️
+      await buildProvider(http).generateCompletion(PROMPT, SYSTEM_PROMPT, {
+        model: 'claude-sonnet-5-5',
+        timeoutMs: 1_000,
+        maxRetries: 0,
+        expectsFilledMarkup: true,
+      });
+
+      // 3. Assert 🎯: en `required` y no solo en `properties`. Bajo un prompt
+      //    largo —y uno que lleva una plantilla HTML entera lo es— un campo
+      //    meramente opcional es justo el que el modelo omite.
+      const schema = (
+        sentBody(http).output_config as {
+          format: { schema: Record<string, unknown> };
+        }
+      ).format.schema;
+
+      expect(schema.properties).toHaveProperty('filled_markup');
+      expect(schema.required).toContain('filled_markup');
+    });
+
+    it('1.8 NO deberia mencionar filled_markup sin plantilla delante', async () => {
+      // 1. Arrange 📐: exigirlo siempre obligaria a inventar HTML a un flujo que
+      //    no tiene plantilla ninguna.
+      const http = buildHttp();
+
+      // 2. Act ⚙️
+      await buildProvider(http).generateCompletion(PROMPT, SYSTEM_PROMPT);
+
+      // 3. Assert 🎯
+      const schema = (
+        sentBody(http).output_config as {
+          format: { schema: Record<string, unknown> };
+        }
+      ).format.schema;
+
+      expect(schema.properties).not.toHaveProperty('filled_markup');
+      expect(schema.required).not.toContain('filled_markup');
+      expect(sentBody(http).system as string).not.toContain('filled_markup');
+    });
+
+    it('1.9 deberia anadir la directiva de maquetado al system prompt', async () => {
+      // 1. Arrange 📐
+      const http = buildHttp();
+
+      // 2. Act ⚙️
+      await buildProvider(http).generateCompletion(PROMPT, SYSTEM_PROMPT, {
+        model: 'claude-sonnet-5-5',
+        timeoutMs: 1_000,
+        maxRetries: 0,
+        expectsFilledMarkup: true,
+      });
+
+      // 3. Assert 🎯
+      const system = sentBody(http).system as string;
+      expect(system).toContain('"filled_markup"');
+      expect(system).toContain('Respeta estrictamente');
+    });
+
     it('1.6 deberia exigir el JSON por esquema en vez de rescatarlo con regex', async () => {
       // 1. Arrange 📐: parsear texto libre seria el parser de formato ad hoc
       //    que `security-and-scope.md` §3 prohibe construir.

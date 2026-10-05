@@ -1,5 +1,6 @@
 import { Injectable } from '@nestjs/common';
 
+import { escapeHtml } from '@common/utils/escape-html.util';
 import { LlmProvider } from '@modules/nodes/strategies/interfaces/llm-provider.interface';
 
 import type {
@@ -100,17 +101,23 @@ export class MockLlmProvider implements ILlmProviderClient {
     const [firstParagraph] = paragraphs;
     const flattened = paragraphs.join(' ');
 
+    const headline = truncate(
+      firstParagraph ?? 'Contenido simulado sin titular',
+      MOCK_HEADLINE_LENGTH,
+    );
+    const bodyParagraphs =
+      paragraphs.length > 0 ? paragraphs.slice(0, MOCK_MAX_PARAGRAPHS) : [];
+
     return Promise.resolve({
-      headline: truncate(
-        firstParagraph ?? 'Contenido simulado sin titular',
-        MOCK_HEADLINE_LENGTH,
-      ),
+      headline,
       summary: truncate(
         flattened.length > 0 ? flattened : 'Contenido simulado sin cuerpo',
         MOCK_SUMMARY_LENGTH,
       ),
-      body_paragraphs:
-        paragraphs.length > 0 ? paragraphs.slice(0, MOCK_MAX_PARAGRAPHS) : [],
+      body_paragraphs: bodyParagraphs,
+      ...(config?.expectsFilledMarkup === true
+        ? { filled_markup: this.buildMarkup(headline, bodyParagraphs) }
+        : {}),
       metadata: {
         tokensPrompt: 0,
         tokensCompletion: 0,
@@ -118,6 +125,35 @@ export class MockLlmProvider implements ILlmProviderClient {
         isMock: true,
       },
     });
+  }
+
+  /**
+   * Esqueleto HTML simulado, con el mismo contenido que el resto del payload.
+   *
+   * POR QUE EL SIMULADOR MAQUETA. `MOCK` es el proveedor por defecto del DTO y
+   * el destino de `dryRun`, asi que sin esto el circuito
+   * MAPEADOR_PLANTILLA -> PROCESADOR_IA -> ESCUDO_POST_IA no se podria recorrer
+   * entero sin una clave de API de pago: el escudo caeria siempre en
+   * `ERR_POST_IA_EMPTY_HTML` y nadie sabria si es que la auditoria funciona o
+   * que el banco de pruebas no llega.
+   *
+   * Se compone a partir del titular y los parrafos que este mismo metodo ya
+   * produjo, y NO recortando la plantilla real que viaja interpolada dentro del
+   * `systemPrompt`. Eso ultimo seria mas realista y ataria el simulador al
+   * formato del prompt de otra capa, que es exactamente lo que el TSDoc de
+   * `LlmExecutionOptions.mode` rechaza para el modo OCR.
+   *
+   * Determinista como todo lo demas aqui: la misma entrada da el mismo markup.
+   * Las etiquetas son las minimas que la lista blanca del saneador admite, de
+   * modo que el escudo lo aprueba salvo que se le exijan selectores que este
+   * esqueleto no tiene —que es justamente lo que conviene que distinga.
+   */
+  private buildMarkup(headline: string, paragraphs: readonly string[]): string {
+    const body = paragraphs
+      .map((paragraph) => `<p>${escapeHtml(paragraph)}</p>`)
+      .join('');
+
+    return `<h1>${escapeHtml(headline)}</h1><div>${body}</div>`;
   }
 
   /**
