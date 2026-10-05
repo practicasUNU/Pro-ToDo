@@ -71,6 +71,26 @@ export interface HttpClientOptions {
 export type HttpClientOutcome<T> =
   { readonly data: T } | { readonly failure: NodeErrorDetail };
 
+/**
+ * Variante de `HttpClientOutcome` que ademas expone el ESTADO HTTP crudo.
+ *
+ * Existe porque `toFailure` asigna sus propios codigos —todos GRAVE— y esa
+ * clasificacion es correcta para un proveedor de IA pero insuficiente para un
+ * destino como Drupal, que necesita distinguir un 401 de un 404: los dos salen
+ * de aqui como `ERR_HTTP_CLIENT_REJECTED`, y deducir cual fue leyendo el
+ * `message` seria atarse a un texto libre que puede reescribirse cualquier dia
+ * sin romper ningun test. El consumidor necesita ademas el numero en si para
+ * publicarlo en su payload.
+ *
+ * `status` es OPCIONAL solo en la rama de fallo, y su ausencia es INFORMACION:
+ * significa que no hubo respuesta que clasificar —DNS, conexion rechazada,
+ * timeout—, que es justo lo que distingue una averia de red de una respuesta
+ * del servidor remoto.
+ */
+export type HttpClientStatusOutcome<T> =
+  | { readonly data: T; readonly status: number }
+  | { readonly failure: NodeErrorDetail; readonly status?: number };
+
 /** Espera pasiva entre reintentos. */
 const sleep = (milliseconds: number): Promise<void> =>
   new Promise((resolve) => setTimeout(resolve, milliseconds));
@@ -108,6 +128,48 @@ export class HttpClientService {
     config: AxiosRequestConfig,
     options: HttpClientOptions = {},
   ): Promise<HttpClientOutcome<T>> {
+    const outcome = await this.executeWithStatus<T>(config, options);
+
+    // Se RECONSTRUYE el objeto en vez de devolver el enriquecido tal cual.
+    // Devolverlo compilaria —un tipo mas ancho es asignable a uno mas estrecho,
+    // y el chequeo de propiedades sobrantes solo alcanza a los literales—, pero
+    // colaria `status` en runtime y rompería todo `toEqual({ data: ... })` de
+    // quien ya consume este metodo. El coste es un objeto por peticion; a
+    // cambio, la extension es literalmente invisible aguas abajo.
+    return 'failure' in outcome
+      ? { failure: outcome.failure }
+      : { data: outcome.data };
+  }
+
+  /**
+   * Como `request`, pero devolviendo tambien el estado HTTP de la respuesta.
+   *
+   * Comparte bucle, politica de reintentos y traduccion de errores con
+   * `request`: las dos entran por `executeWithStatus`, de modo que no hay dos
+   * politicas que puedan divergir. La diferencia es solo cuanta informacion se
+   * deja ver.
+   *
+   * Lo consume `DrupalHttpStrategy`, que necesita el numero para publicarlo en
+   * su payload y para repartir los codigos `ERR_DRUPAL_*` por familia de estado.
+   */
+  public async requestWithStatus<T>(
+    config: AxiosRequestConfig,
+    options: HttpClientOptions = {},
+  ): Promise<HttpClientStatusOutcome<T>> {
+    return this.executeWithStatus<T>(config, options);
+  }
+
+  /**
+   * Bucle de intentos, backoff y traduccion de errores. UNICA copia.
+   *
+   * El bucle cuenta INTENTOS, no reintentos: `maxRetries: 3` produce hasta
+   * cuatro llamadas. Solo se reintenta lo que `isRetryable` admite, de modo que
+   * un `401` sale por la primera vuelta sin gastar las esperas.
+   */
+  private async executeWithStatus<T>(
+    config: AxiosRequestConfig,
+    options: HttpClientOptions,
+  ): Promise<HttpClientStatusOutcome<T>> {
     const timeoutMs = options.timeoutMs ?? DEFAULT_HTTP_TIMEOUT_MS;
     const maxRetries = options.maxRetries ?? DEFAULT_HTTP_MAX_RETRIES;
     const baseDelayMs = options.baseDelayMs ?? DEFAULT_HTTP_BASE_DELAY_MS;
@@ -117,6 +179,7 @@ export class HttpClientService {
       code: ERR_HTTP_UPSTREAM_UNAVAILABLE,
       message: 'La peticion no llego a ejecutarse.',
     };
+    let lastStatus: number | undefined;
 
     for (let attempt = 0; attempt <= maxRetries; attempt += 1) {
       try {
@@ -124,9 +187,10 @@ export class HttpClientService {
           this.httpService.request<T>({ timeout: timeoutMs, ...config }),
         );
 
-        return { data: response.data };
+        return { data: response.data, status: response.status };
       } catch (error) {
         lastFailure = this.toFailure(error);
+        lastStatus = this.extractStatus(error);
 
         if (!this.isRetryable(lastFailure) || attempt === maxRetries) {
           break;
@@ -146,7 +210,25 @@ export class HttpClientService {
       `${lastFailure.code} | Peticion agotada contra "${config.url ?? 'sin url'}": ${lastFailure.message}`,
     );
 
-    return { failure: lastFailure };
+    // Spread condicional y no `status: lastStatus`: con
+    // `exactOptionalPropertyTypes` una propiedad opcional no admite `undefined`
+    // explicito. Mismo patron que `toFailure` con `stackTrace`.
+    return {
+      failure: lastFailure,
+      ...(lastStatus === undefined ? {} : { status: lastStatus }),
+    };
+  }
+
+  /**
+   * Estado HTTP de una excepcion, si la hubo.
+   *
+   * Va aparte de `toFailure` a proposito: aquella decide codigo, nivel y
+   * mensaje por cinco ramas, y devolver ademas el estado obligaria a cambiar su
+   * tipo de retorno y a revisar las cinco. Esto son tres lineas que no tocan
+   * nada.
+   */
+  private extractStatus(error: unknown): number | undefined {
+    return axios.isAxiosError(error) ? error.response?.status : undefined;
   }
 
   /**

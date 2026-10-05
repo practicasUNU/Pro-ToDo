@@ -4,6 +4,7 @@ import { createTemplateRendererService } from '@test/factories/template-renderer
 
 import { NodesModule } from './nodes.module';
 import { CronTriggerStrategy } from './strategies/cron-trigger.strategy';
+import { DrupalHttpStrategy } from './strategies/drupal-http.strategy';
 import { ImapTriggerStrategy } from './strategies/imap-trigger.strategy';
 import { LlmExtractorStrategy } from './strategies/llm-extractor.strategy';
 import { ParserEmailStrategy } from './strategies/parser-email.strategy';
@@ -14,6 +15,8 @@ import { TemplateMapperStrategy } from './strategies/template-mapper.strategy';
 import { WebScraperStrategy } from './strategies/web-scraper.strategy';
 
 import type { ConfigService } from '@nestjs/config';
+import type { DrupalApiConfig } from '@core/config/drupal-api.config';
+import type { HttpClientService } from '@core/http/http-client.service';
 import type { AiDefaultsConfig } from '@core/config/ai-defaults.config';
 import type { SmtpNodeMailerService } from '@common/services/smtp-node-mailer.service';
 import type { AiPromptTemplatesService } from '@modules/ai-prompt-templates/ai-prompt-templates.service';
@@ -41,6 +44,8 @@ const buildHarness = (): {
   scraper: WebScraperStrategy;
   llm: LlmExtractorStrategy;
   smtp: SmtpAlertStrategy;
+  ocr: OcrProcessorStrategy;
+  drupal: DrupalHttpStrategy;
   module: NodesModule;
 } => {
   const factory = new NodeStrategyFactory();
@@ -79,6 +84,13 @@ const buildHarness = (): {
     {} as AiDefaultsConfig,
   );
 
+  // Los dos colaboradores van vacios: inscribir la estrategia no emite ninguna
+  // peticion a Drupal ni lee el entorno.
+  const drupal = new DrupalHttpStrategy(
+    {} as HttpClientService,
+    {} as DrupalApiConfig,
+  );
+
   return {
     factory,
     mapper,
@@ -90,6 +102,7 @@ const buildHarness = (): {
     llm,
     smtp,
     ocr,
+    drupal,
     module: new NodesModule(
       factory,
       mapper,
@@ -101,6 +114,7 @@ const buildHarness = (): {
       llm,
       smtp,
       ocr,
+      drupal,
     ),
   };
 };
@@ -216,5 +230,21 @@ describe('NodesModule', () => {
     //    guardaria sin protestar y reventaria al ejecutarla con
     //    `StrategyNotFoundException`.
     expect(factory.getStrategy(NodeType.PROCESADOR_OCR)).toBe(ocr);
+  });
+
+  it('1.10 deberia registrar DrupalHttpStrategy en la factoria al iniciarse', () => {
+    // 1. Arrange
+    const { factory, drupal, module } = buildHarness();
+
+    // 2. Act
+    module.onModuleInit();
+
+    // 3. Assert: DESTINO_HTTP llevaba desde la migracion 005 en el enum sin
+    // ninguna estrategia inscrita —la unica implementacion vivia en
+    // `strategies/dummies/` y nadie la registra—, asi que `GET /api/nodos` lo
+    // servia con `implemented: false` y un flujo que llegara a publicar
+    // reventaba en su ultimo paso con `StrategyNotFoundException`, que el motor
+    // normaliza a URGENTE y por tanto no reintenta.
+    expect(factory.getStrategy(NodeType.DESTINO_HTTP)).toBe(drupal);
   });
 });

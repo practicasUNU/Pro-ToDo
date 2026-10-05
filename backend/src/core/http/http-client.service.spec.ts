@@ -425,4 +425,120 @@ describe('HttpClientService', () => {
       expect(messageOf(outcome)).not.toContain('Respuesta del remoto');
     });
   });
+
+  describe('6. requestWithStatus: el estado HTTP crudo', () => {
+    it('6.1 deberia exponer el estado de una respuesta exitosa', async () => {
+      // 1. Arrange 📐: el consumidor de Drupal publica este numero en su
+      //    payload (`http_status`), asi que tiene que llegarle sin interpretar.
+      const httpService = buildHttpService();
+      httpService.request.mockReturnValue(of(buildResponse({ ok: true })));
+      const client = buildClient(httpService);
+
+      // 2. Act ⚙️
+      const outcome = await runPending(
+        client.requestWithStatus<{ ok: boolean }>({ url: TARGET_URL }),
+      );
+
+      // 3. Assert 🎯
+      expect(outcome).toEqual({ data: { ok: true }, status: 200 });
+    });
+
+    it('6.2 deberia exponer el estado de un 401 junto al fallo', async () => {
+      // 1. Arrange 📐: es la razon de ser del metodo. `toFailure` funde el 401 y
+      //    el 404 en ERR_HTTP_CLIENT_REJECTED, y quien necesita distinguir una
+      //    credencial caducada de una ruta inexistente solo puede hacerlo por el
+      //    numero: el mensaje es texto libre y no es contrato.
+      const httpService = buildHttpService();
+      httpService.request.mockReturnValue(
+        throwError(() => buildStatusError(401)),
+      );
+      const client = buildClient(httpService);
+
+      // 2. Act ⚙️
+      const outcome = await runPending(
+        client.requestWithStatus({ url: TARGET_URL }, { maxRetries: 0 }),
+      );
+
+      // 3. Assert 🎯
+      expect('failure' in outcome && outcome.failure.code).toBe(
+        ERR_HTTP_CLIENT_REJECTED,
+      );
+      expect('status' in outcome && outcome.status).toBe(401);
+    });
+
+    it('6.3 deberia OMITIR el estado cuando no hubo respuesta', async () => {
+      // 1. Arrange 📐: la ausencia es informacion. Un socket roto no tiene
+      //    estado que clasificar, y es justo eso lo que permite al consumidor
+      //    separar una averia de red de un rechazo del servidor remoto.
+      const httpService = buildHttpService();
+      httpService.request.mockReturnValue(
+        throwError(() => buildAxiosError({ message: 'el transporte se rompio' })),
+      );
+      const client = buildClient(httpService);
+
+      // 2. Act ⚙️
+      const outcome = await runPending(
+        client.requestWithStatus({ url: TARGET_URL }, { maxRetries: 0 }),
+      );
+
+      // 3. Assert 🎯
+      expect('failure' in outcome).toBe(true);
+      expect('status' in outcome).toBe(false);
+    });
+
+    it('6.4 deberia reintentar un 503 con la misma politica que request', async () => {
+      // 1. Arrange 📐: las dos entradas comparten `executeWithStatus`. Si el
+      //    bucle se duplicara algun dia, este test lo detecta.
+      const httpService = buildHttpService();
+      httpService.request.mockReturnValue(
+        throwError(() => buildStatusError(503)),
+      );
+      const client = buildClient(httpService);
+
+      // 2. Act ⚙️
+      const outcome = await runPending(
+        client.requestWithStatus({ url: TARGET_URL }, { maxRetries: 2 }),
+      );
+
+      // 3. Assert 🎯: tres intentos, y el estado sobrevive al ultimo.
+      expect(httpService.request).toHaveBeenCalledTimes(3);
+      expect('status' in outcome && outcome.status).toBe(503);
+    });
+
+    it('6.5 request NO deberia filtrar el estado en su resultado', async () => {
+      // 1. Arrange 📐: REGRESION de los dos proveedores de LLM. `request` se
+      //    reescribio como adaptador sobre `executeWithStatus`, y devolver el
+      //    objeto enriquecido tal cual habria colado `status` en runtime para
+      //    todo consumidor existente.
+      const httpService = buildHttpService();
+      httpService.request.mockReturnValue(of(buildResponse({ ok: true })));
+      const client = buildClient(httpService);
+
+      // 2. Act ⚙️
+      const outcome = await runPending(
+        client.request<{ ok: boolean }>({ url: TARGET_URL }),
+      );
+
+      // 3. Assert 🎯
+      expect(outcome).toEqual({ data: { ok: true } });
+      expect('status' in outcome).toBe(false);
+    });
+
+    it('6.6 request NO deberia filtrar el estado en un fallo', async () => {
+      // 1. Arrange 📐: hermano del anterior, por la otra rama de la union.
+      const httpService = buildHttpService();
+      httpService.request.mockReturnValue(
+        throwError(() => buildStatusError(404)),
+      );
+      const client = buildClient(httpService);
+
+      // 2. Act ⚙️
+      const outcome = await runPending(
+        client.request({ url: TARGET_URL }, { maxRetries: 0 }),
+      );
+
+      // 3. Assert 🎯
+      expect(Object.keys(outcome)).toEqual(['failure']);
+    });
+  });
 });

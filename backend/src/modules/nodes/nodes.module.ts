@@ -18,11 +18,13 @@ import { CronSchedulingService } from './services/cron-scheduling.service';
 import { ImapPollingService } from './services/imap-polling.service';
 import { NodeCatalogService } from './services/node-catalog.service';
 import { CronTriggerStrategy } from './strategies/cron-trigger.strategy';
+import { DrupalHttpStrategy } from './strategies/drupal-http.strategy';
 import { ImapTriggerStrategy } from './strategies/imap-trigger.strategy';
 import { LlmExtractorStrategy } from './strategies/llm-extractor.strategy';
 import { OcrProcessorStrategy } from './strategies/ocr-processor.strategy';
 import { SmtpAlertStrategy } from './strategies/smtp-alert.strategy';
 import { AiDefaultsConfig } from '@core/config/ai-defaults.config';
+import { DrupalApiConfig } from '@core/config/drupal-api.config';
 import { ParserEmailStrategy } from './strategies/parser-email.strategy';
 import { PostIaSanitizerStrategy } from './strategies/post-ia-sanitizer.strategy';
 import { LlmProviderFactory } from './strategies/llm-provider.factory';
@@ -95,7 +97,9 @@ import type { OnModuleInit } from '@nestjs/common';
     LlmExtractorStrategy,
     SmtpAlertStrategy,
     OcrProcessorStrategy,
+    DrupalHttpStrategy,
     AiDefaultsConfig,
+    DrupalApiConfig,
     // Los clientes de LLM son providers del contenedor y no instancias que la
     // estrategia construya: `GeminiLlmProvider` necesita `HttpClientService` y
     // `ConfigService`, y fabricarlo a mano dejaria sin inyectar ambos.
@@ -118,6 +122,7 @@ import type { OnModuleInit } from '@nestjs/common';
     LlmExtractorStrategy,
     SmtpAlertStrategy,
     OcrProcessorStrategy,
+    DrupalHttpStrategy,
     ImapPollingService,
     CronSchedulingService,
     NodeCatalogService,
@@ -142,6 +147,7 @@ export class NodesModule implements OnModuleInit {
     private readonly llmExtractorStrategy: LlmExtractorStrategy,
     private readonly smtpAlertStrategy: SmtpAlertStrategy,
     private readonly ocrProcessorStrategy: OcrProcessorStrategy,
+    private readonly drupalHttpStrategy: DrupalHttpStrategy,
   ) {}
 
   public onModuleInit(): void {
@@ -154,5 +160,11 @@ export class NodesModule implements OnModuleInit {
     this.strategyFactory.registerStrategy(this.llmExtractorStrategy);
     this.strategyFactory.registerStrategy(this.smtpAlertStrategy);
     this.strategyFactory.registerStrategy(this.ocrProcessorStrategy);
+    // Cierra el catalogo: DESTINO_HTTP era el ultimo tipo del enum sin
+    // estrategia. OJO si algun dia aparece un aviso de registro duplicado para
+    // este tipo: `DummyLogDispatcherStrategy` (`@core/fsm/strategies/dummies/`)
+    // declara el mismo `nodeType` y nadie la inscribe, pero `registerStrategy`
+    // ante un duplicado solo avisa y SUSTITUYE, asi que ganaria la ultima.
+    this.strategyFactory.registerStrategy(this.drupalHttpStrategy);
   }
 }
