@@ -19,7 +19,8 @@
     "test:debug": "node --inspect-brk -r tsconfig-paths/register -r ts-node/register node_modules/.bin/jest --runInBand",
     "test:e2e": "jest --config ./test/jest-e2e.json",
     "test:fsm:manual": "ts-node -r tsconfig-paths/register src/core/fsm/scripts/run-dummy-e2e.ts",
-    "seed:fsm-runner": "ts-node -r tsconfig-paths/register src/database/seeds/test-fsm-runner.seed.ts"
+    "seed:fsm-runner": "ts-node -r tsconfig-paths/register src/database/seeds/test-fsm-runner.seed.ts",
+    "test:drupal:e2e": "ts-node -r tsconfig-paths/register src/scripts/test-drupal-sandbox-e2e.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.120.0",
