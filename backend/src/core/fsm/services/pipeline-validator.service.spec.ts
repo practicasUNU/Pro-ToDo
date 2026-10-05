@@ -64,7 +64,11 @@ const buildNotiwebSchema = (): PipelineSchema => ({
       outputNamespace: 'validated_drupal_json',
       nextStep: 'nodo_mapeador',
       onErrorStep: null,
-      params: { schemaId: 'noticia_v1' },
+      // `params: {}` y no el `schemaId` de antes: desde que `ESCUDO_POST_IA`
+      // tiene estrategia, su `paramsSchema` corre con `forbidNonWhitelisted` y
+      // esa clave seria un 400. El fixture describe un esquema valido, asi que
+      // no puede declarar algo que el modulo real rechazaria.
+      params: {},
     },
     nodo_mapeador: {
       nodeId: 'nodo_mapeador',

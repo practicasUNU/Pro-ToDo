@@ -65,9 +65,10 @@ export const buildPromptContextFromCatalog = (
   entries
     .filter((entry) => !isExcludedCategory(entry.category) && !isExcludedNodeType(entry.code))
     // Un nodo sin campos declarados no aporta nada al explorador: seleccionarlo
-    // dejaria el segundo selector vacio sin explicar por que. Es el caso de
-    // PROCESADOR_IA y ESCUDO_POST_IA mientras no tengan estrategia, y el de
-    // DESTINO_ACENS siempre.
+    // dejaria el segundo selector vacio sin explicar por que. Hoy es el caso de
+    // DESTINO_ACENS, que no tiene estrategia ni valor de enum. PROCESADOR_IA y
+    // ESCUDO_POST_IA ya declaran los suyos, pero no llegan hasta aqui: los dos
+    // salen antes por `isExcludedNodeType`.
     .filter((entry) => entry.outputFields.length > 0)
     .map((entry) => ({
       namespace: namespaceOf(entry.code),

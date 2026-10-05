@@ -214,6 +214,22 @@ const URL_SCHEME_PATTERN = /^\s*([a-z][a-z0-9+.-]*)\s*:/i;
 const EVENT_ATTRIBUTE_PATTERN = /^on[a-z]+$/i;
 
 /**
+ * Contenido que cuenta como "relleno" aunque no aporte una sola letra de texto.
+ *
+ * Lo consume `auditFilledSlots`. Sin esta tolerancia, una ranura legitimamente
+ * grafica —un `div.galeria` con solo un `<img>`, una tabla de plazos, un `<hr>`
+ * separador— se reportaria como hueco sin rellenar y dejaria el flujo PAUSADO
+ * por un acierto del modelo. La pregunta que responde la auditoria es "quedo
+ * algo aqui", no "quedo texto".
+ *
+ * No incluye `picture` ni `source` a proposito: no figuran en
+ * `TEMPLATE_SANITIZER_CONFIG.allowedTags`, de modo que cuando esta comprobacion
+ * corre —siempre sobre markup YA saneado— esas etiquetas ya no existen. Lo que
+ * sobrevive de un `<picture>` es su `<img>` de respaldo, que si esta en la lista.
+ */
+const MEDIA_CONTENT_SELECTOR = 'img, table, hr, figure';
+
+/**
  * Marcador de interpolacion del motor como valor COMPLETO de un atributo.
  *
  * Anclado en los dos extremos a proposito: `javascript:{{raw_email.from}}` o
@@ -287,6 +303,29 @@ export interface StructureAudit {
   readonly missing: string[];
   /** Selectores que el motor de consultas no sabe interpretar. */
   readonly invalid: string[];
+}
+
+/**
+ * Resultado de comprobar que un markup conserva la estructura Y la trae rellena.
+ *
+ * Amplia `StructureAudit` con una tercera familia, `empty`, porque el escudo
+ * posterior a la IA hace una pregunta que el mapeador no necesita hacerse. Aquel
+ * audita la plantilla BASE, cuyas ranuras estan vacias a proposito —ese es
+ * justamente su producto—, mientras que este audita lo que el modelo devolvio, y
+ * ahi una ranura en blanco es el fallo que se busca: significa que la IA
+ * conservo el hueco y no lo relleno.
+ *
+ * Las tres familias se separan en vez de fundirse en una lista porque mandan al
+ * operador a sitios distintos: `missing` a mirar lo que el modelo devolvio,
+ * `invalid` a su propia lista de selectores, y `empty` al prompt.
+ */
+export interface FilledSlotAudit {
+  /** Selectores validos que ya no encuentran ningun nodo: la IA se los llevo. */
+  readonly missing: string[];
+  /** Selectores que el motor de consultas no sabe interpretar. */
+  readonly invalid: string[];
+  /** Selectores presentes pero sin contenido util: la IA no los relleno. */
+  readonly empty: string[];
 }
 
 export type RenderOutcome =
@@ -490,6 +529,80 @@ export class TemplateRendererService {
     }
 
     return { missing, invalid };
+  }
+
+  /**
+   * Comprueba que un markup conserva los selectores Y que vienen rellenos.
+   *
+   * Es la version del escudo posterior a la IA de `auditStructure`, y existe
+   * como metodo APARTE en vez de como una bandera de aquel por dos motivos. El
+   * primero es de contrato: `auditStructure` devuelve `{ missing, invalid }` y
+   * lo consume `TemplateMapperStrategy`, de modo que ampliarle la forma de
+   * retorno obligaria a tocar a un llamante que no pidio nada. El segundo es que
+   * la pregunta es genuinamente distinta: el mapeador audita la plantilla BASE,
+   * cuyas ranuras estan vacias por definicion, asi que para el un `empty` seria
+   * ruido constante.
+   *
+   * Vive aqui y no en la estrategia por el mismo motivo que
+   * `prepareInjectableMarkup`: un solo parser y una sola lista blanca en el
+   * backend. Dos cargas de cheerio con banderas distintas discreparian sobre que
+   * hay en el DOM, y la discrepancia solo se veria en produccion.
+   *
+   * No lanza: devuelve datos y es el consumidor quien construye el `NodeResult`.
+   *
+   * @param html Markup a examinar, YA saneado. Importa: un selector que apunte a
+   *        una etiqueta que la lista blanca descarta debe contar como ausente, y
+   *        sobre el markup crudo contaria como presente.
+   * @param requiredSelectors Selectores CSS exigidos.
+   */
+  public auditFilledSlots(
+    html: string,
+    requiredSelectors: readonly string[],
+  ): FilledSlotAudit {
+    if (requiredSelectors.length === 0) {
+      return { missing: [], invalid: [], empty: [] };
+    }
+
+    // Mismo parser y mismas banderas que `auditStructure` y
+    // `auditPublishableMarkup`; el porque esta documentado en extenso en el
+    // segundo (htmlparser2 no sintetiza `<html>`/`<body>`, y `xml` como objeto
+    // evita el modo sensible a mayusculas).
+    const $ = cheerio.load(html, { xml: { xmlMode: false } }, false);
+
+    const missing: string[] = [];
+    const invalid: string[] = [];
+    const empty: string[] = [];
+
+    for (const selector of requiredSelectors) {
+      try {
+        const matched = $(selector);
+
+        if (matched.length === 0) {
+          missing.push(selector);
+          continue;
+        }
+
+        // `is` ademas de `find`: la ranura puede SER el medio (un selector
+        // `img.portada`) y no solo contenerlo. Con `find` a secas, una imagen
+        // apuntada directamente se reportaria como hueco vacio, porque un `<img>`
+        // no tiene texto ni descendientes.
+        const hasContent =
+          matched.text().trim().length > 0 ||
+          matched.is(MEDIA_CONTENT_SELECTOR) ||
+          matched.find(MEDIA_CONTENT_SELECTOR).length > 0;
+
+        if (!hasContent) {
+          empty.push(selector);
+        }
+      } catch {
+        // Un selector que el motor no sabe parsear no es "ausente" ni "vacio":
+        // es un error de configuracion del nodo, y mezclarlo con los otros
+        // mandaria al operador a mirar la salida de la IA en vez de su lista.
+        invalid.push(selector);
+      }
+    }
+
+    return { missing, invalid, empty };
   }
 
   /**

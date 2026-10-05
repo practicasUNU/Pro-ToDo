@@ -2972,7 +2972,8 @@ relanzar el flujo desde cero y tirando el trabajo válido de los nodos anteriore
       cuando se escriba el proveedor correspondiente
 - [ ] 67. Pendiente — `npm run test:e2e` falla al importar `sanitize-html`; ya fallaba en la rama
       base (verificado con `git stash`), ajeno a esta tanda
-- [ ] 68. Pendiente — `ESCUDO_POST_IA`, validador natural de la salida de este nodo
+- [x] 68. Hecho en PROT-25 — `ESCUDO_POST_IA` (`PostIaSanitizerStrategy`), validador natural de la
+      salida de este nodo
 
 ---
 
@@ -3567,7 +3568,8 @@ idénticas al montar sus dos pasos.
       El tipo «sin configurador» de las pruebas rota de `PROCESADOR_IA` a `ESCUDO_POST_IA`
 - [ ] 104. Pendiente — arrastrado del 96: aplicar la migración 021 y actualizar el `.env` real
 - [ ] 105. Pendiente — `ESCUDO_POST_IA` y `DESTINO_HTTP`, los dos tipos que quedan sin configurador.
-      Ninguno tiene estrategia en el motor, así que su turno va detrás del backend
+      `ESCUDO_POST_IA` ya tiene estrategia desde PROT-25 y es el siguiente de la cola;
+      `DESTINO_HTTP` sigue sin estrategia, así que su turno va detrás del backend
 
 ## Tanda actual — Serializacion de tablas a Markdown y ampliacion de formatos ofimaticos
 
@@ -3684,3 +3686,149 @@ levantan la bandera multimodal: un `.doc` no lo arregla ningun modelo con vision
 - [x] Enrutamiento por tipo MIME cruzado con extension.
 - [x] Lista blanca de ingesta ampliada con `.pptx` y `application/vnd.ms-excel`.
 - [ ] Hojas ocultas (`worksheet.state === 'veryHidden'`): hoy se leerian si fuesen la primera.
+
+---
+
+## Tanda actual — PROT-25 · `ESCUDO_POST_IA`, la barrera entre la inferencia y la publicacion
+
+### Problema
+
+Desde PROT-23 el `MAPEADOR_PLANTILLA` entrega la plantilla base saneada y **sin interpolar**, y es un
+`PROCESADOR_IA` **posterior** quien la rellena. Entre esa inferencia y el destino no habia nada. Un
+`<script>` colado por inyeccion de prompt, un `{{nodo.campo}}` que el modelo copio sin resolver, una
+valla ```` ```html ```` que el proveedor anade por habito de chat, o un titular que la IA se llevo por
+delante al reescribir el HTML llegaban a Drupal **sin excepcion, sin PAUSADO y sin alerta**.
+
+El hueco llevaba reservado desde la migracion 005: valor de enum, fila de catalogo (categoria
+`CONTROL`), namespace `validated_drupal_json` en la lista cerrada y tres menciones en la
+documentacion. Lo que no habia era una sola linea de implementacion.
+
+### Contratos nuevos
+
+```typescript
+// @modules/nodes/dto/post-ia-sanitizer-config.dto.ts
+export const DEFAULT_POST_IA_SOURCE_NAMESPACE = 'llm_response';
+export const DEFAULT_POST_IA_SOURCE_FIELD = 'filled_markup';
+
+export class PostIaSanitizerConfigDto {
+  sourceNamespace?: string;     // @Matches(OUTPUT_NAMESPACE_PATTERN)
+  sourceField?: string;         // snake_case; es la segunda mitad de {{ns.campo}}
+  requiredSelectors?: string[]; // <= MAX_REQUIRED_SELECTORS, importado del mapeador
+  allowedTags?: string[];       // solo puede RESTAR de la lista blanca global
+}
+
+export interface ResolvedPostIaSanitizerConfig {
+  readonly sourceNamespace: string;
+  readonly sourceField: string;
+  readonly requiredSelectors: readonly string[];
+  readonly allowedTags: readonly string[];
+}
+
+export const resolvePostIaSanitizerConfig: (
+  dto: PostIaSanitizerConfigDto,
+) => ResolvedPostIaSanitizerConfig;
+```
+
+```typescript
+// @modules/templates/services/template-renderer.service.ts — AMPLIACION
+export interface FilledSlotAudit {
+  readonly missing: string[];  // el selector ya no encuentra nodo
+  readonly invalid: string[];  // el selector no es parseable
+  readonly empty: string[];    // esta, pero sigue en blanco
+}
+
+public auditFilledSlots(
+  html: string,
+  requiredSelectors: readonly string[],
+): FilledSlotAudit;
+
+// Y `RESIDUAL_MARKER_PATTERN` pasa a exportarse desde `templates.service.ts`.
+```
+
+```typescript
+// @modules/nodes/strategies/post-ia-sanitizer.strategy.ts
+export const ERR_POST_IA_CONFIG = 'ERR_POST_IA_CONFIG';
+export const ERR_POST_IA_MISSING_PAYLOAD = 'ERR_POST_IA_MISSING_PAYLOAD';
+export const ERR_POST_IA_EMPTY_HTML = 'ERR_POST_IA_EMPTY_HTML';
+export const ERR_POST_IA_RESIDUAL_VARS = 'ERR_POST_IA_RESIDUAL_VARS';
+export const ERR_POST_IA_UNSUPPORTED_TAGS = 'ERR_POST_IA_UNSUPPORTED_TAGS';
+export const ERR_POST_IA_EMPTY_AFTER_SANITIZE = 'ERR_POST_IA_EMPTY_AFTER_SANITIZE';
+export const ERR_POST_IA_DOM_MUTATED = 'ERR_POST_IA_DOM_MUTATED';
+
+export class PostIaSanitizerStrategy implements INodeStrategy {
+  readonly nodeType = NodeType.ESCUDO_POST_IA;
+  readonly paramsSchema = PostIaSanitizerConfigDto;
+  readonly outputFields: readonly NodeOutputField[]; // validated_markup, character_count,
+                                                     // audit_status, sanitized_at
+  getRequiredNamespaces(params): readonly string[];  // [sourceNamespace], derivado de la config
+  execute(context, params): Promise<NodeResult>;
+}
+```
+
+### Diagrama de inyeccion de dependencias
+
+```
+TemplatesModule
+  └── exports: TemplateRendererService  (ya existente, sin cambios de modulo)
+          │
+          ▼
+NodesModule
+  ├── providers/exports: PostIaSanitizerStrategy
+  └── onModuleInit() ──► NodeStrategyFactory.registerStrategy(postIaSanitizerStrategy)
+                                  ▲
+                                  └── instancia unica exportada por FsmModule,
+                                      la misma que consume FsmEngineService
+
+PostIaSanitizerStrategy
+  └── constructor(TemplateRendererService)   ← unica dependencia; servicio PURO
+                                               (sin repositorio, red ni estado)
+```
+
+### Por que el saneado se delega y no se reimplanta
+
+El encargo traia su propia `DEFAULT_ALLOWED_TAGS` y su propia `DEFAULT_ALLOWED_ATTRIBUTES`. Seria la
+segunda lista blanca del backend, y divergiria del gestor de plantillas en cuanto alguien tocara una
+sola de las dos: el sintoma es que el editor rechaza al guardar lo que el escudo deja publicar, o al
+reves, y nadie sabria cual de las dos manda. Es la misma decision que PROT-23 tomo para el mapeador.
+
+### Por que `auditFilledSlots` y no una bandera en `auditStructure`
+
+`auditStructure` devuelve `{ missing, invalid }` y lo consume `TemplateMapperStrategy`; ampliarle la
+forma de retorno obligaria a tocar a un llamante que no pidio nada. Pero el motivo de fondo es que la
+pregunta es **distinta**: el mapeador audita la plantilla BASE, cuyas ranuras estan vacias por
+definicion —ese es su producto—, asi que para el un `empty` seria ruido constante. Para el escudo,
+una ranura presente y en blanco es justo el fallo que busca.
+
+### Por que `filled_markup` y por que apunta a un campo que nadie publica
+
+`PROCESADOR_IA` **no publica HTML**: sus `outputFields` son `headline`, `summary`,
+`body_paragraphs` y `metadata`, y los tres clientes de proveedor piden la respuesta por esquema JSON
+con los tres primeros como `required`. El modo de salida markup es una tanda aparte.
+
+Que el defecto apunte a `llm_response.filled_markup` —que hoy no existe— es deliberado: el escudo
+falla con `ERR_POST_IA_EMPTY_HTML` nombrando la ruta completa, que es mejor que aprobar un payload
+inexistente. El nombre evita `compiled_markup` porque esa clave ya significa otra cosa en
+`rendered_html`: la plantilla base **vacia**.
+
+### Por que `<picture>` se queda fuera
+
+No figura en `TEMPLATE_SANITIZER_CONFIG.allowedTags`, y ampliar la lista afectaria tambien a lo que
+el editor puede guardar. No hace falta: `disallowedTagsMode: 'discard'` conserva los hijos, de modo
+que el `<img>` de respaldo —que es la imagen que Drupal necesita— sobrevive intacto, con su `src`
+relativo. Los enlaces con `target` conservan ademas el `rel="noopener noreferrer"` que fuerza
+`forceSafeLinkRel`.
+
+### Estado de las tareas
+
+- [x] `auditFilledSlots` en `TemplateRendererService`, con tolerancia a contenedores multimedia
+- [x] `RESIDUAL_MARKER_PATTERN` exportada: una sola gramatica de marcador suelto en el backend
+- [x] `PostIaSanitizerConfigDto` + `resolvePostIaSanitizerConfig` + spec (24 pruebas)
+- [x] `PostIaSanitizerStrategy` con los siete codigos + spec (36 pruebas)
+- [x] Registro en `NodesModule` (import, providers, exports, constructor, `onModuleInit`) y su prueba
+- [x] Fixtures alineados: `ESCUDO_POST_IA` deja de ilustrar «sin estrategia»
+- [x] Backend 1720 pruebas en 72 suites; frontend 716 en 37; `tsc --noEmit` sin errores nuevos
+- [ ] Pendiente — modo de salida HTML en `PROCESADOR_IA` que publique `llm_response.filled_markup`;
+      sin el, el escudo no tiene nada que aprobar
+- [ ] Pendiente — triada Quasar del nodo (`EscudoPostIaConfig.vue` + store + los dos registros)
+- [ ] Pendiente — auditar `configuracion_pipeline` en busca de nodos `ESCUDO_POST_IA` historicos con
+      `params` que el DTO no declare: con `forbidNonWhitelisted` serian un 400 al guardar y al activar

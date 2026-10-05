@@ -66,8 +66,22 @@ const ALLOWED_NAMESPACE_SET: ReadonlySet<string> = new Set(ALLOWED_NAMESPACES);
 const TEMPLATE_VARIABLE_PATTERN =
   /\{\{\s*([a-zA-Z0-9_]+)((?:\.(?:[a-zA-Z0-9_]+|\[\d+\]))+)\s*\}\}/g;
 
-/** Cualquier marcador que sobreviva a la extraccion: sintaxis no reconocida. */
-const RESIDUAL_MARKER_PATTERN = /\{\{[\s\S]*?\}\}/;
+/**
+ * Cualquier marcador que sobreviva a la extraccion: sintaxis no reconocida.
+ *
+ * EXPORTADA porque es la definicion del repositorio de "que cuenta como marcador
+ * suelto", y tiene un segundo consumidor: `PostIaSanitizerStrategy`, que rechaza
+ * el markup que la IA devuelve con interpolaciones sin resolver. Escribir alli
+ * una segunda regex equivalente las dejaria divergir en cuanto alguien tocara
+ * una —y el sintoma seria que el gestor rechaza al guardar lo que el escudo deja
+ * publicar, o al reves.
+ *
+ * SIN bandera global a proposito: con `g` el objeto conserva `lastIndex` entre
+ * llamadas y un `exec` repetido se saltaria coincidencias. Quien necesite
+ * recorrerlas todas construye su propia instancia desde `.source`, que es el
+ * mismo recurso que usa `INTERPOLATION_ONLY_PATTERN` para no duplicar un literal.
+ */
+export const RESIDUAL_MARKER_PATTERN = /\{\{[\s\S]*?\}\}/;
 
 /** `.[0]` -> `.0`, la forma que `resolvePath` del contexto FSM navega. */
 const SEGMENT_LITERAL_PATTERN = /\.\[(\d+)\]/g;

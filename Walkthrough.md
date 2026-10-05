@@ -6783,3 +6783,197 @@ solo pide `@IsString`, asi que se persiste `{{inventado.campo}}`, `{{#each}}` o 
 201. Esto cierra la mitad que depende del FLUJO —un namespace real citado en el orden equivocado—,
 que es la unica que un validador de topologia puede responder. La otra mitad se cierra en el gestor
 de prompts, replicando lo que el de plantillas HTML ya hace.
+
+---
+
+## PROT-25 · El escudo posterior a la IA deja de ser un hueco en el enum
+
+Misma rama `feat/mapeador-inyeccion`. `ESCUDO_POST_IA` llevaba declarado desde la migracion 005 —valor
+de enum, fila de catalogo con categoria `CONTROL`, namespace `validated_drupal_json` reservado en la
+lista cerrada y tres menciones en la documentacion— y no tenia **ni una linea** de implementacion.
+`PostIaSanitizer` y `post-ia` daban cero ocurrencias en todo el repositorio.
+
+Importaba ahora y no antes por lo que cambio en PROT-23. Mientras el mapeador compilaba la plantilla
+e iba al final, lo ultimo que tocaba el markup era codigo nuestro. Desde que el mapeador entrega el
+esqueleto y la IA lo rellena, lo ultimo que lo toca es un modelo de lenguaje, y su salida iba directa
+al destino: un `<script>` colado por inyeccion de prompt, un `{{nodo.campo}}` copiado sin resolver,
+una valla ```` ```html ```` anadida por habito de chat o un titular borrado al reescribir el HTML
+llegaban a Drupal sin excepcion, sin PAUSADO y sin alerta.
+
+### Lo que el encargo daba por hecho y no existia
+
+El encargo venia escrito contra un repositorio que no es este, y la mitad de sus rutas eran
+inventadas: `modules/nodes/enums/node-type.enum.ts` (el enum vive en `@core/fsm/types/`),
+`@core/fsm/state-payload.context` (falta `/context`), `modules/nodes/services/node-strategy.factory.ts`
+(esta en `@core/fsm/factories/`, y ademas no es ahi donde se registra nada: se registra en el
+`onModuleInit` de `NodesModule`). Tambien pedia la firma `execute(context, config)` cuando el segundo
+parametro se llama `params`.
+
+Tres desviaciones eran de fondo y no de ruta:
+
+**El codigo del fallo dentro del mensaje.** El encargo escribia
+`message: "ERR_POST_IA_DOM_MUTATED: La IA altero..."`. Pero `NodeErrorDetail.code` es un campo
+obligatorio y **aparte**, y es contra lo que compara el `catchErrors` de un `onErrorStep`. Un fallo
+con el codigo enterrado en la prosa es un fallo inenrutable: el nodo de respaldo no corre, no hay
+excepcion y no hay traza. El sintoma seria mudo.
+
+**`validated_markup` como namespace.** `NODE_OUTPUT_NAMESPACES` es una lista **cerrada**, y ese valor
+no esta en ella. El hueco que este nodo tenia reservado desde siempre se llama
+`validated_drupal_json`, y el frontend ya lo mapeaba en `DEFAULT_OUTPUT_NAMESPACE_BY_NODE_TYPE`.
+Inventar uno nuevo habria obligado a tocar `@core`, la lista blanca del gestor de plantillas, el
+espejo del frontend y una migracion sobre una columna `jsonb`, todo para renombrar algo que ya
+existia.
+
+**`outputNamespace` como campo del DTO.** El namespace efectivo es el del NODO en el
+`pipeline_schema` —el motor hace `context.setNamespace(node.outputNamespace, result.data ?? {})`— y
+declararlo tambien en los `params` crea la segunda fuente de verdad que `llm-extractor-config.dto.ts`
+prohibe por escrito. A diferencia del mapeador, aqui no habia nada que tolerar por compatibilidad: el
+tipo nunca tuvo estrategia que ejecutara un esquema historico.
+
+### El agujero real: la IA no publica HTML
+
+La comprobacion que mas cambio el encargo fue mirar que hay de verdad en `llm_response`.
+`LlmExtractorStrategy` declara cuatro `outputFields` —`headline`, `summary`, `body_paragraphs` y
+`metadata`— y los tres clientes de proveedor piden la respuesta por esquema JSON con los tres
+primeros como `required`, mapeandolos clave a clave. **No hay ningun campo con marcado**, asi que el
+`sourcePayload.compiled_markup ?? raw_html ?? body` del encargo no podia resolver nunca.
+
+Se decidio no ampliar el alcance a ensenarle al `PROCESADOR_IA` a devolver HTML —son los tres
+clientes, su DTO, sus `outputFields` y sus specs, y merece su propia pasada de regresion— sino hacer
+el origen **configurable**: `sourceNamespace` y `sourceField`, con defecto `llm_response` y
+`filled_markup`. Mientras ese campo no exista, el escudo falla con `ERR_POST_IA_EMPTY_HTML` nombrando
+la ruta completa. Es la conducta correcta: un escudo que aprueba un payload inexistente es peor que
+uno que no corre, porque el primero da una falsa sensacion de cobertura.
+
+`filled_markup` y no `compiled_markup` a proposito. Esa clave ya significa otra cosa un namespace mas
+alla: `rendered_html.compiled_markup` es la plantilla base **vacia**. Reutilizar el nombre para la
+plantilla **rellena** dejaria dos claves homonimas con contenidos opuestos y convertiria cualquier
+traza de ejecucion en un acertijo. Ya basta con que `compiled_markup` contenga markup sin compilar.
+
+### Por que el saneado no se reimplanto en la estrategia
+
+El encargo traia su propia `DEFAULT_ALLOWED_TAGS` y su `DEFAULT_ALLOWED_ATTRIBUTES`. Seria la segunda
+lista blanca del backend. Es exactamente lo que PROT-23 rechazo para el mapeador y por el mismo
+motivo: dos listas que describen la misma regla divergen en cuanto alguien toca una sola, y el
+sintoma es que el gestor rechaza al guardar lo que el escudo deja publicar —o al reves—, sin que
+nadie sepa cual de las dos manda.
+
+La lista del encargo ademas ya divergia de salida: le faltaban `img`, `figure`, `blockquote`, `time`,
+`code` y media docena mas, de modo que un articulo con una imagen habria perdido la imagen.
+
+Lo mismo con el parser. `cheerio.load(sanitizedHtml)` a secas usa parse5 en modo documento, que
+**sintetiza** `<html>` y `<body>` sobre cualquier entrada. Todo el repositorio carga con
+`cheerio.load(html, { xml: { xmlMode: false } }, false)` —htmlparser2, sin sintetizar nada, y `xml`
+como objeto para no entrar en el modo sensible a mayusculas— y las dos cargas verian DOMs distintos.
+
+### Lo que si faltaba: distinguir «la ranura esta» de «la ranura esta rellena»
+
+`auditStructure` ya existia y responde si el selector encuentra algo. No basta aqui. El fallo que
+este nodo busca es precisamente la ranura **presente y en blanco**: la IA conservo el `<div
+class="cuerpo">` y no escribio dentro. Para `auditStructure` eso es un acierto.
+
+Se anadio `auditFilledSlots`, hermano y no bandera del anterior. La razon inmediata es de contrato
+—`auditStructure` devuelve `{ missing, invalid }` y lo consume el mapeador, que no pidio nada—, pero
+la de fondo es que la pregunta es genuinamente distinta: el mapeador audita la plantilla BASE, cuyas
+ranuras estan vacias **por definicion**, porque ese es su producto. Un `empty` seria ruido constante
+para el.
+
+Las tres familias se devuelven separadas y no en una lista porque mandan al operador a sitios
+distintos: `missing` a mirar lo que el modelo devolvio, `invalid` a su propia lista de selectores, y
+`empty` al prompt.
+
+### La tolerancia multimedia, que no es una concesion
+
+Una primera version contaba como relleno solo el texto. Habria dejado el flujo PAUSADO por un acierto
+del modelo: un `div.galeria` cuyo unico contenido es un `<img>`, una tabla de plazos de convocatoria,
+un `<hr>` separador. La pregunta que responde la auditoria es «quedo algo aqui», no «quedo texto».
+
+El `is` ademas del `find` tampoco es decorativo: la ranura puede **ser** el medio (un selector
+`img.portada`), y con `find` a secas una imagen apuntada directamente se reportaria como hueco vacio,
+porque un `<img>` no tiene ni texto ni descendientes.
+
+`picture` y `source` no entran en la lista de medios tolerados, y da igual: la comprobacion corre
+siempre sobre markup **ya saneado**, y para entonces esas dos etiquetas ya no existen. Se decidio no
+ampliar la lista blanca canonica para admitirlas —afectaria tambien a lo que el editor puede guardar
+en el gestor— porque no hace falta: `disallowedTagsMode: 'discard'` conserva los hijos, de modo que
+el `<img>` de respaldo sobrevive con su `src` relativo de Drupal intacto. Eso es lo que Drupal
+necesita.
+
+### El orden de las comprobaciones es la comprobacion
+
+Los marcadores residuales se buscan **antes** de sanear, y esa linea del orden es lo unico que separa
+un fallo ruidoso de uno mudo. Si se saneara primero, un `{{parsed_email.clean_title}}` que el modelo
+dejara dentro de un `<iframe>` desapareceria junto con la etiqueta: la prueba del delito se borraria
+y el flujo publicaria un hueco en vez de pararse. Hay una prueba dedicada a ese caso (4.6).
+
+La auditoria estructural va al reves, **despues** de sanear, y por el motivo simetrico: un selector
+que apunte a una etiqueta que la lista blanca descarta tiene que contar como ausente. El lector no va
+a ver esa etiqueta, asi que la ranura no esta.
+
+### Siete codigos y no uno
+
+Se podria haber emitido un unico `ERR_POST_IA_FAILED`. Enrutar todos los fallos al mismo
+`onErrorStep` sigue siendo posible con la forma de cadena, pero fundirlos en el origen impediria
+**para siempre** distinguirlos, y cada uno manda al operador a un sitio distinto: `RESIDUAL_VARS` al
+prompt, `UNSUPPORTED_TAGS` a los `params` del propio nodo, `EMPTY_HTML` al nodo de IA que va delante,
+`DOM_MUTATED` a la plantilla o al prompt.
+
+`EMPTY_AFTER_SANITIZE` se separo de `EMPTY_HTML` por la misma logica: aquel dice «no llego markup» y
+este «llego markup entero de etiquetas prohibidas», que es el sintoma de una inyeccion de prompt o de
+un modelo que ignoro el formato pedido. Son dos incidencias que se investigan distinto.
+
+Todos son `GRAVE` y ninguno `URGENTE`: son corregibles por el operador, y `GRAVE` es el unico nivel
+que el motor reintenta y que CU-09 permite relanzar. Por eso tambien `resolveConfig` usa `validate` y
+no `validateOrReject`, que lanzaria y haria que el motor lo normalizase a `URGENTE`.
+
+### Sin logger, a proposito
+
+El encargo declaraba un `Logger` con dos llamadas. Ni `TemplateMapperStrategy` ni
+`WebScraperStrategy` lo tienen, y el criterio del repositorio es claro: logger solo cuando hay E/S o
+decisiones que auditar. Este nodo no sale a ningun sitio, y el motor ya emite un `warn` con nivel,
+codigo, ejecucion y nodo en cuanto recibe un `success: false`. La linea del encargo habria sido un
+duplicado exacto.
+
+### Los fixtures que parecian romperse y no se rompian
+
+La lectura rapida decia que registrar la estrategia tumbaria tres suites. Comprobado uno a uno, no:
+
+- `node-catalog.service.spec.ts` usa un **doble** de la factoria con el conjunto de registrados
+  explicito —de ahi que su `it.each` liste tambien `PROCESADOR_IA`, que si esta implementado—, asi
+  que no depende del cableado real. Se saco `ESCUDO_POST_IA` de la lista igualmente, porque el caso
+  que ilustra ya no es cierto.
+- `pipeline-validator.service.spec.ts` construye `new NodeStrategyFactory()` **vacia**, de modo que
+  `tryGetStrategy` devuelve `undefined` y el `paramsSchema` nunca se aplica. Su fixture declaraba
+  `params: { schemaId: 'noticia_v1' }`, que contra el modulo real seria ahora un 400 por
+  `forbidNonWhitelisted`; se cambio a `{}` porque un fixture debe describir un esquema guardable.
+- `flujo-draft.store.spec.ts` usa el tipo como ejemplo de `SIN_CONFIGURADOR`, y **sigue siendo
+  cierto**: esta tanda no anade triada Quasar.
+- `prompt-namespaces.ts` mantiene `ESCUDO_POST_IA` en `PROMPT_EXCLUDED_NODE_TYPES` —consume la salida
+  de la IA, citarlo desde un prompt seguiria siendo un bucle— y solo se reescribio un comentario que
+  justificaba la exclusion «mientras no tengan estrategia», que ya no aplica.
+
+`GET /api/nodos` pasa a devolver `implemented: true` y los cuatro `outputFields` sin tocar nada:
+`NodeCatalogService` consulta la factoria en cada peticion, que es justo para lo que se hizo asi.
+
+### Cobertura
+
+Backend **1720 pruebas en 72 suites**, en verde (+77 y +2 suites: 36 de la estrategia, 24 del DTO, 8
+de `auditFilledSlots`, 1 del registro, mas los ajustes de fixtures). Frontend **716 en 37 archivos**,
+intacto y en verde. `npx tsc --noEmit` mantiene los **89 errores preexistentes**, ninguno nuevo y
+ninguno en los archivos de esta tanda. `nest build` limpio. ESLint sin avisos en lo nuevo; queda una
+deuda de formato preexistente en `template-renderer.service.ts:488`, en codigo que esta tanda no
+toca, y se deja estar para no colar un reformateo ajeno en el commit.
+
+### Lo que sigue abierto
+
+- **El escudo no tiene nada que aprobar todavia.** `PROCESADOR_IA` necesita un modo de salida HTML
+  que publique `llm_response.filled_markup`: su DTO, los tres clientes (que hoy fuerzan el esquema
+  JSON con `headline`/`summary`/`body_paragraphs` como `required`) y sus `outputFields`.
+- **Triada Quasar del nodo.** `EscudoPostIaConfig.vue`, su store y el alta en los dos registros.
+  Cerraria 9 de 10 configuradores y dejaria solo `DESTINO_HTTP`.
+- **Auditoria de `configuracion_pipeline` pendiente.** Conectar `paramsSchema` corre con
+  `forbidNonWhitelisted`, asi que un nodo `ESCUDO_POST_IA` ya guardado con una clave que el DTO no
+  declare pasa a ser un 400 al guardar **y al activar**. No se pudo comprobar en esta sesion: Docker
+  lo levanta el usuario y el servidor MCP de PostgreSQL no conecto. Es la misma trampa que freno la
+  conexion del mapeador en PROT-23 y que PROT-23b resolvio con una consulta previa; el fixture del
+  validador usaba `schemaId`, asi que la clave es verosimil.

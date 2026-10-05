@@ -121,7 +121,6 @@ describe('NodeCatalogService · lectura del catalogo de tipos de nodo', () => {
     it.each([
       'DESTINO_ACENS',
       NodeType.PROCESADOR_IA,
-      NodeType.ESCUDO_POST_IA,
       NodeType.DESTINO_HTTP,
     ])(
       '2.2 deberia marcar implemented en false para %s, que no tiene estrategia',

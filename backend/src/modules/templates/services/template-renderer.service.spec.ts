@@ -884,4 +884,102 @@ describe('TemplateRendererService', () => {
       expect(audit.missing).toEqual(['body']);
     });
   });
+
+  /**
+   * Hermano de `auditStructure` para el escudo posterior a la IA.
+   *
+   * La diferencia que justifica el metodo aparte es la tercera familia: aquel
+   * audita la plantilla BASE, cuyas ranuras estan vacias por definicion, y este
+   * lo que el modelo devolvio, donde una ranura en blanco es el fallo buscado.
+   */
+  describe('auditFilledSlots', () => {
+    const FILLED = '<h1 class="titular">Titular</h1><div class="cuerpo"><p>Texto.</p></div>';
+    const SKELETON = '<h1 class="titular"></h1><div class="cuerpo"></div>';
+
+    it('no deberia reportar nada sin selectores exigidos', () => {
+      // 1. Arrange & 2. Act
+      const audit = renderer.auditFilledSlots(FILLED, []);
+
+      // 3. Assert
+      expect(audit).toEqual({ missing: [], invalid: [], empty: [] });
+    });
+
+    it('deberia dar por buenos los selectores presentes y rellenos', () => {
+      // 1. Arrange & 2. Act
+      const audit = renderer.auditFilledSlots(FILLED, [
+        'h1.titular',
+        'div.cuerpo',
+      ]);
+
+      // 3. Assert
+      expect(audit).toEqual({ missing: [], invalid: [], empty: [] });
+    });
+
+    it('deberia reportar como ausente el selector sin coincidencia', () => {
+      // 1. Arrange & 2. Act
+      const audit = renderer.auditFilledSlots(FILLED, ['h2.subtitulo']);
+
+      // 3. Assert
+      expect(audit.missing).toEqual(['h2.subtitulo']);
+      expect(audit.empty).toEqual([]);
+    });
+
+    it('deberia reportar como vacia la ranura presente pero en blanco', () => {
+      // 1. Arrange: es exactamente lo que `auditStructure` NO puede distinguir.
+      // 2. Act
+      const audit = renderer.auditFilledSlots(SKELETON, [
+        'h1.titular',
+        'div.cuerpo',
+      ]);
+
+      // 3. Assert
+      expect(audit.missing).toEqual([]);
+      expect(audit.empty).toEqual(['h1.titular', 'div.cuerpo']);
+    });
+
+    it('deberia separar el selector invalido de ausentes y vacios', () => {
+      // 1. Arrange & 2. Act
+      const audit = renderer.auditFilledSlots(FILLED, [':::']);
+
+      // 3. Assert
+      expect(audit.invalid).toEqual([':::']);
+      expect(audit.missing).toEqual([]);
+      expect(audit.empty).toEqual([]);
+    });
+
+    it('deberia contar como rellena una ranura cuyo unico contenido es una imagen', () => {
+      // 1. Arrange: la tolerancia multimedia. Sin ella una galeria legitima
+      //    dejaria el flujo PAUSADO por un acierto del modelo.
+      const html = '<div class="galeria"><img src="/foto.jpg" alt="Foto"></div>';
+
+      // 2. Act
+      const audit = renderer.auditFilledSlots(html, ['div.galeria']);
+
+      // 3. Assert
+      expect(audit.empty).toEqual([]);
+    });
+
+    it('deberia contar como rellena una ranura que ES la propia imagen', () => {
+      // 1. Arrange: con `find` a secas fallaria, porque un `<img>` no tiene ni
+      //    texto ni descendientes. De ahi el `is` del metodo.
+      const html = '<img class="portada" src="/portada.jpg" alt="Portada">';
+
+      // 2. Act
+      const audit = renderer.auditFilledSlots(html, ['img.portada']);
+
+      // 3. Assert
+      expect(audit.empty).toEqual([]);
+    });
+
+    it('deberia contar como rellena una ranura con solo una tabla', () => {
+      // 1. Arrange: una tabla de plazos sin texto directo en el contenedor.
+      const html = '<div class="plazos"><table><tr><td>8 oct</td></tr></table></div>';
+
+      // 2. Act
+      const audit = renderer.auditFilledSlots(html, ['div.plazos']);
+
+      // 3. Assert
+      expect(audit.empty).toEqual([]);
+    });
+  });
 });

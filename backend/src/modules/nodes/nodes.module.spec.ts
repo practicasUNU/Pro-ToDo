@@ -7,6 +7,7 @@ import { CronTriggerStrategy } from './strategies/cron-trigger.strategy';
 import { ImapTriggerStrategy } from './strategies/imap-trigger.strategy';
 import { LlmExtractorStrategy } from './strategies/llm-extractor.strategy';
 import { ParserEmailStrategy } from './strategies/parser-email.strategy';
+import { PostIaSanitizerStrategy } from './strategies/post-ia-sanitizer.strategy';
 import { OcrProcessorStrategy } from './strategies/ocr-processor.strategy';
 import { SmtpAlertStrategy } from './strategies/smtp-alert.strategy';
 import { TemplateMapperStrategy } from './strategies/template-mapper.strategy';
@@ -33,6 +34,7 @@ import type { TemplatesService } from '@modules/templates/templates.service';
 const buildHarness = (): {
   factory: NodeStrategyFactory;
   mapper: TemplateMapperStrategy;
+  shield: PostIaSanitizerStrategy;
   imap: ImapTriggerStrategy;
   cron: CronTriggerStrategy;
   parser: ParserEmailStrategy;
@@ -48,6 +50,9 @@ const buildHarness = (): {
     {} as TemplatesService,
     createTemplateRendererService(),
   );
+  // El renderer va REAL: es puro (sin repositorio, red ni estado) y es la unica
+  // dependencia del escudo, asi que un doble no ahorraria nada.
+  const shield = new PostIaSanitizerStrategy(createTemplateRendererService());
   const imap = new ImapTriggerStrategy({} as ConfigService);
   // Sin dependencias inyectadas: el nodo CRON no hace E/S ni lee secretos.
   const cron = new CronTriggerStrategy();
@@ -77,6 +82,7 @@ const buildHarness = (): {
   return {
     factory,
     mapper,
+    shield,
     imap,
     cron,
     parser,
@@ -87,6 +93,7 @@ const buildHarness = (): {
     module: new NodesModule(
       factory,
       mapper,
+      shield,
       imap,
       cron,
       parser,
@@ -108,6 +115,18 @@ describe('NodesModule', () => {
 
     // 3. Assert
     expect(factory.getStrategy(NodeType.MAPEADOR_PLANTILLA)).toBe(mapper);
+  });
+
+  it('1.9 deberia registrar PostIaSanitizerStrategy en la factoria al iniciarse', () => {
+    // 1. Arrange
+    const { factory, shield, module } = buildHarness();
+
+    // 2. Act
+    module.onModuleInit();
+
+    // 3. Assert: sin este registro, `GET /api/nodos` seguiria marcando
+    //    ESCUDO_POST_IA como `implemented: false` y el asistente lo deshabilitaria
+    expect(factory.getStrategy(NodeType.ESCUDO_POST_IA)).toBe(shield);
   });
 
   it('1.2 deberia registrar ImapTriggerStrategy en la factoria al iniciarse', () => {

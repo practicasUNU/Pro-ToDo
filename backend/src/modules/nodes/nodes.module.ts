@@ -24,6 +24,7 @@ import { OcrProcessorStrategy } from './strategies/ocr-processor.strategy';
 import { SmtpAlertStrategy } from './strategies/smtp-alert.strategy';
 import { AiDefaultsConfig } from '@core/config/ai-defaults.config';
 import { ParserEmailStrategy } from './strategies/parser-email.strategy';
+import { PostIaSanitizerStrategy } from './strategies/post-ia-sanitizer.strategy';
 import { LlmProviderFactory } from './strategies/llm-provider.factory';
 import { LlmProviderCatalogService } from './services/llm-provider-catalog.service';
 import { AnthropicLlmProvider } from './strategies/providers/anthropic-llm.provider';
@@ -86,6 +87,7 @@ import type { OnModuleInit } from '@nestjs/common';
   controllers: [NodeCatalogController, LlmCatalogController],
   providers: [
     TemplateMapperStrategy,
+    PostIaSanitizerStrategy,
     ImapTriggerStrategy,
     CronTriggerStrategy,
     ParserEmailStrategy,
@@ -108,6 +110,7 @@ import type { OnModuleInit } from '@nestjs/common';
   ],
   exports: [
     TemplateMapperStrategy,
+    PostIaSanitizerStrategy,
     ImapTriggerStrategy,
     CronTriggerStrategy,
     ParserEmailStrategy,
@@ -131,6 +134,7 @@ export class NodesModule implements OnModuleInit {
   constructor(
     private readonly strategyFactory: NodeStrategyFactory,
     private readonly templateMapperStrategy: TemplateMapperStrategy,
+    private readonly postIaSanitizerStrategy: PostIaSanitizerStrategy,
     private readonly imapTriggerStrategy: ImapTriggerStrategy,
     private readonly cronTriggerStrategy: CronTriggerStrategy,
     private readonly parserEmailStrategy: ParserEmailStrategy,
@@ -142,6 +146,7 @@ export class NodesModule implements OnModuleInit {
 
   public onModuleInit(): void {
     this.strategyFactory.registerStrategy(this.templateMapperStrategy);
+    this.strategyFactory.registerStrategy(this.postIaSanitizerStrategy);
     this.strategyFactory.registerStrategy(this.imapTriggerStrategy);
     this.strategyFactory.registerStrategy(this.cronTriggerStrategy);
     this.strategyFactory.registerStrategy(this.parserEmailStrategy);
