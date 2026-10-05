@@ -78,6 +78,19 @@ const buildContext = (
 ): StatePayloadContext =>
   createMockStatePayloadContext({ currentStep: 'extractor_web', namespaces });
 
+/**
+ * URL que el doble del runner recibio en su primera invocacion.
+ *
+ * El `mock.calls` de un `jest.Mock` sin genericos es `any[][]`, y leer de el a
+ * pelo dispara `no-unsafe-member-access`. Se tipa UNA vez aqui en vez de repetir
+ * el casteo en cada aserto.
+ */
+const firstNavigatedUrl = (run: jest.Mock): string | undefined => {
+  const calls = run.mock.calls as readonly (readonly [URL, unknown])[];
+
+  return calls[0]?.[0].href;
+};
+
 /** Contexto con el enlace ya puesto donde `TARGET_TEMPLATE` lo busca. */
 const contextWithUrl = (url: string = TARGET_URL): StatePayloadContext =>
   buildContext({ parsed_email: { extracted_urls: [url] } });
@@ -634,6 +647,208 @@ describe('WebScraperStrategy', () => {
       expect(result.success).toBe(false);
       expect(result.error?.code).toBe(ERR_SCRAPER_CONFIG);
       expect(result.error?.missingFields).toContain('skipIfEmpty');
+    });
+  });
+
+  /**
+   * El origen deja de ser una POSICION para pasar a ser un CRITERIO.
+   *
+   * Los correos de ingesta traen a la vez el enlace del portal institucional
+   * —que es un metadato de enrutado editorial para el destino, no la noticia— y
+   * el del contenido real. Cual va primero cambia de un correo al siguiente, asi
+   * que ninguna posicion fija resuelve el problema; el dominio si.
+   */
+  describe('8. Seleccion por dominio sobre la lista de enlaces', () => {
+    const LIST_TEMPLATE = '{{parsed_email.extracted_urls}}';
+    const INSTITUTIONAL_URL =
+      'https://www.madrimasd.org/fundacion/portal-contratante';
+    const EXTERNAL_URL =
+      'https://contratos-publicos.comunidad.madrid/licitacion/42';
+
+    /** Contexto con la lista completa de enlaces del correo. */
+    const contextWithUrls = (
+      ...urls: readonly unknown[]
+    ): StatePayloadContext =>
+      buildContext({ parsed_email: { extracted_urls: urls } });
+
+    it('8.1 deberia saltar el dominio excluido y navegar al externo', async () => {
+      // 1. Arrange 📐: el institucional va PRIMERO, que es el caso que la
+      //    seleccion por posicion resolvia mal.
+      const { strategy, run } = createHarness();
+
+      // 2. Act ⚙️
+      const result = await strategy.execute(
+        contextWithUrls(INSTITUTIONAL_URL, EXTERNAL_URL),
+        { targetUrl: LIST_TEMPLATE, excludedDomains: ['madrimasd.org'] },
+      );
+
+      // 3. Assert 🎯
+      expect(result.success).toBe(true);
+      expect(run).toHaveBeenCalledTimes(1);
+      expect(firstNavigatedUrl(run)).toBe(EXTERNAL_URL);
+    });
+
+    it('8.2 deberia respetar el orden de la lista cuando nada esta excluido', async () => {
+      // 1. Arrange 📐: sin exclusiones, "primer elegible" es el primero a secas.
+      const { strategy, run } = createHarness();
+
+      // 2. Act ⚙️
+      const result = await strategy.execute(
+        contextWithUrls(EXTERNAL_URL, INSTITUTIONAL_URL),
+        { targetUrl: LIST_TEMPLATE },
+      );
+
+      // 3. Assert 🎯
+      expect(result.success).toBe(true);
+      expect(firstNavigatedUrl(run)).toBe(EXTERNAL_URL);
+    });
+
+    it('8.3 deberia publicar el payload neutro si TODO esta excluido', async () => {
+      // 1. Arrange 📐: el correo solo traia enlaces del portal propio.
+      const { strategy, run } = createHarness();
+
+      // 2. Act ⚙️
+      const result = await strategy.execute(
+        contextWithUrls(INSTITUTIONAL_URL, 'https://madrimasd.org/noticias'),
+        { targetUrl: LIST_TEMPLATE, excludedDomains: ['madrimasd.org'] },
+      );
+
+      // 3. Assert 🎯: exito VACIO y no un fallo. El flujo sigue y el
+      //    PROCESADOR_IA redacta con el cuerpo del correo.
+      expect(result.success).toBe(true);
+      expect(result.data).toMatchObject(NEUTRAL_PAYLOAD);
+      expect(result.error).toBeUndefined();
+      expect(run).not.toHaveBeenCalled();
+    });
+
+    it('8.4 deberia excluir subdominios pero NO un dominio que lo contenga', async () => {
+      // 1. Arrange 📐: la diferencia entre comparar sufijos y comparar
+      //    subcadenas. `no-madrimasd.org.ejemplo.com` es un portal AJENO.
+      const { strategy, run } = createHarness();
+      const lookalike = 'https://no-madrimasd.org.ejemplo.com/nota';
+
+      // 2. Act ⚙️: el subdominio `www.` entra por el dominio padre.
+      const result = await strategy.execute(
+        contextWithUrls(INSTITUTIONAL_URL, lookalike),
+        { targetUrl: LIST_TEMPLATE, excludedDomains: ['madrimasd.org'] },
+      );
+
+      // 3. Assert 🎯
+      expect(result.success).toBe(true);
+      expect(firstNavigatedUrl(run)).toBe(lookalike);
+    });
+
+    it('8.5 deberia saltar entradas malformadas sin fallar', async () => {
+      // 1. Arrange 📐: en modo lista, "no navegable" significa "la siguiente".
+      //    Un boletin con un `mailto:` o un ancla relativa no es un fallo.
+      const { strategy, run } = createHarness();
+
+      // 2. Act ⚙️
+      const result = await strategy.execute(
+        contextWithUrls(
+          'no-soy-una-url',
+          'mailto:prensa@madrimasd.org',
+          'file:///etc/passwd',
+          42,
+          EXTERNAL_URL,
+        ),
+        { targetUrl: LIST_TEMPLATE },
+      );
+
+      // 3. Assert 🎯
+      expect(result.success).toBe(true);
+      expect(result.error).toBeUndefined();
+      expect(firstNavigatedUrl(run)).toBe(EXTERNAL_URL);
+    });
+
+    it('8.6 deberia omitirse ante una lista vacia', async () => {
+      // 1. Arrange 📐: `extracted_urls` llega siempre como arreglo, nunca
+      //    ausente, asi que el correo sin enlaces se ve AQUI.
+      const { strategy, run } = createHarness();
+
+      // 2. Act ⚙️
+      const result = await strategy.execute(contextWithUrls(), {
+        targetUrl: LIST_TEMPLATE,
+      });
+
+      // 3. Assert 🎯
+      expect(result.success).toBe(true);
+      expect(result.data).toMatchObject(NEUTRAL_PAYLOAD);
+      expect(run).not.toHaveBeenCalled();
+    });
+
+    it('8.7 deberia fallar GRAVE si el namespace de la lista no existe', async () => {
+      // 1. Arrange 📐: la asimetria del bloque 7, aplicada al modo lista. Un
+      //    `url[]` ausente no es "no habia enlaces": es un nodo que apunta a un
+      //    namespace que nadie escribe.
+      const { strategy, run } = createHarness();
+
+      // 2. Act ⚙️
+      const result = await strategy.execute(buildContext(), {
+        targetUrl: LIST_TEMPLATE,
+      });
+
+      // 3. Assert 🎯
+      expect(result.success).toBe(false);
+      expect(result.error?.code).toBe(ERR_SCRAPER_URL_UNRESOLVED);
+      expect(result.error?.level).toBe('GRAVE');
+      expect(run).not.toHaveBeenCalled();
+    });
+
+    it('8.8 deberia aplicar la exclusion tambien en modo POSICION', async () => {
+      // 1. Arrange 📐: quien fija la posicion 1 y excluye el portal propio
+      //    pide lo mismo —no raspar ese dominio—, y recibe el payload neutro en
+      //    vez de una navegacion que nadie queria.
+      const { strategy, run } = createHarness();
+
+      // 2. Act ⚙️
+      const result = await strategy.execute(
+        contextWithUrls(INSTITUTIONAL_URL),
+        {
+          targetUrl: TARGET_TEMPLATE,
+          excludedDomains: ['madrimasd.org'],
+        },
+      );
+
+      // 3. Assert 🎯
+      expect(result.success).toBe(true);
+      expect(result.data).toMatchObject(NEUTRAL_PAYLOAD);
+      expect(run).not.toHaveBeenCalled();
+    });
+
+    it('8.9 deberia comparar el dominio sin distinguir mayusculas', async () => {
+      // 1. Arrange 📐: la lista la teclea una persona y `url.hostname` llega
+      //    siempre en minusculas. Es lo unico que se normaliza: un espacio o un
+      //    punto final los rechaza antes el DTO, con un mensaje de campo.
+      const { strategy, run } = createHarness();
+
+      // 2. Act ⚙️
+      const result = await strategy.execute(
+        contextWithUrls(INSTITUTIONAL_URL, EXTERNAL_URL),
+        { targetUrl: LIST_TEMPLATE, excludedDomains: ['MadrimasD.ORG'] },
+      );
+
+      // 3. Assert 🎯
+      expect(result.success).toBe(true);
+      expect(firstNavigatedUrl(run)).toBe(EXTERNAL_URL);
+    });
+
+    it('8.10 deberia rechazar un dominio excluido con esquema o ruta', async () => {
+      // 1. Arrange 📐: se compara contra el HOST, asi que un valor con mas
+      //    partes no coincidiria nunca. Admitirlo dejaria un filtro inerte.
+      const { strategy, run } = createHarness();
+
+      // 2. Act ⚙️
+      const result = await strategy.execute(contextWithUrls(EXTERNAL_URL), {
+        targetUrl: LIST_TEMPLATE,
+        excludedDomains: ['https://madrimasd.org/portal'],
+      });
+
+      // 3. Assert 🎯
+      expect(result.success).toBe(false);
+      expect(result.error?.code).toBe(ERR_SCRAPER_CONFIG);
+      expect(result.error?.missingFields).toContain('excludedDomains');
+      expect(run).not.toHaveBeenCalled();
     });
   });
 });

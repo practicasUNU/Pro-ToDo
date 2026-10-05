@@ -3,8 +3,10 @@ import { plainToInstance } from 'class-transformer';
 import { validate } from 'class-validator';
 
 import {
+  INTERPOLATION_ONLY_PATH_PATTERN,
   MissingContextVariableException,
   extractNamespaceRoots,
+  resolvePath,
 } from '@core/fsm/context/state-payload.context';
 import { NodeType } from '@core/fsm/types/pipeline-schema.types';
 import {
@@ -84,6 +86,53 @@ const buildNeutralPayload = (): Record<string, unknown> => ({
   byline: null,
   scraped_at: new Date().toISOString(),
 });
+
+/**
+ * Decide si un host cae dentro de un dominio excluido.
+ *
+ * Igualdad exacta o sufijo con punto, NUNCA `includes`: con una comparacion de
+ * subcadena, `no-madrimasd.org.ejemplo.com` quedaria excluido por
+ * `madrimasd.org` siendo un portal ajeno, y —peor— un dominio excluido corto
+ * silenciaria medio correo.
+ */
+const isExcludedHost = (
+  hostname: string,
+  excludedDomains: readonly string[],
+): boolean => {
+  const host = hostname.toLowerCase();
+
+  return excludedDomains.some(
+    (domain) => host === domain || host.endsWith(`.${domain}`),
+  );
+};
+
+/**
+ * Convierte un candidato en `URL` navegable, o en `null` si no lo es.
+ *
+ * Reune las tres condiciones que debe cumplir un destino —parsea, usa un esquema
+ * navegable y no esta excluido— en una sola respuesta, porque en el modo lista
+ * las tres significan lo mismo: pasar al siguiente enlace. El modo posicion no
+ * la usa: alli cada negativa tiene un diagnostico propio que el operador
+ * necesita leer, y solo comparte `isExcludedHost`.
+ */
+const toNavigableUrl = (
+  candidate: string,
+  excludedDomains: readonly string[],
+): URL | null => {
+  let url: URL;
+
+  try {
+    url = new URL(candidate);
+  } catch {
+    return null;
+  }
+
+  if (!ALLOWED_PROTOCOLS.has(url.protocol)) {
+    return null;
+  }
+
+  return isExcludedHost(url.hostname, excludedDomains) ? null : url;
+};
 
 /** Traza completa del error, si la hay, lista para fusionar en el detalle. */
 const stackTraceOf = (error: unknown): { stackTrace?: string } =>
@@ -366,12 +415,22 @@ export class WebScraperStrategy implements INodeStrategy {
   }
 
   /**
-   * Interpola `targetUrl` contra el contexto y valida el resultado.
+   * Resuelve `targetUrl` contra el contexto y elige el destino a navegar.
    *
-   * `getInterpolatedValue` LANZA si la ruta no resuelve, de modo que la
-   * excepcion se captura aqui y se traduce a GRAVE: dejarla salir la
-   * normalizaria el motor a URGENTE, que `canRetry` nunca reintenta y que el
-   * operador no puede corregir desde el flujo PAUSADO.
+   * DOS MODOS, y los distingue el DATO resuelto, no un parametro aparte:
+   *   - `{{ns.campo[0]}}` resuelve a un escalar -> esa posicion y ninguna otra.
+   *   - `{{ns.campo}}` sobre un `url[]` resuelve a un arreglo -> el primer
+   *     enlace elegible, saltando los dominios excluidos.
+   *
+   * Que el modo se lea del origen y no de un enum `selectionMode` es
+   * deliberado: con los dos campos convivirian estados incoherentes —una
+   * posicion fija declarada junto a un modo "primer externo"— y habria que
+   * decidir cual gana. Aqui no hay nada que decidir.
+   *
+   * `resolvePath` LANZA si la ruta no resuelve, de modo que la excepcion se
+   * captura aqui y se traduce a GRAVE: dejarla salir la normalizaria el motor a
+   * URGENTE, que `canRetry` nunca reintenta y que el operador no puede corregir
+   * desde el flujo PAUSADO.
    */
   private resolveTargetUrl(
     context: StatePayloadContext,
@@ -380,10 +439,31 @@ export class WebScraperStrategy implements INodeStrategy {
     | { readonly url: URL }
     | { readonly failure: NodeErrorDetail }
     | { readonly skip: true } {
-    let interpolated: string;
+    const path = INTERPOLATION_ONLY_PATH_PATTERN.exec(config.targetUrl)?.[1];
+
+    // Inalcanzable en la practica: el `@Matches` del DTO ya corrio en
+    // `resolveConfig`. Se diagnostica igualmente en vez de forzar el tipo con un
+    // `!`, porque la alternativa seria un `TypeError` crudo que el motor
+    // normalizaria a URGENTE y que nadie podria reintentar.
+    if (path === undefined) {
+      return {
+        failure: {
+          level: 'GRAVE',
+          code: ERR_SCRAPER_CONFIG,
+          message: `"${config.targetUrl}" no es una variable interpolada valida (ej. {{namespace.campo}}).`,
+          missingFields: ['targetUrl'],
+        },
+      };
+    }
+
+    let resolved: unknown;
 
     try {
-      interpolated = context.getInterpolatedValue(config.targetUrl);
+      // Se resuelve la RUTA y no la plantilla, para conservar el TIPO del valor.
+      // `getInterpolatedValue` devuelve texto, y un arreglo de enlaces llegaria
+      // aqui como el JSON `["https://a","https://b"]`: un dato del que ya no se
+      // puede elegir nada.
+      resolved = resolvePath(context.getAllContext(), path);
     } catch (error) {
       if (error instanceof MissingContextVariableException) {
         // NO HABIA ENLACE QUE SEGUIR, que no es lo mismo que estar mal
@@ -395,7 +475,9 @@ export class WebScraperStrategy implements INodeStrategy {
         //
         // Una variable ESCALAR ausente sigue siendo GRAVE: eso es un nodo que
         // apunta a un namespace que nadie escribe, y degradarlo silenciaria un
-        // error de diseno del flujo.
+        // error de diseno del flujo. El arreglo entero (`{{ns.campo}}`) cae de
+        // este lado a proposito: el campo `url[]` de un nodo que si corrio llega
+        // siempre como `[]`, nunca ausente, asi que su falta delata topologia.
         // Sin log propio: `logNodeOutcome` ya deja una fila por invocacion en
         // `logs_nodo`, y el `source_url: null` de la salida dice lo mismo.
         if (referencesArrayIndex(config.targetUrl)) {
@@ -416,6 +498,35 @@ export class WebScraperStrategy implements INodeStrategy {
       // Imprevisto de verdad: que lo normalice el motor a URGENTE.
       throw error;
     }
+
+    // MODO LISTA: el origen apunta al campo `url[]` entero y la eleccion la hace
+    // el nodo. Es lo que permite expresar "el primer enlace que no sea del
+    // portal institucional", una regla que ninguna posicion fija puede sostener
+    // porque el orden de los enlaces cambia de un correo al siguiente.
+    if (Array.isArray(resolved)) {
+      for (const candidate of resolved) {
+        if (typeof candidate !== 'string') {
+          continue;
+        }
+
+        const url = toNavigableUrl(candidate, config.excludedDomains);
+
+        if (url !== null) {
+          return { url };
+        }
+      }
+
+      // Lista vacia, toda excluida o sin una sola entrada navegable: mismo
+      // desenlace que un indice sin resolver. No hay codigo de error nuevo
+      // porque no hay fallo: este correo no traia nada que raspar.
+      return { skip: true };
+    }
+
+    // MODO POSICION: se reinterpola para obtener el texto por el mismo camino
+    // que lo obtendria cualquier otro nodo. No puede lanzar —`resolvePath`
+    // acaba de resolver esa misma ruta— y mantener un solo conversor a cadena
+    // evita que este nodo publique un formato propio.
+    const interpolated = context.getInterpolatedValue(config.targetUrl);
 
     let url: URL;
 
@@ -446,6 +557,14 @@ export class WebScraperStrategy implements INodeStrategy {
           missingFields: ['targetUrl'],
         },
       };
+    }
+
+    // La exclusion tambien muerde aqui, y no solo en el modo lista: un operador
+    // que fija la posicion 1 y excluye el portal propio esta pidiendo lo mismo
+    // —no raspar ese dominio— y recibe el payload neutro en vez de una
+    // navegacion que nadie queria.
+    if (isExcludedHost(url.hostname, config.excludedDomains)) {
+      return { skip: true };
     }
 
     return { url };

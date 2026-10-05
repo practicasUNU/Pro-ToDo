@@ -49,6 +49,15 @@ export interface WebScraperConfigDto {
    * una URL (contingencia OCR).
    */
   skipIfEmpty: boolean;
+  /**
+   * Dominios que el nodo NUNCA navega, comparados contra el host de la URL ya
+   * resuelta e incluyendo subdominios.
+   *
+   * Es lo que permite expresar "el enlace que no sea del portal propio" cuando
+   * `targetUrl` apunta al arreglo entero (`{{parsed_email.extracted_urls}}`).
+   * Vacio por defecto: el backend no cablea el dominio de ningun cliente.
+   */
+  excludedDomains: string[];
 }
 
 /**

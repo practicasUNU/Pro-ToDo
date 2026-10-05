@@ -3,6 +3,9 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
   DEFAULT_SCRAPER_MAX_RETRIES,
+  EXCLUDED_DOMAIN_SUGGESTIONS,
+  FIRST_ELIGIBLE_LABEL_SUFFIX,
+  MAX_EXCLUDED_DOMAINS,
   DEFAULT_SCRAPER_RETRY_DELAY_MS,
   DEFAULT_SCRAPER_TIMEOUT_MS,
   indexedUrlTemplateFor,
@@ -106,10 +109,14 @@ describe('useWebScraperStore · configuracion del nodo EXTRACTOR_WEB', () => {
       // 2. Act
       store.setAvailableUpstreamContext(PARSER_UPSTREAM);
 
-      // 3. Assert: el unico campo de tipo URL del contexto es `extracted_urls`
-      expect(store.urlOptions).toHaveLength(SELECTABLE_URL_SLOTS);
-      expect(store.urlOptions[0]?.value).toBe('{{parsed_email.extracted_urls[0]}}');
-      expect(store.urlOptions[1]?.value).toBe('{{parsed_email.extracted_urls[1]}}');
+      // 3. Assert: el unico campo de tipo URL del contexto es `extracted_urls`,
+      //    y encabeza sus posiciones la opcion que delega la eleccion en el
+      //    nodo (el arreglo entero, sin indice).
+      expect(store.urlOptions).toHaveLength(SELECTABLE_URL_SLOTS + 1);
+      expect(store.urlOptions[0]?.value).toBe('{{parsed_email.extracted_urls}}');
+      expect(store.urlOptions[0]?.label).toContain(FIRST_ELIGIBLE_LABEL_SUFFIX);
+      expect(store.urlOptions[1]?.value).toBe('{{parsed_email.extracted_urls[0]}}');
+      expect(store.urlOptions[2]?.value).toBe('{{parsed_email.extracted_urls[1]}}');
     });
 
     it('1.3 deberia ofrecer una sola opcion por cada campo url escalar', () => {
@@ -783,6 +790,146 @@ describe('useWebScraperStore · configuracion del nodo EXTRACTOR_WEB', () => {
       });
 
       expect(store.config.skipIfEmpty).toBe(true);
+    });
+  });
+
+  /**
+   * El filtro editorial que evita raspar el portal institucional propio.
+   *
+   * El correo trae su enlace como metadato de enrutado para el destino, no como
+   * la noticia, y su posicion en la lista cambia de un dia para otro.
+   */
+  describe('9. Dominios excluidos y origen por criterio', () => {
+    const LIST_TEMPLATE = '{{parsed_email.extracted_urls}}';
+
+    it('9.1 deberia arrancar sin ningun dominio excluido', () => {
+      // 1. Arrange & 2. Act: el backend mantiene su DTO neutro y el store
+      //    tampoco siembra nada; la sugerencia solo se OFRECE.
+      const store = useWebScraperStore(NODE_ID);
+
+      // 3. Assert
+      expect(store.config.excludedDomains).toEqual([]);
+      expect(EXCLUDED_DOMAIN_SUGGESTIONS).toContain('madrimasd.org');
+    });
+
+    it('9.2 deberia invalidar un dominio que no sea solo el host', () => {
+      // 1. Arrange
+      const store = buildConfiguredStore();
+
+      // 2. Act
+      store.updateConfig({ excludedDomains: ['https://madrimasd.org/portal'] });
+
+      // 3. Assert: se bloquea el paso aqui, no con el 400 del guardado.
+      expect(store.areExcludedDomainsValid).toBe(false);
+      expect(store.isConfigValid).toBe(false);
+    });
+
+    it('9.3 deberia invalidar una lista mas larga que el tope', () => {
+      // 1. Arrange
+      const store = buildConfiguredStore();
+
+      // 2. Act
+      store.updateConfig({
+        excludedDomains: Array.from(
+          { length: MAX_EXCLUDED_DOMAINS + 1 },
+          (_, index) => `portal-${index}.example`,
+        ),
+      });
+
+      // 3. Assert
+      expect(store.isConfigValid).toBe(false);
+    });
+
+    it('9.4 deberia dar por valido el origen por criterio con dominios bien escritos', () => {
+      // 1. Arrange
+      const store = buildConfiguredStore();
+
+      // 2. Act
+      store.updateConfig({
+        targetUrl: LIST_TEMPLATE,
+        excludedDomains: ['madrimasd.org'],
+      });
+
+      // 3. Assert
+      expect(store.isFirstEligibleTarget).toBe(true);
+      expect(store.isConfigValid).toBe(true);
+    });
+
+    it('9.5 no deberia tomar una posicion fija por origen por criterio', () => {
+      // 1. Arrange & 2. Act: el modo se lee de la FORMA del origen, igual que
+      //    en la estrategia del backend.
+      const store = buildConfiguredStore();
+
+      // 3. Assert
+      expect(store.config.targetUrl).toBe(parsedEmailUrl(0));
+      expect(store.isFirstEligibleTarget).toBe(false);
+    });
+
+    it('9.6 deberia avisar del criterio sin ningun dominio excluido', () => {
+      // 1. Arrange
+      const store = buildConfiguredStore();
+
+      // 2. Act
+      store.updateConfig({ targetUrl: LIST_TEMPLATE, excludedDomains: [] });
+
+      // 3. Assert: no bloquea; solo dice que hoy equivale a la posicion 1.
+      expect(store.isConfigValid).toBe(true);
+      expect(store.configWarnings.some((warning) => warning.includes('posicion 1'))).toBe(true);
+    });
+
+    it('9.7 deberia avisar de dominios excluidos con una posicion fija', () => {
+      // 1. Arrange: el caso inverso, dominios que nadie llegara a consultar.
+      const store = buildConfiguredStore();
+
+      // 2. Act
+      store.updateConfig({ excludedDomains: ['madrimasd.org'] });
+
+      // 3. Assert
+      expect(
+        store.configWarnings.some((warning) => warning.includes('posicion fija')),
+      ).toBe(true);
+    });
+
+    it('9.8 deberia publicar la lista solo cuando no esta vacia', () => {
+      // 1. Arrange
+      const store = buildConfiguredStore();
+
+      // 2. Act & 3. Assert: ausencia es "no filtra nada".
+      expect(store.toNodeParams()).not.toHaveProperty('excludedDomains');
+
+      store.updateConfig({ excludedDomains: ['madrimasd.org'] });
+
+      expect(store.toNodeParams().excludedDomains).toEqual(['madrimasd.org']);
+    });
+
+    it('9.9 deberia restaurar la lista de un nodo guardado, con coercion', () => {
+      // 1. Arrange
+      const store = buildConfiguredStore();
+
+      // 2. Act: `pipeline_schema` es `jsonb` y pudo escribirse por SQL directo.
+      store.hydrateFromNode({
+        outputNamespace: 'scraped_web',
+        params: { excludedDomains: ['madrimasd.org', 42, null] },
+      });
+
+      // 3. Assert
+      expect(store.config.excludedDomains).toEqual(['madrimasd.org']);
+    });
+
+    it('9.10 deberia conservar los dominios que sembro la plantilla', () => {
+      // 1. Arrange: son una decision editorial del disenador de la plantilla,
+      //    no un valor de calibracion del flujo concreto.
+      const store = buildConfiguredStore();
+
+      // 2. Act
+      store.applyTemplateParams({
+        skipIfEmpty: false,
+        excludedDomains: ['madrimasd.org'],
+      });
+
+      // 3. Assert
+      expect(store.config.excludedDomains).toEqual(['madrimasd.org']);
+      expect(store.config.skipIfEmpty).toBe(false);
     });
   });
 });

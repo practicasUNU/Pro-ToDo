@@ -3,6 +3,7 @@ import { validate } from 'class-validator';
 
 import {
   DEFAULT_SCRAPER_MAX_RETRIES,
+  MAX_EXCLUDED_DOMAINS,
   DEFAULT_SCRAPER_RETRY_DELAY_MS,
   DEFAULT_SCRAPER_SKIP_IF_EMPTY,
   DEFAULT_SCRAPER_TIMEOUT_MS,
@@ -77,6 +78,7 @@ describe('WebScraperConfigDto', () => {
         maxRetries: DEFAULT_SCRAPER_MAX_RETRIES,
         retryDelayMs: DEFAULT_SCRAPER_RETRY_DELAY_MS,
         skipIfEmpty: DEFAULT_SCRAPER_SKIP_IF_EMPTY,
+        excludedDomains: [],
       });
     });
 
@@ -89,6 +91,105 @@ describe('WebScraperConfigDto', () => {
 
       // 3. Assert 🎯
       expect(config.skipIfEmpty).toBe(false);
+    });
+  });
+
+  /**
+   * El filtro que impide raspar el portal institucional propio.
+   *
+   * Se valida la FORMA —solo el host— porque la comparacion se hace contra
+   * `url.hostname`: un valor con esquema o ruta no coincidiria jamas y
+   * produciria un filtro silenciosamente inerte, que es peor que un 400.
+   */
+  describe('excludedDomains', () => {
+    it('deberia admitir la ausencia del campo', async () => {
+      // 1. Arrange 📐: el defecto es la lista vacia; el backend no cablea
+      //    ningun dominio de ningun cliente.
+      const params = {};
+
+      // 2. Act ⚙️
+      const errors = await validateParams(params);
+
+      // 3. Assert 🎯
+      expect(errors).toHaveLength(0);
+    });
+
+    it('deberia admitir una lista de hosts', async () => {
+      // 1. Arrange 📐
+      const params = {
+        excludedDomains: ['madrimasd.org', 'www.madrimasd.org'],
+      };
+
+      // 2. Act ⚙️
+      const errors = await validateParams(params);
+
+      // 3. Assert 🎯
+      expect(errors).toHaveLength(0);
+    });
+
+    it.each([
+      'https://madrimasd.org',
+      'madrimasd.org/portal-contratante',
+      'madrimasd.org:443',
+      ' madrimasd.org ',
+      'madrimasd.org.',
+      'madrimasd',
+    ])('deberia rechazar %p por no ser solo el host', async (domain) => {
+      // 1. Arrange 📐: el operador se entera al GUARDAR, con un mensaje de
+      //    campo, en vez de descubrir en produccion que el filtro no filtraba.
+      const params = { excludedDomains: [domain] };
+
+      // 2. Act ⚙️
+      const errors = await validateParams(params);
+
+      // 3. Assert 🎯
+      expect(errors).toHaveLength(1);
+      expect(errors[0].property).toBe('excludedDomains');
+    });
+
+    it('deberia rechazar una lista mas larga que el tope', async () => {
+      // 1. Arrange 📐: el tope es de diagnostico, no tecnico. Ver el TSDoc.
+      const params = {
+        excludedDomains: Array.from(
+          { length: MAX_EXCLUDED_DOMAINS + 1 },
+          (_, index) => `portal-${index}.example`,
+        ),
+      };
+
+      // 2. Act ⚙️
+      const errors = await validateParams(params);
+
+      // 3. Assert 🎯
+      expect(errors).toHaveLength(1);
+      expect(Object.values(errors[0].constraints ?? {})).toContain(
+        `excludedDomains no puede superar ${MAX_EXCLUDED_DOMAINS} entradas.`,
+      );
+    });
+
+    it('deberia rechazar un elemento que no sea cadena', async () => {
+      // 1. Arrange 📐: `pipeline_schema` es `jsonb` y pudo escribirse por SQL.
+      const params = { excludedDomains: [42] };
+
+      // 2. Act ⚙️
+      const errors = await validateParams(params);
+
+      // 3. Assert 🎯
+      expect(errors).toHaveLength(1);
+      expect(errors[0].property).toBe('excludedDomains');
+    });
+
+    it('deberia pasar a minusculas y deduplicar al resolver', () => {
+      // 1. Arrange 📐: `url.hostname` llega en minusculas, asi que la
+      //    conversion se hace una vez y no en cada comparacion.
+      const dto = plainToInstance(WebScraperConfigDto, {
+        excludedDomains: ['MadrimasD.ORG', 'madrimasd.org', 'Otro.example'],
+      });
+
+      // 2. Act ⚙️
+      const config = resolveWebScraperConfig(dto);
+
+      // 3. Assert 🎯
+      expect(config.excludedDomains).toEqual(['madrimasd.org', 'otro.example']);
     });
   });
 });

@@ -4,6 +4,10 @@ import { computed } from 'vue';
 import { useQuasar } from 'quasar';
 
 import {
+  EXCLUDED_DOMAIN_PATTERN,
+  EXCLUDED_DOMAIN_RULE,
+  EXCLUDED_DOMAIN_SUGGESTIONS,
+  MAX_EXCLUDED_DOMAINS,
   MAX_RETRIES_RULE,
   MAX_SCRAPER_RETRIES,
   MAX_SCRAPER_RETRY_DELAY_MS,
@@ -47,6 +51,9 @@ const SKIP_IF_EMPTY_LOCKED_HINT =
 const RETRY_TOOLTIP =
   'Reintento rapido de red: cubre el corte puntual de conexion. Es independiente del "retryPolicy" del flujo, y las dos capas se multiplican.';
 
+const EXCLUDED_DOMAINS_HINT =
+  'Dominios que este nodo nunca navega, subdominios incluidos. El enlace al portal propio que viaja en el correo es un metadato de enrutado editorial para el destino, no la noticia: excluirlo hace que "primer enlace elegible" acierte con el articulo de verdad.';
+
 const SANDBOX_HINT =
   'Se prueba contra una URL REAL y completa, no contra la posicion elegida arriba: en tiempo de diseno el correo todavia no ha llegado.';
 
@@ -68,6 +75,23 @@ const onTargetUrlChange = (targetUrl: string): void => {
 const onSkipIfEmptyChange = (skipIfEmpty: boolean): void => {
   store.updateConfig({ skipIfEmpty });
 };
+
+const onExcludedDomainsChange = (domains: readonly string[] | null): void => {
+  // Se normaliza a minusculas aqui y no al comparar: `url.hostname` llega
+  // siempre asi, y el backend hace lo mismo al resolver la configuracion.
+  store.updateConfig({
+    excludedDomains: [...new Set((domains ?? []).map((domain) => domain.trim().toLowerCase()))],
+  });
+};
+
+/** Regla de campo de los chips. Replica el `@Matches({ each: true })` del DTO. */
+const excludedDomainsRules = [
+  (domains: readonly string[] | null): boolean | string =>
+    (domains ?? []).every((domain) => EXCLUDED_DOMAIN_PATTERN.test(domain)) || EXCLUDED_DOMAIN_RULE,
+  (domains: readonly string[] | null): boolean | string =>
+    (domains ?? []).length <= MAX_EXCLUDED_DOMAINS ||
+    `No mas de ${MAX_EXCLUDED_DOMAINS} dominios excluidos`,
+];
 
 const onNumberChange = (
   field: 'timeoutMs' | 'maxRetries' | 'retryDelayMs',
@@ -207,6 +231,27 @@ const onRunSandboxTest = async (): Promise<void> => {
     >
       {{ SKIP_IF_EMPTY_LOCKED_HINT }}
     </p>
+    <br>
+
+    <!-- Campo 1c: dominios excluidos de la extraccion -->
+    <label class="pd-label" for="excluded-domains">Dominios que no se extraen</label>
+    <q-select
+      id="excluded-domains"
+      outlined
+      dense
+      multiple
+      use-chips
+      use-input
+      hide-dropdown-icon
+      new-value-mode="add-unique"
+      data-test="excluded-domains-select"
+      :model-value="store.config.excludedDomains"
+      :options="EXCLUDED_DOMAIN_SUGGESTIONS"
+      :rules="excludedDomainsRules"
+      :hint="EXCLUDED_DOMAINS_HINT"
+      class="q-mb-md pd-excluded-domains"
+      @update:model-value="onExcludedDomainsChange"
+    />
 
     <!-- Campo 2: espera de carga -->
     <label class="pd-label" for="timeout-ms">Espera maxima de carga</label>
@@ -442,6 +487,14 @@ const onRunSandboxTest = async (): Promise<void> => {
 // Las plantillas y las URL son largas y no tienen espacios donde partir.
 .pd-url-option {
   word-break: break-all;
+}
+
+// Chips de dominio excluido: mismo par de tokens que los chips de variable del
+// sistema de diseno (regla §2, Formularios -> selectores deterministas).
+.pd-excluded-domains :deep(.q-chip) {
+  background: var(--pd-surface-muted);
+  color: var(--pd-accent-text);
+  font-family: inherit;
 }
 
 // Campos e inputs sobre los tokens del sistema (regla §2, Formularios). Mismo

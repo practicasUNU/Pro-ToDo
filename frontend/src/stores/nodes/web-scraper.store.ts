@@ -45,6 +45,34 @@ export const MIN_SCRAPER_RETRY_DELAY_MS = 500;
 export const MAX_SCRAPER_RETRY_DELAY_MS = 10_000;
 
 /**
+ * Tope de dominios excluidos, replica de `MAX_EXCLUDED_DOMAINS` del DTO.
+ */
+export const MAX_EXCLUDED_DOMAINS = 20;
+
+/**
+ * Forma admitida de un dominio excluido: SOLO el host.
+ *
+ * Replica `EXCLUDED_DOMAIN_PATTERN` del backend, que es quien decide. Sin esta
+ * copia, teclear `https://madrimasd.org/portal` en los chips se saldria con la
+ * suya hasta el 400 del guardado, y el operador leeria un error de servidor
+ * donde deberia haber leido una regla de campo.
+ */
+export const EXCLUDED_DOMAIN_PATTERN =
+  /^(?!-)[a-z0-9-]+(?<!-)(?:\.(?!-)[a-z0-9-]+(?<!-))+$/i;
+
+/**
+ * Dominios que el desplegable OFRECE, nunca los que siembra.
+ *
+ * El portal institucional propio es el caso que motiva el filtro: su enlace
+ * viaja en el correo como metadato de enrutado editorial para el destino, no
+ * como la noticia que hay que raspar. Se ofrece como sugerencia y no como valor
+ * por defecto porque el backend mantiene su DTO neutro —ningun dominio de
+ * ningun cliente cableado— y porque sembrarlo cambiaria el comportamiento de
+ * todo flujo que se reabra sin que nadie lo haya pedido.
+ */
+export const EXCLUDED_DOMAIN_SUGGESTIONS: readonly string[] = ['madrimasd.org'];
+
+/**
  * Cuantas posiciones ofrece el selector por cada campo de tipo `url[]`.
  *
  * DIEZ, y no las cincuenta que el backend admite como tope: el selector no es un
@@ -75,6 +103,8 @@ export const INTERPOLATION_ONLY_PATTERN =
 export const TIMEOUT_RULE = `La espera debe estar entre ${MIN_SCRAPER_TIMEOUT_MS} y ${MAX_SCRAPER_TIMEOUT_MS} ms`;
 export const MAX_RETRIES_RULE = `Los reintentos deben estar entre 0 y ${MAX_SCRAPER_RETRIES}`;
 export const RETRY_DELAY_RULE = `La espera entre reintentos debe estar entre ${MIN_SCRAPER_RETRY_DELAY_MS} y ${MAX_SCRAPER_RETRY_DELAY_MS} ms`;
+export const EXCLUDED_DOMAIN_RULE =
+  'Escribe solo el host (ej. madrimasd.org), sin https:// ni rutas';
 
 /** Opcion del selector determinista de URL. */
 export interface TargetUrlOption {
@@ -89,6 +119,13 @@ export const urlTemplateFor = (namespace: string, field: string): string =>
 /** Plantilla de interpolacion de la posicion `index` de un campo de arreglo. */
 export const indexedUrlTemplateFor = (namespace: string, field: string, index: number): string =>
   `{{${namespace}.${field}[${index}]}}`;
+
+/**
+ * Etiqueta de la opcion que delega la eleccion en el nodo.
+ *
+ * Se exporta para que las pruebas la aseveren sin recopiarla.
+ */
+export const FIRST_ELIGIBLE_LABEL_SUFFIX = 'primer enlace elegible';
 
 /**
  * Opciones del selector: POSICIONES del contexto, no URLs.
@@ -134,10 +171,23 @@ const buildUrlOptions = (context: readonly UpstreamNamespace[]): readonly Target
 
       if (field.type !== 'url[]') return [];
 
-      return Array.from({ length: SELECTABLE_URL_SLOTS }, (_, index) => ({
-        label: `${namespace}.${field.name} — posicion ${index + 1}`,
-        value: indexedUrlTemplateFor(namespace, field.name, index),
-      }));
+      // LA PRIMERA opcion del arreglo no es una posicion: es un CRITERIO. El
+      // enlace del portal propio y el de la noticia llegan en el mismo correo y
+      // su orden cambia de un dia para otro, asi que fijar la posicion 1 raspa
+      // tan pronto uno como el otro. Delegando en el nodo, la eleccion la hace
+      // "no ser un dominio excluido", que si es estable. Va la primera porque es
+      // la respuesta correcta en el caso normal; las posiciones se quedan para
+      // el correo de formato fijo.
+      return [
+        {
+          label: `${namespace}.${field.name} — ${FIRST_ELIGIBLE_LABEL_SUFFIX} (salta los dominios excluidos)`,
+          value: urlTemplateFor(namespace, field.name),
+        },
+        ...Array.from({ length: SELECTABLE_URL_SLOTS }, (_, index) => ({
+          label: `${namespace}.${field.name} — posicion ${index + 1}`,
+          value: indexedUrlTemplateFor(namespace, field.name, index),
+        })),
+      ];
     }),
   );
 
@@ -156,6 +206,7 @@ const buildInitialConfig = (): WebScraperConfigDto => ({
   maxRetries: DEFAULT_SCRAPER_MAX_RETRIES,
   retryDelayMs: DEFAULT_SCRAPER_RETRY_DELAY_MS,
   skipIfEmpty: DEFAULT_SCRAPER_SKIP_IF_EMPTY,
+  excludedDomains: [],
 });
 
 /** Coercion defensiva de una clave textual del `jsonb`. */
@@ -168,6 +219,10 @@ const asNumber = (value: unknown, fallback: number): number =>
 /** Coercion defensiva de una clave booleana del `jsonb`. */
 const asBoolean = (value: unknown, fallback: boolean): boolean =>
   typeof value === 'boolean' ? value : fallback;
+
+/** Coercion defensiva de una lista de dominios del `jsonb`. */
+const asDomainList = (value: unknown): string[] =>
+  Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string') : [];
 
 /** Entero dentro de un rango cerrado. */
 const isIntegerInRange = (value: number, min: number, max: number): boolean =>
@@ -267,11 +322,39 @@ const webScraperSetup = () => {
       urlOptions.value.some((option) => option.value === config.value.targetUrl),
   );
 
+  /**
+   * El origen elegido delega la seleccion en el nodo.
+   *
+   * Se deduce de la FORMA del origen —una marca sin indice de arreglo— y no de
+   * un campo aparte, igual que hace la estrategia del backend: dos fuentes para
+   * la misma decision admitirian estados incoherentes (una posicion fija junto
+   * a un modo "primer elegible") y alguien tendria que arbitrar cual gana.
+   */
+  const isFirstEligibleTarget = computed<boolean>(
+    () =>
+      config.value.targetUrl.length > 0 &&
+      !config.value.targetUrl.includes('[') &&
+      urlOptions.value.some((option) => option.value === config.value.targetUrl),
+  );
+
+  /**
+   * Los dominios excluidos estan bien escritos y no pasan del tope.
+   *
+   * Replica lo que el `@Matches({ each: true })` del DTO decide; esta copia solo
+   * adelanta el rechazo al formulario.
+   */
+  const areExcludedDomainsValid = computed<boolean>(
+    () =>
+      config.value.excludedDomains.length <= MAX_EXCLUDED_DOMAINS &&
+      config.value.excludedDomains.every((domain) => EXCLUDED_DOMAIN_PATTERN.test(domain)),
+  );
+
   const isConfigValid = computed<boolean>(
     () =>
       (config.value.targetUrl.length === 0
         ? config.value.skipIfEmpty
         : isUrlSourceValid.value) &&
+      areExcludedDomainsValid.value &&
       isIntegerInRange(config.value.timeoutMs, MIN_SCRAPER_TIMEOUT_MS, MAX_SCRAPER_TIMEOUT_MS) &&
       isIntegerInRange(config.value.maxRetries, 0, MAX_SCRAPER_RETRIES) &&
       isIntegerInRange(
@@ -299,6 +382,28 @@ const webScraperSetup = () => {
     if (config.value.skipIfEmpty && config.value.targetUrl.length === 0) {
       warnings.push(
         'Este nodo se saltara: no hay origen seleccionado y "Omitir extraccion" esta activo. El flujo continuara con los campos de "scraped_web" en blanco.',
+      );
+    }
+
+    // El origen "primer enlace elegible" sin ningun dominio excluido NO es un
+    // error: es, exactamente, la posicion 1. El aviso existe porque esa
+    // equivalencia no se ve en el formulario, y quien eligio el criterio creia
+    // estar filtrando algo.
+    if (isFirstEligibleTarget.value && config.value.excludedDomains.length === 0) {
+      warnings.push(
+        'El origen toma el primer enlace elegible, pero no hay ningun dominio excluido: hoy equivale a la posicion 1. Anade el portal institucional si lo que quieres es saltartelo.',
+      );
+    }
+
+    // El caso inverso: se declararon dominios que nadie va a consultar, porque
+    // una posicion fija solo puede acertar o quedarse sin candidato.
+    if (
+      config.value.excludedDomains.length > 0 &&
+      config.value.targetUrl.length > 0 &&
+      !isFirstEligibleTarget.value
+    ) {
+      warnings.push(
+        'Hay dominios excluidos pero el origen es una posicion fija: si justo esa posicion cae en un dominio excluido, el nodo se saltara en vez de probar la siguiente. Elige "primer enlace elegible" para que el filtro decida.',
       );
     }
 
@@ -354,9 +459,21 @@ const webScraperSetup = () => {
    * escribirse por SQL directo, donde la cadena `'false'` es *truthy*.
    */
   const applyTemplateParams = (params: Record<string, unknown>): void => {
-    if (typeof params.skipIfEmpty !== 'boolean') return;
+    if (typeof params.skipIfEmpty === 'boolean') {
+      config.value = { ...config.value, skipIfEmpty: params.skipIfEmpty };
+    }
 
-    config.value = { ...config.value, skipIfEmpty: params.skipIfEmpty };
+    // Tambien los dominios excluidos: son una decision EDITORIAL del disenador
+    // de la plantilla ("este flujo nunca raspa el portal propio"), no un valor
+    // de calibracion del flujo concreto. Perderlos al instanciar obligaria a
+    // redescubrirlos en cada flujo nuevo, y el primero en notarlo seria el
+    // articulo publicado con el contenido equivocado.
+    if (Array.isArray(params.excludedDomains)) {
+      config.value = {
+        ...config.value,
+        excludedDomains: asDomainList(params.excludedDomains),
+      };
+    }
   };
 
   /** Se puede probar cuando hay una URL real escrita y no hay otra prueba en vuelo. */
@@ -485,6 +602,13 @@ const webScraperSetup = () => {
     // es auditable por quien revise la plantilla despues.
     params.skipIfEmpty = config.value.skipIfEmpty;
 
+    // Se OMITE la lista vacia, como `targetUrl`: ausencia es "no filtra nada", y
+    // publicar `[]` llenaria de ruido todo esquema guardado sin decir nada que
+    // el defecto no diga ya.
+    if (config.value.excludedDomains.length > 0) {
+      params.excludedDomains = [...config.value.excludedDomains];
+    }
+
     if (config.value.timeoutMs !== DEFAULT_SCRAPER_TIMEOUT_MS) {
       params.timeoutMs = config.value.timeoutMs;
     }
@@ -524,6 +648,7 @@ const webScraperSetup = () => {
       maxRetries: asNumber(params.maxRetries, DEFAULT_SCRAPER_MAX_RETRIES),
       retryDelayMs: asNumber(params.retryDelayMs, DEFAULT_SCRAPER_RETRY_DELAY_MS),
       skipIfEmpty: asBoolean(params.skipIfEmpty, DEFAULT_SCRAPER_SKIP_IF_EMPTY),
+      excludedDomains: asDomainList(params.excludedDomains),
     };
     invalidateSandboxResult();
   };
@@ -545,6 +670,8 @@ const webScraperSetup = () => {
     hasUrlSource,
     hasStaleTargetUrl,
     isUrlSourceValid,
+    isFirstEligibleTarget,
+    areExcludedDomainsValid,
     isSkipIfEmptyLocked,
     isConfigValid,
     configWarnings,

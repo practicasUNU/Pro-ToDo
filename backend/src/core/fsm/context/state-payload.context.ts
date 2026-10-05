@@ -33,11 +33,28 @@ export const INTERPOLATION_PATTERN =
  * `https://otro-portal.es/?x={{ns.campo}}` pasaria el filtro: seria una URL
  * literal disfrazada, que es justo lo que el campo deja de admitir.
  *
- * Sin grupo de captura, a diferencia de su hermano: aqui solo se responde si o
- * no. De extraer la raiz se encarga `extractNamespaceRoots`.
+ * CON grupo de captura, para que quien necesite la ruta entera no tenga que
+ * escribir una segunda version anclada del mismo patron. Es la razon de que
+ * `INTERPOLATION_ONLY_PATTERN` sea un ALIAS de este objeto y no un literal
+ * aparte: un grupo de captura no altera lo que `.test()` responde, de modo que
+ * quien solo pregunta "si o no" obtiene exactamente el comportamiento anterior,
+ * y quien necesita la ruta la lee del mismo sitio. Dos literales equivalentes
+ * acabarian divergiendo, que es el fallo que este archivo viene evitando.
+ *
+ * El objeto se puede compartir porque NO lleva la bandera `g`: sin ella no hay
+ * `lastIndex` que arrastrar entre llamadas.
  */
-export const INTERPOLATION_ONLY_PATTERN =
-  /^\{\{\s*[a-zA-Z0-9_]+(?:\.[a-zA-Z0-9_]+|\[\d+\])+\s*\}\}$/;
+export const INTERPOLATION_ONLY_PATH_PATTERN =
+  /^\{\{\s*([a-zA-Z0-9_]+(?:\.[a-zA-Z0-9_]+|\[\d+\])+)\s*\}\}$/;
+
+/**
+ * El mismo patron anclado, leido como una pregunta de si o no.
+ *
+ * Lo consumen los `@Matches` de los DTO, que solo deciden QUE se admite. De
+ * extraer la raiz sigue encargandose `extractNamespaceRoots`; de extraer la ruta
+ * completa, `INTERPOLATION_ONLY_PATH_PATTERN`.
+ */
+export const INTERPOLATION_ONLY_PATTERN = INTERPOLATION_ONLY_PATH_PATTERN;
 
 /** Normaliza `urls[0]` a `urls.0`: una sola gramatica que recorrer. */
 const BRACKET_INDEX_PATTERN = /\[(\d+)\]/g;

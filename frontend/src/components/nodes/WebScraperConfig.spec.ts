@@ -24,6 +24,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import WebScraperConfig from '@components/nodes/WebScraperConfig.vue';
 import {
+  EXCLUDED_DOMAIN_SUGGESTIONS,
   indexedUrlTemplateFor,
   SELECTABLE_URL_SLOTS,
   useWebScraperStore,
@@ -51,6 +52,21 @@ const PARSER_UPSTREAM: UpstreamNamespace[] = [
     fields: [{ name: 'extracted_urls', type: 'url[]' }],
   },
 ];
+
+/**
+ * El `QSelect` de chips de dominios, localizado por su clase.
+ *
+ * Por COMPONENTE y no por elemento: hace falta el componente que emite
+ * `update:model-value`, y desde el nodo raiz ya no se puede subir hasta el.
+ * Se filtra por CLASE y no por `data-test` porque `QSelect` no propaga a su raiz
+ * los atributos que no conoce —se ve en el DOM renderizado—, mientras que
+ * `class` si llega. Es el mismo motivo por el que el resto del archivo localiza
+ * los selects por nombre de componente.
+ */
+const findExcludedDomainsSelect = (wrapper: ReturnType<typeof mountComponent>) =>
+  wrapper
+    .findAllComponents({ name: 'QSelect' })
+    .filter((select) => select.classes().includes('pd-excluded-domains'))[0];
 
 /** Plantilla de la posicion `index` de los enlaces del parser. */
 const parsedEmailUrl = (index: number): string =>
@@ -145,10 +161,11 @@ describe('WebScraperConfig · configurador del nodo EXTRACTOR_WEB', () => {
       // 2. Act: las opciones las compone la TOPOLOGIA, no una constante.
       store.setAvailableUpstreamContext(PARSER_UPSTREAM);
 
-      // 3. Assert: son POSICIONES, no URLs: en tiempo de diseno el correo
-      //    todavia no ha llegado.
-      expect(store.urlOptions).toHaveLength(SELECTABLE_URL_SLOTS);
-      expect(store.urlOptions[0]?.value).toBe(parsedEmailUrl(0));
+      // 3. Assert: son CRITERIOS y POSICIONES, nunca URLs: en tiempo de
+      //    diseno el correo todavia no ha llegado. La primera opcion delega la
+      //    eleccion en el nodo; las diez siguientes fijan la posicion.
+      expect(store.urlOptions).toHaveLength(SELECTABLE_URL_SLOTS + 1);
+      expect(store.urlOptions[1]?.value).toBe(parsedEmailUrl(0));
     });
 
     it('1.3 deberia deshabilitar el selector sin origenes aguas arriba', async () => {
@@ -251,6 +268,35 @@ describe('WebScraperConfig · configurador del nodo EXTRACTOR_WEB', () => {
       // 3. Assert: el componente no guarda estado propio; el dueno de la
       //    configuracion es el store (regla §5).
       expect(store.config.targetUrl).toBe(parsedEmailUrl(2));
+    });
+
+    it('2.3 deberia escribir en el store los dominios excluidos, normalizados', async () => {
+      // 1. Arrange
+      const wrapper = mountComponent();
+      const store = useWebScraperStore(NODE_ID);
+
+      // 2. Act: el evento que emite el `QSelect` de chips al anadir uno.
+      await findExcludedDomainsSelect(wrapper)?.vm.$emit('update:model-value', [
+        'MadrimasD.ORG',
+        ' madrimasd.org ',
+      ]);
+
+      // 3. Assert: a minusculas y sin repetir, igual que hace el backend al
+      //    resolver la configuracion.
+      expect(store.config.excludedDomains).toEqual(['madrimasd.org']);
+    });
+
+    it('2.4 deberia ofrecer el portal institucional como SUGERENCIA, no como valor', () => {
+      // 1. Arrange & 2. Act
+      const wrapper = mountComponent();
+      const store = useWebScraperStore(NODE_ID);
+
+      // 3. Assert: la lista arranca vacia; sembrarla cambiaria el
+      //    comportamiento de todo flujo que se reabra sin que nadie lo pida.
+      expect(store.config.excludedDomains).toEqual([]);
+      expect(findExcludedDomainsSelect(wrapper)?.props('options')).toEqual([
+        ...EXCLUDED_DOMAIN_SUGGESTIONS,
+      ]);
     });
 
     it('2.2 deberia reflejar en el badge la validez que declara el store', async () => {

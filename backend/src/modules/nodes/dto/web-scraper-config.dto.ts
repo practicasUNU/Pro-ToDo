@@ -1,5 +1,7 @@
 import { ApiPropertyOptional } from '@nestjs/swagger';
 import {
+  ArrayMaxSize,
+  IsArray,
   IsBoolean,
   IsInt,
   IsNotEmpty,
@@ -49,6 +51,30 @@ export const MIN_SCRAPER_RETRY_DELAY_MS = 500;
 export const MAX_SCRAPER_RETRY_DELAY_MS = 10_000;
 
 /**
+ * Tope de dominios excluidos por nodo.
+ *
+ * No es una restriccion tecnica sino de diagnostico: la exclusion se recorre por
+ * cada URL candidata, y una lista de cien dominios deja de ser una decision
+ * editorial legible para convertirse en un filtro que nadie sabe por que
+ * descarto el enlace del dia.
+ */
+export const MAX_EXCLUDED_DOMAINS = 20;
+
+/**
+ * Forma admitida de un dominio excluido: SOLO el host.
+ *
+ * Se rechaza a proposito `https://madrimasd.org/portal` y cualquier cosa con
+ * esquema, ruta, puerto o barra. La comparacion se hace contra `url.hostname`,
+ * asi que un valor con mas partes no coincidiria NUNCA: aceptarlo produciria un
+ * filtro silenciosamente inerte, que es peor que un 400 al guardar.
+ *
+ * Admite etiquetas alfanumericas con guiones interiores, al menos dos niveles
+ * (`madrimasd.org`), y no exige TLD conocido.
+ */
+export const EXCLUDED_DOMAIN_PATTERN =
+  /^(?!-)[a-z0-9-]+(?<!-)(?:\.(?!-)[a-z0-9-]+(?<!-))+$/i;
+
+/**
  * Por defecto, un extractor sin origen se SALTA en vez de romper el flujo.
  *
  * Se elige este defecto porque el modo de fallo que cubre —el correo que no
@@ -82,7 +108,7 @@ export const DEFAULT_SCRAPER_SKIP_IF_EMPTY = true;
 export class WebScraperConfigDto {
   @ApiPropertyOptional({
     description:
-      'URL del articulo a extraer. Si viene, DEBE ser una variable interpolada contra el contexto acumulado, p. ej. "{{parsed_email.extracted_urls[0]}}". Opcional al GUARDAR (una plantilla de flujo declara topologia, no operativa) y obligatorio al ACTIVAR, que es donde lo exige `getIncompleteParams`.',
+      'Origen del enlace a extraer. Si viene, DEBE ser una variable interpolada contra el contexto acumulado, en una de sus dos formas: una POSICION concreta ("{{parsed_email.extracted_urls[0]}}") o el ARREGLO entero ("{{parsed_email.extracted_urls}}"), que toma el primer enlace elegible segun "excludedDomains". Opcional al GUARDAR (una plantilla de flujo declara topologia, no operativa) y obligatorio al ACTIVAR, que es donde lo exige `getIncompleteParams`.',
     example: '{{parsed_email.extracted_urls[0]}}',
   })
   // OPCIONAL, y esto es una decision sobre QUE significa guardar. Una plantilla
@@ -178,6 +204,33 @@ export class WebScraperConfigDto {
   @IsOptional()
   @IsBoolean({ message: 'skipIfEmpty debe ser un booleano.' })
   skipIfEmpty?: boolean;
+
+  @ApiPropertyOptional({
+    description:
+      'Dominios que este nodo NUNCA navega (p. ej. el portal institucional propio, cuyo enlace en el correo es un metadato de enrutado editorial y no la noticia). Se comparan contra el host de la URL ya resuelta, incluyendo subdominios. Por defecto, lista vacia.',
+    example: ['madrimasd.org'],
+    maxItems: MAX_EXCLUDED_DOMAINS,
+    type: [String],
+  })
+  // DEFECTO VACIO, y es una decision: el backend no cablea ningun dominio de
+  // ningun cliente. La sugerencia institucional la ofrece el asistente, donde el
+  // operador la acepta o la quita; sembrarla aqui se la impondria ademas a todo
+  // flujo ya guardado, que nadie pidio cambiar.
+  @IsOptional()
+  @IsArray({ message: 'excludedDomains debe ser un arreglo.' })
+  @ArrayMaxSize(MAX_EXCLUDED_DOMAINS, {
+    message: `excludedDomains no puede superar ${MAX_EXCLUDED_DOMAINS} entradas.`,
+  })
+  @IsString({
+    each: true,
+    message: 'Cada dominio excluido debe ser una cadena.',
+  })
+  @Matches(EXCLUDED_DOMAIN_PATTERN, {
+    each: true,
+    message:
+      'Cada dominio excluido debe ser solo el host (p. ej. "madrimasd.org"), sin esquema, puerto ni ruta.',
+  })
+  excludedDomains?: string[];
 }
 
 /** Configuracion del extractor con los valores por defecto ya aplicados. */
@@ -187,7 +240,27 @@ export interface ResolvedWebScraperConfig {
   readonly maxRetries: number;
   readonly retryDelayMs: number;
   readonly skipIfEmpty: boolean;
+  readonly excludedDomains: readonly string[];
 }
+
+/**
+ * Pasa la lista de exclusion a minusculas y la deduplica.
+ *
+ * `url.hostname` llega siempre en minusculas, asi que la conversion se hace UNA
+ * vez aqui y no en cada comparacion; el `@Matches` admite las mayusculas porque
+ * es lo unico que un dominio tecleado puede traer de mas sin dejar de ser un
+ * host. Nada mas se "arregla" en esta funcion: corre DESPUES de la validacion,
+ * de modo que recortar aqui espacios o un punto final seria limpiar algo que el
+ * DTO ya ha rechazado con un 400, y daria a entender que se aceptan.
+ *
+ * Se deduplica porque la lista la escribe una persona y repetir un dominio no
+ * cambia el resultado, solo gasta comparaciones por cada URL candidata.
+ */
+const normalizeExcludedDomains = (
+  domains: readonly string[],
+): readonly string[] => [
+  ...new Set(domains.map((domain) => domain.toLowerCase())),
+];
 
 /** Aplica los valores por defecto sobre un DTO ya validado. Funcion pura. */
 export const resolveWebScraperConfig = (
@@ -201,4 +274,5 @@ export const resolveWebScraperConfig = (
   maxRetries: dto.maxRetries ?? DEFAULT_SCRAPER_MAX_RETRIES,
   retryDelayMs: dto.retryDelayMs ?? DEFAULT_SCRAPER_RETRY_DELAY_MS,
   skipIfEmpty: dto.skipIfEmpty ?? DEFAULT_SCRAPER_SKIP_IF_EMPTY,
+  excludedDomains: normalizeExcludedDomains(dto.excludedDomains ?? []),
 });
