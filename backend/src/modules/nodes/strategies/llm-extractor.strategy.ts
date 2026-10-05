@@ -26,6 +26,7 @@ import {
 import { MockLlmProvider } from '@modules/nodes/strategies/providers/mock-llm.provider';
 
 import type { StatePayloadContext } from '@core/fsm/context/state-payload.context';
+import type { PromptReference } from '@core/fsm/types/prompt-text-resolver.port';
 import type {
   INodeStrategy,
   NodeErrorDetail,
@@ -391,6 +392,40 @@ export class LlmExtractorStrategy implements INodeStrategy {
     return typeof params.inlinePrompt === 'string'
       ? extractNamespaceRoots(params.inlinePrompt)
       : [];
+  }
+
+  /**
+   * Prompt guardado que este nodo cita, si cita alguno.
+   *
+   * Es la mitad que `getRequiredNamespaces` no puede cubrir. Aquel solo ve
+   * `inlinePrompt`, porque es puro y sincrono y el texto de una plantilla vive
+   * en `plantillas_prompts_ia`; sin esto, un flujo que resuelve su instruccion
+   * por codigo parece no depender de ningun namespace, y un
+   * `{{scraped_web.full_article_content}}` dentro de ese prompt —como el que
+   * trae `NOTIWEB_DEFAULT`— no se detectaba hasta reventar en ejecucion.
+   *
+   * MISMA PRECEDENCIA QUE `resolvePrompt`: `templatePromptId` gana a
+   * `promptCode`. Devolver las dos referencias cuando ambas estan declaradas
+   * haria que el validador exigiera los namespaces de un prompt que la ejecucion
+   * nunca va a leer.
+   *
+   * `inlinePrompt` no entra: su texto esta en los `params` y ya lo analiza
+   * `getRequiredNamespaces`.
+   */
+  public getPromptReferences(
+    params: Record<string, unknown>,
+  ): readonly PromptReference[] {
+    const { templatePromptId, promptCode } = params;
+
+    if (typeof templatePromptId === 'string' && templatePromptId.trim() !== '') {
+      return [{ kind: 'id', value: templatePromptId.trim() }];
+    }
+
+    if (typeof promptCode === 'string' && promptCode.trim() !== '') {
+      return [{ kind: 'code', value: promptCode.trim() }];
+    }
+
+    return [];
   }
 
   /**

@@ -403,6 +403,116 @@ describe('validatePipelineTopology', () => {
       expect(issues[0].constraints[0]).toContain('parsed_email');
     });
 
+    it('7.10 deberia rechazar un PROCESADOR_IA con el mapeador DETRAS', () => {
+      // 1. Arrange: el orden que el cambio de semantica invirtio. El mapeador
+      //    publica `rendered_html` y ahora debe ir DELANTE de la inferencia,
+      //    porque es la IA quien rellena la plantilla que aquel inyecta.
+      const schema = buildSchema();
+
+      schema.nodes.nodo_parser.nextStep = 'nodo_ia';
+      schema.nodes.nodo_ia = {
+        nodeId: 'nodo_ia',
+        nodeType: NodeType.PROCESADOR_IA,
+        outputNamespace: 'llm_response',
+        nextStep: 'nodo_mapeador',
+        onErrorStep: null,
+        params: {},
+      };
+      schema.nodes.nodo_mapeador = {
+        nodeId: 'nodo_mapeador',
+        nodeType: NodeType.MAPEADOR_PLANTILLA,
+        outputNamespace: 'rendered_html',
+        nextStep: null,
+        onErrorStep: null,
+        params: { templateId: 'tpl-1' },
+      };
+      delete schema.nodes.nodo_extractor;
+
+      // 2. Act: la instruccion de la IA cita la plantilla base
+      const issues = validatePipelineTopology(
+        schema,
+        requiring({ [NodeType.PROCESADOR_IA]: ['rendered_html'] }),
+      );
+
+      // 3. Assert
+      expect(fieldsOf(issues)).toEqual(['nodes.nodo_ia.params']);
+      expect(issues[0].code).toBe('ERR_MISSING_UPSTREAM_CONTEXT');
+      expect(issues[0].constraints[0]).toContain('rendered_html');
+    });
+
+    it('7.11 deberia aceptar el PROCESADOR_IA con el mapeador DELANTE', () => {
+      // 1. Arrange: el mismo flujo en el orden previsto
+      const schema = buildSchema();
+
+      schema.nodes.nodo_parser.nextStep = 'nodo_mapeador';
+      schema.nodes.nodo_mapeador = {
+        nodeId: 'nodo_mapeador',
+        nodeType: NodeType.MAPEADOR_PLANTILLA,
+        outputNamespace: 'rendered_html',
+        nextStep: 'nodo_ia',
+        onErrorStep: null,
+        params: { templateId: 'tpl-1' },
+      };
+      schema.nodes.nodo_ia = {
+        nodeId: 'nodo_ia',
+        nodeType: NodeType.PROCESADOR_IA,
+        outputNamespace: 'llm_response',
+        nextStep: null,
+        onErrorStep: null,
+        params: {},
+      };
+      delete schema.nodes.nodo_extractor;
+
+      // 2. Act
+      const issues = validatePipelineTopology(
+        schema,
+        requiring({ [NodeType.PROCESADOR_IA]: ['rendered_html'] }),
+      );
+
+      // 3. Assert
+      expect(issues).toHaveLength(0);
+    });
+
+    it('7.12 deberia nombrar la procedencia de una dependencia no escrita en params', () => {
+      // 1. Arrange: un namespace heredado de un prompt guardado no aparece en
+      //    los `params` del nodo. Sin decir de donde sale, el operador leeria
+      //    "necesitas scraped_web" y no tendria donde buscarlo.
+      const schema = buildSchema();
+
+      schema.nodes.nodo_parser.nextStep = null;
+      delete schema.nodes.nodo_extractor;
+
+      // 2. Act
+      const issues = validatePipelineTopology(schema, {
+        ...requiring({ [NodeType.PARSER_PRE_IA]: ['scraped_web'] }),
+        dependencyOrigins: () =>
+          new Map([['scraped_web', 'el prompt "NOTIWEB_DEFAULT"']]),
+      });
+
+      // 3. Assert
+      expect(issues[0].constraints[0]).toContain('NOTIWEB_DEFAULT');
+      expect(issues[0].constraints[0]).toContain('scraped_web');
+    });
+
+    it('7.13 deberia conservar el mensaje escueto sin resolutor de procedencias', () => {
+      // 1. Arrange: el resolutor es opcional y las 9 pruebas anteriores no lo
+      //    pasan; el mensaje de siempre tiene que seguir saliendo igual.
+      const schema = buildSchema();
+
+      schema.nodes.nodo_parser.nextStep = null;
+      delete schema.nodes.nodo_extractor;
+
+      // 2. Act
+      const issues = validatePipelineTopology(
+        schema,
+        requiring({ [NodeType.PARSER_PRE_IA]: ['scraped_web'] }),
+      );
+
+      // 3. Assert
+      expect(issues[0].constraints[0]).toContain('[scraped_web]');
+      expect(issues[0].constraints[0]).not.toContain('lo cita');
+    });
+
     it('7.9 no deberia poner codigo en las incidencias de otras reglas', () => {
       // 1. Arrange
       const schema = buildSchema();

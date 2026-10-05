@@ -6669,3 +6669,117 @@ aunque el flujo lo coloque antes") ya no describe al mapeador.
 
 Backend 1603 en verde (34 de la estrategia, 20 del DTO). Frontend 704. `npx tsc --noEmit` mantiene
 los 89 errores preexistentes, ninguno nuevo. Build de Quasar correcto.
+
+---
+
+## PROT-24 · Los prompts guardados dejan de ser un punto ciego del validador
+
+Misma rama `feat/mapeador-inyeccion`. El encargo pedia construir validacion topologica de
+dependencias de namespaces; esa validacion ya existia —la regla 7, `detectUnreachableNamespaces`—
+asi que lo que se hizo fue tapar el agujero por el que se escapaba.
+
+### Lo que ya estaba, y por que no se reescribio
+
+La regla 7 recorre `entrypoint -> nextStep` acumulando `outputNamespace` en un `Set`, comprueba las
+dependencias de cada nodo ANTES de anadir el suyo —de ahi que ningun nodo se satisfaga a si mismo— y
+emite `ERR_MISSING_UPSTREAM_CONTEXT`. Tenia 9 pruebas, y dos de ellas eran literalmente las que el
+PASO 2 pedia.
+
+Reemplazarla por el codigo propuesto habria metido tres regresiones. Su regex no contempla los
+indices `[0]`, asi que `{{parsed_email.extracted_urls[0]}}` —el ejemplo del propio
+`WebScraperConfigDto`— dejaria de detectarse. Su semilla `['trigger','raw_email']` omite `_assets` y
+`error_context` (que la regla cubre y tiene probados) y mete `raw_email`, que NO debe sembrarse: se
+deriva del `outputNamespace` del disparador, y sembrarlo daria por bueno un `{{raw_email.x}}` en un
+flujo que arranca por cron. Y su `throw` inmediato, sin `issues[]`, deja al asistente sin
+diagnostico —`extractApiIssues` solo mira ese arreglo— y acaba con el "nombrar todos los que faltan
+a la vez" que la prueba 7.7 fija.
+
+### El agujero: un prompt es texto que el validador no leia
+
+`resolveNodeDependencies` une dos fuentes: lo que la estrategia declara y un barrido de
+interpolaciones sobre `params`. Para el nodo de IA ninguna de las dos ve nada cuando la instruccion
+viene de base de datos: `getRequiredNamespaces` solo mira `inlinePrompt` —es puro y sincrono por
+contrato— y en `params` solo hay un UUID o un codigo, sin `{{...}}` que escanear.
+
+No era teorico. `NOTIWEB_DEFAULT`, uno de los tres prompts sembrados, interpola
+`{{scraped_web.full_article_content}}`. Un flujo que lo citara sin un `EXTRACTOR_WEB` por delante se
+guardaba, se activaba, y reventaba en la primera ejecucion con `ERR_LLM_INTERPOLATION` dejando el
+flujo PAUSADO.
+
+### Por que la estrategia declara la referencia y no el validador la busca
+
+El hook nuevo es `getPromptReferences(params)`, opcional en `INodeStrategy`. Podria haberse resuelto
+mirando `params.templatePromptId` y `params.promptCode` desde el validador, pero eso mete los
+nombres de los params de un nodo concreto dentro de `@core`, que no sabe lo que es un
+`templatePromptId` igual que no sabe lo que es un `targetUrl`. Con el hook, el dia que el
+`PROCESADOR_OCR` resuelva prompts guardados queda cubierto sin tocar el validador.
+
+Respeta la precedencia de `resolvePrompt` (`templatePromptId` gana a `promptCode`) a proposito:
+devolver las dos referencias cuando ambas estan declaradas haria exigir los namespaces de un prompt
+que la ejecucion nunca va a leer.
+
+### Por que se pre-resuelve y no se hace async el resolutor
+
+`validatePipelineTopology` es una funcion PURA y SINCRONA, y eso es lo que permite probar cada regla
+con un doble de una linea sin tocar el contenedor de Nest. Leer un prompt es I/O. La salida fue
+pre-resolver en `validateSchema` —que ya era `async`— y pasar las dependencias extra por el
+resolutor que la regla 7 ya recibia. El validador puro no cambia de firma.
+
+La pre-resolucion vive DENTRO del `if (issues.length === 0)` que ya guardaba la topologia, asi que un
+esquema con la forma mal ni siquiera paga la consulta. Y es UNA consulta para todo el esquema, no una
+por nodo: el puerto recibe todas las referencias juntas.
+
+### La frontera `@core` -> `@modules`, resuelta por inversion
+
+El validador vive en `@core` y los prompts en `@modules`. En vez de inyectar
+`AiPromptTemplatesService`, `@core` declara el puerto `PromptTextResolverPort` y
+`AiPromptTemplatesModule` provee la implementacion bajo el token `PROMPT_TEXT_RESOLVER`. La
+dependencia apunta hacia dentro.
+
+El puerto devuelve TEXTO y no namespaces, y eso es deliberado: `extractNamespaceRoots` ya vive en
+`@core`, junto al patron con el que el motor interpola de verdad. Si el puerto devolviera namespaces
+habria dos analizadores condenados a discrepar — el mismo motivo por el que
+`AiPromptTemplatesService.toDetail` reutiliza el de la FSM en vez de reimplementarlo.
+
+El adaptador NO reutiliza los buscadores del servicio: lanzan `NotFoundException` y resuelven de uno
+en uno, y aqui hace falta lo contrario —una consulta para todo el esquema y silencio ante lo que no
+existe—. Una referencia que no resuelve se OMITE del mapa: de la plantilla que falta se queja la
+ejecucion con `ERR_LLM_PROMPT_UNRESOLVED`, y tratarla aqui como namespace ausente mandaria al
+operador a reordenar un flujo cuyo orden esta bien. Las plantillas desactivadas SI se resuelven: de
+que namespaces depende un flujo no cambia porque alguien retire el prompt del selector.
+
+### El mensaje tenia que decir de donde sale la dependencia
+
+Cerrar el agujero sin esto habria empeorado el diagnostico: el operador leeria "el nodo necesita
+`scraped_web`", miraria los `params` del nodo y no encontraria ningun marcador que lo explique,
+porque esta en el prompt. De ahi el resolutor opcional `dependencyOrigins`, que la regla 7 usa SOLO
+para redactar: el namespace ausente se imprime como `scraped_web (lo cita el prompt "NOTIWEB_DEFAULT")`.
+Sin el resolutor el mensaje es el de siempre, y la prueba 7.13 lo fija.
+
+El codigo de error no cambia. Es el mismo problema —una dependencia que nadie satisface— y estrenar
+uno obligaria a tocar todo `catchErrors` que ya lo mencione a cambio de nada.
+
+### `@Optional()` como red
+
+El puerto se inyecta opcional. Sin el, el validador se comporta exactamente como antes, lo que deja
+en pie los 47 casos del spec del servicio —que construyen `new PipelineValidatorService(factory)` a
+mano— sin obligarlos a doblar una dependencia que no les concierne. La prueba "deberia comportarse
+como antes sin puerto inyectado" fija ese contrato.
+
+### Cobertura
+
+1631 pruebas en 70 suites, en verde: 9 nuevas en el servicio validador, 4 en el validador de
+topologia (entre ellas las dos del PASO 2, con la pareja `MAPEADOR_PLANTILLA`/`PROCESADOR_IA`), 6 del
+hook en la estrategia y 9 del adaptador. `npx tsc --noEmit` mantiene los 89 errores preexistentes y
+`nest build` pasa limpio.
+
+Comprobacion de que las pruebas muerden: quitando la union de los namespaces del prompt en el
+resolutor de dependencias, 3 de las nuevas se ponen rojas.
+
+### Lo que sigue abierto
+
+El texto de un prompt se guarda SIN VALIDAR. `create`/`update` asignan `promptText` verbatim y el DTO
+solo pide `@IsString`, asi que se persiste `{{inventado.campo}}`, `{{#each}}` o un `{{roto` con un
+201. Esto cierra la mitad que depende del FLUJO —un namespace real citado en el orden equivocado—,
+que es la unica que un validador de topologia puede responder. La otra mitad se cierra en el gestor
+de prompts, replicando lo que el de plantillas HTML ya hace.

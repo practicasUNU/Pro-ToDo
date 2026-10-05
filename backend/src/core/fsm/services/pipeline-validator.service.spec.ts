@@ -3,6 +3,7 @@ import { BadRequestException } from '@nestjs/common';
 import { PipelineSchemaDto } from '@core/fsm/dto/pipeline-schema.dto';
 import { NodeStrategyFactory } from '@core/fsm/factories/node-strategy.factory';
 import { PipelineValidatorService } from '@core/fsm/services/pipeline-validator.service';
+import { ERR_MISSING_UPSTREAM_CONTEXT } from '@core/fsm/types/node-strategy.types';
 import { NodeType } from '@core/fsm/types/pipeline-schema.types';
 import { WebScraperStrategy } from '@modules/nodes/strategies/web-scraper.strategy';
 
@@ -706,6 +707,217 @@ describe('PipelineValidatorService (PROT-07)', () => {
 
       // 3. Assert: exigir que algun nodo lo produzca lo haria irresoluble por
       //    construccion.
+      expect(result.entrypoint).toBe('trigger_imap');
+    });
+  });
+
+  describe('namespaces que citan los prompts guardados', () => {
+    const PROMPT_ID = '9f1b2c3d-4e5f-4a6b-8c7d-0e1f2a3b4c5d';
+    const PROMPT_CODE = 'NOTIWEB_DEFAULT';
+
+    /** El texto real del prompt sembrado: cita `scraped_web`. */
+    const NOTIWEB_TEXT =
+      'Redacta la noticia.\nDirectiva: {{parsed_email.clean_body}}\nArticulo: {{scraped_web.full_article_content}}';
+
+    /**
+     * Servicio con una estrategia de IA que declara sus referencias a prompt y
+     * un puerto doblado que devuelve el texto.
+     *
+     * El doble del puerto es lo que permite probar la regla SIN base de datos:
+     * la pregunta de estas pruebas es si el validador cruza el texto del prompt
+     * con la topologia, no si TypeORM sabe leer una fila.
+     */
+    const buildServiceWithPrompt = (
+      texts: ReadonlyMap<string, string>,
+    ): {
+      readonly service: PipelineValidatorService;
+      readonly resolvePromptTexts: jest.Mock;
+    } => {
+      const factory = new NodeStrategyFactory();
+      jest.spyOn(factory['logger'], 'log').mockImplementation(() => undefined);
+      jest
+        .spyOn(factory['logger'], 'error')
+        .mockImplementation(() => undefined);
+
+      factory.registerStrategy({
+        nodeType: NodeType.PROCESADOR_IA,
+        execute: jest.fn(),
+        getPromptReferences: (params) => {
+          const { templatePromptId, promptCode } = params;
+
+          if (typeof templatePromptId === 'string') {
+            return [{ kind: 'id', value: templatePromptId }];
+          }
+
+          return typeof promptCode === 'string'
+            ? [{ kind: 'code', value: promptCode }]
+            : [];
+        },
+      });
+
+      const resolvePromptTexts = jest.fn().mockResolvedValue(texts);
+
+      return {
+        service: new PipelineValidatorService(factory, { resolvePromptTexts }),
+        resolvePromptTexts,
+      };
+    };
+
+    /** Esquema sin extractor: trigger -> parser -> IA. */
+    const buildSchemaWithoutScraper = (
+      params: Record<string, unknown>,
+    ): PipelineSchema => {
+      const schema = buildNotiwebSchema();
+
+      schema.nodes.nodo_parser.nextStep = 'nodo_ia';
+      schema.nodes.nodo_ia.params = params;
+      delete schema.nodes.nodo_extractor;
+
+      return schema;
+    };
+
+    it('deberia rechazar un prompt por codigo que cita un namespace ausente', async () => {
+      // 1. Arrange: es el caso real de `NOTIWEB_DEFAULT`. Antes de esto el flujo
+      //    se guardaba y se activaba sin queja, y reventaba en ejecucion con
+      //    ERR_LLM_INTERPOLATION ya PAUSADO.
+      const { service } = buildServiceWithPrompt(
+        new Map([[`code:${PROMPT_CODE}`, NOTIWEB_TEXT]]),
+      );
+      const schema = buildSchemaWithoutScraper({ promptCode: PROMPT_CODE });
+
+      // 2. Act
+      const issues = await captureIssues(service, schema);
+
+      // 3. Assert
+      const issue = issues.find(
+        (candidate) => candidate.field === 'nodes.nodo_ia.params',
+      );
+
+      expect(issue?.code).toBe(ERR_MISSING_UPSTREAM_CONTEXT);
+      expect(issue?.constraints[0]).toContain('scraped_web');
+    });
+
+    it('deberia nombrar el prompt del que sale la dependencia', async () => {
+      // 1. Arrange: sin esto el operador leeria "necesitas scraped_web", miraria
+      //    los params del nodo y no encontraria ningun marcador que lo explique.
+      const { service } = buildServiceWithPrompt(
+        new Map([[`code:${PROMPT_CODE}`, NOTIWEB_TEXT]]),
+      );
+      const schema = buildSchemaWithoutScraper({ promptCode: PROMPT_CODE });
+
+      // 2. Act
+      const issues = await captureIssues(service, schema);
+
+      // 3. Assert
+      const issue = issues.find(
+        (candidate) => candidate.field === 'nodes.nodo_ia.params',
+      );
+
+      expect(issue?.constraints[0]).toContain(PROMPT_CODE);
+    });
+
+    it('deberia aceptar el mismo flujo con el extractor por delante', async () => {
+      // 1. Arrange: la comprobacion no es un bloqueo indiscriminado
+      const { service } = buildServiceWithPrompt(
+        new Map([[`code:${PROMPT_CODE}`, NOTIWEB_TEXT]]),
+      );
+      const schema = buildNotiwebSchema();
+      schema.nodes.nodo_ia.params = { promptCode: PROMPT_CODE };
+
+      // 2. Act
+      const result = await service.validateSchema(schema);
+
+      // 3. Assert
+      expect(result.entrypoint).toBe('trigger_imap');
+    });
+
+    it('deberia rechazar igual cuando el prompt se cita por id', async () => {
+      // 1. Arrange
+      const { service } = buildServiceWithPrompt(
+        new Map([[`id:${PROMPT_ID}`, NOTIWEB_TEXT]]),
+      );
+      const schema = buildSchemaWithoutScraper({ templatePromptId: PROMPT_ID });
+
+      // 2. Act
+      const issues = await captureIssues(service, schema);
+
+      // 3. Assert
+      const issue = issues.find(
+        (candidate) => candidate.field === 'nodes.nodo_ia.params',
+      );
+
+      expect(issue?.constraints[0]).toContain('scraped_web');
+    });
+
+    it('deberia aceptar un prompt que solo cita lo que el flujo si produce', async () => {
+      // 1. Arrange: el equivalente de `LICITACION_DEFAULT`, que solo pide
+      //    `parsed_email` — y el parser va por delante.
+      const { service } = buildServiceWithPrompt(
+        new Map([[`code:LICITACION_DEFAULT`, 'Extrae de {{parsed_email.clean_body}}']]),
+      );
+      const schema = buildSchemaWithoutScraper({ promptCode: 'LICITACION_DEFAULT' });
+
+      // 2. Act
+      const result = await service.validateSchema(schema);
+
+      // 3. Assert
+      expect(result.entrypoint).toBe('trigger_imap');
+    });
+
+    it('no deberia inventar un fallo de dependencias si el prompt no existe', async () => {
+      // 1. Arrange: mapa vacio. De la plantilla que falta se queja la ejecucion
+      //    con ERR_LLM_PROMPT_UNRESOLVED; tratarla aqui como namespace ausente
+      //    mandaria a reordenar un flujo cuyo orden esta bien.
+      const { service } = buildServiceWithPrompt(new Map());
+      const schema = buildSchemaWithoutScraper({ promptCode: PROMPT_CODE });
+
+      // 2. Act
+      const result = await service.validateSchema(schema);
+
+      // 3. Assert
+      expect(result.entrypoint).toBe('trigger_imap');
+    });
+
+    it('deberia resolver todas las referencias en UNA sola llamada', async () => {
+      // 1. Arrange: dos nodos de IA citando prompts. Validar un flujo no puede
+      //    costar una consulta por nodo.
+      const { service, resolvePromptTexts } = buildServiceWithPrompt(
+        new Map([[`code:${PROMPT_CODE}`, 'Usa {{parsed_email.clean_body}}']]),
+      );
+      const schema = buildNotiwebSchema();
+      schema.nodes.nodo_ia.params = { promptCode: PROMPT_CODE };
+
+      // 2. Act
+      await service.validateSchema(schema);
+
+      // 3. Assert
+      expect(resolvePromptTexts).toHaveBeenCalledTimes(1);
+    });
+
+    it('no deberia consultar nada si ningun nodo cita un prompt guardado', async () => {
+      // 1. Arrange: el caso normal no paga ninguna consulta
+      const { service, resolvePromptTexts } = buildServiceWithPrompt(new Map());
+      const schema = buildNotiwebSchema();
+
+      // 2. Act
+      await service.validateSchema(schema);
+
+      // 3. Assert
+      expect(resolvePromptTexts).not.toHaveBeenCalled();
+    });
+
+    it('deberia comportarse como antes sin puerto inyectado', async () => {
+      // 1. Arrange: el puerto es opcional, y un contexto que no lo provea debe
+      //    seguir validando. Es lo que protege a las pruebas de los demas bloques.
+      const factory = new NodeStrategyFactory();
+      jest.spyOn(factory['logger'], 'error').mockImplementation(() => undefined);
+      const service = new PipelineValidatorService(factory);
+      const schema = buildSchemaWithoutScraper({ promptCode: PROMPT_CODE });
+
+      // 2. Act
+      const result = await service.validateSchema(schema);
+
+      // 3. Assert
       expect(result.entrypoint).toBe('trigger_imap');
     });
   });

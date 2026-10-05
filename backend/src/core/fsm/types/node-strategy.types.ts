@@ -2,6 +2,8 @@ import type { StatePayloadContext } from '@core/fsm/context/state-payload.contex
 import type { NodeType } from '@core/fsm/types/pipeline-schema.types';
 import type { ClassConstructor } from 'class-transformer';
 
+import type { PromptReference } from '@core/fsm/types/prompt-text-resolver.port';
+
 /**
  * Contrato polimorfico de los nodos del motor FSM.
  *
@@ -352,6 +354,31 @@ export interface INodeStrategy {
   readonly getUnreachableErrorCodes?: (
     params: Record<string, unknown>,
   ) => readonly string[];
+
+  /**
+   * Prompts GUARDADOS que este nodo cita en sus `params`.
+   *
+   * Existe porque `getRequiredNamespaces` no puede responder por ellos: es puro
+   * y sincrono por contrato, y el texto de un prompt vive en base de datos. Sin
+   * esta declaracion, un nodo que resuelve su instruccion por `templatePromptId`
+   * o `promptCode` parece no depender de nada, y un `{{scraped_web.x}}` escrito
+   * dentro de ese prompt se cuela hasta la ejecucion.
+   *
+   * Lo que se declara es la REFERENCIA, no el texto ni los namespaces: resolverla
+   * es I/O y la hace `PipelineValidatorService` antes de validar la topologia,
+   * de una sola vez para todo el esquema.
+   *
+   * Vive aqui, en el contrato generico, para que `@core` no tenga que conocer
+   * los nombres de los params de un nodo concreto —no sabe lo que es un
+   * `templatePromptId`, igual que no sabe lo que es un `targetUrl`— y para que
+   * cualquier nodo futuro que resuelva instrucciones guardadas quede cubierto
+   * sin tocar el validador.
+   *
+   * OPCIONAL: solo los nodos que hablan con un modelo citan prompts.
+   */
+  readonly getPromptReferences?: (
+    params: Record<string, unknown>,
+  ) => readonly PromptReference[];
 
   /**
    * Ejecuta el nodo contra el contexto acumulado.

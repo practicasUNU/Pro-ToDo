@@ -3,6 +3,7 @@ import { InjectRepository, TypeOrmModule } from '@nestjs/typeorm';
 
 import { FsmController } from '@core/fsm/controllers/fsm.controller';
 import { FsmExecution } from '@core/fsm/entities/fsm-execution.entity';
+import { AiPromptTemplatesModule } from '@modules/ai-prompt-templates/ai-prompt-templates.module';
 import { LogsModule } from '@modules/logs/logs.module';
 import { NodeStrategyFactory } from '@core/fsm/factories/node-strategy.factory';
 import { FsmEngineService } from '@core/fsm/services/fsm-engine.service';
@@ -20,7 +21,15 @@ import type { Repository } from 'typeorm';
  * registren sus estrategias contra la misma instancia que consume el motor.
  */
 @Module({
-  imports: [TypeOrmModule.forFeature([FsmExecution]), LogsModule],
+  // `AiPromptTemplatesModule` aporta `PROMPT_TEXT_RESOLVER`, con el que
+  // `PipelineValidatorService` analiza los namespaces que cita un prompt
+  // guardado. Es el mismo cruce que ya existe con `LogsModule`, y sigue siendo
+  // aciclico: aquel modulo solo importa su propio repositorio.
+  imports: [
+    TypeOrmModule.forFeature([FsmExecution]),
+    LogsModule,
+    AiPromptTemplatesModule,
+  ],
   controllers: [FsmController],
   providers: [PipelineValidatorService, NodeStrategyFactory, FsmEngineService],
   exports: [PipelineValidatorService, NodeStrategyFactory, FsmEngineService],

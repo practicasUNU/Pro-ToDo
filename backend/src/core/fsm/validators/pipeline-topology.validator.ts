@@ -35,6 +35,22 @@ export type NodeDependencyResolver = (
   node: PipelineNodeConfigDto,
 ) => readonly string[];
 
+/**
+ * Procedencia legible de una dependencia que NO esta escrita en los `params`.
+ *
+ * Mapea namespace -> frase que explica de donde sale (ej. `el prompt "NOTIWEB_DEFAULT"`).
+ * Solo se usa para redactar el mensaje de la regla 7: sin esto, un nodo que
+ * hereda `scraped_web` de un prompt guardado recibiria un "necesitas
+ * scraped_web" que el operador no puede casar con nada de lo que ve en el
+ * formulario del nodo.
+ *
+ * Es un mapa y no una cadena por nodo porque un mismo nodo puede heredar varios
+ * namespaces de origenes distintos.
+ */
+export type NodeDependencyOriginResolver = (
+  node: PipelineNodeConfigDto,
+) => ReadonlyMap<string, string>;
+
 /** Campos que un nodo publica en su `outputNamespace`. Regla 8. */
 export type NodeOutputFieldsResolver = (
   node: PipelineNodeConfigDto,
@@ -62,6 +78,8 @@ export type NodeUnreachableErrorCodesResolver = (
 export interface PipelineTopologyResolvers {
   /** Regla 7. */
   readonly dependencies?: NodeDependencyResolver;
+  /** Regla 7, solo para enriquecer el mensaje. Opcional. */
+  readonly dependencyOrigins?: NodeDependencyOriginResolver;
   /** Regla 8; hace falta junto con `requiredFieldTypes`. */
   readonly outputFields?: NodeOutputFieldsResolver;
   /** Regla 8; hace falta junto con `outputFields`. */
@@ -270,7 +288,13 @@ export const validatePipelineTopology = (
   issues.push(...detectActivePathCycle(schema));
 
   if (resolvers.dependencies !== undefined) {
-    issues.push(...detectUnreachableNamespaces(schema, resolvers.dependencies));
+    issues.push(
+      ...detectUnreachableNamespaces(
+        schema,
+        resolvers.dependencies,
+        resolvers.dependencyOrigins,
+      ),
+    );
   }
 
   if (
@@ -331,6 +355,7 @@ const ENGINE_PROVIDED_NAMESPACES: ReadonlySet<string> = new Set([
 const detectUnreachableNamespaces = (
   schema: PipelineSchemaDto,
   resolveDependencies: NodeDependencyResolver,
+  resolveOrigins?: NodeDependencyOriginResolver,
 ): SchemaIssue[] => {
   const issues: SchemaIssue[] = [];
   const produced = new Set<string>();
@@ -351,11 +376,21 @@ const detectUnreachableNamespaces = (
     );
 
     if (missing.length > 0) {
+      // Las procedencias solo adornan el mensaje: un namespace que el nodo
+      // hereda de un prompt guardado no aparece por ninguna parte de sus
+      // `params`, y sin decirlo el operador no sabria donde mirar.
+      const origins = resolveOrigins?.(node);
+      const described = missing.map((namespace) => {
+        const origin = origins?.get(namespace);
+
+        return origin === undefined ? namespace : `${namespace} (lo cita ${origin})`;
+      });
+
       issues.push({
         field: `nodes.${node.nodeId}.params`,
         code: ERR_MISSING_UPSTREAM_CONTEXT,
         constraints: [
-          `El nodo necesita los namespaces [${missing.join(', ')}], que ningun paso anterior del flujo escribe. Reordena el flujo o anade el nodo que los produce.`,
+          `El nodo necesita los namespaces [${described.join(', ')}], que ningun paso anterior del flujo escribe. Reordena el flujo o anade el nodo que los produce.`,
         ],
       });
     }

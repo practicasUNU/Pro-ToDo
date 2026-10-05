@@ -1,8 +1,16 @@
-import { BadRequestException, Injectable } from '@nestjs/common';
+import {
+  BadRequestException,
+  Inject,
+  Injectable,
+  Optional,
+} from '@nestjs/common';
 import { plainToInstance } from 'class-transformer';
 import { validate } from 'class-validator';
 
-import { collectNamespaceRoots } from '@core/fsm/context/state-payload.context';
+import {
+  collectNamespaceRoots,
+  extractNamespaceRoots,
+} from '@core/fsm/context/state-payload.context';
 import {
   PipelineNodeConfigDto,
   PipelineSchemaDto,
@@ -13,10 +21,26 @@ import {
 import { NodeStrategyFactory } from '@core/fsm/factories/node-strategy.factory';
 import { ERR_INCOMPLETE_NODE_PARAMS } from '@core/fsm/types/node-strategy.types';
 import { validatePipelineTopology } from '@core/fsm/validators/pipeline-topology.validator';
+import {
+  PROMPT_TEXT_RESOLVER,
+  promptReferenceKey,
+} from '@core/fsm/types/prompt-text-resolver.port';
 
 import type { INodeStrategy } from '@core/fsm/types/node-strategy.types';
 import type { SchemaIssue } from '@core/fsm/validators/pipeline-topology.validator';
+import type {
+  PromptReference,
+  PromptTextResolverPort,
+} from '@core/fsm/types/prompt-text-resolver.port';
 import type { ValidationError, ValidatorOptions } from 'class-validator';
+
+/** Lo que aportan los prompts guardados a la validacion de topologia. */
+interface PromptContext {
+  /** Namespaces que hereda cada nodo de los prompts que cita. */
+  readonly namespacesByNode: ReadonlyMap<string, readonly string[]>;
+  /** Procedencia legible de cada namespace, para el mensaje de la regla 7. */
+  readonly originsByNode: ReadonlyMap<string, ReadonlyMap<string, string>>;
+}
 
 /** Codigo de error del cuerpo de la excepcion; el frontend conmuta sobre el. */
 const SCHEMA_ERROR_CODE = 'PIPELINE_SCHEMA_INVALIDO';
@@ -80,7 +104,21 @@ const flattenValidationErrors = (
  */
 @Injectable()
 export class PipelineValidatorService {
-  constructor(private readonly strategyFactory: NodeStrategyFactory) {}
+  /**
+   * El puerto de prompts es OPCIONAL a proposito.
+   *
+   * Sin el, el validador se comporta exactamente como antes de PROT-24: ve los
+   * namespaces escritos en `params` y no los que cita un prompt guardado. Eso
+   * mantiene en pie cualquier contexto que construya este servicio a mano —las
+   * pruebas, un arranque parcial— sin obligarlo a doblar una dependencia que no
+   * le concierne.
+   */
+  constructor(
+    private readonly strategyFactory: NodeStrategyFactory,
+    @Optional()
+    @Inject(PROMPT_TEXT_RESOLVER)
+    private readonly promptTextResolver: PromptTextResolverPort | null = null,
+  ) {}
 
   /**
    * Convierte un JSON arbitrario en un `PipelineSchemaDto` validado.
@@ -117,9 +155,22 @@ export class PipelineValidatorService {
 
     // La topologia presupone forma y tipos correctos (ver el TSDoc del validador).
     if (issues.length === 0) {
+      // Se resuelve ANTES de validar la topologia y no dentro del resolutor
+      // porque leer un prompt es I/O y `validatePipelineTopology` es una funcion
+      // pura y sincrona. Pre-resolver mantiene esa propiedad y de paso agrupa
+      // todas las lecturas en una sola consulta.
+      const promptContext = await this.resolvePromptContext(schema);
+
       issues.push(
         ...validatePipelineTopology(schema, {
-          dependencies: (node) => this.resolveNodeDependencies(node),
+          dependencies: (node) => [
+            ...new Set([
+              ...this.resolveNodeDependencies(node),
+              ...(promptContext.namespacesByNode.get(node.nodeId) ?? []),
+            ]),
+          ],
+          dependencyOrigins: (node) =>
+            promptContext.originsByNode.get(node.nodeId) ?? new Map(),
           outputFields: (node) =>
             this.tryGetStrategy(node.nodeType)?.outputFields ?? [],
           // Se prefiere el metodo sobre la propiedad: hay nodos cuya exigencia
@@ -221,6 +272,93 @@ export class PipelineValidatorService {
    * deriva la suya justamente de `targetUrl`— y un namespace repetido saldria
    * dos veces en el mensaje de la regla 7.
    */
+  /**
+   * Namespaces que cada nodo hereda de los prompts GUARDADOS que cita.
+   *
+   * Es la mitad que `resolveNodeDependencies` no puede ver: aquella mira los
+   * `params`, y un nodo que resuelve su instruccion por `templatePromptId` o
+   * `promptCode` solo lleva ahi un identificador. Sin esto, el
+   * `{{scraped_web.full_article_content}}` que trae el prompt sembrado
+   * `NOTIWEB_DEFAULT` no se detectaba al guardar: el flujo se daba por valido y
+   * reventaba en ejecucion con `ERR_LLM_INTERPOLATION`, ya PAUSADO.
+   *
+   * Devuelve DOS mapas porque responden a preguntas distintas. El de namespaces
+   * alimenta la regla 7; el de procedencias solo sirve para que el mensaje diga
+   * de donde sale la dependencia, que es lo que evita mandar al operador a
+   * buscar en los `params` un marcador que esta en el prompt.
+   *
+   * Sale en seco si no hay puerto inyectado o si ningun nodo cita un prompt
+   * guardado: el caso normal no paga ninguna consulta.
+   */
+  private async resolvePromptContext(
+    schema: PipelineSchemaDto,
+  ): Promise<PromptContext> {
+    const empty: PromptContext = {
+      namespacesByNode: new Map(),
+      originsByNode: new Map(),
+    };
+
+    if (this.promptTextResolver === null || !isPlainObject(schema.nodes)) {
+      return empty;
+    }
+
+    // Referencias por nodo. Se recorre el mapa ENTERO y no solo el camino
+    // activo: filtrar aqui seria adivinar, y la regla 7 ya decide por donde
+    // camina. Un nodo satelite pide su prompt y simplemente nadie le pregunta.
+    const referencesByNode = new Map<string, readonly PromptReference[]>();
+
+    for (const node of Object.values(schema.nodes)) {
+      const references =
+        this.tryGetStrategy(node.nodeType)?.getPromptReferences?.(node.params) ??
+        [];
+
+      if (references.length > 0) {
+        referencesByNode.set(node.nodeId, references);
+      }
+    }
+
+    if (referencesByNode.size === 0) return empty;
+
+    const texts = await this.promptTextResolver.resolvePromptTexts([
+      ...referencesByNode.values(),
+    ].flat());
+
+    const namespacesByNode = new Map<string, readonly string[]>();
+    const originsByNode = new Map<string, ReadonlyMap<string, string>>();
+
+    for (const [nodeId, references] of referencesByNode) {
+      const namespaces = new Set<string>();
+      const origins = new Map<string, string>();
+
+      for (const reference of references) {
+        const text = texts.get(promptReferenceKey(reference));
+
+        // Una referencia que no resuelve no es un fallo de dependencias: de la
+        // plantilla que falta se queja la ejecucion con
+        // `ERR_LLM_PROMPT_UNRESOLVED`, y tratarla aqui como un namespace ausente
+        // mandaria a reordenar un flujo cuyo orden esta bien.
+        if (text === undefined) continue;
+
+        for (const namespace of extractNamespaceRoots(text)) {
+          namespaces.add(namespace);
+          // La primera procedencia gana: con `templatePromptId` y `promptCode`
+          // solo se declara una referencia (ver `getPromptReferences`), asi que
+          // en la practica no hay empate que deshacer.
+          if (!origins.has(namespace)) {
+            origins.set(namespace, `el prompt "${reference.value}"`);
+          }
+        }
+      }
+
+      if (namespaces.size > 0) {
+        namespacesByNode.set(nodeId, [...namespaces]);
+        originsByNode.set(nodeId, origins);
+      }
+    }
+
+    return { namespacesByNode, originsByNode };
+  }
+
   private resolveNodeDependencies(
     node: PipelineNodeConfigDto,
   ): readonly string[] {

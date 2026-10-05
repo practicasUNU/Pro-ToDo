@@ -712,6 +712,72 @@ describe('LlmExtractorStrategy', () => {
     });
   });
 
+  describe('12. Referencias a prompts guardados', () => {
+    it('12.1 deberia declarar la referencia por id', () => {
+      // 1. Arrange & 2. Act
+      const strategy = buildStrategy(buildPromptService());
+
+      // 3. Assert: es lo que permite al validador leer el prompt y ver que
+      //    namespaces cita, algo que `getRequiredNamespaces` no puede hacer.
+      expect(
+        strategy.getPromptReferences({ templatePromptId: TEMPLATE_ID }),
+      ).toEqual([{ kind: 'id', value: TEMPLATE_ID }]);
+    });
+
+    it('12.2 deberia declarar la referencia por codigo', () => {
+      // 1. Arrange & 2. Act
+      const strategy = buildStrategy(buildPromptService());
+
+      // 3. Assert
+      expect(strategy.getPromptReferences({ promptCode: TEMPLATE_CODE })).toEqual([
+        { kind: 'code', value: TEMPLATE_CODE },
+      ]);
+    });
+
+    it('12.3 deberia respetar la precedencia de resolvePrompt', () => {
+      // 1. Arrange & 2. Act: con los dos declarados, la ejecucion lee el id y
+      //    nunca el codigo. Devolver ambos haria que el validador exigiera los
+      //    namespaces de un prompt que jamas se va a leer.
+      const strategy = buildStrategy(buildPromptService());
+
+      // 3. Assert
+      expect(
+        strategy.getPromptReferences({
+          templatePromptId: TEMPLATE_ID,
+          promptCode: TEMPLATE_CODE,
+        }),
+      ).toEqual([{ kind: 'id', value: TEMPLATE_ID }]);
+    });
+
+    it('12.4 no deberia declarar nada con un prompt en linea', () => {
+      // 1. Arrange & 2. Act: su texto esta en los `params` y de el ya responde
+      //    `getRequiredNamespaces`.
+      const strategy = buildStrategy(buildPromptService());
+
+      // 3. Assert
+      expect(
+        strategy.getPromptReferences({ inlinePrompt: 'Redacta {{parsed_email.clean_body}}' }),
+      ).toEqual([]);
+    });
+
+    it('12.5 no deberia declarar nada sin instruccion alguna', () => {
+      // 1. Arrange & 2. Act
+      const strategy = buildStrategy(buildPromptService());
+
+      // 3. Assert
+      expect(strategy.getPromptReferences({})).toEqual([]);
+    });
+
+    it('12.6 deberia ignorar una referencia en blanco', () => {
+      // 1. Arrange & 2. Act: `resolvePrompt` trata el blanco como ausencia, y
+      //    las dos lecturas deben coincidir.
+      const strategy = buildStrategy(buildPromptService());
+
+      // 3. Assert
+      expect(strategy.getPromptReferences({ promptCode: '   ' })).toEqual([]);
+    });
+  });
+
   describe('6. Completitud para activar', () => {
     it('6.1 deberia reclamar la instruccion cuando no hay ninguna', () => {
       // 1. Arrange
