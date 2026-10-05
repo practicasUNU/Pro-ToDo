@@ -103,7 +103,7 @@ export class LogNodo {
   /**
    * Codigo HTTP de la respuesta, para los nodos que hablan por red.
    *
-   * Sin poblar todavia: lo estrenara `DESTINO_HTTP`, que aun no tiene
+   * Sin poblar todavia: lo estrenara `DESTINO_DRUPAL`, que aun no tiene
    * estrategia. La columna ya existia en `init.sql` y se mapea para que la
    * entidad describa la tabla entera y no una parte.
    */

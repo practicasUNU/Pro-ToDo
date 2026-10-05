@@ -532,7 +532,7 @@ const buildUnorderedSchema = (): PipelineSchemaDto => ({
   nodes: {
     nodo_destino: {
       nodeId: 'nodo_destino',
-      nodeType: NodeType.DESTINO_HTTP,
+      nodeType: NodeType.DESTINO_DRUPAL,
       outputNamespace: 'http_result',
       nextStep: null,
       onErrorStep: null,

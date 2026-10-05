@@ -160,7 +160,7 @@ export class NodesModule implements OnModuleInit {
     this.strategyFactory.registerStrategy(this.llmExtractorStrategy);
     this.strategyFactory.registerStrategy(this.smtpAlertStrategy);
     this.strategyFactory.registerStrategy(this.ocrProcessorStrategy);
-    // Cierra el catalogo: DESTINO_HTTP era el ultimo tipo del enum sin
+    // Cierra el catalogo: este destino era el ultimo tipo del enum sin
     // estrategia. OJO si algun dia aparece un aviso de registro duplicado para
     // este tipo: `DummyLogDispatcherStrategy` (`@core/fsm/strategies/dummies/`)
     // declara el mismo `nodeType` y nadie la inscribe, pero `registerStrategy`

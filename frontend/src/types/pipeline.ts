@@ -14,7 +14,7 @@ export enum NodeType {
   PROCESADOR_IA = 'PROCESADOR_IA',
   ESCUDO_POST_IA = 'ESCUDO_POST_IA',
   MAPEADOR_PLANTILLA = 'MAPEADOR_PLANTILLA',
-  DESTINO_HTTP = 'DESTINO_HTTP',
+  DESTINO_DRUPAL = 'DESTINO_DRUPAL',
   DESTINO_SMTP = 'DESTINO_SMTP',
   PROCESADOR_OCR = 'PROCESADOR_OCR',
 }
@@ -28,7 +28,7 @@ export const NODE_TYPE_LABELS: Record<NodeType, string> = {
   [NodeType.PROCESADOR_IA]: 'Procesador IA',
   [NodeType.ESCUDO_POST_IA]: 'Escudo posterior a IA',
   [NodeType.MAPEADOR_PLANTILLA]: 'Mapeador de plantilla',
-  [NodeType.DESTINO_HTTP]: 'Destino HTTP',
+  [NodeType.DESTINO_DRUPAL]: 'Destino Drupal',
   [NodeType.DESTINO_SMTP]: 'Alerta por correo',
   [NodeType.PROCESADOR_OCR]: 'Procesador OCR',
 };
@@ -99,7 +99,12 @@ export const DEFAULT_OUTPUT_NAMESPACE_BY_NODE_TYPE: Record<NodeType, string> = {
   [NodeType.PROCESADOR_IA]: 'llm_response',
   [NodeType.ESCUDO_POST_IA]: 'validated_drupal_json',
   [NodeType.MAPEADOR_PLANTILLA]: 'rendered_html',
-  [NodeType.DESTINO_HTTP]: 'http_result',
+  // Conserva `http_result` pese al renombrado del tipo a DESTINO_DRUPAL: el
+  // namespace es la clave con la que los flujos YA GUARDADOS interpolan
+  // `{{http_result.node_id}}`, y esta ademas en la lista cerrada
+  // NODE_OUTPUT_NAMESPACES. Renombrarlo romperia esas plantillas sin dar
+  // nada a cambio; el nombre del namespace no tiene que seguir al del tipo.
+  [NodeType.DESTINO_DRUPAL]: 'http_result',
   [NodeType.DESTINO_SMTP]: 'smtp_result',
   [NodeType.PROCESADOR_OCR]: 'ocr_result',
 };
@@ -131,7 +136,7 @@ export const DEFAULT_PARAMS_BY_NODE_TYPE: Record<NodeType, Record<string, unknow
   [NodeType.PROCESADOR_IA]: {},
   [NodeType.ESCUDO_POST_IA]: {},
   [NodeType.MAPEADOR_PLANTILLA]: {},
-  [NodeType.DESTINO_HTTP]: {},
+  [NodeType.DESTINO_DRUPAL]: {},
   [NodeType.DESTINO_SMTP]: {},
   [NodeType.PROCESADOR_OCR]: {},
 };

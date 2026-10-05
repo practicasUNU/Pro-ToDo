@@ -100,13 +100,13 @@ de siempre, todos ajenos a esta rama.
 
 El tipo que las pruebas usan como «sin configurador» rotó de `PROCESADOR_IA` a `ESCUDO_POST_IA`. El
 comentario de esa constante lo anticipaba desde la tanda del parser, y seguirá rotando: el último de
-la cola es `DESTINO_HTTP`.
+la cola es `DESTINO_DRUPAL`.
 
 ### Pendiente
 
 - La migración 021 y el `.env`, arrastrados desde PROT-16. **Sin ellos `DESTINO_SMTP` llega con
   `implemented: false`.**
-- `ESCUDO_POST_IA` y `DESTINO_HTTP` son los dos tipos que quedan sin configurador, y ninguno tiene
+- `ESCUDO_POST_IA` y `DESTINO_DRUPAL` son los dos tipos que quedan sin configurador, y ninguno tiene
   estrategia en el motor: su turno va detrás del backend.
 
 ---
@@ -2230,7 +2230,7 @@ un estorbo durante la edición. Lo que sí es innegociable es que el camino acti
   disparaba `@typescript-eslint/no-unsafe-return`.
 - El validador topológico es una función pura sin DI ni estado, testeable al margen de Nest.
 - `db/migrations/005-tipos-nodo-fsm.sql` alinea `tipos_nodo` con el enum: `NODO_PARSER_CORREO` →
-  `PARSER_PRE_IA`, `NODO_VALIDACION` → `ESCUDO_POST_IA`, `DESTINO_DRUPAL` → `DESTINO_HTTP`. Como
+  `PARSER_PRE_IA`, `NODO_VALIDACION` → `ESCUDO_POST_IA`, `DESTINO_DRUPAL` → `DESTINO_DRUPAL`. Como
   `codigo` es `VARCHAR(50) UNIQUE` y no un `ENUM` de PostgreSQL, basta un `UPDATE`. **No se borra
   ninguna fila**: `nodos.id_tipo_nodo` es FK contra esta tabla, así que `TRIGGER_CRON` y
   `DESTINO_ACENS` se quedan en el catálogo aunque hoy no sean declarables en un `pipeline_schema`.
@@ -2623,7 +2623,7 @@ directo porque todavía no tiene entidad TypeORM.
 ### Estrategias dummy con tipos reales, no inventados
 
 El enunciado proponía `'DUMMY_INPUT' as any`. Se descartó: las tres dummy se registran bajo
-`TRIGGER_IMAP`, `MAPEADOR_PLANTILLA` y `DESTINO_HTTP`, que son exactamente los roles que representan
+`TRIGGER_IMAP`, `MAPEADOR_PLANTILLA` y `DESTINO_DRUPAL`, que son exactamente los roles que representan
 y los huecos que ocuparán las estrategias definitivas. Cero casts, y una ventaja que no es cosmética:
 **el esquema dummy pasa el `PipelineValidatorService`**, así que el e2e asevera de paso que sigue
 siendo un pipeline legítimo según el contrato de PROT-07. Con un tipo inventado eso era imposible.
@@ -2658,7 +2658,7 @@ Con eso, `app.e2e-spec.ts` —que estaba roto desde hacía tickets— **pasa por
 ```
 [NodeStrategyFactory] Estrategia registrada para el nodo "TRIGGER_IMAP".
 [NodeStrategyFactory] Estrategia registrada para el nodo "MAPEADOR_PLANTILLA".
-[NodeStrategyFactory] Estrategia registrada para el nodo "DESTINO_HTTP".
+[NodeStrategyFactory] Estrategia registrada para el nodo "DESTINO_DRUPAL".
 [RunDummyE2E] El esquema dummy supera PipelineValidatorService.
 [DummyLogDispatcherStrategy] [PROTO-DO MOTOR FSM] -> Salida generada:
     Noticia: Innovacion en Madrid | remitente: prensa@unuware.com
@@ -4156,7 +4156,7 @@ sin errores (queda el warning preexistente de `bootstrap()` en `main.ts:78`).
 ### El «por qué» de tres decisiones
 
 **1. `params` no viaja.** La proyección es deliberadamente parcial. En un nodo `TRIGGER_IMAP`, `params`
-contiene `host`, `user` y `passwordEnvKey`; en un `DESTINO_HTTP`, la URL interna del CMS. Devolver el
+contiene `host`, `user` y `passwordEnvKey`; en un `DESTINO_DRUPAL`, la URL interna del CMS. Devolver el
 esquema entero convertiría un endpoint de *listado* en una fuga de configuración de infraestructura
 hacia el navegador, y el selector del asistente no necesita ninguno de esos datos para pintar una
 tarjeta. La prueba 6.1 lo blinda serializando la respuesta y comprobando que no aparecen ni el host ni
@@ -6540,7 +6540,7 @@ markup, habria una compilacion donde no deberia haberla.
 ### Por que `compiled_markup` conserva un nombre que ya miente
 
 La clave contiene ahora markup SIN compilar. Renombrarla era lo limpio y se descarto: dejaria sin
-dato a todo consumidor de `rendered_html.compiled_markup`, incluido el `DESTINO_HTTP` de cualquier
+dato a todo consumidor de `rendered_html.compiled_markup`, incluido el `DESTINO_DRUPAL` de cualquier
 flujo guardado. El precio —un nombre que no describe su contenido— se paga en la `description` del
 `outputField`, que es lo que leen `GET /api/nodos` y el selector de variables del asistente: quien
 audita una ejecucion lee la descripcion, no el identificador. La migracion 025 hace lo propio con
@@ -6970,7 +6970,7 @@ toca, y se deja estar para no colar un reformateo ajeno en el commit.
   que publique `llm_response.filled_markup`: su DTO, los tres clientes (que hoy fuerzan el esquema
   JSON con `headline`/`summary`/`body_paragraphs` como `required`) y sus `outputFields`.
 - **Triada Quasar del nodo.** `EscudoPostIaConfig.vue`, su store y el alta en los dos registros.
-  Cerraria 9 de 10 configuradores y dejaria solo `DESTINO_HTTP`.
+  Cerraria 9 de 10 configuradores y dejaria solo `DESTINO_DRUPAL`.
 - **Auditoria de `configuracion_pipeline` pendiente.** Conectar `paramsSchema` corre con
   `forbidNonWhitelisted`, asi que un nodo `ESCUDO_POST_IA` ya guardado con una clave que el DTO no
   declare pasa a ser un 400 al guardar **y al activar**. No se pudo comprobar en esta sesion: Docker
@@ -7155,7 +7155,7 @@ implementa como `LlmExtractorConfig.vue` y `llm-extractor.store.ts` — el nombr
 **`NodeType.DESTINO_ACENS` no existe**, y su ausencia esta documentada: el catalogo tiene once filas y
 el enum declara diez, porque `DESTINO_ACENS` no tiene estrategia y por tanto no es expresable en un
 `pipeline_schema`. El encargo lo proponia como nuevo nodo canonico «sin configurador»; el unico que
-de verdad queda es `DESTINO_HTTP`.
+de verdad queda es `DESTINO_DRUPAL`.
 
 **El endpoint `POST /nodos/validar-config` no existe.** `@Controller('nodos')` expone exactamente una
 ruta, `GET /api/nodos`, de solo lectura. El servicio propuesto habria sido codigo muerto contra un
@@ -7209,7 +7209,7 @@ pero no vigila ninguna ranura.
 ### El fixture rota por cuarta vez, y es la ultima
 
 `UNSUPPORTED_TOPOLOGY` lleva rotando desde `PARSER_PRE_IA` → `EXTRACTOR_WEB` → `PROCESADOR_IA` →
-`ESCUDO_POST_IA`, y su TSDoc ya anunciaba que `DESTINO_HTTP` era «el ultimo de la cola». Ahora lo es
+`ESCUDO_POST_IA`, y su TSDoc ya anunciaba que `DESTINO_DRUPAL` era «el ultimo de la cola». Ahora lo es
 de verdad: es el UNICO tipo del enum sin configurador. Se deja escrito que cuando reciba el suyo esta
 constante se queda sin candidato, y habra que decidir entre retirar las pruebas que la usan o
 declarar un tipo ficticio solo para ellas. De paso se corrigieron tres comentarios que ya mentian
@@ -7240,7 +7240,7 @@ del backend— y `quasar build` sin avisos. ESLint sin avisos en lo nuevo.
 
 ### Lo que sigue abierto
 
-- **`DESTINO_HTTP` es lo unico que queda.** Sin estrategia en el motor y sin triada; su turno va
+- **`DESTINO_DRUPAL` es lo unico que queda.** Sin estrategia en el motor y sin triada; su turno va
   detras del backend, como ya le paso al escudo.
 - **Sigue sin verificacion de extremo a extremo.** El circuito completo
   `MAPEADOR_PLANTILLA → PROCESADOR_IA (dryRun) → ESCUDO_POST_IA` esta cubierto por pruebas unitarias

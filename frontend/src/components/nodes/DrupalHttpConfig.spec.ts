@@ -59,7 +59,7 @@ const selectByField = (wrapper: ReturnType<typeof mount>, field: string) =>
 const inputByField = (wrapper: ReturnType<typeof mount>, field: string) =>
   wrapper.get(`[data-test="${field}"]`).findComponent(QInput);
 
-describe('DrupalHttpConfig · configurador del nodo DESTINO_HTTP', () => {
+describe('DrupalHttpConfig · configurador del nodo DESTINO_DRUPAL', () => {
   beforeEach(() => {
     setActivePinia(createPinia());
     config.global.plugins = [];

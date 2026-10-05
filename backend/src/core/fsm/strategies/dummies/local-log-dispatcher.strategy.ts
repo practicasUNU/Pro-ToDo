@@ -23,7 +23,7 @@ const RENDERED_NAMESPACE = 'rendered_html';
  */
 @Injectable()
 export class DummyLogDispatcherStrategy implements INodeStrategy {
-  public readonly nodeType = NodeType.DESTINO_HTTP;
+  public readonly nodeType = NodeType.DESTINO_DRUPAL;
 
   private readonly logger = new Logger(DummyLogDispatcherStrategy.name);
 

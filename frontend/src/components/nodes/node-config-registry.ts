@@ -51,7 +51,7 @@ export const nodeConfigRegistry: Partial<Record<NodeType, Component>> = {
   [NodeType.DESTINO_SMTP]: defineAsyncComponent(
     () => import('@components/nodes/SmtpAlertConfig.vue'),
   ),
-  [NodeType.DESTINO_HTTP]: defineAsyncComponent(
+  [NodeType.DESTINO_DRUPAL]: defineAsyncComponent(
     () => import('@components/nodes/DrupalHttpConfig.vue'),
   ),
 };

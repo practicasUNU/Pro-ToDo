@@ -17,7 +17,7 @@ import { OUTPUT_NAMESPACE_PATTERN } from '@core/fsm/types/pipeline-schema.types'
 import { MAX_SELECTOR_LENGTH } from './template-mapper-config.dto';
 
 /**
- * Modos operativos del nodo DESTINO_HTTP contra Drupal JSON:API.
+ * Modos operativos del nodo DESTINO_DRUPAL contra Drupal JSON:API.
  *
  * Son cuatro trabajos distintos sobre el mismo CMS y no cuatro variantes del
  * mismo: `CREATE_NODE` crea una entidad propia, los dos de HTML mutan el
@@ -149,7 +149,7 @@ const UUID_V4_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 /**
- * Configuracion del nodo DESTINO_HTTP (publicacion en Drupal JSON:API).
+ * Configuracion del nodo DESTINO_DRUPAL (publicacion en Drupal JSON:API).
  *
  * TODOS los campos son OPCIONALES, por la misma razon que en
  * `PostIaSanitizerConfigDto` y `WebScraperConfigDto`: una plantilla de flujo es

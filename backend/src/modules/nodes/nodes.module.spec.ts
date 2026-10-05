@@ -239,12 +239,12 @@ describe('NodesModule', () => {
     // 2. Act
     module.onModuleInit();
 
-    // 3. Assert: DESTINO_HTTP llevaba desde la migracion 005 en el enum sin
+    // 3. Assert: este destino llevaba desde la migracion 005 en el enum sin
     // ninguna estrategia inscrita —la unica implementacion vivia en
     // `strategies/dummies/` y nadie la registra—, asi que `GET /api/nodos` lo
     // servia con `implemented: false` y un flujo que llegara a publicar
     // reventaba en su ultimo paso con `StrategyNotFoundException`, que el motor
     // normaliza a URGENTE y por tanto no reintenta.
-    expect(factory.getStrategy(NodeType.DESTINO_HTTP)).toBe(drupal);
+    expect(factory.getStrategy(NodeType.DESTINO_DRUPAL)).toBe(drupal);
   });
 });

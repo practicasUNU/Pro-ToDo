@@ -71,7 +71,7 @@ export const DUMMY_SCHEMA: PipelineSchemaDto = {
     },
     nodo_dispatch: {
       nodeId: 'nodo_dispatch',
-      nodeType: NodeType.DESTINO_HTTP,
+      nodeType: NodeType.DESTINO_DRUPAL,
       outputNamespace: 'http_result',
       nextStep: null,
       onErrorStep: null,

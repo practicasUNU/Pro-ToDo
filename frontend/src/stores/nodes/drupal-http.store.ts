@@ -132,7 +132,7 @@ const buildInitialConfig = (): DrupalHttpNodeConfig => ({
   fileFieldName: DEFAULT_DRUPAL_FILE_FIELD_NAME,
 });
 
-// Estado reactivo del nodo DESTINO_HTTP (regla frontend-quasar.md §3.1).
+// Estado reactivo del nodo DESTINO_DRUPAL (regla frontend-quasar.md §3.1).
 //
 // SIN capa de servicios, como TRIGGER_CRON, DESTINO_SMTP y ESCUDO_POST_IA, y
 // por el mismo motivo: no hay nada que preguntarle al backend.
@@ -509,7 +509,7 @@ export type DrupalHttpStore = ReturnType<ReturnType<typeof buildDrupalHttpStore>
 /** Definiciones ya creadas, indexadas por `nodeId`. */
 const definitions = new Map<string, ReturnType<typeof buildDrupalHttpStore>>();
 
-/** Store del nodo DESTINO_HTTP identificado por `nodeId`. */
+/** Store del nodo DESTINO_DRUPAL identificado por `nodeId`. */
 export const useDrupalHttpStore = (nodeId: string): DrupalHttpStore => {
   const cached = definitions.get(nodeId);
 

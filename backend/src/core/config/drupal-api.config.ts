@@ -20,11 +20,39 @@ import { DEFAULT_HTTP_TIMEOUT_MS } from '@core/http/http-client.service';
 /** Raiz de la API, con el sufijo `/jsonapi` ya incluido en el valor. */
 export const DRUPAL_API_BASE_URL_VAR = 'DRUPAL_API_BASE_URL';
 
-/** Token Bearer. Es el unico metodo de autenticacion aprobado (HTTP 200). */
+/**
+ * Credencial de la cuenta de servicio.
+ *
+ * Bajo `BASIC` —el modo por defecto— es la CONTRASENA de la cuenta
+ * `DRUPAL_API_USER`, no un token emitido: el modulo `basic_auth` de Drupal
+ * autentica contra las credenciales del usuario. El nombre de la variable se
+ * conserva por compatibilidad con los `.env` ya desplegados.
+ */
 export const DRUPAL_API_TOKEN_VAR = 'DRUPAL_API_TOKEN';
+
+/** Cuenta de servicio con permiso de edicion. Obligatoria en modo `BASIC`. */
+export const DRUPAL_API_USER_VAR = 'DRUPAL_API_USER';
+
+/** Esquema de autenticacion: `BASIC` (por defecto) o `BEARER`. */
+export const DRUPAL_AUTH_TYPE_VAR = 'DRUPAL_AUTH_TYPE';
 
 /** Espera maxima de una peticion a Drupal, en milisegundos. */
 export const DRUPAL_API_TIMEOUT_MS_VAR = 'DRUPAL_API_TIMEOUT_MS';
+
+/**
+ * Esquemas de autenticacion que la estrategia sabe componer.
+ *
+ * `BASIC` es el que acepta la instalacion de Madrid+D, que monta el modulo
+ * `basic_auth` del nucleo y NO `simple_oauth`. Un `Bearer` contra ese Drupal no
+ * da 401 directamente: se evalua como peticion ANONIMA, de modo que los GET de
+ * contenido publico siguen respondiendo 200 y solo falla la escritura. Esa
+ * asimetria es lo que hizo creer durante dos iteraciones que la credencial era
+ * correcta.
+ */
+export type DrupalAuthType = 'BASIC' | 'BEARER';
+
+/** Defecto deliberado: es lo que funciona contra la instalacion real. */
+export const DEFAULT_DRUPAL_AUTH_TYPE: DrupalAuthType = 'BASIC';
 
 /**
  * Raiz por defecto: el portal institucional.
@@ -49,9 +77,14 @@ export class DrupalApiConfig {
     return resolved.replace(/\/+$/, '');
   }
 
-  /** Token Bearer, o cadena vacia si el entorno no lo declara. */
+  /** Credencial de la cuenta, o cadena vacia si el entorno no la declara. */
   public get token(): string {
     return this.configService.get<string>(DRUPAL_API_TOKEN_VAR)?.trim() ?? '';
+  }
+
+  /** Cuenta de servicio, o cadena vacia. Solo se consume en modo `BASIC`. */
+  public get user(): string {
+    return this.configService.get<string>(DRUPAL_API_USER_VAR)?.trim() ?? '';
   }
 
   /**
@@ -72,12 +105,64 @@ export class DrupalApiConfig {
   }
 
   /**
+   * Esquema de autenticacion declarado en el entorno.
+   *
+   * Cualquier valor no reconocido cae a `BASIC` en vez de lanzar: un `.env` con
+   * una errata no debe tumbar el nodo, y de las dos opciones `BASIC` es la que
+   * funciona contra la instalacion real. La comparacion normaliza mayusculas
+   * porque `basic` y `Basic` son la misma intencion escrita a mano.
+   */
+  public get authType(): DrupalAuthType {
+    const raw = this.configService
+      .get<string>(DRUPAL_AUTH_TYPE_VAR)
+      ?.trim()
+      .toUpperCase();
+
+    return raw === 'BEARER' ? 'BEARER' : DEFAULT_DRUPAL_AUTH_TYPE;
+  }
+
+  /**
+   * Cabecera `Authorization` ya compuesta, lista para el cliente HTTP.
+   *
+   * Se expone armada y no en piezas para que exista UN solo sitio donde se
+   * decide el esquema. La estrategia hace cuatro tipos de peticion y todas
+   * pasan por `buildJsonApiHeaders`; repartir ahi el `if` del modo significaria
+   * que un modo nuevo pudiera olvidarse de aplicarlo.
+   *
+   * `Buffer.from(...).toString('base64')` es el Base64 nativo de Node: no hace
+   * falta dependencia, y `btoa` no acepta bytes fuera de Latin-1, lo que
+   * romperia una contrasena con acentos.
+   */
+  public get authHeader(): string {
+    if (
+      this.authType === 'BASIC' &&
+      this.user.length > 0 &&
+      this.token.length > 0
+    ) {
+      const credentials = Buffer.from(`${this.user}:${this.token}`).toString(
+        'base64',
+      );
+
+      return `Basic ${credentials}`;
+    }
+
+    return `Bearer ${this.token}`;
+  }
+
+  /**
    * Hay credenciales suficientes para intentar una peticion.
    *
-   * Solo mira el token: `baseUrl` siempre resuelve a algo por el defecto, y un
-   * token vacio es el unico fallo que garantiza un 401 contra cualquier ruta.
+   * `baseUrl` siempre resuelve a algo por el defecto, asi que lo unico que se
+   * comprueba son las credenciales. En `BASIC` hacen falta LAS DOS: con el
+   * usuario vacio la cabecera saldria como `Basic` de `:contrasena`, que Drupal
+   * rechaza igual que si no hubiera nada —pero lo haria DESPUES de gastar la
+   * peticion y con un `ERR_DRUPAL_AUTH` que apunta al servidor, en vez de parar
+   * aqui con `ERR_DRUPAL_CONFIG`, que apunta al `.env`, que es donde esta el
+   * problema de verdad.
    */
   public get isUsable(): boolean {
-    return this.token.length > 0;
+    if (this.token.length === 0) return false;
+
+    return this.authType === 'BEARER' || this.user.length > 0;
   }
 }

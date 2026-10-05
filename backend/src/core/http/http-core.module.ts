@@ -8,7 +8,7 @@ import { HttpClientService } from '@core/http/http-client.service';
  *
  * Se aisla en `@core` y no se cuelga de `NodesModule` porque el consumidor
  * natural del cliente no es el nodo de IA sino CUALQUIER nodo que salga a
- * Internet: el `DESTINO_HTTP` de Drupal y el `DESTINO_ACENS` pendientes lo
+ * Internet: el `DESTINO_DRUPAL` de Drupal y el `DESTINO_ACENS` pendientes lo
  * necesitaran igual, y ninguno de los dos deberia tener que importar el modulo
  * de nodos para conseguirlo.
  *

@@ -145,7 +145,7 @@ const buildTemplate = (
  *
  * El papel lo fue haciendo el ultimo tipo real sin triada —`PARSER_PRE_IA`,
  * `EXTRACTOR_WEB`, `PROCESADOR_IA`, `ESCUDO_POST_IA` y por ultimo
- * `DESTINO_HTTP`—, y rotarlo a mano era trabajo recurrente. Ya no quedan: los
+ * `DESTINO_DRUPAL`—, y rotarlo a mano era trabajo recurrente. Ya no quedan: los
  * diez tipos del enum tienen configurador, asi que el fixture se queda sin
  * candidato real y hay que elegir entre retirar las pruebas o declarar un
  * doble. Se declara el doble.

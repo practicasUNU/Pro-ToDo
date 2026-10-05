@@ -174,7 +174,7 @@ export const DRUPAL_SANDBOX_PRESETS: Readonly<
 };
 
 /**
- * Configuracion del nodo `DESTINO_HTTP` en el cliente.
+ * Configuracion del nodo `DESTINO_DRUPAL` en el cliente.
  *
  * NINGUN campo es opcional, aunque el DTO del backend los admita todos
  * ausentes: un `undefined` enlazado a un control de Quasar lo convierte en

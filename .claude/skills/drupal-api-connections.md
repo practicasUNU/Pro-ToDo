@@ -6,19 +6,29 @@ Esta guía operativa documenta los contratos de red, bundles, rutas de API y est
 ---
 
 ## 2. Autenticación y Credenciales Perimetrales
-- **Tipo de Autenticación Oficial:** `BEARER` (validado y aprobado con HTTP 200).
-- **Cabeceras Obligatorias:**
-  - `Authorization: Bearer ${DRUPAL_API_TOKEN}`
+
+- **Tipo de autenticación oficial:** `BASIC`. Esta instalación monta el módulo **`basic_auth`** del núcleo de Drupal, **no `simple_oauth`**.
+
+> ⚠️ **El `Bearer` no da 401: da 200 y no escribe.** Una petición con `Authorization: Bearer …` contra este Drupal no se rechaza — se evalúa como **anónima**. Los `GET` de contenido público siguen respondiendo `200 OK`, de modo que toda comprobación de lectura parece confirmar que la credencial es buena, y solo revienta el `PATCH`. Si una escritura falla con 401 mientras las lecturas van finas, el sospechoso es el **esquema**, no el token.
+
+- **Cabeceras obligatorias:**
+  - `Authorization: Basic <base64(DRUPAL_API_USER:DRUPAL_API_TOKEN)>`
   - `Accept: application/vnd.api+json`
   - `Content-Type: application/vnd.api+json`
+
+  La compone **un solo sitio**, el getter `DrupalApiConfig.authHeader`; `DrupalHttpStrategy.buildJsonApiHeaders()` la consume ya armada. Ni la estrategia ni el script E2E construyen la cabecera por su cuenta, para que un modo nuevo no pueda olvidarse del esquema.
+
 - **Variables de entorno oficiales** (todas en `backend/.env`, leídas vía `ConfigService`; plantilla en `backend/.env.example`):
 
   | Variable | Valor de referencia | Notas |
   |---|---|---|
-  | `DRUPAL_API_BASE_URL` | `https://www.madrimasd.org/jsonapi` | Incluye el sufijo `/jsonapi` a propósito: es la raíz sobre la que la estrategia concatena `/node/page/{uuid}`. Sin ella el nodo falla con `ERR_DRUPAL_CONFIG`. |
-  | `DRUPAL_API_TOKEN` | *(bearer emitido por Drupal)* | Sin token el nodo falla con `ERR_DRUPAL_CONFIG` **antes** de emitir ninguna petición. |
+  | `DRUPAL_API_BASE_URL` | `https://www.madrimasd.org/jsonapi` | Incluye el sufijo `/jsonapi` a propósito: es la raíz sobre la que la estrategia concatena `/node/page/{uuid}`. |
+  | `DRUPAL_AUTH_TYPE` | `BASIC` | `BASIC` o `BEARER`. Cualquier otro valor cae a `BASIC`; la comparación ignora mayúsculas. |
+  | `DRUPAL_API_USER` | `editor_api` | Cuenta de servicio con permiso de edición. **Obligatoria bajo `BASIC`**; ignorada bajo `BEARER`. |
+  | `DRUPAL_API_TOKEN` | *(contraseña de la cuenta)* | Bajo `BASIC` es la **contraseña** de `DRUPAL_API_USER`, no un token emitido. El nombre se conserva por compatibilidad con los `.env` ya desplegados. |
   | `DRUPAL_API_TIMEOUT_MS` | `15000` | Timeout por petición HTTP. |
-  | `DRUPAL_API_USER` | `example_api` | Reservada; la autenticación aprobada es Bearer y la estrategia no la consume. |
+
+- **Guarda previa (`DrupalApiConfig.isUsable`):** bajo `BASIC` exige usuario **y** contraseña. Con el usuario vacío la cabecera saldría como el Base64 de `:contraseña`, que Drupal procesa como anónima; detenerse antes con `ERR_DRUPAL_CONFIG` apunta al `.env`, mientras que dejar salir la petición devolvería `ERR_DRUPAL_AUTH`, que apunta al servidor y manda a buscar donde no es.
 
 - **Aislamiento:** Las credenciales operan exclusivamente en `backend/.env` vía `ConfigService`. Prohibido exponer tokens en frontend o en `pipeline_schema`.
 
@@ -41,7 +51,7 @@ El endpoint `/router/translate-path` responde `404 Not Found` (módulo no instal
 ### Comando de Descubrimiento de NIDs y UUIDs
 Para extraer los identificadores de `/prueba-licitaciones` y `/prueba-verificador-titulos`:
 ```bash
-curl -s -H "Authorization: Bearer $DRUPAL_API_TOKEN" \
+curl -s -u "$DRUPAL_API_USER:$DRUPAL_API_TOKEN" \
   -H "Accept: application/vnd.api+json" \
   "[https://www.madrimasd.org/jsonapi/node/page?fields](https://www.madrimasd.org/jsonapi/node/page?fields)[node--page]=title,path,drupal_internal__nid" \
   | jq '.data[] | {nid: .attributes.drupal_internal__nid, title: .attributes.title, path: .attributes.path.alias, id: .id}'

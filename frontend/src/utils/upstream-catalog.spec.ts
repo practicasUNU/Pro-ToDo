@@ -85,7 +85,7 @@ describe('upstream-catalog · contexto de variables sin topologia', () => {
       // 3. Assert: vacio significa "no hay nada que ofrecer todavia", y el
       //    namespace sigue estando.
       expect(context).toEqual([
-        { namespace: 'http_result', nodeType: NodeType.DESTINO_HTTP, fields: [] },
+        { namespace: 'http_result', nodeType: NodeType.DESTINO_DRUPAL, fields: [] },
       ]);
     });
 

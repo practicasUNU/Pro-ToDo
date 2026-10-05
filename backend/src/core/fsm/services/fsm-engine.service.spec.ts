@@ -162,7 +162,7 @@ const buildLinearSchema = (): PipelineSchemaDto => ({
     },
     nodo_c: {
       nodeId: 'nodo_c',
-      nodeType: NodeType.DESTINO_HTTP,
+      nodeType: NodeType.DESTINO_DRUPAL,
       outputNamespace: 'salida_c',
       nextStep: null,
       onErrorStep: null,
@@ -267,7 +267,9 @@ describe('FsmEngineService (PROT-09)', () => {
 
       factory.registerStrategy(buildStrategy(NodeType.TRIGGER_IMAP, executeA));
       factory.registerStrategy(buildStrategy(NodeType.PROCESADOR_IA, executeB));
-      factory.registerStrategy(buildStrategy(NodeType.DESTINO_HTTP, executeC));
+      factory.registerStrategy(
+        buildStrategy(NodeType.DESTINO_DRUPAL, executeC),
+      );
 
       // 2. Act
       const result = await buildEngine(repo).executeWorkflow(
@@ -298,7 +300,7 @@ describe('FsmEngineService (PROT-09)', () => {
 
       factory.registerStrategy(buildStrategy(NodeType.TRIGGER_IMAP, execute));
       factory.registerStrategy(buildStrategy(NodeType.PROCESADOR_IA, execute));
-      factory.registerStrategy(buildStrategy(NodeType.DESTINO_HTTP, execute));
+      factory.registerStrategy(buildStrategy(NodeType.DESTINO_DRUPAL, execute));
 
       // 2. Act
       await buildEngine(repo).executeWorkflow(
@@ -330,7 +332,9 @@ describe('FsmEngineService (PROT-09)', () => {
 
       factory.registerStrategy(buildStrategy(NodeType.TRIGGER_IMAP, executeA));
       factory.registerStrategy(buildStrategy(NodeType.PROCESADOR_IA, executeB));
-      factory.registerStrategy(buildStrategy(NodeType.DESTINO_HTTP, executeC));
+      factory.registerStrategy(
+        buildStrategy(NodeType.DESTINO_DRUPAL, executeC),
+      );
 
       // 2. Act
       const result = await buildEngine(repo).executeWorkflow(
@@ -369,7 +373,7 @@ describe('FsmEngineService (PROT-09)', () => {
 
       factory.registerStrategy(buildStrategy(NodeType.TRIGGER_IMAP, execute));
       factory.registerStrategy(buildStrategy(NodeType.PROCESADOR_IA, execute));
-      factory.registerStrategy(buildStrategy(NodeType.DESTINO_HTTP, execute));
+      factory.registerStrategy(buildStrategy(NodeType.DESTINO_DRUPAL, execute));
 
       // 2. Act
       const result = await buildEngine(repo).executeWorkflow(
@@ -399,7 +403,9 @@ describe('FsmEngineService (PROT-09)', () => {
 
       factory.registerStrategy(buildStrategy(NodeType.TRIGGER_IMAP, executeA));
       factory.registerStrategy(buildStrategy(NodeType.PROCESADOR_IA, executeB));
-      factory.registerStrategy(buildStrategy(NodeType.DESTINO_HTTP, executeC));
+      factory.registerStrategy(
+        buildStrategy(NodeType.DESTINO_DRUPAL, executeC),
+      );
 
       // 2. Act
       const result = await buildEngine(repo).executeWorkflow(
@@ -422,7 +428,7 @@ describe('FsmEngineService (PROT-09)', () => {
 
       factory.registerStrategy(buildStrategy(NodeType.TRIGGER_IMAP, execute));
       factory.registerStrategy(buildStrategy(NodeType.PROCESADOR_IA, execute));
-      factory.registerStrategy(buildStrategy(NodeType.DESTINO_HTTP, execute));
+      factory.registerStrategy(buildStrategy(NodeType.DESTINO_DRUPAL, execute));
 
       // 2. Act
       await buildEngine(repo).executeWorkflow(
@@ -516,7 +522,7 @@ describe('FsmEngineService (PROT-09)', () => {
       );
       factory.registerStrategy(
         buildStrategy(
-          NodeType.DESTINO_HTTP,
+          NodeType.DESTINO_DRUPAL,
           jest.fn().mockResolvedValue({ success: true }),
         ),
       );
@@ -584,7 +590,7 @@ describe('FsmEngineService (PROT-09)', () => {
       );
       factory.registerStrategy(
         buildStrategy(
-          NodeType.DESTINO_HTTP,
+          NodeType.DESTINO_DRUPAL,
           jest.fn().mockResolvedValue({ success: true }),
         ),
       );
@@ -625,7 +631,7 @@ describe('FsmEngineService (PROT-09)', () => {
       factory.registerStrategy(buildStrategy(NodeType.PROCESADOR_IA, executeB));
       factory.registerStrategy(
         buildStrategy(
-          NodeType.DESTINO_HTTP,
+          NodeType.DESTINO_DRUPAL,
           jest.fn().mockResolvedValue({ success: true }),
         ),
       );
@@ -718,7 +724,9 @@ describe('FsmEngineService (PROT-09)', () => {
         .mockResolvedValue({ success: true, data: { recuperado: true } });
 
       factory.registerStrategy(buildStrategy(NodeType.TRIGGER_IMAP, executeA));
-      factory.registerStrategy(buildStrategy(NodeType.DESTINO_HTTP, executeC));
+      factory.registerStrategy(
+        buildStrategy(NodeType.DESTINO_DRUPAL, executeC),
+      );
 
       // 2. Act
       const result = await buildEngine(repo).executeWorkflow(
@@ -761,7 +769,9 @@ describe('FsmEngineService (PROT-09)', () => {
           jest.fn().mockResolvedValue({ success: true }),
         ),
       );
-      factory.registerStrategy(buildStrategy(NodeType.DESTINO_HTTP, executeC));
+      factory.registerStrategy(
+        buildStrategy(NodeType.DESTINO_DRUPAL, executeC),
+      );
 
       return { executeC, seen };
     };
@@ -905,7 +915,7 @@ describe('FsmEngineService (PROT-09)', () => {
       );
       factory.registerStrategy(
         buildStrategy(
-          NodeType.DESTINO_HTTP,
+          NodeType.DESTINO_DRUPAL,
           jest.fn().mockImplementation((context: StatePayloadContext) => {
             seen.push(context.getNamespace(ERROR_CONTEXT_NAMESPACE) ?? {});
 
@@ -1022,7 +1032,9 @@ describe('FsmEngineService (PROT-09)', () => {
           jest.fn().mockResolvedValue({ success: true }),
         ),
       );
-      factory.registerStrategy(buildStrategy(NodeType.DESTINO_HTTP, executeC));
+      factory.registerStrategy(
+        buildStrategy(NodeType.DESTINO_DRUPAL, executeC),
+      );
 
       return { executeA, executeC };
     };
@@ -1232,7 +1244,9 @@ describe('FsmEngineService (PROT-09)', () => {
           jest.fn().mockRejectedValue(new Error('roto')),
         ),
       );
-      factory.registerStrategy(buildStrategy(NodeType.DESTINO_HTTP, executeC));
+      factory.registerStrategy(
+        buildStrategy(NodeType.DESTINO_DRUPAL, executeC),
+      );
 
       // 2. Act
       const result = await buildEngine(repo).executeWorkflow(
@@ -1362,7 +1376,9 @@ describe('FsmEngineService (PROT-09)', () => {
 
       factory.registerStrategy(buildStrategy(NodeType.TRIGGER_IMAP, executeA));
       factory.registerStrategy(buildStrategy(NodeType.PROCESADOR_IA, executeB));
-      factory.registerStrategy(buildStrategy(NodeType.DESTINO_HTTP, executeC));
+      factory.registerStrategy(
+        buildStrategy(NodeType.DESTINO_DRUPAL, executeC),
+      );
 
       // 2. Act
       const result = await buildEngine(repo).executeWorkflow(
@@ -1398,7 +1414,7 @@ describe('FsmEngineService (PROT-09)', () => {
       factory.registerStrategy(buildStrategy(NodeType.PROCESADOR_IA, executeB));
       factory.registerStrategy(
         buildStrategy(
-          NodeType.DESTINO_HTTP,
+          NodeType.DESTINO_DRUPAL,
           jest.fn().mockResolvedValue({ success: true }),
         ),
       );
@@ -1436,7 +1452,7 @@ describe('FsmEngineService (PROT-09)', () => {
       );
       factory.registerStrategy(
         buildStrategy(
-          NodeType.DESTINO_HTTP,
+          NodeType.DESTINO_DRUPAL,
           jest.fn().mockResolvedValue({ success: true }),
         ),
       );
@@ -1471,7 +1487,7 @@ describe('FsmEngineService (PROT-09)', () => {
       );
       factory.registerStrategy(
         buildStrategy(
-          NodeType.DESTINO_HTTP,
+          NodeType.DESTINO_DRUPAL,
           jest.fn().mockResolvedValue({ success: true }),
         ),
       );
@@ -1976,7 +1992,9 @@ describe('FsmEngineService (PROT-09)', () => {
 
       factory.registerStrategy(buildStrategy(NodeType.TRIGGER_IMAP, executeA));
       factory.registerStrategy(buildStrategy(NodeType.PROCESADOR_IA, executeB));
-      factory.registerStrategy(buildStrategy(NodeType.DESTINO_HTTP, executeC));
+      factory.registerStrategy(
+        buildStrategy(NodeType.DESTINO_DRUPAL, executeC),
+      );
 
       // 2. Act
       await engine.executeWorkflow(EXECUTION_ID, buildLinearSchema());
@@ -2021,7 +2039,9 @@ describe('FsmEngineService (PROT-09)', () => {
       factory.registerStrategy(
         buildStrategy(NodeType.PROCESADOR_IA, jest.fn()),
       );
-      factory.registerStrategy(buildStrategy(NodeType.DESTINO_HTTP, jest.fn()));
+      factory.registerStrategy(
+        buildStrategy(NodeType.DESTINO_DRUPAL, jest.fn()),
+      );
 
       // 2. Act
       const result = await engine.executeWorkflow(
@@ -2057,7 +2077,9 @@ describe('FsmEngineService (PROT-09)', () => {
       const executeC = jest.fn().mockResolvedValue({ success: true });
       factory.registerStrategy(buildStrategy(NodeType.TRIGGER_IMAP, executeA));
       factory.registerStrategy(buildStrategy(NodeType.PROCESADOR_IA, executeB));
-      factory.registerStrategy(buildStrategy(NodeType.DESTINO_HTTP, executeC));
+      factory.registerStrategy(
+        buildStrategy(NodeType.DESTINO_DRUPAL, executeC),
+      );
 
       // 2. Act: el flujo se reactiva y se relanza la ejecucion.
       const result = await engine.executeWorkflow(
@@ -2672,7 +2694,7 @@ describe('FsmEngineService (PROT-09)', () => {
       factory.registerStrategy(
         buildStrategy(NodeType.PROCESADOR_IA, execB, () => ['salida_a']),
       );
-      factory.registerStrategy(buildStrategy(NodeType.DESTINO_HTTP, execC));
+      factory.registerStrategy(buildStrategy(NodeType.DESTINO_DRUPAL, execC));
       const execution = buildExecution();
       const { repo, update } = buildRepository(execution);
 
@@ -2697,7 +2719,9 @@ describe('FsmEngineService (PROT-09)', () => {
       factory.registerStrategy(
         buildStrategy(NodeType.PROCESADOR_IA, execB, () => ['llm_response']),
       );
-      factory.registerStrategy(buildStrategy(NodeType.DESTINO_HTTP, jest.fn()));
+      factory.registerStrategy(
+        buildStrategy(NodeType.DESTINO_DRUPAL, jest.fn()),
+      );
       const execution = buildExecution();
       const { repo, update } = buildRepository(execution);
 
@@ -2733,7 +2757,9 @@ describe('FsmEngineService (PROT-09)', () => {
           'scraped_web',
         ]),
       );
-      factory.registerStrategy(buildStrategy(NodeType.DESTINO_HTTP, jest.fn()));
+      factory.registerStrategy(
+        buildStrategy(NodeType.DESTINO_DRUPAL, jest.fn()),
+      );
       const { repo } = buildRepository(buildExecution());
 
       // 2. Act
@@ -2772,7 +2798,7 @@ describe('FsmEngineService (PROT-09)', () => {
       );
       factory.registerStrategy(
         buildStrategy(
-          NodeType.DESTINO_HTTP,
+          NodeType.DESTINO_DRUPAL,
           jest.fn().mockResolvedValue({ success: true }),
         ),
       );
@@ -2805,7 +2831,7 @@ describe('FsmEngineService (PROT-09)', () => {
           'llm_response',
         ]),
       );
-      factory.registerStrategy(buildStrategy(NodeType.DESTINO_HTTP, execC));
+      factory.registerStrategy(buildStrategy(NodeType.DESTINO_DRUPAL, execC));
 
       const schema = buildLinearSchema();
       schema.nodes.nodo_b.onErrorStep = {
@@ -2835,7 +2861,7 @@ describe('FsmEngineService (PROT-09)', () => {
       );
       factory.registerStrategy(
         buildStrategy(
-          NodeType.DESTINO_HTTP,
+          NodeType.DESTINO_DRUPAL,
           jest.fn().mockResolvedValue({ success: true }),
         ),
       );
@@ -2992,7 +3018,7 @@ describe('FsmEngineService (PROT-09)', () => {
       );
       factory.registerStrategy(
         buildStrategy(
-          NodeType.DESTINO_HTTP,
+          NodeType.DESTINO_DRUPAL,
           jest.fn().mockResolvedValue({ success: true, data: { pub: true } }),
         ),
       );
@@ -3100,7 +3126,7 @@ describe('FsmEngineService (PROT-09)', () => {
       );
       factory.registerStrategy(
         buildStrategy(
-          NodeType.DESTINO_HTTP,
+          NodeType.DESTINO_DRUPAL,
           jest.fn().mockResolvedValue({ success: true, data: {} }),
         ),
       );
@@ -3136,7 +3162,7 @@ describe('FsmEngineService (PROT-09)', () => {
       );
       factory.registerStrategy(
         buildStrategy(
-          NodeType.DESTINO_HTTP,
+          NodeType.DESTINO_DRUPAL,
           jest.fn().mockResolvedValue({ success: true, data: {} }),
         ),
       );
@@ -3175,7 +3201,7 @@ describe('FsmEngineService (PROT-09)', () => {
       );
       factory.registerStrategy(
         buildStrategy(
-          NodeType.DESTINO_HTTP,
+          NodeType.DESTINO_DRUPAL,
           jest.fn().mockResolvedValue({ success: true, data: {} }),
         ),
       );
@@ -3213,7 +3239,7 @@ describe('FsmEngineService (PROT-09)', () => {
       );
       factory.registerStrategy(
         buildStrategy(
-          NodeType.DESTINO_HTTP,
+          NodeType.DESTINO_DRUPAL,
           jest.fn().mockResolvedValue({ success: true, data: {} }),
         ),
       );
@@ -3261,7 +3287,9 @@ describe('FsmEngineService (PROT-09)', () => {
           jest.fn().mockResolvedValue({ success: true, data: {} }),
         ),
       );
-      factory.registerStrategy(buildStrategy(NodeType.DESTINO_HTTP, terminal));
+      factory.registerStrategy(
+        buildStrategy(NodeType.DESTINO_DRUPAL, terminal),
+      );
     };
 
     /** Grafo lineal con `nodo_b` desviando hacia el terminal. */

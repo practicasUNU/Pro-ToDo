@@ -11,6 +11,8 @@ import {
 import { NodeType } from '@core/fsm/types/pipeline-schema.types';
 import { HttpClientService } from '@core/http/http-client.service';
 
+import { BaseHttpDestinationStrategy } from './base/base-http-destination.strategy';
+
 import {
   DrupalHttpConfigDto,
   DrupalOperationMode,
@@ -19,7 +21,6 @@ import {
 
 import type { StatePayloadContext } from '@core/fsm/context/state-payload.context';
 import type {
-  INodeStrategy,
   NodeErrorDetail,
   NodeOutputField,
   NodeResult,
@@ -154,12 +155,15 @@ const sanitizeFilename = (filename: string): string => {
 };
 
 /**
- * Nodo DESTINO_HTTP: publicacion final en el Drupal institucional (JSON:API).
+ * Nodo DESTINO_DRUPAL: publicacion final en el Drupal institucional (JSON:API).
  *
- * POR QUE ESTE NOMBRE. El tipo se llamo `DESTINO_DRUPAL` hasta la migracion 005,
- * que lo renombro a `DESTINO_HTTP` para que el catalogo admitiera tambien otros
- * destinos por HTTP. La clase conserva `Drupal` porque lo que implementa es el
- * dialecto JSON:API de Drupal, no un POST generico.
+ * POR QUE ESTE NOMBRE. El tipo viajo de `DESTINO_DRUPAL` a `DESTINO_HTTP` en la
+ * migracion 005 —para admitir otros destinos por HTTP— y la 027 lo devolvio a
+ * `DESTINO_DRUPAL`. El motivo del viaje de vuelta es que el generico nunca
+ * llego: lo que esta clase implementa es el dialecto JSON:API de Drupal, no un
+ * POST cualquiera, y sus hermanos del catalogo (`DESTINO_SMTP`, `DESTINO_ACENS`)
+ * nombran el destino y no el transporte. Lo que de verdad es generico vive
+ * ahora en `BaseHttpDestinationStrategy`, que es donde lo heredara Acens.
  *
  * CUATRO MODOS, que son cuatro trabajos distintos y no variantes del mismo:
  *
@@ -180,8 +184,8 @@ const sanitizeFilename = (filename: string): string => {
  * deja escrito para que nadie lo descubra en produccion.
  */
 @Injectable()
-export class DrupalHttpStrategy implements INodeStrategy {
-  public readonly nodeType = NodeType.DESTINO_HTTP;
+export class DrupalHttpStrategy extends BaseHttpDestinationStrategy {
+  public readonly nodeType = NodeType.DESTINO_DRUPAL;
 
   /** Validacion estricta de los `params` al guardar y al activar el flujo. */
   public readonly paramsSchema = DrupalHttpConfigDto;
@@ -230,9 +234,14 @@ export class DrupalHttpStrategy implements INodeStrategy {
   ];
 
   constructor(
-    private readonly httpClient: HttpClientService,
+    httpClient: HttpClientService,
     private readonly drupalApiConfig: DrupalApiConfig,
-  ) {}
+  ) {
+    // El contexto del logger es el de ESTA clase y no el de la base: al
+    // operador le sirve leer `DrupalHttpStrategy` en la traza, no el nombre del
+    // andamiaje compartido.
+    super(httpClient, DrupalHttpStrategy.name);
+  }
 
   /**
    * Namespaces sin los cuales este nodo no puede operar.
@@ -358,16 +367,17 @@ export class DrupalHttpStrategy implements INodeStrategy {
 
     const { config } = resolution;
 
-    // Guarda de credencial, antes de construir ninguna peticion: sin token, la
-    // respuesta de Drupal seria un 401 indistinguible de un token caducado.
+    // Guarda de credencial, antes de construir ninguna peticion: sin ella la
+    // respuesta de Drupal seria un 401 indistinguible de una cuenta caducada.
     if (!this.drupalApiConfig.isUsable) {
       return {
         success: false,
         error: {
           level: 'GRAVE',
           code: ERR_DRUPAL_CONFIG,
-          message:
-            'DRUPAL_API_TOKEN no esta definida en el entorno. El nodo no puede autenticarse contra Drupal.',
+          // El mensaje nombra la variable que falta y no un generico, porque
+          // en modo BASIC son dos y confundirlas cuesta una corrida entera.
+          message: this.describeMissingCredentials(),
         },
       };
     }
@@ -697,10 +707,11 @@ export class DrupalHttpStrategy implements INodeStrategy {
     );
 
     if ('failure' in patchedSource) {
-      const failure = this.mapStatusToFailure(
+      const failure = this.mapHttpFailure(
         patchedSource.failure,
         patchedSource.status,
-        'retirar el bloque de la pagina de origen',
+        DrupalHttpStrategy.ERROR_PREFIX,
+        'retirar el bloque de la pagina de origen en Drupal',
       );
 
       // Se devuelve `data` AUNQUE el nodo falle: el motor publica el namespace
@@ -929,10 +940,16 @@ export class DrupalHttpStrategy implements INodeStrategy {
     );
   }
 
-  /** Cabeceras del dialecto JSON:API, con el token del entorno. */
+  /**
+   * Cabeceras del dialecto JSON:API, con la credencial del entorno.
+   *
+   * El esquema (`Basic` o `Bearer`) lo decide `DrupalApiConfig.authHeader`, no
+   * este metodo: los cuatro modos pasan por aqui, y repartir el `if` por cada
+   * uno significaria que el quinto se olvidara de aplicarlo.
+   */
   private buildJsonApiHeaders(): Record<string, string> {
     return {
-      Authorization: `Bearer ${this.drupalApiConfig.token}`,
+      Authorization: this.drupalApiConfig.authHeader,
       Accept: 'application/vnd.api+json',
       'Content-Type': 'application/vnd.api+json',
     };
@@ -1071,58 +1088,14 @@ export class DrupalHttpStrategy implements INodeStrategy {
   }
 
   /**
-   * Traduce el estado HTTP crudo al par (codigo, nivel) de este nodo.
+   * Prefijo de los codigos de error de este nodo.
    *
-   * TODOS los niveles son GRAVE, y es una decision, no una simplificacion.
-   * `FsmEngineService.canRetry` reintenta UNICAMENTE los GRAVE, y es ademas el
-   * unico nivel que deja la ejecucion en PAUSADO conservando el `activeCursor`,
-   * que es lo que habilita el reintento manual de CU-09.
-   *
-   * Las dos alternativas hacen lo contrario de lo que hace falta:
-   *
-   * - LEVE cierra la ejecucion en FALLIDO con `activeCursor: null`, de modo que
-   *   no queda nada que reanudar. Un 503 marcado LEVE dejaria el contenido sin
-   *   publicar y sin ninguna via —automatica ni manual— de recuperarlo.
-   * - URGENTE declara el fallo irrecuperable, y un `socket hang up` o un
-   *   timeout son justo lo contrario: una indisponibilidad pasajera que se
-   *   resuelve sola en cuanto vuelve la conectividad.
-   *
-   * Los codigos SI se reparten, porque lo que enruta un `catchErrors` es el
-   * `code` y cada uno manda al operador a un sitio distinto.
+   * `BaseHttpDestinationStrategy.resolveErrorCode` lo concatena con la familia
+   * (`_AUTH`, `_SERVER`, `_NETWORK`, `_REQUEST`). Las constantes exportadas
+   * arriba siguen siendo la fuente de verdad para quien las importe; esto es
+   * solo la raiz comun con la que se componen.
    */
-  private mapStatusToFailure(
-    base: NodeErrorDetail,
-    status: number | undefined,
-    operation: string,
-  ): NodeErrorDetail {
-    const code = this.resolveErrorCode(status);
-
-    return {
-      ...base,
-      level: 'GRAVE',
-      code,
-      message: `Fallo al ${operation} en Drupal: ${base.message}`,
-    };
-  }
-
-  /** Reparto del codigo por familia de estado. */
-  private resolveErrorCode(status: number | undefined): string {
-    // Sin estado no hubo respuesta que clasificar: es DNS, conexion rechazada
-    // o timeout. Es lo que distingue una averia de red de un rechazo remoto.
-    if (status === undefined || status === NEUTRAL_STATUS) {
-      return ERR_DRUPAL_NETWORK;
-    }
-
-    if (status === 401 || status === 403) {
-      return ERR_DRUPAL_AUTH;
-    }
-
-    if (status >= 500) {
-      return ERR_DRUPAL_SERVER;
-    }
-
-    return ERR_DRUPAL_REQUEST;
-  }
+  private static readonly ERROR_PREFIX = 'ERR_DRUPAL';
 
   /** Fallo de una peticion cualquiera, con el payload neutro del modo. */
   private failWith(
@@ -1136,10 +1109,13 @@ export class DrupalHttpStrategy implements INodeStrategy {
         { httpStatus: outcome.status ?? NEUTRAL_STATUS },
         config.operationMode,
       ),
-      error: this.mapStatusToFailure(
+      error: this.mapHttpFailure(
         outcome.failure,
         outcome.status,
-        operation,
+        DrupalHttpStrategy.ERROR_PREFIX,
+        // El sufijo mantiene el mensaje identico al de antes del refactor: la
+        // base no puede saber contra que CMS se estaba hablando.
+        `${operation} en Drupal`,
       ),
     };
   }
@@ -1151,6 +1127,26 @@ export class DrupalHttpStrategy implements INodeStrategy {
     operation: string,
   ): NodeResult {
     return this.failWith(fetched, config, operation);
+  }
+
+  /**
+   * Que credencial falta, con el nombre exacto de la variable de entorno.
+   *
+   * En modo BASIC hacen falta DOS, y un mensaje que solo nombrara el token
+   * mandaria al operador a revisar la que ya estaba bien.
+   */
+  private describeMissingCredentials(): string {
+    const { authType, token, user } = this.drupalApiConfig;
+
+    if (token.length === 0) {
+      return `DRUPAL_API_TOKEN no esta definida en el entorno. El nodo no puede autenticarse contra Drupal (modo ${authType}).`;
+    }
+
+    if (authType === 'BASIC' && user.length === 0) {
+      return 'DRUPAL_AUTH_TYPE es BASIC pero DRUPAL_API_USER esta vacia. La autenticacion basica exige usuario y contrasena; declara la cuenta de servicio o cambia a DRUPAL_AUTH_TYPE=BEARER.';
+    }
+
+    return 'Las credenciales de Drupal estan incompletas en el entorno.';
   }
 
   /** Param obligatorio ausente en ejecucion pese a `getIncompleteParams`. */

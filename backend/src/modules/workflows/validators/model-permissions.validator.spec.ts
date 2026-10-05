@@ -104,7 +104,7 @@ describe('assertModelPermissions · modelos de pago reservados al ADMIN', () => 
     it('1.5 deberia ignorar los nodos que no consumen un LLM', () => {
       // 1. Arrange 📐: comprobar "todo nodo que tenga un campo model" habria
       //    prohibido configuraciones que no gastan un euro.
-      const schema = buildSchema(NodeType.DESTINO_HTTP, {
+      const schema = buildSchema(NodeType.DESTINO_DRUPAL, {
         model: 'claude-opus-5-5',
       });
 

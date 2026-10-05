@@ -53,7 +53,7 @@ const FULL_UPSTREAM: UpstreamNamespace[] = [
   },
 ];
 
-describe('useDrupalHttpStore · configuracion del nodo DESTINO_HTTP', () => {
+describe('useDrupalHttpStore · configuracion del nodo DESTINO_DRUPAL', () => {
   beforeEach(() => {
     setActivePinia(createPinia());
   });

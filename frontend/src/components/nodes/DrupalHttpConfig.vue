@@ -193,7 +193,7 @@ const toNullableText = (value: string | number | null): string | null => {
         <q-icon name="cloud_upload" size="20px" class="pd-node-icon" />
       </span>
       <div>
-        <div class="pd-h2">{{ NODE_TYPE_LABELS[NodeType.DESTINO_HTTP] }}</div>
+        <div class="pd-h2">{{ NODE_TYPE_LABELS[NodeType.DESTINO_DRUPAL] }}</div>
         <div class="pd-subtitle">Publica el resultado del flujo en Drupal mediante JSON:API.</div>
       </div>
     </header>

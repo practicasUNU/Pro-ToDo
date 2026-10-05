@@ -232,7 +232,7 @@ describe('validatePipelineTopology', () => {
       const schema = buildSchema();
       schema.nodes.nodo_suelto = {
         nodeId: 'nodo_suelto',
-        nodeType: NodeType.DESTINO_HTTP,
+        nodeType: NodeType.DESTINO_DRUPAL,
         outputNamespace: 'http_result',
         nextStep: null,
         onErrorStep: null,

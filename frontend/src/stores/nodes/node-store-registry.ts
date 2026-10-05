@@ -275,7 +275,7 @@ export const nodeStoreRegistry: Partial<Record<NodeType, NodeStoreHook>> = {
   [NodeType.DESTINO_SMTP]: useSmtpAlertStore,
   [NodeType.PROCESADOR_OCR]: useOcrProcessorStore,
   [NodeType.ESCUDO_POST_IA]: usePostIaSanitizerStore,
-  [NodeType.DESTINO_HTTP]: useDrupalHttpStore,
+  [NodeType.DESTINO_DRUPAL]: useDrupalHttpStore,
 };
 
 /**

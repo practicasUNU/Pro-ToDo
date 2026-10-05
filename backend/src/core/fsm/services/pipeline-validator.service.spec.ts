@@ -80,7 +80,7 @@ const buildNotiwebSchema = (): PipelineSchema => ({
     },
     nodo_destino: {
       nodeId: 'nodo_destino',
-      nodeType: NodeType.DESTINO_HTTP,
+      nodeType: NodeType.DESTINO_DRUPAL,
       outputNamespace: 'http_result',
       nextStep: null,
       onErrorStep: null,
@@ -676,10 +676,10 @@ describe('PipelineValidatorService (PROT-07)', () => {
       //    afirmar sobre el al guardar seria adivinar. Lo cubre el motor.
       const schema = buildNotiwebSchema();
       const service = buildServiceWith({
-        [NodeType.DESTINO_HTTP]: ['namespace_inventado'],
+        [NodeType.DESTINO_DRUPAL]: ['namespace_inventado'],
       });
       const terminal = Object.values(schema.nodes).find(
-        (node) => node.nodeType === NodeType.DESTINO_HTTP,
+        (node) => node.nodeType === NodeType.DESTINO_DRUPAL,
       );
 
       if (terminal !== undefined) {
@@ -857,9 +857,13 @@ describe('PipelineValidatorService (PROT-07)', () => {
       // 1. Arrange: el equivalente de `LICITACION_DEFAULT`, que solo pide
       //    `parsed_email` — y el parser va por delante.
       const { service } = buildServiceWithPrompt(
-        new Map([[`code:LICITACION_DEFAULT`, 'Extrae de {{parsed_email.clean_body}}']]),
+        new Map([
+          [`code:LICITACION_DEFAULT`, 'Extrae de {{parsed_email.clean_body}}'],
+        ]),
       );
-      const schema = buildSchemaWithoutScraper({ promptCode: 'LICITACION_DEFAULT' });
+      const schema = buildSchemaWithoutScraper({
+        promptCode: 'LICITACION_DEFAULT',
+      });
 
       // 2. Act
       const result = await service.validateSchema(schema);
@@ -914,7 +918,9 @@ describe('PipelineValidatorService (PROT-07)', () => {
       // 1. Arrange: el puerto es opcional, y un contexto que no lo provea debe
       //    seguir validando. Es lo que protege a las pruebas de los demas bloques.
       const factory = new NodeStrategyFactory();
-      jest.spyOn(factory['logger'], 'error').mockImplementation(() => undefined);
+      jest
+        .spyOn(factory['logger'], 'error')
+        .mockImplementation(() => undefined);
       const service = new PipelineValidatorService(factory);
       const schema = buildSchemaWithoutScraper({ promptCode: PROMPT_CODE });
 

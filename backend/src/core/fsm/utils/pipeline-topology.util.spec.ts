@@ -99,7 +99,7 @@ describe('buildOrderedTopology', () => {
       const schema = buildSchema('trigger', [
         buildNode({
           nodeId: 'destino',
-          nodeType: NodeType.DESTINO_HTTP,
+          nodeType: NodeType.DESTINO_DRUPAL,
           outputNamespace: 'http_result',
         }),
         buildNode({

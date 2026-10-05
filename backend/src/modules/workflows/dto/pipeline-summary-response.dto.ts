@@ -9,7 +9,7 @@ import { NodeType } from '@core/fsm/types/pipeline-schema.types';
  * `params`, `nextStep`, `onErrorStep` y `retryPolicy`.
  *
  * `params` no es una omision por brevedad, es de seguridad: en un nodo
- * TRIGGER_IMAP contiene `host`, `user` y `passwordEnvKey`, y en un DESTINO_HTTP
+ * TRIGGER_IMAP contiene `host`, `user` y `passwordEnvKey`, y en un DESTINO_DRUPAL
  * la URL interna del CMS. Son datos de infraestructura que el selector del
  * asistente no necesita para nada, y devolverlos convertiria un endpoint de
  * listado en una fuga de configuracion hacia el navegador.

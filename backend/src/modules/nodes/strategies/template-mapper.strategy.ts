@@ -108,7 +108,7 @@ export class TemplateMapperStrategy implements INodeStrategy {
    * `compiled_markup` CONSERVA SU NOMBRE pese a contener ahora markup sin
    * compilar. Es una concesion deliberada a la compatibilidad: renombrarlo
    * dejaria sin dato a todo consumidor de `rendered_html.compiled_markup`,
-   * incluido el `DESTINO_HTTP` de cualquier flujo ya guardado. El precio es que
+   * incluido el `DESTINO_DRUPAL` de cualquier flujo ya guardado. El precio es que
    * el nombre ya no describe el contenido, y por eso la `description` —que es lo
    * que leen `GET /api/nodos` y el selector de variables del asistente— lo dice
    * de forma explicita: quien audite una ejecucion lee la descripcion, no el
@@ -155,9 +155,7 @@ export class TemplateMapperStrategy implements INodeStrategy {
     _context: StatePayloadContext,
     params: Record<string, unknown>,
   ): Promise<NodeResult> {
-    const config = resolveTemplateMapperConfig(
-      params as TemplateMapperConfigDto,
-    );
+    const config = resolveTemplateMapperConfig(params);
 
     // 1. Resolver la plantilla (base de datos o fallback de pruebas).
     const resolution = await this.resolveTemplate(config);
@@ -242,10 +240,10 @@ export class TemplateMapperStrategy implements INodeStrategy {
    * topologia, no operativa. Sin esto, la ausencia de plantilla solo se
    * descubria en ejecucion, con el flujo ya PAUSADO.
    */
-  public getIncompleteParams(params: Record<string, unknown>): readonly string[] {
-    const { templateId, rawTemplate } = resolveTemplateMapperConfig(
-      params as TemplateMapperConfigDto,
-    );
+  public getIncompleteParams(
+    params: Record<string, unknown>,
+  ): readonly string[] {
+    const { templateId, rawTemplate } = resolveTemplateMapperConfig(params);
 
     return templateId === '' && rawTemplate === null ? ['templateId'] : [];
   }

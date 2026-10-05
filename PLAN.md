@@ -330,7 +330,7 @@ export const SEMVER_PATTERN = /^\d+\.\d+\.\d+$/;
 // Enum, no union type: @IsEnum() necesita un objeto en runtime.
 export enum NodeType {
   TRIGGER_IMAP, PARSER_PRE_IA, EXTRACTOR_WEB, PROCESADOR_IA,
-  ESCUDO_POST_IA, MAPEADOR_PLANTILLA, DESTINO_HTTP,
+  ESCUDO_POST_IA, MAPEADOR_PLANTILLA, DESTINO_DRUPAL,
 }
 
 export interface PipelineNodeConfig {
@@ -3567,9 +3567,9 @@ idénticas al montar sus dos pasos.
 - [x] 103. Pruebas — frontend 30 archivos / 599 (+3 archivos, +52); backend intacto en 55 / 1265.
       El tipo «sin configurador» de las pruebas rota de `PROCESADOR_IA` a `ESCUDO_POST_IA`
 - [ ] 104. Pendiente — arrastrado del 96: aplicar la migración 021 y actualizar el `.env` real
-- [ ] 105. Pendiente — `ESCUDO_POST_IA` y `DESTINO_HTTP`, los dos tipos que quedan sin configurador.
+- [ ] 105. Pendiente — `ESCUDO_POST_IA` y `DESTINO_DRUPAL`, los dos tipos que quedan sin configurador.
       `ESCUDO_POST_IA` ya tiene estrategia desde PROT-25 y es el siguiente de la cola;
-      `DESTINO_HTTP` sigue sin estrategia, así que su turno va detrás del backend
+      `DESTINO_DRUPAL` sigue sin estrategia, así que su turno va detrás del backend
 
 ## Tanda actual — Serializacion de tablas a Markdown y ampliacion de formatos ofimaticos
 
@@ -4066,9 +4066,9 @@ un numero fijaria el presupuesto para siempre y desactivaria la subida automatic
 - [x] Tipos, store y componente del escudo; alta en los DOS registros
 - [x] Selectores cerrados de origen y de etiquetas, alimentados por el catalogo
 - [x] Aviso de «no hay mapeador por delante», detectado por el CAMPO `compiled_markup`
-- [x] Fixture del asistente rotado de `ESCUDO_POST_IA` a `DESTINO_HTTP`
+- [x] Fixture del asistente rotado de `ESCUDO_POST_IA` a `DESTINO_DRUPAL`
 - [x] `maxTokens` en tipos, store y configurador del `PROCESADOR_IA`
 - [x] Frontend 758 pruebas en 39 archivos (+42); backend 1734 intacto; `vue-tsc` y `quasar build` limpios
-- [ ] Pendiente — configurador de `DESTINO_HTTP`, el ultimo sin triada y sin estrategia
+- [ ] Pendiente — configurador de `DESTINO_DRUPAL`, el ultimo sin triada y sin estrategia
 - [ ] Pendiente — verificacion de extremo a extremo contra la base de datos (Docker lo levanta el
       usuario; el MCP de PostgreSQL no conecta en esta sesion)

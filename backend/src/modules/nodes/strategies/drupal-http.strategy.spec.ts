@@ -39,6 +39,15 @@ import type { AxiosRequestConfig } from 'axios';
 
 const BASE_URL = 'https://drupal.example/jsonapi';
 const TOKEN = 'token-de-prueba';
+const API_USER = 'editor_api';
+
+/**
+ * Cabecera que emite `DrupalApiConfig.authHeader` en modo BASIC con las dos
+ * constantes de arriba. Se fija como literal y no se recalcula con `Buffer`
+ * para que la prueba falle si alguien cambia el formato de la cabecera: un
+ * valor derivado del mismo codigo que se esta probando no prueba nada.
+ */
+const BASIC_AUTH_HEADER = 'Basic ZWRpdG9yX2FwaTp0b2tlbi1kZS1wcnVlYmE=';
 
 const SOURCE_NAMESPACE = 'validated_drupal_json';
 const SOURCE_FIELD = 'validated_markup';
@@ -63,6 +72,11 @@ const buildApiConfig = (token: string = TOKEN): DrupalApiConfig =>
   ({
     baseUrl: BASE_URL,
     token,
+    user: API_USER,
+    authType: 'BASIC',
+    // La estrategia nunca compone la cabecera: la pide ya hecha. El doble la
+    // sirve como literal, igual que el getter real.
+    authHeader: token.length > 0 ? BASIC_AUTH_HEADER : `Bearer ${token}`,
     timeoutMs: 15_000,
     isUsable: token.length > 0,
   }) as DrupalApiConfig;
@@ -134,13 +148,14 @@ describe('DrupalHttpStrategy', () => {
   });
 
   describe('0. Identidad y contratos declarativos', () => {
-    it('0.1 deberia declararse como el destino DESTINO_HTTP', () => {
-      // 1. Arrange 📐: el tipo se llamo DESTINO_DRUPAL hasta la migracion 005.
+    it('0.1 deberia declararse como el destino DESTINO_DRUPAL', () => {
+      // 1. Arrange 📐: el tipo se llamo DESTINO_HTTP entre las migraciones 005
+      //    y 027; el valor vigente nombra el destino, no el transporte.
       //    La clase conserva el nombre comercial, el enum no.
       const strategy = buildStrategy(buildHttpMock());
 
       // 3. Assert 🎯
-      expect(strategy.nodeType).toBe(NodeType.DESTINO_HTTP);
+      expect(strategy.nodeType).toBe(NodeType.DESTINO_DRUPAL);
     });
 
     it('0.2 deberia someter sus params a validacion estricta al guardar', () => {
@@ -243,7 +258,7 @@ describe('DrupalHttpStrategy', () => {
       expect(callConfig(httpClient, 0).url).toBe(`${BASE_URL}/node/noticias`);
       expect(callConfig(httpClient, 0).method).toBe('POST');
       expect(callConfig(httpClient, 0).headers).toMatchObject({
-        Authorization: `Bearer ${TOKEN}`,
+        Authorization: BASIC_AUTH_HEADER,
         Accept: 'application/vnd.api+json',
         'Content-Type': 'application/vnd.api+json',
       });
@@ -875,6 +890,36 @@ describe('DrupalHttpStrategy', () => {
       ]);
     });
 
+    it('5.8 deberia conservar las SEIS claves de salida tambien al fallar', async () => {
+      // 1. Arrange 📐: es la regresion que vigila esta prueba. El reparto de
+      //    codigos vive ahora en `BaseHttpDestinationStrategy`, compartido con
+      //    el futuro destino de Acens, pero el `data` NO: cada nodo tiene su
+      //    propio inventario. Si alguien «simplificara» el helper para que
+      //    devolviera el `NodeResult` entero —`{ success: false, error }`—,
+      //    todas las rutas de error dejarian de publicar `http_status`, que es
+      //    justo el campo que un `onErrorStep` necesita leer para decidir.
+      const httpClient = buildHttpMock();
+      httpClient.requestWithStatus.mockResolvedValue(httpFailure(503));
+      const strategy = buildStrategy(httpClient);
+
+      // 2. Act ⚙️
+      const result = await strategy.execute(buildContext(), {
+        titleTemplate: 'Titular',
+      });
+
+      // 3. Assert 🎯
+      expect(result.success).toBe(false);
+      expect(Object.keys(result.data ?? {}).sort()).toEqual([
+        'drupal_internal__nid',
+        'http_status',
+        'node_id',
+        'operation_applied',
+        'path_alias',
+        'published_at',
+      ]);
+      expect(result.data?.http_status).toBe(503);
+    });
+
     it('5.7 deberia conservar el diagnostico que ya traia el cliente HTTP', async () => {
       // 1. Arrange 📐: `describeRemoteBody` ya recorto el cuerpo del remoto, que
       //    en Drupal es el `errors[].detail`. Perderlo obligaria a auditar a
@@ -1093,6 +1138,142 @@ describe('DrupalHttpStrategy', () => {
       // 3. Assert 🎯
       expect(result.success).toBe(false);
       expectParity(strategy, result.data);
+    });
+  });
+
+  describe('9. Autenticacion', () => {
+    /**
+     * La cuestion es de ENRUTADO, no de formato.
+     *
+     * Quien decide entre `Basic` y `Bearer` es `DrupalApiConfig.authHeader`, y
+     * eso se prueba en su propio spec. Lo que se comprueba aqui es que los
+     * CUATRO modos consumen ese getter en vez de componer la cabecera por su
+     * cuenta: el 401 que motivo el cambio venia de que la estrategia cableaba
+     * `Bearer`, y basta con que un modo se quede atras para reproducirlo.
+     */
+    const authHeaderOf = (httpClient: HttpMock, index: number): unknown =>
+      (callConfig(httpClient, index).headers ?? {})[
+        'Authorization' as keyof AxiosRequestConfig['headers']
+      ];
+
+    it('9.1 deberia autenticar el POST de CREATE_NODE', async () => {
+      // 1. Arrange 📐
+      const httpClient = buildHttpMock();
+      httpClient.requestWithStatus.mockResolvedValue(entityResponse());
+      const strategy = buildStrategy(httpClient);
+
+      // 2. Act ⚙️
+      await strategy.execute(buildContext(), { titleTemplate: 'Titular' });
+
+      // 3. Assert 🎯
+      expect(authHeaderOf(httpClient, 0)).toBe(BASIC_AUTH_HEADER);
+    });
+
+    it('9.2 deberia autenticar el GET y el PATCH de APPEND_HTML_BLOCK', async () => {
+      // 1. Arrange 📐: son DOS peticiones, y el PATCH es la que de verdad
+      //    exigia credenciales: el GET de una pagina publica responde 200
+      //    aunque vaya anonimo, que es lo que enmascaro el fallo original.
+      const httpClient = buildHttpMock();
+      httpClient.requestWithStatus
+        .mockResolvedValueOnce(pageResponse(OTHER_BLOCK))
+        .mockResolvedValueOnce(pageResponse(OTHER_BLOCK));
+      const strategy = buildStrategy(httpClient);
+
+      // 2. Act ⚙️
+      await strategy.execute(buildContext(), {
+        operationMode: DrupalOperationMode.APPEND_HTML_BLOCK,
+        bundle: 'node--page',
+        targetNodeUuid: PAGE_UUID,
+      });
+
+      // 3. Assert 🎯
+      expect(httpClient.requestWithStatus).toHaveBeenCalledTimes(2);
+      expect(authHeaderOf(httpClient, 0)).toBe(BASIC_AUTH_HEADER);
+      expect(authHeaderOf(httpClient, 1)).toBe(BASIC_AUTH_HEADER);
+    });
+
+    it('9.3 deberia autenticar las CUATRO peticiones de TRANSFER_HTML_BLOCK', async () => {
+      // 1. Arrange 📐: dos lecturas y dos escrituras, en el orden invertido que
+      //    documenta `runTransferHtmlBlock`.
+      const httpClient = buildHttpMock();
+      httpClient.requestWithStatus
+        .mockResolvedValueOnce(pageResponse(BLOCK))
+        .mockResolvedValueOnce(pageResponse(OTHER_BLOCK))
+        .mockResolvedValueOnce(pageResponse(OTHER_BLOCK))
+        .mockResolvedValueOnce(pageResponse(''));
+      const strategy = buildStrategy(httpClient);
+
+      // 2. Act ⚙️
+      await strategy.execute(buildContext(), {
+        operationMode: DrupalOperationMode.TRANSFER_HTML_BLOCK,
+        bundle: 'node--page',
+        targetNodeUuid: PAGE_UUID,
+        destinationNodeUuid: CLOSED_UUID,
+        itemSelector: EXPEDIENTE,
+      });
+
+      // 3. Assert 🎯
+      const headers = httpClient.requestWithStatus.mock.calls.map((_call, i) =>
+        authHeaderOf(httpClient, i),
+      );
+      expect(headers).toHaveLength(4);
+      expect(headers.every((header) => header === BASIC_AUTH_HEADER)).toBe(
+        true,
+      );
+    });
+
+    it('9.4 deberia autenticar el POST binario de UPLOAD_ATTACHMENT', async () => {
+      // 1. Arrange 📐: este modo SOBRESCRIBE `Content-Type` y
+      //    `Content-Disposition` sobre las de JSON:API. La cabecera de
+      //    autenticacion tiene que sobrevivir a ese `spread`.
+      const httpClient = buildHttpMock();
+      httpClient.requestWithStatus.mockResolvedValue(
+        entityResponse({ uri: { url: '/sites/default/files/e.pdf' } }),
+      );
+      const strategy = buildStrategy(httpClient);
+
+      // 2. Act ⚙️
+      await strategy.execute(
+        buildContext({
+          raw_email: {
+            attachments: [
+              {
+                filename: 'expediente.pdf',
+                contentType: 'application/pdf',
+                size: 10,
+                contentBase64: 'JVBERi0xLjQK',
+              },
+            ],
+          },
+        }),
+        {
+          operationMode: DrupalOperationMode.UPLOAD_ATTACHMENT,
+          bundle: 'node--page',
+          targetNodeUuid: PAGE_UUID,
+        },
+      );
+
+      // 3. Assert 🎯
+      expect(authHeaderOf(httpClient, 0)).toBe(BASIC_AUTH_HEADER);
+      expect(callConfig(httpClient, 0).headers).toMatchObject({
+        'Content-Type': 'application/octet-stream',
+      });
+    });
+
+    it('9.5 NO deberia emitir ninguna peticion si faltan credenciales', async () => {
+      // 1. Arrange 📐: la guarda esta ANTES del `switch` justamente para no
+      //    gastar una peticion que se sabe que va a volver 401.
+      const httpClient = buildHttpMock();
+      const strategy = buildStrategy(httpClient, buildApiConfig(''));
+
+      // 2. Act ⚙️
+      const result = await strategy.execute(buildContext(), {
+        titleTemplate: 'Titular',
+      });
+
+      // 3. Assert 🎯
+      expect(result.error?.code).toBe(ERR_DRUPAL_CONFIG);
+      expect(httpClient.requestWithStatus).not.toHaveBeenCalled();
     });
   });
 

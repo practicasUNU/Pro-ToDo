@@ -18,7 +18,11 @@ import axios from 'axios';
 import * as cheerio from 'cheerio';
 
 import { generateDevJwt } from '@common/utils/dev-jwt.util';
-import { DrupalApiConfig } from '@core/config/drupal-api.config';
+import {
+  DRUPAL_API_USER_VAR,
+  DRUPAL_AUTH_TYPE_VAR,
+  DrupalApiConfig,
+} from '@core/config/drupal-api.config';
 import { NodeStrategyFactory } from '@core/fsm/factories/node-strategy.factory';
 import { StatePayloadContext } from '@core/fsm/context/state-payload.context';
 import { NodeType } from '@core/fsm/types/pipeline-schema.types';
@@ -35,7 +39,7 @@ import type { NodeResult } from '@core/fsm/types/node-strategy.types';
  *   npm run test:drupal:e2e             # simulacion: NO escribe nada
  *   npm run test:drupal:e2e -- --write  # escribe en PRODUCCION
  *
- * Encadena a mano `ESCUDO_POST_IA` -> `DESTINO_HTTP` sobre la pagina de pruebas
+ * Encadena a mano `ESCUDO_POST_IA` -> `DESTINO_DRUPAL` sobre la pagina de pruebas
  * de licitaciones. Existe porque las suites unitarias tienen PROHIBIDO llamar
  * por red (`testing-standards.md` §2): el circuito completo contra el CMS no se
  * puede cubrir alli, y hasta que alguien lo ejerce no se sabe si el HTML que
@@ -115,9 +119,20 @@ const assertPreflight = (
 ): string => {
   const uuid = configService.get<string>(SANDBOX_UUID_VAR)?.trim() ?? '';
 
-  if (!drupalApiConfig.isUsable) {
+  if (drupalApiConfig.token === '') {
     throw new Error(
       'DRUPAL_API_TOKEN no esta definida en backend/.env: sin ella toda peticion a Drupal es un 401.',
+    );
+  }
+
+  // La autenticacion basica exige usuario Y contrasena. Se comprueban por
+  // separado del token porque el sintoma de olvidar el usuario es enganoso:
+  // Drupal evalua la peticion como ANONIMA, de modo que los GET de contenido
+  // publico siguen devolviendo 200 y solo revienta la escritura.
+  if (drupalApiConfig.authType === 'BASIC' && drupalApiConfig.user === '') {
+    throw new Error(
+      `${DRUPAL_AUTH_TYPE_VAR} vale BASIC pero ${DRUPAL_API_USER_VAR} esta vacia en backend/.env. ` +
+        'Declara la cuenta de servicio con permiso de edicion, o cambia a BEARER si esta instalacion usa OAuth.',
     );
   }
 
@@ -180,7 +195,10 @@ const fetchRemoteBody = async (
     `${drupalApiConfig.baseUrl}/${SANDBOX_BUNDLE.replace('--', '/')}/${uuid}`,
     {
       headers: {
-        Authorization: `Bearer ${drupalApiConfig.token}`,
+        // Misma cabecera que usara la estrategia. Ir anonimo aqui funcionaria
+        // mientras la pagina sea publica, pero un nodo despublicado devolveria
+        // un 401 que se leeria como «la escritura no persistio».
+        Authorization: drupalApiConfig.authHeader,
         Accept: 'application/vnd.api+json',
       },
       timeout: drupalApiConfig.timeoutMs,
@@ -223,7 +241,7 @@ const main = async (): Promise<void> => {
   const shouldWrite = process.argv.includes(WRITE_FLAG);
 
   logger.log(
-    '--- PRUEBA E2E: ESCUDO_POST_IA -> DESTINO_HTTP (sandbox Drupal) ---',
+    '--- PRUEBA E2E: ESCUDO_POST_IA -> DESTINO_DRUPAL (sandbox Drupal) ---',
   );
 
   const app = await NestFactory.createApplicationContext(AppModule, {
@@ -326,7 +344,7 @@ const main = async (): Promise<void> => {
     );
 
     const drupalResult = await strategyFactory
-      .getStrategy(NodeType.DESTINO_HTTP)
+      .getStrategy(NodeType.DESTINO_DRUPAL)
       .execute(context, {
         operationMode: DrupalOperationMode.APPEND_HTML_BLOCK,
         bundle: SANDBOX_BUNDLE,
@@ -335,13 +353,13 @@ const main = async (): Promise<void> => {
       });
 
     if (!drupalResult.success || drupalResult.data === undefined) {
-      reportNodeFailure('DESTINO_HTTP', drupalResult);
+      reportNodeFailure('DESTINO_DRUPAL', drupalResult);
       process.exitCode = 1;
       return;
     }
 
     logger.log(
-      `DESTINO_HTTP ok · HTTP ${asText(drupalResult.data.http_status)} · nid ${asText(drupalResult.data.drupal_internal__nid)}`,
+      `DESTINO_DRUPAL ok · HTTP ${asText(drupalResult.data.http_status)} · nid ${asText(drupalResult.data.drupal_internal__nid)}`,
     );
 
     // --- 5. Verificacion contra el DOM remoto. Es la unica prueba de que el

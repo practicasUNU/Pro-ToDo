@@ -40,7 +40,7 @@ const FULL_CATALOG: NodeCatalogEntry[] = [
     outputFields: [],
   }),
   buildEntry({ id: '7', code: NodeType.MAPEADOR_PLANTILLA }),
-  buildEntry({ id: '8', code: NodeType.DESTINO_HTTP, category: NodeCategory.DESTINO }),
+  buildEntry({ id: '8', code: NodeType.DESTINO_DRUPAL, category: NodeCategory.DESTINO }),
   buildEntry({ id: '9', code: 'DESTINO_ACENS', category: NodeCategory.DESTINO, outputFields: [] }),
 ];
 

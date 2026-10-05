@@ -29,7 +29,7 @@ import type { UpstreamNamespace } from '@stores/nodes/node-store-registry';
  * a teclear el marcador de memoria.
  *
  * Los destinos no estan aqui sino en `isExcludedCategory`: son dos hoy
- * (`DESTINO_HTTP`, `DESTINO_ACENS`) pero la regla es "todo lo que cierre el
+ * (`DESTINO_DRUPAL`, `DESTINO_ACENS`) pero la regla es "todo lo que cierre el
  * flujo", y enumerarlos obligaria a acordarse de esta lista al anadir el
  * tercero.
  */
