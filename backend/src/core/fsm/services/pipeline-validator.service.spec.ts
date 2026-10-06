@@ -185,9 +185,17 @@ describe('PipelineValidatorService (PROT-07)', () => {
       // 2. Act
       const issues = await captureIssues(service, schema);
 
-      // 3. Assert
+      // 3. Assert: se busca el issue del CICLO en vez de asumir que es el
+      // primero. El nodo que cierra el lazo es ademas un destino, asi que la
+      // regla 11 emite el suyo sobre el mismo campo y ambas son correctas.
       expect(fieldsOf(issues)).toContain('nodes.nodo_destino.nextStep');
-      expect(issues[0].constraints[0]).toContain('ciclo infinito');
+      expect(
+        issues.some((issue) =>
+          issue.constraints.some((constraint) =>
+            constraint.includes('ciclo infinito'),
+          ),
+        ),
+      ).toBe(true);
     });
 
     it('deberia rechazar un pipeline cuyo entry point no sea TRIGGER', async () => {

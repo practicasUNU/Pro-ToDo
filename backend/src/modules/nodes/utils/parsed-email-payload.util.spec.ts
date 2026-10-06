@@ -3,6 +3,7 @@ import { Workbook } from 'exceljs';
 import { resolveParserEmailConfig } from '@modules/nodes/dto/parser-email-config.dto';
 
 import {
+  EXCLUDED_BY_CONFIG_NOTICE,
   buildParsedEmail,
   extractEmailBody,
 } from './parsed-email-payload.util';
@@ -774,6 +775,125 @@ describe('parsed-email-payload.util', () => {
       );
       expect(payload.extracted_documents_text).toBe('');
       expect(payload.requires_multimodal_fallback).toBe(false);
+    });
+  });
+  describe('9. Exclusion de documentos de la extraccion', () => {
+    /** Presentacion con binario, del tipo que se excluye por ser puro ruido. */
+    const PPTX_ATTACHMENT = {
+      filename: 'Dossier corporativo.pptx',
+      contentType:
+        'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+      size: 4096,
+      contentBase64: Buffer.from('binario-de-presentacion').toString('base64'),
+    };
+
+    it('9.1 deberia omitir el texto del adjunto excluido CONSERVANDO el fichero', async () => {
+      // 1. Arrange 📐
+      const onDocumentNotice = jest.fn();
+      const source = buildSource({ attachments: [PPTX_ATTACHMENT] });
+
+      // 2. Act ⚙️
+      const payload = await buildParsedEmail(
+        source,
+        buildConfig({ excludedExtensions: ['.pptx'] }),
+        { onDocumentNotice },
+      );
+
+      // 3. Assert 🎯: excluir es "no lo leas", nunca "no lo conserves". El
+      //    inventario sigue listando el fichero porque DESTINO_DRUPAL tiene que
+      //    poder subirlo, y el namespace de origen queda intacto.
+      expect(payload.extracted_documents_text).toBe('');
+      expect(payload.attachments).toHaveLength(1);
+      expect(payload.attachments[0]?.filename).toBe(PPTX_ATTACHMENT.filename);
+      expect(source.attachments).toEqual([PPTX_ATTACHMENT]);
+      expect(onDocumentNotice).toHaveBeenCalledWith(
+        PPTX_ATTACHMENT.filename,
+        EXCLUDED_BY_CONFIG_NOTICE,
+      );
+    });
+
+    it('9.2 NO deberia contar el adjunto excluido como candidato a vision', async () => {
+      // 1. Arrange 📐: cuerpo corto, que es la otra mitad del AND multimodal.
+      // El doble se limpia porque la suite no lo reinicia entre pruebas y aqui
+      // se afirma justamente que NO se le llama.
+      pdfParse.mockClear();
+      const source = buildSource({
+        text: 'Ver adjunto.',
+        attachments: [SCANNED_PDF],
+      });
+
+      // 2. Act ⚙️
+      const payload = await buildParsedEmail(
+        source,
+        buildConfig({ excludedExtensions: ['.pdf'] }),
+      );
+
+      // 3. Assert 🎯: contarlo encenderia la bandera y, con
+      //    `failOnUnextractableMedia`, dejaria el flujo PAUSADO por el fichero
+      //    que el operador pidio ignorar.
+      expect(payload.requires_multimodal_fallback).toBe(false);
+      expect(pdfParse).not.toHaveBeenCalled();
+    });
+
+    it('9.3 deberia respetar el orden de exclusion aunque el tipo MIME sea generico', async () => {
+      // 1. Arrange 📐: `application/octet-stream` es lo que deja un inventario
+      //    rehidratado desde jsonb; la decision se toma por el NOMBRE.
+      const source = buildSource({
+        attachments: [
+          { ...PPTX_ATTACHMENT, contentType: 'application/octet-stream' },
+        ],
+      });
+
+      // 2. Act ⚙️
+      const payload = await buildParsedEmail(
+        source,
+        buildConfig({ excludedExtensions: ['.pptx'] }),
+      );
+
+      // 3. Assert 🎯
+      expect(payload.extracted_documents_text).toBe('');
+    });
+
+    it('9.4 deberia omitir TODOS los adjuntos con skipDocumentExtraction', async () => {
+      // 1. Arrange 📐
+      pdfParse.mockClear();
+      const source = buildSource({
+        attachments: [SCANNED_PDF, PPTX_ATTACHMENT],
+      });
+
+      // 2. Act ⚙️
+      const payload = await buildParsedEmail(
+        source,
+        buildConfig({ skipDocumentExtraction: true }),
+      );
+
+      // 3. Assert 🎯: ni se decodifica. El inventario, en cambio, sigue entero.
+      expect(payload.extracted_documents_text).toBe('');
+      expect(payload.attachments).toHaveLength(2);
+      expect(payload.requires_multimodal_fallback).toBe(false);
+      expect(pdfParse).not.toHaveBeenCalled();
+    });
+
+    it('9.5 deberia extraer con normalidad lo que no esta excluido', async () => {
+      // 1. Arrange 📐: la exclusion es quirurgica, no un apagado general.
+      pdfParse.mockResolvedValueOnce({
+        text: 'Contenido de la nota de prensa.',
+      });
+      const source = buildSource({
+        attachments: [SCANNED_PDF, PPTX_ATTACHMENT],
+      });
+
+      // 2. Act ⚙️
+      const payload = await buildParsedEmail(
+        source,
+        buildConfig({ excludedExtensions: ['.pptx'] }),
+      );
+
+      // 3. Assert 🎯
+      expect(payload.extracted_documents_text).toContain(
+        'Contenido de la nota de prensa.',
+      );
+      expect(payload.extracted_documents_text).not.toContain('Dossier');
     });
   });
 });

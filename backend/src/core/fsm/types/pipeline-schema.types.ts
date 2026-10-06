@@ -130,6 +130,20 @@ export const TRIGGER_NODE_TYPES: ReadonlySet<NodeType> = new Set([
   NodeType.TRIGGER_CRON,
 ]);
 
+/**
+ * Tipos de nodo que CIERRAN un flujo: entregan el resultado fuera del sistema.
+ *
+ * Se declara a mano por el mismo motivo que `TRIGGER_NODE_TYPES`: la categoria
+ * autentica es la columna `enum_categoria` de la tabla `nodos`, que vive en
+ * `@modules/nodes` y de la que el nucleo no puede depender. Anadir un destino
+ * obliga a tocar el enum `NodeType` de este mismo fichero, asi que las dos
+ * listas no pueden desincronizarse en silencio.
+ */
+export const DESTINO_NODE_TYPES: ReadonlySet<NodeType> = new Set([
+  NodeType.DESTINO_DRUPAL,
+  NodeType.DESTINO_SMTP,
+]);
+
 /** Politica de reintentos de un nodo ante un `NodeResult` fallido. */
 export interface RetryPolicy {
   /** Reintentos adicionales tras el primer intento. Entre 0 y `MAX_RETRY_ATTEMPTS`. */

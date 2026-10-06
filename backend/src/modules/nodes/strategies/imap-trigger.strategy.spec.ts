@@ -20,6 +20,7 @@ import {
   MAX_HTML_LENGTH,
   MAX_TOTAL_ATTACHMENT_BYTES,
   NO_MESSAGES_STATUS,
+  SUBJECT_FILTERED_STATUS,
 } from './imap-trigger.strategy';
 
 import type { StatePayloadContext } from '@core/fsm/context/state-payload.context';
@@ -554,6 +555,101 @@ describe('ImapTriggerStrategy', () => {
       const result = await strategy.execute(buildContext(), buildParams());
 
       // 3. Assert
+      expect(result.success).toBe(true);
+      expect(result.halt).toBeUndefined();
+    });
+  });
+
+  describe('2bis. Filtro por expresion regular del asunto', () => {
+    it('2bis.1 deberia procesar el correo cuyo asunto casa con el patron', async () => {
+      // 1. Arrange 📐: el asunto por defecto es "Innovacion en Madrid".
+      const client = buildClient();
+      useClient(client);
+      const { strategy } = buildStrategy();
+
+      // 2. Act ⚙️
+      const result = await strategy.execute(
+        buildContext(),
+        buildParams({ subjectFilterRegex: '^Innovacion' }),
+      );
+
+      // 3. Assert 🎯: el filtro que casa es transparente; el nodo entrega el
+      // payload completo y NO pide parada.
+      expect(result.success).toBe(true);
+      expect(result.halt).toBeUndefined();
+      expect(result.data?.subject).toBe('Innovacion en Madrid');
+    });
+
+    it('2bis.2 deberia parar con SUBJECT_FILTERED cuando el asunto no casa', async () => {
+      // 1. Arrange 📐
+      const client = buildClient();
+      useClient(client);
+      const { strategy } = buildStrategy();
+
+      // 2. Act ⚙️
+      const result = await strategy.execute(
+        buildContext(),
+        buildParams({ subjectFilterRegex: '^S_2026_' }),
+      );
+
+      // 3. Assert 🎯: exito con parada, por la misma razon que el buzon vacio.
+      // Un `success: false` escribiria un `.log` y una fila de trazabilidad por
+      // cada correo irrelevante del buzon, ahogando las alertas reales.
+      expect(result.success).toBe(true);
+      expect(result.error).toBeUndefined();
+      expect(result.data).toEqual({ status: SUBJECT_FILTERED_STATUS });
+      expect(result.halt).toBeDefined();
+    });
+
+    it('2bis.3 deberia marcar como leido el correo descartado', async () => {
+      // 1. Arrange 📐
+      const client = buildClient();
+      useClient(client);
+      const { strategy } = buildStrategy();
+
+      // 2. Act ⚙️
+      await strategy.execute(
+        buildContext(),
+        buildParams({ subjectFilterRegex: '^S_2026_' }),
+      );
+
+      // 3. Assert 🎯: sin la bandera \\Seen, `findLatestMatchingUid` volveria a
+      // encontrar este mismo correo en cada sondeo y ningun mensaje posterior
+      // llegaria jamas a procesarse.
+      expect(client.messageFlagsAdd).toHaveBeenCalledTimes(1);
+    });
+
+    it('2bis.4 deberia fallar GRAVE sin conectar cuando el patron no compila', async () => {
+      // 1. Arrange 📐
+      const client = buildClient();
+      useClient(client);
+      const { strategy } = buildStrategy();
+
+      // 2. Act ⚙️
+      const result = await strategy.execute(
+        buildContext(),
+        buildParams({ subjectFilterRegex: '([' }),
+      );
+
+      // 3. Assert 🎯: lo ataja el DTO antes de abrir el socket. Es la unica
+      // forma de que un patron roto de la cara: dentro de la estrategia el
+      // `try/catch` queda como defensa de un `params` que ya no puede llegar.
+      expect(result.success).toBe(false);
+      expect(result.error?.level).toBe('GRAVE');
+      expect(result.error?.code).toBe(ERR_IMAP_CONFIG);
+      expect(result.error?.missingFields).toContain('subjectFilterRegex');
+      expect(client.connect).not.toHaveBeenCalled();
+    });
+
+    it('2bis.5 deberia procesar el correo cuando no hay patron configurado', async () => {
+      // 1. Arrange 📐
+      useClient(buildClient());
+      const { strategy } = buildStrategy();
+
+      // 2. Act ⚙️
+      const result = await strategy.execute(buildContext(), buildParams());
+
+      // 3. Assert 🎯: el filtro es opt-in; su ausencia no puede cambiar nada.
       expect(result.success).toBe(true);
       expect(result.halt).toBeUndefined();
     });

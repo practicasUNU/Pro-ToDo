@@ -5,6 +5,8 @@ import { useQuasar } from 'quasar';
 import {
   MIN_POLL_INTERVAL_MS,
   PASSWORD_ENV_KEY_PATTERN,
+  SUBJECT_REGEX_RULE,
+  isValidRegexPattern,
   useTriggerImapStore,
 } from '@stores/nodes/trigger-imap.store';
 
@@ -30,6 +32,9 @@ const PASSWORD_ENV_KEY_HINT =
 const POLL_INTERVAL_HINT = `El backend rechaza periodos por debajo de ${MIN_POLL_INTERVAL_MS / 1000} s para no exceder los limites de tasa del proveedor IMAP.`;
 
 const FILTER_HINT = 'Coincidencia por subcadena. Dejalo vacio para no filtrar.';
+
+const SUBJECT_REGEX_HINT =
+  'Expresion regular sobre el asunto completo (ej. ^S_2026_.*). El correo que no coincida se descarta sin ejecutar el flujo.';
 
 const UNREAD_ONLY_WARNING =
   'Con el filtro desactivado el flujo puede volver a procesar un correo ya leido en cada sondeo.';
@@ -285,6 +290,30 @@ const onTestConnection = async (): Promise<void> => {
           placeholder="Notiweb"
           :hint="FILTER_HINT"
           @update:model-value="store.patchFilters({ subjectFilter: String($event ?? '') })"
+        />
+      </div>
+
+      <div class="col-12" data-test="subject-filter-regex">
+        <label class="pd-label" for="imap-subject-filter-regex">
+          Asunto coincide con la expresion
+        </label>
+        <!--
+          Sin `debounce`: el store es la unica fuente de verdad del boton
+          "Siguiente" del asistente, y un retardo abre una ventana real en la
+          que el usuario teclea un patron invalido y avanza antes de que el
+          evento llegue a `hasValidFields`.
+        -->
+        <q-input
+          id="imap-subject-filter-regex"
+          :model-value="store.config.subjectFilterRegex"
+          outlined
+          dense
+          clearable
+          class="q-mt-xs pd-mono"
+          placeholder="^S_2026_.*"
+          :hint="SUBJECT_REGEX_HINT"
+          :rules="[(val: string) => !val || isValidRegexPattern(val) || SUBJECT_REGEX_RULE]"
+          @update:model-value="store.patchFilters({ subjectFilterRegex: String($event ?? '') })"
         />
       </div>
 

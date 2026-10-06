@@ -259,6 +259,29 @@ interface DocumentsExtraction {
  * convertiria en candidato a vision cuando lo unico que pasa es que su binario
  * ya no esta.
  */
+/** Aviso emitido por cada adjunto omitido por la lista de exclusiones. */
+export const EXCLUDED_BY_CONFIG_NOTICE =
+  'Excluido por configuracion del nodo; el fichero sigue disponible en el namespace de origen.';
+
+/**
+ * Devuelve la extension del nombre de fichero en forma canonica, o `''`.
+ *
+ * Se decide por el NOMBRE y no por el `contentType` porque es el nombre lo que
+ * el operador teclea en el formulario. El tipo MIME que ponen los clientes de
+ * correo no es fiable para esto: `application/octet-stream` es el valor por
+ * defecto de un inventario rehidratado desde jsonb y no distingue un `.pptx` de
+ * un `.zip`.
+ */
+const extensionOf = (filename: string): string => {
+  const dotIndex = filename.lastIndexOf('.');
+
+  if (dotIndex <= 0 || dotIndex === filename.length - 1) {
+    return '';
+  }
+
+  return filename.slice(dotIndex).toLowerCase();
+};
+
 const decodeAttachment = (value: unknown): Buffer | null => {
   if (typeof value !== 'string' || value.trim().length === 0) {
     return null;
@@ -284,8 +307,17 @@ const decodeAttachment = (value: unknown): Buffer | null => {
  */
 const extractAttachmentDocuments = async (
   rawAttachments: readonly unknown[],
+  config: ResolvedParserEmailConfig,
   hooks: ParsedEmailHooks,
 ): Promise<DocumentsExtraction> => {
+  // Atajo total: ni se decodifica. Con `skipDocumentExtraction` encendido, el
+  // unico trabajo que queda es no hacerlo, y pasar por el bucle solo serviria
+  // para volcar a memoria los megabytes en base64 que luego se descartan.
+  if (config.skipDocumentExtraction) {
+    return { text: '', visualCandidateCount: 0 };
+  }
+
+  const excluded = new Set(config.excludedExtensions);
   const chunks: string[] = [];
   let visualCandidateCount = 0;
 
@@ -297,6 +329,19 @@ const extractAttachmentDocuments = async (
     const filename = asString(record.filename);
     const contentType =
       asString(record.contentType) || DEFAULT_ATTACHMENT_CONTENT_TYPE;
+    // La exclusion se resuelve ANTES de decodificar: un `.pptx` corporativo de
+    // varios megabytes no tiene por que pasar por `Buffer.from(..., 'base64')`
+    // para acabar descartado.
+    //
+    // Y no incrementa `visualCandidateCount`. Excluir es una decision explicita
+    // del operador, no una incapacidad del extractor: contarlo aqui encenderia
+    // `requires_multimodal_fallback` y, con `failOnUnextractableMedia`, dejaria
+    // el flujo PAUSADO por el fichero que se pidio ignorar.
+    if (excluded.has(extensionOf(filename))) {
+      hooks.onDocumentNotice?.(filename, EXCLUDED_BY_CONFIG_NOTICE);
+      continue;
+    }
+
     const buffer = decodeAttachment(record.contentBase64);
 
     if (buffer === null) {
@@ -392,7 +437,11 @@ export const buildParsedEmail = async (
     hooks.onNoUrlsFound?.();
   }
 
-  const documents = await extractAttachmentDocuments(rawAttachments, hooks);
+  const documents = await extractAttachmentDocuments(
+    rawAttachments,
+    config,
+    hooks,
+  );
   const bodyLength = body.clean.length;
 
   // El texto UTIL suma cuerpo y documentos. Es el cambio que hace barato el

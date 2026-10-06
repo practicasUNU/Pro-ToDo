@@ -1,6 +1,9 @@
 import { NodeType } from '@core/fsm/types/pipeline-schema.types';
 
-import { validatePipelineTopology } from './pipeline-topology.validator';
+import {
+  ERR_TOPOLOGY_DESTINATION_NOT_TERMINAL,
+  validatePipelineTopology,
+} from './pipeline-topology.validator';
 
 import type { PipelineSchemaDto } from '@core/fsm/dto/pipeline-schema.dto';
 import type {
@@ -856,6 +859,114 @@ describe('validatePipelineTopology', () => {
 
       // 2. Act ⚙️
       const issues = validatePipelineTopology(schema, resolvers);
+
+      // 3. Assert 🎯
+      expect(issues).toEqual([]);
+    });
+  });
+  describe('11. Nodos de destino terminales', () => {
+    /**
+     * Convierte el extractor final en un destino y le encadena lo que se le
+     * pase. Parte del pipeline valido para que el unico cambio sea el que se
+     * esta probando.
+     */
+    const withDestination = (nextStep: string | null): PipelineSchemaDto => {
+      const schema = buildSchema();
+
+      schema.nodes.nodo_extractor = {
+        ...schema.nodes.nodo_extractor,
+        nodeType: NodeType.DESTINO_DRUPAL,
+        outputNamespace: 'http_result',
+        nextStep,
+        params: {},
+      };
+
+      return schema;
+    };
+
+    it('11.1 deberia aceptar un destino que cierra el flujo', () => {
+      // 1. Arrange 📐
+      const schema = withDestination(null);
+
+      // 2. Act ⚙️
+      const issues = validatePipelineTopology(schema);
+
+      // 3. Assert 🎯
+      expect(issues).toEqual([]);
+    });
+
+    it('11.2 deberia rechazar un destino que encadena un paso posterior', () => {
+      // 1. Arrange 📐: el destino publica en Drupal y luego sigue procesando.
+      const schema = withDestination('nodo_parser');
+
+      // 2. Act ⚙️
+      const issues = validatePipelineTopology(schema);
+
+      // 3. Assert 🎯: el efecto externo ya ocurrio y no tiene marcha atras. Si
+      //    el nodo posterior falla, el flujo queda FALLIDO describiendo una
+      //    entrega que SI se realizo.
+      const issue = issues.find(
+        (candidate) => candidate.code === ERR_TOPOLOGY_DESTINATION_NOT_TERMINAL,
+      );
+
+      expect(issue?.field).toBe('nodes.nodo_extractor.nextStep');
+      expect(issue?.constraints[0]).toContain('onErrorStep');
+    });
+
+    it('11.3 deberia permitir que un destino derive su fallo con onErrorStep', () => {
+      // 1. Arrange 📐: la valvula de escape deliberada. Una entrega fallida
+      //    tiene que poder avisar por correo.
+      const schema = withDestination(null);
+
+      schema.nodes.nodo_alerta = {
+        nodeId: 'nodo_alerta',
+        nodeType: NodeType.DESTINO_SMTP,
+        outputNamespace: 'smtp_result',
+        nextStep: null,
+        onErrorStep: null,
+        params: {},
+      };
+      schema.nodes.nodo_extractor = {
+        ...schema.nodes.nodo_extractor,
+        onErrorStep: 'nodo_alerta',
+      };
+
+      // 2. Act ⚙️
+      const issues = validatePipelineTopology(schema);
+
+      // 3. Assert 🎯: la regla mira `nextStep`, no la salida del nodo en
+      //    general.
+      expect(issues).toEqual([]);
+    });
+
+    it('11.4 deberia rechazar tambien un destino encadenado a otro destino', () => {
+      // 1. Arrange 📐: publicar y notificar se modela con la ruta de error o
+      //    con dos flujos, no encadenando entregas.
+      const schema = withDestination('nodo_alerta');
+
+      schema.nodes.nodo_alerta = {
+        nodeId: 'nodo_alerta',
+        nodeType: NodeType.DESTINO_SMTP,
+        outputNamespace: 'smtp_result',
+        nextStep: null,
+        onErrorStep: null,
+        params: {},
+      };
+
+      // 2. Act ⚙️
+      const issues = validatePipelineTopology(schema);
+
+      // 3. Assert 🎯
+      expect(fieldsOf(issues)).toContain('nodes.nodo_extractor.nextStep');
+    });
+
+    it('11.5 NO deberia afectar a los nodos que no son de destino', () => {
+      // 1. Arrange 📐: el pipeline base encadena parser y extractor sin
+      //    protestar, que es justo lo que la regla no debe tocar.
+      const schema = buildSchema();
+
+      // 2. Act ⚙️
+      const issues = validatePipelineTopology(schema);
 
       // 3. Assert 🎯
       expect(issues).toEqual([]);

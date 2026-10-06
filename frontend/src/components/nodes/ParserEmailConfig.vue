@@ -4,6 +4,7 @@ import { useQuasar } from 'quasar';
 
 import {
   DEFAULT_MIN_BODY_LENGTH,
+  EXCLUDABLE_EXTENSION_PRESETS,
   MIN_BODY_LENGTH,
   MIN_BODY_LENGTH_RULE,
   useParserEmailStore,
@@ -30,6 +31,12 @@ const store = useParserEmailStore(props.nodeId);
 // Mensajes como constantes: el mismo texto lo usan la regla del campo y la ayuda
 // bajo el input, y duplicarlo los dejaria divergir.
 const MIN_BODY_LENGTH_HINT = `Caracteres del cuerpo YA SANEADO por debajo de los cuales se considera que el correo no trae texto aprovechable. Por defecto ${DEFAULT_MIN_BODY_LENGTH}.`;
+
+const SKIP_DOCUMENTS_HINT =
+  'Los adjuntos se conservan intactos para los nodos de destino; lo unico que se omite es volcar su texto al prompt del modelo.';
+
+const EXCLUDED_EXTENSIONS_HINT =
+  'Escribe una extension y pulsa Intro para anadirla. Se normaliza sola (pptx pasa a .pptx).';
 
 const MULTIMODAL_TOOLTIP =
   'Si el texto util resultante —cuerpo limpio MAS el texto nativo extraido de los adjuntos— tiene menos de este numero de caracteres y queda algun adjunto de imagen o PDF del que no se saco ni un caracter, el motor FSM preservara los binarios para el procesamiento multimodal por IA.';
@@ -161,6 +168,41 @@ const onRunSandboxTest = async (): Promise<void> => {
             <q-tooltip max-width="320px">{{ SOURCE_NAMESPACE_HINT }}</q-tooltip>
           </q-icon>
         </div>
+      </div>
+    </div>
+
+    <div class="row q-col-gutter-md items-start q-mt-xs">
+      <div class="col-12" data-test="skip-document-extraction">
+        <q-toggle
+          :model-value="store.config.skipDocumentExtraction"
+          color="primary"
+          label="Omitir extraccion de documentos adjuntos"
+          @update:model-value="store.updateConfig({ skipDocumentExtraction: Boolean($event) })"
+        />
+        <p class="pd-subtitle q-mt-xs q-mb-none">{{ SKIP_DOCUMENTS_HINT }}</p>
+      </div>
+
+      <div class="col-12 col-md-8" data-test="excluded-extensions">
+        <label class="pd-label" for="parser-excluded-extensions">
+          Extensiones excluidas de la extraccion
+        </label>
+        <!-- Deshabilitado cuando ya se omiten todos: una lista de excepciones
+             sobre un "ninguno" no excluye nada y solo confunde. -->
+        <q-select
+          id="parser-excluded-extensions"
+          :model-value="store.config.excludedExtensions"
+          :options="EXCLUDABLE_EXTENSION_PRESETS"
+          :disable="store.config.skipDocumentExtraction"
+          multiple
+          use-chips
+          use-input
+          new-value-mode="add-unique"
+          outlined
+          dense
+          class="q-mt-xs"
+          :hint="EXCLUDED_EXTENSIONS_HINT"
+          @update:model-value="store.updateConfig({ excludedExtensions: ($event as string[]) ?? [] })"
+        />
       </div>
     </div>
 

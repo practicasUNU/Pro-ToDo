@@ -8,6 +8,7 @@ import {
   DEFAULT_UNREAD_ONLY,
   MIN_POLL_INTERVAL_MS,
   UNVERIFIED_CONNECTION_WARNING,
+  isValidRegexPattern,
   useTriggerImapStore,
 } from './trigger-imap.store';
 
@@ -83,6 +84,7 @@ describe('useTriggerImapStore · configuracion del nodo TRIGGER_IMAP', () => {
         pollIntervalMs: DEFAULT_POLL_INTERVAL_MS,
         fromFilter: '',
         subjectFilter: '',
+        subjectFilterRegex: '',
         unreadOnly: DEFAULT_UNREAD_ONLY,
         // Opt-IN, al reves que `unreadOnly`: el base64 de los adjuntos se
         // reserializa en cada checkpoint, asi que se activa a proposito.
@@ -712,6 +714,82 @@ describe('useTriggerImapStore · configuracion del nodo TRIGGER_IMAP', () => {
 
       // 3. Assert 🎯
       expect(store.isFieldLockedByTemplate('includeAttachments')).toBe(false);
+    });
+  });
+  describe('4sexies. Filtro de asunto por expresion regular', () => {
+    it('4sexies.1 deberia arrancar sin filtro', () => {
+      // 1. Arrange 📐 + 2. Act ⚙️
+      const store = useTriggerImapStore(NODE_ID);
+
+      // 3. Assert 🎯: es opt-in; un patron sugerido descartaria correos en un
+      //    flujo que nadie configuro para eso.
+      expect(store.config.subjectFilterRegex).toBe('');
+    });
+
+    it('4sexies.2 NO deberia invalidar la conexion ya probada', () => {
+      // 1. Arrange 📐
+      const store = useTriggerImapStore(NODE_ID);
+
+      store.$patch({ connectionVerified: true });
+
+      // 2. Act ⚙️
+      store.patchFilters({ subjectFilterRegex: '^S_2026_' });
+
+      // 3. Assert 🎯: a que asuntos se atiende no cambia las credenciales.
+      expect(store.connectionVerified).toBe(true);
+    });
+
+    it('4sexies.3 deberia publicar el patron solo cuando no esta vacio', () => {
+      // 1. Arrange 📐
+      const store = useTriggerImapStore(NODE_ID);
+
+      store.patchConfig(VALID_CONFIG);
+
+      // 2. Act ⚙️ + 3. Assert 🎯
+      expect(store.toNodeParams()).not.toHaveProperty('subjectFilterRegex');
+
+      store.patchFilters({ subjectFilterRegex: '  ^S_2026_  ' });
+
+      expect(store.toNodeParams()).toMatchObject({
+        subjectFilterRegex: '^S_2026_',
+      });
+    });
+
+    it('4sexies.4 deberia bloquear el paso con un patron que no compila', () => {
+      // 1. Arrange 📐
+      const verified = buildVerifiedStore();
+
+      expect(verified.isConfigValid).toBe(true);
+
+      // 2. Act ⚙️
+      verified.patchFilters({ subjectFilterRegex: '([' });
+
+      // 3. Assert 🎯: dejarlo avanzar guardaria un esquema que el backend
+      //    rechaza, con el error apareciendo lejos del campo que lo causo.
+      expect(verified.hasValidFields).toBe(false);
+      expect(verified.isConfigValid).toBe(false);
+    });
+
+    it('4sexies.5 deberia rehidratar el patron guardado', () => {
+      // 1. Arrange 📐
+      const store = useTriggerImapStore(NODE_ID);
+
+      // 2. Act ⚙️
+      store.hydrateFromNode({
+        outputNamespace: 'raw_email',
+        params: { ...VALID_CONFIG, subjectFilterRegex: '^Notiweb' },
+      });
+
+      // 3. Assert 🎯
+      expect(store.config.subjectFilterRegex).toBe('^Notiweb');
+    });
+
+    it('4sexies.6 deberia aceptar el vacio como "sin filtro" en el validador', () => {
+      // 1. Arrange 📐 + 2. Act ⚙️ + 3. Assert 🎯: la ausencia del campo no es un
+      //    error de sintaxis, igual que en el DTO del backend.
+      expect(isValidRegexPattern('')).toBe(true);
+      expect(isValidRegexPattern('^S_2026_.*')).toBe(true);
+      expect(isValidRegexPattern('([')).toBe(false);
     });
   });
 });

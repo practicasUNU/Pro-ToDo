@@ -80,6 +80,22 @@ export interface ParserEmailConfigDto {
    * PAUSADO un flujo que hoy atraviesa tranquilamente un correo de solo imagen.
    */
   failOnUnextractableMedia: boolean;
+  /**
+   * Si `true`, no se extrae texto de NINGUN adjunto.
+   *
+   * Es independiente de la ingesta: el fichero sigue viajando entero en
+   * `raw_email.attachments` para que un nodo de destino pueda subirlo. Lo unico
+   * que se omite es su volcado a `extracted_documents_text`, que es lo que
+   * acaba en el prompt del modelo.
+   */
+  skipDocumentExtraction: boolean;
+  /**
+   * Extensiones cuyo texto NO se extrae, ya normalizadas (minusculas, con punto).
+   *
+   * Misma garantia que arriba sobre el binario del adjunto: excluir es "no lo
+   * leas", nunca "no lo conserves".
+   */
+  excludedExtensions: string[];
 }
 
 /**

@@ -61,6 +61,8 @@ export const UNVERIFIED_CONNECTION_WARNING =
 export interface TriggerImapFilters {
   fromFilter: string;
   subjectFilter: string;
+  /** Patron aplicado al asunto ya decodificado. Cadena vacia = sin filtro. */
+  subjectFilterRegex: string;
   unreadOnly: boolean;
 }
 
@@ -95,6 +97,30 @@ const asText = (value: unknown): string => (typeof value === 'string' ? value : 
 const asNumber = (value: unknown, fallback: number): number =>
   typeof value === 'number' && Number.isFinite(value) ? value : fallback;
 
+/**
+ * Comprueba que un patron sea compilable por el motor de expresiones regulares.
+ *
+ * Replica la restriccion `IsValidRegexConstraint` del DTO homonimo del backend,
+ * y la replica a proposito: el objetivo es que el formulario senale el error
+ * mientras se escribe, en lugar de que el guardado devuelva un 400 generico
+ * cuando el asistente ya avanzo tres pasos.
+ */
+export const isValidRegexPattern = (value: string): boolean => {
+  if (value === '') {
+    return true;
+  }
+
+  try {
+    new RegExp(value);
+    return true;
+  } catch {
+    return false;
+  }
+};
+
+/** Mensaje unico de la regla, compartido por el `:rules` y el `:hint` del formulario. */
+export const SUBJECT_REGEX_RULE = 'La expresion regular no es valida.';
+
 /** Configuracion inicial; se reutiliza en `resetConfig`. */
 const buildInitialConfig = (): TriggerImapConfig => ({
   host: '',
@@ -106,6 +132,7 @@ const buildInitialConfig = (): TriggerImapConfig => ({
   pollIntervalMs: DEFAULT_POLL_INTERVAL_MS,
   fromFilter: '',
   subjectFilter: '',
+  subjectFilterRegex: '',
   unreadOnly: DEFAULT_UNREAD_ONLY,
   includeAttachments: false,
 });
@@ -183,7 +210,11 @@ const triggerImapSetup = () => {
       config.value.port > 0 &&
       config.value.port <= 65_535 &&
       Number.isInteger(config.value.pollIntervalMs) &&
-      config.value.pollIntervalMs >= MIN_POLL_INTERVAL_MS,
+      config.value.pollIntervalMs >= MIN_POLL_INTERVAL_MS &&
+      // Un patron que no compila bloquea el paso: dejarlo avanzar guardaria un
+      // flujo que el backend rechaza, y el error apareceria lejos del campo
+      // que lo causo.
+      isValidRegexPattern(config.value.subjectFilterRegex),
   );
 
   /**
@@ -306,6 +337,7 @@ const triggerImapSetup = () => {
   const toNodeParams = (): Record<string, unknown> => {
     const fromFilter = config.value.fromFilter.trim();
     const subjectFilter = config.value.subjectFilter.trim();
+    const subjectFilterRegex = config.value.subjectFilterRegex.trim();
 
     return {
       ...checkPayload.value,
@@ -317,6 +349,7 @@ const triggerImapSetup = () => {
       includeAttachments: config.value.includeAttachments,
       ...(fromFilter !== '' ? { fromFilter } : {}),
       ...(subjectFilter !== '' ? { subjectFilter } : {}),
+      ...(subjectFilterRegex !== '' ? { subjectFilterRegex } : {}),
     };
   };
 
@@ -368,6 +401,7 @@ const triggerImapSetup = () => {
       pollIntervalMs: asNumber(params.pollIntervalMs, DEFAULT_POLL_INTERVAL_MS),
       fromFilter: asText(params.fromFilter),
       subjectFilter: asText(params.subjectFilter),
+      subjectFilterRegex: asText(params.subjectFilterRegex),
       unreadOnly: params.unreadOnly !== false,
       // Comparacion estricta y no `!== false` como el de arriba: aquel es un
       // opt-OUT cuyo defecto es `true`, y este un opt-IN cuyo defecto es

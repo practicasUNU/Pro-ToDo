@@ -10,6 +10,7 @@ import {
   ERROR_CONTEXT_NAMESPACE,
   NODE_OUTPUT_NAMESPACE_SET,
   NODE_OUTPUT_NAMESPACES,
+  DESTINO_NODE_TYPES,
   TRIGGER_NODE_TYPES,
 } from '@core/fsm/types/pipeline-schema.types';
 
@@ -118,6 +119,10 @@ export interface SchemaIssue {
 const hasNode = (schema: PipelineSchemaDto, nodeId: string): boolean =>
   Object.hasOwn(schema.nodes, nodeId);
 
+/** Codigo de la regla 11: un nodo DESTINO encadena un paso posterior. */
+export const ERR_TOPOLOGY_DESTINATION_NOT_TERMINAL =
+  'ERR_TOPOLOGY_DESTINATION_NOT_TERMINAL';
+
 /**
  * Valida la integridad del grafo declarado en el pipeline.
  *
@@ -159,6 +164,21 @@ const hasNode = (schema: PipelineSchemaDto, nodeId: string): boolean =>
  *    namespace `trigger` que nadie habia escrito. La regla mira solo el primer
  *    nodo: un disparador en una posicion posterior es raro pero no se prohibe,
  *    para no invalidar plantillas ya guardadas.
+ * 11. Un nodo de categoria DESTINO (`DESTINO_NODE_TYPES`) cierra el flujo:
+ *    `nextStep` debe ser `null`. Encadenar procesamiento DESPUES de haber
+ *    publicado en Drupal o enviado el correo no tiene marcha atras —el efecto
+ *    externo ya ocurrio—, y si ese nodo posterior falla el flujo queda FALLIDO
+ *    describiendo una entrega que si se realizo.
+ *
+ *    `onErrorStep` SI se permite, y es la valvula de escape deliberada: un
+ *    destino que falla debe poder derivar a un `DESTINO_SMTP` de alerta. Por eso
+ *    la regla mira `nextStep` y no la salida del nodo en general. Un destino
+ *    encadenado a otro destino tambien se rechaza: publicar y notificar se
+ *    modela con la ruta de error o con dos flujos distintos.
+ *
+ *    Se comprueba sobre el MAPA COMPLETO, como las reglas 2 a 5 y 10, y no solo
+ *    sobre el camino activo: una rama en construccion con esta forma es un error
+ *    que conviene ver al guardar, no el dia que se conecte.
  *
  * Los nodos inalcanzables desde `entrypoint` se ignoran deliberadamente: un flujo
  * puede conservar ramas en construccion sin que eso invalide el esquema.
@@ -219,6 +239,17 @@ export const validatePipelineTopology = (
         field: `nodes.${key}.nextStep`,
         constraints: [
           `nextStep apunta a "${node.nextStep}", que no existe en el mapa de nodos.`,
+        ],
+      });
+    }
+
+    // 11. Un nodo de destino es terminal.
+    if (DESTINO_NODE_TYPES.has(node.nodeType) && node.nextStep !== null) {
+      issues.push({
+        field: `nodes.${key}.nextStep`,
+        code: ERR_TOPOLOGY_DESTINATION_NOT_TERMINAL,
+        constraints: [
+          `"${key}" es un nodo de destino y debe cerrar el flujo; no puede encadenar "${node.nextStep}". Para reaccionar a un fallo de la entrega, usa onErrorStep.`,
         ],
       });
     }
@@ -383,7 +414,9 @@ const detectUnreachableNamespaces = (
       const described = missing.map((namespace) => {
         const origin = origins?.get(namespace);
 
-        return origin === undefined ? namespace : `${namespace} (lo cita ${origin})`;
+        return origin === undefined
+          ? namespace
+          : `${namespace} (lo cita ${origin})`;
       });
 
       issues.push({

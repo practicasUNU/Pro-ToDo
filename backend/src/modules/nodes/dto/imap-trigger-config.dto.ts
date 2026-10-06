@@ -9,7 +9,11 @@ import {
   Matches,
   Max,
   Min,
+  Validate,
+  ValidatorConstraint,
 } from 'class-validator';
+
+import type { ValidatorConstraintInterface } from 'class-validator';
 
 import { OUTPUT_NAMESPACE_PATTERN } from '@core/fsm/types/pipeline-schema.types';
 
@@ -117,6 +121,39 @@ export const PASSWORD_ENV_KEY_PATTERN = /^IMAP_[A-Z0-9_]*PASSWORD$/;
  * en `FsmEngineService`). Un inicializador solo actuaria si `plainToInstance`
  * corriera con `exposeDefaultValues`, que no es el caso.
  */
+/**
+ * Comprueba que un patron sea compilable por el motor de expresiones regulares.
+ *
+ * Se valida al GUARDAR y no en el primer sondeo porque un patron roto no da la
+ * cara hasta que llega un correo: el flujo quedaria aparentemente configurado y
+ * fallaria en produccion horas despues, sin que nadie relacione el fallo con el
+ * formulario que lo origino.
+ *
+ * Devuelve `true` ante `undefined`, `null` o cadena vacia: la PRESENCIA del
+ * campo es asunto de `@IsOptional()` y su tipo lo cubre `@IsString()`. Mezclar
+ * aqui esas tres responsabilidades haria que borrar el campo en el formulario
+ * produjese un mensaje de error sobre sintaxis de regex.
+ */
+@ValidatorConstraint({ name: 'isValidRegex', async: false })
+export class IsValidRegexConstraint implements ValidatorConstraintInterface {
+  public validate(value: unknown): boolean {
+    if (typeof value !== 'string' || value.length === 0) {
+      return true;
+    }
+
+    try {
+      new RegExp(value);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  public defaultMessage(): string {
+    return 'subjectFilterRegex no es una expresion regular valida.';
+  }
+}
+
 export class ImapTriggerConfigDto {
   @ApiProperty({
     description: 'Host del servidor IMAP',
@@ -250,6 +287,20 @@ export class ImapTriggerConfigDto {
   unreadOnly?: boolean;
 
   @ApiPropertyOptional({
+    description:
+      'Expresion regular aplicada al asunto YA decodificado. El correo que no case se descarta sin ejecutar el resto del flujo. Omitir para no filtrar',
+    example: '^S_2026_.*',
+  })
+  @IsOptional()
+  @IsString({ message: 'subjectFilterRegex debe ser una cadena.' })
+  @IsNotEmpty({
+    message:
+      'subjectFilterRegex no puede estar vacio; omitelo para no filtrar.',
+  })
+  @Validate(IsValidRegexConstraint)
+  subjectFilterRegex?: string;
+
+  @ApiPropertyOptional({
     description: `Si true, ingiere los adjuntos del correo en el payload. Por defecto ${String(DEFAULT_INCLUDE_ATTACHMENTS)}`,
     example: DEFAULT_INCLUDE_ATTACHMENTS,
     default: DEFAULT_INCLUDE_ATTACHMENTS,
@@ -294,6 +345,15 @@ export interface ResolvedImapConfig {
   readonly fromFilter: string | null;
   /** `null` cuando no se filtra por asunto; nunca cadena vacia. */
   readonly subjectFilter: string | null;
+  /**
+   * Patron aplicado al asunto ya decodificado, o `null` si no se filtra.
+   *
+   * Complementa a `subjectFilter` en lugar de sustituirlo: aquel es un criterio
+   * de IMAP SEARCH que resuelve el servidor (y por tanto descarta mensajes sin
+   * descargarlos), mientras que este se evalua en local sobre el asunto ya
+   * decodificado de MIME, que es la unica forma de aplicar anclas como `^`.
+   */
+  readonly subjectFilterRegex: string | null;
   readonly unreadOnly: boolean;
   /** Si `false`, `raw_email.attachments` sera siempre `[]`. */
   readonly includeAttachments: boolean;
@@ -330,6 +390,11 @@ export const resolveImapConfig = (
   // esperaria quien borra el campo en el formulario.
   fromFilter: dto.fromFilter ?? null,
   subjectFilter: dto.subjectFilter ?? null,
+  // Anadir esta clave altera por una sola vez la cadena que compara
+  // `ImapPollingService.hasConfigChanged`, de modo que el primer arranque tras
+  // el despliegue reprograma los sondeos existentes. Es inocuo y ocurre una
+  // unica vez; lo que no se puede es colocarla DESPUES de las dos ultimas.
+  subjectFilterRegex: dto.subjectFilterRegex ?? null,
   unreadOnly: dto.unreadOnly ?? DEFAULT_UNREAD_ONLY,
   // Las dos ultimas, y en este orden, a proposito:
   // `ImapPollingService.hasConfigChanged` compara configuraciones con

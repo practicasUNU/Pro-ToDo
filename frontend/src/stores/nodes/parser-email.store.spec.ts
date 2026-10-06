@@ -460,4 +460,81 @@ describe('useParserEmailStore · configuracion del nodo PARSER_PRE_IA', () => {
       expect(store.config.failOnUnextractableMedia).toBe(false);
     });
   });
+  describe('8. Exclusion de documentos adjuntos', () => {
+    it('8.1 deberia arrancar extrayendo de todo, como el backend', () => {
+      // 1. Arrange 📐 + 2. Act ⚙️
+      const store = useParserEmailStore(NODE_ID);
+
+      // 3. Assert 🎯: un defecto distinto cambiaria el payload de los flujos ya
+      //    guardados sin que nadie lo pidiera.
+      expect(store.config.skipDocumentExtraction).toBe(false);
+      expect(store.config.excludedExtensions).toEqual([]);
+    });
+
+    it('8.2 deberia canonizar y deduplicar las extensiones al entrar', () => {
+      // 1. Arrange 📐
+      const store = useParserEmailStore(NODE_ID);
+
+      // 2. Act ⚙️: lo que teclea el operador, tal cual.
+      store.updateConfig({ excludedExtensions: ['PPTX', '.Ppt', 'pptx', '  '] });
+
+      // 3. Assert 🎯: el backend compara contra la forma canonica, asi que dos
+      //    grafias de la misma extension dejarian pasar el fichero que se
+      //    queria excluir.
+      expect(store.config.excludedExtensions).toEqual(['.pptx', '.ppt']);
+    });
+
+    it('8.3 deberia publicar ambos campos solo cuando se apartan del defecto', () => {
+      // 1. Arrange 📐
+      const store = useParserEmailStore(NODE_ID);
+
+      // 2. Act ⚙️ + 3. Assert 🎯
+      expect(store.toNodeParams()).not.toHaveProperty('skipDocumentExtraction');
+      expect(store.toNodeParams()).not.toHaveProperty('excludedExtensions');
+
+      store.updateConfig({
+        skipDocumentExtraction: true,
+        excludedExtensions: ['.zip'],
+      });
+
+      expect(store.toNodeParams()).toMatchObject({
+        skipDocumentExtraction: true,
+        excludedExtensions: ['.zip'],
+      });
+    });
+
+    it('8.4 deberia rehidratar normalizando lo que haya en el jsonb', () => {
+      // 1. Arrange 📐: la columna pudo escribirse por SQL directo, sin pasar
+      //    por este store.
+      const store = useParserEmailStore(NODE_ID);
+
+      // 2. Act ⚙️
+      store.hydrateFromNode({
+        outputNamespace: 'parsed_email',
+        params: {
+          minBodyLength: 50,
+          skipDocumentExtraction: true,
+          excludedExtensions: ['PPTX', 'pptx', '.zip'],
+        },
+      });
+
+      // 3. Assert 🎯
+      expect(store.config.skipDocumentExtraction).toBe(true);
+      expect(store.config.excludedExtensions).toEqual(['.pptx', '.zip']);
+    });
+
+    it('8.5 NO deberia influir en la validez del nodo', () => {
+      // 1. Arrange 📐
+      const store = useParserEmailStore(NODE_ID);
+
+      // 2. Act ⚙️
+      store.updateConfig({
+        skipDocumentExtraction: true,
+        excludedExtensions: ['.pdf'],
+      });
+
+      // 3. Assert 🎯: `isConfigValid` solo mira el umbral de cuerpo util.
+      expect(store.isConfigValid).toBe(true);
+    });
+  });
 });

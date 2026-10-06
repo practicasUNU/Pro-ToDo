@@ -490,6 +490,100 @@ describe('ParserEmailStrategy', () => {
     });
   });
 
+  describe('2quater. Exclusion de adjuntos de la extraccion', () => {
+    /** Presentacion corporativa: el caso que motiva la exclusion. */
+    const buildPresentation = (): RawEmailAttachment => ({
+      filename: 'Dossier corporativo.pptx',
+      contentType:
+        'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+      size: 4096,
+      contentBase64: BASE64_CONTENT,
+    });
+
+    it('2quater.1 deberia omitir el texto del .pptx conservando el adjunto', async () => {
+      // 1. Arrange 📐
+      const strategy = new ParserEmailStrategy();
+      const presentation = buildPresentation();
+      const context = buildContext(
+        buildRawEmail({ attachments: [presentation] }),
+      );
+
+      // 2. Act ⚙️
+      const result = await strategy.execute(context, {
+        excludedExtensions: ['.pptx'],
+      });
+
+      // 3. Assert 🎯: excluir es "no lo leas", no "no lo conserves". El binario
+      //    sigue en `raw_email` porque DESTINO_DRUPAL tiene que poder subirlo.
+      expect(result.success).toBe(true);
+      expect(result.data?.extracted_documents_text).toBe('');
+      expect(result.data?.attachment_count).toBe(1);
+
+      const rawAttachments = context.getNamespace('raw_email')
+        ?.attachments as RawEmailAttachment[];
+
+      expect(rawAttachments[0]?.contentBase64).toBe(BASE64_CONTENT);
+    });
+
+    it('2quater.2 deberia normalizar la extension escrita sin punto', async () => {
+      // 1. Arrange 📐: el DTO canoniza, asi que `PPTX` excluye igual que `.pptx`.
+      const strategy = new ParserEmailStrategy();
+      const context = buildContext(
+        buildRawEmail({ attachments: [buildPresentation()] }),
+      );
+
+      // 2. Act ⚙️
+      const result = await strategy.execute(context, {
+        excludedExtensions: ['PPTX'],
+      });
+
+      // 3. Assert 🎯
+      expect(result.success).toBe(true);
+      expect(result.data?.extracted_documents_text).toBe('');
+    });
+
+    it('2quater.3 deberia omitir todo con skipDocumentExtraction sin pedir vision', async () => {
+      // 1. Arrange 📐: cuerpo corto y PDF escaneado, que sin la omision
+      //    levantaria `requires_multimodal_fallback`.
+      const strategy = new ParserEmailStrategy();
+      const context = buildContext(
+        buildRawEmail({
+          text: 'Ver adjunto.',
+          attachments: [buildAttachment()],
+        }),
+      );
+
+      // 2. Act ⚙️
+      const result = await strategy.execute(context, {
+        skipDocumentExtraction: true,
+      });
+
+      // 3. Assert 🎯: omitir es una decision del operador, no una incapacidad
+      //    del extractor; convertirla en bandera multimodal pondria PAUSADO el
+      //    flujo por el fichero que se pidio ignorar.
+      expect(result.success).toBe(true);
+      expect(result.data?.extracted_documents_text).toBe('');
+      expect(result.data?.requires_multimodal_fallback).toBe(false);
+    });
+
+    it('2quater.4 deberia rechazar GRAVE una lista de extensiones mal tipada', async () => {
+      // 1. Arrange 📐
+      const strategy = new ParserEmailStrategy();
+
+      // 2. Act ⚙️
+      const result = await strategy.execute(buildContext(), {
+        excludedExtensions: '.pptx',
+      });
+
+      // 3. Assert 🎯: el DTO corre con `forbidNonWhitelisted`, asi que un
+      //    `params` mal escrito se RECHAZA en vez de ignorarse en silencio.
+      expect(result.success).toBe(false);
+      expect(result.error?.level).toBe('GRAVE');
+      expect(result.error?.code).toBe(ERR_PARSER_CONFIG);
+      expect(result.error?.missingFields).toContain('excludedExtensions');
+    });
+  });
+
   describe('3. Pureza: no muta namespaces ajenos', () => {
     it('3.1 NO deberia liberar el base64 de raw_email', async () => {
       // 1. Arrange: liberar memoria es competencia EXCLUSIVA del motor. Un nodo

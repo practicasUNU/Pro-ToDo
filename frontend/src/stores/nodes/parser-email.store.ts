@@ -79,6 +79,38 @@ const asText = (value: unknown): string => (typeof value === 'string' ? value : 
 const asNumber = (value: unknown, fallback: number): number =>
   typeof value === 'number' && Number.isFinite(value) ? value : fallback;
 
+/**
+ * Extensiones ofrecidas como atajo en el selector de exclusiones.
+ *
+ * Es una lista de SUGERENCIAS, no cerrada: el selector admite valores nuevos
+ * porque el catalogo de formatos que una organizacion decide no leer no lo
+ * puede fijar este fichero.
+ */
+export const EXCLUDABLE_EXTENSION_PRESETS: readonly string[] = [
+  '.ppt',
+  '.pptx',
+  '.pdf',
+  '.zip',
+];
+
+/**
+ * Lleva una extension a su forma canonica: minusculas y con punto inicial.
+ *
+ * Replica de `normalizeExtension` del DTO del backend. Se normaliza AQUI, al
+ * entrar en el store, porque `new-value-mode="add-unique"` compara cadenas en
+ * crudo: sin esto, `PPTX` y `.pptx` convivirian como dos entradas distintas y
+ * ninguna de las dos excluiria el fichero que el operador queria excluir.
+ */
+export const normalizeExtension = (value: string): string => {
+  const trimmed = value.trim().toLowerCase();
+
+  if (trimmed === '') {
+    return '';
+  }
+
+  return trimmed.startsWith('.') ? trimmed : `.${trimmed}`;
+};
+
 /** Configuracion inicial; se reutiliza en `resetConfig`. */
 const buildInitialConfig = (): ParserEmailConfigDto => ({
   minBodyLength: DEFAULT_MIN_BODY_LENGTH,
@@ -86,6 +118,8 @@ const buildInitialConfig = (): ParserEmailConfigDto => ({
   // El mismo defecto que el backend, y por el mismo motivo: bifurcar es una
   // decision del disenador del flujo, no del despliegue.
   failOnUnextractableMedia: false,
+  skipDocumentExtraction: false,
+  excludedExtensions: [],
 });
 
 /** Correo de prueba inicial: vacio, para no sugerir un ejemplo que nadie pidio. */
@@ -163,7 +197,17 @@ const parserEmailSetup = () => {
    * corresponde a lo que dice el formulario.
    */
   const updateConfig = (partial: Partial<ParserEmailConfigDto>): void => {
-    config.value = { ...config.value, ...partial };
+    const normalized: Partial<ParserEmailConfigDto> =
+      partial.excludedExtensions === undefined
+        ? partial
+        : {
+            ...partial,
+            excludedExtensions: [
+              ...new Set(partial.excludedExtensions.map(normalizeExtension)),
+            ].filter((extension) => extension !== ''),
+          };
+
+    config.value = { ...config.value, ...normalized };
     invalidateSandboxResult();
   };
 
@@ -256,6 +300,13 @@ const parserEmailSetup = () => {
     // apagado solo anadiria ruido a cada esquema guardado. Encendido SI tiene
     // que viajar, porque es lo que hace legal la ruta de error que lo acompana.
     ...(config.value.failOnUnextractableMedia ? { failOnUnextractableMedia: true } : {}),
+    // Mismo criterio para los dos siguientes: solo viajan cuando se apartan del
+    // defecto del backend, para no engordar cada esquema guardado con el valor
+    // que ya se aplicaria solo.
+    ...(config.value.skipDocumentExtraction ? { skipDocumentExtraction: true } : {}),
+    ...(config.value.excludedExtensions.length > 0
+      ? { excludedExtensions: [...config.value.excludedExtensions] }
+      : {}),
   });
 
   /**
@@ -274,6 +325,16 @@ const parserEmailSetup = () => {
       // `=== true` y no un cast: la columna es `jsonb` y pudo escribirse por SQL
       // directo, donde la cadena "false" es un valor veraz.
       failOnUnextractableMedia: params.failOnUnextractableMedia === true,
+      skipDocumentExtraction: params.skipDocumentExtraction === true,
+      // Se vuelve a normalizar al rehidratar: la columna es `jsonb` y pudo
+      // escribirse por SQL directo, sin pasar por este store.
+      excludedExtensions: Array.isArray(params.excludedExtensions)
+        ? [
+            ...new Set(
+              params.excludedExtensions.map((entry) => normalizeExtension(String(entry))),
+            ),
+          ].filter((extension) => extension !== '')
+        : [],
     };
     invalidateSandboxResult();
   };

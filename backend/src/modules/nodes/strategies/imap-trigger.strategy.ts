@@ -39,6 +39,17 @@ import type { Attachment, AddressObject, ParsedMail } from 'mailparser';
 export const NO_MESSAGES_STATUS = 'NO_MESSAGES_FOUND';
 
 /**
+ * Estado devuelto cuando el asunto no casa con `subjectFilterRegex`.
+ *
+ * Comparte la via del buzon vacio —exito con `halt`— y no la del error LEVE por
+ * la misma razon: descartar un correo que no interesa es el funcionamiento
+ * NORMAL del filtro, no una incidencia. Un `success: false` escribiria un `.log`
+ * en disco y una fila de trazabilidad por cada mensaje irrelevante del buzon
+ * (`architecture-patterns.md` §4), ahogando las alertas reales.
+ */
+export const SUBJECT_FILTERED_STATUS = 'SUBJECT_FILTERED';
+
+/**
  * Tope del marcado que viaja en el payload, en caracteres.
  *
  * Ya NO es la defensa contra las imagenes incrustadas: de esas se ocupa
@@ -587,6 +598,20 @@ export class ImapTriggerStrategy implements INodeStrategy {
         await client.messageFlagsAdd(String(uid), ['\\Seen'], { uid: true });
       }
 
+      // El filtro se evalua tras el marcado a proposito: un correo descartado
+      // que quedase sin leer volveria a descargarse en cada sondeo, un minuto
+      // tras otro, y ningun mensaje posterior llegaria nunca a procesarse
+      // porque `findLatestMatchingUid` reencontraria siempre el mismo.
+      if (!this.matchesSubjectFilter(parsed, config)) {
+        return {
+          success: true,
+          data: { status: SUBJECT_FILTERED_STATUS },
+          halt: {
+            reason: `El asunto no coincide con el filtro configurado (${String(config.subjectFilterRegex)}).`,
+          },
+        };
+      }
+
       return {
         success: true,
         data: { ...this.toExtractedEmail(parsed, config) },
@@ -674,6 +699,37 @@ export class ImapTriggerStrategy implements INodeStrategy {
    * `structuredClone` en entrada y salida, asi que un `Date` o un `Buffer` no
    * sobrevivirian intactos al checkpoint JSONB.
    */
+  /**
+   * Resuelve si el asunto del correo supera el filtro por expresion regular.
+   *
+   * Un patron que no compila NO bloquea el sondeo: se registra como LEVE y el
+   * correo pasa. El motivo es que el patron puede venir de un `pipeline_schema`
+   * guardado antes de que existiera la validacion del DTO, y negarse a leer el
+   * buzon dejaria el flujo muerto sin una sola pista en la interfaz.
+   */
+  private matchesSubjectFilter(
+    parsed: ParsedMail,
+    config: ResolvedImapConfig,
+  ): boolean {
+    if (config.subjectFilterRegex === null) {
+      return true;
+    }
+
+    let pattern: RegExp;
+
+    try {
+      pattern = new RegExp(config.subjectFilterRegex);
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      this.logger.warn(
+        `LEVE | subjectFilterRegex no compila ("${config.subjectFilterRegex}": ${detail}); se procesa el correo sin filtrar.`,
+      );
+      return true;
+    }
+
+    return pattern.test(asString(parsed.subject));
+  }
+
   private toExtractedEmail(
     parsed: ParsedMail,
     config: ResolvedImapConfig,

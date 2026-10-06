@@ -1,10 +1,12 @@
 import { ApiPropertyOptional } from '@nestjs/swagger';
 import {
+  IsArray,
   IsBoolean,
   IsIn,
   IsInt,
   IsOptional,
   IsPositive,
+  IsString,
 } from 'class-validator';
 
 import { NODE_OUTPUT_NAMESPACES } from '@core/fsm/types/pipeline-schema.types';
@@ -31,6 +33,30 @@ export const DEFAULT_PARSER_SOURCE_NAMESPACE = 'raw_email';
  * purgar y a la vez insuficiente para el modelo.
  */
 export const DEFAULT_MIN_BODY_LENGTH = 50;
+
+/** Por defecto SI se extrae texto de los adjuntos soportados. */
+export const DEFAULT_SKIP_DOCUMENT_EXTRACTION = false;
+
+/** Por defecto no se excluye ninguna extension de la extraccion de texto. */
+export const DEFAULT_EXCLUDED_EXTENSIONS: readonly string[] = [];
+
+/**
+ * Lleva una extension a su forma canonica: minusculas y con punto inicial.
+ *
+ * Se normaliza al RESOLVER y no al comparar para que el conjunto de exclusiones
+ * tenga una sola forma posible aguas abajo. Quien escribe el formulario teclea
+ * indistintamente `pptx`, `.PPTX` o `.pptx`, y sin esto las tres convivirian en
+ * el mismo array dejando pasar justo el fichero que se queria excluir.
+ */
+export const normalizeExtension = (value: string): string => {
+  const trimmed = value.trim().toLowerCase();
+
+  if (trimmed.length === 0) {
+    return '';
+  }
+
+  return trimmed.startsWith('.') ? trimmed : `.${trimmed}`;
+};
 
 /**
  * Configuracion del nodo `PARSER_PRE_IA`.
@@ -86,6 +112,30 @@ export class ParserEmailConfigDto {
   @IsOptional()
   @IsBoolean({ message: 'failOnUnextractableMedia debe ser un booleano.' })
   failOnUnextractableMedia?: boolean;
+
+  @ApiPropertyOptional({
+    description:
+      'Si true, no se extrae texto de NINGUN adjunto. Los ficheros se conservan intactos en el namespace de origen para que un nodo de destino pueda subirlos.',
+    default: DEFAULT_SKIP_DOCUMENT_EXTRACTION,
+  })
+  @IsOptional()
+  @IsBoolean({ message: 'skipDocumentExtraction debe ser un booleano.' })
+  skipDocumentExtraction?: boolean;
+
+  @ApiPropertyOptional({
+    description:
+      'Extensiones cuyo texto NO se extrae (p. ej. [".pptx", ".ppt"]). El adjunto sigue viajando entero en el namespace de origen; solo se omite su volcado a `extracted_documents_text`.',
+    example: ['.pptx', '.ppt'],
+    type: [String],
+    default: DEFAULT_EXCLUDED_EXTENSIONS,
+  })
+  @IsOptional()
+  @IsArray({ message: 'excludedExtensions debe ser un arreglo.' })
+  @IsString({
+    each: true,
+    message: 'cada entrada de excludedExtensions debe ser una cadena.',
+  })
+  excludedExtensions?: string[];
 }
 
 /** Configuracion del parser con los valores por defecto ya aplicados. */
@@ -93,6 +143,9 @@ export interface ResolvedParserEmailConfig {
   readonly sourceNamespace: string;
   readonly minBodyLength: number;
   readonly failOnUnextractableMedia: boolean;
+  readonly skipDocumentExtraction: boolean;
+  /** Extensiones ya normalizadas (minusculas, con punto) y sin duplicados. */
+  readonly excludedExtensions: readonly string[];
 }
 
 /** Aplica los valores por defecto sobre un DTO ya validado. Funcion pura. */
@@ -102,4 +155,13 @@ export const resolveParserEmailConfig = (
   sourceNamespace: dto.sourceNamespace ?? DEFAULT_PARSER_SOURCE_NAMESPACE,
   minBodyLength: dto.minBodyLength ?? DEFAULT_MIN_BODY_LENGTH,
   failOnUnextractableMedia: dto.failOnUnextractableMedia ?? false,
+  skipDocumentExtraction:
+    dto.skipDocumentExtraction ?? DEFAULT_SKIP_DOCUMENT_EXTRACTION,
+  excludedExtensions: [
+    ...new Set(
+      (dto.excludedExtensions ?? DEFAULT_EXCLUDED_EXTENSIONS)
+        .map(normalizeExtension)
+        .filter((extension) => extension.length > 0),
+    ),
+  ],
 });
