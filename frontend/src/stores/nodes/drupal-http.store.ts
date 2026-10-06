@@ -28,7 +28,11 @@ import { NodeType, OUTPUT_NAMESPACE_PATTERN } from '@/types/pipeline';
 
 import type { HydratableNode, UpstreamNamespace } from '@stores/nodes/node-store-registry';
 
-import type { DrupalHttpNodeConfig, DrupalInsertPosition } from '@/types/nodes/drupal-http.types';
+import type {
+  DrupalHttpNodeConfig,
+  DrupalInsertPosition,
+  DrupalSandboxPresetKey,
+} from '@/types/nodes/drupal-http.types';
 
 /** Prefijo del id de Pinia; el sufijo es el `nodeId` del `pipeline_schema`. */
 const STORE_ID_PREFIX = 'drupalHttpNode';
@@ -317,28 +321,51 @@ const drupalHttpSetup = () => {
   };
 
   /**
-   * Carga una de las paginas de sandbox confirmadas en produccion.
+   * Carga uno de los destinos operativos confirmados en produccion.
    *
-   * Escribe los tres campos a la vez —UUID, bundle y modo— porque por separado
-   * no significan nada: el UUID de la agregadora de licitaciones solo tiene
-   * sentido con `node--page` y un modo que mute HTML.
+   * Escribe los SIETE campos del destino en UNA sola llamada, y las dos cosas
+   * importan:
+   *
+   * - De una en una no significan nada. El UUID de la agregadora de
+   *   licitaciones solo tiene sentido con `node--page` y un modo que mute HTML,
+   *   y un `TRANSFER_HTML_BLOCK` sin `itemSelector` no es media configuracion:
+   *   es una que falla en ejecucion.
+   * - Los campos que el preset NO usa se escriben igualmente, con su valor
+   *   nulo. Si solo se parchearan los que aplican, pasar de «cerrar licitacion»
+   *   a «abrir licitacion» dejaria el `itemSelector` del traslado colgado en una
+   *   configuracion que ya no lo lee, y reaparecería al volver al otro modo.
+   *
+   * Una sola llamada a `updateConfig` y no siete: cada una reemplaza el objeto
+   * entero y volveria a disparar los `computed` de validacion, que recorren los
+   * parametros del modo activo.
    */
-  const applySandboxPreset = (key: keyof typeof DRUPAL_SANDBOX_PRESETS): void => {
-    const preset = DRUPAL_SANDBOX_PRESETS[key];
+  const applyPreset = (presetKey: DrupalSandboxPresetKey): void => {
+    const preset = DRUPAL_SANDBOX_PRESETS[presetKey];
 
     updateConfig({
-      targetNodeUuid: preset.uuid,
-      bundle: preset.bundle,
       operationMode: preset.operationMode,
+      bundle: preset.bundle,
+      targetNodeUuid: preset.targetNodeUuid,
+      destinationNodeUuid: preset.destinationNodeUuid,
+      containerSelector: preset.containerSelector,
+      itemSelector: preset.itemSelector,
+      insertPosition: preset.insertPosition,
     });
   };
 
-  const applyLicitacionesSandbox = (): void => {
-    applySandboxPreset('LICITACIONES');
+  // Atajos nominales. El componente invoca estos y no `applyPreset('...')` con
+  // una cadena, para que renombrar una clave del catalogo sea un error de
+  // compilacion y no un boton que deja de hacer nada.
+  const applyAbrirLicitacionPreset = (): void => {
+    applyPreset('ABRIR_LICITACION');
   };
 
-  const applyTitulosSandbox = (): void => {
-    applySandboxPreset('TITULOS');
+  const applyCerrarLicitacionPreset = (): void => {
+    applyPreset('CERRAR_LICITACION');
+  };
+
+  const applyVerificacionTitulosPreset = (): void => {
+    applyPreset('VERIFICACION_TITULOS');
   };
 
   /** Se COPIA el arreglo: el anfitrion reconstruye el suyo en cada sincronizacion. */
@@ -483,8 +510,10 @@ const drupalHttpSetup = () => {
     isConfigValid,
     configWarnings,
     updateConfig,
-    applyLicitacionesSandbox,
-    applyTitulosSandbox,
+    applyPreset,
+    applyAbrirLicitacionPreset,
+    applyCerrarLicitacionPreset,
+    applyVerificacionTitulosPreset,
     setAvailableUpstreamContext,
     toNodeParams,
     hydrateFromNode,

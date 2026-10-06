@@ -33,7 +33,7 @@ let nodeCounter = 0;
 const nextNodeId = (): string => `destino_http_${(nodeCounter += 1)}`;
 
 /** UUID v4 validos, para no depender de literales repetidos por el archivo. */
-const SOURCE_UUID = DRUPAL_SANDBOX_PRESETS.LICITACIONES.uuid;
+const SOURCE_UUID = DRUPAL_SANDBOX_PRESETS.ABRIR_LICITACION.targetNodeUuid;
 const DESTINATION_UUID = '3b9f5c21-7d84-4a6e-9c13-2f8e5a0d4b77';
 
 /** Contexto tipico de un flujo completo: escudo delante del destino. */
@@ -405,42 +405,114 @@ describe('useDrupalHttpStore · configuracion del nodo DESTINO_DRUPAL', () => {
     });
   });
 
-  describe('6. Presets de sandbox', () => {
-    it('6.1 deberia cargar identificador, bundle y modo a la vez', () => {
-      // 1. Arrange 📐
+  describe('6. Presets de destinos operativos', () => {
+    it('6.1 deberia cargar los siete campos de ABRIR_LICITACION a la vez', () => {
+      // 1. Arrange 📐: juntos o no significan nada. El UUID de la agregadora
+      //    solo tiene sentido con `node--page` y un modo que mute HTML.
       const store = useDrupalHttpStore(nextNodeId());
+      const preset = DRUPAL_SANDBOX_PRESETS.ABRIR_LICITACION;
 
       // 2. Act ⚙️
-      store.applyLicitacionesSandbox();
+      store.applyAbrirLicitacionPreset();
 
-      // 3. Assert 🎯: los tres juntos, porque por separado no significan nada:
-      //    el UUID de la agregadora solo tiene sentido con `node--page`.
-      expect(store.config.targetNodeUuid).toBe(DRUPAL_SANDBOX_PRESETS.LICITACIONES.uuid);
-      expect(store.config.bundle).toBe('node--page');
+      // 3. Assert 🎯
       expect(store.config.operationMode).toBe(DrupalOperationMode.APPEND_HTML_BLOCK);
+      expect(store.config.bundle).toBe('node--page');
+      expect(store.config.targetNodeUuid).toBe(preset.targetNodeUuid);
+      expect(store.config.destinationNodeUuid).toBeNull();
+      expect(store.config.containerSelector).toBeNull();
+      expect(store.config.itemSelector).toBeNull();
+      expect(store.config.insertPosition).toBe('PREPEND');
     });
 
-    it('6.2 deberia dejar el paso ya valido tras cargar un preset', () => {
+    it('6.2 deberia dejar el paso ya valido tras cargar ABRIR_LICITACION', () => {
       // 1. Arrange 📐: es el objetivo del boton, ahorrar el UUID tecleado.
       const store = useDrupalHttpStore(nextNodeId());
 
       // 2. Act ⚙️
-      store.applyLicitacionesSandbox();
+      store.applyAbrirLicitacionPreset();
 
       // 3. Assert 🎯
       expect(store.isConfigValid).toBe(true);
     });
 
-    it('6.3 deberia cargar el panel de titulos con su propio bundle', () => {
+    it('6.3 deberia cargar CERRAR_LICITACION con su selector de bloque', () => {
       // 1. Arrange 📐
       const store = useDrupalHttpStore(nextNodeId());
 
       // 2. Act ⚙️
-      store.applyTitulosSandbox();
+      store.applyCerrarLicitacionPreset();
+
+      // 3. Assert 🎯: `.licitacion-entry` es la clase del envoltorio que siembra
+      //    la plantilla de apertura; sin ella el traslado no encuentra que mover.
+      expect(store.config.operationMode).toBe(DrupalOperationMode.TRANSFER_HTML_BLOCK);
+      expect(store.config.itemSelector).toBe('.licitacion-entry');
+      expect(store.config.insertPosition).toBe('APPEND');
+    });
+
+    it('6.4 deberia dejar CERRAR_LICITACION INVALIDO por falta de destino', () => {
+      // 1. Arrange 📐: es la prueba mas importante de este bloque. El destino se
+      //    deja nulo A PROPOSITO —la pagina de cerradas no tiene UUID conocido—
+      //    y apuntarlo a la de abiertas seria destructivo: `runTransferHtmlBlock`
+      //    lee origen y destino por separado, y el segundo PATCH pisa al primero
+      //    con un DOM ya obsoleto, borrando el bloque sin dejar copia. Que el
+      //    paso quede invalido es lo que obliga a escribir el destino de verdad.
+      const store = useDrupalHttpStore(nextNodeId());
+
+      // 2. Act ⚙️
+      store.applyCerrarLicitacionPreset();
 
       // 3. Assert 🎯
-      expect(store.config.targetNodeUuid).toBe(DRUPAL_SANDBOX_PRESETS.TITULOS.uuid);
+      expect(store.config.destinationNodeUuid).toBeNull();
+      expect(store.missingRequiredParams).toContain('destinationNodeUuid');
+      expect(store.isConfigValid).toBe(false);
+    });
+
+    it('6.5 deberia cargar VERIFICACION_TITULOS con su bundle y modo propios', () => {
+      // 1. Arrange 📐
+      const store = useDrupalHttpStore(nextNodeId());
+      const preset = DRUPAL_SANDBOX_PRESETS.VERIFICACION_TITULOS;
+
+      // 2. Act ⚙️
+      store.applyVerificacionTitulosPreset();
+
+      // 3. Assert 🎯: CREATE_NODE y no APPEND. Este canal da de alta una entidad
+      //    por panel; no acumula bloques dentro de una pagina agregadora.
+      expect(store.config.operationMode).toBe(DrupalOperationMode.CREATE_NODE);
       expect(store.config.bundle).toBe('node--acreditacion_evaluacion_panel');
+      expect(store.config.targetNodeUuid).toBe(preset.targetNodeUuid);
+    });
+
+    it('6.6 deberia LIMPIAR los campos que el preset nuevo no usa', () => {
+      // 1. Arrange 📐: el operador prueba el traslado y despues se pasa a la
+      //    apertura. Si el preset solo parcheara los campos que le aplican, el
+      //    `itemSelector` del traslado quedaria colgado en una configuracion que
+      //    ya no lo lee, y reapareceria al volver al otro modo.
+      const store = useDrupalHttpStore(nextNodeId());
+      store.applyCerrarLicitacionPreset();
+      expect(store.config.itemSelector).toBe('.licitacion-entry');
+
+      // 2. Act ⚙️
+      store.applyAbrirLicitacionPreset();
+
+      // 3. Assert 🎯
+      expect(store.config.itemSelector).toBeNull();
+      expect(store.config.insertPosition).toBe('PREPEND');
+    });
+
+    it('6.7 deberia exponer un applyPreset generico equivalente al atajo', () => {
+      // 1. Arrange 📐: los atajos existen para que renombrar una clave sea un
+      //    error de compilacion, pero el generico es el que recorre el catalogo
+      //    desde la plantilla. Los dos caminos tienen que coincidir.
+      const porAtajo = useDrupalHttpStore(nextNodeId());
+      const porClave = useDrupalHttpStore(nextNodeId());
+
+      // 2. Act ⚙️
+      porAtajo.applyVerificacionTitulosPreset();
+      porClave.applyPreset('VERIFICACION_TITULOS');
+
+      // 3. Assert 🎯
+      expect(porClave.config).toEqual(porAtajo.config);
     });
   });
 

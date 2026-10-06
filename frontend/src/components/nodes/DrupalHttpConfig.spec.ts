@@ -4,7 +4,18 @@
 // store no necesitan DOM y arrancan mas rapido sin el.
 import { config, mount } from '@vue/test-utils';
 import { createPinia, setActivePinia } from 'pinia';
-import { QBanner, QBtn, QCheckbox, QExpansionItem, QIcon, QInput, QSelect, Quasar } from 'quasar';
+import {
+  Notify,
+  QBanner,
+  QBtn,
+  QCheckbox,
+  QExpansionItem,
+  QIcon,
+  QInput,
+  QSelect,
+  QTooltip,
+  Quasar,
+} from 'quasar';
 import { beforeEach, describe, expect, it } from 'vitest';
 
 import DrupalHttpConfig from '@components/nodes/DrupalHttpConfig.vue';
@@ -23,7 +34,16 @@ const nextNodeId = (): string => `destino_http_view_${(nodeCounter += 1)}`;
  * Se registran a mano porque el plugin `Quasar` instala directivas y plugins
  * pero NO componentes.
  */
-const QUASAR_COMPONENTS = { QBanner, QBtn, QCheckbox, QExpansionItem, QIcon, QInput, QSelect };
+const QUASAR_COMPONENTS = {
+  QBanner,
+  QBtn,
+  QCheckbox,
+  QExpansionItem,
+  QIcon,
+  QInput,
+  QSelect,
+  QTooltip,
+};
 
 const UPSTREAM: UpstreamNamespace[] = [
   {
@@ -44,7 +64,13 @@ const UPSTREAM: UpstreamNamespace[] = [
 const mountComponent = (nodeId: string): ReturnType<typeof mount> =>
   mount(DrupalHttpConfig, {
     props: { nodeId },
-    global: { plugins: [Quasar], components: QUASAR_COMPONENTS },
+    // `Notify` se instala explicitamente: los botones de preset acusan recibo
+    // con `$q.notify`, y sin el plugin `useQuasar()` devuelve un `$q` sin ese
+    // metodo y el click revienta.
+    global: {
+      plugins: [[Quasar, { plugins: { Notify } }]],
+      components: QUASAR_COMPONENTS,
+    },
   });
 
 /**
@@ -53,6 +79,39 @@ const mountComponent = (nodeId: string): ReturnType<typeof mount> =>
  * Quasar derrama los atributos sobre un div interno, asi que marcar el propio
  * `q-select` no serviria para encontrarlo.
  */
+/**
+ * Deja que Quasar monte la notificacion.
+ *
+ * `Notify` se renderiza en un portal sobre `document.body` en un tick aparte,
+ * asi que un `await trigger('click')` solo espera al ciclo del componente.
+ */
+const flushNotifications = async (): Promise<void> => {
+  await new Promise((resolve) => setTimeout(resolve, 60));
+};
+
+/** Notificaciones vivas en este instante, para poder diferenciar despues. */
+const notificationSnapshot = (): Element[] =>
+  Array.from(document.querySelectorAll('.q-notification'));
+
+/**
+ * Texto de las notificaciones que han aparecido DESDE `before`.
+ *
+ * Se compara contra una foto previa en vez de leer la ultima del DOM, y no es
+ * remilgo: las notificaciones viven en `document.body` —fuera del wrapper—,
+ * duran varios segundos y Quasar las agrupa por tipo y posicion, de modo que el
+ * orden del DOM no es el de emision. Una 'warning' de una prueba anterior puede
+ * quedar por detras de la 'positive' de esta.
+ *
+ * Tampoco se barren a mano entre pruebas: Quasar mantiene su propia lista y su
+ * portal, y arrancar los nodos por debajo lo desincroniza hasta el punto de que
+ * las siguientes ya no llegan a montarse.
+ */
+const notificationsSince = (before: Element[]): string =>
+  notificationSnapshot()
+    .filter((node) => !before.includes(node))
+    .map((node) => node.textContent ?? '')
+    .join(' | ');
+
 const selectByField = (wrapper: ReturnType<typeof mount>, field: string) =>
   wrapper.get(`[data-test="${field}"]`).findComponent(QSelect);
 
@@ -276,39 +335,125 @@ describe('DrupalHttpConfig · configurador del nodo DESTINO_DRUPAL', () => {
     });
   });
 
-  describe('5. Presets de sandbox', () => {
-    it('5.1 deberia rellenar identificador, bundle y modo de una sola vez', async () => {
-      // 1. Arrange 📐: teclear un UUID v4 a mano es el error mas caro de este
-      //    formulario —un digito cambiado pasa la validacion y falla en
-      //    ejecucion con un 404 de Drupal y el flujo ya PAUSADO.
-      const nodeId = nextNodeId();
-      const wrapper = mountComponent(nodeId);
-      const store = useDrupalHttpStore(nodeId);
-
-      // 2. Act ⚙️
-      await wrapper.get('[data-test="preset-licitaciones"]').trigger('click');
+  /**
+   * ORDEN DELIBERADO: las dos pruebas de notificacion van ANTES que las de
+   * configuracion.
+   *
+   * Quasar AGRUPA las notificaciones identicas: la segunda vez que se emite el
+   * mismo mensaje no monta un elemento nuevo, reutiliza el existente e
+   * incrementa su contador. Como varios presets comparten el texto de acuse, si
+   * estas pruebas fueran las ultimas no habria nodo nuevo que observar y la
+   * comprobacion no distinguiria «notifico» de «no notifico».
+   */
+  describe('5. Presets de destinos operativos', () => {
+    it('5.1 deberia pintar un boton por cada destino del catalogo', () => {
+      // 1. Arrange 📐: la barra se recorre sobre `DRUPAL_SANDBOX_PRESETS`, de
+      //    modo que anadir un destino no obliga a tocar la plantilla. Esta
+      //    prueba es la que lo sostiene: si alguien volviera a escribir los
+      //    botones a mano, el recuento dejaria de cuadrar al anadir el cuarto.
+      const wrapper = mountComponent(nextNodeId());
 
       // 3. Assert 🎯
-      expect(store.config.targetNodeUuid).toBe(DRUPAL_SANDBOX_PRESETS.LICITACIONES.uuid);
-      expect(store.config.bundle).toBe('node--page');
-      expect(store.config.operationMode).toBe(DrupalOperationMode.APPEND_HTML_BLOCK);
+      const botones = wrapper.findAll('[data-test^="preset-"]');
+      expect(botones).toHaveLength(Object.keys(DRUPAL_SANDBOX_PRESETS).length);
+      expect(wrapper.find('[data-test="preset-abrir_licitacion"]').exists()).toBe(true);
+      expect(wrapper.find('[data-test="preset-cerrar_licitacion"]').exists()).toBe(true);
+      expect(wrapper.find('[data-test="preset-verificacion_titulos"]').exists()).toBe(true);
     });
 
-    it('5.2 deberia cargar el panel de titulos con su propio bundle', async () => {
-      // 1. Arrange 📐
-      const nodeId = nextNodeId();
-      const wrapper = mountComponent(nodeId);
-      const store = useDrupalHttpStore(nodeId);
+    it('5.2 deberia acusar recibo del preset con una notificacion', async () => {
+      // 1. Arrange 📐: un preset escribe siete campos repartidos por secciones
+      //    que pueden estar plegadas. Sin el acuse, el unico indicio visible de
+      //    que el boton hizo algo seria el UUID.
+      //
+      //    Se afirma sobre el DOM y no sobre un espia de `Notify.create`: el
+      //    plugin asigna `$q.notify` en el install y el componente captura esa
+      //    referencia en su `setup`, de modo que un espia puesto despues no la
+      //    intercepta —y una prueba que no intercepta nada pasa igual sin
+      //    comprobar nada.
+      const wrapper = mountComponent(nextNodeId());
+      const previas = notificationSnapshot();
 
       // 2. Act ⚙️
-      await wrapper.get('[data-test="preset-titulos"]').trigger('click');
+      await wrapper.get('[data-test="preset-abrir_licitacion"]').trigger('click');
+      await flushNotifications();
 
       // 3. Assert 🎯
-      expect(store.config.targetNodeUuid).toBe(DRUPAL_SANDBOX_PRESETS.TITULOS.uuid);
-      expect(store.config.bundle).toBe('node--acreditacion_evaluacion_panel');
+      expect(notificationsSince(previas)).toContain('Preset cargado');
+    });
+
+    it('5.3 deberia avisar de que el traslado queda a medias', async () => {
+      // 1. Arrange 📐: sin este aviso el operador lee el asterisco del campo de
+      //    destino como un fallo del boton y vuelve a pulsarlo.
+      const wrapper = mountComponent(nextNodeId());
+      const previas = notificationSnapshot();
+
+      // 2. Act ⚙️
+      await wrapper.get('[data-test="preset-cerrar_licitacion"]').trigger('click');
+      await flushNotifications();
+
+      // 3. Assert 🎯
+      expect(notificationsSince(previas)).toContain('destino');
     });
   });
 
+  it('5.4 deberia rellenar el destino de apertura de una sola vez', async () => {
+    // 1. Arrange 📐: teclear un UUID v4 a mano es el error mas caro de este
+    //    formulario —un digito cambiado pasa la validacion y falla en
+    //    ejecucion con un 404 de Drupal y el flujo ya PAUSADO.
+    const nodeId = nextNodeId();
+    const wrapper = mountComponent(nodeId);
+    const store = useDrupalHttpStore(nodeId);
+
+    // 2. Act ⚙️
+    await wrapper.get('[data-test="preset-abrir_licitacion"]').trigger('click');
+    await flushNotifications();
+
+    // 3. Assert 🎯
+    expect(store.config.targetNodeUuid).toBe(
+      DRUPAL_SANDBOX_PRESETS.ABRIR_LICITACION.targetNodeUuid,
+    );
+    expect(store.config.bundle).toBe('node--page');
+    expect(store.config.operationMode).toBe(DrupalOperationMode.APPEND_HTML_BLOCK);
+  });
+
+  it('5.5 deberia cargar el panel de titulos con su propio bundle', async () => {
+    // 1. Arrange 📐
+    const nodeId = nextNodeId();
+    const wrapper = mountComponent(nodeId);
+    const store = useDrupalHttpStore(nodeId);
+
+    // 2. Act ⚙️
+    await wrapper.get('[data-test="preset-verificacion_titulos"]').trigger('click');
+    await flushNotifications();
+
+    // 3. Assert 🎯
+    expect(store.config.targetNodeUuid).toBe(
+      DRUPAL_SANDBOX_PRESETS.VERIFICACION_TITULOS.targetNodeUuid,
+    );
+    expect(store.config.bundle).toBe('node--acreditacion_evaluacion_panel');
+    expect(store.config.operationMode).toBe(DrupalOperationMode.CREATE_NODE);
+  });
+
+  it('5.6 deberia cargar el traslado dejando el destino pendiente', async () => {
+    // 1. Arrange 📐: el campo se queda vacio A PROPOSITO, porque la pagina de
+    //    cerradas no tiene UUID conocido. Lo que esta prueba vigila es que el
+    //    boton SI haga el resto del trabajo: si no escribiera el selector,
+    //    «no hace nada» y «hace lo que puede» se verian igual en pantalla.
+    const nodeId = nextNodeId();
+    const wrapper = mountComponent(nodeId);
+    const store = useDrupalHttpStore(nodeId);
+
+    // 2. Act ⚙️
+    await wrapper.get('[data-test="preset-cerrar_licitacion"]').trigger('click');
+    await flushNotifications();
+
+    // 3. Assert 🎯
+    expect(store.config.operationMode).toBe(DrupalOperationMode.TRANSFER_HTML_BLOCK);
+    expect(store.config.itemSelector).toBe('.licitacion-entry');
+    expect(store.config.destinationNodeUuid).toBeNull();
+    expect(store.isConfigValid).toBe(false);
+  });
   describe('6. Avisos', () => {
     it('6.1 deberia pintar los avisos que levanta el store', async () => {
       // 1. Arrange 📐: un flujo sin escudo delante no publica el namespace que

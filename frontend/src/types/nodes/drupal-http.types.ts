@@ -134,17 +134,59 @@ export const DRUPAL_BUNDLES: readonly string[] = [
   'node--acreditacion_evaluacion_panel',
 ];
 
-/** Una pagina concreta de Drupal, para los botones de carga rapida. */
+/**
+ * Un destino operativo completo, para los botones de carga rapida.
+ *
+ * Declara TODO lo que el modo elegido necesita, y no solo el identificador: un
+ * `TRANSFER_HTML_BLOCK` sin `itemSelector` o un `APPEND_HTML_BLOCK` sin bundle
+ * no son configuraciones a medias, son configuraciones que fallan en ejecucion.
+ */
 export interface DrupalSandboxPreset {
+  /** Rotulo del boton. Corto: va dentro de un `q-btn` en una fila de tres. */
+  readonly label: string;
+
+  /** Que hace este destino, para el `q-tooltip`. */
+  readonly description: string;
+
+  /** Identificador interno del nodo en Drupal. Informativo: la API usa el UUID. */
   readonly nid: number;
-  readonly uuid: string;
-  readonly title: string;
-  readonly bundle: string;
+
   readonly operationMode: DrupalOperationMode;
+  readonly bundle: string;
+  readonly targetNodeUuid: string;
+
+  /**
+   * Pagina receptora en `TRANSFER_HTML_BLOCK`.
+   *
+   * `null` significa «lo pone el operador», y en el unico preset de traslado lo
+   * es a proposito: la pagina de licitaciones CERRADAS aun no tiene UUID
+   * conocido. Apuntarlo a la misma pagina de origen para «poder probar» seria
+   * destructivo —`runTransferHtmlBlock` lee origen y destino por separado y el
+   * segundo PATCH pisa al primero con un DOM ya obsoleto, de modo que el bloque
+   * se borra sin dejar copia y el nodo devuelve exito—. Dejandolo nulo, el paso
+   * queda invalido hasta que alguien escriba el destino de verdad.
+   */
+  readonly destinationNodeUuid: string | null;
+
+  readonly containerSelector: string | null;
+  readonly itemSelector: string | null;
+  readonly insertPosition: DrupalInsertPosition;
+
+  /**
+   * Plantilla de `plantillas_html` que acompana a este destino.
+   *
+   * Es una PISTA para el operador —se muestra en el tooltip—, no una clave
+   * ajena: nada la resuelve ni la valida. El nodo que elige plantilla es el
+   * MAPEADOR_PLANTILLA, varios pasos antes, y un store de nodo no puede leer el
+   * de otro (`frontend-quasar.md` §3.1). Se identifica por NOMBRE porque
+   * `plantillas_html` no tiene columna `codigo`: su unica clave estable, aparte
+   * del UUID que cambia en cada instalacion, es el nombre con indice unico.
+   */
+  readonly associatedTemplateName: string | null;
 }
 
 /**
- * Nodos de pruebas confirmados en el Drupal de Madrid+D.
+ * Destinos operativos confirmados en el Drupal de Madrid+D.
  *
  * Son UUID publicos de dos paginas de sandbox, no credenciales: viajan en el
  * bundle sin exponer nada. El token (`DRUPAL_API_TOKEN`) vive exclusivamente en
@@ -155,23 +197,61 @@ export interface DrupalSandboxPreset {
  * casando— sino en ejecucion, con un 404 de Drupal y el flujo ya PAUSADO.
  */
 export const DRUPAL_SANDBOX_PRESETS: Readonly<
-  Record<'LICITACIONES' | 'TITULOS', DrupalSandboxPreset>
+  Record<'ABRIR_LICITACION' | 'CERRAR_LICITACION' | 'VERIFICACION_TITULOS', DrupalSandboxPreset>
 > = {
-  LICITACIONES: {
+  ABRIR_LICITACION: {
+    label: 'Abrir licitación',
+    description:
+      'Antepone el bloque de la convocatoria a la página agregadora de licitaciones abiertas.',
     nid: 55937,
-    uuid: '7f1700bf-b54b-4c12-b71a-8a71f1f0ee38',
-    title: 'Prueba de Licitaciones',
-    bundle: 'node--page',
     operationMode: DrupalOperationMode.APPEND_HTML_BLOCK,
+    bundle: 'node--page',
+    targetNodeUuid: '7f1700bf-b54b-4c12-b71a-8a71f1f0ee38',
+    destinationNodeUuid: null,
+    containerSelector: null,
+    itemSelector: null,
+    // Lo ultimo convocado se lee arriba, que es como el portal presenta la lista.
+    insertPosition: 'PREPEND',
+    associatedTemplateName: 'Licitaciones · Convocatoria abierta (Madrid+D)',
   },
-  TITULOS: {
+  CERRAR_LICITACION: {
+    label: 'Cerrar licitación',
+    description:
+      'Traslada un bloque de licitación desde la página de abiertas a la de cerradas. Exige indicar a mano la página de destino.',
+    nid: 55937,
+    operationMode: DrupalOperationMode.TRANSFER_HTML_BLOCK,
+    bundle: 'node--page',
+    targetNodeUuid: '7f1700bf-b54b-4c12-b71a-8a71f1f0ee38',
+    // Ver el TSDoc del campo: queda nulo a proposito.
+    destinationNodeUuid: null,
+    containerSelector: null,
+    // La clase del envoltorio que siembra la plantilla de apertura. Afinarla a
+    // un expediente concreto (`[data-expediente="..."]`) es trabajo del flujo.
+    itemSelector: '.licitacion-entry',
+    // En cerradas el orden cronologico se lee al reves: lo ultimo en cerrarse va
+    // al final, detras de lo que lleva mas tiempo archivado.
+    insertPosition: 'APPEND',
+    associatedTemplateName: null,
+  },
+  VERIFICACION_TITULOS: {
+    label: 'Verificación de títulos',
+    description: 'Crea una entidad de panel de evaluación por cada título acreditado.',
     nid: 55938,
-    uuid: 'b17d69d8-6998-4883-b8dc-153b55dbd9c5',
-    title: 'Prueba verificador titulos',
-    bundle: 'node--acreditacion_evaluacion_panel',
+    // CREATE_NODE y no APPEND: este canal da de alta una entidad por panel, no
+    // acumula bloques dentro del HTML de una pagina agregadora.
     operationMode: DrupalOperationMode.CREATE_NODE,
+    bundle: 'node--acreditacion_evaluacion_panel',
+    targetNodeUuid: 'b17d69d8-6998-4883-b8dc-153b55dbd9c5',
+    destinationNodeUuid: null,
+    containerSelector: null,
+    itemSelector: null,
+    insertPosition: 'PREPEND',
+    associatedTemplateName: 'Verificación de Títulos · Panel de evaluación',
   },
 };
+
+/** Claves de `DRUPAL_SANDBOX_PRESETS`, para tipar el selector sin `string`. */
+export type DrupalSandboxPresetKey = keyof typeof DRUPAL_SANDBOX_PRESETS;
 
 /**
  * Configuracion del nodo `DESTINO_DRUPAL` en el cliente.

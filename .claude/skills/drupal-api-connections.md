@@ -41,7 +41,7 @@ A través de la inspección directa del índice JSON:API, los bundles activos pa
 |---|---|---|---|
 | **Licitaciones** | `node--page` | `/jsonapi/node/page` | Agregador HTML (Mutación `PATCH` con Cheerio) |
 | **Notiweb** | `node--noticias` / `node--article` | `/jsonapi/node/noticias` | Creación de entidad independiente (`POST`) |
-| **Paneles / Títulos** | `node--acreditacion_evaluacion_panel` | `/jsonapi/node/acreditacion_evaluacion_panel` | Procesamiento matricial desde `.xlsx` |
+| **Paneles / Títulos** | `node--acreditacion_evaluacion_panel` | `/jsonapi/node/acreditacion_evaluacion_panel` | Creación de entidad por panel (`CREATE_NODE`). El origen matricial `.xlsx` es el canal de entrada, no el modo de publicación. |
 
 ---
 
@@ -68,7 +68,43 @@ curl -s -u "$DRUPAL_API_USER:$DRUPAL_API_TOKEN" \
   - NID: `55938`
   - UUID: `b17d69d8-6998-4883-b8dc-153b55dbd9c5`
   - Bundle: `node--acreditacion_evaluacion_panel`
-  - Operación: Procesamiento matricial de `.xlsx`
+  - Operación: `CREATE_NODE` (una entidad por panel evaluado)
+
+---
+
+## 4.bis Matriz de casos de uso: de la intención al destino
+
+Las tres combinaciones operativas confirmadas. Cada fila se corresponde con un botón de preset en el configurador del nodo `DESTINO_DRUPAL` (`DRUPAL_SANDBOX_PRESETS`, `frontend/src/types/nodes/drupal-http.types.ts`) y, cuando aplica, con una fila sembrada en `plantillas_html` por `db/migrations/028`.
+
+| Intención del correo | Plantilla (`plantillas_html.nombre`) | Preset | NID / UUID | Modo | Selector |
+|---|---|---|---|---|---|
+| **Abrir licitación** | `Licitaciones · Convocatoria abierta (Madrid+D)` | `ABRIR_LICITACION` | 55937 / `7f1700bf…` | `APPEND_HTML_BLOCK`, `PREPEND` | — |
+| **Cerrar licitación** | — (mueve marcado ya publicado) | `CERRAR_LICITACION` | origen 55937 / `7f1700bf…` · **destino por determinar** | `TRANSFER_HTML_BLOCK`, `APPEND` | `itemSelector: .licitacion-entry`, afinable a `div.licitacion-entry[data-expediente="…"]` |
+| **Verificación de títulos** | `Verificación de Títulos · Panel de evaluación` | `VERIFICACION_TITULOS` | 55938 / `b17d69d8…` | `CREATE_NODE` | — |
+
+### Las plantillas NO llevan marcadores, y es deliberado
+
+Las dos filas sembradas son **esqueletos con ranuras vacías nombradas por clase**, no plantillas con `{{namespace.campo}}`. El `MAPEADOR_PLANTILLA` dejó de interpolar: entrega el marcado saneado para que lo rellene un `PROCESADOR_IA` posterior, y rechaza con `ERR_TEMPLATE_PENDING_VARS` cualquier plantilla cuya columna `variables_esperadas` no venga vacía. Añadir un marcador a una de estas plantillas deja el flujo `PAUSADO` en la primera ejecución.
+
+Consecuencia práctica para quien redacte el prompt del `PROCESADOR_IA`: **la IA es quien escribe el `data-expediente`**, y de ese atributo depende que el cierre encuentre después el bloque que tiene que mover.
+
+### ⚠️ El destino del cierre está sin determinar
+
+`CERRAR_LICITACION` deja `destinationNodeUuid` en `null` a propósito: no hay UUID conocido para la página de licitaciones **cerradas**. Apuntarlo a la de abiertas «para poder probar» es destructivo — `runTransferHtmlBlock` lee origen y destino por separado y el segundo `PATCH` pisa al primero con un DOM ya obsoleto, de modo que el bloque se borra sin dejar copia **y el nodo devuelve éxito**. El paso queda inválido hasta que alguien escriba el destino real, que es el comportamiento buscado.
+
+---
+
+## 4.ter Directiva de escalamiento operativo
+
+Ante un correo o requerimiento que **no case claramente** con una fila de la matriz anterior, no se improvisa destino ni marcado: un UUID inventado falla en ejecución con un 404 y el flujo ya `PAUSADO`, y un bloque con una estructura distinta de la esperada rompe el `itemSelector` de todos los cierres posteriores.
+
+El procedimiento es detenerse y formular la consulta técnica a la tutora empresarial, pidiendo **las tres cosas a la vez** —por separado no bastan para configurar el nodo—:
+
+1. **URL o NID de destino** en Madrid+D, del que se deriva el UUID por `/jsonapi/node/page?filter[drupal_internal__nid]=…`.
+2. **Estructura HTML exacta** del bloque deseado, o la plantilla `.html` de referencia. Hace falta el marcado literal, no una descripción: de él salen las clases de las ranuras y los `requiredSelectors` que audita el `ESCUDO_POST_IA`.
+3. **Criterio de colocación**: `PREPEND` (lo último publicado se lee arriba) o `APPEND` (orden cronológico), y si el bloque sustituye a uno existente o se acumula.
+
+Mientras falte cualquiera de los tres, el nodo se deja sin configurar en vez de rellenarlo con un valor plausible: un paso inválido es visible en el asistente, y un UUID equivocado no lo es hasta que se ejecuta.
 
 ---
 

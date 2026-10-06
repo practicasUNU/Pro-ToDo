@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { useQuasar } from 'quasar';
 import { computed } from 'vue';
 
 import { useDrupalHttpStore } from '@stores/nodes/drupal-http.store';
@@ -15,7 +16,7 @@ import {
   UUID_V4_PATTERN,
 } from '@/types/nodes/drupal-http.types';
 
-import type { DrupalInsertPosition } from '@/types/nodes/drupal-http.types';
+import type { DrupalInsertPosition, DrupalSandboxPresetKey } from '@/types/nodes/drupal-http.types';
 
 interface Props {
   /** Identificador del nodo en el `pipeline_schema` (contrato uniforme §3.1). */
@@ -27,6 +28,30 @@ const props = defineProps<Props>();
 // El store se resuelve POR NODO: un flujo puede publicar la noticia y, ademas,
 // mover su licitacion a la pagina de cerradas, con configuraciones distintas.
 const store = useDrupalHttpStore(props.nodeId);
+
+const $q = useQuasar();
+
+/**
+ * Carga un destino y lo confirma por `q-notify`.
+ *
+ * El acuse importa: un preset escribe siete campos repartidos por secciones que
+ * pueden estar plegadas, de modo que sin aviso el unico indicio visible de que
+ * el boton hizo algo seria el UUID. Los presets de traslado dejan ademas un
+ * campo obligatorio vacio A PROPOSITO, y el aviso lo dice para que no se lea
+ * como un fallo del boton.
+ */
+const onPresetClick = (presetKey: DrupalSandboxPresetKey): void => {
+  store.applyPreset(presetKey);
+
+  const needsDestination =
+    DRUPAL_SANDBOX_PRESETS[presetKey].operationMode === DrupalOperationMode.TRANSFER_HTML_BLOCK;
+
+  $q.notify({
+    type: needsDestination ? 'warning' : 'positive',
+    message: needsDestination ? TRANSFER_NOTICE : 'Preset cargado exitosamente',
+    timeout: needsDestination ? 6000 : 2000,
+  });
+};
 
 /** Opcion de un selector cerrado con etiqueta legible. */
 interface LabeledOption {
@@ -45,8 +70,33 @@ const MODE_HINT =
 const BUNDLE_HINT =
   'Es el `data.type` de JSON:API, en la forma entidad--bundle. De el se deriva la ruta de coleccion.';
 
+/**
+ * Icono de cada destino operativo.
+ *
+ * Vive aqui y no en el catalogo de tipos porque es decision de PRESENTACION:
+ * `DRUPAL_SANDBOX_PRESETS` describe una configuracion de Drupal y no deberia
+ * saber que existe Material Icons. El `Record` es completo, de modo que anadir
+ * un preset sin icono no compila.
+ */
+const PRESET_ICONS: Readonly<Record<DrupalSandboxPresetKey, string>> = {
+  ABRIR_LICITACION: 'post_add',
+  CERRAR_LICITACION: 'archive',
+  VERIFICACION_TITULOS: 'school',
+};
+
 const SANDBOX_NOTICE =
-  'Paginas de pruebas confirmadas en produccion. Rellenan identificador, bundle y modo a la vez: por separado no significan nada.';
+  'Destinos confirmados en produccion. Cada uno rellena identificador, bundle, modo y selectores a la vez: por separado no significan nada.';
+
+/**
+ * Por que «Cerrar licitacion» deja un campo pendiente.
+ *
+ * Sin este aviso el operador lee el asterisco de `destinationNodeUuid` como un
+ * fallo del preset y vuelve a pulsarlo. La pagina de licitaciones CERRADAS no
+ * tiene UUID conocido todavia, y apuntarla a la de abiertas «para probar» seria
+ * destructivo (ver el TSDoc de `destinationNodeUuid` en los tipos).
+ */
+const TRANSFER_NOTICE =
+  'Cerrar licitacion deja a proposito la pagina de destino sin rellenar: hay que indicar la de licitaciones cerradas antes de poder guardar.';
 
 const SOURCE_HINT =
   'Solo se ofrecen los namespaces que publican los pasos ANTERIORES de este flujo. Elegir uno que nadie produzca rechaza el guardado con ERR_MISSING_UPSTREAM_CONTEXT.';
@@ -252,27 +302,30 @@ const toNullableText = (value: string | number | null): string | null => {
     </div>
 
     <p class="pd-subtitle q-mt-md q-mb-xs">{{ SANDBOX_NOTICE }}</p>
-    <div class="row q-gutter-sm q-mb-md" data-test="sandbox-presets">
+    <div class="row q-gutter-sm q-mb-sm" data-test="sandbox-presets">
+      <!-- Se recorre el catalogo en vez de escribir tres bloques iguales:
+           anadir un destino operativo pasa a ser una entrada en
+           DRUPAL_SANDBOX_PRESETS y no un cuarto `q-btn` aqui. -->
       <q-btn
+        v-for="(preset, key) in DRUPAL_SANDBOX_PRESETS"
+        :key="key"
         flat
         dense
         no-caps
+        :icon="PRESET_ICONS[key]"
         icon-right="north_east"
         class="pd-preset-btn"
-        :label="`Cargar sandbox ${DRUPAL_SANDBOX_PRESETS.LICITACIONES.title}`"
-        data-test="preset-licitaciones"
-        @click="store.applyLicitacionesSandbox()"
-      />
-      <q-btn
-        flat
-        dense
-        no-caps
-        icon-right="north_east"
-        class="pd-preset-btn"
-        :label="`Cargar sandbox ${DRUPAL_SANDBOX_PRESETS.TITULOS.title}`"
-        data-test="preset-titulos"
-        @click="store.applyTitulosSandbox()"
-      />
+        :label="preset.label"
+        :data-test="`preset-${key.toLowerCase()}`"
+        @click="onPresetClick(key)"
+      >
+        <q-tooltip class="pd-preset-tooltip" anchor="bottom left" self="top left">
+          <div>{{ preset.description }}</div>
+          <div v-if="preset.associatedTemplateName !== null" class="q-mt-xs">
+            Plantilla: {{ preset.associatedTemplateName }}
+          </div>
+        </q-tooltip>
+      </q-btn>
     </div>
 
     <!-- Selectores CERRADOS (Poka-Yoke §4): lo que se ofrece es lo que de
@@ -607,6 +660,18 @@ const toNullableText = (value: string | number | null): string | null => {
   color: var(--pd-accent-text);
   border: 1px dashed var(--pd-border);
   border-radius: $button-border-radius;
+}
+
+// El tooltip de Quasar se monta FUERA del componente (teleport al body), de
+// modo que el scope no lo alcanza: de ahi el `:deep`. Usa los tokens del shell
+// y no los de superficie porque flota sobre el formulario, igual que el header.
+:deep(.pd-preset-tooltip) {
+  max-width: 320px;
+  background: var(--pd-shell-bg);
+  color: var(--pd-shell-text);
+  border: 1px solid var(--pd-border);
+  border-radius: $generic-border-radius;
+  font-size: 12px;
 }
 
 .pd-advanced {
