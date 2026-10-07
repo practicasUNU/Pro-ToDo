@@ -7,6 +7,7 @@ process.env.IMAP_POLLING_ENABLED = 'false';
 process.env.CRON_SCHEDULING_ENABLED = 'false';
 
 import { Logger } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { NestFactory } from '@nestjs/core';
 import axios from 'axios';
 import * as cheerio from 'cheerio';
@@ -51,6 +52,38 @@ const DEFAULT_BUNDLE = 'node--page';
 
 /** Formato de texto enriquecido con el que Drupal guarda estos cuerpos. */
 const DEFAULT_BODY_FORMAT = 'full_html';
+
+/** UUID v4 canonico, para distinguir un identificador de un alias de ruta. */
+const UUID_PATTERN =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+/**
+ * Alias conocido -> NOMBRE de la variable que trae su UUID.
+ *
+ * El mapa guarda el nombre y no el valor a proposito. Leer `process.env` aqui no
+ * funcionaria: quien vuelca el `.env` es el `ConfigModule` de `AppModule`, y lo
+ * hace DENTRO de `createApplicationContext`, es decir despues de que estas
+ * constantes de modulo ya se evaluaron. Un mapa con valores saldria siempre con
+ * el respaldo y la variable no serviria para nada.
+ */
+const SANDBOX_UUID_VARS: Readonly<Record<string, string>> = {
+  '/prueba-licitaciones': 'DRUPAL_SANDBOX_LICITACIONES_UUID',
+  '/prueba-verificador-titulos': 'DRUPAL_SANDBOX_TITULOS_UUID',
+};
+
+/**
+ * Respaldo cableado de los dos nodos de sandbox confirmados en produccion.
+ *
+ * Son identificadores PUBLICOS, no credenciales. El respaldo existe porque los
+ * valores del `.env.example` son marcadores falsos (`00000000-0000-4000-...`):
+ * un `.env` copiado de la plantilla daria un 404 opaco en vez de funcionar. La
+ * variable sigue mandando cuando trae algo, que es lo que permite apuntar a otra
+ * instalacion sin tocar este archivo.
+ */
+const SANDBOX_UUID_FALLBACKS: Readonly<Record<string, string>> = {
+  '/prueba-licitaciones': '7f1700bf-b54b-4c12-b71a-8a71f1f0ee38',
+  '/prueba-verificador-titulos': 'b17d69d8-6998-4883-b8dc-153b55dbd9c5',
+};
 
 /**
  * Selectores de purga, en orden de aplicacion.
@@ -156,6 +189,43 @@ export const purgeMarkedBlocks = (
     : { html: $.html(), purgedCount };
 };
 
+/** Un UUID v4, en oposicion a un alias de ruta. */
+export const isUuid = (value: string): boolean =>
+  UUID_PATTERN.test(value.trim());
+
+/**
+ * Deja dos HTML comparables pese a la cosmetica del viaje por Drupal.
+ *
+ * Unifica las TRES formas del espacio duro, que es la trampa de este caso:
+ * cheerio serializa a `&#xa0;` y no a `&nbsp;`, de modo que normalizar solo la
+ * entidad con nombre deja la diferencia intacta.
+ */
+export const normalizeHtmlForComparison = (raw: string): string =>
+  raw
+    .replace(/&nbsp;/gi, ' ')
+    .replace(/&#(?:xa0|160);/gi, ' ')
+    .replace(/\u00a0/g, ' ')
+    // El espacio ENTRE etiquetas se borra, no se colapsa: una reindentacion de
+    // Drupal mete saltos y sangrias ahi, y dejarlos reducidos a un espacio
+    // seguiria marcando como distinto un cuerpo identicamente estructurado.
+    .replace(/>\s+</g, '><')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+/**
+ * Texto plano del fragmento, colapsado.
+ *
+ * Es la medida que distingue «Drupal reescribio el formato» de «falta
+ * contenido»: la cosmetica no cambia lo que se lee, un borrado si.
+ */
+export const textContentOf = (html: string): string =>
+  cheerio
+    .load(html, { xml: { xmlMode: false } }, false)
+    .root()
+    .text()
+    .replace(/\s+/g, ' ')
+    .trim();
+
 /** `node--page` -> `node/page`. */
 const toEntityPath = (bundle: string): string => bundle.replace('--', '/');
 
@@ -185,20 +255,50 @@ export class DrupalSandboxCleanupService {
     };
   }
 
-  /** Resuelve el UUID de una pagina a partir de su alias de ruta. */
+  /**
+   * Resuelve el UUID de una pagina a partir de su alias de ruta.
+   *
+   * ULTIMO RECURSO, y no la via normal. Filtrar por `path.alias` es fragil en
+   * esta instalacion —`path` es un campo calculado y el Entity Query devuelve
+   * 500—, asi que quien llama deberia traer el UUID resuelto. Se conserva para
+   * un alias que no este en los mapas conocidos.
+   *
+   * Un UUID pasado como alias se devuelve tal cual, sin tocar la red: es lo que
+   * permite `npm run drupal:cleanup -- <uuid>` cuando la consulta falla.
+   */
   public async resolveNodeUuidByAlias(
     pathAlias: string,
     bundle: string = DEFAULT_BUNDLE,
   ): Promise<string> {
+    if (isUuid(pathAlias)) {
+      return pathAlias.trim();
+    }
+
     const alias = toCanonicalAlias(pathAlias);
     const url =
       `${this.drupalApiConfig.baseUrl}/${toEntityPath(bundle)}` +
       `?filter[path.alias]=${encodeURIComponent(alias)}`;
 
-    const { data } = await axios.get<DrupalCollectionResponse>(url, {
-      headers: this.headers,
-      timeout: this.drupalApiConfig.timeoutMs,
-    });
+    let data: DrupalCollectionResponse;
+
+    try {
+      ({ data } = await axios.get<DrupalCollectionResponse>(url, {
+        headers: this.headers,
+        timeout: this.drupalApiConfig.timeoutMs,
+      }));
+    } catch (error) {
+      // El 500 crudo de axios no dice nada util aqui. El diagnostico es
+      // conocido y la salida tambien, asi que se cuentan las dos.
+      const status = axios.isAxiosError(error)
+        ? (error.response?.status ?? 'sin respuesta')
+        : 'desconocido';
+
+      throw new Error(
+        `Drupal respondio ${status} al filtrar "${bundle}" por path.alias="${alias}". ` +
+          'Esa consulta no es fiable en esta instalacion: `path` es un campo calculado. ' +
+          'Pasa el UUID directamente como argumento, o declara el alias en SANDBOX_UUID_VARS.',
+      );
+    }
 
     const uuid = data.data?.[0]?.id;
 
@@ -277,6 +377,35 @@ export class DrupalSandboxCleanupService {
  * desde `test-titulos-e2e.ts`: sin la guarda, pedirle el servicio dispararia
  * una limpieza completa como efecto secundario del import.
  */
+/**
+ * UUID de un alias conocido, o `null` si hay que resolverlo por la via larga.
+ *
+ * Precedencia: un UUID pasado a pelo manda sobre todo; despues la variable de
+ * entorno, que es lo que permite apuntar a otra instalacion; y por ultimo el
+ * respaldo cableado, para que la corrida tipica no exija configuracion.
+ */
+const resolveKnownUuid = (
+  pathAlias: string,
+  configService: ConfigService,
+): string | null => {
+  if (isUuid(pathAlias)) {
+    return pathAlias.trim();
+  }
+
+  const alias = toCanonicalAlias(pathAlias);
+  const varName = SANDBOX_UUID_VARS[alias];
+
+  if (varName === undefined) {
+    return null;
+  }
+
+  const fromEnv = configService.get<string>(varName)?.trim();
+
+  return fromEnv !== undefined && fromEnv.length > 0
+    ? fromEnv
+    : (SANDBOX_UUID_FALLBACKS[alias] ?? null);
+};
+
 const main = async (): Promise<void> => {
   const pathAlias = process.argv[2] ?? DEFAULT_PATH_ALIAS;
   const customSelector = process.argv[3];
@@ -298,8 +427,20 @@ const main = async (): Promise<void> => {
     }
 
     const service = new DrupalSandboxCleanupService(drupalApiConfig);
+
+    // Resolucion AQUI y no dentro del servicio: `ConfigService` solo tiene los
+    // valores del `.env` una vez levantado el contexto, y es el unico momento en
+    // que se pueden leer. Con los dos alias conocidos la consulta por
+    // `path.alias` —la que devuelve 500— no llega a emitirse.
+    const resolvedUuid = resolveKnownUuid(pathAlias, app.get(ConfigService));
+
+    if (resolvedUuid !== null) {
+      logger.log(`Alias conocido: ${pathAlias} | uuid=${resolvedUuid}`);
+    }
+
     const result = await service.purgeInjectedBlocks({
       pathAlias,
+      ...(resolvedUuid === null ? {} : { nodeUuid: resolvedUuid }),
       ...(customSelector === undefined ? {} : { customSelector }),
     });
 

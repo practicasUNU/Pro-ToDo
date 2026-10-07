@@ -1,4 +1,12 @@
-import { purgeMarkedBlocks } from './cleanup-drupal-sandbox';
+import {
+  DrupalSandboxCleanupService,
+  isUuid,
+  normalizeHtmlForComparison,
+  purgeMarkedBlocks,
+  textContentOf,
+} from './cleanup-drupal-sandbox';
+
+import type { DrupalApiConfig } from '@core/config/drupal-api.config';
 
 /**
  * Bloque editorial legitimo: lo que un flujo real publica.
@@ -104,6 +112,81 @@ describe('purgeMarkedBlocks · poda del sandbox de Drupal', () => {
       // 3. Assert 🎯
       expect(result.html).not.toContain('panel-default');
       expect(result.html).toBe('<div id="accordionCEU"></div>');
+    });
+  });
+
+  describe('4. Resolucion del nodo sin tocar la red', () => {
+    it('4.1 deberia distinguir un UUID de un alias de ruta', () => {
+      // 1. Arrange 📐 + 2. Act ⚙️ + 3. Assert 🎯
+      expect(isUuid('7f1700bf-b54b-4c12-b71a-8a71f1f0ee38')).toBe(true);
+      expect(isUuid('/prueba-licitaciones')).toBe(false);
+      expect(isUuid('prueba-verificador-titulos')).toBe(false);
+    });
+
+    it('4.2 deberia devolver un UUID pasado como alias SIN emitir peticion', () => {
+      // 1. Arrange 📐: es la salida de emergencia cuando Drupal responde
+      //    500 al filtrar por `path.alias`. El doble de config no tiene URL
+      //    valida ni credenciales: si el metodo intentara salir a la red, el
+      //    test fallaria en vez de pasar.
+      const apiConfig = {
+        baseUrl: 'https://no-debe-usarse.invalid/jsonapi',
+        authHeader: 'Basic x',
+        timeoutMs: 1,
+      } as DrupalApiConfig;
+      const service = new DrupalSandboxCleanupService(apiConfig);
+
+      // 2. Act ⚙️ + 3. Assert 🎯
+      return expect(
+        service.resolveNodeUuidByAlias('7f1700bf-b54b-4c12-b71a-8a71f1f0ee38'),
+      ).resolves.toBe('7f1700bf-b54b-4c12-b71a-8a71f1f0ee38');
+    });
+  });
+
+  describe('5. Comparacion contra la linea base', () => {
+    it('5.1 deberia igualar las TRES formas del espacio duro', () => {
+      // 1. Arrange 📐: la trampa del caso. Cheerio serializa a `&#xa0;` y
+      //    no a `&nbsp;`, asi que normalizar solo la entidad con nombre dejaria
+      //    la diferencia intacta y la prueba fallaria sin que nada este mal.
+      const conEntidad = '<p>Hola&nbsp;mundo</p>';
+      const conNumerica = '<p>Hola&#xa0;mundo</p>';
+      const conLiteral = '<p>Hola\u00a0mundo</p>';
+
+      // 2. Act ⚙️ + 3. Assert 🎯
+      expect(normalizeHtmlForComparison(conEntidad)).toBe(
+        normalizeHtmlForComparison(conNumerica),
+      );
+      expect(normalizeHtmlForComparison(conLiteral)).toBe(
+        normalizeHtmlForComparison(conNumerica),
+      );
+    });
+
+    it('5.2 deberia colapsar saltos de linea y sangrias', () => {
+      // 1. Arrange 📐: Drupal reindenta al guardar, y eso no es un fallo.
+      const compacto = '<div><p>Uno</p><p>Dos</p></div>';
+      const indentado = '<div>\n  <p>Uno</p>\n  <p>Dos</p>\n</div>';
+
+      // 2. Act ⚙️ + 3. Assert 🎯
+      expect(normalizeHtmlForComparison(indentado)).toBe(
+        normalizeHtmlForComparison(compacto),
+      );
+    });
+
+    it('5.3 deberia acortar el texto plano cuando desaparece un bloque', () => {
+      // 1. Arrange 📐: es la medida que sostiene el tramo 2 del E2E. La
+      //    cosmetica no cambia lo que se lee; un borrado si, y es el unico
+      //    fallo irreversible que puede cometer la purga.
+      const completo = `<div>${EDITORIAL_BLOCK}<p>Pie de pagina</p></div>`;
+      const mutilado = '<div><p>Pie de pagina</p></div>';
+
+      // 2. Act ⚙️ + 3. Assert 🎯
+      expect(textContentOf(mutilado).length).toBeLessThan(
+        textContentOf(completo).length,
+      );
+      // Y la reindentacion NO acorta: si lo hiciera, el tramo 2 daria falsos
+      // positivos en cada corrida.
+      expect(textContentOf('<div>\n  <p>Uno</p>\n</div>')).toBe(
+        textContentOf('<div><p>Uno</p></div>'),
+      );
     });
   });
 });

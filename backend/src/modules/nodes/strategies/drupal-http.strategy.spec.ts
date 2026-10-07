@@ -735,6 +735,37 @@ describe('DrupalHttpStrategy', () => {
       expect(result.data?.attachment_url).toBe(FILE_URL);
     });
 
+    it('2.14bis deberia preferir field_fichero_adjunto, el unico verificado', async () => {
+      // 1. Arrange 📐: el sondeo contra Madrid+D confirmo que `node--page`
+      //    declara `field_fichero_adjunto`. Encabeza la lista de candidatos
+      //    justamente por eso: los demas son conjeturas por convencion de
+      //    nombre, y ante un bundle que declarase dos hay que probar antes el
+      //    que se sabe que existe. Este caso fija esa precedencia.
+      const httpClient = buildHttpMock();
+      httpClient.requestWithStatus
+        .mockResolvedValueOnce(
+          pageResponse('', PAGE_UUID, 55_937, {
+            field_archivos: { data: null },
+            field_fichero_adjunto: { data: null },
+          }),
+        )
+        .mockResolvedValueOnce(fileResponse())
+        .mockResolvedValueOnce(pageResponse(''));
+      const strategy = buildStrategy(httpClient);
+
+      // 2. Act ⚙️: el configurado no existe en el bundle, asi que se autodescubre.
+      const result = await strategy.execute(attachmentContext(), {
+        ...uploadAppendParams,
+        fileFieldName: 'field_inexistente',
+      });
+
+      // 3. Assert 🎯
+      expect(callConfig(httpClient, 1).url).toBe(
+        `${BASE_URL}/node/page/${PAGE_UUID}/field_fichero_adjunto`,
+      );
+      expect(result.data?.attachment_url).toBe(FILE_URL);
+    });
+
     it('2.15 NO deberia intentar la subida si el bundle no declara ficheros', async () => {
       // 1. Arrange 📐: clausula de guarda. La peticion condenada se descarta
       //    antes de tocar la red, no despues de que Drupal la rechace.

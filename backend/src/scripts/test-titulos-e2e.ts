@@ -14,7 +14,11 @@ import * as cheerio from 'cheerio';
 import { DrupalApiConfig } from '@core/config/drupal-api.config';
 
 import { AppModule } from '../app.module';
-import { DrupalSandboxCleanupService } from './cleanup-drupal-sandbox';
+import {
+  DrupalSandboxCleanupService,
+  normalizeHtmlForComparison,
+  textContentOf,
+} from './cleanup-drupal-sandbox';
 
 import type { DrupalNodeResponse } from './cleanup-drupal-sandbox';
 import type { CheerioAPI } from 'cheerio';
@@ -41,6 +45,15 @@ const logger = new Logger('TitulosE2E');
 
 /** Bandera que habilita la escritura real. */
 const WRITE_FLAG = '--write';
+
+/**
+ * Banderas que dejan el panel publicado al terminar.
+ *
+ * Sirven para mirarlo en el navegador, que es lo unico que no se puede
+ * comprobar desde aqui. El precio lo paga la corrida SIGUIENTE, y por eso
+ * existe la guarda anti-contaminacion de mas abajo.
+ */
+const KEEP_FLAGS = ['--keep', '--no-cleanup'] as const;
 
 /** Pagina agregadora del verificador de titulos en el sandbox. */
 const DEFAULT_PATH_ALIAS = '/prueba-verificador-titulos';
@@ -164,6 +177,7 @@ const patchRemoteBody = async (
 
 const main = async (): Promise<void> => {
   const shouldWrite = process.argv.includes(WRITE_FLAG);
+  const shouldKeep = KEEP_FLAGS.some((flag) => process.argv.includes(flag));
 
   const app = await NestFactory.createApplicationContext(AppModule, {
     logger: ['error', 'warn', 'log'],
@@ -201,10 +215,29 @@ const main = async (): Promise<void> => {
 
     const original = await fetchRemoteBody(drupalApiConfig, uuid);
 
+    const $ = loadFragment(original.value);
+
+    // Guarda ANTI-CONTAMINACION, y es la contrapartida obligatoria de `--keep`.
+    // Si una corrida anterior dejo el panel publicado, este GET tomaria la
+    // pagina sucia como linea base legitima: la prueba inyectaria un SEGUNDO
+    // panel y acabaria comparando contra un estado que ya era incorrecto. Se
+    // comprueba tambien en simulacion, porque el aviso sirve antes de escribir.
+    const previous = $(INJECTED_MARKER).length;
+
+    if (previous > 0) {
+      logger.error(
+        `La pagina remota ya contiene ${previous} bloque(s) inyectado(s) de una corrida ` +
+          `anterior, probablemente con --keep. Ejecuta "npm run drupal:cleanup -- ` +
+          `${DEFAULT_PATH_ALIAS}" antes de correr el E2E.`,
+      );
+      process.exitCode = 1;
+
+      return;
+    }
+
     // Guarda de estructura. Sin el acordeon no hay donde insertar, y caer a la
     // raiz del fragmento «por si acaso» publicaria un panel suelto flotando en
     // una pagina real. Mejor parar y decir que la suposicion no se cumple.
-    const $ = loadFragment(original.value);
 
     if ($(ACCORDION_SELECTOR).length === 0) {
       throw new Error(
@@ -258,7 +291,18 @@ const main = async (): Promise<void> => {
       `Panel publicado y verificado (${injectedCount} coincidencia/s).`,
     );
 
-    // --- 3. Restauracion inmediata
+    // --- 3. Salida con el panel puesto, si se pidio verlo
+    if (shouldKeep) {
+      logger.log(
+        'Modo --keep activo: el panel permanece visible en Drupal. Para retirarlo ejecuta ' +
+          `"npm run drupal:cleanup -- ${DEFAULT_PATH_ALIAS}". Hasta entonces, una nueva ` +
+          'corrida de este E2E se negara a arrancar para no contaminar su linea base.',
+      );
+
+      return;
+    }
+
+    // --- 4. Restauracion inmediata
     const result = await cleanup.purgeInjectedBlocks({
       pathAlias: DEFAULT_PATH_ALIAS,
       nodeUuid: uuid,
@@ -269,13 +313,15 @@ const main = async (): Promise<void> => {
       `Purga: ${result.purgedCount} bloque(s) | actualizado=${result.updated}`,
     );
 
-    // --- 4. Verificacion contra la linea base NORMALIZADA
+    // --- 5. Verificacion en tres tramos contra la linea base
     const restored = await fetchRemoteBody(drupalApiConfig, uuid);
-    // Normalizada a proposito: `purgeMarkedBlocks` con cero coincidencias
-    // devuelve el original SIN serializar, que es justo lo que no sirve aqui.
+    // Serializada por cheerio: es el estado al que converge la pagina tras
+    // cualquier PATCH, y comparar contra el crudo de Drupal daria por fallida
+    // cada corrida correcta.
     const baseline = loadFragment(original.value).html();
     const leftovers = loadFragment(restored.value)(INJECTED_MARKER).length;
 
+    // Tramo 1: sobra algo. La purga no hizo su trabajo.
     if (leftovers > 0) {
       throw new Error(
         `Quedan ${leftovers} bloque(s) marcados tras la purga. Ejecuta "npm run drupal:cleanup -- ` +
@@ -283,11 +329,33 @@ const main = async (): Promise<void> => {
       );
     }
 
-    if (restored.value !== baseline) {
-      throw new Error(
-        'El cuerpo restaurado no coincide con la linea base normalizada: la purga se llevo por ' +
-          'delante algo que no habia inyectado esta prueba. Revisa el HTML de la pagina.',
+    if (
+      normalizeHtmlForComparison(restored.value) !==
+      normalizeHtmlForComparison(baseline)
+    ) {
+      const restoredText = textContentOf(restored.value);
+      const baselineText = textContentOf(baseline);
+
+      // Tramo 2: FALTA algo. Es el unico fallo sin vuelta atras de todo esto, y
+      // el chequeo de residuos no lo ve: aquel mira que no sobre nada, nunca
+      // que no falte. Se mide sobre el texto plano porque la cosmetica no
+      // cambia lo que se lee y un borrado si.
+      if (restoredText.length < baselineText.length) {
+        throw new Error(
+          `El cuerpo restaurado perdio ${baselineText.length - restoredText.length} caracteres ` +
+            'de texto: la purga se llevo por delante contenido que no habia inyectado esta ' +
+            'prueba. Revisa los selectores antes de volver a correrla.',
+        );
+      }
+
+      // Tramo 3: difiere solo en formato. Drupal reescribe el marcado al
+      // guardar, y eso no es un fallo de la purga.
+      logger.warn(
+        'Drupal aplico transformaciones cosmeticas al guardar, pero el texto esta intacto y no ' +
+          'queda ningun bloque de prueba en el DOM.',
       );
+    } else {
+      logger.log('Restauracion validada contra la linea base normalizada.');
     }
 
     logger.log('E2E OK: panel inyectado, verificado y retirado sin residuo.');

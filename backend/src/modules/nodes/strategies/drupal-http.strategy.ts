@@ -139,21 +139,32 @@ type AttachmentResolution =
   | { readonly attachment: ResolvedAttachment }
   | { readonly failure: NodeErrorDetail };
 
+/** Icono con el que se ilustra el enlace al pliego. */
+const PDF_ICON_SRC = '/modules/file/icons/application-pdf.png';
+
 /**
  * Nombres de campo de fichero que se buscan cuando el configurado no existe.
+ *
+ * `field_fichero_adjunto` va PRIMERO porque es el unico VERIFICADO: el sondeo
+ * `probe:drupal:upload` lo encontro en las relaciones de `node--page` en la
+ * instalacion de Madrid+D. Los otros siete son conjeturas por convencion de
+ * nombre, y por eso van detras: ante un bundle que declarase dos, se prueba
+ * antes el que se sabe que existe.
  *
  * Es una HEURISTICA y no un contrato, y conviene no olvidarlo: en JSON:API
  * `relationships` enumera TODAS las referencias de entidad del nodo —`uid`,
  * `type`, `revision_uid`, terminos de taxonomia—, no solo los campos de
  * fichero. Que uno de estos nombres este presente no demuestra que admita
  * bytes; si un bundle usara `field_documentos` como referencia a taxonomia, el
- * POST devolveria 422. El riesgo se acepta porque los siete son nombres de
- * fichero por convencion y porque el fallo cae en la degradacion controlada,
- * nunca en una ejecucion pausada.
+ * POST devolveria 422. El riesgo se acepta porque el fallo cae en la
+ * degradacion controlada, nunca en una ejecucion pausada.
+ *
+ * Se EXPORTA para que `probe-drupal-file-upload.ts` sondee exactamente esta
+ * lista. Antes la replicaba, con un comentario que avisaba de lo que pasaria si
+ * las dos divergian; divergieron en cuanto se anadio el primer candidato.
  */
-const PDF_ICON_SRC = '/modules/file/icons/application-pdf.png';
-
-const COMMON_FILE_FIELD_CANDIDATES = [
+export const COMMON_FILE_FIELD_CANDIDATES = [
+  'field_fichero_adjunto',
   'field_adjuntos',
   'field_archivos',
   'field_documentos',
