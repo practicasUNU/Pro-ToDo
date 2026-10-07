@@ -93,12 +93,17 @@ export const DEFAULT_DRUPAL_INSERT_POSITION: DrupalInsertPosition = 'PREPEND';
  * `contexto_acumulado`—, de modo que ahi no hay nada que subir.
  *
  * ADVERTENCIA TOPOLOGICA. Ni siquiera `raw_email` conserva los bytes para
- * siempre: `FsmEngineService` los libera en cuanto CUALQUIER nodo publica texto
- * aprovechable (`clean_body`, `extracted_documents_text`...). Un
- * `UPLOAD_ATTACHMENT` colocado detras de un `PARSER_PRE_IA` encontrara el
- * inventario con `contentBase64` a `null` y fallara con
- * `ERR_DRUPAL_MISSING_PAYLOAD`. Este nodo tiene que ir ANTES del que extrae
- * texto.
+ * siempre: `FsmEngineService` los libera en cuanto algun nodo publica texto de
+ * PROCEDENCIA DOCUMENTAL (`extracted_documents_text`, `extracted_text`). El
+ * cuerpo del correo ya NO cuenta —`clean_body` salio de `EXTRACTED_TEXT_KEYS`
+ * precisamente porque purgaba adjuntos que nadie habia abierto—, pero un
+ * `PARSER_PRE_IA` que extraiga el texto de los PDF si deja el inventario con
+ * `contentBase64` a `null`.
+ *
+ * De ahi salen las dos unicas topologias que funcionan: un `UPLOAD_ATTACHMENT`
+ * colocado ANTES del parser, o un `APPEND_HTML_BLOCK` con `uploadAttachment`
+ * sobre un parser con `skipDocumentExtraction` encendido. En el resto de casos
+ * no hay binario que subir, y el modo degrada con un aviso.
  */
 export const DEFAULT_DRUPAL_ATTACHMENT_NAMESPACE = 'raw_email';
 
@@ -120,6 +125,27 @@ export const MAX_DRUPAL_ATTACHMENT_INDEX = 50;
 
 /** Campo de fichero del nodo anfitrion al que se adjunta el binario. */
 export const DEFAULT_DRUPAL_FILE_FIELD_NAME = 'field_adjuntos';
+
+/**
+ * Interruptor de la subida dentro de `APPEND_HTML_BLOCK`.
+ *
+ * Apagado por defecto, y es deliberado: los cuatro params de adjunto ya traen
+ * valor, de modo que sin una bandera explicita no hay forma de distinguir
+ * "configurado" de "sin configurar", y CUALQUIER `APPEND_HTML_BLOCK` sobre un
+ * correo con adjuntos empezaria a escribir ficheros en Drupal sin que nadie lo
+ * hubiera pedido. Un efecto externo no se enciende por omision.
+ */
+export const DEFAULT_DRUPAL_UPLOAD_ATTACHMENT = false;
+
+/**
+ * Lista del bloque donde se cuelga el enlace al fichero subido.
+ *
+ * Es un selector INTERNO al markup que se inserta, no de la pagina agregadora:
+ * por eso no reutiliza `containerSelector`, que ya nombra el contenedor de
+ * destino en el HTML remoto. El valor por defecto apunta a la lista que la
+ * plantilla sembrada de licitaciones deja vacia a proposito (migracion 028).
+ */
+export const DEFAULT_DRUPAL_ATTACHMENT_LIST_SELECTOR = 'ul.licitacion-pliegos';
 
 /** Tope del titulo: es el limite de `node.title` en Drupal estandar. */
 export const MAX_DRUPAL_TITLE_LENGTH = 255;
@@ -387,6 +413,28 @@ export class DrupalHttpConfigDto {
     message: 'fileFieldName debe ser snake_case alfanumerico en minusculas.',
   })
   fileFieldName?: string;
+
+  @ApiPropertyOptional({
+    description:
+      'Sube el adjunto y enlaza el fichero dentro del bloque, en APPEND_HTML_BLOCK.',
+    default: DEFAULT_DRUPAL_UPLOAD_ATTACHMENT,
+  })
+  @IsOptional()
+  @IsBoolean({ message: 'uploadAttachment debe ser un booleano.' })
+  uploadAttachment?: boolean;
+
+  @ApiPropertyOptional({
+    description:
+      'Selector, DENTRO del bloque insertado, de la lista que recibe el enlace al fichero.',
+    default: DEFAULT_DRUPAL_ATTACHMENT_LIST_SELECTOR,
+    maxLength: MAX_SELECTOR_LENGTH,
+  })
+  @IsOptional()
+  @IsString({ message: 'attachmentListSelector debe ser una cadena.' })
+  @MaxLength(MAX_SELECTOR_LENGTH, {
+    message: `attachmentListSelector no puede superar ${MAX_SELECTOR_LENGTH} caracteres.`,
+  })
+  attachmentListSelector?: string;
 }
 
 /** Configuracion del destino Drupal con los valores por defecto ya aplicados. */
@@ -409,6 +457,8 @@ export interface ResolvedDrupalHttpConfig {
   readonly attachmentField: string;
   readonly attachmentIndex: number;
   readonly fileFieldName: string;
+  readonly uploadAttachment: boolean;
+  readonly attachmentListSelector: string;
 }
 
 /** Cadena no vacia, o `null`. Evita que un `"  "` pase por valor declarado. */
@@ -456,4 +506,8 @@ export const resolveDrupalHttpConfig = (
   attachmentIndex: dto.attachmentIndex ?? DEFAULT_DRUPAL_ATTACHMENT_INDEX,
   fileFieldName:
     trimmedOrNull(dto.fileFieldName) ?? DEFAULT_DRUPAL_FILE_FIELD_NAME,
+  uploadAttachment: dto.uploadAttachment ?? DEFAULT_DRUPAL_UPLOAD_ATTACHMENT,
+  attachmentListSelector:
+    trimmedOrNull(dto.attachmentListSelector) ??
+    DEFAULT_DRUPAL_ATTACHMENT_LIST_SELECTOR,
 });

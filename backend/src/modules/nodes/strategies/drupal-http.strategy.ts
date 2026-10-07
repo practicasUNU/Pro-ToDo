@@ -84,6 +84,7 @@ interface DrupalResultFields {
   readonly operationApplied?: string;
   readonly httpStatus?: number;
   readonly publishedAt?: string;
+  readonly attachmentUrl?: string;
 }
 
 /**
@@ -97,6 +98,7 @@ interface DrupalEntityResponse {
   readonly data?: {
     readonly id?: string;
     readonly attributes?: Record<string, unknown>;
+    readonly relationships?: Record<string, unknown>;
   };
 }
 
@@ -106,6 +108,8 @@ interface FetchedNode {
   readonly internalNid: number;
   readonly pathAlias: string;
   readonly bodyHtml: string;
+  /** Referencias declaradas por el bundle; de aqui sale el campo de fichero. */
+  readonly relationships: Record<string, unknown>;
 }
 
 /** Resultado de resolver la configuracion: o hay config, o hay fallo. */
@@ -117,6 +121,47 @@ type ConfigResolution =
 type FetchResolution =
   | { readonly node: FetchedNode }
   | { readonly failure: NodeErrorDetail; readonly status: number };
+
+/** Binario listo para enviar, ya validado. */
+interface ResolvedAttachment {
+  readonly contentBase64: string;
+  readonly filename: string;
+}
+
+/** Fichero ya subido: lo que hace falta para construir el enlace. */
+interface UploadedAttachment {
+  readonly url: string;
+  readonly filename: string;
+}
+
+/** O hay adjunto que subir, o hay un motivo por el que no lo hay. */
+type AttachmentResolution =
+  | { readonly attachment: ResolvedAttachment }
+  | { readonly failure: NodeErrorDetail };
+
+/**
+ * Nombres de campo de fichero que se buscan cuando el configurado no existe.
+ *
+ * Es una HEURISTICA y no un contrato, y conviene no olvidarlo: en JSON:API
+ * `relationships` enumera TODAS las referencias de entidad del nodo —`uid`,
+ * `type`, `revision_uid`, terminos de taxonomia—, no solo los campos de
+ * fichero. Que uno de estos nombres este presente no demuestra que admita
+ * bytes; si un bundle usara `field_documentos` como referencia a taxonomia, el
+ * POST devolveria 422. El riesgo se acepta porque los siete son nombres de
+ * fichero por convencion y porque el fallo cae en la degradacion controlada,
+ * nunca en una ejecucion pausada.
+ */
+const PDF_ICON_SRC = '/modules/file/icons/application-pdf.png';
+
+const COMMON_FILE_FIELD_CANDIDATES = [
+  'field_adjuntos',
+  'field_archivos',
+  'field_documentos',
+  'field_ficheros',
+  'field_documentacion',
+  'field_archivo',
+  'field_pdf',
+] as const;
 
 /** Carga de cheerio con las banderas CANONICAS del proyecto. */
 const loadFragment = (html: string): CheerioAPI =>
@@ -231,6 +276,12 @@ export class DrupalHttpStrategy extends BaseHttpDestinationStrategy {
       type: 'text',
       description: 'Marca ISO del instante en que Drupal confirmo la escritura',
     },
+    {
+      name: 'attachment_url',
+      type: 'text',
+      description:
+        'URL publica del fichero subido; vacia si el modo no sube nada o si la subida se omitio',
+    },
   ];
 
   constructor(
@@ -280,7 +331,14 @@ export class DrupalHttpStrategy extends BaseHttpDestinationStrategy {
       required.add(config.sourceNamespace);
     }
 
-    if (config.operationMode === DrupalOperationMode.UPLOAD_ATTACHMENT) {
+    // El namespace del binario tambien hace falta cuando el APPEND lo sube: sin
+    // esto, la regla 7 del validador no avisaria de un flujo que pide subir un
+    // adjunto por un namespace que nadie publica aguas arriba.
+    if (
+      config.operationMode === DrupalOperationMode.UPLOAD_ATTACHMENT ||
+      (config.operationMode === DrupalOperationMode.APPEND_HTML_BLOCK &&
+        config.uploadAttachment)
+    ) {
       required.add(config.attachmentNamespace);
     }
 
@@ -542,7 +600,20 @@ export class DrupalHttpStrategy extends BaseHttpDestinationStrategy {
       return this.failFetched(fetched, config, 'leer la pagina agregadora');
     }
 
-    const inserted = this.insertBlock(fetched.node.bodyHtml, markup, config);
+    // Subida DESPUES del GET, y no antes, por dos razones que apuntan al mismo
+    // sitio: el campo de destino se descubre en las relaciones que devuelve esa
+    // misma respuesta, y si el GET falla no queda un fichero huerfano colgando
+    // de Drupal por una publicacion que nunca llego a ocurrir.
+    const uploaded = config.uploadAttachment
+      ? await this.tryUploadAttachment(context, config, uuid, fetched.node)
+      : null;
+
+    const enriched =
+      uploaded === null
+        ? markup
+        : this.tryInjectAttachmentLink(markup, uploaded, config);
+
+    const inserted = this.insertBlock(fetched.node.bodyHtml, enriched, config);
 
     if (typeof inserted !== 'string') {
       return { success: false, error: inserted };
@@ -564,6 +635,7 @@ export class DrupalHttpStrategy extends BaseHttpDestinationStrategy {
           // no habria atributos que leer. El GET ya es obligatorio en este modo.
           internalNid: fetched.node.internalNid,
           pathAlias: fetched.node.pathAlias,
+          attachmentUrl: uploaded?.url ?? NEUTRAL_TEXT,
           httpStatus: patched.status,
           publishedAt: this.readChangedAt(patched.data.data?.attributes ?? {}),
         },
@@ -759,23 +831,24 @@ export class DrupalHttpStrategy extends BaseHttpDestinationStrategy {
   }
 
   /** Sube un binario adjunto y resuelve su URL publica descargable. */
-  private async runUploadAttachment(
+  /**
+   * Localiza el binario del adjunto pedido, o explica por que no esta.
+   *
+   * Se separa del modo porque los DOS consumidores necesitan exactamente estas
+   * tres guardas y ninguna mas: `UPLOAD_ATTACHMENT`, que convierte el fallo en
+   * un `NodeResult` fallido, y `APPEND_HTML_BLOCK`, que lo degrada a un aviso.
+   * Quien decide la gravedad es el modo; esta funcion solo averigua.
+   */
+  private resolveAttachmentBinary(
     context: StatePayloadContext,
     config: ResolvedDrupalHttpConfig,
-  ): Promise<NodeResult> {
-    const uuid = config.targetNodeUuid;
-
-    if (uuid === null) {
-      return this.missingParam('targetNodeUuid');
-    }
-
+  ): AttachmentResolution {
     const namespace = context.getNamespace(config.attachmentNamespace);
     const inventory = namespace?.[config.attachmentField];
 
     if (!Array.isArray(inventory) || inventory.length === 0) {
       return {
-        success: false,
-        error: {
+        failure: {
           level: 'GRAVE',
           code: ERR_DRUPAL_MISSING_PAYLOAD,
           message: `No hay adjuntos en "${config.attachmentNamespace}.${config.attachmentField}". Recuerde que el binario solo vive en "raw_email": "parsed_email" publica el inventario SIN los bytes.`,
@@ -791,8 +864,7 @@ export class DrupalHttpStrategy extends BaseHttpDestinationStrategy {
 
     if (attachment === undefined) {
       return {
-        success: false,
-        error: {
+        failure: {
           level: 'GRAVE',
           code: ERR_DRUPAL_MISSING_PAYLOAD,
           message: `El inventario de adjuntos tiene ${inventory.length} elemento(s) y se pidio el indice ${config.attachmentIndex}.`,
@@ -811,11 +883,10 @@ export class DrupalHttpStrategy extends BaseHttpDestinationStrategy {
     // el operador vera un inventario perfectamente formado y sin bytes.
     if (typeof contentBase64 !== 'string' || contentBase64.length === 0) {
       return {
-        success: false,
-        error: {
+        failure: {
           level: 'GRAVE',
           code: ERR_DRUPAL_MISSING_PAYLOAD,
-          message: `El binario de "${filename}" ya fue liberado por el motor: se descarta en cuanto un nodo anterior publica texto aprovechable. Coloque este nodo ANTES del nodo que extrae texto (PARSER_PRE_IA).`,
+          message: `El binario de "${filename}" ya fue liberado por el motor: se descarta en cuanto un nodo anterior publica texto extraido de los adjuntos. Coloque este nodo ANTES del PARSER_PRE_IA, o encienda en el su "skipDocumentExtraction".`,
           missingFields: [
             `${config.attachmentNamespace}.${config.attachmentField}[${config.attachmentIndex}].contentBase64`,
           ],
@@ -823,30 +894,225 @@ export class DrupalHttpStrategy extends BaseHttpDestinationStrategy {
       };
     }
 
-    const outcome =
-      await this.httpClient.requestWithStatus<DrupalEntityResponse>(
-        {
-          url: `${this.drupalApiConfig.baseUrl}/${this.resolveEntityPath(config.bundle)}/${uuid}/${config.fileFieldName}`,
-          method: 'POST',
-          headers: {
-            ...this.buildJsonApiHeaders(),
-            // Sobrescriben las de JSON:API: este endpoint recibe bytes crudos.
-            'Content-Type': 'application/octet-stream',
-            'Content-Disposition': `file; filename="${sanitizeFilename(filename)}"`,
-          },
-          data: Buffer.from(contentBase64, 'base64'),
+    return { attachment: { contentBase64, filename } };
+  }
+
+  /**
+   * Elige el campo de fichero del bundle leyendo sus relaciones.
+   *
+   * Evita el 404/422 de subir contra un campo que la instalacion no declara:
+   * la peticion condenada se descarta ANTES de tocar la red, que es la clausula
+   * de guarda de siempre aplicada a un recurso remoto.
+   */
+  private resolveTargetFileField(
+    configuredField: string,
+    relationships: Record<string, unknown>,
+  ): string | null {
+    if (configuredField in relationships) {
+      return configuredField;
+    }
+
+    for (const candidate of COMMON_FILE_FIELD_CANDIDATES) {
+      if (candidate in relationships) {
+        this.logger.log(
+          `INFO | DRUPAL_FIELD_AUTODISCOVERED | El campo "${configuredField}" no existe en el bundle. Se usara la relacion detectada "${candidate}".`,
+        );
+
+        return candidate;
+      }
+    }
+
+    this.logger.warn(
+      `WARN | DRUPAL_NO_FILE_RELATIONSHIP | El bundle no declara relaciones de fichero compatibles. Candidatos evaluados: ${COMMON_FILE_FIELD_CANDIDATES.join(', ')}.`,
+    );
+
+    return null;
+  }
+
+  /** Envia los bytes al endpoint de campo de fichero de JSON:API. */
+  private async postAttachmentBinary(
+    uuid: string,
+    fileFieldName: string,
+    attachment: ResolvedAttachment,
+    config: ResolvedDrupalHttpConfig,
+  ): Promise<HttpClientStatusOutcome<DrupalEntityResponse>> {
+    return this.httpClient.requestWithStatus<DrupalEntityResponse>(
+      {
+        url: `${this.drupalApiConfig.baseUrl}/${this.resolveEntityPath(config.bundle)}/${uuid}/${fileFieldName}`,
+        method: 'POST',
+        headers: {
+          ...this.buildJsonApiHeaders(),
+          // Sobrescriben las de JSON:API: este endpoint recibe bytes crudos.
+          'Content-Type': 'application/octet-stream',
+          'Content-Disposition': `file; filename="${sanitizeFilename(attachment.filename)}"`,
         },
-        // Sin reintentos, por el mismo motivo que `CREATE_NODE`: un POST repetido
-        // deja dos copias del fichero colgando del mismo campo.
-        { timeoutMs: this.drupalApiConfig.timeoutMs, maxRetries: 0 },
+        data: Buffer.from(attachment.contentBase64, 'base64'),
+      },
+      // Sin reintentos, por el mismo motivo que `CREATE_NODE`: un POST repetido
+      // deja dos copias del fichero colgando del mismo campo.
+      { timeoutMs: this.drupalApiConfig.timeoutMs, maxRetries: 0 },
+    );
+  }
+
+  /** URL publica del fichero recien subido, o el neutro. */
+  private readUploadedUrl(response: DrupalEntityResponse): string {
+    const attributes = response.data?.attributes ?? {};
+    const uri = attributes.uri as Record<string, unknown> | undefined;
+
+    return toText(uri?.url, NEUTRAL_TEXT);
+  }
+
+  /**
+   * Cuelga el enlace al fichero de la lista de pliegos del bloque.
+   *
+   * Opera sobre el markup que se va a INSERTAR, no sobre el HTML remoto, y en
+   * modo `append`: la plantilla sembrada deja `ul.licitacion-pliegos` vacia
+   * porque es la IA quien genera un `<li>` por cada pliego que cita el correo.
+   * Reemplazar ahi dentro borraria ese trabajo; el fichero subido es un pliego
+   * mas, no el unico.
+   */
+  private injectAttachmentLink(
+    markup: string,
+    url: string,
+    filename: string,
+    config: ResolvedDrupalHttpConfig,
+  ): string | null {
+    const $ = loadFragment(markup);
+    const list = $(config.attachmentListSelector);
+
+    if (list.length === 0) {
+      return null;
+    }
+
+    const safeName = sanitizeFilename(filename);
+
+    list
+      .first()
+      .append(
+        `<li><img style="border:0px;vertical-align:baseline;" src="${PDF_ICON_SRC}" alt="Icono PDF" title="application/pdf"> <a class="pliego-link" href="${url}" target="_blank">${safeName}</a></li>`,
       );
+
+    return $.html();
+  }
+
+  /**
+   * Intenta subir el adjunto; ante cualquier tropiezo AVISA y devuelve `null`.
+   *
+   * Es la diferencia de caracter con `UPLOAD_ATTACHMENT`: alli la subida es el
+   * trabajo entero y no hacerla es un fallo, mientras que aqui es un extra
+   * sobre una publicacion que tiene valor por si sola. Pausar el flujo por un
+   * PDF dejaria la licitacion sin publicar, que es peor que publicarla sin el
+   * enlace.
+   *
+   * El coste de esta decision hay que asumirlo con los ojos abiertos: un 403 de
+   * credenciales o un campo mal configurado NO pausan la ejecucion. Quedan en
+   * el `warn` y en un `attachment_url` vacio, y hay que ir a buscarlos.
+   */
+  private async tryUploadAttachment(
+    context: StatePayloadContext,
+    config: ResolvedDrupalHttpConfig,
+    uuid: string,
+    node: FetchedNode,
+  ): Promise<UploadedAttachment | null> {
+    const resolved = this.resolveAttachmentBinary(context, config);
+
+    if ('failure' in resolved) {
+      this.logger.warn(
+        `WARN | DRUPAL_ATTACHMENT_SKIPPED | ${resolved.failure.message} Se publica el bloque sin enlace al fichero.`,
+      );
+
+      return null;
+    }
+
+    const fileField = this.resolveTargetFileField(
+      config.fileFieldName,
+      node.relationships,
+    );
+
+    if (fileField === null) {
+      return null;
+    }
+
+    const outcome = await this.postAttachmentBinary(
+      uuid,
+      fileField,
+      resolved.attachment,
+      config,
+    );
+
+    if ('failure' in outcome) {
+      this.logger.warn(
+        `WARN | DRUPAL_ATTACHMENT_UPLOAD_FAILED | No se pudo subir "${resolved.attachment.filename}" a "${fileField}": ${outcome.failure.message}`,
+      );
+
+      return null;
+    }
+
+    const url = this.readUploadedUrl(outcome.data);
+
+    if (url.length === 0) {
+      this.logger.warn(
+        'WARN | DRUPAL_ATTACHMENT_NO_URL | Drupal acepto el fichero pero no devolvio "attributes.uri.url".',
+      );
+
+      return null;
+    }
+
+    return { url, filename: resolved.attachment.filename };
+  }
+
+  /** Inyecta el enlace, o deja el bloque intacto si no hay donde colgarlo. */
+  private tryInjectAttachmentLink(
+    markup: string,
+    uploaded: UploadedAttachment,
+    config: ResolvedDrupalHttpConfig,
+  ): string {
+    const enriched = this.injectAttachmentLink(
+      markup,
+      uploaded.url,
+      uploaded.filename,
+      config,
+    );
+
+    if (enriched === null) {
+      this.logger.warn(
+        `WARN | DRUPAL_ATTACHMENT_LIST_MISSING | El bloque no contiene "${config.attachmentListSelector}". El fichero quedo subido pero sin enlace.`,
+      );
+
+      return markup;
+    }
+
+    return enriched;
+  }
+
+  private async runUploadAttachment(
+    context: StatePayloadContext,
+    config: ResolvedDrupalHttpConfig,
+  ): Promise<NodeResult> {
+    const uuid = config.targetNodeUuid;
+
+    if (uuid === null) {
+      return this.missingParam('targetNodeUuid');
+    }
+
+    const resolved = this.resolveAttachmentBinary(context, config);
+
+    if ('failure' in resolved) {
+      return { success: false, error: resolved.failure };
+    }
+
+    const outcome = await this.postAttachmentBinary(
+      uuid,
+      config.fileFieldName,
+      resolved.attachment,
+      config,
+    );
 
     if ('failure' in outcome) {
       return this.failWith(outcome, config, 'subir el adjunto');
     }
 
-    const attributesOut = outcome.data.data?.attributes ?? {};
-    const uri = attributesOut.uri as Record<string, unknown> | undefined;
+    const uploadedUrl = this.readUploadedUrl(outcome.data);
 
     return {
       success: true,
@@ -856,12 +1122,13 @@ export class DrupalHttpStrategy extends BaseHttpDestinationStrategy {
           // Un fichero no tiene `nid`: su identificador interno es un `fid`, y
           // fingir lo contrario daria un numero que no resuelve ninguna ruta.
           internalNid: NEUTRAL_NID,
-          // La URL publica viaja en `path_alias` porque el catalogo de salida
-          // es cerrado y este es el unico campo cuya semantica la admite. Es el
-          // dato que el APPEND posterior inyecta en el `<a href>` del bloque.
-          pathAlias: toText(uri?.url, NEUTRAL_TEXT),
+          // La URL publica viaja en `path_alias` porque es el campo cuya
+          // semantica la admite, y se repite en `attachment_url` para que un
+          // consumidor no tenga que saber en que modo corrio el nodo.
+          pathAlias: uploadedUrl,
+          attachmentUrl: uploadedUrl,
           httpStatus: outcome.status,
-          publishedAt: this.readChangedAt(attributesOut),
+          publishedAt: this.readChangedAt(outcome.data.data?.attributes ?? {}),
         },
         config.operationMode,
       ),
@@ -902,6 +1169,7 @@ export class DrupalHttpStrategy extends BaseHttpDestinationStrategy {
         internalNid: toNumber(attributes.drupal_internal__nid, NEUTRAL_NID),
         pathAlias: this.readPathAlias(attributes),
         bodyHtml: toText(body?.value, NEUTRAL_TEXT),
+        relationships: outcome.data.data?.relationships ?? {},
       },
     };
   }
@@ -1084,6 +1352,7 @@ export class DrupalHttpStrategy extends BaseHttpDestinationStrategy {
       operation_applied: fields.operationApplied ?? mode,
       http_status: fields.httpStatus ?? NEUTRAL_STATUS,
       published_at: fields.publishedAt ?? NEUTRAL_TEXT,
+      attachment_url: fields.attachmentUrl ?? NEUTRAL_TEXT,
     };
   }
 

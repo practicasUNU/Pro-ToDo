@@ -178,6 +178,17 @@ const mutatesContainer = computed<boolean>(
 );
 
 /**
+ * El APPEND que ademas sube el adjunto de paso.
+ *
+ * Es su propia bandera y no el modo, porque la regla 11 del validador obliga a
+ * que todo DESTINO cierre el flujo: no se puede encadenar un UPLOAD_ATTACHMENT
+ * delante, asi que subir y publicar tienen que caber en el mismo nodo.
+ */
+const uploadsWithinAppend = computed<boolean>(
+  () => mutatesContainer.value && store.config.uploadAttachment,
+);
+
+/**
  * Regla de un identificador obligatorio del modo activo.
  *
  * Se extrae al script porque son dos predicados —presencia y formato UUID v4— y
@@ -214,6 +225,12 @@ const itemSelectorRules = [
 ];
 
 const containerSelectorRules = [
+  (value: string | null): boolean | string =>
+    (value ?? '').length <= MAX_DRUPAL_SELECTOR_LENGTH ||
+    `El selector no puede superar ${MAX_DRUPAL_SELECTOR_LENGTH} caracteres`,
+];
+
+const attachmentListSelectorRules = [
   (value: string | null): boolean | string =>
     (value ?? '').length <= MAX_DRUPAL_SELECTOR_LENGTH ||
     `El selector no puede superar ${MAX_DRUPAL_SELECTOR_LENGTH} caracteres`,
@@ -612,6 +629,43 @@ const toNullableText = (value: string | number | null): string | null => {
               dense
               class="q-mt-xs pd-mono"
               @update:model-value="store.updateConfig({ fileFieldName: String($event ?? '') })"
+            />
+          </div>
+
+          <div v-if="mutatesContainer" class="col-12" data-test="upload-attachment-field">
+            <q-checkbox
+              :model-value="store.config.uploadAttachment"
+              label="Subir el adjunto y enlazarlo en el bloque"
+              class="pd-label"
+              @update:model-value="store.updateConfig({ uploadAttachment: $event === true })"
+            />
+            <p class="pd-subtitle q-mb-none">
+              El binario solo sobrevive hasta aqui si el PARSER_PRE_IA de delante tiene
+              activado «omitir extraccion de documentos». Si no lo encuentra, el bloque se
+              publica igual, sin enlace.
+            </p>
+          </div>
+
+          <div
+            v-if="uploadsWithinAppend"
+            class="col-12 col-md-6"
+            data-test="attachment-list-selector-field"
+          >
+            <label class="pd-label" for="drupal-attachment-list-selector">
+              Lista de pliegos del bloque
+            </label>
+            <q-input
+              id="drupal-attachment-list-selector"
+              :model-value="store.config.attachmentListSelector"
+              outlined
+              dense
+              class="q-mt-xs pd-mono"
+              :maxlength="MAX_DRUPAL_SELECTOR_LENGTH"
+              hint="Selector DENTRO del bloque que se inserta, no de la pagina agregadora."
+              :rules="attachmentListSelectorRules"
+              @update:model-value="
+                store.updateConfig({ attachmentListSelector: String($event ?? '') })
+              "
             />
           </div>
         </div>

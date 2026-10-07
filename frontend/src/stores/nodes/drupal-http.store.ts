@@ -4,6 +4,7 @@ import { computed, ref } from 'vue';
 import {
   DEFAULT_DRUPAL_ATTACHMENT_FIELD,
   DEFAULT_DRUPAL_ATTACHMENT_INDEX,
+  DEFAULT_DRUPAL_ATTACHMENT_LIST_SELECTOR,
   DEFAULT_DRUPAL_ATTACHMENT_NAMESPACE,
   DEFAULT_DRUPAL_BODY_FIELD,
   DEFAULT_DRUPAL_BODY_FORMAT,
@@ -13,6 +14,7 @@ import {
   DEFAULT_DRUPAL_MODE,
   DEFAULT_DRUPAL_SOURCE_FIELD,
   DEFAULT_DRUPAL_SOURCE_NAMESPACE,
+  DEFAULT_DRUPAL_UPLOAD_ATTACHMENT,
   DRUPAL_BUNDLE_PATTERN,
   DRUPAL_FIELD_NAME_PATTERN,
   DRUPAL_INSERT_POSITIONS,
@@ -134,6 +136,8 @@ const buildInitialConfig = (): DrupalHttpNodeConfig => ({
   attachmentField: DEFAULT_DRUPAL_ATTACHMENT_FIELD,
   attachmentIndex: DEFAULT_DRUPAL_ATTACHMENT_INDEX,
   fileFieldName: DEFAULT_DRUPAL_FILE_FIELD_NAME,
+  uploadAttachment: DEFAULT_DRUPAL_UPLOAD_ATTACHMENT,
+  attachmentListSelector: DEFAULT_DRUPAL_ATTACHMENT_LIST_SELECTOR,
 });
 
 // Estado reactivo del nodo DESTINO_DRUPAL (regla frontend-quasar.md §3.1).
@@ -243,6 +247,11 @@ const drupalHttpSetup = () => {
         ['summaryTemplate', current.summaryTemplate, MAX_DRUPAL_SUMMARY_LENGTH],
         ['containerSelector', current.containerSelector, MAX_DRUPAL_SELECTOR_LENGTH],
         ['itemSelector', current.itemSelector, MAX_DRUPAL_SELECTOR_LENGTH],
+        [
+          'attachmentListSelector',
+          current.attachmentListSelector,
+          MAX_DRUPAL_SELECTOR_LENGTH,
+        ],
       ] as const
     ).forEach(([key, value, limit]) => {
       if (value !== null && value.length > limit) malformed.push(key);
@@ -297,18 +306,33 @@ const drupalHttpSetup = () => {
     }
 
     // 2. Advertencia topologica del propio DTO: el motor LIBERA los bytes de
-    //    los adjuntos en cuanto cualquier nodo publica texto aprovechable, asi
-    //    que un parser por delante deja el inventario con `contentBase64` a
-    //    `null`. No se puede afirmar que falle —depende de que publique el
-    //    parser en ejecucion—, de modo que avisa en vez de bloquear.
+    //    los adjuntos en cuanto un nodo publica texto de PROCEDENCIA DOCUMENTAL
+    //    (`extracted_documents_text`, `extracted_text`), de modo que un parser
+    //    que extraiga el contenido de los PDF deja el inventario con
+    //    `contentBase64` a `null`. El cuerpo del correo ya no cuenta. No se
+    //    puede afirmar que falle —depende de la config del parser en
+    //    ejecucion—, de modo que avisa en vez de bloquear.
+    //
+    //    Cubre las dos formas de subir: el modo dedicado, que va ANTES del
+    //    parser, y el APPEND que sube de paso, que es terminal y por tanto solo
+    //    funciona si ese parser lleva `skipDocumentExtraction` encendido.
+    const subeAdjunto =
+      config.value.operationMode === DrupalOperationMode.UPLOAD_ATTACHMENT ||
+      (config.value.operationMode === DrupalOperationMode.APPEND_HTML_BLOCK &&
+        config.value.uploadAttachment);
+
     if (
-      config.value.operationMode === DrupalOperationMode.UPLOAD_ATTACHMENT &&
+      subeAdjunto &&
       availableUpstreamContext.value.some(({ nodeType }) => nodeType === NodeType.PARSER_PRE_IA)
     ) {
       warnings.push(
-        'Hay un PARSER_PRE_IA antes de este paso: el motor libera los bytes de los adjuntos en ' +
-          'cuanto un nodo publica texto, y la subida fallara con ERR_DRUPAL_MISSING_PAYLOAD. ' +
-          'Coloca la subida ANTES del parser.',
+        config.value.operationMode === DrupalOperationMode.UPLOAD_ATTACHMENT
+          ? 'Hay un PARSER_PRE_IA antes de este paso: si extrae el texto de los adjuntos, el ' +
+            'motor libera sus bytes y la subida fallara con ERR_DRUPAL_MISSING_PAYLOAD. ' +
+            'Coloca la subida ANTES del parser.'
+          : 'Hay un PARSER_PRE_IA antes de este paso. Como este nodo cierra el flujo, la subida ' +
+            'solo encontrara el binario si ese parser tiene "skipDocumentExtraction" activado; ' +
+            'si no, el bloque se publicara sin enlace al fichero.',
       );
     }
 
@@ -425,6 +449,11 @@ const drupalHttpSetup = () => {
     );
     putDefaulted('attachmentField', current.attachmentField, DEFAULT_DRUPAL_ATTACHMENT_FIELD);
     putDefaulted('fileFieldName', current.fileFieldName, DEFAULT_DRUPAL_FILE_FIELD_NAME);
+    putDefaulted(
+      'attachmentListSelector',
+      current.attachmentListSelector,
+      DEFAULT_DRUPAL_ATTACHMENT_LIST_SELECTOR,
+    );
 
     putNullable('titleTemplate', current.titleTemplate);
     putNullable('summaryTemplate', current.summaryTemplate);
@@ -439,6 +468,13 @@ const drupalHttpSetup = () => {
 
     if (current.attachmentIndex !== DEFAULT_DRUPAL_ATTACHMENT_INDEX) {
       params.attachmentIndex = current.attachmentIndex;
+    }
+
+    // Simetrico a `publishStatus`: solo viaja cuando se aparta del defecto. Y
+    // aqui el defecto es `false`, porque subir un fichero es un efecto externo
+    // y esos no se encienden por omision.
+    if (current.uploadAttachment !== DEFAULT_DRUPAL_UPLOAD_ATTACHMENT) {
+      params.uploadAttachment = current.uploadAttachment;
     }
 
     // `publishStatus` se publica solo cuando es `false`, que es la decision
@@ -491,6 +527,9 @@ const drupalHttpSetup = () => {
         MAX_DRUPAL_ATTACHMENT_INDEX,
       ),
       fileFieldName: asText(params.fileFieldName).trim() || DEFAULT_DRUPAL_FILE_FIELD_NAME,
+      uploadAttachment: asBoolean(params.uploadAttachment, DEFAULT_DRUPAL_UPLOAD_ATTACHMENT),
+      attachmentListSelector:
+        asText(params.attachmentListSelector).trim() || DEFAULT_DRUPAL_ATTACHMENT_LIST_SELECTOR,
     };
   };
 

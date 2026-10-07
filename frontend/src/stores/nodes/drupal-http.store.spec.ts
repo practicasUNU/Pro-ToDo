@@ -8,6 +8,7 @@ import {
   DEFAULT_DRUPAL_BODY_FIELD,
   DEFAULT_DRUPAL_BODY_FORMAT,
   DEFAULT_DRUPAL_BUNDLE,
+  DEFAULT_DRUPAL_ATTACHMENT_LIST_SELECTOR,
   DEFAULT_DRUPAL_FILE_FIELD_NAME,
   DEFAULT_DRUPAL_SOURCE_FIELD,
   DEFAULT_DRUPAL_SOURCE_NAMESPACE,
@@ -84,6 +85,8 @@ describe('useDrupalHttpStore · configuracion del nodo DESTINO_DRUPAL', () => {
         attachmentField: DEFAULT_DRUPAL_ATTACHMENT_FIELD,
         attachmentIndex: 0,
         fileFieldName: DEFAULT_DRUPAL_FILE_FIELD_NAME,
+        uploadAttachment: false,
+        attachmentListSelector: DEFAULT_DRUPAL_ATTACHMENT_LIST_SELECTOR,
       });
     });
 
@@ -403,6 +406,51 @@ describe('useDrupalHttpStore · configuracion del nodo DESTINO_DRUPAL', () => {
       expect(store.configWarnings.some((warning) => warning.includes('PARSER_PRE_IA'))).toBe(true);
       expect(store.isConfigValid).toBe(true);
     });
+
+    it('5.5 deberia avisar del parser tambien en un APPEND que sube el adjunto', () => {
+      // 1. Arrange 📐: la regla 11 obliga a que el destino cierre el flujo, asi
+      //    que la subida no puede ir en un nodo propio por delante del parser.
+      //    Cabe en el APPEND, pero entonces depende de `skipDocumentExtraction`.
+      const store = useDrupalHttpStore(nextNodeId());
+
+      // 2. Act ⚙️
+      store.updateConfig({
+        operationMode: DrupalOperationMode.APPEND_HTML_BLOCK,
+        targetNodeUuid: SOURCE_UUID,
+        uploadAttachment: true,
+      });
+      store.setAvailableUpstreamContext([
+        { namespace: 'raw_email', nodeType: NodeType.TRIGGER_IMAP, fields: [] },
+        { namespace: 'parsed_email', nodeType: NodeType.PARSER_PRE_IA, fields: [] },
+      ]);
+
+      // 3. Assert 🎯: el texto del aviso es OTRO, porque el remedio tambien
+      //    lo es: aqui no se puede mover el nodo, hay que tocar el parser.
+      expect(
+        store.configWarnings.some((warning) => warning.includes('skipDocumentExtraction')),
+      ).toBe(true);
+      expect(store.isConfigValid).toBe(true);
+    });
+
+    it('5.6 NO deberia avisar del parser si el APPEND no sube nada', () => {
+      // 1. Arrange 📐: sin subida, los bytes del adjunto dan igual. Avisar
+      //    aqui seria ruido en el caso mas comun del nodo.
+      const store = useDrupalHttpStore(nextNodeId());
+
+      // 2. Act ⚙️
+      store.updateConfig({
+        operationMode: DrupalOperationMode.APPEND_HTML_BLOCK,
+        targetNodeUuid: SOURCE_UUID,
+      });
+      store.setAvailableUpstreamContext([
+        { namespace: 'parsed_email', nodeType: NodeType.PARSER_PRE_IA, fields: [] },
+      ]);
+
+      // 3. Assert 🎯
+      expect(store.configWarnings.some((warning) => warning.includes('PARSER_PRE_IA'))).toBe(
+        false,
+      );
+    });
   });
 
   describe('6. Presets de destinos operativos', () => {
@@ -556,6 +604,29 @@ describe('useDrupalHttpStore · configuracion del nodo DESTINO_DRUPAL', () => {
 
       store.updateConfig({ publishStatus: false });
       expect(store.toNodeParams().publishStatus).toBe(false);
+    });
+
+    it('7.3bis deberia publicar uploadAttachment solo cuando se enciende', () => {
+      // 1. Arrange 📐: simetrico a `publishStatus` y por un motivo mas
+      //    fuerte: subir un fichero escribe en Drupal, y un efecto externo no
+      //    puede quedar encendido por un defecto que nadie eligio.
+      const store = useDrupalHttpStore(nextNodeId());
+      store.updateConfig({
+        operationMode: DrupalOperationMode.APPEND_HTML_BLOCK,
+        targetNodeUuid: SOURCE_UUID,
+      });
+
+      // 2. Act ⚙️ & 3. Assert 🎯
+      expect(store.toNodeParams()).not.toHaveProperty('uploadAttachment');
+
+      store.updateConfig({ uploadAttachment: true });
+      expect(store.toNodeParams().uploadAttachment).toBe(true);
+
+      // El selector solo viaja si se aparta del que ya repone el backend.
+      expect(store.toNodeParams()).not.toHaveProperty('attachmentListSelector');
+
+      store.updateConfig({ attachmentListSelector: 'ul.otros-anexos' });
+      expect(store.toNodeParams().attachmentListSelector).toBe('ul.otros-anexos');
     });
 
     it('7.4 NO deberia publicar ninguna clave ajena al DTO', () => {

@@ -88,6 +88,17 @@ export const MAX_DRUPAL_ATTACHMENT_INDEX = 50;
 /** Campo de fichero del nodo anfitrion al que se adjunta el binario. */
 export const DEFAULT_DRUPAL_FILE_FIELD_NAME = 'field_adjuntos';
 
+/**
+ * Interruptor de la subida dentro de `APPEND_HTML_BLOCK`.
+ *
+ * Apagado por defecto: subir un fichero es un efecto externo, y esos no se
+ * encienden por omision.
+ */
+export const DEFAULT_DRUPAL_UPLOAD_ATTACHMENT = false;
+
+/** Lista del bloque que recibe el enlace al fichero subido. */
+export const DEFAULT_DRUPAL_ATTACHMENT_LIST_SELECTOR = 'ul.licitacion-pliegos';
+
 /** Tope del titulo: es el limite de `node.title` en Drupal estandar. */
 export const MAX_DRUPAL_TITLE_LENGTH = 255;
 
@@ -282,4 +293,16 @@ export interface DrupalHttpNodeConfig {
   attachmentField: string;
   attachmentIndex: number;
   fileFieldName: string;
+
+  /**
+   * Sube el adjunto y lo enlaza dentro del bloque, en `APPEND_HTML_BLOCK`.
+   *
+   * Apagado por defecto: los cuatro params de adjunto ya traen valor, asi que
+   * sin esta bandera cualquier APPEND sobre un correo con adjuntos empezaria a
+   * escribir ficheros en Drupal sin que nadie lo hubiera pedido.
+   */
+  uploadAttachment: boolean;
+
+  /** Lista, DENTRO del bloque insertado, que recibe el enlace al fichero. */
+  attachmentListSelector: string;
 }

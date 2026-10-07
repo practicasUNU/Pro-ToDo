@@ -174,6 +174,43 @@ describe('DrupalHttpConfig · configurador del nodo DESTINO_DRUPAL', () => {
       expect(wrapper.find('[data-test="title-template-field"]').exists()).toBe(false);
     });
 
+    it('2.2bis deberia revelar la lista de pliegos solo al encender la subida', async () => {
+      // 1. Arrange 📐: el selector solo significa algo si hay fichero que
+      //    colgar de el. Mostrarlo siempre invitaria a configurarlo en modos que
+      //    ni lo leen.
+      const nodeId = nextNodeId();
+      const wrapper = mountComponent(nodeId);
+      const store = useDrupalHttpStore(nodeId);
+
+      // 2. Act ⚙️
+      store.updateConfig({ operationMode: DrupalOperationMode.APPEND_HTML_BLOCK });
+      await wrapper.vm.$nextTick();
+
+      // 3. Assert 🎯: la casilla esta, el selector todavia no.
+      expect(wrapper.find('[data-test="upload-attachment-field"]').exists()).toBe(true);
+      expect(wrapper.find('[data-test="attachment-list-selector-field"]').exists()).toBe(false);
+
+      store.updateConfig({ uploadAttachment: true });
+      await wrapper.vm.$nextTick();
+
+      expect(wrapper.find('[data-test="attachment-list-selector-field"]').exists()).toBe(true);
+    });
+
+    it('2.2ter NO deberia ofrecer la subida en los modos que no insertan bloque', async () => {
+      // 1. Arrange 📐: CREATE_NODE crea una entidad, no aumenta una pagina.
+      const nodeId = nextNodeId();
+      const wrapper = mountComponent(nodeId);
+
+      // 2. Act ⚙️
+      useDrupalHttpStore(nodeId).updateConfig({
+        operationMode: DrupalOperationMode.CREATE_NODE,
+      });
+      await wrapper.vm.$nextTick();
+
+      // 3. Assert 🎯
+      expect(wrapper.find('[data-test="upload-attachment-field"]').exists()).toBe(false);
+    });
+
     it('2.3 deberia pedir los dos identificadores y el selector en TRANSFER_HTML_BLOCK', async () => {
       // 1. Arrange 📐
       const nodeId = nextNodeId();

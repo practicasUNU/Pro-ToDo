@@ -98,8 +98,9 @@ const buildContext = (
 const entityResponse = (
   attributes: Record<string, unknown> = {},
   id = PAGE_UUID,
+  relationships: Record<string, unknown> = {},
 ): { data: unknown; status: number } => ({
-  data: { data: { id, attributes } },
+  data: { data: { id, attributes, relationships } },
   status: 200,
 });
 
@@ -108,6 +109,9 @@ const pageResponse = (
   html: string,
   id = PAGE_UUID,
   nid = 55_937,
+  // Por defecto el bundle declara el campo de fichero canonico: asi las
+  // pruebas que no van de adjuntos no tienen que saber que esto existe.
+  relationships: Record<string, unknown> = { field_adjuntos: { data: null } },
 ): { data: unknown; status: number } =>
   entityResponse(
     {
@@ -117,6 +121,7 @@ const pageResponse = (
       changed: '2026-10-05T10:00:00+00:00',
     },
     id,
+    relationships,
   );
 
 /** Fallo del cliente HTTP con el estado indicado. */
@@ -486,6 +491,269 @@ describe('DrupalHttpStrategy', () => {
       expect(result.error?.level).toBe('GRAVE');
       // No se llego a escribir: solo hubo el GET.
       expect(httpClient.requestWithStatus).toHaveBeenCalledTimes(1);
+    });
+
+    /**
+     * Subida del adjunto consolidada en este mismo modo.
+     *
+     * Va aqui y no en un nodo propio porque la regla 11 del validador exige que
+     * todo DESTINO cierre el flujo (`nextStep === null`): un UPLOAD_ATTACHMENT
+     * intermedio no se puede ni guardar. El orden de peticiones pasa a ser
+     * GET -> POST -> PATCH, y el GET va primero porque de sus `relationships`
+     * sale el campo de fichero al que se sube.
+     */
+    const PLIEGO_BLOCK =
+      '<div class="licitacion-entry"><ul class="licitacion-pliegos"></ul></div>';
+    const ATTACHMENT_BASE64 = 'UERGLWRlLXBydWViYQ==';
+    const FILE_URL = '/sites/default/files/2026-10/pliego.pdf';
+    const FILE_UUID = '0d1a6a52-6a0f-4f1e-9a1a-6b6f0f3f1a21';
+
+    const uploadAppendParams = { ...appendParams, uploadAttachment: true };
+
+    const attachmentContext = (
+      contentBase64: unknown = ATTACHMENT_BASE64,
+      markup: string = PLIEGO_BLOCK,
+    ): StatePayloadContext =>
+      buildContext({
+        [SOURCE_NAMESPACE]: { [SOURCE_FIELD]: markup },
+        raw_email: {
+          attachments: [
+            {
+              filename: 'pliego.pdf',
+              contentType: 'application/pdf',
+              size: 12,
+              contentBase64,
+            },
+          ],
+        },
+      });
+
+    /** Respuesta del endpoint de campo de fichero de JSON:API. */
+    const fileResponse = (): { data: unknown; status: number } =>
+      entityResponse({ uri: { url: FILE_URL } }, FILE_UUID);
+
+    /** HTML que acaba viajando en el PATCH. */
+    const patchedHtml = (httpClient: HttpMock, index: number): string =>
+      (
+        (
+          callBody(httpClient, index).data?.attributes as Record<
+            string,
+            unknown
+          >
+        ).body as Record<string, string>
+      ).value;
+
+    it('2.7 deberia subir el adjunto y colgar su enlace de la lista de pliegos', async () => {
+      // 1. Arrange 📐: el caso que motiva todo. El PDF llega como adjunto del
+      //    correo, no como una URL que la IA pudiera haber leido del cuerpo.
+      const httpClient = buildHttpMock();
+      httpClient.requestWithStatus
+        .mockResolvedValueOnce(pageResponse(''))
+        .mockResolvedValueOnce(fileResponse())
+        .mockResolvedValueOnce(pageResponse(''));
+      const strategy = buildStrategy(httpClient);
+
+      // 2. Act ⚙️
+      const result = await strategy.execute(
+        attachmentContext(),
+        uploadAppendParams,
+      );
+
+      // 3. Assert 🎯
+      expect(result.success).toBe(true);
+      expect(patchedHtml(httpClient, 2)).toContain(
+        `<a class="pliego-link" href="${FILE_URL}" target="_blank">pliego.pdf</a>`,
+      );
+      // La URL se publica para que la trazabilidad la pueda auditar.
+      expect(result.data?.attachment_url).toBe(FILE_URL);
+    });
+
+    it('2.8 deberia enviar el binario con las cabeceras del endpoint de fichero', async () => {
+      // 1. Arrange 📐: este endpoint NO habla JSON:API, recibe bytes crudos.
+      const httpClient = buildHttpMock();
+      httpClient.requestWithStatus
+        .mockResolvedValueOnce(pageResponse(''))
+        .mockResolvedValueOnce(fileResponse())
+        .mockResolvedValueOnce(pageResponse(''));
+      const strategy = buildStrategy(httpClient);
+
+      // 2. Act ⚙️
+      await strategy.execute(attachmentContext(), uploadAppendParams);
+
+      // 3. Assert 🎯
+      const upload = callConfig(httpClient, 1);
+
+      expect(upload.method).toBe('POST');
+      expect(upload.url).toBe(
+        `${BASE_URL}/node/page/${PAGE_UUID}/field_adjuntos`,
+      );
+      expect(upload.headers).toMatchObject({
+        'Content-Type': 'application/octet-stream',
+        'Content-Disposition': 'file; filename="pliego.pdf"',
+        Authorization: BASIC_AUTH_HEADER,
+      });
+      expect(Buffer.isBuffer(upload.data)).toBe(true);
+    });
+
+    it('2.9 deberia CONVIVIR con los pliegos que ya puso la IA', async () => {
+      // 1. Arrange 📐: la plantilla sembrada deja la lista vacia porque es la IA
+      //    quien genera un <li> por cada pliego citado en el correo. Reemplazar
+      //    ahi dentro borraria ese trabajo; el adjunto es un pliego mas.
+      const httpClient = buildHttpMock();
+      httpClient.requestWithStatus
+        .mockResolvedValueOnce(pageResponse(''))
+        .mockResolvedValueOnce(fileResponse())
+        .mockResolvedValueOnce(pageResponse(''));
+      const strategy = buildStrategy(httpClient);
+      const previo =
+        '<li><a class="pliego-link" href="https://ejemplo.es/otro.pdf">otro.pdf</a></li>';
+
+      // 2. Act ⚙️
+      await strategy.execute(
+        attachmentContext(
+          ATTACHMENT_BASE64,
+          `<div class="licitacion-entry"><ul class="licitacion-pliegos">${previo}</ul></div>`,
+        ),
+        uploadAppendParams,
+      );
+
+      // 3. Assert 🎯
+      const sent = patchedHtml(httpClient, 2);
+
+      expect(sent).toContain('otro.pdf');
+      expect(sent).toContain(FILE_URL);
+    });
+
+    it('2.10 NO deberia subir nada si no se pidio la subida', async () => {
+      // 1. Arrange 📐: el efecto externo no se enciende por omision, aunque el
+      //    correo traiga adjuntos y los params por defecto apunten a ellos.
+      const httpClient = buildHttpMock();
+      httpClient.requestWithStatus
+        .mockResolvedValueOnce(pageResponse(''))
+        .mockResolvedValueOnce(pageResponse(''));
+      const strategy = buildStrategy(httpClient);
+
+      // 2. Act ⚙️
+      const result = await strategy.execute(attachmentContext(), appendParams);
+
+      // 3. Assert 🎯: solo GET y PATCH.
+      expect(httpClient.requestWithStatus).toHaveBeenCalledTimes(2);
+      expect(result.data?.attachment_url).toBe('');
+    });
+
+    it('2.11 deberia publicar igual si el motor ya libero el binario', async () => {
+      // 1. Arrange 📐: `contentBase64` a null es lo que deja un PARSER_PRE_IA
+      //    que extrajo el texto del PDF. Pausar el flujo por eso dejaria la
+      //    licitacion sin publicar, que es peor que publicarla sin el enlace.
+      const httpClient = buildHttpMock();
+      httpClient.requestWithStatus
+        .mockResolvedValueOnce(pageResponse(''))
+        .mockResolvedValueOnce(pageResponse(''));
+      const strategy = buildStrategy(httpClient);
+
+      // 2. Act ⚙️
+      const result = await strategy.execute(
+        attachmentContext(null),
+        uploadAppendParams,
+      );
+
+      // 3. Assert 🎯
+      expect(result.success).toBe(true);
+      expect(httpClient.requestWithStatus).toHaveBeenCalledTimes(2);
+      expect(result.data?.attachment_url).toBe('');
+      expect(patchedHtml(httpClient, 1)).toContain('licitacion-entry');
+    });
+
+    it('2.12 deberia publicar aunque el bloque no traiga lista de pliegos', async () => {
+      // 1. Arrange 📐: el fichero queda subido pero sin enlace. Se avisa y se
+      //    sigue: el bloque tiene valor por si solo.
+      const httpClient = buildHttpMock();
+      httpClient.requestWithStatus
+        .mockResolvedValueOnce(pageResponse(''))
+        .mockResolvedValueOnce(fileResponse())
+        .mockResolvedValueOnce(pageResponse(''));
+      const strategy = buildStrategy(httpClient);
+
+      // 2. Act ⚙️
+      const result = await strategy.execute(
+        attachmentContext(ATTACHMENT_BASE64, '<div class="sin-lista"></div>'),
+        uploadAppendParams,
+      );
+
+      // 3. Assert 🎯
+      expect(result.success).toBe(true);
+      expect(patchedHtml(httpClient, 2)).toContain('sin-lista');
+      expect(patchedHtml(httpClient, 2)).not.toContain('pliego-link');
+    });
+
+    it('2.13 deberia publicar el texto aunque la subida devuelva un fallo HTTP', async () => {
+      // 1. Arrange 📐: el coste asumido de la degradacion. Un 403 NO pausa la
+      //    ejecucion; queda en el warn y en un attachment_url vacio.
+      const httpClient = buildHttpMock();
+      httpClient.requestWithStatus
+        .mockResolvedValueOnce(pageResponse(''))
+        .mockResolvedValueOnce(httpFailure(403))
+        .mockResolvedValueOnce(pageResponse(''));
+      const strategy = buildStrategy(httpClient);
+
+      // 2. Act ⚙️
+      const result = await strategy.execute(
+        attachmentContext(),
+        uploadAppendParams,
+      );
+
+      // 3. Assert 🎯
+      expect(result.success).toBe(true);
+      expect(result.data?.attachment_url).toBe('');
+      expect(patchedHtml(httpClient, 2)).not.toContain('pliego-link');
+    });
+
+    it('2.14 deberia autodescubrir el campo de fichero que si declara el bundle', async () => {
+      // 1. Arrange 📐: el bundle no tiene `field_adjuntos` sino `field_archivos`.
+      //    Sin esto, el POST saldria contra un campo inexistente y volveria 404.
+      const httpClient = buildHttpMock();
+      httpClient.requestWithStatus
+        .mockResolvedValueOnce(
+          pageResponse('', PAGE_UUID, 55_937, {
+            field_archivos: { data: null },
+          }),
+        )
+        .mockResolvedValueOnce(fileResponse())
+        .mockResolvedValueOnce(pageResponse(''));
+      const strategy = buildStrategy(httpClient);
+
+      // 2. Act ⚙️
+      const result = await strategy.execute(
+        attachmentContext(),
+        uploadAppendParams,
+      );
+
+      // 3. Assert 🎯
+      expect(callConfig(httpClient, 1).url).toBe(
+        `${BASE_URL}/node/page/${PAGE_UUID}/field_archivos`,
+      );
+      expect(result.data?.attachment_url).toBe(FILE_URL);
+    });
+
+    it('2.15 NO deberia intentar la subida si el bundle no declara ficheros', async () => {
+      // 1. Arrange 📐: clausula de guarda. La peticion condenada se descarta
+      //    antes de tocar la red, no despues de que Drupal la rechace.
+      const httpClient = buildHttpMock();
+      httpClient.requestWithStatus
+        .mockResolvedValueOnce(pageResponse('', PAGE_UUID, 55_937, {}))
+        .mockResolvedValueOnce(pageResponse(''));
+      const strategy = buildStrategy(httpClient);
+
+      // 2. Act ⚙️
+      const result = await strategy.execute(
+        attachmentContext(),
+        uploadAppendParams,
+      );
+
+      // 3. Assert 🎯: solo GET y PATCH.
+      expect(result.success).toBe(true);
+      expect(httpClient.requestWithStatus).toHaveBeenCalledTimes(2);
+      expect(result.data?.attachment_url).toBe('');
     });
   });
 
@@ -890,7 +1158,7 @@ describe('DrupalHttpStrategy', () => {
       ]);
     });
 
-    it('5.8 deberia conservar las SEIS claves de salida tambien al fallar', async () => {
+    it('5.8 deberia conservar las SIETE claves de salida tambien al fallar', async () => {
       // 1. Arrange 📐: es la regresion que vigila esta prueba. El reparto de
       //    codigos vive ahora en `BaseHttpDestinationStrategy`, compartido con
       //    el futuro destino de Acens, pero el `data` NO: cada nodo tiene su
@@ -910,6 +1178,7 @@ describe('DrupalHttpStrategy', () => {
       // 3. Assert 🎯
       expect(result.success).toBe(false);
       expect(Object.keys(result.data ?? {}).sort()).toEqual([
+        'attachment_url',
         'drupal_internal__nid',
         'http_status',
         'node_id',
@@ -1016,7 +1285,7 @@ describe('DrupalHttpStrategy', () => {
   });
 
   describe('7. Inventario de salida (outputFields)', () => {
-    it('7.1 deberia declarar las seis claves del namespace', () => {
+    it('7.1 deberia declarar las siete claves del namespace', () => {
       const strategy = buildStrategy(buildHttpMock());
 
       expect(strategy.outputFields.map((field) => field.name)).toEqual([
@@ -1026,6 +1295,7 @@ describe('DrupalHttpStrategy', () => {
         'operation_applied',
         'http_status',
         'published_at',
+        'attachment_url',
       ]);
     });
 
@@ -1046,7 +1316,7 @@ describe('DrupalHttpStrategy', () => {
       );
     };
 
-    it('7.2 deberia emitir las seis claves en CREATE_NODE', async () => {
+    it('7.2 deberia emitir las siete claves en CREATE_NODE', async () => {
       const httpClient = buildHttpMock();
       httpClient.requestWithStatus.mockResolvedValue(entityResponse());
       const strategy = buildStrategy(httpClient);
@@ -1058,7 +1328,7 @@ describe('DrupalHttpStrategy', () => {
       expectParity(strategy, result.data);
     });
 
-    it('7.3 deberia emitir las seis claves en APPEND_HTML_BLOCK', async () => {
+    it('7.3 deberia emitir las siete claves en APPEND_HTML_BLOCK', async () => {
       const httpClient = buildHttpMock();
       httpClient.requestWithStatus
         .mockResolvedValueOnce(pageResponse(''))
@@ -1074,7 +1344,7 @@ describe('DrupalHttpStrategy', () => {
       expectParity(strategy, result.data);
     });
 
-    it('7.4 deberia emitir las seis claves en TRANSFER_HTML_BLOCK', async () => {
+    it('7.4 deberia emitir las siete claves en TRANSFER_HTML_BLOCK', async () => {
       const httpClient = buildHttpMock();
       httpClient.requestWithStatus
         .mockResolvedValueOnce(pageResponse(BLOCK, PAGE_UUID))
@@ -1094,7 +1364,7 @@ describe('DrupalHttpStrategy', () => {
       expectParity(strategy, result.data);
     });
 
-    it('7.5 deberia emitir las seis claves en UPLOAD_ATTACHMENT', async () => {
+    it('7.5 deberia emitir las siete claves en UPLOAD_ATTACHMENT', async () => {
       const httpClient = buildHttpMock();
       httpClient.requestWithStatus.mockResolvedValue(entityResponse());
       const strategy = buildStrategy(httpClient);
