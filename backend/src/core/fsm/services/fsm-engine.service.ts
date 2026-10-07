@@ -176,27 +176,31 @@ const ATTACHMENTS_KEY = 'attachments';
 const BINARY_CONTENT_KEY = 'contentBase64';
 
 /**
- * Claves con las que un nodo declara haber extraido texto aprovechable.
+ * Claves con las que un nodo declara haber extraido texto DE LOS ADJUNTOS.
  *
- * Son el disparador de la liberacion de memoria: mientras ningun nodo haya
- * sacado texto, el binario sigue siendo la UNICA fuente de datos del correo
- * —un PDF escaneado, un `multipart/alternative` sin parte de texto— y tirarlo
- * dejaria al flujo sin nada que procesar. En cuanto alguien produce texto, el
- * binario pasa a ser peso muerto.
+ * Son el disparador de la liberacion de memoria: mientras nadie haya sacado el
+ * texto de un adjunto, su binario sigue siendo la UNICA fuente de ese dato —un
+ * PDF escaneado, un pliego que nunca se decodifico— y tirarlo lo destruye sin
+ * vuelta atras. En cuanto alguien lo extrae, el binario pasa a ser peso muerto.
+ *
+ * POR QUE `clean_body` Y `text` YA NO ESTAN AQUI. Las dos son el cuerpo del
+ * CORREO, no de sus adjuntos, y la diferencia resulto ser la regla entera:
+ * `PARSER_PRE_IA` publica en el MISMO payload un `clean_body` largo y, con
+ * `skipDocumentExtraction` encendido, un `extracted_documents_text` vacio. El
+ * cuerpo superaba el listado, `hasUsefulText` daba `true` y la purga se llevaba
+ * por delante unos adjuntos de los que no se habia leido ni un byte. Que el
+ * correo venga redactado no acredita nada sobre lo que cuelga de el.
  *
  * `extracted_documents_text` es el texto NATIVO que `PARSER_PRE_IA` saca de los
- * adjuntos legibles (.pdf, .docx, .xlsx, .csv, .txt). Sin ella en esta lista, el
- * caso que mas pesa —el correo de cuerpo vacio cuyo contenido entero viaja en un
- * PDF— dejaba `clean_body` vacio, `hasUsefulText` daba `false` y los megabytes
- * se quedaban en `contexto_acumulado` para siempre, aun habiendose extraido ya
- * todo su texto.
+ * adjuntos legibles (.pdf, .docx, .xlsx, .csv, .txt). `extracted_text` es la
+ * misma afirmacion hecha por cualquier otro extractor: hoy la declara el
+ * `PROCESADOR_OCR` junto a su `clean_body`, precisamente porque ese `clean_body`
+ * suyo es indistinguible por nombre del que escribe el parser.
  *
  * La lista es ESTRUCTURAL, por nombre de clave: es lo que permite al motor
  * decidir sin importar ni una interfaz de `@modules`.
  */
 const EXTRACTED_TEXT_KEYS = [
-  'clean_body',
-  'text',
   'extracted_text',
   'extracted_documents_text',
 ] as const;

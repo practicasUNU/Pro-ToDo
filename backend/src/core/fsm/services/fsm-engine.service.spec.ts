@@ -2150,9 +2150,11 @@ describe('FsmEngineService (PROT-09)', () => {
       >[];
     };
 
-    it('12.1 deberia liberar el base64 en cuanto el propio nodo IMAP trae texto', async () => {
-      // 1. Arrange: el correo trae cuerpo textual, asi que su adjunto deja de
-      //    ser la unica fuente de datos en el MISMO paso que lo ingirio.
+    it('12.1 NO deberia liberar el base64 porque el correo traiga cuerpo', async () => {
+      // 1. Arrange: el correo trae cuerpo textual, pero NADIE ha abierto su
+      //    adjunto. Que el cuerpo venga redactado no dice nada sobre lo que
+      //    cuelga de el, y hasta el recalibrado esto purgaba un PDF del que no
+      //    se habia leido un solo byte.
       const execution = buildExecution();
       const { repo, update } = buildRepository(execution);
 
@@ -2182,19 +2184,21 @@ describe('FsmEngineService (PROT-09)', () => {
         buildEmailSchema(),
       );
 
-      // 3. Assert: binario liberado y metadatos intactos.
+      // 3. Assert: el adjunto llega entero al final, metadatos incluidos.
       expect(attachmentsIn(result.contextPayload)).toEqual([
         {
           filename: 'escaneo.pdf',
           contentType: 'application/pdf',
           size: 1024,
-          contentBase64: null,
+          contentBase64: BASE64,
         },
       ]);
-      // Y, sobre todo: NINGUN checkpoint llego a escribir el base64 en jsonb.
-      for (const payload of checkpointsOf(update)) {
-        expect(JSON.stringify(payload)).not.toContain(BASE64);
-      }
+      // Y el binario sigue en el checkpoint: es la UNICA copia que queda.
+      expect(
+        checkpointsOf(update).some((payload) =>
+          JSON.stringify(payload).includes(BASE64),
+        ),
+      ).toBe(true);
     });
 
     it('12.2 deberia conservar el binario hasta que algun nodo extraiga texto', async () => {
@@ -2218,7 +2222,7 @@ describe('FsmEngineService (PROT-09)', () => {
           jest.fn().mockResolvedValue({
             success: true,
             data: {
-              clean_body:
+              extracted_documents_text:
                 'Texto extraido por el modelo multimodal a partir del PDF escaneado.',
             },
           }),
@@ -2359,7 +2363,10 @@ describe('FsmEngineService (PROT-09)', () => {
           NodeType.TRIGGER_IMAP,
           jest.fn().mockResolvedValue({
             success: true,
-            data: { text: '   \n  ', attachments: [buildAttachment()] },
+            data: {
+              extracted_documents_text: '   \n  ',
+              attachments: [buildAttachment()],
+            },
           }),
         ),
       );
@@ -2392,7 +2399,7 @@ describe('FsmEngineService (PROT-09)', () => {
           NodeType.TRIGGER_IMAP,
           jest.fn().mockResolvedValue({
             success: true,
-            data: { text: 'Texto sin adjuntos.' },
+            data: { extracted_documents_text: 'Texto sin adjuntos.' },
           }),
         ),
       );
@@ -2512,7 +2519,7 @@ describe('FsmEngineService (PROT-09)', () => {
           jest.fn().mockResolvedValue({
             success: true,
             data: {
-              clean_body:
+              extracted_documents_text:
                 'Texto suficiente para superar el listado del motor sin problema.',
               requires_multimodal_fallback: true,
             },
@@ -2553,7 +2560,7 @@ describe('FsmEngineService (PROT-09)', () => {
           jest.fn().mockResolvedValue({
             success: true,
             data: {
-              clean_body:
+              extracted_documents_text:
                 'Texto suficiente para superar el listado del motor sin problema.',
               requires_multimodal_fallback: false,
             },
@@ -2593,7 +2600,7 @@ describe('FsmEngineService (PROT-09)', () => {
           jest.fn().mockResolvedValue({
             success: true,
             data: {
-              clean_body:
+              extracted_documents_text:
                 'Texto suficiente para superar el listado del motor sin problema.',
               requires_multimodal_fallback: 'true',
             },
@@ -2624,7 +2631,10 @@ describe('FsmEngineService (PROT-09)', () => {
           NodeType.TRIGGER_IMAP,
           jest.fn().mockResolvedValue({
             success: true,
-            data: { text: 'Ver adjunto.', attachments: [buildAttachment()] },
+            data: {
+              extracted_documents_text: 'Ver adjunto.',
+              attachments: [buildAttachment()],
+            },
           }),
         ),
       );
@@ -2658,7 +2668,10 @@ describe('FsmEngineService (PROT-09)', () => {
           NodeType.TRIGGER_IMAP,
           jest.fn().mockResolvedValue({
             success: true,
-            data: { text: 'Ver adjunto.', attachments: [buildAttachment()] },
+            data: {
+              extracted_documents_text: 'Ver adjunto.',
+              attachments: [buildAttachment()],
+            },
           }),
         ),
       );
@@ -2674,6 +2687,96 @@ describe('FsmEngineService (PROT-09)', () => {
         repo,
         new ConfigService({ FSM_MIN_USEFUL_TEXT_LENGTH: '5' }),
       ).executeWorkflow(EXECUTION_ID, buildEmailSchema());
+
+      // 3. Assert
+      expect(attachmentsIn(result.contextPayload)[0].contentBase64).toBeNull();
+    });
+
+    /**
+     * Los dos casos que fijan el incidente de la ejecucion E2E.
+     *
+     * `PARSER_PRE_IA` publica en el MISMO payload el cuerpo del correo y el
+     * texto de los adjuntos. Son dos afirmaciones distintas y solo la segunda
+     * autoriza a tirar los binarios; mientras ambas estuvieron en
+     * `EXTRACTED_TEXT_KEYS` eran indistinguibles para el motor.
+     */
+    it('12.14 NO deberia liberar el binario si extracted_documents_text llega vacio', async () => {
+      // 1. Arrange: la forma exacta que deja `skipDocumentExtraction` encendido
+      //    —cuerpo largo, extraccion documental en blanco— sobre un adjunto que
+      //    nadie ha abierto.
+      const execution = buildExecution();
+      const { repo } = buildRepository(execution);
+
+      factory.registerStrategy(
+        buildStrategy(
+          NodeType.TRIGGER_IMAP,
+          jest.fn().mockResolvedValue({
+            success: true,
+            data: { attachments: [buildAttachment()] },
+          }),
+        ),
+      );
+      factory.registerStrategy(
+        buildStrategy(
+          NodeType.PROCESADOR_IA,
+          jest.fn().mockResolvedValue({
+            success: true,
+            data: {
+              clean_body:
+                'Cuerpo del correo con texto de sobra para cualquier modelo de lenguaje.',
+              extracted_documents_text: '',
+            },
+          }),
+        ),
+      );
+
+      // 2. Act
+      const result = await buildEngine(repo).executeWorkflow(
+        EXECUTION_ID,
+        buildEmailSchema(),
+      );
+
+      // 3. Assert: el pliego sigue entero. Era la unica copia.
+      expect(attachmentsIn(result.contextPayload)[0].contentBase64).toBe(
+        BASE64,
+      );
+    });
+
+    it('12.15 deberia liberar el binario cuando extracted_documents_text trae texto', async () => {
+      // 1. Arrange: el MISMO cuerpo del caso anterior; lo unico que cambia es
+      //    que esta vez el adjunto SI se leyo.
+      const execution = buildExecution();
+      const { repo } = buildRepository(execution);
+
+      factory.registerStrategy(
+        buildStrategy(
+          NodeType.TRIGGER_IMAP,
+          jest.fn().mockResolvedValue({
+            success: true,
+            data: { attachments: [buildAttachment()] },
+          }),
+        ),
+      );
+      factory.registerStrategy(
+        buildStrategy(
+          NodeType.PROCESADOR_IA,
+          jest.fn().mockResolvedValue({
+            success: true,
+            data: {
+              clean_body:
+                'Cuerpo del correo con texto de sobra para cualquier modelo de lenguaje.',
+              extracted_documents_text:
+                'Pliego de clausulas administrativas particulares del expediente.',
+            },
+          }),
+        ),
+      );
+
+      // 2. Act
+      const result = await buildEngine(repo).executeWorkflow(
+        EXECUTION_ID,
+        buildEmailSchema(),
+      );
 
       // 3. Assert
       expect(attachmentsIn(result.contextPayload)[0].contentBase64).toBeNull();

@@ -161,6 +161,10 @@ describe('Satelite OCR · desvio, reincorporacion y purga binaria', () => {
       success: true,
       data: {
         clean_body: TRANSCRIPTION,
+        // La clave que libera los binarios. El doble la publica porque la
+        // estrategia real lo hace: `clean_body` por si solo ya no acredita que
+        // el texto saliera de un adjunto (ver `EXTRACTED_TEXT_KEYS`).
+        extracted_text: TRANSCRIPTION,
         character_count: TRANSCRIPTION.length,
         ocr_status: 'COMPLETED',
       },
@@ -236,7 +240,7 @@ describe('Satelite OCR · desvio, reincorporacion y purga binaria', () => {
     it('2.1 deberia dejar contentBase64 en null tras la transcripcion', async () => {
       // 1. Arrange 📐: la prueba que sostiene el diseno. `releaseAttachmentBinaries`
       //    es AGNOSTICO al tipo de nodo: decide por el vocabulario de claves de
-      //    salida. Como el OCR publica `clean_body` por encima del umbral de
+      //    salida. Como el OCR publica `extracted_text` por encima del umbral de
       //    texto util, la purga se dispara sola, sin que `@core` sepa que existe
       //    un PROCESADOR_OCR.
       const execution = buildExecution();
@@ -320,6 +324,7 @@ describe('Satelite OCR · desvio, reincorporacion y purga binaria', () => {
       // 3. Assert 🎯
       expect(result.contextPayload.ocr_result).toEqual({
         clean_body: TRANSCRIPTION,
+        extracted_text: TRANSCRIPTION,
         character_count: TRANSCRIPTION.length,
         ocr_status: 'COMPLETED',
       });

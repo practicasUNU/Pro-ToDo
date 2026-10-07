@@ -400,6 +400,20 @@ export class LlmExtractorStrategy implements INodeStrategy {
     // fallos anteriores frenaria mas tarde por una racha que ya se rompio.
     this.consecutiveFailures.delete(brakeKey);
 
+    const filledMarkup = this.normalizeMarkup(response.filled_markup);
+
+    // Aviso, no fallo: quien decide es el ESCUDO_POST_IA, que para eso existe.
+    // Pero sin esta linea el primer indicio de que el modelo ignoro la plantilla
+    // llega un nodo mas tarde, como un ERR_POST_IA_EMPTY_HTML que no dice nada
+    // del proveedor ni del modelo que lo provocaron. Solo se emite cuando el
+    // markup se PIDIO: sin plantilla, un `null` aqui es lo esperado.
+    if (expectsFilledMarkup && filledMarkup === null) {
+      this.logger.warn(
+        `GRAVE | ${brakeKey} | ${usedProvider} no devolvio filled_markup pese a ` +
+          'haberse suministrado una plantilla base; el escudo posterior lo rechazara.',
+      );
+    }
+
     return {
       success: true,
       data: {
@@ -411,7 +425,7 @@ export class LlmExtractorStrategy implements INodeStrategy {
         // cada consumidor a comprobar la existencia antes de interpolar. `null`
         // es ademas lo que `PostIaSanitizerStrategy` lee como
         // ERR_POST_IA_EMPTY_HTML, que es el diagnostico correcto.
-        filled_markup: this.normalizeMarkup(response.filled_markup),
+        filled_markup: filledMarkup,
         metadata: {
           ...response.metadata,
           provider: usedProvider,

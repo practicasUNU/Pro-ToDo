@@ -102,7 +102,7 @@ type OcrConfigResolution =
  *
  * NO levanta `requires_multimodal_fallback`. Esa bandera es el veto que impide
  * al motor tirar los binarios, y aqui ya se han usado: en cuanto este nodo
- * publica un `clean_body` con texto suficiente, `releaseAttachmentBinaries`
+ * publica un `extracted_text` con texto suficiente, `releaseAttachmentBinaries`
  * libera los megabytes del correo sin que este nodo tenga que pedirlo (RNF-01).
  */
 @Injectable()
@@ -117,12 +117,25 @@ export class OcrProcessorStrategy implements INodeStrategy {
    * Contrato de salida.
    *
    * `clean_body` repite deliberadamente el nombre que usa el parser: es el mismo
-   * dato —el cuerpo aprovechable del correo— obtenido por otra via, y el motor
-   * lo reconoce en `EXTRACTED_TEXT_KEYS` para decidir que los binarios sobran.
-   * Llamarlo de otra forma habria obligado a ampliar ese vocabulario en `@core`.
+   * dato —el cuerpo aprovechable del correo— obtenido por otra via, y asi lo
+   * leen aguas abajo el `PROCESADOR_IA` y quien interpole `ocr_result.clean_body`.
+   *
+   * `extracted_text` ES ESE MISMO TEXTO, repetido a proposito. Es la clave con
+   * la que el motor reconoce que el texto SALIO DE UN ADJUNTO, y hace falta
+   * justo porque `clean_body` ya no vale para eso: el parser publica uno con el
+   * cuerpo del correo sin haber tocado los adjuntos, de modo que por nombre de
+   * clave los dos casos eran indistinguibles y la purga se disparaba de mas.
+   * Duplicar el valor es el precio de que `@core` siga decidiendo por
+   * vocabulario de claves y no por tipo de nodo (ver `EXTRACTED_TEXT_KEYS`).
    */
   public readonly outputFields: readonly NodeOutputField[] = [
     { name: 'clean_body', type: 'text' },
+    {
+      name: 'extracted_text',
+      type: 'text',
+      description:
+        'La transcripcion, repetida bajo la clave que libera los binarios',
+    },
     { name: 'character_count', type: 'number' },
     { name: 'ocr_status', type: 'text' },
     {
@@ -264,6 +277,9 @@ export class OcrProcessorStrategy implements INodeStrategy {
       success: true,
       data: {
         clean_body: cleanBody,
+        // El mismo texto bajo la clave que el motor lee para liberar los
+        // binarios del correo. Ver el TSDoc de `outputFields`.
+        extracted_text: cleanBody,
         // DERIVADO y no un literal: un numero escrito a mano se convierte en
         // mentira a la primera edicion del texto.
         character_count: cleanBody.length,

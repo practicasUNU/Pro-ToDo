@@ -144,19 +144,38 @@ describe('OcrProcessorStrategy · nodo satelite PROCESADOR_OCR', () => {
       expect(strategy.nodeType).toBe(NodeType.PROCESADOR_OCR);
     });
 
-    it('1.2 deberia publicar clean_body, para que el motor libere los binarios', () => {
-      // 1. Arrange 📐: `clean_body` esta en `EXTRACTED_TEXT_KEYS` del motor.
-      //    Llamarlo de otra forma habria obligado a ampliar ese vocabulario en
-      //    `@core`, que es justo lo que ese diseno evita.
+    it('1.2 deberia publicar extracted_text, para que el motor libere los binarios', () => {
+      // 1. Arrange 📐: quien esta en `EXTRACTED_TEXT_KEYS` del motor es
+      //    `extracted_text`, no `clean_body`. El parser publica un `clean_body`
+      //    con el cuerpo del correo sin haber tocado los adjuntos, asi que esa
+      //    clave dejo de acreditar que un binario sobra. `clean_body` se
+      //    mantiene porque es lo que interpolan los nodos de aguas abajo.
       const strategy = buildStrategy();
 
       // 2. Act ⚙️ + 3. Assert 🎯
       expect(strategy.outputFields.map((field) => field.name)).toEqual([
         'clean_body',
+        'extracted_text',
         'character_count',
         'ocr_status',
         'metadata',
       ]);
+    });
+
+    it('1.3 deberia repetir la transcripcion en clean_body y extracted_text', async () => {
+      // 1. Arrange 📐: la duplicacion es deliberada y hay que fijarla. Si
+      //    alguien la deshiciera, el motor dejaria de liberar los megabytes del
+      //    correo y nada mas en esta suite lo delataria.
+      const strategy = buildStrategy();
+
+      // 2. Act ⚙️
+      const result = await strategy.execute(buildContext(), {
+        provider: LlmProvider.MOCK,
+      });
+
+      // 3. Assert 🎯
+      expect(result.data?.extracted_text).toBe(result.data?.clean_body);
+      expect(String(result.data?.extracted_text).length).toBeGreaterThan(0);
     });
   });
 
