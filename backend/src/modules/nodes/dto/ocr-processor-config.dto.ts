@@ -26,7 +26,7 @@ import { DEFAULT_GEMINI_MODEL } from '@modules/nodes/strategies/providers/gemini
  *
  * PIDE MARKDOWN GFM, y no es un capricho de formato. La version anterior pedia
  * "el texto tal como aparece" sin mas, y con un documento de texto corrido
- * bastaba; con una tabla —el caso de `PANELES_UEM_DEFAULT`, que procesa
+ * bastaba; con una tabla —el caso de `VERIFICADOR_TITULOS_DEFAULT`, que procesa
  * comisiones de acreditacion— la transcripcion llegaba como un amasijo de
  * celdas sin estructura y el nodo de IA no podia reconstruirla.
  *

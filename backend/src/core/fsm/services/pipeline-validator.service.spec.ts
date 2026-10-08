@@ -862,15 +862,18 @@ describe('PipelineValidatorService (PROT-07)', () => {
     });
 
     it('deberia aceptar un prompt que solo cita lo que el flujo si produce', async () => {
-      // 1. Arrange: el equivalente de `LICITACION_DEFAULT`, que solo pide
+      // 1. Arrange: el equivalente de `LICITACION_APERTURA_DEFAULT`, que solo pide
       //    `parsed_email` — y el parser va por delante.
       const { service } = buildServiceWithPrompt(
         new Map([
-          [`code:LICITACION_DEFAULT`, 'Extrae de {{parsed_email.clean_body}}'],
+          [
+            `code:LICITACION_APERTURA_DEFAULT`,
+            'Extrae de {{parsed_email.clean_body}}',
+          ],
         ]),
       );
       const schema = buildSchemaWithoutScraper({
-        promptCode: 'LICITACION_DEFAULT',
+        promptCode: 'LICITACION_APERTURA_DEFAULT',
       });
 
       // 2. Act

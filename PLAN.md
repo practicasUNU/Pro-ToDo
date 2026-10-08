@@ -4072,3 +4072,68 @@ un numero fijaria el presupuesto para siempre y desactivaria la subida automatic
 - [ ] Pendiente — configurador de `DESTINO_DRUPAL`, el ultimo sin triada y sin estrategia
 - [ ] Pendiente — verificacion de extremo a extremo contra la base de datos (Docker lo levanta el
       usuario; el MCP de PostgreSQL no conecta en esta sesion)
+
+---
+
+## PROT-29 · Refactor de UX Poka-Yoke, tablas CRUD y semillas de los cuatro flujos
+
+### Contratos tocados, y los que NO
+
+Ningun DTO del backend cambia de forma. Es la restriccion que mas condiciona el diseno de esta
+tanda: `ValidationPipe` corre con `forbidNonWhitelisted`, de modo que una clave nueva en los
+`params` de un nodo es un 400 al guardar el flujo, no un campo ignorado.
+
+| Pieza | Cambio | Por que no es un contrato nuevo |
+|---|---|---|
+| `imap-trigger-config.dto.ts` | — | El modo de coincidencia NO se persiste |
+| `ImapTriggerStrategy.matchesSubjectFilter` | compila con flag `i` | Solo amplia lo que casa |
+| `document-extractor.util.ts` | exporta `EXTRACTABLE_DOCUMENT_EXTENSIONS` | Derivada de `EXTENSION_KINDS`, no una lista nueva |
+| `fsm.enums.ts` | `ExecutionState.OMITIDO` | Valor nuevo del enum, migracion 030 |
+| `FsmEngineService.closeTerminalState` | parametro `wasHalted` | Metodo privado |
+| `NodeResult.halt` | — | Ya existia; solo cambia su DESENLACE |
+
+### `SubjectMatchMode`: un modo que no se guarda
+
+```typescript
+// @/utils/subject-filter-mode — helper puro, sin estado ni E/S
+export type SubjectMatchMode = 'CONTAINS' | 'STARTS_WITH' | 'ADVANCED';
+
+export const buildSubjectPattern = (mode: SubjectMatchMode, draft: string): string => ...;
+export const readSubjectPattern = (pattern: string): { mode; draft } => ...;
+```
+
+El estado del formulario se DERIVA del patron guardado en cada hidratacion, igual que
+`web-scraper.store.ts` deriva `isFirstEligibleTarget` de la forma de `targetUrl`. La propiedad
+invariante que sostiene el diseno es el viaje de ida y vuelta:
+`readSubjectPattern(buildSubjectPattern(m, d)) === { mode: m, draft: d }` para todo texto llano.
+Lo que no la cumple cae en `ADVANCED` con su expresion intacta.
+
+### `ExecutionState.OMITIDO`: donde encaja en el ciclo de vida
+
+```
+            ┌─ grafo agotado, sin halt ──────────────→ EXITOSO
+EN_PROCESO ─┼─ halt (NO_MESSAGES / SUBJECT_FILTERED) → OMITIDO   ← nuevo
+            ├─ fallo sin onErrorStep ────────────────→ PAUSADO
+            └─ rama murio en DESTINO_SMTP ───────────→ PAUSADO (GRAVE) | FALLIDO
+```
+
+`OMITIDO` no pide intervencion: no hay `.log`, no hay cursor que reintentar y
+`applyStopOnFirstSuccess` lo descarta por la condicion de estado antes incluso de mirar
+`haltReason`.
+
+### Estado de las tareas
+
+- [x] Modo de coincidencia del asunto, derivado y no persistido; flag `i` en la estrategia
+- [x] Aviso de omision de adjuntos y selector de extensiones cerrado contra el backend
+- [x] Aviso operativo de posicion vs. dominios excluidos en el extractor web
+- [x] Atajos de `allowedTags`, verificados como subconjunto de la lista blanca
+- [x] Presets de Drupal con selectores reales, preset Notiweb y rotulo del Bundle
+- [x] Celdas de tabla que crecen a lo alto (`.pd-cell--long`) en las seis tablas administrativas
+- [x] Editor de plantillas sin insertador de marcadores, con aviso de estructura
+- [x] `PromptCodeEditor` sobre CodeMirror, con `markerHighlighter` compartido
+- [x] `OMITIDO` en enum, motor, `init.sql` y migracion 030
+- [x] Migracion 031 — plantillas de cierre de licitacion y Notiweb
+- [x] Migracion 032 — codigos y textos de los cuatro prompts oficiales
+- [ ] Pendiente — aplicar 030, 031 y 032 contra PostgreSQL (Docker lo levanta el usuario)
+- [ ] Pendiente — validar el texto de un prompt al guardarlo (`AiPromptTemplatesService` sigue
+      aceptando `{{inventado.campo}}` con un 201)

@@ -931,6 +931,9 @@ export class FsmEngineService {
           retryState,
           contingency,
           lastCompletedNodeType,
+          // Se lee de la entidad y no de una variable del bucle porque es donde
+          // lo dejo la rama de `halt`, unas lineas mas arriba.
+          execution.haltReason !== undefined,
         );
       }
     } catch (error) {
@@ -1557,6 +1560,7 @@ export class FsmEngineService {
    *
    * @param contingency Ultimo desvio, o `null` si el recorrido fue nominal.
    * @param lastCompletedNodeType Tipo del ultimo nodo que completo con exito.
+   * @param wasHalted El bucle termino porque un nodo pidio parada ordenada.
    */
   private async closeTerminalState(
     execution: FsmExecution,
@@ -1564,6 +1568,7 @@ export class FsmEngineService {
     retryState: RetryState,
     contingency: { severity: NodeErrorSeverity; failedNodeId: string } | null,
     lastCompletedNodeType: NodeType | null,
+    wasHalted: boolean,
   ): Promise<void> {
     // Recuperacion FUNCIONAL: la rama reincorporo el flujo y este llego al
     // final. El trabajo se hizo —el correo con la imagen acabo publicado—, asi
@@ -1573,8 +1578,20 @@ export class FsmEngineService {
       contingency === null ||
       lastCompletedNodeType !== NodeType.DESTINO_SMTP
     ) {
+      // OMITIDO cuando un nodo pidio parada ordenada: el buzon no traia nada,
+      // o el asunto no casaba con el filtro. No es un fallo, pero tampoco un
+      // exito, y hasta ahora los dos casos dejaban la fila EXACTAMENTE igual.
+      // Con un sondeo por minuto eso hacia que cualquier recuento de exitos
+      // midiese sobre todo buzones vacios.
+      //
+      // `wasHalted` manda sobre `contingency`: una parada ordenada despues de
+      // un desvio por `onErrorStep` sigue siendo una ejecucion que no hizo
+      // trabajo. Lo que NO alcanza esta rama es el caso en que la rama murio
+      // en el nodo de alerta, que se resuelve abajo por severidad.
       await this.saveCheckpoint(execution, {
-        currentState: ExecutionState.EXITOSO,
+        currentState: wasHalted
+          ? ExecutionState.OMITIDO
+          : ExecutionState.EXITOSO,
         activeCursor: null,
         contextPayload: context.getAllContext(),
         retryState,

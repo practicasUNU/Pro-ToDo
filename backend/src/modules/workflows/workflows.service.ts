@@ -211,12 +211,15 @@ export class WorkflowsService {
    * Tres condiciones, y las tres importan:
    *
    * 1. La politica esta declarada y en `true`.
-   * 2. La ejecucion cerro en EXITOSO.
-   * 3. `haltReason` es `undefined`, es decir, recorrio el grafo ENTERO. Una
-   *    ejecucion detenida por `halt` tambien cierra en EXITOSO —un buzon sin
-   *    correos nuevos no es un fallo— pero no hizo ningun trabajo: sin esta
-   *    tercera condicion, un flujo IMAP con la politica activa se apagaria en su
-   *    primer sondeo en vacio, antes de haber procesado un solo correo.
+   * 2. La ejecucion cerro en EXITOSO. Una detenida por `halt` cierra en
+   *    OMITIDO desde la migracion 030, de modo que esta sola condicion ya la
+   *    descarta.
+   * 3. `haltReason` es `undefined`, es decir, recorrio el grafo ENTERO. Hoy es
+   *    REDUNDANTE con la condicion 2 y se conserva a proposito: es la
+   *    comprobacion directa del hecho que importa —"no hizo ningun trabajo"—,
+   *    mientras que el estado es una consecuencia de el. Sin alguna de las dos,
+   *    un flujo IMAP con la politica activa se apagaria en su primer sondeo en
+   *    vacio, antes de haber procesado un solo correo.
    * 4. `tookContingency` no esta puesto, es decir, no se desvio por ninguna
    *    ruta de error. Una recuperacion funcional cierra EXITOSO con razon —el
    *    trabajo se hizo— pero esta politica describe un flujo que ya funciona sin

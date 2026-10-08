@@ -115,7 +115,7 @@ const INPUT_TEXT_SOURCES = [
 /**
  * Materia prima cuando TODOS los bloques ya viajan dentro de la instruccion.
  *
- * Pasa con plantillas como `PANELES_UEM_DEFAULT`, que interpola el unico origen
+ * Pasa con plantillas como `VERIFICADOR_TITULOS_DEFAULT`, que interpola el unico origen
  * poblado. Mandar el `prompt` vacio dejaria al proveedor una peticion sin
  * contenido —algunos la rechazan— y al operador un log ilegible; esta linea dice
  * explicitamente donde esta el material.
@@ -591,7 +591,7 @@ export class LlmExtractorStrategy implements INodeStrategy {
    * Materia prima: todos los origenes con contenido, etiquetados y en orden.
    *
    * OMITE el origen que el prompt YA cita como marcador. Sin esta regla, una
-   * plantilla como `LICITACION_DEFAULT` —que interpola `clean_body` y
+   * plantilla como `LICITACION_APERTURA_DEFAULT` —que interpola `clean_body` y
    * `extracted_documents_text`— mandaria ambos textos dos veces, duplicando los
    * tokens de cada llamada sin aportar un solo dato nuevo. La comprobacion va
    * contra el prompt SIN interpolar, que es donde el marcador todavia existe.

@@ -38,7 +38,7 @@ const OTHER_EXECUTION_ID = 'exec-22222222-2222-4222-8222-222222222222';
 const WORKFLOW_ID = 'flow-33333333-3333-4333-8333-333333333333';
 const NODE_ID = 'nodo_ia';
 const TEMPLATE_ID = '9f1b2c3d-4e5f-4a6b-8c7d-0e1f2a3b4c5d';
-const TEMPLATE_CODE = 'LICITACION_DEFAULT';
+const TEMPLATE_CODE = 'LICITACION_APERTURA_DEFAULT';
 const AUTHOR_ID = '1a2b3c4d-5e6f-4071-8283-94a5b6c7d8e9';
 
 /** Cuerpo de correo tipico que `PARSER_PRE_IA` deja en su namespace. */
@@ -1296,7 +1296,7 @@ describe('LlmExtractorStrategy', () => {
 
     it('11.3 NO deberia repetir lo que el prompt ya interpola', async () => {
       // 1. Arrange 📐: duplicar el texto no aporta un dato nuevo y si duplica
-      //    los tokens facturados de cada llamada. `LICITACION_DEFAULT` cita los
+      //    los tokens facturados de cada llamada. `LICITACION_APERTURA_DEFAULT` cita los
       //    adjuntos, asi que solo el correo debe ir como materia prima.
       const generateCompletion = buildSpyProvider();
       const promptService = buildPromptService();
@@ -1338,7 +1338,7 @@ describe('LlmExtractorStrategy', () => {
     });
 
     it('11.4 deberia avisar donde esta el material si el prompt lo cita todo', async () => {
-      // 1. Arrange 📐: el caso de `PANELES_UEM_DEFAULT`, que interpola su unico
+      // 1. Arrange 📐: el caso de `VERIFICADOR_TITULOS_DEFAULT`, que interpola su unico
       //    origen. Mandar el `prompt` vacio dejaria una peticion sin contenido.
       const generateCompletion = buildSpyProvider();
       const promptService = buildPromptService();

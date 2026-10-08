@@ -62,7 +62,7 @@ export class CreateAiPromptTemplateDto {
       'params del nodo PROCESADOR_IA, y la unica referencia que sobrevive a un ' +
       'clonado de la base o a un renombrado de la etiqueta visible. Si se omite, ' +
       'se deriva del nombre.',
-    example: 'LICITACION_DEFAULT',
+    example: 'LICITACION_APERTURA_DEFAULT',
     maxLength: MAX_CODE_LENGTH,
     pattern: CODE_PATTERN.source,
   })

@@ -83,7 +83,7 @@ export class AiPromptTemplatesController {
    *
    * VA ANTES de `@Get(':id')` y eso es obligatorio, no estilistico: Nest casa
    * las rutas en orden de declaracion, asi que con el orden inverso
-   * `/code/LICITACION_DEFAULT` entraria por `:id`, el `ParseUUIDPipe` veria
+   * `/code/LICITACION_APERTURA_DEFAULT` entraria por `:id`, el `ParseUUIDPipe` veria
    * "code" y devolveria un 400 en lugar del prompt.
    */
   @Get('code/:code')

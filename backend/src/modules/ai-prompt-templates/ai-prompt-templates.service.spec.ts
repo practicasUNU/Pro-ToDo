@@ -351,13 +351,13 @@ describe('AiPromptTemplatesService · repositorio de prompts de IA', () => {
 
       // 2. Act
       await service.create(
-        buildCreateDto({ code: '  licitacion_default  ' }),
+        buildCreateDto({ code: '  licitacion_apertura_default  ' }),
         AUTHOR_ID,
       );
 
       // 3. Assert
       expect(repository.create).toHaveBeenCalledWith(
-        expect.objectContaining({ code: 'LICITACION_DEFAULT' }),
+        expect.objectContaining({ code: 'LICITACION_APERTURA_DEFAULT' }),
       );
     });
   });

@@ -168,10 +168,10 @@ export interface PipelineExecutionPolicy {
    *
    * NO cuenta como exito una ejecucion detenida por `halt`. Ahi el disparador
    * concluyo que no habia NADA que procesar —un buzon sin correos nuevos— y la
-   * ejecucion cierra en EXITOSO sin haber hecho ningun trabajo: tratarlo como
+   * ejecucion cierra en OMITIDO sin haber hecho ningun trabajo: tratarlo como
    * "primer exito" apagaria el flujo en su primer sondeo, antes de haber
-   * procesado un solo correo. Quien distingue los dos casos es
-   * `FsmExecution.haltReason`.
+   * procesado un solo correo. Los dos casos se distinguen por el estado y,
+   * dentro del proceso que despacha, tambien por `FsmExecution.haltReason`.
    *
    * Solo se evalua en el despacho automatico (`runAutomaticWorkflow`). El
    * despacho manual de pruebas queda fuera a proposito: el operador usa ese

@@ -318,7 +318,7 @@ describe('FsmEngineService (PROT-09)', () => {
   });
 
   describe('1.1 Parada ordenada pedida por un nodo (`halt`)', () => {
-    it('deberia cerrar en EXITOSO sin invocar los nodos siguientes', async () => {
+    it('deberia cerrar en OMITIDO sin invocar los nodos siguientes', async () => {
       // 1. Arrange: el disparador no encuentra nada que procesar y pide parar.
       const execution = buildExecution();
       const { repo, update } = buildRepository(execution);
@@ -346,7 +346,10 @@ describe('FsmEngineService (PROT-09)', () => {
       expect(executeA).toHaveBeenCalledTimes(1);
       expect(executeB).not.toHaveBeenCalled();
       expect(executeC).not.toHaveBeenCalled();
-      expect(result.currentState).toBe(ExecutionState.EXITOSO);
+      // OMITIDO y no EXITOSO: no fallo nada, pero tampoco se hizo ningun
+      // trabajo. Con un sondeo por minuto, contar esto como exito hacia que
+      // cualquier recuento midiese sobre todo buzones vacios.
+      expect(result.currentState).toBe(ExecutionState.OMITIDO);
       expect(result.activeCursor).toBeNull();
       // El motivo queda en el contexto: es lo que explica en trazabilidad por
       // que la ejecucion termino en un unico paso.
@@ -356,8 +359,9 @@ describe('FsmEngineService (PROT-09)', () => {
       // Marca inicial EN_PROCESO + el checkpoint final. Sin transiciones
       // intermedias: el cursor nunca llego a avanzar.
       expect(update).toHaveBeenCalledTimes(2);
-      // La marca transitoria es lo UNICO que distingue esta salida de la del
-      // nodo terminal: ambas dejan la fila en EXITOSO con el cursor nulo.
+      // La marca transitoria se conserva pese a que el estado ya distinga las
+      // dos salidas: la lee quien despacha, dentro del mismo proceso, para
+      // explicar POR QUE se omitio sin volver a la base de datos.
       expect(result.haltReason).toBe(
         'El buzon no contiene mensajes nuevos que procesar.',
       );

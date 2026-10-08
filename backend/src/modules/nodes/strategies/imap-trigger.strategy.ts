@@ -427,7 +427,7 @@ export class ImapTriggerStrategy implements INodeStrategy {
    *
    * `status` NO se declara, y no es un olvido. Esa clave solo existe en la rama
    * del buzon vacio, que devuelve `halt`: el motor cierra la ejecucion en
-   * EXITOSO y ningun nodo de aguas abajo llega a interpolar nada. Ofrecerla en
+   * OMITIDO y ningun nodo de aguas abajo llega a interpolar nada. Ofrecerla en
    * el selector prometeria un campo que nunca esta cuando hay algo que mapear.
    *
    * Ningun campo es `url`, pese a que `html` y `text` vienen llenos de enlaces.
@@ -579,7 +579,7 @@ export class ImapTriggerStrategy implements INodeStrategy {
       if (uid === null) {
         // Buzon vacio: exito con parada. `success: true` porque no ha fallado
         // nada —el sondeo corre cada minuto y lo habitual es no encontrar nada—
-        // y `halt` para que el motor cierre la ejecucion en EXITOSO en vez de
+        // y `halt` para que el motor cierre la ejecucion en OMITIDO en vez de
         // pasar al nodo siguiente, que esperaria las claves de un correo.
         return {
           success: true,

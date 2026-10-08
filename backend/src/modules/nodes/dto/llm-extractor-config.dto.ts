@@ -127,7 +127,7 @@ export class LlmExtractorConfigDto {
       'portable a `templatePromptId`: el UUID se regenera en cada clonado de la base ' +
       'y este literal no, asi que es la forma de que una plantilla de flujo o una ' +
       'semilla citen un prompt. Cede ante `templatePromptId` si vienen los dos.',
-    example: 'LICITACION_DEFAULT',
+    example: 'LICITACION_APERTURA_DEFAULT',
   })
   @IsOptional()
   @IsString({ message: 'promptCode debe ser una cadena.' })

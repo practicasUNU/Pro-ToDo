@@ -258,7 +258,7 @@ export const DRUPAL_SANDBOX_PRESETS: Readonly<
     // En cerradas el orden cronologico se lee al reves: lo ultimo en cerrarse va
     // al final, detras de lo que lleva mas tiempo archivado.
     insertPosition: 'APPEND',
-    associatedTemplateName: null,
+    associatedTemplateName: 'Licitaciones · Convocatoria cerrada (Madrid+D)',
   },
   VERIFICACION_TITULOS: {
     label: 'Verificación de títulos',

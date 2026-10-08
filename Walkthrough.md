@@ -7250,3 +7250,190 @@ del backend— y `quasar build` sin avisos. ESLint sin avisos en lo nuevo.
 - **`SANITIZER_ALLOWED_TAGS` es una replica manual** de la lista del saneador. Hoy no hay nada que
   vigile que no diverjan; una prueba de contrato que las compare exigiria exponer la lista por la API
   del catalogo, que es una tanda en si misma.
+
+---
+
+## PROT-29 · UX Poka-Yoke de los nodos, tablas CRUD y semillas de los cuatro flujos
+
+### El modo de coincidencia no se guarda, se deduce
+
+El encargo pedia sustituir la expresion regular del filtro de asunto por un selector de modo. Lo
+evidente seria anadir `subjectMatchMode` a los `params` del nodo, y es justo lo que no se puede
+hacer: el DTO valida con `forbidNonWhitelisted`, asi que una clave de mas devuelve un 400 al
+guardar el flujo entero, tres pasos despues de haberla escrito.
+
+La salida ya estaba inventada en el repositorio. `web-scraper.store.ts` no guarda en ningun sitio
+si el operador eligio «primer enlace elegible» o una posicion concreta: lo DEDUCE de la forma de
+`targetUrl` (`isFirstEligibleTarget = !targetUrl.includes('[')`). Aqui se hace lo mismo con
+`readSubjectPattern`, y la propiedad que lo sostiene es el viaje de ida y vuelta: componer y volver
+a leer devuelve el mismo modo y el mismo texto. Lo que no la cumple —`^S_2026_.*`, una alternancia
+con clases de caracteres— abre en modo avanzado con su expresion intacta, que es la unica forma de
+no romper un flujo heredado.
+
+**El error que casi se cuela.** La primera version enganchaba el campo del acordeon avanzado al
+mismo `setSubjectMatchDraft` que los modos asistidos. Las pruebas existentes lo cazaron en la
+primera ejecucion: escribir `^S_2026_.*` con el modo en «contiene» lo guardaba escapado como
+`\^S_2026_\.\*`. Y lo peor no era el escape, sino su consecuencia: un patron escapado SIEMPRE
+compila, de modo que la regla que bloquea el paso ante una expresion invalida se habria vuelto
+inalcanzable sin que nada lo delatase. De ahi `setAdvancedSubjectPattern`, una via propia que
+escribe el texto tal cual y entra en modo avanzado. Por la misma razon, SALIR de avanzado no
+reinterpreta el borrador: relee la forma del patron y, si no es expresable, ignora la peticion.
+
+### El flag `i`, y por que no se codifica en el patron
+
+El modo «contiene texto» compone `(?:licitacion|convocatoria)` a partir de palabras clave. Para que
+case con «Licitación» hace falta insensibilidad a mayusculas, y hay dos sitios donde ponerla: en el
+texto del patron o en la compilacion. En el texto exigiria una clase de caracteres por letra
+(`[Ll][Ii][Cc]...`), ilegible en cuanto alguien abra el modo avanzado para afinarla. Asi que va en
+`new RegExp(pattern, 'i')`.
+
+Tiene un efecto retroactivo y conviene decirlo en voz alta: amplia el conjunto de asuntos que casan
+en flujos ya guardados. Nunca lo reduce, de modo que ningun correo que hoy se procese dejara de
+procesarse; lo que puede pasar es que entre alguno que antes se descartaba por una mayuscula.
+
+**Una hora perdida por un `*/`.** Al insertar el TSDoc del flag me comi el cierre del comentario y
+deje `matchesSubjectFilter` y `toExtractedEmail` dentro del bloque. TypeScript no protesto —el
+codigo comentado es codigo valido— y el sintoma fueron 38 pruebas en rojo que parecian decir que el
+flag habia roto el parseo del correo. Comparar contra `HEAD` con un `git stash` dio la respuesta en
+un minuto: en `HEAD` pasaban las 76.
+
+### `OMITIDO`: el estado que faltaba
+
+El contrato `halt` ya existia y el motor ya lo honraba; lo que estaba mal era el DESENLACE. Un
+sondeo IMAP en vacio y un correo publicado en Drupal dejaban la fila EXACTAMENTE igual: `EXITOSO`
+con el cursor nulo. Con un sondeo por minuto eso significa que cualquier recuento de ejecuciones
+exitosas medía, sobre todo, buzones vacios.
+
+`haltReason` distinguia los dos casos, pero es una marca transitoria en memoria —no hay columna—
+que solo ve quien despacha dentro del mismo proceso. Nadie que consulte `ejecuciones_flujo` despues
+puede saberlo.
+
+Se descarto reutilizar `FALLIDO` (pide intervencion humana y escribiria un `.log` por cada correo
+irrelevante del buzon, ahogando las alertas reales, que es exactamente lo que el contrato `halt`
+existe para evitar) y `INACTIVO` (describe una fila que aun no arranco). `OMITIDO` dice lo que paso:
+termino sin trabajo que hacer.
+
+La migracion 030 va **sola y sin bloque transaccional**: PostgreSQL rechaza usar un valor de enum en
+la misma transaccion en la que se anade (55P04). `init.sql` lo adelanta para que una base nueva
+nazca completa, con el mismo criterio que la 006 aplico a `INACTIVO`.
+
+Las filas ya cerradas en `EXITOSO` por un `halt` se quedan como estan. Son traza historica de lo que
+de verdad se escribio entonces, y reescribirla falsearia la auditoria con el mismo criterio que la
+027 aplico a `logs_nodo.tipo_nodo`.
+
+`applyStopOnFirstSuccess` gana una condicion redundante: su comprobacion de `haltReason` ya la cubre
+el estado. Se conserva a proposito y documentada, porque es la comprobacion DIRECTA del hecho que
+importa —«no hizo ningun trabajo»— mientras que el estado es una consecuencia de el.
+
+### El editor de plantillas deja de ofrecer lo que el motor rechaza
+
+El paso 5.1 del encargo pedia facilitar la escritura de `{{rendered_html.campo}}` en el gestor de
+plantillas. Es exactamente lo contrario de lo que el sistema necesita hoy: desde la migracion 025 el
+`MAPEADOR_PLANTILLA` no interpola, entrega el esqueleto saneado para que lo rellene un
+`PROCESADOR_IA` posterior, y rechaza con `ERR_TEMPLATE_PENDING_VARS` cualquier plantilla cuyas
+`variables_esperadas` no vengan vacias. Un insertador de marcadores ahi solo sirve para fabricar
+flujos que revientan en la primera ejecucion, ya PAUSADOS.
+
+Se retiro el `VariableExplorer` del dialogo y en su lugar quedo el aviso de como se escribe hoy una
+plantilla: huecos nombrados por clase CSS y vacios. Los chips de «variables detectadas» SE
+CONSERVAN, y no por inercia: son de solo lectura y el unico aviso de que una plantilla heredada aun
+interpola y va a ser rechazada.
+
+Dos consecuencias en cadena que hubo que seguir. El dialogo pedia el catalogo de nodos en cada
+apertura SOLO para poblar el explorador, asi que la peticion desaparece. Y `TemplateMapperConfig` le
+pasaba un `upstreamContext` que ya nadie lee; se retira la prop entera en vez de dejarla muerta,
+porque una prop que no hace nada sugiere que todavia se interpola ahi.
+
+El spec del dialogo se reescribio completo: sus once pruebas iban del explorador. Lo que cubrian
+—seleccion en dos pasos, tarjeta del token, botones— ya lo cubre el spec propio de
+`VariableExplorer`, que es donde pertenece.
+
+### El prompt pasa de textarea a CodeMirror
+
+La asimetria era llamativa: el mismo lenguaje `{{ns.campo}}` tenia editor con resaltado en
+plantillas y un `<q-input type="textarea">` plano en prompts, donde insertar un marcador exigia
+manipular `selectionStart` del elemento nativo y recolocar el caret en un `setTimeout(0)` porque Vue
+aun no habia propagado el `v-model`.
+
+`markerHighlighter` sale a `@/utils/codemirror-markers` y lo consume un `PromptCodeEditor` nuevo,
+hermano del de plantillas pero **sin** la gramatica `html()` de Lezer ni el carril de diagnosticos:
+el texto de un prompt es prosa con marcadores, no marcado, y colorear sus angulos como etiquetas
+confundiria mas que ayudaria. La insercion pasa a ser una transaccion, de modo que `Ctrl+Z` la
+deshace entera.
+
+**El detalle que casi se escapa.** `QForm` valida recorriendo las reglas de sus hijos, y el editor
+de codigo no es un campo de Quasar. Al quitar el `<q-input>` desaparecio tambien su
+`:rules="[(val) => !!val.trim() || ...]"`, de modo que un prompt vacio habria llegado al backend y
+vuelto como 400. De ahi el `isFormValid` explicito que bloquea el boton Guardar.
+
+El filtro de origenes (`prompt-namespaces.ts`) ya cumplia lo pedido —fuera los destinos, el
+`PROCESADOR_IA` y el `ESCUDO_POST_IA`; dentro el OCR y el mapeador—. Solo se corrigio su TSDoc, que
+seguia diciendo «cuatro origenes» cuando son seis desde que el mapeador salio de las exclusiones.
+
+### Tablas: una regla global en vez de seis locales
+
+Quasar deja `white-space: nowrap` en los `td`, asi que una descripcion larga estiraba la fila hasta
+sacar las columnas de accion de la pantalla. La regla va en `.pd-table` de `app.scss` y el tope de
+350px se aplica con `classes: 'pd-cell--long'` desde la definicion de la columna: §2 prohibe el
+`style` inline, y ademas solo las columnas de prosa deben recortarse —cual es cual lo sabe cada
+tabla, no la hoja de estilos—. Es la primera vez que estas tablas usan la propiedad `classes` de
+`QTableColumn`, que ya existia sin usarse.
+
+### Semillas: por que las plantillas nuevas tampoco llevan marcadores
+
+Las 031 replican al pie de la letra las restricciones que la 028 documenta, y ninguna es de estilo:
+envoltorio `<div>` y no `<article>` (el saneador desenvuelve las etiquetas de estructura de pagina y
+se lleva la clase por delante, dejando el `itemSelector` sin nada que encontrar), `<a>` sin `href` e
+`<img>` sin `src` (un atributo vacio se descarta, de modo que escribirlo solo daria una diferencia
+entre lo sembrado y lo publicado), sin `scope` en los `<th>`, y contenedores vacios donde habria
+hecho falta un bucle.
+
+`.licitacion-entry` en la plantilla de cierre no es casual: es el `itemSelector` que declara el
+preset `CERRAR_LICITACION`, porque el bloque que se traslada es el que sembro la plantilla de
+apertura.
+
+### Prompts: renombrar obliga a reescribir el JSONB
+
+`LICITACION_DEFAULT` no decia si abria o cerraba, y `PANELES_UEM_DEFAULT` citaba una universidad
+concreta cuando el flujo procesa paneles de cualquiera. Renombrarlos es un `UPDATE` sobre una
+columna `VARCHAR UNIQUE`, trivial… salvo por el paso que la migracion 027 enseno a no olvidar: el
+`promptCode` tambien viaja como TEXTO dentro del JSONB `configuracion_pipeline` de cada flujo y cada
+plantilla guardados.
+
+Y aqui el fallo seria especialmente malo. El validador de topologia no comprueba que el codigo
+exista, asi que un flujo que citase el codigo muerto se guardaria y se activaria sin una queja, y
+reventaria en ejecucion al no resolver el prompt, con el flujo ya PAUSADO. Por eso el renombrado y
+la reescritura del JSONB van en la MISMA transaccion: dejar una sin la otra es peor que no
+renombrar.
+
+Los cuatro textos citan ahora `{{rendered_html.compiled_markup}}`. Es lo que enciende
+`expectsFilledMarkup` y cierra el circuito `MAPEADOR_PLANTILLA → PROCESADOR_IA → ESCUDO_POST_IA`;
+la 029 ya lo hizo para licitaciones y aqui se extiende a los cuatro. Un prompt sin ese marcador deja
+al escudo sin nada que auditar.
+
+A diferencia de las semillas de plantillas, los `UPDATE` de texto **no** llevan guarda y son
+reescrituras deliberadas: el objeto de la migracion ES el contenido del prompt. Si alguien curo uno
+desde el CRUD, esta migracion se lo pisa, y queda escrito en su cabecera.
+
+### Cobertura
+
+Frontend **901 pruebas en 46 archivos**, en verde (+22 y +2 archivos: 11 del utilitario de modos de
+asunto y de la gramatica del marcador, 6 de modos en el configurador IMAP, 2 del aviso de adjuntos,
+3 de atajos de etiquetas y 2 del preset Notiweb; −7 netas por la reescritura del spec del editor de
+plantillas). Backend **1861 en 76 suites**, en verde. `vue-tsc --noEmit` limpio; `tsc` sobre
+`tsconfig.build.json` limpio. Los 87 errores de tipos que `tsconfig.json` reporta sobre specs del
+backend son previos y no varian con esta tanda.
+
+### Lo que sigue abierto
+
+- **Las tres migraciones estan escritas y SIN APLICAR.** Docker lo levanta el usuario y el servidor
+  MCP de PostgreSQL no conecta en esta sesion. Hasta que se apliquen, `OMITIDO` no existe en la base
+  y el motor intentaria escribir un valor que el tipo no admite.
+- **El preset `VERIFICACION_TITULOS` lleva `containerSelector: '#accordionCEU'` pero es
+  `CREATE_NODE`,** modo que ni muestra ni envia ese campo. Decision tomada: se deja documentado e
+  inerte, porque el canal da de alta una entidad por panel y no acumula bloques.
+- **El texto de un prompt se sigue guardando sin validar.** `AiPromptTemplatesService` acepta
+  `{{inventado.campo}}` con un 201; el gestor de plantillas HTML si lo valida. Sigue pendiente.
+- **`SANITIZER_ALLOWED_TAGS` sigue siendo una replica manual** de la lista del saneador. Los atajos
+  nuevos de `allowedTags` si tienen prueba de subconjunto contra ella, pero nada vigila que la
+  replica no diverja del original.

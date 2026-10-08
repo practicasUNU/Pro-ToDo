@@ -113,15 +113,16 @@ export class FsmExecution {
    * Motivo por el que un nodo detuvo el flujo ANTES de llegar al nodo terminal.
    *
    * NO es una columna, y por eso no lleva `@Column`: vive solo en la instancia
-   * que `executeWorkflow` devuelve. Existe porque las dos salidas buenas del
+   * que `executeWorkflow` devuelve. Nacio porque las dos salidas buenas del
    * bucle —recorrer el grafo entero y pararse porque no habia nada que hacer—
-   * dejan la fila EXACTAMENTE igual: EXITOSO con el cursor nulo. Quien despacha
-   * necesita separarlas para decidir si aplicar `stopOnFirstSuccess`, y desde la
-   * fila sola es imposible.
+   * dejaban la fila EXACTAMENTE igual: EXITOSO con el cursor nulo.
    *
-   * Se deja transitorio a proposito: persistirlo hoy seria una columna con su
-   * migracion y sin un solo lector. Si la trazabilidad llega a mostrar por que
-   * una ejecucion termino en un unico paso, entonces se promueve a columna.
+   * Desde la migracion 030 el ESTADO ya las separa (`OMITIDO`), asi que esto
+   * deja de ser la unica senal y pasa a ser la mas precisa: lleva el MOTIVO
+   * —que buzon, que filtro— y no solo el hecho. Sigue siendo transitorio a
+   * proposito: persistirlo seria una columna con su migracion, y su unico
+   * lector corre en el mismo proceso que lo escribe. Si la trazabilidad llega
+   * a mostrar por que una ejecucion se omitio, entonces se promueve.
    */
   haltReason?: string;
 

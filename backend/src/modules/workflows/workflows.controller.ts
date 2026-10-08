@@ -212,7 +212,7 @@ export class WorkflowsController {
    * recurso que interesa al cliente no es la fila creada en `ejecuciones_flujo`,
    * sino el RESULTADO del recorrido, que se devuelve en el mismo cuerpo. La
    * peticion es sincrona: no retorna hasta que el motor alcanza un estado
-   * terminal (EXITOSO, PAUSADO o FALLIDO).
+   * terminal (EXITOSO, OMITIDO, PAUSADO o FALLIDO).
    *
    * El cuerpo es opcional en la practica: sin `mockData` se aplica el fixture
    * estandar de `raw_email`, de modo que `POST` con `{}` ya rinde una prueba

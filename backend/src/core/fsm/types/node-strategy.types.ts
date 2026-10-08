@@ -164,8 +164,9 @@ export interface NodeResult {
    *
    * NO es un fallo: el nodo hizo su trabajo y concluyo que no hay nada que
    * procesar aguas abajo (un buzon sin correos nuevos, un filtro sin
-   * coincidencias). El motor cierra la ejecucion en EXITOSO y no invoca los
-   * pasos siguientes.
+   * coincidencias). El motor cierra la ejecucion en OMITIDO —ni EXITOSO, que
+   * reclamaria un trabajo que no se hizo, ni FALLIDO, que pediria que alguien
+   * intervenga— y no invoca los pasos siguientes.
    *
    * Sin esta senal el caso solo tendria salidas malas: un `success: false`
    * dejaria el flujo PAUSADO varias veces por hora —el sondeo IMAP corre cada

@@ -13,7 +13,10 @@ CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
 
 CREATE TYPE enum_categoria AS ENUM ('TRIGGER', 'PROCESAMIENTO', 'CONTROL', 'DESTINO');
 
-CREATE TYPE enum_estado AS ENUM ('INACTIVO', 'EN_PROCESO', 'EXITOSO', 'FALLIDO', 'PAUSADO');
+-- `INACTIVO` lo incorporo la migracion 006 y `OMITIDO` la 030; ambos se
+-- adelantan aqui para que una base nueva nazca completa (las migraciones son
+-- idempotentes y no vuelven a anadirlos).
+CREATE TYPE enum_estado AS ENUM ('INACTIVO', 'EN_PROCESO', 'EXITOSO', 'OMITIDO', 'FALLIDO', 'PAUSADO');
 
 CREATE TYPE enum_estado_nodo AS ENUM ('OK', 'ERROR', 'ADVERTENCIA');
 

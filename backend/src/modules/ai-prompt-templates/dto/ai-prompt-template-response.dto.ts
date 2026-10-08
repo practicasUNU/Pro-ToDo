@@ -18,7 +18,7 @@ export class AiPromptTemplateResponseDto {
   @ApiProperty({
     description:
       'Clave de maquina, inmutable. Es la que citan los params del nodo IA',
-    example: 'LICITACION_DEFAULT',
+    example: 'LICITACION_APERTURA_DEFAULT',
   })
   readonly code: string;
 
