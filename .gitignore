@@ -6,6 +6,7 @@ backend/node_modules/
 frontend/node_modules/
 .pnp
 .pnp.js
+ultima_ejecucion.json
 
 # =============================================================================
 # Compilación y Salidas de Build

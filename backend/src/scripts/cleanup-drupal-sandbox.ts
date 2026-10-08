@@ -105,6 +105,9 @@ const DEFAULT_PURGE_SELECTORS: readonly string[] = [
   '#collapseCEU_TEST',
   '.licitacion-entry[data-expediente^="TEST_"]',
   '.licitacion-entry[data-expediente^="EXP-SANDBOX-"]',
+  '.licitacion-entry[data-expediente="S_2026_015_TEST"]',
+  '.licitacion-entry[data-expediente="S_2026_015"]', // Limpieza de pruebas reales E2E
+  '.licitacion-entry', // Todo bloque generado por TemplateMapperStrategy
 ];
 
 /** Respuesta de JSON:API para una entidad suelta. */
