@@ -5,7 +5,3 @@ import AiPromptTemplatesManager from '@components/ai-prompt-templates/AiPromptTe
 <template>
   <AiPromptTemplatesManager />
 </template>
-
-<style lang="scss"> 
-
-</style>

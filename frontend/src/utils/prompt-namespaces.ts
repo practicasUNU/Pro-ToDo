@@ -53,8 +53,10 @@ const isExcludedNodeType = (nodeType: string | undefined): boolean =>
  *
  * Es el fallback del gestor de plantillas de prompt, donde no hay ningun flujo
  * detras: solo se sabe que publicaria cada tipo de nodo SI alguien lo colocara.
- * Hoy deja cuatro origenes: `raw_email`, `cron_trigger`, `parsed_email` y
- * `scraped_web`.
+ * Hoy deja SEIS origenes: `raw_email`, `cron_trigger`, `parsed_email`,
+ * `scraped_web`, `rendered_html` (el mapeador salio de las exclusiones cuando
+ * paso a ir DELANTE de la inferencia) y `ocr_result` —el OCR transcribe para
+ * que un prompt posterior lea, asi que citarlo es su razon de ser—.
  *
  * Se recorre el catalogo y no la lista de namespaces porque la CATEGORIA solo
  * la conoce el catalogo; `NODE_TYPE_BY_NAMESPACE` responde la pregunta inversa.

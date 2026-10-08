@@ -486,6 +486,22 @@ body {
     border-color: var(--pd-border);
   }
 
+  // Las celdas crecen a lo alto en vez de ensanchar la tabla. Quasar deja
+  // `white-space: nowrap` en `td`, de modo que una descripcion larga estiraba
+  // la fila hasta sacar las columnas de accion fuera de la pantalla.
+  td {
+    white-space: normal;
+    word-break: break-word;
+  }
+
+  // Tope para las columnas de texto libre. Se aplica desde la definicion de la
+  // columna (`classes`) y no con un `style` inline, que §2 prohibe: solo las
+  // columnas que de verdad llevan prosa deben recortarse, y cual es cual lo
+  // sabe cada tabla.
+  .pd-cell--long {
+    max-width: 350px;
+  }
+
   tbody tr:hover > td {
     background: var(--pd-surface-muted);
   }

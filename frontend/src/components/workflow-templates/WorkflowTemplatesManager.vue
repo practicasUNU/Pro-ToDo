@@ -37,6 +37,7 @@ const columns: QTableColumn<WorkflowTemplateSummary>[] = [
     label: 'Descripcion',
     field: (row: WorkflowTemplateSummary) => row.description ?? '—',
     align: 'left',
+    classes: 'pd-cell--long',
   },
   {
     name: 'nodes',

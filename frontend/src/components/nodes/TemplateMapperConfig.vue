@@ -157,18 +157,11 @@ onMounted(loadTemplates);
       :template="templateMapperStore.selectedTemplate"
     />
 
-    <!-- El editor recibe el contexto del flujo: con el, sus chips insertan la
-         ruta completa en vez de dejar al autor terminando el nombre a mano.
-         Sigue teniendo sentido pese a que este nodo ya no interpole, porque el
-         editor es superficie de AUTORIA compartida con el gestor de plantillas:
-         la plantilla que se escribe aqui puede usarse en otro nodo que si lea
-         el contexto. -->
-    <TemplateEditorDialog
-      v-model="isEditorOpen"
-      :template="null"
-      :upstream-context="templateMapperStore.availableUpstreamContext"
-      @saved="onTemplateCreated"
-    />
+    <!-- Ya NO se le pasa el contexto del flujo: el editor dejo de ofrecer un
+         insertador de marcadores. Una plantilla de este nodo se estructura con
+         selectores CSS vacios y la rellena el PROCESADOR_IA de detras, asi que
+         no hay ninguna ruta `{{ns.campo}}` que componer aqui. -->
+    <TemplateEditorDialog v-model="isEditorOpen" :template="null" @saved="onTemplateCreated" />
   </section>
 </template>
 

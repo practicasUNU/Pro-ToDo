@@ -22,7 +22,13 @@ const columns: QTableColumn<AiPromptTemplate>[] = [
   // el alta no lo suministra, asi que sin esta columna no habria forma de
   // saber con cual quedo la plantilla.
   { name: 'code', label: 'Codigo', field: 'code', align: 'left', sortable: true },
-  { name: 'description', label: 'Descripcion', field: 'description', align: 'left' },
+  {
+    name: 'description',
+    label: 'Descripcion',
+    field: 'description',
+    align: 'left',
+    classes: 'pd-cell--long',
+  },
   { name: 'status', label: 'Estado', field: 'active', align: 'center', sortable: true },
   {
     name: 'createdAt',
@@ -135,7 +141,7 @@ onMounted(loadPrompts);
 </script>
 
 <template>
-  <q-page class="pd-page">
+  <q-page padding class="pd-page">
     <header class="prompts-header">
       <div>
         <h1 class="pd-h1">Prompts de IA</h1>
@@ -293,9 +299,6 @@ onMounted(loadPrompts);
 </template>
 
 <style scoped lang="scss">
-.pd-page {
-  margin: 1.75%;
-}
 // Solo maquetacion: el color proviene de las clases .pd-* globales.
 .prompts-header {
   display: flex;

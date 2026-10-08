@@ -45,6 +45,7 @@ const columns: QTableColumn<AllowedIp>[] = [
     field: 'description',
     align: 'left',
     sortable: true,
+    classes: 'pd-cell--long',
   },
   {
     name: 'createdAt',

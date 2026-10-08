@@ -4,39 +4,18 @@
 // utilidades no necesitan DOM y arrancan mas rapido sin el.
 import { config, flushPromises, mount } from '@vue/test-utils';
 import { createPinia, setActivePinia } from 'pinia';
-import { QBtn, QCard, QIcon, QInput, QSelect, Quasar } from 'quasar';
+import { QBanner, QBtn, QCard, QChip, QIcon, QInput, QSelect, Quasar } from 'quasar';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { defineComponent, h } from 'vue';
 
 import TemplateEditorDialog from '@components/templates/TemplateEditorDialog.vue';
 
-import { TEMPLATE_NAMESPACES } from '@/types/html-template';
-import { NodeCategory } from '@/types/node-catalog';
-import { NodeType } from '@/types/pipeline';
-
-import type { UpstreamNamespace } from '@stores/nodes/node-store-registry';
-
-import type { NodeCatalogEntry } from '@/types/node-catalog';
-
-/**
- * Espias del contrato imperativo del editor.
- *
- * `vi.hoisted` porque `vi.mock` se iza por encima de las declaraciones del
- * modulo: sin esto, la factoria del doble leeria variables aun sin inicializar.
- */
-const editorSpies = vi.hoisted(() => ({
-  insertTextAtCursor: vi.fn(),
-  setViolations: vi.fn(),
-  formatDocument: vi.fn(),
-}));
-
 /**
  * `TemplateCodeEditor` se sustituye a nivel de MODULO y no con `stubs`.
  *
  * El dialogo lo carga con `defineAsyncComponent`, asi que en el arbol no hay un
- * nombre contra el que casar un stub; y montarlo de verdad arrastraria CodeMirror
- * entero a un spec que va del explorador de variables. El doble expone el mismo
- * contrato que `defineExpose` publica, que es lo unico que el dialogo consume.
+ * nombre contra el que casar un stub; y montarlo de verdad arrastraria
+ * CodeMirror entero a un spec que no va del editor.
  */
 vi.mock('@components/templates/TemplateCodeEditor.vue', () => ({
   // Sin esta marca Vue no desenvuelve `default` y toma el modulo entero por el
@@ -46,16 +25,13 @@ vi.mock('@components/templates/TemplateCodeEditor.vue', () => ({
   default: defineComponent({
     name: 'TemplateCodeEditor',
     props: { modelValue: { type: String, default: '' } },
-    setup(_props, { expose }) {
-      expose(editorSpies);
-
+    setup() {
       return () => h('div', { 'data-test': 'code-editor-stub' });
     },
   }),
 }));
 
-// Los dos servicios que el dialogo alcanza por sus stores cuelgan de
-// `@boot/axios`, que necesita el entorno de Quasar.
+// El servicio cuelga de `@boot/axios`, que necesita el entorno de Quasar.
 vi.mock('@services/templates.service', () => ({
   fetchTemplates: vi.fn(),
   fetchTemplateById: vi.fn(),
@@ -65,34 +41,19 @@ vi.mock('@services/templates.service', () => ({
   previewTemplate: vi.fn(),
 }));
 
+/**
+ * El catalogo de nodos se dobla aunque el dialogo YA NO lo pida.
+ *
+ * Precisamente para poder afirmarlo: la prueba 2.2 comprueba que no se dispara
+ * ninguna peticion, y sin el doble el fallo seria un error de `@boot/axios` en
+ * vez de la asercion que interesa.
+ */
 vi.mock('@services/node-catalog.service', () => ({
   fetchNodeCatalog: vi.fn(),
 }));
 
 const nodeCatalogService = await import('@services/node-catalog.service');
 const fetchNodeCatalog = vi.mocked(nodeCatalogService.fetchNodeCatalog);
-
-const PARSER_ENTRY: NodeCatalogEntry = {
-  id: 'id-parser',
-  code: NodeType.PARSER_PRE_IA,
-  name: 'Parser pre-IA',
-  category: NodeCategory.PROCESAMIENTO,
-  description: null,
-  implemented: true,
-  outputFields: [
-    { name: 'clean_title', type: 'text', description: 'Titular saneado' },
-    { name: 'extracted_urls', type: 'url[]' },
-  ],
-};
-
-/** Contexto que dejaria un flujo real aguas arriba del mapeador. */
-const FLOW_CONTEXT: UpstreamNamespace[] = [
-  {
-    namespace: 'parsed_email',
-    nodeType: NodeType.PARSER_PRE_IA,
-    fields: PARSER_ENTRY.outputFields,
-  },
-];
 
 /**
  * `QDialog` se sustituye por un pasamuros.
@@ -109,14 +70,14 @@ const QUASAR_STUBS = {
   }),
 };
 
-const QUASAR_COMPONENTS = { QBtn, QCard, QIcon, QInput, QSelect };
+const QUASAR_COMPONENTS = { QBanner, QBtn, QCard, QChip, QIcon, QInput, QSelect };
 
 /**
  * Monta el dialogo CERRADO y lo abre, que es el camino real.
  *
  * El `watch` sobre `modelValue` no es `immediate`: montar directamente abierto
- * no dispararia ni `initDraft` ni la carga del catalogo, y la prueba pasaria por
- * un estado que en la aplicacion no existe.
+ * no dispararia `initDraft`, y la prueba pasaria por un estado que en la
+ * aplicacion no existe.
  */
 const openDialog = async (
   props: Record<string, unknown> = {},
@@ -136,170 +97,73 @@ const openDialog = async (
   return wrapper;
 };
 
-const selectByField = (wrapper: ReturnType<typeof mount>, field: string) =>
-  wrapper.get(`[data-test="${field}"]`).findComponent(QSelect);
-
-const buttonByTest = (wrapper: ReturnType<typeof mount>, testId: string) =>
-  wrapper.get(`[data-test="${testId}"]`).findComponent(QBtn);
-
-describe('TemplateEditorDialog · explorador de variables', () => {
+describe('TemplateEditorDialog · plantillas estructurales sin marcadores', () => {
   beforeEach(() => {
     setActivePinia(createPinia());
     config.global.plugins = [];
     vi.clearAllMocks();
-    fetchNodeCatalog.mockResolvedValue([PARSER_ENTRY]);
+    fetchNodeCatalog.mockResolvedValue([]);
   });
 
-  describe('1. Origen de los namespaces', () => {
-    it('1.1 deberia ofrecer el catalogo global sin flujo detras', async () => {
-      // 1. Arrange & 2. Act: es como lo abre el gestor de plantillas.
+  describe('1. Aviso de estructura', () => {
+    it('1.1 deberia explicar que los huecos se nombran por clase CSS', async () => {
+      // 1. Arrange 📐 + 2. Act ⚙️
       const wrapper = await openDialog();
-      const options = selectByField(wrapper, 'namespace-field').props('options');
 
-      // 3. Assert: ahi no hay topologia, y la plantilla debe poder escribirse
-      //    para cualquier flujo.
-      expect(options).toHaveLength(TEMPLATE_NAMESPACES.length);
-      expect(options).toContainEqual({ label: '_assets', value: '_assets' });
-      expect(options).toContainEqual({
-        label: 'parsed_email (PARSER_PRE_IA)',
-        value: 'parsed_email',
-      });
+      // 3. Assert 🎯: es la unica indicacion de como se escribe una plantilla
+      //    desde que el mapeador inyecta en vez de compilar.
+      const notice = wrapper.get('[data-test="structure-notice"]');
+      expect(notice.text()).toContain('selectores CSS');
+      expect(notice.text()).toContain('ERR_TEMPLATE_PENDING_VARS');
+    });
+  });
+
+  describe('2. Retirada del explorador de variables', () => {
+    it('2.1 no deberia ofrecer ningun insertador de marcadores', async () => {
+      // 1. Arrange 📐 + 2. Act ⚙️
+      const wrapper = await openDialog();
+
+      // 3. Assert 🎯: el MAPEADOR_PLANTILLA rechaza con
+      //    ERR_TEMPLATE_PENDING_VARS cualquier plantilla que aun interpole, de
+      //    modo que un boton "Insertar en plantilla" solo serviria para
+      //    fabricar flujos que revientan en ejecucion, ya PAUSADOS.
+      expect(wrapper.find('[data-test="variable-explorer"]').exists()).toBe(false);
+      expect(wrapper.find('[data-test="insert-token"]').exists()).toBe(false);
+      expect(wrapper.find('[data-test="namespace-field"]').exists()).toBe(false);
     });
 
-    it('1.2 deberia restringirse al flujo cuando llega upstreamContext', async () => {
-      // 1. Arrange & 2. Act: es como lo abre el nodo mapeador.
-      const wrapper = await openDialog({ upstreamContext: FLOW_CONTEXT });
-
-      // 3. Assert: la prop MANDA porque es la respuesta mas especifica.
-      expect(selectByField(wrapper, 'namespace-field').props('options')).toEqual([
-        { label: 'parsed_email (PARSER_PRE_IA)', value: 'parsed_email' },
-      ]);
-    });
-
-    it('1.3 deberia pedir el catalogo AL ABRIR y una sola vez', async () => {
-      // 1. Arrange & 2. Act
+    it('2.2 no deberia pedir el catalogo de nodos al abrir', async () => {
+      // 1. Arrange 📐 + 2. Act ⚙️
       await openDialog();
 
-      // 3. Assert: memoizada en el store, asi que si el asistente ya lo cargo no
-      //    cuesta una peticion.
-      expect(fetchNodeCatalog).toHaveBeenCalledTimes(1);
+      // 3. Assert 🎯: la peticion existia SOLO para poblar el explorador. Con
+      //    el fuera, mantenerla gastaria una llamada por cada apertura del
+      //    dialogo sin que nadie lea la respuesta.
+      expect(fetchNodeCatalog).not.toHaveBeenCalled();
     });
   });
 
-  describe('2. Seleccion en dos pasos', () => {
-    it('2.1 deberia mantener el campo deshabilitado hasta elegir origen', async () => {
-      // 1. Arrange & 2. Act
-      const wrapper = await openDialog({ upstreamContext: FLOW_CONTEXT });
+  describe('3. Variables detectadas', () => {
+    it('3.1 deberia seguir mostrando las de una plantilla heredada', async () => {
+      // 1. Arrange 📐: una plantilla guardada antes del cambio de semantica.
+      const wrapper = await openDialog({
+        template: {
+          id: 'tpl-1',
+          name: 'Heredada',
+          description: null,
+          htmlContent: '<p>{{parsed_email.clean_title}}</p>',
+          requiredVariables: ['parsed_email.clean_title'],
+          createdById: 'user-1',
+          active: true,
+          createdAt: '2026-01-01T00:00:00.000Z',
+          updatedAt: '2026-01-01T00:00:00.000Z',
+        },
+      });
 
-      // 3. Assert
-      expect(selectByField(wrapper, 'variable-field').props('disable')).toBe(true);
-    });
-
-    it('2.2 deberia ofrecer los campos del origen elegido', async () => {
-      // 1. Arrange
-      const wrapper = await openDialog({ upstreamContext: FLOW_CONTEXT });
-
-      // 2. Act
-      selectByField(wrapper, 'namespace-field').vm.$emit('update:modelValue', 'parsed_email');
-      await flushPromises();
-
-      // 3. Assert
-      const field = selectByField(wrapper, 'variable-field');
-      expect(field.props('disable')).toBe(false);
-      expect(field.props('options')).toEqual(PARSER_ENTRY.outputFields);
-    });
-
-    it('2.3 deberia limpiar el campo al cambiar de origen', async () => {
-      // 1. Arrange: dejarlo compuesto para ver que se deshace.
-      const wrapper = await openDialog();
-      selectByField(wrapper, 'namespace-field').vm.$emit('update:modelValue', 'parsed_email');
-      await flushPromises();
-      selectByField(wrapper, 'variable-field').vm.$emit(
-        'update:modelValue',
-        PARSER_ENTRY.outputFields[0],
-      );
-      await flushPromises();
-      expect(wrapper.find('[data-test="token-detail"]').exists()).toBe(true);
-
-      // 2. Act
-      selectByField(wrapper, 'namespace-field').vm.$emit('update:modelValue', 'raw_email');
-      await flushPromises();
-
-      // 3. Assert: el campo pertenecia al origen anterior; conservarlo compondria
-      //    un marcador que mezcla dos namespaces.
-      expect(wrapper.find('[data-test="token-detail"]').exists()).toBe(false);
-    });
-  });
-
-  describe('3. Tarjeta de detalle y acciones', () => {
-    /** Deja el explorador con `{{parsed_email.clean_title}}` compuesto. */
-    const composeToken = async (): Promise<ReturnType<typeof mount>> => {
-      const wrapper = await openDialog({ upstreamContext: FLOW_CONTEXT });
-
-      selectByField(wrapper, 'namespace-field').vm.$emit('update:modelValue', 'parsed_email');
-      await flushPromises();
-      selectByField(wrapper, 'variable-field').vm.$emit(
-        'update:modelValue',
-        PARSER_ENTRY.outputFields[0],
-      );
-      await flushPromises();
-
-      return wrapper;
-    };
-
-    it('3.1 deberia mostrar el token, su tipo y su descripcion', async () => {
-      // 1. Arrange & 2. Act
-      const detail = (await composeToken()).get('[data-test="token-detail"]');
-
-      // 3. Assert
-      expect(detail.text()).toContain('{{parsed_email.clean_title}}');
-      expect(detail.text()).toContain('text');
-      expect(detail.text()).toContain('Titular saneado');
-    });
-
-    it('3.2 deberia deshabilitar ambos botones sin la eleccion completa', async () => {
-      // 1. Arrange & 2. Act
-      const wrapper = await openDialog({ upstreamContext: FLOW_CONTEXT });
-
-      // 3. Assert
-      expect(buttonByTest(wrapper, 'copy-token').props('disable')).toBe(true);
-      expect(buttonByTest(wrapper, 'insert-token').props('disable')).toBe(true);
-    });
-
-    it('3.3 deberia habilitarlos con el token compuesto', async () => {
-      // 1. Arrange & 2. Act
-      const wrapper = await composeToken();
-
-      // 3. Assert
-      expect(buttonByTest(wrapper, 'copy-token').props('disable')).toBe(false);
-      expect(buttonByTest(wrapper, 'insert-token').props('disable')).toBe(false);
-    });
-
-    it('3.4 deberia insertar la ruta COMPLETA en el cursor del editor', async () => {
-      // 1. Arrange
-      const wrapper = await composeToken();
-
-      // 2. Act
-      await buttonByTest(wrapper, 'insert-token').trigger('click');
-
-      // 3. Assert: offset 0, el caret detras. La version de chips insertaba
-      //    `{{parsed_email.}}` y retrocedia dos para que el autor escribiera el
-      //    campo, que es la errata que el explorador elimina.
-      expect(editorSpies.insertTextAtCursor).toHaveBeenCalledWith(
-        '{{parsed_email.clean_title}}',
-        0,
-      );
-    });
-
-    it('3.5 no deberia tocar el editor sin token compuesto', async () => {
-      // 1. Arrange
-      const wrapper = await openDialog({ upstreamContext: FLOW_CONTEXT });
-
-      // 2. Act: el boton esta deshabilitado, pero la guarda es del manejador.
-      await buttonByTest(wrapper, 'insert-token').trigger('click');
-
-      // 3. Assert
-      expect(editorSpies.insertTextAtCursor).not.toHaveBeenCalled();
+      // 3. Assert 🎯: los chips son de SOLO LECTURA y se conservan a proposito.
+      //    Son el unico aviso de que esa plantilla aun interpola y de que el
+      //    mapeador va a rechazarla.
+      expect(wrapper.text()).toContain('parsed_email.clean_title');
     });
   });
 });

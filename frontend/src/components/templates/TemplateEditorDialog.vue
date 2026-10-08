@@ -2,20 +2,11 @@
 import { computed, defineAsyncComponent, ref, watch } from 'vue';
 import { useQuasar } from 'quasar';
 
-import { useNodeCatalogStore } from '@stores/node-catalog.store';
 import { useTemplatesStore } from '@stores/templates.store';
-import VariableExplorer from '@components/shared/VariableExplorer.vue';
 
 import { extractApiErrorMessage, extractApiViolations } from '@/utils/api-error';
-import { buildContextForNamespaces } from '@/utils/upstream-catalog';
 
-import {
-  TEMPLATE_NAMESPACES,
-  type HtmlTemplate,
-  type TemplateViolation,
-} from '@/types/html-template';
-
-import type { UpstreamNamespace } from '@stores/nodes/node-store-registry';
+import type { HtmlTemplate, TemplateViolation } from '@/types/html-template';
 
 // CodeMirror pesa unos cientos de KB y este dialogo lo importan dos componentes
 // distintos; en diferido solo se descarga al abrir el editor.
@@ -33,18 +24,9 @@ interface TemplateCodeEditorInstance {
 interface Props {
   modelValue: boolean;
   template: HtmlTemplate | null;
-  /**
-   * Namespaces del flujo desde el que se abre el dialogo, con sus campos.
-   *
-   * OPCIONAL, y su ausencia no es un caso degradado: el gestor de plantillas
-   * abre este mismo dialogo sin ningun flujo detras, y ahi no hay topologia que
-   * consultar. Con contexto, el explorador ofrece lo que ESE flujo publica de
-   * verdad; sin el, cae al catalogo global (ver `variableContext`).
-   */
-  upstreamContext?: readonly UpstreamNamespace[];
 }
 
-const props = withDefaults(defineProps<Props>(), { upstreamContext: () => [] });
+const props = defineProps<Props>();
 
 const emit = defineEmits<{
   'update:modelValue': [value: boolean];
@@ -53,9 +35,6 @@ const emit = defineEmits<{
 
 const $q = useQuasar();
 const templatesStore = useTemplatesStore();
-// El catalogo es estado compartido y este componente lo consume de su store, no
-// de un servicio: la frontera HTTP sigue siendo `node-catalog.service.ts`.
-const nodeCatalogStore = useNodeCatalogStore();
 
 // Los ejemplos con llaves viven aqui y no en la plantilla: el compilador de Vue
 // no sabe distinguir unas llaves literales de una interpolacion anidada.
@@ -63,19 +42,23 @@ const VARIABLE_SYNTAX_EXAMPLE = '{{namespace.campo}}';
 const FORBIDDEN_BLOCK_EXAMPLE = '{{#if}}';
 const FORBIDDEN_TRIPLE_STASH_EXAMPLE = '{{{}}}';
 
+/**
+ * Como se estructura hoy una plantilla de este gestor.
+ *
+ * El MAPEADOR_PLANTILLA dejo de interpolar: entrega el esqueleto saneado para
+ * que lo rellene un PROCESADOR_IA posterior, y rechaza con
+ * ERR_TEMPLATE_PENDING_VARS cualquier plantilla cuyas `variables_esperadas` no
+ * vengan vacias. Un hueco a rellenar solo es expresable como POSICION del DOM,
+ * de ahi que se nombre por clase y se deje vacio. Esas mismas clases son las
+ * que el ESCUDO_POST_IA autodetecta despues para proponer sus
+ * `requiredSelectors`.
+ */
+const STRUCTURE_NOTICE =
+  'Las plantillas para MAPEADOR_PLANTILLA deben estructurarse mediante selectores CSS vacios (ej. <span class="campo"></span>). No utilice marcadores Handlebars: el motor los rechaza con ERR_TEMPLATE_PENDING_VARS.';
+
 // `InstanceType<typeof ...>` no resuelve a traves de defineAsyncComponent, de
 // ahi la interfaz explicita.
 const codeEditorRef = ref<TemplateCodeEditorInstance | null>(null);
-
-// Seleccion del explorador de variables. Se declara antes del `watch` de
-// apertura porque ese lo lee: en `<script setup>` el orden de declaracion es el
-// de ejecucion.
-/** Contrato imperativo de `VariableExplorer`, para reiniciarlo al abrir. */
-interface VariableExplorerInstance {
-  reset: () => void;
-}
-
-const variableExplorerRef = ref<VariableExplorerInstance | null>(null);
 
 const isEditMode = computed(() => !!props.template);
 
@@ -87,58 +70,12 @@ watch(
     if (!isOpen) return;
 
     templatesStore.initDraft(props.template ?? undefined);
-    variableExplorerRef.value?.reset();
-
-    // Tambien al abrir y no en `onMounted`, por lo mismo: montado esta desde que
-    // se pinta el gestor, y ahi no hay nadie mirando el explorador. La llamada
-    // es memoizada, asi que si el asistente ya cargo el catalogo no cuesta una
-    // peticion.
-    void nodeCatalogStore.fetchCatalog();
   },
-);
-
-/**
- * De donde salen los origenes que el explorador ofrece.
- *
- * La prop MANDA cuando viene con algo, porque es la respuesta mas especifica:
- * un flujo concreto sabe que namespaces publica de verdad y con que campos. El
- * catalogo global solo sabe que publicaria cada tipo de nodo SI alguien lo
- * colocara, que es exactamente lo que necesita el gestor de plantillas —donde no
- * hay flujo y la plantilla debe poder escribirse para cualquiera.
- */
-const variableContext = computed<readonly UpstreamNamespace[]>(() =>
-  props.upstreamContext.length > 0
-    ? props.upstreamContext
-    : buildContextForNamespaces(TEMPLATE_NAMESPACES, nodeCatalogStore.findByCode),
 );
 
 const onDialogToggle = (value: boolean): void => emit('update:modelValue', value);
 
 const closeDialog = (): void => emit('update:modelValue', false);
-
-/**
- * Inserta el marcador completo en el cursor del editor (Poka-Yoke).
- *
- * Se despacha sobre el EDITOR y no sobre el store porque CodeMirror es el dueno
- * del cursor y del historial: `insertTextAtCursor` reemplaza el rango de
- * `view.state.selection.main` —que sobrevive a perder el foco, asi que el clic
- * en el boton no lo pierde— y el store se sincroniza solo por
- * `update:modelValue`. Escribir tambien en el store insertaria el texto dos
- * veces.
- *
- * Offset `0`: el marcador esta completo y el caret debe quedar DETRAS. La
- * version anterior insertaba `{{ns.}}` y retrocedia dos posiciones para que el
- * autor escribiera el campo — que es justo la errata que el explorador elimina.
- */
-const handleInsertToken = (token: string): void => {
-  if (codeEditorRef.value) {
-    codeEditorRef.value.insertTextAtCursor(token, 0);
-    return;
-  }
-
-  // Red por si el editor aun no ha resuelto su carga diferida.
-  templatesStore.insertTextAtCursor(token);
-};
 
 /**
  * Reindenta el HTML del editor.
@@ -237,14 +174,17 @@ const onSubmit = async (): Promise<void> => {
               />
             </div>
 
-            <!-- Explorador Poka-Yoke: origen y campo se eligen, no se teclean -->
-            <VariableExplorer
-              ref="variableExplorerRef"
-              class="q-mb-md"
-              :context="variableContext"
-              insert-label="Insertar en plantilla"
-              @insert="handleInsertToken"
-            />
+            <!-- Las plantillas de este gestor alimentan al MAPEADOR_PLANTILLA,
+                 que YA NO interpola: entrega el esqueleto saneado para que lo
+                 rellene un PROCESADOR_IA posterior. Ofrecer aqui un insertador
+                 de marcadores seria invitar a escribir plantillas que el nodo
+                 rechaza en ejecucion, con el flujo ya PAUSADO. -->
+            <q-banner dense class="pd-structure-banner q-mb-md" data-test="structure-notice">
+              <template #avatar>
+                <q-icon name="info_outline" size="20px" class="pd-banner-icon" />
+              </template>
+              {{ STRUCTURE_NOTICE }}
+            </q-banner>
 
             <div>
               <div class="pd-label">Variables detectadas</div>
@@ -272,9 +212,8 @@ const onSubmit = async (): Promise<void> => {
               <div class="pd-label">Acciones de la Plantilla</div>
 
               <p class="pd-subtitle q-mt-xs q-mb-none">
-                Solo se permite sustitucion determinista de variables (<span class="pd-mono">{{
-                  VARIABLE_SYNTAX_EXAMPLE
-                }}</span
+                En las plantillas heredadas que aun interpolan, solo se admite sustitucion
+                determinista de variables (<span class="pd-mono">{{ VARIABLE_SYNTAX_EXAMPLE }}</span
                 >). Quedan prohibidos bloques (<span class="pd-mono">{{
                   FORBIDDEN_BLOCK_EXAMPLE
                 }}</span
@@ -341,6 +280,18 @@ const onSubmit = async (): Promise<void> => {
 </template>
 
 <style scoped lang="scss">
+// Solo maquetacion: el color proviene de los tokens --pd-*.
+.pd-structure-banner {
+  background: var(--pd-surface-muted);
+  border: 1px solid var(--pd-border);
+  border-radius: $generic-border-radius;
+  color: var(--pd-text-primary);
+}
+
+.pd-banner-icon {
+  color: var(--pd-accent);
+}
+
 // Modal ancho: la autoria de HTML necesita sitio. Sobrescribe el min-width de
 // 380px que impone .pd-dialog-card.
 .pd-editor-card {

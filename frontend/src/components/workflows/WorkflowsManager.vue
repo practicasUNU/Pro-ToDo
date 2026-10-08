@@ -47,6 +47,7 @@ const columns: QTableColumn<PipelineSummary>[] = [
     label: 'Descripcion',
     field: (row: PipelineSummary) => row.description ?? '—',
     align: 'left',
+    classes: 'pd-cell--long',
   },
   {
     name: 'template',

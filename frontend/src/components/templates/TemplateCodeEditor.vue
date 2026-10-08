@@ -6,23 +6,17 @@ import { html } from '@codemirror/lang-html';
 import { HighlightStyle, syntaxHighlighting } from '@codemirror/language';
 import { lintGutter, setDiagnostics } from '@codemirror/lint';
 import { EditorState } from '@codemirror/state';
-import {
-  Decoration,
-  EditorView,
-  MatchDecorator,
-  ViewPlugin,
-  keymap,
-  lineNumbers,
-} from '@codemirror/view';
+import { EditorView, keymap, lineNumbers } from '@codemirror/view';
 import { tags } from '@lezer/highlight';
 
+import { markerHighlighter } from '@/utils/codemirror-markers';
 import { unuwareEditorTheme } from '@/utils/codemirror-theme';
 
 import { formatTemplateHtml } from '@/utils/html-formatter';
 import { locateViolations } from '@/utils/violation-matcher';
 
 import type { Diagnostic } from '@codemirror/lint';
-import type { DecorationSet, ViewUpdate } from '@codemirror/view';
+import type { ViewUpdate } from '@codemirror/view';
 
 import type { TemplateViolation } from '@/types/html-template';
 
@@ -45,12 +39,6 @@ const editorContainer = ref<HTMLDivElement | null>(null);
 let view: EditorView | null = null;
 
 /**
- * Marcador interpolable. Misma gramatica que `TEMPLATE_VARIABLE_PATTERN` del
- * store, para que lo resaltado y lo listado en los chips coincidan siempre.
- */
-const MARKER_PATTERN = /\{\{\s*[a-zA-Z0-9_]+(?:\.(?:[a-zA-Z0-9_]+|\[\d+\]))+\s*\}\}/g;
-
-/**
  * Resaltado de sintaxis sobre tokens ya existentes del sistema.
  *
  * No se usa `defaultHighlightStyle` de CodeMirror: esta pensado para fondo claro
@@ -64,27 +52,6 @@ const unuwareHighlight = HighlightStyle.define([
   { tag: tags.comment, color: 'var(--pd-text-secondary)', fontStyle: 'italic' },
   { tag: [tags.angleBracket, tags.punctuation], color: 'var(--pd-text-secondary)' },
 ]);
-
-/** Pinta cada `{{ns.campo}}` como un chip dentro del propio editor. */
-const markerDecorator = new MatchDecorator({
-  regexp: MARKER_PATTERN,
-  decoration: Decoration.mark({ class: 'cm-pd-template-marker' }),
-});
-
-const markerHighlighter = ViewPlugin.fromClass(
-  class {
-    public decorations: DecorationSet;
-
-    constructor(view: EditorView) {
-      this.decorations = markerDecorator.createDeco(view);
-    }
-
-    public update(update: ViewUpdate): void {
-      this.decorations = markerDecorator.updateDeco(update, this.decorations);
-    }
-  },
-  { decorations: (instance) => instance.decorations },
-);
 
 /** Propaga los cambios del documento y del cursor hacia el padre. */
 const changeListener = EditorView.updateListener.of((update: ViewUpdate) => {

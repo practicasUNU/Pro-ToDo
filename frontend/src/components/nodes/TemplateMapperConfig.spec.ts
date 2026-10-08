@@ -96,9 +96,13 @@ const QUASAR_COMPONENTS = {
  * configurador del nodo. Los componentes de Quasar si se montan REALES: con
  * stubs, la prueba 1.1 aseveraria sobre el doble que la propia prueba declara.
  */
+// El doble declara `upstreamContext` aunque el componente real ya no la tenga:
+// es justamente lo que permite afirmar que el configurador NO la pasa. Sin la
+// prop declarada, `props('upstreamContext')` saldria `undefined` tanto si se
+// pasa como si no, y la prueba 3.2 no probaria nada.
 const TemplateEditorDialogStub = defineComponent({
   name: 'TemplateEditorDialog',
-  props: { upstreamContext: { type: Array, default: () => [] } },
+  props: { upstreamContext: { type: Array, default: undefined } },
   template: '<div data-test="editor-dialog-stub" />',
 });
 
@@ -222,16 +226,19 @@ describe('TemplateMapperConfig · configurador del nodo MAPEADOR_PLANTILLA', () 
       expect(fetchSelectableTemplates).toHaveBeenCalledTimes(1);
     });
 
-    it('3.2 deberia trasladar el contexto del flujo al editor de plantillas', () => {
+    it('3.2 NO deberia trasladar el contexto del flujo al editor de plantillas', () => {
       // 1. Arrange
       buildStore([], UPSTREAM);
 
       // 2. Act
       const editor = mountComponent().findComponent(TemplateEditorDialogStub);
 
-      // 3. Assert: con el, los chips del editor insertan la ruta completa en vez
-      //    de dejar al autor terminando el nombre del campo a mano.
-      expect(editor.props('upstreamContext')).toEqual(UPSTREAM);
+      // 3. Assert: el editor dejo de ofrecer un insertador de marcadores, asi
+      //    que no hay ninguna ruta `{{ns.campo}}` que componer. Una plantilla
+      //    de este nodo se estructura con selectores CSS vacios y la rellena el
+      //    PROCESADOR_IA de detras; pasarle un contexto que nadie lee seria
+      //    sugerir que todavia se interpola aqui.
+      expect(editor.props('upstreamContext')).toBeUndefined();
     });
 
     it('3.3 deberia montar la seccion con el nodeId recibido', () => {

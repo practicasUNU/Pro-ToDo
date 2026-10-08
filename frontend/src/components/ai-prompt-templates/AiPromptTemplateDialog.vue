@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, reactive, ref, watch } from 'vue';
+import { computed, defineAsyncComponent, reactive, ref, watch } from 'vue';
 import { useQuasar } from 'quasar';
 
 import { useAiPromptTemplatesStore } from '@stores/ai-prompt-templates.store';
@@ -16,8 +16,18 @@ import {
 import { buildPromptContextFromCatalog, filterPromptContext } from '@/utils/prompt-namespaces';
 
 import type { AiPromptTemplateDetail } from '@/types/ai-prompt-template';
-import type { QInput } from 'quasar';
 import type { UpstreamNamespace } from '@stores/nodes/node-store-registry';
+
+// CodeMirror pesa unos cientos de KB y este dialogo se monta con el gestor de
+// prompts aunque nadie lo abra; en diferido solo se descarga al editar.
+const PromptCodeEditor = defineAsyncComponent(
+  () => import('@components/shared/PromptCodeEditor.vue'),
+);
+
+/** Contrato imperativo que `PromptCodeEditor` expone con `defineExpose`. */
+interface PromptCodeEditorInstance {
+  insertTextAtCursor: (text: string) => void;
+}
 
 /** Replican los limites de `plantillas_prompts_ia` y del DTO del backend. */
 const MAX_NAME_LENGTH = 120;
@@ -75,7 +85,9 @@ const $q = useQuasar();
 const aiPromptTemplatesStore = useAiPromptTemplatesStore();
 const nodeCatalogStore = useNodeCatalogStore();
 
-const promptTextRef = ref<QInput | null>(null);
+// `InstanceType<typeof ...>` no resuelve a traves de `defineAsyncComponent`,
+// de ahi la interfaz explicita.
+const promptEditorRef = ref<PromptCodeEditorInstance | null>(null);
 const variableExplorerRef = ref<VariableExplorerInstance | null>(null);
 
 const form = reactive<{
@@ -172,44 +184,44 @@ const variableContext = computed<readonly UpstreamNamespace[]>(() =>
 );
 
 /**
- * Inserta el marcador en la posicion del cursor del textarea.
+ * Inserta el marcador en el cursor del editor (Poka-Yoke).
  *
- * Se escribe a mano porque aqui NO hay CodeMirror: el prompt se edita en un
- * `q-input type="textarea"`, asi que no existe un `insertTextAtCursor` que
- * despachar. Se lee el caret real del elemento nativo —y no un espejo en el
- * store, como hace el fallback de `templates.store`— porque el textarea es el
- * unico que lo conoce.
+ * Se despacha sobre el EDITOR y no sobre `form.promptText`, igual que en el
+ * dialogo de plantillas: CodeMirror es el dueno del cursor y del historial, y
+ * el formulario se sincroniza solo por `update:modelValue`. Escribir tambien
+ * aqui insertaria el texto dos veces.
  *
- * `selectionStart`/`selectionEnd` cubren tambien el caso de que haya texto
- * seleccionado: el marcador lo REEMPLAZA, que es lo que espera cualquiera que
- * seleccione algo antes de pulsar Insertar.
- *
- * El caret se recoloca en un `setTimeout` de 0: Vue todavia no ha propagado el
- * `v-model` al DOM cuando esta funcion termina, y fijar la posicion antes la
- * perderia al repintar.
+ * La version anterior manipulaba `selectionStart` del textarea nativo y
+ * recolocaba el caret en un `setTimeout(0)` porque Vue aun no habia propagado
+ * el `v-model`. Nada de eso hace falta con una transaccion.
  */
 const handleInsertToken = (token: string): void => {
-  const input = promptTextRef.value?.nativeEl as HTMLTextAreaElement | undefined;
-
-  if (!input) {
-    // Sin referencia al textarea no hay cursor que respetar; se anade al final
-    // en vez de descartar la insercion.
-    form.promptText = `${form.promptText}${token}`;
+  if (promptEditorRef.value) {
+    promptEditorRef.value.insertTextAtCursor(token);
     return;
   }
 
-  const start = input.selectionStart ?? form.promptText.length;
-  const end = input.selectionEnd ?? start;
-
-  form.promptText = `${form.promptText.slice(0, start)}${token}${form.promptText.slice(end)}`;
-
-  const caret = start + token.length;
-
-  setTimeout(() => {
-    input.focus();
-    input.setSelectionRange(caret, caret);
-  }, 0);
+  // Red por si el editor aun no ha resuelto su carga diferida: se anade al
+  // final en vez de descartar la insercion.
+  form.promptText = `${form.promptText}${token}`;
 };
+
+/**
+ * El formulario esta completo y se puede enviar.
+ *
+ * Sustituye al `:rules` que llevaba el `<q-input type="textarea">` de la
+ * instruccion: `QForm` valida recorriendo las reglas de sus hijos, y el editor
+ * de codigo no es un campo de Quasar, de modo que sin esto un prompt vacio
+ * llegaria al backend y volveria como 400. Se bloquea el boton ademas de
+ * pintar el mensaje: el aviso explica, el bloqueo impide.
+ */
+const isFormValid = computed<boolean>(
+  () =>
+    form.name.trim() !== '' &&
+    form.name.length <= MAX_NAME_LENGTH &&
+    form.description.length <= MAX_DESCRIPTION_LENGTH &&
+    form.promptText.trim() !== '',
+);
 
 const onDialogToggle = (value: boolean): void => emit('update:modelValue', value);
 
@@ -325,25 +337,27 @@ const onSubmit = async (): Promise<void> => {
             />
           </div>
 
-          <!-- Monoespaciada (.pd-mono): el texto lleva marcadores {{nodo.campo}}
-               y una tipografia proporcional dificulta ver un punto de mas. -->
+          <!-- Mismo editor de codigo que las plantillas HTML, sin la gramatica
+               de marcado: el texto lleva marcadores {{nodo.campo}} y resaltarlos
+               es lo que permite verlos entre la prosa de la instruccion. -->
           <div>
             <label class="pd-label" for="prompt-text">
               Instruccion<span class="pd-required">*</span>
             </label>
-            <q-input
-              id="prompt-text"
-              ref="promptTextRef"
-              v-model="form.promptText"
-              type="textarea"
-              outlined
-              class="q-mt-xs pd-mono"
-              input-class="pd-mono"
-              rows="8"
-              counter
-              placeholder="Extrae el titular de: {{parsed_email.clean_body}}"
-              :rules="[(val: string) => !!val.trim() || 'La instruccion es obligatoria']"
-            />
+            <div id="prompt-text" class="q-mt-xs">
+              <PromptCodeEditor
+                ref="promptEditorRef"
+                :model-value="form.promptText"
+                @update:model-value="form.promptText = $event"
+              />
+            </div>
+            <p
+              v-if="form.promptText.trim() === ''"
+              class="pd-required q-mt-xs q-mb-none"
+              data-test="prompt-text-error"
+            >
+              La instruccion es obligatoria
+            </p>
             <p class="pd-subtitle q-mt-xs q-mb-sm">
               Admite marcadores <span class="pd-mono">{{ MARKER_EXAMPLE }}</span
               >, que el motor resuelve contra el contexto en tiempo de ejecucion.
@@ -370,6 +384,7 @@ const onSubmit = async (): Promise<void> => {
             label="Guardar"
             icon-right="north_east"
             type="submit"
+            :disable="!isFormValid"
             :loading="aiPromptTemplatesStore.isLoading"
           />
         </q-card-actions>

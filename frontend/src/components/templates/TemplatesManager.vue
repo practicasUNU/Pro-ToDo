@@ -41,6 +41,7 @@ const columns: QTableColumn<HtmlTemplate>[] = [
     label: 'Descripcion',
     field: (row: HtmlTemplate) => row.description ?? '—',
     align: 'left',
+    classes: 'pd-cell--long',
   },
   {
     name: 'variables',
