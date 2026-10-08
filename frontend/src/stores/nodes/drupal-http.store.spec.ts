@@ -34,7 +34,11 @@ let nodeCounter = 0;
 const nextNodeId = (): string => `destino_http_${(nodeCounter += 1)}`;
 
 /** UUID v4 validos, para no depender de literales repetidos por el archivo. */
-const SOURCE_UUID = DRUPAL_SANDBOX_PRESETS.ABRIR_LICITACION.targetNodeUuid;
+// `targetNodeUuid` del catalogo es `string | null` desde que existe el preset
+// de Notiweb, que da de alta contenido nuevo y no cuelga de ninguna pagina. El
+// de apertura SI declara uno, asi que se estrecha aqui en vez de salpicar cada
+// aserto con una comprobacion que no es lo que la prueba mide.
+const SOURCE_UUID = DRUPAL_SANDBOX_PRESETS.ABRIR_LICITACION.targetNodeUuid as string;
 const DESTINATION_UUID = '3b9f5c21-7d84-4a6e-9c13-2f8e5a0d4b77';
 
 /** Contexto tipico de un flujo completo: escudo delante del destino. */
@@ -447,9 +451,7 @@ describe('useDrupalHttpStore · configuracion del nodo DESTINO_DRUPAL', () => {
       ]);
 
       // 3. Assert 🎯
-      expect(store.configWarnings.some((warning) => warning.includes('PARSER_PRE_IA'))).toBe(
-        false,
-      );
+      expect(store.configWarnings.some((warning) => warning.includes('PARSER_PRE_IA'))).toBe(false);
     });
   });
 
@@ -468,7 +470,10 @@ describe('useDrupalHttpStore · configuracion del nodo DESTINO_DRUPAL', () => {
       expect(store.config.bundle).toBe('node--page');
       expect(store.config.targetNodeUuid).toBe(preset.targetNodeUuid);
       expect(store.config.destinationNodeUuid).toBeNull();
-      expect(store.config.containerSelector).toBeNull();
+      // Contra el propio preset y no contra un literal: el selector del panel
+      // desplegable es un dato del portal, y repetirlo aqui crearia una segunda
+      // copia que se quedaria atras si Madrid+D remaqueta la pagina.
+      expect(store.config.containerSelector).toBe(preset.containerSelector);
       expect(store.config.itemSelector).toBeNull();
       expect(store.config.insertPosition).toBe('PREPEND');
     });
@@ -792,6 +797,36 @@ describe('useDrupalHttpStore · configuracion del nodo DESTINO_DRUPAL', () => {
       expect(store.config.titleTemplate).toBeNull();
       expect(store.config.bundle).toBe(DEFAULT_DRUPAL_BUNDLE);
       expect(store.namespaceOptions).toEqual([]);
+    });
+  });
+
+  describe('7. Preset de Notiweb', () => {
+    it('7.1 deberia dar de alta contenido nuevo sin pagina receptora', () => {
+      // 1. Arrange 📐
+      const store = useDrupalHttpStore(nextNodeId());
+
+      // 2. Act ⚙️
+      store.applyNotiwebPreset();
+
+      // 3. Assert 🎯: modo, bundle y ausencia de contenedor se escriben a la
+      //    vez; por separado no significan nada.
+      expect(store.config.operationMode).toBe(DrupalOperationMode.CREATE_NODE);
+      expect(store.config.bundle).toBe('node--noticias');
+      expect(store.config.containerSelector).toBeNull();
+      expect(store.config.itemSelector).toBeNull();
+    });
+
+    it('7.2 deberia dejar el UUID sin rellenar en vez de inventar uno', () => {
+      // 1. Arrange 📐
+      const store = useDrupalHttpStore(nextNodeId());
+
+      // 2. Act ⚙️
+      store.applyNotiwebPreset();
+
+      // 3. Assert 🎯: cada noticia es su propia entidad y no cuelga de ninguna
+      //    pagina conocida. Un UUID v4 inventado casaria el patron, dejaria el
+      //    paso valido y reventaria en ejecucion con un 404 ya PAUSADO.
+      expect(store.config.targetNodeUuid).toBeNull();
     });
   });
 });

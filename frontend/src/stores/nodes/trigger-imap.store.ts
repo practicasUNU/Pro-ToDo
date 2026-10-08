@@ -3,7 +3,14 @@ import { computed, ref } from 'vue';
 
 import * as triggerImapService from '@services/nodes/trigger-imap.service';
 
+import {
+  DEFAULT_SUBJECT_MATCH_MODE,
+  buildSubjectPattern,
+  readSubjectPattern,
+} from '@/utils/subject-filter-mode';
+
 import type { HydratableNode } from '@stores/nodes/node-store-registry';
+import type { SubjectMatchMode } from '@/utils/subject-filter-mode';
 
 import type { CheckImapPayload, CheckImapResult } from '@/types/pipeline';
 
@@ -152,6 +159,19 @@ const triggerImapSetup = () => {
   const config = ref<TriggerImapConfig>(buildInitialConfig());
 
   /**
+   * Modo con el que se compone `subjectFilterRegex`, y texto que el operador
+   * teclea en el.
+   *
+   * NINGUNO de los dos se persiste: `toNodeParams()` solo publica el patron ya
+   * compuesto, porque el DTO del backend valida con `forbidNonWhitelisted` y
+   * una clave de mas seria un 400 al guardar el flujo. Al hidratar se deducen
+   * de la forma del patron (`readSubjectPattern`), de modo que la unica fuente
+   * de verdad sigue siendo `config.subjectFilterRegex`.
+   */
+  const subjectMatchMode = ref<SubjectMatchMode>(DEFAULT_SUBJECT_MATCH_MODE);
+  const subjectMatchDraft = ref('');
+
+  /**
    * La conexion se ha probado con exito para los valores ACTUALES del formulario.
    *
    * Se invalida en cuanto cambia cualquier campo de conexion (ver `patchConfig`).
@@ -292,6 +312,81 @@ const triggerImapSetup = () => {
   };
 
   /**
+   * Recompone el patron a partir del modo y el borrador actuales.
+   *
+   * Pasa por `patchFilters` y no por `patchConfig`: el asunto no interviene en
+   * la prueba de credenciales.
+   */
+  const syncSubjectPattern = (): void => {
+    patchFilters({
+      subjectFilterRegex: buildSubjectPattern(subjectMatchMode.value, subjectMatchDraft.value),
+    });
+  };
+
+  /**
+   * Cambia de modo sin perder nunca el patron ya escrito.
+   *
+   * Entrar en `ADVANCED` vuelca el patron compuesto en el borrador, para que el
+   * operador retoque exactamente lo que estaba guardado en vez de encontrarse
+   * el campo vacio.
+   *
+   * SALIR de `ADVANCED` no reinterpreta el borrador como texto llano, que es el
+   * error que destruiria el dato: escribir `^S_2026_` a mano y volver a "empieza
+   * por" lo convertiria en el literal `\^S_2026_`. Se relee la FORMA del patron
+   * y manda lo que diga; si no es expresable en un modo asistido, la peticion se
+   * ignora y el nodo se queda en avanzado. Un patron escrito a mano solo
+   * desaparece si quien lo escribio lo borra.
+   */
+  const setSubjectMatchMode = (mode: SubjectMatchMode): void => {
+    if (mode === subjectMatchMode.value) return;
+
+    if (mode === 'ADVANCED') {
+      subjectMatchDraft.value = config.value.subjectFilterRegex;
+      subjectMatchMode.value = mode;
+      return;
+    }
+
+    if (subjectMatchMode.value === 'ADVANCED') {
+      const reading = readSubjectPattern(config.value.subjectFilterRegex);
+
+      if (reading.mode === 'ADVANCED') return;
+
+      subjectMatchMode.value = reading.mode;
+      subjectMatchDraft.value = reading.draft;
+      return;
+    }
+
+    subjectMatchMode.value = mode;
+    syncSubjectPattern();
+  };
+
+  /** Escribe el texto del modo activo y recompone el patron. */
+  const setSubjectMatchDraft = (draft: string): void => {
+    subjectMatchDraft.value = draft;
+    syncSubjectPattern();
+  };
+
+  /**
+   * Escribe el patron TAL CUAL, desde el campo de modo avanzado.
+   *
+   * Tiene que ser una via propia y no `setSubjectMatchDraft`: aquel compone el
+   * patron segun el modo activo, de modo que teclear `^S_2026_.*` con el modo
+   * en "contiene" lo guardaria escapado como el literal `\^S_2026_\.\*`. Y
+   * mientras el patron saliera escapado, jamas podria dejar de compilar: el
+   * bloqueo del paso ante una expresion invalida —que es para lo que existe la
+   * regla— se habria vuelto inalcanzable.
+   *
+   * Escribir aqui ES entrar en modo avanzado: el campo solo esta a la vista
+   * dentro de su acordeon, y lo que se teclea deja de ser expresable por los
+   * modos asistidos en cuanto no es texto llano.
+   */
+  const setAdvancedSubjectPattern = (pattern: string): void => {
+    subjectMatchMode.value = 'ADVANCED';
+    subjectMatchDraft.value = pattern;
+    patchFilters({ subjectFilterRegex: pattern });
+  };
+
+  /**
    * Prueba las credenciales contra el servidor de correo.
    *
    * No captura la excepcion: el store solo garantiza el `finally` que apaga
@@ -410,6 +505,13 @@ const triggerImapSetup = () => {
       includeAttachments: params.includeAttachments === true,
     };
 
+    // El modo no viaja en los `params`: se deduce de la forma del patron. Lo
+    // que no encaje en una forma generada se abre en modo avanzado con su
+    // expresion intacta.
+    const reading = readSubjectPattern(config.value.subjectFilterRegex);
+    subjectMatchMode.value = reading.mode;
+    subjectMatchDraft.value = reading.draft;
+
     connectionVerified.value = true;
     lastCheckResult.value = null;
   };
@@ -420,6 +522,8 @@ const triggerImapSetup = () => {
     templateLockedFields.value = new Set();
 
     config.value = buildInitialConfig();
+    subjectMatchMode.value = DEFAULT_SUBJECT_MATCH_MODE;
+    subjectMatchDraft.value = '';
     connectionVerified.value = false;
     // El reconocimiento SI se limpia aqui, a diferencia de en `patchConfig`:
     // esto no es corregir un campo, es empezar un nodo distinto.
@@ -440,6 +544,11 @@ const triggerImapSetup = () => {
     toNodeParams,
     patchConfig,
     patchFilters,
+    subjectMatchMode,
+    subjectMatchDraft,
+    setSubjectMatchMode,
+    setSubjectMatchDraft,
+    setAdvancedSubjectPattern,
     hydrateFromNode,
     applyTemplateParams,
     isFieldLockedByTemplate,

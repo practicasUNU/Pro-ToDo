@@ -247,11 +247,7 @@ const drupalHttpSetup = () => {
         ['summaryTemplate', current.summaryTemplate, MAX_DRUPAL_SUMMARY_LENGTH],
         ['containerSelector', current.containerSelector, MAX_DRUPAL_SELECTOR_LENGTH],
         ['itemSelector', current.itemSelector, MAX_DRUPAL_SELECTOR_LENGTH],
-        [
-          'attachmentListSelector',
-          current.attachmentListSelector,
-          MAX_DRUPAL_SELECTOR_LENGTH,
-        ],
+        ['attachmentListSelector', current.attachmentListSelector, MAX_DRUPAL_SELECTOR_LENGTH],
       ] as const
     ).forEach(([key, value, limit]) => {
       if (value !== null && value.length > limit) malformed.push(key);
@@ -328,11 +324,11 @@ const drupalHttpSetup = () => {
       warnings.push(
         config.value.operationMode === DrupalOperationMode.UPLOAD_ATTACHMENT
           ? 'Hay un PARSER_PRE_IA antes de este paso: si extrae el texto de los adjuntos, el ' +
-            'motor libera sus bytes y la subida fallara con ERR_DRUPAL_MISSING_PAYLOAD. ' +
-            'Coloca la subida ANTES del parser.'
+              'motor libera sus bytes y la subida fallara con ERR_DRUPAL_MISSING_PAYLOAD. ' +
+              'Coloca la subida ANTES del parser.'
           : 'Hay un PARSER_PRE_IA antes de este paso. Como este nodo cierra el flujo, la subida ' +
-            'solo encontrara el binario si ese parser tiene "skipDocumentExtraction" activado; ' +
-            'si no, el bloque se publicara sin enlace al fichero.',
+              'solo encontrara el binario si ese parser tiene "skipDocumentExtraction" activado; ' +
+              'si no, el bloque se publicara sin enlace al fichero.',
       );
     }
 
@@ -390,6 +386,10 @@ const drupalHttpSetup = () => {
 
   const applyVerificacionTitulosPreset = (): void => {
     applyPreset('VERIFICACION_TITULOS');
+  };
+
+  const applyNotiwebPreset = (): void => {
+    applyPreset('NOTIWEB');
   };
 
   /** Se COPIA el arreglo: el anfitrion reconstruye el suyo en cada sincronizacion. */
@@ -553,6 +553,7 @@ const drupalHttpSetup = () => {
     applyAbrirLicitacionPreset,
     applyCerrarLicitacionPreset,
     applyVerificacionTitulosPreset,
+    applyNotiwebPreset,
     setAvailableUpstreamContext,
     toNodeParams,
     hydrateFromNode,

@@ -580,6 +580,27 @@ describe('ImapTriggerStrategy', () => {
       expect(result.data?.subject).toBe('Innovacion en Madrid');
     });
 
+    it('2bis.1.1 deberia casar sin distinguir mayusculas de minusculas', async () => {
+      // 1. Arrange 📐: el asunto por defecto es "Innovacion en Madrid"; el
+      // patron viene en minusculas, como lo compone el modo "contiene texto"
+      // del asistente a partir de las palabras clave que teclea el operador.
+      const client = buildClient();
+      useClient(client);
+      const { strategy } = buildStrategy();
+
+      // 2. Act ⚙️
+      const result = await strategy.execute(
+        buildContext(),
+        buildParams({ subjectFilterRegex: '(?:innovacion|convocatoria)' }),
+      );
+
+      // 3. Assert 🎯: sin el flag `i`, el modo asistido obligaria a acertar la
+      // capitalizacion exacta del asunto, que la decide quien envia el correo.
+      expect(result.success).toBe(true);
+      expect(result.halt).toBeUndefined();
+      expect(result.data?.subject).toBe('Innovacion en Madrid');
+    });
+
     it('2bis.2 deberia parar con SUBJECT_FILTERED cuando el asunto no casa', async () => {
       // 1. Arrange 📐
       const client = buildClient();

@@ -12,6 +12,8 @@ import {
 
 import { extractApiErrorMessage } from '@/utils/api-error';
 
+import type { SubjectMatchMode } from '@/utils/subject-filter-mode';
+
 interface Props {
   /** Identificador del nodo en el `pipeline_schema` (contrato uniforme §3.1). */
   nodeId: string;
@@ -35,6 +37,51 @@ const FILTER_HINT = 'Coincidencia por subcadena. Dejalo vacio para no filtrar.';
 
 const SUBJECT_REGEX_HINT =
   'Expresion regular sobre el asunto completo (ej. ^S_2026_.*). El correo que no coincida se descarta sin ejecutar el flujo.';
+
+/**
+ * Modos de coincidencia ofrecidos, en el orden en que se espera que se usen.
+ *
+ * El modo NO es un campo del nodo: no se guarda en `params` (el DTO del backend
+ * valida con `forbidNonWhitelisted`) sino que se deduce de la forma del patron
+ * al abrir un flujo. Ver `@/utils/subject-filter-mode`.
+ */
+const SUBJECT_MODE_OPTIONS: readonly { label: string; value: SubjectMatchMode }[] = [
+  { label: 'Contiene texto', value: 'CONTAINS' },
+  { label: 'Empieza por', value: 'STARTS_WITH' },
+];
+
+const SUBJECT_CONTAINS_HINT =
+  'Escribe palabras clave separadas por comas, ej: licitacion, convocatoria. Basta con que el asunto contenga una de ellas; no se distinguen mayusculas de minusculas.';
+
+const SUBJECT_STARTS_WITH_HINT =
+  'El asunto debe EMPEZAR por este texto, ej: S_2026_. No se distinguen mayusculas de minusculas.';
+
+const SUBJECT_ADVANCED_NOTICE =
+  'Al escribir una expresion regular a mano dejas de usar los modos asistidos: el texto de arriba se sustituye por lo que escribas aqui.';
+
+/** Ayuda del campo asistido, segun el modo activo. */
+const subjectDraftHint = computed(() =>
+  store.subjectMatchMode === 'STARTS_WITH' ? SUBJECT_STARTS_WITH_HINT : SUBJECT_CONTAINS_HINT,
+);
+
+/** Rotulo del campo asistido, segun el modo activo. */
+const subjectDraftLabel = computed(() =>
+  store.subjectMatchMode === 'STARTS_WITH' ? 'El asunto empieza por' : 'El asunto contiene',
+);
+
+/** Marcador de posicion del campo asistido, segun el modo activo. */
+const subjectDraftPlaceholder = computed(() =>
+  store.subjectMatchMode === 'STARTS_WITH' ? 'S_2026_' : 'licitacion, convocatoria',
+);
+
+/**
+ * El patron efectivo, para mostrarlo bajo los modos asistidos.
+ *
+ * Es lo que de verdad se guarda, y enseñarlo evita que el modo asistido sea una
+ * caja negra: el operador que quiera afinarlo sabe con que parte en el acordeon
+ * de modo avanzado.
+ */
+const effectiveSubjectPattern = computed(() => store.config.subjectFilterRegex);
 
 const UNREAD_ONLY_WARNING =
   'Con el filtro desactivado el flujo puede volver a procesar un correo ya leido en cada sondeo.';
@@ -293,28 +340,84 @@ const onTestConnection = async (): Promise<void> => {
         />
       </div>
 
-      <div class="col-12" data-test="subject-filter-regex">
-        <label class="pd-label" for="imap-subject-filter-regex">
-          Asunto coincide con la expresion
-        </label>
-        <!--
-          Sin `debounce`: el store es la unica fuente de verdad del boton
-          "Siguiente" del asistente, y un retardo abre una ventana real en la
-          que el usuario teclea un patron invalido y avanza antes de que el
-          evento llegue a `hasValidFields`.
-        -->
+      <!-- Coincidencia del asunto. El modo se ELIGE (Poka-Yoke §4) y el patron
+           se compone solo; la expresion regular queda relegada al acordeon. -->
+      <div class="col-12 col-md-4" data-test="subject-match-mode">
+        <label class="pd-label" for="imap-subject-match-mode">Modo de coincidencia</label>
+        <q-select
+          id="imap-subject-match-mode"
+          :model-value="store.subjectMatchMode"
+          :options="SUBJECT_MODE_OPTIONS"
+          outlined
+          dense
+          emit-value
+          map-options
+          class="q-mt-xs"
+          :disable="store.subjectMatchMode === 'ADVANCED'"
+          @update:model-value="store.setSubjectMatchMode($event as SubjectMatchMode)"
+        />
+      </div>
+
+      <div
+        v-if="store.subjectMatchMode !== 'ADVANCED'"
+        class="col-12 col-md-8"
+        data-test="subject-match-draft"
+      >
+        <label class="pd-label" for="imap-subject-match-draft">{{ subjectDraftLabel }}</label>
         <q-input
-          id="imap-subject-filter-regex"
-          :model-value="store.config.subjectFilterRegex"
+          id="imap-subject-match-draft"
+          :model-value="store.subjectMatchDraft"
           outlined
           dense
           clearable
-          class="q-mt-xs pd-mono"
-          placeholder="^S_2026_.*"
-          :hint="SUBJECT_REGEX_HINT"
-          :rules="[(val: string) => !val || isValidRegexPattern(val) || SUBJECT_REGEX_RULE]"
-          @update:model-value="store.patchFilters({ subjectFilterRegex: String($event ?? '') })"
+          class="q-mt-xs"
+          :placeholder="subjectDraftPlaceholder"
+          :hint="subjectDraftHint"
+          @update:model-value="store.setSubjectMatchDraft(String($event ?? ''))"
         />
+        <p v-if="effectiveSubjectPattern !== ''" class="pd-subtitle q-mt-xs q-mb-none">
+          Patron aplicado:
+          <span class="pd-mono" data-test="subject-effective-pattern">
+            {{ effectiveSubjectPattern }}
+          </span>
+        </p>
+      </div>
+
+      <div class="col-12">
+        <q-expansion-item
+          dense
+          dense-toggle
+          icon="code"
+          label="Modo avanzado / Expresion regular"
+          :model-value="store.subjectMatchMode === 'ADVANCED'"
+          data-test="subject-advanced-panel"
+          @update:model-value="store.setSubjectMatchMode($event ? 'ADVANCED' : 'CONTAINS')"
+        >
+          <div class="q-pt-sm" data-test="subject-filter-regex">
+            <p class="pd-subtitle q-mb-sm">{{ SUBJECT_ADVANCED_NOTICE }}</p>
+            <label class="pd-label" for="imap-subject-filter-regex">
+              Asunto coincide con la expresion
+            </label>
+            <!--
+              Sin `debounce`: el store es la unica fuente de verdad del boton
+              "Siguiente" del asistente, y un retardo abre una ventana real en la
+              que el usuario teclea un patron invalido y avanza antes de que el
+              evento llegue a `hasValidFields`.
+            -->
+            <q-input
+              id="imap-subject-filter-regex"
+              :model-value="store.config.subjectFilterRegex"
+              outlined
+              dense
+              clearable
+              class="q-mt-xs pd-mono"
+              placeholder="^S_2026_.*"
+              :hint="SUBJECT_REGEX_HINT"
+              :rules="[(val: string) => !val || isValidRegexPattern(val) || SUBJECT_REGEX_RULE]"
+              @update:model-value="store.setAdvancedSubjectPattern(String($event ?? ''))"
+            />
+          </div>
+        </q-expansion-item>
       </div>
 
       <div class="col-12">

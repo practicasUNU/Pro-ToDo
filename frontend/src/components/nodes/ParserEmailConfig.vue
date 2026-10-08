@@ -36,7 +36,10 @@ const SKIP_DOCUMENTS_HINT =
   'Los adjuntos se conservan intactos para los nodos de destino; lo unico que se omite es volcar su texto al prompt del modelo.';
 
 const EXCLUDED_EXTENSIONS_HINT =
-  'Escribe una extension y pulsa Intro para anadirla. Se normaliza sola (pptx pasa a .pptx).';
+  'Elige las extensiones cuyo texto NO quieres volcar al prompt. Solo se ofrecen los formatos que el backend sabe leer: excluir cualquier otro no tendria efecto.';
+
+const SKIP_DOCUMENTS_NOTICE =
+  'Se ignorara el contenido de todos los documentos para la IA; el archivo fisico se mantiene intacto para su subida a Drupal/Acens.';
 
 const MULTIMODAL_TOOLTIP =
   'Si el texto util resultante —cuerpo limpio MAS el texto nativo extraido de los adjuntos— tiene menos de este numero de caracteres y queda algun adjunto de imagen o PDF del que no se saco ni un caracter, el motor FSM preservara los binarios para el procesamiento multimodal por IA.';
@@ -182,12 +185,32 @@ const onRunSandboxTest = async (): Promise<void> => {
         <p class="pd-subtitle q-mt-xs q-mb-none">{{ SKIP_DOCUMENTS_HINT }}</p>
       </div>
 
+      <!-- Con el interruptor activo el selector de abajo queda sin sentido, asi
+           que en su lugar se dice en voz alta que pasa con los ficheros: la
+           duda real del operador es si el adjunto se pierde, y no se pierde. -->
+      <div
+        v-if="store.config.skipDocumentExtraction"
+        class="col-12"
+        data-test="skip-documents-notice"
+      >
+        <q-banner dense class="pd-info-banner">
+          <template #avatar>
+            <q-icon name="info_outline" size="20px" class="pd-node-icon" />
+          </template>
+          {{ SKIP_DOCUMENTS_NOTICE }}
+        </q-banner>
+      </div>
+
       <div class="col-12 col-md-8" data-test="excluded-extensions">
         <label class="pd-label" for="parser-excluded-extensions">
           Extensiones excluidas de la extraccion
         </label>
         <!-- Deshabilitado cuando ya se omiten todos: una lista de excepciones
-             sobre un "ninguno" no excluye nada y solo confunde. -->
+             sobre un "ninguno" no excluye nada y solo confunde.
+
+             Selector CERRADO (§4 Poka-Yoke): sin `use-input` ni
+             `new-value-mode`. Las opciones son las extensiones que el backend
+             sabe leer de verdad; excluir una que no lee no excluye nada. -->
         <q-select
           id="parser-excluded-extensions"
           :model-value="store.config.excludedExtensions"
@@ -195,13 +218,13 @@ const onRunSandboxTest = async (): Promise<void> => {
           :disable="store.config.skipDocumentExtraction"
           multiple
           use-chips
-          use-input
-          new-value-mode="add-unique"
           outlined
           dense
           class="q-mt-xs"
           :hint="EXCLUDED_EXTENSIONS_HINT"
-          @update:model-value="store.updateConfig({ excludedExtensions: ($event as string[]) ?? [] })"
+          @update:model-value="
+            store.updateConfig({ excludedExtensions: ($event as string[]) ?? [] })
+          "
         />
       </div>
     </div>

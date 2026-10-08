@@ -4,7 +4,18 @@
 // DOM, y los specs de store arrancan mas rapido sin el.
 import { config, mount } from '@vue/test-utils';
 import { createPinia, setActivePinia } from 'pinia';
-import { Notify, QBadge, QBtn, QCheckbox, QIcon, QInput, QToggle, Quasar } from 'quasar';
+import {
+  Notify,
+  QBadge,
+  QBtn,
+  QCheckbox,
+  QExpansionItem,
+  QIcon,
+  QInput,
+  QSelect,
+  QToggle,
+  Quasar,
+} from 'quasar';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 // Sin esto se cargaria `@boot/axios`, que necesita entorno de navegador. El
@@ -20,7 +31,16 @@ import { useTriggerImapStore } from '@stores/nodes/trigger-imap.store';
 let nodeCounter = 0;
 const nextNodeId = (): string => `trigger_imap_view_${(nodeCounter += 1)}`;
 
-const QUASAR_COMPONENTS = { QBadge, QBtn, QCheckbox, QIcon, QInput, QToggle };
+const QUASAR_COMPONENTS = {
+  QBadge,
+  QBtn,
+  QCheckbox,
+  QExpansionItem,
+  QIcon,
+  QInput,
+  QSelect,
+  QToggle,
+};
 
 const mountComponent = (nodeId: string): ReturnType<typeof mount> =>
   mount(TriggerImapConfig, {
@@ -36,6 +56,14 @@ const mountComponent = (nodeId: string): ReturnType<typeof mount> =>
  */
 const regexInput = (wrapper: ReturnType<typeof mount>) =>
   wrapper.get('[data-test="subject-filter-regex"]').findComponent(QInput);
+
+/** Selector del modo de coincidencia, por el `data-test` de su contenedor. */
+const modeSelect = (wrapper: ReturnType<typeof mount>) =>
+  wrapper.get('[data-test="subject-match-mode"]').findComponent(QSelect);
+
+/** Campo asistido ("contiene" / "empieza por"), ausente en modo avanzado. */
+const draftInput = (wrapper: ReturnType<typeof mount>) =>
+  wrapper.get('[data-test="subject-match-draft"]').findComponent(QInput);
 
 describe('TriggerImapConfig · filtro de asunto por expresion regular', () => {
   beforeEach(() => {
@@ -152,6 +180,98 @@ describe('TriggerImapConfig · filtro de asunto por expresion regular', () => {
 
       // 3. Assert 🎯
       expect(store.isConfigValid).toBe(true);
+    });
+  });
+
+  describe('4. Modos asistidos de coincidencia', () => {
+    it('4.1 deberia arrancar en "contiene texto" con el campo asistido a la vista', () => {
+      // 1. Arrange 📐 + 2. Act ⚙️
+      const wrapper = mountComponent(nextNodeId());
+
+      // 3. Assert 🎯: la expresion regular deja de ser lo primero que ve el
+      //    operador; queda relegada al acordeon de modo avanzado.
+      expect(modeSelect(wrapper).props('modelValue')).toBe('CONTAINS');
+      expect(draftInput(wrapper).props('modelValue')).toBe('');
+    });
+
+    it('4.2 deberia componer una alternancia desde palabras separadas por comas', async () => {
+      // 1. Arrange 📐
+      const nodeId = nextNodeId();
+      const wrapper = mountComponent(nodeId);
+      const store = useTriggerImapStore(nodeId);
+
+      // 2. Act ⚙️
+      await draftInput(wrapper).setValue('licitacion, convocatoria');
+
+      // 3. Assert 🎯: lo que se guarda sigue siendo un patron; el modo es solo
+      //    la forma de componerlo sin teclear expresiones regulares.
+      expect(store.config.subjectFilterRegex).toBe('(?:licitacion|convocatoria)');
+    });
+
+    it('4.3 deberia anclar el texto al cambiar a "empieza por"', async () => {
+      // 1. Arrange 📐
+      const nodeId = nextNodeId();
+      const wrapper = mountComponent(nodeId);
+      const store = useTriggerImapStore(nodeId);
+
+      await draftInput(wrapper).setValue('S_2026_');
+
+      // 2. Act ⚙️
+      await modeSelect(wrapper).setValue('STARTS_WITH');
+
+      // 3. Assert 🎯
+      expect(store.config.subjectFilterRegex).toBe('^S_2026_');
+    });
+
+    it('4.4 deberia abrir en modo avanzado un patron heredado que no sabe expresar', () => {
+      // 1. Arrange 📐: un flujo guardado antes de que existieran los modos.
+      const nodeId = nextNodeId();
+      const store = useTriggerImapStore(nodeId);
+
+      store.hydrateFromNode({ params: { subjectFilterRegex: '^S_2026_.*' } } as never);
+
+      // 2. Act ⚙️
+      const wrapper = mountComponent(nodeId);
+
+      // 3. Assert 🎯: el modo no viaja en los `params`, se deduce de la forma.
+      //    Lo que no encaja se conserva intacto en vez de perderse.
+      expect(store.subjectMatchMode).toBe('ADVANCED');
+      expect(regexInput(wrapper).props('modelValue')).toBe('^S_2026_.*');
+      expect(wrapper.find('[data-test="subject-match-draft"]').exists()).toBe(false);
+    });
+
+    it('4.5 deberia reabrir en "empieza por" un patron que SI sabe expresar', () => {
+      // 1. Arrange 📐
+      const nodeId = nextNodeId();
+      const store = useTriggerImapStore(nodeId);
+
+      store.hydrateFromNode({ params: { subjectFilterRegex: '^S_2026_' } } as never);
+
+      // 2. Act ⚙️
+      const wrapper = mountComponent(nodeId);
+
+      // 3. Assert 🎯
+      expect(store.subjectMatchMode).toBe('STARTS_WITH');
+      expect(draftInput(wrapper).props('modelValue')).toBe('S_2026_');
+    });
+
+    it('4.6 no deberia reinterpretar como texto llano un patron escrito a mano', async () => {
+      // 1. Arrange 📐: el operador escribe una expresion en el modo avanzado.
+      const nodeId = nextNodeId();
+      const wrapper = mountComponent(nodeId);
+      const store = useTriggerImapStore(nodeId);
+
+      await regexInput(wrapper).setValue('^S_2026_.*');
+      expect(store.subjectMatchMode).toBe('ADVANCED');
+
+      // 2. Act ⚙️: y pide volver a un modo asistido.
+      store.setSubjectMatchMode('CONTAINS');
+
+      // 3. Assert 🎯: la peticion se ignora porque el patron no es expresable.
+      //    Aceptarla escaparia el texto a `\^S_2026_\.\*` y destruiria el
+      //    filtro sin decir una palabra.
+      expect(store.subjectMatchMode).toBe('ADVANCED');
+      expect(store.config.subjectFilterRegex).toBe('^S_2026_.*');
     });
   });
 });

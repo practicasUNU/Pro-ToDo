@@ -68,7 +68,7 @@ const MODE_HINT =
   'Cada modo es un trabajo distinto contra el CMS y pide sus propios campos. Cambiarlo cambia tambien lo que el flujo exige aguas arriba.';
 
 const BUNDLE_HINT =
-  'Es el `data.type` de JSON:API, en la forma entidad--bundle. De el se deriva la ruta de coleccion.';
+  'Identificador del tipo de contenido en Drupal (ej: node--page para paginas generales o agregadoras, node--noticias para publicaciones individuales de Notiweb). Es el `data.type` de JSON:API, en la forma entidad--bundle, y de el se deriva la ruta de coleccion.';
 
 /**
  * Icono de cada destino operativo.
@@ -82,6 +82,7 @@ const PRESET_ICONS: Readonly<Record<DrupalSandboxPresetKey, string>> = {
   ABRIR_LICITACION: 'post_add',
   CERRAR_LICITACION: 'archive',
   VERIFICACION_TITULOS: 'school',
+  NOTIWEB: 'newspaper',
 };
 
 const SANDBOX_NOTICE =
@@ -295,7 +296,10 @@ const toNullableText = (value: string | number | null): string | null => {
 
       <div class="col-12 col-md-5" data-test="bundle-field">
         <label class="pd-label" for="drupal-bundle">
-          Bundle<span class="pd-required">*</span>
+          Tipo de contenido en Drupal (Bundle)<span class="pd-required">*</span>
+          <q-icon name="help_outline" size="15px" class="q-ml-xs pd-hint-icon">
+            <q-tooltip max-width="320px">{{ BUNDLE_HINT }}</q-tooltip>
+          </q-icon>
         </label>
         <q-select
           id="drupal-bundle"
@@ -640,9 +644,9 @@ const toNullableText = (value: string | number | null): string | null => {
               @update:model-value="store.updateConfig({ uploadAttachment: $event === true })"
             />
             <p class="pd-subtitle q-mb-none">
-              El binario solo sobrevive hasta aqui si el PARSER_PRE_IA de delante tiene
-              activado «omitir extraccion de documentos». Si no lo encuentra, el bloque se
-              publica igual, sin enlace.
+              El binario solo sobrevive hasta aqui si el PARSER_PRE_IA de delante tiene activado
+              «omitir extraccion de documentos». Si no lo encuentra, el bloque se publica igual, sin
+              enlace.
             </p>
           </div>
 
@@ -688,6 +692,11 @@ const toNullableText = (value: string | number | null): string | null => {
 </template>
 
 <style scoped lang="scss">
+// Solo maquetacion: el color proviene de los tokens --pd-*.
+.pd-hint-icon {
+  color: var(--pd-text-secondary);
+}
+
 .pd-node-icon {
   color: var(--pd-primary);
 }

@@ -706,6 +706,13 @@ export class ImapTriggerStrategy implements INodeStrategy {
    * correo pasa. El motivo es que el patron puede venir de un `pipeline_schema`
    * guardado antes de que existiera la validacion del DTO, y negarse a leer el
    * buzon dejaria el flujo muerto sin una sola pista en la interfaz.
+   *
+   * Se compila con el flag `i` (insensible a mayusculas). Es lo que permite que
+   * el asistente ofrezca los modos "contiene texto" y "empieza por" componiendo
+   * un patron legible: expresar la insensibilidad dentro del propio texto
+   * exigiria una clase de caracteres por letra (`[Ll][Ii]...`), imposible de
+   * editar a mano desde el modo avanzado. Amplia el conjunto de asuntos que
+   * casan en flujos ya guardados, nunca lo reduce.
    */
   private matchesSubjectFilter(
     parsed: ParsedMail,
@@ -718,7 +725,7 @@ export class ImapTriggerStrategy implements INodeStrategy {
     let pattern: RegExp;
 
     try {
-      pattern = new RegExp(config.subjectFilterRegex);
+      pattern = new RegExp(config.subjectFilterRegex, 'i');
     } catch (error) {
       const detail = error instanceof Error ? error.message : String(error);
       this.logger.warn(

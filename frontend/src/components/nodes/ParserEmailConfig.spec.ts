@@ -4,17 +4,7 @@
 // DOM, y los specs de store arrancan mas rapido sin el.
 import { config, mount } from '@vue/test-utils';
 import { createPinia, setActivePinia } from 'pinia';
-import {
-  Notify,
-  QBanner,
-  QBtn,
-  QCard,
-  QIcon,
-  QInput,
-  QSelect,
-  QToggle,
-  Quasar,
-} from 'quasar';
+import { Notify, QBanner, QBtn, QCard, QIcon, QInput, QSelect, QToggle, Quasar } from 'quasar';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 // Sin esto se cargaria `@boot/axios`, que necesita entorno de navegador. Nada
@@ -70,17 +60,16 @@ describe('ParserEmailConfig · exclusion de documentos adjuntos', () => {
       expect(extensionsSelect(wrapper).props('modelValue')).toEqual([]);
     });
 
-    it('1.2 deberia ofrecer las extensiones preseleccionadas como atajo', () => {
+    it('1.2 deberia ofrecer un selector CERRADO con los formatos que el backend lee', () => {
       // 1. Arrange 📐 + 2. Act ⚙️
       const wrapper = mountComponent(nextNodeId());
 
-      // 3. Assert 🎯: sugerencias, no lista cerrada; el selector admite valores
-      //    nuevos porque este fichero no puede fijar el catalogo de formatos
-      //    que una organizacion decide no leer.
-      expect(extensionsSelect(wrapper).props('options')).toEqual(
-        EXCLUDABLE_EXTENSION_PRESETS,
-      );
-      expect(extensionsSelect(wrapper).props('newValueMode')).toBe('add-unique');
+      // 3. Assert 🎯: lista cerrada (§4 Poka-Yoke). Con entrada libre se podia
+      //    excluir `.zip`, que el extractor del backend ni siquiera lee: la
+      //    exclusion no hacia nada y la interfaz sugeria lo contrario.
+      expect(extensionsSelect(wrapper).props('options')).toEqual(EXCLUDABLE_EXTENSION_PRESETS);
+      expect(extensionsSelect(wrapper).props('newValueMode')).toBeUndefined();
+      expect(extensionsSelect(wrapper).props('useInput')).toBe(false);
     });
   });
 
@@ -140,6 +129,31 @@ describe('ParserEmailConfig · exclusion de documentos adjuntos', () => {
       // 3. Assert 🎯: `isConfigValid` solo mira el umbral de cuerpo util; estas
       //    dos son siempre validas, incluso vacias.
       expect(store.isConfigValid).toBe(true);
+    });
+  });
+
+  describe('4. Aviso de omision de documentos', () => {
+    it('4.1 no deberia mostrar el aviso mientras se extraigan documentos', () => {
+      // 1. Arrange 📐 + 2. Act ⚙️
+      const wrapper = mountComponent(nextNodeId());
+
+      // 3. Assert 🎯
+      expect(wrapper.find('[data-test="skip-documents-notice"]').exists()).toBe(false);
+    });
+
+    it('4.2 deberia explicar que el fichero sobrevive al activar la omision', async () => {
+      // 1. Arrange 📐
+      const nodeId = nextNodeId();
+      const wrapper = mountComponent(nodeId);
+
+      // 2. Act ⚙️
+      await skipToggle(wrapper).setValue(true);
+
+      // 3. Assert 🎯: la duda real del operador es si el adjunto se pierde. No
+      //    se pierde, y decirlo es lo que evita que nadie active el interruptor.
+      const notice = wrapper.get('[data-test="skip-documents-notice"]');
+      expect(notice.text()).toContain('Drupal/Acens');
+      expect(extensionsSelect(wrapper).props('disable')).toBe(true);
     });
   });
 });

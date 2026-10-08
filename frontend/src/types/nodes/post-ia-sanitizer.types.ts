@@ -91,6 +91,61 @@ export const SANITIZER_ALLOWED_TAGS: readonly string[] = [
   'time',
 ];
 
+/** Clave de un atajo de la lista de etiquetas permitidas. */
+export type AllowedTagPresetKey = 'RICH_TEXT' | 'FULL_STRUCTURE' | 'UNRESTRICTED';
+
+/** Un atajo: su rotulo para el boton y las etiquetas que escribe. */
+export interface AllowedTagPreset {
+  readonly label: string;
+  readonly tags: readonly string[];
+}
+
+/**
+ * Atajos para `allowedTags`, ordenados de mas restrictivo a menos.
+ *
+ * `allowedTags` solo puede RESTRINGIR `SANITIZER_ALLOWED_TAGS`: pedir una
+ * etiqueta que no figure alli es `ERR_POST_IA_UNSUPPORTED_TAGS` al ejecutar.
+ * Por eso cada atajo es un subconjunto comprobable de esa lista, y la prueba
+ * del componente lo verifica en vez de confiar en la revision.
+ *
+ * `UNRESTRICTED` es la lista VACIA y no la lista entera: un `allowedTags: []`
+ * significa "no recortes nada" y deja que el saneador aplique su propia lista
+ * blanca. Copiar aqui las 39 etiquetas crearia una segunda fuente de verdad que
+ * se quedaria atras en cuanto el saneador admitiese una mas.
+ */
+export const ALLOWED_TAG_PRESETS: Readonly<Record<AllowedTagPresetKey, AllowedTagPreset>> = {
+  RICH_TEXT: {
+    label: 'Texto enriquecido basico',
+    tags: ['p', 'strong', 'em', 'ul', 'li', 'a'],
+  },
+  FULL_STRUCTURE: {
+    label: 'Estructura completa',
+    tags: [
+      'p',
+      'strong',
+      'em',
+      'ul',
+      'li',
+      'a',
+      'img',
+      'table',
+      'tr',
+      'th',
+      'td',
+      'div',
+      'span',
+      'h3',
+      'h4',
+      'h5',
+      'hr',
+    ],
+  },
+  UNRESTRICTED: {
+    label: 'Sin restricciones',
+    tags: [],
+  },
+};
+
 /**
  * Configuracion del nodo `ESCUDO_POST_IA` en el cliente.
  *

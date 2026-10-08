@@ -2,6 +2,7 @@ import { defineStore, acceptHMRUpdate } from 'pinia';
 import { computed, ref } from 'vue';
 
 import {
+  ALLOWED_TAG_PRESETS,
   DEFAULT_POST_IA_SOURCE_FIELD,
   DEFAULT_POST_IA_SOURCE_NAMESPACE,
   HTML_TAG_PATTERN,
@@ -15,7 +16,10 @@ import { extractStructuralSelectors } from '@/utils/structural-selectors';
 
 import type { HydratableNode, UpstreamNamespace } from '@stores/nodes/node-store-registry';
 
-import type { PostIaSanitizerNodeConfig } from '@/types/nodes/post-ia-sanitizer.types';
+import type {
+  AllowedTagPresetKey,
+  PostIaSanitizerNodeConfig,
+} from '@/types/nodes/post-ia-sanitizer.types';
 
 /** Prefijo del id de Pinia; el sufijo es el `nodeId` del `pipeline_schema`. */
 const STORE_ID_PREFIX = 'postIaSanitizerNode';
@@ -223,6 +227,18 @@ const postIaSanitizerSetup = () => {
   };
 
   /**
+   * Escribe de golpe una lista de etiquetas conocida.
+   *
+   * Vive en el store y no en la plantilla por lo mismo que `applyPreset` en el
+   * nodo de Drupal: es una decision sobre la configuracion del nodo, no sobre
+   * como se pinta. La lista se COPIA porque la del preset es `readonly` y
+   * compartida entre todos los nodos del flujo.
+   */
+  const applyTagPreset = (key: AllowedTagPresetKey): void => {
+    updateConfig({ allowedTags: [...ALLOWED_TAG_PRESETS[key].tags] });
+  };
+
+  /**
    * `params` del nodo para el `pipeline_schema`.
    *
    * LO QUE COINCIDE CON EL DEFECTO SE OMITE, igual que hace el extractor web con
@@ -330,6 +346,7 @@ const postIaSanitizerSetup = () => {
     isConfigValid,
     configWarnings,
     updateConfig,
+    applyTagPreset,
     autoPopulateCriticalSelectors,
     setAvailableUpstreamContext,
     setUpstreamBaseMarkup,

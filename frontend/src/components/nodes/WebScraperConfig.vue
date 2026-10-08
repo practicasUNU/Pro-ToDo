@@ -36,6 +36,17 @@ const MIN_ARTICLE_LENGTH = 200;
 const TARGET_URL_HINT =
   'Se elige una REFERENCIA al contexto, no una direccion concreta: el flujo se ejecutara sobre correos distintos cada dia. La lista la componen los campos de tipo URL que publican los pasos anteriores.';
 
+/**
+ * Como se combinan la posicion elegida y los dominios excluidos.
+ *
+ * El comportamiento ya era este, pero no se enunciaba en ninguna parte de la
+ * interfaz: la lista de posiciones se numera DESPUES de descartar los dominios
+ * bloqueados, de modo que "Posicion 1" no es el primer enlace del correo sino
+ * el primero que sobrevive al filtro.
+ */
+const TARGET_URL_NOTICE =
+  'Nota operativa: si configuras dominios excluidos (ej. madrimasd.org), el sistema descartara automaticamente esos enlaces y tomara el siguiente enlace valido del correo. Si eliges "Posicion 1", se tomara el primer enlace que NO pertenezca a los dominios bloqueados.';
+
 const MISSING_SOURCE_WARNING =
   'Ningun paso anterior de este flujo publica un campo del que pueda salir una URL. Coloca por delante un nodo que la produzca —un PARSER_PRE_IA extrae los enlaces del correo— o reordena el flujo; mientras tanto no hay nada que este nodo pueda extraer.';
 
@@ -176,6 +187,13 @@ const onRunSandboxTest = async (): Promise<void> => {
     </div>
 
     <!-- Campo 1: seleccion determinista de la URL (Poka-Yoke) -->
+    <q-banner dense class="pd-info-banner q-mb-sm" data-test="target-url-notice">
+      <template #avatar>
+        <q-icon name="info_outline" size="20px" class="pd-node-icon" />
+      </template>
+      {{ TARGET_URL_NOTICE }}
+    </q-banner>
+
     <label class="pd-label" for="target-url">
       Enlace a extraer
       <span v-if="!store.config.skipIfEmpty" class="pd-required">*</span>
@@ -231,7 +249,7 @@ const onRunSandboxTest = async (): Promise<void> => {
     >
       {{ SKIP_IF_EMPTY_LOCKED_HINT }}
     </p>
-    <br>
+    <br />
 
     <!-- Campo 1c: dominios excluidos de la extraccion -->
     <label class="pd-label" for="excluded-domains">Dominios que no se extraen</label>

@@ -5,11 +5,14 @@ import { usePostIaSanitizerStore } from '@stores/nodes/post-ia-sanitizer.store';
 
 import { NODE_TYPE_LABELS, NodeType } from '@/types/pipeline';
 import {
+  ALLOWED_TAG_PRESETS,
   MAX_ALLOWED_TAGS,
   MAX_REQUIRED_SELECTORS,
   MAX_SELECTOR_LENGTH,
   SANITIZER_ALLOWED_TAGS,
 } from '@/types/nodes/post-ia-sanitizer.types';
+
+import type { AllowedTagPresetKey } from '@/types/nodes/post-ia-sanitizer.types';
 
 interface Props {
   /** Identificador del nodo en el `pipeline_schema` (contrato uniforme §3.1). */
@@ -252,6 +255,23 @@ const commitTypedSelector = (): void => {
          el flujo entero en vez de al elegir. -->
     <div data-test="allowed-tags-field">
       <label class="pd-label" for="post-ia-tags">Restringir a estas etiquetas</label>
+
+      <!-- Atajos para las tres formas habituales. Se pintan en bucle: dar de
+           alta una cuarta es anadir una entrada a ALLOWED_TAG_PRESETS. -->
+      <div class="row q-gutter-sm q-mt-xs q-mb-sm" data-test="allowed-tags-presets">
+        <q-btn
+          v-for="(preset, key) in ALLOWED_TAG_PRESETS"
+          :key="key"
+          :label="preset.label"
+          outline
+          no-caps
+          dense
+          class="pd-btn-secondary"
+          :data-test="`tag-preset-${key.toLowerCase()}`"
+          @click="store.applyTagPreset(key as AllowedTagPresetKey)"
+        />
+      </div>
+
       <q-select
         id="post-ia-tags"
         :model-value="store.config.allowedTags"

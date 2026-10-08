@@ -8,7 +8,11 @@ import PostIaSanitizerConfig from '@components/nodes/PostIaSanitizerConfig.vue';
 import { usePostIaSanitizerStore } from '@stores/nodes/post-ia-sanitizer.store';
 
 import { NodeType } from '@/types/pipeline';
-import { MAX_REQUIRED_SELECTORS } from '@/types/nodes/post-ia-sanitizer.types';
+import {
+  ALLOWED_TAG_PRESETS,
+  MAX_REQUIRED_SELECTORS,
+  SANITIZER_ALLOWED_TAGS,
+} from '@/types/nodes/post-ia-sanitizer.types';
 
 import type { UpstreamNamespace } from '@stores/nodes/node-store-registry';
 
@@ -285,6 +289,48 @@ describe('PostIaSanitizerConfig · configurador del nodo ESCUDO_POST_IA', () => 
 
       // 3. Assert
       expect(suggestButton(wrapper).props('disable')).toBe(true);
+    });
+  });
+
+  describe('Atajos de etiquetas permitidas', () => {
+    it('deberia ofrecer solo subconjuntos de la lista blanca del saneador', () => {
+      // 1. Arrange 📐 + 2. Act ⚙️
+      const offered = Object.values(ALLOWED_TAG_PRESETS).flatMap((preset) => preset.tags);
+
+      // 3. Assert 🎯: `allowedTags` solo puede RESTRINGIR. Un atajo que pidiera
+      //    una etiqueta ausente de la lista blanca fallaria en ejecucion con
+      //    ERR_POST_IA_UNSUPPORTED_TAGS, y el operador no tendria modo de saber
+      //    que fue el boton y no su eleccion.
+      expect(offered.filter((tag) => !SANITIZER_ALLOWED_TAGS.includes(tag))).toEqual([]);
+    });
+
+    it('deberia escribir la lista del atajo pulsado', async () => {
+      // 1. Arrange 📐
+      const wrapper = mountComponent();
+      const store = usePostIaSanitizerStore(NODE_ID);
+
+      // 2. Act ⚙️
+      await wrapper.get('[data-test="tag-preset-rich_text"]').trigger('click');
+
+      // 3. Assert 🎯
+      expect(store.config.allowedTags).toEqual([...ALLOWED_TAG_PRESETS.RICH_TEXT.tags]);
+      expect(store.unsupportedTags).toEqual([]);
+      expect(store.isConfigValid).toBe(true);
+    });
+
+    it('deberia vaciar la lista con el atajo "Sin restricciones"', async () => {
+      // 1. Arrange 📐
+      const wrapper = mountComponent();
+      const store = usePostIaSanitizerStore(NODE_ID);
+
+      await wrapper.get('[data-test="tag-preset-full_structure"]').trigger('click');
+
+      // 2. Act ⚙️
+      await wrapper.get('[data-test="tag-preset-unrestricted"]').trigger('click');
+
+      // 3. Assert 🎯: vacio NO es "ninguna etiqueta" sino "no recortes nada";
+      //    el saneador aplica entonces su propia lista blanca entera.
+      expect(store.config.allowedTags).toEqual([]);
     });
   });
 });

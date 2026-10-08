@@ -202,6 +202,23 @@ const EXTENSION_KINDS: ReadonlyMap<string, DocumentKind> = new Map([
 ]);
 
 /**
+ * Extensiones de documento cuyo texto este modulo sabe extraer, con el punto
+ * delante y en minusculas (`.pdf`, `.docx`, ...).
+ *
+ * Se DERIVA de `EXTENSION_KINDS` en vez de escribirse a mano: es la misma lista
+ * que decide el lector en ejecucion, de modo que dar de alta un formato nuevo
+ * no puede dejar desactualizado el selector de exclusiones del asistente.
+ *
+ * Existe para que el frontend la replique (ver
+ * `frontend/src/types/parser-email.ts`) y ofrezca un `<q-select>` CERRADO en el
+ * configurador del PARSER_PRE_IA: excluir una extension que el backend ni
+ * siquiera lee no tiene efecto, y poder teclearla sugiere lo contrario.
+ */
+export const EXTRACTABLE_DOCUMENT_EXTENSIONS: readonly string[] = [
+  ...EXTENSION_KINDS.keys(),
+].map((extension) => `.${extension}`);
+
+/**
  * Extension en minusculas, o cadena vacia.
  *
  * El nombre lo controla QUIEN ENVIA el correo (ver la nota de

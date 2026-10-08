@@ -164,7 +164,17 @@ export interface DrupalSandboxPreset {
 
   readonly operationMode: DrupalOperationMode;
   readonly bundle: string;
-  readonly targetNodeUuid: string;
+
+  /**
+   * Pagina o entidad sobre la que actua el destino.
+   *
+   * `null` en los presets que dan de alta contenido nuevo sin colgarlo de una
+   * pagina conocida. Sembrar aqui un UUID inventado para «dejarlo relleno»
+   * seria el peor de los rellenos: el patron v4 casaria, el paso quedaria
+   * valido y el fallo saldria en ejecucion como un 404 con el flujo ya
+   * PAUSADO. Nulo, `isConfigValid` lo reclama en el momento de configurar.
+   */
+  readonly targetNodeUuid: string | null;
 
   /**
    * Pagina receptora en `TRANSFER_HTML_BLOCK`.
@@ -208,7 +218,10 @@ export interface DrupalSandboxPreset {
  * casando— sino en ejecucion, con un 404 de Drupal y el flujo ya PAUSADO.
  */
 export const DRUPAL_SANDBOX_PRESETS: Readonly<
-  Record<'ABRIR_LICITACION' | 'CERRAR_LICITACION' | 'VERIFICACION_TITULOS', DrupalSandboxPreset>
+  Record<
+    'ABRIR_LICITACION' | 'CERRAR_LICITACION' | 'VERIFICACION_TITULOS' | 'NOTIWEB',
+    DrupalSandboxPreset
+  >
 > = {
   ABRIR_LICITACION: {
     label: 'Abrir licitación',
@@ -219,7 +232,10 @@ export const DRUPAL_SANDBOX_PRESETS: Readonly<
     bundle: 'node--page',
     targetNodeUuid: '7f1700bf-b54b-4c12-b71a-8a71f1f0ee38',
     destinationNodeUuid: null,
-    containerSelector: null,
+    // Panel desplegable de "convocatorias abiertas" en la pagina agregadora.
+    // Sin el, el bloque se antepondria al cuerpo entero del nodo y quedaria
+    // fuera del acordeon que el portal presenta.
+    containerSelector: '#collapse2 > .panel-body',
     itemSelector: null,
     // Lo ultimo convocado se lee arriba, que es como el portal presenta la lista.
     insertPosition: 'PREPEND',
@@ -254,10 +270,33 @@ export const DRUPAL_SANDBOX_PRESETS: Readonly<
     bundle: 'node--acreditacion_evaluacion_panel',
     targetNodeUuid: 'b17d69d8-6998-4883-b8dc-153b55dbd9c5',
     destinationNodeUuid: null,
-    containerSelector: null,
+    // Acordeon de paneles del portal. Queda declarado aunque `CREATE_NODE` NO
+    // lo lea —el formulario solo muestra el campo cuando el modo muta un
+    // contenedor—: es el selector real de Madrid+D y sirve si alguna vez este
+    // canal pasa a acumular paneles dentro de la pagina agregadora en vez de
+    // dar de alta una entidad por panel.
+    containerSelector: '#accordionCEU',
     itemSelector: null,
     insertPosition: 'PREPEND',
     associatedTemplateName: 'Verificación de Títulos · Panel de evaluación',
+  },
+  NOTIWEB: {
+    label: 'Notiweb',
+    description:
+      'Da de alta una noticia individual de Notiweb. No cuelga de ninguna pagina agregadora: cada publicacion es su propio nodo.',
+    // Sin pagina receptora: este canal crea entidades sueltas. Se deja el nid
+    // del agregador de licitaciones fuera a proposito y se marca con 0, que es
+    // el valor que dice "no aplica" sin inventar un identificador.
+    nid: 0,
+    operationMode: DrupalOperationMode.CREATE_NODE,
+    bundle: 'node--noticias',
+    // El operador lo escribe: no hay una entidad fija a la que apuntar.
+    targetNodeUuid: null,
+    destinationNodeUuid: null,
+    containerSelector: null,
+    itemSelector: null,
+    insertPosition: 'PREPEND',
+    associatedTemplateName: 'Notiweb · Noticia institucional',
   },
 };
 

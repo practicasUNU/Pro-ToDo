@@ -80,17 +80,32 @@ const asNumber = (value: unknown, fallback: number): number =>
   typeof value === 'number' && Number.isFinite(value) ? value : fallback;
 
 /**
- * Extensiones ofrecidas como atajo en el selector de exclusiones.
+ * Extensiones que el selector de exclusiones ofrece, y las UNICAS admisibles.
  *
- * Es una lista de SUGERENCIAS, no cerrada: el selector admite valores nuevos
- * porque el catalogo de formatos que una organizacion decide no leer no lo
- * puede fijar este fichero.
+ * Replica de `EXTRACTABLE_DOCUMENT_EXTENSIONS`
+ * (`@modules/nodes/utils/document-extractor.util.ts`), que a su vez se deriva
+ * del mapa `EXTENSION_KINDS` con el que el backend decide que lector aplica a
+ * cada adjunto. Cualquier alta alli debe reflejarse aqui.
+ *
+ * Sustituye a la lista de SUGERENCIAS anterior, que ademas dejaba teclear
+ * valores nuevos. Era texto libre, que §4 Poka-Yoke prohibe, y el agujero no
+ * era teorico: excluir `.zip` —que el backend ni siquiera lee— no tiene ningun
+ * efecto, pero la interfaz aceptaba la entrada y sugeria lo contrario.
  */
 export const EXCLUDABLE_EXTENSION_PRESETS: readonly string[] = [
-  '.ppt',
-  '.pptx',
+  '.txt',
+  '.md',
+  '.log',
+  '.csv',
+  '.tsv',
   '.pdf',
-  '.zip',
+  '.docx',
+  '.xlsx',
+  '.xlsm',
+  '.pptx',
+  '.doc',
+  '.xls',
+  '.ppt',
 ];
 
 /**
@@ -330,9 +345,7 @@ const parserEmailSetup = () => {
       // escribirse por SQL directo, sin pasar por este store.
       excludedExtensions: Array.isArray(params.excludedExtensions)
         ? [
-            ...new Set(
-              params.excludedExtensions.map((entry) => normalizeExtension(String(entry))),
-            ),
+            ...new Set(params.excludedExtensions.map((entry) => normalizeExtension(String(entry)))),
           ].filter((extension) => extension !== '')
         : [],
     };
