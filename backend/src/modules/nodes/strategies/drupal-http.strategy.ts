@@ -12,6 +12,7 @@ import { NodeType } from '@core/fsm/types/pipeline-schema.types';
 import { HttpClientService } from '@core/http/http-client.service';
 
 import { BaseHttpDestinationStrategy } from './base/base-http-destination.strategy';
+import { planPanelDispatch } from './drupal-universities';
 
 import {
   DrupalHttpConfigDto,
@@ -26,6 +27,7 @@ import type {
   NodeResult,
 } from '@core/fsm/types/node-strategy.types';
 import type { HttpClientStatusOutcome } from '@core/http/http-client.service';
+import type { PanelDispatch } from './drupal-universities';
 import type { ResolvedDrupalHttpConfig } from '../dto/drupal-http-config.dto';
 import type { CheerioAPI } from 'cheerio';
 import type { ValidatorOptions } from 'class-validator';
@@ -1244,8 +1246,18 @@ export class DrupalHttpStrategy extends BaseHttpDestinationStrategy {
   /**
    * Inserta un bloque en el fragmento HTML de una pagina.
    *
-   * Devuelve el HTML resultante, o el `NodeErrorDetail` si el contenedor
-   * declarado no existe.
+   * Dos rutas, y cual se toma lo decide el MARCADO ENTRANTE, no la
+   * configuracion del nodo:
+   *
+   * - Si trae paneles que declaran su propio destino —un acordeon de varias
+   *   universidades—, cada uno va al suyo. Ver `insertDispatchedPanels`.
+   * - Si no, el fragmento entero va al `containerSelector`, que es como ha
+   *   funcionado siempre y es lo que necesitan los demas flujos que publican
+   *   por este modo (licitaciones, Notiweb): sus bloques no son paneles y no
+   *   declaran destino ninguno.
+   *
+   * Devuelve el HTML resultante, o el `NodeErrorDetail` si algun destino no
+   * existe.
    */
   private insertBlock(
     currentHtml: string,
@@ -1253,6 +1265,11 @@ export class DrupalHttpStrategy extends BaseHttpDestinationStrategy {
     config: ResolvedDrupalHttpConfig,
   ): string | NodeErrorDetail {
     const $ = loadFragment(currentHtml);
+    const plan = planPanelDispatch(blockHtml);
+
+    if (plan.length > 0) {
+      return this.insertDispatchedPanels($, plan, config);
+    }
 
     // Sin `containerSelector` se opera sobre la raiz del fragmento, que es el
     // caso normal: la pagina agregadora es una lista de bloques hermanos.
@@ -1274,6 +1291,72 @@ export class DrupalHttpStrategy extends BaseHttpDestinationStrategy {
       container.first().append(blockHtml);
     } else {
       container.first().prepend(blockHtml);
+    }
+
+    return $.html();
+  }
+
+  /**
+   * Reparte cada panel dentro del sub-acordeon de SU universidad.
+   *
+   * TODO O NADA, y es la decision de diseno de este metodo. Si un solo panel no
+   * tiene donde ir, no se inserta ninguno y el nodo falla nombrandolo. La
+   * alternativa que parecia amable —mandar los huerfanos al `containerSelector`
+   * del nodo— es exactamente la averia que esto viene a arreglar: el panel
+   * aterriza en la raiz del acordeon, fuera de su universidad, la ejecucion se
+   * marca EXITOSA y el unico rastro es un aviso en el log que nadie mira a
+   * tiempo. Un error con el codigo del comite dentro llega antes.
+   *
+   * Que falte el destino significa una de dos, y las dos quiere verlas una
+   * persona: el modelo no sustituyo el relleno de la plantilla, o la pagina no
+   * tiene a esa universidad. Ninguna se arregla publicando igualmente.
+   */
+  private insertDispatchedPanels(
+    $: CheerioAPI,
+    plan: readonly PanelDispatch[],
+    config: ResolvedDrupalHttpConfig,
+  ): string | NodeErrorDetail {
+    const unplaceable = plan.filter(
+      (panel) =>
+        panel.targetSelector === null || $(panel.targetSelector).length === 0,
+    );
+
+    if (unplaceable.length > 0) {
+      const detail = unplaceable
+        .map(
+          (panel) =>
+            `"${panel.committeeCode}" -> ${panel.targetSelector ?? 'sin destino declarado'}`,
+        )
+        .join('; ');
+
+      return {
+        level: 'GRAVE',
+        code: ERR_DRUPAL_DOM_TARGET,
+        message:
+          `No existe en la pagina el contenedor de ${unplaceable.length} de los ${plan.length} paneles recibidos: ${detail}. ` +
+          'No se ha modificado nada. Revisa el mapeo de universidades del prompt o la estructura de la pagina agregadora.',
+        // El CODIGO DEL COMITE y no el selector: es lo que permite localizar el
+        // panel en el material de origen, que es donde esta la correccion.
+        missingFields: unplaceable.map((panel) => panel.committeeCode),
+      };
+    }
+
+    for (const panel of plan) {
+      // `targetSelector` no puede ser null aqui: la guarda de arriba ya
+      // devolvio en ese caso. El `?? ''` es para el compilador, no para el
+      // flujo —un selector vacio no casaria con nada y la guarda ya lo habria
+      // cazado—.
+      const container = $(panel.targetSelector ?? '').first();
+
+      if (config.insertPosition === 'APPEND') {
+        container.append(panel.html);
+      } else {
+        container.prepend(panel.html);
+      }
+
+      this.logger.debug(
+        `Panel "${panel.committeeCode}" inyectado en ${panel.targetSelector ?? ''}.`,
+      );
     }
 
     return $.html();

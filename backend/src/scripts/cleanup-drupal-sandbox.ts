@@ -28,13 +28,23 @@ import { AppModule } from '../app.module';
  * corrida con `--write` anade un bloque mas. Hasta ahora habia que retirarlos a
  * mano, deuda que el propio `test-drupal-sandbox-e2e.ts` ya declaraba.
  *
- * POR QUE ES SEGURO. La purga NO adivina que es contenido de prueba: busca
- * marcadores que solo estampan los scripts E2E. La estrategia de produccion
- * (`DrupalHttpStrategy`) no escribe ningun `data-protodo-injected` ni
- * `data-test-id`, de modo que un bloque publicado por un flujo real es
- * invisible para estos selectores. Esa asimetria es la garantia entera, y
- * conviene no romperla: el dia que la produccion marcase lo que inyecta, este
- * script pasaria a borrar contenido editorial legitimo.
+ * POR QUE ERA SEGURO, Y QUE HA CAMBIADO. La purga no adivina que es contenido
+ * de prueba: busca marcadores. El TSDoc decia aqui que la produccion no
+ * estampaba ninguno y que esa asimetria era «la garantia entera», advirtiendo
+ * de que el dia que la produccion marcase lo que inyecta este script pasaria a
+ * borrar contenido legitimo.
+ *
+ * ESE DIA YA LLEGO. La migracion 034 siembra `data-protodo-injected="true"` en
+ * la plantilla del verificador de titulos, de modo que un panel publicado por
+ * un flujo REAL tambien lo lleva y `[data-protodo-injected="true"]` lo alcanza.
+ * Lo que sigue distinguiendo a una corrida de prueba es `data-test-id`, que solo
+ * estampan los scripts E2E.
+ *
+ * Mientras tanto, el selector por defecto de este script sigue siendo el par
+ * completo, asi que una limpieza de sandbox puede llevarse por delante un panel
+ * de produccion publicado en la misma pagina. Para retirar contenido real a
+ * conciencia esta `npm run drupal:clean` (`drupal-cleanup.ts`), que simula por
+ * defecto y obliga a `--write`.
  *
  * ALCANCE DE «no altera el contenido editorial». Es cierto en ESTRUCTURA, no
  * byte a byte. El PATCH reescribe el `body.value` entero con la serializacion de
@@ -239,6 +249,18 @@ export const textContentOf = (html: string): string =>
 export const COLLAPSE_PLACEHOLDER = 'collapsePanelId';
 
 /**
+ * Literal que la plantilla siembra en el `data-parent` del enlace.
+ *
+ * Hermano del anterior y con el mismo cometido: ser RECONOCIBLE si el modelo no
+ * lo sustituye por el acordeon de la universidad que toca. Antes de la
+ * migracion 035 ese atributo venia cableado a `#accordionCEU`, que es un valor
+ * perfectamente creible —y que el modelo copiaba tal cual—, de modo que los
+ * comites de las otras trece universidades acababan apuntando a CEU sin que
+ * nada lo delatase.
+ */
+export const ACCORDION_PLACEHOLDER = '#accordionPadreId';
+
+/**
  * Motivos por los que un panel no desplegaria al pulsarlo.
  *
  * POR QUE NO LO VE EL ESCUDO_POST_IA. `auditFilledSlots` responde a «quedo algo
@@ -261,6 +283,17 @@ export const findUndeployablePanelReasons = (
     reasons.push(
       `El marcado conserva el valor de relleno "${COLLAPSE_PLACEHOLDER}": el modelo no lo ` +
         'sustituyo por un identificador derivado del comite.',
+    );
+  }
+
+  // Mismo modo de fallo que el anterior, un nivel mas arriba: el panel se
+  // publica bien formado y el escudo lo aprueba, pero `DrupalHttpStrategy` no
+  // encuentra el sub-acordeon y el comite no llega a su universidad. Aqui se
+  // caza antes de gastar la publicacion.
+  if (markup.includes(ACCORDION_PLACEHOLDER)) {
+    reasons.push(
+      `El marcado conserva el valor de relleno "${ACCORDION_PLACEHOLDER}": el modelo no asigno ` +
+        'el acordeon de la universidad que corresponde al comite.',
     );
   }
 

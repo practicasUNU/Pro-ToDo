@@ -1,3 +1,5 @@
+import * as cheerio from 'cheerio';
+
 import { NodeType } from '@core/fsm/types/pipeline-schema.types';
 import { createMockStatePayloadContext } from '@test/factories/state-payload-context.factory';
 
@@ -785,6 +787,178 @@ describe('DrupalHttpStrategy', () => {
       expect(result.success).toBe(true);
       expect(httpClient.requestWithStatus).toHaveBeenCalledTimes(2);
       expect(result.data?.attachment_url).toBe('');
+    });
+  });
+
+  describe('2bis. APPEND_HTML_BLOCK · despacho jerarquico de paneles', () => {
+    const appendParams = {
+      operationMode: DrupalOperationMode.APPEND_HTML_BLOCK,
+      bundle: 'node--page',
+      targetNodeUuid: PAGE_UUID,
+      containerSelector: '#accordion',
+    };
+
+    /** Panel de comite al molde de la plantilla de la migracion 034. */
+    const panel = (code: string, accordion: string): string =>
+      `<div class="panel panel-default" data-protodo-injected="true">` +
+      '<div class="panel-heading"><h5 class="panel-title">' +
+      `<a class="panel-toggle-link" data-parent="${accordion}" href="#collapse${code}">` +
+      `<strong class="panel-comite-codigo">${code}</strong></a>` +
+      `</h5></div><div class="collapse" id="collapse${code}"><p>Cuerpo</p></div></div>`;
+
+    /** Acordeon de dos niveles, como el del portal pero con dos universidades. */
+    const ACCORDION_PAGE =
+      '<div id="accordion">' +
+      '<div class="panel panel-default"><div class="collapse" id="collapseUAM">' +
+      '<div id="accordionUAM"></div></div></div>' +
+      '<div class="panel panel-default"><div class="collapse" id="collapseUCM">' +
+      '<div id="accordionUCM"></div></div></div>' +
+      '</div>';
+
+    /** El HTML que viajo en el PATCH de la llamada indicada. */
+    const sentHtml = (httpClient: HttpMock, index: number): string =>
+      (
+        (
+          callBody(httpClient, index).data?.attributes as Record<
+            string,
+            unknown
+          >
+        ).body as Record<string, string>
+      ).value;
+
+    it('2bis.1 deberia meter cada panel en el sub-acordeon de SU universidad', async () => {
+      // 1. Arrange 📐: EL caso. Antes, el fragmento entero iba al
+      //    `containerSelector` y los dos comites acababan juntos en la raiz,
+      //    fuera de la universidad que les corresponde.
+      const httpClient = buildHttpMock();
+      httpClient.requestWithStatus
+        .mockResolvedValueOnce(pageResponse(ACCORDION_PAGE))
+        .mockResolvedValueOnce(pageResponse(''));
+      const strategy = buildStrategy(httpClient);
+
+      // 2. Act ⚙️
+      const result = await strategy.execute(
+        buildContext({
+          [SOURCE_NAMESPACE]: {
+            [SOURCE_FIELD]:
+              panel('UAM 9', '#accordionUAM') + panel('UCM 3', '#accordionUCM'),
+          },
+        }),
+        appendParams,
+      );
+
+      // 3. Assert 🎯: cada panel DENTRO de su contenedor, no detras de el.
+      const html = sentHtml(httpClient, 1);
+      const $ = cheerio.load(html, { xml: { xmlMode: false } }, false);
+
+      expect(result.success).toBe(true);
+      expect($('#accordionUAM .panel-comite-codigo').text()).toBe('UAM 9');
+      expect($('#accordionUCM .panel-comite-codigo').text()).toBe('UCM 3');
+    });
+
+    it('2bis.2 NO deberia tocar la pagina si un destino no existe', async () => {
+      // 1. Arrange 📐: todo o nada. Mandar el huerfano al `containerSelector`
+      //    es justo la averia que esto arregla: aterriza en la raiz, la
+      //    ejecucion se marca EXITOSA y nadie se entera a tiempo.
+      const httpClient = buildHttpMock();
+      httpClient.requestWithStatus.mockResolvedValueOnce(
+        pageResponse(ACCORDION_PAGE),
+      );
+      const strategy = buildStrategy(httpClient);
+
+      // 2. Act ⚙️
+      const result = await strategy.execute(
+        buildContext({
+          [SOURCE_NAMESPACE]: {
+            [SOURCE_FIELD]:
+              panel('UAM 9', '#accordionUAM') + panel('UPM 2', '#accordionUPM'),
+          },
+        }),
+        appendParams,
+      );
+
+      // 3. Assert 🎯: ningun PATCH, y el CODIGO DEL COMITE en `missingFields`
+      //    —es lo que permite localizarlo en el material de origen—.
+      expect(result.success).toBe(false);
+      expect(result.error?.code).toBe(ERR_DRUPAL_DOM_TARGET);
+      expect(result.error?.missingFields).toEqual(['UPM 2']);
+      expect(httpClient.requestWithStatus).toHaveBeenCalledTimes(1);
+    });
+
+    it('2bis.3 deberia cazar el relleno de la plantilla sin sustituir', async () => {
+      // 1. Arrange 📐: si el modelo no reemplaza el literal, el destino no
+      //    existe y el nodo para aqui en vez de publicar fuera de sitio.
+      const httpClient = buildHttpMock();
+      httpClient.requestWithStatus.mockResolvedValueOnce(
+        pageResponse(ACCORDION_PAGE),
+      );
+      const strategy = buildStrategy(httpClient);
+
+      // 2. Act ⚙️
+      const result = await strategy.execute(
+        buildContext({
+          [SOURCE_NAMESPACE]: {
+            [SOURCE_FIELD]: panel('UAM 9', '#accordionPadreId'),
+          },
+        }),
+        appendParams,
+      );
+
+      // 3. Assert 🎯
+      expect(result.success).toBe(false);
+      expect(result.error?.message).toContain('#accordionPadreId');
+    });
+
+    it('2bis.4 deberia respetar insertPosition dentro del sub-acordeon', async () => {
+      // 1. Arrange 📐: el despacho cambia el DONDE, no el orden.
+      const httpClient = buildHttpMock();
+      httpClient.requestWithStatus
+        .mockResolvedValueOnce(
+          pageResponse(
+            '<div id="accordion"><div id="accordionUAM">' +
+              '<div class="panel panel-default" data-previo="si"></div>' +
+              '</div></div>',
+          ),
+        )
+        .mockResolvedValueOnce(pageResponse(''));
+      const strategy = buildStrategy(httpClient);
+
+      // 2. Act ⚙️
+      await strategy.execute(
+        buildContext({
+          [SOURCE_NAMESPACE]: {
+            [SOURCE_FIELD]: panel('UAM 9', '#accordionUAM'),
+          },
+        }),
+        { ...appendParams, insertPosition: 'APPEND' },
+      );
+
+      // 3. Assert 🎯
+      const html = sentHtml(httpClient, 1);
+
+      expect(html.indexOf('UAM 9')).toBeGreaterThan(
+        html.indexOf('data-previo'),
+      );
+    });
+
+    it('2bis.5 NO deberia alterar la ruta de los flujos que no usan paneles', async () => {
+      // 1. Arrange 📐: licitaciones y Notiweb publican bloques que no son
+      //    `.panel.panel-default` y no declaran destino. Sin esta bifurcacion
+      //    se quedarian sin contenedor y fallarian en bloque.
+      const httpClient = buildHttpMock();
+      httpClient.requestWithStatus
+        .mockResolvedValueOnce(
+          pageResponse(`<div id="accordion">${OTHER_BLOCK}</div>`),
+        )
+        .mockResolvedValueOnce(pageResponse(''));
+      const strategy = buildStrategy(httpClient);
+
+      // 2. Act ⚙️
+      const result = await strategy.execute(buildContext(), appendParams);
+
+      // 3. Assert 🎯
+      expect(result.success).toBe(true);
+      expect(sentHtml(httpClient, 1)).toContain(MARKUP);
     });
   });
 

@@ -7429,9 +7429,12 @@ backend son previos y no varian con esta tanda.
 - **Las tres migraciones estan escritas y SIN APLICAR.** Docker lo levanta el usuario y el servidor
   MCP de PostgreSQL no conecta en esta sesion. Hasta que se apliquen, `OMITIDO` no existe en la base
   y el motor intentaria escribir un valor que el tipo no admite.
-- **El preset `VERIFICACION_TITULOS` lleva `containerSelector: '#accordionCEU'` pero es
-  `CREATE_NODE`,** modo que ni muestra ni envia ese campo. Decision tomada: se deja documentado e
-  inerte, porque el canal da de alta una entidad por panel y no acumula bloques.
+- ~~**El preset `VERIFICACION_TITULOS` lleva `containerSelector: '#accordionCEU'` pero es
+  `CREATE_NODE`,** modo que ni muestra ni envia ese campo.~~ **RESUELTO.** El preset paso a
+  `APPEND_HTML_BLOCK` —el portal presenta un acordeon, no entidades sueltas— de modo que el campo
+  dejo de ser inerte. Y desde el despacho jerarquico vale `#accordion`: el destino real lo decide
+  cada panel por su `data-parent`, y este selector es solo el respaldo del marcado que no declara
+  ninguno. Apuntarlo a CEU mandaba alli los paneles de las otras trece universidades.
 - **El texto de un prompt se sigue guardando sin validar.** `AiPromptTemplatesService` acepta
   `{{inventado.campo}}` con un 201; el gestor de plantillas HTML si lo valida. Sigue pendiente.
 - **`SANITIZER_ALLOWED_TAGS` sigue siendo una replica manual** de la lista del saneador. Los atajos

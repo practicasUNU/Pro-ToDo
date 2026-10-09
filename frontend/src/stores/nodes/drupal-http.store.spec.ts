@@ -536,8 +536,10 @@ describe('useDrupalHttpStore · configuracion del nodo DESTINO_DRUPAL', () => {
       expect(store.config.operationMode).toBe(DrupalOperationMode.APPEND_HTML_BLOCK);
       expect(store.config.bundle).toBe('node--page');
       expect(store.config.targetNodeUuid).toBe(preset.targetNodeUuid);
-      // El contenedor y el envoltorio: con el modo nuevo los dos SI se leen.
-      expect(store.config.containerSelector).toBe('#accordionCEU');
+      // El contenedor es el acordeon RAIZ y actua de respaldo: el destino real
+      // lo decide cada panel por su `data-parent`. Apuntarlo a la universidad
+      // CEU mandaria alli los paneles sin destino resoluble.
+      expect(store.config.containerSelector).toBe('#accordion');
       expect(store.config.itemSelector).toBe('.panel-default');
     });
 

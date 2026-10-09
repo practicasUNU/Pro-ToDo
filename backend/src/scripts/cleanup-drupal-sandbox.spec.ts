@@ -1,4 +1,5 @@
 import {
+  ACCORDION_PLACEHOLDER,
   COLLAPSE_PLACEHOLDER,
   DrupalSandboxCleanupService,
   findUndeployablePanelReasons,
@@ -264,6 +265,35 @@ describe('purgeMarkedBlocks · poda del sandbox de Drupal', () => {
 
       // 3. Assert 🎯
       expect(reasons).toEqual([]);
+    });
+
+    it('6.7 deberia cazar el acordeon de la universidad sin sustituir', () => {
+      // 1. Arrange 📐: mismo modo de fallo que el placeholder del colapsable,
+      //    un nivel mas arriba. El panel se publica bien formado y el escudo lo
+      //    aprueba, pero la estrategia no encuentra el sub-acordeon y el comite
+      //    no llega a su universidad.
+      const markup =
+        '<div class="panel panel-default"><div class="panel-heading"><h5 class="panel-title">' +
+        `<a class="panel-toggle-link" href="#collapseUAM9" data-parent="${ACCORDION_PLACEHOLDER}" data-bs-toggle="collapse">UAM 9</a>` +
+        '</h5></div><div class="collapse" id="collapseUAM9"><p>Contenido</p></div></div>';
+
+      // 2. Act ⚙️
+      const reasons = findUndeployablePanelReasons(markup);
+
+      // 3. Assert 🎯
+      expect(reasons).toHaveLength(1);
+      expect(reasons[0]).toContain(ACCORDION_PLACEHOLDER);
+    });
+
+    it('6.8 NO deberia quejarse de un acordeon ya asignado', () => {
+      // 1. Arrange 📐: el camino feliz del despacho jerarquico.
+      const markup =
+        '<div class="panel panel-default"><div class="panel-heading"><h5 class="panel-title">' +
+        '<a class="panel-toggle-link" href="#collapseUAM9" data-parent="#accordionUAM" data-bs-toggle="collapse">UAM 9</a>' +
+        '</h5></div><div class="collapse" id="collapseUAM9"><p>Contenido</p></div></div>';
+
+      // 2. Act ⚙️ + 3. Assert 🎯
+      expect(findUndeployablePanelReasons(markup)).toEqual([]);
     });
   });
 });

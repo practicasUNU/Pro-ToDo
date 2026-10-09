@@ -275,9 +275,16 @@ export const DRUPAL_SANDBOX_PRESETS: Readonly<
     bundle: 'node--page',
     targetNodeUuid: 'b17d69d8-6998-4883-b8dc-153b55dbd9c5',
     destinationNodeUuid: null,
-    // Acordeon de paneles del portal. Con el modo nuevo SI se lee: es el
-    // contenedor dentro del cual se antepone cada panel.
-    containerSelector: '#accordionCEU',
+    // Acordeon RAIZ del portal, y es un RESPALDO, no el destino.
+    //
+    // El destino real lo decide cada panel por su `data-parent`, y la estrategia
+    // lo reparte al sub-acordeon de su universidad. Este selector solo entra en
+    // juego con marcado que no declara destino ninguno.
+    //
+    // Estuvo en `#accordionCEU`, que era el acordeon de UNA universidad
+    // concreta: un panel sin destino resoluble acababa publicado dentro de CEU,
+    // que es un error bastante mas dificil de ver que dejarlo en la raiz.
+    containerSelector: '#accordion',
     // El envoltorio que siembra la plantilla base, equivalente a
     // `.licitacion-entry` en el canal de licitaciones. Afinarlo a un comite
     // concreto (`[data-comite="CEU1"]`) es trabajo del flujo.
