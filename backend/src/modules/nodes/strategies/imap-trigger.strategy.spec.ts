@@ -426,6 +426,62 @@ describe('ImapTriggerStrategy', () => {
       );
     });
 
+    /**
+     * La colision que este bloque existe para que no vuelva: los dos filtros de
+     * asunto se combinaban en AND y el del SERVIDOR corria primero, de modo que
+     * descartaba los correos con tilde antes de que el plegado NFD del patron
+     * local pudiera verlos. El sintoma no era un error, sino un buzon que
+     * "nunca tenia correo".
+     */
+    it('1bis.2bis NO deberia mandar SUBJECT al servidor cuando hay patron local', async () => {
+      // 1. Arrange 📐
+      const { strategy } = buildStrategy();
+      const client = buildClient();
+      useClient(client);
+      simpleParser.mockResolvedValue(buildParsedMail());
+
+      // 2. Act ⚙️
+      await strategy.execute(
+        buildContext(),
+        buildParams({
+          subjectFilter: 'Verificacion',
+          subjectFilterRegex: '(?:verificacion|titulos)',
+        }),
+      );
+
+      // 3. Assert 🎯: el criterio del servidor se cae entero; filtrar por asunto
+      // pasa a ser responsabilidad exclusiva del patron, que si pliega acentos.
+      expect(client.search).toHaveBeenCalledWith(
+        { seen: false },
+        { uid: true },
+      );
+    });
+
+    it('1bis.2ter deberia procesar un asunto con tilde pese a traer los DOS filtros', async () => {
+      // 1. Arrange 📐: es la combinacion exacta que fallaba. El flujo guardado
+      //    trae los dos campos y el correo real llega acentuado.
+      const client = buildClient();
+      useClient(client);
+      simpleParser.mockResolvedValue(
+        buildParsedMail({ subject: 'Verificación de Títulos 2026' }),
+      );
+      const { strategy } = buildStrategy();
+
+      // 2. Act ⚙️
+      const result = await strategy.execute(
+        buildContext(),
+        buildParams({
+          subjectFilter: 'Verificacion',
+          subjectFilterRegex: '(?:verificacion|titulos)',
+        }),
+      );
+
+      // 3. Assert 🎯
+      expect(result.success).toBe(true);
+      expect(result.halt).toBeUndefined();
+      expect(result.data?.subject).toBe('Verificación de Títulos 2026');
+    });
+
     it('1bis.3 deberia combinar los tres criterios con AND', async () => {
       // 1. Arrange
       const { strategy } = buildStrategy();

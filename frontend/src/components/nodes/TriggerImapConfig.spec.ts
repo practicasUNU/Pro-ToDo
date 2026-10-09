@@ -80,6 +80,27 @@ describe('TriggerImapConfig · filtro de asunto por expresion regular', () => {
       //    en un flujo que nadie configuro para eso.
       expect(regexInput(wrapper).props('modelValue')).toBe('');
     });
+
+    it('1.2 NO deberia ofrecer un segundo campo de asunto', () => {
+      // 1. Arrange 📐: hubo un "Asunto contiene" en la fila superior, que era el
+      //    criterio SUBJECT de IMAP SEARCH. Lo resuelve el SERVIDOR, que no sabe
+      //    de acentos, y al combinarse en AND con el patron local descartaba los
+      //    correos con tilde antes de que la normalizacion diacritica pudiera
+      //    verlos: el badge que promete esa normalizacion quedaba desmentido por
+      //    un campo situado tres lineas mas arriba.
+      const wrapper = mountComponent(nextNodeId());
+
+      // 3. Assert 🎯: el asunto se gobierna SOLO desde la seccion de modo de
+      //    coincidencia. El remitente, que no tiene ese problema, sigue ahi.
+      //    Se localiza por el TEXTO del rotulo y no por el `id`, que Quasar no
+      //    propaga al DOM: el rotulo es lo que de verdad veia duplicado quien
+      //    abria el formulario.
+      const labels = wrapper.findAll('label').map((label) => label.text().trim());
+
+      expect(labels).not.toContain('Asunto contiene');
+      expect(labels).toContain('Remitente contiene');
+      expect(wrapper.find('[data-test="subject-match-mode"]').exists()).toBe(true);
+    });
   });
 
   describe('2. Enlace con el store', () => {

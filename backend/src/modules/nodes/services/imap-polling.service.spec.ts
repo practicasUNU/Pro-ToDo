@@ -497,6 +497,30 @@ describe('ImapPollingService', () => {
       );
     });
 
+    it('2.5bis deberia soltar el SUBJECT del servidor igual que la estrategia', async () => {
+      // 1. Arrange 📐: el sondeo y la estrategia comparten
+      //    `buildImapSearchQuery` justamente para no divergir. Este caso lo fija
+      //    en el escenario nuevo: con patron local, el criterio del servidor se
+      //    cae a los DOS lados o el sondeo despertaria por correos que la
+      //    estrategia no encuentra.
+      const { service, client } = buildHarness();
+
+      // 2. Act ⚙️
+      await service.pollInbox(
+        FLOW_ID,
+        buildParams({
+          subjectFilter: 'Verificacion',
+          subjectFilterRegex: '(?:verificacion|titulos)',
+        }),
+      );
+
+      // 3. Assert 🎯
+      expect(client.search).toHaveBeenCalledWith(
+        { seen: false },
+        { uid: true },
+      );
+    });
+
     it('2.6 NO deberia disparar el flujo si ningun correo casa con los filtros', async () => {
       // 1. Arrange
       const { service, workflows } = buildHarness({ matches: 0 });

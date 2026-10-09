@@ -363,6 +363,26 @@ const resolveAttachmentFilename = (
  *
  * Los criterios se combinan con AND, que es el comportamiento por defecto de
  * IMAP SEARCH: `from` y `subject` son subcadenas, no coincidencias exactas.
+ *
+ * EL CRITERIO `SUBJECT` CEDE ANTE `subjectFilterRegex`. Los dos filtran por
+ * asunto, pero no son dos formas de lo mismo: este lo resuelve el SERVIDOR
+ * —insensible a mayusculas, pero NO a acentos— y el otro se evalua en local con
+ * plegado NFD. Al combinarse en AND y correr el servidor primero, un
+ * `subjectFilter: "Verificacion"` impedia que el buzon devolviese siquiera
+ * "Verificación de Títulos", de modo que `foldDiacritics` no llegaba a
+ * ejecutarse y el formulario prometia una normalizacion que este criterio
+ * rompia aguas arriba. El sintoma no era un error, sino un buzon que "nunca
+ * tiene correo".
+ *
+ * Se resuelve aqui y no solo retirando el campo del formulario porque el fallo
+ * vive en los flujos YA GUARDADOS, que seguirian mandando ambos criterios.
+ *
+ * CONTRAPARTIDA, asumida: sin el criterio `SUBJECT` el sondeo se trae el correo
+ * mas reciente del buzon y lo descarta en OMITIDO si no casa el patron. Con los
+ * valores por defecto (`unreadOnly` y `markAsRead` a `true`) el buzon se consume
+ * de uno en uno y no se pierde nada; con `markAsRead: false` el flujo se atasca
+ * en el mismo mensaje, que es el riesgo que el comentario de `execute` ya
+ * describe y que corre igual cualquier flujo que hoy use solo el patron.
  */
 export const buildImapSearchQuery = (
   config: ResolvedImapConfig,
@@ -370,7 +390,9 @@ export const buildImapSearchQuery = (
   const query: SearchObject = {
     ...(config.unreadOnly ? { seen: false } : {}),
     ...(config.fromFilter !== null ? { from: config.fromFilter } : {}),
-    ...(config.subjectFilter !== null ? { subject: config.subjectFilter } : {}),
+    ...(config.subjectFilter !== null && config.subjectFilterRegex === null
+      ? { subject: config.subjectFilter }
+      : {}),
   };
 
   // IMAP SEARCH exige al menos un criterio. Con `unreadOnly: false` y sin

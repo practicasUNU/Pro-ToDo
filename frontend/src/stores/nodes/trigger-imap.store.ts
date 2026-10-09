@@ -67,8 +67,17 @@ export const UNVERIFIED_CONNECTION_WARNING =
  */
 export interface TriggerImapFilters {
   fromFilter: string;
-  subjectFilter: string;
-  /** Patron aplicado al asunto ya decodificado. Cadena vacia = sin filtro. */
+  /**
+   * Patron aplicado al asunto ya decodificado. Cadena vacia = sin filtro.
+   *
+   * Es el UNICO filtro de asunto que este formulario compone. Hubo tambien un
+   * `subjectFilter` —el criterio SUBJECT de IMAP SEARCH, que resuelve el
+   * servidor— y se retiro: al combinarse en AND con este, descartaba los
+   * correos con tilde antes de que el plegado NFD pudiera verlos. El DTO del
+   * backend lo sigue aceptando para no romper los flujos ya guardados, pero
+   * este store ya no lo publica, de modo que reabrir y guardar un flujo
+   * heredado lo purga del esquema.
+   */
   subjectFilterRegex: string;
   unreadOnly: boolean;
 }
@@ -138,7 +147,6 @@ const buildInitialConfig = (): TriggerImapConfig => ({
   mailbox: DEFAULT_MAILBOX,
   pollIntervalMs: DEFAULT_POLL_INTERVAL_MS,
   fromFilter: '',
-  subjectFilter: '',
   subjectFilterRegex: '',
   unreadOnly: DEFAULT_UNREAD_ONLY,
   includeAttachments: false,
@@ -431,7 +439,6 @@ const triggerImapSetup = () => {
    */
   const toNodeParams = (): Record<string, unknown> => {
     const fromFilter = config.value.fromFilter.trim();
-    const subjectFilter = config.value.subjectFilter.trim();
     const subjectFilterRegex = config.value.subjectFilterRegex.trim();
 
     return {
@@ -443,7 +450,9 @@ const triggerImapSetup = () => {
       // acaban en el `pipeline_schema`.
       includeAttachments: config.value.includeAttachments,
       ...(fromFilter !== '' ? { fromFilter } : {}),
-      ...(subjectFilter !== '' ? { subjectFilter } : {}),
+      // `subjectFilter` ya NO se publica: el DTO lo tolera, pero omitirlo es lo
+      // que purga del esquema los flujos heredados en cuanto se vuelven a
+      // guardar.
       ...(subjectFilterRegex !== '' ? { subjectFilterRegex } : {}),
     };
   };
@@ -495,7 +504,6 @@ const triggerImapSetup = () => {
       mailbox: asText(params.mailbox) || DEFAULT_MAILBOX,
       pollIntervalMs: asNumber(params.pollIntervalMs, DEFAULT_POLL_INTERVAL_MS),
       fromFilter: asText(params.fromFilter),
-      subjectFilter: asText(params.subjectFilter),
       subjectFilterRegex: asText(params.subjectFilterRegex),
       unreadOnly: params.unreadOnly !== false,
       // Comparacion estricta y no `!== false` como el de arriba: aquel es un

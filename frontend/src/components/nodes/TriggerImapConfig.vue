@@ -322,7 +322,13 @@ const onTestConnection = async (): Promise<void> => {
     </p>
 
     <div class="row q-col-gutter-md">
-      <div class="col-12 col-md-6">
+      <!-- El asunto NO se filtra aqui: tiene su propia seccion debajo, con el
+           modo de coincidencia. Hubo un "Asunto contiene" en esta fila y se
+           retiro porque era el criterio SUBJECT de IMAP SEARCH —lo resuelve el
+           servidor, que no sabe de acentos— y, al combinarse en AND con el
+           patron local, descartaba los correos con tilde antes de que la
+           normalizacion diacritica pudiera verlos. -->
+      <div class="col-12">
         <label class="pd-label" for="imap-from-filter">Remitente contiene</label>
         <q-input
           id="imap-from-filter"
@@ -334,21 +340,6 @@ const onTestConnection = async (): Promise<void> => {
           placeholder="redaccion@noticias.es"
           :hint="FILTER_HINT"
           @update:model-value="store.patchFilters({ fromFilter: String($event ?? '') })"
-        />
-      </div>
-
-      <div class="col-12 col-md-6">
-        <label class="pd-label" for="imap-subject-filter">Asunto contiene</label>
-        <q-input
-          id="imap-subject-filter"
-          :model-value="store.config.subjectFilter"
-          outlined
-          dense
-          clearable
-          class="q-mt-xs"
-          placeholder="Notiweb"
-          :hint="FILTER_HINT"
-          @update:model-value="store.patchFilters({ subjectFilter: String($event ?? '') })"
         />
       </div>
 

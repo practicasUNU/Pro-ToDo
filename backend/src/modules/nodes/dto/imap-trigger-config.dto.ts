@@ -265,10 +265,25 @@ export class ImapTriggerConfigDto {
   })
   fromFilter?: string;
 
+  /**
+   * DEPRECADO: lo sustituye `subjectFilterRegex`.
+   *
+   * Sigue declarado y validandose, pero `buildImapSearchQuery` lo IGNORA en
+   * cuanto hay un patron local, porque este criterio lo resuelve el servidor y
+   * no sabe de acentos: con los dos activos descartaba los correos con tilde
+   * antes de que el plegado NFD pudiera verlos.
+   *
+   * NO se retira de este DTO aunque el formulario ya no lo ofrezca. La
+   * validacion corre con `forbidNonWhitelisted`, de modo que borrar la
+   * propiedad convertiria en un 400 a cualquier flujo ya guardado que la traiga
+   * en su `configuracion_pipeline`. Mismo criterio que `outputNamespace` en
+   * `TemplateMapperConfigDto`: tolerado y deliberadamente ignorado.
+   */
   @ApiPropertyOptional({
     description:
-      'Filtra por asunto (subcadena, criterio SUBJECT de IMAP SEARCH). Omitir para no filtrar',
+      'DEPRECADO (usa subjectFilterRegex). Filtra por asunto (subcadena, criterio SUBJECT de IMAP SEARCH), y se ignora cuando hay un patron local',
     example: 'Notiweb',
+    deprecated: true,
   })
   @IsOptional()
   @IsString({ message: 'subjectFilter debe ser una cadena.' })
@@ -343,15 +358,25 @@ export interface ResolvedImapConfig {
   readonly markAsRead: boolean;
   /** `null` cuando no se filtra por remitente; nunca cadena vacia. */
   readonly fromFilter: string | null;
-  /** `null` cuando no se filtra por asunto; nunca cadena vacia. */
+  /**
+   * `null` cuando no se filtra por asunto; nunca cadena vacia.
+   *
+   * DEPRECADO: `buildImapSearchQuery` lo ignora si hay `subjectFilterRegex`. Se
+   * conserva en la config resuelta —y en este orden— porque
+   * `ImapPollingService.hasConfigChanged` compara con `JSON.stringify`, que
+   * respeta el orden de insercion: quitarlo reprogramaria todos los sondeos.
+   */
   readonly subjectFilter: string | null;
   /**
    * Patron aplicado al asunto ya decodificado, o `null` si no se filtra.
    *
-   * Complementa a `subjectFilter` en lugar de sustituirlo: aquel es un criterio
-   * de IMAP SEARCH que resuelve el servidor (y por tanto descarta mensajes sin
-   * descargarlos), mientras que este se evalua en local sobre el asunto ya
-   * decodificado de MIME, que es la unica forma de aplicar anclas como `^`.
+   * SUSTITUYE a `subjectFilter` en vez de complementarlo, al reves de lo que
+   * decia esta nota. Aquel es un criterio de IMAP SEARCH que resuelve el
+   * servidor (y por tanto descarta mensajes sin descargarlos), mientras que
+   * este se evalua en local sobre el asunto ya decodificado de MIME, que es la
+   * unica forma de aplicar anclas como `^` Y de plegar los acentos. Convivir
+   * los dos en AND no sumaba precision: el del servidor, que no sabe de
+   * acentos, descartaba antes de que este pudiera opinar.
    */
   readonly subjectFilterRegex: string | null;
   readonly unreadOnly: boolean;

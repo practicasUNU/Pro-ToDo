@@ -1722,7 +1722,7 @@ describe('useFlujoDraftStore · modo edicion', () => {
             mailbox: 'INBOX',
             pollIntervalMs: 60_000,
             unreadOnly: true,
-            subjectFilter: 'Notiweb',
+            subjectFilterRegex: 'Notiweb',
           },
         },
         [MAPPER_NODE_ID]: {
@@ -1767,7 +1767,7 @@ describe('useFlujoDraftStore · modo edicion', () => {
       const mapper = useTemplateMapperStore(MAPPER_NODE_ID);
 
       expect(trigger.config.host).toBe('imap.unuware.com');
-      expect(trigger.config.subjectFilter).toBe('Notiweb');
+      expect(trigger.config.subjectFilterRegex).toBe('Notiweb');
       expect(mapper.config.templateId).toBe(HTML_TEMPLATE_ID);
       expect(mapper.config.outputNamespace).toBe('rendered_html');
     });
@@ -1810,7 +1810,7 @@ describe('useFlujoDraftStore · modo edicion', () => {
       const trigger = useTriggerImapStore(TRIGGER_NODE_ID);
 
       // 2. Act
-      trigger.patchFilters({ subjectFilter: 'Otro asunto' });
+      trigger.patchFilters({ subjectFilterRegex: 'Otro asunto' });
 
       // 3. Assert: un filtro no interviene en las credenciales.
       expect(trigger.connectionVerified).toBe(true);
@@ -1844,7 +1844,7 @@ describe('useFlujoDraftStore · modo edicion', () => {
       if (triggerNode !== undefined) {
         otherNodes[TRIGGER_NODE_ID] = {
           ...triggerNode,
-          params: { ...triggerNode.params, subjectFilter: undefined },
+          params: { ...triggerNode.params, subjectFilterRegex: undefined },
         };
       }
       draft.hydrateForEdit({
@@ -1854,7 +1854,7 @@ describe('useFlujoDraftStore · modo edicion', () => {
 
       // 3. Assert: `toNodeParams()` OMITE los filtros vacios, asi que sin
       // reponer `''` el valor anterior sobreviviria al cambio de flujo.
-      expect(useTriggerImapStore(TRIGGER_NODE_ID).config.subjectFilter).toBe('');
+      expect(useTriggerImapStore(TRIGGER_NODE_ID).config.subjectFilterRegex).toBe('');
     });
   });
 
@@ -1880,7 +1880,7 @@ describe('useFlujoDraftStore · modo edicion', () => {
       // 1. Arrange
       const draft = useFlujoDraftStore();
       draft.hydrateForEdit(buildWorkflowDetail());
-      useTriggerImapStore(TRIGGER_NODE_ID).patchFilters({ subjectFilter: 'Otro asunto' });
+      useTriggerImapStore(TRIGGER_NODE_ID).patchFilters({ subjectFilterRegex: 'Otro asunto' });
       updateWorkflow.mockResolvedValue(buildWorkflow());
 
       // 2. Act
@@ -1890,7 +1890,7 @@ describe('useFlujoDraftStore · modo edicion', () => {
       const [, payload] = updateWorkflow.mock.calls[0] ?? [];
       const params = payload?.pipelineSchema?.nodes[TRIGGER_NODE_ID]?.params;
 
-      expect(params?.subjectFilter).toBe('Otro asunto');
+      expect(params?.subjectFilterRegex).toBe('Otro asunto');
       expect(params?.host).toBe('imap.unuware.com');
     });
 

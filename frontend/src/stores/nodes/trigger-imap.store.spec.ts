@@ -83,7 +83,6 @@ describe('useTriggerImapStore · configuracion del nodo TRIGGER_IMAP', () => {
         mailbox: DEFAULT_MAILBOX,
         pollIntervalMs: DEFAULT_POLL_INTERVAL_MS,
         fromFilter: '',
-        subjectFilter: '',
         subjectFilterRegex: '',
         unreadOnly: DEFAULT_UNREAD_ONLY,
         // Opt-IN, al reves que `unreadOnly`: el base64 de los adjuntos se
@@ -394,7 +393,7 @@ describe('useTriggerImapStore · configuracion del nodo TRIGGER_IMAP', () => {
       // `@IsNotEmpty()`, porque en IMAP SEARCH `''` casa con todo.
       expect(params.unreadOnly).toBe(true);
       expect(params).not.toHaveProperty('fromFilter');
-      expect(params).not.toHaveProperty('subjectFilter');
+      expect(params).not.toHaveProperty('subjectFilterRegex');
     });
 
     it('4bis.2 deberia publicar los filtros recortados cuando tienen valor', () => {
@@ -402,7 +401,7 @@ describe('useTriggerImapStore · configuracion del nodo TRIGGER_IMAP', () => {
       const store = buildVerifiedStore();
       store.patchFilters({
         fromFilter: '  redaccion@noticias.es  ',
-        subjectFilter: '  Notiweb  ',
+        subjectFilterRegex: '  Notiweb  ',
         unreadOnly: false,
       });
 
@@ -411,7 +410,7 @@ describe('useTriggerImapStore · configuracion del nodo TRIGGER_IMAP', () => {
 
       // 3. Assert
       expect(params.fromFilter).toBe('redaccion@noticias.es');
-      expect(params.subjectFilter).toBe('Notiweb');
+      expect(params.subjectFilterRegex).toBe('Notiweb');
       expect(params.unreadOnly).toBe(false);
     });
 
@@ -434,10 +433,10 @@ describe('useTriggerImapStore · configuracion del nodo TRIGGER_IMAP', () => {
       const store = buildVerifiedStore();
 
       // 2. Act
-      store.patchFilters({ subjectFilter: 'Notiweb' });
+      store.patchFilters({ fromFilter: 'redaccion@noticias.es' });
 
       // 3. Assert: un filtro no interviene en la conexion; obligar a reprobarla
-      // por escribir un asunto seria ruido, no seguridad.
+      // por escribir un remitente seria ruido, no seguridad.
       expect(store.connectionVerified).toBe(true);
       expect(store.isConfigValid).toBe(true);
     });
@@ -488,7 +487,7 @@ describe('useTriggerImapStore · configuracion del nodo TRIGGER_IMAP', () => {
       const store = buildVerifiedStore();
 
       // 2. Act
-      store.patchFilters({ subjectFilter: 'Notiweb' });
+      store.patchFilters({ fromFilter: 'redaccion@noticias.es' });
 
       // 3. Assert: un filtro no toca las credenciales, asi que no hay nada nuevo
       //    que advertir.
@@ -519,7 +518,7 @@ describe('useTriggerImapStore · configuracion del nodo TRIGGER_IMAP', () => {
       const store = useTriggerImapStore(NODE_ID);
       const node = buildSavedNode({
         fromFilter: 'redaccion@noticias.es',
-        subjectFilter: 'Notiweb',
+        subjectFilterRegex: 'Notiweb',
       });
 
       // 2. Act
@@ -528,6 +527,28 @@ describe('useTriggerImapStore · configuracion del nodo TRIGGER_IMAP', () => {
       // 3. Assert: el contrato del registro es que hidratar y volver a serializar
       // devuelva lo mismo. Si no, editar un flujo perderia campos en silencio.
       expect(store.toNodeParams()).toEqual(node.params);
+    });
+
+    it('4ter.1bis deberia PURGAR el subjectFilter de un flujo heredado', () => {
+      // 1. Arrange 📐: es la unica excepcion deliberada al viaje de ida y
+      //    vuelta de arriba. Ese campo era el criterio SUBJECT de IMAP SEARCH y
+      //    descartaba los correos con tilde antes de que el patron local
+      //    pudiera plegar los acentos; conservarlo al reguardar perpetuaria la
+      //    colision en el flujo que alguien acaba de abrir para arreglarla.
+      const store = useTriggerImapStore(NODE_ID);
+      const node = buildSavedNode({
+        subjectFilter: 'Verificacion',
+        subjectFilterRegex: '(?:verificacion|titulos)',
+      });
+
+      // 2. Act ⚙️
+      store.hydrateFromNode(node);
+
+      // 3. Assert 🎯
+      const params = store.toNodeParams();
+
+      expect(params).not.toHaveProperty('subjectFilter');
+      expect(params.subjectFilterRegex).toBe('(?:verificacion|titulos)');
     });
 
     it('4ter.2 deberia reponer los filtros que el esquema omite', () => {
@@ -541,7 +562,7 @@ describe('useTriggerImapStore · configuracion del nodo TRIGGER_IMAP', () => {
       // 3. Assert: `''` y no `undefined`, que dejaria el `<q-input>` como campo
       // descontrolado en Vue.
       expect(store.config.fromFilter).toBe('');
-      expect(store.config.subjectFilter).toBe('');
+      expect(store.config.subjectFilterRegex).toBe('');
     });
 
     it('4ter.3 deberia dar la configuracion por verificada', () => {
