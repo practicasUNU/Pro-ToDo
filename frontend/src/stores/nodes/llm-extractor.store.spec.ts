@@ -290,6 +290,86 @@ describe('useLlmExtractorStore · configuracion del nodo PROCESADOR_IA', () => {
     });
   });
 
+  describe('3c. Estimacion de recursos', () => {
+    /** Tabla con las trece comisiones que tumbaron el flujo de titulos. */
+    const TABLA_COMISIONES = `<table class="tableform"><tbody>${Array.from(
+      { length: 13 },
+      () => '<tr><td>{{universidad}}</td><td>{{titulo}}</td></tr>',
+    ).join('')}</tbody></table>`;
+
+    it('3c.1 deberia callarse mientras no haya plantilla base delante', () => {
+      // 1. Arrange 📐: es lo que llega mientras el operador no ha elegido
+      //    plantilla, y tambien si el mapeador fuese detras de este nodo: el
+      //    anfitrion solo mira hacia atras y entregaria `null`.
+      const store = useLlmExtractorStore(nextNodeId());
+
+      // 2. Act ⚙️ + 3. Assert 🎯
+      expect(store.hasResourceEstimation).toBe(false);
+      expect(store.resourceEstimation.complexityLevel).toBe('BAJA');
+    });
+
+    it('3c.2 deberia estimar a partir del marcado que empuja el anfitrion', () => {
+      // 1. Arrange 📐: segundo consumidor de `setUpstreamBaseMarkup`, junto al
+      //    escudo. El marcado llega por el agregador y no leyendo el store del
+      //    mapeador, que es lo que §3.1 prohibe.
+      const store = useLlmExtractorStore(nextNodeId());
+
+      // 2. Act ⚙️
+      store.setUpstreamBaseMarkup(TABLA_COMISIONES);
+
+      // 3. Assert 🎯
+      expect(store.hasResourceEstimation).toBe(true);
+      expect(store.resourceEstimation.complexityLevel).toBe('ALTA');
+    });
+
+    it('3c.3 aplicar la recomendacion deberia dejar el nodo VALIDO', () => {
+      // 1. Arrange 📐: si la recomendacion se saliera de rango, el operador se
+      //    encontraria el "Siguiente" del asistente apagado por culpa de un
+      //    boton que acaba de pulsar.
+      const store = useLlmExtractorStore(nextNodeId());
+      store.updateConfig({ templatePromptId: PROMPT_ID });
+      store.setUpstreamBaseMarkup(TABLA_COMISIONES);
+
+      // 2. Act ⚙️
+      store.applyRecommendedResources();
+
+      // 3. Assert 🎯
+      expect(store.isConfigValid).toBe(true);
+      expect(store.config.timeoutMs).toBe(60_000);
+      expect(store.config.maxTokens).toBeGreaterThanOrEqual(8_192);
+    });
+
+    it('3c.4 sin coleccion deberia DEVOLVER el tope a null, no fijar un numero', () => {
+      // 1. Arrange 📐: `null` es una recomendacion activa, no ausencia de ella.
+      //    Fijar una cifra desactivaria la resolucion en tres escalones del
+      //    backend y congelaria el presupuesto en el esquema para siempre.
+      const store = useLlmExtractorStore(nextNodeId());
+      store.updateConfig({ templatePromptId: PROMPT_ID, maxTokens: 512 });
+      store.setUpstreamBaseMarkup('<article><h1>{{titulo}}</h1></article>');
+
+      // 2. Act ⚙️
+      store.applyRecommendedResources();
+
+      // 3. Assert 🎯
+      expect(store.config.maxTokens).toBeNull();
+      expect(store.toNodeParams()).not.toHaveProperty('maxTokens');
+    });
+
+    it('3c.5 deberia olvidar el marcado al reiniciar el nodo', () => {
+      // 1. Arrange 📐: el marcado pertenece a la topologia de UN flujo. Si
+      //    sobreviviera al reinicio, el nodo estimaria sobre la plantilla del
+      //    flujo anterior.
+      const store = useLlmExtractorStore(nextNodeId());
+      store.setUpstreamBaseMarkup(TABLA_COMISIONES);
+
+      // 2. Act ⚙️
+      store.resetConfig();
+
+      // 3. Assert 🎯
+      expect(store.hasResourceEstimation).toBe(false);
+    });
+  });
+
   describe('4. Avisos de coste', () => {
     it('4.1 deberia avisar del gasto real con un proveedor de pago', () => {
       // 1. Arrange 📐

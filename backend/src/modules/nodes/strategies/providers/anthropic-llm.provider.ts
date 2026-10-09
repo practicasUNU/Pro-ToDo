@@ -5,6 +5,7 @@ import { HttpClientService } from '@core/http/http-client.service';
 import { stripCodeFence } from '@modules/nodes/utils/code-fence.util';
 import {
   ERR_LLM_PROVIDER_CONTRACT,
+  ERR_LLM_PROVIDER_TRUNCATED,
   LlmProvider,
   LlmProviderException,
   buildResponseContractInstruction,
@@ -40,11 +41,35 @@ export const DEFAULT_ANTHROPIC_MODEL = 'claude-sonnet-5-5';
 /**
  * Techo de generacion por inferencia.
  *
- * `max_tokens` es obligatorio en esta API, al reves que en Gemini. No se expone
- * en el DTO del nodo porque el contrato de salida son tres campos de redaccion
- * y no un documento largo; 4096 cubre de sobra una noticia con sus parrafos.
+ * `max_tokens` es obligatorio en esta API, al reves que en Gemini, de modo que
+ * este valor NO es un defecto inocuo: es el tope real de toda inferencia que no
+ * declare el suyo. Gemini, que si puede omitirlo, deja mandar al modelo.
+ *
+ * Fueron 4096 mientras el contrato de salida eran tres campos de redaccion.
+ * Dejo de valer cuando se le sumo `filled_markup`, que es una plantilla
+ * institucional ENTERA dentro de una cadena JSON: una tabla de trece comisiones
+ * universitarias se pasa de largo, la respuesta se corta a media cadena y lo
+ * que llega al log es un `Unterminated string in JSON at position 14471` que no
+ * se parece en nada a su causa.
+ *
+ * 8192 y no mas por el mismo razonamiento que `DEFAULT_LLM_MARKUP_MAX_TOKENS`,
+ * que ya es el tope que la estrategia envia cuando hay plantilla base: sube el
+ * presupuesto donde hace falta sin convertir cada inferencia corriente en una
+ * factura mayor, porque este numero es un TOPE y no un consumo.
  */
-const ANTHROPIC_MAX_TOKENS = 4_096;
+export const ANTHROPIC_MAX_TOKENS = 8_192;
+
+/**
+ * `stop_reason` que delata un corte por presupuesto agotado.
+ *
+ * Se compara en POSITIVO contra este unico valor, y no contra "todo lo que no
+ * sea sano" como hace Gemini con su `STOP`. El motivo es que Anthropic tiene
+ * VARIOS motivos sanos —`end_turn`, `stop_sequence`, `tool_use`— y la lista
+ * puede crecer con la API: una lista blanca desactualizada convertiria una
+ * respuesta correcta en un fallo, mientras que una negra desactualizada como
+ * mucho deja un caso nuevo cayendo donde ya caia.
+ */
+const TRUNCATED_STOP_REASON = 'max_tokens';
 
 /*
  * La frase del contrato y el esquema de salida ya NO viven aqui: los construyen
@@ -209,7 +234,14 @@ export class AnthropicLlmProvider implements ILlmProviderClient {
       );
     }
 
-    return this.toPayload(outcome.data, model);
+    // El tope viaja al parser para poder NOMBRARLO en el mensaje de un corte:
+    // sin el, el error diria que falto presupuesto sin decir cuanto habia.
+    // Mismo patron que `GeminiLlmProvider.toPayload`.
+    return this.toPayload(
+      outcome.data,
+      model,
+      config?.maxTokens ?? ANTHROPIC_MAX_TOKENS,
+    );
   }
 
   /**
@@ -261,6 +293,7 @@ export class AnthropicLlmProvider implements ILlmProviderClient {
   private toPayload(
     response: AnthropicApiResponse,
     model: string,
+    maxTokens: number,
   ): LlmResponsePayload {
     // Se busca el primer bloque de texto en vez de tomar `content[0]`: la
     // respuesta puede abrir con bloques de otro tipo y un indice fijo leeria el
@@ -268,6 +301,27 @@ export class AnthropicLlmProvider implements ILlmProviderClient {
     const rawText = response.content?.find(
       (block) => block.type === 'text' && typeof block.text === 'string',
     )?.text;
+
+    // ANTES de parsear, igual que en el cliente de Gemini: un corte por tope de
+    // tokens produce un JSON a medias, y diagnosticarlo como contrato roto
+    // manda a revisar el prompt cuando lo que falta es presupuesto. Hasta ahora
+    // este cliente no miraba el `stop_reason` salvo para el caso de respuesta
+    // vacia, asi que un truncamiento salia por `ERR_LLM_PROVIDER_CONTRACT` con
+    // el mensaje de V8 por toda explicacion.
+    //
+    // Se exige ademas texto parcial: sin NADA que parsear no hubo truncamiento,
+    // hubo respuesta vacia, y eso lo cuenta mejor la guarda de abajo.
+    if (
+      response.stop_reason === TRUNCATED_STOP_REASON &&
+      rawText !== undefined &&
+      rawText.trim().length > 0
+    ) {
+      throw new AnthropicProviderException(
+        `Anthropic corto la respuesta (stop_reason: ${response.stop_reason}, ` +
+          `max_tokens: ${maxTokens}). Sube el tope de tokens del nodo.`,
+        ERR_LLM_PROVIDER_TRUNCATED,
+      );
+    }
 
     if (rawText === undefined || rawText.trim().length === 0) {
       throw new AnthropicProviderException(

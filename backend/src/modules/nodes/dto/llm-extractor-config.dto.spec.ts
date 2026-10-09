@@ -52,10 +52,14 @@ describe('resolveLlmExtractorConfig · politica de red', () => {
       expect(config.maxRetries).toBe(2);
     });
 
-    it('1.3 deberia preferir los params del nodo al entorno', () => {
-      // 1. Arrange 📐: el entorno es el ULTIMO escalon, no el primero. Un nodo
-      //    que declara su espera manda sobre el `.env`, igual que ya ocurre con
-      //    el proveedor y el modelo.
+    it('1.3 el entorno deberia ser PISO de la espera y TECHO de los reintentos', () => {
+      // 1. Arrange 📐: aqui esta la inversion. El nodo pide MENOS espera que el
+      //    entorno —el caso del flujo guardado con los 15 000 de antes— y MENOS
+      //    reintentos de los que el entorno tolera.
+      //
+      //    La asimetria responde a de que lado esta el riesgo: quedarse corto
+      //    de espera mata una inferencia que iba bien, mientras que pasarse de
+      //    reintentos se paga en tokens.
       const dto = buildDto({ timeoutMs: 20_000, maxRetries: 0 });
 
       // 2. Act ⚙️
@@ -65,8 +69,38 @@ describe('resolveLlmExtractorConfig · politica de red', () => {
       });
 
       // 3. Assert 🎯
-      expect(config.timeoutMs).toBe(20_000);
+      expect(config.timeoutMs).toBe(90_000);
       expect(config.maxRetries).toBe(0);
+    });
+
+    it('1.3bis los params del nodo deberian mandar cuando piden MAS espera', () => {
+      // 1. Arrange 📐: es un piso, no una imposicion. Un nodo que declaro dos
+      //    minutos sabe algo del documento que procesa que el `.env` no sabe.
+      const dto = buildDto({ timeoutMs: 120_000, maxRetries: 5 });
+
+      // 2. Act ⚙️
+      const config = resolveLlmExtractorConfig(dto, {
+        timeoutMs: 60_000,
+        maxRetries: 1,
+      });
+
+      // 3. Assert 🎯: y los reintentos van al reves — el entorno los recorta.
+      expect(config.timeoutMs).toBe(120_000);
+      expect(config.maxRetries).toBe(1);
+    });
+
+    it('1.3ter sin variables declaradas NO deberia cambiar nada', () => {
+      // 1. Arrange 📐: la guarda que hace inocuo el cambio en una instalacion
+      //    que no declare `LLM_HTTP_*`. Sin ella, la constante por defecto
+      //    actuaria de piso y elevaria en silencio este flujo a 15 000.
+      const dto = buildDto({ timeoutMs: 5_000, maxRetries: 4 });
+
+      // 2. Act ⚙️
+      const config = resolveLlmExtractorConfig(dto, SIN_ENTORNO);
+
+      // 3. Assert 🎯
+      expect(config.timeoutMs).toBe(5_000);
+      expect(config.maxRetries).toBe(4);
     });
 
     it('1.4 deberia seguir siendo invocable sin entorno', () => {

@@ -1,12 +1,14 @@
 import {
   ANTHROPIC_API_KEY_VAR,
   ANTHROPIC_API_URL,
+  ANTHROPIC_MAX_TOKENS,
   ANTHROPIC_VERSION,
   AnthropicLlmProvider,
   AnthropicProviderException,
   DEFAULT_ANTHROPIC_MODEL,
 } from './anthropic-llm.provider';
 import { MockLlmProvider } from './mock-llm.provider';
+import { ERR_LLM_PROVIDER_TRUNCATED } from '@modules/nodes/strategies/interfaces/llm-provider.interface';
 
 import type { HttpClientService } from '@core/http/http-client.service';
 import type { ConfigService } from '@nestjs/config';
@@ -342,7 +344,11 @@ describe('AnthropicLlmProvider · cliente de Claude sobre la Messages API', () =
 
       // 3. Assert 🎯
       expect(sentBody(http)).not.toHaveProperty('temperature');
-      expect(sentBody(http).max_tokens).toBe(4_096);
+      // Contra la CONSTANTE y no contra un literal: el valor sube cuando sube
+      // el presupuesto del contrato, y un numero cableado aqui convertiria ese
+      // cambio en una prueba roja sin informacion. Misma leccion que el spec
+      // del nodo de OCR con `DEFAULT_OCR_MAX_TOKENS`.
+      expect(sentBody(http).max_tokens).toBe(ANTHROPIC_MAX_TOKENS);
     });
   });
 
@@ -511,7 +517,10 @@ describe('AnthropicLlmProvider · cliente de Claude sobre la Messages API', () =
     });
 
     it('4.2 deberia LANZAR ante una respuesta sin contenido generado', async () => {
-      // 1. Arrange 📐
+      // 1. Arrange 📐: SIN texto. Importa que siga saliendo por aqui y no por
+      //    la guarda de truncamiento de 4.2bis pese a traer el mismo
+      //    `stop_reason`: sin nada que parsear no hubo un corte, hubo una
+      //    respuesta vacia, y son dos averias distintas.
       const http = buildHttp();
       http.request.mockResolvedValue({
         data: { content: [], stop_reason: 'max_tokens' },
@@ -521,7 +530,83 @@ describe('AnthropicLlmProvider · cliente de Claude sobre la Messages API', () =
       //    es lo unico que explica por que no hay texto.
       await expect(
         buildProvider(http).generateCompletion(PROMPT),
-      ).rejects.toThrow(/max_tokens/);
+      ).rejects.toThrow(/sin contenido generado/);
+    });
+
+    it('4.2bis deberia diagnosticar el CORTE por tope de tokens, no el contrato', async () => {
+      // 1. Arrange 📐: el fallo real de `FLUJO VERIFICACION DE TITULOS`. El
+      //    modelo agota el presupuesto a media cadena JSON y lo que llegaba al
+      //    log era el `Unterminated string in JSON at position N` de V8 bajo un
+      //    ERR_LLM_PROVIDER_CONTRACT, que manda a revisar el prompt cuando lo
+      //    que falta es presupuesto. Gemini ya lo distinguia; este cliente no.
+      const http = buildHttp();
+      http.request.mockResolvedValue({
+        data: {
+          content: [{ type: 'text', text: '{"headline":"Comision de Bi' }],
+          stop_reason: 'max_tokens',
+        },
+      });
+
+      // 2. Act ⚙️
+      const failure = await buildProvider(http)
+        .generateCompletion(PROMPT, undefined, {
+          model: DEFAULT_ANTHROPIC_MODEL,
+          timeoutMs: 1_000,
+          maxRetries: 0,
+          maxTokens: 8_192,
+        })
+        .catch((error: unknown) => error);
+
+      // 3. Assert 🎯: el codigo es lo que lee la estrategia; el tope va en el
+      //    mensaje para que el operador sepa de cuanto partia.
+      expect(failure).toBeInstanceOf(AnthropicProviderException);
+      expect((failure as AnthropicProviderException).code).toBe(
+        ERR_LLM_PROVIDER_TRUNCATED,
+      );
+      expect((failure as AnthropicProviderException).message).toMatch(
+        /max_tokens: 8192/,
+      );
+    });
+
+    it('4.2ter deberia nombrar el tope del repositorio cuando el nodo no declara ninguno', async () => {
+      // 1. Arrange 📐: es el caso que de verdad se daba, porque la estrategia
+      //    OMITE `maxTokens` mientras el prompt no cite una plantilla base.
+      const http = buildHttp();
+      http.request.mockResolvedValue({
+        data: {
+          content: [{ type: 'text', text: '{"headline":"Cortad' }],
+          stop_reason: 'max_tokens',
+        },
+      });
+
+      // 2. Act ⚙️ & 3. Assert 🎯
+      await expect(
+        buildProvider(http).generateCompletion(PROMPT),
+      ).rejects.toThrow(new RegExp(`max_tokens: ${ANTHROPIC_MAX_TOKENS}`));
+    });
+
+    it('4.2quater NO deberia confundir un final sano con un corte', async () => {
+      // 1. Arrange 📐: Anthropic tiene VARIOS `stop_reason` sanos, de ahi que
+      //    la guarda compare en positivo contra `max_tokens` en vez de contra
+      //    "todo lo que no sea el unico valor bueno", como hace Gemini.
+      const http = buildHttp();
+      http.request.mockResolvedValue({
+        data: {
+          content: [
+            {
+              type: 'text',
+              text: '{"headline":"T","summary":"S","body_paragraphs":[]}',
+            },
+          ],
+          stop_reason: 'stop_sequence',
+        },
+      });
+
+      // 2. Act ⚙️
+      const payload = await buildProvider(http).generateCompletion(PROMPT);
+
+      // 3. Assert 🎯
+      expect(payload.headline).toBe('T');
     });
 
     it('4.3 deberia LANZAR cuando el cuerpo no es JSON valido', async () => {

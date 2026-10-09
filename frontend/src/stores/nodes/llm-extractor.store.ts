@@ -26,9 +26,12 @@ import {
 
 import { useSessionStore } from '@stores/session.store';
 import { buildModelOptions } from '@/utils/llm-model-options';
+import { estimateLlmResources } from '@/utils/llm-estimator.util';
 import { filterPromptContext } from '@/utils/prompt-namespaces';
 
 import type { HydratableNode, UpstreamNamespace } from '@stores/nodes/node-store-registry';
+
+import type { LlmResourceEstimate } from '@/utils/llm-estimator.util';
 
 import type {
   LlmExtractorNodeConfig,
@@ -109,6 +112,14 @@ const llmExtractorSetup = () => {
   const sessionStore = useSessionStore();
   const config = ref<LlmExtractorNodeConfig>(buildInitialConfig());
   const availableUpstreamContext = ref<UpstreamNamespace[]>([]);
+
+  /**
+   * Marcado base que aporta un paso ANTERIOR, empujado por el anfitrion.
+   *
+   * `null` significa "no hay plantilla base delante", que es lo mismo que
+   * "todavia no se ha elegido": nunca es un error.
+   */
+  const upstreamBaseMarkup = ref<string | null>(null);
 
   const availableModels = ref<LlmModelDescriptor[]>([]);
   const isLoadingModels = ref<boolean>(false);
@@ -302,6 +313,66 @@ const llmExtractorSetup = () => {
   };
 
   /**
+   * Canal del marcado base; lo invoca el anfitrion al sincronizar un paso.
+   *
+   * Segundo consumidor de este canal, junto al ESCUDO_POST_IA. Va por el
+   * agregador y no leyendo el store del mapeador porque §3.1 prohibe que un
+   * nodo conozca la forma interna de otro.
+   *
+   * Que el marcado LLEGUE aqui depende de que el mapeador vaya DELANTE, y eso
+   * es exactamente la topologia prevista desde el cambio de semantica: el
+   * mapeador publica `rendered_html.compiled_markup` y el prompt de este nodo
+   * lo interpola. Con el mapeador detras, `upstreamBaseMarkup` del anfitrion
+   * —que solo mira hacia atras— entrega `null` y la estimacion se calla, que es
+   * la conducta correcta.
+   */
+  const setUpstreamBaseMarkup = (markup: string | null): void => {
+    upstreamBaseMarkup.value = markup;
+  };
+
+  /**
+   * Proyeccion de recursos de la inferencia, derivada del marcado de delante.
+   *
+   * Es un `computed` y no un dato cargado porque todo lo que necesita ya esta
+   * en memoria: el anfitrion empuja el marcado al cambiar de paso. Pedir ademas
+   * el TEXTO del prompt obligaria a una llamada asincrona —el listado de
+   * plantillas lo omite a proposito— para medir lo que menos influye: lo que
+   * encarece esta inferencia es cuantas fichas hay que rellenar, no lo larga
+   * que sea la orden.
+   */
+  const resourceEstimation = computed<LlmResourceEstimate>(() =>
+    estimateLlmResources(upstreamBaseMarkup.value),
+  );
+
+  /** Hay plantilla base delante y, por tanto, algo que estimar. */
+  const hasResourceEstimation = computed<boolean>(
+    () => (upstreamBaseMarkup.value?.trim().length ?? 0) > 0,
+  );
+
+  /**
+   * Vuelca la recomendacion sobre la configuracion del nodo.
+   *
+   * Quien garantiza que la recomendacion CABE en el nodo es el estimador, que
+   * ya acota contra `MAX_LLM_TIMEOUT_MS` y `MAX_LLM_MAX_TOKENS` antes de
+   * devolverla. `updateConfig` no acota —es una fusion llana— y ponerle un
+   * acotado aqui repartiria la misma regla en dos sitios. Importa que se
+   * respete: dejar el nodo invalido apagaria el "Siguiente" del asistente por
+   * culpa de un boton que el operador acaba de pulsar.
+   *
+   * `recommendedMaxTokens` puede valer `null`, y entonces se escribe `null`: es
+   * la recomendacion ACTIVA de no fijar tope y dejar que lo resuelva el
+   * backend, no la ausencia de recomendacion.
+   */
+  const applyRecommendedResources = (): void => {
+    const estimate = resourceEstimation.value;
+
+    updateConfig({
+      timeoutMs: estimate.recommendedTimeoutMs,
+      maxTokens: estimate.recommendedMaxTokens,
+    });
+  };
+
+  /**
    * Trae el catalogo de prompts, una sola vez por sesion.
    *
    * La guarda esta AQUI y no en el store de dominio, aunque `node-catalog.store`
@@ -440,6 +511,7 @@ const llmExtractorSetup = () => {
   const resetConfig = (): void => {
     config.value = buildInitialConfig();
     availableUpstreamContext.value = [];
+    upstreamBaseMarkup.value = null;
     lastConnectionResult.value = null;
   };
 
@@ -462,6 +534,10 @@ const llmExtractorSetup = () => {
     configWarnings,
     updateConfig,
     setAvailableUpstreamContext,
+    setUpstreamBaseMarkup,
+    resourceEstimation,
+    hasResourceEstimation,
+    applyRecommendedResources,
     loadPrompts,
     fetchAvailableModels,
     testConnection,

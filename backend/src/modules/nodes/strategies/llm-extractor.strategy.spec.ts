@@ -1252,10 +1252,12 @@ describe('LlmExtractorStrategy', () => {
       });
     });
 
-    it('8.6 los params del nodo deberian mandar sobre el entorno', async () => {
-      // 1. Arrange 📐: el entorno es el ULTIMO escalon, no el primero. Un flujo
-      //    que ya declaro su espera no debe cambiar de comportamiento porque
-      //    alguien toque el `.env` del servidor.
+    it('8.6 el entorno deberia ELEVAR la espera que el flujo trae guardada', async () => {
+      // 1. Arrange 📐: la razon de ser de la tanda. El asistente publica
+      //    `timeoutMs` en el esquema aunque el operador no lo toque, de modo
+      //    que todo flujo guardado llevaba 15 000 clavados y ganaba al `.env`.
+      //    Ahora el entorno es un PISO y alcanza a lo ya guardado sin que haya
+      //    que reabrir el flujo.
       const generateCompletion = jest.fn().mockResolvedValue({
         headline: 'T',
         summary: 'S',
@@ -1270,7 +1272,7 @@ describe('LlmExtractorStrategy', () => {
       const aiDefaults = buildAiDefaults({
         getTextHttpDefaults: jest
           .fn()
-          .mockReturnValue({ timeoutMs: 90_000, maxRetries: 4 }),
+          .mockReturnValue({ timeoutMs: 60_000, maxRetries: 1 }),
       });
       const strategy = buildStrategy(
         buildPromptService(),
@@ -1285,15 +1287,58 @@ describe('LlmExtractorStrategy', () => {
         {
           provider: LlmProvider.GEMINI,
           inlinePrompt: 'Redacta.',
-          timeoutMs: 20_000,
-          maxRetries: 1,
+          timeoutMs: 15_000,
+          maxRetries: 3,
+        },
+      );
+
+      // 3. Assert 🎯: la espera sube al piso del entorno y los reintentos bajan
+      //    a su techo. Las dos direcciones en el mismo caso, porque es la
+      //    asimetria lo que hay que fijar.
+      expect(optionsOf(generateCompletion)).toMatchObject({
+        timeoutMs: 60_000,
+        maxRetries: 1,
+      });
+    });
+
+    it('8.7 los params del nodo deberian mandar cuando piden MAS espera', async () => {
+      // 1. Arrange 📐: es un piso, no una imposicion.
+      const generateCompletion = jest.fn().mockResolvedValue({
+        headline: 'T',
+        summary: 'S',
+        body_paragraphs: [],
+        metadata: {
+          tokensPrompt: 0,
+          tokensCompletion: 0,
+          modelUsed: 'x',
+          isMock: false,
+        },
+      });
+      const aiDefaults = buildAiDefaults({
+        getTextHttpDefaults: jest
+          .fn()
+          .mockReturnValue({ timeoutMs: 60_000, maxRetries: 1 }),
+      });
+      const strategy = buildStrategy(
+        buildPromptService(),
+        { provider: LlmProvider.GEMINI, generateCompletion },
+        new MockLlmProvider(),
+        aiDefaults,
+      );
+
+      // 2. Act ⚙️
+      await strategy.execute(
+        buildContext({ parsed_email: { clean_body: CLEAN_BODY } }),
+        {
+          provider: LlmProvider.GEMINI,
+          inlinePrompt: 'Redacta.',
+          timeoutMs: 120_000,
         },
       );
 
       // 3. Assert 🎯
       expect(optionsOf(generateCompletion)).toMatchObject({
-        timeoutMs: 20_000,
-        maxRetries: 1,
+        timeoutMs: 120_000,
       });
     });
   });

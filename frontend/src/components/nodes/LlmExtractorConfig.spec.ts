@@ -269,6 +269,55 @@ describe('LlmExtractorConfig · configurador del nodo PROCESADOR_IA', () => {
     });
   });
 
+  describe('3bis. Estimacion de recursos', () => {
+    /** Tabla con las trece comisiones del flujo de verificacion de titulos. */
+    const TABLA_COMISIONES = `<table class="tableform"><tbody>${Array.from(
+      { length: 13 },
+      () => '<tr><td>{{universidad}}</td></tr>',
+    ).join('')}</tbody></table>`;
+
+    it('3bis.1 NO deberia pintar la tarjeta sin plantilla base delante', () => {
+      // 1. Arrange 📐 + 2. Act ⚙️: sin marcado que medir, una tarjeta que
+      //    siempre dice lo mismo solo anade ruido al formulario.
+      const wrapper = mountComponent(nextNodeId());
+
+      // 3. Assert 🎯
+      expect(wrapper.find('[data-test="resource-estimate"]').exists()).toBe(false);
+    });
+
+    it('3bis.2 deberia pintarla con el nivel ALTA ante una coleccion', async () => {
+      // 1. Arrange 📐
+      const nodeId = nextNodeId();
+      const wrapper = mountComponent(nodeId);
+
+      // 2. Act ⚙️: el marcado llega por el canal del anfitrion.
+      useLlmExtractorStore(nodeId).setUpstreamBaseMarkup(TABLA_COMISIONES);
+      await wrapper.vm.$nextTick();
+
+      // 3. Assert 🎯
+      expect(wrapper.find('[data-test="resource-estimate"]').exists()).toBe(true);
+      expect(wrapper.get('[data-test="estimate-level"]').text()).toBe('ALTA');
+    });
+
+    it('3bis.3 el boton deberia volcar la recomendacion sobre la configuracion', async () => {
+      // 1. Arrange 📐: es una SUGERENCIA, y quien la aplica es el operador. Los
+      //    campos manuales siguen estando y siguen mandando.
+      const nodeId = nextNodeId();
+      const wrapper = mountComponent(nodeId);
+      const store = useLlmExtractorStore(nodeId);
+
+      store.setUpstreamBaseMarkup(TABLA_COMISIONES);
+      await wrapper.vm.$nextTick();
+
+      // 2. Act ⚙️
+      await wrapper.get('[data-test="apply-recommendation"]').trigger('click');
+
+      // 3. Assert 🎯
+      expect(store.config.timeoutMs).toBe(60_000);
+      expect(store.config.maxTokens).toBeGreaterThanOrEqual(8_192);
+    });
+  });
+
   describe('4. Enlace con el store', () => {
     it('4.1 deberia reflejar el proveedor elegido', async () => {
       // 1. Arrange 📐

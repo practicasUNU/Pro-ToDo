@@ -204,8 +204,8 @@ onMounted(async () => {
       <div>
         <div class="pd-h2">{{ NODE_TYPE_LABELS[NodeType.PROCESADOR_IA] }}</div>
         <div class="pd-subtitle">
-          Convierte el texto acumulado en una redaccion estructurada. Su salida alimenta al mapeador
-          de plantilla.
+          Convierte el texto acumulado en una redaccion estructurada y, cuando el mapeador de
+          plantilla va delante, la vuelca sobre el esqueleto HTML que aquel publica.
         </div>
       </div>
     </header>
@@ -435,6 +435,45 @@ onMounted(async () => {
         </q-btn>
       </div>
 
+      <!-- Poka-Yoke: proyecta el coste ANTES de ejecutar, para que el operador no
+           descubra que se quedo corto en forma de JSON cortado a media cadena.
+           Se calla entera sin plantilla base delante: sin marcado que medir, una
+           tarjeta que siempre dice lo mismo solo anade ruido. -->
+      <div v-if="store.hasResourceEstimation" class="col-12">
+        <div class="pd-estimate" data-test="resource-estimate">
+          <div class="row items-center q-gutter-sm">
+            <span
+              class="pd-badge"
+              :class="`pd-estimate--${store.resourceEstimation.complexityLevel.toLowerCase()}`"
+              data-test="estimate-level"
+            >
+              {{ store.resourceEstimation.complexityLevel }}
+            </span>
+            <span class="pd-estimate-figures pd-mono">
+              ~{{ store.resourceEstimation.estimatedOutputTokens }} tokens de salida ·
+              {{ Math.round(store.resourceEstimation.recommendedTimeoutMs / 1000) }} s recomendados
+            </span>
+          </div>
+
+          <p class="pd-estimate-reason">{{ store.resourceEstimation.reason }}</p>
+
+          <q-btn
+            no-caps
+            dense
+            icon="auto_fix_high"
+            label="Aplicar recomendacion"
+            class="pd-btn-primary"
+            data-test="apply-recommendation"
+            @click="store.applyRecommendedResources()"
+          >
+            <q-tooltip max-width="320px">
+              Escribe la espera y el presupuesto sugeridos en los campos de abajo. Es una estimacion
+              heuristica: los campos siguen siendo tuyos y puedes corregirlos.
+            </q-tooltip>
+          </q-btn>
+        </div>
+      </div>
+
       <div class="col-12">
         <q-toggle
           :model-value="store.config.dryRun"
@@ -609,6 +648,38 @@ onMounted(async () => {
 
 .pd-node-icon {
   color: var(--pd-primary);
+}
+
+// Tarjeta de estimacion. Superficie secundaria sobre los tokens del sistema
+// (regla §2): ni compite con la tarjeta principal ni parece un campo editable.
+.pd-estimate {
+  padding: 12px;
+  background: var(--pd-surface-muted);
+  border: 1px solid var(--pd-border);
+  border-radius: $generic-border-radius;
+}
+
+.pd-estimate-figures {
+  color: var(--pd-text-secondary);
+}
+
+.pd-estimate-reason {
+  margin: 8px 0 12px;
+  color: var(--pd-text-secondary);
+}
+
+// El nivel colorea el badge con la misma escala de severidad que el modulo de
+// trazabilidad, para que ALTA signifique lo mismo en las dos pantallas.
+.pd-estimate--baja {
+  background: var(--pd-positive);
+}
+
+.pd-estimate--media {
+  background: var(--pd-warning);
+}
+
+.pd-estimate--alta {
+  background: var(--pd-negative);
 }
 
 .pd-warn-icon {

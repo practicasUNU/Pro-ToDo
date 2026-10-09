@@ -553,12 +553,24 @@ export class LlmExtractorStrategy implements INodeStrategy {
       };
     }
 
-    return {
-      config: resolveLlmExtractorConfig(
-        dto,
-        this.aiDefaults.getTextHttpDefaults(),
-      ),
-    };
+    const config = resolveLlmExtractorConfig(
+      dto,
+      this.aiDefaults.getTextHttpDefaults(),
+    );
+
+    // La politica de red EFECTIVA, una vez cruzado lo que guarda el nodo con lo
+    // que impone el entorno. Va en `debug` y no en `log` porque corre una vez
+    // por ejecucion y solo interesa cuando se esta diagnosticando justo esto —
+    // pero cuando se esta, es la unica forma de distinguir "el `.env` no se
+    // aplico" de "el `.env` se aplico y aun asi no basta", que desde fuera dan
+    // el mismo ERR_HTTP_TIMEOUT.
+    this.logger.debug(
+      `[Inferencia LLM] Timeout efectivo: ${config.timeoutMs}ms | ` +
+        `Reintentos: ${config.maxRetries} | ` +
+        `Espera base: ${config.baseDelayMs}ms`,
+    );
+
+    return { config };
   }
 
   /**

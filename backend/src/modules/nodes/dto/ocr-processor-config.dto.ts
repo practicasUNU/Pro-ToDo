@@ -14,6 +14,10 @@ import { ApiPropertyOptional } from '@nestjs/swagger';
 
 import { LlmProvider } from '@modules/nodes/strategies/interfaces/llm-provider.interface';
 import { clamp } from '@common/utils/clamp.util';
+import {
+  applyEnvironmentCeiling,
+  applyEnvironmentFloor,
+} from '@common/utils/env-precedence.util';
 import { DEFAULT_GEMINI_MODEL } from '@modules/nodes/strategies/providers/gemini-llm.provider';
 
 import type { AiHttpDefaults } from '@core/config/ai-defaults.config';
@@ -251,16 +255,25 @@ export const resolveOcrProcessorConfig = (
   provider: dto.provider ?? DEFAULT_OCR_PROVIDER,
   model: dto.model ?? DEFAULT_OCR_MODEL,
   temperature: dto.temperature ?? DEFAULT_OCR_TEMPERATURE,
-  // El `clamp` solo hace falta por el valor del ENTORNO: lo que viene en `dto`
-  // ya paso por los `@Min`/`@Max` de arriba, pero una variable del `.env` no
-  // atraviesa `class-validator` en ninguna parte.
+  // PISO para la espera y TECHO para los reintentos, igual que en el nodo de
+  // redaccion y por los mismos motivos: su store tambien publica los dos
+  // valores en el esquema al guardar, de modo que sin esto `OCR_HTTP_*` no
+  // alcanzaria a ningun flujo ya configurado.
+  //
+  // El `clamp` sigue haciendo falta por el valor del ENTORNO: lo que viene en
+  // `dto` ya paso por los `@Min`/`@Max` de arriba, pero una variable del `.env`
+  // no atraviesa `class-validator` en ninguna parte.
   timeoutMs: clamp(
-    dto.timeoutMs ?? env.timeoutMs ?? DEFAULT_OCR_TIMEOUT_MS,
+    applyEnvironmentFloor(dto.timeoutMs, env.timeoutMs, DEFAULT_OCR_TIMEOUT_MS),
     MIN_OCR_TIMEOUT_MS,
     MAX_OCR_TIMEOUT_MS,
   ),
   maxRetries: clamp(
-    dto.maxRetries ?? env.maxRetries ?? DEFAULT_OCR_MAX_RETRIES,
+    applyEnvironmentCeiling(
+      dto.maxRetries,
+      env.maxRetries,
+      DEFAULT_OCR_MAX_RETRIES,
+    ),
     MIN_OCR_RETRIES,
     MAX_OCR_RETRIES,
   ),

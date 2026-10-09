@@ -13,6 +13,10 @@ import {
 } from 'class-validator';
 
 import { clamp } from '@common/utils/clamp.util';
+import {
+  applyEnvironmentCeiling,
+  applyEnvironmentFloor,
+} from '@common/utils/env-precedence.util';
 import { CODE_PATTERN } from '@modules/ai-prompt-templates/dto/create-ai-prompt-template.dto';
 import { LlmProvider } from '@modules/nodes/strategies/interfaces/llm-provider.interface';
 import { DEFAULT_GEMINI_MODEL } from '@modules/nodes/strategies/providers/gemini-llm.provider';
@@ -340,17 +344,28 @@ export const resolveLlmExtractorConfig = (
   provider: dto.provider ?? DEFAULT_LLM_PROVIDER,
   model: dto.model ?? DEFAULT_LLM_MODEL,
   dryRun: dto.dryRun ?? false,
-  // El `clamp` solo hace falta por el valor del ENTORNO: lo que viene en `dto`
-  // ya paso por los `@Min`/`@Max` de arriba, pero una variable del `.env` no
-  // atraviesa `class-validator` en ninguna parte. Se recorta y no se rechaza
+  // PISO, no defecto: ver `applyEnvironmentFloor`. El asistente publica
+  // `timeoutMs` en el esquema aunque el operador no lo haya tocado, asi que un
+  // flujo guardado con los 15 000 de antes ganaba a un `.env` que pide 60 000 y
+  // la variable no alcanzaba a los unicos flujos que la necesitan.
+  //
+  // El `clamp` sigue haciendo falta por el valor del ENTORNO: lo que viene en
+  // `dto` ya paso por los `@Min`/`@Max` de arriba, pero una variable del `.env`
+  // no atraviesa `class-validator` en ninguna parte. Se recorta y no se rechaza
   // porque un `.env` con una errata no debe impedir que el flujo corra.
   timeoutMs: clamp(
-    dto.timeoutMs ?? env.timeoutMs ?? DEFAULT_LLM_TIMEOUT_MS,
+    applyEnvironmentFloor(dto.timeoutMs, env.timeoutMs, DEFAULT_LLM_TIMEOUT_MS),
     MIN_LLM_TIMEOUT_MS,
     MAX_LLM_TIMEOUT_MS,
   ),
+  // TECHO y no piso, al reves que la espera: aqui pasarse cuesta dinero. Ver el
+  // TSDoc de `applyEnvironmentCeiling`.
   maxRetries: clamp(
-    dto.maxRetries ?? env.maxRetries ?? DEFAULT_LLM_MAX_RETRIES,
+    applyEnvironmentCeiling(
+      dto.maxRetries,
+      env.maxRetries,
+      DEFAULT_LLM_MAX_RETRIES,
+    ),
     0,
     MAX_LLM_RETRIES,
   ),

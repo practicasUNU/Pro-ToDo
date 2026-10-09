@@ -201,11 +201,13 @@ export interface NodeConfigStore {
   /**
    * Declara el marcado base que aporta un paso ANTERIOR, si lo hay.
    *
-   * Es el canal por el que el ESCUDO_POST_IA puede sugerir ranuras reales en
-   * vez de pedir selectores CSS a ciegas. Va por el anfitrion y no leyendo el
-   * store del mapeador porque §3.1 prohibe que un nodo conozca la forma interna
-   * de otro: aqui el agregador PREGUNTA al productor y EMPUJA al consumidor,
-   * igual que ya hace con `setAvailableUpstreamContext`.
+   * Lo consumen DOS nodos, por motivos distintos: el ESCUDO_POST_IA para
+   * sugerir ranuras reales en vez de pedir selectores CSS a ciegas, y el
+   * PROCESADOR_IA para proyectar cuanto va a costar rellenar ese marcado antes
+   * de ejecutar nada. Va por el anfitrion y no leyendo el store del mapeador
+   * porque §3.1 prohibe que un nodo conozca la forma interna de otro: aqui el
+   * agregador PREGUNTA al productor y EMPUJA al consumidor, igual que ya hace
+   * con `setAvailableUpstreamContext`.
    *
    * `null` significa "no hay plantilla base aguas arriba", que es lo mismo que
    * "todavia no se ha elegido": el consumidor debe tratarlo como ausencia de
