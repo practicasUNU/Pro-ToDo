@@ -571,6 +571,39 @@ describe('DrupalHttpConfig · configurador del nodo DESTINO_DRUPAL', () => {
       expect(warnings[0]?.text()).toContain('validated_drupal_json');
     });
 
+    it('6.3 deberia explicar el despacho jerarquico SOLO en el modo agregador', async () => {
+      // 1. Arrange 📐: es lo que lo distingue del `aggregator-notice` de al
+      //    lado, y la razon de que sean dos banners y no uno. Aquel se muestra
+      //    con `mutatesRemoteDom`, que cubre tambien el traslado; el reparto por
+      //    universidad solo ocurre en APPEND_HTML_BLOCK, de modo que un texto
+      //    unico mentiria en el otro modo.
+      const nodeId = nextNodeId();
+      const wrapper = mountComponent(nodeId);
+      const store = useDrupalHttpStore(nodeId);
+
+      // 2. Act ⚙️ & 3. Assert 🎯: en CREATE_NODE, que es el defecto, no sale.
+      expect(wrapper.find('[data-test="hierarchical-dispatch-notice"]').exists()).toBe(false);
+
+      // 2bis. Act ⚙️
+      store.updateConfig({ operationMode: DrupalOperationMode.APPEND_HTML_BLOCK });
+      await wrapper.vm.$nextTick();
+
+      // 3bis. Assert 🎯: y nombra el reparto, porque su texto es la unica
+      //    explicacion que el operador recibe de el.
+      const notice = wrapper.find('[data-test="hierarchical-dispatch-notice"]');
+
+      expect(notice.exists()).toBe(true);
+      expect(notice.text()).toContain('data-parent');
+
+      // 2ter. Act ⚙️: el traslado SI muestra el otro banner, pero no este.
+      store.updateConfig({ operationMode: DrupalOperationMode.TRANSFER_HTML_BLOCK });
+      await wrapper.vm.$nextTick();
+
+      // 3ter. Assert 🎯
+      expect(wrapper.find('[data-test="aggregator-notice"]').exists()).toBe(true);
+      expect(wrapper.find('[data-test="hierarchical-dispatch-notice"]').exists()).toBe(false);
+    });
+
     it('6.2 NO deberia pintar avisos mientras el contexto esta vacio', () => {
       // 1. Arrange 📐 & 2. Act ⚙️
       const wrapper = mountComponent(nextNodeId());

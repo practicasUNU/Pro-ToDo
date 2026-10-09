@@ -145,6 +145,21 @@ type AttachmentResolution =
 const PDF_ICON_SRC = '/modules/file/icons/application-pdf.png';
 
 /**
+ * Clases con las que un portal oculta un contenedor vacio.
+ *
+ * Son DOS porque la version de Bootstrap de la pagina no coincide con la de la
+ * plantilla, y ninguna de las dos es negociable desde aqui: el portal presenta
+ * `.panel`, `.panel-default` y `.panel-heading`, que son Bootstrap 3 —donde la
+ * utilidad se llama `hidden`—, mientras que la plantilla sembrada emite
+ * `data-bs-toggle`, que es Bootstrap 5 —donde se llama `d-none`—.
+ *
+ * Quitar una clase que no esta no hace nada, asi que listar las dos no tiene
+ * coste; acertar solo una si lo tendria, y del peor tipo: el panel se publica,
+ * el nodo devuelve EXITOSO y nadie lo ve en la pagina.
+ */
+const HIDDEN_UTILITY_CLASSES = 'd-none hidden';
+
+/**
  * Nombres de campo de fichero que se buscan cuando el configurado no existe.
  *
  * `field_fichero_adjunto` va PRIMERO porque es el unico VERIFICADO: el sondeo
@@ -1347,6 +1362,17 @@ export class DrupalHttpStrategy extends BaseHttpDestinationStrategy {
       // flujo —un selector vacio no casaria con nada y la guarda ya lo habria
       // cazado—.
       const container = $(panel.targetSelector ?? '').first();
+
+      // Un sub-acordeon al que todavia no se le ha inyectado ningun comite
+      // puede venir oculto, y entonces el primero que reciba se publicaria sin
+      // verse. Es el mismo fallo de "publicado pero invisible" que obligo a
+      // cambiar este preset de CREATE_NODE a APPEND_HTML_BLOCK, y no se
+      // manifiesta en ninguna respuesta HTTP: el PATCH devuelve 200.
+      //
+      // Se retira SOLO la utilidad de ocultacion, no la clase entera: el
+      // contenedor lleva ademas las suyas propias —`panel-group` y demas— y
+      // vaciarlas romperia la maquetacion del portal.
+      container.removeClass(HIDDEN_UTILITY_CLASSES);
 
       if (config.insertPosition === 'APPEND') {
         container.append(panel.html);

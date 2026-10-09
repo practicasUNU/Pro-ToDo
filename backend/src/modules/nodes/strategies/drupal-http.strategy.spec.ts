@@ -941,6 +941,53 @@ describe('DrupalHttpStrategy', () => {
       );
     });
 
+    it('2bis.4bis deberia DESTAPAR el sub-acordeon oculto que recibe el panel', async () => {
+      // 1. Arrange 📐: un sub-acordeon al que no se le ha inyectado nada
+      //    todavia puede venir oculto, y entonces el primer comite se publica
+      //    sin verse. No lo delata ninguna respuesta HTTP: el PATCH da 200.
+      //
+      //    Se ejercen las DOS convenciones porque la pagina y la plantilla no
+      //    usan la misma version de Bootstrap: el portal presenta `.panel` y
+      //    `.panel-heading` (BS3, donde la clase es `hidden`) mientras que la
+      //    plantilla emite `data-bs-toggle` (BS5, donde es `d-none`).
+      const httpClient = buildHttpMock();
+      httpClient.requestWithStatus
+        .mockResolvedValueOnce(
+          pageResponse(
+            '<div id="accordion">' +
+              '<div id="accordionUAM" class="panel-group d-none"></div>' +
+              '<div id="accordionUCM" class="panel-group hidden"></div>' +
+              '</div>',
+          ),
+        )
+        .mockResolvedValueOnce(pageResponse(''));
+      const strategy = buildStrategy(httpClient);
+
+      // 2. Act ⚙️
+      const result = await strategy.execute(
+        buildContext({
+          [SOURCE_NAMESPACE]: {
+            [SOURCE_FIELD]:
+              panel('UAM 9', '#accordionUAM') + panel('UCM 3', '#accordionUCM'),
+          },
+        }),
+        appendParams,
+      );
+
+      // 3. Assert 🎯: las utilidades de ocultacion caen y `panel-group`
+      //    SOBREVIVE. Vaciar la clase entera romperia la maquetacion del
+      //    portal, que es un precio mas alto que el problema que se arregla.
+      const $ = cheerio.load(
+        sentHtml(httpClient, 1),
+        { xml: { xmlMode: false } },
+        false,
+      );
+
+      expect(result.success).toBe(true);
+      expect($('#accordionUAM').attr('class')).toBe('panel-group');
+      expect($('#accordionUCM').attr('class')).toBe('panel-group');
+    });
+
     it('2bis.5 NO deberia alterar la ruta de los flujos que no usan paneles', async () => {
       // 1. Arrange 📐: licitaciones y Notiweb publican bloques que no son
       //    `.panel.panel-default` y no declaran destino. Sin esta bifurcacion

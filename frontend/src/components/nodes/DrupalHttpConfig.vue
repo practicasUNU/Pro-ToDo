@@ -107,6 +107,27 @@ const UUID_HINT = 'UUID v4 de la entidad en Drupal. Usa los botones de sandbox p
 const AGGREGATOR_NOTICE =
   'Modo agregador activo: el contenido se inserta directamente en el HTML de la pagina objetivo mediante manipulacion del DOM. No requiere titulo ni resumen de entidad independientes.';
 
+/**
+ * Explicacion del reparto por universidad, y va APARTE de `AGGREGATOR_NOTICE`.
+ *
+ * Aquel se muestra con `mutatesRemoteDom`, que cubre tambien el traslado de
+ * bloques, y el despacho jerarquico solo existe en el modo agregador. Fundir
+ * los dos textos mentiria en TRANSFER_HTML_BLOCK, de modo que este va gobernado
+ * por `mutatesContainer`, que es el computed APPEND-only.
+ */
+const HIERARCHICAL_DISPATCH_NOTICE =
+  'Despacho jerarquico: cuando el marcado trae paneles de acordeon, cada uno se inyecta dentro del sub-acordeon de su universidad (#accordion mas las siglas) segun su data-parent. Si algun panel no encuentra su contenedor en la pagina, no se publica ninguno y el nodo se detiene, para que ningun comite termine fuera de lugar.';
+
+/**
+ * Que hace el contenedor de bloques DESDE el despacho jerarquico.
+ *
+ * Deja de ser el destino unico: los paneles de acordeon van cada uno al suyo.
+ * Lo que sigue cayendo aqui es el marcado que NO viene en paneles, que es el de
+ * los otros canales que publican por este modo —licitaciones, Notiweb—.
+ */
+const CONTAINER_SELECTOR_HINT =
+  'Destino del marcado que NO viene en paneles de acordeon. Vacio: la raiz del cuerpo de la pagina.';
+
 const ATTACHMENT_NOTICE =
   'El binario sale del inventario de adjuntos del correo. El motor libera esos bytes en cuanto un nodo publica texto, asi que este paso debe ir ANTES del parser.';
 
@@ -526,8 +547,26 @@ const toNullableText = (value: string | number | null): string | null => {
         />
       </div>
 
+      <!-- Va pegado al campo de abajo y no arriba del todo porque es SU
+           explicacion: sin el, "Contenedor de bloques" se lee como el unico
+           destino, que es lo que dejo de ser cuando llego el reparto por
+           universidad. -->
+      <div v-if="mutatesContainer" class="col-12">
+        <q-banner dense class="pd-info-banner q-mb-sm" data-test="hierarchical-dispatch-notice">
+          <template #avatar>
+            <q-icon name="account_tree" size="20px" class="pd-node-icon" />
+          </template>
+          <p class="pd-subtitle q-mb-none">{{ HIERARCHICAL_DISPATCH_NOTICE }}</p>
+        </q-banner>
+      </div>
+
       <div v-if="mutatesContainer" class="col-12 col-md-6" data-test="container-selector-field">
-        <label class="pd-label" for="drupal-container-selector">Contenedor de bloques</label>
+        <!-- SIN asterisco: el campo no es obligatorio. `REQUIRED_PARAMS_BY_MODE`
+             solo exige `targetNodeUuid` en este modo, y con el campo vacio el
+             backend inserta en la raiz del fragmento. -->
+        <label class="pd-label" for="drupal-container-selector">
+          Contenedor de bloques sin panel (Selector CSS)
+        </label>
         <q-input
           id="drupal-container-selector"
           :model-value="store.config.containerSelector"
@@ -535,7 +574,8 @@ const toNullableText = (value: string | number | null): string | null => {
           dense
           class="q-mt-xs pd-mono"
           :maxlength="MAX_DRUPAL_SELECTOR_LENGTH"
-          hint="Vacio: el bloque se inserta en la raiz del cuerpo de la pagina."
+          placeholder="#accordion"
+          :hint="CONTAINER_SELECTOR_HINT"
           :rules="containerSelectorRules"
           @update:model-value="store.updateConfig({ containerSelector: toNullableText($event) })"
         />
