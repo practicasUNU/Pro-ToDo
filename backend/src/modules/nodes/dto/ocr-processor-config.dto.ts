@@ -13,7 +13,10 @@ import {
 import { ApiPropertyOptional } from '@nestjs/swagger';
 
 import { LlmProvider } from '@modules/nodes/strategies/interfaces/llm-provider.interface';
+import { clamp } from '@common/utils/clamp.util';
 import { DEFAULT_GEMINI_MODEL } from '@modules/nodes/strategies/providers/gemini-llm.provider';
+
+import type { AiHttpDefaults } from '@core/config/ai-defaults.config';
 
 /**
  * Prompt del sistema con el que se pide la transcripcion.
@@ -70,9 +73,28 @@ export const DEFAULT_OCR_MODEL = DEFAULT_GEMINI_MODEL;
 export const DEFAULT_OCR_TIMEOUT_MS = 30_000;
 export const MIN_OCR_TIMEOUT_MS = 1_000;
 export const MAX_OCR_TIMEOUT_MS = 120_000;
-export const DEFAULT_OCR_MAX_RETRIES = 2;
+/**
+ * Reintentos rapidos de red por defecto, adicionales al primer intento.
+ *
+ * UNO, y antes eran dos. Mismo argumento que `DEFAULT_LLM_MAX_RETRIES`: un
+ * `ERR_HTTP_TIMEOUT` se reintenta, de modo que la espera se gasta
+ * `timeoutMs × (maxRetries + 1)` veces y el ciclo entero se repite ademas por
+ * cada proveedor de la cadena de respaldo. Con el techo de 120 000 ms de este
+ * nodo, la cuenta se dispara deprisa.
+ */
+export const DEFAULT_OCR_MAX_RETRIES = 1;
 export const MIN_OCR_RETRIES = 0;
 export const MAX_OCR_RETRIES = 5;
+
+/**
+ * Espera base entre reintentos de la transcripcion, en milisegundos.
+ *
+ * Gemela de `LLM_RETRY_BASE_DELAY_MS`, y por el mismo motivo: los 500 ms que
+ * `HttpClientService` aplica por defecto estan pensados para un portal web, no
+ * para un modelo que acaba de devolver un 429 de cuota. No es un campo del DTO
+ * porque no es una decision del operador.
+ */
+export const OCR_RETRY_BASE_DELAY_MS = 2_500;
 
 /** Tope de la respuesta. Una transcripcion larga cabe de sobra en 4096. */
 // 8192 y no 4096 desde PROT-24. En la gama Gemini 3.x este tope cubre TAMBIEN
@@ -207,20 +229,42 @@ export interface ResolvedOcrProcessorConfig {
   readonly temperature: number;
   readonly timeoutMs: number;
   readonly maxRetries: number;
+
+  /** Espera base del backoff entre reintentos. Ver `OCR_RETRY_BASE_DELAY_MS`. */
+  readonly baseDelayMs: number;
   readonly maxTokens: number;
   readonly allowedMimeTypes: readonly string[];
   readonly dryRun: boolean;
 }
 
-/** Aplica los defaults del DTO sobre una instancia ya validada. */
+/**
+ * Aplica los defaults del DTO sobre una instancia ya validada.
+ *
+ * `env` es el escalon intermedio de la politica de red, con la precedencia
+ * `params del nodo > entorno > constante`. Lleva valor por defecto para seguir
+ * siendo invocable con un solo argumento donde no hay entorno que consultar.
+ */
 export const resolveOcrProcessorConfig = (
   dto: OcrProcessorConfigDto,
+  env: AiHttpDefaults = { timeoutMs: null, maxRetries: null },
 ): ResolvedOcrProcessorConfig => ({
   provider: dto.provider ?? DEFAULT_OCR_PROVIDER,
   model: dto.model ?? DEFAULT_OCR_MODEL,
   temperature: dto.temperature ?? DEFAULT_OCR_TEMPERATURE,
-  timeoutMs: dto.timeoutMs ?? DEFAULT_OCR_TIMEOUT_MS,
-  maxRetries: dto.maxRetries ?? DEFAULT_OCR_MAX_RETRIES,
+  // El `clamp` solo hace falta por el valor del ENTORNO: lo que viene en `dto`
+  // ya paso por los `@Min`/`@Max` de arriba, pero una variable del `.env` no
+  // atraviesa `class-validator` en ninguna parte.
+  timeoutMs: clamp(
+    dto.timeoutMs ?? env.timeoutMs ?? DEFAULT_OCR_TIMEOUT_MS,
+    MIN_OCR_TIMEOUT_MS,
+    MAX_OCR_TIMEOUT_MS,
+  ),
+  maxRetries: clamp(
+    dto.maxRetries ?? env.maxRetries ?? DEFAULT_OCR_MAX_RETRIES,
+    MIN_OCR_RETRIES,
+    MAX_OCR_RETRIES,
+  ),
+  baseDelayMs: OCR_RETRY_BASE_DELAY_MS,
   maxTokens: dto.maxTokens ?? DEFAULT_OCR_MAX_TOKENS,
   allowedMimeTypes: dto.allowedMimeTypes ?? DEFAULT_OCR_ALLOWED_MIME_TYPES,
   dryRun: dto.dryRun ?? false,

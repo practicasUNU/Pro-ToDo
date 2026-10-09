@@ -56,10 +56,27 @@ export const DEFAULT_LLM_MODEL = 'gemini-3.6-flash';
 /** Espera maxima por defecto de la inferencia, en milisegundos. */
 export const DEFAULT_LLM_TIMEOUT_MS = 15_000;
 export const MIN_LLM_TIMEOUT_MS = 1_000;
-export const MAX_LLM_TIMEOUT_MS = 60_000;
 
-/** Reintentos RAPIDOS DE RED, adicionales al primer intento. */
-export const DEFAULT_LLM_MAX_RETRIES = 3;
+/**
+ * Techo de la espera. REPLICA de `MAX_LLM_TIMEOUT_MS` (backend).
+ *
+ * Fueron 60 000 hasta que se vio que redactar una plantilla institucional a
+ * partir de una tabla de trece comisiones universitarias se pasa de largo de
+ * ese minuto. Con el tope ahi, el operador veia el campo en rojo y no tenia
+ * forma de arreglarlo sin desplegar. Son los mismos 120 000 que ya admite el
+ * nodo de OCR.
+ */
+export const MAX_LLM_TIMEOUT_MS = 120_000;
+
+/**
+ * Reintentos RAPIDOS DE RED, adicionales al primer intento.
+ *
+ * UNO, y antes eran tres. REPLICA de `DEFAULT_LLM_MAX_RETRIES` (backend): un
+ * timeout SI se reintenta, de modo que la espera no se gasta una vez sino
+ * `timeoutMs × (maxRetries + 1)`, y el ciclo se repite ademas por cada
+ * proveedor de la cadena de respaldo.
+ */
+export const DEFAULT_LLM_MAX_RETRIES = 1;
 export const MIN_LLM_RETRIES = 0;
 export const MAX_LLM_RETRIES = 5;
 
@@ -87,9 +104,11 @@ export const MAX_LLM_MAX_TOKENS = 32_768;
 /**
  * Umbral de `maxRetries` a partir del cual se avisa del efecto multiplicativo.
  *
- * Tres es el defecto del backend y no merece aviso. Por encima, el TSDoc del DTO
- * advierte de que esta capa y el `retryPolicy` del esquema SE MULTIPLICAN, y de
- * que cada vuelta factura tokens.
+ * Se ata al defecto del backend, que no merece aviso. Por encima, el TSDoc del
+ * DTO advierte de que esta capa y el `retryPolicy` del esquema SE MULTIPLICAN,
+ * y de que cada vuelta factura tokens. El umbral baja con el defecto —de tres a
+ * uno— y eso hace el aviso mas sensible a proposito: con el techo de la espera
+ * en 120 000 ms, la cuenta se dispara antes que con los 60 000 de antes.
  */
 export const LLM_RETRIES_WARNING_THRESHOLD = DEFAULT_LLM_MAX_RETRIES;
 

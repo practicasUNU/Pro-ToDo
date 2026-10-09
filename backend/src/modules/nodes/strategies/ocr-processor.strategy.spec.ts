@@ -12,6 +12,7 @@ import {
 import {
   DEFAULT_OCR_MAX_TOKENS,
   DEFAULT_OCR_MODEL,
+  OCR_RETRY_BASE_DELAY_MS,
 } from '@modules/nodes/dto/ocr-processor-config.dto';
 import {
   ERR_OCR_CONFIG,
@@ -45,11 +46,27 @@ const buildContext = (
     namespaces: { raw_email: { attachments: [...attachments] } },
   });
 
-/** Defaults del entorno sin declarar: se cae a las constantes del DTO. */
-const buildAiDefaults = (): AiDefaultsConfig =>
+/**
+ * Defaults del entorno sin declarar: se cae a las constantes del DTO.
+ *
+ * Los cuatro metodos devuelven `null` en todos sus campos, que es el escenario
+ * de un `.env` que no declara ninguna de las variables `AI_*` ni `OCR_HTTP_*`.
+ * Las pruebas que SI ejercen el entorno lo declaran explicitamente por
+ * `overrides`.
+ */
+const buildAiDefaults = (
+  overrides: Partial<Record<keyof AiDefaultsConfig, unknown>> = {},
+): AiDefaultsConfig =>
   ({
     getOcrDefaults: jest.fn().mockReturnValue({ provider: null, model: null }),
     getTextDefaults: jest.fn().mockReturnValue({ provider: null, model: null }),
+    getOcrHttpDefaults: jest
+      .fn()
+      .mockReturnValue({ timeoutMs: null, maxRetries: null }),
+    getTextHttpDefaults: jest
+      .fn()
+      .mockReturnValue({ timeoutMs: null, maxRetries: null }),
+    ...overrides,
   }) as unknown as AiDefaultsConfig;
 
 /**
@@ -495,6 +512,47 @@ describe('OcrProcessorStrategy · nodo satelite PROCESADOR_OCR', () => {
         { thinkingLevel?: string } | undefined;
 
       expect(options?.thinkingLevel).toBe('minimal');
+    });
+
+    it('6.1ter deberia trasladar la espera y los reintentos del entorno', async () => {
+      // 1. Arrange 📐: `OCR_HTTP_*` va aparte de `LLM_HTTP_*` por el mismo
+      //    motivo que `AI_OCR_DEFAULT_*` va aparte de `AI_DEFAULT_*`:
+      //    transcribir no es redactar, y una transcripcion no crece con el
+      //    numero de filas de la tabla como lo hace una redaccion.
+      const generateCompletion = buildSpyGemini();
+      const strategy = buildStrategy(
+        {
+          provider: LlmProvider.GEMINI,
+          generateCompletion,
+        } as unknown as GeminiLlmProvider,
+        buildAiDefaults({
+          getOcrHttpDefaults: jest
+            .fn()
+            .mockReturnValue({ timeoutMs: 45_000, maxRetries: 0 }),
+        }),
+      );
+
+      // 2. Act ⚙️
+      await strategy.execute(buildContext(), { provider: LlmProvider.GEMINI });
+
+      // 3. Assert 🎯
+      // El doble se tipa con una firma sin argumentos, asi que indexar la
+      // tupla de la llamada exige reinterpretarla. Las pruebas vecinas lo
+      // hacen sobre `calls[0]?.[2]` directamente y eso deja un error de tipos
+      // en la linea; aqui se reinterpreta el arreglo entero para no sumar otro.
+      const options = (
+        generateCompletion.mock.calls as unknown as readonly [
+          unknown,
+          unknown,
+          Record<string, unknown>,
+        ][]
+      )[0]?.[2];
+
+      expect(options).toMatchObject({
+        timeoutMs: 45_000,
+        maxRetries: 0,
+        baseDelayMs: OCR_RETRY_BASE_DELAY_MS,
+      });
     });
 
     it('6.2 deberia respetar la temperatura declarada en el nodo', async () => {

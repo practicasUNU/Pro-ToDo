@@ -30,6 +30,19 @@ export const AI_OCR_DEFAULT_PROVIDER_VAR = 'AI_OCR_DEFAULT_PROVIDER';
 export const AI_OCR_DEFAULT_MODEL_VAR = 'AI_OCR_DEFAULT_MODEL';
 
 /**
+ * Variables de la ESPERA y los REINTENTOS de la peticion saliente.
+ *
+ * Van en dos pares por el mismo motivo que el proveedor y el modelo: redactar
+ * una plantilla institucional a partir de una tabla de trece comisiones tarda
+ * un orden de magnitud mas que transcribir un escaneado, y atar las dos esperas
+ * a la misma variable obliga a dimensionar la corta por la larga.
+ */
+export const LLM_HTTP_TIMEOUT_MS_VAR = 'LLM_HTTP_TIMEOUT_MS';
+export const LLM_HTTP_MAX_RETRIES_VAR = 'LLM_HTTP_MAX_RETRIES';
+export const OCR_HTTP_TIMEOUT_MS_VAR = 'OCR_HTTP_TIMEOUT_MS';
+export const OCR_HTTP_MAX_RETRIES_VAR = 'OCR_HTTP_MAX_RETRIES';
+
+/**
  * Traduccion de los valores del `.env` al enum `LlmProvider`.
  *
  * Hace falta una tabla explicita porque los dos vocabularios no coinciden: el
@@ -65,6 +78,23 @@ export interface AiDefaultPair {
   readonly model: string | null;
 }
 
+/**
+ * Politica de red resuelta desde el entorno, con `null` donde el entorno calla.
+ *
+ * NO se acota aqui contra el rango que admite el nodo. Este archivo vive en
+ * `@core`, que no puede importar de `@modules`, y los limites
+ * (`MIN_LLM_TIMEOUT_MS`, `MAX_LLM_RETRIES`...) son constantes del DTO. El
+ * recorte lo hace quien resuelve la configuracion del nodo, que es ademas el
+ * unico sitio donde esos limites significan algo.
+ */
+export interface AiHttpDefaults {
+  /** Espera maxima de la peticion saliente, en milisegundos. */
+  readonly timeoutMs: number | null;
+
+  /** Reintentos rapidos de red, adicionales al primer intento. */
+  readonly maxRetries: number | null;
+}
+
 @Injectable()
 export class AiDefaultsConfig {
   private readonly logger = new Logger(AiDefaultsConfig.name);
@@ -84,6 +114,22 @@ export class AiDefaultsConfig {
     return {
       provider: this.resolveProvider(AI_OCR_DEFAULT_PROVIDER_VAR),
       model: this.readString(AI_OCR_DEFAULT_MODEL_VAR),
+    };
+  }
+
+  /** Espera y reintentos por defecto de la inferencia de TEXTO. */
+  public getTextHttpDefaults(): AiHttpDefaults {
+    return {
+      timeoutMs: this.readPositiveInt(LLM_HTTP_TIMEOUT_MS_VAR),
+      maxRetries: this.readNonNegativeInt(LLM_HTTP_MAX_RETRIES_VAR),
+    };
+  }
+
+  /** Espera y reintentos por defecto de la lectura de IMAGENES y PDFs. */
+  public getOcrHttpDefaults(): AiHttpDefaults {
+    return {
+      timeoutMs: this.readPositiveInt(OCR_HTTP_TIMEOUT_MS_VAR),
+      maxRetries: this.readNonNegativeInt(OCR_HTTP_MAX_RETRIES_VAR),
     };
   }
 
@@ -120,5 +166,62 @@ export class AiDefaultsConfig {
     const raw = this.configService.get<string>(variable)?.trim();
 
     return raw === undefined || raw.length === 0 ? null : raw;
+  }
+
+  /**
+   * Entero ESTRICTAMENTE POSITIVO, o `null`.
+   *
+   * El cero no vale, y no es rigor gratuito: es la lectura de una ESPERA, y un
+   * `timeout: 0` significa en Axios «sin limite», de modo que una variable mal
+   * puesta dejaria la peticion colgada para siempre en vez de cortarla antes.
+   * Misma guarda que `DrupalApiConfig.timeoutMs`.
+   */
+  private readPositiveInt(variable: string): number | null {
+    return this.readInt(variable, 1);
+  }
+
+  /**
+   * Entero MAYOR O IGUAL QUE CERO, o `null`.
+   *
+   * Aqui el cero SI vale, y por eso hace falta un lector aparte: es la lectura
+   * de un numero de reintentos, donde `0` es la peticion explicita de «no
+   * reintentes». Reutilizar `readPositiveInt` convertiria ese cero en ausencia
+   * y lo sustituiria por el defecto del nodo, de modo que desactivar el
+   * reintento desde el `.env` seria literalmente imposible.
+   */
+  private readNonNegativeInt(variable: string): number | null {
+    return this.readInt(variable, 0);
+  }
+
+  /**
+   * Entero no menor que `minimum`, o `null`.
+   *
+   * Un valor que no cumple AVISA y devuelve `null` en vez de lanzar, igual que
+   * `resolveProvider` con un proveedor desconocido: el sistema tiene un escalon
+   * mas abajo —las constantes del DTO— y sigue siendo capaz de ejecutar flujos.
+   * Lo que no puede es decidirlo en silencio.
+   *
+   * Se rechaza explicitamente el decimal. `Number('1.5')` es finito, pero un
+   * `timeout` fraccionario no significa nada y un reintento y medio tampoco;
+   * dejarlo pasar solo esconde la errata hasta que alguien mire el log de red.
+   */
+  private readInt(variable: string, minimum: number): number | null {
+    const raw = this.readString(variable);
+
+    if (raw === null) {
+      return null;
+    }
+
+    const parsed = Number(raw);
+
+    if (!Number.isInteger(parsed) || parsed < minimum) {
+      this.logger.warn(
+        `${variable}="${raw}" no es un numero entero mayor o igual que ${minimum}. Se ignora y se usara el valor por defecto del nodo.`,
+      );
+
+      return null;
+    }
+
+    return parsed;
   }
 }

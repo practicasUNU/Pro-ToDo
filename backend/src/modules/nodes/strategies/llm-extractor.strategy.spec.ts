@@ -1,6 +1,7 @@
 import { NotFoundException } from '@nestjs/common';
 
 import { NodeType } from '@core/fsm/types/pipeline-schema.types';
+import { LLM_RETRY_BASE_DELAY_MS } from '@modules/nodes/dto/llm-extractor-config.dto';
 import { LlmProvider } from '@modules/nodes/strategies/interfaces/llm-provider.interface';
 import {
   ERR_LLM_EMERGENCY_BRAKE,
@@ -103,7 +104,13 @@ const buildContext = (
  */
 /** Doble del resolutor de defaults. Acotado a los dos metodos que se consultan. */
 type AiDefaultsMock = jest.Mocked<
-  Pick<AiDefaultsConfig, 'getTextDefaults' | 'getOcrDefaults'>
+  Pick<
+    AiDefaultsConfig,
+    | 'getTextDefaults'
+    | 'getOcrDefaults'
+    | 'getTextHttpDefaults'
+    | 'getOcrHttpDefaults'
+  >
 >;
 
 /**
@@ -120,6 +127,12 @@ const buildAiDefaults = (
 ): AiDefaultsMock => ({
   getTextDefaults: jest.fn().mockReturnValue({ provider: null, model: null }),
   getOcrDefaults: jest.fn().mockReturnValue({ provider: null, model: null }),
+  getTextHttpDefaults: jest
+    .fn()
+    .mockReturnValue({ timeoutMs: null, maxRetries: null }),
+  getOcrHttpDefaults: jest
+    .fn()
+    .mockReturnValue({ timeoutMs: null, maxRetries: null }),
   ...overrides,
 });
 
@@ -1194,6 +1207,94 @@ describe('LlmExtractorStrategy', () => {
       expect(
         (result.data?.metadata as { isMock?: boolean } | undefined)?.isMock,
       ).toBe(true);
+    });
+
+    it('8.5 deberia trasladar la espera del entorno a la llamada al proveedor', async () => {
+      // 1. Arrange 📐: el caso que motiva la tanda. Una tabla de trece
+      //    comisiones universitarias no cabe en los 15 s cableados, y el
+      //    sintoma era un ERR_HTTP_TIMEOUT que solo se podia arreglar
+      //    desplegando. Ahora `LLM_HTTP_TIMEOUT_MS` lo decide.
+      const generateCompletion = jest.fn().mockResolvedValue({
+        headline: 'T',
+        summary: 'S',
+        body_paragraphs: [],
+        metadata: {
+          tokensPrompt: 0,
+          tokensCompletion: 0,
+          modelUsed: 'x',
+          isMock: false,
+        },
+      });
+      const aiDefaults = buildAiDefaults({
+        getTextHttpDefaults: jest
+          .fn()
+          .mockReturnValue({ timeoutMs: 60_000, maxRetries: 0 }),
+      });
+      const strategy = buildStrategy(
+        buildPromptService(),
+        { provider: LlmProvider.GEMINI, generateCompletion },
+        new MockLlmProvider(),
+        aiDefaults,
+      );
+
+      // 2. Act ⚙️
+      await strategy.execute(
+        buildContext({ parsed_email: { clean_body: CLEAN_BODY } }),
+        { provider: LlmProvider.GEMINI, inlinePrompt: 'Redacta.' },
+      );
+
+      // 3. Assert 🎯: viaja ademas `baseDelayMs`, que es lo que separa los
+      //    reintentos lo suficiente para no caer en el mismo 429 de cuota.
+      expect(optionsOf(generateCompletion)).toMatchObject({
+        timeoutMs: 60_000,
+        maxRetries: 0,
+        baseDelayMs: LLM_RETRY_BASE_DELAY_MS,
+      });
+    });
+
+    it('8.6 los params del nodo deberian mandar sobre el entorno', async () => {
+      // 1. Arrange 📐: el entorno es el ULTIMO escalon, no el primero. Un flujo
+      //    que ya declaro su espera no debe cambiar de comportamiento porque
+      //    alguien toque el `.env` del servidor.
+      const generateCompletion = jest.fn().mockResolvedValue({
+        headline: 'T',
+        summary: 'S',
+        body_paragraphs: [],
+        metadata: {
+          tokensPrompt: 0,
+          tokensCompletion: 0,
+          modelUsed: 'x',
+          isMock: false,
+        },
+      });
+      const aiDefaults = buildAiDefaults({
+        getTextHttpDefaults: jest
+          .fn()
+          .mockReturnValue({ timeoutMs: 90_000, maxRetries: 4 }),
+      });
+      const strategy = buildStrategy(
+        buildPromptService(),
+        { provider: LlmProvider.GEMINI, generateCompletion },
+        new MockLlmProvider(),
+        aiDefaults,
+      );
+
+      // 2. Act ⚙️
+      await strategy.execute(
+        buildContext({ parsed_email: { clean_body: CLEAN_BODY } }),
+        {
+          provider: LlmProvider.GEMINI,
+          inlinePrompt: 'Redacta.',
+          timeoutMs: 20_000,
+          maxRetries: 1,
+        },
+      );
+
+      // 3. Assert 🎯
+      expect(optionsOf(generateCompletion)).toMatchObject({
+        timeoutMs: 20_000,
+        maxRetries: 1,
+      });
     });
   });
 

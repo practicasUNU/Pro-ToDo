@@ -208,6 +208,7 @@ export class OcrProcessorStrategy implements INodeStrategy {
             model: attempt.model,
             timeoutMs: config.timeoutMs,
             maxRetries: config.maxRetries,
+            baseDelayMs: config.baseDelayMs,
             // La temperatura se resolvia y se tiraba hasta PROT-22: el nodo
             // declaraba 0.1 para transcribir con fidelidad y la llamada corria
             // con el defecto del modelo.
@@ -434,7 +435,12 @@ export class OcrProcessorStrategy implements INodeStrategy {
       };
     }
 
-    return { config: resolveOcrProcessorConfig(dto) };
+    return {
+      config: resolveOcrProcessorConfig(
+        dto,
+        this.aiDefaults.getOcrHttpDefaults(),
+      ),
+    };
   }
 
   /**

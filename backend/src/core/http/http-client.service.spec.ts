@@ -209,6 +209,38 @@ describe('HttpClientService', () => {
       expect(outcome).toEqual({ data: { ok: true } });
       expect(httpService.request).toHaveBeenCalledTimes(2);
     });
+
+    it('2.5 deberia duplicar la espera en cada vuelta a partir de baseDelayMs', async () => {
+      // 1. Arrange 📐: hasta ahora ninguna prueba aseveraba los retardos REALES
+      //    del backoff — solo cuantas llamadas salian—, de modo que el factor
+      //    exponencial no estaba fijado por nada. Importa desde que los nodos de
+      //    IA y OCR pasan su propio `baseDelayMs` de 2 500 ms: contra un modelo
+      //    que acaba de devolver un 429 de cuota, el medio segundo por defecto
+      //    garantiza caer en el mismo limite y gastar el reintento en balde.
+      const httpService = buildHttpService();
+      httpService.request.mockReturnValue(
+        throwError(() => buildAxiosError({ code: 'ECONNABORTED' })),
+      );
+      const client = buildClient(httpService);
+      const scheduled = jest.spyOn(global, 'setTimeout');
+
+      // 2. Act ⚙️
+      await runPending(
+        client.request(
+          { url: TARGET_URL },
+          { maxRetries: 3, baseDelayMs: 2_500 },
+        ),
+      );
+
+      // 3. Assert 🎯: tres esperas para cuatro intentos, cada una el doble que
+      //    la anterior.
+      const delays = scheduled.mock.calls.map(([, delay]) => delay);
+
+      expect(delays).toEqual([2_500, 5_000, 10_000]);
+      expect(httpService.request).toHaveBeenCalledTimes(4);
+
+      scheduled.mockRestore();
+    });
   });
 
   describe('3. Fallos que NO se reintentan', () => {
@@ -472,7 +504,9 @@ describe('HttpClientService', () => {
       //    separar una averia de red de un rechazo del servidor remoto.
       const httpService = buildHttpService();
       httpService.request.mockReturnValue(
-        throwError(() => buildAxiosError({ message: 'el transporte se rompio' })),
+        throwError(() =>
+          buildAxiosError({ message: 'el transporte se rompio' }),
+        ),
       );
       const client = buildClient(httpService);
 

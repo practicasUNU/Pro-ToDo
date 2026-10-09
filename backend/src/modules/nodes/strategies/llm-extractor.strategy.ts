@@ -363,6 +363,7 @@ export class LlmExtractorStrategy implements INodeStrategy {
           model: attempt.model,
           timeoutMs: config.timeoutMs,
           maxRetries: config.maxRetries,
+          baseDelayMs: config.baseDelayMs,
           expectsFilledMarkup,
           // Se OMITE cuando no hay nada que decir, en vez de mandar un numero:
           // asi el defecto lo sigue publicando cada proveedor, que es como ha
@@ -552,7 +553,12 @@ export class LlmExtractorStrategy implements INodeStrategy {
       };
     }
 
-    return { config: resolveLlmExtractorConfig(dto) };
+    return {
+      config: resolveLlmExtractorConfig(
+        dto,
+        this.aiDefaults.getTextHttpDefaults(),
+      ),
+    };
   }
 
   /**

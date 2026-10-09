@@ -133,6 +133,17 @@ export interface LlmExecutionOptions {
   readonly maxRetries: number;
 
   /**
+   * Espera base del backoff entre reintentos, en milisegundos.
+   *
+   * OPCIONAL, al reves que los dos de arriba, y la asimetria es deliberada: el
+   * cliente HTTP ya tiene un defecto razonable (`DEFAULT_HTTP_BASE_DELAY_MS`) y
+   * declararla obligatoria forzaria a inventarle un valor a cada llamante que
+   * no tiene opinion —el simulador, el catalogo de proveedores— para no romper
+   * el tipo. Omitida, el cliente aplica el suyo, que es como funciono hasta hoy.
+   */
+  readonly baseDelayMs?: number;
+
+  /**
    * Para que se pide la inferencia: redactar o transcribir.
    *
    * OPCIONAL y con `'text'` implicito, de modo que ninguna llamada existente

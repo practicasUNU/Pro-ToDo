@@ -1,9 +1,15 @@
+import { Logger } from '@nestjs/common';
+
 import {
   AI_DEFAULT_MODEL_VAR,
   AI_DEFAULT_PROVIDER_VAR,
   AI_OCR_DEFAULT_MODEL_VAR,
   AI_OCR_DEFAULT_PROVIDER_VAR,
   AiDefaultsConfig,
+  LLM_HTTP_MAX_RETRIES_VAR,
+  LLM_HTTP_TIMEOUT_MS_VAR,
+  OCR_HTTP_MAX_RETRIES_VAR,
+  OCR_HTTP_TIMEOUT_MS_VAR,
 } from './ai-defaults.config';
 
 import type { ConfigService } from '@nestjs/config';
@@ -129,6 +135,110 @@ describe('AiDefaultsConfig', () => {
       expect(resolver.getOcrDefaults()).toEqual({
         provider: null,
         model: null,
+      });
+    });
+  });
+  describe('4. Politica de red declarada en el entorno', () => {
+    it('4.1 deberia leer los dos pares de espera y reintentos', () => {
+      // 1. Arrange 📐: texto y OCR van en pares separados por el mismo motivo
+      //    que el proveedor y el modelo — redactar una plantilla a partir de
+      //    una tabla de trece comisiones tarda un orden de magnitud mas que
+      //    transcribir un escaneado.
+      const resolver = buildResolver({
+        [LLM_HTTP_TIMEOUT_MS_VAR]: '60000',
+        [LLM_HTTP_MAX_RETRIES_VAR]: '1',
+        [OCR_HTTP_TIMEOUT_MS_VAR]: '30000',
+        [OCR_HTTP_MAX_RETRIES_VAR]: '2',
+      });
+
+      // 2. Act ⚙️ + 3. Assert 🎯
+      expect(resolver.getTextHttpDefaults()).toEqual({
+        timeoutMs: 60_000,
+        maxRetries: 1,
+      });
+      expect(resolver.getOcrHttpDefaults()).toEqual({
+        timeoutMs: 30_000,
+        maxRetries: 2,
+      });
+    });
+
+    it('4.2 deberia devolver null cuando el entorno calla o va vacio', () => {
+      // 1. Arrange 📐: `null` significa "no declarado", y es lo que hace que la
+      //    estrategia caiga en las constantes del DTO.
+      const mudo = buildResolver();
+      const vacio = buildResolver({
+        [LLM_HTTP_TIMEOUT_MS_VAR]: '   ',
+        [LLM_HTTP_MAX_RETRIES_VAR]: '',
+      });
+
+      // 2. Act ⚙️ + 3. Assert 🎯
+      expect(mudo.getTextHttpDefaults()).toEqual({
+        timeoutMs: null,
+        maxRetries: null,
+      });
+      expect(vacio.getTextHttpDefaults()).toEqual({
+        timeoutMs: null,
+        maxRetries: null,
+      });
+    });
+
+    it('4.3 deberia aceptar CERO reintentos pero NO una espera de cero', () => {
+      // 1. Arrange 📐: este es el caso que obliga a tener DOS lectores. En
+      //    `maxRetries`, `0` es la peticion explicita de "no reintentes" y debe
+      //    sobrevivir; en `timeoutMs`, `0` significa en Axios "sin limite", de
+      //    modo que dejaria la peticion colgada para siempre y vale mas
+      //    ignorarlo. Un solo lector con `> 0` haria imposible lo primero.
+      const resolver = buildResolver({
+        [LLM_HTTP_TIMEOUT_MS_VAR]: '0',
+        [LLM_HTTP_MAX_RETRIES_VAR]: '0',
+      });
+
+      // 2. Act ⚙️ + 3. Assert 🎯
+      expect(resolver.getTextHttpDefaults()).toEqual({
+        timeoutMs: null,
+        maxRetries: 0,
+      });
+    });
+
+    it('4.4 deberia avisar e ignorar lo que no sea un entero valido', () => {
+      // 1. Arrange 📐: un `.env` con una errata no debe tumbar el arranque, pero
+      //    tampoco decidirlo en silencio. Se cubren las tres formas de errata:
+      //    texto, decimal y negativo.
+      const warn = jest
+        .spyOn(Logger.prototype, 'warn')
+        .mockImplementation(() => undefined);
+
+      const resolver = buildResolver({
+        [LLM_HTTP_TIMEOUT_MS_VAR]: 'sesenta mil',
+        [LLM_HTTP_MAX_RETRIES_VAR]: '1.5',
+        [OCR_HTTP_TIMEOUT_MS_VAR]: '-1',
+      });
+
+      // 2. Act ⚙️
+      const texto = resolver.getTextHttpDefaults();
+      const ocr = resolver.getOcrHttpDefaults();
+
+      // 3. Assert 🎯
+      expect(texto).toEqual({ timeoutMs: null, maxRetries: null });
+      expect(ocr.timeoutMs).toBeNull();
+      expect(warn).toHaveBeenCalledTimes(3);
+
+      warn.mockRestore();
+    });
+
+    it('4.5 el par de OCR no deberia heredar del par de texto', () => {
+      // 1. Arrange 📐: misma independencia que comprueba el bloque 3 para el
+      //    proveedor y el modelo. Declarar solo la espera de texto no debe
+      //    alargar la de la transcripcion.
+      const resolver = buildResolver({
+        [LLM_HTTP_TIMEOUT_MS_VAR]: '90000',
+        [LLM_HTTP_MAX_RETRIES_VAR]: '0',
+      });
+
+      // 2. Act ⚙️ + 3. Assert 🎯
+      expect(resolver.getOcrHttpDefaults()).toEqual({
+        timeoutMs: null,
+        maxRetries: null,
       });
     });
   });

@@ -168,6 +168,38 @@ describe('AnthropicLlmProvider · cliente de Claude sobre la Messages API', () =
       });
     });
 
+    it('1.3bis deberia reenviar la espera entre reintentos solo si el nodo la declara', async () => {
+      // 1. Arrange 📐: `baseDelayMs` es OPCIONAL en el contrato, al reves que
+      //    los otros dos. Omitida, NO debe viajar ninguna clave: el cliente
+      //    compartido aplica entonces su propio defecto, que es como funciono
+      //    hasta que los nodos de IA y OCR empezaron a separar sus reintentos.
+      const conEspera = buildHttp();
+      const sinEspera = buildHttp();
+
+      // 2. Act ⚙️
+      await buildProvider(conEspera).generateCompletion(PROMPT, undefined, {
+        model: 'claude-opus-5-5',
+        timeoutMs: 9_000,
+        maxRetries: 1,
+        baseDelayMs: 2_500,
+      });
+      await buildProvider(sinEspera).generateCompletion(PROMPT, undefined, {
+        model: 'claude-opus-5-5',
+        timeoutMs: 9_000,
+        maxRetries: 1,
+      });
+
+      // 3. Assert 🎯
+      expect(conEspera.request.mock.calls[0]?.[1]).toEqual({
+        timeoutMs: 9_000,
+        maxRetries: 1,
+        baseDelayMs: 2_500,
+      });
+      expect(sinEspera.request.mock.calls[0]?.[1]).not.toHaveProperty(
+        'baseDelayMs',
+      );
+    });
+
     it('1.4 deberia poner el contrato de formato DESPUES de la instruccion del operador', async () => {
       // 1. Arrange 📐: el contrato va el ultimo para que sea lo mas reciente
       //    que el modelo lee antes de responder.

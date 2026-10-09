@@ -238,6 +238,9 @@ export class GeminiLlmProvider implements ILlmProviderClient {
         ...(config?.maxRetries === undefined
           ? {}
           : { maxRetries: config.maxRetries }),
+        ...(config?.baseDelayMs === undefined
+          ? {}
+          : { baseDelayMs: config.baseDelayMs }),
       },
     );
 

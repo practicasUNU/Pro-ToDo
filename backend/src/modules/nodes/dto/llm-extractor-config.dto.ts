@@ -12,9 +12,12 @@ import {
   Min,
 } from 'class-validator';
 
+import { clamp } from '@common/utils/clamp.util';
 import { CODE_PATTERN } from '@modules/ai-prompt-templates/dto/create-ai-prompt-template.dto';
 import { LlmProvider } from '@modules/nodes/strategies/interfaces/llm-provider.interface';
 import { DEFAULT_GEMINI_MODEL } from '@modules/nodes/strategies/providers/gemini-llm.provider';
+
+import type { AiHttpDefaults } from '@core/config/ai-defaults.config';
 
 /** Proveedor por defecto: simulacion de coste cero. Ver la nota de la clase. */
 export const DEFAULT_LLM_PROVIDER = LlmProvider.MOCK;
@@ -38,16 +41,49 @@ export const MIN_LLM_TIMEOUT_MS = 1_000;
  * Techo del `timeoutMs`.
  *
  * El motor FSM ejecuta los nodos en linea, asi que este valor es tiempo que el
- * flujo entero pasa bloqueado. Un minuto es el limite a partir del cual conviene
- * dar la inferencia por perdida antes que retener la ejecucion.
+ * flujo entero pasa bloqueado, y por eso el DEFECTO sigue siendo prudente. El
+ * techo, en cambio, ya no puede ser un minuto: redactar una plantilla
+ * institucional a partir de una tabla de trece comisiones universitarias se
+ * pasa de largo de ese minuto, y con el tope ahi el operador no tenia forma de
+ * arreglarlo sin desplegar. Son los mismos 120 000 ms que ya admite
+ * `MAX_OCR_TIMEOUT_MS`, de modo que los dos nodos que llaman a un modelo
+ * comparten limite.
  */
-export const MAX_LLM_TIMEOUT_MS = 60_000;
+export const MAX_LLM_TIMEOUT_MS = 120_000;
 
-/** Reintentos rapidos de red por defecto, adicionales al primer intento. */
-export const DEFAULT_LLM_MAX_RETRIES = 3;
+/**
+ * Reintentos rapidos de red por defecto, adicionales al primer intento.
+ *
+ * UNO, y antes eran tres. El motivo es que un `ERR_HTTP_TIMEOUT` SI se
+ * reintenta (`HttpClientService.isRetryable` solo excluye el rechazo de
+ * cliente), de modo que la espera no se gasta una vez sino
+ * `timeoutMs × (maxRetries + 1)` — y el ciclo entero se repite ademas por cada
+ * proveedor de la cadena de respaldo, porque `ERR_HTTP_TIMEOUT` tambien es
+ * `isFallbackWorthy`. Con el techo nuevo y tres reintentos, un proveedor mudo
+ * retenia el motor alrededor de OCHO minutos antes de rendirse.
+ *
+ * Con uno son dos intentos por proveedor y el salto al siguiente llega antes,
+ * que es lo que de verdad resuelve un proveedor saturado: insistir contra el
+ * mismo no lo descongestiona.
+ */
+export const DEFAULT_LLM_MAX_RETRIES = 1;
 
 /** Techo de reintentos internos. Ver el AVISO sobre los dos niveles. */
 export const MAX_LLM_RETRIES = 5;
+
+/**
+ * Espera base entre reintentos de la inferencia, en milisegundos.
+ *
+ * NO es un campo del DTO, y la omision es deliberada: no es una decision del
+ * operador sino la distancia minima que el proveedor necesita entre dos
+ * intentos. Los 500 ms que `HttpClientService` aplica por defecto estan
+ * pensados para un portal web cualquiera; contra un modelo de pago que acaba de
+ * devolver un 429 de cuota, medio segundo garantiza caer en el mismo limite y
+ * gastar el reintento sin opcion de que funcione.
+ *
+ * Con `HTTP_BACKOFF_FACTOR` (2) produce esperas de 2 500 / 5 000 / 10 000 ms.
+ */
+export const LLM_RETRY_BASE_DELAY_MS = 2_500;
 
 /**
  * Presupuesto de tokens cuando el nodo debe devolver ademas la plantilla rellena.
@@ -258,6 +294,16 @@ export interface ResolvedLlmExtractorConfig {
   readonly dryRun: boolean;
   readonly timeoutMs: number;
   readonly maxRetries: number;
+
+  /**
+   * Espera base del backoff entre reintentos.
+   *
+   * Viaja en la configuracion resuelta aunque sea constante para que exista UN
+   * solo sitio donde se decide la politica de red del nodo: la estrategia lee
+   * `config.*` para los otros dos valores, y sacar este de una constante
+   * importada aparte repartiria la misma decision en dos capas.
+   */
+  readonly baseDelayMs: number;
   readonly emergencyBrakeThreshold: number;
   /**
    * `null` significa NO DECLARADO, no "sin tope".
@@ -270,9 +316,19 @@ export interface ResolvedLlmExtractorConfig {
   readonly maxTokens: number | null;
 }
 
-/** Aplica los valores por defecto sobre un DTO ya validado. Funcion pura. */
+/**
+ * Aplica los valores por defecto sobre un DTO ya validado. Funcion pura.
+ *
+ * `env` es el ESCALON INTERMEDIO de la politica de red, y la precedencia es
+ * `params del nodo > entorno > constante`: un nodo que declara su `timeoutMs`
+ * sigue mandando sobre el `.env`, igual que ya ocurre con el proveedor y el
+ * modelo (`AiDefaultsConfig`). Lleva valor por defecto para que la funcion
+ * siga siendo invocable con un solo argumento alli donde no hay entorno que
+ * consultar —validadores, asistente, pruebas—.
+ */
 export const resolveLlmExtractorConfig = (
   dto: LlmExtractorConfigDto,
+  env: AiHttpDefaults = { timeoutMs: null, maxRetries: null },
 ): ResolvedLlmExtractorConfig => ({
   // `?? null` y no un lanzamiento: el DTO admite la ausencia al guardar, asi que
   // aqui hay que representarla. Quien la convierte en un fallo diagnosticado es
@@ -284,8 +340,21 @@ export const resolveLlmExtractorConfig = (
   provider: dto.provider ?? DEFAULT_LLM_PROVIDER,
   model: dto.model ?? DEFAULT_LLM_MODEL,
   dryRun: dto.dryRun ?? false,
-  timeoutMs: dto.timeoutMs ?? DEFAULT_LLM_TIMEOUT_MS,
-  maxRetries: dto.maxRetries ?? DEFAULT_LLM_MAX_RETRIES,
+  // El `clamp` solo hace falta por el valor del ENTORNO: lo que viene en `dto`
+  // ya paso por los `@Min`/`@Max` de arriba, pero una variable del `.env` no
+  // atraviesa `class-validator` en ninguna parte. Se recorta y no se rechaza
+  // porque un `.env` con una errata no debe impedir que el flujo corra.
+  timeoutMs: clamp(
+    dto.timeoutMs ?? env.timeoutMs ?? DEFAULT_LLM_TIMEOUT_MS,
+    MIN_LLM_TIMEOUT_MS,
+    MAX_LLM_TIMEOUT_MS,
+  ),
+  maxRetries: clamp(
+    dto.maxRetries ?? env.maxRetries ?? DEFAULT_LLM_MAX_RETRIES,
+    0,
+    MAX_LLM_RETRIES,
+  ),
+  baseDelayMs: LLM_RETRY_BASE_DELAY_MS,
   emergencyBrakeThreshold:
     dto.emergencyBrakeThreshold ?? DEFAULT_LLM_EMERGENCY_BRAKE_THRESHOLD,
   maxTokens: dto.maxTokens ?? null,

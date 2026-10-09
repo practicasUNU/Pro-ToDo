@@ -37,7 +37,14 @@ export const DEFAULT_OCR_TIMEOUT_MS = 30_000;
 export const MIN_OCR_TIMEOUT_MS = 1_000;
 export const MAX_OCR_TIMEOUT_MS = 120_000;
 
-export const DEFAULT_OCR_MAX_RETRIES = 2;
+/**
+ * Reintentos rapidos de red. REPLICA de `DEFAULT_OCR_MAX_RETRIES` (backend).
+ *
+ * Bajo de dos a uno por el mismo motivo que el del nodo de redaccion: un
+ * timeout se reintenta, asi que la espera se multiplica por los intentos y
+ * luego otra vez por la cadena de respaldo de proveedores.
+ */
+export const DEFAULT_OCR_MAX_RETRIES = 1;
 export const MIN_OCR_RETRIES = 0;
 export const MAX_OCR_RETRIES = 5;
 
