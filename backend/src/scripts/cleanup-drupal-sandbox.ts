@@ -229,6 +229,76 @@ export const textContentOf = (html: string): string =>
     .replace(/\s+/g, ' ')
     .trim();
 
+/**
+ * Literal que la plantilla base siembra en el `href` y en el `id` del panel.
+ *
+ * Es deliberadamente inverosimil: su unico cometido es ser RECONOCIBLE si el
+ * modelo no lo sustituye. Un valor creible como `collapse1` habria hecho ese
+ * fallo invisible tambien aqui.
+ */
+export const COLLAPSE_PLACEHOLDER = 'collapsePanelId';
+
+/**
+ * Motivos por los que un panel no desplegaria al pulsarlo.
+ *
+ * POR QUE NO LO VE EL ESCUDO_POST_IA. `auditFilledSlots` responde a «quedo algo
+ * en esta ranura», y un placeholder sin sustituir la deja rellena: el escudo lo
+ * aprueba. El sintoma tampoco aparece al publicar —el fragmento se inyecta
+ * entero y bien formado— sino al pulsar el panel en la pagina real, donde
+ * Bootstrap busca por `id` y encuentra el del vecino. Esta es, por tanto, la
+ * unica comprobacion del sistema que lo caza.
+ *
+ * Devuelve los motivos en vez de lanzar para que quien la llame decida: el E2E
+ * aborta, y un futuro consumidor podria querer solo avisar.
+ */
+export const findUndeployablePanelReasons = (
+  markup: string,
+): readonly string[] => {
+  const $ = cheerio.load(markup, { xml: { xmlMode: false } }, false);
+  const reasons: string[] = [];
+
+  if (markup.includes(COLLAPSE_PLACEHOLDER)) {
+    reasons.push(
+      `El marcado conserva el valor de relleno "${COLLAPSE_PLACEHOLDER}": el modelo no lo ` +
+        'sustituyo por un identificador derivado del comite.',
+    );
+  }
+
+  const toggle = $('a.panel-toggle-link').first();
+
+  if (toggle.length === 0) {
+    reasons.push(
+      'No hay ningun "a.panel-toggle-link" que despliegue el panel.',
+    );
+
+    return reasons;
+  }
+
+  const href = (toggle.attr('href') ?? '').trim();
+
+  if (!href.startsWith('#') || href.length <= 1) {
+    reasons.push(
+      `El href del enlace ("${href}") no apunta a un fragmento de la propia pagina.`,
+    );
+
+    return reasons;
+  }
+
+  // `#collapseCEU1` -> `collapseCEU1`. Se busca por atributo y no con el
+  // selector de id, porque un identificador con caracteres que CSS reserva
+  // haria estallar el selector en vez de reportar el fallo.
+  const targetId = href.slice(1);
+
+  if ($(`.collapse[id="${targetId}"]`).length === 0) {
+    reasons.push(
+      `El href apunta a "#${targetId}" pero ningun ".collapse" del panel lleva ese id. ` +
+        'Bootstrap no encontraria el contenedor y el panel no desplegaria.',
+    );
+  }
+
+  return reasons;
+};
+
 /** `node--page` -> `node/page`. */
 const toEntityPath = (bundle: string): string => bundle.replace('--', '/');
 

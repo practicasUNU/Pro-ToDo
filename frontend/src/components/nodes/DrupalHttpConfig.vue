@@ -104,28 +104,45 @@ const SOURCE_HINT =
 
 const UUID_HINT = 'UUID v4 de la entidad en Drupal. Usa los botones de sandbox para no teclearlo.';
 
+const AGGREGATOR_NOTICE =
+  'Modo agregador activo: el contenido se inserta directamente en el HTML de la pagina objetivo mediante manipulacion del DOM. No requiere titulo ni resumen de entidad independientes.';
+
 const ATTACHMENT_NOTICE =
   'El binario sale del inventario de adjuntos del correo. El motor libera esos bytes en cuanto un nodo publica texto, asi que este paso debe ir ANTES del parser.';
 
 const ADVANCED_NOTICE =
   'Valores que el backend ya resuelve por defecto. Tocalos solo si este Drupal se aparta de la instalacion estandar.';
 
-/** Etiquetas de los cuatro modos, en el orden en que se suelen elegir. */
+/**
+ * Etiquetas de los cuatro modos, en el orden en que se suelen elegir.
+ *
+ * Cada una nombra los CANALES institucionales que la usan, y no solo la
+ * operacion tecnica: quien configura el nodo piensa en "verificador de titulos",
+ * no en "APPEND_HTML_BLOCK". Citar los dos canales que comparten el modo
+ * agregador es lo que evita que alguien elija "crear contenido" para los
+ * paneles de acreditacion, que es el error que deja el flujo publicando
+ * entidades sueltas que nadie alcanza desde la pagina que las agrega.
+ *
+ * La de UPLOAD_ATTACHMENT NO cita un nombre de campo concreto: `fileFieldName`
+ * es configurable y la estrategia ademas autodetecta el campo probando
+ * candidatos, de modo que prometer uno aqui seria una promesa que el formulario
+ * no cumple.
+ */
 const MODE_OPTIONS: readonly LabeledOption[] = [
   {
-    label: 'Crear contenido nuevo (una noticia por ejecucion)',
+    label: 'Crear contenido nuevo (Notiweb / articulo independiente)',
     value: DrupalOperationMode.CREATE_NODE,
   },
   {
-    label: 'Anadir bloque a una pagina agregadora (abrir licitacion)',
+    label: 'Insertar bloque en pagina agregadora (licitaciones abiertas / verificador de titulos)',
     value: DrupalOperationMode.APPEND_HTML_BLOCK,
   },
   {
-    label: 'Mover un bloque entre dos paginas (cerrar licitacion)',
+    label: 'Mover bloque entre paginas (cerrar licitacion hacia historico)',
     value: DrupalOperationMode.TRANSFER_HTML_BLOCK,
   },
   {
-    label: 'Subir un adjunto del correo como fichero',
+    label: 'Subir un adjunto del correo como fichero fisico',
     value: DrupalOperationMode.UPLOAD_ATTACHMENT,
   },
 ];
@@ -172,6 +189,20 @@ const isTransfer = computed<boolean>(
 
 /** Todos los modos menos `CREATE_NODE` apuntan a una entidad que ya existe. */
 const needsTargetUuid = computed<boolean>(() => !isCreateNode.value);
+
+/**
+ * El modo activo MUTA el DOM de una pagina que ya existe.
+ *
+ * Es el espejo en cliente del `touchesDom` que `DrupalHttpStrategy` usa en
+ * `getUnreachableErrorCodes` para decidir que modos pueden fallar por un
+ * selector, y se nombra parecido a proposito: son el mismo concepto a los dos
+ * lados de la red.
+ *
+ * NO es `!isCreateNode`: `UPLOAD_ATTACHMENT` tampoco crea contenido, pero sube
+ * un binario a un campo de la entidad sin tocar su marcado. Meterlo aqui
+ * prometeria al operador una insercion en el HTML que ese modo no hace.
+ */
+const mutatesRemoteDom = computed<boolean>(() => mutatesContainer.value || isTransfer.value);
 
 /** Solo el modo que anade bloque elige donde insertarlos dentro del contenedor. */
 const mutatesContainer = computed<boolean>(
@@ -394,6 +425,21 @@ const toNullableText = (value: string | number | null): string | null => {
     <h3 class="pd-h2 q-mt-lg q-mb-md">
       {{ isCreateNode ? 'Contenido a publicar' : 'Pagina de destino' }}
     </h3>
+
+    <!-- Ocupa el hueco que dejan el titulo y el resumen al desaparecer. Sin el,
+         el operador ve dos campos esfumarse al cambiar de modo y nada que
+         explique por que ya no hacen falta. -->
+    <q-banner
+      v-if="mutatesRemoteDom"
+      dense
+      class="pd-info-banner q-mb-md"
+      data-test="aggregator-notice"
+    >
+      <template #avatar>
+        <q-icon name="account_tree" size="20px" class="pd-node-icon" />
+      </template>
+      <p class="pd-subtitle q-mb-none">{{ AGGREGATOR_NOTICE }}</p>
+    </q-banner>
 
     <div class="row q-col-gutter-md items-start">
       <div v-if="isCreateNode" class="col-12" data-test="title-template-field">

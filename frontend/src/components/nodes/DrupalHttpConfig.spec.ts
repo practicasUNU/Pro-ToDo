@@ -174,6 +174,67 @@ describe('DrupalHttpConfig · configurador del nodo DESTINO_DRUPAL', () => {
       expect(wrapper.find('[data-test="title-template-field"]').exists()).toBe(false);
     });
 
+    /**
+     * El banner y el ocultamiento son UNA sola pieza: el cartel explica por que
+     * los campos no estan. Por eso cada caso afirma las dos cosas a la vez — si
+     * alguien reintrodujera el titulo en un modo agregador, el banner pasaria a
+     * mentir ("no requiere titulo") y una prueba que solo mirase el cartel lo
+     * dejaria pasar.
+     */
+    it('2.1bis deberia explicar la ausencia de titulo en APPEND_HTML_BLOCK', async () => {
+      // 1. Arrange 📐
+      const nodeId = nextNodeId();
+      const wrapper = mountComponent(nodeId);
+
+      // 2. Act ⚙️
+      useDrupalHttpStore(nodeId).updateConfig({
+        operationMode: DrupalOperationMode.APPEND_HTML_BLOCK,
+      });
+      await wrapper.vm.$nextTick();
+
+      // 3. Assert 🎯
+      expect(wrapper.find('[data-test="aggregator-notice"]').exists()).toBe(true);
+      expect(wrapper.find('[data-test="title-template-field"]').exists()).toBe(false);
+      expect(wrapper.find('[data-test="summary-template-field"]').exists()).toBe(false);
+    });
+
+    it('2.1ter deberia explicar la ausencia de titulo tambien en TRANSFER_HTML_BLOCK', async () => {
+      // 1. Arrange 📐: trasladar un bloque tampoco da de alta una entidad.
+      const nodeId = nextNodeId();
+      const wrapper = mountComponent(nodeId);
+
+      // 2. Act ⚙️
+      useDrupalHttpStore(nodeId).updateConfig({
+        operationMode: DrupalOperationMode.TRANSFER_HTML_BLOCK,
+      });
+      await wrapper.vm.$nextTick();
+
+      // 3. Assert 🎯
+      expect(wrapper.find('[data-test="aggregator-notice"]').exists()).toBe(true);
+      expect(wrapper.find('[data-test="title-template-field"]').exists()).toBe(false);
+    });
+
+    it('2.1quater NO deberia anunciar el modo agregador en CREATE_NODE ni al subir un fichero', async () => {
+      // 1. Arrange 📐: CREATE_NODE es el modo por defecto.
+      const nodeId = nextNodeId();
+      const wrapper = mountComponent(nodeId);
+
+      // 2. Act ⚙️ & 3. Assert 🎯: con el titulo en pantalla, el cartel se
+      //    contradiria con el formulario que tiene debajo.
+      expect(wrapper.find('[data-test="aggregator-notice"]').exists()).toBe(false);
+
+      // 2bis. Act ⚙️: UPLOAD_ATTACHMENT tampoco crea contenido, pero sube un
+      //    binario a un campo SIN tocar el marcado de la pagina. Prometer una
+      //    insercion en el HTML seria falso.
+      useDrupalHttpStore(nodeId).updateConfig({
+        operationMode: DrupalOperationMode.UPLOAD_ATTACHMENT,
+      });
+      await wrapper.vm.$nextTick();
+
+      // 3bis. Assert 🎯
+      expect(wrapper.find('[data-test="aggregator-notice"]').exists()).toBe(false);
+    });
+
     it('2.2bis deberia revelar la lista de pliegos solo al encender la subida', async () => {
       // 1. Arrange 📐: el selector solo significa algo si hay fichero que
       //    colgar de el. Mostrarlo siempre invitaria a configurarlo en modos que

@@ -1,5 +1,7 @@
 import {
+  COLLAPSE_PLACEHOLDER,
   DrupalSandboxCleanupService,
+  findUndeployablePanelReasons,
   isUuid,
   normalizeHtmlForComparison,
   purgeMarkedBlocks,
@@ -187,6 +189,81 @@ describe('purgeMarkedBlocks · poda del sandbox de Drupal', () => {
       expect(textContentOf('<div>\n  <p>Uno</p>\n</div>')).toBe(
         textContentOf('<div><p>Uno</p></div>'),
       );
+    });
+  });
+
+  /**
+   * El fallo que no ve nadie mas: un panel que se publica entero, pasa el
+   * escudo y no despliega al pulsarlo.
+   */
+  describe('6. Panel desplegable', () => {
+    const buildPanel = (href: string, id: string): string =>
+      `<div class="panel panel-default"><div class="panel-heading"><h5 class="panel-title">` +
+      `<a class="panel-toggle-link" href="${href}" data-bs-toggle="collapse">CEU 1</a>` +
+      `</h5></div><div class="collapse" id="${id}"><p>Contenido</p></div></div>`;
+
+    it('6.1 no deberia objetar nada a un panel cuyo enlace y contenedor casan', () => {
+      // 1. Arrange 📐 + 2. Act ⚙️
+      const reasons = findUndeployablePanelReasons(
+        buildPanel('#collapseESIC1', 'collapseESIC1'),
+      );
+
+      // 3. Assert 🎯
+      expect(reasons).toEqual([]);
+    });
+
+    it('6.2 deberia delatar el placeholder que el modelo no sustituyo', () => {
+      // 1. Arrange 📐: el enlace y el contenedor CASAN entre si, de modo que
+      //    sin la comprobacion del literal el panel pareceria correcto. Lo que
+      //    esta mal es que los dos paneles de la pagina compartirian id.
+      const reasons = findUndeployablePanelReasons(
+        buildPanel(`#${COLLAPSE_PLACEHOLDER}`, COLLAPSE_PLACEHOLDER),
+      );
+
+      // 3. Assert 🎯
+      expect(reasons.join(' ')).toContain(COLLAPSE_PLACEHOLDER);
+    });
+
+    it('6.3 deberia delatar un href que no casa con ningun contenedor', () => {
+      // 1. Arrange 📐 + 2. Act ⚙️: un digito de diferencia basta.
+      const reasons = findUndeployablePanelReasons(
+        buildPanel('#collapseESIC1', 'collapseESIC2'),
+      );
+
+      // 3. Assert 🎯
+      expect(reasons.join(' ')).toContain('ningun ".collapse"');
+    });
+
+    it('6.4 deberia delatar un panel sin enlace de despliegue', () => {
+      // 1. Arrange 📐: el modelo se comio la etiqueta entera.
+      const reasons = findUndeployablePanelReasons(
+        '<div class="panel panel-default"><div class="collapse" id="x"></div></div>',
+      );
+
+      // 3. Assert 🎯
+      expect(reasons.join(' ')).toContain('panel-toggle-link');
+    });
+
+    it('6.5 deberia delatar un href que apunta fuera de la pagina', () => {
+      // 1. Arrange 📐: un enlace absoluto no despliega nada; navega.
+      const reasons = findUndeployablePanelReasons(
+        buildPanel('https://www.madrimasd.org/panel', 'collapseESIC1'),
+      );
+
+      // 3. Assert 🎯
+      expect(reasons.join(' ')).toContain('fragmento');
+    });
+
+    it('6.6 no deberia estallar con un id que lleva caracteres reservados por CSS', () => {
+      // 1. Arrange 📐: se busca por atributo y no con el selector de id, porque
+      //    un `#collapse.CEU:1` haria estallar el selector y el fallo saldria
+      //    como una excepcion de cheerio en vez de como un motivo legible.
+      const reasons = findUndeployablePanelReasons(
+        buildPanel('#collapse.CEU:1', 'collapse.CEU:1'),
+      );
+
+      // 3. Assert 🎯
+      expect(reasons).toEqual([]);
     });
   });
 });

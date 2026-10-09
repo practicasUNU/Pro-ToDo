@@ -16,6 +16,7 @@ import { DrupalApiConfig } from '@core/config/drupal-api.config';
 import { AppModule } from '../app.module';
 import {
   DrupalSandboxCleanupService,
+  findUndeployablePanelReasons,
   normalizeHtmlForComparison,
   textContentOf,
 } from './cleanup-drupal-sandbox';
@@ -85,11 +86,12 @@ const loadFragment = (html: string): CheerioAPI =>
 /**
  * Panel institucional de prueba.
  *
- * Imita el marcado real de la pagina de Madrid+D (acordeon de Bootstrap 3), que
- * NO es la plantilla sembrada en `plantillas_html` —aquella es un
- * `div.panel-evaluacion` con dos tablas—. Son cosas distintas a proposito: esto
- * verifica que se puede insertar en la pagina tal y como esta hoy, no que la
- * plantilla sea correcta.
+ * Imita el marcado real de la pagina de Madrid+D (acordeon de Bootstrap 3).
+ * Sigue SIN ser la fila de `plantillas_html`: esto verifica que se puede
+ * insertar en la pagina tal y como esta hoy, no que la plantilla sembrada sea
+ * correcta. Desde la migracion 034 las dos comparten forma —el mismo acordeon,
+ * la misma `a.panel-toggle-link`— porque el panel de prueba debe parecerse a lo
+ * que el flujo publicara de verdad; lo que no comparten es el origen.
  *
  * Los `aria-*` sobreviven porque este script escribe directo contra Drupal y no
  * pasa por `TemplateRendererService`, cuya lista blanca si los descartaria.
@@ -98,7 +100,7 @@ const buildTestPanel = (): string => `
   <div class="panel panel-default" data-protodo-injected="true" data-test-id="${TEST_ID}" aria-expanded="false">
     <div class="panel-heading">
       <h5 class="panel-title">
-        <a href="#collapseCEU_TEST" aria-expanded="false" data-parent="#accordionCEU" data-bs-toggle="collapse">
+        <a class="panel-toggle-link" href="#collapseCEU_TEST" aria-expanded="false" data-parent="#accordionCEU" data-bs-toggle="collapse">
           <strong>CEU TEST</strong>&nbsp;Facultad de Ingenieria y Pruebas E2E (Proto-Do)
         </a>
       </h5>
@@ -247,6 +249,19 @@ const main = async (): Promise<void> => {
     }
 
     const panel = buildTestPanel();
+
+    // Guarda de DESPLIEGUE. Corre antes de la bifurcacion por `--write`, de modo
+    // que la simulacion —que es como se lanza a diario— tambien la ejercita. Lo
+    // que vigila no lo ve ningun otro punto del sistema: el ESCUDO_POST_IA
+    // aprueba un `href` relleno con el placeholder, y un panel cuyo enlace y
+    // contenedor no casan se publica sin una sola queja y falla al pulsarlo.
+    const undeployable = findUndeployablePanelReasons(panel);
+
+    if (undeployable.length > 0) {
+      throw new Error(
+        `El panel no desplegaria una vez publicado:\n- ${undeployable.join('\n- ')}`,
+      );
+    }
 
     if (!shouldWrite) {
       logger.log(
