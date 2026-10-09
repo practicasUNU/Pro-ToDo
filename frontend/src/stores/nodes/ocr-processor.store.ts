@@ -16,12 +16,16 @@ import {
 } from '@/types/nodes/ocr-processor.types';
 
 import { useSessionStore } from '@stores/session.store';
-import { fetchLlmModels } from '@services/nodes/llm-extractor.service';
+import { fetchLlmModels, testLlmConnection } from '@services/nodes/llm-extractor.service';
 import { buildModelOptions, isModelForbidden } from '@/utils/llm-model-options';
 
 import type { HydratableNode } from '@stores/nodes/node-store-registry';
 import type { OcrProcessorNodeConfig } from '@/types/nodes/ocr-processor.types';
-import type { LlmModelDescriptor, LlmModelOption } from '@/types/nodes/llm-extractor.types';
+import type {
+  LlmModelDescriptor,
+  LlmModelOption,
+  LlmTestConnectionResult,
+} from '@/types/nodes/llm-extractor.types';
 
 /** Lee una cadena de los `params` crudos del esquema. */
 const asText = (value: unknown): string => (typeof value === 'string' ? value : '');
@@ -48,19 +52,28 @@ const STORE_ID_PREFIX = 'ocrProcessorNode';
 
 // Estado reactivo del nodo PROCESADOR_OCR (regla frontend-quasar.md §3.1).
 //
-// SIGUE SIN BOTON DE PRUEBA, y por el motivo de siempre: una simulacion de OCR
-// desde el asistente facturaria una inferencia cada vez que alguien reabre el
-// paso, y el banco de pruebas del flujo completo ya cubre esa necesidad.
+// GANA EL BOTON DE PRUEBA, revirtiendo la decision anterior de no tenerlo. El
+// motivo de aquella —"facturaria una inferencia cada vez que alguien reabre el
+// paso"— daba por hecho que la prueba se dispararia sola; no es el caso: la
+// lanza el operador pulsando, igual que en el nodo de redaccion, y su resultado
+// entra en `configWarnings` SIN tocar `isConfigValid`, de modo que nadie se ve
+// obligado a pulsarla para poder avanzar. El coste pasa a ser una eleccion y no
+// un peaje, y a cambio el par proveedor/modelo deja de comprobarse por primera
+// vez en ejecucion, con el flujo ya PAUSADO.
 //
-// Si CONSUME el catalogo de modelos desde PROT-22. No es una capa de servicios
-// propia: la ruta `/llm/models` es del catalogo y ya la posee
-// `services/nodes/llm-extractor.service.ts`; envolverla aqui seria la capa
-// vacia que `frontend-architecture.md` §2.1 desaconseja.
+// CONSUME el catalogo y el banco de pruebas desde PROT-22. No es una capa de
+// servicios propia: las rutas `/llm/models` y `/llm/test-connection` son del
+// catalogo y ya las posee `services/nodes/llm-extractor.service.ts`; envolverlas
+// aqui seria la capa vacia que `frontend-architecture.md` §2.1 desaconseja. El
+// OCR comparte ademas el mismo camino de proveedores que la IA
+// (`LlmProviderFactory` en el backend), asi que la prueba es la misma prueba.
 const ocrProcessorSetup = () => {
   const sessionStore = useSessionStore();
   const config = ref<OcrProcessorNodeConfig>(buildInitialConfig());
   const availableModels = ref<LlmModelDescriptor[]>([]);
   const isLoadingModels = ref(false);
+  const isTestingConnection = ref(false);
+  const lastConnectionResult = ref<LlmTestConnectionResult | null>(null);
 
   /** Opciones del selector, con los de pago marcados segun el rol. */
   const modelOptions = computed<LlmModelOption[]>(() =>
@@ -93,6 +106,35 @@ const ocrProcessorSetup = () => {
     }
   };
 
+  /** Hay un par proveedor/modelo que probar y no hay una prueba en vuelo. */
+  const canTestConnection = computed<boolean>(
+    () => config.value.model.trim() !== '' && !isTestingConnection.value,
+  );
+
+  /**
+   * Lanza una inferencia minima contra el proveedor elegido.
+   *
+   * No captura el error: `frontend-architecture.md` §2.1 deja al componente
+   * decidir el mensaje. El `finally` solo garantiza que el boton no se quede
+   * girando.
+   */
+  const testConnection = async (): Promise<LlmTestConnectionResult> => {
+    isTestingConnection.value = true;
+
+    try {
+      const result = await testLlmConnection({
+        provider: config.value.provider,
+        model: config.value.model.trim(),
+      });
+
+      lastConnectionResult.value = result;
+
+      return result;
+    } finally {
+      isTestingConnection.value = false;
+    }
+  };
+
   /**
    * Contrato Poka-Yoke que el stepper consulta para habilitar "Siguiente".
    *
@@ -118,16 +160,46 @@ const ocrProcessorSetup = () => {
    * que lee, y una transcripcion que se aparta del original es peor que no
    * tenerla, porque nadie la revisa.
    */
-  const configWarnings = computed<string[]>(() =>
-    config.value.temperature > DEFAULT_OCR_TEMPERATURE
-      ? [
-          `La temperatura ${config.value.temperature} deja al modelo apartarse de lo que pone en la imagen. Para transcribir, ${DEFAULT_OCR_TEMPERATURE} es lo recomendable.`,
-        ]
-      : [],
-  );
+  const configWarnings = computed<string[]>(() => {
+    const warnings: string[] = [];
+
+    if (config.value.temperature > DEFAULT_OCR_TEMPERATURE) {
+      warnings.push(
+        `La temperatura ${config.value.temperature} deja al modelo apartarse de lo que pone en la imagen. Para transcribir, ${DEFAULT_OCR_TEMPERATURE} es lo recomendable.`,
+      );
+    }
+
+    // `null` cubre las dos situaciones que para el operador son la misma: nunca
+    // se probo, o el cambio de proveedor/modelo invalido el resultado anterior.
+    if (lastConnectionResult.value === null) {
+      warnings.push(
+        'Este nodo todavia no ha superado una prueba de conexion con el proveedor elegido. Pulsa "Probar conexion" para confirmar que la clave existe y el modelo responde.',
+      );
+    } else if (!lastConnectionResult.value.success) {
+      warnings.push(
+        `La ultima prueba de conexion fallo: ${lastConnectionResult.value.error?.message ?? 'sin detalle del proveedor'}. Guardar asi deja un flujo que reventara en su primera ejecucion.`,
+      );
+    } else if (lastConnectionResult.value.isMock) {
+      // Un exito simulado NO puede apagar el aviso: un proveedor sin clave no
+      // falla, degrada. En un OCR eso significa publicar como transcripcion un
+      // texto que nadie leyo de la imagen.
+      warnings.push(
+        'La prueba de conexion la respondio el SIMULADOR, no el proveedor elegido: falta su clave de API en el servidor. La transcripcion seria texto simulado, no lo que pone en la imagen.',
+      );
+    }
+
+    return warnings;
+  });
 
   const updateConfig = (patch: Partial<OcrProcessorNodeConfig>): void => {
     config.value = { ...config.value, ...patch };
+
+    // Un resultado de prueba no puede sobrevivir al par que lo produjo: dejar
+    // "conexion correcta" en pantalla despues de cambiar de proveedor es peor
+    // que no haber probado nunca. Mismo criterio que el nodo de redaccion.
+    if (patch.provider !== undefined || patch.model !== undefined) {
+      lastConnectionResult.value = null;
+    }
   };
 
   /**
@@ -161,10 +233,13 @@ const ocrProcessorSetup = () => {
       maxRetries: asNumber(params.maxRetries, DEFAULT_OCR_MAX_RETRIES),
       dryRun: params.dryRun === true,
     };
+
+    lastConnectionResult.value = null;
   };
 
   const resetConfig = (): void => {
     config.value = buildInitialConfig();
+    lastConnectionResult.value = null;
   };
 
   return {
@@ -173,7 +248,11 @@ const ocrProcessorSetup = () => {
     isLoadingModels,
     modelOptions,
     isSelectedModelForbidden,
+    isTestingConnection,
+    lastConnectionResult,
+    canTestConnection,
     fetchAvailableModels,
+    testConnection,
     isConfigValid,
     configWarnings,
     updateConfig,

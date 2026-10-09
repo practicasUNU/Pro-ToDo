@@ -318,6 +318,41 @@ describe('PostIaSanitizerConfig · configurador del nodo ESCUDO_POST_IA', () => 
       expect(store.isConfigValid).toBe(true);
     });
 
+    it('deberia cubrir el panel colapsable con el atajo del acordeon', async () => {
+      // 1. Arrange 📐: son las etiquetas que la plantilla del verificador de
+      //    titulos declara de verdad. Si el atajo dejara fuera una de ellas, el
+      //    saneador la podaria y el ESCUDO rechazaria su propia plantilla base
+      //    con ERR_POST_IA_DOM_MUTATED.
+      const wrapper = mountComponent();
+      const store = usePostIaSanitizerStore(NODE_ID);
+      const ESTRUCTURA_DEL_PANEL = [
+        'div',
+        'h5',
+        'a',
+        'strong',
+        'span',
+        'table',
+        'tbody',
+        'tr',
+        'th',
+      ];
+
+      // 2. Act ⚙️
+      await wrapper.get('[data-test="tag-preset-panel_acordeon"]').trigger('click');
+
+      // 3. Assert 🎯
+      for (const tag of ESTRUCTURA_DEL_PANEL) {
+        expect(store.config.allowedTags).toContain(tag);
+      }
+
+      // Mas estrecho que "estructura completa" A PROPOSITO: un <p> dentro de
+      // este fragmento solo puede venir de que el modelo se haya puesto a
+      // redactar por su cuenta.
+      expect(store.config.allowedTags).not.toContain('p');
+      expect(store.unsupportedTags).toEqual([]);
+      expect(store.isConfigValid).toBe(true);
+    });
+
     it('deberia vaciar la lista con el atajo "Sin restricciones"', async () => {
       // 1. Arrange 📐
       const wrapper = mountComponent();

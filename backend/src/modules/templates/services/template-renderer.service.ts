@@ -121,10 +121,23 @@ export const TEMPLATE_SANITIZER_CONFIG: sanitizeHtml.IOptions = {
     // legitimos. `data-*` usa el comodin nativo de la libreria: los clientes de
     // correo inyectan atributos propios (`data-olk-copy-source`) que son
     // metadatos inertes, no ejecutables.
-    '*': ['id', 'class', 'style', 'data-*'],
+    //
+    // `aria-*` entra por el mismo criterio que `data-*`: describe, no ejecuta.
+    // Lo pide el marcado real de destino, donde los paneles colapsables de
+    // Bootstrap llevan `aria-expanded` junto al `data-bs-toggle` que ya pasaba.
+    // Admitir uno y podar el otro publicaba un acordeon que funciona con el
+    // raton y miente al lector de pantalla.
+    '*': ['id', 'class', 'style', 'data-*', 'aria-*'],
     a: ['href', 'title', 'target', 'rel'],
     img: ['src', 'alt', 'title', 'width', 'height'],
     time: ['datetime'],
+    // `colspan`/`rowspan` son ESTRUCTURA de la tabla, no presentacion: sin
+    // ellos una celda que abarca tres columnas pasa a ocupar una y la tabla se
+    // descuadra al publicar, en silencio y solo en el destino. No tienen
+    // superficie de ataque —su valor es un entero— y ninguna otra via permite
+    // expresar lo mismo, porque `style` no puede fusionar celdas.
+    th: ['colspan', 'rowspan'],
+    td: ['colspan', 'rowspan'],
   },
   // Sin `javascript:` ni `data:`: el primero ejecuta, el segundo permite
   // incrustar un documento entero en un href.
@@ -485,7 +498,11 @@ export class TemplateRendererService {
     // aunque no filtre nada, y compararlo crudo daria `wasFiltered` siempre.
     const normalized = sanitizeHtml(html, PUBLISHABLE_MARKUP_PROBE_CONFIG);
 
-    return { sanitized, wasFiltered: sanitized !== normalized, unsupportedTags };
+    return {
+      sanitized,
+      wasFiltered: sanitized !== normalized,
+      unsupportedTags,
+    };
   }
 
   /**

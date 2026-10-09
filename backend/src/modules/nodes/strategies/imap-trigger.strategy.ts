@@ -15,6 +15,7 @@ import {
   DOWNLOAD_SOCKET_TIMEOUT_MS,
 } from '@modules/nodes/services/imap-client.factory';
 import { FALLBACK_ATTACHMENT_NAME_PREFIX } from '@modules/nodes/interfaces/raw-email-attachment.interface';
+import { foldDiacritics } from '@modules/nodes/utils/diacritics.util';
 
 import type { StatePayloadContext } from '@core/fsm/context/state-payload.context';
 import type {
@@ -713,6 +714,19 @@ export class ImapTriggerStrategy implements INodeStrategy {
    * exigiria una clase de caracteres por letra (`[Ll][Ii]...`), imposible de
    * editar a mano desde el modo avanzado. Amplia el conjunto de asuntos que
    * casan en flujos ya guardados, nunca lo reduce.
+   *
+   * Por el mismo motivo se pliegan los acentos (`foldDiacritics`) a AMBOS
+   * lados, patron y asunto. Plegar solo el asunto seria peor que no plegar: un
+   * patron escrito con tilde —"Verificacion" tecleado correctamente— dejaria de
+   * casar con el correo que antes atrapaba, porque el acento seguiria en el
+   * patron y ya no estaria en el sujeto. Plegar solo el patron deja el caso
+   * simetrico sin resolver. Con los dos lados plegados, "Verificación",
+   * "VERIFICACION" y "verificacion" son el mismo filtro.
+   *
+   * El plegado se aplica al TEXTO del patron antes de compilarlo, no al
+   * `RegExp` ya construido. Sobre una expresion regular eso es seguro porque
+   * ningun metacaracter de la sintaxis lleva diacriticos: lo unico que cambia
+   * son los literales que el operador escribio.
    */
   private matchesSubjectFilter(
     parsed: ParsedMail,
@@ -725,7 +739,7 @@ export class ImapTriggerStrategy implements INodeStrategy {
     let pattern: RegExp;
 
     try {
-      pattern = new RegExp(config.subjectFilterRegex, 'i');
+      pattern = new RegExp(foldDiacritics(config.subjectFilterRegex), 'i');
     } catch (error) {
       const detail = error instanceof Error ? error.message : String(error);
       this.logger.warn(
@@ -734,7 +748,7 @@ export class ImapTriggerStrategy implements INodeStrategy {
       return true;
     }
 
-    return pattern.test(asString(parsed.subject));
+    return pattern.test(foldDiacritics(asString(parsed.subject)));
   }
 
   private toExtractedEmail(

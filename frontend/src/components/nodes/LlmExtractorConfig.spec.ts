@@ -225,12 +225,17 @@ describe('LlmExtractorConfig · configurador del nodo PROCESADOR_IA', () => {
   });
 
   describe('3. Avisos de coste', () => {
-    it('3.1 no deberia mostrar ninguno en el estado inicial', () => {
+    it('3.1 no deberia mostrar ninguno DE COSTE en el estado inicial', () => {
       // 1. Arrange 📐 + 2. Act ⚙️: el nodo arranca en el simulador.
       const wrapper = mountComponent(nextNodeId());
 
-      // 3. Assert 🎯
-      expect(wrapper.findAll('[data-test="config-warning"]')).toHaveLength(0);
+      // 3. Assert 🎯: el unico aviso que queda en el arranque es el de la
+      // prueba de conexion pendiente, que no habla de gasto. Contar cero
+      // avisos ya no describiria el estado inicial del formulario.
+      const warnings = wrapper.findAll('[data-test="config-warning"]').map((w) => w.text());
+
+      expect(warnings.join(' ')).not.toContain('tokens facturables');
+      expect(warnings.join(' ')).not.toContain('simulador');
     });
 
     it('3.2 deberia mostrarlo al elegir un proveedor de pago', async () => {
@@ -243,10 +248,9 @@ describe('LlmExtractorConfig · configurador del nodo PROCESADOR_IA', () => {
       await wrapper.vm.$nextTick();
 
       // 3. Assert 🎯
-      const warnings = wrapper.findAll('[data-test="config-warning"]');
+      const warnings = wrapper.findAll('[data-test="config-warning"]').map((w) => w.text());
 
-      expect(warnings).toHaveLength(1);
-      expect(warnings[0]?.text()).toContain('tokens facturables');
+      expect(warnings.join(' ')).toContain('tokens facturables');
     });
 
     it('3.3 deberia avisar de que un proveedor sin cliente degrada al simulador', async () => {

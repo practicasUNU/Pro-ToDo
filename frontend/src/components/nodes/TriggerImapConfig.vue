@@ -51,10 +51,22 @@ const SUBJECT_MODE_OPTIONS: readonly { label: string; value: SubjectMatchMode }[
 ];
 
 const SUBJECT_CONTAINS_HINT =
-  'Escribe palabras clave separadas por comas, ej: licitacion, convocatoria. Basta con que el asunto contenga una de ellas; no se distinguen mayusculas de minusculas.';
+  'Escribe palabras clave separadas por comas, ej: licitacion, convocatoria. Basta con que el asunto contenga una de ellas; no se distinguen mayusculas, minusculas ni acentos.';
 
 const SUBJECT_STARTS_WITH_HINT =
-  'El asunto debe EMPEZAR por este texto, ej: S_2026_. No se distinguen mayusculas de minusculas.';
+  'El asunto debe EMPEZAR por este texto, ej: S_2026_. No se distinguen mayusculas, minusculas ni acentos.';
+
+/**
+ * Aviso del plegado de acentos.
+ *
+ * Se anuncia porque NO es visible en el patron: a diferencia de los modos
+ * asistidos, que se leen en "Patron aplicado", la normalizacion ocurre en el
+ * servidor al comparar (`foldDiacritics` en `ImapTriggerStrategy`). Sin este
+ * cartel, quien teclea "verificacion" no tiene forma de saber que tambien
+ * atrapara "Verificación".
+ */
+const SUBJECT_DIACRITICS_NOTICE =
+  'Normalizacion diacritica activa: coincide con palabras con o sin tilde';
 
 const SUBJECT_ADVANCED_NOTICE =
   'Al escribir una expresion regular a mano dejas de usar los modos asistidos: el texto de arriba se sustituye por lo que escribas aqui.';
@@ -375,6 +387,9 @@ const onTestConnection = async (): Promise<void> => {
           :hint="subjectDraftHint"
           @update:model-value="store.setSubjectMatchDraft(String($event ?? ''))"
         />
+        <q-badge class="pd-badge pd-diacritics-badge q-mt-sm" data-test="subject-diacritics-notice">
+          {{ SUBJECT_DIACRITICS_NOTICE }}
+        </q-badge>
         <p v-if="effectiveSubjectPattern !== ''" class="pd-subtitle q-mt-xs q-mb-none">
           Patron aplicado:
           <span class="pd-mono" data-test="subject-effective-pattern">
@@ -501,6 +516,12 @@ const onTestConnection = async (): Promise<void> => {
 <style scoped lang="scss">
 .pd-node-icon {
   color: var(--pd-primary);
+}
+
+.pd-diacritics-badge {
+  background: var(--pd-accent-soft);
+  color: var(--pd-accent-text);
+  white-space: normal;
 }
 
 .pd-check-badge--warn {

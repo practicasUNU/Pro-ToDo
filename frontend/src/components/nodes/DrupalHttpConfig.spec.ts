@@ -454,7 +454,7 @@ describe('DrupalHttpConfig · configurador del nodo DESTINO_DRUPAL', () => {
     expect(store.config.operationMode).toBe(DrupalOperationMode.APPEND_HTML_BLOCK);
   });
 
-  it('5.5 deberia cargar el panel de titulos con su propio bundle', async () => {
+  it('5.5 deberia cargar el panel de titulos en la pagina agregadora', async () => {
     // 1. Arrange 📐
     const nodeId = nextNodeId();
     const wrapper = mountComponent(nodeId);
@@ -468,8 +468,8 @@ describe('DrupalHttpConfig · configurador del nodo DESTINO_DRUPAL', () => {
     expect(store.config.targetNodeUuid).toBe(
       DRUPAL_SANDBOX_PRESETS.VERIFICACION_TITULOS.targetNodeUuid,
     );
-    expect(store.config.bundle).toBe('node--acreditacion_evaluacion_panel');
-    expect(store.config.operationMode).toBe(DrupalOperationMode.CREATE_NODE);
+    expect(store.config.bundle).toBe('node--page');
+    expect(store.config.operationMode).toBe(DrupalOperationMode.APPEND_HTML_BLOCK);
   });
 
   it('5.6 deberia cargar el traslado dejando el destino pendiente', async () => {

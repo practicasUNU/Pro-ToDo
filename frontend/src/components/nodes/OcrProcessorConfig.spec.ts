@@ -5,6 +5,7 @@ import {
   Notify,
   QBadge,
   QBanner,
+  QBtn,
   QIcon,
   QInput,
   QItem,
@@ -21,6 +22,7 @@ import { useOcrProcessorStore } from '@stores/nodes/ocr-processor.store';
 import { useSessionStore } from '@stores/session.store';
 
 import { LlmProvider } from '@/types/nodes/llm-extractor.types';
+import { DEFAULT_OCR_MODEL } from '@/types/nodes/ocr-processor.types';
 import { UserRole } from '@/types/user';
 
 import type { LlmModelDescriptor } from '@/types/nodes/llm-extractor.types';
@@ -45,10 +47,12 @@ vi.mock('@services/nodes/llm-extractor.service', () => ({
 
 const llmExtractorService = await import('@services/nodes/llm-extractor.service');
 const fetchLlmModels = vi.mocked(llmExtractorService.fetchLlmModels);
+const testLlmConnection = vi.mocked(llmExtractorService.testLlmConnection);
 
 const QUASAR_COMPONENTS = {
   QBadge,
   QBanner,
+  QBtn,
   QIcon,
   QInput,
   QItem,
@@ -232,6 +236,89 @@ describe('OcrProcessorConfig · configurador del nodo PROCESADOR_OCR', () => {
       const field = wrapper.get('[data-test="ocr-model-field"]');
 
       expect(field.findComponent(QSelect).exists()).toBe(true);
+    });
+  });
+
+  /**
+   * El banco de pruebas que este nodo NO tenia. Lo que lo hace admisible pese a
+   * su coste es que la prueba la dispara el operador y su resultado no decide
+   * si se puede avanzar.
+   */
+  describe('4. Banco de pruebas', () => {
+    it('4.1 deberia ofrecer el boton de prueba de conexion', async () => {
+      // 1. Arrange 📐
+      fetchLlmModels.mockResolvedValue(CATALOG);
+
+      // 2. Act ⚙️
+      const wrapper = mountComponent(nextNodeId());
+      await flushPromises();
+
+      // 3. Assert 🎯
+      expect(wrapper.find('[data-test="test-connection-btn"]').exists()).toBe(true);
+    });
+
+    it('4.2 deberia delegar en el servicio del catalogo con el par activo', async () => {
+      // 1. Arrange 📐: no hay `ocr-processor.service.ts`, y es deliberado: la
+      //    ruta `/llm/test-connection` pertenece al catalogo y envolverla aqui
+      //    seria la capa vacia que `frontend-architecture.md` §2.1 desaconseja.
+      fetchLlmModels.mockResolvedValue(CATALOG);
+      testLlmConnection.mockResolvedValue({
+        success: true,
+        latencyMs: 210,
+        isMock: false,
+        outputPreview: 'ok',
+      });
+      const nodeId = nextNodeId();
+      const wrapper = mountComponent(nodeId);
+      await flushPromises();
+
+      // 2. Act ⚙️
+      await wrapper.get('[data-test="test-connection-btn"]').trigger('click');
+      await flushPromises();
+
+      // 3. Assert 🎯
+      expect(testLlmConnection).toHaveBeenCalledWith({
+        provider: LlmProvider.GEMINI,
+        model: DEFAULT_OCR_MODEL,
+      });
+    });
+
+    it('4.3 deberia seguir avisando cuando responde el simulador pese al exito', async () => {
+      // 1. Arrange 📐: un proveedor sin clave NO falla, degrada. Presentarlo
+      //    como conexion correcta es la confusion mas cara del formulario: la
+      //    transcripcion seria texto inventado y nada aguas abajo lo delata
+      //    salvo `metadata.isMock`.
+      fetchLlmModels.mockResolvedValue(CATALOG);
+      testLlmConnection.mockResolvedValue({
+        success: true,
+        latencyMs: 4,
+        isMock: true,
+        outputPreview: 'simulado',
+      });
+      const nodeId = nextNodeId();
+      const wrapper = mountComponent(nodeId);
+      await flushPromises();
+
+      // 2. Act ⚙️
+      await wrapper.get('[data-test="test-connection-btn"]').trigger('click');
+      await flushPromises();
+
+      // 3. Assert 🎯: el exito simulado NO puede apagar el aviso.
+      expect(useOcrProcessorStore(nodeId).configWarnings.join(' ')).toContain('SIMULADOR');
+    });
+
+    it('4.4 no deberia invalidar el paso por no haber probado', async () => {
+      // 1. Arrange 📐: `isConfigValid` replica `getIncompleteParams` del
+      //    backend. Atarlo a una llamada de pago bloquearia el stepper.
+      fetchLlmModels.mockResolvedValue(CATALOG);
+      const nodeId = nextNodeId();
+
+      // 2. Act ⚙️
+      mountComponent(nodeId);
+      await flushPromises();
+
+      // 3. Assert 🎯
+      expect(useOcrProcessorStore(nodeId).isConfigValid).toBe(true);
     });
   });
 });

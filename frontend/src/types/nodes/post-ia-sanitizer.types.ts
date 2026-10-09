@@ -92,7 +92,8 @@ export const SANITIZER_ALLOWED_TAGS: readonly string[] = [
 ];
 
 /** Clave de un atajo de la lista de etiquetas permitidas. */
-export type AllowedTagPresetKey = 'RICH_TEXT' | 'FULL_STRUCTURE' | 'UNRESTRICTED';
+export type AllowedTagPresetKey =
+  'RICH_TEXT' | 'PANEL_ACORDEON' | 'FULL_STRUCTURE' | 'UNRESTRICTED';
 
 /** Un atajo: su rotulo para el boton y las etiquetas que escribe. */
 export interface AllowedTagPreset {
@@ -117,6 +118,15 @@ export const ALLOWED_TAG_PRESETS: Readonly<Record<AllowedTagPresetKey, AllowedTa
   RICH_TEXT: {
     label: 'Texto enriquecido basico',
     tags: ['p', 'strong', 'em', 'ul', 'li', 'a'],
+  },
+  // Exactamente lo que necesita el panel colapsable de Bootstrap del canal de
+  // verificacion de titulos, y nada mas. Es MAS ESTRECHO que "estructura
+  // completa" a proposito: deja fuera `p`, `img`, `ul` y `li`, que en este
+  // fragmento solo pueden venir de que el modelo se haya puesto a redactar por
+  // su cuenta dentro de la tabla.
+  PANEL_ACORDEON: {
+    label: 'Panel colapsable (acordeon)',
+    tags: ['div', 'h5', 'a', 'strong', 'span', 'table', 'tbody', 'tr', 'th', 'td'],
   },
   FULL_STRUCTURE: {
     label: 'Estructura completa',

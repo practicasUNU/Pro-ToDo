@@ -262,21 +262,27 @@ export const DRUPAL_SANDBOX_PRESETS: Readonly<
   },
   VERIFICACION_TITULOS: {
     label: 'Verificación de títulos',
-    description: 'Crea una entidad de panel de evaluación por cada título acreditado.',
+    description:
+      'Antepone el panel colapsable del comité dentro del acordeón de la página agregadora.',
     nid: 55938,
-    // CREATE_NODE y no APPEND: este canal da de alta una entidad por panel, no
-    // acumula bloques dentro del HTML de una pagina agregadora.
-    operationMode: DrupalOperationMode.CREATE_NODE,
-    bundle: 'node--acreditacion_evaluacion_panel',
+    // APPEND_HTML_BLOCK y ya no CREATE_NODE. El canal daba de alta una entidad
+    // por panel, pero lo que el portal presenta en
+    // `/prueba-verificador-titulos` es un ACORDEON: cada comite es un panel
+    // colapsable DENTRO del HTML de la pagina agregadora, no un nodo suelto.
+    // Dar de alta la entidad publicaba un contenido que nadie llegaba a ver
+    // desde la pagina que lo agrega.
+    operationMode: DrupalOperationMode.APPEND_HTML_BLOCK,
+    bundle: 'node--page',
     targetNodeUuid: 'b17d69d8-6998-4883-b8dc-153b55dbd9c5',
     destinationNodeUuid: null,
-    // Acordeon de paneles del portal. Queda declarado aunque `CREATE_NODE` NO
-    // lo lea —el formulario solo muestra el campo cuando el modo muta un
-    // contenedor—: es el selector real de Madrid+D y sirve si alguna vez este
-    // canal pasa a acumular paneles dentro de la pagina agregadora en vez de
-    // dar de alta una entidad por panel.
+    // Acordeon de paneles del portal. Con el modo nuevo SI se lee: es el
+    // contenedor dentro del cual se antepone cada panel.
     containerSelector: '#accordionCEU',
-    itemSelector: null,
+    // El envoltorio que siembra la plantilla base, equivalente a
+    // `.licitacion-entry` en el canal de licitaciones. Afinarlo a un comite
+    // concreto (`[data-comite="CEU1"]`) es trabajo del flujo.
+    itemSelector: '.panel-default',
+    // Lo ultimo convocado se lee arriba, como el portal presenta la lista.
     insertPosition: 'PREPEND',
     associatedTemplateName: 'Verificación de Títulos · Panel de evaluación',
   },

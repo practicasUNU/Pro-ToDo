@@ -301,15 +301,18 @@ describe('useLlmExtractorStore · configuracion del nodo PROCESADOR_IA', () => {
       expect(store.configWarnings.join(' ')).toContain('tokens facturables');
     });
 
-    it('4.2 no deberia avisar con la simulacion activada', () => {
+    it('4.2 no deberia avisar del gasto con la simulacion activada', () => {
       // 1. Arrange 📐
       const store = useLlmExtractorStore(nextNodeId());
 
       // 2. Act ⚙️
       store.updateConfig({ provider: LlmProvider.GEMINI, dryRun: true });
 
-      // 3. Assert 🎯
-      expect(store.configWarnings).toEqual([]);
+      // 3. Assert 🎯: se afirma sobre el aviso de COSTE y no sobre la lista
+      // vacia. Desde que la prueba de conexion avisa, un nodo recien creado
+      // nunca tiene cero avisos, y `toEqual([])` se habria vuelto una
+      // aserccion sobre un detalle ajeno a lo que este caso comprueba.
+      expect(store.configWarnings.join(' ')).not.toContain('tokens facturables');
     });
 
     it('4.3 deberia avisar de que un proveedor sin cliente degrada al simulador', () => {
@@ -349,7 +352,57 @@ describe('useLlmExtractorStore · configuracion del nodo PROCESADOR_IA', () => {
       const store = useLlmExtractorStore(nextNodeId());
 
       // 3. Assert 🎯
-      expect(store.configWarnings).toEqual([]);
+      expect(store.configWarnings.join(' ')).not.toContain('MULTIPLICAN');
+    });
+
+    /**
+     * La prueba de conexion AVISA y no bloquea. Es la decision central de este
+     * bloque: `isConfigValid` replica `getIncompleteParams` del backend, de modo
+     * que atarlo al resultado de una llamada de pago haria invalido en el
+     * asistente un flujo que la API acepta.
+     */
+    it('4.6 deberia avisar mientras no haya una prueba de conexion vigente', () => {
+      // 1. Arrange 📐 + 2. Act ⚙️
+      const store = useLlmExtractorStore(nextNodeId());
+      store.updateConfig({ inlinePrompt: 'Redacta algo' });
+
+      // 3. Assert 🎯
+      expect(store.configWarnings.join(' ')).toContain('prueba de conexion');
+      expect(store.isConfigValid).toBe(true);
+    });
+
+    it('4.7 deberia nombrar el motivo cuando la ultima prueba fallo', () => {
+      // 1. Arrange 📐
+      const store = useLlmExtractorStore(nextNodeId());
+
+      // 2. Act ⚙️
+      store.lastConnectionResult = {
+        success: false,
+        latencyMs: 12,
+        isMock: false,
+        outputPreview: '',
+        error: { level: 'GRAVE', message: 'Falta ANTHROPIC_API_KEY' },
+      };
+
+      // 3. Assert 🎯: el mensaje del proveedor viaja al aviso. Sin el, el
+      // operador lee "fallo" y no sabe si corregir la clave o el modelo.
+      expect(store.configWarnings.join(' ')).toContain('Falta ANTHROPIC_API_KEY');
+    });
+
+    it('4.8 no deberia avisar tras una prueba con exito', () => {
+      // 1. Arrange 📐
+      const store = useLlmExtractorStore(nextNodeId());
+
+      // 2. Act ⚙️
+      store.lastConnectionResult = {
+        success: true,
+        latencyMs: 340,
+        isMock: false,
+        outputPreview: 'ok',
+      };
+
+      // 3. Assert 🎯
+      expect(store.configWarnings.join(' ')).not.toContain('prueba de conexion');
     });
   });
 

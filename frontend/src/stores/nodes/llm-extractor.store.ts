@@ -223,9 +223,17 @@ const llmExtractorSetup = () => {
   /**
    * Avisos que el operador debe confirmar ANTES de guardar.
    *
-   * Los dos salen del TSDoc del DTO del backend y ninguno se puede deducir
-   * mirando el formulario, que es el criterio para que sean avisos y no texto de
-   * ayuda. No bloquean: son decisiones legitimas con consecuencias caras.
+   * Los dos primeros salen del TSDoc del DTO del backend y ninguno se puede
+   * deducir mirando el formulario, que es el criterio para que sean avisos y no
+   * texto de ayuda. No bloquean: son decisiones legitimas con consecuencias
+   * caras.
+   *
+   * EL ESTADO DE LA PRUEBA DE CONEXION ENTRA AQUI Y NO EN `isConfigValid`. Ese
+   * getter es la replica exacta de `getIncompleteParams` del backend, de modo
+   * que atarlo al resultado de la prueba haria invalido en el asistente un flujo
+   * que la API acepta —y bloquearia el boton "Siguiente" hasta que alguien
+   * pulsase un boton que factura tokens contra un proveedor de pago cada vez
+   * que se reabre el paso—. El aviso dice lo mismo sin cobrar el peaje.
    */
   const configWarnings = computed<readonly string[]>(() => {
     const warnings: string[] = [];
@@ -244,6 +252,26 @@ const llmExtractorSetup = () => {
     if (maxRetries > LLM_RETRIES_WARNING_THRESHOLD) {
       warnings.push(
         `Los reintentos de red se MULTIPLICAN con el retryPolicy del esquema, y cada vuelta factura tokens. Con ${maxRetries} aqui y una politica de reintentos en el flujo, una sola ejecucion puede pagar decenas de inferencias.`,
+      );
+    }
+
+    // `null` cubre dos situaciones que para el operador son la misma —nunca se
+    // probo, o se probo y el cambio de proveedor/modelo invalido el resultado—:
+    // en ambas no hay prueba vigente del par que se va a guardar.
+    if (lastConnectionResult.value === null) {
+      warnings.push(
+        'Este nodo todavia no ha superado una prueba de conexion con el proveedor elegido. Pulsa "Probar conexion" para confirmar que la clave existe y el modelo responde; si no, el fallo aparecera en ejecucion con el flujo ya PAUSADO.',
+      );
+    } else if (!lastConnectionResult.value.success) {
+      warnings.push(
+        `La ultima prueba de conexion fallo: ${lastConnectionResult.value.error?.message ?? 'sin detalle del proveedor'}. Guardar asi deja un flujo que reventara en su primera ejecucion.`,
+      );
+    } else if (lastConnectionResult.value.isMock) {
+      // Un exito simulado NO puede apagar el aviso: un proveedor sin clave no
+      // falla, degrada, de modo que sin esta rama la prueba "correcta" seria
+      // indistinguible de una real y el flujo publicaria texto inventado.
+      warnings.push(
+        `La prueba de conexion la respondio el SIMULADOR, no ${LLM_PROVIDER_LABELS[provider]}: falta su clave de API en el servidor. El flujo se ejecutaria, pero lo que publique no sera una redaccion real.`,
       );
     }
 

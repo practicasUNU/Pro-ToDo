@@ -117,9 +117,75 @@ describe('useOcrProcessorStore · configuracion del nodo PROCESADOR_OCR', () => 
       // 2. Act ⚙️
       store.updateConfig({ temperature: 0.9 });
 
-      // 3. Assert 🎯
+      // 3. Assert 🎯: se afirma sobre el CONTENIDO del aviso y no sobre cuantos
+      // hay. Desde que la prueba de conexion avisa, un nodo recien creado nunca
+      // tiene un solo aviso, y contar habria atado este caso a un detalle ajeno
+      // a lo que comprueba.
       expect(store.isConfigValid).toBe(true);
-      expect(store.configWarnings).toHaveLength(1);
+      expect(store.configWarnings.join(' ')).toContain('temperatura 0.9');
+    });
+  });
+
+  /**
+   * El boton de prueba revierte la decision anterior de no tenerlo. Lo que hace
+   * aceptable el coste es que NO bloquea: su ausencia avisa, no invalida.
+   */
+  describe('2bis. Prueba de conexion', () => {
+    it('2bis.1 deberia avisar mientras no haya una prueba vigente, sin invalidar', () => {
+      // 1. Arrange 📐 + 2. Act ⚙️
+      const store = useOcrProcessorStore(nextNodeId());
+
+      // 3. Assert 🎯
+      expect(store.configWarnings.join(' ')).toContain('prueba de conexion');
+      expect(store.isConfigValid).toBe(true);
+    });
+
+    it('2bis.2 deberia invalidar el resultado al cambiar de modelo', () => {
+      // 1. Arrange 📐: dejar "conexion correcta" en pantalla despues de cambiar
+      //    el par que la produjo es peor que no haber probado nunca.
+      const store = useOcrProcessorStore(nextNodeId());
+      store.lastConnectionResult = {
+        success: true,
+        latencyMs: 120,
+        isMock: false,
+        outputPreview: 'ok',
+      };
+
+      // 2. Act ⚙️
+      store.updateConfig({ model: 'gemini-2.0-flash' });
+
+      // 3. Assert 🎯
+      expect(store.lastConnectionResult).toBeNull();
+    });
+
+    it('2bis.3 no deberia invalidar el resultado al tocar un campo ajeno al par', () => {
+      // 1. Arrange 📐: la temperatura no cambia con quien se habla, asi que
+      //    tirar la prueba obligaria a repetirla —y a pagarla— sin motivo.
+      const store = useOcrProcessorStore(nextNodeId());
+      store.lastConnectionResult = {
+        success: true,
+        latencyMs: 120,
+        isMock: false,
+        outputPreview: 'ok',
+      };
+
+      // 2. Act ⚙️
+      store.updateConfig({ temperature: 0.2 });
+
+      // 3. Assert 🎯
+      expect(store.lastConnectionResult).not.toBeNull();
+    });
+
+    it('2bis.4 deberia bloquear el boton sin modelo elegido', () => {
+      // 1. Arrange 📐
+      const store = useOcrProcessorStore(nextNodeId());
+
+      // 2. Act ⚙️
+      store.updateConfig({ model: '   ' });
+
+      // 3. Assert 🎯: sin modelo no hay nada que probar y el backend
+      // responderia un 400 sobre un `@IsNotEmpty`.
+      expect(store.canTestConnection).toBe(false);
     });
   });
 

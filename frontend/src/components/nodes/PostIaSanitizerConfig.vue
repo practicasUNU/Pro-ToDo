@@ -256,8 +256,9 @@ const commitTypedSelector = (): void => {
     <div data-test="allowed-tags-field">
       <label class="pd-label" for="post-ia-tags">Restringir a estas etiquetas</label>
 
-      <!-- Atajos para las tres formas habituales. Se pintan en bucle: dar de
-           alta una cuarta es anadir una entrada a ALLOWED_TAG_PRESETS. -->
+      <!-- Atajos para las formas habituales. Se pintan en bucle: dar de alta
+           una mas es anadir una entrada a ALLOWED_TAG_PRESETS, sin tocar esta
+           plantilla. -->
       <div class="row q-gutter-sm q-mt-xs q-mb-sm" data-test="allowed-tags-presets">
         <q-btn
           v-for="(preset, key) in ALLOWED_TAG_PRESETS"

@@ -529,11 +529,16 @@ describe('useDrupalHttpStore · configuracion del nodo DESTINO_DRUPAL', () => {
       // 2. Act ⚙️
       store.applyVerificacionTitulosPreset();
 
-      // 3. Assert 🎯: CREATE_NODE y no APPEND. Este canal da de alta una entidad
-      //    por panel; no acumula bloques dentro de una pagina agregadora.
-      expect(store.config.operationMode).toBe(DrupalOperationMode.CREATE_NODE);
-      expect(store.config.bundle).toBe('node--acreditacion_evaluacion_panel');
+      // 3. Assert 🎯: APPEND_HTML_BLOCK y ya no CREATE_NODE. Lo que el portal
+      //    presenta es un ACORDEON: cada comite es un panel colapsable dentro
+      //    del HTML de la pagina agregadora, no un nodo suelto que nadie
+      //    alcanzaria desde la pagina que lo agrega.
+      expect(store.config.operationMode).toBe(DrupalOperationMode.APPEND_HTML_BLOCK);
+      expect(store.config.bundle).toBe('node--page');
       expect(store.config.targetNodeUuid).toBe(preset.targetNodeUuid);
+      // El contenedor y el envoltorio: con el modo nuevo los dos SI se leen.
+      expect(store.config.containerSelector).toBe('#accordionCEU');
+      expect(store.config.itemSelector).toBe('.panel-default');
     });
 
     it('6.6 deberia LIMPIAR los campos que el preset nuevo no usa', () => {

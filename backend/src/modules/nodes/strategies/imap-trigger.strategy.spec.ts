@@ -676,6 +676,102 @@ describe('ImapTriggerStrategy', () => {
     });
   });
 
+  /**
+   * El plegado es SIMETRICO: se aplica al patron y al asunto. Los dos primeros
+   * casos son las dos mitades del mismo problema, y por eso van juntos: plegar
+   * un solo lado resuelve uno y ROMPE el otro.
+   */
+  describe('2ter. Normalizacion diacritica del filtro de asunto', () => {
+    it('2ter.1 deberia casar un asunto con tilde contra un patron sin tilde', async () => {
+      // 1. Arrange 📐: es el caso corriente. El modo "contiene texto" del
+      // asistente compone el patron con lo que el operador teclea, y nadie
+      // teclea tildes en una caja de palabras clave.
+      const client = buildClient();
+      useClient(client);
+      simpleParser.mockResolvedValue(
+        buildParsedMail({ subject: 'Verificación de Títulos 2026' }),
+      );
+      const { strategy } = buildStrategy();
+
+      // 2. Act ⚙️
+      const result = await strategy.execute(
+        buildContext(),
+        buildParams({ subjectFilterRegex: '(?:verificacion|titulos)' }),
+      );
+
+      // 3. Assert 🎯
+      expect(result.success).toBe(true);
+      expect(result.halt).toBeUndefined();
+      expect(result.data?.subject).toBe('Verificación de Títulos 2026');
+    });
+
+    it('2ter.2 deberia casar un asunto sin tilde contra un patron con tilde', async () => {
+      // 1. Arrange 📐: la mitad que se perderia plegando solo el asunto. Un
+      // operador que escribe correctamente "Verificación" veria su filtro
+      // dejar de atrapar los correos que antes casaban.
+      const client = buildClient();
+      useClient(client);
+      simpleParser.mockResolvedValue(
+        buildParsedMail({ subject: 'Verificacion de titulos 2026' }),
+      );
+      const { strategy } = buildStrategy();
+
+      // 2. Act ⚙️
+      const result = await strategy.execute(
+        buildContext(),
+        buildParams({ subjectFilterRegex: 'Verificación' }),
+      );
+
+      // 3. Assert 🎯
+      expect(result.success).toBe(true);
+      expect(result.halt).toBeUndefined();
+    });
+
+    it('2ter.3 deberia seguir descartando el asunto que no casa', async () => {
+      // 1. Arrange 📐: el plegado AMPLIA lo que casa; no puede convertir el
+      // filtro en un colador que lo deje pasar todo.
+      const client = buildClient();
+      useClient(client);
+      simpleParser.mockResolvedValue(
+        buildParsedMail({ subject: 'Convocatoria de licitación' }),
+      );
+      const { strategy } = buildStrategy();
+
+      // 2. Act ⚙️
+      const result = await strategy.execute(
+        buildContext(),
+        buildParams({ subjectFilterRegex: '(?:verificacion|titulos)' }),
+      );
+
+      // 3. Assert 🎯
+      expect(result.success).toBe(true);
+      expect(result.data).toEqual({ status: SUBJECT_FILTERED_STATUS });
+      expect(result.halt).toBeDefined();
+    });
+
+    it('2ter.4 deberia conservar el anclaje del modo "empieza por" al plegar', async () => {
+      // 1. Arrange 📐: el plegado corre sobre el TEXTO del patron antes de
+      // compilarlo. Si tocase los metacaracteres, el `^` dejaria de anclar y
+      // este asunto —que contiene el termino, pero no empieza por el— casaria.
+      const client = buildClient();
+      useClient(client);
+      simpleParser.mockResolvedValue(
+        buildParsedMail({ subject: 'RE: Verificación de Títulos' }),
+      );
+      const { strategy } = buildStrategy();
+
+      // 2. Act ⚙️
+      const result = await strategy.execute(
+        buildContext(),
+        buildParams({ subjectFilterRegex: '^Verificacion' }),
+      );
+
+      // 3. Assert 🎯
+      expect(result.success).toBe(true);
+      expect(result.data).toEqual({ status: SUBJECT_FILTERED_STATUS });
+    });
+  });
+
   describe('3. Resolucion del secreto (modelo hibrido)', () => {
     it('3.1 deberia fallar GRAVE sin conectar cuando la variable no existe', async () => {
       // 1. Arrange: entorno sin la clave referenciada.

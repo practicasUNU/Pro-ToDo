@@ -65,6 +65,49 @@ const providerOptions = computed(() =>
 // El catalogo se pide al montar y no al desplegar el selector: desplegarlo y
 // encontrarlo vacio durante medio segundo parece un fallo. La peticion es un
 // GET barato contra el propio backend.
+/**
+ * Lanza el banco de pruebas y traduce el resultado a UNA notificacion.
+ *
+ * Son tres desenlaces y no dos: un exito con `isMock` significa que respondio el
+ * simulador por falta de clave, y presentarlo como "conexion correcta" seria la
+ * confusion mas cara del formulario —el flujo transcribiria texto inventado sin
+ * que nada lo delate aguas abajo salvo `metadata.isMock`—.
+ */
+const onTestConnection = async (): Promise<void> => {
+  try {
+    const result = await store.testConnection();
+
+    if (!result.success) {
+      $q.notify({
+        type: 'warning',
+        message: 'No se pudo conectar con el proveedor',
+        caption: result.error?.message ?? 'Revisa el proveedor y el modelo elegidos.',
+      });
+      return;
+    }
+
+    if (result.isMock) {
+      $q.notify({
+        type: 'warning',
+        message: 'Respondio el simulador, no el proveedor real',
+        caption: `Falta la clave de API de ${LLM_PROVIDER_LABELS[store.config.provider]} en el servidor. La transcripcion seria texto simulado, no lo que pone en la imagen.`,
+      });
+      return;
+    }
+
+    $q.notify({
+      type: 'positive',
+      message: `Conexion correcta en ${result.latencyMs} ms`,
+      caption: result.outputPreview,
+    });
+  } catch (error) {
+    $q.notify({
+      type: 'negative',
+      message: extractApiErrorMessage(error, 'No se pudo contactar con el banco de pruebas.'),
+    });
+  }
+};
+
 onMounted(() => {
   void store.fetchAvailableModels().catch((error: unknown) => {
     $q.notify({
@@ -184,6 +227,26 @@ onMounted(() => {
           </template>
           El modelo guardado esta reservado a Administradores. Elige otro para poder continuar.
         </q-banner>
+
+        <!-- Banco de pruebas, junto al par que verifica. La prueba NO bloquea el
+             avance: su ausencia se avisa por `configWarnings`. -->
+        <q-btn
+          flat
+          no-caps
+          dense
+          icon="bolt"
+          label="Probar conexion"
+          class="q-mt-sm pd-btn-secondary"
+          data-test="test-connection-btn"
+          :disable="!store.canTestConnection"
+          :loading="store.isTestingConnection"
+          @click="onTestConnection"
+        >
+          <q-tooltip>
+            Ejecuta una inferencia minima contra el proveedor elegido. Con un proveedor de pago,
+            esta prueba factura tokens.
+          </q-tooltip>
+        </q-btn>
       </div>
 
       <div class="col-12 col-md-4" data-test="ocr-temperature-field">

@@ -769,7 +769,62 @@ describe('TemplateRendererService', () => {
     });
   });
   describe('prepareInjectableMarkup', () => {
-    const SKELETON = '<h1 class="titular"></h1><div class="cuerpo"><p></p></div>';
+    const SKELETON =
+      '<h1 class="titular"></h1><div class="cuerpo"><p></p></div>';
+
+    /**
+     * El acordeon de Bootstrap del portal de destino no sobrevive sin estos
+     * atributos. Van juntos porque el fallo era el mismo: se podaban en
+     * SILENCIO, de modo que la plantilla sembrada y lo que se publicaba
+     * diferian sin que nada lo denunciase.
+     */
+    describe('atributos estructurales del panel colapsable', () => {
+      it('deberia conservar colspan y rowspan en las celdas', () => {
+        // 1. Arrange 📐
+        const tabla =
+          '<table class="tableform"><tbody><tr><th colspan="3">Fecha</th>' +
+          '<td rowspan="2">Visita</td></tr></tbody></table>';
+
+        // 2. Act ⚙️
+        const { sanitized } = renderer.prepareInjectableMarkup(tabla);
+
+        // 3. Assert 🎯: sin ellos la celda que abarca tres columnas pasa a
+        // ocupar una y la tabla se descuadra solo en el destino.
+        expect(sanitized).toContain('colspan="3"');
+        expect(sanitized).toContain('rowspan="2"');
+      });
+
+      it('deberia conservar los atributos aria junto a los data', () => {
+        // 1. Arrange 📐
+        const panel =
+          '<div class="panel panel-default" data-protodo-injected="true" aria-expanded="false">' +
+          '<a href="#collapseCEU1" aria-expanded="false" data-bs-toggle="collapse">CEU 1</a></div>';
+
+        // 2. Act ⚙️
+        const { sanitized } = renderer.prepareInjectableMarkup(panel);
+
+        // 3. Assert 🎯: admitir `data-bs-toggle` y podar `aria-expanded`
+        // publicaba un acordeon que funciona con el raton y miente al lector
+        // de pantalla.
+        expect(sanitized).toContain('aria-expanded="false"');
+        expect(sanitized).toContain('data-bs-toggle="collapse"');
+        expect(sanitized).toContain('data-protodo-injected="true"');
+        expect(sanitized).toContain('href="#collapseCEU1"');
+      });
+
+      it('deberia seguir descartando un evento en linea sobre una celda', () => {
+        // 1. Arrange 📐: la ampliacion no puede abrir la puerta de al lado.
+        const tabla =
+          '<table><tbody><tr><td colspan="2" onclick="alert(1)">x</td></tr></tbody></table>';
+
+        // 2. Act ⚙️
+        const { sanitized } = renderer.prepareInjectableMarkup(tabla);
+
+        // 3. Assert 🎯
+        expect(sanitized).toContain('colspan="2"');
+        expect(sanitized).not.toContain('onclick');
+      });
+    });
 
     it('deberia conservar el esqueleto que ya cabe en la lista blanca', () => {
       // 1. Arrange & 2. Act
@@ -893,7 +948,8 @@ describe('TemplateRendererService', () => {
    * lo que el modelo devolvio, donde una ranura en blanco es el fallo buscado.
    */
   describe('auditFilledSlots', () => {
-    const FILLED = '<h1 class="titular">Titular</h1><div class="cuerpo"><p>Texto.</p></div>';
+    const FILLED =
+      '<h1 class="titular">Titular</h1><div class="cuerpo"><p>Texto.</p></div>';
     const SKELETON = '<h1 class="titular"></h1><div class="cuerpo"></div>';
 
     it('no deberia reportar nada sin selectores exigidos', () => {
@@ -950,7 +1006,8 @@ describe('TemplateRendererService', () => {
     it('deberia contar como rellena una ranura cuyo unico contenido es una imagen', () => {
       // 1. Arrange: la tolerancia multimedia. Sin ella una galeria legitima
       //    dejaria el flujo PAUSADO por un acierto del modelo.
-      const html = '<div class="galeria"><img src="/foto.jpg" alt="Foto"></div>';
+      const html =
+        '<div class="galeria"><img src="/foto.jpg" alt="Foto"></div>';
 
       // 2. Act
       const audit = renderer.auditFilledSlots(html, ['div.galeria']);
@@ -973,7 +1030,8 @@ describe('TemplateRendererService', () => {
 
     it('deberia contar como rellena una ranura con solo una tabla', () => {
       // 1. Arrange: una tabla de plazos sin texto directo en el contenedor.
-      const html = '<div class="plazos"><table><tr><td>8 oct</td></tr></table></div>';
+      const html =
+        '<div class="plazos"><table><tr><td>8 oct</td></tr></table></div>';
 
       // 2. Act
       const audit = renderer.auditFilledSlots(html, ['div.plazos']);
