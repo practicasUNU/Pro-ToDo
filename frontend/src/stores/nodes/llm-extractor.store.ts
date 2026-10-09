@@ -26,6 +26,7 @@ import {
 
 import { useSessionStore } from '@stores/session.store';
 import { buildModelOptions } from '@/utils/llm-model-options';
+import { filterPromptContext } from '@/utils/prompt-namespaces';
 
 import type { HydratableNode, UpstreamNamespace } from '@stores/nodes/node-store-registry';
 
@@ -131,9 +132,15 @@ const llmExtractorSetup = () => {
    * Mismo canal que usa el mapeador de plantillas: el agregador empuja el
    * contexto aguas arriba y el nodo compone las opciones. Sin esto, el operador
    * tendria que recordar de memoria que publica cada paso anterior.
+   *
+   * PASA POR `filterPromptContext` igual que el dialogo de plantillas de prompt.
+   * `availableUpstreamContext` llega CRUDO —el agregador empuja todo lo que
+   * precede al nodo, sin criterio de prompt— y este es el segundo camino hacia
+   * las mismas opciones: sin el filtro, un ESCUDO_POST_IA mal colocado delante
+   * se ofreceria aqui y no alli, y la incoherencia solo se veria al ejecutar.
    */
   const promptVariableOptions = computed<PromptVariableOption[]>(() =>
-    availableUpstreamContext.value.flatMap(({ namespace, nodeType, fields }) =>
+    filterPromptContext(availableUpstreamContext.value).flatMap(({ namespace, nodeType, fields }) =>
       fields.map((field) => ({
         label: `${field.name} (${field.type})`,
         value: promptMarkerFor(namespace, field.name),

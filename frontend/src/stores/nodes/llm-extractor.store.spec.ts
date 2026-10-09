@@ -19,6 +19,7 @@ import {
   MAX_LLM_TIMEOUT_MS,
   MIN_LLM_MAX_TOKENS,
 } from '@/types/nodes/llm-extractor.types';
+import { NodeType } from '@/types/pipeline';
 
 import { useLlmExtractorStore } from './llm-extractor.store';
 
@@ -541,6 +542,40 @@ describe('useLlmExtractorStore · configuracion del nodo PROCESADOR_IA', () => {
           group: 'parsed_email',
         },
       ]);
+    });
+
+    it('6.2bis deberia callar los origenes que un prompt no puede citar', () => {
+      // 1. Arrange 📐: `availableUpstreamContext` llega CRUDO —el agregador
+      //    empuja todo lo que precede al nodo— y este es el SEGUNDO camino
+      //    hacia las mismas opciones que ofrece el dialogo de plantillas de
+      //    prompt. Sin el filtro compartido, un escudo mal colocado delante se
+      //    ofreceria aqui y no alli, y la incoherencia solo se veria al
+      //    ejecutar, con el flujo ya PAUSADO.
+      const store = useLlmExtractorStore(nextNodeId());
+
+      // 2. Act ⚙️
+      store.setAvailableUpstreamContext([
+        {
+          namespace: 'parsed_email',
+          nodeType: NodeType.PARSER_PRE_IA,
+          fields: [{ name: 'clean_body', type: 'text' }],
+        },
+        {
+          namespace: 'validated_drupal_json',
+          nodeType: NodeType.ESCUDO_POST_IA,
+          fields: [{ name: 'validated_markup', type: 'text' }],
+        },
+        {
+          namespace: 'llm_response',
+          nodeType: NodeType.PROCESADOR_IA,
+          fields: [{ name: 'headline', type: 'text' }],
+        },
+      ]);
+
+      // 3. Assert 🎯
+      const values = store.promptVariableOptions.map(({ value }) => value);
+
+      expect(values).toEqual(['{{parsed_email.clean_body}}']);
     });
 
     it('6.3 deberia compartir el catalogo entre dos nodos de IA', async () => {

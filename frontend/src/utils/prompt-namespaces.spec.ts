@@ -25,8 +25,15 @@ const buildEntry = (overrides: Partial<NodeCatalogEntry> = {}): NodeCatalogEntry
   ...overrides,
 });
 
-/** Replica las nueve filas reales del catalogo, con campos solo en las cinco
- *  que hoy tienen estrategia. */
+/**
+ * Replica las ONCE filas reales del catalogo.
+ *
+ * Tenia nueve y le faltaban `PROCESADOR_OCR` y `DESTINO_SMTP`, que son
+ * justamente los dos casos que importa fijar: el OCR es el origen que mas se
+ * discute —transcribe PARA que un prompt posterior lea— y el SMTP es el segundo
+ * destino, la prueba de que la exclusion por categoria no depende de acordarse
+ * de ningun nombre.
+ */
 const FULL_CATALOG: NodeCatalogEntry[] = [
   buildEntry({ id: '1', code: NodeType.TRIGGER_IMAP, category: NodeCategory.TRIGGER }),
   buildEntry({ id: '2', code: NodeType.TRIGGER_CRON, category: NodeCategory.TRIGGER }),
@@ -42,6 +49,8 @@ const FULL_CATALOG: NodeCatalogEntry[] = [
   buildEntry({ id: '7', code: NodeType.MAPEADOR_PLANTILLA }),
   buildEntry({ id: '8', code: NodeType.DESTINO_DRUPAL, category: NodeCategory.DESTINO }),
   buildEntry({ id: '9', code: 'DESTINO_ACENS', category: NodeCategory.DESTINO, outputFields: [] }),
+  buildEntry({ id: '10', code: NodeType.PROCESADOR_OCR }),
+  buildEntry({ id: '11', code: NodeType.DESTINO_SMTP, category: NodeCategory.DESTINO }),
 ];
 
 const namespacesOf = (context: readonly UpstreamNamespace[]): string[] =>
@@ -49,20 +58,38 @@ const namespacesOf = (context: readonly UpstreamNamespace[]): string[] =>
 
 describe('prompt-namespaces · filtro Poka-Yoke de origenes', () => {
   describe('1. Escenario A: catalogo global', () => {
-    it('1.1 deberia dejar exactamente los cinco origenes citables', () => {
+    it('1.1 deberia dejar exactamente los seis origenes citables', () => {
       // 1. Arrange & 2. Act
       const context = buildPromptContextFromCatalog(FULL_CATALOG);
 
       // 3. Assert: es el contrato completo de la vista general. Si alguien
       //    anade un nodo al catalogo, esta lista lo delata antes que la UI.
-      //    `rendered_html` entro con el cambio de semantica del mapeador.
+      //    `rendered_html` entro con el cambio de semantica del mapeador, y
+      //    `ocr_result` es el origen cuya razon de ser es ser citado: el OCR
+      //    transcribe para que un prompt posterior lea lo transcrito.
       expect(namespacesOf(context)).toEqual([
         'raw_email',
         'cron_trigger',
         'parsed_email',
         'scraped_web',
         'rendered_html',
+        'ocr_result',
       ]);
+    });
+
+    it('1.1bis deberia ofrecer el OCR y callar los DOS destinos reales', () => {
+      // 1. Arrange & 2. Act
+      const namespaces = namespacesOf(buildPromptContextFromCatalog(FULL_CATALOG));
+
+      // 3. Assert 🎯: se nombran los namespaces REALES de los destinos, que no
+      //    son `destino_drupal` ni `destino_smtp` —esos no existen— sino
+      //    `http_result` y `smtp_result`. Una exclusion escrita contra los
+      //    nombres equivocados no filtraria nada y lo pareceria.
+      expect(namespaces).toContain('ocr_result');
+      expect(namespaces).not.toContain('http_result');
+      expect(namespaces).not.toContain('smtp_result');
+      expect(namespaces).not.toContain('llm_response');
+      expect(namespaces).not.toContain('validated_drupal_json');
     });
 
     it('1.2 deberia excluir los destinos por CATEGORIA y no por nombre', () => {
