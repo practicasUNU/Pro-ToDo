@@ -22,6 +22,12 @@ import { AppModule } from '../app.module';
  *   npm run drupal:cleanup                                  # /prueba-verificador-titulos
  *   npm run drupal:cleanup -- /prueba-licitaciones
  *   npm run drupal:cleanup -- /prueba-licitaciones '.mi-selector'
+ *   npm run drupal:cleanup -- /prueba-verificador-titulos --dry-run
+ *
+ * EMPIEZA SIEMPRE POR `--dry-run`. Imprime el desglose por selector y sale sin
+ * escribir. La bandera se reconoce en cualquier posicion, porque los dos
+ * argumentos de verdad son posicionales y confundirla con un selector dejaria
+ * correr la purga que se queria evitar (ver `splitCliArgs`).
  *
  * POR QUE EXISTE. `www.madrimasd.org` es el portal de verdad: las paginas son de
  * sandbox, pero lo que se escribe en ellas queda publicado y visible, y cada
@@ -113,6 +119,12 @@ const DEFAULT_PURGE_SELECTORS: readonly string[] = [
   '[data-test-id="PROTODO-E2E-TITULOS"]',
   '.panel:has(#collapseCEU_TEST)',
   '#collapseCEU_TEST',
+  // Residuo de una prueba manual sobre el acordeon de titulos: un panel de
+  // comite duplicado a mano. Va por pares, igual que `#collapseCEU_TEST`: el
+  // `.panel:has(...)` se lleva el panel entero y el `#...` a secas cubre el
+  // caso en que el cuerpo quedo suelto sin su envoltorio.
+  '.panel:has(#collapseUFV1Duplicado)',
+  '#collapseUFV1Duplicado',
   '.licitacion-entry[data-expediente^="TEST_"]',
   '.licitacion-entry[data-expediente^="EXP-SANDBOX-"]',
   '.licitacion-entry[data-expediente="S_2026_015_TEST"]',
@@ -150,12 +162,24 @@ export interface CleanupOptions {
 
   /** Selector adicional, que se evalua ANTES que los de serie. */
   readonly customSelector?: string;
+
+  /**
+   * Inventaria y sale, sin emitir el PATCH.
+   *
+   * Por defecto `false`, que es el comportamiento historico del script. Se
+   * declara como opcion del servicio y no como un `if` en el CLI para que la
+   * decision de escribir viva en el mismo sitio que la escritura.
+   */
+  readonly dryRun?: boolean;
 }
 
 export interface CleanupResult {
   readonly purgedCount: number;
   readonly updated: boolean;
   readonly targetUuid: string;
+
+  /** Desglose por selector. Solo se rellena en simulacro. */
+  readonly matches?: readonly PurgeMatch[];
 }
 
 /** Resultado de la poda en memoria, sin tocar la red. */
@@ -200,6 +224,38 @@ export const purgeMarkedBlocks = (
   return purgedCount === 0
     ? { html, purgedCount }
     : { html: $.html(), purgedCount };
+};
+
+/** Cuantos elementos casa cada selector, sin tocar el documento. */
+export interface PurgeMatch {
+  readonly selector: string;
+  readonly matches: number;
+}
+
+/**
+ * Inventario de lo que una purga se llevaria, SIN llevarselo.
+ *
+ * Es el respaldo del simulacro: un recuento total no sirve para decidir, porque
+ * lo que el operador necesita saber es CUAL de los selectores esta mordiendo. El
+ * de serie `.licitacion-entry` alcanza todo bloque generado por
+ * `TemplateMapperStrategy`, tambien el de produccion, y la diferencia entre una
+ * limpieza y un destrozo esta en esa linea del inventario.
+ *
+ * Cuenta sobre una carga PROPIA y no reutiliza la de `purgeMarkedBlocks` porque
+ * aquella va quitando a medida que recorre: alli un selector generico desconecta
+ * los nodos que el siguiente habria contado, y ese solapamiento —deseable al
+ * purgar, ver el orden de `DEFAULT_PURGE_SELECTORS`— falsearia el inventario.
+ * Por eso aqui la suma de `matches` puede superar al `purgedCount` real.
+ */
+export const describePurgeMatches = (
+  html: string,
+  selectors: readonly string[],
+): readonly PurgeMatch[] => {
+  const $ = cheerio.load(html, { xml: { xmlMode: false } }, false);
+
+  return selectors
+    .map((selector) => ({ selector, matches: $(selector).length }))
+    .filter((match) => match.matches > 0);
 };
 
 /** Un UUID v4, en oposicion a un alias de ruta. */
@@ -455,6 +511,18 @@ export class DrupalSandboxCleanupService {
       return { purgedCount: 0, updated: false, targetUuid: nodeUuid };
     }
 
+    // El corte va DESPUES de podar y ANTES de escribir: asi el simulacro informa
+    // del recuento real —el que produce el solapamiento de los selectores— y no
+    // de una estimacion. Lo unico que no ocurre es el PATCH.
+    if (options.dryRun === true) {
+      return {
+        purgedCount,
+        updated: false,
+        targetUuid: nodeUuid,
+        matches: describePurgeMatches(body.value, selectors),
+      };
+    }
+
     await axios.patch(
       url,
       {
@@ -512,9 +580,30 @@ const resolveKnownUuid = (
     : (SANDBOX_UUID_FALLBACKS[alias] ?? null);
 };
 
+/**
+ * Separa banderas de posicionales.
+ *
+ * NO es un adorno. Los dos argumentos de este script son POSICIONALES —alias y
+ * selector adicional—, de modo que un `--dry-run` escrito en tercera posicion se
+ * tomaria como un selector CSS, no casaria con nada y la purga se ejecutaria
+ * igualmente: exactamente lo contrario de lo que el operador acaba de pedir.
+ */
+export const splitCliArgs = (
+  argv: readonly string[],
+): {
+  readonly positionals: readonly string[];
+  readonly flags: ReadonlySet<string>;
+} => ({
+  positionals: argv.filter((arg) => !arg.startsWith('--')),
+  flags: new Set(argv.filter((arg) => arg.startsWith('--'))),
+});
+
 const main = async (): Promise<void> => {
-  const pathAlias = process.argv[2] ?? DEFAULT_PATH_ALIAS;
-  const customSelector = process.argv[3];
+  const { positionals, flags } = splitCliArgs(process.argv.slice(2));
+
+  const pathAlias = positionals[0] ?? DEFAULT_PATH_ALIAS;
+  const customSelector = positionals[1];
+  const dryRun = flags.has('--dry-run');
 
   const app = await NestFactory.createApplicationContext(AppModule, {
     logger: ['error', 'warn', 'log'],
@@ -548,7 +637,21 @@ const main = async (): Promise<void> => {
       pathAlias,
       ...(resolvedUuid === null ? {} : { nodeUuid: resolvedUuid }),
       ...(customSelector === undefined ? {} : { customSelector }),
+      dryRun,
     });
+
+    if (dryRun) {
+      for (const { selector, matches } of result.matches ?? []) {
+        logger.log(`  ${selector} -> ${matches} coincidencia(s)`);
+      }
+
+      logger.log(
+        `[DRUPAL_CLEANUP_DRY_RUN] Se purgarian ${result.purgedCount} bloque(s) | ` +
+          `Escrituras: 0 | UUID: ${result.targetUuid}`,
+      );
+
+      return;
+    }
 
     logger.log(
       `[DRUPAL_CLEANUP_SUCCESS] Purgados: ${result.purgedCount} bloque(s) | ` +

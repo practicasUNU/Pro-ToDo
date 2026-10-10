@@ -6,8 +6,10 @@ import {
   isUuid,
   normalizeHtmlForComparison,
   purgeMarkedBlocks,
+  splitCliArgs,
   textContentOf,
 } from './cleanup-drupal-sandbox';
+import { describePurgeMatches } from './cleanup-drupal-sandbox';
 
 import type { DrupalApiConfig } from '@core/config/drupal-api.config';
 
@@ -295,5 +297,166 @@ describe('purgeMarkedBlocks · poda del sandbox de Drupal', () => {
       // 2. Act ⚙️ + 3. Assert 🎯
       expect(findUndeployablePanelReasons(markup)).toEqual([]);
     });
+  });
+});
+
+describe('7. Residuo del panel de titulos duplicado', () => {
+  /** Los dos selectores que la purga gana para este residuo. */
+  const DUPLICATE_SELECTORS: readonly string[] = [
+    '.panel:has(#collapseUFV1Duplicado)',
+    '#collapseUFV1Duplicado',
+  ];
+
+  /** El duplicado dejado a mano sobre el acordeon de titulos. */
+  const DUPLICATE_PANEL =
+    '<div class="panel panel-default">' +
+    '<div class="collapse" id="collapseUFV1Duplicado"><p>Copia a mano</p></div></div>';
+
+  /** Panel legitimo del mismo acordeon, sin marcador de prueba. */
+  const LEGIT_PANEL =
+    '<div class="panel panel-default">' +
+    '<div class="collapse" id="collapseUFV2"><p>Comite real</p></div></div>';
+
+  it('7.1 deberia retirar el panel duplicado ENTERO', () => {
+    // 1. Arrange 📐: el `.panel:has(...)` se lleva el envoltorio, no solo el
+    //    cuerpo. Quitar unicamente el `#collapse...` dejaria publicada una
+    //    cabecera huerfana, que es el mismo fallo que razona el orden de
+    //    `DEFAULT_PURGE_SELECTORS` para `#collapseCEU_TEST`.
+    const html = `<div id="accordionUFV">${DUPLICATE_PANEL}</div>`;
+
+    // 2. Act ⚙️
+    const result = purgeMarkedBlocks(html, DUPLICATE_SELECTORS);
+
+    // 3. Assert 🎯
+    expect(result.purgedCount).toBeGreaterThan(0);
+    expect(result.html).toBe('<div id="accordionUFV"></div>');
+  });
+
+  it('7.2 NO deberia tocar el panel legitimo vecino', () => {
+    // 1. Arrange 📐: la asimetria de la que depende toda la purga. El residuo
+    //    se identifica por su identificador concreto, no por ser un `.panel`.
+    const html = `<div id="accordionUFV">${DUPLICATE_PANEL}${LEGIT_PANEL}</div>`;
+
+    // 2. Act ⚙️
+    const result = purgeMarkedBlocks(html, DUPLICATE_SELECTORS);
+
+    // 3. Assert 🎯
+    expect(result.html).toContain('collapseUFV2');
+    expect(result.html).toContain('Comite real');
+    expect(result.html).not.toContain('collapseUFV1Duplicado');
+  });
+
+  it('7.3 deberia cubrir el cuerpo suelto sin su envoltorio', () => {
+    // 1. Arrange 📐: por eso los selectores van por pares. Una purga anterior
+    //    —o la edicion a mano— pudo dejar el `.collapse` sin su `.panel`.
+    const html =
+      '<div id="accordionUFV">' +
+      '<div class="collapse" id="collapseUFV1Duplicado"><p>Huerfano</p></div>' +
+      '</div>';
+
+    // 2. Act ⚙️
+    const result = purgeMarkedBlocks(html, DUPLICATE_SELECTORS);
+
+    // 3. Assert 🎯
+    expect(result.purgedCount).toBe(1);
+    expect(result.html).toBe('<div id="accordionUFV"></div>');
+  });
+});
+
+describe('8. describePurgeMatches · inventario del simulacro', () => {
+  it('8.1 deberia desglosar las coincidencias POR SELECTOR', () => {
+    // 1. Arrange 📐: un recuento total no sirve para decidir. Lo que el
+    //    operador necesita saber es CUAL selector esta mordiendo.
+    const html =
+      '<div class="licitacion-entry" data-expediente="S_2026_015"></div>' +
+      '<div class="collapse" id="collapseUFV1Duplicado"></div>';
+
+    // 2. Act ⚙️
+    const matches = describePurgeMatches(html, [
+      '#collapseUFV1Duplicado',
+      '.licitacion-entry',
+      '[data-protodo-injected="true"]',
+    ]);
+
+    // 3. Assert 🎯: los que no casan NO aparecen; un inventario lleno de ceros
+    //    esconde las dos lineas que importan.
+    expect(matches).toEqual([
+      { selector: '#collapseUFV1Duplicado', matches: 1 },
+      { selector: '.licitacion-entry', matches: 1 },
+    ]);
+  });
+
+  it('8.2 no deberia MUTAR el documento', () => {
+    // 1. Arrange 📐: es la mitad entera de su razon de ser.
+    const html = '<div class="collapse" id="collapseUFV1Duplicado"></div>';
+
+    // 2. Act ⚙️
+    describePurgeMatches(html, ['#collapseUFV1Duplicado']);
+
+    // 3. Assert 🎯
+    expect(purgeMarkedBlocks(html, []).html).toBe(html);
+  });
+
+  it('8.3 deberia contar SIN el solapamiento que aplica la purga', () => {
+    // 1. Arrange 📐: `purgeMarkedBlocks` va quitando a medida que recorre, de
+    //    modo que un selector generico desconecta los nodos que el siguiente
+    //    habria contado. Aqui los dos selectores ven el mismo panel, y por eso
+    //    la suma del inventario puede superar al `purgedCount` real.
+    const html =
+      '<div class="panel panel-default">' +
+      '<div class="collapse" id="collapseUFV1Duplicado"></div></div>';
+    const selectors = [
+      '.panel:has(#collapseUFV1Duplicado)',
+      '#collapseUFV1Duplicado',
+    ];
+
+    // 2. Act ⚙️
+    const inventory = describePurgeMatches(html, selectors);
+    const purged = purgeMarkedBlocks(html, selectors);
+
+    // 3. Assert 🎯
+    expect(inventory).toHaveLength(2);
+    expect(purged.purgedCount).toBe(1);
+  });
+});
+
+describe('9. splitCliArgs · banderas frente a posicionales', () => {
+  it('9.1 deberia reconocer --dry-run en TERCERA posicion', () => {
+    // 1. Arrange 📐: el fallo que esta funcion evita. Los dos argumentos reales
+    //    son posicionales, de modo que sin separar banderas el `--dry-run` se
+    //    tomaria como selector CSS, no casaria con nada y la purga se
+    //    ejecutaria igual: lo contrario de lo que se acaba de pedir.
+    // 2. Act ⚙️
+    const { positionals, flags } = splitCliArgs([
+      '/prueba-verificador-titulos',
+      '--dry-run',
+    ]);
+
+    // 3. Assert 🎯
+    expect(positionals).toEqual(['/prueba-verificador-titulos']);
+    expect(flags.has('--dry-run')).toBe(true);
+  });
+
+  it('9.2 deberia conservar el selector adicional junto a la bandera', () => {
+    // 1. Arrange 📐 + 2. Act ⚙️
+    const { positionals, flags } = splitCliArgs([
+      '--dry-run',
+      '/prueba-licitaciones',
+      '.mi-selector',
+    ]);
+
+    // 3. Assert 🎯: la bandera se reconoce en CUALQUIER posicion, y no desplaza
+    //    a los posicionales que la rodean.
+    expect(positionals).toEqual(['/prueba-licitaciones', '.mi-selector']);
+    expect(flags.has('--dry-run')).toBe(true);
+  });
+
+  it('9.3 deberia dejar las banderas fuera sin inventar posicionales', () => {
+    // 1. Arrange 📐 + 2. Act ⚙️
+    const { positionals, flags } = splitCliArgs([]);
+
+    // 3. Assert 🎯
+    expect(positionals).toEqual([]);
+    expect(flags.size).toBe(0);
   });
 });

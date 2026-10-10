@@ -541,6 +541,24 @@ describe('useDrupalHttpStore · configuracion del nodo DESTINO_DRUPAL', () => {
       // CEU mandaria alli los paneles sin destino resoluble.
       expect(store.config.containerSelector).toBe('#accordion');
       expect(store.config.itemSelector).toBe('.panel-default');
+      // "Al final" en el QSelect. A diferencia del resto de canales, el destino
+      // no es una lista cronologica sino el sub-acordeon de una universidad:
+      // encabezarlo con el ultimo comite reordenaria paneles ya publicados.
+      expect(store.config.insertPosition).toBe('APPEND');
+    });
+
+    it('6.5bis deberia EMITIR insertPosition en los params al diferir del defecto', () => {
+      // 1. Arrange 📐: `buildParams` omite lo que coincide con el defecto del
+      //    backend, que es PREPEND. Mientras el preset valia PREPEND la clave
+      //    NO viajaba en el pipeline_schema; ahora debe viajar, porque es lo
+      //    unico que hace que el motor llame a `.append()`.
+      const store = useDrupalHttpStore(nextNodeId());
+
+      // 2. Act ⚙️
+      store.applyVerificacionTitulosPreset();
+
+      // 3. Assert 🎯
+      expect(store.toNodeParams()).toMatchObject({ insertPosition: 'APPEND' });
     });
 
     it('6.6 deberia LIMPIAR los campos que el preset nuevo no usa', () => {

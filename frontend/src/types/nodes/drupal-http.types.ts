@@ -289,8 +289,17 @@ export const DRUPAL_SANDBOX_PRESETS: Readonly<
     // `.licitacion-entry` en el canal de licitaciones. Afinarlo a un comite
     // concreto (`[data-comite="CEU1"]`) es trabajo del flujo.
     itemSelector: '.panel-default',
-    // Lo ultimo convocado se lee arriba, como el portal presenta la lista.
-    insertPosition: 'PREPEND',
+    // Al FINAL, y no al principio como el resto de canales. Aqui el destino no
+    // es una lista cronologica sino el sub-acordeon de UNA universidad, donde
+    // los comites se leen como un listado estable: encabezarlo con el ultimo
+    // recibido reordena en cada ejecucion paneles que ya estaban publicados.
+    //
+    // Se muestra en el QSelect como "Al final" (ver INSERT_POSITION_OPTIONS en
+    // DrupalHttpConfig.vue). Ojo: al dejar de coincidir con el defecto del
+    // backend —PREPEND—, `buildParams` empieza a EMITIR esta clave en los
+    // params del nodo, que es justo lo que hace falta para que el motor use
+    // `.append()`.
+    insertPosition: 'APPEND',
     associatedTemplateName: 'Verificación de Títulos · Panel de evaluación',
   },
   NOTIWEB: {

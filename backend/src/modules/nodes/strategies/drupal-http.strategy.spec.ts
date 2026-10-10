@@ -885,6 +885,51 @@ describe('DrupalHttpStrategy', () => {
       expect(httpClient.requestWithStatus).toHaveBeenCalledTimes(1);
     });
 
+    it('2bis.2bis deberia inyectar en el sub-acordeon VISIBLE y no en el oculto', async () => {
+      // 1. Arrange 📐: la pagina real trae una plantilla de muestra escondida en
+      //    un `<div class="d-none">` que DUPLICA los contenedores del portal, y
+      //    el duplicado aparece ANTES en el documento. Con `$(selector).first()`
+      //    el panel aterrizaba dentro de la muestra: el PATCH devolvia 200, el
+      //    nodo se marcaba EXITOSO y el comite no se veia en la pagina.
+      const PAGE_WITH_HIDDEN_SAMPLE =
+        '<div class="d-none"><div class="panel panel-default">' +
+        '<div id="accordionUFV"></div></div></div>' +
+        '<div id="accordion"><div class="panel panel-default">' +
+        '<div class="collapse" id="collapseUFV">' +
+        '<div id="accordionUFV"></div></div></div></div>';
+
+      const httpClient = buildHttpMock();
+      httpClient.requestWithStatus
+        .mockResolvedValueOnce(pageResponse(PAGE_WITH_HIDDEN_SAMPLE))
+        .mockResolvedValueOnce(pageResponse(''));
+      const strategy = buildStrategy(httpClient);
+
+      // 2. Act ⚙️
+      const result = await strategy.execute(
+        buildContext({
+          [SOURCE_NAMESPACE]: {
+            [SOURCE_FIELD]: panel('UFV 1', '#accordionUFV'),
+          },
+        }),
+        appendParams,
+      );
+
+      // 3. Assert 🎯
+      expect(result.success).toBe(true);
+
+      const html = sentHtml(httpClient, 1);
+      const $ = cheerio.load(html, { xml: { xmlMode: false } }, false);
+
+      // El panel esta DENTRO del acordeon visible...
+      expect($('#accordion #accordionUFV .panel-comite-codigo').text()).toBe(
+        'UFV 1',
+      );
+      // ...y la muestra oculta sigue vacia, sin haber recibido nada.
+      expect($('.d-none #accordionUFV').children()).toHaveLength(0);
+      // Y se inyecto UNA sola vez, no en los dos contenedores homonimos.
+      expect($('.panel-comite-codigo')).toHaveLength(1);
+    });
+
     it('2bis.3 deberia cazar el relleno de la plantilla sin sustituir', async () => {
       // 1. Arrange 📐: si el modelo no reemplaza el literal, el destino no
       //    existe y el nodo para aqui en vez de publicar fuera de sitio.

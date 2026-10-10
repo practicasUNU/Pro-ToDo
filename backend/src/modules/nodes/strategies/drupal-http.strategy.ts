@@ -13,6 +13,7 @@ import { HttpClientService } from '@core/http/http-client.service';
 
 import { BaseHttpDestinationStrategy } from './base/base-http-destination.strategy';
 import { planPanelDispatch } from './drupal-universities';
+import { selectVisibleTarget } from '../utils/visible-target.util';
 
 import {
   DrupalHttpConfigDto,
@@ -1288,10 +1289,16 @@ export class DrupalHttpStrategy extends BaseHttpDestinationStrategy {
 
     // Sin `containerSelector` se opera sobre la raiz del fragmento, que es el
     // caso normal: la pagina agregadora es una lista de bloques hermanos.
+    // `selectVisibleTarget` y no `$(...)` a secas: la pagina trae una plantilla
+    // de muestra escondida en un subarbol `.d-none` que DUPLICA los
+    // contenedores del portal, y el duplicado aparece antes en el documento. El
+    // `.first()` de mas abajo se quedaba con el, de modo que el bloque se
+    // publicaba dentro de la muestra oculta —PATCH 200, nodo EXITOSO— y no se
+    // veia en la pagina.
     const container =
       config.containerSelector === null
         ? $.root()
-        : $(config.containerSelector);
+        : selectVisibleTarget($, config.containerSelector);
 
     if (container.length === 0) {
       return {
@@ -1361,7 +1368,10 @@ export class DrupalHttpStrategy extends BaseHttpDestinationStrategy {
       // devolvio en ese caso. El `?? ''` es para el compilador, no para el
       // flujo —un selector vacio no casaria con nada y la guarda ya lo habria
       // cazado—.
-      const container = $(panel.targetSelector ?? '').first();
+      // Mismo motivo que en `insertBlock`: entre varios candidatos se prefiere
+      // el que no cuelga de un subarbol oculto. Si TODOS cuelgan de uno, se
+      // devuelve el primero igual y lo destapa el `removeClass` de aqui abajo.
+      const container = selectVisibleTarget($, panel.targetSelector ?? '');
 
       // Un sub-acordeon al que todavia no se le ha inyectado ningun comite
       // puede venir oculto, y entonces el primero que reciba se publicaria sin
