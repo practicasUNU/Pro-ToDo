@@ -14,6 +14,8 @@ import { plainToInstance } from 'class-transformer';
 import { validate } from 'class-validator';
 
 import { FlowPollingCoordinator } from '@common/services/flow-polling.coordinator';
+import { FsmConfig } from '@core/config/fsm.config';
+import { SystemCapacityExceededException } from '@core/fsm/exceptions/system-capacity-exceeded.exception';
 import { NodeType } from '@core/fsm/types/pipeline-schema.types';
 import {
   DEFAULT_POLL_INTERVAL_MS,
@@ -161,6 +163,17 @@ export class ImapPollingService implements OnModuleInit, OnModuleDestroy {
   private readonly failingFlows = new Set<string>();
 
   /**
+   * Flujos que el motor esta rechazando por falta de capacidad global.
+   *
+   * SEPARADO de `failingFlows` a proposito, aunque los dos sirvan para alertar
+   * una sola vez: no son la misma condicion. Una averia de sondeo significa que
+   * el buzon no se puede mirar; una saturacion significa que se mira bien y el
+   * motor va lleno. Compartir conjunto haria que recuperarse de una silenciase
+   * la alerta de la otra, y al reves.
+   */
+  private readonly saturatedFlows = new Set<string>();
+
+  /**
    * Periodo de sondeo por defecto, resuelto UNA vez al arrancar.
    *
    * Se cachea en un campo en lugar de leer `ConfigService` en cada
@@ -177,6 +190,7 @@ export class ImapPollingService implements OnModuleInit, OnModuleDestroy {
     private readonly configService: ConfigService,
     private readonly flowPollingCoordinator: FlowPollingCoordinator,
     private readonly hybridLogger: HybridLoggerService,
+    private readonly fsmConfig: FsmConfig,
   ) {}
 
   public async onModuleInit(): Promise<void> {
@@ -289,6 +303,7 @@ export class ImapPollingService implements OnModuleInit, OnModuleDestroy {
       // que anunciarlo seria mentir. Solo se olvida su estado para que una
       // reactivacion futura pueda volver a alertar si sigue cayendose.
       this.failingFlows.delete(flowId);
+      this.saturatedFlows.delete(flowId);
     }
 
     // A nivel `log` y no `debug`: sin esta linea el camino rapido es invisible
@@ -339,6 +354,7 @@ export class ImapPollingService implements OnModuleInit, OnModuleDestroy {
         this.deleteIntervalIfExists(intervalName(flowId));
         this.scheduled.delete(flowId);
         this.failingFlows.delete(flowId);
+        this.saturatedFlows.delete(flowId);
         removed.push(flowId);
       }
     }
@@ -418,17 +434,39 @@ export class ImapPollingService implements OnModuleInit, OnModuleDestroy {
 
     try {
       const resolved = resolveImapConfig(config);
-      const hasMatch = await this.hasMatchingMessages(resolved);
+      const pending = await this.countMatchingMessages(resolved);
 
       // El ciclo se completo: si veniamos de una averia, el flujo se recupero y
       // vuelve a ser elegible para alertar si cae otra vez.
       this.clearFailure(flowId);
 
-      if (!hasMatch) {
+      if (pending === 0) {
         return false;
       }
 
-      return await this.dispatchFlow(flowId);
+      // Lote del ciclo. Cada ejecucion consume UN correo (la estrategia toma el
+      // UID mas alto que case), asi que sin este bucle un buzon con cien
+      // mensajes atrasados tardaba cien ciclos —mas de hora y media con el
+      // intervalo por defecto— en vaciarse.
+      //
+      // Los despachos son SECUENCIALES: `dispatchFlow` espera al pipeline
+      // entero antes de volver. El lote acelera el drenaje, no multiplica la
+      // concurrencia, y el techo global del motor sigue siendo quien manda.
+      const budget = Math.min(pending, this.fsmConfig.maxExecutionsPerPollTick);
+      let dispatched = 0;
+
+      for (let attempt = 0; attempt < budget; attempt += 1) {
+        // Un `false` es un rechazo del motor —cupo del flujo, saturacion
+        // global o esquema invalido—, nunca un buzon vacio. Insistir dentro
+        // del mismo ciclo solo repetiria el mismo rechazo con el mismo estado.
+        if (!(await this.dispatchFlow(flowId))) {
+          break;
+        }
+
+        dispatched += 1;
+      }
+
+      return dispatched > 0;
     } catch (error) {
       // Un fallo de sondeo NUNCA se propaga: este metodo corre dentro del
       // callback de un `setInterval`, y una excepcion escapando de ahi termina
@@ -527,7 +565,7 @@ export class ImapPollingService implements OnModuleInit, OnModuleDestroy {
   }
 
   /**
-   * Pregunta al servidor si el buzon tiene algun mensaje que case con el nodo.
+   * Pregunta al servidor cuantos mensajes del buzon casan con el nodo.
    *
    * Usa `SEARCH` con la MISMA consulta que la estrategia
    * (`buildImapSearchQuery`), y no el `STATUS` mas barato que usaba antes. Con
@@ -539,17 +577,25 @@ export class ImapPollingService implements OnModuleInit, OnModuleDestroy {
    * El precio es seleccionar el buzon (`SEARCH` lo exige y `STATUS` no), asi que
    * se toma el lock y se libera en el `finally`. Se sigue sin descargar cuerpos
    * y sin tocar ninguna bandera: eso es trabajo de la estrategia.
+   *
+   * Devuelve el RECUENTO y no un booleano porque de el sale el tamano del lote
+   * de este ciclo. Preguntar «queda alguno?» antes de cada despacho obligaria a
+   * abrir una conexion TLS por correo, que es justo lo contrario de lo que
+   * persigue la barrera de saturacion: con el recuento, el ciclo sigue costando
+   * exactamente una conexion, como hasta ahora.
+   *
+   * @returns Cuantos mensajes casan, o `0` si no se pudo preguntar.
    */
-  private async hasMatchingMessages(
+  private async countMatchingMessages(
     config: ResolvedImapConfig,
-  ): Promise<boolean> {
+  ): Promise<number> {
     const password = this.configService.get<string>(config.passwordEnvKey);
 
     if (typeof password !== 'string' || password === '') {
       this.logger.warn(
         `La variable "${config.passwordEnvKey}" no esta definida: no se puede sondear ${config.host}.`,
       );
-      return false;
+      return 0;
     }
 
     const client = createImapClient(config, password, (error: Error) => {
@@ -583,7 +629,7 @@ export class ImapPollingService implements OnModuleInit, OnModuleDestroy {
         uid: true,
       });
 
-      return uids !== false && Array.isArray(uids) && uids.length > 0;
+      return uids !== false && Array.isArray(uids) ? uids.length : 0;
     } finally {
       this.releaseQuietly(lock);
       await this.logoutQuietly(client);
@@ -619,6 +665,12 @@ export class ImapPollingService implements OnModuleInit, OnModuleDestroy {
       this.logger.log(
         `Correo nuevo detectado en el flujo "${flowId}" | ejecucion=${executionId}`,
       );
+
+      // El motor acepto trabajo: si veniamos de una saturacion, se acabo. Va
+      // aqui y no en `clearFailure` porque aquel corre ANTES de despachar —solo
+      // sabe que el buzon se pudo mirar—, y la saturacion la decide el motor.
+      this.clearSaturation(flowId);
+
       return true;
     } catch (error) {
       // El 409 de RNF-09 es la condicion NORMAL del sondeo, no una averia: el
@@ -642,6 +694,15 @@ export class ImapPollingService implements OnModuleInit, OnModuleDestroy {
       // Se conserva el MENSAJE REAL en vez de uno generico: por esta misma via
       // llega tambien el esquema corrupto, y ese si tiene que quedar legible en
       // la traza aunque deje de disfrazarse de caida IMAP.
+      // ANTES de la rama generica, y no es cosmetico:
+      // `SystemCapacityExceededException` TAMBIEN es una `HttpException`, asi
+      // que aquella la absorberia primero y la saturacion del motor quedaria
+      // registrada como un rechazo cualquiera, sin escalar nunca a la bandeja.
+      if (error instanceof SystemCapacityExceededException) {
+        await this.reportSaturation(flowId, error);
+        return false;
+      }
+
       if (error instanceof HttpException) {
         this.logger.warn(
           `El motor rechazo el despacho del flujo "${flowId}": ${error.message}`,
@@ -651,6 +712,68 @@ export class ImapPollingService implements OnModuleInit, OnModuleDestroy {
 
       throw error;
     }
+  }
+
+  /**
+   * Registra que el motor va lleno, sin inundar la bandeja de alertas.
+   *
+   * La contrapresion es operacion NORMAL: el correo sigue sin leer y el
+   * siguiente ciclo volvera a intentarlo. Pero una saturacion que dura horas si
+   * merece que alguien se entere, de modo que se aplica el mismo criterio que
+   * `raiseWorkerAlert`: consola en cada ciclo, bandeja solo en la TRANSICION.
+   *
+   * Sin esa distincion, diez flujos sondeando cada minuto dejarian seiscientas
+   * filas GRAVE por hora describiendo una condicion que se resuelve sola.
+   */
+  private async reportSaturation(
+    flowId: string,
+    error: SystemCapacityExceededException,
+  ): Promise<void> {
+    // Cada ciclo, y con el detalle: es lo que permite ver si la saturacion es
+    // puntual o sostenida. Se dice explicitamente que no se pierde nada, porque
+    // la pregunta del operador al leerlo es siempre esa.
+    this.logger.warn(
+      `[Worker] Motor saturado (${error.activeCount}/${error.maxAllowed}): el flujo "${flowId}" espera al siguiente ciclo. Ningun correo se marca como leido.`,
+    );
+
+    if (this.saturatedFlows.has(flowId)) {
+      return;
+    }
+
+    this.saturatedFlows.add(flowId);
+
+    try {
+      await this.hybridLogger.logWorkerFailure({
+        flowId,
+        source: ImapPollingService.name,
+        level: 'GRAVE',
+        message: error.message,
+      });
+    } catch (loggingError: unknown) {
+      // Se retira la marca para que el siguiente ciclo REINTENTE la alerta.
+      // Dejarla puesta silenciaria la saturacion para siempre: la transicion ya
+      // habria "ocurrido" sin dejar rastro. Mismo criterio que `raiseWorkerAlert`.
+      this.saturatedFlows.delete(flowId);
+
+      this.logger.error(
+        `[Worker] No se pudo escalar a alertas_error la saturacion del flujo "${flowId}": ${
+          loggingError instanceof Error
+            ? loggingError.message
+            : String(loggingError)
+        }`,
+      );
+    }
+  }
+
+  /** Da por superada la saturacion de un flujo. Idempotente. */
+  private clearSaturation(flowId: string): void {
+    if (!this.saturatedFlows.delete(flowId)) {
+      return;
+    }
+
+    this.logger.log(
+      `[Worker] El motor volvio a aceptar ejecuciones del flujo "${flowId}".`,
+    );
   }
 
   /**
@@ -872,6 +995,7 @@ export class ImapPollingService implements OnModuleInit, OnModuleDestroy {
     // intactos y no volveria a inscribirlos.
     this.scheduled.clear();
     this.failingFlows.clear();
+    this.saturatedFlows.clear();
   }
 
   /** Cierra la sesion IMAP sin dejar escapar errores de cierre. */

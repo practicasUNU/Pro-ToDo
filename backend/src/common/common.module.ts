@@ -5,6 +5,7 @@ import { EmailService } from '@common/services/email.service';
 import { FlowPollingCoordinator } from '@common/services/flow-polling.coordinator';
 import { IpAccessService } from '@common/services/ip-access.service';
 import { SmtpNodeMailerService } from '@common/services/smtp-node-mailer.service';
+import { FsmConfig } from '@core/config/fsm.config';
 import { AllowedIpsModule } from '@modules/security/allowed-ips/allowed-ips.module';
 
 /**
@@ -20,6 +21,11 @@ import { AllowedIpsModule } from '@modules/security/allowed-ips/allowed-ips.modu
  * dependencia directa cerraria un ciclo de modulos. Que este modulo sea global
  * es justo lo que evita ese acoplamiento.
  *
+ * Aloja tambien `FsmConfig` por ese mismo caracter global. Sus dos techos de
+ * saturacion los consumen `FsmEngineService` (`@core`) y los dos disparadores
+ * automaticos (`@modules/nodes`), que no comparten modulo; registrarlo en cada
+ * uno crearia dos instancias de una clase que describe un unico limite.
+ *
  * Es global para que cualquier modulo pueda inyectar `IpAccessService` sin reimportarlo,
  * y expone `RedLocalMiddleware` como provider para poder resolverlo desde `main.ts`
  * y montarlo sobre las rutas de Swagger. Importa `AllowedIpsModule` porque
@@ -34,6 +40,7 @@ import { AllowedIpsModule } from '@modules/security/allowed-ips/allowed-ips.modu
     EmailService,
     SmtpNodeMailerService,
     FlowPollingCoordinator,
+    FsmConfig,
   ],
   exports: [
     IpAccessService,
@@ -41,6 +48,7 @@ import { AllowedIpsModule } from '@modules/security/allowed-ips/allowed-ips.modu
     EmailService,
     SmtpNodeMailerService,
     FlowPollingCoordinator,
+    FsmConfig,
   ],
 })
 export class CommonModule {}

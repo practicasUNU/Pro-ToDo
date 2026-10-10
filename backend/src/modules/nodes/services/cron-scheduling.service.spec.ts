@@ -2,11 +2,13 @@ import { BadRequestException, ConflictException } from '@nestjs/common';
 import { SchedulerRegistry } from '@nestjs/schedule';
 
 import { FlowPollingCoordinator } from '@common/services/flow-polling.coordinator';
+import { SystemCapacityExceededException } from '@core/fsm/exceptions/system-capacity-exceeded.exception';
 import { NodeType } from '@core/fsm/types/pipeline-schema.types';
 
 import { CronSchedulingService } from './cron-scheduling.service';
 
 import type { ConfigService } from '@nestjs/config';
+import type { HybridLoggerService } from '@modules/logs/services/hybrid-logger.service';
 import type { CronTriggerConfigDto } from '@modules/nodes/dto/cron-trigger-config.dto';
 import type { Workflow } from '@modules/workflows/entities/workflow.entity';
 import type { WorkflowsService } from '@modules/workflows/workflows.service';
@@ -73,6 +75,8 @@ interface Harness {
   repository: RepositoryMock;
   registry: SchedulerRegistry;
   coordinator: FlowPollingCoordinator;
+  /** Doble del logger hibrido, para aseverar el escalado a `alertas_error`. */
+  hybridLogger: { logWorkerFailure: jest.Mock };
   warnSpy: jest.SpyInstance;
   errorSpy: jest.SpyInstance;
 }
@@ -113,12 +117,19 @@ const buildHarness = (
     .spyOn(coordinator['logger'], 'error')
     .mockImplementation(() => undefined);
 
+  // Doble y no el servicio real: el real abriria transportes de winston y
+  // necesitaria dos repositorios. Lo que aqui interesa es CUANDO se le llama.
+  const hybridLogger = {
+    logWorkerFailure: jest.fn().mockResolvedValue(undefined),
+  };
+
   const service = new CronSchedulingService(
     repository as unknown as Repository<Workflow>,
     workflows as unknown as WorkflowsService,
     registry,
     configService,
     coordinator,
+    hybridLogger as unknown as HybridLoggerService,
   );
 
   jest.spyOn(service['logger'], 'log').mockImplementation(() => undefined);
@@ -136,6 +147,7 @@ const buildHarness = (
     repository,
     registry,
     coordinator,
+    hybridLogger,
     warnSpy,
     errorSpy,
   };
@@ -668,6 +680,77 @@ describe('CronSchedulingService · planificacion de nodos TRIGGER_CRON', () => {
       // 3. Assert
       expect(cronJobsOf(registry)).toEqual([jobNameOf(FLOW_ID)]);
       service.onModuleDestroy();
+    });
+  });
+
+  describe('7. Contrapresion ante la saturacion global del motor', () => {
+    it('7.1 deberia absorber la saturacion sin propagarla ni acusar al planificador', async () => {
+      // 1. Arrange: esto corre dentro del callback de un `CronJob`. Una
+      //    excepcion que escapara terminaria el proceso de Node entero.
+      const { service, workflows, warnSpy, errorSpy } = buildHarness();
+      workflows.runAutomaticWorkflow.mockRejectedValue(
+        new SystemCapacityExceededException(5, 5),
+      );
+
+      // 2. Act
+      const dispatched = await service.runScheduledFlow(FLOW_ID);
+
+      // 3. Assert
+      expect(dispatched).toBe(false);
+      expect(warnSpy).toHaveBeenCalledWith(
+        expect.stringContaining('Motor saturado'),
+      );
+      // A nivel `warn` y nunca `error`: el motor va lleno, no se ha roto nada.
+      expect(errorSpy).not.toHaveBeenCalled();
+    });
+
+    it('7.2 no deberia repetir la alerta mientras la saturacion se mantenga', async () => {
+      // 1. Arrange: con una expresion `* * * * *`, sin la marca en memoria esto
+      //    dejaria una fila GRAVE por minuto describiendo lo mismo.
+      const { service, workflows, hybridLogger } = buildHarness();
+      workflows.runAutomaticWorkflow.mockRejectedValue(
+        new SystemCapacityExceededException(5, 5),
+      );
+
+      // 2. Act: tres vencimientos consecutivos saturados
+      await service.runScheduledFlow(FLOW_ID);
+      await service.runScheduledFlow(FLOW_ID);
+      await service.runScheduledFlow(FLOW_ID);
+
+      // 3. Assert
+      expect(hybridLogger.logWorkerFailure).toHaveBeenCalledTimes(1);
+    });
+
+    it('7.3 deberia volver a alertar si el motor se libera y vuelve a saturarse', async () => {
+      // 1. Arrange
+      const { service, workflows, hybridLogger } = buildHarness();
+      workflows.runAutomaticWorkflow
+        .mockRejectedValueOnce(new SystemCapacityExceededException(5, 5))
+        .mockResolvedValueOnce(EXECUTION_ID)
+        .mockRejectedValueOnce(new SystemCapacityExceededException(5, 5));
+
+      // 2. Act: saturado, recuperado, saturado otra vez
+      await service.runScheduledFlow(FLOW_ID);
+      await service.runScheduledFlow(FLOW_ID);
+      await service.runScheduledFlow(FLOW_ID);
+
+      // 3. Assert: sin rearmar en la recuperacion, una saturacion posterior
+      // quedaria muda para siempre.
+      expect(hybridLogger.logWorkerFailure).toHaveBeenCalledTimes(2);
+    });
+
+    it('7.4 no deberia propagar un fallo del registro de la alerta', async () => {
+      // 1. Arrange
+      const { service, workflows, hybridLogger } = buildHarness();
+      workflows.runAutomaticWorkflow.mockRejectedValue(
+        new SystemCapacityExceededException(5, 5),
+      );
+      hybridLogger.logWorkerFailure.mockRejectedValue(
+        new Error('connection terminated'),
+      );
+
+      // 2. Act & 3. Assert
+      await expect(service.runScheduledFlow(FLOW_ID)).resolves.toBe(false);
     });
   });
 });

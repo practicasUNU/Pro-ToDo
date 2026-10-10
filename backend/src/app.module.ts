@@ -49,6 +49,18 @@ const STATIC_UPLOADS_ROOT = join(process.cwd(), 'static', 'uploads');
  */
 const STATIC_UPLOADS_ROUTE = '/static/uploads';
 
+/**
+ * Conexiones del pool de PostgreSQL cuando `DB_POOL_MAX` no esta declarada.
+ *
+ * Diez, que es el default implicito de `node-postgres`: hasta ahora el pool no
+ * se configuraba en ninguna parte, de modo que este numero ya gobernaba el
+ * sistema sin aparecer escrito. Declararlo no cambia el comportamiento; lo hace
+ * visible y ajustable, que es lo que permite emparejarlo con
+ * `MAX_GLOBAL_CONCURRENT_EXECUTIONS` en vez de descubrirlo cuando el pool se
+ * agota.
+ */
+const DEFAULT_DB_POOL_MAX = 10;
+
 @Module({
   imports: [
     ConfigModule.forRoot({ isGlobal: true }),
@@ -86,6 +98,15 @@ const STATIC_UPLOADS_ROUTE = '/static/uploads';
         database: configService.get<string>('DB_NAME'),
         autoLoadEntities: true,
         synchronize: false,
+        // Techo del pool. Debe quedar POR ENCIMA de
+        // `MAX_GLOBAL_CONCURRENT_EXECUTIONS`: cada ejecucion viva retiene al
+        // menos una conexion para sus checkpoints, y las que sobran son las que
+        // mantienen el API respondiendo mientras el motor trabaja a plena carga.
+        extra: {
+          max:
+            Number(configService.get<string>('DB_POOL_MAX')) ||
+            DEFAULT_DB_POOL_MAX,
+        },
       }),
     }),
     // Limite de tasa (PROT-04.1): protege la generacion y validacion de OTP frente a

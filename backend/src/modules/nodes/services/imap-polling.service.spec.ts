@@ -2,6 +2,8 @@ import { BadRequestException, ConflictException } from '@nestjs/common';
 import { SchedulerRegistry } from '@nestjs/schedule';
 
 import { FlowPollingCoordinator } from '@common/services/flow-polling.coordinator';
+import { FsmConfig } from '@core/config/fsm.config';
+import { SystemCapacityExceededException } from '@core/fsm/exceptions/system-capacity-exceeded.exception';
 
 import type { HybridLoggerService } from '@modules/logs/services/hybrid-logger.service';
 import { NodeType } from '@core/fsm/types/pipeline-schema.types';
@@ -188,6 +190,11 @@ const buildHarness = (
     configService,
     coordinator,
     hybridLogger as unknown as HybridLoggerService,
+    // `FsmConfig` REAL sobre el mismo `ConfigService` del harness: es una clase
+    // pura sin I/O, asi que sembrar `MAX_EXECUTIONS_PER_POLL_TICK` en `env`
+    // basta para gobernar el tamano del lote. Mismo criterio que
+    // `SchedulerRegistry` y `FlowPollingCoordinator`.
+    new FsmConfig(configService),
   );
 
   jest.spyOn(service['logger'], 'log').mockImplementation(() => undefined);
@@ -1262,6 +1269,157 @@ describe('ImapPollingService', () => {
 
       // 3. Assert: se intento las dos veces, y la segunda si cuajo.
       expect(hybridLogger.logWorkerFailure).toHaveBeenCalledTimes(2);
+    });
+  });
+
+  describe('7. Contrapresion ante la saturacion global del motor', () => {
+    /** Entorno del harness con un tamano de lote explicito. */
+    const envWithBatch = (batchSize?: string): Record<string, string> => ({
+      IMAP_POLLING_ENABLED: 'true',
+      [PASSWORD_ENV_KEY]: IMAP_PASSWORD,
+      ...(batchSize === undefined
+        ? {}
+        : { MAX_EXECUTIONS_PER_POLL_TICK: batchSize }),
+    });
+
+    it('7.1 deberia frenar el despacho y no marcar correos como leidos si el motor reporta saturacion global', async () => {
+      // 1. Arrange: el buzon trae tres correos que casan, pero el motor esta
+      //    lleno y rechaza ya el primer despacho.
+      const { service, workflows, client, hybridLogger, warnSpy } =
+        buildHarness({ matches: 3 });
+      workflows.runAutomaticWorkflow.mockRejectedValue(
+        new SystemCapacityExceededException(5, 5),
+      );
+
+      // 2. Act
+      const dispatched = await service.pollInbox(FLOW_ID, buildParams());
+
+      // 3. Assert
+      expect(dispatched).toBe(false);
+
+      // El lote se corta en el primer rechazo: insistir con los otros dos
+      // repetiria el mismo rechazo contra el mismo estado del motor.
+      expect(workflows.runAutomaticWorkflow).toHaveBeenCalledTimes(1);
+
+      // NINGUN correo queda marcado. Este servicio solo hace SEARCH —nunca
+      // FETCH ni `messageFlagsAdd`—, y quien marca `\Seen` es la estrategia,
+      // dentro de una ejecucion que con saturacion jamas llego a arrancar. El
+      // doble del cliente IMAP no expone siquiera ese metodo: si algun dia
+      // alguien lo necesitase aqui, esta asercion se caeria y obligaria a
+      // justificar por que el sondeo empieza a consumir el buzon.
+      expect(client['messageFlagsAdd']).toBeUndefined();
+      expect(client.search).toHaveBeenCalledTimes(1);
+
+      // Consola en cada ciclo...
+      expect(warnSpy).toHaveBeenCalledWith(
+        expect.stringContaining('Motor saturado'),
+      );
+      // ...y bandeja una sola vez, en la transicion.
+      expect(hybridLogger.logWorkerFailure).toHaveBeenCalledTimes(1);
+    });
+
+    it('7.2 no deberia repetir la alerta mientras la saturacion se mantenga', async () => {
+      // 1. Arrange: sin la marca en memoria, un buzon sondeado cada minuto
+      //    contra un motor lleno dejaria una fila GRAVE por minuto.
+      const { service, workflows, hybridLogger } = buildHarness({ matches: 1 });
+      workflows.runAutomaticWorkflow.mockRejectedValue(
+        new SystemCapacityExceededException(5, 5),
+      );
+
+      // 2. Act: tres ciclos consecutivos saturados
+      await service.pollInbox(FLOW_ID, buildParams());
+      await service.pollInbox(FLOW_ID, buildParams());
+      await service.pollInbox(FLOW_ID, buildParams());
+
+      // 3. Assert
+      expect(hybridLogger.logWorkerFailure).toHaveBeenCalledTimes(1);
+    });
+
+    it('7.3 deberia volver a alertar si el motor se libera y vuelve a saturarse', async () => {
+      // 1. Arrange
+      const { service, workflows, hybridLogger } = buildHarness({ matches: 1 });
+      workflows.runAutomaticWorkflow
+        .mockRejectedValueOnce(new SystemCapacityExceededException(5, 5))
+        .mockResolvedValueOnce(EXECUTION_ID)
+        .mockRejectedValueOnce(new SystemCapacityExceededException(5, 5));
+
+      // 2. Act: saturado, recuperado, saturado otra vez
+      await service.pollInbox(FLOW_ID, buildParams());
+      await service.pollInbox(FLOW_ID, buildParams());
+      await service.pollInbox(FLOW_ID, buildParams());
+
+      // 3. Assert: la recuperacion rearma la alerta. Sin ella, una saturacion
+      // posterior —ya con otra causa— quedaria muda para siempre.
+      expect(hybridLogger.logWorkerFailure).toHaveBeenCalledTimes(2);
+    });
+
+    it('7.4 no deberia escalar la saturacion como averia de conexion IMAP', async () => {
+      // 1. Arrange: el 429 llega por la misma via que un fallo de socket, pero
+      //    no es una averia del buzon. Registrarlo a nivel `error` acusaria al
+      //    servidor IMAP de algo que no ha pasado.
+      const { service, workflows, errorSpy } = buildHarness({ matches: 1 });
+      workflows.runAutomaticWorkflow.mockRejectedValue(
+        new SystemCapacityExceededException(5, 5),
+      );
+
+      // 2. Act
+      await service.pollInbox(FLOW_ID, buildParams());
+
+      // 3. Assert
+      expect(errorSpy).not.toHaveBeenCalled();
+    });
+
+    it('7.5 deberia drenar hasta MAX_EXECUTIONS_PER_POLL_TICK correos en un solo ciclo', async () => {
+      // 1. Arrange: cinco correos esperando, lote de tres
+      const { service, workflows } = buildHarness({
+        matches: 5,
+        env: envWithBatch('3'),
+      });
+
+      // 2. Act
+      const dispatched = await service.pollInbox(FLOW_ID, buildParams());
+
+      // 3. Assert: el techo manda sobre lo que hay en el buzon. Los dos
+      // restantes esperan al siguiente ciclo.
+      expect(dispatched).toBe(true);
+      expect(workflows.runAutomaticWorkflow).toHaveBeenCalledTimes(3);
+    });
+
+    it('7.6 no deberia despachar mas veces que correos haya', async () => {
+      // 1. Arrange: un solo correo, lote de tres
+      const { service, workflows, client } = buildHarness({
+        matches: 1,
+        env: envWithBatch('3'),
+      });
+
+      // 2. Act
+      await service.pollInbox(FLOW_ID, buildParams());
+
+      // 3. Assert: lo que hay en el buzon manda sobre el techo. Y el recuento
+      // sale de UN solo SEARCH: preguntar antes de cada despacho abriria una
+      // conexion TLS por correo, justo lo contrario de lo que busca la barrera.
+      expect(workflows.runAutomaticWorkflow).toHaveBeenCalledTimes(1);
+      expect(client.search).toHaveBeenCalledTimes(1);
+    });
+
+    it('7.7 deberia cortar el lote ante el 409 de concurrencia por flujo', async () => {
+      // 1. Arrange: el primer despacho arranca, el segundo choca con RNF-09
+      //    porque el flujo ya tiene su ejecucion viva.
+      const { service, workflows } = buildHarness({
+        matches: 3,
+        env: envWithBatch('3'),
+      });
+      workflows.runAutomaticWorkflow
+        .mockResolvedValueOnce(EXECUTION_ID)
+        .mockRejectedValue(new ConflictException('RNF-09'));
+
+      // 2. Act
+      const dispatched = await service.pollInbox(FLOW_ID, buildParams());
+
+      // 3. Assert: se despacho uno, el rechazo corta el resto del lote, y el
+      // ciclo cuenta como productivo porque algo si se proceso.
+      expect(dispatched).toBe(true);
+      expect(workflows.runAutomaticWorkflow).toHaveBeenCalledTimes(2);
     });
   });
 });

@@ -16,11 +16,13 @@ import { CronJob } from 'cron';
 import { Repository } from 'typeorm';
 
 import { FlowPollingCoordinator } from '@common/services/flow-polling.coordinator';
+import { SystemCapacityExceededException } from '@core/fsm/exceptions/system-capacity-exceeded.exception';
 import { NodeType } from '@core/fsm/types/pipeline-schema.types';
 import {
   CronTriggerConfigDto,
   resolveCronConfig,
 } from '@modules/nodes/dto/cron-trigger-config.dto';
+import { HybridLoggerService } from '@modules/logs/services/hybrid-logger.service';
 import { Workflow } from '@modules/workflows/entities/workflow.entity';
 import { WorkflowsService } from '@modules/workflows/workflows.service';
 
@@ -81,6 +83,16 @@ export class CronSchedulingService implements OnModuleInit, OnModuleDestroy {
   private readonly inFlight = new Set<string>();
 
   /**
+   * Flujos que el motor esta rechazando por falta de capacidad global.
+   *
+   * Este servicio no tiene equivalente de `failingFlows` —un vencimiento que
+   * falla solo se registra—, pero la saturacion si necesita memoria: sin ella,
+   * una expresion `* * * * *` contra un motor lleno dejaria una fila GRAVE por
+   * minuto describiendo la misma condicion.
+   */
+  private readonly saturatedFlows = new Set<string>();
+
+  /**
    * Configuracion con la que cada flujo quedo programado, indexada por `flowId`.
    *
    * `SchedulerRegistry` guarda el `CronJob` pero no CON QUE se creo, asi que sin
@@ -104,6 +116,7 @@ export class CronSchedulingService implements OnModuleInit, OnModuleDestroy {
     private readonly schedulerRegistry: SchedulerRegistry,
     private readonly configService: ConfigService,
     private readonly flowPollingCoordinator: FlowPollingCoordinator,
+    private readonly hybridLogger: HybridLoggerService,
   ) {}
 
   public async onModuleInit(): Promise<void> {
@@ -171,6 +184,9 @@ export class CronSchedulingService implements OnModuleInit, OnModuleDestroy {
       // del siguiente ciclo, la fase de altas lo veria "ya programado e intacto"
       // y no volveria a inscribirlo nunca.
       this.scheduled.delete(flowId);
+      // Se olvida tambien su saturacion: una reactivacion futura debe poder
+      // volver a alertar si el motor sigue lleno.
+      this.saturatedFlows.delete(flowId);
     }
 
     this.logger.log(
@@ -207,6 +223,7 @@ export class CronSchedulingService implements OnModuleInit, OnModuleDestroy {
       if (!desired.has(flowId)) {
         this.deleteCronJobIfExists(jobName(flowId));
         this.scheduled.delete(flowId);
+        this.saturatedFlows.delete(flowId);
         removed.push(flowId);
       }
     }
@@ -342,6 +359,10 @@ export class CronSchedulingService implements OnModuleInit, OnModuleDestroy {
       this.logger.log(
         `Vencimiento CRON del flujo "${flowId}" | ejecucion=${executionId}`,
       );
+
+      // El motor acepto trabajo: si veniamos de una saturacion, se acabo.
+      this.clearSaturation(flowId);
+
       return true;
     } catch (error) {
       // El 409 de RNF-09 no es una averia: el flujo ya tiene una instancia
@@ -361,6 +382,14 @@ export class CronSchedulingService implements OnModuleInit, OnModuleDestroy {
       // alguien desactivo el flujo llega aqui y `runAutomaticWorkflow` lo
       // rechaza con un 400. Se conserva el mensaje real porque por esta misma
       // via llega tambien el esquema corrupto, que si debe quedar legible.
+      // ANTES de la rama generica: `SystemCapacityExceededException` TAMBIEN es
+      // una `HttpException`, asi que aquella la absorberia primero y la
+      // saturacion quedaria registrada como un rechazo cualquiera.
+      if (error instanceof SystemCapacityExceededException) {
+        await this.reportSaturation(flowId, error);
+        return false;
+      }
+
       if (error instanceof HttpException) {
         this.logger.warn(
           `El motor rechazo el despacho programado del flujo "${flowId}": ${error.message}`,
@@ -370,6 +399,64 @@ export class CronSchedulingService implements OnModuleInit, OnModuleDestroy {
 
       throw error;
     }
+  }
+
+  /**
+   * Registra que el motor va lleno, sin inundar la bandeja de alertas.
+   *
+   * Consola en cada vencimiento, bandeja solo en la TRANSICION. A diferencia del
+   * sondeo IMAP, aqui el disparo se PIERDE —no hay ningun correo esperando en el
+   * buzon—, y por eso el mensaje lo dice: el siguiente vencimiento es trabajo
+   * nuevo, no el mismo aplazado.
+   */
+  private async reportSaturation(
+    flowId: string,
+    error: SystemCapacityExceededException,
+  ): Promise<void> {
+    this.logger.warn(
+      `Motor saturado (${error.activeCount}/${error.maxAllowed}): se pierde el vencimiento del flujo "${flowId}".`,
+    );
+
+    if (this.saturatedFlows.has(flowId)) {
+      return;
+    }
+
+    this.saturatedFlows.add(flowId);
+
+    // Guarda de contingencia ADEMAS de la del propio logger: esto corre dentro
+    // del callback de un `CronJob`, y una excepcion que escapara de ahi
+    // terminaria el proceso de Node entero.
+    try {
+      await this.hybridLogger.logWorkerFailure({
+        flowId,
+        source: CronSchedulingService.name,
+        level: 'GRAVE',
+        message: error.message,
+      });
+    } catch (loggingError: unknown) {
+      // Se retira la marca para que el siguiente vencimiento REINTENTE la
+      // alerta: dejarla puesta silenciaria la saturacion para siempre.
+      this.saturatedFlows.delete(flowId);
+
+      this.logger.error(
+        `No se pudo escalar a alertas_error la saturacion del flujo "${flowId}": ${
+          loggingError instanceof Error
+            ? loggingError.message
+            : String(loggingError)
+        }`,
+      );
+    }
+  }
+
+  /** Da por superada la saturacion de un flujo. Idempotente. */
+  private clearSaturation(flowId: string): void {
+    if (!this.saturatedFlows.delete(flowId)) {
+      return;
+    }
+
+    this.logger.log(
+      `El motor volvio a aceptar ejecuciones del flujo "${flowId}".`,
+    );
   }
 
   /** Flujos habilitados que declaran un nodo TRIGGER_CRON con parametros validos. */
@@ -530,5 +617,6 @@ export class CronSchedulingService implements OnModuleInit, OnModuleDestroy {
     // temporizadores ya no existen, y la siguiente reconciliacion los daria por
     // intactos y no volveria a inscribirlos.
     this.scheduled.clear();
+    this.saturatedFlows.clear();
   }
 }

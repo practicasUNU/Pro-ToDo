@@ -7440,3 +7440,119 @@ backend son previos y no varian con esta tanda.
 - **`SANITIZER_ALLOWED_TAGS` sigue siendo una replica manual** de la lista del saneador. Los atajos
   nuevos de `allowedTags` si tienen prueba de subconjunto contra ella, pero nada vigila que la
   replica no diverja del original.
+
+---
+
+## PROT-30 · Barrera de saturacion global y contrapresion en el despacho
+
+El sintoma de partida se describio como «el motor no para». La auditoria lo desmintio: el bucle de
+`executeWorkflow` tiene una docena de clausulas de guarda y `pauseAt` conserva el cursor del nodo
+culpable. Lo que faltaba estaba una capa mas arriba, y el propio codigo ya lo tenia escrito como si
+fuera inmutable, en el comentario del cierre por `LEVE`: *«media hora de red caida deja treinta filas
+PAUSADO —una por tick, porque PAUSADO no reserva el mutex»*.
+
+El defecto real era que **todas** las barreras miraban a un flujo. Cincuenta flujos con una ejecucion
+cada uno las respetan todas y aun asi agotan el pool de PostgreSQL. Y el pool no se declaraba en
+ninguna parte: el sistema corria con el default implicito de `node-postgres`, diez conexiones, sin
+que ese numero apareciese escrito en ningun sitio donde alguien pudiera emparejarlo con nada.
+
+### Por que la excepcion rompe la convencion del proyecto
+
+Las otras cuatro excepciones propias extienden `Error` nativo. `SystemCapacityExceededException`
+extiende `HttpException`, y las dos razones son mecanicas, no estilisticas:
+
+`createExecution` se alcanza tambien desde el despacho manual, donde el codigo de estado viaja al
+cliente; un `Error` corriente habria convertido un rechazo por cupo en un 500. Y los `dispatchFlow`
+de ambos disparadores discriminan por `instanceof HttpException` para separar un rechazo del motor de
+una averia de red: un `Error` corriente se habria propagado hasta `pollInbox`, que lo habria
+registrado como «falla critica de conexion IMAP» —a nivel `error`, con stack— y habria levantado una
+alerta GRAVE por cada ciclo saturado, acusando al buzon de algo que no ha pasado.
+
+El precio es que la rama que la captura **tiene que ir antes** de la generica de `HttpException`, que
+si no la absorbe primero. Es una dependencia de orden invisible en el diff, y por eso esta escrita en
+el TSDoc de la clase y en un comentario en cada uno de los dos sitios que la capturan.
+
+### El `COUNT` global sale gratis
+
+Su unico predicado es `estado = 'EN_PROCESO'`, que es exactamente el predicado del indice unico
+parcial `idx_flujo_activo` creado en la migracion 006 para otra cosa. Las filas que hay que contar son
+las unicas que ese indice contiene, asi que PostgreSQL lo resuelve sin tocar la tabla. No hizo falta
+ningun indice nuevo ni ninguna migracion.
+
+### La guarda global va despues de la de flujo, no antes
+
+Parece contraintuitivo —lo mas general primero— pero el orden lo decide la calidad del diagnostico.
+Si el flujo ya tiene una ejecucion viva, el 409 de RNF-09 nombra el flujo y el conflicto exacto.
+Adelantar la global convertiria ese caso en un generico «el sistema esta saturado» que manda a mirar
+al sitio equivocado. El efecto colateral util es que los tres tests de `createExecution` que ya
+existian siguen pasando sin tocar una linea.
+
+### `MAX_EXECUTIONS_PER_POLL_TICK` no limitaba nada, asi que pasa a drenar
+
+Tal como se pidio, la variable era un techo sobre algo que estructuralmente valia uno: `pollInbox`
+colapsaba el resultado del `SEARCH` a un booleano y llamaba a `dispatchFlow` una sola vez, y la
+estrategia consume un unico correo, el UID mas alto que case. El drenaje real era de un correo por
+ciclo y por flujo —uno por minuto— de modo que un buzon con cien mensajes atrasados tardaba mas de
+hora y media en vaciarse, y nunca alcanzaba al remitente si este escribia mas rapido.
+
+La variable pasa a gobernar cuantos despachos **secuenciales** encadena un ciclo. Secuenciales
+importa: `dispatchFlow` espera al pipeline entero antes de volver, asi que el lote acelera el drenaje
+sin multiplicar la concurrencia. Quien pone el techo de ejecuciones a la vez sigue siendo
+`MAX_GLOBAL_CONCURRENT_EXECUTIONS`.
+
+Eso obligo a que `hasMatchingMessages` devolviera el recuento y pasara a llamarse
+`countMatchingMessages`. Iterar preguntando «queda alguno?» antes de cada despacho habria abierto una
+conexion TLS por correo, que es justo lo contrario de lo que persigue toda esta tanda. Con el
+recuento, el ciclo sigue costando exactamente una conexion, como antes.
+
+### La saturacion no es una averia, y la bandeja de alertas no debe creer que lo es
+
+`HybridLoggerService.logWorkerFailure` escribe en el `.log` y ademas crea una fila en `alertas_error`
+con nivel GRAVE. Usarlo en cada rechazo habria dejado seiscientas filas por hora con diez flujos
+sondeando cada minuto, describiendo una condicion que se resuelve sola en cuanto una ejecucion
+termina.
+
+Se reutilizo el criterio que `raiseWorkerAlert` ya aplicaba a las averias: consola en cada ciclo
+—ahi el detalle repetido sirve para ver si la saturacion es puntual o sostenida— y bandeja solo en la
+transicion sano → saturado. El conjunto `saturatedFlows` va **separado** de `failingFlows`, y no es
+purismo: no son la misma condicion, y compartir conjunto haria que recuperarse de una silenciase la
+alerta de la otra. La marca se retira cuando un despacho vuelve a cuajar, que es la unica senal
+fiable de que el motor acepta trabajo otra vez; `clearFailure` no servia porque corre *antes* de
+despachar y solo sabe que el buzon se pudo mirar.
+
+### Lo que NO se hizo
+
+**No se escribio una sola linea para «no marcar los correos como leidos».** El requisito ya se cumplia
+y la auditoria lo confirmo: el sondeo solo hace `SEARCH` —nunca `FETCH` ni `messageFlagsAdd`— y el
+unico punto del repositorio que marca `\Seen` esta dentro de `ImapTriggerStrategy`, en una ejecucion
+que con saturacion jamas llega a arrancar. Se fijo como prueba (`7.1`) en lugar de como codigo, con
+una asercion sobre el doble del cliente IMAP que se caeria si algun dia alguien hiciera que el sondeo
+empezase a consumir el buzon.
+
+**No se toco la programacion de los disparadores.** Filtrar en `findImapTriggerNodes` los flujos con
+ejecucion viva habria exigido que `NodesModule` consultase `ejecuciones_flujo` —`FsmModule` no exporta
+ese repositorio— y, peor, `refreshSchedules` desinscribe el temporizador de los flujos que no
+devuelve: al liberarse el motor, el flujo habria quedado sin sondear hasta la siguiente
+reconciliacion. El 409 ya era la via diseñada.
+
+**No se implemento BullMQ.** Sigue siendo la solucion de fondo y ambos servicios la documentan como
+deuda: hoy el pipeline corre en el mismo proceso que el disparador, de modo que estos techos protegen
+pero no desacoplan.
+
+### Estado de la verificacion
+
+Backend **2033 pruebas en 85 suites**, en verde. 34 son nuevas: 18 de `FsmConfig`, 5 del motor, 7 del
+sondeo IMAP y 4 del planificador CRON. `npm run build` limpio. `eslint` limpio sobre los doce archivos
+tocados; los tres errores de `no-unsafe-assignment` que quedan en `imap-polling.service.spec.ts` son
+previos —`registry.getInterval` devuelve `any`— y estan en lineas que esta tanda no toca.
+
+### Pendiente
+
+- **Las tres variables nuevas no estan en el `.env` real,** solo en la plantilla. Hasta declararlas,
+  el sistema corre con los defectos del codigo (5, 3 y 10), que son deliberadamente los valores con
+  los que ya funcionaba.
+- **Ninguna barrera cubre todavia las conexiones IMAP.** `createImapClient` sigue construyendo un
+  `ImapFlow` nuevo por llamada, sin pool ni semaforo. El techo global limita las ejecuciones, pero el
+  `SEARCH` de cada ciclo ocurre *antes* de pedirle permiso al motor: con el motor lleno, N flujos
+  siguen abriendo N conexiones TLS por minuto para descubrir que no pueden despachar. El punto de
+  enganche natural es `imap-client.factory.ts`, por donde pasa toda conexion del sistema.

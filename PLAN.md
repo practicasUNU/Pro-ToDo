@@ -4137,3 +4137,133 @@ EN_PROCESO ─┼─ halt (NO_MESSAGES / SUBJECT_FILTERED) → OMITIDO   ← nue
 - [ ] Pendiente — aplicar 030, 031 y 032 contra PostgreSQL (Docker lo levanta el usuario)
 - [ ] Pendiente — validar el texto de un prompt al guardarlo (`AiPromptTemplatesService` sigue
       aceptando `{{inventado.campo}}` con un 201)
+
+---
+
+## PROT-30 · Barrera de saturacion global y contrapresion en el despacho
+
+### Problema
+
+Todas las barreras de concurrencia del sistema eran **por flujo**, y ninguna miraba al motor
+entero:
+
+| Capa | Limite | Granularidad |
+|---|---|---|
+| `inFlight` del sondeo IMAP | ciclos solapados | por `flowId` |
+| `inFlight` del planificador CRON | vencimientos solapados | por `flowId` |
+| `createExecution` (RNF-09) | 1 ejecucion `EN_PROCESO` | por `flowId` |
+| Indice `idx_flujo_activo` | mutex duro en PostgreSQL | por `flowId` |
+| Conexiones IMAP (`createImapClient`) | **ninguno** | — |
+| Ejecuciones de pipeline simultaneas | **ninguno** | — |
+
+Cincuenta flujos con una ejecucion cada uno respetan las cuatro primeras y aun asi dejan el pool de
+PostgreSQL sin conexiones libres, con cincuenta navegadores headless de Playwright repartiendose la
+memoria del proceso. El pool, ademas, no se declaraba en ninguna parte: corria con el default
+implicito de `node-postgres` —diez conexiones— sin aparecer escrito.
+
+### Contratos nuevos
+
+```typescript
+// @core/config/fsm.config.ts — techos declarados en el entorno
+@Injectable()
+export class FsmConfig {
+  get maxGlobalConcurrentExecutions(): number; // MAX_GLOBAL_CONCURRENT_EXECUTIONS, def. 5
+  get maxExecutionsPerPollTick(): number;      // MAX_EXECUTIONS_PER_POLL_TICK, def. 3
+}
+
+// @core/fsm/exceptions/system-capacity-exceeded.exception.ts
+export class SystemCapacityExceededException extends HttpException {
+  constructor(
+    public readonly activeCount: number,
+    public readonly maxAllowed: number,
+  ); // HttpStatus.TOO_MANY_REQUESTS
+}
+
+// FsmEngineService
+private async assertGlobalCapacityAvailable(): Promise<void>;
+
+// ImapPollingService — devuelve el RECUENTO, no un booleano
+private async countMatchingMessages(config: ResolvedImapConfig): Promise<number>;
+```
+
+### Diagrama de inyeccion de dependencias
+
+```
+CommonModule (@Global)
+  └── FsmConfig ──────────┬──→ FsmEngineService        (@core/fsm)
+                          ├──→ ImapPollingService      (@modules/nodes)
+                          └──→ CronSchedulingService   (@modules/nodes)
+
+LogsModule
+  └── HybridLoggerService ───→ CronSchedulingService   (nuevo consumidor)
+```
+
+`FsmConfig` vive en `CommonModule` y no en `FsmModule` ni en `NodesModule` porque lo consumen los
+dos lados de una frontera que no comparte modulo. Registrarlo en cada uno crearia dos instancias de
+una clase que describe un unico limite.
+
+### Por que la guarda global va DESPUES de la de flujo
+
+Si el flujo ya tiene una ejecucion viva, el 409 de RNF-09 es el diagnostico exacto y accionable.
+Adelantar la comprobacion global convertiria ese caso concreto en un generico «el sistema esta
+saturado» que mandaria al operador a mirar al sitio equivocado.
+
+### Por que la excepcion extiende `HttpException` y no `Error`
+
+Las otras cuatro excepciones propias del proyecto extienden `Error`. Esta no puede:
+
+1. `createExecution` se alcanza tambien desde `POST /workflows/:id/execute-test`, donde el codigo de
+   estado viaja al cliente. Con un `Error` corriente ese endpoint devolveria un 500.
+2. Los `dispatchFlow` discriminan por `instanceof HttpException`. Con un `Error` corriente la
+   excepcion se propagaria hasta `pollInbox`, que la registraria como «falla critica de conexion
+   IMAP» y levantaria una alerta GRAVE por cada ciclo saturado.
+
+Quien la capture debe hacerlo **antes** de su rama generica de `HttpException`: esta clase tambien
+lo es, y la generica la absorberia primero.
+
+### Por que el `COUNT` global no necesita indice nuevo
+
+Su unico predicado es `estado = 'EN_PROCESO'`, que es exactamente el predicado del indice unico
+parcial `idx_flujo_activo`. Las filas que hay que contar son las unicas que el indice contiene.
+
+### Por que `MAX_EXECUTIONS_PER_POLL_TICK` es un lote y no un techo
+
+No habia ningun lote que limitar: `pollInbox` colapsaba el `SEARCH` a un booleano y despachaba una
+sola vez, y la estrategia consume **un** correo (`Math.max(...uids)`). El drenaje era de un correo
+por ciclo y por flujo —uno por minuto con la configuracion real—, de modo que un buzon atrasado
+nunca alcanzaba al remitente. La variable pasa a gobernar cuantos despachos **secuenciales** encadena
+un ciclo: acelera el drenaje sin multiplicar la concurrencia, porque `dispatchFlow` espera al
+pipeline entero antes de volver. El techo de ejecuciones a la vez lo pone
+`MAX_GLOBAL_CONCURRENT_EXECUTIONS`.
+
+`hasMatchingMessages` tuvo que devolver el recuento por esto: preguntar «queda alguno?» antes de cada
+despacho abriria una conexion TLS por correo, justo lo contrario de lo que persigue la barrera.
+
+### Por que la saturacion no escala a `alertas_error` en cada ciclo
+
+Es operacion normal, no una averia: el correo sigue sin leer y el siguiente ciclo lo recoge. Diez
+flujos sondeando cada minuto dejarian seiscientas filas GRAVE por hora describiendo una condicion que
+se resuelve sola. Se aplica el criterio de `raiseWorkerAlert`: consola en cada ciclo, bandeja solo en
+la transicion sano → saturado. El conjunto `saturatedFlows` va **separado** de `failingFlows` porque
+no son la misma condicion —un buzon que no se puede mirar frente a un motor lleno—, y compartirlo
+haria que recuperarse de una silenciase la alerta de la otra.
+
+### Lo que NO hizo falta implementar
+
+El requisito de «no marcar los correos como leidos» ya se cumplia. El sondeo solo hace `SEARCH`:
+nunca `FETCH` ni `messageFlagsAdd`. Quien marca `\Seen` es `ImapTriggerStrategy`, dentro de una
+ejecucion que con saturacion jamas llega a arrancar. Se fijo como prueba, no como codigo.
+
+### Estado de las tareas
+
+- [x] `FsmConfig` con los dos techos, tolerante a erratas, registrado en `CommonModule`
+- [x] `SystemCapacityExceededException` (429) y `assertGlobalCapacityAvailable` en el motor
+- [x] Guarda global integrada en `createExecution`, antes de insertar y despues del cupo por flujo
+- [x] Lote real por ciclo en `ImapPollingService` con `countMatchingMessages`
+- [x] Absorcion de la saturacion en ambos `dispatchFlow`, con rama propia antes de la generica
+- [x] Alerta en la transicion, con `saturatedFlows` separado de `failingFlows`
+- [x] `extra.max` del pool de PostgreSQL declarado via `DB_POOL_MAX`
+- [x] Tres variables documentadas en `.env.example`, emparejadas entre si
+- [x] 34 pruebas nuevas (18 de `FsmConfig`, 5 del motor, 7 del sondeo, 4 del planificador)
+- [ ] Pendiente — BullMQ como solucion de fondo: ambos disparadores siguen ejecutando el pipeline en
+      el mismo proceso, de modo que estos techos protegen pero no desacoplan

@@ -10,9 +10,11 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { In, QueryFailedError } from 'typeorm';
 
 import { HybridLoggerService } from '@modules/logs/services/hybrid-logger.service';
+import { FsmConfig } from '@core/config/fsm.config';
 import { StatePayloadContext } from '@core/fsm/context/state-payload.context';
 import { FsmExecution } from '@core/fsm/entities/fsm-execution.entity';
 import { StrategyNotFoundException } from '@core/fsm/exceptions/strategy-not-found.exception';
+import { SystemCapacityExceededException } from '@core/fsm/exceptions/system-capacity-exceeded.exception';
 import { NodeStrategyFactory } from '@core/fsm/factories/node-strategy.factory';
 import { ExecutionState } from '@core/fsm/types/fsm.enums';
 import {
@@ -394,6 +396,7 @@ export class FsmEngineService {
     private readonly strategyFactory: NodeStrategyFactory,
     private readonly configService: ConfigService,
     private readonly hybridLogger: HybridLoggerService,
+    private readonly fsmConfig: FsmConfig,
   ) {}
 
   /**
@@ -483,6 +486,8 @@ export class FsmEngineService {
    *        para que `buildContext()` los restaure de forma inmutable.
    * @returns La fila persistida, con su `executionId` ya asignado.
    * @throws ConflictException Si el flujo agota su cupo de instancias activas.
+   * @throws SystemCapacityExceededException Si el motor, en su conjunto, ya
+   *         atiende el maximo de ejecuciones simultaneas (429).
    */
   public async createExecution(
     flowId: string,
@@ -503,6 +508,12 @@ export class FsmEngineService {
       );
     }
 
+    // DESPUES del cupo por flujo, y el orden importa: si este flujo ya tiene una
+    // ejecucion viva, el 409 de arriba es el diagnostico exacto y accionable.
+    // Adelantar la guarda global convertiria ese caso concreto en un generico
+    // «el sistema esta saturado» que mandaria a mirar al sitio equivocado.
+    await this.assertGlobalCapacityAvailable();
+
     const execution = this.fsmExecutionRepo.create({
       flowId,
       currentState: ExecutionState.INACTIVO,
@@ -512,6 +523,40 @@ export class FsmEngineService {
     });
 
     return this.fsmExecutionRepo.save(execution);
+  }
+
+  /**
+   * Impide que el motor acepte mas trabajo del que su maquina puede sostener.
+   *
+   * El cupo por flujo (RNF-09) no cubre esto y nunca podria: cincuenta flujos
+   * con una ejecucion cada uno lo respetan, y aun asi dejan el pool de
+   * PostgreSQL sin conexiones libres y la memoria del proceso repartida entre
+   * cincuenta navegadores headless. La saturacion no la causa un flujo que se
+   * pisa a si mismo, sino la SUMA de flujos que se comportan bien.
+   *
+   * El `COUNT` lo resuelve PostgreSQL con el indice unico parcial
+   * `idx_flujo_activo`, cuyo predicado es exactamente `WHERE estado =
+   * 'EN_PROCESO'`: las filas que hay que contar son las unicas que el indice
+   * contiene, asi que no hace falta ninguno nuevo.
+   *
+   * @throws SystemCapacityExceededException Si no queda cupo global (429).
+   */
+  private async assertGlobalCapacityAvailable(): Promise<void> {
+    const maxAllowed = this.fsmConfig.maxGlobalConcurrentExecutions;
+
+    const activeCount = await this.fsmExecutionRepo.count({
+      where: { currentState: ExecutionState.EN_PROCESO },
+    });
+
+    if (activeCount < maxAllowed) {
+      return;
+    }
+
+    this.logger.warn(
+      `Capacidad del motor agotada: ${activeCount}/${maxAllowed} ejecuciones EN_PROCESO. Se rechaza el alta de una ejecucion nueva.`,
+    );
+
+    throw new SystemCapacityExceededException(activeCount, maxAllowed);
   }
 
   /**

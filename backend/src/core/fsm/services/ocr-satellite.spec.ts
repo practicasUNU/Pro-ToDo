@@ -1,5 +1,7 @@
 import { ConfigService } from '@nestjs/config';
 
+import { FsmConfig } from '@core/config/fsm.config';
+
 import { NodeStrategyFactory } from '@core/fsm/factories/node-strategy.factory';
 import { FsmEngineService } from '@core/fsm/services/fsm-engine.service';
 import { ExecutionState } from '@core/fsm/types/fsm.enums';
@@ -133,11 +135,13 @@ describe('Satelite OCR · desvio, reincorporacion y purga binaria', () => {
   });
 
   const buildEngine = (repo: Repository<FsmExecution>): FsmEngineService => {
+    const configService = new ConfigService({});
     const engine = new FsmEngineService(
       repo,
       factory,
-      new ConfigService({}),
+      configService,
       hybridLogger as unknown as HybridLoggerService,
+      new FsmConfig(configService),
     );
 
     jest.spyOn(engine['logger'], 'log').mockImplementation(() => undefined);

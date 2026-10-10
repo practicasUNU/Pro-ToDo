@@ -1,9 +1,13 @@
 import {
   BadRequestException,
   ConflictException,
+  HttpStatus,
   NotFoundException,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+
+import { FsmConfig } from '@core/config/fsm.config';
+import { SystemCapacityExceededException } from '@core/fsm/exceptions/system-capacity-exceeded.exception';
 import { In, QueryFailedError } from 'typeorm';
 
 import { StatePayloadContext } from '@core/fsm/context/state-payload.context';
@@ -242,6 +246,12 @@ describe('FsmEngineService (PROT-09)', () => {
       factory,
       configService,
       hybridLogger as unknown as HybridLoggerService,
+      // `FsmConfig` REAL y no un doble: es una clase pura sobre el mismo
+      // `ConfigService` que ya recibe el motor, asi que sembrar
+      // `MAX_GLOBAL_CONCURRENT_EXECUTIONS` en el entorno de la prueba basta
+      // para gobernar tambien el techo global. Un doble obligaria a declararlo
+      // dos veces y permitiria que ambos se contradijeran.
+      new FsmConfig(configService),
     );
     jest.spyOn(engine['logger'], 'log').mockImplementation(() => undefined);
     jest.spyOn(engine['logger'], 'warn').mockImplementation(() => undefined);
@@ -1807,15 +1817,27 @@ describe('FsmEngineService (PROT-09)', () => {
   });
 
   describe('createExecution y control de concurrencia (RNF-09)', () => {
-    /** Doble con `count` y `create`/`save`, que `buildRepository` no cubre. */
+    /**
+     * Doble con `count` y `create`/`save`, que `buildRepository` no cubre.
+     *
+     * `createExecution` consulta DOS veces: primero las vivas de este flujo
+     * (RNF-09) y despues las de todo el motor. `globalCount` cae por defecto en
+     * `activeCount` porque en la mayoria de escenarios la unica ejecucion viva
+     * del sistema es la de este flujo; los casos que separan ambos techos lo
+     * declaran explicitamente.
+     */
     const buildCreationRepository = (
       activeCount: number,
+      globalCount: number = activeCount,
     ): {
       repo: Repository<FsmExecution>;
       count: jest.Mock;
       save: jest.Mock;
     } => {
-      const count = jest.fn().mockResolvedValue(activeCount);
+      const count = jest
+        .fn()
+        .mockResolvedValueOnce(activeCount)
+        .mockResolvedValue(globalCount);
       const save = jest.fn((entity: FsmExecution) => Promise.resolve(entity));
       const create = jest.fn((entity: Partial<FsmExecution>) => entity);
 
@@ -1872,6 +1894,92 @@ describe('FsmEngineService (PROT-09)', () => {
 
       // 3. Assert
       expect(save).toHaveBeenCalledTimes(1);
+    });
+
+    it('deberia rechazar la creacion con SystemCapacityExceededException si las ejecuciones activas alcanzan el limite global', async () => {
+      // 1. Arrange: este flujo no tiene ninguna viva —el cupo por flujo pasa
+      // limpio— pero el motor en conjunto ya esta en su techo.
+      const { repo, save } = buildCreationRepository(0, 5);
+      const configService = new ConfigService({
+        MAX_GLOBAL_CONCURRENT_EXECUTIONS: '5',
+      });
+
+      // 2. Act + 3. Assert: se rechaza ANTES de insertar, no despues
+      await expect(
+        buildEngine(repo, configService).createExecution(FLOW_ID),
+      ).rejects.toBeInstanceOf(SystemCapacityExceededException);
+      expect(save).not.toHaveBeenCalled();
+    });
+
+    it('deberia rechazar con 429 y no con 409, para distinguir saturacion de solapamiento', async () => {
+      // 1. Arrange
+      const { repo } = buildCreationRepository(0, 5);
+      const configService = new ConfigService({
+        MAX_GLOBAL_CONCURRENT_EXECUTIONS: '5',
+      });
+
+      // 2. Act
+      const rejection: unknown = await buildEngine(repo, configService)
+        .createExecution(FLOW_ID)
+        .catch((error: unknown) => error);
+
+      // 3. Assert: el codigo es el contrato que leen los disparadores y el
+      // despacho manual. Un 409 aqui afirmaria "este flujo esta ocupado", que
+      // es justo lo que NO ha pasado: el flujo esta libre y lleno el motor.
+      expect(rejection).toBeInstanceOf(SystemCapacityExceededException);
+
+      const capacityError = rejection as SystemCapacityExceededException;
+
+      expect(capacityError.getStatus()).toBe(HttpStatus.TOO_MANY_REQUESTS);
+      expect(capacityError.activeCount).toBe(5);
+      expect(capacityError.maxAllowed).toBe(5);
+    });
+
+    it('deberia contar las EN_PROCESO de TODO el motor, no solo las del flujo', async () => {
+      // 1. Arrange
+      const { repo, count } = buildCreationRepository(0, 5);
+      const configService = new ConfigService({
+        MAX_GLOBAL_CONCURRENT_EXECUTIONS: '5',
+      });
+
+      // 2. Act
+      await buildEngine(repo, configService)
+        .createExecution(FLOW_ID)
+        .catch(() => undefined);
+
+      // 3. Assert: la segunda consulta NO lleva `flowId`. Filtrarla por flujo
+      // la convertiria en una copia de la guarda RNF-09, y el techo global no
+      // se alcanzaria jamas con flujos distintos, que es el caso que motiva
+      // toda esta barrera.
+      expect(count).toHaveBeenNthCalledWith(2, {
+        where: { currentState: ExecutionState.EN_PROCESO },
+      });
+    });
+
+    it('deberia admitir la creacion mientras quede cupo global', async () => {
+      // 1. Arrange: cuatro vivas en el motor contra un techo de cinco
+      const { repo, save } = buildCreationRepository(0, 4);
+      const configService = new ConfigService({
+        MAX_GLOBAL_CONCURRENT_EXECUTIONS: '5',
+      });
+
+      // 2. Act
+      await buildEngine(repo, configService).createExecution(FLOW_ID);
+
+      // 3. Assert
+      expect(save).toHaveBeenCalledTimes(1);
+    });
+
+    it('deberia aplicar el techo global por defecto cuando la variable no esta declarada', async () => {
+      // 1. Arrange: sin `MAX_GLOBAL_CONCURRENT_EXECUTIONS` manda el defecto de
+      // `FsmConfig`, que son cinco. Con cinco vivas, la sexta no entra.
+      const { repo, save } = buildCreationRepository(0, 5);
+
+      // 2. Act + 3. Assert
+      await expect(
+        buildEngine(repo).createExecution(FLOW_ID),
+      ).rejects.toBeInstanceOf(SystemCapacityExceededException);
+      expect(save).not.toHaveBeenCalled();
     });
   });
 
