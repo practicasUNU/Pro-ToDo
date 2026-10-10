@@ -96,35 +96,65 @@ const SANDBOX_UUID_VARS: Readonly<Record<string, string>> = {
  * variable sigue mandando cuando trae algo, que es lo que permite apuntar a otra
  * instalacion sin tocar este archivo.
  */
+/**
+ * Suelo del timeout de este script, en milisegundos.
+ *
+ * La pagina agregadora de titulos ronda los 250 KB de cuerpo y el portal tarda
+ * del orden de ochenta segundos en servirla. El defecto de `DrupalApiConfig`
+ * —quince segundos, dimensionado para las llamadas de un nodo en ejecucion—
+ * corta la lectura antes de empezar. Se toma el MAYOR de los dos para que subir
+ * `DRUPAL_API_TIMEOUT_MS` en el entorno siga mandando.
+ */
+const CLEANUP_MIN_TIMEOUT_MS = 120_000;
+
 const SANDBOX_UUID_FALLBACKS: Readonly<Record<string, string>> = {
   '/prueba-licitaciones': '7f1700bf-b54b-4c12-b71a-8a71f1f0ee38',
   '/prueba-verificador-titulos': 'b17d69d8-6998-4883-b8dc-153b55dbd9c5',
 };
 
 /**
+ * Prefijo que ANCLA la purga al segundo nivel del acordeon.
+ *
+ * NO ES DECORATIVO, Y ESTA LINEA SE PAGO CARA. La pagina agregadora es un
+ * acordeon de dos niveles: catorce paneles de universidad y, dentro de cada
+ * uno, un `.panel-group` con sus comites. Los dos llevan la MISMA clase
+ * `.panel`, de modo que un `.panel:has(#loQueSea)` casa tambien con el panel de
+ * la universidad que contiene el comite buscado, y el `.remove()` se lleva el
+ * contenedor entero con todos sus hijos.
+ *
+ * Fue exactamente lo que le paso a `ESIC Universidad`: desaparecio de la pagina
+ * por un selector que pretendia quitar UN panel de comite duplicado. Exigir que
+ * el `.panel-group` este a su vez DENTRO de otro `.panel-group` deja fuera el
+ * primer nivel, que es donde viven los padres.
+ */
+const COMMITTEE_PANEL_SCOPE = '.panel-group .panel-group > .panel';
+
+/**
  * Selectores de purga, en orden de aplicacion.
  *
- * El orden NO es indiferente. Los dos marcadores genericos van primero y se
- * llevan el panel entero; cuando les toca el turno a los especificos, sus nodos
- * ya estan desconectados del arbol y no vuelven a contarse. Al reves, un
- * `#collapseCEU_TEST` por delante arrancaria solo el cuerpo del acordeon y
- * dejaria publicada su cabecera huerfana.
+ * El orden NO es indiferente. Los que se llevan el panel entero van primero;
+ * cuando les toca el turno a los demas, sus nodos ya estan desconectados del
+ * arbol y no vuelven a contarse.
  *
- * Los dos ultimos cubren los bloques de licitacion de prueba, que se marcan por
- * expediente en vez de por atributo porque esa es la forma que ya tenian antes
- * de que existiera este script.
+ * POR QUE SE ANCLA EN LAS CLASES DE LA PLANTILLA y no en el marcador. El
+ * atributo `data-protodo-injected` NO SOBREVIVE AL VIAJE: Drupal lo filtra al
+ * guardar el cuerpo, y en la pagina de titulos da hoy cero coincidencias pese a
+ * seguir ahi los catorce paneles que lo llevaban al publicarse. `panel-toggle-link`
+ * y `panel-comite-codigo`, en cambio, son clases y sobreviven. Los paneles
+ * nativos del portal no las llevan —sus enlaces van sin clase—, asi que
+ * distinguen lo que publico Proto-Do de lo que ya estaba.
+ *
+ * Los de `.licitacion-entry` cubren los bloques de licitacion de prueba, que se
+ * marcan por expediente en vez de por atributo porque esa es la forma que ya
+ * tenian antes de que existiera este script.
  */
 const DEFAULT_PURGE_SELECTORS: readonly string[] = [
+  `${COMMITTEE_PANEL_SCOPE}:has(a.panel-toggle-link)`,
+  `${COMMITTEE_PANEL_SCOPE}:has(.panel-comite-codigo)`,
+  `${COMMITTEE_PANEL_SCOPE}:has(#collapseUFV1Duplicado)`,
+  `${COMMITTEE_PANEL_SCOPE}:has(#collapseCEU_TEST)`,
   '[data-protodo-injected="true"]',
   '[data-test-id="PROTODO-E2E-TITULOS"]',
-  '.panel:has(#collapseCEU_TEST)',
-  '#collapseCEU_TEST',
-  // Residuo de una prueba manual sobre el acordeon de titulos: un panel de
-  // comite duplicado a mano. Va por pares, igual que `#collapseCEU_TEST`: el
-  // `.panel:has(...)` se lleva el panel entero y el `#...` a secas cubre el
-  // caso en que el cuerpo quedo suelto sin su envoltorio.
-  '.panel:has(#collapseUFV1Duplicado)',
-  '#collapseUFV1Duplicado',
   '.licitacion-entry[data-expediente^="TEST_"]',
   '.licitacion-entry[data-expediente^="EXP-SANDBOX-"]',
   '.licitacion-entry[data-expediente="S_2026_015_TEST"]',
@@ -180,6 +210,9 @@ export interface CleanupResult {
 
   /** Desglose por selector. Solo se rellena en simulacro. */
   readonly matches?: readonly PurgeMatch[];
+
+  /** Titulos de los paneles de universidad repuestos en esta corrida. */
+  readonly restored?: readonly string[];
 }
 
 /** Resultado de la poda en memoria, sin tocar la red. */
@@ -256,6 +289,91 @@ export const describePurgeMatches = (
   return selectors
     .map((selector) => ({ selector, matches: $(selector).length }))
     .filter((match) => match.matches > 0);
+};
+
+/** Un panel de universidad que la pagina debe tener, con su titulo. */
+export interface UniversityPanelRestoration {
+  /** Texto exacto del enlace de cabecera. Es la clave de la idempotencia. */
+  readonly title: string;
+
+  /** El panel de primer nivel completo, listo para colgar de `#accordion`. */
+  readonly html: string;
+}
+
+/**
+ * Paneles de universidad que esta pagina debe tener SIEMPRE.
+ *
+ * Hoy solo ESIC, y es deliberado que no este tambien Francisco de Vitoria: ese
+ * sigue publicado. Meterlo aqui "por simetria" lo duplicaria en cuanto alguien
+ * confundiera la comprobacion por panel con una comprobacion por bloque.
+ *
+ * IDENTIFICADORES PROPIOS, Y NO LOS DE UFV. El bloque del que sale esto
+ * reutilizaba `collapseUFV`, `accordionUFV` y `collapseUFV1` para ESIC, que son
+ * los que ya ocupa el panel de Francisco de Vitoria. Pegarlo asi habria dejado
+ * tres `#accordionUFV` en la pagina y una cabecera de ESIC que despliega el
+ * colapsable de otra universidad.
+ */
+const UNIVERSITY_PANELS_TO_RESTORE: readonly UniversityPanelRestoration[] = [
+  {
+    title: 'ESIC Universidad',
+    html: '<div class="panel panel-default" aria-expanded="false"><div class="panel-heading"><h4 class="panel-title"><a href="#collapseESIC" aria-expanded="true" data-parent="#accordion" data-bs-toggle="collapse">ESIC Universidad</a></h4><div class="collapse" id="collapseESIC"><div class="panel-body accordion-inner"><div class="panel-group" id="accordionESIC"><div class="panel panel-default" aria-expanded="false"><div class="panel-heading"><h5 class="panel-title"><a href="#collapseESIC1" aria-expanded="false" data-parent="#accordionESIC" data-bs-toggle="collapse"><strong>ESIC 1 &nbsp;</strong> Facultad de Ciencias Jurídicas y Sociales</a></h5></div><div class="collapse" id="collapseESIC1"><div class="panel-body"><div class="pane"><table class="tableform"><tbody><tr><th>4317229</th><th colspan="2">Máster Universitario en Dirección de Personas y Desarrollo Organizativo por la ESIC Universidad</th></tr><tr><th>4317233</th><th colspan="2">Máster Universitario en Dirección de Marketing por la ESIC Universidad</th></tr><tr><th>4317235</th><th colspan="2">Máster Universitario en Dirección de Comunicación y Nuevas Tecnologías por la ESIC Universidad</th></tr><tr><th>&nbsp;</th><th style="background-color:#A9BCF5;">Evaluador</th><th style="background-color:#A9BCF5;">Institución</th></tr><tr><th>Presidente: &nbsp; &nbsp; &nbsp;</th><th>Manuel Sánchez Pérez</th><th>UAL</th></tr><tr><th>Secretario:</th><th>María Brígido Mero</th><th>Fmi+d</th></tr><tr><th>Vocal:</th><th>Teresa Fayos Gardó</th><th>UV</th></tr><tr><th>Estudiante:</th><th>Laura Cordero Martínez</th><th>EFV</th></tr><tr><th style="background-color:#C6E0B4;border:1px solid black;" colspan="3">Fecha Visita: &nbsp; &nbsp;28 y 29 de mayo</th></tr></tbody></table></div></div></div></div></div></div></div></div>',
+  },
+];
+
+/** Lo que la restauracion devuelve: el HTML y que paneles ha repuesto. */
+export interface RestorationOutcome {
+  readonly html: string;
+  readonly restored: readonly string[];
+}
+
+/**
+ * Repone los paneles de universidad que falten, y solo esos.
+ *
+ * SE COMPRUEBA UNO A UNO, no el conjunto. La tentacion es preguntar "¿falta
+ * alguno?" y reinyectar el bloque entero; con eso, faltando ESIC se repondria
+ * tambien Francisco de Vitoria, que esta, y la pagina acabaria con dos. La
+ * idempotencia de esta funcion es lo unico que hace seguro llamarla en cada
+ * corrida del script.
+ *
+ * Si no hay `#accordion` no inventa nada: esta funcion repone lo que falta
+ * dentro de una estructura que existe, no construye la estructura.
+ */
+export const restoreMissingUniversityPanels = (
+  html: string,
+  panels: readonly UniversityPanelRestoration[] = UNIVERSITY_PANELS_TO_RESTORE,
+): RestorationOutcome => {
+  const $ = cheerio.load(html, { xml: { xmlMode: false } }, false);
+  const root = $('#accordion').first();
+
+  if (root.length === 0) {
+    return { html, restored: [] };
+  }
+
+  const present = new Set(
+    $('#accordion > .panel')
+      .toArray()
+      .map((element) =>
+        $(element).find('.panel-title > a').first().text().trim(),
+      ),
+  );
+
+  const restored: string[] = [];
+
+  for (const panel of panels) {
+    if (present.has(panel.title)) {
+      continue;
+    }
+
+    root.append(panel.html);
+    restored.push(panel.title);
+  }
+
+  // Sin reposiciones se devuelve el ORIGINAL sin serializar, por el mismo
+  // motivo que `purgeMarkedBlocks`: una pagina intacta no debe recibir la
+  // normalizacion de cheerio por el mero hecho de haberla revisado.
+  return restored.length === 0
+    ? { html, restored: [] }
+    : { html: $.html(), restored };
 };
 
 /** Un UUID v4, en oposicion a un alias de ruta. */
@@ -409,6 +527,17 @@ export class DrupalSandboxCleanupService {
    */
   constructor(private readonly drupalApiConfig: DrupalApiConfig) {}
 
+  /**
+   * Timeout de las llamadas de ESTE script, con el suelo aplicado.
+   *
+   * Se toma el mayor de los dos y no el constante a secas: asi, subir
+   * `DRUPAL_API_TIMEOUT_MS` en el entorno para una instalacion mas lenta sigue
+   * mandando, y bajarlo no puede volver a cortar la lectura de la pagina.
+   */
+  private get requestTimeoutMs(): number {
+    return Math.max(this.drupalApiConfig.timeoutMs, CLEANUP_MIN_TIMEOUT_MS);
+  }
+
   private get headers(): Record<string, string> {
     return {
       Authorization: this.drupalApiConfig.authHeader,
@@ -491,7 +620,7 @@ export class DrupalSandboxCleanupService {
 
     const { data } = await axios.get<DrupalNodeResponse>(url, {
       headers: this.headers,
-      timeout: this.drupalApiConfig.timeoutMs,
+      timeout: this.requestTimeoutMs,
     });
 
     const body = data.data?.attributes?.body;
@@ -505,10 +634,20 @@ export class DrupalSandboxCleanupService {
         ? DEFAULT_PURGE_SELECTORS
         : [options.customSelector, ...DEFAULT_PURGE_SELECTORS];
 
-    const { html, purgedCount } = purgeMarkedBlocks(body.value, selectors);
+    const purge = purgeMarkedBlocks(body.value, selectors);
 
-    if (purgedCount === 0) {
-      return { purgedCount: 0, updated: false, targetUuid: nodeUuid };
+    // La reposicion va DESPUES de podar, y en ese orden por una razon: lo que se
+    // repone no debe pasar por los selectores. Un panel restaurado trae sus
+    // propias clases de plantilla y la purga se lo llevaria en la misma corrida.
+    const restoration = restoreMissingUniversityPanels(purge.html);
+
+    const { purgedCount } = purge;
+    const { restored } = restoration;
+
+    // Se escribe si hubo poda O reposicion. Comprobar solo la poda dejaria una
+    // pagina a la que solo le falta un padre sin arreglar.
+    if (purgedCount === 0 && restored.length === 0) {
+      return { purgedCount: 0, updated: false, targetUuid: nodeUuid, restored };
     }
 
     // El corte va DESPUES de podar y ANTES de escribir: asi el simulacro informa
@@ -520,8 +659,11 @@ export class DrupalSandboxCleanupService {
         updated: false,
         targetUuid: nodeUuid,
         matches: describePurgeMatches(body.value, selectors),
+        restored,
       };
     }
+
+    const html = restoration.html;
 
     await axios.patch(
       url,
@@ -537,10 +679,10 @@ export class DrupalSandboxCleanupService {
           },
         },
       },
-      { headers: this.headers, timeout: this.drupalApiConfig.timeoutMs },
+      { headers: this.headers, timeout: this.requestTimeoutMs },
     );
 
-    return { purgedCount, updated: true, targetUuid: nodeUuid };
+    return { purgedCount, updated: true, targetUuid: nodeUuid, restored };
   }
 }
 
@@ -640,21 +782,33 @@ const main = async (): Promise<void> => {
       dryRun,
     });
 
+    const restored = result.restored ?? [];
+
     if (dryRun) {
       for (const { selector, matches } of result.matches ?? []) {
         logger.log(`  ${selector} -> ${matches} coincidencia(s)`);
       }
 
+      for (const title of restored) {
+        logger.log(`  + se repondria el panel de universidad "${title}"`);
+      }
+
       logger.log(
         `[DRUPAL_CLEANUP_DRY_RUN] Se purgarian ${result.purgedCount} bloque(s) | ` +
+          `Se repondrian ${restored.length} panel(es) | ` +
           `Escrituras: 0 | UUID: ${result.targetUuid}`,
       );
 
       return;
     }
 
+    for (const title of restored) {
+      logger.log(`Panel de universidad repuesto: "${title}".`);
+    }
+
     logger.log(
       `[DRUPAL_CLEANUP_SUCCESS] Purgados: ${result.purgedCount} bloque(s) | ` +
+        `Repuestos: ${restored.length} panel(es) | ` +
         `Actualizado: ${result.updated} | UUID: ${result.targetUuid}`,
     );
   } finally {

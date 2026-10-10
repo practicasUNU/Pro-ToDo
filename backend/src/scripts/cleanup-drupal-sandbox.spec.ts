@@ -9,7 +9,10 @@ import {
   splitCliArgs,
   textContentOf,
 } from './cleanup-drupal-sandbox';
-import { describePurgeMatches } from './cleanup-drupal-sandbox';
+import {
+  describePurgeMatches,
+  restoreMissingUniversityPanels,
+} from './cleanup-drupal-sandbox';
 
 import type { DrupalApiConfig } from '@core/config/drupal-api.config';
 
@@ -458,5 +461,164 @@ describe('9. splitCliArgs · banderas frente a posicionales', () => {
     // 3. Assert 🎯
     expect(positionals).toEqual([]);
     expect(flags.size).toBe(0);
+  });
+});
+
+describe('10. Acotamiento al segundo nivel del acordeon', () => {
+  /**
+   * La pagina agregadora, en miniatura: acordeon raiz -> panel de universidad
+   * -> sub-acordeon -> panel de comite. Los DOS niveles de panel llevan la
+   * misma clase `.panel`, que es de donde salio el incidente.
+   */
+  const TWO_LEVEL_PAGE =
+    '<div class="panel-group" id="accordion">' +
+    '<div class="panel panel-default">' +
+    '<div class="panel-heading"><h4 class="panel-title">' +
+    '<a href="#collapseESIC" data-parent="#accordion">ESIC Universidad</a></h4></div>' +
+    '<div class="collapse" id="collapseESIC"><div class="panel-body">' +
+    '<div class="panel-group" id="accordionESIC">' +
+    '<div class="panel panel-default"><div class="panel-heading"><h5 class="panel-title">' +
+    '<a class="panel-toggle-link" href="#collapseESIC1" data-parent="#accordionESIC">' +
+    '<strong class="panel-comite-codigo">ESIC 1</strong></a></h5></div>' +
+    '<div class="collapse" id="collapseESIC1"><p>Inyectado</p></div></div>' +
+    '<div class="panel panel-default"><div class="panel-heading"><h5 class="panel-title">' +
+    '<a href="#collapseESIC9"><strong>ESIC 9</strong></a></h5></div>' +
+    '<div class="collapse" id="collapseESIC9"><p>Nativo</p></div></div>' +
+    '</div></div></div></div></div>';
+
+  const SCOPED = '.panel-group .panel-group > .panel';
+
+  it('10.1 NUNCA deberia casar con un panel de universidad', () => {
+    // 1. Arrange 📐: LA REGRESION DE ESTE INCIDENTE. El selector anterior era
+    //    `.panel:has(#collapseESIC1)`, que casa tambien con el panel de la
+    //    universidad —lleva la misma clase— y `.remove()` se llevo el
+    //    contenedor entero. ESIC desaparecio de la pagina por esto.
+    const html = TWO_LEVEL_PAGE;
+
+    // 2. Act ⚙️
+    const result = purgeMarkedBlocks(html, [
+      `${SCOPED}:has(a.panel-toggle-link)`,
+      `${SCOPED}:has(.panel-comite-codigo)`,
+    ]);
+
+    // 3. Assert 🎯: la universidad sigue en pie y su sub-acordeon tambien.
+    expect(result.html).toContain('ESIC Universidad');
+    expect(result.html).toContain('id="accordionESIC"');
+    expect(result.html).toContain('id="collapseESIC"');
+  });
+
+  it('10.2 deberia quitar el comite INYECTADO y dejar el nativo', () => {
+    // 1. Arrange 📐: la asimetria de la que depende todo. `panel-toggle-link` y
+    //    `panel-comite-codigo` son clases de NUESTRA plantilla; los paneles que
+    //    ya estaban en el portal no las llevan.
+    // 2. Act ⚙️
+    const result = purgeMarkedBlocks(TWO_LEVEL_PAGE, [
+      `${SCOPED}:has(a.panel-toggle-link)`,
+    ]);
+
+    // 3. Assert 🎯
+    expect(result.purgedCount).toBe(1);
+    expect(result.html).not.toContain('Inyectado');
+    expect(result.html).toContain('Nativo');
+    expect(result.html).toContain('ESIC 9');
+  });
+
+  it('10.3 el selector sin acotar SI se llevaria la universidad', () => {
+    // 1. Arrange 📐: se deja escrito el comportamiento del selector retirado,
+    //    para que nadie lo reintroduzca creyendo que era equivalente.
+    // 2. Act ⚙️
+    const sinAcotar = purgeMarkedBlocks(TWO_LEVEL_PAGE, [
+      '.panel:has(.panel-comite-codigo)',
+    ]);
+
+    // 3. Assert 🎯
+    expect(sinAcotar.html).not.toContain('ESIC Universidad');
+  });
+});
+
+describe('11. restoreMissingUniversityPanels', () => {
+  const PANEL = {
+    title: 'ESIC Universidad',
+    html:
+      '<div class="panel panel-default"><div class="panel-heading">' +
+      '<h4 class="panel-title"><a href="#collapseESIC">ESIC Universidad</a>' +
+      '</h4></div></div>',
+  };
+
+  const OTHER =
+    '<div class="panel panel-default"><div class="panel-heading">' +
+    '<h4 class="panel-title"><a href="#collapseUFV">Universidad Francisco de Vitoria</a>' +
+    '</h4></div></div>';
+
+  it('11.1 deberia reponer el panel que falta', () => {
+    // 1. Arrange 📐 + 2. Act ⚙️
+    const result = restoreMissingUniversityPanels(
+      `<div id="accordion">${OTHER}</div>`,
+      [PANEL],
+    );
+
+    // 3. Assert 🎯
+    expect(result.restored).toEqual(['ESIC Universidad']);
+    expect(result.html).toContain('ESIC Universidad');
+    expect(result.html).toContain('Universidad Francisco de Vitoria');
+  });
+
+  it('11.2 deberia ser IDEMPOTENTE', () => {
+    // 1. Arrange 📐: es lo unico que hace seguro llamarla en cada corrida.
+    const once = restoreMissingUniversityPanels('<div id="accordion"></div>', [
+      PANEL,
+    ]);
+
+    // 2. Act ⚙️
+    const twice = restoreMissingUniversityPanels(once.html, [PANEL]);
+
+    // 3. Assert 🎯
+    expect(twice.restored).toEqual([]);
+    expect(twice.html).toBe(once.html);
+    expect(twice.html.match(/ESIC Universidad/g)).toHaveLength(1);
+  });
+
+  it('11.3 NO deberia reponer un panel que ya esta, aunque falte otro', () => {
+    // 1. Arrange 📐: el fallo de preguntar "¿falta alguno?" sobre el conjunto.
+    //    Con un `||`, faltando ESIC se reinyectaria tambien UFV, que esta, y la
+    //    pagina acabaria con dos Francisco de Vitoria.
+    const ufvPanel = { title: 'Universidad Francisco de Vitoria', html: OTHER };
+
+    // 2. Act ⚙️
+    const result = restoreMissingUniversityPanels(
+      `<div id="accordion">${OTHER}</div>`,
+      [ufvPanel, PANEL],
+    );
+
+    // 3. Assert 🎯
+    expect(result.restored).toEqual(['ESIC Universidad']);
+    expect(result.html.match(/Universidad Francisco de Vitoria/g)).toHaveLength(
+      1,
+    );
+  });
+
+  it('11.4 no deberia inventar la estructura si no hay #accordion', () => {
+    // 1. Arrange 📐: repone lo que falta DENTRO de algo que existe; construir
+    //    el acordeon seria inventarse la pagina.
+    const html = '<p>Una pagina cualquiera</p>';
+
+    // 2. Act ⚙️
+    const result = restoreMissingUniversityPanels(html, [PANEL]);
+
+    // 3. Assert 🎯
+    expect(result.restored).toEqual([]);
+    expect(result.html).toBe(html);
+  });
+
+  it('11.5 el catalogo por defecto deberia reponer SOLO ESIC', () => {
+    // 1. Arrange 📐: Francisco de Vitoria sigue publicada. Incluirla "por
+    //    simetria" la duplicaria.
+    // 2. Act ⚙️
+    const result = restoreMissingUniversityPanels('<div id="accordion"></div>');
+
+    // 3. Assert 🎯
+    expect(result.restored).toEqual(['ESIC Universidad']);
+    expect(result.html).toContain('id="accordionESIC"');
+    expect(result.html).not.toContain('accordionUFV');
   });
 });

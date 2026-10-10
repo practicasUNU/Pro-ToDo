@@ -58,23 +58,33 @@ describe('Catalogo de universidades de Drupal', () => {
       }
     });
 
-    it('1.4 deberia mandar a ESIC al contenedor heredado #accordionUFV', () => {
-      // 1. Arrange 📐: ESTE TEST PARECE UN ERROR Y NO LO ES. El sub-acordeon de
-      //    ESIC en la pagina agregadora arrastra el identificador `accordionUFV`
-      //    de una version anterior del portal; ESIC y UFV son el MISMO
-      //    contenedor y no hay ninguna universidad Francisco de Vitoria en el
-      //    agregador. Esta aqui para que quien vea la discrepancia en el
-      //    catalogo y la "arregle" se encuentre antes con este rojo que con un
-      //    ERR_DRUPAL_DOM_TARGET en produccion, que es como se descubrio.
+    it('1.4 deberia mandar a ESIC a su PROPIO acordeon, nunca al de UFV', () => {
+      // 1. Arrange 📐: hubo una correccion que apunto ESIC a `#accordionUFV`
+      //    creyendo que era un identificador heredado del propio panel de ESIC
+      //    y que no existia ninguna Francisco de Vitoria en el agregador.
+      //    Existe —oculta con `d-none`, con su comite UFV D1— y es otra
+      //    universidad. El resultado fue que los comites de ESIC se publicaron
+      //    dentro de su acordeon. Este test fija que no vuelva a pasar.
       const esic = DRUPAL_UNIVERSITIES_CATALOG.find(
         (university) => university.name === 'ESIC Universidad',
       );
 
       // 2. Act ⚙️ + 3. Assert 🎯
-      expect(esic?.accordionId).toBe('#accordionUFV');
+      expect(esic?.accordionId).toBe('#accordionESIC');
       expect(resolveUniversityAccordion('ESIC 1 · Facultad')).toBe(
-        '#accordionUFV',
+        '#accordionESIC',
       );
+    });
+
+    it('1.5 NINGUNA universidad deberia apuntar al acordeon de UFV', () => {
+      // 1. Arrange 📐: Francisco de Vitoria no esta en este catalogo —no figura
+      //    entre las catorce que lista el portal en la tabla del prompt—, de
+      //    modo que cualquier `#accordionUFV` aqui solo puede ser un destino
+      //    prestado, que es justo el error que se corrigio.
+      // 2. Act ⚙️ + 3. Assert 🎯
+      expect(
+        DRUPAL_UNIVERSITIES_CATALOG.map((u) => u.accordionId),
+      ).not.toContain('#accordionUFV');
     });
   });
 
@@ -103,18 +113,17 @@ describe('Catalogo de universidades de Drupal', () => {
       expect([...fromPrompt].sort()).toEqual([...fromCatalog].sort());
     });
 
-    it('1bis.2 el prompt deberia mandar a ESIC al contenedor heredado', () => {
-      // 1. Arrange 📐: la linea concreta que causo el ERR_DRUPAL_DOM_TARGET.
-      //    Se afirma aparte del conjunto de arriba porque aquel solo compara
-      //    DOS CONJUNTOS: si alguien cambiase las dos fuentes a la vez de vuelta
-      //    a `#accordionESIC`, seguirian coincidiendo entre si y el flujo
-      //    volveria a romperse contra la pagina real.
+    it('1bis.2 el prompt deberia mandar a ESIC a su propio acordeon', () => {
+      // 1. Arrange 📐: se afirma aparte del conjunto de arriba porque aquel
+      //    solo compara DOS CONJUNTOS: si alguien cambiase las dos fuentes a la
+      //    vez, seguirian coincidiendo entre si y el flujo volveria a romperse
+      //    contra la pagina real, que es lo que ya paso una vez.
       // 2. Act ⚙️
       const accordions = accordionsInSeededPrompt();
 
       // 3. Assert 🎯
-      expect(accordions).toContain('#accordionUFV');
-      expect(accordions).not.toContain('#accordionESIC');
+      expect(accordions).toContain('#accordionESIC');
+      expect(accordions).not.toContain('#accordionUFV');
     });
   });
 
@@ -216,10 +225,9 @@ describe('Catalogo de universidades de Drupal', () => {
         facultad: 'ESIC Universidad · Facultad de Ciencias Juridicas',
       });
 
-      // 2. Act ⚙️ + 3. Assert 🎯: UFV, no ESIC. Ver el comentario de la entrada
-      //    de ESIC en el catalogo.
+      // 2. Act ⚙️ + 3. Assert 🎯
       expect(planPanelDispatch(markup)[0]?.targetSelector).toBe(
-        '#accordionUFV',
+        '#accordionESIC',
       );
     });
 
