@@ -115,6 +115,26 @@ export interface NodeExecutionDetails {
 }
 
 /**
+ * Acuse de la traza de un nodo: donde quedo, en disco y en la tabla.
+ *
+ * Se devuelve un OBJETO y no la ruta pelada porque los dos destinos del modelo
+ * hibrido tienen identificadores distintos y el llamante necesita los dos:
+ * `logFilePath` es lo que el motor persiste en `ejecuciones_flujo` para que la
+ * interfaz pueda senalar el archivo forense de una ejecucion pausada, y
+ * `logNodeId` es el unico eslabon hacia `alertas_error`, que enlaza por
+ * `id_log_nodo` y no guarda ruta propia.
+ *
+ * Los dos campos son independientes: cada destino tiene su propio `try/catch`,
+ * asi que una traza puede quedar en disco y no en la tabla, o al reves.
+ */
+export interface NodeTraceReceipt {
+  /** Ruta del `execution-*.log`, o `null` si no se pudo escribir. */
+  readonly logFilePath: string | null;
+  /** Clave de la fila de `logs_nodo`, o `null` si no se pudo persistir. */
+  readonly logNodeId: string | null;
+}
+
+/**
  * Averia de un proceso que corre FUERA de una ejecucion FSM.
  *
  * El caso que la motiva es el worker de sondeo IMAP: si la conexion no responde,
@@ -282,8 +302,18 @@ export class HybridLoggerService {
    * El disco va PRIMERO por la misma razon que en el volcado catastrofico: este
    * metodo cubre tambien el caso de que PostgreSQL sea justo lo que esta
    * fallando, y entonces el archivo es el unico rastro que va a quedar.
+   *
+   * Devolver el acuse no compromete el contrato de no lanzar: las tres
+   * sentencias del cuerpo ya estan protegidas por su propio manejador, y el
+   * `return` no introduce ninguna ruta de excepcion nueva.
+   *
+   * @returns Donde quedo la traza. Ambos campos pueden ser `null` de forma
+   *          independiente: "hubo ejecucion, no hay archivo" es informacion
+   *          honesta, igual que en `logCatastrophicFailure`.
    */
-  public async logNodeExecution(details: NodeExecutionDetails): Promise<void> {
+  public async logNodeExecution(
+    details: NodeExecutionDetails,
+  ): Promise<NodeTraceReceipt> {
     const logFilePath = this.writeNodeTrace(details);
 
     // Declarado FUERA del `try` para seguir siendo visible despues del `catch`:
@@ -316,6 +346,8 @@ export class HybridLoggerService {
     }
 
     await this.raiseOperationalAlert(details, savedLog);
+
+    return { logFilePath, logNodeId: savedLog?.id ?? null };
   }
 
   /**

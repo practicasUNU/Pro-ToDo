@@ -4267,3 +4267,139 @@ ejecucion que con saturacion jamas llega a arrancar. Se fijo como prueba, no com
 - [x] 34 pruebas nuevas (18 de `FsmConfig`, 5 del motor, 7 del sondeo, 4 del planificador)
 - [ ] Pendiente — BullMQ como solucion de fondo: ambos disparadores siguen ejecutando el pipeline en
       el mismo proceso, de modo que estos techos protegen pero no desacoplan
+
+---
+
+## PROT-31 · CU-09: reanudacion manual de ejecuciones y `logFilePath` persistente
+
+### Problema
+
+Dos huecos encadenados que dejaban sin salida a la cuarentena que introdujo PROT-30.
+
+**1. CU-09 no existia.** El caso de uso estaba documentado en una veintena de TSDoc del motor
+—`fsm-engine.service.ts` habla de «reanudable con CU-09» en dos sitios— y la infraestructura de
+datos estaba completa: `ExecutionState.PAUSADO`, el cursor preservado y el contexto acumulado. Pero
+no habia ni controlador, ni servicio, ni DTO, asi que una ejecucion pausada se quedaba ahi para
+siempre. Con la barrera de saturacion en su sitio, eso dejo de ser un inconveniente y paso a ser un
+bloqueo: un flujo pausado no admite ejecuciones nuevas y nadie podia desatascarlo.
+
+**2. La ruta del `.log` se perdia.** `writeNodeTrace` devuelve la ruta del `execution-*.log` y
+`logNodeExecution` la escribia en `logs_nodo.ruta_archivo_log`… y la descartaba: su firma era
+`Promise<void>`. Solo el fallo catastrofico poblaba `ejecuciones_flujo.ruta_archivo_log`, de modo
+que una fila PAUSADO no tenia puntero a su archivo forense y la interfaz no tenia nada que ensenar
+sobre el nodo que la detuvo.
+
+### Contratos nuevos
+
+```typescript
+// @modules/logs — el acuse de la traza
+export interface NodeTraceReceipt {
+  readonly logFilePath: string | null;  // `execution-*.log`
+  readonly logNodeId: string | null;    // `logs_nodo.id`
+}
+public async logNodeExecution(details: NodeExecutionDetails): Promise<NodeTraceReceipt>;
+
+// @core/fsm — lectura separada de la escritura
+export class FsmExecutionQueryService {
+  findPage(filter: ExecutionFilter): Promise<ExecutionPage>;   // sin `contextPayload`
+  findById(executionId: string): Promise<FsmExecution | null>; // con `contextPayload`
+  findLiveByFlow(flowId: string): Promise<FsmExecution[]>;     // EN_PROCESO + PAUSADO
+}
+
+// @core/fsm — primera mitad de CU-09
+public async prepareResume(
+  executionId: string,
+  contextPatch?: Record<string, Record<string, unknown>>,
+  resetRetries = true,
+): Promise<FsmExecution>;
+
+// Deja de ser privada: la reanudacion entra por `executeWorkflow`, no por `createExecution`
+public async assertGlobalCapacityAvailable(): Promise<void>;
+
+// `pauseAt` gana la causa del paron
+private async pauseAt(
+  execution, cursor, context, retryState,
+  cause?: { severity?: NodeErrorSeverity; errorMessage?: string; logFilePath?: string | null },
+): Promise<void>;
+```
+
+Endpoints: `GET /api/executions` (filtrado y paginado), `GET /api/executions/:id`,
+`POST /api/executions/:id/resume`. Los tres bajo `JwtAuthGuard` + `RolesGuard` con
+`@Roles(ADMIN, EDITOR)` a nivel de CLASE.
+
+### Diagrama de inyeccion de dependencias
+
+```
+FsmModule
+  ├── FsmExecutionQueryService ──exporta──┐
+  └── FsmEngineService ──────────exporta──┤
+                                          │
+WorkflowsModule (ya importaba FsmModule)  │
+  ├── ExecutionsController ──→ ExecutionsService
+  └── ExecutionsService ─────────────────-┤
+        ├── FsmExecutionQueryService ◄────┘
+        ├── Repository<Workflow>      (forFeature ya declarado)
+        ├── PipelineValidatorService
+        └── FsmEngineService
+```
+
+Se exporta el servicio de CONSULTA y no el repositorio: `@modules` puede leer `ejecuciones_flujo`
+sin ganar permiso para escribirla, que sigue siendo competencia exclusiva del motor.
+
+### Por que la reanudacion vive en `WorkflowsModule` y no en `FsmModule`
+
+Reanudar necesita la fila de `flujos` —su esquema para revalidarlo y su nombre para el contexto— y
+`@core` no puede importar de `@modules`. `WorkflowsModule` ya importaba `FsmModule` y ya declaraba
+`forFeature([Workflow])`, asi que no hubo nada que cablear; un modulo aparte habria tenido que
+duplicar el `forFeature` o importar este para nada.
+
+### Por que reanudar respeta el techo global pero no el flag `activo`
+
+Son dos asimetrias deliberadas y opuestas.
+
+El **techo global** si aplica: `executeWorkflow` no pasa por `createExecution`, donde vive la
+guarda, de modo que sin una llamada explicita cada reintento manual sumaria una ejecucion por
+encima del limite y la barrera de PROT-30 dejaria de significar lo que dice.
+
+El **`workflow.active`** no se exige: esa columna gobierna los DISPARADORES automaticos, mientras
+que CU-09 es una accion manual sobre una ejecucion que ya existe. Es el mismo criterio del banco de
+pruebas, y lo refrenda la decision de `updateWorkflow` de no abortar las PAUSADO al desactivar un
+flujo. Exigirlo dejaria sin salida a las pausadas de todo flujo apagado.
+
+### Por que no se comprueban los modelos de pago al reanudar
+
+`assertModelPermissions` vive en el alta y la edicion del flujo, que es donde se ELIGE el modelo.
+`runAutomaticWorkflow` tampoco lo repite en cada despacho, asi que aplicarlo solo aqui seria
+incoherente y dejaria a un EDITOR sin poder desatascar un flujo que configuro un ADMIN.
+
+### Por que la guarda del cursor huerfano es la que mas importa
+
+Si alguien edita el flujo mientras la ejecucion esta pausada, el cursor puede apuntar a un nodo que
+ya no existe. Sin la comprobacion `schema.nodes[activeCursor] === undefined`, `executeWorkflow` cae
+en su propia guarda de cursor inexistente, vuelve a pausar en el mismo sitio y devuelve **un 200 que
+no ha hecho nada**: el operador pulsaria «Reanudar» diez veces sin entender por que no avanza.
+
+### Por que `logFilePath` sobrevive a la reanudacion y `motivo_fallo` no
+
+El motivo describe un cierre que ya no es el estado de la fila; dejarlo mostraria un fallo junto a
+una ejecucion que esta corriendo otra vez. La ruta, en cambio, es el rastro de POR QUE hubo que
+reanudar: borrarla dejaria al operador sin nada que mirar si el reintento se rompe por lo mismo. La
+sustituira el proximo fallo.
+
+### Estado de las tareas
+
+- [x] `NodeTraceReceipt` y `logNodeExecution` devolviendo el acuse, sin romper el contrato de no lanzar
+- [x] `logNodeOutcome`, `lastTrace` por vuelta del bucle y `pauseAt` con causa
+- [x] La traza del nodo culpable viaja dentro de `contingency` hasta `closeTerminalState`
+- [x] TSDoc de `ruta_archivo_log` reescrito: son dos archivos distintos segun el desenlace
+- [x] `FsmExecutionQueryService`, exportado desde `FsmModule`, con `select` sin `contextPayload`
+- [x] `prepareResume` con fusion inmutable por namespace y limpieza del contador del cursor
+- [x] `assertGlobalCapacityAvailable` publica y aplicada en la reanudacion
+- [x] Primer query-DTO del proyecto (`ListExecutionsQueryDto`), con `@Type(() => Number)`
+- [x] `requirePipelineSchema` extraido a `validators/`, compartido por los tres caminos al motor
+- [x] `ExecutionsService` + `ExecutionsController` con las siete guardas en orden
+- [x] 40 pruebas unitarias nuevas (8 de consulta, 22 de reanudacion, 10 del motor)
+- [x] **Crear y validar suite de integracion `backend/test/executions-resume.e2e-spec.ts`** — 9 casos
+      contra PostgreSQL real, con los disparadores neutralizados y base de datos dedicada
+- [ ] Pendiente — la interfaz Quasar no tiene todavia vista de trazabilidad ni boton de reanudar:
+      los tres endpoints existen y no los consume nadie

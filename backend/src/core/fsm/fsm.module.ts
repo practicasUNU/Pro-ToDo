@@ -7,6 +7,7 @@ import { AiPromptTemplatesModule } from '@modules/ai-prompt-templates/ai-prompt-
 import { LogsModule } from '@modules/logs/logs.module';
 import { NodeStrategyFactory } from '@core/fsm/factories/node-strategy.factory';
 import { FsmEngineService } from '@core/fsm/services/fsm-engine.service';
+import { FsmExecutionQueryService } from '@core/fsm/services/fsm-execution-query.service';
 import { PipelineValidatorService } from '@core/fsm/services/pipeline-validator.service';
 import { ExecutionState } from '@core/fsm/types/fsm.enums';
 
@@ -31,8 +32,21 @@ import type { Repository } from 'typeorm';
     AiPromptTemplatesModule,
   ],
   controllers: [FsmController],
-  providers: [PipelineValidatorService, NodeStrategyFactory, FsmEngineService],
-  exports: [PipelineValidatorService, NodeStrategyFactory, FsmEngineService],
+  providers: [
+    PipelineValidatorService,
+    NodeStrategyFactory,
+    FsmEngineService,
+    FsmExecutionQueryService,
+  ],
+  // Se exporta el servicio de CONSULTA y no el repositorio: asi `@modules`
+  // puede leer `ejecuciones_flujo` sin ganar permiso para escribirla, que
+  // sigue siendo competencia exclusiva del motor.
+  exports: [
+    PipelineValidatorService,
+    NodeStrategyFactory,
+    FsmEngineService,
+    FsmExecutionQueryService,
+  ],
 })
 export class FsmModule implements OnModuleInit {
   private readonly logger = new Logger(FsmModule.name);

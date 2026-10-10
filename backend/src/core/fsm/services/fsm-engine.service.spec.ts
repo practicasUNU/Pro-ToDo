@@ -202,6 +202,22 @@ const lastPatch = (
 /** Ruta que el doble del volcado forense devuelve, para aseverar sobre ella. */
 const LOG_PATH = 'logs/fsm-2026-09-09.log';
 
+/**
+ * Ruta de la traza POR NODO, distinta del volcado forense de arriba.
+ *
+ * Son dos archivos con dos prefijos: `fsm-*` lo escribe el fallo catastrofico y
+ * `execution-*` la traza de cada invocacion de estrategia. La pausa persiste
+ * esta segunda, asi que confundirlas en las aserciones dejaria pasar que el
+ * motor guardase el archivo equivocado.
+ */
+const NODE_LOG_PATH = 'logs/execution-2026-09-09.log';
+
+/** Acuse que devuelve el logger hibrido cuando ambos destinos funcionan. */
+const NODE_TRACE = {
+  logFilePath: NODE_LOG_PATH,
+  logNodeId: 'b1d4c6e8-0a2f-4c3b-9d5e-6f7a8b9c0d1e',
+};
+
 describe('FsmEngineService (PROT-09)', () => {
   let factory: NodeStrategyFactory;
 
@@ -222,7 +238,10 @@ describe('FsmEngineService (PROT-09)', () => {
   beforeEach(() => {
     hybridLogger = {
       logCatastrophicFailure: jest.fn().mockReturnValue(LOG_PATH),
-      logNodeExecution: jest.fn().mockResolvedValue(undefined),
+      // Devuelve el ACUSE, no `undefined`: desde que la traza alimenta
+      // `ejecuciones_flujo.ruta_archivo_log`, un doble que resolviera a nada
+      // mentiria sobre el contrato y el motor no tendria ruta que persistir.
+      logNodeExecution: jest.fn().mockResolvedValue(NODE_TRACE),
     };
     factory = new NodeStrategyFactory();
     jest.spyOn(factory['logger'], 'log').mockImplementation(() => undefined);
@@ -975,6 +994,69 @@ describe('FsmEngineService (PROT-09)', () => {
       expect(result.activeCursor).toBe('nodo_b');
       // El trabajo del nodo previo se conserva: reanudar no lo repite
       expect(result.contextPayload.salida_a).toEqual({ valorA: 1 });
+    });
+
+    it('deberia persistir la ruta del log del nodo que la detuvo', async () => {
+      // 1. Arrange: sin esto, una fila PAUSADO no tiene nada que ensenar sobre
+      // el fallo. La ruta sale del acuse de la traza, no del volcado forense:
+      // son dos archivos distintos y aqui no hubo fallo catastrofico.
+      const execution = buildExecution();
+      const { repo } = buildRepository(execution);
+
+      factory.registerStrategy(
+        buildStrategy(
+          NodeType.TRIGGER_IMAP,
+          jest.fn().mockResolvedValue({ success: true, data: {} }),
+        ),
+      );
+      factory.registerStrategy(
+        buildStrategy(
+          NodeType.PROCESADOR_IA,
+          jest.fn().mockResolvedValue(failure('URGENTE')),
+        ),
+      );
+
+      // 2. Act
+      const result = await buildEngine(repo).executeWorkflow(
+        EXECUTION_ID,
+        buildLinearSchema(),
+      );
+
+      // 3. Assert
+      expect(result.currentState).toBe(ExecutionState.PAUSADO);
+      expect(result.logFilePath).toBe(NODE_LOG_PATH);
+      // Y NO el del volcado forense: confundirlos mandaria al operador a un
+      // archivo que no contiene esta incidencia.
+      expect(result.logFilePath).not.toBe(LOG_PATH);
+    });
+
+    it('NO deberia escribir ruta de log en una pausa anterior a ejecutar el nodo', async () => {
+      // 1. Arrange: el cursor apunta a un nodo que no existe en el mapa, de
+      // modo que el bucle pausa ANTES de invocar ninguna estrategia. No hay
+      // traza de este paso, y escribir la del paso anterior seria una pista
+      // falsa: ese archivo no explica por que se paro aqui.
+      const execution = buildExecution({
+        activeCursor: 'nodo_fantasma',
+        logFilePath: null,
+      });
+      const { repo, update } = buildRepository(execution);
+
+      // 2. Act
+      const result = await buildEngine(repo).executeWorkflow(
+        EXECUTION_ID,
+        buildLinearSchema(),
+      );
+
+      // 3. Assert
+      expect(result.currentState).toBe(ExecutionState.PAUSADO);
+      expect(result.activeCursor).toBe('nodo_fantasma');
+      // La clave ni siquiera viaja en el patch: `update` de TypeORM solo
+      // escribe lo que recibe, asi que omitirla conserva lo que hubiera.
+      const updateCalls = update.mock.calls as Array<
+        [string, Record<string, unknown>]
+      >;
+      const pausePatch = updateCalls[updateCalls.length - 1]?.[1];
+      expect(pausePatch).not.toHaveProperty('logFilePath');
     });
 
     it('deberia cerrar sin reintentar ni pausar cuando la severidad es LEVE', async () => {
@@ -1980,6 +2062,147 @@ describe('FsmEngineService (PROT-09)', () => {
         buildEngine(repo).createExecution(FLOW_ID),
       ).rejects.toBeInstanceOf(SystemCapacityExceededException);
       expect(save).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('13. prepareResume: preparacion del reintento manual (CU-09)', () => {
+    /** Fila pausada tipica: cursor conservado, contexto a medias y contador al tope. */
+    const buildPausedExecution = (): FsmExecution =>
+      buildExecution({
+        currentState: ExecutionState.PAUSADO,
+        activeCursor: 'nodo_b',
+        contextPayload: {
+          salida_a: { valorA: 1, titulo: 'Original' },
+          otro_namespace: { intacto: true },
+        },
+        retryState: { nodo_a: 2, nodo_b: 5 },
+        logFilePath: NODE_LOG_PATH,
+        failureReason: 'El nodo "nodo_b" fallo (GRAVE).',
+      });
+
+    it('deberia limpiar el contador del cursor y conservar el de los demas nodos', async () => {
+      // 1. Arrange: sin esto, reanudar concederia UN intento en vez de la
+      // politica declarada, y desde la interfaz "volvio a pausarse al
+      // instante" es indistinguible de "el boton no hace nada".
+      const execution = buildPausedExecution();
+      const { repo } = buildRepository(execution);
+
+      // 2. Act
+      const prepared = await buildEngine(repo).prepareResume(EXECUTION_ID);
+
+      // 3. Assert: el contador de `nodo_a` describe lo que costo llegar hasta
+      // aqui y no se toca; borrarlo falsearia la traza.
+      expect(prepared.retryState).toEqual({ nodo_a: 2 });
+    });
+
+    it('deberia conservar el contador cuando resetRetries es false', async () => {
+      // 1. Arrange
+      const execution = buildPausedExecution();
+      const { repo } = buildRepository(execution);
+
+      // 2. Act
+      const prepared = await buildEngine(repo).prepareResume(
+        EXECUTION_ID,
+        undefined,
+        false,
+      );
+
+      // 3. Assert
+      expect(prepared.retryState).toEqual({ nodo_a: 2, nodo_b: 5 });
+    });
+
+    it('deberia preservar los namespaces ya publicados', async () => {
+      // 1. Arrange: reanudar no puede repetir el trabajo de los nodos que si
+      // completaron; ese es el motivo de conservar el checkpoint.
+      const execution = buildPausedExecution();
+      const { repo } = buildRepository(execution);
+
+      // 2. Act
+      const prepared = await buildEngine(repo).prepareResume(EXECUTION_ID);
+
+      // 3. Assert
+      expect(prepared.contextPayload).toEqual({
+        salida_a: { valorA: 1, titulo: 'Original' },
+        otro_namespace: { intacto: true },
+      });
+    });
+
+    it('deberia fusionar el contextPatch sin borrar los campos previos del namespace', async () => {
+      // 1. Arrange: el caso tipico de CU-09 es "faltaba un campo". Reemplazar
+      // el namespace entero borraria los otros que el nodo si publico, y el
+      // reintento fallaria por un dato que estaba.
+      const execution = buildPausedExecution();
+      const { repo } = buildRepository(execution);
+
+      // 2. Act
+      const prepared = await buildEngine(repo).prepareResume(EXECUTION_ID, {
+        salida_a: { titulo: 'Corregido a mano' },
+      });
+
+      // 3. Assert: `valorA` sobrevive junto al campo parcheado
+      expect(prepared.contextPayload.salida_a).toEqual({
+        valorA: 1,
+        titulo: 'Corregido a mano',
+      });
+      expect(prepared.contextPayload.otro_namespace).toEqual({ intacto: true });
+    });
+
+    it('deberia admitir un namespace nuevo en el parche', async () => {
+      // 1. Arrange
+      const execution = buildPausedExecution();
+      const { repo } = buildRepository(execution);
+
+      // 2. Act
+      const prepared = await buildEngine(repo).prepareResume(EXECUTION_ID, {
+        namespace_nuevo: { aportado: 'a mano' },
+      });
+
+      // 3. Assert
+      expect(prepared.contextPayload.namespace_nuevo).toEqual({
+        aportado: 'a mano',
+      });
+    });
+
+    it('deberia limpiar el motivo de fallo y CONSERVAR la ruta del log', async () => {
+      // 1. Arrange
+      const execution = buildPausedExecution();
+      const { repo } = buildRepository(execution);
+
+      // 2. Act
+      const prepared = await buildEngine(repo).prepareResume(EXECUTION_ID);
+
+      // 3. Assert: el motivo describe un cierre que ya no es el estado de esta
+      // fila. La ruta, en cambio, es el rastro de por que hubo que reanudar:
+      // borrarla dejaria sin nada que mirar si el reintento se rompe igual.
+      expect(prepared.failureReason).toBeNull();
+      expect(prepared.logFilePath).toBe(NODE_LOG_PATH);
+    });
+
+    it('NO deberia cambiar el estado ni el cursor', async () => {
+      // 1. Arrange: el paso a EN_PROCESO lo da `executeWorkflow`, porque esa
+      // transicion es la que reserva el mutex `idx_flujo_activo`. Adelantarla
+      // dejaria el turno cogido sin ningun bucle atendiendolo.
+      const execution = buildPausedExecution();
+      const { repo } = buildRepository(execution);
+
+      // 2. Act
+      const prepared = await buildEngine(repo).prepareResume(EXECUTION_ID);
+
+      // 3. Assert
+      expect(prepared.currentState).toBe(ExecutionState.PAUSADO);
+      expect(prepared.activeCursor).toBe('nodo_b');
+    });
+
+    it('deberia lanzar NotFoundException si la ejecucion no existe', async () => {
+      // 1. Arrange
+      const { repo, findOne, update } = buildRepository(buildExecution());
+      findOne.mockResolvedValue(null);
+
+      // 2. Act + 3. Assert
+      await expect(
+        buildEngine(repo).prepareResume(EXECUTION_ID),
+      ).rejects.toBeInstanceOf(NotFoundException);
+      expect(update).not.toHaveBeenCalled();
     });
   });
 

@@ -115,6 +115,14 @@ const buildService = (
 describe('HybridLoggerService · volcado forense del motor FSM', () => {
   beforeEach(() => {
     jest.clearAllMocks();
+
+    // `clearAllMocks` borra las LLAMADAS pero conserva las implementaciones, y
+    // varias pruebas hacen que estos dobles lancen para simular un disco lleno.
+    // Sin restaurarlos aqui, ese `throw` se filtra a todas las pruebas
+    // posteriores del fichero: durante un tiempo paso inadvertido porque nadie
+    // aseveraba el retorno, y la traza "perdida" no cambiaba ninguna asercion.
+    infoSpy.mockImplementation(() => undefined);
+    errorSpy.mockImplementation(() => undefined);
   });
 
   describe('1. Configuracion del transporte', () => {
@@ -328,9 +336,14 @@ describe('HybridLoggerService · volcado forense del motor FSM', () => {
 
       // 2. Act & 3. Assert: no lanza, y el archivo conserva la traza. Un flujo
       //    no puede caerse porque no se pudo anotar que funciono.
-      await expect(
-        service.logNodeExecution(NODE_DETAILS),
-      ).resolves.toBeUndefined();
+      //
+      //    El acuse lo refleja con precision: hay ruta —el disco respondio— y
+      //    no hay `logNodeId` —la fila no llego a existir—. Los dos campos son
+      //    independientes justamente para poder describir esta media traza.
+      const receipt = await service.logNodeExecution(NODE_DETAILS);
+
+      expect(receipt.logFilePath).toContain('execution-');
+      expect(receipt.logNodeId).toBeNull();
       expect(infoSpy).toHaveBeenCalledTimes(1);
     });
 
@@ -343,10 +356,12 @@ describe('HybridLoggerService · volcado forense del motor FSM', () => {
         throw new Error('ENOSPC');
       });
 
-      // 2. Act & 3. Assert
-      await expect(
-        service.logNodeExecution(NODE_DETAILS),
-      ).resolves.toBeUndefined();
+      // 2. Act & 3. Assert: acuse vacio en los dos campos, que es la respuesta
+      //    honesta a "donde quedo la traza": en ninguna parte.
+      await expect(service.logNodeExecution(NODE_DETAILS)).resolves.toEqual({
+        logFilePath: null,
+        logNodeId: null,
+      });
     });
 
     it('4.7 deberia recortar un codigo de error mas largo que su columna', async () => {
@@ -455,10 +470,12 @@ describe('HybridLoggerService · volcado forense del motor FSM', () => {
         alerts,
       );
 
-      // 2. Act & 3. Assert: la traza sobrevive intacta en los dos destinos.
-      await expect(
-        service.logNodeExecution(FAILING_NODE),
-      ).resolves.toBeUndefined();
+      // 2. Act & 3. Assert: la traza sobrevive intacta en los dos destinos, y
+      //    el acuse los acredita pese a que la alerta se cayera despues.
+      const receipt = await service.logNodeExecution(FAILING_NODE);
+
+      expect(receipt.logFilePath).toContain('execution-');
+      expect(receipt.logNodeId).toBe(SAVED_LOG_ID);
       expect(infoSpy).toHaveBeenCalledTimes(1);
       expect(repository.save).toHaveBeenCalledTimes(1);
     });

@@ -14,6 +14,7 @@ import { ADMIN_ONLY_MODELS } from '@modules/nodes/services/llm-provider-catalog.
 import { UserRole } from '@modules/users/enums/user-role.enum';
 import { WorkflowTemplatesService } from '@modules/workflow-templates/workflow-templates.service';
 import { assertModelPermissions } from './validators/model-permissions.validator';
+import { requirePipelineSchema } from './validators/require-pipeline-schema.validator';
 
 import { ExecutionState } from '@core/fsm/types/fsm.enums';
 import { NodeType } from '@core/fsm/types/pipeline-schema.types';
@@ -597,19 +598,14 @@ export class WorkflowsService {
   }
 
   /**
-   * Clausula de guarda: un flujo sin esquema no se puede despachar.
+   * Envoltorio sobre la guarda de esquema ausente.
    *
-   * Es un 400 y no un 404: el flujo existe, lo que falta es terminar de
-   * configurarlo en el asistente.
+   * La funcion libre vive en `validators/` porque la comparten tambien el
+   * despacho automatico y la reanudacion manual de CU-09, que esta en otro
+   * servicio. Mismo criterio que `assertModelPermissions`.
    */
   private requirePipelineSchema(workflow: Workflow): unknown {
-    if (workflow.pipelineSchema === null) {
-      throw new BadRequestException(
-        `El flujo "${workflow.name}" (${workflow.id}) no tiene configuracion_pipeline: complete el asistente antes de despacharlo.`,
-      );
-    }
-
-    return workflow.pipelineSchema;
+    return requirePipelineSchema(workflow);
   }
   /**
    * Envoltorio sobre la guarda de modelos de pago.

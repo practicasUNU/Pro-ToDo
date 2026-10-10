@@ -5,6 +5,8 @@ import { FsmModule } from '@core/fsm/fsm.module';
 import { WorkflowTemplatesModule } from '@modules/workflow-templates/workflow-templates.module';
 
 import { Workflow } from './entities/workflow.entity';
+import { ExecutionsController } from './executions.controller';
+import { ExecutionsService } from './executions.service';
 import { WorkflowsController } from './workflows.controller';
 import { WorkflowsService } from './workflows.service';
 
@@ -13,6 +15,11 @@ import { WorkflowsService } from './workflows.service';
  *
  * Importa `FsmModule` por sus dos servicios exportados —`PipelineValidatorService`
  * y `FsmEngineService`— en lugar de replicar validacion o bucle de ejecucion.
+ *
+ * Aloja tambien la superficie de EJECUCIONES (`ExecutionsController`), y no un
+ * modulo propio, porque reanudar necesita la fila de `flujos` para revalidar su
+ * esquema: `@core` no puede importar de `@modules`, y un modulo aparte tendria
+ * que duplicar el `forFeature([Workflow])` o importar este para nada.
  *
  * NO importa `NodesModule`: las estrategias se inscriben solas en la instancia
  * compartida de `NodeStrategyFactory` cuando `AppModule` levanta `NodesModule`,
@@ -28,8 +35,8 @@ import { WorkflowsService } from './workflows.service';
     // La dependencia va en un solo sentido; el catalogo no conoce este modulo.
     WorkflowTemplatesModule,
   ],
-  controllers: [WorkflowsController],
-  providers: [WorkflowsService],
+  controllers: [WorkflowsController, ExecutionsController],
+  providers: [WorkflowsService, ExecutionsService],
   exports: [WorkflowsService],
 })
 export class WorkflowsModule {}

@@ -122,7 +122,12 @@ const RAW_EMAIL_WITH_SCAN = {
 describe('Satelite OCR · desvio, reincorporacion y purga binaria', () => {
   const hybridLogger = {
     logCatastrophicFailure: jest.fn().mockReturnValue('logs/fsm.log'),
-    logNodeExecution: jest.fn().mockResolvedValue(undefined),
+    // El acuse de la traza: el motor lo propaga a la pausa, asi que un doble
+    // que resolviera a `undefined` romperia el desenlace de cualquier fallo.
+    logNodeExecution: jest.fn().mockResolvedValue({
+      logFilePath: 'logs/execution.log',
+      logNodeId: null,
+    }),
   };
 
   let factory: NodeStrategyFactory;

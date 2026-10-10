@@ -37,12 +37,22 @@ import type {
   NodeErrorSeverity,
   NodeResult,
 } from '@core/fsm/types/node-strategy.types';
+import type { NodeTraceReceipt } from '@modules/logs/services/hybrid-logger.service';
 import type { ResolvedErrorRoute } from '@core/fsm/utils/pipeline-topology.util';
 import type { Repository } from 'typeorm';
 import type { QueryDeepPartialEntity } from 'typeorm/query-builder/QueryPartialEntity';
 
 /** Namespace reservado donde aterriza el `initialPayload` del disparador. */
 export const TRIGGER_NAMESPACE = 'trigger';
+
+/**
+ * Acuse vacio: no hubo traza, ni en disco ni en la tabla.
+ *
+ * Se usa como valor inicial de cada vuelta del bucle y como salida del
+ * manejador de `logNodeOutcome`. Es una constante y no un literal repetido para
+ * que «sin traza» tenga un solo nombre en todo el archivo.
+ */
+const EMPTY_TRACE: NodeTraceReceipt = { logFilePath: null, logNodeId: null };
 
 /**
  * Circuit breaker de grafo: tope de saltos ENTRE nodos en una misma ejecucion.
@@ -124,7 +134,14 @@ interface CheckpointPatch {
   activeCursor: string | null;
   contextPayload: Record<string, Record<string, unknown>>;
   retryState: RetryState;
-  /** Solo lo escribe el desenlace catastrofico; las transiciones normales no. */
+  /**
+   * Ruta del archivo que explica el desenlace.
+   *
+   * La escriben el fallo catastrofico (volcado forense, `fsm-*.log`) y la
+   * pausa por fallo de nodo (traza de ejecucion, `execution-*.log`). Las
+   * transiciones nominales la omiten, de modo que la columna conserve la
+   * ultima ruta relevante en vez de borrarse en cada salto.
+   */
   logFilePath?: string | null;
   /** Motivo legible del cierre. Lo escribe el desenlace por severidad LEVE. */
   failureReason?: string | null;
@@ -539,9 +556,14 @@ export class FsmEngineService {
    * 'EN_PROCESO'`: las filas que hay que contar son las unicas que el indice
    * contiene, asi que no hace falta ninguno nuevo.
    *
+   * Es PUBLICA porque no todo el trabajo entra por `createExecution`: la
+   * reanudacion manual (CU-09) reutiliza una fila que ya existe y llama
+   * directamente a `executeWorkflow`, de modo que sin poder invocar esta guarda
+   * desde fuera el techo global no gobernaria ese camino.
+   *
    * @throws SystemCapacityExceededException Si no queda cupo global (429).
    */
-  private async assertGlobalCapacityAvailable(): Promise<void> {
+  public async assertGlobalCapacityAvailable(): Promise<void> {
     const maxAllowed = this.fsmConfig.maxGlobalConcurrentExecutions;
 
     const activeCount = await this.fsmExecutionRepo.count({
@@ -557,6 +579,116 @@ export class FsmEngineService {
     );
 
     throw new SystemCapacityExceededException(activeCount, maxAllowed);
+  }
+
+  /**
+   * Deja una ejecucion PAUSADO lista para que `executeWorkflow` la retome.
+   *
+   * Es la primera mitad de CU-09; la segunda es volver a llamar al bucle con el
+   * MISMO `executionId`. Se separa porque son dos decisiones distintas: que
+   * estado de partida se le da al reintento, y recorrerlo.
+   *
+   * NO cambia `currentState`. La fila sigue PAUSADO al salir de aqui, y es
+   * `executeWorkflow` quien la marca EN_PROCESO; esa transicion es la que
+   * reserva el mutex `idx_flujo_activo`, y adelantarla abriria una ventana en la
+   * que el turno esta cogido sin que haya ningun bucle atendiendolo.
+   *
+   * @param executionId Fila de `ejecuciones_flujo` que se va a reanudar.
+   * @param contextPatch Namespaces a fusionar sobre el contexto acumulado. El
+   *        caso tipico de CU-09 es «faltaba un campo»: parchearlo convierte la
+   *        reanudacion en un arreglo y no en una repeticion del mismo fallo.
+   * @param resetRetries Devuelve al nodo del cursor su presupuesto completo.
+   * @returns La fila ya preparada.
+   * @throws NotFoundException Si la ejecucion no existe.
+   */
+  public async prepareResume(
+    executionId: string,
+    contextPatch?: Record<string, Record<string, unknown>>,
+    resetRetries = true,
+  ): Promise<FsmExecution> {
+    const execution = await this.fsmExecutionRepo.findOne({
+      where: { executionId },
+    });
+
+    if (execution === null) {
+      throw new NotFoundException(
+        `No existe la ejecucion "${executionId}" en ejecuciones_flujo.`,
+      );
+    }
+
+    const contextPayload = this.mergeContextPatch(
+      execution.contextPayload,
+      contextPatch,
+    );
+
+    // El cursor es la unica clave que se limpia: los contadores de los nodos
+    // que ya pasaron describen lo que costo llegar hasta aqui, y borrarlos
+    // falsearia la traza de una ejecucion que si tuvo que insistir.
+    const retryState =
+      resetRetries && execution.activeCursor !== null
+        ? this.withoutRetryCounter(
+            execution.retryState as RetryState,
+            execution.activeCursor,
+          )
+        : { ...(execution.retryState as RetryState) };
+
+    await this.saveCheckpoint(execution, {
+      currentState: execution.currentState,
+      activeCursor: execution.activeCursor,
+      contextPayload,
+      retryState,
+      // Se limpia el motivo porque describe un cierre que ya no es el estado
+      // de esta fila; dejarlo haria que la tabla de trazabilidad mostrase un
+      // fallo junto a una ejecucion que esta corriendo otra vez.
+      //
+      // `logFilePath` NO se toca a proposito: es el rastro de por que hubo que
+      // reanudar, y borrarlo dejaria al operador sin nada que mirar si el
+      // reintento se rompe por lo mismo. Lo sustituira el proximo fallo.
+      failureReason: null,
+    });
+
+    return execution;
+  }
+
+  /**
+   * Fusiona el parche sobre el contexto acumulado, namespace a namespace.
+   *
+   * FUSIONA y no reemplaza, con la misma semantica que
+   * `StatePayloadContext.setNamespace`: parchear un campo de `parsed_email` no
+   * puede borrar los otros nueve que publico el parser. Todo el recorrido es
+   * inmutable —spread en los dos niveles—, igual que exige
+   * `architecture-patterns.md` §3 para el payload del motor.
+   */
+  private mergeContextPatch(
+    current: Record<string, Record<string, unknown>>,
+    patch?: Record<string, Record<string, unknown>>,
+  ): Record<string, Record<string, unknown>> {
+    if (patch === undefined) {
+      return { ...current };
+    }
+
+    return Object.entries(patch).reduce<
+      Record<string, Record<string, unknown>>
+    >(
+      (merged, [namespace, data]) => ({
+        ...merged,
+        [namespace]: { ...(merged[namespace] ?? {}), ...data },
+      }),
+      { ...current },
+    );
+  }
+
+  /** Copia del `retryState` sin el contador del nodo indicado. */
+  private withoutRetryCounter(
+    retryState: RetryState,
+    nodeId: string,
+  ): RetryState {
+    // Se construye una copia filtrada en vez de clonar y hacer `delete`: el
+    // `delete` sobre el objeto original mutaria el estado que la entidad
+    // todavia expone, y el checkpoint es inmutable por contrato.
+    return Object.fromEntries(
+      Object.entries(retryState).filter(([key]) => key !== nodeId),
+    );
   }
 
   /**
@@ -660,6 +792,15 @@ export class FsmEngineService {
       let contingency: {
         severity: NodeErrorSeverity;
         failedNodeId: string;
+        /**
+         * Donde quedo la traza de ESE nodo, no la del ultimo del recorrido.
+         *
+         * Viaja dentro del desvio porque el nodo que fallo pertenece a una
+         * iteracion anterior: para cuando `closeTerminalState` decide pausar,
+         * `lastTrace` ya apunta al nodo de alerta, que es justamente el que no
+         * hay que reintentar.
+         */
+        trace: NodeTraceReceipt;
       } | null = null;
 
       /**
@@ -672,6 +813,17 @@ export class FsmEngineService {
       let lastCompletedNodeType: NodeType | null = null;
 
       while (cursor !== null) {
+        /**
+         * Donde quedo la traza del ultimo intento del nodo de ESTA vuelta.
+         *
+         * Se declara dentro del `while` y no fuera, y la diferencia es
+         * observable: los dos `pauseAt` tempranos de aqui abajo —circuit
+         * breaker y cursor inexistente— ocurren ANTES de ejecutar ningun nodo,
+         * asi que con un alcance externo arrastrarian la ruta del nodo
+         * anterior y senalarian un archivo que no explica esta pausa.
+         */
+        let lastTrace: NodeTraceReceipt = EMPTY_TRACE;
+
         // Aborto llegado mientras se escribia el checkpoint anterior. Va antes
         // que el circuit breaker para no consumir presupuesto de transiciones
         // ni disparar el `pauseAt` de un bucle que ya no debe continuar.
@@ -745,7 +897,7 @@ export class FsmEngineService {
           // real de la estrategia. Con una sola fila final, los reintentos
           // fallidos desaparecerian, y son a menudo el dato que explica la
           // incidencia —"tardo en estabilizarse" frente a "fallo a la primera".
-          await this.logNodeOutcome(
+          lastTrace = await this.logNodeOutcome(
             executionId,
             node,
             outcome,
@@ -922,6 +1074,7 @@ export class FsmEngineService {
           contingency = {
             severity: result.error?.level ?? 'URGENTE',
             failedNodeId: node.nodeId,
+            trace: lastTrace,
           };
           execution.tookContingency = true;
 
@@ -964,8 +1117,14 @@ export class FsmEngineService {
         }
 
         // --- 3. Sin ruta de recuperacion: se detiene conservando el cursor
-        // culpable, que es lo que permite el reintento manual de CU-09.
-        await this.pauseAt(execution, cursor, context, retryState);
+        // culpable, que es lo que permite el reintento manual de CU-09. La
+        // causa viaja con la pausa para que la fila apunte al archivo que
+        // explica por que se paro, y no solo a donde.
+        await this.pauseAt(execution, cursor, context, retryState, {
+          severity: result.error?.level,
+          errorMessage: result.error?.message,
+          logFilePath: lastTrace.logFilePath,
+        });
         break;
       }
 
@@ -1291,7 +1450,7 @@ export class FsmEngineService {
     node: PipelineNodeConfigDto,
     outcome: NodeOutcome,
     durationMs: number,
-  ): Promise<void> {
+  ): Promise<NodeTraceReceipt> {
     const { result } = outcome;
     const failure = result.error;
 
@@ -1318,7 +1477,7 @@ export class FsmEngineService {
     // cambio futuro que hiciera lanzar al logger convertiria el registro en un
     // punto unico de fallo del motor.
     try {
-      await this.hybridLogger.logNodeExecution({
+      return await this.hybridLogger.logNodeExecution({
         executionId,
         nodeId: node.nodeId,
         nodeType: node.nodeType,
@@ -1334,6 +1493,11 @@ export class FsmEngineService {
       this.logger.warn(
         `No se pudo registrar la traza del nodo "${node.nodeId}" (ejecucion=${executionId}): ${this.describeError(error)}`,
       );
+
+      // Acuse vacio y no una excepcion: el contrato de este metodo es no
+      // lanzar, y quien lo llama solo quiere saber DONDE quedo la traza. Que
+      // no quedara en ninguna parte es una respuesta valida.
+      return EMPTY_TRACE;
     }
   }
 
@@ -1611,7 +1775,11 @@ export class FsmEngineService {
     execution: FsmExecution,
     context: StatePayloadContext,
     retryState: RetryState,
-    contingency: { severity: NodeErrorSeverity; failedNodeId: string } | null,
+    contingency: {
+      severity: NodeErrorSeverity;
+      failedNodeId: string;
+      trace: NodeTraceReceipt;
+    } | null,
     lastCompletedNodeType: NodeType | null,
     wasHalted: boolean,
   ): Promise<void> {
@@ -1657,6 +1825,10 @@ export class FsmEngineService {
         contingency.failedNodeId,
         context,
         retryState,
+        {
+          severity: contingency.severity,
+          logFilePath: contingency.trace.logFilePath,
+        },
       );
       return;
     }
@@ -1674,19 +1846,43 @@ export class FsmEngineService {
     });
   }
 
-  /** Detiene la ejecucion conservando el cursor del nodo que la bloqueo. */
+  /**
+   * Detiene la ejecucion conservando el cursor del nodo que la bloqueo.
+   *
+   * `cause` es opcional porque no toda pausa la provoca un nodo: el circuit
+   * breaker y el cursor inexistente paran el bucle antes de ejecutar nada, y
+   * ahi no hay traza que senalar.
+   *
+   * @param cause Severidad, mensaje y archivo del fallo que detuvo el flujo.
+   */
   private async pauseAt(
     execution: FsmExecution,
     cursor: string,
     context: StatePayloadContext,
     retryState: RetryState,
+    cause?: {
+      severity?: NodeErrorSeverity;
+      errorMessage?: string;
+      logFilePath?: string | null;
+    },
   ): Promise<void> {
-    await this.saveCheckpoint(execution, {
+    const patch: CheckpointPatch = {
       currentState: ExecutionState.PAUSADO,
       activeCursor: cursor,
       contextPayload: context.getAllContext(),
       retryState,
-    });
+    };
+
+    // La clave se anade SOLO si la causa trae ruta, y no con un `?? null`:
+    // `saveCheckpoint` hace `Object.assign` con el patch tras el UPDATE, de
+    // modo que una clave presente con valor `undefined` dejaria la entidad en
+    // memoria afirmando algo que la fila nunca tuvo. Y un `null` incondicional
+    // borraria una ruta anterior perfectamente valida.
+    if (cause?.logFilePath !== undefined) {
+      patch.logFilePath = cause.logFilePath;
+    }
+
+    await this.saveCheckpoint(execution, patch);
   }
 
   /**

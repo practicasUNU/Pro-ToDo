@@ -66,13 +66,25 @@ export class FsmExecution {
   retryState: Record<string, unknown>;
 
   /**
-   * Ruta del volcado forense asociado a un fallo catastrofico.
+   * Ruta del ultimo archivo de registro relevante para esta ejecucion.
    *
    * Es el eslabon entre los dos destinos de la persistencia hibrida
    * (`architecture-patterns.md` §4): el stack trace y el payload viven en disco
    * —demasiado voluminosos para una columna— y aqui queda la referencia que
-   * permite encontrarlos. `null` mientras no haya habido un fallo URGENTE, y
-   * tambien cuando lo hubo pero el volcado a disco no pudo escribirse.
+   * permite encontrarlos.
+   *
+   * Apunta a UNO DE DOS ARCHIVOS DISTINTOS, segun como se detuviera la
+   * ejecucion, y conviene saberlo antes de abrirlo:
+   *
+   * - `fsm-*.log` — volcado forense de un fallo catastrofico, con el stack
+   *   trace completo. Lo escribe `failCatastrophically`.
+   * - `execution-*.log` — traza por nodo del paso que dejo la ejecucion
+   *   PAUSADO. La escribe `pauseAt` con el acuse de `logNodeExecution`.
+   *
+   * `null` mientras no haya ocurrido ninguno de los dos, y tambien cuando
+   * ocurrieron pero el volcado a disco no pudo escribirse. Una reanudacion
+   * (CU-09) NO lo limpia: es el rastro de por que hubo que reanudar, y se
+   * conserva hasta que un fallo nuevo lo sustituya.
    */
   @Column({
     name: 'ruta_archivo_log',

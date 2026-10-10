@@ -7556,3 +7556,130 @@ previos —`registry.getInterval` devuelve `any`— y estan en lineas que esta t
   `SEARCH` de cada ciclo ocurre *antes* de pedirle permiso al motor: con el motor lleno, N flujos
   siguen abriendo N conexiones TLS por minuto para descubrir que no pueden despachar. El punto de
   enganche natural es `imap-client.factory.ts`, por donde pasa toda conexion del sistema.
+
+---
+
+## PROT-31 · CU-09: reanudacion manual y el acuse de la traza
+
+La tanda anterior puso los flujos en cuarentena. Esta abre la puerta.
+
+El motor **ya estaba escrito para reanudar**, y eso fue lo primero que confirmo la auditoria:
+`executeWorkflow` arranca en `execution.activeCursor ?? schema.entrypoint`, `buildContext` restaura
+los namespaces persistidos, el `retryState` se rehidrata desde su columna, y hay una linea que
+limpia la marca de aborto superviviente con el comentario explicito *«el reintento manual de CU-09
+reutiliza el mismo `executionId`»*. Reanudar es volver a llamar al bucle sobre la misma fila. Lo
+que faltaba no era el mecanismo sino la superficie HTTP y, sobre todo, las guardas.
+
+### La guarda que de verdad importa
+
+De las siete validaciones de `resumeExecution`, seis son las que cualquiera escribiria. La septima
+no es obvia y es la que evita un sintoma mudo: si alguien edita el flujo mientras la ejecucion esta
+pausada, el cursor puede quedar apuntando a un nodo que ya no existe. Sin comprobar
+`schema.nodes[activeCursor]`, `executeWorkflow` cae en su propia guarda de cursor inexistente,
+vuelve a pausar en el mismo sitio y devuelve **un 200**. El operador pulsa «Reanudar», la interfaz
+dice que todo fue bien, y nada avanza. Diez veces seguidas.
+
+### Dos asimetrias opuestas, y las dos deliberadas
+
+**El techo global si se aplica.** Reanudar entra al motor por `executeWorkflow` y no por
+`createExecution`, que es donde vivia `assertGlobalCapacityAvailable`. Sin una llamada explicita,
+cada reintento manual habria sumado una ejecucion por encima del limite que PROT-30 acababa de
+establecer: la barrera habria dejado de significar lo que dice justo por la puerta que abriamos. De
+ahi que el metodo pasara de `private` a `public`.
+
+**El flag `activo` no se exige.** Esa columna gobierna los disparadores automaticos, no las acciones
+manuales sobre ejecuciones que ya existen. Lo refrenda una decision anterior: `updateWorkflow` no
+aborta las PAUSADO al desactivar un flujo, precisamente porque son la cola de reintento. Exigir
+`activo` aqui habria dejado sin salida a las pausadas de todo flujo apagado — que son, con
+diferencia, las mas probables. Queda escrito en el TSDoc del metodo porque es justo el tipo de cosa
+que alguien «arregla» seis meses despues.
+
+### Por que el acuse es un objeto y no la ruta pelada
+
+`logNodeExecution` escribia la ruta del `execution-*.log` en `logs_nodo` y la tiraba. Devolverla
+habria bastado para que `pauseAt` la persistiera, pero se devuelve tambien el `logs_nodo.id`:
+`alertas_error` enlaza con la traza por `id_log_nodo` y **no guarda ruta propia**, asi que ese
+identificador es el unico eslabon que permitira a la interfaz saltar de un evento a su alerta. Es el
+dato que el `NotificationGateway` va a necesitar en la siguiente tanda, y anadirlo ahora cuesta una
+propiedad.
+
+El cambio de firma no toca el contrato de «no lanza nunca»: las tres sentencias del cuerpo ya
+estaban protegidas por sus propios manejadores, y un `return` no abre ninguna ruta de excepcion.
+
+### Donde se declara `lastTrace` cambia lo que se guarda
+
+Dentro del cuerpo del `while`, no fuera, y la diferencia es observable. Dos de los cuatro `pauseAt`
+—el circuit breaker y el cursor inexistente— ocurren ANTES de ejecutar ningun nodo de esa vuelta.
+Con alcance externo arrastrarian la ruta del nodo anterior y senalarian un archivo que no explica
+esta pausa; con el alcance correcto pausan sin ruta, que es la verdad.
+
+El cuarto `pauseAt`, el de `closeTerminalState`, tenia el problema simetrico: pausa en el nodo que
+fallo, de una iteracion anterior, cuando `lastTrace` ya apunta al nodo de alerta. La solucion fue
+meter la traza DENTRO del objeto `contingency`, que ya viaja con el desvio. Asi `closeTerminalState`
+no necesito parametro nuevo y pausa con el archivo del nodo que CU-09 va a reintentar.
+
+### Un defecto latente que destapo el cambio
+
+Al aseverar por primera vez el retorno de `logNodeExecution`, tres pruebas de
+`hybrid-logger.service.spec.ts` empezaron a fallar **solo en la corrida completa**, no aisladas. La
+causa estaba a cincuenta lineas: una prueba anterior hace que el doble de Winston lance para simular
+un disco lleno, y `jest.clearAllMocks()` borra las LLAMADAS pero conserva las IMPLEMENTACIONES. Ese
+`throw` se filtraba a todas las pruebas posteriores del fichero.
+
+Llevaba ahi desde que se escribio el fichero. Pasaba inadvertido porque nadie aseveraba el retorno:
+la traza «perdida» no cambiaba ninguna asercion. Se arreglo en el `beforeEach`, restaurando los dos
+dobles, en vez de parchear la prueba culpable: el problema no era de esa prueba sino del ciclo de
+vida compartido.
+
+### La suite E2E y el buzon corporativo
+
+La verificacion iba a ser manual, con cURL y psql. Sustituirla por Supertest destapo un riesgo que
+no habria aparecido de otro modo: **`backend/.env` tiene `IMAP_POLLING_ENABLED=true` y
+`CRON_SCHEDULING_ENABLED=true`**. Montar `AppModule` ejecuta sus `onModuleInit`, que programan
+temporizadores reales, abren conexion contra el buzon institucional y **marcan correos como leidos**.
+Una suite de pruebas que se ejecuta en cada commit no puede consumir la bandeja de nadie.
+
+Hay un segundo efecto colateral del arranque: `FsmModule.onModuleInit` hace un
+`UPDATE ejecuciones_flujo SET estado='PAUSADO' WHERE estado='EN_PROCESO'` **sin filtro por flujo**.
+Contra la base de desarrollo, le arranca de debajo las ejecuciones vivas a cualquier
+`npm run start:dev` que este corriendo.
+
+Los dos se neutralizan con tres lineas de `process.env` **antes de los imports** —`ConfigModule` no
+pisa lo que ya esta en el entorno— y una base de datos dedicada. Es la trampa que repetira quien
+escriba el siguiente E2E, y por eso esta documentada en el encabezado del fichero y aqui.
+
+### Lo que NO se hizo
+
+**No se comprueban los modelos de pago al reanudar.** `assertModelPermissions` vive donde se ELIGE
+el modelo, que es el alta y la edicion del flujo. El despacho automatico tampoco lo repite, asi que
+aplicarlo solo en CU-09 habria sido incoherente y habria dejado a un EDITOR sin poder desatascar un
+flujo que configuro un ADMIN.
+
+**No se espia `runNode`.** El enunciado pedia «mockear el runner interno», pero es `private` y
+espiarlo exigiria `as any`, prohibido por la regla de TypeScript estricto. El proyecto ya tiene un
+idioma para esto: `registerDummyStrategies` tras `init()`, aprovechando que `registerStrategy`
+sustituye ante un duplicado. Es lo que hace `fsm-engine.e2e-spec.ts` y lo documenta `nodes.module.ts`.
+
+**No se toco la interfaz.** Los tres endpoints existen y no los consume nadie todavia.
+
+### Estado de la verificacion
+
+Backend **2073 pruebas en 87 suites**, en verde — 40 mas que la linea base anterior. La suite E2E,
+**9 casos**, pasa contra PostgreSQL real. `npm run build` limpio. `eslint` limpio sobre los
+dieciseis archivos tocados; los cuatro errores que quedan en `workflows.service.spec.ts` son previos
+y se verificaron contra `HEAD` sin cambios.
+
+`test/jest-e2e.json` necesito tres ajustes para poder montar `AppModule`: su
+`transformIgnorePatterns` solo cubria lo que usaba el runner del motor, su `transform` no casaba
+`.mjs` y faltaba `testTimeout`. Se alinearon con el config de las unitarias, que ya resolvia el
+mismo arbol de dependencias ESM.
+
+### Pendiente
+
+- **La interfaz no consume nada de esto.** No hay vista de trazabilidad, ni boton de reanudar, ni
+  tipos replicados en `frontend/src/types/`. Los endpoints estan y esperan.
+- **La base `<nombre_bd_test>` hay que mantenerla al dia a mano.** No hay script que le aplique las
+  migraciones nuevas, asi que una migracion futura la dejara desfasada y el E2E fallara por un
+  motivo que no es el codigo.
+- **`FsmModule.onModuleInit` sigue haciendo un UPDATE sin filtro.** Con la base dedicada deja de
+  importar para el E2E, pero sigue siendo un efecto global en cada arranque del proceso.
