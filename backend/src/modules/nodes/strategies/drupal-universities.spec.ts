@@ -1,11 +1,9 @@
-import { readFileSync } from 'node:fs';
-import { resolve } from 'node:path';
-
 import {
   DRUPAL_UNIVERSITIES_CATALOG,
   planPanelDispatch,
   resolveUniversityAccordion,
 } from '@modules/nodes/strategies/drupal-universities';
+import { accordionsInSeededPrompt } from '@test/helpers/prompt-migrations.helper';
 
 /** Panel al molde del que siembra la migracion 034. */
 const buildPanel = (options: {
@@ -59,42 +57,64 @@ describe('Catalogo de universidades de Drupal', () => {
         );
       }
     });
+
+    it('1.4 deberia mandar a ESIC al contenedor heredado #accordionUFV', () => {
+      // 1. Arrange 📐: ESTE TEST PARECE UN ERROR Y NO LO ES. El sub-acordeon de
+      //    ESIC en la pagina agregadora arrastra el identificador `accordionUFV`
+      //    de una version anterior del portal; ESIC y UFV son el MISMO
+      //    contenedor y no hay ninguna universidad Francisco de Vitoria en el
+      //    agregador. Esta aqui para que quien vea la discrepancia en el
+      //    catalogo y la "arregle" se encuentre antes con este rojo que con un
+      //    ERR_DRUPAL_DOM_TARGET en produccion, que es como se descubrio.
+      const esic = DRUPAL_UNIVERSITIES_CATALOG.find(
+        (university) => university.name === 'ESIC Universidad',
+      );
+
+      // 2. Act ⚙️ + 3. Assert 🎯
+      expect(esic?.accordionId).toBe('#accordionUFV');
+      expect(resolveUniversityAccordion('ESIC 1 · Facultad')).toBe(
+        '#accordionUFV',
+      );
+    });
   });
 
   describe('1bis. Coherencia con el prompt sembrado', () => {
     /**
-     * La tabla que la migracion 035 mete en el prompt del verificador.
-     *
      * Son DOS fuentes para la misma verdad y no hay forma de fundirlas: el
      * catalogo de TypeScript resuelve el destino cuando el panel no trae
      * `data-parent`, y la tabla del prompt es de donde el modelo saca ese
      * atributo —el acordeon no es un dato del material de entrada, es una
      * propiedad del DOM del portal—. Si divergen, el fallo no se ve: el panel
      * se publica bien formado y apunta a un contenedor que no existe.
+     *
+     * El prompt se COMPONE recorriendo las migraciones en orden, en vez de leer
+     * una por su ruta. Leer solo la 035 funcionaba hasta que la 036 la parcheo;
+     * desde entonces ese fichero ya no describe lo que hay en la base de datos.
+     * Ver `composeSeededPrompt`.
      */
-    const MIGRATION_PATH = resolve(
-      __dirname,
-      '../../../../../db/migrations/035-verificador-titulos-universidades.sql',
-    );
-
-    const accordionsInPrompt = (): readonly string[] =>
-      [
-        ...readFileSync(MIGRATION_PATH, 'utf-8').matchAll(
-          /data-parent="(#accordion[A-Za-z0-9]+)"/g,
-        ),
-      ]
-        .map((match) => match[1] ?? '')
-        .filter((id) => id !== '#accordionPadreId');
-
     it('1bis.1 el prompt deberia mapear EXACTAMENTE las mismas universidades', () => {
       // 1. Arrange 📐 + 2. Act ⚙️
-      const fromPrompt = new Set(accordionsInPrompt());
+      const fromPrompt = new Set(accordionsInSeededPrompt());
       const fromCatalog = new Set(
         DRUPAL_UNIVERSITIES_CATALOG.map((u) => u.accordionId),
       );
 
       // 3. Assert 🎯
       expect([...fromPrompt].sort()).toEqual([...fromCatalog].sort());
+    });
+
+    it('1bis.2 el prompt deberia mandar a ESIC al contenedor heredado', () => {
+      // 1. Arrange 📐: la linea concreta que causo el ERR_DRUPAL_DOM_TARGET.
+      //    Se afirma aparte del conjunto de arriba porque aquel solo compara
+      //    DOS CONJUNTOS: si alguien cambiase las dos fuentes a la vez de vuelta
+      //    a `#accordionESIC`, seguirian coincidiendo entre si y el flujo
+      //    volveria a romperse contra la pagina real.
+      // 2. Act ⚙️
+      const accordions = accordionsInSeededPrompt();
+
+      // 3. Assert 🎯
+      expect(accordions).toContain('#accordionUFV');
+      expect(accordions).not.toContain('#accordionESIC');
     });
   });
 
@@ -196,9 +216,10 @@ describe('Catalogo de universidades de Drupal', () => {
         facultad: 'ESIC Universidad · Facultad de Ciencias Juridicas',
       });
 
-      // 2. Act ⚙️ + 3. Assert 🎯
+      // 2. Act ⚙️ + 3. Assert 🎯: UFV, no ESIC. Ver el comentario de la entrada
+      //    de ESIC en el catalogo.
       expect(planPanelDispatch(markup)[0]?.targetSelector).toBe(
-        '#accordionESIC',
+        '#accordionUFV',
       );
     });
 

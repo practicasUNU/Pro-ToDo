@@ -126,8 +126,18 @@ export const DRUPAL_UNIVERSITIES_CATALOG: readonly UniversityMapping[] = [
   },
   {
     name: 'ESIC Universidad',
-    collapseId: '#collapseESIC',
-    accordionId: '#accordionESIC',
+    // EL NOMBRE DEL CONTENEDOR NO CUADRA CON EL DE LA UNIVERSIDAD, Y ES
+    // CORRECTO. El sub-acordeon de ESIC en el portal arrastra el identificador
+    // `accordionUFV` de una version anterior de la pagina; ESIC y UFV son el
+    // MISMO contenedor, y no hay ninguna Universidad Francisco de Vitoria en el
+    // agregador. Devolverlo a `#accordionESIC` —que es lo que parece correcto
+    // leyendo solo estas lineas— reproduce el ERR_DRUPAL_DOM_TARGET que motivo
+    // este cambio: la pagina no tiene ese contenedor, `insertDispatchedPanels`
+    // no encuentra destino y la tanda entera se queda sin publicar.
+    collapseId: '#collapseUFV',
+    accordionId: '#accordionUFV',
+    // Se quedan en 'esic' a proposito: el material de entrada habla de ESIC, no
+    // de UFV. Lo heredado es el DOM del portal, no como se llama la institucion.
     aliases: ['esic'],
   },
 ] as const;
