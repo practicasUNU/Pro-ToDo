@@ -9,12 +9,22 @@ import {
   splitCliArgs,
   textContentOf,
 } from './cleanup-drupal-sandbox';
+import * as cheerio from 'cheerio';
+
 import {
+  applyCeuVisibilityRules,
+  buildPurgeGuard,
   describePurgeMatches,
+  describePreservedPanels,
+  preserveLoneInjectedCommittee,
   restoreMissingUniversityPanels,
 } from './cleanup-drupal-sandbox';
 
 import type { DrupalApiConfig } from '@core/config/drupal-api.config';
+
+/** Carga con las banderas CANONICAS del proyecto, como el propio script. */
+const cheerioLoad = (html: string): cheerio.CheerioAPI =>
+  cheerio.load(html, { xml: { xmlMode: false } }, false);
 
 /**
  * Bloque editorial legitimo: lo que un flujo real publica.
@@ -495,11 +505,17 @@ describe('10. Acotamiento al segundo nivel del acordeon', () => {
     //    contenedor entero. ESIC desaparecio de la pagina por esto.
     const html = TWO_LEVEL_PAGE;
 
-    // 2. Act ⚙️
-    const result = purgeMarkedBlocks(html, [
-      `${SCOPED}:has(a.panel-toggle-link)`,
-      `${SCOPED}:has(.panel-comite-codigo)`,
-    ]);
+    // 2. Act ⚙️: guard neutro a proposito. Este bloque verifica el ACOTADO del
+    //    selector; la preservacion tiene los suyos en el bloque 12, y dejarla
+    //    activa aqui mezclaria las dos razones por las que un panel sobrevive.
+    const result = purgeMarkedBlocks(
+      html,
+      [
+        `${SCOPED}:has(a.panel-toggle-link)`,
+        `${SCOPED}:has(.panel-comite-codigo)`,
+      ],
+      () => false,
+    );
 
     // 3. Assert 🎯: la universidad sigue en pie y su sub-acordeon tambien.
     expect(result.html).toContain('ESIC Universidad');
@@ -511,10 +527,12 @@ describe('10. Acotamiento al segundo nivel del acordeon', () => {
     // 1. Arrange 📐: la asimetria de la que depende todo. `panel-toggle-link` y
     //    `panel-comite-codigo` son clases de NUESTRA plantilla; los paneles que
     //    ya estaban en el portal no las llevan.
-    // 2. Act ⚙️
-    const result = purgeMarkedBlocks(TWO_LEVEL_PAGE, [
-      `${SCOPED}:has(a.panel-toggle-link)`,
-    ]);
+    // 2. Act ⚙️: guard neutro, por el mismo motivo que en 10.1.
+    const result = purgeMarkedBlocks(
+      TWO_LEVEL_PAGE,
+      [`${SCOPED}:has(a.panel-toggle-link)`],
+      () => false,
+    );
 
     // 3. Assert 🎯
     expect(result.purgedCount).toBe(1);
@@ -527,9 +545,11 @@ describe('10. Acotamiento al segundo nivel del acordeon', () => {
     // 1. Arrange 📐: se deja escrito el comportamiento del selector retirado,
     //    para que nadie lo reintroduzca creyendo que era equivalente.
     // 2. Act ⚙️
-    const sinAcotar = purgeMarkedBlocks(TWO_LEVEL_PAGE, [
-      '.panel:has(.panel-comite-codigo)',
-    ]);
+    const sinAcotar = purgeMarkedBlocks(
+      TWO_LEVEL_PAGE,
+      ['.panel:has(.panel-comite-codigo)'],
+      () => false,
+    );
 
     // 3. Assert 🎯
     expect(sinAcotar.html).not.toContain('ESIC Universidad');
@@ -620,5 +640,203 @@ describe('11. restoreMissingUniversityPanels', () => {
     expect(result.restored).toEqual(['ESIC Universidad']);
     expect(result.html).toContain('id="accordionESIC"');
     expect(result.html).not.toContain('accordionUFV');
+  });
+});
+
+describe('12. Preservacion del comite sin gemelo nativo', () => {
+  const SCOPED = '.panel-group .panel-group > .panel';
+  const PURGE = [`${SCOPED}:has(a.panel-toggle-link)`];
+
+  /** Panel tal y como lo emite la plantilla de Proto-Do. */
+  const injected = (code: string): string =>
+    '<div class="panel panel-default"><div class="panel-heading">' +
+    '<h5 class="panel-title"><a class="panel-toggle-link" ' +
+    `href="#collapse${code.replace(/\s/g, '')}">` +
+    `<strong class="panel-comite-codigo">${code}</strong></a></h5></div>` +
+    `<div class="collapse" id="collapse${code.replace(/\s/g, '')}">` +
+    '<table class="tableform"><tbody><tr><th>Titulacion</th></tr></tbody></table>' +
+    '</div></div>';
+
+  /** El mismo comite, pero como lo tiene el portal: sin clases de plantilla y
+   *  con el codigo separado del centro por un ESPACIO DURO. */
+  const native = (code: string): string =>
+    '<div class="panel panel-default"><div class="panel-heading">' +
+    `<h5 class="panel-title"><a href="#collapse${code.replace(/\s/g, '')}Nat">` +
+    `<strong>${code}&nbsp;</strong> Centro</a></h5></div></div>`;
+
+  const page = (accordion: string, inner: string): string =>
+    `<div class="panel-group" id="accordion"><div class="panel panel-default">` +
+    `<div class="panel-group" id="${accordion}">${inner}</div></div></div>`;
+
+  it('12.1 deberia purgar los duplicados y PRESERVAR el que no tiene gemelo', () => {
+    // 1. Arrange 📐: UAM 9 y UPM 4 inyectados tienen copia nativa al lado;
+    //    ESIC 2 no. Retirar ESIC 2 no seria limpiar, seria despublicar el unico
+    //    ejemplar del comite.
+    const html =
+      page('accordionUAM', injected('UAM 9') + native('UAM 9')) +
+      page('accordionUPM', injected('UPM 4') + native('UPM 4')) +
+      page('accordionESIC', injected('ESIC 2'));
+
+    // 2. Act ⚙️
+    const result = purgeMarkedBlocks(html, PURGE);
+
+    // 3. Assert 🎯
+    expect(result.purgedCount).toBe(2);
+    expect(result.html).toContain('id="collapseESIC2"');
+    expect(result.html).toContain('tableform');
+    expect(result.html).not.toContain('id="collapseUAM9"');
+    expect(result.html).not.toContain('id="collapseUPM4"');
+    // Las copias nativas siguen enteras.
+    expect(result.html).toContain('collapseUAM9Nat');
+    expect(result.html).toContain('collapseUPM4Nat');
+  });
+
+  it('12.2 deberia purgar ESIC 2 EN CUANTO exista su gemelo nativo', () => {
+    // 1. Arrange 📐: lo que distingue una regla de una lista cableada. Con
+    //    `#collapseESIC2` fijo en una constante, este panel quedaria blindado
+    //    para siempre, tambien cuando ya fuese un duplicado mas.
+    const html = page('accordionESIC', injected('ESIC 2') + native('ESIC 2'));
+
+    // 2. Act ⚙️
+    const result = purgeMarkedBlocks(html, PURGE);
+
+    // 3. Assert 🎯
+    expect(result.purgedCount).toBe(1);
+    expect(result.html).not.toContain('id="collapseESIC2"');
+    expect(result.html).toContain('collapseESIC2Nat');
+  });
+
+  it('12.3 deberia plegar el espacio duro al comparar codigos', () => {
+    // 1. Arrange 📐: el portal separa el codigo del centro con `&nbsp;`. Sin
+    //    normalizarlo, "ESIC 2\u00a0" y "ESIC 2" son cadenas distintas y el
+    //    panel no reconoceria a su propio gemelo: se preservaria un duplicado.
+    const html = page('accordionESIC', injected('ESIC 2') + native('ESIC 2'));
+    const $ = cheerioLoad(html);
+    const panel = $(`${SCOPED}:has(a.panel-toggle-link)`).first();
+
+    // 2. Act ⚙️ + 3. Assert 🎯
+    expect(preserveLoneInjectedCommittee($, panel.get(0)!)).toBe(false);
+  });
+
+  it('12.4 NO deberia opinar sobre bloques que no son paneles de comite', () => {
+    // 1. Arrange 📐: `purgeMarkedBlocks` la comparten las rutas de licitaciones
+    //    y Notiweb. El guard debe callarse ahi y dejar mandar al selector.
+    const html =
+      '<div class="licitacion-entry" data-expediente="TEST_1">x</div>';
+
+    // 2. Act ⚙️
+    const result = purgeMarkedBlocks(html, [
+      '.licitacion-entry[data-expediente^="TEST_"]',
+    ]);
+
+    // 3. Assert 🎯
+    expect(result.purgedCount).toBe(1);
+    expect(result.html).not.toContain('licitacion-entry');
+  });
+
+  it('12.5 deberia admitir selectores de exclusion manuales', () => {
+    // 1. Arrange 📐: la escotilla para la incidencia puntual que no merece un
+    //    despliegue. UAM 9 tiene gemelo, asi que la regla lo purgaria.
+    const html = page('accordionUAM', injected('UAM 9') + native('UAM 9'));
+
+    // 2. Act ⚙️
+    const result = purgeMarkedBlocks(
+      html,
+      PURGE,
+      buildPurgeGuard(['.panel:has(#collapseUAM9)']),
+    );
+
+    // 3. Assert 🎯
+    expect(result.purgedCount).toBe(0);
+    expect(result.html).toContain('id="collapseUAM9"');
+  });
+
+  it('12.6 deberia NOMBRAR lo que preserva, no solo contarlo', () => {
+    // 1. Arrange 📐: la pregunta del operador es "¿seguro que no te llevas el
+    //    comite bueno?", y solo se responde nombrandolo.
+    const html = page('accordionESIC', injected('ESIC 2'));
+
+    // 2. Act ⚙️
+    const preserved = describePreservedPanels(
+      html,
+      PURGE,
+      preserveLoneInjectedCommittee,
+    );
+
+    // 3. Assert 🎯
+    expect(preserved).toEqual(['ESIC 2']);
+  });
+});
+
+describe('13. Visibilidad de CEU', () => {
+  /** Padre de universidad con su comite dentro, como el portal lo sirve. */
+  const CEU_PAGE =
+    '<div class="panel-group" id="accordion">' +
+    '<div class="panel panel-default"><div class="panel-heading">' +
+    '<h4 class="panel-title"><a href="#collapseCEU" aria-expanded="true">' +
+    'Universidad San Pablo CEU</a></h4></div>' +
+    '<div class="collapse show" id="collapseCEU"><div class="panel-body">' +
+    '<div class="panel-group" id="accordionCEU">' +
+    '<div class="panel panel-default"><div class="panel-heading">' +
+    '<h5 class="panel-title"><a href="#collapseCEUD1"><strong>CEU D1</strong></a>' +
+    '</h5></div><div class="collapse" id="collapseCEUD1"><p>Doctorado</p></div></div>' +
+    '<div class="panel panel-default"><div class="collapse" id="collapseCEU1">' +
+    '<p>Otro comite</p></div></div>' +
+    '</div></div></div></div></div>';
+
+  it('13.1 deberia ocultar CEU D1 y plegar el acordeon padre', () => {
+    // 1. Arrange 📐 + 2. Act ⚙️
+    const result = applyCeuVisibilityRules(CEU_PAGE);
+    const $ = cheerioLoad(result.html);
+
+    // 3. Assert 🎯
+    expect(
+      $('.panel-group .panel-group > .panel:has(#collapseCEUD1)').hasClass(
+        'd-none',
+      ),
+    ).toBe(true);
+    expect($('#collapseCEU').hasClass('show')).toBe(false);
+    expect($('a[href="#collapseCEU"]').attr('aria-expanded')).toBe('false');
+    expect($('a[href="#collapseCEU"]').hasClass('collapsed')).toBe(true);
+  });
+
+  it('13.2 NUNCA deberia ocultar el panel de la universidad', () => {
+    // 1. Arrange 📐: LA REGRESION. `.panel:has(#collapseCEUD1)` casa tambien
+    //    con `Universidad San Pablo CEU`, que lleva la misma clase y contiene
+    //    el comite. Sin acotar al segundo nivel, este `addClass` esconde la
+    //    universidad entera con todos sus comites: el mismo mecanismo que, con
+    //    `remove()`, ya borro el panel de ESIC de esta pagina.
+    // 2. Act ⚙️
+    const $ = cheerioLoad(applyCeuVisibilityRules(CEU_PAGE).html);
+
+    // 3. Assert 🎯
+    const universityPanel = $('#accordion > .panel').first();
+
+    expect(universityPanel.hasClass('d-none')).toBe(false);
+    expect($('#collapseCEU1').length).toBe(1);
+  });
+
+  it('13.3 deberia ser IDEMPOTENTE y no reportar cambios la segunda vez', () => {
+    // 1. Arrange 📐: el script corre en cada limpieza; lo que no cambia no debe
+    //    provocar un PATCH.
+    const once = applyCeuVisibilityRules(CEU_PAGE);
+
+    // 2. Act ⚙️
+    const twice = applyCeuVisibilityRules(once.html);
+
+    // 3. Assert 🎯
+    expect(twice.changes).toEqual([]);
+    expect(twice.html).toBe(once.html);
+    expect(once.html.match(/d-none/g)).toHaveLength(1);
+  });
+
+  it('13.4 no deberia tocar una pagina sin CEU', () => {
+    // 1. Arrange 📐 + 2. Act ⚙️
+    const html = '<div class="panel-group" id="accordion"></div>';
+    const result = applyCeuVisibilityRules(html);
+
+    // 3. Assert 🎯
+    expect(result.changes).toEqual([]);
+    expect(result.html).toBe(html);
   });
 });

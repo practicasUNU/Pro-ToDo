@@ -16,6 +16,9 @@ import { DrupalApiConfig } from '@core/config/drupal-api.config';
 
 import { AppModule } from '../app.module';
 
+import type { Cheerio, CheerioAPI } from 'cheerio';
+import type { AnyNode } from 'domhandler';
+
 /**
  * Purga de los bloques que las pruebas E2E dejan publicados en el sandbox.
  *
@@ -130,6 +133,15 @@ const SANDBOX_UUID_FALLBACKS: Readonly<Record<string, string>> = {
 const COMMITTEE_PANEL_SCOPE = '.panel-group .panel-group > .panel';
 
 /**
+ * Utilidad con la que se oculta un panel.
+ *
+ * `d-none` y no `hidden`: la plantilla que emite estos paneles es Bootstrap 5.
+ * El portal usa ademas `hidden`, de Bootstrap 3, pero para OCULTAR hay que
+ * elegir una y esta es la que el marcado inyectado ya entiende.
+ */
+const HIDDEN_UTILITY_CLASS = 'd-none';
+
+/**
  * Selectores de purga, en orden de aplicacion.
  *
  * El orden NO es indiferente. Los que se llevan el panel entero van primero;
@@ -194,6 +206,16 @@ export interface CleanupOptions {
   readonly customSelector?: string;
 
   /**
+   * Selectores que esta corrida NO debe purgar, pase lo que pase.
+   *
+   * Escotilla manual, vacia por defecto: la regla de serie
+   * (`preserveLoneInjectedCommittee`) ya conserva el panel que es la unica
+   * copia de su comite. Esto es para la excepcion puntual que no merece un
+   * despliegue.
+   */
+  readonly preserveSelectors?: readonly string[];
+
+  /**
    * Inventaria y sale, sin emitir el PATCH.
    *
    * Por defecto `false`, que es el comportamiento historico del script. Se
@@ -213,6 +235,12 @@ export interface CleanupResult {
 
   /** Titulos de los paneles de universidad repuestos en esta corrida. */
   readonly restored?: readonly string[];
+
+  /** Cambios de visibilidad aplicados (o que se aplicarian, en simulacro). */
+  readonly visibilityChanges?: readonly string[];
+
+  /** Paneles que el guard salvo de la poda. Solo se rellena en simulacro. */
+  readonly preserved?: readonly string[];
 }
 
 /** Resultado de la poda en memoria, sin tocar la red. */
@@ -235,15 +263,143 @@ export interface PurgeOutcome {
  * el `xml` truthy fuerza htmlparser2 sin activar el modo XML sensible a
  * mayusculas.
  */
+/**
+ * Decide si un elemento que ya caso con un selector debe SOBREVIVIR a la poda.
+ *
+ * Devuelve `true` para conservarlo. Es la via por la que un criterio que el
+ * selector no puede expresar —porque depende de lo que haya ALREDEDOR del
+ * elemento— entra en la decision sin ensuciar la lista de selectores.
+ */
+export type PurgeGuard = ($: CheerioAPI, element: AnyNode) => boolean;
+
+/** Clases que delatan un panel emitido por la plantilla de Proto-Do. */
+const INJECTED_PANEL_MARKERS = 'a.panel-toggle-link, .panel-comite-codigo';
+
+/**
+ * Codigo de comite de un panel, normalizado para poder compararlo.
+ *
+ * El portal separa el codigo del nombre del centro con un ESPACIO DURO, y
+ * cheerio lo entrega tal cual. Sin plegarlo, `"ESIC 2\u00a0"` y `"ESIC 2"` son
+ * cadenas distintas y el panel inyectado no reconoceria a su propio gemelo.
+ */
+const committeeCodeOf = ($: CheerioAPI, panel: Cheerio<AnyNode>): string => {
+  const tagged = panel.find('.panel-comite-codigo').first();
+  const raw =
+    tagged.length > 0
+      ? tagged.text()
+      : panel.find('.panel-title > a strong').first().text();
+
+  return raw
+    .replace(/\u00a0/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+};
+
+/**
+ * Conserva el panel inyectado que es la UNICA copia de su comite.
+ *
+ * POR QUE UNA REGLA Y NO UNA LISTA. La alternativa era cablear el selector del
+ * panel a salvar —`#collapseESIC2`— en una constante. Eso funciona exactamente
+ * una vez: blinda ese panel para siempre, tambien cuando el portal publique su
+ * copia y pase a ser un duplicado mas, y no protege al siguiente comite nuevo
+ * que entre por el flujo. La propiedad que de verdad distingue a uno de otro no
+ * es su identificador, es si tiene o no un gemelo NATIVO al lado.
+ *
+ * Un panel de comite inyectado duplica a uno del portal cuando otro panel de su
+ * mismo sub-acordeon lleva el mismo codigo y NO trae las clases de la plantilla.
+ * Sin ese gemelo, lo que la purga esta a punto de quitar es la unica copia
+ * publicada del comite, y retirarla no es limpiar: es despublicar.
+ *
+ * Devuelve `false` —no opina— para todo lo que no sea un panel de comite
+ * inyectado, de modo que las rutas de licitaciones y Notiweb, que comparten
+ * `purgeMarkedBlocks`, se comportan igual que siempre.
+ */
+export const preserveLoneInjectedCommittee: PurgeGuard = ($, element) => {
+  const panel = $(element);
+
+  if (panel.find(INJECTED_PANEL_MARKERS).length === 0) {
+    return false;
+  }
+
+  const code = committeeCodeOf($, panel);
+
+  if (code === '') {
+    return false;
+  }
+
+  const nativeTwins = panel
+    .closest('.panel-group')
+    .children('.panel')
+    .filter((_, sibling) => {
+      const candidate = $(sibling);
+
+      return (
+        candidate.get(0) !== panel.get(0) &&
+        candidate.find(INJECTED_PANEL_MARKERS).length === 0 &&
+        committeeCodeOf($, candidate) === code
+      );
+    });
+
+  return nativeTwins.length === 0;
+};
+
+/**
+ * Compone el guard de serie con los selectores de exclusion que pida quien
+ * llama. Se preserva si lo dice la regla O si casa con uno de ellos.
+ *
+ * La escotilla existe para una incidencia puntual —"hoy no me toques este
+ * panel"— sin obligar a editar el codigo y desplegarlo para una sola corrida.
+ */
+export const buildPurgeGuard = (
+  preserveSelectors: readonly string[] = [],
+): PurgeGuard =>
+  preserveSelectors.length === 0
+    ? preserveLoneInjectedCommittee
+    : ($, element) =>
+        preserveLoneInjectedCommittee($, element) ||
+        preserveSelectors.some((selector) => $(element).is(selector));
+
+/**
+ * Que paneles sobreviven a la poda por decision del GUARD, no del selector.
+ *
+ * Es la mitad que le faltaba al simulacro. Un recuento de lo que se va no dice
+ * nada de lo que se queda, y la pregunta que el operador trae a este script
+ * —"¿seguro que no te llevas el comite bueno?"— solo se responde nombrandolo.
+ */
+export const describePreservedPanels = (
+  html: string,
+  selectors: readonly string[],
+  guard: PurgeGuard,
+): readonly string[] => {
+  const $ = cheerio.load(html, { xml: { xmlMode: false } }, false);
+  const preserved = new Set<string>();
+
+  for (const selector of selectors) {
+    $(selector)
+      .filter((_, element) => guard($, element))
+      .each((_, element) => {
+        const code = committeeCodeOf($, $(element));
+
+        preserved.add(code === '' ? selector : code);
+      });
+  }
+
+  return [...preserved];
+};
+
 export const purgeMarkedBlocks = (
   html: string,
   selectors: readonly string[],
+  guard: PurgeGuard = preserveLoneInjectedCommittee,
 ): PurgeOutcome => {
   const $ = cheerio.load(html, { xml: { xmlMode: false } }, false);
   let purgedCount = 0;
 
   for (const selector of selectors) {
-    const targets = $(selector);
+    // El filtro va ANTES de contar: un panel preservado no es un panel purgado,
+    // y sumarlo falsearia el recuento con el que el llamante decide si emitir
+    // el PATCH.
+    const targets = $(selector).filter((_, element) => !guard($, element));
 
     if (targets.length > 0) {
       purgedCount += targets.length;
@@ -374,6 +530,66 @@ export const restoreMissingUniversityPanels = (
   return restored.length === 0
     ? { html, restored: [] }
     : { html: $.html(), restored };
+};
+
+/** Lo que la rutina de visibilidad ha cambiado, para poder reportarlo. */
+export interface VisibilityOutcome {
+  readonly html: string;
+  readonly changes: readonly string[];
+}
+
+/**
+ * Deja `CEU D1` oculto y el acordeon de San Pablo CEU plegado.
+ *
+ * ES UNA DECISION EDITORIAL, NO LIMPIEZA. `CEU D1` es un panel NATIVO del
+ * portal: no lo publico Proto-Do y no lleva ninguna clase de nuestra plantilla.
+ * Vive en este script porque es donde esta el acceso a la pagina, no porque sea
+ * un residuo de pruebas. Quien lo revise dentro de unos meses y no encuentre el
+ * motivo, que lo trate como contenido y no como basura.
+ *
+ * EL PREFIJO `COMMITTEE_PANEL_SCOPE` NO ES OPCIONAL. `.panel:has(#collapseCEUD1)`
+ * casa con DOS elementos en esta pagina: el panel del comite y el de la
+ * `Universidad San Pablo CEU`, que lleva la misma clase y lo contiene. Sin
+ * acotar, el `addClass('d-none')` oculta la universidad entera con sus seis
+ * comites. Es el mismo mecanismo que, con `remove()`, ya hizo desaparecer el
+ * panel de ESIC de esta misma pagina.
+ */
+export const applyCeuVisibilityRules = (html: string): VisibilityOutcome => {
+  const $ = cheerio.load(html, { xml: { xmlMode: false } }, false);
+  const changes: string[] = [];
+
+  const ceuD1Panel = $(`${COMMITTEE_PANEL_SCOPE}:has(#collapseCEUD1)`);
+
+  if (ceuD1Panel.length > 0 && !ceuD1Panel.hasClass(HIDDEN_UTILITY_CLASS)) {
+    ceuD1Panel.addClass(HIDDEN_UTILITY_CLASS);
+    changes.push('CEU D1 ocultado');
+  }
+
+  const ceuCollapse = $('#collapseCEU');
+
+  if (ceuCollapse.hasClass('show')) {
+    ceuCollapse.removeClass('show');
+    changes.push('acordeon de CEU plegado');
+  }
+
+  const ceuToggle = $('a[href="#collapseCEU"]');
+
+  if (ceuToggle.length > 0 && ceuToggle.attr('aria-expanded') !== 'false') {
+    ceuToggle.attr('aria-expanded', 'false');
+    changes.push('aria-expanded de CEU a false');
+  }
+
+  if (ceuToggle.length > 0 && !ceuToggle.hasClass('collapsed')) {
+    ceuToggle.addClass('collapsed');
+    changes.push('enlace de CEU marcado como collapsed');
+  }
+
+  // Sin cambios se devuelve el ORIGINAL sin serializar, igual que
+  // `purgeMarkedBlocks`: revisar una pagina no debe imponerle la normalizacion
+  // de cheerio.
+  return changes.length === 0
+    ? { html, changes: [] }
+    : { html: $.html(), changes };
 };
 
 /** Un UUID v4, en oposicion a un alias de ruta. */
@@ -634,20 +850,38 @@ export class DrupalSandboxCleanupService {
         ? DEFAULT_PURGE_SELECTORS
         : [options.customSelector, ...DEFAULT_PURGE_SELECTORS];
 
-    const purge = purgeMarkedBlocks(body.value, selectors);
+    const guard = buildPurgeGuard(options.preserveSelectors);
+    const purge = purgeMarkedBlocks(body.value, selectors, guard);
 
     // La reposicion va DESPUES de podar, y en ese orden por una razon: lo que se
     // repone no debe pasar por los selectores. Un panel restaurado trae sus
     // propias clases de plantilla y la purga se lo llevaria en la misma corrida.
     const restoration = restoreMissingUniversityPanels(purge.html);
 
+    // Y la visibilidad al FINAL, sobre el arbol ya definitivo: ocultar un panel
+    // que la poda se iba a llevar, o uno que todavia no se habia repuesto, seria
+    // trabajo perdido.
+    const visibility = applyCeuVisibilityRules(restoration.html);
+
     const { purgedCount } = purge;
     const { restored } = restoration;
+    const visibilityChanges = visibility.changes;
 
-    // Se escribe si hubo poda O reposicion. Comprobar solo la poda dejaria una
-    // pagina a la que solo le falta un padre sin arreglar.
-    if (purgedCount === 0 && restored.length === 0) {
-      return { purgedCount: 0, updated: false, targetUuid: nodeUuid, restored };
+    // Se escribe si hubo poda, reposicion O cambio de visibilidad. Comprobar
+    // solo la poda dejaria sin arreglar una pagina a la que unicamente le falta
+    // ocultar un panel.
+    if (
+      purgedCount === 0 &&
+      restored.length === 0 &&
+      visibilityChanges.length === 0
+    ) {
+      return {
+        purgedCount: 0,
+        updated: false,
+        targetUuid: nodeUuid,
+        restored,
+        visibilityChanges,
+      };
     }
 
     // El corte va DESPUES de podar y ANTES de escribir: asi el simulacro informa
@@ -659,11 +893,13 @@ export class DrupalSandboxCleanupService {
         updated: false,
         targetUuid: nodeUuid,
         matches: describePurgeMatches(body.value, selectors),
+        preserved: describePreservedPanels(body.value, selectors, guard),
         restored,
+        visibilityChanges,
       };
     }
 
-    const html = restoration.html;
+    const html = visibility.html;
 
     await axios.patch(
       url,
@@ -682,7 +918,13 @@ export class DrupalSandboxCleanupService {
       { headers: this.headers, timeout: this.requestTimeoutMs },
     );
 
-    return { purgedCount, updated: true, targetUuid: nodeUuid, restored };
+    return {
+      purgedCount,
+      updated: true,
+      targetUuid: nodeUuid,
+      restored,
+      visibilityChanges,
+    };
   }
 }
 
@@ -783,19 +1025,30 @@ const main = async (): Promise<void> => {
     });
 
     const restored = result.restored ?? [];
+    const visibilityChanges = result.visibilityChanges ?? [];
 
     if (dryRun) {
       for (const { selector, matches } of result.matches ?? []) {
         logger.log(`  ${selector} -> ${matches} coincidencia(s)`);
       }
 
+      for (const code of result.preserved ?? []) {
+        logger.log(`  = se PRESERVA "${code}": es la unica copia de su comite`);
+      }
+
       for (const title of restored) {
         logger.log(`  + se repondria el panel de universidad "${title}"`);
       }
 
+      for (const change of visibilityChanges) {
+        logger.log(`  ~ ${change}`);
+      }
+
       logger.log(
         `[DRUPAL_CLEANUP_DRY_RUN] Se purgarian ${result.purgedCount} bloque(s) | ` +
+          `Se preservarian ${(result.preserved ?? []).length} | ` +
           `Se repondrian ${restored.length} panel(es) | ` +
+          `Cambios de visibilidad: ${visibilityChanges.length} | ` +
           `Escrituras: 0 | UUID: ${result.targetUuid}`,
       );
 
@@ -806,9 +1059,14 @@ const main = async (): Promise<void> => {
       logger.log(`Panel de universidad repuesto: "${title}".`);
     }
 
+    for (const change of visibilityChanges) {
+      logger.log(`Visibilidad: ${change}.`);
+    }
+
     logger.log(
       `[DRUPAL_CLEANUP_SUCCESS] Purgados: ${result.purgedCount} bloque(s) | ` +
         `Repuestos: ${restored.length} panel(es) | ` +
+        `Cambios de visibilidad: ${visibilityChanges.length} | ` +
         `Actualizado: ${result.updated} | UUID: ${result.targetUuid}`,
     );
   } finally {

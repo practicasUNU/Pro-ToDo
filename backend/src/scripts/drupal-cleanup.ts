@@ -309,7 +309,14 @@ const main = async (): Promise<void> => {
       return;
     }
 
-    const purged = purgeMarkedBlocks(html, selectors);
+    // Guard NEUTRO, y es una decision sobre que es esta herramienta. El script
+    // de sandbox corre solo y con una lista de serie, asi que necesita una red
+    // que le impida despublicar el unico ejemplar de un comite. Esta es
+    // manual: exige `--uuid`, simula por defecto y ENUMERA lo que se va a
+    // llevar antes de tocar nada. Aqui el operador ya ha visto la lista, de
+    // modo que una heuristica que le ignore el selector seria un estorbo, no
+    // una proteccion.
+    const purged = purgeMarkedBlocks(html, selectors, () => false);
 
     await cleaner.patchBody(flags.uuid, purged.html, format);
 

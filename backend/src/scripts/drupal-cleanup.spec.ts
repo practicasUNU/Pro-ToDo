@@ -7,6 +7,19 @@ import {
 
 import { purgeMarkedBlocks } from './cleanup-drupal-sandbox';
 
+import type { PurgeGuard } from './cleanup-drupal-sandbox';
+
+/**
+ * El guard que esta herramienta usa en produccion: ninguno.
+ *
+ * `drupal-cleanup` es la via MANUAL —exige `--uuid`, simula por defecto y
+ * enumera lo que va a quitar—, de modo que manda el selector del operador y no
+ * la heuristica de `preserveLoneInjectedCommittee`, que es la red del script de
+ * sandbox automatico. Estas pruebas reproducen esa decision; si se omitiera,
+ * estarian verificando un camino que el script no recorre.
+ */
+const NEUTRAL_GUARD: PurgeGuard = () => false;
+
 /** Panel de universidad: estructura del portal, SIN marcador de inyeccion. */
 const UNIVERSITY_PANEL = (siglas: string): string =>
   `<div class="panel panel-default">` +
@@ -120,7 +133,7 @@ describe('drupal-cleanup · purga quirurgica', () => {
       );
 
       // 2. Act ⚙️
-      const purged = purgeMarkedBlocks(PAGE, selectors);
+      const purged = purgeMarkedBlocks(PAGE, selectors, NEUTRAL_GUARD);
 
       // 3. Assert 🎯
       expect(purged.purgedCount).toBe(1);
@@ -139,6 +152,7 @@ describe('drupal-cleanup · purga quirurgica', () => {
       const purged = purgeMarkedBlocks(
         vacia,
         buildPurgeSelectors(parseFlags(['--remove-root-panels'])),
+        NEUTRAL_GUARD,
       );
 
       // 3. Assert 🎯
@@ -158,6 +172,7 @@ describe('drupal-cleanup · purga quirurgica', () => {
       const purged = purgeMarkedBlocks(
         bien,
         buildPurgeSelectors(parseFlags(['--remove-root-panels'])),
+        NEUTRAL_GUARD,
       );
 
       // 3. Assert 🎯
@@ -178,6 +193,7 @@ describe('drupal-cleanup · purga quirurgica', () => {
       const purged = purgeMarkedBlocks(
         bien,
         buildPurgeSelectors(parseFlags(['--injected-only'])),
+        NEUTRAL_GUARD,
       );
 
       // 3. Assert 🎯
