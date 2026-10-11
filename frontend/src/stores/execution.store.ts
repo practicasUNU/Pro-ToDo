@@ -2,6 +2,7 @@ import { defineStore, acceptHMRUpdate } from 'pinia';
 import { computed, ref } from 'vue';
 
 import * as fsmExecutionsService from '@services/fsm-executions.service';
+import { joinFlowRoom, leaveFlowRoom } from '@services/socket-events.service';
 
 import { ExecutionState } from '@/types/execution';
 
@@ -12,6 +13,7 @@ import type {
   FlowPausedEvent,
   FlowResumedEvent,
   NodeErrorEvent,
+  RoomAck,
   WorkflowExecutionResult,
 } from '@/types/execution';
 
@@ -202,6 +204,48 @@ export const useExecutionStore = defineStore('execution', () => {
     joinedFlowId.value = flowId;
   };
 
+  /**
+   * Entra en la sala de un flujo, abandonando la anterior. Idempotente.
+   *
+   * El store importa aqui un servicio de SOCKET, no el transporte HTTP: la
+   * prohibicion de `frontend-architecture.md` §2.1 apunta a Axios y a `@boot`,
+   * y `socket-events.service` es una capa de servicio del proyecto igual que
+   * `fsm-executions.service`. Los nombres de evento siguen sin aparecer aqui.
+   *
+   * `joinedFlowId` se fija SOLO con acuse afirmativo: el gateway rechaza un
+   * UUID mal formado y el tope `MAX_ROOMS_PER_SOCKET` devolviendo
+   * `{ ok: false }`, y apuntar una sala en la que no se esta haria que la
+   * re-suscripcion tras reconectar insistiera en un destino inexistente.
+   */
+  const joinFlow = async (flowId: string): Promise<RoomAck> => {
+    if (joinedFlowId.value === flowId) {
+      return { ok: true };
+    }
+
+    if (joinedFlowId.value !== null) {
+      await leaveFlowRoom(joinedFlowId.value);
+      joinedFlowId.value = null;
+    }
+
+    const ack = await joinFlowRoom(flowId);
+
+    if (ack.ok) {
+      joinedFlowId.value = flowId;
+    }
+
+    return ack;
+  };
+
+  /** Abandona la sala actual, si habia alguna. Idempotente. */
+  const leaveFlow = async (): Promise<void> => {
+    if (joinedFlowId.value === null) {
+      return;
+    }
+
+    await leaveFlowRoom(joinedFlowId.value);
+    joinedFlowId.value = null;
+  };
+
   return {
     executions,
     activeExecution,
@@ -221,6 +265,8 @@ export const useExecutionStore = defineStore('execution', () => {
     fetchExecution,
     resumeExecution,
     setJoinedFlow,
+    joinFlow,
+    leaveFlow,
   };
 });
 

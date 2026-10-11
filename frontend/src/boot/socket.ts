@@ -7,6 +7,8 @@ import {
   disconnectSocket,
   getSocket,
 } from '@services/socket.client';
+import { joinFlowRoom } from '@services/socket-events.service';
+import { useExecutionStore } from '@stores/execution.store';
 import { useSessionStore } from '@stores/session.store';
 
 /** Ruta del login: destino del rechazo por credencial invalida. */
@@ -34,6 +36,7 @@ const WS_INVALID_TOKEN = 'WS_INVALID_TOKEN';
  */
 export default defineBoot(({ router, store }) => {
   const sessionStore = useSessionStore(store);
+  const executionStore = useExecutionStore(store);
 
   // Una recarga de pagina con sesion viva debe reconectar sola: el store se
   // rehidrata de `localStorage` al crearse, asi que aqui ya hay token si lo hay.
@@ -50,6 +53,18 @@ export default defineBoot(({ router, store }) => {
       authenticateSocket(accessToken);
     },
   );
+
+  // Las salas viven en el SERVIDOR y mueren con la conexion. Tras un micro-corte
+  // o un reinicio de Nest el socket vuelve solo, pero FUERA de toda sala: la
+  // vista seguiria abierta, sin errores en consola, y simplemente dejaria de
+  // recibir eventos. Re-suscribirse al reconectar es lo que cierra ese hueco.
+  getSocket().on('connect', () => {
+    const { joinedFlowId } = executionStore;
+
+    if (joinedFlowId !== null) {
+      void joinFlowRoom(joinedFlowId);
+    }
+  });
 
   getSocket().on('connect_error', (error: Error) => {
     // SOLO la credencial cierra la sesion. `connect_error` tambien se dispara

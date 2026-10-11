@@ -7811,3 +7811,67 @@ propio frontend. Comprobado que los tres `.env` reales siguen ignorados.
   reconexion.
 - Emision por la sala `user_*` cuando exista algun aviso dirigido a una persona.
 - BullMQ para el desacoplamiento productor-consumidor (`rules/architecture-patterns.md` §5).
+
+---
+
+## Consumidor visual del canal y RBAC de plantillas (rama `feat/fsm-realtime`)
+
+Tras la tanda anterior la infraestructura de tiempo real estaba completa pero **muda**: el backend
+emitia, el cliente recibia y `useExecutionStore` parcheaba su estado, pero el operador no veia nada.
+Esta tanda cierra esa ultima pulgada y resuelve dos de los pendientes anotados arriba.
+
+### Por que el aviso vive en el composable y no en el store
+
+`useExecutionSocket` pasaba las referencias del store directamente al canal. Ahora las envuelve: el
+store sigue parcheando el estado y el composable anade el `$q.notify`. Meter Quasar dentro del store
+lo sacaria de la capa de logica de negocio (`rules/frontend-architecture.md` §2.1) y, sobre todo,
+obligaria a levantar un DOM para probar cualquier transicion de estado. El composable ya era la
+costura entre store y transporte; es el sitio natural para la que va entre store y UI.
+
+El aviso de pausa es **persistente** (`timeout: 0`) porque lleva la accion de reanudar (CU-09): uno
+que se desvanece solo convertiria el reintento en cuestion de haber estado mirando la pantalla. El
+store propaga la excepcion de `resumeExecution` y es el composable quien la traduce, porque el 409
+(ya no esta PAUSADO), el 400 (su nodo desaparecio del esquema) y el 429 (motor saturado) llegan con
+textos distintos.
+
+Un `node:error` **LEVE no notifica**. Lo emite un nodo que va a reintentar y el flujo sigue
+avanzando: llenar la pantalla de avisos por algo que se resuelve solo acabaria tapando al `URGENTE`
+que si importa.
+
+Nota de contrato: `FlowPausedEvent` **no trae `nodeId`**. El paso detenido es `activeCursor`.
+
+### Por que `joinFlow` vive en el store
+
+`joinFlowRoom`/`leaveFlowRoom` existian desde la tanda anterior y no las llamaba nadie, y
+`joinedFlowId` se escribia sin leerse jamas. `joinFlow` cierra el circuito: abandona la sala previa,
+entra en la nueva y apunta `joinedFlowId` **solo con acuse afirmativo** — el gateway rechaza un UUID
+mal formado y el tope `MAX_ROOMS_PER_SOCKET` devolviendo `{ok: false}`, y apuntar una sala en la que
+no se esta haria que la re-suscripcion insistiera en un destino inexistente.
+
+El store importa aqui un servicio de socket. La prohibicion de §2.1 apunta a Axios y a `@boot`;
+`socket-events.service` es una capa de servicio como `fsm-executions.service`, y los nombres de
+evento siguen sin aparecer en el store.
+
+### Por que hay un listener de `connect`
+
+Las salas viven en el **servidor** y mueren con la conexion. Tras un micro-corte o un reinicio de
+Nest el socket vuelve solo, pero fuera de toda sala: la vista seguiria abierta, sin errores en
+consola, y simplemente dejaria de recibir eventos. `boot/socket.ts` reengancha `joinedFlowId` al
+reconectar.
+
+### Estado de la verificacion
+
+- `npm run test` en `frontend/`: **51 ficheros, 980 pruebas**, todas en verde (antes 49 / 962).
+- `npm run typecheck` en `frontend/`: limpio.
+- `npm run lint:check` en `frontend/`: limpio.
+- Backend **sin tocar** en esta tanda.
+
+### Pendiente
+
+- **Vista de detalle de flujo que llame a `executionStore.joinFlow(flowId)`.** Sigue siendo el unico
+  hueco: el router solo tiene `/flujos` (listado), `/flujos/nuevo` y `/flujos/:id/editar`, ninguna
+  expone un flujo concreto en modo observacion. `joinFlow` y el reenganche del `connect` quedan
+  listos y probados, pero hasta que exista esa vista nadie entra en ninguna sala, de modo que los
+  avisos solo se disparan con los eventos que el gateway difunda por otras vias.
+- Emision por la sala `user_*` cuando exista algun aviso dirigido a una persona.
+- BullMQ para el desacoplamiento productor-consumidor (`rules/architecture-patterns.md` §5).

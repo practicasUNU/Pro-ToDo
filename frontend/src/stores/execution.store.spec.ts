@@ -22,7 +22,17 @@ vi.mock('@services/fsm-executions.service', () => ({
   resumeExecution: vi.fn(),
 }));
 
+// El store emite a las salas a traves de este servicio desde que `joinFlow`
+// existe. Se mockea entero: el spec comprueba el circuito, no el transporte.
+vi.mock('@services/socket-events.service', () => ({
+  joinFlowRoom: vi.fn(),
+  leaveFlowRoom: vi.fn(),
+}));
+
 const service = await import('@services/fsm-executions.service');
+const socketEvents = await import('@services/socket-events.service');
+const joinFlowRoom = vi.mocked(socketEvents.joinFlowRoom);
+const leaveFlowRoom = vi.mocked(socketEvents.leaveFlowRoom);
 const fetchExecutions = vi.mocked(service.fetchExecutions);
 const fetchExecution = vi.mocked(service.fetchExecution);
 const resumeExecution = vi.mocked(service.resumeExecution);
@@ -30,6 +40,7 @@ const resumeExecution = vi.mocked(service.resumeExecution);
 const EXECUTION_ID = '7c9e6679-7425-40de-944b-e07fc1f90ae7';
 const OTHER_EXECUTION_ID = '11111111-2222-4333-8444-555555555555';
 const FLOW_ID = 'b3f1c2d4-5a6b-4c7d-8e9f-0a1b2c3d4e5f';
+const OTHER_FLOW_ID = 'c4e2d3f5-6b7c-4d8e-9f0a-1b2c3d4e5f60';
 const LOG_PATH = '/logs/execution-2026-10-10.log';
 
 const buildSummary = (
@@ -387,6 +398,86 @@ describe('useExecutionStore · estado reactivo de las ejecuciones del motor', ()
 
       // 3. Assert
       expect(store.isResuming).toBe(false);
+    });
+  });
+  describe('6. Salas del canal de eventos', () => {
+    beforeEach(() => {
+      joinFlowRoom.mockReset();
+      leaveFlowRoom.mockReset();
+    });
+
+    it('6.1 deberia apuntar la sala cuando el gateway la acepta', async () => {
+      // 1. Arrange
+      const store = useExecutionStore();
+      joinFlowRoom.mockResolvedValue({ ok: true });
+
+      // 2. Act
+      const ack = await store.joinFlow(FLOW_ID);
+
+      // 3. Assert
+      expect(ack.ok).toBe(true);
+      expect(joinFlowRoom).toHaveBeenCalledWith(FLOW_ID);
+      expect(store.joinedFlowId).toBe(FLOW_ID);
+    });
+
+    it('6.2 NO deberia apuntar la sala cuando el gateway la rechaza', async () => {
+      // 1. Arrange: un UUID mal formado o el tope de salas por socket devuelven
+      //    `{ ok: false }`. Apuntar una sala en la que no se esta haria que la
+      //    re-suscripcion tras reconectar insistiera en un destino inexistente.
+      const store = useExecutionStore();
+      joinFlowRoom.mockResolvedValue({ ok: false, reason: 'no es un UUID' });
+
+      // 2. Act
+      const ack = await store.joinFlow('flujo-invalido');
+
+      // 3. Assert
+      expect(ack.ok).toBe(false);
+      expect(store.joinedFlowId).toBeNull();
+    });
+
+    it('6.3 deberia abandonar la sala anterior antes de entrar en otra', async () => {
+      // 1. Arrange
+      const store = useExecutionStore();
+      joinFlowRoom.mockResolvedValue({ ok: true });
+      leaveFlowRoom.mockResolvedValue({ ok: true });
+      await store.joinFlow(FLOW_ID);
+
+      // 2. Act
+      await store.joinFlow(OTHER_FLOW_ID);
+
+      // 3. Assert: quedarse en ambas mezclaria las trazas de dos ejecuciones.
+      expect(leaveFlowRoom).toHaveBeenCalledWith(FLOW_ID);
+      expect(store.joinedFlowId).toBe(OTHER_FLOW_ID);
+    });
+
+    it('6.4 deberia ser idempotente sobre la sala ya ocupada', async () => {
+      // 1. Arrange
+      const store = useExecutionStore();
+      joinFlowRoom.mockResolvedValue({ ok: true });
+      await store.joinFlow(FLOW_ID);
+      joinFlowRoom.mockClear();
+
+      // 2. Act
+      await store.joinFlow(FLOW_ID);
+
+      // 3. Assert: sin esto, cada montaje de la vista repetiria el handshake.
+      expect(joinFlowRoom).not.toHaveBeenCalled();
+      expect(leaveFlowRoom).not.toHaveBeenCalled();
+    });
+
+    it('6.5 deberia limpiar joinedFlowId al abandonar la sala', async () => {
+      // 1. Arrange
+      const store = useExecutionStore();
+      joinFlowRoom.mockResolvedValue({ ok: true });
+      leaveFlowRoom.mockResolvedValue({ ok: true });
+      await store.joinFlow(FLOW_ID);
+
+      // 2. Act
+      await store.leaveFlow();
+
+      // 3. Assert
+      expect(leaveFlowRoom).toHaveBeenCalledWith(FLOW_ID);
+      expect(store.joinedFlowId).toBeNull();
     });
   });
 });
