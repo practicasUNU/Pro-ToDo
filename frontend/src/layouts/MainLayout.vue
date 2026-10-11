@@ -3,6 +3,7 @@ import { computed, ref } from 'vue';
 import { useRoute } from 'vue-router';
 
 import AppHeader from '@components/shared/AppHeader.vue';
+import { useSessionStore } from '@stores/session.store';
 
 import { useExecutionSocket } from '@/composables/useExecutionSocket';
 import { useSessionMonitor } from '@/composables/useSessionMonitor';
@@ -21,6 +22,11 @@ const ROUTE_BREADCRUMBS: Record<string, string> = {
 };
 
 const route = useRoute();
+
+// Decide que entradas del menu se pintan. Es comodidad, NO seguridad: quien
+// escriba la URL a mano se topa igualmente con la guarda del router y, detras,
+// con el RolesGuard del backend.
+const sessionStore = useSessionStore();
 
 // Vigila la caducidad del JWT. Se engancha aqui porque este layout envuelve
 // todas las rutas autenticadas y se desmonta al salir a /login.
@@ -57,14 +63,14 @@ const toggleLeftDrawer = (): void => {
           <q-item-section class="pd-nav">Inicio</q-item-section>
         </q-item>
 
-        <q-item to="/users" clickable v-ripple>
+        <q-item v-if="sessionStore.isAdmin" to="/users" clickable v-ripple>
           <q-item-section avatar>
             <q-icon name="group" size="20px" />
           </q-item-section>
           <q-item-section class="pd-nav">Usuarios</q-item-section>
         </q-item>
 
-        <q-item to="/ip-whitelist" clickable v-ripple>
+        <q-item v-if="sessionStore.isAdmin" to="/ip-whitelist" clickable v-ripple>
           <q-item-section avatar>
             <q-icon name="shield" size="20px" />
           </q-item-section>
@@ -112,7 +118,7 @@ const toggleLeftDrawer = (): void => {
           <q-item-section class="pd-nav">Nuevo Flujo</q-item-section>
         </q-item>
 
-        <q-item to="/plantillas-flujo" clickable v-ripple>
+        <q-item v-if="sessionStore.isAdmin" to="/plantillas-flujo" clickable v-ripple>
           <q-item-section avatar>
             <q-icon name="schema" size="20px" />
           </q-item-section>

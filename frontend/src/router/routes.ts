@@ -70,11 +70,15 @@ const routes: RouteRecordRaw[] = [
       {
         path: 'plantillas-flujo',
         component: () => import('@/pages/workflow-templates/WorkflowTemplatesPage.vue'),
-        // SIN requiresAdmin a proposito, aunque las ESCRITURAS del backend sean
-        // solo de ADMIN: un EDITOR necesita consultar el catalogo para saber de
-        // que puede partir. El 403 en el alta y la edicion lo impone el
-        // servidor, que es la autoridad; bloquear la ruta entera le ocultaria
-        // informacion que si puede ver.
+        // Reservada a ADMIN por decision de producto: el catalogo maestro de
+        // plantillas es administracion, no operacion. Un EDITOR instancia
+        // pipelines derivados, nunca administra el catalogo.
+        //
+        // DIVERGENCIA DELIBERADA con el backend: WorkflowTemplatesController
+        // sigue admitiendo @Roles(ADMIN, EDITOR) en LECTURA, de modo que la API
+        // le serviria el listado a un EDITOR que la llamase a mano. El cierre es
+        // solo de navegacion; las ESCRITURAS si las bloquea el RolesGuard.
+        meta: { requiresAdmin: true },
       },
       {
         path: 'nodos/config-sandbox',

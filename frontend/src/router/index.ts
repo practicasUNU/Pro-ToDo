@@ -10,12 +10,8 @@ import { Dialog, Notify } from 'quasar';
 
 import { useSessionStore } from '@stores/session.store';
 
-import { UserRole } from '@/types/user';
-
+import { HOME_ROUTE, isDenied, resolveNavigation } from './navigation-guard';
 import routes from './routes';
-
-const LOGIN_ROUTE = '/login';
-const HOME_ROUTE = '/';
 
 /*
  * If not building with SSR mode, you can
@@ -43,43 +39,38 @@ export default defineRouter(({ store }) => {
     history: createHistory(import.meta.env.QUASAR_VUE_ROUTER_BASE),
   });
 
-  // Guarda de sesion. Solo mira el estado local: la autoridad real es el backend,
-  // que responde 401 si el token no vale. Esto evita pintar vistas privadas que
-  // acabarian vacias, no sustituye a la comprobacion del servidor.
+  // Guarda de navegacion. La DECISION vive en `navigation-guard.ts` como funcion
+  // pura y probable; aqui solo se adapta: se le entrega la sesion en forma plana
+  // y se traduce su veredicto a lo que espera vue-router.
   Router.beforeEach((to) => {
     const sessionStore = useSessionStore(store);
-    const requiresAuth = to.matched.some((record) => record.meta.requiresAuth);
-    const requiresAdmin = to.matched.some((record) => record.meta.requiresAdmin);
 
-    if (requiresAuth && !sessionStore.isAuthenticated) {
-      // Se recuerda el destino para volver a el tras validar el codigo.
-      return { path: LOGIN_ROUTE, query: { redirect: to.fullPath } };
+    const decision = resolveNavigation(to, {
+      isAuthenticated: sessionStore.isAuthenticated,
+      role: sessionStore.user?.role ?? null,
+    });
+
+    if (decision === true) {
+      return true;
     }
 
-    // RBAC: espejo del @Roles(UserRole.ADMIN) del backend. Evita enseñar una
-    // vista que el servidor contestaria con 403; NO es el control de acceso real,
-    // que sigue siendo el RolesGuard de NestJS.
-    if (requiresAdmin && sessionStore.user?.role !== UserRole.ADMIN) {
-      // `Dialog` importado del paquete, no `useQuasar()`: aqui no hay componente
-      // montado del que obtener la instancia.
-      Dialog.create({
-        title: 'Acceso denegado',
-        message: 'Esta seccion esta reservada a administradores. Tu cuenta no tiene ese permiso.',
-        persistent: true,
-        ok: { label: 'Entendido', unelevated: true, noCaps: true, color: 'negative' },
-      });
-
-      // Se devuelve la ruta de inicio en lugar de `next(false)`: cancelar sin mas
-      // dejaria la barra de direcciones mostrando la URL prohibida, porque el
-      // navegador ya la habia escrito.
-      return { path: HOME_ROUTE };
+    if (!isDenied(decision)) {
+      return decision;
     }
 
-    if (to.path === LOGIN_ROUTE && sessionStore.isAuthenticated) {
-      return { path: HOME_ROUTE };
-    }
+    // `Dialog` importado del paquete, no `useQuasar()`: aqui no hay componente
+    // montado del que obtener la instancia.
+    Dialog.create({
+      title: 'Acceso denegado',
+      message: 'Esta seccion esta reservada a administradores. Tu cuenta no tiene ese permiso.',
+      persistent: true,
+      ok: { label: 'Entendido', unelevated: true, noCaps: true, color: 'negative' },
+    });
 
-    return true;
+    // Se devuelve la ruta de inicio en lugar de `next(false)`: cancelar sin mas
+    // dejaria la barra de direcciones mostrando la URL prohibida, porque el
+    // navegador ya la habia escrito.
+    return { path: HOME_ROUTE };
   });
 
   // Un chunk de ruta que no carga (asset inexistente, import sin resolver, o un
