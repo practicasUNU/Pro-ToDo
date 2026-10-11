@@ -26,3 +26,28 @@ const DIACRITICS = /[̀-ͯ]/g;
  */
 export const foldDiacritics = (value: string): string =>
   value.normalize('NFD').replace(DIACRITICS, '');
+
+/**
+ * Marcas diacriticas que retira la normalizacion canonica.
+ *
+ * El rango excluye a proposito `̃` (COMBINING TILDE): sin esa exclusion la
+ * enie se perderia y "diseno" casaria con "diseño".
+ */
+const CANONICAL_DIACRITICS = /[̀-̂̄-ͯ]/g;
+
+/**
+ * Forma canonica de un texto de asunto o de un termino de filtro.
+ *
+ * Recorta y colapsa los espacios, pliega a minusculas y retira los acentos,
+ * recomponiendo despues a NFC para devolver la enie a su unico punto de codigo.
+ * Patron y asunto pasan por aqui, de modo que la comparacion se hace siempre
+ * entre dos cadenas de la misma forma.
+ */
+export const normalizeSubjectText = (value: string): string =>
+  value
+    .trim()
+    .replace(/\s+/g, ' ')
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(CANONICAL_DIACRITICS, '')
+    .normalize('NFC');

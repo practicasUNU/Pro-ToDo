@@ -32,6 +32,32 @@ const ALTERNATION_SHAPE = /^\(\?:(.+)\)$/;
 /** Forma exacta que produce `buildStartsWithPattern`. */
 const ANCHORED_SHAPE = /^\^(.*)$/;
 
+/**
+ * Marcas diacriticas que retira la normalizacion canonica.
+ *
+ * El rango excluye a proposito `\u0303` (COMBINING TILDE): sin esa exclusion la
+ * enie se perderia y el filtro "diseno" casaria con "diseño".
+ */
+const CANONICAL_DIACRITICS = /[\u0300-\u0302\u0304-\u036f]/g;
+
+/**
+ * Forma canonica de un termino de filtro.
+ *
+ * Replica exacta de `normalizeSubjectText` del backend
+ * (`backend/src/modules/nodes/utils/diacritics.util.ts`). La duplicacion es
+ * deliberada —no hay paquete compartido entre cliente y servidor— y lo que
+ * importa es que las dos copias produzcan la misma cadena: aqui se compila el
+ * patron y alli se compara contra el asunto del correo.
+ */
+export const normalizeSubjectText = (value: string): string =>
+  value
+    .trim()
+    .replace(/\s+/g, ' ')
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(CANONICAL_DIACRITICS, '')
+    .normalize('NFC');
+
 /** Neutraliza los metacaracteres para que el texto case consigo mismo. */
 export const escapeRegExpLiteral = (value: string): string =>
   value.replace(REGEXP_METACHARACTERS, '\\$&');
@@ -49,12 +75,17 @@ const unescapeRegExpLiteral = (value: string): string => value.replace(/\\(.)/g,
 const isPlainLiteral = (pattern: string): boolean =>
   pattern !== '' && escapeRegExpLiteral(unescapeRegExpLiteral(pattern)) === pattern;
 
-/** Trocea la entrada del operador en terminos limpios y sin repetir. */
+/**
+ * Trocea la entrada del operador en terminos canonicos y sin repetir.
+ *
+ * La normalizacion va ANTES del `Set`, de modo que "AÑO, año" colapsa en un
+ * unico termino en vez de generar dos alternativas equivalentes.
+ */
 export const splitSubjectTerms = (draft: string): string[] => [
   ...new Set(
     draft
       .split(TERM_SEPARATOR)
-      .map((term) => term.trim())
+      .map(normalizeSubjectText)
       .filter((term) => term !== ''),
   ),
 ];
@@ -67,10 +98,10 @@ export const splitSubjectTerms = (draft: string): string[] => [
  * `licitacion` casan lo mismo y el segundo es el que el operador reconoce al
  * volver a abrir el formulario.
  *
- * La insensibilidad a mayusculas NO se codifica aqui: la aporta el flag `i`
- * con el que la estrategia compila el patron. Expresarla en el propio texto
- * exigiria clases de caracteres por letra, ilegibles al editarlas a mano desde
- * el modo avanzado.
+ * Los terminos llegan ya en forma canonica (minusculas, sin acentos, espacios
+ * colapsados), de modo que el patron persistido es el mismo que compara el
+ * backend. El flag `i` con el que la estrategia compila sigue ahi como red de
+ * seguridad para los patrones heredados que se guardaron en mayusculas.
  */
 export const buildContainsPattern = (draft: string): string => {
   const terms = splitSubjectTerms(draft).map(escapeRegExpLiteral);
@@ -83,7 +114,7 @@ export const buildContainsPattern = (draft: string): string => {
 
 /** Compone el patron del modo "empieza por": ancla de inicio y literal escapado. */
 export const buildStartsWithPattern = (draft: string): string => {
-  const prefix = draft.trim();
+  const prefix = normalizeSubjectText(draft);
 
   return prefix === '' ? '' : `^${escapeRegExpLiteral(prefix)}`;
 };

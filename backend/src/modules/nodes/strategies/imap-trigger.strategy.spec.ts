@@ -1,3 +1,4 @@
+import { Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { plainToInstance } from 'class-transformer';
 
@@ -825,6 +826,116 @@ describe('ImapTriggerStrategy', () => {
       // 3. Assert 🎯
       expect(result.success).toBe(true);
       expect(result.data).toEqual({ status: SUBJECT_FILTERED_STATUS });
+    });
+
+    it('2ter.4 deberia casar la enie sin importar la capitalizacion', async () => {
+      // 1. Arrange 📐: la normalizacion canonica preserva `ñ` a proposito.
+      const client = buildClient();
+      useClient(client);
+      simpleParser.mockResolvedValue(buildParsedMail({ subject: 'DISEÑO WEB' }));
+      const { strategy } = buildStrategy();
+
+      // 2. Act ⚙️
+      const result = await strategy.execute(
+        buildContext(),
+        buildParams({ subjectFilterRegex: 'diseño' }),
+      );
+
+      // 3. Assert 🎯
+      expect(result.success).toBe(true);
+      expect(result.halt).toBeUndefined();
+    });
+
+    it('2ter.5 NO deberia casar la enie contra la n sin virgulilla', async () => {
+      // 1. Arrange 📐: plegar la enie haria que "ano" casara con "año", de modo
+      // que se asume la rigidez a cambio de no cambiar el significado.
+      const client = buildClient();
+      useClient(client);
+      simpleParser.mockResolvedValue(buildParsedMail({ subject: 'DISENO WEB' }));
+      const { strategy } = buildStrategy();
+
+      // 2. Act ⚙️
+      const result = await strategy.execute(
+        buildContext(),
+        buildParams({ subjectFilterRegex: 'diseño' }),
+      );
+
+      // 3. Assert 🎯
+      expect(result.success).toBe(true);
+      expect(result.data).toEqual({ status: SUBJECT_FILTERED_STATUS });
+    });
+
+    it('2ter.6 deberia casar pese a mayusculas, tildes y espacios redundantes', async () => {
+      // 1. Arrange 📐
+      const client = buildClient();
+      useClient(client);
+      simpleParser.mockResolvedValue(
+        buildParsedMail({ subject: 'PRÚEBA  IA   GÉMINI' }),
+      );
+      const { strategy } = buildStrategy();
+
+      // 2. Act ⚙️
+      const result = await strategy.execute(
+        buildContext(),
+        buildParams({ subjectFilterRegex: '(?:prueba|ia|gemini)' }),
+      );
+
+      // 3. Assert 🎯
+      expect(result.success).toBe(true);
+      expect(result.halt).toBeUndefined();
+    });
+
+    it('2ter.7 deberia trazar SUBJECT_MISMATCH con asunto y patron al descartar', async () => {
+      // 1. Arrange 📐: sin esta traza el operador no puede distinguir un
+      // descarte por asunto de un buzon vacio, que es el diagnostico que
+      // motivo el cambio.
+      const client = buildClient();
+      useClient(client);
+      simpleParser.mockResolvedValue(buildParsedMail({ subject: 'OTRA COSA' }));
+      const { strategy } = buildStrategy();
+      const log = jest
+        .spyOn(Logger.prototype, 'log')
+        .mockImplementation(() => undefined);
+
+      // 2. Act ⚙️
+      await strategy.execute(
+        buildContext(),
+        buildParams({ subjectFilterRegex: '(?:prueba|gemini)' }),
+      );
+
+      // 3. Assert 🎯
+      expect(log).toHaveBeenCalledWith(
+        expect.stringContaining('OMITIDO | REASON: SUBJECT_MISMATCH'),
+      );
+      expect(log).toHaveBeenCalledWith(expect.stringContaining('"otra cosa"'));
+      expect(log).toHaveBeenCalledWith(
+        expect.stringContaining('"(?:prueba|gemini)"'),
+      );
+    });
+
+    it('2ter.8 deberia trazar NO_MESSAGES con los filtros activos', async () => {
+      // 1. Arrange 📐: el filtro de remitente lo resuelve el servidor IMAP, de
+      // modo que un descarte por remitente solo se observa como buzon vacio.
+      const client = buildClient({ search: jest.fn().mockResolvedValue([]) });
+      useClient(client);
+      const { strategy } = buildStrategy();
+      const log = jest
+        .spyOn(Logger.prototype, 'log')
+        .mockImplementation(() => undefined);
+
+      // 2. Act ⚙️
+      await strategy.execute(
+        buildContext(),
+        buildParams({ fromFilter: 'boletin@unuware.com' }),
+      );
+
+      // 3. Assert 🎯
+      expect(log).toHaveBeenCalledWith(
+        expect.stringContaining('OMITIDO | REASON: NO_MESSAGES'),
+      );
+      expect(log).toHaveBeenCalledWith(
+        expect.stringContaining('boletin@unuware.com'),
+      );
     });
   });
 

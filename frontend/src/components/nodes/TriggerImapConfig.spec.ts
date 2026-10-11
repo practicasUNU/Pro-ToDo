@@ -240,8 +240,8 @@ describe('TriggerImapConfig · filtro de asunto por expresion regular', () => {
       // 2. Act ⚙️
       await modeSelect(wrapper).setValue('STARTS_WITH');
 
-      // 3. Assert 🎯
-      expect(store.config.subjectFilterRegex).toBe('^S_2026_');
+      // 3. Assert 🎯: el prefijo se ancla Y se normaliza a la forma canonica.
+      expect(store.config.subjectFilterRegex).toBe('^s_2026_');
     });
 
     it('4.4 deberia abrir en modo avanzado un patron heredado que no sabe expresar', () => {

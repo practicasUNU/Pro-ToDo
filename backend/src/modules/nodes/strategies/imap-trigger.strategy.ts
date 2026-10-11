@@ -15,7 +15,7 @@ import {
   DOWNLOAD_SOCKET_TIMEOUT_MS,
 } from '@modules/nodes/services/imap-client.factory';
 import { FALLBACK_ATTACHMENT_NAME_PREFIX } from '@modules/nodes/interfaces/raw-email-attachment.interface';
-import { foldDiacritics } from '@modules/nodes/utils/diacritics.util';
+import { normalizeSubjectText } from '@modules/nodes/utils/diacritics.util';
 
 import type { StatePayloadContext } from '@core/fsm/context/state-payload.context';
 import type {
@@ -600,6 +600,14 @@ export class ImapTriggerStrategy implements INodeStrategy {
       const uid = await this.findLatestMatchingUid(client, config);
 
       if (uid === null) {
+        // El filtro de remitente lo resuelve el servidor IMAP dentro de la
+        // query, de modo que un correo descartado por `fromFilter` jamas llega
+        // hasta aqui: lo unico observable es que no vuelve ningun UID. Por eso
+        // la traza enumera los filtros activos en lugar de un valor recibido.
+        this.logger.log(
+          `OMITIDO | REASON: NO_MESSAGES | filtros activos → from: "${config.fromFilter ?? '(ninguno)'}" | unreadOnly: ${config.unreadOnly}`,
+        );
+
         // Buzon vacio: exito con parada. `success: true` porque no ha fallado
         // nada —el sondeo corre cada minuto y lo habitual es no encontrar nada—
         // y `halt` para que el motor cierre la ejecucion en OMITIDO en vez de
@@ -737,7 +745,7 @@ export class ImapTriggerStrategy implements INodeStrategy {
    * editar a mano desde el modo avanzado. Amplia el conjunto de asuntos que
    * casan en flujos ya guardados, nunca lo reduce.
    *
-   * Por el mismo motivo se pliegan los acentos (`foldDiacritics`) a AMBOS
+   * Por el mismo motivo se normalizan (`normalizeSubjectText`) AMBOS
    * lados, patron y asunto. Plegar solo el asunto seria peor que no plegar: un
    * patron escrito con tilde —"Verificacion" tecleado correctamente— dejaria de
    * casar con el correo que antes atrapaba, porque el acento seguiria en el
@@ -758,10 +766,12 @@ export class ImapTriggerStrategy implements INodeStrategy {
       return true;
     }
 
+    const compiledPattern = normalizeSubjectText(config.subjectFilterRegex);
+
     let pattern: RegExp;
 
     try {
-      pattern = new RegExp(foldDiacritics(config.subjectFilterRegex), 'i');
+      pattern = new RegExp(compiledPattern, 'i');
     } catch (error) {
       const detail = error instanceof Error ? error.message : String(error);
       this.logger.warn(
@@ -770,7 +780,20 @@ export class ImapTriggerStrategy implements INodeStrategy {
       return true;
     }
 
-    return pattern.test(foldDiacritics(asString(parsed.subject)));
+    const normalizedSubject = normalizeSubjectText(asString(parsed.subject));
+
+    if (pattern.test(normalizedSubject)) {
+      return true;
+    }
+
+    // La traza se emite aqui y no en la rama de descarte del llamador porque es
+    // donde siguen vivos el asunto normalizado y el patron ya compilado, que
+    // son justo los dos valores que hay que contrastar para entender el OMITIDO.
+    this.logger.log(
+      `OMITIDO | REASON: SUBJECT_MISMATCH | asunto normalizado: "${normalizedSubject}" | patron: "${compiledPattern}"`,
+    );
+
+    return false;
   }
 
   private toExtractedEmail(

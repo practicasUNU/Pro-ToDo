@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 import {
   buildSubjectPattern,
   escapeRegExpLiteral,
+  normalizeSubjectText,
   readSubjectPattern,
   splitSubjectTerms,
 } from '@/utils/subject-filter-mode';
@@ -23,9 +24,9 @@ describe('subject-filter-mode · composicion y lectura del filtro de asunto', ()
       expect(buildSubjectPattern('CONTAINS', 'licitacion')).toBe('licitacion');
     });
 
-    it('1.3 deberia anclar el prefijo en el modo "empieza por"', () => {
-      // 1. Arrange 📐 + 2. Act ⚙️
-      expect(buildSubjectPattern('STARTS_WITH', 'S_2026_')).toBe('^S_2026_');
+    it('1.3 deberia anclar el prefijo normalizado en el modo "empieza por"', () => {
+      // 1. Arrange 📐 + 2. Act ⚙️: el prefijo tambien pasa por la forma canonica.
+      expect(buildSubjectPattern('STARTS_WITH', 'S_2026_')).toBe('^s_2026_');
     });
 
     it('1.4 deberia escapar los metacaracteres que teclee el operador', () => {
@@ -106,6 +107,44 @@ describe('subject-filter-mode · composicion y lectura del filtro de asunto', ()
 
       // 3. Assert 🎯
       expect(reading).toEqual({ mode: 'CONTAINS', draft });
+    });
+  });
+  describe('4. Normalizacion canonica de los terminos', () => {
+    it('4.1 deberia plegar mayusculas, acentos y espacios redundantes', () => {
+      // 1. Arrange 📐 + 2. Act ⚙️
+      const pattern = buildSubjectPattern('CONTAINS', '  PRÚEBA ,  IÁ  ,  GÉMINI  ,  AÑO  ');
+
+      // 3. Assert 🎯: la enie sobrevive; el resto de diacriticos no.
+      expect(pattern).toBe('(?:prueba|ia|gemini|año)');
+    });
+
+    it('4.2 deberia colapsar en uno los terminos que solo difieren en forma', () => {
+      // 1. Arrange 📐 + 2. Act ⚙️
+      const terms = splitSubjectTerms('AÑO, año,  AÑO  ');
+
+      // 3. Assert 🎯
+      expect(terms).toEqual(['año']);
+    });
+
+    it('4.3 deberia preservar la enie frente a la n sin virgulilla', () => {
+      // 1. Arrange 📐 + 2. Act ⚙️ + 3. Assert 🎯: plegar la enie haria que
+      //    "diseno" casara con "diseño", que es justo lo que no se quiere.
+      expect(normalizeSubjectText('DISEÑO Web')).toBe('diseño web');
+      expect(normalizeSubjectText('DISENO Web')).toBe('diseno web');
+    });
+
+    it('4.4 deberia devolver el borrador ya normalizado al reabrir el formulario', () => {
+      // 1. Arrange 📐 + 2. Act ⚙️
+      const reading = readSubjectPattern(buildSubjectPattern('CONTAINS', 'PRÚEBA, GÉMINI'));
+
+      // 3. Assert 🎯: se acepta perder la grafia tecleada a cambio de que el
+      //    patron persistido sea el mismo que compara el backend.
+      expect(reading).toEqual({ mode: 'CONTAINS', draft: 'prueba, gemini' });
+    });
+
+    it('4.5 deberia dejar intacto el patron del modo avanzado', () => {
+      // 1. Arrange 📐 + 2. Act ⚙️ + 3. Assert 🎯: es la valvula de escape.
+      expect(buildSubjectPattern('ADVANCED', '^ACTA\\s+N.\\d+$')).toBe('^ACTA\\s+N.\\d+$');
     });
   });
 });
