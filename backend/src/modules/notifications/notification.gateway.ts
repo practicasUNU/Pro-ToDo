@@ -1,4 +1,4 @@
-import { Logger } from '@nestjs/common';
+import { Logger, NotFoundException } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
 import {
   ConnectedSocket,
@@ -11,9 +11,11 @@ import { isUUID } from 'class-validator';
 
 import { ExecutionEventsCoordinator } from '@common/services/execution-events.coordinator';
 import { IpAccessService } from '@common/services/ip-access.service';
+import { WorkflowsService } from '@modules/workflows/workflows.service';
 import { EXECUTION_EVENT } from '@common/types/execution-events.types';
 import {
   FLOW_ROOM_PREFIX,
+  FORBIDDEN_ROOM,
   MAX_ROOMS_PER_SOCKET,
   USER_ROOM_PREFIX,
   WS_DENIED_ORIGIN,
@@ -105,6 +107,7 @@ export class NotificationGateway
     private readonly jwtService: JwtService,
     private readonly ipAccessService: IpAccessService,
     private readonly executionEvents: ExecutionEventsCoordinator,
+    private readonly workflowsService: WorkflowsService,
   ) {}
 
   /**
@@ -183,6 +186,23 @@ export class NotificationGateway
       return { ok: false, reason: 'El identificador de flujo no es un UUID.' };
     }
 
+    // El middleware del handshake deja siempre la identidad resuelta; si
+    // faltase, el socket no esta autenticado y no se le fia ninguna sala.
+    const { userId } = client.data;
+
+    if (userId === undefined || userId === '') {
+      return { ok: false, reason: FORBIDDEN_ROOM };
+    }
+
+    // Paridad con HTTP: `workflows.controller.ts` expone los flujos a `ADMIN` y
+    // `EDITOR` por igual, de modo que lo unico que se exige aqui es que el
+    // flujo EXISTA. Filtrar ademas por `createdById` haria que un editor viese
+    // en la tabla flujos cuya telemetria no recibiria nunca, y el canal WS no
+    // es el sitio para estrenar una regla de acceso que REST no aplica.
+    if (!(await this.flowExists(flowId))) {
+      return { ok: false, reason: FORBIDDEN_ROOM };
+    }
+
     // Se cuentan SOLO las salas de flujo: `client.rooms` incluye siempre la
     // sala propia del socket y la `user_*`, de modo que usar `rooms.size`
     // gastaria dos plazas del cupo en algo que el cliente no pidio.
@@ -196,6 +216,34 @@ export class NotificationGateway
     await client.join(`${FLOW_ROOM_PREFIX}${flowId}`);
 
     return { ok: true };
+  }
+
+  /**
+   * Comprueba si existe el flujo, traduciendo el 404 del servicio a un booleano.
+   *
+   * `WorkflowsService.findOne` lanza `NotFoundException` porque su llamador
+   * natural es un controlador HTTP. Aqui no hay respuesta que mapear: un flujo
+   * inexistente es una sala denegada, no un fallo del socket.
+   */
+  private async flowExists(flowId: string): Promise<boolean> {
+    try {
+      await this.workflowsService.findOne(flowId);
+
+      return true;
+    } catch (error) {
+      if (error instanceof NotFoundException) {
+        return false;
+      }
+
+      // Una caida de la base de datos no debe tumbar el socket: se deniega la
+      // sala y se deja rastro, que es lo que distingue este caso del 404.
+      this.logger.error(
+        `No se pudo comprobar el flujo "${flowId}" al inscribir la sala.`,
+        error instanceof Error ? error.stack : undefined,
+      );
+
+      return false;
+    }
   }
 
   @SubscribeMessage('flow:unsubscribe')

@@ -1,7 +1,10 @@
+import { NotFoundException } from '@nestjs/common';
+
 import { ExecutionEventsCoordinator } from '@common/services/execution-events.coordinator';
 import { EXECUTION_EVENT } from '@common/types/execution-events.types';
 import {
   FLOW_ROOM_PREFIX,
+  FORBIDDEN_ROOM,
   MAX_ROOMS_PER_SOCKET,
   USER_ROOM_PREFIX,
   WS_DENIED_ORIGIN,
@@ -55,7 +58,9 @@ const buildSocket = (overrides: Partial<SocketMock> = {}): SocketMock => {
 
   return {
     id: 'socket-1',
-    data: {},
+    // El middleware del handshake deja la identidad resuelta antes de que
+    // llegue ningun `flow:subscribe`; el doble arranca en ese mismo estado.
+    data: overrides.data ?? { userId: USER_ID, role: UserRole.EDITOR },
     rooms,
     handshake: {
       auth: { token: TOKEN },
@@ -86,6 +91,7 @@ interface Harness {
   jwtService: { verifyAsync: jest.Mock };
   ipAccessService: { isOriginAllowed: jest.Mock };
   coordinator: ExecutionEventsCoordinator;
+  workflowsService: { findOne: jest.Mock };
   emit: jest.Mock;
   to: jest.Mock;
   use: jest.Mock;
@@ -104,11 +110,15 @@ const buildHarness = (): Harness => {
     isOriginAllowed: jest.fn().mockResolvedValue(true),
   };
   const coordinator = new ExecutionEventsCoordinator();
+  const workflowsService = {
+    findOne: jest.fn().mockResolvedValue({ id: FLOW_ID }),
+  };
 
   const gateway = new NotificationGateway(
     jwtService as unknown as JwtService,
     ipAccessService as unknown as IpAccessService,
     coordinator,
+    workflowsService as unknown as WorkflowsService,
   );
 
   jest.spyOn(gateway['logger'], 'log').mockImplementation(() => undefined);
@@ -128,6 +138,7 @@ const buildHarness = (): Harness => {
     jwtService,
     ipAccessService,
     coordinator,
+    workflowsService,
     emit,
     to,
     use,
@@ -339,6 +350,78 @@ describe('NotificationGateway (canal WebSocket de eventos de ejecucion)', () => 
 
       // 3. Assert
       expect(ack.ok).toBe(true);
+    });
+
+    it('2.5bis deberia denegar la sala de un flujo inexistente', async () => {
+      // 1. Arrange 📐: `findOne` lanza 404 cuando no hay fila.
+      const harness = buildHarness();
+      harness.workflowsService.findOne.mockRejectedValue(
+        new NotFoundException('No existe el flujo.'),
+      );
+      const socket = buildSocket();
+
+      // 2. Act ⚙️
+      const ack = await harness.gateway.subscribeToFlow(
+        socket as unknown as never,
+        { flowId: FLOW_ID },
+      );
+
+      // 3. Assert 🎯: sin esta guarda, cualquier socket autenticado podia
+      // inscribirse en `flow_<uuid>` arbitrarios y sondear que llega.
+      expect(ack).toEqual({ ok: false, reason: FORBIDDEN_ROOM });
+      expect(socket.join).not.toHaveBeenCalled();
+    });
+
+    it('2.5ter deberia denegar la sala a un socket sin identidad resuelta', async () => {
+      // 1. Arrange 📐
+      const { gateway } = buildHarness();
+      const socket = buildSocket({ data: {} });
+
+      // 2. Act ⚙️
+      const ack = await gateway.subscribeToFlow(socket as unknown as never, {
+        flowId: FLOW_ID,
+      });
+
+      // 3. Assert 🎯
+      expect(ack).toEqual({ ok: false, reason: FORBIDDEN_ROOM });
+      expect(socket.join).not.toHaveBeenCalled();
+    });
+
+    it('2.5quater deberia admitir a un EDITOR en la sala de un flujo existente', async () => {
+      // 1. Arrange 📐: paridad con HTTP. `workflows.controller.ts` expone los
+      // flujos a ADMIN y EDITOR por igual, asi que el rol no discrimina salas.
+      const harness = buildHarness();
+      const socket = buildSocket({
+        data: { userId: USER_ID, role: UserRole.EDITOR },
+      });
+
+      // 2. Act ⚙️
+      const ack = await harness.gateway.subscribeToFlow(
+        socket as unknown as never,
+        { flowId: FLOW_ID },
+      );
+
+      // 3. Assert 🎯
+      expect(ack).toEqual({ ok: true });
+      expect(socket.join).toHaveBeenCalledWith(`${FLOW_ROOM_PREFIX}${FLOW_ID}`);
+    });
+
+    it('2.5quinquies deberia admitir a un ADMIN en la sala de un flujo existente', async () => {
+      // 1. Arrange 📐
+      const harness = buildHarness();
+      const socket = buildSocket({
+        data: { userId: USER_ID, role: UserRole.ADMIN },
+      });
+
+      // 2. Act ⚙️
+      const ack = await harness.gateway.subscribeToFlow(
+        socket as unknown as never,
+        { flowId: FLOW_ID },
+      );
+
+      // 3. Assert 🎯
+      expect(ack).toEqual({ ok: true });
+      expect(socket.join).toHaveBeenCalledWith(`${FLOW_ROOM_PREFIX}${FLOW_ID}`);
     });
 
     it('2.6 deberia abandonar la sala del flujo al desuscribirse', async () => {

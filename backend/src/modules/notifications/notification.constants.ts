@@ -13,6 +13,16 @@ export const WS_DENIED_ORIGIN = 'WS_DENIED_ORIGIN';
 export const WS_INVALID_TOKEN = 'WS_INVALID_TOKEN';
 
 /**
+ * Rechazo de `flow:subscribe`. Viaja como `reason` del acuse, no como error de
+ * handshake: la conexion sigue viva y solo se deniega ESA sala.
+ *
+ * Es el mismo valor tanto si el flujo no existe como si el socket no esta
+ * autenticado, a proposito: distinguirlos convertiria el gateway en un oraculo
+ * para averiguar que UUID de flujo son reales.
+ */
+export const FORBIDDEN_ROOM = 'FORBIDDEN_ROOM';
+
+/**
  * Salas de flujo que un solo socket puede ocupar a la vez.
  *
  * No es una cifra de capacidad sino un tope de abuso: un socket ya autenticado

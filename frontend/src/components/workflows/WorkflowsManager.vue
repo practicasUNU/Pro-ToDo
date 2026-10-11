@@ -1,7 +1,8 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue';
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue';
 import { useQuasar, type QTableColumn } from 'quasar';
 
+import { useExecutionStore } from '@stores/execution.store';
 import { useWorkflowTemplatesStore } from '@stores/workflow-templates.store';
 import { useWorkflowsStore } from '@stores/workflows.store';
 
@@ -11,6 +12,9 @@ import WorkflowDialog from './WorkflowDialog.vue';
 
 import { extractApiErrorMessage } from '@/utils/api-error';
 
+import { ExecutionState } from '@/types/execution';
+
+import type { ExecutionSummary } from '@/types/execution';
 import type { PipelineSummary } from '@/types/pipeline';
 
 const $q = useQuasar();
@@ -18,6 +22,10 @@ const workflowsStore = useWorkflowsStore();
 // Solo para resolver el NOMBRE de la plantilla de origen: la tabla recibe un
 // `templateId`, y un UUID no le dice nada al operador.
 const templatesStore = useWorkflowTemplatesStore();
+// Telemetria en vivo de cada fila. Los escuchadores del canal los engancha
+// `useExecutionSocket` una sola vez en `MainLayout`, de modo que aqui solo se
+// gestiona la pertenencia a las salas.
+const executionStore = useExecutionStore();
 
 const isEditorOpen = ref(false);
 const isDeleteDialogOpen = ref(false);
@@ -67,6 +75,10 @@ const columns: QTableColumn<PipelineSummary>[] = [
   { name: 'actions', label: 'Acciones', field: 'id', align: 'center' },
 ];
 
+/** Ejecucion vigente de un flujo, o `null` si nunca se ha disparado. */
+const resolveExecution = (workflow: PipelineSummary): ExecutionSummary | null =>
+  executionStore.executionByFlowId.get(workflow.id) ?? null;
+
 const loadCatalog = async (): Promise<void> => {
   try {
     // Las plantillas se piden en paralelo y con las retiradas incluidas: un
@@ -77,6 +89,32 @@ const loadCatalog = async (): Promise<void> => {
     $q.notify({
       type: 'negative',
       message: extractApiErrorMessage(error, 'No se pudo cargar el catalogo de flujos'),
+    });
+  }
+};
+
+/**
+ * Relanza la ejecucion detenida de un flujo (CU-09).
+ *
+ * El error se decide aqui y no en el store: la capa de negocio deja propagar la
+ * excepcion y es el componente quien elige el mensaje
+ * (`frontend-architecture.md` §2.1). El estado de la fila no se toca a mano
+ * —lo repinta el evento `flow:resumed` que llega por el canal.
+ */
+const resumeExecution = async (workflow: PipelineSummary): Promise<void> => {
+  const execution = resolveExecution(workflow);
+
+  if (execution === null) {
+    return;
+  }
+
+  try {
+    await executionStore.resumeExecution(execution.executionId);
+    $q.notify({ type: 'positive', message: 'Ejecucion reanudada' });
+  } catch (error) {
+    $q.notify({
+      type: 'negative',
+      message: extractApiErrorMessage(error, 'No se pudo reanudar la ejecucion'),
     });
   }
 };
@@ -146,7 +184,30 @@ const activateWorkflow = async (workflow: PipelineSummary): Promise<void> => {
   }
 };
 
-onMounted(loadCatalog);
+/**
+ * Entra en la sala de cada flujo del catalogo.
+ *
+ * Va DESPUES de cargar: hasta que no responde el listado no se sabe que salas
+ * pedir. Un acuse negativo no interrumpe al resto —el gateway deniega una sala
+ * por flujo inexistente o por tope de socket—, de modo que un flujo retirado
+ * entre la carga y la suscripcion no deja la tabla a medio suscribir.
+ */
+const subscribeToCatalog = async (): Promise<void> => {
+  await Promise.all(
+    workflowsStore.workflows.map((workflow) => executionStore.joinFlow(workflow.id)),
+  );
+};
+
+onMounted(async () => {
+  await loadCatalog();
+  await subscribeToCatalog();
+});
+
+// Las salas viven en el servidor: sin abandonarlas, el socket seguiria recibiendo
+// la telemetria de todo el catalogo mucho despues de cerrar la tabla.
+onBeforeUnmount(() => {
+  void executionStore.leaveAllFlows();
+});
 </script>
 
 <template>
@@ -224,21 +285,55 @@ onMounted(loadCatalog);
            Antes habia aqui un `q-toggle` que duplicaba la conmutacion con la
            botonera y, ademas, desactivaba un flujo en marcha con un solo clic
            saltandose el temporizador que exige CU-10. -->
+      <!-- El estado de EJECUCION manda sobre el de habilitacion: a un operador
+           le importa mas que el flujo este detenido ahora mismo que si quedo
+           habilitado frente a los disparadores. Sin ejecucion viva se cae al
+           badge de siempre. -->
       <template #body-cell-status="cellProps">
         <q-td :props="cellProps">
-          <q-badge
-            class="pd-badge"
-            :class="cellProps.row.active ? 'pd-badge--active' : 'pd-badge--inactive'"
+          <template v-if="resolveExecution(cellProps.row)?.state === ExecutionState.PAUSADO">
+            <q-badge class="pd-badge row-grave" data-test="status-paused"> Pausado </q-badge>
+            <q-btn
+              flat
+              round
+              dense
+              icon="play_arrow"
+              data-test="resume-execution"
+              :loading="executionStore.isResuming"
+              @click="resumeExecution(cellProps.row)"
+            >
+              <q-tooltip>Reanudar la ejecucion detenida (CU-09)</q-tooltip>
+            </q-btn>
+            <q-tooltip>
+              {{ resolveExecution(cellProps.row)?.failureReason ?? 'Ejecucion detenida' }}
+            </q-tooltip>
+          </template>
+
+          <template
+            v-else-if="resolveExecution(cellProps.row)?.state === ExecutionState.EN_PROCESO"
           >
-            {{ cellProps.row.active ? 'Activo' : 'Inactivo' }}
-          </q-badge>
-          <q-tooltip>
-            {{
-              cellProps.row.active
-                ? 'Habilitado frente a los disparadores automaticos'
-                : 'No se disparara hasta que lo habilites'
-            }}
-          </q-tooltip>
+            <q-badge class="pd-badge pd-badge--active" data-test="status-running">
+              En Proceso
+            </q-badge>
+            <q-spinner class="q-ml-xs" size="1em" />
+            <q-tooltip>El motor esta recorriendo el pipeline ahora mismo</q-tooltip>
+          </template>
+
+          <template v-else>
+            <q-badge
+              class="pd-badge"
+              :class="cellProps.row.active ? 'pd-badge--active' : 'pd-badge--inactive'"
+            >
+              {{ cellProps.row.active ? 'Activo' : 'Inactivo' }}
+            </q-badge>
+            <q-tooltip>
+              {{
+                cellProps.row.active
+                  ? 'Habilitado frente a los disparadores automaticos'
+                  : 'No se disparara hasta que lo habilites'
+              }}
+            </q-tooltip>
+          </template>
         </q-td>
       </template>
 

@@ -59,10 +59,8 @@ export default defineBoot(({ router, store }) => {
   // vista seguiria abierta, sin errores en consola, y simplemente dejaria de
   // recibir eventos. Re-suscribirse al reconectar es lo que cierra ese hueco.
   getSocket().on('connect', () => {
-    const { joinedFlowId } = executionStore;
-
-    if (joinedFlowId !== null) {
-      void joinFlowRoom(joinedFlowId);
+    for (const flowId of executionStore.joinedFlowIds) {
+      void joinFlowRoom(flowId);
     }
   });
 

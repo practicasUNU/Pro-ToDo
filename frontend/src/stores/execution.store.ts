@@ -40,7 +40,7 @@ export const useExecutionStore = defineStore('execution', () => {
   const executions = ref<ExecutionSummary[]>([]);
   const activeExecution = ref<ExecutionDetail | ExecutionSummary | null>(null);
   const nodeEvents = ref<NodeErrorEvent[]>([]);
-  const joinedFlowId = ref<string | null>(null);
+  const joinedFlowIds = ref<Set<string>>(new Set());
   const isLoading = ref(false);
   const isResuming = ref(false);
 
@@ -59,6 +59,30 @@ export const useExecutionStore = defineStore('execution', () => {
   const isRunning = computed<boolean>(
     () => currentState.value === ExecutionState.EN_PROCESO,
   );
+
+  /**
+   * Ultima ejecucion conocida de cada flujo, indexada por `flowId`.
+   *
+   * Lo consume la tabla de flujos para pintar el estado de cada fila. Se deriva
+   * una sola vez por cambio en lugar de que cada celda recorra `executions`,
+   * que convertiria el pintado en cuadratico sobre el catalogo.
+   *
+   * "Ultima" se decide por `startedAt`: un flujo puede acumular ejecuciones y
+   * la fila debe reflejar la vigente, no la primera que devolvio la API.
+   */
+  const executionByFlowId = computed<Map<string, ExecutionSummary>>(() => {
+    const index = new Map<string, ExecutionSummary>();
+
+    for (const execution of executions.value) {
+      const current = index.get(execution.flowId);
+
+      if (current === undefined || execution.startedAt >= current.startedAt) {
+        index.set(execution.flowId, execution);
+      }
+    }
+
+    return index;
+  });
 
   /** Traza mas reciente; `nodeEvents` se mantiene en orden descendente. */
   const lastNodeError = computed<NodeErrorEvent | null>(
@@ -87,12 +111,37 @@ export const useExecutionStore = defineStore('execution', () => {
   const patchSummary = (
     executionId: string,
     patch: Partial<ExecutionSummary>,
+    seed?: Pick<ExecutionSummary, 'flowId' | 'startedAt'>,
   ): void => {
-    executions.value = executions.value.map((execution) =>
-      execution.executionId === executionId
-        ? { ...execution, ...patch }
-        : execution,
+    const isKnown = executions.value.some(
+      (execution) => execution.executionId === executionId,
     );
+
+    if (isKnown) {
+      executions.value = executions.value.map((execution) =>
+        execution.executionId === executionId
+          ? { ...execution, ...patch }
+          : execution,
+      );
+    } else if (seed !== undefined) {
+      // La tabla de flujos sigue salas de flujos que quiza nunca listaron una
+      // ejecucion: sin esta rama, el primer `flow:paused` de una ejecucion
+      // recien nacida no pintaria nada y la fila quedaria mintiendo.
+      executions.value = [
+        ...executions.value,
+        {
+          executionId,
+          flowId: seed.flowId,
+          state: ExecutionState.EN_PROCESO,
+          activeCursor: null,
+          logFilePath: null,
+          failureReason: null,
+          startedAt: seed.startedAt,
+          updatedAt: seed.startedAt,
+          ...patch,
+        },
+      ];
+    }
 
     if (belongsToActive(executionId) && activeExecution.value !== null) {
       activeExecution.value = { ...activeExecution.value, ...patch };
@@ -101,30 +150,38 @@ export const useExecutionStore = defineStore('execution', () => {
 
   /** El motor detuvo la ejecucion: queda reanudable (CU-09). */
   const handleFlowPaused = (event: FlowPausedEvent): void => {
-    patchSummary(event.executionId, {
-      state: ExecutionState.PAUSADO,
-      activeCursor: event.activeCursor,
-      ...(event.errorMessage !== undefined
-        ? { failureReason: event.errorMessage }
-        : {}),
-      // Solo si el evento trae ruta: un `null` incondicional borraria una ruta
-      // anterior perfectamente valida, que es la misma precaucion que toma
-      // `pauseAt` en el backend.
-      ...(event.logFilePath !== undefined && event.logFilePath !== null
-        ? { logFilePath: event.logFilePath }
-        : {}),
-    });
+    patchSummary(
+      event.executionId,
+      {
+        state: ExecutionState.PAUSADO,
+        activeCursor: event.activeCursor,
+        ...(event.errorMessage !== undefined
+          ? { failureReason: event.errorMessage }
+          : {}),
+        // Solo si el evento trae ruta: un `null` incondicional borraria una
+        // ruta anterior perfectamente valida, que es la misma precaucion que
+        // toma `pauseAt` en el backend.
+        ...(event.logFilePath !== undefined && event.logFilePath !== null
+          ? { logFilePath: event.logFilePath }
+          : {}),
+      },
+      { flowId: event.flowId, startedAt: event.emittedAt },
+    );
   };
 
   /** Alguien relanzo la ejecucion sobre la misma fila. */
   const handleFlowResumed = (event: FlowResumedEvent): void => {
-    patchSummary(event.executionId, {
-      state: ExecutionState.EN_PROCESO,
-      activeCursor: event.activeCursor,
-      // El motivo del fallo anterior deja de ser cierto en cuanto se reintenta;
-      // el backend tambien lo limpia en `prepareResume`.
-      failureReason: null,
-    });
+    patchSummary(
+      event.executionId,
+      {
+        state: ExecutionState.EN_PROCESO,
+        activeCursor: event.activeCursor,
+        // El motivo del fallo anterior deja de ser cierto en cuanto se
+        // reintenta; el backend tambien lo limpia en `prepareResume`.
+        failureReason: null,
+      },
+      { flowId: event.flowId, startedAt: event.emittedAt },
+    );
   };
 
   /**
@@ -199,58 +256,71 @@ export const useExecutionStore = defineStore('execution', () => {
     }
   };
 
-  /** Deja constancia de la sala ocupada, para poder abandonarla despues. */
-  const setJoinedFlow = (flowId: string | null): void => {
-    joinedFlowId.value = flowId;
+  /** Deja constancia de las salas ocupadas, para poder abandonarlas despues. */
+  const setJoinedFlows = (flowIds: readonly string[]): void => {
+    joinedFlowIds.value = new Set(flowIds);
   };
 
   /**
-   * Entra en la sala de un flujo, abandonando la anterior. Idempotente.
+   * Entra en la sala de un flujo. Idempotente y acumulativa.
    *
    * El store importa aqui un servicio de SOCKET, no el transporte HTTP: la
    * prohibicion de `frontend-architecture.md` §2.1 apunta a Axios y a `@boot`,
    * y `socket-events.service` es una capa de servicio del proyecto igual que
    * `fsm-executions.service`. Los nombres de evento siguen sin aparecer aqui.
    *
-   * `joinedFlowId` se fija SOLO con acuse afirmativo: el gateway rechaza un
-   * UUID mal formado y el tope `MAX_ROOMS_PER_SOCKET` devolviendo
-   * `{ ok: false }`, y apuntar una sala en la que no se esta haria que la
-   * re-suscripcion tras reconectar insistiera en un destino inexistente.
+   * Se sostienen VARIAS salas a la vez porque la tabla de flujos sigue a todas
+   * sus filas en paralelo; el tope real lo pone `MAX_ROOMS_PER_SOCKET` en el
+   * gateway, que responde `{ ok: false }` al rebasarlo.
+   *
+   * El identificador se apunta SOLO con acuse afirmativo: el gateway rechaza un
+   * UUID mal formado, un flujo inexistente y el exceso de salas, y apuntar una
+   * sala en la que no se esta haria que la re-suscripcion tras reconectar
+   * insistiera en un destino inexistente.
    */
   const joinFlow = async (flowId: string): Promise<RoomAck> => {
-    if (joinedFlowId.value === flowId) {
+    if (joinedFlowIds.value.has(flowId)) {
       return { ok: true };
-    }
-
-    if (joinedFlowId.value !== null) {
-      await leaveFlowRoom(joinedFlowId.value);
-      joinedFlowId.value = null;
     }
 
     const ack = await joinFlowRoom(flowId);
 
     if (ack.ok) {
-      joinedFlowId.value = flowId;
+      // Se reemplaza el Set entero: mutarlo en sitio no dispara la reactividad
+      // de Vue sobre un `ref` que envuelve una coleccion nativa.
+      joinedFlowIds.value = new Set(joinedFlowIds.value).add(flowId);
     }
 
     return ack;
   };
 
-  /** Abandona la sala actual, si habia alguna. Idempotente. */
-  const leaveFlow = async (): Promise<void> => {
-    if (joinedFlowId.value === null) {
+  /** Abandona la sala de un flujo, si se estaba en ella. Idempotente. */
+  const leaveFlow = async (flowId: string): Promise<void> => {
+    if (!joinedFlowIds.value.has(flowId)) {
       return;
     }
 
-    await leaveFlowRoom(joinedFlowId.value);
-    joinedFlowId.value = null;
+    await leaveFlowRoom(flowId);
+
+    const remaining = new Set(joinedFlowIds.value);
+    remaining.delete(flowId);
+    joinedFlowIds.value = remaining;
+  };
+
+  /** Abandona todas las salas ocupadas. Pensado para `onBeforeUnmount`. */
+  const leaveAllFlows = async (): Promise<void> => {
+    const occupied = [...joinedFlowIds.value];
+
+    joinedFlowIds.value = new Set();
+
+    await Promise.all(occupied.map((flowId) => leaveFlowRoom(flowId)));
   };
 
   return {
     executions,
     activeExecution,
     nodeEvents,
-    joinedFlowId,
+    joinedFlowIds,
     isLoading,
     isResuming,
     activeCursor,
@@ -264,9 +334,11 @@ export const useExecutionStore = defineStore('execution', () => {
     fetchExecutions,
     fetchExecution,
     resumeExecution,
-    setJoinedFlow,
+    executionByFlowId,
+    setJoinedFlows,
     joinFlow,
     leaveFlow,
+    leaveAllFlows,
   };
 });
 

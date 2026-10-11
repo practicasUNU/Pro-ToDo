@@ -417,7 +417,7 @@ describe('useExecutionStore · estado reactivo de las ejecuciones del motor', ()
       // 3. Assert
       expect(ack.ok).toBe(true);
       expect(joinFlowRoom).toHaveBeenCalledWith(FLOW_ID);
-      expect(store.joinedFlowId).toBe(FLOW_ID);
+      expect([...store.joinedFlowIds]).toEqual([FLOW_ID]);
     });
 
     it('6.2 NO deberia apuntar la sala cuando el gateway la rechaza', async () => {
@@ -432,22 +432,23 @@ describe('useExecutionStore · estado reactivo de las ejecuciones del motor', ()
 
       // 3. Assert
       expect(ack.ok).toBe(false);
-      expect(store.joinedFlowId).toBeNull();
+      expect(store.joinedFlowIds.size).toBe(0);
     });
 
-    it('6.3 deberia abandonar la sala anterior antes de entrar en otra', async () => {
-      // 1. Arrange
+    it('6.3 deberia acumular las salas sin abandonar la anterior', async () => {
+      // 1. Arrange 📐
       const store = useExecutionStore();
       joinFlowRoom.mockResolvedValue({ ok: true });
       leaveFlowRoom.mockResolvedValue({ ok: true });
       await store.joinFlow(FLOW_ID);
 
-      // 2. Act
+      // 2. Act ⚙️
       await store.joinFlow(OTHER_FLOW_ID);
 
-      // 3. Assert: quedarse en ambas mezclaria las trazas de dos ejecuciones.
-      expect(leaveFlowRoom).toHaveBeenCalledWith(FLOW_ID);
-      expect(store.joinedFlowId).toBe(OTHER_FLOW_ID);
+      // 3. Assert 🎯: la tabla de flujos sigue a todas sus filas a la vez, de
+      //    modo que entrar en una sala no puede expulsar de la anterior.
+      expect(leaveFlowRoom).not.toHaveBeenCalled();
+      expect([...store.joinedFlowIds]).toEqual([FLOW_ID, OTHER_FLOW_ID]);
     });
 
     it('6.4 deberia ser idempotente sobre la sala ya ocupada', async () => {
@@ -465,19 +466,76 @@ describe('useExecutionStore · estado reactivo de las ejecuciones del motor', ()
       expect(leaveFlowRoom).not.toHaveBeenCalled();
     });
 
-    it('6.5 deberia limpiar joinedFlowId al abandonar la sala', async () => {
-      // 1. Arrange
+    it('6.5 deberia descontar solo la sala abandonada', async () => {
+      // 1. Arrange 📐
       const store = useExecutionStore();
       joinFlowRoom.mockResolvedValue({ ok: true });
       leaveFlowRoom.mockResolvedValue({ ok: true });
       await store.joinFlow(FLOW_ID);
+      await store.joinFlow(OTHER_FLOW_ID);
 
-      // 2. Act
-      await store.leaveFlow();
+      // 2. Act ⚙️
+      await store.leaveFlow(FLOW_ID);
 
-      // 3. Assert
+      // 3. Assert 🎯
       expect(leaveFlowRoom).toHaveBeenCalledWith(FLOW_ID);
-      expect(store.joinedFlowId).toBeNull();
+      expect([...store.joinedFlowIds]).toEqual([OTHER_FLOW_ID]);
+    });
+
+    it('6.6 deberia vaciar todas las salas de una vez', async () => {
+      // 1. Arrange 📐: es lo que invoca la tabla al desmontarse.
+      const store = useExecutionStore();
+      joinFlowRoom.mockResolvedValue({ ok: true });
+      leaveFlowRoom.mockResolvedValue({ ok: true });
+      await store.joinFlow(FLOW_ID);
+      await store.joinFlow(OTHER_FLOW_ID);
+
+      // 2. Act ⚙️
+      await store.leaveAllFlows();
+
+      // 3. Assert 🎯
+      expect(leaveFlowRoom).toHaveBeenCalledWith(FLOW_ID);
+      expect(leaveFlowRoom).toHaveBeenCalledWith(OTHER_FLOW_ID);
+      expect(store.joinedFlowIds.size).toBe(0);
+    });
+
+    it('6.7 deberia ignorar el abandono de una sala que no se ocupa', async () => {
+      // 1. Arrange 📐
+      const store = useExecutionStore();
+
+      // 2. Act ⚙️
+      await store.leaveFlow(FLOW_ID);
+
+      // 3. Assert 🎯
+      expect(leaveFlowRoom).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('7. Indice de ejecuciones por flujo', () => {
+    it('7.1 deberia quedarse con la ejecucion mas reciente de cada flujo', () => {
+      // 1. Arrange 📐
+      const store = useExecutionStore();
+      store.executions = [
+        buildSummary({
+          executionId: 'exec-vieja',
+          flowId: FLOW_ID,
+          startedAt: '2026-01-01T00:00:00.000Z',
+        }),
+        buildSummary({
+          executionId: 'exec-nueva',
+          flowId: FLOW_ID,
+          startedAt: '2026-02-01T00:00:00.000Z',
+        }),
+        buildSummary({ executionId: 'exec-otra', flowId: OTHER_FLOW_ID }),
+      ];
+
+      // 2. Act ⚙️
+      const index = store.executionByFlowId;
+
+      // 3. Assert 🎯: la fila debe reflejar la ejecucion vigente, no la
+      //    primera que devolvio la API.
+      expect(index.get(FLOW_ID)?.executionId).toBe('exec-nueva');
+      expect(index.get(OTHER_FLOW_ID)?.executionId).toBe('exec-otra');
     });
   });
 });
