@@ -50,6 +50,11 @@ vi.mock('@services/fsm.service', () => ({
   fetchNodeCatalog: vi.fn(),
 }));
 
+vi.mock('@services/workflows.service', () => ({
+  fetchWorkflows: vi.fn(),
+  updateWorkflow: vi.fn(),
+}));
+
 vi.mock('@services/ai-prompt-templates.service', () => ({
   fetchAiPromptTemplates: vi.fn(),
   fetchAiPromptTemplate: vi.fn(),
@@ -62,6 +67,7 @@ import { useCrudSocket } from '@/composables/useCrudSocket';
 import { subscribeToCrudMutations } from '@services/socket-events.service';
 import { useAllowedIpsStore } from '@stores/allowed-ips.store';
 import { useUsersStore } from '@stores/users.store';
+import { useWorkflowsStore } from '@stores/workflows.store';
 
 import { UserRole } from '@/types/user';
 
@@ -69,6 +75,7 @@ import type { CrudMutationPayload } from '@/types/crud-events';
 
 const USER_ID = 'b3f1c2d4-5a6b-4c7d-8e9f-0a1b2c3d4e5f';
 const IP_ID = 'c4e2d3f5-6b7c-4d8e-9f0a-1b2c3d4e5f60';
+const WORKFLOW_ID = 'd5f3e4a6-7c8d-4e9f-a0b1-2c3d4e5f6071';
 
 const buildUser = (overrides = {}) => ({
   id: USER_ID,
@@ -84,6 +91,16 @@ const buildAllowedIp = () => ({
   description: 'Sede central',
   createdAt: '2026-10-11T00:00:00.000Z',
   updatedAt: '2026-10-11T00:00:00.000Z',
+});
+
+const buildWorkflow = (overrides = {}) => ({
+  id: WORKFLOW_ID,
+  name: 'Notiweb',
+  description: null,
+  active: true,
+  templateId: null,
+  topology: [],
+  ...overrides,
 });
 
 /** Monta un anfitrion minimo: el composable exige ciclo de vida de componente. */
@@ -215,6 +232,48 @@ describe('useCrudSocket · encaminado de mutaciones hacia los stores', () => {
     // 3. Assert 🎯
     expect(usersStore.users).toHaveLength(1);
     expect(allowedIpsStore.entries).toHaveLength(1);
+  });
+
+  it('1.5bis deberia actualizar los metadatos del flujo ante un UPDATED', () => {
+    // 1. Arrange 📐: renombrar o conmutar el estado de un flujo es siempre un
+    //    `UPDATED`; `workflows` no produce `DELETED` nunca.
+    const workflowsStore = useWorkflowsStore();
+    workflowsStore.workflows = [buildWorkflow()];
+    const host = mountHost();
+
+    // 2. Act ⚙️
+    host.emit({
+      entity: 'workflows',
+      action: 'UPDATED',
+      id: WORKFLOW_ID,
+      data: buildWorkflow({ name: 'Notiweb v2', active: false }),
+      emittedAt: '2026-10-11T00:00:00.000Z',
+    });
+
+    // 3. Assert 🎯
+    expect(workflowsStore.workflows).toHaveLength(1);
+    expect(workflowsStore.workflows[0]?.name).toBe('Notiweb v2');
+    expect(workflowsStore.workflows[0]?.active).toBe(false);
+  });
+
+  it('1.5ter NO deberia duplicar el flujo si el CREATED llega repetido', () => {
+    // 1. Arrange 📐: quien instancio el flujo ya lo tiene en su lista.
+    const workflowsStore = useWorkflowsStore();
+    workflowsStore.workflows = [buildWorkflow()];
+    const host = mountHost();
+
+    // 2. Act ⚙️
+    host.emit({
+      entity: 'workflows',
+      action: 'CREATED',
+      id: WORKFLOW_ID,
+      data: buildWorkflow({ name: 'Notiweb renombrado' }),
+      emittedAt: '2026-10-11T00:00:00.000Z',
+    });
+
+    // 3. Assert 🎯
+    expect(workflowsStore.workflows).toHaveLength(1);
+    expect(workflowsStore.workflows[0]?.name).toBe('Notiweb renombrado');
   });
 
   it('1.6 deberia darse de baja al desmontar', () => {

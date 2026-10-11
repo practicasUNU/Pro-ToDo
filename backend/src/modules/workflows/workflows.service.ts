@@ -6,6 +6,7 @@ import {
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 
+import { CrudEventsCoordinator } from '@common/services/crud-events.coordinator';
 import { FlowPollingCoordinator } from '@common/services/flow-polling.coordinator';
 import { FsmEngineService } from '@core/fsm/services/fsm-engine.service';
 import { PipelineValidatorService } from '@core/fsm/services/pipeline-validator.service';
@@ -32,6 +33,7 @@ import type { WorkflowExecutionResponseDto } from './dto/workflow-execution-resp
 
 import type { FsmExecution } from '@core/fsm/entities/fsm-execution.entity';
 import type { PipelineSchema } from '@core/fsm/types/pipeline-schema.types';
+import type { CrudAction } from '@common/types/crud-events.types';
 import type { Repository } from 'typeorm';
 
 /**
@@ -85,7 +87,31 @@ export class WorkflowsService {
     private readonly fsmEngineService: FsmEngineService,
     private readonly workflowTemplatesService: WorkflowTemplatesService,
     private readonly flowPollingCoordinator: FlowPollingCoordinator,
+    private readonly crudEvents: CrudEventsCoordinator,
   ) {}
+
+  /**
+   * Difunde la mutacion del flujo a los paneles abiertos.
+   *
+   * Reutiliza el resumen que el metodo ya calcula para devolver, de modo que no
+   * hay una segunda proyeccion que pueda divergir de la respuesta REST.
+   *
+   * `workflows` no produce `DELETED` jamas: no existe `@Delete` en el
+   * controlador y retirar un flujo es `PATCH { active: false }`, es decir un
+   * `UPDATED` con la fila ya actualizada.
+   */
+  private publishMutation(
+    action: CrudAction,
+    summary: PipelineSummaryResponseDto,
+  ): void {
+    this.crudEvents.dispatch({
+      entity: 'workflows',
+      action,
+      id: summary.id,
+      data: summary,
+      emittedAt: new Date().toISOString(),
+    });
+  }
 
   /**
    * Dispara un flujo de principio a fin con datos simulados y devuelve el
@@ -359,7 +385,12 @@ export class WorkflowsService {
       `Flujo creado: "${saved.name}" (${saved.id}) | nodos=${Object.keys(schema.nodes).length} | activo=${String(saved.active)} | plantilla=${saved.templateId ?? 'ninguna'} | autor=${userId}`,
     );
 
-    return this.toPipelineSummary(saved);
+    const summary = this.toPipelineSummary(saved);
+    // Despues de confirmar la escritura, nunca antes: emitir en vuelo haria que
+    // otro panel pintase una fila que PostgreSQL aun no tiene.
+    this.publishMutation('CREATED', summary);
+
+    return summary;
   }
 
   /**
@@ -454,7 +485,12 @@ export class WorkflowsService {
       await this.flowPollingCoordinator.refreshPolling();
     }
 
-    return this.toPipelineSummary(saved);
+    const summary = this.toPipelineSummary(saved);
+    // Al FINAL, despues de liberar o registrar el sondeo: emitir antes
+    // anunciaria un flujo activo cuyo temporizador aun no existe.
+    this.publishMutation('UPDATED', summary);
+
+    return summary;
   }
 
   /**

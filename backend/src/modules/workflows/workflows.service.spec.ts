@@ -4,6 +4,7 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 
+import { UserRole } from '@modules/users/enums/user-role.enum';
 import { ExecutionState } from '@core/fsm/types/fsm.enums';
 import { NodeType } from '@core/fsm/types/pipeline-schema.types';
 
@@ -15,6 +16,7 @@ import type { CreateWorkflowDto } from './dto/create-workflow.dto';
 
 import type { PipelineSchemaDto } from '@core/fsm/dto/pipeline-schema.dto';
 import type { FsmExecution } from '@core/fsm/entities/fsm-execution.entity';
+import type { CrudEventsCoordinator } from '@common/services/crud-events.coordinator';
 import type { FlowPollingCoordinator } from '@common/services/flow-polling.coordinator';
 import type { FsmEngineService } from '@core/fsm/services/fsm-engine.service';
 import type { PipelineValidatorService } from '@core/fsm/services/pipeline-validator.service';
@@ -118,6 +120,7 @@ interface ServiceHarness {
   engine: EngineMock;
   templates: { assertInstantiable: jest.Mock };
   coordinator: CoordinatorMock;
+  crudEvents: { dispatch: jest.Mock };
   errorSpy: jest.SpyInstance;
 }
 
@@ -168,12 +171,17 @@ const buildHarness = (): ServiceHarness => {
     assertInstantiable: jest.fn().mockResolvedValue({ id: TEMPLATE_ID }),
   };
 
+  // Doble y no la clase real, a diferencia de otros servicios: aqui SI se
+  // afirma sobre la llamada, no solo sobre que no estorbe.
+  const crudEvents = { dispatch: jest.fn() };
+
   const service = new WorkflowsService(
     repository as unknown as Repository<Workflow>,
     validator as unknown as PipelineValidatorService,
     engine as unknown as FsmEngineService,
     templates as unknown as WorkflowTemplatesService,
     coordinator as unknown as FlowPollingCoordinator,
+    crudEvents as unknown as CrudEventsCoordinator,
   );
   jest.spyOn(service['logger'], 'log').mockImplementation(() => undefined);
   jest.spyOn(service['logger'], 'warn').mockImplementation(() => undefined);
@@ -188,6 +196,7 @@ const buildHarness = (): ServiceHarness => {
     engine,
     templates,
     coordinator,
+    crudEvents,
     errorSpy,
   };
 };
@@ -947,6 +956,78 @@ describe('WorkflowsService (instanciacion desde plantilla)', () => {
       // 3. Assert
       expect(summary.templateId).toBe(TEMPLATE_ID);
     });
+  });
+});
+
+describe('WorkflowsService (difusion de mutaciones CRUD)', () => {
+  it('C.1 deberia difundir UPDATED al editar los metadatos del flujo', async () => {
+    // 1. Arrange 📐
+    const { service, crudEvents } = buildHarness();
+
+    // 2. Act ⚙️
+    await service.updateWorkflow(
+      WORKFLOW_ID,
+      { name: 'Notiweb v2' },
+      UserRole.ADMIN,
+    );
+
+    // 3. Assert 🎯: sin esto la tabla del otro administrador se queda con el
+    //    nombre viejo hasta que recargue.
+    expect(crudEvents.dispatch).toHaveBeenCalledWith(
+      expect.objectContaining({
+        entity: 'workflows',
+        action: 'UPDATED',
+        id: WORKFLOW_ID,
+      }),
+    );
+  });
+
+  it('C.1bis deberia difundir CREATED al instanciar un flujo', async () => {
+    // 1. Arrange 📐
+    const { service, crudEvents } = buildHarness();
+
+    // 2. Act ⚙️
+    await service.createWorkflow(buildCreateDto(), AUTHOR_ID, UserRole.ADMIN);
+
+    // 3. Assert 🎯
+    expect(crudEvents.dispatch).toHaveBeenCalledWith(
+      expect.objectContaining({ entity: 'workflows', action: 'CREATED' }),
+    );
+  });
+
+  it('C.2 deberia difundir UPDATED —y nunca DELETED— al desactivar', async () => {
+    // 1. Arrange 📐: retirar un flujo es `PATCH { active: false }`; la fila
+    //    sigue existiendo y el panel debe pintarla como inactiva, no quitarla.
+    const { service, crudEvents } = buildHarness();
+
+    // 2. Act ⚙️
+    await service.updateWorkflow(WORKFLOW_ID, { active: false }, UserRole.ADMIN);
+
+    // 3. Assert 🎯
+    expect(crudEvents.dispatch).toHaveBeenCalledWith(
+      expect.objectContaining({ entity: 'workflows', action: 'UPDATED' }),
+    );
+    expect(crudEvents.dispatch).not.toHaveBeenCalledWith(
+      expect.objectContaining({ action: 'DELETED' }),
+    );
+  });
+
+  it('C.3 deberia difundir la MISMA proyeccion que devuelve REST', async () => {
+    // 1. Arrange 📐: reutilizar el resumen del propio metodo es lo que impide
+    //    que el payload del socket y la respuesta HTTP se separen con el tiempo.
+    const { service, crudEvents } = buildHarness();
+
+    // 2. Act ⚙️
+    const returned = await service.updateWorkflow(
+      WORKFLOW_ID,
+      { name: 'Notiweb v2' },
+      UserRole.ADMIN,
+    );
+
+    // 3. Assert 🎯
+    expect(crudEvents.dispatch).toHaveBeenCalledWith(
+      expect.objectContaining({ data: returned }),
+    );
   });
 });
 

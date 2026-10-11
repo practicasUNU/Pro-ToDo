@@ -3,6 +3,7 @@ import { computed, ref } from 'vue';
 
 import * as workflowsService from '@services/workflows.service';
 
+import type { CrudAction } from '@/types/crud-events';
 import type { PipelineSummary, UpdateWorkflowPayload } from '@/types/pipeline';
 
 // Logica de negocio y estado compartido del catalogo de flujos INSTANCIADOS.
@@ -63,6 +64,45 @@ export const useWorkflowsStore = defineStore('workflows', () => {
   const setActive = async (id: string, active: boolean): Promise<PipelineSummary> =>
     updateWorkflow(id, { active });
 
+  /**
+   * Aplica una mutacion llegada por WebSocket.
+   *
+   * Es IDEMPOTENTE a proposito: quien origino el cambio ya actualizo esta lista
+   * con la respuesta REST y recibe ademas su propio evento, de modo que un
+   * `CREATED` que insertara a ciegas le duplicaria la fila en pantalla.
+   *
+   * Reemplaza la fila ENTERA en vez de fusionarla porque el backend difunde el
+   * mismo resumen completo que devuelve REST; fusionar solo tendria sentido con
+   * un payload parcial, y romperia la simetria con los otros cinco stores.
+   *
+   * La rama `DELETED` existe por contrato, pero `workflows` no la produce: no
+   * hay `@Delete` en su controlador y retirar un flujo es `PATCH
+   * { active: false }`, es decir un `UPDATED`.
+   */
+  const applyMutation = (
+    action: CrudAction,
+    item: PipelineSummary | undefined,
+    id: string,
+  ): void => {
+    if (action === 'DELETED') {
+      workflows.value = workflows.value.filter((workflow) => workflow.id !== id);
+
+      return;
+    }
+
+    // Un evento sin fila solo puede ser una baja; cualquier otra cosa es un
+    // emisor incoherente y se ignora antes que corromper la lista.
+    if (item === undefined) {
+      return;
+    }
+
+    const exists = workflows.value.some((workflow) => workflow.id === item.id);
+
+    workflows.value = exists
+      ? workflows.value.map((workflow) => (workflow.id === item.id ? item : workflow))
+      : [item, ...workflows.value];
+  };
+
   return {
     workflows,
     isLoading,
@@ -70,6 +110,7 @@ export const useWorkflowsStore = defineStore('workflows', () => {
     fetchWorkflows,
     updateWorkflow,
     setActive,
+    applyMutation,
   };
 });
 

@@ -6,12 +6,13 @@ import { useAllowedIpsStore } from '@stores/allowed-ips.store';
 import { useTemplatesStore } from '@stores/templates.store';
 import { useUsersStore } from '@stores/users.store';
 import { useWorkflowTemplatesStore } from '@stores/workflow-templates.store';
+import { useWorkflowsStore } from '@stores/workflows.store';
 
 import type { AiPromptTemplate } from '@/types/ai-prompt-template';
 import type { AllowedIp } from '@/types/allowed-ip';
 import type { CrudMutationPayload } from '@/types/crud-events';
 import type { HtmlTemplate } from '@/types/html-template';
-import type { WorkflowTemplateSummary } from '@/types/pipeline';
+import type { PipelineSummary, WorkflowTemplateSummary } from '@/types/pipeline';
 import type { User } from '@/types/user';
 
 /**
@@ -32,19 +33,10 @@ export const useCrudSocket = (): void => {
   const templatesStore = useTemplatesStore();
   const workflowTemplatesStore = useWorkflowTemplatesStore();
   const aiPromptTemplatesStore = useAiPromptTemplatesStore();
+  const workflowsStore = useWorkflowsStore();
 
   let unsubscribe: (() => void) | null = null;
 
-  /**
-   * Encamina la mutacion hacia el store de su entidad.
-   *
-   * Cada store aplica el parche; aqui solo se elige el destinatario. Escribir
-   * la coleccion desde fuera dejaria la mutacion del estado repartida entre el
-   * store y este composable (`frontend-architecture.md` §2.1).
-   *
-   * Un `DELETED` no trae `data`, de modo que el store recibe el registro vacio
-   * y se queda con el `id`, que es lo unico que necesita para sacar la fila.
-   */
   /**
    * Encamina la mutacion hacia el store de su entidad.
    *
@@ -57,6 +49,9 @@ export const useCrudSocket = (): void => {
    * Es la UNICA frontera donde se afirma un tipo sin que el compilador pueda
    * comprobarlo, y por eso se hace explicito por entidad en vez de con un
    * comodin.
+   *
+   * Un `DELETED` no trae `data`: el store recibe el registro vacio y se queda
+   * con el `id`, que es lo unico que necesita para sacar la fila.
    */
   const onMutation = (payload: CrudMutationPayload): void => {
     const { entity, action, id, data } = payload;
@@ -84,6 +79,10 @@ export const useCrudSocket = (): void => {
 
       case 'ai_prompts':
         aiPromptTemplatesStore.applyMutation(action, data as AiPromptTemplate | undefined, id);
+        break;
+
+      case 'workflows':
+        workflowsStore.applyMutation(action, data as PipelineSummary | undefined, id);
         break;
     }
   };

@@ -18,7 +18,12 @@ export const CRUD_EVENT = { MUTATION: 'crud:mutation' } as const;
 
 /** Tablas maestras cuya edicion se difunde. */
 export type CrudEntity =
-  'users' | 'allowed_ips' | 'templates' | 'workflow_templates' | 'ai_prompts';
+  | 'users'
+  | 'allowed_ips'
+  | 'templates'
+  | 'workflow_templates'
+  | 'ai_prompts'
+  | 'workflows';
 
 /**
  * Naturaleza de la escritura, tal y como la entiende la BASE DE DATOS.
