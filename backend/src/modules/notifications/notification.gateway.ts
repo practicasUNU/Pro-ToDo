@@ -9,21 +9,27 @@ import {
 } from '@nestjs/websockets';
 import { isUUID } from 'class-validator';
 
+import { CrudEventsCoordinator } from '@common/services/crud-events.coordinator';
 import { ExecutionEventsCoordinator } from '@common/services/execution-events.coordinator';
 import { IpAccessService } from '@common/services/ip-access.service';
 import { WorkflowsService } from '@modules/workflows/workflows.service';
+import { CRUD_EVENT } from '@common/types/crud-events.types';
 import { EXECUTION_EVENT } from '@common/types/execution-events.types';
 import {
+  ADMIN_ONLY_ENTITIES,
   FLOW_ROOM_PREFIX,
   FORBIDDEN_ROOM,
   MAX_ROOMS_PER_SOCKET,
   resolveCorsOrigin,
+  ROLE_ROOM_PREFIX,
   USER_ROOM_PREFIX,
   WS_DENIED_ORIGIN,
   WS_INVALID_TOKEN,
 } from '@modules/notifications/notification.constants';
 
+import type { CrudEventPort } from '@common/services/crud-events.coordinator';
 import type { ExecutionEventPort } from '@common/services/execution-events.coordinator';
+import type { CrudMutationPayload } from '@common/types/crud-events.types';
 import type {
   FlowPausedEvent,
   FlowResumedEvent,
@@ -36,7 +42,7 @@ import type {
   OnGatewayInit,
 } from '@nestjs/websockets';
 import type { JwtPayload } from '@modules/auth/interfaces/jwt-payload.interface';
-import type { UserRole } from '@modules/users/enums/user-role.enum';
+import { UserRole } from '@modules/users/enums/user-role.enum';
 import type { Server, Socket } from 'socket.io';
 
 /** Identidad que el middleware del handshake deja resuelta en `socket.data`. */
@@ -102,7 +108,8 @@ export class NotificationGateway
     OnGatewayDisconnect,
     OnModuleInit,
     OnModuleDestroy,
-    ExecutionEventPort
+    ExecutionEventPort,
+    CrudEventPort
 {
   private readonly logger = new Logger(NotificationGateway.name);
 
@@ -114,6 +121,7 @@ export class NotificationGateway
     private readonly ipAccessService: IpAccessService,
     private readonly executionEvents: ExecutionEventsCoordinator,
     private readonly workflowsService: WorkflowsService,
+    private readonly crudEvents: CrudEventsCoordinator,
   ) {}
 
   /**
@@ -124,6 +132,7 @@ export class NotificationGateway
    */
   public onModuleInit(): void {
     this.executionEvents.register(this);
+    this.crudEvents.registerPort(this);
   }
 
   /**
@@ -132,6 +141,7 @@ export class NotificationGateway
    */
   public onModuleDestroy(): void {
     this.executionEvents.unregister(this);
+    this.crudEvents.unregisterPort(this);
   }
 
   /** Instala el filtro del handshake en cuanto existe el servidor del namespace. */
@@ -161,7 +171,21 @@ export class NotificationGateway
     }
 
     await client.join(`${USER_ROOM_PREFIX}${userId}`);
-    this.logger.log(`Socket conectado | usuario=${userId} | id=${client.id}`);
+
+    // La sala de ROL es lo que permite difundir una mutacion administrativa sin
+    // que la reciba un EDITOR. Se une aqui, y no bajo demanda como las salas de
+    // flujo, porque el rol es un hecho del handshake y no una eleccion del
+    // cliente: dejarlo a `@SubscribeMessage` seria dejar que el socket eligiera
+    // su propio rol.
+    const { role } = client.data;
+
+    if (role) {
+      await client.join(`${ROLE_ROOM_PREFIX}${role}`);
+    }
+
+    this.logger.log(
+      `Socket conectado | usuario=${userId} | rol=${role ?? 'desconocido'} | id=${client.id}`,
+    );
   }
 
   public handleDisconnect(client: AuthenticatedSocket): void {
@@ -278,6 +302,29 @@ export class NotificationGateway
 
   public emitNodeError(event: NodeErrorEvent): void {
     this.emitToFlow(EXECUTION_EVENT.NODE_ERROR, event.flowId, event);
+  }
+
+  /**
+   * Difunde una mutacion de tabla maestra a los paneles abiertos.
+   *
+   * El destino depende de la entidad, no del emisor: las administrativas van
+   * SOLO a la sala de los administradores, porque un `server.emit` alcanzaria
+   * tambien a los editores y les entregaria correos corporativos y rangos de
+   * red que REST les niega. El resto se difunde al namespace entero, que ya
+   * esta autenticado por el middleware del handshake.
+   */
+  public emitCrudMutation(payload: CrudMutationPayload): void {
+    // El `?.` no es decorativo, igual que en `emitToFlow`: el coordinador puede
+    // despachar antes de que el adaptador haya montado el namespace.
+    if (ADMIN_ONLY_ENTITIES.has(payload.entity)) {
+      this.server
+        ?.to(`${ROLE_ROOM_PREFIX}${UserRole.ADMIN}`)
+        .emit(CRUD_EVENT.MUTATION, payload);
+
+      return;
+    }
+
+    this.server?.emit(CRUD_EVENT.MUTATION, payload);
   }
 
   /**

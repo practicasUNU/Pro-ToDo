@@ -5,6 +5,8 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
+
+import { CrudEventsCoordinator } from '@common/services/crud-events.coordinator';
 import { Repository } from 'typeorm';
 
 import { NODE_OUTPUT_NAMESPACES } from '@core/fsm/types/pipeline-schema.types';
@@ -21,6 +23,7 @@ import {
 import type { TemplateViolation } from './dto/template-violation.dto';
 import type { RenderNamespaces } from './services/template-renderer.service';
 import type { FindOptionsWhere } from 'typeorm';
+import type { CrudAction } from '@common/types/crud-events.types';
 
 /**
  * Namespaces que una plantilla puede referenciar.
@@ -141,7 +144,31 @@ export class TemplatesService {
     @InjectRepository(HtmlTemplate)
     private readonly templateRepository: Repository<HtmlTemplate>,
     private readonly templateRendererService: TemplateRendererService,
+    private readonly crudEvents: CrudEventsCoordinator,
   ) {}
+  /**
+   * Difunde la mutacion a los paneles abiertos.
+   *
+   * Siempre DESPUES de confirmar la escritura: emitir antes abriria una ventana
+   * en la que otro panel pinta una fila que PostgreSQL aun no tiene.
+   *
+   * Una baja logica viaja como `UPDATED` y no como `DELETED`, porque la fila
+   * sigue existiendo con `active` en falso: es el cliente quien decide si la
+   * oculta, segun liste o no las inactivas.
+   */
+  private publishMutation(
+    action: CrudAction,
+    id: string,
+    data: HtmlTemplate,
+  ): void {
+    this.crudEvents.dispatch({
+      entity: 'templates',
+      action,
+      id,
+      data,
+      emittedAt: new Date().toISOString(),
+    });
+  }
 
   public async findAll(onlyActive = true): Promise<HtmlTemplate[]> {
     const where: FindOptionsWhere<HtmlTemplate> = onlyActive
@@ -192,7 +219,10 @@ export class TemplatesService {
       createdById,
     });
 
-    return this.templateRepository.save(template);
+    const saved = await this.templateRepository.save(template);
+    this.publishMutation('CREATED', saved.id, saved);
+
+    return saved;
   }
 
   /**
@@ -234,7 +264,10 @@ export class TemplatesService {
       template.active = updateTemplateDto.active;
     }
 
-    return this.templateRepository.save(template);
+    const saved = await this.templateRepository.save(template);
+    this.publishMutation('UPDATED', saved.id, saved);
+
+    return saved;
   }
 
   /**
@@ -249,7 +282,11 @@ export class TemplatesService {
     const template = await this.findOne(id);
 
     template.active = false;
-    return this.templateRepository.save(template);
+
+    const saved = await this.templateRepository.save(template);
+    this.publishMutation('UPDATED', saved.id, saved);
+
+    return saved;
   }
 
   /**

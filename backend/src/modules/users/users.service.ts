@@ -6,11 +6,18 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
+import { plainToInstance } from 'class-transformer';
 import { IsNull, Repository } from 'typeorm';
+
+import { CrudEventsCoordinator } from '@common/services/crud-events.coordinator';
+
+import { UserResponseDto } from './dto/user-response.dto';
 
 import { CreateUserDto } from './dto/create-user.dto';
 import { UpdateUserDto } from './dto/update-user.dto';
 import { User } from './entities/user.entity';
+
+import type { CrudAction } from '@common/types/crud-events.types';
 
 @Injectable()
 export class UsersService {
@@ -18,7 +25,30 @@ export class UsersService {
     @InjectRepository(User)
     private readonly userRepository: Repository<User>,
     private readonly configService: ConfigService,
+    private readonly crudEvents: CrudEventsCoordinator,
   ) {}
+
+  /**
+   * Difunde la mutacion a los paneles abiertos.
+   *
+   * Proyecta con `UserResponseDto` y NUNCA emite la entidad: ese DTO es una
+   * lista blanca (`@Exclude()` de clase mas `@Expose()` por campo) para que una
+   * columna nueva no se filtre por olvido, y mandar la entidad en crudo
+   * esquivaria esa politica por la puerta de atras.
+   *
+   * Una baja logica viaja como `UPDATED`, no como `DELETED`: la fila sigue
+   * existiendo con `isActive` en falso, que es justo lo que el panel debe
+   * pintar.
+   */
+  private publishMutation(action: CrudAction, user: User): void {
+    this.crudEvents.dispatch({
+      entity: 'users',
+      action,
+      id: user.id,
+      data: plainToInstance(UserResponseDto, user),
+      emittedAt: new Date().toISOString(),
+    });
+  }
 
   // Filtro de dominios corporativos (MOD-01): rechaza correos fuera de ACCEPTED_EMAIL_DOMAINS
   private assertCorporateEmail(email: string): void {
@@ -124,7 +154,12 @@ export class UsersService {
     }
 
     const user = this.userRepository.create(createUserDto);
-    return this.userRepository.save(user);
+    const saved = await this.userRepository.save(user);
+    // Siempre DESPUES de confirmar la escritura: emitir antes abriria una
+    // ventana en la que otro panel pinta una fila que PostgreSQL aun no tiene.
+    this.publishMutation('CREATED', saved);
+
+    return saved;
   }
 
   public async update(id: string, updateUserDto: UpdateUserDto): Promise<User> {
@@ -135,7 +170,10 @@ export class UsersService {
     const user = await this.findOne(id);
 
     Object.assign(user, updateUserDto);
-    return this.userRepository.save(user);
+    const saved = await this.userRepository.save(user);
+    this.publishMutation('UPDATED', saved);
+
+    return saved;
   }
 
   // Borrado lógico: desactiva al usuario en lugar de eliminar el registro
@@ -143,6 +181,9 @@ export class UsersService {
     const user = await this.findOne(id);
 
     user.isActive = false;
-    return this.userRepository.save(user);
+    const saved = await this.userRepository.save(user);
+    this.publishMutation('UPDATED', saved);
+
+    return saved;
   }
 }

@@ -2,6 +2,7 @@ import { Global, Module } from '@nestjs/common';
 
 import { RedLocalMiddleware } from '@common/middlewares/red-local.middleware';
 import { EmailService } from '@common/services/email.service';
+import { CrudEventsCoordinator } from '@common/services/crud-events.coordinator';
 import { ExecutionEventsCoordinator } from '@common/services/execution-events.coordinator';
 import { FlowPollingCoordinator } from '@common/services/flow-polling.coordinator';
 import { IpAccessService } from '@common/services/ip-access.service';
@@ -27,6 +28,10 @@ import { AllowedIpsModule } from '@modules/security/allowed-ips/allowed-ips.modu
  * automaticos (`@modules/nodes`), que no comparten modulo; registrarlo en cada
  * uno crearia dos instancias de una clase que describe un unico limite.
  *
+ * Aloja tambien `CrudEventsCoordinator`, que ademas rompe un ciclo real:
+ * `NotificationsModule` importa `AuthModule` y este `UsersModule`, de modo que
+ * inyectar el gateway en los servicios CRUD seria una dependencia circular.
+ *
  * Y aloja `ExecutionEventsCoordinator` por identica razon que al anterior: lo
  * publican `FsmEngineService` (`@core`) y `ExecutionsService`
  * (`@modules/workflows`), y lo implementa `NotificationGateway`
@@ -46,6 +51,7 @@ import { AllowedIpsModule } from '@modules/security/allowed-ips/allowed-ips.modu
     EmailService,
     SmtpNodeMailerService,
     FlowPollingCoordinator,
+    CrudEventsCoordinator,
     ExecutionEventsCoordinator,
     FsmConfig,
   ],
@@ -55,6 +61,7 @@ import { AllowedIpsModule } from '@modules/security/allowed-ips/allowed-ips.modu
     EmailService,
     SmtpNodeMailerService,
     FlowPollingCoordinator,
+    CrudEventsCoordinator,
     ExecutionEventsCoordinator,
     FsmConfig,
   ],

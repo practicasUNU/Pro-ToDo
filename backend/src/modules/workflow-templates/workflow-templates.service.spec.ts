@@ -13,6 +13,7 @@ import type { WorkflowTemplate } from './entities/workflow-template.entity';
 import type { PipelineSchemaDto } from '@core/fsm/dto/pipeline-schema.dto';
 import type { PipelineValidatorService } from '@core/fsm/services/pipeline-validator.service';
 import type { Repository } from 'typeorm';
+import { CrudEventsCoordinator } from '@common/services/crud-events.coordinator';
 
 const TEMPLATE_ID = '5e2d1c4b-7a89-4f30-b1c2-6d5e4f3a2b10';
 const OTHER_TEMPLATE_ID = '7f3a2b1c-9d8e-4f60-a1b2-3c4d5e6f7a80';
@@ -104,6 +105,8 @@ const buildHarness = (): Harness => {
   const service = new WorkflowTemplatesService(
     repository as unknown as Repository<WorkflowTemplate>,
     { validateSchema } as unknown as PipelineValidatorService,
+    // Sin puertos inscritos es un no-op: la clase real basta, no hace falta doble.
+    new CrudEventsCoordinator(),
   );
 
   return { service, repository, validateSchema };

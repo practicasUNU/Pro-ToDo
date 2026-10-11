@@ -8,6 +8,7 @@ import {
 import type { AiPromptTemplate } from './entities/ai-prompt-template.entity';
 import type { CreateAiPromptTemplateDto } from './dto/create-ai-prompt-template.dto';
 import type { Repository } from 'typeorm';
+import { CrudEventsCoordinator } from '@common/services/crud-events.coordinator';
 
 const PROMPT_ID = '3c9a1f52-8b47-4d21-9e06-5a7b8c9d0e1f';
 const OTHER_PROMPT_ID = '9f8e7d6c-5b4a-4321-8765-1a2b3c4d5e6f';
@@ -67,8 +68,12 @@ const buildHarness = (): Harness => {
     save: jest.fn((entity: AiPromptTemplate) => Promise.resolve(entity)),
   };
 
+  // El coordinador sin puertos inscritos es un no-op silencioso, de modo que
+  // se inyecta la clase real en lugar de un doble (asi lo documenta el propio
+  // coordinador).
   const service = new AiPromptTemplatesService(
     repository as unknown as Repository<AiPromptTemplate>,
+    new CrudEventsCoordinator(),
   );
 
   return { service, repository };

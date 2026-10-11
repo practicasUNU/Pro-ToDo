@@ -11,6 +11,7 @@ import { ALLOWED_NAMESPACES, TemplatesService } from './templates.service';
 
 import type { HtmlTemplate } from './entities/html-template.entity';
 import type { Repository } from 'typeorm';
+import { CrudEventsCoordinator } from '@common/services/crud-events.coordinator';
 
 const AUTHOR_ID = '9c1f7b52-4d3a-4e6b-8f2c-1a0b9d8e7f60';
 const TEMPLATE_ID = '5e2d1c4b-7a89-4f30-b1c2-6d5e4f3a2b10';
@@ -56,6 +57,8 @@ const buildService = (repository: TemplateRepositoryMock): TemplatesService =>
   new TemplatesService(
     repository as unknown as Repository<HtmlTemplate>,
     createTemplateRendererService(),
+    // Sin puertos inscritos es un no-op: la clase real basta, no hace falta doble.
+    new CrudEventsCoordinator(),
   );
 
 /**

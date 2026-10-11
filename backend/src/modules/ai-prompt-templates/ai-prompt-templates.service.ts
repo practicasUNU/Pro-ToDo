@@ -6,6 +6,8 @@ import {
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 
+import { CrudEventsCoordinator } from '@common/services/crud-events.coordinator';
+
 import { extractNamespaceRoots } from '@core/fsm/context/state-payload.context';
 
 import { AiPromptTemplate } from './entities/ai-prompt-template.entity';
@@ -19,6 +21,7 @@ import type {
 } from './dto/ai-prompt-template-response.dto';
 import type { UpdateAiPromptTemplateDto } from './dto/update-ai-prompt-template.dto';
 import type { FindOptionsWhere, Repository } from 'typeorm';
+import type { CrudAction } from '@common/types/crud-events.types';
 
 /**
  * Repositorio de prompts de IA (PROT-15.2).
@@ -86,7 +89,31 @@ export class AiPromptTemplatesService {
   constructor(
     @InjectRepository(AiPromptTemplate)
     private readonly aiPromptTemplateRepository: Repository<AiPromptTemplate>,
+    private readonly crudEvents: CrudEventsCoordinator,
   ) {}
+  /**
+   * Difunde la mutacion a los paneles abiertos.
+   *
+   * Siempre DESPUES de confirmar la escritura: emitir antes abriria una ventana
+   * en la que otro panel pinta una fila que PostgreSQL aun no tiene.
+   *
+   * Una baja logica viaja como `UPDATED` y no como `DELETED`, porque la fila
+   * sigue existiendo con `active` en falso: es el cliente quien decide si la
+   * oculta, segun liste o no las inactivas.
+   */
+  private publishMutation(
+    action: CrudAction,
+    id: string,
+    data: AiPromptTemplateDetailResponseDto,
+  ): void {
+    this.crudEvents.dispatch({
+      entity: 'ai_prompts',
+      action,
+      id,
+      data,
+      emittedAt: new Date().toISOString(),
+    });
+  }
 
   /**
    * Lista los prompts.
@@ -227,7 +254,10 @@ export class AiPromptTemplatesService {
       `Prompt "${name}" (${code}) creado por el usuario ${createdById}`,
     );
 
-    return this.findOne(saved.id);
+    const detail = await this.findOne(saved.id);
+    this.publishMutation('CREATED', detail.id, detail);
+
+    return detail;
   }
 
   /**
@@ -270,7 +300,10 @@ export class AiPromptTemplatesService {
     const saved = await this.aiPromptTemplateRepository.save(prompt);
     this.logger.log(`Prompt "${saved.name}" actualizado`);
 
-    return this.findOne(saved.id);
+    const detail = await this.findOne(saved.id);
+    this.publishMutation('UPDATED', detail.id, detail);
+
+    return detail;
   }
 
   /**
@@ -290,7 +323,10 @@ export class AiPromptTemplatesService {
     const saved = await this.aiPromptTemplateRepository.save(prompt);
     this.logger.log(`Prompt "${saved.name}" retirado (borrado logico)`);
 
-    return this.findOne(saved.id);
+    const detail = await this.findOne(saved.id);
+    this.publishMutation('UPDATED', detail.id, detail);
+
+    return detail;
   }
 
   /**

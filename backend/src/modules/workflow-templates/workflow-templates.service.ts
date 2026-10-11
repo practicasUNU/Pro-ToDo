@@ -7,6 +7,8 @@ import {
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 
+import { CrudEventsCoordinator } from '@common/services/crud-events.coordinator';
+
 import { PipelineValidatorService } from '@core/fsm/services/pipeline-validator.service';
 import { buildOrderedTopology } from '@core/fsm/utils/pipeline-topology.util';
 
@@ -19,6 +21,7 @@ import type {
   WorkflowTemplateResponseDto,
 } from './dto/workflow-template-response.dto';
 import type { FindOptionsWhere, Repository } from 'typeorm';
+import type { CrudAction } from '@common/types/crud-events.types';
 
 /**
  * Catalogo de plantillas de flujo (blueprints maestros).
@@ -41,7 +44,31 @@ export class WorkflowTemplatesService {
     @InjectRepository(WorkflowTemplate)
     private readonly templateRepository: Repository<WorkflowTemplate>,
     private readonly pipelineValidatorService: PipelineValidatorService,
+    private readonly crudEvents: CrudEventsCoordinator,
   ) {}
+  /**
+   * Difunde la mutacion a los paneles abiertos.
+   *
+   * Siempre DESPUES de confirmar la escritura: emitir antes abriria una ventana
+   * en la que otro panel pinta una fila que PostgreSQL aun no tiene.
+   *
+   * Una baja logica viaja como `UPDATED` y no como `DELETED`, porque la fila
+   * sigue existiendo con `active` en falso: es el cliente quien decide si la
+   * oculta, segun liste o no las inactivas.
+   */
+  private publishMutation(
+    action: CrudAction,
+    id: string,
+    data: WorkflowTemplateDetailResponseDto,
+  ): void {
+    this.crudEvents.dispatch({
+      entity: 'workflow_templates',
+      action,
+      id,
+      data,
+      emittedAt: new Date().toISOString(),
+    });
+  }
 
   /**
    * Lista las plantillas con su topologia proyectada.
@@ -133,7 +160,10 @@ export class WorkflowTemplatesService {
       `Plantilla de flujo creada: "${saved.name}" (${saved.id}) | nodos=${Object.keys(schema.nodes).length} | activa=${String(saved.active)}`,
     );
 
-    return this.findOne(saved.id);
+    const detail = await this.findOne(saved.id);
+    this.publishMutation('CREATED', detail.id, detail);
+
+    return detail;
   }
 
   /**
@@ -179,7 +209,10 @@ export class WorkflowTemplatesService {
 
     const saved = await this.templateRepository.save(template);
 
-    return this.findOne(saved.id);
+    const detail = await this.findOne(saved.id);
+    this.publishMutation('UPDATED', detail.id, detail);
+
+    return detail;
   }
 
   /**
@@ -202,7 +235,10 @@ export class WorkflowTemplatesService {
       `Plantilla de flujo retirada del catalogo: "${saved.name}" (${saved.id})`,
     );
 
-    return this.findOne(saved.id);
+    const detail = await this.findOne(saved.id);
+    this.publishMutation('UPDATED', detail.id, detail);
+
+    return detail;
   }
 
   /**

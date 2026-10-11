@@ -1,3 +1,5 @@
+import type { CrudEntity } from '@common/types/crud-events.types';
+
 /**
  * Motivos de rechazo del handshake. Son el CONTRATO DE CABLE con el cliente:
  * viajan como `Error.message` del `connect_error` de Socket.io, y
@@ -71,9 +73,10 @@ export const resolveCorsOrigin = (
   requestOrigin: string | undefined,
   callback: (error: Error | null, allow?: boolean) => void,
 ): void => {
-  const allowedOrigins = [process.env.FRONTEND_URL, ...DEVELOPMENT_ORIGINS].filter(
-    (url): url is string => Boolean(url),
-  );
+  const allowedOrigins = [
+    process.env.FRONTEND_URL,
+    ...DEVELOPMENT_ORIGINS,
+  ].filter((url): url is string => Boolean(url));
 
   // Sin cabecera `Origin` no hay nada que proteger: son peticiones que no vienen
   // de una pagina (curl, sondas de salud, el mismo origen). La barrera real para
@@ -86,3 +89,23 @@ export const resolveCorsOrigin = (
 
   callback(new Error(CORS_ORIGIN_DENIED), false);
 };
+
+/** Prefijo de las salas por rol, usadas para acotar la difusion CRUD. */
+export const ROLE_ROOM_PREFIX = 'role_';
+
+/**
+ * Entidades cuya mutacion solo pueden recibir los administradores.
+ *
+ * `users` y `allowed_ips` exponen correos corporativos y rangos de red, que
+ * `security-and-scope.md` §2 reserva a ADMIN. `workflow_templates` se incluye
+ * porque su ruta lleva `requiresAdmin` en el enrutador del panel; su
+ * controlador HTTP es mas laxo, y ante la divergencia se aplica la restriccion
+ * mas estricta de las dos.
+ *
+ * Lo que NO esta aqui —`templates`, `ai_prompts`— se difunde a todo el
+ * namespace, que ya esta autenticado por el middleware del handshake, en
+ * paridad con el `@Roles(ADMIN, EDITOR)` de sus controladores.
+ */
+export const ADMIN_ONLY_ENTITIES: ReadonlySet<CrudEntity> = new Set<CrudEntity>(
+  ['users', 'allowed_ips', 'workflow_templates'],
+);

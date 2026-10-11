@@ -8,6 +8,7 @@ import { InjectRepository } from '@nestjs/typeorm';
 import ipRangeCheck from 'ip-range-check';
 import { Repository } from 'typeorm';
 
+import { CrudEventsCoordinator } from '@common/services/crud-events.coordinator';
 import {
   ALLOWED_IP_RANGES_ENV,
   ALLOWED_IPS_CACHE_TTL_MS,
@@ -17,6 +18,8 @@ import {
 import { CreateAllowedIpDto } from './dto/create-allowed-ip.dto';
 import { UpdateAllowedIpDto } from './dto/update-allowed-ip.dto';
 import { AllowedIp } from './entities/allowed-ip.entity';
+
+import type { CrudAction } from '@common/types/crud-events.types';
 
 interface RangesCache {
   ranges: string[];
@@ -36,6 +39,7 @@ export class AllowedIpsService {
     @InjectRepository(AllowedIp)
     private readonly allowedIpRepository: Repository<AllowedIp>,
     private readonly configService: ConfigService,
+    private readonly crudEvents: CrudEventsCoordinator,
   ) {}
 
   public async findAll(): Promise<AllowedIp[]> {
@@ -52,6 +56,27 @@ export class AllowedIpsService {
     return entry;
   }
 
+  /**
+   * Difunde la mutacion a los paneles abiertos.
+   *
+   * Se invoca en los TRES puntos de llamada y no dentro de `invalidateCache`,
+   * que no recibe argumentos: meterla ahi obligaria a cambiarle la firma y
+   * convertiria un invalidador de cache en un emisor de eventos.
+   */
+  private publishMutation(
+    action: CrudAction,
+    id: string,
+    entry?: AllowedIp,
+  ): void {
+    this.crudEvents.dispatch({
+      entity: 'allowed_ips',
+      action,
+      id,
+      ...(entry !== undefined ? { data: entry } : {}),
+      emittedAt: new Date().toISOString(),
+    });
+  }
+
   public async create(
     createAllowedIpDto: CreateAllowedIpDto,
   ): Promise<AllowedIp> {
@@ -66,6 +91,8 @@ export class AllowedIpsService {
     const saved = await this.allowedIpRepository.save(entry);
 
     this.invalidateCache();
+    this.publishMutation('CREATED', saved.id, saved);
+
     return saved;
   }
 
@@ -88,6 +115,8 @@ export class AllowedIpsService {
     const saved = await this.allowedIpRepository.save(entry);
 
     this.invalidateCache();
+    this.publishMutation('UPDATED', saved.id, saved);
+
     return saved;
   }
 
@@ -96,9 +125,17 @@ export class AllowedIpsService {
   public async remove(id: string): Promise<AllowedIp> {
     const entry = await this.findById(id);
 
+    // `remove` desprende la entidad, de modo que hay que quedarse con el id
+    // ANTES de perderlo: es lo unico que el panel necesita para sacar la fila.
+    const removedId = entry.id;
+
     await this.allowedIpRepository.remove(entry);
 
     this.invalidateCache();
+    // Unico `DELETED` del sistema: aqui la fila desaparece de verdad, asi que
+    // no viaja `data` —no queda nada que describir.
+    this.publishMutation('DELETED', removedId);
+
     return entry;
   }
 

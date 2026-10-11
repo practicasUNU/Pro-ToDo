@@ -1,6 +1,8 @@
 import { NotFoundException } from '@nestjs/common';
 
+import { CrudEventsCoordinator } from '@common/services/crud-events.coordinator';
 import { ExecutionEventsCoordinator } from '@common/services/execution-events.coordinator';
+import { CRUD_EVENT } from '@common/types/crud-events.types';
 import { EXECUTION_EVENT } from '@common/types/execution-events.types';
 import {
   CORS_ORIGIN_DENIED,
@@ -8,6 +10,7 @@ import {
   FORBIDDEN_ROOM,
   MAX_ROOMS_PER_SOCKET,
   resolveCorsOrigin,
+  ROLE_ROOM_PREFIX,
   USER_ROOM_PREFIX,
   WS_DENIED_ORIGIN,
   WS_INVALID_TOKEN,
@@ -16,6 +19,10 @@ import { NotificationGateway } from '@modules/notifications/notification.gateway
 import { UserRole } from '@modules/users/enums/user-role.enum';
 
 import type { IpAccessService } from '@common/services/ip-access.service';
+import type {
+  CrudEntity,
+  CrudMutationPayload,
+} from '@common/types/crud-events.types';
 import type { WorkflowsService } from '@modules/workflows/workflows.service';
 import type { NodeErrorEvent } from '@common/types/execution-events.types';
 import type { JwtService } from '@nestjs/jwt';
@@ -95,6 +102,7 @@ interface Harness {
   ipAccessService: { isOriginAllowed: jest.Mock };
   coordinator: ExecutionEventsCoordinator;
   workflowsService: { findOne: jest.Mock };
+  crudEvents: CrudEventsCoordinator;
   emit: jest.Mock;
   to: jest.Mock;
   use: jest.Mock;
@@ -117,11 +125,14 @@ const buildHarness = (): Harness => {
     findOne: jest.fn().mockResolvedValue({ id: FLOW_ID }),
   };
 
+  const crudEvents = new CrudEventsCoordinator();
+
   const gateway = new NotificationGateway(
     jwtService as unknown as JwtService,
     ipAccessService as unknown as IpAccessService,
     coordinator,
     workflowsService as unknown as WorkflowsService,
+    crudEvents,
   );
 
   jest.spyOn(gateway['logger'], 'log').mockImplementation(() => undefined);
@@ -130,7 +141,12 @@ const buildHarness = (): Harness => {
   const emit = jest.fn();
   const to = jest.fn().mockReturnValue({ emit });
   const use = jest.fn();
-  const server = { to, use } as unknown as Server;
+  // `emit` cuelga del servidor Y de lo que devuelve `to`: la difusion CRUD de
+  // entidades compartidas va al namespace entero, sin pasar por una sala, de
+  // modo que un doble con `emit` solo bajo `to` no la veria nunca. Se comparte
+  // el mismo espia a proposito; quien distingue un caso de otro es si `to` llego
+  // a invocarse.
+  const server = { to, use, emit } as unknown as Server;
 
   // `@WebSocketServer()` lo inyecta Nest en tiempo de arranque; aqui se siembra
   // a mano porque el gateway se instancia suelto, sin modulo.
@@ -142,6 +158,7 @@ const buildHarness = (): Harness => {
     ipAccessService,
     coordinator,
     workflowsService,
+    crudEvents,
     emit,
     to,
     use,
@@ -564,6 +581,106 @@ describe('resolveCorsOrigin · negociacion CORS del handshake', () => {
     expect(callback).toHaveBeenCalledWith(
       expect.objectContaining({ message: CORS_ORIGIN_DENIED }),
       false,
+    );
+  });
+});
+
+describe('NotificationGateway · difusion de mutaciones CRUD', () => {
+  const MUTATION_ID = 'b3f1c2d4-5a6b-4c7d-8e9f-0a1b2c3d4e5f';
+
+  const buildMutation = (entity: CrudEntity): CrudMutationPayload => ({
+    entity,
+    action: 'UPDATED',
+    id: MUTATION_ID,
+    emittedAt: '2026-10-11T00:00:00.000Z',
+  });
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+  });
+
+  it('D.1 deberia difundir a todo el namespace una entidad compartida', () => {
+    // 1. Arrange 📐: `templates` lo pueden leer ADMIN y EDITOR por REST.
+    const harness = buildHarness();
+
+    // 2. Act ⚙️
+    harness.gateway.emitCrudMutation(buildMutation('templates'));
+
+    // 3. Assert 🎯: sin sala intermedia.
+    expect(harness.emit).toHaveBeenCalledWith(
+      CRUD_EVENT.MUTATION,
+      expect.objectContaining({ entity: 'templates' }),
+    );
+    expect(harness.to).not.toHaveBeenCalled();
+  });
+
+  it('D.2 deberia acotar a la sala de administradores una entidad restringida', () => {
+    // 1. Arrange 📐: `users` expone correos corporativos; difundirlo entero se
+    //    los entregaria a cualquier EDITOR conectado.
+    const harness = buildHarness();
+
+    // 2. Act ⚙️
+    harness.gateway.emitCrudMutation(buildMutation('users'));
+
+    // 3. Assert 🎯
+    expect(harness.to).toHaveBeenCalledWith(
+      `${ROLE_ROOM_PREFIX}${UserRole.ADMIN}`,
+    );
+    expect(harness.emit).toHaveBeenCalledWith(
+      CRUD_EVENT.MUTATION,
+      expect.objectContaining({ entity: 'users' }),
+    );
+  });
+
+  it('D.3 deberia acotar tambien allowed_ips y workflow_templates', () => {
+    // 1. Arrange 📐 + 2. Act ⚙️
+    const harness = buildHarness();
+    harness.gateway.emitCrudMutation(buildMutation('allowed_ips'));
+    harness.gateway.emitCrudMutation(buildMutation('workflow_templates'));
+
+    // 3. Assert 🎯: las tres entidades administrativas pasan por la sala.
+    expect(harness.to).toHaveBeenCalledTimes(2);
+    expect(harness.to).toHaveBeenNthCalledWith(
+      1,
+      `${ROLE_ROOM_PREFIX}${UserRole.ADMIN}`,
+    );
+    expect(harness.to).toHaveBeenNthCalledWith(
+      2,
+      `${ROLE_ROOM_PREFIX}${UserRole.ADMIN}`,
+    );
+  });
+
+  it('D.4 deberia unir el socket a la sala de su rol al conectar', async () => {
+    // 1. Arrange 📐: el rol es un hecho del handshake, no una eleccion del
+    //    cliente, de ahi que la sala se una aqui y no bajo demanda.
+    const { gateway } = buildHarness();
+    const socket = buildSocket({
+      data: { userId: USER_ID, role: UserRole.EDITOR },
+    });
+
+    // 2. Act ⚙️
+    await gateway.handleConnection(socket as unknown as never);
+
+    // 3. Assert 🎯
+    expect(socket.join).toHaveBeenCalledWith(
+      `${ROLE_ROOM_PREFIX}${UserRole.EDITOR}`,
+    );
+  });
+
+  it('D.5 deberia inscribirse como puerto CRUD al iniciar el modulo', () => {
+    // 1. Arrange 📐
+    const harness = buildHarness();
+    const dispatch = jest.spyOn(harness.crudEvents, 'dispatch');
+
+    // 2. Act ⚙️
+    harness.gateway.onModuleInit();
+    harness.crudEvents.dispatch(buildMutation('templates'));
+
+    // 3. Assert 🎯: el coordinador alcanza al gateway, que difunde.
+    expect(dispatch).toHaveBeenCalled();
+    expect(harness.emit).toHaveBeenCalledWith(
+      CRUD_EVENT.MUTATION,
+      expect.objectContaining({ entity: 'templates' }),
     );
   });
 });

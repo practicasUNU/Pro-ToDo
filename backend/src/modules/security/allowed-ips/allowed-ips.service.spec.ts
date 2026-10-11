@@ -1,5 +1,6 @@
 import { ConflictException, NotFoundException } from '@nestjs/common';
 
+import { CrudEventsCoordinator } from '@common/services/crud-events.coordinator';
 import { AllowedIpsService } from './allowed-ips.service';
 
 import type { AllowedIp } from './entities/allowed-ip.entity';
@@ -45,6 +46,7 @@ describe('AllowedIpsService', () => {
       const service = new AllowedIpsService(
         repository,
         buildConfigService(undefined),
+        new CrudEventsCoordinator(),
       );
 
       // 2. Act
@@ -60,6 +62,7 @@ describe('AllowedIpsService', () => {
       const service = new AllowedIpsService(
         repository,
         buildConfigService(undefined),
+        new CrudEventsCoordinator(),
       );
 
       // 2. Act & 3. Assert
@@ -74,6 +77,7 @@ describe('AllowedIpsService', () => {
       const service = new AllowedIpsService(
         repository,
         buildConfigService(undefined),
+        new CrudEventsCoordinator(),
       );
 
       // 2. Act
@@ -95,6 +99,7 @@ describe('AllowedIpsService', () => {
       const service = new AllowedIpsService(
         repository,
         buildConfigService(undefined),
+        new CrudEventsCoordinator(),
       );
 
       // 2. Act & 3. Assert
@@ -115,6 +120,7 @@ describe('AllowedIpsService', () => {
       const service = new AllowedIpsService(
         repository,
         buildConfigService(undefined),
+        new CrudEventsCoordinator(),
       );
 
       // 2. Act
@@ -134,6 +140,7 @@ describe('AllowedIpsService', () => {
       const service = new AllowedIpsService(
         repository,
         buildConfigService(undefined),
+        new CrudEventsCoordinator(),
       );
 
       // 2. Act
@@ -153,6 +160,7 @@ describe('AllowedIpsService', () => {
       const service = new AllowedIpsService(
         repository,
         buildConfigService(undefined),
+        new CrudEventsCoordinator(),
       );
 
       // 2. Act
@@ -169,6 +177,7 @@ describe('AllowedIpsService', () => {
       const service = new AllowedIpsService(
         repository,
         buildConfigService(undefined),
+        new CrudEventsCoordinator(),
       );
 
       // 2. Act
@@ -185,6 +194,7 @@ describe('AllowedIpsService', () => {
       const service = new AllowedIpsService(
         repository,
         buildConfigService('10.0.0.0/8'),
+        new CrudEventsCoordinator(),
       );
 
       // 2. Act
@@ -205,6 +215,7 @@ describe('AllowedIpsService', () => {
       const service = new AllowedIpsService(
         repository,
         buildConfigService(undefined),
+        new CrudEventsCoordinator(),
       );
 
       // 2. Act
@@ -221,6 +232,7 @@ describe('AllowedIpsService', () => {
       const service = new AllowedIpsService(
         repository,
         buildConfigService('10.0.0.0/8'),
+        new CrudEventsCoordinator(),
       );
 
       // 2. Act
@@ -245,6 +257,7 @@ describe('AllowedIpsService', () => {
       const service = new AllowedIpsService(
         repository,
         buildConfigService(undefined),
+        new CrudEventsCoordinator(),
       );
 
       // 2. Act
@@ -263,6 +276,7 @@ describe('AllowedIpsService', () => {
       const service = new AllowedIpsService(
         repository,
         buildConfigService(undefined),
+        new CrudEventsCoordinator(),
       );
       await service.isIpAllowed('192.168.1.55');
 
