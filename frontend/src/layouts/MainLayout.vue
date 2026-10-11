@@ -4,6 +4,7 @@ import { useRoute } from 'vue-router';
 
 import AppHeader from '@components/shared/AppHeader.vue';
 
+import { useExecutionSocket } from '@/composables/useExecutionSocket';
 import { useSessionMonitor } from '@/composables/useSessionMonitor';
 
 // Titulo de seccion mostrado en la cabecera, derivado de la ruta activa.
@@ -24,6 +25,10 @@ const route = useRoute();
 // Vigila la caducidad del JWT. Se engancha aqui porque este layout envuelve
 // todas las rutas autenticadas y se desmonta al salir a /login.
 useSessionMonitor();
+
+// Mismo enganche, mismo motivo: los eventos del motor FSM deben seguir
+// llegando mientras el operador navega entre vistas.
+useExecutionSocket();
 
 const leftDrawerOpen = ref(false);
 

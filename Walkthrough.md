@@ -7683,3 +7683,131 @@ mismo arbol de dependencias ESM.
   motivo que no es el codigo.
 - **`FsmModule.onModuleInit` sigue haciendo un UPDATE sin filtro.** Con la base dedicada deja de
   importar para el E2E, pero sigue siendo un efecto global en cada arranque del proceso.
+
+---
+
+## PROT-32 · El canal que faltaba: eventos del motor hasta la interfaz
+
+### El evento que nunca llegaba a ninguna parte
+
+`rules/architecture-patterns.md` §4 describe cuatro pasos para un fallo de nodo: volcar el `.log`,
+persistir en PostgreSQL, pausar el motor y **notificar por WebSocket**. Los tres primeros llevaban
+funcionando desde PROT-20; el cuarto no existia. Las dependencias estaban instaladas desde el
+principio, lo que hacia facil creer que el canal estaba montado — `grep -rl WebSocketGateway
+backend/src` no devolvia nada.
+
+### Por que el rechazo vive en un middleware y no en `handleConnection`
+
+Esta es la decision que mas cambio respecto al diseno inicial, y la razon es puramente mecanica.
+
+El enunciado situaba la validacion dentro de `handleConnection`, cerrando con
+`client.disconnect(true)`, y pedia al mismo tiempo que el cliente escuchase `connect_error` para
+distinguir una credencial invalida. Las dos cosas no pueden ser ciertas a la vez: `handleConnection`
+corre **despues** de que el handshake se haya aceptado, asi que desconectar ahi produce un evento
+`disconnect` con motivo `io server disconnect` — el mismo que genera un reinicio del backend.
+`connect_error` solo lo produce un middleware que rechaza el handshake llamando `next(error)`.
+
+Con la version literal, el cliente no podria separar «tu token caduco» de «el servidor se cayo», y
+la unica salida segura seria no purgar nunca la sesion… o purgarla siempre, expulsando al usuario
+cada vez que `nest start --watch` recarga.
+
+Asi que la autenticacion se instala en `afterInit` sobre `server.use(...)`, y `handleConnection`
+queda reducido a unir el socket a su sala privada leyendo lo que el middleware ya dejo validado en
+`socket.data`. Comprobado contra el servidor real: un handshake sin token devuelve
+`connect_error -> "WS_INVALID_TOKEN"`, que es exactamente la cadena que `boot/socket.ts` compara.
+
+### Un coordinador sincrono dentro del bucle de la FSM
+
+`ExecutionEventsCoordinator` es un calco de `FlowPollingCoordinator`, hasta en el comentario de por
+que se itera una copia del `Set`. No es pereza: los dos resuelven el mismo problema —`@core` no
+puede importar `@modules`— y dos soluciones distintas para un mismo problema obligan a elegir cada
+vez que aparece el tercero.
+
+Lo que si es propio de este es que los tres metodos devuelvan `void` en vez de `Promise<void>`. Se
+invocan desde `pauseAt`, a mitad de una transicion de estado. Una firma asincrona invita a
+esperarla, y esperar ahi convierte la latencia de un socket en latencia del motor. Ademas seria una
+promesa hueca: `emit` no espera acuse de nadie.
+
+El `try/catch` por puerto cierra el circulo: una notificacion que revienta no puede convertir una
+ejecucion correcta en una fallida.
+
+### El orden de los dos emisores no es decorativo
+
+`pauseAt` emite **despues** del checkpoint. El evento invita al operador a reanudar, y reanudar
+empieza leyendo esa misma fila: emitir con el UPDATE todavia en vuelo abre una ventana en la que la
+interfaz ofrece un boton sobre un estado que PostgreSQL aun no tiene.
+
+`ExecutionsService` emite **antes** de `executeWorkflow`, y por la razon opuesta: ese metodo es
+bloqueante hasta que el flujo termina o vuelve a pausarse. Emitido despues, el cliente recibiria
+«reanudado» detras del «pausado» del siguiente fallo, y la vista pintaria como viva una ejecucion
+que acaba de detenerse otra vez.
+
+### `logNodeOutcome` no sabia en que flujo estaba
+
+Recibia `(executionId, node, outcome, durationMs)`. El `flowId` —que es la clave de la sala— y el
+numero de intento no estaban en su ambito, asi que la firma gano dos parametros. Su unica llamada
+vive dentro del bucle de reintentos, donde ambos valores estan a mano.
+
+El `attempt` se publica como `(retryState[nodeId] ?? 0) + 1`. El contador crudo arranca en cero, de
+modo que publicarlo tal cual mostraria «intento 0» en el primer fallo.
+
+### El origen del socket no es el `baseURL` de Axios
+
+`VITE_API_BASE_URL` vale `http://localhost:3000/api`: ya trae el prefijo. Concatenar el namespace
+daria `http://localhost:3000/api/events`, que no existe, y el sintoma seria un socket que no conecta
+sin ninguna pista de por que. El cliente extrae el origen con `new URL(base).origin`.
+
+En el otro extremo pasa lo simetrico: `setGlobalPrefix('api')` no alcanza al adaptador de Socket.io
+—el mismo motivo por el que Swagger se monta a mano—, asi que el gateway declara
+`path: '/api/socket.io'` en su decorador y el cliente repite el valor. Verificado: `/api/socket.io`
+responde el handshake y `/socket.io` devuelve 404.
+
+### Una plantilla de entorno que nunca salia del disco
+
+Al documentar `VITE_SOCKET_URL` aparecio que `frontend/.env.example` **no esta versionado**:
+`frontend/.gitignore` tiene un `.env*` que se lo traga, y el `!.env.example` de la raiz no lo
+alcanza porque un patron de un `.gitignore` mas profundo gana sobre el de arriba.
+
+`rules/security-and-scope.md` §0.1 exige esa plantilla versionada, y sin ella cualquier clonado
+nuevo tiene que adivinar las variables del frontend. Se anade la negacion en el `.gitignore` del
+propio frontend. Comprobado que los tres `.env` reales siguen ignorados.
+
+### Lo que NO se hizo
+
+- **No hay consumidor visual.** No existe vista de trazabilidad, ni boton de reanudar, ni ruta
+  nueva. Es una decision explicita de alcance, con una consecuencia que conviene tener presente:
+  `joinFlowRoom` no se invoca desde ninguna pantalla, asi que hoy el socket se conecta, se autentica
+  y no entra en ninguna sala de flujo. La infraestructura esta probada; no esta *usada*.
+- **La sala `user_*` se ocupa pero no recibe nada.** Existe para los avisos dirigidos a una persona
+  concreta. Los eventos de ejecucion se difunden por flujo a proposito: un flujo lo vigila quien lo
+  tenga abierto, no quien lo creo.
+- **Sin BullMQ.** `rules/architecture-patterns.md` §5 lo pide junto a los WebSockets; esta tanda
+  solo cubre la segunda mitad. El desacoplamiento de las ejecuciones pesadas sigue pendiente.
+- **Sin reintento de suscripcion tras reconectar.** Si el socket se cae y vuelve, las salas de flujo
+  se pierden: Socket.io no las restaura. Hoy no se nota porque nadie se suscribe; en cuanto exista
+  la vista, habra que reenganchar en el evento `connect`.
+
+### Estado de la verificacion
+
+- `npm test` en `backend/`: **89 suites, 2099 pruebas**, todas en verde (antes 87 / 2073).
+- `npm run build` en `backend/`: limpio.
+- `npm run test:e2e -- executions-resume.e2e-spec.ts`: **9 casos en verde**. No es ceremonia:
+  `ExecutionsService` gano un parametro de constructor y esa suite monta el `AppModule` real, asi
+  que es lo unico que demuestra que el grafo de inyeccion sigue resolviendo con el gateway dentro.
+- `npm run test` en `frontend/`: **49 ficheros, 962 pruebas**, todas en verde.
+- `npm run typecheck` en `frontend/`: limpio.
+- ESLint limpio sobre los 22 archivos tocados. Los 4 errores de `workflows.service.spec.ts` y los 3
+  de `imap-polling.service.spec.ts` siguen siendo previos.
+- **Sondeo manual contra el servidor real** (puerto aislado, base `<nombre_bd_test>`, disparadores
+  apagados): handshake sin token → `connect_error "WS_INVALID_TOKEN"`; con token valido → conecta;
+  `flow:subscribe` con UUID → `{ok:true}`; con `user_otro` → `{ok:false}`; `flow:unsubscribe` →
+  `{ok:true}`.
+
+### Pendiente
+
+- Vista de trazabilidad en Quasar que consuma el store y llame a `joinFlowRoom`. Es lo unico que
+  convierte esta tanda en funcionalidad visible.
+- Reenganche de las salas de flujo en el evento `connect` del socket, para sobrevivir a una
+  reconexion.
+- Emision por la sala `user_*` cuando exista algun aviso dirigido a una persona.
+- BullMQ para el desacoplamiento productor-consumidor (`rules/architecture-patterns.md` §5).

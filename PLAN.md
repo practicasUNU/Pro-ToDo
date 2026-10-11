@@ -4403,3 +4403,141 @@ sustituira el proximo fallo.
       contra PostgreSQL real, con los disparadores neutralizados y base de datos dedicada
 - [ ] Pendiente — la interfaz Quasar no tiene todavia vista de trazabilidad ni boton de reanudar:
       los tres endpoints existen y no los consume nadie
+
+---
+
+## PROT-32 · Capa de tiempo real: puerto de eventos, `NotificationGateway` y store reactivo
+
+### Problema
+
+PROT-31 dejo el motor capaz de pausar conservando el cursor y la ruta del `.log`, y de reanudar por
+HTTP. Pero **nadie se entera de nada**: la unica forma de saber que un flujo se detuvo era sondear
+`GET /api/executions`. El contrato de `rules/architecture-patterns.md` §4.4 —«emitir el evento de
+error a la sala del flujo para que Quasar actualice la interfaz y permita el reintento (CU-09)»—
+llevaba escrito desde el principio sin una sola linea detras: no existia ningun `@WebSocketGateway`
+en `backend/src`, y las cuatro dependencias (`@nestjs/websockets`, `@nestjs/platform-socket.io`,
+`socket.io`, `socket.io-client`) estaban instaladas sin uso.
+
+El hueco no era cosmetico. Con la barrera de saturacion de PROT-30 activa, una ejecucion pausada
+bloquea su flujo entero hasta que alguien la desatasca — y sin notificacion, ese «alguien» tiene que
+adivinar cuando mirar.
+
+### Contratos nuevos
+
+```typescript
+// @common/types — el contrato de cable, compartido con el frontend
+export const EXECUTION_EVENT = {
+  FLOW_PAUSED: 'flow:paused',
+  FLOW_RESUMED: 'flow:resumed',
+  NODE_ERROR: 'node:error',
+} as const;
+
+export interface ExecutionEventBase {
+  readonly executionId: string;
+  readonly flowId: string;    // clave de la sala; viaja aunque sea derivable
+  readonly emittedAt: string; // ISO, no Date: cruza un socket
+}
+
+// @common/services — el puerto que rompe el acoplamiento @core -> @modules
+export interface ExecutionEventPort {
+  emitFlowPaused(event: FlowPausedEvent): void;   // los tres SINCRONOS
+  emitFlowResumed(event: FlowResumedEvent): void;
+  emitNodeError(event: NodeErrorEvent): void;
+}
+
+// @common/utils — ensanchado para servir tambien a un handshake de Socket.io
+export interface ClientIpSource {
+  readonly headers: IncomingHttpHeaders;
+  readonly socket?: { readonly remoteAddress?: string | undefined };
+  readonly ip?: string | undefined;
+}
+public async isOriginAllowed(source: ClientIpSource): Promise<boolean>;
+```
+
+### Diagrama de inyeccion de dependencias
+
+```
+CommonModule (@Global)
+  └── ExecutionEventsCoordinator ──────┐ (Set<ExecutionEventPort>)
+                                       │
+  FsmEngineService (@core) ────────────┤ publica: pauseAt, logNodeOutcome
+  ExecutionsService (@modules/workflows)┤ publica: resumeExecution
+                                       │
+  NotificationGateway ─────────────────┘ se INSCRIBE en onModuleInit
+    (@modules/notifications)             se da de BAJA en onModuleDestroy
+      ├── JwtService        (via AuthModule, que reexporta JwtModule)
+      ├── IpAccessService   (via CommonModule global)
+      └── ExecutionEventsCoordinator
+```
+
+La flecha va en un solo sentido: el motor nunca conoce al gateway. Es el mismo patron —y por el
+mismo motivo— que `FlowPollingCoordinator`.
+
+### Por que el rechazo del handshake vive en un middleware y no en `handleConnection`
+
+La forma intuitiva —validar en `handleConnection` y llamar `client.disconnect(true)`— **acepta** el
+handshake y lo cierra despues. El cliente recibe entonces un evento `disconnect` con motivo
+`io server disconnect`, que es exactamente el mismo que recibe cuando el backend se reinicia:
+indistinguible. Un middleware instalado en `afterInit` que llama `next(new Error(...))` rechaza
+ANTES de establecer la conexion y produce un `connect_error` con mensaje propio.
+
+Esa diferencia es la que permite al cliente purgar la sesion solo cuando la credencial es la que
+falla. Sin ella, cada reinicio de Nest en desarrollo expulsaria al usuario al login.
+
+### Por que el coordinador es sincrono y devuelve `void`
+
+Se invoca desde `pauseAt` y `logNodeOutcome`, que estan en la ruta critica del bucle de la FSM.
+Devolver una promesa invitaria a esperarla, y eso acoplaria la latencia del motor a la de la red.
+Ademas seria una promesa vacia: el `emit` de Socket.io no espera acuse de nadie.
+
+El `try/catch` es **por puerto** y no propaga nada: quien llama es el motor a mitad de una
+transicion, y una notificacion fallida no puede convertirse en una ejecucion fallida.
+
+### Por que `logNodeOutcome` gano dos parametros
+
+Recibia `(executionId, node, outcome, durationMs)`: no tenia `flowId` —la clave de la sala— ni el
+numero de intento en su ambito. Ambos estan a mano en su unica llamada, dentro del bucle de
+reintentos. El `attempt` se publica 1-based porque «intento 1 de 3» es como se lee en una interfaz;
+el contador crudo de `retryState` arranca en cero y mostraria «intento 0» en el primer fallo.
+
+### Por que el origen del socket no es el `baseURL` de Axios
+
+`VITE_API_BASE_URL` vale `http://localhost:3000/api`, es decir **ya trae el prefijo**. Concatenar el
+namespace daria `http://localhost:3000/api/events`, que no existe. El cliente extrae el origen
+limpio con `new URL(base).origin` y declara aparte `path: '/api/socket.io'`, que es el mismo valor
+que el decorador del gateway fija a mano porque `setGlobalPrefix('api')` no alcanza al adaptador de
+sockets.
+
+Si esos dos valores dejan de coincidir, el handshake responde 404 y el sintoma —«no conecta»— no
+apunta a su causa.
+
+### Por que el perimetro se reutiliza en vez de reimplementarse
+
+`IpAccessService.assertRequestAllowed` exige un `Request` de Express, y un handshake de Socket.io no
+lo es. En vez de duplicar la precedencia `x-forwarded-for` → `x-real-ip` → `socket.remoteAddress`
+—una segunda definicion de «IP de origen» que puede desviarse de la primera sin que nada lo note—,
+se ensancha el parametro de `extractClientIp` a un tipo estructural. `Request` sigue siendo
+asignable, asi que ningun llamante existente cambia.
+
+### Estado de las tareas
+
+- [x] `execution-events.types.ts`: nombres de evento y las tres cargas tipadas
+- [x] `ExecutionEventsCoordinator` con `Set` de puertos y aislamiento por canal, en `CommonModule`
+- [x] `pauseAt` emite tras persistir el checkpoint, nunca antes
+- [x] `logNodeOutcome` emite tambien en ADVERTENCIA, con la ruta real del `.log` del acuse
+- [x] `ExecutionsService` emite la reanudacion ANTES de entrar al motor, que es bloqueante
+- [x] `ClientIpSource` y `IpAccessService.isOriginAllowed`, sin duplicar la regla perimetral
+- [x] `NotificationGateway`: middleware de handshake (IP → JWT), salas `user_*` y `flow_*`
+- [x] Techo de 50 salas por socket y validacion de UUID antes de `join`
+- [x] `NotificationsModule` registrado en `app.module.ts`
+- [x] Frontend: `types/execution.ts` replicando los cuatro DTO y las cargas del socket
+- [x] Frontend: `socket.client.ts`, `socket-events.service.ts`, `fsm-executions.service.ts`
+- [x] Frontend: `execution.store.ts` (Setup API, techo de 200 trazas, parcheo inmutable)
+- [x] Frontend: `boot/socket.ts` discriminando `WS_INVALID_TOKEN` del resto de `connect_error`
+- [x] Frontend: `useExecutionSocket` enganchado en `MainLayout.vue`
+- [x] 44 pruebas nuevas (10 del coordinador, 16 del gateway, 18 del store)
+- [x] `frontend/.env.example` deja de estar ignorado por `frontend/.gitignore`
+- [ ] Pendiente — **no hay consumidor visual**: `joinFlowRoom` no se invoca desde ninguna pantalla.
+      Falta la vista de trazabilidad con `<q-table>` (`.row-urgente` / `-grave` / `-exitoso`) y el
+      boton de reanudar que cierre CU-09 de extremo a extremo
+- [ ] Pendiente — la sala `user_*` se ocupa pero no se emite nada por ella todavia
