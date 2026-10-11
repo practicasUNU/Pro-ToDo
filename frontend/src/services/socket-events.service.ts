@@ -49,6 +49,46 @@ export const subscribeToExecutionEvents = (
 };
 
 /**
+ * Margen para que el servidor acuse una peticion de sala.
+ *
+ * Cinco segundos cubren con holgura un acuse real —el gateway solo consulta la
+ * fila del flujo— y acotan la espera cuando no hay nadie al otro lado.
+ */
+const ROOM_ACK_TIMEOUT_MS = 5000;
+
+/** Motivo del acuse que nunca llego. Lo distingue de un rechazo del gateway. */
+export const ACK_TIMEOUT = 'ACK_TIMEOUT';
+
+/**
+ * Pide una sala y espera el acuse, con tope de tiempo.
+ *
+ * El tope NO es decorativo. Sin el, la promesa se resolvia UNICAMENTE desde el
+ * callback del servidor: con el socket caido, Socket.io encola el `emit` y el
+ * `await` quedaba pendiente para siempre, de modo que un fallo de transporte se
+ * manifestaba como silencio absoluto en vez de un error accionable.
+ *
+ * Se usa el `timeout()` nativo en lugar de un `setTimeout` propio porque
+ * cancela el acuse por su cuenta; un temporizador manual habria que limpiarlo
+ * en las dos ramas y dejaria el callback vivo tras expirar.
+ *
+ * El vencimiento se traduce al mismo `RoomAck` que ya consume el store, asi que
+ * ninguna capa superior distingue un rechazo de un silencio: ambos impiden
+ * apuntar la sala.
+ */
+const requestRoom = async (
+  event: 'flow:subscribe' | 'flow:unsubscribe',
+  flowId: string,
+): Promise<RoomAck> => {
+  try {
+    return await getSocket()
+      .timeout(ROOM_ACK_TIMEOUT_MS)
+      .emitWithAck(event, { flowId });
+  } catch {
+    return { ok: false, reason: ACK_TIMEOUT };
+  }
+};
+
+/**
  * Entra en la sala de un flujo para recibir sus eventos.
  *
  * El acuse del servidor se propaga porque el rechazo es silencioso de otro
@@ -57,11 +97,7 @@ export const subscribeToExecutionEvents = (
  * llego a suscribirse.
  */
 export const joinFlowRoom = async (flowId: string): Promise<RoomAck> =>
-  new Promise<RoomAck>((resolve) => {
-    getSocket().emit('flow:subscribe', { flowId }, resolve);
-  });
+  requestRoom('flow:subscribe', flowId);
 
 export const leaveFlowRoom = async (flowId: string): Promise<RoomAck> =>
-  new Promise<RoomAck>((resolve) => {
-    getSocket().emit('flow:unsubscribe', { flowId }, resolve);
-  });
+  requestRoom('flow:unsubscribe', flowId);

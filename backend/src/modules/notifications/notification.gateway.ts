@@ -17,6 +17,7 @@ import {
   FLOW_ROOM_PREFIX,
   FORBIDDEN_ROOM,
   MAX_ROOMS_PER_SOCKET,
+  resolveCorsOrigin,
   USER_ROOM_PREFIX,
   WS_DENIED_ORIGIN,
   WS_INVALID_TOKEN,
@@ -87,7 +88,12 @@ const BEARER_PREFIX = 'Bearer ';
 @WebSocketGateway({
   namespace: '/events',
   path: '/api/socket.io',
-  cors: { origin: process.env.FRONTEND_URL || '*', credentials: true },
+  // `resolveCorsOrigin` es un CALLBACK a proposito: el decorador se evalua al
+  // importar la clase, antes de que `ConfigModule` cargue el `.env`, asi que un
+  // `process.env.FRONTEND_URL` leido aqui valdria `undefined` y el comodin de
+  // respaldo es ilegal junto a `credentials: true` (el navegador rechaza
+  // `Access-Control-Allow-Origin: *` cuando viajan credenciales).
+  cors: { origin: resolveCorsOrigin, credentials: true },
 })
 export class NotificationGateway
   implements

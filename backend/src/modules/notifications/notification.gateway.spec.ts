@@ -3,9 +3,11 @@ import { NotFoundException } from '@nestjs/common';
 import { ExecutionEventsCoordinator } from '@common/services/execution-events.coordinator';
 import { EXECUTION_EVENT } from '@common/types/execution-events.types';
 import {
+  CORS_ORIGIN_DENIED,
   FLOW_ROOM_PREFIX,
   FORBIDDEN_ROOM,
   MAX_ROOMS_PER_SOCKET,
+  resolveCorsOrigin,
   USER_ROOM_PREFIX,
   WS_DENIED_ORIGIN,
   WS_INVALID_TOKEN,
@@ -14,6 +16,7 @@ import { NotificationGateway } from '@modules/notifications/notification.gateway
 import { UserRole } from '@modules/users/enums/user-role.enum';
 
 import type { IpAccessService } from '@common/services/ip-access.service';
+import type { WorkflowsService } from '@modules/workflows/workflows.service';
 import type { NodeErrorEvent } from '@common/types/execution-events.types';
 import type { JwtService } from '@nestjs/jwt';
 import type { Server, Socket } from 'socket.io';
@@ -497,5 +500,70 @@ describe('NotificationGateway (canal WebSocket de eventos de ejecucion)', () => 
       // 3. Assert
       expect(emit).not.toHaveBeenCalled();
     });
+  });
+});
+
+describe('resolveCorsOrigin · negociacion CORS del handshake', () => {
+  const ORIGINAL_FRONTEND_URL = process.env.FRONTEND_URL;
+
+  afterEach(() => {
+    if (ORIGINAL_FRONTEND_URL === undefined) {
+      delete process.env.FRONTEND_URL;
+    } else {
+      process.env.FRONTEND_URL = ORIGINAL_FRONTEND_URL;
+    }
+  });
+
+  it('C.1 deberia admitir el origen de desarrollo sin FRONTEND_URL', () => {
+    // 1. Arrange 📐: maquina recien clonada, sin `.env`. Antes esto resolvia al
+    //    comodin `*`, ilegal junto a `credentials: true`.
+    delete process.env.FRONTEND_URL;
+    const callback = jest.fn();
+
+    // 2. Act ⚙️
+    resolveCorsOrigin('http://localhost:9000', callback);
+
+    // 3. Assert 🎯
+    expect(callback).toHaveBeenCalledWith(null, true);
+  });
+
+  it('C.2 deberia admitir el origen declarado en FRONTEND_URL', () => {
+    // 1. Arrange 📐: la lectura ocurre DENTRO de la llamada, no al importar el
+    //    modulo, que es justo lo que arregla el fallo.
+    process.env.FRONTEND_URL = 'https://protodo.unuware.com';
+    const callback = jest.fn();
+
+    // 2. Act ⚙️
+    resolveCorsOrigin('https://protodo.unuware.com', callback);
+
+    // 3. Assert 🎯
+    expect(callback).toHaveBeenCalledWith(null, true);
+  });
+
+  it('C.3 deberia admitir una peticion sin cabecera Origin', () => {
+    // 1. Arrange 📐: curl y las sondas de salud no mandan `Origin`. Su barrera
+    //    real es el middleware del handshake (IP corporativa + JWT).
+    const callback = jest.fn();
+
+    // 2. Act ⚙️
+    resolveCorsOrigin(undefined, callback);
+
+    // 3. Assert 🎯
+    expect(callback).toHaveBeenCalledWith(null, true);
+  });
+
+  it('C.4 deberia rechazar un origen ajeno', () => {
+    // 1. Arrange 📐
+    process.env.FRONTEND_URL = 'http://localhost:9000';
+    const callback = jest.fn();
+
+    // 2. Act ⚙️
+    resolveCorsOrigin('http://malicioso.test', callback);
+
+    // 3. Assert 🎯: se deniega con el motivo del contrato, nunca permitiendo.
+    expect(callback).toHaveBeenCalledWith(
+      expect.objectContaining({ message: CORS_ORIGIN_DENIED }),
+      false,
+    );
   });
 });

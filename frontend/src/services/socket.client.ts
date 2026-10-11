@@ -45,8 +45,21 @@ let socket: ExecutionSocket | null = null;
 const resolveSocketOrigin = (): string => {
   const explicit = import.meta.env.VITE_SOCKET_URL;
 
-  if (explicit) {
+  // Se descarta el valor que apunta al PROPIO origen del documento, que es el
+  // del servidor de desarrollo. Ahi no hay backend: Vite no conoce la ruta
+  // `/api/socket.io`, aplica su respaldo de SPA y devuelve `index.html` con
+  // 200 OK al sondeo de Socket.io, que lo descarta y reintenta en bucle sin un
+  // solo error en consola. Ese 200 es lo que hace el fallo indistinguible de un
+  // problema de red, de modo que la configuracion que lo provoca deja de ser
+  // representable (Poka-Yoke, `frontend-quasar.md` §4).
+  if (explicit && explicit !== window.location.origin) {
     return explicit;
+  }
+
+  if (explicit) {
+    console.warn(
+      `[socket] Se ignora VITE_SOCKET_URL="${explicit}": apunta al origen del propio panel, no al backend.`,
+    );
   }
 
   const apiBaseUrl = import.meta.env.VITE_API_BASE_URL;
