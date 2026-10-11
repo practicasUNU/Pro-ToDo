@@ -8,6 +8,7 @@ import {
 import { InjectRepository } from '@nestjs/typeorm';
 
 import { FsmEngineService } from '@core/fsm/services/fsm-engine.service';
+import { ExecutionEventsCoordinator } from '@common/services/execution-events.coordinator';
 import { FsmExecutionQueryService } from '@core/fsm/services/fsm-execution-query.service';
 import { PipelineValidatorService } from '@core/fsm/services/pipeline-validator.service';
 import { ExecutionState } from '@core/fsm/types/fsm.enums';
@@ -51,6 +52,7 @@ export class ExecutionsService {
     private readonly workflowRepository: Repository<Workflow>,
     private readonly pipelineValidatorService: PipelineValidatorService,
     private readonly fsmEngineService: FsmEngineService,
+    private readonly executionEvents: ExecutionEventsCoordinator,
   ) {}
 
   /** Pagina de ejecuciones, de la mas reciente a la mas antigua. */
@@ -191,6 +193,19 @@ export class ExecutionsService {
     this.logger.log(
       `Reanudacion manual (CU-09) del flujo "${workflow.name}" (${workflow.id}) desde el nodo "${execution.activeCursor}" | ejecucion=${executionId} | usuario=${userId}`,
     );
+
+    // ANTES de entrar al motor, y el orden es observable: `executeWorkflow` es
+    // bloqueante hasta que el flujo termina o vuelve a pausarse. Emitido
+    // despues, el cliente recibiria "reanudado" DETRAS del "pausado" del
+    // siguiente fallo, y la interfaz pintaria como viva una ejecucion que
+    // acaba de detenerse otra vez.
+    this.executionEvents.emitFlowResumed({
+      executionId,
+      flowId: execution.flowId,
+      emittedAt: new Date().toISOString(),
+      activeCursor: execution.activeCursor,
+      resumedBy: userId,
+    });
 
     // Sin `skipNodeTypes` ni `initialPayload`: el disparador ya corrio en el
     // intento original y su salida esta en el contexto acumulado. Volver a

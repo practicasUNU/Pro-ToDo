@@ -6,6 +6,7 @@ import {
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 
+import { ExecutionEventsCoordinator } from '@common/services/execution-events.coordinator';
 import { FsmConfig } from '@core/config/fsm.config';
 import { SystemCapacityExceededException } from '@core/fsm/exceptions/system-capacity-exceeded.exception';
 import { In, QueryFailedError } from 'typeorm';
@@ -271,6 +272,11 @@ describe('FsmEngineService (PROT-09)', () => {
       // para gobernar tambien el techo global. Un doble obligaria a declararlo
       // dos veces y permitiria que ambos se contradijeran.
       new FsmConfig(configService),
+      // Coordinador REAL y sin puertos inscritos: por diseno eso lo convierte
+      // en un no-op silencioso, asi que no hace falta un doble con tres
+      // `jest.fn()` que ninguna asercion mira. Mismo criterio que el
+      // `FsmConfig` de arriba.
+      new ExecutionEventsCoordinator(),
     );
     jest.spyOn(engine['logger'], 'log').mockImplementation(() => undefined);
     jest.spyOn(engine['logger'], 'warn').mockImplementation(() => undefined);

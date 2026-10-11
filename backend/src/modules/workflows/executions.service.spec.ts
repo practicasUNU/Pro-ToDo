@@ -4,6 +4,7 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 
+import { ExecutionEventsCoordinator } from '@common/services/execution-events.coordinator';
 import { SystemCapacityExceededException } from '@core/fsm/exceptions/system-capacity-exceeded.exception';
 import { ExecutionState } from '@core/fsm/types/fsm.enums';
 import { NodeType } from '@core/fsm/types/pipeline-schema.types';
@@ -133,6 +134,8 @@ const buildHarness = (): ServiceHarness => {
     repository as unknown as Repository<Workflow>,
     validator as unknown as PipelineValidatorService,
     engine as unknown as FsmEngineService,
+    // Coordinador real sin puertos: no-op silencioso por diseno.
+    new ExecutionEventsCoordinator(),
   );
   jest.spyOn(service['logger'], 'log').mockImplementation(() => undefined);
 

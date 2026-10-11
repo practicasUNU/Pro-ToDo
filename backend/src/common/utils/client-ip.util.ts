@@ -1,4 +1,4 @@
-import type { Request } from 'express';
+import type { IncomingHttpHeaders } from 'http';
 
 /** Prefijo que Node antepone a las IPv4 cuando el socket escucha en modo dual IPv6. */
 const IPV4_MAPPED_PREFIX = '::ffff:';
@@ -19,6 +19,25 @@ const normalizeIp = (rawIp: string): string | null => {
 };
 
 /**
+ * Lo minimo que hace falta para averiguar de donde viene una conexion.
+ *
+ * Es un tipo ESTRUCTURAL y no `Request` de Express a proposito: el handshake de
+ * Socket.io no es una peticion HTTP del router —no tiene `ip`, ni `method`, ni
+ * `originalUrl`— pero si tiene cabeceras y direccion remota, que es todo lo que
+ * esta funcion mira. `Request` sigue siendo asignable a este tipo, de modo que
+ * ningun llamante existente cambia.
+ *
+ * La alternativa era afirmar `handshake as unknown as Request`, que funciona
+ * por casualidad estructural y se rompe en silencio el dia que alguien lea aqui
+ * un campo que solo Express tiene.
+ */
+export interface ClientIpSource {
+  readonly headers: IncomingHttpHeaders;
+  readonly socket?: { readonly remoteAddress?: string | undefined };
+  readonly ip?: string | undefined;
+}
+
+/**
  * PROT-05.1: extrae la IP real del cliente considerando proxies inversos.
  *
  * Orden de prioridad estricto:
@@ -33,7 +52,7 @@ const normalizeIp = (rawIp: string): string | null => {
  * @returns la IP normalizada, o `null` si no se pudo determinar (el llamador debe
  *          tratar ese caso como fail-closed).
  */
-export const extractClientIp = (req: Request): string | null => {
+export const extractClientIp = (req: ClientIpSource): string | null => {
   const forwardedFor = req.headers['x-forwarded-for'];
   const forwardedChain = Array.isArray(forwardedFor)
     ? forwardedFor[0]

@@ -9,6 +9,7 @@ import { ConfigService } from '@nestjs/config';
 import { InjectRepository } from '@nestjs/typeorm';
 import { In, QueryFailedError } from 'typeorm';
 
+import { ExecutionEventsCoordinator } from '@common/services/execution-events.coordinator';
 import { HybridLoggerService } from '@modules/logs/services/hybrid-logger.service';
 import { FsmConfig } from '@core/config/fsm.config';
 import { StatePayloadContext } from '@core/fsm/context/state-payload.context';
@@ -414,6 +415,7 @@ export class FsmEngineService {
     private readonly configService: ConfigService,
     private readonly hybridLogger: HybridLoggerService,
     private readonly fsmConfig: FsmConfig,
+    private readonly executionEvents: ExecutionEventsCoordinator,
   ) {}
 
   /**
@@ -899,8 +901,13 @@ export class FsmEngineService {
           // incidencia —"tardo en estabilizarse" frente a "fallo a la primera".
           lastTrace = await this.logNodeOutcome(
             executionId,
+            execution.flowId,
             node,
             outcome,
+            // 1-based: "intento 1 de 3" es como se lee en una interfaz. El
+            // contador de `retryState` arranca en cero, asi que publicarlo en
+            // crudo mostraria "intento 0" en el primer fallo.
+            (retryState[node.nodeId] ?? 0) + 1,
             Date.now() - startedAt,
           );
 
@@ -1447,8 +1454,10 @@ export class FsmEngineService {
 
   private async logNodeOutcome(
     executionId: string,
+    flowId: string,
     node: PipelineNodeConfigDto,
     outcome: NodeOutcome,
+    attempt: number,
     durationMs: number,
   ): Promise<NodeTraceReceipt> {
     const { result } = outcome;
@@ -1477,7 +1486,7 @@ export class FsmEngineService {
     // cambio futuro que hiciera lanzar al logger convertiria el registro en un
     // punto unico de fallo del motor.
     try {
-      return await this.hybridLogger.logNodeExecution({
+      const receipt = await this.hybridLogger.logNodeExecution({
         executionId,
         nodeId: node.nodeId,
         nodeType: node.nodeType,
@@ -1489,6 +1498,30 @@ export class FsmEngineService {
         durationMs,
         payloadSnapshot: this.redactSnapshotBinaries(result.data),
       });
+
+      // Tambien en ADVERTENCIA (los LEVE), no solo en ERROR: un nodo que se
+      // reintenta y acaba saliendo bien es justo el dato que explica una
+      // ejecucion lenta, y sin el la interfaz solo veria el desenlace.
+      //
+      // DESPUES del acuse y dentro del `try`, para que el evento lleve la ruta
+      // real del `.log`. Si el registro falla, el `catch` de abajo no emite
+      // nada: un evento que apunta a un archivo que no se escribio es peor que
+      // ningun evento.
+      if (status !== NodeLogStatus.OK) {
+        this.executionEvents.emitNodeError({
+          executionId,
+          flowId,
+          emittedAt: new Date().toISOString(),
+          nodeId: node.nodeId,
+          severity: failure?.level ?? 'GRAVE',
+          errorCode: failure?.code ?? null,
+          errorMessage: customMessage ?? failure?.message ?? null,
+          logFilePath: receipt.logFilePath,
+          attempt,
+        });
+      }
+
+      return receipt;
     } catch (error: unknown) {
       this.logger.warn(
         `No se pudo registrar la traza del nodo "${node.nodeId}" (ejecucion=${executionId}): ${this.describeError(error)}`,
@@ -1883,6 +1916,24 @@ export class FsmEngineService {
     }
 
     await this.saveCheckpoint(execution, patch);
+
+    // DESPUES del checkpoint, nunca antes. El evento invita al operador a
+    // reanudar, y reanudar empieza leyendo esta misma fila: emitirlo con el
+    // UPDATE todavia en vuelo abre una ventana —corta, pero real— en la que la
+    // interfaz ofrece un boton sobre un estado que PostgreSQL aun no tiene.
+    this.executionEvents.emitFlowPaused({
+      executionId: execution.executionId,
+      flowId: execution.flowId,
+      emittedAt: new Date().toISOString(),
+      activeCursor: cursor,
+      ...(cause?.severity !== undefined ? { severity: cause.severity } : {}),
+      ...(cause?.errorMessage !== undefined
+        ? { errorMessage: cause.errorMessage }
+        : {}),
+      ...(cause?.logFilePath !== undefined
+        ? { logFilePath: cause.logFilePath }
+        : {}),
+    });
   }
 
   /**

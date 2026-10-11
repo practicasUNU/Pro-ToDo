@@ -2,6 +2,7 @@ import { Global, Module } from '@nestjs/common';
 
 import { RedLocalMiddleware } from '@common/middlewares/red-local.middleware';
 import { EmailService } from '@common/services/email.service';
+import { ExecutionEventsCoordinator } from '@common/services/execution-events.coordinator';
 import { FlowPollingCoordinator } from '@common/services/flow-polling.coordinator';
 import { IpAccessService } from '@common/services/ip-access.service';
 import { SmtpNodeMailerService } from '@common/services/smtp-node-mailer.service';
@@ -26,6 +27,11 @@ import { AllowedIpsModule } from '@modules/security/allowed-ips/allowed-ips.modu
  * automaticos (`@modules/nodes`), que no comparten modulo; registrarlo en cada
  * uno crearia dos instancias de una clase que describe un unico limite.
  *
+ * Y aloja `ExecutionEventsCoordinator` por identica razon que al anterior: lo
+ * publican `FsmEngineService` (`@core`) y `ExecutionsService`
+ * (`@modules/workflows`), y lo implementa `NotificationGateway`
+ * (`@modules/notifications`), que no conoce a ninguno de los dos.
+ *
  * Es global para que cualquier modulo pueda inyectar `IpAccessService` sin reimportarlo,
  * y expone `RedLocalMiddleware` como provider para poder resolverlo desde `main.ts`
  * y montarlo sobre las rutas de Swagger. Importa `AllowedIpsModule` porque
@@ -40,6 +46,7 @@ import { AllowedIpsModule } from '@modules/security/allowed-ips/allowed-ips.modu
     EmailService,
     SmtpNodeMailerService,
     FlowPollingCoordinator,
+    ExecutionEventsCoordinator,
     FsmConfig,
   ],
   exports: [
@@ -48,6 +55,7 @@ import { AllowedIpsModule } from '@modules/security/allowed-ips/allowed-ips.modu
     EmailService,
     SmtpNodeMailerService,
     FlowPollingCoordinator,
+    ExecutionEventsCoordinator,
     FsmConfig,
   ],
 })

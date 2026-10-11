@@ -1,5 +1,6 @@
 import { ConfigService } from '@nestjs/config';
 
+import { ExecutionEventsCoordinator } from '@common/services/execution-events.coordinator';
 import { FsmConfig } from '@core/config/fsm.config';
 
 import { NodeStrategyFactory } from '@core/fsm/factories/node-strategy.factory';
@@ -147,6 +148,8 @@ describe('Satelite OCR · desvio, reincorporacion y purga binaria', () => {
       configService,
       hybridLogger as unknown as HybridLoggerService,
       new FsmConfig(configService),
+      // Sin puertos inscritos es un no-op: ver `fsm-engine.service.spec.ts`.
+      new ExecutionEventsCoordinator(),
     );
 
     jest.spyOn(engine['logger'], 'log').mockImplementation(() => undefined);

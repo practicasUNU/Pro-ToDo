@@ -4,6 +4,7 @@ import { ACCESS_DENIED_MESSAGE } from '@common/constants/security.constants';
 import { extractClientIp } from '@common/utils/client-ip.util';
 import { AllowedIpsService } from '@modules/security/allowed-ips/allowed-ips.service';
 
+import type { ClientIpSource } from '@common/utils/client-ip.util';
 import type { Request } from 'express';
 
 /**
@@ -47,6 +48,41 @@ export class IpAccessService {
         'IP fuera de los rangos CIDR autorizados',
       );
     }
+  }
+
+  /**
+   * Misma politica, para transportes que no son el router HTTP de Nest.
+   *
+   * La usa `NotificationGateway` sobre el handshake de Socket.io. Devuelve un
+   * booleano en vez de lanzar porque ahi no hay respuesta HTTP donde colgar un
+   * 403: quien rechaza es el middleware del handshake, cortando la conexion
+   * antes de que llegue a establecerse.
+   *
+   * Comparte `extractClientIp` con la ruta HTTP y eso es lo importante. Duplicar
+   * aqui la precedencia `x-forwarded-for` -> `x-real-ip` -> socket seria crear
+   * una segunda definicion de "IP de origen" que se puede desviar de la primera
+   * sin que ninguna prueba lo note.
+   *
+   * Fail-closed igual que su hermana: sin IP determinable, se deniega.
+   */
+  public async isOriginAllowed(source: ClientIpSource): Promise<boolean> {
+    const clientIp = extractClientIp(source);
+
+    if (!clientIp) {
+      this.logger.warn(
+        'Acceso perimetral denegado | ip=desconocida | transporte=no-http | motivo=No se pudo determinar la IP de origen',
+      );
+      return false;
+    }
+
+    if (!(await this.allowedIpsService.isIpAllowed(clientIp))) {
+      this.logger.warn(
+        `Acceso perimetral denegado | ip=${clientIp} | transporte=no-http | motivo=IP fuera de los rangos CIDR autorizados`,
+      );
+      return false;
+    }
+
+    return true;
   }
 
   /**
