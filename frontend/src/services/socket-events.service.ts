@@ -1,6 +1,8 @@
+import { CRUD_EVENT } from '@/types/crud-events';
 import { EXECUTION_EVENT } from '@/types/execution';
 import { getSocket } from '@services/socket.client';
 
+import type { CrudMutationPayload } from '@/types/crud-events';
 import type {
   ExecutionEventHandlers,
   FlowPausedEvent,
@@ -25,17 +27,12 @@ import type {
  * consumidor tenga puestos sobre el mismo evento, y el sintoma seria una vista
  * que deja de actualizarse al desmontarse una vista distinta.
  */
-export const subscribeToExecutionEvents = (
-  handlers: ExecutionEventHandlers,
-): (() => void) => {
+export const subscribeToExecutionEvents = (handlers: ExecutionEventHandlers): (() => void) => {
   const socket = getSocket();
 
-  const onFlowPaused = (event: FlowPausedEvent): void =>
-    handlers.onFlowPaused?.(event);
-  const onFlowResumed = (event: FlowResumedEvent): void =>
-    handlers.onFlowResumed?.(event);
-  const onNodeError = (event: NodeErrorEvent): void =>
-    handlers.onNodeError?.(event);
+  const onFlowPaused = (event: FlowPausedEvent): void => handlers.onFlowPaused?.(event);
+  const onFlowResumed = (event: FlowResumedEvent): void => handlers.onFlowResumed?.(event);
+  const onNodeError = (event: NodeErrorEvent): void => handlers.onNodeError?.(event);
 
   socket.on(EXECUTION_EVENT.FLOW_PAUSED, onFlowPaused);
   socket.on(EXECUTION_EVENT.FLOW_RESUMED, onFlowResumed);
@@ -45,6 +42,29 @@ export const subscribeToExecutionEvents = (
     socket.off(EXECUTION_EVENT.FLOW_PAUSED, onFlowPaused);
     socket.off(EXECUTION_EVENT.FLOW_RESUMED, onFlowResumed);
     socket.off(EXECUTION_EVENT.NODE_ERROR, onNodeError);
+  };
+};
+
+/**
+ * Escucha las mutaciones de tablas maestras.
+ *
+ * El servidor decide quien recibe cada entidad —las administrativas solo
+ * alcanzan la sala de administradores—, de modo que aqui no hay que filtrar
+ * por rol: lo que llega es lo que corresponde a esta sesion.
+ *
+ * La baja se hace POR REFERENCIA, igual que en `subscribeToExecutionEvents`:
+ * un `off` a secas sobre el nombre del evento se llevaria por delante a
+ * cualquier otro suscriptor del mismo canal.
+ */
+export const subscribeToCrudMutations = (
+  handler: (payload: CrudMutationPayload) => void,
+): (() => void) => {
+  const socket = getSocket();
+
+  socket.on(CRUD_EVENT.MUTATION, handler);
+
+  return () => {
+    socket.off(CRUD_EVENT.MUTATION, handler);
   };
 };
 
@@ -80,9 +100,7 @@ const requestRoom = async (
   flowId: string,
 ): Promise<RoomAck> => {
   try {
-    return await getSocket()
-      .timeout(ROOM_ACK_TIMEOUT_MS)
-      .emitWithAck(event, { flowId });
+    return await getSocket().timeout(ROOM_ACK_TIMEOUT_MS).emitWithAck(event, { flowId });
   } catch {
     return { ok: false, reason: ACK_TIMEOUT };
   }

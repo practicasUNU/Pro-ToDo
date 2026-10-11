@@ -9,6 +9,7 @@ import type {
   CreateAiPromptTemplatePayload,
   UpdateAiPromptTemplatePayload,
 } from '@/types/ai-prompt-template';
+import type { CrudAction } from '@/types/crud-events';
 
 // Logica de negocio y estado compartido del dominio Prompts de IA. Esta capa no
 // conoce Axios ni rutas del backend (ver frontend-architecture.md §2.1): solo
@@ -101,6 +102,40 @@ export const useAiPromptTemplatesStore = defineStore('aiPromptTemplates', () => 
     }
   };
 
+  /**
+   * Aplica una mutacion llegada por WebSocket.
+   *
+   * Es IDEMPOTENTE a proposito: quien origino el cambio ya actualizo esta lista
+   * con la respuesta REST y recibe ademas su propio evento, de modo que un
+   * `CREATED` que insertara a ciegas le duplicaria la fila en pantalla.
+   *
+   * `UPDATED` inserta si no encuentra el id, porque una baja logica puede
+   * llegar a una lista que todavia no tenia esa fila cargada.
+   */
+  const applyMutation = (
+    action: CrudAction,
+    item: AiPromptTemplate | undefined,
+    id: string,
+  ): void => {
+    if (action === 'DELETED') {
+      prompts.value = prompts.value.filter((prompt) => prompt.id !== id);
+
+      return;
+    }
+
+    // Un evento sin fila solo puede ser una baja; cualquier otra cosa es
+    // un emisor incoherente y se ignora antes que corromper la lista.
+    if (item === undefined) {
+      return;
+    }
+
+    const exists = prompts.value.some((prompt) => prompt.id === item.id);
+
+    prompts.value = exists
+      ? prompts.value.map((prompt) => (prompt.id === item.id ? item : prompt))
+      : [item, ...prompts.value];
+  };
+
   return {
     prompts,
     activePrompt,
@@ -110,6 +145,7 @@ export const useAiPromptTemplatesStore = defineStore('aiPromptTemplates', () => 
     createPrompt,
     updatePrompt,
     deletePrompt,
+    applyMutation,
   };
 });
 

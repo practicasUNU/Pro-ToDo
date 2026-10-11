@@ -8,6 +8,7 @@ import type {
   HtmlTemplate,
   UpdateHtmlTemplatePayload,
 } from '@/types/html-template';
+import type { CrudAction } from '@/types/crud-events';
 
 /**
  * Buffer de edicion activo del editor de plantillas.
@@ -236,6 +237,36 @@ export const useTemplatesStore = defineStore('templates', () => {
     selectedTemplate.value = template;
   };
 
+  /**
+   * Aplica una mutacion llegada por WebSocket.
+   *
+   * Es IDEMPOTENTE a proposito: quien origino el cambio ya actualizo esta lista
+   * con la respuesta REST y recibe ademas su propio evento, de modo que un
+   * `CREATED` que insertara a ciegas le duplicaria la fila en pantalla.
+   *
+   * `UPDATED` inserta si no encuentra el id, porque una baja logica puede
+   * llegar a una lista que todavia no tenia esa fila cargada.
+   */
+  const applyMutation = (action: CrudAction, item: HtmlTemplate | undefined, id: string): void => {
+    if (action === 'DELETED') {
+      templates.value = templates.value.filter((template) => template.id !== id);
+
+      return;
+    }
+
+    // Un evento sin fila solo puede ser una baja; cualquier otra cosa es
+    // un emisor incoherente y se ignora antes que corromper la lista.
+    if (item === undefined) {
+      return;
+    }
+
+    const exists = templates.value.some((template) => template.id === item.id);
+
+    templates.value = exists
+      ? templates.value.map((template) => (template.id === item.id ? item : template))
+      : [item, ...templates.value];
+  };
+
   return {
     templates,
     selectedTemplate,
@@ -255,6 +286,7 @@ export const useTemplatesStore = defineStore('templates', () => {
     deactivateTemplate,
     previewTemplate,
     selectTemplate,
+    applyMutation,
   };
 });
 

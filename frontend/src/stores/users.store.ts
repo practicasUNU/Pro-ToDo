@@ -4,6 +4,7 @@ import { ref } from 'vue';
 import * as usersService from '@services/users.service';
 
 import type { CreateUserPayload, UpdateUserPayload, User } from '@/types/user';
+import type { CrudAction } from '@/types/crud-events';
 
 // Logica de negocio y estado compartido del dominio Usuarios. Esta capa no
 // conoce Axios ni rutas del backend (ver frontend-architecture.md §2.1): solo
@@ -59,7 +60,45 @@ export const useUsersStore = defineStore('users', () => {
     }
   };
 
-  return { users, isLoading, fetchUsers, createUser, updateUser, deactivateUser };
+  /**
+   * Aplica una mutacion llegada por WebSocket.
+   *
+   * Es IDEMPOTENTE a proposito: quien origino el cambio ya actualizo esta lista
+   * con la respuesta REST y recibe ademas su propio evento, de modo que un
+   * `CREATED` que insertara a ciegas le duplicaria la fila en pantalla.
+   *
+   * `UPDATED` inserta si no encuentra el id, porque una baja logica puede
+   * llegar a una lista que todavia no tenia esa fila cargada.
+   */
+  const applyMutation = (action: CrudAction, item: User | undefined, id: string): void => {
+    if (action === 'DELETED') {
+      users.value = users.value.filter((user) => user.id !== id);
+
+      return;
+    }
+
+    // Un evento sin fila solo puede ser una baja; cualquier otra cosa es
+    // un emisor incoherente y se ignora antes que corromper la lista.
+    if (item === undefined) {
+      return;
+    }
+
+    const exists = users.value.some((user) => user.id === item.id);
+
+    users.value = exists
+      ? users.value.map((user) => (user.id === item.id ? item : user))
+      : [item, ...users.value];
+  };
+
+  return {
+    users,
+    isLoading,
+    fetchUsers,
+    createUser,
+    updateUser,
+    deactivateUser,
+    applyMutation,
+  };
 });
 
 if (import.meta.hot) {

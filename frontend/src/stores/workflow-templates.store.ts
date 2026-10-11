@@ -35,6 +35,7 @@ import type {
   WorkflowTemplateDetail,
   WorkflowTemplateSummary,
 } from '@/types/pipeline';
+import type { CrudAction } from '@/types/crud-events';
 
 /**
  * Buffer de edicion del editor de plantillas.
@@ -835,6 +836,40 @@ export const useWorkflowTemplatesStore = defineStore('workflowTemplates', () => 
     satellites.value = [];
   };
 
+  /**
+   * Aplica una mutacion llegada por WebSocket.
+   *
+   * Es IDEMPOTENTE a proposito: quien origino el cambio ya actualizo esta lista
+   * con la respuesta REST y recibe ademas su propio evento, de modo que un
+   * `CREATED` que insertara a ciegas le duplicaria la fila en pantalla.
+   *
+   * `UPDATED` inserta si no encuentra el id, porque una baja logica puede
+   * llegar a una lista que todavia no tenia esa fila cargada.
+   */
+  const applyMutation = (
+    action: CrudAction,
+    item: WorkflowTemplateSummary | undefined,
+    id: string,
+  ): void => {
+    if (action === 'DELETED') {
+      templates.value = templates.value.filter((candidate) => candidate.id !== id);
+
+      return;
+    }
+
+    // Un evento sin fila solo puede ser una baja; cualquier otra cosa es un
+    // emisor incoherente y se ignora antes que corromper la lista.
+    if (item === undefined) {
+      return;
+    }
+
+    const exists = templates.value.some((candidate) => candidate.id === item.id);
+
+    templates.value = exists
+      ? templates.value.map((candidate) => (candidate.id === item.id ? item : candidate))
+      : [item, ...templates.value];
+  };
+
   return {
     templates,
     isLoading,
@@ -865,6 +900,7 @@ export const useWorkflowTemplatesStore = defineStore('workflowTemplates', () => 
     validateDraftSchema,
     setActive,
     resetDraft,
+    applyMutation,
   };
 });
 

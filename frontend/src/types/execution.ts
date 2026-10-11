@@ -17,6 +17,8 @@
  * y pintarlo como tal haria que cualquier recuento midiese sobre todo buzones
  * vacios.
  */
+import type { CrudMutationPayload } from '@/types/crud-events';
+
 export enum ExecutionState {
   INACTIVO = 'INACTIVO',
   EN_PROCESO = 'EN_PROCESO',
@@ -133,17 +135,14 @@ export interface ServerToClientEvents {
   'flow:paused': (event: FlowPausedEvent) => void;
   'flow:resumed': (event: FlowResumedEvent) => void;
   'node:error': (event: NodeErrorEvent) => void;
+  // Familia aparte —mutaciones de tablas maestras—, pero comparte socket, y el
+  // mapa tipado tiene que conocerla o `socket.on` la rechaza en compilacion.
+  'crud:mutation': (payload: CrudMutationPayload) => void;
 }
 
 export interface ClientToServerEvents {
-  'flow:subscribe': (
-    payload: { flowId: string },
-    ack: (response: RoomAck) => void,
-  ) => void;
-  'flow:unsubscribe': (
-    payload: { flowId: string },
-    ack: (response: RoomAck) => void,
-  ) => void;
+  'flow:subscribe': (payload: { flowId: string }, ack: (response: RoomAck) => void) => void;
+  'flow:unsubscribe': (payload: { flowId: string }, ack: (response: RoomAck) => void) => void;
 }
 
 /** Manejadores que un consumidor entrega para escuchar el canal. */

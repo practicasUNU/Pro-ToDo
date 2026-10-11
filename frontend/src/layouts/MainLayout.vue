@@ -5,6 +5,7 @@ import { useRoute } from 'vue-router';
 import AppHeader from '@components/shared/AppHeader.vue';
 import { useSessionStore } from '@stores/session.store';
 
+import { useCrudSocket } from '@/composables/useCrudSocket';
 import { useExecutionSocket } from '@/composables/useExecutionSocket';
 import { useSessionMonitor } from '@/composables/useSessionMonitor';
 
@@ -35,6 +36,10 @@ useSessionMonitor();
 // Mismo enganche, mismo motivo: los eventos del motor FSM deben seguir
 // llegando mientras el operador navega entre vistas.
 useExecutionSocket();
+
+// Aqui por el mismo motivo que el anterior: las ediciones de otro administrador
+// deben seguir llegando mientras el operador navega entre vistas.
+useCrudSocket();
 
 const leftDrawerOpen = ref(false);
 

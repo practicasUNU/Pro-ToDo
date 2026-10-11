@@ -44,21 +44,13 @@ export const useExecutionStore = defineStore('execution', () => {
   const isLoading = ref(false);
   const isResuming = ref(false);
 
-  const activeCursor = computed<string | null>(
-    () => activeExecution.value?.activeCursor ?? null,
-  );
+  const activeCursor = computed<string | null>(() => activeExecution.value?.activeCursor ?? null);
 
-  const currentState = computed<ExecutionState | null>(
-    () => activeExecution.value?.state ?? null,
-  );
+  const currentState = computed<ExecutionState | null>(() => activeExecution.value?.state ?? null);
 
-  const isPaused = computed<boolean>(
-    () => currentState.value === ExecutionState.PAUSADO,
-  );
+  const isPaused = computed<boolean>(() => currentState.value === ExecutionState.PAUSADO);
 
-  const isRunning = computed<boolean>(
-    () => currentState.value === ExecutionState.EN_PROCESO,
-  );
+  const isRunning = computed<boolean>(() => currentState.value === ExecutionState.EN_PROCESO);
 
   /**
    * Ultima ejecucion conocida de cada flujo, indexada por `flowId`.
@@ -85,9 +77,7 @@ export const useExecutionStore = defineStore('execution', () => {
   });
 
   /** Traza mas reciente; `nodeEvents` se mantiene en orden descendente. */
-  const lastNodeError = computed<NodeErrorEvent | null>(
-    () => nodeEvents.value[0] ?? null,
-  );
+  const lastNodeError = computed<NodeErrorEvent | null>(() => nodeEvents.value[0] ?? null);
 
   /**
    * ¿El evento habla de la ejecucion que el usuario tiene abierta?
@@ -113,15 +103,11 @@ export const useExecutionStore = defineStore('execution', () => {
     patch: Partial<ExecutionSummary>,
     seed?: Pick<ExecutionSummary, 'flowId' | 'startedAt'>,
   ): void => {
-    const isKnown = executions.value.some(
-      (execution) => execution.executionId === executionId,
-    );
+    const isKnown = executions.value.some((execution) => execution.executionId === executionId);
 
     if (isKnown) {
       executions.value = executions.value.map((execution) =>
-        execution.executionId === executionId
-          ? { ...execution, ...patch }
-          : execution,
+        execution.executionId === executionId ? { ...execution, ...patch } : execution,
       );
     } else if (seed !== undefined) {
       // La tabla de flujos sigue salas de flujos que quiza nunca listaron una
@@ -155,9 +141,7 @@ export const useExecutionStore = defineStore('execution', () => {
       {
         state: ExecutionState.PAUSADO,
         activeCursor: event.activeCursor,
-        ...(event.errorMessage !== undefined
-          ? { failureReason: event.errorMessage }
-          : {}),
+        ...(event.errorMessage !== undefined ? { failureReason: event.errorMessage } : {}),
         // Solo si el evento trae ruta: un `null` incondicional borraria una
         // ruta anterior perfectamente valida, que es la misma precaucion que
         // toma `pauseAt` en el backend.
@@ -197,9 +181,7 @@ export const useExecutionStore = defineStore('execution', () => {
   };
 
   /** Pagina de ejecuciones. Sin contexto acumulado: eso lo trae el detalle. */
-  const fetchExecutions = async (
-    query: ExecutionListQuery = {},
-  ): Promise<void> => {
+  const fetchExecutions = async (query: ExecutionListQuery = {}): Promise<void> => {
     isLoading.value = true;
 
     try {
@@ -221,8 +203,7 @@ export const useExecutionStore = defineStore('execution', () => {
     isLoading.value = true;
 
     try {
-      activeExecution.value =
-        await fsmExecutionsService.fetchExecution(executionId);
+      activeExecution.value = await fsmExecutionsService.fetchExecution(executionId);
       nodeEvents.value = [];
     } finally {
       isLoading.value = false;
@@ -236,9 +217,7 @@ export const useExecutionStore = defineStore('execution', () => {
    * desaparecio del esquema) y el 429 (motor saturado) necesitan mensajes
    * distintos, y quien los decide es el componente.
    */
-  const resumeExecution = async (
-    executionId: string,
-  ): Promise<WorkflowExecutionResult> => {
+  const resumeExecution = async (executionId: string): Promise<WorkflowExecutionResult> => {
     isResuming.value = true;
 
     try {
