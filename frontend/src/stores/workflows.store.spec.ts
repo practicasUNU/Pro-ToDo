@@ -1,4 +1,5 @@
 import { createPinia, setActivePinia } from 'pinia';
+import { nextTick } from 'vue';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { useWorkflowsStore } from './workflows.store';
@@ -167,6 +168,41 @@ describe('useWorkflowsStore · catalogo de flujos instanciados', () => {
       // 2. Act & 3. Assert
       await expect(store.setActive(WORKFLOW_ID, true)).rejects.toThrow('400 Bad Request');
       expect(store.workflows[0]?.active).toBe(false);
+    });
+  });
+
+  describe('apagado automatico llegado por el canal', () => {
+    it('deberia repintar la fila como inactiva sin recargar', async () => {
+      // 1. Arrange 📐: es el caso del flujo con `stopOnFirstSuccess`, que se
+      //    apaga solo tras su primer exito. Lo dispara un sondeo, de modo que
+      //    nadie lo esta mirando cuando ocurre y la unica via para que la tabla
+      //    diga la verdad es esta mutacion.
+      const store = useWorkflowsStore();
+      store.workflows = [buildWorkflow({ active: true })];
+
+      // 2. Act ⚙️
+      store.applyMutation('UPDATED', buildWorkflow({ active: false }), WORKFLOW_ID);
+      await nextTick();
+
+      // 3. Assert 🎯: la fila se reemplaza ENTERA, no se fusiona.
+      expect(store.workflows).toHaveLength(1);
+      expect(store.workflows[0]?.active).toBe(false);
+    });
+
+    it('NO deberia tocar las filas de otros flujos', async () => {
+      // 1. Arrange 📐
+      const store = useWorkflowsStore();
+      store.workflows = [
+        buildWorkflow({ active: true }),
+        buildWorkflow({ id: OTHER_WORKFLOW_ID, active: true }),
+      ];
+
+      // 2. Act ⚙️
+      store.applyMutation('UPDATED', buildWorkflow({ active: false }), WORKFLOW_ID);
+      await nextTick();
+
+      // 3. Assert 🎯
+      expect(store.workflows[1]?.active).toBe(true);
     });
   });
 });

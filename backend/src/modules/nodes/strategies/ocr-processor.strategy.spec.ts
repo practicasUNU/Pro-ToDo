@@ -18,7 +18,7 @@ import {
   ERR_OCR_CONFIG,
   ERR_OCR_EMPTY_TRANSCRIPTION,
   ERR_OCR_NO_ATTACHMENTS,
-  ERR_OCR_PROVIDER_FAILURE,
+  ERR_OCR_MAX_RETRIES_EXCEEDED,
   OcrProcessorStrategy,
 } from '@modules/nodes/strategies/ocr-processor.strategy';
 
@@ -355,7 +355,13 @@ describe('OcrProcessorStrategy · nodo satelite PROCESADOR_OCR', () => {
       // 3. Assert 🎯
       expect(result.success).toBe(false);
       expect(result.error?.level).toBe('GRAVE');
-      expect(result.error?.code).toBe(ERR_OCR_PROVIDER_FAILURE);
+      expect(result.error?.code).toBe(ERR_OCR_MAX_RETRIES_EXCEEDED);
+
+      // Un unico fallo consolidado: al llegar aqui ya corrieron los reintentos
+      // del transporte y la cascada de proveedores entera, de modo que el
+      // presupuesto se declara agotado para que el motor no sume los suyos.
+      expect(result.error?.metadata).toMatchObject({ exhausted: true });
+      expect(result.error?.description).toContain('Causa raiz');
     });
 
     it('4.3 NO deberia publicar una transcripcion vacia como exito', async () => {
@@ -996,7 +1002,7 @@ describe('OcrProcessorStrategy · nodo satelite PROCESADOR_OCR', () => {
       // 3. Assert 🎯
       expect(anthropicCompletion).not.toHaveBeenCalled();
       expect(result.success).toBe(false);
-      expect(result.error?.code).toBe(ERR_OCR_PROVIDER_FAILURE);
+      expect(result.error?.code).toBe(ERR_OCR_MAX_RETRIES_EXCEEDED);
     });
 
     it('9.3 deberia rendirse con el ultimo error al agotar la cadena', async () => {

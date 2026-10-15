@@ -107,6 +107,29 @@ export interface NodeErrorDetail {
   missingFields?: string[];
   /** Traza completa; se volcara al `.log` fisico por el protocolo de resiliencia. */
   stackTrace?: string;
+  /**
+   * Causa raiz tecnica, separada del titular que es `message`.
+   *
+   * Los dos los lee un humano, pero en sitios distintos: `message` cabe en una
+   * linea de toast o en el asunto de un correo, y esto es el parrafo que
+   * explica QUE paso por debajo —el error del proveedor, cuantos intentos se
+   * hicieron y contra que modelo—. Fundirlos obligaria a elegir entre un titular
+   * ilegible y un detalle que no se cuenta en ninguna parte.
+   */
+  description?: string;
+  /**
+   * Datos estructurados del fallo, para quien decide y no para quien lee.
+   *
+   * La clave que el motor interpreta es `exhausted`: cuando vale `true`, la
+   * estrategia declara que YA agoto su propio presupuesto de reintentos y
+   * `canRetry` no vuelve a insistir. Sin ella, un `GRAVE` que ya consumio tres
+   * intentos internos recibiria encima los del `retryPolicy` del nodo y los
+   * intentos se multiplicarian, con una alerta por cada uno.
+   *
+   * Las demas claves habituales (`attempts`, `maxRetries`, `lastError`) son
+   * informativas: viajan a `error_context` y de ahi al correo y al aviso.
+   */
+  metadata?: Record<string, unknown>;
 }
 
 /**

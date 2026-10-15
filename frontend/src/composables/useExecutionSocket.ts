@@ -25,6 +25,9 @@ import type {
  */
 const ALERTING_SEVERITIES: readonly NodeErrorSeverity[] = ['GRAVE', 'URGENTE'];
 
+/** Cuanto permanece en pantalla el aviso de exito, en milisegundos. */
+const NOTIFY_SUCCESS_TIMEOUT_MS = 5000;
+
 /** Longitud del identificador abreviado que se muestra en los avisos. */
 const SHORT_ID_LENGTH = 8;
 
@@ -116,12 +119,22 @@ export const useExecutionSocket = (): void => {
       .filter((part): part is string => part !== undefined)
       .join(': ');
 
+    // Un unico intento no se anuncia: es el caso normal y el distintivo solo
+    // sirve para avisar de lo contrario —que ya se insistio y no funciono—,
+    // que es lo que dice al operador si reanudar ahora mismo tiene sentido.
+    const attemptBadge =
+      event.attempts !== undefined && event.attempts > 1
+        ? ` (fallo tras ${event.attempts} intentos)`
+        : '';
+
     $q.notify({
       type: 'warning',
       icon: 'pause_circle',
       multiLine: true,
-      message: `⚠️ Flujo pausado: ${describeFlow(event.flowName, event.flowId)} — nodo ${node}`,
-      caption: `${event.severity ?? 'GRAVE'} · ${detail}`,
+      message: `⚠️ Flujo pausado: ${describeFlow(event.flowName, event.flowId)} — nodo ${node}${attemptBadge}`,
+      caption: [`${event.severity ?? 'GRAVE'} · ${detail}`, event.errorDetail]
+        .filter((part): part is string => part !== undefined)
+        .join('\n'),
       classes: 'pd-card pd-card--accent pd-accent-grave',
       timeout: 0,
       actions: [
@@ -182,8 +195,11 @@ export const useExecutionSocket = (): void => {
     if (event.finalState === ExecutionState.EXITOSO) {
       $q.notify({
         type: 'positive',
-        icon: 'task_alt',
-        message: `Flujo completado: ${flow}`,
+        icon: 'check_circle',
+        // Se desvanece solo: a diferencia de la pausa, no lleva ninguna accion
+        // que el operador deba poder pulsar mas tarde.
+        timeout: NOTIFY_SUCCESS_TIMEOUT_MS,
+        message: `✅ Flujo "${flow}" completado con exito.`,
         caption: 'El pipeline recorrio todos sus nodos sin incidencias.',
       });
 

@@ -66,6 +66,8 @@ const buildPaused = (overrides: Partial<FlowPausedEvent> = {}): FlowPausedEvent 
   flowName: 'NOTIWEB Licitaciones',
   nodeType: 'PROCESADOR_IA',
   errorCode: 'ERR_TEMPLATE_PENDING_VARS',
+  attempts: 3,
+  errorDetail: 'Causa raiz: el proveedor devolvio 503.',
   ...overrides,
 });
 
@@ -339,5 +341,45 @@ describe('useExecutionSocket', () => {
     expect(options.type).toBe('info');
     expect(options.message).toContain('nodo_ia');
     expect(options.caption).toContain('inactivo');
+  });
+  it('deberia desglosar los intentos agotados en el aviso de pausa', () => {
+    // Arrange. Es el dato que decide si reanudar ahora mismo sirve de algo: un
+    // fallo al primer intento invita a reintentar, y uno tras agotar tres dice
+    // que el problema esta en el otro extremo.
+    mountHost();
+
+    // Act
+    registered?.onFlowPaused?.(buildPaused());
+
+    // Assert
+    const options = lastNotifyOptions();
+    expect(options.message).toContain('3 intentos');
+    expect(options.caption).toContain('Causa raiz: el proveedor devolvio 503.');
+  });
+
+  it('NO deberia anunciar los intentos cuando solo hubo uno', () => {
+    // Arrange. Un unico intento es el caso normal; el distintivo solo sirve
+    // para avisar de lo contrario, y ponerlo siempre lo volveria invisible.
+    mountHost();
+
+    // Act
+    registered?.onFlowPaused?.(buildPaused({ attempts: 1 }));
+
+    // Assert
+    expect(lastNotifyOptions().message).not.toContain('intentos');
+  });
+
+  it('deberia desvanecer el aviso de exito, que no lleva ninguna accion', () => {
+    // Arrange. A diferencia de la pausa, no hay nada que el operador deba poder
+    // pulsar mas tarde, asi que un aviso permanente solo acumularia ruido.
+    mountHost();
+
+    // Act
+    registered?.onFlowCompleted?.(buildCompleted());
+
+    // Assert
+    const options = lastNotifyOptions();
+    expect(options.timeout).toBe(5000);
+    expect(options.icon).toBe('check_circle');
   });
 });

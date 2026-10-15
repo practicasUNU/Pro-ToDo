@@ -4124,4 +4124,105 @@ describe('FsmEngineService (PROT-09)', () => {
       expect(event?.flowName).toBe('NOTIWEB Licitaciones');
     });
   });
+
+  describe('38. Presupuesto de reintentos declarado agotado', () => {
+    /** Fallo GRAVE que declara haber consumido ya su propio presupuesto. */
+    const exhaustedFailure = (): NodeResult => ({
+      success: false,
+      error: {
+        level: 'GRAVE',
+        code: TEST_ERROR_CODE,
+        message: 'Inferencia fallida tras agotar 3 reintentos',
+        description: 'Causa raiz: el proveedor devolvio 503.',
+        metadata: {
+          attempts: 3,
+          maxRetries: 3,
+          exhausted: true,
+          lastError: '503',
+        },
+      },
+    });
+
+    /** Pipeline cuyo primer nodo tiene presupuesto de reintentos del motor. */
+    const schemaWithRetries = (maxRetries: number): PipelineSchemaDto => {
+      const schema = buildLinearSchema();
+      // El tipo del nodo se deriva del propio esquema en vez de importarse:
+      // asi no hay una segunda referencia que mantener si el DTO cambia.
+      const nodes: PipelineSchemaDto['nodes'] = { ...schema.nodes };
+      const entry = nodes.nodo_a;
+
+      if (entry === undefined) {
+        throw new Error('El pipeline de prueba perdio su nodo de entrada.');
+      }
+
+      nodes.nodo_a = { ...entry, retryPolicy: { maxRetries } };
+
+      return { ...schema, nodes };
+    };
+
+    it('38.1 NO deberia reintentar un GRAVE que ya se declara agotado', async () => {
+      // 1. Arrange 📐. Es la guarda que evita la multiplicacion: bajo la
+      //    estrategia ya corrio su propio bucle, asi que sumar los del nodo
+      //    repetiria la cadena entera y emitiria un `node:error` por vuelta.
+      const { repo } = buildRepository(buildExecution());
+      const execute = jest.fn().mockResolvedValue(exhaustedFailure());
+      factory.registerStrategy(buildStrategy(NodeType.TRIGGER_IMAP, execute));
+
+      // 2. Act ⚙️
+      const result = await buildEngine(repo).executeWorkflow(
+        EXECUTION_ID,
+        schemaWithRetries(3),
+      );
+
+      // 3. Assert 🎯: UNA sola invocacion pese a los tres reintentos del nodo.
+      expect(execute).toHaveBeenCalledTimes(1);
+      expect(result.currentState).toBe(ExecutionState.PAUSADO);
+    });
+
+    it('38.2 SI deberia reintentar un GRAVE que no lleva la marca', async () => {
+      // 1. Arrange 📐: la contrapartida. Sin ella, una guarda que cortara
+      //    siempre pasaria la prueba anterior y dejaria el motor sin reintentos.
+      const { repo } = buildRepository(buildExecution());
+      const execute = jest.fn().mockResolvedValue(failure('GRAVE'));
+      factory.registerStrategy(buildStrategy(NodeType.TRIGGER_IMAP, execute));
+
+      // 2. Act ⚙️
+      await buildEngine(repo).executeWorkflow(
+        EXECUTION_ID,
+        schemaWithRetries(2),
+      );
+
+      // 3. Assert 🎯: el intento inicial mas los dos reintentos.
+      expect(execute).toHaveBeenCalledTimes(3);
+    });
+
+    it('38.3 deberia anunciar en la pausa los intentos que declara la estrategia', async () => {
+      // 1. Arrange 📐: el contador del MOTOR vale cero en este caso —no llego a
+      //    reintentar—, y publicarlo diria "fallo al primer intento" sobre una
+      //    incidencia que consumio tres. Es justo el dato con el que el
+      //    operador decide si reanudar ahora mismo sirve de algo.
+      const { repo } = buildRepository(buildExecution());
+      const events = new ExecutionEventsCoordinator();
+      const emitFlowPaused = jest.spyOn(events, 'emitFlowPaused');
+      const engine = buildEngine(repo, new ConfigService({}), events);
+
+      factory.registerStrategy(
+        buildStrategy(
+          NodeType.TRIGGER_IMAP,
+          jest.fn().mockResolvedValue(exhaustedFailure()),
+        ),
+      );
+
+      // 2. Act ⚙️
+      await engine.executeWorkflow(EXECUTION_ID, schemaWithRetries(3));
+
+      // 3. Assert 🎯
+      expect(emitFlowPaused).toHaveBeenCalledWith(
+        expect.objectContaining({
+          attempts: 3,
+          errorDetail: 'Causa raiz: el proveedor devolvio 503.',
+        }),
+      );
+    });
+  });
 });

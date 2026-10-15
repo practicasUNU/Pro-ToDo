@@ -37,6 +37,23 @@ export interface AlertEmailParams {
   readonly errorCode?: string;
   readonly errorLevel?: string;
   readonly errorMessage?: string;
+  /**
+   * Causa raiz tecnica, mas larga que `errorMessage`.
+   *
+   * Sale de `NodeErrorDetail.description`: el mensaje es el titular que cabe en
+   * el asunto, y esto el parrafo que dice contra que modelo o que portal se
+   * intento y con que error respondio.
+   */
+  readonly errorDescription?: string;
+  /**
+   * Intentos reales consumidos y tope declarado por el nodo.
+   *
+   * Cambian lo que hace quien lee el correo: "fallo una vez" invita a reintentar
+   * a mano; "fallo tras agotar tres" dice que el problema esta en el otro
+   * extremo y que insistir no va a servir.
+   */
+  readonly attempts?: number;
+  readonly maxRetries?: number;
   /** Nota en texto plano que el operador configuro en el nodo. */
   readonly customNote?: string;
   readonly partialData?: Record<string, unknown>;
@@ -110,6 +127,9 @@ export const buildAlertEmailHtml = (params: AlertEmailParams): string => {
     errorCode,
     errorLevel,
     errorMessage,
+    errorDescription,
+    attempts,
+    maxRetries,
     customNote,
     partialData,
     unresolvedSubjectVariable,
@@ -151,13 +171,42 @@ export const buildAlertEmailHtml = (params: AlertEmailParams): string => {
           </td>
         </tr>`;
 
+  // "N de M" solo si se conocen los dos; con `attempts` a secas se imprime el
+  // numero suelto, que sigue diciendo mas que nada. La fila entera desaparece
+  // cuando no hay intentos que contar, igual que las demas de diagnostico.
+  const retriesSummary =
+    attempts === undefined
+      ? undefined
+      : maxRetries === undefined
+        ? `${attempts}`
+        : `${attempts} de ${maxRetries}`;
+
   const diagnosticRows = [
     diagnosticRow('Codigo de error', errorCode),
     diagnosticRow('Nivel', errorLevel),
     diagnosticRow('Tipo de nodo', failedNodeType),
+    diagnosticRow('Reintentos ejecutados', retriesSummary),
     diagnosticRow('Flujo', flowId),
     diagnosticRow('Fecha / hora (UTC)', timestamp),
   ].join('');
+
+  // Se imprime bajo el mensaje y no como fila de la tabla: es un parrafo, y
+  // meterlo en una celda de diagnostico lo dejaria ilegible.
+  const descriptionBlock =
+    errorDescription === undefined || errorDescription.trim().length === 0
+      ? ''
+      : `
+        <tr>
+          <td style="padding:0 28px 16px">
+            <div style="font-size:11px;font-weight:700;letter-spacing:1px;text-transform:uppercase;color:${BRAND_TEXT_MUTED};margin-bottom:6px">Causa raiz</div>
+            <p style="margin:0;font-size:13px;line-height:20px;color:${BRAND_TEXT_MUTED}">${escapeHtml(errorDescription)}</p>
+            ${
+              attempts === undefined
+                ? ''
+                : `<p style="margin:8px 0 0;font-size:12px;line-height:18px;color:${BRAND_TEXT_MUTED}">Este aviso se emite una sola vez, despues de agotar formalmente la politica de reintentos del nodo.</p>`
+            }
+          </td>
+        </tr>`;
 
   const payloadBlock =
     partialData === undefined || Object.keys(partialData).length === 0
@@ -193,7 +242,7 @@ export const buildAlertEmailHtml = (params: AlertEmailParams): string => {
             <h1 style="margin:${badge === '' ? '0' : '14px'} 0 8px;font-size:20px;line-height:28px;font-weight:700;color:${BRAND_TEXT}">Flujo detenido</h1>
             <p style="margin:0;font-size:14px;line-height:22px;color:${BRAND_TEXT_MUTED}">${headline}</p>
           </td>
-        </tr>${messageBlock}${noteBlock}
+        </tr>${messageBlock}${descriptionBlock}${noteBlock}
         <tr>
           <td style="padding:0 28px 20px">
             <div style="font-size:11px;font-weight:700;letter-spacing:1px;text-transform:uppercase;color:${BRAND_TEXT_MUTED};margin-bottom:4px">Diagnostico tecnico</div>
@@ -242,6 +291,19 @@ export const buildAlertEmailText = (params: AlertEmailParams): string => {
     lines.push('', params.errorMessage);
   }
 
+  if (
+    params.errorDescription !== undefined &&
+    params.errorDescription.trim().length > 0
+  ) {
+    lines.push('', 'CAUSA RAIZ', params.errorDescription);
+
+    if (params.attempts !== undefined) {
+      lines.push(
+        'Este aviso se emite una sola vez, despues de agotar formalmente la politica de reintentos del nodo.',
+      );
+    }
+  }
+
   if (params.customNote !== undefined && params.customNote.trim().length > 0) {
     lines.push('', 'NOTA DEL OPERADOR', params.customNote);
   }
@@ -252,6 +314,14 @@ export const buildAlertEmailText = (params: AlertEmailParams): string => {
     ['Codigo de error', params.errorCode],
     ['Nivel', params.errorLevel],
     ['Tipo de nodo', params.failedNodeType],
+    [
+      'Reintentos ejecutados',
+      params.attempts === undefined
+        ? undefined
+        : params.maxRetries === undefined
+          ? `${params.attempts}`
+          : `${params.attempts} de ${params.maxRetries}`,
+    ],
     ['Flujo', params.flowId],
     ['Fecha / hora (UTC)', params.timestamp],
   ];

@@ -41,7 +41,21 @@ import type { ValidatorOptions } from 'class-validator';
 
 export const ERR_OCR_CONFIG = 'ERR_OCR_CONFIG';
 export const ERR_OCR_NO_ATTACHMENTS = 'ERR_OCR_NO_ATTACHMENTS';
+/**
+ * RETIRADO como salida de la estrategia: lo sustituye
+ * `ERR_OCR_MAX_RETRIES_EXCEEDED`. Se conserva exportado porque un `catchErrors`
+ * de un esquema ya guardado puede nombrarlo, pero este nodo ya no lo emite.
+ */
 export const ERR_OCR_PROVIDER_FAILURE = 'ERR_OCR_PROVIDER_FAILURE';
+
+/**
+ * El nodo agoto su presupuesto de reintentos de transcripcion.
+ *
+ * Viaja con `metadata.exhausted`, de modo que el motor no suma los suyos: al
+ * llegar aqui ya corrieron los reintentos del transporte HTTP y la cascada de
+ * proveedores entera.
+ */
+export const ERR_OCR_MAX_RETRIES_EXCEEDED = 'ERR_OCR_MAX_RETRIES_EXCEEDED';
 export const ERR_OCR_EMPTY_TRANSCRIPTION = 'ERR_OCR_EMPTY_TRANSCRIPTION';
 
 const VALIDATION_OPTIONS: ValidatorOptions = {
@@ -237,7 +251,7 @@ export class OcrProcessorStrategy implements INodeStrategy {
         // Se rinde ante un fallo que otro proveedor repetiria igual —un payload
         // invalido, una credencial mala— y cuando ya no queda a quien recurrir.
         if (!isFallbackWorthy(code) || next === undefined) {
-          return this.providerFailure(error);
+          return this.providerFailure(error, config);
         }
 
         this.logger.warn(
@@ -250,7 +264,7 @@ export class OcrProcessorStrategy implements INodeStrategy {
     // Defensivo: el bucle solo sale por `break` o por `return`. Si la lista de
     // intentos llegase vacia, rendirse es mejor que publicar un exito sin texto.
     if (response === undefined) {
-      return this.providerFailure(lastError);
+      return this.providerFailure(lastError, config);
     }
 
     const cleanBody = this.flattenTranscription(response);
@@ -562,14 +576,34 @@ export class OcrProcessorStrategy implements INodeStrategy {
     return this.providerFactory.getClient(provider);
   }
 
-  /** Mismo `NodeResult` de siempre, ahora desde dos sitios del bucle. */
-  private providerFailure(error: unknown): NodeResult {
+  /**
+   * Mismo `NodeResult` de siempre, ahora desde dos sitios del bucle.
+   *
+   * Se declara `exhausted` porque los dos sitios que lo invocan son finales: o
+   * el fallo no lo arregla otro proveedor, o ya no queda ninguno al que
+   * recurrir. Sin esa marca el motor reintentaria el nodo entero por su cuenta
+   * —GRAVE es la severidad que `canRetry` acepta— y cada vuelta repetiria la
+   * cascada completa contra los mismos proveedores caidos.
+   */
+  private providerFailure(
+    error: unknown,
+    config: ResolvedOcrProcessorConfig,
+  ): NodeResult {
+    const description = error instanceof Error ? error.message : String(error);
+
     return {
       success: false,
       error: {
         level: 'GRAVE',
-        code: ERR_OCR_PROVIDER_FAILURE,
-        message: `El proveedor de OCR fallo: ${error instanceof Error ? error.message : String(error)}`,
+        code: ERR_OCR_MAX_RETRIES_EXCEEDED,
+        message: `Transcripcion fallida tras agotar ${config.maxRetries} reintentos`,
+        description: `Se realizaron ${config.maxRetries} reintentos contra el modelo ${config.model} del proveedor ${config.provider}. Causa raiz: ${description}`,
+        metadata: {
+          attempts: config.maxRetries,
+          maxRetries: config.maxRetries,
+          exhausted: true,
+          lastError: description,
+        },
         ...stackTraceOf(error),
       },
     };

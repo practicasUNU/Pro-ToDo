@@ -60,6 +60,7 @@ const createHarness = (
   runner: WebScraperRunner;
   pool: { createContext: jest.Mock };
   closeContext: jest.Mock;
+  sleep: jest.SpyInstance;
 } => {
   const closeContext = jest.fn().mockResolvedValue(undefined);
   const pool = {
@@ -72,8 +73,9 @@ const createHarness = (
   const runner = new WebScraperRunner(pool as unknown as BrowserPoolService);
 
   // La espera entre reintentos se neutraliza: las pruebas comprueban CUANTOS
-  // intentos hubo, no cuanto se durmio entre ellos.
-  jest
+  // intentos hubo, no cuanto se durmio entre ellos. El espia se devuelve para
+  // la unica que SI mira la duracion.
+  const sleep = jest
     .spyOn(
       runner as unknown as { sleep: (ms: number) => Promise<void> },
       'sleep',
@@ -81,7 +83,7 @@ const createHarness = (
     .mockResolvedValue(undefined);
   jest.spyOn(runner['logger'], 'warn').mockImplementation(() => undefined);
 
-  return { runner, pool, closeContext };
+  return { runner, pool, closeContext, sleep };
 };
 
 const run = async (
@@ -426,6 +428,26 @@ describe('WebScraperRunner', () => {
       // 3. Assert: si el `finally` lanzara, sustituiria un exito ya decidido por
       //    una excepcion sobre la limpieza.
       expect(outcome.success).toBe(true);
+    });
+  });
+
+  describe('Backoff entre reintentos', () => {
+    it('deberia duplicar la espera en cada intento fallido', async () => {
+      // 1. Arrange 📐: la espera lineal que habia aqui era la unica de las
+      //    cuatro capas de reintento que no cedia terreno. Contra un portal que
+      //    limita el ritmo, tres intentos separados por los MISMOS dos segundos
+      //    caen los tres dentro de la misma ventana de bloqueo y agotan el
+      //    presupuesto sin haber esperado nunca lo suficiente.
+      const page = createPage();
+      page.goto.mockRejectedValue(timeoutError());
+      const { runner, sleep } = createHarness(page);
+
+      // 2. Act ⚙️
+      await run(runner, { maxRetries: 2, retryDelayMs: 1_000 });
+
+      // 3. Assert 🎯: 1 s y 2 s; tras el ultimo intento no se espera.
+      const waits = sleep.mock.calls as [number][];
+      expect(waits.map(([ms]) => ms)).toEqual([1_000, 2_000]);
     });
   });
 });

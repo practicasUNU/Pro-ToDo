@@ -67,6 +67,16 @@ export type ScrapeOutcome = ScrapeSuccess | ScrapeFailure;
 const NETWORK_SETTLE_TIMEOUT_MS = 3_000;
 
 /**
+ * Multiplicador de la espera entre reintentos de navegacion.
+ *
+ * Dos, el mismo que `HTTP_BACKOFF_FACTOR` del transporte y el
+ * `DEFAULT_BACKOFF_FACTOR` del motor: con `retryDelayMs` a 2 s la secuencia es
+ * 2 s, 4 s, 8 s. Que las tres capas usen el mismo factor es lo que hace
+ * predecible el peor caso de un nodo.
+ */
+const RETRY_BACKOFF_FACTOR = 2;
+
+/**
  * Codigos de red de Chromium que son, en realidad, una espera agotada.
  *
  * NO son `TimeoutError` de Playwright: el vencimiento lo declara la pila de red
@@ -299,11 +309,19 @@ export class WebScraperRunner {
           break;
         }
 
+        // Backoff EXPONENCIAL, como el transporte HTTP y el motor. La espera
+        // lineal que habia aqui era la unica de las cuatro capas de reintento
+        // que no cedia terreno: contra un portal que esta limitando el ritmo,
+        // tres intentos separados por los mismos dos segundos llegan los tres
+        // dentro de la misma ventana de bloqueo y agotan el presupuesto sin
+        // haber esperado nunca lo suficiente.
+        const delay = options.retryDelayMs * RETRY_BACKOFF_FACTOR ** attempt;
+
         this.logger.warn(
-          `LEVE | Intento ${attempt + 1}/${options.maxRetries + 1} contra "${url.hostname}" fallido (${classifyNavigationError(error)}); se reintenta en ${options.retryDelayMs} ms.`,
+          `LEVE | Intento ${attempt + 1}/${options.maxRetries + 1} contra "${url.hostname}" fallido (${classifyNavigationError(error)}); se reintenta en ${delay} ms.`,
         );
 
-        await this.sleep(options.retryDelayMs);
+        await this.sleep(delay);
       }
     }
 

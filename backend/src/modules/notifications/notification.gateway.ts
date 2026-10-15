@@ -306,8 +306,22 @@ export class NotificationGateway
     this.emitToFlow(EXECUTION_EVENT.FLOW_DISCARDED, event.flowId, event);
   }
 
+  /**
+   * El cierre terminal va al NAMESPACE ENTERO, no a la sala del flujo.
+   *
+   * Es el unico evento de ejecucion que se difunde asi, y la asimetria es
+   * deliberada: la pausa, la reanudacion y el descarte piden una accion sobre
+   * un flujo concreto —solo interesan a quien lo esta mirando—, mientras que el
+   * cierre con exito es la confirmacion de que el trabajo salio, y un operador
+   * que lanzo un flujo y se fue a otra pantalla deberia enterarse igual. El
+   * precedente esta en `emitCrudMutation`, que ya difunde asi todo lo que no es
+   * `ADMIN_ONLY_ENTITIES`; y no filtra nada, porque ADMIN y EDITOR pueden
+   * consultar cualquier flujo por REST.
+   */
   public emitFlowCompleted(event: FlowCompletedEvent): void {
-    this.emitToFlow(EXECUTION_EVENT.FLOW_COMPLETED, event.flowId, event);
+    // El `?.` no es decorativo, igual que en `emitToFlow`: el coordinador puede
+    // despachar antes de que el adaptador haya montado el namespace.
+    this.server?.emit(EXECUTION_EVENT.FLOW_COMPLETED, event);
   }
 
   public emitNodeError(event: NodeErrorEvent): void {

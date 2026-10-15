@@ -55,7 +55,24 @@ export const ERR_LLM_INTERPOLATION = 'ERR_LLM_INTERPOLATION';
  * apuntando a una constante inexistente.
  */
 export const ERR_LLM_PROVIDER_UNSUPPORTED = 'ERR_LLM_PROVIDER_UNSUPPORTED';
+/**
+ * RETIRADO como salida de la estrategia: lo sustituye
+ * `ERR_LLM_MAX_RETRIES_EXCEEDED`. Se conserva exportado por el mismo motivo que
+ * el de arriba —un `catchErrors` de un esquema ya guardado puede nombrarlo—,
+ * pero ninguna ruta nueva deberia usarlo: este nodo ya no lo emite, de modo que
+ * una ruta que solo lo atrape no se disparara nunca.
+ */
 export const ERR_LLM_PROVIDER_FAILURE = 'ERR_LLM_PROVIDER_FAILURE';
+/**
+ * El nodo agoto su propio presupuesto de reintentos contra el proveedor.
+ *
+ * Sustituye a `ERR_LLM_PROVIDER_FAILURE` desde que el fallo viaja con
+ * `metadata.exhausted`: aquel describia "un intento no salio" y este, "ya se
+ * intento todo lo que este nodo sabe intentar". La diferencia la lee el motor,
+ * que no vuelve a reintentar encima, y tambien el operador, al que un reintento
+ * manual inmediato no le va a servir de nada.
+ */
+export const ERR_LLM_MAX_RETRIES_EXCEEDED = 'ERR_LLM_MAX_RETRIES_EXCEEDED';
 export const ERR_LLM_EMERGENCY_BRAKE = 'ERR_LLM_EMERGENCY_BRAKE';
 
 /**
@@ -1014,10 +1031,18 @@ export class LlmExtractorStrategy implements INodeStrategy {
   /**
    * Contabiliza un fallo del proveedor y decide si activar el freno.
    *
-   * Por debajo del umbral devuelve GRAVE, que el motor SI reintenta: un corte
-   * puntual no debe pausar un flujo. Al alcanzarlo devuelve URGENTE, que
-   * `canRetry` rechaza, de modo que la ejecucion queda PAUSADA conservando el
-   * cursor —reanudable con CU-09 en cuanto el proveedor vuelva.
+   * Por debajo del umbral devuelve GRAVE con `metadata.exhausted`, de modo que
+   * el motor NO reintenta encima: cuando se llega aqui ya corrieron los
+   * reintentos del transporte HTTP (`maxRetries` por intento) y la cascada de
+   * proveedores entera. Sumar los del `retryPolicy` del nodo multiplicaria las
+   * llamadas al modelo —y el gasto— por una incidencia que ya se sabe
+   * persistente, con una alerta por cada vuelta. Sigue siendo GRAVE y no
+   * URGENTE porque la ejecucion queda PAUSADA y reanudable con CU-09 en cuanto
+   * el proveedor vuelva.
+   *
+   * Al alcanzar el umbral de fallos CONSECUTIVOS devuelve URGENTE: eso ya no
+   * describe un corte, sino un proveedor que lleva varias ejecuciones sin
+   * responder.
    *
    * Se DEVUELVE URGENTE en lugar de lanzar. La diferencia no es de estilo: una
    * excepcion la clasificaria `toDomainFailure` como catastrofica y marcaria la
@@ -1057,15 +1082,22 @@ export class LlmExtractorStrategy implements INodeStrategy {
     this.consecutiveFailures.set(brakeKey, failures);
 
     this.logger.warn(
-      `GRAVE | ${brakeKey} | Fallo ${failures}/${config.emergencyBrakeThreshold} del proveedor ${config.provider}: ${description}`,
+      `GRAVE | ${ERR_LLM_MAX_RETRIES_EXCEEDED} | ${brakeKey} | Fallo ${failures}/${config.emergencyBrakeThreshold} del proveedor ${config.provider} tras agotar ${config.maxRetries} reintentos: ${description}`,
     );
 
     return {
       success: false,
       error: {
         level: 'GRAVE',
-        code: ERR_LLM_PROVIDER_FAILURE,
-        message: `El proveedor ${config.provider} no completo la inferencia: ${description}`,
+        code: ERR_LLM_MAX_RETRIES_EXCEEDED,
+        message: `Inferencia fallida tras agotar ${config.maxRetries} reintentos`,
+        description: `Se realizaron ${config.maxRetries} reintentos contra el modelo ${config.model} del proveedor ${config.provider}. Causa raiz: ${description}`,
+        metadata: {
+          attempts: config.maxRetries,
+          maxRetries: config.maxRetries,
+          exhausted: true,
+          lastError: description,
+        },
         ...stackTraceOf(error),
       },
     };

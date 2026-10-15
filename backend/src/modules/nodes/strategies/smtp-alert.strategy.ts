@@ -91,6 +91,18 @@ const readText = (
     : undefined;
 };
 
+/** Lee una metrica numerica del contexto de error, si viene y es un numero. */
+const readNumber = (
+  source: Record<string, unknown> | undefined,
+  key: string,
+): number | undefined => {
+  const value = source?.[key];
+
+  return typeof value === 'number' && Number.isFinite(value)
+    ? value
+    : undefined;
+};
+
 /** Lee `partial_data`, que el motor siembra siempre pero puede venir vacio. */
 const readPartialData = (
   source: Record<string, unknown> | undefined,
@@ -198,6 +210,30 @@ export class SmtpAlertStrategy implements INodeStrategy {
       return {
         success: true,
         data: { skipped: true, reason: 'EXECUTION_NOT_PAUSED' },
+      };
+    }
+
+    // SEGUNDA GUARDA: la severidad. La anterior comprueba que haya incidencia;
+    // esta, que merezca interrumpir a alguien. Un `LEVE` describe un fallo que
+    // el motor cierra solo —no pausa, no reserva cursor y el sondeo vuelve en
+    // un minuto—, de modo que un correo por cada uno llena el buzon del
+    // operador de avisos que no exigen nada y acaba enterrando los GRAVE que si.
+    // Va igualmente ANTES de `resolveConfig`, por el mismo motivo que la otra:
+    // no abrir un transporte SMTP para un correo que no se va a mandar.
+    const detectedLevel = readText(errorEvidence, 'error_level');
+
+    if (detectedLevel !== 'GRAVE' && detectedLevel !== 'URGENTE') {
+      this.logger.log(
+        `Alerta SMTP omitida: la severidad detectada (${detectedLevel ?? 'NONE'}) no justifica interrumpir a nadie.`,
+      );
+
+      return {
+        success: true,
+        data: {
+          skipped: true,
+          reason: 'SEVERITY_NOT_ALERTABLE',
+          detectedLevel: detectedLevel ?? 'NONE',
+        },
       };
     }
 
@@ -440,6 +476,20 @@ export class SmtpAlertStrategy implements INodeStrategy {
         : {}),
       ...(readText(errorContext, 'error_message') !== undefined
         ? { errorMessage: readText(errorContext, 'error_message') }
+        : {}),
+      // El conteo de intentos viene del motor (`error_context.attempts`), que a
+      // su vez prefiere el que declara la estrategia. Importa en el correo
+      // porque cambia la decision de quien lo lee: "fallo una vez" invita a
+      // reintentar a mano, "fallo tras agotar tres intentos" dice que el
+      // problema esta en el otro extremo.
+      ...(readNumber(errorContext, 'attempts') !== undefined
+        ? { attempts: readNumber(errorContext, 'attempts') }
+        : {}),
+      ...(readNumber(errorContext, 'max_retries') !== undefined
+        ? { maxRetries: readNumber(errorContext, 'max_retries') }
+        : {}),
+      ...(readText(errorContext, 'error_description') !== undefined
+        ? { errorDescription: readText(errorContext, 'error_description') }
         : {}),
       ...(note.length > 0 ? { customNote: note } : {}),
       ...(partialData !== undefined ? { partialData } : {}),

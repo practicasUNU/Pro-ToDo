@@ -126,6 +126,15 @@ export interface FlowPausedEvent extends ExecutionEventBase {
    */
   readonly nodeType?: string;
   readonly errorCode?: string;
+  /**
+   * Intentos reales consumidos antes de rendirse.
+   *
+   * Lo declara la estrategia cuando agota su presupuesto interno; si no, es el
+   * contador del motor. Ausente en las pausas previas a ejecutar nodo alguno.
+   */
+  readonly attempts?: number;
+  /** Causa raiz tecnica, mas larga que `errorMessage`. */
+  readonly errorDetail?: string;
 }
 
 /** Un operador renuncio a reanudar: cierre manual de una PAUSADO. */

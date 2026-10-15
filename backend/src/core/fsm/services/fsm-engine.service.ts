@@ -359,6 +359,25 @@ const truncateFailureReason = (reason: string): string =>
     ? reason
     : `${reason.slice(0, FAILURE_REASON_MAX_LENGTH - 1)}…`;
 
+/**
+ * Intentos que se reportan de un fallo: los de la estrategia si los declara.
+ *
+ * El contador del motor cuenta REINTENTOS DEL NODO, y vale cero en el caso mas
+ * comun —una estrategia que agota su presupuesto interno y se declara
+ * `exhausted`, de modo que `canRetry` no llega a sumar ninguno—. Reportar ese
+ * cero diria "fallo al primer intento" sobre una incidencia que consumio varios,
+ * que es justo lo que el operador necesita saber para decidir si reintentar
+ * manualmente sirve de algo.
+ */
+const resolveReportedAttempts = (
+  result: NodeResult,
+  engineRetries: number,
+): number => {
+  const declared = result.error?.metadata?.attempts;
+
+  return typeof declared === 'number' ? declared : engineRetries;
+};
+
 /** Espera pasiva; solo se invoca cuando el nodo declara un backoff real. */
 const sleep = (milliseconds: number): Promise<void> =>
   new Promise((resolve) => setTimeout(resolve, milliseconds));
@@ -1239,6 +1258,13 @@ export class FsmEngineService {
             logFilePath: lastTrace.logFilePath,
             nodeType: node.nodeType,
             errorCode,
+            attempts: resolveReportedAttempts(
+              result,
+              (retryState[node.nodeId] ?? 0) + 1,
+            ),
+            ...(result.error?.description !== undefined
+              ? { errorDetail: result.error.description }
+              : {}),
           },
         );
         break;
@@ -1375,7 +1401,16 @@ export class FsmEngineService {
       error_level: result.error?.level ?? 'URGENTE',
       error_message: route.customMessage ?? result.error?.message ?? '',
       missing_fields: result.error?.missingFields ?? [],
-      attempts: retryState[node.nodeId] ?? 0,
+      // El contador de la ESTRATEGIA manda sobre el del motor cuando existe:
+      // aquel cuenta los intentos reales contra el proveedor y este solo los
+      // reintentos del nodo, que con un fallo ya agotado valen cero.
+      attempts: resolveReportedAttempts(result, retryState[node.nodeId] ?? 0),
+      ...(typeof result.error?.metadata?.maxRetries === 'number'
+        ? { max_retries: result.error.metadata.maxRetries }
+        : {}),
+      ...(result.error?.description !== undefined
+        ? { error_description: result.error.description }
+        : {}),
       failed_at: new Date().toISOString(),
       partial_data: result.data ?? {},
     };
@@ -1817,12 +1852,26 @@ export class FsmEngineService {
    *
    * Solo los `GRAVE` reintentan: un `URGENTE` es irrecuperable y un `LEVE` no
    * justifica insistir. El tope de `maxRetries` ya viene acotado a 5 por el DTO.
+   *
+   * LA GUARDA DE `exhausted` ES LA QUE EVITA LA MULTIPLICACION. Bajo cada
+   * estrategia hay ya su propio bucle de reintentos —el transporte HTTP, la
+   * cascada de proveedor, el navegador—, de modo que un `GRAVE` que llega aqui
+   * con el presupuesto agotado representa VARIOS intentos reales, no uno. Sin
+   * esto, un nodo con `retryPolicy.maxRetries: 3` y tres reintentos internos
+   * produce hasta doce llamadas al proveedor y un `node:error` por cada una:
+   * exactamente el spam de alertas que la estrategia intenta consolidar en un
+   * unico fallo. Que la estrategia lo declare es mejor que deducirlo por codigo
+   * de error, porque la decision la toma quien conoce su propio presupuesto.
    */
   private canRetry(
     node: PipelineNodeConfigDto,
     result: NodeResult,
     attempts: number,
   ): boolean {
+    if (result.error?.metadata?.exhausted === true) {
+      return false;
+    }
+
     if (result.error?.level !== 'GRAVE' || node.retryPolicy === undefined) {
       return false;
     }
@@ -1990,6 +2039,10 @@ export class FsmEngineService {
           logFilePath: contingency.trace.logFilePath,
           nodeType: contingency.failedNodeType,
           errorCode: contingency.errorCode,
+          // Del nodo QUE FALLO, no del de alerta: es el que el operador va a
+          // reintentar, y el contador del nodo de respaldo —que fue el que
+          // acabo de correr— no dice nada sobre la incidencia original.
+          attempts: (retryState[contingency.failedNodeId] ?? 0) + 1,
         },
       );
       return;
@@ -2043,6 +2096,8 @@ export class FsmEngineService {
       logFilePath?: string | null;
       nodeType?: NodeType;
       errorCode?: string;
+      attempts?: number;
+      errorDetail?: string;
     },
   ): Promise<void> {
     const patch: CheckpointPatch = {
@@ -2081,6 +2136,10 @@ export class FsmEngineService {
         : {}),
       ...(cause?.nodeType !== undefined ? { nodeType: cause.nodeType } : {}),
       ...(cause?.errorCode !== undefined ? { errorCode: cause.errorCode } : {}),
+      ...(cause?.attempts !== undefined ? { attempts: cause.attempts } : {}),
+      ...(cause?.errorDetail !== undefined
+        ? { errorDetail: cause.errorDetail }
+        : {}),
       ...(flowName !== undefined ? { flowName } : {}),
     });
   }

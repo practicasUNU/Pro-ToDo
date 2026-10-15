@@ -383,6 +383,13 @@ describe('WebScraperStrategy', () => {
       expect(result.success).toBe(false);
       expect(result.error?.code).toBe(ERR_ACCESS_DENIED_BLOCK_DETECTED);
       expect(result.error?.level).toBe('GRAVE');
+
+      // El presupuesto agotado es un hecho APARTE del codigo: sin esta marca el
+      // motor reintentaria el nodo entero —GRAVE es la severidad que `canRetry`
+      // acepta— y repetiria la navegacion que el runner ya repitio.
+      expect(result.error?.metadata).toMatchObject({ exhausted: true });
+      expect(typeof result.error?.metadata?.maxRetries).toBe('number');
+      expect(result.error?.description).toContain('Causa raiz');
     });
 
     it('3.4 deberia propagar la traza del runner cuando la trae', async () => {

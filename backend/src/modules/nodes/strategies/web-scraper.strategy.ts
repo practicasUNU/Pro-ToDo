@@ -320,12 +320,26 @@ export class WebScraperStrategy implements INodeStrategy {
         };
       }
 
+      // EL CODIGO DEL RUNNER SE CONSERVA, y no se sustituye por uno generico
+      // de "extraccion agotada": es contra lo que compara el `catchErrors` de
+      // los esquemas ya guardados, y un timeout, un muro anti-bot y un cuerpo
+      // que Readability no aisla mandan al operador a sitios distintos.
+      // Reescribirlo aqui romperia esas rutas en silencio. Lo que SI se añade
+      // es la metadata: el presupuesto agotado es un hecho aparte del codigo, y
+      // es lo que impide que el motor reintente encima.
       return {
         success: false,
         error: {
           level: 'GRAVE',
           code: outcome.code,
-          message: outcome.message,
+          message: `${outcome.message} (tras agotar ${config.maxRetries} reintentos)`,
+          description: `Se realizaron ${config.maxRetries} reintentos contra "${target.url.toString()}". Causa raiz (${outcome.code}): ${outcome.message}`,
+          metadata: {
+            attempts: config.maxRetries,
+            maxRetries: config.maxRetries,
+            exhausted: true,
+            lastError: `${outcome.code}: ${outcome.message}`,
+          },
           ...(outcome.stackTrace === undefined
             ? {}
             : { stackTrace: outcome.stackTrace }),

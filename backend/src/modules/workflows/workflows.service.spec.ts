@@ -422,6 +422,29 @@ describe('WorkflowsService (despacho manual de pruebas, Camino B)', () => {
       expect(coordinator.stopPollingForFlow).toHaveBeenCalledWith(WORKFLOW_ID);
     });
 
+    it('2c.1bis deberia difundir el apagado a las sesiones abiertas', async () => {
+      // 1. Arrange 📐. Era el UNICO de los cuatro caminos que escriben `activo`
+      //    sin difundir la mutacion, y precisamente el que nadie esta mirando
+      //    cuando ocurre: lo dispara un sondeo, de modo que la tabla de
+      //    cualquier otro operador seguia pintando el flujo como activo hasta
+      //    que alguien recargase la pagina.
+      const { service, validator, crudEvents } = buildHarness();
+      validator.validateSchema.mockResolvedValue(schemaWithPolicy());
+
+      // 2. Act ⚙️
+      await service.runAutomaticWorkflow(WORKFLOW_ID);
+
+      // 3. Assert 🎯
+      expect(crudEvents.dispatch).toHaveBeenCalledWith(
+        expect.objectContaining({
+          entity: 'workflows',
+          action: 'UPDATED',
+          id: WORKFLOW_ID,
+          data: expect.objectContaining({ active: false }),
+        }),
+      );
+    });
+
     it('2c.2 NO deberia desactivar una ejecucion detenida por halt', async () => {
       // 1. Arrange: el disparador no encontro nada que procesar. Cierra en
       //    EXITOSO igual que un recorrido completo, pero no hizo trabajo alguno.
@@ -442,6 +465,22 @@ describe('WorkflowsService (despacho manual de pruebas, Camino B)', () => {
       //    antes de haber procesado un solo correo.
       expect(repository.save).not.toHaveBeenCalled();
       expect(coordinator.stopPollingForFlow).not.toHaveBeenCalled();
+    });
+
+    it('2c.2bis NO deberia difundir nada cuando la politica no aplica', async () => {
+      // 1. Arrange 📐: una difusion incondicional apagaria el toggle de los
+      //    demas operadores sobre un flujo que sigue activo en PostgreSQL.
+      const { service, validator, engine, crudEvents } = buildHarness();
+      validator.validateSchema.mockResolvedValue(schemaWithPolicy());
+      engine.executeWorkflow.mockResolvedValue(
+        buildExecution({ currentState: ExecutionState.PAUSADO }),
+      );
+
+      // 2. Act ⚙️
+      await service.runAutomaticWorkflow(WORKFLOW_ID);
+
+      // 3. Assert 🎯
+      expect(crudEvents.dispatch).not.toHaveBeenCalled();
     });
 
     it('2c.3 NO deberia desactivar una ejecucion que no termino en EXITOSO', async () => {
@@ -1018,7 +1057,11 @@ describe('WorkflowsService (difusion de mutaciones CRUD)', () => {
     const { service, crudEvents } = buildHarness();
 
     // 2. Act ⚙️
-    await service.updateWorkflow(WORKFLOW_ID, { active: false }, UserRole.ADMIN);
+    await service.updateWorkflow(
+      WORKFLOW_ID,
+      { active: false },
+      UserRole.ADMIN,
+    );
 
     // 3. Assert 🎯
     expect(crudEvents.dispatch).toHaveBeenCalledWith(

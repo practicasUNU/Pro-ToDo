@@ -69,6 +69,17 @@ export const SUBJECT_FILTERED_STATUS = 'SUBJECT_FILTERED';
 export const MAX_HTML_LENGTH = 262_144;
 
 /**
+ * Antiguedad maxima de los mensajes que se consideran cuando NO se filtra por
+ * no leidos, en milisegundos.
+ *
+ * Cuarenta y ocho horas. Es la ventana que sustituye al `{ all: true }` que
+ * evaluaba el buzon historico entero; el porque esta en el TSDoc de
+ * `buildImapSearchQuery`. Se exporta para que la prueba afirme sobre la misma
+ * constante que compone la consulta, y no sobre un numero repetido.
+ */
+export const RECENT_WINDOW_MS = 48 * 60 * 60 * 1000;
+
+/**
  * Presupuesto ACUMULADO de adjuntos por correo, en bytes.
  *
  * `maxAttachmentBytes` acota UN adjunto; este acota la suma. Sin el, veinte
@@ -377,6 +388,19 @@ const resolveAttachmentFilename = (
  * Se resuelve aqui y no solo retirando el campo del formulario porque el fallo
  * vive en los flujos YA GUARDADOS, que seguirian mandando ambos criterios.
  *
+ * VENTANA TEMPORAL CON `unreadOnly: false`. Sin leidos ni filtros no quedaba
+ * ningun criterio y la consulta caia en `{ all: true }`, es decir, el buzon
+ * HISTORICO entero. Contra una cuenta con años de correo eso satura la conexion
+ * y el `FETCH` acaba cortando por inactividad: el sintoma era un
+ * `ERR_IMAP_TIMEOUT` que parecia del servidor y en realidad lo provocaba la
+ * amplitud de la busqueda. `since` acota a las ultimas 48 horas, que es mas que
+ * suficiente para cualquier cadencia de sondeo —la mas espaciada del proyecto es
+ * diaria— y deja margen para un fin de semana con el servicio caido.
+ *
+ * NO se aplica con `unreadOnly: true`: ahi el conjunto ya esta acotado por el
+ * flag `\Seen`, y añadir la ventana descartaria en silencio un correo sin leer
+ * mas antiguo, que es justo el que nadie ha atendido.
+ *
  * CONTRAPARTIDA, asumida: sin el criterio `SUBJECT` el sondeo se trae el correo
  * mas reciente del buzon y lo descarta en OMITIDO si no casa el patron. Con los
  * valores por defecto (`unreadOnly` y `markAsRead` a `true`) el buzon se consume
@@ -388,16 +412,19 @@ export const buildImapSearchQuery = (
   config: ResolvedImapConfig,
 ): SearchObject => {
   const query: SearchObject = {
-    ...(config.unreadOnly ? { seen: false } : {}),
+    ...(config.unreadOnly
+      ? { seen: false }
+      : { since: new Date(Date.now() - RECENT_WINDOW_MS) }),
     ...(config.fromFilter !== null ? { from: config.fromFilter } : {}),
     ...(config.subjectFilter !== null && config.subjectFilterRegex === null
       ? { subject: config.subjectFilter }
       : {}),
   };
 
-  // IMAP SEARCH exige al menos un criterio. Con `unreadOnly: false` y sin
-  // filtros no queda ninguno, y `{}` seria una sentencia invalida: `all` es la
-  // forma explicita de pedir el buzon entero.
+  // IMAP SEARCH exige al menos un criterio, y `{}` seria una sentencia
+  // invalida. Ya no puede ocurrir —las dos ramas de `unreadOnly` aportan uno—,
+  // pero la guarda se conserva: es la unica defensa si alguien añade mañana un
+  // tercer caso que no escriba nada.
   return Object.keys(query).length === 0 ? { all: true } : query;
 };
 

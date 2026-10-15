@@ -68,6 +68,17 @@ export interface FlowPausedEvent extends ExecutionEventBase {
    * operador a un sitio concreto en vez de a una descripcion.
    */
   readonly errorCode?: string;
+  /**
+   * Intentos reales que consumio el nodo antes de rendirse.
+   *
+   * Lo declara la estrategia cuando agota su propio presupuesto; si no, es el
+   * contador de reintentos del motor. Cambia lo que hace quien lee el aviso:
+   * un fallo al primer intento invita a reanudar, y uno tras agotar tres dice
+   * que insistir ahora mismo no va a servir.
+   */
+  readonly attempts?: number;
+  /** Causa raiz tecnica (`NodeErrorDetail.description`), mas larga que el mensaje. */
+  readonly errorDetail?: string;
 }
 
 /** Un operador relanzo la ejecucion sobre la misma fila (CU-09). */

@@ -519,19 +519,25 @@ describe('NotificationGateway (canal WebSocket de eventos de ejecucion)', () => 
       );
     });
 
-    it('3.4 deberia emitir flow:completed a flow_<flowId>', () => {
+    it('3.4 deberia difundir flow:completed al namespace entero, no a la sala', () => {
       // 1. Arrange
       const { gateway, to, emit } = buildHarness();
 
       // 2. Act
       gateway.emitFlowCompleted(COMPLETED);
 
-      // 3. Assert
-      expect(to).toHaveBeenCalledWith(`${FLOW_ROOM_PREFIX}${FLOW_ID}`);
+      // 3. Assert: es el UNICO evento de ejecucion que no se dirige a la sala.
+      // La pausa, la reanudacion y el descarte piden una accion sobre un flujo
+      // concreto; el cierre con exito es la confirmacion de que el trabajo
+      // salio, y quien lanzo el flujo y se fue a otra pantalla debe enterarse
+      // igual.
+      // El mismo espia `emit` cuelga del servidor y de lo que devuelve `to`,
+      // de modo que quien distingue los dos destinos es si `to` se invoco.
       expect(emit).toHaveBeenCalledWith(
         EXECUTION_EVENT.FLOW_COMPLETED,
         COMPLETED,
       );
+      expect(to).not.toHaveBeenCalled();
     });
 
     // El coordinador puede despachar antes de que el adaptador monte el

@@ -381,10 +381,11 @@ describe('SmtpAlertStrategy', () => {
       await strategy.execute(
         buildContext({
           trigger: { flow_name: 'Notas de prensa' },
-          // `error_context` presente porque la guarda de pertinencia lo exige
-          // para llegar siquiera al armado del asunto, que es lo que aqui se
-          // comprueba. Su contenido es indiferente para esta prueba.
-          error_context: { error_code: 'ERR_CUALQUIERA' },
+          // `error_context` presente Y con severidad alertable: las DOS
+          // guardas de pertinencia —hay incidencia, y merece interrumpir a
+          // alguien— se cruzan antes de llegar al armado del asunto, que es lo
+          // que aqui se comprueba.
+          error_context: { error_code: 'ERR_CUALQUIERA', error_level: 'GRAVE' },
         }),
         { to: [RECIPIENT] },
       );
@@ -406,7 +407,7 @@ describe('SmtpAlertStrategy', () => {
       const result = await strategy.execute(
         buildContext({
           trigger: { flow_name: 'Notas de prensa' },
-          error_context: { error_code: 'ERR_CUALQUIERA' },
+          error_context: { error_code: 'ERR_CUALQUIERA', error_level: 'GRAVE' },
         }),
         { to: [RECIPIENT], subject: '   ' },
       );
@@ -565,6 +566,7 @@ describe('SmtpAlertStrategy', () => {
       await strategy.execute(
         buildContext({
           error_context: {
+            error_level: 'GRAVE',
             error_message: '<img src=x onerror="alert(1)">',
             partial_data: { subject: '<script>robar()</script>' },
           },
@@ -675,6 +677,132 @@ describe('SmtpAlertStrategy', () => {
       expect(result.success).toBe(true);
       expect(result.data).not.toHaveProperty('skipped');
       expect(mailer.sendNodeAlert).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe('10. Pertinencia por SEVERIDAD', () => {
+    /** Contexto con incidencia real pero de la severidad indicada. */
+    const contextWithLevel = (level: string): StatePayloadContext =>
+      buildContext({
+        error_context: {
+          failed_node_id: 'nodo_scraper',
+          failed_node_type: 'EXTRACTOR_WEB',
+          error_code: 'ERR_SCRAPING_TIMEOUT_EXCEEDED',
+          error_level: level,
+          error_message: 'El portal no respondio',
+        },
+      });
+
+    it('10.1 NO deberia despachar correo ante un LEVE', async () => {
+      // 1. Arrange 📐: un LEVE lo cierra el motor solo —no pausa, no reserva
+      //    cursor y el sondeo vuelve en un minuto—, asi que un correo por cada
+      //    uno llena el buzon de avisos que no piden nada y acaba enterrando
+      //    los GRAVE que si.
+      const mailer = buildMailer();
+      const strategy = buildStrategy(mailer);
+      muteLogger(strategy);
+
+      // 2. Act ⚙️
+      const result = await strategy.execute(
+        contextWithLevel('LEVE'),
+        buildParams(),
+      );
+
+      // 3. Assert 🎯
+      expect(result.success).toBe(true);
+      expect(result.data).toMatchObject({
+        skipped: true,
+        reason: 'SEVERITY_NOT_ALERTABLE',
+        detectedLevel: 'LEVE',
+      });
+      // Ni siquiera se abre el transporte: la guarda va antes de resolver la
+      // configuracion, por el mismo motivo que la de presencia.
+      expect(mailer.sendNodeAlert).not.toHaveBeenCalled();
+    });
+
+    it('10.2 deberia informar NONE cuando la incidencia no declara nivel', async () => {
+      // 1. Arrange 📐: `error_context` sembrado por una estrategia antigua que
+      //    no escribe `error_level`. Se omite igual —no hay forma de saber si
+      //    merece interrumpir— pero el motivo debe distinguirse de un LEVE.
+      const mailer = buildMailer();
+      const strategy = buildStrategy(mailer);
+      muteLogger(strategy);
+
+      // 2. Act ⚙️
+      const result = await strategy.execute(
+        buildContext({ error_context: { error_code: 'ERR_SIN_NIVEL' } }),
+        buildParams(),
+      );
+
+      // 3. Assert 🎯
+      expect(result.data).toMatchObject({ detectedLevel: 'NONE' });
+      expect(mailer.sendNodeAlert).not.toHaveBeenCalled();
+    });
+
+    it('10.3 deberia despachar ante GRAVE y ante URGENTE', async () => {
+      // 1. Arrange 📐: la contrapartida. Sin ella, una guarda que omitiera
+      //    siempre pasaria las dos pruebas anteriores.
+      const mailer = buildMailer();
+      const strategy = buildStrategy(mailer);
+      muteLogger(strategy);
+
+      // 2. Act ⚙️
+      await strategy.execute(contextWithLevel('GRAVE'), buildParams());
+      await strategy.execute(contextWithLevel('URGENTE'), buildParams());
+
+      // 3. Assert 🎯
+      expect(mailer.sendNodeAlert).toHaveBeenCalledTimes(2);
+    });
+  });
+
+  describe('11. Metricas de reintentos en la carta', () => {
+    it('11.1 deberia imprimir los intentos consumidos y el tope', async () => {
+      // 1. Arrange 📐: el dato cambia lo que hace quien lee el correo. "Fallo
+      //    una vez" invita a reanudar a mano; "fallo tras agotar tres" dice que
+      //    el problema esta en el otro extremo y que insistir no va a servir.
+      const mailer = buildMailer();
+      const strategy = buildStrategy(mailer);
+      muteLogger(strategy);
+
+      // 2. Act ⚙️
+      await strategy.execute(
+        buildContext({
+          error_context: {
+            failed_node_id: 'nodo_ia',
+            error_level: 'GRAVE',
+            error_code: 'ERR_LLM_MAX_RETRIES_EXCEEDED',
+            error_message: 'Inferencia fallida tras agotar 3 reintentos',
+            error_description: 'Causa raiz: el proveedor devolvio 503.',
+            attempts: 3,
+            max_retries: 3,
+          },
+        }),
+        buildParams(),
+      );
+
+      // 3. Assert 🎯
+      const { html, text } = sentMessage(mailer);
+
+      expect(html).toContain('Reintentos ejecutados');
+      expect(html).toContain('3 de 3');
+      expect(html).toContain('Causa raiz');
+      expect(text).toContain('Reintentos ejecutados: 3 de 3');
+      // La nota que explica POR QUE llega un solo aviso y no tres.
+      expect(text).toContain('una sola vez');
+    });
+
+    it('11.2 NO deberia inventar la fila cuando no hay intentos que contar', async () => {
+      // 1. Arrange 📐: una incidencia de configuracion no reintenta nada, y una
+      //    fila "Reintentos: 0" sugeriria que si se intento algo.
+      const mailer = buildMailer();
+      const strategy = buildStrategy(mailer);
+      muteLogger(strategy);
+
+      // 2. Act ⚙️
+      await strategy.execute(buildContext(), buildParams());
+
+      // 3. Assert 🎯
+      expect(sentMessage(mailer).html).not.toContain('Reintentos ejecutados');
     });
   });
 });

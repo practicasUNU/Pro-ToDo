@@ -8,7 +8,7 @@ import {
   ERR_LLM_INTERPOLATION,
   ERR_LLM_MISSING_INPUT_TEXT,
   ERR_LLM_PROMPT_UNRESOLVED,
-  ERR_LLM_PROVIDER_FAILURE,
+  ERR_LLM_MAX_RETRIES_EXCEEDED,
   LLM_OUTPUT_KEYS,
   LlmExtractorStrategy,
   MATERIAL_IN_INSTRUCTIONS_NOTICE,
@@ -482,7 +482,7 @@ describe('LlmExtractorStrategy', () => {
       // 3. Assert: un corte puntual no debe pausar un flujo; GRAVE si lo
       //    reintenta el motor.
       expect(result.error?.level).toBe('GRAVE');
-      expect(result.error?.code).toBe(ERR_LLM_PROVIDER_FAILURE);
+      expect(result.error?.code).toBe(ERR_LLM_MAX_RETRIES_EXCEEDED);
     });
   });
 
@@ -577,7 +577,7 @@ describe('LlmExtractorStrategy', () => {
       // 3. Assert: el freno cuenta fallos CONSECUTIVOS. Sin el reinicio, este
       //    cuarto intento habria frenado por una racha ya rota.
       expect(result.error?.level).toBe('GRAVE');
-      expect(result.error?.code).toBe(ERR_LLM_PROVIDER_FAILURE);
+      expect(result.error?.code).toBe(ERR_LLM_MAX_RETRIES_EXCEEDED);
     });
 
     it('3.4 deberia aislar el contador entre ejecuciones concurrentes', async () => {
@@ -609,7 +609,7 @@ describe('LlmExtractorStrategy', () => {
       //    ejecuciones. Con un contador unico, el flujo sano habria quedado
       //    pausado sin un solo fallo propio que lo explique.
       expect(braked.error?.code).toBe(ERR_LLM_EMERGENCY_BRAKE);
-      expect(firstOfHealthy.error?.code).toBe(ERR_LLM_PROVIDER_FAILURE);
+      expect(firstOfHealthy.error?.code).toBe(ERR_LLM_MAX_RETRIES_EXCEEDED);
     });
   });
 
@@ -1693,8 +1693,18 @@ describe('LlmExtractorStrategy', () => {
       const second = await strategy.execute(context, params);
 
       // 3. Assert 🎯
-      expect(first.error?.code).toBe(ERR_LLM_PROVIDER_FAILURE);
+      expect(first.error?.code).toBe(ERR_LLM_MAX_RETRIES_EXCEEDED);
       expect(second.error?.code).toBe(ERR_LLM_EMERGENCY_BRAKE);
+
+      // Un UNICO fallo consolidado, con el presupuesto declarado agotado: el
+      // motor no debe reintentar encima un nodo que ya recorrio la cadena de
+      // proveedores entera, porque cada vuelta suya la repetiria completa y
+      // emitiria un `node:error` mas por cada intento.
+      expect(first.error?.level).toBe('GRAVE');
+      expect(first.error?.metadata).toMatchObject({ exhausted: true });
+      expect(typeof first.error?.metadata?.attempts).toBe('number');
+      expect(typeof first.error?.metadata?.maxRetries).toBe('number');
+      expect(first.error?.description).toContain('Causa raiz');
     });
 
     it('11.4 NO deberia conmutar ante un fallo que el destino repetiria', async () => {
@@ -1714,7 +1724,7 @@ describe('LlmExtractorStrategy', () => {
       // 3. Assert 🎯
       expect(anthropic.completion).not.toHaveBeenCalled();
       expect(result.success).toBe(false);
-      expect(result.error?.code).toBe(ERR_LLM_PROVIDER_FAILURE);
+      expect(result.error?.code).toBe(ERR_LLM_MAX_RETRIES_EXCEEDED);
     });
   });
 

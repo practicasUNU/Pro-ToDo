@@ -2,11 +2,25 @@ import { ImapFlow } from 'imapflow';
 
 import type { ResolvedImapConfig } from '@modules/nodes/dto/imap-trigger-config.dto';
 
-/** Espera maxima para establecer la conexion TCP/TLS con el servidor IMAP. */
-export const CONNECTION_TIMEOUT_MS = 15_000;
+/**
+ * Espera maxima para establecer la conexion TCP/TLS con el servidor IMAP.
+ *
+ * Sesenta segundos y no quince: los buzones corporativos grandes tardan en
+ * aceptar el handshake cuando el servidor esta bajo carga, y el corte prematuro
+ * se presentaba como `ERR_IMAP_TIMEOUT` —un fallo del nodo— cuando lo unico que
+ * pasaba es que no se habia esperado lo suficiente. Un timeout generoso aqui no
+ * cuelga el pipeline: la inactividad POSTERIOR la acota `socketTimeout`.
+ */
+export const CONNECTION_TIMEOUT_MS = 60_000;
 
-/** Espera maxima del saludo inicial del servidor tras conectar. */
-export const GREETING_TIMEOUT_MS = 15_000;
+/**
+ * Espera maxima del saludo inicial del servidor tras conectar.
+ *
+ * La mitad que la conexion: el saludo es la primera linea que el servidor
+ * escribe una vez ya hay socket, de modo que tardar mas de treinta segundos en
+ * emitirla describe un servidor que no va a responder, no uno ocupado.
+ */
+export const GREETING_TIMEOUT_MS = 30_000;
 
 /**
  * Inactividad maxima del socket en una comprobacion corta (sondeo o wizard).

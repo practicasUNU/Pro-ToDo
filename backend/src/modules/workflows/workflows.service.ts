@@ -280,11 +280,18 @@ export class WorkflowsService {
     }
 
     workflow.active = false;
-    await this.workflowRepository.save(workflow);
+    const saved = await this.workflowRepository.save(workflow);
 
     this.logger.log(
       `Flujo "${workflow.name}" (${workflow.id}) desactivado automaticamente por executionPolicy.stopOnFirstSuccess | ejecucion=${finished.executionId}`,
     );
+
+    // SIN ESTO el apagado era invisible. Era el unico de los cuatro caminos que
+    // escriben `activo` sin difundir la mutacion, de modo que la tabla de
+    // cualquier otro operador seguia pintando el flujo como activo hasta que
+    // alguien recargase la pagina — y el apagado automatico es justo el que
+    // nadie esta mirando cuando ocurre, porque lo dispara un sondeo.
+    this.publishMutation('UPDATED', this.toPipelineSummary(saved));
 
     // Reutiliza la limpieza de la desactivacion manual: el residuo es el mismo
     // —temporizador en memoria y ejecuciones vivas— y duplicar el orden de esas

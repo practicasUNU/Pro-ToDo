@@ -21,6 +21,7 @@ import {
   MAX_HTML_LENGTH,
   MAX_TOTAL_ATTACHMENT_BYTES,
   NO_MESSAGES_STATUS,
+  RECENT_WINDOW_MS,
   SUBJECT_FILTERED_STATUS,
 } from './imap-trigger.strategy';
 
@@ -511,22 +512,37 @@ describe('ImapTriggerStrategy', () => {
       );
     });
 
-    it('1bis.4 deberia pedir el buzon entero con unreadOnly false y sin filtros', async () => {
-      // 1. Arrange
-      const { strategy } = buildStrategy();
-      const client = buildClient();
-      useClient(client);
-      simpleParser.mockResolvedValue(buildParsedMail());
+    it('1bis.4 deberia acotar a 48 horas con unreadOnly false y sin filtros', async () => {
+      // 1. Arrange 📐: el reloj se congela para poder afirmar sobre la fecha
+      //    exacta que compone la consulta.
+      jest.useFakeTimers().setSystemTime(new Date('2026-10-15T09:00:00.000Z'));
 
-      // 2. Act
-      await strategy.execute(
-        buildContext(),
-        buildParams({ unreadOnly: false }),
-      );
+      try {
+        const { strategy } = buildStrategy();
+        const client = buildClient();
+        useClient(client);
+        simpleParser.mockResolvedValue(buildParsedMail());
 
-      // 3. Assert: `{}` seria una sentencia SEARCH invalida (el protocolo exige
-      // al menos un criterio); `all` es la forma explicita de pedirlo todo.
-      expect(client.search).toHaveBeenCalledWith({ all: true }, { uid: true });
+        // 2. Act ⚙️
+        await strategy.execute(
+          buildContext(),
+          buildParams({ unreadOnly: false }),
+        );
+
+        // 3. Assert 🎯: antes caia en `{ all: true }` y evaluaba el buzon
+        //    HISTORICO entero, que es lo que saturaba la conexion hasta cortar
+        //    por inactividad con un ERR_IMAP_TIMEOUT que parecia del servidor.
+        expect(client.search).toHaveBeenCalledWith(
+          { since: new Date(Date.now() - RECENT_WINDOW_MS) },
+          { uid: true },
+        );
+        expect(client.search).not.toHaveBeenCalledWith(
+          { all: true },
+          { uid: true },
+        );
+      } finally {
+        jest.useRealTimers();
+      }
     });
 
     it('1bis.5 deberia omitir el criterio seen cuando unreadOnly es false pero hay filtros', async () => {
@@ -542,9 +558,33 @@ describe('ImapTriggerStrategy', () => {
         buildParams({ unreadOnly: false, fromFilter: 'redaccion@noticias.es' }),
       );
 
-      // 3. Assert
+      // 3. Assert: sin `seen`, pero CON la ventana temporal, que acompaña a
+      // `unreadOnly: false` haya filtros o no.
       expect(client.search).toHaveBeenCalledWith(
-        { from: 'redaccion@noticias.es' },
+        expect.objectContaining({ from: 'redaccion@noticias.es' }),
+        { uid: true },
+      );
+
+      const [query] = client.search.mock.calls[0] as [Record<string, unknown>];
+      expect(query.seen).toBeUndefined();
+      expect(query.since).toBeInstanceOf(Date);
+    });
+
+    it('1bis.4bis NO deberia acotar por fecha cuando se piden solo los no leidos', async () => {
+      // 1. Arrange 📐
+      const { strategy } = buildStrategy();
+      const client = buildClient();
+      useClient(client);
+      simpleParser.mockResolvedValue(buildParsedMail());
+
+      // 2. Act ⚙️
+      await strategy.execute(buildContext(), buildParams({ unreadOnly: true }));
+
+      // 3. Assert 🎯: el flag `\\Seen` ya acota el conjunto, y añadir la ventana
+      //    descartaria en silencio un correo sin leer mas antiguo — justo el
+      //    que nadie ha atendido todavia.
+      expect(client.search).toHaveBeenCalledWith(
+        { seen: false },
         { uid: true },
       );
     });
@@ -832,7 +872,9 @@ describe('ImapTriggerStrategy', () => {
       // 1. Arrange 📐: la normalizacion canonica preserva `ñ` a proposito.
       const client = buildClient();
       useClient(client);
-      simpleParser.mockResolvedValue(buildParsedMail({ subject: 'DISEÑO WEB' }));
+      simpleParser.mockResolvedValue(
+        buildParsedMail({ subject: 'DISEÑO WEB' }),
+      );
       const { strategy } = buildStrategy();
 
       // 2. Act ⚙️
@@ -851,7 +893,9 @@ describe('ImapTriggerStrategy', () => {
       // que se asume la rigidez a cambio de no cambiar el significado.
       const client = buildClient();
       useClient(client);
-      simpleParser.mockResolvedValue(buildParsedMail({ subject: 'DISENO WEB' }));
+      simpleParser.mockResolvedValue(
+        buildParsedMail({ subject: 'DISENO WEB' }),
+      );
       const { strategy } = buildStrategy();
 
       // 2. Act ⚙️
