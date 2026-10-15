@@ -17,6 +17,7 @@ import { AppModule } from '../app.module';
 import { purgeMarkedBlocks } from './cleanup-drupal-sandbox';
 
 import type { DrupalNodeResponse } from './cleanup-drupal-sandbox';
+import type { Element } from 'domhandler';
 
 /**
  * Purga QUIRURGICA de bloques en una pagina de Drupal, por JSON:API.
@@ -67,6 +68,7 @@ export interface CleanupFlags {
   readonly selector: string | null;
   readonly removeRootPanels: boolean;
   readonly dedupCommittees: boolean;
+  readonly keepCount: number;
   readonly rootSelector: string;
   readonly write: boolean;
 }
@@ -78,6 +80,36 @@ export interface CleanupFlags {
  * scripts operativos ya parsean a mano. Anadir una libreria para seis banderas
  * seria pagar un paquete por un `split`.
  */
+/**
+ * Lee `--keep-count=<n>`, y ABORTA en vez de caer al defecto si no es un entero.
+ *
+ * La tolerancia seria aqui el peor camino posible. `--keep-count=dos` degradado
+ * a 0 no avisa de nada y purga TODAS las coincidencias del selector, que es
+ * exactamente lo contrario de lo que el operador acaba de pedir. Un valor que
+ * no se entiende tiene que parar la herramienta, no elegir por su cuenta la
+ * interpretacion mas destructiva.
+ *
+ * Ausente es 0: sin la bandera, el comportamiento historico —purgar todo lo que
+ * case— se conserva intacto.
+ */
+const parseKeepCount = (raw: string | null): number => {
+  if (raw === null || raw.length === 0) {
+    return 0;
+  }
+
+  // `Number(raw)` y no `parseInt`: este ultimo acepta "2abc" como 2, y un
+  // argumento a medio teclear no deberia pasar por bueno.
+  const parsed = Number(raw);
+
+  if (!Number.isInteger(parsed) || parsed < 0) {
+    throw new Error(
+      `--keep-count debe ser un entero no negativo. Recibido: "${raw}".`,
+    );
+  }
+
+  return parsed;
+};
+
 export const parseFlags = (argv: readonly string[]): CleanupFlags => {
   const valueOf = (name: string): string | null => {
     const prefix = `--${name}=`;
@@ -96,6 +128,7 @@ export const parseFlags = (argv: readonly string[]): CleanupFlags => {
     selector: valueOf('selector'),
     removeRootPanels: has('remove-root-panels'),
     dedupCommittees: has('dedup-committees'),
+    keepCount: parseKeepCount(valueOf('keep-count')),
     rootSelector:
       root === null || root.length === 0 ? DEFAULT_ROOT_SELECTOR : root,
     // `--dry-run` NO se consulta: simular es el defecto y la bandera solo
@@ -135,7 +168,15 @@ export const buildPurgeSelectors = (flags: CleanupFlags): readonly string[] => {
     );
   }
 
-  if (flags.selector !== null && flags.selector.length > 0) {
+  // Con `--keep-count` el selector NO entra aqui: `purgeMarkedBlocks` retira
+  // todas las coincidencias de cada selector que recibe, que es justo lo
+  // contrario de preservar las primeras. Lo trata `purgeKeepingFirst` por su
+  // cuenta, y por eso la guarda de `main` exige que vengan juntos.
+  if (
+    flags.keepCount === 0 &&
+    flags.selector !== null &&
+    flags.selector.length > 0
+  ) {
     selectors.push(flags.selector);
   }
 
@@ -203,6 +244,72 @@ const COMMITTEE_PANEL_SCOPE = '.panel-group .panel-group > .panel';
 
 /** Paneles de comite, ya acotados al nivel seguro del acordeon. */
 const COMMITTEE_PANEL_SELECTOR = `${COMMITTEE_PANEL_SCOPE}:has(.panel-comite-codigo)`;
+
+/**
+ * Retira las coincidencias de un selector CONSERVANDO las `keepCount` primeras.
+ *
+ * Es la deduplicacion ORDINAL, hermana de `purgeDuplicateCommittees` pero sin
+ * criterio semantico: alli el grupo lo define el codigo del comite, aqui lo
+ * define el selector que escribio el operador y el orden del documento.
+ *
+ * SE CONSERVAN LAS PRIMERAS y no las ultimas por el mismo motivo que alla:
+ * cheerio recorre el documento en orden, de modo que las primeras son las que
+ * llevan mas tiempo publicadas y, en una pagina editorial, las que es mas
+ * probable que sean el original frente a las copias de una corrida repetida.
+ *
+ * Devuelve el HTML ORIGINAL sin serializar cuando no retira nada, igual que
+ * `purgeMarkedBlocks`: una pagina ya limpia no tiene por que recibir la
+ * normalizacion de cheerio por el mero hecho de haberla revisado.
+ */
+export const purgeKeepingFirst = (
+  html: string,
+  selector: string,
+  keepCount: number,
+): { html: string; purgedCount: number; preservedCount: number } => {
+  const $ = loadFragment(html);
+  const matches = $(selector).toArray();
+  const preservedCount = Math.min(keepCount, matches.length);
+  const surplus = matches.slice(keepCount);
+
+  if (surplus.length === 0) {
+    return { html, purgedCount: 0, preservedCount };
+  }
+
+  for (const element of surplus) {
+    $(element).remove();
+  }
+
+  return { html: $.html(), purgedCount: surplus.length, preservedCount };
+};
+
+/**
+ * Inventario de una purga ordinal, con lo que se preserva ademas de lo que cae.
+ *
+ * Se separa de `describePurgeTargets` porque la pregunta que responde es otra:
+ * alli basta con "esto se lo lleva", aqui el operador necesita ver CUALES
+ * sobreviven para decidir si el orden del documento es el que cree.
+ */
+export const describeKeepFirstTargets = (
+  html: string,
+  selector: string,
+  keepCount: number,
+): { preserved: readonly string[]; purged: readonly string[] } => {
+  const $ = loadFragment(html);
+
+  const describe = (element: Element): string => {
+    const node = $(element);
+    const code = node.find('.panel-comite-codigo').first().text().trim();
+
+    return clip(code.length > 0 ? code : node.text());
+  };
+
+  const matches = $(selector).toArray();
+
+  return {
+    preserved: matches.slice(0, keepCount).map(describe),
+    purged: matches.slice(keepCount).map(describe),
+  };
+};
 
 /**
  * Agrupa los paneles de comite por su codigo y devuelve los SOBRANTES.
@@ -286,8 +393,15 @@ export const purgeDuplicateCommittees = (
   return { html: $.html(), purgedCount: duplicates.length };
 };
 
-/** Cliente minimo de JSON:API para leer y reescribir el cuerpo de una pagina. */
-class DrupalPageCleaner {
+/**
+ * Cliente minimo de JSON:API para leer y reescribir el cuerpo de una pagina.
+ *
+ * EXPORTADA para que `drupal-inject.ts` la reutilice en vez de abrir la quinta
+ * copia del mismo cliente axios —hoy hay una por script—. Importar entre
+ * scripts es el precedente que ya sigue esta carpeta: este mismo fichero toma
+ * `purgeMarkedBlocks` de `cleanup-drupal-sandbox.ts`.
+ */
+export class DrupalPageCleaner {
   private readonly headers: Record<string, string>;
 
   constructor(private readonly drupalApiConfig: DrupalApiConfig) {
@@ -363,11 +477,29 @@ const main = async (): Promise<void> => {
     );
   }
 
+  // GUARDA DE AMBITO. `--keep-count` significa "de los que casan con ESTE
+  // selector, conserva los primeros n". Repartido entre los tres selectores que
+  // `buildPurgeSelectors` puede devolver a la vez no tiene un significado
+  // unico, y elegir uno por el operador seria adivinar con la tijera en la
+  // mano. Se exige que venga acompanado.
+  const hasCustomSelector =
+    flags.selector !== null && flags.selector.length > 0;
+
+  if (flags.keepCount > 0 && !hasCustomSelector) {
+    throw new Error(
+      '--keep-count exige --selector=<css>: indica de QUE conjunto hay que conservar los primeros.',
+    );
+  }
+
   const selectors = buildPurgeSelectors(flags);
 
-  if (selectors.length === 0 && !flags.dedupCommittees) {
+  if (
+    selectors.length === 0 &&
+    !flags.dedupCommittees &&
+    flags.keepCount === 0
+  ) {
     throw new Error(
-      'No se ha pedido nada que purgar. Usa --injected-only, --remove-root-panels, --dedup-committees o --selector=<css>.',
+      'No se ha pedido nada que purgar. Usa --injected-only, --remove-root-panels, --dedup-committees, --keep-count=<n> o --selector=<css>.',
     );
   }
 
@@ -400,7 +532,39 @@ const main = async (): Promise<void> => {
       ...(flags.dedupCommittees ? [describeDuplicateCommittees(html)] : []),
     ];
 
-    const matched = reportTargets(targets);
+    let matched = reportTargets(targets);
+
+    // El inventario ordinal se imprime aparte porque dice dos cosas y no una:
+    // cuales sobreviven y cuales caen. Ver los preservados es lo que permite
+    // comprobar que el ORDEN del documento es el que el operador cree.
+    if (flags.keepCount > 0 && flags.selector !== null) {
+      const ordinal = describeKeepFirstTargets(
+        html,
+        flags.selector,
+        flags.keepCount,
+      );
+
+      logger.log(
+        `  ${flags.selector} -> ${ordinal.preserved.length} preservado(s), ${ordinal.purged.length} a purgar`,
+      );
+
+      for (const match of ordinal.preserved) {
+        logger.log(`    = se PRESERVA "${match}"`);
+      }
+
+      for (const match of ordinal.purged) {
+        logger.log(`    · ${match}`);
+      }
+
+      if (ordinal.purged.length === 0) {
+        logger.log(
+          `[DRUPAL_CLEAN_NOOP] ${String(ordinal.preserved.length)} coincidencia(s) encontrada(s), ` +
+            `${String(flags.keepCount)} a preservar. No hay sobrantes; se preservan intactas.`,
+        );
+      }
+
+      matched += ordinal.purged.length;
+    }
 
     if (matched === 0) {
       logger.log(
@@ -436,7 +600,16 @@ const main = async (): Promise<void> => {
       ? purgeDuplicateCommittees(purged.html)
       : { html: purged.html, purgedCount: 0 };
 
-    const purgedCount = purged.purgedCount + deduped.purgedCount;
+    // La purga ordinal va la ULTIMA, sobre lo que dejan las anteriores: si un
+    // selector previo ya se llevo alguna de las copias, el conjunto puede haber
+    // quedado por debajo de `keepCount` y entonces no sobra nada.
+    const ordinal =
+      flags.keepCount > 0 && flags.selector !== null
+        ? purgeKeepingFirst(deduped.html, flags.selector, flags.keepCount)
+        : { html: deduped.html, purgedCount: 0, preservedCount: 0 };
+
+    const purgedCount =
+      purged.purgedCount + deduped.purgedCount + ordinal.purgedCount;
 
     if (purgedCount === 0) {
       logger.log(
@@ -446,12 +619,15 @@ const main = async (): Promise<void> => {
       return;
     }
 
-    await cleaner.patchBody(flags.uuid, deduped.html, format);
+    await cleaner.patchBody(flags.uuid, ordinal.html, format);
 
     logger.log(
       `[DRUPAL_CLEAN_SUCCESS] Purgados: ${purgedCount} elemento(s)` +
         (flags.dedupCommittees
           ? ` (${deduped.purgedCount} duplicado(s) de comite)`
+          : '') +
+        (flags.keepCount > 0
+          ? ` (${ordinal.preservedCount} preservado(s) por --keep-count)`
           : '') +
         ` | UUID: ${flags.uuid}`,
     );

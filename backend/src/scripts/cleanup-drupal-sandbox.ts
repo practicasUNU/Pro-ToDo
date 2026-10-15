@@ -216,6 +216,25 @@ export interface CleanupOptions {
   readonly preserveSelectors?: readonly string[];
 
   /**
+   * Anula la heuristica de preservacion y purga el 100% de lo inyectado.
+   *
+   * Es el RESET TOTAL del sandbox: cuando lo que se quiere es dejar la pagina
+   * sin un solo bloque de pruebas, la regla de serie
+   * (`preserveLoneInjectedCommittee`) estorba en vez de proteger, porque salva
+   * justamente los comites que no tienen gemelo nativo —que en una pagina de
+   * pruebas son casi todos—.
+   *
+   * Se pasa el mismo guard neutro que usa `drupal-cleanup.ts` y por un motivo
+   * emparentado: alli manda el selector que escribio el operador, y aqui manda
+   * una bandera que el operador ha tenido que teclear a proposito.
+   *
+   * SOLO afecta al guard. La reposicion de paneles de universidad y las reglas
+   * de visibilidad siguen corriendo despues, de modo que `--all` vacia las
+   * inyecciones pero NO deja la pagina sin sus paneles de universidad.
+   */
+  readonly forceAll?: boolean;
+
+  /**
    * Inventaria y sale, sin emitir el PATCH.
    *
    * Por defecto `false`, que es el comportamiento historico del script. Se
@@ -850,7 +869,13 @@ export class DrupalSandboxCleanupService {
         ? DEFAULT_PURGE_SELECTORS
         : [options.customSelector, ...DEFAULT_PURGE_SELECTORS];
 
-    const guard = buildPurgeGuard(options.preserveSelectors);
+    // Con `forceAll` se pasa un guard NEUTRO: nada se preserva. Sin el, la
+    // composicion de siempre —la regla de serie mas la escotilla de selectores
+    // que pida quien llama—.
+    const guard: PurgeGuard =
+      options.forceAll === true
+        ? () => false
+        : buildPurgeGuard(options.preserveSelectors);
     const purge = purgeMarkedBlocks(body.value, selectors, guard);
 
     // La reposicion va DESPUES de podar, y en ese orden por una razon: lo que se
@@ -987,7 +1012,20 @@ const main = async (): Promise<void> => {
 
   const pathAlias = positionals[0] ?? DEFAULT_PATH_ALIAS;
   const customSelector = positionals[1];
-  const dryRun = flags.has('--dry-run');
+  const forceAll = flags.has('--all') || flags.has('--force-all');
+
+  // ASIMETRIA DELIBERADA, y conviene nombrarla porque deja dos criterios de
+  // escritura conviviendo en el mismo script. El resto de `drupal:cleanup`
+  // ESCRIBE por defecto y simula solo si se pide `--dry-run`; ese contrato se
+  // conserva intacto. Pero `--all` desactiva la unica red que impide
+  // despublicar el ultimo ejemplar de un comite, de modo que exige `--write`
+  // explicito: sin el se simula, se enumera y no se emite PATCH.
+  //
+  // El motivo es el peor caso de cada bandera. Un olvido de `--dry-run` en una
+  // corrida normal retira los bloques de prueba, que es para lo que existe el
+  // script. Un olvido con `--all` vacia la pagina de un portal publicado.
+  const writeRequested = flags.has('--write');
+  const dryRun = flags.has('--dry-run') || (forceAll && !writeRequested);
 
   const app = await NestFactory.createApplicationContext(AppModule, {
     logger: ['error', 'warn', 'log'],
@@ -1017,10 +1055,23 @@ const main = async (): Promise<void> => {
       logger.log(`Alias conocido: ${pathAlias} | uuid=${resolvedUuid}`);
     }
 
+    if (forceAll) {
+      logger.warn(
+        '[DRUPAL_CLEANUP_FORCE_ALL] Modo --all activo: heuristica desactivada, purga total de inyecciones.',
+      );
+
+      if (!writeRequested) {
+        logger.warn(
+          '[DRUPAL_CLEANUP_FORCE_ALL] --all es destructivo y requiere --write. Se simula y no se emite PATCH.',
+        );
+      }
+    }
+
     const result = await service.purgeInjectedBlocks({
       pathAlias,
       ...(resolvedUuid === null ? {} : { nodeUuid: resolvedUuid }),
       ...(customSelector === undefined ? {} : { customSelector }),
+      forceAll,
       dryRun,
     });
 

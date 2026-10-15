@@ -20,6 +20,7 @@ import {
   restoreMissingUniversityPanels,
 } from './cleanup-drupal-sandbox';
 
+import type { PurgeGuard } from './cleanup-drupal-sandbox';
 import type { DrupalApiConfig } from '@core/config/drupal-api.config';
 
 /** Carga con las banderas CANONICAS del proyecto, como el propio script. */
@@ -838,5 +839,84 @@ describe('13. Visibilidad de CEU', () => {
     // 3. Assert 🎯
     expect(result.changes).toEqual([]);
     expect(result.html).toBe(html);
+  });
+});
+
+describe('14. Reset total (--all)', () => {
+  const SCOPED = '.panel-group .panel-group > .panel';
+  const PURGE = [`${SCOPED}:has(a.panel-toggle-link)`];
+
+  /** Guard neutro: el mismo que `--all` pasa al servicio. Nada se preserva. */
+  const NEUTRAL_GUARD: PurgeGuard = () => false;
+
+  /** Panel tal y como lo emite la plantilla de Proto-Do. */
+  const injected = (code: string): string =>
+    '<div class="panel panel-default"><div class="panel-heading">' +
+    '<h5 class="panel-title"><a class="panel-toggle-link" ' +
+    `href="#collapse${code.replace(/\s/g, '')}">` +
+    `<strong class="panel-comite-codigo">${code}</strong></a></h5></div>` +
+    `<div class="collapse" id="collapse${code.replace(/\s/g, '')}"></div></div>`;
+
+  const page = (accordion: string, inner: string): string =>
+    `<div class="panel-group" id="accordion"><div class="panel panel-default">` +
+    `<div class="panel-group" id="${accordion}">${inner}</div></div></div>`;
+
+  it('14.1 deberia purgar el comite que la heuristica preservaria', () => {
+    // 1. Arrange 📐: ESIC 2 no tiene gemelo nativo, de modo que la regla de
+    //    serie lo salva. Es justo lo que `--all` viene a desactivar: en un
+    //    reset total del sandbox, "es la unica copia" deja de ser una razon
+    //    para conservarlo, porque lo que se quiere es la pagina sin rastro.
+    const html = page('accordionESIC', injected('ESIC 2'));
+
+    // 2. Act ⚙️
+    const result = purgeMarkedBlocks(html, PURGE, NEUTRAL_GUARD);
+
+    // 3. Assert 🎯
+    expect(result.purgedCount).toBe(1);
+    expect(result.html).not.toContain('collapseESIC2');
+  });
+
+  it('14.2 el guard de SERIE deberia seguir preservandolo', () => {
+    // 1. Arrange 📐: la contrapartida de 14.1, y la que protege el defecto. Sin
+    //    esta, un cambio que dejara el guard neutro siempre activo pasaria
+    //    inadvertido.
+    const html = page('accordionESIC', injected('ESIC 2'));
+
+    // 2. Act ⚙️
+    const result = purgeMarkedBlocks(html, PURGE, buildPurgeGuard());
+
+    // 3. Assert 🎯
+    expect(result.purgedCount).toBe(0);
+    expect(result.html).toContain('collapseESIC2');
+  });
+
+  it('14.3 deberia vaciar TODAS las inyecciones de varias universidades', () => {
+    // 1. Arrange 📐: el caso real del reset. Ninguno tiene gemelo nativo, asi
+    //    que con la heuristica activa no se purgaria ni uno.
+    const html =
+      page('accordionUAM', injected('UAM 9')) +
+      page('accordionUPM', injected('UPM 4')) +
+      page('accordionESIC', injected('ESIC 2'));
+
+    // 2. Act ⚙️
+    const result = purgeMarkedBlocks(html, PURGE, NEUTRAL_GUARD);
+
+    // 3. Assert 🎯
+    expect(result.purgedCount).toBe(3);
+    expect(result.html).not.toContain('panel-comite-codigo');
+  });
+
+  it('14.4 NO deberia tocar los paneles de universidad contenedores', () => {
+    // 1. Arrange 📐: `--all` desactiva la preservacion de comites, no el
+    //    acotamiento al segundo nivel. La pagina se queda sin inyecciones,
+    //    pero con su estructura de universidades intacta (COMMANDS.md §6.4).
+    const html = page('accordionESIC', injected('ESIC 2'));
+
+    // 2. Act ⚙️
+    const result = purgeMarkedBlocks(html, PURGE, NEUTRAL_GUARD);
+
+    // 3. Assert 🎯
+    expect(result.html).toContain('id="accordionESIC"');
+    expect(result.html).toContain('id="accordion"');
   });
 });

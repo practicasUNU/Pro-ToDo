@@ -2,9 +2,11 @@ import {
   INJECTED_MARKER_SELECTOR,
   buildPurgeSelectors,
   describeDuplicateCommittees,
+  describeKeepFirstTargets,
   describePurgeTargets,
   parseFlags,
   purgeDuplicateCommittees,
+  purgeKeepingFirst,
 } from './drupal-cleanup';
 
 import { purgeMarkedBlocks } from './cleanup-drupal-sandbox';
@@ -351,6 +353,136 @@ describe('drupal-cleanup · purga quirurgica', () => {
 
       // 3. Assert 🎯
       expect(summary.matches).toEqual(['UAM 9']);
+    });
+  });
+
+  describe('6. Preservacion ordinal (--keep-count)', () => {
+    /** Cuatro paneles identicos, como los deja un flujo ejecutado de mas. */
+    const FOUR = TWO_LEVEL_PAGE({
+      UAM: ['UAM 9', 'UAM 9', 'UAM 9', 'UAM 9'],
+    });
+
+    const PANEL_SELECTOR = '.panel-group .panel-group > .panel';
+
+    it('6.1 parseFlags deberia leer --keep-count=<n>', () => {
+      // 1. Arrange 📐 + 2. Act ⚙️ + 3. Assert 🎯
+      expect(parseFlags(['--uuid=abc', '--keep-count=2']).keepCount).toBe(2);
+      expect(parseFlags(['--uuid=abc']).keepCount).toBe(0);
+    });
+
+    it('6.2 parseFlags deberia RECHAZAR un valor no entero', () => {
+      // 1. Arrange 📐: LA GUARDA QUE IMPORTA. Un `--keep-count=dos` degradado
+      //    en silencio a 0 purgaria TODAS las coincidencias del selector, que
+      //    es exactamente lo contrario de lo que se acaba de pedir.
+      // 2. Act ⚙️ + 3. Assert 🎯
+      expect(() => parseFlags(['--uuid=abc', '--keep-count=dos'])).toThrow(
+        '--keep-count debe ser un entero no negativo',
+      );
+      expect(() => parseFlags(['--uuid=abc', '--keep-count=-1'])).toThrow(
+        '--keep-count debe ser un entero no negativo',
+      );
+      expect(() => parseFlags(['--uuid=abc', '--keep-count=2abc'])).toThrow(
+        '--keep-count debe ser un entero no negativo',
+      );
+    });
+
+    it('6.3 deberia conservar 1 de 4 y purgar 3', () => {
+      // 1. Arrange 📐 + 2. Act ⚙️
+      const result = purgeKeepingFirst(FOUR, PANEL_SELECTOR, 1);
+
+      // 3. Assert 🎯
+      expect(result.purgedCount).toBe(3);
+      expect(result.preservedCount).toBe(1);
+      expect(result.html.match(/UAM 9/g)).toHaveLength(1);
+    });
+
+    it('6.4 deberia conservar los n primeros con n>1', () => {
+      // 1. Arrange 📐 + 2. Act ⚙️
+      const result = purgeKeepingFirst(FOUR, PANEL_SELECTOR, 2);
+
+      // 3. Assert 🎯
+      expect(result.purgedCount).toBe(2);
+      expect(result.preservedCount).toBe(2);
+      expect(result.html.match(/UAM 9/g)).toHaveLength(2);
+    });
+
+    it('6.5 con 1 sola coincidencia el recuento de purga deberia ser 0', () => {
+      // 1. Arrange 📐: el NOOP. No hay sobrantes, de modo que no hay nada que
+      //    escribir y la pagina queda intacta.
+      const one = TWO_LEVEL_PAGE({ UAM: ['UAM 9'] });
+
+      // 2. Act ⚙️
+      const result = purgeKeepingFirst(one, PANEL_SELECTOR, 1);
+
+      // 3. Assert 🎯: y se devuelve el ORIGINAL sin serializar, para que una
+      //    pagina ya limpia no reciba la normalizacion de cheerio.
+      expect(result.purgedCount).toBe(0);
+      expect(result.preservedCount).toBe(1);
+      expect(result.html).toBe(one);
+    });
+
+    it('6.6 con keepCount=0 deberia purgar todas las coincidencias', () => {
+      // 1. Arrange 📐: es el comportamiento historico, el de no pasar la
+      //    bandera. Se fija para que anadirla no lo haya cambiado.
+      // 2. Act ⚙️
+      const result = purgeKeepingFirst(FOUR, PANEL_SELECTOR, 0);
+
+      // 3. Assert 🎯
+      expect(result.purgedCount).toBe(4);
+      expect(result.preservedCount).toBe(0);
+      expect(result.html).not.toContain('UAM 9');
+    });
+
+    it('6.7 NO deberia alcanzar el panel de la universidad contenedor', () => {
+      // 1. Arrange 📐: el selector lo escribe el operador, pero la prueba fija
+      //    que el acotamiento al segundo nivel hace su trabajo tambien por
+      //    esta via. Ver COMMANDS.md §6.4.
+      // 2. Act ⚙️
+      const result = purgeKeepingFirst(FOUR, PANEL_SELECTOR, 1);
+
+      // 3. Assert 🎯
+      expect(result.html).toContain('Universidad UAM');
+      expect(result.html).toContain('id="accordionUAM"');
+    });
+
+    it('6.8 el inventario deberia separar preservados de purgados', () => {
+      // 1. Arrange 📐: ver CUALES sobreviven es lo que permite comprobar que el
+      //    orden del documento es el que el operador cree.
+      // 2. Act ⚙️
+      const summary = describeKeepFirstTargets(FOUR, PANEL_SELECTOR, 1);
+
+      // 3. Assert 🎯
+      expect(summary.preserved).toEqual(['UAM 9']);
+      expect(summary.purged).toEqual(['UAM 9', 'UAM 9', 'UAM 9']);
+    });
+
+    it('6.9 buildPurgeSelectors deberia EXCLUIR el selector con keep-count', () => {
+      // 1. Arrange 📐: si el selector entrara en la lista que va a
+      //    `purgeMarkedBlocks`, este retiraria TODAS sus coincidencias antes de
+      //    que `purgeKeepingFirst` pudiera preservar ninguna.
+      const flags = parseFlags([
+        '--uuid=abc',
+        '--selector=.panel',
+        '--keep-count=1',
+      ]);
+
+      // 2. Act ⚙️
+      const selectors = buildPurgeSelectors(flags);
+
+      // 3. Assert 🎯
+      expect(selectors).toEqual([]);
+    });
+
+    it('6.10 buildPurgeSelectors deberia incluirlo SIN keep-count', () => {
+      // 1. Arrange 📐: la contrapartida de 6.9, que protege el camino de
+      //    siempre.
+      const flags = parseFlags(['--uuid=abc', '--selector=.panel']);
+
+      // 2. Act ⚙️
+      const selectors = buildPurgeSelectors(flags);
+
+      // 3. Assert 🎯
+      expect(selectors).toEqual(['.panel']);
     });
   });
 });

@@ -229,6 +229,7 @@ Se ejecutan desde `backend/`, **no son pruebas automatizadas** y no corren en CI
 | `npm run probe:drupal:upload` | Sonda de subida de ficheros a Drupal. |
 | `npm run drupal:cleanup` | Purga los rastros de las pruebas en una página del sandbox. |
 | `npm run drupal:clean` | Purga **quirúrgica** por UUID, selector o deduplicación de comités. |
+| `npm run drupal:inject` | Inyecta marcado HTML en una página, por selector y modo. |
 
 > 🔴 **`DRUPAL_API_BASE_URL` apunta a `https://www.madrimasd.org`, el portal real.** Las páginas son de sandbox, pero lo que se escribe en ellas queda publicado. **Empieza siempre por el simulacro.**
 
@@ -251,6 +252,24 @@ npm run drupal:cleanup -- /prueba-licitaciones '.mi-selector' --dry-run
 Sin argumentos usa `/prueba-verificador-titulos`. El alias se resuelve a UUID por el mapa interno, con respaldo cableado para las dos páginas conocidas.
 
 El script ya impone un **suelo de 120 s** al timeout (`Math.max(timeoutMs, CLEANUP_MIN_TIMEOUT_MS)`), de modo que `DRUPAL_API_TIMEOUT_MS=120000` es redundante pero inofensivo; el portal tarda del orden de 80 s en servir esta página y los 15 s por defecto de `DrupalApiConfig` cortaban la lectura.
+
+#### Reset total (`--all` / `--force-all`)
+
+Por defecto, la heurística `preserveLoneInjectedCommittee` **salva** todo comité inyectado que no tenga una copia nativa al lado, para no despublicar el único ejemplar de un comité. En una página de pruebas eso es casi todo, así que vaciarla del todo era imposible sin editar el código.
+
+`--all` (o `--force-all`) desactiva esa heurística y purga el 100% de lo inyectado:
+
+```bash
+# Simulacro: enumera lo que se llevaría. --all SIN --write no escribe.
+npm run drupal:cleanup -- /prueba-verificador-titulos --all
+
+# Purgar absolutamente todo lo inyectado en pruebas (sin preservaciones)
+npm run drupal:cleanup -- /prueba-verificador-titulos --all --write
+```
+
+> ⚠️ **`--all` exige `--write`, al contrario que el resto del script.** Es la única asimetría de `drupal:cleanup`, que por lo demás escribe por defecto y simula solo con `--dry-run`. El motivo es el peor caso de cada bandera: un olvido de `--dry-run` en una corrida normal retira los bloques de prueba, que es para lo que existe el script; un olvido con `--all` vacía la página de un portal publicado.
+
+Lo que `--all` **no** hace: solo anula el guard de preservación. La reposición de paneles de universidad y las reglas de visibilidad de CEU siguen corriendo después, de modo que la página se queda sin inyecciones pero **con su estructura de universidades intacta**.
 
 ### 6.2 `drupal:clean` — purga quirúrgica
 
@@ -282,12 +301,56 @@ Detalles que conviene saber antes de usarla:
 - **Conserva el primero** de cada grupo en orden de documento (el más antiguo de la página) y borra el resto.
 - **Agrupa por código en toda la página**, no por universidad: dos comités con el mismo código colgando de universidades distintas se tratan como duplicados y solo sobrevive el primero. Revisa el inventario del simulacro antes de añadir `--write`.
 - **Ignora los paneles sin código legible:** sin código no hay forma de saber de qué comité son copia, así que nunca se borran.
-- Se ancla a `.panel-group .panel-group > .panel:has(.panel-comite-codigo)` por la regla de §6.3; **no** usa un `.panel:has(...)` suelto.
+- Se ancla a `.panel-group .panel-group > .panel:has(.panel-comite-codigo)` por la regla de §6.4; **no** usa un `.panel:has(...)` suelto.
 - Combinable con las demás banderas. Corre **después** de ellas, sobre el HTML que dejan.
 
-> ⚠️ `--uuid` es **obligatorio** (no acepta alias de ruta) y hay que pedir **algo** que purgar: `--injected-only`, `--remove-root-panels`, `--dedup-committees` o `--selector=<css>`. Un `--uuid=<UUID> --dry-run` a secas aborta con *«No se ha pedido nada que purgar»*.
+**`--keep-count=<n>`** es la deduplicación **ordinal**: de las coincidencias de `--selector`, conserva las `n` primeras en orden de documento y purga las sobrantes. Es la bandera para cuando el criterio no es el código del comité sino «de estos, quédate con uno»:
 
-### 6.3 Regla de oro de los selectores
+```bash
+# Simular: retiene el primero y purga los duplicados
+npm run drupal:clean -- --uuid=b17d69d8-6998-4883-b8dc-153b55dbd9c5 --selector='.panel-group .panel-group > .panel:has(.panel-heading:contains("ESIC 2"))' --keep-count=1
+
+# Aplicar de verdad
+npm run drupal:clean -- --uuid=b17d69d8-6998-4883-b8dc-153b55dbd9c5 --selector='.panel-group .panel-group > .panel:has(.panel-heading:contains("ESIC 2"))' --keep-count=1 --write
+```
+
+- **Exige `--selector`.** El script puede componer hasta tres selectores a la vez (`--injected-only`, `--remove-root-panels`, `--selector`) y «conserva los primeros n» no tiene un significado único repartido entre ellos; sin `--selector` aborta.
+- **Un valor no entero aborta**, no cae a 0. Un `--keep-count=dos` interpretado como 0 purgaría *todas* las coincidencias, que es lo contrario de lo pedido.
+- El simulacro lista por separado **cuáles se preservan** y cuáles caen, para poder comprobar que el orden del documento es el que crees.
+- Si las coincidencias no superan a `n`, es un NOOP: no se emite PATCH.
+
+> ⚠️ `--uuid` es **obligatorio** (no acepta alias de ruta) y hay que pedir **algo** que purgar: `--injected-only`, `--remove-root-panels`, `--dedup-committees`, `--keep-count=<n>` o `--selector=<css>`. Un `--uuid=<UUID> --dry-run` a secas aborta con *«No se ha pedido nada que purgar»*.
+
+### 6.3 `drupal:inject` — inyección de marcado
+
+Coloca un bloque HTML dentro de una página, sin escribir un script desechable para cada ocasión. **Simula por defecto**, como `drupal:clean`.
+
+```bash
+# Inyectar desde archivo local en un sub-acordeón
+npm run drupal:inject -- --uuid=b17d69d8-6998-4883-b8dc-153b55dbd9c5 --file=src/scripts/fixtures/esic-2.html --target='#accordionESIC' --mode=append --write
+
+# Inyectar marcado en línea
+npm run drupal:inject -- --uuid=b17d69d8-6998-4883-b8dc-153b55dbd9c5 --html='<div class="panel panel-default">...</div>' --target='#accordion' --write
+```
+
+| Bandera | Obligatoria | Defecto | Qué hace |
+|---|---|---|---|
+| `--uuid=<UUID>` | sí | — | Página destino. No acepta alias de ruta. |
+| `--html=<marcado>` | una de las dos | — | Marcado en línea. No se recorta. |
+| `--file=<ruta>` | una de las dos | — | Lee el marcado de un fichero local. |
+| `--target=<css>` | no | `#accordion` | Contenedor donde se inserta. |
+| `--mode=<modo>` | no | `append` | `append`, `prepend` o `replace`. |
+| `--write` | no | *(simula)* | Sin ella no se emite ningún PATCH. |
+
+- `append` inserta al final del contenedor, `prepend` al principio y `replace` sustituye el nodo que casa con `--target` **entero**.
+- `--html` y `--file` son **excluyentes**: pedir los dos aborta.
+- **Un `--target` que no casa con nada es un fallo, no un fallback.** El script no «se las arregla» cayendo a `#accordion`: aborta y dice qué selector no encontró. Un bloque en el contenedor equivocado no se distingue de uno bien puesto hasta que alguien mira la página.
+- Elige el destino **visible**: la plantilla de muestra del portal cuelga de un `.d-none` y duplica cada contenedor, de modo que una búsqueda ingenua acierta con el escondido y el bloque se publica donde nadie lo ve. Si el contenedor elegido viene oculto, lo destapa y lo avisa en el simulacro.
+- El simulacro imprime la longitud del marcado, cuántas veces casa el destino y una vista previa de ambos.
+
+`src/scripts/fixtures/esic-2.html` es el bloque del comité ESIC 2, guardado para poder reinyectarlo con `--file`.
+
+### 6.4 Regla de oro de los selectores
 
 La página agregadora es un acordeón de **dos niveles** y los paneles de universidad y de comité comparten la clase `.panel`. Un `.panel:has(#loQueSea)` casa **también con el panel de la universidad** que contiene el objetivo: ya borró una universidad entera de la página. Toda mutación por `:has()` se ancla al segundo nivel:
 
