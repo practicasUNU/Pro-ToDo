@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
 import { plainToInstance } from 'class-transformer';
 import { validate } from 'class-validator';
 
@@ -71,7 +71,20 @@ const referencesArrayIndex = (template: string): boolean =>
   /\[\d+\]\s*\}\}/.test(template);
 
 /**
- * Las CINCO claves de `outputFields` en blanco.
+ * Desenlace de la extraccion, publicado como un campo mas del namespace.
+ *
+ * Existe porque los tres desenlaces producen payloads INDISTINGUIBLES entre si
+ * —cuerpo vacio en los tres casos—, y un nodo posterior que decide si publicar
+ * necesita separar «no habia enlace» de «el portal no se dejo leer» de «esto es
+ * el articulo y venia vacio».
+ */
+type ScraperStatus = 'OK' | 'SKIPPED_EMPTY' | 'FALLBACK_EMPTY';
+
+/** Desenlace nominal: hubo articulo y se extrajo. */
+const SCRAPER_STATUS_OK: ScraperStatus = 'OK';
+
+/**
+ * Las claves de `outputFields` en blanco.
  *
  * Se emiten todas y no solo las dos que el camino de omision necesita, porque un
  * nodo posterior que interpole `{{scraped_web.article_title}}` recibiria un
@@ -79,12 +92,17 @@ const referencesArrayIndex = (template: string): boolean =>
  * campo declarado y ausente es indistinguible de un flujo mal compuesto, que es
  * justo la confusion que este nodo viene evitando.
  */
-const buildNeutralPayload = (): Record<string, unknown> => ({
-  source_url: null,
+const buildNeutralPayload = (
+  status: ScraperStatus,
+  sourceUrl: string | null = null,
+): Record<string, unknown> => ({
+  source_url: sourceUrl,
   article_title: '',
   full_article_content: '',
   byline: null,
   scraped_at: new Date().toISOString(),
+  character_count: 0,
+  status,
 });
 
 /**
@@ -167,10 +185,16 @@ const stackTraceOf = (error: unknown): { stackTrace?: string } =>
  */
 @Injectable()
 export class WebScraperStrategy implements INodeStrategy {
+  // Cadena literal y no `WebScraperStrategy.name`: la autorreferencia en el
+  // inicializador hace reventar a `nest build` con un «Cannot read properties
+  // of undefined (reading 'checkJsDirective')», aunque `tsc` compile el fichero
+  // sin una sola queja. El contexto resultante del Logger es identico.
+  private readonly logger = new Logger('WebScraperStrategy');
+
   public readonly nodeType = NodeType.EXTRACTOR_WEB;
 
   /**
-   * Las cinco claves que este nodo deposita en su namespace.
+   * Las claves que este nodo deposita en su namespace.
    *
    * Replican el `data` que devuelve `execute`. `source_url` es la URL FINAL tras
    * los redirectos, asi que un segundo extractor encadenado puede tomarla como
@@ -194,6 +218,17 @@ export class WebScraperStrategy implements INodeStrategy {
     },
     { name: 'byline', type: 'text', description: 'Firma, o nulo si no hay' },
     { name: 'scraped_at', type: 'text', description: 'Marca de tiempo ISO' },
+    {
+      name: 'character_count',
+      type: 'number',
+      description: 'Longitud del cuerpo aislado; 0 si no se extrajo nada',
+    },
+    {
+      name: 'status',
+      type: 'text',
+      description:
+        'OK, SKIPPED_EMPTY (sin origen) o FALLBACK_EMPTY (fallo ignorado)',
+    },
   ];
 
   /**
@@ -236,7 +271,7 @@ export class WebScraperStrategy implements INodeStrategy {
     // No hay origen configurado y el nodo esta declarado como omitible: se sale
     // antes de tocar el navegador. Ver `buildNeutralPayload`.
     if ('skip' in resolution) {
-      return { success: true, data: buildNeutralPayload() };
+      return { success: true, data: buildNeutralPayload('SKIPPED_EMPTY') };
     }
 
     const { config } = resolution;
@@ -251,7 +286,7 @@ export class WebScraperStrategy implements INodeStrategy {
     // alternativa —parar el flujo— convertiria "este correo no traia enlaces"
     // en una incidencia que alguien tendria que cerrar a mano.
     if ('skip' in target) {
-      return { success: true, data: buildNeutralPayload() };
+      return { success: true, data: buildNeutralPayload('SKIPPED_EMPTY') };
     }
 
     // Se pasan SOLO los tres campos de navegacion y no la config entera: el
@@ -265,6 +300,26 @@ export class WebScraperStrategy implements INodeStrategy {
     });
 
     if (!outcome.success) {
+      // FALLO AJENO Y TRANSITORIO, no defecto del flujo. Lo que llega aqui es
+      // siempre cosa del portal remoto —timeout, muro anti-bot, servidor
+      // inalcanzable, cuerpo que Readability no sabe aislar—: los fallos de
+      // configuracion ya se nombraron mas arriba y nunca alcanzan esta rama.
+      // Por eso es la UNICA que el flag silencia; extenderlo a `resolveConfig`
+      // convertiria un nodo mal compuesto en un exito vacio y permanente.
+      if (config.ignoreExtractionFailure) {
+        this.logger.log(
+          `Extraccion no completada (${outcome.code}) en "${target.url.toString()}". Fallback neutro aplicado por configuracion.`,
+        );
+
+        // Se conserva `source_url`: el intento se hizo contra una URL concreta
+        // y perderla dejaria la traza sin el unico dato que permite reproducir
+        // el fallo contra el portal.
+        return {
+          success: true,
+          data: buildNeutralPayload('FALLBACK_EMPTY', target.url.toString()),
+        };
+      }
+
       return {
         success: false,
         error: {
@@ -286,6 +341,8 @@ export class WebScraperStrategy implements INodeStrategy {
         full_article_content: outcome.article.content,
         byline: outcome.article.byline,
         scraped_at: new Date().toISOString(),
+        character_count: outcome.article.content.length,
+        status: SCRAPER_STATUS_OK,
       },
     };
   }

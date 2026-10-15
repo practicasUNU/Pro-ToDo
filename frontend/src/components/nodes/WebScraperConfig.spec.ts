@@ -372,4 +372,61 @@ describe('WebScraperConfig · configurador del nodo EXTRACTOR_WEB', () => {
       expect(wrapper.attributes('data-node-id')).toBe(NODE_ID);
     });
   });
+
+  describe('4. Fallo de extraccion ignorado', () => {
+    it('4.1 deberia renderizar el toggle reflejando el defecto del store', () => {
+      // 1. Arrange & 2. Act
+      const wrapper = mountComponent();
+
+      // 3. Assert
+      const toggle = wrapper.find(
+        '[data-test="ignore-extraction-failure-toggle"]',
+      );
+
+      expect(toggle.exists()).toBe(true);
+      expect(useWebScraperStore(NODE_ID).config.ignoreExtractionFailure).toBe(
+        true,
+      );
+    });
+
+    it('4.2 deberia propagar el cambio al store', () => {
+      // 1. Arrange: el componente nunca muta el store con `v-model`; emite y el
+      //    store decide (§2.1).
+      const wrapper = mountComponent();
+      const store = useWebScraperStore(NODE_ID);
+
+      // 2. Act
+      const toggle = wrapper
+        .findAllComponents(QToggle)
+        .find(
+          (candidate) =>
+            candidate.attributes('data-test') ===
+            'ignore-extraction-failure-toggle',
+        );
+
+      toggle?.vm.$emit('update:model-value', false);
+
+      // 3. Assert
+      expect(store.config.ignoreExtractionFailure).toBe(false);
+    });
+
+    it('4.3 NO deberia bloquearse con el toggle de skipIfEmpty', () => {
+      // 1. Arrange: son decisiones independientes. `skipIfEmpty` se bloquea
+      //    cuando ningun paso anterior publica una URL; este nunca, porque el
+      //    fallo de un portal puede ocurrir en cualquier topologia.
+      const wrapper = mountComponent();
+      const store = useWebScraperStore(NODE_ID);
+
+      // 2. Act
+      store.setAvailableUpstreamContext([]);
+
+      // 3. Assert
+      expect(store.isSkipIfEmptyLocked).toBe(true);
+      expect(
+        wrapper
+          .find('[data-test="ignore-extraction-failure-toggle"]')
+          .attributes('disabled'),
+      ).toBeUndefined();
+    });
+  });
 });

@@ -379,7 +379,13 @@ describe('SmtpAlertStrategy', () => {
 
       // 2. Act ⚙️
       await strategy.execute(
-        buildContext({ trigger: { flow_name: 'Notas de prensa' } }),
+        buildContext({
+          trigger: { flow_name: 'Notas de prensa' },
+          // `error_context` presente porque la guarda de pertinencia lo exige
+          // para llegar siquiera al armado del asunto, que es lo que aqui se
+          // comprueba. Su contenido es indiferente para esta prueba.
+          error_context: { error_code: 'ERR_CUALQUIERA' },
+        }),
         { to: [RECIPIENT] },
       );
 
@@ -398,7 +404,10 @@ describe('SmtpAlertStrategy', () => {
 
       // 2. Act ⚙️
       const result = await strategy.execute(
-        buildContext({ trigger: { flow_name: 'Notas de prensa' } }),
+        buildContext({
+          trigger: { flow_name: 'Notas de prensa' },
+          error_context: { error_code: 'ERR_CUALQUIERA' },
+        }),
         { to: [RECIPIENT], subject: '   ' },
       );
 
@@ -517,9 +526,13 @@ describe('SmtpAlertStrategy', () => {
       expect(html).toContain(FLOW_ID);
     });
 
-    it('8.3 NO deberia escribir undefined sin error_context', async () => {
-      // 1. Arrange 📐: el nodo puede colocarse en el camino feliz para confirmar
-      //    una publicacion, y ahi el motor nunca siembra `error_context`.
+    it('8.3 NO deberia enviar nada sin error_context', async () => {
+      // 1. Arrange 📐: CAMBIO DE CONTRATO. Antes este nodo podia colocarse en el
+      //    camino feliz para confirmar una publicacion, y la prueba se limitaba
+      //    a exigir que la carta no escribiera "undefined" por los campos del
+      //    fallo que no existian. Ahora la guarda de pertinencia lo impide: este
+      //    nodo es de ALERTA y solo habla cuando hay una incidencia que
+      //    notificar, de modo que el camino feliz se omite entero.
       const mailer = buildMailer();
       const strategy = buildStrategy(mailer);
       muteLogger(strategy);
@@ -531,12 +544,12 @@ describe('SmtpAlertStrategy', () => {
       });
 
       // 3. Assert 🎯
-      const message = sentMessage(mailer);
-
       expect(result.success).toBe(true);
-      expect(message.html).not.toContain('undefined');
-      expect(message.text).not.toContain('undefined');
-      expect(message.html).not.toContain('Codigo de error');
+      expect(result.data).toEqual({
+        skipped: true,
+        reason: 'EXECUTION_NOT_PAUSED',
+      });
+      expect(mailer.sendNodeAlert).not.toHaveBeenCalled();
     });
 
     it('8.4 deberia escapar el marcado que llega del correo entrante', async () => {
@@ -584,6 +597,84 @@ describe('SmtpAlertStrategy', () => {
 
       // 3. Assert 🎯
       expect(sentMessage(mailer).html).toContain('&lt;b&gt;urgente&lt;/b&gt;');
+    });
+  });
+
+  describe('9. Guarda de pertinencia', () => {
+    it('9.1 deberia omitir el envio cuando no hay error_context', async () => {
+      // 1. Arrange 📐: es el nodo colocado donde no corresponde, o un flujo que
+      //    llego al final sin incidencias. En ninguno de los dos casos hay nada
+      //    que alertar.
+      const mailer = buildMailer();
+      const strategy = buildStrategy(mailer);
+      muteLogger(strategy);
+
+      // 2. Act ⚙️
+      const result = await strategy.execute(buildContext({}), buildParams());
+
+      // 3. Assert 🎯
+      expect(result.success).toBe(true);
+      expect(result.data).toEqual({
+        skipped: true,
+        reason: 'EXECUTION_NOT_PAUSED',
+      });
+      expect(mailer.sendNodeAlert).not.toHaveBeenCalled();
+    });
+
+    it('9.2 deberia omitir el envio con un error_context vacio', async () => {
+      // 1. Arrange 📐: un namespace presente pero sin claves no es evidencia de
+      //    nada, y tratarlo como tal enviaria una carta sin un solo dato del
+      //    fallo.
+      const mailer = buildMailer();
+      const strategy = buildStrategy(mailer);
+      muteLogger(strategy);
+
+      // 2. Act ⚙️
+      const result = await strategy.execute(
+        buildContext({ error_context: {} }),
+        buildParams(),
+      );
+
+      // 3. Assert 🎯
+      expect(result.data).toEqual({
+        skipped: true,
+        reason: 'EXECUTION_NOT_PAUSED',
+      });
+      expect(mailer.sendNodeAlert).not.toHaveBeenCalled();
+    });
+
+    it('9.3 NO deberia validar la configuracion antes de omitir', async () => {
+      // 1. Arrange 📐: la guarda va ANTES de `resolveConfig` a proposito. Un
+      //    nodo sin destinatarios es configuracion invalida, pero si no hay
+      //    nada que notificar tampoco hay por que diagnosticarlo: devolver
+      //    GRAVE aqui pausaria un flujo que iba bien.
+      const mailer = buildMailer();
+      const strategy = buildStrategy(mailer);
+      muteLogger(strategy);
+
+      // 2. Act ⚙️
+      const result = await strategy.execute(buildContext({}), {});
+
+      // 3. Assert 🎯
+      expect(result.success).toBe(true);
+      expect(result.error).toBeUndefined();
+      expect(mailer.sendNodeAlert).not.toHaveBeenCalled();
+    });
+
+    it('9.4 deberia enviar cuando SI hay error_context', async () => {
+      // 1. Arrange 📐: la contrapartida de 9.1. Sin esta, una guarda que
+      //    omitiera SIEMPRE pasaria las otras tres pruebas.
+      const mailer = buildMailer();
+      const strategy = buildStrategy(mailer);
+      muteLogger(strategy);
+
+      // 2. Act ⚙️
+      const result = await strategy.execute(buildContext(), buildParams());
+
+      // 3. Assert 🎯
+      expect(result.success).toBe(true);
+      expect(result.data).not.toHaveProperty('skipped');
+      expect(mailer.sendNodeAlert).toHaveBeenCalledTimes(1);
     });
   });
 });

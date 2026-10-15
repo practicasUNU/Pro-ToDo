@@ -5,6 +5,7 @@ import {
   DEFAULT_SCRAPER_MAX_RETRIES,
   MAX_EXCLUDED_DOMAINS,
   DEFAULT_SCRAPER_RETRY_DELAY_MS,
+  DEFAULT_SCRAPER_IGNORE_EXTRACTION_FAILURE,
   DEFAULT_SCRAPER_SKIP_IF_EMPTY,
   DEFAULT_SCRAPER_TIMEOUT_MS,
   WebScraperConfigDto,
@@ -63,6 +64,46 @@ describe('WebScraperConfigDto', () => {
     });
   });
 
+  describe('ignoreExtractionFailure', () => {
+    it('deberia admitir la ausencia del campo', async () => {
+      // 1. Arrange 📐: igual que sus hermanos, es opcional al guardar.
+      const params = {};
+
+      // 2. Act ⚙️
+      const errors = await validateParams(params);
+
+      // 3. Assert 🎯
+      expect(errors).toHaveLength(0);
+    });
+
+    it('deberia admitir un booleano explicito', async () => {
+      // 1. Arrange 📐
+      const params = { ignoreExtractionFailure: false };
+
+      // 2. Act ⚙️
+      const errors = await validateParams(params);
+
+      // 3. Assert 🎯
+      expect(errors).toHaveLength(0);
+    });
+
+    it('deberia rechazar un valor que no sea booleano', async () => {
+      // 1. Arrange 📐: el `pipeline_schema` es `jsonb` y pudo escribirse por
+      //    SQL directo, de modo que el "si" textual es alcanzable.
+      const params = { ignoreExtractionFailure: 'si' };
+
+      // 2. Act ⚙️
+      const errors = await validateParams(params);
+
+      // 3. Assert 🎯
+      expect(errors).toHaveLength(1);
+      expect(errors[0].property).toBe('ignoreExtractionFailure');
+      expect(Object.values(errors[0].constraints ?? {})).toContain(
+        'ignoreExtractionFailure debe ser un booleano.',
+      );
+    });
+  });
+
   describe('resolveWebScraperConfig', () => {
     it('deberia aplicar los defectos sobre un DTO vacio', () => {
       // 1. Arrange 📐
@@ -78,6 +119,7 @@ describe('WebScraperConfigDto', () => {
         maxRetries: DEFAULT_SCRAPER_MAX_RETRIES,
         retryDelayMs: DEFAULT_SCRAPER_RETRY_DELAY_MS,
         skipIfEmpty: DEFAULT_SCRAPER_SKIP_IF_EMPTY,
+        ignoreExtractionFailure: DEFAULT_SCRAPER_IGNORE_EXTRACTION_FAILURE,
         excludedDomains: [],
       });
     });
@@ -91,6 +133,20 @@ describe('WebScraperConfigDto', () => {
 
       // 3. Assert 🎯
       expect(config.skipIfEmpty).toBe(false);
+    });
+
+    it('deberia respetar un ignoreExtractionFailure desactivado explicitamente', () => {
+      // 1. Arrange 📐: `?? ` y no `||`, para que `false` no caiga al defecto.
+      //    Es el operador que SI quiere que el fallo pause la FSM.
+      const dto = plainToInstance(WebScraperConfigDto, {
+        ignoreExtractionFailure: false,
+      });
+
+      // 2. Act ⚙️
+      const config = resolveWebScraperConfig(dto);
+
+      // 3. Assert 🎯
+      expect(config.ignoreExtractionFailure).toBe(false);
     });
   });
 

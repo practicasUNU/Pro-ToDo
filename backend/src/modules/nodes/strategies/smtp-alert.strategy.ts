@@ -172,6 +172,35 @@ export class SmtpAlertStrategy implements INodeStrategy {
     context: StatePayloadContext,
     params: Record<string, unknown>,
   ): Promise<NodeResult> {
+    // GUARDA DE PERTINENCIA, y va ANTES de `resolveConfig` a proposito: si no
+    // hay nada que alertar, no se valida la configuracion ni se abre el
+    // transporte SMTP. Es la diferencia entre un no-op barato y una conexion
+    // que puede tardar o fallar por un correo que nadie iba a querer.
+    //
+    // SE PREGUNTA POR LA EVIDENCIA, NO POR EL ESTADO. Comprobar literalmente
+    // que la ejecucion este en PAUSADO no funcionaria: un DESTINO_SMTP colgado
+    // de una ruta `onErrorStep` corre mientras la ejecucion sigue EN_PROCESO
+    // —solo pasa a PAUSADO despues, cuando el motor aplica el protocolo de
+    // resiliencia—, asi que esa comprobacion haria que la alerta no se enviara
+    // NUNCA. `error_context` es el namespace que el motor siembra justo antes
+    // de desviar el flujo, de modo que su presencia ES la condicion que
+    // interesa. De paso, la estrategia no necesita repositorio de ejecuciones.
+    const errorEvidence = context.getNamespace(ERROR_CONTEXT_NAMESPACE);
+
+    if (
+      errorEvidence === undefined ||
+      Object.keys(errorEvidence).length === 0
+    ) {
+      this.logger.log(
+        'Alerta SMTP omitida: la ejecucion no presenta error_context, de modo que no hay incidencia que notificar.',
+      );
+
+      return {
+        success: true,
+        data: { skipped: true, reason: 'EXECUTION_NOT_PAUSED' },
+      };
+    }
+
     const resolution = await this.resolveConfig(params);
 
     if ('failure' in resolution) {

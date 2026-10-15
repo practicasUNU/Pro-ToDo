@@ -19,6 +19,7 @@ import type { FsmExecution } from '@core/fsm/entities/fsm-execution.entity';
 import type { CrudEventsCoordinator } from '@common/services/crud-events.coordinator';
 import type { FlowPollingCoordinator } from '@common/services/flow-polling.coordinator';
 import type { FsmEngineService } from '@core/fsm/services/fsm-engine.service';
+import type { FsmExecutionQueryService } from '@core/fsm/services/fsm-execution-query.service';
 import type { PipelineValidatorService } from '@core/fsm/services/pipeline-validator.service';
 import type { WorkflowTemplatesService } from '@modules/workflow-templates/workflow-templates.service';
 import type { Workflow } from './entities/workflow.entity';
@@ -107,6 +108,12 @@ type EngineMock = jest.Mocked<
 >;
 /** Miembros `jest.Mock` y no `jest.Mocked<Pick<...>>`: `expect(mock.metodo)`
  *  sobre metodos de instancia dispara `@typescript-eslint/unbound-method`. */
+interface ExecutionQueryMock {
+  findLiveByFlow: jest.Mock;
+}
+
+/** Miembros `jest.Mock` y no `jest.Mocked<Pick<...>>`: `expect(mock.metodo)`
+ *  sobre metodos de instancia dispara `@typescript-eslint/unbound-method`. */
 interface CoordinatorMock {
   stopPollingForFlow: jest.Mock;
   refreshPolling: jest.Mock;
@@ -118,6 +125,7 @@ interface ServiceHarness {
   repository: WorkflowRepositoryMock;
   validator: ValidatorMock;
   engine: EngineMock;
+  executionQuery: ExecutionQueryMock;
   templates: { assertInstantiable: jest.Mock };
   coordinator: CoordinatorMock;
   crudEvents: { dispatch: jest.Mock };
@@ -158,6 +166,13 @@ const buildHarness = (): ServiceHarness => {
     abortExecutionsForFlow: jest.fn().mockResolvedValue(0),
   };
 
+  // Consulta de ejecuciones vivas. Por defecto NINGUNA, que es el caso normal:
+  // la guarda `assertNotInFlight` solo debe estorbar cuando hay una EN_PROCESO,
+  // y las pruebas que lo comprueban la rellenan.
+  const executionQuery: ExecutionQueryMock = {
+    findLiveByFlow: jest.fn().mockResolvedValue([]),
+  };
+
   // El puerto del sondeo va mockeado: la implementacion real vive en
   // `NodesModule` y lo que aqui se comprueba es QUE se le avisa, no como para.
   const coordinator: CoordinatorMock = {
@@ -179,6 +194,7 @@ const buildHarness = (): ServiceHarness => {
     repository as unknown as Repository<Workflow>,
     validator as unknown as PipelineValidatorService,
     engine as unknown as FsmEngineService,
+    executionQuery as unknown as FsmExecutionQueryService,
     templates as unknown as WorkflowTemplatesService,
     coordinator as unknown as FlowPollingCoordinator,
     crudEvents as unknown as CrudEventsCoordinator,
@@ -194,6 +210,7 @@ const buildHarness = (): ServiceHarness => {
     repository,
     validator,
     engine,
+    executionQuery,
     templates,
     coordinator,
     crudEvents,
@@ -1307,6 +1324,70 @@ describe('WorkflowsService (edicion y habilitacion de flujos)', () => {
         service.updateWorkflow(WORKFLOW_ID, { active: false }),
       ).rejects.toThrow('PostgreSQL no responde');
       expect(coordinator.stopPollingForFlow).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('11bis. Bloqueo por ejecucion en curso', () => {
+    it('11bis.1 deberia rechazar la ACTIVACION con una ejecucion EN_PROCESO', async () => {
+      // 1. Arrange 📐: una EN_PROCESO tiene un bucle del motor atendiendola y
+      //    reserva el mutex parcial `idx_flujo_activo`.
+      const { service, executionQuery, repository } = buildHarness();
+      executionQuery.findLiveByFlow.mockResolvedValue([
+        buildExecution({ currentState: ExecutionState.EN_PROCESO }),
+      ]);
+
+      // 2. Act ⚙️ + 3. Assert 🎯
+      await expect(
+        service.updateWorkflow(WORKFLOW_ID, { active: true }),
+      ).rejects.toThrow(ConflictException);
+      expect(repository.save).not.toHaveBeenCalled();
+    });
+
+    it('11bis.2 deberia rechazar la DESACTIVACION con una ejecucion EN_PROCESO', async () => {
+      // 1. Arrange 📐: desactivar bajo ella la cerraria como FALLIDO a mitad de
+      //    camino, via `releaseDeactivatedFlow`.
+      const { service, executionQuery, repository } = buildHarness();
+      executionQuery.findLiveByFlow.mockResolvedValue([
+        buildExecution({ currentState: ExecutionState.EN_PROCESO }),
+      ]);
+
+      // 2. Act ⚙️ + 3. Assert 🎯
+      await expect(
+        service.updateWorkflow(WORKFLOW_ID, { active: false }),
+      ).rejects.toThrow(ConflictException);
+      expect(repository.save).not.toHaveBeenCalled();
+    });
+
+    it('11bis.3 NO deberia bloquear por una ejecucion PAUSADO', async () => {
+      // 1. Arrange 📐: LA PRUEBA QUE PROTEGE CU-09. Las pausadas son la cola de
+      //    reintento manual y sobreviven a proposito a los cambios de estado
+      //    del flujo. Contarlas aqui dejaria un flujo con una incidencia sin
+      //    cerrar IMPOSIBLE de desactivar, que es justo lo que un operador
+      //    quiere hacer cuando algo va mal.
+      const { service, executionQuery } = buildHarness();
+      executionQuery.findLiveByFlow.mockResolvedValue([
+        buildExecution({ currentState: ExecutionState.PAUSADO }),
+      ]);
+
+      // 2. Act ⚙️
+      const summary = await service.updateWorkflow(WORKFLOW_ID, {
+        active: false,
+      });
+
+      // 3. Assert 🎯
+      expect(summary.active).toBe(false);
+    });
+
+    it('11bis.4 NO deberia consultar ejecuciones si no se toca active', async () => {
+      // 1. Arrange 📐: editar el nombre no tiene por que costar una consulta a
+      //    `ejecuciones_flujo`.
+      const { service, executionQuery } = buildHarness();
+
+      // 2. Act ⚙️
+      await service.updateWorkflow(WORKFLOW_ID, { name: 'Otro nombre' });
+
+      // 3. Assert 🎯
+      expect(executionQuery.findLiveByFlow).not.toHaveBeenCalled();
     });
   });
 });

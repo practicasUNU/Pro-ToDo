@@ -1,5 +1,6 @@
 import {
   BadRequestException,
+  ConflictException,
   Injectable,
   Logger,
   NotFoundException,
@@ -9,6 +10,7 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { CrudEventsCoordinator } from '@common/services/crud-events.coordinator';
 import { FlowPollingCoordinator } from '@common/services/flow-polling.coordinator';
 import { FsmEngineService } from '@core/fsm/services/fsm-engine.service';
+import { FsmExecutionQueryService } from '@core/fsm/services/fsm-execution-query.service';
 import { PipelineValidatorService } from '@core/fsm/services/pipeline-validator.service';
 import { buildOrderedTopology } from '@core/fsm/utils/pipeline-topology.util';
 import { ADMIN_ONLY_MODELS } from '@modules/nodes/services/llm-provider-catalog.service';
@@ -85,6 +87,7 @@ export class WorkflowsService {
     private readonly workflowRepository: Repository<Workflow>,
     private readonly pipelineValidatorService: PipelineValidatorService,
     private readonly fsmEngineService: FsmEngineService,
+    private readonly fsmExecutionQueryService: FsmExecutionQueryService,
     private readonly workflowTemplatesService: WorkflowTemplatesService,
     private readonly flowPollingCoordinator: FlowPollingCoordinator,
     private readonly crudEvents: CrudEventsCoordinator,
@@ -455,6 +458,8 @@ export class WorkflowsService {
     }
 
     if (updateWorkflowDto.active !== undefined) {
+      await this.assertNotInFlight(workflow);
+
       if (updateWorkflowDto.active) {
         await this.assertActivatable(workflow);
       }
@@ -511,6 +516,42 @@ export class WorkflowsService {
    * reconciliacion periodica borra el intervalo de todos modos, y la guarda
    * `!active` de `runAutomaticWorkflow` ya impide ejecuciones nuevas.
    */
+  /**
+   * Impide conmutar `activo` mientras haya trabajo REALMENTE en vuelo.
+   *
+   * SOLO EN_PROCESO BLOQUEA, y la exclusion de PAUSADO es deliberada, no un
+   * olvido. Las pausadas son la cola de reintento de CU-09 y sobreviven a
+   * proposito a los cambios de estado del flujo (ver la nota de
+   * `updateWorkflow` sobre la activacion): contarlas aqui dejaria un flujo con
+   * una incidencia sin cerrar IMPOSIBLE de desactivar, que es justo lo que un
+   * operador quiere hacer cuando algo va mal.
+   *
+   * Una EN_PROCESO es otra cosa: tiene un bucle del motor atendiendola y
+   * reserva el mutex parcial `idx_flujo_activo`. Desactivar bajo ella la
+   * cerraria como FALLIDO a mitad de camino (`releaseDeactivatedFlow`) y
+   * activar competiria con el sondeo por una ejecucion que ya existe.
+   *
+   * Se reutiliza `findLiveByFlow` —que devuelve ambos estados por diseno— y se
+   * filtra aqui, en vez de anadir una consulta casi identica al servicio.
+   *
+   * @throws ConflictException Si el flujo tiene una ejecucion EN_PROCESO.
+   */
+  private async assertNotInFlight(workflow: Workflow): Promise<void> {
+    const live = await this.fsmExecutionQueryService.findLiveByFlow(
+      workflow.id,
+    );
+
+    const inFlight = live.filter(
+      (execution) => execution.currentState === ExecutionState.EN_PROCESO,
+    );
+
+    if (inFlight.length > 0) {
+      throw new ConflictException(
+        `No se puede activar o desactivar el flujo "${workflow.name}" mientras tiene una ejecucion en curso.`,
+      );
+    }
+  }
+
   private async releaseDeactivatedFlow(workflow: Workflow): Promise<void> {
     // Primero cortar la fuente de trabajo nuevo y despues matar lo que ya
     // corre: al reves, el intervalo podria disparar un tick mas y crear una

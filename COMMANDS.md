@@ -228,7 +228,7 @@ Se ejecutan desde `backend/`, **no son pruebas automatizadas** y no corren en CI
 | `npm run test:e2e:titulos` | E2E del flujo verificador de títulos. |
 | `npm run probe:drupal:upload` | Sonda de subida de ficheros a Drupal. |
 | `npm run drupal:cleanup` | Purga los rastros de las pruebas en una página del sandbox. |
-| `npm run drupal:clean` | Purga **quirúrgica** por UUID y selector. |
+| `npm run drupal:clean` | Purga **quirúrgica** por UUID, selector o deduplicación de comités. |
 
 > 🔴 **`DRUPAL_API_BASE_URL` apunta a `https://www.madrimasd.org`, el portal real.** Las páginas son de sandbox, pero lo que se escribe en ellas queda publicado. **Empieza siempre por el simulacro.**
 
@@ -267,7 +267,25 @@ npm run drupal:clean -- --uuid=<UUID> --selector='.panel-default:has(.panel-head
 npm run drupal:clean -- --uuid=<UUID> --injected-only --write
 ```
 
-> ⚠️ `--uuid` es **obligatorio** (no acepta alias de ruta) y hay que pedir **algo** que purgar: `--injected-only`, `--remove-root-panels` o `--selector=<css>`. Un `--uuid=<UUID> --dry-run` a secas aborta con *«No se ha pedido nada que purgar»*.
+**`--dedup-committees`** conserva **una sola copia por código de comité** (el texto de `.panel-comite-codigo`) y elimina las sobrantes. Es la bandera para el flujo que se ejecutó de más y publicó el mismo comité varias veces:
+
+```bash
+# Inventario de duplicados, sin tocar nada
+npm run drupal:clean -- --uuid=<UUID> --dedup-committees
+
+# Aplicar de verdad
+npm run drupal:clean -- --uuid=<UUID> --dedup-committees --write
+```
+
+Detalles que conviene saber antes de usarla:
+
+- **Conserva el primero** de cada grupo en orden de documento (el más antiguo de la página) y borra el resto.
+- **Agrupa por código en toda la página**, no por universidad: dos comités con el mismo código colgando de universidades distintas se tratan como duplicados y solo sobrevive el primero. Revisa el inventario del simulacro antes de añadir `--write`.
+- **Ignora los paneles sin código legible:** sin código no hay forma de saber de qué comité son copia, así que nunca se borran.
+- Se ancla a `.panel-group .panel-group > .panel:has(.panel-comite-codigo)` por la regla de §6.3; **no** usa un `.panel:has(...)` suelto.
+- Combinable con las demás banderas. Corre **después** de ellas, sobre el HTML que dejan.
+
+> ⚠️ `--uuid` es **obligatorio** (no acepta alias de ruta) y hay que pedir **algo** que purgar: `--injected-only`, `--remove-root-panels`, `--dedup-committees` o `--selector=<css>`. Un `--uuid=<UUID> --dry-run` a secas aborta con *«No se ha pedido nada que purgar»*.
 
 ### 6.3 Regla de oro de los selectores
 

@@ -38,6 +38,8 @@ const NEUTRAL_PAYLOAD = {
   article_title: '',
   full_article_content: '',
   byline: null,
+  character_count: 0,
+  status: 'SKIPPED_EMPTY',
 };
 
 /** Desenlace exitoso del runner, que es lo unico que la estrategia traduce. */
@@ -327,14 +329,20 @@ describe('WebScraperStrategy', () => {
       expect(Object.keys(result.data ?? {}).sort()).toEqual([
         'article_title',
         'byline',
+        'character_count',
         'full_article_content',
         'scraped_at',
         'source_url',
+        'status',
       ]);
       expect(result.data?.source_url).toBe(TARGET_URL);
       expect(result.data?.article_title).toBe('Titular de la nota');
       expect(result.data?.byline).toBeNull();
       expect(typeof result.data?.scraped_at).toBe('string');
+      expect(result.data?.status).toBe('OK');
+      expect(result.data?.character_count).toBe(
+        (result.data?.full_article_content as string).length,
+      );
     });
 
     it('3.2 deberia publicar la URL FINAL que devuelve el runner', async () => {
@@ -362,9 +370,12 @@ describe('WebScraperStrategy', () => {
         attempts: 1,
       });
 
-      // 2. Act
+      // 2. Act: `ignoreExtractionFailure: false` explicito. El defecto es
+      //    `true`, de modo que sin esto el fallo se traduciria al payload
+      //    neutro y no habria GRAVE que comprobar. Lo cubre 3.5.
       const result = await strategy.execute(contextWithUrl(), {
         targetUrl: TARGET_TEMPLATE,
+        ignoreExtractionFailure: false,
       });
 
       // 3. Assert: el codigo viaja intacto porque es contra lo que compara el
@@ -387,10 +398,106 @@ describe('WebScraperStrategy', () => {
       // 2. Act
       const result = await strategy.execute(contextWithUrl(), {
         targetUrl: TARGET_TEMPLATE,
+        ignoreExtractionFailure: false,
       });
 
       // 3. Assert: el protocolo de resiliencia la vuelca al `.log` fisico.
       expect(result.error?.stackTrace).toContain('at algun.sitio');
+    });
+
+    it('3.5 deberia devolver FALLBACK_EMPTY ante un fallo del runner por defecto', async () => {
+      // 1. Arrange 📐: el defecto de `ignoreExtractionFailure` es `true`, asi que
+      //    el muro anti-bot deja de pausar la FSM. Es la razon de ser del flag:
+      //    el fallo es de un tercero y transitorio, y convertirlo en una
+      //    incidencia que alguien cierra a mano cuesta mas que seguir con el
+      //    cuerpo vacio.
+      const { strategy } = createHarness({
+        success: false,
+        code: ERR_ACCESS_DENIED_BLOCK_DETECTED,
+        message: 'Acceso denegado: muro de pago.',
+        attempts: 1,
+      });
+
+      // 2. Act ⚙️
+      const result = await strategy.execute(contextWithUrl(), {
+        targetUrl: TARGET_TEMPLATE,
+      });
+
+      // 3. Assert 🎯
+      expect(result.success).toBe(true);
+      expect(result.error).toBeUndefined();
+      expect(result.data?.status).toBe('FALLBACK_EMPTY');
+      expect(result.data?.full_article_content).toBe('');
+      expect(result.data?.character_count).toBe(0);
+    });
+
+    it('3.6 deberia conservar la URL intentada en el fallback', async () => {
+      // 1. Arrange 📐: sin `source_url` la traza pierde el unico dato que
+      //    permite reproducir el fallo contra el portal, y el FALLBACK_EMPTY
+      //    seria indistinguible de un SKIPPED_EMPTY al leer el checkpoint.
+      const { strategy } = createHarness({
+        success: false,
+        code: ERR_ACCESS_DENIED_BLOCK_DETECTED,
+        message: 'Acceso denegado.',
+        attempts: 1,
+      });
+
+      // 2. Act ⚙️
+      const result = await strategy.execute(contextWithUrl(), {
+        targetUrl: TARGET_TEMPLATE,
+      });
+
+      // 3. Assert 🎯
+      expect(result.data?.source_url).toBe(TARGET_URL);
+    });
+
+    it('3.7 deberia publicar el esquema COMPLETO tambien en el fallback', async () => {
+      // 1. Arrange 📐: un nodo posterior que interpole
+      //    `{{scraped_web.article_title}}` recibiria un
+      //    `MissingContextVariableException` por una clave que el contrato
+      //    promete. Un campo declarado y ausente es indistinguible de un flujo
+      //    mal compuesto.
+      const { strategy } = createHarness({
+        success: false,
+        code: ERR_ACCESS_DENIED_BLOCK_DETECTED,
+        message: 'Acceso denegado.',
+        attempts: 1,
+      });
+
+      // 2. Act ⚙️
+      const result = await strategy.execute(contextWithUrl(), {
+        targetUrl: TARGET_TEMPLATE,
+      });
+
+      // 3. Assert 🎯
+      expect(Object.keys(result.data ?? {}).sort()).toEqual([
+        'article_title',
+        'byline',
+        'character_count',
+        'full_article_content',
+        'scraped_at',
+        'source_url',
+        'status',
+      ]);
+    });
+
+    it('3.8 NO deberia silenciar un fallo de CONFIGURACION con el flag activo', async () => {
+      // 1. Arrange 📐: LA FRONTERA DEL FLAG. Un `targetUrl` ausente con
+      //    `skipIfEmpty: false` es un defecto del flujo, no una contingencia de
+      //    red. Silenciarlo esconderia un nodo mal compuesto tras un exito
+      //    vacio y PERMANENTE, que es justo lo que no se quiere.
+      const { strategy } = createHarness();
+
+      // 2. Act ⚙️
+      const result = await strategy.execute(contextWithUrl(), {
+        ignoreExtractionFailure: true,
+        skipIfEmpty: false,
+      });
+
+      // 3. Assert 🎯
+      expect(result.success).toBe(false);
+      expect(result.error?.code).toBe(ERR_SCRAPER_CONFIG);
+      expect(result.error?.level).toBe('GRAVE');
     });
   });
 

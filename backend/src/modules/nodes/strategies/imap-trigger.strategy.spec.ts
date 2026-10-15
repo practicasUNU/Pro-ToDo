@@ -885,6 +885,31 @@ describe('ImapTriggerStrategy', () => {
       expect(result.halt).toBeUndefined();
     });
 
+    it('2ter.6bis deberia casar aunque el asunto traiga palabras de mas', async () => {
+      // 1. Arrange 📐: REGRESION. El modo "contiene" compila una alternancia SIN
+      // anclar —`(?:prueba|ia|gemini)`—, de modo que basta con que UNO de los
+      // terminos aparezca en cualquier posicion. Un asunto real llega siempre
+      // con numero de expediente y demas ruido alrededor, y marcarlo OMITIDO por
+      // ello vaciaria el filtro de utilidad.
+      const client = buildClient();
+      useClient(client);
+      simpleParser.mockResolvedValue(
+        buildParsedMail({ subject: 'EXPEDIENTE 123 PRUEBA IA GEMINI' }),
+      );
+      const { strategy } = buildStrategy();
+
+      // 2. Act ⚙️
+      const result = await strategy.execute(
+        buildContext(),
+        buildParams({ subjectFilterRegex: '(?:prueba|ia|gemini)' }),
+      );
+
+      // 3. Assert 🎯
+      expect(result.success).toBe(true);
+      expect(result.halt).toBeUndefined();
+      expect(result.data).not.toEqual({ status: SUBJECT_FILTERED_STATUS });
+    });
+
     it('2ter.7 deberia trazar SUBJECT_MISMATCH con asunto y patron al descartar', async () => {
       // 1. Arrange 📐: sin esta traza el operador no puede distinguir un
       // descarte por asunto de un buzon vacio, que es el diagnostico que

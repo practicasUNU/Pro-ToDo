@@ -59,6 +59,9 @@ const SKIP_IF_EMPTY_HINT =
 const SKIP_IF_EMPTY_LOCKED_HINT =
   'No se puede apagar: ningun paso anterior de este flujo publica una URL, asi que un extractor que exigiera origen no superaria la validacion del esquema al guardar.';
 
+const IGNORE_EXTRACTION_FAILURE_HINT =
+  'Cubre el fallo AJENO: el portal que no responde a tiempo, el muro anti-bot o la pagina de la que no se puede aislar ningun texto. Con la bandera activa el nodo publica "scraped_web" con los campos en blanco y el flujo continua; con ella apagada, el fallo pausa la ejecucion para que alguien la reanude. No encubre un nodo MAL configurado: eso sigue bloqueando.';
+
 const RETRY_TOOLTIP =
   'Reintento rapido de red: cubre el corte puntual de conexion. Es independiente del "retryPolicy" del flujo, y las dos capas se multiplican.';
 
@@ -85,6 +88,12 @@ const onTargetUrlChange = (targetUrl: string): void => {
 
 const onSkipIfEmptyChange = (skipIfEmpty: boolean): void => {
   store.updateConfig({ skipIfEmpty });
+};
+
+const onIgnoreExtractionFailureChange = (
+  ignoreExtractionFailure: boolean,
+): void => {
+  store.updateConfig({ ignoreExtractionFailure });
 };
 
 const onExcludedDomainsChange = (domains: readonly string[] | null): void => {
@@ -248,6 +257,26 @@ const onRunSandboxTest = async (): Promise<void> => {
       data-test="skip-if-empty-locked-hint"
     >
       {{ SKIP_IF_EMPTY_LOCKED_HINT }}
+    </p>
+
+    <!-- Campo 1b-bis: el fallo de extraccion tampoco pausa el flujo.
+         Va DEBAJO de `skipIfEmpty` porque son la misma familia de decision
+         —cuando este nodo se rinde en silencio— y separarlas obligaria a
+         buscar la segunda en otra parte del formulario. -->
+    <q-toggle
+      :model-value="store.config.ignoreExtractionFailure"
+      class="q-mb-md"
+      data-test="ignore-extraction-failure-toggle"
+      label="Ignorar fallos de extraccion web"
+      color="primary"
+      @update:model-value="onIgnoreExtractionFailureChange"
+    >
+      <q-tooltip>{{ IGNORE_EXTRACTION_FAILURE_HINT }}</q-tooltip>
+    </q-toggle>
+
+    <p class="pd-subtitle q-mt-xs q-mb-md">
+      Si la pagina no carga o no tiene contenido extraible, continua al
+      siguiente nodo sin pausar el flujo.
     </p>
     <br />
 

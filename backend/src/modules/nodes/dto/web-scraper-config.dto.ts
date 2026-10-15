@@ -87,6 +87,28 @@ export const EXCLUDED_DOMAIN_PATTERN =
 export const DEFAULT_SCRAPER_SKIP_IF_EMPTY = true;
 
 /**
+ * Por defecto, un fallo de EXTRACCION tampoco rompe el flujo.
+ *
+ * Cubre una familia distinta de la de `DEFAULT_SCRAPER_SKIP_IF_EMPTY`, y la
+ * frontera entre las dos es deliberada: aquella responde a «no habia de donde
+ * sacar una URL», esta a «habia una URL y el portal no se dejo leer» —el
+ * timeout, el muro anti-bot, el documento del que Readability no aisla nada—.
+ *
+ * Se elige `true` porque ese modo de fallo es AJENO y transitorio: depende de un
+ * tercero que ni el operador ni este sistema controlan, y dejar el flujo PAUSADO
+ * esperando un reintento manual convierte la mala racha de un portal en trabajo
+ * para una persona. El precio asumido es que un portal caido de forma
+ * permanente se traduce en publicaciones con el cuerpo vacio en vez de en una
+ * alerta; por eso el payload lo DECLARA con `status: 'FALLBACK_EMPTY'` en vez
+ * de limitarse a callar.
+ *
+ * NO cubre los fallos de CONFIGURACION (`ERR_SCRAPER_CONFIG`,
+ * `ERR_SCRAPER_URL_MALFORMED`): esos son defectos del flujo, no contingencias de
+ * red, y silenciarlos esconderia un nodo mal compuesto tras un exito.
+ */
+export const DEFAULT_SCRAPER_IGNORE_EXTRACTION_FAILURE = true;
+
+/**
  * Configuracion del nodo `EXTRACTOR_WEB`.
  *
  * AVISO SOBRE LOS DOS NIVELES DE REINTENTO. `maxRetries` y `retryDelayMs` son
@@ -207,6 +229,15 @@ export class WebScraperConfigDto {
 
   @ApiPropertyOptional({
     description:
+      'Si es true, un fallo de NAVEGACION o EXTRACCION (timeout, bloqueo anti-bot, portal inalcanzable, cuerpo no aislable) deja de pausar la FSM: el nodo devuelve el payload neutro con "status": "FALLBACK_EMPTY" y el flujo continua. No afecta a los fallos de configuracion, que siguen siendo GRAVE.',
+    default: DEFAULT_SCRAPER_IGNORE_EXTRACTION_FAILURE,
+  })
+  @IsOptional()
+  @IsBoolean({ message: 'ignoreExtractionFailure debe ser un booleano.' })
+  ignoreExtractionFailure?: boolean;
+
+  @ApiPropertyOptional({
+    description:
       'Dominios que este nodo NUNCA navega (p. ej. el portal institucional propio, cuyo enlace en el correo es un metadato de enrutado editorial y no la noticia). Se comparan contra el host de la URL ya resuelta, incluyendo subdominios. Por defecto, lista vacia.',
     example: ['madrimasd.org'],
     maxItems: MAX_EXCLUDED_DOMAINS,
@@ -240,6 +271,7 @@ export interface ResolvedWebScraperConfig {
   readonly maxRetries: number;
   readonly retryDelayMs: number;
   readonly skipIfEmpty: boolean;
+  readonly ignoreExtractionFailure: boolean;
   readonly excludedDomains: readonly string[];
 }
 
@@ -274,5 +306,7 @@ export const resolveWebScraperConfig = (
   maxRetries: dto.maxRetries ?? DEFAULT_SCRAPER_MAX_RETRIES,
   retryDelayMs: dto.retryDelayMs ?? DEFAULT_SCRAPER_RETRY_DELAY_MS,
   skipIfEmpty: dto.skipIfEmpty ?? DEFAULT_SCRAPER_SKIP_IF_EMPTY,
+  ignoreExtractionFailure:
+    dto.ignoreExtractionFailure ?? DEFAULT_SCRAPER_IGNORE_EXTRACTION_FAILURE,
   excludedDomains: normalizeExcludedDomains(dto.excludedDomains ?? []),
 });

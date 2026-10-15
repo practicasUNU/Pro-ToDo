@@ -1,8 +1,10 @@
 import {
   INJECTED_MARKER_SELECTOR,
   buildPurgeSelectors,
+  describeDuplicateCommittees,
   describePurgeTargets,
   parseFlags,
+  purgeDuplicateCommittees,
 } from './drupal-cleanup';
 
 import { purgeMarkedBlocks } from './cleanup-drupal-sandbox';
@@ -31,6 +33,30 @@ const UNIVERSITY_PANEL = (siglas: string): string =>
 const COMMITTEE_PANEL = (code: string): string =>
   `<div class="panel panel-default" data-protodo-injected="true">` +
   `<div class="panel-heading"><h5><strong class="panel-comite-codigo">${code}</strong></h5></div>` +
+  '</div>';
+
+/**
+ * Pagina agregadora REAL: un acordeon de DOS niveles.
+ *
+ * La anidacion no es decorativa. Los paneles de universidad y los de comite
+ * comparten la clase `.panel`, y es justo esa ambiguedad la que hizo
+ * desaparecer `ESIC Universidad` de la pagina. Un fixture plano no podria
+ * detectar una regresion de ese tipo, porque no habria panel padre al que
+ * alcanzar por error.
+ */
+const TWO_LEVEL_PAGE = (
+  committeesBySchool: Record<string, readonly string[]>,
+): string =>
+  '<div class="panel-group" id="accordion">' +
+  Object.entries(committeesBySchool)
+    .map(
+      ([siglas, codes]) =>
+        `<div class="panel panel-default"><div class="panel-heading"><h4>Universidad ${siglas}</h4></div>` +
+        `<div class="panel-group" id="accordion${siglas}">` +
+        codes.map(COMMITTEE_PANEL).join('') +
+        '</div></div>',
+    )
+    .join('') +
   '</div>';
 
 describe('drupal-cleanup · purga quirurgica', () => {
@@ -226,6 +252,105 @@ describe('drupal-cleanup · purga quirurgica', () => {
       // 3. Assert 🎯
       expect(targets).toHaveLength(2);
       expect(targets.every((t) => t.matches.length === 0)).toBe(true);
+    });
+  });
+
+  describe('5. Deduplicacion de comites', () => {
+    it('5.1 parseFlags deberia reconocer --dedup-committees', () => {
+      // 1. Arrange 📐 + 2. Act ⚙️ + 3. Assert 🎯
+      expect(
+        parseFlags(['--uuid=abc', '--dedup-committees']).dedupCommittees,
+      ).toBe(true);
+      expect(parseFlags(['--uuid=abc']).dedupCommittees).toBe(false);
+    });
+
+    it('5.2 deberia conservar UNA copia por codigo y quitar el resto', () => {
+      // 1. Arrange 📐: tres ejemplares de "UAM 9" publicados por un flujo que
+      //    se ejecuto de mas.
+      const html = TWO_LEVEL_PAGE({ UAM: ['UAM 9', 'UAM 9', 'UAM 9'] });
+
+      // 2. Act ⚙️
+      const result = purgeDuplicateCommittees(html);
+
+      // 3. Assert 🎯
+      expect(result.purgedCount).toBe(2);
+      expect(result.html.match(/UAM 9/g)).toHaveLength(1);
+    });
+
+    it('5.3 NO deberia tocar los codigos que ya son unicos', () => {
+      // 1. Arrange 📐: la pagina sana. Si la herramienta tocara algo aqui,
+      //    estaria borrando contenido editorial legitimo.
+      const html = TWO_LEVEL_PAGE({ UAM: ['UAM 9', 'UAM 3'] });
+
+      // 2. Act ⚙️
+      const result = purgeDuplicateCommittees(html);
+
+      // 3. Assert 🎯: y se devuelve el ORIGINAL sin serializar, de modo que una
+      //    pagina limpia no recibe la normalizacion de cheerio por el mero
+      //    hecho de haberla revisado.
+      expect(result.purgedCount).toBe(0);
+      expect(result.html).toBe(html);
+    });
+
+    it('5.4 NO deberia alcanzar el panel de la universidad contenedor', () => {
+      // 1. Arrange 📐: LA PRUEBA QUE IMPORTA. Un `.panel:has(.panel-comite-codigo)`
+      //    sin anclar casa tambien con la universidad que contiene el comite, y
+      //    el `.remove()` se la lleva entera con todos sus hijos. Le paso a
+      //    `ESIC Universidad`.
+      const html = TWO_LEVEL_PAGE({ UAM: ['UAM 9', 'UAM 9'] });
+
+      // 2. Act ⚙️
+      const result = purgeDuplicateCommittees(html);
+
+      // 3. Assert 🎯
+      expect(result.html).toContain('Universidad UAM');
+      expect(result.html).toContain('id="accordionUAM"');
+    });
+
+    it('5.5 deberia deduplicar por separado dentro de cada universidad', () => {
+      // 1. Arrange 📐: dos universidades distintas que hospedan un comite con
+      //    el MISMO codigo no son duplicados entre si... pero el codigo es la
+      //    unica identidad que el panel expone, de modo que se documenta el
+      //    comportamiento real: la agrupacion es GLOBAL a la pagina.
+      const html = TWO_LEVEL_PAGE({ UAM: ['UAM 9'], UCM: ['UAM 9'] });
+
+      // 2. Act ⚙️
+      const result = purgeDuplicateCommittees(html);
+
+      // 3. Assert 🎯: se conserva el primero, que es el de UAM.
+      expect(result.purgedCount).toBe(1);
+      expect(result.html).toContain('Universidad UCM');
+      expect(result.html.match(/UAM 9/g)).toHaveLength(1);
+    });
+
+    it('5.6 deberia IGNORAR los paneles sin codigo legible', () => {
+      // 1. Arrange 📐: sin codigo no hay forma de saber de que comite son
+      //    copia, y agruparlos bajo la cadena vacia borraria paneles sin
+      //    ninguna relacion entre si.
+      const html =
+        '<div class="panel-group" id="accordion">' +
+        '<div class="panel panel-default"><div class="panel-group">' +
+        COMMITTEE_PANEL('') +
+        COMMITTEE_PANEL('') +
+        '</div></div></div>';
+
+      // 2. Act ⚙️
+      const result = purgeDuplicateCommittees(html);
+
+      // 3. Assert 🎯
+      expect(result.purgedCount).toBe(0);
+    });
+
+    it('5.7 el inventario deberia nombrar los duplicados por su codigo', () => {
+      // 1. Arrange 📐: «2 elementos» no permite decidir si seguir adelante, y
+      //    decidir es para lo que el simulacro existe.
+      const html = TWO_LEVEL_PAGE({ UAM: ['UAM 9', 'UAM 9', 'UAM 3'] });
+
+      // 2. Act ⚙️
+      const summary = describeDuplicateCommittees(html);
+
+      // 3. Assert 🎯
+      expect(summary.matches).toEqual(['UAM 9']);
     });
   });
 });

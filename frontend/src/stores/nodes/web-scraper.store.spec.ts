@@ -2,6 +2,7 @@ import { createPinia, setActivePinia } from 'pinia';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
+  DEFAULT_SCRAPER_IGNORE_EXTRACTION_FAILURE,
   DEFAULT_SCRAPER_MAX_RETRIES,
   EXCLUDED_DOMAIN_SUGGESTIONS,
   FIRST_ELIGIBLE_LABEL_SUFFIX,
@@ -930,6 +931,83 @@ describe('useWebScraperStore · configuracion del nodo EXTRACTOR_WEB', () => {
       // 3. Assert
       expect(store.config.excludedDomains).toEqual(['madrimasd.org']);
       expect(store.config.skipIfEmpty).toBe(false);
+    });
+  });
+
+  describe('10. Fallo de extraccion ignorado (ignoreExtractionFailure)', () => {
+    it('10.1 deberia venir activo por defecto', () => {
+      // 1. Arrange & 2. Act
+      const store = useWebScraperStore(NODE_ID);
+
+      // 3. Assert: replica del defecto del DTO del backend.
+      expect(store.config.ignoreExtractionFailure).toBe(
+        DEFAULT_SCRAPER_IGNORE_EXTRACTION_FAILURE,
+      );
+    });
+
+    it('10.2 NO deberia publicarse cuando coincide con el defecto', () => {
+      // 1. Arrange: al contrario que `skipIfEmpty`, esta bandera no tiene
+      //    consecuencia topologica, de modo que vale el criterio general de no
+      //    engordar el esquema con lo que el defecto ya dice.
+      const store = buildConfiguredStore();
+
+      // 2. Act
+      const params = store.toNodeParams();
+
+      // 3. Assert
+      expect(params.ignoreExtractionFailure).toBeUndefined();
+    });
+
+    it('10.3 deberia publicarse cuando el operador la apaga', () => {
+      // 1. Arrange: apagarla es una decision —"quiero que esto pause"— y tiene
+      //    que quedar escrita en el esquema para ser auditable.
+      const store = buildConfiguredStore();
+
+      // 2. Act
+      store.updateConfig({ ignoreExtractionFailure: false });
+      const params = store.toNodeParams();
+
+      // 3. Assert
+      expect(params.ignoreExtractionFailure).toBe(false);
+    });
+
+    it('10.4 NO deberia influir en isConfigValid', () => {
+      // 1. Arrange: un booleano con defecto siempre es valido; no hay forma de
+      //    teclearlo mal.
+      const store = buildConfiguredStore();
+
+      // 2. Act
+      store.updateConfig({ ignoreExtractionFailure: false });
+
+      // 3. Assert
+      expect(store.isConfigValid).toBe(true);
+    });
+
+    it('10.5 deberia restaurarse al hidratar desde el esquema', () => {
+      // 1. Arrange: sin esto el operador reabre un flujo que SI pausaba y ve el
+      //    toggle encendido, que es exactamente lo contrario de lo guardado.
+      const store = useWebScraperStore(NODE_ID);
+
+      // 2. Act
+      store.hydrateFromNode({
+        outputNamespace: 'scraped_web',
+        params: { ignoreExtractionFailure: false },
+      });
+
+      // 3. Assert
+      expect(store.config.ignoreExtractionFailure).toBe(false);
+    });
+
+    it('10.6 deberia caer al defecto si el esquema no la trae', () => {
+      // 1. Arrange: todo flujo guardado ANTES de que existiera la bandera. La
+      //    lectura defensiva es lo que impide que se hidrate como `undefined`.
+      const store = useWebScraperStore(NODE_ID);
+
+      // 2. Act
+      store.hydrateFromNode({ outputNamespace: 'scraped_web', params: {} });
+
+      // 3. Assert
+      expect(store.config.ignoreExtractionFailure).toBe(true);
     });
   });
 });

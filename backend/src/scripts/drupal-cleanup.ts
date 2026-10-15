@@ -66,6 +66,7 @@ export interface CleanupFlags {
   readonly injectedOnly: boolean;
   readonly selector: string | null;
   readonly removeRootPanels: boolean;
+  readonly dedupCommittees: boolean;
   readonly rootSelector: string;
   readonly write: boolean;
 }
@@ -94,6 +95,7 @@ export const parseFlags = (argv: readonly string[]): CleanupFlags => {
     injectedOnly: has('injected-only'),
     selector: valueOf('selector'),
     removeRootPanels: has('remove-root-panels'),
+    dedupCommittees: has('dedup-committees'),
     rootSelector:
       root === null || root.length === 0 ? DEFAULT_ROOT_SELECTOR : root,
     // `--dry-run` NO se consulta: simular es el defecto y la bandera solo
@@ -183,6 +185,107 @@ export const describePurgeTargets = (
   }));
 };
 
+/**
+ * Ambito de un panel de COMITE, anclado al segundo nivel del acordeon.
+ *
+ * REPLICA DELIBERADA de `COMMITTEE_PANEL_SCOPE` (`cleanup-drupal-sandbox.ts`), y
+ * la duplicacion se asume por la misma razon por la que aquel existe: la pagina
+ * es un acordeon de DOS niveles cuyos paneles de universidad y de comite
+ * comparten la clase `.panel`. Un `.panel:has(.panel-comite-codigo)` sin anclar
+ * casa tambien con la universidad que CONTIENE el comite, y el `.remove()` se
+ * lleva el contenedor entero: le paso a `ESIC Universidad`, que desaparecio de
+ * la pagina por un selector que pretendia quitar un solo duplicado.
+ *
+ * Exigir que el `.panel-group` este a su vez dentro de otro `.panel-group` deja
+ * fuera el primer nivel, que es donde viven los padres.
+ */
+const COMMITTEE_PANEL_SCOPE = '.panel-group .panel-group > .panel';
+
+/** Paneles de comite, ya acotados al nivel seguro del acordeon. */
+const COMMITTEE_PANEL_SELECTOR = `${COMMITTEE_PANEL_SCOPE}:has(.panel-comite-codigo)`;
+
+/**
+ * Agrupa los paneles de comite por su codigo y devuelve los SOBRANTES.
+ *
+ * NO ES EXPRESABLE COMO SELECTOR CSS, y por eso no vive en
+ * `buildPurgeSelectors`: "conserva uno por grupo" exige mirar el conjunto, no
+ * cada elemento por separado. De ahi que sea una funcion propia, pura y con
+ * spec, igual que sus hermanas.
+ *
+ * SE CONSERVA EL PRIMERO (`nodes[0]`) por un motivo concreto: cheerio recorre el
+ * documento en orden, de modo que el primero es el que lleva mas tiempo
+ * publicado y, en una pagina editorial, el que es mas probable que sea el
+ * original frente a las copias que inyecto un flujo repetido.
+ *
+ * Los paneles cuyo `.panel-comite-codigo` esta vacio se IGNORAN: sin codigo no
+ * hay forma de saber de que comite son copia, y agruparlos todos bajo la cadena
+ * vacia borraria paneles sin relacion entre si.
+ */
+export const collectDuplicateCommitteePanels = (
+  $: cheerio.CheerioAPI,
+): cheerio.Cheerio<never>[] => {
+  const byCode = new Map<string, cheerio.Cheerio<never>[]>();
+
+  for (const element of $(COMMITTEE_PANEL_SELECTOR).toArray()) {
+    const panel = $(element) as unknown as cheerio.Cheerio<never>;
+    const code = panel.find('.panel-comite-codigo').first().text().trim();
+
+    if (code === '') {
+      continue;
+    }
+
+    byCode.set(code, [...(byCode.get(code) ?? []), panel]);
+  }
+
+  const duplicates: cheerio.Cheerio<never>[] = [];
+
+  for (const panels of byCode.values()) {
+    if (panels.length > 1) {
+      duplicates.push(...panels.slice(1));
+    }
+  }
+
+  return duplicates;
+};
+
+/** Inventario de los duplicados, con la misma forma que el de los selectores. */
+export const describeDuplicateCommittees = (
+  html: string,
+): PurgeTargetSummary => {
+  const $ = loadFragment(html);
+
+  return {
+    selector: `${COMMITTEE_PANEL_SELECTOR} (duplicados)`,
+    matches: collectDuplicateCommitteePanels($).map((panel) =>
+      clip(panel.find('.panel-comite-codigo').first().text().trim()),
+    ),
+  };
+};
+
+/**
+ * Quita los duplicados y devuelve el cuerpo resultante.
+ *
+ * Como `purgeMarkedBlocks`, devuelve el HTML ORIGINAL sin serializar cuando no
+ * hubo nada que quitar: asi una pagina ya limpia no recibe la normalizacion de
+ * cheerio por el mero hecho de haberla revisado.
+ */
+export const purgeDuplicateCommittees = (
+  html: string,
+): { html: string; purgedCount: number } => {
+  const $ = loadFragment(html);
+  const duplicates = collectDuplicateCommitteePanels($);
+
+  if (duplicates.length === 0) {
+    return { html, purgedCount: 0 };
+  }
+
+  for (const panel of duplicates) {
+    panel.remove();
+  }
+
+  return { html: $.html(), purgedCount: duplicates.length };
+};
+
 /** Cliente minimo de JSON:API para leer y reescribir el cuerpo de una pagina. */
 class DrupalPageCleaner {
   private readonly headers: Record<string, string>;
@@ -262,9 +365,9 @@ const main = async (): Promise<void> => {
 
   const selectors = buildPurgeSelectors(flags);
 
-  if (selectors.length === 0) {
+  if (selectors.length === 0 && !flags.dedupCommittees) {
     throw new Error(
-      'No se ha pedido nada que purgar. Usa --injected-only, --remove-root-panels o --selector=<css>.',
+      'No se ha pedido nada que purgar. Usa --injected-only, --remove-root-panels, --dedup-committees o --selector=<css>.',
     );
   }
 
@@ -290,7 +393,14 @@ const main = async (): Promise<void> => {
     logger.log(`Pagina ${flags.uuid} | ${html.length} caracteres de cuerpo.`);
     logger.log('Elementos que coinciden con los selectores pedidos:');
 
-    const matched = reportTargets(describePurgeTargets(html, selectors));
+    // La deduplicacion se inventaria APARTE porque no nace de un selector: el
+    // suyo describe de donde salen los candidatos, no lo que se va a quitar.
+    const targets = [
+      ...describePurgeTargets(html, selectors),
+      ...(flags.dedupCommittees ? [describeDuplicateCommittees(html)] : []),
+    ];
+
+    const matched = reportTargets(targets);
 
     if (matched === 0) {
       logger.log(
@@ -318,10 +428,32 @@ const main = async (): Promise<void> => {
     // una proteccion.
     const purged = purgeMarkedBlocks(html, selectors, () => false);
 
-    await cleaner.patchBody(flags.uuid, purged.html, format);
+    // La dedup corre DESPUES y sobre el resultado de la anterior: si un selector
+    // ya se llevo una de las copias, el grupo puede haber quedado con un unico
+    // ejemplar y entonces no hay nada que deduplicar. Al reves se contarian
+    // elementos que el otro paso iba a borrar de todos modos.
+    const deduped = flags.dedupCommittees
+      ? purgeDuplicateCommittees(purged.html)
+      : { html: purged.html, purgedCount: 0 };
+
+    const purgedCount = purged.purgedCount + deduped.purgedCount;
+
+    if (purgedCount === 0) {
+      logger.log(
+        '[DRUPAL_CLEAN_NOOP] El inventario no sobrevivio a la purga: nada que escribir.',
+      );
+
+      return;
+    }
+
+    await cleaner.patchBody(flags.uuid, deduped.html, format);
 
     logger.log(
-      `[DRUPAL_CLEAN_SUCCESS] Purgados: ${purged.purgedCount} elemento(s) | UUID: ${flags.uuid}`,
+      `[DRUPAL_CLEAN_SUCCESS] Purgados: ${purgedCount} elemento(s)` +
+        (flags.dedupCommittees
+          ? ` (${deduped.purgedCount} duplicado(s) de comite)`
+          : '') +
+        ` | UUID: ${flags.uuid}`,
     );
   } finally {
     // Sin esto el proceso queda colgado del pool de conexiones de TypeORM.

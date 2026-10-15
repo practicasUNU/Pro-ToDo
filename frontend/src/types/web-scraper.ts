@@ -50,6 +50,15 @@ export interface WebScraperConfigDto {
    */
   skipIfEmpty: boolean;
   /**
+   * Un fallo de NAVEGACION o EXTRACCION (timeout, bloqueo anti-bot, portal
+   * inalcanzable, cuerpo que no se deja aislar) deja de pausar la FSM: el nodo
+   * publica el payload neutro con `status: 'FALLBACK_EMPTY'` y el flujo sigue.
+   *
+   * No se confunde con `skipIfEmpty`, que cubre la ausencia de ORIGEN. Tampoco
+   * afecta a los fallos de configuracion, que siguen siendo GRAVE.
+   */
+  ignoreExtractionFailure: boolean;
+  /**
    * Dominios que el nodo NUNCA navega, comparados contra el host de la URL ya
    * resuelta e incluyendo subdominios.
    *

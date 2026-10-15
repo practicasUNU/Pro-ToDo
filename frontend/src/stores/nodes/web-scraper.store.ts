@@ -41,6 +41,14 @@ export const DEFAULT_SCRAPER_RETRY_DELAY_MS = 2_000;
  * `configWarnings` se lo dice sin bloquearle el paso.
  */
 export const DEFAULT_SCRAPER_SKIP_IF_EMPTY = true;
+
+/**
+ * Replica de `DEFAULT_SCRAPER_IGNORE_EXTRACTION_FAILURE` del DTO del backend.
+ *
+ * Cubre el fallo AJENO —el portal que no responde o se niega a servir—, no la
+ * ausencia de origen, que es de lo que se ocupa la bandera de arriba.
+ */
+export const DEFAULT_SCRAPER_IGNORE_EXTRACTION_FAILURE = true;
 export const MIN_SCRAPER_RETRY_DELAY_MS = 500;
 export const MAX_SCRAPER_RETRY_DELAY_MS = 10_000;
 
@@ -206,6 +214,7 @@ const buildInitialConfig = (): WebScraperConfigDto => ({
   maxRetries: DEFAULT_SCRAPER_MAX_RETRIES,
   retryDelayMs: DEFAULT_SCRAPER_RETRY_DELAY_MS,
   skipIfEmpty: DEFAULT_SCRAPER_SKIP_IF_EMPTY,
+  ignoreExtractionFailure: DEFAULT_SCRAPER_IGNORE_EXTRACTION_FAILURE,
   excludedDomains: [],
 });
 
@@ -463,6 +472,13 @@ const webScraperSetup = () => {
       config.value = { ...config.value, skipIfEmpty: params.skipIfEmpty };
     }
 
+    if (typeof params.ignoreExtractionFailure === 'boolean') {
+      config.value = {
+        ...config.value,
+        ignoreExtractionFailure: params.ignoreExtractionFailure,
+      };
+    }
+
     // Tambien los dominios excluidos: son una decision EDITORIAL del disenador
     // de la plantilla ("este flujo nunca raspa el portal propio"), no un valor
     // de calibracion del flujo concreto. Perderlos al instanciar obligaria a
@@ -602,6 +618,17 @@ const webScraperSetup = () => {
     // es auditable por quien revise la plantilla despues.
     params.skipIfEmpty = config.value.skipIfEmpty;
 
+    // Solo si DIFIERE del defecto, al contrario que `skipIfEmpty`: esta bandera
+    // no tiene consecuencia topologica —el validador no la consulta—, de modo
+    // que vale el criterio general de no engordar el esquema con lo que el
+    // defecto ya dice.
+    if (
+      config.value.ignoreExtractionFailure !==
+      DEFAULT_SCRAPER_IGNORE_EXTRACTION_FAILURE
+    ) {
+      params.ignoreExtractionFailure = config.value.ignoreExtractionFailure;
+    }
+
     // Se OMITE la lista vacia, como `targetUrl`: ausencia es "no filtra nada", y
     // publicar `[]` llenaria de ruido todo esquema guardado sin decir nada que
     // el defecto no diga ya.
@@ -648,6 +675,10 @@ const webScraperSetup = () => {
       maxRetries: asNumber(params.maxRetries, DEFAULT_SCRAPER_MAX_RETRIES),
       retryDelayMs: asNumber(params.retryDelayMs, DEFAULT_SCRAPER_RETRY_DELAY_MS),
       skipIfEmpty: asBoolean(params.skipIfEmpty, DEFAULT_SCRAPER_SKIP_IF_EMPTY),
+      ignoreExtractionFailure: asBoolean(
+        params.ignoreExtractionFailure,
+        DEFAULT_SCRAPER_IGNORE_EXTRACTION_FAILURE,
+      ),
       excludedDomains: asDomainList(params.excludedDomains),
     };
     invalidateSandboxResult();
