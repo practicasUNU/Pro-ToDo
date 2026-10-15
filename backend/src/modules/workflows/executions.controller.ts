@@ -1,6 +1,7 @@
 import {
   Body,
   Controller,
+  Delete,
   Get,
   HttpCode,
   HttpStatus,
@@ -30,6 +31,7 @@ import { toIssueContractException } from '@core/fsm/utils/schema-issue-contract.
 import { JwtAuthGuard } from '@modules/auth/guards/jwt-auth.guard';
 import { UserRole } from '@modules/users/enums/user-role.enum';
 
+import { DiscardExecutionResponseDto } from './dto/discard-execution-response.dto';
 import { ExecutionDetailResponseDto } from './dto/execution-detail-response.dto';
 import { ExecutionPageResponseDto } from './dto/execution-summary-response.dto';
 import { ListExecutionsQueryDto } from './dto/list-executions-query.dto';
@@ -158,5 +160,44 @@ export class ExecutionsController {
     } catch (error: unknown) {
       throw toIssueContractException(error);
     }
+  }
+
+  /**
+   * Cierre manual de una ejecucion detenida (CU-09).
+   *
+   * `HttpStatus.OK` y no el `204` habitual de un `@Delete`: la respuesta lleva
+   * cuerpo, porque el descarte toca DOS filas —la ejecucion y su flujo, que
+   * queda retirado de los disparadores— y un cliente que solo recibiera un
+   * acuse pintaria el flujo como activo hasta la siguiente recarga.
+   *
+   * `@Delete` y no `@Post` pese a no borrar ninguna fila: el recurso que la
+   * ejecucion representaba —un trabajo pendiente de reanudar— deja de existir,
+   * que es exactamente lo que el verbo significa para el cliente.
+   */
+  @Delete(':id/discard')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary:
+      'Descarta una ejecucion PAUSADO y retira su flujo de los disparadores automaticos',
+  })
+  @ApiOkResponse({
+    description:
+      'La ejecucion quedo en DESCARTADO y sin cursor; se devuelve ademas el flujo ya desactivado',
+    type: DiscardExecutionResponseDto,
+  })
+  @ApiNotFoundResponse({
+    description:
+      'No existe la ejecucion, o el flujo que la origino fue borrado',
+  })
+  @ApiConflictResponse({
+    description: 'La ejecucion no esta PAUSADO: no hay nada que descartar',
+  })
+  public async discard(
+    @Param('id', ParseUUIDPipe) id: string,
+    // Mismo motivo que en `resume`: descartar es una intervencion manual sobre
+    // datos reales, y su traza no puede ser anonima.
+    @CurrentUser() currentUser: AuthenticatedUser,
+  ): Promise<DiscardExecutionResponseDto> {
+    return this.executionsService.discardExecution(id, currentUser.id);
   }
 }

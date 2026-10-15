@@ -5,7 +5,11 @@ import { useQuasar } from 'quasar';
 import { subscribeToExecutionEvents } from '@services/socket-events.service';
 import { useExecutionStore } from '@stores/execution.store';
 
+import { ExecutionState } from '@/types/execution';
+
 import type {
+  FlowCompletedEvent,
+  FlowDiscardedEvent,
   FlowPausedEvent,
   FlowResumedEvent,
   NodeErrorEvent,
@@ -26,6 +30,16 @@ const SHORT_ID_LENGTH = 8;
 
 /** `7c9e6679-7425-...` -> `7c9e6679`. Un UUID entero no cabe en un toast. */
 const shortId = (id: string): string => id.slice(0, SHORT_ID_LENGTH);
+
+/**
+ * Como nombrar un flujo en un aviso.
+ *
+ * El nombre solo llega si quien despacho la ejecucion se lo paso al motor, asi
+ * que la caida al identificador abreviado no es defensiva: es el caso real de
+ * una ejecucion lanzada sin `flowName`.
+ */
+const describeFlow = (flowName: string | undefined, flowId: string): string =>
+  flowName ?? `${shortId(flowId)}...`;
 
 /**
  * Engancha el store de ejecuciones al canal WebSocket mientras viva el
@@ -65,8 +79,7 @@ export const useExecutionSocket = (): void => {
         message: 'Flujo reanudado exitosamente',
       });
     } catch (error: unknown) {
-      const message =
-        error instanceof Error ? error.message : 'Error al reanudar flujo';
+      const message = error instanceof Error ? error.message : 'Error al reanudar flujo';
 
       $q.notify({
         type: 'negative',
@@ -89,11 +102,26 @@ export const useExecutionSocket = (): void => {
   const onFlowPaused = (event: FlowPausedEvent): void => {
     executionStore.handleFlowPaused(event);
 
+    // El nodo se nombra con su TIPO entre parentesis cuando el evento lo trae:
+    // `nodo_3` no le dice nada a nadie, `nodo_3 (DESTINO_DRUPAL)` manda al
+    // operador al configurador correcto sin abrir el flujo.
+    const node =
+      event.nodeType === undefined
+        ? `"${event.activeCursor}"`
+        : `"${event.activeCursor}" (${event.nodeType})`;
+
+    // El codigo va DELANTE del mensaje: es el contrato estable que identifica
+    // el fallo, mientras que el texto cambia con cada version de la estrategia.
+    const detail = [event.errorCode, event.errorMessage ?? 'sin detalle']
+      .filter((part): part is string => part !== undefined)
+      .join(': ');
+
     $q.notify({
       type: 'warning',
       icon: 'pause_circle',
-      message: `Flujo ${shortId(event.flowId)}... en pausa`,
-      caption: `Detenido en paso "${event.activeCursor}": ${event.errorMessage ?? 'sin detalle'}`,
+      multiLine: true,
+      message: `⚠️ Flujo pausado: ${describeFlow(event.flowName, event.flowId)} — nodo ${node}`,
+      caption: `${event.severity ?? 'GRAVE'} · ${detail}`,
       classes: 'pd-card pd-card--accent pd-accent-grave',
       timeout: 0,
       actions: [
@@ -104,7 +132,11 @@ export const useExecutionSocket = (): void => {
             void resumeFromNotification(event.executionId);
           },
         },
-        { label: 'Descartar', color: 'white', flat: true },
+        // «Cerrar» y no «Descartar»: descartar una ejecucion exige la cuenta
+        // atras de cinco segundos (regla §4) y vive en la tabla de flujos. Un
+        // boton de toast que pareciera hacerlo seria justo el atajo que esa
+        // regla prohibe.
+        { label: 'Cerrar', color: 'white', flat: true },
       ],
     });
   };
@@ -118,6 +150,63 @@ export const useExecutionSocket = (): void => {
       icon: 'play_arrow',
       message: `Flujo ${shortId(event.flowId)}... en marcha`,
       caption: `Reanudado en el paso "${event.activeCursor}" por ${event.resumedBy}.`,
+    });
+  };
+
+  /** Un operador renuncio a reanudarla; su flujo queda fuera del sondeo. */
+  const onFlowDiscarded = (event: FlowDiscardedEvent): void => {
+    executionStore.handleFlowDiscarded(event);
+
+    $q.notify({
+      type: 'info',
+      icon: 'delete_sweep',
+      message: `Ejecucion descartada en el paso "${event.lastCursor}"`,
+      caption: event.workflowDeactivated
+        ? 'El flujo queda inactivo: habilitalo cuando este corregido.'
+        : 'El flujo sigue habilitado.',
+    });
+  };
+
+  /**
+   * La ejecucion llego a un estado terminal.
+   *
+   * Tres tonos para un solo evento, y la distincion no es cosmetica: un
+   * `OMITIDO` —el buzon no traia nada— en verde haria creer que se publico
+   * algo, y en rojo mandaria a investigar una ejecucion que funciono.
+   */
+  const onFlowCompleted = (event: FlowCompletedEvent): void => {
+    executionStore.handleFlowCompleted(event);
+
+    const flow = describeFlow(event.flowName, event.flowId);
+
+    if (event.finalState === ExecutionState.EXITOSO) {
+      $q.notify({
+        type: 'positive',
+        icon: 'task_alt',
+        message: `Flujo completado: ${flow}`,
+        caption: 'El pipeline recorrio todos sus nodos sin incidencias.',
+      });
+
+      return;
+    }
+
+    if (event.finalState === ExecutionState.OMITIDO) {
+      $q.notify({
+        type: 'info',
+        icon: 'inbox',
+        message: `Flujo sin trabajo: ${flow}`,
+        caption: 'Termino sin nada que procesar; no hay nada que revisar.',
+      });
+
+      return;
+    }
+
+    $q.notify({
+      type: 'negative',
+      icon: 'report',
+      message: `Flujo fallido: ${flow}`,
+      caption: event.failureReason ?? 'Sin motivo registrado.',
+      classes: 'pd-card pd-card--accent pd-accent-urgente',
     });
   };
 
@@ -145,6 +234,8 @@ export const useExecutionSocket = (): void => {
     unsubscribe = subscribeToExecutionEvents({
       onFlowPaused,
       onFlowResumed,
+      onFlowDiscarded,
+      onFlowCompleted,
       onNodeError,
     });
   });

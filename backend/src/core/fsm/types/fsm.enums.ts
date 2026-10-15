@@ -30,4 +30,19 @@ export enum ExecutionState {
   OMITIDO = 'OMITIDO',
   /** Abandonada definitivamente tras agotar los reintentos. */
   FALLIDO = 'FALLIDO',
+  /**
+   * Un operador renuncio a reanudarla: cierre manual de una PAUSADO.
+   *
+   * NO es un `FALLIDO`. Aquel significa "el motor se rindio" y pide atencion
+   * humana; este significa que esa atencion ya se presto y la decision fue
+   * abandonar. Contarlos juntos haria que el recuento de incidencias creciese
+   * justo cuando alguien resuelve una.
+   *
+   * Es terminal y pierde el cursor (`paso_actual = NULL`), pero conserva el
+   * contexto acumulado y la ruta del `.log` como traza de hasta donde llego.
+   *
+   * Incorporado al tipo `enum_estado` en
+   * `db/migrations/039-estado-ejecucion-descartado.sql`.
+   */
+  DESCARTADO = 'DESCARTADO',
 }

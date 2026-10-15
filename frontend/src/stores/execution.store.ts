@@ -7,7 +7,10 @@ import { joinFlowRoom, leaveFlowRoom } from '@services/socket-events.service';
 import { ExecutionState } from '@/types/execution';
 
 import type {
+  DiscardExecutionResult,
   ExecutionDetail,
+  FlowCompletedEvent,
+  FlowDiscardedEvent,
   ExecutionListQuery,
   ExecutionSummary,
   FlowPausedEvent,
@@ -43,6 +46,7 @@ export const useExecutionStore = defineStore('execution', () => {
   const joinedFlowIds = ref<Set<string>>(new Set());
   const isLoading = ref(false);
   const isResuming = ref(false);
+  const isDiscarding = ref(false);
 
   const activeCursor = computed<string | null>(() => activeExecution.value?.activeCursor ?? null);
 
@@ -169,6 +173,40 @@ export const useExecutionStore = defineStore('execution', () => {
   };
 
   /**
+   * Un operador renuncio a reanudarla: la ejecucion queda cerrada.
+   *
+   * El cursor se anula porque la fila lo perdio: `DESCARTADO` es terminal y
+   * conservarlo ofreceria un reintento imposible. Quien quiera saber donde se
+   * detuvo lo lee del evento (`lastCursor`), no de la fila.
+   */
+  const handleFlowDiscarded = (event: FlowDiscardedEvent): void => {
+    patchSummary(
+      event.executionId,
+      { state: ExecutionState.DESCARTADO, activeCursor: null },
+      { flowId: event.flowId, startedAt: event.emittedAt },
+    );
+  };
+
+  /**
+   * La ejecucion alcanzo un estado terminal sin cursor.
+   *
+   * El estado llega en el evento y no se deduce aqui: EXITOSO, OMITIDO y
+   * FALLIDO comparten evento a proposito, y reconstruirlo en el cliente seria
+   * una segunda fuente de verdad sobre lo que ya decidio el motor.
+   */
+  const handleFlowCompleted = (event: FlowCompletedEvent): void => {
+    patchSummary(
+      event.executionId,
+      {
+        state: event.finalState,
+        activeCursor: null,
+        ...(event.failureReason !== undefined ? { failureReason: event.failureReason } : {}),
+      },
+      { flowId: event.flowId, startedAt: event.emittedAt },
+    );
+  };
+
+  /**
    * Un nodo termino sin exito. NO implica que el flujo se haya detenido: un
    * LEVE con reintentos emite esto y sigue adelante.
    */
@@ -232,6 +270,36 @@ export const useExecutionStore = defineStore('execution', () => {
       return result;
     } finally {
       isResuming.value = false;
+    }
+  };
+
+  /**
+   * Cierre manual de una ejecucion detenida (CU-09).
+   *
+   * La excepcion se propaga igual que en `resumeExecution`: el 409 de «ya no
+   * esta PAUSADO» necesita un mensaje propio, y quien lo decide es el
+   * componente.
+   *
+   * Solo se parchea la EJECUCION. El flujo que el backend acaba de desactivar
+   * viaja en la misma respuesta, pero su fila pertenece a `workflows.store`, y
+   * repintarla desde aqui crearia un segundo dueno de ese estado: ya lo hace
+   * la mutacion `crud:mutation` que el backend difunde.
+   */
+  const discardExecution = async (executionId: string): Promise<DiscardExecutionResult> => {
+    isDiscarding.value = true;
+
+    try {
+      const result = await fsmExecutionsService.discardExecution(executionId);
+
+      patchSummary(executionId, {
+        state: result.execution.state,
+        activeCursor: result.execution.activeCursor,
+        failureReason: result.execution.failureReason,
+      });
+
+      return result;
+    } finally {
+      isDiscarding.value = false;
     }
   };
 
@@ -302,6 +370,7 @@ export const useExecutionStore = defineStore('execution', () => {
     joinedFlowIds,
     isLoading,
     isResuming,
+    isDiscarding,
     activeCursor,
     currentState,
     isPaused,
@@ -309,10 +378,13 @@ export const useExecutionStore = defineStore('execution', () => {
     lastNodeError,
     handleFlowPaused,
     handleFlowResumed,
+    handleFlowDiscarded,
+    handleFlowCompleted,
     handleNodeError,
     fetchExecutions,
     fetchExecution,
     resumeExecution,
+    discardExecution,
     executionByFlowId,
     setJoinedFlows,
     joinFlow,

@@ -17,6 +17,7 @@ import type { FsmExecutionQueryService } from '@core/fsm/services/fsm-execution-
 import type { PipelineValidatorService } from '@core/fsm/services/pipeline-validator.service';
 import type { PipelineSchemaDto } from '@core/fsm/dto/pipeline-schema.dto';
 import type { Workflow } from '@modules/workflows/entities/workflow.entity';
+import type { WorkflowsService } from '@modules/workflows/workflows.service';
 import type { Repository } from 'typeorm';
 
 const FLOW_ID = 'b6c1f0d2-3e4a-4b5c-8d6e-7f8091a2b3c4';
@@ -91,7 +92,10 @@ interface ServiceHarness {
     prepareResume: jest.Mock;
     executeWorkflow: jest.Mock;
     createExecution: jest.Mock;
+    discardExecution: jest.Mock;
   };
+  workflows: { deactivateAfterDiscard: jest.Mock };
+  events: ExecutionEventsCoordinator;
 }
 
 /**
@@ -127,19 +131,40 @@ const buildHarness = (): ServiceHarness => {
       }),
     ),
     createExecution: jest.fn(),
+    discardExecution: jest.fn().mockResolvedValue({
+      execution: buildExecution({
+        currentState: ExecutionState.DESCARTADO,
+        activeCursor: null,
+        failureReason: 'Descartada manualmente.',
+      }),
+      lastCursor: PAUSED_NODE_ID,
+    }),
   };
+  const workflows = {
+    deactivateAfterDiscard: jest.fn().mockResolvedValue({
+      id: FLOW_ID,
+      name: 'Flujo de prueba',
+      description: null,
+      active: false,
+      templateId: null,
+      topology: [],
+    }),
+  };
+  // Coordinador real sin puertos: no-op silencioso por diseno. Se conserva la
+  // referencia para poder espiar sus emisiones.
+  const events = new ExecutionEventsCoordinator();
 
   const service = new ExecutionsService(
     query as unknown as FsmExecutionQueryService,
     repository as unknown as Repository<Workflow>,
     validator as unknown as PipelineValidatorService,
     engine as unknown as FsmEngineService,
-    // Coordinador real sin puertos: no-op silencioso por diseno.
-    new ExecutionEventsCoordinator(),
+    events,
+    workflows as unknown as WorkflowsService,
   );
   jest.spyOn(service['logger'], 'log').mockImplementation(() => undefined);
 
-  return { service, query, repository, validator, engine };
+  return { service, query, repository, validator, engine, workflows, events };
 };
 
 describe('ExecutionsService (consulta y reintento manual CU-09)', () => {
@@ -436,6 +461,107 @@ describe('ExecutionsService (consulta y reintento manual CU-09)', () => {
         service.resumeExecution(EXECUTION_ID, {}, USER_ID),
       ).rejects.toBeInstanceOf(BadRequestException);
       expect(engine.assertGlobalCapacityAvailable).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('4. Descarte manual (CU-09)', () => {
+    it('4.1 deberia cerrar la ejecucion y desactivar su flujo', async () => {
+      // 1. Arrange
+      const { service, engine, workflows } = buildHarness();
+
+      // 2. Act
+      const result = await service.discardExecution(EXECUTION_ID, USER_ID);
+
+      // 3. Assert
+      expect(engine.discardExecution).toHaveBeenCalledWith(
+        EXECUTION_ID,
+        USER_ID,
+      );
+      expect(workflows.deactivateAfterDiscard).toHaveBeenCalledWith(FLOW_ID);
+      expect(result.execution.state).toBe(ExecutionState.DESCARTADO);
+      // Sin cursor: la fila es terminal y no se reanuda.
+      expect(result.execution.activeCursor).toBeNull();
+      // El flujo viaja en la misma respuesta porque un cliente que solo
+      // recibiera la ejecucion lo pintaria activo hasta la siguiente recarga.
+      expect(result.workflow.active).toBe(false);
+    });
+
+    // LA GUARDA MENOS OBVIA DE ESTA ENTREGA. Desactivar un flujo pasa por
+    // `abortExecutionsForFlow`, que arrastra EN_PROCESO|PAUSADO a FALLIDO. Con
+    // el orden invertido, el descarte encontraria la fila ya FALLIDO y la
+    // columna `estado` diria que el motor se rindio donde hubo una decision
+    // humana.
+    it('4.2 deberia descartar ANTES de desactivar el flujo', async () => {
+      // 1. Arrange
+      const { service, engine, workflows } = buildHarness();
+      const order: string[] = [];
+
+      engine.discardExecution.mockImplementation(() => {
+        order.push('discard');
+
+        return Promise.resolve({
+          execution: buildExecution({
+            currentState: ExecutionState.DESCARTADO,
+            activeCursor: null,
+          }),
+          lastCursor: PAUSED_NODE_ID,
+        });
+      });
+      workflows.deactivateAfterDiscard.mockImplementation(() => {
+        order.push('deactivate');
+
+        return Promise.resolve({
+          id: FLOW_ID,
+          name: 'Flujo de prueba',
+          description: null,
+          active: false,
+          templateId: null,
+          topology: [],
+        });
+      });
+
+      // 2. Act
+      await service.discardExecution(EXECUTION_ID, USER_ID);
+
+      // 3. Assert
+      expect(order).toEqual(['discard', 'deactivate']);
+    });
+
+    it('4.3 deberia anunciar el descarte con el paso en el que se detuvo', async () => {
+      // 1. Arrange. El cursor viaja en el evento porque la fila acaba de
+      //    perderlo: quien lo reciba despues ya no puede consultarlo.
+      const { service, events } = buildHarness();
+      const emitFlowDiscarded = jest.spyOn(events, 'emitFlowDiscarded');
+
+      // 2. Act
+      await service.discardExecution(EXECUTION_ID, USER_ID);
+
+      // 3. Assert
+      expect(emitFlowDiscarded).toHaveBeenCalledWith(
+        expect.objectContaining({
+          executionId: EXECUTION_ID,
+          flowId: FLOW_ID,
+          discardedBy: USER_ID,
+          lastCursor: PAUSED_NODE_ID,
+          workflowDeactivated: true,
+        }),
+      );
+    });
+
+    it('4.4 NO deberia desactivar el flujo si el descarte no prospera', async () => {
+      // 1. Arrange. El 409 lo decide el motor —solo una PAUSADO se descarta— y
+      //    apagar el flujo de todas formas castigaria al operador por pulsar
+      //    tarde sobre una ejecucion que ya se reanudo.
+      const { service, engine, workflows } = buildHarness();
+      engine.discardExecution.mockRejectedValue(
+        new ConflictException('No esta PAUSADO.'),
+      );
+
+      // 2. Act & 3. Assert
+      await expect(
+        service.discardExecution(EXECUTION_ID, USER_ID),
+      ).rejects.toBeInstanceOf(ConflictException);
+      expect(workflows.deactivateAfterDiscard).not.toHaveBeenCalled();
     });
   });
 });

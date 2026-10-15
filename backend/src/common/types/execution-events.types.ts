@@ -1,4 +1,6 @@
+import type { ExecutionState } from '@core/fsm/types/fsm.enums';
 import type { NodeErrorSeverity } from '@core/fsm/types/node-strategy.types';
+import type { NodeType } from '@core/fsm/types/pipeline-schema.types';
 
 /**
  * Nombres de los eventos que el motor publica hacia la interfaz.
@@ -11,6 +13,8 @@ import type { NodeErrorSeverity } from '@core/fsm/types/node-strategy.types';
 export const EXECUTION_EVENT = {
   FLOW_PAUSED: 'flow:paused',
   FLOW_RESUMED: 'flow:resumed',
+  FLOW_DISCARDED: 'flow:discarded',
+  FLOW_COMPLETED: 'flow:completed',
   NODE_ERROR: 'node:error',
 } as const;
 
@@ -50,6 +54,20 @@ export interface FlowPausedEvent extends ExecutionEventBase {
   readonly severity?: NodeErrorSeverity;
   readonly errorMessage?: string;
   readonly logFilePath?: string | null;
+  /**
+   * Nombre legible del flujo. Opcional porque el motor solo lo conoce si quien
+   * despacha se lo pasa (`ExecuteWorkflowOptions.flowName`); sin el, la interfaz
+   * cae a un identificador abreviado.
+   */
+  readonly flowName?: string;
+  /** Tipo del nodo que quedo bloqueado: dice QUE hay que mirar, no solo donde. */
+  readonly nodeType?: NodeType;
+  /**
+   * Codigo del fallo (`ERR_TEMPLATE_PENDING_VARS`, ...). Es el contrato que ya
+   * leen las rutas `onErrorStep`, y el unico dato del aviso que lleva al
+   * operador a un sitio concreto en vez de a una descripcion.
+   */
+  readonly errorCode?: string;
 }
 
 /** Un operador relanzo la ejecucion sobre la misma fila (CU-09). */
@@ -58,6 +76,41 @@ export interface FlowResumedEvent extends ExecutionEventBase {
   readonly activeCursor: string;
   /** Quien pulso reanudar, para la traza de la interfaz. */
   readonly resumedBy: string;
+}
+
+/**
+ * Un operador renuncio a reanudar una ejecucion detenida: cierre manual.
+ *
+ * Es el contrapunto de `FlowResumedEvent` y la segunda salida de una PAUSADO.
+ */
+export interface FlowDiscardedEvent extends ExecutionEventBase {
+  /** Quien pulso descartar, para la traza de la interfaz. */
+  readonly discardedBy: string;
+  /**
+   * Paso en el que estaba detenida antes de descartarla.
+   *
+   * Viaja en el evento porque la fila lo acaba de perder: el descarte anula
+   * `paso_actual`, de modo que quien reciba esto despues no puede consultarlo.
+   */
+  readonly lastCursor: string;
+  /** El flujo padre quedo retirado de los disparadores automaticos. */
+  readonly workflowDeactivated: boolean;
+}
+
+/**
+ * La ejecucion alcanzo un estado TERMINAL sin cursor que reintentar.
+ *
+ * Un solo evento para los tres desenlaces en vez de tres eventos distintos: el
+ * cliente decide el tono leyendo `finalState`, y tres nombres obligarian a tres
+ * `socket.on` que hacen lo mismo. La pausa queda fuera a proposito —es
+ * reanudable y ya tiene su propio evento.
+ */
+export interface FlowCompletedEvent extends ExecutionEventBase {
+  /** `EXITOSO`, `OMITIDO`, `FALLIDO` o `DESCARTADO`. */
+  readonly finalState: ExecutionState;
+  readonly flowName?: string;
+  /** Motivo persistido en `motivo_fallo`, o `null` si no hubo. */
+  readonly failureReason?: string | null;
 }
 
 /**

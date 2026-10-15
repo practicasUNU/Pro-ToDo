@@ -13,6 +13,7 @@ import { FsmExecutionQueryService } from '@core/fsm/services/fsm-execution-query
 import { PipelineValidatorService } from '@core/fsm/services/pipeline-validator.service';
 import { ExecutionState } from '@core/fsm/types/fsm.enums';
 import { Workflow } from '@modules/workflows/entities/workflow.entity';
+import { WorkflowsService } from '@modules/workflows/workflows.service';
 
 import {
   DEFAULT_PAGE_LIMIT,
@@ -20,6 +21,7 @@ import {
 } from './dto/list-executions-query.dto';
 import { requirePipelineSchema } from './validators/require-pipeline-schema.validator';
 
+import type { DiscardExecutionResponseDto } from './dto/discard-execution-response.dto';
 import type { ExecutionDetailResponseDto } from './dto/execution-detail-response.dto';
 import type {
   ExecutionPageResponseDto,
@@ -53,6 +55,7 @@ export class ExecutionsService {
     private readonly pipelineValidatorService: PipelineValidatorService,
     private readonly fsmEngineService: FsmEngineService,
     private readonly executionEvents: ExecutionEventsCoordinator,
+    private readonly workflowsService: WorkflowsService,
   ) {}
 
   /** Pagina de ejecuciones, de la mas reciente a la mas antigua. */
@@ -223,6 +226,58 @@ export class ExecutionsService {
       activeCursor: finished.activeCursor,
       context: finished.contextPayload,
     };
+  }
+
+  /**
+   * Cierre manual de una ejecucion detenida (CU-09).
+   *
+   * Es la segunda salida de una PAUSADO, y la contraria a `resumeExecution`:
+   * cuando la causa de la pausa es irrecuperable —un UUID de Drupal que no
+   * existe, un buzon dado de baja— reanudar solo repite el mismo fallo, y hasta
+   * ahora no habia forma de cerrar la fila.
+   *
+   * EL ORDEN DE LOS DOS PASOS NO ES INTERCAMBIABLE. Desactivar un flujo pasa
+   * por `abortExecutionsForFlow`, que arrastra `EN_PROCESO|PAUSADO` a FALLIDO;
+   * si se desactivara primero, el descarte encontraria la ejecucion ya FALLIDO,
+   * responderia un 409 y la fila mentiria diciendo que el motor se rindio
+   * cuando lo que hubo fue una decision humana. Por eso se cierra ANTES y con
+   * `deactivateAfterDiscard`, que no dispara ese cierre en cascada.
+   *
+   * La escritura sobre `ejecuciones_flujo` la hace el MOTOR: este servicio no
+   * tiene su repositorio, y abrir una excepcion a esa regla dejaria dos duenos
+   * de la misma columna.
+   *
+   * @throws NotFoundException Si no existe la ejecucion o su flujo.
+   * @throws ConflictException Si no esta PAUSADO.
+   */
+  public async discardExecution(
+    executionId: string,
+    userId: string,
+  ): Promise<DiscardExecutionResponseDto> {
+    const { execution, lastCursor } =
+      await this.fsmEngineService.discardExecution(executionId, userId);
+
+    const workflow = await this.workflowsService.deactivateAfterDiscard(
+      execution.flowId,
+    );
+
+    this.logger.log(
+      `Descarte manual (CU-09) del flujo "${workflow.name}" (${workflow.id}) detenido en "${lastCursor}" | ejecucion=${executionId} | usuario=${userId}`,
+    );
+
+    // DESPUES de las dos escrituras: el evento invita a la interfaz a repintar
+    // ambas filas, y emitirlo antes abriria una ventana en la que la tabla
+    // muestra un flujo inactivo que PostgreSQL todavia tiene activo.
+    this.executionEvents.emitFlowDiscarded({
+      executionId,
+      flowId: execution.flowId,
+      emittedAt: new Date().toISOString(),
+      discardedBy: userId,
+      lastCursor,
+      workflowDeactivated: true,
+    });
+
+    return { execution: this.toSummary(execution), workflow };
   }
 
   /**

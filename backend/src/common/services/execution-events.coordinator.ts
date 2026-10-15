@@ -1,6 +1,8 @@
 import { Injectable, Logger } from '@nestjs/common';
 
 import type {
+  FlowCompletedEvent,
+  FlowDiscardedEvent,
   FlowPausedEvent,
   FlowResumedEvent,
   NodeErrorEvent,
@@ -25,6 +27,8 @@ import type {
 export interface ExecutionEventPort {
   emitFlowPaused(event: FlowPausedEvent): void;
   emitFlowResumed(event: FlowResumedEvent): void;
+  emitFlowDiscarded(event: FlowDiscardedEvent): void;
+  emitFlowCompleted(event: FlowCompletedEvent): void;
   emitNodeError(event: NodeErrorEvent): void;
 }
 
@@ -81,6 +85,14 @@ export class ExecutionEventsCoordinator {
 
   public emitFlowResumed(event: FlowResumedEvent): void {
     this.dispatch('flow:resumed', (port) => port.emitFlowResumed(event));
+  }
+
+  public emitFlowDiscarded(event: FlowDiscardedEvent): void {
+    this.dispatch('flow:discarded', (port) => port.emitFlowDiscarded(event));
+  }
+
+  public emitFlowCompleted(event: FlowCompletedEvent): void {
+    this.dispatch('flow:completed', (port) => port.emitFlowCompleted(event));
   }
 
   public emitNodeError(event: NodeErrorEvent): void {

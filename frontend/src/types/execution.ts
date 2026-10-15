@@ -12,12 +12,15 @@
  * Estados de una ejecucion. Copia literal de
  * `backend/src/core/fsm/types/fsm.enums.ts`.
  *
- * Son SEIS. `OMITIDO` es el que se olvida: no es un fallo —el buzon no traia
- * correos nuevos, o el asunto no casaba con el filtro— pero tampoco un exito,
- * y pintarlo como tal haria que cualquier recuento midiese sobre todo buzones
- * vacios.
+ * Son SIETE. Dos se olvidan con facilidad: `OMITIDO` no es un fallo —el buzon
+ * no traia correos nuevos, o el asunto no casaba con el filtro— pero tampoco un
+ * exito, y pintarlo como tal haria que cualquier recuento midiese sobre todo
+ * buzones vacios; `DESCARTADO` es la renuncia explicita de un operador sobre
+ * una PAUSADO, y confundirlo con `FALLIDO` haria crecer el recuento de
+ * incidencias justo cuando alguien resuelve una.
  */
 import type { CrudMutationPayload } from '@/types/crud-events';
+import type { PipelineSummary } from '@/types/pipeline';
 
 export enum ExecutionState {
   INACTIVO = 'INACTIVO',
@@ -26,6 +29,7 @@ export enum ExecutionState {
   EXITOSO = 'EXITOSO',
   OMITIDO = 'OMITIDO',
   FALLIDO = 'FALLIDO',
+  DESCARTADO = 'DESCARTADO',
 }
 
 /** Severidad de un fallo de nodo. Copia de `NodeErrorSeverity` del motor. */
@@ -81,12 +85,25 @@ export interface WorkflowExecutionResult {
   readonly context: Record<string, Record<string, unknown>>;
 }
 
+/**
+ * Desenlace de un descarte. Replica `DiscardExecutionResponseDto`.
+ *
+ * Trae las DOS filas que el descarte toca: cerrar una ejecucion detenida retira
+ * ademas su flujo de los disparadores automaticos.
+ */
+export interface DiscardExecutionResult {
+  readonly execution: ExecutionSummary;
+  readonly workflow: PipelineSummary;
+}
+
 // --- Canal WebSocket (`backend/src/common/types/execution-events.types.ts`) ---
 
 /** Nombres de evento, identicos a los del backend. */
 export const EXECUTION_EVENT = {
   FLOW_PAUSED: 'flow:paused',
   FLOW_RESUMED: 'flow:resumed',
+  FLOW_DISCARDED: 'flow:discarded',
+  FLOW_COMPLETED: 'flow:completed',
   NODE_ERROR: 'node:error',
 } as const;
 
@@ -101,6 +118,35 @@ export interface FlowPausedEvent extends ExecutionEventBase {
   readonly severity?: NodeErrorSeverity;
   readonly errorMessage?: string;
   readonly logFilePath?: string | null;
+  /** Opcional: el motor solo lo conoce si quien despacha se lo pasa. */
+  readonly flowName?: string;
+  /**
+   * Tipo del nodo bloqueado. Ausente en las pausas que ocurren ANTES de
+   * ejecutar nodo alguno (circuit breaker, cursor inexistente).
+   */
+  readonly nodeType?: string;
+  readonly errorCode?: string;
+}
+
+/** Un operador renuncio a reanudar: cierre manual de una PAUSADO. */
+export interface FlowDiscardedEvent extends ExecutionEventBase {
+  readonly discardedBy: string;
+  /** Paso donde estaba detenida; la fila acaba de perderlo. */
+  readonly lastCursor: string;
+  readonly workflowDeactivated: boolean;
+}
+
+/**
+ * La ejecucion alcanzo un estado terminal sin cursor que reintentar.
+ *
+ * Un solo evento para todos los desenlaces: el tono del aviso lo decide
+ * `finalState`, de modo que la pausa —que SI es reanudable— queda fuera y
+ * conserva su propio evento.
+ */
+export interface FlowCompletedEvent extends ExecutionEventBase {
+  readonly finalState: ExecutionState;
+  readonly flowName?: string;
+  readonly failureReason?: string | null;
 }
 
 export interface FlowResumedEvent extends ExecutionEventBase {
@@ -134,6 +180,8 @@ export interface RoomAck {
 export interface ServerToClientEvents {
   'flow:paused': (event: FlowPausedEvent) => void;
   'flow:resumed': (event: FlowResumedEvent) => void;
+  'flow:discarded': (event: FlowDiscardedEvent) => void;
+  'flow:completed': (event: FlowCompletedEvent) => void;
   'node:error': (event: NodeErrorEvent) => void;
   // Familia aparte —mutaciones de tablas maestras—, pero comparte socket, y el
   // mapa tipado tiene que conocerla o `socket.on` la rechaza en compilacion.
@@ -149,5 +197,7 @@ export interface ClientToServerEvents {
 export interface ExecutionEventHandlers {
   onFlowPaused?: (event: FlowPausedEvent) => void;
   onFlowResumed?: (event: FlowResumedEvent) => void;
+  onFlowDiscarded?: (event: FlowDiscardedEvent) => void;
+  onFlowCompleted?: (event: FlowCompletedEvent) => void;
   onNodeError?: (event: NodeErrorEvent) => void;
 }

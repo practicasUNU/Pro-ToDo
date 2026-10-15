@@ -694,6 +694,87 @@ export class FsmEngineService {
   }
 
   /**
+   * Cierre manual de una ejecucion detenida: el operador renuncia (CU-09).
+   *
+   * Es la SEGUNDA salida de una PAUSADO, y la contraria a `prepareResume`.
+   * Hasta ahora solo existia la de reanudar, de modo que una pausa de causa
+   * irrecuperable —un UUID de Drupal que no existe, un buzon dado de baja— se
+   * quedaba en la tabla invitando a reintentar algo que no iba a funcionar.
+   *
+   * Vive en el MOTOR y no en `@modules` aunque la dispare un endpoint: la
+   * escritura sobre `ejecuciones_flujo` es exclusiva de esta clase
+   * (`FsmExecutionQueryService` es solo lectura), y abrir una excepcion a esa
+   * regla para un caso dejaria dos duenos de la misma columna.
+   *
+   * `DESCARTADO` y no `FALLIDO`: aquel pide atencion humana y este significa
+   * que la atencion ya se presto. El cursor se anula —es terminal y no se
+   * reanuda— pero el contexto acumulado y la ruta del `.log` se conservan como
+   * traza de hasta donde llego.
+   *
+   * @param executionId Fila de `ejecuciones_flujo` que se cierra.
+   * @param discardedBy Quien lo pidio: un descarte es una intervencion manual
+   *        sobre datos reales y su traza no puede ser anonima.
+   * @returns La fila ya cerrada. Conserva en memoria el `activeCursor` PREVIO
+   *          en `lastCursor`, porque la columna acaba de perderlo y quien emite
+   *          el evento todavia lo necesita.
+   * @throws NotFoundException Si la ejecucion no existe.
+   * @throws ConflictException Si no esta PAUSADO.
+   */
+  public async discardExecution(
+    executionId: string,
+    discardedBy: string,
+  ): Promise<{ execution: FsmExecution; lastCursor: string }> {
+    const execution = await this.fsmExecutionRepo.findOne({
+      where: { executionId },
+    });
+
+    if (execution === null) {
+      throw new NotFoundException(
+        `No existe la ejecucion "${executionId}" en ejecuciones_flujo.`,
+      );
+    }
+
+    // Un 409 y no un 400, con el mismo criterio que `resumeExecution`: la
+    // peticion esta bien formada y el recurso existe; lo que no encaja es su
+    // estado. El estado real va en el mensaje para que el operador sepa si
+    // llego tarde o si esta mirando la ejecucion equivocada.
+    if (execution.currentState !== ExecutionState.PAUSADO) {
+      throw new ConflictException(
+        `La ejecucion "${executionId}" esta en estado ${execution.currentState} y solo se puede descartar una PAUSADO.`,
+      );
+    }
+
+    // Defensivo, igual que en la reanudacion: `pauseAt` siempre escribe el
+    // cursor, asi que llegar aqui sin el significa que alguien toco la fila por
+    // SQL. Se tolera —descartar no necesita saber donde se paro— pero el evento
+    // debe decir la verdad sobre lo que habia.
+    const lastCursor = execution.activeCursor ?? 'desconocido';
+
+    await this.saveCheckpoint(execution, {
+      currentState: ExecutionState.DESCARTADO,
+      activeCursor: null,
+      // El contexto se reescribe con el que ya tenia, no se vacia: es la traza
+      // de hasta donde llego, y `CheckpointPatch` lo exige siempre.
+      contextPayload: execution.contextPayload,
+      retryState: execution.retryState as RetryState,
+      failureReason: truncateFailureReason(
+        `Descartada manualmente por ${discardedBy} desde el paso "${lastCursor}".`,
+      ),
+    });
+
+    // Sin esto, una marca de aborto pendiente sobre esta misma ejecucion
+    // sobreviviria a su cierre y abortaria por sorpresa una ejecucion futura
+    // que reutilizase el identificador.
+    this.abortedExecutions.delete(executionId);
+
+    this.logger.log(
+      `Descarte manual (CU-09) de la ejecucion "${executionId}" detenida en "${lastCursor}" | usuario=${discardedBy}`,
+    );
+
+    return { execution, lastCursor };
+  }
+
+  /**
    * Ejecuta un flujo de principio a fin, o hasta que un nodo lo detenga.
    *
    * @param executionId Fila de `ejecuciones_flujo` que sostiene el checkpoint.
@@ -794,6 +875,10 @@ export class FsmEngineService {
       let contingency: {
         severity: NodeErrorSeverity;
         failedNodeId: string;
+        /** Tipo del nodo culpable: el aviso dice QUE mirar, no solo donde. */
+        failedNodeType: NodeType;
+        /** Codigo del fallo; es el contrato que ya leen las rutas `onErrorStep`. */
+        errorCode: string;
         /**
          * Donde quedo la traza de ESE nodo, no la del ultimo del recorrido.
          *
@@ -838,7 +923,13 @@ export class FsmEngineService {
           this.logger.error(
             `URGENTE | ejecucion=${executionId} | Circuit breaker: se superaron ${MAX_TRANSITIONS} transiciones. Posible ciclo en el grafo. Se pausa en "${cursor}".`,
           );
-          await this.pauseAt(execution, cursor, context, retryState);
+          await this.pauseAt(
+            execution,
+            cursor,
+            context,
+            retryState,
+            options.flowName,
+          );
           break;
         }
 
@@ -850,7 +941,13 @@ export class FsmEngineService {
           this.logger.error(
             `URGENTE | ejecucion=${executionId} | El cursor "${cursor}" no existe en el mapa de nodos.`,
           );
-          await this.pauseAt(execution, cursor, context, retryState);
+          await this.pauseAt(
+            execution,
+            cursor,
+            context,
+            retryState,
+            options.flowName,
+          );
           break;
         }
 
@@ -963,6 +1060,7 @@ export class FsmEngineService {
             retryState,
             node.nodeId,
             outcome.result,
+            options.flowName,
           );
           break;
         }
@@ -1081,6 +1179,8 @@ export class FsmEngineService {
           contingency = {
             severity: result.error?.level ?? 'URGENTE',
             failedNodeId: node.nodeId,
+            failedNodeType: node.nodeType,
+            errorCode,
             trace: lastTrace,
           };
           execution.tookContingency = true;
@@ -1127,11 +1227,20 @@ export class FsmEngineService {
         // culpable, que es lo que permite el reintento manual de CU-09. La
         // causa viaja con la pausa para que la fila apunte al archivo que
         // explica por que se paro, y no solo a donde.
-        await this.pauseAt(execution, cursor, context, retryState, {
-          severity: result.error?.level,
-          errorMessage: result.error?.message,
-          logFilePath: lastTrace.logFilePath,
-        });
+        await this.pauseAt(
+          execution,
+          cursor,
+          context,
+          retryState,
+          options.flowName,
+          {
+            severity: result.error?.level,
+            errorMessage: result.error?.message,
+            logFilePath: lastTrace.logFilePath,
+            nodeType: node.nodeType,
+            errorCode,
+          },
+        );
         break;
       }
 
@@ -1145,6 +1254,7 @@ export class FsmEngineService {
           // Se lee de la entidad y no de una variable del bucle porque es donde
           // lo dejo la rama de `halt`, unas lineas mas arriba.
           execution.haltReason !== undefined,
+          options.flowName,
         );
       }
     } catch (error) {
@@ -1762,6 +1872,7 @@ export class FsmEngineService {
     retryState: RetryState,
     nodeId: string | null,
     result: NodeResult,
+    flowName?: string,
   ): Promise<void> {
     const logFilePath = this.hybridLogger.logCatastrophicFailure({
       executionId: execution.executionId,
@@ -1784,6 +1895,13 @@ export class FsmEngineService {
       retryState,
       logFilePath,
     });
+
+    this.emitCompleted(
+      execution,
+      ExecutionState.FALLIDO,
+      flowName,
+      result.error?.message ?? null,
+    );
   }
 
   /**
@@ -1803,6 +1921,7 @@ export class FsmEngineService {
    * @param contingency Ultimo desvio, o `null` si el recorrido fue nominal.
    * @param lastCompletedNodeType Tipo del ultimo nodo que completo con exito.
    * @param wasHalted El bucle termino porque un nodo pidio parada ordenada.
+   * @param flowName Nombre legible del flujo, para los avisos de la interfaz.
    */
   private async closeTerminalState(
     execution: FsmExecution,
@@ -1811,10 +1930,13 @@ export class FsmEngineService {
     contingency: {
       severity: NodeErrorSeverity;
       failedNodeId: string;
+      failedNodeType: NodeType;
+      errorCode: string;
       trace: NodeTraceReceipt;
     } | null,
     lastCompletedNodeType: NodeType | null,
     wasHalted: boolean,
+    flowName?: string,
   ): Promise<void> {
     // Recuperacion FUNCIONAL: la rama reincorporo el flujo y este llego al
     // final. El trabajo se hizo —el correo con la imagen acabo publicado—, asi
@@ -1834,14 +1956,18 @@ export class FsmEngineService {
       // un desvio por `onErrorStep` sigue siendo una ejecucion que no hizo
       // trabajo. Lo que NO alcanza esta rama es el caso en que la rama murio
       // en el nodo de alerta, que se resuelve abajo por severidad.
+      const finalState = wasHalted
+        ? ExecutionState.OMITIDO
+        : ExecutionState.EXITOSO;
+
       await this.saveCheckpoint(execution, {
-        currentState: wasHalted
-          ? ExecutionState.OMITIDO
-          : ExecutionState.EXITOSO,
+        currentState: finalState,
         activeCursor: null,
         contextPayload: context.getAllContext(),
         retryState,
       });
+
+      this.emitCompleted(execution, finalState, flowName);
       return;
     }
 
@@ -1858,9 +1984,12 @@ export class FsmEngineService {
         contingency.failedNodeId,
         context,
         retryState,
+        flowName,
         {
           severity: contingency.severity,
           logFilePath: contingency.trace.logFilePath,
+          nodeType: contingency.failedNodeType,
+          errorCode: contingency.errorCode,
         },
       );
       return;
@@ -1868,15 +1997,24 @@ export class FsmEngineService {
 
     // URGENTE es irrecuperable y LEVE no justifica insistir: ni uno ni otro
     // ofrecen un reintento, asi que se cierra sin cursor.
+    const failureReason = truncateFailureReason(
+      `El nodo "${contingency.failedNodeId}" fallo (${contingency.severity}) y la ruta de contingencia solo notifico.`,
+    );
+
     await this.saveCheckpoint(execution, {
       currentState: ExecutionState.FALLIDO,
       activeCursor: null,
       contextPayload: context.getAllContext(),
       retryState,
-      failureReason: truncateFailureReason(
-        `El nodo "${contingency.failedNodeId}" fallo (${contingency.severity}) y la ruta de contingencia solo notifico.`,
-      ),
+      failureReason,
     });
+
+    this.emitCompleted(
+      execution,
+      ExecutionState.FALLIDO,
+      flowName,
+      failureReason,
+    );
   }
 
   /**
@@ -1886,17 +2024,25 @@ export class FsmEngineService {
    * breaker y el cursor inexistente paran el bucle antes de ejecutar nada, y
    * ahi no hay traza que senalar.
    *
-   * @param cause Severidad, mensaje y archivo del fallo que detuvo el flujo.
+   * `flowName` va ANTES de `cause` y no al final: las dos pausas tempranas lo
+   * conocen y no tienen causa que contar, de modo que con el orden inverso
+   * tendrian que pasar un `undefined` de relleno.
+   *
+   * @param flowName Nombre legible del flujo, para el aviso de la interfaz.
+   * @param cause Severidad, mensaje, tipo de nodo, codigo y archivo del fallo.
    */
   private async pauseAt(
     execution: FsmExecution,
     cursor: string,
     context: StatePayloadContext,
     retryState: RetryState,
+    flowName?: string,
     cause?: {
       severity?: NodeErrorSeverity;
       errorMessage?: string;
       logFilePath?: string | null;
+      nodeType?: NodeType;
+      errorCode?: string;
     },
   ): Promise<void> {
     const patch: CheckpointPatch = {
@@ -1933,6 +2079,36 @@ export class FsmEngineService {
       ...(cause?.logFilePath !== undefined
         ? { logFilePath: cause.logFilePath }
         : {}),
+      ...(cause?.nodeType !== undefined ? { nodeType: cause.nodeType } : {}),
+      ...(cause?.errorCode !== undefined ? { errorCode: cause.errorCode } : {}),
+      ...(flowName !== undefined ? { flowName } : {}),
+    });
+  }
+
+  /**
+   * Anuncia que la ejecucion alcanzo un estado terminal sin cursor.
+   *
+   * Centralizado en un metodo y no repetido en cada cierre porque los tres
+   * desenlaces —EXITOSO, OMITIDO y FALLIDO— emiten el MISMO evento y solo
+   * cambia `finalState`; duplicar el literal invitaria a que una rama se
+   * quedase sin emitirlo el dia que aparezca una cuarta.
+   *
+   * Igual que `pauseAt`, se invoca siempre DESPUES del checkpoint: el cliente
+   * reacciona leyendo esta misma fila.
+   */
+  private emitCompleted(
+    execution: FsmExecution,
+    finalState: ExecutionState,
+    flowName?: string,
+    failureReason?: string | null,
+  ): void {
+    this.executionEvents.emitFlowCompleted({
+      executionId: execution.executionId,
+      flowId: execution.flowId,
+      emittedAt: new Date().toISOString(),
+      finalState,
+      ...(flowName !== undefined ? { flowName } : {}),
+      ...(failureReason !== undefined ? { failureReason } : {}),
     });
   }
 

@@ -29,9 +29,16 @@ const executionStore = useExecutionStore();
 
 const isEditorOpen = ref(false);
 const isDeleteDialogOpen = ref(false);
+const isDiscardDialogOpen = ref(false);
 
 const editedWorkflow = ref<PipelineSummary | null>(null);
 const workflowToDeactivate = ref<PipelineSummary | null>(null);
+// Se guarda la EJECUCION y no el flujo: entre abrir el dialogo y confirmarlo
+// pasan cinco segundos obligatorios, tiempo de sobra para que un `flow:resumed`
+// ajeno cambie cual es la ejecucion vigente de ese flujo. Descartar la que se
+// resolviera en ese momento cerraria una ejecucion distinta de la que el
+// operador vio al pulsar.
+const executionToDiscard = ref<ExecutionSummary | null>(null);
 
 // Admite `null` porque el boton `clearable` de QInput escribe eso, no una cadena
 // vacia. QTable declara su prop `filter` como `any`, asi que el compilador no
@@ -116,6 +123,55 @@ const resumeExecution = async (workflow: PipelineSummary): Promise<void> => {
       type: 'negative',
       message: extractApiErrorMessage(error, 'No se pudo reanudar la ejecucion'),
     });
+  }
+};
+
+/**
+ * Abre el descarte de la ejecucion detenida de un flujo (CU-09).
+ *
+ * El cierre es la segunda salida de una PAUSADO: cuando la causa es
+ * irrecuperable —un destino que ya no existe, un buzon dado de baja—, reanudar
+ * solo repite el mismo fallo.
+ */
+const requestDiscard = (workflow: PipelineSummary): void => {
+  const execution = resolveExecution(workflow);
+
+  if (execution === null) {
+    return;
+  }
+
+  executionToDiscard.value = execution;
+  isDiscardDialogOpen.value = true;
+};
+
+/**
+ * Cierra la ejecucion detenida y retira el flujo del sondeo.
+ *
+ * La invoca `SafeDeleteModal` tras su cuenta atras de cinco segundos. Ni la
+ * fila de la ejecucion ni la del flujo se parchean a mano: las repintan
+ * `flow:discarded` y la mutacion `crud:mutation` que el backend difunde, que es
+ * ademas lo que mantiene al dia las pantallas de los demas operadores.
+ */
+const confirmDiscard = async (): Promise<void> => {
+  const execution = executionToDiscard.value;
+
+  if (execution === null) {
+    return;
+  }
+
+  try {
+    await executionStore.discardExecution(execution.executionId);
+    $q.notify({
+      type: 'positive',
+      message: 'Ejecucion descartada. El flujo queda inactivo.',
+    });
+  } catch (error) {
+    $q.notify({
+      type: 'negative',
+      message: extractApiErrorMessage(error, 'No se pudo descartar la ejecucion'),
+    });
+  } finally {
+    executionToDiscard.value = null;
   }
 };
 
@@ -304,6 +360,18 @@ onBeforeUnmount(() => {
             >
               <q-tooltip>Reanudar la ejecucion detenida (CU-09)</q-tooltip>
             </q-btn>
+            <q-btn
+              flat
+              round
+              dense
+              icon="delete_sweep"
+              color="negative"
+              data-test="discard-execution"
+              :loading="executionStore.isDiscarding"
+              @click="requestDiscard(cellProps.row)"
+            >
+              <q-tooltip>Descartar la ejecucion: no se podra reanudar</q-tooltip>
+            </q-btn>
             <q-tooltip>
               {{ resolveExecution(cellProps.row)?.failureReason ?? 'Ejecucion detenida' }}
             </q-tooltip>
@@ -408,6 +476,19 @@ onBeforeUnmount(() => {
       :message="`¿Seguro que deseas desactivar el flujo ${workflowToDeactivate?.name ?? ''}? Dejara de procesar correos entrantes hasta que lo habilites de nuevo.`"
       confirm-label="Desactivar"
       @confirm="confirmDeactivation"
+    />
+
+    <!-- Descartar es IRREVERSIBLE —la ejecucion no vuelve a ser reanudable— y
+         ademas apaga el flujo, asi que pasa por el mismo temporizador de cinco
+         segundos que la desactivacion. Dos modales y no uno compartido: los
+         dos pueden estar abiertos sobre filas distintas, y un unico `v-model`
+         haria que abrir el segundo cerrase el primero. -->
+    <SafeDeleteModal
+      v-model="isDiscardDialogOpen"
+      title="Descartar ejecucion pausada"
+      message="Esta accion abortara definitivamente la ejecucion pausada y cambiara el estado del flujo a Inactivo. ¿Deseas continuar?"
+      confirm-label="Descartar"
+      @confirm="confirmDiscard"
     />
   </q-page>
 </template>

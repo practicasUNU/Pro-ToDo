@@ -260,6 +260,10 @@ describe('FsmEngineService (PROT-09)', () => {
   const buildEngine = (
     repo: Repository<FsmExecution>,
     configService: ConfigService = new ConfigService({}),
+    // Se admite un coordinador de fuera para que las pruebas del canal puedan
+    // espiar lo que el motor publica; sin pasarlo, sigue siendo el no-op de
+    // siempre y ninguna prueba anterior cambia.
+    events: ExecutionEventsCoordinator = new ExecutionEventsCoordinator(),
   ): FsmEngineService => {
     const engine = new FsmEngineService(
       repo,
@@ -276,7 +280,7 @@ describe('FsmEngineService (PROT-09)', () => {
       // en un no-op silencioso, asi que no hace falta un doble con tres
       // `jest.fn()` que ninguna asercion mira. Mismo criterio que el
       // `FsmConfig` de arriba.
-      new ExecutionEventsCoordinator(),
+      events,
     );
     jest.spyOn(engine['logger'], 'log').mockImplementation(() => undefined);
     jest.spyOn(engine['logger'], 'warn').mockImplementation(() => undefined);
@@ -3894,6 +3898,230 @@ describe('FsmEngineService (PROT-09)', () => {
       expect(result.contextPayload[ERROR_CONTEXT_NAMESPACE]).toMatchObject({
         partial_data: NEUTRAL_PAYLOAD,
       });
+    });
+  });
+
+  describe('35. Descarte manual de una ejecucion detenida (CU-09)', () => {
+    it('35.1 deberia cerrarla en DESCARTADO, sin cursor y devolviendo el paso previo', async () => {
+      // 1. Arrange 📐
+      const execution = buildExecution({
+        currentState: ExecutionState.PAUSADO,
+        activeCursor: 'nodo_b',
+        contextPayload: { salida_a: { valorA: 1 } },
+      });
+      const { repo, update } = buildRepository(execution);
+
+      // 2. Act ⚙️
+      const { execution: closed, lastCursor } = await buildEngine(
+        repo,
+      ).discardExecution(EXECUTION_ID, 'usuario-1');
+
+      // 3. Assert 🎯
+      expect(closed.currentState).toBe(ExecutionState.DESCARTADO);
+      expect(closed.activeCursor).toBeNull();
+      // El paso donde se detuvo viaja aparte PORQUE la fila acaba de perderlo.
+      expect(lastCursor).toBe('nodo_b');
+      // El contexto se conserva: es la traza de hasta donde llego.
+      expect(closed.contextPayload.salida_a).toEqual({ valorA: 1 });
+      expect(update).toHaveBeenCalledWith(
+        EXECUTION_ID,
+        expect.objectContaining({
+          currentState: ExecutionState.DESCARTADO,
+          activeCursor: null,
+        }),
+      );
+    });
+
+    it('35.2 deberia rechazar con 409 una ejecucion que no esta PAUSADO', async () => {
+      // 1. Arrange 📐: descartar una viva abortaria trabajo en curso sin que el
+      //    bucle se entere, y una ya cerrada no tiene nada que descartar.
+      const { repo } = buildRepository(
+        buildExecution({ currentState: ExecutionState.EN_PROCESO }),
+      );
+
+      // 2. Act ⚙️ & 3. Assert 🎯
+      await expect(
+        buildEngine(repo).discardExecution(EXECUTION_ID, 'usuario-1'),
+      ).rejects.toBeInstanceOf(ConflictException);
+    });
+
+    it('35.3 deberia rechazar con 404 una ejecucion inexistente', async () => {
+      // 1. Arrange 📐
+      const { repo, findOne } = buildRepository(buildExecution());
+      findOne.mockResolvedValue(null);
+
+      // 2. Act ⚙️ & 3. Assert 🎯
+      await expect(
+        buildEngine(repo).discardExecution(EXECUTION_ID, 'usuario-1'),
+      ).rejects.toBeInstanceOf(NotFoundException);
+    });
+  });
+
+  describe('36. Anuncio del desenlace por el canal', () => {
+    /** Motor con un coordinador espiado, que es lo que estas pruebas miran. */
+    const buildListeningEngine = (
+      repo: Repository<FsmExecution>,
+    ): { engine: FsmEngineService; events: ExecutionEventsCoordinator } => {
+      const events = new ExecutionEventsCoordinator();
+
+      return {
+        engine: buildEngine(repo, new ConfigService({}), events),
+        events,
+      };
+    };
+
+    it('36.1 deberia anunciar EXITOSO al agotar el grafo sin incidencias', async () => {
+      // 1. Arrange 📐
+      const { repo } = buildRepository(buildExecution());
+      const { engine, events } = buildListeningEngine(repo);
+      const emitFlowCompleted = jest.spyOn(events, 'emitFlowCompleted');
+
+      for (const nodeType of [
+        NodeType.TRIGGER_IMAP,
+        NodeType.PROCESADOR_IA,
+        NodeType.DESTINO_DRUPAL,
+      ]) {
+        factory.registerStrategy(
+          buildStrategy(
+            nodeType,
+            jest.fn().mockResolvedValue({ success: true, data: {} }),
+          ),
+        );
+      }
+
+      // 2. Act ⚙️
+      await engine.executeWorkflow(EXECUTION_ID, buildLinearSchema(), {
+        flowName: 'NOTIWEB Licitaciones',
+      });
+
+      // 3. Assert 🎯: el nombre viaja porque un aviso que solo diga el UUID
+      //    obliga al operador a buscar de que flujo le estan hablando.
+      expect(emitFlowCompleted).toHaveBeenCalledWith(
+        expect.objectContaining({
+          executionId: EXECUTION_ID,
+          finalState: ExecutionState.EXITOSO,
+          flowName: 'NOTIWEB Licitaciones',
+        }),
+      );
+    });
+
+    it('36.2 deberia anunciar OMITIDO cuando un nodo pide parada ordenada', async () => {
+      // 1. Arrange 📐: un buzon vacio no es un exito, y anunciarlo como tal
+      //    haria creer que se publico algo.
+      const { repo } = buildRepository(buildExecution());
+      const { engine, events } = buildListeningEngine(repo);
+      const emitFlowCompleted = jest.spyOn(events, 'emitFlowCompleted');
+
+      factory.registerStrategy(
+        buildStrategy(
+          NodeType.TRIGGER_IMAP,
+          jest.fn().mockResolvedValue({
+            success: true,
+            data: {},
+            halt: { reason: 'NO_MESSAGES_FOUND' },
+          }),
+        ),
+      );
+
+      // 2. Act ⚙️
+      await engine.executeWorkflow(EXECUTION_ID, buildLinearSchema());
+
+      // 3. Assert 🎯
+      expect(emitFlowCompleted).toHaveBeenCalledWith(
+        expect.objectContaining({ finalState: ExecutionState.OMITIDO }),
+      );
+    });
+
+    it('36.3 NO deberia anunciar cierre al pausarse: eso ya lo dice flow:paused', async () => {
+      // 1. Arrange 📐: una PAUSADO es reanudable, de modo que contarla como
+      //    terminal dejaria la interfaz sin ofrecer el reintento.
+      const { repo } = buildRepository(buildExecution());
+      const { engine, events } = buildListeningEngine(repo);
+      const emitFlowCompleted = jest.spyOn(events, 'emitFlowCompleted');
+      const emitFlowPaused = jest.spyOn(events, 'emitFlowPaused');
+
+      factory.registerStrategy(
+        buildStrategy(
+          NodeType.TRIGGER_IMAP,
+          jest.fn().mockResolvedValue(failure('URGENTE')),
+        ),
+      );
+
+      // 2. Act ⚙️
+      await engine.executeWorkflow(EXECUTION_ID, buildLinearSchema());
+
+      // 3. Assert 🎯
+      expect(emitFlowPaused).toHaveBeenCalledTimes(1);
+      expect(emitFlowCompleted).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('37. Detalle que acompana a flow:paused', () => {
+    it('37.1 deberia nombrar el flujo, el tipo del nodo y el codigo del fallo', async () => {
+      // 1. Arrange 📐. Sin estos tres datos el aviso dice que algo fallo pero
+      //    no a que pantalla ir: el nodeId no revela el tipo, y el mensaje de
+      //    la estrategia cambia entre versiones mientras el codigo no.
+      const { repo } = buildRepository(buildExecution());
+      const events = new ExecutionEventsCoordinator();
+      const emitFlowPaused = jest.spyOn(events, 'emitFlowPaused');
+      const engine = buildEngine(repo, new ConfigService({}), events);
+
+      factory.registerStrategy(
+        buildStrategy(
+          NodeType.TRIGGER_IMAP,
+          jest.fn().mockResolvedValue({ success: true, data: {} }),
+        ),
+      );
+      factory.registerStrategy(
+        buildStrategy(
+          NodeType.PROCESADOR_IA,
+          jest
+            .fn()
+            .mockResolvedValue(failure('GRAVE', 'El proveedor devolvio 503')),
+        ),
+      );
+
+      // 2. Act ⚙️
+      await engine.executeWorkflow(EXECUTION_ID, buildLinearSchema(), {
+        flowName: 'NOTIWEB Licitaciones',
+      });
+
+      // 3. Assert 🎯
+      expect(emitFlowPaused).toHaveBeenCalledWith(
+        expect.objectContaining({
+          activeCursor: 'nodo_b',
+          severity: 'GRAVE',
+          errorCode: TEST_ERROR_CODE,
+          errorMessage: 'El proveedor devolvio 503',
+          nodeType: NodeType.PROCESADOR_IA,
+          flowName: 'NOTIWEB Licitaciones',
+        }),
+      );
+    });
+
+    it('37.2 NO deberia inventar tipo ni codigo en una pausa previa a ejecutar nodo', async () => {
+      // 1. Arrange 📐: el cursor apunta a un nodo que ya no esta en el mapa, de
+      //    modo que el bucle para ANTES de invocar estrategia alguna. Rellenar
+      //    ahi un tipo o un codigo senalaria a un nodo que no intervino.
+      const { repo } = buildRepository(
+        buildExecution({ activeCursor: 'nodo_fantasma' }),
+      );
+      const events = new ExecutionEventsCoordinator();
+      const emitFlowPaused = jest.spyOn(events, 'emitFlowPaused');
+      const engine = buildEngine(repo, new ConfigService({}), events);
+
+      // 2. Act ⚙️
+      await engine.executeWorkflow(EXECUTION_ID, buildLinearSchema(), {
+        flowName: 'NOTIWEB Licitaciones',
+      });
+
+      // 3. Assert 🎯
+      const event = emitFlowPaused.mock.calls[0]?.[0];
+      expect(event?.activeCursor).toBe('nodo_fantasma');
+      expect(event?.nodeType).toBeUndefined();
+      expect(event?.errorCode).toBeUndefined();
+      // El nombre SI viaja: no depende de haber ejecutado nada.
+      expect(event?.flowName).toBe('NOTIWEB Licitaciones');
     });
   });
 });

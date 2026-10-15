@@ -5,6 +5,8 @@ import { getSocket } from '@services/socket.client';
 import type { CrudMutationPayload } from '@/types/crud-events';
 import type {
   ExecutionEventHandlers,
+  FlowCompletedEvent,
+  FlowDiscardedEvent,
   FlowPausedEvent,
   FlowResumedEvent,
   NodeErrorEvent,
@@ -32,15 +34,21 @@ export const subscribeToExecutionEvents = (handlers: ExecutionEventHandlers): ((
 
   const onFlowPaused = (event: FlowPausedEvent): void => handlers.onFlowPaused?.(event);
   const onFlowResumed = (event: FlowResumedEvent): void => handlers.onFlowResumed?.(event);
+  const onFlowDiscarded = (event: FlowDiscardedEvent): void => handlers.onFlowDiscarded?.(event);
+  const onFlowCompleted = (event: FlowCompletedEvent): void => handlers.onFlowCompleted?.(event);
   const onNodeError = (event: NodeErrorEvent): void => handlers.onNodeError?.(event);
 
   socket.on(EXECUTION_EVENT.FLOW_PAUSED, onFlowPaused);
   socket.on(EXECUTION_EVENT.FLOW_RESUMED, onFlowResumed);
+  socket.on(EXECUTION_EVENT.FLOW_DISCARDED, onFlowDiscarded);
+  socket.on(EXECUTION_EVENT.FLOW_COMPLETED, onFlowCompleted);
   socket.on(EXECUTION_EVENT.NODE_ERROR, onNodeError);
 
   return () => {
     socket.off(EXECUTION_EVENT.FLOW_PAUSED, onFlowPaused);
     socket.off(EXECUTION_EVENT.FLOW_RESUMED, onFlowResumed);
+    socket.off(EXECUTION_EVENT.FLOW_DISCARDED, onFlowDiscarded);
+    socket.off(EXECUTION_EVENT.FLOW_COMPLETED, onFlowCompleted);
     socket.off(EXECUTION_EVENT.NODE_ERROR, onNodeError);
   };
 };

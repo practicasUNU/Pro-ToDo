@@ -47,11 +47,13 @@ vi.mock('@services/fsm-executions.service', () => ({
   fetchExecutions: vi.fn(),
   fetchExecution: vi.fn(),
   resumeExecution: vi.fn(),
+  discardExecution: vi.fn(),
 }));
 
 import WorkflowsManager from '@components/workflows/WorkflowsManager.vue';
 import { useExecutionStore } from '@stores/execution.store';
 
+import { discardExecution } from '@services/fsm-executions.service';
 import { fetchWorkflows } from '@services/workflows.service';
 import { joinFlowRoom, leaveFlowRoom } from '@services/socket-events.service';
 
@@ -194,6 +196,111 @@ describe('WorkflowsManager · telemetria en vivo del catalogo', () => {
       expect(wrapper.find('[data-test="status-paused"]').exists()).toBe(false);
       expect(wrapper.find('[data-test="status-running"]').exists()).toBe(false);
       expect(wrapper.text()).toContain('Activo');
+    });
+  });
+
+  describe('3. Descarte seguro de una ejecucion pausada (CU-09)', () => {
+    /** Deja la unica fila del catalogo con su ejecucion detenida. */
+    const mountWithPausedRow = async (): Promise<ReturnType<typeof mountManager>> => {
+      vi.mocked(fetchWorkflows).mockResolvedValue([buildWorkflow()]);
+
+      const executionStore = useExecutionStore();
+      executionStore.executions = [
+        buildExecution({
+          state: ExecutionState.PAUSADO,
+          activeCursor: 'llm_processor',
+        }),
+      ];
+
+      const wrapper = mountManager();
+      await flushPromises();
+
+      return wrapper;
+    };
+
+    it('3.1 deberia ofrecer descartar junto a reanudar, y ningun interruptor', async () => {
+      // 1. Arrange 📐 + 2. Act ⚙️
+      const wrapper = await mountWithPausedRow();
+
+      // 3. Assert 🎯: la celda de estado NO lleva interruptor —se retiro porque
+      //    desactivaba un flujo en marcha de un clic, saltandose el
+      //    temporizador— y la fila detenida ofrece las dos unicas salidas que
+      //    tiene una PAUSADO.
+      expect(wrapper.findComponent({ name: 'QToggle' }).exists()).toBe(false);
+      expect(wrapper.find('[data-test="resume-execution"]').exists()).toBe(true);
+      expect(wrapper.find('[data-test="discard-execution"]').exists()).toBe(true);
+    });
+
+    it('3.2 deberia abrir el modal con el boton bloqueado hasta agotar los 5 segundos', async () => {
+      // 1. Arrange 📐
+      vi.useFakeTimers();
+
+      try {
+        const wrapper = await mountWithPausedRow();
+
+        // 2. Act ⚙️
+        await wrapper.find('[data-test="discard-execution"]').trigger('click');
+        await flushPromises();
+
+        // 3. Assert 🎯: el aviso nombra las DOS consecuencias —la ejecucion se
+        //    aborta y el flujo queda inactivo—, y confirmar sigue vetado.
+        const dialogText = document.body.textContent ?? '';
+        expect(dialogText).toContain('Inactivo');
+
+        const confirmBefore = document.querySelector('.pd-btn-danger');
+        expect(confirmBefore?.hasAttribute('disabled')).toBe(true);
+
+        // Consumidos los cinco segundos, el veto cae.
+        vi.advanceTimersByTime(5000);
+        await flushPromises();
+
+        const confirmAfter = document.querySelector('.pd-btn-danger');
+        expect(confirmAfter?.hasAttribute('disabled')).toBe(false);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('3.3 deberia descartar la ejecucion que el operador vio, no la vigente al confirmar', async () => {
+      // 1. Arrange 📐: entre abrir el dialogo y confirmarlo pasan cinco
+      //    segundos; si en ese hueco entra otra ejecucion del mismo flujo,
+      //    resolverla al confirmar cerraria una fila distinta de la pulsada.
+      const wrapper = await mountWithPausedRow();
+      const executionStore = useExecutionStore();
+
+      vi.mocked(discardExecution).mockResolvedValue({
+        execution: buildExecution({
+          state: ExecutionState.DESCARTADO,
+          activeCursor: null,
+        }),
+        workflow: buildWorkflow({ active: false }),
+      });
+
+      await wrapper.find('[data-test="discard-execution"]').trigger('click');
+      await flushPromises();
+
+      // 2. Act ⚙️: llega una ejecucion mas nueva para el mismo flujo.
+      executionStore.executions = [
+        ...executionStore.executions,
+        buildExecution({
+          executionId: 'ffffffff-1111-4222-8333-444444444444',
+          startedAt: '2026-03-01T00:00:00.000Z',
+        }),
+      ];
+      await flushPromises();
+
+      // Hay DOS modales de borrado seguro en la vista —desactivar flujo y
+      // descartar ejecucion—, asi que se localiza por su titulo: `findComponent`
+      // devolveria el primero, que es el otro.
+      const discardModal = wrapper
+        .findAllComponents({ name: 'SafeDeleteModal' })
+        .find((modal) => modal.props('title') === 'Descartar ejecucion pausada');
+
+      discardModal?.vm.$emit('confirm');
+      await flushPromises();
+
+      // 3. Assert 🎯
+      expect(discardExecution).toHaveBeenCalledWith(EXECUTION_ID);
     });
   });
 });

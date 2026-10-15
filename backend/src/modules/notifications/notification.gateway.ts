@@ -31,6 +31,8 @@ import type { CrudEventPort } from '@common/services/crud-events.coordinator';
 import type { ExecutionEventPort } from '@common/services/execution-events.coordinator';
 import type { CrudMutationPayload } from '@common/types/crud-events.types';
 import type {
+  FlowCompletedEvent,
+  FlowDiscardedEvent,
   FlowPausedEvent,
   FlowResumedEvent,
   NodeErrorEvent,
@@ -300,6 +302,14 @@ export class NotificationGateway
     this.emitToFlow(EXECUTION_EVENT.FLOW_RESUMED, event.flowId, event);
   }
 
+  public emitFlowDiscarded(event: FlowDiscardedEvent): void {
+    this.emitToFlow(EXECUTION_EVENT.FLOW_DISCARDED, event.flowId, event);
+  }
+
+  public emitFlowCompleted(event: FlowCompletedEvent): void {
+    this.emitToFlow(EXECUTION_EVENT.FLOW_COMPLETED, event.flowId, event);
+  }
+
   public emitNodeError(event: NodeErrorEvent): void {
     this.emitToFlow(EXECUTION_EVENT.NODE_ERROR, event.flowId, event);
   }
@@ -433,7 +443,12 @@ export class NotificationGateway
   private emitToFlow(
     eventName: string,
     flowId: string,
-    payload: FlowPausedEvent | FlowResumedEvent | NodeErrorEvent,
+    payload:
+      | FlowPausedEvent
+      | FlowResumedEvent
+      | FlowDiscardedEvent
+      | FlowCompletedEvent
+      | NodeErrorEvent,
   ): void {
     this.server?.to(`${FLOW_ROOM_PREFIX}${flowId}`).emit(eventName, payload);
   }

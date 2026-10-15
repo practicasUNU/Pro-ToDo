@@ -660,6 +660,41 @@ export class WorkflowsService {
   }
 
   /**
+   * Retira un flujo de los disparadores automaticos tras descartar su
+   * ejecucion detenida (CU-09).
+   *
+   * NO reutiliza `updateWorkflow`, y las tres diferencias importan: aquel exige
+   * un `UserRole` para `assertModelPermissions` —que aqui no viene a cuento,
+   * porque no se esta tocando el esquema—, pasa por `assertNotInFlight` y, al
+   * cerrar, dispara `abortExecutionsForFlow`, que arrastraria a FALLIDO
+   * cualquier PAUSADO del flujo. Justo lo que el descarte acaba de evitar
+   * escribiendo DESCARTADO.
+   *
+   * Difunde `crud:mutation` por el camino de siempre para que las tablas
+   * abiertas de otros operadores repinten la fila sin recargar.
+   *
+   * @throws NotFoundException Si no existe ninguna fila con ese `id_flujo`.
+   */
+  public async deactivateAfterDiscard(
+    workflowId: string,
+  ): Promise<PipelineSummaryResponseDto> {
+    const workflow = await this.findOne(workflowId);
+
+    workflow.active = false;
+
+    const saved = await this.workflowRepository.save(workflow);
+    const summary = this.toPipelineSummary(saved);
+
+    this.publishMutation('UPDATED', summary);
+
+    this.logger.warn(
+      `Flujo "${saved.name}" (${saved.id}) desactivado al descartar su ejecucion detenida.`,
+    );
+
+    return summary;
+  }
+
+  /**
    * Busca un flujo por su identificador.
    *
    * @throws NotFoundException Si no existe ninguna fila con ese `id_flujo`.

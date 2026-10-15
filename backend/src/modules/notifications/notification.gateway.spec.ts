@@ -24,7 +24,13 @@ import type {
   CrudMutationPayload,
 } from '@common/types/crud-events.types';
 import type { WorkflowsService } from '@modules/workflows/workflows.service';
-import type { NodeErrorEvent } from '@common/types/execution-events.types';
+import { ExecutionState } from '@core/fsm/types/fsm.enums';
+
+import type {
+  FlowCompletedEvent,
+  FlowDiscardedEvent,
+  NodeErrorEvent,
+} from '@common/types/execution-events.types';
 import type { JwtService } from '@nestjs/jwt';
 import type { Server, Socket } from 'socket.io';
 
@@ -42,6 +48,23 @@ const NODE_ERROR: NodeErrorEvent = {
   errorMessage: 'Tiempo agotado.',
   logFilePath: '/logs/execution-2026-10-10.log',
   attempt: 1,
+};
+
+const DISCARDED: FlowDiscardedEvent = {
+  executionId: '11111111-2222-4333-8444-555555555555',
+  flowId: FLOW_ID,
+  emittedAt: '2026-10-10T08:05:00.000Z',
+  discardedBy: USER_ID,
+  lastCursor: 'nodo_ia',
+  workflowDeactivated: true,
+};
+
+const COMPLETED: FlowCompletedEvent = {
+  executionId: '11111111-2222-4333-8444-555555555555',
+  flowId: FLOW_ID,
+  emittedAt: '2026-10-10T08:10:00.000Z',
+  finalState: ExecutionState.EXITOSO,
+  flowName: 'NOTIWEB Licitaciones',
 };
 
 interface SocketMock {
@@ -476,6 +499,39 @@ describe('NotificationGateway (canal WebSocket de eventos de ejecucion)', () => 
       // 3. Assert
       expect(to).toHaveBeenCalledWith(`${FLOW_ROOM_PREFIX}${FLOW_ID}`);
       expect(emit).toHaveBeenCalledWith(EXECUTION_EVENT.NODE_ERROR, NODE_ERROR);
+    });
+
+    // Las dos salidas de una ejecucion detenida y el cierre terminal viajan a
+    // la MISMA sala que el resto: un operador suscrito a su flujo no deberia
+    // tener que suscribirse a nada mas para enterarse de como acabo.
+    it('3.3 deberia emitir flow:discarded a flow_<flowId>', () => {
+      // 1. Arrange
+      const { gateway, to, emit } = buildHarness();
+
+      // 2. Act
+      gateway.emitFlowDiscarded(DISCARDED);
+
+      // 3. Assert
+      expect(to).toHaveBeenCalledWith(`${FLOW_ROOM_PREFIX}${FLOW_ID}`);
+      expect(emit).toHaveBeenCalledWith(
+        EXECUTION_EVENT.FLOW_DISCARDED,
+        DISCARDED,
+      );
+    });
+
+    it('3.4 deberia emitir flow:completed a flow_<flowId>', () => {
+      // 1. Arrange
+      const { gateway, to, emit } = buildHarness();
+
+      // 2. Act
+      gateway.emitFlowCompleted(COMPLETED);
+
+      // 3. Assert
+      expect(to).toHaveBeenCalledWith(`${FLOW_ROOM_PREFIX}${FLOW_ID}`);
+      expect(emit).toHaveBeenCalledWith(
+        EXECUTION_EVENT.FLOW_COMPLETED,
+        COMPLETED,
+      );
     });
 
     // El coordinador puede despachar antes de que el adaptador monte el

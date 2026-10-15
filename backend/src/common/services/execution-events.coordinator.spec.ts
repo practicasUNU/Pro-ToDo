@@ -1,6 +1,10 @@
 import { ExecutionEventsCoordinator } from '@common/services/execution-events.coordinator';
 
+import { ExecutionState } from '@core/fsm/types/fsm.enums';
+
 import type {
+  FlowCompletedEvent,
+  FlowDiscardedEvent,
   FlowPausedEvent,
   FlowResumedEvent,
   NodeErrorEvent,
@@ -28,6 +32,23 @@ const RESUMED: FlowResumedEvent = {
   resumedBy: 'usuario-1',
 };
 
+const DISCARDED: FlowDiscardedEvent = {
+  executionId: EXECUTION_ID,
+  flowId: FLOW_ID,
+  emittedAt: EMITTED_AT,
+  discardedBy: 'usuario-1',
+  lastCursor: 'nodo_ia',
+  workflowDeactivated: true,
+};
+
+const COMPLETED: FlowCompletedEvent = {
+  executionId: EXECUTION_ID,
+  flowId: FLOW_ID,
+  emittedAt: EMITTED_AT,
+  finalState: ExecutionState.EXITOSO,
+  flowName: 'NOTIWEB Licitaciones',
+};
+
 const NODE_ERROR: NodeErrorEvent = {
   executionId: EXECUTION_ID,
   flowId: FLOW_ID,
@@ -50,12 +71,16 @@ const NODE_ERROR: NodeErrorEvent = {
 interface PortMock {
   emitFlowPaused: jest.Mock;
   emitFlowResumed: jest.Mock;
+  emitFlowDiscarded: jest.Mock;
+  emitFlowCompleted: jest.Mock;
   emitNodeError: jest.Mock;
 }
 
 const buildPort = (): PortMock => ({
   emitFlowPaused: jest.fn(),
   emitFlowResumed: jest.fn(),
+  emitFlowDiscarded: jest.fn(),
+  emitFlowCompleted: jest.fn(),
   emitNodeError: jest.fn(),
 });
 
@@ -224,5 +249,31 @@ describe('ExecutionEventsCoordinator (puerto de eventos del motor FSM)', () => {
       expect(() => coordinator.emitNodeError(NODE_ERROR)).not.toThrow();
       expect(() => coordinator.emitFlowResumed(RESUMED)).not.toThrow();
     });
+  });
+
+  it('deberia repartir el descarte manual a los puertos inscritos', () => {
+    // 1. Arrange 📐
+    const coordinator = new ExecutionEventsCoordinator();
+    const port = buildPort();
+    coordinator.register(port);
+
+    // 2. Act ⚙️
+    coordinator.emitFlowDiscarded(DISCARDED);
+
+    // 3. Assert 🎯
+    expect(port.emitFlowDiscarded).toHaveBeenCalledWith(DISCARDED);
+  });
+
+  it('deberia repartir el cierre terminal a los puertos inscritos', () => {
+    // 1. Arrange 📐
+    const coordinator = new ExecutionEventsCoordinator();
+    const port = buildPort();
+    coordinator.register(port);
+
+    // 2. Act ⚙️
+    coordinator.emitFlowCompleted(COMPLETED);
+
+    // 3. Assert 🎯
+    expect(port.emitFlowCompleted).toHaveBeenCalledWith(COMPLETED);
   });
 });

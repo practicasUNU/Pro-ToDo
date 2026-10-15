@@ -6,8 +6,11 @@ import { useExecutionStore } from './execution.store';
 import { ExecutionState } from '@/types/execution';
 
 import type {
+  DiscardExecutionResult,
   ExecutionDetail,
   ExecutionSummary,
+  FlowCompletedEvent,
+  FlowDiscardedEvent,
   FlowPausedEvent,
   FlowResumedEvent,
   NodeErrorEvent,
@@ -20,6 +23,7 @@ vi.mock('@services/fsm-executions.service', () => ({
   fetchExecutions: vi.fn(),
   fetchExecution: vi.fn(),
   resumeExecution: vi.fn(),
+  discardExecution: vi.fn(),
 }));
 
 // El store emite a las salas a traves de este servicio desde que `joinFlow`
@@ -36,6 +40,7 @@ const leaveFlowRoom = vi.mocked(socketEvents.leaveFlowRoom);
 const fetchExecutions = vi.mocked(service.fetchExecutions);
 const fetchExecution = vi.mocked(service.fetchExecution);
 const resumeExecution = vi.mocked(service.resumeExecution);
+const discardExecution = vi.mocked(service.discardExecution);
 
 const EXECUTION_ID = '7c9e6679-7425-40de-944b-e07fc1f90ae7';
 const OTHER_EXECUTION_ID = '11111111-2222-4333-8444-555555555555';
@@ -43,9 +48,7 @@ const FLOW_ID = 'b3f1c2d4-5a6b-4c7d-8e9f-0a1b2c3d4e5f';
 const OTHER_FLOW_ID = 'c4e2d3f5-6b7c-4d8e-9f0a-1b2c3d4e5f60';
 const LOG_PATH = '/logs/execution-2026-10-10.log';
 
-const buildSummary = (
-  overrides: Partial<ExecutionSummary> = {},
-): ExecutionSummary => ({
+const buildSummary = (overrides: Partial<ExecutionSummary> = {}): ExecutionSummary => ({
   executionId: EXECUTION_ID,
   flowId: FLOW_ID,
   state: ExecutionState.EN_PROCESO,
@@ -57,18 +60,14 @@ const buildSummary = (
   ...overrides,
 });
 
-const buildDetail = (
-  overrides: Partial<ExecutionDetail> = {},
-): ExecutionDetail => ({
+const buildDetail = (overrides: Partial<ExecutionDetail> = {}): ExecutionDetail => ({
   ...buildSummary(),
   context: { parsed_email: { subject: 'Hola' } },
   retryState: { nodo_ia: 2 },
   ...overrides,
 });
 
-const buildNodeError = (
-  overrides: Partial<NodeErrorEvent> = {},
-): NodeErrorEvent => ({
+const buildNodeError = (overrides: Partial<NodeErrorEvent> = {}): NodeErrorEvent => ({
   executionId: EXECUTION_ID,
   flowId: FLOW_ID,
   emittedAt: '2026-10-10T08:00:00.000Z',
@@ -212,12 +211,8 @@ describe('useExecutionStore · estado reactivo de las ejecuciones del motor', ()
 
       // 3. Assert
       expect(store.executions[0]?.state).toBe(ExecutionState.PAUSADO);
-      expect(store.executions[0]?.failureReason).toBe(
-        'El proveedor devolvio 503.',
-      );
-      expect(store.executions[0]?.logFilePath).toBe(
-        '/logs/execution-2026-10-11.log',
-      );
+      expect(store.executions[0]?.failureReason).toBe('El proveedor devolvio 503.');
+      expect(store.executions[0]?.logFilePath).toBe('/logs/execution-2026-10-11.log');
     });
 
     // Un `null` incondicional borraria una ruta anterior perfectamente valida,
@@ -274,9 +269,7 @@ describe('useExecutionStore · estado reactivo de las ejecuciones del motor', ()
       store.activeExecution = buildSummary();
 
       // 2. Act
-      store.handleNodeError(
-        buildNodeError({ executionId: OTHER_EXECUTION_ID }),
-      );
+      store.handleNodeError(buildNodeError({ executionId: OTHER_EXECUTION_ID }));
 
       // 3. Assert
       expect(store.nodeEvents).toHaveLength(0);
@@ -536,6 +529,113 @@ describe('useExecutionStore · estado reactivo de las ejecuciones del motor', ()
       //    primera que devolvio la API.
       expect(index.get(FLOW_ID)?.executionId).toBe('exec-nueva');
       expect(index.get(OTHER_FLOW_ID)?.executionId).toBe('exec-otra');
+    });
+  });
+
+  describe('descarte manual (CU-09)', () => {
+    const buildDiscardResult = (
+      overrides: Partial<ExecutionSummary> = {},
+    ): DiscardExecutionResult =>
+      ({
+        execution: buildSummary({
+          state: ExecutionState.DESCARTADO,
+          activeCursor: null,
+          failureReason: 'Descartada manualmente por un operador',
+          ...overrides,
+        }),
+        workflow: { id: FLOW_ID, active: false },
+      }) as DiscardExecutionResult;
+
+    it('deberia cerrar la fila en DESCARTADO y sin cursor', async () => {
+      // 1. Arrange 📐
+      const store = useExecutionStore();
+      store.executions = [buildSummary({ state: ExecutionState.PAUSADO })];
+      discardExecution.mockResolvedValue(buildDiscardResult());
+
+      // 2. Act ⚙️
+      await store.discardExecution(EXECUTION_ID);
+
+      // 3. Assert 🎯
+      expect(discardExecution).toHaveBeenCalledWith(EXECUTION_ID);
+      expect(store.executions[0]?.state).toBe(ExecutionState.DESCARTADO);
+      // Sin cursor: DESCARTADO es terminal, y conservarlo ofreceria un
+      // reintento imposible.
+      expect(store.executions[0]?.activeCursor).toBeNull();
+      expect(store.isDiscarding).toBe(false);
+    });
+
+    it('deberia propagar el fallo y apagar el indicador igualmente', async () => {
+      // 1. Arrange 📐: el 409 de «ya no esta PAUSADO» necesita un mensaje
+      //    propio, y quien lo decide es el componente.
+      const store = useExecutionStore();
+      discardExecution.mockRejectedValue(new Error('409'));
+
+      // 2. Act ⚙️ + 3. Assert 🎯
+      await expect(store.discardExecution(EXECUTION_ID)).rejects.toThrow('409');
+      expect(store.isDiscarding).toBe(false);
+    });
+
+    it('deberia reflejar el descarte llegado por el canal', () => {
+      // 1. Arrange 📐
+      const store = useExecutionStore();
+      store.executions = [buildSummary({ state: ExecutionState.PAUSADO })];
+
+      const event: FlowDiscardedEvent = {
+        executionId: EXECUTION_ID,
+        flowId: FLOW_ID,
+        emittedAt: '2026-10-10T08:00:00.000Z',
+        discardedBy: 'practicas@unuware.com',
+        lastCursor: 'nodo_ia',
+        workflowDeactivated: true,
+      };
+
+      // 2. Act ⚙️
+      store.handleFlowDiscarded(event);
+
+      // 3. Assert 🎯
+      expect(store.executions[0]?.state).toBe(ExecutionState.DESCARTADO);
+      expect(store.executions[0]?.activeCursor).toBeNull();
+    });
+  });
+
+  describe('cierre terminal llegado por el canal', () => {
+    const buildCompleted = (overrides: Partial<FlowCompletedEvent> = {}): FlowCompletedEvent => ({
+      executionId: EXECUTION_ID,
+      flowId: FLOW_ID,
+      emittedAt: '2026-10-10T08:10:00.000Z',
+      finalState: ExecutionState.EXITOSO,
+      ...overrides,
+    });
+
+    it('deberia escribir el estado terminal que dicta el evento', () => {
+      // 1. Arrange 📐: el estado lo decide el motor; reconstruirlo aqui seria
+      //    una segunda fuente de verdad.
+      const store = useExecutionStore();
+      store.executions = [buildSummary()];
+
+      // 2. Act ⚙️
+      store.handleFlowCompleted(buildCompleted({ finalState: ExecutionState.OMITIDO }));
+
+      // 3. Assert 🎯
+      expect(store.executions[0]?.state).toBe(ExecutionState.OMITIDO);
+      expect(store.executions[0]?.activeCursor).toBeNull();
+    });
+
+    it('deberia conservar el motivo del fallo que trae el cierre', () => {
+      // 1. Arrange 📐
+      const store = useExecutionStore();
+      store.executions = [buildSummary()];
+
+      // 2. Act ⚙️
+      store.handleFlowCompleted(
+        buildCompleted({
+          finalState: ExecutionState.FALLIDO,
+          failureReason: 'La ruta de contingencia solo notifico',
+        }),
+      );
+
+      // 3. Assert 🎯
+      expect(store.executions[0]?.failureReason).toBe('La ruta de contingencia solo notifico');
     });
   });
 });

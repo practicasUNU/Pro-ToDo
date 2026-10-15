@@ -7,8 +7,12 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { useExecutionSocket } from './useExecutionSocket';
 
+import { ExecutionState } from '@/types/execution';
+
 import type {
   ExecutionEventHandlers,
+  FlowCompletedEvent,
+  FlowDiscardedEvent,
   FlowPausedEvent,
   FlowResumedEvent,
   NodeErrorEvent,
@@ -42,6 +46,7 @@ vi.mock('@services/fsm-executions.service', () => ({
   fetchExecutions: vi.fn(),
   fetchExecution: vi.fn(),
   resumeExecution: vi.fn(),
+  discardExecution: vi.fn(),
 }));
 
 const service = await import('@services/fsm-executions.service');
@@ -50,9 +55,7 @@ const resumeExecution = vi.mocked(service.resumeExecution);
 const EXECUTION_ID = '7c9e6679-7425-40de-944b-e07fc1f90ae7';
 const FLOW_ID = 'b3f1c2d4-5a6b-4c7d-8e9f-0a1b2c3d4e5f';
 
-const buildPaused = (
-  overrides: Partial<FlowPausedEvent> = {},
-): FlowPausedEvent => ({
+const buildPaused = (overrides: Partial<FlowPausedEvent> = {}): FlowPausedEvent => ({
   executionId: EXECUTION_ID,
   flowId: FLOW_ID,
   emittedAt: '2026-10-10T07:30:00.000Z',
@@ -60,12 +63,32 @@ const buildPaused = (
   severity: 'GRAVE',
   errorMessage: 'La plantilla aun trae marcadores',
   logFilePath: '/logs/execution.log',
+  flowName: 'NOTIWEB Licitaciones',
+  nodeType: 'PROCESADOR_IA',
+  errorCode: 'ERR_TEMPLATE_PENDING_VARS',
   ...overrides,
 });
 
-const buildResumed = (
-  overrides: Partial<FlowResumedEvent> = {},
-): FlowResumedEvent => ({
+const buildDiscarded = (overrides: Partial<FlowDiscardedEvent> = {}): FlowDiscardedEvent => ({
+  executionId: EXECUTION_ID,
+  flowId: FLOW_ID,
+  emittedAt: '2026-10-10T07:45:00.000Z',
+  discardedBy: 'practicas@unuware.com',
+  lastCursor: 'nodo_ia',
+  workflowDeactivated: true,
+  ...overrides,
+});
+
+const buildCompleted = (overrides: Partial<FlowCompletedEvent> = {}): FlowCompletedEvent => ({
+  executionId: EXECUTION_ID,
+  flowId: FLOW_ID,
+  emittedAt: '2026-10-10T07:50:00.000Z',
+  finalState: ExecutionState.EXITOSO,
+  flowName: 'NOTIWEB Licitaciones',
+  ...overrides,
+});
+
+const buildResumed = (overrides: Partial<FlowResumedEvent> = {}): FlowResumedEvent => ({
   executionId: EXECUTION_ID,
   flowId: FLOW_ID,
   emittedAt: '2026-10-10T07:40:00.000Z',
@@ -74,9 +97,7 @@ const buildResumed = (
   ...overrides,
 });
 
-const buildNodeError = (
-  overrides: Partial<NodeErrorEvent> = {},
-): NodeErrorEvent => ({
+const buildNodeError = (overrides: Partial<NodeErrorEvent> = {}): NodeErrorEvent => ({
   executionId: EXECUTION_ID,
   flowId: FLOW_ID,
   emittedAt: '2026-10-10T07:35:00.000Z',
@@ -129,8 +150,48 @@ describe('useExecutionSocket', () => {
     // `timeout: 0` es el contrato del aviso accionable: si se desvaneciese, el
     // reintento dependeria de haber estado mirando la pantalla.
     expect(options.timeout).toBe(0);
-    expect(options.caption).toContain('nodo_ia');
+    expect(options.multiLine).toBe(true);
+    expect(options.classes).toContain('pd-accent-grave');
+
+    // El desglose completo, que es lo que distingue este aviso de un «algo
+    // fallo»: nombre del flujo, nodo CON su tipo, severidad, codigo y mensaje.
+    // Sin el tipo y el codigo, el operador sabe que hay un problema pero no a
+    // que pantalla ir.
+    expect(options.message).toContain('NOTIWEB Licitaciones');
+    expect(options.message).toContain('nodo_ia');
+    expect(options.message).toContain('PROCESADOR_IA');
+    expect(options.caption).toContain('GRAVE');
+    expect(options.caption).toContain('ERR_TEMPLATE_PENDING_VARS');
+    expect(options.caption).toContain('La plantilla aun trae marcadores');
+
     expect(options.actions).toHaveLength(2);
+  });
+
+  it('deberia caer al identificador abreviado cuando la pausa no trae nombre de flujo', () => {
+    // Arrange
+    mountHost();
+
+    // Act. `flowName` solo llega si quien despacho paso el nombre al motor: su
+    // ausencia es un caso real, no defensivo.
+    // Las claves se QUITAN en vez de pasarse como `undefined`: con
+    // `exactOptionalPropertyTypes` no son lo mismo, y el evento real
+    // sencillamente no las trae.
+    const complete = buildPaused();
+    const withoutNames: FlowPausedEvent = {
+      executionId: complete.executionId,
+      flowId: complete.flowId,
+      emittedAt: complete.emittedAt,
+      activeCursor: complete.activeCursor,
+      errorMessage: 'El proveedor devolvio 503',
+    };
+
+    registered?.onFlowPaused?.(withoutNames);
+
+    // Assert
+    const options = lastNotifyOptions();
+    expect(options.message).toContain(FLOW_ID.slice(0, 8));
+    // Sin tipo de nodo no se inventa ningun parentesis vacio.
+    expect(options.message).not.toContain('()');
   });
 
   it('deberia reanudar la ejecucion al pulsar la accion del toast (CU-09)', async () => {
@@ -222,5 +283,61 @@ describe('useExecutionSocket', () => {
 
     // Assert
     expect(unsubscribe).toHaveBeenCalledTimes(1);
+  });
+  it('deberia felicitar en positivo al completarse un flujo con exito', () => {
+    // Arrange
+    mountHost();
+
+    // Act
+    registered?.onFlowCompleted?.(buildCompleted());
+
+    // Assert
+    const options = lastNotifyOptions();
+    expect(options.type).toBe('positive');
+    expect(options.message).toContain('NOTIWEB Licitaciones');
+  });
+
+  it('NO deberia pintar como exito un cierre OMITIDO', () => {
+    // Arrange. Un OMITIDO es un buzon vacio: en verde haria creer que se
+    // publico algo, y en rojo mandaria a investigar una ejecucion que funciono.
+    mountHost();
+
+    // Act
+    registered?.onFlowCompleted?.(buildCompleted({ finalState: ExecutionState.OMITIDO }));
+
+    // Assert
+    expect(lastNotifyOptions().type).toBe('info');
+  });
+
+  it('deberia avisar en negativo del cierre FALLIDO con su motivo', () => {
+    // Arrange
+    mountHost();
+
+    // Act
+    registered?.onFlowCompleted?.(
+      buildCompleted({
+        finalState: ExecutionState.FALLIDO,
+        failureReason: 'El nodo "nodo_ia" fallo (URGENTE)',
+      }),
+    );
+
+    // Assert
+    const options = lastNotifyOptions();
+    expect(options.type).toBe('negative');
+    expect(options.caption).toContain('El nodo "nodo_ia" fallo (URGENTE)');
+  });
+
+  it('deberia avisar del descarte indicando que el flujo queda inactivo', () => {
+    // Arrange
+    mountHost();
+
+    // Act
+    registered?.onFlowDiscarded?.(buildDiscarded());
+
+    // Assert
+    const options = lastNotifyOptions();
+    expect(options.type).toBe('info');
+    expect(options.message).toContain('nodo_ia');
+    expect(options.caption).toContain('inactivo');
   });
 });
