@@ -47,6 +47,13 @@ vi.mock('@services/fsm-executions.service', () => ({
   fetchExecution: vi.fn(),
   resumeExecution: vi.fn(),
   discardExecution: vi.fn(),
+  fetchActiveExecution: vi.fn(),
+}));
+
+// El composable alimenta tambien al canvas, que arrastra el servicio de
+// flujos; mismo motivo que el mock anterior.
+vi.mock('@services/workflows.service', () => ({
+  fetchWorkflow: vi.fn(),
 }));
 
 const service = await import('@services/fsm-executions.service');

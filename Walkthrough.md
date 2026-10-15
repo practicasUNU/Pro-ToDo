@@ -7875,3 +7875,112 @@ reconectar.
   avisos solo se disparan con los eventos que el gateway difunda por otras vias.
 - Emision por la sala `user_*` cuando exista algun aviso dirigido a una persona.
 - BullMQ para el desacoplamiento productor-consumidor (`rules/architecture-patterns.md` §5).
+
+---
+
+## Canvas de topología y supervisión en vivo (rama `feat/canvas-view`)
+
+El canal de tiempo real llevaba desde PROT-32 completo de extremo a extremo salvo el último
+tramo: no tenía pantalla. `PLAN.md` §4542 lo dejaba anotado —«no hay consumidor visual»— y el
+router solo exponía `/flujos` (tabla), `/flujos/nuevo` y `/flujos/:id/editar`. Un operador que
+recibía el aviso de «flujo pausado» no podía ver *dónde* se congeló el cursor ni qué había dejado
+cada nodo en el contexto: solo el texto del `q-notify`. Esta tanda añade esa vista, la que
+`frontend-quasar.md` §4 ya exigía con el nombre de «Canvas Read-Only».
+
+### Por qué `node:started` se emite por intento y no por nodo
+
+El motor ya aplicaba ese criterio dos veces: `logNodeOutcome` escribe una fila por invocación real
+de la estrategia, y `emitNodeError` lleva su `attempt` 1-based. Emitir una sola vez por nodo
+produciría la secuencia `started → error(1) → error(2) → completed`, en la que el canvas pinta la
+caja en rojo mientras el nodo está en realidad corriendo otra vez — incluido el `waitBackoff`, que
+puede durar segundos. Con emisión por intento, la interfaz puede decir «reintentando 3 de 3» sin
+inventarse nada.
+
+`node:completed`, en cambio, se emite **una vez y solo en el éxito**, justo tras
+`lastCompletedNodeType = node.nodeType`: ese punto domina las tres salidas de éxito (`halt`, nodo
+terminal y transición normal), igual que la liberación de binarios que vive dos líneas más abajo.
+El hueco del fallo ya lo cubre `node:error`, y un `node:completed` con `success: false` obligaría a
+todo consumidor a discriminar dentro del manejador del camino feliz.
+
+### Por qué el `stepIndex` sale de la topología y no del contador del bucle
+
+Es la decisión que más fácil sería deshacer por accidente. El consumidor ya tiene pintada la
+proyección de `buildOrderedTopology`, así que lo que necesita del evento es «ilumina la caja número
+3 de las que ya tienes». El contador `transitions` describe otra cosa —el ordinal de esta vuelta
+del bucle— y miente como índice en dos casos concretos: tras una reanudación CU-09 desde el quinto
+nodo arranca en cero y anunciaría «paso 1 de 7», y tras un desvío por `onErrorStep` con
+reincorporación vale 5 sobre un nodo que es la caja 3. Ambos viajan igualmente, pero cada uno con
+su papel: `stepIndex` para posicionar y `transition` para ordenar la serie, que con nodos de
+milisegundos y entregas por socket es lo único que deja descartar llegadas desordenadas y entender
+un ciclo `A → B → A`.
+
+`buildOrderedTopology` se calcula **una vez por ejecución**, junto al contador de transiciones y
+fuera del `while`: recorre el grafo entero, y moverlo dentro lo volvería O(n²) en la ruta crítica.
+
+### `stepIndex: number | null`, y no `-1`
+
+`buildOrderedTopology` solo sigue `nextStep`, de modo que un nodo de contingencia colgado
+únicamente de un `onErrorStep` no figura en la topología. Ese nodo **sí emite** —es justo el que el
+operador mira tras un fallo, y silenciarlo dejaría el canvas congelado tras el `node:error`—, pero
+con índice nulo. Se eligió `null` sobre `-1` porque un índice fuera de rango se pinta como caja
+válida en el primer `array[index]` descuidado, mientras que el nulo obliga a decidir: el canvas lo
+dibuja como derivación lateral punteada, bajo «Rutas de contingencia».
+
+### Sala y no difusión
+
+`flow:completed` se difunde al namespace entero porque es la confirmación de que el trabajo salió y
+alcanza a quien se fue a otra pantalla. El par del ciclo de vida del nodo es exactamente lo
+contrario: es la animación, no el desenlace, y solo significa algo para quien tiene ese canvas
+abierto en ese instante. El argumento decisivo es de volumen — dos eventos por intento de cada
+nodo, multiplicados por los sockets conectados si se difundieran.
+
+### Hueco conocido: el nodo en vuelo no tiene cierre propio
+
+Si salta el circuit breaker (`MAX_TRANSITIONS`) o el flujo se pausa, el último `node:started` se
+queda sin su `node:completed`. No se añadió un `node:aborted`: duplicaría lo que
+`flow:paused.activeCursor` ya lleva. En su lugar, **`flow:paused` y `flow:completed` son también el
+cierre del nodo en vuelo**, y el canvas los consume con ese papel — la pausa congela el cursor, y
+el cierre apaga las cajas que seguían corriendo marcándolas completadas o fallidas según el
+`finalState`. Sin esto, la caja giraría su spinner para siempre.
+
+### El store del canvas no duplica el de ejecución
+
+`canvas.store.ts` posee solo lo que no significa nada fuera de esta pantalla: el flujo cargado, su
+topología proyectada, el mapa de estados por caja y la selección. La ejecución, el cursor, la
+pertenencia a salas y las dos acciones de CU-09 siguen siendo de `useExecutionStore`. Es el mismo
+criterio por el que `useFlujoDraftStore` no guarda la configuración de cada nodo: duplicarlo
+crearía dos fuentes de verdad que divergen en cuanto una pausa llegue con el canvas cerrado.
+
+Sí guarda una ejecución propia, `observedExecution`, y la distinción importa:
+`executionStore.activeExecution` sigue al **último evento recibido sea del flujo que sea**, porque
+la tabla de `/flujos` mantiene abiertas las salas de todos los flujos a la vez. El canvas necesita
+la de *su* flujo, y por el mismo motivo todos sus manejadores descartan lo que no lleve su `flowId`.
+
+### Dónde vive `fetchActiveExecution`
+
+En `fsm-executions.service.ts` y no en `workflows.service.ts`: compone dos rutas de `/executions`
+—el listado para localizar la ejecución viva y el detalle para traer `context` y `retryState`, que
+el resumen omite a propósito— y `frontend-architecture.md` §1 fija un servicio por dominio. Filtra
+por estado **en el servidor**, consultando `EN_PROCESO` y luego `PAUSADO`: el listado pagina por
+`createdAt DESC`, así que filtrar en el cliente dejaría la ejecución pausada de un flujo con
+histórico largo fuera de la primera página y el canvas la daría por inexistente.
+
+No se añadió el endpoint `GET /workflows/:id/executions/active` que se barajó: los dos existentes
+bastan, y uno nuevo habría que mantenerlo sincronizado con ellos.
+
+### Verificación
+
+Backend **92 suites / 2226 pruebas**; frontend **56 ficheros / 1049 pruebas**; `tsc` y `vue-tsc`
+limpios, ESLint sin incidencias nuevas. Los 7 casos del bloque 38 del motor fijan las decisiones de
+arriba, en particular el 38.2 (emisión por intento) y el 38.5 (`stepIndex` tras reanudar), que es
+el que falla si alguien cambia la fuente del índice al contador del bucle.
+
+Un spec previo, `useExecutionSocket.spec.ts`, hubo que completarlo: el composable alimenta ahora
+también al canvas, y con él arrastra `@services/workflows.service` hasta `@boot/axios`, que no
+resuelve fuera del navegador.
+
+### Pendiente tras esta tanda
+
+- **Tabla de trazabilidad histórica** (`<q-table>` con `.row-urgente` / `-grave` / `-exitoso`): el
+  canvas cubre la ejecución VIVA de un flujo, no el histórico de todas.
+- Emisión por sala `user_*` y BullMQ, que siguen donde estaban.

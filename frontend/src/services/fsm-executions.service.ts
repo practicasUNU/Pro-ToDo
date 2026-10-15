@@ -1,5 +1,7 @@
 import { api } from '@boot/axios';
 
+import { ExecutionState } from '@/types/execution';
+
 import type {
   DiscardExecutionResult,
   ExecutionDetail,
@@ -70,4 +72,38 @@ export const discardExecution = async (executionId: string): Promise<DiscardExec
   );
 
   return data;
+};
+
+/**
+ * Estados en los que una ejecucion sigue VIVA y merece supervision.
+ *
+ * Se consultan por separado y en este orden porque `EN_PROCESO` es unico por
+ * flujo (lo garantiza el indice parcial `idx_flujo_activo`) mientras que las
+ * PAUSADO pueden acumularse: si hay una corriendo, es la que interesa.
+ */
+const LIVE_STATES: readonly ExecutionState[] = [ExecutionState.EN_PROCESO, ExecutionState.PAUSADO];
+
+/**
+ * Ejecucion viva de un flujo con su contexto acumulado, o `null` si no hay.
+ *
+ * Compone los dos endpoints existentes en vez de estrenar uno: el listado para
+ * localizarla y el detalle para traer `context` y `retryState`, que el resumen
+ * omite a proposito.
+ *
+ * Filtra por estado EN EL SERVIDOR y no en el cliente: el listado pagina por
+ * `createdAt DESC`, asi que un flujo con historico largo podria dejar su
+ * ejecucion pausada fuera de la primera pagina y el canvas la daria por
+ * inexistente.
+ */
+export const fetchActiveExecution = async (flowId: string): Promise<ExecutionDetail | null> => {
+  for (const state of LIVE_STATES) {
+    const page = await fetchExecutions({ flowId, state, limit: 1 });
+    const [candidate] = page.items;
+
+    if (candidate !== undefined) {
+      return fetchExecution(candidate.executionId);
+    }
+  }
+
+  return null;
 };

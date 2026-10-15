@@ -9,7 +9,9 @@ import type {
   FlowDiscardedEvent,
   FlowPausedEvent,
   FlowResumedEvent,
+  NodeCompletedEvent,
   NodeErrorEvent,
+  NodeStartedEvent,
   RoomAck,
 } from '@/types/execution';
 
@@ -37,12 +39,16 @@ export const subscribeToExecutionEvents = (handlers: ExecutionEventHandlers): ((
   const onFlowDiscarded = (event: FlowDiscardedEvent): void => handlers.onFlowDiscarded?.(event);
   const onFlowCompleted = (event: FlowCompletedEvent): void => handlers.onFlowCompleted?.(event);
   const onNodeError = (event: NodeErrorEvent): void => handlers.onNodeError?.(event);
+  const onNodeStarted = (event: NodeStartedEvent): void => handlers.onNodeStarted?.(event);
+  const onNodeCompleted = (event: NodeCompletedEvent): void => handlers.onNodeCompleted?.(event);
 
   socket.on(EXECUTION_EVENT.FLOW_PAUSED, onFlowPaused);
   socket.on(EXECUTION_EVENT.FLOW_RESUMED, onFlowResumed);
   socket.on(EXECUTION_EVENT.FLOW_DISCARDED, onFlowDiscarded);
   socket.on(EXECUTION_EVENT.FLOW_COMPLETED, onFlowCompleted);
   socket.on(EXECUTION_EVENT.NODE_ERROR, onNodeError);
+  socket.on(EXECUTION_EVENT.NODE_STARTED, onNodeStarted);
+  socket.on(EXECUTION_EVENT.NODE_COMPLETED, onNodeCompleted);
 
   return () => {
     socket.off(EXECUTION_EVENT.FLOW_PAUSED, onFlowPaused);
@@ -50,6 +56,8 @@ export const subscribeToExecutionEvents = (handlers: ExecutionEventHandlers): ((
     socket.off(EXECUTION_EVENT.FLOW_DISCARDED, onFlowDiscarded);
     socket.off(EXECUTION_EVENT.FLOW_COMPLETED, onFlowCompleted);
     socket.off(EXECUTION_EVENT.NODE_ERROR, onNodeError);
+    socket.off(EXECUTION_EVENT.NODE_STARTED, onNodeStarted);
+    socket.off(EXECUTION_EVENT.NODE_COMPLETED, onNodeCompleted);
   };
 };
 

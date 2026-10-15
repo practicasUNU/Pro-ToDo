@@ -29,9 +29,13 @@ import { ExecutionState } from '@core/fsm/types/fsm.enums';
 import type {
   FlowCompletedEvent,
   FlowDiscardedEvent,
+  NodeCompletedEvent,
   NodeErrorEvent,
+  NodeStartedEvent,
 } from '@common/types/execution-events.types';
 import type { JwtService } from '@nestjs/jwt';
+import { NodeType } from '@core/fsm/types/pipeline-schema.types';
+
 import type { Server, Socket } from 'socket.io';
 
 const FLOW_ID = 'b3f1c2d4-5a6b-4c7d-8e9f-0a1b2c3d4e5f';
@@ -48,6 +52,32 @@ const NODE_ERROR: NodeErrorEvent = {
   errorMessage: 'Tiempo agotado.',
   logFilePath: '/logs/execution-2026-10-10.log',
   attempt: 1,
+};
+
+const NODE_STARTED: NodeStartedEvent = {
+  executionId: '11111111-2222-4333-8444-555555555555',
+  flowId: FLOW_ID,
+  emittedAt: '2026-10-10T08:00:00.000Z',
+  nodeId: 'nodo_ia',
+  nodeType: NodeType.PROCESADOR_IA,
+  stepIndex: 1,
+  totalSteps: 3,
+  transition: 2,
+  attempt: 1,
+};
+
+const NODE_COMPLETED: NodeCompletedEvent = {
+  executionId: '11111111-2222-4333-8444-555555555555',
+  flowId: FLOW_ID,
+  emittedAt: '2026-10-10T08:00:04.000Z',
+  nodeId: 'nodo_ia',
+  nodeType: NodeType.PROCESADOR_IA,
+  stepIndex: 1,
+  totalSteps: 3,
+  transition: 2,
+  durationMs: 4000,
+  attempts: 1,
+  halted: false,
 };
 
 const DISCARDED: FlowDiscardedEvent = {
@@ -540,8 +570,53 @@ describe('NotificationGateway (canal WebSocket de eventos de ejecucion)', () => 
       expect(to).not.toHaveBeenCalled();
     });
 
+    // El par del ciclo de vida del nodo es el OPUESTO de `flow:completed`:
+    // solo significa algo para quien tiene ese canvas abierto, y es ademas el
+    // mas voluminoso del canal —dos eventos por intento de cada nodo—, asi que
+    // difundirlo multiplicaria ese trafico por los sockets conectados.
+    it('3.5 deberia emitir node:started a flow_<flowId>, no al namespace', () => {
+      // 1. Arrange
+      const { gateway, to, emit } = buildHarness();
+
+      // 2. Act
+      gateway.emitNodeStarted(NODE_STARTED);
+
+      // 3. Assert
+      expect(to).toHaveBeenCalledWith(`${FLOW_ROOM_PREFIX}${FLOW_ID}`);
+      expect(emit).toHaveBeenCalledWith(
+        EXECUTION_EVENT.NODE_STARTED,
+        NODE_STARTED,
+      );
+    });
+
+    it('3.6 deberia emitir node:completed a flow_<flowId>', () => {
+      // 1. Arrange
+      const { gateway, to, emit } = buildHarness();
+
+      // 2. Act
+      gateway.emitNodeCompleted(NODE_COMPLETED);
+
+      // 3. Assert
+      expect(to).toHaveBeenCalledWith(`${FLOW_ROOM_PREFIX}${FLOW_ID}`);
+      expect(emit).toHaveBeenCalledWith(
+        EXECUTION_EVENT.NODE_COMPLETED,
+        NODE_COMPLETED,
+      );
+    });
+
     // El coordinador puede despachar antes de que el adaptador monte el
     // namespace: en ese instante `@WebSocketServer()` aun no inyecto nada.
+    // Importa el doble en estos dos, que se despachan desde el arranque mismo
+    // del bucle y no desde un cierre.
+    it('3.7 NO deberia lanzar node:started sin servidor montado', () => {
+      // 1. Arrange
+      const { gateway } = buildHarness();
+      (gateway as unknown as { server?: Server }).server = undefined;
+
+      // 2. Act & 3. Assert
+      expect(() => gateway.emitNodeStarted(NODE_STARTED)).not.toThrow();
+    });
+
     it('3.2 NO deberia lanzar si el servidor todavia no existe', () => {
       // 1. Arrange
       const { gateway } = buildHarness();

@@ -407,6 +407,21 @@ onBeforeUnmount(() => {
 
       <template #body-cell-actions="cellProps">
         <q-td :props="cellProps" class="q-gutter-x-xs">
+          <!-- Supervision: la topologia en vivo, de solo lectura. Va la
+               primera porque es la accion no destructiva y la que se usa al
+               recibir el aviso de una pausa. -->
+          <q-btn
+            class="pd-btn-icon"
+            outline
+            dense
+            size="sm"
+            icon="account_tree"
+            :aria-label="`Supervisar ${cellProps.row.name}`"
+            :to="`/flujos/${cellProps.row.id}`"
+          >
+            <q-tooltip>Ver la topologia y el estado en vivo</q-tooltip>
+          </q-btn>
+
           <!-- Dos acciones y no una: el asistente edita la CONFIGURACION del
                pipeline (filtros, plantilla de cada nodo) y el dialogo se queda
                con el renombrado rapido, que no merece cargar un stepper. -->

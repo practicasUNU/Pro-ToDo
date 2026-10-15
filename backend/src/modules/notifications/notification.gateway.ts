@@ -35,7 +35,9 @@ import type {
   FlowDiscardedEvent,
   FlowPausedEvent,
   FlowResumedEvent,
+  NodeCompletedEvent,
   NodeErrorEvent,
+  NodeStartedEvent,
 } from '@common/types/execution-events.types';
 import type { OnModuleDestroy, OnModuleInit } from '@nestjs/common';
 import type {
@@ -329,6 +331,24 @@ export class NotificationGateway
   }
 
   /**
+   * El ciclo de vida del nodo va a la SALA, nunca al namespace entero.
+   *
+   * Es el caso opuesto a `emitFlowCompleted`: estos dos solo significan algo
+   * para quien tiene ese canvas abierto en ese instante —son la animacion, no
+   * el desenlace—, y nadie que mire otra pantalla gana nada con recibirlos.
+   * Ademas es el par mas voluminoso del canal, dos eventos por intento de cada
+   * nodo: difundirlos multiplicaria ese trafico por el numero de sockets
+   * conectados para entregar a cada operador la animacion de flujos ajenos.
+   */
+  public emitNodeStarted(event: NodeStartedEvent): void {
+    this.emitToFlow(EXECUTION_EVENT.NODE_STARTED, event.flowId, event);
+  }
+
+  public emitNodeCompleted(event: NodeCompletedEvent): void {
+    this.emitToFlow(EXECUTION_EVENT.NODE_COMPLETED, event.flowId, event);
+  }
+
+  /**
    * Difunde una mutacion de tabla maestra a los paneles abiertos.
    *
    * El destino depende de la entidad, no del emisor: las administrativas van
@@ -462,7 +482,9 @@ export class NotificationGateway
       | FlowResumedEvent
       | FlowDiscardedEvent
       | FlowCompletedEvent
-      | NodeErrorEvent,
+      | NodeErrorEvent
+      | NodeStartedEvent
+      | NodeCompletedEvent,
   ): void {
     this.server?.to(`${FLOW_ROOM_PREFIX}${flowId}`).emit(eventName, payload);
   }

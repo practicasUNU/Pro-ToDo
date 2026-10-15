@@ -25,6 +25,10 @@ import {
   NodeType,
 } from '@core/fsm/types/pipeline-schema.types';
 
+import type {
+  NodeCompletedEvent,
+  NodeStartedEvent,
+} from '@common/types/execution-events.types';
 import type { HybridLoggerService } from '@modules/logs/services/hybrid-logger.service';
 import type { PipelineSchemaDto } from '@core/fsm/dto/pipeline-schema.dto';
 import type { FsmExecution } from '@core/fsm/entities/fsm-execution.entity';
@@ -4223,6 +4227,243 @@ describe('FsmEngineService (PROT-09)', () => {
           errorDetail: 'Causa raiz: el proveedor devolvio 503.',
         }),
       );
+    });
+  });
+
+  describe('38. Ciclo de vida del nodo por el canal', () => {
+    /** Motor con el coordinador real espiado, igual que en el bloque 36. */
+    const buildListeningEngine = (
+      repo: Repository<FsmExecution>,
+    ): { engine: FsmEngineService; events: ExecutionEventsCoordinator } => {
+      const events = new ExecutionEventsCoordinator();
+
+      return {
+        engine: buildEngine(repo, new ConfigService({}), events),
+        events,
+      };
+    };
+
+    /** Registra los tres tipos del pipeline lineal resolviendo con exito. */
+    const registerHappyStrategies = (): void => {
+      for (const nodeType of [
+        NodeType.TRIGGER_IMAP,
+        NodeType.PROCESADOR_IA,
+        NodeType.DESTINO_DRUPAL,
+      ]) {
+        factory.registerStrategy(
+          buildStrategy(
+            nodeType,
+            jest.fn().mockResolvedValue({ success: true, data: {} }),
+          ),
+        );
+      }
+    };
+
+    /** Payloads emitidos, en orden, ya tipados para poder navegarlos. */
+    const payloadsOf = <T>(spy: jest.SpyInstance): T[] =>
+      (spy.mock.calls as [T][]).map(([event]) => event);
+
+    it('38.1 deberia anunciar inicio y fin de cada nodo en orden topologico', async () => {
+      // 1. Arrange 📐
+      const { repo } = buildRepository(buildExecution());
+      const { engine, events } = buildListeningEngine(repo);
+      const emitNodeStarted = jest.spyOn(events, 'emitNodeStarted');
+      const emitNodeCompleted = jest.spyOn(events, 'emitNodeCompleted');
+      registerHappyStrategies();
+
+      // 2. Act ⚙️
+      await engine.executeWorkflow(EXECUTION_ID, buildLinearSchema());
+
+      // 3. Assert 🎯: `stepIndex` es la posicion en la topologia que el canvas
+      //    ya tiene pintada, y `totalSteps` permite el "paso 3 de 3".
+      expect(payloadsOf<NodeStartedEvent>(emitNodeStarted)).toEqual([
+        expect.objectContaining({ nodeId: 'nodo_a', stepIndex: 0 }),
+        expect.objectContaining({ nodeId: 'nodo_b', stepIndex: 1 }),
+        expect.objectContaining({ nodeId: 'nodo_c', stepIndex: 2 }),
+      ]);
+      expect(payloadsOf<NodeCompletedEvent>(emitNodeCompleted)).toEqual([
+        expect.objectContaining({ nodeId: 'nodo_a', totalSteps: 3 }),
+        expect.objectContaining({ nodeId: 'nodo_b', totalSteps: 3 }),
+        expect.objectContaining({ nodeId: 'nodo_c', totalSteps: 3 }),
+      ]);
+    });
+
+    it('38.2 deberia anunciar el inicio POR INTENTO y el fin una sola vez', async () => {
+      // 1. Arrange 📐: con un solo anuncio inicial, la caja se quedaria pintada
+      //    como fallida durante el reintento, que es cuando hace falta ver que
+      //    el nodo sigue vivo.
+      const { repo } = buildRepository(buildExecution());
+      const { engine, events } = buildListeningEngine(repo);
+      const emitNodeStarted = jest.spyOn(events, 'emitNodeStarted');
+      const emitNodeCompleted = jest.spyOn(events, 'emitNodeCompleted');
+
+      const schema = buildLinearSchema();
+      schema.nodes.nodo_a.retryPolicy = { maxRetries: 2 };
+      schema.nodes.nodo_a.nextStep = null;
+
+      const executeA = jest
+        .fn()
+        .mockResolvedValueOnce(failure('GRAVE'))
+        .mockResolvedValueOnce(failure('GRAVE'))
+        .mockResolvedValue({ success: true, data: {} });
+      factory.registerStrategy(buildStrategy(NodeType.TRIGGER_IMAP, executeA));
+
+      // 2. Act ⚙️
+      await engine.executeWorkflow(EXECUTION_ID, schema);
+
+      // 3. Assert 🎯
+      expect(
+        payloadsOf<NodeStartedEvent>(emitNodeStarted).map((e) => e.attempt),
+      ).toEqual([1, 2, 3]);
+      expect(emitNodeCompleted).toHaveBeenCalledTimes(1);
+      expect(emitNodeCompleted).toHaveBeenCalledWith(
+        expect.objectContaining({ nodeId: 'nodo_a', attempts: 3 }),
+      );
+    });
+
+    it('38.3 NO deberia anunciar fin cuando el nodo agota sus intentos', async () => {
+      // 1. Arrange 📐: ese hueco ya lo cubre `node:error`, y un `node:completed`
+      //    en el camino del fallo obligaria a discriminar dentro del manejador
+      //    del camino feliz.
+      const { repo } = buildRepository(buildExecution());
+      const { engine, events } = buildListeningEngine(repo);
+      const emitNodeStarted = jest.spyOn(events, 'emitNodeStarted');
+      const emitNodeCompleted = jest.spyOn(events, 'emitNodeCompleted');
+      const emitFlowPaused = jest.spyOn(events, 'emitFlowPaused');
+
+      factory.registerStrategy(
+        buildStrategy(
+          NodeType.TRIGGER_IMAP,
+          jest.fn().mockResolvedValue(failure('URGENTE')),
+        ),
+      );
+
+      // 2. Act ⚙️
+      await engine.executeWorkflow(EXECUTION_ID, buildLinearSchema());
+
+      // 3. Assert 🎯
+      expect(emitNodeStarted).toHaveBeenCalledTimes(1);
+      expect(emitNodeCompleted).not.toHaveBeenCalled();
+      expect(emitFlowPaused).toHaveBeenCalledTimes(1);
+    });
+
+    it('38.4 deberia anunciar el nodo de contingencia con stepIndex nulo', async () => {
+      // 1. Arrange 📐: `buildOrderedTopology` solo sigue `nextStep`, asi que un
+      //    nodo colgado unicamente de un `onErrorStep` NO esta en la topologia.
+      //    El nulo le dice al canvas "pintalo como rama lateral"; un -1 se
+      //    pintaria como caja valida en el primer `array[index]` descuidado.
+      const { repo } = buildRepository(buildExecution());
+      const { engine, events } = buildListeningEngine(repo);
+      const emitNodeStarted = jest.spyOn(events, 'emitNodeStarted');
+
+      const schema = buildLinearSchema();
+      schema.nodes.nodo_a.onErrorStep = 'nodo_alerta';
+      schema.nodes.nodo_alerta = {
+        nodeId: 'nodo_alerta',
+        nodeType: NodeType.DESTINO_SMTP,
+        outputNamespace: 'smtp_result',
+        nextStep: null,
+        onErrorStep: null,
+        params: {},
+      };
+
+      factory.registerStrategy(
+        buildStrategy(
+          NodeType.TRIGGER_IMAP,
+          jest.fn().mockResolvedValue(failure('GRAVE')),
+        ),
+      );
+      factory.registerStrategy(
+        buildStrategy(
+          NodeType.DESTINO_SMTP,
+          jest.fn().mockResolvedValue({ success: true, data: {} }),
+        ),
+      );
+
+      // 2. Act ⚙️
+      await engine.executeWorkflow(EXECUTION_ID, schema);
+
+      // 3. Assert 🎯
+      expect(emitNodeStarted).toHaveBeenCalledWith(
+        expect.objectContaining({ nodeId: 'nodo_alerta', stepIndex: null }),
+      );
+      // La topologia nominal no cambia por tener una rama de contingencia.
+      expect(emitNodeStarted).toHaveBeenCalledWith(
+        expect.objectContaining({ nodeId: 'nodo_alerta', totalSteps: 3 }),
+      );
+    });
+
+    it('38.5 deberia conservar el stepIndex al reanudar desde un cursor intermedio', async () => {
+      // 1. Arrange 📐: es la prueba que falla si alguien cambia la fuente del
+      //    indice al contador del bucle, que arranca en cero sea cual sea el
+      //    cursor de partida y anunciaria "paso 1" sobre la caja equivocada.
+      const { repo } = buildRepository(
+        buildExecution({ activeCursor: 'nodo_c' }),
+      );
+      const { engine, events } = buildListeningEngine(repo);
+      const emitNodeStarted = jest.spyOn(events, 'emitNodeStarted');
+      registerHappyStrategies();
+
+      // 2. Act ⚙️
+      await engine.executeWorkflow(EXECUTION_ID, buildLinearSchema());
+
+      // 3. Assert 🎯: tercera caja de la topologia, primera vuelta del bucle.
+      expect(emitNodeStarted).toHaveBeenCalledTimes(1);
+      expect(emitNodeStarted).toHaveBeenCalledWith(
+        expect.objectContaining({
+          nodeId: 'nodo_c',
+          stepIndex: 2,
+          transition: 1,
+        }),
+      );
+    });
+
+    it('38.6 NO deberia anunciar un nodo omitido en modo prueba', async () => {
+      // 1. Arrange 📐: un nodo saltado no se ejecuta en absoluto, de modo que
+      //    anunciarlo lo pintaria corriendo sin que nadie lo invoque.
+      const { repo } = buildRepository(buildExecution());
+      const { engine, events } = buildListeningEngine(repo);
+      const emitNodeStarted = jest.spyOn(events, 'emitNodeStarted');
+      registerHappyStrategies();
+
+      // 2. Act ⚙️
+      await engine.executeWorkflow(EXECUTION_ID, buildLinearSchema(), {
+        skipNodeTypes: [NodeType.TRIGGER_IMAP],
+      });
+
+      // 3. Assert 🎯
+      expect(
+        payloadsOf<NodeStartedEvent>(emitNodeStarted).map((e) => e.nodeId),
+      ).toEqual(['nodo_b', 'nodo_c']);
+    });
+
+    it('38.7 deberia marcar halted y medir la duracion en la parada ordenada', async () => {
+      // 1. Arrange 📐: confirma que el punto de emision domina tambien la salida
+      //    por `halt`, que no pasa por `nextStep`.
+      const { repo } = buildRepository(buildExecution());
+      const { engine, events } = buildListeningEngine(repo);
+      const emitNodeCompleted = jest.spyOn(events, 'emitNodeCompleted');
+
+      factory.registerStrategy(
+        buildStrategy(
+          NodeType.TRIGGER_IMAP,
+          jest.fn().mockResolvedValue({
+            success: true,
+            data: {},
+            halt: { reason: 'NO_MESSAGES_FOUND' },
+          }),
+        ),
+      );
+
+      // 2. Act ⚙️
+      await engine.executeWorkflow(EXECUTION_ID, buildLinearSchema());
+
+      // 3. Assert 🎯: el valor del reloj es real, asi que solo se afirma el
+      //    tipo —mismo criterio que la traza del bloque de duraciones.
+      const [completed] = payloadsOf<NodeCompletedEvent>(emitNodeCompleted);
+      expect(completed?.halted).toBe(true);
+      expect(completed?.attempts).toBe(1);
+      expect(typeof completed?.durationMs).toBe('number');
     });
   });
 });

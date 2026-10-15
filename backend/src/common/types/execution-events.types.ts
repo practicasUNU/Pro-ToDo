@@ -16,6 +16,8 @@ export const EXECUTION_EVENT = {
   FLOW_DISCARDED: 'flow:discarded',
   FLOW_COMPLETED: 'flow:completed',
   NODE_ERROR: 'node:error',
+  NODE_STARTED: 'node:started',
+  NODE_COMPLETED: 'node:completed',
 } as const;
 
 /** Union de los nombres de evento, derivada para que no haya que mantenerla. */
@@ -140,4 +142,79 @@ export interface NodeErrorEvent extends ExecutionEventBase {
   /** Ruta del `execution-*.log` con la traza, o `null` si no se pudo escribir. */
   readonly logFilePath: string | null;
   readonly attempt: number;
+}
+
+/**
+ * Lo que comparten los dos eventos del ciclo de vida de un nodo.
+ *
+ * `nodeId` y no `stepId`: un paso del pipeline no tiene mas identidad que su
+ * clave en `PipelineSchema.nodes`, que es como ya lo nombra `NodeErrorEvent`.
+ * Tampoco viaja un nombre legible, porque `PipelineNodeConfig` no tiene `name`:
+ * la etiqueta la deriva el cliente de su propio catalogo de tipos, que es
+ * presentacion y le corresponde.
+ */
+interface NodeLifecycleEventBase extends ExecutionEventBase {
+  readonly nodeId: string;
+  readonly nodeType: NodeType;
+  /**
+   * Posicion del nodo en la topologia ESTATICA (0-based), o `null` si no es
+   * alcanzable siguiendo `nextStep` desde el `entrypoint` —el caso de un nodo
+   * de contingencia que solo cuelga de un `onErrorStep`.
+   *
+   * Sale de `buildOrderedTopology` y NO del contador de transiciones del bucle:
+   * el consumidor ya tiene pintada esa misma proyeccion y lo que necesita es
+   * "ilumina la caja numero 3 de las que ya tienes". Con el contador, una
+   * reanudacion desde el quinto nodo anunciaria "paso 1", porque el bucle
+   * arranca de cero sea cual sea el cursor de partida.
+   *
+   * `null` y no `-1`: un indice fuera de rango se pinta como caja valida en el
+   * primer `array[index]` descuidado, mientras que el nulo obliga a decidir.
+   */
+  readonly stepIndex: number | null;
+  /** Longitud de esa topologia: permite un "paso 3 de 7" sin otra consulta. */
+  readonly totalSteps: number;
+  /**
+   * Ordinal REAL de esta vuelta del bucle (1-based).
+   *
+   * Distinto de `stepIndex` y complementario: es la clave de orden de la serie.
+   * Con nodos de milisegundos y entregas por socket, es lo unico que deja
+   * descartar llegadas desordenadas y entender un ciclo de recuperacion
+   * `A -> B -> A`, donde el mismo `stepIndex` aparece dos veces.
+   */
+  readonly transition: number;
+}
+
+/**
+ * El motor va a invocar la estrategia de un nodo.
+ *
+ * Se emite UNA VEZ POR INTENTO y no por nodo, igual que `NodeErrorEvent` y que
+ * la fila de traza: con una sola emision inicial, un nodo que reintenta se
+ * quedaria pintado como fallido durante el backoff, que es justo cuando el
+ * operador necesita ver que sigue vivo.
+ */
+export interface NodeStartedEvent extends NodeLifecycleEventBase {
+  /** 1-based, misma semantica que `NodeErrorEvent.attempt`. */
+  readonly attempt: number;
+}
+
+/**
+ * La estrategia de un nodo resolvio con exito.
+ *
+ * No existe el simetrico para el fallo: ese hueco ya lo cubre `NodeErrorEvent`,
+ * y un `node:completed` con `success: false` obligaria a todo consumidor a
+ * discriminar dentro del manejador del camino feliz.
+ */
+export interface NodeCompletedEvent extends NodeLifecycleEventBase {
+  /**
+   * Reloj de pared del nodo COMPLETO: incluye los reintentos y sus esperas.
+   *
+   * Es deliberadamente mayor que la `duracion_ms` que guarda `log_nodos`, que
+   * mide cada invocacion por separado. Aqui interesa cuanto estuvo la caja
+   * encendida en la pantalla.
+   */
+  readonly durationMs: number;
+  /** Intentos consumidos hasta salir bien; `1` si fue a la primera. */
+  readonly attempts: number;
+  /** El nodo pidio parada ordenada (`NodeResult.halt`): el flujo acaba OMITIDO. */
+  readonly halted: boolean;
 }

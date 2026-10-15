@@ -28,7 +28,10 @@ import {
   ERR_NODE_HTTP_FAILURE,
   ERR_STRATEGY_NOT_FOUND,
 } from '@core/fsm/types/node-strategy.types';
-import { resolveErrorRoute } from '@core/fsm/utils/pipeline-topology.util';
+import {
+  buildOrderedTopology,
+  resolveErrorRoute,
+} from '@core/fsm/utils/pipeline-topology.util';
 import { NodeLogStatus } from '@modules/logs/entities/log-nodo.entity';
 
 import type { PipelineNodeConfigDto } from '@core/fsm/dto/pipeline-schema.dto';
@@ -881,6 +884,20 @@ export class FsmEngineService {
     try {
       let transitions = 0;
 
+      // Proyeccion ESTATICA del grafo, calculada UNA sola vez por ejecucion.
+      // Alimenta el `stepIndex` de los eventos de nodo, que es la posicion en
+      // la topologia que el canvas ya tiene pintada y no el ordinal del bucle:
+      // una reanudacion CU-09 desde el quinto nodo arranca `transitions` en
+      // cero y anunciaria "paso 1 de 7" sobre la caja equivocada.
+      //
+      // FUERA del `while` a proposito: `buildOrderedTopology` recorre el grafo
+      // entero, y moverlo dentro lo volveria O(n^2) en la ruta critica.
+      const orderedTopology = buildOrderedTopology(schema);
+      const stepIndexById = new Map<string, number>(
+        orderedTopology.map((step, index) => [step.nodeId, index]),
+      );
+      const totalSteps = orderedTopology.length;
+
       /**
        * Ultimo desvio por `onErrorStep` de esta ejecucion, o `null`.
        *
@@ -1006,8 +1023,31 @@ export class FsmEngineService {
         // `@Max(5)` de RetryPolicyDto (capa 1 de la defensa).
         let outcome: NodeOutcome;
 
+        // Reloj de pared del NODO completo: a diferencia del `startedAt` de
+        // cada vuelta —que mide una invocacion y alimenta la traza—, este
+        // incluye los reintentos y sus esperas, que es el tiempo que la caja
+        // estuvo encendida en la pantalla del operador.
+        const nodeEnteredAt = Date.now();
+        let attemptNumber = 0;
+
         for (;;) {
           const startedAt = Date.now();
+
+          // 1-based, igual que en la traza y en `node:error`.
+          attemptNumber = (retryState[node.nodeId] ?? 0) + 1;
+
+          // Se anuncia POR INTENTO y no una vez por nodo: con una sola emision
+          // inicial, un nodo que reintenta se quedaria pintado como fallido
+          // durante todo el backoff, que es justo cuando hace falta ver que
+          // sigue vivo. Mismo criterio que ya aplican la traza y `node:error`.
+          this.emitNodeStarted(
+            execution,
+            node,
+            stepIndexById.get(node.nodeId) ?? null,
+            totalSteps,
+            transitions,
+            attemptNumber,
+          );
 
           outcome = await this.runNode(node, context, executionId);
 
@@ -1023,7 +1063,7 @@ export class FsmEngineService {
             // 1-based: "intento 1 de 3" es como se lee en una interfaz. El
             // contador de `retryState` arranca en cero, asi que publicarlo en
             // crudo mostraria "intento 0" en el primer fallo.
-            (retryState[node.nodeId] ?? 0) + 1,
+            attemptNumber,
             Date.now() - startedAt,
           );
 
@@ -1113,6 +1153,22 @@ export class FsmEngineService {
 
         if (result.success) {
           lastCompletedNodeType = node.nodeType;
+
+          // Mismo punto y mismo motivo que la liberacion de binarios: domina
+          // las tres salidas de exito que siguen. No hay simetrico para el
+          // fallo porque ese hueco ya lo cubre `node:error`.
+          this.emitNodeCompleted(
+            execution,
+            node,
+            stepIndexById.get(node.nodeId) ?? null,
+            totalSteps,
+            transitions,
+            {
+              durationMs: Date.now() - nodeEnteredAt,
+              attempts: attemptNumber,
+              halted: result.halt !== undefined,
+            },
+          );
 
           // Liberacion de binarios. Va JUSTO aqui, y no repetida en cada rama de
           // salida, porque este punto domina las tres que siguen —`halt`, nodo
@@ -2168,6 +2224,63 @@ export class FsmEngineService {
       finalState,
       ...(flowName !== undefined ? { flowName } : {}),
       ...(failureReason !== undefined ? { failureReason } : {}),
+    });
+  }
+
+  /**
+   * Anuncia que el motor va a invocar la estrategia de un nodo.
+   *
+   * Centralizado por el mismo motivo que `emitCompleted`: son seis campos
+   * compartidos entre dos emisiones, y repetir el literal invita a que una de
+   * las dos se quede sin un campo el dia que el contrato crezca.
+   *
+   * `stepIndex` llega ya resuelto —y puede ser `null`— porque un nodo de
+   * contingencia colgado solo de un `onErrorStep` no figura en la topologia:
+   * `buildOrderedTopology` solo sigue `nextStep`. El nulo le dice al canvas
+   * "pintalo como rama lateral", que es informacion y no un hueco.
+   */
+  private emitNodeStarted(
+    execution: FsmExecution,
+    node: PipelineNodeConfigDto,
+    stepIndex: number | null,
+    totalSteps: number,
+    transition: number,
+    attempt: number,
+  ): void {
+    this.executionEvents.emitNodeStarted({
+      executionId: execution.executionId,
+      flowId: execution.flowId,
+      emittedAt: new Date().toISOString(),
+      nodeId: node.nodeId,
+      nodeType: node.nodeType,
+      stepIndex,
+      totalSteps,
+      transition,
+      attempt,
+    });
+  }
+
+  /** Anuncia que la estrategia de un nodo resolvio con exito. */
+  private emitNodeCompleted(
+    execution: FsmExecution,
+    node: PipelineNodeConfigDto,
+    stepIndex: number | null,
+    totalSteps: number,
+    transition: number,
+    outcome: { durationMs: number; attempts: number; halted: boolean },
+  ): void {
+    this.executionEvents.emitNodeCompleted({
+      executionId: execution.executionId,
+      flowId: execution.flowId,
+      emittedAt: new Date().toISOString(),
+      nodeId: node.nodeId,
+      nodeType: node.nodeType,
+      stepIndex,
+      totalSteps,
+      transition,
+      durationMs: outcome.durationMs,
+      attempts: outcome.attempts,
+      halted: outcome.halted,
     });
   }
 

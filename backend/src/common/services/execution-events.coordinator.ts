@@ -5,7 +5,9 @@ import type {
   FlowDiscardedEvent,
   FlowPausedEvent,
   FlowResumedEvent,
+  NodeCompletedEvent,
   NodeErrorEvent,
+  NodeStartedEvent,
 } from '@common/types/execution-events.types';
 
 /**
@@ -17,7 +19,7 @@ import type {
  * gateway se inscribe hacia arriba y el motor habla contra una interfaz que no
  * sabe nada de Socket.io, de salas ni de JWT.
  *
- * Los tres metodos son SINCRONOS y devuelven `void`. No es descuido: se invocan
+ * Todos los metodos son SINCRONOS y devuelven `void`. No es descuido: se invocan
  * desde `pauseAt` y `logNodeOutcome`, que estan en la ruta critica del bucle de
  * la FSM. Devolver una promesa invitaria a esperarla, y eso acoplaria la
  * latencia del motor a la de la red. Ademas seria una promesa vacia: `emit` de
@@ -30,6 +32,8 @@ export interface ExecutionEventPort {
   emitFlowDiscarded(event: FlowDiscardedEvent): void;
   emitFlowCompleted(event: FlowCompletedEvent): void;
   emitNodeError(event: NodeErrorEvent): void;
+  emitNodeStarted(event: NodeStartedEvent): void;
+  emitNodeCompleted(event: NodeCompletedEvent): void;
 }
 
 /**
@@ -97,6 +101,20 @@ export class ExecutionEventsCoordinator {
 
   public emitNodeError(event: NodeErrorEvent): void {
     this.dispatch('node:error', (port) => port.emitNodeError(event));
+  }
+
+  /**
+   * Los dos del ciclo de vida del nodo se despachan igual que los demas, pero
+   * se invocan desde el CENTRO del bucle de la FSM y no desde un cierre. El
+   * aislamiento por puerto de `dispatch` deja de ser una precaucion y pasa a ser
+   * el unico motivo por el que un canal roto no aborta una transicion en curso.
+   */
+  public emitNodeStarted(event: NodeStartedEvent): void {
+    this.dispatch('node:started', (port) => port.emitNodeStarted(event));
+  }
+
+  public emitNodeCompleted(event: NodeCompletedEvent): void {
+    this.dispatch('node:completed', (port) => port.emitNodeCompleted(event));
   }
 
   /**

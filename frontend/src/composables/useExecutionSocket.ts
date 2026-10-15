@@ -3,12 +3,15 @@ import { onBeforeUnmount, onMounted } from 'vue';
 import { useQuasar } from 'quasar';
 
 import { subscribeToExecutionEvents } from '@services/socket-events.service';
+import { useCanvasStore } from '@stores/canvas.store';
 import { useExecutionStore } from '@stores/execution.store';
 
 import { ExecutionState } from '@/types/execution';
 
 import type {
   FlowCompletedEvent,
+  NodeCompletedEvent,
+  NodeStartedEvent,
   FlowDiscardedEvent,
   FlowPausedEvent,
   FlowResumedEvent,
@@ -62,6 +65,7 @@ const describeFlow = (flowName: string | undefined, flowId: string): string =>
 export const useExecutionSocket = (): void => {
   const $q = useQuasar();
   const executionStore = useExecutionStore();
+  const canvasStore = useCanvasStore();
 
   let unsubscribe: (() => void) | null = null;
 
@@ -104,6 +108,9 @@ export const useExecutionSocket = (): void => {
    */
   const onFlowPaused = (event: FlowPausedEvent): void => {
     executionStore.handleFlowPaused(event);
+    // El canvas tambien escucha la pausa: es el UNICO cierre del nodo en
+    // vuelo, porque el motor no emite un `node:aborted`.
+    canvasStore.handleFlowPaused(event);
 
     // El nodo se nombra con su TIPO entre parentesis cuando el evento lo trae:
     // `nodo_3` no le dice nada a nadie, `nodo_3 (DESTINO_DRUPAL)` manda al
@@ -189,6 +196,8 @@ export const useExecutionSocket = (): void => {
    */
   const onFlowCompleted = (event: FlowCompletedEvent): void => {
     executionStore.handleFlowCompleted(event);
+    // Apaga las cajas que seguian corriendo, por el mismo motivo que la pausa.
+    canvasStore.handleFlowCompleted(event);
 
     const flow = describeFlow(event.flowName, event.flowId);
 
@@ -246,6 +255,22 @@ export const useExecutionSocket = (): void => {
     });
   };
 
+  /**
+   * El ciclo de vida del nodo alimenta SOLO al canvas, sin aviso al usuario.
+   *
+   * Es el par mas voluminoso del canal —dos eventos por intento de cada nodo—,
+   * de modo que notificarlo sepultaria los avisos que si piden una accion. El
+   * propio canvas descarta lo que no sea de su flujo, porque la tabla de
+   * `/flujos` mantiene abiertas las salas de todos.
+   */
+  const onNodeStarted = (event: NodeStartedEvent): void => {
+    canvasStore.handleNodeStarted(event);
+  };
+
+  const onNodeCompleted = (event: NodeCompletedEvent): void => {
+    canvasStore.handleNodeCompleted(event);
+  };
+
   onMounted(() => {
     unsubscribe = subscribeToExecutionEvents({
       onFlowPaused,
@@ -253,6 +278,8 @@ export const useExecutionSocket = (): void => {
       onFlowDiscarded,
       onFlowCompleted,
       onNodeError,
+      onNodeStarted,
+      onNodeCompleted,
     });
   });
 

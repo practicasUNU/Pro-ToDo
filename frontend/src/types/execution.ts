@@ -20,7 +20,7 @@
  * incidencias justo cuando alguien resuelve una.
  */
 import type { CrudMutationPayload } from '@/types/crud-events';
-import type { PipelineSummary } from '@/types/pipeline';
+import type { NodeType, PipelineSummary } from '@/types/pipeline';
 
 export enum ExecutionState {
   INACTIVO = 'INACTIVO',
@@ -105,6 +105,8 @@ export const EXECUTION_EVENT = {
   FLOW_DISCARDED: 'flow:discarded',
   FLOW_COMPLETED: 'flow:completed',
   NODE_ERROR: 'node:error',
+  NODE_STARTED: 'node:started',
+  NODE_COMPLETED: 'node:completed',
 } as const;
 
 export interface ExecutionEventBase {
@@ -173,6 +175,38 @@ export interface NodeErrorEvent extends ExecutionEventBase {
 }
 
 /** Acuse de las suscripciones a sala. */
+/**
+ * Lo que comparten los dos eventos del ciclo de vida de un nodo.
+ *
+ * Replica exacta de `NodeLifecycleEventBase` del backend
+ * (`@common/types/execution-events.types.ts`).
+ */
+interface NodeLifecycleEvent extends ExecutionEventBase {
+  readonly nodeId: string;
+  readonly nodeType: NodeType;
+  /**
+   * Posicion en la topologia ESTATICA (0-based), o `null` si el nodo solo
+   * cuelga de un `onErrorStep` y por tanto no esta en el camino nominal.
+   */
+  readonly stepIndex: number | null;
+  readonly totalSteps: number;
+  /** Ordinal real de la vuelta del bucle (1-based): ordena la serie. */
+  readonly transition: number;
+}
+
+/** El motor va a invocar la estrategia de un nodo. Llega UNO POR INTENTO. */
+export interface NodeStartedEvent extends NodeLifecycleEvent {
+  readonly attempt: number;
+}
+
+/** La estrategia de un nodo resolvio con exito. Solo en el camino feliz. */
+export interface NodeCompletedEvent extends NodeLifecycleEvent {
+  /** Reloj de pared del nodo completo: incluye reintentos y esperas. */
+  readonly durationMs: number;
+  readonly attempts: number;
+  readonly halted: boolean;
+}
+
 export interface RoomAck {
   readonly ok: boolean;
   readonly reason?: string;
@@ -192,6 +226,8 @@ export interface ServerToClientEvents {
   'flow:discarded': (event: FlowDiscardedEvent) => void;
   'flow:completed': (event: FlowCompletedEvent) => void;
   'node:error': (event: NodeErrorEvent) => void;
+  'node:started': (event: NodeStartedEvent) => void;
+  'node:completed': (event: NodeCompletedEvent) => void;
   // Familia aparte —mutaciones de tablas maestras—, pero comparte socket, y el
   // mapa tipado tiene que conocerla o `socket.on` la rechaza en compilacion.
   'crud:mutation': (payload: CrudMutationPayload) => void;
@@ -209,4 +245,6 @@ export interface ExecutionEventHandlers {
   onFlowDiscarded?: (event: FlowDiscardedEvent) => void;
   onFlowCompleted?: (event: FlowCompletedEvent) => void;
   onNodeError?: (event: NodeErrorEvent) => void;
+  onNodeStarted?: (event: NodeStartedEvent) => void;
+  onNodeCompleted?: (event: NodeCompletedEvent) => void;
 }

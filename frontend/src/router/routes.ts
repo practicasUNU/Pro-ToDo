@@ -49,6 +49,15 @@ const routes: RouteRecordRaw[] = [
         // Operar flujos es operacion, no gestion de cuentas.
       },
       {
+        // Vista de supervision: el "Canvas Read-Only" de `frontend-quasar.md`
+        // §4. Va ANTES de `flujos/nuevo` y `flujos/:id/editar` por legibilidad
+        // del grupo; el emparejador de vue-router prioriza el segmento literal
+        // sobre el parametro, de modo que `/flujos/nuevo` sigue resolviendo al
+        // asistente y no a un flujo llamado "nuevo".
+        path: 'flujos/:id',
+        component: () => import('@/pages/workflows/WorkflowCanvasPage.vue'),
+      },
+      {
         path: 'flujos/nuevo',
         component: () => import('@/pages/WizardPage.vue'),
         // SIN requiresAdmin: idem. Se declara DESPUES de 'flujos' por claridad;
