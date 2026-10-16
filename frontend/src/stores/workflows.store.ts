@@ -1,3 +1,4 @@
+import { WorkflowStatus } from '@/types/pipeline';
 import { defineStore, acceptHMRUpdate } from 'pinia';
 import { computed, ref } from 'vue';
 
@@ -18,8 +19,15 @@ export const useWorkflowsStore = defineStore('workflows', () => {
   const workflows = ref<PipelineSummary[]>([]);
   const isLoading = ref(false);
 
+  /**
+   * Flujos armados frente a los disparadores.
+   *
+   * Cuenta SOLO los ACTIVO: un PAUSADO no dispara —el motor lo saco de los
+   * sondeos al detener su ejecucion—, asi que sumarlo diria que hay mas flujos
+   * trabajando de los que hay.
+   */
   const activeCount = computed<number>(
-    () => workflows.value.filter((workflow) => workflow.active).length,
+    () => workflows.value.filter((workflow) => workflow.status === WorkflowStatus.ACTIVO).length,
   );
 
   const fetchWorkflows = async (): Promise<void> => {
@@ -60,9 +68,16 @@ export const useWorkflowsStore = defineStore('workflows', () => {
     }
   };
 
-  /** Habilita o retira el flujo frente a los disparadores automaticos. */
-  const setActive = async (id: string, active: boolean): Promise<PipelineSummary> =>
-    updateWorkflow(id, { active });
+  /**
+   * Habilita o retira el flujo frente a los disparadores automaticos.
+   *
+   * Solo ACTIVO e INACTIVO: el backend rechaza un PAUSADO llegado por la API,
+   * porque ese estado describe una ejecucion detenida y lo escribe el motor.
+   */
+  const setStatus = async (
+    id: string,
+    status: WorkflowStatus.ACTIVO | WorkflowStatus.INACTIVO,
+  ): Promise<PipelineSummary> => updateWorkflow(id, { status });
 
   /**
    * Aplica una mutacion llegada por WebSocket.
@@ -77,7 +92,7 @@ export const useWorkflowsStore = defineStore('workflows', () => {
    *
    * La rama `DELETED` existe por contrato, pero `workflows` no la produce: no
    * hay `@Delete` en su controlador y retirar un flujo es `PATCH
-   * { active: false }`, es decir un `UPDATED`.
+   * { status: 'INACTIVO' }`, es decir un `UPDATED`.
    */
   const applyMutation = (
     action: CrudAction,
@@ -109,7 +124,7 @@ export const useWorkflowsStore = defineStore('workflows', () => {
     activeCount,
     fetchWorkflows,
     updateWorkflow,
-    setActive,
+    setStatus,
     applyMutation,
   };
 });

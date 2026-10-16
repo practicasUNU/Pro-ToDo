@@ -13,6 +13,7 @@ import WorkflowDialog from './WorkflowDialog.vue';
 import { extractApiErrorMessage } from '@/utils/api-error';
 
 import { ExecutionState } from '@/types/execution';
+import { WorkflowStatus } from '@/types/pipeline';
 
 import type { ExecutionSummary } from '@/types/execution';
 import type { PipelineSummary } from '@/types/pipeline';
@@ -38,7 +39,7 @@ const workflowToDeactivate = ref<PipelineSummary | null>(null);
 // ajeno cambie cual es la ejecucion vigente de ese flujo. Descartar la que se
 // resolviera en ese momento cerraria una ejecucion distinta de la que el
 // operador vio al pulsar.
-const executionToDiscard = ref<ExecutionSummary | null>(null);
+const executionToDiscard = ref<string | null>(null);
 
 // Admite `null` porque el boton `clearable` de QInput escribe eso, no una cadena
 // vacia. QTable declara su prop `filter` como `any`, asi que el compilador no
@@ -78,13 +79,38 @@ const columns: QTableColumn<PipelineSummary>[] = [
     align: 'center',
     sortable: true,
   },
-  { name: 'status', label: 'Estado', field: 'active', align: 'center', sortable: true },
+  { name: 'status', label: 'Estado', field: 'status', align: 'center', sortable: true },
   { name: 'actions', label: 'Acciones', field: 'id', align: 'center' },
 ];
 
-/** Ejecucion vigente de un flujo, o `null` si nunca se ha disparado. */
+/**
+ * Ejecucion vigente de un flujo, o `null` si no hay ninguna viva.
+ *
+ * Prefiere la del store, que es la que el canal mantiene al dia, y cae al dato
+ * que ya trae la fila. Antes solo existia la primera via, y eso ataba el estado
+ * pintado a que el socket hubiera entregado algo: tras un refresco de la pagina
+ * la tabla no sabia que un flujo estaba detenido hasta el siguiente evento.
+ */
 const resolveExecution = (workflow: PipelineSummary): ExecutionSummary | null =>
   executionStore.executionByFlowId.get(workflow.id) ?? null;
+
+/**
+ * El flujo tiene una ejecucion detenida esperando decision.
+ *
+ * Se mira PRIMERO el estado de la fila: `status` es un hecho persistido que
+ * sobrevive a un refresco, mientras que el del store depende de que el canal
+ * haya entregado el evento. Se conserva la segunda via porque el backend marca
+ * PAUSADO el flujo solo si estaba ACTIVO, y una ejecucion de un flujo que ya
+ * estaba retirado sigue siendo reanudable.
+ */
+const isPaused = (workflow: PipelineSummary): boolean =>
+  workflow.status === WorkflowStatus.PAUSADO ||
+  workflow.executionState === ExecutionState.PAUSADO ||
+  resolveExecution(workflow)?.state === ExecutionState.PAUSADO;
+
+/** Identificador de la ejecucion detenida, venga del canal o de la fila. */
+const resolveExecutionId = (workflow: PipelineSummary): string | null =>
+  resolveExecution(workflow)?.executionId ?? workflow.activeExecutionId;
 
 const loadCatalog = async (): Promise<void> => {
   try {
@@ -109,14 +135,17 @@ const loadCatalog = async (): Promise<void> => {
  * —lo repinta el evento `flow:resumed` que llega por el canal.
  */
 const resumeExecution = async (workflow: PipelineSummary): Promise<void> => {
-  const execution = resolveExecution(workflow);
+  // Por id y no por la ejecucion entera: tras un refresco de la pagina el store
+  // todavia no ha recibido ningun evento, y lo unico que identifica la
+  // ejecucion detenida es el campo que ya trae la fila.
+  const executionId = resolveExecutionId(workflow);
 
-  if (execution === null) {
+  if (executionId === null) {
     return;
   }
 
   try {
-    await executionStore.resumeExecution(execution.executionId);
+    await executionStore.resumeExecution(executionId);
     $q.notify({ type: 'positive', message: 'Ejecucion reanudada' });
   } catch (error) {
     $q.notify({
@@ -134,13 +163,15 @@ const resumeExecution = async (workflow: PipelineSummary): Promise<void> => {
  * solo repite el mismo fallo.
  */
 const requestDiscard = (workflow: PipelineSummary): void => {
-  const execution = resolveExecution(workflow);
+  const executionId = resolveExecutionId(workflow);
 
-  if (execution === null) {
+  if (executionId === null) {
     return;
   }
 
-  executionToDiscard.value = execution;
+  // Se guarda el ID y no el resumen: el dialogo solo necesita a quien descartar,
+  // y exigir el objeto completo dejaba el boton inerte tras un refresco.
+  executionToDiscard.value = executionId;
   isDiscardDialogOpen.value = true;
 };
 
@@ -153,14 +184,14 @@ const requestDiscard = (workflow: PipelineSummary): void => {
  * ademas lo que mantiene al dia las pantallas de los demas operadores.
  */
 const confirmDiscard = async (): Promise<void> => {
-  const execution = executionToDiscard.value;
+  const executionId = executionToDiscard.value;
 
-  if (execution === null) {
+  if (executionId === null) {
     return;
   }
 
   try {
-    await executionStore.discardExecution(execution.executionId);
+    await executionStore.discardExecution(executionId);
     $q.notify({
       type: 'positive',
       message: 'Ejecucion descartada. El flujo queda inactivo.',
@@ -201,7 +232,7 @@ const confirmDeactivation = async (): Promise<void> => {
   if (!workflowToDeactivate.value) return;
 
   try {
-    await workflowsStore.setActive(workflowToDeactivate.value.id, false);
+    await workflowsStore.setStatus(workflowToDeactivate.value.id, WorkflowStatus.INACTIVO);
     $q.notify({ type: 'positive', message: 'Flujo desactivado correctamente' });
   } catch (error) {
     $q.notify({
@@ -227,7 +258,7 @@ const confirmDeactivation = async (): Promise<void> => {
  */
 const activateWorkflow = async (workflow: PipelineSummary): Promise<void> => {
   try {
-    await workflowsStore.setActive(workflow.id, true);
+    await workflowsStore.setStatus(workflow.id, WorkflowStatus.ACTIVO);
     $q.notify({
       type: 'positive',
       message: `Flujo "${workflow.name}" habilitado. El sondeo lo recogera en menos de un minuto.`,
@@ -344,10 +375,13 @@ onBeforeUnmount(() => {
       <!-- El estado de EJECUCION manda sobre el de habilitacion: a un operador
            le importa mas que el flujo este detenido ahora mismo que si quedo
            habilitado frente a los disparadores. Sin ejecucion viva se cae al
-           badge de siempre. -->
+           badge de siempre.
+           La pausa se decide con `isPaused`, que mira PRIMERO el `status` de la
+           fila: ese es un hecho persistido que sobrevive a un refresco, mientras
+           que el del store depende de que el canal haya entregado el evento. -->
       <template #body-cell-status="cellProps">
         <q-td :props="cellProps">
-          <template v-if="resolveExecution(cellProps.row)?.state === ExecutionState.PAUSADO">
+          <template v-if="isPaused(cellProps.row)">
             <q-badge class="pd-badge row-grave" data-test="status-paused"> Pausado </q-badge>
             <q-btn
               flat
@@ -378,7 +412,10 @@ onBeforeUnmount(() => {
           </template>
 
           <template
-            v-else-if="resolveExecution(cellProps.row)?.state === ExecutionState.EN_PROCESO"
+            v-else-if="
+              resolveExecution(cellProps.row)?.state === ExecutionState.EN_PROCESO ||
+              cellProps.row.executionState === ExecutionState.EN_PROCESO
+            "
           >
             <q-badge class="pd-badge pd-badge--active" data-test="status-running">
               En Proceso
@@ -390,13 +427,17 @@ onBeforeUnmount(() => {
           <template v-else>
             <q-badge
               class="pd-badge"
-              :class="cellProps.row.active ? 'pd-badge--active' : 'pd-badge--inactive'"
+              :class="
+                cellProps.row.status === WorkflowStatus.ACTIVO
+                  ? 'pd-badge--active'
+                  : 'pd-badge--inactive'
+              "
             >
-              {{ cellProps.row.active ? 'Activo' : 'Inactivo' }}
+              {{ cellProps.row.status === WorkflowStatus.ACTIVO ? 'Activo' : 'Inactivo' }}
             </q-badge>
             <q-tooltip>
               {{
-                cellProps.row.active
+                cellProps.row.status === WorkflowStatus.ACTIVO
                   ? 'Habilitado frente a los disparadores automaticos'
                   : 'No se disparara hasta que lo habilites'
               }}
@@ -452,7 +493,7 @@ onBeforeUnmount(() => {
           <!-- Mismo par excluyente que el CRUD de usuarios: desactivar pasa
                por la cuenta atras de `SafeDeleteModal`; activar es directo. -->
           <q-btn
-            v-if="cellProps.row.active"
+            v-if="cellProps.row.status === WorkflowStatus.ACTIVO"
             class="pd-btn-icon pd-btn-icon--danger"
             outline
             dense

@@ -1,6 +1,6 @@
 import { ApiPropertyOptional } from '@nestjs/swagger';
 import {
-  IsBoolean,
+  IsIn,
   IsNotEmptyObject,
   IsObject,
   IsOptional,
@@ -8,6 +8,11 @@ import {
   MaxLength,
   ValidateIf,
 } from 'class-validator';
+
+import {
+  EDITABLE_WORKFLOW_STATUSES,
+  WorkflowStatus,
+} from '@modules/workflows/enums/workflow-status.enum';
 
 /** Longitud de `flujos.nombre` en el esquema SQL. */
 const MAX_NAME_LENGTH = 100;
@@ -62,12 +67,15 @@ export class UpdateWorkflowDto {
   readonly description?: string;
 
   @ApiPropertyOptional({
+    enum: EDITABLE_WORKFLOW_STATUSES,
     description:
-      'Habilitacion frente a los disparadores automaticos (Cron, IMAP). Activar exige un pipeline_schema valido',
+      'Habilitacion frente a los disparadores automaticos (Cron, IMAP). Activar exige un pipeline_schema valido. PAUSADO no se admite: lo escribe el motor al detener una ejecucion',
   })
   @IsOptional()
-  @IsBoolean({ message: 'active debe ser un booleano.' })
-  readonly active?: boolean;
+  @IsIn(EDITABLE_WORKFLOW_STATUSES, {
+    message: `status solo admite ${EDITABLE_WORKFLOW_STATUSES.join(' o ')}: PAUSADO lo escribe el motor al detener una ejecucion reanudable.`,
+  })
+  readonly status?: WorkflowStatus;
 
   @ApiPropertyOptional({
     description:

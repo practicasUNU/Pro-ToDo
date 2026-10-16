@@ -7,6 +7,7 @@ import {
   PrimaryGeneratedColumn,
 } from 'typeorm';
 
+import { WorkflowStatus } from '@modules/workflows/enums/workflow-status.enum';
 import { WorkflowTemplate } from '@modules/workflow-templates/entities/workflow-template.entity';
 
 import type { PipelineSchema } from '@core/fsm/types/pipeline-schema.types';
@@ -19,10 +20,16 @@ import type { PipelineSchema } from '@core/fsm/types/pipeline-schema.types';
  *
  * FRONTERA CON `ejecuciones_flujo`: esta entidad describe la PLANTILLA del
  * trabajo —su topologia y si esta habilitado—, nunca su ciclo de vida. El
- * `currentState` (INACTIVO, EN_PROCESO, PAUSADO...) vive exclusivamente en
+ * `currentState` (EN_PROCESO, EXITOSO, DESCARTADO...) vive exclusivamente en
  * `FsmExecution`, porque un mismo flujo acumula muchas ejecuciones historicas y
- * una columna de estado aqui solo podria reflejar una de ellas. `activo` es otra
- * cosa: significa "este flujo se puede disparar", no "se esta ejecutando".
+ * una columna de estado aqui solo podria reflejar una de ellas.
+ *
+ * `status` NO rompe esa frontera pese a compartir la palabra PAUSADO: sigue
+ * respondiendo a "este flujo se puede disparar", solo que con tres respuestas
+ * en vez de dos. La tercera -"no, porque hay una ejecucion detenida esperando
+ * un reintento"- es una propiedad de la PLANTILLA en este instante, y es lo que
+ * decide si el sondeo lo inscribe; cual sea esa ejecucion y como acabe sigue
+ * siendo asunto exclusivo de `FsmExecution`.
  *
  * Los tipos y longitudes replican `init.sql` a proposito: con
  * `synchronize: false` TypeORM no altera el esquema, asi que una discrepancia
@@ -44,9 +51,19 @@ export class Workflow {
    *
    * El despacho manual de `execute-test` la ignora a proposito: probar un flujo
    * antes de habilitarlo es justo el caso de uso del Camino B.
+   *
+   * Nace INACTIVO (migracion 040), al reves que el `DEFAULT TRUE` del booleano
+   * al que sustituye: un flujo que se armase solo empezaria a consumir el buzon
+   * corporativo sin que nadie hubiera revisado su configuracion. El codigo ya
+   * desmentia aquel defecto, porque `createWorkflow` forzaba `false`.
    */
-  @Column({ name: 'activo', type: 'boolean', default: true })
-  active: boolean;
+  @Column({
+    name: 'status',
+    type: 'enum',
+    enum: WorkflowStatus,
+    default: WorkflowStatus.INACTIVO,
+  })
+  status: WorkflowStatus;
 
   /**
    * Grafo declarativo que recorre el `FsmEngineService`.

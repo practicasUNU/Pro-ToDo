@@ -13,10 +13,16 @@ CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
 
 CREATE TYPE enum_categoria AS ENUM ('TRIGGER', 'PROCESAMIENTO', 'CONTROL', 'DESTINO');
 
--- `INACTIVO` lo incorporo la migracion 006 y `OMITIDO` la 030; ambos se
--- adelantan aqui para que una base nueva nazca completa (las migraciones son
--- idempotentes y no vuelven a anadirlos).
-CREATE TYPE enum_estado AS ENUM ('INACTIVO', 'EN_PROCESO', 'EXITOSO', 'OMITIDO', 'FALLIDO', 'PAUSADO');
+-- `INACTIVO` lo incorporo la migracion 006, `OMITIDO` la 030 y `DESCARTADO` la
+-- 039; los tres se adelantan aqui para que una base nueva nazca completa (las
+-- migraciones son idempotentes y no vuelven a anadirlos).
+CREATE TYPE enum_estado AS ENUM ('INACTIVO', 'EN_PROCESO', 'EXITOSO', 'OMITIDO', 'FALLIDO', 'PAUSADO', 'DESCARTADO');
+
+-- Estado del FLUJO (migracion 040), que es otra cosa que el de la ejecucion:
+-- responde a "se puede disparar", no a "como acabo". `PAUSADO` lo escribe solo
+-- el motor al detener una ejecucion reanudable; la API de edicion admite
+-- unicamente ACTIVO e INACTIVO.
+CREATE TYPE workflow_status_enum AS ENUM ('ACTIVO', 'INACTIVO', 'PAUSADO');
 
 CREATE TYPE enum_estado_nodo AS ENUM ('OK', 'ERROR', 'ADVERTENCIA');
 
@@ -201,12 +207,15 @@ CREATE TABLE flujos (
     id_flujo UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     nombre VARCHAR(100) NOT NULL,
     descripcion VARCHAR(255),
-    activo BOOLEAN DEFAULT TRUE,
+    -- Nace INACTIVO a proposito (migracion 040): un flujo que se armase solo
+    -- empezaria a consumir el buzon corporativo sin que nadie revisara su
+    -- configuracion.
+    status workflow_status_enum NOT NULL DEFAULT 'INACTIVO',
     configuracion_pipeline JSONB,
     -- Maestro del que nació este flujo. Nullable: los flujos anteriores a la
     -- migración 010 no vienen de ninguno, y el asistente debe poder crear uno
     -- desde cero. ON DELETE SET NULL es la red de seguridad ante un borrado
-    -- físico por SQL directo; la vía prevista es el borrado lógico (`activo`)
+    -- físico por SQL directo; la vía prevista es el borrado lógico (`status`)
     id_plantilla_origen UUID REFERENCES plantillas_flujo(id_plantilla_flujo) ON DELETE SET NULL,
     id_usuario_creador UUID NOT NULL REFERENCES usuarios(id_usuario),
     fecha_creacion TIMESTAMP DEFAULT CURRENT_TIMESTAMP

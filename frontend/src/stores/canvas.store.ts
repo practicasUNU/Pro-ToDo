@@ -5,6 +5,7 @@ import { fetchActiveExecution } from '@services/fsm-executions.service';
 import { fetchWorkflow } from '@services/workflows.service';
 import { useExecutionStore } from '@stores/execution.store';
 import { ExecutionState } from '@/types/execution';
+import { errorRouteTarget } from '@/utils/pipeline-assembler';
 
 import type {
   ExecutionDetail,
@@ -24,6 +25,53 @@ import type { AssembledPipelineNode, WorkflowDetail } from '@/types/pipeline';
  * para `OMITIDO` o `DESCARTADO` a nivel de caja.
  */
 export type CanvasNodeStatus = 'IDLE' | 'RUNNING' | 'COMPLETED' | 'PAUSED' | 'FAILED';
+
+/**
+ * Por que una bifurcacion NO pinta tarjeta propia.
+ *
+ * - `card`: su destino se dibuja aqui, en el carril de contingencia.
+ * - `rejoin`: apunta a un nodo del camino nominal, que ya tiene tarjeta arriba.
+ * - `duplicate`: otro nodo ya coloco ese mismo destino (el alertador es uno por
+ *   flujo, y dos pasos pueden desviar hacia el).
+ * - `missing`: el puntero apunta a un `nodeId` que no existe en el esquema.
+ */
+export type CanvasForkPlacement = 'card' | 'rejoin' | 'duplicate' | 'missing';
+
+/** Arista del camino nominal, de un paso al siguiente. */
+export interface CanvasEdge {
+  readonly fromNodeId: string;
+  readonly toNodeId: string;
+  readonly isTraversed: boolean;
+}
+
+/** Ruta de contingencia ya colocada en una columna del carril. */
+export interface CanvasForkSlot {
+  readonly fromNodeId: string;
+  readonly toNodeId: string;
+  /**
+   * Codigos que la ruta atrapa.
+   *
+   * `null` es la forma de cadena, que atrapa CUALQUIER fallo. Un arreglo vacio
+   * es una ruta que no se dispara jamas: el backend la guarda sin protestar, y
+   * el canvas es el unico sitio donde el operador puede verla.
+   */
+  readonly catchErrors: readonly string[] | null;
+  /** Indice en `orderedSteps` del nodo que DECLARA la ruta: su columna. */
+  readonly column: number;
+  /** 0 cuelga de la tarjeta nominal; 1 de la tarjeta de contingencia de arriba. */
+  readonly depth: number;
+  readonly placement: CanvasForkPlacement;
+  /** `null` solo cuando `placement` es `missing`. */
+  readonly target: AssembledPipelineNode | null;
+  /** Todos los nodos que desvian aqui. Solo se rellena en `placement: card`. */
+  readonly sourceNodeIds: readonly string[];
+  /** El satelite devuelve el flujo al camino nominal, y por que paso. */
+  readonly rejoin: { readonly nodeId: string; readonly column: number } | null;
+  readonly isTraversed: boolean;
+}
+
+/** Tope de anidamiento del carril: `parser -> ocr_ia -> alerta_smtp` y basta. */
+const MAX_FORK_DEPTH = 3;
 
 /**
  * Supervision visual de un flujo concreto: SOLO el estado de la vista.
@@ -105,6 +153,132 @@ export const useCanvasStore = defineStore('canvas', () => {
     const nominal = new Set(orderedSteps.value.map((step) => step.nodeId));
 
     return Object.values(schema.nodes).filter((node) => !nominal.has(node.nodeId));
+  });
+
+  /**
+   * Aristas del camino nominal, una por transicion.
+   *
+   * Un tramo cuenta como recorrido mirando su ORIGEN: la flecha describe una
+   * transicion que ya ocurrio en cuanto el nodo de la izquierda termino, aunque
+   * el de la derecha todavia no haya arrancado.
+   */
+  const nominalEdges = computed<CanvasEdge[]>(() =>
+    orderedSteps.value.slice(0, -1).map((step, index) => ({
+      fromNodeId: step.nodeId,
+      toNodeId: orderedSteps.value[index + 1]?.nodeId ?? '',
+      isTraversed: statusOf(step.nodeId) === 'COMPLETED',
+    })),
+  );
+
+  /**
+   * Rutas de contingencia ya colocadas en la columna de quien las declara.
+   *
+   * Recorre el camino nominal y, por cada `onErrorStep`, decide si su destino
+   * merece tarjeta propia o basta una referencia. Despues repite sobre el
+   * `onErrorStep` de la tarjeta recien colocada, que es el caso real del
+   * satelite de vision: `parser -> ocr_ia -> alerta_smtp`.
+   *
+   * Un `Set` de colocados garantiza UNA tarjeta por `nodeId` en todo el lienzo
+   * y corta de paso cualquier ciclo entre rutas de error.
+   */
+  const forkSlots = computed<CanvasForkSlot[]>(() => {
+    const schema = workflow.value?.pipelineSchema;
+
+    if (schema == null) {
+      return [];
+    }
+
+    const nominalIndex = new Map(orderedSteps.value.map((step, index) => [step.nodeId, index]));
+    const placed = new Set<string>();
+    const slots: CanvasForkSlot[] = [];
+
+    /** Nodos del camino nominal que desvian al mismo destino. */
+    const declarantsOf = (targetId: string): string[] =>
+      orderedSteps.value
+        .filter((step) => errorRouteTarget(step.onErrorStep) === targetId)
+        .map((step) => step.nodeId);
+
+    const collect = (from: AssembledPipelineNode, column: number, depth: number): void => {
+      const toNodeId = errorRouteTarget(from.onErrorStep);
+
+      if (toNodeId === null || depth >= MAX_FORK_DEPTH) {
+        return;
+      }
+
+      const target = schema.nodes[toNodeId];
+      const catchErrors =
+        typeof from.onErrorStep === 'object' && from.onErrorStep !== null
+          ? from.onErrorStep.catchErrors
+          : null;
+
+      const placement: CanvasForkPlacement =
+        target === undefined
+          ? 'missing'
+          : nominalIndex.has(toNodeId)
+            ? 'rejoin'
+            : placed.has(toNodeId)
+              ? 'duplicate'
+              : 'card';
+
+      if (placement === 'card') {
+        placed.add(toNodeId);
+      }
+
+      const rejoinColumn = target?.nextStep == null ? undefined : nominalIndex.get(target.nextStep);
+
+      slots.push({
+        fromNodeId: from.nodeId,
+        toNodeId,
+        catchErrors,
+        column,
+        depth,
+        placement,
+        target: target ?? null,
+        sourceNodeIds: placement === 'card' ? declarantsOf(toNodeId) : [],
+        rejoin:
+          placement === 'card' && target?.nextStep != null && rejoinColumn !== undefined
+            ? { nodeId: target.nextStep, column: rejoinColumn }
+            : null,
+        // El origen COMPLETED no sirve aqui: un nodo que termino bien es justo
+        // el que NO desvio. La prueba de que la rama se disparo es que su
+        // destino se encendio, y al carril solo se llega por la ruta de error.
+        isTraversed: placement === 'card' && statusOf(toNodeId) !== 'IDLE',
+      });
+
+      if (placement === 'card' && target !== undefined) {
+        collect(target, column, depth + 1);
+      }
+    };
+
+    for (const [column, step] of orderedSteps.value.entries()) {
+      collect(step, column, 0);
+    }
+
+    return slots;
+  });
+
+  /** Indice por columna, para que la plantilla solo haga `.get(i)`. */
+  const forkByColumn = computed<Map<number, CanvasForkSlot[]>>(() => {
+    const index = new Map<number, CanvasForkSlot[]>();
+
+    for (const slot of forkSlots.value) {
+      index.set(slot.column, [...(index.get(slot.column) ?? []), slot]);
+    }
+
+    return index;
+  });
+
+  /**
+   * Nodos del esquema a los que no apunta NADA: ni `nextStep` ni `onErrorStep`.
+   *
+   * Son un esquema corrupto, y existen en la vista a proposito: al desaparecer
+   * el bloque inferior de "Rutas de contingencia" se quedarian invisibles, y un
+   * nodo huerfano que nadie ve es un nodo que nadie arregla.
+   */
+  const unreachableSteps = computed<AssembledPipelineNode[]>(() => {
+    const reachable = new Set(forkSlots.value.map((slot) => slot.toNodeId));
+
+    return contingencySteps.value.filter((node) => !reachable.has(node.nodeId));
   });
 
   /** Paso seleccionado para el panel de inspeccion, o `null`. */
@@ -288,6 +462,10 @@ export const useCanvasStore = defineStore('canvas', () => {
     isLoading,
     orderedSteps,
     contingencySteps,
+    nominalEdges,
+    forkSlots,
+    forkByColumn,
+    unreachableSteps,
     selectedStep,
     executionState,
     activeCursor,

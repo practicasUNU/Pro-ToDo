@@ -27,6 +27,7 @@ import { createImapClient } from '@modules/nodes/services/imap-client.factory';
 import { buildImapSearchQuery } from '@modules/nodes/strategies/imap-trigger.strategy';
 import { HybridLoggerService } from '@modules/logs/services/hybrid-logger.service';
 import { Workflow } from '@modules/workflows/entities/workflow.entity';
+import { WorkflowStatus } from '@modules/workflows/enums/workflow-status.enum';
 import { WorkflowsService } from '@modules/workflows/workflows.service';
 
 import type { OnModuleDestroy, OnModuleInit } from '@nestjs/common';
@@ -785,7 +786,10 @@ export class ImapPollingService implements OnModuleInit, OnModuleDestroy {
    */
   private async findImapTriggerNodes(): Promise<ImapTriggerNode[]> {
     const workflows = await this.workflowRepository.find({
-      where: { active: true },
+      // SOLO los ACTIVO: un flujo PAUSADO tiene una ejecucion detenida esperando
+      // reintento, y volver a inscribirlo apilaria ejecuciones nuevas encima de
+      // la atascada. INACTIVO queda fuera por el motivo de siempre.
+      where: { status: WorkflowStatus.ACTIVO },
     });
 
     // Se registran los dos recuentos por separado a proposito: la diferencia

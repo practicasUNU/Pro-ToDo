@@ -10,6 +10,7 @@ import { CronSchedulingService } from './cron-scheduling.service';
 import type { ConfigService } from '@nestjs/config';
 import type { HybridLoggerService } from '@modules/logs/services/hybrid-logger.service';
 import type { CronTriggerConfigDto } from '@modules/nodes/dto/cron-trigger-config.dto';
+import { WorkflowStatus } from '@modules/workflows/enums/workflow-status.enum';
 import type { Workflow } from '@modules/workflows/entities/workflow.entity';
 import type { WorkflowsService } from '@modules/workflows/workflows.service';
 import type { Repository } from 'typeorm';
@@ -47,7 +48,7 @@ const buildWorkflow = (
     id: FLOW_ID,
     name: 'Boletin diario',
     description: null,
-    active: true,
+    status: WorkflowStatus.ACTIVO,
     createdById: null,
     createdAt: new Date('2026-01-01T00:00:00.000Z'),
     pipelineSchema: {
@@ -203,9 +204,10 @@ describe('CronSchedulingService · planificacion de nodos TRIGGER_CRON', () => {
       // 2. Act
       await service.onModuleInit();
 
-      // 3. Assert
+      // 3. Assert: `status` gobierna los disparadores automaticos, y solo el
+      //    valor ACTIVO los habilita.
       expect(repository.find).toHaveBeenCalledWith({
-        where: { active: true },
+        where: { status: WorkflowStatus.ACTIVO },
       });
       service.onModuleDestroy();
     });

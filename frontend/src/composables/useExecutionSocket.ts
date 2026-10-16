@@ -138,7 +138,7 @@ export const useExecutionSocket = (): void => {
       type: 'warning',
       icon: 'pause_circle',
       multiLine: true,
-      message: `⚠️ Flujo pausado: ${describeFlow(event.flowName, event.flowId)} — nodo ${node}${attemptBadge}`,
+      message: `Flujo pausado: ${describeFlow(event.flowName, event.flowId)} — nodo ${node}${attemptBadge}`,
       caption: [`${event.severity ?? 'GRAVE'} · ${detail}`, event.errorDetail]
         .filter((part): part is string => part !== undefined)
         .join('\n'),
@@ -208,7 +208,7 @@ export const useExecutionSocket = (): void => {
         // Se desvanece solo: a diferencia de la pausa, no lleva ninguna accion
         // que el operador deba poder pulsar mas tarde.
         timeout: NOTIFY_SUCCESS_TIMEOUT_MS,
-        message: `✅ Flujo "${flow}" completado con exito.`,
+        message: `Flujo "${flow}" completado con exito.`,
         caption: 'El pipeline recorrio todos sus nodos sin incidencias.',
       });
 

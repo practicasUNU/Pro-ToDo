@@ -1,4 +1,6 @@
 import { createPinia, setActivePinia } from 'pinia';
+
+import { WorkflowStatus } from '@/types/pipeline';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { useExecutionStore } from './execution.store';
@@ -543,7 +545,7 @@ describe('useExecutionStore · estado reactivo de las ejecuciones del motor', ()
           failureReason: 'Descartada manualmente por un operador',
           ...overrides,
         }),
-        workflow: { id: FLOW_ID, active: false },
+        workflow: { id: FLOW_ID, status: WorkflowStatus.INACTIVO },
       }) as DiscardExecutionResult;
 
     it('deberia cerrar la fila en DESCARTADO y sin cursor', async () => {

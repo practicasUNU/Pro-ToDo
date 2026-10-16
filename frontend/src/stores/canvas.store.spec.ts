@@ -4,7 +4,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { useCanvasStore } from './canvas.store';
 
 import { ExecutionState } from '@/types/execution';
-import { NodeType } from '@/types/pipeline';
+import { WorkflowStatus, NodeType } from '@/types/pipeline';
 
 import type {
   ExecutionDetail,
@@ -80,7 +80,9 @@ const buildWorkflow = (): WorkflowDetail => ({
   id: FLOW_ID,
   name: 'Notiweb - publicacion automatica',
   description: null,
-  active: true,
+  status: WorkflowStatus.ACTIVO,
+  activeExecutionId: null,
+  executionState: null,
   templateId: null,
   topology: [],
   pipelineSchema: buildSchema(),
@@ -355,6 +357,148 @@ describe('useCanvasStore · supervision visual de un flujo', () => {
       expect(store.workflow).toBeNull();
       expect(store.orderedSteps).toEqual([]);
       expect(store.selectedStep).toBeNull();
+    });
+  });
+
+  describe('6. Aristas y bifurcaciones del grafo', () => {
+    it('6.1 deberia emparejar cada paso nominal con el siguiente', async () => {
+      // 1. Arrange 📐
+      const store = useCanvasStore();
+      await store.loadCanvas(FLOW_ID);
+
+      // 2. Act ⚙️ & 3. Assert 🎯: dos pasos nominales, UNA arista.
+      expect(store.nominalEdges).toEqual([
+        expect.objectContaining({ fromNodeId: 'nodo_a', toNodeId: 'nodo_b' }),
+      ]);
+    });
+
+    it('6.2 deberia colocar la ruta en la columna de quien la declara', async () => {
+      // 1. Arrange 📐: `nodo_a` declara `onErrorStep: nodo_alerta` y es el
+      //    primer paso, asi que su columna es la 0.
+      const store = useCanvasStore();
+
+      // 2. Act ⚙️
+      await store.loadCanvas(FLOW_ID);
+
+      // 3. Assert 🎯
+      expect(store.forkSlots).toEqual([
+        expect.objectContaining({
+          fromNodeId: 'nodo_a',
+          toNodeId: 'nodo_alerta',
+          column: 0,
+          depth: 0,
+          placement: 'card',
+        }),
+      ]);
+    });
+
+    it('6.3 deberia distinguir la cadena incondicional de la ruta selectiva', async () => {
+      // 1. Arrange 📐: `null` significa "atrapa cualquier fallo"; un arreglo,
+      //    solo los codigos que enumera. El componente no debe inspeccionar la
+      //    union por su cuenta.
+      const store = useCanvasStore();
+      await store.loadCanvas(FLOW_ID);
+
+      // 2. Act ⚙️ & 3. Assert 🎯
+      expect(store.forkSlots[0]?.catchErrors).toBeNull();
+
+      // 1. Arrange 📐 (segunda mitad): misma topologia, ruta selectiva.
+      const schema = buildSchema();
+      fetchWorkflow.mockResolvedValue({
+        ...buildWorkflow(),
+        pipelineSchema: {
+          ...schema,
+          nodes: {
+            ...schema.nodes,
+            nodo_a: {
+              ...schema.nodes.nodo_a!,
+              onErrorStep: { targetNode: 'nodo_alerta', catchErrors: ['ERR_A'] },
+            },
+          },
+        },
+      });
+
+      // 2. Act ⚙️
+      await store.loadCanvas(FLOW_ID);
+
+      // 3. Assert 🎯
+      expect(store.forkSlots[0]?.catchErrors).toEqual(['ERR_A']);
+    });
+
+    it('6.4 deberia marcar como rejoin un destino del camino nominal', async () => {
+      // 1. Arrange 📐: ese nodo YA tiene tarjeta arriba; dibujarle otra romperia
+      //    la biyeccion entre `nodeId` y tarjeta.
+      const schema = buildSchema();
+      fetchWorkflow.mockResolvedValue({
+        ...buildWorkflow(),
+        pipelineSchema: {
+          ...schema,
+          nodes: {
+            ...schema.nodes,
+            nodo_a: { ...schema.nodes.nodo_a!, onErrorStep: 'nodo_b' },
+          },
+        },
+      });
+      const store = useCanvasStore();
+
+      // 2. Act ⚙️
+      await store.loadCanvas(FLOW_ID);
+
+      // 3. Assert 🎯
+      expect(store.forkSlots[0]?.placement).toBe('rejoin');
+    });
+
+    it('6.5 deberia marcar como missing un puntero a un nodo inexistente', async () => {
+      // 1. Arrange 📐: un esquema roto debe verse, no desaparecer.
+      const schema = buildSchema();
+      fetchWorkflow.mockResolvedValue({
+        ...buildWorkflow(),
+        pipelineSchema: {
+          ...schema,
+          nodes: {
+            ...schema.nodes,
+            nodo_a: { ...schema.nodes.nodo_a!, onErrorStep: 'no_existe' },
+          },
+        },
+      });
+      const store = useCanvasStore();
+
+      // 2. Act ⚙️
+      await store.loadCanvas(FLOW_ID);
+
+      // 3. Assert 🎯
+      expect(store.forkSlots[0]).toEqual(
+        expect.objectContaining({ placement: 'missing', target: null }),
+      );
+    });
+
+    it('6.6 NO deberia dar por recorrida una rama cuyo destino sigue en espera', async () => {
+      // 1. Arrange 📐: el origen COMPLETED no sirve de prueba aqui. Un nodo que
+      //    termino bien es justo el que NO desvio.
+      const store = useCanvasStore();
+      await store.loadCanvas(FLOW_ID);
+
+      // 2. Act ⚙️ & 3. Assert 🎯
+      expect(store.forkSlots[0]?.isTraversed).toBe(false);
+
+      // 2. Act ⚙️ (segunda mitad): el destino se enciende.
+      store.handleNodeStarted(buildStarted({ nodeId: 'nodo_alerta' }));
+
+      // 3. Assert 🎯
+      expect(store.forkSlots[0]?.isTraversed).toBe(true);
+    });
+
+    it('6.7 deberia dejar fuera de los huerfanos a los destinos ya colocados', async () => {
+      // 1. Arrange 📐: `nodo_alerta` cuelga de una ruta, asi que NO es huerfano
+      //    aunque no este en el camino nominal.
+      const store = useCanvasStore();
+
+      // 2. Act ⚙️
+      await store.loadCanvas(FLOW_ID);
+
+      // 3. Assert 🎯
+      expect(store.contingencySteps.map((step) => step.nodeId)).toEqual(['nodo_alerta']);
+      expect(store.unreachableSteps).toEqual([]);
     });
   });
 });

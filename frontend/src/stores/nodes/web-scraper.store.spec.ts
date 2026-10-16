@@ -866,29 +866,34 @@ describe('useWebScraperStore · configuracion del nodo EXTRACTOR_WEB', () => {
       expect(store.isFirstEligibleTarget).toBe(false);
     });
 
-    it('9.6 deberia avisar del criterio sin ningun dominio excluido', () => {
-      // 1. Arrange
+    it('9.6 NO deberia avisar del criterio sin ningun dominio excluido', () => {
+      // 1. Arrange 📐: el aviso se retiro a proposito. "Primer enlace elegible"
+      //    sin dominios excluidos equivale a la posicion 1, lo cual es CORRECTO
+      //    y es ademas la configuracion por defecto del nodo: avisarlo ponia una
+      //    advertencia permanente en la pantalla de un nodo bien configurado, y
+      //    eso acostumbra a ignorar la lista donde si aparecen los problemas.
       const store = buildConfiguredStore();
 
-      // 2. Act
+      // 2. Act ⚙️
       store.updateConfig({ targetUrl: LIST_TEMPLATE, excludedDomains: [] });
 
-      // 3. Assert: no bloquea; solo dice que hoy equivale a la posicion 1.
+      // 3. Assert 🎯
       expect(store.isConfigValid).toBe(true);
-      expect(store.configWarnings.some((warning) => warning.includes('posicion 1'))).toBe(true);
+      expect(store.configWarnings.some((warning) => warning.includes('posicion 1'))).toBe(false);
     });
 
-    it('9.7 deberia avisar de dominios excluidos con una posicion fija', () => {
-      // 1. Arrange: el caso inverso, dominios que nadie llegara a consultar.
+    it('9.7 NO deberia avisar de dominios excluidos con una posicion fija', () => {
+      // 1. Arrange 📐: el caso inverso, retirado por el mismo motivo. Declarar
+      //    dominios con una posicion fija es redundante, no incorrecto, y el
+      //    nodo sigue siendo perfectamente ejecutable.
       const store = buildConfiguredStore();
 
-      // 2. Act
+      // 2. Act ⚙️
       store.updateConfig({ excludedDomains: ['madrimasd.org'] });
 
-      // 3. Assert
-      expect(
-        store.configWarnings.some((warning) => warning.includes('posicion fija')),
-      ).toBe(true);
+      // 3. Assert 🎯
+      expect(store.configWarnings.some((warning) => warning.includes('posicion fija'))).toBe(false);
+      expect(store.isConfigValid).toBe(true);
     });
 
     it('9.8 deberia publicar la lista solo cuando no esta vacia', () => {
@@ -940,9 +945,7 @@ describe('useWebScraperStore · configuracion del nodo EXTRACTOR_WEB', () => {
       const store = useWebScraperStore(NODE_ID);
 
       // 3. Assert: replica del defecto del DTO del backend.
-      expect(store.config.ignoreExtractionFailure).toBe(
-        DEFAULT_SCRAPER_IGNORE_EXTRACTION_FAILURE,
-      );
+      expect(store.config.ignoreExtractionFailure).toBe(DEFAULT_SCRAPER_IGNORE_EXTRACTION_FAILURE);
     });
 
     it('10.2 NO deberia publicarse cuando coincide con el defecto', () => {

@@ -366,6 +366,27 @@ describe('ImapTriggerStrategy', () => {
       expect(untouched.messageFlagsAdd).not.toHaveBeenCalled();
     });
 
+    it('1.7bis NO deberia tocar el buzon si nadie declara markAsRead', async () => {
+      // 1. Arrange 📐: el defecto se invirtio a proposito. El buzon es
+      //    corporativo y compartido, y que un automatismo marque como leidos
+      //    los correos de una persona es un efecto irreversible sobre datos que
+      //    no son suyos. El coste asumido es que la deduplicacion pasa a
+      //    depender de la ventana de 48 h y del filtro de asunto.
+      const client = buildClient();
+      useClient(client);
+      const { strategy } = buildStrategy();
+
+      // 2. Act ⚙️: `buildParams` sin tocar `markAsRead`, que es como llega un
+      //    nodo que no lo declara.
+      await strategy.execute(
+        buildContext(),
+        buildParams({ markAsRead: undefined }),
+      );
+
+      // 3. Assert 🎯
+      expect(client.messageFlagsAdd).not.toHaveBeenCalled();
+    });
+
     it('1.8 deberia marcar \\Seen despues de parsear, nunca antes', async () => {
       // 1. Arrange: el parseo revienta con un MIME corrupto.
       const client = buildClient();

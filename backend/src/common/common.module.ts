@@ -5,6 +5,7 @@ import { EmailService } from '@common/services/email.service';
 import { CrudEventsCoordinator } from '@common/services/crud-events.coordinator';
 import { ExecutionEventsCoordinator } from '@common/services/execution-events.coordinator';
 import { FlowPollingCoordinator } from '@common/services/flow-polling.coordinator';
+import { WorkflowStatusCoordinator } from '@common/services/workflow-status.coordinator';
 import { IpAccessService } from '@common/services/ip-access.service';
 import { SmtpNodeMailerService } from '@common/services/smtp-node-mailer.service';
 import { FsmConfig } from '@core/config/fsm.config';
@@ -53,6 +54,7 @@ import { AllowedIpsModule } from '@modules/security/allowed-ips/allowed-ips.modu
     FlowPollingCoordinator,
     CrudEventsCoordinator,
     ExecutionEventsCoordinator,
+    WorkflowStatusCoordinator,
     FsmConfig,
   ],
   exports: [
@@ -63,6 +65,7 @@ import { AllowedIpsModule } from '@modules/security/allowed-ips/allowed-ips.modu
     FlowPollingCoordinator,
     CrudEventsCoordinator,
     ExecutionEventsCoordinator,
+    WorkflowStatusCoordinator,
     FsmConfig,
   ],
 })

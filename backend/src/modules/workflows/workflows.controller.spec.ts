@@ -13,6 +13,8 @@ import { JwtAuthGuard } from '@modules/auth/guards/jwt-auth.guard';
 import { UserRole } from '@modules/users/enums/user-role.enum';
 
 import { WorkflowsController } from './workflows.controller';
+
+import { WorkflowStatus } from '@modules/workflows/enums/workflow-status.enum';
 import { WorkflowsService } from './workflows.service';
 
 import type { PipelineSummaryResponseDto } from './dto/pipeline-summary-response.dto';
@@ -59,7 +61,7 @@ const WORKFLOW_SUMMARY: PipelineSummaryResponseDto = {
   id: WORKFLOW_ID,
   name: 'Notiweb - publicacion automatica',
   description: null,
-  active: false,
+  status: WorkflowStatus.INACTIVO,
   templateId: null,
   topology: TOPOLOGY,
 };
@@ -335,14 +337,14 @@ describe('WorkflowsController (POST /workflows/:id/execute-test)', () => {
       // 2. Act
       const response = await request(httpServer())
         .patch(`/workflows/${WORKFLOW_ID}`)
-        .send({ active: true });
+        .send({ status: WorkflowStatus.ACTIVO });
 
       // 3. Assert: regresion del contrato existente; `@ValidateIf` no debe
       // exigir los campos de texto cuando estan AUSENTES.
       expect(response.status).toBe(200);
       expect(workflowsServiceMock.updateWorkflow).toHaveBeenCalledWith(
         WORKFLOW_ID,
-        { active: true },
+        { status: WorkflowStatus.ACTIVO },
         UserRole.EDITOR,
       );
     });
@@ -417,7 +419,7 @@ describe('WorkflowsController (POST /workflows/:id/execute-test)', () => {
       // 2. Act
       const response = await request(httpServer())
         .patch(`/workflows/${WORKFLOW_ID}`)
-        .send({ active: true });
+        .send({ status: WorkflowStatus.ACTIVO });
 
       // 3. Assert
       const body = response.body as { message?: string; issues?: unknown };
@@ -436,7 +438,7 @@ describe('WorkflowsController (POST /workflows/:id/execute-test)', () => {
       // 2. Act
       const response = await request(httpServer())
         .patch(`/workflows/${WORKFLOW_ID}`)
-        .send({ active: true });
+        .send({ status: WorkflowStatus.ACTIVO });
 
       // 3. Assert
       expect(response.status).toBe(404);

@@ -529,11 +529,20 @@ body {
 // `style` inline tanto para el color como para la franja de severidad.
 // ---------------------------------------------------------------------------
 
-// Carril del grafo. El scroll es del carril y no de la pagina para que la
-// cabecera con el estado del flujo siga visible mientras se recorre.
+// Metricas de columna. Las comparten los DOS carriles, y por eso son variables
+// y no literales repetidos: si divergen, el trazo de una bifurcacion deja de
+// caer bajo el nodo que la declara.
+$pd-node-width: 220px;
+$pd-link-width: 36px;
+$pd-fork-height: 56px;
+
+// Contenedor del grafo. El scroll es suyo y no de la pagina para que la
+// cabecera con el estado del flujo siga visible mientras se recorre. Apila
+// carriles: el nominal, el de contingencias y el de huerfanos.
 .pd-canvas {
   display: flex;
-  align-items: stretch;
+  flex-direction: column;
+  align-items: flex-start;
   gap: 0;
   overflow-x: auto;
   overflow-y: hidden;
@@ -541,9 +550,42 @@ body {
   scroll-behavior: smooth;
 }
 
+// Fila de columnas. `max-content` es lo que garantiza que los dos carriles
+// midan exactamente igual y queden alineados sin medir nada en JavaScript.
+.pd-canvas-rail {
+  display: flex;
+  align-items: stretch;
+  width: max-content;
+}
+
+.pd-canvas-rail--forks,
+.pd-canvas-rail--orphans {
+  align-items: flex-start;
+}
+
+.pd-canvas-rail--orphans {
+  margin-top: 16px;
+}
+
+// Espejo de una columna del carril nominal. Vacia la mayoria de las veces: es
+// justo lo que hace caer cada bifurcacion bajo su nodo.
+.pd-canvas-slot {
+  flex: 0 0 auto;
+  width: $pd-node-width;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+}
+
+// Espejo del hueco que ocupa la flecha entre dos tarjetas nominales.
+.pd-canvas-gap {
+  flex: 0 0 auto;
+  width: $pd-link-width;
+}
+
 .pd-node-card {
   flex: 0 0 auto;
-  width: 220px;
+  width: $pd-node-width;
   padding: 14px;
   cursor: pointer;
   // Solo la sombra y el borde transicionan: animar `transform` desplazaria las
@@ -598,7 +640,7 @@ body {
 .pd-canvas-link {
   flex: 0 0 auto;
   align-self: center;
-  width: 36px;
+  width: $pd-link-width;
   color: var(--pd-border);
 }
 
@@ -652,4 +694,142 @@ body {
   50% {
     opacity: 0.62;
   }
+}
+
+// ---------------------------------------------------------------------------
+// Campos numericos con rango declarado
+//
+// Quasar ya pinta en rojo un campo con `:rules` incumplidas, pero solo DESPUES
+// de tocarlo y sin decir nada cuando el valor es correcto. Estas dos clases
+// dan la lectura continua que pide un formulario con minimos y maximos: verde
+// mientras el valor cae dentro, rojo en cuanto se sale.
+//
+// Se aplican al contenedor del campo y no al `q-input`, para alcanzar tambien
+// al `hint` que enuncia el rango — que es la informacion que el operador
+// necesita leer justo cuando se equivoca.
+// ---------------------------------------------------------------------------
+
+.pd-field--in-range {
+  :deep(.q-field__control):after {
+    border-color: var(--pd-positive);
+  }
+}
+
+.pd-field--out-of-range {
+  :deep(.q-field__control):after {
+    border-color: var(--pd-negative);
+  }
+
+  // El caption del rango se enciende con el campo: es el unico sitio donde
+  // dice cuales son el minimo y el maximo, y en gris pasa desapercibido justo
+  // cuando hace falta.
+  .pd-field-range {
+    color: var(--pd-negative);
+    font-weight: 700;
+  }
+
+  &:hover .pd-field-range {
+    text-decoration: underline;
+  }
+}
+
+// Enunciado del rango bajo un campo numerico. Neutro mientras el valor vale.
+.pd-field-range {
+  display: block;
+  margin-top: 2px;
+  font-size: 12px;
+  color: var(--pd-text-secondary);
+  transition: color 0.15s ease;
+}
+
+// --- Bifurcaciones de contingencia (`onErrorStep`) ---------------------------
+//
+// El trazo baja a la izquierda de la celda, bajo el ICONO del nodo y no bajo su
+// centro: deja asi los ~170px restantes para la etiqueta sin desplazar nada.
+.pd-fork {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: $pd-fork-height;
+  padding-left: 22px;
+}
+
+// Unico sitio donde se nombra el color del trazo. El SVG lo hereda con
+// `currentColor`, de modo que la plantilla no lleva ni un color.
+.pd-canvas-fork {
+  flex: 0 0 auto;
+  color: var(--pd-warning);
+  opacity: 0.55;
+}
+
+.pd-canvas-fork--traversed {
+  opacity: 1;
+}
+
+.pd-fork-label {
+  // Habilita el recorte del texto dentro del contenedor flex.
+  min-width: 0;
+  border-left: 2px solid var(--pd-warning);
+  padding-left: 6px;
+}
+
+// El alcance de la ruta. NUNCA en `--pd-warning`: ese token no alcanza el 3:1
+// de WCAG sobre el fondo claro, asi que el ambar queda reducido al trazo y a la
+// franja de 2px, ambos redundantes respecto a este texto.
+.pd-fork-label__codes {
+  color: var(--pd-text-secondary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+// Ruta con `catchErrors: []`: declarada pero imposible de disparar.
+.pd-fork-label__codes--inert {
+  color: var(--pd-disabled-text);
+}
+
+// Referencia a una tarjeta que ya existe en otra columna o en el carril
+// nominal. Se dibuja en vez de duplicar la tarjeta: el alertador es uno por
+// flujo, y pintarlo dos veces haria leer dos.
+.pd-fork-ref {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: $pd-node-width;
+  padding: 8px 10px;
+  text-align: left;
+  border: 1px dashed var(--pd-border);
+  border-radius: $generic-border-radius;
+  background: var(--pd-surface-muted);
+  color: var(--pd-text-secondary);
+  cursor: pointer;
+
+  &:hover {
+    border-color: var(--pd-accent);
+  }
+
+  &:focus-visible {
+    outline: 2px solid var(--pd-accent);
+    outline-offset: 2px;
+  }
+}
+
+// El `onErrorStep` apunta a un nodo que no existe: esquema roto.
+.pd-fork-ref--missing {
+  border-color: var(--pd-negative);
+  color: var(--pd-negative);
+}
+
+.pd-fork-sources,
+.pd-fork-rejoin {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--pd-text-secondary);
+}
+
+// Nodo al que no apunta ni `nextStep` ni ningun `onErrorStep`.
+.pd-node-card--orphan {
+  border-style: dotted;
+  border-color: var(--pd-disabled-bg);
 }

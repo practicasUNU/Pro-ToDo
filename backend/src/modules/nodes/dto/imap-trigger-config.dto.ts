@@ -40,8 +40,22 @@ export const DEFAULT_POLL_INTERVAL_MS = 60_000;
  */
 export const DEFAULT_OUTPUT_NAMESPACE = 'raw_email';
 
-/** Por defecto el correo procesado se marca como leido para no reprocesarlo. */
-export const DEFAULT_MARK_AS_READ = true;
+/**
+ * Por defecto el buzon se deja INTACTO: no se marca ningun correo como leido.
+ *
+ * Invierte el defecto original, y el cambio tiene coste: la bandera `\Seen` era
+ * el marcador de "ya tratado" que, combinado con `unreadOnly`, impedia
+ * reprocesar el mismo correo en el siguiente sondeo. Sin ella la deduplicacion
+ * recae en la ventana de 48 h de `buildImapSearchQuery` y en el filtro de
+ * asunto, de modo que un flujo con filtros laxos PUEDE volver a publicar un
+ * correo ya tratado.
+ *
+ * Se asume a proposito: el buzon es corporativo y compartido, y que un
+ * automatismo marque como leidos los correos de una persona es un efecto
+ * irreversible sobre datos que no son suyos. Quien prefiera el comportamiento
+ * anterior lo declara con `markAsRead: true` en el nodo.
+ */
+export const DEFAULT_MARK_AS_READ = false;
 
 /**
  * Por defecto solo disparan los correos NO leidos.

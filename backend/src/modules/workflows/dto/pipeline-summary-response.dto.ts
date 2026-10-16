@@ -1,5 +1,8 @@
 import { ApiProperty } from '@nestjs/swagger';
 
+import { ExecutionState } from '@core/fsm/types/fsm.enums';
+import { WorkflowStatus } from '@modules/workflows/enums/workflow-status.enum';
+
 import { NodeType } from '@core/fsm/types/pipeline-schema.types';
 
 /**
@@ -62,10 +65,27 @@ export class PipelineSummaryResponseDto {
   readonly description: string | null;
 
   @ApiProperty({
+    enum: WorkflowStatus,
     description:
-      'Habilitacion frente a los disparadores automaticos (Cron, IMAP)',
+      'Habilitacion frente a los disparadores automaticos (Cron, IMAP). PAUSADO significa que hay una ejecucion detenida esperando reintento, y solo lo escribe el motor',
   })
-  readonly active: boolean;
+  readonly status: WorkflowStatus;
+
+  @ApiProperty({
+    description:
+      'Ejecucion viva (EN_PROCESO o PAUSADO) de este flujo, o null si no hay ninguna. Es lo que la tabla necesita para ofrecer Reanudar sin consultar el detalle',
+    nullable: true,
+    format: 'uuid',
+  })
+  readonly activeExecutionId: string | null;
+
+  @ApiProperty({
+    enum: ExecutionState,
+    description:
+      'Estado de esa ejecucion viva, o null. Va el enum y no una cadena suelta: el cliente ya lo importa, y comparar literales es justo lo que se quiere evitar',
+    nullable: true,
+  })
+  readonly executionState: ExecutionState | null;
 
   @ApiProperty({
     description:

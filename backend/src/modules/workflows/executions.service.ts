@@ -193,6 +193,15 @@ export class ExecutionsService {
       resumeExecutionDto.resetRetries ?? true,
     );
 
+    // El flujo vuelve a estar armado: la pausa que lo saco de los disparadores
+    // la escribio el motor al detener ESTA ejecucion, y reanudarla la deshace.
+    //
+    // SOLO desde PAUSADO. Un flujo INACTIVO se queda INACTIVO: reanudar no
+    // exige el flujo armado —asi lo declara el TSDoc de este metodo— y
+    // activarlo aqui habilitaria sus disparadores sin que nadie lo pidiera,
+    // justo en el flujo que alguien habia retirado a mano.
+    await this.workflowsService.reactivateAfterResume(workflow.id);
+
     this.logger.log(
       `Reanudacion manual (CU-09) del flujo "${workflow.name}" (${workflow.id}) desde el nodo "${execution.activeCursor}" | ejecucion=${executionId} | usuario=${userId}`,
     );

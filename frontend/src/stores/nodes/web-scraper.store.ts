@@ -65,8 +65,7 @@ export const MAX_EXCLUDED_DOMAINS = 20;
  * suya hasta el 400 del guardado, y el operador leeria un error de servidor
  * donde deberia haber leido una regla de campo.
  */
-export const EXCLUDED_DOMAIN_PATTERN =
-  /^(?!-)[a-z0-9-]+(?<!-)(?:\.(?!-)[a-z0-9-]+(?<!-))+$/i;
+export const EXCLUDED_DOMAIN_PATTERN = /^(?!-)[a-z0-9-]+(?<!-)(?:\.(?!-)[a-z0-9-]+(?<!-))+$/i;
 
 /**
  * Dominios que el desplegable OFRECE, nunca los que siembra.
@@ -360,9 +359,7 @@ const webScraperSetup = () => {
 
   const isConfigValid = computed<boolean>(
     () =>
-      (config.value.targetUrl.length === 0
-        ? config.value.skipIfEmpty
-        : isUrlSourceValid.value) &&
+      (config.value.targetUrl.length === 0 ? config.value.skipIfEmpty : isUrlSourceValid.value) &&
       areExcludedDomainsValid.value &&
       isIntegerInRange(config.value.timeoutMs, MIN_SCRAPER_TIMEOUT_MS, MAX_SCRAPER_TIMEOUT_MS) &&
       isIntegerInRange(config.value.maxRetries, 0, MAX_SCRAPER_RETRIES) &&
@@ -394,27 +391,11 @@ const webScraperSetup = () => {
       );
     }
 
-    // El origen "primer enlace elegible" sin ningun dominio excluido NO es un
-    // error: es, exactamente, la posicion 1. El aviso existe porque esa
-    // equivalencia no se ve en el formulario, y quien eligio el criterio creia
-    // estar filtrando algo.
-    if (isFirstEligibleTarget.value && config.value.excludedDomains.length === 0) {
-      warnings.push(
-        'El origen toma el primer enlace elegible, pero no hay ningun dominio excluido: hoy equivale a la posicion 1. Anade el portal institucional si lo que quieres es saltartelo.',
-      );
-    }
-
-    // El caso inverso: se declararon dominios que nadie va a consultar, porque
-    // una posicion fija solo puede acertar o quedarse sin candidato.
-    if (
-      config.value.excludedDomains.length > 0 &&
-      config.value.targetUrl.length > 0 &&
-      !isFirstEligibleTarget.value
-    ) {
-      warnings.push(
-        'Hay dominios excluidos pero el origen es una posicion fija: si justo esa posicion cae en un dominio excluido, el nodo se saltara en vez de probar la siguiente. Elige "primer enlace elegible" para que el filtro decida.',
-      );
-    }
+    // Aqui vivian dos avisos sobre la combinacion de "primer enlace elegible"
+    // y los dominios excluidos. Se retiraron con el banner del formulario por
+    // el mismo motivo: describian una equivalencia correcta —no un problema— y
+    // aparecian en la configuracion normal del nodo, de modo que acostumbraban
+    // al operador a ignorar la lista de avisos donde si aparecen los reales.
 
     if (sandboxResult.value === null) {
       warnings.push(
@@ -622,10 +603,7 @@ const webScraperSetup = () => {
     // no tiene consecuencia topologica —el validador no la consulta—, de modo
     // que vale el criterio general de no engordar el esquema con lo que el
     // defecto ya dice.
-    if (
-      config.value.ignoreExtractionFailure !==
-      DEFAULT_SCRAPER_IGNORE_EXTRACTION_FAILURE
-    ) {
+    if (config.value.ignoreExtractionFailure !== DEFAULT_SCRAPER_IGNORE_EXTRACTION_FAILURE) {
       params.ignoreExtractionFailure = config.value.ignoreExtractionFailure;
     }
 

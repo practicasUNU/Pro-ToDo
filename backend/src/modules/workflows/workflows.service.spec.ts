@@ -10,6 +10,11 @@ import { NodeType } from '@core/fsm/types/pipeline-schema.types';
 
 import { WorkflowsService } from './workflows.service';
 
+import { WorkflowStatusCoordinator } from '@common/services/workflow-status.coordinator';
+
+import type { PipelineSummaryResponseDto } from '@modules/workflows/dto/pipeline-summary-response.dto';
+import { WorkflowStatus } from '@modules/workflows/enums/workflow-status.enum';
+
 import { DEFAULT_MOCK_NAMESPACES } from './dto/execute-test-workflow.dto';
 
 import type { CreateWorkflowDto } from './dto/create-workflow.dto';
@@ -61,7 +66,7 @@ const buildWorkflow = (overrides: Partial<Workflow> = {}): Workflow => ({
   id: WORKFLOW_ID,
   name: '[E2E] Mapeador de plantilla',
   description: null,
-  active: true,
+  status: WorkflowStatus.ACTIVO,
   pipelineSchema: buildSchema(),
   // Un flujo que no nacio de ninguna plantilla, que es el caso de todos los
   // anteriores a la migracion 010 y el del asistente creando uno desde cero.
@@ -110,6 +115,7 @@ type EngineMock = jest.Mocked<
  *  sobre metodos de instancia dispara `@typescript-eslint/unbound-method`. */
 interface ExecutionQueryMock {
   findLiveByFlow: jest.Mock;
+  findLiveByFlows: jest.Mock;
 }
 
 /** Miembros `jest.Mock` y no `jest.Mocked<Pick<...>>`: `expect(mock.metodo)`
@@ -171,6 +177,7 @@ const buildHarness = (): ServiceHarness => {
   // y las pruebas que lo comprueban la rellenan.
   const executionQuery: ExecutionQueryMock = {
     findLiveByFlow: jest.fn().mockResolvedValue([]),
+    findLiveByFlows: jest.fn().mockResolvedValue([]),
   };
 
   // El puerto del sondeo va mockeado: la implementacion real vive en
@@ -190,6 +197,8 @@ const buildHarness = (): ServiceHarness => {
   // afirma sobre la llamada, no solo sobre que no estorbe.
   const crudEvents = { dispatch: jest.fn() };
 
+  const statusCoordinator = new WorkflowStatusCoordinator();
+
   const service = new WorkflowsService(
     repository as unknown as Repository<Workflow>,
     validator as unknown as PipelineValidatorService,
@@ -198,6 +207,10 @@ const buildHarness = (): ServiceHarness => {
     templates as unknown as WorkflowTemplatesService,
     coordinator as unknown as FlowPollingCoordinator,
     crudEvents as unknown as CrudEventsCoordinator,
+    // Coordinador REAL y vacio: el servicio se inscribe en el (`onModuleInit`)
+    // y aqui no hay nadie que lo invoque, asi que no estorba. Un doble solo
+    // anadiria dos `jest.fn()` que ninguna asercion mira.
+    statusCoordinator,
   );
   jest.spyOn(service['logger'], 'log').mockImplementation(() => undefined);
   jest.spyOn(service['logger'], 'warn').mockImplementation(() => undefined);
@@ -312,6 +325,8 @@ describe('WorkflowsService (despacho manual de pruebas, Camino B)', () => {
         {
           skipNodeTypes: [NodeType.TRIGGER_IMAP, NodeType.TRIGGER_CRON],
           flowName: expect.any(String),
+          // Un ensayo fallido no puede apagar un flujo de produccion.
+          suppressFlowPause: true,
         },
       );
     });
@@ -417,7 +432,7 @@ describe('WorkflowsService (despacho manual de pruebas, Camino B)', () => {
       //    Sin lo segundo, el sondeo seguiria disparando un flujo apagado hasta
       //    la siguiente reconciliacion.
       expect(repository.save).toHaveBeenCalledWith(
-        expect.objectContaining({ active: false }),
+        expect.objectContaining({ status: WorkflowStatus.INACTIVO }),
       );
       expect(coordinator.stopPollingForFlow).toHaveBeenCalledWith(WORKFLOW_ID);
     });
@@ -440,7 +455,7 @@ describe('WorkflowsService (despacho manual de pruebas, Camino B)', () => {
           entity: 'workflows',
           action: 'UPDATED',
           id: WORKFLOW_ID,
-          data: expect.objectContaining({ active: false }),
+          data: expect.objectContaining({ status: WorkflowStatus.INACTIVO }),
         }),
       );
     });
@@ -674,7 +689,7 @@ describe('WorkflowsService (catalogo de pipelines del asistente)', () => {
         id: WORKFLOW_ID,
         name: '[E2E] Mapeador de plantilla',
         description: 'Publicacion automatica de noticias',
-        active: true,
+        status: WorkflowStatus.ACTIVO,
       });
     });
   });
@@ -866,20 +881,29 @@ describe('WorkflowsService (alta de flujos desde el asistente)', () => {
       //    flujo que se activase solo empezaria a consumir el buzon corporativo
       //    —marcando los correos como leidos— sin revision previa.
       expect(repository.create).toHaveBeenCalledWith(
-        expect.objectContaining({ active: false }),
+        expect.objectContaining({ status: WorkflowStatus.INACTIVO }),
       );
     });
 
-    it('7.5 deberia respetar un active explicito', async () => {
-      // 1. Arrange
+    it('7.5 deberia IGNORAR un estado colado en el cuerpo del alta', async () => {
+      // 1. Arrange 📐: `CreateWorkflowDto` ya no declara el estado, pero el
+      //    `ValidationPipe` solo recorta propiedades desconocidas en la capa
+      //    HTTP. Quien invoque el servicio directamente no debe poder armar un
+      //    flujo saltandose `assertActivatable`, que solo corre al editar.
       const { service, repository } = buildHarness();
 
-      // 2. Act
-      await service.createWorkflow(buildCreateDto({ active: true }), AUTHOR_ID);
+      // 2. Act ⚙️
+      await service.createWorkflow(
+        {
+          ...buildCreateDto(),
+          status: WorkflowStatus.ACTIVO,
+        } as ReturnType<typeof buildCreateDto>,
+        AUTHOR_ID,
+      );
 
-      // 3. Assert
+      // 3. Assert 🎯
       expect(repository.create).toHaveBeenCalledWith(
-        expect.objectContaining({ active: true }),
+        expect.objectContaining({ status: WorkflowStatus.INACTIVO }),
       );
     });
 
@@ -1052,14 +1076,14 @@ describe('WorkflowsService (difusion de mutaciones CRUD)', () => {
   });
 
   it('C.2 deberia difundir UPDATED —y nunca DELETED— al desactivar', async () => {
-    // 1. Arrange 📐: retirar un flujo es `PATCH { active: false }`; la fila
+    // 1. Arrange 📐: retirar un flujo es `PATCH { status: 'INACTIVO' }`; la fila
     //    sigue existiendo y el panel debe pintarla como inactiva, no quitarla.
     const { service, crudEvents } = buildHarness();
 
     // 2. Act ⚙️
     await service.updateWorkflow(
       WORKFLOW_ID,
-      { active: false },
+      { status: WorkflowStatus.INACTIVO },
       UserRole.ADMIN,
     );
 
@@ -1124,7 +1148,7 @@ describe('WorkflowsService (edicion y habilitacion de flujos)', () => {
         expect.objectContaining({
           name: 'Solo el nombre',
           description: null,
-          active: true,
+          status: WorkflowStatus.ACTIVO,
         }),
       );
     });
@@ -1165,7 +1189,7 @@ describe('WorkflowsService (edicion y habilitacion de flujos)', () => {
 
       // 2. Act & 3. Assert
       await expect(
-        service.updateWorkflow(WORKFLOW_ID, { active: true }),
+        service.updateWorkflow(WORKFLOW_ID, { status: WorkflowStatus.ACTIVO }),
       ).rejects.toThrow(NotFoundException);
     });
   });
@@ -1174,32 +1198,37 @@ describe('WorkflowsService (edicion y habilitacion de flujos)', () => {
     it('11.1 deberia revalidar el esquema al activar', async () => {
       // 1. Arrange
       const { service, repository, validator } = buildHarness();
-      repository.findOne.mockResolvedValue(buildWorkflow({ active: false }));
+      repository.findOne.mockResolvedValue(
+        buildWorkflow({ status: WorkflowStatus.INACTIVO }),
+      );
 
       // 2. Act
       const summary = await service.updateWorkflow(WORKFLOW_ID, {
-        active: true,
+        status: WorkflowStatus.ACTIVO,
       });
 
       // 3. Assert: habilitar expone el flujo al sondeo IMAP, que lo recogera en
       //    su reconciliacion sin volver a preguntar nada. Es la ultima
       //    oportunidad de detectar un grafo roto.
       expect(validator.validateSchema).toHaveBeenCalledTimes(1);
-      expect(summary.active).toBe(true);
+      expect(summary.status).toBe(WorkflowStatus.ACTIVO);
     });
 
     it('11.2 deberia rechazar la activacion de un flujo sin esquema', async () => {
       // 1. Arrange
       const { service, repository } = buildHarness();
       repository.findOne.mockResolvedValue(
-        buildWorkflow({ active: false, pipelineSchema: null }),
+        buildWorkflow({
+          status: WorkflowStatus.INACTIVO,
+          pipelineSchema: null,
+        }),
       );
 
       // 2. Act & 3. Assert: un flujo sin esquema es un borrador legitimo del
       //    asistente, pero activarlo dejaria al sondeo disparando ejecuciones
       //    que fallan en el primer paso.
       await expect(
-        service.updateWorkflow(WORKFLOW_ID, { active: true }),
+        service.updateWorkflow(WORKFLOW_ID, { status: WorkflowStatus.ACTIVO }),
       ).rejects.toThrow(BadRequestException);
       expect(repository.save).not.toHaveBeenCalled();
     });
@@ -1207,7 +1236,9 @@ describe('WorkflowsService (edicion y habilitacion de flujos)', () => {
     it('11.3 deberia rechazar la activacion si el esquema ya no es integro', async () => {
       // 1. Arrange
       const { service, repository, validator } = buildHarness();
-      repository.findOne.mockResolvedValue(buildWorkflow({ active: false }));
+      repository.findOne.mockResolvedValue(
+        buildWorkflow({ status: WorkflowStatus.INACTIVO }),
+      );
       validator.validateSchema.mockRejectedValue(
         new BadRequestException({ issues: [{ field: 'nodes.a.nextStep' }] }),
       );
@@ -1215,7 +1246,7 @@ describe('WorkflowsService (edicion y habilitacion de flujos)', () => {
       // 2. Act & 3. Assert: la fila pudo escribirse por SQL directo o quedar
       //    obsoleta si el contrato del grafo cambio desde que se guardo.
       await expect(
-        service.updateWorkflow(WORKFLOW_ID, { active: true }),
+        service.updateWorkflow(WORKFLOW_ID, { status: WorkflowStatus.ACTIVO }),
       ).rejects.toThrow(BadRequestException);
       expect(repository.save).not.toHaveBeenCalled();
     });
@@ -1225,13 +1256,15 @@ describe('WorkflowsService (edicion y habilitacion de flujos)', () => {
       const { service, repository, validator } = buildHarness();
 
       // 2. Act
-      await service.updateWorkflow(WORKFLOW_ID, { active: false });
+      await service.updateWorkflow(WORKFLOW_ID, {
+        status: WorkflowStatus.INACTIVO,
+      });
 
       // 3. Assert: retirar un flujo de los disparadores nunca puede fallar por
       //    un esquema roto; si acaso es la via de emergencia para pararlo.
       expect(validator.validateSchema).not.toHaveBeenCalled();
       expect(repository.save).toHaveBeenCalledWith(
-        expect.objectContaining({ active: false }),
+        expect.objectContaining({ status: WorkflowStatus.INACTIVO }),
       );
     });
 
@@ -1244,12 +1277,12 @@ describe('WorkflowsService (edicion y habilitacion de flujos)', () => {
 
       // 2. Act
       const summary = await service.updateWorkflow(WORKFLOW_ID, {
-        active: false,
+        status: WorkflowStatus.INACTIVO,
       });
 
       // 3. Assert: la guarda es asimetrica a proposito y solo mira la
       //    activacion. Un flujo a medio configurar debe poder desactivarse.
-      expect(summary.active).toBe(false);
+      expect(summary.status).toBe(WorkflowStatus.INACTIVO);
       expect(summary.topology).toEqual([]);
     });
 
@@ -1259,7 +1292,9 @@ describe('WorkflowsService (edicion y habilitacion de flujos)', () => {
       engine.abortExecutionsForFlow.mockResolvedValue(2);
 
       // 2. Act
-      await service.updateWorkflow(WORKFLOW_ID, { active: false });
+      await service.updateWorkflow(WORKFLOW_ID, {
+        status: WorkflowStatus.INACTIVO,
+      });
 
       // 3. Assert
       expect(coordinator.stopPollingForFlow).toHaveBeenCalledWith(WORKFLOW_ID);
@@ -1277,7 +1312,9 @@ describe('WorkflowsService (edicion y habilitacion de flujos)', () => {
       const { service, repository, coordinator } = buildHarness();
 
       // 2. Act
-      await service.updateWorkflow(WORKFLOW_ID, { active: false });
+      await service.updateWorkflow(WORKFLOW_ID, {
+        status: WorkflowStatus.INACTIVO,
+      });
 
       // 3. Assert
       const savedAt = repository.save.mock.invocationCallOrder[0];
@@ -1289,10 +1326,14 @@ describe('WorkflowsService (edicion y habilitacion de flujos)', () => {
     it('11.8 no deberia limpiar nada si el flujo ya estaba inactivo', async () => {
       // 1. Arrange: `false -> false` no es una transicion.
       const { service, engine, coordinator, repository } = buildHarness();
-      repository.findOne.mockResolvedValue(buildWorkflow({ active: false }));
+      repository.findOne.mockResolvedValue(
+        buildWorkflow({ status: WorkflowStatus.INACTIVO }),
+      );
 
       // 2. Act
-      await service.updateWorkflow(WORKFLOW_ID, { active: false });
+      await service.updateWorkflow(WORKFLOW_ID, {
+        status: WorkflowStatus.INACTIVO,
+      });
 
       // 3. Assert
       expect(coordinator.stopPollingForFlow).not.toHaveBeenCalled();
@@ -1315,10 +1356,14 @@ describe('WorkflowsService (edicion y habilitacion de flujos)', () => {
       // 1. Arrange: las PAUSADO son la cola de reintento de CU-09 y sobreviven
       //    a proposito; el operador desactiva para arreglar algo y reactiva.
       const { service, engine, repository } = buildHarness();
-      repository.findOne.mockResolvedValue(buildWorkflow({ active: false }));
+      repository.findOne.mockResolvedValue(
+        buildWorkflow({ status: WorkflowStatus.INACTIVO }),
+      );
 
       // 2. Act
-      await service.updateWorkflow(WORKFLOW_ID, { active: true });
+      await service.updateWorkflow(WORKFLOW_ID, {
+        status: WorkflowStatus.ACTIVO,
+      });
 
       // 3. Assert
       expect(engine.abortExecutionsForFlow).not.toHaveBeenCalled();
@@ -1328,10 +1373,14 @@ describe('WorkflowsService (edicion y habilitacion de flujos)', () => {
       // 1. Arrange: sin esto el operador pulsa "Activar" y el flujo no sondea
       //    hasta el siguiente ciclo de reconciliacion.
       const { service, coordinator, repository } = buildHarness();
-      repository.findOne.mockResolvedValue(buildWorkflow({ active: false }));
+      repository.findOne.mockResolvedValue(
+        buildWorkflow({ status: WorkflowStatus.INACTIVO }),
+      );
 
       // 2. Act
-      await service.updateWorkflow(WORKFLOW_ID, { active: true });
+      await service.updateWorkflow(WORKFLOW_ID, {
+        status: WorkflowStatus.ACTIVO,
+      });
 
       // 3. Assert
       expect(coordinator.refreshPolling).toHaveBeenCalledTimes(1);
@@ -1348,11 +1397,11 @@ describe('WorkflowsService (edicion y habilitacion de flujos)', () => {
 
       // 2. Act
       const summary = await service.updateWorkflow(WORKFLOW_ID, {
-        active: false,
+        status: WorkflowStatus.INACTIVO,
       });
 
       // 3. Assert
-      expect(summary.active).toBe(false);
+      expect(summary.status).toBe(WorkflowStatus.INACTIVO);
       expect(errorSpy).toHaveBeenCalled();
     });
 
@@ -1364,7 +1413,9 @@ describe('WorkflowsService (edicion y habilitacion de flujos)', () => {
       // 2. Act + 3. Assert: el flujo sigue activo en la base de datos, asi que
       //    pararlo dejaria un flujo habilitado que no sondea.
       await expect(
-        service.updateWorkflow(WORKFLOW_ID, { active: false }),
+        service.updateWorkflow(WORKFLOW_ID, {
+          status: WorkflowStatus.INACTIVO,
+        }),
       ).rejects.toThrow('PostgreSQL no responde');
       expect(coordinator.stopPollingForFlow).not.toHaveBeenCalled();
     });
@@ -1381,7 +1432,7 @@ describe('WorkflowsService (edicion y habilitacion de flujos)', () => {
 
       // 2. Act ⚙️ + 3. Assert 🎯
       await expect(
-        service.updateWorkflow(WORKFLOW_ID, { active: true }),
+        service.updateWorkflow(WORKFLOW_ID, { status: WorkflowStatus.ACTIVO }),
       ).rejects.toThrow(ConflictException);
       expect(repository.save).not.toHaveBeenCalled();
     });
@@ -1396,7 +1447,9 @@ describe('WorkflowsService (edicion y habilitacion de flujos)', () => {
 
       // 2. Act ⚙️ + 3. Assert 🎯
       await expect(
-        service.updateWorkflow(WORKFLOW_ID, { active: false }),
+        service.updateWorkflow(WORKFLOW_ID, {
+          status: WorkflowStatus.INACTIVO,
+        }),
       ).rejects.toThrow(ConflictException);
       expect(repository.save).not.toHaveBeenCalled();
     });
@@ -1414,23 +1467,25 @@ describe('WorkflowsService (edicion y habilitacion de flujos)', () => {
 
       // 2. Act ⚙️
       const summary = await service.updateWorkflow(WORKFLOW_ID, {
-        active: false,
+        status: WorkflowStatus.INACTIVO,
       });
 
       // 3. Assert 🎯
-      expect(summary.active).toBe(false);
+      expect(summary.status).toBe(WorkflowStatus.INACTIVO);
     });
 
-    it('11bis.4 NO deberia consultar ejecuciones si no se toca active', async () => {
-      // 1. Arrange 📐: editar el nombre no tiene por que costar una consulta a
-      //    `ejecuciones_flujo`.
+    it('11bis.4 NO deberia anadir la consulta de la guarda si no se toca el estado', async () => {
+      // 1. Arrange 📐: editar el nombre no dispara `assertNotInFlight`. La UNICA
+      //    consulta que queda es la del resumen, que resuelve la ejecucion viva
+      //    para que el `crud:mutation` no difunda un `activeExecutionId: null`
+      //    y el cliente borre el boton de reanudar al repintar la fila.
       const { service, executionQuery } = buildHarness();
 
       // 2. Act ⚙️
       await service.updateWorkflow(WORKFLOW_ID, { name: 'Otro nombre' });
 
       // 3. Assert 🎯
-      expect(executionQuery.findLiveByFlow).not.toHaveBeenCalled();
+      expect(executionQuery.findLiveByFlow).toHaveBeenCalledTimes(1);
     });
   });
 });
@@ -1496,6 +1551,132 @@ describe('WorkflowsService (detalle para el asistente de edicion)', () => {
       await expect(service.findOneDetail(WORKFLOW_ID)).rejects.toBeInstanceOf(
         NotFoundException,
       );
+    });
+  });
+
+  describe('13. Pausa y reactivacion del flujo por el motor (WorkflowStatusPort)', () => {
+    it('13.1 deberia persistir PAUSADO, soltar el sondeo y difundirlo', async () => {
+      // 1. Arrange 📐
+      const { service, repository, coordinator, crudEvents } = buildHarness();
+
+      // 2. Act ⚙️
+      await service.pauseFlow(WORKFLOW_ID, 'ERR_LLM_TIMEOUT');
+
+      // 3. Assert 🎯
+      expect(repository.save).toHaveBeenCalledWith(
+        expect.objectContaining({ status: WorkflowStatus.PAUSADO }),
+      );
+      // Cortar la fuente de trabajo nuevo: sin esto el sondeo apilaria
+      // ejecuciones encima de la que acaba de quedarse atascada.
+      expect(coordinator.stopPollingForFlow).toHaveBeenCalledWith(WORKFLOW_ID);
+      // Se navega el payload en vez de anidar dos `objectContaining`: el
+      // anidado devuelve `any` y el lint del repositorio lo rechaza.
+      const [mutation] = crudEvents.dispatch.mock.calls.at(-1) as [
+        { entity: string; action: string; data: PipelineSummaryResponseDto },
+      ];
+
+      expect(mutation.entity).toBe('workflows');
+      expect(mutation.action).toBe('UPDATED');
+      expect(mutation.data.status).toBe(WorkflowStatus.PAUSADO);
+    });
+
+    it('13.2 NO deberia abortar las ejecuciones vivas al pausar', async () => {
+      // 1. Arrange 📐: ESTA es la regresion que importa. `abortExecutionsForFlow`
+      //    cierra como FALLIDO todo lo que este en EN_PROCESO o PAUSADO, asi que
+      //    reutilizar `releaseDeactivatedFlow` aqui mataria la ejecucion que el
+      //    motor acaba de pausar —se llamaria a si mismo— y convertiria cada
+      //    pausa reanudable en un fallo definitivo.
+      const { service, engine } = buildHarness();
+
+      // 2. Act ⚙️
+      await service.pauseFlow(WORKFLOW_ID, 'ERR_LLM_TIMEOUT');
+
+      // 3. Assert 🎯
+      expect(engine.abortExecutionsForFlow).not.toHaveBeenCalled();
+    });
+
+    it('13.3 NO deberia tocar un flujo que no estaba ACTIVO', async () => {
+      // 1. Arrange 📐: uno INACTIVO no tiene temporizador que desarmar, y
+      //    marcarlo PAUSADO lo sacaria de la columna "Inactivo" de la tabla sin
+      //    que nadie pudiera devolverlo: las dos salidas de PAUSADO parten de
+      //    una ejecucion detenida que aqui no existe.
+      const { service, repository, coordinator, crudEvents } = buildHarness();
+      repository.findOne.mockResolvedValue(
+        buildWorkflow({ status: WorkflowStatus.INACTIVO }),
+      );
+
+      // 2. Act ⚙️
+      await service.pauseFlow(WORKFLOW_ID, 'ERR_LLM_TIMEOUT');
+
+      // 3. Assert 🎯
+      expect(repository.save).not.toHaveBeenCalled();
+      expect(coordinator.stopPollingForFlow).not.toHaveBeenCalled();
+      expect(crudEvents.dispatch).not.toHaveBeenCalled();
+    });
+
+    it('13.4 NO deberia romperse si el flujo ya no existe', async () => {
+      // 1. Arrange 📐: el motor pausa por `flowId`, y entre el checkpoint y esta
+      //    llamada alguien pudo borrar la fila por SQL directo. Lanzar aqui
+      //    propagaria hasta `pauseAt`, que ya persistio el checkpoint.
+      const { service, repository } = buildHarness();
+      repository.findOne.mockResolvedValue(null);
+
+      // 2. Act ⚙️ & 3. Assert 🎯
+      await expect(
+        service.pauseFlow(WORKFLOW_ID, 'ERR_LLM_TIMEOUT'),
+      ).resolves.toBeUndefined();
+      expect(repository.save).not.toHaveBeenCalled();
+    });
+
+    it('13.5 deberia devolver a ACTIVO y reinscribir el sondeo al reanudar', async () => {
+      // 1. Arrange 📐
+      const { service, repository, coordinator } = buildHarness();
+      repository.findOne.mockResolvedValue(
+        buildWorkflow({ status: WorkflowStatus.PAUSADO }),
+      );
+
+      // 2. Act ⚙️
+      await service.reactivateAfterResume(WORKFLOW_ID);
+
+      // 3. Assert 🎯: `refreshPolling` y no `stopPollingForFlow`: hay que
+      //    REINSCRIBIR el temporizador que la pausa borro.
+      expect(repository.save).toHaveBeenCalledWith(
+        expect.objectContaining({ status: WorkflowStatus.ACTIVO }),
+      );
+      expect(coordinator.refreshPolling).toHaveBeenCalledTimes(1);
+    });
+
+    it('13.6 NO deberia activar un flujo que el operador habia retirado', async () => {
+      // 1. Arrange 📐: reanudar NO exige el flujo armado —esa asimetria la
+      //    documenta `ExecutionsService.resumeExecution`—, pero tampoco puede
+      //    rearmarlo: habilitaria los disparadores de un flujo que alguien
+      //    apago a mano, sin que nadie lo pidiera.
+      const { service, repository, coordinator } = buildHarness();
+      repository.findOne.mockResolvedValue(
+        buildWorkflow({ status: WorkflowStatus.INACTIVO }),
+      );
+
+      // 2. Act ⚙️
+      await service.reactivateAfterResume(WORKFLOW_ID);
+
+      // 3. Assert 🎯
+      expect(repository.save).not.toHaveBeenCalled();
+      expect(coordinator.refreshPolling).not.toHaveBeenCalled();
+    });
+
+    it('13.7 deberia soltar el sondeo al desactivar por descarte', async () => {
+      // 1. Arrange 📐: hasta ahora la fila quedaba INACTIVO pero el intervalo
+      //    seguia vivo en memoria hasta la siguiente reconciliacion, creando
+      //    ejecuciones de un flujo que el operador acababa de cerrar.
+      const { service, coordinator, engine } = buildHarness();
+
+      // 2. Act ⚙️
+      await service.deactivateAfterDiscard(WORKFLOW_ID);
+
+      // 3. Assert 🎯
+      expect(coordinator.stopPollingForFlow).toHaveBeenCalledWith(WORKFLOW_ID);
+      // Y sigue sin arrastrar las PAUSADO, que es lo que el descarte respeta.
+      expect(engine.abortExecutionsForFlow).not.toHaveBeenCalled();
     });
   });
 });

@@ -7,6 +7,7 @@ import {
 import { ConfigService } from '@nestjs/config';
 
 import { ExecutionEventsCoordinator } from '@common/services/execution-events.coordinator';
+import { WorkflowStatusCoordinator } from '@common/services/workflow-status.coordinator';
 import { FsmConfig } from '@core/config/fsm.config';
 import { SystemCapacityExceededException } from '@core/fsm/exceptions/system-capacity-exceeded.exception';
 import { In, QueryFailedError } from 'typeorm';
@@ -268,6 +269,10 @@ describe('FsmEngineService (PROT-09)', () => {
     // espiar lo que el motor publica; sin pasarlo, sigue siendo el no-op de
     // siempre y ninguna prueba anterior cambia.
     events: ExecutionEventsCoordinator = new ExecutionEventsCoordinator(),
+    // Mismo criterio y mismo motivo que el coordinador de eventos: real, vacio
+    // y por tanto no-op, salvo cuando una prueba quiera espiar la pausa del
+    // flujo padre.
+    workflowStatus: WorkflowStatusCoordinator = new WorkflowStatusCoordinator(),
   ): FsmEngineService => {
     const engine = new FsmEngineService(
       repo,
@@ -285,6 +290,7 @@ describe('FsmEngineService (PROT-09)', () => {
       // `jest.fn()` que ninguna asercion mira. Mismo criterio que el
       // `FsmConfig` de arriba.
       events,
+      workflowStatus,
     );
     jest.spyOn(engine['logger'], 'log').mockImplementation(() => undefined);
     jest.spyOn(engine['logger'], 'warn').mockImplementation(() => undefined);
@@ -4464,6 +4470,161 @@ describe('FsmEngineService (PROT-09)', () => {
       expect(completed?.halted).toBe(true);
       expect(completed?.attempts).toBe(1);
       expect(typeof completed?.durationMs).toBe('number');
+    });
+  });
+
+  describe('39. Pausa del flujo padre al detener una ejecucion', () => {
+    /** Motor con el coordinador de estado espiado. */
+    const buildPausingEngine = (
+      repo: Repository<FsmExecution>,
+    ): {
+      engine: FsmEngineService;
+      workflowStatus: WorkflowStatusCoordinator;
+      events: ExecutionEventsCoordinator;
+    } => {
+      const events = new ExecutionEventsCoordinator();
+      const workflowStatus = new WorkflowStatusCoordinator();
+
+      return {
+        engine: buildEngine(
+          repo,
+          new ConfigService({}),
+          events,
+          workflowStatus,
+        ),
+        workflowStatus,
+        events,
+      };
+    };
+
+    it('39.1 deberia pedir la pausa del flujo al detenerse sin ruta', async () => {
+      // 1. Arrange 📐
+      const { repo } = buildRepository(buildExecution());
+      const { engine, workflowStatus } = buildPausingEngine(repo);
+      const pauseFlow = jest.spyOn(workflowStatus, 'pauseFlow');
+
+      factory.registerStrategy(
+        buildStrategy(
+          NodeType.TRIGGER_IMAP,
+          jest.fn().mockResolvedValue(failure('URGENTE')),
+        ),
+      );
+
+      // 2. Act ⚙️
+      await engine.executeWorkflow(EXECUTION_ID, buildLinearSchema());
+
+      // 3. Assert 🎯: se identifica el flujo, no la ejecucion: lo que se apaga
+      //    es el sondeo del flujo padre.
+      expect(pauseFlow).toHaveBeenCalledWith(FLOW_ID, TEST_ERROR_CODE);
+    });
+
+    it('39.2 deberia pausar el flujo DESPUES del checkpoint y ANTES del evento', async () => {
+      // 1. Arrange 📐: el orden es observable. Despues del checkpoint porque la
+      //    ejecucion es el hecho y el estado del flujo su consecuencia; antes
+      //    del evento porque el cliente repinta la fila leyendo lo que el evento
+      //    anuncia, y al reves pintaria "Activo" sobre una ejecucion detenida.
+      const { repo, update } = buildRepository(buildExecution());
+      const { engine, workflowStatus, events } = buildPausingEngine(repo);
+      const pauseFlow = jest.spyOn(workflowStatus, 'pauseFlow');
+      const emitFlowPaused = jest.spyOn(events, 'emitFlowPaused');
+
+      factory.registerStrategy(
+        buildStrategy(
+          NodeType.TRIGGER_IMAP,
+          jest.fn().mockResolvedValue(failure('URGENTE')),
+        ),
+      );
+
+      // 2. Act ⚙️
+      await engine.executeWorkflow(EXECUTION_ID, buildLinearSchema());
+
+      // 3. Assert 🎯
+      const checkpointOrder = update.mock.invocationCallOrder.at(-1) ?? 0;
+      const pauseOrder = pauseFlow.mock.invocationCallOrder[0] ?? 0;
+      const eventOrder = emitFlowPaused.mock.invocationCallOrder[0] ?? 0;
+
+      expect(checkpointOrder).toBeLessThan(pauseOrder);
+      expect(pauseOrder).toBeLessThan(eventOrder);
+    });
+
+    it('39.3 NO deberia pausar el flujo en el banco de pruebas', async () => {
+      // 1. Arrange 📐: un ensayo fallido contra un flujo en produccion lo
+      //    dejaria PAUSADO y apagaria su sondeo, convirtiendo la prueba en una
+      //    interrupcion del servicio.
+      const { repo } = buildRepository(buildExecution());
+      const { engine, workflowStatus, events } = buildPausingEngine(repo);
+      const pauseFlow = jest.spyOn(workflowStatus, 'pauseFlow');
+      const emitFlowPaused = jest.spyOn(events, 'emitFlowPaused');
+
+      factory.registerStrategy(
+        buildStrategy(
+          NodeType.TRIGGER_IMAP,
+          jest.fn().mockResolvedValue(failure('URGENTE')),
+        ),
+      );
+
+      // 2. Act ⚙️
+      await engine.executeWorkflow(EXECUTION_ID, buildLinearSchema(), {
+        suppressFlowPause: true,
+      });
+
+      // 3. Assert 🎯: la EJECUCION si queda PAUSADO —es reanudable—, pero el
+      //    flujo padre no se entera.
+      expect(pauseFlow).not.toHaveBeenCalled();
+      expect(emitFlowPaused).toHaveBeenCalledTimes(1);
+    });
+
+    it('39.4 deberia pausar el flujo tambien cuando salta el circuit breaker', async () => {
+      // 1. Arrange 📐: un ciclo en el grafo no tiene nodo culpable, pero deja la
+      //    ejecucion igual de atascada y el sondeo igual de inutil.
+      const execution = buildExecution();
+      const { repo } = buildRepository(execution);
+      const { engine, workflowStatus } = buildPausingEngine(repo);
+      const pauseFlow = jest.spyOn(workflowStatus, 'pauseFlow');
+
+      const schema = buildLinearSchema();
+      schema.nodes.nodo_a.nextStep = 'nodo_b';
+      schema.nodes.nodo_b.nextStep = 'nodo_a';
+
+      for (const nodeType of [NodeType.TRIGGER_IMAP, NodeType.PROCESADOR_IA]) {
+        factory.registerStrategy(
+          buildStrategy(
+            nodeType,
+            jest.fn().mockResolvedValue({ success: true, data: {} }),
+          ),
+        );
+      }
+
+      // 2. Act ⚙️
+      await engine.executeWorkflow(EXECUTION_ID, schema);
+
+      // 3. Assert 🎯
+      expect(pauseFlow).toHaveBeenCalledTimes(1);
+    });
+
+    it('39.5 NO deberia romper la pausa si el coordinador falla', async () => {
+      // 1. Arrange 📐: una notificacion rota no puede convertir una pausa
+      //    reanudable en una excepcion sin checkpoint.
+      const { repo, update } = buildRepository(buildExecution());
+      const { engine, workflowStatus, events } = buildPausingEngine(repo);
+      jest
+        .spyOn(workflowStatus, 'pauseFlow')
+        .mockRejectedValue(new Error('PostgreSQL caido'));
+      const emitFlowPaused = jest.spyOn(events, 'emitFlowPaused');
+
+      factory.registerStrategy(
+        buildStrategy(
+          NodeType.TRIGGER_IMAP,
+          jest.fn().mockResolvedValue(failure('URGENTE')),
+        ),
+      );
+
+      // 2. Act ⚙️ & 3. Assert 🎯
+      await expect(
+        engine.executeWorkflow(EXECUTION_ID, buildLinearSchema()),
+      ).resolves.toBeDefined();
+      expect(lastPatch(update).currentState).toBe(ExecutionState.PAUSADO);
+      expect(emitFlowPaused).toHaveBeenCalledTimes(1);
     });
   });
 });

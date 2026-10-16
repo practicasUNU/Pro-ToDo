@@ -94,7 +94,10 @@ interface ServiceHarness {
     createExecution: jest.Mock;
     discardExecution: jest.Mock;
   };
-  workflows: { deactivateAfterDiscard: jest.Mock };
+  workflows: {
+    deactivateAfterDiscard: jest.Mock;
+    reactivateAfterResume: jest.Mock;
+  };
   events: ExecutionEventsCoordinator;
 }
 
@@ -141,6 +144,7 @@ const buildHarness = (): ServiceHarness => {
     }),
   };
   const workflows = {
+    reactivateAfterResume: jest.fn().mockResolvedValue(undefined),
     deactivateAfterDiscard: jest.fn().mockResolvedValue({
       id: FLOW_ID,
       name: 'Flujo de prueba',

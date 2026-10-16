@@ -18,7 +18,7 @@ import { OCR_STEP_NAME, useFlujoDraftStore } from './flujo-draft.store';
 import { useOcrProcessorStore } from '@stores/nodes/ocr-processor.store';
 
 import { NodeCategory } from '@/types/node-catalog';
-import { NodeType } from '@/types/pipeline';
+import { WorkflowStatus, NodeType } from '@/types/pipeline';
 import {
   MULTIMODAL_FALLBACK_CODE,
   SHARED_ALERT_NODE_ID,
@@ -197,7 +197,9 @@ const buildWorkflow = (overrides: Partial<PipelineSummary> = {}): PipelineSummar
   id: 'f1e2d3c4-b5a6-4978-8a9b-0c1d2e3f4a5b',
   name: 'Notiweb - publicacion automatica',
   description: 'Publica noticias entrantes en el CMS',
-  active: false,
+  status: WorkflowStatus.INACTIVO,
+  activeExecutionId: null,
+  executionState: null,
   templateId: TEMPLATE_ID,
   topology: [],
   ...overrides,
@@ -1683,7 +1685,9 @@ describe('useFlujoDraftStore · modo edicion', () => {
     id: WORKFLOW_ID,
     name: 'Notiweb - publicacion automatica',
     description: 'Publica noticias entrantes en el CMS',
-    active: true,
+    status: WorkflowStatus.ACTIVO,
+    activeExecutionId: null,
+    executionState: null,
     templateId: TEMPLATE_ID,
     // Solo los dos tipos con configurador registrado. Un tipo sin store en
     // `nodeStoreRegistry` no puede declararse valido, asi que un flujo que lo

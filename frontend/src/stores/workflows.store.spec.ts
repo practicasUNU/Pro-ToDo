@@ -4,7 +4,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { useWorkflowsStore } from './workflows.store';
 
-import { NodeType } from '@/types/pipeline';
+import { WorkflowStatus, NodeType } from '@/types/pipeline';
 
 import type { PipelineSummary } from '@/types/pipeline';
 
@@ -27,7 +27,9 @@ const buildWorkflow = (overrides: Partial<PipelineSummary> = {}): PipelineSummar
   id: WORKFLOW_ID,
   name: 'Notiweb - publicacion automatica',
   description: 'Publica noticias entrantes en el CMS',
-  active: false,
+  status: WorkflowStatus.INACTIVO,
+  activeExecutionId: null,
+  executionState: null,
   templateId: TEMPLATE_ID,
   topology: [
     { nodeId: 'trigger_imap', nodeType: NodeType.TRIGGER_IMAP, outputNamespace: 'raw_email' },
@@ -59,8 +61,8 @@ describe('useWorkflowsStore · catalogo de flujos instanciados', () => {
       // 1. Arrange
       const store = useWorkflowsStore();
       fetchWorkflows.mockResolvedValue([
-        buildWorkflow({ active: true }),
-        buildWorkflow({ id: OTHER_WORKFLOW_ID, active: false }),
+        buildWorkflow({ status: WorkflowStatus.ACTIVO }),
+        buildWorkflow({ id: OTHER_WORKFLOW_ID, status: WorkflowStatus.INACTIVO }),
       ]);
 
       // 2. Act
@@ -133,41 +135,43 @@ describe('useWorkflowsStore · catalogo de flujos instanciados', () => {
     it('3.1 deberia enviar solo el estado al activar', async () => {
       // 1. Arrange
       const store = useWorkflowsStore();
-      updateWorkflow.mockResolvedValue(buildWorkflow({ active: true }));
+      updateWorkflow.mockResolvedValue(buildWorkflow({ status: WorkflowStatus.ACTIVO }));
 
       // 2. Act
-      await store.setActive(WORKFLOW_ID, true);
+      await store.setStatus(WORKFLOW_ID, WorkflowStatus.ACTIVO);
 
       // 3. Assert: un cambio de estado no debe reenviar el grafo completo.
-      expect(updateWorkflow).toHaveBeenCalledWith(WORKFLOW_ID, { active: true });
+      expect(updateWorkflow).toHaveBeenCalledWith(WORKFLOW_ID, { status: WorkflowStatus.ACTIVO });
     });
 
     it('3.2 deberia reflejar el estado devuelto por el backend', async () => {
       // 1. Arrange
       const store = useWorkflowsStore();
-      fetchWorkflows.mockResolvedValue([buildWorkflow({ active: false })]);
+      fetchWorkflows.mockResolvedValue([buildWorkflow({ status: WorkflowStatus.INACTIVO })]);
       await store.fetchWorkflows();
-      updateWorkflow.mockResolvedValue(buildWorkflow({ active: true }));
+      updateWorkflow.mockResolvedValue(buildWorkflow({ status: WorkflowStatus.ACTIVO }));
 
       // 2. Act
-      await store.setActive(WORKFLOW_ID, true);
+      await store.setStatus(WORKFLOW_ID, WorkflowStatus.ACTIVO);
 
       // 3. Assert
-      expect(store.workflows[0]?.active).toBe(true);
+      expect(store.workflows[0]?.status).toBe(WorkflowStatus.ACTIVO);
       expect(store.activeCount).toBe(1);
     });
 
     it('3.3 no deberia cambiar el estado local si la activacion falla', async () => {
       // 1. Arrange
       const store = useWorkflowsStore();
-      fetchWorkflows.mockResolvedValue([buildWorkflow({ active: false })]);
+      fetchWorkflows.mockResolvedValue([buildWorkflow({ status: WorkflowStatus.INACTIVO })]);
       await store.fetchWorkflows();
       // El backend rechaza activar un flujo sin esquema valido.
       updateWorkflow.mockRejectedValue(new Error('400 Bad Request'));
 
       // 2. Act & 3. Assert
-      await expect(store.setActive(WORKFLOW_ID, true)).rejects.toThrow('400 Bad Request');
-      expect(store.workflows[0]?.active).toBe(false);
+      await expect(store.setStatus(WORKFLOW_ID, WorkflowStatus.ACTIVO)).rejects.toThrow(
+        '400 Bad Request',
+      );
+      expect(store.workflows[0]?.status).toBe(WorkflowStatus.INACTIVO);
     });
   });
 
@@ -178,31 +182,39 @@ describe('useWorkflowsStore · catalogo de flujos instanciados', () => {
       //    nadie lo esta mirando cuando ocurre y la unica via para que la tabla
       //    diga la verdad es esta mutacion.
       const store = useWorkflowsStore();
-      store.workflows = [buildWorkflow({ active: true })];
+      store.workflows = [buildWorkflow({ status: WorkflowStatus.ACTIVO })];
 
       // 2. Act ⚙️
-      store.applyMutation('UPDATED', buildWorkflow({ active: false }), WORKFLOW_ID);
+      store.applyMutation(
+        'UPDATED',
+        buildWorkflow({ status: WorkflowStatus.INACTIVO }),
+        WORKFLOW_ID,
+      );
       await nextTick();
 
       // 3. Assert 🎯: la fila se reemplaza ENTERA, no se fusiona.
       expect(store.workflows).toHaveLength(1);
-      expect(store.workflows[0]?.active).toBe(false);
+      expect(store.workflows[0]?.status).toBe(WorkflowStatus.INACTIVO);
     });
 
     it('NO deberia tocar las filas de otros flujos', async () => {
       // 1. Arrange 📐
       const store = useWorkflowsStore();
       store.workflows = [
-        buildWorkflow({ active: true }),
-        buildWorkflow({ id: OTHER_WORKFLOW_ID, active: true }),
+        buildWorkflow({ status: WorkflowStatus.ACTIVO }),
+        buildWorkflow({ id: OTHER_WORKFLOW_ID, status: WorkflowStatus.ACTIVO }),
       ];
 
       // 2. Act ⚙️
-      store.applyMutation('UPDATED', buildWorkflow({ active: false }), WORKFLOW_ID);
+      store.applyMutation(
+        'UPDATED',
+        buildWorkflow({ status: WorkflowStatus.INACTIVO }),
+        WORKFLOW_ID,
+      );
       await nextTick();
 
       // 3. Assert 🎯
-      expect(store.workflows[1]?.active).toBe(true);
+      expect(store.workflows[1]?.status).toBe(WorkflowStatus.ACTIVO);
     });
   });
 });

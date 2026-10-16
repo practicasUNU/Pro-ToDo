@@ -105,6 +105,35 @@ export class FsmExecutionQueryService {
    * segunda espera un reintento manual (CU-09). Las dos impiden que el flujo
    * arranque otra, asi que para quien pregunta «puedo despachar?» cuentan igual.
    */
+  /**
+   * Ejecuciones vivas de VARIOS flujos, en una sola consulta.
+   *
+   * Hermano de `findLiveByFlow`: mismo filtro y mismas columnas, pero para el
+   * listado del catalogo, donde una llamada por flujo seria un N+1 sobre una
+   * tabla que crece con cada disparo del sondeo.
+   *
+   * El singular se conserva porque `assertNotInFlight` pregunta por UN flujo, y
+   * reexpresarlo sobre el plural le haria construir un arreglo para nada.
+   */
+  public async findLiveByFlows(
+    flowIds: readonly string[],
+  ): Promise<FsmExecution[]> {
+    // `In([])` genera un `IN ()` que PostgreSQL rechaza, y un catalogo vacio no
+    // necesita ninguna consulta.
+    if (flowIds.length === 0) {
+      return [];
+    }
+
+    return this.fsmExecutionRepo.find({
+      where: {
+        flowId: In([...flowIds]),
+        currentState: In([ExecutionState.EN_PROCESO, ExecutionState.PAUSADO]),
+      },
+      select: SUMMARY_COLUMNS,
+      order: { createdAt: 'DESC' },
+    });
+  }
+
   public async findLiveByFlow(flowId: string): Promise<FsmExecution[]> {
     return this.fsmExecutionRepo.find({
       where: {

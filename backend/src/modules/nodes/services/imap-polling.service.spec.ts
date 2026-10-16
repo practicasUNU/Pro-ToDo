@@ -16,6 +16,7 @@ import { ImapPollingService } from './imap-polling.service';
 
 import type { ConfigService } from '@nestjs/config';
 import type { ImapTriggerConfigDto } from '@modules/nodes/dto/imap-trigger-config.dto';
+import { WorkflowStatus } from '@modules/workflows/enums/workflow-status.enum';
 import type { Workflow } from '@modules/workflows/entities/workflow.entity';
 import type { WorkflowsService } from '@modules/workflows/workflows.service';
 import type { Repository } from 'typeorm';
@@ -69,7 +70,7 @@ const buildWorkflow = (
     id: FLOW_ID,
     name: 'Noticias entrantes',
     description: null,
-    active: true,
+    status: WorkflowStatus.ACTIVO,
     createdById: null,
     createdAt: new Date('2026-01-01T00:00:00.000Z'),
     pipelineSchema: {
@@ -273,9 +274,10 @@ describe('ImapPollingService', () => {
       // 2. Act
       await service.onModuleInit();
 
-      // 3. Assert: `activo` gobierna los disparadores automaticos.
+      // 3. Assert: `status` gobierna los disparadores automaticos, y solo el
+      //    valor ACTIVO los habilita.
       expect(repository.find).toHaveBeenCalledWith({
-        where: { active: true },
+        where: { status: WorkflowStatus.ACTIVO },
       });
       service.onModuleDestroy();
     });

@@ -1,177 +1,207 @@
 <script setup lang="ts">
 import { computed } from 'vue';
 
+import CanvasNodeCard from '@components/canvas/CanvasNodeCard.vue';
 import { useCanvasStore } from '@stores/canvas.store';
-import { NODE_TYPE_LABELS, NodeType } from '@/types/pipeline';
+import { NODE_TYPE_LABELS } from '@/types/pipeline';
 
-import type { CanvasNodeStatus } from '@stores/canvas.store';
+import type { CanvasEdge, CanvasForkSlot } from '@stores/canvas.store';
 import type { AssembledPipelineNode } from '@/types/pipeline';
 
-/**
- * Icono por tipo de nodo.
- *
- * Vive en el componente y no en `@/types`: es presentacion pura, y el backend
- * no tiene ni debe tener opinion sobre con que glifo se dibuja un nodo.
- */
-const NODE_ICONS: Record<NodeType, string> = {
-  [NodeType.TRIGGER_IMAP]: 'mail',
-  [NodeType.TRIGGER_CRON]: 'schedule',
-  [NodeType.PARSER_PRE_IA]: 'segment',
-  [NodeType.EXTRACTOR_WEB]: 'public',
-  [NodeType.PROCESADOR_IA]: 'psychology',
-  [NodeType.ESCUDO_POST_IA]: 'gavel',
-  [NodeType.MAPEADOR_PLANTILLA]: 'dashboard_customize',
-  [NodeType.DESTINO_DRUPAL]: 'language',
-  [NodeType.DESTINO_SMTP]: 'forward_to_inbox',
-  [NodeType.PROCESADOR_OCR]: 'document_scanner',
-};
+/** Codigos que se listan antes de resumir el resto con un `+N`. */
+const MAX_VISIBLE_CODES = 2;
 
-/**
- * Distintivo de cada estado: icono, color y texto.
- *
- * El color NUNCA viaja solo. Un operador que no distingue verde de ambar tiene
- * que poder leer el estado igual, y por eso cada entrada lleva tambien glifo y
- * etiqueta.
- */
-const STATUS_BADGES: Record<
-  CanvasNodeStatus,
-  { readonly icon: string; readonly color: string; readonly label: string }
-> = {
-  IDLE: { icon: 'radio_button_unchecked', color: 'grey-6', label: 'En espera' },
-  RUNNING: { icon: 'autorenew', color: 'info', label: 'Ejecutando' },
-  COMPLETED: { icon: 'check_circle', color: 'positive', label: 'Completado' },
-  PAUSED: { icon: 'pause_circle', color: 'warning', label: 'Pausado' },
-  FAILED: { icon: 'error', color: 'negative', label: 'Fallido' },
+/** Icono de cada tipo de referencia a una tarjeta que ya existe. */
+const REF_ICONS: Record<string, string> = {
+  rejoin: 'u_turn_right',
+  duplicate: 'subdirectory_arrow_right',
+  missing: 'error_outline',
 };
 
 const canvasStore = useCanvasStore();
 
 const steps = computed<AssembledPipelineNode[]>(() => canvasStore.orderedSteps);
 
-const contingencySteps = computed<AssembledPipelineNode[]>(() => canvasStore.contingencySteps);
+const nominalEdges = computed<CanvasEdge[]>(() => canvasStore.nominalEdges);
 
-/**
- * El tramo entre dos cajas ya se recorrio.
- *
- * Se mira el ORIGEN y no el destino: la flecha describe una transicion que ya
- * ocurrio en cuanto el nodo de la izquierda termino, aunque el de la derecha
- * aun no haya arrancado.
- */
-const isTraversed = (step: AssembledPipelineNode): boolean =>
-  canvasStore.statusOf(step.nodeId) === 'COMPLETED';
+const forkSlots = computed<CanvasForkSlot[]>(() => canvasStore.forkSlots);
 
-const cardClasses = (step: AssembledPipelineNode, isContingency = false): string[] => {
-  const classes = [
-    'pd-card',
-    'pd-node-card',
-    `pd-node-card--${canvasStore.statusOf(step.nodeId).toLowerCase()}`,
-  ];
+/** Nombre legible de un nodo del esquema; cae al `nodeId` si ya no existe. */
+const nameOf = (nodeId: string): string => {
+  const node = canvasStore.workflow?.pipelineSchema?.nodes[nodeId];
 
-  if (isContingency) {
-    classes.push('pd-node-card--contingency');
-  }
-
-  if (canvasStore.selectedNodeId === step.nodeId) {
-    classes.push('pd-node-card--selected');
-  }
-
-  return classes;
+  return node === undefined ? nodeId : NODE_TYPE_LABELS[node.nodeType];
 };
 
-const badgeOf = (step: AssembledPipelineNode): (typeof STATUS_BADGES)[CanvasNodeStatus] =>
-  STATUS_BADGES[canvasStore.statusOf(step.nodeId)];
+/**
+ * Alcance de la ruta, en una linea.
+ *
+ * El arreglo VACIO no es un detalle menor: el backend guarda sin protestar una
+ * ruta selectiva sin codigos, y esa ruta no se dispara jamas. Este es el unico
+ * sitio donde el operador puede enterarse.
+ */
+const codesText = (fork: CanvasForkSlot): string => {
+  if (fork.catchErrors === null) {
+    return 'Cualquier fallo';
+  }
+
+  if (fork.catchErrors.length === 0) {
+    return 'Sin codigos: no se dispara';
+  }
+
+  const visible = fork.catchErrors.slice(0, MAX_VISIBLE_CODES).join(' · ');
+  const hidden = fork.catchErrors.length - MAX_VISIBLE_CODES;
+
+  return hidden > 0 ? `Solo ${visible} +${hidden}` : `Solo ${visible}`;
+};
+
+/** Lista completa de codigos, para el `title` cuando no caben todos. */
+const codesTitle = (fork: CanvasForkSlot): string | undefined =>
+  fork.catchErrors !== null && fork.catchErrors.length > MAX_VISIBLE_CODES
+    ? fork.catchErrors.join(', ')
+    : undefined;
+
+/** Texto del chip que sustituye a una tarjeta ya dibujada en otro sitio. */
+const refText = (fork: CanvasForkSlot): string => {
+  if (fork.placement === 'missing') {
+    return `Destino inexistente: ${fork.toNodeId}`;
+  }
+
+  if (fork.placement === 'rejoin') {
+    const column = steps.value.findIndex((step) => step.nodeId === fork.toNodeId);
+
+    return `vuelve al paso ${column + 1} · ${nameOf(fork.toNodeId)}`;
+  }
+
+  return `${nameOf(fork.toNodeId)}, ya mostrado`;
+};
+
+const refAriaLabel = (fork: CanvasForkSlot): string =>
+  `En caso de error en ${nameOf(fork.fromNodeId)}, continua en ${refText(fork)}`;
 </script>
 
 <template>
-  <!-- Lienzo de SOLO LECTURA: ni arrastre ni eventos de mutacion
-       (`frontend-quasar.md` §4). Un clic solo abre la inspeccion. -->
-  <div class="pd-canvas" role="list" aria-label="Topologia del flujo">
-    <template v-for="(step, index) in steps" :key="step.nodeId">
-      <div
-        role="listitem"
-        tabindex="0"
-        :class="cardClasses(step)"
-        :aria-label="`Paso ${index + 1}: ${NODE_TYPE_LABELS[step.nodeType]} — ${badgeOf(step).label}`"
-        @click="canvasStore.selectNode(step.nodeId)"
-        @keydown.enter="canvasStore.selectNode(step.nodeId)"
-        @keydown.space.prevent="canvasStore.selectNode(step.nodeId)"
-      >
-        <div class="row items-center no-wrap q-gutter-sm">
-          <q-icon :name="NODE_ICONS[step.nodeType]" size="22px" color="primary" />
-          <div class="col">
-            <div class="pd-label">{{ NODE_TYPE_LABELS[step.nodeType] }}</div>
-            <div class="pd-mono pd-node-type">{{ step.nodeId }}</div>
-          </div>
+  <!-- Contenedor de scroll. El `role="list"` NO vive aqui sino en cada carril:
+       una lista cuyos hijos no son todos `listitem` es una violacion ARIA, y
+       con dos filas de tarjetas eso es inevitable. -->
+  <div class="pd-canvas">
+    <div
+      class="pd-canvas-rail pd-canvas-rail--nominal"
+      role="list"
+      aria-label="Camino nominal del flujo"
+    >
+      <template v-for="(step, index) in steps" :key="step.nodeId">
+        <CanvasNodeCard :step="step" variant="nominal" :index="index" />
+
+        <q-icon
+          v-if="nominalEdges[index]"
+          name="arrow_forward"
+          size="24px"
+          class="pd-canvas-link"
+          :class="{ 'pd-canvas-link--traversed': nominalEdges[index]?.isTraversed }"
+          aria-hidden="true"
+        />
+      </template>
+    </div>
+
+    <!-- Carril de contingencias: ESPEJO del nominal. Cada celda mide lo mismo
+         que la tarjeta de arriba aunque este vacia, y es eso lo que hace caer
+         el trazo bajo el nodo que lo declara sin medir nada en JavaScript. -->
+    <div
+      v-if="forkSlots.length > 0"
+      class="pd-canvas-rail pd-canvas-rail--forks"
+      role="list"
+      aria-label="Bifurcaciones de contingencia"
+    >
+      <template v-for="(step, index) in steps" :key="`fork-${step.nodeId}`">
+        <div class="pd-canvas-slot" role="presentation">
+          <template
+            v-for="fork in canvasStore.forkByColumn.get(index) ?? []"
+            :key="`${fork.fromNodeId}-${fork.toNodeId}`"
+          >
+            <div class="pd-fork">
+              <!-- Decorativo: todo lo que dice viaja como texto en la etiqueta
+                   de al lado y en el `aria-label` de la tarjeta destino. El
+                   color sale de `currentColor`, que la clase fija en un token. -->
+              <svg
+                class="pd-canvas-fork"
+                :class="{ 'pd-canvas-fork--traversed': fork.isTraversed }"
+                width="24"
+                height="56"
+                viewBox="0 0 24 56"
+                aria-hidden="true"
+                focusable="false"
+              >
+                <line
+                  x1="12"
+                  y1="0"
+                  x2="12"
+                  y2="42"
+                  stroke="currentColor"
+                  stroke-width="2"
+                  stroke-dasharray="5 4"
+                  stroke-linecap="round"
+                />
+                <path d="M12 54 L6 42 L18 42 Z" fill="currentColor" />
+              </svg>
+
+              <div class="pd-fork-label">
+                <div class="pd-label">En caso de error</div>
+                <div
+                  class="pd-mono pd-fork-label__codes"
+                  :class="{ 'pd-fork-label__codes--inert': fork.catchErrors?.length === 0 }"
+                  :title="codesTitle(fork)"
+                >
+                  {{ codesText(fork) }}
+                </div>
+              </div>
+            </div>
+
+            <CanvasNodeCard
+              v-if="fork.placement === 'card' && fork.target !== null"
+              :step="fork.target"
+              variant="contingency"
+              :fork="fork"
+            />
+            <!-- UNA tarjeta por nodo en todo el lienzo: el alertador es uno por
+                 flujo, y duplicarlo haria leer dos donde hay uno. -->
+            <button
+              v-else
+              type="button"
+              class="pd-fork-ref"
+              :class="{ 'pd-fork-ref--missing': fork.placement === 'missing' }"
+              :aria-label="refAriaLabel(fork)"
+              @click="fork.target !== null && canvasStore.selectNode(fork.toNodeId)"
+            >
+              <q-icon :name="REF_ICONS[fork.placement]" size="16px" aria-hidden="true" />
+              <span>{{ refText(fork) }}</span>
+            </button>
+          </template>
         </div>
 
-        <div class="row items-center q-mt-sm q-gutter-xs">
-          <q-badge :color="badgeOf(step).color" class="pd-badge">
-            <q-icon :name="badgeOf(step).icon" size="13px" class="q-mr-xs" />
-            {{ badgeOf(step).label }}
-          </q-badge>
-          <!-- El spinner acompana al badge en vez de sustituirlo: el badge dice
-               QUE pasa y el spinner que sigue pasando ahora mismo. -->
-          <q-spinner-dots
-            v-if="canvasStore.statusOf(step.nodeId) === 'RUNNING'"
-            color="info"
-            size="18px"
-          />
-        </div>
+        <div v-if="index < steps.length - 1" class="pd-canvas-gap" aria-hidden="true" />
+      </template>
+    </div>
 
-        <div class="pd-mono pd-node-type q-mt-xs">{{ step.outputNamespace }}</div>
-      </div>
-
-      <q-icon
-        v-if="index < steps.length - 1"
-        name="arrow_forward"
-        size="24px"
-        class="pd-canvas-link"
-        :class="{ 'pd-canvas-link--traversed': isTraversed(step) }"
-        aria-hidden="true"
+    <!-- Nodos a los que no apunta nada. Sin esto desaparecerian de la vista al
+         retirarse el bloque inferior, y un nodo huerfano que nadie ve es un
+         nodo que nadie arregla. -->
+    <div
+      v-if="canvasStore.unreachableSteps.length > 0"
+      class="pd-canvas-rail pd-canvas-rail--orphans"
+      role="list"
+      aria-label="Nodos sin ruta declarada"
+    >
+      <CanvasNodeCard
+        v-for="step in canvasStore.unreachableSteps"
+        :key="step.nodeId"
+        :step="step"
+        variant="orphan"
       />
-    </template>
+    </div>
 
     <q-banner v-if="steps.length === 0" class="pd-card">
       Este flujo todavia no tiene un esquema de pipeline guardado.
     </q-banner>
-  </div>
-
-  <!-- Derivaciones de contingencia: destinos de un `onErrorStep` que nadie
-       encadena con `nextStep`, de modo que no estan en el camino nominal. -->
-  <div v-if="contingencySteps.length > 0" class="q-px-md q-pb-md">
-    <div class="pd-subtitle q-mb-sm">Rutas de contingencia</div>
-    <div class="pd-canvas">
-      <div
-        v-for="step in contingencySteps"
-        :key="step.nodeId"
-        role="listitem"
-        tabindex="0"
-        :class="cardClasses(step, true)"
-        :aria-label="`Contingencia: ${NODE_TYPE_LABELS[step.nodeType]} — ${badgeOf(step).label}`"
-        @click="canvasStore.selectNode(step.nodeId)"
-        @keydown.enter="canvasStore.selectNode(step.nodeId)"
-        @keydown.space.prevent="canvasStore.selectNode(step.nodeId)"
-      >
-        <div class="row items-center no-wrap q-gutter-sm">
-          <q-icon :name="NODE_ICONS[step.nodeType]" size="22px" color="primary" />
-          <div class="col">
-            <div class="pd-label">{{ NODE_TYPE_LABELS[step.nodeType] }}</div>
-            <div class="pd-mono pd-node-type">{{ step.nodeId }}</div>
-          </div>
-        </div>
-
-        <div class="row items-center q-mt-sm q-gutter-xs">
-          <q-badge :color="badgeOf(step).color" class="pd-badge">
-            <q-icon :name="badgeOf(step).icon" size="13px" class="q-mr-xs" />
-            {{ badgeOf(step).label }}
-          </q-badge>
-          <q-spinner-dots
-            v-if="canvasStore.statusOf(step.nodeId) === 'RUNNING'"
-            color="info"
-            size="18px"
-          />
-        </div>
-      </div>
-    </div>
   </div>
 </template>

@@ -36,17 +36,6 @@ const MIN_ARTICLE_LENGTH = 200;
 const TARGET_URL_HINT =
   'Se elige una REFERENCIA al contexto, no una direccion concreta: el flujo se ejecutara sobre correos distintos cada dia. La lista la componen los campos de tipo URL que publican los pasos anteriores.';
 
-/**
- * Como se combinan la posicion elegida y los dominios excluidos.
- *
- * El comportamiento ya era este, pero no se enunciaba en ninguna parte de la
- * interfaz: la lista de posiciones se numera DESPUES de descartar los dominios
- * bloqueados, de modo que "Posicion 1" no es el primer enlace del correo sino
- * el primero que sobrevive al filtro.
- */
-const TARGET_URL_NOTICE =
-  'Nota operativa: si configuras dominios excluidos (ej. madrimasd.org), el sistema descartara automaticamente esos enlaces y tomara el siguiente enlace valido del correo. Si eliges "Posicion 1", se tomara el primer enlace que NO pertenezca a los dominios bloqueados.';
-
 const MISSING_SOURCE_WARNING =
   'Ningun paso anterior de este flujo publica un campo del que pueda salir una URL. Coloca por delante un nodo que la produzca —un PARSER_PRE_IA extrae los enlaces del correo— o reordena el flujo; mientras tanto no hay nada que este nodo pueda extraer.';
 
@@ -90,9 +79,7 @@ const onSkipIfEmptyChange = (skipIfEmpty: boolean): void => {
   store.updateConfig({ skipIfEmpty });
 };
 
-const onIgnoreExtractionFailureChange = (
-  ignoreExtractionFailure: boolean,
-): void => {
+const onIgnoreExtractionFailureChange = (ignoreExtractionFailure: boolean): void => {
   store.updateConfig({ ignoreExtractionFailure });
 };
 
@@ -119,6 +106,17 @@ const onNumberChange = (
 ): void => {
   store.updateConfig({ [field]: Number(value ?? 0) });
 };
+
+/**
+ * Clase de estado de un campo numerico con rango.
+ *
+ * Da lectura CONTINUA: verde mientras el valor cae dentro, rojo en cuanto se
+ * sale. Quasar solo pinta el error despues de tocar el campo y no dice nada
+ * cuando el valor es correcto, de modo que un formulario con minimos y maximos
+ * se recorria sin saber si lo escrito valia hasta intentar guardar.
+ */
+const rangeClass = (value: number, min: number, max: number): string =>
+  value >= min && value <= max ? 'pd-field--in-range' : 'pd-field--out-of-range';
 
 /**
  * Lanza la extraccion de prueba y traduce el desenlace a un aviso.
@@ -195,14 +193,11 @@ const onRunSandboxTest = async (): Promise<void> => {
       }}</span>
     </div>
 
-    <!-- Campo 1: seleccion determinista de la URL (Poka-Yoke) -->
-    <q-banner dense class="pd-info-banner q-mb-sm" data-test="target-url-notice">
-      <template #avatar>
-        <q-icon name="info_outline" size="20px" class="pd-node-icon" />
-      </template>
-      {{ TARGET_URL_NOTICE }}
-    </q-banner>
-
+    <!-- Campo 1: seleccion determinista de la URL (Poka-Yoke).
+         SIN banner explicativo: la relacion entre la posicion elegida y los
+         dominios excluidos la enuncian ya las etiquetas del propio selector y
+         el `hint` del campo de dominios, y repetirla en un parrafo largo sobre
+         el formulario solo alejaba los controles de la vista. -->
     <label class="pd-label" for="target-url">
       Enlace a extraer
       <span v-if="!store.config.skipIfEmpty" class="pd-required">*</span>
@@ -275,8 +270,8 @@ const onRunSandboxTest = async (): Promise<void> => {
     </q-toggle>
 
     <p class="pd-subtitle q-mt-xs q-mb-md">
-      Si la pagina no carga o no tiene contenido extraible, continua al
-      siguiente nodo sin pausar el flujo.
+      Si la pagina no carga o no tiene contenido extraible, continua al siguiente nodo sin pausar el
+      flujo.
     </p>
     <br />
 
@@ -302,21 +297,29 @@ const onRunSandboxTest = async (): Promise<void> => {
 
     <!-- Campo 2: espera de carga -->
     <label class="pd-label" for="timeout-ms">Espera maxima de carga</label>
-    <q-input
-      id="timeout-ms"
-      outlined
-      dense
-      type="number"
-      suffix="ms"
-      data-test="timeout-input"
-      :model-value="store.config.timeoutMs"
-      :min="MIN_SCRAPER_TIMEOUT_MS"
-      :max="MAX_SCRAPER_TIMEOUT_MS"
-      :step="1000"
-      :hint="TIMEOUT_RULE"
+    <div
       class="q-mb-md"
-      @update:model-value="(value) => onNumberChange('timeoutMs', value)"
-    />
+      :class="rangeClass(store.config.timeoutMs, MIN_SCRAPER_TIMEOUT_MS, MAX_SCRAPER_TIMEOUT_MS)"
+      data-test="timeout-field"
+    >
+      <q-input
+        id="timeout-ms"
+        outlined
+        dense
+        type="number"
+        suffix="ms"
+        data-test="timeout-input"
+        :model-value="store.config.timeoutMs"
+        :min="MIN_SCRAPER_TIMEOUT_MS"
+        :max="MAX_SCRAPER_TIMEOUT_MS"
+        :step="1000"
+        @update:model-value="(value) => onNumberChange('timeoutMs', value)"
+      />
+      <!-- El rango va FUERA del `hint` del campo para poder encenderlo con la
+           clase del contenedor: es lo unico que dice cual es el minimo y cual
+           el maximo, y en gris pasa desapercibido justo cuando hace falta. -->
+      <span class="pd-field-range">{{ TIMEOUT_RULE }}</span>
+    </div>
 
     <!-- Campo 3: resiliencia -->
     <div class="row q-col-gutter-md q-mb-md">
@@ -327,35 +330,51 @@ const onRunSandboxTest = async (): Promise<void> => {
             <q-tooltip>{{ RETRY_TOOLTIP }}</q-tooltip>
           </q-icon>
         </label>
-        <q-input
-          id="max-retries"
-          outlined
-          dense
-          type="number"
-          data-test="max-retries-input"
-          :model-value="store.config.maxRetries"
-          :min="0"
-          :max="MAX_SCRAPER_RETRIES"
-          :hint="MAX_RETRIES_RULE"
-          @update:model-value="(value) => onNumberChange('maxRetries', value)"
-        />
+        <div
+          :class="rangeClass(store.config.maxRetries, 0, MAX_SCRAPER_RETRIES)"
+          data-test="max-retries-field"
+        >
+          <q-input
+            id="max-retries"
+            outlined
+            dense
+            type="number"
+            data-test="max-retries-input"
+            :model-value="store.config.maxRetries"
+            :min="0"
+            :max="MAX_SCRAPER_RETRIES"
+            @update:model-value="(value) => onNumberChange('maxRetries', value)"
+          />
+          <span class="pd-field-range">{{ MAX_RETRIES_RULE }}</span>
+        </div>
       </div>
       <div class="col-12 col-sm-6">
         <label class="pd-label" for="retry-delay-ms">Espera entre reintentos</label>
-        <q-input
-          id="retry-delay-ms"
-          outlined
-          dense
-          type="number"
-          suffix="ms"
-          data-test="retry-delay-input"
-          :model-value="store.config.retryDelayMs"
-          :min="MIN_SCRAPER_RETRY_DELAY_MS"
-          :max="MAX_SCRAPER_RETRY_DELAY_MS"
-          :step="500"
-          :hint="RETRY_DELAY_RULE"
-          @update:model-value="(value) => onNumberChange('retryDelayMs', value)"
-        />
+        <div
+          :class="
+            rangeClass(
+              store.config.retryDelayMs,
+              MIN_SCRAPER_RETRY_DELAY_MS,
+              MAX_SCRAPER_RETRY_DELAY_MS,
+            )
+          "
+          data-test="retry-delay-field"
+        >
+          <q-input
+            id="retry-delay-ms"
+            outlined
+            dense
+            type="number"
+            suffix="ms"
+            data-test="retry-delay-input"
+            :model-value="store.config.retryDelayMs"
+            :min="MIN_SCRAPER_RETRY_DELAY_MS"
+            :max="MAX_SCRAPER_RETRY_DELAY_MS"
+            :step="500"
+            @update:model-value="(value) => onNumberChange('retryDelayMs', value)"
+          />
+          <span class="pd-field-range">{{ RETRY_DELAY_RULE }}</span>
+        </div>
       </div>
     </div>
 

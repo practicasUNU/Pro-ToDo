@@ -1,6 +1,8 @@
 // Replica exacta de los contratos del motor FSM (NestJS). Cualquier cambio en
 // `@core/fsm/types/pipeline-schema.types.ts` debe reflejarse aqui.
 
+import type { ExecutionState } from '@/types/execution';
+
 /**
  * Tipos de nodo admitidos por el pipeline. Enum real (no `type`) porque se
  * recorre en tiempo de ejecucion para poblar selectores y el registro de
@@ -162,11 +164,34 @@ export interface PipelineStep {
  * `/flujos`; el selector del asistente NO lo consume: desde la migracion 010
  * parte de `WorkflowTemplateSummary`, que son los blueprints maestros.
  */
+/**
+ * Estado del FLUJO frente a los disparadores automaticos.
+ *
+ * Replica `WorkflowStatus` del backend. No confundir con `ExecutionState`, que
+ * describe el ciclo de vida de UNA ejecucion: este responde a "se puede
+ * disparar", solo que con tres respuestas. `PAUSADO` lo escribe unicamente el
+ * motor al detener una ejecucion reanudable, y la API de edicion lo rechaza.
+ */
+export enum WorkflowStatus {
+  ACTIVO = 'ACTIVO',
+  INACTIVO = 'INACTIVO',
+  PAUSADO = 'PAUSADO',
+}
+
 export interface PipelineSummary {
   readonly id: string;
   readonly name: string;
   readonly description: string | null;
-  readonly active: boolean;
+  readonly status: WorkflowStatus;
+  /**
+   * Ejecucion viva (EN_PROCESO o PAUSADO) de este flujo, o `null`.
+   *
+   * Lo resuelve el backend en el propio listado: es lo que permite ofrecer
+   * Reanudar sin cruzar la tabla con el store de ejecuciones.
+   */
+  readonly activeExecutionId: string | null;
+  /** Estado de esa ejecucion viva, o `null` si no hay ninguna. */
+  readonly executionState: ExecutionState | null;
   /** Plantilla de la que se instancio, o `null` si nacio desde cero. */
   readonly templateId: string | null;
   /** Pasos EN ORDEN DE EJECUCION, ya resueltos por el backend. */
@@ -244,7 +269,7 @@ export type UpdateWorkflowTemplatePayload = Partial<CreateWorkflowTemplatePayloa
 export interface UpdateWorkflowPayload {
   readonly name?: string;
   readonly description?: string;
-  readonly active?: boolean;
+  readonly status?: WorkflowStatus;
   readonly pipelineSchema?: AssembledPipelineSchema;
 }
 
@@ -341,7 +366,8 @@ export interface CreateWorkflowPayload {
   readonly name: string;
   readonly description?: string;
   readonly pipelineSchema: AssembledPipelineSchema;
-  readonly active?: boolean;
+  // SIN estado: un flujo nace siempre INACTIVO y armarlo es un `PATCH`, que es
+  // el unico camino que revalida que su esquema sea ejecutable.
   /**
    * Plantilla de la que parte el flujo.
    *

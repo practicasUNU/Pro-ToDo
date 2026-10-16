@@ -7984,3 +7984,150 @@ resuelve fuera del navegador.
 - **Tabla de trazabilidad histórica** (`<q-table>` con `.row-urgente` / `-grave` / `-exitoso`): el
   canvas cubre la ejecución VIVA de un flujo, no el histórico de todas.
 - Emisión por sala `user_*` y BullMQ, que siguen donde estaban.
+
+---
+
+## Estado triestatal del flujo y bifurcaciones del canvas (rama `feat/canvas-view`)
+
+Dos trabajos en una tanda: uno de dominio —el flujo gana un tercer estado— y otro de interfaz —el
+canvas aprende a dibujar las rutas de error—. Antes de nada, lo que **no** hubo que hacer.
+
+### Lo que el enunciado pedía y ya estaba hecho
+
+Buena parte de la petición describía trabajo cerrado en `c2840ca`, `7dd255a`, `9deb188` y `97bb208`.
+Se verificó uno a uno en vez de reimplementarlo: los reintentos encapsulados con
+`metadata.exhausted` y su guarda en `canRetry`; el `ignoreExtractionFailure` con `FALLBACK_EMPTY`;
+las dos guardas de `SmtpAlertStrategy` (contexto y severidad) con los reintentos en el correo; la
+ventana IMAP de 48 h; `normalizeSubjectText` preservando la `ñ`; las cuatro variables OCR en el
+catálogo de prompts; y la telemetría por nodo.
+
+Dos hallazgos concretos merecen quedar escritos, porque invitan a reimplementar algo que existe:
+
+1. **El «break tras contingencia» ya existía**, con un criterio más fino que el pedido.
+   `closeTerminalState` distingue si la rama de error **reincorporó** al camino (cierra EXITOSO: el
+   trabajo se hizo) o **murió en un nodo de alerta** (pausa en el nodo que falló, si era GRAVE).
+   Pedir un `break` incondicional habría roto la recuperación por OCR/visión de PROT-18, que es
+   justamente la rama que sí recupera. Lo único que faltaba era propagar esa pausa al flujo padre.
+2. **El log `Intento N/M fallido` ya existía en las tres capas**: `HttpClientService:201` para LLM y
+   OCR, `web-scraper.runner:320` para el scraper. Subir el bucle de reintentos a las estrategias
+   —lo que el enunciado pedía— habría multiplicado los intentos por sí mismos.
+
+### Por qué un enum y no un segundo booleano
+
+`activo` + `pausado` admite la combinación `(false, true)` —un flujo retirado y pausado a la vez—
+que no significa nada y obliga a cada consulta a mirar dos columnas en el orden correcto. Los tres
+valores son mutuamente excluyentes por definición: un flujo dispara, no dispara porque alguien lo
+retiró, o no dispara porque algo se rompió.
+
+Tampoco se reutilizó `enum_estado`. Ese tipo describe el ciclo de vida de una **ejecución** y tiene
+siete valores, cinco terminales; un flujo no es EXITOSO ni DESCARTADO. Compartirlo habría borrado en
+el esquema la frontera que el TSDoc de `Workflow` defiende desde el principio. Lo que sí hubo que
+reescribir es ese TSDoc: `status` **no** rompe la frontera pese a compartir la palabra PAUSADO,
+porque sigue respondiendo «¿se puede disparar?», solo que con tres respuestas.
+
+### PAUSADO es escritura exclusiva del motor
+
+El `@IsIn([ACTIVO, INACTIVO])` del DTO no es celo. Un PAUSADO puesto a mano describe una ejecución
+detenida que no existe: el flujo deja de disparar, la tabla pinta el badge de pausa con su botón de
+reanudar, y al pulsarlo no pasa nada porque no hay ejecución que reanudar. Un callejón sin salida sin
+mensaje de error. Y «parar de disparar conservando las detenidas» ya tiene palabra: INACTIVO.
+
+De paso se cerró un agujero que venía de antes: `CreateWorkflowDto.active` permitía nacer armado, y
+`createWorkflow` **nunca** llama a `assertActivatable` —solo lo hace `updateWorkflow`—, así que un
+`POST { active: true }` creaba un flujo expuesto al sondeo sin que nadie comprobara que su esquema
+era ejecutable. El campo desaparece del alta.
+
+### El cuarto coordinador
+
+El enunciado pedía que la FSM llamase a `imapPollingService` y a `workflowsService`. No puede:
+`@core` no importa de `@modules`, que es el motivo de existir de los otros tres coordinadores. Se
+añadió `WorkflowStatusCoordinator` con el mismo patrón, y **no** se amplió `FlowPollingCoordinator`
+por tres razones, la primera bloqueante: `WorkflowsService` ya es *consumidor* de aquel, así que
+inscribirse en su mismo `Set` le devolvería sus propios despachos. Además aquel puerto es síncrono y
+`void` porque solo toca temporizadores, mientras que esto escribe en PostgreSQL.
+
+La trampa que más importa está en `pauseFlow`: reutiliza `publishMutation`, pero **jamás**
+`releaseDeactivatedFlow`. Aquel llama a `abortExecutionsForFlow`, que cierra como FALLIDO todo lo que
+esté en EN_PROCESO o PAUSADO; invocado desde dentro de `pauseAt` mataría la ejecución que el motor
+acaba de pausar —se llamaría a sí mismo— y convertiría cada pausa reanudable en un fallo definitivo.
+Hay un test dedicado a esa regresión (13.2).
+
+El orden de las tres operaciones es observable y hay un test que lo fija (39.2): checkpoint → pausa
+del flujo → evento. Antes del checkpoint no habría fila que leer; después del evento, la interfaz
+pintaría «Activo» sobre una ejecución detenida.
+
+### `suppressFlowPause`
+
+Sin esta opción, probar desde el banco de pruebas un flujo que está en producción lo dejaría PAUSADO
+y apagaría su sondeo: un ensayo convertido en una interrupción del servicio. Es el mismo criterio por
+el que `applyStopOnFirstSuccess` ya excluía el despacho manual. La guarda de `pauseFlow` —solo actúa
+sobre un flujo ACTIVO— cubre el caso del flujo en borrador, pero no este.
+
+### Carriles espejo frente a SVG superpuesto
+
+Para que el trazo de una bifurcación caiga bajo el nodo que la declara había dos caminos. Se eligió
+repetir en el carril inferior **la misma estructura de columnas** del nominal —una celda de 220px por
+paso, un hueco de 36px entre pasos— rellenando solo las celdas con ruta: la alineación sale sola y
+las medidas viven una sola vez, en variables SCSS que comparten los dos carriles.
+
+Un `<svg>` absoluto superpuesto habría obligado a replicar esas medidas en TypeScript (segunda fuente
+de verdad geométrica, que diverge en cuanto alguien toque el SCSS), a sincronizar `scrollLeft` con el
+contenedor y a re-medir en cada `resize`. Solo se habría pagado por diagonales reales, y el diseño las
+elimina a propósito: en un carril con scroll horizontal, una arista larga tiene sus dos extremos fuera
+de pantalla a la vez, así que el número de paso informa más que la línea.
+
+El conector sí es SVG inline, pero local: `stroke-dasharray` controla el ritmo del guion, que un
+`border: dashed` deja al navegador, y la punta es un `<path>` en el mismo `viewBox` en vez de un
+`marker-end`, que exigiría ids únicos por instancia. El color entra por `currentColor` desde la clase,
+así que la plantilla no lleva ni un color.
+
+**Contraste asumido por escrito:** `--pd-warning` sobre el fondo claro da ~2.1:1, por debajo del 3:1
+de WCAG 1.4.11. La mitigación cabe dentro de la lista cerrada de tokens: trazo de 2px, patrón
+discontinuo y punta —tres señales no cromáticas— y el texto **nunca** en ámbar.
+
+### Una tarjeta por nodo
+
+El alertador es uno por flujo (regla 5 del validador: `outputNamespace` único), y dos pasos pueden
+desviar hacia él. Duplicar su tarjeta haría leer dos alertadores donde hay uno y rompería la biyección
+`nodeId ↔ .pd-node-card` de la que dependen el `aria-label` y el recuento de los tests. Los demás
+declarantes pintan su trazo completo terminado en un chip de referencia, y la tarjeta única lleva
+«Recibe de: …» en el pie.
+
+Caso que no se puede perder de vista: `isTraversed` de una contingencia **no** puede ser
+`statusOf(origen) === 'COMPLETED'`, porque un nodo completado es justo el que *no* desvió. La prueba
+de que la rama se disparó es que su destino dejó de estar `IDLE`.
+
+### `markAsRead: false` y lo que cuesta
+
+El buzón corporativo deja de marcarse. El coste es real y se asume: la bandera `\Seen` era, junto a
+`unreadOnly`, el único marcador de «ya tratado» que sobrevivía a un reinicio, y sin ella la
+deduplicación recae en la ventana de 48 h y el filtro de asunto. Un flujo con filtros laxos puede
+republicar. Se acepta porque el buzón es compartido y que un automatismo marque como leídos los
+correos de una persona es un efecto irreversible sobre datos que no son suyos; quien prefiera lo
+anterior lo declara en el nodo.
+
+### Lo que se retiró del formulario del scraper
+
+El banner largo sobre «primer enlace elegible» y dos avisos de `configWarnings`. Los dos avisos
+describían configuraciones **correctas** —«primer elegible» sin dominios excluidos equivale a la
+posición 1, que es además el defecto del nodo—, de modo que aparecían en un nodo bien configurado y
+acostumbraban al operador a ignorar la lista donde sí salen los problemas reales. Sus dos tests se
+invirtieron en vez de borrarse: ahora fijan que esos avisos **no** aparecen. El `q-select`
+determinista se queda intacto: es el Poka-Yoke que exige la regla §4.
+
+### Verificación
+
+Backend **93 suites / 2248 pruebas**; frontend **56 ficheros / 1066**. `tsc` y `vue-tsc` limpios,
+ESLint sin incidencias nuevas (quedan 5 preexistentes en `workflows.service.spec.ts` y 3 en
+`imap-polling.service.spec.ts`, todas `any` de `expect.any` y del `SchedulerRegistry`).
+
+### Pendiente y advertido
+
+- **Migración 040 obligatoria ANTES de desplegar.** Con `synchronize: false`, en cuanto la entidad
+  declara `status` toda lectura de `flujos` muere con `column Workflow.status does not exist`. Hay una
+  guarda en `onModuleInit` que aborta el arranque con el comando `psql` literal en el log, para que el
+  síntoma aparezca una vez y en el sitio donde se arregla.
+- **La 030 debería estar ya aplicada**: el motor escribe `ExecutionState.OMITIDO`, así que toda parada
+  ordenada está fallando hoy contra la base real.
+- `init.sql` llevaba `enum_estado` sin `DESCARTADO` (migración 039): una base creada desde cero
+  reventaba en el primer descarte. Corregido en el mismo commit.

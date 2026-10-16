@@ -1,6 +1,5 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import {
-  IsBoolean,
   IsNotEmpty,
   IsNotEmptyObject,
   IsObject,
@@ -71,14 +70,11 @@ export class CreateWorkflowDto {
   )
   readonly pipelineSchema: Record<string, unknown>;
 
-  @ApiPropertyOptional({
-    description:
-      'Habilitacion frente a los disparadores automaticos. Por defecto FALSE: un flujo recien creado no debe empezar a consumir el buzon sin revision',
-    default: false,
-  })
-  @IsOptional()
-  @IsBoolean({ message: 'active debe ser un booleano.' })
-  readonly active?: boolean;
+  // SIN `active`/`status` A PROPOSITO: el flujo nace siempre INACTIVO. Admitirlo
+  // en el alta no solo contradice la decision de seguridad que documenta
+  // `createWorkflow`, es que `assertActivatable` solo se invoca desde
+  // `updateWorkflow`: un `POST` con el flujo ya armado se saltaria la unica
+  // comprobacion de que su esquema es ejecutable. Armarlo es un `PATCH`.
 
   @ApiPropertyOptional({
     description:

@@ -3,6 +3,8 @@
 // Directiva POR ARCHIVO: montar un componente anfitrion exige DOM, y los specs
 // de store arrancan mas rapido sin el.
 import { mount } from '@vue/test-utils';
+
+import { WorkflowStatus } from '@/types/pipeline';
 import { createPinia, setActivePinia } from 'pinia';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -97,7 +99,9 @@ const buildWorkflow = (overrides = {}) => ({
   id: WORKFLOW_ID,
   name: 'Notiweb',
   description: null,
-  active: true,
+  status: WorkflowStatus.ACTIVO,
+  activeExecutionId: null,
+  executionState: null,
   templateId: null,
   topology: [],
   ...overrides,
@@ -246,14 +250,14 @@ describe('useCrudSocket · encaminado de mutaciones hacia los stores', () => {
       entity: 'workflows',
       action: 'UPDATED',
       id: WORKFLOW_ID,
-      data: buildWorkflow({ name: 'Notiweb v2', active: false }),
+      data: buildWorkflow({ name: 'Notiweb v2', status: WorkflowStatus.INACTIVO }),
       emittedAt: '2026-10-11T00:00:00.000Z',
     });
 
     // 3. Assert 🎯
     expect(workflowsStore.workflows).toHaveLength(1);
     expect(workflowsStore.workflows[0]?.name).toBe('Notiweb v2');
-    expect(workflowsStore.workflows[0]?.active).toBe(false);
+    expect(workflowsStore.workflows[0]?.status).toBe(WorkflowStatus.INACTIVO);
   });
 
   it('1.5ter NO deberia duplicar el flujo si el CREATED llega repetido', () => {

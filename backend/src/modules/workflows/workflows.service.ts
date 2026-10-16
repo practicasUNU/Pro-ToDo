@@ -10,7 +10,9 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { CrudEventsCoordinator } from '@common/services/crud-events.coordinator';
 import { FlowPollingCoordinator } from '@common/services/flow-polling.coordinator';
 import { FsmEngineService } from '@core/fsm/services/fsm-engine.service';
+import { WorkflowStatusCoordinator } from '@common/services/workflow-status.coordinator';
 import { FsmExecutionQueryService } from '@core/fsm/services/fsm-execution-query.service';
+import { WorkflowStatus } from '@modules/workflows/enums/workflow-status.enum';
 import { PipelineValidatorService } from '@core/fsm/services/pipeline-validator.service';
 import { buildOrderedTopology } from '@core/fsm/utils/pipeline-topology.util';
 import { ADMIN_ONLY_MODELS } from '@modules/nodes/services/llm-provider-catalog.service';
@@ -33,7 +35,9 @@ import type { WorkflowDetailResponseDto } from './dto/workflow-detail-response.d
 import type { ExecuteTestWorkflowDto } from './dto/execute-test-workflow.dto';
 import type { WorkflowExecutionResponseDto } from './dto/workflow-execution-response.dto';
 
+import type { WorkflowStatusPort } from '@common/services/workflow-status.coordinator';
 import type { FsmExecution } from '@core/fsm/entities/fsm-execution.entity';
+import type { OnModuleDestroy, OnModuleInit } from '@nestjs/common';
 import type { PipelineSchema } from '@core/fsm/types/pipeline-schema.types';
 import type { CrudAction } from '@common/types/crud-events.types';
 import type { Repository } from 'typeorm';
@@ -79,7 +83,9 @@ const TEST_MODE_SKIPPED_NODE_TYPES: readonly NodeType[] = [
 ];
 
 @Injectable()
-export class WorkflowsService {
+export class WorkflowsService
+  implements WorkflowStatusPort, OnModuleInit, OnModuleDestroy
+{
   private readonly logger = new Logger(WorkflowsService.name);
 
   constructor(
@@ -91,6 +97,7 @@ export class WorkflowsService {
     private readonly workflowTemplatesService: WorkflowTemplatesService,
     private readonly flowPollingCoordinator: FlowPollingCoordinator,
     private readonly crudEvents: CrudEventsCoordinator,
+    private readonly workflowStatusCoordinator: WorkflowStatusCoordinator,
   ) {}
 
   /**
@@ -100,8 +107,8 @@ export class WorkflowsService {
    * hay una segunda proyeccion que pueda divergir de la respuesta REST.
    *
    * `workflows` no produce `DELETED` jamas: no existe `@Delete` en el
-   * controlador y retirar un flujo es `PATCH { active: false }`, es decir un
-   * `UPDATED` con la fila ya actualizada.
+   * controlador y retirar un flujo es `PATCH { status: 'INACTIVO' }`, es decir
+   * un `UPDATED` con la fila ya actualizada.
    */
   private publishMutation(
     action: CrudAction,
@@ -167,6 +174,12 @@ export class WorkflowsService {
       {
         skipNodeTypes: TEST_MODE_SKIPPED_NODE_TYPES,
         flowName: workflow.name,
+        // Un ensayo fallido NO apaga el flujo. Mismo criterio que
+        // `applyStopOnFirstSuccess`, que tambien excluye el despacho manual: el
+        // Camino B existe para probar antes de habilitar, y dejar PAUSADO un
+        // flujo de produccion por una prueba convertiria el ensayo en una
+        // interrupcion del servicio.
+        suppressFlowPause: true,
       },
     );
 
@@ -205,9 +218,9 @@ export class WorkflowsService {
   public async runAutomaticWorkflow(flowId: string): Promise<string> {
     const workflow = await this.findOne(flowId);
 
-    if (!workflow.active) {
+    if (workflow.status !== WorkflowStatus.ACTIVO) {
       throw new BadRequestException(
-        `El flujo "${workflow.name}" (${workflow.id}) esta desactivado: los disparadores automaticos no deben ejecutarlo.`,
+        `El flujo "${workflow.name}" (${workflow.id}) esta ${workflow.status}: los disparadores automaticos solo deben ejecutar los ACTIVO.`,
       );
     }
 
@@ -279,7 +292,7 @@ export class WorkflowsService {
       return;
     }
 
-    workflow.active = false;
+    workflow.status = WorkflowStatus.INACTIVO;
     const saved = await this.workflowRepository.save(workflow);
 
     this.logger.log(
@@ -291,7 +304,7 @@ export class WorkflowsService {
     // cualquier otro operador seguia pintando el flujo como activo hasta que
     // alguien recargase la pagina — y el apagado automatico es justo el que
     // nadie esta mirando cuando ocurre, porque lo dispara un sondeo.
-    this.publishMutation('UPDATED', this.toPipelineSummary(saved));
+    this.publishMutation('UPDATED', await this.buildSummary(saved));
 
     // Reutiliza la limpieza de la desactivacion manual: el residuo es el mismo
     // —temporizador en memoria y ejecuciones vivas— y duplicar el orden de esas
@@ -318,9 +331,21 @@ export class WorkflowsService {
       order: { createdAt: 'DESC' },
     });
 
-    return workflows
-      .filter((workflow) => workflow.pipelineSchema !== null)
-      .map((workflow) => this.toPipelineSummary(workflow));
+    const selectable = workflows.filter(
+      (workflow) => workflow.pipelineSchema !== null,
+    );
+
+    // UNA consulta para todas las ejecuciones vivas, no una por flujo: el N+1
+    // caeria sobre `ejecuciones_flujo`, que crece con cada disparo del sondeo.
+    const liveIndex = this.indexLiveExecutions(
+      await this.fsmExecutionQueryService.findLiveByFlows(
+        selectable.map((workflow) => workflow.id),
+      ),
+    );
+
+    return selectable.map((workflow) =>
+      this.toPipelineSummary(workflow, liveIndex.get(workflow.id) ?? null),
+    );
   }
 
   /**
@@ -331,8 +356,10 @@ export class WorkflowsService {
    * motor, y admitir ahi un grafo con un `nextStep` huerfano significaria una
    * ejecucion que revienta a mitad de camino en lugar de un 400 al guardar.
    *
-   * NACE INACTIVO por defecto (`active: false`). Es una decision de seguridad,
-   * no un descuido: `flujos.activo` gobierna los disparadores automaticos, y un
+   * NACE INACTIVO SIEMPRE, y desde la migracion 040 ya ni siquiera es un valor
+   * por defecto que el cuerpo pueda pisar: `CreateWorkflowDto` no admite el
+   * estado. Es una decision de seguridad, no un descuido: `flujos.status`
+   * gobierna los disparadores automaticos, y un
    * flujo recien creado que se activase solo empezaria a consumir el buzon
    * corporativo —marcando los correos como leidos— sin que nadie hubiera
    * revisado su configuracion. Activarlo es un acto deliberado posterior.
@@ -381,7 +408,9 @@ export class WorkflowsService {
       name: createWorkflowDto.name,
       description: createWorkflowDto.description ?? null,
       pipelineSchema: schema,
-      active: createWorkflowDto.active ?? false,
+      // Siempre INACTIVO: ya no viaja en el DTO. Armarlo es un `PATCH`, que es
+      // el unico camino que pasa por `assertActivatable`.
+      status: WorkflowStatus.INACTIVO,
       // El grafo se guarda COPIADO en la fila del flujo, no referenciado: editar
       // la plantilla despues no altera los flujos que ya salieron de ella. La
       // columna es trazabilidad de la procedencia, no una dependencia viva.
@@ -392,9 +421,11 @@ export class WorkflowsService {
     const saved = await this.workflowRepository.save(workflow);
 
     this.logger.log(
-      `Flujo creado: "${saved.name}" (${saved.id}) | nodos=${Object.keys(schema.nodes).length} | activo=${String(saved.active)} | plantilla=${saved.templateId ?? 'ninguna'} | autor=${userId}`,
+      `Flujo creado: "${saved.name}" (${saved.id}) | nodos=${Object.keys(schema.nodes).length} | estado=${saved.status} | plantilla=${saved.templateId ?? 'ninguna'} | autor=${userId}`,
     );
 
+    // Recien creado no puede tener ejecucion viva, asi que el mapeador puro
+    // basta y nos ahorramos la consulta de `buildSummary`.
     const summary = this.toPipelineSummary(saved);
     // Despues de confirmar la escritura, nunca antes: emitir en vuelo haria que
     // otro panel pintase una fila que PostgreSQL aun no tiene.
@@ -442,9 +473,9 @@ export class WorkflowsService {
     }
 
     // Se captura ANTES de aplicar el DTO: la entidad se muta en sitio mas abajo
-    // y despues ya no hay forma de distinguir un `false -> false` (que no es
-    // transicion y no debe limpiar nada) de la desactivacion real.
-    const wasActive = workflow.active;
+    // y despues ya no hay forma de distinguir un `INACTIVO -> INACTIVO` (que no
+    // es transicion y no debe limpiar nada) de la desactivacion real.
+    const wasActive = workflow.status === WorkflowStatus.ACTIVO;
 
     if (updateWorkflowDto.name !== undefined) {
       workflow.name = updateWorkflowDto.name.trim();
@@ -464,28 +495,34 @@ export class WorkflowsService {
       workflow.pipelineSchema = schema;
     }
 
-    if (updateWorkflowDto.active !== undefined) {
+    if (updateWorkflowDto.status !== undefined) {
       await this.assertNotInFlight(workflow);
 
-      if (updateWorkflowDto.active) {
+      if (updateWorkflowDto.status === WorkflowStatus.ACTIVO) {
         await this.assertActivatable(workflow);
       }
 
-      workflow.active = updateWorkflowDto.active;
+      // El DTO ya rechaza PAUSADO con un `@IsIn`, asi que aqui solo pueden
+      // llegar ACTIVO e INACTIVO. Activar un flujo PAUSADO es LEGITIMO y es la
+      // via de escape del operador: la ejecucion detenida sobrevive porque el
+      // mutex `idx_flujo_activo` solo cubre EN_PROCESO.
+      workflow.status = updateWorkflowDto.status;
     }
 
     const saved = await this.workflowRepository.save(workflow);
 
     this.logger.log(
-      `Flujo actualizado: "${saved.name}" (${saved.id}) | activo=${String(saved.active)}`,
+      `Flujo actualizado: "${saved.name}" (${saved.id}) | estado=${saved.status}`,
     );
 
-    // DESPUES del `save`, nunca antes. El sondeo lee `flujos WHERE activo=true`
+    const isActive = saved.status === WorkflowStatus.ACTIVO;
+
+    // DESPUES del `save`, nunca antes. El sondeo lee `flujos WHERE status=ACTIVO`
     // y `runAutomaticWorkflow` relee la columna: si limpiaramos con el cambio
     // aun sin comprometer, una reconciliacion que se colara veria el flujo
     // todavia activo y reinscribiria el temporizador que acabamos de borrar,
     // deshaciendo nuestra propia parada.
-    if (wasActive && !saved.active) {
+    if (wasActive && !isActive) {
       await this.releaseDeactivatedFlow(saved);
     }
 
@@ -493,16 +530,143 @@ export class WorkflowsService {
     // CU-09 y sobreviven a proposito—, pero si adelanta la reinscripcion: sin
     // esto el operador pulsa "Activar" y el flujo no sondea hasta el siguiente
     // ciclo de reconciliacion, hasta un minuto de silencio inexplicable.
-    if (!wasActive && saved.active) {
+    if (!wasActive && isActive) {
       await this.flowPollingCoordinator.refreshPolling();
     }
 
-    const summary = this.toPipelineSummary(saved);
+    const summary = await this.buildSummary(saved);
     // Al FINAL, despues de liberar o registrar el sondeo: emitir antes
     // anunciaria un flujo activo cuyo temporizador aun no existe.
     this.publishMutation('UPDATED', summary);
 
     return summary;
+  }
+
+  /**
+   * Devuelve a ACTIVO un flujo que el motor habia pausado (CU-09).
+   *
+   * Contrapartida exacta de `pauseFlow`, y con la misma guarda invertida: SOLO
+   * actua sobre un PAUSADO. Un flujo INACTIVO se queda como esta, porque
+   * reanudar una ejecucion no exige el flujo armado —esa asimetria es
+   * deliberada y la documenta `ExecutionsService.resumeExecution`— y activarlo
+   * aqui habilitaria los disparadores de un flujo que alguien retiro a mano.
+   *
+   * `refreshPolling` y no `stopPollingForFlow`: hay que REINSCRIBIR el
+   * temporizador que la pausa borro. Sin esto el operador reanuda y el flujo no
+   * vuelve a sondear hasta el siguiente ciclo de reconciliacion.
+   */
+  public async reactivateAfterResume(workflowId: string): Promise<void> {
+    const workflow = await this.workflowRepository.findOne({
+      where: { id: workflowId },
+    });
+
+    if (workflow === null || workflow.status !== WorkflowStatus.PAUSADO) {
+      return;
+    }
+
+    workflow.status = WorkflowStatus.ACTIVO;
+
+    const saved = await this.workflowRepository.save(workflow);
+
+    await this.flowPollingCoordinator.refreshPolling();
+
+    this.publishMutation('UPDATED', await this.buildSummary(saved));
+
+    this.logger.log(
+      `Flujo "${saved.name}" (${saved.id}) vuelve a ACTIVO al reanudarse su ejecucion detenida.`,
+    );
+  }
+
+  /**
+   * Marca el flujo como PAUSADO porque el motor detuvo una ejecucion suya.
+   *
+   * Implementa `WorkflowStatusPort`: lo invoca `FsmEngineService.pauseAt` a
+   * traves de `WorkflowStatusCoordinator`, porque `@core` no puede importar de
+   * `@modules`.
+   *
+   * NO REUTILIZA `releaseDeactivatedFlow`, y la diferencia es critica: aquel
+   * llama a `abortExecutionsForFlow`, que cierra como FALLIDO todo lo que este
+   * en EN_PROCESO o PAUSADO. Invocado desde dentro de `pauseAt` mataria la
+   * ejecucion que acaba de pausarse —el motor se llamaria a si mismo— y
+   * convertiria cada pausa reanudable en un fallo definitivo. De aquel metodo
+   * solo sirve su primera linea, que se replica aqui.
+   *
+   * Idempotente y silencioso: solo actua sobre un flujo ACTIVO. Uno INACTIVO no
+   * tiene temporizador que desarmar, y marcarlo PAUSADO lo sacaria de la columna
+   * "Inactivo" de la tabla sin que nadie pudiera devolverlo.
+   */
+  public async pauseFlow(flowId: string, reason: string): Promise<void> {
+    const workflow = await this.workflowRepository.findOne({
+      where: { id: flowId },
+    });
+
+    if (workflow === null || workflow.status !== WorkflowStatus.ACTIVO) {
+      return;
+    }
+
+    workflow.status = WorkflowStatus.PAUSADO;
+
+    const saved = await this.workflowRepository.save(workflow);
+
+    // Cortar la fuente de trabajo nuevo: sin esto el sondeo seguiria creando
+    // ejecuciones por encima de la que acaba de quedarse atascada, que es
+    // justo el escenario que el tercer estado existe para evitar.
+    this.flowPollingCoordinator.stopPollingForFlow(saved.id);
+
+    this.publishMutation('UPDATED', await this.buildSummary(saved));
+
+    this.logger.warn(
+      `Flujo "${saved.name}" (${saved.id}) marcado como PAUSADO: ${reason}`,
+    );
+  }
+
+  /**
+   * Se inscribe como dueño del estado del flujo para el motor.
+   *
+   * Se registra a si mismo (`this`) y no un literal, para poder darse de baja
+   * con la misma referencia cuando el `--watch` de Nest recargue el modulo.
+   */
+  public async onModuleInit(): Promise<void> {
+    this.workflowStatusCoordinator.register(this);
+    await this.assertStatusColumnExists();
+  }
+
+  /**
+   * Aborta el arranque si la migracion 040 no esta aplicada.
+   *
+   * Con `synchronize: false` TypeORM no crea nada: enumera las columnas que la
+   * entidad declara. Sin `flujos.status`, TODA lectura de flujos muere con un
+   * `42703` de PostgreSQL —listado, detalle, sondeo IMAP, cron y reanudacion—,
+   * una por peticion y con el error en crudo.
+   *
+   * Fallar al arrancar con el comando exacto en el log es incomparablemente
+   * mejor: el sintoma aparece una vez, en el sitio donde se puede arreglar, en
+   * lugar de convertirse en cinco cincos distintos durante el dia.
+   */
+  private async assertStatusColumnExists(): Promise<void> {
+    const rows: unknown[] = await this.workflowRepository.query(
+      `SELECT 1 FROM information_schema.columns
+        WHERE table_name = 'flujos' AND column_name = 'status' LIMIT 1`,
+    );
+
+    if (rows.length > 0) {
+      return;
+    }
+
+    const message = [
+      'La tabla "flujos" no tiene la columna "status": falta aplicar la migracion 040.',
+      'Aplicala antes de arrancar:',
+      "  sudo docker exec -i protodo_postgres psql -U unuware007 -d 'DB_PRO-TODO' \\",
+      '    < db/migrations/040-estado-flujo-triestatal.sql',
+    ].join('\n');
+
+    this.logger.error(message);
+
+    throw new Error(message);
+  }
+
+  public onModuleDestroy(): void {
+    this.workflowStatusCoordinator.unregister(this);
   }
 
   /**
@@ -615,18 +779,80 @@ export class WorkflowsService {
   }
 
   /**
+   * Indexa por flujo las ejecuciones vivas que devolvio la consulta plural.
+   *
+   * EN_PROCESO GANA SIEMPRE sobre PAUSADO: un flujo puede acumular pausadas
+   * historicas mientras el motor atiende una nueva, y la que el operador
+   * necesita ver es la que esta corriendo. A igualdad de estado gana la primera,
+   * que es la mas reciente porque la consulta ordena por `createdAt DESC`.
+   */
+  private indexLiveExecutions(
+    executions: readonly FsmExecution[],
+  ): Map<string, FsmExecution> {
+    const index = new Map<string, FsmExecution>();
+
+    for (const execution of executions) {
+      const current = index.get(execution.flowId);
+
+      if (
+        current === undefined ||
+        (current.currentState !== ExecutionState.EN_PROCESO &&
+          execution.currentState === ExecutionState.EN_PROCESO)
+      ) {
+        index.set(execution.flowId, execution);
+      }
+    }
+
+    return index;
+  }
+
+  /**
+   * Resumen de UN flujo resolviendo antes su ejecucion viva.
+   *
+   * Existe aparte del mapeador puro por una trampa concreta: los caminos de
+   * mutacion difunden su resultado por `crud:mutation`, y si publicasen un
+   * resumen con `activeExecutionId: null` el cliente BORRARIA ese dato al
+   * repintar la fila, dejando sin boton de reanudar a un flujo que sigue
+   * teniendo una ejecucion detenida.
+   *
+   * La consulta extra es irrelevante: las mutaciones son manuales y esporadicas,
+   * mientras que el listado -que si es caliente- conserva el mapeador puro.
+   */
+  private async buildSummary(
+    workflow: Workflow,
+  ): Promise<PipelineSummaryResponseDto> {
+    const live = await this.fsmExecutionQueryService.findLiveByFlow(
+      workflow.id,
+    );
+
+    return this.toPipelineSummary(
+      workflow,
+      this.indexLiveExecutions(live).get(workflow.id) ?? null,
+    );
+  }
+
+  /**
    * Proyecta un flujo persistido a su resumen publicable.
    *
    * Compartido por el listado y el alta para que ambos devuelvan exactamente la
    * misma forma: si divergieran, el cliente tendria que tratar el flujo que acaba
    * de crear distinto de los que lee del catalogo.
+   *
+   * PURO Y SINCRONO a proposito: la ejecucion viva se le entrega resuelta. Es lo
+   * que permite que el listado la obtenga para todos los flujos de una vez en
+   * vez de consultar aqui dentro, una vez por fila.
    */
-  private toPipelineSummary(workflow: Workflow): PipelineSummaryResponseDto {
+  private toPipelineSummary(
+    workflow: Workflow,
+    live: FsmExecution | null = null,
+  ): PipelineSummaryResponseDto {
     return {
       id: workflow.id,
       name: workflow.name,
       description: workflow.description,
-      active: workflow.active,
+      status: workflow.status,
+      activeExecutionId: live?.executionId ?? null,
+      executionState: live?.currentState ?? null,
       templateId: workflow.templateId,
       topology:
         workflow.pipelineSchema === null
@@ -687,10 +913,18 @@ export class WorkflowsService {
   ): Promise<PipelineSummaryResponseDto> {
     const workflow = await this.findOne(workflowId);
 
-    workflow.active = false;
+    workflow.status = WorkflowStatus.INACTIVO;
 
     const saved = await this.workflowRepository.save(workflow);
-    const summary = this.toPipelineSummary(saved);
+
+    // Baja del temporizador, que hasta ahora faltaba: la fila quedaba INACTIVO
+    // pero el intervalo seguia vivo en memoria hasta el siguiente ciclo de
+    // reconciliacion, creando ejecuciones de un flujo que el operador acababa
+    // de cerrar. NO se delega en `releaseDeactivatedFlow` por el motivo del
+    // TSDoc: aquel arrastraria a FALLIDO las PAUSADO que el descarte respeta.
+    this.flowPollingCoordinator.stopPollingForFlow(saved.id);
+
+    const summary = await this.buildSummary(saved);
 
     this.publishMutation('UPDATED', summary);
 

@@ -10,6 +10,7 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { In, QueryFailedError } from 'typeorm';
 
 import { ExecutionEventsCoordinator } from '@common/services/execution-events.coordinator';
+import { WorkflowStatusCoordinator } from '@common/services/workflow-status.coordinator';
 import { HybridLoggerService } from '@modules/logs/services/hybrid-logger.service';
 import { FsmConfig } from '@core/config/fsm.config';
 import { StatePayloadContext } from '@core/fsm/context/state-payload.context';
@@ -117,6 +118,19 @@ export interface ExecuteWorkflowOptions {
    * volver a tocar el motor.
    */
   skipNodeTypes?: readonly NodeType[];
+
+  /**
+   * El desenlace NO altera el estado del flujo padre.
+   *
+   * Lo usa el banco de pruebas: una prueba fallida contra un flujo que esta en
+   * produccion lo dejaria PAUSADO y apagaria su sondeo, convirtiendo un ensayo
+   * en una interrupcion del servicio. Mismo criterio por el que
+   * `applyStopOnFirstSuccess` excluye el despacho manual.
+   *
+   * No cubre el caso contrario -probar un flujo en borrador- porque ese ya lo
+   * cubre la guarda de `pauseFlow`, que solo actua sobre un flujo ACTIVO.
+   */
+  suppressFlowPause?: boolean;
 
   /**
    * Nombre legible del flujo, para el namespace reservado `trigger`.
@@ -438,6 +452,7 @@ export class FsmEngineService {
     private readonly hybridLogger: HybridLoggerService,
     private readonly fsmConfig: FsmConfig,
     private readonly executionEvents: ExecutionEventsCoordinator,
+    private readonly workflowStatus: WorkflowStatusCoordinator,
   ) {}
 
   /**
@@ -959,13 +974,7 @@ export class FsmEngineService {
           this.logger.error(
             `URGENTE | ejecucion=${executionId} | Circuit breaker: se superaron ${MAX_TRANSITIONS} transiciones. Posible ciclo en el grafo. Se pausa en "${cursor}".`,
           );
-          await this.pauseAt(
-            execution,
-            cursor,
-            context,
-            retryState,
-            options.flowName,
-          );
+          await this.pauseAt(execution, cursor, context, retryState, options);
           break;
         }
 
@@ -977,13 +986,7 @@ export class FsmEngineService {
           this.logger.error(
             `URGENTE | ejecucion=${executionId} | El cursor "${cursor}" no existe en el mapa de nodos.`,
           );
-          await this.pauseAt(
-            execution,
-            cursor,
-            context,
-            retryState,
-            options.flowName,
-          );
+          await this.pauseAt(execution, cursor, context, retryState, options);
           break;
         }
 
@@ -1302,27 +1305,20 @@ export class FsmEngineService {
         // culpable, que es lo que permite el reintento manual de CU-09. La
         // causa viaja con la pausa para que la fila apunte al archivo que
         // explica por que se paro, y no solo a donde.
-        await this.pauseAt(
-          execution,
-          cursor,
-          context,
-          retryState,
-          options.flowName,
-          {
-            severity: result.error?.level,
-            errorMessage: result.error?.message,
-            logFilePath: lastTrace.logFilePath,
-            nodeType: node.nodeType,
-            errorCode,
-            attempts: resolveReportedAttempts(
-              result,
-              (retryState[node.nodeId] ?? 0) + 1,
-            ),
-            ...(result.error?.description !== undefined
-              ? { errorDetail: result.error.description }
-              : {}),
-          },
-        );
+        await this.pauseAt(execution, cursor, context, retryState, options, {
+          severity: result.error?.level,
+          errorMessage: result.error?.message,
+          logFilePath: lastTrace.logFilePath,
+          nodeType: node.nodeType,
+          errorCode,
+          attempts: resolveReportedAttempts(
+            result,
+            (retryState[node.nodeId] ?? 0) + 1,
+          ),
+          ...(result.error?.description !== undefined
+            ? { errorDetail: result.error.description }
+            : {}),
+        });
         break;
       }
 
@@ -1336,7 +1332,7 @@ export class FsmEngineService {
           // Se lee de la entidad y no de una variable del bucle porque es donde
           // lo dejo la rama de `halt`, unas lineas mas arriba.
           execution.haltReason !== undefined,
-          options.flowName,
+          options,
         );
       }
     } catch (error) {
@@ -2041,7 +2037,7 @@ export class FsmEngineService {
     } | null,
     lastCompletedNodeType: NodeType | null,
     wasHalted: boolean,
-    flowName?: string,
+    options: ExecuteWorkflowOptions,
   ): Promise<void> {
     // Recuperacion FUNCIONAL: la rama reincorporo el flujo y este llego al
     // final. El trabajo se hizo —el correo con la imagen acabo publicado—, asi
@@ -2072,7 +2068,7 @@ export class FsmEngineService {
         retryState,
       });
 
-      this.emitCompleted(execution, finalState, flowName);
+      this.emitCompleted(execution, finalState, options.flowName);
       return;
     }
 
@@ -2089,7 +2085,7 @@ export class FsmEngineService {
         contingency.failedNodeId,
         context,
         retryState,
-        flowName,
+        options,
         {
           severity: contingency.severity,
           logFilePath: contingency.trace.logFilePath,
@@ -2121,7 +2117,7 @@ export class FsmEngineService {
     this.emitCompleted(
       execution,
       ExecutionState.FALLIDO,
-      flowName,
+      options.flowName,
       failureReason,
     );
   }
@@ -2145,7 +2141,7 @@ export class FsmEngineService {
     cursor: string,
     context: StatePayloadContext,
     retryState: RetryState,
-    flowName?: string,
+    options: ExecuteWorkflowOptions,
     cause?: {
       severity?: NodeErrorSeverity;
       errorMessage?: string;
@@ -2174,6 +2170,35 @@ export class FsmEngineService {
 
     await this.saveCheckpoint(execution, patch);
 
+    // El flujo PADRE tambien se detiene, y va EN MEDIO de las dos operaciones a
+    // proposito: despues del checkpoint porque la ejecucion es el hecho y el
+    // estado del flujo su consecuencia, y ANTES del evento porque el cliente
+    // repinta la fila leyendo lo que el evento anuncia —emitirlo primero
+    // pintaria "Activo" sobre un flujo con una ejecucion detenida.
+    //
+    // Se cruza la frontera de capas por un puerto: `@core` no conoce
+    // `WorkflowsService`, solo pide que alguien lo marque. Si nadie esta
+    // inscrito —las pruebas del motor— es un no-op silencioso.
+    //
+    // El `try/catch` duplica el que ya hace el coordinador por puerto, y no es
+    // redundante: aquel protege de un IMPLEMENTADOR roto, este del coordinador
+    // mismo. Son la misma regla aplicada a dos capas —nada de lo que ocurra
+    // despues del checkpoint puede convertir una pausa reanudable en una
+    // excepcion—, y el checkpoint ya esta escrito cuando llegamos aqui.
+    if (options.suppressFlowPause !== true) {
+      try {
+        await this.workflowStatus.pauseFlow(
+          execution.flowId,
+          cause?.errorCode ?? 'Ejecucion detenida por el motor',
+        );
+      } catch (error) {
+        this.logger.error(
+          `ejecucion=${execution.executionId} | La ejecucion quedo PAUSADO, pero no se pudo marcar asi el flujo "${execution.flowId}": ${this.describeError(error)}`,
+          error instanceof Error ? error.stack : undefined,
+        );
+      }
+    }
+
     // DESPUES del checkpoint, nunca antes. El evento invita al operador a
     // reanudar, y reanudar empieza leyendo esta misma fila: emitirlo con el
     // UPDATE todavia en vuelo abre una ventana —corta, pero real— en la que la
@@ -2196,7 +2221,7 @@ export class FsmEngineService {
       ...(cause?.errorDetail !== undefined
         ? { errorDetail: cause.errorDetail }
         : {}),
-      ...(flowName !== undefined ? { flowName } : {}),
+      ...(options.flowName !== undefined ? { flowName: options.flowName } : {}),
     });
   }
 

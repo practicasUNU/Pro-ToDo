@@ -3,6 +3,8 @@
 // Directiva POR ARCHIVO, como en el resto de specs de componente: montar exige
 // DOM, y los specs de store arrancan mas rapido sin el.
 import { mount, flushPromises } from '@vue/test-utils';
+
+import { WorkflowStatus } from '@/types/pipeline';
 import { createPinia, setActivePinia } from 'pinia';
 import {
   Notify,
@@ -70,7 +72,9 @@ const buildWorkflow = (overrides: Partial<PipelineSummary> = {}): PipelineSummar
   id: FLOW_ID,
   name: 'Boletin diario',
   description: null,
-  active: true,
+  status: WorkflowStatus.ACTIVO,
+  activeExecutionId: null,
+  executionState: null,
   templateId: null,
   topology: [],
   ...overrides,
@@ -186,7 +190,9 @@ describe('WorkflowsManager · telemetria en vivo del catalogo', () => {
 
     it('2.2 deberia conservar el badge de habilitacion sin ejecucion viva', async () => {
       // 1. Arrange 📐
-      vi.mocked(fetchWorkflows).mockResolvedValue([buildWorkflow({ active: true })]);
+      vi.mocked(fetchWorkflows).mockResolvedValue([
+        buildWorkflow({ status: WorkflowStatus.ACTIVO }),
+      ]);
 
       // 2. Act ⚙️
       const wrapper = mountManager();
@@ -273,7 +279,7 @@ describe('WorkflowsManager · telemetria en vivo del catalogo', () => {
           state: ExecutionState.DESCARTADO,
           activeCursor: null,
         }),
-        workflow: buildWorkflow({ active: false }),
+        workflow: buildWorkflow({ status: WorkflowStatus.INACTIVO }),
       });
 
       await wrapper.find('[data-test="discard-execution"]').trigger('click');
