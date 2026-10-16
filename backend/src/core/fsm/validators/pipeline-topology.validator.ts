@@ -3,6 +3,7 @@ import {
   declaredErrorTarget,
 } from '@core/fsm/utils/pipeline-topology.util';
 import {
+  ERR_CONDITIONAL_UPSTREAM_CONTEXT,
   ERR_MISSING_UPSTREAM_CONTEXT,
   ERR_MISSING_UPSTREAM_FIELD_TYPE,
 } from '@core/fsm/types/node-strategy.types';
@@ -79,6 +80,17 @@ export type NodeUnreachableErrorCodesResolver = (
 export interface PipelineTopologyResolvers {
   /** Regla 7. */
   readonly dependencies?: NodeDependencyResolver;
+  /**
+   * Regla 7, subconjunto DURO de `dependencies`. Opcional.
+   *
+   * Solo lo que la estrategia declara en `getRequiredNamespaces`, sin las
+   * variables que se descubren barriendo `params` o el texto de un prompt. Se
+   * pide aparte porque las dos mitades no toleran lo mismo: una interpolacion
+   * sobre un namespace ausente resuelve a cadena vacia, mientras que una
+   * dependencia declarada hace abortar el nodo en el motor. Omitirlo deja la
+   * regla 7 funcionando como antes, con un unico nivel de exigencia.
+   */
+  readonly strictDependencies?: NodeDependencyResolver;
   /** Regla 7, solo para enriquecer el mensaje. Opcional. */
   readonly dependencyOrigins?: NodeDependencyOriginResolver;
   /** Regla 8; hace falta junto con `requiredFieldTypes`. */
@@ -323,6 +335,7 @@ export const validatePipelineTopology = (
       ...detectUnreachableNamespaces(
         schema,
         resolvers.dependencies,
+        resolvers.strictDependencies,
         resolvers.dependencyOrigins,
       ),
     );
@@ -366,6 +379,90 @@ const ENGINE_PROVIDED_NAMESPACES: ReadonlySet<string> = new Set([
 ]);
 
 /**
+ * Disponibilidad de un namespace en el punto del recorrido en que se consulta.
+ *
+ * `certain` lo escribe un predecesor del camino activo, asi que existe en TODA
+ * ejecucion que llegue al consumidor. `conditional` lo escribe un nodo al que
+ * solo se llega por una rama de contingencia: existe unicamente en las
+ * ejecuciones que se desviaron por ahi.
+ */
+type NamespaceAvailability = 'certain' | 'conditional';
+
+/** Nodos del camino activo, para distinguir un satelite de una reincorporacion. */
+const collectActivePathIds = (
+  schema: PipelineSchemaDto,
+): ReadonlySet<string> => {
+  const path = new Set<string>();
+  let cursor: string | null = schema.entrypoint;
+
+  while (cursor !== null && hasNode(schema, cursor) && !path.has(cursor)) {
+    path.add(cursor);
+    cursor = schema.nodes[cursor].nextStep;
+  }
+
+  return path;
+};
+
+/**
+ * Recorre el subgrafo de contingencia que cuelga de un nodo del camino activo.
+ *
+ * Entra por `onErrorStep` y sigue avanzando por los `nextStep` y por los
+ * `onErrorStep` anidados del satelite, PARANDO en cuanto pisa un nodo del camino
+ * activo. Ese corte es lo que impide adelantar namespaces: un satelite que
+ * reincorpora al flujo no debe hacer parecer disponibles los nodos nominales que
+ * vengan despues, porque esos ya los acumula el bucle principal cuando toca.
+ *
+ * El `Set` de visitados no es decorativo: dos satelites pueden apuntarse entre
+ * si, y una rama de error que vuelve sobre si misma colgaria el recorrido.
+ *
+ * Recibe el NODO ya resuelto y no su identificador: la regla 2 no garantiza que
+ * la clave del mapa coincida con el `nodeId`, y volver a indexar `schema.nodes`
+ * con el segundo reventaria justo en los esquemas que esa regla esta reportando.
+ */
+const forEachContingencyNode = (
+  schema: PipelineSchemaDto,
+  from: PipelineNodeConfigDto,
+  activePath: ReadonlySet<string>,
+  visit: (node: PipelineNodeConfigDto) => void,
+): void => {
+  const entry = declaredErrorTarget(from.onErrorStep);
+
+  if (entry === null) {
+    return;
+  }
+
+  const pending: string[] = [entry];
+  const seen = new Set<string>();
+
+  while (pending.length > 0) {
+    const nodeId = pending.shift() as string;
+
+    if (
+      seen.has(nodeId) ||
+      activePath.has(nodeId) ||
+      !hasNode(schema, nodeId)
+    ) {
+      continue;
+    }
+
+    seen.add(nodeId);
+
+    const node: PipelineNodeConfigDto = schema.nodes[nodeId];
+    visit(node);
+
+    if (node.nextStep !== null) {
+      pending.push(node.nextStep);
+    }
+
+    const nested = declaredErrorTarget(node.onErrorStep);
+
+    if (nested !== null) {
+      pending.push(nested);
+    }
+  }
+};
+
+/**
  * Comprueba que cada nodo del camino activo encuentre lo que necesita.
  *
  * Recorre `entrypoint -> nextStep` acumulando los `outputNamespace` ya escritos,
@@ -373,23 +470,37 @@ const ENGINE_PROVIDED_NAMESPACES: ReadonlySet<string> = new Set([
  * Es la misma pregunta que la guarda del motor responde en ejecucion, adelantada
  * al momento de guardar.
  *
- * DOS ACOTACIONES DELIBERADAS, ambas para no rechazar flujos validos:
+ * LAS RAMAS DE CONTINGENCIA SI CUENTAN, pero marcadas aparte. Al visitar un nodo
+ * se acumula tambien lo que producen los satelites que cuelgan de su
+ * `onErrorStep`, como `conditional`. El caso que lo motiva es el rescate por OCR:
+ * `parser_pre_ia` desvia a un `PROCESADOR_OCR` que escribe `ocr_result` y
+ * reincorpora al `procesador_ia`, cuyo prompt cita `{{ocr_result.clean_body}}`.
+ * Esa topologia es correcta y hasta ahora se rechazaba con un 400.
  *
- * 1. Solo el camino activo. Un nodo al que solo se llega por `onErrorStep` tiene
- *    un conjunto de predecesores distinto segun por donde se entre, y afirmar
- *    algo sobre el aqui seria adivinar. Esos nodos quedan cubiertos por la
- *    guarda del motor, que si sabe que contexto hay de verdad.
- * 2. Se para en seco si un puntero no resuelve o si el camino cicla. Los dos
- *    fallos ya los reportan las reglas 3 y 6, y duplicarlos anadiria ruido sobre
- *    el error real.
+ * El nivel de exigencia NO es el mismo para las dos mitades de la dependencia:
+ *
+ * - Lo INTERPOLADO (`{{ns.campo}}` en los params o en un prompt) se satisface con
+ *   un namespace condicional. Si la rama no llego a dispararse,
+ *   `getInterpolatedValue` resuelve a cadena vacia y el flujo continua.
+ * - Lo DECLARADO en `getRequiredNamespaces` exige un productor del camino activo.
+ *   Ahi el motor no interpola nada: aborta el nodo con
+ *   `ERR_MISSING_UPSTREAM_CONTEXT` siempre que la ejecucion tome el camino feliz,
+ *   que es justamente el caso normal. Se reporta con un codigo propio para que el
+ *   operador sepa que el nodo esta bien colocado pero mal alimentado.
+ *
+ * SE MANTIENE la segunda acotacion original: parada en seco si un puntero no
+ * resuelve o si el camino cicla, porque eso ya lo reportan las reglas 3 y 6 y
+ * duplicarlo anadiria ruido sobre el error real.
  */
 const detectUnreachableNamespaces = (
   schema: PipelineSchemaDto,
   resolveDependencies: NodeDependencyResolver,
+  resolveStrictDependencies?: NodeDependencyResolver,
   resolveOrigins?: NodeDependencyOriginResolver,
 ): SchemaIssue[] => {
   const issues: SchemaIssue[] = [];
-  const produced = new Set<string>();
+  const produced = new Map<string, NamespaceAvailability>();
+  const activePath = collectActivePathIds(schema);
   const visited = new Set<string>();
   let cursor: string | null = schema.entrypoint;
 
@@ -401,9 +512,18 @@ const detectUnreachableNamespaces = (
     visited.add(cursor);
 
     const node: PipelineNodeConfigDto = schema.nodes[cursor];
+    const isSatisfiable = (namespace: string): boolean =>
+      ENGINE_PROVIDED_NAMESPACES.has(namespace) || produced.has(namespace);
+
     const missing = resolveDependencies(node).filter(
+      (namespace) => !isSatisfiable(namespace),
+    );
+
+    // Lo declarado que SI esta, pero solo por una rama que puede no dispararse.
+    const conditional = (resolveStrictDependencies?.(node) ?? []).filter(
       (namespace) =>
-        !ENGINE_PROVIDED_NAMESPACES.has(namespace) && !produced.has(namespace),
+        !ENGINE_PROVIDED_NAMESPACES.has(namespace) &&
+        produced.get(namespace) === 'conditional',
     );
 
     if (missing.length > 0) {
@@ -428,7 +548,24 @@ const detectUnreachableNamespaces = (
       });
     }
 
-    produced.add(node.outputNamespace);
+    if (conditional.length > 0) {
+      issues.push({
+        field: `nodes.${node.nodeId}.params`,
+        code: ERR_CONDITIONAL_UPSTREAM_CONTEXT,
+        constraints: [
+          `El nodo exige los namespaces [${conditional.join(', ')}], que solo escribe una rama de contingencia y por tanto faltan siempre que el flujo no falle. Coloca en el camino principal un nodo que los produzca.`,
+        ],
+      });
+    }
+
+    produced.set(node.outputNamespace, 'certain');
+
+    forEachContingencyNode(schema, node, activePath, (satellite) => {
+      if (!produced.has(satellite.outputNamespace)) {
+        produced.set(satellite.outputNamespace, 'conditional');
+      }
+    });
+
     cursor = node.nextStep;
   }
 
@@ -450,11 +587,15 @@ const detectUnreachableNamespaces = (
  * por falta de valor haria inexpresable el nodo. De la completitud responde
  * `getIncompleteParams`, que consulta `assertActivatable`.
  *
- * Comparte las dos acotaciones de la regla 7 y por los mismos motivos: solo el
- * camino activo —un nodo alcanzable unicamente por `onErrorStep` tiene
- * predecesores distintos segun por donde se entre— y parada en seco si un
- * puntero no resuelve o el camino cicla, porque eso ya lo reportan las reglas 3
- * y 6.
+ * Acumula tambien los campos de los satelites de contingencia, por el mismo
+ * motivo que la regla 7 y con el mismo recorrido: si un `PROCESADOR_OCR` cuelga
+ * de la rama de error de un predecesor, su `text` esta disponible para quien
+ * venga detras. Aqui NO se distingue `certain` de `conditional`: la regla 8 solo
+ * afirma que el flujo PODRIA configurarse, que es una pregunta mas debil, y
+ * exigir un tipo de campo por dos caminos distintos rechazaria flujos correctos.
+ *
+ * Se mantiene la parada en seco si un puntero no resuelve o el camino cicla,
+ * porque eso ya lo reportan las reglas 3 y 6.
  *
  * Un nodo cuya estrategia no declare campos de salida aporta un arreglo vacio y
  * simplemente no ayuda a satisfacer a nadie. No es un fallo: hoy solo dos de las
@@ -468,6 +609,7 @@ const detectMissingUpstreamFieldTypes = (
 ): SchemaIssue[] => {
   const issues: SchemaIssue[] = [];
   const availableTypes = new Set<string>();
+  const activePath = collectActivePathIds(schema);
   const visited = new Set<string>();
   let cursor: string | null = schema.entrypoint;
 
@@ -497,6 +639,12 @@ const detectMissingUpstreamFieldTypes = (
     for (const field of resolveOutputFields(node)) {
       availableTypes.add(field.type);
     }
+
+    forEachContingencyNode(schema, node, activePath, (satellite) => {
+      for (const field of resolveOutputFields(satellite)) {
+        availableTypes.add(field.type);
+      }
+    });
 
     cursor = node.nextStep;
   }

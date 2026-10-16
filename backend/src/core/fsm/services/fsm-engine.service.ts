@@ -637,6 +637,12 @@ export class FsmEngineService {
    *        caso tipico de CU-09 es «faltaba un campo»: parchearlo convierte la
    *        reanudacion en un arreglo y no en una repeticion del mismo fallo.
    * @param resetRetries Devuelve al nodo del cursor su presupuesto completo.
+   * @param targetStepId Paso desde el que reanudar, si no es el del cursor.
+   *        Llega YA VALIDADO por `ExecutionsService`, que es quien conoce el
+   *        esquema y puede comprobar que el nodo existe y que realmente se
+   *        ejecuto. Aqui solo se escribe: el motor no tiene el esquema a mano
+   *        en este punto y duplicar la comprobacion con menos informacion solo
+   *        daria un diagnostico peor.
    * @returns La fila ya preparada.
    * @throws NotFoundException Si la ejecucion no existe.
    */
@@ -644,6 +650,7 @@ export class FsmEngineService {
     executionId: string,
     contextPatch?: Record<string, Record<string, unknown>>,
     resetRetries = true,
+    targetStepId?: string,
   ): Promise<FsmExecution> {
     const execution = await this.fsmExecutionRepo.findOne({
       where: { executionId },
@@ -660,20 +667,28 @@ export class FsmEngineService {
       contextPatch,
     );
 
-    // El cursor es la unica clave que se limpia: los contadores de los nodos
-    // que ya pasaron describen lo que costo llegar hasta aqui, y borrarlos
-    // falsearia la traza de una ejecucion que si tuvo que insistir.
+    // Reanudacion selectiva: el operador eligio otro paso en el canvas. Sin
+    // `targetStepId` se conserva el cursor persistido, que es el caso comun.
+    const resumeCursor = targetStepId ?? execution.activeCursor;
+
+    // El presupuesto se restaura para el nodo DESDE EL QUE SE VA A REANUDAR, no
+    // para el que detuvo la ejecucion: reanudar en otro sitio y devolverle los
+    // intentos al nodo viejo dejaria al nuevo con el contador que traia y, si
+    // ya habia agotado su politica en un intento anterior, fallaria al primer
+    // tropiezo. Los contadores de los demas nodos describen lo que costo llegar
+    // hasta aqui, y borrarlos falsearia la traza de una ejecucion que si tuvo
+    // que insistir.
     const retryState =
-      resetRetries && execution.activeCursor !== null
+      resetRetries && resumeCursor !== null
         ? this.withoutRetryCounter(
             execution.retryState as RetryState,
-            execution.activeCursor,
+            resumeCursor,
           )
         : { ...(execution.retryState as RetryState) };
 
     await this.saveCheckpoint(execution, {
       currentState: execution.currentState,
-      activeCursor: execution.activeCursor,
+      activeCursor: resumeCursor,
       contextPayload,
       retryState,
       // Se limpia el motivo porque describe un cierre que ya no es el estado
@@ -1202,6 +1217,57 @@ export class FsmEngineService {
             // un "no habia nada que hacer" como un trabajo completado.
             execution.haltReason = result.halt.reason;
             cursor = null;
+            break;
+          }
+
+          // --- Suspension DELIBERADA pedida por el nodo (`PAUSA_FLOW`).
+          //
+          // Hermana de `halt` y colocada justo detras, pero con el desenlace
+          // opuesto: `halt` cierra en OMITIDO porque no habia nada que hacer,
+          // y esto deja la ejecucion VIVA en PAUSADO para que un operador la
+          // retome por CU-09.
+          //
+          // El cursor queda en `nextStep` y no en este nodo: la pausa ya se
+          // ejecuto, y reanudar volviendo a entrar en ella pausaria otra vez,
+          // dejando la ejecucion atascada en un bucle del que CU-09 no podria
+          // sacarla.
+          //
+          // Un `PAUSA_FLOW` SIN `nextStep` no pausa, y no es un caso de error:
+          // no queda ningun paso que reanudar, asi que congelar la ejecucion
+          // solo produciria una fila detenida para siempre esperando un trabajo
+          // que no existe. Se deja cerrar por la salida normal del bucle.
+          if (result.pause !== undefined) {
+            if (node.nextStep === null) {
+              this.logger.warn(
+                `ejecucion=${executionId} | Nodo "${node.nodeId}" pidio pausa, pero no hay paso siguiente que reanudar: el flujo se cierra con normalidad.`,
+              );
+              cursor = null;
+              break;
+            }
+
+            this.logger.log(
+              `ejecucion=${executionId} | Nodo "${node.nodeId}" suspende el flujo: ${result.pause.reason}. El cursor queda en "${node.nextStep}".`,
+            );
+
+            context.setCursor(node.nextStep);
+            await this.pauseAt(
+              execution,
+              node.nextStep,
+              context,
+              retryState,
+              options,
+              {
+                nodeType: node.nodeType,
+                isProgrammedPause: true,
+                pauseReason: result.pause.reason,
+              },
+            );
+
+            // `break` y no `cursor = null`: el cursor sigue vivo, que es la
+            // diferencia con `halt`. Al salir del bucle, la guarda
+            // `if (cursor === null)` no se cumple y `closeTerminalState` no
+            // llega a ejecutarse, de modo que la fila conserva el PAUSADO que
+            // `pauseAt` acaba de escribir.
             break;
           }
 
@@ -2150,6 +2216,9 @@ export class FsmEngineService {
       errorCode?: string;
       attempts?: number;
       errorDetail?: string;
+      /** La pidio un nodo `PAUSA_FLOW`; no hay incidencia que diagnosticar. */
+      isProgrammedPause?: boolean;
+      pauseReason?: string;
     },
   ): Promise<void> {
     const patch: CheckpointPatch = {
@@ -2189,7 +2258,9 @@ export class FsmEngineService {
       try {
         await this.workflowStatus.pauseFlow(
           execution.flowId,
-          cause?.errorCode ?? 'Ejecucion detenida por el motor',
+          cause?.pauseReason ??
+            cause?.errorCode ??
+            'Ejecucion detenida por el motor',
         );
       } catch (error) {
         this.logger.error(
@@ -2222,6 +2293,10 @@ export class FsmEngineService {
         ? { errorDetail: cause.errorDetail }
         : {}),
       ...(options.flowName !== undefined ? { flowName: options.flowName } : {}),
+      ...(cause?.isProgrammedPause === true ? { isProgrammedPause: true } : {}),
+      ...(cause?.pauseReason !== undefined
+        ? { pauseReason: cause.pauseReason }
+        : {}),
     });
   }
 

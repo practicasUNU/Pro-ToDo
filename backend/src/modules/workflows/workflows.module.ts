@@ -2,6 +2,7 @@ import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 
 import { FsmModule } from '@core/fsm/fsm.module';
+import { LogsModule } from '@modules/logs/logs.module';
 import { WorkflowTemplatesModule } from '@modules/workflow-templates/workflow-templates.module';
 
 import { Workflow } from './entities/workflow.entity';
@@ -34,6 +35,9 @@ import { WorkflowsService } from './workflows.service';
     // Por `WorkflowTemplatesService`: comprueba el `templateId` al instanciar.
     // La dependencia va en un solo sentido; el catalogo no conoce este modulo.
     WorkflowTemplatesModule,
+    // Por la marca de demarcacion que `ExecutionsService` escribe al reanudar:
+    // `LogsModule` no es global desde que salio de `CommonModule`.
+    LogsModule,
   ],
   controllers: [WorkflowsController, ExecutionsController],
   providers: [WorkflowsService, ExecutionsService],

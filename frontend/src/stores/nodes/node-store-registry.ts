@@ -3,6 +3,7 @@ import { useLlmExtractorStore } from '@stores/nodes/llm-extractor.store';
 import { useParserEmailStore } from '@stores/nodes/parser-email.store';
 import { usePostIaSanitizerStore } from '@stores/nodes/post-ia-sanitizer.store';
 import { useOcrProcessorStore } from '@stores/nodes/ocr-processor.store';
+import { usePauseFlowStore } from '@stores/nodes/pause-flow.store';
 import { useSmtpAlertStore } from '@stores/nodes/smtp-alert.store';
 import { useTemplateMapperStore } from '@stores/nodes/template-mapper.store';
 import { useTriggerCronStore } from '@stores/nodes/trigger-cron.store';
@@ -53,6 +54,19 @@ export interface UpstreamNamespace {
    */
   readonly nodeType?: NodeType;
   readonly fields: readonly NodeOutputField[];
+  /**
+   * El namespace lo escribe una rama de CONTINGENCIA, no el camino principal.
+   *
+   * Existe solo en las ejecuciones que se desviaron por ahi. El caso vivo es el
+   * rescate por OCR: `ocr_result` aparece unicamente si el parser no pudo
+   * extraer texto y la rama se disparo. Citarlo es legitimo —es la razon de ser
+   * del satelite— y el backend lo admite desde que la regla 7 del validador
+   * distingue lo interpolado de lo declarado, pero el operador tiene que saber
+   * que ese valor puede llegar vacio.
+   *
+   * OPCIONAL y ausente por defecto: lo normal es que un namespace sea seguro.
+   */
+  readonly isConditional?: boolean;
 }
 
 /**
@@ -276,6 +290,7 @@ export const nodeStoreRegistry: Partial<Record<NodeType, NodeStoreHook>> = {
   [NodeType.PROCESADOR_IA]: useLlmExtractorStore,
   [NodeType.DESTINO_SMTP]: useSmtpAlertStore,
   [NodeType.PROCESADOR_OCR]: useOcrProcessorStore,
+  [NodeType.PAUSA_FLOW]: usePauseFlowStore,
   [NodeType.ESCUDO_POST_IA]: usePostIaSanitizerStore,
   [NodeType.DESTINO_DRUPAL]: useDrupalHttpStore,
 };

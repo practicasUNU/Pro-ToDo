@@ -10,6 +10,7 @@ import { LlmExtractorStrategy } from './strategies/llm-extractor.strategy';
 import { ParserEmailStrategy } from './strategies/parser-email.strategy';
 import { PostIaSanitizerStrategy } from './strategies/post-ia-sanitizer.strategy';
 import { OcrProcessorStrategy } from './strategies/ocr-processor.strategy';
+import { PauseFlowStrategy } from './strategies/pause-flow.strategy';
 import { SmtpAlertStrategy } from './strategies/smtp-alert.strategy';
 import { TemplateMapperStrategy } from './strategies/template-mapper.strategy';
 import { WebScraperStrategy } from './strategies/web-scraper.strategy';
@@ -46,6 +47,7 @@ const buildHarness = (): {
   smtp: SmtpAlertStrategy;
   ocr: OcrProcessorStrategy;
   drupal: DrupalHttpStrategy;
+  pause: PauseFlowStrategy;
   module: NodesModule;
 } => {
   const factory = new NodeStrategyFactory();
@@ -91,6 +93,10 @@ const buildHarness = (): {
     {} as DrupalApiConfig,
   );
 
+  // Mismo criterio que el nodo de alerta: el transporte va vacio porque
+  // inscribir la estrategia no abre ninguna conexion.
+  const pause = new PauseFlowStrategy({} as SmtpNodeMailerService);
+
   return {
     factory,
     mapper,
@@ -103,6 +109,7 @@ const buildHarness = (): {
     smtp,
     ocr,
     drupal,
+    pause,
     module: new NodesModule(
       factory,
       mapper,
@@ -115,6 +122,7 @@ const buildHarness = (): {
       smtp,
       ocr,
       drupal,
+      pause,
     ),
   };
 };
@@ -246,5 +254,15 @@ describe('NodesModule', () => {
     // reventaba en su ultimo paso con `StrategyNotFoundException`, que el motor
     // normaliza a URGENTE y por tanto no reintenta.
     expect(factory.getStrategy(NodeType.DESTINO_DRUPAL)).toBe(drupal);
+  });
+  it('1.11 deberia registrar PauseFlowStrategy en la factoria al iniciarse', () => {
+    // 1. Arrange 📐
+    const { factory, pause, module } = buildHarness();
+
+    // 2. Act ⚙️
+    module.onModuleInit();
+
+    // 3. Assert 🎯
+    expect(factory.getStrategy(NodeType.PAUSA_FLOW)).toBe(pause);
   });
 });

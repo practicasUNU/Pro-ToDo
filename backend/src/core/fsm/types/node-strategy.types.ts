@@ -52,6 +52,22 @@ export const ERR_MISSING_UPSTREAM_FIELD_TYPE =
   'ERR_MISSING_UPSTREAM_FIELD_TYPE';
 
 /**
+ * El nodo EXIGE un namespace que solo produce una rama de contingencia.
+ *
+ * Tercer hermano de los dos anteriores, y el matiz que los separa importa: el
+ * namespace si es alcanzable, pero solo si la rama de error llega a dispararse.
+ * Una variable interpolada tolera esa incertidumbre —`getInterpolatedValue`
+ * resuelve a cadena vacia y el flujo sigue—, pero un namespace declarado en
+ * `getRequiredNamespaces` no: ahi la guarda del motor aborta el nodo con
+ * `ERR_MISSING_UPSTREAM_CONTEXT` cada vez que la ejecucion tome el camino feliz.
+ *
+ * Por eso la regla 7 admite los namespaces condicionales para lo interpolado y
+ * los rechaza aqui para lo declarado. Solo lo emite el validador, al GUARDAR.
+ */
+export const ERR_CONDITIONAL_UPSTREAM_CONTEXT =
+  'ERR_CONDITIONAL_UPSTREAM_CONTEXT';
+
+/**
  * El nodo se puede guardar pero no ejecutar: le faltan params por elegir.
  *
  * Lo emite `PipelineValidatorService` solo cuando se le pide validar para
@@ -205,6 +221,27 @@ export interface NodeResult {
    * propias rutas (`onErrorStep`, reintento, pausa).
    */
   halt?: { reason: string };
+  /**
+   * Suspension deliberada del flujo pedida por el propio nodo.
+   *
+   * Hermano de `halt` y deliberadamente distinto de el. `halt` cierra la
+   * ejecucion en OMITIDO: no habia nada que procesar y nadie tiene que
+   * intervenir. `pause` la deja en PAUSADO con el cursor vivo en el paso
+   * siguiente, a la espera de que un operador la reanude por CU-09. La
+   * diferencia la ve el usuario: una ejecucion omitida desaparece de la cola y
+   * una pausada sigue reclamando atencion.
+   *
+   * Tampoco es un fallo: no escribe alerta, no tiene severidad y el flujo queda
+   * reanudable sin corregir nada.
+   *
+   * Es un CAMPO TIPADO y no una clave convenida dentro de `data` porque lo lee
+   * el motor, que vive en `@core`: `data` es un `Record<string, unknown>` y
+   * sacar de ahi una senal de control obligaria a un cast en el nucleo y a que
+   * una errata en el nombre de la clave pasara en silencio. La estrategia puede
+   * publicar ademas lo que quiera en `data` para la trazabilidad; lo que
+   * gobierna la transicion es esto.
+   */
+  pause?: { reason: string };
   error?: NodeErrorDetail;
 }
 

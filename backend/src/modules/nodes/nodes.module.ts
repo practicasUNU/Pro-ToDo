@@ -22,6 +22,7 @@ import { DrupalHttpStrategy } from './strategies/drupal-http.strategy';
 import { ImapTriggerStrategy } from './strategies/imap-trigger.strategy';
 import { LlmExtractorStrategy } from './strategies/llm-extractor.strategy';
 import { OcrProcessorStrategy } from './strategies/ocr-processor.strategy';
+import { PauseFlowStrategy } from './strategies/pause-flow.strategy';
 import { SmtpAlertStrategy } from './strategies/smtp-alert.strategy';
 import { AiDefaultsConfig } from '@core/config/ai-defaults.config';
 import { DrupalApiConfig } from '@core/config/drupal-api.config';
@@ -95,6 +96,7 @@ import type { OnModuleInit } from '@nestjs/common';
     ParserEmailStrategy,
     WebScraperStrategy,
     LlmExtractorStrategy,
+    PauseFlowStrategy,
     SmtpAlertStrategy,
     OcrProcessorStrategy,
     DrupalHttpStrategy,
@@ -120,6 +122,7 @@ import type { OnModuleInit } from '@nestjs/common';
     ParserEmailStrategy,
     WebScraperStrategy,
     LlmExtractorStrategy,
+    PauseFlowStrategy,
     SmtpAlertStrategy,
     OcrProcessorStrategy,
     DrupalHttpStrategy,
@@ -148,6 +151,7 @@ export class NodesModule implements OnModuleInit {
     private readonly smtpAlertStrategy: SmtpAlertStrategy,
     private readonly ocrProcessorStrategy: OcrProcessorStrategy,
     private readonly drupalHttpStrategy: DrupalHttpStrategy,
+    private readonly pauseFlowStrategy: PauseFlowStrategy,
   ) {}
 
   public onModuleInit(): void {
@@ -166,5 +170,8 @@ export class NodesModule implements OnModuleInit {
     // declara el mismo `nodeType` y nadie la inscribe, pero `registerStrategy`
     // ante un duplicado solo avisa y SUSTITUYE, asi que ganaria la ultima.
     this.strategyFactory.registerStrategy(this.drupalHttpStrategy);
+    // Nodo de CONTROL, no de destino: no entrega nada fuera y conserva su
+    // `nextStep`, que es donde queda el cursor para que un operador reanude.
+    this.strategyFactory.registerStrategy(this.pauseFlowStrategy);
   }
 }

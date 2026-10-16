@@ -12,6 +12,8 @@ import { ExecutionEventsCoordinator } from '@common/services/execution-events.co
 import { FsmExecutionQueryService } from '@core/fsm/services/fsm-execution-query.service';
 import { PipelineValidatorService } from '@core/fsm/services/pipeline-validator.service';
 import { ExecutionState } from '@core/fsm/types/fsm.enums';
+import { HybridLoggerService } from '@modules/logs/services/hybrid-logger.service';
+import { NodeLogStatus } from '@modules/logs/entities/log-nodo.entity';
 import { Workflow } from '@modules/workflows/entities/workflow.entity';
 import { WorkflowsService } from '@modules/workflows/workflows.service';
 
@@ -30,6 +32,7 @@ import type {
 import type { ResumeExecutionDto } from './dto/resume-execution.dto';
 import type { WorkflowExecutionResponseDto } from './dto/workflow-execution-response.dto';
 import type { FsmExecution } from '@core/fsm/entities/fsm-execution.entity';
+import type { PipelineSchemaDto } from '@core/fsm/dto/pipeline-schema.dto';
 import type { Repository } from 'typeorm';
 
 /**
@@ -56,6 +59,7 @@ export class ExecutionsService {
     private readonly fsmEngineService: FsmEngineService,
     private readonly executionEvents: ExecutionEventsCoordinator,
     private readonly workflowsService: WorkflowsService,
+    private readonly hybridLoggerService: HybridLoggerService,
   ) {}
 
   /** Pagina de ejecuciones, de la mas reciente a la mas antigua. */
@@ -181,6 +185,17 @@ export class ExecutionsService {
       );
     }
 
+    // Reanudacion SELECTIVA (CU-09 extendido): el operador eligio otro paso en
+    // el canvas. Se valida aqui y no en el motor porque es aqui donde estan a
+    // la vez el esquema y el contexto acumulado, que son las dos cosas que hay
+    // que cruzar para responder "ese paso llego a ejecutarse".
+    const resumeCursor = this.resolveResumeCursor(
+      execution,
+      schema,
+      workflow,
+      resumeExecutionDto.targetStepId,
+    );
+
     // La reanudacion entra al motor por `executeWorkflow` y no por
     // `createExecution`, asi que la guarda de saturacion no se aplicaria sola.
     // Sin esta llamada, cada reintento manual sumaria una ejecucion por encima
@@ -191,7 +206,29 @@ export class ExecutionsService {
       executionId,
       resumeExecutionDto.contextPatch,
       resumeExecutionDto.resetRetries ?? true,
+      resumeCursor,
     );
+
+    // Marca de demarcacion en la trazabilidad. Reanudar NO borra ni invalida
+    // las filas del intento anterior —son la evidencia que CU-09 existe para
+    // conservar—, asi que los nodos que se reejecuten van a dejar filas nuevas
+    // junto a las viejas. Sin esta linea, las dos tandas quedarian mezcladas y
+    // solo las separaria la marca de tiempo; con ella, el historial dice donde
+    // empieza cada intento.
+    //
+    // Es ADVERTENCIA y no OK: no describe un nodo que funciono, sino una
+    // intervencion manual sobre una ejecucion detenida, que es justo lo que un
+    // auditor querria ver resaltado.
+    await this.hybridLoggerService.logNodeExecution({
+      executionId,
+      nodeId: resumeCursor,
+      nodeType: schema.nodes[resumeCursor]?.nodeType ?? null,
+      status: NodeLogStatus.ADVERTENCIA,
+      message:
+        resumeCursor === execution.activeCursor
+          ? `Reanudacion manual (CU-09) desde el paso en que se detuvo: "${resumeCursor}".`
+          : `Reanudacion manual (CU-09) desde un paso elegido por el operador: "${resumeCursor}" (se habia detenido en "${execution.activeCursor}").`,
+    });
 
     // El flujo vuelve a estar armado: la pausa que lo saco de los disparadores
     // la escribio el motor al detener ESTA ejecucion, y reanudarla la deshace.
@@ -203,7 +240,7 @@ export class ExecutionsService {
     await this.workflowsService.reactivateAfterResume(workflow.id);
 
     this.logger.log(
-      `Reanudacion manual (CU-09) del flujo "${workflow.name}" (${workflow.id}) desde el nodo "${execution.activeCursor}" | ejecucion=${executionId} | usuario=${userId}`,
+      `Reanudacion manual (CU-09) del flujo "${workflow.name}" (${workflow.id}) desde el nodo "${resumeCursor}" | ejecucion=${executionId} | usuario=${userId}`,
     );
 
     // ANTES de entrar al motor, y el orden es observable: `executeWorkflow` es
@@ -215,7 +252,9 @@ export class ExecutionsService {
       executionId,
       flowId: execution.flowId,
       emittedAt: new Date().toISOString(),
-      activeCursor: execution.activeCursor,
+      // El cursor EFECTIVO, que con una reanudacion selectiva no es el que
+      // detuvo la ejecucion: el cliente pinta el nodo activo leyendo esto.
+      activeCursor: resumeCursor,
       resumedBy: userId,
     });
 
@@ -235,6 +274,59 @@ export class ExecutionsService {
       activeCursor: finished.activeCursor,
       context: finished.contextPayload,
     };
+  }
+
+  /**
+   * Decide desde que paso se reanuda, y rechaza los saltos imposibles.
+   *
+   * Sin `targetStepId` devuelve el cursor persistido, que es la reanudacion de
+   * siempre. Con el, admite exactamente dos casos:
+   *
+   * 1. El propio cursor. Redundante pero legitimo: es lo que manda el canvas
+   *    cuando el operador pulsa sobre el nodo que ya estaba detenido.
+   * 2. Un nodo que YA SE EJECUTO, probado porque su `outputNamespace` esta
+   *    escrito en el contexto acumulado.
+   *
+   * Lo que se rechaza, y el motivo: saltar a un paso POSTERIOR dejaria sin
+   * escribir los namespaces de los pasos intermedios, y el flujo reventaria al
+   * interpolarlos —con un fallo que el operador leeria como un error del motor
+   * y no como la consecuencia de su eleccion—. La prueba se hace contra el
+   * contexto y no contra el indice en la topologia porque esta ultima deja
+   * fuera a los satelites de contingencia, que son justo donde una reanudacion
+   * selectiva resulta mas util: si el OCR corrio, se puede volver a el.
+   *
+   * Es un 400 y no un 409: lo que no encaja es el cuerpo de la peticion.
+   */
+  private resolveResumeCursor(
+    execution: FsmExecution,
+    schema: PipelineSchemaDto,
+    workflow: Workflow,
+    targetStepId?: string,
+  ): string {
+    // `activeCursor` ya esta comprobado no nulo por la guarda de arriba.
+    const persisted = execution.activeCursor as string;
+
+    if (targetStepId === undefined || targetStepId === persisted) {
+      return persisted;
+    }
+
+    const target = schema.nodes[targetStepId];
+
+    if (target === undefined) {
+      throw new BadRequestException(
+        `El nodo "${targetStepId}" no existe en el esquema del flujo "${workflow.name}".`,
+      );
+    }
+
+    const context = execution.contextPayload ?? {};
+
+    if (!Object.hasOwn(context, target.outputNamespace)) {
+      throw new BadRequestException(
+        `No se puede reanudar desde "${targetStepId}": ese paso no llego a ejecutarse en esta ejecucion, asi que los pasos intermedios se quedarian sin contexto. Elige un paso ya recorrido o reanuda desde "${persisted}".`,
+      );
+    }
+
+    return targetStepId;
   }
 
   /**

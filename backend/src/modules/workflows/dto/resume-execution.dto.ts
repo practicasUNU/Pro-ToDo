@@ -1,10 +1,10 @@
 import { ApiPropertyOptional } from '@nestjs/swagger';
-import { IsBoolean, IsObject, IsOptional } from 'class-validator';
+import { IsBoolean, IsObject, IsOptional, IsString } from 'class-validator';
 
 /**
  * Cuerpo de `POST /api/executions/:id/resume`: reintento manual de CU-09.
  *
- * Los dos campos son opcionales y el cuerpo vacio (`{}`) ya rinde la
+ * Los tres campos son opcionales y el cuerpo vacio (`{}`) ya rinde la
  * reanudacion mas comun: retomar el flujo desde el nodo que lo detuvo, con su
  * presupuesto de reintentos restaurado.
  */
@@ -26,4 +26,13 @@ export class ResumeExecutionDto {
   @IsOptional()
   @IsObject({ message: 'contextPatch debe ser un objeto de namespaces.' })
   readonly contextPatch?: Record<string, Record<string, unknown>>;
+
+  @ApiPropertyOptional({
+    description:
+      'Paso desde el que reanudar, si no es el que detuvo la ejecucion. Solo se admite el propio cursor o un nodo que YA se ejecuto —su namespace esta en el contexto acumulado—: saltar a un paso posterior dejaria sin escribir los namespaces intermedios y el flujo reventaria al interpolarlos',
+    example: 'procesador_ia',
+  })
+  @IsOptional()
+  @IsString({ message: 'targetStepId debe ser el identificador de un nodo.' })
+  readonly targetStepId?: string;
 }

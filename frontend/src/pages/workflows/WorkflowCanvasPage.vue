@@ -7,6 +7,7 @@ import NodeInspectionPanel from '@components/canvas/NodeInspectionPanel.vue';
 import TopologyCanvas from '@components/canvas/TopologyCanvas.vue';
 import { useCanvasStore } from '@stores/canvas.store';
 import { ExecutionState } from '@/types/execution';
+import { WorkflowStatus } from '@/types/pipeline';
 
 const route = useRoute();
 const router = useRouter();
@@ -16,21 +17,61 @@ const $q = useQuasar();
 const flowId = computed<string>(() => String(route.params.id));
 
 /**
+ * Se llego aqui desde "Elegir paso en el Canvas" (CU-09 extendido).
+ *
+ * Solo gobierna un AVISO. Los botones de cada tarjeta dependen del estado real
+ * de la ejecucion y no de esta bandera: condicionarlos a la query esconderia la
+ * accion a quien abriera el canvas por su cuenta teniendo delante una ejecucion
+ * detenida, que es el mismo caso con otra forma de llegar.
+ */
+const isResumeMode = computed<boolean>(
+  () => route.query.resume === 'true' && canvasStore.isPaused,
+);
+
+/**
  * Distintivo del estado GENERAL del flujo.
  *
- * `INACTIVO` no es un estado persistido aqui: es como se presenta la ausencia
- * de ejecucion viva, que para el operador significa lo mismo —no hay nada
- * ocurriendo— y evita una caja vacia sin explicacion.
+ * CRUZA DOS FUENTES, y hacerlo es el arreglo. Antes se derivaba solo de
+ * `executionState`, que sale de una ejecucion VIVA: un flujo ACTIVO a la espera
+ * de su disparador no tiene ninguna, caia en el `default` y se pintaba
+ * "INACTIVO" —es decir, la vista decia que estaba apagado un flujo que estaba
+ * armado y escuchando—. El estado del flujo ya viaja en `WorkflowDetail`, que
+ * extiende `PipelineSummary`, asi que no hizo falta tocar el backend.
+ *
+ * EL ORDEN DE LAS RAMAS ES LA REGLA, no una casualidad. Lo que ocurre AHORA
+ * manda sobre lo que el flujo es en general: una ejecucion en curso se anuncia
+ * aunque la fila diga ACTIVO, y una detenida aunque el flujo ya se haya
+ * reactivado. Solo cuando no hay nada en vuelo se describe el flujo en si.
+ *
+ * `spinner` acompana al texto en vez de sustituirlo: el badge dice QUE pasa y
+ * el spinner que sigue pasando ahora mismo. Mismo criterio que las tarjetas del
+ * canvas, y la razon es la misma —el color nunca viaja solo—.
  */
-const stateBadge = computed<{ readonly color: string; readonly label: string }>(() => {
-  switch (canvasStore.executionState) {
-    case ExecutionState.EN_PROCESO:
-      return { color: 'info', label: 'EN PROCESO' };
-    case ExecutionState.PAUSADO:
-      return { color: 'warning', label: 'PAUSADO' };
-    default:
-      return { color: 'grey-6', label: 'INACTIVO' };
+const stateBadge = computed<{
+  readonly color: string;
+  readonly label: string;
+  readonly spinner: boolean;
+}>(() => {
+  if (canvasStore.executionState === ExecutionState.EN_PROCESO) {
+    return { color: 'info', label: 'En ejecucion', spinner: true };
   }
+
+  if (
+    canvasStore.executionState === ExecutionState.PAUSADO ||
+    canvasStore.workflow?.status === WorkflowStatus.PAUSADO
+  ) {
+    return { color: 'warning', label: 'Pausado', spinner: false };
+  }
+
+  if (canvasStore.workflow?.status === WorkflowStatus.ACTIVO) {
+    return {
+      color: 'positive',
+      label: 'Activo (En espera de trigger)',
+      spinner: false,
+    };
+  }
+
+  return { color: 'grey-6', label: 'Inactivo', spinner: false };
 });
 
 const loadCanvas = async (): Promise<void> => {
@@ -78,7 +119,10 @@ onBeforeUnmount(() => {
           </div>
         </div>
 
-        <q-badge :color="stateBadge.color" class="pd-badge">{{ stateBadge.label }}</q-badge>
+        <q-badge :color="stateBadge.color" class="pd-badge" data-test="flow-state-badge">
+          <q-spinner-dots v-if="stateBadge.spinner" class="q-mr-xs" size="14px" />
+          {{ stateBadge.label }}
+        </q-badge>
 
         <q-btn
           flat
@@ -102,6 +146,17 @@ onBeforeUnmount(() => {
       </div>
     </div>
 
+    <!-- Guia de la reanudacion selectiva. Sin esto, el operador llega desde la
+         tabla a una vista que no explica que se espera de el. -->
+    <q-banner v-if="isResumeMode" dense class="pd-resume-banner q-mt-md" data-test="resume-banner">
+      <template #avatar>
+        <q-icon name="play_circle" size="22px" class="pd-resume-icon" />
+      </template>
+      Elige el paso desde el que reanudar. Solo los pasos que llegaron a ejecutarse ofrecen el
+      boton: retroceder repite trabajo, pero saltar hacia adelante dejaria sin datos a los pasos
+      intermedios.
+    </q-banner>
+
     <q-inner-loading :showing="canvasStore.isLoading">
       <q-spinner-dots size="48px" color="primary" />
     </q-inner-loading>
@@ -111,3 +166,19 @@ onBeforeUnmount(() => {
     <NodeInspectionPanel />
   </q-page>
 </template>
+
+<style scoped lang="scss">
+// Ambar como el trazo de contingencia del canvas, y por el mismo motivo: no es
+// un error, es una via alternativa. El TEXTO nunca va en `--pd-warning`, que no
+// alcanza el contraste AA; el ambar queda en el borde y en el icono.
+.pd-resume-banner {
+  background: var(--pd-surface-muted);
+  border: 1px solid var(--pd-warning);
+  border-radius: $generic-border-radius;
+  color: var(--pd-text-primary);
+}
+
+.pd-resume-icon {
+  color: var(--pd-warning);
+}
+</style>

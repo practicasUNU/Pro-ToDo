@@ -44,13 +44,22 @@ export const fetchExecution = async (executionId: string): Promise<ExecutionDeta
  * Reutiliza la MISMA fila: el historico no crece con cada intento, y el
  * `executionId` que vuelve es el mismo que se envio.
  *
+ * `targetStepId` reanuda desde OTRO paso, el que el operador elige en el
+ * canvas. El backend solo admite el propio cursor o un nodo que ya se ejecuto:
+ * saltar hacia adelante dejaria sin escribir los namespaces intermedios. Sin el
+ * argumento, el cuerpo va vacio y se reanuda desde donde se detuvo.
+ *
  * @throws AxiosError 409 si ya no esta PAUSADO, 400 si su nodo desaparecio del
- *         esquema, 429 si el motor esta al limite de ejecuciones simultaneas.
+ *         esquema o el paso elegido no se habia ejecutado, 429 si el motor esta
+ *         al limite de ejecuciones simultaneas.
  */
-export const resumeExecution = async (executionId: string): Promise<WorkflowExecutionResult> => {
+export const resumeExecution = async (
+  executionId: string,
+  targetStepId?: string,
+): Promise<WorkflowExecutionResult> => {
   const { data } = await api.post<WorkflowExecutionResult>(
     `${EXECUTIONS_PATH}/${executionId}/resume`,
-    {},
+    targetStepId === undefined ? {} : { targetStepId },
   );
 
   return data;

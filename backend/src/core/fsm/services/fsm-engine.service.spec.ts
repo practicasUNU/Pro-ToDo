@@ -4627,4 +4627,200 @@ describe('FsmEngineService (PROT-09)', () => {
       expect(emitFlowPaused).toHaveBeenCalledTimes(1);
     });
   });
+
+  describe('40. Suspension deliberada pedida por un nodo (`pause`)', () => {
+    /** Motor con el coordinador de estado y el canal espiados. */
+    const buildPausingEngine = (
+      repo: Repository<FsmExecution>,
+    ): {
+      engine: FsmEngineService;
+      workflowStatus: WorkflowStatusCoordinator;
+      events: ExecutionEventsCoordinator;
+    } => {
+      const events = new ExecutionEventsCoordinator();
+      const workflowStatus = new WorkflowStatusCoordinator();
+
+      return {
+        engine: buildEngine(
+          repo,
+          new ConfigService({}),
+          events,
+          workflowStatus,
+        ),
+        workflowStatus,
+        events,
+      };
+    };
+
+    /** `NodeResult` de un nodo de pausa: exito, sin error, con senal. */
+    const pausing = (): Record<string, unknown> => ({
+      success: true,
+      data: { shouldPause: true, pauseReason: 'PROGRAMMED_AUTO_PAUSE' },
+      pause: { reason: 'PROGRAMMED_AUTO_PAUSE' },
+    });
+
+    it('40.1 deberia dejar la ejecucion PAUSADO con el cursor en el paso SIGUIENTE', async () => {
+      // 1. Arrange 📐: el cursor NO se queda en el nodo de pausa. Reanudar
+      //    volviendo a entrar en el pausaria otra vez, y CU-09 no podria sacar
+      //    la ejecucion de ese bucle.
+      const { repo, update } = buildRepository(buildExecution());
+      const { engine } = buildPausingEngine(repo);
+      const executeB = jest.fn().mockResolvedValue(pausing());
+      const executeC = jest.fn().mockResolvedValue({ success: true });
+
+      factory.registerStrategy(
+        buildStrategy(
+          NodeType.TRIGGER_IMAP,
+          jest.fn().mockResolvedValue({ success: true }),
+        ),
+      );
+      factory.registerStrategy(buildStrategy(NodeType.PROCESADOR_IA, executeB));
+      factory.registerStrategy(
+        buildStrategy(NodeType.DESTINO_DRUPAL, executeC),
+      );
+
+      // 2. Act ⚙️
+      const result = await engine.executeWorkflow(
+        EXECUTION_ID,
+        buildLinearSchema(),
+      );
+
+      // 3. Assert 🎯
+      expect(result.currentState).toBe(ExecutionState.PAUSADO);
+      expect(lastPatch(update).activeCursor).toBe('nodo_c');
+      // El paso siguiente NO se ejecuta: de eso trata la pausa.
+      expect(executeC).not.toHaveBeenCalled();
+    });
+
+    it('40.2 deberia pausar tambien el flujo padre, marcando que es deliberada', async () => {
+      // 1. Arrange 📐: sin la marca, el cliente presenta una suspension pedida
+      //    por el flujo con el mismo lenguaje de alarma que una caida.
+      const { repo } = buildRepository(buildExecution());
+      const { engine, workflowStatus, events } = buildPausingEngine(repo);
+      const pauseFlow = jest.spyOn(workflowStatus, 'pauseFlow');
+      const emitFlowPaused = jest.spyOn(events, 'emitFlowPaused');
+
+      factory.registerStrategy(
+        buildStrategy(
+          NodeType.TRIGGER_IMAP,
+          jest.fn().mockResolvedValue(pausing()),
+        ),
+      );
+
+      // 2. Act ⚙️
+      await engine.executeWorkflow(EXECUTION_ID, buildLinearSchema());
+
+      // 3. Assert 🎯
+      expect(pauseFlow).toHaveBeenCalledWith(FLOW_ID, 'PROGRAMMED_AUTO_PAUSE');
+      expect(emitFlowPaused).toHaveBeenCalledWith(
+        expect.objectContaining({
+          isProgrammedPause: true,
+          pauseReason: 'PROGRAMMED_AUTO_PAUSE',
+          activeCursor: 'nodo_b',
+        }),
+      );
+    });
+
+    it('40.3 NO deberia escribir severidad ni codigo de error', async () => {
+      // 1. Arrange 📐: una pausa deliberada no es una incidencia; que el aviso
+      //    llevase severidad mandaria al operador a buscar un fallo inexistente.
+      const { repo } = buildRepository(buildExecution());
+      const { engine, events } = buildPausingEngine(repo);
+      const emitFlowPaused = jest.spyOn(events, 'emitFlowPaused');
+
+      factory.registerStrategy(
+        buildStrategy(
+          NodeType.TRIGGER_IMAP,
+          jest.fn().mockResolvedValue(pausing()),
+        ),
+      );
+
+      // 2. Act ⚙️
+      await engine.executeWorkflow(EXECUTION_ID, buildLinearSchema());
+
+      // 3. Assert 🎯
+      const payload = emitFlowPaused.mock.calls[0]?.[0];
+
+      expect(payload?.severity).toBeUndefined();
+      expect(payload?.errorCode).toBeUndefined();
+    });
+
+    it('40.4 deberia CERRAR con normalidad si el nodo de pausa no tiene paso siguiente', async () => {
+      // 1. Arrange 📐: sin `nextStep` no queda nada que reanudar, asi que
+      //    congelar la ejecucion solo dejaria una fila detenida para siempre
+      //    esperando un trabajo que no existe.
+      const { repo } = buildRepository(buildExecution());
+      const { engine, workflowStatus } = buildPausingEngine(repo);
+      const pauseFlow = jest.spyOn(workflowStatus, 'pauseFlow');
+      const schema = buildLinearSchema();
+
+      schema.nodes.nodo_a.nextStep = null;
+      factory.registerStrategy(
+        buildStrategy(
+          NodeType.TRIGGER_IMAP,
+          jest.fn().mockResolvedValue(pausing()),
+        ),
+      );
+
+      // 2. Act ⚙️
+      const result = await engine.executeWorkflow(EXECUTION_ID, schema);
+
+      // 3. Assert 🎯
+      expect(result.currentState).toBe(ExecutionState.EXITOSO);
+      expect(result.activeCursor).toBeNull();
+      expect(pauseFlow).not.toHaveBeenCalled();
+    });
+
+    it('40.5 NO deberia pausar el flujo padre en el banco de pruebas', async () => {
+      // 1. Arrange 📐: mismo criterio que una pausa por fallo. Una prueba
+      //    manual no puede dejar PAUSADO un flujo de produccion.
+      const { repo } = buildRepository(buildExecution());
+      const { engine, workflowStatus } = buildPausingEngine(repo);
+      const pauseFlow = jest.spyOn(workflowStatus, 'pauseFlow');
+
+      factory.registerStrategy(
+        buildStrategy(
+          NodeType.TRIGGER_IMAP,
+          jest.fn().mockResolvedValue(pausing()),
+        ),
+      );
+
+      // 2. Act ⚙️
+      const result = await engine.executeWorkflow(
+        EXECUTION_ID,
+        buildLinearSchema(),
+        { suppressFlowPause: true },
+      );
+
+      // 3. Assert 🎯: la EJECUCION si queda pausada; lo que se silencia es la
+      //    propagacion al flujo.
+      expect(result.currentState).toBe(ExecutionState.PAUSADO);
+      expect(pauseFlow).not.toHaveBeenCalled();
+    });
+
+    it('40.6 deberia IGNORAR la senal en un nodo que falla', async () => {
+      // 1. Arrange 📐: `pause` solo se atiende con `success: true`, igual que
+      //    `halt`. Si no, un nodo roto podria secuestrar la transicion y saltarse
+      //    el protocolo de resiliencia.
+      const { repo } = buildRepository(buildExecution());
+      const { engine, workflowStatus } = buildPausingEngine(repo);
+      const pauseFlow = jest.spyOn(workflowStatus, 'pauseFlow');
+
+      factory.registerStrategy(
+        buildStrategy(
+          NodeType.TRIGGER_IMAP,
+          jest.fn().mockResolvedValue({
+            ...failure('URGENTE'),
+            pause: { reason: 'PROGRAMMED_AUTO_PAUSE' },
+          }),
+        ),
+      );
+
+      // 2. Act ⚙️
+      await engine.executeWorkflow(EXECUTION_ID, buildLinearSchema());
+
+      // 3. Assert 🎯: pausa SI, pero por el protocolo de fallo y con su codigo.
+      expect(pauseFlow).toHaveBeenCalledWith(FLOW_ID, TEST_ERROR_CODE);
+    });
+  });
 });

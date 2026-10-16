@@ -251,15 +251,21 @@ export const useExecutionStore = defineStore('execution', () => {
   /**
    * Reintento manual (CU-09). Reutiliza la misma fila.
    *
+   * `targetStepId` solo se envia cuando el operador eligio un paso concreto en
+   * el canvas; omitirlo reanuda desde donde se detuvo, que es el caso comun.
+   *
    * La excepcion se propaga: el 409 (ya no esta PAUSADO), el 400 (su nodo
    * desaparecio del esquema) y el 429 (motor saturado) necesitan mensajes
    * distintos, y quien los decide es el componente.
    */
-  const resumeExecution = async (executionId: string): Promise<WorkflowExecutionResult> => {
+  const resumeExecution = async (
+    executionId: string,
+    targetStepId?: string,
+  ): Promise<WorkflowExecutionResult> => {
     isResuming.value = true;
 
     try {
-      const result = await fsmExecutionsService.resumeExecution(executionId);
+      const result = await fsmExecutionsService.resumeExecution(executionId, targetStepId);
 
       patchSummary(executionId, {
         state: result.status,

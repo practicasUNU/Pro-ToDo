@@ -7,6 +7,7 @@ import {
 import { ExecutionEventsCoordinator } from '@common/services/execution-events.coordinator';
 import { SystemCapacityExceededException } from '@core/fsm/exceptions/system-capacity-exceeded.exception';
 import { ExecutionState } from '@core/fsm/types/fsm.enums';
+import { NodeLogStatus } from '@modules/logs/entities/log-nodo.entity';
 import { NodeType } from '@core/fsm/types/pipeline-schema.types';
 
 import { ExecutionsService } from './executions.service';
@@ -16,6 +17,7 @@ import type { FsmEngineService } from '@core/fsm/services/fsm-engine.service';
 import type { FsmExecutionQueryService } from '@core/fsm/services/fsm-execution-query.service';
 import type { PipelineValidatorService } from '@core/fsm/services/pipeline-validator.service';
 import type { PipelineSchemaDto } from '@core/fsm/dto/pipeline-schema.dto';
+import type { HybridLoggerService } from '@modules/logs/services/hybrid-logger.service';
 import type { Workflow } from '@modules/workflows/entities/workflow.entity';
 import type { WorkflowsService } from '@modules/workflows/workflows.service';
 import type { Repository } from 'typeorm';
@@ -99,10 +101,11 @@ interface ServiceHarness {
     reactivateAfterResume: jest.Mock;
   };
   events: ExecutionEventsCoordinator;
+  hybridLogger: { logNodeExecution: jest.Mock };
 }
 
 /**
- * Monta el servicio con los cuatro colaboradores mockeados.
+ * Monta el servicio con los cinco colaboradores mockeados.
  *
  * El motor va SIEMPRE mockeado: `executeWorkflow` escribe checkpoints en
  * PostgreSQL en cada transicion, y lo que aqui se comprueba es la orquestacion
@@ -158,6 +161,14 @@ const buildHarness = (): ServiceHarness => {
   // referencia para poder espiar sus emisiones.
   const events = new ExecutionEventsCoordinator();
 
+  // Doble del registro hibrido: la reanudacion escribe una fila de demarcacion
+  // en `logs_nodo` para separar los dos intentos en la trazabilidad.
+  const hybridLogger: { logNodeExecution: jest.Mock } = {
+    logNodeExecution: jest
+      .fn()
+      .mockResolvedValue({ logFilePath: null, logNodeId: null }),
+  };
+
   const service = new ExecutionsService(
     query as unknown as FsmExecutionQueryService,
     repository as unknown as Repository<Workflow>,
@@ -165,10 +176,20 @@ const buildHarness = (): ServiceHarness => {
     engine as unknown as FsmEngineService,
     events,
     workflows as unknown as WorkflowsService,
+    hybridLogger as unknown as HybridLoggerService,
   );
   jest.spyOn(service['logger'], 'log').mockImplementation(() => undefined);
 
-  return { service, query, repository, validator, engine, workflows, events };
+  return {
+    service,
+    query,
+    repository,
+    validator,
+    engine,
+    workflows,
+    events,
+    hybridLogger,
+  };
 };
 
 describe('ExecutionsService (consulta y reintento manual CU-09)', () => {
@@ -260,6 +281,7 @@ describe('ExecutionsService (consulta y reintento manual CU-09)', () => {
         EXECUTION_ID,
         undefined,
         true,
+        PAUSED_NODE_ID,
       );
     });
 
@@ -280,6 +302,7 @@ describe('ExecutionsService (consulta y reintento manual CU-09)', () => {
         EXECUTION_ID,
         contextPatch,
         false,
+        PAUSED_NODE_ID,
       );
     });
 
@@ -295,6 +318,107 @@ describe('ExecutionsService (consulta y reintento manual CU-09)', () => {
 
       // 3. Assert
       expect(engine.executeWorkflow).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe('2 bis. Reanudacion selectiva (targetStepId)', () => {
+    it('2b.1 deberia reanudar desde un paso YA RECORRIDO', async () => {
+      // 1. Arrange 📐: `nodo_a` escribio `raw_email`, que esta en el contexto
+      //    acumulado. Esa es la prueba de que llego a ejecutarse.
+      const { service, engine } = buildHarness();
+
+      // 2. Act ⚙️
+      await service.resumeExecution(
+        EXECUTION_ID,
+        { targetStepId: 'nodo_a' },
+        USER_ID,
+      );
+
+      // 3. Assert 🎯
+      expect(engine.prepareResume).toHaveBeenCalledWith(
+        EXECUTION_ID,
+        undefined,
+        true,
+        'nodo_a',
+      );
+    });
+
+    it('2b.2 deberia RECHAZAR un paso que no llego a ejecutarse', async () => {
+      // 1. Arrange 📐: `nodo_b` es el cursor y nadie escribio `llm_response`.
+      //    Saltar hacia adelante dejaria sin contexto los pasos intermedios.
+      const { service, engine, query } = buildHarness();
+
+      query.findById.mockResolvedValue(
+        buildExecution({ activeCursor: 'nodo_a', contextPayload: {} }),
+      );
+
+      // 2. Act ⚙️ & 3. Assert 🎯
+      await expect(
+        service.resumeExecution(
+          EXECUTION_ID,
+          { targetStepId: PAUSED_NODE_ID },
+          USER_ID,
+        ),
+      ).rejects.toThrow(BadRequestException);
+      expect(engine.prepareResume).not.toHaveBeenCalled();
+    });
+
+    it('2b.3 deberia RECHAZAR un paso que no existe en el esquema', async () => {
+      // 1. Arrange 📐
+      const { service, engine } = buildHarness();
+
+      // 2. Act ⚙️ & 3. Assert 🎯
+      await expect(
+        service.resumeExecution(
+          EXECUTION_ID,
+          { targetStepId: 'nodo_fantasma' },
+          USER_ID,
+        ),
+      ).rejects.toThrow(BadRequestException);
+      expect(engine.prepareResume).not.toHaveBeenCalled();
+    });
+
+    it('2b.4 deberia ACEPTAR el propio cursor como destino', async () => {
+      // 1. Arrange 📐: es lo que manda el canvas cuando el operador pulsa sobre
+      //    el nodo que ya estaba detenido. Redundante, pero legitimo.
+      const { service, engine } = buildHarness();
+
+      // 2. Act ⚙️
+      await service.resumeExecution(
+        EXECUTION_ID,
+        { targetStepId: PAUSED_NODE_ID },
+        USER_ID,
+      );
+
+      // 3. Assert 🎯
+      expect(engine.prepareResume).toHaveBeenCalledWith(
+        EXECUTION_ID,
+        undefined,
+        true,
+        PAUSED_NODE_ID,
+      );
+    });
+
+    it('2b.5 deberia dejar una fila de demarcacion en la trazabilidad', async () => {
+      // 1. Arrange 📐: reanudar NO borra las filas del intento anterior, asi
+      //    que sin esta marca las dos tandas quedarian mezcladas.
+      const { service, hybridLogger } = buildHarness();
+
+      // 2. Act ⚙️
+      await service.resumeExecution(
+        EXECUTION_ID,
+        { targetStepId: 'nodo_a' },
+        USER_ID,
+      );
+
+      // 3. Assert 🎯
+      expect(hybridLogger.logNodeExecution).toHaveBeenCalledWith(
+        expect.objectContaining({
+          executionId: EXECUTION_ID,
+          nodeId: 'nodo_a',
+          status: NodeLogStatus.ADVERTENCIA,
+        }),
+      );
     });
   });
 

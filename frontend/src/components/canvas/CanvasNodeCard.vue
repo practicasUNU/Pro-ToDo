@@ -1,7 +1,10 @@
 <script setup lang="ts">
 import { computed } from 'vue';
+import { useQuasar } from 'quasar';
 
 import { useCanvasStore } from '@stores/canvas.store';
+import { useExecutionStore } from '@stores/execution.store';
+import { extractApiErrorMessage } from '@/utils/api-error';
 import { NODE_TYPE_LABELS, NodeType } from '@/types/pipeline';
 
 import type { CanvasForkSlot, CanvasNodeStatus } from '@stores/canvas.store';
@@ -24,6 +27,7 @@ const NODE_ICONS: Record<NodeType, string> = {
   [NodeType.DESTINO_DRUPAL]: 'language',
   [NodeType.DESTINO_SMTP]: 'forward_to_inbox',
   [NodeType.PROCESADOR_OCR]: 'document_scanner',
+  [NodeType.PAUSA_FLOW]: 'pause_circle',
 };
 
 /**
@@ -61,8 +65,22 @@ const props = withDefaults(defineProps<Props>(), {
 });
 
 const canvasStore = useCanvasStore();
+const executionStore = useExecutionStore();
+const $q = useQuasar();
 
 const status = computed<CanvasNodeStatus>(() => canvasStore.statusOf(props.step.nodeId));
+
+/**
+ * Si esta tarjeta ofrece relanzar la ejecucion desde su nodo.
+ *
+ * La condicion la decide el store, que replica la del backend. NO se exige
+ * ademas la query `?resume=true`: esa solo es el atajo con el que se llega
+ * desde la tabla, y condicionar el boton a ella esconderia la accion a quien
+ * abriese el canvas por su cuenta teniendo una ejecucion detenida delante.
+ */
+const canResumeHere = computed<boolean>(() =>
+  canvasStore.isResumableFrom(props.step.nodeId),
+);
 
 const badge = computed(() => STATUS_BADGES[status.value]);
 
@@ -120,6 +138,50 @@ const ariaLabel = computed<string>(() => {
   return `Paso ${props.index + 1}: ${label.value} — ${badge.value.label}`;
 });
 
+/**
+ * Relanza la ejecucion detenida desde este nodo, previa confirmacion.
+ *
+ * El dialogo NO lleva el temporizador de 5 segundos: ese esta reservado a lo
+ * irreversible —descartar una ejecucion, dar de baja un flujo—, y reanudar no
+ * destruye nada. Lo que si hace falta es confirmar, porque reanudar desde un
+ * paso anterior REPITE trabajo ya hecho, y en un flujo que publica eso puede
+ * significar un segundo envio.
+ */
+const requestResume = (): void => {
+  const executionId = canvasStore.observedExecution?.executionId;
+
+  if (executionId === undefined) return;
+
+  $q.dialog({
+    title: 'Reanudar desde este paso',
+    message: `La ejecucion continuara desde "${label.value}". Los pasos que vengan despues volveran a ejecutarse.`,
+    cancel: { flat: true, label: 'Cancelar', class: 'pd-btn-secondary' },
+    ok: { unelevated: true, label: 'Reanudar', color: 'primary' },
+    persistent: true,
+  }).onOk(() => {
+    void resumeFromHere(executionId);
+  });
+};
+
+/** Despacha la reanudacion y recarga el canvas con el desenlace. */
+const resumeFromHere = async (executionId: string): Promise<void> => {
+  try {
+    await executionStore.resumeExecution(executionId, props.step.nodeId);
+    $q.notify({ type: 'positive', icon: 'play_arrow', message: 'Ejecucion reanudada' });
+    const flowId = canvasStore.workflow?.id;
+
+    if (flowId !== undefined) {
+      await canvasStore.loadCanvas(flowId);
+    }
+  } catch (error: unknown) {
+    $q.notify({
+      type: 'negative',
+      icon: 'error',
+      message: extractApiErrorMessage(error, 'No se pudo reanudar la ejecucion'),
+    });
+  }
+};
+
 /** Otros nodos que desvian al mismo destino, ya en texto legible. */
 const sourcesText = computed<string | null>(() => {
   const sources = props.fork?.sourceNodeIds ?? [];
@@ -156,6 +218,33 @@ const sourcesText = computed<string | null>(() => {
       <!-- El spinner acompana al badge en vez de sustituirlo: el badge dice QUE
            pasa y el spinner que sigue pasando ahora mismo. -->
       <q-spinner-dots v-if="status === 'RUNNING'" color="info" size="18px" />
+
+      <q-space />
+
+      <!-- Reanudacion selectiva (CU-09 extendido). Solo en los nodos elegibles:
+           ofrecerlo en los demas produciria un 400 que el operador leeria como
+           un fallo del sistema. `.stop` porque la tarjeta entera abre la
+           inspeccion al pulsarla, y reanudar no es inspeccionar.
+
+           Actua sobre la EJECUCION, no sobre el grafo: el canvas sigue siendo
+           de solo lectura en lo que a topologia se refiere
+           (`frontend-quasar.md` §4). -->
+      <q-btn
+        v-if="canResumeHere"
+        flat
+        round
+        dense
+        icon="play_arrow"
+        color="warning"
+        :loading="executionStore.isResuming"
+        data-test="resume-from-node"
+        :aria-label="`Reanudar la ejecucion desde ${label}`"
+        @click.stop="requestResume"
+        @keydown.enter.stop
+        @keydown.space.stop
+      >
+        <q-tooltip>Reanudar desde este paso</q-tooltip>
+      </q-btn>
     </div>
 
     <div v-if="variant === 'nominal'" class="pd-mono pd-node-type q-mt-xs">

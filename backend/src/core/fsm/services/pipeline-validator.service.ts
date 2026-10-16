@@ -169,6 +169,10 @@ export class PipelineValidatorService {
               ...(promptContext.namespacesByNode.get(node.nodeId) ?? []),
             ]),
           ],
+          // Solo lo DECLARADO. Es el subconjunto que no tolera un namespace
+          // condicional, y por eso viaja aparte en vez de fusionado con lo
+          // interpolado (ver el TSDoc de `strictDependencies`).
+          strictDependencies: (node) => this.resolveDeclaredNamespaces(node),
           dependencyOrigins: (node) =>
             promptContext.originsByNode.get(node.nodeId) ?? new Map(),
           outputFields: (node) =>
@@ -309,8 +313,9 @@ export class PipelineValidatorService {
 
     for (const node of Object.values(schema.nodes)) {
       const references =
-        this.tryGetStrategy(node.nodeType)?.getPromptReferences?.(node.params) ??
-        [];
+        this.tryGetStrategy(node.nodeType)?.getPromptReferences?.(
+          node.params,
+        ) ?? [];
 
       if (references.length > 0) {
         referencesByNode.set(node.nodeId, references);
@@ -319,9 +324,9 @@ export class PipelineValidatorService {
 
     if (referencesByNode.size === 0) return empty;
 
-    const texts = await this.promptTextResolver.resolvePromptTexts([
-      ...referencesByNode.values(),
-    ].flat());
+    const texts = await this.promptTextResolver.resolvePromptTexts(
+      [...referencesByNode.values()].flat(),
+    );
 
     const namespacesByNode = new Map<string, readonly string[]>();
     const originsByNode = new Map<string, ReadonlyMap<string, string>>();
@@ -362,12 +367,29 @@ export class PipelineValidatorService {
   private resolveNodeDependencies(
     node: PipelineNodeConfigDto,
   ): readonly string[] {
-    const declared =
+    return [
+      ...new Set([
+        ...this.resolveDeclaredNamespaces(node),
+        ...collectNamespaceRoots(node.params),
+      ]),
+    ];
+  }
+
+  /**
+   * Namespaces que la estrategia declara como requisito duro.
+   *
+   * Se extrae aparte porque la regla 7 necesita las dos mitades por separado: a
+   * esta le exige un productor del camino activo, mientras que las variables
+   * interpoladas se conforman con una rama de contingencia.
+   */
+  private resolveDeclaredNamespaces(
+    node: PipelineNodeConfigDto,
+  ): readonly string[] {
+    return (
       this.tryGetStrategy(node.nodeType)?.getRequiredNamespaces?.(
         node.params,
-      ) ?? [];
-
-    return [...new Set([...declared, ...collectNamespaceRoots(node.params)])];
+      ) ?? []
+    );
   }
 
   /**

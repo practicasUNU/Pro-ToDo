@@ -223,7 +223,9 @@ describe('useExecutionSocket', () => {
     await vi.waitFor(() => expect(notify).toHaveBeenCalledTimes(2));
 
     // Assert: la cadena llega hasta el servicio REST, no se queda en el store.
-    expect(resumeExecution).toHaveBeenCalledWith(EXECUTION_ID);
+    // El segundo argumento va `undefined`: desde el aviso se reanuda siempre
+    // desde el cursor persistido; elegir paso es cosa del canvas.
+    expect(resumeExecution).toHaveBeenCalledWith(EXECUTION_ID, undefined);
     expect(lastNotifyOptions().type).toBe('positive');
   });
 

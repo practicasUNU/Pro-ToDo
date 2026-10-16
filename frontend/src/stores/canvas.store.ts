@@ -306,6 +306,38 @@ export const useCanvasStore = defineStore('canvas', () => {
   const statusOf = (nodeId: string): CanvasNodeStatus => nodeStatuses.value.get(nodeId) ?? 'IDLE';
 
   /**
+   * Si se puede relanzar la ejecucion detenida desde ESTE nodo (CU-09 extendido).
+   *
+   * REPLICA EXACTA del criterio que aplica `ExecutionsService.resolveResumeCursor`
+   * en el backend, y tiene que serlo: esta funcion decide que tarjetas ensenan
+   * el boton, asi que si fuera mas permisiva el operador pulsaria botones que
+   * devuelven un 400, y si fuera mas estricta esconderia opciones legitimas.
+   *
+   * Admite el propio cursor —es donde se detuvo— y cualquier nodo cuyo
+   * `outputNamespace` este ya escrito en el contexto, que es la unica prueba de
+   * que llego a ejecutarse. Lo que queda fuera son los pasos POSTERIORES:
+   * saltar a uno dejaria sin escribir los namespaces intermedios y el flujo
+   * reventaria al interpolarlos, con un fallo que el operador leeria como un
+   * error del motor y no como la consecuencia de su eleccion.
+   *
+   * Se pregunta al CONTEXTO y no al indice en la topologia porque esta ultima
+   * deja fuera a los satelites de contingencia, que es justo donde reanudar a
+   * mano resulta mas util: si el rescate por OCR corrio, se puede volver a el.
+   */
+  const isResumableFrom = (nodeId: string): boolean => {
+    if (!isPaused.value) return false;
+
+    if (nodeId === activeCursor.value) return true;
+
+    const node = workflow.value?.pipelineSchema?.nodes[nodeId];
+
+    return (
+      node !== undefined &&
+      Object.hasOwn(executionContext.value, node.outputNamespace)
+    );
+  };
+
+  /**
    * Reescribe el mapa entero en vez de mutarlo entrada a entrada.
    *
    * Un `Map` reactivo de Vue notifica a sus consumidores al mutarlo, pero
@@ -472,6 +504,7 @@ export const useCanvasStore = defineStore('canvas', () => {
     isPaused,
     executionContext,
     statusOf,
+    isResumableFrom,
     loadCanvas,
     handleNodeStarted,
     handleNodeCompleted,

@@ -45,6 +45,9 @@ export const nodeConfigRegistry: Partial<Record<NodeType, Component>> = {
   [NodeType.PROCESADOR_OCR]: defineAsyncComponent(
     () => import('@components/nodes/OcrProcessorConfig.vue'),
   ),
+  [NodeType.PAUSA_FLOW]: defineAsyncComponent(
+    () => import('@components/nodes/PauseFlowConfig.vue'),
+  ),
   [NodeType.ESCUDO_POST_IA]: defineAsyncComponent(
     () => import('@components/nodes/PostIaSanitizerConfig.vue'),
   ),

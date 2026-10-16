@@ -7,6 +7,7 @@ import { mount, flushPromises } from '@vue/test-utils';
 import { WorkflowStatus } from '@/types/pipeline';
 import { createPinia, setActivePinia } from 'pinia';
 import {
+  Dialog,
   Notify,
   QBadge,
   QBtn,
@@ -52,10 +53,18 @@ vi.mock('@services/fsm-executions.service', () => ({
   discardExecution: vi.fn(),
 }));
 
+// La tabla navega al canvas cuando el operador elige el paso alli. No hay
+// enrutador real que montar: se observa la intencion de navegar.
+const routerPush = vi.fn();
+
+vi.mock('vue-router', () => ({
+  useRouter: () => ({ push: routerPush }),
+}));
+
 import WorkflowsManager from '@components/workflows/WorkflowsManager.vue';
 import { useExecutionStore } from '@stores/execution.store';
 
-import { discardExecution } from '@services/fsm-executions.service';
+import { discardExecution, resumeExecution } from '@services/fsm-executions.service';
 import { fetchWorkflows } from '@services/workflows.service';
 import { joinFlowRoom, leaveFlowRoom } from '@services/socket-events.service';
 
@@ -115,7 +124,7 @@ const QUASAR_COMPONENTS = {
 const mountManager = () =>
   mount(WorkflowsManager, {
     global: {
-      plugins: [[Quasar, { plugins: { Notify } }]],
+      plugins: [[Quasar, { plugins: { Dialog, Notify } }]],
       components: QUASAR_COMPONENTS,
     },
   });
@@ -235,6 +244,25 @@ describe('WorkflowsManager · telemetria en vivo del catalogo', () => {
       expect(wrapper.findComponent({ name: 'QToggle' }).exists()).toBe(false);
       expect(wrapper.find('[data-test="resume-execution"]').exists()).toBe(true);
       expect(wrapper.find('[data-test="discard-execution"]').exists()).toBe(true);
+    });
+
+    it('3.1b deberia PREGUNTAR antes de reanudar, en vez de lanzar el reintento', async () => {
+      // 1. Arrange 📐: hasta ahora el boton disparaba el POST de un clic. Las
+      //    dos formas de reanudar llevan a sitios muy distintos —una ejecuta y
+      //    la otra abre una vista—, asi que la eleccion es del operador.
+      const wrapper = await mountWithPausedRow();
+
+      // 2. Act ⚙️
+      await wrapper.get('[data-test="resume-execution"]').trigger('click');
+      await flushPromises();
+
+      // 3. Assert 🎯: SIN temporizador de 5 s —ese esta reservado a lo
+      //    irreversible, y reanudar no destruye nada—.
+      const dialogText = document.body.textContent ?? '';
+
+      expect(dialogText).toContain('Reanudar desde el ultimo paso fallido');
+      expect(dialogText).toContain('Elegir paso en el Canvas');
+      expect(resumeExecution).not.toHaveBeenCalled();
     });
 
     it('3.2 deberia abrir el modal con el boton bloqueado hasta agotar los 5 segundos', async () => {

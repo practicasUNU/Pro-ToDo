@@ -19,6 +19,7 @@ export enum NodeType {
   DESTINO_DRUPAL = 'DESTINO_DRUPAL',
   DESTINO_SMTP = 'DESTINO_SMTP',
   PROCESADOR_OCR = 'PROCESADOR_OCR',
+  PAUSA_FLOW = 'PAUSA_FLOW',
 }
 
 /** Etiquetas legibles para los selectores; el enum viaja crudo al backend. */
@@ -33,6 +34,7 @@ export const NODE_TYPE_LABELS: Record<NodeType, string> = {
   [NodeType.DESTINO_DRUPAL]: 'Destino Drupal',
   [NodeType.DESTINO_SMTP]: 'Alerta por correo',
   [NodeType.PROCESADOR_OCR]: 'Procesador OCR',
+  [NodeType.PAUSA_FLOW]: 'Pausa de flujo',
 };
 
 /**
@@ -78,6 +80,7 @@ export const NODE_OUTPUT_NAMESPACES = [
   'http_result',
   'smtp_result',
   'ocr_result',
+  'pause_context',
 ] as const;
 
 /**
@@ -109,6 +112,7 @@ export const DEFAULT_OUTPUT_NAMESPACE_BY_NODE_TYPE: Record<NodeType, string> = {
   [NodeType.DESTINO_DRUPAL]: 'http_result',
   [NodeType.DESTINO_SMTP]: 'smtp_result',
   [NodeType.PROCESADOR_OCR]: 'ocr_result',
+  [NodeType.PAUSA_FLOW]: 'pause_context',
 };
 
 /**
@@ -141,6 +145,9 @@ export const DEFAULT_PARAMS_BY_NODE_TYPE: Record<NodeType, Record<string, unknow
   [NodeType.DESTINO_DRUPAL]: {},
   [NodeType.DESTINO_SMTP]: {},
   [NodeType.PROCESADOR_OCR]: {},
+  // Se siembra el modo: sin el, el nodo pausa igual —`IMMEDIATE` es el defecto
+  // del backend— pero el `q-btn-toggle` arrancaria sin ninguna opcion marcada.
+  [NodeType.PAUSA_FLOW]: { pauseMode: 'IMMEDIATE' },
 };
 
 /**

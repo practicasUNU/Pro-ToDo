@@ -81,6 +81,18 @@ export interface FlowPausedEvent extends ExecutionEventBase {
   readonly attempts?: number;
   /** Causa raiz tecnica (`NodeErrorDetail.description`), mas larga que el mensaje. */
   readonly errorDetail?: string;
+  /**
+   * La pausa la pidio un nodo `PAUSA_FLOW`, no un fallo.
+   *
+   * Cambia por completo lo que la interfaz debe decir: no hay incidencia que
+   * diagnosticar, no hay severidad y nadie tiene que corregir nada antes de
+   * reanudar. Sin esta marca, el cliente presenta una suspension deliberada con
+   * el mismo lenguaje de alarma que una caida, porque el resto del payload es
+   * indistinguible —ambas dejan la ejecucion en PAUSADO con cursor vivo—.
+   */
+  readonly isProgrammedPause?: boolean;
+  /** Motivo declarado por el nodo que pidio la pausa. Solo en pausas programadas. */
+  readonly pauseReason?: string;
 }
 
 /** Un operador relanzo la ejecucion sobre la misma fila (CU-09). */

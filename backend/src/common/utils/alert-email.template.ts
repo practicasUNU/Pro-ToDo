@@ -66,7 +66,30 @@ export interface AlertEmailParams {
    * persona mire. Impresa al pie, llega a quien ya esta leyendo el correo.
    */
   readonly unresolvedSubjectVariable?: string;
+  /**
+   * Titulillo de la cinta superior y de la primera linea del texto plano.
+   *
+   * Parametrizado porque esta carta ya no solo anuncia fallos: el nodo
+   * `PAUSA_FLOW` la usa para avisar de una suspension DELIBERADA, y encabezar
+   * ese correo con "Notificacion de Incidencia" diria exactamente lo contrario
+   * de lo que ha pasado. Por defecto conserva el texto de siempre, de modo que
+   * ninguna alerta existente cambia.
+   */
+  readonly headline?: string;
+  /**
+   * Titular grande, bajo la cinta.
+   *
+   * Mismo motivo que `headline`: "Flujo detenido" describe bien una caida y mal
+   * una pausa pedida por el propio flujo.
+   */
+  readonly title?: string;
 }
+
+/** Titulillo por defecto: el que han llevado siempre las alertas de error. */
+export const DEFAULT_EMAIL_HEADLINE = 'Notificacion de Incidencia';
+
+/** Titular por defecto, hermano de `DEFAULT_EMAIL_HEADLINE`. */
+export const DEFAULT_EMAIL_TITLE = 'Flujo detenido';
 
 /** Color del badge segun la severidad declarada por el motor. */
 const severityColor = (level?: string): string => {
@@ -234,12 +257,12 @@ export const buildAlertEmailHtml = (params: AlertEmailParams): string => {
       <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="max-width:560px;background:#FFFFFF;border:1px solid ${BRAND_BORDER};border-radius:8px;overflow:hidden">
         <tr>
           <td style="background:linear-gradient(90deg, ${BRAND_PRIMARY} 0%, ${BRAND_PRIMARY_LIGHT} 100%);background-color:${BRAND_PRIMARY};padding:20px 28px">
-            <span style="color:#FFFFFF;font-size:15px;font-weight:700;letter-spacing:1.2px;text-transform:uppercase">Proto-Do &middot; Notificacion de Incidencia</span>
+            <span style="color:#FFFFFF;font-size:15px;font-weight:700;letter-spacing:1.2px;text-transform:uppercase">Proto-Do &middot; ${escapeHtml(params.headline ?? DEFAULT_EMAIL_HEADLINE)}</span>
           </td>
         </tr>
         <tr>
           <td style="padding:28px 28px 8px">${badge}
-            <h1 style="margin:${badge === '' ? '0' : '14px'} 0 8px;font-size:20px;line-height:28px;font-weight:700;color:${BRAND_TEXT}">Flujo detenido</h1>
+            <h1 style="margin:${badge === '' ? '0' : '14px'} 0 8px;font-size:20px;line-height:28px;font-weight:700;color:${BRAND_TEXT}">${escapeHtml(params.title ?? DEFAULT_EMAIL_TITLE)}</h1>
             <p style="margin:0;font-size:14px;line-height:22px;color:${BRAND_TEXT_MUTED}">${headline}</p>
           </td>
         </tr>${messageBlock}${descriptionBlock}${noteBlock}
@@ -276,7 +299,10 @@ export const buildAlertEmailHtml = (params: AlertEmailParams): string => {
  * Aqui NO se escapa nada: el texto plano no interpreta marcado.
  */
 export const buildAlertEmailText = (params: AlertEmailParams): string => {
-  const lines: string[] = ['PROTO-DO - NOTIFICACION DE INCIDENCIA', ''];
+  const lines: string[] = [
+    `PROTO-DO - ${(params.headline ?? DEFAULT_EMAIL_HEADLINE).toUpperCase()}`,
+    '',
+  ];
 
   lines.push(
     params.failedNodeId === undefined || params.failedNodeId.trim().length === 0

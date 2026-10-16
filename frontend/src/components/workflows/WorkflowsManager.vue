@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue';
 import { useQuasar, type QTableColumn } from 'quasar';
+import { useRouter } from 'vue-router';
 
 import { useExecutionStore } from '@stores/execution.store';
 import { useWorkflowTemplatesStore } from '@stores/workflow-templates.store';
@@ -19,6 +20,7 @@ import type { ExecutionSummary } from '@/types/execution';
 import type { PipelineSummary } from '@/types/pipeline';
 
 const $q = useQuasar();
+const router = useRouter();
 const workflowsStore = useWorkflowsStore();
 // Solo para resolver el NOMBRE de la plantilla de origen: la tabla recibe un
 // `templateId`, y un UUID no le dice nada al operador.
@@ -124,6 +126,53 @@ const loadCatalog = async (): Promise<void> => {
       message: extractApiErrorMessage(error, 'No se pudo cargar el catalogo de flujos'),
     });
   }
+};
+
+/**
+ * Ofrece las dos formas de reanudar una ejecucion detenida (CU-09 extendido).
+ *
+ * SIN temporizador de 5 segundos, a diferencia del descarte y de la baja del
+ * flujo: aquel esta reservado a lo irreversible, y reanudar no destruye nada.
+ * Lo que si hace falta es la eleccion, porque las dos opciones llevan a sitios
+ * muy distintos —una ejecuta en el acto y la otra abre una vista— y hasta ahora
+ * el boton disparaba el POST sin preguntar.
+ *
+ * La segunda opcion NO reanuda: navega al canvas con la ejecucion identificada
+ * en la query, y es alli donde el operador elige el paso.
+ */
+const requestResume = (workflow: PipelineSummary): void => {
+  const executionId = resolveExecutionId(workflow);
+
+  if (executionId === null) {
+    return;
+  }
+
+  $q.dialog({
+    title: 'Reanudar ejecucion',
+    message: 'Elige desde donde continuar el flujo detenido.',
+    options: {
+      type: 'radio',
+      model: 'last',
+      items: [
+        { label: 'Reanudar desde el ultimo paso fallido', value: 'last' },
+        { label: 'Elegir paso en el Canvas', value: 'canvas' },
+      ],
+    },
+    cancel: { flat: true, label: 'Cancelar', class: 'pd-btn-secondary' },
+    ok: { unelevated: true, label: 'Continuar', color: 'primary' },
+    persistent: true,
+  }).onOk((choice: string) => {
+    if (choice === 'canvas') {
+      void router.push({
+        path: `/flujos/${workflow.id}`,
+        query: { resume: 'true', execId: executionId },
+      });
+
+      return;
+    }
+
+    void resumeExecution(workflow);
+  });
 };
 
 /**
@@ -390,7 +439,7 @@ onBeforeUnmount(() => {
               icon="play_arrow"
               data-test="resume-execution"
               :loading="executionStore.isResuming"
-              @click="resumeExecution(cellProps.row)"
+              @click="requestResume(cellProps.row)"
             >
               <q-tooltip>Reanudar la ejecucion detenida (CU-09)</q-tooltip>
             </q-btn>

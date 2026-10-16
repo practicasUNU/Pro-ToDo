@@ -285,12 +285,60 @@ export const useFlujoDraftStore = defineStore('flujoDraft', () => {
    */
   const upstreamContext = (stepIndex: number): UpstreamNamespace[] => {
     const catalog = useNodeCatalogStore();
+    const predecessors = pipelineTopology.value.slice(0, Math.max(stepIndex, 0));
 
-    return pipelineTopology.value.slice(0, Math.max(stepIndex, 0)).map((step) => ({
+    const nominal = predecessors.map((step) => ({
       namespace: step.outputNamespace,
       nodeType: step.nodeType,
       fields: catalog.findByCode(step.nodeType)?.outputFields ?? [],
     }));
+
+    const alreadyOffered = new Set(nominal.map((entry) => entry.namespace));
+
+    // SATELITES DE CONTINGENCIA. Viven fuera de `pipelineTopology` a proposito
+    // —el orden de ese arreglo ES la topologia, y meter ahi un nodo de rescate
+    // lo colocaria en el camino feliz—, pero lo que escriben SI esta disponible
+    // para los pasos que vienen despues del nodo que declara la rama.
+    //
+    // Sin esto, el prompt de un PROCESADOR_IA colocado tras un parser con
+    // rescate por OCR no podia ofrecer `{{ocr_result.clean_body}}`, que es
+    // justamente la razon de existir de ese satelite: el catalogo del gestor de
+    // prompts si lo ofrecia, y el del asistente no, para el mismo flujo.
+    //
+    // Se marcan `isConditional` porque solo existen si la rama se dispara. El
+    // criterio es el MISMO que aplica la regla 7 del validador en el backend, y
+    // tiene que serlo: si la interfaz ofreciera una variable que el validador
+    // rechaza, el operador la elegiria y el flujo no se dejaria guardar.
+    const conditional = predecessors.flatMap<UpstreamNamespace>((step) => {
+      const branch = errorBranches.value[step.nodeId];
+
+      if (branch === undefined) return [];
+
+      const { provisionedNodeId, targetNodeType } = ERROR_BRANCH_ACTIONS[branch.action];
+
+      // Sin nodo provisionado no hay namespace nuevo: la accion resuelve el
+      // error sin escribir nada (reintentar, abortar).
+      if (provisionedNodeId === null) return [];
+
+      const namespace = DEFAULT_OUTPUT_NAMESPACE_BY_NODE_TYPE[targetNodeType];
+
+      // Si el destino ya esta en el camino principal, su namespace lo aporta
+      // aquel y ofrecerlo dos veces duplicaria el grupo del desplegable.
+      if (alreadyOffered.has(namespace)) return [];
+
+      alreadyOffered.add(namespace);
+
+      return [
+        {
+          namespace,
+          nodeType: targetNodeType,
+          fields: catalog.findByCode(targetNodeType)?.outputFields ?? [],
+          isConditional: true,
+        },
+      ];
+    });
+
+    return [...nominal, ...conditional];
   };
 
   /**

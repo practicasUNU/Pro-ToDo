@@ -41,11 +41,23 @@ const selectedField = ref<NodeOutputField | null>(null);
 
 /** Paso 1 del explorador. El `nodeType` va en la etiqueta, no en el valor. */
 const namespaceOptions = computed(() =>
-  props.context.map(({ namespace, nodeType }) => ({
+  props.context.map(({ namespace, nodeType, isConditional }) => ({
     label: nodeType === undefined ? namespace : `${namespace} (${nodeType})`,
     value: namespace,
+    isConditional: isConditional === true,
   })),
 );
+
+/**
+ * Aviso de los origenes que solo existen si una rama de error se dispara.
+ *
+ * Se dice con un badge Y con texto, nunca solo con color: el operador tiene que
+ * poder distinguir "este dato siempre llega" de "este dato llega a veces" antes
+ * de construir un marcador con el, porque la diferencia no se ve hasta que el
+ * flujo se ejecuta y la variable sale vacia.
+ */
+const CONDITIONAL_HINT =
+  'Solo existe si la rama de contingencia se dispara; si no, el marcador resuelve vacio.';
 
 /**
  * Paso 2: campos del origen elegido.
@@ -56,6 +68,13 @@ const namespaceOptions = computed(() =>
  */
 const availableFields = computed<readonly NodeOutputField[]>(
   () => props.context.find(({ namespace }) => namespace === selectedNamespace.value)?.fields ?? [],
+);
+
+/** El origen elegido depende de una rama de error. */
+const isSelectedConditional = computed<boolean>(
+  () =>
+    props.context.find(({ namespace }) => namespace === selectedNamespace.value)
+      ?.isConditional === true,
 );
 
 /** Marcador resultante, o cadena vacia mientras la eleccion este incompleta. */
@@ -121,7 +140,30 @@ const handleInsertToken = (): void => {
         emit-value
         map-options
         class="q-mb-sm"
-      />
+      >
+        <template #option="scope">
+          <q-item v-bind="scope.itemProps">
+            <q-item-section>
+              <q-item-label>{{ scope.opt.label }}</q-item-label>
+            </q-item-section>
+            <q-item-section v-if="scope.opt.isConditional" side>
+              <q-badge class="pd-badge" color="warning" data-test="conditional-badge">
+                Contingencia
+              </q-badge>
+            </q-item-section>
+          </q-item>
+        </template>
+      </q-select>
+
+      <!-- El badge solo se ve con el desplegable abierto; este aviso persiste
+           junto al campo una vez elegido. -->
+      <p
+        v-if="isSelectedConditional"
+        class="pd-subtitle q-mt-none q-mb-sm"
+        data-test="conditional-hint"
+      >
+        {{ CONDITIONAL_HINT }}
+      </p>
     </div>
 
     <!-- Sin `emit-value map-options`, al contrario que el anterior: aqui el

@@ -664,6 +664,51 @@ describe('useFlujoDraftStore · agregador del asistente', () => {
         { namespace: 'parsed_email', nodeType: NodeType.PARSER_PRE_IA, fields: [] },
       ]);
     });
+
+    it('5.7 deberia ofrecer el namespace del satelite de contingencia, marcado', async () => {
+      // 1. Arrange 📐: el parser declara rescate por vision, asi que el paso
+      //    siguiente puede citar `{{ocr_result.clean_body}}` — que es la razon
+      //    de ser del satelite—. Hasta ahora no se ofrecia: los satelites viven
+      //    fuera de `pipelineTopology` y el recorte por predecesores los perdia.
+      const draft = await buildDraftWithBranches({ [PARSER_NODE_ID]: VISION_ROUTE });
+
+      // 2. Act ⚙️
+      const context = draft.upstreamContext(2);
+
+      // 3. Assert 🎯: va marcado porque solo existe si la rama se dispara. El
+      //    operador tiene que saber que ese valor puede llegar vacio.
+      expect(context).toContainEqual(
+        expect.objectContaining({
+          namespace: 'ocr_result',
+          nodeType: NodeType.PROCESADOR_OCR,
+          isConditional: true,
+        }),
+      );
+    });
+
+    it('5.8 NO deberia marcar como condicionales los namespaces del camino', async () => {
+      // 1. Arrange 📐: la contrapartida. Si todo se marcara, el distintivo
+      //    dejaria de decir nada.
+      const draft = await buildDraftWithBranches({ [PARSER_NODE_ID]: VISION_ROUTE });
+
+      // 2. Act ⚙️
+      const nominal = draft.upstreamContext(2).filter((entry) => entry.isConditional !== true);
+
+      // 3. Assert 🎯
+      expect(nominal.map((entry) => entry.namespace)).toEqual(['raw_email', 'parsed_email']);
+    });
+
+    it('5.9 NO deberia ofrecer el satelite a un paso ANTERIOR a la bifurcacion', async () => {
+      // 1. Arrange 📐: el rescate cuelga del parser, que es el paso 1. El
+      //    disparador no tiene nada por delante, ni condicional ni seguro.
+      const draft = await buildDraftWithBranches({ [PARSER_NODE_ID]: VISION_ROUTE });
+
+      // 2. Act ⚙️
+      const namespaces = draft.upstreamContext(1).map((entry) => entry.namespace);
+
+      // 3. Assert 🎯
+      expect(namespaces).toEqual(['raw_email']);
+    });
   });
 
   describe('6. Reseteo', () => {

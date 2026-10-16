@@ -48,6 +48,7 @@ export const NODE_OUTPUT_NAMESPACES = [
   'http_result',
   'smtp_result',
   'ocr_result',
+  'pause_context',
 ] as const;
 
 /**
@@ -102,6 +103,13 @@ export const SEMVER_PATTERN = /^\d+\.\d+\.\d+$/;
  * juego de `params` para los dos. Tenerlo aparte le da ademas su propio
  * `ocr_result`, sin el cual un segundo nodo de IA chocaria con el primero en
  * `llm_response` (regla 5 del validador).
+ *
+ * `PAUSA_FLOW` detiene el flujo A PROPOSITO, no por fallo. Es de categoria
+ * CONTROL y no DESTINO: no entrega nada fuera del sistema y conserva su
+ * `nextStep`, que es justo donde queda el cursor para que un operador reanude.
+ * Su `pause_context` documenta cuando y por que se detuvo; sin namespace propio
+ * la trazabilidad no podria explicar una ejecucion que termina a medias sin
+ * ningun error asociado.
  */
 export enum NodeType {
   TRIGGER_IMAP = 'TRIGGER_IMAP',
@@ -114,6 +122,7 @@ export enum NodeType {
   DESTINO_DRUPAL = 'DESTINO_DRUPAL',
   DESTINO_SMTP = 'DESTINO_SMTP',
   PROCESADOR_OCR = 'PROCESADOR_OCR',
+  PAUSA_FLOW = 'PAUSA_FLOW',
 }
 
 /**

@@ -3,7 +3,10 @@ import { BadRequestException } from '@nestjs/common';
 import { PipelineSchemaDto } from '@core/fsm/dto/pipeline-schema.dto';
 import { NodeStrategyFactory } from '@core/fsm/factories/node-strategy.factory';
 import { PipelineValidatorService } from '@core/fsm/services/pipeline-validator.service';
-import { ERR_MISSING_UPSTREAM_CONTEXT } from '@core/fsm/types/node-strategy.types';
+import {
+  ERR_CONDITIONAL_UPSTREAM_CONTEXT,
+  ERR_MISSING_UPSTREAM_CONTEXT,
+} from '@core/fsm/types/node-strategy.types';
 import { NodeType } from '@core/fsm/types/pipeline-schema.types';
 import { WebScraperStrategy } from '@modules/nodes/strategies/web-scraper.strategy';
 
@@ -1026,6 +1029,75 @@ describe('PipelineValidatorService (PROT-07)', () => {
       // 2. Act ⚙️ + 3. Assert 🎯
       await expect(service.validateSchema(schema)).rejects.toThrow(
         BadRequestException,
+      );
+    });
+
+    it('deberia ACEPTAR que el consumidor INTERPOLE el namespace del satelite', async () => {
+      // 1. Arrange 📐: es el defecto que motiva el cambio. `ocr_result` solo lo
+      //    escribe una rama de contingencia, pero citarlo en el prompt es la
+      //    razon de ser del rescate: si la rama no se disparo, la interpolacion
+      //    resuelve a cadena vacia y el flujo sigue.
+      const schema = buildOcrSchema();
+      const nodes = schema.nodes as Record<
+        string,
+        { params: Record<string, unknown> }
+      >;
+
+      nodes.procesador_ia.params = {
+        inlinePrompt: 'Redacta a partir de {{ocr_result.clean_body}}.',
+      };
+
+      // 2. Act ⚙️ + 3. Assert 🎯
+      await expect(service.validateSchema(schema)).resolves.toBeDefined();
+    });
+
+    it('deberia RECHAZAR que el consumidor lo DECLARE como requisito duro', async () => {
+      // 1. Arrange 📐: la otra mitad de la regla. Un `getRequiredNamespaces` no
+      //    interpola nada: el motor aborta el nodo siempre que la ejecucion
+      //    tome el camino feliz, que es el caso normal.
+      const factory = new NodeStrategyFactory();
+      jest.spyOn(factory['logger'], 'log').mockImplementation(() => undefined);
+      jest
+        .spyOn(factory['logger'], 'error')
+        .mockImplementation(() => undefined);
+      factory.registerStrategy({
+        nodeType: NodeType.PROCESADOR_IA,
+        execute: jest.fn(),
+        getRequiredNamespaces: () => ['ocr_result'],
+      });
+
+      const issues = await captureIssues(
+        new PipelineValidatorService(factory),
+        buildOcrSchema(),
+      );
+
+      // 2. Act ⚙️ + 3. Assert 🎯
+      expect(issues.map((issue) => issue.code)).toContain(
+        ERR_CONDITIONAL_UPSTREAM_CONTEXT,
+      );
+      expect(fieldsOf(issues)).toContain('nodes.procesador_ia.params');
+    });
+
+    it('NO deberia satisfacer a un consumidor ANTERIOR a la bifurcacion', async () => {
+      // 1. Arrange 📐: el satelite cuelga del parser, que va DESPUES del propio
+      //    trigger. Un namespace solo esta disponible para quien venga detras
+      //    del nodo que declara la rama, no para todo el grafo.
+      const schema = buildOcrSchema();
+      const nodes = schema.nodes as Record<
+        string,
+        { params: Record<string, unknown> }
+      >;
+
+      nodes.trigger_imap.params = {
+        subjectFilter: '{{ocr_result.clean_body}}',
+      };
+
+      const issues = await captureIssues(service, schema);
+
+      // 2. Act ⚙️ + 3. Assert 🎯
+      expect(fieldsOf(issues)).toContain('nodes.trigger_imap.params');
+      expect(issues.map((issue) => issue.code)).toContain(
+        ERR_MISSING_UPSTREAM_CONTEXT,
       );
     });
   });

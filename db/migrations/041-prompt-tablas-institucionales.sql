@@ -60,7 +60,7 @@ UPDATE plantillas_prompts_ia
            || '- Si el material de partida trae tablas en Markdown (GitHub Flavored Markdown, con celdas separadas por | y una fila de guiones bajo la cabecera), NUNCA las copies tal cual ni las publiques como texto: conviertelas al marcado institucional. Cada tabla pasa a ser un <table class="tableform"> con su <thead> y su <tbody>, y cada celda combinada que el origen repita se vuelve a combinar con colspan o rowspan.'
            || E'\n'
            || '- Si esas tablas vienen agrupadas por secciones o epigrafes, envuelve cada seccion en un panel: <div class="panel panel-default"> con el titulo en <div class="panel-heading"><h4 class="panel-title">...</h4></div> y el contenido en <div class="panel-body">. Respeta las clases exactamente como estan escritas aqui: son las que el portal sabe pintar y las que audita el nodo de validacion posterior.',
-       actualizado_en = NOW()
+       fecha_actualizacion = NOW()
  WHERE texto_prompt LIKE '%tableform%'
    AND texto_prompt NOT LIKE '%GitHub Flavored Markdown%';
 
@@ -76,7 +76,7 @@ SELECT codigo,
        nombre,
        (texto_prompt LIKE '%GitHub Flavored Markdown%') AS tiene_directiva,
        LENGTH(texto_prompt) AS longitud,
-       actualizado_en
+       fecha_actualizacion
   FROM plantillas_prompts_ia
  WHERE texto_prompt LIKE '%tableform%'
  ORDER BY codigo;

@@ -8131,3 +8131,164 @@ ESLint sin incidencias nuevas (quedan 5 preexistentes en `workflows.service.spec
   ordenada está fallando hoy contra la base real.
 - `init.sql` llevaba `enum_estado` sin `DESCARTADO` (migración 039): una base creada desde cero
   reventaba en el primer descarte. Corregido en el mismo commit.
+
+---
+
+## Nodo de pausa, reanudación flexible y dependencias de contingencia (rama `feat/canvas-view`)
+
+Tres defectos y dos capacidades. Los tres defectos resultaron tener la misma forma: **una regla que
+mira solo el camino nominal cuando el dominio ya tiene ramas**.
+
+### El 400 sobre una topología correcta
+
+`detectUnreachableNamespaces` recorre `entrypoint → nextStep` acumulando `outputNamespace`. La
+acotación estaba documentada y razonada —«un nodo al que solo se llega por `onErrorStep` tiene
+predecesores distintos según por dónde se entre, y afirmar algo sobre él aquí sería adivinar»— pero
+se quedó corta cuando el satélite **reincorpora**: el rescate por OCR desvía desde `parser_pre_ia`,
+escribe `ocr_result` y devuelve el flujo al `procesador_ia`. Ese nodo sí está en el camino nominal, y
+su prompt citando `{{ocr_result.clean_body}}` es exactamente la razón de existir del satélite. Se
+rechazaba con `ERR_MISSING_UPSTREAM_CONTEXT`. El propio motor dejó constancia del agujero por
+escrito (`fsm-engine.service.ts`, en el comentario de la publicación desacoplada del payload).
+
+Lo que **no** se hizo es contar esos namespaces como si tal cosa. `produced` pasa de `Set` a
+`Map<string, 'certain' | 'conditional'>`, y la exigencia se parte en dos según de dónde venga la
+dependencia:
+
+- **Interpolada** (`{{ns.campo}}` en los `params` o dentro de un prompt guardado): se satisface con
+  un condicional. Si la rama no se disparó, `getInterpolatedValue` devuelve cadena vacía y el flujo
+  continúa. Se comprobó que `LlmExtractorStrategy` **no** implementa `getRequiredNamespaces`, así que
+  el caso del encargo entra por esta vía y no tiene modo de fallo.
+- **Declarada** en `getRequiredNamespaces`: sigue exigiendo productor en el camino activo. Ahí el
+  motor no interpola nada —`findMissingNamespaces` aborta el nodo—, y lo haría **siempre que la
+  ejecución tome el camino feliz**, que es el caso normal. Aceptarlo habría convertido el validador
+  en un sello de goma justo en el escenario que más caro sale. Estrena código propio,
+  `ERR_CONDITIONAL_UPSTREAM_CONTEXT`, porque el diagnóstico no es «falta el namespace» sino «el nodo
+  está bien colocado y mal alimentado».
+
+El recorrido del subgrafo de contingencia **para en cuanto pisa el camino activo**. Sin ese corte, un
+satélite que reincorpora haría parecer disponibles los nodos nominales posteriores, que es
+precisamente lo que la regla existe para impedir. Reutiliza `declaredErrorTarget`, que ya conocía la
+unión `string | SelectiveErrorFallback` y que la regla 3 usa desde siempre.
+
+Un detalle que costó un test rojo: el helper recibe el **nodo ya resuelto** y no su `nodeId`. La
+regla 2 no garantiza que la clave del mapa coincida con el `nodeId`, así que volver a indexar
+`schema.nodes` con el segundo reventaba justo en los esquemas que esa regla está reportando.
+
+### El mismo hueco en el asistente, por otra causa
+
+`flujo-draft.store.upstreamContext` recortaba con `pipelineTopology.slice(0, stepIndex)`, y los
+satélites viven **fuera** de ese arreglo por diseño: su orden *es* la topología —`nextStep` es el
+elemento siguiente—, así que un nodo de rescate metido ahí acabaría en el camino feliz. No era el
+`filterPromptContext` que apuntaba el enunciado. El síntoma visible: la misma variable existía o no
+según por dónde se abriera el editor, porque el gestor de prompts recorre el catálogo entero y el
+asistente no.
+
+Arreglado en la causa, no en el consumidor. Y marcado: `UpstreamNamespace` gana `isConditional`, y
+`VariableExplorer` lo distingue con badge **y** con frase. El color nunca viaja solo, y aquí además
+no bastaría: la diferencia entre «este dato siempre llega» y «este dato llega a veces» no se ve hasta
+que el flujo se ejecuta y el marcador sale vacío.
+
+### La cabecera que decía lo contrario
+
+`stateBadge` se derivaba solo de `executionState`, que sale de una ejecución **viva**. Un flujo
+`ACTIVO` a la espera de su disparador no tiene ninguna, caía en el `default` y se pintaba
+«INACTIVO»: la vista afirmaba que estaba apagado un flujo armado y escuchando. Cruza ahora las dos
+fuentes, y el orden de las ramas es la regla y no una casualidad — lo que ocurre **ahora** manda
+sobre lo que el flujo es en general: una ejecución en curso se anuncia aunque la fila diga ACTIVO, y
+una detenida aunque el flujo ya se haya reactivado. Cero backend: `WorkflowDetailResponseDto` extiende
+`PipelineSummaryResponseDto` y ya traía `status` desde la entrega anterior.
+
+### Reanudar desde otro paso, y lo que no se admite
+
+`ResumeExecutionDto` **ya existía** con `resetRetries` y `contextPatch`; solo se le añadió
+`targetStepId`. Lo que importa es el criterio de admisión: el propio cursor, o un nodo cuyo
+`outputNamespace` esté escrito en el contexto acumulado. Saltar a un paso posterior dejaría sin
+escribir los namespaces intermedios, y el flujo reventaría al interpolarlos con un fallo que el
+operador leería como un error del motor y no como la consecuencia de su elección.
+
+La prueba se hace contra el **contexto** y no contra el índice en la topología ordenada. Esa última
+deja fuera a los satélites de contingencia, que es justo donde una reanudación selectiva resulta más
+útil: si el rescate por OCR llegó a correr, volver a él es legítimo.
+
+El criterio está escrito dos veces, en `ExecutionsService.resolveResumeCursor` y en
+`canvas.store.isResumableFrom`, y la duplicación es deliberada: la segunda decide qué tarjetas
+enseñan el botón, así que una copia más laxa ofrecería botones que devuelven 400 y una más estricta
+escondería opciones legítimas. Hay tests a los dos lados.
+
+**`logs_nodo` no se toca.** El enunciado pedía «limpiar o marcar como obsoletos» los pasos
+posteriores, y no existe tal concepto: `NodeLogStatus` solo admite `OK | ERROR | ADVERTENCIA` y
+ampliarlo exige recrear el tipo PG. Borrar habría destruido la evidencia del fallo que motivó la
+pausa, que es lo que CU-09 existe para conservar. En su lugar, la reanudación escribe una fila
+`ADVERTENCIA` de demarcación —«Reanudado desde `<nodo>`»— que separa los dos intentos. Cero
+migraciones.
+
+El presupuesto de reintentos se restaura para el nodo **desde el que se reanuda**, no para el que
+detuvo la ejecución: devolvérselo al viejo dejaría al nuevo con el contador que traía y, si ya había
+agotado su política antes, fallaría al primer tropiezo.
+
+En la tabla, «Reanudar» pasa a preguntar en vez de disparar el POST de un clic — las dos opciones
+llevan a sitios muy distintos, una ejecuta y la otra abre una vista. **Sin** el temporizador de 5 s:
+ese está reservado a lo irreversible, y reanudar no destruye nada.
+
+### `PAUSA_FLOW`: una pausa que no es un fallo
+
+Hasta ahora la única forma de que una ejecución quedara en `PAUSADO` era que algo se rompiera. Un
+flujo que debe esperar el visto bueno de redacción antes de publicar no tenía cómo decirlo: o
+publicaba solo, o alguien daba de baja el flujo entero y perdía el contexto de la ejecución en curso.
+
+Categoría **CONTROL** y no `DESTINO`: no entrega nada fuera del sistema y conserva su `nextStep`, que
+es donde queda el cursor. Un `DESTINO` tiene que cerrar el flujo (regla 11), que es lo contrario.
+
+La señal viaja en `NodeResult.pause?: { reason }`, **campo tipado** y hermano de `halt`. El enunciado
+proponía leerla de `data.shouldPause`, y no se hizo: `data` es un `Record<string, unknown>` y quien
+consume la señal es el motor, en `@core`, así que sacarla de ahí obligaría a un cast en el núcleo y
+haría que una errata en el nombre de la clave pasara en silencio. `data` publica igualmente
+`shouldPause` y `pauseReason`, pero para la trazabilidad, no como fuente de verdad de la transición.
+
+La diferencia con `halt` es el desenlace y la ve el usuario: `halt` cierra en `OMITIDO` —no había
+nada que hacer, nadie tiene que intervenir— y esto deja la ejecución viva reclamando atención. El
+motor la atiende reutilizando `pauseAt`, que ya hacía checkpoint → pausa del flujo → evento en ese
+orden no intercambiable; solo se le añadieron `isProgrammedPause` y `pauseReason` al evento, sin los
+cuales el cliente presentaría una suspensión deliberada con el mismo lenguaje de alarma que una
+caída, porque el resto del payload es indistinguible.
+
+**No hay auto-reanudación, y es una decisión.** Los `resumeCronExpression` / `pauseUntilDate` del
+enunciado original prometían que el flujo vuelve solo, y nada en el sistema lo haría: la única salida
+de `PAUSADO` es `POST /executions/:id/resume`, con una persona delante. Un campo que promete algo que
+no ocurre es peor que no tener el campo. Lo que `pauseMode` parametriza es *cuándo* se congela.
+
+**El coste del retardo, dicho por escrito.** La espera transcurre dentro de `execute`, con la
+ejecución en `EN_PROCESO` ocupando una plaza de la capacidad global y reteniendo el mutex parcial
+`idx_flujo_activo`; si el proceso se reinicia en ese hueco, la fila queda `EN_PROCESO` sin checkpoint
+posterior. De ahí `MAX_PAUSE_DELAY_SECONDS = 900`. No se trocea la espera para atender un aborto
+porque `abortedExecutions` es privado del motor y no hay puerto que lo exponga a `@modules`: montar
+uno para esto habría sido más superficie que la que resuelve, y para detener un flujo durante horas
+la herramienta correcta ya existe —darlo de baja, que no consume nada mientras espera—.
+
+Un `PAUSA_FLOW` sin `nextStep` **no pausa**: no quedaría ningún paso que reanudar, así que congelar
+la ejecución solo dejaría una fila detenida para siempre esperando un trabajo que no existe. Cierra
+por la salida normal del bucle, con un aviso en el log.
+
+El aviso por correo reutiliza la carta institucional, pero hubo que **parametrizar su titular**: la
+cinta decía «Notificación de Incidencia» en duro, y encabezar así una suspensión deliberada diría
+justo lo contrario de lo que ha pasado. `AlertEmailParams` gana `headline` y `title`, ambos con el
+texto de siempre por defecto, de modo que ninguna alerta existente cambia. Un fallo de transporte
+**no** convierte la pausa en error: la pausa es el trabajo del nodo y el correo una cortesía;
+tratarlo como fallo desviaría el flujo por `onErrorStep` en vez de detenerlo.
+
+### Verificación
+
+Backend **94 suites / 2280 pruebas**; frontend **59 ficheros / 1113**. `tsc` y `vue-tsc` limpios,
+ESLint sin incidencias en nada de lo tocado (siguen las preexistentes en `workflows.service.spec.ts`,
+`wizard.service.spec.ts` y `template-mapper.strategy*`).
+
+### Pendiente y advertido
+
+- **Migración 042** da de alta `PAUSA_FLOW` en el catálogo `nodos`. Sin ella el tipo existe en el
+  enum y en la factoría, pero `GET /api/nodos` no lo lista y el editor de plantillas no lo ofrece.
+  `init.sql` se actualizó en el mismo commit.
+- Sigue vigente todo lo advertido en la entrada anterior: **030** (el motor escribe
+  `ExecutionState.OMITIDO` y hoy toda parada ordenada falla contra la base real) y **040** (sin ella
+  toda lectura de `flujos` muere), además de 026, 031 y 032.
+- La **041** llevaba el nombre de columna equivocado (`actualizado_en`); el correcto es
+  `fecha_actualizacion`, como confirma `init.sql`. Corregido en este commit.

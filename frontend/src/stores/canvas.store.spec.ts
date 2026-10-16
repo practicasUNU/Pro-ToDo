@@ -501,4 +501,78 @@ describe('useCanvasStore · supervision visual de un flujo', () => {
       expect(store.unreachableSteps).toEqual([]);
     });
   });
+
+  describe('7. Elegibilidad para reanudar desde un paso (CU-09 extendido)', () => {
+    /** Flujo cargado con una ejecucion PAUSADO en `nodo_b`. */
+    const loadPaused = async (overrides = {}) => {
+      fetchWorkflow.mockResolvedValue(buildWorkflow());
+      fetchActiveExecution.mockResolvedValue(
+        buildExecution({ state: ExecutionState.PAUSADO, ...overrides }),
+      );
+
+      const store = useCanvasStore();
+      await store.loadCanvas(FLOW_ID);
+
+      return store;
+    };
+
+    it('7.1 NO deberia ofrecer nada sin ejecucion pausada', async () => {
+      // 1. Arrange 📐: con el flujo corriendo no hay nada que reanudar.
+      fetchWorkflow.mockResolvedValue(buildWorkflow());
+      fetchActiveExecution.mockResolvedValue(buildExecution());
+
+      const store = useCanvasStore();
+      await store.loadCanvas(FLOW_ID);
+
+      // 2. Act ⚙️ + 3. Assert 🎯
+      expect(store.isResumableFrom('nodo_a')).toBe(false);
+      expect(store.isResumableFrom('nodo_b')).toBe(false);
+    });
+
+    it('7.2 deberia ofrecer el propio cursor', async () => {
+      // 1. Arrange 📐: es donde se detuvo, y la reanudacion de siempre.
+      const store = await loadPaused();
+
+      // 2. Act ⚙️ + 3. Assert 🎯
+      expect(store.isResumableFrom('nodo_b')).toBe(true);
+    });
+
+    it('7.3 deberia ofrecer un paso YA RECORRIDO', async () => {
+      // 1. Arrange 📐: `nodo_a` escribio `raw_email`, que esta en el contexto.
+      //    Esa es la unica prueba de que llego a ejecutarse.
+      const store = await loadPaused();
+
+      // 2. Act ⚙️ + 3. Assert 🎯
+      expect(store.isResumableFrom('nodo_a')).toBe(true);
+    });
+
+    it('7.4 NO deberia ofrecer un paso que nunca se ejecuto', async () => {
+      // 1. Arrange 📐: el satelite no corrio, asi que `smtp_result` no esta en
+      //    el contexto. Saltar ahi dejaria sin datos a los pasos intermedios.
+      const store = await loadPaused();
+
+      // 2. Act ⚙️ + 3. Assert 🎯
+      expect(store.isResumableFrom('nodo_alerta')).toBe(false);
+    });
+
+    it('7.5 SI deberia ofrecer un satelite de contingencia que llego a correr', async () => {
+      // 1. Arrange 📐: es justo donde reanudar a mano resulta mas util, y por
+      //    eso la pregunta va al CONTEXTO y no al indice en la topologia, que
+      //    deja fuera a los satelites.
+      const store = await loadPaused({
+        context: { raw_email: { asunto: 'X' }, smtp_result: { message_id: 'm-1' } },
+      });
+
+      // 2. Act ⚙️ + 3. Assert 🎯
+      expect(store.isResumableFrom('nodo_alerta')).toBe(true);
+    });
+
+    it('7.6 NO deberia ofrecer un nodo que no existe en el esquema', async () => {
+      // 1. Arrange 📐
+      const store = await loadPaused();
+
+      // 2. Act ⚙️ + 3. Assert 🎯
+      expect(store.isResumableFrom('nodo_fantasma')).toBe(false);
+    });
+  });
 });

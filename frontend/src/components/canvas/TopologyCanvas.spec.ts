@@ -4,13 +4,24 @@
 // store no necesitan DOM y arrancan mas rapido sin el.
 import { config, mount } from '@vue/test-utils';
 import { createPinia, setActivePinia } from 'pinia';
-import { QBadge, QBanner, QIcon, QSpinnerDots, Quasar } from 'quasar';
+import {
+  Dialog,
+  Notify,
+  QBadge,
+  QBanner,
+  QBtn,
+  QIcon,
+  QSpinnerDots,
+  QTooltip,
+  Quasar,
+} from 'quasar';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import TopologyCanvas from '@components/canvas/TopologyCanvas.vue';
 import { useCanvasStore } from '@stores/canvas.store';
 
 import { WorkflowStatus, NodeType } from '@/types/pipeline';
+import { ExecutionState } from '@/types/execution';
 
 import type { AssembledPipelineSchema, WorkflowDetail } from '@/types/pipeline';
 
@@ -29,7 +40,7 @@ const fetchActiveExecution = vi.mocked(executionsService.fetchActiveExecution);
 
 const FLOW_ID = 'f1e2d3c4-b5a6-4978-8a9b-0c1d2e3f4a5b';
 
-const QUASAR_COMPONENTS = { QBadge, QBanner, QIcon, QSpinnerDots };
+const QUASAR_COMPONENTS = { QBadge, QBanner, QBtn, QIcon, QSpinnerDots, QTooltip };
 
 /** Selector acotado: el lienzo tiene ahora mas de un carril de tarjetas. */
 const NOMINAL_CARDS = '.pd-canvas-rail--nominal .pd-node-card';
@@ -112,7 +123,12 @@ const buildWorkflowWithFork = (
 
 const mountCanvas = (): ReturnType<typeof mount> =>
   mount(TopologyCanvas, {
-    global: { plugins: [Quasar], components: QUASAR_COMPONENTS },
+    // `Dialog` porque la tarjeta confirma antes de reanudar; sin el plugin,
+    // `$q.dialog` no existe y el manejador revienta.
+    global: {
+      plugins: [[Quasar, { plugins: { Dialog, Notify } }]],
+      components: QUASAR_COMPONENTS,
+    },
   });
 
 describe('TopologyCanvas · lienzo de solo lectura', () => {
@@ -366,5 +382,72 @@ describe('TopologyCanvas · lienzo de solo lectura', () => {
     // 3. Assert 🎯
     expect(store.selectedNodeId).toBe('nodo_alerta');
     expect(store.statusOf('nodo_alerta')).toBe('IDLE');
+  });
+  describe('2. Reanudacion selectiva desde la tarjeta (CU-09 extendido)', () => {
+    /** Deja el canvas con la ejecucion detenida en `nodo_b`. */
+    const loadPaused = async (context: Record<string, Record<string, unknown>> = {}) => {
+      // CON bifurcacion: el esquema base no tiene satelite, y sin el no hay
+      // segundo carril en el que comprobar la acotacion.
+      fetchWorkflow.mockResolvedValue(buildWorkflowWithFork());
+      fetchActiveExecution.mockResolvedValue({
+        executionId: '11111111-2222-4333-8444-555555555555',
+        flowId: FLOW_ID,
+        state: ExecutionState.PAUSADO,
+        activeCursor: 'nodo_b',
+        logFilePath: null,
+        failureReason: null,
+        startedAt: '2026-10-15T08:00:00.000Z',
+        updatedAt: '2026-10-15T08:00:05.000Z',
+        context: { raw_email: { asunto: 'X' }, ...context },
+        retryState: {},
+      });
+
+      const store = useCanvasStore();
+      await store.loadCanvas(FLOW_ID);
+
+      return store;
+    };
+
+    it('2.1 NO deberia ofrecer reanudar sin ejecucion detenida', async () => {
+      // 1. Arrange 📐: con el flujo parado o corriendo no hay nada que retomar.
+      const store = useCanvasStore();
+      await store.loadCanvas(FLOW_ID);
+
+      // 2. Act ⚙️
+      const wrapper = mountCanvas();
+
+      // 3. Assert 🎯
+      expect(wrapper.find('[data-test="resume-from-node"]').exists()).toBe(false);
+    });
+
+    it('2.2 deberia ofrecerlo SOLO en los pasos elegibles', async () => {
+      // 1. Arrange 📐: `nodo_a` corrio —dejo `raw_email`— y `nodo_b` es el
+      //    cursor. El satelite no llego a ejecutarse, asi que ofrecerlo
+      //    produciria un 400 que el operador leeria como un fallo del sistema.
+      await loadPaused();
+
+      // 2. Act ⚙️
+      const wrapper = mountCanvas();
+
+      // 3. Assert 🎯
+      expect(wrapper.findAll('[data-test="resume-from-node"]')).toHaveLength(2);
+      expect(
+        wrapper
+          .get('.pd-canvas-rail--forks')
+          .find('[data-test="resume-from-node"]')
+          .exists(),
+      ).toBe(false);
+    });
+
+    it('2.3 deberia ofrecerlo tambien en un satelite que llego a correr', async () => {
+      // 1. Arrange 📐: es donde reanudar a mano resulta mas util.
+      await loadPaused({ smtp_result: { message_id: 'm-1' } });
+
+      // 2. Act ⚙️
+      const wrapper = mountCanvas();
+
+      // 3. Assert 🎯
+      expect(wrapper.findAll('[data-test="resume-from-node"]')).toHaveLength(3);
+    });
   });
 });
