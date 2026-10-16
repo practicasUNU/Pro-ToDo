@@ -1,4 +1,5 @@
 import { Injectable, Logger } from '@nestjs/common';
+import { createHash, randomBytes } from 'node:crypto';
 import { plainToInstance } from 'class-transformer';
 import { validate } from 'class-validator';
 
@@ -28,6 +29,30 @@ export const ERR_PAUSE_CONFIG = 'ERR_PAUSE_CONFIG';
 
 /** Motivo que viaja en `NodeResult.pause` y en el evento `flow:paused`. */
 export const PROGRAMMED_PAUSE_REASON = 'PROGRAMMED_AUTO_PAUSE';
+
+/**
+ * Vigencia del testigo de reanudacion por correo. Siete dias.
+ *
+ * Una pausa que espera el visto bueno de una persona puede cruzar un fin de
+ * semana o unas vacaciones cortas; menos tiempo obligaria a relanzar el flujo
+ * por una demora normal. Mas tampoco: un testigo que vive en un buzon durante
+ * meses es un testigo que alguien reenvia por error.
+ */
+export const RESUME_TOKEN_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+
+/**
+ * Testigo de un solo uso para reanudar desde el correo.
+ *
+ * Veinte caracteres hexadecimales: 80 bits, que es mucho mas de lo que hace
+ * falta para que no se adivine, y a la vez algo que una persona puede copiar a
+ * mano desde el aviso sin equivocarse. Sin simbolos, porque viaja en un asunto
+ * de correo que varios clientes reescriben.
+ */
+const generateResumeToken = (): string => randomBytes(10).toString('hex');
+
+/** Huella del testigo. Es lo UNICO que se persiste. */
+export const hashResumeToken = (token: string): string =>
+  createHash('sha256').update(token.trim().toLowerCase()).digest('hex');
 
 /**
  * `whitelist` descarta claves desconocidas y `forbidNonWhitelisted` las delata.
@@ -152,11 +177,22 @@ export class PauseFlowStrategy implements INodeStrategy {
       await sleep(config.delaySeconds * 1_000);
     }
 
-    // El aviso va DESPUES de la espera y ANTES de devolver: se anuncia la pausa
-    // que efectivamente ocurre, no la que estaba prevista. Un fallo de correo
-    // NO convierte esto en un error —la pausa es el trabajo del nodo y el correo
-    // una cortesia—, asi que se registra y se sigue.
-    const notified = await this.notifyIfRequested(context, config);
+    // --- Testigo de reanudacion por correo.
+    //
+    // Se genera SOLO si hay aviso, y esa condicion es la mitad del modelo de
+    // seguridad: sin correo no hay testigo, y sin testigo esa ejecucion no es
+    // reanudable desde el buzon por mucho que alguien lo intente. El canal
+    // queda abierto unicamente para quien recibio el aviso.
+    //
+    // El testigo viaja EN CLARO en la carta y de el solo se persiste la huella,
+    // igual que una contrasena: el contexto acumulado se devuelve por la API y
+    // acaba en el checkpoint de cada transicion, asi que guardarlo entero seria
+    // repartir la credencial por todas partes.
+    //
+    // No hace falta tabla ni migracion para que sea de un solo uso: al reanudar,
+    // la ejecucion deja de estar PAUSADO y el testigo no vuelve a validar.
+    const token = config.notifyOnPause ? generateResumeToken() : null;
+    const notified = await this.notifyIfRequested(context, config, token);
 
     return {
       success: true,
@@ -170,6 +206,14 @@ export class PauseFlowStrategy implements INodeStrategy {
         // este deja el motivo legible en el contexto que persiste el checkpoint.
         shouldPause: true,
         pauseReason: PROGRAMMED_PAUSE_REASON,
+        ...(token !== null
+          ? {
+              resume_token_hash: hashResumeToken(token),
+              token_expires_at: new Date(
+                Date.now() + RESUME_TOKEN_TTL_MS,
+              ).toISOString(),
+            }
+          : {}),
       },
       pause: { reason: PROGRAMMED_PAUSE_REASON },
     };
@@ -218,6 +262,7 @@ export class PauseFlowStrategy implements INodeStrategy {
   private async notifyIfRequested(
     context: StatePayloadContext,
     config: ResolvedPauseFlowConfig,
+    token: string | null,
   ): Promise<string> {
     if (!config.notifyOnPause || config.notificationRecipient === null) {
       return '';
@@ -225,24 +270,29 @@ export class PauseFlowStrategy implements INodeStrategy {
 
     const flowName = this.resolveFlowName(context);
 
+    // La nota del operador y, debajo, como reanudar sin entrar en la
+    // aplicacion. Van juntas en `customNote` porque la carta institucional ya
+    // tiene su sitio reservado y anadir un bloque propio obligaria a tocar una
+    // plantilla que comparten todas las alertas.
+    const note =
+      token === null
+        ? config.message
+        : `${config.message}\n\nPara reanudar este flujo, responde a este correo con el asunto:\nREANUDAR ${token}\n\nPara retomarlo desde un paso concreto, anade "DESDE <paso>".\nEl codigo caduca en ${RESUME_TOKEN_TTL_MS / (24 * 60 * 60 * 1000)} dias y sirve una sola vez.`;
+
+    const letter = {
+      flowId: context.getWorkflowId(),
+      timestamp: new Date().toISOString(),
+      headline: 'Aviso de pausa programada',
+      title: 'Flujo en suspension controlada',
+      customNote: note,
+    };
+
     try {
       await this.mailer.sendNodeAlert({
         to: [config.notificationRecipient],
         subject: `[PROTO-DO] Flujo pausado: ${flowName}`,
-        text: buildAlertEmailText({
-          flowId: context.getWorkflowId(),
-          timestamp: new Date().toISOString(),
-          headline: 'Aviso de pausa programada',
-          title: 'Flujo en suspension controlada',
-          customNote: config.message,
-        }),
-        html: buildAlertEmailHtml({
-          flowId: context.getWorkflowId(),
-          timestamp: new Date().toISOString(),
-          headline: 'Aviso de pausa programada',
-          title: 'Flujo en suspension controlada',
-          customNote: config.message,
-        }),
+        text: buildAlertEmailText(letter),
+        html: buildAlertEmailHtml(letter),
       });
 
       return config.notificationRecipient;

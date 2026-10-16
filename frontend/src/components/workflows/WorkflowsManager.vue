@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue';
-import { useQuasar, type QTableColumn } from 'quasar';
+import { copyToClipboard, useQuasar, type QTableColumn } from 'quasar';
 import { useRouter } from 'vue-router';
 
 import { useExecutionStore } from '@stores/execution.store';
@@ -125,6 +125,33 @@ const loadCatalog = async (): Promise<void> => {
       type: 'negative',
       message: extractApiErrorMessage(error, 'No se pudo cargar el catalogo de flujos'),
     });
+  }
+};
+
+/**
+ * Copia el identificador del flujo al portapapeles.
+ *
+ * El id ya estaba en la tabla, pero solo dentro de un tooltip: visible y no
+ * seleccionable, que es la peor combinacion —se ve lo que hace falta y hay que
+ * teclearlo a mano, con 36 caracteres y guiones—. Hace falta para la orden de
+ * reanudacion por correo, para el soporte y para cualquier consulta contra la
+ * base.
+ *
+ * El `catch` NO es ceremonia: el portapapeles exige contexto seguro (HTTPS o
+ * localhost) y permiso del navegador, asi que falla de verdad en despliegues
+ * por IP. Sin el, el operador se queda sin saber si copio o no.
+ */
+const copyWorkflowId = async (id: string): Promise<void> => {
+  try {
+    await copyToClipboard(id);
+    $q.notify({
+      type: 'positive',
+      icon: 'check',
+      message: 'ID de flujo copiado al portapapeles',
+      timeout: 2000,
+    });
+  } catch {
+    $q.notify({ type: 'negative', message: 'No se pudo copiar el ID' });
   }
 };
 
@@ -398,6 +425,20 @@ onBeforeUnmount(() => {
       <template #body-cell-name="cellProps">
         <q-td :props="cellProps">
           {{ cellProps.value }}
+          <!-- `.stop` porque la fila entera es pulsable: copiar no es abrir. -->
+          <q-btn
+            flat
+            round
+            dense
+            size="xs"
+            icon="content_copy"
+            class="q-ml-xs pd-copy-id"
+            data-test="copy-workflow-id"
+            :aria-label="`Copiar el ID del flujo ${cellProps.value}`"
+            @click.stop="copyWorkflowId(cellProps.row.id)"
+          >
+            <q-tooltip>Copiar ID de flujo</q-tooltip>
+          </q-btn>
           <q-tooltip anchor="top middle" self="bottom middle">
             <span class="pd-mono">{{ cellProps.row.id }}</span>
           </q-tooltip>
@@ -606,5 +647,15 @@ onBeforeUnmount(() => {
   gap: 16px;
   margin-bottom: 20px;
   flex-wrap: wrap;
+}
+
+// Discreto hasta que se busca: el identificador es un dato de soporte, no una
+// accion primaria de la tabla. `text-grey-N` queda descartado por §2.
+.pd-copy-id {
+  color: var(--pd-text-secondary);
+
+  &:hover {
+    color: var(--pd-accent);
+  }
 }
 </style>

@@ -137,6 +137,26 @@ export interface FlowPausedEvent extends ExecutionEventBase {
   readonly attempts?: number;
   /** Causa raiz tecnica, mas larga que `errorMessage`. */
   readonly errorDetail?: string;
+  /**
+   * La pausa la pidio un nodo `PAUSA_FLOW`, no un fallo.
+   *
+   * Cambia por completo lo que hay que decir: no hay incidencia, no hay
+   * severidad y nadie tiene que corregir nada antes de reanudar. Sin esta marca
+   * el aviso cae a `GRAVE` y presenta una suspension deliberada con el lenguaje
+   * de una averia, porque el resto del payload es indistinguible.
+   */
+  readonly isProgrammedPause?: boolean;
+  /** Motivo declarado por el nodo. Solo en pausas programadas. */
+  readonly pauseReason?: string;
+  /**
+   * Nodo donde OCURRIO la pausa, que no siempre es el del cursor.
+   *
+   * En una pausa por fallo coinciden. En una programada no: el nodo de pausa ya
+   * se ejecuto y el cursor apunta al paso SIGUIENTE, porque reanudar volviendo
+   * a entrar en la pausa seria un bucle. Pintar el cursor marcaria como
+   * detenido un nodo que nunca arranco.
+   */
+  readonly pausedStepId?: string;
 }
 
 /** Un operador renuncio a reanudar: cierre manual de una PAUSADO. */
@@ -162,7 +182,26 @@ export interface FlowCompletedEvent extends ExecutionEventBase {
 
 export interface FlowResumedEvent extends ExecutionEventBase {
   readonly activeCursor: string;
-  readonly resumedBy: string;
+  /**
+   * Quien reanudo, identificado Y nombrado.
+   *
+   * Era el UUID suelto, y el aviso lo imprimia tal cual: "reanudado por
+   * 3f1c2b64-8a5e-...". El correo ya viajaba en el JWT, asi que el dato legible
+   * estaba a mano y se tiraba.
+   */
+  readonly resumedBy: { readonly id: string; readonly email: string };
+  /**
+   * Paso que el operador eligio, cuando no reanudo desde donde se detuvo.
+   *
+   * Es lo que permite reiniciar las cajas posteriores al punto elegido: sin el,
+   * conservan el `COMPLETADO` del intento anterior y mienten sobre lo que se va
+   * a reejecutar.
+   */
+  readonly targetStepId?: string;
+  /** Nodo donde estaba detenida, para poder borrar su marca de pausa. */
+  readonly previousCursor?: string;
+  /** La orden llego por correo entrante y no desde la interfaz. */
+  readonly isEmailResume?: boolean;
 }
 
 export interface NodeErrorEvent extends ExecutionEventBase {

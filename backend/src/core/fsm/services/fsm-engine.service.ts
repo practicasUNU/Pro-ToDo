@@ -1249,6 +1249,31 @@ export class FsmEngineService {
               `ejecucion=${executionId} | Nodo "${node.nodeId}" suspende el flujo: ${result.pause.reason}. El cursor queda en "${node.nextStep}".`,
             );
 
+            // --- Topologia de la pausa, que la estrategia NO puede conocer.
+            //
+            // Un nodo recibe `context` y `params`: no sabe cual es su propio
+            // `nodeId` ni cual es su `nextStep`, asi que estas dos claves solo
+            // puede ponerlas el motor. Son las que permiten que la interfaz
+            // pinte la pausa DONDE OCURRIO: el cursor apunta al paso siguiente
+            // —reanudar volviendo a entrar en la pausa seria un bucle— y sin
+            // esto el canvas marcaria PAUSADO un nodo que nunca llego a
+            // arrancar, mientras el que si se ejecuto quedaba COMPLETADO.
+            //
+            // Se fusionan sobre el namespace DEL NODO y no sobre el literal
+            // `pause_context`: el `outputNamespace` es propiedad del nodo en el
+            // esquema, y atar el motor al literal romperia un `PAUSA_FLOW`
+            // reconfigurado. Mismo criterio por el que `DESTINO_DRUPAL`
+            // conserva `http_result` pese al renombrado del tipo.
+            //
+            // `setNamespace` FUSIONA, asi que lo que publico la estrategia se
+            // conserva intacto.
+            context.setNamespace(node.outputNamespace, {
+              pausedAtStepId: node.nodeId,
+              resumeStepId: node.nextStep,
+              pausedAt: new Date().toISOString(),
+              reason: result.pause.reason,
+            });
+
             context.setCursor(node.nextStep);
             await this.pauseAt(
               execution,
@@ -1260,6 +1285,7 @@ export class FsmEngineService {
                 nodeType: node.nodeType,
                 isProgrammedPause: true,
                 pauseReason: result.pause.reason,
+                pausedStepId: node.nodeId,
               },
             );
 
@@ -2219,6 +2245,14 @@ export class FsmEngineService {
       /** La pidio un nodo `PAUSA_FLOW`; no hay incidencia que diagnosticar. */
       isProgrammedPause?: boolean;
       pauseReason?: string;
+      /**
+       * Nodo donde OCURRIO la pausa, cuando no es el del cursor.
+       *
+       * En una pausa por fallo los dos coinciden. En una programada no: el
+       * cursor queda en el paso siguiente, y sin este dato la interfaz
+       * senalaria un nodo que nunca arranco.
+       */
+      pausedStepId?: string;
     },
   ): Promise<void> {
     const patch: CheckpointPatch = {
@@ -2297,6 +2331,9 @@ export class FsmEngineService {
       ...(cause?.pauseReason !== undefined
         ? { pauseReason: cause.pauseReason }
         : {}),
+      // Siempre presente: en una pausa por fallo es el propio cursor, de modo
+      // que el cliente lee una sola clave sin tener que ramificar.
+      pausedStepId: cause?.pausedStepId ?? cursor,
     });
   }
 

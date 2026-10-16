@@ -152,10 +152,13 @@ export class ExecutionsController {
       // `await` dentro del `try`, y no un `return` de la promesa: sin el, el
       // rechazo escapa de este bloque y los issues del validador volverian a
       // salir crudos. Mismo criterio que `WorkflowsController`.
+      // El usuario ENTERO y no solo su identificador: el aviso en tiempo real
+      // lo nombra por su correo, y antes imprimia un UUID crudo pese a que el
+      // dato legible venia en el mismo JWT.
       return await this.executionsService.resumeExecution(
         id,
         resumeExecutionDto,
-        currentUser.id,
+        currentUser,
       );
     } catch (error: unknown) {
       throw toIssueContractException(error);

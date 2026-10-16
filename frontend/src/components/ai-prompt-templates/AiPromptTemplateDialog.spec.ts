@@ -195,6 +195,46 @@ describe('AiPromptTemplateDialog · redaccion de la instruccion a dos columnas',
       expect(namespaces).not.toContain('http_result');
     });
 
+    it('2.1b deberia ofrecer los origenes que siembra el MOTOR', async () => {
+      // 1. Arrange 📐: `trigger`, `error_context` y `_assets` no los publica
+      //    ninguna estrategia, asi que por la via del catalogo no pueden
+      //    aparecer nunca. Y son marcadores validos: `{{trigger.flow_name}}` es
+      //    lo que lleva el asunto por defecto del nodo de alerta. Se podian
+      //    teclear pero no elegir, que es justo lo que §4 quiere evitar.
+      const wrapper = await openDialog();
+
+      // 2. Act ⚙️
+      const options = wrapper
+        .get('[data-test="namespace-field"]')
+        .findComponent(QSelect)
+        .props('options') as readonly { value: string }[];
+      const namespaces = options.map(({ value }) => value);
+
+      // 3. Assert 🎯
+      expect(namespaces).toContain('trigger');
+      expect(namespaces).toContain('error_context');
+    });
+
+    it('2.1c deberia tener los campos de ocr_result resueltos al abrir', async () => {
+      // 1. Arrange 📐: el defecto no era que faltara el namespace, sino que el
+      //    catalogo se pedia sin esperarlo: el primer repintado ocurria con la
+      //    lista vacia y quien bajaba al desplegable concluia que no habia
+      //    variables.
+      const wrapper = await openDialog();
+
+      // 2. Act ⚙️
+      const context = wrapper
+        .getComponent({ name: 'VariableExplorer' })
+        .props('context') as readonly {
+        namespace: string;
+        fields: readonly { name: string }[];
+      }[];
+      const ocr = context.find(({ namespace }) => namespace === 'ocr_result');
+
+      // 3. Assert 🎯
+      expect(ocr?.fields.map((field) => field.name)).toContain('clean_body');
+    });
+
     it('2.2 deberia explicar por que faltan los demas origenes', async () => {
       // 1. Arrange 📐: la ausencia no se ve. Quien busca `llm_response` y no lo
       //    encuentra no puede distinguir "esta prohibido" de "no ha cargado".

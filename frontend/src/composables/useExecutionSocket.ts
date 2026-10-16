@@ -112,6 +112,35 @@ export const useExecutionSocket = (): void => {
     // vuelo, porque el motor no emite un `node:aborted`.
     canvasStore.handleFlowPaused(event);
 
+    // --- Pausa DELIBERADA: otro aviso entero, no un matiz del mismo.
+    //
+    // No hay incidencia que diagnosticar, ni severidad, ni nada que corregir
+    // antes de reanudar. Pasarla por el aviso de abajo la anunciaria con
+    // `GRAVE` y una franja roja, mandando al operador a buscar una averia que
+    // no existe: el resto del payload es indistinguible del de una caida.
+    if (event.isProgrammedPause === true) {
+      $q.notify({
+        type: 'info',
+        icon: 'pause_circle',
+        multiLine: true,
+        message: `Flujo en pausa programada: ${describeFlow(event.flowName, event.flowId)}`,
+        caption: `Detenido en "${event.pausedStepId ?? event.activeCursor}". Continuara cuando alguien lo reanude.`,
+        timeout: 0,
+        actions: [
+          {
+            label: 'Reanudar',
+            color: 'white',
+            handler: () => {
+              void resumeFromNotification(event.executionId);
+            },
+          },
+          { label: 'Cerrar', color: 'white', flat: true },
+        ],
+      });
+
+      return;
+    }
+
     // El nodo se nombra con su TIPO entre parentesis cuando el evento lo trae:
     // `nodo_3` no le dice nada a nadie, `nodo_3 (DESTINO_DRUPAL)` manda al
     // operador al configurador correcto sin abrir el flujo.
@@ -164,12 +193,22 @@ export const useExecutionSocket = (): void => {
   /** Alguien relanzo la ejecucion sobre la misma fila. */
   const onFlowResumed = (event: FlowResumedEvent): void => {
     executionStore.handleFlowResumed(event);
+    // El canvas tambien: sin esto se queda congelado en la foto del intento
+    // anterior —el nodo pausado en ambar y los posteriores completados— hasta
+    // que alguien recarga la pagina.
+    canvasStore.handleFlowResumed(event);
+
+    // Por correo el aviso cambia de tono y de icono: nadie esta mirando la
+    // pantalla cuando llega, asi que tiene que decir de donde salio la orden.
+    const byEmail = event.isEmailResume === true;
 
     $q.notify({
-      type: 'positive',
-      icon: 'play_arrow',
-      message: `Flujo ${shortId(event.flowId)}... en marcha`,
-      caption: `Reanudado en el paso "${event.activeCursor}" por ${event.resumedBy}.`,
+      type: byEmail ? 'info' : 'positive',
+      icon: byEmail ? 'mail' : 'play_arrow',
+      message: byEmail
+        ? `Flujo reanudado via correo por ${event.resumedBy.email}`
+        : `Flujo ${shortId(event.flowId)}... en marcha`,
+      caption: `Reanudado en el paso "${event.activeCursor}" por ${event.resumedBy.email}.`,
     });
   };
 

@@ -175,8 +175,28 @@ describe('OcrProcessorStrategy · nodo satelite PROCESADOR_OCR', () => {
         'extracted_text',
         'character_count',
         'ocr_status',
+        'processed_at',
         'metadata',
       ]);
+    });
+
+    it('1.2b deberia fechar la transcripcion con una marca propia', async () => {
+      // 1. Arrange 📐: `processed_at` NO se deriva del checkpoint de la fila.
+      //    Una reanudacion reescribe `fecha_actualizacion`, asi que leer de ahi
+      //    cuando se transcribio daria la hora del ultimo reintento del flujo.
+      const strategy = buildStrategy();
+
+      // 2. Act ⚙️: con el simulador declarado, como el resto del bloque —el
+      //    defecto del DTO es GEMINI desde PROT-22—.
+      const result = await strategy.execute(buildContext(), {
+        provider: LlmProvider.MOCK,
+      });
+
+      // 3. Assert 🎯
+      expect(typeof result.data?.processed_at).toBe('string');
+      expect(Number.isNaN(Date.parse(String(result.data?.processed_at)))).toBe(
+        false,
+      );
     });
 
     it('1.3 deberia repetir la transcripcion en clean_body y extracted_text', async () => {

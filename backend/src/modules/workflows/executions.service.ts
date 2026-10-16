@@ -32,6 +32,7 @@ import type {
 import type { ResumeExecutionDto } from './dto/resume-execution.dto';
 import type { WorkflowExecutionResponseDto } from './dto/workflow-execution-response.dto';
 import type { FsmExecution } from '@core/fsm/entities/fsm-execution.entity';
+import type { AuthenticatedUser } from '@modules/auth/interfaces/jwt-payload.interface';
 import type { PipelineSchemaDto } from '@core/fsm/dto/pipeline-schema.dto';
 import type { Repository } from 'typeorm';
 
@@ -132,7 +133,8 @@ export class ExecutionsService {
   public async resumeExecution(
     executionId: string,
     resumeExecutionDto: ResumeExecutionDto,
-    userId: string,
+    user: AuthenticatedUser,
+    options: { readonly isEmailResume?: boolean } = {},
   ): Promise<WorkflowExecutionResponseDto> {
     const execution = await this.requireExecution(executionId);
 
@@ -240,7 +242,7 @@ export class ExecutionsService {
     await this.workflowsService.reactivateAfterResume(workflow.id);
 
     this.logger.log(
-      `Reanudacion manual (CU-09) del flujo "${workflow.name}" (${workflow.id}) desde el nodo "${resumeCursor}" | ejecucion=${executionId} | usuario=${userId}`,
+      `Reanudacion manual (CU-09) del flujo "${workflow.name}" (${workflow.id}) desde el nodo "${resumeCursor}" | ejecucion=${executionId} | usuario=${user.email} (${user.id})${options.isEmailResume === true ? ' | via correo entrante' : ''}`,
     );
 
     // ANTES de entrar al motor, y el orden es observable: `executeWorkflow` es
@@ -255,7 +257,15 @@ export class ExecutionsService {
       // El cursor EFECTIVO, que con una reanudacion selectiva no es el que
       // detuvo la ejecucion: el cliente pinta el nodo activo leyendo esto.
       activeCursor: resumeCursor,
-      resumedBy: userId,
+      resumedBy: { id: user.id, email: user.email },
+      // El nodo donde estaba detenida. El cliente lo necesita para borrar su
+      // marca de pausa: con una reanudacion selectiva deja de ser el cursor, y
+      // nadie mas volveria a tocarlo.
+      previousCursor: execution.activeCursor,
+      ...(resumeExecutionDto.targetStepId !== undefined
+        ? { targetStepId: resumeCursor }
+        : {}),
+      ...(options.isEmailResume === true ? { isEmailResume: true } : {}),
     });
 
     // Sin `skipNodeTypes` ni `initialPayload`: el disparador ya corrio en el

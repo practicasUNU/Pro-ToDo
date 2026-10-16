@@ -8292,3 +8292,156 @@ ESLint sin incidencias en nada de lo tocado (siguen las preexistentes en `workfl
   toda lectura de `flujos` muere), además de 026, 031 y 032.
 - La **041** llevaba el nombre de columna equivocado (`actualizado_en`); el correcto es
   `fecha_actualizacion`, como confirma `init.sql`. Corregido en este commit.
+
+---
+
+## Órdenes por correo, sincronización del canvas y suite E2E (rama `feat/canvas-view`)
+
+### La pausa se pintaba en el nodo de al lado
+
+El motor deja el cursor en `node.nextStep`, y está bien: reanudar volviendo a entrar en la pausa
+sería un bucle del que CU-09 no podría sacar la ejecución. Pero el canvas solo tenía esa clave, así
+que marcaba `PAUSADO` un nodo que **nunca arrancó** —no hubo `node:started` para él— mientras el
+`PAUSA_FLOW`, que sí se ejecutó, quedaba `COMPLETADO` por el `emitNodeCompleted` de unas líneas
+antes. El operador veía el aviso de pausa colgando del paso equivocado.
+
+`flow:paused` gana `pausedStepId` y se emite **siempre**, cayendo al propio cursor cuando no hay
+nada que distinguir. Esa decisión es deliberada: con una clave opcional, cada consumidor tendría que
+escribir `event.pausedStepId ?? event.activeCursor` y bastaría que uno lo olvidara para reintroducir
+el defecto. Emitiéndola siempre, leer la clave correcta es el camino fácil.
+
+Al recargar la página no hay evento que escuchar, así que el dato tiene que estar persistido. Lo
+escribe el motor, no la estrategia: un nodo recibe `context` y `params` y no sabe ni su propio
+`nodeId` ni cuál es su `nextStep`. Se fusiona sobre `node.outputNamespace` y **no** sobre el literal
+`pause_context`, por lo mismo que `DESTINO_DRUPAL` conserva `http_result` tras el renombrado: el
+namespace es propiedad del nodo en el esquema. Y el cliente lo localiza buscando la clave
+`pausedAtStepId` entre los namespaces, no el nombre del namespace, de modo que un `PAUSA_FLOW`
+reconfigurado sigue funcionando.
+
+### El canvas no sabía que alguien había reanudado
+
+No existía `handleFlowResumed`. `useExecutionSocket` dirigía el evento solo a `execution.store`, que
+repinta la fila de la tabla. Resultado: el nodo pausado seguía en ámbar —con una reanudación
+selectiva ya no es el cursor, así que nadie volvía a tocarlo— y los pasos posteriores conservaban su
+`COMPLETADO` del intento anterior, afirmando un trabajo que estaba a punto de rehacerse. Había que
+recargar para ver el estado real, que es justo lo que un canvas en vivo existe para evitar.
+
+La regla es la topología: desde el paso elegido en adelante todo vuelve a `IDLE`; lo anterior
+conserva lo que logró. El caso que obliga a pensarlo es el satélite de contingencia: no está en
+`orderedSteps`, así que «posterior a él» no significa nada y solo se reinicia él mismo.
+
+De paso, `resumedBy` deja de ser un UUID. El aviso imprimía literalmente «reanudado por
+3f1c2b64-8a5e-…» pese a que `AuthenticatedUser` ya traía el correo desde el JWT: el dato legible
+estaba a mano y se tiraba. El identificador se conserva junto al correo porque es lo estable.
+
+### Lo que no se hizo en la Parte 2, y por qué
+
+El enunciado describía un defecto que no existe: el CRUD de prompts **ya ofrecía `ocr_result`**
+—hay un test que lo fija desde hace tiempo— y no hay en ninguna parte una «advertencia de namespace
+inexistente» que desactivar; de hecho nada valida el texto del prompt contra la lista de namespaces,
+y se puede teclear `{{inventado.campo}}` sin que nadie proteste.
+
+Lo que sí estaba roto era la **resolución**, por una carrera: `fetchCatalog()` se invocaba con `void`
+al abrir el diálogo, de modo que el primer repintado ocurría con `entries` vacío. Duraba un instante
+—el justo para que quien abriera y fuera directo al desplegable lo encontrara vacío y concluyera que
+no había variables—. Ahora se espera, y el selector dice que está cargando en vez de parecer vacío.
+
+Y faltaba algo que el catálogo **no puede ofrecer por construcción**: `trigger`, `error_context` y
+`_assets` no los publica ninguna estrategia, los siembra el motor. Son marcadores perfectamente
+válidos —`{{trigger.flow_name}}` es lo que lleva el asunto por defecto del nodo de alerta— y se
+podían teclear pero no elegir, que es exactamente lo que el Poka-Yoke de §4 quiere evitar. Se
+replican en `engine-namespaces.ts`, y esa réplica manual es aceptable porque la alternativa no
+existe: no hay endpoint que los publique. Solo se ofrecen en el catálogo general; dentro del
+asistente, poner `error_context` a disposición de un nodo del camino feliz sería mentir.
+
+Sobre `processed_at`: se pedía declararlo en una constante del cliente, pero no existía en el
+backend. Replicarlo allí habría ofrecido al operador una variable que interpola vacío siempre, y
+dejado dos listas de campos divergiendo a la primera edición de la estrategia. Se añadió donde
+corresponde —`OcrProcessorStrategy` lo publica y lo declara— y el frontend lo recibe del catálogo
+sin replicar nada. Su marca es propia y no derivada del checkpoint: una reanudación reescribe
+`fecha_actualizacion`, así que leer de ahí cuándo se transcribió daría la hora del último reintento.
+
+### Reanudar desde un correo sin abrir un agujero
+
+Esta es la parte que más cambió respecto del enunciado, y conviene dejar escrito por qué.
+
+**El remitente no puede ser la credencial.** SMTP no autentica la cabecera `From`: ponerla es
+escribir una línea de texto. Y el correo entra desde Internet, de modo que esta vía evita a la vez
+el `RedLocalMiddleware` que filtra por subred, el OTP y el JWT — las tres capas que
+`security-and-scope.md` declara obligatorias. Con el remitente como única prueba, cualquiera que
+conociera el UUID de un flujo y la dirección del buzón reanudaba ejecuciones de producción.
+
+La credencial es un **testigo de un solo uso** que genera el nodo `PAUSA_FLOW` al avisar de la
+pausa. Viaja en claro en la carta y de él solo se persiste la huella SHA-256, igual que una
+contraseña: el contexto acumulado se devuelve por la API y se copia en el checkpoint de cada
+transición, así que guardarlo entero sería repartir la credencial por todas partes.
+
+Lo que hace elegante la solución es **dónde vive**. Dentro del contexto de la ejecución pausada se
+obtienen tres propiedades sin tabla, sin migración y sin trabajo de expiración:
+
+1. **Un solo uso**: al reanudar, la ejecución deja de estar `PAUSADO` y no vuelve a ser candidata.
+2. **Atado a una ejecución concreta**, no al flujo: un testigo filtrado no sirve para la siguiente.
+3. **Sin aviso no hay canal**: una pausa configurada sin `notifyOnPause` no genera testigo y por
+   tanto no es reanudable por correo. Es una propiedad deseable y no una carencia.
+
+El UUID del flujo desaparece del asunto —lo identifica el testigo— porque un identificador de
+producción es un dato que no conviene pasear por buzones ajenos ni por los registros de los
+servidores intermedios.
+
+El orden de las comprobaciones también importa: primero el testigo, después el remitente. Al revés,
+consultar `usuarios` con el remitente de un mensaje cualquiera convertiría el buzón en un oráculo de
+qué direcciones están dadas de alta. Hay un test que fija ese orden.
+
+El buzón es **propio** y se declara en el entorno, nunca el de un flujo: el de un flujo lo elige
+quien edita ese flujo, y un EDITOR podría entonces redirigir el canal de mando a un servidor suyo.
+La clave sigue el patrón `IMAP_*PASSWORD` por el mismo motivo que en el nodo IMAP — sin esa guarda,
+apuntarla a `JWT_SECRET` entregaría el secreto de firma al servidor de correo en el saludo.
+
+El despacho pasa por el mismo `resumeExecution` que usa la API, así que el canal nuevo **no relaja
+ninguna regla**: las guardas de estado, la revalidación del esquema, el techo de ejecuciones y el
+rechazo de los saltos hacia adelante siguen aplicando igual. Este servicio decide quién pide y qué
+ejecución, nunca si la reanudación es legal.
+
+Dos detalles de operación. El correo se marca `\Seen` **siempre**, aceptado o rechazado: uno sin
+marcar se reprocesa en cada vuelta, de modo que un intento no autorizado quedaría reintentándose
+solo para siempre. Y un identificador de paso que no resuelve **no aborta**: se reanuda desde donde
+se detuvo, porque abortar por una errata en un nombre dejaría el flujo parado por un detalle que el
+correo no permite corregir.
+
+### La suite E2E, y lo que de verdad se pudo comprobar
+
+La infraestructura ya existía —`test/jest-e2e.json`, `supertest`, y `executions-resume.e2e-spec.ts`
+con el preámbulo de aislamiento resuelto—. Faltaba `socket.io-client` en el backend, que se añadió.
+
+**La suite arranca y conecta contra PostgreSQL.** Falla en la guarda `assertStatusColumnExists`,
+porque la base de pruebas no tiene aplicada la migración 040. Es el resultado esperado y resultó
+útil por partida doble: confirma que `<nombre_bd_test>` existe y acepta conexión, y demuestra que la
+guarda hace su trabajo. De paso delató un defecto propio: el mensaje nombraba `DB_PRO-TODO` en duro,
+así que mandaba a aplicar la migración sobre la base **equivocada**. Ahora lee la base de la conexión
+viva.
+
+El tercer caso quedó más estrecho de lo que pedía el enunciado, y es deliberado. La validación del
+canal de correo —testigo desconocido, caducado o usado; remitente inexistente, dado de baja o sin
+rol; las tres formas de nombrar un paso; el marcado en todos los caminos— está cubierta con 21
+pruebas unitarias y dobles del cliente IMAP. Repetirla en E2E exigiría un servidor de correo de
+pruebas y no mediría nada nuevo. Lo que sí se comprueba de extremo a extremo es lo que aquellas no
+pueden ver: que una orden ya validada atraviesa el servicio real, mueve la fila en PostgreSQL y sale
+por el canal marcada como llegada por correo.
+
+### Verificación
+
+Backend **95 suites / 2307 pruebas**; frontend **59 ficheros / 1124**. `tsc` y `vue-tsc` limpios,
+ESLint sin incidencias en nada de lo tocado.
+
+**La suite E2E no se ha podido ejecutar en verde ni una vez**, y conviene decirlo sin adornos: se
+entrega código de prueba verificado solo hasta donde llega el arranque de la aplicación.
+
+### Pendiente y advertido
+
+- La base `<nombre_bd_test>` existe pero le faltan migraciones, empezando por la **040**. Hasta
+  aplicarlas, `npm run test:e2e` muere en el arranque con el comando exacto en el log.
+- `E2E_DB_NAME` y las variables `INBOUND_RESUME_*` quedan documentadas en `.env.example`; antes la
+  primera solo existía escrita a mano dentro de un spec.
+- Sigue vigente lo advertido en las dos entregas anteriores: **030** (hoy toda parada ordenada falla
+  contra la base real) y **040** (sin ella toda lectura de `flujos` muere), además de 026, 031, 032,
+  041 y 042.

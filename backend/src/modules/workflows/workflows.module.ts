@@ -3,11 +3,13 @@ import { TypeOrmModule } from '@nestjs/typeorm';
 
 import { FsmModule } from '@core/fsm/fsm.module';
 import { LogsModule } from '@modules/logs/logs.module';
+import { UsersModule } from '@modules/users/users.module';
 import { WorkflowTemplatesModule } from '@modules/workflow-templates/workflow-templates.module';
 
 import { Workflow } from './entities/workflow.entity';
 import { ExecutionsController } from './executions.controller';
 import { ExecutionsService } from './executions.service';
+import { InboundEmailResumeService } from './inbound-email-resume.service';
 import { WorkflowsController } from './workflows.controller';
 import { WorkflowsService } from './workflows.service';
 
@@ -38,9 +40,12 @@ import { WorkflowsService } from './workflows.service';
     // Por la marca de demarcacion que `ExecutionsService` escribe al reanudar:
     // `LogsModule` no es global desde que salio de `CommonModule`.
     LogsModule,
+    // Por `InboundEmailResumeService`: comprueba contra `usuarios` quien firma
+    // la orden que llega por correo.
+    UsersModule,
   ],
   controllers: [WorkflowsController, ExecutionsController],
-  providers: [WorkflowsService, ExecutionsService],
+  providers: [WorkflowsService, ExecutionsService, InboundEmailResumeService],
   exports: [WorkflowsService],
 })
 export class WorkflowsModule {}

@@ -93,14 +93,55 @@ export interface FlowPausedEvent extends ExecutionEventBase {
   readonly isProgrammedPause?: boolean;
   /** Motivo declarado por el nodo que pidio la pausa. Solo en pausas programadas. */
   readonly pauseReason?: string;
+  /**
+   * Nodo donde OCURRIO la pausa, que no siempre es el del cursor.
+   *
+   * En una pausa por FALLO los dos coinciden: el nodo que se rompio es el que
+   * se reintentara. En una pausa PROGRAMADA no: el nodo de pausa ya se ejecuto
+   * y el cursor apunta al paso siguiente, porque reanudar volviendo a entrar en
+   * la pausa seria un bucle del que CU-09 no podria salir.
+   *
+   * Sin esta clave el cliente solo tiene `activeCursor`, y marcaria como
+   * detenido un nodo que nunca llego a arrancar mientras el que de verdad se
+   * ejecuto aparece completado. Se emite SIEMPRE —cayendo al cursor cuando no
+   * hay nada que distinguir— para que el consumidor no tenga que ramificar.
+   */
+  readonly pausedStepId?: string;
 }
 
 /** Un operador relanzo la ejecucion sobre la misma fila (CU-09). */
 export interface FlowResumedEvent extends ExecutionEventBase {
   /** Nodo desde el que arranca el reintento. */
   readonly activeCursor: string;
-  /** Quien pulso reanudar, para la traza de la interfaz. */
-  readonly resumedBy: string;
+  /**
+   * Quien reanudo, identificado Y nombrado.
+   *
+   * Era un `string` con el UUID, y el cliente lo imprimia tal cual en el aviso:
+   * "reanudado por 3f1c2b64-8a5e-...". El correo ya viajaba en
+   * `AuthenticatedUser` desde el JWT, asi que el dato legible estaba a mano y
+   * se tiraba. El identificador se conserva porque es lo estable —un correo se
+   * puede editar— y es con lo que se cruza la traza.
+   */
+  readonly resumedBy: { readonly id: string; readonly email: string };
+  /**
+   * Paso que el operador eligio, cuando no reanudo desde donde se detuvo.
+   *
+   * `activeCursor` dice desde donde ARRANCA la FSM y este desde donde lo pidio
+   * una persona; coinciden salvo que el destino elegido se rechace. El cliente
+   * lo necesita aparte para reiniciar las cajas del canvas posteriores al
+   * punto elegido, que conservan el estado del intento anterior y mentirian
+   * sobre lo que se va a reejecutar.
+   */
+  readonly targetStepId?: string;
+  /** Nodo en el que estaba detenida, para poder limpiar su marca de pausa. */
+  readonly previousCursor?: string;
+  /**
+   * La reanudacion llego por correo entrante y no por la interfaz.
+   *
+   * Cambia lo que el cliente anuncia: nadie esta mirando la pantalla cuando
+   * ocurre, asi que el aviso tiene que decir de donde salio la orden.
+   */
+  readonly isEmailResume?: boolean;
 }
 
 /**

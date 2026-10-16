@@ -11,6 +11,7 @@ import type {
   ExecutionDetail,
   FlowCompletedEvent,
   FlowPausedEvent,
+  FlowResumedEvent,
   NodeCompletedEvent,
   NodeStartedEvent,
 } from '@/types/execution';
@@ -306,6 +307,27 @@ export const useCanvasStore = defineStore('canvas', () => {
   const statusOf = (nodeId: string): CanvasNodeStatus => nodeStatuses.value.get(nodeId) ?? 'IDLE';
 
   /**
+   * Nodo donde un `PAUSA_FLOW` detuvo el flujo, segun el contexto acumulado.
+   *
+   * Se BUSCA la clave en vez de leer `context.pause_context` por su nombre: el
+   * `outputNamespace` es propiedad del nodo en el esquema, no de su tipo, asi
+   * que un `PAUSA_FLOW` reconfigurado publicaria en otro sitio y la vista
+   * dejaria de encontrarlo en silencio. El motor escribe `pausedAtStepId` sea
+   * cual sea el namespace, y esa clave es lo que se busca.
+   */
+  const resolveProgrammedPauseStep = (execution: ExecutionDetail): string | null => {
+    for (const namespace of Object.values(execution.context)) {
+      const pausedAt = namespace.pausedAtStepId;
+
+      if (typeof pausedAt === 'string' && pausedAt !== '') {
+        return pausedAt;
+      }
+    }
+
+    return null;
+  };
+
+  /**
    * Si se puede relanzar la ejecucion detenida desde ESTE nodo (CU-09 extendido).
    *
    * REPLICA EXACTA del criterio que aplica `ExecutionsService.resolveResumeCursor`
@@ -373,6 +395,24 @@ export const useCanvasStore = defineStore('canvas', () => {
           execution.state === ExecutionState.EN_PROCESO ? 'RUNNING' : 'PAUSED',
         );
       }
+
+      // --- Pausa DELIBERADA, reconstruida del contexto.
+      //
+      // Aqui no hay evento que escuchar: es lo que se ve al recargar la pagina
+      // sobre un flujo ya detenido. El nodo de pausa dejo en su namespace el
+      // paso donde ocurrio, y sin leerlo la caja marcada seria la del cursor
+      // —el paso SIGUIENTE, que nunca llego a arrancar— mientras el nodo que de
+      // verdad se ejecuto aparece completado.
+      const pausedAt = resolveProgrammedPauseStep(execution);
+
+      if (pausedAt !== null && execution.state === ExecutionState.PAUSADO) {
+        seeded.set(pausedAt, 'PAUSED');
+
+        // El cursor vuelve a IDLE: es el proximo en correr, no el detenido.
+        if (execution.activeCursor !== null) {
+          seeded.set(execution.activeCursor, 'IDLE');
+        }
+      }
     }
 
     nodeStatuses.value = seeded;
@@ -429,7 +469,72 @@ export const useCanvasStore = defineStore('canvas', () => {
       return;
     }
 
-    patchStatus(event.activeCursor, 'PAUSED');
+    // `pausedStepId` y no `activeCursor`: en una pausa programada el cursor
+    // apunta al paso SIGUIENTE —reanudar entrando otra vez en la pausa seria un
+    // bucle—, de modo que marcarlo senalaria un nodo que nunca arranco. El
+    // motor emite siempre la clave, cayendo al cursor cuando no hay nada que
+    // distinguir, asi que aqui no hace falta ramificar por tipo de pausa.
+    const pausedAt = event.pausedStepId ?? event.activeCursor;
+    const next = new Map(nodeStatuses.value);
+
+    next.set(pausedAt, 'PAUSED');
+
+    // El cursor queda en espera, no detenido: es el que correra al reanudar.
+    if (pausedAt !== event.activeCursor) {
+      next.set(event.activeCursor, 'IDLE');
+    }
+
+    nodeStatuses.value = next;
+  };
+
+  /**
+   * Devuelve las cajas a su sitio cuando alguien relanza la ejecucion.
+   *
+   * SIN ESTO el canvas se queda congelado en la foto del intento anterior: el
+   * nodo pausado sigue en ambar —nadie vuelve a tocarlo, porque con una
+   * reanudacion selectiva ya no es el cursor— y los pasos posteriores conservan
+   * su `COMPLETADO`, afirmando un trabajo que esta a punto de rehacerse.
+   *
+   * La regla es la topologia: desde el paso elegido en adelante, todo vuelve a
+   * `IDLE`; lo anterior conserva lo que logro. Un `targetStepId` que no esta en
+   * el camino nominal —un satelite de contingencia— no define "posterior", asi
+   * que solo se reinicia el.
+   *
+   * Se ejecuta en TODOS los clientes de la sala, que es lo que evita tener que
+   * recargar para ver el estado real.
+   */
+  const handleFlowResumed = (event: FlowResumedEvent): void => {
+    if (!belongsToCanvas(event.flowId)) {
+      return;
+    }
+
+    const next = new Map(nodeStatuses.value);
+
+    // La marca de pausa del nodo donde estaba detenida, que puede no ser
+    // ninguno de los dos cursores si la pausa fue programada.
+    if (event.previousCursor !== undefined) {
+      next.set(event.previousCursor, 'IDLE');
+    }
+
+    for (const [nodeId, status] of next) {
+      if (status === 'PAUSED' || status === 'FAILED') {
+        next.set(nodeId, 'IDLE');
+      }
+    }
+
+    const target = event.targetStepId ?? event.activeCursor;
+    const steps = orderedSteps.value;
+    const targetIndex = steps.findIndex((step) => step.nodeId === target);
+
+    if (targetIndex === -1) {
+      next.set(target, 'IDLE');
+    } else {
+      for (const step of steps.slice(targetIndex)) {
+        next.set(step.nodeId, 'IDLE');
+      }
+    }
+
+    nodeStatuses.value = next;
   };
 
   /**
@@ -509,6 +614,7 @@ export const useCanvasStore = defineStore('canvas', () => {
     handleNodeStarted,
     handleNodeCompleted,
     handleFlowPaused,
+    handleFlowResumed,
     handleFlowCompleted,
     selectNode,
     clearSelection,

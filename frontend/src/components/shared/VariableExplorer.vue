@@ -26,10 +26,19 @@ interface Props {
   context: readonly UpstreamNamespace[];
   /** Rotulo del boton de insercion; cambia entre "plantilla" y "prompt". */
   insertLabel?: string;
+  /**
+   * El anfitrion todavia esta trayendo los origenes.
+   *
+   * Distingue "aun no se sabe" de "no hay ninguno", que es lo que el selector
+   * vacio no podia decir: quien abria el dialogo y bajaba al desplegable antes
+   * de que llegara el catalogo concluia que no habia variables disponibles.
+   */
+  loading?: boolean;
 }
 
 const props = withDefaults(defineProps<Props>(), {
   insertLabel: 'Insertar',
+  loading: false,
 });
 
 const emit = defineEmits<{ insert: [token: string] }>();
@@ -134,6 +143,8 @@ const handleInsertToken = (): void => {
       <q-select
         v-model="selectedNamespace"
         :options="namespaceOptions"
+        :loading="loading"
+        :disable="loading"
         label="1. Selecciona Origen / Namespace"
         dense
         outlined

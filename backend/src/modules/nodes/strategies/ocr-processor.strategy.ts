@@ -151,7 +151,17 @@ export class OcrProcessorStrategy implements INodeStrategy {
         'La transcripcion, repetida bajo la clave que libera los binarios',
     },
     { name: 'character_count', type: 'number' },
-    { name: 'ocr_status', type: 'text' },
+    {
+      name: 'ocr_status',
+      type: 'text',
+      description:
+        'Siempre COMPLETED: una transcripcion que falla devuelve error y no publica namespace',
+    },
+    {
+      name: 'processed_at',
+      type: 'text',
+      description: 'Marca ISO-8601 del momento en que se transcribio',
+    },
     {
       name: 'metadata',
       type: 'object',
@@ -299,6 +309,10 @@ export class OcrProcessorStrategy implements INodeStrategy {
         // mentira a la primera edicion del texto.
         character_count: cleanBody.length,
         ocr_status: OCR_STATUS_COMPLETED,
+        // Marca propia y no derivada del checkpoint: una reanudacion reescribe
+        // `fecha_actualizacion` de la fila, de modo que leer de ahi cuando se
+        // transcribio daria la hora del ultimo reintento del flujo entero.
+        processed_at: new Date().toISOString(),
         // `metadata` SE PUBLICA, y `isMock` es el motivo. Hasta PROT-22 este
         // nodo descartaba la metadata del proveedor, asi que una transcripcion
         // SIMULADA era indistinguible de una real para todo lo que viniera

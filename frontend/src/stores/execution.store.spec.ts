@@ -97,7 +97,7 @@ const RESUMED: FlowResumedEvent = {
   flowId: FLOW_ID,
   emittedAt: '2026-10-10T09:00:00.000Z',
   activeCursor: 'nodo_ia',
-  resumedBy: 'usuario-1',
+  resumedBy: { id: 'usuario-1', email: 'editor@unuware.com' },
 };
 
 describe('useExecutionStore · estado reactivo de las ejecuciones del motor', () => {

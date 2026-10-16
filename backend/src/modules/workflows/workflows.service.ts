@@ -653,10 +653,17 @@ export class WorkflowsService
       return;
     }
 
+    // La base se lee de la conexion viva y no se escribe a mano: la suite de
+    // extremo a extremo corre contra `<nombre_bd_test>`, y un comando que
+    // nombrase siempre la de desarrollo mandaria a aplicar la migracion sobre
+    // la base equivocada —o, peor, haria pensar que ya esta aplicada—.
+    const database = this.workflowRepository.manager.connection.options
+      .database as string;
+
     const message = [
       'La tabla "flujos" no tiene la columna "status": falta aplicar la migracion 040.',
       'Aplicala antes de arrancar:',
-      "  sudo docker exec -i protodo_postgres psql -U unuware007 -d 'DB_PRO-TODO' \\",
+      `  sudo docker exec -i protodo_postgres psql -U unuware007 -d '${database}' \\`,
       '    < db/migrations/040-estado-flujo-triestatal.sql',
     ].join('\n');
 

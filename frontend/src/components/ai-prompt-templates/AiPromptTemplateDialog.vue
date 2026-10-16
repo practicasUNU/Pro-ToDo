@@ -13,6 +13,7 @@ import {
   deriveCodeFromName,
   sanitizeCodeInput,
 } from '@/utils/prompt-code';
+import { ENGINE_PROVIDED_CONTEXT } from '@/utils/engine-namespaces';
 import { buildPromptContextFromCatalog, filterPromptContext } from '@/utils/prompt-namespaces';
 
 import type { AiPromptTemplateDetail } from '@/types/ai-prompt-template';
@@ -96,6 +97,9 @@ const $q = useQuasar();
 const aiPromptTemplatesStore = useAiPromptTemplatesStore();
 const nodeCatalogStore = useNodeCatalogStore();
 
+/** El catalogo de variables aun viaja. Solo gobierna el indicador de carga. */
+const isCatalogLoading = ref(false);
+
 // `InstanceType<typeof ...>` no resuelve a traves de `defineAsyncComponent`,
 // de ahi la interfaz explicita.
 const promptEditorRef = ref<PromptCodeEditorInstance | null>(null);
@@ -176,7 +180,21 @@ watch(
     // Al abrir y no en `onMounted`: montado esta desde que se pinta el gestor, y
     // ahi no hay nadie mirando el explorador. La llamada esta memoizada, asi que
     // si el asistente ya cargo el catalogo no cuesta una peticion.
-    void nodeCatalogStore.fetchCatalog();
+    //
+    // Se ESPERA, al contrario que antes. Sin esperar, el primer repintado
+    // ocurre con `entries` todavia vacio y el selector de origenes aparece sin
+    // una sola opcion: duraba un instante, el justo para que quien abriera el
+    // dialogo y fuera directo al desplegable lo encontrara vacio y concluyera
+    // que no hay variables disponibles.
+    void (async () => {
+      isCatalogLoading.value = true;
+
+      try {
+        await nodeCatalogStore.fetchCatalog();
+      } finally {
+        isCatalogLoading.value = false;
+      }
+    })();
   },
 );
 
@@ -188,11 +206,24 @@ watch(
  * Poka-Yoke, que es lo que garantiza que un destino o el propio `llm_response`
  * no se cuelen por ninguna de las dos.
  */
-const variableContext = computed<readonly UpstreamNamespace[]>(() =>
-  props.upstreamContext.length > 0
-    ? filterPromptContext(props.upstreamContext)
-    : buildPromptContextFromCatalog(nodeCatalogStore.entries),
-);
+const variableContext = computed<readonly UpstreamNamespace[]>(() => {
+  // DENTRO de un flujo: solo lo que ese flujo produce aguas arriba del nodo.
+  if (props.upstreamContext.length > 0) {
+    return filterPromptContext(props.upstreamContext);
+  }
+
+  // FUERA de un flujo (el CRUD general): el catalogo maestro. Aqui no hay
+  // topologia contra la que recortar —la plantilla se escribe antes de saber en
+  // que flujo se usara—, asi que se ofrece todo lo que el sistema sabe
+  // producir, incluidos los tres origenes que siembra el MOTOR y que ninguna
+  // estrategia declara. Sin ellos, `{{trigger.flow_name}}` —que es lo que lleva
+  // el asunto por defecto del nodo de alerta— no se podia elegir del selector,
+  // solo teclear de memoria.
+  return [
+    ...buildPromptContextFromCatalog(nodeCatalogStore.entries),
+    ...ENGINE_PROVIDED_CONTEXT,
+  ];
+});
 
 /**
  * Inserta el marcador en el cursor del editor (Poka-Yoke).
@@ -356,6 +387,7 @@ const onSubmit = async (): Promise<void> => {
                  plantillas HTML. Los origenes llegan ya filtrados, sin destinos
                  ni la propia salida de la IA. -->
             <VariableExplorer
+            :loading="isCatalogLoading"
               ref="variableExplorerRef"
               :context="variableContext"
               insert-label="Insertar en el prompt"

@@ -1,0 +1,488 @@
+import { Injectable, Logger } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
+import { InjectRepository } from '@nestjs/typeorm';
+import { simpleParser } from 'mailparser';
+
+import { FsmExecutionQueryService } from '@core/fsm/services/fsm-execution-query.service';
+import { createImapClient } from '@modules/nodes/services/imap-client.factory';
+import { hashResumeToken } from '@modules/nodes/strategies/pause-flow.strategy';
+import { PASSWORD_ENV_KEY_PATTERN } from '@modules/nodes/dto/imap-trigger-config.dto';
+import { UserRole } from '@modules/users/enums/user-role.enum';
+import { UsersService } from '@modules/users/users.service';
+import { Workflow } from '@modules/workflows/entities/workflow.entity';
+
+import { ExecutionsService } from './executions.service';
+
+import type { ResolvedImapConfig } from '@modules/nodes/dto/imap-trigger-config.dto';
+import type { FsmExecution } from '@core/fsm/entities/fsm-execution.entity';
+import type { AuthenticatedUser } from '@modules/auth/interfaces/jwt-payload.interface';
+import type { User } from '@modules/users/entities/user.entity';
+import type { ImapFlow, MailboxLockObject } from 'imapflow';
+import type { Repository } from 'typeorm';
+
+/**
+ * Asunto que se acepta como orden de reanudacion.
+ *
+ * `REANUDAR <testigo>` o `REANUDAR <testigo> DESDE <paso>`, con sus equivalentes
+ * en ingles. El identificador del flujo NO aparece: la ejecucion la determina el
+ * testigo, y un UUID de produccion es un dato que no conviene pasear por buzones
+ * ajenos ni por los registros de los servidores intermedios.
+ */
+const RESUME_SUBJECT_PATTERN =
+  /^(?:REANUDAR|RESUME)\s+([A-Za-z0-9]{12,32})(?:\s+(?:DESDE|FROM)\s+([a-zA-Z0-9_-]+))?$/i;
+
+/** Roles que pueden dar la orden. Mismos que los de la API. */
+const AUTHORIZED_ROLES: ReadonlySet<UserRole> = new Set([
+  UserRole.ADMIN,
+  UserRole.EDITOR,
+]);
+
+/** Cuantos mensajes se atienden por vuelta, para no bloquear el proceso. */
+const MAX_COMMANDS_PER_RUN = 10;
+
+/** Inactividad maxima del socket durante la descarga de un mensaje. */
+const SOCKET_TIMEOUT_MS = 30_000;
+
+/** Lo que se extrae de un mensaje antes de decidir nada. */
+interface InboundCommand {
+  readonly uid: number;
+  readonly fromAddress: string;
+  readonly token: string;
+  readonly targetIdentifier: string | null;
+}
+
+/**
+ * Reanuda ejecuciones detenidas desde una orden que llega por correo.
+ *
+ * ## Por que el remitente NO es la credencial
+ *
+ * SMTP no autentica la cabecera `From`: ponerla es escribir una linea de texto.
+ * Ademas el correo entra desde Internet, de modo que esta via no pasa por el
+ * `RedLocalMiddleware` que filtra por subred, ni por el OTP, ni por el JWT —las
+ * tres capas que `security-and-scope.md` declara obligatorias—. Con el remitente
+ * como unica prueba, cualquiera que supiera la direccion del buzon podria
+ * reanudar ejecuciones de produccion.
+ *
+ * Por eso la credencial es un TESTIGO de un solo uso que genera el nodo
+ * `PAUSA_FLOW` al avisar de la pausa, y que solo conoce quien recibio ese aviso.
+ * De el se persiste unicamente la huella SHA-256, dentro del contexto de la
+ * ejecucion. El remitente se sigue comprobando —tiene que existir, estar activo
+ * y tener rol suficiente—, pero como segundo factor y no como el primero.
+ *
+ * Tres propiedades salen gratis de donde vive el testigo:
+ *
+ * 1. **Un solo uso**, sin tabla ni migracion: al reanudar, la ejecucion deja de
+ *    estar PAUSADO y la huella ya no casa con ninguna candidata.
+ * 2. **Atado a una ejecucion concreta**, no al flujo: un testigo filtrado no
+ *    sirve para la siguiente pausa.
+ * 3. **Sin aviso no hay canal**: una pausa configurada sin `notifyOnPause` no
+ *    genera testigo y por tanto no es reanudable por correo. Es una propiedad
+ *    deseable, no una carencia.
+ *
+ * ## Lo que este servicio NO relaja
+ *
+ * El despacho final pasa por `ExecutionsService.resumeExecution`, el mismo que
+ * usa la API: las guardas de estado, la revalidacion del esquema, el techo de
+ * ejecuciones simultaneas y el rechazo de los saltos hacia adelante siguen
+ * aplicando igual. Este servicio decide QUIEN pide y QUE ejecucion, nunca si la
+ * reanudacion es legal.
+ */
+@Injectable()
+export class InboundEmailResumeService {
+  private readonly logger = new Logger(InboundEmailResumeService.name);
+
+  constructor(
+    private readonly configService: ConfigService,
+    private readonly executionQueryService: FsmExecutionQueryService,
+    private readonly executionsService: ExecutionsService,
+    private readonly usersService: UsersService,
+    @InjectRepository(Workflow)
+    private readonly workflowRepository: Repository<Workflow>,
+  ) {}
+
+  /**
+   * Lee el buzon de ordenes y atiende lo que encuentre.
+   *
+   * Devuelve cuantas ordenes se despacharon de verdad; el resto se descartan en
+   * silencio para quien las envio y con un aviso en el registro para quien
+   * opera el sistema.
+   *
+   * NO LANZA por una orden invalida: un mensaje que no se entiende no puede
+   * dejar sin atender a los que vienen detras en el mismo lote.
+   */
+  public async processInbox(): Promise<number> {
+    const config = this.resolveMailboxConfig();
+
+    if (config === null) {
+      return 0;
+    }
+
+    const password = this.configService.get<string>(config.passwordEnvKey);
+
+    if (password === undefined || password === '') {
+      this.logger.error(
+        `[InboundEmailResume] La variable ${config.passwordEnvKey} no esta declarada: el buzon de ordenes no se puede abrir.`,
+      );
+
+      return 0;
+    }
+
+    const client = createImapClient(
+      config,
+      password,
+      (error: Error) => {
+        this.logger.warn(
+          `[InboundEmailResume] Error de socket contra el buzon: ${error.message}`,
+        );
+      },
+      SOCKET_TIMEOUT_MS,
+    );
+
+    let lock: MailboxLockObject | undefined;
+    let dispatched = 0;
+
+    try {
+      await client.connect();
+      lock = await client.getMailboxLock(config.mailbox);
+
+      const uids = await client.search({ seen: false }, { uid: true });
+
+      if (uids === false || !Array.isArray(uids) || uids.length === 0) {
+        return 0;
+      }
+
+      for (const uid of uids.slice(0, MAX_COMMANDS_PER_RUN)) {
+        // El marcado va en el `finally` de cada mensaje y NO al final del lote:
+        // un comando que no se marca se vuelve a leer en la vuelta siguiente, y
+        // uno que falla a mitad dejaria el buzon reprocesandose para siempre.
+        try {
+          const handled = await this.handleMessage(client, uid);
+
+          if (handled) {
+            dispatched += 1;
+          }
+        } catch (error: unknown) {
+          this.logger.error(
+            `[InboundEmailResume] El mensaje uid=${uid} no se pudo atender: ${this.describe(error)}`,
+          );
+        } finally {
+          await this.markSeen(client, uid);
+        }
+      }
+
+      return dispatched;
+    } catch (error: unknown) {
+      this.logger.error(
+        `[InboundEmailResume] No se pudo leer el buzon de ordenes: ${this.describe(error)}`,
+      );
+
+      return dispatched;
+    } finally {
+      lock?.release();
+      await this.logoutQuietly(client);
+    }
+  }
+
+  /**
+   * Descarga un mensaje, lo valida de principio a fin y lo despacha.
+   *
+   * Devuelve `true` solo si la ejecucion llego a reanudarse.
+   */
+  private async handleMessage(client: ImapFlow, uid: number): Promise<boolean> {
+    const command = await this.parseCommand(client, uid);
+
+    if (command === null) {
+      return false;
+    }
+
+    // --- 1. El testigo. Va PRIMERO, antes incluso de mirar quien escribe: sin
+    // credencial valida no hay nada que discutir, y preguntar a la base de
+    // datos por el remitente de un mensaje cualquiera convertiria el buzon en
+    // un oraculo de que direcciones estan dadas de alta.
+    const execution = await this.findExecutionByToken(command.token);
+
+    if (execution === null) {
+      this.logger.warn(
+        `[InboundEmailResume] Intento no autorizado desde: ${command.fromAddress} (testigo desconocido, caducado o ya usado)`,
+      );
+
+      return false;
+    }
+
+    // --- 2. Quien escribe. Segundo factor: el testigo prueba que esa persona
+    // recibio el aviso, y esto que sigue teniendo permiso hoy.
+    const user = await this.resolveAuthorizedUser(command.fromAddress);
+
+    if (user === null) {
+      return false;
+    }
+
+    // --- 3. El paso, si lo pidio. Un identificador que no resuelve NO aborta:
+    // se reanuda desde donde se detuvo, que es lo que el operador queria de
+    // todas formas. Abortar por una errata en un nombre de nodo dejaria el
+    // flujo parado por un detalle que el correo no permite corregir.
+    const targetStepId = await this.resolveTargetStep(
+      execution,
+      command.targetIdentifier,
+    );
+
+    await this.executionsService.resumeExecution(
+      execution.executionId,
+      targetStepId === null ? {} : { targetStepId },
+      user,
+      { isEmailResume: true },
+    );
+
+    this.logger.log(
+      `[InboundEmailResume] Ejecucion ${execution.executionId} reanudada por ${user.email}${
+        targetStepId === null ? '' : ` desde "${targetStepId}"`
+      }`,
+    );
+
+    return true;
+  }
+
+  /** Descarga el mensaje y extrae la orden, o `null` si no lo es. */
+  private async parseCommand(
+    client: ImapFlow,
+    uid: number,
+  ): Promise<InboundCommand | null> {
+    const download = await client.download(String(uid), undefined, {
+      uid: true,
+    });
+    const parsed = await simpleParser(download.content);
+    const subject = (parsed.subject ?? '').trim();
+    const match = RESUME_SUBJECT_PATTERN.exec(subject);
+
+    if (match === null) {
+      // Ni un `warn`: un buzon recibe correo que no son ordenes, y avisar de
+      // cada uno llenaria el registro de ruido que nadie puede accionar.
+      this.logger.debug(
+        `[InboundEmailResume] Mensaje uid=${uid} ignorado: el asunto no es una orden.`,
+      );
+
+      return null;
+    }
+
+    const fromAddress = (
+      parsed.from?.value?.[0]?.address ??
+      parsed.from?.text ??
+      ''
+    )
+      .trim()
+      .toLowerCase();
+
+    return {
+      uid,
+      fromAddress,
+      token: match[1] ?? '',
+      targetIdentifier: match[2] ?? null,
+    };
+  }
+
+  /**
+   * Busca la ejecucion detenida cuyo testigo casa, si no ha caducado.
+   *
+   * Se recorren en memoria las ejecuciones PAUSADO: son pocas por definicion
+   * —cada una reclama atencion de una persona— y el testigo vive dentro de un
+   * `jsonb`, sin columna por la que filtrar.
+   */
+  private async findExecutionByToken(
+    token: string,
+  ): Promise<FsmExecution | null> {
+    const candidates = await this.executionQueryService.findPausedWithContext();
+    const expected = hashResumeToken(token);
+
+    for (const candidate of candidates) {
+      for (const namespace of Object.values(candidate.contextPayload ?? {})) {
+        const stored = namespace?.resume_token_hash;
+
+        if (typeof stored !== 'string' || stored !== expected) {
+          continue;
+        }
+
+        const expiresAt = namespace?.token_expires_at;
+
+        if (
+          typeof expiresAt === 'string' &&
+          Date.parse(expiresAt) < Date.now()
+        ) {
+          this.logger.warn(
+            `[InboundEmailResume] Testigo caducado para la ejecucion ${candidate.executionId}.`,
+          );
+
+          return null;
+        }
+
+        return candidate;
+      }
+    }
+
+    return null;
+  }
+
+  /** El remitente, si existe, sigue activo y tiene rol suficiente. */
+  private async resolveAuthorizedUser(
+    fromAddress: string,
+  ): Promise<AuthenticatedUser | null> {
+    if (fromAddress === '') {
+      this.logger.warn(
+        '[InboundEmailResume] Intento no autorizado desde: (remitente ausente)',
+      );
+
+      return null;
+    }
+
+    const user: User | null = await this.usersService.findByEmail(fromAddress);
+
+    if (user === null || !user.isActive || !AUTHORIZED_ROLES.has(user.role)) {
+      this.logger.warn(
+        `[InboundEmailResume] Intento no autorizado desde: ${fromAddress}`,
+      );
+
+      return null;
+    }
+
+    return { id: user.id, email: user.email, role: user.role };
+  }
+
+  /**
+   * Traduce lo que el operador escribio tras "DESDE" a un `nodeId`.
+   *
+   * Acepta las tres formas con las que una persona nombra un paso de memoria:
+   * su identificador, su tipo o el namespace que publica. Sin distinguir
+   * mayusculas, porque un asunto de correo pasa por varios clientes que lo
+   * reescriben.
+   */
+  private async resolveTargetStep(
+    execution: FsmExecution,
+    identifier: string | null,
+  ): Promise<string | null> {
+    if (identifier === null) {
+      return null;
+    }
+
+    const workflow = await this.workflowRepository.findOne({
+      where: { id: execution.flowId },
+    });
+    const nodes = (
+      workflow?.pipelineSchema as
+        { nodes?: Record<string, Record<string, unknown>> } | null | undefined
+    )?.nodes;
+
+    if (nodes === undefined) {
+      return null;
+    }
+
+    const wanted = identifier.trim().toLowerCase();
+
+    for (const [nodeId, node] of Object.entries(nodes)) {
+      const candidates = [
+        nodeId,
+        typeof node.nodeType === 'string' ? node.nodeType : '',
+        typeof node.outputNamespace === 'string' ? node.outputNamespace : '',
+      ];
+
+      if (candidates.some((value) => value.toLowerCase() === wanted)) {
+        return nodeId;
+      }
+    }
+
+    this.logger.warn(
+      `[InboundEmailResume] El paso "${identifier}" no existe en el flujo ${execution.flowId}: se reanuda desde donde se detuvo.`,
+    );
+
+    return null;
+  }
+
+  /**
+   * Configuracion del buzon de ordenes, o `null` si el canal esta apagado.
+   *
+   * Buzon PROPIO y no el de ningun flujo: el de un flujo lo elige quien edita
+   * ese flujo, y un EDITOR podria entonces redirigir el canal de mando a un
+   * servidor suyo. Este se declara en el entorno, que solo toca quien despliega.
+   *
+   * Apagado por defecto, igual que `IMAP_POLLING_ENABLED`: una instalacion que
+   * no lo configure no abre ninguna conexion ni expone ninguna superficie.
+   */
+  private resolveMailboxConfig(): ResolvedImapConfig | null {
+    if (this.configService.get<string>('INBOUND_RESUME_ENABLED') !== 'true') {
+      return null;
+    }
+
+    const host = this.configService.get<string>('INBOUND_RESUME_IMAP_HOST');
+    const user = this.configService.get<string>('INBOUND_RESUME_IMAP_USER');
+    const passwordEnvKey =
+      this.configService.get<string>('INBOUND_RESUME_IMAP_PASSWORD_KEY') ?? '';
+
+    if (host === undefined || user === undefined || passwordEnvKey === '') {
+      this.logger.error(
+        '[InboundEmailResume] El canal esta habilitado pero faltan INBOUND_RESUME_IMAP_HOST, _USER o _PASSWORD_KEY.',
+      );
+
+      return null;
+    }
+
+    // Misma guarda que el nodo IMAP: sin ella, apuntar la clave a `JWT_SECRET`
+    // la entregaria al servidor de correo en el saludo de autenticacion.
+    if (!PASSWORD_ENV_KEY_PATTERN.test(passwordEnvKey)) {
+      this.logger.error(
+        `[InboundEmailResume] INBOUND_RESUME_IMAP_PASSWORD_KEY="${passwordEnvKey}" no cumple el patron IMAP_*PASSWORD.`,
+      );
+
+      return null;
+    }
+
+    return {
+      host,
+      port: Number(
+        this.configService.get<string>('INBOUND_RESUME_IMAP_PORT') ?? 993,
+      ),
+      secure: true,
+      user,
+      passwordEnvKey,
+      mailbox:
+        this.configService.get<string>('INBOUND_RESUME_IMAP_MAILBOX') ??
+        'INBOX',
+      pollIntervalMs: 0,
+      outputNamespace: 'raw_email',
+      markAsRead: true,
+      fromFilter: null,
+      subjectFilter: null,
+      subjectFilterRegex: null,
+      unreadOnly: true,
+      includeAttachments: false,
+      maxAttachmentBytes: 0,
+    };
+  }
+
+  /**
+   * Marca el mensaje como leido, pase lo que pase con el.
+   *
+   * Tambien los rechazados: un comando que no se marca se vuelve a leer en cada
+   * vuelta, de modo que un intento no autorizado quedaria reintentandose solo
+   * para siempre y llenaria el registro de la misma advertencia.
+   */
+  private async markSeen(client: ImapFlow, uid: number): Promise<void> {
+    try {
+      await client.messageFlagsAdd(String(uid), ['\\Seen'], { uid: true });
+    } catch (error: unknown) {
+      this.logger.warn(
+        `[InboundEmailResume] No se pudo marcar como leido el uid=${uid}: ${this.describe(error)}`,
+      );
+    }
+  }
+
+  /** Cierra la sesion sin dejar que un fallo de salida tape el resultado. */
+  private async logoutQuietly(client: ImapFlow): Promise<void> {
+    try {
+      await client.logout();
+    } catch {
+      client.close();
+    }
+  }
+
+  private describe(error: unknown): string {
+    return error instanceof Error ? error.message : 'causa desconocida';
+  }
+}

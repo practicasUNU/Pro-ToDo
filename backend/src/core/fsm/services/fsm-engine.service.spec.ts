@@ -4518,6 +4518,30 @@ describe('FsmEngineService (PROT-09)', () => {
       expect(pauseFlow).toHaveBeenCalledWith(FLOW_ID, TEST_ERROR_CODE);
     });
 
+    it('39.1b deberia hacer coincidir pausedStepId con el cursor en un fallo', async () => {
+      // 1. Arrange 📐: el nodo que se rompio ES el que se reintentara, asi que
+      //    la clave cae al cursor y el cliente puede leer siempre la misma sin
+      //    ramificar por tipo de pausa.
+      const { repo } = buildRepository(buildExecution());
+      const { engine, events } = buildPausingEngine(repo);
+      const emitFlowPaused = jest.spyOn(events, 'emitFlowPaused');
+
+      factory.registerStrategy(
+        buildStrategy(
+          NodeType.TRIGGER_IMAP,
+          jest.fn().mockResolvedValue(failure('URGENTE')),
+        ),
+      );
+
+      // 2. Act ⚙️
+      await engine.executeWorkflow(EXECUTION_ID, buildLinearSchema());
+
+      // 3. Assert 🎯
+      const payload = emitFlowPaused.mock.calls[0]?.[0];
+
+      expect(payload?.pausedStepId).toBe(payload?.activeCursor);
+    });
+
     it('39.2 deberia pausar el flujo DESPUES del checkpoint y ANTES del evento', async () => {
       // 1. Arrange 📐: el orden es observable. Despues del checkpoint porque la
       //    ejecucion es el hecho y el estado del flujo su consecuencia; antes
@@ -4719,6 +4743,66 @@ describe('FsmEngineService (PROT-09)', () => {
           activeCursor: 'nodo_b',
         }),
       );
+    });
+
+    it('40.2b deberia senalar el NODO DE PAUSA, no el cursor', async () => {
+      // 1. Arrange 📐: es el defecto que esto corrige. El cursor queda en el
+      //    paso SIGUIENTE —reanudar entrando otra vez en la pausa seria un
+      //    bucle—, asi que sin `pausedStepId` la interfaz marcaba como detenido
+      //    un nodo que nunca llego a arrancar, mientras el que si se ejecuto
+      //    aparecia completado.
+      const { repo } = buildRepository(buildExecution());
+      const { engine, events } = buildPausingEngine(repo);
+      const emitFlowPaused = jest.spyOn(events, 'emitFlowPaused');
+
+      factory.registerStrategy(
+        buildStrategy(
+          NodeType.TRIGGER_IMAP,
+          jest.fn().mockResolvedValue(pausing()),
+        ),
+      );
+
+      // 2. Act ⚙️
+      await engine.executeWorkflow(EXECUTION_ID, buildLinearSchema());
+
+      // 3. Assert 🎯
+      expect(emitFlowPaused).toHaveBeenCalledWith(
+        expect.objectContaining({
+          pausedStepId: 'nodo_a',
+          activeCursor: 'nodo_b',
+        }),
+      );
+    });
+
+    it('40.2c deberia escribir la topologia de la pausa en el namespace', async () => {
+      // 1. Arrange 📐: la estrategia recibe `context` y `params`, asi que no
+      //    sabe cual es su propio `nodeId` ni su `nextStep`. Solo el motor
+      //    puede ponerlos, y son los que permiten reconstruir la pausa al
+      //    recargar la pagina, cuando ya no hay evento que escuchar.
+      const { repo } = buildRepository(buildExecution());
+      const { engine } = buildPausingEngine(repo);
+
+      factory.registerStrategy(
+        buildStrategy(
+          NodeType.TRIGGER_IMAP,
+          jest.fn().mockResolvedValue(pausing()),
+        ),
+      );
+
+      // 2. Act ⚙️
+      const result = await engine.executeWorkflow(
+        EXECUTION_ID,
+        buildLinearSchema(),
+      );
+
+      // 3. Assert 🎯: fusionado sobre lo que publico la estrategia, no en su
+      //    lugar.
+      expect(result.contextPayload?.salida_a).toMatchObject({
+        shouldPause: true,
+        pausedAtStepId: 'nodo_a',
+        resumeStepId: 'nodo_b',
+        reason: 'PROGRAMMED_AUTO_PAUSE',
+      });
     });
 
     it('40.3 NO deberia escribir severidad ni codigo de error', async () => {

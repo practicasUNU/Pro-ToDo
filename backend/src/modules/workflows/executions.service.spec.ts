@@ -8,6 +8,7 @@ import { ExecutionEventsCoordinator } from '@common/services/execution-events.co
 import { SystemCapacityExceededException } from '@core/fsm/exceptions/system-capacity-exceeded.exception';
 import { ExecutionState } from '@core/fsm/types/fsm.enums';
 import { NodeLogStatus } from '@modules/logs/entities/log-nodo.entity';
+import { UserRole } from '@modules/users/enums/user-role.enum';
 import { NodeType } from '@core/fsm/types/pipeline-schema.types';
 
 import { ExecutionsService } from './executions.service';
@@ -17,6 +18,7 @@ import type { FsmEngineService } from '@core/fsm/services/fsm-engine.service';
 import type { FsmExecutionQueryService } from '@core/fsm/services/fsm-execution-query.service';
 import type { PipelineValidatorService } from '@core/fsm/services/pipeline-validator.service';
 import type { PipelineSchemaDto } from '@core/fsm/dto/pipeline-schema.dto';
+import type { AuthenticatedUser } from '@modules/auth/interfaces/jwt-payload.interface';
 import type { HybridLoggerService } from '@modules/logs/services/hybrid-logger.service';
 import type { Workflow } from '@modules/workflows/entities/workflow.entity';
 import type { WorkflowsService } from '@modules/workflows/workflows.service';
@@ -25,6 +27,19 @@ import type { Repository } from 'typeorm';
 const FLOW_ID = 'b6c1f0d2-3e4a-4b5c-8d6e-7f8091a2b3c4';
 const EXECUTION_ID = '1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d';
 const USER_ID = '9c1f7b52-4d3a-4e6b-8f2c-1a0b9d8e7f60';
+
+/**
+ * Operador que reanuda, con su correo.
+ *
+ * El servicio recibe el `AuthenticatedUser` entero y no solo el identificador:
+ * el aviso en tiempo real nombra a quien reanudo, y con el UUID suelto la
+ * interfaz imprimia una cadena que no dice nada a nadie.
+ */
+const CURRENT_USER: AuthenticatedUser = {
+  id: USER_ID,
+  email: 'editor@unuware.com',
+  role: UserRole.EDITOR,
+};
 const PAUSED_NODE_ID = 'nodo_b';
 const LOG_PATH = 'logs/execution-2026-10-10.log';
 
@@ -255,7 +270,11 @@ describe('ExecutionsService (consulta y reintento manual CU-09)', () => {
       const { service, engine } = buildHarness();
 
       // 2. Act
-      const response = await service.resumeExecution(EXECUTION_ID, {}, USER_ID);
+      const response = await service.resumeExecution(
+        EXECUTION_ID,
+        {},
+        CURRENT_USER,
+      );
 
       // 3. Assert
       expect(engine.createExecution).not.toHaveBeenCalled();
@@ -274,7 +293,7 @@ describe('ExecutionsService (consulta y reintento manual CU-09)', () => {
       const { service, engine } = buildHarness();
 
       // 2. Act
-      await service.resumeExecution(EXECUTION_ID, {}, USER_ID);
+      await service.resumeExecution(EXECUTION_ID, {}, CURRENT_USER);
 
       // 3. Assert
       expect(engine.prepareResume).toHaveBeenCalledWith(
@@ -294,7 +313,7 @@ describe('ExecutionsService (consulta y reintento manual CU-09)', () => {
       await service.resumeExecution(
         EXECUTION_ID,
         { contextPatch, resetRetries: false },
-        USER_ID,
+        CURRENT_USER,
       );
 
       // 3. Assert
@@ -314,7 +333,7 @@ describe('ExecutionsService (consulta y reintento manual CU-09)', () => {
       repository.findOne.mockResolvedValue(buildWorkflow({ active: false }));
 
       // 2. Act
-      await service.resumeExecution(EXECUTION_ID, {}, USER_ID);
+      await service.resumeExecution(EXECUTION_ID, {}, CURRENT_USER);
 
       // 3. Assert
       expect(engine.executeWorkflow).toHaveBeenCalledTimes(1);
@@ -331,7 +350,7 @@ describe('ExecutionsService (consulta y reintento manual CU-09)', () => {
       await service.resumeExecution(
         EXECUTION_ID,
         { targetStepId: 'nodo_a' },
-        USER_ID,
+        CURRENT_USER,
       );
 
       // 3. Assert 🎯
@@ -357,7 +376,7 @@ describe('ExecutionsService (consulta y reintento manual CU-09)', () => {
         service.resumeExecution(
           EXECUTION_ID,
           { targetStepId: PAUSED_NODE_ID },
-          USER_ID,
+          CURRENT_USER,
         ),
       ).rejects.toThrow(BadRequestException);
       expect(engine.prepareResume).not.toHaveBeenCalled();
@@ -372,7 +391,7 @@ describe('ExecutionsService (consulta y reintento manual CU-09)', () => {
         service.resumeExecution(
           EXECUTION_ID,
           { targetStepId: 'nodo_fantasma' },
-          USER_ID,
+          CURRENT_USER,
         ),
       ).rejects.toThrow(BadRequestException);
       expect(engine.prepareResume).not.toHaveBeenCalled();
@@ -387,7 +406,7 @@ describe('ExecutionsService (consulta y reintento manual CU-09)', () => {
       await service.resumeExecution(
         EXECUTION_ID,
         { targetStepId: PAUSED_NODE_ID },
-        USER_ID,
+        CURRENT_USER,
       );
 
       // 3. Assert 🎯
@@ -396,6 +415,46 @@ describe('ExecutionsService (consulta y reintento manual CU-09)', () => {
         undefined,
         true,
         PAUSED_NODE_ID,
+      );
+    });
+
+    it('2b.4b deberia anunciar el paso elegido y el anterior por el canal', async () => {
+      // 1. Arrange 📐: el cliente reinicia las cajas posteriores al punto
+      //    elegido y borra la marca de pausa del nodo donde estaba detenida.
+      //    Sin las dos claves no puede hacer ni lo uno ni lo otro.
+      const { service, events } = buildHarness();
+      const emitFlowResumed = jest.spyOn(events, 'emitFlowResumed');
+
+      // 2. Act ⚙️
+      await service.resumeExecution(
+        EXECUTION_ID,
+        { targetStepId: 'nodo_a' },
+        CURRENT_USER,
+      );
+
+      // 3. Assert 🎯
+      expect(emitFlowResumed).toHaveBeenCalledWith(
+        expect.objectContaining({
+          activeCursor: 'nodo_a',
+          targetStepId: 'nodo_a',
+          previousCursor: PAUSED_NODE_ID,
+          resumedBy: { id: USER_ID, email: CURRENT_USER.email },
+        }),
+      );
+    });
+
+    it('2b.4c NO deberia declarar targetStepId en una reanudacion normal', async () => {
+      // 1. Arrange 📐: sin eleccion del operador no hay nada que reiniciar mas
+      //    alla de lo que el propio motor vaya pisando.
+      const { service, events } = buildHarness();
+      const emitFlowResumed = jest.spyOn(events, 'emitFlowResumed');
+
+      // 2. Act ⚙️
+      await service.resumeExecution(EXECUTION_ID, {}, CURRENT_USER);
+
+      // 3. Assert 🎯
+      expect(emitFlowResumed.mock.calls[0]?.[0]).not.toHaveProperty(
+        'targetStepId',
       );
     });
 
@@ -408,7 +467,7 @@ describe('ExecutionsService (consulta y reintento manual CU-09)', () => {
       await service.resumeExecution(
         EXECUTION_ID,
         { targetStepId: 'nodo_a' },
-        USER_ID,
+        CURRENT_USER,
       );
 
       // 3. Assert 🎯
@@ -441,7 +500,7 @@ describe('ExecutionsService (consulta y reintento manual CU-09)', () => {
 
         // 2. Act + 3. Assert
         await expect(
-          service.resumeExecution(EXECUTION_ID, {}, USER_ID),
+          service.resumeExecution(EXECUTION_ID, {}, CURRENT_USER),
         ).rejects.toBeInstanceOf(ConflictException);
         expect(engine.prepareResume).not.toHaveBeenCalled();
       },
@@ -457,7 +516,7 @@ describe('ExecutionsService (consulta y reintento manual CU-09)', () => {
 
       // 2. Act
       const rejection: unknown = await service
-        .resumeExecution(EXECUTION_ID, {}, USER_ID)
+        .resumeExecution(EXECUTION_ID, {}, CURRENT_USER)
         .catch((error: unknown) => error);
 
       // 3. Assert
@@ -473,7 +532,7 @@ describe('ExecutionsService (consulta y reintento manual CU-09)', () => {
 
       // 2. Act + 3. Assert
       await expect(
-        service.resumeExecution(EXECUTION_ID, {}, USER_ID),
+        service.resumeExecution(EXECUTION_ID, {}, CURRENT_USER),
       ).rejects.toBeInstanceOf(ConflictException);
       expect(engine.prepareResume).not.toHaveBeenCalled();
     });
@@ -485,7 +544,7 @@ describe('ExecutionsService (consulta y reintento manual CU-09)', () => {
 
       // 2. Act + 3. Assert
       await expect(
-        service.resumeExecution(EXECUTION_ID, {}, USER_ID),
+        service.resumeExecution(EXECUTION_ID, {}, CURRENT_USER),
       ).rejects.toBeInstanceOf(NotFoundException);
       expect(repository.findOne).not.toHaveBeenCalled();
     });
@@ -497,7 +556,7 @@ describe('ExecutionsService (consulta y reintento manual CU-09)', () => {
 
       // 2. Act + 3. Assert
       await expect(
-        service.resumeExecution(EXECUTION_ID, {}, USER_ID),
+        service.resumeExecution(EXECUTION_ID, {}, CURRENT_USER),
       ).rejects.toBeInstanceOf(NotFoundException);
       expect(validator.validateSchema).not.toHaveBeenCalled();
     });
@@ -514,7 +573,7 @@ describe('ExecutionsService (consulta y reintento manual CU-09)', () => {
 
       // 2. Act + 3. Assert
       await expect(
-        service.resumeExecution(EXECUTION_ID, {}, USER_ID),
+        service.resumeExecution(EXECUTION_ID, {}, CURRENT_USER),
       ).rejects.toBeInstanceOf(BadRequestException);
       expect(engine.prepareResume).not.toHaveBeenCalled();
     });
@@ -531,7 +590,7 @@ describe('ExecutionsService (consulta y reintento manual CU-09)', () => {
 
       // 2. Act + 3. Assert
       await expect(
-        service.resumeExecution(EXECUTION_ID, {}, USER_ID),
+        service.resumeExecution(EXECUTION_ID, {}, CURRENT_USER),
       ).rejects.toBeInstanceOf(BadRequestException);
       expect(engine.prepareResume).not.toHaveBeenCalled();
       expect(engine.executeWorkflow).not.toHaveBeenCalled();
@@ -547,7 +606,7 @@ describe('ExecutionsService (consulta y reintento manual CU-09)', () => {
 
       // 2. Act + 3. Assert
       await expect(
-        service.resumeExecution(EXECUTION_ID, {}, USER_ID),
+        service.resumeExecution(EXECUTION_ID, {}, CURRENT_USER),
       ).rejects.toBeInstanceOf(BadRequestException);
       expect(engine.prepareResume).not.toHaveBeenCalled();
     });
@@ -566,7 +625,7 @@ describe('ExecutionsService (consulta y reintento manual CU-09)', () => {
 
       // 2. Act + 3. Assert
       await expect(
-        service.resumeExecution(EXECUTION_ID, {}, USER_ID),
+        service.resumeExecution(EXECUTION_ID, {}, CURRENT_USER),
       ).rejects.toBeInstanceOf(SystemCapacityExceededException);
 
       // La fila no se toca: preparar y luego no arrancar la dejaria con el
@@ -586,7 +645,7 @@ describe('ExecutionsService (consulta y reintento manual CU-09)', () => {
 
       // 2. Act + 3. Assert
       await expect(
-        service.resumeExecution(EXECUTION_ID, {}, USER_ID),
+        service.resumeExecution(EXECUTION_ID, {}, CURRENT_USER),
       ).rejects.toBeInstanceOf(BadRequestException);
       expect(engine.assertGlobalCapacityAvailable).not.toHaveBeenCalled();
     });
@@ -601,6 +660,8 @@ describe('ExecutionsService (consulta y reintento manual CU-09)', () => {
       const result = await service.discardExecution(EXECUTION_ID, USER_ID);
 
       // 3. Assert
+      // El descarte conserva su firma con el identificador suelto: no emite
+      // ningun aviso que tenga que nombrar a nadie.
       expect(engine.discardExecution).toHaveBeenCalledWith(
         EXECUTION_ID,
         USER_ID,

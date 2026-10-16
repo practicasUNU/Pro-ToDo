@@ -134,6 +134,26 @@ export class FsmExecutionQueryService {
     });
   }
 
+  /**
+   * Todas las ejecuciones detenidas, CON su contexto acumulado.
+   *
+   * Es el unico metodo de esta clase que no usa `SUMMARY_COLUMNS`, y la
+   * excepcion esta acotada a proposito: el contexto puede llevar el correo
+   * entrante en base64, asi que traerlo en los listados multiplicaria por mil
+   * el peso de una pantalla. Aqui hace falta porque la reanudacion por correo
+   * identifica la ejecucion por un testigo que vive dentro de ese contexto, y
+   * no hay columna por la que filtrar sin inventarse una.
+   *
+   * El conjunto que devuelve es naturalmente pequeno —una ejecucion detenida
+   * es una que reclama atencion humana— y se recorre en memoria.
+   */
+  public async findPausedWithContext(): Promise<FsmExecution[]> {
+    return this.fsmExecutionRepo.find({
+      where: { currentState: ExecutionState.PAUSADO },
+      order: { createdAt: 'DESC' },
+    });
+  }
+
   public async findLiveByFlow(flowId: string): Promise<FsmExecution[]> {
     return this.fsmExecutionRepo.find({
       where: {

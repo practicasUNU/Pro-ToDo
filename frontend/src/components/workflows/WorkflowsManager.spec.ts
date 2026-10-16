@@ -61,6 +61,21 @@ vi.mock('vue-router', () => ({
   useRouter: () => ({ push: routerPush }),
 }));
 
+// `copyToClipboard` exige contexto seguro y permiso del navegador, que en
+// happy-dom no existen: se dobla la funcion, no el navegador.
+//
+// `vi.hoisted` porque `vi.mock` se iza por encima de las constantes del modulo:
+// declarado a secas, la fabrica se evaluaria antes de que exista.
+const { copyToClipboard } = vi.hoisted(() => ({
+  copyToClipboard: vi.fn().mockResolvedValue(undefined),
+}));
+
+vi.mock('quasar', async () => {
+  const actual = await vi.importActual<Record<string, unknown>>('quasar');
+
+  return { ...actual, copyToClipboard };
+});
+
 import WorkflowsManager from '@components/workflows/WorkflowsManager.vue';
 import { useExecutionStore } from '@stores/execution.store';
 
@@ -335,6 +350,42 @@ describe('WorkflowsManager · telemetria en vivo del catalogo', () => {
 
       // 3. Assert 🎯
       expect(discardExecution).toHaveBeenCalledWith(EXECUTION_ID);
+    });
+  });
+
+  describe('4. Copiado del identificador del flujo', () => {
+    it('4.1 deberia copiar el id y confirmarlo', async () => {
+      // 1. Arrange 📐: el id ya estaba en la tabla, pero solo dentro de un
+      //    tooltip: visible y no seleccionable, la peor combinacion. Hace falta
+      //    para la orden de reanudacion por correo y para cualquier consulta.
+      vi.mocked(fetchWorkflows).mockResolvedValue([buildWorkflow()]);
+
+      const wrapper = mountManager();
+      await flushPromises();
+
+      // 2. Act ⚙️
+      await wrapper.get('[data-test="copy-workflow-id"]').trigger('click');
+      await flushPromises();
+
+      // 3. Assert 🎯
+      expect(copyToClipboard).toHaveBeenCalledWith(FLOW_ID);
+    });
+
+    it('4.2 deberia avisar cuando el portapapeles no esta disponible', async () => {
+      // 1. Arrange 📐: falla de verdad en despliegues por IP, donde el contexto
+      //    no es seguro. Sin el aviso, el operador se queda sin saber si copio.
+      vi.mocked(fetchWorkflows).mockResolvedValue([buildWorkflow()]);
+      copyToClipboard.mockRejectedValueOnce(new Error('Contexto inseguro'));
+
+      const wrapper = mountManager();
+      await flushPromises();
+
+      // 2. Act ⚙️
+      await wrapper.get('[data-test="copy-workflow-id"]').trigger('click');
+      await flushPromises();
+
+      // 3. Assert 🎯
+      expect(document.body.textContent).toContain('No se pudo copiar el ID');
     });
   });
 });

@@ -102,7 +102,7 @@ const buildResumed = (overrides: Partial<FlowResumedEvent> = {}): FlowResumedEve
   flowId: FLOW_ID,
   emittedAt: '2026-10-10T07:40:00.000Z',
   activeCursor: 'nodo_ia',
-  resumedBy: 'practicas@unuware.com',
+  resumedBy: { id: 'u-1', email: 'practicas@unuware.com' },
   ...overrides,
 });
 

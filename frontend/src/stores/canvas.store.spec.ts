@@ -575,4 +575,184 @@ describe('useCanvasStore · supervision visual de un flujo', () => {
       expect(store.isResumableFrom('nodo_fantasma')).toBe(false);
     });
   });
+
+  describe('8. Pausa deliberada y reanudacion en vivo', () => {
+    /** Ejecucion detenida por un `PAUSA_FLOW` en `nodo_a`, con el cursor en `nodo_b`. */
+    const programmedPause = () =>
+      buildExecution({
+        state: ExecutionState.PAUSADO,
+        activeCursor: 'nodo_b',
+        context: {
+          raw_email: { asunto: 'Licitacion' },
+          pause_context: {
+            pausedAtStepId: 'nodo_a',
+            resumeStepId: 'nodo_b',
+            reason: 'PROGRAMMED_AUTO_PAUSE',
+          },
+        },
+      });
+
+    it('8.1 deberia marcar el NODO DE PAUSA al recargar, no el cursor', async () => {
+      // 1. Arrange 📐: aqui no hay evento que escuchar, es lo que se ve al
+      //    recargar sobre un flujo ya detenido. Sin leer el contexto, la caja
+      //    marcada seria la del cursor —un paso que nunca arranco—.
+      fetchWorkflow.mockResolvedValue(buildWorkflow());
+      fetchActiveExecution.mockResolvedValue(programmedPause());
+
+      const store = useCanvasStore();
+
+      // 2. Act ⚙️
+      await store.loadCanvas(FLOW_ID);
+
+      // 3. Assert 🎯
+      expect(store.statusOf('nodo_a')).toBe('PAUSED');
+      expect(store.statusOf('nodo_b')).toBe('IDLE');
+    });
+
+    it('8.2 deberia marcar el nodo de pausa al recibir el evento', async () => {
+      // 1. Arrange 📐: el motor emite siempre `pausedStepId`, cayendo al cursor
+      //    cuando no hay nada que distinguir, asi que el cliente no ramifica.
+      fetchWorkflow.mockResolvedValue(buildWorkflow());
+      fetchActiveExecution.mockResolvedValue(null);
+
+      const store = useCanvasStore();
+      await store.loadCanvas(FLOW_ID);
+
+      // 2. Act ⚙️
+      store.handleFlowPaused({
+        executionId: EXECUTION_ID,
+        flowId: FLOW_ID,
+        emittedAt: '2026-10-16T08:00:00.000Z',
+        activeCursor: 'nodo_b',
+        pausedStepId: 'nodo_a',
+        isProgrammedPause: true,
+      });
+
+      // 3. Assert 🎯
+      expect(store.statusOf('nodo_a')).toBe('PAUSED');
+      expect(store.statusOf('nodo_b')).toBe('IDLE');
+    });
+
+    it('8.3 deberia seguir marcando el cursor en una pausa por FALLO', async () => {
+      // 1. Arrange 📐: la contrapartida. Ahi el nodo que se rompio ES el que se
+      //    reintentara, y las dos claves coinciden.
+      fetchWorkflow.mockResolvedValue(buildWorkflow());
+      fetchActiveExecution.mockResolvedValue(null);
+
+      const store = useCanvasStore();
+      await store.loadCanvas(FLOW_ID);
+
+      // 2. Act ⚙️
+      store.handleFlowPaused({
+        executionId: EXECUTION_ID,
+        flowId: FLOW_ID,
+        emittedAt: '2026-10-16T08:00:00.000Z',
+        activeCursor: 'nodo_b',
+        pausedStepId: 'nodo_b',
+      });
+
+      // 3. Assert 🎯
+      expect(store.statusOf('nodo_b')).toBe('PAUSED');
+    });
+
+    it('8.4 deberia reiniciar desde el paso elegido al reanudar', async () => {
+      // 1. Arrange 📐: los pasos posteriores conservan el COMPLETADO del
+      //    intento anterior y mienten sobre lo que se va a reejecutar.
+      fetchWorkflow.mockResolvedValue(buildWorkflow());
+      fetchActiveExecution.mockResolvedValue(programmedPause());
+
+      const store = useCanvasStore();
+      await store.loadCanvas(FLOW_ID);
+      store.handleNodeCompleted(buildCompleted({ nodeId: 'nodo_b' }));
+
+      // 2. Act ⚙️
+      store.handleFlowResumed({
+        executionId: EXECUTION_ID,
+        flowId: FLOW_ID,
+        emittedAt: '2026-10-16T08:05:00.000Z',
+        activeCursor: 'nodo_a',
+        targetStepId: 'nodo_a',
+        previousCursor: 'nodo_b',
+        resumedBy: { id: 'u-1', email: 'editor@unuware.com' },
+      });
+
+      // 3. Assert 🎯
+      expect(store.statusOf('nodo_a')).toBe('IDLE');
+      expect(store.statusOf('nodo_b')).toBe('IDLE');
+    });
+
+    it('8.5 deberia CONSERVAR lo completado antes del paso elegido', async () => {
+      // 1. Arrange 📐: reanudar desde el segundo paso no deshace el primero.
+      fetchWorkflow.mockResolvedValue(buildWorkflow());
+      fetchActiveExecution.mockResolvedValue(
+        buildExecution({ state: ExecutionState.PAUSADO, activeCursor: 'nodo_b' }),
+      );
+
+      const store = useCanvasStore();
+      await store.loadCanvas(FLOW_ID);
+
+      // 2. Act ⚙️
+      store.handleFlowResumed({
+        executionId: EXECUTION_ID,
+        flowId: FLOW_ID,
+        emittedAt: '2026-10-16T08:05:00.000Z',
+        activeCursor: 'nodo_b',
+        targetStepId: 'nodo_b',
+        previousCursor: 'nodo_b',
+        resumedBy: { id: 'u-1', email: 'editor@unuware.com' },
+      });
+
+      // 3. Assert 🎯: `nodo_a` dejo `raw_email` en el contexto y se quedo
+      //    COMPLETADO al sembrar; esta por delante del elegido.
+      expect(store.statusOf('nodo_a')).toBe('COMPLETED');
+      expect(store.statusOf('nodo_b')).toBe('IDLE');
+    });
+
+    it('8.6 NO deberia arrastrar a nadie con un satelite como destino', async () => {
+      // 1. Arrange 📐: un nodo fuera del camino nominal no define "posterior",
+      //    asi que reiniciar "desde el en adelante" no significa nada.
+      fetchWorkflow.mockResolvedValue(buildWorkflow());
+      fetchActiveExecution.mockResolvedValue(
+        buildExecution({ state: ExecutionState.PAUSADO, activeCursor: 'nodo_b' }),
+      );
+
+      const store = useCanvasStore();
+      await store.loadCanvas(FLOW_ID);
+
+      // 2. Act ⚙️
+      store.handleFlowResumed({
+        executionId: EXECUTION_ID,
+        flowId: FLOW_ID,
+        emittedAt: '2026-10-16T08:05:00.000Z',
+        activeCursor: 'nodo_alerta',
+        targetStepId: 'nodo_alerta',
+        resumedBy: { id: 'u-1', email: 'editor@unuware.com' },
+      });
+
+      // 3. Assert 🎯
+      expect(store.statusOf('nodo_a')).toBe('COMPLETED');
+      expect(store.statusOf('nodo_alerta')).toBe('IDLE');
+    });
+
+    it('8.7 NO deberia reaccionar a la reanudacion de OTRO flujo', async () => {
+      // 1. Arrange 📐: el canal difunde a la sala, pero el store se comparte.
+      fetchWorkflow.mockResolvedValue(buildWorkflow());
+      fetchActiveExecution.mockResolvedValue(programmedPause());
+
+      const store = useCanvasStore();
+      await store.loadCanvas(FLOW_ID);
+
+      // 2. Act ⚙️
+      store.handleFlowResumed({
+        executionId: EXECUTION_ID,
+        flowId: OTHER_FLOW_ID,
+        emittedAt: '2026-10-16T08:05:00.000Z',
+        activeCursor: 'nodo_a',
+        resumedBy: { id: 'u-1', email: 'editor@unuware.com' },
+      });
+
+      // 3. Assert 🎯
+      expect(store.statusOf('nodo_a')).toBe('PAUSED');
+    });
+  });
 });
