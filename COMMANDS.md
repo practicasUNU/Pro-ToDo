@@ -79,10 +79,10 @@ En el primer arranque sobre un volumen vacío, Postgres ejecuta `init.sql` desde
 
 ```bash
 sudo docker exec -it protodo_postgres \
-  psql -U "${DB_USER:-unuware007}" -d "${DB_NAME:-DB_PRO-TODO}"
+  psql -U "${DB_USER:?exporta backend/.env — ver §1.1}" -d "${DB_NAME:?exporta backend/.env — ver §1.1}"
 ```
 
-Las llaves con `:-` aportan el valor por defecto cuando la variable no está exportada en la sesión (§1.1). **Las comillas no son opcionales**: `DB_NAME` vale `DB_PRO-TODO` y contiene un guion.
+Las llaves con `:?` abortan con el mensaje indicado si la variable no está exportada en la sesión (§1.1), en lugar de conectar en silencio contra una base equivocada. **Las comillas no son opcionales**: el valor de `DB_NAME` puede contener guiones y la shell lo partiría.
 
 ### 2.4 Automatización vía slash command
 
@@ -103,7 +103,7 @@ Las llaves con `:-` aportan el valor por defecto cuando la variable no está exp
 
 ```bash
 sudo docker exec -i protodo_postgres \
-  psql -U "${DB_USER:-unuware007}" -d "${DB_NAME:-DB_PRO-TODO}" \
+  psql -U "${DB_USER:?exporta backend/.env — ver §1.1}" -d "${DB_NAME:?exporta backend/.env — ver §1.1}" \
   < db/migrations/<archivo>.sql
 ```
 
@@ -116,7 +116,7 @@ Cada migración termina con sus propios `SELECT` de comprobación. **Léelos**: 
 for f in db/migrations/03{6,7,8}-*.sql; do
   echo "== $f"
   sudo docker exec -i protodo_postgres \
-    psql -v ON_ERROR_STOP=1 -U "${DB_USER:-unuware007}" -d "${DB_NAME:-DB_PRO-TODO}" < "$f" || break
+    psql -v ON_ERROR_STOP=1 -U "${DB_USER:?exporta backend/.env}" -d "${DB_NAME:?exporta backend/.env}" < "$f" || break
 done
 ```
 
@@ -231,7 +231,7 @@ Se ejecutan desde `backend/`, **no son pruebas automatizadas** y no corren en CI
 | `npm run drupal:clean` | Purga **quirúrgica** por UUID, selector o deduplicación de comités. |
 | `npm run drupal:inject` | Inyecta marcado HTML en una página, por selector y modo. |
 
-> 🔴 **`DRUPAL_API_BASE_URL` apunta a `https://www.madrimasd.org`, el portal real.** Las páginas son de sandbox, pero lo que se escribe en ellas queda publicado. **Empieza siempre por el simulacro.**
+> 🔴 **`DRUPAL_API_BASE_URL` apunta al portal REAL de producción** (el host concreto se declara en `backend/.env`). Las páginas son de sandbox, pero lo que se escribe en ellas queda publicado. **Empieza siempre por el simulacro.**
 
 ### 6.1 `drupal:cleanup` — limpieza de la página de títulos
 
@@ -277,7 +277,7 @@ Lo que `--all` **no** hace: solo anula el guard de preservación. La reposición
 
 ```bash
 # Inventario de lo que publicó un flujo, sin tocar nada
-npm run drupal:clean -- --uuid=b17d69d8-6998-4883-b8dc-153b55dbd9c5 --injected-only
+npm run drupal:clean -- --uuid="${DRUPAL_SANDBOX_TITULOS_UUID}" --injected-only
 
 # Selector a medida, todavía en simulacro
 npm run drupal:clean -- --uuid=<UUID> --selector='.panel-default:has(.panel-heading:contains("UAM 9"))'
@@ -308,10 +308,10 @@ Detalles que conviene saber antes de usarla:
 
 ```bash
 # Simular: retiene el primero y purga los duplicados
-npm run drupal:clean -- --uuid=b17d69d8-6998-4883-b8dc-153b55dbd9c5 --selector='.panel-group .panel-group > .panel:has(.panel-heading:contains("ESIC 2"))' --keep-count=1
+npm run drupal:clean -- --uuid="${DRUPAL_SANDBOX_TITULOS_UUID}" --selector='.panel-group .panel-group > .panel:has(.panel-heading:contains("ESIC 2"))' --keep-count=1
 
 # Aplicar de verdad
-npm run drupal:clean -- --uuid=b17d69d8-6998-4883-b8dc-153b55dbd9c5 --selector='.panel-group .panel-group > .panel:has(.panel-heading:contains("ESIC 2"))' --keep-count=1 --write
+npm run drupal:clean -- --uuid="${DRUPAL_SANDBOX_TITULOS_UUID}" --selector='.panel-group .panel-group > .panel:has(.panel-heading:contains("ESIC 2"))' --keep-count=1 --write
 ```
 
 - **Exige `--selector`.** El script puede componer hasta tres selectores a la vez (`--injected-only`, `--remove-root-panels`, `--selector`) y «conserva los primeros n» no tiene un significado único repartido entre ellos; sin `--selector` aborta.
@@ -327,10 +327,10 @@ Coloca un bloque HTML dentro de una página, sin escribir un script desechable p
 
 ```bash
 # Inyectar desde archivo local en un sub-acordeón
-npm run drupal:inject -- --uuid=b17d69d8-6998-4883-b8dc-153b55dbd9c5 --file=src/scripts/fixtures/esic-2.html --target='#accordionESIC' --mode=append --write
+npm run drupal:inject -- --uuid="${DRUPAL_SANDBOX_TITULOS_UUID}" --file=src/scripts/fixtures/esic-2.html --target='#accordionESIC' --mode=append --write
 
 # Inyectar marcado en línea
-npm run drupal:inject -- --uuid=b17d69d8-6998-4883-b8dc-153b55dbd9c5 --html='<div class="panel panel-default">...</div>' --target='#accordion' --write
+npm run drupal:inject -- --uuid="${DRUPAL_SANDBOX_TITULOS_UUID}" --html='<div class="panel panel-default">...</div>' --target='#accordion' --write
 ```
 
 | Bandera | Obligatoria | Defecto | Qué hace |
