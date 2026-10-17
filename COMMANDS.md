@@ -122,6 +122,29 @@ done
 
 > ⚠️ Aplicar una migración es **decisión del desarrollador**: no ocurre al arrancar el backend ni forma parte de ningún script. El orden importa y hay dependencias entre archivos (la `038` revierte parte de la `037`, que depende de la `035`).
 
+### Verificación del backend antes de cerrar un cambio
+
+```bash
+npm run verify --prefix backend     # build + typecheck + jest
+```
+
+⚠️ **`npm run typecheck` NO sustituye a `npm run build`.** `tsc` y el CLI de Nest son dos
+compiladores distintos: hay código que `tsc -p tsconfig.build.json` emite con exit 0 y que
+`nest build` rechaza. El síntoma típico es
+
+```
+Error Cannot read properties of undefined (reading 'checkJsDirective')
+```
+
+—**sin fichero ni línea**—, que aparece cuando un transformador del CLI recibe un `SourceFile`
+indefinido. No tiene una sola causa: se ha visto con `new Logger(Clase.name)` en un inicializador de
+propiedad y con `export { ... } from '@alias'` (reexportación a través de un alias de ruta; la misma
+línea con ruta relativa compila). Como el mensaje no señala nada, se diagnostica **bisecando por
+fichero** con `git checkout <fichero>` y repitiendo el build.
+
+Purga `dist/` antes de diagnosticar: con una compilación a medias, `nest build` devuelve `ENOTEMPTY`
+y tapa el error real.
+
 ### 3.1.1 Aplicarlas con control de estado (recomendado)
 
 `scripts/apply-migrations.sh` lleva la cuenta en una tabla `schema_migrations`, de modo que solo

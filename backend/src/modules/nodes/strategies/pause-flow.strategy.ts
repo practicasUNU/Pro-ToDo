@@ -3,7 +3,7 @@ import {
   buildResumeInstructions,
   buildResumeTokenExpiry,
   generateResumeToken,
-  hashResumeToken as hashToken,
+  hashResumeToken,
 } from '@common/utils/resume-token.util';
 import { plainToInstance } from 'class-transformer';
 import { validate } from 'class-validator';
@@ -36,21 +36,26 @@ export const ERR_PAUSE_CONFIG = 'ERR_PAUSE_CONFIG';
 export const PROGRAMMED_PAUSE_REASON = 'PROGRAMMED_AUTO_PAUSE';
 
 /**
- * El testigo ya NO se define aqui.
+ * El testigo ya NO se define aqui, y NO se reexporta.
  *
  * Vive en `@common/utils/resume-token.util` desde que un segundo nodo —el de
  * alerta, `DESTINO_SMTP`— tambien lo emite: con dos emisores y un verificador,
  * dejar el generador y el hash dentro de una estrategia concreta obligaba a los
  * demas a importar de ella.
  *
- * Se REEXPORTA `hashResumeToken` porque varias pruebas y
- * `InboundEmailResumeService` lo importaban desde este modulo; redirigir aqui
- * evita tocar esos puntos y deja una sola implementacion real.
+ * HUBO AQUI UN `export { ... } from '@common/...'` y tumbaba la compilacion.
+ * `nest build` moria con `Cannot read properties of undefined (reading
+ * 'checkJsDirective')`, un mensaje sin fichero ni linea, mientras `tsc -p
+ * tsconfig.build.json` emitia con exit 0: el fallo es del CLI, no del tipado.
+ * El disparador es la combinacion exacta de REEXPORTACION y ALIAS de ruta —la
+ * misma linea con ruta relativa compila, y con `import` + `export const`
+ * tambien—, porque el resolvedor del CLI no encuentra el `SourceFile` del
+ * especificador y devuelve `undefined`. Era el unico `export ... from '@alias'`
+ * de todo `backend/src`, de ahi que nadie lo hubiera pisado antes.
+ *
+ * Quien necesite el testigo importa del util directamente, que ademas es la
+ * direccion correcta: un servicio no deberia importar de una estrategia.
  */
-export {
-  hashResumeToken,
-  RESUME_TOKEN_TTL_MS,
-} from '@common/utils/resume-token.util';
 
 /**
  * `whitelist` descarta claves desconocidas y `forbidNonWhitelisted` las delata.
@@ -206,7 +211,7 @@ export class PauseFlowStrategy implements INodeStrategy {
         pauseReason: PROGRAMMED_PAUSE_REASON,
         ...(token !== null
           ? {
-              resume_token_hash: hashToken(token),
+              resume_token_hash: hashResumeToken(token),
               token_expires_at: buildResumeTokenExpiry(),
             }
           : {}),

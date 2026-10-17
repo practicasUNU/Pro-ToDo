@@ -5,8 +5,12 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { simpleParser } from 'mailparser';
 
 import { FsmExecutionQueryService } from '@core/fsm/services/fsm-execution-query.service';
+// Del util y no de `pause-flow.strategy`, que solo lo reexportaba: un servicio
+// importando de una estrategia es la direccion equivocada —aquella es un
+// detalle de ejecucion de un nodo concreto y esto verifica testigos de
+// cualquiera—, y esa reexportacion ademas tumbaba `nest build`.
+import { hashResumeToken } from '@common/utils/resume-token.util';
 import { createImapClient } from '@modules/nodes/services/imap-client.factory';
-import { hashResumeToken } from '@modules/nodes/strategies/pause-flow.strategy';
 import { PASSWORD_ENV_KEY_PATTERN } from '@modules/nodes/dto/imap-trigger-config.dto';
 import { UserRole } from '@modules/users/enums/user-role.enum';
 import { UsersService } from '@modules/users/users.service';
