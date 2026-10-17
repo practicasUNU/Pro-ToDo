@@ -25,6 +25,7 @@ import { io } from 'socket.io-client';
 import { DataSource } from 'typeorm';
 
 import { generateDevJwt } from '@common/utils/dev-jwt.util';
+import { FlowPollingCoordinator } from '@common/services/flow-polling.coordinator';
 import { FsmExecution } from '@core/fsm/entities/fsm-execution.entity';
 import { NodeStrategyFactory } from '@core/fsm/factories/node-strategy.factory';
 import {
@@ -36,6 +37,7 @@ import { NodeType } from '@core/fsm/types/pipeline-schema.types';
 import { ExecutionsService } from '@modules/workflows/executions.service';
 import { InboundEmailResumeService } from '@modules/workflows/inbound-email-resume.service';
 import { UserRole } from '@modules/users/enums/user-role.enum';
+import { WorkflowsService } from '@modules/workflows/workflows.service';
 
 import { AppModule } from './../src/app.module';
 
@@ -680,6 +682,47 @@ describe('Canvas FSM · pausa, reanudacion y descarte (e2e)', () => {
           currentState: ExecutionState.EXITOSO,
         });
         expect(await readWorkflowStatus(flowId)).toBe('ACTIVO');
+      },
+      CASE_TIMEOUT_MS,
+    );
+
+    it(
+      '5.3 deberia apagar el flujo y soltar su sondeo en el despacho AUTOMATICO',
+      async () => {
+        // 1. Arrange 📐: el otro camino que llega al final del grafo, y el que
+        //    no estaba cubierto. 5.1 mide la reanudacion manual; esto mide el
+        //    disparo por trigger, que es el que corre sin nadie delante.
+        //
+        //    Se inscribe un puerto de sondeo postizo en el coordinador real: es
+        //    la unica forma de comprobar que el worker se desregistra DE
+        //    VERDAD, y no solo que la columna cambia.
+        const flowId = await seedStraightFlow(true);
+        const stopPollingForFlow = jest.fn();
+        const port = {
+          stopPollingForFlow,
+          refreshPolling: (): Promise<void> => Promise.resolve(),
+        };
+        const coordinator = app.get(FlowPollingCoordinator);
+        coordinator.register(port);
+
+        try {
+          // 2. Act ⚙️
+          const executionId = await app
+            .get(WorkflowsService)
+            .runAutomaticWorkflow(flowId);
+
+          // 3. Assert 🎯
+          const execution = await readExecution(executionId);
+
+          expect(execution.currentState).toBe(ExecutionState.EXITOSO);
+          expect(await readWorkflowStatus(flowId)).toBe('INACTIVO');
+          // LO QUE IMPORTA ADEMAS DEL ESTADO: sin esta baja el temporizador
+          // seguiria abriendo conexiones IMAP contra el buzon de un flujo que
+          // ya nadie debe disparar, hasta la siguiente reconciliacion.
+          expect(stopPollingForFlow).toHaveBeenCalledWith(flowId);
+        } finally {
+          coordinator.unregister(port);
+        }
       },
       CASE_TIMEOUT_MS,
     );

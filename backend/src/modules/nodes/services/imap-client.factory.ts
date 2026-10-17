@@ -88,3 +88,52 @@ export const createImapClient = (
 
   return client;
 };
+
+/**
+ * Cierra la sesion IMAP sin dejar rastro, pase lo que pase.
+ *
+ * Reemplaza a las tres copias de `logoutQuietly` que tenian la estrategia, el
+ * sondeo y el canal de ordenes. Las tres hacian lo mismo y las tres estaban
+ * MAL del mismo modo: `await client.logout()` dentro de un `try` y rendirse en
+ * el `catch`. Sobre un socket ya roto —una VPN que se cae a mitad del ciclo—
+ * `logout()` lanza `Connection not available`, de modo que el cierre nunca
+ * llegaba a ocurrir y el socket TCP con sus oyentes sobrevivia al ciclo. Un
+ * sondeo cada minuto convertia eso en una fuga: clientes huerfanos
+ * acumulandose hasta que el proceso agotaba descriptores.
+ *
+ * Dos pasos, y el orden importa:
+ *
+ * 1. `logout()` SOLO si `client.usable`. Es el cierre LIMPIO —despide la sesion
+ *    y libera el slot en el servidor de correo—, pero exige un socket vivo.
+ *    Preguntar antes evita provocar justo la excepcion que tapaba el paso 2.
+ * 2. `close()` SIEMPRE, y fuera de todo condicional. Es la destruccion
+ *    imperativa del socket y de sus oyentes. Es lo unico que corre en el caso
+ *    que motiva esta funcion, asi que no puede depender de que el paso
+ *    anterior haya salido bien.
+ *
+ * Nunca relanza: la invocan `finally` de bloques que ya estan gestionando otro
+ * error, y dejar escapar un fallo de cierre taparia la causa real. Quien
+ * quiera enterarse pasa `onCloseError`.
+ *
+ * @param client Cliente a cerrar, utilizable o no.
+ * @param onCloseError Observador opcional del fallo de cierre. Recibe tanto el
+ *        de `logout()` como el de `close()`.
+ */
+export const closeImapClientQuietly = async (
+  client: ImapFlow,
+  onCloseError?: (error: unknown) => void,
+): Promise<void> => {
+  try {
+    if (client.usable) {
+      await client.logout();
+    }
+  } catch (error: unknown) {
+    onCloseError?.(error);
+  }
+
+  try {
+    client.close();
+  } catch (error: unknown) {
+    onCloseError?.(error);
+  }
+};

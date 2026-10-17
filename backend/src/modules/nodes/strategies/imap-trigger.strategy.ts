@@ -11,6 +11,7 @@ import {
   resolveImapConfig,
 } from '@modules/nodes/dto/imap-trigger-config.dto';
 import {
+  closeImapClientQuietly,
   createImapClient,
   DOWNLOAD_SOCKET_TIMEOUT_MS,
 } from '@modules/nodes/services/imap-client.factory';
@@ -1288,14 +1289,18 @@ export class ImapTriggerStrategy implements INodeStrategy {
     }
   }
 
-  /** Cierra la sesion IMAP sin dejar escapar errores de cierre. */
+  /**
+   * Cierra la sesion IMAP sin dejar escapar errores de cierre.
+   *
+   * Delega en `closeImapClientQuietly`, que destruye el socket ADEMAS de
+   * despedir la sesion. La descarga de un MIME completo es el punto donde mas
+   * caro sale dejar un cliente huerfano: el socket sigue abierto con su buffer.
+   */
   private async logoutQuietly(client: ImapFlow): Promise<void> {
-    try {
-      await client.logout();
-    } catch (error) {
+    await closeImapClientQuietly(client, (error: unknown) => {
       this.logger.warn(
         `No se pudo cerrar la sesion IMAP limpiamente: ${error instanceof Error ? error.message : String(error)}`,
       );
-    }
+    });
   }
 }

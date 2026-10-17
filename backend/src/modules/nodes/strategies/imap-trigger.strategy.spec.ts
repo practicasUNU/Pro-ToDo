@@ -93,7 +93,12 @@ const buildAttachment = (overrides: Partial<Attachment> = {}): Attachment =>
     ...overrides,
   }) as Attachment;
 
-/** Doble del cliente IMAP con las cinco operaciones que el nodo usa. */
+/**
+ * Doble del cliente IMAP con las operaciones que el nodo usa.
+ *
+ * `close` y `usable` entran por el cierre compartido: se pregunta por el
+ * segundo antes de despedir la sesion y se invoca el primero pase lo que pase.
+ */
 interface ImapClientDouble {
   connect: jest.Mock;
   getMailboxLock: jest.Mock;
@@ -101,12 +106,14 @@ interface ImapClientDouble {
   download: jest.Mock;
   messageFlagsAdd: jest.Mock;
   logout: jest.Mock;
+  close: jest.Mock;
   on: jest.Mock;
   release: jest.Mock;
+  usable: boolean;
 }
 
 const buildClient = (
-  overrides: Partial<Record<keyof ImapClientDouble, jest.Mock>> = {},
+  overrides: Partial<ImapClientDouble> = {},
 ): ImapClientDouble => {
   const release = jest.fn();
 
@@ -117,7 +124,9 @@ const buildClient = (
     download: jest.fn().mockResolvedValue({ meta: {}, content: 'stream-mime' }),
     messageFlagsAdd: jest.fn().mockResolvedValue(true),
     logout: jest.fn().mockResolvedValue(undefined),
+    close: jest.fn(),
     on: jest.fn(),
+    usable: true,
     release,
     ...overrides,
   };

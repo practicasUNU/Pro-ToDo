@@ -24,9 +24,7 @@ const flowId = computed<string>(() => String(route.params.id));
  * accion a quien abriera el canvas por su cuenta teniendo delante una ejecucion
  * detenida, que es el mismo caso con otra forma de llegar.
  */
-const isResumeMode = computed<boolean>(
-  () => route.query.resume === 'true' && canvasStore.isPaused,
-);
+const isResumeMode = computed<boolean>(() => route.query.resume === 'true' && canvasStore.isPaused);
 
 /**
  * Distintivo del estado GENERAL del flujo.
@@ -61,6 +59,14 @@ const stateBadge = computed<{
     canvasStore.workflow?.status === WorkflowStatus.PAUSADO
   ) {
     return { color: 'warning', label: 'Pausado', spinner: false };
+  }
+
+  // Desenlace de la ejecucion que se acaba de ver correr. Va ANTES del estado
+  // del flujo porque es la respuesta a lo que el operador estaba mirando: sin
+  // esta rama, un flujo que terminaba bien y se autodesactivaba saltaba de "En
+  // ejecucion" a "Inactivo" sin decir nunca que habia salido bien.
+  if (canvasStore.executionState === ExecutionState.EXITOSO) {
+    return { color: 'positive', label: 'Exitoso', spinner: false };
   }
 
   if (canvasStore.workflow?.status === WorkflowStatus.ACTIVO) {

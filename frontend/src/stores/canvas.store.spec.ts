@@ -823,4 +823,300 @@ describe('useCanvasStore · supervision visual de un flujo', () => {
       expect(store.statusOf('nodo_a')).toBe('PAUSED');
     });
   });
+
+  /**
+   * EL DEFECTO QUE CIERRA ESTE BLOQUE. `prepareResume` purga `error_context` y
+   * nada mas, de modo que los namespaces de los nodos POSTERIORES sobreviven a
+   * una reanudacion selectiva. Al recargar la pagina, la siembra los leia como
+   * prueba de que habian corrido y pintaba en verde un trabajo que el flujo
+   * todavia tenia que rehacer.
+   */
+  describe('9. Reset topologico al rehidratar', () => {
+    /**
+     * Topologia de tres pasos que reproduce el caso reportado:
+     * `procesador_ia` → `pausa_flow` → `escudo_post_ia`.
+     *
+     * No se reutiliza `buildSchema`, que solo encadena dos nodos: el defecto
+     * necesita un paso DETRAS del de pausa para que haya algo que purgar.
+     */
+    const buildThreeStepSchema = (): AssembledPipelineSchema => ({
+      flowId: FLOW_ID,
+      name: 'Pipeline con pausa intermedia',
+      version: '1.0.0',
+      entrypoint: 'procesador_ia',
+      nodes: {
+        procesador_ia: {
+          nodeId: 'procesador_ia',
+          nodeType: NodeType.PROCESADOR_IA,
+          outputNamespace: 'llm_response',
+          nextStep: 'pausa_flow',
+          onErrorStep: null,
+          params: {},
+        },
+        pausa_flow: {
+          nodeId: 'pausa_flow',
+          nodeType: NodeType.PAUSA_FLOW,
+          outputNamespace: 'pause_context',
+          nextStep: 'escudo_post_ia',
+          onErrorStep: null,
+          params: {},
+        },
+        escudo_post_ia: {
+          nodeId: 'escudo_post_ia',
+          nodeType: NodeType.ESCUDO_POST_IA,
+          outputNamespace: 'validation_result',
+          nextStep: null,
+          onErrorStep: null,
+          params: {},
+        },
+      },
+    });
+
+    const buildThreeStepWorkflow = (): WorkflowDetail => ({
+      ...buildWorkflow(),
+      pipelineSchema: buildThreeStepSchema(),
+    });
+
+    it('9.1 deberia marcar el nodo de pausa y dejar el cursor en espera', async () => {
+      // 1. Arrange 📐: pausa DELIBERADA en `pausa_flow`; el cursor apunta ya al
+      //    paso siguiente, que nunca llego a arrancar.
+      fetchWorkflow.mockResolvedValue(buildThreeStepWorkflow());
+      fetchActiveExecution.mockResolvedValue(
+        buildExecution({
+          state: ExecutionState.PAUSADO,
+          activeCursor: 'escudo_post_ia',
+          context: {
+            llm_response: { titulo: 'Innovacion en Madrid' },
+            pause_context: { pausedAtStepId: 'pausa_flow' },
+          },
+        }),
+      );
+
+      const store = useCanvasStore();
+
+      // 2. Act ⚙️
+      await store.loadCanvas(FLOW_ID);
+
+      // 3. Assert 🎯
+      expect(store.statusOf('pausa_flow')).toBe('PAUSED');
+      expect(store.statusOf('escudo_post_ia')).toBe('IDLE');
+      expect(store.statusOf('procesador_ia')).toBe('COMPLETED');
+    });
+
+    it('9.2 deberia ignorar los namespaces posteriores de un intento anterior', async () => {
+      // 1. Arrange 📐: el contexto arrastra `pause_context` Y
+      //    `validation_result` de la corrida anterior, pero la ejecucion se
+      //    reanudo desde `procesador_ia` y los dos van a volver a correr.
+      fetchWorkflow.mockResolvedValue(buildThreeStepWorkflow());
+      fetchActiveExecution.mockResolvedValue(
+        buildExecution({
+          state: ExecutionState.EN_PROCESO,
+          activeCursor: 'procesador_ia',
+          context: {
+            llm_response: { titulo: 'Innovacion en Madrid' },
+            pause_context: { pausedAtStepId: 'pausa_flow' },
+            validation_result: { ok: true },
+          },
+        }),
+      );
+
+      const store = useCanvasStore();
+
+      // 2. Act ⚙️
+      await store.loadCanvas(FLOW_ID);
+
+      // 3. Assert 🎯: sin la purga, los dos se pintaban en verde pese a que el
+      //    motor todavia no habia llegado a ellos.
+      expect(store.statusOf('procesador_ia')).toBe('RUNNING');
+      expect(store.statusOf('pausa_flow')).toBe('IDLE');
+      expect(store.statusOf('escudo_post_ia')).toBe('IDLE');
+    });
+
+    it('9.3 deberia conservar el historico completo de una ejecucion cerrada', async () => {
+      // 1. Arrange 📐: control negativo. Una ejecucion terminada no tiene corte
+      //    y purgar ahi borraria justo lo que hay que ensenar.
+      fetchWorkflow.mockResolvedValue(buildThreeStepWorkflow());
+      fetchActiveExecution.mockResolvedValue(
+        buildExecution({
+          state: ExecutionState.EXITOSO,
+          activeCursor: null,
+          context: {
+            llm_response: {},
+            pause_context: { pausedAtStepId: 'pausa_flow' },
+            validation_result: { ok: true },
+          },
+        }),
+      );
+
+      const store = useCanvasStore();
+
+      // 2. Act ⚙️
+      await store.loadCanvas(FLOW_ID);
+
+      // 3. Assert 🎯
+      expect(store.statusOf('procesador_ia')).toBe('COMPLETED');
+      expect(store.statusOf('pausa_flow')).toBe('COMPLETED');
+      expect(store.statusOf('escudo_post_ia')).toBe('COMPLETED');
+    });
+
+    it('9.4 deberia purgar lo posterior tambien al reanudar en vivo', async () => {
+      // 1. Arrange 📐: la contraparte de 9.2 sobre el canvas VIVO. Las dos
+      //    rutas comparten el mismo barrido justo para no divergir.
+      fetchWorkflow.mockResolvedValue(buildThreeStepWorkflow());
+      fetchActiveExecution.mockResolvedValue(
+        buildExecution({
+          state: ExecutionState.PAUSADO,
+          activeCursor: 'escudo_post_ia',
+          context: {
+            llm_response: {},
+            pause_context: { pausedAtStepId: 'pausa_flow' },
+            validation_result: { ok: true },
+          },
+        }),
+      );
+
+      const store = useCanvasStore();
+      await store.loadCanvas(FLOW_ID);
+
+      // 2. Act ⚙️
+      store.handleFlowResumed({
+        executionId: EXECUTION_ID,
+        flowId: FLOW_ID,
+        emittedAt: '2026-10-16T08:05:00.000Z',
+        activeCursor: 'procesador_ia',
+        targetStepId: 'procesador_ia',
+        previousCursor: 'escudo_post_ia',
+        resumedBy: { id: 'u-1', email: 'editor@unuware.com' },
+      });
+
+      // 3. Assert 🎯
+      expect(store.statusOf('procesador_ia')).toBe('IDLE');
+      expect(store.statusOf('pausa_flow')).toBe('IDLE');
+      expect(store.statusOf('escudo_post_ia')).toBe('IDLE');
+    });
+  });
+
+  /**
+   * La cabecera leia `executionState`, que salia SOLO de la carga REST: las
+   * transiciones se veian en las cajas pero la insignia se quedaba congelada
+   * hasta que alguien recargaba la pagina.
+   */
+  describe('10. Reactividad del estado en vivo', () => {
+    const loadRunningCanvas = async (overrides: Partial<ExecutionDetail> = {}) => {
+      fetchWorkflow.mockResolvedValue(buildWorkflow());
+      fetchActiveExecution.mockResolvedValue(buildExecution(overrides));
+
+      const store = useCanvasStore();
+      await store.loadCanvas(FLOW_ID);
+
+      return store;
+    };
+
+    it('10.1 deberia anunciar la ejecucion al primer node:started', async () => {
+      // 1. Arrange 📐: no existe ningun `flow:started` en el canal; el primer
+      //    `node:started` ES el arranque observable.
+      const store = await loadRunningCanvas({
+        state: ExecutionState.PAUSADO,
+        activeCursor: 'nodo_a',
+      });
+
+      // 2. Act ⚙️
+      store.handleNodeStarted(buildStarted({ nodeId: 'nodo_a' }));
+
+      // 3. Assert 🎯
+      expect(store.executionState).toBe(ExecutionState.EN_PROCESO);
+      expect(store.activeCursor).toBe('nodo_a');
+    });
+
+    it('10.2 deberia pasar a PAUSADO al recibir flow:paused', async () => {
+      // 1. Arrange 📐
+      const store = await loadRunningCanvas();
+
+      // 2. Act ⚙️
+      store.handleFlowPaused({
+        executionId: EXECUTION_ID,
+        flowId: FLOW_ID,
+        emittedAt: '2026-10-16T08:05:00.000Z',
+        activeCursor: 'nodo_b',
+        severity: 'GRAVE',
+        errorMessage: 'Falta el texto de entrada',
+      });
+
+      // 3. Assert 🎯
+      expect(store.executionState).toBe(ExecutionState.PAUSADO);
+      expect(store.isPaused).toBe(true);
+    });
+
+    it('10.3 deberia volver a EN_PROCESO al reanudar, sin recargar', async () => {
+      // 1. Arrange 📐: sin esto, `isPaused` seguia en `true` y el boton de
+      //    reanudar quedaba encendido sobre una ejecucion ya en marcha.
+      const store = await loadRunningCanvas({
+        state: ExecutionState.PAUSADO,
+        activeCursor: 'nodo_b',
+      });
+
+      // 2. Act ⚙️
+      store.handleFlowResumed({
+        executionId: EXECUTION_ID,
+        flowId: FLOW_ID,
+        emittedAt: '2026-10-16T08:05:00.000Z',
+        activeCursor: 'nodo_b',
+        resumedBy: { id: 'u-1', email: 'editor@unuware.com' },
+      });
+
+      // 3. Assert 🎯
+      expect(store.executionState).toBe(ExecutionState.EN_PROCESO);
+      expect(store.isPaused).toBe(false);
+    });
+
+    it('10.4 deberia cerrar el estado y el cursor al completarse', async () => {
+      // 1. Arrange 📐
+      const store = await loadRunningCanvas();
+
+      // 2. Act ⚙️
+      store.handleFlowCompleted({
+        executionId: EXECUTION_ID,
+        flowId: FLOW_ID,
+        emittedAt: '2026-10-16T08:06:00.000Z',
+        finalState: ExecutionState.EXITOSO,
+      });
+
+      // 3. Assert 🎯
+      expect(store.executionState).toBe(ExecutionState.EXITOSO);
+      expect(store.activeCursor).toBeNull();
+    });
+
+    it('10.5 deberia reflejar la autodesactivacion que llega por crud:mutation', async () => {
+      // 1. Arrange 📐: el backend ya difunde la mutacion al apagar el flujo por
+      //    `stopOnFirstSuccess`; esto comprueba que el canvas la escucha.
+      const store = await loadRunningCanvas();
+
+      // 2. Act ⚙️
+      store.applyWorkflowMutation(
+        'UPDATED',
+        { ...buildWorkflow(), status: WorkflowStatus.INACTIVO },
+        FLOW_ID,
+      );
+
+      // 3. Assert 🎯: cambia el estado SIN perder la topologia, que no viaja en
+      //    el resumen difundido.
+      expect(store.workflow?.status).toBe(WorkflowStatus.INACTIVO);
+      expect(store.workflow?.pipelineSchema).not.toBeNull();
+    });
+
+    it('10.6 NO deberia aplicar la mutacion de OTRO flujo', async () => {
+      // 1. Arrange 📐: `useCrudSocket` encamina TODAS las mutaciones de flujos.
+      const store = await loadRunningCanvas();
+
+      // 2. Act ⚙️
+      store.applyWorkflowMutation(
+        'UPDATED',
+        { ...buildWorkflow(), id: OTHER_FLOW_ID, status: WorkflowStatus.INACTIVO },
+        OTHER_FLOW_ID,
+      );
+
+      // 3. Assert 🎯
+      expect(store.workflow?.status).toBe(WorkflowStatus.ACTIVO);
+    });
+  });
 });

@@ -14,6 +14,7 @@ import { plainToInstance } from 'class-transformer';
 import { validate } from 'class-validator';
 
 import { FlowPollingCoordinator } from '@common/services/flow-polling.coordinator';
+import { isTransientNetworkError } from '@common/utils/network-errors.util';
 import { FsmConfig } from '@core/config/fsm.config';
 import { SystemCapacityExceededException } from '@core/fsm/exceptions/system-capacity-exceeded.exception';
 import { NodeType } from '@core/fsm/types/pipeline-schema.types';
@@ -23,7 +24,10 @@ import {
   MIN_POLL_INTERVAL_MS,
   resolveImapConfig,
 } from '@modules/nodes/dto/imap-trigger-config.dto';
-import { createImapClient } from '@modules/nodes/services/imap-client.factory';
+import {
+  closeImapClientQuietly,
+  createImapClient,
+} from '@modules/nodes/services/imap-client.factory';
 import { buildImapSearchQuery } from '@modules/nodes/strategies/imap-trigger.strategy';
 import { HybridLoggerService } from '@modules/logs/services/hybrid-logger.service';
 import { Workflow } from '@modules/workflows/entities/workflow.entity';
@@ -472,15 +476,33 @@ export class ImapPollingService implements OnModuleInit, OnModuleDestroy {
       // Un fallo de sondeo NUNCA se propaga: este metodo corre dentro del
       // callback de un `setInterval`, y una excepcion escapando de ahi termina
       // el proceso de Node entero.
-      //
-      // Se registra con el STACK como segundo argumento, y no solo el mensaje:
-      // este es el punto donde el disparador falla en silencio (el flujo no
-      // arranca y nadie se entera), asi que sin la traza no hay forma de
-      // distinguir un buzon caido de unas credenciales caducadas o de un error
-      // de programacion en la resolucion de la configuracion.
       const description =
         error instanceof Error ? error.message : String(error);
 
+      // CORTE DE ENLACE, no averia del buzon. Apagar la VPN, saltar de red o un
+      // microcorte producen aqui un `ETIMEDOUT` —a menudo envuelto en un
+      // `AggregateError`— que se resuelve solo en cuanto vuelve la ruta. Antes
+      // de esta rama, cada caida escalaba una incidencia GRAVE a
+      // `alertas_error` que el operador tenia que cerrar a mano para descubrir
+      // que ya no habia nada que arreglar.
+      //
+      // El intervalo NO se toca, y es justo lo que convierte esto en
+      // auto-recuperacion: el worker sigue programado y el ciclo siguiente
+      // reconecta por su cuenta en cuanto hay enlace. Tampoco se desregistra el
+      // flujo ni se escribe `FALLIDO`: un cable desenchufado no es un flujo
+      // roto.
+      if (isTransientNetworkError(error)) {
+        this.logger.warn(
+          `[Worker] Enlace no disponible con el buzon del flujo "${flowId}" (${description}). Se reintentara en el ciclo siguiente.`,
+        );
+
+        return false;
+      }
+
+      // Se registra con el STACK como segundo argumento, y no solo el mensaje:
+      // este es el punto donde el disparador falla en silencio, asi que sin la
+      // traza no hay forma de distinguir unas credenciales caducadas de un
+      // error de programacion en la resolucion de la configuracion.
       this.logger.error(
         `[Worker] Falla critica de conexion IMAP en el flujo "${flowId}": ${description}`,
         error instanceof Error ? error.stack : undefined,
@@ -1002,14 +1024,18 @@ export class ImapPollingService implements OnModuleInit, OnModuleDestroy {
     this.saturatedFlows.clear();
   }
 
-  /** Cierra la sesion IMAP sin dejar escapar errores de cierre. */
+  /**
+   * Cierra la sesion IMAP sin dejar escapar errores de cierre.
+   *
+   * Delega en `closeImapClientQuietly` y no cierra aqui: la version propia
+   * hacia `logout()` sobre un socket ya roto, fallaba con `Connection not
+   * available` y DESTRUIA NADA, dejando un cliente huerfano por ciclo.
+   */
   private async logoutQuietly(client: ImapFlow): Promise<void> {
-    try {
-      await client.logout();
-    } catch (error) {
+    await closeImapClientQuietly(client, (error: unknown) => {
       this.logger.warn(
         `No se pudo cerrar la sesion IMAP del sondeo: ${error instanceof Error ? error.message : String(error)}`,
       );
-    }
+    });
   }
 }

@@ -16,7 +16,8 @@ import type {
   NodeCompletedEvent,
   NodeStartedEvent,
 } from '@/types/execution';
-import type { AssembledPipelineNode, WorkflowDetail } from '@/types/pipeline';
+import type { CrudAction } from '@/types/crud-events';
+import type { AssembledPipelineNode, PipelineSummary, WorkflowDetail } from '@/types/pipeline';
 
 /**
  * Como se pinta cada caja del canvas.
@@ -370,10 +371,7 @@ export const useCanvasStore = defineStore('canvas', () => {
 
     const node = workflow.value?.pipelineSchema?.nodes[nodeId];
 
-    return (
-      node !== undefined &&
-      Object.hasOwn(executionContext.value, node.outputNamespace)
-    );
+    return node !== undefined && Object.hasOwn(executionContext.value, node.outputNamespace);
   };
 
   /**
@@ -390,57 +388,138 @@ export const useCanvasStore = defineStore('canvas', () => {
   };
 
   /**
+   * Adelanta sobre la ejecucion observada lo que acaba de contar un evento.
+   *
+   * SE REEMPLAZA EL OBJETO, nunca se muta un campo: el payload que viene del
+   * backend se trata como inmutable en la interfaz
+   * (`architecture-patterns.md` §3), y ademas un reemplazo deja un valor
+   * estable por fotograma para los `computed` que cuelgan de el.
+   *
+   * Existe porque `executionState` —y con el la insignia de la cabecera— se
+   * derivaba SOLO de la carga REST: los manejadores de socket pintaban las
+   * cajas pero no tocaban el estado global, de modo que un flujo pasaba de
+   * «Activo» a «Exitoso» ante los ojos del operador sin que la cabecera se
+   * enterase hasta un F5.
+   *
+   * No crea la ejecucion si no hay ninguna: un evento de un flujo que el canvas
+   * todavia no ha cargado no puede inventarse un checkpoint a medias.
+   */
+  const patchObservedExecution = (patch: Partial<ExecutionDetail>): void => {
+    if (observedExecution.value === null) {
+      return;
+    }
+
+    observedExecution.value = { ...observedExecution.value, ...patch };
+  };
+
+  /**
+   * Devuelve al estado de espera todo el tramo que queda por delante del corte.
+   *
+   * EL DEFECTO QUE ARREGLA. `FsmEngineService.prepareResume` purga
+   * `error_context` y nada mas: los namespaces de los nodos POSTERIORES
+   * sobreviven a una reanudacion selectiva, y la siembra los lee como prueba de
+   * que corrieron. Tras reanudar desde `procesador_ia`, un `pausa_flow` del
+   * intento anterior seguia pintandose en verde al recargar la pagina,
+   * describiendo un trabajo que el flujo va a volver a hacer.
+   *
+   * El corte NO se incluye: su estado lo decide quien resuelve el corte
+   * —`PAUSED` si ahi esta detenida, `RUNNING` si esta corriendo—, y
+   * sobreescribirlo aqui borraria justo la marca que el operador busca.
+   *
+   * Solo alcanza al camino nominal, que es el unico con orden. Un satelite de
+   * contingencia que corrio, corrio de verdad: no hay indice con el que
+   * compararlo y su namespace sigue siendo prueba legitima.
+   */
+  const resetAfterIndex = (statuses: Map<string, CanvasNodeStatus>, cutoffIndex: number): void => {
+    for (const step of orderedSteps.value.slice(cutoffIndex + 1)) {
+      statuses.set(step.nodeId, 'IDLE');
+    }
+  };
+
+  /**
+   * Nodo que marca hasta donde ha llegado de verdad la ejecucion.
+   *
+   * Tres casos y una prioridad, que es la misma que aplica el pintado:
+   *
+   * 1. `PAUSADO` con `error_context`: el fallo VIVO manda, y el nodo detenido
+   *    es el cursor y nadie mas.
+   * 2. `PAUSADO` sin fallo tecnico: la pausa fue DELIBERADA, y el nodo detenido
+   *    es el que dejo `pausedAtStepId`. El cursor apunta al paso SIGUIENTE
+   *    —reanudar entrando otra vez en la pausa seria un bucle—, asi que no es
+   *    el corte y queda por delante de el.
+   * 3. `EN_PROCESO`: el corte es el cursor, que es lo que se esta ejecutando.
+   *
+   * Un estado TERMINAL (`EXITOSO`, `FALLIDO`, `OMITIDO`, `DESCARTADO`) no tiene
+   * corte: la ejecucion ya no va a avanzar, y el historico completo es
+   * exactamente lo que hay que ensenar.
+   */
+  const resolveCutoffNode = (
+    execution: ExecutionDetail,
+  ): { nodeId: string; status: CanvasNodeStatus } | null => {
+    if (execution.state === ExecutionState.PAUSADO) {
+      if (!hasTechnicalFailure(execution)) {
+        const pausedAt = resolveProgrammedPauseStep(execution);
+
+        if (pausedAt !== null) {
+          return { nodeId: pausedAt, status: 'PAUSED' };
+        }
+      }
+
+      return execution.activeCursor === null
+        ? null
+        : { nodeId: execution.activeCursor, status: 'PAUSED' };
+    }
+
+    if (execution.state === ExecutionState.EN_PROCESO) {
+      return execution.activeCursor === null
+        ? null
+        : { nodeId: execution.activeCursor, status: 'RUNNING' };
+    }
+
+    return null;
+  };
+
+  /**
    * Siembra el estado inicial de las cajas a partir del checkpoint.
    *
-   * Sin ejecucion viva todo queda en `IDLE`. Con ella, un nodo cuenta como
-   * completado si dejo su `outputNamespace` en el contexto —que es la unica
-   * prueba de que corrio—, y el cursor hereda el estado de la ejecucion.
+   * Sin ejecucion viva todo queda en `IDLE`. Con ella, en tres fases y en este
+   * orden, porque cada una corrige a la anterior:
+   *
+   * 1. HISTORICO: un nodo cuenta como completado si dejo su `outputNamespace`
+   *    en el contexto, que es la unica prueba de que corrio.
+   * 2. CORTE: se marca el nodo donde la ejecucion esta detenida o corriendo.
+   * 3. PURGA: todo lo que queda por delante del corte vuelve a `IDLE`, pese al
+   *    historico. Sin esta fase el contexto de un intento anterior pintaba como
+   *    hecho un trabajo que el flujo todavia tiene que rehacer.
+   *
+   * Es la contraparte de `handleFlowResumed`, que hace la misma purga sobre el
+   * canvas VIVO; las dos comparten `resetAfterIndex` para no desincronizarse.
    */
   const seedStatuses = (execution: ExecutionDetail | null): void => {
     const seeded = new Map<string, CanvasNodeStatus>();
 
     if (execution !== null) {
+      // --- 1. Historico.
       for (const step of orderedSteps.value) {
         if (execution.context[step.outputNamespace] !== undefined) {
           seeded.set(step.nodeId, 'COMPLETED');
         }
       }
 
-      if (execution.activeCursor !== null) {
-        seeded.set(
-          execution.activeCursor,
-          execution.state === ExecutionState.EN_PROCESO ? 'RUNNING' : 'PAUSED',
-        );
-      }
+      // --- 2. Corte.
+      const cutoff = resolveCutoffNode(execution);
 
-      // --- Pausa DELIBERADA, reconstruida del contexto.
-      //
-      // Aqui no hay evento que escuchar: es lo que se ve al recargar la pagina
-      // sobre un flujo ya detenido. El nodo de pausa dejo en su namespace el
-      // paso donde ocurrio, y sin leerlo la caja marcada seria la del cursor
-      // —el paso SIGUIENTE, que nunca llego a arrancar— mientras el nodo que de
-      // verdad se ejecuto aparece completado.
-      //
-      // PERO SOLO SI LA PAUSA FUE DELIBERADA, y esa es la prioridad que faltaba.
-      // Un fallo tecnico siembra `error_context`, y entonces el nodo detenido es
-      // el CURSOR y nadie mas: esta rama ganaba siempre, de modo que una
-      // ejecucion rota en `procesador_ia` se pintaba en ambar sobre el
-      // `pausa_flow` —que se habia ejecutado con normalidad en un intento
-      // anterior— y dejaba sin senalar al nodo que de verdad hay que reintentar.
-      //
-      // Las dos mitades del arreglo: esta prioridad resuelve el fallo VIVO, y la
-      // purga de `error_context` en `FsmEngineService.prepareResume` impide que
-      // un fallo YA REANUDADO siga ganando sobre una pausa limpia posterior.
-      if (!hasTechnicalFailure(execution) && execution.state === ExecutionState.PAUSADO) {
-        const pausedAt = resolveProgrammedPauseStep(execution);
+      if (cutoff !== null) {
+        seeded.set(cutoff.nodeId, cutoff.status);
 
-        if (pausedAt !== null) {
-          seeded.set(pausedAt, 'PAUSED');
+        // --- 3. Purga de lo que queda por delante.
+        const cutoffIndex = orderedSteps.value.findIndex((step) => step.nodeId === cutoff.nodeId);
 
-          // El cursor vuelve a IDLE: es el proximo en correr, no el detenido.
-          if (execution.activeCursor !== null) {
-            seeded.set(execution.activeCursor, 'IDLE');
-          }
+        // Un corte fuera del camino nominal —un satelite de contingencia— no
+        // tiene indice con el que purgar. Se marca igual (fase 2) y el resto
+        // conserva su historico: no hay un "despues" que definir.
+        if (cutoffIndex !== -1) {
+          resetAfterIndex(seeded, cutoffIndex);
         }
       }
     }
@@ -476,6 +555,15 @@ export const useCanvasStore = defineStore('canvas', () => {
     }
 
     patchStatus(event.nodeId, 'RUNNING');
+
+    // No existe ningun `flow:started` en el canal: el primer `node:started` ES
+    // el arranque observable de la ejecucion. Sin esto, la cabecera se quedaba
+    // en «Activo (En espera de trigger)» mientras las cajas ya se encendian una
+    // tras otra.
+    patchObservedExecution({
+      state: ExecutionState.EN_PROCESO,
+      activeCursor: event.nodeId,
+    });
   };
 
   const handleNodeCompleted = (event: NodeCompletedEvent): void => {
@@ -515,6 +603,14 @@ export const useCanvasStore = defineStore('canvas', () => {
     }
 
     nodeStatuses.value = next;
+
+    // `activeCursor` y no `pausedAt`: es el cursor lo que el backend tiene
+    // persistido, y la rehidratacion tras un F5 tiene que coincidir con lo que
+    // se pinta ahora.
+    patchObservedExecution({
+      state: ExecutionState.PAUSADO,
+      activeCursor: event.activeCursor,
+    });
   };
 
   /**
@@ -553,18 +649,29 @@ export const useCanvasStore = defineStore('canvas', () => {
     }
 
     const target = event.targetStepId ?? event.activeCursor;
-    const steps = orderedSteps.value;
-    const targetIndex = steps.findIndex((step) => step.nodeId === target);
+    const targetIndex = orderedSteps.value.findIndex((step) => step.nodeId === target);
 
+    // El propio destino entra en la purga —de ahi el `- 1`— porque todavia no
+    // ha arrancado: lo hara en cuanto el motor entre en el. `resetAfterIndex`
+    // es el mismo barrido que aplica `seedStatuses` al recargar la pagina, y
+    // compartirlo es lo que garantiza que el canvas vivo y el rehidratado
+    // pinten lo mismo.
     if (targetIndex === -1) {
       next.set(target, 'IDLE');
     } else {
-      for (const step of steps.slice(targetIndex)) {
-        next.set(step.nodeId, 'IDLE');
-      }
+      resetAfterIndex(next, targetIndex - 1);
     }
 
     nodeStatuses.value = next;
+
+    // La ejecucion vuelve a estar viva. Sin esto, `executionState` seguia
+    // diciendo `PAUSADO` hasta la siguiente recarga: la cabecera mentia y
+    // `isResumableFrom` dejaba el boton de reanudar encendido sobre una
+    // ejecucion que ya estaba corriendo.
+    patchObservedExecution({
+      state: ExecutionState.EN_PROCESO,
+      activeCursor: target,
+    });
   };
 
   /**
@@ -590,6 +697,59 @@ export const useCanvasStore = defineStore('canvas', () => {
     }
 
     nodeStatuses.value = next;
+
+    // El cursor se anula igual que lo hace el motor al cerrar el checkpoint:
+    // una ejecucion terminada no tiene paso activo, y dejarlo puesto mantendria
+    // encendido el boton de reanudar sobre algo que ya no se puede reanudar.
+    patchObservedExecution({
+      state: event.finalState,
+      activeCursor: null,
+    });
+  };
+
+  /**
+   * Aplica al flujo que el canvas mira la mutacion CRUD que acaba de difundirse.
+   *
+   * La via por la que la cabecera se entera de una AUTODESACTIVACION. Cuando
+   * una ejecucion con `executionPolicy.stopOnFirstSuccess` cierra bien, el
+   * backend pone el flujo en `INACTIVO` y publica la mutacion por el canal
+   * `crud:mutation` que ya mantiene al dia la tabla de flujos. Sin engancharse
+   * a el, la insignia del canvas seguia diciendo «Activo» sobre un flujo cuyo
+   * sondeo ya se habia desmontado, y nada lo desmentia hasta un F5.
+   *
+   * Se reutiliza ese canal en vez de emitir un evento nuevo: la informacion ya
+   * viaja, completa y con el resumen recien guardado.
+   *
+   * La guarda por `id` no es cosmetica: `useCrudSocket` encamina TODAS las
+   * mutaciones de flujos, y sin ella la desactivacion de un flujo ajeno
+   * repintaria la cabecera de este.
+   */
+  const applyWorkflowMutation = (
+    action: CrudAction,
+    item: PipelineSummary | undefined,
+    id: string,
+  ): void => {
+    if (workflow.value === null || workflow.value.id !== id) {
+      return;
+    }
+
+    if (action === 'DELETED') {
+      workflow.value = null;
+      observedExecution.value = null;
+      nodeStatuses.value = new Map();
+      selectedNodeId.value = null;
+
+      return;
+    }
+
+    if (item === undefined) {
+      return;
+    }
+
+    // Fusion y no sustitucion: lo que viaja por el canal es el RESUMEN del
+    // flujo, que no lleva `pipelineSchema`. Reemplazar el objeto entero dejaria
+    // el canvas sin topologia que pintar.
+    workflow.value = { ...workflow.value, ...item };
   };
 
   const selectNode = (nodeId: string): void => {
@@ -646,6 +806,7 @@ export const useCanvasStore = defineStore('canvas', () => {
     handleFlowPaused,
     handleFlowResumed,
     handleFlowCompleted,
+    applyWorkflowMutation,
     selectNode,
     clearSelection,
     observeFlow,

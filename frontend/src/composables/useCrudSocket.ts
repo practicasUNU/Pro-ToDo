@@ -3,6 +3,7 @@ import { onBeforeUnmount, onMounted } from 'vue';
 import { subscribeToCrudMutations } from '@services/socket-events.service';
 import { useAiPromptTemplatesStore } from '@stores/ai-prompt-templates.store';
 import { useAllowedIpsStore } from '@stores/allowed-ips.store';
+import { useCanvasStore } from '@stores/canvas.store';
 import { useTemplatesStore } from '@stores/templates.store';
 import { useUsersStore } from '@stores/users.store';
 import { useWorkflowTemplatesStore } from '@stores/workflow-templates.store';
@@ -34,6 +35,7 @@ export const useCrudSocket = (): void => {
   const workflowTemplatesStore = useWorkflowTemplatesStore();
   const aiPromptTemplatesStore = useAiPromptTemplatesStore();
   const workflowsStore = useWorkflowsStore();
+  const canvasStore = useCanvasStore();
 
   let unsubscribe: (() => void) | null = null;
 
@@ -83,6 +85,11 @@ export const useCrudSocket = (): void => {
 
       case 'workflows':
         workflowsStore.applyMutation(action, data as PipelineSummary | undefined, id);
+        // DOS destinatarios para la misma mutacion, y ninguno es redundante: la
+        // tabla mantiene la coleccion y el canvas mantiene el flujo concreto que
+        // esta mirando, con su topologia, que no viaja en el resumen. El canvas
+        // descarta por `id` lo que no es suyo.
+        canvasStore.applyWorkflowMutation(action, data as PipelineSummary | undefined, id);
         break;
     }
   };

@@ -97,8 +97,10 @@ interface Harness {
     logout: jest.Mock;
     close: jest.Mock;
     on: jest.Mock;
+    usable: boolean;
   };
   warnSpy: jest.SpyInstance;
+  errorSpy: jest.SpyInstance;
 }
 
 /**
@@ -109,9 +111,20 @@ interface Harness {
  */
 const mockClient = {} as Harness['client'];
 
+// Se sustituye SOLO la construccion del cliente. `closeImapClientQuietly` entra
+// por `requireActual` a proposito: es la pieza que decide si se despide la
+// sesion y que destruye el socket siempre, y doblarla dejaria sin verificar
+// justo el cierre que estas pruebas afirman.
 jest.mock('@modules/nodes/services/imap-client.factory', () => ({
+  ...jest.requireActual<Record<string, unknown>>(
+    '@modules/nodes/services/imap-client.factory',
+  ),
   createImapClient: jest.fn(() => mockClient),
 }));
+
+const { createImapClient } = jest.requireMock<{
+  createImapClient: jest.Mock;
+}>('@modules/nodes/services/imap-client.factory');
 
 jest.mock('mailparser', () => ({
   simpleParser: jest.fn(),
@@ -151,8 +164,13 @@ const buildHarness = (
     logout: jest.fn().mockResolvedValue(undefined),
     close: jest.fn(),
     on: jest.fn(),
+    usable: true,
   };
 
+  // Se vuelca sobre el doble COMPARTIDO y es el compartido lo que se devuelve:
+  // la factoria entrega `mockClient`, asi que una prueba que ajuste un campo
+  // por valor —`usable`, no un mock— sobre una copia local no lo veria el
+  // servicio.
   Object.assign(mockClient, client);
 
   const executions = {
@@ -189,12 +207,14 @@ const buildHarness = (
 
   jest.spyOn(service['logger'], 'log').mockImplementation(() => undefined);
   jest.spyOn(service['logger'], 'debug').mockImplementation(() => undefined);
-  jest.spyOn(service['logger'], 'error').mockImplementation(() => undefined);
+  const errorSpy = jest
+    .spyOn(service['logger'], 'error')
+    .mockImplementation(() => undefined);
   const warnSpy = jest
     .spyOn(service['logger'], 'warn')
     .mockImplementation(() => undefined);
 
-  return { service, executions, users, client, warnSpy };
+  return { service, executions, users, client: mockClient, warnSpy, errorSpy };
 };
 
 describe('InboundEmailResumeService (ordenes de reanudacion por correo)', () => {
@@ -691,6 +711,93 @@ describe('InboundEmailResumeService (ordenes de reanudacion por correo)', () => 
       // 3. Assert 🎯
       expect(resumed).toBe(false);
       expect(executions.resumeExecution).not.toHaveBeenCalled();
+    });
+  });
+
+  /**
+   * EL DEFECTO QUE CIERRA ESTE BLOQUE. Este canal no tenia NINGUNA guarda de
+   * solapamiento —a diferencia del sondeo de flujos— ni destruia el socket al
+   * acabar, de modo que un enlace lento apilaba una sesion IMAP por minuto
+   * contra el mismo buzon y las ordenes se despachaban por duplicado.
+   */
+  describe('8. Resiliencia del enlace', () => {
+    it('8.1 deberia aguantar una caida de red sin apagar el canal', async () => {
+      // 1. Arrange 📐: la VPN se cae con el barrido ya en marcha.
+      const { service, client, warnSpy, errorSpy } = buildHarness();
+      client.usable = false;
+      client.connect.mockRejectedValue(
+        Object.assign(new Error('connect ETIMEDOUT'), { code: 'ETIMEDOUT' }),
+      );
+
+      // 2. Act ⚙️
+      const dispatched = await service.processInbox();
+
+      // 3. Assert 🎯
+      expect(dispatched).toBe(0);
+      // El socket se destruye aunque no se pueda despedir la sesion.
+      expect(client.logout).not.toHaveBeenCalled();
+      expect(client.close).toHaveBeenCalledTimes(1);
+      expect(warnSpy).toHaveBeenCalledWith(
+        expect.stringContaining('Enlace no disponible temporalmente'),
+      );
+      // Un corte que se arregla solo no es una traza roja.
+      expect(errorSpy).not.toHaveBeenCalled();
+    });
+
+    it('8.2 deberia volver a barrer en el ciclo siguiente tras la caida', async () => {
+      // 1. Arrange 📐: la guarda de solapamiento no puede quedarse armada
+      //    cuando el ciclo muere por una excepcion; el canal quedaria mudo para
+      //    siempre sin un reinicio.
+      const { service, client } = buildHarness();
+      client.connect
+        .mockRejectedValueOnce(new Error('Connection not available'))
+        .mockResolvedValue(undefined);
+
+      // 2. Act ⚙️
+      await service.processInbox();
+      await service.processInbox();
+
+      // 3. Assert 🎯
+      expect(client.search).toHaveBeenCalledTimes(1);
+    });
+
+    it('8.3 deberia descartar un tick solapado sin abrir una segunda sesion', async () => {
+      // 1. Arrange 📐: el primer barrido se queda colgado a proposito.
+      const { service, warnSpy } = buildHarness();
+      let unblock: () => void = () => undefined;
+      const pending = new Promise<void>((resolve) => {
+        unblock = resolve;
+      });
+
+      const { client } = buildHarness();
+      client.connect.mockReturnValue(pending);
+      createImapClient.mockClear();
+
+      // 2. Act ⚙️
+      const first = service.processInbox();
+      const second = await service.processInbox();
+      unblock();
+      await first;
+
+      // 3. Assert 🎯: una sola sesion contra el buzon, no dos leyendo los
+      //    mismos mensajes sin marcar.
+      expect(second).toBe(0);
+      expect(createImapClient).toHaveBeenCalledTimes(1);
+      expect(warnSpy).toHaveBeenCalledWith(
+        expect.stringContaining('sigue en curso'),
+      );
+    });
+
+    it('8.4 deberia cerrar el socket tambien en el barrido nominal', async () => {
+      // 1. Arrange 📐
+      const { service, client } = buildHarness();
+
+      // 2. Act ⚙️
+      await service.processInbox();
+
+      // 3. Assert 🎯: despedida limpia Y destruccion, no una de las dos.
+      expect(client.logout).toHaveBeenCalledTimes(1);
+      expect(client.close).toHaveBeenCalledTimes(1);
     });
   });
 });

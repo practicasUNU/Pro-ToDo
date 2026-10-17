@@ -101,7 +101,36 @@ const buildWorkflow = (
  *
  * @param matches Cuantos UID devuelve la busqueda; 0 simula "nada que disparar".
  */
-const buildClient = (matches = 3): Record<string, jest.Mock> => {
+/**
+ * Doble del cliente IMAP.
+ *
+ * `usable` y `close` NO son adorno: el cierre del sondeo pregunta por el
+ * primero antes de despedirse y llama al segundo SIEMPRE. Un doble sin ellos
+ * describiria un cliente que no existe y dejaria sin cubrir justo el paso que
+ * impide la fuga de sockets.
+ */
+interface ImapClientDouble {
+  connect: jest.Mock;
+  getMailboxLock: jest.Mock;
+  search: jest.Mock;
+  logout: jest.Mock;
+  close: jest.Mock;
+  on: jest.Mock;
+  release: jest.Mock;
+  usable: boolean;
+  /**
+   * Declarados como AUSENTES a proposito, y por eso aparecen en el contrato.
+   *
+   * El sondeo solo hace `SEARCH`: quien descarga y marca `\Seen` es la
+   * estrategia, dentro de una ejecucion. Varias pruebas afirman que estos dos
+   * metodos no existen en el doble; sin declararlos aqui, esa afirmacion seria
+   * un error de tipos en vez de la barrera que pretende ser.
+   */
+  download?: undefined;
+  messageFlagsAdd?: undefined;
+}
+
+const buildClient = (matches = 3): ImapClientDouble => {
   const release = jest.fn();
 
   return {
@@ -113,8 +142,10 @@ const buildClient = (matches = 3): Record<string, jest.Mock> => {
         Array.from({ length: matches }, (_, index) => index + 1),
       ),
     logout: jest.fn().mockResolvedValue(undefined),
+    close: jest.fn(),
     on: jest.fn(),
     release,
+    usable: true,
   };
 };
 
@@ -123,7 +154,7 @@ interface Harness {
   workflows: WorkflowsMock;
   repository: RepositoryMock;
   registry: SchedulerRegistry;
-  client: Record<string, jest.Mock>;
+  client: ImapClientDouble;
   coordinator: FlowPollingCoordinator;
   /** Doble del logger hibrido, para aseverar el escalado a `alertas_error`. */
   hybridLogger: { logWorkerFailure: jest.Mock };
@@ -605,7 +636,9 @@ describe('ImapPollingService', () => {
         getMailboxLock: jest.fn(),
         search: jest.fn(),
         logout: jest.fn().mockResolvedValue(undefined),
+        close: jest.fn(),
         on: jest.fn(),
+        usable: true,
       }));
 
       // 2. Act
@@ -624,7 +657,9 @@ describe('ImapPollingService', () => {
         getMailboxLock: jest.fn(),
         search: jest.fn(),
         logout: jest.fn().mockResolvedValue(undefined),
+        close: jest.fn(),
         on: jest.fn(),
+        usable: true,
       }));
 
       // 2. Act
@@ -652,7 +687,9 @@ describe('ImapPollingService', () => {
           .mockResolvedValue({ path: 'INBOX', release: jest.fn() }),
         search: jest.fn().mockResolvedValue([1]),
         logout: jest.fn().mockResolvedValue(undefined),
+        close: jest.fn(),
         on: jest.fn(),
+        usable: true,
       }));
 
       // 2. Act
@@ -748,6 +785,129 @@ describe('ImapPollingService', () => {
       // 3. Assert
       expect(dispatched).toBe(false);
       expect(errorSpy).toHaveBeenCalled();
+    });
+
+    /**
+     * EL DEFECTO QUE CIERRA ESTE BLOQUE. Apagar la VPN tumbaba el ciclo con un
+     * `AggregateError [ETIMEDOUT]`, dejaba el socket vivo porque `logout()`
+     * fallaba sobre el, y escalaba a `alertas_error` una incidencia GRAVE que
+     * se resolvia sola en cuanto volvia el enlace.
+     */
+    it('3.9 deberia tratar un AggregateError [ETIMEDOUT] como corte transitorio', async () => {
+      // 1. Arrange 📐: asi entrega Node el fallo de una resolucion con varias
+      //    direcciones; el `code` real vive en `.errors`, no arriba.
+      const { service, hybridLogger, warnSpy, errorSpy, registry } =
+        buildHarness();
+      await service.onModuleInit();
+
+      const timeout = Object.assign(new Error('connect ETIMEDOUT'), {
+        code: 'ETIMEDOUT',
+      });
+      const close = jest.fn();
+
+      ImapFlow.mockImplementation(() => ({
+        connect: jest
+          .fn()
+          .mockRejectedValue(new AggregateError([timeout], 'ETIMEDOUT')),
+        getMailboxLock: jest.fn(),
+        search: jest.fn(),
+        logout: jest.fn().mockResolvedValue(undefined),
+        close,
+        on: jest.fn(),
+        usable: false,
+      }));
+
+      // 2. Act ⚙️
+      const dispatched = await service.pollInbox(FLOW_ID, buildParams());
+
+      // 3. Assert 🎯
+      expect(dispatched).toBe(false);
+      // El socket se destruye aunque `logout()` no sea posible: es lo unico que
+      // impide que cada ciclo deje un cliente huerfano.
+      expect(close).toHaveBeenCalledTimes(1);
+      expect(warnSpy).toHaveBeenCalledWith(
+        expect.stringContaining('Enlace no disponible'),
+      );
+      expect(errorSpy).not.toHaveBeenCalled();
+      // NI alerta GRAVE NI baja del worker: el intervalo sigue programado para
+      // reconectar solo en el ciclo siguiente.
+      expect(hybridLogger.logWorkerFailure).not.toHaveBeenCalled();
+      expect(pollIntervalsOf(registry)).toContain(`imap-poll:${FLOW_ID}`);
+
+      service.onModuleDestroy();
+    });
+
+    it('3.10 deberia tratar "Connection not available" como corte transitorio', async () => {
+      // 1. Arrange 📐: el mismo corte visto desde `imapflow`, que pierde el
+      //    `errno` original y solo deja el mensaje.
+      const { service, hybridLogger, warnSpy, errorSpy } = buildHarness();
+      const close = jest.fn();
+
+      ImapFlow.mockImplementation(() => ({
+        connect: jest
+          .fn()
+          .mockRejectedValue(new Error('Connection not available')),
+        getMailboxLock: jest.fn(),
+        search: jest.fn(),
+        logout: jest.fn().mockResolvedValue(undefined),
+        close,
+        on: jest.fn(),
+        usable: false,
+      }));
+
+      // 2. Act ⚙️
+      const dispatched = await service.pollInbox(FLOW_ID, buildParams());
+
+      // 3. Assert 🎯
+      expect(dispatched).toBe(false);
+      expect(close).toHaveBeenCalledTimes(1);
+      expect(warnSpy).toHaveBeenCalledWith(
+        expect.stringContaining('Enlace no disponible'),
+      );
+      expect(errorSpy).not.toHaveBeenCalled();
+      expect(hybridLogger.logWorkerFailure).not.toHaveBeenCalled();
+    });
+
+    it('3.11 deberia seguir escalando a GRAVE un fallo que NO es de red', async () => {
+      // 1. Arrange 📐: control negativo del par anterior. Sin el, la
+      //    clasificacion podria tragarse tambien las averias reales y el buzon
+      //    caeria en silencio.
+      const { service, hybridLogger, errorSpy } = buildHarness();
+
+      ImapFlow.mockImplementation(() => ({
+        connect: jest
+          .fn()
+          .mockRejectedValue(new Error('Invalid credentials (Failure)')),
+        getMailboxLock: jest.fn(),
+        search: jest.fn(),
+        logout: jest.fn().mockResolvedValue(undefined),
+        close: jest.fn(),
+        on: jest.fn(),
+        usable: false,
+      }));
+
+      // 2. Act ⚙️
+      const dispatched = await service.pollInbox(FLOW_ID, buildParams());
+
+      // 3. Assert 🎯
+      expect(dispatched).toBe(false);
+      expect(errorSpy).toHaveBeenCalled();
+      expect(hybridLogger.logWorkerFailure).toHaveBeenCalledWith(
+        expect.objectContaining({ level: 'GRAVE', flowId: FLOW_ID }),
+      );
+    });
+
+    it('3.12 deberia cerrar el socket tambien en el ciclo nominal', async () => {
+      // 1. Arrange 📐: el camino normal es el que mas veces corre, asi que es
+      //    donde una fuga de sockets se acumula mas rapido.
+      const { service, client } = buildHarness();
+
+      // 2. Act ⚙️
+      await service.pollInbox(FLOW_ID, buildParams());
+
+      // 3. Assert 🎯: despedida limpia Y destruccion, no una de las dos.
+      expect(client.logout).toHaveBeenCalledTimes(1);
+      expect(client.close).toHaveBeenCalledTimes(1);
     });
   });
 
@@ -1143,7 +1303,9 @@ describe('ImapPollingService', () => {
       getMailboxLock: jest.fn(),
       search: jest.fn(),
       logout: jest.fn().mockResolvedValue(undefined),
+      close: jest.fn(),
       on: jest.fn(),
+      usable: true,
     });
 
     it('4.1 deberia registrar una alerta GRAVE atribuida al flujo', async () => {

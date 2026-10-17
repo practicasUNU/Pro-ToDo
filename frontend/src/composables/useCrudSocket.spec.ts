@@ -12,6 +12,8 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 // hacia cada store, no el transporte.
 vi.mock('@services/socket-events.service', () => ({
   subscribeToCrudMutations: vi.fn(),
+  joinFlowRoom: vi.fn().mockResolvedValue({ ok: true }),
+  leaveFlowRoom: vi.fn().mockResolvedValue({ ok: true }),
 }));
 
 // Los stores alcanzan `@boot/axios` a traves de sus servicios, y ese modulo
@@ -54,7 +56,18 @@ vi.mock('@services/fsm.service', () => ({
 
 vi.mock('@services/workflows.service', () => ({
   fetchWorkflows: vi.fn(),
+  fetchWorkflow: vi.fn(),
   updateWorkflow: vi.fn(),
+}));
+
+// Entra en la cadena desde que el canvas tambien escucha las mutaciones de
+// flujos: su store carga la ejecucion viva por este servicio.
+vi.mock('@services/fsm-executions.service', () => ({
+  fetchActiveExecution: vi.fn(),
+  fetchExecutions: vi.fn(),
+  fetchExecution: vi.fn(),
+  resumeExecution: vi.fn(),
+  discardExecution: vi.fn(),
 }));
 
 vi.mock('@services/ai-prompt-templates.service', () => ({
@@ -68,6 +81,7 @@ vi.mock('@services/ai-prompt-templates.service', () => ({
 import { useCrudSocket } from '@/composables/useCrudSocket';
 import { subscribeToCrudMutations } from '@services/socket-events.service';
 import { useAllowedIpsStore } from '@stores/allowed-ips.store';
+import { useCanvasStore } from '@stores/canvas.store';
 import { useUsersStore } from '@stores/users.store';
 import { useWorkflowsStore } from '@stores/workflows.store';
 
@@ -278,6 +292,32 @@ describe('useCrudSocket · encaminado de mutaciones hacia los stores', () => {
     // 3. Assert 🎯
     expect(workflowsStore.workflows).toHaveLength(1);
     expect(workflowsStore.workflows[0]?.name).toBe('Notiweb renombrado');
+  });
+
+  it('1.5quater deberia encaminar la mutacion de flujos TAMBIEN al canvas', () => {
+    // 1. Arrange 📐: la via por la que la cabecera del canvas se entera de una
+    //    autodesactivacion. Sin este segundo destinatario, la insignia seguia
+    //    diciendo «Activo» sobre un flujo cuyo sondeo ya se habia desmontado.
+    const canvasStore = useCanvasStore();
+    const applyWorkflowMutation = vi.spyOn(canvasStore, 'applyWorkflowMutation');
+    const host = mountHost();
+
+    // 2. Act ⚙️
+    host.emit({
+      entity: 'workflows',
+      action: 'UPDATED',
+      id: WORKFLOW_ID,
+      data: buildWorkflow({ status: WorkflowStatus.INACTIVO }),
+      emittedAt: '2026-10-11T00:00:00.000Z',
+    });
+
+    // 3. Assert 🎯: el composable encamina; quien descarta lo que no es suyo
+    //    es el propio canvas, comparando el `id`.
+    expect(applyWorkflowMutation).toHaveBeenCalledWith(
+      'UPDATED',
+      expect.objectContaining({ status: WorkflowStatus.INACTIVO }),
+      WORKFLOW_ID,
+    );
   });
 
   it('1.6 deberia darse de baja al desmontar', () => {

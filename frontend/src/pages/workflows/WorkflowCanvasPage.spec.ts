@@ -4,6 +4,8 @@ import { createPinia, setActivePinia } from 'pinia';
 import { Notify, QBadge, QBanner, QIcon, QSpinnerDots, Quasar } from 'quasar';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { useCanvasStore } from '@stores/canvas.store';
+
 import { ExecutionState } from '@/types/execution';
 import { NodeType, WorkflowStatus } from '@/types/pipeline';
 
@@ -222,6 +224,85 @@ describe('WorkflowCanvasPage · distintivo de estado del flujo', () => {
 
       // 3. Assert 🎯
       expect(wrapper.find('[data-test="resume-banner"]').exists()).toBe(false);
+    });
+  });
+
+  /**
+   * EL DEFECTO QUE CIERRA ESTE BLOQUE. Las dos fuentes de la insignia salian de
+   * la carga REST y nada las volvia a tocar: el operador veia las cajas
+   * encenderse y apagarse mientras la cabecera seguia anunciando el estado con
+   * el que habia abierto la pagina, hasta que recargaba con F5.
+   */
+  describe('4. Conmutacion en vivo, sin recargar', () => {
+    it('4.1 deberia recorrer activo → en ejecucion → pausado → exitoso', async () => {
+      // 1. Arrange 📐: se parte de un flujo armado y sin ejecucion viva, que es
+      //    como esta justo antes de que entre un correo.
+      fetchWorkflow.mockResolvedValue(buildWorkflow(WorkflowStatus.ACTIVO));
+      fetchActiveExecution.mockResolvedValue(buildExecution(ExecutionState.INACTIVO));
+
+      const wrapper = await mountPage();
+      const store = useCanvasStore();
+
+      expect(badgeText(wrapper)).toContain('Activo (En espera de trigger)');
+
+      // 2. Act ⚙️ & 3. Assert 🎯, paso a paso: lo que se mide es que cada
+      //    evento se vea SIN volver a llamar a los servicios.
+      store.handleNodeStarted({
+        executionId: EXECUTION_ID,
+        flowId: FLOW_ID,
+        emittedAt: '2026-10-16T08:00:01.000Z',
+        nodeId: 'nodo_a',
+        nodeType: NodeType.TRIGGER_IMAP,
+        stepIndex: 0,
+        totalSteps: 1,
+        transition: 1,
+        attempt: 1,
+      });
+      await wrapper.vm.$nextTick();
+      expect(badgeText(wrapper)).toContain('En ejecucion');
+
+      store.handleFlowPaused({
+        executionId: EXECUTION_ID,
+        flowId: FLOW_ID,
+        emittedAt: '2026-10-16T08:00:02.000Z',
+        activeCursor: 'nodo_a',
+        isProgrammedPause: true,
+        pausedStepId: 'nodo_a',
+      });
+      await wrapper.vm.$nextTick();
+      expect(badgeText(wrapper)).toContain('Pausado');
+
+      store.handleFlowCompleted({
+        executionId: EXECUTION_ID,
+        flowId: FLOW_ID,
+        emittedAt: '2026-10-16T08:00:03.000Z',
+        finalState: ExecutionState.EXITOSO,
+      });
+      await wrapper.vm.$nextTick();
+      expect(badgeText(wrapper)).toContain('Exitoso');
+
+      expect(fetchWorkflow).toHaveBeenCalledTimes(1);
+    });
+
+    it('4.2 deberia anunciar la autodesactivacion que llega por crud:mutation', async () => {
+      // 1. Arrange 📐: cierre de la politica `stopOnFirstSuccess`. El flujo se
+      //    apaga solo y nadie esta pulsando nada en esta vista.
+      fetchWorkflow.mockResolvedValue(buildWorkflow(WorkflowStatus.ACTIVO));
+      fetchActiveExecution.mockResolvedValue(null);
+
+      const wrapper = await mountPage();
+      const store = useCanvasStore();
+
+      // 2. Act ⚙️
+      store.applyWorkflowMutation(
+        'UPDATED',
+        { ...buildWorkflow(WorkflowStatus.INACTIVO) },
+        FLOW_ID,
+      );
+      await wrapper.vm.$nextTick();
+
+      // 3. Assert 🎯
+      expect(badgeText(wrapper)).toContain('Inactivo');
     });
   });
 });

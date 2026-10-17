@@ -10,7 +10,11 @@ import { FsmExecutionQueryService } from '@core/fsm/services/fsm-execution-query
 // detalle de ejecucion de un nodo concreto y esto verifica testigos de
 // cualquiera—, y esa reexportacion ademas tumbaba `nest build`.
 import { hashResumeToken } from '@common/utils/resume-token.util';
-import { createImapClient } from '@modules/nodes/services/imap-client.factory';
+import { isTransientNetworkError } from '@common/utils/network-errors.util';
+import {
+  closeImapClientQuietly,
+  createImapClient,
+} from '@modules/nodes/services/imap-client.factory';
 import { PASSWORD_ENV_KEY_PATTERN } from '@modules/nodes/dto/imap-trigger-config.dto';
 import { UserRole } from '@modules/users/enums/user-role.enum';
 import { UsersService } from '@modules/users/users.service';
@@ -180,6 +184,20 @@ export class InboundEmailResumeService
 {
   private readonly logger = new Logger(InboundEmailResumeService.name);
 
+  /**
+   * Hay un barrido del buzon en curso.
+   *
+   * GLOBAL y no por flujo —a diferencia del `inFlight` de
+   * `ImapPollingService`— porque aqui solo hay un buzon: el de ordenes. El
+   * intervalo dispara sin preguntar, de modo que un ciclo que tarda mas que el
+   * periodo abria una segunda sesion IMAP contra el MISMO buzon mientras la
+   * primera seguia descargando. Las dos veian los mismos mensajes sin marcar y
+   * las dos los despachaban: una orden de reanudacion ejecutada por duplicado.
+   * Con un enlace lento —justo el caso que motiva este cambio— las sesiones se
+   * apilaban una por minuto.
+   */
+  private isPolling = false;
+
   constructor(
     private readonly configService: ConfigService,
     private readonly executionQueryService: FsmExecutionQueryService,
@@ -284,6 +302,16 @@ export class InboundEmailResumeService
    * dejar sin atender a los que vienen detras en el mismo lote.
    */
   public async processInbox(): Promise<number> {
+    // ANTES de resolver nada: si el ciclo anterior sigue vivo, este tick sobra
+    // entero. Se sale SIN tocar `isPolling`, que es del ciclo que lo armo.
+    if (this.isPolling) {
+      this.logger.warn(
+        '[InboundEmailResume] El barrido anterior sigue en curso; se omite este ciclo.',
+      );
+
+      return 0;
+    }
+
     const config = this.resolveMailboxConfig();
 
     if (config === null) {
@@ -299,6 +327,11 @@ export class InboundEmailResumeService
 
       return 0;
     }
+
+    // Se arma aqui y no en la guarda: las dos salidas anteriores (sin buzon
+    // configurado, sin contrasena) no abren conexion alguna, y marcarlas como
+    // "barrido en curso" obligaria a desarmar el flag en cada `return`.
+    this.isPolling = true;
 
     const client = createImapClient(
       config,
@@ -345,14 +378,31 @@ export class InboundEmailResumeService
 
       return dispatched;
     } catch (error: unknown) {
+      // Un corte de enlace no es una averia del buzon de ordenes: se resuelve
+      // solo en cuanto vuelve la ruta, y el intervalo sigue programado para
+      // recogerlo. Registrarlo como `error` convertia cada apagado de VPN en
+      // una traza roja que no describia ningun problema que atender.
+      if (isTransientNetworkError(error)) {
+        this.logger.warn(
+          '[InboundEmailResume] Enlace no disponible temporalmente. Reintentando en el siguiente ciclo...',
+        );
+
+        return dispatched;
+      }
+
       this.logger.error(
         `[InboundEmailResume] No se pudo leer el buzon de ordenes: ${this.describe(error)}`,
       );
 
       return dispatched;
     } finally {
-      lock?.release();
+      // `releaseQuietly` y no `lock?.release()` desnudo: sobre una conexion ya
+      // rota la liberacion lanza, y esa excepcion escapaba del `finally`
+      // saltandose el cierre del cliente —el unico paso que destruye el socket—
+      // y tapando ademas el error original del `catch`.
+      this.releaseQuietly(lock);
       await this.logoutQuietly(client);
+      this.isPolling = false;
     }
   }
 
@@ -696,13 +746,35 @@ export class InboundEmailResumeService
     }
   }
 
-  /** Cierra la sesion sin dejar que un fallo de salida tape el resultado. */
-  private async logoutQuietly(client: ImapFlow): Promise<void> {
-    try {
-      await client.logout();
-    } catch {
-      client.close();
+  /** Libera el lock del buzon sin dejar que su fallo tape el error original. */
+  private releaseQuietly(lock: MailboxLockObject | undefined): void {
+    if (lock === undefined) {
+      return;
     }
+
+    try {
+      lock.release();
+    } catch (error: unknown) {
+      this.logger.warn(
+        `[InboundEmailResume] No se pudo liberar el buzon de ordenes: ${this.describe(error)}`,
+      );
+    }
+  }
+
+  /**
+   * Cierra la sesion sin dejar que un fallo de salida tape el resultado.
+   *
+   * Delega en `closeImapClientQuietly`: la version propia solo destruia el
+   * socket cuando `logout()` lanzaba, de modo que el camino normal —el que
+   * corre en cada ciclo— dejaba el cliente a merced del recolector con sus
+   * oyentes todavia enganchados.
+   */
+  private async logoutQuietly(client: ImapFlow): Promise<void> {
+    await closeImapClientQuietly(client, (error: unknown) => {
+      this.logger.warn(
+        `[InboundEmailResume] No se pudo cerrar la sesion del buzon de ordenes: ${this.describe(error)}`,
+      );
+    });
   }
 
   private describe(error: unknown): string {
