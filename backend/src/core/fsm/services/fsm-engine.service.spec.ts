@@ -2167,6 +2167,78 @@ describe('FsmEngineService (PROT-09)', () => {
       expect(prepared.contextPayload.otro_namespace).toEqual({ intacto: true });
     });
 
+    it('deberia PURGAR `error_context` al reanudar', async () => {
+      // 1. Arrange 📐: el namespace lo siembra el motor justo antes de desviar
+      //    por `onErrorStep` y describe UN fallo concreto, no el historial.
+      const execution = buildExecution({
+        currentState: ExecutionState.PAUSADO,
+        activeCursor: 'nodo_b',
+        contextPayload: {
+          salida_a: { valorA: 1 },
+          error_context: {
+            failed_node_id: 'nodo_b',
+            error_code: 'ERR_LLM_TIMEOUT',
+            error_level: 'GRAVE',
+          },
+        },
+        retryState: {},
+      });
+      const { repo } = buildRepository(execution);
+
+      // 2. Act ⚙️
+      const prepared = await buildEngine(repo).prepareResume(EXECUTION_ID);
+
+      // 3. Assert 🎯: conservarlo hacia que el canvas leyera la pausa como
+      // TECNICA para siempre, de modo que una suspension limpia posterior en
+      // un `PAUSA_FLOW` se repintaba como si el flujo siguiera roto y
+      // senalando ademas el nodo equivocado.
+      expect(prepared.contextPayload.error_context).toBeUndefined();
+      // Lo demas sigue intacto: se purga un namespace, no el contexto.
+      expect(prepared.contextPayload.salida_a).toEqual({ valorA: 1 });
+    });
+
+    it('NO deberia mutar el contexto original al purgarlo', async () => {
+      // 1. Arrange 📐: el checkpoint es inmutable por contrato
+      //    (`architecture-patterns.md` §3); un `delete` sobre el jsonb cargado
+      //    tocaria el objeto que la entidad todavia expone.
+      const execution = buildExecution({
+        currentState: ExecutionState.PAUSADO,
+        activeCursor: 'nodo_b',
+        contextPayload: { error_context: { error_code: 'ERR_X' } },
+        retryState: {},
+      });
+      const original = execution.contextPayload;
+      const { repo } = buildRepository(execution);
+
+      // 2. Act ⚙️
+      await buildEngine(repo).prepareResume(EXECUTION_ID);
+
+      // 3. Assert 🎯: el objeto de partida conserva su clave.
+      expect(original.error_context).toEqual({ error_code: 'ERR_X' });
+    });
+
+    it('deberia dejar que el parche REPONGA `error_context` si alguien lo pide', async () => {
+      // 1. Arrange 📐: la purga va antes de la fusion justamente para que el
+      //    parche —que es abierto— siga mandando sobre el motor.
+      const execution = buildExecution({
+        currentState: ExecutionState.PAUSADO,
+        activeCursor: 'nodo_b',
+        contextPayload: { error_context: { error_code: 'ERR_VIEJO' } },
+        retryState: {},
+      });
+      const { repo } = buildRepository(execution);
+
+      // 2. Act ⚙️
+      const prepared = await buildEngine(repo).prepareResume(EXECUTION_ID, {
+        error_context: { error_code: 'ERR_REPUESTO' },
+      });
+
+      // 3. Assert 🎯
+      expect(prepared.contextPayload.error_context).toEqual({
+        error_code: 'ERR_REPUESTO',
+      });
+    });
+
     it('deberia admitir un namespace nuevo en el parche', async () => {
       // 1. Arrange
       const execution = buildPausedExecution();

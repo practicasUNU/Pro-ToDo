@@ -42,7 +42,12 @@ const nameOf = (nodeId: string): string => {
  */
 const codesText = (fork: CanvasForkSlot): string => {
   if (fork.catchErrors === null) {
-    return 'Cualquier fallo';
+    // GRAVE y no "cualquiera" a secas: esta es la forma de cadena del motor,
+    // que es la unica que atrapa todo, y lo que atrapa es lo que desvia el
+    // flujo. Un LEVE lo cierra el motor solo —no pausa, no reserva cursor y el
+    // sondeo vuelve en un minuto— y un URGENTE es irrecuperable, de modo que
+    // la rama de contingencia existe, en la practica, para los GRAVE.
+    return 'Cualquier fallo grave';
   }
 
   if (fork.catchErrors.length === 0) {
@@ -77,7 +82,7 @@ const refText = (fork: CanvasForkSlot): string => {
 };
 
 const refAriaLabel = (fork: CanvasForkSlot): string =>
-  `En caso de error en ${nameOf(fork.fromNodeId)}, continua en ${refText(fork)}`;
+  `En caso de error grave en ${nameOf(fork.fromNodeId)}, continua en ${refText(fork)}`;
 </script>
 
 <template>
@@ -146,7 +151,7 @@ const refAriaLabel = (fork: CanvasForkSlot): string =>
               </svg>
 
               <div class="pd-fork-label">
-                <div class="pd-label">En caso de error</div>
+                <div class="pd-label">EN CASO DE ERROR GRAVE</div>
                 <div
                   class="pd-mono pd-fork-label__codes"
                   :class="{ 'pd-fork-label__codes--inert': fork.catchErrors?.length === 0 }"

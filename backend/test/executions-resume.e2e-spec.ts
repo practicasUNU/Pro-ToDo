@@ -105,8 +105,15 @@ describe('CU-09 · reanudacion manual de ejecuciones (e2e)', () => {
     } = {},
   ): Promise<{ flowId: string; executionId: string }> => {
     const flows = await dataSource.query<Array<{ id_flujo: string }>>(
-      `INSERT INTO flujos (nombre, descripcion, activo, id_usuario_creador)
-       VALUES ($1, $2, FALSE, $3)
+      // `status` y no `activo`: la migracion 040 sustituyo el booleano por el
+      // enum triestatal y dejo caer la columna vieja. La suite seguia
+      // insertando en ella, asi que fallaba contra cualquier base migrada —y
+      // pasaba solo mientras la de pruebas se mantuvo desfasada a mano—.
+      //
+      // INACTIVO conserva la intencion del `FALSE` original: el flujo no debe
+      // exponerse a los disparadores automaticos durante la prueba.
+      `INSERT INTO flujos (nombre, descripcion, status, id_usuario_creador)
+       VALUES ($1, $2, 'INACTIVO', $3)
        RETURNING id_flujo`,
       [
         `${E2E_FLOW_PREFIX} ${Date.now()}-${seededFlowIds.length}`,

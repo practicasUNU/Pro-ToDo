@@ -819,6 +819,10 @@ describe('useFlujoDraftStore · agregador del asistente', () => {
         // de que el toggle de la plantilla sobrevive al instanciar el flujo, en
         // vez de perderse al reconstruir los `params`.
         includeAttachments: false,
+        // Se publica siempre, tambien apagado: lo que el operador vio en el
+        // formulario tiene que quedar escrito en el esquema, sin depender del
+        // defecto del DTO.
+        markAsRead: false,
       });
     });
 

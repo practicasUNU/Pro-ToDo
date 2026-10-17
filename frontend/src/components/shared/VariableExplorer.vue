@@ -2,6 +2,8 @@
 import { computed, ref, watch } from 'vue';
 import { copyToClipboard, useQuasar } from 'quasar';
 
+import { useSelectFilter } from '@/composables/useSelectFilter';
+
 import type { NodeOutputField } from '@/types/node-catalog';
 import type { UpstreamNamespace } from '@stores/nodes/node-store-registry';
 
@@ -46,7 +48,16 @@ const emit = defineEmits<{ insert: [token: string] }>();
 const $q = useQuasar();
 
 const selectedNamespace = ref<string | null>(null);
-const selectedField = ref<NodeOutputField | null>(null);
+/**
+ * Nombre del campo elegido, no el objeto entero.
+ *
+ * Cambio deliberado: con `emit-value` + `option-value="name"` el modelo es la
+ * clave que de verdad se interpola (`{{ns.campo}}`), de modo que la etiqueta
+ * del desplegable puede enriquecerse con la `description` sin que eso altere el
+ * valor. Con el objeto como modelo, `option-label` tenia que ser el nombre a
+ * secas o el marcador habria salido mal.
+ */
+const selectedField = ref<string | null>(null);
 
 /** Paso 1 del explorador. El `nodeType` va en la etiqueta, no en el valor. */
 const namespaceOptions = computed(() =>
@@ -79,6 +90,13 @@ const availableFields = computed<readonly NodeOutputField[]>(
   () => props.context.find(({ namespace }) => namespace === selectedNamespace.value)?.fields ?? [],
 );
 
+// Filtrado predictivo en los dos pasos. Un flujo con satelites de contingencia
+// llega a ofrecer una docena de origenes, y cada uno hasta siete campos.
+const { filteredOptions: filteredNamespaceOptions, filterFn: filterNamespaces } =
+  useSelectFilter(namespaceOptions);
+const { filteredOptions: filteredFieldOptions, filterFn: filterFields } =
+  useSelectFilter(availableFields);
+
 /** El origen elegido depende de una rama de error. */
 const isSelectedConditional = computed<boolean>(
   () =>
@@ -86,10 +104,27 @@ const isSelectedConditional = computed<boolean>(
       ?.isConditional === true,
 );
 
+/**
+ * Campo elegido, completo.
+ *
+ * La tarjeta de abajo necesita `type` y `description`, que el modelo ya no
+ * lleva. Se resuelve contra `availableFields`, que es la misma lista que
+ * alimenta al selector, asi que no puede desincronizarse.
+ */
+const selectedFieldDetail = computed<NodeOutputField | null>(
+  () => availableFields.value.find(({ name }) => name === selectedField.value) ?? null,
+);
+
+/** Etiqueta del desplegable: el nombre tecnico y, si la hay, que contiene. */
+const fieldLabel = (field: NodeOutputField): string =>
+  field.description === undefined || field.description === ''
+    ? field.name
+    : `${field.name} — ${field.description}`;
+
 /** Marcador resultante, o cadena vacia mientras la eleccion este incompleta. */
 const interpolatedToken = computed<string>(() =>
   selectedNamespace.value !== null && selectedField.value !== null
-    ? `{{${selectedNamespace.value}.${selectedField.value.name}}}`
+    ? `{{${selectedNamespace.value}.${selectedField.value}}}`
     : '',
 );
 
@@ -142,7 +177,7 @@ const handleInsertToken = (): void => {
     <div data-test="namespace-field">
       <q-select
         v-model="selectedNamespace"
-        :options="namespaceOptions"
+        :options="filteredNamespaceOptions"
         :loading="loading"
         :disable="loading"
         label="1. Selecciona Origen / Namespace"
@@ -150,7 +185,12 @@ const handleInsertToken = (): void => {
         outlined
         emit-value
         map-options
+        use-input
+        fill-input
+        hide-selected
+        input-debounce="0"
         class="q-mb-sm"
+        @filter="filterNamespaces"
       >
         <template #option="scope">
           <q-item v-bind="scope.itemProps">
@@ -177,27 +217,50 @@ const handleInsertToken = (): void => {
       </p>
     </div>
 
-    <!-- Sin `emit-value map-options`, al contrario que el anterior: aqui el
-         v-model es el objeto entero, porque la tarjeta necesita `type` y
-         `description` ademas del nombre. -->
+    <!-- `emit-value map-options` como el anterior: el modelo es la clave que
+         se interpola, y la etiqueta queda libre para llevar tambien la
+         descripcion. El detalle que pinta la tarjeta se resuelve aparte, en
+         `selectedFieldDetail`. -->
     <div data-test="variable-field">
       <q-select
         v-model="selectedField"
-        :options="availableFields"
-        option-label="name"
+        :options="filteredFieldOptions"
+        :option-label="fieldLabel"
+        option-value="name"
+        emit-value
+        map-options
+        use-input
+        fill-input
+        hide-selected
+        input-debounce="0"
         label="2. Campo a inyectar"
         dense
         outlined
         :disable="selectedNamespace === null"
-      />
+        @filter="filterFields"
+      >
+        <!-- El nombre tecnico en `pd-mono` porque es lo que hay que copiar
+             caracter a caracter, y la descripcion en texto secundario: el
+             operador lee la frase para elegir, pero escribe la clave. -->
+        <template #option="{ itemProps, opt }">
+          <q-item v-bind="itemProps">
+            <q-item-section>
+              <q-item-label class="pd-mono">{{ opt.name }}</q-item-label>
+              <q-item-label v-if="opt.description" caption class="pd-subtitle">
+                {{ opt.description }}
+              </q-item-label>
+            </q-item-section>
+          </q-item>
+        </template>
+      </q-select>
     </div>
 
-    <div v-if="selectedField" class="pd-token-card q-mt-sm" data-test="token-detail">
+    <div v-if="selectedFieldDetail" class="pd-token-card q-mt-sm" data-test="token-detail">
       <div class="pd-mono pd-token-value">{{ interpolatedToken }}</div>
       <div class="row items-center q-gutter-xs q-mt-xs">
-        <span class="pd-badge pd-badge--role">{{ selectedField.type }}</span>
-        <span v-if="selectedField.description" class="col pd-subtitle q-mb-none">
-          {{ selectedField.description }}
+        <span class="pd-badge pd-badge--role">{{ selectedFieldDetail.type }}</span>
+        <span v-if="selectedFieldDetail.description" class="col pd-subtitle q-mb-none">
+          {{ selectedFieldDetail.description }}
         </span>
       </div>
     </div>

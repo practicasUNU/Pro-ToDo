@@ -1,4 +1,12 @@
 import { Injectable, Logger } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
+
+import {
+  buildResumeInstructions,
+  buildResumeTokenExpiry,
+  generateResumeToken,
+  hashResumeToken,
+} from '@common/utils/resume-token.util';
 import { plainToInstance } from 'class-transformer';
 import { validate } from 'class-validator';
 
@@ -171,6 +179,12 @@ export class SmtpAlertStrategy implements INodeStrategy {
     { name: 'accepted_count', type: 'number' },
     { name: 'rejected_count', type: 'number' },
     { name: 'sent_at', type: 'text', description: 'Marca ISO-8601 del envio' },
+    // `resume_token_hash` y `token_expires_at` SE PUBLICAN en el payload pero
+    // NO se declaran aqui, y la omision es deliberada: `outputFields` es lo que
+    // el explorador de variables ofrece para construir marcadores, y la huella
+    // de una credencial no es un dato que ningun prompt ni ningun asunto deba
+    // poder citar. Quien las lee es `InboundEmailResumeService`, que recorre el
+    // contexto buscando la clave y no consulta este catalogo.
   ];
 
   /** El mismo DTO que valida `execute`, ahora tambien al GUARDAR el esquema. */
@@ -178,7 +192,10 @@ export class SmtpAlertStrategy implements INodeStrategy {
 
   private readonly logger = new Logger(SmtpAlertStrategy.name);
 
-  constructor(private readonly mailer: SmtpNodeMailerService) {}
+  constructor(
+    private readonly mailer: SmtpNodeMailerService,
+    private readonly configService: ConfigService,
+  ) {}
 
   public async execute(
     context: StatePayloadContext,
@@ -248,7 +265,42 @@ export class SmtpAlertStrategy implements INodeStrategy {
       context,
       config,
     );
-    const letter = this.buildLetterParams(context, config, unresolvedVariable);
+
+    // --- TESTIGO DE REANUDACION, solo cuando va a servir de algo.
+    //
+    // Dos condiciones, y las dos importan:
+    //
+    // 1. La severidad es GRAVE. Es la UNICA que acaba en una pausa reanudable:
+    //    `closeTerminalState` llama a `pauseAt` para GRAVE y cierra sin cursor
+    //    para URGENTE —irrecuperable— y para LEVE. Ofrecer un codigo de
+    //    reanudacion sobre una ejecucion que no va a quedar PAUSADO es
+    //    prometer una salida que no existe: quien respondiera al correo
+    //    recibiria un rechazo por "testigo desconocido".
+    //
+    // 2. El canal de ordenes esta encendido. `INBOUND_RESUME_ENABLED` apagado
+    //    significa que nadie lee ningun buzon de vuelta, asi que las
+    //    instrucciones mandarian a la persona a escribir a un sitio donde no
+    //    hay nadie. El testigo entra por la via del buzon del propio flujo
+    //    (`ImapTriggerStrategy` delega) o por la del buzon de ordenes, pero
+    //    las dos cuelgan de esta misma bandera.
+    //
+    // Del testigo solo se persiste la huella, igual que en `PAUSA_FLOW`: el
+    // contexto acumulado se devuelve por la API y se escribe en cada
+    // checkpoint, de modo que guardarlo en claro repartiria la credencial.
+    // Es de un solo uso sin necesidad de tabla: al reanudar, la ejecucion deja
+    // de estar PAUSADO y deja de ser candidata.
+    const resumeToken =
+      detectedLevel === 'GRAVE' &&
+      this.configService.get<string>('INBOUND_RESUME_ENABLED') === 'true'
+        ? generateResumeToken()
+        : null;
+
+    const letter = {
+      ...this.buildLetterParams(context, config, unresolvedVariable),
+      ...(resumeToken === null
+        ? {}
+        : { resumeInstructions: buildResumeInstructions(resumeToken) }),
+    };
 
     try {
       const receipt = await this.mailer.sendNodeAlert({
@@ -273,6 +325,17 @@ export class SmtpAlertStrategy implements INodeStrategy {
           accepted_count: receipt.accepted.length,
           rejected_count: receipt.rejected.length,
           sent_at: new Date().toISOString(),
+          // La huella viaja en el namespace de ESTE nodo y no en uno reservado:
+          // `InboundEmailResumeService.findExecutionByToken` recorre todos los
+          // namespaces del contexto buscando la clave, asi que no hace falta
+          // acordar un sitio fijo — y el motor hace checkpoint del contexto
+          // entero al pausar, de modo que queda persistida sin tocar el motor.
+          ...(resumeToken === null
+            ? {}
+            : {
+                resume_token_hash: hashResumeToken(resumeToken),
+                token_expires_at: buildResumeTokenExpiry(),
+              }),
         },
       };
     } catch (error) {

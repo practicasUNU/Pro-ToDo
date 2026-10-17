@@ -16,6 +16,10 @@ import {
 } from '@modules/nodes/services/imap-client.factory';
 import { FALLBACK_ATTACHMENT_NAME_PREFIX } from '@modules/nodes/interfaces/raw-email-attachment.interface';
 import { normalizeSubjectText } from '@modules/nodes/utils/diacritics.util';
+// Import de VALOR y no `import type`: se inyecta por constructor, y con
+// `emitDecoratorMetadata` un `import type` se borra al transpilar dejando a Nest
+// sin el token que necesita para resolver la dependencia.
+import { InboundEmailResumeService } from '@modules/workflows/inbound-email-resume.service';
 
 import type { StatePayloadContext } from '@core/fsm/context/state-payload.context';
 import type {
@@ -49,6 +53,35 @@ export const NO_MESSAGES_STATUS = 'NO_MESSAGES_FOUND';
  * (`architecture-patterns.md` §4), ahogando las alertas reales.
  */
 export const SUBJECT_FILTERED_STATUS = 'SUBJECT_FILTERED';
+
+/**
+ * Estado devuelto cuando el mensaje era una ORDEN DE REANUDACION, no contenido.
+ *
+ * El operador responde al correo de alerta para reanudar (CU-09 por correo), y
+ * esa respuesta cae en el MISMO buzon que el flujo sondea. Sin esta via el
+ * mensaje se ingeria como si fuera una noticia: el cuerpo util va vacio —lo
+ * unico que lleva es el comando— y la ejecucion reventaba mas adelante en el
+ * `PROCESADOR_IA` con `ERR_LLM_MISSING_INPUT_TEXT`, que ademas apunta al nodo
+ * equivocado y no dice nada de la orden que nadie llego a atender.
+ *
+ * Dice EXECUTED y no SKIPPED porque la orden SI se ejecuta: el nodo delega en
+ * `InboundEmailResumeService` antes de parar. Descartarla sin mas dejaria al
+ * operador esperando una reanudacion que nunca ocurre.
+ */
+export const RESUME_COMMAND_STATUS = 'RESUME_COMMAND_EXECUTED';
+
+/**
+ * Reconoce una orden de reanudacion en el asunto o en la cabecera del cuerpo.
+ *
+ * Tolera los `Re:` acumulados que los clientes de correo anteponen al
+ * responder, que es como llega SIEMPRE: nadie redacta estas ordenes desde cero.
+ * No valida el testigo —de eso se encarga `InboundEmailResumeService` con el
+ * hash persistido—, solo decide si el mensaje es contenido o es mando.
+ */
+const RESUME_COMMAND_HINT = /^\s*(?:re\s*:\s*)*reanudar\s+[a-f0-9]{8,64}\b/i;
+
+/** Lineas del cuerpo que se inspeccionan buscando el comando. */
+const RESUME_COMMAND_BODY_LINES = 5;
 
 /**
  * Tope del marcado que viaja en el payload, en caracteres.
@@ -523,7 +556,10 @@ export class ImapTriggerStrategy implements INodeStrategy {
 
   private readonly logger = new Logger(ImapTriggerStrategy.name);
 
-  constructor(private readonly configService: ConfigService) {}
+  constructor(
+    private readonly configService: ConfigService,
+    private readonly inboundEmailResumeService: InboundEmailResumeService,
+  ) {}
 
   public async execute(
     _context: StatePayloadContext,
@@ -650,6 +686,17 @@ export class ImapTriggerStrategy implements INodeStrategy {
 
       const parsed = await this.downloadAndParse(client, uid);
 
+      // --- ORDENES DE MANDO, antes que nada mas.
+      //
+      // Va por delante del filtro de asunto a proposito: la orden llega como
+      // RESPUESTA al correo de alerta, asi que su asunto es el de aquel con un
+      // `Re:` delante y no casa con el filtro del flujo. Evaluado despues, el
+      // mensaje saldria por `SUBJECT_FILTERED` y la reanudacion no se atenderia
+      // jamas.
+      if (this.isResumeCommandEmail(parsed)) {
+        return this.dispatchResumeCommand(client, uid, parsed);
+      }
+
       // El marcado va DESPUES de parsear con exito. Al reves, un MIME que
       // reventase el parser quedaria como leido y nadie volveria a procesarlo.
       if (config.markAsRead) {
@@ -713,6 +760,92 @@ export class ImapTriggerStrategy implements INodeStrategy {
       // devolviendo desde el `catch`.
       this.releaseQuietly(lock);
       await this.logoutQuietly(client);
+    }
+  }
+
+  /**
+   * Decide si el mensaje es una ORDEN de reanudacion y no contenido a procesar.
+   *
+   * Mira el asunto y las primeras lineas del cuerpo, no el cuerpo entero: por
+   * debajo va la cita del correo original —que incluye literalmente el texto
+   * `REANUDAR <testigo>` que el propio nodo de alerta escribio— y buscar ahi
+   * daria por mando cualquier respuesta, incluida una que solo dijera "recibido".
+   *
+   * Solo RECONOCE. Validar el testigo contra su hash y al remitente contra
+   * `usuarios` es trabajo de `InboundEmailResumeService`, y duplicarlo aqui
+   * crearia una segunda puerta con sus propias reglas.
+   */
+  private isResumeCommandEmail(parsed: ParsedMail): boolean {
+    if (RESUME_COMMAND_HINT.test(parsed.subject ?? '')) {
+      return true;
+    }
+
+    return (parsed.text ?? '')
+      .split(/\r?\n/)
+      .slice(0, RESUME_COMMAND_BODY_LINES)
+      .some((line) => RESUME_COMMAND_HINT.test(line));
+  }
+
+  /**
+   * Ejecuta la orden en el acto y retira el mensaje del buzon.
+   *
+   * DELEGA en vez de descartar: el operador que responde al aviso espera que su
+   * flujo se reanude, y un simple `halt` dejaria la orden sin atender sin que
+   * nada lo dijera.
+   *
+   * El `\Seen` se marca SIEMPRE, al margen de `config.markAsRead` y de que la
+   * orden se acepte o se rechace. Esa bandera gobierna los correos de
+   * CONTENIDO —si marcarlos altera un buzon compartido es una decision del
+   * operador—, pero un mensaje de mando sin marcar lo reencuentra
+   * `findLatestMatchingUid` en cada sondeo: se reejecutaria en bucle y, peor,
+   * ningun correo posterior llegaria a procesarse nunca porque el maximo UID
+   * seria siempre este.
+   *
+   * Un fallo al despachar no tumba la ingesta ni devuelve error: se deja traza
+   * y se para igual. El testigo es de un solo uso y ya habra quedado consumido
+   * o invalidado; convertir esto en un `success: false` pausaria el flujo por
+   * un correo que ni siquiera era suyo.
+   */
+  private async dispatchResumeCommand(
+    client: ImapFlow,
+    uid: number,
+    parsed: ParsedMail,
+  ): Promise<NodeResult> {
+    this.logger.log(
+      `OMITIDO | REASON: ${RESUME_COMMAND_STATUS} | uid=${uid} | asunto="${parsed.subject ?? ''}" | se delega en InboundEmailResumeService`,
+    );
+
+    try {
+      await this.inboundEmailResumeService.processMessage(parsed);
+    } catch (error) {
+      this.logger.warn(
+        `No se pudo atender la orden de reanudacion del mensaje uid=${uid}: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+
+    await this.markSeenQuietly(client, uid);
+
+    // `halt` y no una salida normal: sin el, el motor avanzaria al nodo
+    // siguiente con el namespace del disparador vacio, que es exactamente el
+    // `ERR_LLM_MISSING_INPUT_TEXT` que esta via existe para evitar.
+    return {
+      success: true,
+      data: { status: RESUME_COMMAND_STATUS, skipped: true },
+      halt: {
+        reason:
+          'El mensaje era una orden de reanudacion, no contenido que procesar.',
+      },
+    };
+  }
+
+  /** Marca `\Seen` sin propagar: el flujo ya decidio su desenlace. */
+  private async markSeenQuietly(client: ImapFlow, uid: number): Promise<void> {
+    try {
+      await client.messageFlagsAdd(String(uid), ['\\Seen'], { uid: true });
+    } catch (error) {
+      this.logger.warn(
+        `No se pudo marcar como leido el mensaje de mando uid=${uid}; se reprocesara en el proximo sondeo: ${error instanceof Error ? error.message : String(error)}`,
+      );
     }
   }
 

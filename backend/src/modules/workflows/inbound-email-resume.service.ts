@@ -1,4 +1,5 @@
 import { Injectable, Logger } from '@nestjs/common';
+import { SchedulerRegistry } from '@nestjs/schedule';
 import { ConfigService } from '@nestjs/config';
 import { InjectRepository } from '@nestjs/typeorm';
 import { simpleParser } from 'mailparser';
@@ -17,19 +18,85 @@ import type { ResolvedImapConfig } from '@modules/nodes/dto/imap-trigger-config.
 import type { FsmExecution } from '@core/fsm/entities/fsm-execution.entity';
 import type { AuthenticatedUser } from '@modules/auth/interfaces/jwt-payload.interface';
 import type { User } from '@modules/users/entities/user.entity';
+import type { OnModuleDestroy, OnModuleInit } from '@nestjs/common';
 import type { ImapFlow, MailboxLockObject } from 'imapflow';
+import type { ParsedMail } from 'mailparser';
 import type { Repository } from 'typeorm';
 
 /**
- * Asunto que se acepta como orden de reanudacion.
+ * Texto que se acepta como orden de reanudacion.
  *
  * `REANUDAR <testigo>` o `REANUDAR <testigo> DESDE <paso>`, con sus equivalentes
  * en ingles. El identificador del flujo NO aparece: la ejecucion la determina el
  * testigo, y un UUID de produccion es un dato que no conviene pasear por buzones
  * ajenos ni por los registros de los servidores intermedios.
+ *
+ * El testigo es HEXADECIMAL: lo produce `randomBytes(n).toString('hex')`, asi
+ * que admitir el alfabeto alfanumerico completo solo ensanchaba la superficie
+ * de lo que hay que probar contra la base. La horquilla de longitud cubre los
+ * dos emisores —el nodo `PAUSA_FLOW` y el de alerta— sin atarse a ninguno.
  */
-const RESUME_SUBJECT_PATTERN =
-  /^(?:REANUDAR|RESUME)\s+([A-Za-z0-9]{12,32})(?:\s+(?:DESDE|FROM)\s+([a-zA-Z0-9_-]+))?$/i;
+const RESUME_COMMAND_REGEX =
+  /^(?:REANUDAR|RESUME)\s+([a-f0-9]{8,64})(?:\s+(?:DESDE|FROM)\s+([a-zA-Z0-9_-]+))?$/i;
+
+/**
+ * Prefijos de respuesta y reenvio que los clientes acumulan en el asunto.
+ *
+ * `Re:`, `RE:`, `Rv:`, `Fwd:`… y encadenados (`Re: Re: ...`). Son justo lo que
+ * rompia la lectura por asunto: la orden llega SIEMPRE como respuesta al aviso,
+ * nunca redactada desde cero.
+ */
+const SUBJECT_REPLY_PREFIXES = /^(?:\s*(?:re|rv|fw|fwd)\s*:\s*)+/i;
+
+/**
+ * Donde empieza la cita del correo original dentro de una respuesta.
+ *
+ * Por debajo de cualquiera de estas marcas viene el aviso entero, que incluye
+ * LITERALMENTE el texto `REANUDAR <testigo>` que el propio sistema escribio.
+ * Sin cortar ahi, toda respuesta —incluso un "recibido, gracias"— casaria con
+ * la orden y reanudaria el flujo sin que nadie lo hubiera pedido.
+ */
+const QUOTED_BLOCK_MARKERS: readonly RegExp[] = [
+  /^\s*>/,
+  /^\s*--\s*$/,
+  /^\s*_{5,}\s*$/,
+  /^\s*-{5,}\s*(?:mensaje original|original message)/i,
+  /^\s*el\s+.+\s+escribi(?:o|ó)\s*:/i,
+  /^\s*on\s+.+\s+wrote\s*:/i,
+  /^\s*de\s*:\s*/i,
+  /^\s*from\s*:\s*/i,
+];
+
+/**
+ * Primera linea util del cuerpo, descontada la cita y la firma.
+ *
+ * Helper PURO (`frontend-architecture.md` §2.1 aplica el mismo criterio en
+ * backend): sin estado ni E/S, para poder probarlo contra cuerpos reales.
+ *
+ * Devuelve `null` cuando no queda nada que mirar, que es lo que empuja a la
+ * llamada a probar con el asunto.
+ */
+export const extractCommandLine = (rawBody: string): string | null => {
+  for (const line of rawBody.split(/\r?\n/)) {
+    if (QUOTED_BLOCK_MARKERS.some((marker) => marker.test(line))) {
+      // No se sigue buscando: de aqui para abajo es texto del sistema, no del
+      // operador.
+      return null;
+    }
+
+    const trimmed = line.trim();
+
+    if (trimmed.length > 0) {
+      return trimmed;
+    }
+  }
+
+  return null;
+};
+
+/** Asunto sin los `Re:`/`Fwd:` acumulados. */
+export const cleanSubject = (rawSubject: string): string =>
+  rawSubject.replace(SUBJECT_REPLY_PREFIXES, '').trim();
 
 /** Roles que pueden dar la orden. Mismos que los de la API. */
 const AUTHORIZED_ROLES: ReadonlySet<UserRole> = new Set([
@@ -43,9 +110,25 @@ const MAX_COMMANDS_PER_RUN = 10;
 /** Inactividad maxima del socket durante la descarga de un mensaje. */
 const SOCKET_TIMEOUT_MS = 30_000;
 
+/** Nombre del intervalo en el `SchedulerRegistry`, para poder darlo de baja. */
+const RESUME_POLL_INTERVAL_NAME = 'inbound-resume-poll';
+
+/**
+ * Cada cuanto se mira el buzon de ordenes si no se declara otra cosa.
+ *
+ * Un minuto, como el sondeo de los flujos: la orden la da una persona que acaba
+ * de recibir un aviso y esta esperando a que su flujo arranque, asi que la
+ * latencia se nota. Mas abajo no compensa — cada vuelta abre una conexion IMAP.
+ */
+const DEFAULT_RESUME_POLL_MS = 60_000;
+
+/** Suelo del intervalo: por debajo se maltrata al servidor de correo. */
+const MIN_RESUME_POLL_MS = 15_000;
+
 /** Lo que se extrae de un mensaje antes de decidir nada. */
 interface InboundCommand {
-  readonly uid: number;
+  /** `null` cuando la orden no viene de un barrido del buzon propio. */
+  readonly uid: number | null;
   readonly fromAddress: string;
   readonly token: string;
   readonly targetIdentifier: string | null;
@@ -88,7 +171,9 @@ interface InboundCommand {
  * reanudacion es legal.
  */
 @Injectable()
-export class InboundEmailResumeService {
+export class InboundEmailResumeService
+  implements OnModuleInit, OnModuleDestroy
+{
   private readonly logger = new Logger(InboundEmailResumeService.name);
 
   constructor(
@@ -98,7 +183,91 @@ export class InboundEmailResumeService {
     private readonly usersService: UsersService,
     @InjectRepository(Workflow)
     private readonly workflowRepository: Repository<Workflow>,
+    private readonly schedulerRegistry: SchedulerRegistry,
   ) {}
+
+  /**
+   * Programa el barrido periodico del buzon de ordenes.
+   *
+   * SIN ESTO el canal no existia. `processInbox` estaba escrito y probado, pero
+   * no lo invocaba nadie en produccion —ni cron, ni intervalo, ni endpoint—, de
+   * modo que una orden de reanudacion enviada al buzon propio se quedaba ahi
+   * para siempre. El unico camino vivo era el del buzon del flujo, y ese solo
+   * existe desde que `ImapTriggerStrategy` delega.
+   *
+   * Apagado por defecto (`INBOUND_RESUME_ENABLED`), igual que el sondeo de
+   * flujos: una instalacion que no lo configure no abre ninguna conexion.
+   */
+  public onModuleInit(): void {
+    if (this.configService.get<string>('INBOUND_RESUME_ENABLED') !== 'true') {
+      this.logger.warn(
+        '[InboundEmailResume] Canal de ordenes por correo deshabilitado (INBOUND_RESUME_ENABLED != "true").',
+      );
+
+      return;
+    }
+
+    const intervalMs = this.resolvePollInterval();
+
+    // `processInbox` no lanza por una orden invalida, pero si puede hacerlo si
+    // el servidor de correo esta caido. El `catch` evita que un rechazo sin
+    // atrapar derribe el proceso desde el bucle de eventos del temporizador.
+    const interval = setInterval(() => {
+      void this.processInbox().catch((error: unknown) => {
+        this.logger.error(
+          `[InboundEmailResume] Fallo el barrido del buzon de ordenes: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      });
+    }, intervalMs);
+
+    this.schedulerRegistry.addInterval(RESUME_POLL_INTERVAL_NAME, interval);
+
+    this.logger.log(
+      `[InboundEmailResume] Buzon de ordenes vigilado cada ${intervalMs} ms.`,
+    );
+  }
+
+  /**
+   * Da de baja el intervalo.
+   *
+   * Sin esto, una recarga del `--watch` de Nest dejaria el temporizador viejo
+   * corriendo contra una instancia muerta, junto al de la instancia nueva: dos
+   * barridos simultaneos sobre el mismo buzon.
+   */
+  public onModuleDestroy(): void {
+    if (
+      this.schedulerRegistry.doesExist('interval', RESUME_POLL_INTERVAL_NAME)
+    ) {
+      this.schedulerRegistry.deleteInterval(RESUME_POLL_INTERVAL_NAME);
+    }
+  }
+
+  /**
+   * Lee `INBOUND_RESUME_POLL_MS` y lo acota.
+   *
+   * Lo que no sea un entero por encima del suelo se descarta con aviso y se cae
+   * al defecto: un intervalo mal escrito que se tomase al pie de la letra
+   * podria convertir el barrido en una tormenta de conexiones.
+   */
+  private resolvePollInterval(): number {
+    const raw = this.configService.get<string>('INBOUND_RESUME_POLL_MS');
+
+    if (raw === undefined || raw.trim() === '') {
+      return DEFAULT_RESUME_POLL_MS;
+    }
+
+    const parsed = Number(raw);
+
+    if (!Number.isInteger(parsed) || parsed < MIN_RESUME_POLL_MS) {
+      this.logger.warn(
+        `[InboundEmailResume] INBOUND_RESUME_POLL_MS="${raw}" no es un entero >= ${MIN_RESUME_POLL_MS}; se usa ${DEFAULT_RESUME_POLL_MS} ms.`,
+      );
+
+      return DEFAULT_RESUME_POLL_MS;
+    }
+
+    return parsed;
+  }
 
   /**
    * Lee el buzon de ordenes y atiende lo que encuentre.
@@ -189,7 +358,38 @@ export class InboundEmailResumeService {
    * Devuelve `true` solo si la ejecucion llego a reanudarse.
    */
   private async handleMessage(client: ImapFlow, uid: number): Promise<boolean> {
-    const command = await this.parseCommand(client, uid);
+    const download = await client.download(String(uid), undefined, {
+      uid: true,
+    });
+
+    return this.processMessage(await simpleParser(download.content), uid);
+  }
+
+  /**
+   * Atiende un mensaje YA parseado: lo valida de principio a fin y lo despacha.
+   *
+   * Publico porque tiene DOS entradas, y las dos tienen que pasar por las
+   * mismas guardas. La primera es el barrido de este servicio sobre su buzon
+   * propio (`INBOUND_RESUME_*`). La segunda es `ImapTriggerStrategy`, que se
+   * topa con la orden en el buzon QUE SONDEA EL FLUJO: el operador responde al
+   * correo de alerta y su respuesta cae ahi, no en el buzon de ordenes. Sin
+   * esta puerta, aquella estrategia tendria que reimplementar la validacion del
+   * testigo y el RBAC, y dos copias de una comprobacion de seguridad divergen.
+   *
+   * Recibe un `ParsedMail` y no un UID justamente por eso: la estrategia ya lo
+   * ha descargado y parseado, y volver a bajarlo con otro cliente IMAP seria
+   * pedir dos veces el mismo mensaje.
+   *
+   * @param parsed Mensaje decodificado por `mailparser`.
+   * @param uid UID de origen, solo para la traza; `null` si no viene de un
+   *        barrido propio.
+   * @returns `true` solo si la ejecucion llego a reanudarse.
+   */
+  public async processMessage(
+    parsed: ParsedMail,
+    uid: number | null = null,
+  ): Promise<boolean> {
+    const command = this.extractCommand(parsed, uid);
 
     if (command === null) {
       return false;
@@ -242,23 +442,42 @@ export class InboundEmailResumeService {
     return true;
   }
 
-  /** Descarga el mensaje y extrae la orden, o `null` si no lo es. */
-  private async parseCommand(
-    client: ImapFlow,
-    uid: number,
-  ): Promise<InboundCommand | null> {
-    const download = await client.download(String(uid), undefined, {
-      uid: true,
-    });
-    const parsed = await simpleParser(download.content);
-    const subject = (parsed.subject ?? '').trim();
-    const match = RESUME_SUBJECT_PATTERN.exec(subject);
+  /**
+   * Extrae la orden del mensaje, o `null` si no lo es.
+   *
+   * DOS VIAS, y el cuerpo manda sobre el asunto. El cuerpo es donde se le pide
+   * al operador que escriba, y es la unica via que sobrevive a un cliente que
+   * reescribe el asunto; el asunto queda de respaldo para quien responde sin
+   * texto util, que con una firma automatica delante es frecuente.
+   *
+   * Las dos pasan por la MISMA expresion y con anclaje completo: un cuerpo que
+   * traiga la orden mas cualquier cosa detras se rechaza. Es deliberado y es lo
+   * que impide que una respuesta larga que mencione el comando de pasada acabe
+   * reanudando un flujo.
+   */
+  private extractCommand(
+    parsed: ParsedMail,
+    uid: number | null,
+  ): InboundCommand | null {
+    const candidates = [
+      extractCommandLine(parsed.text ?? ''),
+      cleanSubject(parsed.subject ?? ''),
+    ];
+
+    const match = candidates.reduce<RegExpExecArray | null>(
+      (found, candidate) =>
+        found ??
+        (candidate === null || candidate.length === 0
+          ? null
+          : RESUME_COMMAND_REGEX.exec(candidate)),
+      null,
+    );
 
     if (match === null) {
       // Ni un `warn`: un buzon recibe correo que no son ordenes, y avisar de
       // cada uno llenaria el registro de ruido que nadie puede accionar.
       this.logger.debug(
-        `[InboundEmailResume] Mensaje uid=${uid} ignorado: el asunto no es una orden.`,
+        `[InboundEmailResume] Mensaje uid=${uid ?? 'n/d'} ignorado: ni el cuerpo ni el asunto son una orden.`,
       );
 
       return null;

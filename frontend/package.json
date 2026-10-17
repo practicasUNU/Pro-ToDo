@@ -2,7 +2,7 @@
   "name": "frontend",
   "version": "0.0.1",
   "description": "A Quasar Project",
-  "productName": "Pro-ToDo",
+  "productName": "Proto-Do",
   "author": "VictorContr <contrerasv174@gmail.com>",
   "type": "module",
   "private": true,

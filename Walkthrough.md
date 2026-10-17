@@ -8445,3 +8445,210 @@ entrega código de prueba verificado solo hasta donde llega el arranque de la ap
 - Sigue vigente lo advertido en las dos entregas anteriores: **030** (hoy toda parada ordenada falla
   contra la base real) y **040** (sin ella toda lectura de `flujos` muere), además de 026, 031, 032,
   041 y 042.
+
+---
+
+## Correos de mando, purga de `error_context` y límites Poka-Yoke (rama `feat/canvas-view`)
+
+### El correo que el operador responde vuelve al flujo
+
+El aviso de incidencia pide responder. Esa respuesta cae en el **mismo buzón que el flujo sondea**, y
+hasta ahora `ImapTriggerStrategy` la ingería como si fuera una noticia más: el cuerpo útil va vacío
+—lo único que lleva es el comando— y la ejecución reventaba tres nodos más adelante, en el
+`PROCESADOR_IA`, con `ERR_LLM_MISSING_INPUT_TEXT`. El diagnóstico apuntaba al nodo equivocado y no
+decía nada de la orden que nadie llegó a atender.
+
+Descartar el mensaje no bastaba. Quien responde espera que su flujo se reanude, así que la estrategia
+**delega y luego para**: llama a `InboundEmailResumeService.processMessage()` y cierra con `halt`.
+Ese método es nuevo solo en su visibilidad —sale del `handleMessage` privado—, y existe así para que
+las dos entradas al canal pasen por las **mismas** guardas. La alternativa era que la estrategia
+reimplementara la validación del testigo y el RBAC, y dos copias de una comprobación de seguridad
+divergen.
+
+Tres detalles del orden, que no son cosméticos:
+
+1. La guarda va **antes del filtro de asunto**. La orden llega como respuesta al aviso, de modo que
+   su asunto es el de aquel con un `Re:` delante y no casa con el filtro del flujo. Evaluada después,
+   el mensaje salía por `SUBJECT_FILTERED` y la reanudación no se atendía jamás.
+2. El `\Seen` se marca **al margen de `markAsRead`**. Esa bandera gobierna los correos de contenido
+   —si marcarlos altera un buzón compartido es decisión del operador—, pero un mensaje de mando sin
+   marcar lo reencuentra `findLatestMatchingUid` en cada sondeo: se reejecutaría en bucle y, peor,
+   ningún correo posterior llegaría a procesarse nunca, porque el UID máximo sería siempre ese.
+3. El `halt` es obligatorio. Sin él el motor avanza al nodo siguiente con el namespace del disparador
+   vacío, que es exactamente el fallo que esta vía existe para evitar. Y es `{ reason }`, no un
+   booleano: el contrato de `NodeResult` lo declara así.
+
+### La orden se lee del cuerpo, y la cita es una trampa
+
+La lectura por asunto estaba condenada: los clientes anteponen `Re:`, así que un asunto que empiece
+literalmente por `REANUDAR` solo se consigue editándolo a mano. Se pasa al cuerpo, con el asunto como
+respaldo para quien responde sin texto útil.
+
+Pero un `^…$` sobre el cuerpo crudo no sirve, y por un motivo que solo se ve mirando un correo real:
+**la cita del aviso incluye literalmente el texto `REANUDAR <testigo>` que el propio sistema
+escribió**. Sin cortar en la marca de cita, una respuesta que solo dijera «recibido, gracias»
+reanudaría el flujo. De ahí `extractCommandLine`, que descarta las líneas citadas y las firmas y
+devuelve la primera línea útil; y `cleanSubject`, que descuenta los `Re:`/`Fwd:` acumulados. Los dos
+son puros, para poder probarlos contra cuerpos reales.
+
+El anclaje sigue siendo completo: un cuerpo con texto de más detrás de la orden se rechaza. Es
+deliberado y es lo que impide que una respuesta larga que mencione el comando de pasada acabe
+reanudando un flujo.
+
+### El canal no existía
+
+`processInbox()` estaba escrito y probado, pero **no lo invocaba nadie en producción**: ni cron, ni
+intervalo, ni endpoint. Una orden enviada al buzón propio se quedaba ahí para siempre. Gana
+`onModuleInit`/`onModuleDestroy` con `SchedulerRegistry`, gobernados por `INBOUND_RESUME_ENABLED`
+—apagado por defecto— y un `INBOUND_RESUME_POLL_MS` acotado por abajo.
+
+### El aviso de un GRAVE ahora ofrece la salida
+
+El testigo solo lo emitía `PAUSA_FLOW`, es decir, la pausa *deliberada*. La pausa que de verdad
+interrumpe a alguien —un fallo GRAVE que deja el flujo esperando reintento— no ofrecía ninguna, de
+modo que la única salida era entrar en la aplicación.
+
+`SmtpAlertStrategy` lo emite bajo dos condiciones, y las dos importan. **GRAVE**, porque es la única
+severidad que acaba en `pauseAt`: con URGENTE el motor cierra sin cursor y con LEVE ni siquiera pausa,
+así que ofrecer un código ahí es prometer una salida que no existe —quien respondiera recibiría un
+rechazo por «testigo desconocido»—. Y **el canal encendido**, porque con `INBOUND_RESUME_ENABLED` en
+`false` nadie lee ningún buzón de vuelta.
+
+No hizo falta tocar el motor: la estrategia publica la huella en su propio namespace, `pauseAt` hace
+checkpoint del contexto entero y `findExecutionByToken` ya recorre todos los namespaces buscando la
+clave. El generador, el hash y el TTL suben a `@common/utils/resume-token.util`, y eso sí era
+necesario: con dos emisores y un verificador, una segunda implementación que normalizara distinto
+produciría huellas que no casan, y el síntoma sería un testigo legítimo rechazado como caducado, sin
+nada en el registro que apuntara a la causa.
+
+`resume_token_hash` y `token_expires_at` **se publican pero no se declaran** en `outputFields`: ese
+catálogo es lo que el explorador de variables ofrece para construir marcadores, y la huella de una
+credencial no es algo que ningún prompt deba poder citar.
+
+### Dos mitades del mismo repintado erróneo
+
+El canvas marcaba en ámbar el `pausa_flow` cuando el flujo había reventado en `procesador_ia`. Hay
+**dos** causas y hacían falta las dos correcciones:
+
+- **La prioridad.** `seedStatuses` —lo que corre al recargar, donde no hay evento que escuchar—
+  consultaba siempre primero la pausa programada. Ahora, si `error_context` trae contenido, marca
+  `PAUSED` **solo** el `activeCursor`.
+- **La purga.** Aun con la prioridad, un `error_context` de un fallo **ya reanudado** seguía en el
+  contexto, de modo que una suspensión limpia posterior se leía como fallo. `prepareResume` lo retira
+  con una copia filtrada —no con `delete`: el checkpoint es inmutable por contrato— y **antes** de
+  fusionar el parche, para que este siga mandando. La evidencia forense no se pierde: vive en
+  `logs_nodo` y en el `.log` físico, que es donde CU-09 la guarda a propósito.
+
+### La política de corrida única no alcanzaba a las reanudaciones
+
+`applyStopOnFirstSuccess` solo corría desde `runAutomaticWorkflow`. Un flujo que se atascaba, se
+reanudaba a mano y terminaba bien se quedaba `ACTIVO` con su sondeo vivo: la política «una sola
+corrida» se cumplía **solo si nadie había tenido que intervenir**, que es justo cuando menos falta
+hacía. Pasa a `public` y la invoca también `resumeExecution`, después del motor —hasta que
+`executeWorkflow` no devuelve no se sabe cómo terminó— y reevaluando sus cuatro condiciones.
+
+**No se inyectan los workers en el motor**, pese a que el encargo lo pedía literalmente:
+`NodesModule` importa `FsmModule`, así que sería un ciclo. Y no hace falta: el desregistro ya lo
+abanica `FlowPollingCoordinator.stopPollingForFlow` a los dos puertos, IMAP y Cron. El evento
+`flow:completed` tampoco se toca, porque ya era difusión global al namespace.
+
+### El techo de reintentos, y el suelo que no se mueve
+
+De 5 a 3 en los dos nodos de IA. El motor ejecuta los nodos **en línea**, así que el tiempo que una
+ejecución pasa bloqueada es `timeoutMs × (maxRetries + 1)` y se repite por cada proveedor de la
+cadena de respaldo.
+
+El suelo **sigue en cero**, al contrario de lo que pedía el encargo: apagar los reintentos es una
+configuración legítima y la más barata frente a un proveedor de pago, así que exigir al menos uno
+quitaba la única forma de expresarla. El techo de espera tampoco baja a 60 000: las variables
+`LLM_HTTP_*`/`OCR_HTTP_*` ya aplican piso y techo **en ejecución** sobre los flujos guardados, que es
+donde de verdad alcanza a lo que ya está persistido.
+
+La migración `043` recorta los `maxRetries` ya guardados porque el DTO valida al **editar**: un flujo
+viejo con 4 o 5 devolvería un 400 que el operador leería como un fallo del formulario y no como la
+consecuencia de un límite nuevo.
+
+### `markAsRead` existía y nadie podía tocarlo
+
+El campo estaba en el DTO desde el principio, con su valor por defecto y su TSDoc. Lo que no existía
+era ninguna forma de decidirlo: **ni el tipo, ni el store, ni el componente** del disparador lo
+contemplaban, así que todo flujo se guardaba con el defecto. Se expone con el mismo nombre que el DTO
+—un alias en cliente obligaría a traducir en `toNodeParams`, y el DTO valida con
+`forbidNonWhitelisted`— y se publica siempre, también apagado: lo que el operador vio marcado tiene
+que quedar escrito en el esquema, sin depender de un defecto que puede cambiar.
+
+El texto de ayuda cambia según la posición, y eso es deliberado: los dos lados tienen coste y ninguno
+es obviamente el correcto. Encendido se toca un buzón compartido de forma irreversible; apagado se
+pierde el marcador anti-duplicados y la deduplicación recae en la ventana de 48 h.
+
+**Lo que NO se movió:** el orden del marcado dentro de la estrategia. El encargo pedía llevarlo
+detrás del filtro de asunto, pero el comentario que ya estaba ahí explica por qué va delante: un
+correo descartado que quedase sin leer volvería a descargarse en cada sondeo y ningún mensaje
+posterior llegaría a procesarse, porque `findLatestMatchingUid` reencontraría siempre el mismo.
+
+### El explorador de variables, y lo que se queda
+
+El segundo selector ofrecía claves en `snake_case` sin más; la `description` que cada estrategia ya
+declara no se veía hasta *después* de elegir. Pasa a `emit-value` con `option-value="name"`: el modelo
+es la clave que se interpola, de modo que la etiqueta queda libre para llevar también la descripción.
+Eso obligó a mover `type` y `description` a un `selectedFieldDetail` resuelto aparte, porque la
+tarjeta de abajo los necesita y el modelo ya no los lleva.
+
+Del catálogo general salen `trigger` y `error_context` —mecánica del motor, no datos del negocio; y
+`error_context` solo existe en las ejecuciones que se desviaron, así que citado desde el camino feliz
+interpola vacío—. **`_assets` se conserva**, y la asimetría es deliberada: no es mecánica, es
+contenido, la base de las URL con las que una plantilla enlaza los binarios subidos a Drupal. Siguen
+funcionando si alguien los teclea; lo que se retira es la invitación a usarlos.
+
+`smtp_result` **entra** pese a ser categoría `DESTINO`. La regla general —un destino cierra el flujo,
+nada corre después— no le aplica: el alertador no vive en el camino feliz sino colgado de un
+`onErrorStep`, de modo que una rama de recuperación posterior puede citar el acuse del aviso. Se
+declara en un conjunto y no como una comparación suelta para que el día que aparezca otro destino con
+la misma forma se añada ahí en vez de ensanchar la regla.
+
+### Teclear para filtrar no es teclear para inventar
+
+Los desplegables son cerrados por Poka-Yoke (§4) y algunos listan decenas de entradas. `use-input`
+abre un campo para **filtrar**; lo que permitiría dar de alta un valor libre es `new-value-mode`, que
+no se declara en ninguno de los que se tocaron. Una prueba que ataba la garantía a `useInput` se
+corrigió para afirmar lo que de verdad la sostiene, `newValueMode`.
+
+Los selectores **múltiples** van sin `fill-input`/`hide-selected`: con ellos los chips de lo ya
+elegido dejan de pintarse. Y se dejan fuera las listas de dos o tres opciones fijas —roles,
+proveedores, modos—, donde un filtro es ruido.
+
+### La base que nadie sabía que estaba desfasada
+
+`PROCESADOR_OCR` **faltaba en la base de desarrollo**: la migración `022` nunca se aplicó ahí, de
+modo que `GET /api/nodos` no devolvía la fila y `ocr_result` no aparecía en el explorador. Once nodos
+en vez de doce, y nada que lo delatara. Ese es exactamente el caso que justifica `schema_migrations`.
+
+`scripts/apply-migrations.sh` registra lo aplicado y para en el primer fallo. **No envuelve nada en
+una transacción**: cada archivo declara la suya cuando la necesita, y las que añaden un valor a un
+enum (`030`, `039`) no pueden ir en una (error 55P04). `--baseline` adopta una base ya al día sin
+reejecutar.
+
+Al construir una base limpia salieron dos cosas que conviene dejar escritas:
+
+- **`init.sql` no se puede encadenar con toda la historia.** Es el acumulado final, así que varias
+  migraciones describen pasos que ya dejó atrás: la `005` actualiza `tipos_nodo` (sustituida por
+  `nodos` en la `011`), la `009` recrea `tokens_sesion` sin `IF NOT EXISTS`, y la `002` **promueve**
+  una cuenta en vez de crearla. Por eso el bootstrap las registra en baseline y siembra el ADMIN
+  aparte.
+- **Las migraciones `035`-`038` están rotas.** Escriben en `plantillas_html.actualizado_en` y
+  `plantillas_prompts_ia.actualizado_en`, columnas que no existen: las dos tablas usan
+  `fecha_actualizacion`. Fallan contra cualquier base, también la de desarrollo. Defecto previo,
+  pendiente de decidir si se corrigen o se retiran.
+
+Las semillas **no se funden en `init.sql`**, pese a que el encargo lo pedía: duplicarlas crearía dos
+copias de cada plantilla y cada prompt, y dos copias divergen. El archivo sigue siendo DDL puro.
+
+### La suite E2E no podía pasar
+
+`fsm-canvas-execution.e2e-spec.ts` sembraba la ejecución en `INACTIVO` y pedía reanudarla.
+`POST /executions/:id/resume` exige `PAUSADO` y devuelve 409 con cualquier otro estado —guarda
+deliberada: solo una ejecución detenida tiene desde dónde retomarse—, así que **siete de los nueve
+casos fallaban en su primera petición**, antes de ejercitar nada de lo que venían a probar. Se
+corrigió el fixture, no la guarda. Con eso los nueve pasan, y la tanda añade tres más:
+autodesactivación tras reanudar, su contraria sin la política declarada, y el rechazo de un
+`maxRetries` por encima del techo.

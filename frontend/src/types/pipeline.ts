@@ -60,6 +60,20 @@ export const TRIGGER_NODE_TYPES: ReadonlySet<string> = new Set<string>([
 ]);
 
 /**
+ * Namespace reservado que siembra el MOTOR antes de desviar por `onErrorStep`.
+ *
+ * Replica de `ERROR_CONTEXT_NAMESPACE`
+ * (`backend/src/core/fsm/types/pipeline-schema.types.ts`). NO esta en
+ * `NODE_OUTPUT_NAMESPACES` a proposito: ningun nodo puede declararlo como su
+ * salida, porque lo escribe el motor.
+ *
+ * Su presencia en el contexto es lo que separa una pausa TECNICA —hay que
+ * reintentar el cursor— de una DELIBERADA pedida por un `PAUSA_FLOW`, que se
+ * pintan en cajas distintas.
+ */
+export const ERROR_CONTEXT_NAMESPACE = 'error_context';
+
+/**
  * Namespaces que un nodo puede declarar como `outputNamespace`.
  *
  * Replica de `NODE_OUTPUT_NAMESPACES` del backend. Es una lista CERRADA: el

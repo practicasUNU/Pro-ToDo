@@ -5,6 +5,8 @@ import { useQuasar } from 'quasar';
 import { useNodeCatalogStore } from '@stores/node-catalog.store';
 import TemplateNodeCard from '@components/workflow-templates/TemplateNodeCard.vue';
 
+import { useSelectFilter } from '@/composables/useSelectFilter';
+
 import { extractApiErrorMessage } from '@/utils/api-error';
 
 import { NODE_CATEGORY_LABELS, NodeCategory } from '@/types/node-catalog';
@@ -103,6 +105,11 @@ const groupedOptions = computed(() =>
       disable: !entry.implemented,
     })),
 );
+
+// Filtrado predictivo sobre el catalogo de nodos. Busca por el nombre visible
+// y tambien por el codigo, que es como lo recuerda quien ya conoce el sistema.
+const { filteredOptions: filteredNodeOptions, filterFn: filterNodes } =
+  useSelectFilter(groupedOptions);
 
 const isCatalogEmpty = computed<boolean>(
   () => !catalogStore.isLoading && catalogStore.entries.length === 0,
@@ -266,7 +273,12 @@ onMounted(async () => {
         option-value="entry"
         option-label="label"
         option-disable="disable"
-        :options="groupedOptions"
+        use-input
+        fill-input
+        hide-selected
+        input-debounce="0"
+        :options="filteredNodeOptions"
+        @filter="filterNodes"
         :loading="catalogStore.isLoading"
         :label="isEntryPointSlot ? 'Elige el disparador inicial' : 'Anadir nodo'"
         :hint="

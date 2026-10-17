@@ -277,6 +277,22 @@ export class ExecutionsService {
       { flowName: workflow.name },
     );
 
+    // La politica de corrida unica tambien alcanza a las reanudaciones. Sin
+    // esta llamada, un flujo que se atasca, se reanuda y termina bien se queda
+    // ACTIVO con su sondeo vivo: la autodesactivacion solo corria por el
+    // despacho automatico, de modo que bastaba una intervencion manual para
+    // que el flujo siguiera disparando ejecuciones que ya no debia disparar.
+    //
+    // Va DESPUES del motor y no antes por lo obvio —hasta que `executeWorkflow`
+    // no devuelve no se sabe como termino—, y el propio metodo vuelve a leer
+    // las cuatro condiciones, asi que una reanudacion que acaba PAUSADA otra
+    // vez, OMITIDA o desviada por contingencia no apaga nada.
+    await this.workflowsService.applyStopOnFirstSuccess(
+      workflow,
+      schema,
+      finished,
+    );
+
     return {
       executionId: finished.executionId,
       workflowId: workflow.id,

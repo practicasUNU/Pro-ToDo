@@ -8,7 +8,10 @@ import { useAiPromptTemplatesStore } from '@stores/ai-prompt-templates.store';
 import AiPromptPreviewDialog from '@components/ai-prompt-templates/AiPromptPreviewDialog.vue';
 import AiPromptTemplateDialog from '@components/ai-prompt-templates/AiPromptTemplateDialog.vue';
 
+import { useSelectFilter } from '@/composables/useSelectFilter';
+
 import { extractApiErrorMessage } from '@/utils/api-error';
+import { rangeClass } from '@/utils/field-range';
 
 import { NODE_TYPE_LABELS, NodeType } from '@/types/pipeline';
 import type { AiPromptTemplateDetail } from '@/types/ai-prompt-template';
@@ -76,6 +79,17 @@ const BRAKE_HINT =
   'Fallos consecutivos del proveedor que pausan el flujo. Es el corte de la espiral de gasto: al alcanzarlo, la ejecucion queda PAUSADA con el cursor intacto.';
 
 /** Selector cerrado del proveedor (Poka-Yoke §4). */
+// Filtrado predictivo en las dos listas largas del nodo: el repositorio de
+// prompts crece sin tope y un proveedor puede publicar decenas de modelos. El
+// selector sigue CERRADO —no se declara `new-value-mode`—, asi que teclear
+// filtra pero no inventa.
+const { filteredOptions: filteredPromptOptions, filterFn: filterPrompts } = useSelectFilter(
+  () => store.promptOptions,
+);
+const { filteredOptions: filteredModelOptions, filterFn: filterModels } = useSelectFilter(
+  () => store.modelOptions,
+);
+
 const providerOptions = computed(() =>
   Object.values(LlmProvider).map((provider) => ({
     label: LLM_PROVIDER_LABELS[provider],
@@ -218,13 +232,18 @@ onMounted(async () => {
       <q-select
         id="llm-template-prompt"
         :model-value="store.config.templatePromptId"
-        :options="store.promptOptions"
+        :options="filteredPromptOptions"
         outlined
         dense
         clearable
         emit-value
         map-options
+        use-input
+        fill-input
+        hide-selected
+        input-debounce="0"
         class="q-mt-xs"
+        @filter="filterPrompts"
         hint="Prompts revisados y compartidos entre flujos. Se gestionan en Prompts de IA."
         @update:model-value="
           store.updateConfig({ templatePromptId: ($event ?? null) as string | null })
@@ -340,14 +359,19 @@ onMounted(async () => {
         <q-select
           id="llm-model"
           :model-value="store.config.model"
-          :options="store.modelOptions"
+          :options="filteredModelOptions"
           :loading="store.isLoadingModels"
           outlined
           dense
           emit-value
           map-options
           option-disable="disable"
+          use-input
+          fill-input
+          hide-selected
+          input-debounce="0"
           class="q-mt-xs"
+          @filter="filterModels"
           :hint="store.modelOptions.length > 0 ? MODEL_HINT : NO_MODELS_HINT"
           :rules="[(val: string) => !!val?.trim() || 'El modelo es obligatorio']"
           @update:model-value="store.updateConfig({ model: String($event ?? '') })"
@@ -489,7 +513,11 @@ onMounted(async () => {
         </q-toggle>
       </div>
 
-      <div class="col-12 col-md-4" data-test="timeout-field">
+      <div
+        class="col-12 col-md-4"
+        :class="rangeClass(store.config.timeoutMs, MIN_LLM_TIMEOUT_MS, MAX_LLM_TIMEOUT_MS)"
+        data-test="timeout-field"
+      >
         <label class="pd-label" for="llm-timeout">Espera maxima (ms)</label>
         <q-input
           id="llm-timeout"
@@ -514,7 +542,11 @@ onMounted(async () => {
         />
       </div>
 
-      <div class="col-12 col-md-4" data-test="retries-field">
+      <div
+        class="col-12 col-md-4"
+        :class="rangeClass(store.config.maxRetries, MIN_LLM_RETRIES, MAX_LLM_RETRIES)"
+        data-test="retries-field"
+      >
         <label class="pd-label" for="llm-retries">Reintentos de red</label>
         <q-input
           id="llm-retries"

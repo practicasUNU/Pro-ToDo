@@ -114,6 +114,7 @@ interface ServiceHarness {
   workflows: {
     deactivateAfterDiscard: jest.Mock;
     reactivateAfterResume: jest.Mock;
+    applyStopOnFirstSuccess: jest.Mock;
   };
   events: ExecutionEventsCoordinator;
   hybridLogger: { logNodeExecution: jest.Mock };
@@ -163,6 +164,7 @@ const buildHarness = (): ServiceHarness => {
   };
   const workflows = {
     reactivateAfterResume: jest.fn().mockResolvedValue(undefined),
+    applyStopOnFirstSuccess: jest.fn().mockResolvedValue(undefined),
     deactivateAfterDiscard: jest.fn().mockResolvedValue({
       id: FLOW_ID,
       name: 'Flujo de prueba',
@@ -478,6 +480,58 @@ describe('ExecutionsService (consulta y reintento manual CU-09)', () => {
           status: NodeLogStatus.ADVERTENCIA,
         }),
       );
+    });
+
+    it('2b.6 deberia aplicar la politica de corrida unica al terminar', async () => {
+      // 1. Arrange 📐: era el defecto. `applyStopOnFirstSuccess` solo corria
+      //    desde el despacho automatico, de modo que un flujo que se atascaba,
+      //    se reanudaba a mano y terminaba bien se quedaba ACTIVO con su
+      //    sondeo vivo: la politica "una sola corrida" solo se cumplia si
+      //    nadie habia tenido que intervenir.
+      const { service, workflows } = buildHarness();
+
+      // 2. Act ⚙️
+      await service.resumeExecution(EXECUTION_ID, {}, CURRENT_USER);
+
+      // 3. Assert 🎯: se le entrega el desenlace REAL del motor, porque las
+      // cuatro condiciones de la politica se leen de ahi.
+      expect(workflows.applyStopOnFirstSuccess).toHaveBeenCalledTimes(1);
+      expect(workflows.applyStopOnFirstSuccess).toHaveBeenCalledWith(
+        expect.objectContaining({ id: expect.any(String) }),
+        expect.anything(),
+        // El desenlace REAL que devolvio el motor: las cuatro condiciones de
+        // la politica se leen de ahi (`currentState`, `haltReason`,
+        // `tookContingency`).
+        expect.objectContaining({ currentState: ExecutionState.EXITOSO }),
+      );
+    });
+
+    it('2b.7 deberia decidir la politica DESPUES de ejecutar, no antes', async () => {
+      // 1. Arrange 📐: hasta que `executeWorkflow` no devuelve no se sabe como
+      //    termino, asi que invocarla antes apagaria flujos por el desenlace
+      //    del intento ANTERIOR.
+      const { service, engine, workflows } = buildHarness();
+      const order: string[] = [];
+      engine.executeWorkflow.mockImplementation(() => {
+        order.push('executeWorkflow');
+
+        return Promise.resolve(
+          buildExecution({
+            currentState: ExecutionState.EXITOSO,
+            activeCursor: null,
+            failureReason: null,
+          }),
+        );
+      });
+      workflows.applyStopOnFirstSuccess.mockImplementation(() => {
+        order.push('applyStopOnFirstSuccess');
+      });
+
+      // 2. Act ⚙️
+      await service.resumeExecution(EXECUTION_ID, {}, CURRENT_USER);
+
+      // 3. Assert 🎯
+      expect(order).toEqual(['executeWorkflow', 'applyStopOnFirstSuccess']);
     });
   });
 

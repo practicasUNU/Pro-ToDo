@@ -56,6 +56,19 @@ export interface AlertEmailParams {
   readonly maxRetries?: number;
   /** Nota en texto plano que el operador configuro en el nodo. */
   readonly customNote?: string;
+  /**
+   * Como reanudar el flujo respondiendo a este mismo correo.
+   *
+   * Bloque PROPIO y no un anexo dentro de `customNote`, que pertenece al
+   * operador: estas lineas las escribe el sistema, llevan una credencial de un
+   * solo uso y las emiten dos nodos distintos —la pausa programada y la alerta
+   * por fallo GRAVE—. Pegadas a la nota se maquetaban bajo el rotulo "Nota del
+   * operador", que es justo lo que no son, y cada emisor tenia que recomponer
+   * el texto por su cuenta.
+   *
+   * Lo compone `buildResumeInstructions` (`@common/utils/resume-token.util`).
+   */
+  readonly resumeInstructions?: string;
   readonly partialData?: Record<string, unknown>;
   /**
    * Variable del asunto que no resolvio contra el contexto.
@@ -154,6 +167,7 @@ export const buildAlertEmailHtml = (params: AlertEmailParams): string => {
     attempts,
     maxRetries,
     customNote,
+    resumeInstructions,
     partialData,
     unresolvedSubjectVariable,
   } = params;
@@ -180,6 +194,23 @@ export const buildAlertEmailHtml = (params: AlertEmailParams): string => {
             <div style="background:${BRAND_SURFACE};border-left:3px solid ${BRAND_PRIMARY};border-radius:8px;padding:14px 18px">
               <div style="font-size:11px;font-weight:700;letter-spacing:1px;text-transform:uppercase;color:${BRAND_TEXT_MUTED};margin-bottom:6px">Nota del operador</div>
               <p style="margin:0;font-size:14px;line-height:22px;color:${BRAND_TEXT};white-space:pre-wrap">${escapeHtml(customNote)}</p>
+            </div>
+          </td>
+        </tr>`;
+
+  // Acento en `--pd-primary` y no en el rojo de la incidencia: esto es la via
+  // de salida, no parte del diagnostico. El testigo va en `pd-mono` por el
+  // mismo criterio que la tabla de tokens aplica a los valores tecnicos — hay
+  // que copiarlo caracter a caracter.
+  const resumeBlock =
+    resumeInstructions === undefined || resumeInstructions.trim().length === 0
+      ? ''
+      : `
+        <tr>
+          <td style="padding:0 28px 20px">
+            <div style="background:${BRAND_SURFACE};border-left:3px solid ${BRAND_PRIMARY};border-radius:8px;padding:14px 18px">
+              <div style="font-size:11px;font-weight:700;letter-spacing:1px;text-transform:uppercase;color:${BRAND_TEXT_MUTED};margin-bottom:6px">Como reanudar este flujo</div>
+              <p style="margin:0;font-size:13px;line-height:22px;color:${BRAND_TEXT};white-space:pre-wrap;font-family:'JetBrains Mono','Fira Code',Consolas,monospace">${escapeHtml(resumeInstructions)}</p>
             </div>
           </td>
         </tr>`;
@@ -265,7 +296,7 @@ export const buildAlertEmailHtml = (params: AlertEmailParams): string => {
             <h1 style="margin:${badge === '' ? '0' : '14px'} 0 8px;font-size:20px;line-height:28px;font-weight:700;color:${BRAND_TEXT}">${escapeHtml(params.title ?? DEFAULT_EMAIL_TITLE)}</h1>
             <p style="margin:0;font-size:14px;line-height:22px;color:${BRAND_TEXT_MUTED}">${headline}</p>
           </td>
-        </tr>${messageBlock}${descriptionBlock}${noteBlock}
+        </tr>${messageBlock}${descriptionBlock}${noteBlock}${resumeBlock}
         <tr>
           <td style="padding:0 28px 20px">
             <div style="font-size:11px;font-weight:700;letter-spacing:1px;text-transform:uppercase;color:${BRAND_TEXT_MUTED};margin-bottom:4px">Diagnostico tecnico</div>
@@ -332,6 +363,13 @@ export const buildAlertEmailText = (params: AlertEmailParams): string => {
 
   if (params.customNote !== undefined && params.customNote.trim().length > 0) {
     lines.push('', 'NOTA DEL OPERADOR', params.customNote);
+  }
+
+  if (
+    params.resumeInstructions !== undefined &&
+    params.resumeInstructions.trim().length > 0
+  ) {
+    lines.push('', 'COMO REANUDAR ESTE FLUJO', params.resumeInstructions);
   }
 
   lines.push('', 'DIAGNOSTICO TECNICO');

@@ -46,7 +46,14 @@ export const MAX_OCR_TIMEOUT_MS = 120_000;
  */
 export const DEFAULT_OCR_MAX_RETRIES = 1;
 export const MIN_OCR_RETRIES = 0;
-export const MAX_OCR_RETRIES = 5;
+/**
+ * TRES y no cinco. Replica del techo del DTO del backend, que bajo porque el
+ * motor ejecuta los nodos EN LINEA: el tiempo que una ejecucion pasa bloqueada
+ * es `timeoutMs x (maxRetries + 1)` y se repite por cada proveedor de la cadena
+ * de respaldo. El suelo sigue en CERO —apagar los reintentos es la
+ * configuracion mas barata frente a un proveedor de pago—.
+ */
+export const MAX_OCR_RETRIES = 3;
 
 /**
  * Configuracion del nodo `PROCESADOR_OCR`.

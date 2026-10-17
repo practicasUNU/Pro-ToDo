@@ -168,7 +168,12 @@ describe('TemplateMapperConfig · configurador del nodo MAPEADOR_PLANTILLA', () 
       //    mayuscula o un guion ahi eran un 400 al guardar el flujo entero.
       expect(select.exists()).toBe(true);
       expect(select.props('options')).toContain('rendered_html');
-      expect(select.props('useInput')).toBeFalsy();
+
+      // LA GARANTIA ES `new-value-mode`, NO `use-input`. Este ultimo solo abre
+      // un campo para teclear y FILTRAR la lista, que con once namespaces ya se
+      // agradece; lo que permitiria dar de alta un valor inventado —y devolver
+      // el 400 que esta prueba vigila— es `new-value-mode`, que no se declara.
+      expect(select.props('newValueMode')).toBeUndefined();
     });
   });
 

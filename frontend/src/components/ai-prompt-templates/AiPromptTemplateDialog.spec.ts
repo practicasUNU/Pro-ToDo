@@ -195,12 +195,11 @@ describe('AiPromptTemplateDialog · redaccion de la instruccion a dos columnas',
       expect(namespaces).not.toContain('http_result');
     });
 
-    it('2.1b deberia ofrecer los origenes que siembra el MOTOR', async () => {
-      // 1. Arrange 📐: `trigger`, `error_context` y `_assets` no los publica
-      //    ninguna estrategia, asi que por la via del catalogo no pueden
-      //    aparecer nunca. Y son marcadores validos: `{{trigger.flow_name}}` es
-      //    lo que lleva el asunto por defecto del nodo de alerta. Se podian
-      //    teclear pero no elegir, que es justo lo que §4 quiere evitar.
+    it('2.1b deberia ofrecer `_assets`, que no publica ninguna estrategia', async () => {
+      // 1. Arrange 📐: `_assets` no lo declara ningun nodo, asi que por la via
+      //    del catalogo no puede aparecer nunca; y es contenido, no mecanica
+      //    del motor: es la base de las URL con las que una plantilla enlaza
+      //    los binarios subidos a Drupal.
       const wrapper = await openDialog();
 
       // 2. Act ⚙️
@@ -211,8 +210,30 @@ describe('AiPromptTemplateDialog · redaccion de la instruccion a dos columnas',
       const namespaces = options.map(({ value }) => value);
 
       // 3. Assert 🎯
-      expect(namespaces).toContain('trigger');
-      expect(namespaces).toContain('error_context');
+      expect(namespaces).toContain('_assets');
+    });
+
+    it('2.1b-bis NO deberia ofrecer la mecanica interna del motor', async () => {
+      // 1. Arrange 📐: `trigger` y `error_context` describen como funciona el
+      //    motor, no datos del negocio. `error_context` ademas solo existe en
+      //    las ejecuciones que se desviaron por `onErrorStep`, asi que citado
+      //    desde el camino feliz interpola vacio — un marcador que unas veces
+      //    trae dato y otras no es lo que §4 intenta evitar.
+      //
+      //    Siguen FUNCIONANDO si alguien los teclea: lo que se retira es la
+      //    invitacion a usarlos desde la interfaz.
+      const wrapper = await openDialog();
+
+      // 2. Act ⚙️
+      const options = wrapper
+        .get('[data-test="namespace-field"]')
+        .findComponent(QSelect)
+        .props('options') as readonly { value: string }[];
+      const namespaces = options.map(({ value }) => value);
+
+      // 3. Assert 🎯
+      expect(namespaces).not.toContain('trigger');
+      expect(namespaces).not.toContain('error_context');
     });
 
     it('2.1c deberia tener los campos de ocr_result resueltos al abrir', async () => {

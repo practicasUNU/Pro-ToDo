@@ -27,7 +27,10 @@ import { DataSource } from 'typeorm';
 import { generateDevJwt } from '@common/utils/dev-jwt.util';
 import { FsmExecution } from '@core/fsm/entities/fsm-execution.entity';
 import { NodeStrategyFactory } from '@core/fsm/factories/node-strategy.factory';
-import { registerDummyStrategies } from '@core/fsm/scripts/dummy-pipeline.fixture';
+import {
+  buildDummySchema,
+  registerDummyStrategies,
+} from '@core/fsm/scripts/dummy-pipeline.fixture';
 import { ExecutionState } from '@core/fsm/types/fsm.enums';
 import { NodeType } from '@core/fsm/types/pipeline-schema.types';
 import { ExecutionsService } from '@modules/workflows/executions.service';
@@ -47,6 +50,9 @@ const BOOTSTRAP_TIMEOUT_MS = 30_000;
 
 /** Margen para que un evento viaje por el canal antes de darlo por perdido. */
 const EVENT_TIMEOUT_MS = 10_000;
+
+/** Holgura por caso: cada uno arranca el motor contra PostgreSQL real. */
+const CASE_TIMEOUT_MS = 30_000;
 
 const TEST_USER_ID = '00000000-0000-0000-0000-0000000000e2';
 const E2E_FLOW_PREFIX = '[E2E canvas]';
@@ -135,12 +141,20 @@ describe('Canvas FSM · pausa, reanudacion y descarte (e2e)', () => {
   };
 
   /** Ejecucion lista para arrancar desde el principio. */
-  const seedExecution = async (flowId: string): Promise<string> => {
+  const seedExecution = async (
+    flowId: string,
+    cursor: string = FIRST_NODE_ID,
+  ): Promise<string> => {
     const execution = await repository.save(
       repository.create({
         flowId,
-        currentState: ExecutionState.INACTIVO,
-        activeCursor: FIRST_NODE_ID,
+        // PAUSADO y no INACTIVO. `POST /executions/:id/resume` exige PAUSADO y
+        // devuelve 409 con cualquier otro estado —una guarda deliberada: solo
+        // una ejecucion detenida tiene desde donde retomarse—, asi que sembrar
+        // INACTIVO hacia que los siete casos que reanudan fallaran en su
+        // primera peticion, antes de ejercitar nada de lo que vienen a probar.
+        currentState: ExecutionState.PAUSADO,
+        activeCursor: cursor,
         contextPayload: {},
         retryState: {},
       }),
@@ -577,5 +591,136 @@ describe('Canvas FSM · pausa, reanudacion y descarte (e2e)', () => {
       expect(execution.activeCursor).toBeNull();
       expect(await readWorkflowStatus(flowId)).toBe('INACTIVO');
     });
+  });
+
+  describe('5. Autodesactivacion tras una reanudacion exitosa', () => {
+    /**
+     * EL DEFECTO QUE CIERRA ESTA SECCION. `applyStopOnFirstSuccess` solo corria
+     * desde el despacho automatico, de modo que un flujo que se atascaba, se
+     * reanudaba a mano y terminaba bien se quedaba ACTIVO con su sondeo en
+     * marcha: la politica "una sola corrida" se cumplia solo si nadie habia
+     * tenido que intervenir, que es justo cuando menos falta hacia.
+     */
+    /**
+     * Flujo que recorre el grafo ENTERO y cierra EXITOSO.
+     *
+     * Reutiliza `buildDummySchema`, el pipeline de andamiaje de tres nodos cuyas
+     * estrategias dobles estan hechas para completar: escribirlo a mano aqui
+     * obligaba a replicar los `params` que espera cada doble —el disparador
+     * falla sin los suyos— y a mantener esa copia al dia.
+     *
+     * El de la suite no sirve: se detiene a mitad por diseno, y lo que aqui se
+     * mide es el desenlace de una ejecucion que TERMINA.
+     */
+    const seedStraightFlow = async (
+      stopOnFirstSuccess: boolean,
+    ): Promise<string> => {
+      const flowId = await seedFlow();
+      const schema = buildDummySchema(flowId);
+
+      await dataSource.query(
+        `UPDATE flujos SET configuracion_pipeline = $1 WHERE id_flujo = $2`,
+        [
+          JSON.stringify(
+            stopOnFirstSuccess
+              ? { ...schema, executionPolicy: { stopOnFirstSuccess: true } }
+              : schema,
+          ),
+          flowId,
+        ],
+      );
+
+      return flowId;
+    };
+
+    it(
+      '5.1 deberia apagar el flujo cuando la ejecucion reanudada termina EXITOSO',
+      async () => {
+        // 1. Arrange 📐: un flujo que recorre el grafo entero y cierra EXITOSO.
+        const flowId = await seedStraightFlow(true);
+        const executionId = await seedExecution(flowId, 'nodo_input');
+
+        // 2. Act ⚙️: se reanuda desde el CURSOR, que es donde quedo. La
+        //    reanudacion selectiva solo admite pasos que ya corrieron, y aqui
+        //    no ha corrido ninguno.
+        await request(httpServer())
+          .post(`/api/executions/${executionId}/resume`)
+          .set('Authorization', `Bearer ${token}`)
+          .send({})
+          .expect(200);
+
+        // 3. Assert 🎯
+        const execution = await readExecution(executionId);
+
+        expect(execution.currentState).toBe(ExecutionState.EXITOSO);
+        // LO QUE IMPORTA: el flujo queda INACTIVO, de modo que su sondeo deja
+        // de crear ejecuciones nuevas.
+        expect(await readWorkflowStatus(flowId)).toBe('INACTIVO');
+      },
+      CASE_TIMEOUT_MS,
+    );
+
+    it(
+      '5.2 NO deberia apagar un flujo SIN la politica declarada',
+      async () => {
+        // 1. Arrange 📐: la contrapartida. Sin `stopOnFirstSuccess` el flujo
+        //    sigue armado, que es el comportamiento de siempre.
+        const flowId = await seedStraightFlow(false);
+        const executionId = await seedExecution(flowId, 'nodo_input');
+
+        // 2. Act ⚙️
+        await request(httpServer())
+          .post(`/api/executions/${executionId}/resume`)
+          .set('Authorization', `Bearer ${token}`)
+          .send({})
+          .expect(200);
+
+        // 3. Assert 🎯
+        expect(await readExecution(executionId)).toMatchObject({
+          currentState: ExecutionState.EXITOSO,
+        });
+        expect(await readWorkflowStatus(flowId)).toBe('ACTIVO');
+      },
+      CASE_TIMEOUT_MS,
+    );
+  });
+
+  describe('6. Limites Poka-Yoke de los nodos de IA', () => {
+    it(
+      '6.1 deberia rechazar un `maxRetries` por encima del techo',
+      async () => {
+        // 1. Arrange 📐: el motor ejecuta los nodos EN LINEA, asi que el tiempo
+        //    bloqueado es `timeoutMs x (maxRetries + 1)` y se repite por cada
+        //    proveedor de respaldo. El techo bajo de 5 a 3.
+        const flowId = await seedFlow();
+        const schema = buildPauseSchema(flowId);
+        const withTooManyRetries = {
+          ...schema,
+          nodes: {
+            ...schema.nodes,
+            [PAUSE_NODE_ID]: {
+              ...schema.nodes[PAUSE_NODE_ID],
+              nodeType: NodeType.PROCESADOR_IA,
+              outputNamespace: 'llm_response',
+              params: {
+                provider: 'MOCK',
+                model: 'mock-1',
+                promptText: 'Redacta algo.',
+                maxRetries: 4,
+              },
+            },
+          },
+        };
+
+        // 2. Act ⚙️ + 3. Assert 🎯: el DTO valida al GUARDAR, no al ejecutar,
+        // asi que el rechazo llega aqui y no con el flujo ya en marcha.
+        await request(httpServer())
+          .patch(`/api/workflows/${flowId}`)
+          .set('Authorization', `Bearer ${token}`)
+          .send({ pipelineSchema: withTooManyRetries })
+          .expect(400);
+      },
+      CASE_TIMEOUT_MS,
+    );
   });
 });

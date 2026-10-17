@@ -1,5 +1,10 @@
 import { Injectable, Logger } from '@nestjs/common';
-import { createHash, randomBytes } from 'node:crypto';
+import {
+  buildResumeInstructions,
+  buildResumeTokenExpiry,
+  generateResumeToken,
+  hashResumeToken as hashToken,
+} from '@common/utils/resume-token.util';
 import { plainToInstance } from 'class-transformer';
 import { validate } from 'class-validator';
 
@@ -31,28 +36,21 @@ export const ERR_PAUSE_CONFIG = 'ERR_PAUSE_CONFIG';
 export const PROGRAMMED_PAUSE_REASON = 'PROGRAMMED_AUTO_PAUSE';
 
 /**
- * Vigencia del testigo de reanudacion por correo. Siete dias.
+ * El testigo ya NO se define aqui.
  *
- * Una pausa que espera el visto bueno de una persona puede cruzar un fin de
- * semana o unas vacaciones cortas; menos tiempo obligaria a relanzar el flujo
- * por una demora normal. Mas tampoco: un testigo que vive en un buzon durante
- * meses es un testigo que alguien reenvia por error.
- */
-export const RESUME_TOKEN_TTL_MS = 7 * 24 * 60 * 60 * 1000;
-
-/**
- * Testigo de un solo uso para reanudar desde el correo.
+ * Vive en `@common/utils/resume-token.util` desde que un segundo nodo —el de
+ * alerta, `DESTINO_SMTP`— tambien lo emite: con dos emisores y un verificador,
+ * dejar el generador y el hash dentro de una estrategia concreta obligaba a los
+ * demas a importar de ella.
  *
- * Veinte caracteres hexadecimales: 80 bits, que es mucho mas de lo que hace
- * falta para que no se adivine, y a la vez algo que una persona puede copiar a
- * mano desde el aviso sin equivocarse. Sin simbolos, porque viaja en un asunto
- * de correo que varios clientes reescriben.
+ * Se REEXPORTA `hashResumeToken` porque varias pruebas y
+ * `InboundEmailResumeService` lo importaban desde este modulo; redirigir aqui
+ * evita tocar esos puntos y deja una sola implementacion real.
  */
-const generateResumeToken = (): string => randomBytes(10).toString('hex');
-
-/** Huella del testigo. Es lo UNICO que se persiste. */
-export const hashResumeToken = (token: string): string =>
-  createHash('sha256').update(token.trim().toLowerCase()).digest('hex');
+export {
+  hashResumeToken,
+  RESUME_TOKEN_TTL_MS,
+} from '@common/utils/resume-token.util';
 
 /**
  * `whitelist` descarta claves desconocidas y `forbidNonWhitelisted` las delata.
@@ -208,10 +206,8 @@ export class PauseFlowStrategy implements INodeStrategy {
         pauseReason: PROGRAMMED_PAUSE_REASON,
         ...(token !== null
           ? {
-              resume_token_hash: hashResumeToken(token),
-              token_expires_at: new Date(
-                Date.now() + RESUME_TOKEN_TTL_MS,
-              ).toISOString(),
+              resume_token_hash: hashToken(token),
+              token_expires_at: buildResumeTokenExpiry(),
             }
           : {}),
       },
@@ -270,14 +266,12 @@ export class PauseFlowStrategy implements INodeStrategy {
 
     const flowName = this.resolveFlowName(context);
 
-    // La nota del operador y, debajo, como reanudar sin entrar en la
-    // aplicacion. Van juntas en `customNote` porque la carta institucional ya
-    // tiene su sitio reservado y anadir un bloque propio obligaria a tocar una
-    // plantilla que comparten todas las alertas.
-    const note =
-      token === null
-        ? config.message
-        : `${config.message}\n\nPara reanudar este flujo, responde a este correo con el asunto:\nREANUDAR ${token}\n\nPara retomarlo desde un paso concreto, anade "DESDE <paso>".\nEl codigo caduca en ${RESUME_TOKEN_TTL_MS / (24 * 60 * 60 * 1000)} dias y sirve una sola vez.`;
+    // La nota del operador. Las instrucciones de reanudacion ya NO se pegan
+    // aqui: la carta institucional tiene un bloque propio para ellas
+    // (`resumeInstructions`), de modo que se maqueten igual en los dos avisos
+    // que las llevan —la pausa programada y la alerta por fallo GRAVE— en vez
+    // de depender de dos cadenas escritas por separado.
+    const note = config.message;
 
     const letter = {
       flowId: context.getWorkflowId(),
@@ -285,6 +279,9 @@ export class PauseFlowStrategy implements INodeStrategy {
       headline: 'Aviso de pausa programada',
       title: 'Flujo en suspension controlada',
       customNote: note,
+      ...(token === null
+        ? {}
+        : { resumeInstructions: buildResumeInstructions(token) }),
     };
 
     try {

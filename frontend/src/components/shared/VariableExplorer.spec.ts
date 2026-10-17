@@ -51,8 +51,11 @@ const chooseVariable = async (
   selectByField(wrapper, 'namespace-field').vm.$emit('update:modelValue', namespace);
   await wrapper.vm.$nextTick();
 
+  // El segundo selector emite el NOMBRE y no el objeto: lleva `emit-value` con
+  // `option-value="name"`, de modo que el modelo es la clave que se interpola y
+  // la etiqueta queda libre para mostrar tambien la descripcion.
   const fields = CONTEXT.find((entry) => entry.namespace === namespace)?.fields ?? [];
-  selectByField(wrapper, 'variable-field').vm.$emit('update:modelValue', fields[fieldIndex]);
+  selectByField(wrapper, 'variable-field').vm.$emit('update:modelValue', fields[fieldIndex]?.name);
   await wrapper.vm.$nextTick();
 };
 
@@ -135,6 +138,44 @@ describe('VariableExplorer · selector determinista de variables', () => {
       // 3. Assert: conservarlo compondria un marcador que mezcla dos
       //    namespaces, y ese es justo el error que el explorador elimina.
       expect(wrapper.find('[data-test="token-detail"]').exists()).toBe(false);
+    });
+  });
+
+  describe('2bis. Lectura del campo en el desplegable', () => {
+    it('2bis.1 deberia acompanar el nombre tecnico con su descripcion', async () => {
+      // 1. Arrange 📐: sin esto el segundo selector ofrecia una lista de claves
+      //    en snake_case sin decir que hay dentro de cada una, y la
+      //    `description` que ya declara cada estrategia no se veia en ninguna
+      //    parte hasta DESPUES de elegir.
+      const wrapper = mountExplorer();
+      selectByField(wrapper, 'namespace-field').vm.$emit('update:modelValue', 'parsed_email');
+      await wrapper.vm.$nextTick();
+
+      // 2. Act ⚙️
+      const optionLabel = selectByField(wrapper, 'variable-field').props('optionLabel') as (
+        field: { name: string; description?: string },
+      ) => string;
+
+      // 3. Assert 🎯
+      expect(optionLabel({ name: 'clean_title', description: 'Titular saneado' })).toBe(
+        'clean_title — Titular saneado',
+      );
+    });
+
+    it('2bis.2 deberia dejar el nombre solo cuando no hay descripcion', async () => {
+      // 1. Arrange 📐: un guion colgando sin texto detras se lee como un error
+      //    de maquetacion.
+      const wrapper = mountExplorer();
+      selectByField(wrapper, 'namespace-field').vm.$emit('update:modelValue', 'parsed_email');
+      await wrapper.vm.$nextTick();
+
+      // 2. Act ⚙️
+      const optionLabel = selectByField(wrapper, 'variable-field').props('optionLabel') as (
+        field: { name: string; description?: string },
+      ) => string;
+
+      // 3. Assert 🎯
+      expect(optionLabel({ name: 'extracted_urls' })).toBe('extracted_urls');
     });
   });
 

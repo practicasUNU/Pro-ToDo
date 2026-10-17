@@ -3,6 +3,8 @@ import { computed, ref } from 'vue';
 
 import { usePostIaSanitizerStore } from '@stores/nodes/post-ia-sanitizer.store';
 
+import { useSelectFilter } from '@/composables/useSelectFilter';
+
 import { NODE_TYPE_LABELS, NodeType } from '@/types/pipeline';
 import {
   ALLOWED_TAG_PRESETS,
@@ -54,6 +56,17 @@ const TAGS_NOTICE =
 
 /** Opciones del selector de etiquetas, ya ordenadas para que sean localizables. */
 const tagOptions = computed<readonly string[]>(() => [...SANITIZER_ALLOWED_TAGS].sort());
+
+// Filtrado predictivo en los tres selectores cerrados del nodo. El de etiquetas
+// es MULTIPLE, asi que lleva `use-input` pero NO `fill-input`/`hide-selected`:
+// con aquellos los chips de lo ya elegido dejan de pintarse.
+const { filteredOptions: filteredNamespaceOptions, filterFn: filterNamespaces } = useSelectFilter(
+  () => store.namespaceOptions,
+);
+const { filteredOptions: filteredFieldOptions, filterFn: filterFields } = useSelectFilter(
+  () => store.fieldOptions,
+);
+const { filteredOptions: filteredTagOptions, filterFn: filterTags } = useSelectFilter(tagOptions);
 
 /** El namespace elegido no figura entre los que ofrece el flujo. */
 const isNamespaceUnlisted = computed<boolean>(
@@ -146,14 +159,19 @@ const commitTypedSelector = (): void => {
         <q-select
           id="post-ia-namespace"
           :model-value="store.config.sourceNamespace"
-          :options="store.namespaceOptions"
+          :options="filteredNamespaceOptions"
           outlined
           dense
           emit-value
           map-options
+          use-input
+          fill-input
+          hide-selected
+          input-debounce="0"
           class="q-mt-xs pd-mono"
           :disable="store.namespaceOptions.length === 0"
           :hint="NAMESPACE_HINT"
+          @filter="filterNamespaces"
           :rules="[(val: string) => !!val?.trim() || 'Elige el namespace del que se lee el HTML']"
           @update:model-value="store.updateConfig({ sourceNamespace: String($event ?? '') })"
         />
@@ -166,14 +184,19 @@ const commitTypedSelector = (): void => {
         <q-select
           id="post-ia-field"
           :model-value="store.config.sourceField"
-          :options="store.fieldOptions"
+          :options="filteredFieldOptions"
           outlined
           dense
           emit-value
           map-options
+          use-input
+          fill-input
+          hide-selected
+          input-debounce="0"
           class="q-mt-xs pd-mono"
           :disable="store.fieldOptions.length === 0"
           :hint="FIELD_HINT"
+          @filter="filterFields"
           :rules="[(val: string) => !!val?.trim() || 'Elige el campo que contiene el marcado']"
           @update:model-value="store.updateConfig({ sourceField: String($event ?? '') })"
         />
@@ -276,12 +299,15 @@ const commitTypedSelector = (): void => {
       <q-select
         id="post-ia-tags"
         :model-value="store.config.allowedTags"
-        :options="tagOptions"
+        :options="filteredTagOptions"
         outlined
         dense
         multiple
         use-chips
+        use-input
+        input-debounce="0"
         class="q-mt-xs pd-mono"
+        @filter="filterTags"
         :max-values="MAX_ALLOWED_TAGS"
         :hint="TAGS_HINT"
         @update:model-value="store.updateConfig({ allowedTags: [...($event as string[])] })"

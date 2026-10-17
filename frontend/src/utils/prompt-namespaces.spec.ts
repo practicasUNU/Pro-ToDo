@@ -58,15 +58,18 @@ const namespacesOf = (context: readonly UpstreamNamespace[]): string[] =>
 
 describe('prompt-namespaces · filtro Poka-Yoke de origenes', () => {
   describe('1. Escenario A: catalogo global', () => {
-    it('1.1 deberia dejar exactamente los seis origenes citables', () => {
+    it('1.1 deberia dejar exactamente los siete origenes citables', () => {
       // 1. Arrange & 2. Act
       const context = buildPromptContextFromCatalog(FULL_CATALOG);
 
       // 3. Assert: es el contrato completo de la vista general. Si alguien
       //    anade un nodo al catalogo, esta lista lo delata antes que la UI.
-      //    `rendered_html` entro con el cambio de semantica del mapeador, y
-      //    `ocr_result` es el origen cuya razon de ser es ser citado: el OCR
-      //    transcribe para que un prompt posterior lea lo transcrito.
+      //    `rendered_html` entro con el cambio de semantica del mapeador;
+      //    `ocr_result` es el origen cuya razon de ser es ser citado —el OCR
+      //    transcribe para que un prompt posterior lea lo transcrito—; y
+      //    `smtp_result` entra pese a ser un DESTINO porque cuelga de un
+      //    `onErrorStep` y no del camino feliz, de modo que una rama de
+      //    recuperacion posterior puede citar el acuse del aviso.
       expect(namespacesOf(context)).toEqual([
         'raw_email',
         'cron_trigger',
@@ -74,10 +77,11 @@ describe('prompt-namespaces · filtro Poka-Yoke de origenes', () => {
         'scraped_web',
         'rendered_html',
         'ocr_result',
+        'smtp_result',
       ]);
     });
 
-    it('1.1bis deberia ofrecer el OCR y callar los DOS destinos reales', () => {
+    it('1.1bis deberia ofrecer el OCR y el acuse SMTP, y callar el destino final', () => {
       // 1. Arrange & 2. Act
       const namespaces = namespacesOf(buildPromptContextFromCatalog(FULL_CATALOG));
 
@@ -85,9 +89,13 @@ describe('prompt-namespaces · filtro Poka-Yoke de origenes', () => {
       //    son `destino_drupal` ni `destino_smtp` —esos no existen— sino
       //    `http_result` y `smtp_result`. Una exclusion escrita contra los
       //    nombres equivocados no filtraria nada y lo pareceria.
+      //
+      //    `http_result` sigue fuera y `smtp_result` entra: la diferencia no es
+      //    la categoria, que es la misma, sino donde vive cada uno. Drupal
+      //    CIERRA el flujo; el aviso por correo es un satelite de contingencia.
       expect(namespaces).toContain('ocr_result');
+      expect(namespaces).toContain('smtp_result');
       expect(namespaces).not.toContain('http_result');
-      expect(namespaces).not.toContain('smtp_result');
       expect(namespaces).not.toContain('llm_response');
       expect(namespaces).not.toContain('validated_drupal_json');
     });

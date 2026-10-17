@@ -22,11 +22,13 @@ import {
   MAX_TOTAL_ATTACHMENT_BYTES,
   NO_MESSAGES_STATUS,
   RECENT_WINDOW_MS,
+  RESUME_COMMAND_STATUS,
   SUBJECT_FILTERED_STATUS,
 } from './imap-trigger.strategy';
 
 import type { StatePayloadContext } from '@core/fsm/context/state-payload.context';
 import type { RawEmailAttachment } from '@modules/nodes/interfaces/raw-email-attachment.interface';
+import type { InboundEmailResumeService } from '@modules/workflows/inbound-email-resume.service';
 import type { Attachment, ParsedMail } from 'mailparser';
 
 // Cero red: `testing-standards.md` §2 prohibe llamadas reales a IMAP. Ambos
@@ -136,11 +138,26 @@ const useClient = (client: ImapClientDouble): void => {
  */
 const buildStrategy = (
   env: Record<string, string> = { [PASSWORD_ENV_KEY]: IMAP_PASSWORD },
-): { strategy: ImapTriggerStrategy; get: jest.Mock } => {
+): {
+  strategy: ImapTriggerStrategy;
+  get: jest.Mock;
+  processMessage: jest.Mock;
+} => {
   const get = jest.fn((key: string) => env[key]);
   const configService = { get } as unknown as ConfigService;
 
-  return { strategy: new ImapTriggerStrategy(configService), get };
+  // Doble del canal de ordenes. Devuelve `false` por defecto —"no era una
+  // orden"— para que las pruebas de ingesta normal no dependan de el.
+  const processMessage = jest.fn().mockResolvedValue(false);
+  const inboundResume = {
+    processMessage,
+  } as unknown as InboundEmailResumeService;
+
+  return {
+    strategy: new ImapTriggerStrategy(configService, inboundResume),
+    get,
+    processMessage,
+  };
 };
 
 const buildContext = (): StatePayloadContext =>
@@ -2110,6 +2127,157 @@ describe('ImapTriggerStrategy', () => {
         (field) => field.type === 'url' || field.type === 'url[]',
       );
       expect(urlFields).toEqual([]);
+    });
+  });
+
+  describe('13. Ordenes de reanudacion que caen en el buzon del flujo', () => {
+    /**
+     * El operador responde al correo de alerta y esa respuesta aterriza en el
+     * MISMO buzon que el flujo sondea. Sin esta via se ingeria como si fuera
+     * una noticia: el cuerpo util va vacio y la ejecucion reventaba mas
+     * adelante en el `PROCESADOR_IA` con `ERR_LLM_MISSING_INPUT_TEXT`, que
+     * ademas senala al nodo equivocado.
+     */
+    const RESUME_TOKEN = 'a1b2c3d4e5f60718293a';
+
+    it('13.1 deberia delegar la orden y parar, sin publicar el correo', async () => {
+      // 1. Arrange 📐
+      const { strategy, processMessage } = buildStrategy();
+      const parsed = buildParsedMail({
+        subject: `Re: [Proto-Do] Flujo detenido`,
+        text: `REANUDAR ${RESUME_TOKEN}`,
+      });
+      simpleParser.mockResolvedValue(parsed);
+
+      // 2. Act ⚙️
+      const result = await strategy.execute(buildContext(), buildParams());
+
+      // 3. Assert 🎯
+      expect(processMessage).toHaveBeenCalledTimes(1);
+      expect(processMessage).toHaveBeenCalledWith(parsed);
+      expect(result.success).toBe(true);
+      expect(result.data).toEqual({
+        status: RESUME_COMMAND_STATUS,
+        skipped: true,
+      });
+      // El `halt` es lo que impide que el motor avance al nodo siguiente con
+      // el namespace del disparador vacio.
+      expect(result.halt).toBeDefined();
+    });
+
+    it('13.2 deberia reconocer la orden tambien en el asunto con `Re:` encadenados', async () => {
+      // 1. Arrange 📐: es como llega de verdad; nadie redacta estas ordenes
+      //    desde cero.
+      const { strategy, processMessage } = buildStrategy();
+      simpleParser.mockResolvedValue(
+        buildParsedMail({
+          subject: `RE: Re: REANUDAR ${RESUME_TOKEN}`,
+          text: 'Gracias.',
+        }),
+      );
+
+      // 2. Act ⚙️
+      const result = await strategy.execute(buildContext(), buildParams());
+
+      // 3. Assert 🎯
+      expect(processMessage).toHaveBeenCalledTimes(1);
+      expect(result.halt).toBeDefined();
+    });
+
+    it('13.3 deberia marcar el correo de mando como leido aunque `markAsRead` este apagado', async () => {
+      // 1. Arrange 📐: `markAsRead` gobierna los correos de CONTENIDO. Un
+      //    mensaje de mando sin marcar lo reencuentra `findLatestMatchingUid`
+      //    en cada sondeo y se reejecutaria en bucle, ademas de tapar a todos
+      //    los correos posteriores.
+      const client = buildClient();
+      useClient(client);
+      const { strategy } = buildStrategy();
+      simpleParser.mockResolvedValue(
+        buildParsedMail({ text: `REANUDAR ${RESUME_TOKEN}` }),
+      );
+
+      // 2. Act ⚙️
+      await strategy.execute(
+        buildContext(),
+        buildParams({ markAsRead: false }),
+      );
+
+      // 3. Assert 🎯
+      expect(client.messageFlagsAdd).toHaveBeenCalledWith(
+        String(MESSAGE_UID),
+        ['\\Seen'],
+        { uid: true },
+      );
+    });
+
+    it('13.4 deberia parar igualmente si el despacho de la orden falla', async () => {
+      // 1. Arrange 📐: el testigo es de un solo uso y ya habra quedado
+      //    consumido o invalidado. Devolver `success: false` pausaria el flujo
+      //    por un correo que ni siquiera era suyo.
+      const { strategy, processMessage } = buildStrategy();
+      processMessage.mockRejectedValue(new Error('Testigo caducado'));
+      simpleParser.mockResolvedValue(
+        buildParsedMail({ text: `REANUDAR ${RESUME_TOKEN}` }),
+      );
+
+      // 2. Act ⚙️
+      const result = await strategy.execute(buildContext(), buildParams());
+
+      // 3. Assert 🎯
+      expect(result.success).toBe(true);
+      expect(result.halt).toBeDefined();
+    });
+
+    it('13.5 deberia evaluarse ANTES del filtro de asunto', async () => {
+      // 1. Arrange 📐: la orden llega como respuesta al aviso, asi que su
+      //    asunto es el de aquel con un `Re:` delante y NO casa con el filtro
+      //    del flujo. Evaluada despues, saldria por SUBJECT_FILTERED y la
+      //    reanudacion no se atenderia jamas.
+      const { strategy, processMessage } = buildStrategy();
+      simpleParser.mockResolvedValue(
+        buildParsedMail({
+          subject: 'Re: aviso que no casa con el filtro',
+          text: `REANUDAR ${RESUME_TOKEN}`,
+        }),
+      );
+
+      // 2. Act ⚙️
+      const result = await strategy.execute(
+        buildContext(),
+        buildParams({ subjectFilterRegex: '^Convocatoria' }),
+      );
+
+      // 3. Assert 🎯
+      expect(processMessage).toHaveBeenCalledTimes(1);
+      expect(result.data).toMatchObject({ status: RESUME_COMMAND_STATUS });
+      expect(result.data).not.toMatchObject({
+        status: SUBJECT_FILTERED_STATUS,
+      });
+    });
+
+    it('13.6 NO deberia confundir una respuesta que solo CITA la orden', async () => {
+      // 1. Arrange 📐: la cita del aviso original incluye literalmente el
+      //    texto `REANUDAR <testigo>` que el propio sistema escribio. Mirar el
+      //    cuerpo entero daria por mando cualquier respuesta.
+      const { strategy, processMessage } = buildStrategy();
+      simpleParser.mockResolvedValue(
+        buildParsedMail({
+          subject: 'Convocatoria abierta',
+          text: [
+            'Recibido, gracias.',
+            '',
+            '> El 16/10/2026, Proto-Do escribio:',
+            `> REANUDAR ${RESUME_TOKEN}`,
+          ].join('\n'),
+        }),
+      );
+
+      // 2. Act ⚙️
+      const result = await strategy.execute(buildContext(), buildParams());
+
+      // 3. Assert 🎯
+      expect(processMessage).not.toHaveBeenCalled();
+      expect(result.data).toMatchObject({ subject: 'Convocatoria abierta' });
     });
   });
 });

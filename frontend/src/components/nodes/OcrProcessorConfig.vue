@@ -14,7 +14,10 @@ import {
   LlmProvider,
 } from '@/types/nodes/llm-extractor.types';
 
+import { useSelectFilter } from '@/composables/useSelectFilter';
+
 import { extractApiErrorMessage } from '@/utils/api-error';
+import { rangeClass } from '@/utils/field-range';
 
 import type { LlmModelAvailability } from '@/types/nodes/llm-extractor.types';
 import {
@@ -45,6 +48,20 @@ const PROMPT_NOTICE =
 const MODEL_HINT =
   'Lista cerrada servida por el backend, que es el unico que sabe que credenciales hay configuradas. Los modelos de pago estan reservados a Administradores.';
 
+/** Textos de rango, junto al campo y siempre visibles (no solo al fallar). */
+const TIMEOUT_RULE = `Entre ${MIN_OCR_TIMEOUT_MS} y ${MAX_OCR_TIMEOUT_MS} ms`;
+const MAX_RETRIES_RULE = `De ${MIN_OCR_RETRIES} a ${MAX_OCR_RETRIES} reintentos`;
+
+/**
+ * Por que el techo son TRES.
+ *
+ * El motor ejecuta los nodos en linea, de modo que la espera no se gasta una
+ * vez sino `timeoutMs x (maxRetries + 1)`, y el ciclo se repite ademas por cada
+ * proveedor de la cadena de respaldo.
+ */
+const RETRIES_HINT =
+  'Cada reintento multiplica la espera maxima, y el ciclo se repite por cada proveedor de respaldo. Cero los desactiva.';
+
 const NO_MODELS_HINT =
   'No se pudo cargar el catalogo de modelos. Se conserva el que ya tuviera el nodo.';
 
@@ -53,6 +70,12 @@ const availabilityToken = (availability: LlmModelAvailability): string =>
 
 const availabilityLabel = (availability: LlmModelAvailability): string =>
   LLM_AVAILABILITY_LABELS[availability];
+
+// Filtrado predictivo: un proveedor puede publicar decenas de modelos de
+// vision. Sigue siendo un selector CERRADO (sin `new-value-mode`).
+const { filteredOptions: filteredModelOptions, filterFn: filterModels } = useSelectFilter(
+  () => store.modelOptions,
+);
 
 const providerOptions = computed(() =>
   Object.values(LlmProvider).map((provider) => ({
@@ -163,14 +186,19 @@ onMounted(() => {
         <q-select
           id="ocr-model"
           :model-value="store.config.model"
-          :options="store.modelOptions"
+          :options="filteredModelOptions"
           :loading="store.isLoadingModels"
           outlined
           dense
           emit-value
           map-options
           option-disable="disable"
+          use-input
+          fill-input
+          hide-selected
+          input-debounce="0"
           class="q-mt-xs"
+          @filter="filterModels"
           :hint="store.modelOptions.length > 0 ? MODEL_HINT : NO_MODELS_HINT"
           @update:model-value="store.updateConfig({ model: String($event ?? '') })"
         >
@@ -265,7 +293,11 @@ onMounted(() => {
         />
       </div>
 
-      <div class="col-12 col-md-4" data-test="ocr-timeout-field">
+      <div
+        class="col-12 col-md-4"
+        :class="rangeClass(store.config.timeoutMs, MIN_OCR_TIMEOUT_MS, MAX_OCR_TIMEOUT_MS)"
+        data-test="ocr-timeout-field"
+      >
         <label class="pd-label" for="ocr-timeout">Espera maxima (ms)</label>
         <q-input
           id="ocr-timeout"
@@ -275,12 +307,23 @@ onMounted(() => {
           dense
           :min="MIN_OCR_TIMEOUT_MS"
           :max="MAX_OCR_TIMEOUT_MS"
+          :step="1000"
           class="q-mt-xs"
+          :rules="[
+            (val: number | string | null) =>
+              (Number(val) >= MIN_OCR_TIMEOUT_MS && Number(val) <= MAX_OCR_TIMEOUT_MS) ||
+              `Entre ${MIN_OCR_TIMEOUT_MS} y ${MAX_OCR_TIMEOUT_MS} ms`,
+          ]"
           @update:model-value="store.updateConfig({ timeoutMs: Number($event) })"
         />
+        <span class="pd-field-range">{{ TIMEOUT_RULE }}</span>
       </div>
 
-      <div class="col-12 col-md-4" data-test="ocr-retries-field">
+      <div
+        class="col-12 col-md-4"
+        :class="rangeClass(store.config.maxRetries, MIN_OCR_RETRIES, MAX_OCR_RETRIES)"
+        data-test="ocr-retries-field"
+      >
         <label class="pd-label" for="ocr-retries">Reintentos de red</label>
         <q-input
           id="ocr-retries"
@@ -290,9 +333,17 @@ onMounted(() => {
           dense
           :min="MIN_OCR_RETRIES"
           :max="MAX_OCR_RETRIES"
+          :step="1"
           class="q-mt-xs"
+          :hint="RETRIES_HINT"
+          :rules="[
+            (val: number | string | null) =>
+              (Number(val) >= MIN_OCR_RETRIES && Number(val) <= MAX_OCR_RETRIES) ||
+              `Permitido de ${MIN_OCR_RETRIES} a ${MAX_OCR_RETRIES} reintentos`,
+          ]"
           @update:model-value="store.updateConfig({ maxRetries: Number($event) })"
         />
+        <span class="pd-field-range">{{ MAX_RETRIES_RULE }}</span>
       </div>
 
       <div class="col-12">

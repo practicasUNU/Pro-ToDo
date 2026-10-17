@@ -122,6 +122,49 @@ done
 
 > ⚠️ Aplicar una migración es **decisión del desarrollador**: no ocurre al arrancar el backend ni forma parte de ningún script. El orden importa y hay dependencias entre archivos (la `038` revierte parte de la `037`, que depende de la `035`).
 
+### 3.1.1 Aplicarlas con control de estado (recomendado)
+
+`scripts/apply-migrations.sh` lleva la cuenta en una tabla `schema_migrations`, de modo que solo
+ejecuta lo que falta y se detiene en el primer fallo.
+
+```bash
+# Base de desarrollo (DB_NAME de backend/.env)
+npm run db:migrate --prefix backend
+
+# Base de las pruebas E2E
+npm run test:migrate --prefix backend
+```
+
+> **Primera vez sobre una base que YA está al día:** regístralas sin ejecutarlas, o se reaplicaría
+> toda la historia.
+> ```bash
+> scripts/apply-migrations.sh --baseline
+> ```
+
+**No envuelve nada en una transacción**: cada archivo declara la suya cuando la necesita, y las que
+añaden un valor a un enum (`030`, `039`) no pueden ir en una (error 55P04 de PostgreSQL).
+
+### 3.1.2 Crear una base desde cero
+
+```bash
+npm run db:bootstrap --prefix backend                 # usa DB_NAME
+npm run test:bootstrap --prefix backend               # <nombre_bd_test>
+```
+
+Ejecuta `init.sql`, registra las migraciones en modo baseline y siembra un ADMIN activo
+(`BOOTSTRAP_ADMIN_EMAIL`, por defecto `practicas@unuware.com`). Aborta si la base ya existe: recrearla
+pierde datos y no puede ser un efecto secundario.
+
+⚠️ **No incluye las semillas de contenido** (plantillas HTML, prompts, plantillas de flujo). Viven en
+migraciones que exigen un autor (`id_usuario_creador` es NOT NULL con FK RESTRICT) y por eso no están
+en `init.sql`. Para una base de desarrollo con contenido, aplícalas a mano después:
+`db/migrations/{008,018,023,024,028,029,031,032}-*.sql`.
+
+⚠️ **`init.sql` no se puede encadenar con toda la historia.** Es el acumulado final, así que la `005`
+(actualiza `tipos_nodo`, sustituida por `nodos` en la `011`), la `009` (recrea `tokens_sesion`) y la
+`002` (promueve una cuenta en vez de crearla) no aplican sobre él. Las `035`-`038` están **rotas**:
+escriben en una columna `actualizado_en` que no existe en esas tablas.
+
 ### 3.2 Crear una migración nueva
 
 1. `db/migrations/<NNN>-<descripcion-kebab>.sql`, con número consecutivo al más alto existente.

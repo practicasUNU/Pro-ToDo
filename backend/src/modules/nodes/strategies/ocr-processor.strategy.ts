@@ -143,14 +143,25 @@ export class OcrProcessorStrategy implements INodeStrategy {
    * vocabulario de claves y no por tipo de nodo (ver `EXTRACTED_TEXT_KEYS`).
    */
   public readonly outputFields: readonly NodeOutputField[] = [
-    { name: 'clean_body', type: 'text' },
+    // Las descripciones NO son decorativas: son el `label` que el explorador de
+    // variables pinta junto al nombre tecnico, y sin ellas el segundo selector
+    // ofrecia siete claves en snake_case sin decir que hay dentro de cada una.
+    {
+      name: 'clean_body',
+      type: 'text',
+      description: 'Texto transcrito del adjunto, en Markdown o plano',
+    },
     {
       name: 'extracted_text',
       type: 'text',
       description:
         'La transcripcion, repetida bajo la clave que libera los binarios',
     },
-    { name: 'character_count', type: 'number' },
+    {
+      name: 'character_count',
+      type: 'number',
+      description: 'Cantidad de caracteres recuperados de la transcripcion',
+    },
     {
       name: 'ocr_status',
       type: 'text',

@@ -13,6 +13,7 @@ import type {
   NodeMailMessage,
   SmtpNodeMailerService,
 } from '@common/services/smtp-node-mailer.service';
+import type { ConfigService } from '@nestjs/config';
 import type { StatePayloadContext } from '@core/fsm/context/state-payload.context';
 
 /** Doble del transporte, acotado al unico metodo que la estrategia invoca. */
@@ -32,8 +33,26 @@ const buildMailer = (overrides: Partial<MailerMock> = {}): MailerMock => ({
   ...overrides,
 });
 
-const buildStrategy = (mailer: MailerMock = buildMailer()): SmtpAlertStrategy =>
-  new SmtpAlertStrategy(mailer as unknown as SmtpNodeMailerService);
+/**
+ * Entorno del nodo. Por defecto el canal de ordenes por correo esta APAGADO,
+ * que es el valor de `INBOUND_RESUME_ENABLED` en una instalacion recien
+ * desplegada: asi, las pruebas que no hablan del testigo siguen describiendo el
+ * aviso de siempre, sin bloque de reanudacion.
+ */
+const buildConfigService = (
+  values: Record<string, string> = {},
+): { get: jest.Mock } => ({
+  get: jest.fn((key: string) => values[key]),
+});
+
+const buildStrategy = (
+  mailer: MailerMock = buildMailer(),
+  configService: { get: jest.Mock } = buildConfigService(),
+): SmtpAlertStrategy =>
+  new SmtpAlertStrategy(
+    mailer as unknown as SmtpNodeMailerService,
+    configService as unknown as ConfigService,
+  );
 
 /** Silencia las trazas del nodo: la suite asevera sobre el correo, no sobre el log. */
 const muteLogger = (strategy: SmtpAlertStrategy): void => {
@@ -803,6 +822,133 @@ describe('SmtpAlertStrategy', () => {
 
       // 3. Assert 🎯
       expect(sentMessage(mailer).html).not.toContain('Reintentos ejecutados');
+    });
+  });
+
+  describe('12. Testigo de reanudacion por correo', () => {
+    /**
+     * Quien recibe el aviso es quien puede reanudar, y hasta ahora no tenia
+     * como: el testigo solo lo emitia el nodo `PAUSA_FLOW`, de modo que una
+     * pausa por fallo GRAVE —la que de verdad interrumpe a alguien— dejaba al
+     * operador sin mas salida que entrar en la aplicacion.
+     */
+    const CANAL_ENCENDIDO = { INBOUND_RESUME_ENABLED: 'true' };
+
+    it('12.1 deberia incluir las instrucciones de reanudacion en un GRAVE', async () => {
+      // 1. Arrange 📐
+      const mailer = buildMailer();
+      const strategy = buildStrategy(
+        mailer,
+        buildConfigService(CANAL_ENCENDIDO),
+      );
+      muteLogger(strategy);
+
+      // 2. Act ⚙️
+      await strategy.execute(buildContext(), buildParams());
+
+      // 3. Assert 🎯: se pide responder con el CUERPO, porque los clientes
+      // anteponen `Re:` al asunto y un asunto que empiece literalmente por
+      // REANUDAR solo se consigue editandolo a mano.
+      const { html, text } = sentMessage(mailer);
+      expect(html).toContain('Como reanudar este flujo');
+      expect(text).toContain('REANUDAR ');
+      expect(text).toContain('CUERPO');
+    });
+
+    it('12.2 deberia publicar la HUELLA del testigo, nunca el testigo', async () => {
+      // 1. Arrange 📐: el contexto acumulado se devuelve por la API y se
+      //    escribe en cada checkpoint; guardarlo en claro repartiria la
+      //    credencial por todas partes.
+      const mailer = buildMailer();
+      const strategy = buildStrategy(
+        mailer,
+        buildConfigService(CANAL_ENCENDIDO),
+      );
+      muteLogger(strategy);
+
+      // 2. Act ⚙️
+      const result = await strategy.execute(buildContext(), buildParams());
+
+      // 3. Assert 🎯
+      const data = result.data as Record<string, unknown>;
+      expect(data.resume_token_hash).toMatch(/^[a-f0-9]{64}$/);
+      expect(data.token_expires_at).toEqual(expect.any(String));
+
+      // El testigo en claro viaja SOLO en la carta.
+      const emitted = /REANUDAR ([a-f0-9]+)/.exec(sentMessage(mailer).text);
+      expect(emitted).not.toBeNull();
+      expect(data.resume_token_hash).not.toBe(emitted?.[1]);
+    });
+
+    it('12.3 NO deberia ofrecer reanudacion en un URGENTE', async () => {
+      // 1. Arrange 📐: URGENTE es irrecuperable. `closeTerminalState` cierra
+      //    sin cursor, asi que la ejecucion no queda PAUSADO y el testigo no
+      //    validaria nunca: ofrecerlo es prometer una salida que no existe.
+      const mailer = buildMailer();
+      const strategy = buildStrategy(
+        mailer,
+        buildConfigService(CANAL_ENCENDIDO),
+      );
+      muteLogger(strategy);
+
+      // 2. Act ⚙️
+      const result = await strategy.execute(
+        buildContext({
+          error_context: {
+            failed_node_id: 'nodo_drupal',
+            error_level: 'URGENTE',
+            error_code: 'ERR_DRUPAL_AUTH',
+          },
+        }),
+        buildParams(),
+      );
+
+      // 3. Assert 🎯
+      expect(
+        (result.data as Record<string, unknown>).resume_token_hash,
+      ).toBeUndefined();
+      expect(sentMessage(mailer).html).not.toContain(
+        'Como reanudar este flujo',
+      );
+    });
+
+    it('12.4 NO deberia ofrecer reanudacion con el canal de ordenes apagado', async () => {
+      // 1. Arrange 📐: `INBOUND_RESUME_ENABLED` apagado significa que nadie
+      //    lee ningun buzon de vuelta. Las instrucciones mandarian a la
+      //    persona a escribir a un sitio donde no hay nadie.
+      const mailer = buildMailer();
+      const strategy = buildStrategy(mailer, buildConfigService());
+      muteLogger(strategy);
+
+      // 2. Act ⚙️
+      const result = await strategy.execute(buildContext(), buildParams());
+
+      // 3. Assert 🎯
+      expect(
+        (result.data as Record<string, unknown>).resume_token_hash,
+      ).toBeUndefined();
+      expect(sentMessage(mailer).html).not.toContain(
+        'Como reanudar este flujo',
+      );
+    });
+
+    it('12.5 deberia emitir un testigo DISTINTO en cada aviso', async () => {
+      // 1. Arrange 📐: es de un solo uso; reutilizarlo permitiria reanudar dos
+      //    veces con el mismo codigo si una pausa se repite.
+      const strategy = buildStrategy(
+        buildMailer(),
+        buildConfigService(CANAL_ENCENDIDO),
+      );
+      muteLogger(strategy);
+
+      // 2. Act ⚙️
+      const primero = await strategy.execute(buildContext(), buildParams());
+      const segundo = await strategy.execute(buildContext(), buildParams());
+
+      // 3. Assert 🎯
+      expect(
+        (primero.data as Record<string, unknown>).resume_token_hash,
+      ).not.toBe((segundo.data as Record<string, unknown>).resume_token_hash);
     });
   });
 });

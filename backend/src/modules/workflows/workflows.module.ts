@@ -46,6 +46,11 @@ import { WorkflowsService } from './workflows.service';
   ],
   controllers: [WorkflowsController, ExecutionsController],
   providers: [WorkflowsService, ExecutionsService, InboundEmailResumeService],
-  exports: [WorkflowsService],
+  // `InboundEmailResumeService` se exporta para `ImapTriggerStrategy`
+  // (`NodesModule`), que se topa con las ordenes de reanudacion en el buzon que
+  // sondea el propio flujo —el operador responde al correo de alerta— y tiene
+  // que despacharlas por la misma puerta que el barrido del buzon de ordenes.
+  // El grafo sigue siendo aciclico: `NodesModule` importa este, no al reves.
+  exports: [WorkflowsService, InboundEmailResumeService],
 })
 export class WorkflowsModule {}

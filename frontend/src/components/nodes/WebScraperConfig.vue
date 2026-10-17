@@ -20,6 +20,7 @@ import {
 } from '@stores/nodes/web-scraper.store';
 
 import { extractApiErrorMessage } from '@/utils/api-error';
+import { rangeClass } from '@/utils/field-range';
 
 interface Props {
   nodeId: string;
@@ -106,17 +107,6 @@ const onNumberChange = (
 ): void => {
   store.updateConfig({ [field]: Number(value ?? 0) });
 };
-
-/**
- * Clase de estado de un campo numerico con rango.
- *
- * Da lectura CONTINUA: verde mientras el valor cae dentro, rojo en cuanto se
- * sale. Quasar solo pinta el error despues de tocar el campo y no dice nada
- * cuando el valor es correcto, de modo que un formulario con minimos y maximos
- * se recorria sin saber si lo escrito valia hasta intentar guardar.
- */
-const rangeClass = (value: number, min: number, max: number): string =>
-  value >= min && value <= max ? 'pd-field--in-range' : 'pd-field--out-of-range';
 
 /**
  * Lanza la extraccion de prueba y traduce el desenlace a un aviso.

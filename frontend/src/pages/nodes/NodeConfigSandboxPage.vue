@@ -9,6 +9,8 @@ import { configurableNodeTypes, nodeConfigRegistry } from '@components/nodes/nod
 import { buildContextForNamespaces } from '@/utils/upstream-catalog';
 
 import { TEMPLATE_NAMESPACES } from '@/types/html-template';
+import { useSelectFilter } from '@/composables/useSelectFilter';
+
 import { NODE_TYPE_LABELS, NodeType } from '@/types/pipeline';
 
 import type { NodeConfigStore, UpstreamNamespace } from '@stores/nodes/node-store-registry';
@@ -43,6 +45,10 @@ const nodeTypeOptions = computed(() =>
     value: nodeType,
   })),
 );
+
+// Filtrado predictivo: el banco de pruebas lista los diez tipos configurables.
+const { filteredOptions: filteredNodeTypeOptions, filterFn: filterNodeTypes } =
+  useSelectFilter(nodeTypeOptions);
 
 // Sin `v-if` por tipo: el componente sale del registro (regla §3.1).
 const resolvedComponent = computed(() => nodeConfigRegistry[selectedNodeType.value] ?? null);
@@ -206,12 +212,17 @@ const inspectedState = computed(() =>
           <q-select
             id="sandbox-node-type"
             v-model="selectedNodeType"
-            :options="nodeTypeOptions"
+            :options="filteredNodeTypeOptions"
             outlined
             dense
             emit-value
             map-options
+            use-input
+            fill-input
+            hide-selected
+            input-debounce="0"
             class="q-mt-xs"
+            @filter="filterNodeTypes"
           />
         </div>
 

@@ -3,6 +3,8 @@ import { computed } from 'vue';
 
 import { nodeBaseParamsRegistry } from '@components/nodes/node-base-params-registry';
 
+import { useSelectFilter } from '@/composables/useSelectFilter';
+
 import { NODE_OUTPUT_NAMESPACES, NodeType } from '@/types/pipeline';
 import { actionsForNodeType, ERROR_BRANCH_ACTIONS } from '@/types/nodes/error-branch.types';
 
@@ -52,6 +54,12 @@ const hasErrorBranch = computed<boolean>(() => props.errorBranch !== null);
  * apuntar: ofrecerla en otro tipo crearia una rama muerta que ninguna regla del
  * backend detecta, porque el codigo que la dispara solo lo emite el parser.
  */
+// Filtrado predictivo sobre la lista blanca de namespaces. Sigue CERRADA: sin
+// `new-value-mode`, teclear recorta las opciones pero no da de alta ninguna.
+const { filteredOptions: filteredNamespaceOptions, filterFn: filterNamespaces } = useSelectFilter(
+  () => [...NODE_OUTPUT_NAMESPACES],
+);
+
 const actionOptions = computed(() =>
   actionsForNodeType(props.step.nodeType)
     // Sin filtro adicional: el catalogo ya acota por tipo de nodo, y desde que
@@ -139,12 +147,17 @@ const baseParamsComponent = computed(() => nodeBaseParamsRegistry[props.step.nod
       <q-select
         :id="`namespace-${props.step.nodeId}`"
         :model-value="props.step.outputNamespace"
-        :options="NODE_OUTPUT_NAMESPACES"
+        :options="filteredNamespaceOptions"
         outlined
         dense
         emit-value
         map-options
+        use-input
+        fill-input
+        hide-selected
+        input-debounce="0"
         class="q-mt-xs q-mb-md pd-mono"
+        @filter="filterNamespaces"
         @update:model-value="emit('update:namespace', String($event ?? ''))"
       />
 

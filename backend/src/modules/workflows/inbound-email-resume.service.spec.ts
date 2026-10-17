@@ -10,6 +10,7 @@ import type { FsmExecution } from '@core/fsm/entities/fsm-execution.entity';
 import type { UsersService } from '@modules/users/users.service';
 import type { Workflow } from '@modules/workflows/entities/workflow.entity';
 import type { ExecutionsService } from './executions.service';
+import type { SchedulerRegistry } from '@nestjs/schedule';
 import type { Repository } from 'typeorm';
 
 const EXECUTION_ID = '1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d';
@@ -120,12 +121,20 @@ const { simpleParser } = jest.requireMock<{ simpleParser: jest.Mock }>(
   'mailparser',
 );
 
-/** Mensaje tal como lo devuelve `simpleParser`. */
+/**
+ * Mensaje tal como lo devuelve `simpleParser`.
+ *
+ * El `text` es opcional porque la lectura tiene DOS vias y el asunto es la de
+ * respaldo: las pruebas que no hablan del cuerpo siguen describiendo el caso
+ * por asunto sin tener que declararlo.
+ */
 const inboundMessage = (
   subject: string,
   address: string = EDITOR_EMAIL,
+  text = '',
 ): Record<string, unknown> => ({
   subject,
+  text,
   from: { value: [{ address }], text: address },
 });
 
@@ -161,6 +170,13 @@ const buildHarness = (
   const config = {
     get: jest.fn((key: string) => env[key]),
   };
+  // El planificador no se ejercita aqui: `onModuleInit` no se invoca en estas
+  // pruebas, que describen el despacho y no el ciclo de vida del modulo.
+  const scheduler = {
+    addInterval: jest.fn(),
+    deleteInterval: jest.fn(),
+    doesExist: jest.fn().mockReturnValue(false),
+  };
 
   const service = new InboundEmailResumeService(
     config as unknown as ConfigService,
@@ -168,6 +184,7 @@ const buildHarness = (
     executions as unknown as ExecutionsService,
     users as unknown as UsersService,
     repository as unknown as Repository<Workflow>,
+    scheduler as unknown as SchedulerRegistry,
   );
 
   jest.spyOn(service['logger'], 'log').mockImplementation(() => undefined);
@@ -497,6 +514,183 @@ describe('InboundEmailResumeService (ordenes de reanudacion por correo)', () => 
       // 3. Assert 🎯
       expect(dispatched).toBe(1);
       expect(executions.resumeExecution).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe('6. Lectura del comando: el cuerpo manda, el asunto respalda', () => {
+    /**
+     * El asunto dejo de ser la unica via porque los clientes de correo
+     * anteponen `Re:` al responder, y la orden llega SIEMPRE como respuesta al
+     * aviso: un asunto que empiece literalmente por `REANUDAR` solo se
+     * consigue editandolo a mano.
+     */
+    it('6.1 deberia leer la orden del CUERPO aunque el asunto sea el del aviso', async () => {
+      // 1. Arrange 📐
+      const { service, executions } = buildHarness();
+      simpleParser.mockResolvedValue(
+        inboundMessage(
+          'Re: [Proto-Do] Flujo detenido',
+          EDITOR_EMAIL,
+          `REANUDAR ${TOKEN}`,
+        ),
+      );
+
+      // 2. Act ⚙️
+      const dispatched = await service.processInbox();
+
+      // 3. Assert 🎯
+      expect(dispatched).toBe(1);
+      expect(executions.resumeExecution).toHaveBeenCalledTimes(1);
+    });
+
+    it('6.2 deberia descontar los `Re:` encadenados del asunto de respaldo', async () => {
+      // 1. Arrange 📐: sin cuerpo util, que es lo que ocurre cuando el cliente
+      //    solo adjunta una firma automatica.
+      const { service, executions } = buildHarness();
+      simpleParser.mockResolvedValue(
+        inboundMessage(`RE: Re: Rv: REANUDAR ${TOKEN}`),
+      );
+
+      // 2. Act ⚙️
+      const dispatched = await service.processInbox();
+
+      // 3. Assert 🎯
+      expect(dispatched).toBe(1);
+      expect(executions.resumeExecution).toHaveBeenCalledTimes(1);
+    });
+
+    it('6.3 deberia descartar la CITA del aviso original', async () => {
+      // 1. Arrange 📐: el aviso que se cita incluye literalmente el texto
+      //    `REANUDAR <testigo>` que el propio sistema escribio. Sin cortar en
+      //    la marca de cita, un "recibido, gracias" reanudaria el flujo.
+      const { service, executions } = buildHarness();
+      simpleParser.mockResolvedValue(
+        inboundMessage(
+          'Re: [Proto-Do] Flujo detenido',
+          EDITOR_EMAIL,
+          [
+            'Recibido, gracias.',
+            '',
+            '> El 16/10/2026, Proto-Do escribio:',
+            `> REANUDAR ${TOKEN}`,
+          ].join('\n'),
+        ),
+      );
+
+      // 2. Act ⚙️
+      const dispatched = await service.processInbox();
+
+      // 3. Assert 🎯
+      expect(dispatched).toBe(0);
+      expect(executions.resumeExecution).not.toHaveBeenCalled();
+    });
+
+    it('6.4 deberia rechazar un cuerpo con texto de mas detras de la orden', async () => {
+      // 1. Arrange 📐: anclaje completo. Una respuesta larga que mencione el
+      //    comando de pasada no puede reanudar nada.
+      const { service, executions } = buildHarness();
+      simpleParser.mockResolvedValue(
+        inboundMessage(
+          'Re: aviso',
+          EDITOR_EMAIL,
+          `REANUDAR ${TOKEN} por favor, es urgente`,
+        ),
+      );
+
+      // 2. Act ⚙️
+      const dispatched = await service.processInbox();
+
+      // 3. Assert 🎯
+      expect(dispatched).toBe(0);
+      expect(executions.resumeExecution).not.toHaveBeenCalled();
+    });
+
+    it('6.5 deberia aceptar la orden con DESDE leida del cuerpo', async () => {
+      // 1. Arrange 📐
+      const { service, executions } = buildHarness();
+      simpleParser.mockResolvedValue(
+        inboundMessage(
+          'Re: aviso',
+          EDITOR_EMAIL,
+          `REANUDAR ${TOKEN} DESDE pausa_revision`,
+        ),
+      );
+
+      // 2. Act ⚙️
+      await service.processInbox();
+
+      // 3. Assert 🎯
+      expect(executions.resumeExecution).toHaveBeenCalledWith(
+        EXECUTION_ID,
+        { targetStepId: 'pausa_revision' },
+        expect.anything(),
+        { isEmailResume: true },
+      );
+    });
+
+    it('6.6 deberia ignorar una firma automatica por delante del comando', async () => {
+      // 1. Arrange 📐: la firma va DETRAS en un cliente normal; si va delante,
+      //    la primera linea util no es el comando y la orden no se entiende.
+      //    Se documenta como limite conocido: el aviso pide escribir el
+      //    comando como PRIMERA linea.
+      const { service, executions } = buildHarness();
+      simpleParser.mockResolvedValue(
+        inboundMessage(
+          'Re: aviso',
+          EDITOR_EMAIL,
+          `Enviado desde mi movil\n\nREANUDAR ${TOKEN}`,
+        ),
+      );
+
+      // 2. Act ⚙️
+      const dispatched = await service.processInbox();
+
+      // 3. Assert 🎯
+      expect(dispatched).toBe(0);
+      expect(executions.resumeExecution).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('7. `processMessage` como puerta compartida', () => {
+    /**
+     * La misma validacion sirve a las DOS entradas: el barrido del buzon de
+     * ordenes y `ImapTriggerStrategy`, que se topa con la orden en el buzon que
+     * sondea el propio flujo. Duplicar la comprobacion del testigo y el RBAC en
+     * la estrategia habria creado una segunda puerta con sus propias reglas.
+     */
+    it('7.1 deberia reanudar desde un mensaje ya parseado, sin tocar IMAP', async () => {
+      // 1. Arrange 📐
+      const { service, executions, client } = buildHarness();
+
+      // 2. Act ⚙️
+      const resumed = await service.processMessage(
+        inboundMessage('Re: aviso', EDITOR_EMAIL, `REANUDAR ${TOKEN}`) as never,
+      );
+
+      // 3. Assert 🎯
+      expect(resumed).toBe(true);
+      expect(executions.resumeExecution).toHaveBeenCalledTimes(1);
+      // No abre ninguna conexion: el mensaje ya venia descargado.
+      expect(client.connect).not.toHaveBeenCalled();
+    });
+
+    it('7.2 deberia aplicar las MISMAS guardas que el barrido propio', async () => {
+      // 1. Arrange 📐: remitente que no esta dado de alta, testigo valido.
+      const { service, executions, users } = buildHarness();
+      users.findByEmail.mockResolvedValue(null);
+
+      // 2. Act ⚙️
+      const resumed = await service.processMessage(
+        inboundMessage(
+          'Re: aviso',
+          'ajeno@example.com',
+          `REANUDAR ${TOKEN}`,
+        ) as never,
+      );
+
+      // 3. Assert 🎯
+      expect(resumed).toBe(false);
+      expect(executions.resumeExecution).not.toHaveBeenCalled();
     });
   });
 });

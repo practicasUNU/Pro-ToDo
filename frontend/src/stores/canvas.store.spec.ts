@@ -592,6 +592,74 @@ describe('useCanvasStore · supervision visual de un flujo', () => {
         },
       });
 
+    /**
+     * La misma ejecucion, pero detenida por un FALLO TECNICO: el motor sembro
+     * `error_context` antes de desviar, y ademas queda el `pause_context` de un
+     * `PAUSA_FLOW` que ya se ejecuto con normalidad en un intento anterior.
+     */
+    const technicalPauseWithStaleContext = () =>
+      buildExecution({
+        state: ExecutionState.PAUSADO,
+        activeCursor: 'nodo_b',
+        context: {
+          raw_email: { asunto: 'Licitacion' },
+          pause_context: {
+            pausedAtStepId: 'nodo_a',
+            resumeStepId: 'nodo_b',
+            reason: 'PROGRAMMED_AUTO_PAUSE',
+          },
+          error_context: {
+            failed_node_id: 'nodo_b',
+            error_code: 'ERR_LLM_MISSING_INPUT_TEXT',
+            error_level: 'GRAVE',
+          },
+        },
+      });
+
+    it('8.0 deberia marcar el CURSOR cuando la pausa es por fallo tecnico', async () => {
+      // 1. Arrange 📐: era el defecto. La rama de pausa programada ganaba
+      //    siempre, de modo que una ejecucion rota en `nodo_b` se pintaba en
+      //    ambar sobre el `PAUSA_FLOW` —que se habia ejecutado con normalidad—
+      //    y dejaba sin senalar al nodo que de verdad hay que reintentar.
+      fetchWorkflow.mockResolvedValue(buildWorkflow());
+      fetchActiveExecution.mockResolvedValue(technicalPauseWithStaleContext());
+
+      const store = useCanvasStore();
+
+      // 2. Act ⚙️
+      await store.loadCanvas(FLOW_ID);
+
+      // 3. Assert 🎯: manda `error_context`, pese a que el contexto tambien
+      // trae un `pausedAtStepId`.
+      expect(store.statusOf('nodo_b')).toBe('PAUSED');
+      expect(store.statusOf('nodo_a')).not.toBe('PAUSED');
+    });
+
+    it('8.0bis NO deberia dejarse enganar por un error_context VACIO', async () => {
+      // 1. Arrange 📐: un namespace presente pero sin claves no prueba ningun
+      //    fallo, y tomarlo por uno taparia la pausa deliberada.
+      fetchWorkflow.mockResolvedValue(buildWorkflow());
+      fetchActiveExecution.mockResolvedValue(
+        buildExecution({
+          state: ExecutionState.PAUSADO,
+          activeCursor: 'nodo_b',
+          context: {
+            error_context: {},
+            pause_context: { pausedAtStepId: 'nodo_a', resumeStepId: 'nodo_b' },
+          },
+        }),
+      );
+
+      const store = useCanvasStore();
+
+      // 2. Act ⚙️
+      await store.loadCanvas(FLOW_ID);
+
+      // 3. Assert 🎯
+      expect(store.statusOf('nodo_a')).toBe('PAUSED');
+      expect(store.statusOf('nodo_b')).toBe('IDLE');
+    });
+
     it('8.1 deberia marcar el NODO DE PAUSA al recargar, no el cursor', async () => {
       // 1. Arrange 📐: aqui no hay evento que escuchar, es lo que se ve al
       //    recargar sobre un flujo ya detenido. Sin leer el contexto, la caja

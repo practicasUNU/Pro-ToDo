@@ -72,8 +72,21 @@ export const MAX_LLM_TIMEOUT_MS = 120_000;
  */
 export const DEFAULT_LLM_MAX_RETRIES = 1;
 
-/** Techo de reintentos internos. Ver el AVISO sobre los dos niveles. */
-export const MAX_LLM_RETRIES = 5;
+/**
+ * Techo de reintentos internos. Ver el AVISO sobre los dos niveles.
+ *
+ * TRES y no cinco: el motor ejecuta los nodos EN LINEA, asi que el tiempo que
+ * una ejecucion pasa bloqueada es `timeoutMs x (maxRetries + 1)` y se repite
+ * ademas por cada proveedor de la cadena de respaldo. Con el techo de espera de
+ * este nodo, cinco reintentos retenian el mutex del flujo durante mas de diez
+ * minutos por proveedor, y lo que resuelve un proveedor saturado no es insistir
+ * contra el sino saltar al siguiente.
+ *
+ * El suelo sigue siendo CERO y no uno: apagar los reintentos es una
+ * configuracion legitima —y la mas barata frente a un proveedor de pago—, asi
+ * que exigir al menos uno quitaria la unica forma de expresarla.
+ */
+export const MAX_LLM_RETRIES = 3;
 
 /**
  * Espera base entre reintentos de la inferencia, en milisegundos.

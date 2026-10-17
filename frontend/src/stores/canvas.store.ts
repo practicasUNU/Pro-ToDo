@@ -5,6 +5,7 @@ import { fetchActiveExecution } from '@services/fsm-executions.service';
 import { fetchWorkflow } from '@services/workflows.service';
 import { useExecutionStore } from '@stores/execution.store';
 import { ExecutionState } from '@/types/execution';
+import { ERROR_CONTEXT_NAMESPACE } from '@/types/pipeline';
 import { errorRouteTarget } from '@/utils/pipeline-assembler';
 
 import type {
@@ -307,6 +308,22 @@ export const useCanvasStore = defineStore('canvas', () => {
   const statusOf = (nodeId: string): CanvasNodeStatus => nodeStatuses.value.get(nodeId) ?? 'IDLE';
 
   /**
+   * Si la ejecucion se detuvo por un fallo tecnico y no por decision de un nodo.
+   *
+   * `error_context` lo siembra el MOTOR justo antes de desviar por `onErrorStep`
+   * y describe UN fallo concreto. Su presencia es lo que separa las dos clases
+   * de pausa, que se pintan en sitios distintos: la tecnica marca el cursor —el
+   * paso que hay que reintentar— y la deliberada marca el nodo de pausa.
+   *
+   * Se comprueba que ademas tenga contenido: un namespace vacio no prueba nada.
+   */
+  const hasTechnicalFailure = (execution: ExecutionDetail): boolean => {
+    const errorContext = execution.context[ERROR_CONTEXT_NAMESPACE];
+
+    return errorContext !== undefined && Object.keys(errorContext).length > 0;
+  };
+
+  /**
    * Nodo donde un `PAUSA_FLOW` detuvo el flujo, segun el contexto acumulado.
    *
    * Se BUSCA la clave en vez de leer `context.pause_context` por su nombre: el
@@ -403,14 +420,27 @@ export const useCanvasStore = defineStore('canvas', () => {
       // paso donde ocurrio, y sin leerlo la caja marcada seria la del cursor
       // —el paso SIGUIENTE, que nunca llego a arrancar— mientras el nodo que de
       // verdad se ejecuto aparece completado.
-      const pausedAt = resolveProgrammedPauseStep(execution);
+      //
+      // PERO SOLO SI LA PAUSA FUE DELIBERADA, y esa es la prioridad que faltaba.
+      // Un fallo tecnico siembra `error_context`, y entonces el nodo detenido es
+      // el CURSOR y nadie mas: esta rama ganaba siempre, de modo que una
+      // ejecucion rota en `procesador_ia` se pintaba en ambar sobre el
+      // `pausa_flow` —que se habia ejecutado con normalidad en un intento
+      // anterior— y dejaba sin senalar al nodo que de verdad hay que reintentar.
+      //
+      // Las dos mitades del arreglo: esta prioridad resuelve el fallo VIVO, y la
+      // purga de `error_context` en `FsmEngineService.prepareResume` impide que
+      // un fallo YA REANUDADO siga ganando sobre una pausa limpia posterior.
+      if (!hasTechnicalFailure(execution) && execution.state === ExecutionState.PAUSADO) {
+        const pausedAt = resolveProgrammedPauseStep(execution);
 
-      if (pausedAt !== null && execution.state === ExecutionState.PAUSADO) {
-        seeded.set(pausedAt, 'PAUSED');
+        if (pausedAt !== null) {
+          seeded.set(pausedAt, 'PAUSED');
 
-        // El cursor vuelve a IDLE: es el proximo en correr, no el detenido.
-        if (execution.activeCursor !== null) {
-          seeded.set(execution.activeCursor, 'IDLE');
+          // El cursor vuelve a IDLE: es el proximo en correr, no el detenido.
+          if (execution.activeCursor !== null) {
+            seeded.set(execution.activeCursor, 'IDLE');
+          }
         }
       }
     }

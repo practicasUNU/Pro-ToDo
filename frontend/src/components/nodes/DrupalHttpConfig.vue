@@ -4,6 +4,8 @@ import { computed } from 'vue';
 
 import { useDrupalHttpStore } from '@stores/nodes/drupal-http.store';
 
+import { useSelectFilter } from '@/composables/useSelectFilter';
+
 import { NODE_TYPE_LABELS, NodeType } from '@/types/pipeline';
 import {
   DRUPAL_BUNDLES,
@@ -187,6 +189,26 @@ const bundleOptions = computed<readonly string[]>(() => {
   return DRUPAL_BUNDLES.includes(bundle) ? DRUPAL_BUNDLES : [bundle, ...DRUPAL_BUNDLES];
 });
 
+// Filtrado predictivo de las cinco listas que crecen con el contenido: los
+// bundles del sitio, los namespaces que publican los nodos de delante y sus
+// campos. Los dos desplegables de adjuntos llevan instancia PROPIA aunque se
+// alimenten de la misma fuente: comparten el filtro y teclear en uno recortaria
+// las opciones del otro.
+const { filteredOptions: filteredBundleOptions, filterFn: filterBundles } =
+  useSelectFilter(bundleOptions);
+const { filteredOptions: filteredNamespaceOptions, filterFn: filterNamespaces } = useSelectFilter(
+  () => store.namespaceOptions,
+);
+const {
+  filteredOptions: filteredAttachmentNamespaceOptions,
+  filterFn: filterAttachmentNamespaces,
+} = useSelectFilter(() => store.namespaceOptions);
+const { filteredOptions: filteredFieldOptions, filterFn: filterFields } = useSelectFilter(
+  () => store.fieldOptions,
+);
+const { filteredOptions: filteredAttachmentFieldOptions, filterFn: filterAttachmentFields } =
+  useSelectFilter(() => store.attachmentFieldOptions);
+
 const isBundleUnlisted = computed<boolean>(() => !DRUPAL_BUNDLES.includes(store.config.bundle));
 
 /** El modo activo lee markup del contexto; `TRANSFER` lo saca del DOM remoto. */
@@ -356,11 +378,16 @@ const toNullableText = (value: string | number | null): string | null => {
         <q-select
           id="drupal-bundle"
           :model-value="store.config.bundle"
-          :options="bundleOptions"
+          :options="filteredBundleOptions"
           outlined
           dense
+          use-input
+          fill-input
+          hide-selected
+          input-debounce="0"
           class="q-mt-xs pd-mono"
           :hint="BUNDLE_HINT"
+          @filter="filterBundles"
           @update:model-value="store.updateConfig({ bundle: String($event ?? '') })"
         >
           <!-- Un bundle heredado fuera del catalogo se conserva y se senala, en
@@ -415,12 +442,17 @@ const toNullableText = (value: string | number | null): string | null => {
           <q-select
             id="drupal-source-namespace"
             :model-value="store.config.sourceNamespace"
-            :options="store.namespaceOptions"
+            :options="filteredNamespaceOptions"
             outlined
             dense
+            use-input
+            fill-input
+            hide-selected
+            input-debounce="0"
             class="q-mt-xs pd-mono"
             :disable="store.namespaceOptions.length === 0"
             :hint="SOURCE_HINT"
+            @filter="filterNamespaces"
             @update:model-value="store.updateConfig({ sourceNamespace: String($event ?? '') })"
           />
         </div>
@@ -432,11 +464,16 @@ const toNullableText = (value: string | number | null): string | null => {
           <q-select
             id="drupal-source-field"
             :model-value="store.config.sourceField"
-            :options="store.fieldOptions"
+            :options="filteredFieldOptions"
             outlined
             dense
+            use-input
+            fill-input
+            hide-selected
+            input-debounce="0"
             class="q-mt-xs pd-mono"
             :disable="store.fieldOptions.length === 0"
+            @filter="filterFields"
             @update:model-value="store.updateConfig({ sourceField: String($event ?? '') })"
           />
         </div>
@@ -669,11 +706,16 @@ const toNullableText = (value: string | number | null): string | null => {
             <q-select
               id="drupal-attachment-namespace"
               :model-value="store.config.attachmentNamespace"
-              :options="store.namespaceOptions"
+              :options="filteredAttachmentNamespaceOptions"
               outlined
               dense
+              use-input
+              fill-input
+              hide-selected
+              input-debounce="0"
               class="q-mt-xs pd-mono"
               :disable="store.namespaceOptions.length === 0"
+              @filter="filterAttachmentNamespaces"
               @update:model-value="
                 store.updateConfig({ attachmentNamespace: String($event ?? '') })
               "
@@ -685,11 +727,16 @@ const toNullableText = (value: string | number | null): string | null => {
             <q-select
               id="drupal-attachment-field"
               :model-value="store.config.attachmentField"
-              :options="store.attachmentFieldOptions"
+              :options="filteredAttachmentFieldOptions"
               outlined
               dense
+              use-input
+              fill-input
+              hide-selected
+              input-debounce="0"
               class="q-mt-xs pd-mono"
               :disable="store.attachmentFieldOptions.length === 0"
+              @filter="filterAttachmentFields"
               @update:model-value="store.updateConfig({ attachmentField: String($event ?? '') })"
             />
           </div>

@@ -235,7 +235,9 @@ describe('TopologyCanvas · lienzo de solo lectura', () => {
     // 3. Assert 🎯
     expect(wrapper.findAll('.pd-canvas-fork')).toHaveLength(1);
     expect(wrapper.find('.pd-canvas-rail--forks .pd-node-card--contingency').exists()).toBe(true);
-    expect(wrapper.text()).toContain('En caso de error');
+    // El rotulo nombra la SEVERIDAD: un LEVE lo cierra el motor solo y un
+    // URGENTE es irrecuperable, asi que la rama existe para los GRAVE.
+    expect(wrapper.text()).toContain('EN CASO DE ERROR GRAVE');
   });
 
   it('1.7 deberia caer en la columna del nodo que declara la ruta', async () => {

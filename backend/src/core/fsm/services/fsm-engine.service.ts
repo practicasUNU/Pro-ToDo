@@ -662,8 +662,11 @@ export class FsmEngineService {
       );
     }
 
+    // La purga va ANTES de la fusion para que un `contextPatch` que reponga
+    // `error_context` a proposito —hoy nadie lo hace, pero el parche es
+    // abierto— no se vea descartado por el motor.
     const contextPayload = this.mergeContextPatch(
-      execution.contextPayload,
+      this.withoutErrorContext(execution.contextPayload),
       contextPatch,
     );
 
@@ -729,6 +732,36 @@ export class FsmEngineService {
         [namespace]: { ...(merged[namespace] ?? {}), ...data },
       }),
       { ...current },
+    );
+  }
+
+  /**
+   * Copia del contexto acumulado sin el namespace reservado `error_context`.
+   *
+   * Lo siembra el motor justo antes de desviar por `onErrorStep`
+   * (`buildErrorContext`) y describe UN fallo concreto, no el historial de la
+   * ejecucion. Al reanudar deja de ser cierto, y conservarlo tenia una
+   * consecuencia visible: el canvas decide con el que la pausa es TECNICA, asi
+   * que una ejecucion que fallo en `procesador_ia`, se reanudo y despues se
+   * suspendio limpiamente en un `PAUSA_FLOW` se repintaba como si siguiera
+   * rota, senalando ademas el nodo equivocado.
+   *
+   * La evidencia no se pierde: el fallo vive en `logs_nodo` y en el `.log`
+   * fisico, que es donde CU-09 la guarda a proposito, y `ruta_archivo_log` de
+   * la propia fila tampoco se toca.
+   *
+   * Se construye una copia filtrada en vez de clonar y hacer `delete`, por el
+   * mismo motivo que `withoutRetryCounter`: el `delete` mutaria el objeto que
+   * la entidad todavia expone, y el checkpoint es inmutable por contrato
+   * (`architecture-patterns.md` §3).
+   */
+  private withoutErrorContext(
+    contextPayload: Record<string, Record<string, unknown>>,
+  ): Record<string, Record<string, unknown>> {
+    return Object.fromEntries(
+      Object.entries(contextPayload).filter(
+        ([namespace]) => namespace !== ERROR_CONTEXT_NAMESPACE,
+      ),
     );
   }
 

@@ -5,6 +5,7 @@ import {
   DEFAULT_IMAP_PORT,
   DEFAULT_MAILBOX,
   DEFAULT_POLL_INTERVAL_MS,
+  DEFAULT_MARK_AS_READ,
   DEFAULT_UNREAD_ONLY,
   MIN_POLL_INTERVAL_MS,
   UNVERIFIED_CONNECTION_WARNING,
@@ -88,7 +89,11 @@ describe('useTriggerImapStore · configuracion del nodo TRIGGER_IMAP', () => {
         // Opt-IN, al reves que `unreadOnly`: el base64 de los adjuntos se
         // reserializa en cada checkpoint, asi que se activa a proposito.
         includeAttachments: false,
+        // Opt-IN tambien: el buzon corporativo es compartido y marcar como
+        // leidos los correos de otra persona es irreversible.
+        markAsRead: DEFAULT_MARK_AS_READ,
       });
+      expect(DEFAULT_MARK_AS_READ).toBe(false);
       expect(DEFAULT_IMAP_PORT).toBe(993);
       expect(DEFAULT_MAILBOX).toBe('INBOX');
       expect(DEFAULT_POLL_INTERVAL_MS).toBe(60_000);
@@ -509,6 +514,7 @@ describe('useTriggerImapStore · configuracion del nodo TRIGGER_IMAP', () => {
         pollIntervalMs: 60_000,
         unreadOnly: true,
         includeAttachments: false,
+        markAsRead: false,
         ...params,
       },
     });
@@ -811,6 +817,83 @@ describe('useTriggerImapStore · configuracion del nodo TRIGGER_IMAP', () => {
       expect(isValidRegexPattern('')).toBe(true);
       expect(isValidRegexPattern('^S_2026_.*')).toBe(true);
       expect(isValidRegexPattern('([')).toBe(false);
+    });
+  });
+
+  describe('4septies. Marcado de lectura del buzon', () => {
+    /**
+     * El campo existia en el DTO del backend desde el principio, pero ninguna
+     * pieza del frontend lo contemplaba: no habia forma de decidirlo desde el
+     * asistente y todo flujo se guardaba con el defecto.
+     */
+    /** Nodo guardado minimo; `buildSavedNode` vive en otro bloque. */
+    const savedNode = (params: Record<string, unknown>) => ({
+      outputNamespace: 'raw_email',
+      params: {
+        host: VALID_HOST,
+        port: 993,
+        secure: true,
+        user: VALID_USER,
+        passwordEnvKey: VALID_ENV_KEY,
+        mailbox: 'INBOX',
+        ...params,
+      },
+    });
+
+    it('4septies.1 deberia nacer SIN marcar, como el DTO', () => {
+      // 1. Arrange 📐 & 2. Act ⚙️
+      const store = useTriggerImapStore(NODE_ID);
+
+      // 3. Assert 🎯: el buzon es corporativo y compartido; marcar como leidos
+      // los correos de otra persona es irreversible.
+      expect(store.config.markAsRead).toBe(false);
+    });
+
+    it('4septies.2 deberia publicarlo SIEMPRE, tambien apagado', () => {
+      // 1. Arrange 📐: omitirlo dejaria que mandara el defecto del DTO, que hoy
+      //    coincide pero no tiene por que seguir haciendolo.
+      const store = useTriggerImapStore(NODE_ID);
+
+      // 2. Act ⚙️
+      const params = store.toNodeParams();
+
+      // 3. Assert 🎯
+      expect(params).toHaveProperty('markAsRead', false);
+    });
+
+    it('4septies.3 deberia publicar el valor que eligio el operador', () => {
+      // 1. Arrange 📐
+      const store = useTriggerImapStore(NODE_ID);
+
+      // 2. Act ⚙️
+      store.patchConfig({ markAsRead: true });
+
+      // 3. Assert 🎯
+      expect(store.toNodeParams()).toHaveProperty('markAsRead', true);
+    });
+
+    it('4septies.4 deberia rehidratarlo de un nodo guardado', () => {
+      // 1. Arrange 📐
+      const store = useTriggerImapStore(NODE_ID);
+
+      // 2. Act ⚙️
+      store.hydrateFromNode(savedNode({ markAsRead: true }));
+
+      // 3. Assert 🎯
+      expect(store.config.markAsRead).toBe(true);
+    });
+
+    it('4septies.5 deberia descartar la cadena "false" de una escritura por SQL', () => {
+      // 1. Arrange 📐: en JavaScript esa cadena es *truthy*, asi que una
+      //    comparacion laxa encenderia el marcado sobre un flujo que lo tenia
+      //    apagado — y el efecto es irreversible sobre un buzon compartido.
+      const store = useTriggerImapStore(NODE_ID);
+
+      // 2. Act ⚙️
+      store.hydrateFromNode(savedNode({ markAsRead: 'false' }));
+
+      // 3. Assert 🎯
+      expect(store.config.markAsRead).toBe(false);
     });
   });
 });

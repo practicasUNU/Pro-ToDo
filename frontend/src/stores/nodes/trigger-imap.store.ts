@@ -27,6 +27,15 @@ export const DEFAULT_MAILBOX = 'INBOX';
  */
 export const DEFAULT_UNREAD_ONLY = true;
 
+/**
+ * El buzon no se toca salvo que el operador lo pida.
+ *
+ * Replica de `DEFAULT_MARK_AS_READ` del DTO del backend. Marcar como leidos los
+ * correos de un buzon corporativo compartido es irreversible y afecta a datos
+ * que no son del flujo.
+ */
+export const DEFAULT_MARK_AS_READ = false;
+
 /** Periodo de sondeo por defecto: un minuto. */
 export const DEFAULT_POLL_INTERVAL_MS = 60_000;
 
@@ -98,6 +107,23 @@ export interface TriggerImapConfig extends TriggerImapFilters {
    * del contexto, y ese contexto se reserializa entero en cada checkpoint.
    */
   includeAttachments: boolean;
+  /**
+   * Marcar `\Seen` el correo ingerido en el servidor.
+   *
+   * Opt-in, y el defecto es NO tocarlo: el buzon es corporativo y compartido,
+   * de modo que marcar como leidos los correos de otra persona es un efecto
+   * irreversible sobre datos que no son suyos.
+   *
+   * EL PRECIO DE DEJARLO APAGADO es perder el marcador anti-duplicados: la
+   * deduplicacion recae entonces en la ventana de 48 h y en el filtro de
+   * asunto, asi que un flujo con filtros laxos puede republicar un correo ya
+   * tratado. Por eso lo decide el operador y no una constante.
+   *
+   * Mismo nombre que en el DTO (`markAsRead`). Un alias en cliente obligaria a
+   * traducir en `toNodeParams`, y el DTO valida con `forbidNonWhitelisted`: una
+   * clave inventada es un 400, no un campo ignorado.
+   */
+  markAsRead: boolean;
 }
 
 /**
@@ -150,6 +176,7 @@ const buildInitialConfig = (): TriggerImapConfig => ({
   subjectFilterRegex: '',
   unreadOnly: DEFAULT_UNREAD_ONLY,
   includeAttachments: false,
+  markAsRead: DEFAULT_MARK_AS_READ,
 });
 
 /** Prefijo del id de Pinia; el sufijo es el `nodeId` del `pipeline_schema`. */
@@ -449,6 +476,11 @@ const triggerImapSetup = () => {
       // adjuntos no le aportan nada. Aqui si, porque esto son los `params` que
       // acaban en el `pipeline_schema`.
       includeAttachments: config.value.includeAttachments,
+      // Se publica SIEMPRE, tambien cuando vale `false`. Omitirlo dejaria que
+      // mandara el defecto del DTO, que hoy coincide pero no tiene por que
+      // seguir haciendolo: lo que el operador vio marcado en el formulario
+      // tiene que quedar escrito en el esquema.
+      markAsRead: config.value.markAsRead,
       ...(fromFilter !== '' ? { fromFilter } : {}),
       // `subjectFilter` ya NO se publica: el DTO lo tolera, pero omitirlo es lo
       // que purga del esquema los flujos heredados en cuanto se vuelven a
@@ -511,6 +543,10 @@ const triggerImapSetup = () => {
       // `false`. Ademas descarta la cadena `'false'` que pudo dejar una escritura
       // por SQL, que en JavaScript seria *truthy*.
       includeAttachments: params.includeAttachments === true,
+      // Comparacion estricta, igual que el de arriba y por lo mismo: es un
+      // opt-IN cuyo defecto es `false`, y asi se descarta la cadena `'false'`
+      // que pudo dejar una escritura por SQL y que seria *truthy*.
+      markAsRead: params.markAsRead === true,
     };
 
     // El modo no viaja en los `params`: se deduce de la forma del patron. Lo

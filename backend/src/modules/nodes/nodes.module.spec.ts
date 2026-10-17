@@ -16,6 +16,7 @@ import { TemplateMapperStrategy } from './strategies/template-mapper.strategy';
 import { WebScraperStrategy } from './strategies/web-scraper.strategy';
 
 import type { ConfigService } from '@nestjs/config';
+import type { InboundEmailResumeService } from '@modules/workflows/inbound-email-resume.service';
 import type { DrupalApiConfig } from '@core/config/drupal-api.config';
 import type { HttpClientService } from '@core/http/http-client.service';
 import type { AiDefaultsConfig } from '@core/config/ai-defaults.config';
@@ -60,7 +61,12 @@ const buildHarness = (): {
   // El renderer va REAL: es puro (sin repositorio, red ni estado) y es la unica
   // dependencia del escudo, asi que un doble no ahorraria nada.
   const shield = new PostIaSanitizerStrategy(createTemplateRendererService());
-  const imap = new ImapTriggerStrategy({} as ConfigService);
+  // El servicio de ordenes va vacio por el mismo criterio que el resto:
+  // inscribir la estrategia no atiende ningun correo.
+  const imap = new ImapTriggerStrategy(
+    {} as ConfigService,
+    {} as InboundEmailResumeService,
+  );
   // Sin dependencias inyectadas: el nodo CRON no hace E/S ni lee secretos.
   const cron = new CronTriggerStrategy();
   // Tampoco el parser: solo lee el contexto que le entrega el motor.
@@ -78,7 +84,10 @@ const buildHarness = (): {
   );
   // El transporte va vacio: inscribir la estrategia no abre ninguna conexion
   // SMTP, y el pool de nodemailer es perezoso hasta el primer envio.
-  const smtp = new SmtpAlertStrategy({} as SmtpNodeMailerService);
+  const smtp = new SmtpAlertStrategy(
+    {} as SmtpNodeMailerService,
+    {} as ConfigService,
+  );
   // Mismo criterio: inscribirla no llama a ningun modelo.
   const ocr = new OcrProcessorStrategy(
     {} as MockLlmProvider,

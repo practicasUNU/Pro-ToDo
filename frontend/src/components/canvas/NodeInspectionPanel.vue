@@ -5,7 +5,7 @@ import { useQuasar } from 'quasar';
 import SafeDeleteModal from '@components/shared/SafeDeleteModal.vue';
 import { useCanvasStore } from '@stores/canvas.store';
 import { useExecutionStore } from '@stores/execution.store';
-import { NODE_TYPE_LABELS } from '@/types/pipeline';
+import { ERROR_CONTEXT_NAMESPACE, NODE_TYPE_LABELS } from '@/types/pipeline';
 
 const canvasStore = useCanvasStore();
 const executionStore = useExecutionStore();
@@ -52,7 +52,7 @@ const namespaceDump = computed<string | null>(() => {
  * siembra en el contexto justo antes de detenerse o desviar.
  */
 const errorContextDump = computed<string | null>(() => {
-  const payload = canvasStore.executionContext.error_context;
+  const payload = canvasStore.executionContext[ERROR_CONTEXT_NAMESPACE];
 
   return payload === undefined ? null : JSON.stringify(payload, null, 2);
 });

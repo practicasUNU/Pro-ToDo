@@ -69,14 +69,17 @@ describe('resolveOcrProcessorConfig · politica de red', () => {
     it('1.4 sin variables declaradas NO deberia cambiar nada', () => {
       // 1. Arrange 📐: la guarda que hace inocuo el cambio donde no se declaren
       //    las variables.
-      const dto = buildDto({ timeoutMs: 5_000, maxRetries: 4 });
+      // `maxRetries: 3` es el techo del DTO desde que bajo de 5: sigue siendo
+      // distinto del defecto (1), que es lo que esta prueba necesita para
+      // demostrar que manda el nodo, y ademas no lo recorta el `clamp`.
+      const dto = buildDto({ timeoutMs: 5_000, maxRetries: 3 });
 
       // 2. Act ⚙️
       const config = resolveOcrProcessorConfig(dto, SIN_ENTORNO);
 
       // 3. Assert 🎯
       expect(config.timeoutMs).toBe(5_000);
-      expect(config.maxRetries).toBe(4);
+      expect(config.maxRetries).toBe(3);
     });
   });
 

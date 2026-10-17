@@ -7,6 +7,8 @@ import { useTemplateMapperStore } from '@stores/nodes/template-mapper.store';
 import TemplateEditorDialog from '@components/templates/TemplateEditorDialog.vue';
 import TemplatePreviewDialog from '@components/templates/TemplatePreviewDialog.vue';
 
+import { useSelectFilter } from '@/composables/useSelectFilter';
+
 import { extractApiErrorMessage } from '@/utils/api-error';
 
 import { NODE_OUTPUT_NAMESPACES } from '@/types/pipeline';
@@ -46,6 +48,11 @@ const templateOptions = computed(() =>
 // teclea. Un guion o una mayuscula aqui eran un 400 al guardar el flujo entero.
 const namespaceOptions = computed(() => [...NODE_OUTPUT_NAMESPACES]);
 
+const { filteredOptions: filteredTemplateOptions, filterFn: filterTemplates } =
+  useSelectFilter(templateOptions);
+const { filteredOptions: filteredNamespaceOptions, filterFn: filterNamespaces } =
+  useSelectFilter(namespaceOptions);
+
 const loadTemplates = async (): Promise<void> => {
   try {
     await templateMapperStore.loadTemplates();
@@ -78,7 +85,10 @@ onMounted(loadTemplates);
       <p class="pd-subtitle pd-mono">{{ nodeId }}</p>
     </header>
 
-    <!-- Selector determinista (Poka-Yoke): sin use-input, sin texto libre -->
+    <!-- Selector determinista (Poka-Yoke): CERRADO, sin texto libre.
+         `use-input` habilita teclear para FILTRAR, no para inventar: lo que
+         daria de alta un valor nuevo es `new-value-mode`, que no esta. Con
+         decenas de plantillas, elegir sin filtro era desplazarse a ojo. -->
     <div class="q-mb-md">
       <label class="pd-label" for="template-mapper-select">
         Plantilla<span class="pd-required">*</span>
@@ -86,14 +96,19 @@ onMounted(loadTemplates);
       <q-select
         id="template-mapper-select"
         :model-value="templateMapperStore.config.templateId"
-        :options="templateOptions"
+        :options="filteredTemplateOptions"
         outlined
         dense
         emit-value
         map-options
+        use-input
+        fill-input
+        hide-selected
+        input-debounce="0"
         class="q-mt-xs"
         :loading="templateMapperStore.isLoading"
         placeholder="Selecciona una plantilla"
+        @filter="filterTemplates"
         @update:model-value="templateMapperStore.setTemplateId($event)"
       />
     </div>
@@ -105,10 +120,15 @@ onMounted(loadTemplates);
       <q-select
         id="template-mapper-namespace"
         :model-value="templateMapperStore.config.outputNamespace"
-        :options="namespaceOptions"
+        :options="filteredNamespaceOptions"
         outlined
         dense
+        use-input
+        fill-input
+        hide-selected
+        input-debounce="0"
         class="q-mt-xs pd-mono"
+        @filter="filterNamespaces"
         @update:model-value="templateMapperStore.setOutputNamespace(String($event))"
       />
     </div>

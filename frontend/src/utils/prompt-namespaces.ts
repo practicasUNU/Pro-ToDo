@@ -39,10 +39,32 @@ export const PROMPT_EXCLUDED_NODE_TYPES: ReadonlySet<string> = new Set<string>([
 ]);
 
 /**
+ * Destinos que SI pueden alimentar a un prompt, pese a su categoria.
+ *
+ * La regla general es que un destino cierra el flujo y por tanto nada corre
+ * despues, pero `DESTINO_SMTP` es la excepcion y lo es por su topologia: no
+ * vive en el camino feliz sino colgado de un `onErrorStep`, como satelite de
+ * contingencia. Una rama de recuperacion que corra DESPUES del aviso —un
+ * segundo intento que quiera citar el acuse del correo enviado— tiene un caso
+ * legitimo, y hasta ahora `smtp_result` no se podia elegir del desplegable.
+ *
+ * Es un conjunto y no una comparacion suelta para que el dia que aparezca otro
+ * destino con la misma forma —un acuse que algo posterior deba leer— se declare
+ * aqui en vez de ensanchar la regla.
+ */
+const PROMPT_ALLOWED_DESTINATION_TYPES: ReadonlySet<string> = new Set<string>([
+  NodeType.DESTINO_SMTP,
+]);
+
+/**
  * Un destino cierra el flujo: su salida es el acuse de la publicacion y nada
  * corre despues, asi que jamas puede alimentar a un nodo anterior.
+ *
+ * Se mira TAMBIEN el tipo y no solo la categoria por la excepcion de arriba.
  */
-const isExcludedCategory = (category: NodeCategory): boolean => category === NodeCategory.DESTINO;
+const isExcludedCategory = (category: NodeCategory, code?: string): boolean =>
+  category === NodeCategory.DESTINO &&
+  (code === undefined || !PROMPT_ALLOWED_DESTINATION_TYPES.has(code));
 
 /** Excluye por tipo de nodo; lo que no se puede identificar se deja pasar. */
 const isExcludedNodeType = (nodeType: string | undefined): boolean =>
@@ -53,10 +75,12 @@ const isExcludedNodeType = (nodeType: string | undefined): boolean =>
  *
  * Es el fallback del gestor de plantillas de prompt, donde no hay ningun flujo
  * detras: solo se sabe que publicaria cada tipo de nodo SI alguien lo colocara.
- * Hoy deja SEIS origenes: `raw_email`, `cron_trigger`, `parsed_email`,
+ * Hoy deja SIETE origenes: `raw_email`, `cron_trigger`, `parsed_email`,
  * `scraped_web`, `rendered_html` (el mapeador salio de las exclusiones cuando
- * paso a ir DELANTE de la inferencia) y `ocr_result` —el OCR transcribe para
- * que un prompt posterior lea, asi que citarlo es su razon de ser—.
+ * paso a ir DELANTE de la inferencia), `ocr_result` —el OCR transcribe para
+ * que un prompt posterior lea, asi que citarlo es su razon de ser— y
+ * `smtp_result`, que entra por `PROMPT_ALLOWED_DESTINATION_TYPES` pese a ser
+ * un destino, porque cuelga de un `onErrorStep` y no del camino feliz.
  *
  * Se recorre el catalogo y no la lista de namespaces porque la CATEGORIA solo
  * la conoce el catalogo; `NODE_TYPE_BY_NAMESPACE` responde la pregunta inversa.
@@ -65,7 +89,10 @@ export const buildPromptContextFromCatalog = (
   entries: readonly NodeCatalogEntry[],
 ): UpstreamNamespace[] =>
   entries
-    .filter((entry) => !isExcludedCategory(entry.category) && !isExcludedNodeType(entry.code))
+    .filter(
+      (entry) =>
+        !isExcludedCategory(entry.category, entry.code) && !isExcludedNodeType(entry.code),
+    )
     // Un nodo sin campos declarados no aporta nada al explorador: seleccionarlo
     // dejaria el segundo selector vacio sin explicar por que. Hoy es el caso de
     // DESTINO_ACENS, que no tiene estrategia ni valor de enum. PROCESADOR_IA y
@@ -89,6 +116,7 @@ export const buildPromptContextFromCatalog = (
  */
 export const filterPromptContext = (context: readonly UpstreamNamespace[]): UpstreamNamespace[] =>
   context.filter(({ nodeType }) => !isExcludedNodeType(nodeType)).map((entry) => ({ ...entry }));
+
 
 /**
  * Namespace por defecto de un codigo del catalogo.

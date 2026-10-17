@@ -274,11 +274,19 @@ export class WorkflowsService
    * importar de ahi. El motor se limita a informar de COMO termino; que hacer
    * con esa informacion es una decision de negocio.
    *
-   * Solo se invoca desde el despacho automatico. `executeTestWorkflow` queda
-   * fuera a proposito: el banco de pruebas existe para iterar sobre un flujo, y
-   * apagarlo en cada prueba exitosa lo convertiria en un interruptor.
+   * Lo invocan los DOS caminos por los que una ejecucion puede llegar al final
+   * del grafo: el despacho automatico (`runAutomaticWorkflow`) y la reanudacion
+   * manual de CU-09 (`ExecutionsService.resumeExecution`). Que faltara el
+   * segundo era el defecto: un flujo que se atascaba, se reanudaba a mano y
+   * terminaba bien se quedaba ACTIVO con su sondeo en marcha, de modo que la
+   * politica "una sola corrida" solo se cumplia si nadie habia tenido que
+   * intervenir. Por eso es `public`.
+   *
+   * `executeTestWorkflow` queda fuera a proposito: el banco de pruebas existe
+   * para iterar sobre un flujo, y apagarlo en cada prueba exitosa lo
+   * convertiria en un interruptor.
    */
-  private async applyStopOnFirstSuccess(
+  public async applyStopOnFirstSuccess(
     workflow: Workflow,
     schema: PipelineSchema,
     finished: FsmExecution,

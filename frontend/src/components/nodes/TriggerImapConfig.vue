@@ -100,6 +100,20 @@ const UNREAD_ONLY_WARNING =
 
 const ATTACHMENTS_LOCKED_HINT = 'Activado obligatoriamente por la plantilla de flujo.';
 
+/**
+ * Los dos lados del interruptor, con su coste.
+ *
+ * Encendido: el efecto es IRREVERSIBLE y cae sobre un buzon que es de todos.
+ * Apagado: sin la marca `\Seen`, la deduplicacion recae en la ventana de 48 h
+ * y en el filtro de asunto, de modo que un flujo con filtros laxos puede
+ * republicar un correo ya tratado.
+ */
+const MARK_AS_READ_ON_HINT =
+  'El mensaje se marcara como leido en el servidor. Es irreversible y el buzon es compartido: afectara tambien a quien lo lea desde su cliente de correo.';
+
+const MARK_AS_READ_OFF_HINT =
+  'El buzon queda intacto. A cambio se pierde el marcador anti-duplicados: la deduplicacion depende de la ventana de 48 h y del filtro de asunto, asi que un filtro laxo puede reprocesar un correo ya tratado.';
+
 const ATTACHMENTS_HINT =
   'Los adjuntos que superen el limite se descartan sin detener el flujo. El contenido binario se libera en cuanto algun nodo extrae texto aprovechable.';
 
@@ -459,6 +473,23 @@ const onTestConnection = async (): Promise<void> => {
         </p>
         <p v-else-if="store.config.includeAttachments" class="pd-subtitle q-mt-xs q-mb-none">
           {{ ATTACHMENTS_HINT }}
+        </p>
+      </div>
+
+      <div class="col-12">
+        <q-toggle
+          :model-value="store.config.markAsRead"
+          color="primary"
+          label="Marcar el correo como leido tras procesarlo"
+          data-test="mark-as-read-toggle"
+          @update:model-value="store.patchConfig({ markAsRead: Boolean($event) })"
+        />
+        <!-- El aviso cambia segun la posicion porque los dos lados tienen
+             coste, y ninguno es obviamente el correcto: encendido se toca un
+             buzon compartido, apagado se pierde el marcador anti-duplicados.
+             Un texto unico dejaria al operador eligiendo a ciegas. -->
+        <p class="pd-subtitle q-mt-xs q-mb-none" data-test="mark-as-read-hint">
+          {{ store.config.markAsRead ? MARK_AS_READ_ON_HINT : MARK_AS_READ_OFF_HINT }}
         </p>
       </div>
     </div>
