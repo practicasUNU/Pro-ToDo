@@ -7,6 +7,8 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { useExecutionSocket } from './useExecutionSocket';
 
+import { useCanvasStore } from '@stores/canvas.store';
+
 import { ExecutionState } from '@/types/execution';
 
 import type {
@@ -25,10 +27,19 @@ import type { QNotifyCreateOptions } from 'quasar';
 let registered: ExecutionEventHandlers | null = null;
 const unsubscribe = vi.fn();
 
+// El oyente de reconexion se intercepta igual que los de dominio: el spec lo
+// dispara a mano para comprobar que la vista se reconcilia sin socket real.
+let registeredReconnect: (() => void) | null = null;
+const unsubscribeReconnect = vi.fn();
+
 vi.mock('@services/socket-events.service', () => ({
   subscribeToExecutionEvents: vi.fn((handlers: ExecutionEventHandlers) => {
     registered = handlers;
     return unsubscribe;
+  }),
+  subscribeToReconnect: vi.fn((handler: () => void) => {
+    registeredReconnect = handler;
+    return unsubscribeReconnect;
   }),
 }));
 
@@ -292,8 +303,28 @@ describe('useExecutionSocket', () => {
     // Act
     wrapper.unmount();
 
-    // Assert
+    // Assert: los DOS juegos, el de dominio y el de reconexion. Sin la segunda
+    // baja, remontar el layout apilaria un sondeo REST por montaje.
     expect(unsubscribe).toHaveBeenCalledTimes(1);
+    expect(unsubscribeReconnect).toHaveBeenCalledTimes(1);
+  });
+
+  it('deberia reconciliar el canvas al reconectar el socket', () => {
+    // Arrange 📐: las salas vuelven solas, pero lo ocurrido durante el corte no
+    // se reenvia a nadie. Sin esta lectura el canvas se queda en la ultima foto
+    // que recibio hasta que alguien recarga a mano.
+    const canvasStore = useCanvasStore();
+    const syncCurrentExecution = vi
+      .spyOn(canvasStore, 'syncCurrentExecution')
+      .mockResolvedValue(undefined);
+
+    mountHost();
+
+    // Act ⚙️
+    registeredReconnect?.();
+
+    // Assert 🎯
+    expect(syncCurrentExecution).toHaveBeenCalledTimes(1);
   });
   it('deberia felicitar en positivo al completarse un flujo con exito', () => {
     // Arrange

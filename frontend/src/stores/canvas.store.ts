@@ -1,7 +1,7 @@
 import { computed, ref } from 'vue';
 import { acceptHMRUpdate, defineStore } from 'pinia';
 
-import { fetchActiveExecution } from '@services/fsm-executions.service';
+import { fetchActiveExecution, fetchExecution } from '@services/fsm-executions.service';
 import { fetchWorkflow } from '@services/workflows.service';
 import { useExecutionStore } from '@stores/execution.store';
 import { ExecutionState } from '@/types/execution';
@@ -10,6 +10,7 @@ import { errorRouteTarget } from '@/utils/pipeline-assembler';
 
 import type {
   ExecutionDetail,
+  ExecutionEventBase,
   FlowCompletedEvent,
   FlowPausedEvent,
   FlowResumedEvent,
@@ -401,8 +402,9 @@ export const useCanvasStore = defineStore('canvas', () => {
    * «Activo» a «Exitoso» ante los ojos del operador sin que la cabecera se
    * enterase hasta un F5.
    *
-   * No crea la ejecucion si no hay ninguna: un evento de un flujo que el canvas
-   * todavia no ha cargado no puede inventarse un checkpoint a medias.
+   * NO crea la ejecucion si no hay ninguna: es para parches PARCIALES, y
+   * completar los huecos con valores de relleno escribiria un checkpoint
+   * inventado. De crearla se encarga `ensureObservedExecution`.
    */
   const patchObservedExecution = (patch: Partial<ExecutionDetail>): void => {
     if (observedExecution.value === null) {
@@ -410,6 +412,96 @@ export const useCanvasStore = defineStore('canvas', () => {
     }
 
     observedExecution.value = { ...observedExecution.value, ...patch };
+  };
+
+  /**
+   * Trae el contexto real de la ejecucion que un evento acaba de presentar.
+   *
+   * Corre EN SEGUNDO PLANO y nadie la espera: lo que el operador necesita ver de
+   * inmediato ya lo pinto la semilla sintetica. Esto repone `context` y
+   * `retryState`, que no viajan en ningun evento y sin los cuales
+   * `isResumableFrom` no puede ofrecer un solo paso al que volver —el boton de
+   * reanudacion selectiva quedaria inerte sobre una ejecucion legitimamente
+   * pausada—.
+   *
+   * SE COMPRUEBA AL VOLVER que se sigue observando la misma ejecucion. La
+   * respuesta puede llegar despues de que el canvas haya cambiado de flujo o de
+   * intento, y fusionarla a ciegas resucitaria el contexto de una ejecucion que
+   * ya nadie mira.
+   *
+   * El fallo se traga a proposito: es un relleno, no el camino critico. Un corte
+   * de red aqui deja la vista exactamente como estaba antes de esta mejora, no
+   * peor, y el siguiente evento o una recarga la completan.
+   */
+  const hydrateObservedExecution = async (executionId: string): Promise<void> => {
+    try {
+      const detail = await fetchExecution(executionId);
+
+      if (observedExecution.value?.executionId !== executionId) {
+        return;
+      }
+
+      patchObservedExecution({
+        context: detail.context,
+        retryState: detail.retryState,
+        startedAt: detail.startedAt,
+        logFilePath: detail.logFilePath,
+      });
+
+      // Se resiembra porque el historico acaba de llegar: hasta ahora el mapa
+      // solo tenia lo que los eventos habian contado, y los nodos que corrieron
+      // ANTES de que el canvas se enganchara no habian dejado rastro alguno.
+      nodeStatuses.value = buildStatuses(
+        detail.context,
+        resolveCutoffNode(observedExecution.value),
+      );
+    } catch {
+      // Sin traza al usuario: no ha perdido nada que tuviera antes.
+    }
+  };
+
+  /**
+   * Garantiza que hay una ejecucion observada antes de aplicar un evento.
+   *
+   * EL DEFECTO QUE ARREGLA. Las cajas se pintaban igualmente —la guarda de los
+   * manejadores es `belongsToCanvas`, que solo mira el flujo—, pero la CABECERA
+   * no: `patchObservedExecution` se rendia en cuanto `observedExecution` era
+   * `null`, y eso es exactamente lo que ocurre cuando el operador deja el canvas
+   * abierto sobre un flujo en espera y el disparador arranca una ejecucion que
+   * la carga REST no llego a ver. Resultado: los nodos encendiendose uno tras
+   * otro bajo una insignia que seguia diciendo «Activo (En espera de trigger)».
+   *
+   * La semilla es SINTETICA y deliberadamente incompleta: `context` y
+   * `retryState` vacios, porque un evento no los trae y rellenarlos con otra
+   * cosa seria inventarlos. `hydrateObservedExecution` los repone enseguida.
+   *
+   * Tambien cubre el RELEVO de ejecucion: si el evento habla de otra distinta a
+   * la observada —el flujo volvio a dispararse mientras la vista seguia
+   * abierta—, se sustituye en vez de parchear sobre el intento viejo.
+   */
+  const ensureObservedExecution = (
+    event: ExecutionEventBase,
+    state: ExecutionState,
+    activeCursor: string | null = null,
+  ): void => {
+    if (observedExecution.value?.executionId === event.executionId) {
+      return;
+    }
+
+    observedExecution.value = {
+      executionId: event.executionId,
+      flowId: event.flowId,
+      state,
+      activeCursor,
+      logFilePath: null,
+      failureReason: null,
+      startedAt: event.emittedAt,
+      updatedAt: event.emittedAt,
+      context: {},
+      retryState: {},
+    };
+
+    void hydrateObservedExecution(event.executionId);
   };
 
   /**
@@ -480,51 +572,77 @@ export const useCanvasStore = defineStore('canvas', () => {
   };
 
   /**
-   * Siembra el estado inicial de las cajas a partir del checkpoint.
+   * Construye el mapa de estados ENTERO a partir del contexto y del corte.
    *
-   * Sin ejecucion viva todo queda en `IDLE`. Con ella, en tres fases y en este
-   * orden, porque cada una corrige a la anterior:
+   * UNICO ALGORITMO DE PINTADO del canvas, y que sea uno solo es el arreglo.
+   * Antes habia dos —este, para rehidratar tras un F5, y un parcheo a mano
+   * dentro de `handleFlowResumed` para el canvas vivo— y no coincidian: al
+   * reanudar HACIA ADELANTE, aquel apagaba el nodo de pausa a `IDLE` mientras
+   * este lo pintaba `COMPLETED`, de modo que recargar la pagina cambiaba el
+   * dibujo sin que el flujo hubiera cambiado. Con una sola funcion, los dos
+   * caminos convergen por construccion y no por disciplina.
+   *
+   * Tres fases, en este orden, porque cada una corrige a la anterior:
    *
    * 1. HISTORICO: un nodo cuenta como completado si dejo su `outputNamespace`
-   *    en el contexto, que es la unica prueba de que corrio.
-   * 2. CORTE: se marca el nodo donde la ejecucion esta detenida o corriendo.
+   *    en el contexto, que es la unica prueba de que corrio. NO se da por
+   *    completado todo lo anterior al corte: una ruta `onErrorStep` puede haber
+   *    SALTADO pasos intermedios, y pintarlos en verde afirmaria un trabajo que
+   *    no ocurrio.
+   * 2. CORTE: el nodo donde la ejecucion esta detenida, corriendo o a punto de
+   *    reanudarse.
    * 3. PURGA: todo lo que queda por delante del corte vuelve a `IDLE`, pese al
    *    historico. Sin esta fase el contexto de un intento anterior pintaba como
    *    hecho un trabajo que el flujo todavia tiene que rehacer.
    *
-   * Es la contraparte de `handleFlowResumed`, que hace la misma purga sobre el
-   * canvas VIVO; las dos comparten `resetAfterIndex` para no desincronizarse.
+   * @param context Namespaces acumulados de la ejecucion.
+   * @param cutoff Nodo de corte con el estado que le corresponde, o `null` si
+   *        la ejecucion ya no va a avanzar y vale el historico completo.
    */
-  const seedStatuses = (execution: ExecutionDetail | null): void => {
-    const seeded = new Map<string, CanvasNodeStatus>();
+  const buildStatuses = (
+    context: Record<string, Record<string, unknown>>,
+    cutoff: { nodeId: string; status: CanvasNodeStatus } | null,
+  ): Map<string, CanvasNodeStatus> => {
+    const statuses = new Map<string, CanvasNodeStatus>();
 
-    if (execution !== null) {
-      // --- 1. Historico.
-      for (const step of orderedSteps.value) {
-        if (execution.context[step.outputNamespace] !== undefined) {
-          seeded.set(step.nodeId, 'COMPLETED');
-        }
-      }
-
-      // --- 2. Corte.
-      const cutoff = resolveCutoffNode(execution);
-
-      if (cutoff !== null) {
-        seeded.set(cutoff.nodeId, cutoff.status);
-
-        // --- 3. Purga de lo que queda por delante.
-        const cutoffIndex = orderedSteps.value.findIndex((step) => step.nodeId === cutoff.nodeId);
-
-        // Un corte fuera del camino nominal —un satelite de contingencia— no
-        // tiene indice con el que purgar. Se marca igual (fase 2) y el resto
-        // conserva su historico: no hay un "despues" que definir.
-        if (cutoffIndex !== -1) {
-          resetAfterIndex(seeded, cutoffIndex);
-        }
+    // --- 1. Historico.
+    for (const step of orderedSteps.value) {
+      if (context[step.outputNamespace] !== undefined) {
+        statuses.set(step.nodeId, 'COMPLETED');
       }
     }
 
-    nodeStatuses.value = seeded;
+    if (cutoff === null) {
+      return statuses;
+    }
+
+    // --- 2. Corte.
+    statuses.set(cutoff.nodeId, cutoff.status);
+
+    // --- 3. Purga de lo que queda por delante.
+    const cutoffIndex = orderedSteps.value.findIndex((step) => step.nodeId === cutoff.nodeId);
+
+    // Un corte fuera del camino nominal —un satelite de contingencia— no
+    // tiene indice con el que purgar. Se marca igual (fase 2) y el resto
+    // conserva su historico: no hay un "despues" que definir.
+    if (cutoffIndex !== -1) {
+      resetAfterIndex(statuses, cutoffIndex);
+    }
+
+    return statuses;
+  };
+
+  /**
+   * Siembra el estado de las cajas a partir del checkpoint cargado por REST.
+   *
+   * Sin ejecucion viva todo queda en `IDLE`. Con ella, delega en
+   * `buildStatuses`, que es el mismo pintor que usa la reanudacion en vivo.
+   */
+  const seedStatuses = (execution: ExecutionDetail | null): void => {
+    nodeStatuses.value =
+      execution === null
+        ? new Map<string, CanvasNodeStatus>()
+        : buildStatuses(execution.context, resolveCutoffNode(execution));
   };
 
   /** Carga el flujo y su ejecucion viva, y deja el canvas listo para pintar. */
@@ -541,6 +659,45 @@ export const useCanvasStore = defineStore('canvas', () => {
   };
 
   /**
+   * Vuelve a leer el estado real y repinta, sin velo de carga.
+   *
+   * SE INVOCA AL RECONECTAR EL SOCKET. Las salas viven en el servidor y mueren
+   * con la conexion: el boot vuelve a entrar en ellas, pero los eventos
+   * ocurridos DURANTE el corte no se reenvian a nadie. Sin esta lectura, un
+   * micro-corte dejaba el canvas congelado en la ultima foto que recibio —nodos
+   * en marcha que ya terminaron, una pausa que nadie pinto— hasta que el
+   * operador recargaba a mano.
+   *
+   * NO TOCA `isLoading` a proposito: encender el velo por una reconciliacion de
+   * fondo produciria justo el parpadeo que se quiere evitar, y ademas
+   * desmontaria el canvas durante la peticion.
+   *
+   * El caso que obliga a la segunda lectura: `fetchActiveExecution` solo busca
+   * estados VIVOS, asi que una ejecucion que termino durante el corte vuelve
+   * como «no hay ninguna». Quedarse ahi dejaria las cajas del intento anterior
+   * encendidas para siempre; se pide esa ejecucion por su identificador para
+   * enterarse de COMO acabo.
+   */
+  const syncCurrentExecution = async (): Promise<void> => {
+    const current = workflow.value;
+
+    if (current === null) {
+      return;
+    }
+
+    const observedId = observedExecution.value?.executionId ?? null;
+    const live = await fetchActiveExecution(current.id);
+
+    if (live === null && observedId !== null) {
+      observedExecution.value = await fetchExecution(observedId);
+    } else {
+      observedExecution.value = live;
+    }
+
+    seedStatuses(observedExecution.value);
+  };
+
+  /**
    * Descarta lo que no sea del flujo que el canvas esta mirando.
    *
    * La suscripcion a eventos es unica y global (`useExecutionSocket`), y la
@@ -553,6 +710,10 @@ export const useCanvasStore = defineStore('canvas', () => {
     if (!belongsToCanvas(event.flowId)) {
       return;
     }
+
+    // ANTES de parchear: si el flujo arranco con la vista ya abierta, la carga
+    // REST no vio ninguna ejecucion y el parche de abajo se rendiria.
+    ensureObservedExecution(event, ExecutionState.EN_PROCESO, event.nodeId);
 
     patchStatus(event.nodeId, 'RUNNING');
 
@@ -586,6 +747,8 @@ export const useCanvasStore = defineStore('canvas', () => {
     if (!belongsToCanvas(event.flowId)) {
       return;
     }
+
+    ensureObservedExecution(event, ExecutionState.PAUSADO, event.activeCursor);
 
     // `pausedStepId` y no `activeCursor`: en una pausa programada el cursor
     // apunta al paso SIGUIENTE —reanudar entrando otra vez en la pausa seria un
@@ -621,10 +784,20 @@ export const useCanvasStore = defineStore('canvas', () => {
    * reanudacion selectiva ya no es el cursor— y los pasos posteriores conservan
    * su `COMPLETADO`, afirmando un trabajo que esta a punto de rehacerse.
    *
-   * La regla es la topologia: desde el paso elegido en adelante, todo vuelve a
-   * `IDLE`; lo anterior conserva lo que logro. Un `targetStepId` que no esta en
-   * el camino nominal —un satelite de contingencia— no define "posterior", asi
-   * que solo se reinicia el.
+   * SE REPINTA ENTERO con `buildStatuses` en vez de parchear el mapa anterior, y
+   * ese es el arreglo del defecto. El parcheo apagaba a `IDLE` el nodo que venia
+   * marcado como pausado, sin preguntarse si habia corrido: al reanudar HACIA
+   * ADELANTE, el `PAUSA_FLOW` —que si se ejecuto, y dejo su `pausedAtStepId` en
+   * el contexto— quedaba en gris como si nunca hubiera arrancado, mientras que
+   * recargar la pagina lo pintaba en verde. Reconstruir desde el contexto da la
+   * misma respuesta que la rehidratacion porque es, literalmente, el mismo
+   * codigo.
+   *
+   * El destino queda en `RUNNING` y no en espera: `flow:resumed` se emite justo
+   * ANTES de entrar al motor, de modo que ese paso esta a punto de arrancar en
+   * el mismo tick. Es optimismo deliberado —el `node:started` que llega detras
+   * lo confirma, y un desenlace distinto lo corrige— a cambio de que el operador
+   * vea de inmediato que su reanudacion surtio efecto.
    *
    * Se ejecuta en TODOS los clientes de la sala, que es lo que evita tener que
    * recargar para ver el estado real.
@@ -634,35 +807,14 @@ export const useCanvasStore = defineStore('canvas', () => {
       return;
     }
 
-    const next = new Map(nodeStatuses.value);
-
-    // La marca de pausa del nodo donde estaba detenida, que puede no ser
-    // ninguno de los dos cursores si la pausa fue programada.
-    if (event.previousCursor !== undefined) {
-      next.set(event.previousCursor, 'IDLE');
-    }
-
-    for (const [nodeId, status] of next) {
-      if (status === 'PAUSED' || status === 'FAILED') {
-        next.set(nodeId, 'IDLE');
-      }
-    }
+    ensureObservedExecution(event, ExecutionState.EN_PROCESO);
 
     const target = event.targetStepId ?? event.activeCursor;
-    const targetIndex = orderedSteps.value.findIndex((step) => step.nodeId === target);
 
-    // El propio destino entra en la purga —de ahi el `- 1`— porque todavia no
-    // ha arrancado: lo hara en cuanto el motor entre en el. `resetAfterIndex`
-    // es el mismo barrido que aplica `seedStatuses` al recargar la pagina, y
-    // compartirlo es lo que garantiza que el canvas vivo y el rehidratado
-    // pinten lo mismo.
-    if (targetIndex === -1) {
-      next.set(target, 'IDLE');
-    } else {
-      resetAfterIndex(next, targetIndex - 1);
-    }
-
-    nodeStatuses.value = next;
+    nodeStatuses.value = buildStatuses(executionContext.value, {
+      nodeId: target,
+      status: 'RUNNING',
+    });
 
     // La ejecucion vuelve a estar viva. Sin esto, `executionState` seguia
     // diciendo `PAUSADO` hasta la siguiente recarga: la cabecera mentia y
@@ -685,6 +837,8 @@ export const useCanvasStore = defineStore('canvas', () => {
     if (!belongsToCanvas(event.flowId)) {
       return;
     }
+
+    ensureObservedExecution(event, event.finalState);
 
     const resolved: CanvasNodeStatus =
       event.finalState === ExecutionState.EXITOSO ? 'COMPLETED' : 'FAILED';
@@ -801,6 +955,7 @@ export const useCanvasStore = defineStore('canvas', () => {
     statusOf,
     isResumableFrom,
     loadCanvas,
+    syncCurrentExecution,
     handleNodeStarted,
     handleNodeCompleted,
     handleFlowPaused,

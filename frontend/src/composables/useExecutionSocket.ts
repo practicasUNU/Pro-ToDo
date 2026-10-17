@@ -2,7 +2,7 @@ import { onBeforeUnmount, onMounted } from 'vue';
 
 import { useQuasar } from 'quasar';
 
-import { subscribeToExecutionEvents } from '@services/socket-events.service';
+import { subscribeToExecutionEvents, subscribeToReconnect } from '@services/socket-events.service';
 import { useCanvasStore } from '@stores/canvas.store';
 import { useExecutionStore } from '@stores/execution.store';
 
@@ -68,6 +68,7 @@ export const useExecutionSocket = (): void => {
   const canvasStore = useCanvasStore();
 
   let unsubscribe: (() => void) | null = null;
+  let unsubscribeReconnect: (() => void) | null = null;
 
   /**
    * Reintento manual (CU-09) lanzado desde el propio aviso.
@@ -310,6 +311,27 @@ export const useExecutionSocket = (): void => {
     canvasStore.handleNodeCompleted(event);
   };
 
+  /**
+   * Vuelve a leer el estado real del canvas cada vez que el socket se reconecta.
+   *
+   * LO QUE CIERRA EL HUECO DE UN MICRO-CORTE. El boot ya vuelve a entrar en las
+   * salas al reconectar, pero nadie reenvia lo ocurrido MIENTRAS no habia
+   * conexion: un `node:completed` o un `flow:paused` emitidos durante el corte
+   * se pierden para todos, y el canvas se quedaba con la ultima foto que le
+   * llego —cajas girando un spinner por un nodo que ya habia terminado— hasta
+   * que el operador recargaba a mano.
+   *
+   * El reparto con el boot es deliberado: aquel recupera las SALAS, esto
+   * recupera el ESTADO. Duplicar aqui la reinscripcion dejaria dos sitios
+   * pidiendo lo mismo.
+   *
+   * Solo el canvas: la tabla de `/flujos` se mantiene al dia por
+   * `crud:mutation`, que el backend difunde en cada cambio de fila.
+   */
+  const onReconnected = (): void => {
+    void canvasStore.syncCurrentExecution();
+  };
+
   onMounted(() => {
     unsubscribe = subscribeToExecutionEvents({
       onFlowPaused,
@@ -320,6 +342,8 @@ export const useExecutionSocket = (): void => {
       onNodeStarted,
       onNodeCompleted,
     });
+
+    unsubscribeReconnect = subscribeToReconnect(onReconnected);
   });
 
   // Sin esta baja, cada montaje apilaria un juego mas de listeners sobre los
@@ -328,5 +352,8 @@ export const useExecutionSocket = (): void => {
   onBeforeUnmount(() => {
     unsubscribe?.();
     unsubscribe = null;
+
+    unsubscribeReconnect?.();
+    unsubscribeReconnect = null;
   });
 };

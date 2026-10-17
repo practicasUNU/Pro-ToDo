@@ -85,6 +85,32 @@ export const subscribeToCrudMutations = (
 };
 
 /**
+ * Avisa cada vez que el socket queda conectado, reconexiones incluidas.
+ *
+ * `connect` lo emite el cliente de Socket.io tanto en la conexion inicial como
+ * tras cada reintento del reconector automatico, y no hay forma de distinguir
+ * una de otra desde aqui. Quien escuche tiene que tolerar que le llamen de mas:
+ * la primera vez normalmente no hay nada que reconciliar.
+ *
+ * Existe para que el consumidor NO tenga que importar `getSocket` ni conocer el
+ * nombre del evento: este archivo es la unica capa que habla con Socket.io, y
+ * una vista enganchandose al transporte por su cuenta rompe esa frontera.
+ *
+ * La baja va POR REFERENCIA, igual que las dos suscripciones de arriba y por el
+ * mismo motivo: el boot tiene su propio `connect` puesto —es quien vuelve a las
+ * salas— y un `off` a secas lo dejaria fuera de combate.
+ */
+export const subscribeToReconnect = (handler: () => void): (() => void) => {
+  const socket = getSocket();
+
+  socket.on('connect', handler);
+
+  return () => {
+    socket.off('connect', handler);
+  };
+};
+
+/**
  * Margen para que el servidor acuse una peticion de sala.
  *
  * Cinco segundos cubren con holgura un acuse real —el gateway solo consulta la

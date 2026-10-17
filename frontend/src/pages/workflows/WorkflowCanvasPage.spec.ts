@@ -20,7 +20,10 @@ let routeQuery: Record<string, string> = {};
 
 // Sin esto se cargaria `@boot/axios`, que necesita entorno de navegador.
 vi.mock('@services/workflows.service', () => ({ fetchWorkflow: vi.fn() }));
-vi.mock('@services/fsm-executions.service', () => ({ fetchActiveExecution: vi.fn() }));
+vi.mock('@services/fsm-executions.service', () => ({
+  fetchActiveExecution: vi.fn(),
+  fetchExecution: vi.fn(),
+}));
 vi.mock('@services/socket-events.service', () => ({
   joinFlowRoom: vi.fn().mockResolvedValue({ ok: true }),
   leaveFlowRoom: vi.fn().mockResolvedValue({ ok: true }),
@@ -37,6 +40,7 @@ const workflowsService = await import('@services/workflows.service');
 const executionsService = await import('@services/fsm-executions.service');
 const fetchWorkflow = vi.mocked(workflowsService.fetchWorkflow);
 const fetchActiveExecution = vi.mocked(executionsService.fetchActiveExecution);
+const fetchExecution = vi.mocked(executionsService.fetchExecution);
 
 const WorkflowCanvasPage = (await import('./WorkflowCanvasPage.vue')).default;
 
@@ -303,6 +307,38 @@ describe('WorkflowCanvasPage · distintivo de estado del flujo', () => {
 
       // 3. Assert 🎯
       expect(badgeText(wrapper)).toContain('Inactivo');
+    });
+
+    it('4.3 deberia anunciar una ejecucion que arranca con la vista ya abierta', async () => {
+      // 1. Arrange 📐: EL CASO QUE FALLABA. El operador deja el canvas abierto
+      //    sobre un flujo armado; la carga REST no ve ninguna ejecucion y el
+      //    disparador arranca una despues. Las cajas se encendian, pero la
+      //    insignia seguia diciendo «Activo (En espera de trigger)».
+      fetchWorkflow.mockResolvedValue(buildWorkflow(WorkflowStatus.ACTIVO));
+      fetchActiveExecution.mockResolvedValue(null);
+      fetchExecution.mockResolvedValue(buildExecution(ExecutionState.EN_PROCESO));
+
+      const wrapper = await mountPage();
+      const store = useCanvasStore();
+
+      expect(badgeText(wrapper)).toContain('Activo (En espera de trigger)');
+
+      // 2. Act ⚙️
+      store.handleNodeStarted({
+        executionId: EXECUTION_ID,
+        flowId: FLOW_ID,
+        emittedAt: '2026-10-16T08:00:01.000Z',
+        nodeId: 'nodo_a',
+        nodeType: NodeType.TRIGGER_IMAP,
+        stepIndex: 0,
+        totalSteps: 1,
+        transition: 1,
+        attempt: 1,
+      });
+      await wrapper.vm.$nextTick();
+
+      // 3. Assert 🎯
+      expect(badgeText(wrapper)).toContain('En ejecucion');
     });
   });
 });

@@ -22,6 +22,7 @@ vi.mock('@services/workflows.service', () => ({
 
 vi.mock('@services/fsm-executions.service', () => ({
   fetchActiveExecution: vi.fn(),
+  fetchExecution: vi.fn(),
 }));
 
 // El store de ejecucion habla con Socket.io al entrar y salir de sala: se
@@ -36,11 +37,13 @@ const executionsService = await import('@services/fsm-executions.service');
 const socketEvents = await import('@services/socket-events.service');
 const fetchWorkflow = vi.mocked(workflowsService.fetchWorkflow);
 const fetchActiveExecution = vi.mocked(executionsService.fetchActiveExecution);
+const fetchExecution = vi.mocked(executionsService.fetchExecution);
 const leaveFlowRoom = vi.mocked(socketEvents.leaveFlowRoom);
 
 const FLOW_ID = 'f1e2d3c4-b5a6-4978-8a9b-0c1d2e3f4a5b';
 const OTHER_FLOW_ID = 'a2b3c4d5-e6f7-4809-9b0c-1d2e3f4a5b6c';
 const EXECUTION_ID = '11111111-2222-4333-8444-555555555555';
+const OTHER_EXECUTION_ID = '99999999-8888-4777-8666-555555555555';
 
 const buildSchema = (): AssembledPipelineSchema => ({
   flowId: FLOW_ID,
@@ -128,6 +131,51 @@ const buildCompleted = (overrides: Partial<NodeCompletedEvent> = {}): NodeComple
   attempts: 1,
   halted: false,
   ...overrides,
+});
+
+/**
+ * Topologia de tres pasos que reproduce el caso reportado:
+ * `procesador_ia` → `pausa_flow` → `escudo_post_ia`.
+ *
+ * No se reutiliza `buildSchema`, que solo encadena dos nodos: el defecto
+ * necesita un paso DETRAS del de pausa para que haya algo que purgar.
+ */
+const buildThreeStepSchema = (): AssembledPipelineSchema => ({
+  flowId: FLOW_ID,
+  name: 'Pipeline con pausa intermedia',
+  version: '1.0.0',
+  entrypoint: 'procesador_ia',
+  nodes: {
+    procesador_ia: {
+      nodeId: 'procesador_ia',
+      nodeType: NodeType.PROCESADOR_IA,
+      outputNamespace: 'llm_response',
+      nextStep: 'pausa_flow',
+      onErrorStep: null,
+      params: {},
+    },
+    pausa_flow: {
+      nodeId: 'pausa_flow',
+      nodeType: NodeType.PAUSA_FLOW,
+      outputNamespace: 'pause_context',
+      nextStep: 'escudo_post_ia',
+      onErrorStep: null,
+      params: {},
+    },
+    escudo_post_ia: {
+      nodeId: 'escudo_post_ia',
+      nodeType: NodeType.ESCUDO_POST_IA,
+      outputNamespace: 'validation_result',
+      nextStep: null,
+      onErrorStep: null,
+      params: {},
+    },
+  },
+});
+
+const buildThreeStepWorkflow = (): WorkflowDetail => ({
+  ...buildWorkflow(),
+  pipelineSchema: buildThreeStepSchema(),
 });
 
 describe('useCanvasStore · supervision visual de un flujo', () => {
@@ -744,8 +792,9 @@ describe('useCanvasStore · supervision visual de un flujo', () => {
         resumedBy: { id: 'u-1', email: 'editor@unuware.com' },
       });
 
-      // 3. Assert 🎯
-      expect(store.statusOf('nodo_a')).toBe('IDLE');
+      // 3. Assert 🎯: el destino arranca en RUNNING —`flow:resumed` se emite
+      //    justo antes de entrar al motor— y lo posterior vuelve a la espera.
+      expect(store.statusOf('nodo_a')).toBe('RUNNING');
       expect(store.statusOf('nodo_b')).toBe('IDLE');
     });
 
@@ -770,10 +819,10 @@ describe('useCanvasStore · supervision visual de un flujo', () => {
         resumedBy: { id: 'u-1', email: 'editor@unuware.com' },
       });
 
-      // 3. Assert 🎯: `nodo_a` dejo `raw_email` en el contexto y se quedo
-      //    COMPLETADO al sembrar; esta por delante del elegido.
+      // 3. Assert 🎯: `nodo_a` dejo `raw_email` en el contexto y se queda
+      //    COMPLETADO; esta por delante del elegido, que arranca en RUNNING.
       expect(store.statusOf('nodo_a')).toBe('COMPLETED');
-      expect(store.statusOf('nodo_b')).toBe('IDLE');
+      expect(store.statusOf('nodo_b')).toBe('RUNNING');
     });
 
     it('8.6 NO deberia arrastrar a nadie con un satelite como destino', async () => {
@@ -797,9 +846,10 @@ describe('useCanvasStore · supervision visual de un flujo', () => {
         resumedBy: { id: 'u-1', email: 'editor@unuware.com' },
       });
 
-      // 3. Assert 🎯
+      // 3. Assert 🎯: el satelite se marca, y el camino nominal conserva su
+      //    historico porque un nodo fuera de el no define ningun "despues".
       expect(store.statusOf('nodo_a')).toBe('COMPLETED');
-      expect(store.statusOf('nodo_alerta')).toBe('IDLE');
+      expect(store.statusOf('nodo_alerta')).toBe('RUNNING');
     });
 
     it('8.7 NO deberia reaccionar a la reanudacion de OTRO flujo', async () => {
@@ -832,51 +882,6 @@ describe('useCanvasStore · supervision visual de un flujo', () => {
    * todavia tenia que rehacer.
    */
   describe('9. Reset topologico al rehidratar', () => {
-    /**
-     * Topologia de tres pasos que reproduce el caso reportado:
-     * `procesador_ia` → `pausa_flow` → `escudo_post_ia`.
-     *
-     * No se reutiliza `buildSchema`, que solo encadena dos nodos: el defecto
-     * necesita un paso DETRAS del de pausa para que haya algo que purgar.
-     */
-    const buildThreeStepSchema = (): AssembledPipelineSchema => ({
-      flowId: FLOW_ID,
-      name: 'Pipeline con pausa intermedia',
-      version: '1.0.0',
-      entrypoint: 'procesador_ia',
-      nodes: {
-        procesador_ia: {
-          nodeId: 'procesador_ia',
-          nodeType: NodeType.PROCESADOR_IA,
-          outputNamespace: 'llm_response',
-          nextStep: 'pausa_flow',
-          onErrorStep: null,
-          params: {},
-        },
-        pausa_flow: {
-          nodeId: 'pausa_flow',
-          nodeType: NodeType.PAUSA_FLOW,
-          outputNamespace: 'pause_context',
-          nextStep: 'escudo_post_ia',
-          onErrorStep: null,
-          params: {},
-        },
-        escudo_post_ia: {
-          nodeId: 'escudo_post_ia',
-          nodeType: NodeType.ESCUDO_POST_IA,
-          outputNamespace: 'validation_result',
-          nextStep: null,
-          onErrorStep: null,
-          params: {},
-        },
-      },
-    });
-
-    const buildThreeStepWorkflow = (): WorkflowDetail => ({
-      ...buildWorkflow(),
-      pipelineSchema: buildThreeStepSchema(),
-    });
-
     it('9.1 deberia marcar el nodo de pausa y dejar el cursor en espera', async () => {
       // 1. Arrange 📐: pausa DELIBERADA en `pausa_flow`; el cursor apunta ya al
       //    paso siguiente, que nunca llego a arrancar.
@@ -989,8 +994,9 @@ describe('useCanvasStore · supervision visual de un flujo', () => {
         resumedBy: { id: 'u-1', email: 'editor@unuware.com' },
       });
 
-      // 3. Assert 🎯
-      expect(store.statusOf('procesador_ia')).toBe('IDLE');
+      // 3. Assert 🎯: el destino corre y los dos posteriores vuelven a la
+      //    espera pese a tener su namespace en el contexto del intento previo.
+      expect(store.statusOf('procesador_ia')).toBe('RUNNING');
       expect(store.statusOf('pausa_flow')).toBe('IDLE');
       expect(store.statusOf('escudo_post_ia')).toBe('IDLE');
     });
@@ -1117,6 +1123,291 @@ describe('useCanvasStore · supervision visual de un flujo', () => {
 
       // 3. Assert 🎯
       expect(store.workflow?.status).toBe(WorkflowStatus.ACTIVO);
+    });
+  });
+
+  /**
+   * EL DEFECTO QUE CIERRA ESTE BLOQUE. `handleFlowResumed` parcheaba el mapa a
+   * mano y apagaba a `IDLE` el nodo marcado como pausado sin preguntarse si
+   * habia corrido. Al reanudar HACIA ADELANTE, el `PAUSA_FLOW` —que si se
+   * ejecuto— quedaba en gris, mientras que recargar la pagina lo pintaba en
+   * verde: el mismo flujo se dibujaba de dos maneras segun se hubiera pulsado
+   * F5 o no.
+   */
+  describe('11. Convergencia del canvas vivo y el rehidratado', () => {
+    /** Ejecucion detenida por el `PAUSA_FLOW`, con el cursor ya en el siguiente. */
+    const pausedAtPauseNode = () =>
+      buildExecution({
+        state: ExecutionState.PAUSADO,
+        activeCursor: 'escudo_post_ia',
+        context: {
+          llm_response: { titulo: 'Innovacion en Madrid' },
+          pause_context: { pausedAtStepId: 'pausa_flow', resumeStepId: 'escudo_post_ia' },
+        },
+      });
+
+    it('11.1 deberia COMPLETAR el nodo de pausa al reanudar hacia adelante', async () => {
+      // 1. Arrange 📐: el caso reportado. Se reanuda desde el paso siguiente a
+      //    la pausa, de modo que el nodo de pausa queda DETRAS del corte.
+      fetchWorkflow.mockResolvedValue(buildThreeStepWorkflow());
+      fetchActiveExecution.mockResolvedValue(pausedAtPauseNode());
+
+      const store = useCanvasStore();
+      await store.loadCanvas(FLOW_ID);
+
+      expect(store.statusOf('pausa_flow')).toBe('PAUSED');
+
+      // 2. Act ⚙️
+      store.handleFlowResumed({
+        executionId: EXECUTION_ID,
+        flowId: FLOW_ID,
+        emittedAt: '2026-10-16T08:05:00.000Z',
+        activeCursor: 'escudo_post_ia',
+        previousCursor: 'pausa_flow',
+        resumedBy: { id: 'u-1', email: 'editor@unuware.com' },
+      });
+
+      // 3. Assert 🎯: dejo `pausedAtStepId` en el contexto, que es la prueba de
+      //    que corrio. Antes quedaba en 'IDLE', como si nunca hubiera arrancado.
+      expect(store.statusOf('pausa_flow')).toBe('COMPLETED');
+      expect(store.statusOf('procesador_ia')).toBe('COMPLETED');
+      expect(store.statusOf('escudo_post_ia')).toBe('RUNNING');
+    });
+
+    it('11.2 deberia pintar lo mismo en vivo que tras recargar la pagina', async () => {
+      // 1. Arrange 📐: LA PRUEBA QUE IMPIDE LA REGRESION. Los dos caminos
+      //    comparten `buildStatuses`; si alguien vuelve a separarlos, esto cae.
+      fetchWorkflow.mockResolvedValue(buildThreeStepWorkflow());
+      fetchActiveExecution.mockResolvedValue(pausedAtPauseNode());
+
+      const live = useCanvasStore();
+      await live.loadCanvas(FLOW_ID);
+
+      live.handleFlowResumed({
+        executionId: EXECUTION_ID,
+        flowId: FLOW_ID,
+        emittedAt: '2026-10-16T08:05:00.000Z',
+        activeCursor: 'escudo_post_ia',
+        previousCursor: 'pausa_flow',
+        resumedBy: { id: 'u-1', email: 'editor@unuware.com' },
+      });
+
+      const afterLiveResume = new Map(live.nodeStatuses);
+
+      // 2. Act ⚙️: el F5. El backend deja la ejecucion EN_PROCESO con el cursor
+      //    en el destino, y el contexto conserva lo del intento anterior.
+      setActivePinia(createPinia());
+      fetchActiveExecution.mockResolvedValue(
+        buildExecution({
+          state: ExecutionState.EN_PROCESO,
+          activeCursor: 'escudo_post_ia',
+          context: {
+            llm_response: { titulo: 'Innovacion en Madrid' },
+            pause_context: { pausedAtStepId: 'pausa_flow', resumeStepId: 'escudo_post_ia' },
+          },
+        }),
+      );
+
+      const rehydrated = useCanvasStore();
+      await rehydrated.loadCanvas(FLOW_ID);
+
+      // 3. Assert 🎯
+      expect(Object.fromEntries(rehydrated.nodeStatuses)).toEqual(
+        Object.fromEntries(afterLiveResume),
+      );
+    });
+
+    it('11.3 NO deberia completar un paso previo que la contingencia salto', async () => {
+      // 1. Arrange 📐: el control negativo de la regla topologica. Dar por
+      //    completado TODO lo anterior al corte pintaria en verde un nodo que
+      //    una ruta `onErrorStep` esquivo sin ejecutar.
+      fetchWorkflow.mockResolvedValue(buildThreeStepWorkflow());
+      fetchActiveExecution.mockResolvedValue(
+        buildExecution({
+          state: ExecutionState.PAUSADO,
+          activeCursor: 'escudo_post_ia',
+          // Sin `pause_context`: `pausa_flow` NO corrio.
+          context: { llm_response: { titulo: 'Innovacion en Madrid' } },
+        }),
+      );
+
+      const store = useCanvasStore();
+      await store.loadCanvas(FLOW_ID);
+
+      // 2. Act ⚙️
+      store.handleFlowResumed({
+        executionId: EXECUTION_ID,
+        flowId: FLOW_ID,
+        emittedAt: '2026-10-16T08:05:00.000Z',
+        activeCursor: 'escudo_post_ia',
+        previousCursor: 'escudo_post_ia',
+        resumedBy: { id: 'u-1', email: 'editor@unuware.com' },
+      });
+
+      // 3. Assert 🎯
+      expect(store.statusOf('pausa_flow')).toBe('IDLE');
+      expect(store.statusOf('procesador_ia')).toBe('COMPLETED');
+    });
+  });
+
+  /**
+   * EL DEFECTO QUE CIERRA ESTE BLOQUE. Las cajas se pintaban igual —la guarda
+   * de los manejadores mira el FLUJO, no la ejecucion—, pero la cabecera no:
+   * `patchObservedExecution` se rendia con `observedExecution` en `null`, que
+   * es justo lo que ocurre cuando el disparador arranca una ejecucion con la
+   * vista ya abierta.
+   */
+  describe('12. Hidratacion y reconciliacion de la ejecucion observada', () => {
+    it('12.1 deberia adoptar la ejecucion que anuncia el primer evento', async () => {
+      // 1. Arrange 📐: canvas abierto sobre un flujo ARMADO, sin ejecucion viva.
+      fetchWorkflow.mockResolvedValue(buildWorkflow());
+      fetchActiveExecution.mockResolvedValue(null);
+      fetchExecution.mockResolvedValue(buildExecution());
+
+      const store = useCanvasStore();
+      await store.loadCanvas(FLOW_ID);
+
+      expect(store.executionState).toBeNull();
+
+      // 2. Act ⚙️
+      store.handleNodeStarted(buildStarted({ nodeId: 'nodo_a' }));
+
+      // 3. Assert 🎯: el evento NO se descarta y la cabecera se entera.
+      expect(store.executionState).toBe(ExecutionState.EN_PROCESO);
+      expect(store.activeCursor).toBe('nodo_a');
+      expect(store.statusOf('nodo_a')).toBe('RUNNING');
+      // Y se pide el detalle real, porque el evento no trae el contexto.
+      expect(fetchExecution).toHaveBeenCalledWith(EXECUTION_ID);
+    });
+
+    it('12.2 deberia reponer el contexto real en segundo plano', async () => {
+      // 1. Arrange 📐: sin el contexto, `isResumableFrom` no ofrece un solo
+      //    paso al que volver y la reanudacion selectiva queda inerte.
+      fetchWorkflow.mockResolvedValue(buildWorkflow());
+      fetchActiveExecution.mockResolvedValue(null);
+      fetchExecution.mockResolvedValue(
+        buildExecution({
+          state: ExecutionState.PAUSADO,
+          activeCursor: 'nodo_b',
+          context: { raw_email: { asunto: 'Licitacion' } },
+        }),
+      );
+
+      const store = useCanvasStore();
+      await store.loadCanvas(FLOW_ID);
+
+      // 2. Act ⚙️: el relleno es asincrono; se cede el turno para que resuelva.
+      store.handleNodeStarted(buildStarted({ nodeId: 'nodo_b' }));
+      await vi.waitFor(() => {
+        expect(store.executionContext.raw_email).toBeDefined();
+      });
+
+      // 3. Assert 🎯
+      expect(store.statusOf('nodo_a')).toBe('COMPLETED');
+    });
+
+    it('12.3 NO deberia pisar el estado con una respuesta tardia', async () => {
+      // 1. Arrange 📐: el relleno puede llegar cuando el canvas ya observa OTRA
+      //    ejecucion. Fusionarlo a ciegas resucitaria un contexto muerto.
+      fetchWorkflow.mockResolvedValue(buildWorkflow());
+      fetchActiveExecution.mockResolvedValue(null);
+
+      // El doble responde SEGUN EL IDENTIFICADOR: la peticion de la ejecucion
+      // vieja se queda colgada a proposito y la de la nueva responde al vuelo.
+      // Con una sola promesa compartida, el doble mentiria devolviendo la
+      // ejecucion vieja tambien a quien pregunto por la nueva.
+      let resolveLate: (value: ExecutionDetail) => void = () => undefined;
+      const late = new Promise<ExecutionDetail>((resolve) => {
+        resolveLate = resolve;
+      });
+
+      fetchExecution.mockImplementation((executionId: string) =>
+        executionId === EXECUTION_ID
+          ? late
+          : Promise.resolve(buildExecution({ executionId: OTHER_EXECUTION_ID, context: {} })),
+      );
+
+      const store = useCanvasStore();
+      await store.loadCanvas(FLOW_ID);
+      store.handleNodeStarted(buildStarted({ nodeId: 'nodo_a' }));
+
+      // 2. Act ⚙️: llega un evento de una ejecucion NUEVA y solo despues
+      //    responde la peticion de la vieja.
+      store.handleNodeStarted(buildStarted({ nodeId: 'nodo_b', executionId: OTHER_EXECUTION_ID }));
+      resolveLate(buildExecution({ context: { raw_email: { asunto: 'Viejo' } } }));
+      await vi.waitFor(() => {
+        expect(store.observedExecution?.executionId).toBe(OTHER_EXECUTION_ID);
+      });
+
+      // 3. Assert 🎯: el contexto de la vieja no se cuela en la nueva.
+      expect(store.executionContext.raw_email).toBeUndefined();
+    });
+
+    it('12.4 deberia reconciliar el estado tras una reconexion', async () => {
+      // 1. Arrange 📐: los eventos emitidos durante el corte no se reenvian a
+      //    nadie, asi que la unica salida es volver a preguntar por REST.
+      fetchWorkflow.mockResolvedValue(buildWorkflow());
+      fetchActiveExecution.mockResolvedValue(
+        buildExecution({ state: ExecutionState.EN_PROCESO, activeCursor: 'nodo_a' }),
+      );
+
+      const store = useCanvasStore();
+      await store.loadCanvas(FLOW_ID);
+
+      // 2. Act ⚙️: mientras no habia conexion, el flujo se pauso.
+      fetchActiveExecution.mockResolvedValue(
+        buildExecution({
+          state: ExecutionState.PAUSADO,
+          activeCursor: 'nodo_b',
+          context: { raw_email: { asunto: 'Licitacion' } },
+        }),
+      );
+      await store.syncCurrentExecution();
+
+      // 3. Assert 🎯
+      expect(store.executionState).toBe(ExecutionState.PAUSADO);
+      expect(store.statusOf('nodo_b')).toBe('PAUSED');
+      expect(store.isLoading).toBe(false);
+    });
+
+    it('12.5 deberia enterarse de la ejecucion que TERMINO durante el corte', async () => {
+      // 1. Arrange 📐: `fetchActiveExecution` solo busca estados vivos, de modo
+      //    que una ejecucion ya cerrada vuelve como «no hay ninguna». Quedarse
+      //    ahi dejaria las cajas del intento anterior encendidas para siempre.
+      fetchWorkflow.mockResolvedValue(buildWorkflow());
+      fetchActiveExecution.mockResolvedValue(
+        buildExecution({ state: ExecutionState.EN_PROCESO, activeCursor: 'nodo_b' }),
+      );
+
+      const store = useCanvasStore();
+      await store.loadCanvas(FLOW_ID);
+
+      // 2. Act ⚙️
+      fetchActiveExecution.mockResolvedValue(null);
+      fetchExecution.mockResolvedValue(
+        buildExecution({
+          state: ExecutionState.EXITOSO,
+          activeCursor: null,
+          context: { raw_email: {}, llm_response: {} },
+        }),
+      );
+      await store.syncCurrentExecution();
+
+      // 3. Assert 🎯
+      expect(fetchExecution).toHaveBeenCalledWith(EXECUTION_ID);
+      expect(store.executionState).toBe(ExecutionState.EXITOSO);
+    });
+
+    it('12.6 NO deberia pedir nada sin flujo cargado', async () => {
+      // 1. Arrange 📐: el primer `connect` ocurre al arrancar la aplicacion,
+      //    mucho antes de que nadie abra un canvas.
+      const store = useCanvasStore();
+
+      // 2. Act ⚙️
+      await store.syncCurrentExecution();
+
+      // 3. Assert 🎯
+      expect(fetchActiveExecution).not.toHaveBeenCalled();
     });
   });
 });
