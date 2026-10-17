@@ -277,12 +277,27 @@ describe('useExecutionSocket', () => {
     // Act
     registered?.onNodeError?.(buildNodeError({ severity: 'GRAVE' }));
 
-    // Assert
+    // Assert: ambar y no rojo. Un GRAVE es el unico que el motor REINTENTA y
+    // el unico que deja la ejecucion reanudable; pintarlo igual que un
+    // URGENTE irrecuperable hacia indistinguibles dos desenlaces opuestos.
     const options = lastNotifyOptions();
-    expect(options.type).toBe('negative');
+    expect(options.type).toBe('warning');
     expect(options.message).toContain('nodo_ia');
     expect(options.caption).toContain('Intento 2');
     expect(options.caption).toContain('ERR_TEMPLATE_PENDING_VARS');
+  });
+
+  it('deberia distinguir un URGENTE de un GRAVE por el color', () => {
+    // Arrange: el par del anterior, y la razon de que exista el categorizador.
+    mountHost();
+
+    // Act
+    registered?.onNodeError?.(buildNodeError({ severity: 'URGENTE' }));
+
+    // Assert
+    const options = lastNotifyOptions();
+    expect(options.type).toBe('negative');
+    expect(options.classes).toContain('pd-accent-urgente');
   });
 
   it('NO deberia avisar de un fallo de nodo LEVE', () => {

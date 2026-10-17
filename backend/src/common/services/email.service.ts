@@ -40,6 +40,22 @@ const MAX_SMTP_CONNECTIONS = 1;
 const MAX_MESSAGES_PER_CONNECTION = 100;
 
 /**
+ * Espera maxima para establecer la conexion TCP con el servidor SMTP.
+ *
+ * Los tres topes replican los del transporte de avisos
+ * (`smtp-node-mailer.service.ts`) a proposito: son la misma clase de dialogo
+ * —un correo corto contra un relay corporativo— y divergir en ellos solo
+ * produciria dos comportamientos distintos ante la misma caida.
+ */
+const CONNECTION_TIMEOUT_MS = 10_000;
+
+/** Espera maxima del saludo SMTP una vez ya hay socket. */
+const GREETING_TIMEOUT_MS = 5_000;
+
+/** Inactividad maxima del socket durante el dialogo SMTP, `DATA` incluido. */
+const SOCKET_TIMEOUT_MS = 15_000;
+
+/**
  * Unico punto del backend que conoce el SMTP de AUTENTICACION. Los servicios de
  * negocio piden "envia este codigo a este correo" y no saben nada del
  * transporte.
@@ -85,6 +101,14 @@ export class EmailService implements OnModuleDestroy {
       // Tras 100 mensajes se recicla la conexion, por si el servidor la corta
       // por su cuenta al alcanzar su propio limite.
       maxMessages: MAX_MESSAGES_PER_CONNECTION,
+
+      // Mismos topes que el transporte de los avisos de nodo, y por una razon
+      // aun mas directa: este correo esta en el camino critico del LOGIN. Sin
+      // ellos, un relay que acepta la conexion y calla deja la peticion de OTP
+      // colgada sin limite, y el usuario no recibe ni el codigo ni un error.
+      connectionTimeout: CONNECTION_TIMEOUT_MS,
+      greetingTimeout: GREETING_TIMEOUT_MS,
+      socketTimeout: SOCKET_TIMEOUT_MS,
     });
   }
 

@@ -34,6 +34,33 @@ const MAX_MESSAGES_PER_CONNECTION = 100;
 const FALLBACK_SENDER = 'no-reply@unuware.com';
 
 /**
+ * Espera maxima para establecer la conexion TCP con el servidor SMTP.
+ *
+ * SIN ESTOS TRES TOPES el transporte heredaba los de `nodemailer`, que dejan el
+ * socket esperando sin limite util. Importa mas aqui que en cualquier otro
+ * cliente del proyecto: el motor NO impone ningun timeout sobre
+ * `strategy.execute()`, de modo que un servidor que acepta la conexion y deja
+ * de responder congelaba el paso del pipeline —y con el, el worker que lo
+ * disparo— hasta que alguien reiniciaba el proceso.
+ *
+ * Los valores son los del aviso, no los del buzon: mandar un correo corto a un
+ * relay corporativo no se parece a descargar un MIME completo, y por eso son
+ * mas agresivos que los de `imap-client.factory.ts`.
+ */
+const CONNECTION_TIMEOUT_MS = 10_000;
+
+/** Espera maxima del saludo SMTP una vez ya hay socket. */
+const GREETING_TIMEOUT_MS = 5_000;
+
+/**
+ * Inactividad maxima del socket durante el dialogo SMTP.
+ *
+ * El mas holgado de los tres porque cubre la entrega completa: `DATA` incluido,
+ * que es donde viaja la carta.
+ */
+const SOCKET_TIMEOUT_MS = 15_000;
+
+/**
  * Lo que este servicio lee del acuse de `nodemailer`.
  *
  * Se declara en vez de usar su `SentMessageInfo`, que es `any`: sin esto, cada
@@ -135,6 +162,9 @@ export class SmtpNodeMailerService implements OnModuleDestroy {
       pool: true,
       maxConnections: MAX_SMTP_CONNECTIONS,
       maxMessages: MAX_MESSAGES_PER_CONNECTION,
+      connectionTimeout: CONNECTION_TIMEOUT_MS,
+      greetingTimeout: GREETING_TIMEOUT_MS,
+      socketTimeout: SOCKET_TIMEOUT_MS,
     });
   }
 

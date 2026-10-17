@@ -371,6 +371,18 @@ body {
   color: var(--pd-shell-text);
 }
 
+// En proceso: azul corporativo. Clase propia y no `pd-badge--active` —que es
+// la verde de "Activo"— porque son dos estados distintos: uno dice que el flujo
+// está armado y el otro que el motor está recorriendo el pipeline AHORA. Pintar
+// ambos igual obligaba a leer el texto para distinguirlos.
+//
+// Hace falta la clase porque Quasar no conoce `--pd-primary`: no hay bloque
+// `brand:` en `quasar.config.ts`, así que `color="pd-primary"` no existe.
+.pd-badge--running {
+  background: var(--pd-primary);
+  color: var(--pd-shell-text);
+}
+
 // Inactivo NO es un error: es estado neutro, de ahí los tokens de deshabilitado.
 .pd-badge--inactive {
   background: var(--pd-disabled-bg);

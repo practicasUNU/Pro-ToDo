@@ -4,7 +4,7 @@
 // DOM, y los specs de store arrancan mas rapido sin el.
 import { mount, flushPromises } from '@vue/test-utils';
 
-import { WorkflowStatus } from '@/types/pipeline';
+import { NodeType, WorkflowStatus } from '@/types/pipeline';
 import { createPinia, setActivePinia } from 'pinia';
 import {
   Dialog,
@@ -226,6 +226,46 @@ describe('WorkflowsManager · telemetria en vivo del catalogo', () => {
       expect(wrapper.find('[data-test="status-paused"]').exists()).toBe(false);
       expect(wrapper.find('[data-test="status-running"]').exists()).toBe(false);
       expect(wrapper.text()).toContain('Activo');
+    });
+
+    /**
+     * EL DEFECTO QUE CIERRA ESTE PAR. La fila solo se enteraba de una ejecucion
+     * cuando se pausaba o terminaba, porque `node:started` no llegaba a ningun
+     * store que la tabla leyera. El estado «En proceso» —el unico que el
+     * operador quiere ver mientras ocurre— era invisible sin recargar.
+     */
+    it('2.3 deberia pintar "En proceso" en cuanto arranca un nodo', async () => {
+      // 1. Arrange 📐: flujo armado y sin ejecucion viva al cargar la tabla.
+      vi.mocked(fetchWorkflows).mockResolvedValue([
+        buildWorkflow({ status: WorkflowStatus.ACTIVO }),
+      ]);
+      const executionStore = useExecutionStore();
+      const wrapper = mountManager();
+      await flushPromises();
+
+      expect(wrapper.find('[data-test="status-running"]').exists()).toBe(false);
+
+      // 2. Act ⚙️
+      executionStore.handleNodeStarted({
+        executionId: EXECUTION_ID,
+        flowId: FLOW_ID,
+        emittedAt: '2026-02-01T00:05:00.000Z',
+        nodeId: 'llm_processor',
+        nodeType: NodeType.PROCESADOR_IA,
+        stepIndex: 1,
+        totalSteps: 3,
+        transition: 2,
+        attempt: 1,
+      });
+      await flushPromises();
+
+      // 3. Assert 🎯: y con su propia clase, no la verde de "Activo": son dos
+      //    estados distintos y pintarlos igual obliga a leer el texto.
+      const badge = wrapper.find('[data-test="status-running"]');
+
+      expect(badge.exists()).toBe(true);
+      expect(badge.text()).toContain('En proceso');
+      expect(badge.classes()).toContain('pd-badge--running');
     });
   });
 

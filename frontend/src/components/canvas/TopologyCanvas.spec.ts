@@ -178,6 +178,10 @@ describe('TopologyCanvas · lienzo de solo lectura', () => {
     const [first] = wrapper.findAll(NOMINAL_CARDS);
     expect(first?.classes()).toContain('pd-node-card--running');
     expect(wrapper.findComponent(QSpinnerDots).exists()).toBe(true);
+    // La etiqueta es la del sistema entero: la tabla y la cabecera dicen «En
+    // proceso» del FLUJO y la tarjeta «Procesando» del NODO. Antes decia
+    // «Ejecutando», una tercera palabra para el mismo concepto.
+    expect(first?.text()).toContain('Procesando');
   });
 
   it('1.3 deberia seleccionar el nodo al hacer clic, sin mutar nada mas', async () => {
@@ -434,10 +438,7 @@ describe('TopologyCanvas · lienzo de solo lectura', () => {
       // 3. Assert 🎯
       expect(wrapper.findAll('[data-test="resume-from-node"]')).toHaveLength(2);
       expect(
-        wrapper
-          .get('.pd-canvas-rail--forks')
-          .find('[data-test="resume-from-node"]')
-          .exists(),
+        wrapper.get('.pd-canvas-rail--forks').find('[data-test="resume-from-node"]').exists(),
       ).toBe(false);
     });
 

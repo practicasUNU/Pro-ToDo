@@ -7,6 +7,7 @@ import { useCanvasStore } from '@stores/canvas.store';
 import { useExecutionStore } from '@stores/execution.store';
 
 import { ExecutionState } from '@/types/execution';
+import { ALERTING_SEVERITIES, notifyClassesOf, presentationOf } from '@/utils/alert-categorizer';
 
 import type {
   FlowCompletedEvent,
@@ -16,17 +17,7 @@ import type {
   FlowPausedEvent,
   FlowResumedEvent,
   NodeErrorEvent,
-  NodeErrorSeverity,
 } from '@/types/execution';
-
-/**
- * Severidades que merecen interrumpir al operador con un aviso flotante.
- *
- * Un `LEVE` queda fuera a proposito: lo emite un nodo que va a reintentar y el
- * flujo sigue avanzando. Notificarlo llenaria la pantalla de avisos por algo
- * que se resuelve solo, y el ruido acabaria tapando al `URGENTE` que si importa.
- */
-const ALERTING_SEVERITIES: readonly NodeErrorSeverity[] = ['GRAVE', 'URGENTE'];
 
 /** Cuanto permanece en pantalla el aviso de exito, en milisegundos. */
 const NOTIFY_SUCCESS_TIMEOUT_MS = 5000;
@@ -172,7 +163,9 @@ export const useExecutionSocket = (): void => {
       caption: [`${event.severity ?? 'GRAVE'} · ${detail}`, event.errorDetail]
         .filter((part): part is string => part !== undefined)
         .join('\n'),
-      classes: 'pd-card pd-card--accent pd-accent-grave',
+      // El acento sigue a la severidad REAL: una pausa por URGENTE se pintaba
+      // en ambar como una GRAVE, pese a que no admite reintento.
+      classes: notifyClassesOf(event.severity),
       timeout: 0,
       actions: [
         {
@@ -271,7 +264,7 @@ export const useExecutionSocket = (): void => {
       icon: 'report',
       message: `Flujo fallido: ${flow}`,
       caption: event.failureReason ?? 'Sin motivo registrado.',
-      classes: 'pd-card pd-card--accent pd-accent-urgente',
+      classes: notifyClassesOf('URGENTE'),
     });
   };
 
@@ -286,12 +279,17 @@ export const useExecutionSocket = (): void => {
       return;
     }
 
+    // La presentacion sale del categorizador y no de literales: hasta ahora un
+    // GRAVE y un URGENTE se pintaban EXACTAMENTE IGUAL, de modo que un fallo
+    // que el motor va a reintentar y uno irrecuperable eran indistinguibles.
+    const presentation = presentationOf(event.severity);
+
     $q.notify({
-      type: 'negative',
-      icon: 'report',
+      type: presentation.type,
+      icon: presentation.icon,
       message: `Fallo ${event.severity} en "${event.nodeId}"`,
       caption: `Intento ${event.attempt} · ${event.errorCode ?? 'sin codigo'}: ${event.errorMessage ?? 'sin detalle'}`,
-      classes: 'pd-card pd-card--accent pd-accent-urgente',
+      classes: notifyClassesOf(event.severity),
     });
   };
 
@@ -305,6 +303,10 @@ export const useExecutionSocket = (): void => {
    */
   const onNodeStarted = (event: NodeStartedEvent): void => {
     canvasStore.handleNodeStarted(event);
+    // Y el store de ejecuciones, que es de donde la TABLA de flujos saca su
+    // insignia: sin esto, una ejecucion recien disparada no aparecia ahi hasta
+    // que se pausaba o terminaba.
+    executionStore.handleNodeStarted(event);
   };
 
   const onNodeCompleted = (event: NodeCompletedEvent): void => {

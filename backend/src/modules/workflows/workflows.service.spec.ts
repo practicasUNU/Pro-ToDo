@@ -1419,6 +1419,52 @@ describe('WorkflowsService (edicion y habilitacion de flujos)', () => {
       ).rejects.toThrow('PostgreSQL no responde');
       expect(coordinator.stopPollingForFlow).not.toHaveBeenCalled();
     });
+
+    /**
+     * EL DEFECTO QUE CIERRA ESTE PAR. Entre las dos ramas de transicion
+     * —activar y desactivar— faltaba la tercera: el flujo que SIGUE activo y
+     * cambia de grafo. `registerInterval` captura la configuracion en la
+     * clausura del temporizador, de modo que el operador guardaba un filtro de
+     * asunto nuevo y el buzon se seguia sondeando con el viejo hasta que la
+     * reconciliacion periodica lo descubriese por su cuenta, un minuto despues.
+     */
+    it('11.14 deberia recargar el sondeo al cambiar el grafo de un flujo ACTIVO', async () => {
+      // 1. Arrange 📐: ni se activa ni se desactiva; solo cambia el pipeline.
+      const { service, coordinator, repository } = buildHarness();
+      repository.findOne.mockResolvedValue(
+        buildWorkflow({ status: WorkflowStatus.ACTIVO }),
+      );
+
+      // 2. Act ⚙️
+      await service.updateWorkflow(
+        WORKFLOW_ID,
+        { pipelineSchema: buildSchema() },
+        UserRole.ADMIN,
+      );
+
+      // 3. Assert 🎯
+      expect(coordinator.refreshPolling).toHaveBeenCalledTimes(1);
+    });
+
+    it('11.15 NO deberia recargar el sondeo si solo cambian los metadatos', async () => {
+      // 1. Arrange 📐: el control negativo. Renombrar un flujo no toca lo que
+      //    el worker tiene capturado, y reconciliar por cada edicion de texto
+      //    seria una consulta a `flujos` que no cambia ningun temporizador.
+      const { service, coordinator, repository } = buildHarness();
+      repository.findOne.mockResolvedValue(
+        buildWorkflow({ status: WorkflowStatus.ACTIVO }),
+      );
+
+      // 2. Act ⚙️
+      await service.updateWorkflow(
+        WORKFLOW_ID,
+        { name: 'Notiweb renombrado' },
+        UserRole.ADMIN,
+      );
+
+      // 3. Assert 🎯
+      expect(coordinator.refreshPolling).not.toHaveBeenCalled();
+    });
   });
 
   describe('11bis. Bloqueo por ejecucion en curso', () => {

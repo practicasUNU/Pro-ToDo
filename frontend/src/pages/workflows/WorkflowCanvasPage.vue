@@ -51,7 +51,7 @@ const stateBadge = computed<{
   readonly spinner: boolean;
 }>(() => {
   if (canvasStore.executionState === ExecutionState.EN_PROCESO) {
-    return { color: 'info', label: 'En ejecucion', spinner: true };
+    return { color: 'primary', label: 'En proceso', spinner: true };
   }
 
   if (

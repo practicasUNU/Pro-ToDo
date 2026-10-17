@@ -41,6 +41,17 @@ import type { ValidatorOptions } from 'class-validator';
 
 /** Codigos de fallo propios de este nodo. */
 export const ERR_SMTP_CONFIG = 'ERR_SMTP_CONFIG';
+
+/**
+ * Fallo del transporte. YA NO SE EMITE, y se conserva a proposito.
+ *
+ * Desde que la caida del relay devuelve un exito degradado (`alert_sent:
+ * false`), este nodo no puede fallar por culpa del servidor de correo. La
+ * constante se mantiene porque es un valor PUBLICO: un `onErrorStep` con
+ * `catchErrors: ['ERR_SMTP_SEND_FAILURE']` ya declarado en algun
+ * `pipeline_schema` seguiria validando, solo que su ruta no se disparara nunca
+ * —que es justo lo correcto, porque el nodo ya no falla por ahi—.
+ */
 export const ERR_SMTP_SEND_FAILURE = 'ERR_SMTP_SEND_FAILURE';
 
 /**
@@ -80,12 +91,6 @@ interface ResolvedSubject {
   readonly subject: string;
   readonly unresolvedVariable?: string;
 }
-
-/** Traza completa del error, si la hay, lista para fusionar en el detalle. */
-const stackTraceOf = (error: unknown): { stackTrace?: string } =>
-  error instanceof Error && error.stack !== undefined
-    ? { stackTrace: error.stack }
-    : {};
 
 /** Lee una clave de texto del namespace del fallo, si existe y es cadena. */
 const readText = (
@@ -169,6 +174,12 @@ export class SmtpAlertStrategy implements INodeStrategy {
    * detalle nominal queda en la traza del envio.
    */
   public readonly outputFields: readonly NodeOutputField[] = [
+    {
+      name: 'alert_sent',
+      type: 'text',
+      description:
+        'Si el correo llego a salir. `false` cuando el transporte SMTP fallo y el nodo degrado el desenlace para no enterrar la incidencia original',
+    },
     { name: 'sent_to', type: 'object', description: 'Destinatarios del aviso' },
     { name: 'subject', type: 'text', description: 'Asunto ya interpolado' },
     {
@@ -319,6 +330,7 @@ export class SmtpAlertStrategy implements INodeStrategy {
       return {
         success: true,
         data: {
+          alert_sent: true,
           sent_to: [...config.to],
           subject,
           message_id: receipt.messageId,
@@ -339,16 +351,40 @@ export class SmtpAlertStrategy implements INodeStrategy {
         },
       };
     } catch (error) {
+      const reason =
+        error instanceof Error
+          ? error.message
+          : 'Fallo desconocido al entregar el aviso por SMTP.';
+
+      // EXITO DEGRADADO, y no un fallo del nodo. Este nodo SOLO corre como
+      // contingencia —sus dos guardas exigen `error_context` y una severidad
+      // alertable—, de modo que cuando llega aqui ya hay una incidencia en
+      // curso que alguien tiene que atender.
+      //
+      // Devolver `GRAVE` hacia que el motor pausara EN EL NODO DE ALERTA,
+      // enterrando el fallo que se estaba anunciando: la fila apuntaba al
+      // mensajero y no al problema, y el reintento manual de CU-09 ofrecia
+      // reenviar un correo en vez de reparar el paso que se rompio. Con un
+      // exito degradado la ejecucion sigue hasta `closeTerminalState`, que pausa
+      // en `contingency.failedNodeId` con la severidad ORIGINAL.
+      //
+      // Tampoco `LEVE`: aquel cierra la ejecucion como FALLIDO y SIN cursor, de
+      // modo que se perderia esa misma reanudacion.
+      //
+      // El aviso queda en la traza y en el payload: `alert_sent` es lo que
+      // permite a un nodo posterior —o a la trazabilidad— distinguir "no habia
+      // nada que avisar" de "no se pudo avisar".
+      this.logger.warn(
+        `No se pudo despachar el correo de alerta a ${config.to.length} destinatario(s): ${reason}. La ejecucion continua; la incidencia original sigue siendo la que importa.`,
+      );
+
       return {
-        success: false,
-        error: {
-          level: 'GRAVE',
-          code: ERR_SMTP_SEND_FAILURE,
-          message:
-            error instanceof Error
-              ? error.message
-              : 'Fallo desconocido al entregar el aviso por SMTP.',
-          ...stackTraceOf(error),
+        success: true,
+        data: {
+          alert_sent: false,
+          reason,
+          attempted_to: [...config.to],
+          subject,
         },
       };
     }

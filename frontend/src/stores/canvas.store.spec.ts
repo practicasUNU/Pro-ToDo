@@ -1053,6 +1053,34 @@ describe('useCanvasStore · supervision visual de un flujo', () => {
       expect(store.isPaused).toBe(true);
     });
 
+    it('10.2bis deberia ofrecer la reanudacion en el acto, sin recargar', async () => {
+      // 1. Arrange 📐: lo que el operador ve es el BOTON, y `CanvasNodeCard` lo
+      //    enciende leyendo `isResumableFrom`. Ese getter exige `isPaused`, que
+      //    sale de la ejecucion observada: si el evento no la parcheara, la
+      //    tarjeta del nodo detenido se quedaria sin accion hasta un F5.
+      const store = await loadRunningCanvas({
+        state: ExecutionState.EN_PROCESO,
+        activeCursor: 'nodo_b',
+      });
+
+      expect(store.isResumableFrom('nodo_b')).toBe(false);
+
+      // 2. Act ⚙️
+      store.handleFlowPaused({
+        executionId: EXECUTION_ID,
+        flowId: FLOW_ID,
+        emittedAt: '2026-10-16T08:05:00.000Z',
+        activeCursor: 'nodo_b',
+        severity: 'GRAVE',
+        errorMessage: 'Falta el texto de entrada',
+      });
+
+      // 3. Assert 🎯: el cursor detenido admite reanudacion, y `nodo_a` tambien
+      //    porque dejo su namespace en el contexto.
+      expect(store.isResumableFrom('nodo_b')).toBe(true);
+      expect(store.isResumableFrom('nodo_a')).toBe(true);
+    });
+
     it('10.3 deberia volver a EN_PROCESO al reanudar, sin recargar', async () => {
       // 1. Arrange 📐: sin esto, `isPaused` seguia en `true` y el boton de
       //    reanudar quedaba encendido sobre una ejecucion ya en marcha.

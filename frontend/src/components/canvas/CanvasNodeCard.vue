@@ -42,7 +42,7 @@ const STATUS_BADGES: Record<
   { readonly icon: string; readonly color: string; readonly label: string }
 > = {
   IDLE: { icon: 'radio_button_unchecked', color: 'grey-6', label: 'En espera' },
-  RUNNING: { icon: 'autorenew', color: 'info', label: 'Ejecutando' },
+  RUNNING: { icon: 'autorenew', color: 'primary', label: 'Procesando' },
   COMPLETED: { icon: 'check_circle', color: 'positive', label: 'Completado' },
   PAUSED: { icon: 'pause_circle', color: 'warning', label: 'Pausado' },
   FAILED: { icon: 'error', color: 'negative', label: 'Fallido' },
@@ -78,9 +78,7 @@ const status = computed<CanvasNodeStatus>(() => canvasStore.statusOf(props.step.
  * desde la tabla, y condicionar el boton a ella esconderia la accion a quien
  * abriese el canvas por su cuenta teniendo una ejecucion detenida delante.
  */
-const canResumeHere = computed<boolean>(() =>
-  canvasStore.isResumableFrom(props.step.nodeId),
-);
+const canResumeHere = computed<boolean>(() => canvasStore.isResumableFrom(props.step.nodeId));
 
 const badge = computed(() => STATUS_BADGES[status.value]);
 
@@ -217,7 +215,7 @@ const sourcesText = computed<string | null>(() => {
       </q-badge>
       <!-- El spinner acompana al badge en vez de sustituirlo: el badge dice QUE
            pasa y el spinner que sigue pasando ahora mismo. -->
-      <q-spinner-dots v-if="status === 'RUNNING'" color="info" size="18px" />
+      <q-spinner-dots v-if="status === 'RUNNING'" :color="badge.color" size="18px" />
 
       <q-space />
 

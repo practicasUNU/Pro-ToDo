@@ -1,6 +1,6 @@
 import { createPinia, setActivePinia } from 'pinia';
 
-import { WorkflowStatus } from '@/types/pipeline';
+import { NodeType, WorkflowStatus } from '@/types/pipeline';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { useExecutionStore } from './execution.store';
@@ -531,6 +531,67 @@ describe('useExecutionStore · estado reactivo de las ejecuciones del motor', ()
       //    primera que devolvio la API.
       expect(index.get(FLOW_ID)?.executionId).toBe('exec-nueva');
       expect(index.get(OTHER_FLOW_ID)?.executionId).toBe('exec-otra');
+    });
+
+    /**
+     * EL DEFECTO QUE CIERRA ESTE PAR. La insignia «En proceso» de la tabla de
+     * flujos sale de este indice, y nada lo poblaba al EMPEZAR: el canal emite
+     * `node:started`, pero ese evento solo llegaba al canvas. Una ejecucion
+     * recien disparada no aparecia en la tabla hasta que se pausaba o
+     * terminaba, que es justo cuando ya no estaba en proceso.
+     */
+    it('7.2 deberia registrar la ejecucion en cuanto arranca un nodo', () => {
+      // 1. Arrange 📐: la tabla sigue salas de flujos que quiza nunca listaron
+      //    una ejecucion, asi que aqui no hay fila previa que parchear.
+      const store = useExecutionStore();
+
+      // 2. Act ⚙️
+      store.handleNodeStarted({
+        executionId: EXECUTION_ID,
+        flowId: FLOW_ID,
+        emittedAt: '2026-02-01T00:00:00.000Z',
+        nodeId: 'nodo_a',
+        nodeType: NodeType.TRIGGER_IMAP,
+        stepIndex: 0,
+        totalSteps: 3,
+        transition: 1,
+        attempt: 1,
+      });
+
+      // 3. Assert 🎯
+      expect(store.executionByFlowId.get(FLOW_ID)).toMatchObject({
+        executionId: EXECUTION_ID,
+        state: ExecutionState.EN_PROCESO,
+        activeCursor: 'nodo_a',
+      });
+    });
+
+    it('7.3 deberia limitarse a mover el cursor en los nodos siguientes', () => {
+      // 1. Arrange 📐: el segundo `node:started` de la misma ejecucion no debe
+      //    duplicar la fila ni reescribir su marca de arranque.
+      const store = useExecutionStore();
+      const started = (nodeId: string, emittedAt: string) => ({
+        executionId: EXECUTION_ID,
+        flowId: FLOW_ID,
+        emittedAt,
+        nodeId,
+        nodeType: NodeType.PROCESADOR_IA,
+        stepIndex: 1,
+        totalSteps: 3,
+        transition: 2,
+        attempt: 1,
+      });
+
+      // 2. Act ⚙️
+      store.handleNodeStarted(started('nodo_a', '2026-02-01T00:00:00.000Z'));
+      store.handleNodeStarted(started('nodo_b', '2026-02-01T00:00:09.000Z'));
+
+      // 3. Assert 🎯
+      expect(store.executions).toHaveLength(1);
+      expect(store.executionByFlowId.get(FLOW_ID)).toMatchObject({
+        activeCursor: 'nodo_b',
+        startedAt: '2026-02-01T00:00:00.000Z',
+      });
     });
   });
 

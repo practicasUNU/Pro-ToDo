@@ -16,6 +16,7 @@ import type {
   FlowPausedEvent,
   FlowResumedEvent,
   NodeErrorEvent,
+  NodeStartedEvent,
   RoomAck,
   WorkflowExecutionResult,
 } from '@/types/execution';
@@ -136,6 +137,29 @@ export const useExecutionStore = defineStore('execution', () => {
     if (belongsToActive(executionId) && activeExecution.value !== null) {
       activeExecution.value = { ...activeExecution.value, ...patch };
     }
+  };
+
+  /**
+   * Un nodo arranco: la ejecucion esta viva y en marcha.
+   *
+   * LO QUE HACE REACCIONAR A LA TABLA DE FLUJOS. Su insignia «En proceso» sale
+   * de `executionByFlowId`, y hasta ahora nada la poblaba al EMPEZAR: el canal
+   * emite `node:started`, pero ese evento solo llegaba al canvas, de modo que
+   * una ejecucion recien disparada no aparecia en la tabla hasta que se pausaba
+   * o terminaba. Las transiciones intermedias —justo las que el operador quiere
+   * ver— eran invisibles sin recargar.
+   *
+   * El `seed` de `patchSummary` cubre el caso normal: la fila de la ejecucion
+   * todavia no existe en el store porque nadie la ha listado. Y es idempotente
+   * por construccion, de modo que el segundo `node:started` de la misma
+   * ejecucion solo mueve el cursor.
+   */
+  const handleNodeStarted = (event: NodeStartedEvent): void => {
+    patchSummary(
+      event.executionId,
+      { state: ExecutionState.EN_PROCESO, activeCursor: event.nodeId },
+      { flowId: event.flowId, startedAt: event.emittedAt },
+    );
   };
 
   /** El motor detuvo la ejecucion: queda reanudable (CU-09). */
@@ -382,6 +406,7 @@ export const useExecutionStore = defineStore('execution', () => {
     isPaused,
     isRunning,
     lastNodeError,
+    handleNodeStarted,
     handleFlowPaused,
     handleFlowResumed,
     handleFlowDiscarded,

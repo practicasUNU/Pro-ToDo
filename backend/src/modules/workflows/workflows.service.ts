@@ -461,6 +461,16 @@ export class WorkflowsService
    * Cada campo se aplica solo si viaja en el cuerpo (`!== undefined`), no si es
    * veraz: sin eso, `{ active: false }` y una descripcion vacia se ignorarian.
    *
+   * TRES SALIDAS HACIA EL SONDEO, mutuamente excluyentes, y conviene leerlas
+   * juntas porque entre las dos primeras faltaba la tercera:
+   *
+   * 1. Se desactiva  -> `releaseDeactivatedFlow`: parar y cerrar lo vivo.
+   * 2. Se activa     -> `refreshPolling`: inscribir ya, sin esperar un ciclo.
+   * 3. Sigue activo y CAMBIA EL GRAFO -> `refreshPolling`: el worker en memoria
+   *    captura su configuracion en la clausura del temporizador, de modo que
+   *    sin esto seguia sondeando con los filtros y el periodo ANTERIORES hasta
+   *    la siguiente reconciliacion.
+   *
    * @param workflowId Identificador de la fila de `flujos`.
    * @param updateWorkflowDto Campos a modificar; todos opcionales.
    * @throws NotFoundException Si el flujo no existe.
@@ -484,6 +494,12 @@ export class WorkflowsService
     // y despues ya no hay forma de distinguir un `INACTIVO -> INACTIVO` (que no
     // es transicion y no debe limpiar nada) de la desactivacion real.
     const wasActive = workflow.status === WorkflowStatus.ACTIVO;
+
+    // Se recuerda que el grafo viajaba en el cuerpo, no que haya cambiado de
+    // verdad: comparar los dos esquemas exigiria una igualdad estructural sobre
+    // un JSONB anidado, y el precio de reconciliar de mas es una consulta a
+    // `flujos` cuyo diffing no tocara ningun temporizador.
+    const schemaChanged = updateWorkflowDto.pipelineSchema !== undefined;
 
     if (updateWorkflowDto.name !== undefined) {
       workflow.name = updateWorkflowDto.name.trim();
@@ -539,6 +555,22 @@ export class WorkflowsService
     // esto el operador pulsa "Activar" y el flujo no sondea hasta el siguiente
     // ciclo de reconciliacion, hasta un minuto de silencio inexplicable.
     if (!wasActive && isActive) {
+      await this.flowPollingCoordinator.refreshPolling();
+    }
+
+    // EL FLUJO NO CAMBIA DE ESTADO, PERO SU GRAFO SI. Era el hueco entre las dos
+    // ramas de arriba: editar el nodo IMAP de un flujo que ya estaba ACTIVO no
+    // avisaba a nadie, y `registerInterval` captura la configuracion en la
+    // clausura del `setInterval`. El resultado es que el operador guardaba un
+    // filtro de asunto nuevo y el buzon se seguia sondeando con el viejo hasta
+    // que la reconciliacion periodica —un minuto— lo descubriese por su cuenta.
+    //
+    // `refreshPolling` y no una parada por flujo: la reconciliacion hace DIFFING
+    // (`hasConfigChanged` compara la configuracion entera), asi que reinscribe
+    // exactamente el worker que cambio y deja intactos los demas. Pedir una
+    // parada aqui obligaria a ampliar `FlowPollingPort` —que implementan IMAP y
+    // Cron— para duplicar algo que el diffing ya resuelve.
+    if (wasActive && isActive && schemaChanged) {
       await this.flowPollingCoordinator.refreshPolling();
     }
 

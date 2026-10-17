@@ -507,8 +507,8 @@ onBeforeUnmount(() => {
               cellProps.row.executionState === ExecutionState.EN_PROCESO
             "
           >
-            <q-badge class="pd-badge pd-badge--active" data-test="status-running">
-              En Proceso
+            <q-badge class="pd-badge pd-badge--running" data-test="status-running">
+              En proceso
             </q-badge>
             <q-spinner class="q-ml-xs" size="1em" />
             <q-tooltip>El motor esta recorriendo el pipeline ahora mismo</q-tooltip>

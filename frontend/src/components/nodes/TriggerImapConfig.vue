@@ -10,6 +10,7 @@ import {
   useTriggerImapStore,
 } from '@stores/nodes/trigger-imap.store';
 
+import { presentationOf } from '@/utils/alert-categorizer';
 import { extractApiErrorMessage } from '@/utils/api-error';
 
 import type { SubjectMatchMode } from '@/utils/subject-filter-mode';
@@ -181,11 +182,15 @@ const onTestConnection = async (): Promise<void> => {
       return;
     }
 
+    // La severidad decide el color, igual que en los avisos del canal de
+    // ejecucion: un timeout de comprobacion es LEVE y pintarlo en rojo lo
+    // presentaba como una averia del buzon.
+    const level = result.error?.level ?? 'GRAVE';
+
     $q.notify({
-      type: 'negative',
-      message: `[${result.error?.level ?? 'GRAVE'}] ${
-        result.error?.message ?? 'No se pudo conectar con el buzon'
-      }`,
+      type: presentationOf(level).type,
+      icon: presentationOf(level).icon,
+      message: `[${level}] ${result.error?.message ?? 'No se pudo conectar con el buzon'}`,
     });
   } catch (error) {
     $q.notify({

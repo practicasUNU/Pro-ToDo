@@ -166,7 +166,7 @@ describe('WorkflowCanvasPage · distintivo de estado del flujo', () => {
 
       // 3. Assert 🎯: el spinner ACOMPANA al texto, no lo sustituye. El color
       //    nunca viaja solo.
-      expect(badgeText(wrapper)).toContain('En ejecucion');
+      expect(badgeText(wrapper)).toContain('En proceso');
       expect(
         wrapper.get('[data-test="flow-state-badge"]').findComponent(QSpinnerDots).exists(),
       ).toBe(true);
@@ -238,7 +238,7 @@ describe('WorkflowCanvasPage · distintivo de estado del flujo', () => {
    * el que habia abierto la pagina, hasta que recargaba con F5.
    */
   describe('4. Conmutacion en vivo, sin recargar', () => {
-    it('4.1 deberia recorrer activo → en ejecucion → pausado → exitoso', async () => {
+    it('4.1 deberia recorrer activo → en proceso → pausado → exitoso', async () => {
       // 1. Arrange 📐: se parte de un flujo armado y sin ejecucion viva, que es
       //    como esta justo antes de que entre un correo.
       fetchWorkflow.mockResolvedValue(buildWorkflow(WorkflowStatus.ACTIVO));
@@ -263,7 +263,7 @@ describe('WorkflowCanvasPage · distintivo de estado del flujo', () => {
         attempt: 1,
       });
       await wrapper.vm.$nextTick();
-      expect(badgeText(wrapper)).toContain('En ejecucion');
+      expect(badgeText(wrapper)).toContain('En proceso');
 
       store.handleFlowPaused({
         executionId: EXECUTION_ID,
@@ -338,7 +338,7 @@ describe('WorkflowCanvasPage · distintivo de estado del flujo', () => {
       await wrapper.vm.$nextTick();
 
       // 3. Assert 🎯
-      expect(badgeText(wrapper)).toContain('En ejecucion');
+      expect(badgeText(wrapper)).toContain('En proceso');
     });
   });
 });

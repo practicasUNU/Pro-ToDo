@@ -248,9 +248,19 @@ describe('SmtpAlertStrategy', () => {
       expect(result.error?.code).toBe(ERR_SMTP_CONFIG);
       expect(result.error?.missingFields).toEqual(['customMessage']);
     });
+  });
 
-    it('2.4 deberia traducir un fallo del transporte sin dejarlo escapar', async () => {
-      // 1. Arrange 📐
+  /**
+   * EL DEFECTO QUE CIERRA ESTE BLOQUE. Un fallo del transporte devolvia GRAVE,
+   * y como este nodo SOLO corre como contingencia, eso hacia que el motor
+   * pausara EN EL NODO DE ALERTA: la fila apuntaba al mensajero y no al paso
+   * que se habia roto, y el reintento manual de CU-09 ofrecia reenviar un
+   * correo en vez de reparar la incidencia que lo habia provocado.
+   */
+  describe('13. Blindaje fail-safe del transporte', () => {
+    it('13.1 NO deberia fallar el nodo cuando el transporte se cae', async () => {
+      // 1. Arrange 📐: el servidor SMTP no responde en mitad de una
+      //    contingencia que ya tiene su propia incidencia que contar.
       const strategy = buildStrategy(
         buildMailer({
           sendNodeAlert: jest
@@ -263,12 +273,64 @@ describe('SmtpAlertStrategy', () => {
       // 2. Act ⚙️
       const result = await strategy.execute(buildContext(), buildParams());
 
-      // 3. Assert 🎯: GRAVE para que el motor lo reintente con backoff. Un SMTP
-      //    que no responde es el caso de manual para insistir.
+      // 3. Assert 🎯: exito DEGRADADO. La ejecucion sigue hasta
+      //    `closeTerminalState`, que pausa en el nodo que fallo de verdad.
+      expect(result.success).toBe(true);
+      expect(result.error).toBeUndefined();
+      expect(result.data).toMatchObject({ alert_sent: false });
+      expect(result.data?.reason).toContain('ECONNREFUSED');
+    });
+
+    it('13.2 deberia dejar la causa en la traza, no solo en el payload', async () => {
+      // 1. Arrange 📐: el correo no sale y nadie lanza nada, asi que sin este
+      //    aviso la caida del relay seria completamente invisible.
+      const strategy = buildStrategy(
+        buildMailer({
+          sendNodeAlert: jest.fn().mockRejectedValue(new Error('ETIMEDOUT')),
+        }),
+      );
+      jest.spyOn(strategy['logger'], 'log').mockImplementation(() => undefined);
+      const warn = jest
+        .spyOn(strategy['logger'], 'warn')
+        .mockImplementation(() => undefined);
+
+      // 2. Act ⚙️
+      await strategy.execute(buildContext(), buildParams());
+
+      // 3. Assert 🎯
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining('ETIMEDOUT'));
+    });
+
+    it('13.3 deberia marcar `alert_sent` tambien en el envio correcto', async () => {
+      // 1. Arrange 📐: el campo es util solo si esta SIEMPRE. Si apareciera
+      //    unicamente al fallar, un nodo posterior tendria que distinguir
+      //    "ausente" de "false", que son cosas distintas.
+      const strategy = buildStrategy();
+      muteLogger(strategy);
+
+      // 2. Act ⚙️
+      const result = await strategy.execute(buildContext(), buildParams());
+
+      // 3. Assert 🎯
+      expect(result.success).toBe(true);
+      expect(result.data).toMatchObject({ alert_sent: true });
+    });
+
+    it('13.4 deberia SEGUIR fallando con GRAVE si la configuracion esta mal', async () => {
+      // 1. Arrange 📐: el control negativo que impide que el blindaje se trague
+      //    todo. Un `to` vacio no se arregla solo: exige que alguien lo corrija.
+      const strategy = buildStrategy();
+      muteLogger(strategy);
+
+      // 2. Act ⚙️
+      const result = await strategy.execute(
+        buildContext(),
+        buildParams({ to: [] }),
+      );
+
+      // 3. Assert 🎯
       expect(result.success).toBe(false);
-      expect(result.error?.code).toBe(ERR_SMTP_SEND_FAILURE);
       expect(result.error?.level).toBe('GRAVE');
-      expect(result.error?.message).toContain('ECONNREFUSED');
     });
   });
 
