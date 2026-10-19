@@ -3,6 +3,7 @@ import { TypeOrmModule } from '@nestjs/typeorm';
 
 import { FsmModule } from '@core/fsm/fsm.module';
 import { LogsModule } from '@modules/logs/logs.module';
+import { NodeCatalogEntry } from '@modules/nodes/entities/node-catalog.entity';
 import { UsersModule } from '@modules/users/users.module';
 import { WorkflowTemplatesModule } from '@modules/workflow-templates/workflow-templates.module';
 
@@ -32,7 +33,12 @@ import { WorkflowsService } from './workflows.service';
  */
 @Module({
   imports: [
-    TypeOrmModule.forFeature([Workflow]),
+    // `NodeCatalogEntry` y no `NodesModule`: `InboundEmailResumeService` solo
+    // necesita leer el par `codigo`/`nombre` de la tabla `nodos` para entender
+    // "DESDE Disparador IMAP". Registrar la entidad cuesta una linea; importar
+    // el modulo de nodos ataria este al grafo de estrategias, que es justo lo
+    // que la nota de arriba explica que no se hace.
+    TypeOrmModule.forFeature([Workflow, NodeCatalogEntry]),
     FsmModule,
     // Por `WorkflowTemplatesService`: comprueba el `templateId` al instanciar.
     // La dependencia va en un solo sentido; el catalogo no conoce este modulo.

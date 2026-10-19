@@ -8652,3 +8652,141 @@ casos fallaban en su primera petición**, antes de ejercitar nada de lo que ven�
 corrigió el fixture, no la guarda. Con eso los nueve pasan, y la tanda añade tres más:
 autodesactivación tras reanudar, su contraria sin la política declarada, y el rechazo de un
 `maxRetries` por encima del techo.
+
+---
+
+## Reanudación CU-09: la fuga de `\Seen`, los alias de paso y el OCR sin binarios
+
+El encargo traía cuatro defectos. **Dos no existían**, el diagnóstico de un tercero era incorrecto,
+y el cuarto era real pero vivía en otro archivo. Vale la pena dejar escrito qué se comprobó, porque
+tres de esas premisas son creíbles y volverán a plantearse.
+
+### Lo que ya estaba resuelto
+
+`markAsRead` **no** se evaluaba con `?? true`. `DEFAULT_MARK_AS_READ` vale `false` desde que se
+invirtió el valor histórico, `resolveImapConfig` lo aplica, y la consulta sobre `flujos` y
+`plantillas_flujo` no devolvió **ni una sola fila** con `true`: o traen `false` explícito, o no traen
+la clave y el runtime ya resuelve `false`. La estrategia solo marca `\Seen` bajo `if (config.markAsRead)`.
+
+`applyStopOnFirstSuccess` **ya se invoca al reanudar** (`executions.service.ts`), y la plantilla
+«Verificiacion De Titulos Sandbox» **ya declara** `executionPolicy.stopOnFirstSuccess: true`, igual
+que el flujo homónimo. No había nada que añadir en ninguno de los dos sitios.
+
+### Por qué el flujo Sandbox no se desactivó: no es un defecto
+
+Su ejecución EXITOSA del 19/10/2026 a las 17:30 trae el namespace `error_context` poblado, que es la
+huella de haber salido por una ruta de contingencia. El motor marca esas ejecuciones con
+`tookContingency = true`, y la **condición 4** de `applyStopOnFirstSuccess` declina desactivar
+justamente ahí: una recuperación funcional cierra EXITOSO —el trabajo se hizo— pero la política
+describe un flujo que ya funciona **sin incidencias**, y apagarlo enterraría el fallo junto con el
+flujo.
+
+Funciona como está escrito. Se deja sin tocar, por decisión expresa, y queda documentado aquí para
+que no se reabra como avería.
+
+### El defecto real de `markAsRead` estaba en el buzón de órdenes
+
+`InboundEmailResumeService` marcaba `\Seen` **todo** mensaje que leía, fuera o no una orden. Cuando
+ese buzón es el mismo que sondea un `TRIGGER_IMAP` —que es el caso cuando el operador responde al
+correo de alerta—, el flujo configurado con `markAsRead: false` veía su correo marcado por la
+espalda, por un servicio que solo venía a buscar comandos. Ninguna lectura del esquema lo explicaba,
+porque el esquema no tenía la culpa.
+
+El `finally` que marcaba estaba bien razonado: una orden sin marcar se reprocesa en cada vuelta. Lo
+que faltaba era distinguir. Ahora `handleMessage` devuelve `{ wasCommand, dispatched }`: lo que era
+una orden se marca aunque se rechace —un testigo caducado no debe reprocesarse cada minuto—, y lo
+que no lo era se deja intacto y se recuerda en `skippedUids`.
+
+Ese conjunto es el **canje** del arreglo: se cambia una marca en el servidor por un recuerdo en
+memoria. Filtra **antes** del `slice(0, MAX_COMMANDS_PER_RUN)`, y ese orden es lo importante: como
+esos mensajes ya no se marcan, el servidor los sigue devolviendo en cada búsqueda de no-leídos, y
+filtrarlos al final dejaría que una conversación larga copara las diez plazas del lote hasta que
+ninguna orden real se atendiera. Tras un reinicio se re-parsean una vez; está acotado por
+`MAX_SKIPPED_UIDS`.
+
+La prueba `5.3` del spec **se invirtió**: exigía literalmente el comportamiento que era el defecto.
+
+`markSeenQuietly` de `ImapTriggerStrategy` no se toca: marcar siempre los correos de mando es
+deliberado y su TSDoc ya lo explicaba.
+
+### `DESDE Disparador IMAP` no fallaba: no llegaba a existir
+
+El grupo del paso en la expresión era `[a-zA-Z0-9_-]+` y la expresión está **anclada de punta a
+punta**. Una orden que nombrara el paso con dos palabras no casaba con *nada*, así que el mensaje se
+descartaba como «esto no es una orden»: el operador no recibía ni el aviso de paso irresoluble ni la
+reanudación desde el cursor. Fallaba en silencio, que es la peor forma de fallar.
+
+El grupo pasa a `.+?` y el anclaje se conserva —es lo que impide que una respuesta larga reanude un
+flujo de pasada—. Quien acota qué es un paso válido es `resolveTargetStep`, que para eso conoce el
+grafo.
+
+Y se añade el cuarto alias: la **etiqueta del catálogo**. Es la forma que de verdad usa una persona
+y la única que no vive en el esquema, porque `PipelineNodeConfigDto` no tiene `name` ni `label`; la
+etiqueta solo existe en la tabla `nodos` (`codigo` → `nombre`). Se lee de ahí en lugar de replicar el
+diccionario. Todo se compara con `normalizeStepAlias`, que pliega diacríticos: nadie escribe las
+tildes de «Procesador de IA» al responder desde el móvil.
+
+Se inyecta el **repositorio** de `NodeCatalogEntry` y no `NodeCatalogService`: de aquel solo hacen
+falta dos columnas, mientras que el servicio arrastra la `NodeStrategyFactory` y obligaría a
+`WorkflowsModule` a importar `NodesModule`, que es precisamente lo que ese módulo evita. Si el
+catálogo no responde, se resuelve con los tres alias del esquema y se reanuda igual: perder la forma
+cómoda de nombrar un paso es un inconveniente; dejar un flujo detenido porque una tabla no contestó
+sería el fallo de verdad.
+
+### OCR: reanudar desde un nodo cuyos binarios ya se tiraron
+
+Llegar a `PROCESADOR_OCR` sin adjuntos tenía **dos causas que no se parecen en nada**, y tratarlas
+igual era el defecto: o el correo nunca los trajo, o este mismo nodo ya los transcribió y el motor
+liberó los binarios después (RNF-01). En el segundo caso la transcripción sigue entera en el
+contexto, de modo que fallar con `ERR_OCR_NO_ATTACHMENTS` convertía toda reanudación desde ese paso
+en un callejón sin salida: el operador no puede devolver un base64 que el sistema tiró a propósito.
+
+La salvaguarda reutiliza el resultado previo y **no llama al proveedor**. Exige
+`ocr_status === 'COMPLETED'` y no la mera presencia del namespace: el motor copia el `data` de un
+resultado fallido en `error_context.partial_data`, y reutilizar restos a medias publicaría texto
+incompleto como si fuera una transcripción buena.
+
+El nodo **no conoce su propio `outputNamespace`** —`execute(context, node.params)` no se lo pasa—,
+así que la caché se localiza por un `cacheNamespace` nuevo con `'ocr_result'` por defecto, el mismo
+patrón que `sourceNamespace` en el parser. Como el DTO ya estaba enchufado como `paramsSchema`, la
+validación al guardar sale gratis.
+
+**`ParserEmailStrategy` no necesitaba la guarda equivalente**, y comprobarlo evitó código muerto:
+`parsed-email-payload.util.ts` ya descarta un adjunto cuyo `contentBase64` es `null` *antes* de
+contarlo como candidato a visión, con un comentario que lo explica —«un adjunto ya liberado no se
+puede evaluar, y tratarlo como sin texto lo convertiría en candidato cuando lo único que pasa es que
+su binario ya no está»—. `requires_multimodal_fallback` se queda en `false` y el parser sale adelante
+solo al reanudar.
+
+### El aviso del canvas, sin cuenta regresiva
+
+El encargo pedía un modal con temporizador bloqueante de 5 segundos. `CanvasNodeCard` lleva escrito
+por qué su diálogo de reanudación **no** lo tiene: ese temporizador está reservado a lo irreversible
+—descartar una ejecución, dar de baja un flujo— y reanudar no destruye nada. Se respetó la
+convención: se amplía el mensaje del diálogo que ya existía, sin componente nuevo ni contador.
+
+El aviso se condiciona al **tipo** de nodo y no al `nodeId`: `ocr_ia` es solo el nombre que suele
+poner el asistente, y atar la advertencia a esa cadena la apagaría en cuanto alguien renombrara el
+paso. La detección de binarios liberados vive en `src/utils/purged-attachments.ts` porque el frontend
+**no tiene tipo espejo del adjunto**: el contexto es un payload abierto, y replicar aquí la forma de
+`RawEmailAttachment` crearía una segunda definición destinada a desincronizarse.
+
+Exige que **todos** estén liberados: mientras quede uno con binario, el nodo puede transcribir de
+verdad y prometer una reutilización sería mentir. Y un arreglo vacío devuelve `false` explícitamente,
+porque `Array.every` sobre vacío da `true` y sin esa guarda todo correo de texto plano dispararía la
+advertencia.
+
+### La migración 044 es cosmética, y conviene saberlo
+
+Inyecta `markAsRead: false` explícito donde falta la clave. **No corrige ningún comportamiento**: el
+runtime ya resolvía `false`. Lo que corrige es la *lectura* del esquema, para que un operador no
+tenga que irse al DTO del backend a saber si su flujo marcará el correo. Recorre todos los nodos y no
+solo el `entrypoint`, siguiendo el patrón de la `043`, y respeta cualquier valor ya declarado.
+
+### Un detalle de las pruebas de componente que costó encontrar
+
+Quasar instala cada plugin **una sola vez por proceso** y copia `Dialog.create` dentro del `$q` en
+esa primera instalación. Un `vi.spyOn(Dialog, 'create')` puesto en una prueba llega siempre tarde:
+el `$q` del componente ya apunta a la función original y el espía no registra nada —sin error, solo
+cero llamadas—. La salida es doblar `useQuasar`, dejando el plugin instalado únicamente por el `_q_`
+que inyectan `QIcon` y compañía al renderizarse.

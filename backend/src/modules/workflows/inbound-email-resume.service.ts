@@ -18,6 +18,7 @@ import {
 import { PASSWORD_ENV_KEY_PATTERN } from '@modules/nodes/dto/imap-trigger-config.dto';
 import { UserRole } from '@modules/users/enums/user-role.enum';
 import { UsersService } from '@modules/users/users.service';
+import { NodeCatalogEntry } from '@modules/nodes/entities/node-catalog.entity';
 import { Workflow } from '@modules/workflows/entities/workflow.entity';
 
 import { ExecutionsService } from './executions.service';
@@ -43,9 +44,18 @@ import type { Repository } from 'typeorm';
  * que admitir el alfabeto alfanumerico completo solo ensanchaba la superficie
  * de lo que hay que probar contra la base. La horquilla de longitud cubre los
  * dos emisores —el nodo `PAUSA_FLOW` y el de alerta— sin atarse a ninguno.
+ *
+ * El grupo del paso es ANCHO (`.+?`) y no un alfabeto cerrado. Antes era
+ * `[a-zA-Z0-9_-]+`, y como la expresion esta anclada de principio a fin, una
+ * orden perfectamente valida que nombrara el paso por su etiqueta —`DESDE
+ * Disparador IMAP`— no casaba con NADA: el mensaje se descartaba como "esto no
+ * es una orden" y el operador no recibia ni el aviso de paso irresoluble. El
+ * anclaje se conserva, que es lo que impide que una respuesta larga reanude un
+ * flujo de pasada; quien acota lo que es un paso valido es `resolveTargetStep`,
+ * que para eso conoce el grafo.
  */
 const RESUME_COMMAND_REGEX =
-  /^(?:REANUDAR|RESUME)\s+([a-f0-9]{8,64})(?:\s+(?:DESDE|FROM)\s+([a-zA-Z0-9_-]+))?$/i;
+  /^(?:REANUDAR|RESUME)\s+([a-f0-9]{8,64})(?:\s+(?:DESDE|FROM)\s+(.+?))?\s*$/i;
 
 /**
  * Prefijos de respuesta y reenvio que los clientes acumulan en el asunto.
@@ -106,6 +116,24 @@ export const extractCommandLine = (rawBody: string): string | null => {
 export const cleanSubject = (rawSubject: string): string =>
   rawSubject.replace(SUBJECT_REPLY_PREFIXES, '').trim();
 
+/**
+ * Forma canonica con la que se comparan los alias de un paso.
+ *
+ * Helper PURO, como los dos de arriba. Hace tres cosas y las tres hacen falta
+ * para que "Disparador IMAP" escrito de memoria case con la fila del catalogo:
+ * recorta, baja a minusculas y PLIEGA LOS DIACRITICOS, porque los nombres de
+ * los nodos llevan tildes («Procesador de IA», «Escudo Post-IA») y nadie las
+ * escribe al responder desde el movil. El espacio interior se colapsa para que
+ * un doble espacio accidental no rompa la coincidencia.
+ */
+export const normalizeStepAlias = (raw: string): string =>
+  raw
+    .normalize('NFD')
+    .replace(/\p{Diacritic}/gu, '')
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, ' ');
+
 /** Roles que pueden dar la orden. Mismos que los de la API. */
 const AUTHORIZED_ROLES: ReadonlySet<UserRole> = new Set([
   UserRole.ADMIN,
@@ -114,6 +142,16 @@ const AUTHORIZED_ROLES: ReadonlySet<UserRole> = new Set([
 
 /** Cuantos mensajes se atienden por vuelta, para no bloquear el proceso. */
 const MAX_COMMANDS_PER_RUN = 10;
+
+/**
+ * Cuantos UID ajenos se recuerdan antes de olvidar los mas antiguos.
+ *
+ * Holgado respecto a lo que cabe en un buzon de ordenes sano, y aun asi
+ * acotado: `Set` conserva el orden de insercion, de modo que descartar desde el
+ * principio tira siempre lo mas viejo. Lo peor que pasa al olvidar un UID es
+ * que ese mensaje se vuelva a descargar una vez.
+ */
+const MAX_SKIPPED_UIDS = 500;
 
 /** Inactividad maxima del socket durante la descarga de un mensaje. */
 const SOCKET_TIMEOUT_MS = 30_000;
@@ -132,6 +170,21 @@ const DEFAULT_RESUME_POLL_MS = 60_000;
 
 /** Suelo del intervalo: por debajo se maltrata al servidor de correo. */
 const MIN_RESUME_POLL_MS = 15_000;
+
+/**
+ * Que se hizo con un mensaje del buzon, para decidir si se marca `\Seen`.
+ *
+ * Las dos respuestas son independientes: una orden con un testigo caducado es
+ * `wasCommand: true, dispatched: false`, y hay que marcarla igual —ya se
+ * atendio, y dejarla sin marcar la reprocesaria cada minuto para volver a
+ * rechazarla.
+ */
+interface HandledMessage {
+  /** El mensaje ERA una orden de reanudacion, aunque fuese rechazada. */
+  readonly wasCommand: boolean;
+  /** La ejecucion llego a reanudarse. */
+  readonly dispatched: boolean;
+}
 
 /** Lo que se extrae de un mensaje antes de decidir nada. */
 interface InboundCommand {
@@ -198,6 +251,27 @@ export class InboundEmailResumeService
    */
   private isPolling = false;
 
+  /**
+   * UID del buzon que ya se miraron y NO eran una orden.
+   *
+   * Existe porque este servicio dejo de marcar `\Seen` el correo ajeno. Antes
+   * lo marcaba TODO lo que leia, y eso convertia el canal de ordenes en un
+   * lector de correo que vaciaba de no-leidos un buzon que puede ser el mismo
+   * que sondea un `TRIGGER_IMAP`: el flujo configurado con `markAsRead: false`
+   * veia sus correos marcados por la espalda, por un servicio que solo venia a
+   * buscar comandos.
+   *
+   * El canje es deliberado: se cambia una marca en el servidor por un recuerdo
+   * en memoria. Tras un reinicio esos mensajes se vuelven a descargar y parsear
+   * UNA vez, lo que cuesta una descarga por mensaje y ninguna consulta a la
+   * base —`extractCommand` descarta antes de preguntar nada—. A cambio, el
+   * buzon del operador queda exactamente como estaba.
+   *
+   * Acotado por `MAX_SKIPPED_UIDS`: un buzon compartido con mucho trafico haria
+   * crecer el conjunto sin techo durante toda la vida del proceso.
+   */
+  private readonly skippedUids = new Set<number>();
+
   constructor(
     private readonly configService: ConfigService,
     private readonly executionQueryService: FsmExecutionQueryService,
@@ -205,6 +279,14 @@ export class InboundEmailResumeService
     private readonly usersService: UsersService,
     @InjectRepository(Workflow)
     private readonly workflowRepository: Repository<Workflow>,
+    // El catalogo se inyecta como REPOSITORIO y no como `NodeCatalogService`:
+    // de aquel solo hace falta el par `codigo`/`nombre`, mientras que el
+    // servicio arrastra ademas la `NodeStrategyFactory` para marcar que tipos
+    // estan implementados. Depender de el obligaria a exportarlo de
+    // `NodesModule` y ataria este canal a la factoria de estrategias por un
+    // diccionario de dos columnas.
+    @InjectRepository(NodeCatalogEntry)
+    private readonly nodeCatalogRepository: Repository<NodeCatalogEntry>,
     private readonly schedulerRegistry: SchedulerRegistry,
   ) {}
 
@@ -357,22 +439,45 @@ export class InboundEmailResumeService
         return 0;
       }
 
-      for (const uid of uids.slice(0, MAX_COMMANDS_PER_RUN)) {
-        // El marcado va en el `finally` de cada mensaje y NO al final del lote:
-        // un comando que no se marca se vuelve a leer en la vuelta siguiente, y
-        // uno que falla a mitad dejaria el buzon reprocesandose para siempre.
-        try {
-          const handled = await this.handleMessage(client, uid);
+      // El descarte va ANTES del `slice` y no despues. Los mensajes ajenos se
+      // quedan sin marcar a proposito, de modo que el servidor los sigue
+      // devolviendo en cada busqueda de no-leidos: filtrarlos al final dejaria
+      // que una conversacion larga copara las diez plazas del lote y las
+      // ordenes reales no se atenderian nunca.
+      const pending = uids
+        .filter((uid) => !this.skippedUids.has(uid))
+        .slice(0, MAX_COMMANDS_PER_RUN);
 
-          if (handled) {
+      for (const uid of pending) {
+        // El marcado va en el `finally` de cada mensaje y NO al final del lote:
+        // una orden que no se marca se vuelve a leer en la vuelta siguiente, y
+        // una que falla a mitad dejaria el buzon reprocesandose para siempre.
+        //
+        // Pero SOLO se marca lo que era una orden. Marcar tambien el correo
+        // ajeno era la fuga que anulaba `markAsRead: false` en el buzon que
+        // comparten este canal y el `TRIGGER_IMAP` del flujo. Lo que no es una
+        // orden se recuerda en `skippedUids` y se deja intacto.
+        let outcome: HandledMessage = { wasCommand: true, dispatched: false };
+
+        try {
+          outcome = await this.handleMessage(client, uid);
+
+          if (outcome.dispatched) {
             dispatched += 1;
           }
         } catch (error: unknown) {
+          // Se conserva `wasCommand: true` del valor inicial: si la cosa reviento
+          // a mitad no hay forma de saber que era, y marcarlo es el lado seguro
+          // —evita el bucle infinito de reintentar un mensaje que siempre falla.
           this.logger.error(
             `[InboundEmailResume] El mensaje uid=${uid} no se pudo atender: ${this.describe(error)}`,
           );
         } finally {
-          await this.markSeen(client, uid);
+          if (outcome.wasCommand) {
+            await this.markSeen(client, uid);
+          } else {
+            this.rememberSkipped(uid);
+          }
         }
       }
 
@@ -409,14 +514,49 @@ export class InboundEmailResumeService
   /**
    * Descarga un mensaje, lo valida de principio a fin y lo despacha.
    *
-   * Devuelve `true` solo si la ejecucion llego a reanudarse.
+   * Devuelve las DOS cosas que el barrido necesita saber: si era una orden
+   * —que es lo que decide el `\Seen`— y si llego a reanudar. No se delega en
+   * `processMessage` porque aquel solo responde lo segundo, y deducir lo
+   * primero desde fuera exigiria volver a pasar la expresion sobre el mensaje.
    */
-  private async handleMessage(client: ImapFlow, uid: number): Promise<boolean> {
+  private async handleMessage(
+    client: ImapFlow,
+    uid: number,
+  ): Promise<HandledMessage> {
     const download = await client.download(String(uid), undefined, {
       uid: true,
     });
+    const command = this.extractCommand(
+      await simpleParser(download.content),
+      uid,
+    );
 
-    return this.processMessage(await simpleParser(download.content), uid);
+    if (command === null) {
+      return { wasCommand: false, dispatched: false };
+    }
+
+    return {
+      wasCommand: true,
+      dispatched: await this.dispatchCommand(command),
+    };
+  }
+
+  /**
+   * Anota un UID como "ya mirado y no era una orden".
+   *
+   * Descarta el mas antiguo al llegar al tope. `Set` itera en orden de
+   * insercion, asi que la primera clave es siempre la mas vieja.
+   */
+  private rememberSkipped(uid: number): void {
+    if (this.skippedUids.size >= MAX_SKIPPED_UIDS) {
+      const oldest = this.skippedUids.values().next();
+
+      if (oldest.done !== true) {
+        this.skippedUids.delete(oldest.value);
+      }
+    }
+
+    this.skippedUids.add(uid);
   }
 
   /**
@@ -449,6 +589,19 @@ export class InboundEmailResumeService
       return false;
     }
 
+    return this.dispatchCommand(command);
+  }
+
+  /**
+   * Aplica las tres guardas a una orden ya extraida y la despacha.
+   *
+   * Separado de `processMessage` para que el barrido del buzon propio pueda
+   * distinguir "no era una orden" de "era una orden y se rechazo" sin volver a
+   * parsear el mensaje: de esa distincion depende si se marca `\Seen`.
+   *
+   * @returns `true` solo si la ejecucion llego a reanudarse.
+   */
+  private async dispatchCommand(command: InboundCommand): Promise<boolean> {
     // --- 1. El testigo. Va PRIMERO, antes incluso de mirar quien escribe: sin
     // credencial valida no hay nada que discutir, y preguntar a la base de
     // datos por el remitente de un mensaje cualquiera convertiria el buzon en
@@ -620,12 +773,54 @@ export class InboundEmailResumeService
   }
 
   /**
+   * Diccionario `codigo` → `nombre` del catalogo de nodos.
+   *
+   * Se consulta en cada resolucion y NO se memoriza en un campo: la tabla
+   * `nodos` son doce filas de datos de instalacion, y esta ruta se recorre
+   * como mucho una vez por orden de correo. Una cache aqui solo anadiria la
+   * pregunta de cuando invalidarla.
+   *
+   * Un fallo de lectura NO tumba la reanudacion: se devuelve un diccionario
+   * vacio y la resolucion sigue con los tres alias que salen del propio
+   * esquema. Perder la forma comoda de nombrar un paso es un inconveniente;
+   * dejar sin reanudar un flujo detenido porque el catalogo no respondio seria
+   * el fallo de verdad.
+   */
+  private async loadCatalogLabels(): Promise<ReadonlyMap<string, string>> {
+    try {
+      const entries = await this.nodeCatalogRepository.find();
+
+      return new Map(entries.map((entry) => [entry.code, entry.name]));
+    } catch (error: unknown) {
+      this.logger.warn(
+        `[InboundEmailResume] No se pudo leer el catalogo de nodos: ${this.describe(error)}. Se resuelve el paso solo por identificador, tipo o namespace.`,
+      );
+
+      return new Map();
+    }
+  }
+
+  /**
    * Traduce lo que el operador escribio tras "DESDE" a un `nodeId`.
    *
-   * Acepta las tres formas con las que una persona nombra un paso de memoria:
-   * su identificador, su tipo o el namespace que publica. Sin distinguir
-   * mayusculas, porque un asunto de correo pasa por varios clientes que lo
+   * Acepta las CUATRO formas con las que una persona nombra un paso de memoria:
+   * su identificador (`trigger_imap`), su tipo (`TRIGGER_IMAP`), el namespace
+   * que publica (`raw_email`) y su ETIQUETA del catalogo (`Disparador IMAP`).
+   * Todas se comparan por `normalizeStepAlias`, asi que ni las mayusculas ni
+   * las tildes cuentan: un asunto de correo pasa por varios clientes que lo
    * reescriben.
+   *
+   * La cuarta forma es la que de verdad usa un operador, y es la unica que no
+   * vive en el esquema: `PipelineNodeConfigDto` no tiene `name` ni `label`, de
+   * modo que la etiqueta legible solo existe en la tabla `nodos` (`codigo` →
+   * `nombre`). Se lee de ahi en lugar de replicar el diccionario aqui, que es
+   * la misma razon por la que el frontend tampoco lo replica.
+   *
+   * La etiqueta identifica un TIPO, no una instancia: en un grafo con dos nodos
+   * del mismo tipo, «Procesador de IA» es ambiguo. Se resuelve al primero por
+   * orden de declaracion —igual que ya ocurria al nombrar el paso por su
+   * `nodeType`— y se deja constancia en el registro para que el operador sepa
+   * por que aterrizo donde aterrizo.
    */
   private async resolveTargetStep(
     execution: FsmExecution,
@@ -647,18 +842,44 @@ export class InboundEmailResumeService
       return null;
     }
 
-    const wanted = identifier.trim().toLowerCase();
+    const wanted = normalizeStepAlias(identifier);
+    const labelsByCode = await this.loadCatalogLabels();
+    const ambiguous: string[] = [];
+    let resolved: string | null = null;
 
     for (const [nodeId, node] of Object.entries(nodes)) {
+      const nodeType = typeof node.nodeType === 'string' ? node.nodeType : '';
       const candidates = [
         nodeId,
-        typeof node.nodeType === 'string' ? node.nodeType : '',
+        nodeType,
         typeof node.outputNamespace === 'string' ? node.outputNamespace : '',
+        labelsByCode.get(nodeType) ?? '',
       ];
 
-      if (candidates.some((value) => value.toLowerCase() === wanted)) {
-        return nodeId;
+      if (
+        !candidates.some(
+          (value) => value.length > 0 && normalizeStepAlias(value) === wanted,
+        )
+      ) {
+        continue;
       }
+
+      if (resolved === null) {
+        resolved = nodeId;
+        continue;
+      }
+
+      ambiguous.push(nodeId);
+    }
+
+    if (resolved !== null) {
+      if (ambiguous.length > 0) {
+        this.logger.warn(
+          `[InboundEmailResume] El paso "${identifier}" nombra a varios nodos del flujo ${execution.flowId} (${[resolved, ...ambiguous].join(', ')}): se reanuda desde el primero, "${resolved}".`,
+        );
+      }
+
+      return resolved;
     }
 
     this.logger.warn(

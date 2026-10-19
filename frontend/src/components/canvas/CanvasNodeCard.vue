@@ -5,6 +5,7 @@ import { useQuasar } from 'quasar';
 import { useCanvasStore } from '@stores/canvas.store';
 import { useExecutionStore } from '@stores/execution.store';
 import { extractApiErrorMessage } from '@/utils/api-error';
+import { hasPurgedAttachments } from '@/utils/purged-attachments';
 import { NODE_TYPE_LABELS, NodeType } from '@/types/pipeline';
 
 import type { CanvasForkSlot, CanvasNodeStatus } from '@stores/canvas.store';
@@ -137,6 +138,32 @@ const ariaLabel = computed<string>(() => {
 });
 
 /**
+ * Tipos de nodo que consumen los binarios del correo.
+ *
+ * Son los unicos a los que les afecta la purga de RNF-01: el resto del grafo
+ * trabaja sobre texto ya extraido y reanudar desde ellos no reutiliza nada.
+ */
+const BINARY_CONSUMER_TYPES: readonly NodeType[] = [
+  NodeType.PROCESADOR_OCR,
+  NodeType.PARSER_PRE_IA,
+];
+
+/**
+ * Reanudar desde aqui reutilizara una extraccion ya hecha, no el fichero.
+ *
+ * Dos condiciones, y las dos hacen falta. Que el nodo sea de los que leen los
+ * adjuntos —si no, la purga le da igual— y que los binarios ya no esten en el
+ * contexto. Se mira el TIPO y no el `nodeId`: `ocr_ia` es solo el nombre que
+ * suele ponerles el asistente, y atar el aviso a esa cadena lo apagaria en
+ * cuanto alguien renombrara el paso.
+ */
+const reusesCachedExtraction = computed<boolean>(
+  () =>
+    BINARY_CONSUMER_TYPES.includes(props.step.nodeType) &&
+    hasPurgedAttachments(canvasStore.executionContext),
+);
+
+/**
  * Relanza la ejecucion detenida desde este nodo, previa confirmacion.
  *
  * El dialogo NO lleva el temporizador de 5 segundos: ese esta reservado a lo
@@ -144,15 +171,26 @@ const ariaLabel = computed<string>(() => {
  * destruye nada. Lo que si hace falta es confirmar, porque reanudar desde un
  * paso anterior REPITE trabajo ya hecho, y en un flujo que publica eso puede
  * significar un segundo envio.
+ *
+ * Cuando el paso consume adjuntos YA LIBERADOS, el mensaje cambia: el operador
+ * suele reanudar ahi justamente porque cambio el fichero o el prompt, y esa es
+ * la unica expectativa que el sistema no puede cumplir —el binario se tiro a
+ * proposito al terminar el nodo (RNF-01) y lo que se reutiliza es la
+ * transcripcion que quedo en el contexto. Decirlo ANTES es lo que evita que
+ * alguien concluya que su cambio no surtio efecto.
  */
 const requestResume = (): void => {
   const executionId = canvasStore.observedExecution?.executionId;
 
   if (executionId === undefined) return;
 
+  const baseMessage = `La ejecucion continuara desde "${label.value}". Los pasos que vengan despues volveran a ejecutarse.`;
+  const purgedWarning =
+    'Atencion: los archivos binarios originales se liberaron de memoria tras el procesamiento previo (RNF-01). Reanudar desde este nodo reutilizara la extraccion de texto ya realizada. Si el archivo o los prompts cambiaron, esos cambios NO se aplicaran a este paso.';
+
   $q.dialog({
     title: 'Reanudar desde este paso',
-    message: `La ejecucion continuara desde "${label.value}". Los pasos que vengan despues volveran a ejecutarse.`,
+    message: reusesCachedExtraction.value ? `${baseMessage} ${purgedWarning}` : baseMessage,
     cancel: { flat: true, label: 'Cancelar', class: 'pd-btn-secondary' },
     ok: { unelevated: true, label: 'Reanudar', color: 'primary' },
     persistent: true,

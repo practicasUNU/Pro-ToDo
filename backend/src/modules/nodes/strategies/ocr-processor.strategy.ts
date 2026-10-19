@@ -202,11 +202,33 @@ export class OcrProcessorStrategy implements INodeStrategy {
       resolution.config.allowedMimeTypes,
     );
 
-    // Sin adjuntos legibles no hay nada que transcribir. Es GRAVE y no LEVE
-    // porque a este nodo solo se llega por una ruta de contingencia: si el
-    // rescate no puede hacerse, el correo se queda sin contenido y alguien tiene
-    // que mirarlo.
     if (attachments.length === 0) {
+      // SALVAGUARDA DE REANUDACION (CU-09 sobre RNF-01). Llegar aqui sin
+      // adjuntos tiene DOS causas que no se parecen en nada, y tratarlas igual
+      // era el defecto: o el correo nunca los trajo, o este mismo nodo ya los
+      // transcribio y el motor libero los binarios despues
+      // (`releaseAttachmentBinaries`). En el segundo caso la transcripcion
+      // sigue entera en el contexto, de modo que fallar por "no hay adjuntos"
+      // convertia toda reanudacion desde este paso en un callejon sin salida:
+      // el operador no puede devolver un base64 que el sistema tiro a
+      // proposito.
+      const cached = this.recoverPreviousTranscription(
+        context,
+        resolution.config,
+      );
+
+      if (cached !== null) {
+        this.logger.warn(
+          `[OcrProcessorStrategy] contentBase64 purgado previamente (RNF-01). Reutilizando la transcripcion en "${resolution.config.cacheNamespace}" para la reanudacion.`,
+        );
+
+        return { success: true, data: cached };
+      }
+
+      // Sin adjuntos legibles Y sin transcripcion previa no hay nada que
+      // hacer. Es GRAVE y no LEVE porque a este nodo solo se llega por una ruta
+      // de contingencia: si el rescate no puede hacerse, el correo se queda sin
+      // contenido y alguien tiene que mirarlo.
       return {
         success: false,
         error: {
@@ -344,6 +366,34 @@ export class OcrProcessorStrategy implements INodeStrategy {
         },
       },
     };
+  }
+
+  /**
+   * Transcripcion que este nodo dejo en una pasada anterior, si la hay.
+   *
+   * Se exige `ocr_status === 'COMPLETED'` y no la mera presencia del namespace:
+   * una pasada que fallo puede haber dejado ahi datos parciales —el motor copia
+   * el `data` de un resultado fallido en `error_context.partial_data`— y
+   * reutilizar eso como si fuera una transcripcion buena publicaria texto a
+   * medias sin que nada lo delatara.
+   *
+   * Devuelve el payload ENTERO y no solo el texto: aguas abajo se interpola
+   * `ocr_result.metadata.isMock` y `ocr_result.character_count`, y reconstruir
+   * esas claves aqui produciria una segunda version del contrato de salida.
+   * `getNamespace` ya entrega una copia profunda, asi que el contexto previo no
+   * queda expuesto a mutaciones.
+   */
+  private recoverPreviousTranscription(
+    context: StatePayloadContext,
+    config: ResolvedOcrProcessorConfig,
+  ): Record<string, unknown> | null {
+    const previous = context.getNamespace(config.cacheNamespace);
+
+    if (previous === undefined) {
+      return null;
+    }
+
+    return previous.ocr_status === OCR_STATUS_COMPLETED ? previous : null;
   }
 
   /**

@@ -150,6 +150,16 @@ export const DEFAULT_OCR_ALLOWED_MIME_TYPES: readonly string[] = [
  * Se valida con `whitelist: true, forbidNonWhitelisted: true`, asi que una clave
  * de mas se rechaza en vez de guardarse en silencio.
  */
+/**
+ * Namespace donde este nodo deja su transcripcion por convencion.
+ *
+ * Coincide con el `outputNamespace` que el asistente asigna al nodo, y existe
+ * como DEFAULT porque la estrategia no recibe el suyo: `INodeStrategy.execute`
+ * toma `(context, node.params)`, de modo que un nodo no puede leer lo que el
+ * mismo publico sin que alguien se lo diga. Ver `cacheNamespace`.
+ */
+export const DEFAULT_OCR_CACHE_NAMESPACE = 'ocr_result';
+
 export class OcrProcessorConfigDto {
   @ApiPropertyOptional({ enum: LlmProvider, default: DEFAULT_OCR_PROVIDER })
   @IsOptional()
@@ -238,6 +248,15 @@ export class OcrProcessorConfigDto {
   @IsOptional()
   @IsBoolean({ message: 'dryRun debe ser un booleano.' })
   dryRun?: boolean;
+
+  @ApiPropertyOptional({
+    description:
+      'Namespace del que se recupera una transcripcion previa al reanudar un flujo cuyos binarios ya se liberaron (RNF-01). Debe coincidir con el `outputNamespace` del propio nodo.',
+    default: DEFAULT_OCR_CACHE_NAMESPACE,
+  })
+  @IsOptional()
+  @IsString({ message: 'cacheNamespace debe ser una cadena.' })
+  cacheNamespace?: string;
 }
 
 /** Configuracion del OCR con los valores por defecto ya aplicados. */
@@ -253,6 +272,7 @@ export interface ResolvedOcrProcessorConfig {
   readonly maxTokens: number;
   readonly allowedMimeTypes: readonly string[];
   readonly dryRun: boolean;
+  readonly cacheNamespace: string;
 }
 
 /**
@@ -295,4 +315,5 @@ export const resolveOcrProcessorConfig = (
   maxTokens: dto.maxTokens ?? DEFAULT_OCR_MAX_TOKENS,
   allowedMimeTypes: dto.allowedMimeTypes ?? DEFAULT_OCR_ALLOWED_MIME_TYPES,
   dryRun: dto.dryRun ?? false,
+  cacheNamespace: dto.cacheNamespace ?? DEFAULT_OCR_CACHE_NAMESPACE,
 });

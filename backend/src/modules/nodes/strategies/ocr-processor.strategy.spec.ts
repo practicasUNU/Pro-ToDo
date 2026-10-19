@@ -47,6 +47,40 @@ const buildContext = (
   });
 
 /**
+ * El mismo adjunto DESPUES de que el motor liberase su binario (RNF-01).
+ *
+ * Se conservan los metadatos y se anula `contentBase64`, que es literalmente lo
+ * que escribe `releaseAttachmentBinaries`.
+ */
+const PURGED_ATTACHMENT = {
+  filename: 'escaneo.png',
+  contentType: 'image/png',
+  contentBase64: null,
+};
+
+/** Transcripcion que una pasada anterior dejo en `ocr_result`. */
+const PREVIOUS_TRANSCRIPTION = {
+  clean_body: 'Texto transcrito en la pasada anterior.',
+  extracted_text: 'Texto transcrito en la pasada anterior.',
+  character_count: 39,
+  ocr_status: 'COMPLETED',
+  processed_at: '2026-10-19T17:30:00.000Z',
+  metadata: { provider: LlmProvider.GEMINI, model: 'gemini', isMock: false },
+};
+
+/** Contexto de una REANUDACION: binarios liberados y cache a mano o no. */
+const buildResumedContext = (
+  cached: Record<string, unknown> | null,
+): StatePayloadContext =>
+  createMockStatePayloadContext({
+    currentStep: 'ocr_ia',
+    namespaces: {
+      raw_email: { attachments: [PURGED_ATTACHMENT] },
+      ...(cached === null ? {} : { ocr_result: cached }),
+    },
+  });
+
+/**
  * Defaults del entorno sin declarar: se cae a las constantes del DTO.
  *
  * Los cuatro metodos devuelven `null` en todos sus campos, que es el escenario
@@ -1088,6 +1122,101 @@ describe('OcrProcessorStrategy · nodo satelite PROCESADOR_OCR', () => {
       expect(anthropicCompletion).not.toHaveBeenCalled();
       expect(result.success).toBe(false);
       expect(result.data?.clean_body).toBeUndefined();
+    });
+  });
+
+  describe('8. Reanudacion con binarios purgados (CU-09 sobre RNF-01)', () => {
+    it('8.1 deberia reutilizar la transcripcion previa sin llamar al proveedor', async () => {
+      // 1. Arrange 📐: el escenario exacto de reanudar desde `ocr_ia`. El nodo
+      //    ya corrio, publico texto util y el motor tiro los binarios; el
+      //    operador no puede devolverlos.
+      const generateCompletion = jest.fn<() => Promise<LlmResponsePayload>>();
+      const strategy = buildStrategy({
+        provider: LlmProvider.GEMINI,
+        generateCompletion,
+      } as unknown as Partial<GeminiLlmProvider>);
+
+      // 2. Act ⚙️
+      const result = await strategy.execute(
+        buildResumedContext(PREVIOUS_TRANSCRIPTION),
+        { provider: LlmProvider.GEMINI },
+      );
+
+      // 3. Assert 🎯: sale adelante con lo que ya habia y NO se vuelve a pagar
+      //    una transcripcion que ya esta hecha.
+      expect(result.success).toBe(true);
+      expect(result.data).toEqual(PREVIOUS_TRANSCRIPTION);
+      expect(generateCompletion).not.toHaveBeenCalled();
+    });
+
+    it('8.2 deberia seguir fallando GRAVE si no hay transcripcion previa', async () => {
+      // 1. Arrange 📐: sin binarios Y sin cache no hay nada que hacer. La
+      //    salvaguarda no puede tragarse el fallo legitimo de un correo que
+      //    nunca trajo adjuntos legibles.
+      const generateCompletion = jest.fn<() => Promise<LlmResponsePayload>>();
+      const strategy = buildStrategy({
+        provider: LlmProvider.GEMINI,
+        generateCompletion,
+      } as unknown as Partial<GeminiLlmProvider>);
+
+      // 2. Act ⚙️
+      const result = await strategy.execute(buildResumedContext(null), {
+        provider: LlmProvider.GEMINI,
+      });
+
+      // 3. Assert 🎯
+      expect(result.success).toBe(false);
+      expect(result.error?.level).toBe('GRAVE');
+      expect(result.error?.code).toBe(ERR_OCR_NO_ATTACHMENTS);
+      expect(generateCompletion).not.toHaveBeenCalled();
+    });
+
+    it('8.3 deberia ignorar una cache que no llego a COMPLETED', async () => {
+      // 1. Arrange 📐: el motor copia el `data` de un resultado fallido en
+      //    `error_context.partial_data`, y un flujo puede dejar restos a medias
+      //    en el namespace. Reutilizarlos publicaria texto incompleto como si
+      //    fuera una transcripcion buena.
+      const generateCompletion = jest.fn<() => Promise<LlmResponsePayload>>();
+      const strategy = buildStrategy({
+        provider: LlmProvider.GEMINI,
+        generateCompletion,
+      } as unknown as Partial<GeminiLlmProvider>);
+
+      // 2. Act ⚙️
+      const result = await strategy.execute(
+        buildResumedContext({
+          ...PREVIOUS_TRANSCRIPTION,
+          ocr_status: 'FAILED',
+        }),
+        { provider: LlmProvider.GEMINI },
+      );
+
+      // 3. Assert 🎯
+      expect(result.success).toBe(false);
+      expect(result.error?.code).toBe(ERR_OCR_NO_ATTACHMENTS);
+    });
+
+    it('8.4 deberia leer la cache del `cacheNamespace` declarado', async () => {
+      // 1. Arrange 📐: el nodo no conoce su propio `outputNamespace`, asi que un
+      //    flujo que renombre la salida tiene que poder decirselo. Sin este
+      //    param, la salvaguarda solo funcionaria con el nombre convencional.
+      const strategy = buildStrategy();
+      const context = createMockStatePayloadContext({
+        currentStep: 'ocr_ia',
+        namespaces: {
+          raw_email: { attachments: [PURGED_ATTACHMENT] },
+          transcripcion: PREVIOUS_TRANSCRIPTION,
+        },
+      });
+
+      // 2. Act ⚙️
+      const result = await strategy.execute(context, {
+        cacheNamespace: 'transcripcion',
+      });
+
+      // 3. Assert 🎯
+      expect(result.success).toBe(true);
+      expect(result.data).toEqual(PREVIOUS_TRANSCRIPTION);
     });
   });
 });

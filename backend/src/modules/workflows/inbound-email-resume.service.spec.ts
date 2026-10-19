@@ -11,6 +11,7 @@ import type { UsersService } from '@modules/users/users.service';
 import type { Workflow } from '@modules/workflows/entities/workflow.entity';
 import type { ExecutionsService } from './executions.service';
 import type { SchedulerRegistry } from '@nestjs/schedule';
+import type { NodeCatalogEntry } from '@modules/nodes/entities/node-catalog.entity';
 import type { Repository } from 'typeorm';
 
 const EXECUTION_ID = '1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d';
@@ -58,6 +59,19 @@ const buildUser = (overrides: Record<string, unknown> = {}) => ({
   ...overrides,
 });
 
+/**
+ * Filas del catalogo `nodos` que esta prueba necesita.
+ *
+ * Replican los pares `codigo`/`nombre` reales: son la unica fuente de la
+ * etiqueta en espanol, porque el `pipeline_schema` no guarda ningun `name` ni
+ * `label` por nodo.
+ */
+const CATALOG_ENTRIES = [
+  { code: 'TRIGGER_IMAP', name: 'Disparador IMAP' },
+  { code: 'PAUSA_FLOW', name: 'Pausa de Flujo' },
+  { code: 'PROCESADOR_IA', name: 'Procesador de IA' },
+];
+
 const buildWorkflow = (): Workflow =>
   ({
     id: FLOW_ID,
@@ -88,6 +102,7 @@ interface Harness {
   service: InboundEmailResumeService;
   executions: { resumeExecution: jest.Mock };
   users: { findByEmail: jest.Mock };
+  nodeCatalog: { find: jest.Mock };
   client: {
     connect: jest.Mock;
     getMailboxLock: jest.Mock;
@@ -185,6 +200,11 @@ const buildHarness = (
   const repository = {
     findOne: jest.fn().mockResolvedValue(buildWorkflow()),
   };
+  // Catalogo de tipos de nodo: de el sale la etiqueta en espanol con la que un
+  // operador nombra un paso de memoria ("DESDE Disparador IMAP").
+  const nodeCatalog = {
+    find: jest.fn().mockResolvedValue(CATALOG_ENTRIES),
+  };
   const config = {
     get: jest.fn((key: string) => env[key]),
   };
@@ -202,6 +222,7 @@ const buildHarness = (
     executions as unknown as ExecutionsService,
     users as unknown as UsersService,
     repository as unknown as Repository<Workflow>,
+    nodeCatalog as unknown as Repository<NodeCatalogEntry>,
     scheduler as unknown as SchedulerRegistry,
   );
 
@@ -214,7 +235,15 @@ const buildHarness = (
     .spyOn(service['logger'], 'warn')
     .mockImplementation(() => undefined);
 
-  return { service, executions, users, client: mockClient, warnSpy, errorSpy };
+  return {
+    service,
+    executions,
+    users,
+    client: mockClient,
+    nodeCatalog,
+    warnSpy,
+    errorSpy,
+  };
 };
 
 describe('InboundEmailResumeService (ordenes de reanudacion por correo)', () => {
@@ -402,12 +431,18 @@ describe('InboundEmailResumeService (ordenes de reanudacion por correo)', () => 
       ['identificador', 'pausa_revision', 'pausa_revision'],
       ['tipo de nodo', 'PROCESADOR_IA', 'nodo_c'],
       ['namespace', 'llm_response', 'nodo_c'],
+      ['etiqueta del catalogo', 'Disparador IMAP', 'nodo_a'],
+      ['etiqueta en minusculas', 'disparador imap', 'nodo_a'],
+      ['etiqueta con tilde', 'Procesador de IÁ', 'nodo_c'],
     ])(
       '4.x deberia resolver el paso por su %s',
       async (_label, written, expected) => {
-        // 1. Arrange 📐: las tres formas con las que una persona nombra un
+        // 1. Arrange 📐: las CUATRO formas con las que una persona nombra un
         //    paso de memoria. Lo que viaja al servicio es SIEMPRE el `nodeId`,
         //    que es lo unico que el motor entiende.
+        //
+        //    La etiqueta es la que de verdad usa un operador y la unica que no
+        //    vive en el esquema: sale de la tabla `nodos`.
         const { service, executions } = buildHarness();
         simpleParser.mockResolvedValue(
           inboundMessage(`REANUDAR ${TOKEN} DESDE ${written}`),
@@ -464,6 +499,52 @@ describe('InboundEmailResumeService (ordenes de reanudacion por correo)', () => 
         { isEmailResume: true },
       );
     });
+
+    it('4.6 deberia aceptar una etiqueta con espacios en el ASUNTO', async () => {
+      // 1. Arrange 📐: REGRESION. El grupo del paso era `[a-zA-Z0-9_-]+` y la
+      //    expresion esta anclada de punta a punta, asi que una orden con un
+      //    nombre de dos palabras no casaba con NADA: el mensaje se descartaba
+      //    como "esto no es una orden" y ni siquiera se reanudaba desde el
+      //    cursor. Fallaba en silencio, que es lo peor que podia hacer.
+      const { service, executions } = buildHarness();
+      simpleParser.mockResolvedValue({
+        subject: `Re: REANUDAR ${TOKEN} DESDE Disparador IMAP`,
+        from: { value: [{ address: EDITOR_EMAIL }], text: EDITOR_EMAIL },
+      });
+
+      // 2. Act ⚙️
+      await service.processInbox();
+
+      // 3. Assert 🎯
+      expect(executions.resumeExecution).toHaveBeenCalledWith(
+        EXECUTION_ID,
+        { targetStepId: 'nodo_a' },
+        expect.anything(),
+        { isEmailResume: true },
+      );
+    });
+
+    it('4.7 deberia reanudar desde el cursor si el catalogo no responde', async () => {
+      // 1. Arrange 📐: perder la forma comoda de nombrar un paso es un
+      //    inconveniente; dejar sin reanudar un flujo detenido porque la tabla
+      //    `nodos` no contesto seria el fallo de verdad.
+      const { service, executions, nodeCatalog } = buildHarness();
+      nodeCatalog.find.mockRejectedValue(new Error('Base no disponible'));
+      simpleParser.mockResolvedValue(
+        inboundMessage(`REANUDAR ${TOKEN} DESDE Disparador IMAP`),
+      );
+
+      // 2. Act ⚙️
+      await service.processInbox();
+
+      // 3. Assert 🎯: se reanuda igual, solo que sin el paso pedido.
+      expect(executions.resumeExecution).toHaveBeenCalledWith(
+        EXECUTION_ID,
+        {},
+        expect.anything(),
+        { isEmailResume: true },
+      );
+    });
   });
 
   describe('5. Higiene del buzon', () => {
@@ -493,8 +574,12 @@ describe('InboundEmailResumeService (ordenes de reanudacion por correo)', () => 
       expect(client.messageFlagsAdd).toHaveBeenCalledTimes(1);
     });
 
-    it('5.3 deberia marcar como leido un mensaje que NO es una orden', async () => {
-      // 1. Arrange 📐: un buzon recibe correo que no son ordenes.
+    it('5.3 NO deberia marcar como leido un mensaje que no es una orden', async () => {
+      // 1. Arrange 📐: INVERSION DELIBERADA de lo que esta prueba exigia antes.
+      //    Marcar todo lo que se leia convertia este canal en un lector que
+      //    vaciaba de no-leidos un buzon que puede ser el MISMO que sondea un
+      //    `TRIGGER_IMAP`: el flujo configurado con `markAsRead: false` veia su
+      //    correo marcado por la espalda y nadie podia explicar por que.
       const { service, client, executions } = buildHarness();
       simpleParser.mockResolvedValue(inboundMessage('Re: dudas del boletin'));
 
@@ -503,7 +588,23 @@ describe('InboundEmailResumeService (ordenes de reanudacion por correo)', () => 
 
       // 3. Assert 🎯
       expect(executions.resumeExecution).not.toHaveBeenCalled();
-      expect(client.messageFlagsAdd).toHaveBeenCalledTimes(1);
+      expect(client.messageFlagsAdd).not.toHaveBeenCalled();
+    });
+
+    it('5.5 no deberia volver a descargar un mensaje ya descartado', async () => {
+      // 1. Arrange 📐: contrapartida del cambio anterior. Al no marcarlos, el
+      //    servidor los sigue devolviendo en cada busqueda de no-leidos; sin el
+      //    recuerdo en memoria, una conversacion larga coparia las plazas del
+      //    lote y las ordenes reales no se atenderian nunca.
+      const { service, client } = buildHarness();
+      simpleParser.mockResolvedValue(inboundMessage('Re: dudas del boletin'));
+
+      // 2. Act ⚙️: dos vueltas sobre el mismo buzon con el mismo uid.
+      await service.processInbox();
+      await service.processInbox();
+
+      // 3. Assert 🎯: se descargo UNA vez, no una por vuelta.
+      expect(client.download).toHaveBeenCalledTimes(1);
     });
 
     it('5.4 deberia cerrar la sesion aunque la lectura falle', async () => {
