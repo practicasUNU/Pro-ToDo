@@ -33,7 +33,7 @@ vi.mock('@services/workflows.service', () => ({ fetchWorkflow: vi.fn() }));
  * con el que el componente pide confirmacion, no el renderizado del dialogo,
  * que es responsabilidad de Quasar y ya esta probado aguas arriba.
  */
-const dialogCreate = vi.fn((_options: { message: string }) => ({
+const dialogCreate = vi.fn<(options: { message: string }) => { onOk: () => void }>(() => ({
   onOk: vi.fn(),
 }));
 const notify = vi.fn();

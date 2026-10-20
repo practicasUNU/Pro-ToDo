@@ -178,6 +178,62 @@ const buildThreeStepWorkflow = (): WorkflowDetail => ({
   pipelineSchema: buildThreeStepSchema(),
 });
 
+/**
+ * Tres pasos nominales con UN satelite colgando de cada uno de los dos
+ * primeros, para poder distinguir "por delante" de "por detras" del cursor.
+ *
+ * `sat_uno` cuelga de la columna 0 y `sat_dos` de la columna 1: al reanudar
+ * desde el paso 1 el primero queda detras y el segundo delante.
+ */
+const buildTwoSatelliteSchema = (): AssembledPipelineSchema => ({
+  flowId: FLOW_ID,
+  name: 'Pipeline con dos ramas de error',
+  version: '1.0.0',
+  entrypoint: 'paso_uno',
+  nodes: {
+    paso_uno: {
+      nodeId: 'paso_uno',
+      nodeType: NodeType.TRIGGER_IMAP,
+      outputNamespace: 'raw_email',
+      nextStep: 'paso_dos',
+      onErrorStep: 'sat_uno',
+      params: {},
+    },
+    paso_dos: {
+      nodeId: 'paso_dos',
+      nodeType: NodeType.PARSER_PRE_IA,
+      outputNamespace: 'parsed_email',
+      nextStep: 'paso_tres',
+      onErrorStep: 'sat_dos',
+      params: {},
+    },
+    paso_tres: {
+      nodeId: 'paso_tres',
+      nodeType: NodeType.PROCESADOR_IA,
+      outputNamespace: 'llm_response',
+      nextStep: null,
+      onErrorStep: null,
+      params: {},
+    },
+    sat_uno: {
+      nodeId: 'sat_uno',
+      nodeType: NodeType.DESTINO_SMTP,
+      outputNamespace: 'smtp_result',
+      nextStep: null,
+      onErrorStep: null,
+      params: {},
+    },
+    sat_dos: {
+      nodeId: 'sat_dos',
+      nodeType: NodeType.PROCESADOR_OCR,
+      outputNamespace: 'ocr_result',
+      nextStep: null,
+      onErrorStep: null,
+      params: {},
+    },
+  },
+});
+
 describe('useCanvasStore · supervision visual de un flujo', () => {
   beforeEach(() => {
     setActivePinia(createPinia());
@@ -1436,6 +1492,186 @@ describe('useCanvasStore · supervision visual de un flujo', () => {
 
       // 3. Assert 🎯
       expect(fetchActiveExecution).not.toHaveBeenCalled();
+    });
+  });
+
+  /**
+   * El satelite de contingencia tenia DOS lecturas contradictorias de su propio
+   * historico: `isResumableFrom` miraba el contexto y lo daba por ejecutado,
+   * mientras que el pintado solo recorria el camino nominal y lo dejaba en
+   * espera. El operador veia un boton de reanudar sobre una caja apagada.
+   */
+  describe('13. Historico y reseteo de los satelites de contingencia', () => {
+    it('13.1 deberia pintar COMPLETED un satelite que dejo su namespace', async () => {
+      // 1. Arrange 📐: `nodo_alerta` cuelga solo del `onErrorStep` de `nodo_a`,
+      //    asi que `buildOrderedTopology` no lo ve. Su namespace en el contexto
+      //    es la prueba de que corrio.
+      fetchActiveExecution.mockResolvedValue(
+        buildExecution({
+          state: ExecutionState.EXITOSO,
+          activeCursor: null,
+          context: {
+            raw_email: { asunto: 'Licitacion' },
+            smtp_result: { enviado: true },
+          },
+        }),
+      );
+      const store = useCanvasStore();
+
+      // 2. Act ⚙️
+      await store.loadCanvas(FLOW_ID);
+
+      // 3. Assert 🎯
+      expect(store.statusOf('nodo_alerta')).toBe('COMPLETED');
+    });
+
+    it('13.2 deberia mantener el satelite encendido tras una reanudacion', async () => {
+      // 1. Arrange 📐: el defecto reportado. El satelite se encendia con su
+      //    `node:completed` y el primer repintado completo —que es lo que hace
+      //    `handleFlowResumed`— lo devolvia a «En espera».
+      fetchActiveExecution.mockResolvedValue(
+        buildExecution({
+          state: ExecutionState.PAUSADO,
+          activeCursor: 'nodo_b',
+          context: {
+            raw_email: { asunto: 'Licitacion' },
+            smtp_result: { enviado: true },
+          },
+        }),
+      );
+      const store = useCanvasStore();
+      await store.loadCanvas(FLOW_ID);
+
+      // 2. Act ⚙️: se reanuda desde el cursor, sin volver atras.
+      store.handleFlowResumed({
+        executionId: EXECUTION_ID,
+        flowId: FLOW_ID,
+        emittedAt: '2026-10-16T08:05:00.000Z',
+        activeCursor: 'nodo_b',
+        previousCursor: 'nodo_b',
+        resumedBy: { id: 'u-1', email: 'editor@unuware.com' },
+      });
+
+      // 3. Assert 🎯: el satelite cuelga de `nodo_a` (columna 0), que ya quedo
+      //    atras; su trabajo sigue hecho.
+      expect(store.statusOf('nodo_alerta')).toBe('COMPLETED');
+    });
+
+    it('13.3 deberia apagar solo los satelites por delante del nuevo cursor', async () => {
+      // 1. Arrange 📐: dos ramas de error en columnas distintas. Al volver al
+      //    paso 1, la rama del paso 0 ya ocurrio y la del paso 1 todavia no se
+      //    ha vuelto a tomar —puede que ni se tome, si esta vez no falla.
+      fetchWorkflow.mockResolvedValue({
+        ...buildWorkflow(),
+        pipelineSchema: buildTwoSatelliteSchema(),
+      });
+      fetchActiveExecution.mockResolvedValue(
+        buildExecution({
+          state: ExecutionState.PAUSADO,
+          activeCursor: 'paso_tres',
+          context: {
+            raw_email: {},
+            parsed_email: {},
+            llm_response: {},
+            smtp_result: {},
+            ocr_result: {},
+          },
+        }),
+      );
+      const store = useCanvasStore();
+      await store.loadCanvas(FLOW_ID);
+
+      // 2. Act ⚙️
+      store.handleFlowResumed({
+        executionId: EXECUTION_ID,
+        flowId: FLOW_ID,
+        emittedAt: '2026-10-16T08:05:00.000Z',
+        activeCursor: 'paso_dos',
+        targetStepId: 'paso_dos',
+        previousCursor: 'paso_tres',
+        resumedBy: { id: 'u-1', email: 'editor@unuware.com' },
+      });
+
+      // 3. Assert 🎯
+      expect(store.statusOf('sat_uno')).toBe('COMPLETED');
+      expect(store.statusOf('sat_dos')).toBe('IDLE');
+      expect(store.statusOf('paso_tres')).toBe('IDLE');
+    });
+
+    it('13.4 NO deberia purgar nada si el corte es un satelite', async () => {
+      // 1. Arrange 📐: regresion de 8.6. Un satelite no tiene indice nominal,
+      //    asi que no define ningun "despues" con el que arrastrar a otros.
+      fetchWorkflow.mockResolvedValue({
+        ...buildWorkflow(),
+        pipelineSchema: buildTwoSatelliteSchema(),
+      });
+      fetchActiveExecution.mockResolvedValue(
+        buildExecution({
+          state: ExecutionState.PAUSADO,
+          activeCursor: 'sat_dos',
+          context: { raw_email: {}, parsed_email: {}, smtp_result: {}, ocr_result: {} },
+        }),
+      );
+      const store = useCanvasStore();
+
+      // 2. Act ⚙️
+      await store.loadCanvas(FLOW_ID);
+
+      // 3. Assert 🎯
+      expect(store.statusOf('sat_dos')).toBe('PAUSED');
+      expect(store.statusOf('paso_uno')).toBe('COMPLETED');
+      expect(store.statusOf('paso_dos')).toBe('COMPLETED');
+      expect(store.statusOf('sat_uno')).toBe('COMPLETED');
+    });
+
+    it('13.5 deberia pintar FALLIDO el nodo que emite node:error', async () => {
+      // 1. Arrange 📐: el canvas no escuchaba este evento, asi que una tarjeta
+      //    rota se quedaba girando en «Procesando» hasta el siguiente evento de
+      //    flujo.
+      fetchActiveExecution.mockResolvedValue(buildExecution());
+      const store = useCanvasStore();
+      await store.loadCanvas(FLOW_ID);
+      store.handleNodeStarted(buildStarted());
+
+      // 2. Act ⚙️
+      store.handleNodeError({
+        executionId: EXECUTION_ID,
+        flowId: FLOW_ID,
+        emittedAt: '2026-10-15T08:00:04.000Z',
+        nodeId: 'nodo_b',
+        severity: 'GRAVE',
+        errorCode: 'ERR_LLM_TIMEOUT',
+        errorMessage: 'El proveedor no respondio',
+        logFilePath: null,
+        attempt: 1,
+      });
+
+      // 3. Assert 🎯
+      expect(store.statusOf('nodo_b')).toBe('FAILED');
+    });
+
+    it('13.6 NO deberia atender un node:error de otro flujo', async () => {
+      // 1. Arrange 📐: la tabla de flujos mantiene abierta la sala de todos.
+      fetchActiveExecution.mockResolvedValue(buildExecution());
+      const store = useCanvasStore();
+      await store.loadCanvas(FLOW_ID);
+      store.handleNodeStarted(buildStarted());
+
+      // 2. Act ⚙️
+      store.handleNodeError({
+        executionId: OTHER_EXECUTION_ID,
+        flowId: OTHER_FLOW_ID,
+        emittedAt: '2026-10-15T08:00:04.000Z',
+        nodeId: 'nodo_b',
+        severity: 'URGENTE',
+        errorCode: null,
+        errorMessage: null,
+        logFilePath: null,
+        attempt: 1,
+      });
+
+      // 3. Assert 🎯
+      expect(store.statusOf('nodo_b')).toBe('RUNNING');
     });
   });
 });

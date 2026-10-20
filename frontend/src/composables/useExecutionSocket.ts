@@ -275,6 +275,14 @@ export const useExecutionSocket = (): void => {
   const onNodeError = (event: NodeErrorEvent): void => {
     executionStore.handleNodeError(event);
 
+    // El canvas lo recibe SIEMPRE, al margen del filtro de severidad de abajo.
+    // Son dos preguntas distintas: aquel decide si hay que interrumpir al
+    // operador con un aviso, y esto solo pinta la caja de rojo. Un LEVE no
+    // merece notificacion, pero mientras se reintenta la tarjeta estaba
+    // mintiendo —seguia en «Procesando»— y esa es justo la informacion que el
+    // canvas existe para dar.
+    canvasStore.handleNodeError(event);
+
     if (!ALERTING_SEVERITIES.includes(event.severity)) {
       return;
     }

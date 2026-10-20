@@ -15,6 +15,7 @@ import type {
   FlowPausedEvent,
   FlowResumedEvent,
   NodeCompletedEvent,
+  NodeErrorEvent,
   NodeStartedEvent,
 } from '@/types/execution';
 import type { CrudAction } from '@/types/crud-events';
@@ -160,6 +161,22 @@ export const useCanvasStore = defineStore('canvas', () => {
   });
 
   /**
+   * Todos los nodos del esquema: camino nominal mas satelites.
+   *
+   * Lo que el PINTADO necesita, frente a `orderedSteps`, que es lo que necesita
+   * el ORDEN. Un satelite no tiene posicion en la topologia —a el solo se llega
+   * por `onErrorStep`— pero si tiene namespace, y el namespace es lo unico que
+   * prueba que un nodo corrio.
+   *
+   * El nominal va primero para que, ante un `nodeId` repetido, mande el mismo
+   * orden que ya aplica el resto del store.
+   */
+  const allSteps = computed<AssembledPipelineNode[]>(() => [
+    ...orderedSteps.value,
+    ...contingencySteps.value,
+  ]);
+
+  /**
    * Aristas del camino nominal, una por transicion.
    *
    * Un tramo cuenta como recorrido mirando su ORIGEN: la flecha describe una
@@ -259,6 +276,36 @@ export const useCanvasStore = defineStore('canvas', () => {
     }
 
     return slots;
+  });
+
+  /**
+   * Columna del camino nominal a la que cuelga cada satelite.
+   *
+   * Es el INDICE que `resetAfterIndex` decia no tener. No vive en la topologia
+   * —`buildOrderedTopology` ignora `onErrorStep`— pero si en el lienzo: un
+   * satelite se dibuja en la columna del paso que lo declara, y esa columna lo
+   * situa en el tiempo tan bien como un indice nominal. Con ella se puede
+   * responder "¿esta esta rama por delante del cursor?", que es lo que hace
+   * falta para apagarla al reanudar hacia atras.
+   *
+   * Se deriva de `forkSlots` en vez de repetir su recorrido, que ya resuelve lo
+   * dificil: seguir `onErrorStep`, recursar hasta `MAX_FORK_DEPTH` y cortar
+   * ciclos. Solo se leen campos ESTRUCTURALES; los estados de `forkSlots` no se
+   * miran, porque este mapa es justo lo que se consulta para calcularlos.
+   *
+   * Unicamente los `placement === 'card'`: un `rejoin` ya es un nodo nominal
+   * con su propio indice, y un `duplicate` apunta a una tarjeta colocada antes.
+   */
+  const satelliteAnchors = computed<Map<string, number>>(() => {
+    const anchors = new Map<string, number>();
+
+    for (const slot of forkSlots.value) {
+      if (slot.placement === 'card') {
+        anchors.set(slot.toNodeId, slot.column);
+      }
+    }
+
+    return anchors;
   });
 
   /** Indice por columna, para que la plantilla solo haga `.get(i)`. */
@@ -518,13 +565,29 @@ export const useCanvasStore = defineStore('canvas', () => {
    * —`PAUSED` si ahi esta detenida, `RUNNING` si esta corriendo—, y
    * sobreescribirlo aqui borraria justo la marca que el operador busca.
    *
-   * Solo alcanza al camino nominal, que es el unico con orden. Un satelite de
-   * contingencia que corrio, corrio de verdad: no hay indice con el que
-   * compararlo y su namespace sigue siendo prueba legitima.
+   * ALCANZA TAMBIEN A LOS SATELITES, al contrario de lo que esta funcion hacia
+   * antes. El argumento de entonces —"no hay indice con el que compararlo"— era
+   * falso: `satelliteAnchors` da la columna nominal de la que cuelga cada rama
+   * de error, y con ella la pregunta "¿esta por delante del corte?" tiene
+   * respuesta. Sin esto, reanudar desde un paso anterior dejaba el satelite del
+   * intento previo en verde, afirmando un trabajo que el flujo va a rehacer —y
+   * que quiza no rehaga, porque la rama de error solo se toma si el nodo vuelve
+   * a fallar.
+   *
+   * El ancla se compara con `>=` y no con `>`: la rama cuelga del nodo del
+   * corte, que es justamente el que va a VOLVER a ejecutarse, de modo que su
+   * desvio todavia no se ha tomado en este intento. El propio nodo del corte si
+   * queda excluido, por lo dicho arriba.
    */
   const resetAfterIndex = (statuses: Map<string, CanvasNodeStatus>, cutoffIndex: number): void => {
     for (const step of orderedSteps.value.slice(cutoffIndex + 1)) {
       statuses.set(step.nodeId, 'IDLE');
+    }
+
+    for (const [nodeId, column] of satelliteAnchors.value) {
+      if (column >= cutoffIndex) {
+        statuses.set(nodeId, 'IDLE');
+      }
     }
   };
 
@@ -589,6 +652,13 @@ export const useCanvasStore = defineStore('canvas', () => {
    *    completado todo lo anterior al corte: una ruta `onErrorStep` puede haber
    *    SALTADO pasos intermedios, y pintarlos en verde afirmaria un trabajo que
    *    no ocurrio.
+   *    Se recorre TODO el esquema y no solo `orderedSteps`. Aquel sale de
+   *    `buildOrderedTopology`, que sigue `nextStep` y nunca `onErrorStep`, de
+   *    modo que un satelite como `ocr_ia` no aparecia en esta fase: corria, se
+   *    ponia verde por el `node:completed` en vivo y volvia a «En espera» en
+   *    cuanto algo repintaba el mapa entero —`handleFlowResumed` lo hace—.
+   *    Ademas contradecia a `isResumableFrom`, que SI mira el contexto: el
+   *    boton de reanudar aparecia sobre una tarjeta pintada como no ejecutada.
    * 2. CORTE: el nodo donde la ejecucion esta detenida, corriendo o a punto de
    *    reanudarse.
    * 3. PURGA: todo lo que queda por delante del corte vuelve a `IDLE`, pese al
@@ -606,8 +676,12 @@ export const useCanvasStore = defineStore('canvas', () => {
     const statuses = new Map<string, CanvasNodeStatus>();
 
     // --- 1. Historico.
-    for (const step of orderedSteps.value) {
-      if (context[step.outputNamespace] !== undefined) {
+    //
+    // `Object.hasOwn` y no `!== undefined`, que es lo que usa `isResumableFrom`
+    // para la misma pregunta: la clave escrita es la prueba de que el nodo
+    // corrio, aunque lo que dejara fuera `undefined`.
+    for (const step of allSteps.value) {
+      if (Object.hasOwn(context, step.outputNamespace)) {
         statuses.set(step.nodeId, 'COMPLETED');
       }
     }
@@ -732,7 +806,41 @@ export const useCanvasStore = defineStore('canvas', () => {
       return;
     }
 
+    // Por el mismo motivo que en `handleNodeStarted`, y era el unico de los
+    // manejadores del canvas que no lo hacia: un `node:completed` que se
+    // adelante a la carga REST pintaba la tarjeta verde pero dejaba
+    // `observedExecution` en `null`, y con el la cabecera y `isResumableFrom`.
+    ensureObservedExecution(event, ExecutionState.EN_PROCESO, event.nodeId);
+
     patchStatus(event.nodeId, 'COMPLETED');
+  };
+
+  /**
+   * Pinta en rojo el nodo que acaba de fallar.
+   *
+   * El canvas NO escuchaba este evento, y era el unico de los siete del canal
+   * que no llegaba hasta aqui. La consecuencia es que una tarjeta que fallaba
+   * se quedaba girando en «Procesando» —el `RUNNING` que le puso su
+   * `node:started`— hasta que apareciera un evento de FLUJO. Con un reintento
+   * de por medio eso son decenas de segundos describiendo un trabajo que ya se
+   * sabe roto.
+   *
+   * NO se toca el cursor ni el estado de la ejecucion: un error no decide por
+   * si solo como termina el flujo. Puede reintentarse, desviarse por
+   * `onErrorStep` o pausar la ejecucion, y de eso informan los eventos que
+   * vienen detras. Por eso tampoco se llama a `ensureObservedExecution`: este
+   * evento no afirma que la ejecucion siga viva.
+   *
+   * Un `LEVE` que se reintenta volvera a `RUNNING` con el siguiente
+   * `node:started`, y asi debe ser: la tarjeta cuenta lo que esta pasando
+   * ahora, no un veredicto definitivo.
+   */
+  const handleNodeError = (event: NodeErrorEvent): void => {
+    if (!belongsToCanvas(event.flowId)) {
+      return;
+    }
+
+    patchStatus(event.nodeId, 'FAILED');
   };
 
   /**
@@ -958,6 +1066,7 @@ export const useCanvasStore = defineStore('canvas', () => {
     syncCurrentExecution,
     handleNodeStarted,
     handleNodeCompleted,
+    handleNodeError,
     handleFlowPaused,
     handleFlowResumed,
     handleFlowCompleted,

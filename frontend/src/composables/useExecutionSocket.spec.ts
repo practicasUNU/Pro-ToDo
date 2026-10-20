@@ -311,6 +311,23 @@ describe('useExecutionSocket', () => {
     expect(notify).not.toHaveBeenCalled();
   });
 
+  it('deberia llevar el fallo al canvas incluso cuando no se avisa', () => {
+    // Arrange: son dos preguntas distintas. El filtro de severidad decide si
+    // hay que interrumpir al operador; pintar la caja de rojo no interrumpe a
+    // nadie y es justo lo que el canvas existe para contar. Sin esto, una
+    // tarjeta que falla se queda girando en «Procesando» mientras reintenta.
+    const canvasStore = useCanvasStore();
+    const handleNodeError = vi.spyOn(canvasStore, 'handleNodeError');
+    mountHost();
+
+    // Act
+    registered?.onNodeError?.(buildNodeError({ severity: 'LEVE' }));
+
+    // Assert
+    expect(handleNodeError).toHaveBeenCalledTimes(1);
+    expect(notify).not.toHaveBeenCalled();
+  });
+
   it('deberia retirar los listeners al desmontarse el anfitrion', () => {
     // Arrange
     const wrapper = mountHost();
