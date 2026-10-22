@@ -34,6 +34,10 @@ const EXISTING_USER: User = {
   role: UserRole.EDITOR,
   otpSecret: LEAKY_OTP_SECRET,
   isActive: true,
+  createdByUserId: null,
+  updatedByUserId: null,
+  createdAt: new Date('2026-01-01T00:00:00.000Z'),
+  updatedAt: new Date('2026-01-01T00:00:00.000Z'),
 };
 
 /** Lo que el cliente debe ver: la entidad menos `otpSecret`. */

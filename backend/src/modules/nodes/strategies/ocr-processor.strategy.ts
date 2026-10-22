@@ -19,6 +19,12 @@ import {
 } from '@modules/nodes/strategies/provider-fallback';
 import { LlmProviderFactory } from '@modules/nodes/strategies/llm-provider.factory';
 import { MockLlmProvider } from '@modules/nodes/strategies/providers/mock-llm.provider';
+import {
+  recordFailedCallUsage,
+  recordResponseUsage,
+  toUsageMetadata,
+} from '@modules/nodes/strategies/inference-telemetry';
+import { TelemetryService } from '@modules/telemetry/telemetry.service';
 import { LlmProviderCatalogService } from '@modules/nodes/services/llm-provider-catalog.service';
 import { MULTIMODAL_CONTENT_TYPE_PATTERN } from '@modules/nodes/utils/parsed-email-payload.util';
 import { stripCodeFence } from '@modules/nodes/utils/code-fence.util';
@@ -185,6 +191,8 @@ export class OcrProcessorStrategy implements INodeStrategy {
     private readonly providerFactory: LlmProviderFactory,
     private readonly aiDefaults: AiDefaultsConfig,
     private readonly providerCatalog: LlmProviderCatalogService,
+    // Registra cada inferencia facturada en `telemetria_tokens_ia`.
+    private readonly telemetryService: TelemetryService,
   ) {}
 
   public async execute(
@@ -287,6 +295,19 @@ export class OcrProcessorStrategy implements INodeStrategy {
       } catch (error) {
         lastError = error;
 
+        // Una respuesta truncada o vacia se factura igual: se registra ANTES de
+        // decidir si se prueba otro proveedor o se pausa.
+        const telemetryFailure = await recordFailedCallUsage(
+          this.telemetryService,
+          context,
+          attempt.provider,
+          error,
+        );
+
+        if (telemetryFailure !== null) {
+          return { success: false, error: telemetryFailure };
+        }
+
         const code =
           error instanceof LlmProviderException ? error.code : undefined;
         const next = attempts[index + 1];
@@ -308,6 +329,19 @@ export class OcrProcessorStrategy implements INodeStrategy {
     // intentos llegase vacia, rendirse es mejor que publicar un exito sin texto.
     if (response === undefined) {
       return this.providerFailure(lastError, config);
+    }
+
+    // El consumo se persiste ANTES de juzgar la transcripcion: una respuesta
+    // vacia tambien se facturo. Si no se puede registrar, el flujo se pausa.
+    const usage = await recordResponseUsage(
+      this.telemetryService,
+      context,
+      usedProvider,
+      response.metadata,
+    );
+
+    if ('failure' in usage) {
+      return { success: false, error: usage.failure };
     }
 
     const cleanBody = this.flattenTranscription(response);
@@ -354,8 +388,9 @@ export class OcrProcessorStrategy implements INodeStrategy {
         metadata: {
           provider: usedProvider,
           model: response.metadata.modelUsed,
-          tokensPrompt: response.metadata.tokensPrompt,
-          tokensCompletion: response.metadata.tokensCompletion,
+          // tokensPrompt, tokensCompletion, tokensReasoning, totalTokens y
+          // estimatedCostUSD: lo mismo que quedo en `telemetria_tokens_ia`.
+          ...toUsageMetadata(usage.metrics),
           isMock: response.metadata.isMock,
           // Solo cuando respondio OTRO: una transcripcion pagada en Anthropic
           // seria indistinguible de una gratuita en Gemini al auditar, que es

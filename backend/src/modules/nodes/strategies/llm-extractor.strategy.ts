@@ -25,6 +25,12 @@ import {
   isFallbackWorthy,
 } from '@modules/nodes/strategies/provider-fallback';
 import { MockLlmProvider } from '@modules/nodes/strategies/providers/mock-llm.provider';
+import {
+  recordFailedCallUsage,
+  recordResponseUsage,
+  toUsageMetadata,
+} from '@modules/nodes/strategies/inference-telemetry';
+import { TelemetryService } from '@modules/telemetry/telemetry.service';
 
 import type { StatePayloadContext } from '@core/fsm/context/state-payload.context';
 import type { PromptReference } from '@core/fsm/types/prompt-text-resolver.port';
@@ -275,6 +281,8 @@ export class LlmExtractorStrategy implements INodeStrategy {
     // Responde si un proveedor tiene cliente Y credencial. Hasta ahora este
     // nodo no lo preguntaba: llamaba al configurado y, si fallaba, se rendia.
     private readonly providerCatalog: LlmProviderCatalogService,
+    // Registra cada inferencia facturada en `telemetria_tokens_ia`.
+    private readonly telemetryService: TelemetryService,
   ) {}
 
   public async execute(
@@ -393,6 +401,19 @@ export class LlmExtractorStrategy implements INodeStrategy {
       } catch (error) {
         lastError = error;
 
+        // Una respuesta truncada o con el contrato roto se factura igual: se
+        // registra ANTES de decidir si se prueba otro proveedor o se pausa.
+        const telemetryFailure = await recordFailedCallUsage(
+          this.telemetryService,
+          context,
+          attempt.provider,
+          error,
+        );
+
+        if (telemetryFailure !== null) {
+          return { success: false, error: telemetryFailure };
+        }
+
         const code =
           error instanceof LlmProviderException ? error.code : undefined;
         const next = attempts[index + 1];
@@ -417,6 +438,19 @@ export class LlmExtractorStrategy implements INodeStrategy {
     // inferencia correcta demuestra que el proveedor responde; conservar los
     // fallos anteriores frenaria mas tarde por una racha que ya se rompio.
     this.consecutiveFailures.delete(brakeKey);
+
+    // El consumo se persiste ANTES de publicar el exito: si no se puede dejar
+    // constancia del gasto, el flujo se pausa en lugar de seguir a ciegas.
+    const usage = await recordResponseUsage(
+      this.telemetryService,
+      context,
+      usedProvider,
+      response.metadata,
+    );
+
+    if ('failure' in usage) {
+      return { success: false, error: usage.failure };
+    }
 
     const filledMarkup = this.normalizeMarkup(response.filled_markup);
 
@@ -447,6 +481,10 @@ export class LlmExtractorStrategy implements INodeStrategy {
         metadata: {
           ...response.metadata,
           provider: usedProvider,
+          model: response.metadata.modelUsed,
+          // tokensPrompt, tokensCompletion, tokensReasoning, totalTokens y
+          // estimatedCostUSD: lo mismo que quedo en `telemetria_tokens_ia`.
+          ...toUsageMetadata(usage.metrics),
           // Solo cuando respondio OTRO: sin esta marca, una redaccion pagada en
           // Anthropic seria indistinguible de una gratuita en Gemini al
           // auditar la ejecucion.

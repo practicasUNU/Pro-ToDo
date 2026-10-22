@@ -1,10 +1,16 @@
 import { Exclude } from 'class-transformer';
 import { Column, Entity, PrimaryGeneratedColumn } from 'typeorm';
 
+import { AuditableEntity } from '@common/entities/auditable.entity';
+
 import { UserRole } from '../enums/user-role.enum';
 
+/**
+ * Hereda la auditoria como el resto de tablas maestras: `creado_por` apunta a
+ * la propia tabla `usuarios` (el ADMIN que dio de alta la cuenta).
+ */
 @Entity('usuarios')
-export class User {
+export class User extends AuditableEntity {
   @PrimaryGeneratedColumn('uuid', { name: 'id_usuario' })
   id: string;
 

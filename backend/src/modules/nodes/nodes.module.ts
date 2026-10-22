@@ -6,6 +6,7 @@ import { FsmModule } from '@core/fsm/fsm.module';
 import { HttpCoreModule } from '@core/http/http-core.module';
 import { AiPromptTemplatesModule } from '@modules/ai-prompt-templates/ai-prompt-templates.module';
 import { LogsModule } from '@modules/logs/logs.module';
+import { TelemetryModule } from '@modules/telemetry/telemetry.module';
 import { TemplatesModule } from '@modules/templates/templates.module';
 import { Workflow } from '@modules/workflows/entities/workflow.entity';
 import { WorkflowsModule } from '@modules/workflows/workflows.module';
@@ -83,6 +84,9 @@ import type { OnModuleInit } from '@nestjs/common';
     // importa este modulo, asi que el grafo sigue siendo aciclico.
     HttpCoreModule,
     AiPromptTemplatesModule,
+    // Persistencia del consumo de tokens de los nodos de IA. Modulo hoja: no
+    // importa nada de dominio, asi que tampoco cierra ningun ciclo.
+    TelemetryModule,
     // El sondeo lee `flujos` para descubrir que buzones vigilar; el catalogo
     // sirve `GET /api/nodos`.
     TypeOrmModule.forFeature([Workflow, NodeCatalogEntry]),

@@ -111,6 +111,17 @@ export type LlmThinkingLevel = 'minimal' | 'low' | 'medium' | 'high';
  * es lo que acaba en el `.log` de disco y en la traza del nodo.
  */
 export class LlmProviderException extends Error {
+  /**
+   * Consumo de la llamada que fallo DESPUES de que el proveedor respondiera
+   * (contrato roto, respuesta truncada o vacia). Esa inferencia se factura igual
+   * que una buena, y sin esto la telemetria solo veria las que salen bien.
+   * `undefined` cuando el fallo fue de transporte y no hubo respuesta que medir.
+   *
+   * Mutable a proposito: lo adjunta `attachUsage` en el punto donde el cliente
+   * ya conoce el `usage`, sin que cada `throw` del parser tenga que pasarlo.
+   */
+  usage?: LlmTokenUsage;
+
   constructor(
     message: string,
     /** `ERR_HTTP_*` del cliente, o `ERR_LLM_PROVIDER_CONTRACT`. */
@@ -120,6 +131,40 @@ export class LlmProviderException extends Error {
     this.name = 'LlmProviderException';
   }
 }
+
+/**
+ * Consumo de tokens de UNA inferencia, tal y como lo informa el proveedor.
+ *
+ * `tokensReasoning` solo cuenta lo que el proveedor factura APARTE de
+ * `tokensCompletion` (los `thoughtsTokenCount` de Gemini). Anthropic incluye el
+ * thinking dentro de `output_tokens`, asi que alli vale 0 y sumarlo contaria
+ * dos veces el mismo gasto.
+ *
+ * `usageReported` es `false` cuando la respuesta no traia bloque de uso: los
+ * contadores son entonces ceros por defecto, no una medicion, y la telemetria lo
+ * marca como estimado.
+ */
+export interface LlmTokenUsage {
+  readonly modelUsed: string;
+  readonly tokensPrompt: number;
+  readonly tokensCompletion: number;
+  readonly tokensReasoning: number;
+  readonly usageReported: boolean;
+}
+
+/**
+ * Adjunta el consumo a un fallo del cliente y lo devuelve para relanzarlo.
+ *
+ * Solo toca `LlmProviderException`: cualquier otra cosa es un error imprevisto
+ * del propio parser y se relanza intacta. No pisa un `usage` ya presente.
+ */
+export const attachUsage = (error: unknown, usage: LlmTokenUsage): unknown => {
+  if (error instanceof LlmProviderException) {
+    error.usage ??= usage;
+  }
+
+  return error;
+};
 
 /** Parametros de ejecucion que el nodo traslada al cliente en cada llamada. */
 export interface LlmExecutionOptions {
@@ -332,6 +377,14 @@ export interface LlmResponsePayload {
   metadata: {
     tokensPrompt: number;
     tokensCompletion: number;
+    /**
+     * Tokens de razonamiento facturados aparte (ver `LlmTokenUsage`). OPCIONAL
+     * por el mismo motivo que `filled_markup`: los literales de prueba de otros
+     * nodos no deberian dejar de compilar por un contador que no usan.
+     */
+    tokensReasoning?: number;
+    /** `false` si el proveedor no informo de uso; ausente equivale a `true`. */
+    usageReported?: boolean;
     modelUsed: string;
     isMock: boolean;
   };

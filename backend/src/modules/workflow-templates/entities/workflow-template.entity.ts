@@ -1,9 +1,6 @@
-import {
-  Column,
-  CreateDateColumn,
-  Entity,
-  PrimaryGeneratedColumn,
-} from 'typeorm';
+import { Column, Entity, PrimaryGeneratedColumn } from 'typeorm';
+
+import { AuditableEntity } from '@common/entities/auditable.entity';
 
 import type { PipelineSchema } from '@core/fsm/types/pipeline-schema.types';
 
@@ -25,7 +22,7 @@ import type { PipelineSchema } from '@core/fsm/types/pipeline-schema.types';
  * discrepancia aqui no se corregiria sola.
  */
 @Entity('plantillas_flujo')
-export class WorkflowTemplate {
+export class WorkflowTemplate extends AuditableEntity {
   @PrimaryGeneratedColumn('uuid', { name: 'id_plantilla_flujo' })
   id: string;
 
@@ -61,7 +58,4 @@ export class WorkflowTemplate {
    */
   @Column({ name: 'configuracion_pipeline', type: 'jsonb' })
   pipelineSchema: PipelineSchema;
-
-  @CreateDateColumn({ name: 'fecha_creacion', type: 'timestamp' })
-  createdAt: Date;
 }

@@ -533,5 +533,61 @@ describe('GeminiLlmProvider', () => {
         provider.generateCompletion('Transcribe.'),
       ).rejects.toMatchObject({ code: ERR_LLM_PROVIDER_CONTRACT });
     });
+
+    it('4.6 deberia publicar los tokens de pensamiento como tokensReasoning', async () => {
+      // 1. Arrange 📐: Gemini factura `thoughtsTokenCount` APARTE de
+      //    `candidatesTokenCount`; descartarlo infravaloraba el coste real.
+      const http = httpReturning(
+        buildResponse([{ text: CONTRACT }], 'STOP', {
+          thoughtsTokenCount: 300,
+        }),
+      );
+      const provider = buildProvider(http);
+
+      // 2. Act ⚙️
+      const result = await provider.generateCompletion('Transcribe.');
+
+      // 3. Assert 🎯
+      expect(result.metadata).toMatchObject({
+        tokensPrompt: 10,
+        tokensCompletion: 20,
+        tokensReasoning: 300,
+        usageReported: true,
+      });
+    });
+
+    it('4.7 deberia adjuntar al error el consumo de una respuesta truncada', async () => {
+      // 1. Arrange 📐: el corte por tope se factura igual que una respuesta
+      //    buena, pensamiento incluido.
+      const http = httpReturning(
+        buildResponse(
+          [{ text: '{"headline":"Titular","summary":"Resu' }],
+          'MAX_TOKENS',
+          { thoughtsTokenCount: 960 },
+        ),
+      );
+      const provider = buildProvider(http);
+
+      // 2. Act ⚙️
+      const failure = await provider
+        .generateCompletion('Transcribe.', undefined, {
+          model: 'gemini-3.6-flash',
+          timeoutMs: 30_000,
+          maxRetries: 2,
+        })
+        .catch((error: unknown) => error);
+
+      // 3. Assert 🎯
+      expect(failure).toMatchObject({
+        code: ERR_LLM_PROVIDER_TRUNCATED,
+        usage: {
+          modelUsed: 'gemini-3.6-flash',
+          tokensPrompt: 10,
+          tokensCompletion: 20,
+          tokensReasoning: 960,
+          usageReported: true,
+        },
+      });
+    });
   });
 });

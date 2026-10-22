@@ -1,10 +1,6 @@
-import {
-  Column,
-  CreateDateColumn,
-  Entity,
-  PrimaryGeneratedColumn,
-  UpdateDateColumn,
-} from 'typeorm';
+import { Column, Entity, PrimaryGeneratedColumn } from 'typeorm';
+
+import { AuditableEntity } from '@common/entities/auditable.entity';
 
 /**
  * Plantilla HTML reutilizable entre flujos (PROT-11.1).
@@ -14,7 +10,7 @@ import {
  * etiqueta no obliga a editar el JSON de cada flujo que la use.
  */
 @Entity('plantillas_html')
-export class HtmlTemplate {
+export class HtmlTemplate extends AuditableEntity {
   @PrimaryGeneratedColumn('uuid', { name: 'id_plantilla' })
   id: string;
 
@@ -54,10 +50,4 @@ export class HtmlTemplate {
   // trazabilidad de las ejecuciones que ya usaron esta plantilla.
   @Column({ name: 'activo', type: 'boolean', default: true })
   active: boolean;
-
-  @CreateDateColumn({ name: 'fecha_creacion', type: 'timestamptz' })
-  createdAt: Date;
-
-  @UpdateDateColumn({ name: 'fecha_actualizacion', type: 'timestamptz' })
-  updatedAt: Date;
 }

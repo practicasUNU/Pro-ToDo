@@ -29,6 +29,8 @@ const EXISTING_ENTRY: AllowedIp = {
   id: 'c8a1f2d3-5b6e-4790-8c1d-2e3f4a5b6c7d',
   ipOrCidr: '192.168.1.0/24',
   description: 'VPN Corporativa Madrid',
+  createdByUserId: null,
+  updatedByUserId: null,
   createdAt: new Date('2026-01-01T00:00:00.000Z'),
   updatedAt: new Date('2026-01-01T00:00:00.000Z'),
 };

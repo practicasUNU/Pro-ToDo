@@ -25,6 +25,8 @@ import type { AiPromptTemplatesService } from '@modules/ai-prompt-templates/ai-p
 import type { WebScraperRunner } from '@modules/nodes/services/web-scraper.runner';
 import type { LlmProviderFactory } from '@modules/nodes/strategies/llm-provider.factory';
 import type { MockLlmProvider } from '@modules/nodes/strategies/providers/mock-llm.provider';
+import type { LlmProviderCatalogService } from '@modules/nodes/services/llm-provider-catalog.service';
+import type { TelemetryService } from '@modules/telemetry/telemetry.service';
 import type { TemplatesService } from '@modules/templates/templates.service';
 
 /**
@@ -81,6 +83,8 @@ const buildHarness = (): {
     {} as MockLlmProvider,
     {} as LlmProviderFactory,
     {} as AiDefaultsConfig,
+    {} as LlmProviderCatalogService,
+    {} as TelemetryService,
   );
   // El transporte va vacio: inscribir la estrategia no abre ninguna conexion
   // SMTP, y el pool de nodemailer es perezoso hasta el primer envio.
@@ -93,6 +97,8 @@ const buildHarness = (): {
     {} as MockLlmProvider,
     {} as LlmProviderFactory,
     {} as AiDefaultsConfig,
+    {} as LlmProviderCatalogService,
+    {} as TelemetryService,
   );
 
   // Los dos colaboradores van vacios: inscribir la estrategia no emite ninguna

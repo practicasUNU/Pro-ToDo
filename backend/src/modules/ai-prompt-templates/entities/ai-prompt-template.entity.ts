@@ -1,13 +1,12 @@
 import {
   Column,
-  CreateDateColumn,
   Entity,
   JoinColumn,
   ManyToOne,
   PrimaryGeneratedColumn,
-  UpdateDateColumn,
 } from 'typeorm';
 
+import { AuditableEntity } from '@common/entities/auditable.entity';
 import { User } from '@modules/users/entities/user.entity';
 
 /**
@@ -35,7 +34,7 @@ import { User } from '@modules/users/entities/user.entity';
  * sola, se convertiria en una mentira en el codigo.
  */
 @Entity('plantillas_prompts_ia')
-export class AiPromptTemplate {
+export class AiPromptTemplate extends AuditableEntity {
   @PrimaryGeneratedColumn('uuid', { name: 'id_plantilla_prompt_ia' })
   id: string;
 
@@ -100,14 +99,11 @@ export class AiPromptTemplate {
    * `RESTRICT` y no `CASCADE`: los prompts son patrimonio del equipo, y dar de
    * baja a una persona no puede llevarse por delante las instrucciones que dejo
    * en produccion.
+   *
+   * Se llama `creatorUser` y no `createdBy` porque ese nombre lo ocupa la
+   * relacion de `AuditableEntity` sobre `creado_por` (migracion 045).
    */
   @ManyToOne(() => User, { onDelete: 'RESTRICT' })
   @JoinColumn({ name: 'id_usuario_creador' })
-  createdBy: User;
-
-  @CreateDateColumn({ name: 'fecha_creacion', type: 'timestamptz' })
-  createdAt: Date;
-
-  @UpdateDateColumn({ name: 'fecha_actualizacion', type: 'timestamptz' })
-  updatedAt: Date;
+  creatorUser: User;
 }

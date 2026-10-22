@@ -27,10 +27,11 @@ import type { CrudAction } from '@common/types/crud-events.types';
  * Repositorio de prompts de IA (PROT-15.2).
  *
  * Logica de negocio del CRUD y unica capa que decide que sale hacia la API. Los
- * metodos publicos devuelven DTOs y no la entidad: `AiPromptTemplate` tiene una relacion
- * `createdBy` hacia `User`, y `User` lleva `secreto_otp` dentro. Basta con que
- * alguien anada un `relations: ['createdBy']` a una consulta para que ese campo
- * viaje al cliente. `findByName` y `findOneEntity` si devuelven la entidad,
+ * metodos publicos devuelven DTOs y no la entidad: `AiPromptTemplate` tiene
+ * relaciones `creatorUser`, `createdBy` y `updatedBy` hacia `User`, y `User`
+ * lleva `secreto_otp` dentro. Basta con que alguien anada un
+ * `relations: ['creatorUser']` a una consulta para que ese campo viaje al
+ * cliente. `findByName` y `findOneEntity` si devuelven la entidad,
  * porque sus consumidores son internos: la estrategia del nodo `PROCESADOR_IA`
  * que se conecta en PROT-15.3.
  */

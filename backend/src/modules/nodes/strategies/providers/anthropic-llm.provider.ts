@@ -8,6 +8,7 @@ import {
   ERR_LLM_PROVIDER_TRUNCATED,
   LlmProvider,
   LlmProviderException,
+  attachUsage,
   buildResponseContractInstruction,
   buildResponseJsonSchema,
 } from '@modules/nodes/strategies/interfaces/llm-provider.interface';
@@ -18,6 +19,7 @@ import type {
   LlmExecutionOptions,
   LlmInlineAttachment,
   LlmResponsePayload,
+  LlmTokenUsage,
 } from '@modules/nodes/strategies/interfaces/llm-provider.interface';
 
 /** Variable de entorno que porta la credencial. Ver `backend/.env.example`. */
@@ -237,11 +239,37 @@ export class AnthropicLlmProvider implements ILlmProviderClient {
     // El tope viaja al parser para poder NOMBRARLO en el mensaje de un corte:
     // sin el, el error diria que falto presupuesto sin decir cuanto habia.
     // Mismo patron que `GeminiLlmProvider.toPayload`.
-    return this.toPayload(
-      outcome.data,
-      model,
-      config?.maxTokens ?? ANTHROPIC_MAX_TOKENS,
-    );
+    const usage = this.toUsage(outcome.data, model);
+
+    try {
+      return this.toPayload(
+        outcome.data,
+        usage,
+        config?.maxTokens ?? ANTHROPIC_MAX_TOKENS,
+      );
+    } catch (error) {
+      // La respuesta llego y se facturo aunque no se pueda usar: el consumo
+      // viaja con el error para que la estrategia lo registre antes de pausar.
+      throw attachUsage(error, usage);
+    }
+  }
+
+  /**
+   * Consumo de la respuesta. El thinking de Anthropic ya va dentro de
+   * `output_tokens` (y se factura a tarifa de salida), por eso
+   * `tokensReasoning` es 0: sumarlo aparte lo contaria dos veces.
+   */
+  private toUsage(
+    response: AnthropicApiResponse,
+    model: string,
+  ): LlmTokenUsage {
+    return {
+      modelUsed: model,
+      tokensPrompt: response.usage?.input_tokens ?? 0,
+      tokensCompletion: response.usage?.output_tokens ?? 0,
+      tokensReasoning: 0,
+      usageReported: response.usage !== undefined,
+    };
   }
 
   /**
@@ -292,7 +320,7 @@ export class AnthropicLlmProvider implements ILlmProviderClient {
   /** Extrae el contrato formal de la respuesta cruda de la API. */
   private toPayload(
     response: AnthropicApiResponse,
-    model: string,
+    usage: LlmTokenUsage,
     maxTokens: number,
   ): LlmResponsePayload {
     // Se busca el primer bloque de texto en vez de tomar `content[0]`: la
@@ -344,12 +372,7 @@ export class AnthropicLlmProvider implements ILlmProviderClient {
       // payload no la menciona en vez de llevarla a `undefined` explicito. Asi
       // el contrato de tres claves sigue siendo literalmente el de tres claves.
       ...(filledMarkup === undefined ? {} : { filled_markup: filledMarkup }),
-      metadata: {
-        tokensPrompt: response.usage?.input_tokens ?? 0,
-        tokensCompletion: response.usage?.output_tokens ?? 0,
-        modelUsed: model,
-        isMock: false,
-      },
+      metadata: { ...usage, isMock: false },
     };
   }
 

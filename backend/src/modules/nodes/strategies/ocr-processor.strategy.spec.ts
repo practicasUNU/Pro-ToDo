@@ -23,6 +23,8 @@ import {
 } from '@modules/nodes/strategies/ocr-processor.strategy';
 
 import { createMockStatePayloadContext } from '../../../../test/factories/state-payload-context.factory';
+import { createMockTelemetryService } from '@test/factories/telemetry-service.factory';
+import { ERR_TELEMETRY_PERSIST_FAILED } from '@modules/telemetry/telemetry.service';
 
 import type { AiDefaultsConfig } from '@core/config/ai-defaults.config';
 import type { AnthropicLlmProvider } from '@modules/nodes/strategies/providers/anthropic-llm.provider';
@@ -30,6 +32,8 @@ import type { GeminiLlmProvider } from '@modules/nodes/strategies/providers/gemi
 import type { LlmProviderCatalogService } from '@modules/nodes/services/llm-provider-catalog.service';
 import type { LlmResponsePayload } from '@modules/nodes/strategies/interfaces/llm-provider.interface';
 import type { StatePayloadContext } from '@core/fsm/context/state-payload.context';
+import type { TelemetryService } from '@modules/telemetry/telemetry.service';
+import type { TelemetryServiceMock } from '@test/factories/telemetry-service.factory';
 
 /** Adjunto legible por un modelo con vision. */
 const SCAN_ATTACHMENT = {
@@ -169,6 +173,7 @@ const buildStrategy = (
   aiDefaults: AiDefaultsConfig = buildAiDefaults(),
   anthropic: Partial<AnthropicLlmProvider> = {},
   providerCatalog: LlmProviderCatalogService = buildProviderCatalog(),
+  telemetry: TelemetryServiceMock = createMockTelemetryService(),
 ): OcrProcessorStrategy => {
   const mockProvider = new MockLlmProvider();
   const strategy = new OcrProcessorStrategy(
@@ -176,6 +181,7 @@ const buildStrategy = (
     buildProviderFactory(mockProvider, gemini, anthropic),
     aiDefaults,
     providerCatalog,
+    telemetry as unknown as TelemetryService,
   );
 
   jest.spyOn(strategy['logger'], 'log').mockImplementation(() => undefined);
@@ -1217,6 +1223,154 @@ describe('OcrProcessorStrategy · nodo satelite PROCESADOR_OCR', () => {
       // 3. Assert 🎯
       expect(result.success).toBe(true);
       expect(result.data).toEqual(PREVIOUS_TRANSCRIPTION);
+    });
+  });
+
+  describe('10. Telemetria de tokens', () => {
+    /** Respuesta real de Gemini con razonamiento facturado aparte. */
+    const buildGeminiReply = (
+      body: readonly string[] = ['Texto transcrito del escaneo.'],
+      summary = 'Texto',
+    ): jest.Mock<() => Promise<LlmResponsePayload>> =>
+      jest.fn<() => Promise<LlmResponsePayload>>(() =>
+        Promise.resolve({
+          headline: 'Transcripcion',
+          summary,
+          body_paragraphs: [...body],
+          metadata: {
+            tokensPrompt: 2_000,
+            tokensCompletion: 300,
+            tokensReasoning: 100,
+            usageReported: true,
+            modelUsed: 'gemini-3.6-flash',
+            isMock: false,
+          },
+        }),
+      );
+
+    const buildGeminiStrategy = (
+      generateCompletion: jest.Mock<() => Promise<LlmResponsePayload>>,
+      telemetry: TelemetryServiceMock,
+    ): OcrProcessorStrategy =>
+      buildStrategy(
+        {
+          provider: LlmProvider.GEMINI,
+          generateCompletion,
+        } as unknown as GeminiLlmProvider,
+        buildAiDefaults(),
+        {},
+        buildProviderCatalog(),
+        telemetry,
+      );
+
+    it('10.1 deberia publicar en ocr_result.metadata los tokens y el coste estimado', async () => {
+      // 1. Arrange 📐
+      const telemetry = createMockTelemetryService();
+      const strategy = buildGeminiStrategy(buildGeminiReply(), telemetry);
+
+      // 2. Act ⚙️
+      const result = await strategy.execute(buildContext(), {
+        provider: LlmProvider.GEMINI,
+      });
+
+      // 3. Assert 🎯: 2000 x 2 + 300 x 10 + 100 x 10 USD/MTok = 0.008 USD.
+      expect(result.success).toBe(true);
+      expect(result.data?.metadata).toMatchObject({
+        provider: LlmProvider.GEMINI,
+        model: 'gemini-3.6-flash',
+        tokensPrompt: 2_000,
+        tokensCompletion: 300,
+        tokensReasoning: 100,
+        totalTokens: 2_400,
+        estimatedCostUSD: 0.008,
+      });
+    });
+
+    it('10.2 deberia registrar el consumo con la ejecucion y el nodo del contexto', async () => {
+      // 1. Arrange 📐
+      const telemetry = createMockTelemetryService();
+      const strategy = buildGeminiStrategy(buildGeminiReply(), telemetry);
+      const context = buildContext();
+
+      // 2. Act ⚙️
+      await strategy.execute(context, { provider: LlmProvider.GEMINI });
+
+      // 3. Assert 🎯
+      expect(telemetry.recordTokenUsage).toHaveBeenCalledWith({
+        executionId: context.getExecutionId(),
+        nodeId: 'ocr_ia',
+        aiProvider: LlmProvider.GEMINI,
+        aiModel: 'gemini-3.6-flash',
+        promptTokens: 2_000,
+        completionTokens: 300,
+        reasoningTokens: 100,
+        usageReported: true,
+      });
+    });
+
+    it('10.3 deberia pausar con GRAVE si no se puede registrar el consumo', async () => {
+      // 1. Arrange 📐
+      const telemetry = createMockTelemetryService();
+      telemetry.recordTokenUsage.mockRejectedValue(
+        new Error('conexion perdida'),
+      );
+      const strategy = buildGeminiStrategy(buildGeminiReply(), telemetry);
+
+      // 2. Act ⚙️
+      const result = await strategy.execute(buildContext(), {
+        provider: LlmProvider.GEMINI,
+      });
+
+      // 3. Assert 🎯
+      expect(result.success).toBe(false);
+      expect(result.error?.level).toBe('GRAVE');
+      expect(result.error?.code).toBe(ERR_TELEMETRY_PERSIST_FAILED);
+    });
+
+    it('10.4 deberia registrar el consumo de una transcripcion vacia antes de fallar', async () => {
+      // 1. Arrange 📐: el modelo respondio sin texto, pero la llamada se
+      //    facturo igual.
+      const telemetry = createMockTelemetryService();
+      const strategy = buildGeminiStrategy(
+        buildGeminiReply([''], ''),
+        telemetry,
+      );
+
+      // 2. Act ⚙️
+      const result = await strategy.execute(buildContext(), {
+        provider: LlmProvider.GEMINI,
+      });
+
+      // 3. Assert 🎯: primero el registro, despues el GRAVE de siempre.
+      expect(telemetry.recordTokenUsage).toHaveBeenCalledTimes(1);
+      expect(result.success).toBe(false);
+      expect(result.error?.code).toBe(ERR_OCR_EMPTY_TRANSCRIPTION);
+    });
+
+    it('10.5 no deberia registrar las transcripciones del simulador', async () => {
+      // 1. Arrange 📐
+      const telemetry = createMockTelemetryService();
+      const strategy = buildStrategy(
+        {},
+        buildAiDefaults(),
+        {},
+        buildProviderCatalog(),
+        telemetry,
+      );
+
+      // 2. Act ⚙️
+      const result = await strategy.execute(buildContext(), {
+        provider: LlmProvider.MOCK,
+      });
+
+      // 3. Assert 🎯
+      expect(result.success).toBe(true);
+      expect(telemetry.recordTokenUsage).not.toHaveBeenCalled();
+      expect(result.data?.metadata).toMatchObject({
+        tokensReasoning: 0,
+        totalTokens: 0,
+        estimatedCostUSD: 0,
+      });
     });
   });
 });

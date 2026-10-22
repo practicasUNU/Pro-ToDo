@@ -58,7 +58,10 @@ const buildTemplate = (
   description: 'Ingesta por correo y publicacion en el CMS',
   active: true,
   pipelineSchema: buildSchema(),
+  createdByUserId: null,
+  updatedByUserId: null,
   createdAt: new Date('2026-01-01T00:00:00.000Z'),
+  updatedAt: new Date('2026-01-01T00:00:00.000Z'),
   ...overrides,
 });
 

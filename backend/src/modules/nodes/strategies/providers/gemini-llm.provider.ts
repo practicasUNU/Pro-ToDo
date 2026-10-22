@@ -7,6 +7,7 @@ import {
   ERR_LLM_PROVIDER_TRUNCATED,
   LlmProvider,
   LlmProviderException,
+  attachUsage,
   buildResponseContractInstruction,
 } from '@modules/nodes/strategies/interfaces/llm-provider.interface';
 import { stripCodeFence } from '@modules/nodes/utils/code-fence.util';
@@ -18,6 +19,7 @@ import type {
   LlmInlineAttachment,
   LlmResponsePayload,
   LlmThinkingLevel,
+  LlmTokenUsage,
 } from '@modules/nodes/strategies/interfaces/llm-provider.interface';
 
 /** Variable de entorno que porta la credencial. Ver `backend/.env.example`. */
@@ -257,7 +259,31 @@ export class GeminiLlmProvider implements ILlmProviderClient {
       );
     }
 
-    return this.toPayload(outcome.data, model, config?.maxTokens);
+    const usage = this.toUsage(outcome.data, model);
+
+    try {
+      return this.toPayload(outcome.data, usage, config?.maxTokens);
+    } catch (error) {
+      // La respuesta llego y se facturo aunque no se pueda usar (truncada,
+      // vacia o con el contrato roto): el consumo viaja con el error para que
+      // la estrategia lo registre antes de pausar.
+      throw attachUsage(error, usage);
+    }
+  }
+
+  /**
+   * Consumo de la respuesta. `thoughtsTokenCount` NO esta incluido en
+   * `candidatesTokenCount` y Gemini lo factura aparte, a tarifa de salida: es
+   * el unico proveedor con `tokensReasoning` distinto de 0.
+   */
+  private toUsage(response: GeminiApiResponse, model: string): LlmTokenUsage {
+    return {
+      modelUsed: model,
+      tokensPrompt: response.usageMetadata?.promptTokenCount ?? 0,
+      tokensCompletion: response.usageMetadata?.candidatesTokenCount ?? 0,
+      tokensReasoning: response.usageMetadata?.thoughtsTokenCount ?? 0,
+      usageReported: response.usageMetadata !== undefined,
+    };
   }
 
   /**
@@ -330,7 +356,7 @@ export class GeminiLlmProvider implements ILlmProviderClient {
   /** Extrae el contrato formal de la respuesta cruda de la API. */
   private toPayload(
     response: GeminiApiResponse,
-    model: string,
+    usage: LlmTokenUsage,
     maxTokens?: number,
   ): LlmResponsePayload {
     const candidate = response.candidates?.[0];
@@ -387,12 +413,7 @@ export class GeminiLlmProvider implements ILlmProviderClient {
       // Condicional, igual que en Anthropic: sin la clave, el payload sigue
       // describiendo literalmente el contrato de tres claves.
       ...(filledMarkup === undefined ? {} : { filled_markup: filledMarkup }),
-      metadata: {
-        tokensPrompt: response.usageMetadata?.promptTokenCount ?? 0,
-        tokensCompletion: response.usageMetadata?.candidatesTokenCount ?? 0,
-        modelUsed: model,
-        isMock: false,
-      },
+      metadata: { ...usage, isMock: false },
     };
   }
 

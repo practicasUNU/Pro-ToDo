@@ -19,6 +19,10 @@ const ACTIVE_USER: User = {
   role: UserRole.ADMIN,
   otpSecret: OTP_SECRET,
   isActive: true,
+  createdByUserId: null,
+  updatedByUserId: null,
+  createdAt: new Date('2026-01-01T00:00:00.000Z'),
+  updatedAt: new Date('2026-01-01T00:00:00.000Z'),
 };
 
 /** Cuenta creada desde el CRUD que aun no ha solicitado ningun codigo. */

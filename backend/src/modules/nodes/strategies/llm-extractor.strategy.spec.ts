@@ -13,6 +13,11 @@ import {
   LlmExtractorStrategy,
   MATERIAL_IN_INSTRUCTIONS_NOTICE,
 } from '@modules/nodes/strategies/llm-extractor.strategy';
+import {
+  ERR_LLM_PROVIDER_TRUNCATED,
+  LlmProviderException,
+} from '@modules/nodes/strategies/interfaces/llm-provider.interface';
+import { ERR_TELEMETRY_PERSIST_FAILED } from '@modules/telemetry/telemetry.service';
 import { LlmProviderFactory } from '@modules/nodes/strategies/llm-provider.factory';
 import { LlmProviderCatalogService } from '@modules/nodes/services/llm-provider-catalog.service';
 import { MockLlmProvider } from '@modules/nodes/strategies/providers/mock-llm.provider';
@@ -22,6 +27,7 @@ import {
   ERR_HTTP_UPSTREAM_UNAVAILABLE,
 } from '@core/http/http-client.service';
 import { createMockStatePayloadContext } from '@test/factories/state-payload-context.factory';
+import { createMockTelemetryService } from '@test/factories/telemetry-service.factory';
 
 import type { StatePayloadContext } from '@core/fsm/context/state-payload.context';
 import type { AiPromptTemplate } from '@modules/ai-prompt-templates/entities/ai-prompt-template.entity';
@@ -33,6 +39,8 @@ import type {
 } from '@modules/nodes/strategies/interfaces/llm-provider.interface';
 import type { AnthropicLlmProvider } from '@modules/nodes/strategies/providers/anthropic-llm.provider';
 import type { GeminiLlmProvider } from '@modules/nodes/strategies/providers/gemini-llm.provider';
+import type { TelemetryService } from '@modules/telemetry/telemetry.service';
+import type { TelemetryServiceMock } from '@test/factories/telemetry-service.factory';
 
 const EXECUTION_ID = 'exec-11111111-1111-4111-8111-111111111111';
 const OTHER_EXECUTION_ID = 'exec-22222222-2222-4222-8222-222222222222';
@@ -162,6 +170,7 @@ const buildStrategy = (
   aiDefaults: AiDefaultsMock = buildAiDefaults(),
   anthropic: Partial<ILlmProviderClient> = {},
   providerCatalog: LlmProviderCatalogService = buildProviderCatalog(),
+  telemetry: TelemetryServiceMock = createMockTelemetryService(),
 ): LlmExtractorStrategy => {
   // Factoria REAL con los clientes doblados: su unica logica es un mapeo, y
   // doblarla devolveria lo que se le dijese, con lo que la prueba dejaria de
@@ -180,6 +189,7 @@ const buildStrategy = (
     factory,
     aiDefaults as unknown as AiDefaultsConfig,
     providerCatalog,
+    telemetry as unknown as TelemetryService,
   );
 };
 
@@ -1974,6 +1984,164 @@ describe('LlmExtractorStrategy', () => {
       expect(Object.keys(result.data ?? {}).sort()).toEqual(
         strategy.outputFields.map((field) => field.name).sort(),
       );
+    });
+  });
+
+  describe('14. Telemetria de tokens', () => {
+    /** Respuesta real de Anthropic con contadores conocidos. */
+    const buildAnthropicReply = (): jest.Mock =>
+      jest.fn().mockResolvedValue({
+        headline: 'Titular real',
+        summary: 'Entradilla real',
+        body_paragraphs: ['Parrafo'],
+        metadata: {
+          tokensPrompt: 1_000,
+          tokensCompletion: 500,
+          tokensReasoning: 0,
+          usageReported: true,
+          modelUsed: 'claude-sonnet-5-5',
+          isMock: false,
+        },
+      });
+
+    const runAnthropic = async (
+      generateCompletion: jest.Mock,
+      telemetry: TelemetryServiceMock,
+    ) => {
+      const strategy = buildStrategy(
+        buildPromptService(),
+        {},
+        new MockLlmProvider(),
+        buildAiDefaults(),
+        { provider: LlmProvider.ANTHROPIC, generateCompletion },
+        buildProviderCatalog(),
+        telemetry,
+      );
+
+      return strategy.execute(
+        buildContext({ parsed_email: { clean_body: CLEAN_BODY } }),
+        {
+          inlinePrompt: 'Redacta la noticia.',
+          provider: LlmProvider.ANTHROPIC,
+        },
+      );
+    };
+
+    it('14.1 deberia publicar en llm_response.metadata los tokens y el coste estimado', async () => {
+      // 1. Arrange 📐
+      const telemetry = createMockTelemetryService();
+
+      // 2. Act ⚙️
+      const result = await runAnthropic(buildAnthropicReply(), telemetry);
+
+      // 3. Assert 🎯: 1000 x 2 + 500 x 10 USD/MTok = 0.007 USD.
+      expect(result.success).toBe(true);
+      expect(result.data?.metadata).toMatchObject({
+        provider: LlmProvider.ANTHROPIC,
+        model: 'claude-sonnet-5-5',
+        tokensPrompt: 1_000,
+        tokensCompletion: 500,
+        tokensReasoning: 0,
+        totalTokens: 1_500,
+        estimatedCostUSD: 0.007,
+      });
+    });
+
+    it('14.2 deberia registrar el consumo con la ejecucion y el nodo del contexto', async () => {
+      // 1. Arrange 📐
+      const telemetry = createMockTelemetryService();
+
+      // 2. Act ⚙️
+      await runAnthropic(buildAnthropicReply(), telemetry);
+
+      // 3. Assert 🎯: el nodo es el cursor y el proveedor el que RESPONDIO.
+      expect(telemetry.recordTokenUsage).toHaveBeenCalledTimes(1);
+      expect(telemetry.recordTokenUsage).toHaveBeenCalledWith({
+        executionId: EXECUTION_ID,
+        nodeId: NODE_ID,
+        aiProvider: LlmProvider.ANTHROPIC,
+        aiModel: 'claude-sonnet-5-5',
+        promptTokens: 1_000,
+        completionTokens: 500,
+        reasoningTokens: 0,
+        usageReported: true,
+      });
+    });
+
+    it('14.3 deberia pausar con GRAVE si no se puede registrar el consumo', async () => {
+      // 1. Arrange 📐: la BD no responde al INSERT de telemetria.
+      const telemetry = createMockTelemetryService();
+      telemetry.recordTokenUsage.mockRejectedValue(
+        new Error('conexion perdida'),
+      );
+
+      // 2. Act ⚙️
+      const result = await runAnthropic(buildAnthropicReply(), telemetry);
+
+      // 3. Assert 🎯: sin trazabilidad del gasto el flujo no continua, y el
+      //    motor no debe reintentar solo (volveria a cobrar la inferencia).
+      expect(result.success).toBe(false);
+      expect(result.error?.level).toBe('GRAVE');
+      expect(result.error?.code).toBe(ERR_TELEMETRY_PERSIST_FAILED);
+      expect(result.error?.metadata).toMatchObject({ exhausted: true });
+    });
+
+    it('14.4 no deberia registrar las inferencias del simulador', async () => {
+      // 1. Arrange 📐
+      const telemetry = createMockTelemetryService();
+      const strategy = buildStrategy(
+        buildPromptService(),
+        {},
+        new MockLlmProvider(),
+        buildAiDefaults(),
+        {},
+        buildProviderCatalog(),
+        telemetry,
+      );
+
+      // 2. Act ⚙️
+      const result = await strategy.execute(
+        buildContext({ parsed_email: { clean_body: CLEAN_BODY } }),
+        { inlinePrompt: 'Redacta.', provider: LlmProvider.MOCK },
+      );
+
+      // 3. Assert 🎯: coste cero, pero la forma de `metadata` es la misma.
+      expect(result.success).toBe(true);
+      expect(telemetry.recordTokenUsage).not.toHaveBeenCalled();
+      expect(result.data?.metadata).toMatchObject({
+        totalTokens: 0,
+        estimatedCostUSD: 0,
+      });
+    });
+
+    it('14.5 deberia registrar el consumo de una respuesta truncada antes de pausar', async () => {
+      // 1. Arrange 📐: el proveedor respondio (y facturo) pero la salida no
+      //    sirve. El consumo viaja en el error.
+      const telemetry = createMockTelemetryService();
+      const truncated = new LlmProviderException(
+        'corte por tope',
+        ERR_LLM_PROVIDER_TRUNCATED,
+      );
+      truncated.usage = {
+        modelUsed: 'claude-sonnet-5-5',
+        tokensPrompt: 800,
+        tokensCompletion: 4_096,
+        tokensReasoning: 0,
+        usageReported: true,
+      };
+
+      // 2. Act ⚙️
+      const result = await runAnthropic(
+        jest.fn().mockRejectedValue(truncated),
+        telemetry,
+      );
+
+      // 3. Assert 🎯: primero el registro, despues el GRAVE de siempre.
+      expect(telemetry.recordTokenUsage).toHaveBeenCalledWith(
+        expect.objectContaining({ promptTokens: 800, completionTokens: 4_096 }),
+      );
+      expect(result.success).toBe(false);
+      expect(result.error?.code).toBe(ERR_LLM_MAX_RETRIES_EXCEEDED);
     });
   });
 });

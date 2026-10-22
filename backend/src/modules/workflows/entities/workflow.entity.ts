@@ -1,12 +1,12 @@
 import {
   Column,
-  CreateDateColumn,
   Entity,
   JoinColumn,
   ManyToOne,
   PrimaryGeneratedColumn,
 } from 'typeorm';
 
+import { AuditableEntity } from '@common/entities/auditable.entity';
 import { WorkflowStatus } from '@modules/workflows/enums/workflow-status.enum';
 import { WorkflowTemplate } from '@modules/workflow-templates/entities/workflow-template.entity';
 
@@ -36,7 +36,7 @@ import type { PipelineSchema } from '@core/fsm/types/pipeline-schema.types';
  * aqui no se corregiria sola — se convertiria en una mentira en el codigo.
  */
 @Entity('flujos')
-export class Workflow {
+export class Workflow extends AuditableEntity {
   @PrimaryGeneratedColumn('uuid', { name: 'id_flujo' })
   id: string;
 
@@ -104,7 +104,4 @@ export class Workflow {
 
   @Column({ name: 'id_usuario_creador', type: 'uuid' })
   createdById: string;
-
-  @CreateDateColumn({ name: 'fecha_creacion', type: 'timestamp' })
-  createdAt: Date;
 }

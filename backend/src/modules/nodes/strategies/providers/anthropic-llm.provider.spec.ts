@@ -433,9 +433,45 @@ describe('AnthropicLlmProvider · cliente de Claude sobre la Messages API', () =
         metadata: {
           tokensPrompt: 10,
           tokensCompletion: 20,
+          // El thinking de Claude va dentro de `output_tokens`: no hay un
+          // contador aparte que sumar.
+          tokensReasoning: 0,
+          usageReported: true,
           modelUsed: DEFAULT_ANTHROPIC_MODEL,
           isMock: false,
         },
+      });
+    });
+
+    it('3.1bis deberia marcar el uso como no informado cuando falta el bloque usage', async () => {
+      // 1. Arrange 📐: sin `usage` los contadores son ceros por defecto, no una
+      //    medicion; la telemetria necesita saberlo para marcar el coste como
+      //    estimado.
+      const http = buildHttp();
+      http.request.mockResolvedValue({
+        data: {
+          content: [
+            {
+              type: 'text',
+              text: JSON.stringify({
+                headline: 'Titular',
+                summary: 'Resumen',
+                body_paragraphs: ['Parrafo'],
+              }),
+            },
+          ],
+          stop_reason: 'end_turn',
+        },
+      });
+
+      // 2. Act ⚙️
+      const payload = await buildProvider(http).generateCompletion(PROMPT);
+
+      // 3. Assert 🎯
+      expect(payload.metadata).toMatchObject({
+        tokensPrompt: 0,
+        tokensCompletion: 0,
+        usageReported: false,
       });
     });
 
@@ -566,6 +602,33 @@ describe('AnthropicLlmProvider · cliente de Claude sobre la Messages API', () =
       expect((failure as AnthropicProviderException).message).toMatch(
         /max_tokens: 8192/,
       );
+    });
+
+    it('4.2bis.1 deberia adjuntar al error el consumo de la respuesta truncada', async () => {
+      // 1. Arrange 📐: una respuesta cortada se factura igual que una buena;
+      //    sin el `usage` en el error, la telemetria solo veria los exitos.
+      const http = buildHttp();
+      http.request.mockResolvedValue({
+        data: {
+          content: [{ type: 'text', text: '{"headline":"Comision de Bi' }],
+          usage: { input_tokens: 1_200, output_tokens: 8_192 },
+          stop_reason: 'max_tokens',
+        },
+      });
+
+      // 2. Act ⚙️
+      const failure = await buildProvider(http)
+        .generateCompletion(PROMPT)
+        .catch((error: unknown) => error);
+
+      // 3. Assert 🎯
+      expect((failure as AnthropicProviderException).usage).toEqual({
+        modelUsed: DEFAULT_ANTHROPIC_MODEL,
+        tokensPrompt: 1_200,
+        tokensCompletion: 8_192,
+        tokensReasoning: 0,
+        usageReported: true,
+      });
     });
 
     it('4.2ter deberia nombrar el tope del repositorio cuando el nodo no declara ninguno', async () => {

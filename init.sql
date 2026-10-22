@@ -42,7 +42,13 @@ CREATE TABLE usuarios (
     -- la primera vez que el usuario pide un código (ver migración 003).
     secreto_otp VARCHAR(64),
     activo BOOLEAN DEFAULT TRUE,
-    fecha_creacion TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    -- Auditoria comun (`AuditableEntity`, migracion 045). Nullable: las filas
+    -- historicas no tienen autor conocido y un usuario borrado no arrastra lo
+    -- que toco.
+    creado_por UUID REFERENCES usuarios(id_usuario) ON DELETE SET NULL,
+    actualizado_por UUID REFERENCES usuarios(id_usuario) ON DELETE SET NULL,
+    fecha_creacion TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    fecha_actualizacion TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
 -- =============================================================================
@@ -107,6 +113,11 @@ CREATE TABLE plantillas_html (
     -- trazabilidad de las ejecuciones que la usaron.
     activo BOOLEAN NOT NULL DEFAULT TRUE,
 
+    -- Auditoria comun (`AuditableEntity`, migracion 045). Nullable: las filas
+    -- historicas no tienen autor conocido y un usuario borrado no arrastra lo
+    -- que toco.
+    creado_por UUID REFERENCES usuarios(id_usuario) ON DELETE SET NULL,
+    actualizado_por UUID REFERENCES usuarios(id_usuario) ON DELETE SET NULL,
     fecha_creacion TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
     fecha_actualizacion TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
@@ -157,6 +168,11 @@ CREATE TABLE plantillas_prompts_ia (
     -- baja a una persona no puede borrar las instrucciones que dejó en producción.
     id_usuario_creador UUID NOT NULL REFERENCES usuarios(id_usuario) ON DELETE RESTRICT,
 
+    -- Auditoria comun (`AuditableEntity`, migracion 045). Nullable: las filas
+    -- historicas no tienen autor conocido y un usuario borrado no arrastra lo
+    -- que toco.
+    creado_por UUID REFERENCES usuarios(id_usuario) ON DELETE SET NULL,
+    actualizado_por UUID REFERENCES usuarios(id_usuario) ON DELETE SET NULL,
     fecha_creacion TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
     fecha_actualizacion TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
@@ -196,7 +212,13 @@ CREATE TABLE plantillas_flujo (
     -- Mismo nombre que en `flujos` porque es el mismo grafo declarativo. Aquí
     -- NOT NULL: una plantilla sin topología no es una plantilla
     configuracion_pipeline JSONB NOT NULL,
-    fecha_creacion TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+    -- Auditoria comun (`AuditableEntity`, migracion 045). Nullable: las filas
+    -- historicas no tienen autor conocido y un usuario borrado no arrastra lo
+    -- que toco.
+    creado_por UUID REFERENCES usuarios(id_usuario) ON DELETE SET NULL,
+    actualizado_por UUID REFERENCES usuarios(id_usuario) ON DELETE SET NULL,
+    fecha_creacion TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    fecha_actualizacion TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
 -- =============================================================================
@@ -218,7 +240,13 @@ CREATE TABLE flujos (
     -- físico por SQL directo; la vía prevista es el borrado lógico (`status`)
     id_plantilla_origen UUID REFERENCES plantillas_flujo(id_plantilla_flujo) ON DELETE SET NULL,
     id_usuario_creador UUID NOT NULL REFERENCES usuarios(id_usuario),
-    fecha_creacion TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    -- Auditoria comun (`AuditableEntity`, migracion 045). Nullable: las filas
+    -- historicas no tienen autor conocido y un usuario borrado no arrastra lo
+    -- que toco.
+    creado_por UUID REFERENCES usuarios(id_usuario) ON DELETE SET NULL,
+    actualizado_por UUID REFERENCES usuarios(id_usuario) ON DELETE SET NULL,
+    fecha_creacion TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    fecha_actualizacion TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
 -- =============================================================================
@@ -374,9 +402,95 @@ CREATE TABLE allowed_ips (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     ip_o_cidr VARCHAR(64) NOT NULL UNIQUE,
     descripcion VARCHAR(255) NOT NULL,
-    creado_en TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    actualizado_en TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+    -- `creado_en` / `actualizado_en` hasta la migracion 045, que los alineo con
+    -- el resto del esquema.
+    -- Auditoria comun (`AuditableEntity`, migracion 045). Nullable: las filas
+    -- historicas no tienen autor conocido y un usuario borrado no arrastra lo
+    -- que toco.
+    creado_por UUID REFERENCES usuarios(id_usuario) ON DELETE SET NULL,
+    actualizado_por UUID REFERENCES usuarios(id_usuario) ON DELETE SET NULL,
+    fecha_creacion TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    fecha_actualizacion TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
+
+-- =============================================================================
+-- Tabla: PRECIOS_MODELOS_IA (migracion 045)
+-- Duplicada en db/migrations/045-auditoria-y-telemetria-tokens-ia.sql para las
+-- bases de datos ya creadas.
+--
+-- Tarifas en USD por millon de tokens, VERSIONADAS por `vigente_desde`: cambiar
+-- un precio es insertar una fila nueva. `modelo_ia = '*'` es la tarifa generica
+-- del proveedor para modelos sin fila propia (coste marcado como estimado).
+-- =============================================================================
+
+CREATE TABLE precios_modelos_ia (
+    id_precio_modelo_ia UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    proveedor_ia VARCHAR(30) NOT NULL,
+    modelo_ia VARCHAR(100) NOT NULL,
+    tarifa_prompt_usd_mtok NUMERIC(12, 6) NOT NULL CHECK (tarifa_prompt_usd_mtok >= 0),
+    tarifa_completacion_usd_mtok NUMERIC(12, 6) NOT NULL CHECK (tarifa_completacion_usd_mtok >= 0),
+    -- Solo la usa Gemini, que factura el razonamiento aparte de la salida.
+    tarifa_razonamiento_usd_mtok NUMERIC(12, 6) NOT NULL CHECK (tarifa_razonamiento_usd_mtok >= 0),
+    vigente_desde TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    activo BOOLEAN NOT NULL DEFAULT TRUE,
+    -- Auditoria comun (`AuditableEntity`, migracion 045). Nullable: las filas
+    -- historicas no tienen autor conocido y un usuario borrado no arrastra lo
+    -- que toco.
+    creado_por UUID REFERENCES usuarios(id_usuario) ON DELETE SET NULL,
+    actualizado_por UUID REFERENCES usuarios(id_usuario) ON DELETE SET NULL,
+    fecha_creacion TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    fecha_actualizacion TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT uq_precios_modelos_ia_vigencia UNIQUE (proveedor_ia, modelo_ia, vigente_desde)
+);
+
+-- A diferencia de las plantillas, estas semillas SI van aqui: no dependen de
+-- ningun usuario, y sin ellas toda la telemetria naceria marcada como estimada.
+-- Las tarifas de GEMINI estan pendientes de confirmar (ver migracion 045).
+INSERT INTO precios_modelos_ia (
+    proveedor_ia, modelo_ia,
+    tarifa_prompt_usd_mtok, tarifa_completacion_usd_mtok, tarifa_razonamiento_usd_mtok,
+    vigente_desde
+) VALUES
+    ('ANTHROPIC', 'claude-opus-5-5',   4.00, 20.00, 20.00, '2026-10-01 00:00:00+00'),
+    ('ANTHROPIC', 'claude-sonnet-5-5', 2.00, 10.00, 10.00, '2026-10-01 00:00:00+00'),
+    ('ANTHROPIC', 'claude-haiku-4-5',  1.00,  5.00,  5.00, '2026-10-01 00:00:00+00'),
+    ('ANTHROPIC', '*',                 4.00, 20.00, 20.00, '2026-10-01 00:00:00+00'),
+    ('OPENAI',    'gpt-4o',            2.50, 10.00, 10.00, '2026-10-01 00:00:00+00');
+
+-- =============================================================================
+-- Tabla: TELEMETRIA_TOKENS_IA (migracion 045)
+-- Duplicada en db/migrations/045-auditoria-y-telemetria-tokens-ia.sql para las
+-- bases de datos ya creadas.
+--
+-- Una fila por inferencia facturada de PROCESADOR_IA / PROCESADOR_OCR.
+-- INMUTABLE: guarda una fotografia de las tarifas aplicadas, no una referencia
+-- a `precios_modelos_ia`, para que el coste historico no cambie con los precios.
+-- =============================================================================
+
+CREATE TABLE telemetria_tokens_ia (
+    id_telemetria_tokens_ia UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    ejecucion_id UUID NOT NULL REFERENCES ejecuciones_flujo(id_ejecucion) ON DELETE CASCADE,
+    -- Redundante con `ejecucion_id` a proposito: eje de agregacion sin JOIN.
+    flujo_id UUID NOT NULL REFERENCES flujos(id_flujo) ON DELETE CASCADE,
+    -- `nodeId` del pipeline: sin FK, igual que `logs_nodo.id_nodo`.
+    nodo_id VARCHAR(50) NOT NULL,
+    proveedor_ia VARCHAR(30) NOT NULL,
+    modelo_ia VARCHAR(100) NOT NULL,
+    tokens_prompt INTEGER NOT NULL DEFAULT 0 CHECK (tokens_prompt >= 0),
+    tokens_completacion INTEGER NOT NULL DEFAULT 0 CHECK (tokens_completacion >= 0),
+    tokens_razonamiento INTEGER NOT NULL DEFAULT 0 CHECK (tokens_razonamiento >= 0),
+    tokens_totales INTEGER NOT NULL DEFAULT 0 CHECK (tokens_totales >= 0),
+    tarifa_prompt_usd NUMERIC(12, 6) NOT NULL DEFAULT 0 CHECK (tarifa_prompt_usd >= 0),
+    tarifa_completacion_usd NUMERIC(12, 6) NOT NULL DEFAULT 0 CHECK (tarifa_completacion_usd >= 0),
+    tarifa_razonamiento_usd NUMERIC(12, 6) NOT NULL DEFAULT 0 CHECK (tarifa_razonamiento_usd >= 0),
+    costo_estimado_usd NUMERIC(12, 6) NOT NULL DEFAULT 0 CHECK (costo_estimado_usd >= 0),
+    es_estimado BOOLEAN NOT NULL DEFAULT FALSE,
+    creado_en TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX idx_telemetria_tokens_ejecucion ON telemetria_tokens_ia (ejecucion_id);
+CREATE INDEX idx_telemetria_tokens_flujo_fecha ON telemetria_tokens_ia (flujo_id, creado_en);
+CREATE INDEX idx_telemetria_tokens_proveedor_modelo ON telemetria_tokens_ia (proveedor_ia, modelo_ia, creado_en);
 
 -- =============================================================================
 -- Índices de apoyo para claves foráneas de alta consulta
