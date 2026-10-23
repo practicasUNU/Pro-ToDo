@@ -544,6 +544,8 @@ export const useCanvasStore = defineStore('canvas', () => {
       failureReason: null,
       startedAt: event.emittedAt,
       updatedAt: event.emittedAt,
+      // Sin consulta todavia: el socket no informa de alertas.
+      hasAlerts: false,
       context: {},
       retryState: {},
     };

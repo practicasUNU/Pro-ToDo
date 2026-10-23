@@ -1,13 +1,16 @@
 <script setup lang="ts">
-import { computed, onMounted } from 'vue';
+import { computed, onMounted, ref } from 'vue';
 import { useQuasar } from 'quasar';
 
 import { useExecutionsStore } from '@stores/executions.store';
 import { useWorkflowsStore } from '@stores/workflows.store';
 
+import LogViewerModal from '@components/shared/LogViewerModal.vue';
+
 import { ExecutionState } from '@/types/execution';
 import { extractApiErrorMessage } from '@/utils/api-error';
 import { formatDateTime } from '@/utils/date-format';
+import { canInspectLog } from '@/utils/execution-log';
 import { describeExecutionState } from '@/utils/execution-state-display';
 
 import type { QTableColumn, QTableProps } from 'quasar';
@@ -69,7 +72,17 @@ const columns: QTableColumn<ExecutionSummary>[] = [
     align: 'left',
     classes: 'pd-cell--long',
   },
+  { name: 'actions', label: 'Traza', field: 'executionId', align: 'center' },
 ];
+
+/** Ejecucion cuya traza esta abierta en el visor. */
+const isLogViewerOpen = ref(false);
+const inspectedExecutionId = ref<string | null>(null);
+
+const openLog = (execution: ExecutionSummary): void => {
+  inspectedExecutionId.value = execution.executionId;
+  isLogViewerOpen.value = true;
+};
 
 const pagination = computed(() => ({
   page: Math.floor(executionsStore.offset / executionsStore.limit) + 1,
@@ -167,6 +180,27 @@ onMounted(async () => {
       </q-td>
     </template>
 
+    <!-- Visor de logs SOLO donde hay algo que inspeccionar: fallo, pausa o
+         alertas. En una ejecucion en curso o exitosa sin observaciones el
+         boton seria ruido en cada fila. -->
+    <template #body-cell-actions="cellProps">
+      <q-td :props="cellProps">
+        <q-btn
+          v-if="canInspectLog(cellProps.row)"
+          class="pd-btn-icon"
+          outline
+          dense
+          size="sm"
+          icon="terminal"
+          :aria-label="`Ver log de la ejecución ${cellProps.row.executionId}`"
+          :data-test="`view-log-${cellProps.row.executionId}`"
+          @click="openLog(cellProps.row)"
+        >
+          <q-tooltip>Ver log</q-tooltip>
+        </q-btn>
+      </q-td>
+    </template>
+
     <template #body-cell-detail="cellProps">
       <q-td :props="cellProps">
         <span :class="{ 'pd-mono': cellProps.row.failureReason === null }">
@@ -175,6 +209,8 @@ onMounted(async () => {
       </q-td>
     </template>
   </q-table>
+
+  <LogViewerModal v-model="isLogViewerOpen" :execution-id="inspectedExecutionId" />
 </template>
 
 <style scoped lang="scss">

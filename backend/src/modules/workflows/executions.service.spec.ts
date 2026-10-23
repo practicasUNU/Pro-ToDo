@@ -19,6 +19,7 @@ import type { FsmExecutionQueryService } from '@core/fsm/services/fsm-execution-
 import type { PipelineValidatorService } from '@core/fsm/services/pipeline-validator.service';
 import type { PipelineSchemaDto } from '@core/fsm/dto/pipeline-schema.dto';
 import type { AuthenticatedUser } from '@modules/auth/interfaces/jwt-payload.interface';
+import type { AlertQueryService } from '@modules/logs/services/alert-query.service';
 import type { HybridLoggerService } from '@modules/logs/services/hybrid-logger.service';
 import type { Workflow } from '@modules/workflows/entities/workflow.entity';
 import type { WorkflowsService } from '@modules/workflows/workflows.service';
@@ -118,6 +119,7 @@ interface ServiceHarness {
   };
   events: ExecutionEventsCoordinator;
   hybridLogger: { logNodeExecution: jest.Mock };
+  alertQuery: { findExecutionIdsWithAlerts: jest.Mock };
 }
 
 /**
@@ -186,6 +188,11 @@ const buildHarness = (): ServiceHarness => {
       .mockResolvedValue({ logFilePath: null, logNodeId: null }),
   };
 
+  // Sin alertas por defecto: cada prueba que las necesita las declara.
+  const alertQuery: { findExecutionIdsWithAlerts: jest.Mock } = {
+    findExecutionIdsWithAlerts: jest.fn().mockResolvedValue(new Set<string>()),
+  };
+
   const service = new ExecutionsService(
     query as unknown as FsmExecutionQueryService,
     repository as unknown as Repository<Workflow>,
@@ -194,6 +201,7 @@ const buildHarness = (): ServiceHarness => {
     events,
     workflows as unknown as WorkflowsService,
     hybridLogger as unknown as HybridLoggerService,
+    alertQuery as unknown as AlertQueryService,
   );
   jest.spyOn(service['logger'], 'log').mockImplementation(() => undefined);
 
@@ -206,6 +214,7 @@ const buildHarness = (): ServiceHarness => {
     workflows,
     events,
     hybridLogger,
+    alertQuery,
   };
 };
 
@@ -236,6 +245,35 @@ describe('ExecutionsService (consulta y reintento manual CU-09)', () => {
 
       // 3. Assert
       expect(page.items[0]?.startedAt).toBe('2026-10-10T08:00:00.000Z');
+    });
+
+    it('1.2bis deberia marcar hasAlerts con UNA consulta por pagina', async () => {
+      // 1. Arrange 📐: el visor de logs se ofrece en las filas con alertas.
+      const { service, alertQuery } = buildHarness();
+      alertQuery.findExecutionIdsWithAlerts.mockResolvedValue(
+        new Set([EXECUTION_ID]),
+      );
+
+      // 2. Act ⚙️
+      const page = await service.findAll({});
+
+      // 3. Assert 🎯: nunca una consulta por fila.
+      expect(alertQuery.findExecutionIdsWithAlerts).toHaveBeenCalledTimes(1);
+      expect(alertQuery.findExecutionIdsWithAlerts).toHaveBeenCalledWith(
+        page.items.map((item) => item.executionId),
+      );
+      expect(page.items[0]?.hasAlerts).toBe(true);
+    });
+
+    it('1.2ter deberia dejar hasAlerts en false sin alertas', async () => {
+      // 1. Arrange 📐
+      const { service } = buildHarness();
+
+      // 2. Act ⚙️
+      const page = await service.findAll({});
+
+      // 3. Assert 🎯
+      expect(page.items.every((item) => !item.hasAlerts)).toBe(true);
     });
 
     it('1.3 el detalle deberia incluir el contexto acumulado', async () => {

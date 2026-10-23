@@ -92,6 +92,12 @@ body.body--dark {
 
   // Degradado corporativo obligatorio (header y botones primarios)
   --pd-gradient: linear-gradient(90deg, var(--pd-primary) 0%, var(--pd-primary-light) 100%);
+
+  // Consola del visor de logs: oscura en AMBOS temas, como una terminal. El
+  // fondo es el `--pd-page-bg` del modo oscuro; el verde claro sobre el da un
+  // contraste de ~13:1 (WCAG AAA) para leer stack traces largos.
+  --pd-terminal-bg: #0d0f26;
+  --pd-terminal-text: #6ee7b7;
 }
 
 // ---- Base ----
@@ -676,6 +682,21 @@ $pd-fork-height: 56px;
 
 .pd-node-type {
   color: var(--pd-text-secondary);
+}
+
+// Consola del visor de logs (`LogViewerModal`). Mismo armazon que
+// `.pd-code-block`, pero oscura en los dos temas para leerse como una terminal.
+.pd-terminal {
+  background: var(--pd-terminal-bg);
+  color: var(--pd-terminal-text);
+  border: 1px solid var(--pd-shell-alt);
+  border-radius: $generic-border-radius;
+  padding: 12px;
+  margin: 0;
+  max-height: 360px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
 }
 
 // Visor de JSON del panel de inspeccion.

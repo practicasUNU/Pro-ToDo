@@ -53,6 +53,12 @@ export class ExecutionSummaryResponseDto {
     format: 'date-time',
   })
   readonly updatedAt: string;
+
+  @ApiProperty({
+    description:
+      'Verdadero si la ejecucion genero alguna alerta GRAVE o URGENTE, resuelta o no',
+  })
+  readonly hasAlerts: boolean;
 }
 
 /** Ventana de resultados de `GET /api/executions`. */

@@ -128,6 +128,9 @@ export const useExecutionStore = defineStore('execution', () => {
           logFilePath: null,
           failureReason: null,
           startedAt: seed.startedAt,
+          // Nacida de un evento del socket: aun no se sabe si genero alertas.
+          // El visor de logs se ofrece igualmente por su estado si se pausa.
+          hasAlerts: false,
           updatedAt: seed.startedAt,
           ...patch,
         },

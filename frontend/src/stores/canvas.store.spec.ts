@@ -102,6 +102,7 @@ const buildExecution = (overrides: Partial<ExecutionDetail> = {}): ExecutionDeta
   failureReason: null,
   startedAt: '2026-10-15T08:00:00.000Z',
   updatedAt: '2026-10-15T08:00:05.000Z',
+  hasAlerts: false,
   context: { raw_email: { asunto: 'Licitacion' } },
   retryState: {},
   ...overrides,

@@ -12,6 +12,7 @@ import { ExecutionEventsCoordinator } from '@common/services/execution-events.co
 import { FsmExecutionQueryService } from '@core/fsm/services/fsm-execution-query.service';
 import { PipelineValidatorService } from '@core/fsm/services/pipeline-validator.service';
 import { ExecutionState } from '@core/fsm/types/fsm.enums';
+import { AlertQueryService } from '@modules/logs/services/alert-query.service';
 import { HybridLoggerService } from '@modules/logs/services/hybrid-logger.service';
 import { NodeLogStatus } from '@modules/logs/entities/log-nodo.entity';
 import { Workflow } from '@modules/workflows/entities/workflow.entity';
@@ -61,6 +62,8 @@ export class ExecutionsService {
     private readonly executionEvents: ExecutionEventsCoordinator,
     private readonly workflowsService: WorkflowsService,
     private readonly hybridLoggerService: HybridLoggerService,
+    // Marca `hasAlerts` del listado: una consulta por pagina, no por fila.
+    private readonly alertQueryService: AlertQueryService,
   ) {}
 
   /** Pagina de ejecuciones, de la mas reciente a la mas antigua. */
@@ -77,8 +80,14 @@ export class ExecutionsService {
       offset,
     });
 
+    const withAlerts = await this.alertQueryService.findExecutionIdsWithAlerts(
+      items.map((execution) => execution.executionId),
+    );
+
     return {
-      items: items.map((execution) => this.toSummary(execution)),
+      items: items.map((execution) =>
+        this.toSummary(execution, withAlerts.has(execution.executionId)),
+      ),
       total,
       limit,
       offset,
@@ -96,7 +105,7 @@ export class ExecutionsService {
     const execution = await this.requireExecution(executionId);
 
     return {
-      ...this.toSummary(execution),
+      ...(await this.toSummaryWithAlerts(execution)),
       context: execution.contextPayload,
       retryState: execution.retryState,
     };
@@ -404,7 +413,7 @@ export class ExecutionsService {
       workflowDeactivated: true,
     });
 
-    return { execution: this.toSummary(execution), workflow };
+    return { execution: await this.toSummaryWithAlerts(execution), workflow };
   }
 
   /**
@@ -430,7 +439,10 @@ export class ExecutionsService {
    * Las fechas salen en ISO 8601 y no como `Date`: JSON no transporta fechas, y
    * declarar `Date` en el DTO mentiria sobre lo que recibe el cliente.
    */
-  private toSummary(execution: FsmExecution): ExecutionSummaryResponseDto {
+  private toSummary(
+    execution: FsmExecution,
+    hasAlerts: boolean,
+  ): ExecutionSummaryResponseDto {
     return {
       executionId: execution.executionId,
       flowId: execution.flowId,
@@ -440,6 +452,18 @@ export class ExecutionsService {
       failureReason: execution.failureReason,
       startedAt: execution.createdAt.toISOString(),
       updatedAt: execution.updatedAt.toISOString(),
+      hasAlerts,
     };
+  }
+
+  /** `toSummary` de una sola ejecucion, resolviendo sus alertas. */
+  private async toSummaryWithAlerts(
+    execution: FsmExecution,
+  ): Promise<ExecutionSummaryResponseDto> {
+    const withAlerts = await this.alertQueryService.findExecutionIdsWithAlerts([
+      execution.executionId,
+    ]);
+
+    return this.toSummary(execution, withAlerts.has(execution.executionId));
   }
 }

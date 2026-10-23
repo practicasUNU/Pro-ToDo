@@ -59,6 +59,7 @@ const buildSummary = (overrides: Partial<ExecutionSummary> = {}): ExecutionSumma
   failureReason: null,
   startedAt: '2026-10-10T07:00:00.000Z',
   updatedAt: '2026-10-10T07:30:00.000Z',
+  hasAlerts: false,
   ...overrides,
 });
 

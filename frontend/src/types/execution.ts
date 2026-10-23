@@ -52,6 +52,11 @@ export interface ExecutionSummary {
   readonly failureReason: string | null;
   readonly startedAt: string;
   readonly updatedAt: string;
+  /**
+   * La ejecucion genero alguna alerta GRAVE o URGENTE, resuelta o no. Junto con
+   * los estados PAUSADO y FALLIDO, decide si se ofrece el visor de logs.
+   */
+  readonly hasAlerts: boolean;
 }
 
 /** Pagina del listado. Replica `ExecutionPageResponseDto`. */

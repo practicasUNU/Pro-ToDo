@@ -1,8 +1,12 @@
 import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 
+import { FsmExecution } from '@core/fsm/entities/fsm-execution.entity';
 import { AlertaError } from '@modules/logs/entities/alerta-error.entity';
 import { LogNodo } from '@modules/logs/entities/log-nodo.entity';
+import { LogsController } from '@modules/logs/logs.controller';
+import { AlertQueryService } from '@modules/logs/services/alert-query.service';
+import { ExecutionLogReaderService } from '@modules/logs/services/execution-log-reader.service';
 import { HybridLoggerService } from '@modules/logs/services/hybrid-logger.service';
 
 /**
@@ -24,8 +28,17 @@ import { HybridLoggerService } from '@modules/logs/services/hybrid-logger.servic
  * mantener una sola transaccion logica.
  */
 @Module({
-  imports: [TypeOrmModule.forFeature([LogNodo, AlertaError])],
-  providers: [HybridLoggerService],
-  exports: [HybridLoggerService],
+  // `FsmExecution` se registra como ENTIDAD, sin importar `FsmModule`: el lector
+  // solo necesita su `ruta_archivo_log`, y `FsmModule` ya importa este modulo,
+  // asi que importarlo de vuelta cerraria un ciclo.
+  imports: [TypeOrmModule.forFeature([LogNodo, AlertaError, FsmExecution])],
+  // Lectura de trazas para el panel (`GET /api/logs/execution/:id`).
+  controllers: [LogsController],
+  providers: [
+    HybridLoggerService,
+    ExecutionLogReaderService,
+    AlertQueryService,
+  ],
+  exports: [HybridLoggerService, AlertQueryService],
 })
 export class LogsModule {}
