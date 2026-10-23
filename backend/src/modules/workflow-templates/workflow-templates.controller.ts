@@ -26,6 +26,9 @@ import { CurrentUser } from '@common/decorators/current-user.decorator';
 import { Roles } from '@common/decorators/roles.decorator';
 import { toIssueContractException } from '@core/fsm/utils/schema-issue-contract.util';
 import { RolesGuard } from '@common/guards/roles.guard';
+import { AuditTable } from '@modules/audit/audit-tables';
+import { AuditAction } from '@modules/audit/decorators/audit-action.decorator';
+import { AuditActionType } from '@modules/audit/enums/audit-action.enum';
 import { JwtAuthGuard } from '@modules/auth/guards/jwt-auth.guard';
 import { UserRole } from '@modules/users/enums/user-role.enum';
 
@@ -100,6 +103,10 @@ export class WorkflowTemplatesController {
 
   // Solo ADMIN: define la topologia base de todos los flujos que partan de ella.
   @Post()
+  @AuditAction({
+    table: AuditTable.WORKFLOW_TEMPLATES,
+    action: AuditActionType.CREATE,
+  })
   @Roles(UserRole.ADMIN)
   @ApiOperation({ summary: 'Crea una plantilla validando su grafo completo' })
   @ApiBadRequestResponse({
@@ -126,6 +133,10 @@ export class WorkflowTemplatesController {
   }
 
   @Put(':id')
+  @AuditAction({
+    table: AuditTable.WORKFLOW_TEMPLATES,
+    action: AuditActionType.UPDATE,
+  })
   @Roles(UserRole.ADMIN)
   @ApiOperation({
     summary: 'Actualiza una plantilla; tambien la activa o la inactiva',
@@ -158,6 +169,10 @@ export class WorkflowTemplatesController {
   // Borrado logico: los flujos instanciados apuntan a esta fila con
   // `id_plantilla_origen` y su trazabilidad depende de que siga existiendo.
   @Delete(':id')
+  @AuditAction({
+    table: AuditTable.WORKFLOW_TEMPLATES,
+    action: AuditActionType.DELETE,
+  })
   @Roles(UserRole.ADMIN)
   @ApiOperation({
     summary: 'Retira una plantilla del catalogo (borrado logico)',

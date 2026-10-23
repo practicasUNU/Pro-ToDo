@@ -24,6 +24,9 @@ import {
 import { CurrentUser } from '@common/decorators/current-user.decorator';
 import { Roles } from '@common/decorators/roles.decorator';
 import { RolesGuard } from '@common/guards/roles.guard';
+import { AuditTable } from '@modules/audit/audit-tables';
+import { AuditAction } from '@modules/audit/decorators/audit-action.decorator';
+import { AuditActionType } from '@modules/audit/enums/audit-action.enum';
 import { JwtAuthGuard } from '@modules/auth/guards/jwt-auth.guard';
 
 import { CreateUserDto } from './dto/create-user.dto';
@@ -81,6 +84,7 @@ export class UsersController {
   }
 
   @Post()
+  @AuditAction({ table: AuditTable.USERS, action: AuditActionType.CREATE })
   @ApiOperation({
     summary: 'Crea un usuario con correo de dominio corporativo',
   })
@@ -94,6 +98,7 @@ export class UsersController {
   }
 
   @Patch(':id')
+  @AuditAction({ table: AuditTable.USERS, action: AuditActionType.UPDATE })
   @ApiOperation({ summary: 'Actualiza los datos de un usuario' })
   public async update(
     @Param('id', ParseUUIDPipe) id: string,
@@ -109,6 +114,7 @@ export class UsersController {
 
   // Borrado logico: nunca elimina fisicamente el registro
   @Delete(':id')
+  @AuditAction({ table: AuditTable.USERS, action: AuditActionType.DELETE })
   @ApiOperation({ summary: 'Desactiva un usuario (borrado logico)' })
   public async remove(
     @Param('id', ParseUUIDPipe) id: string,

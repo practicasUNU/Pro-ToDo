@@ -26,6 +26,9 @@ import {
 import { CurrentUser } from '@common/decorators/current-user.decorator';
 import { Roles } from '@common/decorators/roles.decorator';
 import { RolesGuard } from '@common/guards/roles.guard';
+import { AuditTable } from '@modules/audit/audit-tables';
+import { AuditAction } from '@modules/audit/decorators/audit-action.decorator';
+import { AuditActionType } from '@modules/audit/enums/audit-action.enum';
 import { JwtAuthGuard } from '@modules/auth/guards/jwt-auth.guard';
 import { UserRole } from '@modules/users/enums/user-role.enum';
 
@@ -98,6 +101,10 @@ export class TemplatesController {
   }
 
   @Post()
+  @AuditAction({
+    table: AuditTable.HTML_TEMPLATES,
+    action: AuditActionType.CREATE,
+  })
   @ApiOperation({
     summary:
       'Crea una plantilla validando sus variables contra la lista blanca',
@@ -117,6 +124,10 @@ export class TemplatesController {
   }
 
   @Put(':id')
+  @AuditAction({
+    table: AuditTable.HTML_TEMPLATES,
+    action: AuditActionType.UPDATE,
+  })
   @ApiOperation({
     summary: 'Actualiza una plantilla y recalcula sus variables requeridas',
   })
@@ -158,6 +169,10 @@ export class TemplatesController {
 
   // Borrado logico: preserva la trazabilidad de las ejecuciones que la usaron
   @Delete(':id')
+  @AuditAction({
+    table: AuditTable.HTML_TEMPLATES,
+    action: AuditActionType.DELETE,
+  })
   @ApiOperation({ summary: 'Desactiva una plantilla (borrado logico)' })
   @ApiNotFoundResponse({
     description: 'No existe ninguna plantilla con ese id',

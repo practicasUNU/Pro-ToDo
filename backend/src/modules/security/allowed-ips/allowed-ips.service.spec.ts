@@ -21,15 +21,35 @@ type AllowedIpRepositoryMock = jest.Mocked<
   Pick<Repository<AllowedIp>, 'create' | 'save' | 'find' | 'findOne' | 'remove'>
 >;
 
-/** Repositorio doble: `create` refleja el literal, `save` lo resuelve tal cual. */
-const buildRepository = (): AllowedIpRepositoryMock =>
-  ({
+const ACTOR_ID = 'b27d9e10-4c3f-4a8b-9f21-6d5e4c3b2a19';
+const NEW_ID = 'd4e5f6a7-1b2c-4d3e-8f9a-0b1c2d3e4f5a';
+
+/**
+ * Repositorio doble con memoria: `save` guarda (asignando id a las altas) y
+ * `findOne` por id devuelve lo guardado, porque el servicio relee el registro
+ * tras escribir para devolver los autores resueltos. Cualquier otra busqueda
+ * (la de duplicados por `ipOrCidr`) devuelve `null` salvo que el test diga otra
+ * cosa.
+ */
+const buildRepository = (): AllowedIpRepositoryMock => {
+  const stored = new Map<string, AllowedIp>();
+
+  return {
     create: jest.fn((entity: Partial<AllowedIp>) => entity as AllowedIp),
-    save: jest.fn((entity: AllowedIp) => Promise.resolve(entity)),
+    save: jest.fn((entity: AllowedIp) => {
+      const saved = { ...entity, id: entity.id ?? NEW_ID };
+      stored.set(saved.id, saved);
+      return Promise.resolve(saved);
+    }),
     find: jest.fn().mockResolvedValue([]),
-    findOne: jest.fn().mockResolvedValue(null),
+    findOne: jest.fn(({ where }: { where: Partial<AllowedIp> }) =>
+      Promise.resolve(
+        where.id !== undefined ? (stored.get(where.id) ?? null) : null,
+      ),
+    ),
     remove: jest.fn((entity: AllowedIp) => Promise.resolve(entity)),
-  }) as unknown as AllowedIpRepositoryMock;
+  } as unknown as AllowedIpRepositoryMock;
+};
 
 /** `ConfigService` doble: solo resuelve la variable de fallback. */
 const buildConfigService = (allowedRanges: string | undefined): ConfigService =>
@@ -83,10 +103,13 @@ describe('AllowedIpsService', () => {
       );
 
       // 2. Act
-      const result = await service.create({
-        ipOrCidr: '  10.0.0.0/8  ',
-        description: '  Red interna  ',
-      });
+      const result = await service.create(
+        {
+          ipOrCidr: '  10.0.0.0/8  ',
+          description: '  Red interna  ',
+        },
+        ACTOR_ID,
+      );
 
       // 3. Assert
       expect(result.ipOrCidr).toBe('10.0.0.0/8');
@@ -106,10 +129,13 @@ describe('AllowedIpsService', () => {
 
       // 2. Act & 3. Assert
       await expect(
-        service.create({
-          ipOrCidr: EXISTING_ENTRY.ipOrCidr,
-          description: 'Otra',
-        }),
+        service.create(
+          {
+            ipOrCidr: EXISTING_ENTRY.ipOrCidr,
+            description: 'Otra',
+          },
+          ACTOR_ID,
+        ),
       ).rejects.toThrow(ConflictException);
     });
 
@@ -126,13 +152,60 @@ describe('AllowedIpsService', () => {
       );
 
       // 2. Act
-      const result = await service.update(EXISTING_ENTRY.id, {
-        ipOrCidr: EXISTING_ENTRY.ipOrCidr,
-        description: 'Descripcion actualizada',
-      });
+      const result = await service.update(
+        EXISTING_ENTRY.id,
+        {
+          ipOrCidr: EXISTING_ENTRY.ipOrCidr,
+          description: 'Descripcion actualizada',
+        },
+        ACTOR_ID,
+      );
 
       // 3. Assert
       expect(result.description).toBe('Descripcion actualizada');
+    });
+
+    it('deberia firmar el alta con el actor en las dos columnas de auditoria', async () => {
+      // 1. Arrange 📐
+      const repository = buildRepository();
+      const service = new AllowedIpsService(
+        repository as unknown as Repository<AllowedIp>,
+        buildConfigService(undefined),
+        new CrudEventsCoordinator(),
+      );
+
+      // 2. Act ⚙️
+      const result = await service.create(
+        { ipOrCidr: '10.1.0.0/16', description: 'Oficina' },
+        ACTOR_ID,
+      );
+
+      // 3. Assert 🎯
+      expect(result.createdByUserId).toBe(ACTOR_ID);
+      expect(result.updatedByUserId).toBe(ACTOR_ID);
+    });
+
+    it('deberia firmar la modificacion sin tocar al autor del alta', async () => {
+      // 1. Arrange 📐: registro dado de alta por otra persona.
+      const repository = buildRepository();
+      const original = { ...EXISTING_ENTRY, createdByUserId: NEW_ID };
+      repository.findOne.mockResolvedValueOnce(original);
+      const service = new AllowedIpsService(
+        repository as unknown as Repository<AllowedIp>,
+        buildConfigService(undefined),
+        new CrudEventsCoordinator(),
+      );
+
+      // 2. Act ⚙️
+      const result = await service.update(
+        EXISTING_ENTRY.id,
+        { description: 'Renombrada' },
+        ACTOR_ID,
+      );
+
+      // 3. Assert 🎯
+      expect(result.updatedByUserId).toBe(ACTOR_ID);
+      expect(result.createdByUserId).toBe(NEW_ID);
     });
 
     it('deberia eliminar fisicamente una IP existente', async () => {
@@ -274,7 +347,6 @@ describe('AllowedIpsService', () => {
       // 1. Arrange
       const repository = buildRepository();
       repository.find.mockResolvedValue([EXISTING_ENTRY]);
-      repository.findOne.mockResolvedValue(null);
       const service = new AllowedIpsService(
         repository,
         buildConfigService(undefined),
@@ -283,10 +355,13 @@ describe('AllowedIpsService', () => {
       await service.isIpAllowed('192.168.1.55');
 
       // 2. Act
-      await service.create({
-        ipOrCidr: '172.16.0.0/12',
-        description: 'Nueva red',
-      });
+      await service.create(
+        {
+          ipOrCidr: '172.16.0.0/12',
+          description: 'Nueva red',
+        },
+        ACTOR_ID,
+      );
       await service.isIpAllowed('192.168.1.55');
 
       // 3. Assert

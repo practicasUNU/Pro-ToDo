@@ -8,6 +8,12 @@ export const REPORT_FILENAMES = {
   pdf: 'informe-telemetria.pdf',
 } as const;
 
+/** Nombres del informe de auditoria, iguales a los de `AuditController`. */
+export const AUDIT_REPORT_FILENAMES = {
+  csv: 'informe-auditoria.csv',
+  pdf: 'informe-auditoria.pdf',
+} as const;
+
 /**
  * Guarda un `Blob` con el nombre indicado.
  *

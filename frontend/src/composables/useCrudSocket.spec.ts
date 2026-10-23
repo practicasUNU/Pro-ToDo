@@ -104,11 +104,10 @@ const buildUser = (overrides = {}) => ({
 });
 
 const buildAllowedIp = () => ({
+  ...AUDIT_FIXTURE,
   id: IP_ID,
   ipOrCidr: '10.0.0.0/24',
   description: 'Sede central',
-  createdAt: '2026-10-11T00:00:00.000Z',
-  updatedAt: '2026-10-11T00:00:00.000Z',
 });
 
 const buildWorkflow = (overrides = {}) => ({

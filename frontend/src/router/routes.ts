@@ -49,6 +49,13 @@ const routes: RouteRecordRaw[] = [
         // El coste de los flujos es parte de la auditoria que hace el editor.
       },
       {
+        path: 'auditoria',
+        component: () => import('@/pages/AuditTrailPage.vue'),
+        // Espeja el @Roles(UserRole.ADMIN) del AuditController: incluye los
+        // accesos fallidos y la gestion de cuentas, ambito exclusivo del ADMIN.
+        meta: { requiresAdmin: true },
+      },
+      {
         path: 'flujos',
         component: () => import('@/pages/workflows/WorkflowsPage.vue'),
         // SIN requiresAdmin: WorkflowsController admite @Roles(ADMIN, EDITOR).

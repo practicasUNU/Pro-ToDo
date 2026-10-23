@@ -10,11 +10,17 @@ import { Repository } from 'typeorm';
 
 import { CrudEventsCoordinator } from '@common/services/crud-events.coordinator';
 import {
+  AUDIT_RELATIONS,
+  stampCreated,
+  stampUpdated,
+} from '@common/utils/audit.util';
+import {
   ALLOWED_IP_RANGES_ENV,
   ALLOWED_IPS_CACHE_TTL_MS,
   DEFAULT_LOCALHOST_RANGES,
 } from '@common/constants/security.constants';
 
+import { toAllowedIpResponse } from './dto/allowed-ip-response.dto';
 import { CreateAllowedIpDto } from './dto/create-allowed-ip.dto';
 import { UpdateAllowedIpDto } from './dto/update-allowed-ip.dto';
 import { AllowedIp } from './entities/allowed-ip.entity';
@@ -43,11 +49,17 @@ export class AllowedIpsService {
   ) {}
 
   public async findAll(): Promise<AllowedIp[]> {
-    return this.allowedIpRepository.find({ order: { createdAt: 'ASC' } });
+    return this.allowedIpRepository.find({
+      relations: AUDIT_RELATIONS,
+      order: { createdAt: 'ASC' },
+    });
   }
 
   public async findById(id: string): Promise<AllowedIp> {
-    const entry = await this.allowedIpRepository.findOne({ where: { id } });
+    const entry = await this.allowedIpRepository.findOne({
+      where: { id },
+      relations: AUDIT_RELATIONS,
+    });
 
     if (!entry) {
       throw new NotFoundException(`IP autorizada con id "${id}" no encontrada`);
@@ -72,13 +84,14 @@ export class AllowedIpsService {
       entity: 'allowed_ips',
       action,
       id,
-      ...(entry !== undefined ? { data: entry } : {}),
+      ...(entry !== undefined ? { data: toAllowedIpResponse(entry) } : {}),
       emittedAt: new Date().toISOString(),
     });
   }
 
   public async create(
     createAllowedIpDto: CreateAllowedIpDto,
+    actorId: string,
   ): Promise<AllowedIp> {
     const ipOrCidr = createAllowedIpDto.ipOrCidr.trim();
 
@@ -88,17 +101,22 @@ export class AllowedIpsService {
       ipOrCidr,
       description: createAllowedIpDto.description.trim(),
     });
-    const saved = await this.allowedIpRepository.save(entry);
+    const saved = await this.allowedIpRepository.save(
+      stampCreated(entry, actorId),
+    );
+    // Se relee para devolver los autores ya resueltos (`AUDIT_RELATIONS`).
+    const stored = await this.findById(saved.id);
 
     this.invalidateCache();
-    this.publishMutation('CREATED', saved.id, saved);
+    this.publishMutation('CREATED', stored.id, stored);
 
-    return saved;
+    return stored;
   }
 
   public async update(
     id: string,
     updateAllowedIpDto: UpdateAllowedIpDto,
+    actorId: string,
   ): Promise<AllowedIp> {
     const entry = await this.findById(id);
 
@@ -112,12 +130,13 @@ export class AllowedIpsService {
       entry.description = updateAllowedIpDto.description.trim();
     }
 
-    const saved = await this.allowedIpRepository.save(entry);
+    await this.allowedIpRepository.save(stampUpdated(entry, actorId));
+    const stored = await this.findById(id);
 
     this.invalidateCache();
-    this.publishMutation('UPDATED', saved.id, saved);
+    this.publishMutation('UPDATED', stored.id, stored);
 
-    return saved;
+    return stored;
   }
 
   // Borrado fisico: a diferencia de los usuarios, una IP retirada no debe seguir

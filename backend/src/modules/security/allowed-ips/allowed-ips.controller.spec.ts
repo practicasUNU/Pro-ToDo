@@ -151,7 +151,10 @@ describe('AllowedIpsController (RBAC, PROT-04.2)', () => {
 
       // 3. Assert
       expect(response.status).toBe(201);
-      expect(allowedIpsServiceMock.create).toHaveBeenCalledWith(payload);
+      expect(allowedIpsServiceMock.create).toHaveBeenCalledWith(
+        payload,
+        ADMIN_USER.id,
+      );
     });
 
     it('deberia rechazar con 400 un ipOrCidr con formato invalido', async () => {
@@ -176,6 +179,7 @@ describe('AllowedIpsController (RBAC, PROT-04.2)', () => {
       expect(allowedIpsServiceMock.update).toHaveBeenCalledWith(
         EXISTING_ENTRY.id,
         { description: 'Descripcion nueva' },
+        ADMIN_USER.id,
       );
     });
 

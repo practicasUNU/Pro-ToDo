@@ -1,7 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import Handlebars from 'handlebars';
 
-import { BRAND_TEXT_MUTED } from '@common/constants/email-brand.constants';
+import { renderHtmlToPdf } from '@common/utils/html-to-pdf.util';
 import { BrowserPoolService } from '@modules/nodes/services/browser-pool.service';
 import { TELEMETRY_REPORT_TEMPLATE } from '@modules/telemetry/reports/telemetry-report.template';
 
@@ -139,25 +139,6 @@ export class TelemetryPdfRenderer {
 
   /** PDF A4 del informe. El contexto de Chromium se cierra siempre. */
   public async render(input: TelemetryPdfInput): Promise<Buffer> {
-    const html = this.renderHtml(input);
-    const context = await this.browserPool.createContext();
-
-    try {
-      const page = await context.newPage();
-      await page.setContent(html, { waitUntil: 'load' });
-
-      return await page.pdf({
-        format: 'A4',
-        printBackground: true,
-        displayHeaderFooter: true,
-        headerTemplate: '<span></span>',
-        footerTemplate:
-          `<div style="width:100%;font-size:8px;text-align:center;color:${BRAND_TEXT_MUTED};">` +
-          'Página <span class="pageNumber"></span> de <span class="totalPages"></span></div>',
-        margin: { top: '18mm', bottom: '20mm', left: '14mm', right: '14mm' },
-      });
-    } finally {
-      await context.close();
-    }
+    return renderHtmlToPdf(this.browserPool, this.renderHtml(input));
   }
 }

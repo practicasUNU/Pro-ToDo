@@ -20,6 +20,7 @@ import { AuthModule } from '@modules/auth/auth.module';
 import { HealthModule } from '@modules/health/health.module';
 import { NodesModule } from '@modules/nodes/nodes.module';
 import { NotificationsModule } from '@modules/notifications/notifications.module';
+import { AuditModule } from '@modules/audit/audit.module';
 import { AllowedIpsModule } from '@modules/security/allowed-ips/allowed-ips.module';
 import { TemplatesModule } from '@modules/templates/templates.module';
 import { UsersModule } from '@modules/users/users.module';
@@ -143,6 +144,7 @@ const DEFAULT_DB_POOL_MAX = 10;
     WorkflowsModule,
     WizardModule,
     NotificationsModule,
+    AuditModule,
   ],
   controllers: [AppController],
   providers: [

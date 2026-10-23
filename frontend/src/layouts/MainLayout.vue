@@ -13,6 +13,7 @@ import { useSessionMonitor } from '@/composables/useSessionMonitor';
 const ROUTE_BREADCRUMBS: Record<string, string> = {
   '/': 'Inicio',
   '/informes': 'Informes de Consumo IA',
+  '/auditoria': 'Auditoria de Acciones',
   '/users': 'Gestion de Usuarios',
   '/ip-whitelist': 'Lista Blanca de IPs',
   '/templates': 'Catalogo de Plantillas',
@@ -74,6 +75,13 @@ const toggleLeftDrawer = (): void => {
             <q-icon name="assessment" size="20px" />
           </q-item-section>
           <q-item-section class="pd-nav">Informes</q-item-section>
+        </q-item>
+
+        <q-item v-if="sessionStore.isAdmin" to="/auditoria" clickable v-ripple>
+          <q-item-section avatar>
+            <q-icon name="manage_search" size="20px" />
+          </q-item-section>
+          <q-item-section class="pd-nav">Auditoria</q-item-section>
         </q-item>
 
         <q-item v-if="sessionStore.isAdmin" to="/users" clickable v-ripple>

@@ -27,6 +27,9 @@ import { CurrentUser } from '@common/decorators/current-user.decorator';
 import { Roles } from '@common/decorators/roles.decorator';
 import { toIssueContractException } from '@core/fsm/utils/schema-issue-contract.util';
 import { RolesGuard } from '@common/guards/roles.guard';
+import { AuditTable } from '@modules/audit/audit-tables';
+import { AuditAction } from '@modules/audit/decorators/audit-action.decorator';
+import { AuditActionType } from '@modules/audit/enums/audit-action.enum';
 import { JwtAuthGuard } from '@modules/auth/guards/jwt-auth.guard';
 import { UserRole } from '@modules/users/enums/user-role.enum';
 
@@ -130,6 +133,7 @@ export class WorkflowsController {
    * suplantar; `CreateWorkflowDto` no tiene campo para ella.
    */
   @Post()
+  @AuditAction({ table: AuditTable.WORKFLOWS, action: AuditActionType.CREATE })
   @ApiOperation({
     summary: 'Crea un flujo con su configuracion de pipeline validada',
   })
@@ -170,6 +174,7 @@ export class WorkflowsController {
    * no existe.
    */
   @Patch(':id')
+  @AuditAction({ table: AuditTable.WORKFLOWS, action: AuditActionType.UPDATE })
   @ApiOperation({
     summary: 'Actualiza un flujo; tambien lo activa o lo desactiva',
   })

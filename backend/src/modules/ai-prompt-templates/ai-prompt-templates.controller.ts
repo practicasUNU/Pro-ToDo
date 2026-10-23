@@ -25,6 +25,9 @@ import {
 import { CurrentUser } from '@common/decorators/current-user.decorator';
 import { Roles } from '@common/decorators/roles.decorator';
 import { RolesGuard } from '@common/guards/roles.guard';
+import { AuditTable } from '@modules/audit/audit-tables';
+import { AuditAction } from '@modules/audit/decorators/audit-action.decorator';
+import { AuditActionType } from '@modules/audit/enums/audit-action.enum';
 import { JwtAuthGuard } from '@modules/auth/guards/jwt-auth.guard';
 import { UserRole } from '@modules/users/enums/user-role.enum';
 
@@ -112,6 +115,10 @@ export class AiPromptTemplatesController {
   }
 
   @Post()
+  @AuditAction({
+    table: AuditTable.AI_PROMPT_TEMPLATES,
+    action: AuditActionType.CREATE,
+  })
   @ApiOperation({ summary: 'Registra un prompt reutilizable' })
   @ApiBadRequestResponse({
     description: 'El cuerpo no supera la validacion del DTO',
@@ -129,6 +136,10 @@ export class AiPromptTemplatesController {
   }
 
   @Patch(':id')
+  @AuditAction({
+    table: AuditTable.AI_PROMPT_TEMPLATES,
+    action: AuditActionType.UPDATE,
+  })
   @ApiOperation({ summary: 'Actualiza parcialmente un prompt' })
   @ApiBadRequestResponse({
     description: 'El cuerpo no supera la validacion del DTO',
@@ -149,6 +160,10 @@ export class AiPromptTemplatesController {
 
   // Borrado logico: preserva la trazabilidad de las ejecuciones que lo usaron.
   @Delete(':id')
+  @AuditAction({
+    table: AuditTable.AI_PROMPT_TEMPLATES,
+    action: AuditActionType.DELETE,
+  })
   @ApiOperation({ summary: 'Retira un prompt (borrado logico)' })
   @ApiNotFoundResponse({ description: 'No existe ningun prompt con ese id' })
   public async remove(

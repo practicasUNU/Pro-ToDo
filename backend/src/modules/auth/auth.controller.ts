@@ -5,6 +5,7 @@ import {
   HttpCode,
   HttpStatus,
   Post,
+  Req,
   UseGuards,
   UseInterceptors,
 } from '@nestjs/common';
@@ -18,12 +19,14 @@ import {
 import { Throttle, ThrottlerGuard } from '@nestjs/throttler';
 
 import { OTP_THROTTLER_NAME } from '@common/constants/throttler.constants';
+import { extractClientIp } from '@common/utils/client-ip.util';
 import { AuthService } from '@modules/auth/auth.service';
 import { RefreshTokenDto } from '@modules/auth/dto/refresh-token.dto';
 import { RequestOtpDto } from '@modules/auth/dto/request-otp.dto';
 import { VerifyOtpDto } from '@modules/auth/dto/verify-otp.dto';
 import { OtpConfigService } from '@modules/auth/services/otp-config.service';
 
+import type { Request } from 'express';
 import type {
   AuthTokenResponse,
   OtpRequestResponse,
@@ -103,11 +106,13 @@ export class AuthController {
   @ApiTooManyRequestsResponse({ description: 'Limite de intentos excedido' })
   public async validate(
     @Body() verifyOtpDto: VerifyOtpDto,
+    @Req() request: Request,
   ): Promise<AuthTokenResponse> {
     return this.authService.verifyOtp(
       verifyOtpDto.email,
       verifyOtpDto.code,
       verifyOtpDto.deviceId,
+      extractClientIp(request),
     );
   }
 

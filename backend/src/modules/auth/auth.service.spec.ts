@@ -1,9 +1,12 @@
 import { UnauthorizedException } from '@nestjs/common';
 
+import { AuditTable } from '@modules/audit/audit-tables';
+import { AuditActionType } from '@modules/audit/enums/audit-action.enum';
 import { AuthService } from '@modules/auth/auth.service';
 import { UserRole } from '@modules/users/enums/user-role.enum';
 
 import type { EmailService } from '@common/services/email.service';
+import type { AuditLoggerService } from '@modules/audit/services/audit-logger.service';
 import type { JwtService } from '@nestjs/jwt';
 import type { OtpConfigService } from '@modules/auth/services/otp-config.service';
 import type { RefreshTokenService } from '@modules/auth/services/refresh-token.service';
@@ -56,9 +59,11 @@ describe('AuthService (PROT-04.1 / PROT-06.4)', () => {
   let refreshTokenService: jest.Mocked<
     Pick<RefreshTokenService, 'issue' | 'rotate' | 'revoke'>
   >;
+  let auditLogger: jest.Mocked<Pick<AuditLoggerService, 'record'>>;
   let service: AuthService;
 
   beforeEach(() => {
+    auditLogger = { record: jest.fn().mockResolvedValue(undefined) };
     usersService = {
       findByEmailWithOtpSecret: jest.fn(),
       ensureOtpSecret: jest.fn().mockResolvedValue(NEW_SECRET),
@@ -84,6 +89,7 @@ describe('AuthService (PROT-04.1 / PROT-06.4)', () => {
       emailService as unknown as EmailService,
       jwtService as unknown as JwtService,
       refreshTokenService as unknown as RefreshTokenService,
+      auditLogger as unknown as AuditLoggerService,
     );
   });
 
@@ -345,6 +351,77 @@ describe('AuthService (PROT-04.1 / PROT-06.4)', () => {
 
       // 3. Assert
       expect(missingAccountError).toBe(wrongCodeError);
+    });
+  });
+
+  describe('auditoria de inicios de sesion', () => {
+    const CLIENT_IP = '192.168.1.20';
+
+    it('deberia registrar LOGIN con el usuario y la IP cuando el codigo es valido', async () => {
+      // 1. Arrange 📐
+      usersService.findByEmailWithOtpSecret.mockResolvedValue(ACTIVE_USER);
+
+      // 2. Act ⚙️
+      await service.verifyOtp(
+        ACTIVE_USER.email,
+        GENERATED_CODE,
+        DEVICE_ID,
+        CLIENT_IP,
+      );
+
+      // 3. Assert 🎯
+      expect(auditLogger.record).toHaveBeenCalledWith({
+        userId: ACTIVE_USER.id,
+        action: AuditActionType.LOGIN,
+        affectedTable: AuditTable.USERS,
+        recordId: ACTIVE_USER.id,
+        newData: { email: ACTIVE_USER.email },
+        sourceIp: CLIENT_IP,
+      });
+    });
+
+    it('deberia registrar LOGIN_FAILED sin el codigo cuando el codigo es invalido', async () => {
+      // 1. Arrange 📐
+      usersService.findByEmailWithOtpSecret.mockResolvedValue(ACTIVE_USER);
+      otpConfigService.verifyCode.mockResolvedValue(false);
+
+      // 2. Act ⚙️
+      await expect(
+        service.verifyOtp(ACTIVE_USER.email, '000000', DEVICE_ID, CLIENT_IP),
+      ).rejects.toThrow(UnauthorizedException);
+
+      // 3. Assert 🎯: se anota la cuenta atacada, nunca el codigo probado.
+      expect(auditLogger.record).toHaveBeenCalledWith(
+        expect.objectContaining({
+          userId: ACTIVE_USER.id,
+          action: AuditActionType.LOGIN_FAILED,
+          sourceIp: CLIENT_IP,
+        }),
+      );
+      expect(JSON.stringify(auditLogger.record.mock.calls)).not.toContain(
+        '000000',
+      );
+    });
+
+    it('deberia registrar LOGIN_FAILED sin usuario cuando el correo no existe', async () => {
+      // 1. Arrange 📐
+      usersService.findByEmailWithOtpSecret.mockResolvedValue(null);
+
+      // 2. Act ⚙️
+      await expect(
+        service.verifyOtp('fantasma@unuware.com', '123456', DEVICE_ID),
+      ).rejects.toThrow(UnauthorizedException);
+
+      // 3. Assert 🎯
+      expect(auditLogger.record).toHaveBeenCalledWith(
+        expect.objectContaining({
+          userId: null,
+          recordId: null,
+          action: AuditActionType.LOGIN_FAILED,
+          newData: { email: 'fantasma@unuware.com' },
+          sourceIp: null,
+        }),
+      );
     });
   });
 

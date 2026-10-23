@@ -498,6 +498,33 @@ CREATE INDEX idx_telemetria_tokens_flujo_fecha ON telemetria_tokens_ia (flujo_id
 CREATE INDEX idx_telemetria_tokens_proveedor_modelo ON telemetria_tokens_ia (proveedor_ia, modelo_ia, creado_en);
 
 -- =============================================================================
+-- Tabla: audit_eventos (migracion 048)
+-- Duplicada en db/migrations/048-crear-tabla-audit-eventos.sql para las bases
+-- de datos ya creadas.
+--
+-- Historial de acciones humanas: logins, cambios de rol y mutaciones CRUD de
+-- las maestras, con fotografias JSONB antes y despues. Solo insercion.
+-- =============================================================================
+
+CREATE TABLE audit_eventos (
+    id_audit_evento UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    -- NULL en un login fallido con un correo que no existe.
+    usuario_id UUID NULL REFERENCES usuarios(id_usuario) ON DELETE SET NULL,
+    accion VARCHAR(30) NOT NULL
+        CHECK (accion IN ('CREATE', 'UPDATE', 'DELETE', 'ROLE_CHANGE', 'LOGIN', 'LOGIN_FAILED')),
+    tabla_afectada VARCHAR(60) NOT NULL,
+    registro_id VARCHAR(64) NULL,
+    datos_anteriores JSONB NULL,
+    datos_nuevos JSONB NULL,
+    ip_origen VARCHAR(45) NULL,
+    creado_en TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX idx_audit_eventos_creado_en ON audit_eventos (creado_en);
+CREATE INDEX idx_audit_eventos_usuario_fecha ON audit_eventos (usuario_id, creado_en);
+CREATE INDEX idx_audit_eventos_tabla_registro ON audit_eventos (tabla_afectada, registro_id);
+
+-- =============================================================================
 -- Índices de apoyo para claves foráneas de alta consulta
 -- =============================================================================
 
