@@ -4,6 +4,7 @@ import { useQuasar, type QTableColumn } from 'quasar';
 
 import { useUsersStore } from '@stores/users.store';
 
+import AuditDetailsMenu from '@components/shared/AuditDetailsMenu.vue';
 import SafeDeleteModal from '@components/shared/SafeDeleteModal.vue';
 
 import UserDialog from './UserDialog.vue';
@@ -237,6 +238,9 @@ onMounted(loadUsers);
           >
             <q-tooltip>Reactivar usuario</q-tooltip>
           </q-btn>
+          <!-- Ver mas: auditoria de la fila (migracion 045). Va la ultima
+               porque es consulta, no accion. -->
+          <AuditDetailsMenu :audit="cellProps.row" :subject="cellProps.row.email" />
         </q-td>
       </template>
     </q-table>

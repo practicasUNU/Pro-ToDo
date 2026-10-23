@@ -445,7 +445,6 @@ CREATE TABLE precios_modelos_ia (
 
 -- A diferencia de las plantillas, estas semillas SI van aqui: no dependen de
 -- ningun usuario, y sin ellas toda la telemetria naceria marcada como estimada.
--- Las tarifas de GEMINI estan pendientes de confirmar (ver migracion 045).
 INSERT INTO precios_modelos_ia (
     proveedor_ia, modelo_ia,
     tarifa_prompt_usd_mtok, tarifa_completacion_usd_mtok, tarifa_razonamiento_usd_mtok,
@@ -455,7 +454,13 @@ INSERT INTO precios_modelos_ia (
     ('ANTHROPIC', 'claude-sonnet-5-5', 2.00, 10.00, 10.00, '2026-10-01 00:00:00+00'),
     ('ANTHROPIC', 'claude-haiku-4-5',  1.00,  5.00,  5.00, '2026-10-01 00:00:00+00'),
     ('ANTHROPIC', '*',                 4.00, 20.00, 20.00, '2026-10-01 00:00:00+00'),
-    ('OPENAI',    'gpt-4o',            2.50, 10.00, 10.00, '2026-10-01 00:00:00+00');
+    ('OPENAI',    'gpt-4o',            2.50, 10.00, 10.00, '2026-10-01 00:00:00+00'),
+    -- Gemini (migracion 046). Razonamiento a tarifa de salida, como lo factura.
+    ('GEMINI',    'gemini-1.5-flash',  0.075, 0.30,  0.30, '2026-10-01 00:00:00+00'),
+    ('GEMINI',    'gemini-3.6-flash',  0.075, 0.30,  0.30, '2026-10-01 00:00:00+00'),
+    ('GEMINI',    'gemini-1.5-pro',    1.25,  5.00,  5.00, '2026-10-01 00:00:00+00'),
+    ('GEMINI',    'gemini-3.8-flash',  1.25,  5.00,  5.00, '2026-10-01 00:00:00+00'),
+    ('GEMINI',    '*',                 0.10,  0.40,  0.40, '2026-10-01 00:00:00+00');
 
 -- =============================================================================
 -- Tabla: TELEMETRIA_TOKENS_IA (migracion 045)

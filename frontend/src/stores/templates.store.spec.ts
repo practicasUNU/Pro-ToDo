@@ -2,6 +2,7 @@ import { createPinia, setActivePinia } from 'pinia';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { useTemplatesStore } from './templates.store';
+import { AUDIT_FIXTURE } from '@/testing/audit.fixture';
 
 import type { HtmlTemplate } from '@/types/html-template';
 
@@ -21,6 +22,7 @@ const TEMPLATE_ID = '5e2d1c4b-7a89-4f30-b1c2-6d5e4f3a2b10';
 
 /** Plantilla completa; los tests sobrescriben solo lo que les concierne. */
 const buildTemplate = (overrides: Partial<HtmlTemplate> = {}): HtmlTemplate => ({
+  ...AUDIT_FIXTURE,
   id: TEMPLATE_ID,
   name: 'noticia-basica',
   description: 'Cuerpo de noticia con titular',

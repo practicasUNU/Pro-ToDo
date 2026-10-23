@@ -28,7 +28,7 @@ import type { FsmExecutionQueryService } from '@core/fsm/services/fsm-execution-
 import type { PipelineValidatorService } from '@core/fsm/services/pipeline-validator.service';
 import type { WorkflowTemplatesService } from '@modules/workflow-templates/workflow-templates.service';
 import type { Workflow } from './entities/workflow.entity';
-import type { Repository } from 'typeorm';
+import type { FindOneOptions, Repository } from 'typeorm';
 
 const WORKFLOW_ID = 'b6c1f0d2-3e4a-4b5c-8d6e-7f8091a2b3c4';
 const EXECUTION_ID = '1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d';
@@ -153,7 +153,20 @@ interface ServiceHarness {
  */
 const buildHarness = (): ServiceHarness => {
   const repository: WorkflowRepositoryMock = {
-    findOne: jest.fn().mockResolvedValue(buildWorkflow()),
+    // Devuelve lo ULTIMO que se guardo, si lo hay: el alta y la difusion de
+    // mutaciones releen la fila para resolver los autores de la auditoria
+    // (`AUDIT_RELATIONS`), y esa relectura debe ver lo que se acaba de escribir.
+    // Lee de `mock.results` para seguir funcionando cuando una prueba sustituye
+    // `save` con `mockResolvedValue`.
+    findOne: jest.fn<Promise<Workflow | null>, [FindOneOptions<Workflow>]>(
+      async () => {
+        const lastSave = repository.save.mock.results.at(-1);
+
+        return lastSave === undefined
+          ? buildWorkflow()
+          : ((await lastSave.value) as Workflow);
+      },
+    ),
     find: jest.fn().mockResolvedValue([buildWorkflow()]),
     // `create` devuelve la entidad sin persistir; `save` la que quedo en la BD.
     create: jest.fn((partial: Partial<Workflow>) => partial as Workflow),
@@ -1052,6 +1065,7 @@ describe('WorkflowsService (difusion de mutaciones CRUD)', () => {
       WORKFLOW_ID,
       { name: 'Notiweb v2' },
       UserRole.ADMIN,
+      AUTHOR_ID,
     );
 
     // 3. Assert 🎯: sin esto la tabla del otro administrador se queda con el
@@ -1088,6 +1102,7 @@ describe('WorkflowsService (difusion de mutaciones CRUD)', () => {
       WORKFLOW_ID,
       { status: WorkflowStatus.INACTIVO },
       UserRole.ADMIN,
+      AUTHOR_ID,
     );
 
     // 3. Assert 🎯
@@ -1109,6 +1124,7 @@ describe('WorkflowsService (difusion de mutaciones CRUD)', () => {
       WORKFLOW_ID,
       { name: 'Notiweb v2' },
       UserRole.ADMIN,
+      AUTHOR_ID,
     );
 
     // 3. Assert 🎯
@@ -1443,6 +1459,7 @@ describe('WorkflowsService (edicion y habilitacion de flujos)', () => {
         WORKFLOW_ID,
         { pipelineSchema: buildSchema() },
         UserRole.ADMIN,
+        AUTHOR_ID,
       );
 
       // 3. Assert 🎯
@@ -1463,6 +1480,7 @@ describe('WorkflowsService (edicion y habilitacion de flujos)', () => {
         WORKFLOW_ID,
         { name: 'Notiweb renombrado' },
         UserRole.ADMIN,
+        AUTHOR_ID,
       );
 
       // 3. Assert 🎯
@@ -1727,5 +1745,53 @@ describe('WorkflowsService (detalle para el asistente de edicion)', () => {
       // Y sigue sin arrastrar las PAUSADO, que es lo que el descarte respeta.
       expect(engine.abortExecutionsForFlow).not.toHaveBeenCalled();
     });
+  });
+});
+
+describe('WorkflowsService (auditoria, migracion 045)', () => {
+  const EDITOR_ID = '3f1c2b64-8a5e-4c2f-9d3a-7b6e5f4c1a20';
+
+  it('A.1 deberia firmar el alta con el autor en creado_por y actualizado_por', async () => {
+    // 1. Arrange 📐
+    const { service, repository } = buildHarness();
+
+    // 2. Act ⚙️
+    await service.createWorkflow(buildCreateDto(), AUTHOR_ID, UserRole.ADMIN);
+
+    // 3. Assert 🎯
+    expect(repository.save).toHaveBeenCalledWith(
+      expect.objectContaining({
+        createdByUserId: AUTHOR_ID,
+        updatedByUserId: AUTHOR_ID,
+      }),
+    );
+  });
+
+  it('A.2 deberia firmar la edicion en actualizado_por sin tocar creado_por', async () => {
+    // 1. Arrange 📐: la fila llega con su autor original.
+    const { service, repository } = buildHarness();
+    repository.findOne.mockResolvedValue(
+      buildWorkflow({
+        createdByUserId: AUTHOR_ID,
+        updatedByUserId: AUTHOR_ID,
+      }),
+    );
+
+    // 2. Act ⚙️
+    await service.updateWorkflow(
+      WORKFLOW_ID,
+      { name: 'Notiweb v2' },
+      UserRole.ADMIN,
+      EDITOR_ID,
+    );
+
+    // 3. Assert 🎯: la relacion se vacia para que TypeORM escriba la columna.
+    expect(repository.save).toHaveBeenCalledWith(
+      expect.objectContaining({
+        createdByUserId: AUTHOR_ID,
+        updatedByUserId: EDITOR_ID,
+        updatedBy: undefined,
+      }),
+    );
   });
 });

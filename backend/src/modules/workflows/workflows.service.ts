@@ -8,6 +8,12 @@ import {
 import { InjectRepository } from '@nestjs/typeorm';
 
 import { CrudEventsCoordinator } from '@common/services/crud-events.coordinator';
+import {
+  AUDIT_RELATIONS,
+  stampCreated,
+  stampUpdated,
+  toAuditFields,
+} from '@common/utils/audit.util';
 import { FlowPollingCoordinator } from '@common/services/flow-polling.coordinator';
 import { FsmEngineService } from '@core/fsm/services/fsm-engine.service';
 import { WorkflowStatusCoordinator } from '@common/services/workflow-status.coordinator';
@@ -337,6 +343,7 @@ export class WorkflowsService
   > {
     const workflows = await this.workflowRepository.find({
       order: { createdAt: 'DESC' },
+      relations: AUDIT_RELATIONS,
     });
 
     const selectable = workflows.filter(
@@ -426,15 +433,18 @@ export class WorkflowsService
       createdById: userId,
     });
 
-    const saved = await this.workflowRepository.save(workflow);
+    const saved = await this.workflowRepository.save(
+      stampCreated(workflow, userId),
+    );
 
     this.logger.log(
       `Flujo creado: "${saved.name}" (${saved.id}) | nodos=${Object.keys(schema.nodes).length} | estado=${saved.status} | plantilla=${saved.templateId ?? 'ninguna'} | autor=${userId}`,
     );
 
     // Recien creado no puede tener ejecucion viva, asi que el mapeador puro
-    // basta y nos ahorramos la consulta de `buildSummary`.
-    const summary = this.toPipelineSummary(saved);
+    // basta y nos ahorramos la consulta de `buildSummary`. Si se relee la fila
+    // para resolver los autores de la auditoria.
+    const summary = this.toPipelineSummary(await this.findOne(saved.id));
     // Despues de confirmar la escritura, nunca antes: emitir en vuelo haria que
     // otro panel pintase una fila que PostgreSQL aun no tiene.
     this.publishMutation('CREATED', summary);
@@ -481,9 +491,11 @@ export class WorkflowsService
     workflowId: string,
     updateWorkflowDto: UpdateWorkflowDto,
     userRole: UserRole,
+    actorId: string,
   ): Promise<PipelineSummaryResponseDto> {
     const workflow = await this.workflowRepository.findOne({
       where: { id: workflowId },
+      relations: AUDIT_RELATIONS,
     });
 
     if (!workflow) {
@@ -533,7 +545,9 @@ export class WorkflowsService
       workflow.status = updateWorkflowDto.status;
     }
 
-    const saved = await this.workflowRepository.save(workflow);
+    const saved = await this.workflowRepository.save(
+      stampUpdated(workflow, actorId),
+    );
 
     this.logger.log(
       `Flujo actualizado: "${saved.name}" (${saved.id}) | estado=${saved.status}`,
@@ -873,9 +887,24 @@ export class WorkflowsService
     );
 
     return this.toPipelineSummary(
-      workflow,
+      await this.withAuditRelations(workflow),
       this.indexLiveExecutions(live).get(workflow.id) ?? null,
     );
+  }
+
+  /**
+   * El mismo flujo con los autores de la auditoria resueltos.
+   *
+   * Los caminos del motor (`pauseFlow`, `reactivateAfterResume`...) cargan la
+   * fila sin relaciones, y tras `stampUpdated` la relacion `updatedBy` queda
+   * vacia a proposito. Publicar ese resumen tal cual haria que el cliente
+   * repintase la fila con los autores en `null`. `undefined` significa "no
+   * cargada"; un `null` cargado es un autor que no consta y se respeta.
+   */
+  private async withAuditRelations(workflow: Workflow): Promise<Workflow> {
+    return workflow.createdBy === undefined || workflow.updatedBy === undefined
+      ? this.findOne(workflow.id)
+      : workflow;
   }
 
   /**
@@ -909,6 +938,7 @@ export class WorkflowsService
                 `El flujo "${workflow.id}" apunta al nodo inexistente "${orphanNodeId}": la topologia se truncara ahi.`,
               ),
             ),
+      ...toAuditFields(workflow),
     };
   }
 
@@ -988,7 +1018,10 @@ export class WorkflowsService
    * @throws NotFoundException Si no existe ninguna fila con ese `id_flujo`.
    */
   public async findOne(id: string): Promise<Workflow> {
-    const workflow = await this.workflowRepository.findOne({ where: { id } });
+    const workflow = await this.workflowRepository.findOne({
+      where: { id },
+      relations: AUDIT_RELATIONS,
+    });
 
     if (workflow === null) {
       throw new NotFoundException(`No existe el flujo "${id}" en flujos.`);

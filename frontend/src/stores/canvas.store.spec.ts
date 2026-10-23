@@ -5,6 +5,7 @@ import { useCanvasStore } from './canvas.store';
 
 import { ExecutionState } from '@/types/execution';
 import { WorkflowStatus, NodeType } from '@/types/pipeline';
+import { AUDIT_FIXTURE } from '@/testing/audit.fixture';
 
 import type {
   ExecutionDetail,
@@ -80,6 +81,7 @@ const buildSchema = (): AssembledPipelineSchema => ({
 });
 
 const buildWorkflow = (): WorkflowDetail => ({
+  ...AUDIT_FIXTURE,
   id: FLOW_ID,
   name: 'Notiweb - publicacion automatica',
   description: null,

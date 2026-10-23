@@ -1,6 +1,7 @@
 // Replica exacta de los contratos del motor FSM (NestJS). Cualquier cambio en
 // `@core/fsm/types/pipeline-schema.types.ts` debe reflejarse aqui.
 
+import type { AuditableData } from '@/types/auditable';
 import type { ExecutionState } from '@/types/execution';
 
 /**
@@ -199,7 +200,7 @@ export enum WorkflowStatus {
   PAUSADO = 'PAUSADO',
 }
 
-export interface PipelineSummary {
+export interface PipelineSummary extends AuditableData {
   readonly id: string;
   readonly name: string;
   readonly description: string | null;
@@ -240,7 +241,7 @@ export interface WorkflowDetail extends PipelineSummary {
  * de un TRIGGER_IMAP llevan `host` y `passwordEnvKey`, y para dibujar la
  * secuencia de pasos basta la topologia proyectada.
  */
-export interface WorkflowTemplateSummary {
+export interface WorkflowTemplateSummary extends AuditableData {
   readonly id: string;
   readonly name: string;
   readonly description: string | null;

@@ -1,3 +1,5 @@
+import type { AuditableData } from '@/types/auditable';
+
 /**
  * Contratos del repositorio de prompts de IA (PROT-15.2).
  *
@@ -11,7 +13,7 @@
  * una cadena ISO-8601, y tiparlas como `Date` seria una mentira que solo se
  * descubriria al llamar a un metodo que no existe.
  */
-export interface AiPromptTemplate {
+export interface AiPromptTemplate extends AuditableData {
   id: string;
   /**
    * Clave de maquina, inmutable. Es lo que se teclea en `promptCode` del nodo
@@ -24,8 +26,6 @@ export interface AiPromptTemplate {
   description: string | null;
   active: boolean;
   createdById: string;
-  createdAt: string;
-  updatedAt: string;
 }
 
 /** Prompt con su instruccion completa, tal como lo devuelve `GET /ai-prompt-templates/:id`. */

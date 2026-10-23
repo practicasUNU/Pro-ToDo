@@ -8,6 +8,7 @@ import { useCanvasStore } from '@stores/canvas.store';
 
 import { ExecutionState } from '@/types/execution';
 import { NodeType, WorkflowStatus } from '@/types/pipeline';
+import { AUDIT_FIXTURE } from '@/testing/audit.fixture';
 
 import type { ExecutionDetail } from '@/types/execution';
 import type { WorkflowDetail } from '@/types/pipeline';
@@ -45,6 +46,7 @@ const fetchExecution = vi.mocked(executionsService.fetchExecution);
 const WorkflowCanvasPage = (await import('./WorkflowCanvasPage.vue')).default;
 
 const buildWorkflow = (status: WorkflowStatus): WorkflowDetail => ({
+  ...AUDIT_FIXTURE,
   id: FLOW_ID,
   name: 'Notiweb - publicacion automatica',
   description: null,

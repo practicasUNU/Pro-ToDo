@@ -84,6 +84,7 @@ import { fetchWorkflows } from '@services/workflows.service';
 import { joinFlowRoom, leaveFlowRoom } from '@services/socket-events.service';
 
 import { ExecutionState } from '@/types/execution';
+import { AUDIT_FIXTURE } from '@/testing/audit.fixture';
 
 import type { ExecutionSummary } from '@/types/execution';
 import type { PipelineSummary } from '@/types/pipeline';
@@ -93,6 +94,7 @@ const OTHER_FLOW_ID = 'c4e2d3f5-6b7c-4d8e-9f0a-1b2c3d4e5f60';
 const EXECUTION_ID = 'd5f3e4a6-7c8d-4e9f-a0b1-2c3d4e5f6071';
 
 const buildWorkflow = (overrides: Partial<PipelineSummary> = {}): PipelineSummary => ({
+  ...AUDIT_FIXTURE,
   id: FLOW_ID,
   name: 'Boletin diario',
   description: null,

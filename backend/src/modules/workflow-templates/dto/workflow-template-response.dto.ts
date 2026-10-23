@@ -1,5 +1,6 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 
+import { AuditFieldsResponseDto } from '@common/dto/audit-response.dto';
 import { PipelineStepDto } from '@modules/workflows/dto/pipeline-summary-response.dto';
 
 import type { PipelineExecutionPolicy } from '@core/fsm/types/pipeline-schema.types';
@@ -18,7 +19,7 @@ import type { PipelineExecutionPolicy } from '@core/fsm/types/pipeline-schema.ty
  * la secuencia de pasos. Quien si lo necesita es el editor administrativo, y
  * para eso esta `WorkflowTemplateDetailResponseDto`.
  */
-export class WorkflowTemplateResponseDto {
+export class WorkflowTemplateResponseDto extends AuditFieldsResponseDto {
   @ApiProperty({
     description:
       'Identificador de la plantilla (`plantillas_flujo.id_plantilla_flujo`)',

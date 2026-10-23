@@ -12,6 +12,7 @@ import TemplateMapperConfig from '@components/nodes/TemplateMapperConfig.vue';
 import { useTemplateMapperStore } from '@stores/nodes/template-mapper.store';
 
 import { NodeType } from '@/types/pipeline';
+import { AUDIT_FIXTURE } from '@/testing/audit.fixture';
 
 import type { UpstreamNamespace } from '@stores/nodes/node-store-registry';
 
@@ -63,6 +64,7 @@ const UPSTREAM: UpstreamNamespace[] = [
 ];
 
 const buildTemplate = (requiredVariables: string[]): HtmlTemplate => ({
+  ...AUDIT_FIXTURE,
   id: TEMPLATE_ID,
   name: 'noticia-basica',
   description: null,

@@ -5,6 +5,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { useWorkflowsStore } from './workflows.store';
 
 import { WorkflowStatus, NodeType } from '@/types/pipeline';
+import { AUDIT_FIXTURE } from '@/testing/audit.fixture';
 
 import type { PipelineSummary } from '@/types/pipeline';
 
@@ -24,6 +25,7 @@ const OTHER_WORKFLOW_ID = 'a2b3c4d5-e6f7-4809-9b0c-1d2e3f4a5b6c';
 const TEMPLATE_ID = 'b3f1c2d4-5a6b-4c7d-8e9f-0a1b2c3d4e5f';
 
 const buildWorkflow = (overrides: Partial<PipelineSummary> = {}): PipelineSummary => ({
+  ...AUDIT_FIXTURE,
   id: WORKFLOW_ID,
   name: 'Notiweb - publicacion automatica',
   description: 'Publica noticias entrantes en el CMS',

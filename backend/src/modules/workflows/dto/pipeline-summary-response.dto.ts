@@ -1,5 +1,7 @@
 import { ApiProperty } from '@nestjs/swagger';
 
+import { AuditFieldsResponseDto } from '@common/dto/audit-response.dto';
+
 import { ExecutionState } from '@core/fsm/types/fsm.enums';
 import { WorkflowStatus } from '@modules/workflows/enums/workflow-status.enum';
 
@@ -48,7 +50,7 @@ export class PipelineStepDto {
  * Solo se listan los flujos que YA tienen `configuracion_pipeline`: uno sin
  * esquema esta a medio crear y no sirve como plantilla de la que partir.
  */
-export class PipelineSummaryResponseDto {
+export class PipelineSummaryResponseDto extends AuditFieldsResponseDto {
   @ApiProperty({ description: 'Identificador del flujo (`flujos.id_flujo`)' })
   readonly id: string;
 

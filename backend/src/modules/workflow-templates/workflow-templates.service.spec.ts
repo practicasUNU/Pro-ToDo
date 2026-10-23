@@ -16,6 +16,8 @@ import type { Repository } from 'typeorm';
 import { CrudEventsCoordinator } from '@common/services/crud-events.coordinator';
 
 const TEMPLATE_ID = '5e2d1c4b-7a89-4f30-b1c2-6d5e4f3a2b10';
+/** Usuario que firma la auditoria (`creado_por` / `actualizado_por`). */
+const ACTOR_ID = '3f1c2b64-8a5e-4c2f-9d3a-7b6e5f4c1a20';
 const OTHER_TEMPLATE_ID = '7f3a2b1c-9d8e-4f60-a1b2-3c4d5e6f7a80';
 const TRIGGER_NODE_ID = 'trigger_imap';
 const MAPPER_NODE_ID = 'nodo_mapeador';
@@ -130,6 +132,7 @@ describe('WorkflowTemplatesService · catalogo de plantillas de flujo', () => {
       expect(repository.find).toHaveBeenCalledWith({
         where: { active: true },
         order: { name: 'ASC' },
+        relations: { createdBy: true, updatedBy: true },
       });
     });
 
@@ -145,6 +148,7 @@ describe('WorkflowTemplatesService · catalogo de plantillas de flujo', () => {
       expect(repository.find).toHaveBeenCalledWith({
         where: {},
         order: { name: 'ASC' },
+        relations: { createdBy: true, updatedBy: true },
       });
     });
 
@@ -217,7 +221,7 @@ describe('WorkflowTemplatesService · catalogo de plantillas de flujo', () => {
         .mockResolvedValue(buildTemplate()); // findOne del retorno
 
       // 2. Act
-      await service.create(buildCreateDto());
+      await service.create(buildCreateDto(), ACTOR_ID);
 
       // 3. Assert
       expect(validateSchema).toHaveBeenCalledTimes(1);
@@ -237,7 +241,7 @@ describe('WorkflowTemplatesService · catalogo de plantillas de flujo', () => {
         .mockResolvedValue(buildTemplate());
 
       // 2. Act
-      await service.create(buildCreateDto());
+      await service.create(buildCreateDto(), ACTOR_ID);
 
       // 3. Assert: al contrario que un flujo, una plantilla no dispara nada, asi
       //    que publicarla de entrada no tiene riesgo.
@@ -254,7 +258,7 @@ describe('WorkflowTemplatesService · catalogo de plantillas de flujo', () => {
         .mockResolvedValue(buildTemplate({ active: false }));
 
       // 2. Act
-      await service.create(buildCreateDto({ active: false }));
+      await service.create(buildCreateDto({ active: false }), ACTOR_ID);
 
       // 3. Assert
       expect(repository.create).toHaveBeenCalledWith(
@@ -268,7 +272,7 @@ describe('WorkflowTemplatesService · catalogo de plantillas de flujo', () => {
       repository.findOne.mockResolvedValue(buildTemplate());
 
       // 2. Act & 3. Assert
-      await expect(service.create(buildCreateDto())).rejects.toThrow(
+      await expect(service.create(buildCreateDto(), ACTOR_ID)).rejects.toThrow(
         ConflictException,
       );
       // El nombre se comprueba ANTES del grafo: es la validacion mas barata y la
@@ -285,7 +289,7 @@ describe('WorkflowTemplatesService · catalogo de plantillas de flujo', () => {
       );
 
       // 2. Act & 3. Assert
-      await expect(service.create(buildCreateDto())).rejects.toThrow(
+      await expect(service.create(buildCreateDto(), ACTOR_ID)).rejects.toThrow(
         BadRequestException,
       );
       expect(repository.save).not.toHaveBeenCalled();
@@ -301,6 +305,7 @@ describe('WorkflowTemplatesService · catalogo de plantillas de flujo', () => {
       // 2. Act
       await service.create(
         buildCreateDto({ name: '  Notiweb  ', description: '  Ingesta  ' }),
+        ACTOR_ID,
       );
 
       // 3. Assert
@@ -323,7 +328,7 @@ describe('WorkflowTemplatesService · catalogo de plantillas de flujo', () => {
       };
 
       // 2. Act
-      await service.create(dto);
+      await service.create(dto, ACTOR_ID);
 
       // 3. Assert: la columna es nullable; un `undefined` dejaria el campo sin
       //    definir en la entidad en vez de explicitamente vacio.
@@ -340,9 +345,13 @@ describe('WorkflowTemplatesService · catalogo de plantillas de flujo', () => {
       repository.findOne.mockResolvedValue(buildTemplate());
 
       // 2. Act
-      const updated = await service.update(TEMPLATE_ID, {
-        name: 'Notiweb - correo a CMS',
-      });
+      const updated = await service.update(
+        TEMPLATE_ID,
+        {
+          name: 'Notiweb - correo a CMS',
+        },
+        ACTOR_ID,
+      );
 
       // 3. Assert: el nombre propio no es un conflicto; sin la comparacion de id
       //    seria imposible guardar una plantilla sin renombrarla.
@@ -358,7 +367,7 @@ describe('WorkflowTemplatesService · catalogo de plantillas de flujo', () => {
 
       // 2. Act & 3. Assert
       await expect(
-        service.update(TEMPLATE_ID, { name: 'Otro nombre' }),
+        service.update(TEMPLATE_ID, { name: 'Otro nombre' }, ACTOR_ID),
       ).rejects.toThrow(ConflictException);
     });
 
@@ -368,9 +377,13 @@ describe('WorkflowTemplatesService · catalogo de plantillas de flujo', () => {
       repository.findOne.mockResolvedValue(buildTemplate());
 
       // 2. Act
-      await service.update(TEMPLATE_ID, {
-        pipelineSchema: buildSchema() as unknown as Record<string, unknown>,
-      });
+      await service.update(
+        TEMPLATE_ID,
+        {
+          pipelineSchema: buildSchema() as unknown as Record<string, unknown>,
+        },
+        ACTOR_ID,
+      );
 
       // 3. Assert: una plantilla es el punto de partida de N flujos; guardar un
       //    grafo roto lo propagaria a cada uno de ellos.
@@ -383,7 +396,7 @@ describe('WorkflowTemplatesService · catalogo de plantillas de flujo', () => {
       repository.findOne.mockResolvedValue(buildTemplate());
 
       // 2. Act
-      await service.update(TEMPLATE_ID, { active: false });
+      await service.update(TEMPLATE_ID, { active: false }, ACTOR_ID);
 
       // 3. Assert: un solo verbo cubre editar, activar e inactivar. Comprobar
       //    `!== undefined` y no la veracidad del valor es lo que permite enviar
@@ -400,7 +413,7 @@ describe('WorkflowTemplatesService · catalogo de plantillas de flujo', () => {
       repository.findOne.mockResolvedValue(buildTemplate());
 
       // 2. Act
-      await service.update(TEMPLATE_ID, { active: false });
+      await service.update(TEMPLATE_ID, { active: false }, ACTOR_ID);
 
       // 3. Assert
       expect(repository.save).toHaveBeenCalledWith(
@@ -418,7 +431,7 @@ describe('WorkflowTemplatesService · catalogo de plantillas de flujo', () => {
 
       // 2. Act & 3. Assert
       await expect(
-        service.update(TEMPLATE_ID, { active: false }),
+        service.update(TEMPLATE_ID, { active: false }, ACTOR_ID),
       ).rejects.toThrow(NotFoundException);
     });
   });
@@ -430,7 +443,7 @@ describe('WorkflowTemplatesService · catalogo de plantillas de flujo', () => {
       repository.findOne.mockResolvedValue(buildTemplate());
 
       // 2. Act
-      await service.softDelete(TEMPLATE_ID);
+      await service.softDelete(TEMPLATE_ID, ACTOR_ID);
 
       // 3. Assert: los flujos instanciados apuntan a esta fila con
       //    `id_plantilla_origen`; borrarla los dejaria sin la pieza que explica
@@ -446,7 +459,7 @@ describe('WorkflowTemplatesService · catalogo de plantillas de flujo', () => {
       repository.findOne.mockResolvedValue(null);
 
       // 2. Act & 3. Assert
-      await expect(service.softDelete(TEMPLATE_ID)).rejects.toThrow(
+      await expect(service.softDelete(TEMPLATE_ID, ACTOR_ID)).rejects.toThrow(
         NotFoundException,
       );
       expect(repository.save).not.toHaveBeenCalled();

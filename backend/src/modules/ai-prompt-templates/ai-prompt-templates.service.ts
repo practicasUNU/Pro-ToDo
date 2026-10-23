@@ -7,6 +7,12 @@ import {
 import { InjectRepository } from '@nestjs/typeorm';
 
 import { CrudEventsCoordinator } from '@common/services/crud-events.coordinator';
+import {
+  AUDIT_RELATIONS,
+  stampCreated,
+  stampUpdated,
+  toAuditFields,
+} from '@common/utils/audit.util';
 
 import { extractNamespaceRoots } from '@core/fsm/context/state-payload.context';
 
@@ -135,6 +141,7 @@ export class AiPromptTemplatesService {
     const prompts = await this.aiPromptTemplateRepository.find({
       where,
       order: { name: 'ASC' },
+      relations: AUDIT_RELATIONS,
     });
 
     return prompts.map((prompt) => this.toSummary(prompt));
@@ -164,6 +171,7 @@ export class AiPromptTemplatesService {
   public async findByCode(code: string): Promise<AiPromptTemplate> {
     const prompt = await this.aiPromptTemplateRepository.findOne({
       where: { code: code.trim() },
+      relations: AUDIT_RELATIONS,
     });
 
     if (!prompt) {
@@ -188,6 +196,7 @@ export class AiPromptTemplatesService {
   public async findOneEntity(id: string): Promise<AiPromptTemplate> {
     const prompt = await this.aiPromptTemplateRepository.findOne({
       where: { id },
+      relations: AUDIT_RELATIONS,
     });
 
     if (!prompt) {
@@ -250,7 +259,9 @@ export class AiPromptTemplatesService {
       createdById,
     });
 
-    const saved = await this.aiPromptTemplateRepository.save(prompt);
+    const saved = await this.aiPromptTemplateRepository.save(
+      stampCreated(prompt, createdById),
+    );
     this.logger.log(
       `Prompt "${name}" (${code}) creado por el usuario ${createdById}`,
     );
@@ -271,6 +282,7 @@ export class AiPromptTemplatesService {
   public async update(
     id: string,
     updateAiPromptTemplateDto: UpdateAiPromptTemplateDto,
+    actorId: string,
   ): Promise<AiPromptTemplateDetailResponseDto> {
     const prompt = await this.findOneEntity(id);
 
@@ -298,7 +310,9 @@ export class AiPromptTemplatesService {
       prompt.active = updateAiPromptTemplateDto.active;
     }
 
-    const saved = await this.aiPromptTemplateRepository.save(prompt);
+    const saved = await this.aiPromptTemplateRepository.save(
+      stampUpdated(prompt, actorId),
+    );
     this.logger.log(`Prompt "${saved.name}" actualizado`);
 
     const detail = await this.findOne(saved.id);
@@ -316,12 +330,15 @@ export class AiPromptTemplatesService {
    */
   public async softDelete(
     id: string,
+    actorId: string,
   ): Promise<AiPromptTemplateDetailResponseDto> {
     const prompt = await this.findOneEntity(id);
 
     prompt.active = false;
 
-    const saved = await this.aiPromptTemplateRepository.save(prompt);
+    const saved = await this.aiPromptTemplateRepository.save(
+      stampUpdated(prompt, actorId),
+    );
     this.logger.log(`Prompt "${saved.name}" retirado (borrado logico)`);
 
     const detail = await this.findOne(saved.id);
@@ -357,8 +374,7 @@ export class AiPromptTemplatesService {
       description: prompt.description,
       active: prompt.active,
       createdById: prompt.createdById,
-      createdAt: prompt.createdAt,
-      updatedAt: prompt.updatedAt,
+      ...toAuditFields(prompt),
     };
   }
 

@@ -1,9 +1,11 @@
+import type { AuditableData } from '@/types/auditable';
+
 export enum UserRole {
   ADMIN = 'ADMIN',
   EDITOR = 'EDITOR',
 }
 
-export interface User {
+export interface User extends AuditableData {
   id: string;
   email: string;
   role: UserRole;

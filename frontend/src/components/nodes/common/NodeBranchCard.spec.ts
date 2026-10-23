@@ -9,6 +9,7 @@ import { useFlujoDraftStore } from '@stores/flujo-draft.store';
 
 import { NodeType } from '@/types/pipeline';
 import { MULTIMODAL_FALLBACK_CODE, SHARED_ALERT_NODE_ID } from '@/types/nodes/error-branch.types';
+import { AUDIT_FIXTURE } from '@/testing/audit.fixture';
 
 import type { WorkflowTemplateDetail, WorkflowTemplateSummary } from '@/types/pipeline';
 
@@ -69,6 +70,7 @@ const TOPOLOGY: WorkflowTemplateSummary['topology'] = [
 ];
 
 const TEMPLATE: WorkflowTemplateSummary = {
+  ...AUDIT_FIXTURE,
   id: TEMPLATE_ID,
   name: 'Notiweb',
   description: null,

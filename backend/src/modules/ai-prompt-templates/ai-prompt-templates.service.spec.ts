@@ -94,6 +94,7 @@ describe('AiPromptTemplatesService · repositorio de prompts de IA', () => {
       expect(repository.find).toHaveBeenCalledWith({
         where: { active: true },
         order: { name: 'ASC' },
+        relations: { createdBy: true, updatedBy: true },
       });
     });
 
@@ -109,6 +110,7 @@ describe('AiPromptTemplatesService · repositorio de prompts de IA', () => {
       expect(repository.find).toHaveBeenCalledWith({
         where: {},
         order: { name: 'ASC' },
+        relations: { createdBy: true, updatedBy: true },
       });
     });
 
@@ -405,7 +407,11 @@ describe('AiPromptTemplatesService · repositorio de prompts de IA', () => {
       repository.findOne.mockResolvedValue(buildPrompt());
 
       // 2. Act: solo se toca la instruccion.
-      await service.update(PROMPT_ID, { promptText: 'Resume: {{x.y}}' });
+      await service.update(
+        PROMPT_ID,
+        { promptText: 'Resume: {{x.y}}' },
+        AUTHOR_ID,
+      );
 
       // 3. Assert
       const [saved] = repository.save.mock.calls[0] as [AiPromptTemplate];
@@ -422,7 +428,7 @@ describe('AiPromptTemplatesService · repositorio de prompts de IA', () => {
       repository.findOne.mockResolvedValue(buildPrompt({ active: false }));
 
       // 2. Act
-      await service.update(PROMPT_ID, { active: true });
+      await service.update(PROMPT_ID, { active: true }, AUTHOR_ID);
 
       // 3. Assert
       const [saved] = repository.save.mock.calls[0] as [AiPromptTemplate];
@@ -436,7 +442,7 @@ describe('AiPromptTemplatesService · repositorio de prompts de IA', () => {
 
       // 2. Act & 3. Assert
       await expect(
-        service.update(PROMPT_ID, { name: 'extraccion-noticia-es' }),
+        service.update(PROMPT_ID, { name: 'extraccion-noticia-es' }, AUTHOR_ID),
       ).resolves.toBeDefined();
     });
 
@@ -449,7 +455,7 @@ describe('AiPromptTemplatesService · repositorio de prompts de IA', () => {
 
       // 2. Act & 3. Assert
       await expect(
-        service.update(PROMPT_ID, { name: 'otro-prompt' }),
+        service.update(PROMPT_ID, { name: 'otro-prompt' }, AUTHOR_ID),
       ).rejects.toThrow(ConflictException);
     });
 
@@ -460,7 +466,7 @@ describe('AiPromptTemplatesService · repositorio de prompts de IA', () => {
 
       // 2. Act & 3. Assert
       await expect(
-        service.update(PROMPT_ID, { promptText: 'x' }),
+        service.update(PROMPT_ID, { promptText: 'x' }, AUTHOR_ID),
       ).rejects.toThrow(NotFoundException);
     });
   });
@@ -472,7 +478,7 @@ describe('AiPromptTemplatesService · repositorio de prompts de IA', () => {
       repository.findOne.mockResolvedValue(buildPrompt());
 
       // 2. Act
-      await service.softDelete(PROMPT_ID);
+      await service.softDelete(PROMPT_ID, AUTHOR_ID);
 
       // 3. Assert: una ejecucion ya trazada apunta al prompt con el que se
       //    genero su salida; borrarlo dejaria la auditoria coja.
@@ -487,7 +493,7 @@ describe('AiPromptTemplatesService · repositorio de prompts de IA', () => {
       repository.findOne.mockResolvedValue(null);
 
       // 2. Act & 3. Assert
-      await expect(service.softDelete(PROMPT_ID)).rejects.toThrow(
+      await expect(service.softDelete(PROMPT_ID, AUTHOR_ID)).rejects.toThrow(
         NotFoundException,
       );
       expect(repository.save).not.toHaveBeenCalled();
@@ -506,6 +512,7 @@ describe('AiPromptTemplatesService · repositorio de prompts de IA', () => {
       // 3. Assert 🎯
       expect(repository.findOne).toHaveBeenCalledWith({
         where: { code: PROMPT_CODE },
+        relations: { createdBy: true, updatedBy: true },
       });
       expect(prompt.code).toBe(PROMPT_CODE);
       // Entidad y no DTO: el consumidor es interno (la estrategia del nodo IA).
@@ -570,9 +577,13 @@ describe('AiPromptTemplatesService · repositorio de prompts de IA', () => {
       repository.findOne.mockResolvedValue(buildPrompt());
 
       // 2. Act ⚙️
-      await service.update(PROMPT_ID, {
-        code: 'OTRO_CODIGO',
-      });
+      await service.update(
+        PROMPT_ID,
+        {
+          code: 'OTRO_CODIGO',
+        },
+        AUTHOR_ID,
+      );
 
       // 3. Assert 🎯
       expect(repository.save).toHaveBeenCalledWith(

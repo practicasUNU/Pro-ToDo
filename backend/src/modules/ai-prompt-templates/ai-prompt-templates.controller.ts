@@ -138,8 +138,13 @@ export class AiPromptTemplatesController {
   public async update(
     @Param('id', ParseUUIDPipe) id: string,
     @Body() updateAiPromptTemplateDto: UpdateAiPromptTemplateDto,
+    @CurrentUser() currentUser: AuthenticatedUser,
   ): Promise<AiPromptTemplateDetailResponseDto> {
-    return this.aiPromptTemplatesService.update(id, updateAiPromptTemplateDto);
+    return this.aiPromptTemplatesService.update(
+      id,
+      updateAiPromptTemplateDto,
+      currentUser.id,
+    );
   }
 
   // Borrado logico: preserva la trazabilidad de las ejecuciones que lo usaron.
@@ -148,7 +153,8 @@ export class AiPromptTemplatesController {
   @ApiNotFoundResponse({ description: 'No existe ningun prompt con ese id' })
   public async remove(
     @Param('id', ParseUUIDPipe) id: string,
+    @CurrentUser() currentUser: AuthenticatedUser,
   ): Promise<AiPromptTemplateDetailResponseDto> {
-    return this.aiPromptTemplatesService.softDelete(id);
+    return this.aiPromptTemplatesService.softDelete(id, currentUser.id);
   }
 }

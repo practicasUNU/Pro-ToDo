@@ -86,6 +86,7 @@ import { useUsersStore } from '@stores/users.store';
 import { useWorkflowsStore } from '@stores/workflows.store';
 
 import { UserRole } from '@/types/user';
+import { AUDIT_FIXTURE } from '@/testing/audit.fixture';
 
 import type { CrudMutationPayload } from '@/types/crud-events';
 
@@ -94,6 +95,7 @@ const IP_ID = 'c4e2d3f5-6b7c-4d8e-9f0a-1b2c3d4e5f60';
 const WORKFLOW_ID = 'd5f3e4a6-7c8d-4e9f-a0b1-2c3d4e5f6071';
 
 const buildUser = (overrides = {}) => ({
+  ...AUDIT_FIXTURE,
   id: USER_ID,
   email: 'operador@unuware.com',
   role: UserRole.EDITOR,
@@ -110,6 +112,7 @@ const buildAllowedIp = () => ({
 });
 
 const buildWorkflow = (overrides = {}) => ({
+  ...AUDIT_FIXTURE,
   id: WORKFLOW_ID,
   name: 'Notiweb',
   description: null,

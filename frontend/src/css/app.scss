@@ -389,6 +389,19 @@ body {
   color: var(--pd-disabled-text);
 }
 
+// Fallido: el motor se rindió y alguien tiene que mirarlo. Rojo de severidad.
+.pd-badge--failed {
+  background: var(--pd-negative);
+  color: var(--pd-shell-text);
+}
+
+// Pausado: detenido a la espera de un operador. Texto OSCURO sobre ámbar: el
+// blanco sobre `--pd-warning` no llega al contraste AA (~2:1).
+.pd-badge--paused {
+  background: var(--pd-warning);
+  color: var(--pd-shell-bg);
+}
+
 // ---- Shell: QHeader + QDrawer (regla §2) ----
 // Header 60px, drawer 220px. El header lleva el degradado corporativo
 // obligatorio; el drawer se queda navy sólido. Ambos consumen los

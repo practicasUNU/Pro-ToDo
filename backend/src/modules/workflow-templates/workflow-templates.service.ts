@@ -8,6 +8,12 @@ import {
 import { InjectRepository } from '@nestjs/typeorm';
 
 import { CrudEventsCoordinator } from '@common/services/crud-events.coordinator';
+import {
+  AUDIT_RELATIONS,
+  stampCreated,
+  stampUpdated,
+  toAuditFields,
+} from '@common/utils/audit.util';
 
 import { PipelineValidatorService } from '@core/fsm/services/pipeline-validator.service';
 import { buildOrderedTopology } from '@core/fsm/utils/pipeline-topology.util';
@@ -88,6 +94,7 @@ export class WorkflowTemplatesService {
     const templates = await this.templateRepository.find({
       where,
       order: { name: 'ASC' },
+      relations: AUDIT_RELATIONS,
     });
 
     return templates.map((template) => this.toSummary(template));
@@ -116,7 +123,10 @@ export class WorkflowTemplatesService {
    * @throws NotFoundException Si no existe la plantilla.
    */
   public async findOneEntity(id: string): Promise<WorkflowTemplate> {
-    const template = await this.templateRepository.findOne({ where: { id } });
+    const template = await this.templateRepository.findOne({
+      where: { id },
+      relations: AUDIT_RELATIONS,
+    });
 
     if (!template) {
       throw new NotFoundException(
@@ -138,6 +148,7 @@ export class WorkflowTemplatesService {
    */
   public async create(
     createDto: CreateWorkflowTemplateDto,
+    actorId: string,
   ): Promise<WorkflowTemplateDetailResponseDto> {
     const name = createDto.name.trim();
 
@@ -154,7 +165,9 @@ export class WorkflowTemplatesService {
       active: createDto.active ?? true,
     });
 
-    const saved = await this.templateRepository.save(template);
+    const saved = await this.templateRepository.save(
+      stampCreated(template, actorId),
+    );
 
     this.logger.log(
       `Plantilla de flujo creada: "${saved.name}" (${saved.id}) | nodos=${Object.keys(schema.nodes).length} | activa=${String(saved.active)}`,
@@ -181,6 +194,7 @@ export class WorkflowTemplatesService {
   public async update(
     id: string,
     updateDto: UpdateWorkflowTemplateDto,
+    actorId: string,
   ): Promise<WorkflowTemplateDetailResponseDto> {
     const template = await this.findOneEntity(id);
 
@@ -207,7 +221,9 @@ export class WorkflowTemplatesService {
       template.active = updateDto.active;
     }
 
-    const saved = await this.templateRepository.save(template);
+    const saved = await this.templateRepository.save(
+      stampUpdated(template, actorId),
+    );
 
     const detail = await this.findOne(saved.id);
     this.publishMutation('UPDATED', detail.id, detail);
@@ -225,11 +241,14 @@ export class WorkflowTemplatesService {
    */
   public async softDelete(
     id: string,
+    actorId: string,
   ): Promise<WorkflowTemplateDetailResponseDto> {
     const template = await this.findOneEntity(id);
 
     template.active = false;
-    const saved = await this.templateRepository.save(template);
+    const saved = await this.templateRepository.save(
+      stampUpdated(template, actorId),
+    );
 
     this.logger.log(
       `Plantilla de flujo retirada del catalogo: "${saved.name}" (${saved.id})`,
@@ -281,6 +300,7 @@ export class WorkflowTemplatesService {
       ...(template.pipelineSchema.executionPolicy !== undefined
         ? { executionPolicy: template.pipelineSchema.executionPolicy }
         : {}),
+      ...toAuditFields(template),
     };
   }
 

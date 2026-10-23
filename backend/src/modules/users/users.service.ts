@@ -10,6 +10,11 @@ import { plainToInstance } from 'class-transformer';
 import { IsNull, Repository } from 'typeorm';
 
 import { CrudEventsCoordinator } from '@common/services/crud-events.coordinator';
+import {
+  AUDIT_RELATIONS,
+  stampCreated,
+  stampUpdated,
+} from '@common/utils/audit.util';
 
 import { UserResponseDto } from './dto/user-response.dto';
 
@@ -73,11 +78,14 @@ export class UsersService {
   }
 
   public async findAll(): Promise<User[]> {
-    return this.userRepository.find();
+    return this.userRepository.find({ relations: AUDIT_RELATIONS });
   }
 
   public async findOne(id: string): Promise<User> {
-    const user = await this.userRepository.findOne({ where: { id } });
+    const user = await this.userRepository.findOne({
+      where: { id },
+      relations: AUDIT_RELATIONS,
+    });
 
     if (!user) {
       throw new NotFoundException(`Usuario con id "${id}" no encontrado`);
@@ -140,7 +148,11 @@ export class UsersService {
     return user?.otpSecret ?? secret;
   }
 
-  public async create(createUserDto: CreateUserDto): Promise<User> {
+  /** @param actorId ADMIN que da de alta la cuenta, tomado del JWT. */
+  public async create(
+    createUserDto: CreateUserDto,
+    actorId: string,
+  ): Promise<User> {
     this.assertCorporateEmail(createUserDto.email);
 
     const existingUser = await this.userRepository.findOne({
@@ -153,16 +165,25 @@ export class UsersService {
       );
     }
 
-    const user = this.userRepository.create(createUserDto);
+    const user = stampCreated(
+      this.userRepository.create(createUserDto),
+      actorId,
+    );
     const saved = await this.userRepository.save(user);
+    // Se relee para devolver los autores ya resueltos (`AUDIT_RELATIONS`).
+    const stored = await this.findOne(saved.id);
     // Siempre DESPUES de confirmar la escritura: emitir antes abriria una
     // ventana en la que otro panel pinta una fila que PostgreSQL aun no tiene.
-    this.publishMutation('CREATED', saved);
+    this.publishMutation('CREATED', stored);
 
-    return saved;
+    return stored;
   }
 
-  public async update(id: string, updateUserDto: UpdateUserDto): Promise<User> {
+  public async update(
+    id: string,
+    updateUserDto: UpdateUserDto,
+    actorId: string,
+  ): Promise<User> {
     if (updateUserDto.email) {
       this.assertCorporateEmail(updateUserDto.email);
     }
@@ -170,20 +191,22 @@ export class UsersService {
     const user = await this.findOne(id);
 
     Object.assign(user, updateUserDto);
-    const saved = await this.userRepository.save(user);
-    this.publishMutation('UPDATED', saved);
+    await this.userRepository.save(stampUpdated(user, actorId));
+    const stored = await this.findOne(id);
+    this.publishMutation('UPDATED', stored);
 
-    return saved;
+    return stored;
   }
 
   // Borrado lógico: desactiva al usuario en lugar de eliminar el registro
-  public async remove(id: string): Promise<User> {
+  public async remove(id: string, actorId: string): Promise<User> {
     const user = await this.findOne(id);
 
     user.isActive = false;
-    const saved = await this.userRepository.save(user);
-    this.publishMutation('UPDATED', saved);
+    await this.userRepository.save(stampUpdated(user, actorId));
+    const stored = await this.findOne(id);
+    this.publishMutation('UPDATED', stored);
 
-    return saved;
+    return stored;
   }
 }

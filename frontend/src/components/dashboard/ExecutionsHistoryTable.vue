@@ -1,0 +1,186 @@
+<script setup lang="ts">
+import { computed, onMounted } from 'vue';
+import { useQuasar } from 'quasar';
+
+import { useExecutionsStore } from '@stores/executions.store';
+import { useWorkflowsStore } from '@stores/workflows.store';
+
+import { ExecutionState } from '@/types/execution';
+import { extractApiErrorMessage } from '@/utils/api-error';
+import { formatDateTime } from '@/utils/date-format';
+import { describeExecutionState } from '@/utils/execution-state-display';
+
+import type { QTableColumn, QTableProps } from 'quasar';
+import type { ExecutionSummary } from '@/types/execution';
+
+/**
+ * Historial de ejecuciones, paginado en el servidor.
+ *
+ * El estado se comunica con icono, texto y color a la vez (WCAG 1.4.1): el
+ * color solo refuerza. El filtro es un `q-select` cerrado con los estados del
+ * motor (Poka-Yoke): no hay texto libre que pueda pedir un estado inexistente.
+ *
+ * `compact` es la variante del dashboard: sin filtro y con menos filas.
+ */
+const props = defineProps<{
+  compact?: boolean;
+}>();
+
+const $q = useQuasar();
+const executionsStore = useExecutionsStore();
+const workflowsStore = useWorkflowsStore();
+
+const STATE_OPTIONS = Object.values(ExecutionState).map((state) => ({
+  value: state,
+  label: describeExecutionState(state).label,
+}));
+
+/** Nombre del flujo, o su id si el catalogo no lo trae (flujo sin esquema). */
+const flowNames = computed(
+  () => new Map(workflowsStore.workflows.map((workflow) => [workflow.id, workflow.name])),
+);
+
+const columns: QTableColumn<ExecutionSummary>[] = [
+  { name: 'state', label: 'Estado', field: 'state', align: 'left' },
+  {
+    name: 'flow',
+    label: 'Flujo',
+    field: (row) => flowNames.value.get(row.flowId) ?? row.flowId,
+    align: 'left',
+  },
+  {
+    name: 'startedAt',
+    label: 'Inicio',
+    field: 'startedAt',
+    align: 'left',
+    format: (value: string) => formatDateTime(value),
+  },
+  {
+    name: 'updatedAt',
+    label: 'Última actualización',
+    field: 'updatedAt',
+    align: 'left',
+    format: (value: string) => formatDateTime(value),
+  },
+  {
+    name: 'detail',
+    label: 'Detalle',
+    field: (row) => row.failureReason ?? row.activeCursor ?? '',
+    align: 'left',
+    classes: 'pd-cell--long',
+  },
+];
+
+const pagination = computed(() => ({
+  page: Math.floor(executionsStore.offset / executionsStore.limit) + 1,
+  rowsPerPage: executionsStore.limit,
+  rowsNumber: executionsStore.total,
+}));
+
+const stateFilter = computed<ExecutionState | null>({
+  get: () => executionsStore.filters.state ?? null,
+  set: (state) => {
+    executionsStore.setFilters(state === null ? {} : { state });
+    void loadPage();
+  },
+});
+
+const loadPage = async (page: { limit?: number; offset?: number } = {}): Promise<void> => {
+  try {
+    await executionsStore.fetchPage(page);
+  } catch (error) {
+    $q.notify({
+      type: 'negative',
+      message: extractApiErrorMessage(error, 'No se pudo cargar el historial de ejecuciones.'),
+    });
+  }
+};
+
+/** Paginacion server-side: QTable pide la pagina y el store la trae. */
+const onRequest: QTableProps['onRequest'] = ({ pagination: requested }) => {
+  const rowsPerPage = requested.rowsPerPage || executionsStore.limit;
+
+  void loadPage({ limit: rowsPerPage, offset: (requested.page - 1) * rowsPerPage });
+};
+
+onMounted(async () => {
+  // El nombre del flujo sale del catalogo; si otra vista ya lo cargo, no se
+  // repite la peticion.
+  if (workflowsStore.workflows.length === 0) {
+    try {
+      await workflowsStore.fetchWorkflows();
+    } catch {
+      // Sin catalogo la tabla sigue siendo util: muestra el id del flujo.
+    }
+  }
+
+  await loadPage({ limit: props.compact ? 5 : executionsStore.limit, offset: 0 });
+});
+</script>
+
+<template>
+  <q-table
+    class="pd-card pd-table"
+    flat
+    title="Historial de ejecuciones"
+    :rows="executionsStore.items"
+    :columns="columns"
+    row-key="executionId"
+    :loading="executionsStore.isLoading"
+    :pagination="pagination"
+    :rows-per-page-options="compact ? [5] : [10, 25, 50]"
+    rows-per-page-label="Filas por página"
+    no-data-label="No hay ejecuciones registradas."
+    @request="onRequest"
+  >
+    <template v-if="!compact" #top-right>
+      <q-select
+        v-model="stateFilter"
+        class="pd-search-input"
+        dense
+        outlined
+        clearable
+        emit-value
+        map-options
+        :options="STATE_OPTIONS"
+        label="Filtrar por estado"
+        aria-label="Filtrar ejecuciones por estado"
+        data-test="state-filter"
+      />
+    </template>
+
+    <template #body-cell-state="cellProps">
+      <q-td :props="cellProps">
+        <q-badge
+          class="pd-badge pd-execution-badge"
+          :class="describeExecutionState(cellProps.row.state).badgeClass"
+          :data-test="`state-${cellProps.row.state}`"
+        >
+          <q-icon
+            :name="describeExecutionState(cellProps.row.state).icon"
+            size="14px"
+            aria-hidden="true"
+          />
+          {{ describeExecutionState(cellProps.row.state).label }}
+        </q-badge>
+        <q-tooltip>{{ describeExecutionState(cellProps.row.state).description }}</q-tooltip>
+      </q-td>
+    </template>
+
+    <template #body-cell-detail="cellProps">
+      <q-td :props="cellProps">
+        <span :class="{ 'pd-mono': cellProps.row.failureReason === null }">
+          {{ cellProps.value }}
+        </span>
+      </q-td>
+    </template>
+  </q-table>
+</template>
+
+<style scoped lang="scss">
+.pd-execution-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+</style>

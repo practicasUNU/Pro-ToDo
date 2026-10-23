@@ -43,6 +43,12 @@ const routes: RouteRecordRaw[] = [
         // Curar plantillas de prompt es operacion de flujos, no gestion de cuentas.
       },
       {
+        path: 'informes',
+        component: () => import('@/pages/ReportsPage.vue'),
+        // SIN requiresAdmin: TelemetryController admite @Roles(ADMIN, EDITOR).
+        // El coste de los flujos es parte de la auditoria que hace el editor.
+      },
+      {
         path: 'flujos',
         component: () => import('@/pages/workflows/WorkflowsPage.vue'),
         // SIN requiresAdmin: WorkflowsController admite @Roles(ADMIN, EDITOR).

@@ -4,6 +4,7 @@ import { useQuasar } from 'quasar';
 
 import { useAiPromptTemplatesStore } from '@stores/ai-prompt-templates.store';
 import AiPromptTemplateDialog from '@components/ai-prompt-templates/AiPromptTemplateDialog.vue';
+import AuditDetailsMenu from '@components/shared/AuditDetailsMenu.vue';
 import SafeDeleteModal from '@components/shared/SafeDeleteModal.vue';
 
 import { extractApiErrorMessage } from '@/utils/api-error';
@@ -276,6 +277,9 @@ onMounted(loadPrompts);
           >
             <q-tooltip>Reactivar prompt</q-tooltip>
           </q-btn>
+          <!-- Ver mas: auditoria de la fila (migracion 045). Va la ultima
+               porque es consulta, no accion. -->
+          <AuditDetailsMenu :audit="cellProps.row" :subject="cellProps.row.name" />
         </q-td>
       </template>
     </q-table>

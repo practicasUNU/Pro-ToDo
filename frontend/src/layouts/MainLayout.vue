@@ -12,6 +12,7 @@ import { useSessionMonitor } from '@/composables/useSessionMonitor';
 // Titulo de seccion mostrado en la cabecera, derivado de la ruta activa.
 const ROUTE_BREADCRUMBS: Record<string, string> = {
   '/': 'Inicio',
+  '/informes': 'Informes de Consumo IA',
   '/users': 'Gestion de Usuarios',
   '/ip-whitelist': 'Lista Blanca de IPs',
   '/templates': 'Catalogo de Plantillas',
@@ -66,6 +67,13 @@ const toggleLeftDrawer = (): void => {
             <q-icon name="home" size="20px" />
           </q-item-section>
           <q-item-section class="pd-nav">Inicio</q-item-section>
+        </q-item>
+
+        <q-item to="/informes" clickable v-ripple>
+          <q-item-section avatar>
+            <q-icon name="assessment" size="20px" />
+          </q-item-section>
+          <q-item-section class="pd-nav">Informes</q-item-section>
         </q-item>
 
         <q-item v-if="sessionStore.isAdmin" to="/users" clickable v-ripple>

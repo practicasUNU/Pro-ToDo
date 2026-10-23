@@ -38,15 +38,39 @@ type TemplateRepositoryMock = jest.Mocked<
   >
 >;
 
-/** Repositorio doble: `create` refleja el literal, `save` lo resuelve tal cual. */
-const buildRepository = (): TemplateRepositoryMock =>
-  ({
+/** Id que el doble asigna a lo que se guarda sin identificador. */
+const GENERATED_ID = '7c9e6679-7425-40de-944b-e07fc1f90ae7';
+
+/**
+ * Repositorio doble: `create` refleja el literal y `save` lo resuelve tal
+ * cual, asignandole un id si no lo trae.
+ *
+ * `findOne` por id devuelve lo ultimo guardado: el alta relee la fila para
+ * resolver los autores de la auditoria (`AUDIT_RELATIONS`). Cualquier otra
+ * busqueda (por nombre, la de `assertNameAvailable`) no encuentra nada.
+ */
+const buildRepository = (): TemplateRepositoryMock => {
+  const stored = new Map<string, HtmlTemplate>();
+
+  return {
     create: jest.fn((entity: Partial<HtmlTemplate>) => entity as HtmlTemplate),
-    save: jest.fn((entity: HtmlTemplate) => Promise.resolve(entity)),
+    save: jest.fn((entity: HtmlTemplate) => {
+      const saved = { ...entity, id: entity.id ?? GENERATED_ID };
+      stored.set(saved.id, saved);
+
+      return Promise.resolve(saved);
+    }),
     find: jest.fn().mockResolvedValue([]),
-    findOne: jest.fn().mockResolvedValue(null),
+    findOne: jest.fn((options: { where: Partial<HtmlTemplate> }) =>
+      Promise.resolve(
+        options.where.id === undefined
+          ? null
+          : (stored.get(options.where.id) ?? null),
+      ),
+    ),
     remove: jest.fn((entity: HtmlTemplate) => Promise.resolve(entity)),
-  }) as unknown as TemplateRepositoryMock;
+  } as unknown as TemplateRepositoryMock;
+};
 
 /**
  * El doble no implementa `Repository` entero; el cast se aisla aqui.
@@ -295,6 +319,7 @@ describe('TemplatesService', () => {
       expect(repository.find).toHaveBeenCalledWith({
         where: { active: true },
         order: { name: 'ASC' },
+        relations: { createdBy: true, updatedBy: true },
       });
     });
 
@@ -310,6 +335,7 @@ describe('TemplatesService', () => {
       expect(repository.find).toHaveBeenCalledWith({
         where: {},
         order: { name: 'ASC' },
+        relations: { createdBy: true, updatedBy: true },
       });
     });
 
@@ -348,9 +374,13 @@ describe('TemplatesService', () => {
       const service = buildService(repository);
 
       // 2. Act
-      const result = await service.update(TEMPLATE_ID, {
-        name: 'noticia-basica',
-      });
+      const result = await service.update(
+        TEMPLATE_ID,
+        {
+          name: 'noticia-basica',
+        },
+        AUTHOR_ID,
+      );
 
       // 3. Assert
       expect(result.name).toBe('noticia-basica');
@@ -365,9 +395,13 @@ describe('TemplatesService', () => {
       const service = buildService(repository);
 
       // 2. Act
-      const result = await service.update(TEMPLATE_ID, {
-        htmlContent: '<p>{{validated_drupal_json.body}}</p>',
-      });
+      const result = await service.update(
+        TEMPLATE_ID,
+        {
+          htmlContent: '<p>{{validated_drupal_json.body}}</p>',
+        },
+        AUTHOR_ID,
+      );
 
       // 3. Assert: las variables antiguas no sobreviven al cambio de plantilla
       expect(result.requiredVariables).toEqual(['validated_drupal_json.body']);
@@ -383,9 +417,13 @@ describe('TemplatesService', () => {
 
       // 2. Act
       await expectBadRequest(
-        service.update(TEMPLATE_ID, {
-          htmlContent: '<p>{{contacto.telefono}}</p>',
-        }),
+        service.update(
+          TEMPLATE_ID,
+          {
+            htmlContent: '<p>{{contacto.telefono}}</p>',
+          },
+          AUTHOR_ID,
+        ),
       );
 
       // 3. Assert: la validacion precede a la asignacion, asi que nada cambio
@@ -407,7 +445,11 @@ describe('TemplatesService', () => {
       const service = buildService(repository);
 
       // 2. Act
-      const result = await service.update(TEMPLATE_ID, { active: true });
+      const result = await service.update(
+        TEMPLATE_ID,
+        { active: true },
+        AUTHOR_ID,
+      );
 
       // 3. Assert
       expect(result.active).toBe(true);
@@ -421,7 +463,11 @@ describe('TemplatesService', () => {
       const service = buildService(repository);
 
       // 2. Act
-      const result = await service.update(TEMPLATE_ID, { active: false });
+      const result = await service.update(
+        TEMPLATE_ID,
+        { active: false },
+        AUTHOR_ID,
+      );
 
       // 3. Assert
       expect(result.active).toBe(false);
@@ -437,9 +483,13 @@ describe('TemplatesService', () => {
       const service = buildService(repository);
 
       // 2. Act: se edita solo la descripcion
-      const result = await service.update(TEMPLATE_ID, {
-        description: 'Descripcion nueva',
-      });
+      const result = await service.update(
+        TEMPLATE_ID,
+        {
+          description: 'Descripcion nueva',
+        },
+        AUTHOR_ID,
+      );
 
       // 3. Assert: editar el texto no puede resucitar una plantilla retirada
       expect(result.active).toBe(false);
@@ -455,7 +505,7 @@ describe('TemplatesService', () => {
       const service = buildService(repository);
 
       // 2. Act
-      const result = await service.softDelete(TEMPLATE_ID);
+      const result = await service.softDelete(TEMPLATE_ID, AUTHOR_ID);
 
       // 3. Assert
       expect(result.active).toBe(false);
@@ -469,7 +519,7 @@ describe('TemplatesService', () => {
       const service = buildService(repository);
 
       // 2. Act & 3. Assert
-      await expect(service.softDelete(TEMPLATE_ID)).rejects.toThrow(
+      await expect(service.softDelete(TEMPLATE_ID, AUTHOR_ID)).rejects.toThrow(
         NotFoundException,
       );
       expect(repository.save).not.toHaveBeenCalled();
@@ -738,9 +788,13 @@ describe('TemplatesService', () => {
 
       // 2. Act
       const response = await expectBadRequest(
-        service.update(TEMPLATE_ID, {
-          htmlContent: '<div onclick="alert(1)">x</div>',
-        }),
+        service.update(
+          TEMPLATE_ID,
+          {
+            htmlContent: '<div onclick="alert(1)">x</div>',
+          },
+          AUTHOR_ID,
+        ),
       );
 
       // 3. Assert
@@ -859,5 +913,57 @@ describe('TemplatesService', () => {
       expect(violation?.target).toBe('{{titulo}}');
       expect(violation?.message).toContain('no interpretable');
     });
+  });
+});
+
+describe('TemplatesService · auditoria (migracion 045)', () => {
+  const EDITOR_ID = '3f1c2b64-8a5e-4c2f-9d3a-7b6e5f4c1a20';
+
+  it('A.1 deberia firmar el alta con el autor del JWT', async () => {
+    // 1. Arrange 📐
+    const repository = buildRepository();
+    const service = buildService(repository);
+
+    // 2. Act ⚙️
+    await service.create(
+      { name: 'auditada', htmlContent: '<h1 class="titular"></h1>' },
+      AUTHOR_ID,
+    );
+
+    // 3. Assert 🎯
+    expect(repository.save).toHaveBeenCalledWith(
+      expect.objectContaining({
+        createdById: AUTHOR_ID,
+        createdByUserId: AUTHOR_ID,
+        updatedByUserId: AUTHOR_ID,
+      }),
+    );
+  });
+
+  it('A.2 deberia firmar la edicion y la baja logica en actualizado_por', async () => {
+    // 1. Arrange 📐
+    const repository = buildRepository();
+    repository.findOne.mockResolvedValue({
+      ...STORED_TEMPLATE,
+      createdByUserId: AUTHOR_ID,
+    });
+    const service = buildService(repository);
+
+    // 2. Act ⚙️
+    await service.update(TEMPLATE_ID, { description: 'Revisada' }, EDITOR_ID);
+    await service.softDelete(TEMPLATE_ID, EDITOR_ID);
+
+    // 3. Assert 🎯
+    expect(repository.save).toHaveBeenNthCalledWith(
+      1,
+      expect.objectContaining({
+        createdByUserId: AUTHOR_ID,
+        updatedByUserId: EDITOR_ID,
+      }),
+    );
+    expect(repository.save).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({ active: false, updatedByUserId: EDITOR_ID }),
+    );
   });
 });

@@ -7,11 +7,17 @@ import {
 import { InjectRepository } from '@nestjs/typeorm';
 
 import { CrudEventsCoordinator } from '@common/services/crud-events.coordinator';
+import {
+  AUDIT_RELATIONS,
+  stampCreated,
+  stampUpdated,
+} from '@common/utils/audit.util';
 import { Repository } from 'typeorm';
 
 import { NODE_OUTPUT_NAMESPACES } from '@core/fsm/types/pipeline-schema.types';
 
 import { CreateTemplateDto } from './dto/create-template.dto';
+import { toHtmlTemplateResponse } from './dto/html-template-response.dto';
 import { PreviewTemplateDto } from './dto/preview-template.dto';
 import { UpdateTemplateDto } from './dto/update-template.dto';
 import { HtmlTemplate } from './entities/html-template.entity';
@@ -165,7 +171,9 @@ export class TemplatesService {
       entity: 'templates',
       action,
       id,
-      data,
+      // La proyeccion, no la entidad: con los autores cargados, la entidad
+      // arrastraria el `User` completo hasta el socket.
+      data: toHtmlTemplateResponse(data),
       emittedAt: new Date().toISOString(),
     });
   }
@@ -177,11 +185,18 @@ export class TemplatesService {
 
     // Orden alfabetico y no por fecha: el consumidor natural del listado es el
     // selector de plantillas de la Vista 4.
-    return this.templateRepository.find({ where, order: { name: 'ASC' } });
+    return this.templateRepository.find({
+      where,
+      order: { name: 'ASC' },
+      relations: AUDIT_RELATIONS,
+    });
   }
 
   public async findOne(id: string): Promise<HtmlTemplate> {
-    const template = await this.templateRepository.findOne({ where: { id } });
+    const template = await this.templateRepository.findOne({
+      where: { id },
+      relations: AUDIT_RELATIONS,
+    });
 
     if (!template) {
       throw new NotFoundException(`Plantilla con id "${id}" no encontrada`);
@@ -219,10 +234,14 @@ export class TemplatesService {
       createdById,
     });
 
-    const saved = await this.templateRepository.save(template);
-    this.publishMutation('CREATED', saved.id, saved);
+    const saved = await this.templateRepository.save(
+      stampCreated(template, createdById),
+    );
+    // Se relee para devolver los autores ya resueltos (`AUDIT_RELATIONS`).
+    const stored = await this.findOne(saved.id);
+    this.publishMutation('CREATED', stored.id, stored);
 
-    return saved;
+    return stored;
   }
 
   /**
@@ -235,6 +254,7 @@ export class TemplatesService {
   public async update(
     id: string,
     updateTemplateDto: UpdateTemplateDto,
+    actorId: string,
   ): Promise<HtmlTemplate> {
     const template = await this.findOne(id);
 
@@ -264,10 +284,11 @@ export class TemplatesService {
       template.active = updateTemplateDto.active;
     }
 
-    const saved = await this.templateRepository.save(template);
-    this.publishMutation('UPDATED', saved.id, saved);
+    await this.templateRepository.save(stampUpdated(template, actorId));
+    const stored = await this.findOne(id);
+    this.publishMutation('UPDATED', stored.id, stored);
 
-    return saved;
+    return stored;
   }
 
   /**
@@ -278,15 +299,16 @@ export class TemplatesService {
    * resultado. La plantilla desaparece del listado y la estrategia la rechaza,
    * pero la fila sigue ahi.
    */
-  public async softDelete(id: string): Promise<HtmlTemplate> {
+  public async softDelete(id: string, actorId: string): Promise<HtmlTemplate> {
     const template = await this.findOne(id);
 
     template.active = false;
 
-    const saved = await this.templateRepository.save(template);
-    this.publishMutation('UPDATED', saved.id, saved);
+    await this.templateRepository.save(stampUpdated(template, actorId));
+    const stored = await this.findOne(id);
+    this.publishMutation('UPDATED', stored.id, stored);
 
-    return saved;
+    return stored;
   }
 
   /**

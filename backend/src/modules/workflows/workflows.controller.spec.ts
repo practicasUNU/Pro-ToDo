@@ -317,6 +317,8 @@ describe('WorkflowsController (POST /workflows/:id/execute-test)', () => {
         // El rol viaja tambien en la edicion: los modelos de pago estan
         // reservados al ADMIN y un PATCH es otra via de meter uno.
         UserRole.EDITOR,
+        // Y el id firma `actualizado_por` (auditoria, migracion 045).
+        EDITOR_USER.id,
       );
     });
 
@@ -346,6 +348,7 @@ describe('WorkflowsController (POST /workflows/:id/execute-test)', () => {
         WORKFLOW_ID,
         { status: WorkflowStatus.ACTIVO },
         UserRole.EDITOR,
+        EDITOR_USER.id,
       );
     });
 

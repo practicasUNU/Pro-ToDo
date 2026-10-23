@@ -24,6 +24,7 @@ import {
   SHARED_ALERT_NODE_ID,
   SHARED_OCR_NODE_ID,
 } from '@/types/nodes/error-branch.types';
+import { AUDIT_FIXTURE } from '@/testing/audit.fixture';
 
 import type { HtmlTemplate } from '@/types/html-template';
 import type { NodeCatalogEntry } from '@/types/node-catalog';
@@ -116,6 +117,7 @@ const MAPPER_NODE_ID = 'nodo_mapeador';
 const buildTemplate = (
   overrides: Partial<WorkflowTemplateSummary> = {},
 ): WorkflowTemplateSummary => ({
+  ...AUDIT_FIXTURE,
   id: TEMPLATE_ID,
   name: 'Notiweb - publicacion automatica',
   description: 'Publica noticias entrantes en el CMS',
@@ -194,6 +196,7 @@ const UNSUPPORTED_TOPOLOGY = [
  * justo la frontera que esta entrega establece.
  */
 const buildWorkflow = (overrides: Partial<PipelineSummary> = {}): PipelineSummary => ({
+  ...AUDIT_FIXTURE,
   id: 'f1e2d3c4-b5a6-4978-8a9b-0c1d2e3f4a5b',
   name: 'Notiweb - publicacion automatica',
   description: 'Publica noticias entrantes en el CMS',
@@ -1731,6 +1734,7 @@ describe('useFlujoDraftStore · modo edicion', () => {
 
   /** Flujo guardado, con los `params` que el asistente debe repoblar. */
   const buildWorkflowDetail = (): WorkflowDetail => ({
+    ...AUDIT_FIXTURE,
     id: WORKFLOW_ID,
     name: 'Notiweb - publicacion automatica',
     description: 'Publica noticias entrantes en el CMS',
@@ -2298,6 +2302,7 @@ describe('useFlujoDraftStore · modo edicion', () => {
       const mapper = useTemplateMapperStore(MAPPER_NODE_ID);
       fetchSelectableTemplates.mockResolvedValue([
         {
+          ...AUDIT_FIXTURE,
           id: HTML_TEMPLATE_ID,
           name: 'Notiweb base',
           description: null,

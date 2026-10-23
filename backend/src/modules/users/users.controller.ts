@@ -86,8 +86,11 @@ export class UsersController {
   })
   public async create(
     @Body() createUserDto: CreateUserDto,
+    @CurrentUser() currentUser: AuthenticatedUser,
   ): Promise<UserResponseDto> {
-    return this.toResponse(await this.usersService.create(createUserDto));
+    return this.toResponse(
+      await this.usersService.create(createUserDto, currentUser.id),
+    );
   }
 
   @Patch(':id')
@@ -99,7 +102,9 @@ export class UsersController {
   ): Promise<UserResponseDto> {
     this.assertNotOperatingOnSelf(currentUser, id);
 
-    return this.toResponse(await this.usersService.update(id, updateUserDto));
+    return this.toResponse(
+      await this.usersService.update(id, updateUserDto, currentUser.id),
+    );
   }
 
   // Borrado logico: nunca elimina fisicamente el registro
@@ -111,7 +116,7 @@ export class UsersController {
   ): Promise<UserResponseDto> {
     this.assertNotOperatingOnSelf(currentUser, id);
 
-    return this.toResponse(await this.usersService.remove(id));
+    return this.toResponse(await this.usersService.remove(id, currentUser.id));
   }
 
   /**

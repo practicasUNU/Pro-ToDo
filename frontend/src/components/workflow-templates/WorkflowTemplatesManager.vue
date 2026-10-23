@@ -4,6 +4,7 @@ import { useQuasar, type QTableColumn } from 'quasar';
 
 import { useWorkflowTemplatesStore } from '@stores/workflow-templates.store';
 
+import AuditDetailsMenu from '@components/shared/AuditDetailsMenu.vue';
 import SafeDeleteModal from '@components/shared/SafeDeleteModal.vue';
 
 import WorkflowTemplateDialog from './WorkflowTemplateDialog.vue';
@@ -261,6 +262,9 @@ onMounted(loadTemplates);
           >
             <q-tooltip>Activar plantilla</q-tooltip>
           </q-btn>
+          <!-- Ver mas: auditoria de la fila (migracion 045). Va la ultima
+               porque es consulta, no accion. -->
+          <AuditDetailsMenu :audit="cellProps.row" :subject="cellProps.row.name" />
         </q-td>
       </template>
     </q-table>

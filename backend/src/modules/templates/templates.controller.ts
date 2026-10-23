@@ -30,12 +30,15 @@ import { JwtAuthGuard } from '@modules/auth/guards/jwt-auth.guard';
 import { UserRole } from '@modules/users/enums/user-role.enum';
 
 import { CreateTemplateDto } from './dto/create-template.dto';
+import {
+  HtmlTemplateResponseDto,
+  toHtmlTemplateResponse,
+} from './dto/html-template-response.dto';
 import { PreviewTemplateDto } from './dto/preview-template.dto';
 import { UpdateTemplateDto } from './dto/update-template.dto';
 import { TemplatesService } from './templates.service';
 
 import type { AuthenticatedUser } from '@modules/auth/interfaces/jwt-payload.interface';
-import type { HtmlTemplate } from './entities/html-template.entity';
 
 /**
  * Gestor de plantillas HTML (PROT-11.1), abierto a ADMIN y EDITOR: configurar
@@ -72,11 +75,15 @@ export class TemplatesController {
   })
   public async findAll(
     @Query('includeInactive') includeInactive?: string,
-  ): Promise<HtmlTemplate[]> {
+  ): Promise<HtmlTemplateResponseDto[]> {
     // Se exige el literal "true" y no una conversion laxa: un query param mal
     // escrito debe caer del lado seguro, que es no mostrar las retiradas. Es el
     // mismo criterio que `WorkflowTemplatesController`.
-    return this.templatesService.findAll(includeInactive !== 'true');
+    const templates = await this.templatesService.findAll(
+      includeInactive !== 'true',
+    );
+
+    return templates.map(toHtmlTemplateResponse);
   }
 
   @Get(':id')
@@ -86,8 +93,8 @@ export class TemplatesController {
   })
   public async findOne(
     @Param('id', ParseUUIDPipe) id: string,
-  ): Promise<HtmlTemplate> {
-    return this.templatesService.findOne(id);
+  ): Promise<HtmlTemplateResponseDto> {
+    return toHtmlTemplateResponse(await this.templatesService.findOne(id));
   }
 
   @Post()
@@ -102,9 +109,11 @@ export class TemplatesController {
   public async create(
     @Body() createTemplateDto: CreateTemplateDto,
     @CurrentUser() currentUser: AuthenticatedUser,
-  ): Promise<HtmlTemplate> {
+  ): Promise<HtmlTemplateResponseDto> {
     // La autoria se toma del token, nunca del cuerpo: asi no se puede suplantar.
-    return this.templatesService.create(createTemplateDto, currentUser.id);
+    return toHtmlTemplateResponse(
+      await this.templatesService.create(createTemplateDto, currentUser.id),
+    );
   }
 
   @Put(':id')
@@ -121,8 +130,11 @@ export class TemplatesController {
   public async update(
     @Param('id', ParseUUIDPipe) id: string,
     @Body() updateTemplateDto: UpdateTemplateDto,
-  ): Promise<HtmlTemplate> {
-    return this.templatesService.update(id, updateTemplateDto);
+    @CurrentUser() currentUser: AuthenticatedUser,
+  ): Promise<HtmlTemplateResponseDto> {
+    return toHtmlTemplateResponse(
+      await this.templatesService.update(id, updateTemplateDto, currentUser.id),
+    );
   }
 
   @Post(':id/preview')
@@ -152,7 +164,10 @@ export class TemplatesController {
   })
   public async remove(
     @Param('id', ParseUUIDPipe) id: string,
-  ): Promise<HtmlTemplate> {
-    return this.templatesService.softDelete(id);
+    @CurrentUser() currentUser: AuthenticatedUser,
+  ): Promise<HtmlTemplateResponseDto> {
+    return toHtmlTemplateResponse(
+      await this.templatesService.softDelete(id, currentUser.id),
+    );
   }
 }

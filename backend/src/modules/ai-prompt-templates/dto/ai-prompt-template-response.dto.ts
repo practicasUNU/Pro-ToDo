@@ -1,5 +1,7 @@
 import { ApiProperty } from '@nestjs/swagger';
 
+import { AuditFieldsResponseDto } from '@common/dto/audit-response.dto';
+
 /**
  * Prompt tal como lo ve el listado administrativo.
  *
@@ -11,7 +13,7 @@ import { ApiProperty } from '@nestjs/swagger';
  * `fecha_creacion`: la frontera del JSON es contrato con la UI, no reflejo del
  * esquema.
  */
-export class AiPromptTemplateResponseDto {
+export class AiPromptTemplateResponseDto extends AuditFieldsResponseDto {
   @ApiProperty({ description: 'Identificador del prompt' })
   readonly id: string;
 
@@ -42,11 +44,8 @@ export class AiPromptTemplateResponseDto {
   @ApiProperty({ description: 'Autor, tomado del JWT en el alta' })
   readonly createdById: string;
 
-  @ApiProperty({ description: 'Alta del prompt' })
-  readonly createdAt: Date;
-
-  @ApiProperty({ description: 'Ultima edicion del prompt' })
-  readonly updatedAt: Date;
+  // `createdAt`, `updatedAt`, `createdBy` y `updatedBy` llegan heredados de
+  // `AuditFieldsResponseDto` (migracion 045).
 }
 
 /** Detalle de un prompt: el resumen mas la instruccion completa. */

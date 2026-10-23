@@ -2,6 +2,7 @@ import { createPinia, setActivePinia } from 'pinia';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { useAiPromptTemplatesStore } from './ai-prompt-templates.store';
+import { AUDIT_FIXTURE } from '@/testing/audit.fixture';
 
 import type { AiPromptTemplate, AiPromptTemplateDetail } from '@/types/ai-prompt-template';
 
@@ -26,6 +27,7 @@ const OTHER_PROMPT_ID = '9f8e7d6c-5b4a-4321-8765-1a2b3c4d5e6f';
 const AUTHOR_ID = 'd4e5f6a7-b8c9-4012-a345-6b7c8d9e0f12';
 
 const buildPrompt = (overrides: Partial<AiPromptTemplate> = {}): AiPromptTemplate => ({
+  ...AUDIT_FIXTURE,
   id: PROMPT_ID,
   code: 'EXTRACCION_NOTICIA_ES',
   name: 'extraccion-noticia-es',

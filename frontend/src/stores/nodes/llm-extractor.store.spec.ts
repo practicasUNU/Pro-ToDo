@@ -22,6 +22,7 @@ import {
 import { NodeType } from '@/types/pipeline';
 
 import { useLlmExtractorStore } from './llm-extractor.store';
+import { AUDIT_FIXTURE } from '@/testing/audit.fixture';
 
 import type { AiPromptTemplate } from '@/types/ai-prompt-template';
 import type {
@@ -89,6 +90,7 @@ const buildConnectionResult = (
 });
 
 const buildPrompt = (overrides: Partial<AiPromptTemplate> = {}): AiPromptTemplate => ({
+  ...AUDIT_FIXTURE,
   id: PROMPT_ID,
   code: 'REDACCION_DE_NOTA_DE_PRENSA',
   name: 'Redaccion de nota de prensa',

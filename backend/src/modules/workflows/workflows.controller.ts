@@ -189,9 +189,9 @@ export class WorkflowsController {
   public async updateWorkflow(
     @Param('id', ParseUUIDPipe) id: string,
     @Body() updateWorkflowDto: UpdateWorkflowDto,
-    // El rol se recoge aqui aunque este endpoint no registre autoria: los
-    // modelos de pago estan reservados al ADMIN y editar un flujo es otra via
-    // de meter uno. Sin esto, la restriccion del alta se saltaria con un PATCH.
+    // El rol cubre los modelos de pago, reservados al ADMIN: editar un flujo es
+    // otra via de meter uno y sin esto la restriccion del alta se saltaria con
+    // un PATCH. El id firma la auditoria (`actualizado_por`, migracion 045).
     @CurrentUser() currentUser: AuthenticatedUser,
   ): Promise<PipelineSummaryResponseDto> {
     try {
@@ -199,6 +199,7 @@ export class WorkflowsController {
         id,
         updateWorkflowDto,
         currentUser.role,
+        currentUser.id,
       );
     } catch (error: unknown) {
       throw toIssueContractException(error);

@@ -9,6 +9,7 @@ import {
   SHARED_ALERT_NODE_ID,
   SHARED_OCR_NODE_ID,
 } from '@/types/nodes/error-branch.types';
+import { AUDIT_FIXTURE } from '@/testing/audit.fixture';
 
 import type {
   AssembledPipelineSchema,
@@ -61,6 +62,7 @@ const SCHEMA = {
 const buildSummary = (
   overrides: Partial<WorkflowTemplateSummary> = {},
 ): WorkflowTemplateSummary => ({
+  ...AUDIT_FIXTURE,
   id: TEMPLATE_ID,
   name: 'Notiweb - correo a CMS',
   description: 'Ingesta por correo y publicacion en el CMS',

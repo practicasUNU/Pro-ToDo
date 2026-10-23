@@ -22,6 +22,7 @@ import LlmExtractorConfig from '@components/nodes/LlmExtractorConfig.vue';
 import { useLlmExtractorStore } from '@stores/nodes/llm-extractor.store';
 
 import { LlmProvider } from '@/types/nodes/llm-extractor.types';
+import { AUDIT_FIXTURE } from '@/testing/audit.fixture';
 
 import type { AiPromptTemplate } from '@/types/ai-prompt-template';
 import type { LlmModelDescriptor } from '@/types/nodes/llm-extractor.types';
@@ -79,6 +80,7 @@ const QUASAR_COMPONENTS = {
 };
 
 const PROMPT: AiPromptTemplate = {
+  ...AUDIT_FIXTURE,
   id: PROMPT_ID,
   code: 'REDACCION_DE_NOTA_DE_PRENSA',
   name: 'Redaccion de nota de prensa',
@@ -393,6 +395,7 @@ describe('LlmExtractorConfig · configurador del nodo PROCESADOR_IA', () => {
       //    la recarga que hace falta.
       const nodeId = nextNodeId();
       const created = {
+        ...AUDIT_FIXTURE,
         id: 'e7c9a1b2-3d4e-4f50-8a6b-7c8d9e0f1a2b',
         code: 'REDACCION_INSTITUCIONAL',
         name: 'Redaccion institucional',

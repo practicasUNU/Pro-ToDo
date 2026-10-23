@@ -22,6 +22,7 @@ import {
   ApiUnauthorizedResponse,
 } from '@nestjs/swagger';
 
+import { CurrentUser } from '@common/decorators/current-user.decorator';
 import { Roles } from '@common/decorators/roles.decorator';
 import { toIssueContractException } from '@core/fsm/utils/schema-issue-contract.util';
 import { RolesGuard } from '@common/guards/roles.guard';
@@ -32,6 +33,7 @@ import { CreateWorkflowTemplateDto } from './dto/create-workflow-template.dto';
 import { UpdateWorkflowTemplateDto } from './dto/update-workflow-template.dto';
 import { WorkflowTemplatesService } from './workflow-templates.service';
 
+import type { AuthenticatedUser } from '@modules/auth/interfaces/jwt-payload.interface';
 import type {
   WorkflowTemplateDetailResponseDto,
   WorkflowTemplateResponseDto,
@@ -109,9 +111,13 @@ export class WorkflowTemplatesController {
   })
   public async create(
     @Body() createDto: CreateWorkflowTemplateDto,
+    @CurrentUser() currentUser: AuthenticatedUser,
   ): Promise<WorkflowTemplateDetailResponseDto> {
     try {
-      return await this.workflowTemplatesService.create(createDto);
+      return await this.workflowTemplatesService.create(
+        createDto,
+        currentUser.id,
+      );
     } catch (error: unknown) {
       // `await` dentro del `try`, y no un `return` de la promesa: sin el, el
       // rechazo escapa de este bloque y los issues volverian a salir crudos.
@@ -136,9 +142,14 @@ export class WorkflowTemplatesController {
   public async update(
     @Param('id', ParseUUIDPipe) id: string,
     @Body() updateDto: UpdateWorkflowTemplateDto,
+    @CurrentUser() currentUser: AuthenticatedUser,
   ): Promise<WorkflowTemplateDetailResponseDto> {
     try {
-      return await this.workflowTemplatesService.update(id, updateDto);
+      return await this.workflowTemplatesService.update(
+        id,
+        updateDto,
+        currentUser.id,
+      );
     } catch (error: unknown) {
       throw toIssueContractException(error);
     }
@@ -156,7 +167,8 @@ export class WorkflowTemplatesController {
   })
   public async remove(
     @Param('id', ParseUUIDPipe) id: string,
+    @CurrentUser() currentUser: AuthenticatedUser,
   ): Promise<WorkflowTemplateDetailResponseDto> {
-    return this.workflowTemplatesService.softDelete(id);
+    return this.workflowTemplatesService.softDelete(id, currentUser.id);
   }
 }

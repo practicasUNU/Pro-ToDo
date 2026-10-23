@@ -4,10 +4,11 @@
 
 import { NODE_OUTPUT_NAMESPACES } from '@/types/pipeline';
 
+import type { AuditableData } from '@/types/auditable';
 import type { NodeOutputField } from '@/types/node-catalog';
 
 /** Fila de `plantillas_html`. */
-export interface HtmlTemplate {
+export interface HtmlTemplate extends AuditableData {
   id: string;
   name: string;
   description: string | null;
@@ -16,8 +17,6 @@ export interface HtmlTemplate {
   requiredVariables: string[];
   createdById: string;
   active: boolean;
-  createdAt: string;
-  updatedAt: string;
 }
 
 // `requiredVariables` y `createdById` NO viajan en los payloads: la primera la
