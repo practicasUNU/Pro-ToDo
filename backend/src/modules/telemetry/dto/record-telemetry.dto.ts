@@ -1,3 +1,5 @@
+import type { TelemetryOperationOrigin } from '@modules/telemetry/enums/telemetry-origin.enum';
+
 /**
  * Consumo de una inferencia que una estrategia de IA entrega a
  * `TelemetryService.recordTokenUsage`.
@@ -21,6 +23,20 @@ export interface RecordTelemetryDto {
   readonly reasoningTokens: number;
   /** `false` si el proveedor no informo de uso: el coste sera estimado. */
   readonly usageReported: boolean;
+}
+
+/**
+ * Consumo de una inferencia hecha FUERA de una ejecucion del FSM (asistente de
+ * prompts), para `TelemetryService.recordAssistUsage`. No tiene ejecucion ni
+ * nodo: en su lugar lleva el usuario que la pidio y el origen.
+ */
+export interface RecordAssistUsageDto extends Omit<
+  RecordTelemetryDto,
+  'executionId' | 'nodeId'
+> {
+  /** `id_usuario` de quien pidio la inferencia. */
+  readonly userId: string;
+  readonly origin: TelemetryOperationOrigin.PROMPT_OPTIMIZATION;
 }
 
 /** Contadores y coste ya calculados, con las tarifas que se aplicaron. */

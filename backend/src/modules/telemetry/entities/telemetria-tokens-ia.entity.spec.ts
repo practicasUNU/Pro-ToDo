@@ -103,12 +103,17 @@ describe('TelemetriaTokensIa', () => {
     );
 
     // 2. Act ⚙️
+    // `user` se declara por NOMBRE ('User'), como en `AuditableEntity`: no
+    // es una funcion que devuelva la clase.
     const byProperty = Object.fromEntries(
       relations.map((relation) => [
         relation.propertyName,
         {
           type: relation.relationType,
-          target: (relation.type as () => EntityClass)(),
+          target:
+            typeof relation.type === 'string'
+              ? relation.type
+              : (relation.type as () => EntityClass)(),
         },
       ]),
     );
@@ -119,6 +124,24 @@ describe('TelemetriaTokensIa', () => {
       target: FsmExecution,
     });
     expect(byProperty.flow).toEqual({ type: 'many-to-one', target: Workflow });
+    expect(byProperty.user).toEqual({ type: 'many-to-one', target: 'User' });
+  });
+
+  it('deberia declarar el origen y el usuario de la operacion (migracion 049)', () => {
+    // 1. Arrange 📐 + 2. Act ⚙️
+    const columns = getMetadataArgsStorage().columns.filter(
+      (column) => column.target === TelemetriaTokensIa,
+    );
+    const byName = new Map(
+      columns.map((column) => [String(column.options.name), column.options]),
+    );
+
+    // 3. Assert 🎯: sin ejecucion (asistente de prompts) las tres son NULL.
+    expect(byName.get('origen_operacion')?.default).toBe('EJECUCION_FLUJO');
+    expect(byName.get('usuario_id')?.nullable).toBe(true);
+    expect(byName.get('ejecucion_id')?.nullable).toBe(true);
+    expect(byName.get('flujo_id')?.nullable).toBe(true);
+    expect(byName.get('nodo_id')?.nullable).toBe(true);
   });
 
   it('NO deberia heredar la auditoria: la telemetria es inmutable', () => {

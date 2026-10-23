@@ -7,8 +7,10 @@ import {
   PrecioModeloIa,
 } from '@modules/telemetry/entities/precio-modelo-ia.entity';
 import { TelemetriaTokensIa } from '@modules/telemetry/entities/telemetria-tokens-ia.entity';
+import { TelemetryOperationOrigin } from '@modules/telemetry/enums/telemetry-origin.enum';
 
 import type {
+  RecordAssistUsageDto,
   RecordTelemetryDto,
   TokenUsageMetrics,
 } from '@modules/telemetry/dto/record-telemetry.dto';
@@ -60,7 +62,9 @@ export class TelemetryService {
   ) {}
 
   /**
-   * Calcula contadores y coste con la tarifa vigente, sin escribir nada.
+   * Calcula contadores y coste con la tarifa vigente, sin escribir nada. Solo
+   * usa proveedor, modelo y contadores, asi que sirve igual para el consumo de
+   * una ejecucion y para el del asistente de prompts.
    *
    * Orden de resolucion de la tarifa: la del modelo exacto; si no la hay, la
    * generica del proveedor (`ANY_MODEL`), marcada como estimada; si tampoco,
@@ -68,7 +72,7 @@ export class TelemetryService {
    * nuevo sin precio dado de alta no debe pausar flujos en produccion.
    */
   public async computeUsage(
-    dto: RecordTelemetryDto,
+    dto: Omit<RecordTelemetryDto, 'executionId' | 'nodeId'>,
   ): Promise<TokenUsageMetrics> {
     const pricing = await this.resolvePricing(dto.aiProvider, dto.aiModel);
 
@@ -117,6 +121,7 @@ export class TelemetryService {
       .insert()
       .into(TelemetriaTokensIa)
       .values({
+        operationOrigin: TelemetryOperationOrigin.FLOW_EXECUTION,
         executionId: dto.executionId,
         flowId: () =>
           '(SELECT id_flujo FROM ejecuciones_flujo WHERE id_ejecucion = :executionId)',
@@ -134,6 +139,46 @@ export class TelemetryService {
         isEstimated: metrics.isEstimated,
       })
       .setParameter('executionId', dto.executionId)
+      .execute();
+
+    return metrics;
+  }
+
+  /**
+   * Calcula y registra el consumo de una inferencia hecha FUERA de una
+   * ejecucion (hoy, el asistente "Mejorar Prompt con IA"), asociada al usuario
+   * que la pidio. Sin ejecucion no hay flujo ni nodo: las tres columnas quedan
+   * a NULL, como permite el CHECK de la migracion 049 para este origen.
+   *
+   * Igual que `recordTokenUsage`, no captura errores: decide quien llama.
+   */
+  public async recordAssistUsage(
+    dto: RecordAssistUsageDto,
+  ): Promise<TokenUsageMetrics> {
+    const metrics = await this.computeUsage(dto);
+
+    await this.telemetryRepository
+      .createQueryBuilder()
+      .insert()
+      .into(TelemetriaTokensIa)
+      .values({
+        operationOrigin: dto.origin,
+        userId: dto.userId,
+        executionId: null,
+        flowId: null,
+        nodeId: null,
+        aiProvider: dto.aiProvider,
+        aiModel: dto.aiModel,
+        promptTokens: metrics.promptTokens,
+        completionTokens: metrics.completionTokens,
+        reasoningTokens: metrics.reasoningTokens,
+        totalTokens: metrics.totalTokens,
+        promptRateUsd: metrics.promptRateUsd,
+        completionRateUsd: metrics.completionRateUsd,
+        reasoningRateUsd: metrics.reasoningRateUsd,
+        estimatedCostUsd: metrics.estimatedCostUsd,
+        isEstimated: metrics.isEstimated,
+      })
       .execute();
 
     return metrics;

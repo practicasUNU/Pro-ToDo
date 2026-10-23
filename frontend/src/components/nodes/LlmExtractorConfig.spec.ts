@@ -40,6 +40,12 @@ vi.mock('@services/auth.service', () => ({
   logout: vi.fn(),
 }));
 
+// El asistente de prompts llega con su modal; sin esto se cargaria
+// `@boot/axios`, que necesita el entorno de Quasar.
+vi.mock('@services/prompts.service', () => ({
+  optimizePrompt: vi.fn(),
+}));
+
 vi.mock('@services/ai-prompt-templates.service', () => ({
   fetchAiPromptTemplates: vi.fn(),
   fetchAiPromptTemplateById: vi.fn(),

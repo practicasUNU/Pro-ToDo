@@ -1,3 +1,4 @@
+import { TelemetryOperationOrigin } from '@modules/telemetry/enums/telemetry-origin.enum';
 import {
   MAX_PDF_ROWS,
   TelemetryPdfRenderer,
@@ -26,6 +27,7 @@ const buildItem = (
 ): TelemetryHistoryItemResponseDto => ({
   id: 'row-1',
   createdAt: '2026-10-22T08:30:00.000Z',
+  operationOrigin: TelemetryOperationOrigin.FLOW_EXECUTION,
   executionId: 'exec-1',
   flowId: 'flow-1',
   flowName: 'Notiweb',
@@ -122,6 +124,28 @@ describe('TelemetryPdfRenderer', () => {
     // 3. Assert 🎯
     expect(html).not.toContain('<script>x</script>');
     expect(html).toContain('&lt;script&gt;');
+  });
+
+  it('renderHtml deberia etiquetar el consumo del asistente de prompts', () => {
+    // 1. Arrange 📐: sin ejecucion, flujo ni nodo (migracion 049).
+    const { pool } = buildBrowserPool();
+    const renderer = new TelemetryPdfRenderer(
+      pool as unknown as BrowserPoolService,
+    );
+    const item = buildItem({
+      operationOrigin: TelemetryOperationOrigin.PROMPT_OPTIMIZATION,
+      executionId: null,
+      flowId: null,
+      flowName: null,
+      nodeId: null,
+    });
+
+    // 2. Act ⚙️
+    const html = renderer.renderHtml(buildInput({ items: [item] }));
+
+    // 3. Assert 🎯
+    expect(html).toContain('<td>Optimización de prompt</td>');
+    expect(html).toContain('<td class="mono">—</td>');
   });
 
   it('renderHtml deberia recortar el detalle en MAX_PDF_ROWS y avisarlo', () => {

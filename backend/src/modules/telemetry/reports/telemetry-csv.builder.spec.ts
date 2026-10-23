@@ -1,3 +1,4 @@
+import { TelemetryOperationOrigin } from '@modules/telemetry/enums/telemetry-origin.enum';
 import {
   CSV_HEADERS,
   buildTelemetryCsv,
@@ -12,6 +13,7 @@ const buildItem = (
 ): TelemetryHistoryItemResponseDto => ({
   id: 'a1b2c3d4-0000-4000-8000-000000000001',
   createdAt: '2026-10-22T08:30:00.000Z',
+  operationOrigin: TelemetryOperationOrigin.FLOW_EXECUTION,
   executionId: 'e1b2c3d4-0000-4000-8000-000000000002',
   flowId: 'f1b2c3d4-0000-4000-8000-000000000003',
   flowName: 'Notiweb',
@@ -65,9 +67,30 @@ describe('telemetry-csv.builder', () => {
     // 3. Assert 🎯: cabecera + 2 filas + linea vacia final (CRLF de cierre).
     expect(records).toHaveLength(4);
     expect(records[1]).toBe(
-      '2026-10-22T08:30:00.000Z;Notiweb;e1b2c3d4-0000-4000-8000-000000000002;nodo_ia;GEMINI;gemini-3.6-flash;1000;500;100;1600;0,075000;0,300000;0,300000;0,000255;No',
+      '2026-10-22T08:30:00.000Z;Notiweb;e1b2c3d4-0000-4000-8000-000000000002;nodo_ia;GEMINI;gemini-3.6-flash;1000;500;100;1600;0,075000;0,300000;0,300000;0,000255;No;Ejecución de flujo',
     );
-    expect(records[2]?.endsWith(';Sí')).toBe(true);
+    expect(records[2]?.endsWith(';Sí;Ejecución de flujo')).toBe(true);
+  });
+
+  it('deberia etiquetar el consumo del asistente de prompts, que no tiene flujo', () => {
+    // 1. Arrange 📐: sin ejecucion, flujo ni nodo (migracion 049).
+    const item = buildItem({
+      operationOrigin: TelemetryOperationOrigin.PROMPT_OPTIMIZATION,
+      executionId: null,
+      flowId: null,
+      flowName: null,
+      nodeId: null,
+    });
+
+    // 2. Act ⚙️
+    const [, record] = recordsOf(buildTelemetryCsv([item]));
+    const cells = record?.split(';') ?? [];
+
+    // 3. Assert 🎯
+    expect(cells[1]).toBe('Optimización de prompt');
+    expect(cells[2]).toBe('');
+    expect(cells[3]).toBe('');
+    expect(cells.at(-1)).toBe('Optimización de prompt');
   });
 
   it('deberia usar el id del flujo cuando no hay nombre', () => {

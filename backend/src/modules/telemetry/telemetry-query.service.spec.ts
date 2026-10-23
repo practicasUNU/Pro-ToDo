@@ -52,6 +52,7 @@ const buildRow = (index: number): TelemetriaTokensIa =>
   ({
     id: `row-${index}`,
     createdAt: new Date('2026-10-22T08:30:00.000Z'),
+    operationOrigin: 'EJECUCION_FLUJO',
     executionId: 'exec-1',
     flowId: FLOW_ID,
     flow: { name: 'Notiweb' },
@@ -208,6 +209,7 @@ describe('TelemetryQueryService', () => {
       expect(page.items[0]).toMatchObject({
         id: 'row-1',
         createdAt: '2026-10-22T08:30:00.000Z',
+        operationOrigin: 'EJECUCION_FLUJO',
         flowName: 'Notiweb',
       });
     });

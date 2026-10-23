@@ -4,6 +4,7 @@ import { useQuasar } from 'quasar';
 
 import { useAiPromptTemplatesStore } from '@stores/ai-prompt-templates.store';
 import { useNodeCatalogStore } from '@stores/node-catalog.store';
+import PromptOptimizerModal from '@components/shared/PromptOptimizerModal.vue';
 import VariableExplorer from '@components/shared/VariableExplorer.vue';
 
 import { extractApiErrorMessage } from '@/utils/api-error';
@@ -219,10 +220,7 @@ const variableContext = computed<readonly UpstreamNamespace[]>(() => {
   // estrategia declara. Sin ellos, `{{trigger.flow_name}}` —que es lo que lleva
   // el asunto por defecto del nodo de alerta— no se podia elegir del selector,
   // solo teclear de memoria.
-  return [
-    ...buildPromptContextFromCatalog(nodeCatalogStore.entries),
-    ...ENGINE_PROVIDED_CONTEXT,
-  ];
+  return [...buildPromptContextFromCatalog(nodeCatalogStore.entries), ...ENGINE_PROVIDED_CONTEXT];
 });
 
 /**
@@ -266,6 +264,18 @@ const isFormValid = computed<boolean>(
 );
 
 const onDialogToggle = (value: boolean): void => emit('update:modelValue', value);
+
+/** Asistente "Mejorar Prompt con IA" sobre la instruccion del formulario. */
+const isOptimizerOpen = ref(false);
+
+/**
+ * Sustituye la instruccion por la propuesta aceptada. El editor se sincroniza
+ * solo con `modelValue`, y el cambio no se guarda hasta pulsar "Guardar
+ * prompt": el operador aun puede revisarla o cancelar.
+ */
+const applyOptimizedPrompt = (prompt: string): void => {
+  form.promptText = prompt;
+};
 
 const closeDialog = (): void => emit('update:modelValue', false);
 
@@ -387,7 +397,7 @@ const onSubmit = async (): Promise<void> => {
                  plantillas HTML. Los origenes llegan ya filtrados, sin destinos
                  ni la propia salida de la IA. -->
             <VariableExplorer
-            :loading="isCatalogLoading"
+              :loading="isCatalogLoading"
               ref="variableExplorerRef"
               :context="variableContext"
               insert-label="Insertar en el prompt"
@@ -431,6 +441,19 @@ const onSubmit = async (): Promise<void> => {
                 Instruccion / Prompt del sistema<span class="pd-required">*</span>
               </label>
               <span class="pd-mono pd-prompt-badge">{{ MARKER_EXAMPLE }}</span>
+              <q-btn
+                class="pd-btn-icon q-ml-sm"
+                outline
+                no-caps
+                dense
+                icon="auto_fix_high"
+                label="Mejorar Prompt con IA"
+                :disable="form.promptText.trim() === ''"
+                data-test="prompt-optimize"
+                @click="isOptimizerOpen = true"
+              >
+                <q-tooltip>Reescribe la instrucción con reglas de ingeniería de prompts</q-tooltip>
+              </q-btn>
             </div>
 
             <PromptCodeEditor
@@ -452,6 +475,13 @@ const onSubmit = async (): Promise<void> => {
         </div>
       </q-form>
     </q-card>
+
+    <PromptOptimizerModal
+      v-model="isOptimizerOpen"
+      :draft-prompt="form.promptText"
+      default-format="html"
+      @apply="applyOptimizedPrompt"
+    />
   </q-dialog>
 </template>
 

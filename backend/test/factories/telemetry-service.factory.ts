@@ -1,4 +1,5 @@
 import type {
+  RecordAssistUsageDto,
   RecordTelemetryDto,
   TokenUsageMetrics,
 } from '@modules/telemetry/dto/record-telemetry.dto';
@@ -9,13 +10,22 @@ export const MOCK_PROMPT_RATE_USD = 2;
 export const MOCK_COMPLETION_RATE_USD = 10;
 export const MOCK_REASONING_RATE_USD = 10;
 
-/** Doble tipado de `TelemetryService`, acotado a lo que llaman los nodos. */
+/**
+ * Doble tipado de `TelemetryService`, acotado a lo que llaman los nodos y el
+ * asistente de prompts.
+ */
 export type TelemetryServiceMock = jest.Mocked<
-  Pick<TelemetryService, 'recordTokenUsage' | 'computeUsage'>
+  Pick<
+    TelemetryService,
+    'recordTokenUsage' | 'recordAssistUsage' | 'computeUsage'
+  >
 >;
 
+/** Lo que el calculo necesita: contadores, proveedor y modelo. */
+type UsageInput = Omit<RecordTelemetryDto, 'executionId' | 'nodeId'>;
+
 /** Mismo calculo que el servicio real, con tarifas fijas y sin base de datos. */
-const computeMockMetrics = (dto: RecordTelemetryDto): TokenUsageMetrics => ({
+const computeMockMetrics = (dto: UsageInput): TokenUsageMetrics => ({
   promptTokens: dto.promptTokens,
   completionTokens: dto.completionTokens,
   reasoningTokens: dto.reasoningTokens,
@@ -42,7 +52,10 @@ export const createMockTelemetryService = (): TelemetryServiceMock => ({
   recordTokenUsage: jest
     .fn<Promise<TokenUsageMetrics>, [RecordTelemetryDto]>()
     .mockImplementation((dto) => Promise.resolve(computeMockMetrics(dto))),
+  recordAssistUsage: jest
+    .fn<Promise<TokenUsageMetrics>, [RecordAssistUsageDto]>()
+    .mockImplementation((dto) => Promise.resolve(computeMockMetrics(dto))),
   computeUsage: jest
-    .fn<Promise<TokenUsageMetrics>, [RecordTelemetryDto]>()
+    .fn<Promise<TokenUsageMetrics>, [UsageInput]>()
     .mockImplementation((dto) => Promise.resolve(computeMockMetrics(dto))),
 });

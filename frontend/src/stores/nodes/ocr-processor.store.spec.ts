@@ -13,7 +13,12 @@ import * as llmExtractorService from '@services/nodes/llm-extractor.service';
 import { useOcrProcessorStore } from './ocr-processor.store';
 
 import { LlmProvider } from '@/types/nodes/llm-extractor.types';
-import { DEFAULT_OCR_MODEL, DEFAULT_OCR_TEMPERATURE } from '@/types/nodes/ocr-processor.types';
+import {
+  DEFAULT_OCR_MODEL,
+  DEFAULT_OCR_TEMPERATURE,
+  MAX_OCR_CUSTOM_PROMPT_LENGTH,
+  PROMPT_OCR_MULTIMODAL,
+} from '@/types/nodes/ocr-processor.types';
 import { UserRole } from '@/types/user';
 
 import type { LlmModelDescriptor } from '@/types/nodes/llm-extractor.types';
@@ -190,7 +195,7 @@ describe('useOcrProcessorStore · configuracion del nodo PROCESADOR_OCR', () => 
   });
 
   describe('3. Contrato con el pipeline_schema', () => {
-    it('3.1 NO deberia mandar el prompt en los params', () => {
+    it('3.1 NO deberia mandar el prompt del sistema en los params', () => {
       // 1. Arrange 📐: lo pone el backend, que es su unico dueno. Mandarlo desde
       //    aqui crearia una segunda copia que se quedaria vieja en cuanto
       //    alguien afinara el texto del sistema.
@@ -201,6 +206,7 @@ describe('useOcrProcessorStore · configuracion del nodo PROCESADOR_OCR', () => 
 
       // 3. Assert 🎯
       expect(params.prompt).toBeUndefined();
+      expect(params.customPrompt).toBeUndefined();
       expect(params.templatePromptId).toBeUndefined();
       expect(params.model).toBe(DEFAULT_OCR_MODEL);
     });
@@ -221,6 +227,50 @@ describe('useOcrProcessorStore · configuracion del nodo PROCESADOR_OCR', () => 
 
       // 3. Assert 🎯
       expect(store.toNodeParams()).toEqual(params);
+    });
+  });
+
+  describe('3bis. Prompt personalizado', () => {
+    it('3bis.1 deberia publicar customPrompt recortado y recuperarlo al hidratar', () => {
+      // 1. Arrange 📐
+      const store = useOcrProcessorStore(nextNodeId());
+      store.updateConfig({ customPrompt: '  Ignora sellos y firmas.  ' });
+
+      // 2. Act ⚙️
+      const params = store.toNodeParams();
+      const other = useOcrProcessorStore(nextNodeId());
+      other.hydrateFromNode({ outputNamespace: 'ocr_result', params });
+
+      // 3. Assert 🎯
+      expect(params.customPrompt).toBe('Ignora sellos y firmas.');
+      expect(other.config.customPrompt).toBe('Ignora sellos y firmas.');
+    });
+
+    it('3bis.2 NO deberia publicar una copia identica del prompt del sistema', () => {
+      // 1. Arrange 📐: activar el toggle sin tocar el texto no es personalizar.
+      const store = useOcrProcessorStore(nextNodeId());
+      store.updateConfig({ customPrompt: PROMPT_OCR_MULTIMODAL });
+
+      // 2. Act ⚙️
+      const params = store.toNodeParams();
+
+      // 3. Assert 🎯
+      expect(params.customPrompt).toBeUndefined();
+    });
+
+    it('3bis.3 deberia invalidar el nodo con un prompt propio vacio o demasiado largo', () => {
+      // 1. Arrange 📐
+      const store = useOcrProcessorStore(nextNodeId());
+
+      // 2. Act ⚙️ + 3. Assert 🎯
+      store.updateConfig({ customPrompt: '   ' });
+      expect(store.isConfigValid).toBe(false);
+
+      store.updateConfig({ customPrompt: 'x'.repeat(MAX_OCR_CUSTOM_PROMPT_LENGTH + 1) });
+      expect(store.isConfigValid).toBe(false);
+
+      store.updateConfig({ customPrompt: null });
+      expect(store.isConfigValid).toBe(true);
     });
   });
 

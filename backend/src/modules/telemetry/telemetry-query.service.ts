@@ -275,6 +275,7 @@ export class TelemetryQueryService {
     return {
       id: row.id,
       createdAt: row.createdAt.toISOString(),
+      operationOrigin: row.operationOrigin,
       executionId: row.executionId,
       flowId: row.flowId,
       flowName: row.flow?.name ?? null,

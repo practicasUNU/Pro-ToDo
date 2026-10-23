@@ -18,11 +18,12 @@ import {
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import OcrProcessorConfig from '@components/nodes/OcrProcessorConfig.vue';
+import PromptOptimizerModal from '@components/shared/PromptOptimizerModal.vue';
 import { useOcrProcessorStore } from '@stores/nodes/ocr-processor.store';
 import { useSessionStore } from '@stores/session.store';
 
 import { LlmProvider } from '@/types/nodes/llm-extractor.types';
-import { DEFAULT_OCR_MODEL } from '@/types/nodes/ocr-processor.types';
+import { DEFAULT_OCR_MODEL, PROMPT_OCR_MULTIMODAL } from '@/types/nodes/ocr-processor.types';
 import { UserRole } from '@/types/user';
 
 import type { LlmModelDescriptor } from '@/types/nodes/llm-extractor.types';
@@ -40,6 +41,12 @@ vi.mock('@services/auth.service', () => ({
 
 // El catalogo de modelos lo sirve el servicio del nodo de IA: la ruta
 // `/llm/models` es del catalogo, no del nodo de redaccion.
+// El asistente de prompts llega con su modal; sin esto se cargaria
+// `@boot/axios`, que necesita el entorno de Quasar.
+vi.mock('@services/prompts.service', () => ({
+  optimizePrompt: vi.fn(),
+}));
+
 vi.mock('@services/nodes/llm-extractor.service', () => ({
   fetchLlmModels: vi.fn(),
   testLlmConnection: vi.fn(),
@@ -319,6 +326,57 @@ describe('OcrProcessorConfig · configurador del nodo PROCESADOR_OCR', () => {
 
       // 3. Assert 🎯
       expect(useOcrProcessorStore(nodeId).isConfigValid).toBe(true);
+    });
+  });
+
+  describe('6. Prompt personalizable', () => {
+    it('6.1 al activar "Personalizar prompt" deberia partir del prompt del sistema', async () => {
+      // 1. Arrange 📐
+      const nodeId = nextNodeId();
+      const wrapper = mountComponent(nodeId);
+      await flushPromises();
+
+      // 2. Act ⚙️
+      wrapper
+        .findAllComponents({ name: 'QToggle' })
+        .find((toggle) => toggle.attributes('data-test') === 'ocr-prompt-toggle')
+        ?.vm.$emit('update:modelValue', true);
+      await flushPromises();
+
+      // 3. Assert 🎯
+      expect(useOcrProcessorStore(nodeId).config.customPrompt).toBe(PROMPT_OCR_MULTIMODAL);
+      expect(wrapper.find('[data-test="ocr-prompt-restore"]').exists()).toBe(true);
+    });
+
+    it('6.2 aplicar la propuesta del asistente deberia fijarla como prompt propio', async () => {
+      // 1. Arrange 📐
+      const nodeId = nextNodeId();
+      const wrapper = mountComponent(nodeId);
+      await flushPromises();
+
+      // 2. Act ⚙️
+      wrapper.findComponent(PromptOptimizerModal).vm.$emit('apply', 'Transcribe solo la tabla.');
+      await flushPromises();
+
+      // 3. Assert 🎯
+      expect(useOcrProcessorStore(nodeId).config.customPrompt).toBe('Transcribe solo la tabla.');
+      expect(useOcrProcessorStore(nodeId).toNodeParams().customPrompt).toBe(
+        'Transcribe solo la tabla.',
+      );
+    });
+
+    it('6.3 "Restaurar prompt del sistema" deberia volver al prompt por defecto', async () => {
+      // 1. Arrange 📐
+      const nodeId = nextNodeId();
+      const wrapper = mountComponent(nodeId);
+      useOcrProcessorStore(nodeId).updateConfig({ customPrompt: 'Otro.' });
+      await flushPromises();
+
+      // 2. Act ⚙️
+      await wrapper.get('[data-test="ocr-prompt-restore"]').trigger('click');
+
+      // 3. Assert 🎯
+      expect(useOcrProcessorStore(nodeId).config.customPrompt).toBeNull();
     });
   });
 });

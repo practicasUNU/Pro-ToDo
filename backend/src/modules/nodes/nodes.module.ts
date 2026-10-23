@@ -137,6 +137,11 @@ import type { OnModuleInit } from '@nestjs/common';
     // punto por el que otro modulo deberia pedir un cliente de LLM el dia que
     // lo necesite, sin volver a replicar el mapeo que PROT-21 acaba de unificar.
     LlmProviderFactory,
+    // El catalogo (disponibilidad y politica de roles por modelo) y los
+    // defaults de IA del entorno los necesita el asistente de prompts
+    // (`PromptsModule`) para elegir proveedor igual que lo haria un nodo.
+    LlmProviderCatalogService,
+    AiDefaultsConfig,
     // Se re-exporta para no romper a quien ya importaba este modulo esperando
     // encontrar el navegador.
     BrowserModule,

@@ -4,6 +4,7 @@ import Handlebars from 'handlebars';
 import { renderHtmlToPdf } from '@common/utils/html-to-pdf.util';
 import { BrowserPoolService } from '@modules/nodes/services/browser-pool.service';
 import { TELEMETRY_REPORT_TEMPLATE } from '@modules/telemetry/reports/telemetry-report.template';
+import { describeTelemetrySource } from '@modules/telemetry/reports/telemetry-source.util';
 
 import type {
   ModelBreakdownResponseDto,
@@ -120,8 +121,8 @@ export class TelemetryPdfRenderer {
       totalCostUsd: usdFormat.format(input.summary.totalCostUsd),
       items: items.map((item) => ({
         createdAt: dateTimeFormat.format(new Date(item.createdAt)),
-        flowName: item.flowName ?? item.flowId,
-        nodeId: item.nodeId,
+        flowName: describeTelemetrySource(item),
+        nodeId: item.nodeId ?? '—',
         aiModel: item.aiModel,
         promptTokens: integerFormat.format(item.promptTokens),
         completionTokens: integerFormat.format(item.completionTokens),

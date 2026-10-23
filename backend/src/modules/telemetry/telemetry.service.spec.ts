@@ -1,4 +1,5 @@
 import { ANY_MODEL } from '@modules/telemetry/entities/precio-modelo-ia.entity';
+import { TelemetryOperationOrigin } from '@modules/telemetry/enums/telemetry-origin.enum';
 import { TelemetryService } from '@modules/telemetry/telemetry.service';
 
 import type { Repository } from 'typeorm';
@@ -203,6 +204,60 @@ describe('TelemetryService', () => {
       await expect(service.recordTokenUsage(buildDto())).rejects.toThrow(
         'violates not-null constraint',
       );
+    });
+  });
+
+  describe('recordAssistUsage', () => {
+    const USER_ID = '3f1c2b64-8a5e-4c2f-9d3a-7b6e5f4c1a20';
+
+    it('deberia insertar el consumo del asistente con usuario y origen, sin ejecucion', async () => {
+      // 1. Arrange 📐
+      const { service, chain } = buildService();
+
+      // 2. Act ⚙️
+      const metrics = await service.recordAssistUsage({
+        userId: USER_ID,
+        origin: TelemetryOperationOrigin.PROMPT_OPTIMIZATION,
+        aiProvider: 'GEMINI',
+        aiModel: 'gemini-3.6-flash',
+        promptTokens: 1_000_000,
+        completionTokens: 500_000,
+        reasoningTokens: 100_000,
+        usageReported: true,
+      });
+
+      // 3. Assert 🎯: misma tarifa y coste que una inferencia de un flujo.
+      const values = chain.values.mock.calls[0]?.[0] ?? {};
+      expect(values).toMatchObject({
+        operationOrigin: 'PROMPT_OPTIMIZATION',
+        userId: USER_ID,
+        executionId: null,
+        flowId: null,
+        nodeId: null,
+        estimatedCostUsd: 2.3,
+      });
+      expect(chain.setParameter).not.toHaveBeenCalled();
+      expect(metrics.estimatedCostUsd).toBe(2.3);
+    });
+
+    it('deberia propagar el fallo del INSERT para que decida quien llama', async () => {
+      // 1. Arrange 📐
+      const { service, chain } = buildService();
+      chain.execute.mockRejectedValue(new Error('violates check constraint'));
+
+      // 2. Act ⚙️ + 3. Assert 🎯
+      await expect(
+        service.recordAssistUsage({
+          userId: USER_ID,
+          origin: TelemetryOperationOrigin.PROMPT_OPTIMIZATION,
+          aiProvider: 'GEMINI',
+          aiModel: 'gemini-3.6-flash',
+          promptTokens: 1,
+          completionTokens: 1,
+          reasoningTokens: 0,
+          usageReported: true,
+        }),
+      ).rejects.toThrow('violates check constraint');
     });
   });
 });

@@ -9,6 +9,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { defineComponent, h } from 'vue';
 
 import AiPromptTemplateDialog from '@components/ai-prompt-templates/AiPromptTemplateDialog.vue';
+import PromptOptimizerModal from '@components/shared/PromptOptimizerModal.vue';
 
 import { NodeCategory } from '@/types/node-catalog';
 import { NodeType } from '@/types/pipeline';
@@ -37,6 +38,12 @@ vi.mock('@components/shared/PromptCodeEditor.vue', () => ({
       return () => h('div', { class: 'pd-prompt-editor', 'data-test': 'prompt-code-editor' });
     },
   }),
+}));
+
+// El asistente de prompts llega con su modal; sin esto se cargaria
+// `@boot/axios`, que necesita el entorno de Quasar.
+vi.mock('@services/prompts.service', () => ({
+  optimizePrompt: vi.fn(),
 }));
 
 // Los servicios cuelgan de `@boot/axios`, que necesita el entorno de Quasar.
@@ -282,6 +289,34 @@ describe('AiPromptTemplateDialog · redaccion de la instruccion a dos columnas',
         .find((btn) => btn.text().includes('Guardar prompt'));
 
       expect(save?.props('disable')).toBe(true);
+    });
+  });
+
+  describe('4. Mejorar Prompt con IA', () => {
+    it('4.1 deberia deshabilitar el asistente mientras no hay instruccion', async () => {
+      // 1. Arrange 📐 + 2. Act ⚙️: optimizar un texto vacio es pagar por nada.
+      const wrapper = await openDialog();
+
+      // 3. Assert 🎯
+      const optimize = wrapper
+        .findAllComponents(QBtn)
+        .find((btn) => btn.attributes('data-test') === 'prompt-optimize');
+      expect(optimize?.props('disable')).toBe(true);
+      expect(optimize?.props('icon')).toBe('auto_fix_high');
+    });
+
+    it('4.2 aplicar la propuesta deberia sustituir la instruccion del formulario', async () => {
+      // 1. Arrange 📐
+      const wrapper = await openDialog();
+
+      // 2. Act ⚙️
+      wrapper.findComponent(PromptOptimizerModal).vm.$emit('apply', 'Eres un redactor.');
+      await flushPromises();
+
+      // 3. Assert 🎯: el editor recibe la propuesta; aun no se guarda nada.
+      const editor = wrapper.findComponent({ name: 'PromptCodeEditor' });
+      expect(editor.props('modelValue')).toBe('Eres un redactor.');
+      expect(wrapper.find('[data-test="prompt-text-error"]').exists()).toBe(false);
     });
   });
 });

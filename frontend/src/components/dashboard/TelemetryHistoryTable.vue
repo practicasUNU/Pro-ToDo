@@ -8,6 +8,8 @@ import { extractApiErrorMessage } from '@/utils/api-error';
 import { formatDateTime } from '@/utils/date-format';
 import { formatInteger, formatUsd } from '@/utils/number-format';
 
+import { TelemetryOperationOrigin } from '@/types/telemetry';
+
 import type { QTableColumn, QTableProps } from 'quasar';
 import type { TelemetryHistoryItem } from '@/types/telemetry';
 
@@ -31,11 +33,16 @@ const columns: QTableColumn<TelemetryHistoryItem>[] = [
   {
     name: 'flow',
     label: 'Flujo',
-    field: (row) => row.flowName ?? row.flowId,
+    // El asistente de prompts no corre dentro de ningun flujo: se nombra su
+    // origen en lugar de dejar la celda vacia.
+    field: (row) =>
+      row.operationOrigin === TelemetryOperationOrigin.PROMPT_OPTIMIZATION
+        ? 'Optimización de prompt'
+        : (row.flowName ?? row.flowId ?? '—'),
     align: 'left',
     classes: 'pd-cell--long',
   },
-  { name: 'nodeId', label: 'Nodo', field: 'nodeId', align: 'left' },
+  { name: 'nodeId', label: 'Nodo', field: (row) => row.nodeId ?? '—', align: 'left' },
   { name: 'aiModel', label: 'Modelo', field: 'aiModel', align: 'left' },
   {
     name: 'totalTokens',

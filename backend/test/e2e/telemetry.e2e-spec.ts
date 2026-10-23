@@ -521,4 +521,76 @@ describe('Telemetria de tokens de IA (e2e)', () => {
       BOOTSTRAP_TIMEOUT_MS,
     );
   });
+
+  describe('4. Asistente de prompts (migracion 049)', () => {
+    /** Inicio de la seccion, para borrar solo las filas que crea. */
+    const startedAt = new Date().toISOString();
+
+    afterAll(async () => {
+      await dataSource.query(
+        `DELETE FROM telemetria_tokens_ia
+          WHERE origen_operacion = 'PROMPT_OPTIMIZATION'
+            AND usuario_id = $1 AND creado_en >= CAST($2 AS timestamptz)`,
+        [creatorId, startedAt],
+      );
+    });
+
+    it('4.1 deberia registrar el consumo con origen y usuario, sin ejecucion', async () => {
+      // 1. Arrange 📐: un usuario REAL, porque `usuario_id` tiene FK.
+      const userToken = generateDevJwt(app.get(JwtService), {
+        userId: creatorId,
+        email: 'e2e-prompts@unuware.com',
+        role: UserRole.EDITOR,
+      });
+
+      // 2. Act ⚙️
+      const response = await request(httpServer())
+        .post('/api/prompts/optimize')
+        .set('Authorization', `Bearer ${userToken}`)
+        .send({
+          draftPrompt: 'Resume el correo.',
+          targetFormat: 'text',
+          model: 'gemini-3.6-flash',
+        })
+        .expect(200);
+
+      // 3. Assert 🎯
+      const body = response.body as {
+        optimizedPrompt: string;
+        telemetry: { tokensPrompt: number; estimatedCostUSD: number };
+      };
+      expect(body.optimizedPrompt).toBe('Resumen de prueba');
+      expect(body.telemetry.tokensPrompt).toBe(GEMINI_USAGE.prompt);
+
+      const rows = await dataSource.query<
+        Array<TelemetryRow & { origen_operacion: string; ejecucion_id: null }>
+      >(
+        `SELECT * FROM telemetria_tokens_ia
+          WHERE origen_operacion = 'PROMPT_OPTIMIZATION' AND usuario_id = $1
+            AND creado_en >= CAST($2 AS timestamptz)`,
+        [creatorId, startedAt],
+      );
+      expect(rows).toHaveLength(1);
+      expect(rows[0]).toMatchObject({
+        ejecucion_id: null,
+        flujo_id: null,
+        nodo_id: null,
+        tokens_prompt: GEMINI_USAGE.prompt,
+        tokens_razonamiento: GEMINI_USAGE.thoughts,
+      });
+      expect(Number(rows[0].costo_estimado_usd)).toBeCloseTo(
+        body.telemetry.estimatedCostUSD,
+        6,
+      );
+    });
+
+    it('4.2 el CHECK deberia impedir una fila de flujo sin ejecucion', async () => {
+      // 2. Act ⚙️ + 3. Assert 🎯
+      await expect(
+        dataSource.query(
+          `INSERT INTO telemetria_tokens_ia (proveedor_ia, modelo_ia) VALUES ('GEMINI', 'x')`,
+        ),
+      ).rejects.toThrow(/chk_telemetria_origen_coherente/);
+    });
+  });
 });

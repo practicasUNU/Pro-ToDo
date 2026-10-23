@@ -6,7 +6,6 @@ import { AiDefaultsConfig } from '@core/config/ai-defaults.config';
 import { NodeType } from '@core/fsm/types/pipeline-schema.types';
 import {
   OcrProcessorConfigDto,
-  PROMPT_OCR_MULTIMODAL,
   resolveOcrProcessorConfig,
 } from '@modules/nodes/dto/ocr-processor-config.dto';
 import {
@@ -267,7 +266,8 @@ export class OcrProcessorStrategy implements INodeStrategy {
           attempt.provider,
           config.dryRun,
         ).generateCompletion(
-          PROMPT_OCR_MULTIMODAL,
+          // El del nodo (`customPrompt`) o `PROMPT_OCR_MULTIMODAL`.
+          config.prompt,
           undefined,
           {
             model: attempt.model,

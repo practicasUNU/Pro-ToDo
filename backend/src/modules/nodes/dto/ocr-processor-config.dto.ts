@@ -4,10 +4,12 @@ import {
   IsBoolean,
   IsEnum,
   IsInt,
+  IsNotEmpty,
   IsNumber,
   IsOptional,
   IsString,
   Max,
+  MaxLength,
   Min,
 } from 'class-validator';
 import { ApiPropertyOptional } from '@nestjs/swagger';
@@ -23,13 +25,15 @@ import { DEFAULT_GEMINI_MODEL } from '@modules/nodes/strategies/providers/gemini
 import type { AiHttpDefaults } from '@core/config/ai-defaults.config';
 
 /**
- * Prompt del sistema con el que se pide la transcripcion.
+ * Prompt POR DEFECTO con el que se pide la transcripcion.
  *
- * Es FIJO y no configurable, a diferencia del nodo de redaccion: aqui no hay
- * criterio editorial que ajustar —se pide el texto que hay en la imagen, ni mas
- * ni menos— y dejarlo abierto solo invitaria a pedirle al modelo que resumiera o
- * interpretara, que es justo lo que arruinaria el rescate. El nodo de IA que va
- * detras ya se encarga de la redaccion, y ese si elige su plantilla.
+ * Un flujo puede sustituirlo con `customPrompt` (por ejemplo, para pedir que
+ * se ignoren los sellos o que se transcriba solo una seccion), pero este sigue
+ * siendo el que se usa si el nodo no declara otro. La forma de la SALIDA no
+ * depende de el: el contrato JSON lo anade el proveedor al system prompt, asi
+ * que un prompt propio no puede romper el formato que lee la estrategia. Lo que
+ * si puede es pedir que se resuma o interprete, que arruinaria el rescate; de
+ * ahi que el editor del frontend parta siempre de este texto.
  *
  * PIDE MARKDOWN GFM, y no es un capricho de formato. La version anterior pedia
  * "el texto tal como aparece" sin mas, y con un documento de texto corrido
@@ -139,13 +143,17 @@ export const DEFAULT_OCR_ALLOWED_MIME_TYPES: readonly string[] = [
   'application/pdf',
 ];
 
+/** Techo del prompt propio del OCR, holgado para unas instrucciones de transcripcion. */
+export const MAX_OCR_CUSTOM_PROMPT_LENGTH = 8_000;
+
 /**
  * `params` del nodo `PROCESADOR_OCR`.
  *
  * Deliberadamente MAS CORTO que el del nodo de redaccion: no hay
- * `templatePromptId` ni `inlinePrompt` porque el prompt es del sistema, y sin
- * eso desaparecen tambien el freno de emergencia por prompts en bucle y la
- * resolucion de plantillas. Lo que queda es el presupuesto de la llamada.
+ * `templatePromptId` porque el prompt no es una plantilla compartida, y sin eso
+ * desaparecen tambien el freno de emergencia por prompts en bucle y la
+ * resolucion de plantillas. El prompt se puede sustituir EN LINEA con
+ * `customPrompt`; sin el, se usa `PROMPT_OCR_MULTIMODAL`.
  *
  * Se valida con `whitelist: true, forbidNonWhitelisted: true`, asi que una clave
  * de mas se rechaza en vez de guardarse en silencio.
@@ -257,6 +265,22 @@ export class OcrProcessorConfigDto {
   @IsOptional()
   @IsString({ message: 'cacheNamespace debe ser una cadena.' })
   cacheNamespace?: string;
+
+  @ApiPropertyOptional({
+    description:
+      'Instrucciones de transcripcion propias de este nodo. Sin ellas se usa el prompt por defecto (`PROMPT_OCR_MULTIMODAL`).',
+    maxLength: MAX_OCR_CUSTOM_PROMPT_LENGTH,
+  })
+  @IsOptional()
+  @IsString({ message: 'customPrompt debe ser una cadena.' })
+  @IsNotEmpty({
+    message:
+      'customPrompt no puede estar vacio: omitelo para usar el prompt por defecto.',
+  })
+  @MaxLength(MAX_OCR_CUSTOM_PROMPT_LENGTH, {
+    message: `customPrompt no puede superar ${MAX_OCR_CUSTOM_PROMPT_LENGTH} caracteres.`,
+  })
+  customPrompt?: string;
 }
 
 /** Configuracion del OCR con los valores por defecto ya aplicados. */
@@ -273,6 +297,9 @@ export interface ResolvedOcrProcessorConfig {
   readonly allowedMimeTypes: readonly string[];
   readonly dryRun: boolean;
   readonly cacheNamespace: string;
+
+  /** Prompt de transcripcion efectivo: el propio del nodo o el por defecto. */
+  readonly prompt: string;
 }
 
 /**
@@ -316,4 +343,9 @@ export const resolveOcrProcessorConfig = (
   allowedMimeTypes: dto.allowedMimeTypes ?? DEFAULT_OCR_ALLOWED_MIME_TYPES,
   dryRun: dto.dryRun ?? false,
   cacheNamespace: dto.cacheNamespace ?? DEFAULT_OCR_CACHE_NAMESPACE,
+  // Un prompt de solo espacios cuenta como ausente: `@IsNotEmpty` no lo para.
+  prompt:
+    dto.customPrompt !== undefined && dto.customPrompt.trim().length > 0
+      ? dto.customPrompt.trim()
+      : PROMPT_OCR_MULTIMODAL,
 });

@@ -1,17 +1,15 @@
 import type { LlmProvider } from '@/types/nodes/llm-extractor.types';
 
 /**
- * Prompt del sistema con el que se pide la transcripcion.
+ * Prompt POR DEFECTO con el que se pide la transcripcion.
  *
  * REPLICA LITERAL del backend (`ocr-processor-config.dto.ts`): cualquier cambio
  * alli debe copiarse aqui, o la interfaz enseñaria al operador un prompt que ya
  * no se usa.
  *
- * Se muestra en SOLO LECTURA. Aqui no hay criterio editorial que ajustar —se
- * pide el texto que hay en la imagen, ni mas ni menos— y dejarlo abierto
- * invitaria a pedirle al modelo que resumiera, que es justo lo que arruinaria
- * el rescate. El nodo de IA que va detras ya se encarga de la redaccion, y ese
- * si elige su plantilla.
+ * Un nodo puede sustituirlo con `customPrompt`; el editor parte siempre de este
+ * texto para que no se pierdan sus reglas (no resumir, no interpretar). Sin
+ * `customPrompt` en los `params`, el backend usa este.
  */
 export const PROMPT_OCR_MULTIMODAL = [
   'Eres un motor de transcripcion documental. Transcribe integramente el texto visible en los documentos adjuntos usando Markdown GFM.',
@@ -55,12 +53,15 @@ export const MIN_OCR_RETRIES = 0;
  */
 export const MAX_OCR_RETRIES = 3;
 
+/** Techo del prompt propio. REPLICA de `MAX_OCR_CUSTOM_PROMPT_LENGTH` (backend). */
+export const MAX_OCR_CUSTOM_PROMPT_LENGTH = 8_000;
+
 /**
  * Configuracion del nodo `PROCESADOR_OCR`.
  *
  * Deliberadamente MAS CORTA que la del nodo de redaccion: sin plantilla de
- * prompt ni instruccion en linea, porque el prompt es del sistema. Lo que queda
- * es el presupuesto de la llamada.
+ * prompt compartida. Lo que queda es el presupuesto de la llamada y, si el
+ * flujo lo necesita, unas instrucciones de transcripcion propias.
  */
 export interface OcrProcessorNodeConfig {
   provider: LlmProvider;
@@ -69,4 +70,6 @@ export interface OcrProcessorNodeConfig {
   timeoutMs: number;
   maxRetries: number;
   dryRun: boolean;
+  /** Prompt propio del nodo; `null` = el del sistema (`PROMPT_OCR_MULTIMODAL`). */
+  customPrompt: string | null;
 }

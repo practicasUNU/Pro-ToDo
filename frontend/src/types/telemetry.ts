@@ -54,14 +54,23 @@ export interface ModelBreakdownRow {
   readonly costUsd: number;
 }
 
+/** Valores de `TelemetryOperationOrigin` del backend (migracion 049). */
+export enum TelemetryOperationOrigin {
+  FLOW_EXECUTION = 'EJECUCION_FLUJO',
+  PROMPT_OPTIMIZATION = 'PROMPT_OPTIMIZATION',
+}
+
 /** Una inferencia registrada. Replica `TelemetryHistoryItemResponseDto`. */
 export interface TelemetryHistoryItem {
   readonly id: string;
   readonly createdAt: string;
-  readonly executionId: string;
-  readonly flowId: string;
+  /** Que provoco la inferencia: un nodo de un flujo o el asistente de prompts. */
+  readonly operationOrigin: TelemetryOperationOrigin;
+  /** `null` fuera de una ejecucion (asistente de prompts). */
+  readonly executionId: string | null;
+  readonly flowId: string | null;
   readonly flowName: string | null;
-  readonly nodeId: string;
+  readonly nodeId: string | null;
   readonly aiProvider: string;
   readonly aiModel: string;
   readonly promptTokens: number;

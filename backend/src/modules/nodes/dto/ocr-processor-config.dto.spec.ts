@@ -1,11 +1,16 @@
+import { plainToInstance } from 'class-transformer';
+import { validateSync } from 'class-validator';
+
 import {
   DEFAULT_OCR_MAX_RETRIES,
   DEFAULT_OCR_TIMEOUT_MS,
+  MAX_OCR_CUSTOM_PROMPT_LENGTH,
   MAX_OCR_RETRIES,
   MAX_OCR_TIMEOUT_MS,
   MIN_OCR_TIMEOUT_MS,
   OCR_RETRY_BASE_DELAY_MS,
   OcrProcessorConfigDto,
+  PROMPT_OCR_MULTIMODAL,
   resolveOcrProcessorConfig,
 } from './ocr-processor-config.dto';
 
@@ -116,5 +121,44 @@ describe('resolveOcrProcessorConfig · politica de red', () => {
         resolveOcrProcessorConfig(buildDto(), SIN_ENTORNO).baseDelayMs,
       ).toBe(OCR_RETRY_BASE_DELAY_MS);
     });
+  });
+});
+
+describe('resolveOcrProcessorConfig · prompt de transcripcion', () => {
+  it('4.1 deberia usar PROMPT_OCR_MULTIMODAL si el nodo no declara customPrompt', () => {
+    // 1. Arrange 📐 + 2. Act ⚙️
+    const config = resolveOcrProcessorConfig(buildDto(), SIN_ENTORNO);
+
+    // 3. Assert 🎯
+    expect(config.prompt).toBe(PROMPT_OCR_MULTIMODAL);
+  });
+
+  it('4.2 deberia usar el customPrompt recortado y tratar uno en blanco como ausente', () => {
+    // 1. Arrange 📐 + 2. Act ⚙️
+    const custom = resolveOcrProcessorConfig(
+      buildDto({ customPrompt: '  Solo la primera pagina.  ' }),
+      SIN_ENTORNO,
+    );
+    const blank = resolveOcrProcessorConfig(
+      buildDto({ customPrompt: '   ' }),
+      SIN_ENTORNO,
+    );
+
+    // 3. Assert 🎯
+    expect(custom.prompt).toBe('Solo la primera pagina.');
+    expect(blank.prompt).toBe(PROMPT_OCR_MULTIMODAL);
+  });
+
+  it('4.3 deberia rechazar un customPrompt por encima del techo', () => {
+    // 1. Arrange 📐
+    const dto = plainToInstance(OcrProcessorConfigDto, {
+      customPrompt: 'x'.repeat(MAX_OCR_CUSTOM_PROMPT_LENGTH + 1),
+    });
+
+    // 2. Act ⚙️
+    const errors = validateSync(dto);
+
+    // 3. Assert 🎯
+    expect(errors.map((error) => error.property)).toEqual(['customPrompt']);
   });
 });

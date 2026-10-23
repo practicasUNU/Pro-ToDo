@@ -474,11 +474,17 @@ INSERT INTO precios_modelos_ia (
 
 CREATE TABLE telemetria_tokens_ia (
     id_telemetria_tokens_ia UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-    ejecucion_id UUID NOT NULL REFERENCES ejecuciones_flujo(id_ejecucion) ON DELETE CASCADE,
+    -- Ejecucion, flujo y nodo son NULL en el consumo del asistente de prompts,
+    -- que no ocurre dentro de ninguna ejecucion (migracion 049).
+    ejecucion_id UUID NULL REFERENCES ejecuciones_flujo(id_ejecucion) ON DELETE CASCADE,
     -- Redundante con `ejecucion_id` a proposito: eje de agregacion sin JOIN.
-    flujo_id UUID NOT NULL REFERENCES flujos(id_flujo) ON DELETE CASCADE,
+    flujo_id UUID NULL REFERENCES flujos(id_flujo) ON DELETE CASCADE,
     -- `nodeId` del pipeline: sin FK, igual que `logs_nodo.id_nodo`.
-    nodo_id VARCHAR(50) NOT NULL,
+    nodo_id VARCHAR(50) NULL,
+    -- 'EJECUCION_FLUJO' | 'PROMPT_OPTIMIZATION' (migracion 049).
+    origen_operacion VARCHAR(30) NOT NULL DEFAULT 'EJECUCION_FLUJO',
+    -- Quien pidio la inferencia fuera de una ejecucion.
+    usuario_id UUID NULL REFERENCES usuarios(id_usuario) ON DELETE SET NULL,
     proveedor_ia VARCHAR(30) NOT NULL,
     modelo_ia VARCHAR(100) NOT NULL,
     tokens_prompt INTEGER NOT NULL DEFAULT 0 CHECK (tokens_prompt >= 0),
@@ -490,12 +496,19 @@ CREATE TABLE telemetria_tokens_ia (
     tarifa_razonamiento_usd NUMERIC(12, 6) NOT NULL DEFAULT 0 CHECK (tarifa_razonamiento_usd >= 0),
     costo_estimado_usd NUMERIC(12, 6) NOT NULL DEFAULT 0 CHECK (costo_estimado_usd >= 0),
     es_estimado BOOLEAN NOT NULL DEFAULT FALSE,
-    creado_en TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+    creado_en TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    -- Cada origen trae sus columnas: sin filas a medias.
+    CONSTRAINT chk_telemetria_origen_coherente CHECK (
+        (origen_operacion = 'EJECUCION_FLUJO'
+            AND ejecucion_id IS NOT NULL AND flujo_id IS NOT NULL AND nodo_id IS NOT NULL)
+        OR (origen_operacion = 'PROMPT_OPTIMIZATION' AND usuario_id IS NOT NULL)
+    )
 );
 
 CREATE INDEX idx_telemetria_tokens_ejecucion ON telemetria_tokens_ia (ejecucion_id);
 CREATE INDEX idx_telemetria_tokens_flujo_fecha ON telemetria_tokens_ia (flujo_id, creado_en);
 CREATE INDEX idx_telemetria_tokens_proveedor_modelo ON telemetria_tokens_ia (proveedor_ia, modelo_ia, creado_en);
+CREATE INDEX idx_telemetria_tokens_origen_fecha ON telemetria_tokens_ia (origen_operacion, creado_en);
 
 -- =============================================================================
 -- Tabla: audit_eventos (migracion 048)

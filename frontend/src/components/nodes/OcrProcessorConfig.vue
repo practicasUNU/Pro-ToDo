@@ -1,8 +1,10 @@
 <script setup lang="ts">
-import { computed, onMounted } from 'vue';
+import { computed, defineAsyncComponent, onMounted, ref } from 'vue';
 import { useQuasar } from 'quasar';
 
 import { useOcrProcessorStore } from '@stores/nodes/ocr-processor.store';
+
+import PromptOptimizerModal from '@components/shared/PromptOptimizerModal.vue';
 
 import {
   ADMIN_ONLY_LABEL,
@@ -27,8 +29,15 @@ import {
   MIN_OCR_RETRIES,
   MIN_OCR_TEMPERATURE,
   MIN_OCR_TIMEOUT_MS,
+  MAX_OCR_CUSTOM_PROMPT_LENGTH,
   PROMPT_OCR_MULTIMODAL,
 } from '@/types/nodes/ocr-processor.types';
+
+// CodeMirror pesa unos cientos de KB: solo se descarga si alguien personaliza
+// el prompt.
+const PromptCodeEditor = defineAsyncComponent(
+  () => import('@components/shared/PromptCodeEditor.vue'),
+);
 
 interface Props {
   /** Identificador del nodo en el `pipeline_schema` (contrato uniforme §3.1). */
@@ -43,7 +52,30 @@ const store = useOcrProcessorStore(props.nodeId);
 const $q = useQuasar();
 
 const PROMPT_NOTICE =
-  'Lo fija el sistema y no se edita: aqui se pide el texto que hay en la imagen, ni mas ni menos. Pedirle al modelo que resuma o interprete arruinaria el rescate, y la redaccion ya la hace el nodo de IA que va despues, que si elige su plantilla.';
+  'Por defecto se usa la instruccion del sistema: pide el texto que hay en la imagen, ni mas ni menos. Personalizala solo si el documento lo exige (ignorar sellos, transcribir una seccion); pedir que resuma o interprete arruinaria el rescate, y la redaccion ya la hace el nodo de IA que va despues.';
+
+/** Asistente "Mejorar Prompt con IA" sobre la instruccion de este nodo. */
+const isOptimizerOpen = ref(false);
+
+/** `true` mientras el nodo usa un prompt propio en lugar del del sistema. */
+const isCustomPrompt = computed(() => store.config.customPrompt !== null);
+
+/** Texto que se ve y se optimiza: el propio o, si no hay, el del sistema. */
+const effectivePrompt = computed(() => store.config.customPrompt ?? PROMPT_OCR_MULTIMODAL);
+
+/** Al activar, el editor parte del prompt del sistema para no perder sus reglas. */
+const toggleCustomPrompt = (enabled: boolean): void => {
+  store.updateConfig({ customPrompt: enabled ? PROMPT_OCR_MULTIMODAL : null });
+};
+
+const restoreSystemPrompt = (): void => {
+  store.updateConfig({ customPrompt: null });
+};
+
+/** La propuesta aceptada pasa a ser el prompt propio del nodo. */
+const applyOptimizedPrompt = (prompt: string): void => {
+  store.updateConfig({ customPrompt: prompt });
+};
 
 const MODEL_HINT =
   'Lista cerrada servida por el backend, que es el unico que sabe que credenciales hay configuradas. Los modelos de pago estan reservados a Administradores.';
@@ -156,13 +188,75 @@ onMounted(() => {
       </div>
     </header>
 
-    <!-- El prompt en SOLO LECTURA: se ve lo que se le pide al modelo, pero no se
-         edita. Ocultarlo del todo dejaria al operador sin saber que se envia. -->
+    <!-- Por defecto, el prompt del sistema en SOLO LECTURA: se ve lo que se le
+         pide al modelo. Personalizarlo es una decision explicita (toggle), y el
+         editor parte siempre del texto del sistema. -->
     <div data-test="ocr-prompt-field">
-      <label class="pd-label">Instruccion del sistema</label>
-      <pre class="pd-mono pd-readonly-prompt q-mt-xs">{{ PROMPT_OCR_MULTIMODAL }}</pre>
+      <div class="row items-center no-wrap q-gutter-sm">
+        <label class="pd-label col">
+          {{ isCustomPrompt ? 'Instruccion personalizada' : 'Instruccion del sistema' }}
+        </label>
+        <q-toggle
+          :model-value="isCustomPrompt"
+          dense
+          label="Personalizar prompt"
+          data-test="ocr-prompt-toggle"
+          @update:model-value="toggleCustomPrompt"
+        />
+        <q-btn
+          class="pd-btn-icon"
+          outline
+          no-caps
+          dense
+          icon="auto_fix_high"
+          label="Mejorar Prompt con IA"
+          data-test="ocr-prompt-optimize"
+          @click="isOptimizerOpen = true"
+        >
+          <q-tooltip>Reescribe la instruccion con reglas de ingenieria de prompts</q-tooltip>
+        </q-btn>
+      </div>
+
+      <template v-if="isCustomPrompt">
+        <PromptCodeEditor
+          class="q-mt-xs"
+          :model-value="store.config.customPrompt ?? ''"
+          min-height="180px"
+          data-test="ocr-prompt-editor"
+          @update:model-value="store.updateConfig({ customPrompt: $event })"
+        />
+        <div class="row items-center q-mt-xs">
+          <p
+            v-if="!store.isCustomPromptValid"
+            class="pd-required col q-mb-none"
+            data-test="ocr-prompt-error"
+          >
+            La instruccion no puede quedar vacia ni superar
+            {{ MAX_OCR_CUSTOM_PROMPT_LENGTH }} caracteres.
+          </p>
+          <q-space />
+          <q-btn
+            class="pd-btn-secondary"
+            flat
+            no-caps
+            dense
+            icon="restart_alt"
+            label="Restaurar prompt del sistema"
+            data-test="ocr-prompt-restore"
+            @click="restoreSystemPrompt"
+          />
+        </div>
+      </template>
+      <pre v-else class="pd-mono pd-readonly-prompt q-mt-xs">{{ PROMPT_OCR_MULTIMODAL }}</pre>
       <p class="pd-subtitle q-mt-xs q-mb-none">{{ PROMPT_NOTICE }}</p>
     </div>
+
+    <PromptOptimizerModal
+      v-model="isOptimizerOpen"
+      :draft-prompt="effectivePrompt"
+      default-format="text"
+      @apply="applyOptimizedPrompt"
+    />
 
     <div class="row q-col-gutter-md q-mt-md">
       <div class="col-12 col-md-6" data-test="ocr-provider-field">

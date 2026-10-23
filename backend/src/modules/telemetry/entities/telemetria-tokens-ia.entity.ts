@@ -9,7 +9,10 @@ import {
 
 import { FsmExecution } from '@core/fsm/entities/fsm-execution.entity';
 import { Workflow } from '@modules/workflows/entities/workflow.entity';
+import { TelemetryOperationOrigin } from '@modules/telemetry/enums/telemetry-origin.enum';
 import { numericTransformer } from '@modules/telemetry/utils/numeric.transformer';
+
+import type { User } from '@modules/users/entities/user.entity';
 
 /**
  * Consumo de tokens de UNA inferencia de IA (migracion 045).
@@ -25,14 +28,19 @@ import { numericTransformer } from '@modules/telemetry/utils/numeric.transformer
  *
  * `es_estimado` se activa cuando el coste no es exacto: el proveedor no informo
  * del uso, o el modelo no tenia tarifa propia y se aplico la generica.
+ *
+ * Desde la migracion 049 no todo consumo nace de una ejecucion: el asistente
+ * de prompts (`origen_operacion = 'PROMPT_OPTIMIZATION'`) no tiene ejecucion,
+ * flujo ni nodo, y en su lugar guarda el `usuario_id` que lo pidio. Un CHECK de
+ * la tabla obliga a que cada origen traiga sus columnas.
  */
 @Entity('telemetria_tokens_ia')
 export class TelemetriaTokensIa {
   @PrimaryGeneratedColumn('uuid', { name: 'id_telemetria_tokens_ia' })
   id: string;
 
-  @Column({ name: 'ejecucion_id', type: 'uuid' })
-  executionId: string;
+  @Column({ name: 'ejecucion_id', type: 'uuid', nullable: true })
+  executionId: string | null;
 
   @ManyToOne(() => FsmExecution, { onDelete: 'CASCADE' })
   @JoinColumn({ name: 'ejecucion_id' })
@@ -44,16 +52,33 @@ export class TelemetriaTokensIa {
    * propio INSERT desde `ejecuciones_flujo`, nunca el `flowId` del JSON del
    * pipeline, que es texto libre y no tiene por que ser este UUID.
    */
-  @Column({ name: 'flujo_id', type: 'uuid' })
-  flowId: string;
+  @Column({ name: 'flujo_id', type: 'uuid', nullable: true })
+  flowId: string | null;
 
   @ManyToOne(() => Workflow, { onDelete: 'CASCADE' })
   @JoinColumn({ name: 'flujo_id' })
   flow?: Workflow;
 
   /** `nodeId` del pipeline; sin FK, igual que `logs_nodo.id_nodo`. */
-  @Column({ name: 'nodo_id', type: 'varchar', length: 50 })
-  nodeId: string;
+  @Column({ name: 'nodo_id', type: 'varchar', length: 50, nullable: true })
+  nodeId: string | null;
+
+  @Column({
+    name: 'origen_operacion',
+    type: 'varchar',
+    length: 30,
+    default: TelemetryOperationOrigin.FLOW_EXECUTION,
+  })
+  operationOrigin: TelemetryOperationOrigin;
+
+  /** Quien pidio la inferencia fuera de una ejecucion (asistente de prompts). */
+  @Column({ name: 'usuario_id', type: 'uuid', nullable: true })
+  userId: string | null;
+
+  /** Por nombre (`'User'`), como en `AuditableEntity`, para no abrir ciclos. */
+  @ManyToOne('User', { nullable: true, onDelete: 'SET NULL' })
+  @JoinColumn({ name: 'usuario_id' })
+  user?: User | null;
 
   @Column({ name: 'proveedor_ia', type: 'varchar', length: 30 })
   aiProvider: string;

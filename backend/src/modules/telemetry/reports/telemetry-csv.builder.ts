@@ -3,6 +3,8 @@ import {
   escapeCsvText,
   formatCsvDecimal,
 } from '@common/utils/csv.util';
+import { TELEMETRY_ORIGIN_LABELS } from '@modules/telemetry/enums/telemetry-origin.enum';
+import { describeTelemetrySource } from '@modules/telemetry/reports/telemetry-source.util';
 
 import type { TelemetryHistoryItemResponseDto } from '@modules/telemetry/dto/telemetry-report-response.dto';
 
@@ -30,13 +32,14 @@ export const CSV_HEADERS: readonly string[] = [
   'Tarifa razonamiento (USD/MTok)',
   'Coste estimado (USD)',
   'Coste aproximado',
+  'Origen',
 ];
 
 const toRecord = (item: TelemetryHistoryItemResponseDto): string[] => [
   escapeCsvText(item.createdAt),
-  escapeCsvText(item.flowName ?? item.flowId),
-  escapeCsvText(item.executionId),
-  escapeCsvText(item.nodeId),
+  escapeCsvText(describeTelemetrySource(item)),
+  escapeCsvText(item.executionId ?? ''),
+  escapeCsvText(item.nodeId ?? ''),
   escapeCsvText(item.aiProvider),
   escapeCsvText(item.aiModel),
   String(item.promptTokens),
@@ -48,6 +51,7 @@ const toRecord = (item: TelemetryHistoryItemResponseDto): string[] => [
   formatCsvDecimal(item.reasoningRateUsd),
   formatCsvDecimal(item.estimatedCostUsd),
   item.isEstimated ? 'Sí' : 'No',
+  escapeCsvText(TELEMETRY_ORIGIN_LABELS[item.operationOrigin]),
 ];
 
 /**

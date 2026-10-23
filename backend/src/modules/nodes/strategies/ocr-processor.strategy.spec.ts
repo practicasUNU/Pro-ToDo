@@ -13,6 +13,7 @@ import {
   DEFAULT_OCR_MAX_TOKENS,
   DEFAULT_OCR_MODEL,
   OCR_RETRY_BASE_DELAY_MS,
+  PROMPT_OCR_MULTIMODAL,
 } from '@modules/nodes/dto/ocr-processor-config.dto';
 import {
   ERR_OCR_CONFIG,
@@ -558,6 +559,62 @@ describe('OcrProcessorStrategy · nodo satelite PROCESADOR_OCR', () => {
       // Contra la CONSTANTE: el valor sube cuando sube el presupuesto, y un
       // literal aqui convertiria ese cambio en una prueba roja sin informacion.
       expect(options?.maxTokens).toBe(DEFAULT_OCR_MAX_TOKENS);
+    });
+
+    it('6.0 deberia transcribir con el prompt por defecto si el nodo no declara otro', async () => {
+      // 1. Arrange 📐
+      const generateCompletion = buildSpyGemini();
+      const strategy = buildStrategy({
+        provider: LlmProvider.GEMINI,
+        generateCompletion,
+      } as unknown as GeminiLlmProvider);
+
+      // 2. Act ⚙️
+      await strategy.execute(buildContext(), { provider: LlmProvider.GEMINI });
+
+      // 3. Assert 🎯
+      const [prompt] = generateCompletion.mock.calls[0] as unknown[];
+      expect(prompt).toBe(PROMPT_OCR_MULTIMODAL);
+    });
+
+    it('6.0bis deberia usar el customPrompt del nodo, recortado, en lugar del por defecto', async () => {
+      // 1. Arrange 📐: el flujo pide ignorar los sellos del documento.
+      const generateCompletion = buildSpyGemini();
+      const strategy = buildStrategy({
+        provider: LlmProvider.GEMINI,
+        generateCompletion,
+      } as unknown as GeminiLlmProvider);
+
+      // 2. Act ⚙️
+      const result = await strategy.execute(buildContext(), {
+        provider: LlmProvider.GEMINI,
+        customPrompt: '  Transcribe el documento ignorando sellos y firmas.  ',
+      });
+
+      // 3. Assert 🎯: el contrato JSON lo sigue poniendo el proveedor.
+      const [prompt] = generateCompletion.mock.calls[0] as unknown[];
+      expect(result.success).toBe(true);
+      expect(prompt).toBe('Transcribe el documento ignorando sellos y firmas.');
+    });
+
+    it('6.0ter deberia rechazar un customPrompt vacio como configuracion invalida', async () => {
+      // 1. Arrange 📐
+      const generateCompletion = buildSpyGemini();
+      const strategy = buildStrategy({
+        provider: LlmProvider.GEMINI,
+        generateCompletion,
+      } as unknown as GeminiLlmProvider);
+
+      // 2. Act ⚙️
+      const result = await strategy.execute(buildContext(), {
+        provider: LlmProvider.GEMINI,
+        customPrompt: '',
+      });
+
+      // 3. Assert 🎯
+      expect(result.success).toBe(false);
+      expect(result.error?.code).toBe(ERR_OCR_CONFIG);
+      expect(generateCompletion).not.toHaveBeenCalled();
     });
 
     it('6.1bis deberia pedir el pensamiento MINIMO para transcribir', async () => {

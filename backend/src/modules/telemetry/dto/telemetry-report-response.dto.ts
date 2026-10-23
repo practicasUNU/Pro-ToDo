@@ -1,5 +1,7 @@
 import { ApiProperty } from '@nestjs/swagger';
 
+import { TelemetryOperationOrigin } from '@modules/telemetry/enums/telemetry-origin.enum';
+
 /** Rango efectivo de un informe, ya resuelto (instantes ISO, `to` excluido). */
 export class TelemetryRangeDto {
   @ApiProperty({ description: 'Inicio del rango (incluido)' })
@@ -84,17 +86,28 @@ export class TelemetryHistoryItemResponseDto {
   @ApiProperty({ description: 'Instante de la inferencia (ISO)' })
   readonly createdAt: string;
 
-  @ApiProperty({ format: 'uuid' })
-  readonly executionId: string;
+  @ApiProperty({
+    enum: TelemetryOperationOrigin,
+    description: 'Que provoco la inferencia (migracion 049)',
+  })
+  readonly operationOrigin: TelemetryOperationOrigin;
 
-  @ApiProperty({ format: 'uuid' })
-  readonly flowId: string;
+  @ApiProperty({
+    format: 'uuid',
+    nullable: true,
+    type: String,
+    description: 'null fuera de una ejecucion (asistente de prompts)',
+  })
+  readonly executionId: string | null;
+
+  @ApiProperty({ format: 'uuid', nullable: true, type: String })
+  readonly flowId: string | null;
 
   @ApiProperty({ nullable: true, type: String })
   readonly flowName: string | null;
 
-  @ApiProperty()
-  readonly nodeId: string;
+  @ApiProperty({ nullable: true, type: String })
+  readonly nodeId: string | null;
 
   @ApiProperty()
   readonly aiProvider: string;

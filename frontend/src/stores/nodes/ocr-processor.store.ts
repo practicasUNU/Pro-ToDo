@@ -13,6 +13,8 @@ import {
   MIN_OCR_RETRIES,
   MIN_OCR_TEMPERATURE,
   MIN_OCR_TIMEOUT_MS,
+  MAX_OCR_CUSTOM_PROMPT_LENGTH,
+  PROMPT_OCR_MULTIMODAL,
 } from '@/types/nodes/ocr-processor.types';
 
 import { useSessionStore } from '@stores/session.store';
@@ -45,7 +47,19 @@ const buildInitialConfig = (): OcrProcessorNodeConfig => ({
   timeoutMs: DEFAULT_OCR_TIMEOUT_MS,
   maxRetries: DEFAULT_OCR_MAX_RETRIES,
   dryRun: false,
+  customPrompt: null,
 });
+
+/**
+ * Prompt que se guardaria: `null` si no hay prompt propio o si coincide con el
+ * del sistema (guardar una copia identica la dejaria vieja en cuanto el backend
+ * afinara el suyo).
+ */
+const effectiveCustomPrompt = (customPrompt: string | null): string | null => {
+  const trimmed = customPrompt?.trim() ?? '';
+
+  return trimmed === '' || trimmed === PROMPT_OCR_MULTIMODAL ? null : trimmed;
+};
 
 /** Prefijo del id de Pinia; el sufijo es el `nodeId` del `pipeline_schema`. */
 const STORE_ID_PREFIX = 'ocrProcessorNode';
@@ -143,12 +157,26 @@ const ocrProcessorSetup = () => {
    * backend rechazaria con un 400 sobre el esquema ENTERO, donde el operador ya
    * no sabria que campo lo causo.
    */
+  /**
+   * Un prompt propio ACTIVADO no puede quedar vacio (el backend lo rechazaria
+   * con `IsNotEmpty`) ni pasar del techo. Desactivado (`null`) siempre vale.
+   */
+  const isCustomPromptValid = computed<boolean>(() => {
+    const { customPrompt } = config.value;
+
+    return (
+      customPrompt === null ||
+      (customPrompt.trim() !== '' && customPrompt.length <= MAX_OCR_CUSTOM_PROMPT_LENGTH)
+    );
+  });
+
   const isConfigValid = computed<boolean>(
     () =>
       config.value.model.trim() !== '' &&
       isWithin(config.value.temperature, MIN_OCR_TEMPERATURE, MAX_OCR_TEMPERATURE) &&
       isWithin(config.value.timeoutMs, MIN_OCR_TIMEOUT_MS, MAX_OCR_TIMEOUT_MS) &&
       isWithin(config.value.maxRetries, MIN_OCR_RETRIES, MAX_OCR_RETRIES) &&
+      isCustomPromptValid.value &&
       !isSelectedModelForbidden.value,
   );
 
@@ -205,18 +233,22 @@ const ocrProcessorSetup = () => {
   /**
    * `params` que viajan al `pipeline_schema`.
    *
-   * El prompt NO viaja: lo pone el backend, que es su unico dueno. Mandarlo
-   * desde aqui crearia una segunda copia que se quedaria vieja en cuanto alguien
-   * afinara el texto del sistema.
+   * El prompt del SISTEMA no viaja: lo pone el backend, que es su unico dueno.
+   * Solo viaja `customPrompt` cuando el nodo tiene uno propio y distinto.
    */
-  const toNodeParams = (): Record<string, unknown> => ({
-    provider: config.value.provider,
-    model: config.value.model.trim(),
-    temperature: config.value.temperature,
-    timeoutMs: config.value.timeoutMs,
-    maxRetries: config.value.maxRetries,
-    ...(config.value.dryRun ? { dryRun: true } : {}),
-  });
+  const toNodeParams = (): Record<string, unknown> => {
+    const customPrompt = effectiveCustomPrompt(config.value.customPrompt);
+
+    return {
+      provider: config.value.provider,
+      model: config.value.model.trim(),
+      temperature: config.value.temperature,
+      timeoutMs: config.value.timeoutMs,
+      maxRetries: config.value.maxRetries,
+      ...(config.value.dryRun ? { dryRun: true } : {}),
+      ...(customPrompt !== null ? { customPrompt } : {}),
+    };
+  };
 
   /** Carga la configuracion de un nodo ya guardado en el `pipeline_schema`. */
   const hydrateFromNode = (node: HydratableNode): void => {
@@ -232,6 +264,7 @@ const ocrProcessorSetup = () => {
       timeoutMs: asNumber(params.timeoutMs, DEFAULT_OCR_TIMEOUT_MS),
       maxRetries: asNumber(params.maxRetries, DEFAULT_OCR_MAX_RETRIES),
       dryRun: params.dryRun === true,
+      customPrompt: effectiveCustomPrompt(asText(params.customPrompt)),
     };
 
     lastConnectionResult.value = null;
@@ -254,6 +287,7 @@ const ocrProcessorSetup = () => {
     fetchAvailableModels,
     testConnection,
     isConfigValid,
+    isCustomPromptValid,
     configWarnings,
     updateConfig,
     toNodeParams,
