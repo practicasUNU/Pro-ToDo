@@ -143,8 +143,15 @@ export class AuthController {
     status: HttpStatus.NO_CONTENT,
     description: 'Sesion cerrada (idempotente)',
   })
-  public async logout(@Body() refreshTokenDto: RefreshTokenDto): Promise<void> {
+  public async logout(
+    @Body() refreshTokenDto: RefreshTokenDto,
+    @Req() request: Request,
+  ): Promise<void> {
     // Idempotente: cerrar una sesion ya cerrada no es un error para el cliente.
-    await this.authService.logout(refreshTokenDto.refreshToken);
+    // La IP viaja para la traza de `CIERRE_SESION`, igual que en el login.
+    await this.authService.logout(
+      refreshTokenDto.refreshToken,
+      extractClientIp(request),
+    );
   }
 }

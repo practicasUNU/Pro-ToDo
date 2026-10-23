@@ -341,6 +341,7 @@ describe('ExecutionsService (consulta y reintento manual CU-09)', () => {
         undefined,
         true,
         PAUSED_NODE_ID,
+        buildSchema(),
       );
     });
 
@@ -362,6 +363,7 @@ describe('ExecutionsService (consulta y reintento manual CU-09)', () => {
         contextPatch,
         false,
         PAUSED_NODE_ID,
+        buildSchema(),
       );
     });
 
@@ -399,6 +401,7 @@ describe('ExecutionsService (consulta y reintento manual CU-09)', () => {
         undefined,
         true,
         'nodo_a',
+        buildSchema(),
       );
     });
 
@@ -455,6 +458,7 @@ describe('ExecutionsService (consulta y reintento manual CU-09)', () => {
         undefined,
         true,
         PAUSED_NODE_ID,
+        buildSchema(),
       );
     });
 
@@ -573,10 +577,162 @@ describe('ExecutionsService (consulta y reintento manual CU-09)', () => {
     });
   });
 
+  describe('2 ter. Omision de la extraccion cara al reanudar', () => {
+    /** Esquema cuyo paso detenido es el OCR, que es extraccion cara. */
+    const buildOcrSchema = (): PipelineSchemaDto => ({
+      ...buildSchema(),
+      nodes: {
+        nodo_a: {
+          nodeId: 'nodo_a',
+          nodeType: NodeType.TRIGGER_IMAP,
+          outputNamespace: 'raw_email',
+          nextStep: PAUSED_NODE_ID,
+          onErrorStep: null,
+          params: {},
+        },
+        [PAUSED_NODE_ID]: {
+          nodeId: PAUSED_NODE_ID,
+          nodeType: NodeType.PROCESADOR_OCR,
+          outputNamespace: 'ocr_result',
+          nextStep: null,
+          onErrorStep: null,
+          params: {},
+        },
+      },
+    });
+
+    it('2t.1 deberia omitir el nodo de OCR cuyo resultado se conserva', async () => {
+      // 1. Arrange 📐: conservar el namespace no ahorra nada por si solo. El
+      //    bucle arranca en el cursor y volveria a ejecutar el nodo, pagando
+      //    otra vez la pasada multimodal para sobrescribir con lo mismo.
+      const { service, query, validator, engine } = buildHarness();
+      validator.validateSchema.mockResolvedValue(buildOcrSchema());
+      query.findById.mockResolvedValue(
+        buildExecution({
+          contextPayload: {
+            raw_email: { asunto: 'Nota de prensa' },
+            ocr_result: { extracted_text: 'Texto del PDF escaneado' },
+          },
+        }),
+      );
+
+      // 2. Act ⚙️
+      await service.resumeExecution(EXECUTION_ID, {}, CURRENT_USER);
+
+      // 3. Assert 🎯
+      expect(engine.executeWorkflow).toHaveBeenCalledWith(
+        EXECUTION_ID,
+        expect.anything(),
+        expect.objectContaining({
+          skipNodeTypes: [NodeType.PROCESADOR_OCR],
+        }),
+      );
+    });
+
+    it('2t.2 NO deberia omitir el nodo si su namespace esta vacio', async () => {
+      // 1. Arrange 📐: no hay cache que aprovechar, asi que el OCR tiene que
+      //    correr. Omitirlo dejaria al flujo sin el texto que nadie extrajo.
+      const { service, query, validator, engine } = buildHarness();
+      validator.validateSchema.mockResolvedValue(buildOcrSchema());
+      query.findById.mockResolvedValue(
+        buildExecution({
+          contextPayload: { raw_email: { asunto: 'Nota de prensa' } },
+        }),
+      );
+
+      // 2. Act ⚙️
+      await service.resumeExecution(EXECUTION_ID, {}, CURRENT_USER);
+
+      // 3. Assert 🎯
+      expect(engine.executeWorkflow).toHaveBeenCalledWith(
+        EXECUTION_ID,
+        expect.anything(),
+        { flowName: 'Flujo de prueba' },
+      );
+    });
+
+    it('2t.3 NO deberia omitir un nodo que no es de extraccion cara', async () => {
+      // 1. Arrange 📐: el `PROCESADOR_IA` del esquema por defecto SI puede dar
+      //    algo distinto en el segundo intento, que es justo lo que el
+      //    operador busca al reanudar sobre el.
+      const { service, query, engine } = buildHarness();
+      query.findById.mockResolvedValue(
+        buildExecution({
+          contextPayload: {
+            raw_email: { asunto: 'Nota de prensa' },
+            llm_response: { title: 'Corrida anterior' },
+          },
+        }),
+      );
+
+      // 2. Act ⚙️
+      await service.resumeExecution(EXECUTION_ID, {}, CURRENT_USER);
+
+      // 3. Assert 🎯
+      expect(engine.executeWorkflow).toHaveBeenCalledWith(
+        EXECUTION_ID,
+        expect.anything(),
+        { flowName: 'Flujo de prueba' },
+      );
+    });
+  });
+
+  describe('3 bis. Reanudacion de una ejecucion FALLIDO', () => {
+    it('3b.1 deberia reanudar una FALLIDO que conserva el cursor', async () => {
+      // 1. Arrange 📐: `failCatastrophically` cierra en FALLIDO pero CONSERVA
+      //    el cursor, y hasta ahora esa fila no tenia salida: ni se reanudaba
+      //    ni se descartaba. Las dos vias que llevan ahi sin que el nodo sea
+      //    irreparable —el cierre en cascada al desactivar un flujo y un fallo
+      //    de entorno— dejaban trabajo a medias sin forma de retomarlo.
+      const { service, query, engine } = buildHarness();
+      query.findById.mockResolvedValue(
+        buildExecution({ currentState: ExecutionState.FALLIDO }),
+      );
+
+      // 2. Act ⚙️
+      const response = await service.resumeExecution(
+        EXECUTION_ID,
+        {},
+        CURRENT_USER,
+      );
+
+      // 3. Assert 🎯
+      expect(engine.prepareResume).toHaveBeenCalledWith(
+        EXECUTION_ID,
+        undefined,
+        true,
+        PAUSED_NODE_ID,
+        buildSchema(),
+      );
+      expect(engine.executeWorkflow).toHaveBeenCalledTimes(1);
+      expect(response.executionId).toBe(EXECUTION_ID);
+    });
+
+    it('3b.2 deberia rechazar con 409 una FALLIDO que perdio el cursor', async () => {
+      // 1. Arrange 📐: sin cursor no hay desde donde reanudar, y arrancar
+      //    desde el principio repetiria trabajo ya hecho. La guarda sobrevive
+      //    a la apertura del estado.
+      const { service, query, engine } = buildHarness();
+      query.findById.mockResolvedValue(
+        buildExecution({
+          currentState: ExecutionState.FALLIDO,
+          activeCursor: null,
+        }),
+      );
+
+      // 2. Act + 3. Assert 🎯
+      await expect(
+        service.resumeExecution(EXECUTION_ID, {}, CURRENT_USER),
+      ).rejects.toBeInstanceOf(ConflictException);
+      expect(engine.prepareResume).not.toHaveBeenCalled();
+    });
+  });
+
   describe('3. Guardas de estado', () => {
+    // `FALLIDO` NO figura: desde la invalidacion selectiva es reanudable, y su
+    // caso vive en el bloque 3 bis.
     it.each([
       ExecutionState.EXITOSO,
-      ExecutionState.FALLIDO,
       ExecutionState.EN_PROCESO,
       ExecutionState.OMITIDO,
       ExecutionState.INACTIVO,

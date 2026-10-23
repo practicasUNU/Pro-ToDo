@@ -5,14 +5,23 @@
  * filtros de `ListAuditEventsQueryDto` del backend (`modules/audit/dto`).
  */
 
-/** Valores del enum `AuditActionType` del backend. */
+/**
+ * Valores del enum `AuditActionType` del backend.
+ *
+ * EN CASTELLANO, igual que alli: son los literales del CHECK de
+ * `audit_eventos.accion` y viajan por la API tal cual, de modo que cualquier
+ * divergencia aqui se traduce en un 400 del validador al filtrar.
+ */
 export enum AuditActionValue {
-  CREATE = 'CREATE',
-  UPDATE = 'UPDATE',
-  DELETE = 'DELETE',
-  ROLE_CHANGE = 'ROLE_CHANGE',
-  LOGIN = 'LOGIN',
-  LOGIN_FAILED = 'LOGIN_FAILED',
+  CREATE = 'CREAR',
+  UPDATE = 'ACTUALIZAR',
+  DELETE = 'ELIMINAR',
+  ROLE_CHANGE = 'CAMBIO_ROL',
+  LOGIN = 'INICIO_SESION',
+  LOGIN_FAILED = 'INICIO_SESION_FALLIDO',
+  LOGOUT = 'CIERRE_SESION',
+  ACTIVATE = 'ACTIVAR',
+  DEACTIVATE = 'DESACTIVAR',
 }
 
 /** Valores del enum `AuditTable` del backend: nombres reales de tabla. */

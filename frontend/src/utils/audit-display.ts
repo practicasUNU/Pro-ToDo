@@ -12,6 +12,9 @@ export const AUDIT_ACTION_LABELS: Readonly<Record<AuditActionValue, string>> = {
   [AuditActionValue.ROLE_CHANGE]: 'Cambio de rol',
   [AuditActionValue.LOGIN]: 'Inicio de sesión',
   [AuditActionValue.LOGIN_FAILED]: 'Inicio de sesión fallido',
+  [AuditActionValue.LOGOUT]: 'Cierre de sesión',
+  [AuditActionValue.ACTIVATE]: 'Activación',
+  [AuditActionValue.DEACTIVATE]: 'Desactivación',
 };
 
 export const AUDIT_TABLE_LABELS: Readonly<Record<AuditTableValue, string>> = {
@@ -34,6 +37,11 @@ export const AUDIT_ACTION_BADGES: Readonly<Record<AuditActionValue, string>> = {
   [AuditActionValue.ROLE_CHANGE]: 'pd-badge--paused',
   [AuditActionValue.LOGIN]: 'pd-badge--running',
   [AuditActionValue.LOGIN_FAILED]: 'pd-badge--failed',
+  // El cierre de sesion es el contrapunto neutro del inicio: ni exito ni
+  // fallo, solo el final de una sesion.
+  [AuditActionValue.LOGOUT]: 'pd-badge--paused',
+  [AuditActionValue.ACTIVATE]: 'pd-badge--active',
+  [AuditActionValue.DEACTIVATE]: 'pd-badge--inactive',
 };
 
 /** Opciones cerradas de un `q-select` (Poka-Yoke): `{ label, value }`. */

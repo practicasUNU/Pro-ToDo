@@ -103,7 +103,7 @@ describe('AuditController', () => {
   it('deberia devolver al ADMIN la pagina de eventos con los filtros validados', async () => {
     // 2. Act ⚙️
     const response = await request(httpServer()).get(
-      `/audit/events?userId=${EDITOR_USER.id}&action=ROLE_CHANGE&affectedTable=usuarios&limit=10`,
+      `/audit/events?userId=${EDITOR_USER.id}&action=CAMBIO_ROL&affectedTable=usuarios&limit=10`,
     );
 
     // 3. Assert 🎯
@@ -112,7 +112,7 @@ describe('AuditController', () => {
     expect(auditLogger.findPage).toHaveBeenCalledWith(
       expect.objectContaining({
         userId: EDITOR_USER.id,
-        action: 'ROLE_CHANGE',
+        action: 'CAMBIO_ROL',
         affectedTable: 'usuarios',
         limit: 10,
       }),
@@ -162,7 +162,7 @@ describe('AuditController', () => {
   it('deberia descargar el PDF firmado con el correo de quien lo pide', async () => {
     // 2. Act ⚙️
     const response = await request(httpServer())
-      .get('/audit/reports/export?format=pdf&action=LOGIN_FAILED')
+      .get('/audit/reports/export?format=pdf&action=INICIO_SESION_FALLIDO')
       .buffer(true)
       .parse(binaryParser);
 
@@ -175,7 +175,7 @@ describe('AuditController', () => {
     expect(pdfRenderer.render).toHaveBeenCalledWith(
       expect.objectContaining({
         requestedBy: ADMIN_USER.email,
-        filters: expect.objectContaining({ action: 'LOGIN_FAILED' }) as unknown,
+        filters: expect.objectContaining({ action: 'INICIO_SESION_FALLIDO' }) as unknown,
       }),
     );
   });

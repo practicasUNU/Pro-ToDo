@@ -4,6 +4,8 @@ import { useQuasar } from 'quasar';
 
 import { useTelemetryStore } from '@stores/telemetry.store';
 
+import { usePanelRefresh } from '@/composables/usePanelRefresh';
+
 import ExecutionsHistoryTable from '@components/dashboard/ExecutionsHistoryTable.vue';
 import ExportReportBar from '@components/dashboard/ExportReportBar.vue';
 import TelemetryCostChart from '@components/dashboard/TelemetryCostChart.vue';
@@ -36,6 +38,11 @@ const loadDashboard = async (): Promise<void> => {
 };
 
 onMounted(loadDashboard);
+
+// Las filas de telemetria se escriben mientras el flujo corre, asi que el
+// desenlace es el primer momento en que hay algo nuevo que resumir. Sin esto,
+// los KPIs se quedaban congelados hasta que alguien recargaba la pagina.
+usePanelRefresh(loadDashboard, { onFlowCompleted: true });
 </script>
 
 <template>

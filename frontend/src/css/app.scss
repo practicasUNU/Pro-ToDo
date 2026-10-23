@@ -879,3 +879,61 @@ $pd-fork-height: 56px;
   border-style: dotted;
   border-color: var(--pd-disabled-bg);
 }
+
+// ---------------------------------------------------------------------------
+// Selector de fecha (`QDate`) dentro de un `QPopupProxy`.
+//
+// Va GLOBAL y no en el `<style scoped>` del componente a proposito: Quasar
+// monta los popups en un portal colgado de `<body>`, fuera del arbol del
+// componente, de modo que el atributo de alcance nunca llegaria a alcanzarlos.
+//
+// Sustituye al selector NATIVO de `<input type="date">`, que se pintaba con el
+// tema del sistema operativo —un recuadro blanco sobre el panel oscuro— y no
+// admitia ni un solo estilo.
+.pd-date-popup.q-date {
+  background: var(--pd-card-bg);
+  border: 1px solid var(--pd-border);
+  border-radius: $generic-border-radius;
+  color: var(--pd-text-primary);
+
+  // Cabecera del mes: el degradado corporativo obligatorio (regla §2), el
+  // mismo que el `QHeader` y los botones primarios.
+  .q-date__header {
+    background: var(--pd-gradient);
+    color: var(--pd-text-primary);
+  }
+
+  .q-date__content,
+  .q-date__view {
+    background: var(--pd-card-bg);
+  }
+
+  // Nombres de los dias y numeros fuera del mes: jerarquia de texto, no gris
+  // de Quasar (las clases `text-grey-N` estan prohibidas como sustituto de un
+  // token).
+  .q-date__calendar-weekdays > div,
+  .q-date__calendar-item--out {
+    color: var(--pd-text-secondary);
+  }
+
+  .q-date__calendar-item--in {
+    color: var(--pd-text-primary);
+  }
+
+  // Dia seleccionado y navegacion: acento de marca.
+  .q-date__today {
+    box-shadow: 0 0 0 1px var(--pd-accent);
+  }
+
+  .q-date__navigation .q-btn,
+  .q-date__calendar-item .q-btn {
+    color: var(--pd-text-primary);
+  }
+
+  .q-date__calendar-item .q-btn.bg-primary,
+  .q-date__years-item .q-btn.bg-primary,
+  .q-date__months-item .q-btn.bg-primary {
+    background: var(--pd-panel-solid) !important;
+    color: var(--pd-text-primary);
+  }
+}

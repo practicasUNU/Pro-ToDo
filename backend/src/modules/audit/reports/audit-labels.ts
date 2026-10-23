@@ -9,6 +9,9 @@ export const AUDIT_ACTION_LABELS: Readonly<Record<AuditActionType, string>> = {
   [AuditActionType.ROLE_CHANGE]: 'Cambio de rol',
   [AuditActionType.LOGIN]: 'Inicio de sesión',
   [AuditActionType.LOGIN_FAILED]: 'Inicio de sesión fallido',
+  [AuditActionType.LOGOUT]: 'Cierre de sesión',
+  [AuditActionType.ACTIVATE]: 'Activación',
+  [AuditActionType.DEACTIVATE]: 'Desactivación',
 };
 
 /** Etiquetas en castellano de las tablas auditadas. */

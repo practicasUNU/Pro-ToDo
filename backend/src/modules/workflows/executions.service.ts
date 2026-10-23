@@ -7,7 +7,10 @@ import {
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 
-import { FsmEngineService } from '@core/fsm/services/fsm-engine.service';
+import {
+  CACHED_EXTRACTION_NODE_TYPES,
+  FsmEngineService,
+} from '@core/fsm/services/fsm-engine.service';
 import { ExecutionEventsCoordinator } from '@common/services/execution-events.coordinator';
 import { FsmExecutionQueryService } from '@core/fsm/services/fsm-execution-query.service';
 import { PipelineValidatorService } from '@core/fsm/services/pipeline-validator.service';
@@ -133,8 +136,20 @@ export class ExecutionsService {
    * aplicarlo solo aqui dejaria a un EDITOR sin poder desatascar un flujo que
    * configuro un ADMIN.
    *
+   * ADMITE TAMBIEN `FALLIDO`, y es un cambio de criterio deliberado. Hasta
+   * ahora solo se reanudaba una PAUSADO porque FALLIDO significaba "el ejecutor
+   * lanzo una excepcion no controlada y repetirlo dara lo mismo". Eso dejaba sin
+   * salida a las dos vias que llevan ahi sin que el nodo sea irreparable: el
+   * cierre en cascada de `abortExecutionsForFlow` al desactivar un flujo, y un
+   * fallo catastrofico cuya causa era del entorno —PostgreSQL caido, un binario
+   * de OCR ausente— y no del codigo. Ahora el operador decide: si la causa
+   * persiste, la reanudacion volvera a fallar y la fila lo dira igual.
+   *
+   * El estado se limpia al entrar: `prepareResume` borra `error_context` y
+   * `motivo_fallo`, y `executeWorkflow` marca la fila EN_PROCESO.
+   *
    * @throws NotFoundException Si no existe la ejecucion o su flujo.
-   * @throws ConflictException Si no esta PAUSADO o perdio el cursor.
+   * @throws ConflictException Si no esta PAUSADO ni FALLIDO, o perdio el cursor.
    * @throws BadRequestException Si el esquema ya no es valido o el cursor
    *         apunta a un nodo que se borro.
    * @throws SystemCapacityExceededException Si el motor esta saturado (429).
@@ -151,19 +166,23 @@ export class ExecutionsService {
     // que no encaja es su estado. El estado real va en el mensaje porque es la
     // unica forma de que el operador sepa si llego tarde (ya se reanudo) o si
     // esta mirando la ejecucion equivocada.
-    if (execution.currentState !== ExecutionState.PAUSADO) {
+    if (
+      execution.currentState !== ExecutionState.PAUSADO &&
+      execution.currentState !== ExecutionState.FALLIDO
+    ) {
       throw new ConflictException(
-        `La ejecucion "${executionId}" esta en estado ${execution.currentState} y solo se puede reanudar una PAUSADO.`,
+        `La ejecucion "${executionId}" esta en estado ${execution.currentState} y solo se puede reanudar una PAUSADO o FALLIDO.`,
       );
     }
 
-    // Defensivo: `pauseAt` siempre escribe el cursor, asi que llegar aqui sin el
-    // significa que alguien toco la fila por SQL. Sin cursor no hay desde donde
-    // reanudar, y dejarlo pasar arrancaria el flujo desde el principio
-    // repitiendo trabajo ya hecho.
+    // Defensivo: tanto `pauseAt` como `failCatastrophically` escriben el cursor
+    // —aquella por diseno de CU-09, esta porque saber donde se rompio es la
+    // mitad del diagnostico—, asi que llegar aqui sin el significa que alguien
+    // toco la fila por SQL. Sin cursor no hay desde donde reanudar, y dejarlo
+    // pasar arrancaria el flujo desde el principio repitiendo trabajo ya hecho.
     if (execution.activeCursor === null) {
       throw new ConflictException(
-        `La ejecucion "${executionId}" esta PAUSADO pero no conserva el paso en el que se detuvo: no hay desde donde reanudarla.`,
+        `La ejecucion "${executionId}" esta en estado ${execution.currentState} pero no conserva el paso en el que se detuvo: no hay desde donde reanudarla.`,
       );
     }
 
@@ -213,11 +232,25 @@ export class ExecutionsService {
     // del techo global y la barrera dejaria de significar lo que dice.
     await this.fsmEngineService.assertGlobalCapacityAvailable();
 
+    // El nodo de reanudacion ANTES de que el motor purgue: hace falta saber si
+    // conserva una extraccion cara para decidir si ademas se omite su
+    // reejecucion, y despues de `prepareResume` el contexto ya esta reescrito.
+    const resumeNode = schema.nodes[resumeCursor];
+    const preservesCachedExtraction =
+      resumeNode !== undefined &&
+      CACHED_EXTRACTION_NODE_TYPES.has(resumeNode.nodeType) &&
+      Object.keys(
+        (execution.contextPayload ?? {})[resumeNode.outputNamespace] ?? {},
+      ).length > 0;
+
     await this.fsmEngineService.prepareResume(
       executionId,
       resumeExecutionDto.contextPatch,
       resumeExecutionDto.resetRetries ?? true,
       resumeCursor,
+      // Habilita la purga selectiva: sin el grafo el motor no sabe que pasos
+      // vienen despues del cursor y conserva el contexto entero.
+      schema,
     );
 
     // Marca de demarcacion en la trazabilidad. Reanudar NO borra ni invalida
@@ -277,13 +310,31 @@ export class ExecutionsService {
       ...(options.isEmailResume === true ? { isEmailResume: true } : {}),
     });
 
-    // Sin `skipNodeTypes` ni `initialPayload`: el disparador ya corrio en el
-    // intento original y su salida esta en el contexto acumulado. Volver a
-    // sembrar el namespace `trigger` pisaria datos reales con un fixture.
+    // Sin `initialPayload`: el disparador ya corrio en el intento original y su
+    // salida esta en el contexto acumulado. Volver a sembrar el namespace
+    // `trigger` pisaria datos reales con un fixture.
+    //
+    // `skipNodeTypes` SOLO para cerrar la excepcion de extraccion cara. El
+    // motor acaba de conservar el namespace de este nodo en vez de purgarlo,
+    // pero conservarlo no ahorra nada por si solo: el bucle arranca en el
+    // cursor y volveria a ejecutarlo, sobrescribiendo con un resultado
+    // identico tras pagar otra vez el MIME o la pasada multimodal. Omitirlo es
+    // lo que convierte la reanudacion en el salto de uno o dos segundos hasta
+    // el paso que de verdad hay que repetir.
+    //
+    // Es seguro porque las dos condiciones se miran juntas: el tipo esta en
+    // `CACHED_EXTRACTION_NODE_TYPES` —cuya salida solo depende del correo de
+    // entrada, que no cambia entre intentos— y su namespace ya trae datos. Si
+    // el operador quiere rehacer la extraccion, reanuda desde el disparador.
     const finished = await this.fsmEngineService.executeWorkflow(
       executionId,
       schema,
-      { flowName: workflow.name },
+      {
+        flowName: workflow.name,
+        ...(preservesCachedExtraction && resumeNode !== undefined
+          ? { skipNodeTypes: [resumeNode.nodeType] }
+          : {}),
+      },
     );
 
     // La politica de corrida unica tambien alcanza a las reanudaciones. Sin

@@ -651,19 +651,48 @@ describe('RefreshTokenService (PROT-06.4)', () => {
   });
 
   describe('revoke', () => {
-    it('deberia revocar por hash y no lanzar si el token ya no existe', async () => {
+    it('deberia revocar por hash y devolver null si el token ya no existe', async () => {
       // 1. Arrange
+      repository.findOne.mockResolvedValue(null);
       repository.update.mockResolvedValue({
         affected: 0,
         raw: [],
         generatedMaps: [],
       });
 
-      // 2. Act & 3. Assert
-      await expect(service.revoke('token-en-claro')).resolves.toBeUndefined();
+      // 2. Act & 3. Assert: el cierre se da por cumplido igual, y el `null`
+      //    le dice a la auditoria que aqui no salio nadie de ninguna sesion.
+      await expect(service.revoke('token-en-claro')).resolves.toBeNull();
       expect(repository.update).toHaveBeenCalledWith(
         { tokenHash: sha256('token-en-claro') },
         { isRevoked: true },
+      );
+    });
+
+    it('deberia devolver el dueno de la sesion cerrada', async () => {
+      // 1. Arrange: el endpoint de logout no pasa por `JwtAuthGuard`, asi que
+      //    esta fila es la unica fuente que dice a quien atribuir el cierre.
+      repository.findOne.mockResolvedValue({
+        id: 'fila-1',
+        userId: 'usuario-7',
+      });
+      repository.update.mockResolvedValue({
+        affected: 1,
+        raw: [],
+        generatedMaps: [],
+      });
+
+      // 2. Act
+      const result = await service.revoke('token-en-claro');
+
+      // 3. Assert
+      expect(result).toBe('usuario-7');
+      // Se lee ANTES del update: despues, el token ya esta revocado y la
+      // consulta no distinguiria esta revocacion de una anterior.
+      expect(repository.findOne).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: { tokenHash: sha256('token-en-claro'), isRevoked: false },
+        }),
       );
     });
   });

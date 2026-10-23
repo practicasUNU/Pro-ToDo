@@ -121,6 +121,119 @@ describe('AuditInterceptor', () => {
     );
   });
 
+  it('1.2b deberia registrar DESACTIVAR cuando un UPDATE apaga la bandera isActive', async () => {
+    // 1. Arrange 📐: es la mutacion que un auditor busca por si misma. Como
+    //    `ACTUALIZAR` generico quedaria enterrada entre ediciones de correo.
+    const { interceptor, snapshots, auditLogger } = buildInterceptor();
+    snapshots.load
+      .mockResolvedValueOnce({ email: 'e@unuware.com', isActive: true })
+      .mockResolvedValueOnce({ email: 'e@unuware.com', isActive: false });
+    const context = buildContext(
+      buildHandler({ table: AuditTable.USERS, action: AuditActionType.UPDATE }),
+      buildRequest(),
+    );
+
+    // 2. Act ⚙️
+    await run(interceptor, context, { handle: () => of({ id: TARGET_ID }) });
+
+    // 3. Assert 🎯
+    expect(auditLogger.record).toHaveBeenCalledWith(
+      expect.objectContaining({ action: AuditActionType.DEACTIVATE }),
+    );
+  });
+
+  it('1.2c deberia registrar ACTIVAR cuando la bandera se enciende', async () => {
+    // 1. Arrange 📐
+    const { interceptor, snapshots, auditLogger } = buildInterceptor();
+    snapshots.load
+      .mockResolvedValueOnce({ active: false })
+      .mockResolvedValueOnce({ active: true });
+    const context = buildContext(
+      buildHandler({
+        // Se usa `active` y no `isActive` a proposito: las plantillas nombran
+        // asi la MISMA columna `activo`, y la regla cubre los dos nombres.
+        table: AuditTable.HTML_TEMPLATES,
+        action: AuditActionType.UPDATE,
+      }),
+      buildRequest(),
+    );
+
+    // 2. Act ⚙️
+    await run(interceptor, context, { handle: () => of({ id: TARGET_ID }) });
+
+    // 3. Assert 🎯
+    expect(auditLogger.record).toHaveBeenCalledWith(
+      expect.objectContaining({ action: AuditActionType.ACTIVATE }),
+    );
+  });
+
+  it('1.2d deberia registrar DESACTIVAR en el borrado LOGICO de un usuario', async () => {
+    // 1. Arrange 📐: `DELETE /users/:id` no borra nada —pone `isActive` a
+    //    false y la fila sigue ahi—. Anotarlo como `ELIMINAR` afirmaba que se
+    //    habia borrado algo que no se borro.
+    const { interceptor, snapshots, auditLogger } = buildInterceptor();
+    snapshots.load
+      .mockResolvedValueOnce({ email: 'e@unuware.com', isActive: true })
+      .mockResolvedValueOnce({ email: 'e@unuware.com', isActive: false });
+    const context = buildContext(
+      buildHandler({ table: AuditTable.USERS, action: AuditActionType.DELETE }),
+      buildRequest(),
+    );
+
+    // 2. Act ⚙️
+    await run(interceptor, context, { handle: () => of({ id: TARGET_ID }) });
+
+    // 3. Assert 🎯
+    expect(auditLogger.record).toHaveBeenCalledWith(
+      expect.objectContaining({ action: AuditActionType.DEACTIVATE }),
+    );
+  });
+
+  it('1.2e deberia conservar ELIMINAR en un borrado FISICO', async () => {
+    // 1. Arrange 📐: sin fotografia posterior no hay bandera que comparar, de
+    //    modo que la accion declarada se respeta tal cual. Es lo que separa el
+    //    borrado real del logico sin tener que enumerar que endpoint es cual.
+    const { interceptor, snapshots, auditLogger } = buildInterceptor();
+    snapshots.load
+      .mockResolvedValueOnce({ ipOrCidr: '10.0.0.1' })
+      .mockResolvedValueOnce(null);
+    const context = buildContext(
+      buildHandler({
+        table: AuditTable.ALLOWED_IPS,
+        action: AuditActionType.DELETE,
+      }),
+      buildRequest(),
+    );
+
+    // 2. Act ⚙️
+    await run(interceptor, context, { handle: () => of({ id: TARGET_ID }) });
+
+    // 3. Assert 🎯
+    expect(auditLogger.record).toHaveBeenCalledWith(
+      expect.objectContaining({ action: AuditActionType.DELETE }),
+    );
+  });
+
+  it('1.2f NO deberia inventar ACTIVAR ni DESACTIVAR si la bandera no cambio', async () => {
+    // 1. Arrange 📐
+    const { interceptor, snapshots, auditLogger } = buildInterceptor();
+    snapshots.load
+      .mockResolvedValueOnce({ email: 'viejo@unuware.com', isActive: true })
+      .mockResolvedValueOnce({ email: 'nuevo@unuware.com', isActive: true });
+    const context = buildContext(
+      buildHandler({ table: AuditTable.USERS, action: AuditActionType.UPDATE }),
+      buildRequest(),
+    );
+
+    // 2. Act ⚙️
+    await run(interceptor, context, { handle: () => of({ id: TARGET_ID }) });
+
+    // 3. Assert 🎯: cambiar el correo sigue siendo un `ACTUALIZAR`.
+    expect(auditLogger.record).toHaveBeenCalledWith(
+      expect.objectContaining({ action: AuditActionType.UPDATE }),
+    );
+  });
+
   it('1.3 deberia tomar el id de la respuesta en un CREATE y no leer el "antes"', async () => {
     // 1. Arrange 📐
     const { interceptor, snapshots, auditLogger } = buildInterceptor();

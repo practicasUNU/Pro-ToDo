@@ -80,7 +80,7 @@ describe('AuthService (PROT-04.1 / PROT-06.4)', () => {
       rotate: jest
         .fn()
         .mockResolvedValue({ user: ACTIVE_USER, deviceId: ROTATED_DEVICE_ID }),
-      revoke: jest.fn().mockResolvedValue(undefined),
+      revoke: jest.fn().mockResolvedValue(null),
     };
 
     service = new AuthService(
@@ -496,6 +496,37 @@ describe('AuthService (PROT-04.1 / PROT-06.4)', () => {
       expect(refreshTokenService.revoke).toHaveBeenCalledWith(
         'refresh-vigente',
       );
+    });
+
+    it('deberia registrar CIERRE_SESION con el dueno de la sesion y su IP', async () => {
+      // 1. Arrange 📐: cierra el par con el `INICIO_SESION`. Sin el, la traza
+      //    decia cuando entraba alguien pero nunca cuando salia.
+      refreshTokenService.revoke.mockResolvedValue(ACTIVE_USER.id);
+
+      // 2. Act ⚙️
+      await service.logout('refresh-vigente', '192.168.1.20');
+
+      // 3. Assert 🎯
+      expect(auditLogger.record).toHaveBeenCalledWith({
+        userId: ACTIVE_USER.id,
+        action: AuditActionType.LOGOUT,
+        affectedTable: AuditTable.USERS,
+        recordId: ACTIVE_USER.id,
+        sourceIp: '192.168.1.20',
+      });
+    });
+
+    it('NO deberia registrar nada si el token ya estaba revocado', async () => {
+      // 1. Arrange 📐: el endpoint es idempotente y un cliente puede
+      //    reintentarlo. Anotar un cierre por llamada llenaria la tabla de
+      //    eventos que no corresponden a nadie saliendo de ninguna parte.
+      refreshTokenService.revoke.mockResolvedValue(null);
+
+      // 2. Act ⚙️
+      await service.logout('refresh-ya-revocado');
+
+      // 3. Assert 🎯
+      expect(auditLogger.record).not.toHaveBeenCalled();
     });
   });
 });

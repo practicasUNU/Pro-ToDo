@@ -10,14 +10,23 @@
 /** Nombre del evento en el cable. */
 export const CRUD_EVENT = { MUTATION: 'crud:mutation' } as const;
 
-/** Tablas maestras cuya edicion se difunde. */
+/**
+ * Tablas cuya edicion se difunde. Replica de `CrudEntity` del backend.
+ *
+ * Casi todas son MAESTRAS. `audit_eventos` es la excepcion: registro de solo
+ * insercion que se difunde para que el panel de auditoria vea tambien las
+ * filas que no nacen de una mutacion maestra, como un inicio o un cierre de
+ * sesion. `useCrudSocket` la ignora a proposito —no hay coleccion maestra que
+ * parchear— y quien la escucha es el propio panel.
+ */
 export type CrudEntity =
   | 'users'
   | 'allowed_ips'
   | 'templates'
   | 'workflow_templates'
   | 'ai_prompts'
-  | 'workflows';
+  | 'workflows'
+  | 'audit_eventos';
 
 /**
  * Naturaleza de la escritura, tal y como la entiende la BASE DE DATOS.

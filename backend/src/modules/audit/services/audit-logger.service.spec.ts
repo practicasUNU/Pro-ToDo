@@ -1,3 +1,4 @@
+import { CrudEventsCoordinator } from '@common/services/crud-events.coordinator';
 import { AuditTable } from '@modules/audit/audit-tables';
 import { AuditActionType } from '@modules/audit/enums/audit-action.enum';
 import {
@@ -60,7 +61,15 @@ const buildRepository = () => {
 
 const buildService = (
   repository: ReturnType<typeof buildRepository>['repository'],
-) => new AuditLoggerService(repository as unknown as Repository<AuditEvento>);
+) =>
+  // El coordinador REAL y no un doble: sin puertos inscritos `dispatch` es un
+  // no-op silencioso, que es justo lo que hace falta aqui. Omitirlo dejaba un
+  // `undefined` que el `catch` de `record` tragaba, y cada prueba pasaba por
+  // el camino del error creyendo que probaba el del exito.
+  new AuditLoggerService(
+    repository as unknown as Repository<AuditEvento>,
+    new CrudEventsCoordinator(),
+  );
 
 /** Evento tal como lo devuelve TypeORM, con el usuario parcial del JOIN. */
 const buildRow = (index: number): AuditEvento =>

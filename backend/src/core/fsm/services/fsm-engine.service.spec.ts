@@ -4979,4 +4979,258 @@ describe('FsmEngineService (PROT-09)', () => {
       expect(pauseFlow).toHaveBeenCalledWith(FLOW_ID, TEST_ERROR_CODE);
     });
   });
+
+  describe('41. Purga selectiva de namespaces al reanudar (invalidacion de cache)', () => {
+    /**
+     * Grafo realista de ingesta: disparador -> parser -> OCR -> IA -> plantilla,
+     * con un satelite de alerta colgado del nodo de IA por `onErrorStep`.
+     *
+     * Se declara aqui y no se reutiliza `buildLinearSchema` porque la regla que
+     * se prueba depende de los TIPOS de nodo (`PARSER_PRE_IA`, `PROCESADOR_OCR`)
+     * y de que exista una rama de contingencia, que aquel no tiene.
+     */
+    const buildIngestSchema = (): PipelineSchemaDto => ({
+      flowId: FLOW_ID,
+      name: 'Pipeline de ingesta',
+      version: '1.0.0',
+      entrypoint: 'trigger',
+      nodes: {
+        trigger: {
+          nodeId: 'trigger',
+          nodeType: NodeType.TRIGGER_IMAP,
+          outputNamespace: 'raw_email',
+          nextStep: 'parser',
+          onErrorStep: null,
+          params: {},
+        },
+        parser: {
+          nodeId: 'parser',
+          nodeType: NodeType.PARSER_PRE_IA,
+          outputNamespace: 'parsed_email',
+          nextStep: 'ocr',
+          onErrorStep: null,
+          params: {},
+        },
+        ocr: {
+          nodeId: 'ocr',
+          nodeType: NodeType.PROCESADOR_OCR,
+          outputNamespace: 'ocr_result',
+          nextStep: 'ia',
+          onErrorStep: null,
+          params: {},
+        },
+        ia: {
+          nodeId: 'ia',
+          nodeType: NodeType.PROCESADOR_IA,
+          outputNamespace: 'llm_response',
+          nextStep: 'plantilla',
+          onErrorStep: 'alerta',
+          params: {},
+        },
+        plantilla: {
+          nodeId: 'plantilla',
+          nodeType: NodeType.MAPEADOR_PLANTILLA,
+          outputNamespace: 'rendered_html',
+          nextStep: null,
+          onErrorStep: null,
+          params: {},
+        },
+        alerta: {
+          nodeId: 'alerta',
+          nodeType: NodeType.DESTINO_SMTP,
+          outputNamespace: 'smtp_result',
+          nextStep: null,
+          onErrorStep: null,
+          params: {},
+        },
+      },
+    });
+
+    /** Ejecucion detenida en `ia` con TODO el pipeline ya publicado. */
+    const buildFullContextExecution = (
+      overrides: Partial<FsmExecution> = {},
+    ): FsmExecution =>
+      buildExecution({
+        currentState: ExecutionState.PAUSADO,
+        activeCursor: 'ia',
+        contextPayload: {
+          raw_email: { asunto: 'Nota de prensa' },
+          parsed_email: { clean_title: 'Innovacion en Madrid' },
+          ocr_result: { extracted_text: 'Texto del PDF escaneado' },
+          llm_response: { title: 'Titulo de la corrida anterior' },
+          rendered_html: { html: '<p>viejo</p>' },
+          smtp_result: { sent: true },
+          error_context: { failed_node_id: 'ia' },
+        },
+        ...overrides,
+      });
+
+    it('41.1 deberia purgar la salida del nodo y la de sus sucesores, reteniendo parsed_email y ocr_result', async () => {
+      // 1. Arrange 📐: es el caso del encargo. Reanudar en `ia` tiene que
+      //    rehacer la inferencia y el renderizado, pero no volver a pagar el
+      //    MIME ni la pasada multimodal, cuyo insumo —el correo— no cambia.
+      const execution = buildFullContextExecution();
+      const { repo } = buildRepository(execution);
+
+      // 2. Act ⚙️
+      const prepared = await buildEngine(repo).prepareResume(
+        EXECUTION_ID,
+        undefined,
+        true,
+        'ia',
+        buildIngestSchema(),
+      );
+
+      // 3. Assert 🎯
+      expect(prepared.contextPayload).toEqual({
+        raw_email: { asunto: 'Nota de prensa' },
+        parsed_email: { clean_title: 'Innovacion en Madrid' },
+        ocr_result: { extracted_text: 'Texto del PDF escaneado' },
+      });
+      // La salida del propio nodo se va: describe la corrida que se repite.
+      expect(prepared.contextPayload.llm_response).toBeUndefined();
+      expect(prepared.contextPayload.rendered_html).toBeUndefined();
+    });
+
+    it('41.2 deberia purgar tambien la rama declarada en onErrorStep', async () => {
+      // 1. Arrange 📐: `smtp_result` solo es alcanzable por la contingencia de
+      //    `ia`. Conservarlo dejaria en pie la salida del fallo que se intenta
+      //    superar, y `buildOrderedTopology` ni siquiera lo veria.
+      const execution = buildFullContextExecution();
+      const { repo } = buildRepository(execution);
+
+      // 2. Act ⚙️
+      const prepared = await buildEngine(repo).prepareResume(
+        EXECUTION_ID,
+        undefined,
+        true,
+        'ia',
+        buildIngestSchema(),
+      );
+
+      // 3. Assert 🎯
+      expect(prepared.contextPayload.smtp_result).toBeUndefined();
+    });
+
+    it('41.3 deberia vaciar el contexto entero al reanudar desde el entrypoint', async () => {
+      // 1. Arrange 📐: no hay ningun paso anterior cuyo resultado merezca
+      //    sobrevivir, y el disparador volvera a sembrar el suyo.
+      const execution = buildFullContextExecution();
+      const { repo } = buildRepository(execution);
+
+      // 2. Act ⚙️
+      const prepared = await buildEngine(repo).prepareResume(
+        EXECUTION_ID,
+        undefined,
+        true,
+        'trigger',
+        buildIngestSchema(),
+      );
+
+      // 3. Assert 🎯: ni siquiera la extraccion cara se salva, porque el correo
+      //    que la origino se va a volver a leer.
+      expect(prepared.contextPayload).toEqual({});
+    });
+
+    it('41.4 deberia conservar la extraccion cara al reanudar DESDE el propio OCR', async () => {
+      // 1. Arrange 📐: la excepcion de cacheo pesado. Sin ella, volver al OCR
+      //    repetiria la pasada multimodal para obtener lo mismo.
+      const execution = buildFullContextExecution({ activeCursor: 'ocr' });
+      const { repo } = buildRepository(execution);
+
+      // 2. Act ⚙️
+      const prepared = await buildEngine(repo).prepareResume(
+        EXECUTION_ID,
+        undefined,
+        true,
+        'ocr',
+        buildIngestSchema(),
+      );
+
+      // 3. Assert 🎯
+      expect(prepared.contextPayload.ocr_result).toEqual({
+        extracted_text: 'Texto del PDF escaneado',
+      });
+      expect(prepared.contextPayload.parsed_email).toEqual({
+        clean_title: 'Innovacion en Madrid',
+      });
+      // Lo de aguas abajo sigue purgandose SIN excepcion.
+      expect(prepared.contextPayload.llm_response).toBeUndefined();
+      expect(prepared.contextPayload.rendered_html).toBeUndefined();
+      expect(prepared.contextPayload.smtp_result).toBeUndefined();
+    });
+
+    it('41.5 NO deberia conservar el namespace de un nodo cacheado que quedo vacio', async () => {
+      // 1. Arrange 📐: la excepcion mira el contenido y no solo el tipo. Un OCR
+      //    que no llego a publicar nada no tiene cache que preservar, y dejar
+      //    el objeto vacio confundiria despues a `findMissingNamespaces`.
+      const execution = buildFullContextExecution({
+        activeCursor: 'ocr',
+        contextPayload: {
+          raw_email: { asunto: 'Nota de prensa' },
+          parsed_email: { clean_title: 'Innovacion en Madrid' },
+          ocr_result: {},
+        },
+      });
+      const { repo } = buildRepository(execution);
+
+      // 2. Act ⚙️
+      const prepared = await buildEngine(repo).prepareResume(
+        EXECUTION_ID,
+        undefined,
+        true,
+        'ocr',
+        buildIngestSchema(),
+      );
+
+      // 3. Assert 🎯
+      expect(prepared.contextPayload.ocr_result).toBeUndefined();
+      expect(prepared.contextPayload.parsed_email).toBeDefined();
+    });
+
+    it('41.6 deberia dejar que el contextPatch reponga un namespace recien purgado', async () => {
+      // 1. Arrange 📐: el orden importa. Si la purga corriera DESPUES de la
+      //    fusion, el campo que el operador siembra a mano se perderia y el
+      //    reintento repetiria el mismo fallo.
+      const execution = buildFullContextExecution();
+      const { repo } = buildRepository(execution);
+
+      // 2. Act ⚙️
+      const prepared = await buildEngine(repo).prepareResume(
+        EXECUTION_ID,
+        { llm_response: { title: 'Corregido a mano' } },
+        true,
+        'ia',
+        buildIngestSchema(),
+      );
+
+      // 3. Assert 🎯: el parche sobrevive, y lo hace limpio —sin arrastrar el
+      //    resto del namespace viejo, que la purga ya se habia llevado.
+      expect(prepared.contextPayload.llm_response).toEqual({
+        title: 'Corregido a mano',
+      });
+    });
+
+    it('41.7 deberia conservar el contexto entero cuando no se le pasa el esquema', async () => {
+      // 1. Arrange 📐: sin el grafo el motor no sabe que viene despues del
+      //    cursor, y adivinarlo por los nombres de los namespaces seria el
+      //    acoplamiento que la purga por topologia evita. Es el comportamiento
+      //    historico, y los llamantes internos que no tienen el esquema a mano
+      //    siguen dependiendo de el.
+      const execution = buildFullContextExecution();
+      const { repo } = buildRepository(execution);
+
+      // 2. Act ⚙️
+      const prepared = await buildEngine(repo).prepareResume(EXECUTION_ID);
+
+      // 3. Assert 🎯: solo se va `error_context`, que ya se purgaba antes.
+      expect(prepared.contextPayload.llm_response).toEqual({
+        title: 'Titulo de la corrida anterior',
+      });
+      expect(prepared.contextPayload.rendered_html).toEqual({
+        html: '<p>viejo</p>',
+      });
+      expect(prepared.contextPayload.error_context).toBeUndefined();
+    });
+  });
 });

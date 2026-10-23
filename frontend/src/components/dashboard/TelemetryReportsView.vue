@@ -4,6 +4,8 @@ import { useQuasar } from 'quasar';
 
 import { useTelemetryStore } from '@stores/telemetry.store';
 
+import { usePanelRefresh } from '@/composables/usePanelRefresh';
+
 import ExportReportBar from '@components/dashboard/ExportReportBar.vue';
 import TelemetryCostChart from '@components/dashboard/TelemetryCostChart.vue';
 import TelemetryDateRangeFilter from '@components/dashboard/TelemetryDateRangeFilter.vue';
@@ -33,6 +35,11 @@ const loadReport = async (): Promise<void> => {
 };
 
 onMounted(loadReport);
+
+// Recarga CONSERVANDO el periodo elegido: `loadReport` no toca el rango del
+// store, de modo que un informe acotado a una semana concreta no salta a los
+// ultimos 30 dias porque haya terminado una ejecucion.
+usePanelRefresh(loadReport, { onFlowCompleted: true });
 </script>
 
 <template>

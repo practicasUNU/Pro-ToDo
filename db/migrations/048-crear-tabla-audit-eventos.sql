@@ -19,6 +19,18 @@
 --     usar UUID, y no lleva FK porque el registro puede borrarse (allowed_ips).
 --   - `creado_en` TIMESTAMPTZ, como toda columna nueva desde la 045.
 --
+--   - `accion` guarda los literales EN CASTELLANO. La columna es dato que un
+--     auditor lee en crudo por SQL o en el CSV exportado, de modo que traducir
+--     solo en la capa de informes dejaba el dato en un idioma y su
+--     presentacion en otro. La restriccion se nombra
+--     `audit_eventos_accion_check` para que la 050 pueda sustituirla sin
+--     depender del nombre que PostgreSQL habria inventado.
+--
+-- OJO AL CLONAR: esta migracion nacio con los literales en ingles. Una base que
+-- ya la tenia aplicada NO vuelve a ejecutarla —`schema_migrations` la da por
+-- hecha—, asi que el cambio de idioma viaja en la 050. Las dos dejan el mismo
+-- resultado; esta sirve a las bases nuevas y aquella a las que ya existian.
+--
 -- IDEMPOTENTE: `IF NOT EXISTS` en tabla e indices.
 --
 -- Aplicar con:
@@ -35,7 +47,11 @@ CREATE TABLE IF NOT EXISTS audit_eventos (
     id_audit_evento UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     usuario_id UUID NULL REFERENCES usuarios(id_usuario) ON DELETE SET NULL,
     accion VARCHAR(30) NOT NULL
-        CHECK (accion IN ('CREATE', 'UPDATE', 'DELETE', 'ROLE_CHANGE', 'LOGIN', 'LOGIN_FAILED')),
+        CONSTRAINT audit_eventos_accion_check CHECK (accion IN (
+            'CREAR', 'ACTUALIZAR', 'ELIMINAR', 'CAMBIO_ROL',
+            'INICIO_SESION', 'INICIO_SESION_FALLIDO', 'CIERRE_SESION',
+            'ACTIVAR', 'DESACTIVAR'
+        )),
     tabla_afectada VARCHAR(60) NOT NULL,
     registro_id VARCHAR(64) NULL,
     datos_anteriores JSONB NULL,

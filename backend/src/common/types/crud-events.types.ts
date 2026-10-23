@@ -16,14 +16,29 @@
  */
 export const CRUD_EVENT = { MUTATION: 'crud:mutation' } as const;
 
-/** Tablas maestras cuya edicion se difunde. */
+/**
+ * Tablas cuya edicion se difunde.
+ *
+ * Casi todas son MAESTRAS. `audit_eventos` es la excepcion y entra por la
+ * puerta de delante: es un registro de solo insercion, nunca `UPDATED` ni
+ * `DELETED`, y se difunde para que el panel de auditoria —que es una vista en
+ * vivo de esa tabla— se entere de las filas que no nacen de una mutacion
+ * maestra, como un inicio o un cierre de sesion. Las que SI nacen de una
+ * mutacion ya provocan su propio `crud:mutation`, asi que el panel recibira
+ * dos eventos por esa accion; refrescar dos veces es barato y mucho mas
+ * simple que ensenarle a cada emisor si alguien esta mirando la auditoria.
+ *
+ * Va en `ADMIN_ONLY_ENTITIES`: la tabla registra quien hizo que y desde que
+ * IP, y `audit.controller.ts` la sirve bajo `@Roles(ADMIN)`.
+ */
 export type CrudEntity =
   | 'users'
   | 'allowed_ips'
   | 'templates'
   | 'workflow_templates'
   | 'ai_prompts'
-  | 'workflows';
+  | 'workflows'
+  | 'audit_eventos';
 
 /**
  * Naturaleza de la escritura, tal y como la entiende la BASE DE DATOS.

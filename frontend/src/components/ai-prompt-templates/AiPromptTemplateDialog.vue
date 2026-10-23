@@ -405,8 +405,15 @@ const onSubmit = async (): Promise<void> => {
             />
 
             <q-banner dense class="pd-origin-banner q-mt-md" data-test="prompt-origin-notice">
+              <!-- `info` y 20px, homologado con el banner de
+                   `TemplateMapperConfig`: los dos son avisos dentro de la
+                   configuracion de un nodo y tenian glifo y tamano distintos.
+                   `filter_alt` ademas significaba "filtrar" en el resto del
+                   panel (las dos barras de filtros lo usan para Aplicar), de
+                   modo que marcaba como filtro un texto que solo explica que
+                   marcadores se ofrecen. -->
               <template #avatar>
-                <q-icon name="filter_alt" size="18px" class="pd-banner-icon" />
+                <q-icon name="info" size="20px" class="pd-banner-icon" />
               </template>
               <p class="pd-subtitle q-mb-none">{{ ORIGIN_NOTICE }}</p>
             </q-banner>

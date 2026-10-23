@@ -29,7 +29,9 @@ describe('audit-display', () => {
 
   it('1.4 deberia etiquetar en castellano y caer al valor crudo si no lo conoce', () => {
     // 1. Arrange 📐 + 2. Act ⚙️ + 3. Assert 🎯
-    expect(labelAuditAction('ROLE_CHANGE')).toBe('Cambio de rol');
+    expect(labelAuditAction('CAMBIO_ROL')).toBe('Cambio de rol');
+    expect(labelAuditAction('CIERRE_SESION')).toBe('Cierre de sesión');
+    expect(labelAuditAction('DESACTIVAR')).toBe('Desactivación');
     expect(labelAuditAction('OTRA')).toBe('OTRA');
     expect(toSelectOptions({ A: 'Uno' })).toEqual([{ label: 'Uno', value: 'A' }]);
   });

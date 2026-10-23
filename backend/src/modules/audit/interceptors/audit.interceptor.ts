@@ -36,15 +36,76 @@ const readResponseId = (response: unknown): string | null => {
 };
 
 /**
- * Un UPDATE de `usuarios` que cambia el rol se registra como `ROLE_CHANGE`:
- * es la accion que mas interesa encontrar y, como UPDATE generico, quedaria
- * enterrada entre ediciones de correo y bajas.
+ * Propiedades que representan la bandera de actividad de un registro.
+ *
+ * Son DOS porque las entidades no se pusieron de acuerdo: `User` la llama
+ * `isActive` y las tres familias de plantillas `active`, aunque todas mapeen la
+ * misma columna `activo`. Se miran las dos en vez de normalizar las entidades
+ * porque renombrar una propiedad de dominio para que encaje aqui seria dejar
+ * que la auditoria dicte el modelo.
+ *
+ * `AllowedIp` no tiene ninguna —se da de alta o se borra— y `Workflow` gobierna
+ * su actividad con un estado enumerado, no con un booleano: ninguna de las dos
+ * produce `ACTIVAR` / `DESACTIVAR`, y es correcto.
+ */
+const ACTIVITY_FLAG_KEYS = ['isActive', 'active'] as const;
+
+/**
+ * Bandera de actividad de la fotografia, si la tiene.
+ *
+ * Devuelve `null` cuando la entidad no declara ninguna o cuando el valor no es
+ * booleano: un `undefined` y un `false` significan cosas distintas, y tratarlos
+ * igual inventaria una desactivacion en cada alta de una tabla sin bandera.
+ */
+const readActivityFlag = (snapshot: AuditSnapshot | null): boolean | null => {
+  if (snapshot === null) {
+    return null;
+  }
+
+  for (const key of ACTIVITY_FLAG_KEYS) {
+    const value = snapshot[key];
+
+    if (typeof value === 'boolean') {
+      return value;
+    }
+  }
+
+  return null;
+};
+
+/**
+ * Afina el `UPDATE` generico del decorador en la accion que de verdad ocurrio.
+ *
+ * El decorador solo puede declarar lo que el endpoint hace SIEMPRE (`CREATE`,
+ * `UPDATE`, `DELETE`); que un `PATCH /users/:id` haya cambiado el rol o haya
+ * dado de baja la cuenta no se sabe hasta comparar las dos fotografias. Esa
+ * comparacion vive aqui, que es el unico punto que las tiene a la vez.
+ *
+ * Son las tres acciones que un auditor busca POR SI MISMAS —«quien cambio el
+ * rol de esta cuenta», «quien le quito el acceso»— y que, registradas como
+ * `ACTUALIZAR`, quedarian enterradas entre ediciones de correo. El orden de las
+ * dos reglas no llega a importar: un cambio de rol y un cambio de actividad no
+ * pueden ocurrir en la misma peticion porque son endpoints distintos, y si
+ * algun dia coincidieran, el rol es lo mas grave y gana.
+ *
+ * LA REGLA DE ACTIVIDAD ALCANZA TAMBIEN AL `DELETE`, y no es un descuido.
+ * `DELETE /users/:id` es un borrado LOGICO: pone `isActive = false` y la fila
+ * sigue ahi. Registrarlo como `ELIMINAR` decia que se habia borrado algo que no
+ * se borro, y dejaba sin distinguir esa baja de la de una plantilla que si
+ * desaparece. No hay riesgo de confundir los dos casos porque la condicion
+ * exige que el registro EXISTA despues: un borrado fisico no deja fotografia
+ * posterior, `readActivityFlag` devuelve `null` y la accion declarada se
+ * respeta tal cual.
  */
 const resolveAction = (
   options: AuditActionOptions,
   previous: AuditSnapshot | null,
   next: AuditSnapshot | null,
 ): AuditActionType => {
+  if (options.action === AuditActionType.CREATE) {
+    return options.action;
+  }
+
   const isRoleChange =
     options.table === AuditTable.USERS &&
     options.action === AuditActionType.UPDATE &&
@@ -52,7 +113,20 @@ const resolveAction = (
     next !== null &&
     previous.role !== next.role;
 
-  return isRoleChange ? AuditActionType.ROLE_CHANGE : options.action;
+  if (isRoleChange) {
+    return AuditActionType.ROLE_CHANGE;
+  }
+
+  const wasActive = readActivityFlag(previous);
+  const isActive = readActivityFlag(next);
+
+  // Solo si la bandera existe en AMBAS fotografias y cambio de verdad. Una
+  // modificacion que no la toca sigue siendo un `ACTUALIZAR`.
+  if (wasActive !== null && isActive !== null && wasActive !== isActive) {
+    return isActive ? AuditActionType.ACTIVATE : AuditActionType.DEACTIVATE;
+  }
+
+  return options.action;
 };
 
 /**

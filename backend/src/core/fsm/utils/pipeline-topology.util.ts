@@ -179,3 +179,60 @@ export const buildOrderedTopology = (
 
   return steps;
 };
+
+/**
+ * Todos los nodos ALCANZABLES desde `startNodeId`, el propio excluido.
+ *
+ * Es la pregunta "quien viene despues de este paso", y la responde la reanudacion
+ * selectiva para saber que namespaces quedaron rancios: si el operador vuelve a
+ * lanzar el flujo desde un nodo intermedio, lo que publicaron los pasos
+ * posteriores describe un recorrido que ya no va a repetirse igual.
+ *
+ * A DIFERENCIA de `buildOrderedTopology`, sigue las DOS salidas de cada nodo:
+ * `nextStep` y el destino declarado de `onErrorStep`. Aquella proyecta el camino
+ * feliz para pintarlo en el canvas y puede permitirse ignorar las ramas de
+ * contingencia; esta decide que se borra, y un nodo de alerta al que solo se
+ * llega por error tambien publico su namespace en el intento anterior. Dejarlo
+ * fuera conservaria precisamente la salida del fallo que se intenta superar.
+ *
+ * El recorrido es en anchura con `Set` de visitados, de modo que un grafo con
+ * ciclos —`onErrorStep` que reenvia a un paso previo es legal— termina igual.
+ * Un destino que no existe en `nodes` se ignora en silencio: el validador de
+ * topologia es quien denuncia esquemas rotos, y este recorrido no puede negarse
+ * a purgar porque otro nodo este mal declarado.
+ *
+ * @param schema Grafo declarativo que se recorre.
+ * @param startNodeId Nodo de partida; NO aparece en el resultado.
+ * @returns Conjunto de `nodeId` aguas abajo, en cualquier orden.
+ */
+export const collectDownstreamNodes = (
+  schema: PipelineSchema,
+  startNodeId: string,
+): ReadonlySet<string> => {
+  const downstream = new Set<string>();
+  const pending: string[] = [startNodeId];
+  const seen = new Set<string>([startNodeId]);
+
+  while (pending.length > 0) {
+    // `shift` sobre un grafo de decenas de nodos: el coste es irrelevante y el
+    // recorrido en anchura se lee mejor que invertir la lista para usar `pop`.
+    const currentId = pending.shift() as string;
+    const node: PipelineNodeConfig | undefined = schema.nodes[currentId];
+
+    if (node === undefined) {
+      continue;
+    }
+
+    for (const nextId of [node.nextStep, declaredErrorTarget(node.onErrorStep)]) {
+      if (nextId === null || seen.has(nextId)) {
+        continue;
+      }
+
+      seen.add(nextId);
+      downstream.add(nextId);
+      pending.push(nextId);
+    }
+  }
+
+  return downstream;
+};

@@ -31,6 +31,7 @@ import {
 } from '@core/fsm/types/node-strategy.types';
 import {
   buildOrderedTopology,
+  collectDownstreamNodes,
   resolveErrorRoute,
 } from '@core/fsm/utils/pipeline-topology.util';
 import { NodeLogStatus } from '@modules/logs/entities/log-nodo.entity';
@@ -205,6 +206,26 @@ interface PostgresDriverError extends Error {
  * ESTRUCTURAL: opera sobre el nombre de una clave, no sobre una interfaz.
  */
 const RAW_EMAIL_NAMESPACE = 'raw_email';
+
+/**
+ * Tipos de nodo cuya salida se CONSERVA al reanudar, aunque la purga selectiva
+ * la tuviese marcada para borrar.
+ *
+ * Son los dos pasos caros del catalogo: `PARSER_PRE_IA` decodifica el MIME y
+ * `PROCESADOR_OCR` manda las paginas a un modelo multimodal. Su resultado
+ * depende del correo de entrada, que en una reanudacion es exactamente el
+ * mismo, asi que repetirlos cuesta segundos y tokens para llegar al mismo
+ * sitio. Los demas nodos no entran aqui a proposito: un `EXTRACTOR_WEB` o un
+ * `PROCESADOR_IA` SI pueden dar algo distinto en el segundo intento, que es
+ * justo lo que el operador busca al reanudar.
+ *
+ * Se declara por TIPO y no por nombre de namespace: el namespace lo elige el
+ * `pipeline_schema` de cada flujo y dos flujos pueden nombrarlo distinto.
+ */
+export const CACHED_EXTRACTION_NODE_TYPES: ReadonlySet<NodeType> = new Set([
+  NodeType.PARSER_PRE_IA,
+  NodeType.PROCESADOR_OCR,
+]);
 
 /** Clave, dentro de ese namespace, que guarda el inventario de adjuntos. */
 const ATTACHMENTS_KEY = 'attachments';
@@ -643,6 +664,11 @@ export class FsmEngineService {
    *        ejecuto. Aqui solo se escribe: el motor no tiene el esquema a mano
    *        en este punto y duplicar la comprobacion con menos informacion solo
    *        daria un diagnostico peor.
+   * @param schema Grafo del flujo. Habilita la PURGA SELECTIVA descrita en
+   *        `purgeStaleNamespaces`. Es opcional porque el motor sabe reanudar sin
+   *        el —asi lo hacia antes de que existiera la purga— y hay llamantes
+   *        internos que no lo tienen a mano; omitirlo conserva el contexto
+   *        entero, que es el comportamiento historico.
    * @returns La fila ya preparada.
    * @throws NotFoundException Si la ejecucion no existe.
    */
@@ -651,6 +677,7 @@ export class FsmEngineService {
     contextPatch?: Record<string, Record<string, unknown>>,
     resetRetries = true,
     targetStepId?: string,
+    schema?: PipelineSchemaDto,
   ): Promise<FsmExecution> {
     const execution = await this.fsmExecutionRepo.findOne({
       where: { executionId },
@@ -662,17 +689,24 @@ export class FsmEngineService {
       );
     }
 
-    // La purga va ANTES de la fusion para que un `contextPatch` que reponga
-    // `error_context` a proposito —hoy nadie lo hace, pero el parche es
-    // abierto— no se vea descartado por el motor.
-    const contextPayload = this.mergeContextPatch(
-      this.withoutErrorContext(execution.contextPayload),
-      contextPatch,
-    );
-
     // Reanudacion selectiva: el operador eligio otro paso en el canvas. Sin
     // `targetStepId` se conserva el cursor persistido, que es el caso comun.
+    //
+    // Se resuelve ANTES que el contexto porque la purga necesita saber desde
+    // donde se reanuda para decidir que namespaces quedaron rancios.
     const resumeCursor = targetStepId ?? execution.activeCursor;
+
+    // Las dos purgas van ANTES de la fusion para que un `contextPatch` que
+    // reponga a proposito algo recien borrado —`error_context`, o el campo que
+    // faltaba y el operador siembra a mano— no se vea descartado por el motor.
+    const contextPayload = this.mergeContextPatch(
+      this.purgeStaleNamespaces(
+        this.withoutErrorContext(execution.contextPayload),
+        schema,
+        resumeCursor,
+      ),
+      contextPatch,
+    );
 
     // El presupuesto se restaura para el nodo DESDE EL QUE SE VA A REANUDAR, no
     // para el que detuvo la ejecucion: reanudar en otro sitio y devolverle los
@@ -761,6 +795,90 @@ export class FsmEngineService {
     return Object.fromEntries(
       Object.entries(contextPayload).filter(
         ([namespace]) => namespace !== ERROR_CONTEXT_NAMESPACE,
+      ),
+    );
+  }
+
+  /**
+   * Copia del contexto sin lo que publicaron el nodo de reanudacion y sus
+   * sucesores: la INVALIDACION DE CACHE de CU-09.
+   *
+   * EL PROBLEMA. `buildContext` restaura todos los namespaces persistidos para
+   * no repetir el trabajo ya hecho, lo cual es correcto para los pasos
+   * ANTERIORES al cursor. Para los posteriores no: describen un recorrido que
+   * la reanudacion va a rehacer, y conservarlos tiene consecuencias visibles.
+   * La guarda `findMissingNamespaces` da por satisfecha una dependencia que en
+   * realidad se va a recalcular, de modo que un nodo que se desvie por
+   * `onErrorStep` —o que se omita por `skipNodeTypes`— deja en pie la salida
+   * del intento anterior y el flujo termina publicando datos de dos corridas
+   * distintas sin que nada lo denuncie.
+   *
+   * LAS TRES REGLAS.
+   *   1. Reanudar desde el `entrypoint` vacia el contexto entero: no hay ningun
+   *      paso anterior cuyo resultado merezca sobrevivir, y el disparador
+   *      volvera a sembrar el suyo.
+   *   2. En cualquier otro punto se borra el namespace del propio nodo y el de
+   *      todo lo alcanzable desde el (`collectDownstreamNodes`, que sigue
+   *      `nextStep` Y las ramas de error).
+   *   3. Excepcion de extraccion cara: si el nodo es de
+   *      `CACHED_EXTRACTION_NODE_TYPES` y su namespace ya trae datos, se
+   *      conserva. `ExecutionsService` completa el ahorro omitiendo ademas su
+   *      reejecucion.
+   *
+   * Sin `schema` no se purga nada. El motor sabe reanudar sin el grafo y
+   * adivinar que borrar a partir de los nombres de los namespaces seria
+   * exactamente el acoplamiento que `collectDownstreamNodes` evita.
+   *
+   * Se construye una copia filtrada en vez de clonar y hacer `delete`, por el
+   * mismo motivo que `withoutErrorContext` y `withoutRetryCounter`: el `delete`
+   * mutaria el objeto que la entidad todavia expone, y el checkpoint es
+   * inmutable por contrato (`architecture-patterns.md` §3).
+   */
+  private purgeStaleNamespaces(
+    contextPayload: Record<string, Record<string, unknown>>,
+    schema: PipelineSchemaDto | undefined,
+    resumeCursor: string | null,
+  ): Record<string, Record<string, unknown>> {
+    if (schema === undefined || resumeCursor === null) {
+      return { ...contextPayload };
+    }
+
+    if (resumeCursor === schema.entrypoint) {
+      return {};
+    }
+
+    const staleNodeIds = new Set<string>([
+      resumeCursor,
+      ...collectDownstreamNodes(schema, resumeCursor),
+    ]);
+
+    const staleNamespaces = new Set<string>();
+
+    for (const nodeId of staleNodeIds) {
+      const node = schema.nodes[nodeId];
+
+      if (node === undefined) {
+        continue;
+      }
+
+      // La excepcion mira el contenido y no solo el tipo: un `PROCESADOR_OCR`
+      // que se quedo sin publicar nada no tiene cache que preservar, y dejarlo
+      // fuera de la purga solo serviria para conservar un objeto vacio que
+      // despues confundiria a `findMissingNamespaces`.
+      const holdsCachedExtraction =
+        CACHED_EXTRACTION_NODE_TYPES.has(node.nodeType) &&
+        Object.keys(contextPayload[node.outputNamespace] ?? {}).length > 0;
+
+      if (holdsCachedExtraction) {
+        continue;
+      }
+
+      staleNamespaces.add(node.outputNamespace);
+    }
+
+    return Object.fromEntries(
+      Object.entries(contextPayload).filter(
+        ([namespace]) => !staleNamespaces.has(namespace),
       ),
     );
   }

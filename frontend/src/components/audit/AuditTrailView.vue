@@ -5,6 +5,8 @@ import { useQuasar } from 'quasar';
 import { useAuditStore } from '@stores/audit.store';
 import { useUsersStore } from '@stores/users.store';
 
+import { usePanelRefresh } from '@/composables/usePanelRefresh';
+
 import AuditEventDetailsModal from '@components/audit/AuditEventDetailsModal.vue';
 import AuditExportBar from '@components/audit/AuditExportBar.vue';
 
@@ -19,7 +21,7 @@ import {
   toSelectOptions,
 } from '@/utils/audit-display';
 import { formatDateTime } from '@/utils/date-format';
-import { toIsoRange } from '@/utils/date-range';
+import { defaultDateRange, toIsoRange } from '@/utils/date-range';
 
 import type { QTableColumn, QTableProps } from 'quasar';
 import type { AuditActionValue, AuditEvent, AuditTableValue } from '@/types/audit';
@@ -135,6 +137,16 @@ const clearFilters = (): void => {
   userId.value = null;
   action.value = null;
   affectedTable.value = null;
+
+  // El periodo tambien es un filtro, y el rotulo del boton lo promete. Se
+  // devuelve al de partida en vez de vaciarlo porque la consulta exige las dos
+  // fechas: en blanco daria un formulario invalido, no una vista limpia.
+  const range = defaultDateRange();
+
+  from.value = range.from;
+  to.value = range.to;
+  auditStore.setDateRange(range);
+
   auditStore.resetFilters();
   void loadPage({ offset: 0 });
 };
@@ -152,6 +164,13 @@ onMounted(async () => {
 
   await loadPage({ offset: 0 });
 });
+
+// El historial crece por su cuenta: cada mutacion auditada y cada inicio o
+// cierre de sesion anaden una fila que el panel abierto no veria hasta que
+// alguien recargase. Se recarga la pagina VIGENTE, con sus filtros, en vez de
+// insertar la fila recibida: el orden y el total los decide el servidor, y
+// anadirla a mano descuadraria la paginacion.
+usePanelRefresh(() => loadPage(), { entities: ['audit_eventos'] });
 </script>
 
 <template>
@@ -203,31 +222,56 @@ onMounted(async () => {
         />
         <q-input
           v-model="from"
-          type="date"
           dense
           outlined
           label="Desde"
           stack-label
+          mask="####-##-##"
           :rules="[rangeRule]"
           data-test="audit-filter-from"
-        />
+        >
+          <template #append>
+            <q-icon name="event" class="cursor-pointer">
+              <q-popup-proxy cover transition-show="scale" transition-hide="scale">
+                <q-date v-model="from" mask="YYYY-MM-DD" class="pd-date-popup">
+                  <div class="row items-center justify-end">
+                    <q-btn v-close-popup flat no-caps label="Cerrar" class="pd-btn-secondary" />
+                  </div>
+                </q-date>
+              </q-popup-proxy>
+            </q-icon>
+          </template>
+        </q-input>
         <q-input
           v-model="to"
-          type="date"
           dense
           outlined
           label="Hasta"
           stack-label
+          mask="####-##-##"
           :rules="[rangeRule]"
           data-test="audit-filter-to"
-        />
+        >
+          <template #append>
+            <q-icon name="event" class="cursor-pointer">
+              <q-popup-proxy cover transition-show="scale" transition-hide="scale">
+                <q-date v-model="to" mask="YYYY-MM-DD" class="pd-date-popup">
+                  <div class="row items-center justify-end">
+                    <q-btn v-close-popup flat no-caps label="Cerrar" class="pd-btn-secondary" />
+                  </div>
+                </q-date>
+              </q-popup-proxy>
+            </q-icon>
+          </template>
+        </q-input>
         <div class="pd-audit-trail__form-actions">
           <q-btn
             type="button"
             class="pd-btn-secondary"
             flat
             no-caps
-            label="Limpiar"
+            icon="filter_alt_off"
+            label="Limpiar filtros"
             data-test="audit-filter-clear"
             @click="clearFilters"
           />

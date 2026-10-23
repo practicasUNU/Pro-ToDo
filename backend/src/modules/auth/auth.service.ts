@@ -171,9 +171,35 @@ export class AuthService {
    * El access token sigue siendo valido hasta que caduque por su cuenta: es la
    * contrapartida de un JWT autocontenido, y el motivo de que su vigencia sea de
    * una hora y no de ocho.
+   *
+   * Deja un `CIERRE_SESION` en `audit_eventos` para cerrar el par con el
+   * `INICIO_SESION` de `recordLoginAttempt`: sin el, la traza decia cuando
+   * entraba alguien pero nunca cuando salia, y una sesion abierta de madrugada
+   * era indistinguible de una que siguio viva hasta la manana.
+   *
+   * SOLO si la revocacion encontro una sesion viva. El endpoint es idempotente
+   * y un cliente puede reintentarlo; anotar un cierre por cada llamada llenaria
+   * la tabla de eventos que no corresponden a nadie saliendo de ninguna parte.
+   *
+   * @param clientIp IP de origen, que el controlador extrae de la peticion.
    */
-  public async logout(rawToken: string): Promise<void> {
-    await this.refreshTokenService.revoke(rawToken);
+  public async logout(
+    rawToken: string,
+    clientIp: string | null = null,
+  ): Promise<void> {
+    const userId = await this.refreshTokenService.revoke(rawToken);
+
+    if (userId === null) {
+      return;
+    }
+
+    await this.auditLogger.record({
+      userId,
+      action: AuditActionType.LOGOUT,
+      affectedTable: AuditTable.USERS,
+      recordId: userId,
+      sourceIp: clientIp,
+    });
   }
 
   /**

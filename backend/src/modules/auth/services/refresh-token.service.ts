@@ -183,12 +183,28 @@ export class RefreshTokenService {
    *
    * Silencioso a proposito: si el token ya no existe o ya estaba revocado, el
    * cierre de sesion se considera igualmente cumplido.
+   *
+   * DEVUELVE EL DUENO de la sesion para que la auditoria pueda atribuir el
+   * `CIERRE_SESION`. El endpoint de logout no pasa por `JwtAuthGuard` —cerrar
+   * sesion no puede exigir un access token que quiza ya caduco—, asi que esta
+   * fila es la unica fuente que dice quien se va. Se lee ANTES del `update`
+   * porque despues el token ya esta revocado y la consulta no distinguiria
+   * entre esta revocacion y una anterior.
+   *
+   * @returns El `userId` de la sesion cerrada, o `null` si el token no existia
+   *          o ya estaba revocado.
    */
-  public async revoke(rawToken: string): Promise<void> {
-    await this.refreshTokenRepository.update(
-      { tokenHash: this.hashToken(rawToken) },
-      { isRevoked: true },
-    );
+  public async revoke(rawToken: string): Promise<string | null> {
+    const tokenHash = this.hashToken(rawToken);
+
+    const stored = await this.refreshTokenRepository.findOne({
+      where: { tokenHash, isRevoked: false },
+      select: { id: true, userId: true },
+    });
+
+    await this.refreshTokenRepository.update({ tokenHash }, { isRevoked: true });
+
+    return stored?.userId ?? null;
   }
 
   /** Revoca todas las sesiones vivas de un usuario. */

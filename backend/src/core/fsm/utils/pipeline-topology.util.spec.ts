@@ -1,6 +1,7 @@
 import { NodeType } from '@core/fsm/types/pipeline-schema.types';
 import {
   buildOrderedTopology,
+  collectDownstreamNodes,
   resolveErrorRoute,
 } from '@core/fsm/utils/pipeline-topology.util';
 
@@ -215,5 +216,113 @@ describe('buildOrderedTopology', () => {
       // 3. Assert
       expect(onTruncated).not.toHaveBeenCalled();
     });
+  });
+});
+
+describe('collectDownstreamNodes', () => {
+  it('4.1 deberia devolver los sucesores de la cadena sin incluir el nodo de partida', () => {
+    // 1. Arrange
+    const schema = buildSchema('a', [
+      buildNode({ nodeId: 'a', nextStep: 'b' }),
+      buildNode({ nodeId: 'b', nextStep: 'c' }),
+      buildNode({ nodeId: 'c', nextStep: null }),
+    ]);
+
+    // 2. Act
+    const downstream = collectDownstreamNodes(schema, 'b');
+
+    // 3. Assert
+    expect([...downstream].sort()).toEqual(['c']);
+    // El propio nodo queda fuera: quien purga decide aparte si su salida se
+    // conserva (extraccion cara) o se borra.
+    expect(downstream.has('b')).toBe(false);
+    // Y nunca se mira hacia atras: 'a' ya corrio y su resultado sobrevive.
+    expect(downstream.has('a')).toBe(false);
+  });
+
+  it('4.2 deberia seguir tambien las ramas declaradas en onErrorStep', () => {
+    // 1. Arrange: el satelite de contingencia solo es alcanzable por error.
+    const schema = buildSchema('a', [
+      buildNode({ nodeId: 'a', nextStep: 'b' }),
+      buildNode({ nodeId: 'b', nextStep: 'c', onErrorStep: 'alerta' }),
+      buildNode({ nodeId: 'c', nextStep: null }),
+      buildNode({
+        nodeId: 'alerta',
+        nodeType: NodeType.DESTINO_SMTP,
+        outputNamespace: 'smtp_result',
+        nextStep: null,
+      }),
+    ]);
+
+    // 2. Act
+    const downstream = collectDownstreamNodes(schema, 'b');
+
+    // 3. Assert
+    // `buildOrderedTopology` dejaria fuera a 'alerta' porque solo sigue
+    // `nextStep`; conservarlo mantendria viva la salida del fallo anterior.
+    expect([...downstream].sort()).toEqual(['alerta', 'c']);
+  });
+
+  it('4.3 deberia resolver tambien la forma selectiva de onErrorStep', () => {
+    // 1. Arrange
+    const schema = buildSchema('a', [
+      buildNode({
+        nodeId: 'a',
+        nextStep: null,
+        onErrorStep: {
+          targetNode: 'reintento',
+          catchErrors: ['ERR_HTTP_TIMEOUT'],
+        },
+      }),
+      buildNode({ nodeId: 'reintento', nextStep: null }),
+    ]);
+
+    // 2. Act
+    const downstream = collectDownstreamNodes(schema, 'a');
+
+    // 3. Assert
+    expect([...downstream]).toEqual(['reintento']);
+  });
+
+  it('4.4 deberia terminar en un grafo ciclico', () => {
+    // 1. Arrange: un `onErrorStep` que reenvia a un paso previo es legal.
+    const schema = buildSchema('a', [
+      buildNode({ nodeId: 'a', nextStep: 'b' }),
+      buildNode({ nodeId: 'b', nextStep: 'c' }),
+      buildNode({ nodeId: 'c', nextStep: null, onErrorStep: 'a' }),
+    ]);
+
+    // 2. Act
+    const downstream = collectDownstreamNodes(schema, 'b');
+
+    // 3. Assert
+    // El ciclo devuelve el recorrido hasta 'a', y el `Set` de visitados corta.
+    expect([...downstream].sort()).toEqual(['a', 'c']);
+  });
+
+  it('4.5 deberia ignorar en silencio un destino que no existe en el mapa', () => {
+    // 1. Arrange
+    const schema = buildSchema('a', [
+      buildNode({ nodeId: 'a', nextStep: 'fantasma' }),
+    ]);
+
+    // 2. Act
+    const downstream = collectDownstreamNodes(schema, 'a');
+
+    // 3. Assert
+    // Se anota el id —no hay forma de saber que falta sin mirar el mapa— pero
+    // el recorrido no revienta: denunciar esquemas rotos es del validador.
+    expect([...downstream]).toEqual(['fantasma']);
+  });
+
+  it('4.6 deberia devolver un conjunto vacio en un nodo terminal', () => {
+    // 1. Arrange
+    const schema = buildSchema('a', [buildNode({ nodeId: 'a', nextStep: null })]);
+
+    // 2. Act
+    const downstream = collectDownstreamNodes(schema, 'a');
+
+    // 3. Assert
+    expect(downstream.size).toBe(0);
   });
 });

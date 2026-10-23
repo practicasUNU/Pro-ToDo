@@ -2,6 +2,7 @@ import { Injectable, Logger } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 
+import { CrudEventsCoordinator } from '@common/services/crud-events.coordinator';
 import { resolveDateRange } from '@common/utils/date-range.util';
 import {
   DEFAULT_AUDIT_LIMIT,
@@ -74,6 +75,7 @@ export class AuditLoggerService {
   constructor(
     @InjectRepository(AuditEvento)
     private readonly auditRepository: Repository<AuditEvento>,
+    private readonly crudEvents: CrudEventsCoordinator,
   ) {}
 
   public async record(input: AuditRecordInput): Promise<void> {
@@ -90,6 +92,22 @@ export class AuditLoggerService {
         sourceIp: input.sourceIp,
       });
       await this.auditRepository.save(event);
+
+      // DESPUES del `save` y dentro del `try`: se anuncia una fila que ya
+      // existe, nunca una intencion. Si el guardado falla no se emite nada, y
+      // si fallara el emisor —hoy un no-op cuando no hay canal inscrito— el
+      // mismo `catch` lo degrada a aviso sin tumbar la mutacion auditada.
+      //
+      // Siempre `CREATED`: la tabla es de solo insercion por diseno (la 048 no
+      // hereda las columnas de actualizacion), de modo que `UPDATED` y
+      // `DELETED` no pueden ocurrir aqui.
+      this.crudEvents.dispatch({
+        entity: 'audit_eventos',
+        action: 'CREATED',
+        id: event.id,
+        data: toResponse(event),
+        emittedAt: new Date().toISOString(),
+      });
     } catch (error) {
       this.logger.warn(
         `No se pudo registrar el evento de auditoria ${input.action} sobre ${input.affectedTable}/${input.recordId ?? '-'} (usuario ${input.userId ?? '-'}): ${(error as Error).message}`,
