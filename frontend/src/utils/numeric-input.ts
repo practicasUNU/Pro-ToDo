@@ -26,12 +26,29 @@ const BLOCKED_KEYS: ReadonlySet<string> = new Set(['e', 'E', '+', '-', ',', '.']
  * control seria una lista larga, incompleta y distinta en cada navegador. Los
  * atajos con modificador tambien pasan, o se romperian «pegar» y «deshacer».
  */
-export const blockNonNumericKeys = (event: KeyboardEvent): void => {
-  if (event.ctrlKey || event.metaKey || event.altKey) {
-    return;
-  }
+const blockKeys =
+  (blocked: ReadonlySet<string>) =>
+  (event: KeyboardEvent): void => {
+    if (event.ctrlKey || event.metaKey || event.altKey) {
+      return;
+    }
 
-  if (BLOCKED_KEYS.has(event.key)) {
-    event.preventDefault();
-  }
-};
+    if (blocked.has(event.key)) {
+      event.preventDefault();
+    }
+  };
+
+export const blockNonNumericKeys = blockKeys(BLOCKED_KEYS);
+
+/**
+ * Variante para importes con decimales (tarifas en USD por millon de tokens).
+ *
+ * Deja pasar el PUNTO, que es el separador que `<input type="number">` entiende
+ * en todos los navegadores. La COMA sigue bloqueada: segun el idioma del
+ * navegador se interpreta como separador decimal o se descarta en silencio, y
+ * `1,5` acabaria guardado como `15` o como nada. Mejor una sola forma de
+ * escribir un decimal que dos que se comportan distinto.
+ */
+const BLOCKED_DECIMAL_KEYS: ReadonlySet<string> = new Set(['e', 'E', '+', '-', ',']);
+
+export const blockNonDecimalKeys = blockKeys(BLOCKED_DECIMAL_KEYS);

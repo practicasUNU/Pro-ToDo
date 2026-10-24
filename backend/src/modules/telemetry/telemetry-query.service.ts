@@ -4,8 +4,10 @@ import { Repository } from 'typeorm';
 
 import { FsmExecution } from '@core/fsm/entities/fsm-execution.entity';
 import { ExecutionState } from '@core/fsm/types/fsm.enums';
+import { resolveSort } from '@common/utils/sort-whitelist.util';
 import {
   DEFAULT_HISTORY_LIMIT,
+  TELEMETRY_HISTORY_SORT_COLUMNS,
   TelemetryHistoryQueryDto,
   TelemetryQueryDto,
 } from '@modules/telemetry/dto/telemetry-query.dto';
@@ -182,7 +184,10 @@ export class TelemetryQueryService {
     }));
   }
 
-  /** Inferencias registradas, mas recientes primero, paginadas. */
+  /**
+   * Inferencias registradas, paginadas. Por defecto las mas recientes
+   * primero; `sortBy`/`sortOrder` ordenan el historial entero en el servidor.
+   */
   public async getHistory(
     query: TelemetryHistoryQueryDto,
   ): Promise<TelemetryHistoryPageResponseDto> {
@@ -190,7 +195,19 @@ export class TelemetryQueryService {
     const limit = query.limit ?? DEFAULT_HISTORY_LIMIT;
     const offset = query.offset ?? 0;
 
+    const sort = resolveSort(
+      TELEMETRY_HISTORY_SORT_COLUMNS,
+      query.sortBy,
+      query.sortOrder,
+      { key: 'createdAt', order: 'DESC' },
+    );
+
+    // `NULLS LAST` en los dos sentidos: un nodo o flujo ausente (consumo del
+    // asistente de prompts) no es "el menor" ni "el mayor", es un hueco, y
+    // va al final. El id desempata para que la paginacion sea estable.
     const [rows, total] = await this.historyQuery(query, range)
+      .orderBy(sort.column, sort.order, 'NULLS LAST')
+      .addOrderBy('t.id', sort.order)
       .take(limit)
       .skip(offset)
       .getManyAndCount();

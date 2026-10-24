@@ -5,6 +5,8 @@
  * filtros de `ListAuditEventsQueryDto` del backend (`modules/audit/dto`).
  */
 
+import type { AuditSortKey, SortQuery } from '@/types/sort';
+
 /**
  * Valores del enum `AuditActionType` del backend.
  *
@@ -32,6 +34,7 @@ export enum AuditTableValue {
   WORKFLOW_TEMPLATES = 'plantillas_flujo',
   AI_PROMPT_TEMPLATES = 'plantillas_prompts_ia',
   ALLOWED_IPS = 'allowed_ips',
+  PRECIOS_MODELOS_IA = 'precios_modelos_ia',
 }
 
 /** Fotografia plana de un registro (sin secretos ni relaciones). */
@@ -67,7 +70,7 @@ export interface AuditEventsFilter {
   readonly to?: string;
 }
 
-export interface AuditEventsQuery extends AuditEventsFilter {
+export interface AuditEventsQuery extends AuditEventsFilter, SortQuery<AuditSortKey> {
   readonly limit?: number;
   readonly offset?: number;
 }

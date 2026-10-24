@@ -16,7 +16,6 @@ process.env.CRON_SCHEDULING_ENABLED = 'false';
 process.env.INBOUND_RESUME_ENABLED = 'false';
 process.env.DB_NAME = process.env.E2E_DB_NAME ?? '<nombre_bd_test>';
 
-import { ValidationPipe } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
 import { Test } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
@@ -24,7 +23,7 @@ import request from 'supertest';
 import { io } from 'socket.io-client';
 import { DataSource } from 'typeorm';
 
-import { generateDevJwt } from '@common/utils/dev-jwt.util';
+import { createGlobalValidationPipe } from '@common/pipes/global-validation.pipe';
 import { FlowPollingCoordinator } from '@common/services/flow-polling.coordinator';
 import { FsmExecution } from '@core/fsm/entities/fsm-execution.entity';
 import { NodeStrategyFactory } from '@core/fsm/factories/node-strategy.factory';
@@ -40,12 +39,22 @@ import { UserRole } from '@modules/users/enums/user-role.enum';
 import { WorkflowsService } from '@modules/workflows/workflows.service';
 
 import { AppModule } from './../src/app.module';
+import {
+  E2E_SLOTS,
+  e2eEditor,
+  ensureE2eUser,
+  removeE2eUsers,
+  signFor,
+} from './helpers/e2e-users.helper';
 
 import type { INestApplication } from '@nestjs/common';
 import type { PipelineSchemaDto } from '@core/fsm/dto/pipeline-schema.dto';
 import type { Socket } from 'socket.io-client';
 import type { App } from 'supertest/types';
 import type { Repository } from 'typeorm';
+
+/** EDITOR propio de esta suite (ver `e2eEditor`). */
+const E2E_EDITOR = e2eEditor(E2E_SLOTS.CANVAS, 'editor-canvas');
 
 /** Arrancar Nest y conectar con PostgreSQL excede el timeout por defecto. */
 const BOOTSTRAP_TIMEOUT_MS = 30_000;
@@ -56,7 +65,6 @@ const EVENT_TIMEOUT_MS = 10_000;
 /** Holgura por caso: cada uno arranca el motor contra PostgreSQL real. */
 const CASE_TIMEOUT_MS = 30_000;
 
-const TEST_USER_ID = '00000000-0000-0000-0000-0000000000e2';
 const E2E_FLOW_PREFIX = '[E2E canvas]';
 
 const PAUSE_NODE_ID = 'pausa_revision';
@@ -255,9 +263,7 @@ describe('Canvas FSM · pausa, reanudacion y descarte (e2e)', () => {
 
     app = moduleRef.createNestApplication();
     app.setGlobalPrefix('api');
-    app.useGlobalPipes(
-      new ValidationPipe({ transform: true, whitelist: true }),
-    );
+    app.useGlobalPipes(createGlobalValidationPipe());
 
     // `listen(0)` y no `init()`: esta suite necesita un puerto real al que
     // pueda conectarse el cliente de sockets, y el cero deja que el sistema
@@ -273,10 +279,10 @@ describe('Canvas FSM · pausa, reanudacion y descarte (e2e)', () => {
     repository = app.get<Repository<FsmExecution>>(
       getRepositoryToken(FsmExecution),
     );
-    token = generateDevJwt(app.get(JwtService), {
-      userId: TEST_USER_ID,
-      role: UserRole.EDITOR,
-    });
+    // Un EDITOR REAL: desde la 051 `JwtStrategy` consulta `usuarios`, y un
+    // token firmado para un id inventado recibiria un 401 en cada peticion.
+    await ensureE2eUser(dataSource, E2E_EDITOR);
+    token = await signFor(app.get(JwtService), dataSource, E2E_EDITOR);
 
     // DESPUES de `init`: pisan a las reales que `NodesModule` acaba de
     // inscribir, salvo la de pausa, que no esta entre las tres dobles.
@@ -309,6 +315,7 @@ describe('Canvas FSM · pausa, reanudacion y descarte (e2e)', () => {
       ]);
     }
 
+    await removeE2eUsers(dataSource, [E2E_EDITOR]);
     await app.close();
   });
 

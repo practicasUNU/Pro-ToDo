@@ -8,9 +8,10 @@ import { useWorkflowsStore } from '@stores/workflows.store';
 import LogViewerModal from '@components/shared/LogViewerModal.vue';
 
 import { ExecutionState } from '@/types/execution';
+import { EXECUTION_SORT_KEYS } from '@/types/sort';
 import { extractApiErrorMessage } from '@/utils/api-error';
 import { formatDateTime } from '@/utils/date-format';
-import { sortRows } from '@/utils/table-sort';
+import { toTableSort } from '@/utils/table-sort';
 import { canInspectLog } from '@/utils/execution-log';
 import { describeExecutionState } from '@/utils/execution-state-display';
 
@@ -91,21 +92,14 @@ const openLog = (execution: ExecutionSummary): void => {
   isLogViewerOpen.value = true;
 };
 
-// Orden de la PAGINA CARGADA: la paginacion es del servidor, asi que la
-// cabecera reordena lo visible y no el historial entero.
-const sortBy = ref<string | null>(null);
-const descending = ref(false);
-
-const sortedRows = computed(() =>
-  sortRows(executionsStore.items, sortBy.value, descending.value),
-);
-
 const pagination = computed(() => ({
   page: Math.floor(executionsStore.offset / executionsStore.limit) + 1,
   rowsPerPage: executionsStore.limit,
   rowsNumber: executionsStore.total,
-  sortBy: sortBy.value,
-  descending: descending.value,
+  // Sin estos dos, QTable no pinta la flecha de la cabecera. `null` y no
+  // `undefined`: con `exactOptionalPropertyTypes` QTable admite el nulo.
+  sortBy: executionsStore.sort.sortBy,
+  descending: executionsStore.sort.descending,
 }));
 
 const stateFilter = computed<ExecutionState | null>({
@@ -131,10 +125,11 @@ const loadPage = async (page: { limit?: number; offset?: number } = {}): Promise
 const onRequest: QTableProps['onRequest'] = ({ pagination: requested }) => {
   const rowsPerPage = requested.rowsPerPage || executionsStore.limit;
 
-  // El orden se guarda para el `computed` y no se manda al backend, que no
-  // admite `sortBy`; reordenar lo que ya esta en memoria no pide otro viaje.
-  sortBy.value = requested.sortBy ?? null;
-  descending.value = requested.descending;
+  // El orden viaja al backend, que lo valida contra su lista blanca y ordena
+  // el historial ENTERO, no solo la pagina visible.
+  executionsStore.setSort(
+    toTableSort(EXECUTION_SORT_KEYS, requested.sortBy, requested.descending),
+  );
 
   void loadPage({ limit: rowsPerPage, offset: (requested.page - 1) * rowsPerPage });
 };
@@ -159,7 +154,7 @@ onMounted(async () => {
     class="pd-card pd-table"
     flat
     title="Historial de ejecuciones"
-    :rows="sortedRows"
+    :rows="executionsStore.items"
     :columns="columns"
     row-key="executionId"
     :loading="executionsStore.isLoading"

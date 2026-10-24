@@ -5,7 +5,12 @@ import { In } from 'typeorm';
 import { FsmExecution } from '@core/fsm/entities/fsm-execution.entity';
 import { ExecutionState } from '@core/fsm/types/fsm.enums';
 
-import type { FindOptionsSelect, Repository } from 'typeorm';
+import type { ResolvedSort } from '@common/utils/sort-whitelist.util';
+import type {
+  FindOptionsOrder,
+  FindOptionsSelect,
+  Repository,
+} from 'typeorm';
 
 /** Filtros y ventana de un listado de ejecuciones. */
 export interface ExecutionFilter {
@@ -13,6 +18,12 @@ export interface ExecutionFilter {
   readonly state?: ExecutionState | undefined;
   readonly limit: number;
   readonly offset: number;
+  /**
+   * Orden ya resuelto contra la lista blanca (`EXECUTION_SORT_COLUMNS`): la
+   * columna es SIEMPRE una propiedad de `FsmExecution` escrita en el codigo,
+   * nunca texto del cliente. Sin el, el de siempre: alta mas reciente primero.
+   */
+  readonly sort?: ResolvedSort | undefined;
 }
 
 /** Pagina de resultados con el total que cumple el filtro, no el de la pagina. */
@@ -61,7 +72,7 @@ export class FsmExecutionQueryService {
   ) {}
 
   /**
-   * Pagina de ejecuciones, de la mas reciente a la mas antigua.
+   * Pagina de ejecuciones, por defecto de la mas reciente a la mas antigua.
    *
    * @returns Las filas de la ventana y el total que cumple el filtro.
    */
@@ -79,13 +90,20 @@ export class FsmExecutionQueryService {
       where.currentState = filter.state;
     }
 
+    // Por defecto, fecha de inicio y no de actualizacion: el operador busca
+    // "la ejecucion de esta manana", y `fecha_actualizacion` reordenaria la
+    // lista cada vez que un checkpoint toca una fila antigua. El id desempata
+    // para que dos filas con el mismo valor no bailen entre paginas.
+    const sort = filter.sort ?? { column: 'createdAt', order: 'DESC' };
+    const order = {
+      [sort.column]: sort.order,
+      executionId: sort.order,
+    } as FindOptionsOrder<FsmExecution>;
+
     const [items, total] = await this.fsmExecutionRepo.findAndCount({
       where,
       select: SUMMARY_COLUMNS,
-      // Por fecha de inicio y no de actualizacion: el operador busca "la
-      // ejecucion de esta manana", y `fecha_actualizacion` reordenaria la lista
-      // cada vez que un checkpoint toca una fila antigua.
-      order: { createdAt: 'DESC' },
+      order,
       take: filter.limit,
       skip: filter.offset,
     });

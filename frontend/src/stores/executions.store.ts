@@ -3,7 +3,10 @@ import { ref } from 'vue';
 
 import * as fsmExecutionsService from '@services/fsm-executions.service';
 
+import { toSortQuery } from '@/utils/table-sort';
+
 import type { ExecutionState, ExecutionSummary } from '@/types/execution';
+import type { ExecutionSortKey, TableSort } from '@/types/sort';
 
 /** Filas por pagina del historial de ejecuciones. */
 export const DEFAULT_EXECUTIONS_PAGE_SIZE = 10;
@@ -27,6 +30,8 @@ export const useExecutionsStore = defineStore('executions', () => {
   const limit = ref(DEFAULT_EXECUTIONS_PAGE_SIZE);
   const offset = ref(0);
   const filters = ref<ExecutionHistoryFilters>({});
+  /** Orden del historial ENTERO, resuelto en el servidor. */
+  const sort = ref<TableSort<ExecutionSortKey>>({ sortBy: null, descending: false });
   const isLoading = ref(false);
 
   const setFilters = (next: ExecutionHistoryFilters): void => {
@@ -35,13 +40,19 @@ export const useExecutionsStore = defineStore('executions', () => {
     offset.value = 0;
   };
 
-  /** Pagina pedida (o la actual) con los filtros vigentes. */
+  /** Cambia el orden. La pagina la decide quien recarga (QTable vuelve a la 1). */
+  const setSort = (next: TableSort<ExecutionSortKey>): void => {
+    sort.value = { ...next };
+  };
+
+  /** Pagina pedida (o la actual) con los filtros y el orden vigentes. */
   const fetchPage = async (page: { limit?: number; offset?: number } = {}): Promise<void> => {
     isLoading.value = true;
 
     try {
       const loaded = await fsmExecutionsService.fetchExecutions({
         ...filters.value,
+        ...toSortQuery(sort.value),
         limit: page.limit ?? limit.value,
         offset: page.offset ?? offset.value,
       });
@@ -55,7 +66,18 @@ export const useExecutionsStore = defineStore('executions', () => {
     }
   };
 
-  return { items, total, limit, offset, filters, isLoading, setFilters, fetchPage };
+  return {
+    items,
+    total,
+    limit,
+    offset,
+    filters,
+    sort,
+    isLoading,
+    setFilters,
+    setSort,
+    fetchPage,
+  };
 });
 
 if (import.meta.hot) {

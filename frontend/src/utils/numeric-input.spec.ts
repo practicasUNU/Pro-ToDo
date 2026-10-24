@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 
-import { blockNonNumericKeys } from './numeric-input';
+import { blockNonDecimalKeys, blockNonNumericKeys } from './numeric-input';
 
 /**
  * Evento doble y su espia POR SEPARADO.
@@ -67,6 +67,31 @@ describe('blockNonNumericKeys', () => {
 
     // 2. Act ⚙️
     blockNonNumericKeys(event);
+
+    // 3. Assert 🎯
+    expect(preventDefault).not.toHaveBeenCalled();
+  });
+});
+
+describe('blockNonDecimalKeys', () => {
+  it.each(['e', 'E', '+', '-', ','])('2.1 deberia bloquear "%s"', (key) => {
+    // 1. Arrange 📐: una tarifa no es negativa ni exponencial, y la coma se
+    //    interpreta distinto segun el idioma del navegador.
+    const { event, preventDefault } = buildEvent({ key });
+
+    // 2. Act ⚙️
+    blockNonDecimalKeys(event);
+
+    // 3. Assert 🎯
+    expect(preventDefault).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(['.', '0', '9', 'Backspace', 'ArrowLeft'])('2.2 deberia dejar pasar "%s"', (key) => {
+    // 1. Arrange 📐: el punto es el separador decimal que todo navegador entiende.
+    const { event, preventDefault } = buildEvent({ key });
+
+    // 2. Act ⚙️
+    blockNonDecimalKeys(event);
 
     // 3. Assert 🎯
     expect(preventDefault).not.toHaveBeenCalled();

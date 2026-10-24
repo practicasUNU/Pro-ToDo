@@ -5,6 +5,7 @@ import * as reportsService from '@services/reports.service';
 import * as telemetryService from '@services/telemetry.service';
 
 import { defaultDateRange, toIsoRange } from '@/utils/date-range';
+import { toSortQuery } from '@/utils/table-sort';
 
 import type {
   ModelBreakdownRow,
@@ -13,6 +14,7 @@ import type {
   TelemetryQuery,
   TelemetrySummary,
 } from '@/types/telemetry';
+import type { TableSort, TelemetryHistorySortKey } from '@/types/sort';
 import type { DateRangeInput } from '@/utils/date-range';
 
 /** Filas por pagina del historial de consumos. */
@@ -33,6 +35,8 @@ export const useTelemetryStore = defineStore('telemetry', () => {
   const historyTotal = ref(0);
   const historyLimit = ref(DEFAULT_HISTORY_PAGE_SIZE);
   const historyOffset = ref(0);
+  /** Orden del historial ENTERO, resuelto en el servidor. */
+  const historySort = ref<TableSort<TelemetryHistorySortKey>>({ sortBy: null, descending: false });
 
   const isLoading = ref(false);
   const isLoadingHistory = ref(false);
@@ -75,6 +79,11 @@ export const useTelemetryStore = defineStore('telemetry', () => {
     }
   };
 
+  /** Cambia el orden del historial. La pagina la decide quien recarga. */
+  const setHistorySort = (next: TableSort<TelemetryHistorySortKey>): void => {
+    historySort.value = { ...next };
+  };
+
   /** Una pagina del historial de consumos. */
   const loadHistory = async (page: { limit?: number; offset?: number } = {}): Promise<void> => {
     isLoadingHistory.value = true;
@@ -83,7 +92,12 @@ export const useTelemetryStore = defineStore('telemetry', () => {
     const offset = page.offset ?? historyOffset.value;
 
     try {
-      const loaded = await telemetryService.fetchHistory({ ...query.value, limit, offset });
+      const loaded = await telemetryService.fetchHistory({
+        ...query.value,
+        ...toSortQuery(historySort.value),
+        limit,
+        offset,
+      });
 
       historyItems.value = loaded.items;
       historyTotal.value = loaded.total;
@@ -118,6 +132,7 @@ export const useTelemetryStore = defineStore('telemetry', () => {
     historyTotal,
     historyLimit,
     historyOffset,
+    historySort,
     isLoading,
     isLoadingHistory,
     exporting,
@@ -126,6 +141,7 @@ export const useTelemetryStore = defineStore('telemetry', () => {
     averageCostUsd,
     setDateRange,
     loadDashboard,
+    setHistorySort,
     loadHistory,
     exportReport,
   };

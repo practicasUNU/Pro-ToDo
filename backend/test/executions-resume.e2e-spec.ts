@@ -20,14 +20,13 @@ process.env.IMAP_POLLING_ENABLED = 'false';
 process.env.CRON_SCHEDULING_ENABLED = 'false';
 process.env.DB_NAME = process.env.E2E_DB_NAME ?? '<nombre_bd_test>';
 
-import { ValidationPipe } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
 import { Test } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
 import request from 'supertest';
 import { DataSource } from 'typeorm';
 
-import { generateDevJwt } from '@common/utils/dev-jwt.util';
+import { createGlobalValidationPipe } from '@common/pipes/global-validation.pipe';
 import { FsmExecution } from '@core/fsm/entities/fsm-execution.entity';
 import { SystemCapacityExceededException } from '@core/fsm/exceptions/system-capacity-exceeded.exception';
 import { NodeStrategyFactory } from '@core/fsm/factories/node-strategy.factory';
@@ -38,19 +37,26 @@ import {
 } from '@core/fsm/scripts/dummy-pipeline.fixture';
 import { FsmEngineService } from '@core/fsm/services/fsm-engine.service';
 import { ExecutionState } from '@core/fsm/types/fsm.enums';
-import { UserRole } from '@modules/users/enums/user-role.enum';
 
 import { AppModule } from './../src/app.module';
+import {
+  E2E_SLOTS,
+  e2eEditor,
+  ensureE2eUser,
+  removeE2eUsers,
+  signFor,
+} from './helpers/e2e-users.helper';
 
 import type { INestApplication } from '@nestjs/common';
 import type { App } from 'supertest/types';
 import type { Repository } from 'typeorm';
 
+/** EDITOR propio de esta suite (ver `e2eEditor`). */
+const E2E_EDITOR = e2eEditor(E2E_SLOTS.RESUME, 'editor-reanudacion');
+
 /** Arrancar Nest y conectar con PostgreSQL excede el timeout por defecto. */
 const BOOTSTRAP_TIMEOUT_MS = 30_000;
 
-/** Identidad del token de pruebas. `JwtStrategy` no consulta `usuarios`. */
-const TEST_USER_ID = '00000000-0000-0000-0000-0000000000e2';
 
 const E2E_FLOW_PREFIX = '[E2E CU-09]';
 
@@ -168,9 +174,7 @@ describe('CU-09 · reanudacion manual de ejecuciones (e2e)', () => {
     // no se validarian, de modo que la suite probaria una aplicacion que no es
     // la que se despliega.
     app.setGlobalPrefix('api');
-    app.useGlobalPipes(
-      new ValidationPipe({ transform: true, whitelist: true }),
-    );
+    app.useGlobalPipes(createGlobalValidationPipe());
 
     await app.init();
 
@@ -178,10 +182,10 @@ describe('CU-09 · reanudacion manual de ejecuciones (e2e)', () => {
     repository = app.get<Repository<FsmExecution>>(
       getRepositoryToken(FsmExecution),
     );
-    token = generateDevJwt(app.get(JwtService), {
-      userId: TEST_USER_ID,
-      role: UserRole.EDITOR,
-    });
+    // Un EDITOR REAL: desde la 051 `JwtStrategy` consulta `usuarios`, y un
+    // token firmado para un id inventado recibiria un 401 en cada peticion.
+    await ensureE2eUser(dataSource, E2E_EDITOR);
+    token = await signFor(app.get(JwtService), dataSource, E2E_EDITOR);
 
     // DESPUES de `init()`: `registerStrategy` sustituye ante un duplicado, asi
     // que estas tres pisan a las diez reales que `NodesModule.onModuleInit`
@@ -212,6 +216,7 @@ describe('CU-09 · reanudacion manual de ejecuciones (e2e)', () => {
     }
 
     // Sin cerrar, Jest queda colgado del pool de conexiones de TypeORM.
+    await removeE2eUsers(dataSource, [E2E_EDITOR]);
     await app.close();
   });
 

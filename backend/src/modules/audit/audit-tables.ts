@@ -10,4 +10,5 @@ export enum AuditTable {
   WORKFLOW_TEMPLATES = 'plantillas_flujo',
   AI_PROMPT_TEMPLATES = 'plantillas_prompts_ia',
   ALLOWED_IPS = 'allowed_ips',
+  PRECIOS_MODELOS_IA = 'precios_modelos_ia',
 }

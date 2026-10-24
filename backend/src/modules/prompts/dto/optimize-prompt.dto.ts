@@ -7,6 +7,7 @@ import {
   MaxLength,
 } from 'class-validator';
 
+import { TrimmedString } from '@common/decorators/trimmed-string.decorator';
 import { PROMPT_TARGET_FORMATS } from '@modules/prompts/prompt-meta.template';
 
 import type { PromptTargetFormat } from '@modules/prompts/prompt-meta.template';
@@ -24,6 +25,7 @@ export class OptimizePromptDto {
     description: 'Borrador de prompt a optimizar',
     maxLength: MAX_DRAFT_PROMPT_LENGTH,
   })
+  @TrimmedString()
   @IsString({ message: 'draftPrompt debe ser un texto.' })
   @IsNotEmpty({ message: 'draftPrompt no puede estar vacio.' })
   @MaxLength(MAX_DRAFT_PROMPT_LENGTH, {
@@ -43,6 +45,7 @@ export class OptimizePromptDto {
     example: 'gemini-3.6-flash',
   })
   @IsOptional()
+  @TrimmedString()
   @IsString({ message: 'model debe ser un texto.' })
   @MaxLength(100, { message: 'model no puede superar 100 caracteres.' })
   readonly model?: string;

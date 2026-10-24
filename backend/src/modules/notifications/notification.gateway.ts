@@ -11,11 +11,13 @@ import { isUUID } from 'class-validator';
 
 import { CrudEventsCoordinator } from '@common/services/crud-events.coordinator';
 import { SessionEventsCoordinator } from '@common/services/session-events.coordinator';
+import { PricingEventsCoordinator } from '@common/services/pricing-events.coordinator';
 import { ExecutionEventsCoordinator } from '@common/services/execution-events.coordinator';
 import { IpAccessService } from '@common/services/ip-access.service';
 import { WorkflowsService } from '@modules/workflows/workflows.service';
 import { CRUD_EVENT } from '@common/types/crud-events.types';
 import { SESSION_EVENT } from '@common/types/session-events.types';
+import { PRICING_EVENT } from '@common/types/pricing-events.types';
 import { EXECUTION_EVENT } from '@common/types/execution-events.types';
 import {
   ADMIN_ONLY_ENTITIES,
@@ -31,9 +33,11 @@ import {
 
 import type { CrudEventPort } from '@common/services/crud-events.coordinator';
 import type { SessionEventPort } from '@common/services/session-events.coordinator';
+import type { PricingEventPort } from '@common/services/pricing-events.coordinator';
 import type { ExecutionEventPort } from '@common/services/execution-events.coordinator';
 import type { CrudMutationPayload } from '@common/types/crud-events.types';
 import type { UserModifiedPayload } from '@common/types/session-events.types';
+import type { PricingUpdatedPayload } from '@common/types/pricing-events.types';
 import type {
   FlowCompletedEvent,
   FlowDiscardedEvent,
@@ -118,7 +122,8 @@ export class NotificationGateway
     OnModuleDestroy,
     ExecutionEventPort,
     CrudEventPort,
-    SessionEventPort
+    SessionEventPort,
+    PricingEventPort
 {
   private readonly logger = new Logger(NotificationGateway.name);
 
@@ -132,6 +137,7 @@ export class NotificationGateway
     private readonly workflowsService: WorkflowsService,
     private readonly crudEvents: CrudEventsCoordinator,
     private readonly sessionEvents: SessionEventsCoordinator,
+    private readonly pricingEvents: PricingEventsCoordinator,
   ) {}
 
   /**
@@ -144,6 +150,7 @@ export class NotificationGateway
     this.executionEvents.register(this);
     this.crudEvents.registerPort(this);
     this.sessionEvents.registerPort(this);
+    this.pricingEvents.registerPort(this);
   }
 
   /**
@@ -154,6 +161,7 @@ export class NotificationGateway
     this.executionEvents.unregister(this);
     this.crudEvents.unregisterPort(this);
     this.sessionEvents.unregisterPort(this);
+    this.pricingEvents.unregisterPort(this);
   }
 
   /** Instala el filtro del handshake en cuanto existe el servidor del namespace. */
@@ -400,6 +408,19 @@ export class NotificationGateway
     this.server
       ?.to(`${USER_ROOM_PREFIX}${payload.userId}`)
       .emit(SESSION_EVENT.USER_MODIFIED, payload);
+  }
+
+  /**
+   * Avisa a los ADMIN de que un par (proveedor, modelo) estrena tarifa.
+   *
+   * SOLO a la sala de administradores: el CRUD de tarifas es exclusivo de ese
+   * rol, y un `server.emit` entregaria a los editores un aviso de una pantalla
+   * que REST les niega.
+   */
+  public emitPricingUpdated(payload: PricingUpdatedPayload): void {
+    this.server
+      ?.to(`${ROLE_ROOM_PREFIX}${UserRole.ADMIN}`)
+      .emit(PRICING_EVENT.UPDATED, payload);
   }
 
   /**

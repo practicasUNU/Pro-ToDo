@@ -3,6 +3,7 @@ import { onBeforeUnmount, onMounted } from 'vue';
 import {
   subscribeToCrudMutations,
   subscribeToExecutionEvents,
+  subscribeToPricingEvents,
 } from '@services/socket-events.service';
 
 import type { CrudEntity, CrudMutationPayload } from '@/types/crud-events';
@@ -26,6 +27,14 @@ export interface PanelRefreshOptions {
    * dispararia una consulta por paso de cada flujo vivo.
    */
   readonly onFlowCompleted?: boolean;
+  /**
+   * Recargar cuando un ADMIN registra una tarifa de IA (`pricing:updated`).
+   *
+   * Evento propio y no `crud:mutation` porque un relevo toca DOS filas —la
+   * nueva y la que pasa a historico—, y el panel tiene que releer la pagina
+   * entera en vez de parchear una.
+   */
+  readonly onPricingUpdated?: boolean;
 }
 
 /**
@@ -51,6 +60,7 @@ export const usePanelRefresh = (
 
   let unsubscribeCrud: (() => void) | null = null;
   let unsubscribeExecution: (() => void) | null = null;
+  let unsubscribePricing: (() => void) | null = null;
 
   /**
    * Recarga sin propagar el fallo.
@@ -80,6 +90,10 @@ export const usePanelRefresh = (
         onFlowCompleted: () => refresh(),
       });
     }
+
+    if (options.onPricingUpdated === true) {
+      unsubscribePricing = subscribeToPricingEvents(() => refresh());
+    }
   });
 
   // Sin esta baja, cada montaje apilaria un juego mas de escuchas y un solo
@@ -87,7 +101,9 @@ export const usePanelRefresh = (
   onBeforeUnmount(() => {
     unsubscribeCrud?.();
     unsubscribeExecution?.();
+    unsubscribePricing?.();
     unsubscribeCrud = null;
     unsubscribeExecution = null;
+    unsubscribePricing = null;
   });
 };

@@ -212,6 +212,30 @@ describe('TelemetryQueryService', () => {
         operationOrigin: 'EJECUCION_FLUJO',
         flowName: 'Notiweb',
       });
+      expect(telemetryBuilder.orderBy).toHaveBeenLastCalledWith(
+        't.createdAt',
+        'DESC',
+        'NULLS LAST',
+      );
+    });
+
+    it('deberia ordenar en el servidor por la columna de la lista blanca', async () => {
+      // 1. Arrange 📐: `flow` es el nombre del flujo unido, no un campo de la fila.
+      const { service, telemetryBuilder } = buildService();
+
+      // 2. Act ⚙️
+      await service.getHistory({ sortBy: 'flow', sortOrder: 'ASC' });
+
+      // 3. Assert 🎯
+      expect(telemetryBuilder.orderBy).toHaveBeenLastCalledWith(
+        'f.name',
+        'ASC',
+        'NULLS LAST',
+      );
+      expect(telemetryBuilder.addOrderBy).toHaveBeenLastCalledWith(
+        't.id',
+        'ASC',
+      );
     });
   });
 

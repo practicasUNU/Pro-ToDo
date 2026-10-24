@@ -4,6 +4,7 @@ import { RedLocalMiddleware } from '@common/middlewares/red-local.middleware';
 import { EmailService } from '@common/services/email.service';
 import { CrudEventsCoordinator } from '@common/services/crud-events.coordinator';
 import { SessionEventsCoordinator } from '@common/services/session-events.coordinator';
+import { PricingEventsCoordinator } from '@common/services/pricing-events.coordinator';
 import { SessionRevocationCoordinator } from '@common/services/session-revocation.coordinator';
 import { ExecutionEventsCoordinator } from '@common/services/execution-events.coordinator';
 import { FlowPollingCoordinator } from '@common/services/flow-polling.coordinator';
@@ -40,6 +41,9 @@ import { AllowedIpsModule } from '@modules/security/allowed-ips/allowed-ips.modu
  * (`@modules/workflows`), y lo implementa `NotificationGateway`
  * (`@modules/notifications`), que no conoce a ninguno de los dos.
  *
+ * Y aloja `PricingEventsCoordinator`, el puerto por el que `PricingService`
+ * difunde `pricing:updated` sin inyectar el gateway.
+ *
  * Es global para que cualquier modulo pueda inyectar `IpAccessService` sin reimportarlo,
  * y expone `RedLocalMiddleware` como provider para poder resolverlo desde `main.ts`
  * y montarlo sobre las rutas de Swagger. Importa `AllowedIpsModule` porque
@@ -57,6 +61,7 @@ import { AllowedIpsModule } from '@modules/security/allowed-ips/allowed-ips.modu
     CrudEventsCoordinator,
     ExecutionEventsCoordinator,
     SessionEventsCoordinator,
+    PricingEventsCoordinator,
     SessionRevocationCoordinator,
     WorkflowStatusCoordinator,
     FsmConfig,
@@ -70,6 +75,7 @@ import { AllowedIpsModule } from '@modules/security/allowed-ips/allowed-ips.modu
     CrudEventsCoordinator,
     ExecutionEventsCoordinator,
     SessionEventsCoordinator,
+    PricingEventsCoordinator,
     SessionRevocationCoordinator,
     WorkflowStatusCoordinator,
     FsmConfig,

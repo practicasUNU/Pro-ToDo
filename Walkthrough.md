@@ -8790,3 +8790,62 @@ esa primera instalación. Un `vi.spyOn(Dialog, 'create')` puesto en una prueba l
 el `$q` del componente ya apunta a la función original y el espía no registra nada —sin error, solo
 cero llamadas—. La salida es doblar `useQuasar`, dejando el plugin instalado únicamente por el `_q_`
 que inyectan `QIcon` y compañía al renderizarse.
+
+---
+
+## Tarifas de IA, orden en servidor y entradas resilientes
+
+### Una tarifa no se edita: se releva
+
+`precios_modelos_ia` es un historial. Cada fila de `telemetria_tokens_ia` guarda su propia copia de
+las tarifas que aplico, asi que la tabla de precios es el registro de **que regia cuando**. Editar
+una fila en sitio reescribiria ese registro, y desactivarla sin sustituta dejaria el par sin tarifa:
+`resolvePricing` caeria al comodin `*` y el coste pasaria a "estimado" sin que nadie lo notara. Por
+eso el controlador tiene `GET` y `POST`, y nada mas. "Modificar" es registrar la siguiente.
+
+### El bloqueo no basta: hace falta el indice parcial
+
+`SELECT ... FOR UPDATE` serializa a dos ADMIN que ya ven una vigente. No cubre el alta simultanea
+de un par **sin** vigente previa, porque no hay fila que bloquear y las dos transacciones insertan su
+`activo = TRUE`. La migracion 052 convierte esa carrera en un `23505`, y el servicio lo traduce a un
+409 legible. Solo se traducen las dos restricciones de tarifas: cualquier otro `23505` sube crudo,
+para no disfrazar un fallo distinto de "otro administrador se adelanto".
+
+### La vigencia la pone el servidor
+
+`CreatePricingDto` no tiene `validFrom`. Con una vigencia futura habria un hueco: la anterior ya
+desactivada y la nueva sin entrar en vigor. En ese intervalo `resolvePricing` no encontraria nada.
+
+### Auditoria y aviso, despues del `COMMIT`
+
+El interceptor registra el `CREAR` de la fila nueva. El paso a historico de la anterior no pasa por
+ningun endpoint propio, asi que se audita a mano como `DESACTIVAR`. Las dos cosas, y el
+`pricing:updated`, ocurren despues de confirmar la transaccion: se anuncia un hecho, no una intencion.
+
+### Orden en servidor: el texto del cliente nunca llega al SQL
+
+TypeORM concatena en crudo el primer argumento de `.orderBy()`, y un identificador no admite un
+parametro enlazado. Hay dos lineas de defensa:
+
+1. El DTO valida `sortBy` con `@IsIn(claves)`, asi que una clave ajena, un array o un objeto dan 400.
+2. El servicio traduce la clave con `resolveSort`, y solo interpola literales del codigo fuente.
+   Usa `Object.hasOwn` en lugar de `in`, porque `constructor` y `__proto__` existen en el prototipo
+   de cualquier objeto literal.
+
+Las rutas de la lista blanca son de **propiedad** (`e.createdAt`) y no de columna, porque con
+`take`/`skip` y un `JOIN`, TypeORM reescribe el orden en una subconsulta de ids y solo sabe hacerlo
+con propiedades. `NULLS LAST` en los dos sentidos: un hueco no es "el menor".
+
+### Las e2e estaban rotas desde la 051, y nadie lo vio
+
+Las cuatro suites firmaban tokens para usuarios inventados. Cuando `JwtStrategy` empezo a consultar
+`usuarios`, esas peticiones pasaron a 401 de forma silenciosa. Ahora cada suite siembra **su propio**
+EDITOR: Jest ejecuta las suites en paralelo, y un usuario compartido lo borraba el `afterAll` de la
+primera en terminar, lo que producia 401 intermitentes en la otra. Ademas montan el mismo
+`ValidationPipe` que `main.ts`, y la de auditoria esperaba aun `CREATE`/`UPDATE`/`DELETE` en ingles.
+
+### Lo que no se recorta
+
+`@TrimmedString` se aplica a nombres, descripciones, codigos, URLs y prompts. **No** a los DTO de
+configuracion de nodo ni al `pipeline_schema`, donde viven selectores CSS, expresiones y
+plantillas: ahi un espacio inicial puede ser parte del dato.

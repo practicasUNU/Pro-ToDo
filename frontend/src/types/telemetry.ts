@@ -6,6 +6,8 @@
  * Fechas como `string` ISO: es lo que llega por JSON.
  */
 
+import type { SortQuery, TelemetryHistorySortKey } from '@/types/sort';
+
 /** Filtros comunes de `/telemetry/*`. Replica `TelemetryQueryDto`. */
 export interface TelemetryQuery {
   /** Inicio del rango (incluido), ISO 8601. */
@@ -17,7 +19,9 @@ export interface TelemetryQuery {
 }
 
 /** Filtros del historial paginado. Replica `TelemetryHistoryQueryDto`. */
-export interface TelemetryHistoryQuery extends TelemetryQuery {
+export interface TelemetryHistoryQuery
+  extends TelemetryQuery,
+    SortQuery<TelemetryHistorySortKey> {
   readonly limit?: number;
   readonly offset?: number;
 }

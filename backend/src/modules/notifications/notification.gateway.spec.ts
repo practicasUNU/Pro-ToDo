@@ -2,6 +2,8 @@ import { NotFoundException } from '@nestjs/common';
 
 import { SessionEventsCoordinator } from '@common/services/session-events.coordinator';
 import { SESSION_EVENT } from '@common/types/session-events.types';
+import { PricingEventsCoordinator } from '@common/services/pricing-events.coordinator';
+import { PRICING_EVENT } from '@common/types/pricing-events.types';
 import { CrudEventsCoordinator } from '@common/services/crud-events.coordinator';
 import { ExecutionEventsCoordinator } from '@common/services/execution-events.coordinator';
 import { CRUD_EVENT } from '@common/types/crud-events.types';
@@ -159,6 +161,7 @@ interface Harness {
   workflowsService: { findOne: jest.Mock };
   crudEvents: CrudEventsCoordinator;
   sessionEvents: SessionEventsCoordinator;
+  pricingEvents: PricingEventsCoordinator;
   emit: jest.Mock;
   to: jest.Mock;
   use: jest.Mock;
@@ -185,6 +188,7 @@ const buildHarness = (): Harness => {
   // Coordinadores REALES y no dobles: sin puertos inscritos son un no-op
   // silencioso, que es justo lo que hace falta aqui.
   const sessionEvents = new SessionEventsCoordinator();
+  const pricingEvents = new PricingEventsCoordinator();
 
   const gateway = new NotificationGateway(
     jwtService as unknown as JwtService,
@@ -193,6 +197,7 @@ const buildHarness = (): Harness => {
     workflowsService as unknown as WorkflowsService,
     crudEvents,
     sessionEvents,
+    pricingEvents,
   );
 
   jest.spyOn(gateway['logger'], 'log').mockImplementation(() => undefined);
@@ -220,6 +225,7 @@ const buildHarness = (): Harness => {
     workflowsService,
     crudEvents,
     sessionEvents,
+    pricingEvents,
     emit,
     to,
     use,
@@ -874,5 +880,27 @@ describe('NotificationGateway · difusion de mutaciones CRUD', () => {
       SESSION_EVENT.USER_MODIFIED,
       expect.anything(),
     );
+  });
+  it('D.8 deberia mandar `pricing:updated` SOLO a la sala de los ADMIN', () => {
+    // 1. Arrange 📐: el CRUD de tarifas es exclusivo de ADMIN; un editor no
+    //    debe recibir avisos de una pantalla que REST le niega.
+    const harness = buildHarness();
+    const payload = {
+      id: '0b7d3f5e-1111-4222-8333-944455556666',
+      aiProvider: 'GEMINI',
+      aiModel: 'gemini-1.5-pro',
+      supersededId: null,
+      emittedAt: '2026-10-23T10:00:00.000Z',
+    };
+
+    // 2. Act ⚙️
+    harness.gateway.onModuleInit();
+    harness.pricingEvents.dispatch(payload);
+
+    // 3. Assert 🎯
+    expect(harness.to).toHaveBeenCalledWith(
+      `${ROLE_ROOM_PREFIX}${UserRole.ADMIN}`,
+    );
+    expect(harness.emit).toHaveBeenCalledWith(PRICING_EVENT.UPDATED, payload);
   });
 });

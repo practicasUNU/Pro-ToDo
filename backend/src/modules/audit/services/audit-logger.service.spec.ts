@@ -26,6 +26,7 @@ const CHAIN_METHODS = [
   'where',
   'andWhere',
   'orderBy',
+  'addOrderBy',
   'take',
   'skip',
 ] as const;
@@ -225,6 +226,39 @@ describe('AuditLoggerService', () => {
       expect(builder.andWhere).toHaveBeenCalledWith(
         'e.creado_en < CAST(:to AS timestamptz)',
         { to: '2026-10-23T00:00:00.000Z' },
+      );
+    });
+
+    it('2.3 deberia ordenar el historial entero por la columna de la lista blanca', async () => {
+      // 1. Arrange 📐: `user` es el correo del actor unido, no un campo de la fila.
+      const { repository, builder } = buildRepository();
+      const service = buildService(repository);
+
+      // 2. Act ⚙️
+      await service.findPage({ sortBy: 'user', sortOrder: 'ASC' });
+
+      // 3. Assert 🎯
+      expect(builder.orderBy).toHaveBeenLastCalledWith(
+        'u.email',
+        'ASC',
+        'NULLS LAST',
+      );
+      expect(builder.addOrderBy).toHaveBeenLastCalledWith('e.id', 'ASC');
+    });
+
+    it('2.4 deberia caer al orden por fecha descendente sin criterio', async () => {
+      // 1. Arrange 📐
+      const { repository, builder } = buildRepository();
+      const service = buildService(repository);
+
+      // 2. Act ⚙️
+      await service.findPage({});
+
+      // 3. Assert 🎯
+      expect(builder.orderBy).toHaveBeenLastCalledWith(
+        'e.createdAt',
+        'DESC',
+        'NULLS LAST',
       );
     });
   });

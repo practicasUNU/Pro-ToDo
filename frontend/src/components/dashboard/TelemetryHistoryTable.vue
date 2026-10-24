@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue';
+import { computed } from 'vue';
 import { useQuasar } from 'quasar';
 
 import { useTelemetryStore } from '@stores/telemetry.store';
@@ -7,8 +7,9 @@ import { useTelemetryStore } from '@stores/telemetry.store';
 import { extractApiErrorMessage } from '@/utils/api-error';
 import { formatDateTime } from '@/utils/date-format';
 import { formatInteger, formatUsd } from '@/utils/number-format';
-import { sortRows } from '@/utils/table-sort';
+import { toTableSort } from '@/utils/table-sort';
 
+import { TELEMETRY_HISTORY_SORT_KEYS } from '@/types/sort';
 import { TelemetryOperationOrigin } from '@/types/telemetry';
 
 import type { QTableColumn, QTableProps } from 'quasar';
@@ -71,36 +72,12 @@ const columns: QTableColumn<TelemetryHistoryItem>[] = [
   },
 ];
 
-// Orden de la PAGINA CARGADA: la paginacion es del servidor, asi que la
-// cabecera reordena lo visible y no el historial entero.
-const sortBy = ref<string | null>(null);
-const descending = ref(false);
-
-/**
- * Columnas cuyo `field` no es una clave de la fila.
- *
- * `flow` pinta el nombre del flujo, su id o el origen del asistente de
- * prompts; `nodeId` pinta un guion cuando falta. Ordenar por el texto que se
- * ve mezclaria los huecos entre los valores reales.
- */
-const SORT_RESOLVERS = {
-  flow: (row: TelemetryHistoryItem) =>
-    row.operationOrigin === TelemetryOperationOrigin.PROMPT_OPTIMIZATION
-      ? 'Optimización de prompt'
-      : (row.flowName ?? row.flowId),
-  nodeId: (row: TelemetryHistoryItem) => row.nodeId,
-};
-
-const sortedRows = computed(() =>
-  sortRows(telemetryStore.historyItems, sortBy.value, descending.value, SORT_RESOLVERS),
-);
-
 const pagination = computed(() => ({
   page: Math.floor(telemetryStore.historyOffset / telemetryStore.historyLimit) + 1,
   rowsPerPage: telemetryStore.historyLimit,
   rowsNumber: telemetryStore.historyTotal,
-  sortBy: sortBy.value,
-  descending: descending.value,
+  sortBy: telemetryStore.historySort.sortBy,
+  descending: telemetryStore.historySort.descending,
 }));
 
 const loadPage = async (page: { limit: number; offset: number }): Promise<void> => {
@@ -117,14 +94,15 @@ const loadPage = async (page: { limit: number; offset: number }): Promise<void> 
 /**
  * Paginacion server-side: QTable pide la pagina y el store la trae.
  *
- * El criterio de orden viaja en el mismo evento y se guarda para el `computed`;
- * no se manda al backend, que no admite `sortBy`.
+ * El criterio de orden viaja en el mismo evento y se manda al backend, que lo
+ * valida contra su lista blanca y ordena el historial ENTERO.
  */
 const onRequest: QTableProps['onRequest'] = ({ pagination: requested }) => {
   const rowsPerPage = requested.rowsPerPage || telemetryStore.historyLimit;
 
-  sortBy.value = requested.sortBy ?? null;
-  descending.value = requested.descending;
+  telemetryStore.setHistorySort(
+    toTableSort(TELEMETRY_HISTORY_SORT_KEYS, requested.sortBy, requested.descending),
+  );
 
   void loadPage({ limit: rowsPerPage, offset: (requested.page - 1) * rowsPerPage });
 };
@@ -135,7 +113,7 @@ const onRequest: QTableProps['onRequest'] = ({ pagination: requested }) => {
     class="pd-card pd-table"
     flat
     title="Detalle de consumos"
-    :rows="sortedRows"
+    :rows="telemetryStore.historyItems"
     :columns="columns"
     row-key="id"
     :loading="telemetryStore.isLoadingHistory"

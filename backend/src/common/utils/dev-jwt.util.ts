@@ -12,6 +12,11 @@ export interface DevTokenOptions {
   userId?: string;
   email?: string;
   role?: UserRole;
+  /**
+   * Generacion del token (`usuarios.token_version`). Omitida, el claim no
+   * viaja y `JwtStrategy` lo trata como 0, igual que un token anterior a la 051.
+   */
+  tokenVersion?: number;
 }
 
 /**
@@ -41,9 +46,11 @@ export interface DevTokenOptions {
  * un token sintacticamente valido que el guard tira, y el fallo aparecerian en
  * la peticion y no al compilar.
  *
- * ADVERTENCIA: `JwtStrategy.validate` NO consulta la base de datos. Un token
- * firmado con el secreto correcto se acepta aunque el usuario no exista, asi que
- * esta funcion concede acceso real a la API. Solo para desarrollo local.
+ * ADVERTENCIA: desde la migracion 051, `JwtStrategy.validate` SI consulta
+ * `usuarios`: el `userId` tiene que ser una cuenta REAL y activa, y la
+ * generacion del token tiene que casar con su `token_version`. Un id inventado
+ * recibe un 401. Aun asi, con un id real esta funcion concede acceso real a la
+ * API sin pasar por el OTP. Solo para desarrollo local y pruebas.
  *
  * @returns el JWT ya firmado, listo para la cabecera `Authorization`.
  */
@@ -51,12 +58,15 @@ export const generateDevJwt = (
   jwtService: JwtService,
   options: DevTokenOptions = {},
 ): string => {
-  // Replica exacta del payload de `AuthService.buildTokenResponse`: tres campos
-  // y ni uno mas. `iat` y `exp` los pone la libreria al firmar.
+  // Replica del payload de `AuthService.buildTokenResponse`: los tres campos
+  // de identidad y, si se pide, la generacion. `iat` y `exp` los pone la libreria al firmar.
   const payload: JwtPayload = {
     sub: options.userId ?? DEFAULT_DEV_USER_ID,
     email: options.email ?? DEFAULT_DEV_EMAIL,
     role: options.role ?? UserRole.ADMIN,
+    ...(options.tokenVersion !== undefined
+      ? { tokenVersion: options.tokenVersion }
+      : {}),
   };
 
   return jwtService.sign(payload);

@@ -156,4 +156,19 @@ describe('useTelemetryStore', () => {
     await expect(store.exportReport('csv')).rejects.toThrow('403');
     expect(store.exporting.csv).toBe(false);
   });
+
+  it('2.2 deberia mandar el orden del historial al servidor', async () => {
+    // 1. Arrange 📐
+    fetchHistory.mockResolvedValue({ items: [], total: 0, limit: 25, offset: 0 });
+    const store = useTelemetryStore();
+    store.setHistorySort({ sortBy: 'estimatedCostUsd', descending: true });
+
+    // 2. Act ⚙️
+    await store.loadHistory();
+
+    // 3. Assert 🎯
+    expect(fetchHistory).toHaveBeenCalledWith(
+      expect.objectContaining({ sortBy: 'estimatedCostUsd', sortOrder: 'DESC' }),
+    );
+  });
 });

@@ -21,7 +21,9 @@
  */
 import type { CrudMutationPayload } from '@/types/crud-events';
 import type { UserModifiedPayload } from '@/types/session-events';
+import type { PricingUpdatedPayload } from '@/types/pricing-events';
 import type { NodeType, PipelineSummary } from '@/types/pipeline';
+import type { ExecutionSortKey, SortQuery } from '@/types/sort';
 
 export enum ExecutionState {
   INACTIVO = 'INACTIVO',
@@ -75,7 +77,7 @@ export interface ExecutionDetail extends ExecutionSummary {
 }
 
 /** Filtros de `GET /executions`. Replica `ListExecutionsQueryDto`. */
-export interface ExecutionListQuery {
+export interface ExecutionListQuery extends SortQuery<ExecutionSortKey> {
   readonly flowId?: string;
   readonly state?: ExecutionState;
   readonly limit?: number;
@@ -280,6 +282,8 @@ export interface ServerToClientEvents {
   // anterior —comparte socket y el mapa tipado tiene que conocerla— aunque su
   // destinatario sea la sala `user_*` y no el namespace ni un rol.
   'user:modified': (payload: UserModifiedPayload) => void;
+  // Cuarta familia: relevos de tarifas de IA, solo a la sala de los ADMIN.
+  'pricing:updated': (payload: PricingUpdatedPayload) => void;
 }
 
 export interface ClientToServerEvents {

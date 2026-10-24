@@ -9,6 +9,8 @@ import {
   MaxLength,
 } from 'class-validator';
 
+import { TrimmedString } from '@common/decorators/trimmed-string.decorator';
+
 /** Longitud de `plantillas_flujo.nombre`, alineada con `flujos.nombre`. */
 const MAX_NAME_LENGTH = 100;
 
@@ -45,6 +47,7 @@ export class CreateWorkflowTemplateDto {
     example: 'Notiweb - correo a CMS',
     maxLength: MAX_NAME_LENGTH,
   })
+  @TrimmedString()
   @IsString({ message: 'name debe ser una cadena.' })
   @IsNotEmpty({ message: 'name no puede estar vacio.' })
   @MaxLength(MAX_NAME_LENGTH, {
@@ -57,6 +60,7 @@ export class CreateWorkflowTemplateDto {
     maxLength: MAX_DESCRIPTION_LENGTH,
   })
   @IsOptional()
+  @TrimmedString()
   @IsString({ message: 'description debe ser una cadena.' })
   @MaxLength(MAX_DESCRIPTION_LENGTH, {
     message: `description no puede superar ${MAX_DESCRIPTION_LENGTH} caracteres.`,

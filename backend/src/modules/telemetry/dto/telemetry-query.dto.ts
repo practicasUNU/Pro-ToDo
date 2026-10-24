@@ -11,6 +11,15 @@ import {
 } from 'class-validator';
 
 import { LlmProvider } from '@modules/nodes/strategies/interfaces/llm-provider.interface';
+import {
+  SortByField,
+  SortOrderField,
+} from '@common/utils/sort-whitelist.util';
+
+import type {
+  SortOrder,
+  SortWhitelist,
+} from '@common/utils/sort-whitelist.util';
 
 /** Dias que cubre el informe cuando el cliente no indica `from`. */
 export const DEFAULT_RANGE_DAYS = 30;
@@ -20,6 +29,24 @@ export const DEFAULT_HISTORY_LIMIT = 25;
 
 /** Techo del tamano de pagina, mismo criterio que `GET /api/executions`. */
 export const MAX_HISTORY_LIMIT = 100;
+
+/**
+ * Lista blanca de orden del historial: clave de la API -> ruta del
+ * QueryBuilder (`t` = telemetria, `f` = flujo unido). Las claves coinciden con
+ * el `name` de las columnas de la tabla del frontend.
+ */
+export const TELEMETRY_HISTORY_SORT_COLUMNS = {
+  createdAt: 't.createdAt',
+  flow: 'f.name',
+  nodeId: 't.nodeId',
+  aiProvider: 't.aiProvider',
+  aiModel: 't.aiModel',
+  totalTokens: 't.totalTokens',
+  estimatedCostUsd: 't.estimatedCostUsd',
+} as const satisfies SortWhitelist;
+
+export type TelemetryHistorySortKey =
+  keyof typeof TELEMETRY_HISTORY_SORT_COLUMNS;
 
 /**
  * Filtros comunes a los agregados y a las exportaciones de telemetria.
@@ -87,4 +114,10 @@ export class TelemetryHistoryQueryDto extends TelemetryQueryDto {
   @IsInt({ message: 'offset debe ser un numero entero.' })
   @Min(0, { message: 'offset no puede ser negativo.' })
   readonly offset?: number;
+
+  @SortByField(Object.keys(TELEMETRY_HISTORY_SORT_COLUMNS))
+  readonly sortBy?: TelemetryHistorySortKey;
+
+  @SortOrderField()
+  readonly sortOrder?: SortOrder;
 }

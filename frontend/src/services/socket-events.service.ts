@@ -1,10 +1,12 @@
 import { CRUD_EVENT } from '@/types/crud-events';
 import { SESSION_EVENT } from '@/types/session-events';
+import { PRICING_EVENT } from '@/types/pricing-events';
 import { EXECUTION_EVENT } from '@/types/execution';
 import { getSocket } from '@services/socket.client';
 
 import type { CrudMutationPayload } from '@/types/crud-events';
 import type { UserModifiedPayload } from '@/types/session-events';
+import type { PricingUpdatedPayload } from '@/types/pricing-events';
 import type {
   ExecutionEventHandlers,
   FlowCompletedEvent,
@@ -108,6 +110,25 @@ export const subscribeToSessionEvents = (
 
   return () => {
     socket.off(SESSION_EVENT.USER_MODIFIED, handler);
+  };
+};
+
+/**
+ * Escucha los relevos de tarifas de IA.
+ *
+ * El gateway solo lo manda a la sala de los ADMIN, que son los unicos que
+ * pueden abrir la pantalla de precios. La baja va POR REFERENCIA, igual que el
+ * resto de suscripciones.
+ */
+export const subscribeToPricingEvents = (
+  handler: (payload: PricingUpdatedPayload) => void,
+): (() => void) => {
+  const socket = getSocket();
+
+  socket.on(PRICING_EVENT.UPDATED, handler);
+
+  return () => {
+    socket.off(PRICING_EVENT.UPDATED, handler);
   };
 };
 

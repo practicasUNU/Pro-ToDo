@@ -8,6 +8,8 @@ import {
   MaxLength,
 } from 'class-validator';
 
+import { TrimmedString } from '@common/decorators/trimmed-string.decorator';
+
 /** Replica `plantillas_prompts_ia.codigo VARCHAR(50)`. */
 export const MAX_CODE_LENGTH = 50;
 
@@ -67,6 +69,7 @@ export class CreateAiPromptTemplateDto {
     pattern: CODE_PATTERN.source,
   })
   @IsOptional()
+  @TrimmedString()
   @IsString({ message: 'code debe ser una cadena.' })
   @MaxLength(MAX_CODE_LENGTH, {
     message: `code no puede superar ${MAX_CODE_LENGTH} caracteres.`,
@@ -81,6 +84,7 @@ export class CreateAiPromptTemplateDto {
     example: 'extraccion-noticia-es',
     maxLength: MAX_NAME_LENGTH,
   })
+  @TrimmedString()
   @IsString({ message: 'name debe ser una cadena.' })
   @IsNotEmpty({ message: 'name no puede estar vacio.' })
   @MaxLength(MAX_NAME_LENGTH, {
@@ -94,6 +98,7 @@ export class CreateAiPromptTemplateDto {
     maxLength: MAX_DESCRIPTION_LENGTH,
   })
   @IsOptional()
+  @TrimmedString()
   @IsString({ message: 'description debe ser una cadena.' })
   @MaxLength(MAX_DESCRIPTION_LENGTH, {
     message: `description no puede superar ${MAX_DESCRIPTION_LENGTH} caracteres.`,
@@ -107,6 +112,7 @@ export class CreateAiPromptTemplateDto {
     example:
       'Extrae el titular y un resumen de dos frases del siguiente texto: {{parsed_email.clean_body}}',
   })
+  @TrimmedString()
   @IsString({ message: 'promptText debe ser una cadena.' })
   @IsNotEmpty({ message: 'promptText no puede estar vacio.' })
   readonly promptText: string;

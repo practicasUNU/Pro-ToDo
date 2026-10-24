@@ -48,6 +48,7 @@ export class CreateTemplateDto {
     example:
       '<h1>{{parsed_email.clean_title}}</h1><p>{{llm_response.summary}}</p>',
   })
+  @TrimmedString()
   @IsString()
   @IsNotEmpty()
   htmlContent: string;

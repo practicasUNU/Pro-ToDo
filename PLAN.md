@@ -4541,3 +4541,81 @@ asignable, asi que ningun llamante existente cambia.
       Falta la vista de trazabilidad con `<q-table>` (`.row-urgente` / `-grave` / `-exitoso`) y el
       boton de reanudar que cierre CU-09 de extremo a extremo
 - [ ] Pendiente — la sala `user_*` se ocupa pero no se emite nada por ella todavia
+
+---
+
+## Telemetria · CRUD de tarifas de IA, orden en servidor y resiliencia de entradas
+
+### Problema
+
+- `precios_modelos_ia` solo se podia tocar por SQL. Cambiar una tarifa exigia una migracion, y nada
+  impedia dejar dos filas `activo = TRUE` para el mismo par (proveedor, modelo).
+- Las tablas de Inicio, Informes y Auditoria paginan en el servidor pero ordenaban en el cliente:
+  la cabecera "Coste" reordenaba las 25 filas cargadas, no el historial.
+- `@TrimmedString` existia en cinco DTO. Las suites e2e montaban su propio `ValidationPipe`, sin
+  `forbidNonWhitelisted`, y firmaban tokens para usuarios inventados, que la `JwtStrategy` de la
+  migracion 051 ya rechaza con 401.
+
+### Contratos nuevos
+
+```typescript
+// @common/utils/sort-whitelist.util — lista blanca de orden
+export type SortOrder = 'ASC' | 'DESC';
+export type SortWhitelist<K extends string> = Readonly<Record<K, string>>; // clave API -> ruta fija
+export const resolveSort: (whitelist, sortBy?, sortOrder?, fallback) => { column; order };
+export const SortByField: (keys: readonly string[]) => PropertyDecorator; // @IsIn -> 400
+export const SortOrderField: () => PropertyDecorator;                     // ASC/DESC, normaliza
+
+// @common/types/pricing-events.types — contrato de cable (solo a role_ADMIN)
+export const PRICING_EVENT = { UPDATED: 'pricing:updated' } as const;
+export interface PricingUpdatedPayload { id; aiProvider; aiModel; supersededId: string | null; emittedAt }
+
+// @modules/pricing — ADMIN, sin PATCH ni DELETE
+GET  /api/pricing   ListPricingQueryDto  -> PricingPageResponseDto
+POST /api/pricing   CreatePricingDto     -> PricingResponseDto   // releva la vigente
+```
+
+Listas blancas: `EXECUTION_SORT_COLUMNS` (Inicio), `TELEMETRY_HISTORY_SORT_COLUMNS` (Informes),
+`AUDIT_SORT_COLUMNS` (Auditoria) y `PRICING_SORT_COLUMNS` (Precios). Cada una vive junto al DTO de su
+consulta, y el frontend replica las claves en `types/sort.ts`.
+
+### Diagrama de inyeccion de dependencias
+
+```
+PricingController ──> PricingService ──┬─> Repository<PrecioModeloIa>   (lectura paginada)
+                                       ├─> DataSource.transaction        (relevo atomico)
+                                       ├─> AuditLoggerService            (DESACTIVAR de la saliente)
+                                       └─> PricingEventsCoordinator  <── NotificationGateway (puerto)
+                                                (CommonModule, global)        emite a role_ADMIN
+```
+
+`PricingModule` reutiliza la entidad de `TelemetryModule` en lugar de moverla: la telemetria la lee
+en caliente (`resolvePricing`) y este modulo solo la escribe.
+
+### Namespaces
+
+No aplica: ningun nodo del motor escribe en `StatePayloadContext` por este cambio.
+`telemetria_tokens_ia` sigue guardando su propia copia de las tarifas, asi que un relevo no reescribe
+el coste historico.
+
+### Estado de las tareas
+
+- [x] Migracion 052: indice unico parcial `uq_precios_modelos_ia_activa`. `init.sql` lo incluye, y de
+      paso corrige dos desfases: el CHECK de auditoria seguia en ingles y faltaba `token_version`
+- [x] `PricingService.create`: `FOR UPDATE` -> `activo = false` -> `INSERT`, todo en una transaccion;
+      la vigencia la fija el servidor; `23505` -> 409; tarifa identica -> 409
+- [x] Auditoria `DESACTIVAR` de la tarifa saliente, y `pricing:updated` emitido despues del `COMMIT`
+- [x] Orden en servidor con lista blanca en `/executions`, `/telemetry/history`, `/audit/events` y
+      `/pricing`, con `NULLS LAST` y el id como desempate
+- [x] `createGlobalValidationPipe()`, compartido por `main.ts` y las cuatro suites e2e
+- [x] `@TrimmedString` en los DTO de entrada de flujos, plantillas, prompts, IPs, refresh, reanudacion
+      y banco de pruebas
+- [x] e2e: usuarios reales sembrados por suite (`test/helpers/e2e-users.helper.ts`); acciones de
+      auditoria en castellano
+- [x] Frontend: `PricingManagementPage` -> `PricingManager` + `PricingDialog` + `WarningModal`
+      (5 s, `useConfirmCountdown` compartido con `SafeDeleteModal`), ruta `/precios` solo ADMIN
+- [x] Frontend: `blockNonDecimalKeys` para importes y `q-date` sin fechas futuras en el filtro de vigencia
+- [ ] Pendiente — aplicar la 052 en la base de desarrollo: `cd backend && npm run db:migrate`
+- [ ] Fuera de alcance, a proposito: `@TrimmedString` NO se aplica a los DTO de configuracion de nodo
+      ni al `pipeline_schema`. Son selectores, expresiones y plantillas, donde un espacio puede ser
+      significativo

@@ -12,6 +12,7 @@ import {
   FsmEngineService,
 } from '@core/fsm/services/fsm-engine.service';
 import { ExecutionEventsCoordinator } from '@common/services/execution-events.coordinator';
+import { resolveSort } from '@common/utils/sort-whitelist.util';
 import { FsmExecutionQueryService } from '@core/fsm/services/fsm-execution-query.service';
 import { PipelineValidatorService } from '@core/fsm/services/pipeline-validator.service';
 import { ExecutionState } from '@core/fsm/types/fsm.enums';
@@ -23,6 +24,7 @@ import { WorkflowsService } from '@modules/workflows/workflows.service';
 
 import {
   DEFAULT_PAGE_LIMIT,
+  EXECUTION_SORT_COLUMNS,
   ListExecutionsQueryDto,
 } from './dto/list-executions-query.dto';
 import { requirePipelineSchema } from './validators/require-pipeline-schema.validator';
@@ -69,7 +71,11 @@ export class ExecutionsService {
     private readonly alertQueryService: AlertQueryService,
   ) {}
 
-  /** Pagina de ejecuciones, de la mas reciente a la mas antigua. */
+  /**
+   * Pagina de ejecuciones. Por defecto, de la mas reciente a la mas antigua;
+   * `sortBy`/`sortOrder` reordenan el historial ENTERO en el servidor, no solo
+   * la pagina visible.
+   */
   public async findAll(
     query: ListExecutionsQueryDto,
   ): Promise<ExecutionPageResponseDto> {
@@ -81,6 +87,10 @@ export class ExecutionsService {
       state: query.state,
       limit,
       offset,
+      sort: resolveSort(EXECUTION_SORT_COLUMNS, query.sortBy, query.sortOrder, {
+        key: 'startedAt',
+        order: 'DESC',
+      }),
     });
 
     const withAlerts = await this.alertQueryService.findExecutionIdsWithAlerts(

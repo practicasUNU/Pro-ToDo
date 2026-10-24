@@ -56,6 +56,13 @@ const routes: RouteRecordRaw[] = [
         meta: { requiresAdmin: true },
       },
       {
+        path: 'precios',
+        component: () => import('@/pages/PricingManagementPage.vue'),
+        // Espeja el @Roles(UserRole.ADMIN) del PricingController: una tarifa
+        // cambia el coste de toda inferencia futura.
+        meta: { requiresAdmin: true },
+      },
+      {
         path: 'flujos',
         component: () => import('@/pages/workflows/WorkflowsPage.vue'),
         // SIN requiresAdmin: WorkflowsController admite @Roles(ADMIN, EDITOR).

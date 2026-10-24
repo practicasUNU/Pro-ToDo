@@ -144,7 +144,30 @@ describe('FsmExecutionQueryService (lectura de ejecuciones_flujo)', () => {
 
       // 3. Assert
       expect(findAndCount).toHaveBeenCalledWith(
-        expect.objectContaining({ order: { createdAt: 'DESC' } }),
+        expect.objectContaining({
+          order: { createdAt: 'DESC', executionId: 'DESC' },
+        }),
+      );
+    });
+
+    it('1.6 deberia aplicar el orden ya resuelto y desempatar por id', async () => {
+      // 1. Arrange: el orden llega traducido por la lista blanca; el id
+      //    desempata para que dos filas con el mismo estado no bailen entre
+      //    paginas al pedir la siguiente.
+      const { repo, findAndCount } = buildRepository();
+
+      // 2. Act
+      await new FsmExecutionQueryService(repo).findPage({
+        limit: 25,
+        offset: 0,
+        sort: { column: 'currentState', order: 'ASC' },
+      });
+
+      // 3. Assert
+      expect(findAndCount).toHaveBeenCalledWith(
+        expect.objectContaining({
+          order: { currentState: 'ASC', executionId: 'ASC' },
+        }),
       );
     });
   });

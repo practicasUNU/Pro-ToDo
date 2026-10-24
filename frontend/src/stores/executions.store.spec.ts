@@ -59,4 +59,22 @@ describe('useExecutionsStore', () => {
     await expect(store.fetchPage()).rejects.toThrow('500');
     expect(store.isLoading).toBe(false);
   });
+
+  it('1.4 deberia mandar el orden al servidor y no mandarlo sin criterio', async () => {
+    // 1. Arrange 📐: el orden es del historial ENTERO, no de la pagina visible.
+    fetchExecutions.mockResolvedValue({ items: [], total: 0, limit: 10, offset: 0 });
+    const store = useExecutionsStore();
+
+    // 2. Act ⚙️
+    await store.fetchPage();
+    store.setSort({ sortBy: 'startedAt', descending: false });
+    await store.fetchPage();
+
+    // 3. Assert 🎯
+    expect(fetchExecutions.mock.calls[0]?.[0]).not.toHaveProperty('sortBy');
+    expect(fetchExecutions.mock.calls[1]?.[0]).toMatchObject({
+      sortBy: 'startedAt',
+      sortOrder: 'ASC',
+    });
+  });
 });

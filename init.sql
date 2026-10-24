@@ -42,6 +42,10 @@ CREATE TABLE usuarios (
     -- la primera vez que el usuario pide un código (ver migración 003).
     secreto_otp VARCHAR(64),
     activo BOOLEAN DEFAULT TRUE,
+    -- Generacion de los tokens de la cuenta (migracion 051): `JwtStrategy` la
+    -- compara con el claim `tokenVersion` en cada peticion, y subirla revoca
+    -- en el acto todas las sesiones vivas de esa persona.
+    token_version INTEGER NOT NULL DEFAULT 0,
     -- Auditoria comun (`AuditableEntity`, migracion 045). Nullable: las filas
     -- historicas no tienen autor conocido y un usuario borrado no arrastra lo
     -- que toco.
@@ -443,6 +447,12 @@ CREATE TABLE precios_modelos_ia (
     CONSTRAINT uq_precios_modelos_ia_vigencia UNIQUE (proveedor_ia, modelo_ia, vigente_desde)
 );
 
+-- Una sola tarifa VIGENTE por par (migracion 052): el historico repite el par,
+-- la vigente no. Para la carrera de dos altas simultaneas sin vigente previa.
+CREATE UNIQUE INDEX uq_precios_modelos_ia_activa
+    ON precios_modelos_ia (proveedor_ia, modelo_ia)
+ WHERE activo;
+
 -- A diferencia de las plantillas, estas semillas SI van aqui: no dependen de
 -- ningun usuario, y sin ellas toda la telemetria naceria marcada como estimada.
 INSERT INTO precios_modelos_ia (
@@ -523,8 +533,14 @@ CREATE TABLE audit_eventos (
     id_audit_evento UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     -- NULL en un login fallido con un correo que no existe.
     usuario_id UUID NULL REFERENCES usuarios(id_usuario) ON DELETE SET NULL,
+    -- Literales en castellano (migracion 050). El nombre de la restriccion es
+    -- explicito para que la 050 pueda soltarla y reponerla por nombre.
     accion VARCHAR(30) NOT NULL
-        CHECK (accion IN ('CREATE', 'UPDATE', 'DELETE', 'ROLE_CHANGE', 'LOGIN', 'LOGIN_FAILED')),
+        CONSTRAINT audit_eventos_accion_check CHECK (accion IN (
+            'CREAR', 'ACTUALIZAR', 'ELIMINAR', 'CAMBIO_ROL',
+            'INICIO_SESION', 'INICIO_SESION_FALLIDO', 'CIERRE_SESION',
+            'ACTIVAR', 'DESACTIVAR'
+        )),
     tabla_afectada VARCHAR(60) NOT NULL,
     registro_id VARCHAR(64) NULL,
     datos_anteriores JSONB NULL,

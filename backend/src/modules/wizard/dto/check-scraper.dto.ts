@@ -1,6 +1,7 @@
 import { ApiProperty, PickType } from '@nestjs/swagger';
 import { IsNotEmpty, IsString, IsUrl, MaxLength } from 'class-validator';
 
+import { TrimmedString } from '@common/decorators/trimmed-string.decorator';
 import { WebScraperConfigDto } from '@modules/nodes/dto/web-scraper-config.dto';
 
 /**
@@ -41,6 +42,7 @@ export class CheckScraperDto extends PickType(WebScraperConfigDto, [
     example: 'https://www.ejemplo.es/noticias/nota-de-prensa',
     maxLength: MAX_CHECK_SCRAPER_URL_CHARS,
   })
+  @TrimmedString()
   @IsString({ message: 'targetUrl debe ser una cadena.' })
   @IsNotEmpty({ message: 'targetUrl no puede estar vacio.' })
   @MaxLength(MAX_CHECK_SCRAPER_URL_CHARS, {

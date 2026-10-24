@@ -4,7 +4,9 @@ import { Repository } from 'typeorm';
 
 import { CrudEventsCoordinator } from '@common/services/crud-events.coordinator';
 import { resolveDateRange } from '@common/utils/date-range.util';
+import { resolveSort } from '@common/utils/sort-whitelist.util';
 import {
+  AUDIT_SORT_COLUMNS,
   DEFAULT_AUDIT_LIMIT,
   DEFAULT_AUDIT_RANGE_DAYS,
 } from '@modules/audit/dto/list-audit-events-query.dto';
@@ -123,7 +125,16 @@ export class AuditLoggerService {
     const offset = query.offset ?? 0;
     const range = resolveDateRange(query, DEFAULT_AUDIT_RANGE_DAYS);
 
+    const sort = resolveSort(AUDIT_SORT_COLUMNS, query.sortBy, query.sortOrder, {
+      key: 'createdAt',
+      order: 'DESC',
+    });
+
+    // `NULLS LAST`: un evento sin usuario (login fallido) o sin IP es un hueco,
+    // no el menor de los valores. El id desempata para paginar estable.
     const [events, total] = await this.filteredEvents(query, range)
+      .orderBy(sort.column, sort.order, 'NULLS LAST')
+      .addOrderBy('e.id', sort.order)
       .take(limit)
       .skip(offset)
       .getManyAndCount();

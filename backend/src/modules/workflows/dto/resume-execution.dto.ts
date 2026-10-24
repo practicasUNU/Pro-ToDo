@@ -1,6 +1,8 @@
 import { ApiPropertyOptional } from '@nestjs/swagger';
 import { IsBoolean, IsObject, IsOptional, IsString } from 'class-validator';
 
+import { TrimmedString } from '@common/decorators/trimmed-string.decorator';
+
 /**
  * Cuerpo de `POST /api/executions/:id/resume`: reintento manual de CU-09.
  *
@@ -33,6 +35,7 @@ export class ResumeExecutionDto {
     example: 'procesador_ia',
   })
   @IsOptional()
+  @TrimmedString()
   @IsString({ message: 'targetStepId debe ser el identificador de un nodo.' })
   readonly targetStepId?: string;
 }

@@ -101,4 +101,20 @@ describe('useAuditStore', () => {
     await expect(store.loadPage()).rejects.toThrow('403');
     expect(store.isLoading).toBe(false);
   });
+
+  it('1.6 deberia mandar el orden al servidor', async () => {
+    // 1. Arrange 📐
+    fetchAuditEvents.mockResolvedValue({ items: [], total: 0, limit: 25, offset: 0 });
+    const store = useAuditStore();
+    store.setSort({ sortBy: 'user', descending: false });
+
+    // 2. Act ⚙️
+    await store.loadPage();
+
+    // 3. Assert 🎯
+    expect(fetchAuditEvents.mock.calls[0]?.[0]).toMatchObject({
+      sortBy: 'user',
+      sortOrder: 'ASC',
+    });
+  });
 });

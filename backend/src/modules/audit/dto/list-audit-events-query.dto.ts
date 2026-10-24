@@ -13,6 +13,15 @@ import {
 
 import { AuditTable } from '@modules/audit/audit-tables';
 import { AuditActionType } from '@modules/audit/enums/audit-action.enum';
+import {
+  SortByField,
+  SortOrderField,
+} from '@common/utils/sort-whitelist.util';
+
+import type {
+  SortOrder,
+  SortWhitelist,
+} from '@common/utils/sort-whitelist.util';
 
 /** Dias que cubre la consulta cuando el cliente no indica `from`. */
 export const DEFAULT_AUDIT_RANGE_DAYS = 30;
@@ -22,6 +31,22 @@ export const DEFAULT_AUDIT_LIMIT = 25;
 
 /** Techo del tamano de pagina, mismo criterio que `GET /api/executions`. */
 export const MAX_AUDIT_LIMIT = 100;
+
+/**
+ * Lista blanca de orden de la traza: clave de la API -> ruta del QueryBuilder
+ * (`e` = evento, `u` = usuario unido). Rutas de PROPIEDAD y no de columna:
+ * con `take`/`skip` y un `JOIN`, TypeORM reescribe el orden dentro de una
+ * subconsulta de ids y solo sabe hacerlo con propiedades de entidad.
+ */
+export const AUDIT_SORT_COLUMNS = {
+  createdAt: 'e.createdAt',
+  user: 'u.email',
+  action: 'e.action',
+  affectedTable: 'e.affectedTable',
+  sourceIp: 'e.sourceIp',
+} as const satisfies SortWhitelist;
+
+export type AuditSortKey = keyof typeof AUDIT_SORT_COLUMNS;
 
 /** Formatos de exportacion del informe de auditoria. */
 export const AUDIT_REPORT_FORMATS = ['csv', 'pdf'] as const;
@@ -93,6 +118,12 @@ export class ListAuditEventsQueryDto extends AuditEventsFilterDto {
   @IsInt({ message: 'offset debe ser un numero entero.' })
   @Min(0, { message: 'offset no puede ser negativo.' })
   readonly offset?: number;
+
+  @SortByField(Object.keys(AUDIT_SORT_COLUMNS))
+  readonly sortBy?: AuditSortKey;
+
+  @SortOrderField()
+  readonly sortOrder?: SortOrder;
 }
 
 /** Exportacion: los filtros mas el formato del fichero. */

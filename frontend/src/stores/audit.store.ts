@@ -4,6 +4,7 @@ import { computed, ref } from 'vue';
 import * as auditService from '@services/audit.service';
 
 import { defaultDateRange, toIsoRange } from '@/utils/date-range';
+import { toSortQuery } from '@/utils/table-sort';
 
 import type {
   AuditActionValue,
@@ -12,6 +13,7 @@ import type {
   AuditReportFormat,
   AuditTableValue,
 } from '@/types/audit';
+import type { AuditSortKey, TableSort } from '@/types/sort';
 import type { DateRangeInput } from '@/utils/date-range';
 
 /** Filas por pagina del historial de auditoria. */
@@ -38,6 +40,8 @@ export const useAuditStore = defineStore('audit', () => {
   const total = ref(0);
   const limit = ref(DEFAULT_AUDIT_PAGE_SIZE);
   const offset = ref(0);
+  /** Orden del historial ENTERO, resuelto en el servidor. */
+  const sort = ref<TableSort<AuditSortKey>>({ sortBy: null, descending: false });
 
   const isLoading = ref(false);
   /** Un indicador por formato: exportar CSV no debe bloquear el boton del PDF. */
@@ -70,6 +74,11 @@ export const useAuditStore = defineStore('audit', () => {
     offset.value = 0;
   };
 
+  /** Cambia el orden. La pagina la decide quien recarga (QTable vuelve a la 1). */
+  const setSort = (next: TableSort<AuditSortKey>): void => {
+    sort.value = { ...next };
+  };
+
   const resetFilters = (): void => {
     filters.value = { ...EMPTY_FILTERS };
     offset.value = 0;
@@ -82,6 +91,7 @@ export const useAuditStore = defineStore('audit', () => {
     try {
       const loaded = await auditService.fetchAuditEvents({
         ...query.value,
+        ...toSortQuery(sort.value),
         limit: page.limit ?? limit.value,
         offset: page.offset ?? offset.value,
       });
@@ -116,12 +126,14 @@ export const useAuditStore = defineStore('audit', () => {
     total,
     limit,
     offset,
+    sort,
     isLoading,
     exporting,
     isRangeValid,
     query,
     setDateRange,
     setFilters,
+    setSort,
     resetFilters,
     loadPage,
     exportReport,

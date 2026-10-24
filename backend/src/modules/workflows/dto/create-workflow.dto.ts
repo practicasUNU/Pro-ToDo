@@ -9,6 +9,8 @@ import {
   MaxLength,
 } from 'class-validator';
 
+import { TrimmedString } from '@common/decorators/trimmed-string.decorator';
+
 /** Longitud de `flujos.nombre` en el esquema SQL. */
 const MAX_NAME_LENGTH = 100;
 
@@ -39,6 +41,7 @@ export class CreateWorkflowDto {
     example: 'Notiweb - publicacion automatica',
     maxLength: MAX_NAME_LENGTH,
   })
+  @TrimmedString()
   @IsString({ message: 'name debe ser una cadena.' })
   @IsNotEmpty({ message: 'name no puede estar vacio.' })
   @MaxLength(MAX_NAME_LENGTH, {
@@ -51,6 +54,7 @@ export class CreateWorkflowDto {
     maxLength: MAX_DESCRIPTION_LENGTH,
   })
   @IsOptional()
+  @TrimmedString()
   @IsString({ message: 'description debe ser una cadena.' })
   @MaxLength(MAX_DESCRIPTION_LENGTH, {
     message: `description no puede superar ${MAX_DESCRIPTION_LENGTH} caracteres.`,

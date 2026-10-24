@@ -9,6 +9,7 @@ import {
   ValidateIf,
 } from 'class-validator';
 
+import { TrimmedString } from '@common/decorators/trimmed-string.decorator';
 import {
   EDITABLE_WORKFLOW_STATUSES,
   WorkflowStatus,
@@ -49,6 +50,7 @@ export class UpdateWorkflowDto {
     maxLength: MAX_NAME_LENGTH,
   })
   @ValidateIf((_, value: unknown) => value !== undefined)
+  @TrimmedString()
   @IsString({ message: 'name debe ser una cadena.' })
   @MaxLength(MAX_NAME_LENGTH, {
     message: `name no puede superar ${MAX_NAME_LENGTH} caracteres.`,
@@ -60,6 +62,7 @@ export class UpdateWorkflowDto {
     maxLength: MAX_DESCRIPTION_LENGTH,
   })
   @ValidateIf((_, value: unknown) => value !== undefined)
+  @TrimmedString()
   @IsString({ message: 'description debe ser una cadena.' })
   @MaxLength(MAX_DESCRIPTION_LENGTH, {
     message: `description no puede superar ${MAX_DESCRIPTION_LENGTH} caracteres.`,

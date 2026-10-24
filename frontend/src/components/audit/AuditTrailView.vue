@@ -21,7 +21,8 @@ import {
   toSelectOptions,
 } from '@/utils/audit-display';
 import { formatDateTime } from '@/utils/date-format';
-import { sortRows } from '@/utils/table-sort';
+import { toTableSort } from '@/utils/table-sort';
+import { AUDIT_SORT_KEYS } from '@/types/sort';
 import {
   datePickerBounds,
   defaultDateRange,
@@ -129,27 +130,6 @@ const columns: QTableColumn<AuditEvent>[] = [
   { name: 'details', label: 'Detalle', field: 'id', align: 'center' },
 ];
 
-// Orden de la PAGINA CARGADA. La paginacion es del servidor, asi que en
-// memoria solo estan estas filas: la cabecera reordena lo visible, no el
-// historial entero.
-const sortBy = ref<string | null>(null);
-const descending = ref(false);
-
-/**
- * Como leer el valor de las columnas cuyo `field` no es una clave de la fila.
- *
- * `user` e `sourceIp` pintan un guion cuando faltan, y ordenar por ese guion
- * mezclaria los huecos entre los valores reales en vez de mandarlos al final.
- */
-const SORT_RESOLVERS = {
-  user: (row: AuditEvent) => row.userEmail ?? row.userId,
-  sourceIp: (row: AuditEvent) => row.sourceIp,
-};
-
-const sortedRows = computed(() =>
-  sortRows(auditStore.items, sortBy.value, descending.value, SORT_RESOLVERS),
-);
-
 const pagination = computed(() => ({
   page: Math.floor(auditStore.offset / auditStore.limit) + 1,
   rowsPerPage: auditStore.limit,
@@ -158,8 +138,8 @@ const pagination = computed(() => ({
   // sea `sortable` y el orden si se este aplicando. `null` y no `undefined`:
   // con `exactOptionalPropertyTypes` activo, el tipo de QTable admite el nulo
   // pero no la ausencia explicita.
-  sortBy: sortBy.value,
-  descending: descending.value,
+  sortBy: auditStore.sort.sortBy,
+  descending: auditStore.sort.descending,
 }));
 
 const isDetailsOpen = ref(false);
@@ -184,16 +164,14 @@ const loadPage = async (page: { limit?: number; offset?: number } = {}): Promise
 /**
  * Paginacion server-side: QTable pide la pagina y el store la trae.
  *
- * El criterio de orden llega en el mismo evento y se guarda para el `computed`;
- * NO se manda al backend, que no admite `sortBy` (ver `utils/table-sort.ts`).
- * Tampoco se recarga por el: reordenar lo que ya esta en memoria no necesita
- * otro viaje.
+ * El criterio de orden llega en el mismo evento y se manda al backend, que lo
+ * valida contra su lista blanca y ordena el historial ENTERO, no solo la
+ * pagina visible (ver `utils/table-sort.ts`).
  */
 const onRequest: QTableProps['onRequest'] = ({ pagination: requested }) => {
   const rowsPerPage = requested.rowsPerPage || auditStore.limit;
 
-  sortBy.value = requested.sortBy ?? null;
-  descending.value = requested.descending;
+  auditStore.setSort(toTableSort(AUDIT_SORT_KEYS, requested.sortBy, requested.descending));
 
   void loadPage({ limit: rowsPerPage, offset: (requested.page - 1) * rowsPerPage });
 };
@@ -379,7 +357,7 @@ usePanelRefresh(() => loadPage(), { entities: ['audit_eventos'] });
       class="pd-card pd-table"
       flat
       title="Eventos registrados"
-      :rows="sortedRows"
+      :rows="auditStore.items"
       :columns="columns"
       row-key="id"
       :loading="auditStore.isLoading"

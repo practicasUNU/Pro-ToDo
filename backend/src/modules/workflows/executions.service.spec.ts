@@ -235,6 +235,21 @@ describe('ExecutionsService (consulta y reintento manual CU-09)', () => {
       expect(page.total).toBe(1);
     });
 
+    it('1.1.b deberia traducir `sortBy` a la propiedad de la lista blanca', async () => {
+      // 1. Arrange: la clave publica `startedAt` es la fecha de alta de la fila.
+      const { service, query } = buildHarness();
+
+      // 2. Act
+      await service.findAll({ sortBy: 'startedAt', sortOrder: 'ASC' });
+
+      // 3. Assert
+      expect(query.findPage).toHaveBeenCalledWith(
+        expect.objectContaining({
+          sort: { column: 'createdAt', order: 'ASC' },
+        }),
+      );
+    });
+
     it('1.2 deberia proyectar las fechas en ISO 8601', async () => {
       // 1. Arrange: JSON no transporta `Date`; declararlo en el DTO mentiria
       //    sobre lo que recibe el cliente.

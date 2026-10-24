@@ -16,12 +16,12 @@ process.env.DB_NAME = process.env.E2E_DB_NAME ?? '<nombre_bd_test>';
 process.env.GEMINI_API_KEY = 'e2e-clave-ficticia-gemini';
 process.env.ANTHROPIC_API_KEY = 'e2e-clave-ficticia-anthropic';
 
-import { ValidationPipe } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
 import { Test } from '@nestjs/testing';
 import request from 'supertest';
 import { DataSource } from 'typeorm';
 
+import { createGlobalValidationPipe } from '@common/pipes/global-validation.pipe';
 import { generateDevJwt } from '@common/utils/dev-jwt.util';
 import { HttpClientService } from '@core/http/http-client.service';
 import { ExecutionState } from '@core/fsm/types/fsm.enums';
@@ -29,6 +29,13 @@ import { NodeType } from '@core/fsm/types/pipeline-schema.types';
 import { UserRole } from '@modules/users/enums/user-role.enum';
 
 import { AppModule } from '../../src/app.module';
+import {
+  E2E_SLOTS,
+  e2eEditor,
+  ensureE2eUser,
+  removeE2eUsers,
+  signFor,
+} from '../helpers/e2e-users.helper';
 
 import type { INestApplication } from '@nestjs/common';
 import type { AxiosRequestConfig } from 'axios';
@@ -36,12 +43,11 @@ import type { Response } from 'superagent';
 import type { App } from 'supertest/types';
 import type { PipelineSchemaDto } from '@core/fsm/dto/pipeline-schema.dto';
 
+/** EDITOR propio de esta suite (ver `e2eEditor`). */
+const E2E_EDITOR = e2eEditor(E2E_SLOTS.TELEMETRY, 'editor-telemetria');
+
 /** Arrancar Nest y conectar con PostgreSQL excede el timeout por defecto. */
 const BOOTSTRAP_TIMEOUT_MS = 30_000;
-
-/** Identidad del token de pruebas. `JwtStrategy` no consulta `usuarios`. */
-const TEST_USER_ID = '00000000-0000-0000-0000-0000000000e2';
-const TEST_USER_EMAIL = 'e2e-telemetria@unuware.com';
 
 const E2E_FLOW_PREFIX = '[E2E telemetria]';
 
@@ -240,17 +246,14 @@ describe('Telemetria de tokens de IA (e2e)', () => {
     // Igual que `main.ts`: sin esto las rutas colgarian de la raiz y los DTO no
     // se validarian.
     app.setGlobalPrefix('api');
-    app.useGlobalPipes(
-      new ValidationPipe({ transform: true, whitelist: true }),
-    );
+    app.useGlobalPipes(createGlobalValidationPipe());
     await app.init();
 
     dataSource = app.get(DataSource);
-    token = generateDevJwt(app.get(JwtService), {
-      userId: TEST_USER_ID,
-      email: TEST_USER_EMAIL,
-      role: UserRole.EDITOR,
-    });
+    // Un EDITOR REAL: desde la 051 `JwtStrategy` consulta `usuarios`, y un
+    // token firmado para un id inventado recibiria un 401 en cada peticion.
+    await ensureE2eUser(dataSource, E2E_EDITOR);
+    token = await signFor(app.get(JwtService), dataSource, E2E_EDITOR);
 
     // UNICA frontera con la red. Los proveedores reales se ejecutan enteros
     // —construccion de la peticion, parseo, mapeo del `usage`— y solo la
@@ -303,6 +306,7 @@ describe('Telemetria de tokens de IA (e2e)', () => {
       ]);
     }
 
+    await removeE2eUsers(dataSource, [E2E_EDITOR]);
     jest.restoreAllMocks();
     await app.close();
   });

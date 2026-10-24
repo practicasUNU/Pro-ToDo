@@ -15,6 +15,7 @@ const ROUTE_BREADCRUMBS: Record<string, string> = {
   '/': 'Inicio',
   '/informes': 'Informes de Consumo IA',
   '/auditoria': 'Auditoria de Acciones',
+  '/precios': 'Tarifas de Modelos IA',
   '/users': 'Gestion de Usuarios',
   '/ip-whitelist': 'Lista Blanca de IPs',
   '/templates': 'Catalogo de Plantillas',
@@ -86,6 +87,13 @@ const toggleLeftDrawer = (): void => {
             <q-icon name="manage_search" size="20px" />
           </q-item-section>
           <q-item-section class="pd-nav">Auditoria</q-item-section>
+        </q-item>
+
+        <q-item v-if="sessionStore.isAdmin" to="/precios" clickable v-ripple>
+          <q-item-section avatar>
+            <q-icon name="price_change" size="20px" />
+          </q-item-section>
+          <q-item-section class="pd-nav">Tarifas IA</q-item-section>
         </q-item>
 
         <q-item v-if="sessionStore.isAdmin" to="/users" clickable v-ripple>

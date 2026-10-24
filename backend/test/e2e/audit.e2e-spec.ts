@@ -8,19 +8,28 @@ process.env.CRON_SCHEDULING_ENABLED = 'false';
 process.env.INBOUND_RESUME_ENABLED = 'false';
 process.env.DB_NAME = process.env.E2E_DB_NAME ?? '<nombre_bd_test>';
 
-import { ValidationPipe } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
 import { Test } from '@nestjs/testing';
 import request from 'supertest';
 import { DataSource } from 'typeorm';
 
-import { generateDevJwt } from '@common/utils/dev-jwt.util';
-import { UserRole } from '@modules/users/enums/user-role.enum';
+import { createGlobalValidationPipe } from '@common/pipes/global-validation.pipe';
 
 import { AppModule } from '../../src/app.module';
+import {
+  E2E_SLOTS,
+  e2eEditor,
+  ensureE2eUser,
+  findActiveAdmin,
+  removeE2eUsers,
+  signFor,
+} from '../helpers/e2e-users.helper';
 
 import type { INestApplication } from '@nestjs/common';
 import type { App } from 'supertest/types';
+
+/** EDITOR propio de esta suite (ver `e2eEditor`). */
+const E2E_EDITOR = e2eEditor(E2E_SLOTS.AUDIT, 'editor-auditoria');
 
 /** Arrancar Nest y conectar con PostgreSQL excede el timeout por defecto. */
 const BOOTSTRAP_TIMEOUT_MS = 30_000;
@@ -62,38 +71,21 @@ describe('Auditoria de acciones humanas (e2e)', () => {
 
     app = moduleRef.createNestApplication();
     app.setGlobalPrefix('api');
-    app.useGlobalPipes(
-      new ValidationPipe({ transform: true, whitelist: true }),
-    );
+    app.useGlobalPipes(createGlobalValidationPipe());
     await app.init();
 
     dataSource = app.get(DataSource);
 
-    const admins = await dataSource.query<
-      Array<{ id_usuario: string; correo: string }>
-    >(
-      `SELECT id_usuario, correo FROM usuarios WHERE rol = 'ADMIN' AND activo = TRUE LIMIT 1`,
-    );
-
-    if (admins.length === 0) {
-      throw new Error(
-        'No hay ningun usuario ADMIN activo en la base de pruebas: ejecuta `npm run test:bootstrap`.',
-      );
-    }
-
     // Un ADMIN REAL: `audit_eventos.usuario_id` tiene FK a `usuarios`, y con
-    // un id inventado el registro (best-effort) se perderia en silencio.
-    adminId = admins[0].id_usuario;
-    adminToken = generateDevJwt(app.get(JwtService), {
-      userId: adminId,
-      email: admins[0].correo,
-      role: UserRole.ADMIN,
-    });
-    editorToken = generateDevJwt(app.get(JwtService), {
-      userId: '00000000-0000-0000-0000-0000000000e3',
-      email: 'e2e-auditoria@unuware.com',
-      role: UserRole.EDITOR,
-    });
+    // un id inventado el registro (best-effort) se perderia en silencio. Y un
+    // EDITOR real tambien: desde la 051, `JwtStrategy` consulta `usuarios`, y
+    // un id inventado recibiria un 401 en vez del 403 que se quiere probar.
+    const jwtService = app.get(JwtService);
+    const admin = await findActiveAdmin(dataSource);
+    adminId = admin.id;
+    adminToken = await signFor(jwtService, dataSource, admin);
+    await ensureE2eUser(dataSource, E2E_EDITOR);
+    editorToken = await signFor(jwtService, dataSource, E2E_EDITOR);
 
     // Restos de una ejecucion abortada.
     await dataSource.query(`DELETE FROM allowed_ips WHERE ip_o_cidr = $1`, [
@@ -113,6 +105,7 @@ describe('Auditoria de acciones humanas (e2e)', () => {
       );
     }
 
+    await removeE2eUsers(dataSource, [E2E_EDITOR]);
     await app.close();
   });
 
@@ -132,7 +125,7 @@ describe('Auditoria de acciones humanas (e2e)', () => {
     const [event] = await eventsOf(createdId);
     expect(event).toMatchObject({
       usuario_id: adminId,
-      accion: 'CREATE',
+      accion: 'CREAR',
       tabla_afectada: 'allowed_ips',
       datos_anteriores: null,
       ip_origen: '127.0.0.1',
@@ -157,7 +150,7 @@ describe('Auditoria de acciones humanas (e2e)', () => {
 
     // 3. Assert 🎯
     const events = await eventsOf(createdId as string);
-    const update = events.find((event) => event.accion === 'UPDATE');
+    const update = events.find((event) => event.accion === 'ACTUALIZAR');
     expect(update?.datos_anteriores).toMatchObject({
       description: 'Red e2e de auditoria',
     });
@@ -179,8 +172,8 @@ describe('Auditoria de acciones humanas (e2e)', () => {
     };
     const mine = body.items.filter((item) => item.recordId === createdId);
     expect(mine.map((item) => item.action).sort()).toEqual([
-      'CREATE',
-      'UPDATE',
+      'ACTUALIZAR',
+      'CREAR',
     ]);
     expect(mine[0].userEmail).toContain('@');
   });
@@ -202,7 +195,7 @@ describe('Auditoria de acciones humanas (e2e)', () => {
 
     // 3. Assert 🎯
     const events = await eventsOf(createdId as string);
-    const removal = events.find((event) => event.accion === 'DELETE');
+    const removal = events.find((event) => event.accion === 'ELIMINAR');
     expect(removal?.datos_anteriores).toMatchObject({ ipOrCidr: E2E_CIDR });
     expect(removal?.datos_nuevos).toBeNull();
   });

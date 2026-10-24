@@ -3,6 +3,15 @@ import { Type } from 'class-transformer';
 import { IsEnum, IsInt, IsOptional, IsUUID, Max, Min } from 'class-validator';
 
 import { ExecutionState } from '@core/fsm/types/fsm.enums';
+import {
+  SortByField,
+  SortOrderField,
+} from '@common/utils/sort-whitelist.util';
+
+import type {
+  SortOrder,
+  SortWhitelist,
+} from '@common/utils/sort-whitelist.util';
 
 /** Filas por pagina cuando el cliente no pide un tamano. */
 export const DEFAULT_PAGE_LIMIT = 25;
@@ -15,6 +24,21 @@ export const DEFAULT_PAGE_LIMIT = 25;
  * volcado de la tabla entera.
  */
 export const MAX_PAGE_LIMIT = 100;
+
+/**
+ * Lista blanca de orden: clave de la API -> propiedad de `FsmExecution`.
+ *
+ * Las claves coinciden con el `name` de las columnas de la tabla del frontend
+ * (`startedAt` es la fecha de alta de la fila). El nombre del flujo NO esta:
+ * vive en otra tabla y el listado no la une.
+ */
+export const EXECUTION_SORT_COLUMNS = {
+  state: 'currentState',
+  startedAt: 'createdAt',
+  updatedAt: 'updatedAt',
+} as const satisfies SortWhitelist;
+
+export type ExecutionSortKey = keyof typeof EXECUTION_SORT_COLUMNS;
 
 /**
  * Filtros de `GET /api/executions`.
@@ -74,4 +98,10 @@ export class ListExecutionsQueryDto {
   @IsInt({ message: 'offset debe ser un numero entero.' })
   @Min(0, { message: 'offset no puede ser negativo.' })
   readonly offset?: number;
+
+  @SortByField(Object.keys(EXECUTION_SORT_COLUMNS))
+  readonly sortBy?: ExecutionSortKey;
+
+  @SortOrderField()
+  readonly sortOrder?: SortOrder;
 }

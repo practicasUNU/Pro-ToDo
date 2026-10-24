@@ -4,6 +4,7 @@ import { DataSource } from 'typeorm';
 import { AuditTable } from '@modules/audit/audit-tables';
 import { AiPromptTemplate } from '@modules/ai-prompt-templates/entities/ai-prompt-template.entity';
 import { AllowedIp } from '@modules/security/allowed-ips/entities/allowed-ip.entity';
+import { PrecioModeloIa } from '@modules/telemetry/entities/precio-modelo-ia.entity';
 import { HtmlTemplate } from '@modules/templates/entities/html-template.entity';
 import { User } from '@modules/users/entities/user.entity';
 import { WorkflowTemplate } from '@modules/workflow-templates/entities/workflow-template.entity';
@@ -39,6 +40,7 @@ const ENTITY_BY_TABLE: Readonly<
   [AuditTable.WORKFLOW_TEMPLATES]: WorkflowTemplate,
   [AuditTable.AI_PROMPT_TEMPLATES]: AiPromptTemplate,
   [AuditTable.ALLOWED_IPS]: AllowedIp,
+  [AuditTable.PRECIOS_MODELOS_IA]: PrecioModeloIa,
 };
 
 const isPlainObject = (value: unknown): value is Record<string, unknown> =>

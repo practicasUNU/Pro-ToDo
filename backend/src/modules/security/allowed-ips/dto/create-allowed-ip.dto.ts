@@ -5,6 +5,7 @@ import { TrimmedString } from '@common/decorators/trimmed-string.decorator';
 import { IP_OR_CIDR_REGEX } from '@common/constants/security.constants';
 
 export class CreateAllowedIpDto {
+  @TrimmedString()
   @IsString()
   @IsNotEmpty()
   @MaxLength(64)
