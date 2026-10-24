@@ -8849,3 +8849,32 @@ primera en terminar, lo que producia 401 intermitentes en la otra. Ademas montan
 `@TrimmedString` se aplica a nombres, descripciones, codigos, URLs y prompts. **No** a los DTO de
 configuracion de nodo ni al `pipeline_schema`, donde viven selectores CSS, expresiones y
 plantillas: ahi un espacio inicial puede ser parte del dato.
+
+---
+
+## Pruebas a mala leche: lo que encontraron
+
+### Un `sub` con forma rara tumbaba la peticion
+
+`JwtStrategy` pasaba el `sub` a `findAuthState`, que lo compara contra una columna UUID. Un token
+firmado con `sub = "x' OR '1'='1"` no inyectaba nada: TypeORM parametriza. Pero el driver lanzaba
+`invalid input syntax for type uuid`, y el cliente recibia un **500** que ademas delataba el motor.
+Para firmar un token asi hace falta el `JWT_SECRET`, asi que el riesgo es bajo. Aun asi, un 500 es
+un fallo y no la respuesta "token invalido" que corresponde. La guarda `isUUID` lo convierte en un
+401 antes de tocar la base.
+
+### Dos suites e2e escribian en la base de desarrollo
+
+Al preparar la purga, la base real tenia dos flujos `[E2E] Pipeline dummy` mas que una hora antes.
+Venian de `fsm-engine.e2e-spec.ts`, que, igual que `app.e2e-spec.ts`, no fijaba `DB_NAME` ni apagaba
+el IMAP, la reanudacion por correo y el cron. Cada `npm run test:e2e` arrancaba la aplicacion entera
+contra la base de desarrollo y con el buzon corporativo abierto. De ahi salian los catorce "dummy"
+que se iban acumulando. Ahora las dos llevan la misma cabecera de aislamiento que el resto, y la
+prueba es objetiva: la base de desarrollo tiene el mismo numero de flujos antes y despues de la suite.
+
+### Por que la purga va por id y en seco
+
+Los nombres se repiten (catorce "[E2E] Pipeline dummy") y tienen erratas ("TODOSO LOS NODOS"), asi
+que un `ILIKE` amplio conservaria de mas o borraria de menos. El script conserva cinco ids
+concretos, comprueba que existen con el nombre esperado (si no, aborta) y termina en `ROLLBACK`
+salvo que se pase `-v confirmar=yes`.

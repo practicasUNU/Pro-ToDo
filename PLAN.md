@@ -4619,3 +4619,29 @@ el coste historico.
 - [ ] Fuera de alcance, a proposito: `@TrimmedString` NO se aplica a los DTO de configuracion de nodo
       ni al `pipeline_schema`. Son selectores, expresiones y plantillas, donde un espacio puede ser
       significativo
+
+---
+
+## Pruebas a mala leche · guia, e2e de resiliencia, `tokenVersion` y purga de datos
+
+### Objetivo
+
+Tratar la frontera HTTP y la interfaz como lo haria un atacante o un usuario impaciente: `sortBy`
+hostil, busquedas desbordadas, carreras entre ADMIN, tokens revocados y prisa ante el aviso de 5 s.
+Ademas, dejar la base de desarrollo solo con los flujos de referencia.
+
+### Estado de las tareas
+
+- [x] `GUIA_PRUEBAS_MALA_LECHE.md`: ocho escenarios con el ataque listo para copiar, el resultado
+      esperado y la prueba que lo cubre
+- [x] `jwt.strategy.spec.ts` §2: revocacion en caliente, ADMIN degradado, coercion de la generacion
+      y `sub` no UUID
+- [x] `pricing.service.spec.ts` §4: ROLLBACK sin auditoria ni aviso, `23505` ajeno sin disfrazar,
+      una transaccion por alta, sin metodos de baja
+- [x] `input-resilience.e2e-spec.ts`: 57 casos contra PostgreSQL real
+- [x] `WarningModal.spec.ts` (reloj falso), `PricingDialog.spec.ts`, `PricingManager.spec.ts`
+- [x] Hallazgo corregido: un `sub` no UUID firmado daba **500**; ahora da 401 sin consultar la BD
+- [x] Hallazgo corregido: `fsm-engine.e2e-spec.ts` y `app.e2e-spec.ts` arrancaban contra la base de
+      DESARROLLO, con IMAP, reanudacion por correo y cron encendidos. Ahora estan aisladas como el resto
+- [x] `scripts/purge-test-data.sql`: en seco por defecto, guarda de nombres y `pg_dump` documentado
+- [ ] Pendiente de confirmacion del usuario: ejecutar la purga con `-v confirmar=yes`

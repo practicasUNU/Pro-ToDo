@@ -363,4 +363,103 @@ describe('PricingService', () => {
       ).rejects.toBeInstanceOf(ConflictException);
     });
   });
+
+  describe('4. Pruebas a mala leche: el relevo nunca queda a medias', () => {
+    it('4.1 si el INSERT falla, NO deberia confirmar, auditar ni avisar', async () => {
+      // 1. Arrange 📐: la BD se cae entre el UPDATE y el INSERT. En la
+      //    transaccion real, el ROLLBACK deja la vigente con `activo = true`.
+      const { service, steps, txRepository, auditLogger, dispatch, committed } =
+        buildHarness();
+      txRepository.save.mockRejectedValue(new Error('conexion perdida'));
+
+      // 2. Act ⚙️
+      const attempt = service.create(DTO, ACTOR_ID, SOURCE_IP);
+
+      // 3. Assert 🎯
+      await expect(attempt).rejects.toThrow('conexion perdida');
+      // Sin 'commit': el callback lanzo y la transaccion no se confirmo.
+      expect(steps).toEqual(['begin', 'lock', 'deactivate']);
+      expect(txRepository.save).toHaveBeenCalledTimes(1);
+      expect(committed.value).toBe(false);
+      expect(auditLogger.record).not.toHaveBeenCalled();
+      expect(dispatch).not.toHaveBeenCalled();
+    });
+
+    it('4.2 si el paso a historico falla, NO deberia llegar a insertar', async () => {
+      // 1. Arrange 📐
+      const { service, txRepository, dispatch } = buildHarness();
+      txRepository.update.mockRejectedValue(new Error('deadlock detected'));
+
+      // 2. Act ⚙️ + 3. Assert 🎯
+      await expect(service.create(DTO, ACTOR_ID, SOURCE_IP)).rejects.toThrow(
+        'deadlock detected',
+      );
+      expect(txRepository.save).not.toHaveBeenCalled();
+      expect(dispatch).not.toHaveBeenCalled();
+    });
+
+    it('4.3 NO deberia disfrazar de 409 un 23505 de OTRA restriccion', async () => {
+      // 1. Arrange 📐: solo las dos unicidades de tarifas significan "otro
+      //    ADMIN se adelanto"; cualquier otra es un fallo distinto y sube crudo.
+      const { service, txRepository } = buildHarness(null);
+      const foreign = new QueryFailedError('INSERT', [], {
+        code: '23505',
+        constraint: 'usuarios_correo_key',
+      } as unknown as Error);
+      txRepository.save.mockRejectedValue(foreign);
+
+      // 2. Act ⚙️ + 3. Assert 🎯
+      await expect(service.create(DTO, ACTOR_ID, SOURCE_IP)).rejects.toBe(
+        foreign,
+      );
+    });
+
+    it('4.4 deberia traducir a 409 tambien el choque de vigencia en el mismo instante', async () => {
+      // 1. Arrange 📐: dos altas del mismo par en el mismo milisegundo chocan
+      //    contra `uq_precios_modelos_ia_vigencia`, no contra el indice parcial.
+      const { service, txRepository } = buildHarness(null);
+      txRepository.save.mockRejectedValue(
+        new QueryFailedError('INSERT', [], {
+          code: '23505',
+          constraint: 'uq_precios_modelos_ia_vigencia',
+        } as unknown as Error),
+      );
+
+      // 2. Act ⚙️ + 3. Assert 🎯
+      await expect(
+        service.create(DTO, ACTOR_ID, SOURCE_IP),
+      ).rejects.toBeInstanceOf(ConflictException);
+    });
+
+    it('4.5 deberia abrir una transaccion por alta, sin compartirla entre dos ADMIN', async () => {
+      // 1. Arrange 📐
+      const { service, dataSource } = buildHarness(null);
+
+      // 2. Act ⚙️
+      await Promise.all([
+        service.create(DTO, ACTOR_ID, SOURCE_IP),
+        service.create(
+          { ...DTO, aiModel: 'gemini-1.5-flash' },
+          ACTOR_ID,
+          SOURCE_IP,
+        ),
+      ]);
+
+      // 3. Assert 🎯
+      expect(dataSource.transaction).toHaveBeenCalledTimes(2);
+    });
+
+    it('4.6 NO deberia exponer ningun metodo para desactivar o borrar una tarifa', () => {
+      // 1. Arrange 📐 + 2. Act ⚙️
+      const methods = Object.getOwnPropertyNames(PricingService.prototype);
+
+      // 3. Assert 🎯: el contrato es "solo se releva"; un metodo asi seria la
+      //    puerta a dejar un par sin tarifa vigente.
+      expect(
+        methods.filter((name) =>
+          /deactivate|delete|remove|disable|update/i.test(name),
+        ),
+      ).toEqual([]);
+    });
+  });
 });

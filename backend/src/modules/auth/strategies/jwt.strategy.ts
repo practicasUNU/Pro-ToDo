@@ -1,6 +1,7 @@
 import { Injectable, UnauthorizedException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { PassportStrategy } from '@nestjs/passport';
+import { isUUID } from 'class-validator';
 import { ExtractJwt, Strategy } from 'passport-jwt';
 
 import { UserRole } from '@modules/users/enums/user-role.enum';
@@ -63,8 +64,13 @@ export class JwtStrategy extends PassportStrategy(Strategy, 'jwt') {
    * sigue activa o si simplemente le cambiaron el rol.
    */
   public async validate(payload: JwtPayload): Promise<AuthenticatedUser> {
+    // `isUUID` y no un simple "existe": el `sub` acaba en una columna UUID de
+    // PostgreSQL, y un valor con otra forma hacia saltar al driver con
+    // `invalid input syntax for type uuid` —un 500 que ademas delataba el
+    // motor— en lugar del 401 que corresponde a un token sin identidad valida.
     if (
       !payload?.sub ||
+      !isUUID(payload.sub) ||
       !payload.role ||
       !Object.values(UserRole).includes(payload.role)
     ) {

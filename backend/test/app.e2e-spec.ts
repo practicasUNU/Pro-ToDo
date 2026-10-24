@@ -1,3 +1,19 @@
+// ---------------------------------------------------------------------------
+// AISLAMIENTO. Va ANTES de cualquier import de la aplicacion, y no es opcional:
+// `ConfigModule` no sobrescribe lo que ya esta en `process.env`, asi que esto
+// gana sobre `backend/.env`.
+//
+// Esta suite NO lo tenia: `npm run test:e2e` arrancaba el `AppModule` contra
+// la base de DESARROLLO, con el sondeo IMAP, la reanudacion por correo y el
+// cron del `.env` encendidos. Cada pasada dejaba un "[E2E] Pipeline dummy" mas
+// en la base real (habia catorce) y abria el buzon corporativo. Detectado al
+// preparar la purga de datos de prueba (GUIA_PRUEBAS_MALA_LECHE.md §8).
+// ---------------------------------------------------------------------------
+process.env.IMAP_POLLING_ENABLED = 'false';
+process.env.CRON_SCHEDULING_ENABLED = 'false';
+process.env.INBOUND_RESUME_ENABLED = 'false';
+process.env.DB_NAME = process.env.E2E_DB_NAME ?? '<nombre_bd_test>';
+
 import { Test, TestingModule } from '@nestjs/testing';
 import { INestApplication } from '@nestjs/common';
 import request from 'supertest';
