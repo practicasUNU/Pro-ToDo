@@ -49,4 +49,19 @@ export class User extends AuditableEntity {
   // Borrado lógico: nunca se elimina el registro físicamente
   @Column({ name: 'activo', type: 'boolean', default: true })
   isActive: boolean;
+
+  /**
+   * Generación de los tokens válidos de esta cuenta (migración 051).
+   *
+   * El access token es autocontenido y la estrategia no podía desautorizarlo:
+   * un rol revocado seguía vigente hasta que el JWT caducaba solo. El valor
+   * viaja como claim y `JwtStrategy` lo compara contra esta columna, así que
+   * incrementarlo invalida en el acto todas las sesiones vivas del usuario.
+   *
+   * Lo incrementa `UsersService` SOLO cuando cambia algo que altera los
+   * privilegios o la identidad —rol, estado activo o correo—; una edición
+   * indiferente no tiene por qué echar a nadie de su sesión.
+   */
+  @Column({ name: 'token_version', type: 'int', default: 0 })
+  tokenVersion: number;
 }

@@ -13,6 +13,7 @@ import {
 import { extractApiErrorMessage } from '@/utils/api-error';
 
 import { NODE_TYPE_LABELS, NodeType } from '@/types/pipeline';
+import { blockNonNumericKeys } from '@/utils/numeric-input';
 
 import type { BodySource } from '@/types/parser-email';
 
@@ -148,6 +149,7 @@ const onRunSandboxTest = async (): Promise<void> => {
           id="parser-min-body-length"
           :model-value="store.config.minBodyLength"
           type="number"
+          @keydown="blockNonNumericKeys"
           :min="MIN_BODY_LENGTH"
           step="1"
           outlined

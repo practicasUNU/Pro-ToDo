@@ -8,8 +8,10 @@ import {
 } from '@nestjs/common';
 
 import { AiDefaultsConfig } from '@core/config/ai-defaults.config';
+import { ERR_HTTP_TIMEOUT } from '@core/http/http-client.service';
 import { LlmProviderCatalogService } from '@modules/nodes/services/llm-provider-catalog.service';
 import {
+  ERR_LLM_PROVIDER_TRUNCATED,
   LlmProvider,
   LlmProviderException,
 } from '@modules/nodes/strategies/interfaces/llm-provider.interface';
@@ -44,17 +46,88 @@ export const ERR_PROMPT_OPTIMIZER_FAILED = 'ERR_PROMPT_OPTIMIZER_FAILED';
 export const ERR_PROMPT_OPTIMIZER_EMPTY = 'ERR_PROMPT_OPTIMIZER_EMPTY';
 
 /**
- * Espera de la inferencia. Mas larga que la de un nodo de texto (15 s): un
- * prompt de varias paginas se reescribe entero, y al otro lado hay una persona
- * que ha pulsado un boton y prefiere esperar a reintentar (y pagar dos veces).
+ * Espera de la inferencia: tres minutos.
+ *
+ * Mucho mas larga que la de un nodo de texto (15 s), y por un motivo distinto:
+ * un nodo corre desatendido dentro de un flujo con presupuesto, mientras que
+ * aqui hay una persona que ha pulsado un boton sobre un prompt de varias
+ * paginas y prefiere esperar a reintentar, porque reintentar significa pagar
+ * la inferencia dos veces.
+ *
+ * Tres minutos llegan enteros al navegador: `boot/axios.ts` no fija `timeout`,
+ * asi que no hay un corte mas temprano del lado del cliente que convierta esta
+ * espera en tiempo tirado. El abuso lo acota el `ThrottlerGuard` del
+ * controlador (10 por minuto), no esta constante.
  */
-export const OPTIMIZER_TIMEOUT_MS = 60_000;
+export const OPTIMIZER_TIMEOUT_MS = 180_000;
 
-/** Un solo reintento rapido, y solo de red: cada reintento con respuesta se factura. */
-const OPTIMIZER_MAX_RETRIES = 1;
+/**
+ * Hasta tres reintentos.
+ *
+ * Solo entran los fallos de RED: un error con respuesta ya esta facturado y
+ * repetirlo sumaria coste sin cambiar el desenlace. Con la espera subida a tres
+ * minutos, un unico intento dejaba la operacion a merced de un corte pasajero
+ * despues de haber esperado todo ese rato.
+ */
+const OPTIMIZER_MAX_RETRIES = 3;
 
-/** Techo de la respuesta: el prompt reescrito mas las recomendaciones. */
-const OPTIMIZER_MAX_TOKENS = 8_192;
+/**
+ * Techo de la respuesta: el prompt reescrito mas las recomendaciones.
+ *
+ * Se sube de 8_192 a 10_000 porque el truncado no avisa de forma util: el
+ * proveedor corta a mitad de frase y lo que vuelve es un prompt incompleto que
+ * parece valido.
+ */
+const OPTIMIZER_MAX_TOKENS = 10_000;
+
+/**
+ * Consejo de recuperacion segun por que se rompio.
+ *
+ * El mensaje crudo del proveedor describe la averia pero no dice que hacer, y
+ * quien pulsa "Mejorar prompt" no tiene forma de saber si debe reintentar, si
+ * debe acortar el borrador o si no hay nada que hacer. Los dos casos que SI
+ * tienen salida son el presupuesto y el tiempo, que es justo lo que acaba de
+ * subir: si aun asi se agotan, el borrador es demasiado grande para una sola
+ * pasada.
+ */
+const RECOVERY_ADVICE: ReadonlyArray<{
+  readonly matches: readonly string[];
+  readonly advice: string;
+}> = [
+  {
+    matches: [ERR_LLM_PROVIDER_TRUNCATED],
+    advice:
+      'La respuesta se corto por presupuesto de tokens: acorta el borrador o divide el prompt en partes mas pequenas y vuelve a intentarlo.',
+  },
+  {
+    // Solo `ERR_HTTP_TIMEOUT`: es el codigo real que emite
+    // `HttpClientService.toFailure` al agotarse la espera. `ERR_LLM_TIMEOUT`
+    // aparece en algunos specs, pero ninguna estrategia lo produce.
+    matches: [ERR_HTTP_TIMEOUT],
+    advice:
+      'El proveedor agoto los tres minutos de espera: reintenta en unos segundos, y si vuelve a ocurrir divide el borrador en partes mas cortas.',
+  },
+];
+
+/**
+ * Consejo para el fallo recibido, o cadena vacia si no hay ninguno util.
+ *
+ * Mira el CODIGO y no el mensaje: `LlmProviderException` lleva el motivo en
+ * `code` y deja en `message` el texto crudo del proveedor («corte», «sin
+ * respuesta»), que no contiene el codigo por ningun lado. Buscar ahi la cadena
+ * `ERR_*` no encontraba nunca nada y el consejo no llegaba a salir.
+ */
+const adviceFor = (error: unknown): string => {
+  if (!(error instanceof LlmProviderException)) {
+    return '';
+  }
+
+  const entry = RECOVERY_ADVICE.find(({ matches }) =>
+    matches.includes(error.code),
+  );
+
+  return entry === undefined ? '' : ` ${entry.advice}`;
+};
 
 /** Poca creatividad: se busca precision, no variedad. */
 const OPTIMIZER_TEMPERATURE = 0.3;
@@ -121,7 +194,7 @@ export class PromptOptimizerService {
 
       throw new BadGatewayException({
         code: ERR_PROMPT_OPTIMIZER_FAILED,
-        message: `El proveedor de IA no pudo optimizar el prompt: ${reason}`,
+        message: `El proveedor de IA no pudo optimizar el prompt: ${reason}.${adviceFor(error)}`,
       });
     }
 

@@ -8,6 +8,14 @@ export interface JwtPayload {
   sub: string;
   email: string;
   role: UserRole;
+  /**
+   * Generacion de los tokens validos de la cuenta (`usuarios.token_version`).
+   *
+   * OPCIONAL a proposito: los tokens emitidos ANTES de la migracion 051 no lo
+   * traen, y `JwtStrategy` los interpreta como la generacion 0 para no expulsar
+   * a todo el mundo en el despliegue. Una vez caduquen, todos lo llevaran.
+   */
+  tokenVersion?: number;
 }
 
 /**

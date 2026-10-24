@@ -21,6 +21,7 @@ import {
 
 import { extractApiErrorMessage } from '@/utils/api-error';
 import { rangeClass } from '@/utils/field-range';
+import { blockNonNumericKeys } from '@/utils/numeric-input';
 
 interface Props {
   nodeId: string;
@@ -297,6 +298,7 @@ const onRunSandboxTest = async (): Promise<void> => {
         outlined
         dense
         type="number"
+        @keydown="blockNonNumericKeys"
         suffix="ms"
         data-test="timeout-input"
         :model-value="store.config.timeoutMs"
@@ -329,6 +331,7 @@ const onRunSandboxTest = async (): Promise<void> => {
             outlined
             dense
             type="number"
+            @keydown="blockNonNumericKeys"
             data-test="max-retries-input"
             :model-value="store.config.maxRetries"
             :min="0"
@@ -355,6 +358,7 @@ const onRunSandboxTest = async (): Promise<void> => {
             outlined
             dense
             type="number"
+            @keydown="blockNonNumericKeys"
             suffix="ms"
             data-test="retry-delay-input"
             :model-value="store.config.retryDelayMs"

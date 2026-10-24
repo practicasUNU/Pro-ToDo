@@ -4,7 +4,8 @@ import { useQuasar } from 'quasar';
 
 import { usePromptOptimizerStore } from '@stores/prompt-optimizer.store';
 
-import { extractApiErrorMessage } from '@/utils/api-error';
+import { extractApiErrorCode, extractApiErrorMessage } from '@/utils/api-error';
+import { ALERT_TIMEOUT_MS } from '@/utils/alert-categorizer';
 import { formatInteger, formatUsd } from '@/utils/number-format';
 
 import type { PromptTargetFormat } from '@/types/prompt-optimizer';
@@ -88,9 +89,21 @@ const generate = async (): Promise<void> => {
       targetFormat: targetFormat.value,
     });
   } catch (error) {
+    // El codigo va de `caption` y no dentro del mensaje: es el contrato
+    // estable que identifica el fallo —el texto cambia con cada version— y es
+    // lo unico que el operador puede citar o buscar en la trazabilidad. Se
+    // perdia porque `extractApiErrorMessage` solo lee `message`.
+    const code = extractApiErrorCode(error);
+
     $q.notify({
       type: 'negative',
+      multiLine: true,
       message: extractApiErrorMessage(error, 'No se pudo optimizar el prompt.'),
+      ...(code === null ? {} : { caption: code }),
+      // El mensaje del backend ya trae el consejo de recuperacion cuando el
+      // fallo fue de tiempo o de presupuesto, y es mas largo que un aviso
+      // corriente: con los 5000 por defecto no da tiempo a leerlo.
+      timeout: ALERT_TIMEOUT_MS,
     });
   }
 };

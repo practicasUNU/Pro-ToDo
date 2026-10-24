@@ -7,7 +7,13 @@ import { useCanvasStore } from '@stores/canvas.store';
 import { useExecutionStore } from '@stores/execution.store';
 
 import { ExecutionState } from '@/types/execution';
-import { ALERTING_SEVERITIES, notifyClassesOf, presentationOf } from '@/utils/alert-categorizer';
+import {
+  ALERTING_SEVERITIES,
+  adviceFor,
+  notifyClassesOf,
+  notifyTimeoutOf,
+  presentationOf,
+} from '@/utils/alert-categorizer';
 
 import type {
   FlowCompletedEvent,
@@ -62,6 +68,28 @@ export const useExecutionSocket = (): void => {
   let unsubscribeReconnect: (() => void) | null = null;
 
   /**
+   * Banners de pausa vivos, por flujo.
+   *
+   * Los avisos de pausa son los UNICOS persistentes (`timeout: 0`) porque
+   * llevan el boton de reanudar, y hasta ahora solo se cerraban a mano: un
+   * flujo reanudado desde otra pestana, descartado o terminado dejaba en
+   * pantalla un «Flujo pausado» indefinido, invitando a reanudar algo que ya
+   * no estaba detenido.
+   *
+   * Hay que guardar el handle porque Quasar NO ofrece forma de purgar avisos:
+   * la funcion que devuelve `$q.notify` es la unica manera de cerrar uno desde
+   * fuera. Se indexa por `flowId` y no por `executionId` porque es el flujo lo
+   * que el banner nombra, y una reanudacion conserva la misma fila.
+   */
+  const pausedBanners = new Map<string, () => void>();
+
+  /** Retira el banner de ese flujo, si lo hubiera. */
+  const dismissPausedBanner = (flowId: string): void => {
+    pausedBanners.get(flowId)?.();
+    pausedBanners.delete(flowId);
+  };
+
+  /**
    * Reintento manual (CU-09) lanzado desde el propio aviso.
    *
    * El store propaga la excepcion a proposito; es aqui donde se convierte en un
@@ -100,6 +128,10 @@ export const useExecutionSocket = (): void => {
    */
   const onFlowPaused = (event: FlowPausedEvent): void => {
     executionStore.handleFlowPaused(event);
+    // Si ya habia un banner de este flujo —se pauso, se reanudo y volvio a
+    // caer sin que nadie cerrase el primero— se retira antes de poner el
+    // nuevo, o se apilarian dos avisos describiendo la misma ejecucion.
+    dismissPausedBanner(event.flowId);
     // El canvas tambien escucha la pausa: es el UNICO cierre del nodo en
     // vuelo, porque el motor no emite un `node:aborted`.
     canvasStore.handleFlowPaused(event);
@@ -111,24 +143,27 @@ export const useExecutionSocket = (): void => {
     // `GRAVE` y una franja roja, mandando al operador a buscar una averia que
     // no existe: el resto del payload es indistinguible del de una caida.
     if (event.isProgrammedPause === true) {
-      $q.notify({
-        type: 'info',
-        icon: 'pause_circle',
-        multiLine: true,
-        message: `Flujo en pausa programada: ${describeFlow(event.flowName, event.flowId)}`,
-        caption: `Detenido en "${event.pausedStepId ?? event.activeCursor}". Continuara cuando alguien lo reanude.`,
-        timeout: 0,
-        actions: [
-          {
-            label: 'Reanudar',
-            color: 'white',
-            handler: () => {
-              void resumeFromNotification(event.executionId);
+      pausedBanners.set(
+        event.flowId,
+        $q.notify({
+          type: 'info',
+          icon: 'pause_circle',
+          multiLine: true,
+          message: `Flujo en pausa programada: ${describeFlow(event.flowName, event.flowId)}`,
+          caption: `Detenido en "${event.pausedStepId ?? event.activeCursor}". Continuara cuando alguien lo reanude.`,
+          timeout: 0,
+          actions: [
+            {
+              label: 'Reanudar',
+              color: 'white',
+              handler: () => {
+                void resumeFromNotification(event.executionId);
+              },
             },
-          },
-          { label: 'Cerrar', color: 'white', flat: true },
-        ],
-      });
+            { label: 'Cerrar', color: 'white', flat: true },
+          ],
+        }),
+      );
 
       return;
     }
@@ -155,38 +190,47 @@ export const useExecutionSocket = (): void => {
         ? ` (fallo tras ${event.attempts} intentos)`
         : '';
 
-    $q.notify({
-      type: 'warning',
-      icon: 'pause_circle',
-      multiLine: true,
-      message: `Flujo pausado: ${describeFlow(event.flowName, event.flowId)} — nodo ${node}${attemptBadge}`,
-      caption: [`${event.severity ?? 'GRAVE'} · ${detail}`, event.errorDetail]
-        .filter((part): part is string => part !== undefined)
-        .join('\n'),
-      // El acento sigue a la severidad REAL: una pausa por URGENTE se pintaba
-      // en ambar como una GRAVE, pese a que no admite reintento.
-      classes: notifyClassesOf(event.severity),
-      timeout: 0,
-      actions: [
-        {
-          label: 'Reanudar',
-          color: 'white',
-          handler: () => {
-            void resumeFromNotification(event.executionId);
+    pausedBanners.set(
+      event.flowId,
+      $q.notify({
+        type: 'warning',
+        icon: 'pause_circle',
+        multiLine: true,
+        message: `Flujo pausado: ${describeFlow(event.flowName, event.flowId)} — nodo ${node}${attemptBadge}`,
+        caption: [
+          `${event.severity ?? 'GRAVE'} · ${detail}`,
+          event.errorDetail,
+          adviceFor(event.severity, event.errorCode),
+        ]
+          .filter((part): part is string => part !== undefined)
+          .join('\n'),
+        // El acento sigue a la severidad REAL: una pausa por URGENTE se pintaba
+        // en ambar como una GRAVE, pese a que no admite reintento.
+        classes: notifyClassesOf(event.severity),
+        timeout: 0,
+        actions: [
+          {
+            label: 'Reanudar',
+            color: 'white',
+            handler: () => {
+              void resumeFromNotification(event.executionId);
+            },
           },
-        },
-        // «Cerrar» y no «Descartar»: descartar una ejecucion exige la cuenta
-        // atras de cinco segundos (regla §4) y vive en la tabla de flujos. Un
-        // boton de toast que pareciera hacerlo seria justo el atajo que esa
-        // regla prohibe.
-        { label: 'Cerrar', color: 'white', flat: true },
-      ],
-    });
+          // «Cerrar» y no «Descartar»: descartar una ejecucion exige la cuenta
+          // atras de cinco segundos (regla §4) y vive en la tabla de flujos. Un
+          // boton de toast que pareciera hacerlo seria justo el atajo que esa
+          // regla prohibe.
+          { label: 'Cerrar', color: 'white', flat: true },
+        ],
+      }),
+    );
   };
 
   /** Alguien relanzo la ejecucion sobre la misma fila. */
   const onFlowResumed = (event: FlowResumedEvent): void => {
     executionStore.handleFlowResumed(event);
+    // El flujo dejo de estar PAUSADO: su banner ya no describe nada cierto.
+    dismissPausedBanner(event.flowId);
     // El canvas tambien: sin esto se queda congelado en la foto del intento
     // anterior —el nodo pausado en ambar y los posteriores completados— hasta
     // que alguien recarga la pagina.
@@ -209,6 +253,8 @@ export const useExecutionSocket = (): void => {
   /** Un operador renuncio a reanudarla; su flujo queda fuera del sondeo. */
   const onFlowDiscarded = (event: FlowDiscardedEvent): void => {
     executionStore.handleFlowDiscarded(event);
+    // El flujo dejo de estar PAUSADO: su banner ya no describe nada cierto.
+    dismissPausedBanner(event.flowId);
 
     $q.notify({
       type: 'info',
@@ -229,6 +275,8 @@ export const useExecutionSocket = (): void => {
    */
   const onFlowCompleted = (event: FlowCompletedEvent): void => {
     executionStore.handleFlowCompleted(event);
+    // El flujo dejo de estar PAUSADO: su banner ya no describe nada cierto.
+    dismissPausedBanner(event.flowId);
     // Apaga las cajas que seguian corriendo, por el mismo motivo que la pausa.
     canvasStore.handleFlowCompleted(event);
 
@@ -295,8 +343,18 @@ export const useExecutionSocket = (): void => {
     $q.notify({
       type: presentation.type,
       icon: presentation.icon,
+      // `multiLine` porque el caption pasa a llevar dos renglones: el detalle
+      // tecnico y, debajo, que hacer al respecto.
+      multiLine: true,
       message: `Fallo ${event.severity} en "${event.nodeId}"`,
-      caption: `Intento ${event.attempt} · ${event.errorCode ?? 'sin codigo'}: ${event.errorMessage ?? 'sin detalle'}`,
+      caption: [
+        `Intento ${event.attempt} · ${event.errorCode ?? 'sin codigo'}: ${event.errorMessage ?? 'sin detalle'}`,
+        adviceFor(event.severity, event.errorCode),
+      ].join('\n'),
+      // Diez segundos para LEVE y GRAVE; `0` solo para URGENTE. Antes no se
+      // pasaba `timeout` y Quasar aplicaba sus 5000 por defecto, que no dan
+      // para leer nodo, codigo, intento y consejo.
+      timeout: notifyTimeoutOf(event.severity),
       classes: notifyClassesOf(event.severity),
     });
   };
@@ -365,5 +423,14 @@ export const useExecutionSocket = (): void => {
 
     unsubscribeReconnect?.();
     unsubscribeReconnect = null;
+
+    // Los avisos persistentes sobreviven al componente que los creo: sin esta
+    // purga, salir del layout —al cerrar sesion, por ejemplo— dejaria en
+    // pantalla banners de flujos que ya nadie escucha.
+    for (const dismiss of pausedBanners.values()) {
+      dismiss();
+    }
+
+    pausedBanners.clear();
   });
 };

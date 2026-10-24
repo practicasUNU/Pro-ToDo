@@ -10,6 +10,7 @@ import LogViewerModal from '@components/shared/LogViewerModal.vue';
 import { ExecutionState } from '@/types/execution';
 import { extractApiErrorMessage } from '@/utils/api-error';
 import { formatDateTime } from '@/utils/date-format';
+import { sortRows } from '@/utils/table-sort';
 import { canInspectLog } from '@/utils/execution-log';
 import { describeExecutionState } from '@/utils/execution-state-display';
 
@@ -44,18 +45,23 @@ const flowNames = computed(
 );
 
 const columns: QTableColumn<ExecutionSummary>[] = [
-  { name: 'state', label: 'Estado', field: 'state', align: 'left' },
+  { name: 'state', label: 'Estado', field: 'state', align: 'left', sortable: true },
   {
     name: 'flow',
     label: 'Flujo',
     field: (row) => flowNames.value.get(row.flowId) ?? row.flowId,
     align: 'left',
+    // SIN `sortable`: el nombre no esta en la fila, se resuelve contra el
+    // catalogo de flujos, y una ejecucion de un flujo que el catalogo todavia
+    // no trajo caeria a su UUID. Ordenar mezclaria nombres con identificadores
+    // y el resultado cambiaria segun lo que hubiera cargado en ese momento.
   },
   {
     name: 'startedAt',
     label: 'Inicio',
     field: 'startedAt',
     align: 'left',
+    sortable: true,
     format: (value: string) => formatDateTime(value),
   },
   {
@@ -63,6 +69,7 @@ const columns: QTableColumn<ExecutionSummary>[] = [
     label: 'Última actualización',
     field: 'updatedAt',
     align: 'left',
+    sortable: true,
     format: (value: string) => formatDateTime(value),
   },
   {
@@ -84,10 +91,21 @@ const openLog = (execution: ExecutionSummary): void => {
   isLogViewerOpen.value = true;
 };
 
+// Orden de la PAGINA CARGADA: la paginacion es del servidor, asi que la
+// cabecera reordena lo visible y no el historial entero.
+const sortBy = ref<string | null>(null);
+const descending = ref(false);
+
+const sortedRows = computed(() =>
+  sortRows(executionsStore.items, sortBy.value, descending.value),
+);
+
 const pagination = computed(() => ({
   page: Math.floor(executionsStore.offset / executionsStore.limit) + 1,
   rowsPerPage: executionsStore.limit,
   rowsNumber: executionsStore.total,
+  sortBy: sortBy.value,
+  descending: descending.value,
 }));
 
 const stateFilter = computed<ExecutionState | null>({
@@ -113,6 +131,11 @@ const loadPage = async (page: { limit?: number; offset?: number } = {}): Promise
 const onRequest: QTableProps['onRequest'] = ({ pagination: requested }) => {
   const rowsPerPage = requested.rowsPerPage || executionsStore.limit;
 
+  // El orden se guarda para el `computed` y no se manda al backend, que no
+  // admite `sortBy`; reordenar lo que ya esta en memoria no pide otro viaje.
+  sortBy.value = requested.sortBy ?? null;
+  descending.value = requested.descending;
+
   void loadPage({ limit: rowsPerPage, offset: (requested.page - 1) * rowsPerPage });
 };
 
@@ -136,7 +159,7 @@ onMounted(async () => {
     class="pd-card pd-table"
     flat
     title="Historial de ejecuciones"
-    :rows="executionsStore.items"
+    :rows="sortedRows"
     :columns="columns"
     row-key="executionId"
     :loading="executionsStore.isLoading"

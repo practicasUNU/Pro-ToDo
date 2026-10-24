@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed } from 'vue';
+import { computed, ref } from 'vue';
 import { useQuasar } from 'quasar';
 
 import { useTelemetryStore } from '@stores/telemetry.store';
@@ -7,6 +7,7 @@ import { useTelemetryStore } from '@stores/telemetry.store';
 import { extractApiErrorMessage } from '@/utils/api-error';
 import { formatDateTime } from '@/utils/date-format';
 import { formatInteger, formatUsd } from '@/utils/number-format';
+import { sortRows } from '@/utils/table-sort';
 
 import { TelemetryOperationOrigin } from '@/types/telemetry';
 
@@ -28,6 +29,7 @@ const columns: QTableColumn<TelemetryHistoryItem>[] = [
     label: 'Fecha',
     field: 'createdAt',
     align: 'left',
+    sortable: true,
     format: (value: string) => formatDateTime(value),
   },
   {
@@ -40,15 +42,23 @@ const columns: QTableColumn<TelemetryHistoryItem>[] = [
         ? 'Optimización de prompt'
         : (row.flowName ?? row.flowId ?? '—'),
     align: 'left',
+    sortable: true,
     classes: 'pd-cell--long',
   },
-  { name: 'nodeId', label: 'Nodo', field: (row) => row.nodeId ?? '—', align: 'left' },
-  { name: 'aiModel', label: 'Modelo', field: 'aiModel', align: 'left' },
+  {
+    name: 'nodeId',
+    label: 'Nodo',
+    field: (row) => row.nodeId ?? '—',
+    align: 'left',
+    sortable: true,
+  },
+  { name: 'aiModel', label: 'Modelo', field: 'aiModel', align: 'left', sortable: true },
   {
     name: 'totalTokens',
     label: 'Tokens',
     field: 'totalTokens',
     align: 'right',
+    sortable: true,
     format: (value: number) => formatInteger(value),
   },
   {
@@ -56,14 +66,41 @@ const columns: QTableColumn<TelemetryHistoryItem>[] = [
     label: 'Coste (USD)',
     field: 'estimatedCostUsd',
     align: 'right',
+    sortable: true,
     format: (value: number) => formatUsd(value),
   },
 ];
+
+// Orden de la PAGINA CARGADA: la paginacion es del servidor, asi que la
+// cabecera reordena lo visible y no el historial entero.
+const sortBy = ref<string | null>(null);
+const descending = ref(false);
+
+/**
+ * Columnas cuyo `field` no es una clave de la fila.
+ *
+ * `flow` pinta el nombre del flujo, su id o el origen del asistente de
+ * prompts; `nodeId` pinta un guion cuando falta. Ordenar por el texto que se
+ * ve mezclaria los huecos entre los valores reales.
+ */
+const SORT_RESOLVERS = {
+  flow: (row: TelemetryHistoryItem) =>
+    row.operationOrigin === TelemetryOperationOrigin.PROMPT_OPTIMIZATION
+      ? 'Optimización de prompt'
+      : (row.flowName ?? row.flowId),
+  nodeId: (row: TelemetryHistoryItem) => row.nodeId,
+};
+
+const sortedRows = computed(() =>
+  sortRows(telemetryStore.historyItems, sortBy.value, descending.value, SORT_RESOLVERS),
+);
 
 const pagination = computed(() => ({
   page: Math.floor(telemetryStore.historyOffset / telemetryStore.historyLimit) + 1,
   rowsPerPage: telemetryStore.historyLimit,
   rowsNumber: telemetryStore.historyTotal,
+  sortBy: sortBy.value,
+  descending: descending.value,
 }));
 
 const loadPage = async (page: { limit: number; offset: number }): Promise<void> => {
@@ -77,9 +114,17 @@ const loadPage = async (page: { limit: number; offset: number }): Promise<void> 
   }
 };
 
-/** Paginacion server-side: QTable pide la pagina y el store la trae. */
+/**
+ * Paginacion server-side: QTable pide la pagina y el store la trae.
+ *
+ * El criterio de orden viaja en el mismo evento y se guarda para el `computed`;
+ * no se manda al backend, que no admite `sortBy`.
+ */
 const onRequest: QTableProps['onRequest'] = ({ pagination: requested }) => {
   const rowsPerPage = requested.rowsPerPage || telemetryStore.historyLimit;
+
+  sortBy.value = requested.sortBy ?? null;
+  descending.value = requested.descending;
 
   void loadPage({ limit: rowsPerPage, offset: (requested.page - 1) * rowsPerPage });
 };
@@ -90,7 +135,7 @@ const onRequest: QTableProps['onRequest'] = ({ pagination: requested }) => {
     class="pd-card pd-table"
     flat
     title="Detalle de consumos"
-    :rows="telemetryStore.historyItems"
+    :rows="sortedRows"
     :columns="columns"
     row-key="id"
     :loading="telemetryStore.isLoadingHistory"

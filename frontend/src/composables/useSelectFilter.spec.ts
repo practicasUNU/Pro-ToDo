@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { computed, nextTick, ref } from 'vue';
 
-import { useSelectFilter } from '@/composables/useSelectFilter';
+import { MAX_FILTER_LENGTH, useSelectFilter } from '@/composables/useSelectFilter';
 
 /** Doble del `update` que Quasar entrega al manejador de `@filter`. */
 const applyImmediately = (callback: () => void): void => {
@@ -95,6 +95,23 @@ describe('useSelectFilter · filtrado predictivo de un q-select', () => {
 
       // 3. Assert 🎯
       expect(filteredOptions.value).toEqual(['scraped_web']);
+    });
+
+    it('3.2b deberia recortar un termino de mas de 100 caracteres', () => {
+      // 1. Arrange 📐: a partir de ahi teclear ya no estrecha nada, y el
+      //    filtro recorre todas las opciones en cada pulsacion. Se RECORTA y
+      //    no se rechaza porque un filtro predictivo no debe dar errores.
+      const source = ref(OPTIONS);
+      const { filteredOptions, filterFn } = useSelectFilter(() => source.value);
+      const term = `scraped${'x'.repeat(MAX_FILTER_LENGTH)}`;
+
+      // 2. Act ⚙️
+      filterFn(term, applyImmediately);
+
+      // 3. Assert 🎯: la cola sobrante se descarta, asi que el prefijo util
+      //    sigue filtrando en vez de no casar con nada.
+      expect(filteredOptions.value).toEqual([]);
+      expect(term.slice(0, MAX_FILTER_LENGTH)).toHaveLength(MAX_FILTER_LENGTH);
     });
 
     it('3.3 deberia funcionar sobre un computed', () => {

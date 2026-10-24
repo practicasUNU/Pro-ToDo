@@ -689,6 +689,10 @@ describe('useLlmExtractorStore · configuracion del nodo PROCESADOR_IA', () => {
         buildDescriptor({ model: 'mock-engine', isAvailable: true, isTestOnly: true }),
         buildDescriptor({ model: 'con-clave', isAvailable: true }),
       ];
+      // El PROVEEDOR va primero y es obligatorio: el catalogo se filtra por el
+      // (`buildDescriptor` fabrica modelos de ANTHROPIC y el store arranca en
+      // el simulador), y ademas cambiarlo limpia el modelo elegido.
+      store.updateConfig({ provider: LlmProvider.ANTHROPIC });
       // El modelo elegido tiene que ser uno del catalogo: si no, el store le
       // anadiria con razon una cuarta opcion "no catalogado" (ver 8.3).
       store.updateConfig({ model: 'con-clave' });
@@ -709,6 +713,7 @@ describe('useLlmExtractorStore · configuracion del nodo PROCESADOR_IA', () => {
       store.availableModels = [
         buildDescriptor({ model: 'mock-engine', isAvailable: true, isTestOnly: true }),
       ];
+      store.updateConfig({ provider: LlmProvider.ANTHROPIC });
       store.updateConfig({ model: 'mock-engine' });
 
       // 2. Act ⚙️ & 3. Assert 🎯

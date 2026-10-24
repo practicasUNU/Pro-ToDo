@@ -45,7 +45,16 @@ vi.mock('@services/socket-events.service', () => ({
 
 // Solo se sustituye `useQuasar`: el resto del paquete se conserva porque el
 // store y los tipos siguen necesitandolo.
-const notify = vi.fn();
+/**
+ * `notify` devuelve la funcion de cierre que Quasar entrega de verdad: el
+ * composable la guarda para poder retirar el banner persistente desde fuera,
+ * y un doble que devuelva `undefined` haria pasar las pruebas sin comprobarlo.
+ */
+const dismiss = vi.fn();
+const notify = vi.fn((options: QNotifyCreateOptions) => {
+  void options;
+  return dismiss;
+});
 
 vi.mock('quasar', async () => {
   const actual = await vi.importActual<typeof QuasarModule>('quasar');
@@ -150,8 +159,58 @@ describe('useExecutionSocket', () => {
     setActivePinia(createPinia());
     registered = null;
     notify.mockClear();
+    dismiss.mockClear();
     unsubscribe.mockClear();
+    // Faltaba: es compartido entre pruebas, asi que cualquier otra que
+    // desmonte el anfitrion le sumaba una llamada a la que lo comprueba.
+    unsubscribeReconnect.mockClear();
     resumeExecution.mockReset();
+  });
+
+  it.each([
+    ['reanudarse', () => registered?.onFlowResumed?.(buildResumed())],
+    ['descartarse', () => registered?.onFlowDiscarded?.(buildDiscarded())],
+    ['terminar', () => registered?.onFlowCompleted?.(buildCompleted())],
+  ])('deberia retirar el banner de pausa al %s el flujo', (_label, act) => {
+    // Arrange: el aviso de pausa es persistente porque lleva el boton de
+    // reanudar. Sin esto se quedaba indefinidamente en pantalla invitando a
+    // reanudar algo que ya no estaba detenido.
+    mountHost();
+    registered?.onFlowPaused?.(buildPaused());
+    expect(dismiss).not.toHaveBeenCalled();
+
+    // Act
+    act();
+
+    // Assert
+    expect(dismiss).toHaveBeenCalledTimes(1);
+  });
+
+  it('NO deberia apilar dos banners del mismo flujo', () => {
+    // Arrange: un flujo que se pausa, se reanuda desde otra pestana y vuelve a
+    // caer sin que nadie cerrase el primer aviso.
+    mountHost();
+    registered?.onFlowPaused?.(buildPaused());
+
+    // Act
+    registered?.onFlowPaused?.(buildPaused());
+
+    // Assert: el primero se retira antes de poner el segundo.
+    expect(dismiss).toHaveBeenCalledTimes(1);
+    expect(notify).toHaveBeenCalledTimes(2);
+  });
+
+  it('deberia purgar los banners vivos al desmontarse', () => {
+    // Arrange: los avisos persistentes sobreviven al componente que los creo,
+    // asi que salir del layout —al cerrar sesion— los dejaria en pantalla.
+    const host = mountHost();
+    registered?.onFlowPaused?.(buildPaused());
+
+    // Act
+    host.unmount();
+
+    // Assert
+    expect(dismiss).toHaveBeenCalledTimes(1);
   });
 
   it('deberia avisar con un toast persistente y accionable al pausarse un flujo', () => {

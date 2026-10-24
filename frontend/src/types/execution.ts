@@ -20,6 +20,7 @@
  * incidencias justo cuando alguien resuelve una.
  */
 import type { CrudMutationPayload } from '@/types/crud-events';
+import type { UserModifiedPayload } from '@/types/session-events';
 import type { NodeType, PipelineSummary } from '@/types/pipeline';
 
 export enum ExecutionState {
@@ -275,6 +276,10 @@ export interface ServerToClientEvents {
   // Familia aparte —mutaciones de tablas maestras—, pero comparte socket, y el
   // mapa tipado tiene que conocerla o `socket.on` la rechaza en compilacion.
   'crud:mutation': (payload: CrudMutationPayload) => void;
+  // Tercera familia: avisos dirigidos a una sola persona. Mismo motivo que la
+  // anterior —comparte socket y el mapa tipado tiene que conocerla— aunque su
+  // destinatario sea la sala `user_*` y no el namespace ni un rol.
+  'user:modified': (payload: UserModifiedPayload) => void;
 }
 
 export interface ClientToServerEvents {

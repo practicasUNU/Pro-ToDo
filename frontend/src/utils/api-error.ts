@@ -11,6 +11,8 @@ interface ApiErrorBody {
   message?: string | string[];
   violations?: TemplateViolation[];
   issues?: SchemaIssue[];
+  /** Codigo estable del fallo (`ERR_*`), cuando el backend lo adjunta. */
+  code?: string;
 }
 
 /**
@@ -30,6 +32,26 @@ export const extractApiErrorMessage = (error: unknown, fallback: string): string
   if (!message) return fallback;
 
   return Array.isArray(message) ? message.join(', ') : message;
+};
+
+/**
+ * Extrae el codigo estable del fallo, si el backend lo adjunto.
+ *
+ * Varias excepciones del proyecto responden con payload objeto —
+ * `{ code, message }`, como las tres del optimizador de prompts— y hasta ahora
+ * ese `code` se perdia: `extractApiErrorMessage` solo lee `message`. El codigo
+ * es el contrato estable que identifica el fallo, mientras que el texto cambia
+ * con cada version, de modo que es lo unico que el operador puede buscar en la
+ * trazabilidad o citar en un parte.
+ *
+ * Devuelve `null` —y nunca `undefined`— ante un error de red, un 500 o una
+ * respuesta sin la clave, para que el consumidor no tenga que distinguir "sin
+ * codigo" de "no se pudo saber".
+ */
+export const extractApiErrorCode = (error: unknown): string | null => {
+  if (!axios.isAxiosError<ApiErrorBody>(error)) return null;
+
+  return error.response?.data?.code ?? null;
 };
 
 /**

@@ -9,6 +9,7 @@ import {
   MAX_PAUSE_MESSAGE_LENGTH,
   PauseTriggerMode,
 } from '@/types/nodes/pause-flow.types';
+import { blockNonNumericKeys } from '@/utils/numeric-input';
 
 interface Props {
   nodeId: string;
@@ -92,6 +93,7 @@ const delayFieldClass = computed<string>(() => {
           id="pause-flow-delay"
           :model-value="store.config.delaySeconds"
           type="number"
+          @keydown="blockNonNumericKeys"
           outlined
           dense
           class="q-mt-xs"

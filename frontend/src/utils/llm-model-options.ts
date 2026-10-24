@@ -17,11 +17,19 @@ import { UserRole } from '@/types/user';
  * segunda copia se queda vieja en cuanto una cambia, y el sintoma seria un
  * modelo de pago seleccionable en un nodo y no en el otro.
  *
- * EL MODELO GUARDADO SIEMPRE APARECE, aunque el catalogo no lo incluya. Sin
- * esto, un selector cerrado dejaria en blanco la configuracion de cualquier
- * flujo que apunte a un modelo retirado de la tabla curada —y el `.env` de esta
- * instalacion ya puede traer uno por `AI_DEFAULT_MODEL`—, de modo que abrir el
- * paso para mirarlo bastaria para romperlo al guardar.
+ * EL MODELO GUARDADO SIEMPRE APARECE, aunque el catalogo no lo incluya ni
+ * pertenezca al proveedor elegido. Sin esto, un selector cerrado dejaria en
+ * blanco la configuracion de cualquier flujo que apunte a un modelo retirado de
+ * la tabla curada —y el `.env` de esta instalacion ya puede traer uno por
+ * `AI_DEFAULT_MODEL`—, de modo que abrir el paso para mirarlo bastaria para
+ * romperlo al guardar.
+ *
+ * FILTRA POR PROVEEDOR. El catalogo trae los modelos de los cuatro
+ * proveedores juntos, asi que sin esto el selector ofrecia `gemini-3.6-flash`
+ * con ANTHROPIC elegido: una combinacion que el backend rechaza al guardar y
+ * que, hasta entonces, se ve perfectamente valida. El descriptor ya trae
+ * `provider`, de modo que el filtro es exacto y no una heuristica sobre el
+ * nombre del modelo.
  *
  * `disable` es COMODIDAD, no una barrera: quien decide es el backend al
  * guardar el flujo. Aqui solo se evita que el operador rellene un formulario
@@ -33,15 +41,17 @@ export const buildModelOptions = (
   currentProvider: LlmProvider,
   isAdmin: boolean,
 ): LlmModelOption[] => {
-  const catalogued = descriptors.map<LlmModelOption>((descriptor) => ({
-    label: descriptor.label,
-    value: descriptor.model,
-    provider: descriptor.provider,
-    availability: resolveModelAvailability(descriptor),
-    contextWindow: descriptor.contextWindow,
-    isUncatalogued: false,
-    disable: descriptor.minRoleRequired === UserRole.ADMIN && !isAdmin,
-  }));
+  const catalogued = descriptors
+    .filter((descriptor) => descriptor.provider === currentProvider)
+    .map<LlmModelOption>((descriptor) => ({
+      label: descriptor.label,
+      value: descriptor.model,
+      provider: descriptor.provider,
+      availability: resolveModelAvailability(descriptor),
+      contextWindow: descriptor.contextWindow,
+      isUncatalogued: false,
+      disable: descriptor.minRoleRequired === UserRole.ADMIN && !isAdmin,
+    }));
 
   const current = currentModel.trim();
   const isListed = current === '' || catalogued.some((option) => option.value === current);

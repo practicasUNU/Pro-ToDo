@@ -36,6 +36,18 @@ import type { Ref } from 'vue';
  *        reobserva: una lista que llega por HTTP cambia despues del montaje, y
  *        una copia tomada una sola vez se quedaria vacia para siempre.
  */
+/**
+ * Tope del termino de busqueda.
+ *
+ * Cien caracteres son mas que de sobra para cualquier etiqueta del catalogo, y
+ * a partir de ahi teclear ya no estrecha nada: el filtro recorre todas las
+ * opciones en cada pulsacion, de modo que pegar un texto largo en el campo de
+ * un desplegable solo sirve para hacer trabajo inutil. Se RECORTA en vez de
+ * rechazar porque un filtro predictivo no debe dar errores: deja de afinar y
+ * ya esta.
+ */
+export const MAX_FILTER_LENGTH = 100;
+
 export const useSelectFilter = <T>(
   source: Ref<readonly T[]> | (() => readonly T[]),
 ): {
@@ -56,8 +68,14 @@ export const useSelectFilter = <T>(
   });
 
   const filterFn = (needle: string, update: (callback: () => void) => void): void => {
+    // El recorte vive AQUI y no en cada `q-select`: este composable es el unico
+    // punto por el que pasan todos los desplegables filtrables del proyecto, de
+    // modo que un solo cambio los cubre y ninguno puede quedarse fuera por
+    // olvido.
+    const bounded = needle.slice(0, MAX_FILTER_LENGTH);
+
     update(() => {
-      filteredOptions.value = filterOptions(allOptions.value, needle);
+      filteredOptions.value = filterOptions(allOptions.value, bounded);
     });
   };
 

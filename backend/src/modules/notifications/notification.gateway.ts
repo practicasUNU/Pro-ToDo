@@ -10,10 +10,12 @@ import {
 import { isUUID } from 'class-validator';
 
 import { CrudEventsCoordinator } from '@common/services/crud-events.coordinator';
+import { SessionEventsCoordinator } from '@common/services/session-events.coordinator';
 import { ExecutionEventsCoordinator } from '@common/services/execution-events.coordinator';
 import { IpAccessService } from '@common/services/ip-access.service';
 import { WorkflowsService } from '@modules/workflows/workflows.service';
 import { CRUD_EVENT } from '@common/types/crud-events.types';
+import { SESSION_EVENT } from '@common/types/session-events.types';
 import { EXECUTION_EVENT } from '@common/types/execution-events.types';
 import {
   ADMIN_ONLY_ENTITIES,
@@ -28,8 +30,10 @@ import {
 } from '@modules/notifications/notification.constants';
 
 import type { CrudEventPort } from '@common/services/crud-events.coordinator';
+import type { SessionEventPort } from '@common/services/session-events.coordinator';
 import type { ExecutionEventPort } from '@common/services/execution-events.coordinator';
 import type { CrudMutationPayload } from '@common/types/crud-events.types';
+import type { UserModifiedPayload } from '@common/types/session-events.types';
 import type {
   FlowCompletedEvent,
   FlowDiscardedEvent,
@@ -113,7 +117,8 @@ export class NotificationGateway
     OnModuleInit,
     OnModuleDestroy,
     ExecutionEventPort,
-    CrudEventPort
+    CrudEventPort,
+    SessionEventPort
 {
   private readonly logger = new Logger(NotificationGateway.name);
 
@@ -126,6 +131,7 @@ export class NotificationGateway
     private readonly executionEvents: ExecutionEventsCoordinator,
     private readonly workflowsService: WorkflowsService,
     private readonly crudEvents: CrudEventsCoordinator,
+    private readonly sessionEvents: SessionEventsCoordinator,
   ) {}
 
   /**
@@ -137,6 +143,7 @@ export class NotificationGateway
   public onModuleInit(): void {
     this.executionEvents.register(this);
     this.crudEvents.registerPort(this);
+    this.sessionEvents.registerPort(this);
   }
 
   /**
@@ -146,6 +153,7 @@ export class NotificationGateway
   public onModuleDestroy(): void {
     this.executionEvents.unregister(this);
     this.crudEvents.unregisterPort(this);
+    this.sessionEvents.unregisterPort(this);
   }
 
   /** Instala el filtro del handshake en cuanto existe el servidor del namespace. */
@@ -369,6 +377,29 @@ export class NotificationGateway
     }
 
     this.server?.emit(CRUD_EVENT.MUTATION, payload);
+  }
+
+  /**
+   * Avisa a UNA persona de que su cuenta dejo de ser la que era.
+   *
+   * PRIMER uso real de la sala `user_*`, que hasta ahora se creaba en
+   * `handleConnection` y no tenia ningun emisor. Va dirigido y no difundido por
+   * el motivo evidente: el payload nombra al autor del cambio y los campos
+   * tocados, y eso no es asunto del resto de la plantilla.
+   *
+   * Alcanza a TODAS las pestanas y dispositivos de esa persona, porque cada
+   * socket suyo se unio a la misma sala al conectarse. Es lo que se quiere: la
+   * sesion se cierra en todos sus clientes a la vez.
+   *
+   * El aviso es la CORTESIA, no la medida de seguridad. Quien de verdad corta
+   * la sesion es `usuarios.token_version`, ya escrita en PostgreSQL cuando esto
+   * corre; un cliente desconectado no se entera del modal, pero su siguiente
+   * peticion recibe un 401 igual.
+   */
+  public emitUserModified(payload: UserModifiedPayload): void {
+    this.server
+      ?.to(`${USER_ROOM_PREFIX}${payload.userId}`)
+      .emit(SESSION_EVENT.USER_MODIFIED, payload);
   }
 
   /**

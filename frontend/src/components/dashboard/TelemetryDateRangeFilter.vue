@@ -3,7 +3,12 @@ import { ref, watch } from 'vue';
 
 import { useTelemetryStore } from '@stores/telemetry.store';
 
-import { defaultDateRange, toIsoRange } from '@/utils/date-range';
+import {
+  datePickerBounds,
+  defaultDateRange,
+  isFutureDate,
+  toIsoRange,
+} from '@/utils/date-range';
 
 /**
  * Selector del periodo del informe: dos fechas locales y un boton para aplicar.
@@ -28,9 +33,34 @@ watch(
 );
 
 /** Mensaje de validacion compartido por los dos campos. */
-const rangeRule = (): true | string =>
-  toIsoRange({ from: from.value, to: to.value }) !== null ||
-  'La fecha de inicio debe ser anterior o igual a la de fin.';
+/**
+ * Dias elegibles en el calendario: ni futuros ni mas antiguos que el historial.
+ *
+ * `q-date` entrega la fecha en su formato de barras, que es justo el que
+ * devuelve `datePickerBounds`, asi que la comparacion es textual y no necesita
+ * construir ningun `Date`.
+ */
+const { min: MIN_DATE, max: MAX_DATE } = datePickerBounds();
+
+const isSelectableDate = (date: string): boolean => date >= MIN_DATE && date <= MAX_DATE;
+
+/**
+ * Mensaje de validacion compartido por los dos campos.
+ *
+ * Comprueba el futuro APARTE del rango invertido porque son dos errores
+ * distintos y el operador necesita saber cual cometio. `q-date` ya impide
+ * elegir manana con el raton, pero el campo se puede teclear y pegar.
+ */
+const rangeRule = (): true | string => {
+  if (isFutureDate(from.value) || isFutureDate(to.value)) {
+    return 'No se pueden consultar fechas futuras.';
+  }
+
+  return (
+    toIsoRange({ from: from.value, to: to.value }) !== null ||
+    'La fecha de inicio debe ser anterior o igual a la de fin.'
+  );
+};
 
 const apply = (): void => {
   if (rangeRule() !== true) return;
@@ -78,7 +108,12 @@ const clear = (): void => {
       <template #append>
         <q-icon name="event" class="cursor-pointer">
           <q-popup-proxy cover transition-show="scale" transition-hide="scale">
-            <q-date v-model="from" mask="YYYY-MM-DD" class="pd-date-popup">
+            <q-date
+                  v-model="from"
+                  mask="YYYY-MM-DD"
+                  class="pd-date-popup"
+                  :options="isSelectableDate"
+                >
               <div class="row items-center justify-end">
                 <q-btn v-close-popup flat no-caps label="Cerrar" class="pd-btn-secondary" />
               </div>
@@ -100,7 +135,12 @@ const clear = (): void => {
       <template #append>
         <q-icon name="event" class="cursor-pointer">
           <q-popup-proxy cover transition-show="scale" transition-hide="scale">
-            <q-date v-model="to" mask="YYYY-MM-DD" class="pd-date-popup">
+            <q-date
+                  v-model="to"
+                  mask="YYYY-MM-DD"
+                  class="pd-date-popup"
+                  :options="isSelectableDate"
+                >
               <div class="row items-center justify-end">
                 <q-btn v-close-popup flat no-caps label="Cerrar" class="pd-btn-secondary" />
               </div>

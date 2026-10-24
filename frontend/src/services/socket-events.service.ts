@@ -1,8 +1,10 @@
 import { CRUD_EVENT } from '@/types/crud-events';
+import { SESSION_EVENT } from '@/types/session-events';
 import { EXECUTION_EVENT } from '@/types/execution';
 import { getSocket } from '@services/socket.client';
 
 import type { CrudMutationPayload } from '@/types/crud-events';
+import type { UserModifiedPayload } from '@/types/session-events';
 import type {
   ExecutionEventHandlers,
   FlowCompletedEvent,
@@ -81,6 +83,31 @@ export const subscribeToCrudMutations = (
 
   return () => {
     socket.off(CRUD_EVENT.MUTATION, handler);
+  };
+};
+
+/**
+ * Escucha los avisos dirigidos a la cuenta propia.
+ *
+ * El gateway manda `user:modified` SOLO a la sala `user_${userId}`, de modo
+ * que un socket nunca recibe el de otra persona. Aun asi quien lo consume
+ * vuelve a comprobar el `userId`: el socket sobrevive a un cambio de sesion en
+ * la misma pestana, y confiar en la sala para una expulsion seria apoyar una
+ * decision de seguridad en una suposicion del transporte.
+ *
+ * La baja va POR REFERENCIA, igual que las otras suscripciones y por el mismo
+ * motivo: un `off` a secas sobre el nombre del evento se llevaria por delante
+ * a cualquier otro suscriptor del mismo canal.
+ */
+export const subscribeToSessionEvents = (
+  handler: (payload: UserModifiedPayload) => void,
+): (() => void) => {
+  const socket = getSocket();
+
+  socket.on(SESSION_EVENT.USER_MODIFIED, handler);
+
+  return () => {
+    socket.off(SESSION_EVENT.USER_MODIFIED, handler);
   };
 };
 

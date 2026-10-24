@@ -8,6 +8,8 @@ import {
   MaxLength,
 } from 'class-validator';
 
+import { TrimmedString } from '@common/decorators/trimmed-string.decorator';
+
 /** Payload de validacion del codigo OTP (`POST /auth/otp/validate`). */
 export class VerifyOtpDto {
   @ApiProperty({
@@ -15,6 +17,7 @@ export class VerifyOtpDto {
     example: 'usuario@unuware.com',
     maxLength: 255,
   })
+  @TrimmedString()
   @IsEmail({}, { message: 'El correo no tiene un formato valido.' })
   @MaxLength(255)
   email: string;
@@ -25,6 +28,7 @@ export class VerifyOtpDto {
     minLength: 6,
     maxLength: 6,
   })
+  @TrimmedString()
   @IsString()
   @Length(6, 6, { message: 'El codigo debe tener exactamente 6 digitos.' })
   @Matches(/^\d{6}$/, { message: 'El codigo solo puede contener digitos.' })

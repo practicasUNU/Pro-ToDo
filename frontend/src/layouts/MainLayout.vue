@@ -7,6 +7,7 @@ import { useSessionStore } from '@stores/session.store';
 
 import { useCrudSocket } from '@/composables/useCrudSocket';
 import { useExecutionSocket } from '@/composables/useExecutionSocket';
+import { useForcedLogout } from '@/composables/useForcedLogout';
 import { useSessionMonitor } from '@/composables/useSessionMonitor';
 
 // Titulo de seccion mostrado en la cabecera, derivado de la ruta activa.
@@ -34,6 +35,9 @@ const sessionStore = useSessionStore();
 // Vigila la caducidad del JWT. Se engancha aqui porque este layout envuelve
 // todas las rutas autenticadas y se desmonta al salir a /login.
 useSessionMonitor();
+// Expulsa al usuario si un administrador le cambia el rol, el estado o el
+// correo: su sesion ya esta invalidada en el servidor cuando el aviso llega.
+useForcedLogout();
 
 // Mismo enganche, mismo motivo: los eventos del motor FSM deben seguir
 // llegando mientras el operador navega entre vistas.

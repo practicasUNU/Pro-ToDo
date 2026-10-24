@@ -38,7 +38,7 @@ describe('buildModelOptions · opciones del selector de modelo', () => {
   describe('1. Restriccion por rol', () => {
     it('1.1 deberia deshabilitar un modelo de pago para un no ADMIN', () => {
       // 1. Arrange 📐 & 2. Act ⚙️
-      const options = buildModelOptions([PAID], '', LlmProvider.GEMINI, false);
+      const options = buildModelOptions([PAID], '', LlmProvider.ANTHROPIC, false);
 
       // 3. Assert 🎯
       expect(options[0]?.disable).toBe(true);
@@ -46,7 +46,7 @@ describe('buildModelOptions · opciones del selector de modelo', () => {
 
     it('1.2 deberia habilitarlo para un ADMIN', () => {
       // 1. Arrange 📐 & 2. Act ⚙️
-      const options = buildModelOptions([PAID], '', LlmProvider.GEMINI, true);
+      const options = buildModelOptions([PAID], '', LlmProvider.ANTHROPIC, true);
 
       // 3. Assert 🎯
       expect(options[0]?.disable).toBe(false);
@@ -129,13 +129,50 @@ describe('buildModelOptions · opciones del selector de modelo', () => {
     });
   });
 
+  describe('3 bis. Filtro por proveedor', () => {
+    it('3b.1 deberia ofrecer solo los modelos del proveedor elegido', () => {
+      // 1. Arrange 📐: ESTE ERA EL FALLO. El catalogo trae los cuatro
+      //    proveedores juntos, asi que el selector ofrecia un modelo de Gemini
+      //    con ANTHROPIC elegido y el backend rechazaba la combinacion al
+      //    guardar, despues de rellenar el formulario entero.
+      const options = buildModelOptions(
+        [buildDescriptor(), PAID],
+        '',
+        LlmProvider.ANTHROPIC,
+        true,
+      );
+
+      // 3. Assert 🎯
+      expect(options.map((option) => option.value)).toEqual(['claude-haiku-4-5']);
+    });
+
+    it('3b.2 deberia conservar el modelo guardado aunque sea de otro proveedor', () => {
+      // 1. Arrange 📐: un flujo viejo puede apuntar a una combinacion que hoy
+      //    no se ofreceria. Esconderla vaciaria el campo al abrir el paso para
+      //    mirarlo, y bastaria con eso para romperlo al guardar.
+      const options = buildModelOptions(
+        [PAID],
+        'gemini-1.5-flash',
+        LlmProvider.ANTHROPIC,
+        true,
+      );
+
+      // 3. Assert 🎯
+      const saved = options.find((option) => option.value === 'gemini-1.5-flash');
+      expect(saved?.isUncatalogued).toBe(true);
+      expect(saved?.disable).toBe(false);
+    });
+  });
+
   describe('4. isModelForbidden', () => {
     it('4.1 deberia detectar el modelo elegido vetado', () => {
       // 1. Arrange 📐
-      const options = buildModelOptions([PAID], '', LlmProvider.GEMINI, false);
+      const options = buildModelOptions([PAID], '', LlmProvider.ANTHROPIC, false);
 
       // 2. Act ⚙️ & 3. Assert 🎯
       expect(isModelForbidden(options, 'claude-haiku-4-5')).toBe(true);
+      // Ni vetado ni permitido: con ANTHROPIC elegido, un modelo de Gemini ya
+      // no figura entre las opciones.
       expect(isModelForbidden(options, 'gemini-1.5-flash')).toBe(false);
     });
   });

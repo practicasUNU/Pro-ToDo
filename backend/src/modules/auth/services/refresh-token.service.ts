@@ -1,12 +1,20 @@
 import { createHash, randomBytes } from 'node:crypto';
 
-import { Injectable, Logger, UnauthorizedException } from '@nestjs/common';
+import {
+  Injectable,
+  Logger,
+  OnModuleDestroy,
+  OnModuleInit,
+  UnauthorizedException,
+} from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { InjectRepository } from '@nestjs/typeorm';
 import { LessThanOrEqual, MoreThan, Repository } from 'typeorm';
 
+import { SessionRevocationCoordinator } from '@common/services/session-revocation.coordinator';
 import { RefreshToken } from '@modules/auth/entities/refresh-token.entity';
 
+import type { SessionRevocationPort } from '@common/services/session-revocation.coordinator';
 import type { User } from '@modules/users/entities/user.entity';
 
 /** Entropia del token opaco: 32 bytes = 256 bits, inadivinable por fuerza bruta. */
@@ -70,14 +78,37 @@ export interface RotatedSession {
  * cosa de `AuthService`.
  */
 @Injectable()
-export class RefreshTokenService {
+export class RefreshTokenService
+  implements SessionRevocationPort, OnModuleInit, OnModuleDestroy
+{
   private readonly logger = new Logger(RefreshTokenService.name);
 
   constructor(
     @InjectRepository(RefreshToken)
     private readonly refreshTokenRepository: Repository<RefreshToken>,
     private readonly configService: ConfigService,
+    private readonly sessionRevocation: SessionRevocationCoordinator,
   ) {}
+
+  /**
+   * Se inscribe como almacen de sesiones.
+   *
+   * Permite que `UsersService` cierre las sesiones de una cuenta sin importar
+   * este servicio, que vive en `AuthModule` y cerraria el ciclo
+   * `Auth -> Users -> Auth`. Se registra `this` para poder retirarse con la
+   * misma referencia en `onModuleDestroy`.
+   */
+  public onModuleInit(): void {
+    this.sessionRevocation.registerPort(this);
+  }
+
+  /**
+   * Sin esta baja, cada recarga del `--watch` dejaria en el coordinador un
+   * servicio con su conexion ya cerrada, revocando al vacio junto al nuevo.
+   */
+  public onModuleDestroy(): void {
+    this.sessionRevocation.unregisterPort(this);
+  }
 
   /**
    * Emite un token nuevo para el dispositivo indicado y persiste solo su hash.
@@ -202,7 +233,10 @@ export class RefreshTokenService {
       select: { id: true, userId: true },
     });
 
-    await this.refreshTokenRepository.update({ tokenHash }, { isRevoked: true });
+    await this.refreshTokenRepository.update(
+      { tokenHash },
+      { isRevoked: true },
+    );
 
     return stored?.userId ?? null;
   }

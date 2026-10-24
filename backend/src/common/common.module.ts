@@ -3,6 +3,8 @@ import { Global, Module } from '@nestjs/common';
 import { RedLocalMiddleware } from '@common/middlewares/red-local.middleware';
 import { EmailService } from '@common/services/email.service';
 import { CrudEventsCoordinator } from '@common/services/crud-events.coordinator';
+import { SessionEventsCoordinator } from '@common/services/session-events.coordinator';
+import { SessionRevocationCoordinator } from '@common/services/session-revocation.coordinator';
 import { ExecutionEventsCoordinator } from '@common/services/execution-events.coordinator';
 import { FlowPollingCoordinator } from '@common/services/flow-polling.coordinator';
 import { WorkflowStatusCoordinator } from '@common/services/workflow-status.coordinator';
@@ -54,6 +56,8 @@ import { AllowedIpsModule } from '@modules/security/allowed-ips/allowed-ips.modu
     FlowPollingCoordinator,
     CrudEventsCoordinator,
     ExecutionEventsCoordinator,
+    SessionEventsCoordinator,
+    SessionRevocationCoordinator,
     WorkflowStatusCoordinator,
     FsmConfig,
   ],
@@ -65,6 +69,8 @@ import { AllowedIpsModule } from '@modules/security/allowed-ips/allowed-ips.modu
     FlowPollingCoordinator,
     CrudEventsCoordinator,
     ExecutionEventsCoordinator,
+    SessionEventsCoordinator,
+    SessionRevocationCoordinator,
     WorkflowStatusCoordinator,
     FsmConfig,
   ],

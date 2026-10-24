@@ -12,6 +12,7 @@ import {
 
 import { presentationOf } from '@/utils/alert-categorizer';
 import { extractApiErrorMessage } from '@/utils/api-error';
+import { blockNonNumericKeys } from '@/utils/numeric-input';
 
 import type { SubjectMatchMode } from '@/utils/subject-filter-mode';
 
@@ -242,6 +243,7 @@ const onTestConnection = async (): Promise<void> => {
           id="imap-port"
           :model-value="store.config.port"
           type="number"
+          @keydown="blockNonNumericKeys"
           outlined
           dense
           class="q-mt-xs"
@@ -310,6 +312,7 @@ const onTestConnection = async (): Promise<void> => {
           id="imap-poll-interval"
           :model-value="store.config.pollIntervalMs"
           type="number"
+          @keydown="blockNonNumericKeys"
           outlined
           dense
           class="q-mt-xs"

@@ -65,3 +65,56 @@ export const toIsoRange = (range: DateRangeInput): IsoRange | null => {
 
   return { from: from.toISOString(), to: to.toISOString() };
 };
+
+/**
+ * Dias que cubre el historial hacia atras.
+ *
+ * No es una regla del backend —acepta el rango que le manden— sino un tope de
+ * cordura del formulario: un informe de dos anos no se consulta desde aqui, y
+ * ofrecerlo invita a pedir una pagina que tardara en volver.
+ */
+export const MAX_HISTORY_DAYS = 365;
+
+/**
+ * Limites del selector de fechas, en el formato de `q-date` (`YYYY/MM/DD`).
+ *
+ * Tope superior HOY, y no es cosmetico: ni la telemetria ni la auditoria
+ * pueden tener filas del futuro, de modo que un rango que empiece manana
+ * devuelve siempre vacio. El usuario lo leeria como "no hay datos" en vez de
+ * como "has pedido algo imposible", que es un diagnostico peor.
+ *
+ * `q-date` usa barras y los `<input>` guiones; se devuelve en el formato del
+ * selector porque es quien consume esto en su prop `:options`.
+ */
+export const datePickerBounds = (
+  now: Date = new Date(),
+): { readonly min: string; readonly max: string } => {
+  const earliest = new Date(
+    now.getFullYear(),
+    now.getMonth(),
+    now.getDate() - MAX_HISTORY_DAYS,
+  );
+
+  return {
+    min: toDateInputValue(earliest).replace(/-/g, '/'),
+    max: toDateInputValue(now).replace(/-/g, '/'),
+  };
+};
+
+/**
+ * ¿La fecha cae mas alla de hoy?
+ *
+ * `q-date` bloquea el clic, pero el campo sigue siendo tecleable y el pegado lo
+ * esquiva, asi que las reglas de validacion necesitan la misma pregunta. Una
+ * cadena que no sea una fecha NO se considera futura: de eso ya se queja
+ * `toIsoRange`, y dar dos errores por el mismo valor confunde.
+ */
+export const isFutureDate = (value: string, now: Date = new Date()): boolean => {
+  const day = localMidnight(value);
+
+  if (day === null) return false;
+
+  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+
+  return day.getTime() > today.getTime();
+};

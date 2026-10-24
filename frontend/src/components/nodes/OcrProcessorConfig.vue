@@ -20,6 +20,7 @@ import { useSelectFilter } from '@/composables/useSelectFilter';
 
 import { extractApiErrorMessage } from '@/utils/api-error';
 import { rangeClass } from '@/utils/field-range';
+import { blockNonNumericKeys } from '@/utils/numeric-input';
 
 import type { LlmModelAvailability } from '@/types/nodes/llm-extractor.types';
 import {
@@ -377,6 +378,7 @@ onMounted(() => {
           id="ocr-temperature"
           :model-value="store.config.temperature"
           type="number"
+          @keydown="blockNonNumericKeys"
           outlined
           dense
           :step="0.1"
@@ -397,6 +399,7 @@ onMounted(() => {
           id="ocr-timeout"
           :model-value="store.config.timeoutMs"
           type="number"
+          @keydown="blockNonNumericKeys"
           outlined
           dense
           :min="MIN_OCR_TIMEOUT_MS"
@@ -423,6 +426,7 @@ onMounted(() => {
           id="ocr-retries"
           :model-value="store.config.maxRetries"
           type="number"
+          @keydown="blockNonNumericKeys"
           outlined
           dense
           :min="MIN_OCR_RETRIES"

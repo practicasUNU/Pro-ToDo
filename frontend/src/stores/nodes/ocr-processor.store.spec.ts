@@ -302,8 +302,13 @@ describe('useOcrProcessorStore · configuracion del nodo PROCESADOR_OCR', () => 
       // 2. Act ⚙️
       await store.fetchAvailableModels();
 
-      // 3. Assert 🎯
+      // 3. Assert 🎯: el catalogo se filtra por proveedor, asi que cada modelo
+      //    se mira con el suyo elegido; con los dos a la vez, uno de los dos
+      //    no figuraria entre las opciones.
+      store.updateConfig({ provider: LlmProvider.ANTHROPIC });
       const paid = store.modelOptions.find((option) => option.value === 'claude-haiku-4-5');
+
+      store.updateConfig({ provider: LlmProvider.GEMINI });
       const free = store.modelOptions.find((option) => option.value === 'gemini-1.5-flash');
 
       expect(paid?.disable).toBe(true);
@@ -318,6 +323,7 @@ describe('useOcrProcessorStore · configuracion del nodo PROCESADOR_OCR', () => 
 
       // 2. Act ⚙️
       await store.fetchAvailableModels();
+      store.updateConfig({ provider: LlmProvider.ANTHROPIC });
 
       // 3. Assert 🎯
       expect(
@@ -334,12 +340,47 @@ describe('useOcrProcessorStore · configuracion del nodo PROCESADOR_OCR', () => 
       const store = useOcrProcessorStore(nextNodeId());
       await store.fetchAvailableModels();
 
-      // 2. Act ⚙️
+      // 2. Act ⚙️: el proveedor primero, porque cambiarlo limpia el modelo.
+      store.updateConfig({ provider: LlmProvider.ANTHROPIC });
       store.updateConfig({ model: 'claude-haiku-4-5' });
 
       // 3. Assert 🎯
       expect(store.isSelectedModelForbidden).toBe(true);
       expect(store.isConfigValid).toBe(false);
+    });
+
+    it('5.3b deberia LIMPIAR el modelo al cambiar de proveedor', async () => {
+      // 1. Arrange 📐: sin esto quedaba `ANTHROPIC` + `gemini-...`, una
+      //    combinacion que el formulario daba por buena y que el backend
+      //    rechazaba al guardar, despues de rellenarlo entero.
+      signInAs(UserRole.ADMIN);
+      fetchLlmModels.mockResolvedValue(CATALOG);
+      const store = useOcrProcessorStore(nextNodeId());
+      await store.fetchAvailableModels();
+      store.updateConfig({ model: 'gemini-1.5-flash' });
+
+      // 2. Act ⚙️
+      store.updateConfig({ provider: LlmProvider.ANTHROPIC });
+
+      // 3. Assert 🎯
+      expect(store.config.model).toBe('');
+    });
+
+    it('5.3c NO deberia limpiar el modelo si llega junto al proveedor', () => {
+      // 1. Arrange 📐: restaurar un nodo guardado escribe los dos campos a la
+      //    vez. Limpiar ahi vaciaria la configuracion justo al cargarla.
+      signInAs(UserRole.ADMIN);
+      fetchLlmModels.mockResolvedValue(CATALOG);
+      const store = useOcrProcessorStore(nextNodeId());
+
+      // 2. Act ⚙️
+      store.updateConfig({
+        provider: LlmProvider.ANTHROPIC,
+        model: 'claude-haiku-4-5',
+      });
+
+      // 3. Assert 🎯
+      expect(store.config.model).toBe('claude-haiku-4-5');
     });
 
     it('5.4 NO deberia vetar un modelo guardado que no figura en el catalogo', async () => {

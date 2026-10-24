@@ -214,6 +214,32 @@ describe('PromptOptimizerService', () => {
       });
     });
 
+    it('1.3b deberia pasar al proveedor los limites ampliados', async () => {
+      // 1. Arrange 📐: tres minutos de espera, 10_000 tokens de techo y tres
+      //    reintentos. La espera llega entera al navegador porque
+      //    `boot/axios.ts` no fija `timeout`; quien acota el abuso es el
+      //    `ThrottlerGuard` del controlador, no estas constantes.
+      const { service, generateCompletion } = buildFixture();
+
+      // 2. Act ⚙️
+      await service.optimize(
+        { draftPrompt: DRAFT, targetFormat: 'text' },
+        EDITOR,
+      );
+
+      // 3. Assert 🎯
+      const [, , options] = generateCompletion.mock.calls[0] as [
+        string,
+        string,
+        { timeoutMs: number; maxTokens: number; maxRetries: number },
+      ];
+      expect(options).toMatchObject({
+        timeoutMs: 180_000,
+        maxTokens: 10_000,
+        maxRetries: 3,
+      });
+    });
+
     it('1.4 deberia avisar si la propuesta pierde marcadores del borrador', async () => {
       // 1. Arrange 📐: el modelo "simplifico" quitando un marcador.
       const { service } = buildFixture({
@@ -307,6 +333,57 @@ describe('PromptOptimizerService', () => {
         response: { code: ERR_PROMPT_OPTIMIZER_EMPTY },
       });
       expect(telemetry.recordAssistUsage).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe('2 bis. Consejo de recuperacion', () => {
+    it('2b.1 deberia aconsejar acortar el borrador cuando se trunca', async () => {
+      // 1. Arrange 📐: el mensaje crudo del proveedor describe la averia pero
+      //    no dice que hacer, y quien pulso el boton no sabe si reintentar.
+      const { service, generateCompletion } = buildFixture();
+      generateCompletion.mockRejectedValue(
+        new LlmProviderException('corte', ERR_LLM_PROVIDER_TRUNCATED),
+      );
+
+      // 2. Act ⚙️
+      const failure = await service
+        .optimize({ draftPrompt: DRAFT, targetFormat: 'text' }, EDITOR)
+        .catch((error: { response: { message: string } }) => error.response);
+
+      // 3. Assert 🎯
+      expect(failure.message).toContain('acorta el borrador');
+    });
+
+    it('2b.2 deberia aconsejar reintentar cuando se agota la espera', async () => {
+      // 1. Arrange 📐
+      const { service, generateCompletion } = buildFixture();
+      generateCompletion.mockRejectedValue(
+        new LlmProviderException('sin respuesta', 'ERR_HTTP_TIMEOUT'),
+      );
+
+      // 2. Act ⚙️
+      const failure = await service
+        .optimize({ draftPrompt: DRAFT, targetFormat: 'text' }, EDITOR)
+        .catch((error: { response: { message: string } }) => error.response);
+
+      // 3. Assert 🎯
+      expect(failure.message).toContain('tres minutos');
+    });
+
+    it('2b.3 NO deberia inventar consejo para un fallo sin salida conocida', async () => {
+      // 1. Arrange 📐: un consejo generico ante una averia que no se entiende
+      //    solo manda al operador a reintentar algo que no va a funcionar.
+      const { service, generateCompletion } = buildFixture();
+      generateCompletion.mockRejectedValue(new Error('ECONNRESET'));
+
+      // 2. Act ⚙️
+      const failure = await service
+        .optimize({ draftPrompt: DRAFT, targetFormat: 'text' }, EDITOR)
+        .catch((error: { response: { message: string } }) => error.response);
+
+      // 3. Assert 🎯
+      expect(failure.message).not.toContain('acorta el borrador');
+      expect(failure.message).not.toContain('tres minutos');
     });
   });
 

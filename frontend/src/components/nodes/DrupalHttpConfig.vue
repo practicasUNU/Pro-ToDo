@@ -17,6 +17,7 @@ import {
   MAX_DRUPAL_TITLE_LENGTH,
   UUID_V4_PATTERN,
 } from '@/types/nodes/drupal-http.types';
+import { blockNonNumericKeys } from '@/utils/numeric-input';
 
 import type { DrupalInsertPosition, DrupalSandboxPresetKey } from '@/types/nodes/drupal-http.types';
 
@@ -749,6 +750,7 @@ const toNullableText = (value: string | number | null): string | null => {
               outlined
               dense
               type="number"
+              @keydown="blockNonNumericKeys"
               class="q-mt-xs pd-mono"
               :min="0"
               :max="MAX_DRUPAL_ATTACHMENT_INDEX"

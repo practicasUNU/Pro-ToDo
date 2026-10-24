@@ -7,6 +7,8 @@ import {
   MaxLength,
 } from 'class-validator';
 
+import { TrimmedString } from '@common/decorators/trimmed-string.decorator';
+
 /**
  * Alta de plantilla (PROT-11.1).
  *
@@ -21,6 +23,7 @@ export class CreateTemplateDto {
     example: 'noticia-basica',
     maxLength: 120,
   })
+  @TrimmedString()
   @IsString()
   @IsNotEmpty()
   @MaxLength(120)
@@ -31,6 +34,7 @@ export class CreateTemplateDto {
     example: 'Cuerpo de noticia con titular y resumen generado por IA',
     maxLength: 255,
   })
+  @TrimmedString()
   @IsOptional()
   @IsString()
   @MaxLength(255)

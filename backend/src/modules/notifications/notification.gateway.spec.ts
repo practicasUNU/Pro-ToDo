@@ -1,5 +1,7 @@
 import { NotFoundException } from '@nestjs/common';
 
+import { SessionEventsCoordinator } from '@common/services/session-events.coordinator';
+import { SESSION_EVENT } from '@common/types/session-events.types';
 import { CrudEventsCoordinator } from '@common/services/crud-events.coordinator';
 import { ExecutionEventsCoordinator } from '@common/services/execution-events.coordinator';
 import { CRUD_EVENT } from '@common/types/crud-events.types';
@@ -156,6 +158,7 @@ interface Harness {
   coordinator: ExecutionEventsCoordinator;
   workflowsService: { findOne: jest.Mock };
   crudEvents: CrudEventsCoordinator;
+  sessionEvents: SessionEventsCoordinator;
   emit: jest.Mock;
   to: jest.Mock;
   use: jest.Mock;
@@ -179,6 +182,9 @@ const buildHarness = (): Harness => {
   };
 
   const crudEvents = new CrudEventsCoordinator();
+  // Coordinadores REALES y no dobles: sin puertos inscritos son un no-op
+  // silencioso, que es justo lo que hace falta aqui.
+  const sessionEvents = new SessionEventsCoordinator();
 
   const gateway = new NotificationGateway(
     jwtService as unknown as JwtService,
@@ -186,6 +192,7 @@ const buildHarness = (): Harness => {
     coordinator,
     workflowsService as unknown as WorkflowsService,
     crudEvents,
+    sessionEvents,
   );
 
   jest.spyOn(gateway['logger'], 'log').mockImplementation(() => undefined);
@@ -212,6 +219,7 @@ const buildHarness = (): Harness => {
     coordinator,
     workflowsService,
     crudEvents,
+    sessionEvents,
     emit,
     to,
     use,
@@ -818,6 +826,53 @@ describe('NotificationGateway · difusion de mutaciones CRUD', () => {
     expect(harness.emit).toHaveBeenCalledWith(
       CRUD_EVENT.MUTATION,
       expect.objectContaining({ entity: 'templates' }),
+    );
+  });
+
+  it('D.6 deberia mandar `user:modified` SOLO a la sala de esa persona', () => {
+    // 1. Arrange 📐: el payload nombra al autor del cambio y los campos
+    //    tocados; eso no es asunto del resto de la plantilla. Es ademas el
+    //    primer uso real de la sala `user_*`, que hasta ahora se creaba en
+    //    `handleConnection` sin ningun emisor.
+    const harness = buildHarness();
+    const payload = {
+      userId: USER_ID,
+      actorEmail: 'admin@unuware.com',
+      updatedFields: ['rol'] as const,
+      emittedAt: '2026-10-23T10:00:00.000Z',
+    };
+
+    // 2. Act ⚙️
+    harness.gateway.onModuleInit();
+    harness.sessionEvents.dispatch(payload);
+
+    // 3. Assert 🎯
+    expect(harness.to).toHaveBeenCalledWith(`${USER_ROOM_PREFIX}${USER_ID}`);
+    expect(harness.emit).toHaveBeenCalledWith(
+      SESSION_EVENT.USER_MODIFIED,
+      payload,
+    );
+  });
+
+  it('D.7 deberia dejar de avisar tras darse de baja', () => {
+    // 1. Arrange 📐: sin la baja, cada recarga del `--watch` dejaria un
+    //    gateway con su servidor cerrado emitiendo al vacio junto al nuevo.
+    const harness = buildHarness();
+    harness.gateway.onModuleInit();
+    harness.gateway.onModuleDestroy();
+
+    // 2. Act ⚙️
+    harness.sessionEvents.dispatch({
+      userId: USER_ID,
+      actorEmail: 'admin@unuware.com',
+      updatedFields: ['estado'],
+      emittedAt: '2026-10-23T10:00:00.000Z',
+    });
+
+    // 3. Assert 🎯
+    expect(harness.emit).not.toHaveBeenCalledWith(
+      SESSION_EVENT.USER_MODIFIED,
+      expect.anything(),
     );
   });
 });

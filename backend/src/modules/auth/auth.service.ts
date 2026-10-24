@@ -232,6 +232,10 @@ export class AuthService {
       sub: user.id,
       email: user.email,
       role: user.role,
+      // Generacion vigente en el momento de firmar. `JwtStrategy` la compara
+      // contra la columna en cada peticion, de modo que un cambio de rol o una
+      // desactivacion invalidan este token sin esperar a que caduque.
+      tokenVersion: user.tokenVersion,
     };
     const authenticatedUser: AuthenticatedUser = {
       id: user.id,

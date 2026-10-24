@@ -2,6 +2,8 @@ import { describe, expect, it } from 'vitest';
 
 import {
   ALERTING_SEVERITIES,
+  ALERT_TIMEOUT_MS,
+  adviceFor,
   notifyClassesOf,
   notifyTimeoutOf,
   presentationOf,
@@ -66,8 +68,56 @@ describe('alert-categorizer', () => {
       for (const severity of ALERTING_SEVERITIES) {
         expect(presentationOf(severity).persistent).toBe(true);
       }
+    });
 
-      expect(notifyTimeoutOf('GRAVE')).toBe(0);
+    it('2.3 deberia separar "interrumpe" de "se queda en pantalla"', () => {
+      // 1. Arrange 📐: son dos conceptos distintos aunque se parezcan. Un
+      //    GRAVE interrumpe —hay una ejecucion pausada esperando decision—
+      //    pero su toast no tiene por que quedarse para siempre: la decision
+      //    se toma en la tabla de flujos, no en el toast.
+      // 2. Act ⚙️ & 3. Assert 🎯
+      expect(presentationOf('GRAVE').persistent).toBe(true);
+      expect(notifyTimeoutOf('GRAVE')).toBe(ALERT_TIMEOUT_MS);
+
+      // El unico que se queda: es irrecuperable, y perderselo por mirar a otro
+      // lado deja una ejecucion muerta sin que nadie se entere.
+      expect(notifyTimeoutOf('URGENTE')).toBe(0);
+    });
+
+    it('2.4 deberia dar diez segundos a LEVE y GRAVE', () => {
+      // 1. Arrange 📐: los 5000 por defecto de Quasar no dan para leer nodo,
+      //    codigo, intento y consejo.
+      // 2. Act ⚙️ & 3. Assert 🎯
+      expect(notifyTimeoutOf('LEVE')).toBe(10_000);
+      expect(notifyTimeoutOf('GRAVE')).toBe(10_000);
+    });
+  });
+
+  describe('2 bis. Consejos', () => {
+    it('2b.1 deberia preferir el consejo del codigo al de la severidad', () => {
+      // 1. Arrange 📐: el codigo es el contrato estable que identifica el
+      //    fallo y puede decir algo mucho mas concreto.
+      // 2. Act ⚙️
+      const advice = adviceFor('GRAVE', 'ERR_POST_IA_DOM_MUTATED');
+
+      // 3. Assert 🎯
+      expect(advice).toContain('estructura HTML');
+    });
+
+    it('2b.2 deberia caer al consejo de la severidad ante un codigo desconocido', () => {
+      // 1. Arrange 📐: el backend define mas de sesenta codigos y no hay
+      //    catalogo unico; la severidad siempre tiene algo que responder.
+      // 2. Act ⚙️
+      const advice = adviceFor('LEVE', 'ERR_INVENTADO');
+
+      // 3. Assert 🎯
+      expect(advice).toContain('siguiente ciclo');
+    });
+
+    it('2b.3 deberia responder algo sin severidad ni codigo', () => {
+      // 1. Arrange 📐: un aviso sin consejo deja al operador igual que antes.
+      // 2. Act ⚙️ & 3. Assert 🎯
+      expect(adviceFor(undefined, undefined)).not.toBe('');
     });
   });
 

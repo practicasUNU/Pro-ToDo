@@ -489,8 +489,13 @@ describe('LlmExtractorConfig · configurador del nodo PROCESADOR_IA', () => {
       const wrapper = mountComponent(nodeId);
       await flushPromises();
 
-      // 2. Act ⚙️
-      useLlmExtractorStore(nodeId).updateConfig({ model: 'claude-sonnet-5-5' });
+      // 2. Act ⚙️: los dos campos en la MISMA llamada. Por separado, fijar el
+      //    proveedor limpiaria el modelo (cascada), que es justo lo que evita
+      //    guardar una combinacion invalida.
+      useLlmExtractorStore(nodeId).updateConfig({
+        provider: LlmProvider.ANTHROPIC,
+        model: 'claude-sonnet-5-5',
+      });
       await wrapper.vm.$nextTick();
 
       // 3. Assert 🎯
@@ -567,7 +572,10 @@ describe('LlmExtractorConfig · configurador del nodo PROCESADOR_IA', () => {
       const wrapper = mountComponent(nodeId);
       await flushPromises();
       const store = useLlmExtractorStore(nodeId);
-      store.updateConfig({ provider: LlmProvider.ANTHROPIC });
+      store.updateConfig({
+        provider: LlmProvider.ANTHROPIC,
+        model: 'claude-sonnet-5-5',
+      });
       testLlmConnection.mockResolvedValue({
         success: true,
         latencyMs: 12,

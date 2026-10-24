@@ -168,6 +168,10 @@ describe('OcrProcessorConfig · configurador del nodo PROCESADOR_OCR', () => {
       mountComponent(nodeId);
       await flushPromises();
 
+      // El catalogo se filtra por proveedor desde la cascada, asi que hay
+      // que elegir el del modelo de pago para que figure entre las opciones.
+      useOcrProcessorStore(nodeId).updateConfig({ provider: LlmProvider.ANTHROPIC });
+
       // 3. Assert 🎯: se comprueba sobre las OPCIONES que recibe el QSelect y
       //    no abriendo el menu, que en happy-dom se renderiza en un portal
       //    fuera del wrapper.
@@ -188,6 +192,10 @@ describe('OcrProcessorConfig · configurador del nodo PROCESADOR_OCR', () => {
       mountComponent(nodeId);
       await flushPromises();
 
+      // El catalogo se filtra por proveedor desde la cascada, asi que hay
+      // que elegir el del modelo de pago para que figure entre las opciones.
+      useOcrProcessorStore(nodeId).updateConfig({ provider: LlmProvider.ANTHROPIC });
+
       // 3. Assert 🎯
       const paid = useOcrProcessorStore(nodeId).modelOptions.find(
         (option) => option.value === 'claude-haiku-4-5',
@@ -205,7 +213,8 @@ describe('OcrProcessorConfig · configurador del nodo PROCESADOR_OCR', () => {
       const wrapper = mountComponent(nodeId);
       await flushPromises();
 
-      // 2. Act ⚙️
+      // 2. Act ⚙️: el proveedor primero, porque cambiarlo limpia el modelo.
+      useOcrProcessorStore(nodeId).updateConfig({ provider: LlmProvider.ANTHROPIC });
       useOcrProcessorStore(nodeId).updateConfig({ model: 'claude-haiku-4-5' });
       await flushPromises();
 

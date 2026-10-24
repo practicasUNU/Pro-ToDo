@@ -222,6 +222,19 @@ const ocrProcessorSetup = () => {
   const updateConfig = (patch: Partial<OcrProcessorNodeConfig>): void => {
     config.value = { ...config.value, ...patch };
 
+    // CASCADA proveedor -> modelo. Cambiar de proveedor invalida el modelo
+    // elegido: el catalogo filtra por proveedor, de modo que conservarlo
+    // dejaria el campo apuntando a un valor que ya no figura entre las
+    // opciones, y el formulario se veria completo hasta que el backend
+    // rechazara la combinacion al guardar.
+    //
+    // Vive en el STORE y no en el componente porque es un invariante del
+    // dominio del nodo —`isConfigValid` depende de el— y no una reaccion de un
+    // formulario concreto (`frontend-quasar.md` §3.1).
+    if (patch.provider !== undefined && patch.model === undefined) {
+      config.value = { ...config.value, model: '' };
+    }
+
     // Un resultado de prueba no puede sobrevivir al par que lo produjo: dejar
     // "conexion correcta" en pantalla despues de cambiar de proveedor es peor
     // que no haber probado nunca. Mismo criterio que el nodo de redaccion.

@@ -41,7 +41,18 @@ async function bootstrap() {
   // CORS: en desarrollo local se permite '*' si FRONTEND_URL no esta definida
   app.enableCors({ origin: process.env.FRONTEND_URL || '*' });
 
-  app.useGlobalPipes(new ValidationPipe({ whitelist: true, transform: true }));
+  // `forbidNonWhitelisted` convierte en 400 lo que `whitelist` descartaba en
+  // silencio. El cambio es de contrato y se hace a sabiendas: un campo de mas
+  // en una peticion casi siempre delata un cliente desactualizado o un intento
+  // de tocar algo que el DTO no expone, y enterarse con un error es mucho mejor
+  // que verlo ignorado y creer que surtio efecto.
+  app.useGlobalPipes(
+    new ValidationPipe({
+      whitelist: true,
+      forbidNonWhitelisted: true,
+      transform: true,
+    }),
+  );
   app.setGlobalPrefix(API_PREFIX);
 
   // Se monta antes de SwaggerModule.setup porque Express resuelve por orden de

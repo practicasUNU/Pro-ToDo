@@ -4,6 +4,7 @@ import { PassportStrategy } from '@nestjs/passport';
 import { ExtractJwt, Strategy } from 'passport-jwt';
 
 import { UserRole } from '@modules/users/enums/user-role.enum';
+import { UsersService } from '@modules/users/users.service';
 
 import type {
   AuthenticatedUser,
@@ -13,12 +14,27 @@ import type {
 /**
  * Estrategia de verificacion del JWT corporativo (PROT-04.2).
  *
- * Solo VERIFICA tokens ya emitidos: la generacion tras el OTP corresponde a PROT-04.1.
- * No consulta la base de datos; la identidad viaja completa en el payload firmado.
+ * Solo VERIFICA tokens ya emitidos: la generacion tras el OTP corresponde a
+ * PROT-04.1.
+ *
+ * SI CONSULTA LA BASE DE DATOS, y el cambio es deliberado: hasta la migracion
+ * 051 la identidad viajaba entera en el payload firmado y no habia forma de
+ * desautorizar un token ya emitido. Revocar los refresh tokens no bastaba
+ * —eso solo impide RENOVAR—, de modo que un ADMIN degradado a EDITOR, o una
+ * cuenta recien desactivada, conservaban sus privilegios hasta que el token
+ * caducaba solo (`JWT_EXPIRES_IN`, hoy 1h). Ahora cada peticion comprueba la
+ * generacion del token contra `usuarios.token_version`.
+ *
+ * El coste es un `SELECT` por peticion autenticada, acotado a dos columnas en
+ * `UsersService.findAuthState`. Es el precio de poder cortar una sesion
+ * privilegiada en el acto, y se paga a sabiendas.
  */
 @Injectable()
 export class JwtStrategy extends PassportStrategy(Strategy, 'jwt') {
-  constructor(configService: ConfigService) {
+  constructor(
+    configService: ConfigService,
+    private readonly usersService: UsersService,
+  ) {
     const jwtSecret = configService.get<string>('JWT_SECRET');
 
     // Guarda de arranque: sin secreto no se puede verificar nada, el proceso no debe levantar.
@@ -37,9 +53,16 @@ export class JwtStrategy extends PassportStrategy(Strategy, 'jwt') {
 
   /**
    * Normaliza el payload verificado a la identidad que consumen los guards.
-   * Rechaza tokens bien firmados pero con claims incompletos o un rol desconocido.
+   *
+   * Rechaza, por este orden: claims incompletos o rol desconocido (el token ni
+   * siquiera describe una identidad), cuenta inexistente o desactivada, y
+   * token de una generacion anterior a la vigente.
+   *
+   * El mensaje de las tres ultimas es el MISMO y no distingue el motivo: a
+   * quien presenta un token caduco no se le confirma si la cuenta existe, si
+   * sigue activa o si simplemente le cambiaron el rol.
    */
-  public validate(payload: JwtPayload): AuthenticatedUser {
+  public async validate(payload: JwtPayload): Promise<AuthenticatedUser> {
     if (
       !payload?.sub ||
       !payload.role ||
@@ -47,6 +70,23 @@ export class JwtStrategy extends PassportStrategy(Strategy, 'jwt') {
     ) {
       throw new UnauthorizedException(
         'Token invalido: el payload no contiene una identidad valida.',
+      );
+    }
+
+    const authState = await this.usersService.findAuthState(payload.sub);
+
+    if (authState === null || !authState.isActive) {
+      throw new UnauthorizedException(
+        'Token invalido: la sesion ya no es valida. Vuelve a iniciar sesion.',
+      );
+    }
+
+    // `?? 0` cubre los tokens emitidos ANTES de la migracion 051, que no traen
+    // el claim: se tratan como la generacion inicial para que el despliegue no
+    // expulse de golpe a todas las sesiones vivas.
+    if ((payload.tokenVersion ?? 0) !== authState.tokenVersion) {
+      throw new UnauthorizedException(
+        'Token invalido: la sesion ya no es valida. Vuelve a iniciar sesion.',
       );
     }
 

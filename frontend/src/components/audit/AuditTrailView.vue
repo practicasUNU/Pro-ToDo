@@ -21,7 +21,13 @@ import {
   toSelectOptions,
 } from '@/utils/audit-display';
 import { formatDateTime } from '@/utils/date-format';
-import { defaultDateRange, toIsoRange } from '@/utils/date-range';
+import { sortRows } from '@/utils/table-sort';
+import {
+  datePickerBounds,
+  defaultDateRange,
+  isFutureDate,
+  toIsoRange,
+} from '@/utils/date-range';
 
 import type { QTableColumn, QTableProps } from 'quasar';
 import type { AuditActionValue, AuditEvent, AuditTableValue } from '@/types/audit';
@@ -52,9 +58,34 @@ const affectedTable = ref<AuditTableValue | null>(auditStore.filters.affectedTab
 const from = ref(auditStore.dateRange.from);
 const to = ref(auditStore.dateRange.to);
 
-const rangeRule = (): true | string =>
-  toIsoRange({ from: from.value, to: to.value }) !== null ||
-  'La fecha de inicio debe ser anterior o igual a la de fin.';
+/**
+ * Dias elegibles en el calendario: ni futuros ni mas antiguos que el historial.
+ *
+ * `q-date` entrega la fecha en su formato de barras, que es justo el que
+ * devuelve `datePickerBounds`, asi que la comparacion es textual y no necesita
+ * construir ningun `Date`.
+ */
+const { min: MIN_DATE, max: MAX_DATE } = datePickerBounds();
+
+const isSelectableDate = (date: string): boolean => date >= MIN_DATE && date <= MAX_DATE;
+
+/**
+ * Mensaje de validacion compartido por los dos campos.
+ *
+ * Comprueba el futuro APARTE del rango invertido porque son dos errores
+ * distintos y el operador necesita saber cual cometio. `q-date` ya impide
+ * elegir manana con el raton, pero el campo se puede teclear y pegar.
+ */
+const rangeRule = (): true | string => {
+  if (isFutureDate(from.value) || isFutureDate(to.value)) {
+    return 'No se pueden consultar fechas futuras.';
+  }
+
+  return (
+    toIsoRange({ from: from.value, to: to.value }) !== null ||
+    'La fecha de inicio debe ser anterior o igual a la de fin.'
+  );
+};
 
 const columns: QTableColumn<AuditEvent>[] = [
   {
@@ -62,6 +93,7 @@ const columns: QTableColumn<AuditEvent>[] = [
     label: 'Fecha',
     field: 'createdAt',
     align: 'left',
+    sortable: true,
     format: (value: string) => formatDateTime(value),
   },
   {
@@ -69,13 +101,15 @@ const columns: QTableColumn<AuditEvent>[] = [
     label: 'Usuario',
     field: (row) => row.userEmail ?? row.userId ?? '—',
     align: 'left',
+    sortable: true,
   },
-  { name: 'action', label: 'Acción', field: 'action', align: 'left' },
+  { name: 'action', label: 'Acción', field: 'action', align: 'left', sortable: true },
   {
     name: 'affectedTable',
     label: 'Tabla',
     field: 'affectedTable',
     align: 'left',
+    sortable: true,
     format: (value: string) => labelAuditTable(value),
   },
   {
@@ -85,14 +119,47 @@ const columns: QTableColumn<AuditEvent>[] = [
     align: 'left',
     classes: 'pd-cell--long',
   },
-  { name: 'sourceIp', label: 'IP', field: (row) => row.sourceIp ?? '—', align: 'left' },
+  {
+    name: 'sourceIp',
+    label: 'IP',
+    field: (row) => row.sourceIp ?? '—',
+    align: 'left',
+    sortable: true,
+  },
   { name: 'details', label: 'Detalle', field: 'id', align: 'center' },
 ];
+
+// Orden de la PAGINA CARGADA. La paginacion es del servidor, asi que en
+// memoria solo estan estas filas: la cabecera reordena lo visible, no el
+// historial entero.
+const sortBy = ref<string | null>(null);
+const descending = ref(false);
+
+/**
+ * Como leer el valor de las columnas cuyo `field` no es una clave de la fila.
+ *
+ * `user` e `sourceIp` pintan un guion cuando faltan, y ordenar por ese guion
+ * mezclaria los huecos entre los valores reales en vez de mandarlos al final.
+ */
+const SORT_RESOLVERS = {
+  user: (row: AuditEvent) => row.userEmail ?? row.userId,
+  sourceIp: (row: AuditEvent) => row.sourceIp,
+};
+
+const sortedRows = computed(() =>
+  sortRows(auditStore.items, sortBy.value, descending.value, SORT_RESOLVERS),
+);
 
 const pagination = computed(() => ({
   page: Math.floor(auditStore.offset / auditStore.limit) + 1,
   rowsPerPage: auditStore.limit,
   rowsNumber: auditStore.total,
+  // Sin estos dos, QTable no pinta la flecha de la cabecera aunque la columna
+  // sea `sortable` y el orden si se este aplicando. `null` y no `undefined`:
+  // con `exactOptionalPropertyTypes` activo, el tipo de QTable admite el nulo
+  // pero no la ausencia explicita.
+  sortBy: sortBy.value,
+  descending: descending.value,
 }));
 
 const isDetailsOpen = ref(false);
@@ -114,9 +181,19 @@ const loadPage = async (page: { limit?: number; offset?: number } = {}): Promise
   }
 };
 
-/** Paginacion server-side: QTable pide la pagina y el store la trae. */
+/**
+ * Paginacion server-side: QTable pide la pagina y el store la trae.
+ *
+ * El criterio de orden llega en el mismo evento y se guarda para el `computed`;
+ * NO se manda al backend, que no admite `sortBy` (ver `utils/table-sort.ts`).
+ * Tampoco se recarga por el: reordenar lo que ya esta en memoria no necesita
+ * otro viaje.
+ */
 const onRequest: QTableProps['onRequest'] = ({ pagination: requested }) => {
   const rowsPerPage = requested.rowsPerPage || auditStore.limit;
+
+  sortBy.value = requested.sortBy ?? null;
+  descending.value = requested.descending;
 
   void loadPage({ limit: rowsPerPage, offset: (requested.page - 1) * rowsPerPage });
 };
@@ -233,7 +310,12 @@ usePanelRefresh(() => loadPage(), { entities: ['audit_eventos'] });
           <template #append>
             <q-icon name="event" class="cursor-pointer">
               <q-popup-proxy cover transition-show="scale" transition-hide="scale">
-                <q-date v-model="from" mask="YYYY-MM-DD" class="pd-date-popup">
+                <q-date
+                  v-model="from"
+                  mask="YYYY-MM-DD"
+                  class="pd-date-popup"
+                  :options="isSelectableDate"
+                >
                   <div class="row items-center justify-end">
                     <q-btn v-close-popup flat no-caps label="Cerrar" class="pd-btn-secondary" />
                   </div>
@@ -255,7 +337,12 @@ usePanelRefresh(() => loadPage(), { entities: ['audit_eventos'] });
           <template #append>
             <q-icon name="event" class="cursor-pointer">
               <q-popup-proxy cover transition-show="scale" transition-hide="scale">
-                <q-date v-model="to" mask="YYYY-MM-DD" class="pd-date-popup">
+                <q-date
+                  v-model="to"
+                  mask="YYYY-MM-DD"
+                  class="pd-date-popup"
+                  :options="isSelectableDate"
+                >
                   <div class="row items-center justify-end">
                     <q-btn v-close-popup flat no-caps label="Cerrar" class="pd-btn-secondary" />
                   </div>
@@ -292,7 +379,7 @@ usePanelRefresh(() => loadPage(), { entities: ['audit_eventos'] });
       class="pd-card pd-table"
       flat
       title="Eventos registrados"
-      :rows="auditStore.items"
+      :rows="sortedRows"
       :columns="columns"
       row-key="id"
       :loading="auditStore.isLoading"

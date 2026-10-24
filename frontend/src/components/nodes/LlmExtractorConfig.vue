@@ -14,6 +14,7 @@ import { extractApiErrorMessage } from '@/utils/api-error';
 import { rangeClass } from '@/utils/field-range';
 
 import { NODE_TYPE_LABELS, NodeType } from '@/types/pipeline';
+import { blockNonNumericKeys } from '@/utils/numeric-input';
 import type { AiPromptTemplateDetail } from '@/types/ai-prompt-template';
 import type { LlmModelAvailability } from '@/types/nodes/llm-extractor.types';
 import {
@@ -523,6 +524,7 @@ onMounted(async () => {
           id="llm-timeout"
           :model-value="store.config.timeoutMs"
           type="number"
+          @keydown="blockNonNumericKeys"
           :min="MIN_LLM_TIMEOUT_MS"
           :max="MAX_LLM_TIMEOUT_MS"
           step="1000"
@@ -552,6 +554,7 @@ onMounted(async () => {
           id="llm-retries"
           :model-value="store.config.maxRetries"
           type="number"
+          @keydown="blockNonNumericKeys"
           :min="MIN_LLM_RETRIES"
           :max="MAX_LLM_RETRIES"
           step="1"
@@ -577,6 +580,7 @@ onMounted(async () => {
           id="llm-brake"
           :model-value="store.config.emergencyBrakeThreshold"
           type="number"
+          @keydown="blockNonNumericKeys"
           :min="MIN_LLM_EMERGENCY_BRAKE_THRESHOLD"
           :max="MAX_LLM_EMERGENCY_BRAKE_THRESHOLD"
           step="1"
@@ -606,6 +610,7 @@ onMounted(async () => {
           id="llm-max-tokens"
           :model-value="store.config.maxTokens"
           type="number"
+          @keydown="blockNonNumericKeys"
           :min="MIN_LLM_MAX_TOKENS"
           :max="MAX_LLM_MAX_TOKENS"
           step="256"

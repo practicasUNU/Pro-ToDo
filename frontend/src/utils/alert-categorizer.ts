@@ -15,14 +15,27 @@ export interface AlertPresentation {
    * desvanece: el motor lo cierra por su cuenta y no hay nada que decidir.
    */
   readonly persistent: boolean;
+  /**
+   * `timeout` de `$q.notify`, en ms. `0` = hasta que alguien lo cierre.
+   *
+   * CONCEPTO DISTINTO de `persistent`, aunque se parezcan. Aquel decide si la
+   * severidad merece interrumpir al operador (`ALERTING_SEVERITIES`); este,
+   * cuanto dura el aviso en pantalla. Un `GRAVE` interrumpe —hay una ejecucion
+   * pausada esperando una decision— pero su toast no tiene por que quedarse
+   * para siempre: la decision se toma en la tabla de flujos, no en el toast.
+   */
+  readonly timeoutMs: number;
 }
 
 /**
- * Cuanto permanece en pantalla un aviso que no exige decision, en ms.
+ * Cuanto permanece en pantalla un aviso de incidencia, en ms.
  *
- * `0` significaria "hasta que lo cierren", que es justo lo contrario.
+ * Diez segundos y no los 5000 por defecto de Quasar: el aviso de un fallo trae
+ * nodo, codigo, intento y ahora tambien un consejo de que hacer. Cinco
+ * segundos no dan para leer todo eso, y el operador se quedaba con el color y
+ * poco mas. Son cinco segundos mas que antes, a cambio de que el texto sirva.
  */
-const TRANSIENT_TIMEOUT_MS = 6000;
+export const ALERT_TIMEOUT_MS = 10_000;
 
 /**
  * Severidad -> presentacion. Fuente UNICA de esa traduccion.
@@ -54,18 +67,24 @@ const PRESENTATION_BY_SEVERITY: Record<NodeErrorSeverity, AlertPresentation> = {
     icon: 'info',
     accentClass: 'pd-accent-leve',
     persistent: false,
+    timeoutMs: ALERT_TIMEOUT_MS,
   },
   GRAVE: {
     type: 'warning',
     icon: 'warning',
     accentClass: 'pd-accent-grave',
     persistent: true,
+    timeoutMs: ALERT_TIMEOUT_MS,
   },
   URGENTE: {
     type: 'negative',
     icon: 'report',
     accentClass: 'pd-accent-urgente',
     persistent: true,
+    // El unico que se queda hasta que alguien lo cierre: es irrecuperable, ni
+    // se reintenta ni se puede reanudar, asi que perderselo por mirar a otro
+    // lado deja una ejecucion muerta sin que nadie se entere.
+    timeoutMs: 0,
   },
 };
 
@@ -101,9 +120,68 @@ export const notifyClassesOf = (severity: NodeErrorSeverity | undefined): string
 /**
  * `timeout` de `$q.notify` para esta severidad.
  *
- * `0` en Quasar significa "no se cierra solo", que es lo que necesita un aviso
- * con acciones: un toast que desaparece mientras el operador lee las opciones
- * es peor que no ofrecerlas.
+ * `0` en Quasar significa "no se cierra solo", y se reserva a `URGENTE`. Los
+ * avisos CON ACCIONES —la pausa de un flujo, con su boton de reanudar— fijan
+ * su propio `0` sin pasar por aqui: un toast que desaparece mientras el
+ * operador lee las opciones es peor que no ofrecerlas.
  */
 export const notifyTimeoutOf = (severity: NodeErrorSeverity | undefined): number =>
-  presentationOf(severity).persistent ? 0 : TRANSIENT_TIMEOUT_MS;
+  presentationOf(severity).timeoutMs;
+
+/**
+ * Consejo por defecto de cada severidad.
+ *
+ * Responde la pregunta que el mensaje de error nunca contesta: «y ahora que
+ * hago». El codigo y el texto del motor describen la averia, pero quien mira
+ * el toast necesita saber si debe esperar, tocar algo o avisar a alguien.
+ */
+const ADVICE_BY_SEVERITY: Record<NodeErrorSeverity, string> = {
+  LEVE: 'El flujo continuará en el siguiente ciclo. Puedes incrementar el tiempo de espera en la configuración del nodo o esperar a la siguiente ejecución.',
+  GRAVE:
+    'Verifica la configuración del nodo, el contrato de la plantilla HTML/prompt y el estado de conexión del servidor antes de reanudar el flujo.',
+  URGENTE:
+    'La ejecución no admite reintento: revisa la traza del nodo y lanza una ejecución nueva cuando hayas corregido la causa.',
+};
+
+/**
+ * Consejo afinado para los codigos que de verdad se repiten.
+ *
+ * Es una lista CORTA a proposito. El backend define mas de sesenta codigos
+ * repartidos por las estrategias y no existe ningun catalogo unico: escribir
+ * sesenta consejos aqui crearia un texto sin dueno que se desincronizaria en
+ * cuanto una estrategia anadiese el suyo. Estos son los que un operador ve a
+ * diario, y para el resto basta el consejo de la severidad.
+ */
+const ADVICE_BY_ERROR_CODE: Readonly<Record<string, string>> = {
+  ERR_IMAP_TIMEOUT:
+    'El buzón no respondió a tiempo. El flujo continuará en el siguiente ciclo; si se repite, sube el tiempo de espera del nodo de correo.',
+  ERR_SCRAPING_TIMEOUT_EXCEEDED:
+    'La web tardó más de lo permitido. Sube el tiempo de espera del extractor o comprueba que la página siga publicada.',
+  ERR_ACCESS_DENIED_BLOCK_DETECTED:
+    'El sitio bloqueó la extracción. Revisa si exige navegación con cabeceras propias antes de volver a lanzarlo.',
+  ERR_POST_IA_DOM_MUTATED:
+    'La IA alteró la estructura HTML de la plantilla. Revisa el contrato de la plantilla y el prompt del nodo antes de reanudar.',
+  ERR_TEMPLATE_PENDING_VARS:
+    'La plantilla aún tiene marcadores sin resolver. Comprueba que el nodo que los rellena se ejecutó y publicó su namespace.',
+  ERR_LLM_PROVIDER_FAILURE:
+    'El proveedor de IA rechazó la petición. Verifica su credencial en el servidor y el estado del servicio antes de reanudar.',
+  ERR_LLM_MAX_RETRIES_EXCEEDED:
+    'Se agotaron los reintentos contra el proveedor de IA. Espera unos minutos o cambia de modelo antes de reanudar.',
+};
+
+/**
+ * Que hacer ante este incidente.
+ *
+ * Prefiere el consejo del CODIGO y cae al de la severidad: el codigo es el
+ * contrato estable que identifica el fallo y puede decir algo mucho mas
+ * concreto, mientras que la severidad siempre tiene algo que responder.
+ */
+export const adviceFor = (
+  severity: NodeErrorSeverity | undefined,
+  errorCode: string | null | undefined,
+): string => {
+  const byCode =
+    errorCode === null || errorCode === undefined ? undefined : ADVICE_BY_ERROR_CODE[errorCode];
+
+  return byCode ?? ADVICE_BY_SEVERITY[severity ?? 'URGENTE'] ?? ADVICE_BY_SEVERITY.URGENTE;
+};
