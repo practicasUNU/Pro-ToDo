@@ -14,7 +14,10 @@ import {
 } from '@common/utils/audit.util';
 import { Repository } from 'typeorm';
 
-import { NODE_OUTPUT_NAMESPACES } from '@core/fsm/types/pipeline-schema.types';
+import {
+  isAllowedOutputNamespace,
+  NODE_OUTPUT_NAMESPACES,
+} from '@core/fsm/types/pipeline-schema.types';
 
 import { CreateTemplateDto } from './dto/create-template.dto';
 import { toHtmlTemplateResponse } from './dto/html-template-response.dto';
@@ -56,8 +59,21 @@ export const ALLOWED_NAMESPACES = [
   ASSETS_NAMESPACE,
 ] as const;
 
-/** Busqueda O(1); el arreglo se exporta para documentacion y para el frontend. */
-const ALLOWED_NAMESPACE_SET: ReadonlySet<string> = new Set(ALLOWED_NAMESPACES);
+/**
+ * La raiz de un `{{ns.campo}}` es legal.
+ *
+ * Delega en `isAllowedOutputNamespace` en vez de consultar un `Set` propio
+ * porque desde que un flujo puede repetir un tipo de nodo, los namespaces
+ * legales incluyen las copias numeradas (`ocr_result_2`), y esas no son
+ * enumerables de antemano. Mantener aqui una segunda nocion de "permitido"
+ * haria que el asistente aceptase un namespace que el editor de plantillas
+ * rechazase despues.
+ *
+ * `_assets` se comprueba aparte: no lo escribe ningun nodo, asi que no esta en
+ * la lista del nucleo ni admite copias.
+ */
+const isAllowedTemplateNamespace = (namespace: string): boolean =>
+  namespace === ASSETS_NAMESPACE || isAllowedOutputNamespace(namespace);
 
 /**
  * Variable interpolable: un namespace raiz seguido de al menos un segmento.
@@ -478,7 +494,7 @@ export class TemplatesService {
       (match: string, namespace: string, nestedPath: string) => {
         const variable = `${namespace}${nestedPath}`;
 
-        if (!ALLOWED_NAMESPACE_SET.has(namespace)) {
+        if (!isAllowedTemplateNamespace(namespace)) {
           throw new BadRequestException({
             message: `Namespace no permitido o desconocido: "${namespace}" en la variable {{${variable}}}. Verifique la sintaxis.`,
             invalidVariable: variable,
@@ -486,7 +502,7 @@ export class TemplatesService {
             // `variable` va sin llaves y con la ruta ya normalizada.
             violations: TemplatesService.buildVariableViolation(
               match,
-              `Namespace '${namespace}' no permitido. Solo se admiten: ${ALLOWED_NAMESPACES.join(', ')}.`,
+              `Namespace '${namespace}' no permitido. Solo se admiten: ${ALLOWED_NAMESPACES.join(', ')}, o una copia numerada de uno de ellos (por ejemplo 'ocr_result_2').`,
             ),
           });
         }
@@ -578,7 +594,7 @@ export class TemplatesService {
 
     if (marker !== undefined) {
       throw new BadRequestException({
-        message: `Marcador no interpretable "${marker}". Toda variable debe tener la forma {{namespace.campo}} con un namespace de la lista permitida (${ALLOWED_NAMESPACES.join(', ')}).`,
+        message: `Marcador no interpretable "${marker}". Toda variable debe tener la forma {{namespace.campo}} con un namespace de la lista permitida (${ALLOWED_NAMESPACES.join(', ')}) o una copia numerada de uno de ellos.`,
         invalidVariable: marker,
         violations: TemplatesService.buildVariableViolation(
           marker,

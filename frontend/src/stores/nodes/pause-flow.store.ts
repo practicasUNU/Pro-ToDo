@@ -2,6 +2,7 @@ import { defineStore, acceptHMRUpdate } from 'pinia';
 import { computed, ref } from 'vue';
 
 import { isEmailAddress } from '@/utils/email-address';
+import { MAX_ALERT_RECIPIENTS } from '@/types/nodes/smtp-alert.types';
 
 import {
   DEFAULT_PAUSE_DELAY_SECONDS,
@@ -17,6 +18,28 @@ import type { PauseFlowNodeConfig } from '@/types/nodes/pause-flow.types';
 const asText = (value: unknown): string => (typeof value === 'string' ? value : '');
 
 /**
+ * Lee los destinatarios, aceptando la forma HEREDADA de un solo correo.
+ *
+ * El backend sigue tolerando `notificationRecipient` para no convertir en un
+ * 400 la edicion de un flujo guardado antes del cambio; aqui hay que leerlo por
+ * el mismo motivo, o el formulario de ese flujo abriria con el campo vacio y el
+ * operador creeria que nunca configuro a quien avisar.
+ */
+const asAddressList = (params: Record<string, unknown>): string[] => {
+  const { notificationRecipients, notificationRecipient } = params;
+
+  if (Array.isArray(notificationRecipients)) {
+    return notificationRecipients.filter(
+      (address): address is string => typeof address === 'string',
+    );
+  }
+
+  const legacy = asText(notificationRecipient).trim();
+
+  return legacy === '' ? [] : [legacy];
+};
+
+/**
  * Lee el modo de los `params` crudos.
  *
  * La columna es `jsonb` y pudo escribirse por SQL directo, asi que un valor
@@ -24,9 +47,7 @@ const asText = (value: unknown): string => (typeof value === 'string' ? value : 
  * ninguna opcion marcada, que es un control que el operador no puede arreglar.
  */
 const asPauseMode = (value: unknown): PauseTriggerMode =>
-  value === PauseTriggerMode.DELAYED
-    ? PauseTriggerMode.DELAYED
-    : PauseTriggerMode.IMMEDIATE;
+  value === PauseTriggerMode.DELAYED ? PauseTriggerMode.DELAYED : PauseTriggerMode.IMMEDIATE;
 
 /** Lee los segundos de los `params` crudos, sin aceptar decimales ni negativos. */
 const asSeconds = (value: unknown): number =>
@@ -37,7 +58,7 @@ const buildInitialConfig = (): PauseFlowNodeConfig => ({
   pauseMode: PauseTriggerMode.IMMEDIATE,
   delaySeconds: 0,
   notifyOnPause: false,
-  notificationRecipient: '',
+  notificationRecipients: [],
   customPauseMessage: '',
 });
 
@@ -55,9 +76,7 @@ const pauseFlowSetup = () => {
   const config = ref<PauseFlowNodeConfig>(buildInitialConfig());
 
   /** `true` cuando el operador eligio esperar antes de congelar el flujo. */
-  const isDelayed = computed<boolean>(
-    () => config.value.pauseMode === PauseTriggerMode.DELAYED,
-  );
+  const isDelayed = computed<boolean>(() => config.value.pauseMode === PauseTriggerMode.DELAYED);
 
   /**
    * El retardo elegido no cabe en el tope que acepta el backend.
@@ -68,16 +87,22 @@ const pauseFlowSetup = () => {
   const isDelayOutOfRange = computed<boolean>(
     () =>
       isDelayed.value &&
-      (config.value.delaySeconds < 1 ||
-        config.value.delaySeconds > MAX_PAUSE_DELAY_SECONDS),
+      (config.value.delaySeconds < 1 || config.value.delaySeconds > MAX_PAUSE_DELAY_SECONDS),
   );
 
-  /** El destinatario del aviso no tiene forma de correo. */
+  /**
+   * Direcciones que no tienen forma de correo.
+   *
+   * Se nombran UNA A UNA, como en el nodo de alerta: con tres o cuatro chips en
+   * el campo, un "hay un correo invalido" obliga a revisarlos todos a ojo.
+   */
+  const invalidRecipients = computed<string[]>(() =>
+    config.value.notificationRecipients.filter((address) => !isEmailAddress(address)),
+  );
+
+  /** Alguno de los destinatarios del aviso no tiene forma de correo. */
   const isRecipientInvalid = computed<boolean>(
-    () =>
-      config.value.notifyOnPause &&
-      config.value.notificationRecipient.trim().length > 0 &&
-      !isEmailAddress(config.value.notificationRecipient.trim()),
+    () => config.value.notifyOnPause && invalidRecipients.value.length > 0,
   );
 
   /**
@@ -94,10 +119,7 @@ const pauseFlowSetup = () => {
       return false;
     }
 
-    return (
-      !config.value.notifyOnPause ||
-      config.value.notificationRecipient.trim().length > 0
-    );
+    return !config.value.notifyOnPause || config.value.notificationRecipients.length > 0;
   });
 
   /**
@@ -135,7 +157,14 @@ const pauseFlowSetup = () => {
    * reabriera el nodo.
    */
   const toNodeParams = (): Record<string, unknown> => {
-    const recipient = config.value.notificationRecipient.trim();
+    // Se recortan y se deduplican aqui y no al escribirlos: pegar una lista
+    // separada por comas es la via mas comoda y la mas propensa a dejar
+    // espacios sobrantes, y el `@IsEmail` del backend no los tolera.
+    const recipients = [
+      ...new Set(config.value.notificationRecipients.map((address) => address.trim())),
+    ]
+      .filter((address) => address !== '')
+      .slice(0, MAX_ALERT_RECIPIENTS);
     const message = config.value.customPauseMessage.trim();
 
     return {
@@ -144,8 +173,12 @@ const pauseFlowSetup = () => {
         ? { delaySeconds: config.value.delaySeconds }
         : {}),
       ...(config.value.notifyOnPause ? { notifyOnPause: true } : {}),
-      ...(config.value.notifyOnPause && recipient.length > 0
-        ? { notificationRecipient: recipient }
+      // Siempre la clave NUEVA, nunca la heredada: el DTO valida con
+      // `forbidNonWhitelisted` pero admite las dos, y reescribir el esquema con
+      // la forma vieja dejaria flujos nuevos naciendo ya en el camino de
+      // compatibilidad.
+      ...(config.value.notifyOnPause && recipients.length > 0
+        ? { notificationRecipients: recipients }
         : {}),
       ...(message.length > 0 ? { customPauseMessage: message } : {}),
     };
@@ -164,7 +197,7 @@ const pauseFlowSetup = () => {
       pauseMode: asPauseMode(params.pauseMode),
       delaySeconds: asSeconds(params.delaySeconds),
       notifyOnPause: params.notifyOnPause === true,
-      notificationRecipient: asText(params.notificationRecipient),
+      notificationRecipients: asAddressList(params),
       customPauseMessage: asText(params.customPauseMessage),
     };
   };
@@ -177,6 +210,7 @@ const pauseFlowSetup = () => {
     config,
     isDelayed,
     isDelayOutOfRange,
+    invalidRecipients,
     isRecipientInvalid,
     isConfigValid,
     setPauseMode,

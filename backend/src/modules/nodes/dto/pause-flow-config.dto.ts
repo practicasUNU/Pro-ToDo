@@ -1,5 +1,8 @@
 import { ApiPropertyOptional } from '@nestjs/swagger';
 import {
+  ArrayMaxSize,
+  ArrayNotEmpty,
+  IsArray,
   IsBoolean,
   IsEmail,
   IsEnum,
@@ -11,6 +14,8 @@ import {
   MaxLength,
   Min,
 } from 'class-validator';
+
+import { MAX_ALERT_RECIPIENTS } from '@modules/nodes/dto/smtp-alert-config.dto';
 
 /**
  * Momento en que el nodo congela el flujo.
@@ -101,8 +106,42 @@ export class PauseFlowConfigDto {
 
   @ApiPropertyOptional({
     description:
-      'Destinatario del aviso de pausa. Obligatorio para ACTIVAR el flujo si notifyOnPause es true.',
+      'Destinatarios del aviso de pausa. Obligatorio para ACTIVAR el flujo si notifyOnPause es true.',
+    type: [String],
+    maxItems: MAX_ALERT_RECIPIENTS,
+  })
+  @IsOptional()
+  @IsArray({
+    message: 'notificationRecipients debe ser un arreglo de direcciones.',
+  })
+  @ArrayNotEmpty({
+    message: 'notificationRecipients no puede ir vacio.',
+  })
+  @ArrayMaxSize(MAX_ALERT_RECIPIENTS, {
+    message: `notificationRecipients no puede superar ${MAX_ALERT_RECIPIENTS} destinatarios.`,
+  })
+  @IsEmail(
+    {},
+    {
+      each: true,
+      message: 'notificationRecipients solo admite direcciones validas.',
+    },
+  )
+  notificationRecipients?: string[];
+
+  /**
+   * Destinatario unico, forma HEREDADA del campo de arriba.
+   *
+   * Se conserva porque el DTO valida con `forbidNonWhitelisted`: retirarlo
+   * convertiria en un 400 la edicion de todo flujo guardado antes del cambio, y
+   * el operador leeria como un fallo del formulario lo que seria una clave que
+   * el nodo ya no reconoce. Lo resuelve `resolvePauseFlowConfig`, en un solo
+   * sitio, y el frontend emite siempre la forma nueva.
+   */
+  @ApiPropertyOptional({
+    description: 'Heredado: destinatario unico. Use notificationRecipients.',
     example: 'operaciones@unuware.com',
+    deprecated: true,
   })
   @IsOptional()
   @IsEmail({}, { message: 'notificationRecipient debe ser un correo valido.' })
@@ -129,7 +168,11 @@ export interface ResolvedPauseFlowConfig {
   /** Segundos efectivos de espera. Cero cuando la pausa es inmediata. */
   readonly delaySeconds: number;
   readonly notifyOnPause: boolean;
-  readonly notificationRecipient: string | null;
+  /**
+   * Destinatarios efectivos. Vacio significa "no se avisa a nadie", que es lo
+   * mismo que decia el `null` del campo unico al que sustituye.
+   */
+  readonly notificationRecipients: readonly string[];
   readonly message: string;
 }
 
@@ -151,7 +194,14 @@ export const resolvePauseFlowConfig = (
     delaySeconds:
       pauseMode === PauseTriggerMode.DELAYED ? (dto.delaySeconds ?? 0) : 0,
     notifyOnPause: dto.notifyOnPause ?? false,
-    notificationRecipient: dto.notificationRecipient ?? null,
+    // La forma nueva manda; la heredada solo se mira si aquella no viene. Es
+    // el UNICO punto donde se eligen, para que no haya dos lecturas del mismo
+    // dato que puedan discrepar.
+    notificationRecipients:
+      dto.notificationRecipients ??
+      (dto.notificationRecipient === undefined
+        ? []
+        : [dto.notificationRecipient]),
     message: dto.customPauseMessage ?? DEFAULT_PAUSE_MESSAGE,
   };
 };

@@ -7,8 +7,10 @@ import { extractClientIp } from '@common/utils/client-ip.util';
 import { AuditTable } from '@modules/audit/audit-tables';
 import { AUDIT_ACTION_KEY } from '@modules/audit/decorators/audit-action.decorator';
 import { AuditActionType } from '@modules/audit/enums/audit-action.enum';
+import { changedAuditKeys } from '@modules/audit/reports/audit-labels';
 import { AuditLoggerService } from '@modules/audit/services/audit-logger.service';
 import { AuditSnapshotService } from '@modules/audit/services/audit-snapshot.service';
+import { WorkflowStatus } from '@modules/workflows/enums/workflow-status.enum';
 
 import type {
   CallHandler,
@@ -44,9 +46,10 @@ const readResponseId = (response: unknown): string | null => {
  * porque renombrar una propiedad de dominio para que encaje aqui seria dejar
  * que la auditoria dicte el modelo.
  *
- * `AllowedIp` no tiene ninguna —se da de alta o se borra— y `Workflow` gobierna
- * su actividad con un estado enumerado, no con un booleano: ninguna de las dos
- * produce `ACTIVAR` / `DESACTIVAR`, y es correcto.
+ * `AllowedIp` no tiene ninguna —se da de alta o se borra— y no produce
+ * `ACTIVAR` / `DESACTIVAR`. `Workflow` tampoco la tiene, pero SI las produce:
+ * gobierna su actividad con un estado enumerado y lo resuelve
+ * `readWorkflowStatusAction`, aparte.
  */
 const ACTIVITY_FLAG_KEYS = ['isActive', 'active'] as const;
 
@@ -71,6 +74,47 @@ const readActivityFlag = (snapshot: AuditSnapshot | null): boolean | null => {
   }
 
   return null;
+};
+
+/**
+ * Activacion o desactivacion de un FLUJO, que no tiene bandera booleana.
+ *
+ * La migracion 040 cambio `flujos.activo BOOLEAN` por `flujos.status`
+ * enumerado, de modo que `readActivityFlag` dejo de verlo y armar o retirar un
+ * flujo se registraba como un `ACTUALIZAR` indistinguible de cambiarle el
+ * nombre. Son justo las dos acciones que un auditor busca por si mismas.
+ *
+ * Se exige que `status` sea la UNICA clave cambiada. Guardar el grafo y armarlo
+ * en la misma peticion es una modificacion con todas las letras: registrarla
+ * como `ACTIVAR` afirmaria que solo se cambio el interruptor y escondria la
+ * edicion del pipeline, que es el dato mas delicado de la tabla.
+ *
+ * `PAUSADO` no llega por aqui —el DTO lo rechaza y solo lo escribe el motor—,
+ * pero si llegase cuenta como desactivacion: lo unico que afirma la etiqueta es
+ * que el flujo dejo de estar armado.
+ */
+const readWorkflowStatusAction = (
+  options: AuditActionOptions,
+  previous: AuditSnapshot | null,
+  next: AuditSnapshot | null,
+): AuditActionType | null => {
+  if (
+    options.table !== AuditTable.WORKFLOWS ||
+    previous === null ||
+    next === null
+  ) {
+    return null;
+  }
+
+  const changed = changedAuditKeys(previous, next);
+
+  if (changed.length !== 1 || changed[0] !== 'status') {
+    return null;
+  }
+
+  return next.status === WorkflowStatus.ACTIVO
+    ? AuditActionType.ACTIVATE
+    : AuditActionType.DEACTIVATE;
 };
 
 /**
@@ -126,7 +170,7 @@ const resolveAction = (
     return isActive ? AuditActionType.ACTIVATE : AuditActionType.DEACTIVATE;
   }
 
-  return options.action;
+  return readWorkflowStatusAction(options, previous, next) ?? options.action;
 };
 
 /**

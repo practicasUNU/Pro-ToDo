@@ -9,7 +9,7 @@ import {
 } from '@core/fsm/types/node-strategy.types';
 import {
   ERROR_CONTEXT_NAMESPACE,
-  NODE_OUTPUT_NAMESPACE_SET,
+  isAllowedOutputNamespace,
   NODE_OUTPUT_NAMESPACES,
   DESTINO_NODE_TYPES,
   TRIGGER_NODE_TYPES,
@@ -147,12 +147,14 @@ export const ERR_TOPOLOGY_DESTINATION_NOT_TERMINAL =
  * 2. La clave del mapa coincide con el `nodeId` del nodo (evita que mapa y nodo
  *    se desincronicen: el motor indexa por clave y la estrategia lee `nodeId`).
  * 3. Todo `nextStep` / `onErrorStep` no nulo resuelve a un nodo existente.
- * 4. Todo `outputNamespace` pertenece a `NODE_OUTPUT_NAMESPACES`. El formato ya
- *    lo comprueba el DTO; aqui se comprueba la PERTENENCIA, porque un namespace
- *    bien formado pero desconocido pasaria el esquema y solo reventaria despues,
- *    al guardar una plantilla que lo interpola.
+ * 4. Todo `outputNamespace` pertenece a `NODE_OUTPUT_NAMESPACES`, o es una copia
+ *    numerada de uno de ellos (`ocr_result_2`). El formato ya lo comprueba el
+ *    DTO; aqui se comprueba la PERTENENCIA, porque un namespace bien formado
+ *    pero desconocido pasaria el esquema y solo reventaria despues, al guardar
+ *    una plantilla que lo interpola.
  * 5. Ningun `outputNamespace` se repite: dos nodos escribiendo en el mismo
- *    namespace romperian la inmutabilidad del `StatePayloadContext`.
+ *    namespace romperian la inmutabilidad del `StatePayloadContext`. Es lo que
+ *    obliga a que el SEGUNDO nodo de un mismo tipo use una copia numerada.
  * 6. El camino activo desde `entrypoint` siguiendo `nextStep` termina en un nodo
  *    terminal (`nextStep === null`) sin revisitar ninguno.
  * 7. Todo namespace que un nodo del camino activo declara necesitar lo escribe
@@ -304,11 +306,11 @@ export const validatePipelineTopology = (
       }
     }
 
-    if (!NODE_OUTPUT_NAMESPACE_SET.has(node.outputNamespace)) {
+    if (!isAllowedOutputNamespace(node.outputNamespace)) {
       issues.push({
         field: `nodes.${key}.outputNamespace`,
         constraints: [
-          `El namespace "${node.outputNamespace}" no esta permitido. Solo se admiten: ${NODE_OUTPUT_NAMESPACES.join(', ')}.`,
+          `El namespace "${node.outputNamespace}" no esta permitido. Solo se admiten: ${NODE_OUTPUT_NAMESPACES.join(', ')}, o una copia numerada de uno de ellos (por ejemplo "ocr_result_2").`,
         ],
       });
     }

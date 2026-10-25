@@ -103,6 +103,59 @@ describe('AuditTrailView', () => {
     expect(fetchAuditEvents).toHaveBeenCalledWith(expect.objectContaining({ offset: 0 }));
   });
 
+  it('1.2b la cabecera deberia reflejar el orden que tiene el store', async () => {
+    // 1. Arrange 📐: ESTE es el defecto que arregla `v-model:pagination`.
+    //    Quasar solo fusiona la prop `pagination` en su estado interno cuando
+    //    existe un listener `onUpdate:pagination`; ligada en una sola
+    //    direccion valia como valor inicial y nada mas, asi que la cabecera
+    //    llevaba su propio orden y el store el de la consulta, y la flecha
+    //    acababa senalando un orden que los datos no tenian.
+    vi.mocked(fetchAuditEvents).mockResolvedValue({
+      items: [buildEvent()],
+      total: 1,
+      limit: 25,
+      offset: 0,
+    });
+    const wrapper = mountView();
+    await flushPromises();
+
+    // 2. Act ⚙️: el orden entra por el store, como tras recargar la vista.
+    useAuditStore().setSort({ sortBy: 'user', descending: true });
+    await flushPromises();
+
+    // 3. Assert 🎯: la columna ordenada es la del store, y en descendente.
+    const header = wrapper.findAll('thead th').find((th) => th.text().includes('Usuario'));
+    expect(header?.classes()).toContain('sorted');
+    expect(header?.classes()).toContain('sort-desc');
+  });
+
+  it('1.2c pulsar una cabecera deberia pedir al servidor ese mismo orden', async () => {
+    // 1. Arrange 📐: el orden se resuelve en el SERVIDOR, sobre el historial
+    //    entero. Ordenar en cliente solo reordenaria las 25 filas cargadas.
+    vi.mocked(fetchAuditEvents).mockResolvedValue({
+      items: [buildEvent()],
+      total: 1,
+      limit: 25,
+      offset: 0,
+    });
+    const wrapper = mountView();
+    await flushPromises();
+    vi.mocked(fetchAuditEvents).mockClear();
+
+    // 2. Act ⚙️
+    const header = wrapper.findAll('thead th').find((th) => th.text().includes('Usuario'));
+    await header?.trigger('click');
+    await flushPromises();
+
+    // 3. Assert 🎯: primera pulsacion, ascendente, y la cabecera lo dice.
+    expect(fetchAuditEvents).toHaveBeenCalledWith(
+      expect.objectContaining({ sortBy: 'user', sortOrder: 'ASC' }),
+    );
+    expect(useAuditStore().sort).toEqual({ sortBy: 'user', descending: false });
+    expect(header?.classes()).toContain('sorted');
+    expect(header?.classes()).not.toContain('sort-desc');
+  });
+
   it('1.3 deberia abrir el detalle del evento al pulsar su boton', async () => {
     // 1. Arrange 📐
     vi.mocked(fetchAuditEvents).mockResolvedValue({

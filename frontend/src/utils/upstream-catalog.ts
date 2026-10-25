@@ -1,5 +1,5 @@
 import { ASSETS_NAMESPACE, ASSETS_FIELDS } from '@/types/html-template';
-import { DEFAULT_OUTPUT_NAMESPACE_BY_NODE_TYPE } from '@/types/pipeline';
+import { baseOutputNamespace, DEFAULT_OUTPUT_NAMESPACE_BY_NODE_TYPE } from '@/types/pipeline';
 
 import type { UpstreamNamespace } from '@stores/nodes/node-store-registry';
 
@@ -59,7 +59,11 @@ export const buildContextForNamespaces = (
       return { namespace, fields: ASSETS_FIELDS };
     }
 
-    const nodeType = NODE_TYPE_BY_NAMESPACE[namespace];
+    // Por la BASE: los campos que publica `ocr_result_2` son los que el
+    // catalogo declara para `ocr_result`. Buscar por el nombre literal dejaba a
+    // la segunda copia de un nodo colgando en el explorador sin un solo campo
+    // debajo, que es indistinguible de un namespace que nadie escribe.
+    const nodeType = NODE_TYPE_BY_NAMESPACE[baseOutputNamespace(namespace)];
     const entry = nodeType === undefined ? null : findByCode(nodeType);
 
     return {

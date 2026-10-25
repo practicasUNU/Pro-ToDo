@@ -72,13 +72,33 @@ const columns: QTableColumn<TelemetryHistoryItem>[] = [
   },
 ];
 
-const pagination = computed(() => ({
-  page: Math.floor(telemetryStore.historyOffset / telemetryStore.historyLimit) + 1,
-  rowsPerPage: telemetryStore.historyLimit,
-  rowsNumber: telemetryStore.historyTotal,
-  sortBy: telemetryStore.historySort.sortBy,
-  descending: telemetryStore.historySort.descending,
-}));
+/**
+ * Paginacion de la tabla, con el STORE como unica fuente de verdad.
+ *
+ * Escribible y ligada con `v-model:pagination` y no con `:pagination` a secas:
+ * Quasar solo fusiona esta prop en su estado interno cuando existe un listener
+ * `onUpdate:pagination`. Sin el, la prop valia como valor INICIAL y nada mas, de
+ * modo que a partir del primer repintado la cabecera llevaba su propio
+ * `sortBy`/`descending` y el store llevaba el de la consulta: dos estados que
+ * divergian, y la flecha acababa senalando un orden que los datos no tenian.
+ *
+ * El `set` solo recoge el criterio de orden. La pagina la sigue pidiendo
+ * `onRequest`, y el `get` la refleja cuando el store ya tiene la respuesta.
+ */
+const pagination = computed<NonNullable<QTableProps['pagination']>>({
+  get: () => ({
+    page: Math.floor(telemetryStore.historyOffset / telemetryStore.historyLimit) + 1,
+    rowsPerPage: telemetryStore.historyLimit,
+    rowsNumber: telemetryStore.historyTotal,
+    sortBy: telemetryStore.historySort.sortBy,
+    descending: telemetryStore.historySort.descending,
+  }),
+  set: (next) => {
+    telemetryStore.setHistorySort(
+      toTableSort(TELEMETRY_HISTORY_SORT_KEYS, next.sortBy, next.descending ?? false),
+    );
+  },
+});
 
 const loadPage = async (page: { limit: number; offset: number }): Promise<void> => {
   try {
@@ -117,7 +137,7 @@ const onRequest: QTableProps['onRequest'] = ({ pagination: requested }) => {
     :columns="columns"
     row-key="id"
     :loading="telemetryStore.isLoadingHistory"
-    :pagination="pagination"
+    v-model:pagination="pagination"
     :rows-per-page-options="[25, 50, 100]"
     rows-per-page-label="Filas por página"
     no-data-label="No hay inferencias registradas en el periodo."

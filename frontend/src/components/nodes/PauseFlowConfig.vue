@@ -2,7 +2,10 @@
 import { computed } from 'vue';
 
 import { usePauseFlowStore } from '@stores/nodes/pause-flow.store';
+
+import { useRecipientsInput } from '@/composables/useRecipientsInput';
 import { isEmailAddress } from '@/utils/email-address';
+import { MAX_ALERT_RECIPIENTS } from '@/types/nodes/smtp-alert.types';
 import { NODE_TYPE_LABELS, NodeType } from '@/types/pipeline';
 import {
   MAX_PAUSE_DELAY_SECONDS,
@@ -27,7 +30,28 @@ const MODE_OPTIONS = [
 
 const DELAY_HINT = `Entre 1 y ${MAX_PAUSE_DELAY_SECONDS} segundos (${MAX_PAUSE_DELAY_SECONDS / 60} minutos)`;
 
-const RECIPIENT_HINT = 'Quien debe enterarse de que el flujo quedo a la espera';
+const RECIPIENT_HINT = `Quien debe enterarse de que el flujo quedo a la espera. Escribe una direccion y pulsa Enter o coma. Hasta ${MAX_ALERT_RECIPIENTS} destinatarios.`;
+
+const RECIPIENTS_RULE = 'Todas las direcciones deben tener formato de correo valido';
+
+/** Direcciones invalidas, nombradas una a una en vez de con un aviso generico. */
+const invalidSummary = computed<string>(() => store.invalidRecipients.join(', '));
+
+// Mismas tres vias de entrada que el nodo de alerta, por el mismo composable:
+// una lista de correos se escribe igual se este avisando de un fallo o de una
+// pausa, y dos implementaciones habrian aceptado pegados distintos.
+const {
+  typed: typedRecipient,
+  commitTyped: commitTypedAddress,
+  onKeydown: onRecipientKeydown,
+  onPaste: onPasteRecipients,
+} = useRecipientsInput({
+  current: () => store.config.notificationRecipients,
+  commit: (notificationRecipients) => {
+    store.updateConfig({ notificationRecipients });
+  },
+  max: MAX_ALERT_RECIPIENTS,
+});
 
 /**
  * Aviso de que nadie reanuda solo.
@@ -141,22 +165,49 @@ const delayFieldClass = computed<string>(() => {
     <div v-if="store.config.notifyOnPause" class="row q-col-gutter-md items-start q-mb-md">
       <div class="col-12 col-md-6" data-test="recipient-field">
         <label class="pd-label" for="pause-flow-recipient">
-          Destinatario del aviso<span class="pd-required">*</span>
+          Destinatarios del aviso<span class="pd-required">*</span>
         </label>
-        <q-input
+        <!-- Selector con entrada libre, igual que el del nodo de alerta y por
+             la misma razon: no existe lista cerrada de direcciones de correo,
+             asi que la validez la decide la regla del campo. -->
+        <q-select
           id="pause-flow-recipient"
-          :model-value="store.config.notificationRecipient"
+          :model-value="store.config.notificationRecipients"
           outlined
           dense
-          type="email"
+          multiple
+          use-input
+          use-chips
+          hide-dropdown-icon
+          new-value-mode="add"
+          input-debounce="0"
+          :max-values="MAX_ALERT_RECIPIENTS"
           class="q-mt-xs"
           :hint="RECIPIENT_HINT"
           :rules="[
-            (val: string) => val.trim().length > 0 || 'Indica a quien avisar',
-            (val: string) => isEmailAddress(val.trim()) || 'No parece una direccion de correo',
+            (val: string[]) => val.length > 0 || 'Indica a quien avisar',
+            (val: string[]) => val.every(isEmailAddress) || RECIPIENTS_RULE,
           ]"
-          @update:model-value="store.updateConfig({ notificationRecipient: String($event) })"
+          @update:model-value="
+            store.updateConfig({ notificationRecipients: [...($event as string[])] })
+          "
+          @input-value="typedRecipient = $event"
+          @keydown="onRecipientKeydown"
+          @blur="commitTypedAddress"
+          @paste="onPasteRecipients"
         />
+        <q-banner
+          v-if="store.invalidRecipients.length > 0"
+          dense
+          class="pd-invalid-banner q-mt-sm"
+          role="alert"
+          data-test="invalid-recipients"
+        >
+          <template #avatar>
+            <q-icon name="error_outline" size="20px" class="pd-invalid-icon" />
+          </template>
+          <p class="pd-subtitle pd-mono q-mb-none">{{ invalidSummary }}</p>
+        </q-banner>
       </div>
     </div>
 

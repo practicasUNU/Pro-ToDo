@@ -131,6 +131,57 @@ export const DEFAULT_OUTPUT_NAMESPACE_BY_NODE_TYPE: Record<NodeType, string> = {
 };
 
 /**
+ * Copia numerada de un namespace base. Replica de
+ * `NODE_OUTPUT_NAMESPACE_COPY_PATTERN` del backend.
+ */
+const NODE_OUTPUT_NAMESPACE_COPY_PATTERN = /^(.+)_([2-9]|[1-9][0-9])$/;
+
+/** Busqueda O(1) sobre la lista cerrada de bases. */
+const NODE_OUTPUT_NAMESPACE_SET: ReadonlySet<string> = new Set(NODE_OUTPUT_NAMESPACES);
+
+/**
+ * Namespace base del que una clave es copia; ella misma si no lo es.
+ *
+ * Lo consultan los catalogos de variables: los campos que publica
+ * `ocr_result_2` son los que la estrategia declara para `ocr_result`, asi que
+ * sin esto la segunda copia de un nodo apareceria en el explorador sin ningun
+ * campo debajo.
+ */
+export const baseOutputNamespace = (namespace: string): string => {
+  const match = NODE_OUTPUT_NAMESPACE_COPY_PATTERN.exec(namespace);
+
+  return match?.[1] !== undefined && NODE_OUTPUT_NAMESPACE_SET.has(match[1]) ? match[1] : namespace;
+};
+
+/** La raiz pertenece a la lista cerrada, o es una copia numerada de una de ellas. */
+export const isAllowedOutputNamespace = (namespace: string): boolean =>
+  NODE_OUTPUT_NAMESPACE_SET.has(baseOutputNamespace(namespace));
+
+/**
+ * Primer namespace libre para un nodo del tipo dado.
+ *
+ * Hermano de `deriveNodeId` y con la misma forma, porque resuelven el mismo
+ * problema en dos dominios distintos: el id desambigua nodos dentro del grafo y
+ * el namespace desambigua ESCRITURAS en el contexto. Hasta ahora solo el id se
+ * desambiguaba, asi que anadir un segundo nodo del mismo tipo producia una
+ * topologia que el validador rechazaba al guardar (regla 5) y que el operador
+ * no podia arreglar: el selector solo ofrecia la base, ya ocupada.
+ *
+ * Devuelve la BASE mientras este libre; la copia 1 no existe a proposito.
+ */
+export const deriveOutputNamespace = (nodeType: NodeType, taken: readonly string[]): string => {
+  const base = DEFAULT_OUTPUT_NAMESPACE_BY_NODE_TYPE[nodeType];
+
+  if (!taken.includes(base)) return base;
+
+  let copy = 2;
+
+  while (taken.includes(`${base}_${copy}`)) copy += 1;
+
+  return `${base}_${copy}`;
+};
+
+/**
  * `params` base que se siembran al anadir un nodo a una PLANTILLA.
  *
  * Son valores de arranque de la topologia, no configuracion de operacion: el

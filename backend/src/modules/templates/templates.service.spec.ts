@@ -867,11 +867,30 @@ describe('TemplatesService', () => {
           // La lista se deriva de la constante y no se transcribe: anadir un
           // namespace nuevo no debe romper esta prueba, que verifica el
           // localizador de infracciones, no el contenido de la lista blanca.
-          message: `Namespace 'bad_ns' no permitido. Solo se admiten: ${ALLOWED_NAMESPACES.join(', ')}.`,
+          message: `Namespace 'bad_ns' no permitido. Solo se admiten: ${ALLOWED_NAMESPACES.join(', ')}, o una copia numerada de uno de ellos (por ejemplo 'ocr_result_2').`,
         },
       ]);
       expectVerbatimTarget(response, htmlContent);
       expect(repository.save).not.toHaveBeenCalled();
+    });
+
+    it('8.1b deberia admitir una copia numerada de un namespace permitido', async () => {
+      // 1. Arrange: es la otra mitad del cambio que deja repetir un tipo de
+      //    nodo. Si el validador de topologia aceptara `ocr_result_2` y este
+      //    gestor lo rechazara, el fallo se trasladaria del asistente —donde el
+      //    operador aun puede corregirlo— al guardado de la plantilla, que es
+      //    justo lo que la lista cerrada existe para evitar.
+      const repository = buildRepository();
+      const htmlContent = '<h1>{{ ocr_result_2.clean_body }}</h1>';
+
+      // 2. Act
+      await buildService(repository).create(
+        { name: 'copia-numerada', htmlContent },
+        AUTHOR_ID,
+      );
+
+      // 3. Assert
+      expect(repository.save).toHaveBeenCalled();
     });
 
     it('8.2 deberia localizar la sintaxis prohibida', async () => {

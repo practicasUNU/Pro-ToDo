@@ -4,15 +4,7 @@
 // store no necesitan DOM y arrancan mas rapido sin el.
 import { config, mount } from '@vue/test-utils';
 import { createPinia, setActivePinia } from 'pinia';
-import {
-  Notify,
-  QBanner,
-  QBtnToggle,
-  QIcon,
-  QInput,
-  QToggle,
-  Quasar,
-} from 'quasar';
+import { Notify, QBanner, QBtnToggle, QIcon, QInput, QSelect, QToggle, Quasar } from 'quasar';
 import { beforeEach, describe, expect, it } from 'vitest';
 
 import PauseFlowConfig from '@components/nodes/PauseFlowConfig.vue';
@@ -26,7 +18,7 @@ const RECIPIENT = 'operaciones@unuware.com';
 let nodeCounter = 0;
 const nextNodeId = (): string => `pause_flow_view_${(nodeCounter += 1)}`;
 
-const QUASAR_COMPONENTS = { QBanner, QBtnToggle, QIcon, QInput, QToggle };
+const QUASAR_COMPONENTS = { QBanner, QBtnToggle, QIcon, QInput, QSelect, QToggle };
 
 const mountComponent = (nodeId: string): ReturnType<typeof mount> =>
   mount(PauseFlowConfig, {
@@ -56,9 +48,7 @@ describe('PauseFlowConfig · configurador del nodo PAUSA_FLOW', () => {
       const wrapper = mountComponent(nextNodeId());
 
       // 2. Act ⚙️ + 3. Assert 🎯
-      expect(wrapper.get('[data-test="resume-notice"]').text()).toContain(
-        'No se reanuda solo',
-      );
+      expect(wrapper.get('[data-test="resume-notice"]').text()).toContain('No se reanuda solo');
     });
 
     it('1.3 NO deberia pintar el retardo en modo inmediato', () => {
@@ -123,9 +113,7 @@ describe('PauseFlowConfig · configurador del nodo PAUSA_FLOW', () => {
       await wrapper.vm.$nextTick();
 
       // 3. Assert 🎯
-      expect(wrapper.get('[data-test="delay-field"]').html()).toContain(
-        'pd-field--out-of-range',
-      );
+      expect(wrapper.get('[data-test="delay-field"]').html()).toContain('pd-field--out-of-range');
     });
 
     it('2.4 deberia marcar el campo en rango con un valor valido', async () => {
@@ -139,9 +127,7 @@ describe('PauseFlowConfig · configurador del nodo PAUSA_FLOW', () => {
       await wrapper.vm.$nextTick();
 
       // 3. Assert 🎯
-      expect(wrapper.get('[data-test="delay-field"]').html()).toContain(
-        'pd-field--in-range',
-      );
+      expect(wrapper.get('[data-test="delay-field"]').html()).toContain('pd-field--in-range');
     });
   });
 
@@ -172,12 +158,55 @@ describe('PauseFlowConfig · configurador del nodo PAUSA_FLOW', () => {
       // 2. Act ⚙️
       await wrapper
         .get('[data-test="recipient-field"]')
-        .findComponent(QInput)
-        .setValue(RECIPIENT);
+        .findComponent(QSelect)
+        .setValue([RECIPIENT]);
 
       // 3. Assert 🎯
-      expect(store.config.notificationRecipient).toBe(RECIPIENT);
+      expect(store.config.notificationRecipients).toEqual([RECIPIENT]);
       expect(store.isConfigValid).toBe(true);
+    });
+
+    it('3.3 deberia admitir varias direcciones a la vez', async () => {
+      // 1. Arrange 📐: el aviso de pausa espera a un EQUIPO, no a un buzon. Con
+      //    un solo destinatario, una ausencia dejaba el flujo congelado sin que
+      //    nadie se enterase.
+      const nodeId = nextNodeId();
+      const wrapper = mountComponent(nodeId);
+      const store = usePauseFlowStore(nodeId);
+      const second = 'redaccion@unuware.com';
+
+      store.updateConfig({ notifyOnPause: true });
+      await wrapper.vm.$nextTick();
+
+      // 2. Act ⚙️
+      await wrapper
+        .get('[data-test="recipient-field"]')
+        .findComponent(QSelect)
+        .setValue([RECIPIENT, second]);
+
+      // 3. Assert 🎯
+      expect(store.config.notificationRecipients).toEqual([RECIPIENT, second]);
+      expect(store.toNodeParams().notificationRecipients).toEqual([RECIPIENT, second]);
+      expect(store.isConfigValid).toBe(true);
+    });
+
+    it('3.4 deberia nombrar una a una las direcciones invalidas', async () => {
+      // 1. Arrange 📐: un "hay un correo invalido" generico obliga a revisar
+      //    los chips de uno en uno a ojo.
+      const nodeId = nextNodeId();
+      const wrapper = mountComponent(nodeId);
+      const store = usePauseFlowStore(nodeId);
+
+      // 2. Act ⚙️
+      store.updateConfig({
+        notifyOnPause: true,
+        notificationRecipients: [RECIPIENT, 'no-es-un-correo'],
+      });
+      await wrapper.vm.$nextTick();
+
+      // 3. Assert 🎯
+      expect(wrapper.get('[data-test="invalid-recipients"]').text()).toContain('no-es-un-correo');
+      expect(store.isConfigValid).toBe(false);
     });
   });
 });

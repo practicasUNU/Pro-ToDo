@@ -5,7 +5,7 @@ import { nodeBaseParamsRegistry } from '@components/nodes/node-base-params-regis
 
 import { useSelectFilter } from '@/composables/useSelectFilter';
 
-import { NODE_OUTPUT_NAMESPACES, NodeType } from '@/types/pipeline';
+import { NodeType } from '@/types/pipeline';
 import { actionsForNodeType, ERROR_BRANCH_ACTIONS } from '@/types/nodes/error-branch.types';
 
 import type { AssemblerStep } from '@/utils/pipeline-assembler';
@@ -27,6 +27,13 @@ interface Props {
    * declarado una ruta de contingencia, y la ficha solo conoce el suyo.
    */
   baseParamsLocked: boolean;
+  /**
+   * Namespaces que este selector puede ofrecer, copias numeradas incluidas.
+   *
+   * Llega como prop porque el conjunto legal depende de lo que escriben los
+   * DEMAS pasos: la ficha no puede saber si `ocr_result` ya esta tomado.
+   */
+  namespaceOptions: readonly string[];
 }
 
 const props = defineProps<Props>();
@@ -57,7 +64,7 @@ const hasErrorBranch = computed<boolean>(() => props.errorBranch !== null);
 // Filtrado predictivo sobre la lista blanca de namespaces. Sigue CERRADA: sin
 // `new-value-mode`, teclear recorta las opciones pero no da de alta ninguna.
 const { filteredOptions: filteredNamespaceOptions, filterFn: filterNamespaces } = useSelectFilter(
-  () => [...NODE_OUTPUT_NAMESPACES],
+  () => [...props.namespaceOptions],
 );
 
 const actionOptions = computed(() =>

@@ -1,10 +1,10 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue';
-import { useQuasar } from 'quasar';
+import { computed } from 'vue';
 
 import { useSmtpAlertStore } from '@stores/nodes/smtp-alert.store';
 
-import { isEmailAddress, parseEmailList } from '@/utils/email-address';
+import { useRecipientsInput } from '@/composables/useRecipientsInput';
+import { isEmailAddress } from '@/utils/email-address';
 
 import { NODE_TYPE_LABELS, NodeType } from '@/types/pipeline';
 import {
@@ -24,17 +24,6 @@ const props = defineProps<Props>();
 // El store se resuelve POR NODO: dos alertas en el mismo flujo —una al equipo
 // tecnico, otra al responsable del contenido— tienen cada una sus destinatarios.
 const store = useSmtpAlertStore(props.nodeId);
-
-const $q = useQuasar();
-
-/**
- * Lo que hay escrito en el campo y todavia NO es un chip.
- *
- * QSelect no lo expone: `update:model-value` solo se emite al confirmar, asi
- * que sin espejarlo aqui un correo tecleado y no confirmado se pierde al pulsar
- * Guardar mientras la pantalla lo sigue mostrando.
- */
-const typedRecipient = ref('');
 
 // Mensajes como constantes: varios los comparten la regla del campo y la ayuda
 // bajo el input, y duplicarlos los dejaria divergir.
@@ -57,87 +46,21 @@ const FREE_TEXT_NOTICE =
 /** Direcciones invalidas, nombradas una a una en vez de con un aviso generico. */
 const invalidSummary = computed<string>(() => store.invalidRecipients.join(', '));
 
-/**
- * Confirma lo tecleado como chip, avisando si no tiene forma de correo.
- *
- * `notify` es la diferencia con el pegado: aqui el operador ha pulsado Enter o
- * coma, es decir, ha AFIRMADO que eso es una direccion. Descartarla en silencio
- * —como se hace con el ruido de un pegado— dejaria el campo vacio sin explicar
- * por que, que es justo el fallo que el Poka-Yoke debe evitar.
- */
-const commitTypedAddress = (): void => {
-  const raw = typedRecipient.value.trim();
-
-  if (raw === '') return;
-
-  const parsed = parseEmailList(raw);
-
-  if (parsed.length === 0) {
-    $q.notify({
-      type: 'negative',
-      message: `"${raw}" no tiene formato de correo valido`,
-    });
-    return;
-  }
-
-  addRecipients(parsed);
-  typedRecipient.value = '';
-};
-
-/**
- * Intercepta Enter y la coma para cerrar el chip.
- *
- * La coma entra aqui porque es el separador con el que la gente escribe una
- * lista de correos de memoria; sin interceptarla quedaria DENTRO del chip
- * ("a@x.com,") y el backend devolveria un 400 sobre el esquema entero.
- */
-const onRecipientKeydown = (event: KeyboardEvent): void => {
-  if (event.key !== 'Enter' && event.key !== ',') return;
-
-  // Se corta el comportamiento nativo de QSelect: `new-value-mode` registraria
-  // la cadena cruda, sin recortar ni validar, antes de que esto la revise.
-  event.preventDefault();
-  commitTypedAddress();
-};
-
-/**
- * Anade direcciones ya validadas, sin repetir y respetando el tope.
- *
- * Centraliza las dos vias de entrada —lo tecleado y lo pegado— para que no
- * puedan divergir: si solo una saneara, el operador tendria una forma de colar
- * basura y ninguna pista de cual de las dos era.
- */
-const addRecipients = (candidates: readonly string[]): void => {
-  const merged = [
-    ...new Set([...store.config.to, ...candidates].map((address) => address.trim())),
-  ].slice(0, MAX_ALERT_RECIPIENTS);
-
-  if (merged.length === store.config.to.length) return;
-
-  store.updateConfig({ to: merged });
-};
-
-/**
- * Intercepta el pegado de una lista de correos.
- *
- * Sin esto, pegar "a@x.com, b@y.com" registraba la cadena ENTERA como una unica
- * direccion: `new-value-mode` no parte por separadores, y el chip
- * resultante solo se descubria invalido al guardar, con un 400 del backend
- * sobre el esquema completo.
- */
-const onPasteRecipients = (event: ClipboardEvent): void => {
-  const raw = event.clipboardData?.getData('text') ?? '';
-  const parsed = parseEmailList(raw);
-
-  // Sin direcciones reconocibles se deja pasar el pegado tal cual: puede ser un
-  // correo unico a medio escribir que el operador va a completar a mano, y
-  // tragarselo en silencio seria peor que mostrarlo.
-  if (parsed.length === 0) return;
-
-  event.preventDefault();
-  typedRecipient.value = '';
-  addRecipients(parsed);
-};
+// Las tres vias de entrada (teclear, salir del campo, pegar) viven en el
+// composable: el nodo de pausa programada pide exactamente lo mismo, y una
+// segunda copia de estas politicas habria divergido en silencio.
+const {
+  typed: typedRecipient,
+  commitTyped: commitTypedAddress,
+  onKeydown: onRecipientKeydown,
+  onPaste: onPasteRecipients,
+} = useRecipientsInput({
+  current: () => store.config.to,
+  commit: (to) => {
+    store.updateConfig({ to });
+  },
+  max: MAX_ALERT_RECIPIENTS,
+});
 </script>
 
 <template>

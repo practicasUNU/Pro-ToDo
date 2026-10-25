@@ -10,7 +10,7 @@ import NodeBranchCard from '@components/nodes/common/NodeBranchCard.vue';
 import PipelineSelector from '@components/wizard/PipelineSelector.vue';
 import SaveWarningsDialog from '@components/wizard/SaveWarningsDialog.vue';
 
-import { extractApiErrorMessage } from '@/utils/api-error';
+import { extractApiErrorMessage, extractApiIssues } from '@/utils/api-error';
 
 import { MULTIMODAL_FALLBACK_CODE } from '@/types/nodes/error-branch.types';
 
@@ -191,6 +191,32 @@ const confirmSaveWithWarnings = (warnings: readonly StepWarning[]): Promise<bool
       });
   });
 
+/**
+ * Mensaje del fallo al guardar, con el detalle que trae el validador.
+ *
+ * El 400 del validador de topologia no viaja en `message` sino en `issues`
+ * (`{ path, message }`), de modo que leer solo `message` dejaba al operador con
+ * un "No se pudo guardar el flujo" a secas mientras el servidor habia dicho
+ * exactamente que namespace faltaba y en que nodo.
+ *
+ * Se nombra el PRIMERO y se cuentan los demas: el asistente no tiene un editor
+ * donde iluminar las rutas —eso es cosa del dialogo de plantillas de flujo, que
+ * usa los mismos `issues` para subrayar el JSON—, y volcar media docena de
+ * mensajes en un `notify` no se lee.
+ */
+const describeSaveFailure = (error: unknown, fallback: string): string => {
+  const issues = extractApiIssues(error);
+  const [first] = issues;
+
+  if (first === undefined) {
+    return extractApiErrorMessage(error, fallback);
+  }
+
+  return issues.length === 1
+    ? `${fallback}: ${first.message}`
+    : `${fallback}: ${first.message} (y ${issues.length - 1} error(es) mas)`;
+};
+
 const onSaveWorkflow = async (): Promise<void> => {
   const editing = isEditMode.value;
 
@@ -241,7 +267,7 @@ const onSaveWorkflow = async (): Promise<void> => {
   } catch (error) {
     $q.notify({
       type: 'negative',
-      message: extractApiErrorMessage(
+      message: describeSaveFailure(
         error,
         editing ? 'No se pudo guardar el flujo' : 'No se pudo crear el flujo',
       ),

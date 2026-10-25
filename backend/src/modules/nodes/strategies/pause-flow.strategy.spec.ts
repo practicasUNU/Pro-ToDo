@@ -286,7 +286,7 @@ describe('PauseFlowStrategy (nodo de pausa deliberada)', () => {
 
       // 2. Act ⚙️ & 3. Assert 🎯
       expect(strategy.getIncompleteParams({ notifyOnPause: true })).toEqual([
-        'notificationRecipient',
+        'notificationRecipients',
       ]);
     });
 

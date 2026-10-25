@@ -1,6 +1,9 @@
 import { defineStore, acceptHMRUpdate } from 'pinia';
 import { computed, ref } from 'vue';
 
+import { DEFAULT_CRON_SCHEDULE_MODE, deriveCronScheduleMode } from '@/utils/cron-schedule-mode';
+
+import type { CronScheduleMode } from '@/utils/cron-schedule-mode';
 import type { HydratableNode } from '@stores/nodes/node-store-registry';
 
 /** Zona horaria por defecto, la misma que asume el backend. */
@@ -135,10 +138,31 @@ const STORE_ID_PREFIX = 'triggerCronNode';
 const triggerCronSetup = () => {
   const config = ref<TriggerCronConfig>(buildInitialConfig());
 
+  /**
+   * Modo del formulario: asistente de intervalos o expresion a mano.
+   *
+   * NO se publica en `toNodeParams`: el DTO valida con `forbidNonWhitelisted`,
+   * asi que una clave de mas seria un 400. Vive en el store y no en el
+   * componente porque tiene que sobrevivir a `hydrateFromNode`, que es cuando
+   * se deduce de la forma de la expresion guardada.
+   */
+  const scheduleMode = ref<CronScheduleMode>(DEFAULT_CRON_SCHEDULE_MODE);
+
+  /**
+   * Cambia de modo SIN reinterpretar la expresion.
+   *
+   * Pasar a manual conserva el intervalo elegido como punto de partida, y
+   * volver al asistente no reescribe nada: si la expresion ya no es uno de los
+   * intervalos, el selector sale sin seleccion y el operador elige. Reescribirla
+   * al conmutar perderia en silencio una programacion que alguien afino a mano.
+   */
+  const setScheduleMode = (mode: CronScheduleMode): void => {
+    scheduleMode.value = mode;
+  };
+
   const isConfigValid = computed<boolean>(
     () =>
-      isLikelyCronExpression(config.value.cronExpression) &&
-      isIanaTimeZone(config.value.timeZone),
+      isLikelyCronExpression(config.value.cronExpression) && isIanaTimeZone(config.value.timeZone),
   );
 
   const patchConfig = (patch: Partial<TriggerCronConfig>): void => {
@@ -175,16 +199,22 @@ const triggerCronSetup = () => {
       cronExpression: asText(params.cronExpression),
       timeZone: asText(params.timeZone) || DEFAULT_CRON_TIMEZONE,
     };
+
+    // El modo se DEDUCE, no se lee: no esta persistido y no puede estarlo.
+    scheduleMode.value = deriveCronScheduleMode(config.value.cronExpression);
   };
 
   const resetConfig = (): void => {
     config.value = buildInitialConfig();
+    scheduleMode.value = DEFAULT_CRON_SCHEDULE_MODE;
   };
 
   return {
     config,
+    scheduleMode,
     isConfigValid,
     patchConfig,
+    setScheduleMode,
     toNodeParams,
     hydrateFromNode,
     resetConfig,

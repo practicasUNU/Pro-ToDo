@@ -23,12 +23,7 @@ import {
 import { formatDateTime } from '@/utils/date-format';
 import { toTableSort } from '@/utils/table-sort';
 import { AUDIT_SORT_KEYS } from '@/types/sort';
-import {
-  datePickerBounds,
-  defaultDateRange,
-  isFutureDate,
-  toIsoRange,
-} from '@/utils/date-range';
+import { datePickerBounds, defaultDateRange, isFutureDate, toIsoRange } from '@/utils/date-range';
 
 import type { QTableColumn, QTableProps } from 'quasar';
 import type { AuditActionValue, AuditEvent, AuditTableValue } from '@/types/audit';
@@ -130,17 +125,35 @@ const columns: QTableColumn<AuditEvent>[] = [
   { name: 'details', label: 'Detalle', field: 'id', align: 'center' },
 ];
 
-const pagination = computed(() => ({
-  page: Math.floor(auditStore.offset / auditStore.limit) + 1,
-  rowsPerPage: auditStore.limit,
-  rowsNumber: auditStore.total,
-  // Sin estos dos, QTable no pinta la flecha de la cabecera aunque la columna
-  // sea `sortable` y el orden si se este aplicando. `null` y no `undefined`:
-  // con `exactOptionalPropertyTypes` activo, el tipo de QTable admite el nulo
-  // pero no la ausencia explicita.
-  sortBy: auditStore.sort.sortBy,
-  descending: auditStore.sort.descending,
-}));
+/**
+ * Paginacion de la tabla, con el STORE como unica fuente de verdad.
+ *
+ * Escribible y ligada con `v-model:pagination` y no con `:pagination` a secas:
+ * Quasar solo fusiona esta prop en su estado interno cuando existe un listener
+ * `onUpdate:pagination`. Sin el, la prop valia como valor INICIAL y nada mas, de
+ * modo que a partir del primer repintado la cabecera llevaba su propio
+ * `sortBy`/`descending` y el store llevaba el de la consulta: dos estados que
+ * divergian, y la flecha acababa senalando un orden que los datos no tenian.
+ *
+ * El `set` solo recoge el criterio de orden. La pagina la sigue pidiendo
+ * `onRequest`, y el `get` la refleja cuando el store ya tiene la respuesta.
+ */
+const pagination = computed<NonNullable<QTableProps['pagination']>>({
+  get: () => ({
+    page: Math.floor(auditStore.offset / auditStore.limit) + 1,
+    rowsPerPage: auditStore.limit,
+    rowsNumber: auditStore.total,
+    // Sin estos dos, QTable no pinta la flecha de la cabecera aunque la columna
+    // sea `sortable` y el orden si se este aplicando. `null` y no `undefined`:
+    // con `exactOptionalPropertyTypes` activo, el tipo de QTable admite el nulo
+    // pero no la ausencia explicita.
+    sortBy: auditStore.sort.sortBy,
+    descending: auditStore.sort.descending,
+  }),
+  set: (next) => {
+    auditStore.setSort(toTableSort(AUDIT_SORT_KEYS, next.sortBy, next.descending ?? false));
+  },
+});
 
 const isDetailsOpen = ref(false);
 const selectedEvent = ref<AuditEvent | null>(null);
@@ -361,7 +374,7 @@ usePanelRefresh(() => loadPage(), { entities: ['audit_eventos'] });
       :columns="columns"
       row-key="id"
       :loading="auditStore.isLoading"
-      :pagination="pagination"
+      v-model:pagination="pagination"
       :rows-per-page-options="[10, 25, 50, 100]"
       rows-per-page-label="Filas por página"
       no-data-label="No hay eventos de auditoría con estos filtros."

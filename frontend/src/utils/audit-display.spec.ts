@@ -1,6 +1,14 @@
 import { describe, expect, it } from 'vitest';
 
-import { changedKeys, formatSnapshot, labelAuditAction, toSelectOptions } from './audit-display';
+import { AuditActionValue } from '@/types/audit';
+
+import {
+  AUDIT_ACTION_BADGES,
+  changedKeys,
+  formatSnapshot,
+  labelAuditAction,
+  toSelectOptions,
+} from './audit-display';
 
 describe('audit-display', () => {
   it('1.1 changedKeys deberia listar solo lo que cambio, sin la contabilidad de auditoria', () => {
@@ -32,6 +40,14 @@ describe('audit-display', () => {
     expect(labelAuditAction('CAMBIO_ROL')).toBe('Cambio de rol');
     expect(labelAuditAction('CIERRE_SESION')).toBe('Cierre de sesión');
     expect(labelAuditAction('DESACTIVAR')).toBe('Desactivación');
+    // "Creación" y "Eliminación", NO "Alta" y "Baja": el vocabulario de la
+    // pantalla sigue al del enum de la base (`CREAR` / `ELIMINAR`), y las
+    // etiquetas del informe en CSV y PDF dicen exactamente lo mismo.
+    expect(labelAuditAction('CREAR')).toBe('Creación');
+    expect(labelAuditAction('ELIMINAR')).toBe('Eliminación');
+    // La eliminacion se pinta en rojo; desactivar NO, que no es borrar.
+    expect(AUDIT_ACTION_BADGES[AuditActionValue.DELETE]).toBe('pd-badge--negative');
+    expect(AUDIT_ACTION_BADGES[AuditActionValue.DEACTIVATE]).toBe('pd-badge--inactive');
     expect(labelAuditAction('OTRA')).toBe('OTRA');
     expect(toSelectOptions({ A: 'Uno' })).toEqual([{ label: 'Uno', value: 'A' }]);
   });

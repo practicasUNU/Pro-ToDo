@@ -92,15 +92,35 @@ const openLog = (execution: ExecutionSummary): void => {
   isLogViewerOpen.value = true;
 };
 
-const pagination = computed(() => ({
-  page: Math.floor(executionsStore.offset / executionsStore.limit) + 1,
-  rowsPerPage: executionsStore.limit,
-  rowsNumber: executionsStore.total,
-  // Sin estos dos, QTable no pinta la flecha de la cabecera. `null` y no
-  // `undefined`: con `exactOptionalPropertyTypes` QTable admite el nulo.
-  sortBy: executionsStore.sort.sortBy,
-  descending: executionsStore.sort.descending,
-}));
+/**
+ * Paginacion de la tabla, con el STORE como unica fuente de verdad.
+ *
+ * Escribible y ligada con `v-model:pagination` y no con `:pagination` a secas:
+ * Quasar solo fusiona esta prop en su estado interno cuando existe un listener
+ * `onUpdate:pagination`. Sin el, la prop valia como valor INICIAL y nada mas, de
+ * modo que a partir del primer repintado la cabecera llevaba su propio
+ * `sortBy`/`descending` y el store llevaba el de la consulta: dos estados que
+ * divergian, y la flecha acababa senalando un orden que los datos no tenian.
+ *
+ * El `set` solo recoge el criterio de orden. La pagina la sigue pidiendo
+ * `onRequest`, y el `get` la refleja cuando el store ya tiene la respuesta.
+ */
+const pagination = computed<NonNullable<QTableProps['pagination']>>({
+  get: () => ({
+    page: Math.floor(executionsStore.offset / executionsStore.limit) + 1,
+    rowsPerPage: executionsStore.limit,
+    rowsNumber: executionsStore.total,
+    // Sin estos dos, QTable no pinta la flecha de la cabecera. `null` y no
+    // `undefined`: con `exactOptionalPropertyTypes` QTable admite el nulo.
+    sortBy: executionsStore.sort.sortBy,
+    descending: executionsStore.sort.descending,
+  }),
+  set: (next) => {
+    executionsStore.setSort(
+      toTableSort(EXECUTION_SORT_KEYS, next.sortBy, next.descending ?? false),
+    );
+  },
+});
 
 const stateFilter = computed<ExecutionState | null>({
   get: () => executionsStore.filters.state ?? null,
@@ -127,9 +147,7 @@ const onRequest: QTableProps['onRequest'] = ({ pagination: requested }) => {
 
   // El orden viaja al backend, que lo valida contra su lista blanca y ordena
   // el historial ENTERO, no solo la pagina visible.
-  executionsStore.setSort(
-    toTableSort(EXECUTION_SORT_KEYS, requested.sortBy, requested.descending),
-  );
+  executionsStore.setSort(toTableSort(EXECUTION_SORT_KEYS, requested.sortBy, requested.descending));
 
   void loadPage({ limit: rowsPerPage, offset: (requested.page - 1) * rowsPerPage });
 };
@@ -158,7 +176,7 @@ onMounted(async () => {
     :columns="columns"
     row-key="executionId"
     :loading="executionsStore.isLoading"
-    :pagination="pagination"
+    v-model:pagination="pagination"
     :rows-per-page-options="compact ? [5] : [10, 25, 50]"
     rows-per-page-label="Filas por página"
     no-data-label="No hay ejecuciones registradas."

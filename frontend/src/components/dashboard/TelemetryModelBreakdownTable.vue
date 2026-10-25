@@ -1,7 +1,9 @@
 <script setup lang="ts">
+import { ref } from 'vue';
+
 import { formatInteger, formatUsd } from '@/utils/number-format';
 
-import type { QTableColumn } from 'quasar';
+import type { QTableColumn, QTableProps } from 'quasar';
 import type { ModelBreakdownRow } from '@/types/telemetry';
 
 /**
@@ -12,6 +14,20 @@ defineProps<{
   breakdown: readonly ModelBreakdownRow[];
   loading?: boolean;
 }>();
+
+/**
+ * Paginacion local de la tabla.
+ *
+ * Aqui el orden SI se resuelve en cliente —son una decena de filas ya cargadas,
+ * no una consulta paginada—, pero hace falta ligarla con `v-model` igual que en
+ * las tablas de servidor: un `:pagination` sin listener `onUpdate:pagination`
+ * es una prop que Quasar solo lee al montar, de modo que pulsar una cabecera no
+ * reordenaba nada en absoluto.
+ *
+ * `rowsPerPage: 0` significa "todas las filas", que es lo que permite que el
+ * orden alcance al desglose entero y no solo a una pagina.
+ */
+const pagination = ref<NonNullable<QTableProps['pagination']>>({ rowsPerPage: 0 });
 
 const columns: QTableColumn<ModelBreakdownRow>[] = [
   { name: 'aiProvider', label: 'Proveedor', field: 'aiProvider', align: 'left', sortable: true },
@@ -65,7 +81,7 @@ const columns: QTableColumn<ModelBreakdownRow>[] = [
     :columns="columns"
     :row-key="(row: ModelBreakdownRow) => `${row.aiProvider}:${row.aiModel}`"
     :loading="loading"
-    :pagination="{ rowsPerPage: 0 }"
+    v-model:pagination="pagination"
     hide-pagination
     no-data-label="No hay consumo de IA registrado en el periodo."
   >

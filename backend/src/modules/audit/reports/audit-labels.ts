@@ -3,9 +3,9 @@ import { AuditActionType } from '@modules/audit/enums/audit-action.enum';
 
 /** Etiquetas en castellano de las acciones, para los informes. */
 export const AUDIT_ACTION_LABELS: Readonly<Record<AuditActionType, string>> = {
-  [AuditActionType.CREATE]: 'Alta',
+  [AuditActionType.CREATE]: 'Creación',
   [AuditActionType.UPDATE]: 'Modificación',
-  [AuditActionType.DELETE]: 'Baja',
+  [AuditActionType.DELETE]: 'Eliminación',
   [AuditActionType.ROLE_CHANGE]: 'Cambio de rol',
   [AuditActionType.LOGIN]: 'Inicio de sesión',
   [AuditActionType.LOGIN_FAILED]: 'Inicio de sesión fallido',

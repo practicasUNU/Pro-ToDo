@@ -68,6 +68,30 @@ const VALIDATION_OPTIONS: ValidatorOptions = {
 };
 
 /** Espera no bloqueante. Aislada para poder sustituirla en las pruebas. */
+/**
+ * Los `params` declaran al menos un destinatario, en cualquiera de las dos formas.
+ *
+ * `getIncompleteParams` recibe el JSON CRUDO del esquema guardado, no el DTO ya
+ * resuelto, asi que tiene que mirar las dos claves por su cuenta. Sin la forma
+ * heredada, un flujo guardado antes del cambio se declararia incompleto y
+ * `assertActivatable` lo dejaria sin poder armarse pese a tener su aviso bien
+ * configurado.
+ */
+const hasAnyRecipient = (params: Record<string, unknown>): boolean => {
+  const { notificationRecipients, notificationRecipient } = params;
+
+  if (Array.isArray(notificationRecipients)) {
+    return notificationRecipients.some(
+      (address) => typeof address === 'string' && address.trim().length > 0,
+    );
+  }
+
+  return (
+    typeof notificationRecipient === 'string' &&
+    notificationRecipient.trim().length > 0
+  );
+};
+
 const sleep = (milliseconds: number): Promise<void> =>
   new Promise((resolve) => setTimeout(resolve, milliseconds));
 
@@ -126,7 +150,8 @@ export class PauseFlowStrategy implements INodeStrategy {
     {
       name: 'notified',
       type: 'text',
-      description: 'Destinatario avisado por correo, o cadena vacia',
+      description:
+        'Destinatarios avisados por correo separados por coma, o cadena vacia',
     },
   ];
 
@@ -232,12 +257,8 @@ export class PauseFlowStrategy implements INodeStrategy {
   ): readonly string[] {
     const missing: string[] = [];
 
-    if (
-      params.notifyOnPause === true &&
-      (typeof params.notificationRecipient !== 'string' ||
-        params.notificationRecipient.trim().length === 0)
-    ) {
-      missing.push('notificationRecipient');
+    if (params.notifyOnPause === true && !hasAnyRecipient(params)) {
+      missing.push('notificationRecipients');
     }
 
     if (
@@ -265,7 +286,7 @@ export class PauseFlowStrategy implements INodeStrategy {
     config: ResolvedPauseFlowConfig,
     token: string | null,
   ): Promise<string> {
-    if (!config.notifyOnPause || config.notificationRecipient === null) {
+    if (!config.notifyOnPause || config.notificationRecipients.length === 0) {
       return '';
     }
 
@@ -291,16 +312,16 @@ export class PauseFlowStrategy implements INodeStrategy {
 
     try {
       await this.mailer.sendNodeAlert({
-        to: [config.notificationRecipient],
+        to: [...config.notificationRecipients],
         subject: `[PROTO-DO] Flujo pausado: ${flowName}`,
         text: buildAlertEmailText(letter),
         html: buildAlertEmailHtml(letter),
       });
 
-      return config.notificationRecipient;
+      return config.notificationRecipients.join(', ');
     } catch (error: unknown) {
       this.logger.warn(
-        `El aviso de pausa no pudo enviarse a ${config.notificationRecipient}: ${
+        `El aviso de pausa no pudo enviarse a ${config.notificationRecipients.join(', ')}: ${
           error instanceof Error ? error.message : 'causa desconocida'
         }. La pausa se aplica igualmente.`,
       );

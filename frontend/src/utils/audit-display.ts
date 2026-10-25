@@ -6,9 +6,9 @@ import { AuditActionValue, AuditTableValue } from '@/types/audit';
 import type { AuditSnapshot } from '@/types/audit';
 
 export const AUDIT_ACTION_LABELS: Readonly<Record<AuditActionValue, string>> = {
-  [AuditActionValue.CREATE]: 'Alta',
+  [AuditActionValue.CREATE]: 'Creación',
   [AuditActionValue.UPDATE]: 'Modificación',
-  [AuditActionValue.DELETE]: 'Baja',
+  [AuditActionValue.DELETE]: 'Eliminación',
   [AuditActionValue.ROLE_CHANGE]: 'Cambio de rol',
   [AuditActionValue.LOGIN]: 'Inicio de sesión',
   [AuditActionValue.LOGIN_FAILED]: 'Inicio de sesión fallido',
@@ -34,7 +34,10 @@ export const AUDIT_TABLE_LABELS: Readonly<Record<AuditTableValue, string>> = {
 export const AUDIT_ACTION_BADGES: Readonly<Record<AuditActionValue, string>> = {
   [AuditActionValue.CREATE]: 'pd-badge--active',
   [AuditActionValue.UPDATE]: 'pd-badge--role',
-  [AuditActionValue.DELETE]: 'pd-badge--inactive',
+  // Rojo y no el gris de "inactivo": una eliminacion es irreversible y es lo
+  // que un auditor busca primero. `DEACTIVATE` SI se queda en gris, porque
+  // desactivar no es borrar y pintarlas igual las volveria indistinguibles.
+  [AuditActionValue.DELETE]: 'pd-badge--negative',
   [AuditActionValue.ROLE_CHANGE]: 'pd-badge--paused',
   [AuditActionValue.LOGIN]: 'pd-badge--running',
   [AuditActionValue.LOGIN_FAILED]: 'pd-badge--failed',

@@ -12,7 +12,11 @@ import { extractApiErrorMessage } from '@/utils/api-error';
 import { NODE_CATEGORY_LABELS, NodeCategory } from '@/types/node-catalog';
 import { withBaseParamDefaults } from '@/utils/node-base-params';
 
-import { DEFAULT_OUTPUT_NAMESPACE_BY_NODE_TYPE, TRIGGER_NODE_TYPES } from '@/types/pipeline';
+import {
+  deriveOutputNamespace,
+  NODE_OUTPUT_NAMESPACES,
+  TRIGGER_NODE_TYPES,
+} from '@/types/pipeline';
 
 import type { AssemblerStep } from '@/utils/pipeline-assembler';
 import type { NodeCatalogEntry } from '@/types/node-catalog';
@@ -139,6 +143,33 @@ const deriveNodeId = (code: string, taken: readonly string[]): string => {
   return `${base}_${suffix}`;
 };
 
+/**
+ * Namespaces que el selector de cada tarjeta puede ofrecer.
+ *
+ * Se calcula AQUI y no en la tarjeta porque depende de la secuencia entera y
+ * una tarjeta solo conoce su paso. Son tres conjuntos: las bases de la lista
+ * cerrada, los namespaces ya en uso —para que el valor actual de cada tarjeta
+ * siempre figure entre sus opciones— y, por cada base ocupada, la PRIMERA copia
+ * libre. Sin esa tercera parte el selector no ofreceria ninguna salida al
+ * choque que el propio operador tiene que resolver: veria la base ya tomada y
+ * ninguna alternativa legal.
+ *
+ * Sigue siendo una lista cerrada (§4): se ofrece la copia siguiente, no todas
+ * las imaginables, y ningun `new-value-mode` da de alta lo que se teclee.
+ */
+const namespaceOptions = computed<string[]>(() => {
+  const taken = props.modelValue.map((step) => step.outputNamespace);
+  const nextCopies = NODE_OUTPUT_NAMESPACES.filter((base) => taken.includes(base)).map((base) => {
+    let copy = 2;
+
+    while (taken.includes(`${base}_${copy}`)) copy += 1;
+
+    return `${base}_${copy}`;
+  });
+
+  return [...new Set([...NODE_OUTPUT_NAMESPACES, ...taken, ...nextCopies])];
+});
+
 const emitSequence = (steps: AssemblerStep[]): void => {
   emit('update:modelValue', steps);
 };
@@ -146,11 +177,13 @@ const emitSequence = (steps: AssemblerStep[]): void => {
 /**
  * Anade el nodo elegido al final de la secuencia.
  *
- * El namespace por defecto NO se desambigua con un sufijo como el `nodeId`:
- * `http_result_2` no esta en la lista blanca y seria un valor invalido con
- * apariencia de valido. Dos nodos del mismo tipo comparten namespace a
- * proposito, el validador de topologia lo senala como duplicado y el operador
- * elige otro en el selector de la tarjeta, que solo ofrece valores legales.
+ * El namespace se desambigua igual que el `nodeId`, con `deriveOutputNamespace`.
+ * Antes no se hacia porque la lista cerrada no admitia sufijos, de modo que el
+ * segundo nodo de un tipo nacia con el namespace del primero y la plantilla se
+ * rechazaba al guardar (regla 5) sin que el selector ofreciese ninguna salida.
+ * Desde que las copias numeradas son legales en los dos validadores —topologia
+ * y plantillas HTML—, sembrar la copia libre deja la secuencia valida de
+ * entrada en vez de valida solo despues de que el operador adivine el arreglo.
  */
 const addNode = (): void => {
   const entry = pendingEntry.value;
@@ -168,7 +201,10 @@ const addNode = (): void => {
     {
       nodeId,
       nodeType,
-      outputNamespace: DEFAULT_OUTPUT_NAMESPACE_BY_NODE_TYPE[nodeType],
+      outputNamespace: deriveOutputNamespace(
+        nodeType,
+        props.modelValue.map((step) => step.outputNamespace),
+      ),
       // Devuelve un objeto NUEVO en cada alta: el mapa de defaults es un literal
       // compartido de modulo, y pasarlo por referencia haria que dos nodos del
       // mismo tipo acabaran escribiendo sobre el mismo `params`.
@@ -346,6 +382,7 @@ onMounted(async () => {
         @remove="removeNode(index)"
         :error-branch="props.errorBranches[step.nodeId] ?? null"
         :base-params-locked="props.baseParamsLocked"
+        :namespace-options="namespaceOptions"
         @update:namespace="updateNamespace(index, $event)"
         @update:params="emit('update:params', step.nodeId, $event)"
         @update:error-branch="emit('update:errorBranch', step.nodeId, $event)"

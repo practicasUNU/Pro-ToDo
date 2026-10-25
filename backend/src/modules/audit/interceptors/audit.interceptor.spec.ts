@@ -167,6 +167,87 @@ describe('AuditInterceptor', () => {
     );
   });
 
+  it('1.2c-bis deberia registrar ACTIVAR cuando un flujo pasa a ACTIVO', async () => {
+    // 1. Arrange 📐: los flujos no tienen bandera booleana desde la migracion
+    //    040 —gobiernan su actividad con `status`—, asi que armarlos o
+    //    retirarlos se registraba como un `ACTUALIZAR` indistinguible de
+    //    cambiarles el nombre.
+    const { interceptor, snapshots, auditLogger } = buildInterceptor();
+    snapshots.load
+      .mockResolvedValueOnce({ name: 'Notiweb', status: 'INACTIVO' })
+      .mockResolvedValueOnce({ name: 'Notiweb', status: 'ACTIVO' });
+    const context = buildContext(
+      buildHandler({
+        table: AuditTable.WORKFLOWS,
+        action: AuditActionType.UPDATE,
+      }),
+      buildRequest(),
+    );
+
+    // 2. Act ⚙️
+    await run(interceptor, context, { handle: () => of({ id: TARGET_ID }) });
+
+    // 3. Assert 🎯
+    expect(auditLogger.record).toHaveBeenCalledWith(
+      expect.objectContaining({ action: AuditActionType.ACTIVATE }),
+    );
+  });
+
+  it('1.2c-ter deberia registrar DESACTIVAR cuando un flujo pasa a INACTIVO', async () => {
+    // 1. Arrange 📐
+    const { interceptor, snapshots, auditLogger } = buildInterceptor();
+    snapshots.load
+      .mockResolvedValueOnce({ name: 'Notiweb', status: 'ACTIVO' })
+      .mockResolvedValueOnce({ name: 'Notiweb', status: 'INACTIVO' });
+    const context = buildContext(
+      buildHandler({
+        table: AuditTable.WORKFLOWS,
+        action: AuditActionType.UPDATE,
+      }),
+      buildRequest(),
+    );
+
+    // 2. Act ⚙️
+    await run(interceptor, context, { handle: () => of({ id: TARGET_ID }) });
+
+    // 3. Assert 🎯
+    expect(auditLogger.record).toHaveBeenCalledWith(
+      expect.objectContaining({ action: AuditActionType.DEACTIVATE }),
+    );
+  });
+
+  it('1.2c-quater deberia seguir siendo ACTUALIZAR si ademas cambio el grafo', async () => {
+    // 1. Arrange 📐: `status` tiene que ser la UNICA clave cambiada. Guardar el
+    //    pipeline y armarlo a la vez es una modificacion con todas las letras:
+    //    registrarla como `ACTIVAR` escondería la edicion del esquema, que es
+    //    el dato mas delicado de la tabla.
+    const { interceptor, snapshots, auditLogger } = buildInterceptor();
+    snapshots.load
+      .mockResolvedValueOnce({
+        status: 'INACTIVO',
+        configuracionPipeline: { version: '1.0.0' },
+      })
+      .mockResolvedValueOnce({
+        status: 'ACTIVO',
+        configuracionPipeline: { version: '1.1.0' },
+      });
+    const context = buildContext(
+      buildHandler({
+        table: AuditTable.WORKFLOWS,
+        action: AuditActionType.UPDATE,
+      }),
+      buildRequest(),
+    );
+
+    // 2. Act ⚙️
+    await run(interceptor, context, { handle: () => of({ id: TARGET_ID }) });
+
+    // 3. Assert 🎯
+    expect(auditLogger.record).toHaveBeenCalledWith(
+      expect.objectContaining({ action: AuditActionType.UPDATE }),
+    );
+  });
+
   it('1.2d deberia registrar DESACTIVAR en el borrado LOGICO de un usuario', async () => {
     // 1. Arrange 📐: `DELETE /users/:id` no borra nada —pone `isActive` a
     //    false y la fila sigue ahi—. Anotarlo como `ELIMINAR` afirmaba que se

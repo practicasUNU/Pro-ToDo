@@ -196,6 +196,41 @@ describe('validatePipelineTopology', () => {
       // 3. Assert
       expect(fieldsOf(issues)).toContain('nodes.nodo_parser.outputNamespace');
     });
+
+    it('4.2 deberia admitir una copia numerada de un namespace de la lista', () => {
+      // 1. Arrange: es lo que permite que un flujo repita un TIPO de nodo. La
+      //    regla 5 sigue prohibiendo dos escritores del mismo namespace, asi
+      //    que sin copias numeradas el segundo nodo no tenia valor legal
+      //    posible y el flujo se rechazaba sin via de arreglo.
+      const schema = buildSchema();
+      schema.nodes.nodo_extractor.outputNamespace = 'parsed_email_2';
+
+      // 2. Act
+      const issues = validatePipelineTopology(schema);
+
+      // 3. Assert
+      expect(fieldsOf(issues)).not.toContain(
+        'nodes.nodo_extractor.outputNamespace',
+      );
+    });
+
+    it('4.3 deberia rechazar la copia 1 y la copia de una base inventada', () => {
+      // 1. Arrange: la copia 1 ES la base. Admitirla crearia dos nombres para
+      //    el mismo nodo y el operador no sabria cual eligio al releer.
+      const first = buildSchema();
+      first.nodes.nodo_parser.outputNamespace = 'parsed_email_1';
+
+      const invented = buildSchema();
+      invented.nodes.nodo_parser.outputNamespace = 'namespace_inventado_2';
+
+      // 2. Act & 3. Assert
+      expect(fieldsOf(validatePipelineTopology(first))).toContain(
+        'nodes.nodo_parser.outputNamespace',
+      );
+      expect(fieldsOf(validatePipelineTopology(invented))).toContain(
+        'nodes.nodo_parser.outputNamespace',
+      );
+    });
   });
 
   describe('5. Unicidad del namespace de salida', () => {

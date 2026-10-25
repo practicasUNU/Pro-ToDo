@@ -19,7 +19,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import TemplateNodeCard from '@components/workflow-templates/TemplateNodeCard.vue';
 
-import { NodeType } from '@/types/pipeline';
+import { NODE_OUTPUT_NAMESPACES, NodeType } from '@/types/pipeline';
 
 import type { AssemblerStep } from '@/utils/pipeline-assembler';
 import type { PropType } from 'vue';
@@ -80,12 +80,16 @@ interface MountOptions {
   step: AssemblerStep;
   errorBranch?: ErrorBranchAction | null;
   baseParamsLocked?: boolean;
+  namespaceOptions?: readonly string[];
 }
 
 const mountCard = ({
   step,
   errorBranch = null,
   baseParamsLocked = false,
+  // Por defecto, la lista cerrada de bases: es lo que ofrecia el selector antes
+  // de que las opciones pasaran a calcularse en el padre.
+  namespaceOptions = NODE_OUTPUT_NAMESPACES,
 }: MountOptions): ReturnType<typeof mount> =>
   mount(TemplateNodeCard, {
     props: {
@@ -95,6 +99,7 @@ const mountCard = ({
       isLast: false,
       errorBranch,
       baseParamsLocked,
+      namespaceOptions,
     },
     // El cuerpo del `q-expansion-item` se monta en diferido; sin esto los
     // controles de dentro no existen todavia cuando la prueba los busca.

@@ -121,7 +121,10 @@ describe('usePauseFlowStore · configuracion del nodo PAUSA_FLOW', () => {
       const store = usePauseFlowStore(nextNodeId());
 
       // 2. Act ⚙️
-      store.updateConfig({ notifyOnPause: true, notificationRecipient: 'no-es-un-correo' });
+      store.updateConfig({
+        notifyOnPause: true,
+        notificationRecipients: ['no-es-un-correo'],
+      });
 
       // 3. Assert 🎯
       expect(store.isRecipientInvalid).toBe(true);
@@ -133,7 +136,7 @@ describe('usePauseFlowStore · configuracion del nodo PAUSA_FLOW', () => {
       const store = usePauseFlowStore(nextNodeId());
 
       // 2. Act ⚙️
-      store.updateConfig({ notifyOnPause: true, notificationRecipient: RECIPIENT });
+      store.updateConfig({ notifyOnPause: true, notificationRecipients: [RECIPIENT] });
 
       // 3. Assert 🎯
       expect(store.isConfigValid).toBe(true);
@@ -196,7 +199,7 @@ describe('usePauseFlowStore · configuracion del nodo PAUSA_FLOW', () => {
         pauseMode: PauseTriggerMode.DELAYED,
         delaySeconds: 120,
         notifyOnPause: true,
-        notificationRecipient: RECIPIENT,
+        notificationRecipients: [RECIPIENT],
         customPauseMessage: 'A la espera de revision.',
       };
 
@@ -207,7 +210,30 @@ describe('usePauseFlowStore · configuracion del nodo PAUSA_FLOW', () => {
       expect(store.toNodeParams()).toEqual(params);
     });
 
-    it('5.2 deberia tolerar un `pauseMode` corrupto cayendo a inmediato', () => {
+    it('5.2 deberia leer el destinatario unico heredado y publicarlo como lista', () => {
+      // 1. Arrange 📐: los flujos guardados antes del multicorreo llevan la
+      //    clave en singular. Sin leerla, su formulario abriria vacio y el
+      //    operador creeria que nunca configuro a quien avisar.
+      const store = usePauseFlowStore(nextNodeId());
+
+      // 2. Act ⚙️
+      store.hydrateFromNode({
+        nodeId: 'pausa',
+        nodeType: 'PAUSA_FLOW',
+        params: { notifyOnPause: true, notificationRecipient: RECIPIENT },
+      } as never);
+
+      // 3. Assert 🎯: se LEE la heredada y se publica la nueva. El esquema
+      //    migra al editarlo, que es lo que evita una migracion de la columna.
+      expect(store.config.notificationRecipients).toEqual([RECIPIENT]);
+      expect(store.toNodeParams()).toEqual({
+        pauseMode: PauseTriggerMode.IMMEDIATE,
+        notifyOnPause: true,
+        notificationRecipients: [RECIPIENT],
+      });
+    });
+
+    it('5.3 deberia tolerar un `pauseMode` corrupto cayendo a inmediato', () => {
       // 1. Arrange 📐: la columna es `jsonb` y pudo escribirse por SQL directo.
       //    Un valor fuera del enum dejaria el `q-btn-toggle` sin ninguna opcion
       //    marcada, que es un control que el operador no puede arreglar.
@@ -224,7 +250,7 @@ describe('usePauseFlowStore · configuracion del nodo PAUSA_FLOW', () => {
       expect(store.config.pauseMode).toBe(PauseTriggerMode.IMMEDIATE);
     });
 
-    it('5.3 deberia descartar un retardo no entero', () => {
+    it('5.4 deberia descartar un retardo no entero', () => {
       // 1. Arrange 📐
       const store = usePauseFlowStore(nextNodeId());
 

@@ -42,6 +42,14 @@ export interface PauseFlowNodeConfig {
   /** Segundos de espera. Solo se publica con el modo diferido. */
   delaySeconds: number;
   notifyOnPause: boolean;
-  notificationRecipient: string;
+  /**
+   * Destinatarios del aviso de pausa.
+   *
+   * Lista y no cadena desde que el aviso puede ir a varias personas, igual que
+   * el del nodo de alerta: la pausa programada espera a UN equipo, no a un
+   * buzon concreto, y con un solo destinatario una ausencia dejaba el flujo
+   * congelado sin que nadie se enterase.
+   */
+  notificationRecipients: string[];
   customPauseMessage: string;
 }

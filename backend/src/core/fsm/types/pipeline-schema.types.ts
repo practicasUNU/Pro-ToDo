@@ -75,6 +75,54 @@ export const NODE_OUTPUT_NAMESPACE_SET: ReadonlySet<string> = new Set(
   NODE_OUTPUT_NAMESPACES,
 );
 
+/**
+ * Copia numerada de un namespace base: `ocr_result_2`, `smtp_result_3`.
+ *
+ * EXISTE PARA QUE UN FLUJO PUEDA REPETIR UN TIPO DE NODO. La regla 5 prohibe
+ * que dos nodos escriban el mismo namespace —y debe seguir prohibiendolo: el
+ * segundo pisaria los campos del primero en el contexto—, pero hasta ahora la
+ * lista cerrada no ofrecia ninguna alternativa legal, de modo que un flujo con
+ * dos OCR se rechazaba al guardar sin que el operador tuviera forma de
+ * arreglarlo desde el selector.
+ *
+ * Arranca en 2 y no en 1 porque la copia 1 es la base: admitir `ocr_result_1`
+ * crearia dos nombres para el mismo nodo y el operador no sabria cual eligio al
+ * releer el flujo. Dos digitos como techo; `MaxLength(50)` del DTO ya acota el
+ * total.
+ *
+ * El sufijo va con guion bajo, como `deriveNodeId` hace con los identificadores
+ * (`destino_smtp_2`), y no pegado: el nombre acaba siendo la raiz de un
+ * `{{ns.campo}}` y `ocr_result2` se lee como un namespace distinto en vez de
+ * como la segunda copia de uno conocido.
+ */
+export const NODE_OUTPUT_NAMESPACE_COPY_PATTERN = /^(.+)_([2-9]|[1-9][0-9])$/;
+
+/**
+ * Namespace base del que una clave es copia; ella misma si no lo es.
+ *
+ * Lo necesitan los catalogos de variables: los campos que publica
+ * `ocr_result_2` son los que declara la estrategia para `ocr_result`.
+ */
+export const baseOutputNamespace = (namespace: string): string => {
+  const match = NODE_OUTPUT_NAMESPACE_COPY_PATTERN.exec(namespace);
+
+  return match?.[1] !== undefined && NODE_OUTPUT_NAMESPACE_SET.has(match[1])
+    ? match[1]
+    : namespace;
+};
+
+/**
+ * El namespace es uno de la lista cerrada, o una copia numerada de uno de ella.
+ *
+ * Sustituye a `NODE_OUTPUT_NAMESPACE_SET.has` en los DOS sitios que deciden si
+ * una raiz es legal: el validador de topologia y el gestor de plantillas HTML.
+ * Si solo se relajase el primero, el asistente aceptaria `ocr_result_2` y el
+ * editor de plantillas rechazaria `{{ocr_result_2.campo}}` despues, que es
+ * exactamente el reparto de culpas que la lista cerrada existe para evitar.
+ */
+export const isAllowedOutputNamespace = (namespace: string): boolean =>
+  NODE_OUTPUT_NAMESPACE_SET.has(baseOutputNamespace(namespace));
+
 /** Versionado SemVer estricto del esquema (`MAJOR.MINOR.PATCH`). */
 export const SEMVER_PATTERN = /^\d+\.\d+\.\d+$/;
 

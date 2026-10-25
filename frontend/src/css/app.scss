@@ -401,6 +401,15 @@ body {
   color: var(--pd-shell-text);
 }
 
+// Eliminacion: la fila ya no existe. Rojo de severidad, igual que `--failed`,
+// pero con clase propia porque son dos hechos distintos —un fallo del motor y
+// una baja deliberada— y compartir la clase haria que cambiar el color de uno
+// moviese el del otro sin quererlo.
+.pd-badge--negative {
+  background: var(--pd-negative);
+  color: var(--pd-shell-text);
+}
+
 // Pausado: detenido a la espera de un operador. Texto OSCURO sobre ámbar: el
 // blanco sobre `--pd-warning` no llega al contraste AA (~2:1).
 .pd-badge--paused {

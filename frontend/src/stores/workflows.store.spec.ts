@@ -199,6 +199,26 @@ describe('useWorkflowsStore · catalogo de flujos instanciados', () => {
       expect(store.workflows[0]?.status).toBe(WorkflowStatus.INACTIVO);
     });
 
+    it('deberia repintar la fila como PAUSADA cuando la pausa la escribe el motor', async () => {
+      // 1. Arrange 📐: `PAUSADO` no se alcanza desde la API —el DTO lo
+      //    rechaza—, solo lo escribe el motor al detener una ejecucion. El
+      //    operador no ha pulsado nada, asi que el canal es la UNICA via por la
+      //    que la tabla puede enterarse sin recargar.
+      const store = useWorkflowsStore();
+      store.workflows = [buildWorkflow({ status: WorkflowStatus.ACTIVO })];
+
+      // 2. Act ⚙️
+      store.applyMutation(
+        'UPDATED',
+        buildWorkflow({ status: WorkflowStatus.PAUSADO }),
+        WORKFLOW_ID,
+      );
+      await nextTick();
+
+      // 3. Assert 🎯
+      expect(store.workflows[0]?.status).toBe(WorkflowStatus.PAUSADO);
+    });
+
     it('NO deberia tocar las filas de otros flujos', async () => {
       // 1. Arrange 📐
       const store = useWorkflowsStore();

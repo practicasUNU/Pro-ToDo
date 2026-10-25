@@ -110,13 +110,31 @@ const columns: QTableColumn<ModelPricing>[] = [
   { name: 'actions', label: 'Acciones', field: 'id', align: 'center' },
 ];
 
-const pagination = computed(() => ({
-  page: Math.floor(pricingStore.offset / pricingStore.limit) + 1,
-  rowsPerPage: pricingStore.limit,
-  rowsNumber: pricingStore.total,
-  sortBy: pricingStore.sort.sortBy,
-  descending: pricingStore.sort.descending,
-}));
+/**
+ * Paginacion de la tabla, con el STORE como unica fuente de verdad.
+ *
+ * Escribible y ligada con `v-model:pagination` y no con `:pagination` a secas:
+ * Quasar solo fusiona esta prop en su estado interno cuando existe un listener
+ * `onUpdate:pagination`. Sin el, la prop valia como valor INICIAL y nada mas, de
+ * modo que a partir del primer repintado la cabecera llevaba su propio
+ * `sortBy`/`descending` y el store llevaba el de la consulta: dos estados que
+ * divergian, y la flecha acababa senalando un orden que los datos no tenian.
+ *
+ * El `set` solo recoge el criterio de orden. La pagina la sigue pidiendo
+ * `onRequest`, y el `get` la refleja cuando el store ya tiene la respuesta.
+ */
+const pagination = computed<NonNullable<QTableProps['pagination']>>({
+  get: () => ({
+    page: Math.floor(pricingStore.offset / pricingStore.limit) + 1,
+    rowsPerPage: pricingStore.limit,
+    rowsNumber: pricingStore.total,
+    sortBy: pricingStore.sort.sortBy,
+    descending: pricingStore.sort.descending,
+  }),
+  set: (next) => {
+    pricingStore.setSort(toTableSort(PRICING_SORT_KEYS, next.sortBy, next.descending ?? false));
+  },
+});
 
 /** Tarifa vigente del par pendiente, para el resumen del aviso. */
 const supersededTariff = computed(() => {
@@ -343,7 +361,7 @@ onMounted(() => {
       :columns="columns"
       row-key="id"
       :loading="pricingStore.isLoading"
-      :pagination="pagination"
+      v-model:pagination="pagination"
       :rows-per-page-options="[10, 25, 50, 100]"
       rows-per-page-label="Filas por página"
       no-data-label="No hay tarifas que cumplan el filtro."

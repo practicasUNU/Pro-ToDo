@@ -10,6 +10,10 @@ import {
   useTriggerCronStore,
 } from '@stores/nodes/trigger-cron.store';
 
+import { CRON_INTERVAL_PRESETS, findCronIntervalPreset } from '@/utils/cron-schedule-mode';
+
+import type { CronScheduleMode } from '@/utils/cron-schedule-mode';
+
 interface Props {
   /** Identificador del nodo en el `pipeline_schema` (contrato uniforme §3.1). */
   nodeId: string;
@@ -40,10 +44,7 @@ const timeZoneSuggestions = ref<string[]>([...CRON_TIMEZONE_SUGGESTIONS]);
  * Quasar EXIGE invocar `update()`: sin esa llamada el menu no se repinta y la
  * lista se queda congelada en las doce iniciales.
  */
-const onFilterTimeZones = (
-  inputValue: string,
-  update: (callbackFn: () => void) => void,
-): void => {
+const onFilterTimeZones = (inputValue: string, update: (callbackFn: () => void) => void): void => {
   update(() => {
     const needle = inputValue.toLowerCase();
 
@@ -73,6 +74,30 @@ const onTimeZoneInput = (value: string): void => {
 };
 
 const OUTPUT_NAMESPACE_HINT = `El nodo escribe su marca temporal en el namespace \`${DEFAULT_CRON_OUTPUT_NAMESPACE}\`, interpolable como {{${DEFAULT_CRON_OUTPUT_NAMESPACE}.triggered_at}}.`;
+
+// Mutable y no `readonly`: las `options` de QBtnToggle no aceptan el tipo de
+// solo lectura, al contrario que las de QSelect.
+const SCHEDULE_MODE_OPTIONS: { label: string; value: CronScheduleMode }[] = [
+  { label: 'Asistente', value: 'SIMPLE' },
+  { label: 'Expresion manual', value: 'ADVANCED' },
+];
+
+const INTERVAL_HINT =
+  'El flujo se dispara cada vez que vence el intervalo, en la zona horaria elegida.';
+
+const ADVANCED_NOTICE =
+  'El modo manual admite cualquier programacion cron de cinco campos. El asistente solo cubre los intervalos frecuentes, asi que una expresion afinada a mano no se reescribe al volver a el.';
+
+/**
+ * Intervalo seleccionado en el asistente, o `null` si la expresion no es uno.
+ *
+ * `null` y no una opcion inventada: una expresion manual abierta en modo
+ * asistente debe salir SIN seleccion, para que se vea que ese desplegable no la
+ * describe, en vez de mostrar el intervalo mas parecido y mentir.
+ */
+const selectedInterval = computed<string | null>(
+  () => findCronIntervalPreset(store.config.cronExpression)?.value ?? null,
+);
 
 /** Ejemplos frecuentes, para no obligar a recordar la sintaxis de memoria. */
 const EXPRESSION_PRESETS: ReadonlyArray<{ label: string; value: string }> = [
@@ -119,7 +144,46 @@ const FIELD_LABELS = ['Minuto', 'Hora', 'Dia', 'Mes', 'Dia de semana'] as const;
     </header>
 
     <div class="row q-col-gutter-md">
-      <div class="col-12">
+      <div class="col-12" data-test="schedule-mode">
+        <label class="pd-label">Como se programa</label>
+        <q-btn-toggle
+          :model-value="store.scheduleMode"
+          class="q-mt-xs pd-mode-toggle"
+          unelevated
+          no-caps
+          toggle-color="primary"
+          :options="SCHEDULE_MODE_OPTIONS"
+          @update:model-value="store.setScheduleMode($event as CronScheduleMode)"
+        />
+      </div>
+
+      <div v-if="store.scheduleMode === 'SIMPLE'" class="col-12" data-test="interval-field">
+        <label class="pd-label" for="cron-interval">
+          Cada cuanto se dispara<span class="pd-required">*</span>
+        </label>
+        <!-- Selector CERRADO (§4): sin `new-value-mode`, lo unico elegible son
+             los cuatro intervalos, cuya expresion escribe el propio asistente.
+             Teclear sintaxis cron es lo que el modo manual existe para ofrecer. -->
+        <q-select
+          id="cron-interval"
+          :model-value="selectedInterval"
+          :options="CRON_INTERVAL_PRESETS"
+          outlined
+          dense
+          emit-value
+          map-options
+          class="q-mt-xs"
+          :hint="INTERVAL_HINT"
+          :rules="[(val: string | null) => !!val || 'Elige cada cuanto debe dispararse']"
+          @update:model-value="store.patchConfig({ cronExpression: String($event ?? '') })"
+        />
+        <div v-if="selectedInterval" class="pd-namespace-note q-mt-sm">
+          <span class="pd-subtitle">Equivale a la expresion</span>
+          <span class="pd-mono q-ml-sm">{{ selectedInterval }}</span>
+        </div>
+      </div>
+
+      <div v-else class="col-12" data-test="expression-field">
         <label class="pd-label" for="cron-expression">
           Expresion cron<span class="pd-required">*</span>
         </label>
@@ -150,7 +214,8 @@ const FIELD_LABELS = ['Minuto', 'Hora', 'Dia', 'Mes', 'Dia de semana'] as const;
         </div>
       </div>
 
-      <div class="col-12">
+      <div v-if="store.scheduleMode === 'ADVANCED'" class="col-12">
+        <p class="pd-subtitle q-mb-sm">{{ ADVANCED_NOTICE }}</p>
         <div class="pd-subtitle q-mb-xs">Programaciones frecuentes</div>
         <div class="row q-gutter-xs">
           <q-chip
@@ -239,6 +304,11 @@ const FIELD_LABELS = ['Minuto', 'Hora', 'Dia', 'Mes', 'Dia de semana'] as const;
 
 .pd-cron-field__value {
   color: var(--pd-text-primary);
+}
+
+.pd-mode-toggle {
+  border: 1px solid var(--pd-border);
+  border-radius: 6px;
 }
 
 .pd-preset-chip {
