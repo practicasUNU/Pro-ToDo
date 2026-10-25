@@ -136,6 +136,12 @@ Pro-ToDo/
   - **Respuesta:** se publica en `http_generic_response` como `{ statusCode, statusText, responseBody, headers, dispatchedAt }`.
   - **Credenciales:** la autenticación sale **solo** de la bóveda `credenciales` (AES-256-GCM con `CREDENTIALS_ENCRYPTION_KEY`, AAD = `id_credencial`). La bóveda tiene CRUD de ADMIN y `/credentials/options` para el selector cerrado del EDITOR. El secreto es de solo escritura y en `audit_eventos` aparece enmascarado (`********`).
   - **SSRF:** `OutboundTargetGuard` bloquea las redes privadas, locales y reservadas, también en el `lookup` de la conexión, y la petición va sin redirecciones.
+- ✅ **Accesibilidad WCAG 2.1 y batería del destino HTTP (migración 057).**
+  - **Accesibilidad:** menú en el encabezado con paletas para daltonismo y alto contraste, escala tipográfica en rem, espaciado WCAG 1.4.12 y objetivos de 44 px opcionales; foco `:focus-visible` siempre activo. Los badges de estado llevan icono y texto (`StatusBadge`) y su contraste lo verifica `color-contrast.spec.ts`.
+  - **Banco de pruebas:** `POST /nodes/sandbox/run` ejecuta un nodo aislado con su estrategia real; IA y OCR solo ADMIN, HTTP genérico también EDITOR. La telemetría usa el origen `BANCO_PRUEBAS`.
+  - **Topología al guardar:** no se repite tipo de disparador ni de destino (regla 12) y el destino va tras un nodo de procesamiento (regla 13); la URL del destino HTTP se rechaza si apunta a la red interna.
+  - **URL destino:** admite tomarla entera de un paso anterior (`{{ns.campo[0]}}`) y alerta en tiempo real de destinos privados.
+  - **Reanudación:** la tabla de flujos refleja el cambio sin recargar.
 - 📄 Detalle de contratos/DTOs por implementar: `PLAN.md`. Bitácora de desarrollo paso a paso: `Walkthrough.md`.
 
 ---

@@ -41,6 +41,14 @@ Actúas como un Arquitecto Frontend experto. Al generar o refactorizar código p
   | `--pd-row-urgente` | `#2B1A1D` | `#FBECEB` | Fondo de fila `.row-urgente` en `<q-table>` del Módulo de Trazabilidad |
   | `--pd-row-grave` | `#2C2418` | `#FDF4E3` | Fondo de fila `.row-grave` en `<q-table>` del Módulo de Trazabilidad |
   | `--pd-row-exitoso` | `#142B2A` | `#E7F7F1` | Fondo de fila `.row-exitoso` en `<q-table>` del Módulo de Trazabilidad |
+  | `--pd-on-positive` / `--pd-on-warning` / `--pd-on-accent` | `#12142E` | *(idéntico)* | Texto sobre el relleno semántico correspondiente (badges de estado) |
+  | `--pd-on-negative` | `#12142E` | `#FFFFFF` | Texto sobre `--pd-negative`: el blanco no llega a 4.5:1 sobre el rojo del modo oscuro |
+  | `--pd-on-primary` | `#FFFFFF` | *(idéntico)* | Texto sobre `--pd-primary` (badge "En proceso") |
+  | `--pd-focus-ring` | `#5B8CE8` | `#2C4FC7` | Contorno `:focus-visible` del foco de teclado (>= 3:1 contra el fondo) |
+
+- **Paletas de accesibilidad:** `src/css/a11y.scss` redefine, bajo `html[data-pd-palette='…']`, los tokens semánticos, sus `--pd-on-*`, los tintes de fila y las variables de marca de Quasar (`--q-positive`, `--q-warning`, `--q-negative`, `--q-info`, `--q-primary`) para deuteranopia, protanopia, tritanopia y alto contraste. Es la ÚNICA hoja autorizada a declarar valores fuera de esta tabla, y solo como sustitución de un token existente. Todo par relleno/texto de un badge de estado debe superar 4.5:1 en todas las paletas y modos (`color-contrast.spec.ts`).
+- **Estados accesibles:** ningún estado se comunica solo por color. Se pintan con `StatusBadge` y un helper de `src/utils/` (`describeWorkflowStatus`, `describeSeverity`, `describeExecutionState`, `describeEnabled`), que dan texto + icono + clase.
+- **Tipografía escalable:** todo `font-size`, `line-height` y `letter-spacing` va en `rem`, nunca en px: el menú de accesibilidad escala la raíz (`--pd-font-scale`).
 
 - **Regla de contraste:** `--pd-accent` (`#5B8CE8`) tiene un ratio de contraste insuficiente (~3:1) para texto pequeño sobre fondos claros (WCAG AA). Se reserva para hover de superficies grandes, iconos e interacciones. Para enlaces de texto y elementos interactivos en modo claro, usar siempre `--pd-accent-text`.
 - **Modo claro:** a diferencia de un esquema "papel blanco puro", las superficies elevadas usan `--pd-card-bg` (`#EEF1FA`) y `--pd-surface-muted` (`#E4EAFB`) como fondos tintados de marca — no solo distinción por borde. Prohibido usar las clases `bg-grey-N` / `text-grey-N` de Quasar como sustituto de un token.

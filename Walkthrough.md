@@ -8970,3 +8970,46 @@ pide al backend son las opciones del selector de credencial, y las trae el store
 boveda (`credentials.store.ts` -> `credentials.service.ts`), compartido por cualquier nodo futuro
 que las necesite. El registro visual del asistente es `node-config-registry.ts` (no existe ningun
 `NodeConfigFactory.vue`).
+
+---
+
+## Accesibilidad WCAG y bateria de correcciones del destino HTTP
+
+### Por que las paletas redefinen tokens y no colores sueltos
+
+Los componentes ya pintaban todo con `--pd-*` y con los colores de marca de Quasar (`color="positive"`
+resuelve por `--q-positive`). Una paleta para daltonismo es entonces una sustitucion de tokens sobre
+`<html>`, sin tocar un solo componente. El texto que va SOBRE un relleno tambien es token
+(`--pd-on-*`), porque el blanco que sirve sobre el rojo claro no llega a 4.5:1 sobre el rojo del
+modo oscuro. `color-contrast.spec.ts` lee las hojas reales y comprueba cada par en las cinco
+paletas y los dos modos.
+
+### Por que la escala tipografica exigio pasar a rem
+
+Todo el tamano del texto estaba en px, que no sigue al `font-size` de la raiz. Se convirtieron a
+rem las declaraciones tipograficas de `app.scss`, las variables de Quasar y los estilos de los
+componentes; bordes y rellenos se quedan en px. Algunos tamanos internos de Quasar (tablas,
+campos, tooltips) no salen de sus variables y se reescriben en `a11y.scss`.
+
+### Por que los objetivos de 44 px son una opcion
+
+Aplicados siempre, los botones compactos de las tablas crecerian y la interfaz perderia densidad
+para quien no lo necesita. El foco de teclado, en cambio, esta siempre activo.
+
+### Por que el rol del banco de pruebas se decide en el servicio
+
+El mismo endpoint admite a un EDITOR para el destino HTTP y lo rechaza para IA u OCR, asi que la
+regla depende del CUERPO y `@Roles` no puede expresarla. La prueba ejecuta la estrategia real con
+un contexto efimero: su inferencia se factura y la telemetria la imputa al usuario con el origen
+`BANCO_PRUEBAS`, porque el CHECK de la 049 rechazaba una fila de "ejecucion" sin ejecucion.
+
+### Por que las reglas nuevas solo se exigen al guardar
+
+El validador corre tambien al ejecutar y al reanudar. Endurecerlo ahi dejaria sin poder correr ni
+reanudar flujos ya persistidos que nacieron antes de estas reglas; se corrigen al editarlos.
+
+### Por que el badge seguia en "Pausado" tras reanudar
+
+El backend publicaba la fila con la ejecucion todavia PAUSADO (el motor la mueve despues), y nada
+la republicaba al terminar. Ahora se publica EN_PROCESO al reanudar y la foto final cuando el motor
+devuelve el control.

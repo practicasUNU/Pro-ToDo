@@ -4746,3 +4746,58 @@ El nodo es DESTINO (`DESTINO_NODE_TYPES`, regla 11): no tiene `nextStep`.
 - [x] Frontend: triada del nodo (store + componente, sin servicio propio), `KeyValueRowsEditor`, boveda en `/credenciales`
 - [ ] Pendiente — aplicar 055 y 056 (`cd backend && npm run db:migrate`) y definir `CREDENTIALS_ENCRYPTION_KEY`
 - [ ] Fuera de alcance — rotacion de la clave maestra (cambiarla deja indescifrables las credenciales guardadas)
+
+---
+
+## Accesibilidad WCAG y bateria de correcciones del destino HTTP
+
+### Problema
+
+- La interfaz comunicaba varios estados solo por color, con badges por debajo de 4.5:1 ("Activo" a
+  2.5:1, "Inactivo" a 2.4:1), sin foco de teclado visible y con todo el texto en px fijos.
+- El banco de pruebas de nodos solo configuraba: ningun endpoint ejecutaba un nodo aislado.
+- El validador admitia dos disparadores o dos destinos del MISMO tipo y destinos sin procesamiento
+  previo.
+- `targetUrl` del destino HTTP no admitia tomar la direccion entera de un paso anterior, y el
+  marcador con indice (`{{ns.campo[0]}}`) no se reconocia en el frontend.
+- Al reanudar, la tabla de flujos seguia pintando "Pausado" hasta un F5.
+
+### Contratos nuevos
+
+| Pieza | Contrato |
+|---|---|
+| `useAccessibilityStore` | `palette`, `fontScale`, `textSpacing`, `largeTargets`; aplica `data-pd-palette`, `--pd-font-scale` y clases sobre `<html>` |
+| `css/a11y.scss` | Paletas (deuteranopia, protanopia, tritanopia, alto contraste) sobre tokens `--pd-*` y `--q-*`; foco `:focus-visible`; WCAG 1.4.12 y 2.5.5 |
+| Tokens nuevos | `--pd-on-positive`, `--pd-on-warning`, `--pd-on-negative`, `--pd-on-primary`, `--pd-on-accent`, `--pd-focus-ring` |
+| `StatusBadge` + `utils/status-display.ts` | Icono + texto siempre; `describeWorkflowStatus`, `describeSeverity`, `describeEnabled` |
+| `POST /nodes/sandbox/run` | `RunNodeSandboxDto { nodeType, params, upstreamContext }` -> `NodeSandboxResultDto { success, data?, error?, durationMs }` |
+| `SANDBOX_ROLES_BY_NODE_TYPE` | `PROCESADOR_IA` y `PROCESADOR_OCR`: ADMIN; `DESTINO_HTTP_GENERICO`: ADMIN y EDITOR |
+| `StatePayloadContext` | 4.o argumento opcional `SandboxOperationScope { userId }` |
+| `TelemetryOperationOrigin.NODE_SANDBOX` | `'BANCO_PRUEBAS'` (migracion 057) |
+| `validateSchema(raw, { authoring })` | Reglas 12 y 13 y guarda SSRF solo al GUARDAR |
+| Regla 12 | `ERR_TOPOLOGY_DUPLICATE_NODE_TYPE`: un TRIGGER o DESTINO no repite tipo |
+| Regla 13 | `ERR_TOPOLOGY_DESTINATION_BEFORE_PROCESSING`: el destino va tras un nodo de PROCESAMIENTO |
+| `OutboundTargetGuard.describeBlockedTarget` | Motivo de bloqueo o `null`; un fallo de DNS no bloquea el guardado |
+| `TARGET_URL_PATTERN` | URL http(s) o URL que EMPIEZA por un marcador |
+| `WorkflowsService.publishWorkflowSnapshot` | Republica la fila al terminar la reanudacion |
+
+### Diagrama de inyeccion de dependencias
+
+```
+NodeSandboxController -> NodeSandboxService -> NodeStrategyFactory (estrategia real)
+                                          \-> PipelineValidatorService.validateStandaloneParams
+PipelineValidatorService -> OutboundTargetGuard (HttpCoreModule, importado en FsmModule)
+inference-telemetry.persist -> TelemetryService.recordAssistUsage (si hay SandboxOperationScope)
+ExecutionsService.resumeExecution -> WorkflowsService.reactivateAfterResume (fila EN_PROCESO)
+                                  -> WorkflowsService.publishWorkflowSnapshot (fila final)
+```
+
+### Estado de las tareas
+
+- [x] Menu de accesibilidad, paletas, escala en rem, espaciado, objetivos de 44 px y foco visible
+- [x] Badges de estado con icono y contraste >= 4.5:1 verificado contra las hojas reales
+- [x] Banco de pruebas con ejecucion real y control por rol; telemetria con origen propio
+- [x] Duplicados por tipo, posicion del destino y SSRF al guardar (backend + editor de plantillas)
+- [x] URL destino interpolable (selector cerrado + insercion en el cursor) y escudo SSRF en tiempo real
+- [x] Reanudacion reflejada en tiempo real en la tabla de flujos
+- [ ] Pendiente — aplicar la migracion 057 (`cd backend && npm run db:migrate`) y reiniciar Nest
