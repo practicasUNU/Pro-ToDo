@@ -8440,8 +8440,7 @@ entrega código de prueba verificado solo hasta donde llega el arranque de la ap
 
 - La base `<nombre_bd_test>` existe pero le faltan migraciones, empezando por la **040**. Hasta
   aplicarlas, `npm run test:e2e` muere en el arranque con el comando exacto en el log.
-- `E2E_DB_NAME` y las variables `INBOUND_RESUME_*` quedan documentadas en `.env.example`; antes la
-  primera solo existía escrita a mano dentro de un spec.
+- Las variables `INBOUND_RESUME_*` quedan documentadas en `.env.example`.
 - Sigue vigente lo advertido en las dos entregas anteriores: **030** (hoy toda parada ordenada falla
   contra la base real) y **040** (sin ella toda lectura de `flujos` muere), además de 026, 031, 032,
   041 y 042.

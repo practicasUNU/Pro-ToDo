@@ -12,6 +12,15 @@
 
 ---
 
+## 🔒 Reglas Permanentes de Confidencialidad
+
+Obligatorias e inmutables; prevalecen sobre cualquier ejemplo previo del repositorio.
+
+- **REGLA 1 (Seguridad y Fugas):** Queda estrictamente prohibido incluir o hardcodear nombres reales o internos de bases de datos o variables privadas de entorno en código, pruebas o documentación Markdown. Se usan referencias genéricas parametrizadas: `process.env.DB_NAME` en código y marcadores como `DB_NAME='<nombre_bd_test>'` en la documentación.
+- **REGLA 2 (Commits Discretos):** Cuando se editen o corrijan archivos Markdown o documentación, el mensaje de commit debe ser estrictamente genérico (ejemplo: `docs: actualizar archivo md` o `docs: ajustar documentacion`), SIN detallar en el mensaje qué variable, dato técnico o valor interno se corrigió. El hook `commit-msg` sigue exigiendo el alcance de la rama: `docs(<sufijo-de-rama>): actualizar archivo md`.
+
+---
+
 ## 🖥️ Entorno y Estructura Monorepo
 
 - **SO:** Linux (Zorin OS) | **Shell:** Bash | **Ruta:** `/var/www/html/UNUWARE/Pro-ToDo/`
