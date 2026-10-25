@@ -754,7 +754,7 @@ export class WorkflowsService
     }
 
     // La base se lee de la conexion viva y no se escribe a mano: la suite de
-    // extremo a extremo corre contra `<nombre_bd_test>`, y un comando que
+    // extremo a extremo corre contra una base de pruebas aparte, y un comando que
     // nombrase siempre la de desarrollo mandaria a aplicar la migracion sobre
     // la base equivocada —o, peor, haria pensar que ya esta aplicada—.
     const database = this.workflowRepository.manager.connection.options
