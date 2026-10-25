@@ -63,6 +63,33 @@ export const TRIGGER_NODE_TYPES: ReadonlySet<string> = new Set<string>([
 ]);
 
 /**
+ * Tipos de nodo que CIERRAN un flujo entregando el resultado fuera del sistema.
+ *
+ * Replica de `DESTINO_NODE_TYPES` del backend (`pipeline-schema.types.ts`), con
+ * el mismo criterio que `TRIGGER_NODE_TYPES`: adelantar el veredicto de la regla
+ * 12 sin depender de que el catalogo haya respondido.
+ */
+export const DESTINO_NODE_TYPES: ReadonlySet<string> = new Set<string>([
+  NodeType.DESTINO_DRUPAL,
+  NodeType.DESTINO_SMTP,
+  NodeType.DESTINO_HTTP_GENERICO,
+]);
+
+/**
+ * Tipos de categoria PROCESAMIENTO: ingieren o transforman el contenido.
+ *
+ * Replica de `PROCESSING_NODE_TYPES` del backend, que alimenta la regla 13: un
+ * destino tiene que llegar despues de al menos uno de estos.
+ */
+export const PROCESSING_NODE_TYPES: ReadonlySet<string> = new Set<string>([
+  NodeType.PARSER_PRE_IA,
+  NodeType.EXTRACTOR_WEB,
+  NodeType.PROCESADOR_IA,
+  NodeType.PROCESADOR_OCR,
+  NodeType.MAPEADOR_PLANTILLA,
+]);
+
+/**
  * Namespace reservado que siembra el MOTOR antes de desviar por `onErrorStep`.
  *
  * Replica de `ERROR_CONTEXT_NAMESPACE`

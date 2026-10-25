@@ -133,8 +133,10 @@ describe('FsmController (POST /fsm/validate-schema)', () => {
 
       // 3. Assert: el ValidationPipe global no debe filtrarla, o el validador no
       // podria rechazarla con `forbidNonWhitelisted`.
+      // Y en modo AUTORIA: es la comprobacion previa a guardar.
       expect(validatorMock.validateSchema).toHaveBeenCalledWith(
         expect.objectContaining({ nextStepp: 'typo' }),
+        { authoring: true },
       );
     });
   });

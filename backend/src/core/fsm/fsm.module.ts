@@ -10,6 +10,7 @@ import { FsmEngineService } from '@core/fsm/services/fsm-engine.service';
 import { FsmExecutionQueryService } from '@core/fsm/services/fsm-execution-query.service';
 import { PipelineValidatorService } from '@core/fsm/services/pipeline-validator.service';
 import { ExecutionState } from '@core/fsm/types/fsm.enums';
+import { HttpCoreModule } from '@core/http/http-core.module';
 
 import type { OnModuleInit } from '@nestjs/common';
 import type { Repository } from 'typeorm';
@@ -30,6 +31,8 @@ import type { Repository } from 'typeorm';
     TypeOrmModule.forFeature([FsmExecution]),
     LogsModule,
     AiPromptTemplatesModule,
+    // `OutboundTargetGuard`, para la guarda SSRF al GUARDAR un destino HTTP.
+    HttpCoreModule,
   ],
   controllers: [FsmController],
   providers: [

@@ -11,6 +11,7 @@ import { NodeType } from '@core/fsm/types/pipeline-schema.types';
 import { WebScraperStrategy } from '@modules/nodes/strategies/web-scraper.strategy';
 
 import type { WebScraperRunner } from '@modules/nodes/services/web-scraper.runner';
+import type { OutboundTargetGuard } from '@core/http/outbound-url.guard';
 
 import type { PipelineSchema } from '@core/fsm/types/pipeline-schema.types';
 import type { ValidateSchemaOptions } from '@core/fsm/services/pipeline-validator.service';
@@ -1332,6 +1333,106 @@ describe('PipelineValidatorService (PROT-07)', () => {
 
       // 3. Assert 🎯: guarda Y activa. El nodo publicara su payload neutro.
       expect(result.nodes.nodo_extractor.params).toEqual({ skipIfEmpty: true });
+    });
+  });
+
+  describe('guarda SSRF del destino HTTP generico al GUARDAR', () => {
+    /** El Notiweb con su destino cambiado por uno HTTP generico. */
+    const buildHttpSchema = (targetUrl: string): PipelineSchema => {
+      const schema = buildNotiwebSchema();
+
+      schema.nodes.nodo_destino = {
+        nodeId: 'nodo_destino',
+        nodeType: NodeType.DESTINO_HTTP_GENERICO,
+        outputNamespace: 'http_generic_response',
+        nextStep: null,
+        onErrorStep: null,
+        params: { targetUrl },
+      };
+
+      return schema;
+    };
+
+    /** Servicio con una guarda doblada: ninguna prueba consulta el DNS. */
+    const buildService = (
+      reason: string | null,
+    ): { service: PipelineValidatorService; describe: jest.Mock } => {
+      const describeBlockedTarget = jest.fn().mockResolvedValue(reason);
+      const guard = {
+        describeBlockedTarget,
+      } as unknown as OutboundTargetGuard;
+
+      return {
+        service: new PipelineValidatorService(
+          new NodeStrategyFactory(),
+          null,
+          guard,
+        ),
+        describe: describeBlockedTarget,
+      };
+    };
+
+    it('deberia rechazar al guardar una URL que apunta a la red interna', async () => {
+      // 1. Arrange 📐
+      const { service } = buildService(
+        '"10.0.0.5" pertenece a una red privada',
+      );
+
+      // 2. Act ⚙️
+      const issues = await captureIssues(
+        service,
+        buildHttpSchema('http://10.0.0.5/api'),
+        { authoring: true },
+      );
+
+      // 3. Assert 🎯: el mismo codigo que daria la estrategia al ejecutar.
+      expect(issues).toEqual([
+        expect.objectContaining({
+          field: 'nodes.nodo_destino.params.targetUrl',
+          code: 'ERR_HTTP_GENERIC_TARGET_BLOCKED',
+        }),
+      ]);
+    });
+
+    it('NO deberia comprobarla al ejecutar o reanudar (sin authoring)', async () => {
+      // 1. Arrange 📐: al ejecutar ya la vigila la guarda de la estrategia.
+      const { service, describe: describeBlocked } = buildService('bloqueada');
+
+      // 2. Act ⚙️
+      await service.validateSchema(buildHttpSchema('http://10.0.0.5/api'));
+
+      // 3. Assert 🎯
+      expect(describeBlocked).not.toHaveBeenCalled();
+    });
+
+    it('deberia omitir la comprobacion si el HOST es un marcador', async () => {
+      // 1. Arrange 📐: su valor solo se conoce al ejecutar.
+      const { service, describe: describeBlocked } = buildService('bloqueada');
+
+      // 2. Act ⚙️
+      await service.validateSchema(
+        buildHttpSchema('{{parsed_email.extracted_urls[0]}}'),
+        { authoring: true },
+      );
+
+      // 3. Assert 🎯
+      expect(describeBlocked).not.toHaveBeenCalled();
+    });
+
+    it('deberia comprobar el host literal aunque la ruta lleve marcadores', async () => {
+      // 1. Arrange 📐
+      const { service, describe: describeBlocked } = buildService(null);
+
+      // 2. Act ⚙️
+      await service.validateSchema(
+        buildHttpSchema('https://api.ejemplo.com/items/{{parsed_email.id}}'),
+        { authoring: true },
+      );
+
+      // 3. Assert 🎯: el host se juzga con el marcador neutralizado.
+      expect(describeBlocked).toHaveBeenCalledWith(
+        'https://api.ejemplo.com/items/pdmarker',
+      );
     });
   });
 });

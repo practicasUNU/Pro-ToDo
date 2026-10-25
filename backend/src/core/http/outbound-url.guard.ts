@@ -274,4 +274,48 @@ export class OutboundTargetGuard {
 
     return url;
   }
+
+  /**
+   * Motivo por el que un destino GUARDADO apuntaria a la red interna, o `null`.
+   *
+   * Variante para el validador de esquemas, que no puede usar
+   * `assertPublicTarget` tal cual: aquella convierte un fallo de DNS en
+   * `BlockedOutboundTargetError`, y al guardar eso impediria persistir un flujo
+   * solo porque el DNS no responde en ese momento. Aqui SOLO bloquea lo que
+   * resuelve —o es literalmente— a una red privada; lo irresoluble pasa, y la
+   * guarda de ejecucion lo vuelve a comprobar al conectar.
+   *
+   * @param rawUrl URL ya sin marcadores en el host.
+   * @param lookup Resolucion bloqueante; parametro para los dobles de prueba.
+   */
+  public async describeBlockedTarget(
+    rawUrl: string,
+    lookup: typeof blockingLookup = blockingLookup,
+  ): Promise<string | null> {
+    let url: URL;
+
+    try {
+      url = assertPublicHttpUrl(rawUrl);
+    } catch (error) {
+      if (error instanceof BlockedOutboundTargetError) {
+        return error.message;
+      }
+
+      throw error;
+    }
+
+    const host = url.hostname.replace(/^\[|\]$/g, '');
+
+    if (isIP(host) !== 0) {
+      return null;
+    }
+
+    return new Promise<string | null>((resolve) => {
+      lookup(host, { all: true }, (error) => {
+        resolve(
+          error instanceof BlockedOutboundTargetError ? error.message : null,
+        );
+      });
+    });
+  }
 }

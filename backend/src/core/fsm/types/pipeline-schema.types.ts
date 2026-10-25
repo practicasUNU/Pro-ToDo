@@ -207,6 +207,45 @@ export const DESTINO_NODE_TYPES: ReadonlySet<NodeType> = new Set([
   NodeType.DESTINO_HTTP_GENERICO,
 ]);
 
+/**
+ * Tipos de nodo de categoria PROCESAMIENTO: los que ingieren o transforman el
+ * contenido antes de entregarlo (columna `enum_categoria` de `nodos`).
+ *
+ * Declarado a mano por el mismo motivo que `TRIGGER_NODE_TYPES`. Lo usa la
+ * regla 13 del validador: un destino tiene que llegar DESPUES de al menos uno
+ * de estos, o entregaria el disparo en crudo. Los de CONTROL (`ESCUDO_POST_IA`,
+ * `PAUSA_FLOW`) no cuentan: vigilan o detienen, pero no producen contenido.
+ */
+export const PROCESSING_NODE_TYPES: ReadonlySet<NodeType> = new Set([
+  NodeType.PARSER_PRE_IA,
+  NodeType.EXTRACTOR_WEB,
+  NodeType.PROCESADOR_IA,
+  NodeType.PROCESADOR_OCR,
+  NodeType.MAPEADOR_PLANTILLA,
+]);
+
+/**
+ * Nombre legible de cada tipo, para los mensajes que llegan al operador.
+ *
+ * Replica EXACTA de `NODE_TYPE_LABELS` del frontend (`types/pipeline.ts`): el
+ * error de duplicado lo puede emitir cualquiera de las dos capas, y el texto
+ * tiene que ser el mismo para que el operador no vea dos nombres del mismo nodo.
+ */
+export const NODE_TYPE_LABELS: Readonly<Record<NodeType, string>> = {
+  [NodeType.TRIGGER_IMAP]: 'Disparador IMAP',
+  [NodeType.TRIGGER_CRON]: 'Disparador Cron',
+  [NodeType.PARSER_PRE_IA]: 'Parser de Correo',
+  [NodeType.EXTRACTOR_WEB]: 'Extractor web',
+  [NodeType.PROCESADOR_IA]: 'Procesador IA',
+  [NodeType.ESCUDO_POST_IA]: 'Escudo posterior a IA',
+  [NodeType.MAPEADOR_PLANTILLA]: 'Mapeador de plantilla',
+  [NodeType.DESTINO_DRUPAL]: 'Destino Drupal',
+  [NodeType.DESTINO_SMTP]: 'Alerta por correo',
+  [NodeType.PROCESADOR_OCR]: 'Procesador OCR',
+  [NodeType.PAUSA_FLOW]: 'Pausa de flujo',
+  [NodeType.DESTINO_HTTP_GENERICO]: 'Destino HTTP genérico',
+};
+
 /** Politica de reintentos de un nodo ante un `NodeResult` fallido. */
 export interface RetryPolicy {
   /** Reintentos adicionales tras el primer intento. Entre 0 y `MAX_RETRY_ATTEMPTS`. */

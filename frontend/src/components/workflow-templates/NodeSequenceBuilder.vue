@@ -11,6 +11,10 @@ import { extractApiErrorMessage } from '@/utils/api-error';
 
 import { NODE_CATEGORY_LABELS, NodeCategory } from '@/types/node-catalog';
 import { withBaseParamDefaults } from '@/utils/node-base-params';
+import {
+  findDestinationBeforeProcessing,
+  findDuplicateAddition,
+} from '@/utils/pipeline-authoring-rules';
 
 import {
   deriveOutputNamespace,
@@ -191,6 +195,18 @@ const addNode = (): void => {
   if (entry === null || !entry.implemented) return;
 
   const nodeType = entry.code as NodeType;
+
+  // Poka-Yoke de las reglas de autoria: el backend rechazaria el guardado, y
+  // bloquear aqui el alta evita construir una secuencia que no se podra salvar.
+  const blocked =
+    findDuplicateAddition(props.modelValue, nodeType) ??
+    findDestinationBeforeProcessing([...props.modelValue, { nodeType }]);
+
+  if (blocked !== null) {
+    $q.notify({ type: 'negative', message: blocked });
+
+    return;
+  }
   const nodeId = deriveNodeId(
     entry.code,
     props.modelValue.map((step) => step.nodeId),
@@ -263,6 +279,18 @@ const moveNode = (index: number, offset: number): void => {
   steps.splice(target, 0, moved);
 
   if (rejectsEntryPoint(steps)) return;
+
+  // Subir un destino por delante del procesamiento lo dejaria entregando el
+  // disparo en crudo. Eliminar no se bloquea: quitar el unico paso de
+  // procesamiento para sustituirlo es legitimo, y el aviso del dialogo impide
+  // guardar mientras tanto.
+  const misplaced = findDestinationBeforeProcessing(steps);
+
+  if (misplaced !== null) {
+    $q.notify({ type: 'negative', message: misplaced });
+
+    return;
+  }
 
   emitSequence(steps);
 };

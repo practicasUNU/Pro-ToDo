@@ -1,7 +1,9 @@
 import { NodeType } from '@core/fsm/types/pipeline-schema.types';
 
 import {
+  ERR_TOPOLOGY_DESTINATION_BEFORE_PROCESSING,
   ERR_TOPOLOGY_DESTINATION_NOT_TERMINAL,
+  ERR_TOPOLOGY_DUPLICATE_NODE_TYPE,
   validatePipelineTopology,
 } from './pipeline-topology.validator';
 
@@ -1002,6 +1004,254 @@ describe('validatePipelineTopology', () => {
 
       // 2. Act ⚙️
       const issues = validatePipelineTopology(schema);
+
+      // 3. Assert 🎯
+      expect(issues).toEqual([]);
+    });
+  });
+
+  describe('12. Duplicados por tipo de disparador o destino (solo al guardar)', () => {
+    const AUTHORING = { enforceAuthoringRules: true } as const;
+
+    /** Pipeline base con un destino al final y un satelite opcional. */
+    const withDestinations = (
+      satellite: NodeType | null,
+    ): PipelineSchemaDto => {
+      const schema = buildSchema();
+
+      schema.nodes.nodo_extractor = {
+        ...schema.nodes.nodo_extractor,
+        nodeType: NodeType.DESTINO_DRUPAL,
+        outputNamespace: 'http_result',
+        onErrorStep: satellite === null ? null : 'nodo_satelite',
+        params: {},
+      };
+
+      if (satellite !== null) {
+        schema.nodes.nodo_satelite = {
+          nodeId: 'nodo_satelite',
+          nodeType: satellite,
+          outputNamespace:
+            satellite === NodeType.DESTINO_DRUPAL
+              ? 'http_result_2'
+              : 'http_generic_response',
+          nextStep: null,
+          onErrorStep: null,
+          params: {},
+        };
+      }
+
+      return schema;
+    };
+
+    it('12.1 deberia admitir disparadores de TIPOS distintos (IMAP y Cron)', () => {
+      // 1. Arrange 📐
+      const schema = buildSchema();
+
+      schema.nodes.nodo_cron = {
+        nodeId: 'nodo_cron',
+        nodeType: NodeType.TRIGGER_CRON,
+        outputNamespace: 'cron_trigger',
+        nextStep: null,
+        onErrorStep: null,
+        params: {},
+      };
+
+      // 2. Act ⚙️
+      const issues = validatePipelineTopology(schema, {}, AUTHORING);
+
+      // 3. Assert 🎯
+      expect(issues).toEqual([]);
+    });
+
+    it('12.2 deberia rechazar dos disparadores del MISMO tipo con el mensaje exacto', () => {
+      // 1. Arrange 📐: dos IMAP sondearian el mismo buzon.
+      const schema = buildSchema();
+
+      schema.nodes.nodo_trigger_2 = {
+        ...schema.nodes.nodo_trigger,
+        nodeId: 'nodo_trigger_2',
+        outputNamespace: 'raw_email_2',
+        nextStep: null,
+      };
+
+      // 2. Act ⚙️
+      const issues = validatePipelineTopology(schema, {}, AUTHORING);
+
+      // 3. Assert 🎯: senala el SEGUNDO, no el que ya estaba.
+      const issue = issues.find(
+        (i) => i.code === ERR_TOPOLOGY_DUPLICATE_NODE_TYPE,
+      );
+
+      expect(issue?.field).toBe('nodes.nodo_trigger_2.nodeType');
+      expect(issue?.constraints).toEqual([
+        "El tipo de nodo 'Disparador IMAP' ya está presente en este flujo y no se puede duplicar.",
+      ]);
+    });
+
+    it('12.3 deberia admitir destinos de TIPOS distintos (Drupal y HTTP generico)', () => {
+      // 1. Arrange 📐
+      const schema = withDestinations(NodeType.DESTINO_HTTP_GENERICO);
+
+      // 2. Act ⚙️
+      const issues = validatePipelineTopology(schema, {}, AUTHORING);
+
+      // 3. Assert 🎯
+      expect(issues).toEqual([]);
+    });
+
+    it('12.4 deberia rechazar dos destinos del MISMO tipo aunque uno sea satelite', () => {
+      // 1. Arrange 📐
+      const schema = withDestinations(NodeType.DESTINO_DRUPAL);
+
+      // 2. Act ⚙️
+      const issues = validatePipelineTopology(schema, {}, AUTHORING);
+
+      // 3. Assert 🎯
+      expect(issues).toEqual([
+        expect.objectContaining({
+          field: 'nodes.nodo_satelite.nodeType',
+          code: ERR_TOPOLOGY_DUPLICATE_NODE_TYPE,
+        }),
+      ]);
+    });
+
+    it('12.5 NO deberia aplicarse fuera del guardado (ejecutar o reanudar)', () => {
+      // 1. Arrange 📐: un flujo ya persistido con el duplicado sigue corriendo.
+      const schema = withDestinations(NodeType.DESTINO_DRUPAL);
+
+      // 2. Act ⚙️
+      const issues = validatePipelineTopology(schema);
+
+      // 3. Assert 🎯
+      expect(issues).toEqual([]);
+    });
+
+    it('12.6 NO deberia restringir los nodos de procesamiento repetidos', () => {
+      // 1. Arrange 📐: dos OCR o dos IA son un patron legitimo.
+      const schema = buildSchema();
+
+      schema.nodes.nodo_extractor = {
+        ...schema.nodes.nodo_extractor,
+        nodeType: NodeType.PARSER_PRE_IA,
+        outputNamespace: 'parsed_email_2',
+        params: {},
+      };
+
+      // 2. Act ⚙️
+      const issues = validatePipelineTopology(schema, {}, AUTHORING);
+
+      // 3. Assert 🎯
+      expect(
+        issues.filter((i) => i.code === ERR_TOPOLOGY_DUPLICATE_NODE_TYPE),
+      ).toEqual([]);
+    });
+  });
+
+  describe('13. El destino va despues del procesamiento (solo al guardar)', () => {
+    const AUTHORING = { enforceAuthoringRules: true } as const;
+
+    it('13.1 deberia rechazar un destino conectado directamente al disparador', () => {
+      // 1. Arrange 📐: entregaria el disparo en crudo.
+      const schema = buildSchema();
+
+      schema.nodes.nodo_trigger = {
+        ...schema.nodes.nodo_trigger,
+        nextStep: 'nodo_destino',
+      };
+      schema.nodes.nodo_destino = {
+        nodeId: 'nodo_destino',
+        nodeType: NodeType.DESTINO_HTTP_GENERICO,
+        outputNamespace: 'http_generic_response',
+        nextStep: null,
+        onErrorStep: null,
+        params: {},
+      };
+
+      // 2. Act ⚙️
+      const issues = validatePipelineTopology(schema, {}, AUTHORING);
+
+      // 3. Assert 🎯
+      const issue = issues.find(
+        (i) => i.code === ERR_TOPOLOGY_DESTINATION_BEFORE_PROCESSING,
+      );
+
+      expect(issue?.field).toBe('nodes.nodo_destino.nodeType');
+      expect(issue?.constraints[0]).toContain('Destino HTTP genérico');
+    });
+
+    it('13.2 NO deberia contar un nodo de CONTROL como procesamiento', () => {
+      // 1. Arrange 📐: una pausa no produce contenido.
+      const schema = buildSchema();
+
+      schema.nodes.nodo_trigger = {
+        ...schema.nodes.nodo_trigger,
+        nextStep: 'nodo_pausa',
+      };
+      schema.nodes.nodo_pausa = {
+        nodeId: 'nodo_pausa',
+        nodeType: NodeType.PAUSA_FLOW,
+        outputNamespace: 'pause_context',
+        nextStep: 'nodo_destino',
+        onErrorStep: null,
+        params: {},
+      };
+      schema.nodes.nodo_destino = {
+        nodeId: 'nodo_destino',
+        nodeType: NodeType.DESTINO_DRUPAL,
+        outputNamespace: 'http_result',
+        nextStep: null,
+        onErrorStep: null,
+        params: {},
+      };
+
+      // 2. Act ⚙️
+      const issues = validatePipelineTopology(schema, {}, AUTHORING);
+
+      // 3. Assert 🎯
+      expect(issues.map((i) => i.code)).toContain(
+        ERR_TOPOLOGY_DESTINATION_BEFORE_PROCESSING,
+      );
+    });
+
+    it('13.3 deberia aceptar un destino tras el procesamiento', () => {
+      // 1. Arrange 📐: trigger -> parser -> destino.
+      const schema = buildSchema();
+
+      schema.nodes.nodo_extractor = {
+        ...schema.nodes.nodo_extractor,
+        nodeType: NodeType.DESTINO_DRUPAL,
+        outputNamespace: 'http_result',
+        params: {},
+      };
+
+      // 2. Act ⚙️
+      const issues = validatePipelineTopology(schema, {}, AUTHORING);
+
+      // 3. Assert 🎯
+      expect(issues).toEqual([]);
+    });
+
+    it('13.4 NO deberia juzgar un satelite de alerta colgado del disparador', () => {
+      // 1. Arrange 📐: la alerta SMTP puede atender el fallo del propio
+      //    disparador, antes de que haya habido procesamiento alguno.
+      const schema = buildSchema();
+
+      schema.nodes.nodo_trigger = {
+        ...schema.nodes.nodo_trigger,
+        onErrorStep: 'nodo_alerta',
+      };
+      schema.nodes.nodo_alerta = {
+        nodeId: 'nodo_alerta',
+        nodeType: NodeType.DESTINO_SMTP,
+        outputNamespace: 'smtp_result',
+        nextStep: null,
+        onErrorStep: null,
+        params: {},
+      };
+
+      // 2. Act ⚙️
+      const issues = validatePipelineTopology(schema, {}, AUTHORING);
 
       // 3. Assert 🎯
       expect(issues).toEqual([]);

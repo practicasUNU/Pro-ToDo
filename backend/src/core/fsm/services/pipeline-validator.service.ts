@@ -20,6 +20,8 @@ import {
 // sin el token que necesita para resolver la dependencia.
 import { NodeStrategyFactory } from '@core/fsm/factories/node-strategy.factory';
 import { ERR_INCOMPLETE_NODE_PARAMS } from '@core/fsm/types/node-strategy.types';
+import { NodeType } from '@core/fsm/types/pipeline-schema.types';
+import { OutboundTargetGuard } from '@core/http/outbound-url.guard';
 import { validatePipelineTopology } from '@core/fsm/validators/pipeline-topology.validator';
 import {
   PROMPT_TEXT_RESOLVER,
@@ -57,7 +59,26 @@ const SCHEMA_ERROR_CODE = 'PIPELINE_SCHEMA_INVALIDO';
  */
 export interface ValidateSchemaOptions {
   readonly requireRunnableParams?: boolean;
+  /**
+   * Validacion de AUTORIA: la piden solo los caminos que GUARDAN un flujo o
+   * una plantilla (alta y edicion). Activa las reglas 12 y 13 del validador de
+   * topologia y la guarda SSRF sobre el `targetUrl` del destino HTTP generico.
+   *
+   * Ejecutar, reanudar y activar NO la piden: el validador tambien corre ahi, y
+   * endurecerlo dejaria sin poder correr ni reanudar flujos ya persistidos que
+   * nacieron antes de estas reglas.
+   */
+  readonly authoring?: boolean;
 }
+
+/** Codigo del issue SSRF; el mismo que emite la estrategia al ejecutar. */
+const ERR_HTTP_GENERIC_TARGET_BLOCKED = 'ERR_HTTP_GENERIC_TARGET_BLOCKED';
+
+/** Marcador `{{ns.campo}}` en una URL, para aislar el host interpolado. */
+const URL_MARKER_PATTERN = /\{\{[^}]*\}\}/g;
+
+/** Relleno inocuo con el que se sustituyen los marcadores antes de parsear. */
+const MARKER_PLACEHOLDER = 'pdmarker';
 
 /**
  * `forbidNonWhitelisted` convierte cualquier propiedad no declarada en un error
@@ -118,6 +139,10 @@ export class PipelineValidatorService {
     @Optional()
     @Inject(PROMPT_TEXT_RESOLVER)
     private readonly promptTextResolver: PromptTextResolverPort | null = null,
+    // Opcional por el mismo motivo que el puerto de prompts: sin la guarda, el
+    // validador sigue funcionando y solo omite la comprobacion SSRF al guardar.
+    @Optional()
+    private readonly outboundTargetGuard: OutboundTargetGuard | null = null,
   ) {}
 
   /**
@@ -162,39 +187,47 @@ export class PipelineValidatorService {
       const promptContext = await this.resolvePromptContext(schema);
 
       issues.push(
-        ...validatePipelineTopology(schema, {
-          dependencies: (node) => [
-            ...new Set([
-              ...this.resolveNodeDependencies(node),
-              ...(promptContext.namespacesByNode.get(node.nodeId) ?? []),
-            ]),
-          ],
-          // Solo lo DECLARADO. Es el subconjunto que no tolera un namespace
-          // condicional, y por eso viaja aparte en vez de fusionado con lo
-          // interpolado (ver el TSDoc de `strictDependencies`).
-          strictDependencies: (node) => this.resolveDeclaredNamespaces(node),
-          dependencyOrigins: (node) =>
-            promptContext.originsByNode.get(node.nodeId) ?? new Map(),
-          outputFields: (node) =>
-            this.tryGetStrategy(node.nodeType)?.outputFields ?? [],
-          // Se prefiere el metodo sobre la propiedad: hay nodos cuya exigencia
-          // aguas arriba depende de sus propios `params` (ver `skipIfEmpty` del
-          // extractor web) y la propiedad estatica no puede expresarlo.
-          requiredFieldTypes: (node) => {
-            const strategy = this.tryGetStrategy(node.nodeType);
+        ...validatePipelineTopology(
+          schema,
+          {
+            dependencies: (node) => [
+              ...new Set([
+                ...this.resolveNodeDependencies(node),
+                ...(promptContext.namespacesByNode.get(node.nodeId) ?? []),
+              ]),
+            ],
+            // Solo lo DECLARADO. Es el subconjunto que no tolera un namespace
+            // condicional, y por eso viaja aparte en vez de fusionado con lo
+            // interpolado (ver el TSDoc de `strictDependencies`).
+            strictDependencies: (node) => this.resolveDeclaredNamespaces(node),
+            dependencyOrigins: (node) =>
+              promptContext.originsByNode.get(node.nodeId) ?? new Map(),
+            outputFields: (node) =>
+              this.tryGetStrategy(node.nodeType)?.outputFields ?? [],
+            // Se prefiere el metodo sobre la propiedad: hay nodos cuya exigencia
+            // aguas arriba depende de sus propios `params` (ver `skipIfEmpty` del
+            // extractor web) y la propiedad estatica no puede expresarlo.
+            requiredFieldTypes: (node) => {
+              const strategy = this.tryGetStrategy(node.nodeType);
 
-            return (
-              strategy?.getRequiredUpstreamFieldTypes?.(node.params) ??
-              strategy?.requiredUpstreamFieldTypes ??
-              []
-            );
+              return (
+                strategy?.getRequiredUpstreamFieldTypes?.(node.params) ??
+                strategy?.requiredUpstreamFieldTypes ??
+                []
+              );
+            },
+            unreachableErrorCodes: (node) =>
+              this.tryGetStrategy(node.nodeType)?.getUnreachableErrorCodes?.(
+                node.params,
+              ) ?? [],
           },
-          unreachableErrorCodes: (node) =>
-            this.tryGetStrategy(node.nodeType)?.getUnreachableErrorCodes?.(
-              node.params,
-            ) ?? [],
-        }),
+          { enforceAuthoringRules: options.authoring === true },
+        ),
       );
+
+      if (options.authoring === true) {
+        issues.push(...(await this.detectBlockedHttpTargets(schema)));
+      }
     }
 
     if (options.requireRunnableParams === true) {
@@ -478,6 +511,74 @@ export class PipelineValidatorService {
   }
 
   /** Lanza la excepcion estructurada. Tipada como `never` para cortar el flujo. */
+  /**
+   * Guarda SSRF al GUARDAR: rechaza un destino HTTP generico que apunte a la
+   * red interna, con el mismo codigo que daria la estrategia al ejecutar.
+   *
+   * Se juzga solo lo que se puede juzgar ya. Si el HOST lleva un marcador, su
+   * valor no se conoce hasta la ejecucion y la comprobacion queda para la
+   * guarda de ejecucion; si el marcador esta en la ruta o la query, el host es
+   * literal y se comprueba igual.
+   */
+  private async detectBlockedHttpTargets(
+    schema: PipelineSchemaDto,
+  ): Promise<SchemaIssue[]> {
+    if (this.outboundTargetGuard === null) {
+      return [];
+    }
+
+    const issues: SchemaIssue[] = [];
+
+    for (const [key, node] of Object.entries(schema.nodes)) {
+      const rawUrl = node.params.targetUrl;
+
+      if (
+        node.nodeType !== NodeType.DESTINO_HTTP_GENERICO ||
+        typeof rawUrl !== 'string' ||
+        rawUrl.trim() === ''
+      ) {
+        continue;
+      }
+
+      const literalUrl = this.withLiteralHost(rawUrl);
+
+      if (literalUrl === null) {
+        continue;
+      }
+
+      const reason =
+        await this.outboundTargetGuard.describeBlockedTarget(literalUrl);
+
+      if (reason !== null) {
+        issues.push({
+          field: `nodes.${key}.params.targetUrl`,
+          code: ERR_HTTP_GENERIC_TARGET_BLOCKED,
+          constraints: [
+            `La URL destino apunta a una red privada, local o reservada y no se puede guardar: ${reason}`,
+          ],
+        });
+      }
+    }
+
+    return issues;
+  }
+
+  /**
+   * La URL con los marcadores neutralizados, o `null` si el host depende de
+   * uno (o no se puede parsear: de eso ya se ocupa el DTO del nodo).
+   */
+  private withLiteralHost(rawUrl: string): string | null {
+    const literal = rawUrl.replace(URL_MARKER_PATTERN, MARKER_PLACEHOLDER);
+
+    try {
+      return new URL(literal).hostname.includes(MARKER_PLACEHOLDER)
+        ? null
+        : literal;
+    } catch {
+      return null;
+    }
+  }
+
   private rejectWith(issues: SchemaIssue[]): never {
     throw new BadRequestException({
       statusCode: 400,

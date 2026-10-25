@@ -348,6 +348,16 @@ const onSubmit = async (): Promise<void> => {
           >
             {{ templatesStore.entryPointIssue }}
           </span>
+          <!-- Duplicados por tipo y destino sin procesamiento previo: las
+               reglas de autoria que el backend exige al guardar. -->
+          <span
+            v-else-if="templatesStore.topologyIssue !== null"
+            class="pd-subtitle pd-save-hint"
+            role="alert"
+            data-test="topology-issue"
+          >
+            {{ templatesStore.topologyIssue }}
+          </span>
           <q-btn
             class="pd-btn-primary"
             unelevated

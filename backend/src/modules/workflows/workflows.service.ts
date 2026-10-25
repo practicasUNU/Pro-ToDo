@@ -414,6 +414,7 @@ export class WorkflowsService
 
     const schema = await this.pipelineValidatorService.validateSchema(
       createWorkflowDto.pipelineSchema,
+      { authoring: true },
     );
 
     // DESPUES de validar y no antes, aunque sea una comprobacion mas barata:
@@ -528,6 +529,7 @@ export class WorkflowsService
     if (updateWorkflowDto.pipelineSchema !== undefined) {
       const schema = await this.pipelineValidatorService.validateSchema(
         updateWorkflowDto.pipelineSchema,
+        { authoring: true },
       );
 
       this.assertModelPermissions(schema, userRole);

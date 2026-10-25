@@ -11,6 +11,7 @@ import {
   errorRouteTarget,
 } from '@/utils/pipeline-assembler';
 import { withBaseParamDefaults } from '@/utils/node-base-params';
+import { describeAuthoringIssue } from '@/utils/pipeline-authoring-rules';
 import { resolveSatelliteErrorRoute } from '@/utils/satellite-error-route';
 
 import {
@@ -224,6 +225,23 @@ export const useWorkflowTemplatesStore = defineStore('workflowTemplates', () => 
   });
 
   /**
+   * Motivo por el que la topologia incumple las reglas de AUTORIA, o `null`.
+   *
+   * Duplicados por tipo de disparador o destino y destino sin procesamiento
+   * previo (reglas 12 y 13 del backend). Se juzga el TEXTO, igual que
+   * `entryPointIssue`, porque es lo que se va a enviar; asi cubre tambien un
+   * esquema pegado a mano en el editor JSON, que nunca paso por el
+   * constructor de secuencias.
+   */
+  const topologyIssue = computed<string | null>(() => {
+    try {
+      return describeAuthoringIssue(JSON.parse(activeDraft.value.schemaText));
+    } catch {
+      return null;
+    }
+  });
+
+  /**
    * Condiciones minimas para intentar el guardado.
    *
    * Las tres son de FORMA, no de negocio: un nombre, un documento parseable y al
@@ -240,7 +258,8 @@ export const useWorkflowTemplatesStore = defineStore('workflowTemplates', () => 
       activeDraft.value.name.trim().length > 0 &&
       schemaSyntaxError.value === null &&
       schemaNodeCount.value > 0 &&
-      entryPointIssue.value === null,
+      entryPointIssue.value === null &&
+      topologyIssue.value === null,
   );
 
   /**
@@ -880,6 +899,7 @@ export const useWorkflowTemplatesStore = defineStore('workflowTemplates', () => 
     schemaNodeCount,
     isDraftValid,
     entryPointIssue,
+    topologyIssue,
     sequence,
     stopOnFirstSuccess,
     setStopOnFirstSuccess,

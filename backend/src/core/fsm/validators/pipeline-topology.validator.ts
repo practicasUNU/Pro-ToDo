@@ -11,7 +11,9 @@ import {
   ERROR_CONTEXT_NAMESPACE,
   isAllowedOutputNamespace,
   NODE_OUTPUT_NAMESPACES,
+  NODE_TYPE_LABELS,
   DESTINO_NODE_TYPES,
+  PROCESSING_NODE_TYPES,
   TRIGGER_NODE_TYPES,
 } from '@core/fsm/types/pipeline-schema.types';
 
@@ -135,6 +137,33 @@ const hasNode = (schema: PipelineSchemaDto, nodeId: string): boolean =>
 export const ERR_TOPOLOGY_DESTINATION_NOT_TERMINAL =
   'ERR_TOPOLOGY_DESTINATION_NOT_TERMINAL';
 
+/** Codigo de la regla 12: un disparador o destino repite tipo en el flujo. */
+export const ERR_TOPOLOGY_DUPLICATE_NODE_TYPE =
+  'ERR_TOPOLOGY_DUPLICATE_NODE_TYPE';
+
+/** Codigo de la regla 13: un destino llega sin procesamiento previo. */
+export const ERR_TOPOLOGY_DESTINATION_BEFORE_PROCESSING =
+  'ERR_TOPOLOGY_DESTINATION_BEFORE_PROCESSING';
+
+/**
+ * Opciones de la validacion que no son preguntas a las estrategias.
+ *
+ * `enforceAuthoringRules` activa las reglas 12 y 13, que solo se exigen al
+ * GUARDAR un flujo o una plantilla. El validador corre tambien al ejecutar y al
+ * reanudar, y endurecerlo ahi dejaria sin poder correr —ni reanudar— flujos ya
+ * persistidos que nacieron antes de estas reglas. Se corrigen al editarlos.
+ */
+export interface PipelineTopologyOptions {
+  readonly enforceAuthoringRules?: boolean;
+}
+
+/**
+ * Mensaje de la regla 12. Es el MISMO texto que muestra el editor de
+ * plantillas del frontend al bloquear el alta del nodo repetido.
+ */
+export const duplicateNodeTypeMessage = (label: string): string =>
+  `El tipo de nodo '${label}' ya está presente en este flujo y no se puede duplicar.`;
+
 /**
  * Valida la integridad del grafo declarado en el pipeline.
  *
@@ -194,6 +223,17 @@ export const ERR_TOPOLOGY_DESTINATION_NOT_TERMINAL =
  *    sobre el camino activo: una rama en construccion con esta forma es un error
  *    que conviene ver al guardar, no el dia que se conecte.
  *
+ * 12. (Solo al guardar.) Un disparador o un destino no repite TIPO dentro del
+ *    flujo. Se admiten varios si son de tipos distintos —IMAP y Cron, o Drupal
+ *    y HTTP genérico—, pero dos `TRIGGER_IMAP` sondearian el mismo buzon y dos
+ *    `DESTINO_HTTP_GENERICO` entregarian dos veces el mismo resultado. Se mira
+ *    el mapa completo, satelites incluidos.
+ * 13. (Solo al guardar.) En el camino activo, todo destino va precedido de al
+ *    menos un nodo de PROCESAMIENTO (`PROCESSING_NODE_TYPES`). Junto con la
+ *    regla 11, que lo hace terminal, garantiza que la entrega llega despues de
+ *    la ingesta y la transformacion. Los satelites de `onErrorStep` no se
+ *    juzgan: una alerta SMTP puede colgar del propio disparador.
+ *
  * Los nodos inalcanzables desde `entrypoint` se ignoran deliberadamente: un flujo
  * puede conservar ramas en construccion sin que eso invalide el esquema.
  * `onErrorStep` queda fuera del recorrido porque apuntar hacia atras es el patron
@@ -202,11 +242,13 @@ export const ERR_TOPOLOGY_DESTINATION_NOT_TERMINAL =
  * @param schema Esquema con forma y tipos ya validados.
  * @param resolvers Lo que se pregunta a cada estrategia. Omitir uno desactiva su
  *                  regla, que es lo que hacen las pruebas de las reglas 1 a 6.
+ * @param options `enforceAuthoringRules` activa las reglas 12 y 13.
  * @returns Lista de incidencias; vacia si el grafo es integro.
  */
 export const validatePipelineTopology = (
   schema: PipelineSchemaDto,
   resolvers: PipelineTopologyResolvers = {},
+  options: PipelineTopologyOptions = {},
 ): SchemaIssue[] => {
   const issues: SchemaIssue[] = [];
 
@@ -332,6 +374,13 @@ export const validatePipelineTopology = (
 
   issues.push(...detectActivePathCycle(schema));
 
+  if (options.enforceAuthoringRules === true) {
+    issues.push(
+      ...detectDuplicateRestrictedTypes(schema),
+      ...detectDestinationBeforeProcessing(schema),
+    );
+  }
+
   if (resolvers.dependencies !== undefined) {
     issues.push(
       ...detectUnreachableNamespaces(
@@ -389,6 +438,77 @@ const ENGINE_PROVIDED_NAMESPACES: ReadonlySet<string> = new Set([
  * ejecuciones que se desviaron por ahi.
  */
 type NamespaceAvailability = 'certain' | 'conditional';
+
+/**
+ * Regla 12: un disparador o destino repite tipo.
+ *
+ * El issue se pega al SEGUNDO nodo de cada tipo, en el orden del mapa: el
+ * primero es legitimo y senalarlo haria creer al operador que sobra el que ya
+ * estaba.
+ */
+const detectDuplicateRestrictedTypes = (
+  schema: PipelineSchemaDto,
+): SchemaIssue[] => {
+  const issues: SchemaIssue[] = [];
+  const seen = new Set<string>();
+
+  for (const [key, node] of Object.entries(schema.nodes)) {
+    if (
+      !TRIGGER_NODE_TYPES.has(node.nodeType) &&
+      !DESTINO_NODE_TYPES.has(node.nodeType)
+    ) {
+      continue;
+    }
+
+    if (!seen.has(node.nodeType)) {
+      seen.add(node.nodeType);
+      continue;
+    }
+
+    issues.push({
+      field: `nodes.${key}.nodeType`,
+      code: ERR_TOPOLOGY_DUPLICATE_NODE_TYPE,
+      constraints: [duplicateNodeTypeMessage(NODE_TYPE_LABELS[node.nodeType])],
+    });
+  }
+
+  return issues;
+};
+
+/**
+ * Regla 13: un destino del camino activo sin procesamiento delante.
+ *
+ * Recorre `nextStep` desde el entrypoint con un `Set` de visitados: un ciclo ya
+ * lo denuncia la regla 6, y aqui solo hace falta no colgarse.
+ */
+const detectDestinationBeforeProcessing = (
+  schema: PipelineSchemaDto,
+): SchemaIssue[] => {
+  const issues: SchemaIssue[] = [];
+  const visited = new Set<string>();
+  let processed = false;
+  let cursor: string | null = schema.entrypoint;
+
+  while (cursor !== null && hasNode(schema, cursor) && !visited.has(cursor)) {
+    visited.add(cursor);
+    const node: PipelineNodeConfigDto = schema.nodes[cursor];
+
+    if (DESTINO_NODE_TYPES.has(node.nodeType) && !processed) {
+      issues.push({
+        field: `nodes.${cursor}.nodeType`,
+        code: ERR_TOPOLOGY_DESTINATION_BEFORE_PROCESSING,
+        constraints: [
+          `El destino '${NODE_TYPE_LABELS[node.nodeType]}' debe ubicarse después de los nodos de ingesta y procesamiento: añade antes al menos un nodo de procesamiento (parser, extractor, IA, OCR o mapeador).`,
+        ],
+      });
+    }
+
+    processed ||= PROCESSING_NODE_TYPES.has(node.nodeType);
+    cursor = node.nextStep;
+  }
+
+  return issues;
+};
 
 /** Nodos del camino activo, para distinguir un satelite de una reincorporacion. */
 const collectActivePathIds = (

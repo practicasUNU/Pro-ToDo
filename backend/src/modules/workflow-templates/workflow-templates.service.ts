@@ -156,6 +156,7 @@ export class WorkflowTemplatesService {
 
     const schema = await this.pipelineValidatorService.validateSchema(
       createDto.pipelineSchema,
+      { authoring: true },
     );
 
     const template = this.templateRepository.create({
@@ -214,6 +215,7 @@ export class WorkflowTemplatesService {
       template.pipelineSchema =
         await this.pipelineValidatorService.validateSchema(
           updateDto.pipelineSchema,
+          { authoring: true },
         );
     }
 

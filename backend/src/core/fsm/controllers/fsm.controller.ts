@@ -83,7 +83,12 @@ export class FsmController {
   ): Promise<ValidateSchemaResponseDto> {
     try {
       const schema =
-        await this.pipelineValidatorService.validateSchema(rawJson);
+        // Es la comprobacion PREVIA a guardar, asi que exige lo mismo que
+        // exigira el guardado: sin `authoring`, un esquema daria "valido" aqui
+        // y un 400 al persistirlo.
+        await this.pipelineValidatorService.validateSchema(rawJson, {
+          authoring: true,
+        });
 
       return { success: true, schema };
     } catch (error: unknown) {

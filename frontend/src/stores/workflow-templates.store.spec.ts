@@ -253,6 +253,78 @@ describe('useWorkflowTemplatesStore · catalogo de plantillas de flujo', () => {
       // 3. Assert
       expect(store.entryPointIssue).toBeNull();
     });
+
+    /** Nodo minimo del documento, con el encadenado que se le pase. */
+    const node = (nodeId: string, nodeType: string, nextStep: string | null = null) => ({
+      nodeId,
+      nodeType,
+      outputNamespace: nodeId,
+      nextStep,
+      onErrorStep: null,
+      params: {},
+    });
+
+    it('2.9 deberia bloquear el guardado con dos disparadores del mismo tipo', () => {
+      // 1. Arrange: un documento pegado a mano, que nunca paso por el
+      //    constructor de secuencias.
+      const store = useWorkflowTemplatesStore();
+      store.initDraft();
+      const schema = {
+        ...SCHEMA,
+        nodes: {
+          trigger_imap: node('trigger_imap', 'TRIGGER_IMAP'),
+          trigger_imap_2: node('trigger_imap_2', 'TRIGGER_IMAP'),
+        },
+      };
+
+      // 2. Act
+      store.patchDraft({ name: 'Notiweb', schemaText: JSON.stringify(schema) });
+
+      // 3. Assert: el mismo texto que devolveria el backend (regla 12).
+      expect(store.topologyIssue).toBe(
+        "El tipo de nodo 'Disparador IMAP' ya está presente en este flujo y no se puede duplicar.",
+      );
+      expect(store.isDraftValid).toBe(false);
+    });
+
+    it('2.10 deberia admitir un disparador IMAP y otro Cron en el mismo flujo', () => {
+      // 1. Arrange
+      const store = useWorkflowTemplatesStore();
+      store.initDraft();
+      const schema = {
+        ...SCHEMA,
+        nodes: {
+          trigger_imap: node('trigger_imap', 'TRIGGER_IMAP'),
+          trigger_cron: node('trigger_cron', 'TRIGGER_CRON'),
+        },
+      };
+
+      // 2. Act
+      store.patchDraft({ name: 'Notiweb', schemaText: JSON.stringify(schema) });
+
+      // 3. Assert
+      expect(store.topologyIssue).toBeNull();
+    });
+
+    it('2.11 deberia bloquear un destino conectado directamente al disparador', () => {
+      // 1. Arrange
+      const store = useWorkflowTemplatesStore();
+      store.initDraft();
+      const schema = {
+        ...SCHEMA,
+        nodes: {
+          trigger_imap: node('trigger_imap', 'TRIGGER_IMAP', 'destino'),
+          destino: node('destino', 'DESTINO_DRUPAL'),
+        },
+      };
+
+      // 2. Act
+      store.patchDraft({ name: 'Notiweb', schemaText: JSON.stringify(schema) });
+
+      // 3. Assert
+      expect(store.topologyIssue).toContain("El destino 'Destino Drupal'");
+      expect(store.isDraftValid).toBe(false);
+    });
   });
 
   describe('2bis. Parametros base por nodo (Poka-Yoke)', () => {
