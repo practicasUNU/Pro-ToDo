@@ -26,7 +26,7 @@
 -- antigua el orden correcto sigue siendo 001 -> 004 -> 009.
 --
 -- Aplicar con:
---   sudo docker exec -i protodo_postgres psql -U unuware007 -d 'DB_PRO-TODO' \
+--   sudo docker exec -i protodo_postgres psql -U '<usuario_postgres>' -d '<nombre_bd_desarrollo>' \
 --     < db/migrations/004-device-id-refresh-tokens.sql
 -- =============================================================================
 
