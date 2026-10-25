@@ -4,6 +4,7 @@ import { subscribeToCrudMutations } from '@services/socket-events.service';
 import { useAiPromptTemplatesStore } from '@stores/ai-prompt-templates.store';
 import { useAllowedIpsStore } from '@stores/allowed-ips.store';
 import { useCanvasStore } from '@stores/canvas.store';
+import { useCredentialsStore } from '@stores/credentials.store';
 import { useTemplatesStore } from '@stores/templates.store';
 import { useUsersStore } from '@stores/users.store';
 import { useWorkflowTemplatesStore } from '@stores/workflow-templates.store';
@@ -11,6 +12,7 @@ import { useWorkflowsStore } from '@stores/workflows.store';
 
 import type { AiPromptTemplate } from '@/types/ai-prompt-template';
 import type { AllowedIp } from '@/types/allowed-ip';
+import type { Credential } from '@/types/credential';
 import type { CrudMutationPayload } from '@/types/crud-events';
 import type { HtmlTemplate } from '@/types/html-template';
 import type { PipelineSummary, WorkflowTemplateSummary } from '@/types/pipeline';
@@ -36,6 +38,7 @@ export const useCrudSocket = (): void => {
   const aiPromptTemplatesStore = useAiPromptTemplatesStore();
   const workflowsStore = useWorkflowsStore();
   const canvasStore = useCanvasStore();
+  const credentialsStore = useCredentialsStore();
 
   let unsubscribe: (() => void) | null = null;
 
@@ -90,6 +93,11 @@ export const useCrudSocket = (): void => {
         // esta mirando, con su topologia, que no viaja en el resumen. El canvas
         // descarta por `id` lo que no es suyo.
         canvasStore.applyWorkflowMutation(action, data as PipelineSummary | undefined, id);
+        break;
+
+      case 'credentials':
+        // Solo metadatos: el backend jamas difunde el secreto.
+        credentialsStore.applyMutation(action, data as Credential | undefined, id);
         break;
     }
   };

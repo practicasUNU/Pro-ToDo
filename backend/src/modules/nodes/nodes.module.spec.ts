@@ -5,6 +5,7 @@ import { createTemplateRendererService } from '@test/factories/template-renderer
 import { NodesModule } from './nodes.module';
 import { CronTriggerStrategy } from './strategies/cron-trigger.strategy';
 import { DrupalHttpStrategy } from './strategies/drupal-http.strategy';
+import { HttpGenericDestinationStrategy } from './strategies/http-generic-destination.strategy';
 import { ImapTriggerStrategy } from './strategies/imap-trigger.strategy';
 import { LlmExtractorStrategy } from './strategies/llm-extractor.strategy';
 import { ParserEmailStrategy } from './strategies/parser-email.strategy';
@@ -19,6 +20,8 @@ import type { ConfigService } from '@nestjs/config';
 import type { InboundEmailResumeService } from '@modules/workflows/inbound-email-resume.service';
 import type { DrupalApiConfig } from '@core/config/drupal-api.config';
 import type { HttpClientService } from '@core/http/http-client.service';
+import type { OutboundTargetGuard } from '@core/http/outbound-url.guard';
+import type { CredentialsService } from '@modules/credentials/credentials.service';
 import type { AiDefaultsConfig } from '@core/config/ai-defaults.config';
 import type { SmtpNodeMailerService } from '@common/services/smtp-node-mailer.service';
 import type { AiPromptTemplatesService } from '@modules/ai-prompt-templates/ai-prompt-templates.service';
@@ -51,6 +54,7 @@ const buildHarness = (): {
   ocr: OcrProcessorStrategy;
   drupal: DrupalHttpStrategy;
   pause: PauseFlowStrategy;
+  httpGeneric: HttpGenericDestinationStrategy;
   module: NodesModule;
 } => {
   const factory = new NodeStrategyFactory();
@@ -112,6 +116,13 @@ const buildHarness = (): {
   // inscribir la estrategia no abre ninguna conexion.
   const pause = new PauseFlowStrategy({} as SmtpNodeMailerService);
 
+  // Inscribirla no despacha nada ni abre la boveda.
+  const httpGeneric = new HttpGenericDestinationStrategy(
+    {} as HttpClientService,
+    {} as CredentialsService,
+    {} as OutboundTargetGuard,
+  );
+
   return {
     factory,
     mapper,
@@ -125,6 +136,7 @@ const buildHarness = (): {
     ocr,
     drupal,
     pause,
+    httpGeneric,
     module: new NodesModule(
       factory,
       mapper,
@@ -138,6 +150,7 @@ const buildHarness = (): {
       ocr,
       drupal,
       pause,
+      httpGeneric,
     ),
   };
 };
@@ -279,5 +292,18 @@ describe('NodesModule', () => {
 
     // 3. Assert 🎯
     expect(factory.getStrategy(NodeType.PAUSA_FLOW)).toBe(pause);
+  });
+
+  it('1.12 deberia registrar HttpGenericDestinationStrategy en la factoria al iniciarse', () => {
+    // 1. Arrange 📐
+    const { factory, httpGeneric, module } = buildHarness();
+
+    // 2. Act ⚙️
+    module.onModuleInit();
+
+    // 3. Assert 🎯
+    expect(factory.getStrategy(NodeType.DESTINO_HTTP_GENERICO)).toBe(
+      httpGeneric,
+    );
   });
 });

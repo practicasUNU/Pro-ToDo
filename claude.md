@@ -122,6 +122,11 @@ Pro-ToDo/
 - ⚠️ **Las migraciones `035`-`038` estan ROTAS y nunca se han aplicado.** Escriben en `plantillas_html.actualizado_en` y `plantillas_prompts_ia.actualizado_en`, columnas que no existen: las dos tablas usan `fecha_actualizacion`. Fallan contra cualquier base. Defecto previo, pendiente de decidir si se corrigen o se retiran.
 - ⚠️ **`init.sql` no puede encadenarse con toda la historia de migraciones.** Es el acumulado final, asi que varias describen pasos que ya dejo atras: la `005` actualiza `tipos_nodo` (sustituida por `nodos` en la `011`), la `009` recrea `tokens_sesion` sin `IF NOT EXISTS`, y la `002` PROMUEVE una cuenta en vez de crearla. Por eso el bootstrap las registra en modo baseline y siembra el ADMIN aparte.
 - ✅ **Reanudación auditada, `temperature` y dos `<tbody>` (migraciones 053/054).** La reanudación CU-09 deja `REANUDAR` en `audit_eventos`, escrito en `WorkflowsService.reactivateAfterResume`, el punto común de la vía HTTP y la de correo. Un PATCH `PAUSADO → ACTIVO` usa el mismo literal. `AnthropicLlmProvider` no envía nunca `temperature`, que los modelos Claude vigentes rechazan con un 400. `auditFilledSlots` evalúa cada coincidencia por separado y exige filas con contenido en `tbody`/`thead`/`tfoot`, de modo que el `<tbody>` estático de la plantilla de títulos ya no tapa un `.panel-titulos-body` vacío.
+- ✅ **Nodo `DESTINO_HTTP_GENERICO` (MOD-03, migraciones 055/056).** Es un conector de salida a cualquier API REST pública:
+  - **Peticiones:** verbo, cabeceras, query y cuerpo (JSON interpolado hoja a hoja, texto o formulario) con marcadores `{{ns.campo}}`.
+  - **Respuesta:** se publica en `http_generic_response` como `{ statusCode, statusText, responseBody, headers, dispatchedAt }`.
+  - **Credenciales:** la autenticación sale **solo** de la bóveda `credenciales` (AES-256-GCM con `CREDENTIALS_ENCRYPTION_KEY`, AAD = `id_credencial`). La bóveda tiene CRUD de ADMIN y `/credentials/options` para el selector cerrado del EDITOR. El secreto es de solo escritura y en `audit_eventos` aparece enmascarado (`********`).
+  - **SSRF:** `OutboundTargetGuard` bloquea las redes privadas, locales y reservadas, también en el `lookup` de la conexión, y la petición va sin redirecciones.
 - 📄 Detalle de contratos/DTOs por implementar: `PLAN.md`. Bitácora de desarrollo paso a paso: `Walkthrough.md`.
 
 ---

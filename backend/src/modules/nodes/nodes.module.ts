@@ -5,6 +5,7 @@ import { NodeStrategyFactory } from '@core/fsm/factories/node-strategy.factory';
 import { FsmModule } from '@core/fsm/fsm.module';
 import { HttpCoreModule } from '@core/http/http-core.module';
 import { AiPromptTemplatesModule } from '@modules/ai-prompt-templates/ai-prompt-templates.module';
+import { CredentialsModule } from '@modules/credentials/credentials.module';
 import { LogsModule } from '@modules/logs/logs.module';
 import { TelemetryModule } from '@modules/telemetry/telemetry.module';
 import { TemplatesModule } from '@modules/templates/templates.module';
@@ -20,6 +21,7 @@ import { ImapPollingService } from './services/imap-polling.service';
 import { NodeCatalogService } from './services/node-catalog.service';
 import { CronTriggerStrategy } from './strategies/cron-trigger.strategy';
 import { DrupalHttpStrategy } from './strategies/drupal-http.strategy';
+import { HttpGenericDestinationStrategy } from './strategies/http-generic-destination.strategy';
 import { ImapTriggerStrategy } from './strategies/imap-trigger.strategy';
 import { LlmExtractorStrategy } from './strategies/llm-extractor.strategy';
 import { OcrProcessorStrategy } from './strategies/ocr-processor.strategy';
@@ -87,6 +89,9 @@ import type { OnModuleInit } from '@nestjs/common';
     // Persistencia del consumo de tokens de los nodos de IA. Modulo hoja: no
     // importa nada de dominio, asi que tampoco cierra ningun ciclo.
     TelemetryModule,
+    // Boveda cifrada: `HttpGenericDestinationStrategy` descifra ahi, y solo
+    // ahi, la credencial de cada peticion. Hoja del grafo; no importa este.
+    CredentialsModule,
     // El sondeo lee `flujos` para descubrir que buzones vigilar; el catalogo
     // sirve `GET /api/nodos`.
     TypeOrmModule.forFeature([Workflow, NodeCatalogEntry]),
@@ -104,6 +109,7 @@ import type { OnModuleInit } from '@nestjs/common';
     SmtpAlertStrategy,
     OcrProcessorStrategy,
     DrupalHttpStrategy,
+    HttpGenericDestinationStrategy,
     AiDefaultsConfig,
     DrupalApiConfig,
     // Los clientes de LLM son providers del contenedor y no instancias que la
@@ -130,6 +136,7 @@ import type { OnModuleInit } from '@nestjs/common';
     SmtpAlertStrategy,
     OcrProcessorStrategy,
     DrupalHttpStrategy,
+    HttpGenericDestinationStrategy,
     ImapPollingService,
     CronSchedulingService,
     NodeCatalogService,
@@ -161,6 +168,7 @@ export class NodesModule implements OnModuleInit {
     private readonly ocrProcessorStrategy: OcrProcessorStrategy,
     private readonly drupalHttpStrategy: DrupalHttpStrategy,
     private readonly pauseFlowStrategy: PauseFlowStrategy,
+    private readonly httpGenericDestinationStrategy: HttpGenericDestinationStrategy,
   ) {}
 
   public onModuleInit(): void {
@@ -182,5 +190,8 @@ export class NodesModule implements OnModuleInit {
     // Nodo de CONTROL, no de destino: no entrega nada fuera y conserva su
     // `nextStep`, que es donde queda el cursor para que un operador reanude.
     this.strategyFactory.registerStrategy(this.pauseFlowStrategy);
+    // Conector de salida generico (MOD-03): cualquier API REST publica, con
+    // la credencial de la boveda y la guarda SSRF de `OutboundTargetGuard`.
+    this.strategyFactory.registerStrategy(this.httpGenericDestinationStrategy);
   }
 }

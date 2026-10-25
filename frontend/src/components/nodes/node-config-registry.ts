@@ -57,6 +57,9 @@ export const nodeConfigRegistry: Partial<Record<NodeType, Component>> = {
   [NodeType.DESTINO_DRUPAL]: defineAsyncComponent(
     () => import('@components/nodes/DrupalHttpConfig.vue'),
   ),
+  [NodeType.DESTINO_HTTP_GENERICO]: defineAsyncComponent(
+    () => import('@components/nodes/HttpGenericDestinationConfig.vue'),
+  ),
 };
 
 /** Tipos de nodo con configurador disponible, para poblar selectores. */

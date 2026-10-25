@@ -24,6 +24,7 @@ export const AUDIT_TABLE_LABELS: Readonly<Record<AuditTable, string>> = {
   [AuditTable.AI_PROMPT_TEMPLATES]: 'Plantillas de prompt IA',
   [AuditTable.ALLOWED_IPS]: 'IPs autorizadas',
   [AuditTable.PRECIOS_MODELOS_IA]: 'Tarifas de IA',
+  [AuditTable.CREDENTIALS]: 'Credenciales',
 };
 
 /**

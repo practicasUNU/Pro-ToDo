@@ -18,6 +18,7 @@ const ROUTE_BREADCRUMBS: Record<string, string> = {
   '/precios': 'Tarifas de Modelos IA',
   '/users': 'Gestion de Usuarios',
   '/ip-whitelist': 'Lista Blanca de IPs',
+  '/credenciales': 'Boveda de Credenciales',
   '/templates': 'Catalogo de Plantillas',
   '/plantillas-prompts-ia': 'Plantillas Prompts IA',
   '/flujos': 'Flujos',
@@ -108,6 +109,13 @@ const toggleLeftDrawer = (): void => {
             <q-icon name="shield" size="20px" />
           </q-item-section>
           <q-item-section class="pd-nav">Lista Blanca de IPs</q-item-section>
+        </q-item>
+
+        <q-item v-if="sessionStore.isAdmin" to="/credenciales" clickable v-ripple>
+          <q-item-section avatar>
+            <q-icon name="key" size="20px" />
+          </q-item-section>
+          <q-item-section class="pd-nav">Credenciales</q-item-section>
         </q-item>
 
         <q-item to="/templates" clickable v-ripple>

@@ -30,6 +30,13 @@ const routes: RouteRecordRaw[] = [
         meta: { requiresAdmin: true },
       },
       {
+        path: 'credenciales',
+        component: () => import('@/pages/CredentialsPage.vue'),
+        // Espeja el @Roles(UserRole.ADMIN) del CredentialsController. El EDITOR
+        // solo elige credenciales desde el nodo, via `/credentials/options`.
+        meta: { requiresAdmin: true },
+      },
+      {
         path: 'templates',
         component: () => import('@/pages/templates/TemplatesPage.vue'),
         // SIN requiresAdmin: TemplatesController admite @Roles(ADMIN, EDITOR).

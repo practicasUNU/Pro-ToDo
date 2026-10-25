@@ -21,6 +21,7 @@ import { HealthModule } from '@modules/health/health.module';
 import { NodesModule } from '@modules/nodes/nodes.module';
 import { NotificationsModule } from '@modules/notifications/notifications.module';
 import { AuditModule } from '@modules/audit/audit.module';
+import { CredentialsModule } from '@modules/credentials/credentials.module';
 import { PricingModule } from '@modules/pricing/pricing.module';
 import { PromptsModule } from '@modules/prompts/prompts.module';
 import { AllowedIpsModule } from '@modules/security/allowed-ips/allowed-ips.module';
@@ -149,6 +150,7 @@ const DEFAULT_DB_POOL_MAX = 10;
     AuditModule,
     PromptsModule,
     PricingModule,
+    CredentialsModule,
   ],
   controllers: [AppController],
   providers: [

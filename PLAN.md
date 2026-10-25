@@ -4688,3 +4688,61 @@ WorkflowsModule --imports--> AuditModule (hoja del grafo, sin ciclos)
 - [x] `buildResponseContractInstruction`: regla explicita de conservar `<tbody class="panel-titulos-body">`
 - [x] `auditFilledSlots`: evaluacion por elemento; un `<tbody>` exige al menos una fila con contenido
 - [ ] Pendiente — aplicar 053 y 054: `cd backend && npm run db:migrate`
+
+---
+
+## MOD-03 · Nodo `DESTINO_HTTP_GENERICO` y boveda de credenciales cifradas
+
+### Problema
+
+No habia forma de entregar el resultado de un flujo a una API REST arbitraria. Ademas, cualquier
+credencial de terceros habria quedado en claro en `flujos.configuracion_pipeline`, en cada checkpoint
+y en el JSON exportado.
+
+### Contratos nuevos
+
+```typescript
+// core/security/encryption.service.ts — AES-256-GCM, IV de 12 bytes, tag de 16, AAD obligatorio
+encrypt(plaintext: string, aad: string): EncryptedPayload; // { ciphertext, iv, authTag } en base64
+decrypt(payload: EncryptedPayload, aad: string): string;   // lanza si el tag no cuadra
+
+// modules/credentials/credentials.service.ts
+resolveSecret(id: string): Promise<{ secret: CredentialSecret } | { reason: 'NOT_FOUND' | 'VAULT_UNAVAILABLE' | 'UNREADABLE' }>;
+
+// core/http/outbound-url.guard.ts
+class OutboundTargetGuard { lookup; assertPublicTarget(url: string): Promise<URL> }
+
+// Namespace inmutable del nodo (por defecto `http_generic_response`)
+{ statusCode: number; statusText: string; responseBody: unknown; headers: Record<string, string>; dispatchedAt: string }
+```
+
+`params` del nodo (`HttpGenericDestinationConfigDto`): `targetUrl`, `method`, `headers`, `queryParams`,
+`bodyType`, `bodyTemplate`, `authType`, `authConfig.credentialId`, `timeoutMs`, `retryAttempts`.
+`outputNamespace` es del nodo, no un param.
+
+### Diagrama de inyeccion de dependencias
+
+```
+NodesModule ──imports──> CredentialsModule ──imports──> SecurityCoreModule (EncryptionService)
+           └─imports──> HttpCoreModule (HttpClientService, OutboundTargetGuard)
+HttpGenericDestinationStrategy(HttpClientService, CredentialsService, OutboundTargetGuard)
+  extends BaseHttpDestinationStrategy  ──registerStrategy──> NodeStrategyFactory
+AuditSnapshotService ──SNAPSHOT_PROJECTORS[credenciales]──> enmascarado '********'
+```
+
+### Namespaces
+
+`http_generic_response` entra en la lista cerrada `NODE_OUTPUT_NAMESPACES` (backend y frontend).
+El nodo es DESTINO (`DESTINO_NODE_TYPES`, regla 11): no tiene `nextStep`.
+
+### Estado de las tareas
+
+- [x] `EncryptionService` + `SecurityCoreModule`; `CREDENTIALS_ENCRYPTION_KEY` documentada en `.env.example`
+- [x] Tabla `credenciales` (migracion 055 + `init.sql`), modulo `credentials`: CRUD ADMIN y `/options` para EDITOR
+- [x] Auditoria: `AuditTable.CREDENTIALS`, fotografia sin columnas criptograficas y con `credentialData` enmascarado
+- [x] `HttpGenericDestinationStrategy`, DTO, guardia SSRF (`net.BlockList` + `lookup` en la conexion) y `maxRedirects: 0`
+- [x] `HttpClientService.requestWithResponse` (status, statusText, cabeceras) sin cambiar a los llamantes existentes
+- [x] Migracion 056 (fila `nodos`) + seed en `init.sql`
+- [x] Frontend: triada del nodo (store + componente, sin servicio propio), `KeyValueRowsEditor`, boveda en `/credenciales`
+- [ ] Pendiente — aplicar 055 y 056 (`cd backend && npm run db:migrate`) y definir `CREDENTIALS_ENCRYPTION_KEY`
+- [ ] Fuera de alcance — rotacion de la clave maestra (cambiarla deja indescifrables las credenciales guardadas)

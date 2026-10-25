@@ -78,13 +78,23 @@ vi.mock('@services/ai-prompt-templates.service', () => ({
   deleteAiPromptTemplate: vi.fn(),
 }));
 
+vi.mock('@services/credentials.service', () => ({
+  fetchCredentials: vi.fn(),
+  fetchCredentialOptions: vi.fn(),
+  createCredential: vi.fn(),
+  updateCredential: vi.fn(),
+  deleteCredential: vi.fn(),
+}));
+
 import { useCrudSocket } from '@/composables/useCrudSocket';
 import { subscribeToCrudMutations } from '@services/socket-events.service';
 import { useAllowedIpsStore } from '@stores/allowed-ips.store';
 import { useCanvasStore } from '@stores/canvas.store';
+import { useCredentialsStore } from '@stores/credentials.store';
 import { useUsersStore } from '@stores/users.store';
 import { useWorkflowsStore } from '@stores/workflows.store';
 
+import { CredentialAuthType } from '@/types/credential';
 import { UserRole } from '@/types/user';
 import { AUDIT_FIXTURE } from '@/testing/audit.fixture';
 
@@ -332,5 +342,33 @@ describe('useCrudSocket · encaminado de mutaciones hacia los stores', () => {
 
     // 3. Assert 🎯
     expect(host.unsubscribe).toHaveBeenCalledTimes(1);
+  });
+  it('1.7 deberia encaminar las credenciales a su store, en las dos listas', () => {
+    // 1. Arrange 📐: el panel de ADMIN y el selector del nodo leen listas
+    //    distintas; una rotacion debe verse en ambas.
+    const credentialsStore = useCredentialsStore();
+    const host = mountHost();
+    const credential = {
+      id: 'e6a4f5b7-8d9e-4fa0-b1c2-3d4e5f607182',
+      name: 'API de becas',
+      authType: CredentialAuthType.BEARER_TOKEN,
+      createdAt: '2026-10-24T08:00:00.000Z',
+      updatedAt: '2026-10-24T08:00:00.000Z',
+    };
+
+    // 2. Act ⚙️
+    host.emit({
+      entity: 'credentials',
+      action: 'CREATED',
+      id: credential.id,
+      data: credential,
+      emittedAt: '2026-10-24T08:00:00.000Z',
+    });
+
+    // 3. Assert 🎯
+    expect(credentialsStore.credentials).toEqual([credential]);
+    expect(credentialsStore.options).toEqual([
+      { id: credential.id, name: credential.name, authType: credential.authType },
+    ]);
   });
 });

@@ -37,6 +37,8 @@ export enum AuditTableValue {
   AI_PROMPT_TEMPLATES = 'plantillas_prompts_ia',
   ALLOWED_IPS = 'allowed_ips',
   PRECIOS_MODELOS_IA = 'precios_modelos_ia',
+  /** Boveda cifrada: sus fotografias llegan con los secretos enmascarados. */
+  CREDENTIALS = 'credenciales',
 }
 
 /** Fotografia plana de un registro (sin secretos ni relaciones). */

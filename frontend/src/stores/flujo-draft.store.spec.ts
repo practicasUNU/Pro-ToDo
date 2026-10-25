@@ -46,6 +46,15 @@ vi.mock('@services/auth.service', () => ({
   logout: vi.fn(),
 }));
 
+// La boveda: el store del nodo DESTINO_HTTP_GENERICO lee sus opciones a
+// traves de `useCredentialsStore`, y `@boot/axios` no resuelve en Vitest.
+vi.mock('@services/credentials.service', () => ({
+  fetchCredentials: vi.fn(),
+  fetchCredentialOptions: vi.fn().mockResolvedValue([]),
+  createCredential: vi.fn(),
+  updateCredential: vi.fn(),
+  deleteCredential: vi.fn(),
+}));
 vi.mock('@services/workflow-templates.service', () => ({
   fetchWorkflowTemplates: vi.fn(),
   fetchWorkflowTemplate: vi.fn(),

@@ -555,6 +555,28 @@ CREATE INDEX idx_audit_eventos_usuario_fecha ON audit_eventos (usuario_id, cread
 CREATE INDEX idx_audit_eventos_tabla_registro ON audit_eventos (tabla_afectada, registro_id);
 
 -- =============================================================================
+-- Tabla: credenciales (migracion 055)
+-- Duplicada en db/migrations/055-tabla-credenciales.sql para las bases de
+-- datos ya creadas. Secretos cifrados con AES-256-GCM (`EncryptionService`):
+-- `id_credencial` es el AAD del cifrado y lo genera la aplicacion.
+-- =============================================================================
+
+CREATE TABLE credenciales (
+    id_credencial UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    nombre VARCHAR(100) NOT NULL,
+    tipo_autenticacion VARCHAR(20) NOT NULL
+        CONSTRAINT credenciales_tipo_autenticacion_check
+        CHECK (tipo_autenticacion IN ('BEARER_TOKEN', 'BASIC_AUTH', 'API_KEY')),
+    datos_cifrados TEXT NOT NULL,
+    vector_inicializacion TEXT NOT NULL,
+    etiqueta_autenticacion TEXT NOT NULL,
+    creado_en TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    actualizado_en TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE UNIQUE INDEX idx_credenciales_nombre ON credenciales (nombre);
+
+-- =============================================================================
 -- Índices de apoyo para claves foráneas de alta consulta
 -- =============================================================================
 
@@ -596,7 +618,7 @@ CREATE INDEX idx_alertas_error_pendientes
 -- despues. Un volumen recien creado nace, por tanto, sin prompts.
 -- =============================================================================
 
--- Los 10 codigos con estrategia replican el enum `NodeType` del backend
+-- Los 12 codigos con estrategia replican el enum `NodeType` del backend
 -- (`@core/fsm/types/pipeline-schema.types`): son los unicos que un
 -- `pipeline_schema` puede declarar hoy. `DESTINO_ACENS` sigue en el catalogo a
 -- la espera de su estrategia; hasta entonces no es referenciable desde
@@ -613,5 +635,6 @@ INSERT INTO nodos (codigo, nombre, categoria, descripcion) VALUES
     ('DESTINO_ACENS', 'Destino Acens', 'DESTINO', 'Realiza el envio masivo a traves de Acens'),
     ('DESTINO_SMTP', 'Alerta por Correo', 'DESTINO', 'Envia un correo de aviso interpolando datos del flujo. Pensado como destino de las rutas de recuperacion ante error.'),
     ('PROCESADOR_OCR', 'Procesador OCR', 'PROCESAMIENTO', 'Transcribe los adjuntos de un correo sin texto aprovechable (imagen o PDF escaneado). Pensado como destino de la ruta de contingencia del parser.'),
-    ('PAUSA_FLOW', 'Pausa de Flujo', 'CONTROL', 'Detiene el flujo de forma deliberada y lo deja reanudable por un operador (CU-09). Admite pausa inmediata o tras un retardo, y puede avisar por correo.');
+    ('PAUSA_FLOW', 'Pausa de Flujo', 'CONTROL', 'Detiene el flujo de forma deliberada y lo deja reanudable por un operador (CU-09). Admite pausa inmediata o tras un retardo, y puede avisar por correo.'),
+    ('DESTINO_HTTP_GENERICO', 'Destino HTTP Generico', 'DESTINO', 'Envia el resultado del flujo a una API REST publica (GET, POST, PUT, PATCH o DELETE) con cabeceras, parametros y cuerpo interpolados. Se autentica con una credencial cifrada de la boveda y rechaza destinos de redes privadas.');
 

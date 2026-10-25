@@ -29,6 +29,7 @@ const NODE_ICONS: Record<NodeType, string> = {
   [NodeType.DESTINO_SMTP]: 'forward_to_inbox',
   [NodeType.PROCESADOR_OCR]: 'document_scanner',
   [NodeType.PAUSA_FLOW]: 'pause_circle',
+  [NodeType.DESTINO_HTTP_GENERICO]: 'http',
 };
 
 /**

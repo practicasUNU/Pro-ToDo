@@ -11,4 +11,6 @@ export enum AuditTable {
   AI_PROMPT_TEMPLATES = 'plantillas_prompts_ia',
   ALLOWED_IPS = 'allowed_ips',
   PRECIOS_MODELOS_IA = 'precios_modelos_ia',
+  /** Boveda cifrada (migracion 055): su fotografia se ENMASCARA, ver `AuditSnapshotService`. */
+  CREDENTIALS = 'credenciales',
 }

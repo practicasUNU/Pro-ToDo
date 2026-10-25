@@ -1,4 +1,5 @@
 import { useDrupalHttpStore } from '@stores/nodes/drupal-http.store';
+import { useHttpGenericDestinationStore } from '@stores/nodes/http-generic-destination.store';
 import { useLlmExtractorStore } from '@stores/nodes/llm-extractor.store';
 import { useParserEmailStore } from '@stores/nodes/parser-email.store';
 import { usePostIaSanitizerStore } from '@stores/nodes/post-ia-sanitizer.store';
@@ -293,6 +294,7 @@ export const nodeStoreRegistry: Partial<Record<NodeType, NodeStoreHook>> = {
   [NodeType.PAUSA_FLOW]: usePauseFlowStore,
   [NodeType.ESCUDO_POST_IA]: usePostIaSanitizerStore,
   [NodeType.DESTINO_DRUPAL]: useDrupalHttpStore,
+  [NodeType.DESTINO_HTTP_GENERICO]: useHttpGenericDestinationStore,
 };
 
 /**

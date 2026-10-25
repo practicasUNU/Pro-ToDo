@@ -91,6 +91,40 @@ export type HttpClientStatusOutcome<T> =
   | { readonly data: T; readonly status: number }
   | { readonly failure: NodeErrorDetail; readonly status?: number };
 
+/**
+ * Variante que ademas expone `statusText` y las cabeceras de la respuesta.
+ *
+ * La consume `HttpGenericDestinationStrategy`, que publica la respuesta del
+ * destino tal cual en su namespace. Va en un tipo aparte, y no ampliando
+ * `HttpClientStatusOutcome`, por la misma razon que `request` reconstruye su
+ * resultado: los `toEqual` de quien ya consume la variante con estado no deben
+ * ver aparecer claves nuevas.
+ */
+export type HttpClientResponseOutcome<T> =
+  | {
+      readonly data: T;
+      readonly status: number;
+      readonly statusText: string;
+      readonly headers: Readonly<Record<string, string>>;
+    }
+  | { readonly failure: NodeErrorDetail; readonly status?: number };
+
+/** Cabeceras de Axios aplanadas a `string`: los arrays se unen con coma. */
+const flattenHeaders = (raw: unknown): Record<string, string> => {
+  if (typeof raw !== 'object' || raw === null) {
+    return {};
+  }
+
+  return Object.fromEntries(
+    Object.entries(raw as Record<string, unknown>)
+      .filter(([, value]) => value !== undefined && value !== null)
+      .map(([key, value]) => [
+        key.toLowerCase(),
+        Array.isArray(value) ? value.map(String).join(', ') : String(value),
+      ]),
+  );
+};
+
 /** Espera pasiva entre reintentos. */
 const sleep = (milliseconds: number): Promise<void> =>
   new Promise((resolve) => setTimeout(resolve, milliseconds));
@@ -156,6 +190,25 @@ export class HttpClientService {
     config: AxiosRequestConfig,
     options: HttpClientOptions = {},
   ): Promise<HttpClientStatusOutcome<T>> {
+    const outcome = await this.executeWithStatus<T>(config, options);
+
+    // Reconstruido por el mismo motivo que en `request`: `statusText` y
+    // `headers` no deben colarse en runtime a quien no los pidio.
+    return 'failure' in outcome
+      ? outcome
+      : { data: outcome.data, status: outcome.status };
+  }
+
+  /**
+   * Como `requestWithStatus`, pero con `statusText` y cabeceras de la respuesta.
+   *
+   * Mismo bucle y misma politica que las otras dos: entra por
+   * `executeWithStatus`.
+   */
+  public async requestWithResponse<T>(
+    config: AxiosRequestConfig,
+    options: HttpClientOptions = {},
+  ): Promise<HttpClientResponseOutcome<T>> {
     return this.executeWithStatus<T>(config, options);
   }
 
@@ -169,7 +222,7 @@ export class HttpClientService {
   private async executeWithStatus<T>(
     config: AxiosRequestConfig,
     options: HttpClientOptions,
-  ): Promise<HttpClientStatusOutcome<T>> {
+  ): Promise<HttpClientResponseOutcome<T>> {
     const timeoutMs = options.timeoutMs ?? DEFAULT_HTTP_TIMEOUT_MS;
     const maxRetries = options.maxRetries ?? DEFAULT_HTTP_MAX_RETRIES;
     const baseDelayMs = options.baseDelayMs ?? DEFAULT_HTTP_BASE_DELAY_MS;
@@ -187,7 +240,12 @@ export class HttpClientService {
           this.httpService.request<T>({ timeout: timeoutMs, ...config }),
         );
 
-        return { data: response.data, status: response.status };
+        return {
+          data: response.data,
+          status: response.status,
+          statusText: response.statusText,
+          headers: flattenHeaders(response.headers),
+        };
       } catch (error) {
         lastFailure = this.toFailure(error);
         lastStatus = this.extractStatus(error);

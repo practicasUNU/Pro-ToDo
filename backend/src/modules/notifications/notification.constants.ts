@@ -105,10 +105,19 @@ export const ROLE_ROOM_PREFIX = 'role_';
  * `audit_eventos` registra quien hizo que y desde que IP, y su controlador la
  * sirve entera bajo `@Roles(ADMIN)`.
  *
+ * `credentials` lleva solo metadatos —el secreto nunca viaja—, pero su CRUD es
+ * de ADMIN y un EDITOR no tiene por que saber cuando se rota una credencial.
+ *
  * Lo que NO esta aqui —`templates`, `ai_prompts`— se difunde a todo el
  * namespace, que ya esta autenticado por el middleware del handshake, en
  * paridad con el `@Roles(ADMIN, EDITOR)` de sus controladores.
  */
 export const ADMIN_ONLY_ENTITIES: ReadonlySet<CrudEntity> = new Set<CrudEntity>(
-  ['users', 'allowed_ips', 'workflow_templates', 'audit_eventos'],
+  [
+    'users',
+    'allowed_ips',
+    'workflow_templates',
+    'audit_eventos',
+    'credentials',
+  ],
 );

@@ -38,7 +38,8 @@ export type CrudEntity =
   | 'workflow_templates'
   | 'ai_prompts'
   | 'workflows'
-  | 'audit_eventos';
+  | 'audit_eventos'
+  | 'credentials';
 
 /**
  * Naturaleza de la escritura, tal y como la entiende la BASE DE DATOS.

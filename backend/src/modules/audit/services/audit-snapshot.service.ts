@@ -3,6 +3,9 @@ import { DataSource } from 'typeorm';
 
 import { AuditTable } from '@modules/audit/audit-tables';
 import { AiPromptTemplate } from '@modules/ai-prompt-templates/entities/ai-prompt-template.entity';
+import { Credential } from '@modules/credentials/entities/credential.entity';
+import { CredentialAuthType } from '@modules/credentials/enums/credential-auth-type.enum';
+import { maskCredentialFields } from '@modules/credentials/types/credential-secret.types';
 import { AllowedIp } from '@modules/security/allowed-ips/entities/allowed-ip.entity';
 import { PrecioModeloIa } from '@modules/telemetry/entities/precio-modelo-ia.entity';
 import { HtmlTemplate } from '@modules/templates/entities/html-template.entity';
@@ -41,6 +44,55 @@ const ENTITY_BY_TABLE: Readonly<
   [AuditTable.AI_PROMPT_TEMPLATES]: AiPromptTemplate,
   [AuditTable.ALLOWED_IPS]: AllowedIp,
   [AuditTable.PRECIOS_MODELOS_IA]: PrecioModeloIa,
+  [AuditTable.CREDENTIALS]: Credential,
+};
+
+/**
+ * Columnas criptograficas de `credenciales`. NUNCA entran en una fotografia.
+ *
+ * La entidad ya las declara `select: false`, asi que `findOne` no las trae; se
+ * descartan aqui OTRA VEZ porque esa garantia vive en otro fichero y basta un
+ * `addSelect` futuro para romperla. El texto cifrado tampoco se audita: con la
+ * clave, que vive en el `.env` del mismo servidor, seria texto plano.
+ */
+const CREDENTIAL_CRYPTO_KEYS: ReadonlySet<string> = new Set([
+  'encryptedData',
+  'iv',
+  'authTag',
+]);
+
+const isCredentialAuthType = (value: unknown): value is CredentialAuthType =>
+  typeof value === 'string' &&
+  (Object.values(CredentialAuthType) as string[]).includes(value);
+
+/**
+ * Proyeccion de la fotografia de una credencial: metadatos + campos ENMASCARADOS.
+ *
+ * Se aplica DESPUES de `sanitizeSnapshot`, y el orden importa: la mascara lleva
+ * claves como `token` y `password`, que `SENSITIVE_KEY_PATTERN` borraria. Lo
+ * que el auditor ve es QUE campos tiene la credencial (`token: '********'`),
+ * deducidos de su tipo, sin descifrar nada: la boveda solo se abre dentro de la
+ * ejecucion de la FSM.
+ */
+export const projectCredentialSnapshot = (
+  snapshot: AuditSnapshot,
+): AuditSnapshot => {
+  const metadata = Object.fromEntries(
+    Object.entries(snapshot).filter(
+      ([key]) => !CREDENTIAL_CRYPTO_KEYS.has(key),
+    ),
+  );
+
+  return isCredentialAuthType(snapshot.authType)
+    ? { ...metadata, credentialData: maskCredentialFields(snapshot.authType) }
+    : metadata;
+};
+
+/** Proyecciones por tabla, aplicadas tras el saneado comun. */
+const SNAPSHOT_PROJECTORS: Readonly<
+  Partial<Record<AuditTable, (snapshot: AuditSnapshot) => AuditSnapshot>>
+> = {
+  [AuditTable.CREDENTIALS]: projectCredentialSnapshot,
 };
 
 const isPlainObject = (value: unknown): value is Record<string, unknown> =>
@@ -118,6 +170,13 @@ export class AuditSnapshotService {
       .getRepository(entity)
       .findOne({ where: { id } });
 
-    return row === null ? null : sanitizeSnapshot({ ...row });
+    if (row === null) {
+      return null;
+    }
+
+    const snapshot = sanitizeSnapshot({ ...row });
+    const project = SNAPSHOT_PROJECTORS[table];
+
+    return project === undefined ? snapshot : project(snapshot);
   }
 }

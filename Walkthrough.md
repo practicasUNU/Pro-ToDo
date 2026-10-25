@@ -8915,3 +8915,59 @@ La 054 anade la regla al texto del prompt filtrando por **contenido** y no por `
 `prompt-migrations.helper.ts` recompone el prompt sembrado a partir de las migraciones que lo nombran,
 y solo entiende asignaciones completas y `REPLACE`: un anexo que lo nombrase se leeria como una
 reescritura entera.
+
+---
+
+## MOD-03: nodo `DESTINO_HTTP_GENERICO` y boveda de credenciales
+
+### Por que una boveda y no variables de entorno
+
+El patron de IMAP (`passwordEnvKey`) obliga a tocar el `.env` y reiniciar Nest por cada API nueva.
+Un conector generico existe para no depender de eso. Los secretos van cifrados con AES-256-GCM en la
+tabla `credenciales`. El `id_credencial` es el AAD del cifrado y lo genera la aplicacion antes del
+INSERT: un blob copiado a otra fila no descifra. El esquema del flujo solo guarda
+`authConfig.credentialId`.
+
+### Por que el secreto es de solo escritura
+
+El panel nunca recibe el secreto guardado, asi que no puede reenviarlo. Un PATCH sin campos secretos
+conserva el cifrado. Un PATCH con alguno exige el juego COMPLETO del tipo, porque mezclar el usuario
+nuevo con la contrasena vieja obligaria a descifrar fuera del motor. Cambiar el tipo de una
+credencial en uso, o borrarla, da 409. La consulta de uso es un `jsonb_path_exists` parametrizado
+sobre `flujos` y `plantillas_flujo`.
+
+### Por que la auditoria proyecta y no solo sanea
+
+`sanitizeSnapshot` borra claves como `token` o `password`, pero no sabe nada de `encryptedData`,
+`iv` ni `authTag`, que se habrian auditado en crudo de haberse cargado. Para `credenciales`, un
+proyector las descarta y anade `credentialData` con `'********'` por cada campo del tipo. Corre
+DESPUES del saneado, porque la mascara lleva justo las claves que el saneado elimina. Las columnas
+llevan ademas `select: false`: defensa en profundidad.
+
+### Por que dos barreras SSRF
+
+`assertPublicTarget` rechaza protocolos raros, URLs con credenciales embebidas, `localhost` y
+cualquier IP privada, local o reservada, tambien tras resolver el nombre. Despues, el `lookup` que
+recibe Axios repite la comprobacion con la IP con la que de verdad conecta: eso cierra el DNS
+rebinding. `maxRedirects: 0` impide que un 302 lleve la credencial a donde la guarda no miro. La
+consecuencia aceptada es que la intranet no es un destino valido.
+
+### Por que el JSON se interpola hoja a hoja
+
+Un titular con comillas sustituido en crudo rompia el JSON. La plantilla se parsea primero (el DTO
+exige que ya sea JSON valido, porque los marcadores viven dentro de cadenas) y se interpola cada
+cadena por separado.
+
+### Por que `retryAttempts` marca `exhausted`
+
+El cliente HTTP ya reintenta lo que el operador pide. Sin `metadata.exhausted`, `canRetry` sumaria
+los intentos del `retryPolicy` del nodo y se multiplicarian. El defecto es 0, porque un POST
+reintentado puede publicar dos veces.
+
+### Por que el nodo no tiene servicio propio en el frontend
+
+Ningun endpoint valida los `params` de un nodo suelto, el mismo motivo que en Drupal. Lo unico que
+pide al backend son las opciones del selector de credencial, y las trae el store de dominio de la
+boveda (`credentials.store.ts` -> `credentials.service.ts`), compartido por cualquier nodo futuro
+que las necesite. El registro visual del asistente es `node-config-registry.ts` (no existe ningun
+`NodeConfigFactory.vue`).

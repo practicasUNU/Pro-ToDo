@@ -2,6 +2,7 @@ import { HttpModule } from '@nestjs/axios';
 import { Module } from '@nestjs/common';
 
 import { HttpClientService } from '@core/http/http-client.service';
+import { OutboundTargetGuard } from '@core/http/outbound-url.guard';
 
 /**
  * Modulo del cliente HTTP saliente compartido.
@@ -18,7 +19,7 @@ import { HttpClientService } from '@core/http/http-client.service';
  */
 @Module({
   imports: [HttpModule],
-  providers: [HttpClientService],
-  exports: [HttpClientService],
+  providers: [HttpClientService, OutboundTargetGuard],
+  exports: [HttpClientService, OutboundTargetGuard],
 })
 export class HttpCoreModule {}

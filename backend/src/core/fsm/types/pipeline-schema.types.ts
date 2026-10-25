@@ -49,6 +49,7 @@ export const NODE_OUTPUT_NAMESPACES = [
   'smtp_result',
   'ocr_result',
   'pause_context',
+  'http_generic_response',
 ] as const;
 
 /**
@@ -134,8 +135,11 @@ export const SEMVER_PATTERN = /^\d+\.\d+\.\d+$/;
  * `nodos`, el catalogo estatico de tipos (ver `db/migrations/011-catalogo-nodos.sql`;
  * la tabla se llamaba `tipos_nodo` hasta esa migracion).
  *
- * El catalogo tiene ONCE filas y este enum declara diez: `DESTINO_ACENS` sigue
+ * El catalogo tiene TRECE filas y este enum declara doce: `DESTINO_ACENS` sigue
  * sin estrategia, asi que no es expresable en un `pipeline_schema`.
+ *
+ * `DESTINO_HTTP_GENERICO` (migracion 056, MOD-03) es el conector de salida a
+ * cualquier API REST publica, autenticado con la boveda de credenciales.
  * `GET /api/nodos` lo devuelve marcado con `implemented: false` para que el
  * selector del frontend lo deshabilite.
  *
@@ -171,6 +175,7 @@ export enum NodeType {
   DESTINO_SMTP = 'DESTINO_SMTP',
   PROCESADOR_OCR = 'PROCESADOR_OCR',
   PAUSA_FLOW = 'PAUSA_FLOW',
+  DESTINO_HTTP_GENERICO = 'DESTINO_HTTP_GENERICO',
 }
 
 /**
@@ -199,6 +204,7 @@ export const TRIGGER_NODE_TYPES: ReadonlySet<NodeType> = new Set([
 export const DESTINO_NODE_TYPES: ReadonlySet<NodeType> = new Set([
   NodeType.DESTINO_DRUPAL,
   NodeType.DESTINO_SMTP,
+  NodeType.DESTINO_HTTP_GENERICO,
 ]);
 
 /** Politica de reintentos de un nodo ante un `NodeResult` fallido. */
