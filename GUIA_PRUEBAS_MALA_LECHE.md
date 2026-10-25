@@ -24,7 +24,7 @@ ajusta la guía para que cuadre.
 | Capa | Comando | Qué cubre |
 |---|---|---|
 | Unitarias backend | `cd backend && npx jest` | Estrategia JWT, relevo de tarifas, lista blanca de orden |
-| E2E backend (PostgreSQL real) | `cd backend && npm run test:migrate && npm run test:e2e` | Frontera HTTP completa con el `ValidationPipe` de producción |
+| E2E backend (PostgreSQL real) | `cd backend && export DB_NAME='<nombre_bd_test>' && npm run test:migrate && npm run test:e2e` | Frontera HTTP completa con el `ValidationPipe` de producción |
 | Componentes frontend | `cd frontend && npm run test` | Aviso de 5 s, formulario de tarifas, bloqueo de teclas |
 
 El proyecto **no tiene Cypress ni Playwright**. Del lado del navegador, el «e2e» consiste en montar

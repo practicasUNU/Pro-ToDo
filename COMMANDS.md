@@ -155,7 +155,7 @@ ejecuta lo que falta y se detiene en el primer fallo.
 npm run db:migrate --prefix backend
 
 # Base de las pruebas E2E
-npm run test:migrate --prefix backend
+DB_NAME='<nombre_bd_test>' npm run test:migrate --prefix backend
 ```
 
 > **Primera vez sobre una base que YA está al día:** regístralas sin ejecutarlas, o se reaplicaría
@@ -171,7 +171,7 @@ añaden un valor a un enum (`030`, `039`) no pueden ir en una (error 55P04 de Po
 
 ```bash
 npm run db:bootstrap --prefix backend                 # usa DB_NAME
-npm run test:bootstrap --prefix backend               # usa E2E_DB_NAME
+DB_NAME='<nombre_bd_test>' npm run test:bootstrap --prefix backend
 ```
 
 Ejecuta `init.sql`, registra las migraciones en modo baseline y siembra un ADMIN activo
@@ -233,7 +233,7 @@ Todos los comandos se ejecutan desde `backend/`.
 | `npm run test:watch` | Modo observador. |
 | `npm run test:cov` | Con cobertura (`../coverage`). |
 | `npm run test:debug` | `--inspect-brk --runInBand` para depuración paso a paso. |
-| `npm run test:e2e` | Integración/E2E (`test/jest-e2e.json`, configuración aparte). |
+| `DB_NAME='<nombre_bd_test>' npm run test:e2e` | Integración/E2E (`test/jest-e2e.json`, configuración aparte). Aborta si `DB_NAME` falta o coincide con la base de `backend/.env`. |
 
 > `jest.rootDir` es `src`, así que **un `.spec.ts` colocado en `backend/test/` no lo ejecuta `npm test`**. Los specs unitarios viven junto al fuente; `backend/test/` alberga factories, fixtures y los `*.e2e-spec.ts`.
 
