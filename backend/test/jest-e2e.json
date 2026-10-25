@@ -29,5 +29,8 @@
   "transformIgnorePatterns": [
     "/node_modules/(?!.*(?:@scure|@noble|@exodus|@asamuzakjp|@csstools|lru-cache|jsdom|parse5|cssstyle|rrweb-cssom|whatwg-encoding|whatwg-mimetype|whatwg-url|html-encoding-sniffer|data-urls|tough-cookie|saxes|xmlchars|nwsapi|w3c-xmlserializer|symbol-tree|decimal.js|agent-base|http-proxy-agent|https-proxy-agent|tr46|htmlparser2|domhandler|domutils|dom-serializer|domelementtype|entities)/)"
   ],
+  "setupFiles": [
+    "<rootDir>/helpers/e2e-database.guard.ts"
+  ],
   "testTimeout": 60000
 }

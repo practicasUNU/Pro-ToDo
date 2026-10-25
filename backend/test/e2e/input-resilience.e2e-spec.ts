@@ -6,7 +6,8 @@
 process.env.IMAP_POLLING_ENABLED = 'false';
 process.env.CRON_SCHEDULING_ENABLED = 'false';
 process.env.INBOUND_RESUME_ENABLED = 'false';
-process.env.DB_NAME = process.env.E2E_DB_NAME ?? '<nombre_bd_test>';
+// La base sale de `DB_NAME` del entorno y la valida `test/helpers/e2e-database.guard.ts`
+// (cargado por `setupFiles`) antes de este archivo: nada de nombres escritos aqui.
 
 import { JwtService } from '@nestjs/jwt';
 import { Test } from '@nestjs/testing';
