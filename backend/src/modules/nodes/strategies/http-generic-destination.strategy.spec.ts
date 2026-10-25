@@ -268,6 +268,30 @@ describe('HttpGenericDestinationStrategy (DESTINO_HTTP_GENERICO)', () => {
       expect(http.requestWithResponse).not.toHaveBeenCalled();
     });
 
+    it('1.5b deberia despachar a una URL tomada entera de un paso anterior', async () => {
+      // 1. Arrange 📐: la direccion sale del contexto, indice incluido.
+      const { strategy, http, guard } = buildHarness();
+      const context = buildContext();
+      context.setNamespace('parsed_email', {
+        extracted_urls: [
+          'https://api.ejemplo.org/a',
+          'https://api.ejemplo.org/b',
+        ],
+      });
+
+      // 2. Act ⚙️
+      const result = await strategy.execute(context, {
+        targetUrl: '{{parsed_email.extracted_urls[1]}}',
+      });
+
+      // 3. Assert 🎯: la guarda SSRF juzga la URL YA interpolada.
+      expect(result.success).toBe(true);
+      expect(guard.assertPublicTarget).toHaveBeenCalledWith(
+        'https://api.ejemplo.org/b',
+      );
+      expect(sentConfig(http).url).toBe('https://api.ejemplo.org/b');
+    });
+
     it('1.6 deberia rechazar params invalidos como configuracion GRAVE', async () => {
       // 1. Arrange 📐: un GET con cuerpo y una cabecera Authorization a mano.
       const { strategy, http } = buildHarness();

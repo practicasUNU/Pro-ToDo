@@ -48,6 +48,19 @@ describe('HttpGenericDestinationConfigDto', () => {
   });
 
   it.each([
+    '{{scraped_web.url}}',
+    '{{parsed_email.extracted_urls[0]}}',
+    '{{ parsed_email.extracted_urls[2] }}/avisos?x=1',
+  ])(
+    '1.3 deberia aceptar una URL que toma la direccion de un paso anterior: %s',
+    async (targetUrl) => {
+      // 1. Arrange 📐 + 2. Act ⚙️ + 3. Assert 🎯: el protocolo lo comprueba la
+      //    guarda SSRF sobre la URL ya interpolada.
+      await expect(errorsOf({ targetUrl })).resolves.toBe('');
+    },
+  );
+
+  it.each([
     [{ method: 'GET', bodyType: 'JSON' }, 'no lleva cuerpo'],
     [{ method: 'TRACE' }, 'method debe ser uno de'],
     [{ bodyTemplate: '{"roto": ' }, 'JSON valido'],
@@ -59,6 +72,8 @@ describe('HttpGenericDestinationConfigDto', () => {
     [{ headers: { 'X Bad': 'v' } }, 'no es un nombre valido'],
     [{ headers: { 'X-Ok': 'a\r\nX-Inyectada: 1' } }, 'saltos de linea'],
     [{ targetUrl: 'ftp://ejemplo.org' }, 'URL absoluta http(s)'],
+    [{ targetUrl: '{{sin_cerrar' }, 'URL absoluta http(s)'],
+    [{ targetUrl: 'api.ejemplo.org/{{ns.campo}}' }, 'URL absoluta http(s)'],
     [{ authConfig: { credentialId: 'no-uuid' } }, 'UUID'],
     [{ retryAttempts: 9 }, 'retryAttempts no puede superar'],
     [{ outputNamespace: 'http_generic_response' }, 'should not exist'],

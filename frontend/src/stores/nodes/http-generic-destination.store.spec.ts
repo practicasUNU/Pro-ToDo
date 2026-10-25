@@ -191,6 +191,68 @@ describe('useHttpGenericDestinationStore (DESTINO_HTTP_GENERICO)', () => {
     });
   });
 
+  describe('2bis. URL interpolable y escudo SSRF', () => {
+    const LINKS_UPSTREAM: UpstreamNamespace[] = [
+      {
+        namespace: 'parsed_email',
+        nodeType: NodeType.PARSER_PRE_IA,
+        fields: [{ name: 'extracted_urls', type: 'url[]' }],
+      },
+    ];
+
+    it('2bis.1 deberia aceptar una URL tomada entera de un paso anterior, con indice', () => {
+      // 1. Arrange
+      const store = useHttpGenericDestinationStore(nextNodeId());
+      store.setAvailableUpstreamContext(LINKS_UPSTREAM);
+
+      // 2. Act
+      store.updateConfig({ targetUrl: '{{parsed_email.extracted_urls[0]}}' });
+
+      // 3. Assert: antes el patron exigia `http(s)://` y el indice no casaba.
+      expect(store.malformedParams).toEqual([]);
+      expect(store.isConfigValid).toBe(true);
+    });
+
+    it('2bis.2 deberia reconocer el indice como marcador y validar su origen', () => {
+      // 1. Arrange: nadie aguas arriba publica `scraped_web`.
+      const store = useHttpGenericDestinationStore(nextNodeId());
+      store.setAvailableUpstreamContext(LINKS_UPSTREAM);
+
+      // 2. Act
+      store.updateConfig({ targetUrl: 'https://api.ejemplo.org/{{scraped_web.links[2]}}' });
+
+      // 3. Assert
+      expect(store.unknownMarkers).toEqual(['{{scraped_web.links[2]}}']);
+      expect(store.isConfigValid).toBe(false);
+    });
+
+    it('2bis.3 deberia ofrecer las posiciones de los campos URL de aguas arriba', () => {
+      // 1. Arrange
+      const store = useHttpGenericDestinationStore(nextNodeId());
+
+      // 2. Act
+      store.setAvailableUpstreamContext(LINKS_UPSTREAM);
+
+      // 3. Assert
+      expect(store.urlOptions.map((option) => option.value)).toContain(
+        '{{parsed_email.extracted_urls[0]}}',
+      );
+    });
+
+    it('2bis.4 deberia bloquear en tiempo real un destino de red privada', () => {
+      // 1. Arrange
+      const store = useHttpGenericDestinationStore(nextNodeId());
+
+      // 2. Act
+      store.updateConfig({ targetUrl: 'http://192.168.1.10/api' });
+
+      // 3. Assert
+      expect(store.privateTargetReason).toContain('192.168.1.10');
+      expect(store.malformedParams).toContain(store.privateTargetReason);
+      expect(store.isConfigValid).toBe(false);
+    });
+  });
+
   describe('3. Ensamblado de params e hidratacion', () => {
     it('3.1 deberia emitir los discriminadores y omitir los defectos', () => {
       // 1. Arrange 📐

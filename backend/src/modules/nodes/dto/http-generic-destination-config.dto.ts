@@ -105,8 +105,18 @@ export const FORBIDDEN_HEADER_NAMES: ReadonlySet<string> = new Set([
   'connection',
 ]);
 
-/** URL absoluta http(s); admite marcadores `{{ns.campo}}` en cualquier tramo. */
-const TARGET_URL_PATTERN = /^https?:\/\/\S+$/i;
+/**
+ * URL absoluta http(s), o una URL que EMPIEZA por un marcador.
+ *
+ * La segunda forma es la que permite tomar la direccion entera de un paso
+ * anterior (`{{scraped_web.url}}`, `{{parsed_email.extracted_urls[0]}}`): antes
+ * se rechazaba con un 400 y solo cabia interpolar tramos de una URL literal.
+ * El protocolo de esa forma no se puede comprobar aqui, porque no existe hasta
+ * ejecutar; lo comprueba la guarda SSRF de la estrategia sobre la URL ya
+ * interpolada, que solo admite http y https.
+ */
+export const TARGET_URL_PATTERN =
+  /^(?:https?:\/\/\S+|\{\{\s*[a-zA-Z0-9_]+(?:\.[a-zA-Z0-9_]+|\[\d+\])+\s*\}\}\S*)$/i;
 
 /**
  * Valida un mapa `Record<string, string>`.
@@ -268,7 +278,8 @@ export class HttpGenericDestinationConfigDto {
     message: `targetUrl no puede superar ${MAX_TARGET_URL_LENGTH} caracteres.`,
   })
   @Matches(TARGET_URL_PATTERN, {
-    message: 'targetUrl debe ser una URL absoluta http(s), sin espacios.',
+    message:
+      'targetUrl debe ser una URL absoluta http(s), o empezar por una variable {{ns.campo}}, sin espacios.',
   })
   targetUrl?: string;
 

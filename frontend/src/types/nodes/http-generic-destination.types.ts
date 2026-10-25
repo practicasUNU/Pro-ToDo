@@ -44,8 +44,12 @@ export const MAX_KEY_VALUE_VALUE_LENGTH = 2_000;
 /** Replica de `KEY_VALUE_NAME_PATTERN`. */
 export const KEY_VALUE_NAME_PATTERN = /^[A-Za-z0-9_.-]{1,100}$/;
 
-/** Replica de `TARGET_URL_PATTERN`. */
-export const TARGET_URL_PATTERN = /^https?:\/\/\S+$/i;
+/**
+ * Replica de `TARGET_URL_PATTERN`: URL absoluta http(s), o una que EMPIEZA por
+ * un marcador (la direccion entera sale de un paso anterior).
+ */
+export const TARGET_URL_PATTERN =
+  /^(?:https?:\/\/\S+|\{\{\s*[a-zA-Z0-9_]+(?:\.[a-zA-Z0-9_]+|\[\d+\])+\s*\}\}\S*)$/i;
 
 /** Replica de `FORBIDDEN_HEADER_NAMES`: la autenticacion va SOLO por credencial. */
 export const FORBIDDEN_HEADER_NAMES: ReadonlySet<string> = new Set([
@@ -64,8 +68,12 @@ export const FORBIDDEN_HEADER_NAMES: ReadonlySet<string> = new Set([
  * arrastrar CodeMirror al store de un nodo; el grupo 1 es el namespace y el 2
  * el primer segmento del campo.
  */
+// El indice va PEGADO al campo (`{{ns.urls[0]}}`), como en el
+// `INTERPOLATION_PATTERN` del backend. La version anterior exigia un punto
+// delante (`.[0]`), asi que `{{parsed_email.extracted_urls[0]}}` no casaba: el
+// marcador ni se validaba ni se reconocia como variable.
 export const HTTP_MARKER_PATTERN =
-  /\{\{\s*([a-zA-Z0-9_]+)\.([a-zA-Z0-9_]+)(?:\.(?:[a-zA-Z0-9_]+|\[\d+\]))*\s*\}\}/g;
+  /\{\{\s*([a-zA-Z0-9_]+)\.([a-zA-Z0-9_]+)(?:\.[a-zA-Z0-9_]+|\[\d+\])*\s*\}\}/g;
 
 /** Una fila del editor de cabeceras o parametros. */
 export interface KeyValueRow {

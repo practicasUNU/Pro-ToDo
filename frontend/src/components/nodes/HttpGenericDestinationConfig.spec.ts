@@ -30,6 +30,7 @@ import { fetchCredentialOptions } from '@services/credentials.service';
 import { useHttpGenericDestinationStore } from '@stores/nodes/http-generic-destination.store';
 
 import { CredentialAuthType } from '@/types/credential';
+import { NodeType } from '@/types/pipeline';
 import {
   HttpGenericAuthType,
   HttpGenericBodyType,
@@ -143,5 +144,58 @@ describe('HttpGenericDestinationConfig.vue', () => {
 
     // 3. Assert 🎯
     expect(wrapper.get('[data-test="config-errors"]').text()).toContain('URL de destino');
+  });
+
+  describe('2. URL interpolable y escudo SSRF', () => {
+    it('2.1 deberia alertar en tiempo real de un destino de red privada', async () => {
+      // 1. Arrange
+      const nodeId = nextNodeId();
+      const wrapper = mountComponent(nodeId);
+
+      // 2. Act
+      useHttpGenericDestinationStore(nodeId).updateConfig({ targetUrl: 'http://10.0.0.5/api' });
+      await flushPromises();
+
+      // 3. Assert
+      const alert = wrapper.get('[data-test="private-target-alert"]');
+      expect(alert.attributes('role')).toBe('alert');
+      expect(alert.text()).toContain('10.0.0.5');
+    });
+
+    it('2.2 deberia tomar la URL entera del selector cerrado de pasos anteriores', async () => {
+      // 1. Arrange
+      const nodeId = nextNodeId();
+      const store = useHttpGenericDestinationStore(nodeId);
+      store.setAvailableUpstreamContext([
+        {
+          namespace: 'parsed_email',
+          nodeType: NodeType.PARSER_PRE_IA,
+          fields: [{ name: 'extracted_urls', type: 'url[]' }],
+        },
+      ]);
+      const wrapper = mountComponent(nodeId);
+      await flushPromises();
+
+      // 2. Act
+      // QField reparte los atributos hacia el control interno, asi que el
+      // selector se localiza por su etiqueta.
+      const urlSource = wrapper
+        .findAllComponents(QSelect)
+        .find((select) => select.props('label') === 'O toma la URL de un paso anterior');
+      expect(urlSource).toBeDefined();
+      urlSource?.vm.$emit('update:modelValue', '{{parsed_email.extracted_urls[0]}}');
+      await flushPromises();
+
+      // 3. Assert
+      expect(store.config.targetUrl).toBe('{{parsed_email.extracted_urls[0]}}');
+    });
+
+    it('2.3 NO deberia ofrecer el selector sin campos URL aguas arriba', () => {
+      // 1. Arrange + 2. Act
+      const wrapper = mountComponent(nextNodeId());
+
+      // 3. Assert
+      expect(wrapper.find('[data-test="url-source-select"]').exists()).toBe(false);
+    });
   });
 });

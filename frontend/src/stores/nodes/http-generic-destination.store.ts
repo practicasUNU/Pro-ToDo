@@ -3,6 +3,9 @@ import { computed, ref } from 'vue';
 
 import { useCredentialsStore } from '@stores/credentials.store';
 
+import { detectPrivateTarget } from '@/utils/outbound-url';
+import { buildUrlOptions } from '@/utils/url-source-options';
+
 import { CredentialAuthType } from '@/types/credential';
 import {
   DEFAULT_HTTP_GENERIC_AUTH_TYPE,
@@ -29,6 +32,7 @@ import {
 import type { HydratableNode, UpstreamNamespace } from '@stores/nodes/node-store-registry';
 
 import type { CredentialOption } from '@/types/credential';
+import type { TargetUrlOption } from '@/utils/url-source-options';
 import type {
   HttpGenericDestinationNodeConfig,
   KeyValueRow,
@@ -235,6 +239,27 @@ const httpGenericDestinationSetup = () => {
     return null;
   };
 
+  /**
+   * URLs que publican los pasos anteriores, para el selector cerrado.
+   *
+   * Sin la opcion "primer enlace elegible" del extractor web: ese criterio lo
+   * resuelve aquel nodo, y aqui `{{ns.campo}}` sobre un arreglo interpolaria la
+   * lista entera. Se ofrecen solo POSICIONES concretas.
+   */
+  const urlOptions = computed<readonly TargetUrlOption[]>(() =>
+    buildUrlOptions(availableUpstreamContext.value, { includeFirstEligible: false }),
+  );
+
+  /**
+   * Motivo por el que la URL apunta a la red interna, o `null`.
+   *
+   * Escudo SSRF en tiempo real: solo IP literales y `localhost`. El backend la
+   * vuelve a juzgar al guardar (resolviendo el DNS) y al conectar.
+   */
+  const privateTargetReason = computed<string | null>(() =>
+    detectPrivateTarget(asNullableText(config.value.targetUrl)),
+  );
+
   /** Lo que el DTO rechazaria por formato, mas los marcadores sin origen. */
   const malformedParams = computed<readonly string[]>(() => {
     const problems: string[] = [];
@@ -242,7 +267,13 @@ const httpGenericDestinationSetup = () => {
     const url = asNullableText(current.targetUrl);
 
     if (url !== null && (url.length > MAX_TARGET_URL_LENGTH || !TARGET_URL_PATTERN.test(url))) {
-      problems.push('La URL de destino debe ser absoluta (http:// o https://) y sin espacios.');
+      problems.push(
+        'La URL de destino debe ser absoluta (http:// o https://) o empezar por una variable, y sin espacios.',
+      );
+    }
+
+    if (privateTargetReason.value !== null) {
+      problems.push(privateTargetReason.value);
     }
 
     const headersProblem = describeRowsProblem(current.headers, 'Cabeceras', true);
@@ -461,6 +492,8 @@ const httpGenericDestinationSetup = () => {
     credentialOptions,
     isCredentialStale,
     unknownMarkers,
+    urlOptions,
+    privateTargetReason,
     missingRequiredParams,
     malformedParams,
     isConfigValid,

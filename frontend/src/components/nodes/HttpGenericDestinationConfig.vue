@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted } from 'vue';
+import { computed, nextTick, onMounted, ref } from 'vue';
 import { useQuasar } from 'quasar';
 
 import { useHttpGenericDestinationStore } from '@stores/nodes/http-generic-destination.store';
@@ -9,6 +9,7 @@ import VariableExplorer from '@components/shared/VariableExplorer.vue';
 
 import { extractApiErrorMessage } from '@/utils/api-error';
 import { blockNonNumericKeys } from '@/utils/numeric-input';
+import { insertAtCaret } from '@/utils/url-source-options';
 
 import { NODE_TYPE_LABELS, NodeType } from '@/types/pipeline';
 import {
@@ -22,6 +23,7 @@ import {
   MIN_HTTP_GENERIC_TIMEOUT_MS,
 } from '@/types/nodes/http-generic-destination.types';
 
+import type { QInput } from 'quasar';
 import type { KeyValueRow } from '@/types/nodes/http-generic-destination.types';
 
 interface Props {
@@ -72,8 +74,49 @@ const BODY_HINTS: Readonly<Record<HttpGenericBodyType, string>> = {
   [HttpGenericBodyType.NONE]: 'La peticion no lleva cuerpo.',
 };
 
-const appendToUrl = (token: string): void => {
-  store.updateConfig({ targetUrl: `${store.config.targetUrl ?? ''}${token}` });
+const urlInputRef = ref<QInput | null>(null);
+
+/**
+ * Si el campo de URL ha tenido el foco alguna vez.
+ *
+ * Un `<input>` que nunca se enfoco informa `selectionStart = 0`, y fiarse de eso
+ * pegaria la variable DELANTE de una URL escrita. Sin foco previo se anade al
+ * final, como antes.
+ */
+const urlHasCaret = ref(false);
+
+/** Valor del selector cerrado: la URL actual solo si es una de sus opciones. */
+const selectedUrlOption = computed<string | null>(() =>
+  store.urlOptions.some((option) => option.value === store.config.targetUrl)
+    ? (store.config.targetUrl ?? null)
+    : null,
+);
+
+/**
+ * Inserta la variable EN EL CURSOR del campo de URL, no al final.
+ *
+ * Asi se puede interpolar un tramo intermedio (`https://api/{{ns.id}}/avisos`)
+ * sin tener que cortar y pegar el resto a mano. El cursor queda detras de lo
+ * insertado para seguir escribiendo.
+ */
+const insertIntoUrl = (token: string): void => {
+  const native = urlInputRef.value?.getNativeElement() as HTMLInputElement | undefined;
+  const { text, caret } = insertAtCaret(
+    store.config.targetUrl ?? '',
+    token,
+    urlHasCaret.value ? (native?.selectionStart ?? null) : null,
+    urlHasCaret.value ? (native?.selectionEnd ?? null) : null,
+  );
+
+  store.updateConfig({ targetUrl: text });
+  void nextTick(() => native?.setSelectionRange(caret, caret));
+};
+
+/** Toma la direccion ENTERA de un paso anterior desde el selector cerrado. */
+const selectUrlSource = (value: string | null): void => {
+  if (value === null) return;
+
+  store.updateConfig({ targetUrl: value });
 };
 
 const appendToBody = (token: string): void => {
@@ -147,13 +190,17 @@ onMounted(async () => {
         </label>
         <q-input
           id="http-url"
+          ref="urlInputRef"
           :model-value="store.config.targetUrl ?? ''"
           outlined
           dense
           class="q-mt-xs pd-mono"
           placeholder="https://api.ejemplo.org/v1/avisos"
           :maxlength="MAX_TARGET_URL_LENGTH"
-          hint="Absoluta (https://...). Puede incluir variables del contexto."
+          :error="store.privateTargetReason !== null"
+          hint="Absoluta (https://...) o una variable del contexto. La variable se inserta donde este el cursor."
+          data-test="target-url-input"
+          @focus="urlHasCaret = true"
           @update:model-value="store.updateConfig({ targetUrl: toNullableText($event) })"
         >
           <template #append>
@@ -170,12 +217,45 @@ onMounted(async () => {
                 <VariableExplorer
                   :context="store.availableUpstreamContext"
                   insert-label="Insertar en la URL"
-                  @insert="appendToUrl"
+                  @insert="insertIntoUrl"
                 />
               </q-menu>
             </q-btn>
           </template>
         </q-input>
+
+        <!-- Escudo SSRF en tiempo real: el backend rechazaria el guardado. -->
+        <q-banner
+          v-if="store.privateTargetReason !== null"
+          dense
+          class="pd-error-banner q-mt-sm"
+          role="alert"
+          data-test="private-target-alert"
+        >
+          <template #avatar>
+            <q-icon name="gpp_bad" size="20px" class="pd-error-icon" aria-hidden="true" />
+          </template>
+          <strong>Destino privado bloqueado.</strong> {{ store.privateTargetReason }}
+        </q-banner>
+
+        <!-- Selector cerrado (Poka-Yoke §4): la direccion ENTERA de un paso
+             anterior, sin teclear la referencia. Mismo catalogo que el
+             extractor web, sin su criterio de "primer enlace elegible". -->
+        <q-select
+          v-if="store.urlOptions.length > 0"
+          :model-value="selectedUrlOption"
+          :options="store.urlOptions"
+          outlined
+          dense
+          emit-value
+          map-options
+          clearable
+          class="q-mt-sm pd-mono"
+          label="O toma la URL de un paso anterior"
+          hint="Solo campos de tipo URL publicados aguas arriba."
+          data-test="url-source-select"
+          @update:model-value="selectUrlSource($event as string | null)"
+        />
       </div>
     </div>
 

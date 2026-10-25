@@ -3,7 +3,10 @@ import { computed, ref } from 'vue';
 
 import * as webScraperService from '@services/nodes/web-scraper.service';
 
+import { buildUrlOptions, SELECTABLE_URL_SLOTS } from '@/utils/url-source-options';
+
 import type { HydratableNode, UpstreamNamespace } from '@stores/nodes/node-store-registry';
+import type { TargetUrlOption } from '@/utils/url-source-options';
 
 import type {
   CheckScraperMetrics,
@@ -88,7 +91,9 @@ export const EXCLUDED_DOMAIN_SUGGESTIONS: readonly string[] = ['madrimasd.org'];
  * prensa trae uno o dos enlaces de contenido; mas alla del decimo la posicion
  * deja de ser una referencia estable entre un correo y el siguiente.
  */
-export const SELECTABLE_URL_SLOTS = 10;
+// Vive en `@/utils/url-source-options`, que comparte con el destino HTTP
+// generico; se reexporta para no romper a quien ya lo importa desde aqui.
+export { SELECTABLE_URL_SLOTS };
 
 /**
  * Forma que debe tener `targetUrl`: una unica marca `{{raiz.campo}}`.
@@ -113,26 +118,12 @@ export const RETRY_DELAY_RULE = `La espera entre reintentos debe estar entre ${M
 export const EXCLUDED_DOMAIN_RULE =
   'Escribe solo el host (ej. madrimasd.org), sin https:// ni rutas';
 
-/** Opcion del selector determinista de URL. */
-export interface TargetUrlOption {
-  readonly label: string;
-  readonly value: string;
-}
-
-/** Plantilla de interpolacion de un campo escalar. */
-export const urlTemplateFor = (namespace: string, field: string): string =>
-  `{{${namespace}.${field}}}`;
-
-/** Plantilla de interpolacion de la posicion `index` de un campo de arreglo. */
-export const indexedUrlTemplateFor = (namespace: string, field: string, index: number): string =>
-  `{{${namespace}.${field}[${index}]}}`;
-
-/**
- * Etiqueta de la opcion que delega la eleccion en el nodo.
- *
- * Se exporta para que las pruebas la aseveren sin recopiarla.
- */
-export const FIRST_ELIGIBLE_LABEL_SUFFIX = 'primer enlace elegible';
+export {
+  FIRST_ELIGIBLE_LABEL_SUFFIX,
+  indexedUrlTemplateFor,
+  urlTemplateFor,
+} from '@/utils/url-source-options';
+export type { TargetUrlOption } from '@/utils/url-source-options';
 
 /**
  * Opciones del selector: POSICIONES del contexto, no URLs.
@@ -162,41 +153,9 @@ export const FIRST_ELIGIBLE_LABEL_SUFFIX = 'primer enlace elegible';
  * Un `url[]` se despliega en `SELECTABLE_URL_SLOTS` posiciones; un `url` escalar
  * aporta una sola opcion.
  */
-const buildUrlOptions = (context: readonly UpstreamNamespace[]): readonly TargetUrlOption[] =>
-  context.flatMap(({ namespace, fields }) =>
-    fields.flatMap((field) => {
-      const suffix = field.description === undefined ? '' : ` — ${field.description}`;
-
-      if (field.type === 'url') {
-        return [
-          {
-            label: `${namespace}.${field.name}${suffix}`,
-            value: urlTemplateFor(namespace, field.name),
-          },
-        ];
-      }
-
-      if (field.type !== 'url[]') return [];
-
-      // LA PRIMERA opcion del arreglo no es una posicion: es un CRITERIO. El
-      // enlace del portal propio y el de la noticia llegan en el mismo correo y
-      // su orden cambia de un dia para otro, asi que fijar la posicion 1 raspa
-      // tan pronto uno como el otro. Delegando en el nodo, la eleccion la hace
-      // "no ser un dominio excluido", que si es estable. Va la primera porque es
-      // la respuesta correcta en el caso normal; las posiciones se quedan para
-      // el correo de formato fijo.
-      return [
-        {
-          label: `${namespace}.${field.name} — ${FIRST_ELIGIBLE_LABEL_SUFFIX} (salta los dominios excluidos)`,
-          value: urlTemplateFor(namespace, field.name),
-        },
-        ...Array.from({ length: SELECTABLE_URL_SLOTS }, (_, index) => ({
-          label: `${namespace}.${field.name} — posicion ${index + 1}`,
-          value: indexedUrlTemplateFor(namespace, field.name, index),
-        })),
-      ];
-    }),
-  );
+const buildScraperUrlOptions = (
+  context: readonly UpstreamNamespace[],
+): readonly TargetUrlOption[] => buildUrlOptions(context, { includeFirstEligible: true });
 
 /**
  * Config inicial: SIN `targetUrl` y con los tres defectos del backend.
@@ -260,7 +219,7 @@ const webScraperSetup = () => {
   const loading = ref<boolean>(false);
 
   const urlOptions = computed<readonly TargetUrlOption[]>(() =>
-    buildUrlOptions(availableUpstreamContext.value),
+    buildScraperUrlOptions(availableUpstreamContext.value),
   );
 
   /**
