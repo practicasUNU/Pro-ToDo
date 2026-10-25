@@ -37,6 +37,15 @@
 
   --pd-negative: #d93a2b;
 
+  // Texto SOBRE un relleno semantico (badges de estado). Va por token y no
+  // fijo en blanco porque el contraste depende del relleno y del modo: blanco
+  // sobre el rojo claro da 4.6:1, pero sobre el rojo del modo oscuro se queda en
+  // 3.8:1 (WCAG AA exige 4.5:1). Lo verifica `color-contrast.spec.ts`.
+  --pd-on-negative: #ffffff;
+
+  // Indicador de foco de teclado (`:focus-visible`), >= 3:1 contra el fondo.
+  --pd-focus-ring: #2c4fc7;
+
   // Fondo de fila de tabla según severidad (Vista 6 — Trazabilidad).
   // Tokens derivados de la tríada semántica: no son colores nuevos,
   // son el mismo matiz a baja opacidad sobre la superficie clara.
@@ -61,6 +70,9 @@ body.body--dark {
   --pd-disabled-text: #9ca0b5;
 
   --pd-negative: #e74c3c;
+  --pd-on-negative: #12142e;
+
+  --pd-focus-ring: #5b8ce8;
 
   --pd-row-urgente: #2b1a1d;
   --pd-row-grave: #2c2418;
@@ -84,6 +96,14 @@ body.body--dark {
 
   --pd-warning: #f59e0b;
   --pd-positive: #10b981;
+
+  // Texto sobre cada relleno semantico que NO conmuta con el tema (ver
+  // `--pd-on-negative`). Blanco sobre `--pd-positive` daba 2.5:1 en el badge
+  // "Activo"; el navy del shell da 7:1.
+  --pd-on-positive: #12142e;
+  --pd-on-warning: #12142e;
+  --pd-on-primary: #ffffff;
+  --pd-on-accent: #12142e;
 
   --pd-shell-bg: #12142e;
   --pd-shell-alt: #1c2049; // ítem de nav activo / hover sobre shell
@@ -183,33 +203,33 @@ body {
 
 .pd-h1 {
   font-family: $heading-font-family;
-  font-size: 20px;
-  line-height: 28px;
+  font-size: 1.25rem;
+  line-height: 1.75rem;
   font-weight: 700;
-  letter-spacing: -0.2px;
+  letter-spacing: -0.0125rem;
   margin: 0;
   color: var(--pd-text-primary);
 }
 .pd-h2 {
   font-family: $heading-font-family;
-  font-size: 16px;
-  line-height: 24px;
+  font-size: 1rem;
+  line-height: 1.5rem;
   font-weight: 600;
-  letter-spacing: -0.1px;
+  letter-spacing: -0.0063rem;
   margin: 0;
   color: var(--pd-text-primary);
 }
 .pd-subtitle {
-  font-size: 12.5px;
-  line-height: 18px;
+  font-size: 0.7812rem;
+  line-height: 1.125rem;
   font-weight: 400;
   color: var(--pd-text-secondary);
 }
 
 // Label de formulario: Inter 700, escala compacta.
 .pd-label {
-  font-size: 13px;
-  line-height: 18px;
+  font-size: 0.8125rem;
+  line-height: 1.125rem;
   font-weight: 700;
   color: var(--pd-text-primary);
 }
@@ -225,17 +245,17 @@ body {
 .pd-nav {
   font-family: $heading-font-family;
   font-weight: 500;
-  font-size: 13px;
+  font-size: 0.8125rem;
   text-transform: uppercase;
-  letter-spacing: 1.2px;
+  letter-spacing: 0.075rem;
 }
 
 // Valores técnicos: id_flujo, nombres de plantilla/prompt, payload JSON, rutas .log
 .pd-mono {
   font-family: $mono-font-family;
-  font-size: 13px;
+  font-size: 0.8125rem;
   font-weight: 500;
-  line-height: 18px;
+  line-height: 1.125rem;
 }
 
 // ---- Botones (regla §2) ----
@@ -248,7 +268,7 @@ body {
   border-radius: $button-border-radius;
 
   .q-icon {
-    font-size: 16px;
+    font-size: 1rem;
   }
 
   // Deshabilitado: plano, sin degradado ni hover, con texto legible
@@ -360,9 +380,9 @@ body {
 .pd-badge {
   border-radius: 999px;
   padding: 4px 10px;
-  font-size: 11.5px;
+  font-size: 0.7188rem;
   font-weight: 700;
-  letter-spacing: 0.3px;
+  letter-spacing: 0.0187rem;
 }
 
 // Rol: chip tenue de marca sobre superficie subordinada.
@@ -374,7 +394,7 @@ body {
 
 .pd-badge--active {
   background: var(--pd-positive);
-  color: var(--pd-shell-text);
+  color: var(--pd-on-positive);
 }
 
 // En proceso: azul corporativo. Clase propia y no `pd-badge--active` —que es
@@ -386,19 +406,23 @@ body {
 // `brand:` en `quasar.config.ts`, así que `color="pd-primary"` no existe.
 .pd-badge--running {
   background: var(--pd-primary);
-  color: var(--pd-shell-text);
+  color: var(--pd-on-primary);
 }
 
-// Inactivo NO es un error: es estado neutro, de ahí los tokens de deshabilitado.
+// Inactivo NO es un error: es estado neutro. Antes usaba los tokens de
+// deshabilitado, pensados para controles inertes (exentos de contraste en WCAG)
+// y que como texto de estado se quedaban en 2.4:1; ahora superficie atenuada
+// con texto secundario y borde, que supera 6:1 en ambos modos.
 .pd-badge--inactive {
-  background: var(--pd-disabled-bg);
-  color: var(--pd-disabled-text);
+  background: var(--pd-surface-muted);
+  color: var(--pd-text-secondary);
+  border: 1px solid var(--pd-border);
 }
 
 // Fallido: el motor se rindió y alguien tiene que mirarlo. Rojo de severidad.
 .pd-badge--failed {
   background: var(--pd-negative);
-  color: var(--pd-shell-text);
+  color: var(--pd-on-negative);
 }
 
 // Eliminacion: la fila ya no existe. Rojo de severidad, igual que `--failed`,
@@ -407,14 +431,20 @@ body {
 // moviese el del otro sin quererlo.
 .pd-badge--negative {
   background: var(--pd-negative);
-  color: var(--pd-shell-text);
+  color: var(--pd-on-negative);
 }
 
 // Pausado: detenido a la espera de un operador. Texto OSCURO sobre ámbar: el
 // blanco sobre `--pd-warning` no llega al contraste AA (~2:1).
 .pd-badge--paused {
   background: var(--pd-warning);
-  color: var(--pd-shell-bg);
+  color: var(--pd-on-warning);
+}
+
+// Informativo (severidad LEVE): acento de marca con texto oscuro.
+.pd-badge--info {
+  background: var(--pd-accent);
+  color: var(--pd-on-accent);
 }
 
 // ---- Shell: QHeader + QDrawer (regla §2) ----
@@ -439,8 +469,8 @@ body {
 // un valor y no son un token del sistema.
 .pd-shell-text-secondary {
   color: var(--pd-shell-text-secondary);
-  font-size: 12.5px;
-  line-height: 18px;
+  font-size: 0.7812rem;
+  line-height: 1.125rem;
 }
 
 .pd-drawer {
@@ -469,10 +499,10 @@ body {
   .q-item__label--header {
     color: var(--pd-shell-text-secondary);
     font-family: $heading-font-family;
-    font-size: 10.5px;
+    font-size: 0.6562rem;
     font-weight: 500;
     text-transform: uppercase;
-    letter-spacing: 1.2px;
+    letter-spacing: 0.075rem;
   }
 }
 
@@ -515,9 +545,9 @@ body {
   thead th {
     background: var(--pd-surface-muted);
     color: var(--pd-text-secondary);
-    font-size: 10.5px;
+    font-size: 0.6562rem;
     font-weight: 700;
-    letter-spacing: 0.4px;
+    letter-spacing: 0.025rem;
     text-transform: uppercase;
   }
 
@@ -792,7 +822,7 @@ $pd-fork-height: 56px;
 .pd-field-range {
   display: block;
   margin-top: 2px;
-  font-size: 12px;
+  font-size: 0.75rem;
   color: var(--pd-text-secondary);
   transition: color 0.15s ease;
 }

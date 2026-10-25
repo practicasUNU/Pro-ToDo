@@ -360,7 +360,7 @@ const onSubmit = async (): Promise<void> => {
 
 .pd-editor-badge {
   color: var(--pd-text-secondary);
-  font-size: 11.5px;
+  font-size: 0.7188rem;
 }
 
 .pd-dialog-icon {

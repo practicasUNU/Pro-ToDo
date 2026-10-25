@@ -103,7 +103,7 @@ const bars = computed<Bar[]>(() => {
 
 .pd-cost-chart__provider {
   color: var(--pd-text-secondary);
-  font-size: 12px;
+  font-size: 0.75rem;
 }
 
 .pd-cost-chart__cost {

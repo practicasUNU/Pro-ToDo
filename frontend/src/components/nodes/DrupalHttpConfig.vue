@@ -869,7 +869,7 @@ const toNullableText = (value: string | number | null): string | null => {
   color: var(--pd-shell-text);
   border: 1px solid var(--pd-border);
   border-radius: $generic-border-radius;
-  font-size: 12px;
+  font-size: 0.75rem;
 }
 
 .pd-advanced {

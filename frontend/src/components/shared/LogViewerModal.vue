@@ -4,8 +4,13 @@ import { copyToClipboard, useQuasar } from 'quasar';
 
 import { useLogsStore } from '@stores/logs.store';
 
+import StatusBadge from '@components/shared/StatusBadge.vue';
+
 import { extractApiErrorMessage } from '@/utils/api-error';
 import { formatDateTime } from '@/utils/date-format';
+import { describeSeverity, isNodeErrorSeverity } from '@/utils/status-display';
+
+import type { StatusDisplay } from '@/utils/status-display';
 
 /**
  * Consola de solo lectura con la traza de una ejecucion.
@@ -30,17 +35,21 @@ const emit = defineEmits<{
 const $q = useQuasar();
 const logsStore = useLogsStore();
 
-/** Clase del badge por severidad: el texto acompana siempre al color. */
-const LEVEL_BADGES: Record<string, string> = {
-  URGENTE: 'pd-badge--failed',
-  GRAVE: 'pd-badge--paused',
-};
-
 const log = computed(() => logsStore.currentLog);
 
-const levelBadgeClass = computed(() =>
-  log.value?.level ? (LEVEL_BADGES[log.value.level] ?? 'pd-badge--inactive') : '',
-);
+/**
+ * Severidad con icono y texto (WCAG 1.4.1). Un nivel desconocido —el log trae
+ * el valor como texto libre— se pinta neutro y con el texto tal cual.
+ */
+const levelDisplay = computed<StatusDisplay | null>(() => {
+  const level = log.value?.level;
+
+  if (!level) return null;
+
+  return isNodeErrorSeverity(level)
+    ? describeSeverity(level)
+    : { label: level, icon: 'help_outline', badgeClass: 'pd-badge--inactive' };
+});
 
 /** Lo que se copia: la traza y, debajo, las entradas completas. */
 const clipboardText = computed(() =>
@@ -111,14 +120,9 @@ const copyLog = async (): Promise<void> => {
 
         <template v-else-if="log">
           <div class="pd-log-viewer__meta">
-            <q-badge
-              v-if="log.level"
-              class="pd-badge"
-              :class="levelBadgeClass"
-              data-test="log-level"
-            >
+            <status-badge v-if="levelDisplay" :display="levelDisplay" data-test="log-level">
               {{ log.level }}
-            </q-badge>
+            </status-badge>
             <span v-if="log.timestamp" class="pd-text-secondary">
               Último fallo:
               <time :datetime="log.timestamp">{{ formatDateTime(log.timestamp) }}</time>

@@ -5,12 +5,14 @@ import { useQuasar, type QTableColumn } from 'quasar';
 import { useTemplatesStore } from '@stores/templates.store';
 
 import AuditDetailsMenu from '@components/shared/AuditDetailsMenu.vue';
+import StatusBadge from '@components/shared/StatusBadge.vue';
 import SafeDeleteModal from '@components/shared/SafeDeleteModal.vue';
 
 import TemplateEditorDialog from './TemplateEditorDialog.vue';
 import TemplatePreviewDialog from './TemplatePreviewDialog.vue';
 
 import { extractApiErrorMessage } from '@/utils/api-error';
+import { describeEnabled } from '@/utils/status-display';
 
 import type { HtmlTemplate } from '@/types/html-template';
 
@@ -202,12 +204,9 @@ onMounted(loadTemplates);
 
       <template #body-cell-status="cellProps">
         <q-td :props="cellProps">
-          <q-badge
-            class="pd-badge"
-            :class="cellProps.row.active ? 'pd-badge--active' : 'pd-badge--inactive'"
-          >
-            {{ cellProps.row.active ? 'Activa' : 'Inactiva' }}
-          </q-badge>
+          <status-badge
+            :display="describeEnabled(cellProps.row.active, { on: 'Activa', off: 'Inactiva' })"
+          />
         </q-td>
       </template>
 

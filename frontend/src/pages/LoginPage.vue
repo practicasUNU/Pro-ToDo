@@ -481,15 +481,15 @@ onBeforeUnmount(clearCountdown);
 // Solo escala: la familia la sigue heredando de .pd-h1, para no declarar
 // `font-family` en el componente (regla §2, Tipografia).
 .pd-login-brand__title {
-  font-size: 34px;
-  line-height: 42px;
+  font-size: 2.125rem;
+  line-height: 2.625rem;
 }
 
 // Idem: .pd-h2 aporta familia y peso; aqui solo se sube un paso la escala
 // para que el titulo de la tarjeta no compita con el h1 de marca.
 .pd-login-card__title {
-  font-size: 19px;
-  line-height: 26px;
+  font-size: 1.1875rem;
+  line-height: 1.625rem;
 }
 
 .pd-login-brand__description {
@@ -520,8 +520,8 @@ onBeforeUnmount(clearCountdown);
 
 .pd-banner-expired__hint {
   font-weight: 400;
-  font-size: 12.5px;
-  line-height: 18px;
+  font-size: 0.7812rem;
+  line-height: 1.125rem;
   opacity: 0.9;
 }
 </style>

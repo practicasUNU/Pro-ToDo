@@ -562,7 +562,7 @@ const onSubmit = async (): Promise<void> => {
 
 .pd-prompt-badge {
   color: var(--pd-text-secondary);
-  font-size: 11.5px;
+  font-size: 0.7188rem;
 }
 
 // QSeparator trae su propio color; se fuerza al token del sistema.

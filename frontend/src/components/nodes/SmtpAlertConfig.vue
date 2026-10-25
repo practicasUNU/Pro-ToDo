@@ -248,9 +248,9 @@ const {
 .pd-mail-mock__header {
   background: var(--pd-gradient);
   color: var(--pd-text-primary);
-  font-size: 12px;
+  font-size: 0.75rem;
   font-weight: 700;
-  letter-spacing: 1.2px;
+  letter-spacing: 0.075rem;
   text-transform: uppercase;
   padding: 12px 16px;
 }
@@ -267,15 +267,15 @@ const {
   background: var(--pd-warning);
   color: var(--pd-shell-bg);
   border-radius: 999px;
-  font-size: 10px;
+  font-size: 0.625rem;
   font-weight: 700;
-  letter-spacing: 1px;
+  letter-spacing: 0.0625rem;
   padding: 3px 10px;
 }
 
 .pd-mail-mock__title {
   color: var(--pd-text-primary);
-  font-size: 16px;
+  font-size: 1rem;
   font-weight: 700;
 }
 
@@ -284,7 +284,7 @@ const {
   border: 1px dashed var(--pd-border);
   border-radius: $generic-border-radius;
   color: var(--pd-text-secondary);
-  font-size: 12px;
+  font-size: 0.75rem;
   padding: 10px 12px;
 }
 
@@ -302,16 +302,16 @@ const {
 
 .pd-mail-mock__note-label {
   color: var(--pd-text-secondary);
-  font-size: 10px;
+  font-size: 0.625rem;
   font-weight: 700;
-  letter-spacing: 1px;
+  letter-spacing: 0.0625rem;
   text-transform: uppercase;
   margin-bottom: 4px;
 }
 
 .pd-mail-mock__note-text {
   color: var(--pd-text-primary);
-  font-size: 13px;
+  font-size: 0.8125rem;
   margin: 0;
   white-space: pre-wrap;
   word-break: break-word;

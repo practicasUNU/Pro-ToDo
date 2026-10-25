@@ -296,7 +296,7 @@ const FIELD_LABELS = ['Minuto', 'Hora', 'Dia', 'Mes', 'Dia de semana'] as const;
 }
 
 .pd-cron-field__label {
-  font-size: 10px;
+  font-size: 0.625rem;
   letter-spacing: 0.06em;
   text-transform: uppercase;
   color: var(--pd-text-secondary);

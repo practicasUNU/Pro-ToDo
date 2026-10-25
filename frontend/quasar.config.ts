@@ -14,7 +14,7 @@ export default defineConfig((ctx) => {
     boot: ['axios', 'socket'],
 
     // https://v2.quasar.dev/quasar-cli-vite/quasar-config-file#css
-    css: ['app.scss'],
+    css: ['app.scss', 'a11y.scss'],
 
     // https://github.com/quasarframework/quasar/tree/dev/extras
     extras: [

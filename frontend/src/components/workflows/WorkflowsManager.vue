@@ -9,10 +9,13 @@ import { useWorkflowsStore } from '@stores/workflows.store';
 
 import AuditDetailsMenu from '@components/shared/AuditDetailsMenu.vue';
 import SafeDeleteModal from '@components/shared/SafeDeleteModal.vue';
+import StatusBadge from '@components/shared/StatusBadge.vue';
 
 import WorkflowDialog from './WorkflowDialog.vue';
 
 import { extractApiErrorMessage } from '@/utils/api-error';
+import { describeExecutionState } from '@/utils/execution-state-display';
+import { describeWorkflowStatus } from '@/utils/status-display';
 
 import { ExecutionState } from '@/types/execution';
 import { WorkflowStatus } from '@/types/pipeline';
@@ -473,7 +476,13 @@ onBeforeUnmount(() => {
       <template #body-cell-status="cellProps">
         <q-td :props="cellProps">
           <template v-if="isPaused(cellProps.row)">
-            <q-badge class="pd-badge row-grave" data-test="status-paused"> Pausado </q-badge>
+            <!-- Antes `row-grave`, el TINTE de fila de la tabla de trazabilidad,
+                 usado como badge: sin icono y con un contraste que no llegaba a
+                 AA. Ahora el badge de pausa con su icono. -->
+            <status-badge
+              :display="describeWorkflowStatus(WorkflowStatus.PAUSADO)"
+              data-test="status-paused"
+            />
             <q-btn
               flat
               round
@@ -508,24 +517,24 @@ onBeforeUnmount(() => {
               cellProps.row.executionState === ExecutionState.EN_PROCESO
             "
           >
-            <q-badge class="pd-badge pd-badge--running" data-test="status-running">
-              En proceso
-            </q-badge>
+            <status-badge
+              :display="describeExecutionState(ExecutionState.EN_PROCESO)"
+              data-test="status-running"
+            />
             <q-spinner class="q-ml-xs" size="1em" />
             <q-tooltip>El motor esta recorriendo el pipeline ahora mismo</q-tooltip>
           </template>
 
           <template v-else>
-            <q-badge
-              class="pd-badge"
-              :class="
-                cellProps.row.status === WorkflowStatus.ACTIVO
-                  ? 'pd-badge--active'
-                  : 'pd-badge--inactive'
+            <status-badge
+              :display="
+                describeWorkflowStatus(
+                  cellProps.row.status === WorkflowStatus.ACTIVO
+                    ? WorkflowStatus.ACTIVO
+                    : WorkflowStatus.INACTIVO,
+                )
               "
-            >
-              {{ cellProps.row.status === WorkflowStatus.ACTIVO ? 'Activo' : 'Inactivo' }}
-            </q-badge>
+            />
             <q-tooltip>
               {{
                 cellProps.row.status === WorkflowStatus.ACTIVO

@@ -18,7 +18,7 @@ export const unuwareEditorTheme = EditorView.theme({
     height: '100%',
     backgroundColor: 'var(--pd-card-bg)',
     color: 'var(--pd-text-primary)',
-    fontSize: '13px',
+    fontSize: '0.8125rem',
     border: '1px solid var(--pd-border)',
     borderRadius: '8px',
   },
@@ -60,7 +60,7 @@ export const unuwareEditorTheme = EditorView.theme({
   '.cm-diagnostic': {
     color: 'var(--pd-text-primary)',
     fontFamily: "'Inter Variable', 'Inter', Roboto, sans-serif",
-    fontSize: '12.5px',
+    fontSize: '0.7813rem',
     padding: '4px 8px',
   },
   '.cm-diagnostic-error': { borderLeftColor: 'var(--pd-negative)' },

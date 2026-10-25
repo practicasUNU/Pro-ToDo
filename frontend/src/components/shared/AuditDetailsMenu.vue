@@ -124,7 +124,7 @@ const rows = computed<AuditRow[]>(() => [
 
 .pd-audit-list__subject {
   color: var(--pd-text-secondary);
-  font-size: 12px;
+  font-size: 0.75rem;
   overflow-wrap: anywhere;
 }
 

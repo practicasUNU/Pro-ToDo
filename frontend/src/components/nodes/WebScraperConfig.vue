@@ -512,8 +512,8 @@ const onRunSandboxTest = async (): Promise<void> => {
 
 .pd-metric {
   color: var(--pd-text-primary);
-  font-size: 18px;
-  line-height: 26px;
+  font-size: 1.125rem;
+  line-height: 1.625rem;
 }
 
 .pd-metric-badge--ok {

@@ -40,7 +40,12 @@ $heading-font-family: 'Poppins', 'Montserrat', $typography-font-family;
 
 // Cuerpo base: la interfaz es densa (tablas de trazabilidad,
 // wizard), de ahí los 13px del briefing en lugar de los 14 de Quasar.
-$body-font-size: 13px;
+// En `rem` y no en px: el escalado tipografico del menu de accesibilidad
+// cambia el `font-size` de `<html>`, y solo lo que se mide en rem lo sigue.
+$body-font-size: 0.8125rem;
+$button-font-size: 0.875rem;
+$badge-font-size: 0.75rem;
+$chip-font-size: 0.875rem;
 $body-line-height: 1.42;
 
 // ---- Radios canónicos (briefing §1.3) ----

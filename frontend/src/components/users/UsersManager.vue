@@ -5,12 +5,14 @@ import { useQuasar, type QTableColumn } from 'quasar';
 import { useUsersStore } from '@stores/users.store';
 
 import AuditDetailsMenu from '@components/shared/AuditDetailsMenu.vue';
+import StatusBadge from '@components/shared/StatusBadge.vue';
 import SafeDeleteModal from '@components/shared/SafeDeleteModal.vue';
 
 import UserDialog from './UserDialog.vue';
 
 import { extractApiErrorMessage } from '@/utils/api-error';
 import { deriveDisplayName, roleDisplayLabel, roleIconName } from '@/utils/user-display';
+import { describeEnabled } from '@/utils/status-display';
 
 import type { User, UserRole } from '@/types/user';
 
@@ -190,12 +192,7 @@ onMounted(loadUsers);
 
       <template #body-cell-status="cellProps">
         <q-td :props="cellProps">
-          <q-badge
-            class="pd-badge"
-            :class="cellProps.row.isActive ? 'pd-badge--active' : 'pd-badge--inactive'"
-          >
-            {{ cellProps.row.isActive ? 'Activo' : 'Inactivo' }}
-          </q-badge>
+          <status-badge :display="describeEnabled(cellProps.row.isActive)" />
         </q-td>
       </template>
 

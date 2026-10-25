@@ -1,0 +1,252 @@
+// ============================================================
+// Proto-Do · Accesibilidad visual (WCAG 2.1 AA/AAA)
+//
+// Lo gobierna `useAccessibilityStore` (src/stores/accessibility.store.ts),
+// que escribe en <html>:
+//   - `data-pd-palette`        paleta para daltonismo o alto contraste;
+//   - `--pd-font-scale`        escala tipografica (1 = 100 %);
+//   - `.pd-text-spacing--wide` espaciado de texto WCAG 1.4.12;
+//   - `.pd-large-targets`      objetivos de 44x44 px (WCAG 2.5.5).
+//
+// Las paletas REDEFINEN tokens que ya existen en app.scss (los
+// semanticos, sus textos `--pd-on-*` y los tintes de fila) y las
+// variables de marca de Quasar (`--q-*`), que es lo que pintan los
+// `color="positive"` de los componentes. No introducen colores
+// fuera de los tokens: un componente sigue sin conocer ningun hex.
+//
+// ESPECIFICIDAD. El bloque claro va en `html[data-pd-palette]`
+// (0,1,1), por encima del `:root` (0,1,0) de app.scss y de Quasar.
+// El oscuro va en `html[...] body.body--dark` (0,2,2), por encima
+// del `body.body--dark` (0,1,1) de app.scss.
+//
+// Cada par relleno/texto lo verifica `color-contrast.spec.ts`
+// (>= 4.5:1 en las tres paletas y en los dos modos).
+// ============================================================
+
+// ---- Escalado tipografico ----
+// Todo el tamano tipografico del proyecto esta en `rem`, asi que basta con
+// escalar la raiz. `100%` respeta ademas el tamano que el usuario fije en el
+// navegador, que un `16px` fijo anularia.
+html {
+  font-size: calc(100% * var(--pd-font-scale, 1));
+}
+
+// Quasar fija en px algunos tamanos que no salen de sus variables Sass, y con
+// ellos las tablas y los campos no seguirian la escala.
+.q-table th {
+  font-size: 0.75rem;
+}
+
+.q-table td,
+.q-field__native,
+.q-field__input,
+.q-field__label,
+.q-item__label {
+  font-size: 0.8125rem;
+}
+
+.q-tooltip {
+  font-size: 0.75rem;
+}
+
+// ---- Foco de teclado (siempre activo) ----
+// Visible solo con teclado (`:focus-visible`), para no dibujar un anillo en
+// cada clic de raton. 3px y separado del borde: un contorno pegado al control se
+// confunde con el borde del propio campo.
+:focus-visible {
+  outline: 3px solid var(--pd-focus-ring);
+  outline-offset: 2px;
+}
+
+// Quasar dibuja su propio "focus helper" translucido; con el anillo de arriba
+// sobra y, en alto contraste, lo apagaria.
+.q-btn:focus-visible .q-focus-helper,
+.q-item:focus-visible .q-focus-helper {
+  opacity: 0 !important;
+}
+
+// ---- Espaciado de texto (WCAG 1.4.12) ----
+// Los cuatro valores minimos del criterio: interlineado 1.5, letras 0.12em,
+// palabras 0.16em y parrafos 2em. `!important` porque el criterio exige que la
+// interfaz SOPORTE estos valores aunque los estilos de un componente digan otra
+// cosa.
+.pd-text-spacing--wide body,
+.pd-text-spacing--wide body * {
+  line-height: 1.5 !important;
+  letter-spacing: 0.12em !important;
+  word-spacing: 0.16em !important;
+}
+
+.pd-text-spacing--wide body p {
+  margin-bottom: 2em !important;
+}
+
+// ---- Objetivos tactiles amplios (WCAG 2.5.5, opcion del menu) ----
+// Opcional y apagado por defecto: aplicado siempre, los ~220 botones `dense`
+// de las tablas crecerian y la interfaz perderia densidad para quien no lo
+// necesita.
+.pd-large-targets {
+  .q-btn,
+  .q-item,
+  .q-tab,
+  .q-field__control,
+  .q-toggle__inner,
+  .q-checkbox__inner,
+  .q-radio__inner {
+    min-height: 44px;
+    min-width: 44px;
+  }
+}
+
+// ============================================================
+// Paletas
+// ============================================================
+
+// ---- Deuteranopia y protanopia (confusion rojo-verde) ----
+// Okabe-Ito: verde azulado para el exito, amarillo para el aviso y bermellon
+// para el error se distinguen por LUMINOSIDAD ademas de por matiz, que es lo que
+// conserva quien no separa el rojo del verde. El informativo pasa a purpura
+// rojizo para no confundirse con el azul de "En proceso".
+html[data-pd-palette='deuteranopia'],
+html[data-pd-palette='protanopia'] {
+  --pd-positive: #009e73;
+  --pd-warning: #f0e442;
+  --pd-negative: #d55e00;
+  --pd-accent: #cc79a7;
+  --pd-on-positive: #12142e;
+  --pd-on-warning: #12142e;
+  --pd-on-negative: #12142e;
+  --pd-on-accent: #12142e;
+  --pd-row-urgente: #fbe7d9;
+  --pd-row-grave: #fdf9d6;
+  --pd-row-exitoso: #d9f1ea;
+
+  --q-positive: #009e73;
+  --q-warning: #f0e442;
+  --q-negative: #d55e00;
+  --q-info: #cc79a7;
+}
+
+html[data-pd-palette='deuteranopia'] body.body--dark,
+html[data-pd-palette='protanopia'] body.body--dark {
+  --pd-negative: #d55e00;
+  --pd-on-negative: #12142e;
+  --pd-row-urgente: #2e1d10;
+  --pd-row-grave: #2c2a12;
+  --pd-row-exitoso: #10291f;
+}
+
+// ---- Tritanopia (confusion azul-amarillo) ----
+// Se apoya en el eje rojo-verde, que el tritanope conserva, y saca el aviso del
+// amarillo: bermellon, verde azulado y magenta.
+html[data-pd-palette='tritanopia'] {
+  --pd-positive: #009e73;
+  --pd-warning: #cc79a7;
+  --pd-negative: #d55e00;
+  --pd-on-positive: #12142e;
+  --pd-on-warning: #12142e;
+  --pd-on-negative: #12142e;
+  --pd-row-urgente: #fbe7d9;
+  --pd-row-grave: #f8e6f0;
+  --pd-row-exitoso: #d9f1ea;
+
+  --q-positive: #009e73;
+  --q-warning: #cc79a7;
+  --q-negative: #d55e00;
+}
+
+html[data-pd-palette='tritanopia'] body.body--dark {
+  --pd-negative: #d55e00;
+  --pd-on-negative: #12142e;
+  --pd-row-urgente: #2e1d10;
+  --pd-row-grave: #2b1a25;
+  --pd-row-exitoso: #10291f;
+}
+
+// ---- Alto contraste (AAA) ----
+// Blanco y negro puros, bordes solidos y foco grueso. El shell deja de ser navy
+// para no quedarse en un contraste intermedio con el resto de la pagina.
+html[data-pd-palette='high-contrast'] {
+  --pd-page-bg: #ffffff;
+  --pd-card-bg: #ffffff;
+  --pd-surface-muted: #ffffff;
+  --pd-border: #000000;
+  --pd-text-primary: #000000;
+  --pd-text-secondary: #1a1a1a;
+  --pd-accent-text: #0033cc;
+  --pd-disabled-bg: #e0e0e0;
+  --pd-disabled-text: #3d3d3d;
+
+  --pd-primary: #0033cc;
+  --pd-primary-light: #0033cc;
+  --pd-accent: #0033cc;
+  --pd-positive: #006b3c;
+  --pd-warning: #ffd400;
+  --pd-negative: #b00020;
+  --pd-on-primary: #ffffff;
+  --pd-on-accent: #ffffff;
+  --pd-on-positive: #ffffff;
+  --pd-on-warning: #000000;
+  --pd-on-negative: #ffffff;
+  --pd-focus-ring: #000000;
+
+  --pd-shell-bg: #000000;
+  --pd-shell-alt: #1a1a1a;
+  --pd-shell-text: #ffffff;
+  --pd-shell-text-secondary: #ffffff;
+
+  --pd-row-urgente: #ffe5e9;
+  --pd-row-grave: #fff6cc;
+  --pd-row-exitoso: #e0f5ea;
+
+  --q-primary: #0033cc;
+  --q-positive: #006b3c;
+  --q-warning: #ffd400;
+  --q-negative: #b00020;
+  --q-info: #0033cc;
+
+  .pd-card,
+  .q-card,
+  .q-field--outlined .q-field__control::before {
+    border: 2px solid var(--pd-border);
+  }
+
+  :focus-visible {
+    outline-width: 4px;
+  }
+}
+
+html[data-pd-palette='high-contrast'] body.body--dark {
+  --pd-page-bg: #000000;
+  --pd-card-bg: #000000;
+  --pd-surface-muted: #0a0a0a;
+  --pd-border: #ffffff;
+  --pd-text-primary: #ffffff;
+  --pd-text-secondary: #f0f0f0;
+  --pd-accent-text: #9cc3ff;
+  --pd-disabled-bg: #3d3d3d;
+  --pd-disabled-text: #e0e0e0;
+
+  --pd-primary: #4e74e8;
+  --pd-primary-light: #4e74e8;
+  --pd-accent: #9cc3ff;
+  --pd-positive: #33d17a;
+  --pd-warning: #ffd400;
+  --pd-negative: #ff6b6b;
+  --pd-on-primary: #000000;
+  --pd-on-accent: #000000;
+  --pd-on-positive: #000000;
+  --pd-on-warning: #000000;
+  --pd-on-negative: #000000;
+  --pd-focus-ring: #ffd400;
+
+  --pd-row-urgente: #2a0008;
+  --pd-row-grave: #2a2300;
+  --pd-row-exitoso: #002a12;
+
+  --q-primary: #4e74e8;
+  --q-positive: #33d17a;
+  --q-warning: #ffd400;
+  --q-negative: #ff6b6b;
+  --q-info: #9cc3ff;
+}

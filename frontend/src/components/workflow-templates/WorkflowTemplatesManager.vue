@@ -5,12 +5,14 @@ import { useQuasar, type QTableColumn } from 'quasar';
 import { useWorkflowTemplatesStore } from '@stores/workflow-templates.store';
 
 import AuditDetailsMenu from '@components/shared/AuditDetailsMenu.vue';
+import StatusBadge from '@components/shared/StatusBadge.vue';
 import SafeDeleteModal from '@components/shared/SafeDeleteModal.vue';
 
 import WorkflowTemplateDialog from './WorkflowTemplateDialog.vue';
 
 import { NODE_TYPE_LABELS } from '@/types/pipeline';
 import { extractApiErrorMessage } from '@/utils/api-error';
+import { describeEnabled } from '@/utils/status-display';
 
 import type { WorkflowTemplateSummary } from '@/types/pipeline';
 
@@ -205,12 +207,7 @@ onMounted(loadTemplates);
            saltandose el temporizador que exige CU-10. -->
       <template #body-cell-status="cellProps">
         <q-td :props="cellProps">
-          <q-badge
-            class="pd-badge"
-            :class="cellProps.row.active ? 'pd-badge--active' : 'pd-badge--inactive'"
-          >
-            {{ cellProps.row.active ? 'Activo' : 'Inactivo' }}
-          </q-badge>
+          <status-badge :display="describeEnabled(cellProps.row.active)" />
           <q-tooltip>
             {{
               cellProps.row.active

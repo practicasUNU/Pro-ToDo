@@ -131,16 +131,16 @@ const cards = computed<KpiCard[]>(() => {
 
 .pd-kpi__label {
   margin: 0;
-  font-size: 12px;
+  font-size: 0.75rem;
   font-weight: 700;
-  letter-spacing: 0.4px;
+  letter-spacing: 0.025rem;
   text-transform: uppercase;
   color: var(--pd-text-secondary);
 }
 
 .pd-kpi__value {
   margin: 4px 0 0;
-  font-size: 24px;
+  font-size: 1.5rem;
   font-weight: 700;
   line-height: 1.2;
   color: var(--pd-text-primary);
@@ -153,7 +153,7 @@ const cards = computed<KpiCard[]>(() => {
 
 .pd-kpi__hint {
   margin: 4px 0 0;
-  font-size: 12px;
+  font-size: 0.75rem;
   color: var(--pd-text-secondary);
 }
 </style>

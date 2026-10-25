@@ -96,6 +96,6 @@ onBeforeUnmount(clearCountdown);
 
 .pd-countdown {
   color: var(--pd-negative);
-  font-size: 18px;
+  font-size: 1.125rem;
 }
 </style>

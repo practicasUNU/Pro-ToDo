@@ -7,6 +7,7 @@ import { usePricingStore } from '@stores/pricing.store';
 import { usePanelRefresh } from '@/composables/usePanelRefresh';
 
 import AuditDetailsMenu from '@components/shared/AuditDetailsMenu.vue';
+import StatusBadge from '@components/shared/StatusBadge.vue';
 import WarningModal from '@components/shared/WarningModal.vue';
 
 import PricingDialog from './PricingDialog.vue';
@@ -16,6 +17,7 @@ import { formatDateTime } from '@/utils/date-format';
 import { datePickerBounds, isFutureDate, toIsoRange } from '@/utils/date-range';
 import { formatUsd } from '@/utils/number-format';
 import { toTableSort } from '@/utils/table-sort';
+import { describeEnabled } from '@/utils/status-display';
 import { MAX_PRICING_SEARCH_LENGTH } from '@/types/pricing';
 import { PRICING_SORT_KEYS } from '@/types/sort';
 
@@ -395,12 +397,9 @@ onMounted(() => {
 
       <template #body-cell-active="cellProps">
         <q-td :props="cellProps">
-          <q-badge
-            class="pd-badge"
-            :class="cellProps.row.active ? 'pd-badge--active' : 'pd-badge--inactive'"
-          >
-            {{ cellProps.row.active ? 'Vigente' : 'Histórico' }}
-          </q-badge>
+          <status-badge
+            :display="describeEnabled(cellProps.row.active, { on: 'Vigente', off: 'Histórico' })"
+          />
         </q-td>
       </template>
 

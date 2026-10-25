@@ -3,9 +3,11 @@ import { computed, defineAsyncComponent, ref, watch } from 'vue';
 import { useQuasar } from 'quasar';
 
 import NodeSequenceBuilder from '@components/workflow-templates/NodeSequenceBuilder.vue';
+import StatusBadge from '@components/shared/StatusBadge.vue';
 import { useWorkflowTemplatesStore } from '@stores/workflow-templates.store';
 
 import { extractApiErrorMessage, extractApiIssues } from '@/utils/api-error';
+import { describeEnabled } from '@/utils/status-display';
 
 import type { SchemaIssue, WorkflowTemplateSummary } from '@/types/pipeline';
 import type { ErrorBranchAction } from '@/types/nodes/error-branch.types';
@@ -255,14 +257,7 @@ const onSubmit = async (): Promise<void> => {
             <!-- Estado SOLO informativo, como en `UserDialog.vue`: el estado se
                  conmuta unicamente desde la tabla, con su confirmacion. -->
             <div v-if="isEditing" class="row items-center q-gutter-sm">
-              <q-badge
-                class="pd-badge"
-                :class="
-                  templatesStore.activeDraft.active ? 'pd-badge--active' : 'pd-badge--inactive'
-                "
-              >
-                {{ templatesStore.activeDraft.active ? 'Activo' : 'Inactivo' }}
-              </q-badge>
+              <status-badge :display="describeEnabled(templatesStore.activeDraft.active)" />
               <span class="pd-subtitle">
                 El estado se cambia desde el catalogo, con la confirmacion correspondiente.
               </span>
@@ -449,7 +444,7 @@ const onSubmit = async (): Promise<void> => {
 
 .pd-syntax-error {
   color: var(--pd-negative);
-  font-size: 11.5px;
+  font-size: 0.7188rem;
 }
 
 .pd-issue-list {

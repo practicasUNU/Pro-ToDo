@@ -5,9 +5,14 @@ import { useQuasar } from 'quasar';
 
 import NodeInspectionPanel from '@components/canvas/NodeInspectionPanel.vue';
 import TopologyCanvas from '@components/canvas/TopologyCanvas.vue';
+import StatusBadge from '@components/shared/StatusBadge.vue';
 import { useCanvasStore } from '@stores/canvas.store';
+import { describeExecutionState } from '@/utils/execution-state-display';
+import { describeWorkflowStatus } from '@/utils/status-display';
 import { ExecutionState } from '@/types/execution';
 import { WorkflowStatus } from '@/types/pipeline';
+
+import type { StatusDisplay } from '@/utils/status-display';
 
 const route = useRoute();
 const router = useRouter();
@@ -46,19 +51,18 @@ const isResumeMode = computed<boolean>(() => route.query.resume === 'true' && ca
  * canvas, y la razon es la misma —el color nunca viaja solo—.
  */
 const stateBadge = computed<{
-  readonly color: string;
-  readonly label: string;
+  readonly display: StatusDisplay;
   readonly spinner: boolean;
 }>(() => {
   if (canvasStore.executionState === ExecutionState.EN_PROCESO) {
-    return { color: 'primary', label: 'En proceso', spinner: true };
+    return { display: describeExecutionState(ExecutionState.EN_PROCESO), spinner: true };
   }
 
   if (
     canvasStore.executionState === ExecutionState.PAUSADO ||
     canvasStore.workflow?.status === WorkflowStatus.PAUSADO
   ) {
-    return { color: 'warning', label: 'Pausado', spinner: false };
+    return { display: describeWorkflowStatus(WorkflowStatus.PAUSADO), spinner: false };
   }
 
   // Desenlace de la ejecucion que se acaba de ver correr. Va ANTES del estado
@@ -66,18 +70,20 @@ const stateBadge = computed<{
   // esta rama, un flujo que terminaba bien y se autodesactivaba saltaba de "En
   // ejecucion" a "Inactivo" sin decir nunca que habia salido bien.
   if (canvasStore.executionState === ExecutionState.EXITOSO) {
-    return { color: 'positive', label: 'Exitoso', spinner: false };
+    return { display: describeExecutionState(ExecutionState.EXITOSO), spinner: false };
   }
 
   if (canvasStore.workflow?.status === WorkflowStatus.ACTIVO) {
     return {
-      color: 'positive',
-      label: 'Activo (En espera de trigger)',
+      display: {
+        ...describeWorkflowStatus(WorkflowStatus.ACTIVO),
+        label: 'Activo (En espera de trigger)',
+      },
       spinner: false,
     };
   }
 
-  return { color: 'grey-6', label: 'Inactivo', spinner: false };
+  return { display: describeWorkflowStatus(WorkflowStatus.INACTIVO), spinner: false };
 });
 
 const loadCanvas = async (): Promise<void> => {
@@ -125,10 +131,10 @@ onBeforeUnmount(() => {
           </div>
         </div>
 
-        <q-badge :color="stateBadge.color" class="pd-badge" data-test="flow-state-badge">
-          <q-spinner-dots v-if="stateBadge.spinner" class="q-mr-xs" size="14px" />
-          {{ stateBadge.label }}
-        </q-badge>
+        <status-badge :display="stateBadge.display" data-test="flow-state-badge">
+          {{ stateBadge.display.label }}
+          <q-spinner-dots v-if="stateBadge.spinner" class="q-ml-xs" size="14px" />
+        </status-badge>
 
         <q-btn
           flat

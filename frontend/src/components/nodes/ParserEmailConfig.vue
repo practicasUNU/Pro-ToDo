@@ -439,7 +439,7 @@ const onRunSandboxTest = async (): Promise<void> => {
 
 .pd-readonly-value {
   color: var(--pd-text-secondary);
-  line-height: 40px;
+  line-height: 2.5rem;
 }
 
 .pd-info-banner,
@@ -461,8 +461,8 @@ const onRunSandboxTest = async (): Promise<void> => {
 
 .pd-metric {
   color: var(--pd-text-primary);
-  font-size: 18px;
-  line-height: 26px;
+  font-size: 1.125rem;
+  line-height: 1.625rem;
 }
 
 .pd-metric-badge--ok {

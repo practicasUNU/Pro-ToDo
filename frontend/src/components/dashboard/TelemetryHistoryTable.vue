@@ -174,7 +174,7 @@ const onRequest: QTableProps['onRequest'] = ({ pagination: requested }) => {
 <style scoped lang="scss">
 .pd-history__provider {
   display: block;
-  font-size: 11px;
+  font-size: 0.6875rem;
   color: var(--pd-text-secondary);
 }
 
@@ -183,7 +183,7 @@ const onRequest: QTableProps['onRequest'] = ({ pagination: requested }) => {
   align-items: center;
   gap: 2px;
   margin-left: 6px;
-  font-size: 11px;
+  font-size: 0.6875rem;
   font-weight: 700;
   color: var(--pd-text-secondary);
   border-bottom: 2px solid var(--pd-warning);

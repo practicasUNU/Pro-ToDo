@@ -4,11 +4,13 @@ import { useQuasar } from 'quasar';
 
 import { useAiPromptTemplatesStore } from '@stores/ai-prompt-templates.store';
 import AiPromptTemplateDialog from '@components/ai-prompt-templates/AiPromptTemplateDialog.vue';
+import StatusBadge from '@components/shared/StatusBadge.vue';
 import AuditDetailsMenu from '@components/shared/AuditDetailsMenu.vue';
 import SafeDeleteModal from '@components/shared/SafeDeleteModal.vue';
 
 import { extractApiErrorMessage } from '@/utils/api-error';
 import { formatDateTime } from '@/utils/date-format';
+import { describeEnabled } from '@/utils/status-display';
 
 import type { AiPromptTemplate, AiPromptTemplateDetail } from '@/types/ai-prompt-template';
 import type { QTableColumn } from 'quasar';
@@ -216,12 +218,7 @@ onMounted(loadPrompts);
 
       <template #body-cell-status="cellProps">
         <q-td :props="cellProps">
-          <q-badge
-            class="pd-badge"
-            :class="cellProps.row.active ? 'pd-badge--active' : 'pd-badge--inactive'"
-          >
-            {{ cellProps.row.active ? 'Activo' : 'Inactivo' }}
-          </q-badge>
+          <status-badge :display="describeEnabled(cellProps.row.active)" />
           <q-tooltip>
             {{
               cellProps.row.active
