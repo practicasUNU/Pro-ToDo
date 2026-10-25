@@ -15,6 +15,7 @@ export const AUDIT_ACTION_LABELS: Readonly<Record<AuditActionValue, string>> = {
   [AuditActionValue.LOGOUT]: 'Cierre de sesión',
   [AuditActionValue.ACTIVATE]: 'Activación',
   [AuditActionValue.DEACTIVATE]: 'Desactivación',
+  [AuditActionValue.RESUME]: 'Reanudación',
 };
 
 export const AUDIT_TABLE_LABELS: Readonly<Record<AuditTableValue, string>> = {
@@ -46,6 +47,9 @@ export const AUDIT_ACTION_BADGES: Readonly<Record<AuditActionValue, string>> = {
   [AuditActionValue.LOGOUT]: 'pd-badge--paused',
   [AuditActionValue.ACTIVATE]: 'pd-badge--active',
   [AuditActionValue.DEACTIVATE]: 'pd-badge--inactive',
+  // Mismo azul que una ejecucion en curso: reanudar es devolver el flujo a la
+  // marcha, no armarlo de cero (eso es `ACTIVATE`).
+  [AuditActionValue.RESUME]: 'pd-badge--running',
 };
 
 /** Opciones cerradas de un `q-select` (Poka-Yoke): `{ label, value }`. */

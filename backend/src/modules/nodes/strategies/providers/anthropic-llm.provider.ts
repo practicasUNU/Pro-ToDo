@@ -185,11 +185,13 @@ export class AnthropicLlmProvider implements ILlmProviderClient {
           // modo que aqui no se puede omitir: el nodo manda si lo declara y si
           // no queda el tope del repositorio.
           max_tokens: config?.maxTokens ?? ANTHROPIC_MAX_TOKENS,
-          // La temperatura si se omite cuando el nodo no la declara: el defecto
-          // lo publica Anthropic y cambia con el modelo.
-          ...(config?.temperature === undefined
-            ? {}
-            : { temperature: config.temperature }),
+          // `temperature` NO se envia nunca, aunque el nodo la declare. Los
+          // modelos Claude vigentes (Opus 5.5, Sonnet 5.5...) la rechazan con un
+          // 400 "temperature is deprecated for this model", y desde el
+          // 2026-10-21 la API la rechaza en todos los modelos. Se descarta aqui,
+          // en el unico punto que habla con Anthropic, y no en cada llamante:
+          // asi tambien la cubre el fallback del OCR (Gemini -> Claude), que
+          // hereda la temperatura configurada para Gemini.
           // La instruccion del operador y el contrato de formato viajan juntos
           // en `system`, con el contrato el ultimo para que sea lo mas reciente
           // que el modelo lee antes de responder.

@@ -216,6 +216,30 @@ describe('AuditInterceptor', () => {
     );
   });
 
+  it('1.2c-quinquies deberia registrar REANUDAR cuando un flujo PAUSADO vuelve a ACTIVO', async () => {
+    // 1. Arrange 📐: rearmar un flujo que el motor detuvo no es armarlo de
+    //    cero; es aceptar que el fallo quedo resuelto (CU-09).
+    const { interceptor, snapshots, auditLogger } = buildInterceptor();
+    snapshots.load
+      .mockResolvedValueOnce({ name: 'Notiweb', status: 'PAUSADO' })
+      .mockResolvedValueOnce({ name: 'Notiweb', status: 'ACTIVO' });
+    const context = buildContext(
+      buildHandler({
+        table: AuditTable.WORKFLOWS,
+        action: AuditActionType.UPDATE,
+      }),
+      buildRequest(),
+    );
+
+    // 2. Act ⚙️
+    await run(interceptor, context, { handle: () => of({ id: TARGET_ID }) });
+
+    // 3. Assert 🎯
+    expect(auditLogger.record).toHaveBeenCalledWith(
+      expect.objectContaining({ action: AuditActionType.RESUME }),
+    );
+  });
+
   it('1.2c-quater deberia seguir siendo ACTUALIZAR si ademas cambio el grafo', async () => {
     // 1. Arrange 📐: `status` tiene que ser la UNICA clave cambiada. Guardar el
     //    pipeline y armarlo a la vez es una modificacion con todas las letras:

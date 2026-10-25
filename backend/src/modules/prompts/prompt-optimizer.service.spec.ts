@@ -470,5 +470,45 @@ describe('PromptOptimizerService', () => {
         expect.objectContaining({ aiProvider: LlmProvider.ANTHROPIC }),
       );
     });
+
+    it('3.6 deberia OMITIR la temperatura cuando el destino es Anthropic', async () => {
+      // 1. Arrange 📐: Claude responde 400 "temperature is deprecated for this
+      //    model"; era el fallo que tumbaba "Mejorar Prompt con IA".
+      const { service, generateCompletion } = buildFixture();
+
+      // 2. Act ⚙️
+      await service.optimize(
+        { draftPrompt: DRAFT, targetFormat: 'html', model: 'claude-opus-5-5' },
+        { ...EDITOR, role: UserRole.ADMIN },
+      );
+
+      // 3. Assert 🎯
+      const [, , options] = generateCompletion.mock.calls[0] as [
+        string,
+        string,
+        Record<string, unknown>,
+      ];
+      expect(options).not.toHaveProperty('temperature');
+    });
+
+    it('3.7 deberia conservar la temperatura con Gemini', async () => {
+      // 1. Arrange 📐: Gemini si la acepta; perderla volveria creativa la
+      //    reescritura sin que nadie lo pidiera.
+      const { service, generateCompletion } = buildFixture();
+
+      // 2. Act ⚙️
+      await service.optimize(
+        { draftPrompt: DRAFT, targetFormat: 'text' },
+        EDITOR,
+      );
+
+      // 3. Assert 🎯
+      const [, , options] = generateCompletion.mock.calls[0] as [
+        string,
+        string,
+        Record<string, unknown>,
+      ];
+      expect(options).toMatchObject({ temperature: 0.3 });
+    });
   });
 });

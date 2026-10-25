@@ -92,6 +92,11 @@ const readActivityFlag = (snapshot: AuditSnapshot | null): boolean | null => {
  * `PAUSADO` no llega por aqui —el DTO lo rechaza y solo lo escribe el motor—,
  * pero si llegase cuenta como desactivacion: lo unico que afirma la etiqueta es
  * que el flujo dejo de estar armado.
+ *
+ * El camino inverso SI llega: un PATCH que lleva un flujo de `PAUSADO` a
+ * `ACTIVO` no lo arma de cero, lo REANUDA tras un fallo. Se registra como
+ * `REANUDAR`, la misma accion que deja `POST /executions/:id/resume`, para que
+ * un auditor encuentre todas las reanudaciones con un solo filtro.
  */
 const readWorkflowStatusAction = (
   options: AuditActionOptions,
@@ -112,9 +117,13 @@ const readWorkflowStatusAction = (
     return null;
   }
 
-  return next.status === WorkflowStatus.ACTIVO
-    ? AuditActionType.ACTIVATE
-    : AuditActionType.DEACTIVATE;
+  if (next.status !== WorkflowStatus.ACTIVO) {
+    return AuditActionType.DEACTIVATE;
+  }
+
+  return previous.status === WorkflowStatus.PAUSADO
+    ? AuditActionType.RESUME
+    : AuditActionType.ACTIVATE;
 };
 
 /**

@@ -296,6 +296,9 @@ describe('AnthropicLlmProvider · cliente de Claude sobre la Messages API', () =
       const system = sentBody(http).system as string;
       expect(system).toContain('"filled_markup"');
       expect(system).toContain('Respeta estrictamente');
+      // Los dos `<tbody>` de Verificacion de Titulos: el modelo no puede
+      // fusionarlos ni descartar el vacio que el escudo audita despues.
+      expect(system).toContain('<tbody class="panel-titulos-body">');
     });
 
     it('1.6 deberia exigir el JSON por esquema en vez de rescatarlo con regex', async () => {
@@ -314,9 +317,10 @@ describe('AnthropicLlmProvider · cliente de Claude sobre la Messages API', () =
   });
 
   describe('6. Presupuesto de la llamada', () => {
-    it('6.1 deberia enviar la temperatura cuando el nodo la declara', async () => {
-      // 1. Arrange 📐: el nodo de OCR fija 0.1 para transcribir con fidelidad.
-      //    Hasta PROT-22 ese valor no salia de la configuracion.
+    it('6.1 deberia OMITIR la temperatura aunque el nodo la declare', async () => {
+      // 1. Arrange 📐: el nodo de OCR fija 0.1, pero los modelos Claude
+      //    vigentes responden 400 "temperature is deprecated for this model".
+      //    Enviarla tumbaba el optimizador de prompts y el fallback del OCR.
       const http = buildHttp();
 
       // 2. Act ⚙️
@@ -329,7 +333,7 @@ describe('AnthropicLlmProvider · cliente de Claude sobre la Messages API', () =
       });
 
       // 3. Assert 🎯
-      expect(sentBody(http).temperature).toBe(0.1);
+      expect(sentBody(http)).not.toHaveProperty('temperature');
       expect(sentBody(http).max_tokens).toBe(2_048);
     });
 

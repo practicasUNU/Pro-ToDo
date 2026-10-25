@@ -345,6 +345,11 @@ export class LlmExtractorStrategy implements INodeStrategy {
     // `promptCode` y `templatePromptId`—, que es mas de lo que alcanza
     // `getRequiredNamespaces`: aquel es puro y sincrono por contrato y solo ve
     // el prompt en linea, mientras que aqui el texto guardado ya esta resuelto.
+    //
+    // Con plantilla, el contrato de formato que anade el proveedor
+    // (`buildResponseContractInstruction`) obliga al modelo a conservar cada
+    // `<tbody>` —en particular `<tbody class="panel-titulos-body">`—, que es el
+    // selector que despues audita el ESCUDO_POST_IA.
     const expectsFilledMarkup = BASE_TEMPLATE_MARKER_PATTERN.test(
       promptResolution.prompt,
     );

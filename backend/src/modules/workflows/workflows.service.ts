@@ -21,6 +21,9 @@ import { FsmExecutionQueryService } from '@core/fsm/services/fsm-execution-query
 import { WorkflowStatus } from '@modules/workflows/enums/workflow-status.enum';
 import { PipelineValidatorService } from '@core/fsm/services/pipeline-validator.service';
 import { buildOrderedTopology } from '@core/fsm/utils/pipeline-topology.util';
+import { AuditTable } from '@modules/audit/audit-tables';
+import { AuditActionType } from '@modules/audit/enums/audit-action.enum';
+import { AuditLoggerService } from '@modules/audit/services/audit-logger.service';
 import { ADMIN_ONLY_MODELS } from '@modules/nodes/services/llm-provider-catalog.service';
 import { UserRole } from '@modules/users/enums/user-role.enum';
 import { WorkflowTemplatesService } from '@modules/workflow-templates/workflow-templates.service';
@@ -104,6 +107,7 @@ export class WorkflowsService
     private readonly flowPollingCoordinator: FlowPollingCoordinator,
     private readonly crudEvents: CrudEventsCoordinator,
     private readonly workflowStatusCoordinator: WorkflowStatusCoordinator,
+    private readonly auditLogger: AuditLoggerService,
   ) {}
 
   /**
@@ -597,38 +601,80 @@ export class WorkflowsService
   }
 
   /**
-   * Devuelve a ACTIVO un flujo que el motor habia pausado (CU-09).
+   * Devuelve a ACTIVO un flujo que el motor habia pausado (CU-09) y deja
+   * constancia de la reanudacion en `audit_eventos`.
    *
    * Contrapartida exacta de `pauseFlow`, y con la misma guarda invertida: SOLO
-   * actua sobre un PAUSADO. Un flujo INACTIVO se queda como esta, porque
+   * cambia el estado de un PAUSADO. Un flujo INACTIVO se queda como esta, porque
    * reanudar una ejecucion no exige el flujo armado —esa asimetria es
    * deliberada y la documenta `ExecutionsService.resumeExecution`— y activarlo
    * aqui habilitaria los disparadores de un flujo que alguien retiro a mano.
    *
+   * El evento `REANUDAR` se registra SIEMPRE, este o no el flujo en pausa: lo
+   * que se audita es la intervencion humana sobre una ejecucion detenida, no el
+   * cambio de estado. Se escribe aqui, explicitamente, porque la reanudacion no
+   * pasa por ningun endpoint con `@AuditAction` —`POST /executions/:id/resume`
+   * no muta una maestra, y ademas llega tambien por correo entrante—, mismo
+   * criterio que la desactivacion de tarifas en `PricingService`.
+   *
    * `refreshPolling` y no `stopPollingForFlow`: hay que REINSCRIBIR el
    * temporizador que la pausa borro. Sin esto el operador reanuda y el flujo no
    * vuelve a sondear hasta el siguiente ciclo de reconciliacion.
+   *
+   * @param workflowId Flujo de la ejecucion reanudada.
+   * @param resume Quien reanuda, que ejecucion y desde que IP (`null` si llega
+   *        por correo entrante, donde no hay peticion HTTP).
    */
-  public async reactivateAfterResume(workflowId: string): Promise<void> {
+  public async reactivateAfterResume(
+    workflowId: string,
+    resume: {
+      readonly actorId: string;
+      readonly executionId: string;
+      readonly sourceIp: string | null;
+    },
+  ): Promise<void> {
     const workflow = await this.workflowRepository.findOne({
       where: { id: workflowId },
     });
 
-    if (workflow === null || workflow.status !== WorkflowStatus.PAUSADO) {
+    if (workflow === null) {
       return;
     }
 
-    workflow.status = WorkflowStatus.ACTIVO;
+    const previousStatus = workflow.status;
+    const reactivates = previousStatus === WorkflowStatus.PAUSADO;
 
-    const saved = await this.workflowRepository.save(workflow);
+    if (reactivates) {
+      workflow.status = WorkflowStatus.ACTIVO;
 
-    await this.flowPollingCoordinator.refreshPolling();
+      const saved = await this.workflowRepository.save(
+        stampUpdated(workflow, resume.actorId),
+      );
 
-    this.publishMutation('UPDATED', await this.buildSummary(saved));
+      await this.flowPollingCoordinator.refreshPolling();
 
-    this.logger.log(
-      `Flujo "${saved.name}" (${saved.id}) vuelve a ACTIVO al reanudarse su ejecucion detenida.`,
-    );
+      this.publishMutation('UPDATED', await this.buildSummary(saved));
+
+      this.logger.log(
+        `Flujo "${saved.name}" (${saved.id}) vuelve a ACTIVO al reanudarse su ejecucion detenida.`,
+      );
+    }
+
+    // Fotografias MINIMAS y no la fila entera: el pipeline no cambia al
+    // reanudar, y volcarlo dos veces enterraria el unico dato que importa (el
+    // estado) entre kilobytes de esquema identico.
+    await this.auditLogger.record({
+      userId: resume.actorId,
+      action: AuditActionType.RESUME,
+      affectedTable: AuditTable.WORKFLOWS,
+      recordId: workflowId,
+      previousData: { status: previousStatus },
+      newData: {
+        status: reactivates ? WorkflowStatus.ACTIVO : previousStatus,
+        executionId: resume.executionId,
+      },
+      sourceIp: resume.sourceIp,
+    });
   }
 
   /**

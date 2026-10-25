@@ -4645,3 +4645,46 @@ Ademas, dejar la base de desarrollo solo con los flujos de referencia.
       DESARROLLO, con IMAP, reanudacion por correo y cron encendidos. Ahora estan aisladas como el resto
 - [x] `scripts/purge-test-data.sql`: en seco por defecto, guarda de nombres y `pg_dump` documentado
 - [ ] Pendiente de confirmacion del usuario: ejecutar la purga con `-v confirmar=yes`
+
+---
+
+## Estabilizacion · reanudacion auditada, `temperature` y dos `<tbody>`
+
+### Problema
+
+Tres defectos encontrados en las pruebas a mala leche:
+
+1. Reanudar una ejecucion detenida (CU-09) no dejaba fila en `audit_eventos`.
+2. "Mejorar Prompt con IA" recibia un 400 de Anthropic ("temperature is deprecated for this model").
+3. La plantilla de Verificacion de Titulos lleva dos `<tbody>`, y el escudo post-IA la auditaba mal.
+
+### Contratos nuevos
+
+```typescript
+// audit/enums/audit-action.enum.ts (CHECK ampliado en la migracion 053)
+export enum AuditActionType { /* ... */ RESUME = 'REANUDAR' }
+
+// workflows/workflows.service.ts
+reactivateAfterResume(
+  workflowId: string,
+  resume: { actorId: string; executionId: string; sourceIp: string | null },
+): Promise<void>;
+```
+
+### Diagrama de inyeccion de dependencias
+
+```
+ExecutionsController --(@Req ip, @CurrentUser)--> ExecutionsService.resumeExecution
+  --> WorkflowsService.reactivateAfterResume --> AuditLoggerService.record(REANUDAR)
+WorkflowsModule --imports--> AuditModule (hoja del grafo, sin ciclos)
+```
+
+### Estado de las tareas
+
+- [x] `REANUDAR` en el enum, las etiquetas del informe y el frontend (`AuditActionValue`, badge `running`)
+- [x] `AuditInterceptor`: un PATCH `PAUSADO -> ACTIVO` se registra como `REANUDAR`, no como `ACTIVAR`
+- [x] `reactivateAfterResume` registra `REANUDAR` siempre (con o sin pausa) y sella `updatedBy`
+- [x] `AnthropicLlmProvider` no envia nunca `temperature`; el optimizador solo la pasa a Gemini
+- [x] `buildResponseContractInstruction`: regla explicita de conservar `<tbody class="panel-titulos-body">`
+- [x] `auditFilledSlots`: evaluacion por elemento; un `<tbody>` exige al menos una fila con contenido
+- [ ] Pendiente — aplicar 053 y 054: `cd backend && npm run db:migrate`

@@ -12,6 +12,7 @@ export const AUDIT_ACTION_LABELS: Readonly<Record<AuditActionType, string>> = {
   [AuditActionType.LOGOUT]: 'Cierre de sesión',
   [AuditActionType.ACTIVATE]: 'Activación',
   [AuditActionType.DEACTIVATE]: 'Desactivación',
+  [AuditActionType.RESUME]: 'Reanudación',
 };
 
 /** Etiquetas en castellano de las tablas auditadas. */

@@ -8878,3 +8878,40 @@ Los nombres se repiten (catorce "[E2E] Pipeline dummy") y tienen erratas ("TODOS
 que un `ILIKE` amplio conservaria de mas o borraria de menos. El script conserva cinco ids
 concretos, comprueba que existen con el nombre esperado (si no, aborta) y termina en `ROLLBACK`
 salvo que se pase `-v confirmar=yes`.
+
+---
+
+## Estabilizacion: reanudacion auditada, `temperature` y dos `<tbody>`
+
+### Por que `REANUDAR` se registra a mano y no con `@AuditAction`
+
+`POST /executions/:id/resume` no modifica una maestra: cambia una ejecucion y, de rebote, el
+`status` del flujo. Ademas, la misma reanudacion llega por correo entrante, donde no hay peticion
+HTTP. El unico punto por el que pasan los dos caminos es `WorkflowsService.reactivateAfterResume`,
+y ahi se escribe el evento, igual que `PricingService` registra la desactivacion de la tarifa
+anterior. Se registra **siempre**, este o no el flujo en pausa: lo que se audita es la intervencion
+humana sobre una ejecucion detenida. Un flujo INACTIVO se reanuda sin rearmarse, y tambien deja traza.
+
+El interceptor gana la regla simetrica. Un PATCH que lleva un flujo de `PAUSADO` a `ACTIVO` no lo
+arma de cero: lo reanuda. Asi, un auditor encuentra todas las reanudaciones con un solo filtro.
+
+### Por que `temperature` se descarta en el cliente de Anthropic
+
+Los modelos Claude vigentes la rechazan con un 400, y desde el 2026-10-21 la API la rechaza en todos.
+Quitarla solo en el optimizador dejaba vivo el otro camino: el fallback del OCR (Gemini -> Claude)
+hereda la temperatura configurada para Gemini. El descarte vive en el unico punto que habla con
+Anthropic, y el optimizador la omite ademas de forma explicita para que el contrato se lea en su sitio.
+
+### Por que `auditFilledSlots` evalua elemento a elemento
+
+`Cheerio.text()` concatena el texto de todas las coincidencias. En la tabla de titulos, con
+`.panel-titulos-body` vacio y el `<tbody>` de evaluadores estatico, un selector amplio como
+`table.tableform tbody` pasaba la auditoria con el panel en blanco. Ahora cada coincidencia se juzga
+por separado, y una seccion de tabla solo cuenta como rellena si tiene al menos un `<tr>` con texto o
+medios. El `<tbody>` estatico no casa con `.panel-titulos-body`, asi que nunca se juzga: varias
+secciones en la misma tabla no producen falsos positivos.
+
+La 054 anade la regla al texto del prompt filtrando por **contenido** y no por `codigo`.
+`prompt-migrations.helper.ts` recompone el prompt sembrado a partir de las migraciones que lo nombran,
+y solo entiende asignaciones completas y `REPLACE`: un anexo que lo nombrase se leeria como una
+reescritura entera.

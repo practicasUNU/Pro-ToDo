@@ -29,4 +29,11 @@ export enum AuditActionType {
    */
   ACTIVATE = 'ACTIVAR',
   DEACTIVATE = 'DESACTIVAR',
+  /**
+   * Un flujo PAUSADO por un fallo vuelve a quedar armado (CU-09), ya sea por
+   * `POST /executions/:id/resume` o por un PATCH manual de `status`. Se separa
+   * de `ACTIVATE` porque no es armar un flujo nuevo: es aceptar que el fallo
+   * que lo detuvo quedo resuelto, y el auditor necesita saber QUIEN lo acepto.
+   */
+  RESUME = 'REANUDAR',
 }

@@ -360,6 +360,26 @@ describe('ExecutionsService (consulta y reintento manual CU-09)', () => {
       );
     });
 
+    it('2.2b deberia reactivar el flujo dejando constancia de quien reanuda', async () => {
+      // 1. Arrange 📐
+      const { service, workflows } = buildHarness();
+
+      // 2. Act ⚙️
+      await service.resumeExecution(EXECUTION_ID, {}, CURRENT_USER, {
+        sourceIp: '10.0.0.7',
+      });
+
+      // 3. Assert 🎯: el actor y la IP viajan al evento `REANUDAR`.
+      expect(workflows.reactivateAfterResume).toHaveBeenCalledWith(
+        expect.any(String),
+        {
+          actorId: CURRENT_USER.id,
+          executionId: EXECUTION_ID,
+          sourceIp: '10.0.0.7',
+        },
+      );
+    });
+
     it('2.3 deberia trasladar el parche de contexto y el resetRetries explicito', async () => {
       // 1. Arrange
       const { service, engine } = buildHarness();

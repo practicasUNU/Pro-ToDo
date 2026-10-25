@@ -40,6 +40,9 @@ describe('audit-display', () => {
     expect(labelAuditAction('CAMBIO_ROL')).toBe('Cambio de rol');
     expect(labelAuditAction('CIERRE_SESION')).toBe('Cierre de sesión');
     expect(labelAuditAction('DESACTIVAR')).toBe('Desactivación');
+    // La reanudacion (CU-09) tiene etiqueta y badge propios: no es activar.
+    expect(labelAuditAction('REANUDAR')).toBe('Reanudación');
+    expect(AUDIT_ACTION_BADGES[AuditActionValue.RESUME]).toBe('pd-badge--running');
     // "Creación" y "Eliminación", NO "Alta" y "Baja": el vocabulario de la
     // pantalla sigue al del enum de la base (`CREAR` / `ELIMINAR`), y las
     // etiquetas del informe en CSV y PDF dicen exactamente lo mismo.

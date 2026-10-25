@@ -1039,5 +1039,91 @@ describe('TemplateRendererService', () => {
       // 3. Assert
       expect(audit.empty).toEqual([]);
     });
+
+    /**
+     * Plantilla de Verificacion de Titulos (migraciones 033/034): DOS `<tbody>`
+     * en la misma tabla. `.panel-titulos-body` llega vacio para que la IA
+     * emita una fila por titulacion; el segundo es estatico (evaluadores).
+     */
+    describe('tablas con varios <tbody>', () => {
+      const STATIC_TBODY =
+        '<tbody><tr><th>Evaluador/Institución</th><th class="eval-presidente"></th></tr></tbody>';
+      const titlesPanel = (rows: string): string =>
+        `<table class="tableform"><tbody class="panel-titulos-body">${rows}</tbody>${STATIC_TBODY}</table>`;
+      const TITLE_ROW =
+        '<tr><th>2501234</th><th colspan="2">Grado en Ingeniería Informática</th></tr>';
+
+      it('deberia reportar vacio el panel de titulos sin filas aunque el tbody estatico tenga texto', () => {
+        // 1. Arrange 📐: antes el texto del tbody estatico tapaba el hueco.
+        const html = titlesPanel('');
+
+        // 2. Act ⚙️
+        const audit = renderer.auditFilledSlots(html, [
+          'tbody.panel-titulos-body',
+        ]);
+
+        // 3. Assert 🎯
+        expect(audit.empty).toEqual(['tbody.panel-titulos-body']);
+        expect(audit.missing).toEqual([]);
+      });
+
+      it('deberia dar por bueno el panel con filas sin juzgar el tbody estatico', () => {
+        // 1. Arrange 📐: el estatico tiene una celda vacia; no casa con el
+        //    selector, asi que no puede provocar un falso positivo.
+        const html = titlesPanel(TITLE_ROW);
+
+        // 2. Act ⚙️
+        const audit = renderer.auditFilledSlots(html, [
+          'table.tableform',
+          'tbody.panel-titulos-body',
+        ]);
+
+        // 3. Assert 🎯
+        expect(audit).toEqual({ missing: [], invalid: [], empty: [] });
+      });
+
+      it('deberia exigir rellenas TODAS las coincidencias de un selector amplio', () => {
+        // 1. Arrange 📐: `table.tableform tbody` casa con los dos tbody; el
+        //    concatenado de texto lo daba por bueno con el panel en blanco.
+        const html = titlesPanel('');
+
+        // 2. Act ⚙️
+        const audit = renderer.auditFilledSlots(html, [
+          'table.tableform tbody',
+        ]);
+
+        // 3. Assert 🎯
+        expect(audit.empty).toEqual(['table.tableform tbody']);
+      });
+
+      it('deberia tratar como vacio un tbody con filas sin contenido', () => {
+        // 1. Arrange 📐: un `<tr></tr>` que el modelo deja como hueco
+        //    reservado no es una fila publicable.
+        const html = titlesPanel('<tr></tr><tr><th> </th></tr>');
+
+        // 2. Act ⚙️
+        const audit = renderer.auditFilledSlots(html, [
+          'tbody.panel-titulos-body',
+        ]);
+
+        // 3. Assert 🎯
+        expect(audit.empty).toEqual(['tbody.panel-titulos-body']);
+      });
+
+      it('deberia contar como rellena una fila cuyo unico contenido es una imagen', () => {
+        // 1. Arrange 📐: la tolerancia multimedia se aplica fila a fila.
+        const html = titlesPanel(
+          '<tr><td><img src="/sello.png" alt="Sello"></td></tr>',
+        );
+
+        // 2. Act ⚙️
+        const audit = renderer.auditFilledSlots(html, [
+          'tbody.panel-titulos-body',
+        ]);
+
+        // 3. Assert 🎯
+        expect(audit.empty).toEqual([]);
+      });
+    });
   });
 });

@@ -2,6 +2,7 @@ import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 
 import { FsmModule } from '@core/fsm/fsm.module';
+import { AuditModule } from '@modules/audit/audit.module';
 import { LogsModule } from '@modules/logs/logs.module';
 import { NodeCatalogEntry } from '@modules/nodes/entities/node-catalog.entity';
 import { UsersModule } from '@modules/users/users.module';
@@ -49,6 +50,10 @@ import { WorkflowsService } from './workflows.service';
     // Por `InboundEmailResumeService`: comprueba contra `usuarios` quien firma
     // la orden que llega por correo.
     UsersModule,
+    // Por `AuditLoggerService`: la reanudacion (CU-09) no pasa por un endpoint
+    // con `@AuditAction` y se registra a mano como `REANUDAR`. `AuditModule`
+    // es hoja del grafo, asi que no abre ningun ciclo.
+    AuditModule,
   ],
   controllers: [WorkflowsController, ExecutionsController],
   providers: [WorkflowsService, ExecutionsService, InboundEmailResumeService],

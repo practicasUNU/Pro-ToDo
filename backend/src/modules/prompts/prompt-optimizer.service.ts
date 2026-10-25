@@ -129,7 +129,13 @@ const adviceFor = (error: unknown): string => {
   return entry === undefined ? '' : ` ${entry.advice}`;
 };
 
-/** Poca creatividad: se busca precision, no variedad. */
+/**
+ * Poca creatividad: se busca precision, no variedad.
+ *
+ * Solo se envia a proveedores que la aceptan: Anthropic responde 400
+ * ("temperature is deprecated for this model") y su cliente la descarta de
+ * todos modos; omitirla aqui deja explicito que con Claude no hay temperatura.
+ */
 const OPTIMIZER_TEMPERATURE = 0.3;
 
 /** Proveedor y modelo con los que se atendera la peticion. */
@@ -175,7 +181,9 @@ export class PromptOptimizerService {
           model: target.model,
           timeoutMs: OPTIMIZER_TIMEOUT_MS,
           maxRetries: OPTIMIZER_MAX_RETRIES,
-          temperature: OPTIMIZER_TEMPERATURE,
+          ...(target.provider === LlmProvider.ANTHROPIC
+            ? {}
+            : { temperature: OPTIMIZER_TEMPERATURE }),
           maxTokens: OPTIMIZER_MAX_TOKENS,
           mode: 'text',
         },

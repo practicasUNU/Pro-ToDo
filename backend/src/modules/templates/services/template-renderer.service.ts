@@ -9,6 +9,9 @@ import {
   resolvePath,
 } from '@core/fsm/context/state-payload.context';
 
+import type { Cheerio, CheerioAPI } from 'cheerio';
+import type { AnyNode } from 'domhandler';
+
 import type { TemplateViolation } from '../dto/template-violation.dto';
 
 /** Namespaces acumulados contra los que se compila una plantilla. */
@@ -241,6 +244,50 @@ const EVENT_ATTRIBUTE_PATTERN = /^on[a-z]+$/i;
  * sobrevive de un `<picture>` es su `<img>` de respaldo, que si esta en la lista.
  */
 const MEDIA_CONTENT_SELECTOR = 'img, table, hr, figure';
+
+/**
+ * Secciones de tabla cuyo contenido son FILAS, no texto suelto.
+ *
+ * Una seccion de tabla solo cuenta como rellena si tiene al menos un `<tr>`
+ * con algo dentro. El texto que flota entre etiquetas de un `<tbody>` (saltos
+ * de linea, un comentario mal cerrado) no es una fila publicable, y un
+ * `<tr></tr>` vacio que deja el modelo como "hueco reservado" tampoco.
+ */
+const TABLE_SECTION_TAGS: ReadonlySet<string> = new Set([
+  'tbody',
+  'thead',
+  'tfoot',
+]);
+
+/** Texto no vacio o algun medio, dentro del elemento o siendo el elemento. */
+const hasTextOrMedia = (node: Cheerio<AnyNode>): boolean =>
+  node.text().trim().length > 0 ||
+  node.is(MEDIA_CONTENT_SELECTOR) ||
+  node.find(MEDIA_CONTENT_SELECTOR).length > 0;
+
+/**
+ * Decide si UN elemento que casa con un selector exigido viene relleno.
+ *
+ * Se evalua elemento a elemento, nunca la coleccion entera: `Cheerio.text()`
+ * concatena el texto de TODAS las coincidencias, y con la plantilla de
+ * Verificacion de Titulos —dos `<tbody>` en la misma tabla, el
+ * `.panel-titulos-body` vacio y el de evaluadores estatico— un selector como
+ * `table.tableform tbody` pasaba la auditoria con el panel en blanco, porque
+ * el texto del tbody estatico tapaba el hueco.
+ */
+const hasSlotContent = ($: CheerioAPI, element: AnyNode): boolean => {
+  const node = $(element);
+  const tagName = 'tagName' in element ? element.tagName.toLowerCase() : '';
+
+  if (!TABLE_SECTION_TAGS.has(tagName)) {
+    return hasTextOrMedia(node);
+  }
+
+  return node
+    .children('tr')
+    .toArray()
+    .some((row) => hasTextOrMedia($(row)));
+};
 
 /**
  * Marcador de interpolacion del motor como valor COMPLETO de un atributo.
@@ -599,16 +646,21 @@ export class TemplateRendererService {
           continue;
         }
 
-        // `is` ademas de `find`: la ranura puede SER el medio (un selector
-        // `img.portada`) y no solo contenerlo. Con `find` a secas, una imagen
-        // apuntada directamente se reportaria como hueco vacio, porque un `<img>`
-        // no tiene texto ni descendientes.
-        const hasContent =
-          matched.text().trim().length > 0 ||
-          matched.is(MEDIA_CONTENT_SELECTOR) ||
-          matched.find(MEDIA_CONTENT_SELECTOR).length > 0;
+        // `is` ademas de `find` (en `hasTextOrMedia`): la ranura puede SER el
+        // medio (un selector `img.portada`) y no solo contenerlo. Con `find` a
+        // secas, una imagen apuntada directamente se reportaria como hueco
+        // vacio, porque un `<img>` no tiene texto ni descendientes.
+        //
+        // TODAS las coincidencias deben venir rellenas: basta una vacia para
+        // reportar el selector. Los elementos que NO casan con el selector —el
+        // `<tbody>` estatico junto a `.panel-titulos-body`— no se juzgan nunca,
+        // de modo que varias secciones en la misma tabla no producen falsos
+        // positivos.
+        const everyFilled = matched
+          .toArray()
+          .every((element) => hasSlotContent($, element));
 
-        if (!hasContent) {
+        if (!everyFilled) {
           empty.push(selector);
         }
       } catch {

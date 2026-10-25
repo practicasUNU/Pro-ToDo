@@ -9,6 +9,7 @@ import {
   ParseUUIDPipe,
   Post,
   Query,
+  Req,
   UseGuards,
 } from '@nestjs/common';
 import {
@@ -26,6 +27,7 @@ import {
 
 import { CurrentUser } from '@common/decorators/current-user.decorator';
 import { Roles } from '@common/decorators/roles.decorator';
+import { extractClientIp } from '@common/utils/client-ip.util';
 import { RolesGuard } from '@common/guards/roles.guard';
 import { toIssueContractException } from '@core/fsm/utils/schema-issue-contract.util';
 import { JwtAuthGuard } from '@modules/auth/guards/jwt-auth.guard';
@@ -39,6 +41,7 @@ import { ResumeExecutionDto } from './dto/resume-execution.dto';
 import { WorkflowExecutionResponseDto } from './dto/workflow-execution-response.dto';
 import { ExecutionsService } from './executions.service';
 
+import type { Request } from 'express';
 import type { AuthenticatedUser } from '@modules/auth/interfaces/jwt-payload.interface';
 
 /**
@@ -147,6 +150,9 @@ export class ExecutionsController {
     // una reanudacion es una intervencion manual sobre datos reales, y la
     // traza de operacion no debe ser anonima.
     @CurrentUser() currentUser: AuthenticatedUser,
+    // La IP va al evento `REANUDAR` de `audit_eventos`, igual que la que
+    // recoge `AuditInterceptor` en las mutaciones decoradas.
+    @Req() request: Request,
   ): Promise<WorkflowExecutionResponseDto> {
     try {
       // `await` dentro del `try`, y no un `return` de la promesa: sin el, el
@@ -159,6 +165,7 @@ export class ExecutionsController {
         id,
         resumeExecutionDto,
         currentUser,
+        { sourceIp: extractClientIp(request) },
       );
     } catch (error: unknown) {
       throw toIssueContractException(error);

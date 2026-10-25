@@ -168,7 +168,11 @@ export class ExecutionsService {
     executionId: string,
     resumeExecutionDto: ResumeExecutionDto,
     user: AuthenticatedUser,
-    options: { readonly isEmailResume?: boolean } = {},
+    options: {
+      readonly isEmailResume?: boolean;
+      /** IP de la peticion HTTP; ausente cuando la orden llega por correo. */
+      readonly sourceIp?: string | null;
+    } = {},
   ): Promise<WorkflowExecutionResponseDto> {
     const execution = await this.requireExecution(executionId);
 
@@ -291,7 +295,11 @@ export class ExecutionsService {
     // exige el flujo armado —asi lo declara el TSDoc de este metodo— y
     // activarlo aqui habilitaria sus disparadores sin que nadie lo pidiera,
     // justo en el flujo que alguien habia retirado a mano.
-    await this.workflowsService.reactivateAfterResume(workflow.id);
+    await this.workflowsService.reactivateAfterResume(workflow.id, {
+      actorId: user.id,
+      executionId,
+      sourceIp: options.sourceIp ?? null,
+    });
 
     this.logger.log(
       `Reanudacion manual (CU-09) del flujo "${workflow.name}" (${workflow.id}) desde el nodo "${resumeCursor}" | ejecucion=${executionId} | usuario=${user.email} (${user.id})${options.isEmailResume === true ? ' | via correo entrante' : ''}`,

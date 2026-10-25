@@ -8,6 +8,8 @@ import { UserRole } from '@modules/users/enums/user-role.enum';
 import { ExecutionState } from '@core/fsm/types/fsm.enums';
 import { NodeType } from '@core/fsm/types/pipeline-schema.types';
 
+import { AuditTable } from '@modules/audit/audit-tables';
+import { AuditActionType } from '@modules/audit/enums/audit-action.enum';
 import { WorkflowsService } from './workflows.service';
 
 import { WorkflowStatusCoordinator } from '@common/services/workflow-status.coordinator';
@@ -21,6 +23,7 @@ import type { CreateWorkflowDto } from './dto/create-workflow.dto';
 
 import type { PipelineSchemaDto } from '@core/fsm/dto/pipeline-schema.dto';
 import type { FsmExecution } from '@core/fsm/entities/fsm-execution.entity';
+import type { AuditLoggerService } from '@modules/audit/services/audit-logger.service';
 import type { CrudEventsCoordinator } from '@common/services/crud-events.coordinator';
 import type { FlowPollingCoordinator } from '@common/services/flow-polling.coordinator';
 import type { FsmEngineService } from '@core/fsm/services/fsm-engine.service';
@@ -129,6 +132,13 @@ interface CoordinatorMock {
 }
 
 /** Dobles del caso feliz; cada prueba sobrescribe solo lo que le concierne. */
+/** Quien reanuda y desde donde, para `reactivateAfterResume`. */
+const RESUME_INPUT = {
+  actorId: '55555555-5555-4555-8555-555555555555',
+  executionId: '66666666-6666-4666-8666-666666666666',
+  sourceIp: '10.0.0.7',
+} as const;
+
 interface ServiceHarness {
   service: WorkflowsService;
   repository: WorkflowRepositoryMock;
@@ -138,6 +148,7 @@ interface ServiceHarness {
   templates: { assertInstantiable: jest.Mock };
   coordinator: CoordinatorMock;
   crudEvents: { dispatch: jest.Mock };
+  auditLogger: { record: jest.Mock };
   errorSpy: jest.SpyInstance;
 }
 
@@ -215,6 +226,9 @@ const buildHarness = (): ServiceHarness => {
 
   const statusCoordinator = new WorkflowStatusCoordinator();
 
+  // Doble: se afirma sobre el evento `REANUDAR` que deja `reactivateAfterResume`.
+  const auditLogger = { record: jest.fn().mockResolvedValue(undefined) };
+
   const service = new WorkflowsService(
     repository as unknown as Repository<Workflow>,
     validator as unknown as PipelineValidatorService,
@@ -227,6 +241,7 @@ const buildHarness = (): ServiceHarness => {
     // y aqui no hay nadie que lo invoque, asi que no estorba. Un doble solo
     // anadiria dos `jest.fn()` que ninguna asercion mira.
     statusCoordinator,
+    auditLogger as unknown as AuditLoggerService,
   );
   jest.spyOn(service['logger'], 'log').mockImplementation(() => undefined);
   jest.spyOn(service['logger'], 'warn').mockImplementation(() => undefined);
@@ -243,6 +258,7 @@ const buildHarness = (): ServiceHarness => {
     templates,
     coordinator,
     crudEvents,
+    auditLogger,
     errorSpy,
   };
 };
@@ -1703,7 +1719,7 @@ describe('WorkflowsService (detalle para el asistente de edicion)', () => {
       );
 
       // 2. Act ⚙️
-      await service.reactivateAfterResume(WORKFLOW_ID);
+      await service.reactivateAfterResume(WORKFLOW_ID, RESUME_INPUT);
 
       // 3. Assert 🎯: `refreshPolling` y no `stopPollingForFlow`: hay que
       //    REINSCRIBIR el temporizador que la pausa borro.
@@ -1724,11 +1740,66 @@ describe('WorkflowsService (detalle para el asistente de edicion)', () => {
       );
 
       // 2. Act ⚙️
-      await service.reactivateAfterResume(WORKFLOW_ID);
+      await service.reactivateAfterResume(WORKFLOW_ID, RESUME_INPUT);
 
       // 3. Assert 🎯
       expect(repository.save).not.toHaveBeenCalled();
       expect(coordinator.refreshPolling).not.toHaveBeenCalled();
+    });
+
+    it('13.6b deberia registrar REANUDAR con el actor al reactivar un PAUSADO', async () => {
+      // 1. Arrange 📐: la reanudacion no pasa por ningun endpoint con
+      //    `@AuditAction`, asi que sin este registro explicito quedaba fuera de
+      //    `audit_eventos` la intervencion humana mas delicada del motor.
+      const { service, repository, auditLogger } = buildHarness();
+      repository.findOne.mockResolvedValue(
+        buildWorkflow({ status: WorkflowStatus.PAUSADO }),
+      );
+
+      // 2. Act ⚙️
+      await service.reactivateAfterResume(WORKFLOW_ID, RESUME_INPUT);
+
+      // 3. Assert 🎯
+      expect(repository.save).toHaveBeenCalledWith(
+        expect.objectContaining({ updatedByUserId: RESUME_INPUT.actorId }),
+      );
+      expect(auditLogger.record).toHaveBeenCalledWith({
+        userId: RESUME_INPUT.actorId,
+        action: AuditActionType.RESUME,
+        affectedTable: AuditTable.WORKFLOWS,
+        recordId: WORKFLOW_ID,
+        previousData: { status: WorkflowStatus.PAUSADO },
+        newData: {
+          status: WorkflowStatus.ACTIVO,
+          executionId: RESUME_INPUT.executionId,
+        },
+        sourceIp: RESUME_INPUT.sourceIp,
+      });
+    });
+
+    it('13.6c deberia registrar REANUDAR aunque el flujo no estuviera en pausa', async () => {
+      // 1. Arrange 📐: lo auditado es la intervencion sobre la ejecucion, no
+      //    el cambio de estado; un flujo INACTIVO se reanuda sin rearmarse.
+      const { service, repository, auditLogger } = buildHarness();
+      repository.findOne.mockResolvedValue(
+        buildWorkflow({ status: WorkflowStatus.INACTIVO }),
+      );
+
+      // 2. Act ⚙️
+      await service.reactivateAfterResume(WORKFLOW_ID, RESUME_INPUT);
+
+      // 3. Assert 🎯
+      expect(repository.save).not.toHaveBeenCalled();
+      expect(auditLogger.record).toHaveBeenCalledWith(
+        expect.objectContaining({
+          action: AuditActionType.RESUME,
+          previousData: { status: WorkflowStatus.INACTIVO },
+          newData: {
+            status: WorkflowStatus.INACTIVO,
+            executionId: RESUME_INPUT.executionId,
+          },
+        }),
+      );
     });
 
     it('13.7 deberia soltar el sondeo al desactivar por descarte', async () => {

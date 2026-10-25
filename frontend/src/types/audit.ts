@@ -24,6 +24,8 @@ export enum AuditActionValue {
   LOGOUT = 'CIERRE_SESION',
   ACTIVATE = 'ACTIVAR',
   DEACTIVATE = 'DESACTIVAR',
+  /** Reanudacion manual de un flujo detenido (CU-09, migracion 053). */
+  RESUME = 'REANUDAR',
 }
 
 /** Valores del enum `AuditTable` del backend: nombres reales de tabla. */
