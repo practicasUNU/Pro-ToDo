@@ -34,7 +34,7 @@
 -- Aplicar con:
 --   cd backend && npm run db:migrate
 -- o directamente:
---   sudo docker exec -i protodo_postgres psql -U unuware007 -d 'DB_PRO-TODO' < db/migrations/050-auditoria-acciones-en-espanol.sql
+--   sudo docker exec -i protodo_postgres psql -U '<usuario_postgres>' -d '<nombre_bd_desarrollo>' < db/migrations/050-auditoria-acciones-en-espanol.sql
 -- =============================================================================
 
 SET client_encoding = 'UTF8';

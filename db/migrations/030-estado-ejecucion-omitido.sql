@@ -33,7 +33,7 @@
 -- mismo criterio que la migracion 027 aplico a `logs_nodo.tipo_nodo`.
 --
 -- Aplicar con:
---   sudo docker exec -i protodo_postgres psql -U unuware007 -d 'DB_PRO-TODO' \
+--   sudo docker exec -i protodo_postgres psql -U '<usuario_postgres>' -d '<nombre_bd_desarrollo>' \
 --     < db/migrations/030-estado-ejecucion-omitido.sql
 -- =============================================================================
 

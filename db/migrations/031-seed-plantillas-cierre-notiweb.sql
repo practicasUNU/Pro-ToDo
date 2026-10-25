@@ -47,7 +47,7 @@
 -- del CRUD, no de una migracion.
 --
 -- Aplicar con:
---   sudo docker exec -i protodo_postgres psql -U unuware007 -d 'DB_PRO-TODO' \
+--   sudo docker exec -i protodo_postgres psql -U '<usuario_postgres>' -d '<nombre_bd_desarrollo>' \
 --     < db/migrations/031-seed-plantillas-cierre-notiweb.sql
 -- =============================================================================
 

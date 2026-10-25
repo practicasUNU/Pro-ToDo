@@ -44,7 +44,7 @@
 -- cambio de esquema, asi que NO se replica en `init.sql`.
 --
 -- Aplicar con:
---   sudo docker exec -i protodo_postgres psql -U unuware007 -d 'DB_PRO-TODO' \
+--   sudo docker exec -i protodo_postgres psql -U '<usuario_postgres>' -d '<nombre_bd_desarrollo>' \
 --     < db/migrations/029-prompt-licitaciones-plantilla-base.sql
 -- =============================================================================
 

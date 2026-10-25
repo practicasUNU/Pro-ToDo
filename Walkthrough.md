@@ -624,7 +624,7 @@ devolvería `undefined` por `GET /api/nodos` con el tipo afirmando lo contrario.
 
 - Aplicar la migración 020 contra el contenedor (la ejecuta el usuario):
   ```bash
-  sudo docker exec -i protodo_postgres psql -U unuware007 -d 'DB_PRO-TODO' \
+  sudo docker exec -i protodo_postgres psql -U '<usuario_postgres>' -d '<nombre_bd_desarrollo>' \
     < db/migrations/020-eliminar-ui-schema-nodos.sql
   ```
 - Unificar el nombre de la credencial de Anthropic: el `.env` real declara `ANTHROPIC_API_KEY` y
@@ -1144,7 +1144,7 @@ comprobar la idempotencia: la primera pasada debe reportar `UPDATE <n>`, la segu
 y ambas terminar con código de salida 0.
 
 ```bash
-docker exec -i protodo_postgres psql -U unuware007 -d 'DB_PRO-TODO' \
+docker exec -i protodo_postgres psql -U '<usuario_postgres>' -d '<nombre_bd_desarrollo>' \
   < db/migrations/012-motivo-fallo-ejecucion.sql
 ```
 
@@ -1579,7 +1579,7 @@ Rama activa: `feat/trigger-imap`. Nada commiteado todavía.
 
 1. **Aplicar la migración** (la ejecuta el usuario):
    ```bash
-   sudo docker exec -i protodo_postgres psql -U unuware007 -d 'DB_PRO-TODO' \
+   sudo docker exec -i protodo_postgres psql -U '<usuario_postgres>' -d '<nombre_bd_desarrollo>' \
      < db/migrations/011-catalogo-nodos.sql
    ```
    La base local está en el estado "una pasada previa de la 011": `nodos` tiene `id_tipo_nodo` y
@@ -4779,7 +4779,7 @@ desarrollador, y el servidor MCP `postgres-protodo` estaba caído en esta sesió
       `relation "tokens_sesion" does not exist`. Mismo aviso que llevaba la 004 en su día.
 
       ```bash
-      sudo docker exec -i protodo_postgres psql -U unuware007 -d 'DB_PRO-TODO' \
+      sudo docker exec -i protodo_postgres psql -U '<usuario_postgres>' -d '<nombre_bd_desarrollo>' \
         < db/migrations/009-tokens-sesion.sql
       ```
 
@@ -8416,7 +8416,7 @@ con el preámbulo de aislamiento resuelto—. Faltaba `socket.io-client` en el b
 **La suite arranca y conecta contra PostgreSQL.** Falla en la guarda `assertStatusColumnExists`,
 porque la base de pruebas no tiene aplicada la migración 040. Es el resultado esperado y resultó
 útil por partida doble: confirma que `<nombre_bd_test>` existe y acepta conexión, y demuestra que la
-guarda hace su trabajo. De paso delató un defecto propio: el mensaje nombraba `DB_PRO-TODO` en duro,
+guarda hace su trabajo. De paso delató un defecto propio: el mensaje nombraba la base de desarrollo en duro,
 así que mandaba a aplicar la migración sobre la base **equivocada**. Ahora lee la base de la conexión
 viva.
 
