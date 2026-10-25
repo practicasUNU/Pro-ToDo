@@ -5,6 +5,7 @@ import { useQuasar } from 'quasar';
 import { subscribeToExecutionEvents, subscribeToReconnect } from '@services/socket-events.service';
 import { useCanvasStore } from '@stores/canvas.store';
 import { useExecutionStore } from '@stores/execution.store';
+import { useWorkflowsStore } from '@stores/workflows.store';
 
 import { ExecutionState } from '@/types/execution';
 import {
@@ -63,6 +64,7 @@ export const useExecutionSocket = (): void => {
   const $q = useQuasar();
   const executionStore = useExecutionStore();
   const canvasStore = useCanvasStore();
+  const workflowsStore = useWorkflowsStore();
 
   let unsubscribe: (() => void) | null = null;
   let unsubscribeReconnect: (() => void) | null = null;
@@ -235,6 +237,9 @@ export const useExecutionSocket = (): void => {
     // anterior —el nodo pausado en ambar y los posteriores completados— hasta
     // que alguien recarga la pagina.
     canvasStore.handleFlowResumed(event);
+    // Y la tabla de `/flujos`: su fila decia "Pausado" y solo la corregia el
+    // `crud:mutation`, que un micro-corte puede perder.
+    workflowsStore.markExecutionResumed(event.flowId, event.executionId);
 
     // Por correo el aviso cambia de tono y de icono: nadie esta mirando la
     // pantalla cuando llega, asi que tiene que decir de donde salio la orden.

@@ -643,22 +643,35 @@ export class WorkflowsService
 
     const previousStatus = workflow.status;
     const reactivates = previousStatus === WorkflowStatus.PAUSADO;
+    let current = workflow;
 
     if (reactivates) {
       workflow.status = WorkflowStatus.ACTIVO;
 
-      const saved = await this.workflowRepository.save(
+      current = await this.workflowRepository.save(
         stampUpdated(workflow, resume.actorId),
       );
 
       await this.flowPollingCoordinator.refreshPolling();
 
-      this.publishMutation('UPDATED', await this.buildSummary(saved));
-
       this.logger.log(
-        `Flujo "${saved.name}" (${saved.id}) vuelve a ACTIVO al reanudarse su ejecucion detenida.`,
+        `Flujo "${current.name}" (${current.id}) vuelve a ACTIVO al reanudarse su ejecucion detenida.`,
       );
     }
+
+    // SIEMPRE, este o no el flujo en pausa, y con la ejecucion ya EN_PROCESO.
+    // `buildSummary` lee la ejecucion viva en este instante, y el motor aun no
+    // la ha movido (`prepareResume` la deja PAUSADO hasta que `executeWorkflow`
+    // arranca): publicar esa foto repintaba la fila como "Pausado" en todas las
+    // tablas abiertas y la dejaba asi hasta un F5. Un flujo INACTIVO tampoco
+    // emitia nada, de modo que su ejecucion reanudada era invisible.
+    const summary = await this.buildSummary(current);
+
+    this.publishMutation('UPDATED', {
+      ...summary,
+      activeExecutionId: resume.executionId,
+      executionState: ExecutionState.EN_PROCESO,
+    });
 
     // Fotografias MINIMAS y no la fila entera: el pipeline no cambia al
     // reanudar, y volcarlo dos veces enterraria el unico dato que importa (el
@@ -675,6 +688,27 @@ export class WorkflowsService
       },
       sourceIp: resume.sourceIp,
     });
+  }
+
+  /**
+   * Difunde la fila del flujo tal como esta AHORA, sin mutarla.
+   *
+   * Lo invoca `ExecutionsService.resumeExecution` cuando el motor devuelve el
+   * control: la reanudacion publico la fila "En proceso", y sin una segunda
+   * foto al terminar la tabla se quedaba con ese estado aunque la ejecucion ya
+   * hubiera cerrado en EXITOSO. Si el motor volvio a pausar, `pauseFlow` ya
+   * publico; repetirlo es inocuo porque `applyMutation` sustituye la fila.
+   */
+  public async publishWorkflowSnapshot(workflowId: string): Promise<void> {
+    const workflow = await this.workflowRepository.findOne({
+      where: { id: workflowId },
+    });
+
+    if (workflow === null) {
+      return;
+    }
+
+    this.publishMutation('UPDATED', await this.buildSummary(workflow));
   }
 
   /**

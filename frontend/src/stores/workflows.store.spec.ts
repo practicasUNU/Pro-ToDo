@@ -4,6 +4,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { useWorkflowsStore } from './workflows.store';
 
+import { ExecutionState } from '@/types/execution';
 import { WorkflowStatus, NodeType } from '@/types/pipeline';
 import { AUDIT_FIXTURE } from '@/testing/audit.fixture';
 
@@ -237,6 +238,53 @@ describe('useWorkflowsStore · catalogo de flujos instanciados', () => {
 
       // 3. Assert 🎯
       expect(store.workflows[1]?.status).toBe(WorkflowStatus.ACTIVO);
+    });
+  });
+
+  describe('4. Reanudacion anunciada por la sala del flujo', () => {
+    it('4.1 deberia pasar la fila de Pausado a En proceso sin recargar', () => {
+      // 1. Arrange 📐: la foto que dejo la pausa.
+      const store = useWorkflowsStore();
+      store.workflows = [
+        buildWorkflow({
+          status: WorkflowStatus.PAUSADO,
+          activeExecutionId: 'exec-1',
+          executionState: ExecutionState.PAUSADO,
+        }),
+      ];
+
+      // 2. Act ⚙️
+      store.markExecutionResumed(WORKFLOW_ID, 'exec-1');
+
+      // 3. Assert 🎯
+      expect(store.workflows[0]?.status).toBe(WorkflowStatus.ACTIVO);
+      expect(store.workflows[0]?.executionState).toBe(ExecutionState.EN_PROCESO);
+    });
+
+    it('4.2 NO deberia rearmar un flujo INACTIVO al reanudar su ejecucion', () => {
+      // 1. Arrange 📐: reanudar no exige el flujo armado, ni lo arma.
+      const store = useWorkflowsStore();
+      store.workflows = [buildWorkflow({ executionState: ExecutionState.PAUSADO })];
+
+      // 2. Act ⚙️
+      store.markExecutionResumed(WORKFLOW_ID, 'exec-1');
+
+      // 3. Assert 🎯
+      expect(store.workflows[0]?.status).toBe(WorkflowStatus.INACTIVO);
+      expect(store.workflows[0]?.executionState).toBe(ExecutionState.EN_PROCESO);
+    });
+
+    it('4.3 NO deberia tocar las filas de otros flujos', () => {
+      // 1. Arrange 📐
+      const store = useWorkflowsStore();
+      const other = buildWorkflow({ id: 'otro', status: WorkflowStatus.PAUSADO });
+      store.workflows = [other];
+
+      // 2. Act ⚙️
+      store.markExecutionResumed(WORKFLOW_ID, 'exec-1');
+
+      // 3. Assert 🎯
+      expect(store.workflows[0]).toEqual(other);
     });
   });
 });

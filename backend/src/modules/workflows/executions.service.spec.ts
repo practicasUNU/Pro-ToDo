@@ -116,6 +116,7 @@ interface ServiceHarness {
     deactivateAfterDiscard: jest.Mock;
     reactivateAfterResume: jest.Mock;
     applyStopOnFirstSuccess: jest.Mock;
+    publishWorkflowSnapshot: jest.Mock;
   };
   events: ExecutionEventsCoordinator;
   hybridLogger: { logNodeExecution: jest.Mock };
@@ -167,6 +168,7 @@ const buildHarness = (): ServiceHarness => {
   const workflows = {
     reactivateAfterResume: jest.fn().mockResolvedValue(undefined),
     applyStopOnFirstSuccess: jest.fn().mockResolvedValue(undefined),
+    publishWorkflowSnapshot: jest.fn().mockResolvedValue(undefined),
     deactivateAfterDiscard: jest.fn().mockResolvedValue({
       id: FLOW_ID,
       name: 'Flujo de prueba',
@@ -378,6 +380,20 @@ describe('ExecutionsService (consulta y reintento manual CU-09)', () => {
           sourceIp: '10.0.0.7',
         },
       );
+    });
+
+    it('2.2c deberia republicar la fila del flujo cuando el motor devuelve el control', async () => {
+      // 1. Arrange 📐
+      const { service, engine, workflows } = buildHarness();
+
+      // 2. Act ⚙️
+      await service.resumeExecution(EXECUTION_ID, {}, CURRENT_USER);
+
+      // 3. Assert 🎯: la foto final sale DESPUES del motor, no antes.
+      expect(workflows.publishWorkflowSnapshot).toHaveBeenCalledWith(FLOW_ID);
+      expect(
+        workflows.publishWorkflowSnapshot.mock.invocationCallOrder[0],
+      ).toBeGreaterThan(engine.executeWorkflow.mock.invocationCallOrder[0]);
     });
 
     it('2.3 deberia trasladar el parche de contexto y el resetRetries explicito', async () => {

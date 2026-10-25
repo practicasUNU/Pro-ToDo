@@ -1,3 +1,4 @@
+import { ExecutionState } from '@/types/execution';
 import { WorkflowStatus } from '@/types/pipeline';
 import { defineStore, acceptHMRUpdate } from 'pinia';
 import { computed, ref } from 'vue';
@@ -118,6 +119,29 @@ export const useWorkflowsStore = defineStore('workflows', () => {
       : [item, ...workflows.value];
   };
 
+  /**
+   * Refleja en la fila una reanudacion anunciada por `flow:resumed`.
+   *
+   * Es un REFUERZO del `crud:mutation` que el backend difunde al reanudar: el
+   * evento de sala llega a quien tiene el flujo abierto aunque la mutacion se
+   * pierda en un micro-corte. Replica lo que hace el backend —la ejecucion pasa
+   * a EN_PROCESO y un flujo PAUSADO vuelve a ACTIVO— sin inventar nada mas; la
+   * siguiente mutacion completa sustituye la fila igualmente.
+   */
+  const markExecutionResumed = (flowId: string, executionId: string): void => {
+    workflows.value = workflows.value.map((workflow) =>
+      workflow.id === flowId
+        ? {
+            ...workflow,
+            status:
+              workflow.status === WorkflowStatus.PAUSADO ? WorkflowStatus.ACTIVO : workflow.status,
+            activeExecutionId: executionId,
+            executionState: ExecutionState.EN_PROCESO,
+          }
+        : workflow,
+    );
+  };
+
   return {
     workflows,
     isLoading,
@@ -126,6 +150,7 @@ export const useWorkflowsStore = defineStore('workflows', () => {
     updateWorkflow,
     setStatus,
     applyMutation,
+    markExecutionResumed,
   };
 });
 

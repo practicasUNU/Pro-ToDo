@@ -78,6 +78,7 @@ vi.mock('quasar', async () => {
 
 import WorkflowsManager from '@components/workflows/WorkflowsManager.vue';
 import { useExecutionStore } from '@stores/execution.store';
+import { useWorkflowsStore } from '@stores/workflows.store';
 
 import { discardExecution, resumeExecution } from '@services/fsm-executions.service';
 import { fetchWorkflows } from '@services/workflows.service';
@@ -213,6 +214,37 @@ describe('WorkflowsManager · telemetria en vivo del catalogo', () => {
       // 3. Assert 🎯
       expect(wrapper.find('[data-test="status-paused"]').exists()).toBe(true);
       expect(wrapper.find('[data-test="resume-execution"]').exists()).toBe(true);
+    });
+
+    it('2.1b deberia pasar de Pausado a En proceso con la mutacion de la reanudacion', async () => {
+      // 1. Arrange 📐: la fila que dejo la pausa, ya pintada.
+      vi.mocked(fetchWorkflows).mockResolvedValue([
+        buildWorkflow({
+          status: WorkflowStatus.PAUSADO,
+          activeExecutionId: EXECUTION_ID,
+          executionState: ExecutionState.PAUSADO,
+        }),
+      ]);
+      const wrapper = mountManager();
+      await flushPromises();
+      expect(wrapper.find('[data-test="status-paused"]').exists()).toBe(true);
+
+      // 2. Act ⚙️: el `crud:mutation` que el backend difunde al reanudar.
+      useWorkflowsStore().applyMutation(
+        'UPDATED',
+        buildWorkflow({
+          status: WorkflowStatus.ACTIVO,
+          activeExecutionId: EXECUTION_ID,
+          executionState: ExecutionState.EN_PROCESO,
+        }),
+        FLOW_ID,
+      );
+      await flushPromises();
+
+      // 3. Assert 🎯: cambia sin volver a pedir el catalogo (sin F5).
+      expect(wrapper.find('[data-test="status-paused"]').exists()).toBe(false);
+      expect(wrapper.find('[data-test="status-running"]').exists()).toBe(true);
+      expect(fetchWorkflows).toHaveBeenCalledTimes(1);
     });
 
     it('2.2 deberia conservar el badge de habilitacion sin ejecucion viva', async () => {

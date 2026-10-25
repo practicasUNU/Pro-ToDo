@@ -1802,6 +1802,75 @@ describe('WorkflowsService (detalle para el asistente de edicion)', () => {
       );
     });
 
+    it('13.6d deberia difundir la fila EN_PROCESO al reanudar un PAUSADO', async () => {
+      // 1. Arrange 📐: en este instante la ejecucion sigue PAUSADO en BD
+      //    (`prepareResume` no la mueve), y publicar esa foto dejaba el badge
+      //    "Pausado" en todas las tablas abiertas hasta un F5.
+      const { service, repository, crudEvents } = buildHarness();
+      repository.findOne.mockResolvedValue(
+        buildWorkflow({ status: WorkflowStatus.PAUSADO }),
+      );
+
+      // 2. Act ⚙️
+      await service.reactivateAfterResume(WORKFLOW_ID, RESUME_INPUT);
+
+      // 3. Assert 🎯
+      const [mutation] = crudEvents.dispatch.mock.calls.at(-1) as [
+        { action: string; data: PipelineSummaryResponseDto },
+      ];
+
+      expect(mutation.action).toBe('UPDATED');
+      expect(mutation.data.status).toBe(WorkflowStatus.ACTIVO);
+      expect(mutation.data.executionState).toBe(ExecutionState.EN_PROCESO);
+      expect(mutation.data.activeExecutionId).toBe(RESUME_INPUT.executionId);
+    });
+
+    it('13.6e deberia difundir la fila tambien cuando el flujo estaba INACTIVO', async () => {
+      // 1. Arrange 📐: antes un INACTIVO no emitia nada y su ejecucion reanudada
+      //    era invisible en la tabla.
+      const { service, repository, crudEvents } = buildHarness();
+      repository.findOne.mockResolvedValue(
+        buildWorkflow({ status: WorkflowStatus.INACTIVO }),
+      );
+
+      // 2. Act ⚙️
+      await service.reactivateAfterResume(WORKFLOW_ID, RESUME_INPUT);
+
+      // 3. Assert 🎯: el estado del flujo no cambia, el de la ejecucion si.
+      const [mutation] = crudEvents.dispatch.mock.calls.at(-1) as [
+        { data: PipelineSummaryResponseDto },
+      ];
+
+      expect(mutation.data.status).toBe(WorkflowStatus.INACTIVO);
+      expect(mutation.data.executionState).toBe(ExecutionState.EN_PROCESO);
+    });
+
+    it('13.6f deberia republicar la fila sin mutarla al terminar la reanudacion', async () => {
+      // 1. Arrange 📐
+      const { service, repository, crudEvents } = buildHarness();
+
+      // 2. Act ⚙️
+      await service.publishWorkflowSnapshot(WORKFLOW_ID);
+
+      // 3. Assert 🎯
+      expect(repository.save).not.toHaveBeenCalled();
+      expect(crudEvents.dispatch).toHaveBeenCalledWith(
+        expect.objectContaining({ entity: 'workflows', action: 'UPDATED' }),
+      );
+    });
+
+    it('13.6g NO deberia publicar nada si el flujo ya no existe', async () => {
+      // 1. Arrange 📐
+      const { service, repository, crudEvents } = buildHarness();
+      repository.findOne.mockResolvedValue(null);
+
+      // 2. Act ⚙️
+      await service.publishWorkflowSnapshot(WORKFLOW_ID);
+
+      // 3. Assert 🎯
+      expect(crudEvents.dispatch).not.toHaveBeenCalled();
+    });
+
     it('13.7 deberia soltar el sondeo al desactivar por descarte', async () => {
       // 1. Arrange 📐: hasta ahora la fila quedaba INACTIVO pero el intervalo
       //    seguia vivo en memoria hasta la siguiente reconciliacion, creando

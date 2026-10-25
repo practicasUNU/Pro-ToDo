@@ -8,6 +8,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { useExecutionSocket } from './useExecutionSocket';
 
 import { useCanvasStore } from '@stores/canvas.store';
+import { useWorkflowsStore } from '@stores/workflows.store';
 
 import { ExecutionState } from '@/types/execution';
 
@@ -327,6 +328,19 @@ describe('useExecutionSocket', () => {
 
     // Assert
     expect(lastNotifyOptions().type).toBe('positive');
+  });
+
+  it('deberia pasar a En proceso la fila del flujo reanudado en la tabla', () => {
+    // Arrange: la tabla aun pinta la fila que dejo la pausa.
+    mountHost();
+    const workflowsStore = useWorkflowsStore();
+    const markExecutionResumed = vi.spyOn(workflowsStore, 'markExecutionResumed');
+
+    // Act
+    registered?.onFlowResumed?.(buildResumed());
+
+    // Assert
+    expect(markExecutionResumed).toHaveBeenCalledWith(FLOW_ID, EXECUTION_ID);
   });
 
   it('deberia avisar de un fallo de nodo GRAVE o URGENTE', () => {

@@ -371,6 +371,11 @@ export class ExecutionsService {
       finished,
     );
 
+    // La reanudacion publico la fila "En proceso"; sin esta segunda foto la
+    // tabla de flujos se quedaba con ese estado aunque la ejecucion ya hubiera
+    // cerrado, porque el motor no difunde mutaciones CRUD al terminar.
+    await this.workflowsService.publishWorkflowSnapshot(workflow.id);
+
     return {
       executionId: finished.executionId,
       workflowId: workflow.id,
