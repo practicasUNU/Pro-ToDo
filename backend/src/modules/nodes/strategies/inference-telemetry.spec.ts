@@ -8,6 +8,7 @@ import {
   recordResponseUsage,
   toUsageMetadata,
 } from '@modules/nodes/strategies/inference-telemetry';
+import { TelemetryOperationOrigin } from '@modules/telemetry/enums/telemetry-origin.enum';
 import { ERR_TELEMETRY_PERSIST_FAILED } from '@modules/telemetry/telemetry.service';
 import { createMockStatePayloadContext } from '@test/factories/state-payload-context.factory';
 import { createMockTelemetryService } from '@test/factories/telemetry-service.factory';
@@ -63,6 +64,35 @@ describe('inference-telemetry', () => {
         totalTokens: 0,
         estimatedCostUSD: 0,
       });
+    });
+
+    it('1.1b deberia imputar al usuario una prueba del banco, sin ejecucion', async () => {
+      // 1. Arrange 📐: el id efimero del banco no existe en `ejecuciones_flujo`
+      //    y el CHECK de la 049 rechazaria la fila como "ejecucion".
+      const telemetry = createMockTelemetryService();
+      const context = createMockStatePayloadContext({
+        executionId: 'sandbox-1',
+        currentStep: 'nodo_banco',
+        sandboxScope: { userId: 'usuario-1' },
+      });
+
+      // 2. Act ⚙️
+      await recordResponseUsage(
+        asService(telemetry),
+        context,
+        LlmProvider.GEMINI,
+        buildMetadata(),
+      );
+
+      // 3. Assert 🎯
+      expect(telemetry.recordTokenUsage).not.toHaveBeenCalled();
+      expect(telemetry.recordAssistUsage).toHaveBeenCalledWith(
+        expect.objectContaining({
+          origin: TelemetryOperationOrigin.NODE_SANDBOX,
+          userId: 'usuario-1',
+          promptTokens: 1_000,
+        }),
+      );
     });
 
     it('1.2 deberia registrar con la ejecucion y el nodo del contexto', async () => {

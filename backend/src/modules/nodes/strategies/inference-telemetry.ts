@@ -3,6 +3,7 @@ import {
   buildZeroUsageMetrics,
 } from '@modules/telemetry/telemetry.service';
 import { LlmProviderException } from '@modules/nodes/strategies/interfaces/llm-provider.interface';
+import { TelemetryOperationOrigin } from '@modules/telemetry/enums/telemetry-origin.enum';
 
 import type { StatePayloadContext } from '@core/fsm/context/state-payload.context';
 import type { NodeErrorDetail } from '@core/fsm/types/node-strategy.types';
@@ -105,6 +106,26 @@ const persist = async (
   },
 ): Promise<InferenceTelemetryOutcome> => {
   try {
+    const sandbox = context.getSandboxScope();
+
+    // Banco de pruebas: no hay fila en `ejecuciones_flujo` a la que colgar el
+    // consumo, y el CHECK de la migracion 049 rechazaria una fila de
+    // "ejecucion" sin ella. Se imputa al usuario con su propio origen (057).
+    if (sandbox !== null) {
+      const sandboxMetrics = await telemetry.recordAssistUsage({
+        origin: TelemetryOperationOrigin.NODE_SANDBOX,
+        userId: sandbox.userId,
+        aiProvider: provider,
+        aiModel: usage.modelUsed,
+        promptTokens: usage.tokensPrompt,
+        completionTokens: usage.tokensCompletion,
+        reasoningTokens: usage.tokensReasoning,
+        usageReported: usage.usageReported,
+      });
+
+      return { metrics: sandboxMetrics };
+    }
+
     const metrics = await telemetry.recordTokenUsage({
       executionId: context.getExecutionId(),
       // El cursor ES el `nodeId` en curso: el motor lo mueve antes de ejecutar.

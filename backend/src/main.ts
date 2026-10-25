@@ -1,6 +1,7 @@
 import { Logger } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
 import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
+import { json } from 'express';
 
 import { RedLocalMiddleware } from '@common/middlewares/red-local.middleware';
 import { createGlobalValidationPipe } from '@common/pipes/global-validation.pipe';
@@ -10,6 +11,18 @@ import { AppModule } from './app.module';
 const API_PREFIX = 'api';
 const SWAGGER_PATH = 'api/docs';
 const ASSETS_PATH = '/static/uploads';
+
+/**
+ * Ruta del banco de pruebas y su tope de cuerpo JSON.
+ *
+ * El parser global de Nest acepta 100 KB, y una prueba de PROCESADOR_OCR lleva
+ * el adjunto en base64 dentro del contexto simulado: un PDF de 5 MB ocupa casi
+ * 7 MB codificado. Se amplia SOLO esta ruta, que exige JWT, rol y red interna;
+ * subir el limite global ensancharia la superficie de denegacion de servicio
+ * de toda la API por una necesidad de un unico endpoint.
+ */
+const SANDBOX_RUN_PATH = `/${API_PREFIX}/nodes/sandbox/run`;
+const SANDBOX_JSON_LIMIT = '10mb';
 
 /**
  * Rutas a cubrir con el perimetro de red (PROT-05), y el motivo de que haya que
@@ -53,6 +66,10 @@ async function bootstrap() {
   const redLocalMiddleware = app.get(RedLocalMiddleware);
 
   app.use(PERIMETER_PATHS, redLocalMiddleware.use.bind(redLocalMiddleware));
+
+  // Registrado ANTES de `listen()`, que es cuando Nest monta su parser global:
+  // este analiza el cuerpo primero, y aquel lo salta porque ya viene leido.
+  app.use(SANDBOX_RUN_PATH, json({ limit: SANDBOX_JSON_LIMIT }));
 
   const swaggerConfig = new DocumentBuilder()
     .setTitle('Proto-Do API')

@@ -10,6 +10,11 @@ export enum TelemetryOperationOrigin {
   FLOW_EXECUTION = 'EJECUCION_FLUJO',
   /** El asistente "Mejorar Prompt con IA": lleva el usuario que lo pidio. */
   PROMPT_OPTIMIZATION = 'PROMPT_OPTIMIZATION',
+  /**
+   * Prueba individual de un nodo en el banco de pruebas (migracion 057): sin
+   * ejecucion ni flujo, con el usuario que la lanzo.
+   */
+  NODE_SANDBOX = 'BANCO_PRUEBAS',
 }
 
 /** Etiqueta en castellano del origen, para informes y tablas. */
@@ -18,4 +23,5 @@ export const TELEMETRY_ORIGIN_LABELS: Readonly<
 > = {
   [TelemetryOperationOrigin.FLOW_EXECUTION]: 'Ejecución de flujo',
   [TelemetryOperationOrigin.PROMPT_OPTIMIZATION]: 'Optimización de prompt',
+  [TelemetryOperationOrigin.NODE_SANDBOX]: 'Banco de pruebas',
 };

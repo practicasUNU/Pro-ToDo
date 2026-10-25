@@ -10,7 +10,7 @@ import { formatInteger, formatUsd } from '@/utils/number-format';
 import { toTableSort } from '@/utils/table-sort';
 
 import { TELEMETRY_HISTORY_SORT_KEYS } from '@/types/sort';
-import { TelemetryOperationOrigin } from '@/types/telemetry';
+import { TELEMETRY_ORIGIN_LABELS, TelemetryOperationOrigin } from '@/types/telemetry';
 
 import type { QTableColumn, QTableProps } from 'quasar';
 import type { TelemetryHistoryItem } from '@/types/telemetry';
@@ -36,12 +36,12 @@ const columns: QTableColumn<TelemetryHistoryItem>[] = [
   {
     name: 'flow',
     label: 'Flujo',
-    // El asistente de prompts no corre dentro de ningun flujo: se nombra su
-    // origen en lugar de dejar la celda vacia.
+    // El asistente de prompts y el banco de pruebas no corren dentro de ningun
+    // flujo: se nombra su origen en lugar de dejar la celda vacia.
     field: (row) =>
-      row.operationOrigin === TelemetryOperationOrigin.PROMPT_OPTIMIZATION
-        ? 'Optimización de prompt'
-        : (row.flowName ?? row.flowId ?? '—'),
+      row.operationOrigin === TelemetryOperationOrigin.FLOW_EXECUTION
+        ? (row.flowName ?? row.flowId ?? '—')
+        : TELEMETRY_ORIGIN_LABELS[row.operationOrigin],
     align: 'left',
     sortable: true,
     classes: 'pd-cell--long',

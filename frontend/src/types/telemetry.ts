@@ -19,9 +19,7 @@ export interface TelemetryQuery {
 }
 
 /** Filtros del historial paginado. Replica `TelemetryHistoryQueryDto`. */
-export interface TelemetryHistoryQuery
-  extends TelemetryQuery,
-    SortQuery<TelemetryHistorySortKey> {
+export interface TelemetryHistoryQuery extends TelemetryQuery, SortQuery<TelemetryHistorySortKey> {
   readonly limit?: number;
   readonly offset?: number;
 }
@@ -58,11 +56,20 @@ export interface ModelBreakdownRow {
   readonly costUsd: number;
 }
 
-/** Valores de `TelemetryOperationOrigin` del backend (migracion 049). */
+/** Valores de `TelemetryOperationOrigin` del backend (migraciones 049 y 057). */
 export enum TelemetryOperationOrigin {
   FLOW_EXECUTION = 'EJECUCION_FLUJO',
   PROMPT_OPTIMIZATION = 'PROMPT_OPTIMIZATION',
+  /** Prueba individual de un nodo en el banco de pruebas: sin flujo. */
+  NODE_SANDBOX = 'BANCO_PRUEBAS',
 }
+
+/** Etiqueta del origen, replica de `TELEMETRY_ORIGIN_LABELS` del backend. */
+export const TELEMETRY_ORIGIN_LABELS: Readonly<Record<TelemetryOperationOrigin, string>> = {
+  [TelemetryOperationOrigin.FLOW_EXECUTION]: 'Ejecución de flujo',
+  [TelemetryOperationOrigin.PROMPT_OPTIMIZATION]: 'Optimización de prompt',
+  [TelemetryOperationOrigin.NODE_SANDBOX]: 'Banco de pruebas',
+};
 
 /** Una inferencia registrada. Replica `TelemetryHistoryItemResponseDto`. */
 export interface TelemetryHistoryItem {

@@ -260,6 +260,16 @@ const stringifyResolved = (value: unknown): string => {
 };
 
 /**
+ * Ejecucion AISLADA de un nodo desde el banco de pruebas.
+ *
+ * Su `executionId` es efimero y no existe en `ejecuciones_flujo`, de modo que
+ * todo lo que se cuelgue de el en BD tiene que imputarse al usuario.
+ */
+export interface SandboxOperationScope {
+  readonly userId: string;
+}
+
+/**
  * Contenedor inmutable de los resultados que los nodos van acumulando durante
  * una ejecucion del motor FSM.
  *
@@ -279,12 +289,31 @@ export class StatePayloadContext {
   private readonly workflowId: string;
   private activeCursor: string;
   private namespaces: Record<string, Record<string, unknown>>;
+  private readonly sandboxScope: SandboxOperationScope | null;
 
-  constructor(executionId: string, workflowId: string, initialStep: string) {
+  constructor(
+    executionId: string,
+    workflowId: string,
+    initialStep: string,
+    sandboxScope: SandboxOperationScope | null = null,
+  ) {
     this.executionId = executionId;
     this.workflowId = workflowId;
     this.activeCursor = initialStep;
     this.namespaces = {};
+    this.sandboxScope = sandboxScope;
+  }
+
+  /**
+   * Ambito de banco de pruebas, o `null` en una ejecucion real del motor.
+   *
+   * Quien registra efectos que exigen una fila en `ejecuciones_flujo` —la
+   * telemetria de tokens— pregunta aqui antes de escribir: un nodo probado en
+   * aislamiento no tiene ejecucion, y su gasto se imputa al usuario que lo
+   * lanzo.
+   */
+  public getSandboxScope(): SandboxOperationScope | null {
+    return this.sandboxScope;
   }
 
   public getExecutionId(): string {

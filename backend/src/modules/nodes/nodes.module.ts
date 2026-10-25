@@ -3,6 +3,8 @@ import { TypeOrmModule } from '@nestjs/typeorm';
 
 import { NodeStrategyFactory } from '@core/fsm/factories/node-strategy.factory';
 import { FsmModule } from '@core/fsm/fsm.module';
+import { NodeSandboxController } from '@modules/nodes/sandbox/node-sandbox.controller';
+import { NodeSandboxService } from '@modules/nodes/sandbox/node-sandbox.service';
 import { HttpCoreModule } from '@core/http/http-core.module';
 import { AiPromptTemplatesModule } from '@modules/ai-prompt-templates/ai-prompt-templates.module';
 import { CredentialsModule } from '@modules/credentials/credentials.module';
@@ -96,8 +98,13 @@ import type { OnModuleInit } from '@nestjs/common';
     // sirve `GET /api/nodos`.
     TypeOrmModule.forFeature([Workflow, NodeCatalogEntry]),
   ],
-  controllers: [NodeCatalogController, LlmCatalogController],
+  controllers: [
+    NodeCatalogController,
+    LlmCatalogController,
+    NodeSandboxController,
+  ],
   providers: [
+    NodeSandboxService,
     TemplateMapperStrategy,
     PostIaSanitizerStrategy,
     ImapTriggerStrategy,

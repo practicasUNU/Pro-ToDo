@@ -5,6 +5,7 @@ import { useNodeCatalogStore } from '@stores/node-catalog.store';
 import { resolveNodeStore } from '@stores/nodes/node-store-registry';
 
 import { configurableNodeTypes, nodeConfigRegistry } from '@components/nodes/node-config-registry';
+import NodeSandboxRunner from '@components/nodes/NodeSandboxRunner.vue';
 
 import { buildContextForNamespaces } from '@/utils/upstream-catalog';
 
@@ -179,6 +180,11 @@ const onUpstreamToggle = (namespaces: string[]): void => {
  * configuracion. Es correcto porque el metodo es puro y sin E/S: publica lo que
  * el nodo aportaria al `pipeline_schema`, sin tocar nada.
  */
+/** Contexto simulado actual, para que el ejecutor genere sus datos de ejemplo. */
+const simulatedContext = computed<UpstreamNamespace[]>(() =>
+  buildSimulatedContext(simulatedUpstream.value),
+);
+
 const inspectedState = computed(() =>
   JSON.stringify(
     {
@@ -247,6 +253,18 @@ const inspectedState = computed(() =>
         </q-badge>
 
         <pre class="pd-mono sandbox-state">{{ inspectedState }}</pre>
+
+        <!-- Ejecucion REAL aislada: solo para los tipos y roles que el backend
+             admite (IA y OCR, ADMIN; HTTP generico, tambien EDITOR). -->
+        <template v-if="activeStore !== null">
+          <q-separator class="q-my-md sandbox-separator" />
+          <NodeSandboxRunner
+            :node-type="selectedNodeType"
+            :params="activeStore.toNodeParams()"
+            :is-config-valid="activeStore.isConfigValid"
+            :upstream="simulatedContext"
+          />
+        </template>
 
         <q-separator class="q-my-md sandbox-separator" />
 

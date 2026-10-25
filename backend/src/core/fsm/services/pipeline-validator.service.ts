@@ -242,6 +242,31 @@ export class PipelineValidatorService {
   }
 
   /**
+   * Valida los `params` de UN nodo suelto contra el DTO de su estrategia.
+   *
+   * Lo usa el banco de pruebas, que ejecuta un nodo fuera de cualquier
+   * `pipeline_schema`: sin esto, unos params mal formados llegarian directos a
+   * la estrategia, que los rechazaria igual pero sin la ruta exacta del campo.
+   *
+   * @returns Incidencias con rutas `params.<campo>`; vacia si son validos.
+   */
+  public async validateStandaloneParams(
+    nodeType: NodeType,
+    params: Record<string, unknown>,
+  ): Promise<SchemaIssue[]> {
+    const paramsSchema = this.tryGetStrategy(nodeType)?.paramsSchema;
+
+    if (paramsSchema === undefined) {
+      return [];
+    }
+
+    return flattenValidationErrors(
+      await validate(plainToInstance(paramsSchema, params), VALIDATION_OPTIONS),
+      'params',
+    );
+  }
+
+  /**
    * Nodos cuyos `params` estan a medias para EJECUTARSE.
    *
    * Separado de la validacion normal porque guardar y activar son dos

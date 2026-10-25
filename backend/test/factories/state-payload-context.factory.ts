@@ -1,5 +1,7 @@
 import { StatePayloadContext } from '@core/fsm/context/state-payload.context';
 
+import type { SandboxOperationScope } from '@core/fsm/context/state-payload.context';
+
 /** Valores por defecto: identificadores estables para que los asserts no dependan del azar. */
 const DEFAULT_EXECUTION_ID = 'exec-00000000-0000-4000-8000-000000000000';
 const DEFAULT_WORKFLOW_ID = 'flow-00000000-0000-4000-8000-000000000000';
@@ -13,6 +15,8 @@ export interface MockContextOptions {
   readonly currentStep?: string;
   /** Namespaces precargados, como si los hubieran escrito nodos anteriores. */
   readonly namespaces?: Record<string, Record<string, unknown>>;
+  /** Ambito de banco de pruebas: nodo aislado, sin fila de ejecucion. */
+  readonly sandboxScope?: SandboxOperationScope;
 }
 
 /**
@@ -35,6 +39,7 @@ export const createMockStatePayloadContext = (
     options.executionId ?? DEFAULT_EXECUTION_ID,
     options.workflowId ?? DEFAULT_WORKFLOW_ID,
     options.currentStep ?? DEFAULT_CURRENT_STEP,
+    options.sandboxScope ?? null,
   );
 
   for (const [namespace, data] of Object.entries(options.namespaces ?? {})) {
