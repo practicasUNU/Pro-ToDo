@@ -31,6 +31,12 @@ const secondsRemaining = ref(0);
 
 let countdownId: ReturnType<typeof setInterval> | undefined;
 
+/**
+ * Correo tal como viaja al backend: sin los espacios del portapapeles y en
+ * minusculas, igual que lo normaliza `@NormalizedEmail` en los DTOs de OTP.
+ */
+const normalizedEmail = computed(() => email.value.trim().toLowerCase());
+
 const isCodeExpired = computed(() => otpSent.value && secondsRemaining.value <= 0);
 
 const isCodeComplete = computed(() => code.value.length === OTP_LENGTH);
@@ -40,7 +46,7 @@ const submitLabel = computed(() => (otpSent.value ? 'Verificar Codigo' : 'Enviar
 // Poka-Yoke: el boton no se habilita hasta que el campo del paso actual valida.
 const isSubmitDisabled = computed(() => {
   if (sessionStore.isLoading) return true;
-  if (!otpSent.value) return !email.value || !isCorporateEmail(email.value);
+  if (!otpSent.value) return !normalizedEmail.value || !isCorporateEmail(normalizedEmail.value);
 
   return !isCodeComplete.value || isCodeExpired.value;
 });
@@ -77,7 +83,7 @@ const resetToEmailStep = (): void => {
 
 const sendOtp = async (): Promise<void> => {
   try {
-    const expiresInSeconds = await sessionStore.requestOtp(email.value);
+    const expiresInSeconds = await sessionStore.requestOtp(normalizedEmail.value);
 
     otpSent.value = true;
     code.value = '';
@@ -100,7 +106,7 @@ const sendOtp = async (): Promise<void> => {
 
 const verifyOtp = async (): Promise<void> => {
   try {
-    await sessionStore.verifyOtp(email.value, code.value);
+    await sessionStore.verifyOtp(normalizedEmail.value, code.value);
     clearCountdown();
 
     // `redirect` lo deja la guarda del router al interceptar una ruta protegida.
@@ -223,7 +229,7 @@ onBeforeUnmount(clearCountdown);
                   placeholder="usuario@unuware.com"
                   :rules="[
                     (val: string) => !!val || 'El correo es obligatorio',
-                    (val: string) => isCorporateEmail(val) || corporateEmailErrorMessage,
+                    (val: string) => isCorporateEmail(val.trim()) || corporateEmailErrorMessage,
                   ]"
                 />
               </div>
@@ -239,7 +245,7 @@ onBeforeUnmount(clearCountdown);
                   </template>
                   Codigo caducado
                   <div class="pd-banner-expired__hint">
-                    El codigo enviado a {{ email }} ya no es valido.
+                    El codigo enviado a {{ normalizedEmail }} ya no es valido.
                   </div>
                 </q-banner>
               </div>
@@ -255,7 +261,7 @@ onBeforeUnmount(clearCountdown);
                   @complete="onCodeComplete"
                 />
 
-                <div class="pd-subtitle q-mt-sm">{{ email }}</div>
+                <div class="pd-subtitle q-mt-sm">{{ normalizedEmail }}</div>
               </div>
             </q-card-section>
 

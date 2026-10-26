@@ -8,6 +8,7 @@ import {
   MaxLength,
 } from 'class-validator';
 
+import { NormalizedEmail } from '@common/decorators/normalized-email.decorator';
 import { TrimmedString } from '@common/decorators/trimmed-string.decorator';
 
 /** Payload de validacion del codigo OTP (`POST /auth/otp/validate`). */
@@ -17,7 +18,7 @@ export class VerifyOtpDto {
     example: 'usuario@unuware.com',
     maxLength: 255,
   })
-  @TrimmedString()
+  @NormalizedEmail()
   @IsEmail({}, { message: 'El correo no tiene un formato valido.' })
   @MaxLength(255)
   email: string;

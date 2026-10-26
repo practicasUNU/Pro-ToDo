@@ -1,28 +1,18 @@
 import { Logger } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
 import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
-import { json } from 'express';
 
+import { configureBodyParsers } from '@common/http/configure-body-parsers';
 import { RedLocalMiddleware } from '@common/middlewares/red-local.middleware';
 import { createGlobalValidationPipe } from '@common/pipes/global-validation.pipe';
 
 import { AppModule } from './app.module';
 
+import type { NestExpressApplication } from '@nestjs/platform-express';
+
 const API_PREFIX = 'api';
 const SWAGGER_PATH = 'api/docs';
 const ASSETS_PATH = '/static/uploads';
-
-/**
- * Ruta del banco de pruebas y su tope de cuerpo JSON.
- *
- * El parser global de Nest acepta 100 KB, y una prueba de PROCESADOR_OCR lleva
- * el adjunto en base64 dentro del contexto simulado: un PDF de 5 MB ocupa casi
- * 7 MB codificado. Se amplia SOLO esta ruta, que exige JWT, rol y red interna;
- * subir el limite global ensancharia la superficie de denegacion de servicio
- * de toda la API por una necesidad de un unico endpoint.
- */
-const SANDBOX_RUN_PATH = `/${API_PREFIX}/nodes/sandbox/run`;
-const SANDBOX_JSON_LIMIT = '10mb';
 
 /**
  * Rutas a cubrir con el perimetro de red (PROT-05), y el motivo de que haya que
@@ -50,7 +40,10 @@ const PERIMETER_PATHS = [
 ];
 
 async function bootstrap() {
-  const app = await NestFactory.create(AppModule);
+  // Sin parser automatico: los monta `configureBodyParsers`, mas abajo.
+  const app = await NestFactory.create<NestExpressApplication>(AppModule, {
+    bodyParser: false,
+  });
 
   // CORS: en desarrollo local se permite '*' si FRONTEND_URL no esta definida
   app.enableCors({ origin: process.env.FRONTEND_URL || '*' });
@@ -67,9 +60,9 @@ async function bootstrap() {
 
   app.use(PERIMETER_PATHS, redLocalMiddleware.use.bind(redLocalMiddleware));
 
-  // Registrado ANTES de `listen()`, que es cuando Nest monta su parser global:
-  // este analiza el cuerpo primero, y aquel lo salta porque ya viene leido.
-  app.use(SANDBOX_RUN_PATH, json({ limit: SANDBOX_JSON_LIMIT }));
+  // Antes de `listen()`: los middlewares de Express se evaluan por orden de
+  // registro, y las rutas de los controladores entran en `init()`.
+  configureBodyParsers(app);
 
   const swaggerConfig = new DocumentBuilder()
     .setTitle('Proto-Do API')
