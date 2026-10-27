@@ -58,6 +58,12 @@ const onCancel = (): void => {
         {{ message }}
       </q-card-section>
 
+      <!-- Campos opcionales del llamador (p. ej. el motivo de un descarte). No
+           alteran la cuenta atras: confirmar sigue bloqueado cinco segundos. -->
+      <q-card-section v-if="$slots.default" class="q-pt-none">
+        <slot />
+      </q-card-section>
+
       <q-card-actions align="right" class="q-px-md q-pb-md">
         <q-btn flat no-caps label="Cancelar" class="pd-btn-secondary" @click="onCancel" />
         <q-btn

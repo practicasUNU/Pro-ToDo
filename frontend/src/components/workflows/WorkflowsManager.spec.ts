@@ -424,7 +424,7 @@ describe('WorkflowsManager · telemetria en vivo del catalogo', () => {
       await flushPromises();
 
       // 3. Assert 🎯
-      expect(discardExecution).toHaveBeenCalledWith(EXECUTION_ID);
+      expect(discardExecution).toHaveBeenCalledWith(EXECUTION_ID, null);
     });
   });
 

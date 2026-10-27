@@ -3,6 +3,8 @@
 // describen metadatos, y los campos secretos existen unicamente en los
 // payloads de alta y edicion (solo escritura).
 
+import type { AuditableData } from '@/types/auditable';
+
 /** Replica de `CredentialAuthType`: literales del CHECK de la migracion 055. */
 export enum CredentialAuthType {
   BEARER_TOKEN = 'BEARER_TOKEN',
@@ -36,13 +38,15 @@ export const MAX_SECRET_LENGTH = 4096;
 /** Replica de `API_KEY_NAME_PATTERN`. */
 export const API_KEY_NAME_PATTERN = /^[A-Za-z0-9_-]{1,100}$/;
 
-/** `CredentialResponseDto`: metadatos, sin secreto. */
-export interface Credential {
+/**
+ * `CredentialResponseDto`: metadatos, sin secreto. Desde la migracion 058 trae
+ * tambien la autoria (`createdBy` / `updatedBy`), como el resto de tablas
+ * maestras.
+ */
+export interface Credential extends AuditableData {
   id: string;
   name: string;
   authType: CredentialAuthType;
-  createdAt: string;
-  updatedAt: string;
 }
 
 /** `CredentialOptionDto`: lo unico que ve un EDITOR (selector del nodo). */

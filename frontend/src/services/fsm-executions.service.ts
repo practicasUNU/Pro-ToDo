@@ -75,9 +75,15 @@ export const resumeExecution = async (
  *
  * @throws AxiosError 409 si la ejecucion ya no esta PAUSADO, 404 si no existe.
  */
-export const discardExecution = async (executionId: string): Promise<DiscardExecutionResult> => {
+export const discardExecution = async (
+  executionId: string,
+  reason: string | null = null,
+): Promise<DiscardExecutionResult> => {
+  // El motivo es opcional y viaja en el cuerpo del DELETE: queda escrito en el
+  // evento FLUJO_DESCARTADO de la auditoria. Sin motivo no se envia cuerpo.
   const { data } = await api.delete<DiscardExecutionResult>(
     `${EXECUTIONS_PATH}/${executionId}/discard`,
+    reason === null ? undefined : { data: { reason } },
   );
 
   return data;

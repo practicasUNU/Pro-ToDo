@@ -175,7 +175,9 @@ describe('AuditController', () => {
     expect(pdfRenderer.render).toHaveBeenCalledWith(
       expect.objectContaining({
         requestedBy: ADMIN_USER.email,
-        filters: expect.objectContaining({ action: 'INICIO_SESION_FALLIDO' }) as unknown,
+        filters: expect.objectContaining({
+          action: 'INICIO_SESION_FALLIDO',
+        }) as unknown,
       }),
     );
   });

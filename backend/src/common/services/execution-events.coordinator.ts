@@ -1,6 +1,9 @@
 import { Injectable, Logger } from '@nestjs/common';
 
+import { ExecutionState } from '@core/fsm/types/fsm.enums';
+
 import type {
+  ExecutionUpdatedEvent,
   FlowCompletedEvent,
   FlowDiscardedEvent,
   FlowPausedEvent,
@@ -34,6 +37,7 @@ export interface ExecutionEventPort {
   emitNodeError(event: NodeErrorEvent): void;
   emitNodeStarted(event: NodeStartedEvent): void;
   emitNodeCompleted(event: NodeCompletedEvent): void;
+  emitExecutionUpdated(event: ExecutionUpdatedEvent): void;
 }
 
 /**
@@ -85,18 +89,50 @@ export class ExecutionEventsCoordinator {
 
   public emitFlowPaused(event: FlowPausedEvent): void {
     this.dispatch('flow:paused', (port) => port.emitFlowPaused(event));
+    this.emitExecutionUpdated({
+      ...this.baseOf(event),
+      state: ExecutionState.PAUSADO,
+      activeCursor: event.activeCursor,
+    });
   }
 
   public emitFlowResumed(event: FlowResumedEvent): void {
     this.dispatch('flow:resumed', (port) => port.emitFlowResumed(event));
+    this.emitExecutionUpdated({
+      ...this.baseOf(event),
+      state: ExecutionState.EN_PROCESO,
+      activeCursor: event.activeCursor,
+    });
   }
 
   public emitFlowDiscarded(event: FlowDiscardedEvent): void {
     this.dispatch('flow:discarded', (port) => port.emitFlowDiscarded(event));
+    this.emitExecutionUpdated({
+      ...this.baseOf(event),
+      state: ExecutionState.DESCARTADO,
+      activeCursor: null,
+    });
   }
 
   public emitFlowCompleted(event: FlowCompletedEvent): void {
     this.dispatch('flow:completed', (port) => port.emitFlowCompleted(event));
+    this.emitExecutionUpdated({
+      ...this.baseOf(event),
+      state: event.finalState,
+      activeCursor: null,
+    });
+  }
+
+  /**
+   * Resumen global de cambio de estado para el historial de ejecuciones.
+   *
+   * Publico porque el motor lo emite tambien a mano donde no hay otro evento
+   * del que derivarlo (`abortExecutionsForFlow`, que cierra filas por SQL).
+   */
+  public emitExecutionUpdated(event: ExecutionUpdatedEvent): void {
+    this.dispatch('execution:updated', (port) =>
+      port.emitExecutionUpdated(event),
+    );
   }
 
   public emitNodeError(event: NodeErrorEvent): void {
@@ -111,10 +147,34 @@ export class ExecutionEventsCoordinator {
    */
   public emitNodeStarted(event: NodeStartedEvent): void {
     this.dispatch('node:started', (port) => port.emitNodeStarted(event));
+
+    // Solo la PRIMERA vuelta del bucle: es cuando la fila pasa a EN_PROCESO
+    // (alta nueva o reanudacion). Derivarlo de cada nodo difundiria al
+    // namespace entero el trafico que `node:started` reserva a la sala.
+    if (event.transition === 1 && event.attempt === 1) {
+      this.emitExecutionUpdated({
+        ...this.baseOf(event),
+        state: ExecutionState.EN_PROCESO,
+        activeCursor: event.nodeId,
+      });
+    }
   }
 
   public emitNodeCompleted(event: NodeCompletedEvent): void {
     this.dispatch('node:completed', (port) => port.emitNodeCompleted(event));
+  }
+
+  /** Los tres campos comunes, sin arrastrar el resto del payload de origen. */
+  private baseOf(event: {
+    readonly executionId: string;
+    readonly flowId: string;
+    readonly emittedAt: string;
+  }): Pick<ExecutionUpdatedEvent, 'executionId' | 'flowId' | 'emittedAt'> {
+    return {
+      executionId: event.executionId,
+      flowId: event.flowId,
+      emittedAt: event.emittedAt,
+    };
   }
 
   /**

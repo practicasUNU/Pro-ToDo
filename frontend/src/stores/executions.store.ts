@@ -5,11 +5,31 @@ import * as fsmExecutionsService from '@services/fsm-executions.service';
 
 import { toSortQuery } from '@/utils/table-sort';
 
-import type { ExecutionState, ExecutionSummary } from '@/types/execution';
+import { ExecutionState } from '@/types/execution';
+
+import type { ExecutionSummary, ExecutionUpdatedEvent } from '@/types/execution';
 import type { ExecutionSortKey, TableSort } from '@/types/sort';
 
 /** Filas por pagina del historial de ejecuciones. */
 export const DEFAULT_EXECUTIONS_PAGE_SIZE = 10;
+
+/**
+ * Espera antes de recargar la pagina tras un evento de socket. Agrupa la rafaga
+ * de una ejecucion que arranca y termina en milisegundos en una sola peticion.
+ */
+export const EXECUTIONS_REFRESH_DEBOUNCE_MS = 500;
+
+/**
+ * Estados que traen datos que el evento no lleva (`hasAlerts`, `failureReason`,
+ * `logFilePath`): la fila se parchea al instante y despues se relee.
+ */
+const STATES_NEEDING_RELOAD: ReadonlySet<ExecutionState> = new Set([
+  ExecutionState.PAUSADO,
+  ExecutionState.FALLIDO,
+  ExecutionState.EXITOSO,
+  ExecutionState.OMITIDO,
+  ExecutionState.DESCARTADO,
+]);
 
 /** Filtros del historial. Ausente = sin filtrar. */
 export interface ExecutionHistoryFilters {
@@ -33,6 +53,9 @@ export const useExecutionsStore = defineStore('executions', () => {
   /** Orden del historial ENTERO, resuelto en el servidor. */
   const sort = ref<TableSort<ExecutionSortKey>>({ sortBy: null, descending: false });
   const isLoading = ref(false);
+  /** El historial se ha cargado alguna vez: sin el, un evento no pide nada. */
+  const hasLoaded = ref(false);
+  let refreshTimer: ReturnType<typeof setTimeout> | null = null;
 
   const setFilters = (next: ExecutionHistoryFilters): void => {
     filters.value = { ...next };
@@ -61,9 +84,59 @@ export const useExecutionsStore = defineStore('executions', () => {
       total.value = loaded.total;
       limit.value = loaded.limit;
       offset.value = loaded.offset;
+      hasLoaded.value = true;
     } finally {
       isLoading.value = false;
     }
+  };
+
+  /** Relee la pagina vigente una sola vez por rafaga de eventos. */
+  const scheduleRefresh = (): void => {
+    if (refreshTimer !== null) clearTimeout(refreshTimer);
+
+    refreshTimer = setTimeout(() => {
+      refreshTimer = null;
+      // Un fallo de red aqui no tiene a quien avisar: la tabla conserva la fila
+      // ya parcheada y la siguiente carga manual la corrige.
+      fetchPage().catch(() => undefined);
+    }, EXECUTIONS_REFRESH_DEBOUNCE_MS);
+  };
+
+  /**
+   * Aplica un `execution:updated` del socket sin esperar a un F5.
+   *
+   * - Fila visible: se parchea estado y cursor al instante (inmutable), y si el
+   *   estado trae datos que el evento no lleva o la saca del filtro, se relee.
+   * - Fila no visible en la primera pagina: es una ejecucion nueva o reanudada
+   *   que deberia aparecer arriba; se relee la pagina.
+   * - En otra pagina, o con un filtro de flujo distinto, no se hace nada: el
+   *   operador esta mirando otra cosa y recolocar las filas le moveria la vista.
+   */
+  const applyExecutionUpdate = (event: ExecutionUpdatedEvent): void => {
+    if (!hasLoaded.value) return;
+    if (filters.value.flowId !== undefined && filters.value.flowId !== event.flowId) return;
+
+    const index = items.value.findIndex((item) => item.executionId === event.executionId);
+
+    if (index === -1) {
+      if (offset.value === 0) scheduleRefresh();
+      return;
+    }
+
+    items.value = items.value.map((item, position) =>
+      position === index
+        ? {
+            ...item,
+            state: event.state,
+            activeCursor: event.activeCursor,
+            updatedAt: event.emittedAt,
+          }
+        : item,
+    );
+
+    const leavesFilter = filters.value.state !== undefined && filters.value.state !== event.state;
+
+    if (leavesFilter || STATES_NEEDING_RELOAD.has(event.state)) scheduleRefresh();
   };
 
   return {
@@ -77,6 +150,7 @@ export const useExecutionsStore = defineStore('executions', () => {
     setFilters,
     setSort,
     fetchPage,
+    applyExecutionUpdate,
   };
 });
 

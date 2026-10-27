@@ -25,6 +25,7 @@ import {
   ApiUnauthorizedResponse,
 } from '@nestjs/swagger';
 
+import { CurrentUser } from '@common/decorators/current-user.decorator';
 import { Roles } from '@common/decorators/roles.decorator';
 import { RolesGuard } from '@common/guards/roles.guard';
 import { AuditTable } from '@modules/audit/audit-tables';
@@ -41,6 +42,8 @@ import {
 } from './dto/credential-response.dto';
 import { UpdateCredentialDto } from './dto/update-credential.dto';
 import { CredentialAuthType } from './enums/credential-auth-type.enum';
+
+import type { AuthenticatedUser } from '@modules/auth/interfaces/jwt-payload.interface';
 
 /**
  * Boveda de credenciales cifradas de los nodos de destino.
@@ -125,10 +128,11 @@ export class CredentialsController {
   })
   public async create(
     @Body() createCredentialDto: CreateCredentialDto,
+    @CurrentUser() currentUser: AuthenticatedUser,
   ): Promise<CredentialResponseDto> {
     return plainToInstance(
       CredentialResponseDto,
-      await this.credentialsService.create(createCredentialDto),
+      await this.credentialsService.create(createCredentialDto, currentUser.id),
     );
   }
 
@@ -147,10 +151,15 @@ export class CredentialsController {
   public async update(
     @Param('id', ParseUUIDPipe) id: string,
     @Body() updateCredentialDto: UpdateCredentialDto,
+    @CurrentUser() currentUser: AuthenticatedUser,
   ): Promise<CredentialResponseDto> {
     return plainToInstance(
       CredentialResponseDto,
-      await this.credentialsService.update(id, updateCredentialDto),
+      await this.credentialsService.update(
+        id,
+        updateCredentialDto,
+        currentUser.id,
+      ),
     );
   }
 

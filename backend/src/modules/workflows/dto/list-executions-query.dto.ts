@@ -3,10 +3,7 @@ import { Type } from 'class-transformer';
 import { IsEnum, IsInt, IsOptional, IsUUID, Max, Min } from 'class-validator';
 
 import { ExecutionState } from '@core/fsm/types/fsm.enums';
-import {
-  SortByField,
-  SortOrderField,
-} from '@common/utils/sort-whitelist.util';
+import { SortByField, SortOrderField } from '@common/utils/sort-whitelist.util';
 
 import type {
   SortOrder,

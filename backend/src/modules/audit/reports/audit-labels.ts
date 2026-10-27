@@ -13,6 +13,7 @@ export const AUDIT_ACTION_LABELS: Readonly<Record<AuditActionType, string>> = {
   [AuditActionType.ACTIVATE]: 'Activación',
   [AuditActionType.DEACTIVATE]: 'Desactivación',
   [AuditActionType.RESUME]: 'Reanudación',
+  [AuditActionType.FLOW_DISCARDED]: 'Flujo descartado',
 };
 
 /** Etiquetas en castellano de las tablas auditadas. */

@@ -533,14 +533,15 @@ CREATE TABLE audit_eventos (
     id_audit_evento UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     -- NULL en un login fallido con un correo que no existe.
     usuario_id UUID NULL REFERENCES usuarios(id_usuario) ON DELETE SET NULL,
-    -- Literales en castellano (migracion 050) mas `REANUDAR` (migracion 053).
+    -- Literales en castellano (migracion 050) mas `REANUDAR` (migracion 053)
+    -- y `FLUJO_DESCARTADO` (migracion 059).
     -- El nombre de la restriccion es explicito para que las migraciones
     -- puedan soltarla y reponerla por nombre.
     accion VARCHAR(30) NOT NULL
         CONSTRAINT audit_eventos_accion_check CHECK (accion IN (
             'CREAR', 'ACTUALIZAR', 'ELIMINAR', 'CAMBIO_ROL',
             'INICIO_SESION', 'INICIO_SESION_FALLIDO', 'CIERRE_SESION',
-            'ACTIVAR', 'DESACTIVAR', 'REANUDAR'
+            'ACTIVAR', 'DESACTIVAR', 'REANUDAR', 'FLUJO_DESCARTADO'
         )),
     tabla_afectada VARCHAR(60) NOT NULL,
     registro_id VARCHAR(64) NULL,
@@ -555,9 +556,9 @@ CREATE INDEX idx_audit_eventos_usuario_fecha ON audit_eventos (usuario_id, cread
 CREATE INDEX idx_audit_eventos_tabla_registro ON audit_eventos (tabla_afectada, registro_id);
 
 -- =============================================================================
--- Tabla: credenciales (migracion 055)
--- Duplicada en db/migrations/055-tabla-credenciales.sql para las bases de
--- datos ya creadas. Secretos cifrados con AES-256-GCM (`EncryptionService`):
+-- Tabla: credenciales (migraciones 055 y 058)
+-- Duplicada en db/migrations/055-tabla-credenciales.sql y
+-- 058-credenciales-auditoria.sql para las bases de datos ya creadas. Secretos cifrados con AES-256-GCM (`EncryptionService`):
 -- `id_credencial` es el AAD del cifrado y lo genera la aplicacion.
 -- =============================================================================
 
@@ -570,8 +571,10 @@ CREATE TABLE credenciales (
     datos_cifrados TEXT NOT NULL,
     vector_inicializacion TEXT NOT NULL,
     etiqueta_autenticacion TEXT NOT NULL,
-    creado_en TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    actualizado_en TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+    creado_por UUID NULL REFERENCES usuarios(id_usuario) ON DELETE SET NULL,
+    fecha_creacion TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    actualizado_por UUID NULL REFERENCES usuarios(id_usuario) ON DELETE SET NULL,
+    fecha_actualizacion TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
 CREATE UNIQUE INDEX idx_credenciales_nombre ON credenciales (nombre);

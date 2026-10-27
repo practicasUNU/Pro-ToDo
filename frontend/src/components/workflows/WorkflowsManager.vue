@@ -8,6 +8,7 @@ import { useWorkflowTemplatesStore } from '@stores/workflow-templates.store';
 import { useWorkflowsStore } from '@stores/workflows.store';
 
 import AuditDetailsMenu from '@components/shared/AuditDetailsMenu.vue';
+import AuditStampCell from '@components/shared/AuditStampCell.vue';
 import SafeDeleteModal from '@components/shared/SafeDeleteModal.vue';
 import StatusBadge from '@components/shared/StatusBadge.vue';
 
@@ -17,7 +18,7 @@ import { extractApiErrorMessage } from '@/utils/api-error';
 import { describeExecutionState } from '@/utils/execution-state-display';
 import { describeWorkflowStatus } from '@/utils/status-display';
 
-import { ExecutionState } from '@/types/execution';
+import { ExecutionState, MAX_DISCARD_REASON_LENGTH } from '@/types/execution';
 import { WorkflowStatus } from '@/types/pipeline';
 
 import type { ExecutionSummary } from '@/types/execution';
@@ -46,6 +47,8 @@ const workflowToDeactivate = ref<PipelineSummary | null>(null);
 // resolviera en ese momento cerraria una ejecucion distinta de la que el
 // operador vio al pulsar.
 const executionToDiscard = ref<string | null>(null);
+/** Motivo opcional del descarte; va al evento FLUJO_DESCARTADO de la auditoria. */
+const discardReason = ref('');
 
 // Admite `null` porque el boton `clearable` de QInput escribe eso, no una cadena
 // vacia. QTable declara su prop `filter` como `any`, asi que el compilador no
@@ -86,6 +89,14 @@ const columns: QTableColumn<PipelineSummary>[] = [
     sortable: true,
   },
   { name: 'status', label: 'Estado', field: 'status', align: 'center', sortable: true },
+  {
+    // Ultimo cambio a la vista; el alta completa sigue en `AuditDetailsMenu`.
+    // Sin orden: la API no ordena por autor y la fecha sola enganaria.
+    name: 'updatedAt',
+    label: 'Ultima modificacion',
+    field: 'updatedAt',
+    align: 'left',
+  },
   { name: 'actions', label: 'Acciones', field: 'id', align: 'center' },
 ];
 
@@ -252,6 +263,7 @@ const requestDiscard = (workflow: PipelineSummary): void => {
   // Se guarda el ID y no el resumen: el dialogo solo necesita a quien descartar,
   // y exigir el objeto completo dejaba el boton inerte tras un refresco.
   executionToDiscard.value = executionId;
+  discardReason.value = '';
   isDiscardDialogOpen.value = true;
 };
 
@@ -271,7 +283,7 @@ const confirmDiscard = async (): Promise<void> => {
   }
 
   try {
-    await executionStore.discardExecution(executionId);
+    await executionStore.discardExecution(executionId, discardReason.value);
     $q.notify({
       type: 'positive',
       message: 'Ejecucion descartada. El flujo queda inactivo.',
@@ -546,6 +558,12 @@ onBeforeUnmount(() => {
         </q-td>
       </template>
 
+      <template #body-cell-updatedAt="cellProps">
+        <q-td :props="cellProps">
+          <AuditStampCell :audit="cellProps.row" />
+        </q-td>
+      </template>
+
       <template #body-cell-actions="cellProps">
         <q-td :props="cellProps" class="q-gutter-x-xs">
           <!-- Supervision: la topologia en vivo, de solo lectura. Va la
@@ -648,7 +666,20 @@ onBeforeUnmount(() => {
       message="Esta accion abortara definitivamente la ejecucion pausada y cambiara el estado del flujo a Inactivo. ¿Deseas continuar?"
       confirm-label="Descartar"
       @confirm="confirmDiscard"
-    />
+    >
+      <q-input
+        v-model="discardReason"
+        outlined
+        dense
+        type="textarea"
+        autogrow
+        counter
+        label="Motivo del descarte (opcional)"
+        :maxlength="MAX_DISCARD_REASON_LENGTH"
+        hint="Queda registrado en la auditoria."
+        data-test="discard-reason"
+      />
+    </SafeDeleteModal>
   </q-page>
 </template>
 

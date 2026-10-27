@@ -98,6 +98,28 @@ html {
   }
 }
 
+// En movil los 44px se mantienen, pero sin los margenes entre controles de la
+// cabecera y con los grupos de botones en varias lineas: cuatro objetivos de
+// 44px mas el logotipo desbordaban una pantalla de 360px.
+@media (max-width: 599px) {
+  .pd-large-targets {
+    .pd-toolbar {
+      padding-left: 4px;
+      padding-right: 4px;
+      gap: 2px;
+
+      > .q-btn {
+        margin-left: 0;
+        margin-right: 0;
+      }
+    }
+
+    .q-btn-toggle {
+      flex-wrap: wrap;
+    }
+  }
+}
+
 // ============================================================
 // Paletas
 // ============================================================

@@ -11,14 +11,15 @@ import { useAccessibilityStore } from '@stores/accessibility.store';
 
 import { AccessibilityPalette } from '@/types/accessibility';
 
-const mountMenu = () =>
+const mountMenu = (props: { includeThemeToggle?: boolean } = {}) =>
   mount(AccessibilityMenu, {
+    props,
     global: {
       plugins: [Quasar],
       // El plugin `Quasar` no registra componentes: se declaran a mano.
       components: { QBtn, QBtnToggle, QOptionGroup, QSeparator, QToggle, QTooltip },
       // El QMenu se teletransporta al body: se aplana para ver su contenido.
-      stubs: { QMenu: { template: '<div><slot /></div>' } },
+      stubs: { QMenu: { template: '<div><slot /></div>' }, ThemeToggle: true },
     },
   });
 
@@ -67,5 +68,15 @@ describe('AccessibilityMenu', () => {
     // 3. Assert
     expect(store.fontScale).toBe(1.5);
     expect(store.largeTargets).toBe(true);
+  });
+
+  it('2.1 deberia alojar el conmutador de tema solo cuando la cabecera lo pide (movil)', () => {
+    // 1. Arrange + 2. Act
+    const desktop = mountMenu();
+    const mobile = mountMenu({ includeThemeToggle: true });
+
+    // 3. Assert
+    expect(desktop.find('[data-testid="a11y-theme-row"]').exists()).toBe(false);
+    expect(mobile.find('[data-testid="a11y-theme-row"]').exists()).toBe(true);
   });
 });

@@ -7,6 +7,8 @@ import { computed } from 'vue';
 
 import { useAccessibilityStore } from '@stores/accessibility.store';
 
+import ThemeToggle from '@components/shared/ThemeToggle.vue';
+
 import {
   AccessibilityPalette,
   FONT_SCALES,
@@ -15,6 +17,16 @@ import {
 } from '@/types/accessibility';
 
 import type { FontScale } from '@/types/accessibility';
+
+interface Props {
+  /**
+   * Muestra el conmutador de tema dentro del menu. Lo activa la cabecera en
+   * movil, donde no cabe a su lado con los objetivos de 44px.
+   */
+  includeThemeToggle?: boolean;
+}
+
+withDefaults(defineProps<Props>(), { includeThemeToggle: false });
 
 const store = useAccessibilityStore();
 
@@ -45,7 +57,14 @@ const wideSpacing = computed<boolean>({
   >
     <q-tooltip>Accesibilidad</q-tooltip>
 
-    <q-menu anchor="bottom right" self="top right">
+    <!-- Acotado al viewport: con la escala de texto al maximo y los objetivos
+         de 44px el menu superaba el alto de un movil y no se podia cerrar. -->
+    <q-menu
+      anchor="bottom right"
+      self="top right"
+      max-width="calc(100vw - 32px)"
+      max-height="calc(100vh - 80px)"
+    >
       <div class="pd-a11y-menu q-pa-md" role="group" aria-label="Opciones de accesibilidad">
         <div class="pd-h2 q-mb-sm">Accesibilidad</div>
 
@@ -89,6 +108,14 @@ const wideSpacing = computed<boolean>({
           @update:model-value="store.setLargeTargets($event)"
         />
 
+        <template v-if="includeThemeToggle">
+          <q-separator class="q-my-sm" />
+          <div class="row items-center justify-between" data-testid="a11y-theme-row">
+            <span class="pd-label">Modo oscuro</span>
+            <theme-toggle />
+          </div>
+        </template>
+
         <q-btn
           flat
           no-caps
@@ -113,6 +140,8 @@ const wideSpacing = computed<boolean>({
 .pd-a11y-menu {
   background: var(--pd-card-bg);
   color: var(--pd-text-primary);
-  min-width: 280px;
+  // `min()` y no 280px a secas: en un movil de 320px el menu, con su margen,
+  // se salia por la izquierda de la pantalla.
+  min-width: min(280px, calc(100vw - 32px));
 }
 </style>

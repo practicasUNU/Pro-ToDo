@@ -74,6 +74,9 @@ interface PortMock {
   emitFlowDiscarded: jest.Mock;
   emitFlowCompleted: jest.Mock;
   emitNodeError: jest.Mock;
+  emitNodeStarted: jest.Mock;
+  emitNodeCompleted: jest.Mock;
+  emitExecutionUpdated: jest.Mock;
 }
 
 const buildPort = (): PortMock => ({
@@ -82,6 +85,9 @@ const buildPort = (): PortMock => ({
   emitFlowDiscarded: jest.fn(),
   emitFlowCompleted: jest.fn(),
   emitNodeError: jest.fn(),
+  emitNodeStarted: jest.fn(),
+  emitNodeCompleted: jest.fn(),
+  emitExecutionUpdated: jest.fn(),
 });
 
 interface Harness {
@@ -275,5 +281,42 @@ describe('ExecutionEventsCoordinator (puerto de eventos del motor FSM)', () => {
 
     // 3. Assert 🎯
     expect(port.emitFlowCompleted).toHaveBeenCalledWith(COMPLETED);
+  });
+
+  describe('3. Resumen global execution:updated', () => {
+    it('3.1 deberia derivar PAUSADO con el cursor de una pausa', () => {
+      // 1. Arrange 📐
+      const { coordinator, port } = buildHarness();
+      coordinator.register(port);
+
+      // 2. Act ⚙️
+      coordinator.emitFlowPaused(PAUSED);
+
+      // 3. Assert 🎯: solo los campos minimos, sin el mensaje de error.
+      expect(port.emitExecutionUpdated).toHaveBeenCalledWith({
+        executionId: EXECUTION_ID,
+        flowId: FLOW_ID,
+        emittedAt: EMITTED_AT,
+        state: ExecutionState.PAUSADO,
+        activeCursor: 'nodo_ia',
+      });
+    });
+
+    it('3.2 deberia derivar el estado final de un cierre', () => {
+      // 1. Arrange 📐
+      const { coordinator, port } = buildHarness();
+      coordinator.register(port);
+
+      // 2. Act ⚙️
+      coordinator.emitFlowCompleted(COMPLETED);
+
+      // 3. Assert 🎯
+      expect(port.emitExecutionUpdated).toHaveBeenCalledWith(
+        expect.objectContaining({
+          state: COMPLETED.finalState,
+          activeCursor: null,
+        }),
+      );
+    });
   });
 });

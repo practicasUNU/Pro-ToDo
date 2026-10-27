@@ -26,6 +26,8 @@ export enum AuditActionValue {
   DEACTIVATE = 'DESACTIVAR',
   /** Reanudacion manual de un flujo detenido (CU-09, migracion 053). */
   RESUME = 'REANUDAR',
+  /** Descarte manual de una ejecucion detenida (CU-09, migracion 059). */
+  FLOW_DISCARDED = 'FLUJO_DESCARTADO',
 }
 
 /** Valores del enum `AuditTable` del backend: nombres reales de tabla. */

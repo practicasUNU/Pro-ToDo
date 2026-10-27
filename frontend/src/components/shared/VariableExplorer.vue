@@ -100,8 +100,8 @@ const { filteredOptions: filteredFieldOptions, filterFn: filterFields } =
 /** El origen elegido depende de una rama de error. */
 const isSelectedConditional = computed<boolean>(
   () =>
-    props.context.find(({ namespace }) => namespace === selectedNamespace.value)
-      ?.isConditional === true,
+    props.context.find(({ namespace }) => namespace === selectedNamespace.value)?.isConditional ===
+    true,
 );
 
 /**

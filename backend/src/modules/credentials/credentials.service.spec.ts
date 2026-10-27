@@ -27,6 +27,9 @@ const CREDENTIAL_ID = '0b9a2c47-5d1e-4f3a-8c6b-2e7d9f1a4b30';
  * Repositorio en memoria: guarda las filas COMPLETAS (con cifrado) y simula el
  * `select: false` devolviendo sin columnas criptograficas en `findOne`.
  */
+/** Administrador que firma las altas y modificaciones de la boveda. */
+const ACTOR_ID = '3f1c2b64-8a5e-4c2f-9d3a-7b6e5f4c1a20';
+
 const buildHarness = (options: { key?: string; inUse?: boolean } = {}) => {
   const rows = new Map<string, Credential>();
   const stripCrypto = (row: Credential): Credential =>
@@ -109,11 +112,14 @@ describe('CredentialsService (boveda AES-256-GCM)', () => {
       const { service, rows } = buildHarness();
 
       // 2. Act ⚙️
-      const created = await service.create({
-        name: 'API de becas',
-        authType: CredentialAuthType.BEARER_TOKEN,
-        token: 'tok_secreto',
-      });
+      const created = await service.create(
+        {
+          name: 'API de becas',
+          authType: CredentialAuthType.BEARER_TOKEN,
+          token: 'tok_secreto',
+        },
+        ACTOR_ID,
+      );
       const resolution = await service.resolveSecret(created.id);
 
       // 3. Assert 🎯
@@ -128,17 +134,44 @@ describe('CredentialsService (boveda AES-256-GCM)', () => {
       });
     });
 
+    it('1.1bis deberia firmar el alta y la modificacion con el autor', async () => {
+      // 1. Arrange 📐
+      const { service, rows } = buildHarness();
+      const editorId = '8b2d4e6f-1a3c-4d5e-9f70-8192a3b4c5d6';
+
+      // 2. Act ⚙️
+      const created = await service.create(
+        {
+          name: 'API firmada',
+          authType: CredentialAuthType.BEARER_TOKEN,
+          token: 'tok',
+        },
+        ACTOR_ID,
+      );
+      const afterCreate = { ...rows.get(created.id) };
+      await service.update(created.id, { name: 'API firmada 2' }, editorId);
+
+      // 3. Assert 🎯: actualizado_por pasa al ultimo que toco la fila.
+      expect(afterCreate.createdByUserId).toBe(ACTOR_ID);
+      expect(afterCreate.updatedByUserId).toBe(ACTOR_ID);
+      expect(rows.get(created.id)?.createdByUserId).toBe(ACTOR_ID);
+      expect(rows.get(created.id)?.updatedByUserId).toBe(editorId);
+    });
+
     it('1.2 deberia descartar los campos que no son del tipo', async () => {
       // 1. Arrange 📐: un `password` junto a un BEARER no se cifra en silencio.
       const { service } = buildHarness();
 
       // 2. Act ⚙️
-      const created = await service.create({
-        name: 'API',
-        authType: CredentialAuthType.BEARER_TOKEN,
-        token: 't',
-        password: 'colado',
-      });
+      const created = await service.create(
+        {
+          name: 'API',
+          authType: CredentialAuthType.BEARER_TOKEN,
+          token: 't',
+          password: 'colado',
+        },
+        ACTOR_ID,
+      );
       const resolution = await service.resolveSecret(created.id);
 
       // 3. Assert 🎯
@@ -153,30 +186,39 @@ describe('CredentialsService (boveda AES-256-GCM)', () => {
 
       // 2. Act ⚙️ + 3. Assert 🎯
       await expect(
-        service.create({
-          name: 'API',
-          authType: CredentialAuthType.BEARER_TOKEN,
-          token: 't',
-        }),
+        service.create(
+          {
+            name: 'API',
+            authType: CredentialAuthType.BEARER_TOKEN,
+            token: 't',
+          },
+          ACTOR_ID,
+        ),
       ).rejects.toThrow(ServiceUnavailableException);
     });
 
     it('1.4 deberia rechazar un nombre repetido', async () => {
       // 1. Arrange 📐
       const { service } = buildHarness();
-      await service.create({
-        name: 'API',
-        authType: CredentialAuthType.BEARER_TOKEN,
-        token: 't',
-      });
+      await service.create(
+        {
+          name: 'API',
+          authType: CredentialAuthType.BEARER_TOKEN,
+          token: 't',
+        },
+        ACTOR_ID,
+      );
 
       // 2. Act ⚙️ + 3. Assert 🎯
       await expect(
-        service.create({
-          name: 'API',
-          authType: CredentialAuthType.BEARER_TOKEN,
-          token: 'u',
-        }),
+        service.create(
+          {
+            name: 'API',
+            authType: CredentialAuthType.BEARER_TOKEN,
+            token: 'u',
+          },
+          ACTOR_ID,
+        ),
       ).rejects.toThrow(ConflictException);
     });
   });
@@ -185,15 +227,18 @@ describe('CredentialsService (boveda AES-256-GCM)', () => {
     it('2.1 deberia conservar el cifrado si solo cambia el nombre', async () => {
       // 1. Arrange 📐
       const { service, rows } = buildHarness();
-      const created = await service.create({
-        name: 'API',
-        authType: CredentialAuthType.BEARER_TOKEN,
-        token: 't',
-      });
+      const created = await service.create(
+        {
+          name: 'API',
+          authType: CredentialAuthType.BEARER_TOKEN,
+          token: 't',
+        },
+        ACTOR_ID,
+      );
       const before = rows.get(created.id)?.encryptedData;
 
       // 2. Act ⚙️
-      await service.update(created.id, { name: 'API renombrada' });
+      await service.update(created.id, { name: 'API renombrada' }, ACTOR_ID);
 
       // 3. Assert 🎯
       expect(rows.get(created.id)?.encryptedData).toBe(before);
@@ -204,36 +249,46 @@ describe('CredentialsService (boveda AES-256-GCM)', () => {
       // 1. Arrange 📐: mezclar el usuario nuevo con la contrasena vieja
       //    exigiria descifrar fuera del motor.
       const { service } = buildHarness();
-      const created = await service.create({
-        name: 'Portal',
-        authType: CredentialAuthType.BASIC_AUTH,
-        username: 'svc',
-        password: 'p1',
-      });
+      const created = await service.create(
+        {
+          name: 'Portal',
+          authType: CredentialAuthType.BASIC_AUTH,
+          username: 'svc',
+          password: 'p1',
+        },
+        ACTOR_ID,
+      );
 
       // 2. Act ⚙️ + 3. Assert 🎯
       await expect(
-        service.update(created.id, { password: 'p2' }),
+        service.update(created.id, { password: 'p2' }, ACTOR_ID),
       ).rejects.toThrow(BadRequestException);
     });
 
     it('2.3 deberia re-cifrar al rotar el secreto completo', async () => {
       // 1. Arrange 📐
       const { service } = buildHarness();
-      const created = await service.create({
-        name: 'Clave',
-        authType: CredentialAuthType.API_KEY,
-        keyName: 'X-Api-Key',
-        apiKey: 'k1',
-        placement: ApiKeyPlacement.HEADER,
-      });
+      const created = await service.create(
+        {
+          name: 'Clave',
+          authType: CredentialAuthType.API_KEY,
+          keyName: 'X-Api-Key',
+          apiKey: 'k1',
+          placement: ApiKeyPlacement.HEADER,
+        },
+        ACTOR_ID,
+      );
 
       // 2. Act ⚙️
-      await service.update(created.id, {
-        keyName: 'api_key',
-        apiKey: 'k2',
-        placement: ApiKeyPlacement.QUERY,
-      });
+      await service.update(
+        created.id,
+        {
+          keyName: 'api_key',
+          apiKey: 'k2',
+          placement: ApiKeyPlacement.QUERY,
+        },
+        ACTOR_ID,
+      );
 
       // 3. Assert 🎯
       await expect(service.resolveSecret(created.id)).resolves.toEqual({
@@ -249,19 +304,26 @@ describe('CredentialsService (boveda AES-256-GCM)', () => {
     it('2.4 no deberia cambiar el tipo de una credencial en uso', async () => {
       // 1. Arrange 📐
       const { service } = buildHarness({ inUse: true });
-      const created = await service.create({
-        name: 'API',
-        authType: CredentialAuthType.BEARER_TOKEN,
-        token: 't',
-      });
+      const created = await service.create(
+        {
+          name: 'API',
+          authType: CredentialAuthType.BEARER_TOKEN,
+          token: 't',
+        },
+        ACTOR_ID,
+      );
 
       // 2. Act ⚙️ + 3. Assert 🎯
       await expect(
-        service.update(created.id, {
-          authType: CredentialAuthType.BASIC_AUTH,
-          username: 'u',
-          password: 'p',
-        }),
+        service.update(
+          created.id,
+          {
+            authType: CredentialAuthType.BASIC_AUTH,
+            username: 'u',
+            password: 'p',
+          },
+          ACTOR_ID,
+        ),
       ).rejects.toThrow(ConflictException);
     });
   });
@@ -270,11 +332,14 @@ describe('CredentialsService (boveda AES-256-GCM)', () => {
     it('3.1 deberia bloquear el borrado de una credencial citada por un flujo', async () => {
       // 1. Arrange 📐
       const { service, repository, dataSource } = buildHarness({ inUse: true });
-      const created = await service.create({
-        name: 'API',
-        authType: CredentialAuthType.BEARER_TOKEN,
-        token: 't',
-      });
+      const created = await service.create(
+        {
+          name: 'API',
+          authType: CredentialAuthType.BEARER_TOKEN,
+          token: 't',
+        },
+        ACTOR_ID,
+      );
 
       // 2. Act ⚙️ + 3. Assert 🎯
       await expect(service.remove(created.id)).rejects.toThrow(
@@ -290,11 +355,14 @@ describe('CredentialsService (boveda AES-256-GCM)', () => {
     it('3.2 deberia borrar y difundir DELETED si nadie la usa', async () => {
       // 1. Arrange 📐
       const { service, rows, crudEvents } = buildHarness();
-      const created = await service.create({
-        name: 'API',
-        authType: CredentialAuthType.BEARER_TOKEN,
-        token: 't',
-      });
+      const created = await service.create(
+        {
+          name: 'API',
+          authType: CredentialAuthType.BEARER_TOKEN,
+          token: 't',
+        },
+        ACTOR_ID,
+      );
 
       // 2. Act ⚙️
       await service.remove(created.id);
@@ -309,11 +377,14 @@ describe('CredentialsService (boveda AES-256-GCM)', () => {
     it('3.3 deberia devolver NOT_FOUND, VAULT_UNAVAILABLE o UNREADABLE sin lanzar', async () => {
       // 1. Arrange 📐
       const { service, rows } = buildHarness();
-      const created = await service.create({
-        name: 'API',
-        authType: CredentialAuthType.BEARER_TOKEN,
-        token: 't',
-      });
+      const created = await service.create(
+        {
+          name: 'API',
+          authType: CredentialAuthType.BEARER_TOKEN,
+          token: 't',
+        },
+        ACTOR_ID,
+      );
       const row = rows.get(created.id);
       if (row !== undefined)
         rows.set(created.id, {

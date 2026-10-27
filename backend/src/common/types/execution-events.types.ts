@@ -18,6 +18,7 @@ export const EXECUTION_EVENT = {
   NODE_ERROR: 'node:error',
   NODE_STARTED: 'node:started',
   NODE_COMPLETED: 'node:completed',
+  EXECUTION_UPDATED: 'execution:updated',
 } as const;
 
 /** Union de los nombres de evento, derivada para que no haya que mantenerla. */
@@ -40,6 +41,21 @@ export interface ExecutionEventBase {
   readonly executionId: string;
   readonly flowId: string;
   readonly emittedAt: string;
+}
+
+/**
+ * La fila de `ejecuciones_flujo` cambio de estado.
+ *
+ * Resumen MINIMO y global (namespace entero): es lo que necesita el historial
+ * de ejecuciones para repintar una fila sin F5, aunque quien lo mira no este
+ * suscrito a la sala del flujo. Lo deriva `ExecutionEventsCoordinator` de los
+ * eventos de cierre, pausa, reanudacion y descarte, y del primer nodo de cada
+ * vuelta del bucle; el motor solo lo emite a mano en los abortos por SQL.
+ */
+export interface ExecutionUpdatedEvent extends ExecutionEventBase {
+  readonly state: ExecutionState;
+  /** Nodo del cursor, o `null` en los estados terminales. */
+  readonly activeCursor: string | null;
 }
 
 /**

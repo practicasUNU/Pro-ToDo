@@ -620,12 +620,26 @@ describe('useExecutionStore · estado reactivo de las ejecuciones del motor', ()
       await store.discardExecution(EXECUTION_ID);
 
       // 3. Assert 🎯
-      expect(discardExecution).toHaveBeenCalledWith(EXECUTION_ID);
+      expect(discardExecution).toHaveBeenCalledWith(EXECUTION_ID, null);
       expect(store.executions[0]?.state).toBe(ExecutionState.DESCARTADO);
       // Sin cursor: DESCARTADO es terminal, y conservarlo ofreceria un
       // reintento imposible.
       expect(store.executions[0]?.activeCursor).toBeNull();
       expect(store.isDiscarding).toBe(false);
+    });
+
+    it('deberia enviar el motivo recortado y omitir uno en blanco', async () => {
+      // 1. Arrange 📐
+      const store = useExecutionStore();
+      discardExecution.mockResolvedValue(buildDiscardResult());
+
+      // 2. Act ⚙️
+      await store.discardExecution(EXECUTION_ID, '  Correo de prueba  ');
+      await store.discardExecution(EXECUTION_ID, '   ');
+
+      // 3. Assert 🎯
+      expect(discardExecution).toHaveBeenNthCalledWith(1, EXECUTION_ID, 'Correo de prueba');
+      expect(discardExecution).toHaveBeenNthCalledWith(2, EXECUTION_ID, null);
     });
 
     it('deberia propagar el fallo y apagar el indicador igualmente', async () => {

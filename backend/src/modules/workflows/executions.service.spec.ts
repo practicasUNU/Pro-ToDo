@@ -965,7 +965,13 @@ describe('ExecutionsService (consulta y reintento manual CU-09)', () => {
         EXECUTION_ID,
         USER_ID,
       );
-      expect(workflows.deactivateAfterDiscard).toHaveBeenCalledWith(FLOW_ID);
+      expect(workflows.deactivateAfterDiscard).toHaveBeenCalledWith(FLOW_ID, {
+        userId: USER_ID,
+        executionId: EXECUTION_ID,
+        previousState: ExecutionState.PAUSADO,
+        reason: null,
+        sourceIp: null,
+      });
       expect(result.execution.state).toBe(ExecutionState.DESCARTADO);
       // Sin cursor: la fila es terminal y no se reanuda.
       expect(result.execution.activeCursor).toBeNull();

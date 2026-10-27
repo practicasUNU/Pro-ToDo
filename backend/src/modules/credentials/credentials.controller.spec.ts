@@ -38,6 +38,8 @@ const STORED: Credential = {
   authTag: 'VEFHLUZJTFRSQURB',
   createdAt: new Date('2026-10-24T08:00:00.000Z'),
   updatedAt: new Date('2026-10-24T08:00:00.000Z'),
+  createdByUserId: null,
+  updatedByUserId: null,
 };
 
 describe('CredentialsController (RBAC y lista blanca)', () => {
@@ -188,6 +190,7 @@ describe('CredentialsController (RBAC y lista blanca)', () => {
       );
       expect(serviceMock.create).toHaveBeenCalledWith(
         expect.objectContaining({ token: 'tok_que_no_debe_volver' }),
+        expect.any(String),
       );
     });
 

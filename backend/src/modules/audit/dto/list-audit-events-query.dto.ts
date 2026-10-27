@@ -13,10 +13,7 @@ import {
 
 import { AuditTable } from '@modules/audit/audit-tables';
 import { AuditActionType } from '@modules/audit/enums/audit-action.enum';
-import {
-  SortByField,
-  SortOrderField,
-} from '@common/utils/sort-whitelist.util';
+import { SortByField, SortOrderField } from '@common/utils/sort-whitelist.util';
 
 import type {
   SortOrder,

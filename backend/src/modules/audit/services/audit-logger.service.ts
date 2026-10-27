@@ -125,10 +125,15 @@ export class AuditLoggerService {
     const offset = query.offset ?? 0;
     const range = resolveDateRange(query, DEFAULT_AUDIT_RANGE_DAYS);
 
-    const sort = resolveSort(AUDIT_SORT_COLUMNS, query.sortBy, query.sortOrder, {
-      key: 'createdAt',
-      order: 'DESC',
-    });
+    const sort = resolveSort(
+      AUDIT_SORT_COLUMNS,
+      query.sortBy,
+      query.sortOrder,
+      {
+        key: 'createdAt',
+        order: 'DESC',
+      },
+    );
 
     // `NULLS LAST`: un evento sin usuario (login fallido) o sin IP es un hueco,
     // no el menor de los valores. El id desempata para paginar estable.

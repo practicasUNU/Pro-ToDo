@@ -41,6 +41,10 @@ import type { FsmExecution } from '@core/fsm/entities/fsm-execution.entity';
 import type { AuthenticatedUser } from '@modules/auth/interfaces/jwt-payload.interface';
 import type { PipelineSchemaDto } from '@core/fsm/dto/pipeline-schema.dto';
 import type { Repository } from 'typeorm';
+import type { DiscardAuditContext } from '@modules/workflows/workflows.service';
+
+/** Lo que el controlador aporta al evento `FLUJO_DESCARTADO`. */
+type DiscardAuditInput = Pick<DiscardAuditContext, 'reason' | 'sourceIp'>;
 
 /**
  * Consulta de ejecuciones y reintento manual (CU-09).
@@ -463,12 +467,22 @@ export class ExecutionsService {
   public async discardExecution(
     executionId: string,
     userId: string,
+    audit: DiscardAuditInput = { reason: null, sourceIp: null },
   ): Promise<DiscardExecutionResponseDto> {
     const { execution, lastCursor } =
       await this.fsmEngineService.discardExecution(executionId, userId);
 
+    // El motor solo descarta ejecuciones PAUSADO (409 en otro caso), asi que
+    // ese es siempre el estado del que viene.
     const workflow = await this.workflowsService.deactivateAfterDiscard(
       execution.flowId,
+      {
+        userId,
+        executionId,
+        previousState: ExecutionState.PAUSADO,
+        reason: audit.reason,
+        sourceIp: audit.sourceIp,
+      },
     );
 
     this.logger.log(

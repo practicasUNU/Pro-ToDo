@@ -34,6 +34,7 @@ import { JwtAuthGuard } from '@modules/auth/guards/jwt-auth.guard';
 import { UserRole } from '@modules/users/enums/user-role.enum';
 
 import { DiscardExecutionResponseDto } from './dto/discard-execution-response.dto';
+import { DiscardExecutionDto } from './dto/discard-execution.dto';
 import { ExecutionDetailResponseDto } from './dto/execution-detail-response.dto';
 import { ExecutionPageResponseDto } from './dto/execution-summary-response.dto';
 import { ListExecutionsQueryDto } from './dto/list-executions-query.dto';
@@ -207,7 +208,13 @@ export class ExecutionsController {
     // Mismo motivo que en `resume`: descartar es una intervencion manual sobre
     // datos reales, y su traza no puede ser anonima.
     @CurrentUser() currentUser: AuthenticatedUser,
+    // Motivo opcional y la IP de origen para el evento `FLUJO_DESCARTADO`.
+    @Body() discardExecutionDto: DiscardExecutionDto,
+    @Req() request: Request,
   ): Promise<DiscardExecutionResponseDto> {
-    return this.executionsService.discardExecution(id, currentUser.id);
+    return this.executionsService.discardExecution(id, currentUser.id, {
+      reason: discardExecutionDto.reason ?? null,
+      sourceIp: extractClientIp(request),
+    });
   }
 }

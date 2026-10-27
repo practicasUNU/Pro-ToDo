@@ -36,4 +36,11 @@ export enum AuditActionType {
    * que lo detuvo quedo resuelto, y el auditor necesita saber QUIEN lo acepto.
    */
   RESUME = 'REANUDAR',
+  /**
+   * Cierre manual de una ejecucion detenida (CU-09): la ejecucion pasa a
+   * DESCARTADO y su flujo queda INACTIVO. Se separa de `DEACTIVATE` porque no
+   * es apagar un flujo sano: es renunciar a un trabajo pendiente, y el auditor
+   * necesita su motivo y el estado del que venia.
+   */
+  FLOW_DISCARDED = 'FLUJO_DESCARTADO',
 }

@@ -21,6 +21,8 @@ const CREDENTIAL = {
   authType: CredentialAuthType.BEARER_TOKEN,
   createdAt: '2026-10-24T08:00:00.000Z',
   updatedAt: '2026-10-24T08:00:00.000Z',
+  createdBy: null,
+  updatedBy: null,
 };
 
 describe('useCredentialsStore (boveda)', () => {

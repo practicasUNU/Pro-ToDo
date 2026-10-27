@@ -5,6 +5,7 @@ import { useQuasar, type QTableColumn } from 'quasar';
 import { useAllowedIpsStore } from '@stores/allowed-ips.store';
 
 import AuditDetailsMenu from '@components/shared/AuditDetailsMenu.vue';
+import AuditStampCell from '@components/shared/AuditStampCell.vue';
 import SafeDeleteModal from '@components/shared/SafeDeleteModal.vue';
 
 import AllowedIpDialog from './AllowedIpDialog.vue';
@@ -54,6 +55,14 @@ const columns: QTableColumn<AllowedIp>[] = [
     field: 'createdAt',
     align: 'left',
     sortable: true,
+  },
+  {
+    // Ultimo cambio a la vista; el alta completa sigue en `AuditDetailsMenu`.
+    // Sin orden: la API no ordena por autor y la fecha sola enganaria.
+    name: 'updatedAt',
+    label: 'Ultima modificacion',
+    field: 'updatedAt',
+    align: 'left',
   },
   { name: 'actions', label: 'Acciones', field: 'id', align: 'center' },
 ];
@@ -179,6 +188,12 @@ onMounted(loadAllowedIps);
       <template #body-cell-createdAt="cellProps">
         <q-td :props="cellProps">
           {{ formatDateTime(cellProps.value) }}
+        </q-td>
+      </template>
+
+      <template #body-cell-updatedAt="cellProps">
+        <q-td :props="cellProps">
+          <AuditStampCell :audit="cellProps.row" />
         </q-td>
       </template>
 

@@ -1,5 +1,7 @@
 import { ApiProperty } from '@nestjs/swagger';
-import { Exclude, Expose } from 'class-transformer';
+import { Exclude, Expose, Type } from 'class-transformer';
+
+import { AuditUserResponseDto } from '@common/dto/audit-response.dto';
 
 import { CredentialAuthType } from '../enums/credential-auth-type.enum';
 
@@ -31,6 +33,18 @@ export class CredentialResponseDto {
   @Expose()
   @ApiProperty()
   updatedAt: Date;
+
+  /** Autor del alta; `null` en las filas anteriores a la migracion 058. */
+  @Expose()
+  @ApiProperty({ type: AuditUserResponseDto, nullable: true })
+  @Type(() => AuditUserResponseDto)
+  createdBy: AuditUserResponseDto | null;
+
+  /** Ultimo en modificar o rotar el secreto; `null` si no consta. */
+  @Expose()
+  @ApiProperty({ type: AuditUserResponseDto, nullable: true })
+  @Type(() => AuditUserResponseDto)
+  updatedBy: AuditUserResponseDto | null;
 }
 
 /**

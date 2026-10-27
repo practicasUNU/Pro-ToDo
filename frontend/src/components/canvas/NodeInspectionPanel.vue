@@ -5,6 +5,7 @@ import { useQuasar } from 'quasar';
 import SafeDeleteModal from '@components/shared/SafeDeleteModal.vue';
 import { useCanvasStore } from '@stores/canvas.store';
 import { useExecutionStore } from '@stores/execution.store';
+import { MAX_DISCARD_REASON_LENGTH } from '@/types/execution';
 import { ERROR_CONTEXT_NAMESPACE, NODE_TYPE_LABELS } from '@/types/pipeline';
 
 const canvasStore = useCanvasStore();
@@ -12,6 +13,8 @@ const executionStore = useExecutionStore();
 const $q = useQuasar();
 
 const isDiscardOpen = ref(false);
+/** Motivo opcional del descarte; va al evento FLUJO_DESCARTADO de la auditoria. */
+const discardReason = ref('');
 
 const isOpen = computed<boolean>({
   get: () => canvasStore.selectedStep !== null,
@@ -96,7 +99,8 @@ const handleDiscard = async (): Promise<void> => {
   }
 
   try {
-    await executionStore.discardExecution(execution.executionId);
+    await executionStore.discardExecution(execution.executionId, discardReason.value);
+    discardReason.value = '';
     $q.notify({ type: 'positive', icon: 'delete_sweep', message: 'Ejecucion descartada' });
     await canvasStore.loadCanvas(execution.flowId);
   } catch (error: unknown) {
@@ -186,6 +190,19 @@ const handleDiscard = async (): Promise<void> => {
       message="Se cerrara la ejecucion detenida y el flujo quedara retirado de los disparadores automaticos. No se puede deshacer."
       confirm-label="Descartar"
       @confirm="handleDiscard"
-    />
+    >
+      <q-input
+        v-model="discardReason"
+        outlined
+        dense
+        type="textarea"
+        autogrow
+        counter
+        label="Motivo del descarte (opcional)"
+        :maxlength="MAX_DISCARD_REASON_LENGTH"
+        hint="Queda registrado en la auditoria."
+        data-test="discard-reason"
+      />
+    </SafeDeleteModal>
   </q-drawer>
 </template>

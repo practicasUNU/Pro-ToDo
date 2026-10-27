@@ -43,6 +43,7 @@ import type {
   FlowDiscardedEvent,
   FlowPausedEvent,
   FlowResumedEvent,
+  ExecutionUpdatedEvent,
   NodeCompletedEvent,
   NodeErrorEvent,
   NodeStartedEvent,
@@ -362,6 +363,18 @@ export class NotificationGateway
 
   public emitNodeCompleted(event: NodeCompletedEvent): void {
     this.emitToFlow(EXECUTION_EVENT.NODE_COMPLETED, event.flowId, event);
+  }
+
+  /**
+   * Cambio de estado de una ejecucion, al NAMESPACE ENTERO.
+   *
+   * Mismo criterio que `emitFlowCompleted`: el historial de ejecuciones del
+   * panel no se suscribe a ninguna sala de flujo, y sin este evento solo se
+   * enteraba de una pausa o una reanudacion con un F5. El payload es minimo
+   * (estado y cursor) y se emite una vez por transicion, no por nodo.
+   */
+  public emitExecutionUpdated(event: ExecutionUpdatedEvent): void {
+    this.server?.emit(EXECUTION_EVENT.EXECUTION_UPDATED, event);
   }
 
   /**

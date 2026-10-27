@@ -16,6 +16,7 @@ export const AUDIT_ACTION_LABELS: Readonly<Record<AuditActionValue, string>> = {
   [AuditActionValue.ACTIVATE]: 'Activación',
   [AuditActionValue.DEACTIVATE]: 'Desactivación',
   [AuditActionValue.RESUME]: 'Reanudación',
+  [AuditActionValue.FLOW_DISCARDED]: 'Flujo descartado',
 };
 
 export const AUDIT_TABLE_LABELS: Readonly<Record<AuditTableValue, string>> = {
@@ -51,6 +52,8 @@ export const AUDIT_ACTION_BADGES: Readonly<Record<AuditActionValue, string>> = {
   // Mismo azul que una ejecucion en curso: reanudar es devolver el flujo a la
   // marcha, no armarlo de cero (eso es `ACTIVATE`).
   [AuditActionValue.RESUME]: 'pd-badge--running',
+  // Rojo de fallo: el trabajo pendiente se abandona y no se puede reanudar.
+  [AuditActionValue.FLOW_DISCARDED]: 'pd-badge--failed',
 };
 
 /** Opciones cerradas de un `q-select` (Poka-Yoke): `{ label, value }`. */

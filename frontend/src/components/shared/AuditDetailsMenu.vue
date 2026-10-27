@@ -9,9 +9,10 @@ import type { AuditableData, AuditUser } from '@/types/auditable';
  * Auditoria discreta de una fila maestra (migracion 045).
  *
  * Un unico boton de icono en la columna de acciones que despliega un menu con
- * quien creo y quien modifico por ultima vez el registro, y cuando. La tabla no
- * gana ninguna columna: los cuatro datos solo importan cuando alguien los
- * busca, y en cada fila competirian con lo que de verdad se lee.
+ * quien creo y quien modifico por ultima vez el registro, y cuando. La tabla
+ * solo muestra el ultimo cambio (`AuditStampCell`, columna "Ultima
+ * modificacion"); el alta completa vive aqui, porque solo importa cuando
+ * alguien la busca.
  *
  * ACCESIBILIDAD (WCAG 2.1 AA): el boton lleva `aria-label` con el nombre del
  * registro, porque un lector de pantalla recorriendo la tabla oiria "Ver

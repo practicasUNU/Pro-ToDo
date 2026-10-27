@@ -5,6 +5,7 @@ import { useQuasar } from 'quasar';
 import { subscribeToExecutionEvents, subscribeToReconnect } from '@services/socket-events.service';
 import { useCanvasStore } from '@stores/canvas.store';
 import { useExecutionStore } from '@stores/execution.store';
+import { useExecutionsStore } from '@stores/executions.store';
 import { useWorkflowsStore } from '@stores/workflows.store';
 
 import { ExecutionState } from '@/types/execution';
@@ -17,6 +18,7 @@ import {
 } from '@/utils/alert-categorizer';
 
 import type {
+  ExecutionUpdatedEvent,
   FlowCompletedEvent,
   NodeCompletedEvent,
   NodeStartedEvent,
@@ -65,6 +67,7 @@ export const useExecutionSocket = (): void => {
   const executionStore = useExecutionStore();
   const canvasStore = useCanvasStore();
   const workflowsStore = useWorkflowsStore();
+  const executionsStore = useExecutionsStore();
 
   let unsubscribe: (() => void) | null = null;
   let unsubscribeReconnect: (() => void) | null = null;
@@ -401,6 +404,14 @@ export const useExecutionSocket = (): void => {
    * Solo el canvas: la tabla de `/flujos` se mantiene al dia por
    * `crud:mutation`, que el backend difunde en cada cambio de fila.
    */
+  /**
+   * Historial de ejecuciones del panel: llega por un evento GLOBAL y no por la
+   * sala del flujo, porque el dashboard no se une a ninguna.
+   */
+  const onExecutionUpdated = (event: ExecutionUpdatedEvent): void => {
+    executionsStore.applyExecutionUpdate(event);
+  };
+
   const onReconnected = (): void => {
     void canvasStore.syncCurrentExecution();
   };
@@ -414,6 +425,7 @@ export const useExecutionSocket = (): void => {
       onNodeError,
       onNodeStarted,
       onNodeCompleted,
+      onExecutionUpdated,
     });
 
     unsubscribeReconnect = subscribeToReconnect(onReconnected);

@@ -71,6 +71,20 @@ import type { Repository } from 'typeorm';
  * endpoint.
  */
 /**
+ * Datos del evento `FLUJO_DESCARTADO` que acompana a `deactivateAfterDiscard`.
+ *
+ * `reason` y `sourceIp` son `null` cuando no constan: el motivo es opcional y
+ * un descarte disparado fuera de HTTP no tiene IP de origen.
+ */
+export interface DiscardAuditContext {
+  readonly userId: string;
+  readonly executionId: string;
+  readonly previousState: ExecutionState;
+  readonly reason: string | null;
+  readonly sourceIp: string | null;
+}
+
+/**
  * Tipos de nodo que el despacho de PRUEBAS no ejecuta.
  *
  * Se omiten los DISPARADORES, cada uno por su motivo. `TRIGGER_IMAP` abre una
@@ -1069,10 +1083,14 @@ export class WorkflowsService
    */
   public async deactivateAfterDiscard(
     workflowId: string,
+    discard: DiscardAuditContext,
   ): Promise<PipelineSummaryResponseDto> {
     const workflow = await this.findOne(workflowId);
+    const previousStatus = workflow.status;
 
     workflow.status = WorkflowStatus.INACTIVO;
+    // Firma la fila: quien descarta es quien la dejo INACTIVO.
+    workflow.updatedByUserId = discard.userId;
 
     const saved = await this.workflowRepository.save(workflow);
 
@@ -1090,6 +1108,27 @@ export class WorkflowsService
     this.logger.warn(
       `Flujo "${saved.name}" (${saved.id}) desactivado al descartar su ejecucion detenida.`,
     );
+
+    // Claves en castellano a proposito: son DATO que el auditor lee en crudo
+    // en `datos_anteriores` / `datos_nuevos`, igual que los valores del enum
+    // `AuditActionType`. `usuario_id` va en su propia columna.
+    await this.auditLogger.record({
+      userId: discard.userId,
+      action: AuditActionType.FLOW_DISCARDED,
+      affectedTable: AuditTable.WORKFLOWS,
+      recordId: saved.id,
+      previousData: {
+        estado_previo: discard.previousState,
+        estado_flujo_previo: previousStatus,
+      },
+      newData: {
+        flujo_id: saved.id,
+        ejecucion_id: discard.executionId,
+        estado_flujo: WorkflowStatus.INACTIVO,
+        motivo_descarte: discard.reason,
+      },
+      sourceIp: discard.sourceIp,
+    });
 
     return summary;
   }

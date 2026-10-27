@@ -318,11 +318,19 @@ export const useExecutionStore = defineStore('execution', () => {
    * repintarla desde aqui crearia un segundo dueno de ese estado: ya lo hace
    * la mutacion `crud:mutation` que el backend difunde.
    */
-  const discardExecution = async (executionId: string): Promise<DiscardExecutionResult> => {
+  const discardExecution = async (
+    executionId: string,
+    reason: string | null = null,
+  ): Promise<DiscardExecutionResult> => {
     isDiscarding.value = true;
 
     try {
-      const result = await fsmExecutionsService.discardExecution(executionId);
+      // Un motivo en blanco es lo mismo que no darlo.
+      const trimmedReason = reason?.trim() ?? '';
+      const result = await fsmExecutionsService.discardExecution(
+        executionId,
+        trimmedReason === '' ? null : trimmedReason,
+      );
 
       patchSummary(executionId, {
         state: result.execution.state,

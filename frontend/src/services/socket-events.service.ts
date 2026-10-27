@@ -9,6 +9,7 @@ import type { UserModifiedPayload } from '@/types/session-events';
 import type { PricingUpdatedPayload } from '@/types/pricing-events';
 import type {
   ExecutionEventHandlers,
+  ExecutionUpdatedEvent,
   FlowCompletedEvent,
   FlowDiscardedEvent,
   FlowPausedEvent,
@@ -45,6 +46,8 @@ export const subscribeToExecutionEvents = (handlers: ExecutionEventHandlers): ((
   const onNodeError = (event: NodeErrorEvent): void => handlers.onNodeError?.(event);
   const onNodeStarted = (event: NodeStartedEvent): void => handlers.onNodeStarted?.(event);
   const onNodeCompleted = (event: NodeCompletedEvent): void => handlers.onNodeCompleted?.(event);
+  const onExecutionUpdated = (event: ExecutionUpdatedEvent): void =>
+    handlers.onExecutionUpdated?.(event);
 
   socket.on(EXECUTION_EVENT.FLOW_PAUSED, onFlowPaused);
   socket.on(EXECUTION_EVENT.FLOW_RESUMED, onFlowResumed);
@@ -53,6 +56,7 @@ export const subscribeToExecutionEvents = (handlers: ExecutionEventHandlers): ((
   socket.on(EXECUTION_EVENT.NODE_ERROR, onNodeError);
   socket.on(EXECUTION_EVENT.NODE_STARTED, onNodeStarted);
   socket.on(EXECUTION_EVENT.NODE_COMPLETED, onNodeCompleted);
+  socket.on(EXECUTION_EVENT.EXECUTION_UPDATED, onExecutionUpdated);
 
   return () => {
     socket.off(EXECUTION_EVENT.FLOW_PAUSED, onFlowPaused);
@@ -62,6 +66,7 @@ export const subscribeToExecutionEvents = (handlers: ExecutionEventHandlers): ((
     socket.off(EXECUTION_EVENT.NODE_ERROR, onNodeError);
     socket.off(EXECUTION_EVENT.NODE_STARTED, onNodeStarted);
     socket.off(EXECUTION_EVENT.NODE_COMPLETED, onNodeCompleted);
+    socket.off(EXECUTION_EVENT.EXECUTION_UPDATED, onExecutionUpdated);
   };
 };
 

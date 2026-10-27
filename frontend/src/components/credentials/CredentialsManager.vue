@@ -4,12 +4,13 @@ import { useQuasar, type QTableColumn } from 'quasar';
 
 import { useCredentialsStore } from '@stores/credentials.store';
 
+import AuditDetailsMenu from '@components/shared/AuditDetailsMenu.vue';
+import AuditStampCell from '@components/shared/AuditStampCell.vue';
 import SafeDeleteModal from '@components/shared/SafeDeleteModal.vue';
 
 import CredentialDialog from './CredentialDialog.vue';
 
 import { extractApiErrorMessage } from '@/utils/api-error';
-import { formatDateTime } from '@/utils/date-format';
 
 import { CREDENTIAL_AUTH_TYPE_LABELS } from '@/types/credential';
 
@@ -37,10 +38,11 @@ const columns: QTableColumn<Credential>[] = [
     sortable: true,
   },
   {
+    // Quien y cuando toco la credencial por ultima vez: un alta, un renombrado
+    // o una rotacion del secreto (migracion 058).
     name: 'updatedAt',
-    label: 'Ultima rotacion',
+    label: 'Ultima modificacion',
     field: 'updatedAt',
-    format: (value: string) => formatDateTime(value),
     align: 'left',
     sortable: true,
   },
@@ -164,8 +166,15 @@ onMounted(loadCredentials);
         </q-td>
       </template>
 
+      <template #body-cell-updatedAt="cellProps">
+        <q-td :props="cellProps">
+          <AuditStampCell :audit="cellProps.row" />
+        </q-td>
+      </template>
+
       <template #body-cell-actions="cellProps">
         <q-td :props="cellProps" class="q-gutter-x-xs">
+          <AuditDetailsMenu :audit="cellProps.row" :subject="cellProps.row.name" />
           <q-btn
             class="pd-btn-icon"
             outline

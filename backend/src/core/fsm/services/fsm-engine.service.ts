@@ -536,6 +536,20 @@ export class FsmEngineService {
 
     const closed = affected ?? live.length;
 
+    // El cierre es por SQL y no pasa por `emitCompleted`: sin este aviso el
+    // historial de ejecuciones seguiria pintando EN_PROCESO/PAUSADO hasta un F5.
+    const emittedAt = new Date().toISOString();
+
+    for (const { executionId } of live) {
+      this.executionEvents.emitExecutionUpdated({
+        executionId,
+        flowId,
+        emittedAt,
+        state: ExecutionState.FALLIDO,
+        activeCursor: null,
+      });
+    }
+
     this.logger.warn(
       `Flujo "${flowId}": ${closed} ejecucion(es) viva(s) cerradas como FALLIDO. Motivo: ${trimmedReason}.`,
     );

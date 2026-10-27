@@ -115,12 +115,22 @@ export const EXECUTION_EVENT = {
   NODE_ERROR: 'node:error',
   NODE_STARTED: 'node:started',
   NODE_COMPLETED: 'node:completed',
+  EXECUTION_UPDATED: 'execution:updated',
 } as const;
 
 export interface ExecutionEventBase {
   readonly executionId: string;
   readonly flowId: string;
   readonly emittedAt: string;
+}
+
+/**
+ * Cambio de estado de una ejecucion, difundido al namespace entero. Replica de
+ * `ExecutionUpdatedEvent`: es lo que mantiene el historial al dia sin F5.
+ */
+export interface ExecutionUpdatedEvent extends ExecutionEventBase {
+  readonly state: ExecutionState;
+  readonly activeCursor: string | null;
 }
 
 export interface FlowPausedEvent extends ExecutionEventBase {
@@ -275,6 +285,7 @@ export interface ServerToClientEvents {
   'node:error': (event: NodeErrorEvent) => void;
   'node:started': (event: NodeStartedEvent) => void;
   'node:completed': (event: NodeCompletedEvent) => void;
+  'execution:updated': (event: ExecutionUpdatedEvent) => void;
   // Familia aparte —mutaciones de tablas maestras—, pero comparte socket, y el
   // mapa tipado tiene que conocerla o `socket.on` la rechaza en compilacion.
   'crud:mutation': (payload: CrudMutationPayload) => void;
@@ -300,4 +311,8 @@ export interface ExecutionEventHandlers {
   onNodeError?: (event: NodeErrorEvent) => void;
   onNodeStarted?: (event: NodeStartedEvent) => void;
   onNodeCompleted?: (event: NodeCompletedEvent) => void;
+  onExecutionUpdated?: (event: ExecutionUpdatedEvent) => void;
 }
+
+/** Replica de `MAX_DISCARD_REASON_LENGTH` (`DiscardExecutionDto`). */
+export const MAX_DISCARD_REASON_LENGTH = 500;

@@ -1,11 +1,7 @@
 import { Exclude } from 'class-transformer';
-import {
-  Column,
-  CreateDateColumn,
-  Entity,
-  PrimaryColumn,
-  UpdateDateColumn,
-} from 'typeorm';
+import { Column, Entity, PrimaryColumn } from 'typeorm';
+
+import { AuditableEntity } from '@common/entities/auditable.entity';
 
 import { CredentialAuthType } from '../enums/credential-auth-type.enum';
 
@@ -21,11 +17,13 @@ import { CredentialAuthType } from '../enums/credential-auth-type.enum';
  * auditoria— y, si alguien las cargara, no saldrian en una respuesta. Solo
  * `CredentialsService.resolveSecret` las pide, con `addSelect` explicito.
  *
- * No hereda `AuditableEntity`: la tabla usa `creado_en` / `actualizado_en`, y la
- * autoria de cada cambio queda en `audit_eventos`.
+ * Hereda `AuditableEntity` desde la migracion 058 (`creado_por`,
+ * `fecha_creacion`, `actualizado_por`, `fecha_actualizacion`), como el resto de
+ * tablas maestras: la tabla de Credenciales muestra quien roto por ultima vez
+ * cada secreto sin consultar `audit_eventos`.
  */
 @Entity('credenciales')
-export class Credential {
+export class Credential extends AuditableEntity {
   @PrimaryColumn('uuid', { name: 'id_credencial' })
   id: string;
 
@@ -46,10 +44,4 @@ export class Credential {
   @Exclude()
   @Column({ name: 'etiqueta_autenticacion', type: 'text', select: false })
   authTag: string;
-
-  @CreateDateColumn({ name: 'creado_en', type: 'timestamptz' })
-  createdAt: Date;
-
-  @UpdateDateColumn({ name: 'actualizado_en', type: 'timestamptz' })
-  updatedAt: Date;
 }

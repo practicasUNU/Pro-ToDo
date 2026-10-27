@@ -36,6 +36,15 @@ import type { FindOneOptions, Repository } from 'typeorm';
 const WORKFLOW_ID = 'b6c1f0d2-3e4a-4b5c-8d6e-7f8091a2b3c4';
 const EXECUTION_ID = '1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d';
 const AUTHOR_ID = '9c1f7b52-4d3a-4e6b-8f2c-1a0b9d8e7f60';
+
+/** Contexto de auditoria de un descarte manual (CU-09). */
+const DISCARD_INPUT = {
+  userId: '9c1f7b52-4d3a-4e6b-8f2c-1a0b9d8e7f60',
+  executionId: 'e1d2c3b4-a5f6-4789-8abc-def012345678',
+  previousState: ExecutionState.PAUSADO,
+  reason: 'Correo de prueba interna',
+  sourceIp: '10.0.0.7',
+} as const;
 const TEMPLATE_ID = '5e2d1c4b-7a89-4f30-b1c2-6d5e4f3a2b10';
 const MAPPER_NODE_ID = 'nodo_mapeador';
 
@@ -1878,12 +1887,42 @@ describe('WorkflowsService (detalle para el asistente de edicion)', () => {
       const { service, coordinator, engine } = buildHarness();
 
       // 2. Act ⚙️
-      await service.deactivateAfterDiscard(WORKFLOW_ID);
+      await service.deactivateAfterDiscard(WORKFLOW_ID, DISCARD_INPUT);
 
       // 3. Assert 🎯
       expect(coordinator.stopPollingForFlow).toHaveBeenCalledWith(WORKFLOW_ID);
       // Y sigue sin arrastrar las PAUSADO, que es lo que el descarte respeta.
       expect(engine.abortExecutionsForFlow).not.toHaveBeenCalled();
+    });
+
+    it('13.8 deberia registrar FLUJO_DESCARTADO con estado previo y motivo', async () => {
+      // 1. Arrange 📐
+      const { service, repository, auditLogger } = buildHarness();
+      repository.findOne.mockResolvedValue(
+        buildWorkflow({ status: WorkflowStatus.PAUSADO }),
+      );
+
+      // 2. Act ⚙️
+      await service.deactivateAfterDiscard(WORKFLOW_ID, DISCARD_INPUT);
+
+      // 3. Assert 🎯
+      expect(auditLogger.record).toHaveBeenCalledWith({
+        userId: DISCARD_INPUT.userId,
+        action: AuditActionType.FLOW_DISCARDED,
+        affectedTable: AuditTable.WORKFLOWS,
+        recordId: WORKFLOW_ID,
+        previousData: {
+          estado_previo: ExecutionState.PAUSADO,
+          estado_flujo_previo: WorkflowStatus.PAUSADO,
+        },
+        newData: {
+          flujo_id: WORKFLOW_ID,
+          ejecucion_id: DISCARD_INPUT.executionId,
+          estado_flujo: WorkflowStatus.INACTIVO,
+          motivo_descarte: DISCARD_INPUT.reason,
+        },
+        sourceIp: DISCARD_INPUT.sourceIp,
+      });
     });
   });
 });

@@ -5,6 +5,7 @@
      del area de pagina, via las custom properties --pd-*. -->
 <script setup lang="ts">
 import { computed } from 'vue';
+import { useQuasar } from 'quasar';
 import { useRouter } from 'vue-router';
 
 import AccessibilityMenu from '@components/shared/AccessibilityMenu.vue';
@@ -23,8 +24,16 @@ withDefaults(defineProps<AppHeaderProps>(), {
 
 defineEmits<{ 'toggle-drawer': [] }>();
 
+const $q = useQuasar();
 const router = useRouter();
 const sessionStore = useSessionStore();
+
+/**
+ * Pantalla de movil (< 600px, breakpoint `sm` de Quasar). El conmutador de tema
+ * pasa al menu de accesibilidad: con los objetivos de 44px activados, cuatro
+ * controles junto al logotipo no caben en 360px y la cabecera desbordaba.
+ */
+const isCompact = computed(() => $q.screen.lt.sm);
 
 const userEmail = computed(() => sessionStore.user?.email ?? '');
 
@@ -81,8 +90,8 @@ const onLogout = async (): Promise<void> => {
            el azul de marca no contrastaria contra el propio header. -->
       <!-- Accesibilidad junto al modo oscuro: son las dos preferencias de
            presentacion, y quien necesita una suele buscar la otra al lado. -->
-      <accessibility-menu class="q-mr-xs" />
-      <theme-toggle variant="shell" class="q-mr-sm" />
+      <accessibility-menu class="q-mr-xs" :include-theme-toggle="isCompact" />
+      <theme-toggle v-if="!isCompact" variant="shell" class="q-mr-sm" />
 
       <!-- El avatar va DENTRO de un boton: un q-avatar suelto no recibe foco de
            teclado, y el menu de perfil (con el cierre de sesion) quedaba fuera
@@ -188,5 +197,23 @@ const onLogout = async (): Promise<void> => {
 
 .pd-menu__actions {
   padding: 8px;
+}
+
+// Movil (breakpoint `xs` de Quasar). La cabecera no hace scroll horizontal: el
+// breadcrumb y su separador se ocultan —el titulo de la vista ya dice donde
+// se esta— y el logotipo encoge sin perder su proporcion.
+@media (max-width: 599px) {
+  .pd-header-logo {
+    height: 24px;
+    flex: 0 1 auto;
+    min-width: 0;
+    max-width: 40vw;
+    object-fit: contain;
+  }
+
+  .pd-header-separator,
+  .pd-header-breadcrumb {
+    display: none;
+  }
 }
 </style>

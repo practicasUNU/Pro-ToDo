@@ -11,6 +11,7 @@ import { plainToInstance } from 'class-transformer';
 import { randomUUID } from 'node:crypto';
 import { DataSource } from 'typeorm';
 
+import { AUDIT_RELATIONS } from '@common/utils/audit.util';
 import { CrudEventsCoordinator } from '@common/services/crud-events.coordinator';
 import {
   CREDENTIALS_ENCRYPTION_KEY_VAR,
@@ -117,7 +118,10 @@ export class CredentialsService {
   ) {}
 
   public async findAll(): Promise<Credential[]> {
-    return this.credentialRepository.find({ order: { name: 'ASC' } });
+    return this.credentialRepository.find({
+      relations: AUDIT_RELATIONS,
+      order: { name: 'ASC' },
+    });
   }
 
   /** Opciones del selector del nodo, opcionalmente filtradas por tipo. */
@@ -133,6 +137,7 @@ export class CredentialsService {
   public async findOne(id: string): Promise<Credential> {
     const credential = await this.credentialRepository.findOne({
       where: { id },
+      relations: AUDIT_RELATIONS,
     });
 
     if (credential === null) {
@@ -142,7 +147,10 @@ export class CredentialsService {
     return credential;
   }
 
-  public async create(dto: CreateCredentialDto): Promise<Credential> {
+  public async create(
+    dto: CreateCredentialDto,
+    actorId: string,
+  ): Promise<Credential> {
     this.assertVaultUsable();
     await this.assertNameAvailable(dto.name);
 
@@ -158,6 +166,9 @@ export class CredentialsService {
       name: dto.name,
       authType: dto.authType,
       ...encrypted,
+      // Quien crea es tambien el ultimo en modificar (`stampCreated`).
+      createdByUserId: actorId,
+      updatedByUserId: actorId,
     });
 
     const saved = await this.findOne(id);
@@ -176,6 +187,7 @@ export class CredentialsService {
   public async update(
     id: string,
     dto: UpdateCredentialDto,
+    actorId: string,
   ): Promise<Credential> {
     const current = await this.findOne(id);
     const nextType = dto.authType ?? current.authType;
@@ -198,6 +210,9 @@ export class CredentialsService {
     const patch: Partial<Credential> = {
       ...(dto.name === undefined ? {} : { name: dto.name }),
       authType: nextType,
+      // `update()` escribe columnas sueltas: la relacion `updatedBy` no
+      // interviene, de modo que basta con la FK (ver `stampUpdated`).
+      updatedByUserId: actorId,
     };
 
     if (rotatesSecret) {
