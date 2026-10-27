@@ -4,6 +4,61 @@ Registro técnico del "por qué" de cada decisión de implementación. Los estad
 
 ---
 
+## 2026-10-26 · Refactorizacion integral: filtro IMAP, tiempo real y trazabilidad — rama `feat/destino-http-generico`
+
+### "de" no es "destino"
+
+El modo "contiene" del disparador IMAP componia un patron `(?:a|b)` y lo evaluaba sin anclas, de modo
+que casaba por subcadena: el termino `de` atrapaba "PRUEBA DESTINO HTTP" y, en la practica, cualquier
+asunto en espanol. Se descarto anadir `\b` al patron porque en el motor de JavaScript `\b` solo
+conoce ASCII y partiria "año" en dos. En su lugar el asunto se tokeniza (`imap-filter.util.ts`):
+normalizacion diacritica, division por `[^\p{L}\p{N}]+` y comparacion contra palabras completas, en
+modo AND (`TODAS_LAS_PALABRAS`) u OR (`AL_MENOS_UNA`). Las palabras viajan como params propios y no
+dentro del regex, para que el backend sepa lo que el operador quiso decir. Un patron heredado se lee
+como palabras clave al reabrir el flujo, y al guardarlo queda corregido.
+
+### Un evento global para el historial
+
+El historial del panel no se une a ninguna sala de flujo, y los eventos de pausa, reanudacion y
+descarte solo iban a esas salas. Emitir todo al namespace habria multiplicado el trafico de
+`node:started`, asi que se anadio un resumen minimo, `execution:updated`, que el coordinador DERIVA de
+los eventos que ya existian (y de la primera vuelta del bucle, que es cuando una ejecucion nueva pasa a
+EN_PROCESO). El unico caso sin evento previo era `abortExecutionsForFlow`, que cierra filas por SQL:
+ahi el motor lo emite a mano. En el cliente la fila se parchea al instante y la pagina se relee con
+debounce, porque `hasAlerts` y `failureReason` no viajan en el evento.
+
+### Autoria en la boveda y en el descarte
+
+`credenciales` pasa a heredar `AuditableEntity` (migracion 058, con renombrado idempotente de las
+columnas de fecha) y todas las tablas maestras ganan la columna "Ultima modificacion"; el alta
+completa sigue en `AuditDetailsMenu`. El descarte registra `FLUJO_DESCARTADO` (migracion 059) desde
+`deactivateAfterDiscard`, que ya tenia el `AuditLoggerService` inyectado y conoce el estado del flujo
+antes de apagarlo. Las claves del payload van en castellano porque son dato que el auditor lee en
+crudo, igual que los valores del enum.
+
+### Reintentos segun el verbo
+
+El destino HTTP no reintentaba nunca por defecto, y con razon: un POST repetido tras un timeout puede
+publicar dos veces. Ahora el defecto depende del verbo (3 en GET/PUT/DELETE, 0 en POST/PATCH), y el
+store del frontend mueve el valor con el verbo mientras el operador no lo haya tocado. El backoff
+exponencial ya existia en `HttpClientService` y en el runner del scraper; no se duplico.
+
+### Lo que no se hizo, y por que
+
+- Presets `Authorization: Bearer {{token}}` / `Basic {{basic_auth}}`: dejarian el secreto en claro en
+  el `pipeline_schema`. La cabecera sigue prohibida y su ayuda remite a la boveda.
+- Las migraciones historicas que citan el selector heredado del escudo no se reescriben: ya estan
+  aplicadas y son la traza de lo que hubo.
+
+### Checklist
+
+- [x] Specs de AND/OR, tildes y la regresion "de" ⊂ "destino"
+- [x] Specs del evento global, del parcheo de filas y del debounce
+- [x] Specs de autoria en credenciales y de `FLUJO_DESCARTADO`
+- [ ] Aplicar las migraciones 058 y 059 y reiniciar Nest
+
+---
+
 ## 2026-09-26 · Nodo de IA configurable y paso de contingencias — rama `feat/ui-contextual-branching`
 
 ### Dos costuras de la tanda anterior

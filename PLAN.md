@@ -4801,3 +4801,62 @@ ExecutionsService.resumeExecution -> WorkflowsService.reactivateAfterResume (fil
 - [x] URL destino interpolable (selector cerrado + insercion en el cursor) y escudo SSRF en tiempo real
 - [x] Reanudacion reflejada en tiempo real en la tabla de flujos
 - [ ] Pendiente — aplicar la migracion 057 (`cd backend && npm run db:migrate`) y reiniciar Nest
+
+## Refactorizacion integral: filtro IMAP, tiempo real, trazabilidad y blindaje del destino HTTP
+
+### Problema
+
+- El modo "contiene" del disparador IMAP componia `(?:a|b)` y casaba por SUBCADENA: el termino
+  `de` atrapaba cualquier asunto con `DESTINO`.
+- El historial de ejecuciones del panel no recibia ningun evento de socket: una pausa o una
+  reanudacion solo se veian con F5.
+- `credenciales` era la unica tabla maestra sin autor (`creado_por` / `actualizado_por`).
+- El descarte manual de una ejecucion (CU-09) no dejaba rastro en `audit_eventos`.
+- Con objetivos de 44 px la cabecera desbordaba en movil.
+- Reintentos: el scraper estaba topado en 3 y el destino HTTP no reintentaba nunca por defecto.
+
+### Contratos nuevos
+
+| Pieza | Contrato |
+|---|---|
+| `imap-filter.util.ts` | `tokenizeSubject`, `parseKeywords`, `matchesSubjectKeywords(subject, keywords, mode)`: palabra completa, sin acentos ni mayusculas |
+| `ImapTriggerConfigDto` | `subjectKeywords?: string[]` (max 20 x 100), `subjectMatchMode?: TODAS_LAS_PALABRAS \| AL_MENOS_UNA` (defecto OR); se evalua antes que `subjectFilterRegex` |
+| `ExecutionUpdatedEvent` | `execution:updated` global `{ executionId, flowId, emittedAt, state, activeCursor }` |
+| `ExecutionEventPort.emitExecutionUpdated` | Lo deriva el coordinador de pausa/reanudacion/descarte/cierre y de la primera vuelta del bucle; el motor lo emite a mano en `abortExecutionsForFlow` |
+| `useExecutionsStore.applyExecutionUpdate` | Parchea la fila visible y relee la pagina con debounce de 500 ms |
+| `Credential extends AuditableEntity` | Migracion 058: `creado_por`, `fecha_creacion`, `actualizado_por`, `fecha_actualizacion` |
+| `AuditActionType.FLOW_DISCARDED` | `'FLUJO_DESCARTADO'` (migracion 059); `datos_anteriores { estado_previo, estado_flujo_previo }`, `datos_nuevos { flujo_id, ejecucion_id, estado_flujo, motivo_descarte }` |
+| `DiscardExecutionDto` | Cuerpo opcional del `DELETE /executions/:id/discard`: `reason?` (max 500) |
+| `defaultRetryAttemptsFor(method)` | 3 en GET/PUT/DELETE, 0 en POST/PATCH; maximo 5. Scraper: defecto 3, maximo 5 |
+| `QUERY_PARAM_NAME_PATTERN` | Admite corchetes (`page[number]`) solo en la query |
+| `KeyValueRowsEditor` | Props `namePresets`, `valuePresets`, `describeRow`; con presets usa `q-select` de entrada libre |
+| `AuditStampCell` | Columna "Ultima modificacion" (autor + fecha) en los gestores CRUD |
+
+### Diagrama de inyeccion de dependencias
+
+```
+FsmEngineService -> ExecutionEventsCoordinator -(execution:updated)-> NotificationGateway (server.emit)
+ExecutionsController.discard -> ExecutionsService.discardExecution
+                             -> WorkflowsService.deactivateAfterDiscard -> AuditLoggerService.record(FLUJO_DESCARTADO)
+CredentialsController(@CurrentUser) -> CredentialsService.create/update(actorId)
+```
+
+### Decisiones
+
+- Identificadores de codigo en ingles y columnas SQL en espanol con los nombres ya existentes
+  (`actualizado_por`, no `actualizado_por_id`); se reutilizan `retryAttempts` y `maxRetries`.
+- `Authorization` sigue prohibida como cabecera manual: no hay presets `Bearer` / `Basic`; la
+  autenticacion va por la boveda de credenciales.
+
+### Estado de las tareas
+
+- [x] Filtro IMAP por palabra completa (AND/OR) y migracion de patrones heredados al reabrir
+- [x] Historial de ejecuciones en tiempo real
+- [x] Autoria en credenciales y columna "Ultima modificacion" en los gestores
+- [x] Auditoria `FLUJO_DESCARTADO` con motivo opcional
+- [x] Cabecera y menu de accesibilidad adaptados a movil con objetivos de 44 px
+- [x] Escudo post IA sin referencias al selector heredado
+- [x] Chips de destinatarios unificados entre alerta SMTP y pausa
+- [x] Reintentos por verbo y presets con ayuda en el destino HTTP
+- [x] Guia de pruebas reestructurada en tres secciones
+- [ ] Pendiente — aplicar las migraciones 058 y 059 (`cd backend && npm run db:migrate`) y reiniciar Nest
