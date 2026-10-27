@@ -13,6 +13,8 @@ import { insertAtCaret } from '@/utils/url-source-options';
 
 import { NODE_TYPE_LABELS, NodeType } from '@/types/pipeline';
 import {
+  HEADER_NAME_PRESETS,
+  HEADER_VALUE_PRESETS,
   HttpGenericAuthType,
   HttpGenericBodyType,
   HttpGenericMethod,
@@ -21,6 +23,9 @@ import {
   MAX_KEY_VALUE_ENTRIES,
   MAX_TARGET_URL_LENGTH,
   MIN_HTTP_GENERIC_TIMEOUT_MS,
+  QUERY_PARAM_NAME_PRESETS,
+  describeHeader,
+  describeQueryParam,
 } from '@/types/nodes/http-generic-destination.types';
 
 import type { QInput } from 'quasar';
@@ -268,7 +273,11 @@ onMounted(async () => {
       :context="store.availableUpstreamContext"
       :max-rows="MAX_KEY_VALUE_ENTRIES"
       test-id="headers"
-      name-placeholder="X-Origen"
+      name-placeholder="Content-Type"
+      value-placeholder="application/json"
+      :name-presets="HEADER_NAME_PRESETS"
+      :value-presets="HEADER_VALUE_PRESETS"
+      :describe-row="describeHeader"
       @update:rows="store.updateConfig({ headers: $event as KeyValueRow[] })"
     />
 
@@ -278,7 +287,9 @@ onMounted(async () => {
       :context="store.availableUpstreamContext"
       :max-rows="MAX_KEY_VALUE_ENTRIES"
       test-id="query"
-      name-placeholder="lang"
+      name-placeholder="page[size]"
+      :name-presets="QUERY_PARAM_NAME_PRESETS"
+      :describe-row="describeQueryParam"
       @update:rows="store.updateConfig({ queryParams: $event as KeyValueRow[] })"
     />
 
@@ -429,7 +440,7 @@ onMounted(async () => {
             class="q-mt-xs"
             :min="0"
             :max="MAX_HTTP_GENERIC_RETRY_ATTEMPTS"
-            hint="0 por defecto: un POST reintentado puede duplicar el recurso."
+            hint="Entre 0 y 5, con espera exponencial ante 5xx, timeout o red caida. Por defecto 3 en GET/PUT/DELETE y 0 en POST/PATCH: un POST reintentado puede duplicar el recurso."
             @keydown="blockNonNumericKeys"
             @update:model-value="
               store.updateConfig({ retryAttempts: toInteger($event, store.config.retryAttempts) })

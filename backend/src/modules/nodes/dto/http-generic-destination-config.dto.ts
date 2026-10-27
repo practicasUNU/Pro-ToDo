@@ -67,15 +67,37 @@ export const MIN_HTTP_GENERIC_TIMEOUT_MS = 1_000;
 export const MAX_HTTP_GENERIC_TIMEOUT_MS = 60_000;
 
 /**
- * Reintentos por defecto: CERO.
+ * Reintentos por defecto de los verbos NO idempotentes (POST, PATCH): CERO.
  *
- * Un destino generico no sabe si su verbo es idempotente en el servidor de
- * enfrente, y un POST reintentado puede publicar dos veces (el mismo motivo
- * por el que DESTINO_DRUPAL envia sus POST sin reintentos). Quien sepa que su
- * API lo tolera los sube a mano.
+ * Un POST reintentado tras un timeout puede publicar dos veces en el servidor
+ * de enfrente (el mismo motivo por el que DESTINO_DRUPAL envia sus POST sin
+ * reintentos). Quien sepa que su API lo tolera los sube a mano.
  */
 export const DEFAULT_HTTP_GENERIC_RETRY_ATTEMPTS = 0;
+
+/**
+ * Reintentos por defecto de los verbos idempotentes (GET, PUT, DELETE).
+ *
+ * Repetirlos no cambia el resultado en el servidor, asi que absorben un 5xx,
+ * un timeout o un ECONNREFUSED pasajero con el backoff exponencial de
+ * `HttpClientService` (500 ms, 1 s, 2 s).
+ */
+export const DEFAULT_HTTP_GENERIC_IDEMPOTENT_RETRY_ATTEMPTS = 3;
 export const MAX_HTTP_GENERIC_RETRY_ATTEMPTS = 5;
+
+/** Verbos que se pueden repetir sin efecto adicional en el servidor (RFC 9110 §9.2.2). */
+export const IDEMPOTENT_HTTP_GENERIC_METHODS: ReadonlySet<HttpGenericMethod> =
+  new Set([
+    HttpGenericMethod.GET,
+    HttpGenericMethod.PUT,
+    HttpGenericMethod.DELETE,
+  ]);
+
+/** Reintentos que aplica el nodo cuando `retryAttempts` no se declara. */
+export const defaultRetryAttemptsFor = (method: HttpGenericMethod): number =>
+  IDEMPOTENT_HTTP_GENERIC_METHODS.has(method)
+    ? DEFAULT_HTTP_GENERIC_IDEMPOTENT_RETRY_ATTEMPTS
+    : DEFAULT_HTTP_GENERIC_RETRY_ATTEMPTS;
 
 export const MAX_TARGET_URL_LENGTH = 2048;
 export const MAX_BODY_TEMPLATE_LENGTH = 100_000;
@@ -86,6 +108,15 @@ export const MAX_KEY_VALUE_VALUE_LENGTH = 2_000;
 
 /** Nombre de cabecera o parametro: token HTTP sin separadores ni saltos de linea. */
 export const KEY_VALUE_NAME_PATTERN = /^[A-Za-z0-9_.-]{1,100}$/;
+
+/**
+ * Nombre de parametro de consulta: como el de cabecera, mas los corchetes.
+ *
+ * Los corchetes son los de la convencion JSON:API (`page[number]`,
+ * `filter[search]`) que usa Drupal. En una cabecera no caben (no son `tchar`,
+ * RFC 9110 §5.6.2), y en la query el cliente HTTP los codifica al serializar.
+ */
+export const QUERY_PARAM_NAME_PATTERN = /^[A-Za-z0-9_.[\]-]{1,100}$/;
 
 /**
  * Cabeceras que el operador NO puede fijar a mano.
@@ -156,8 +187,12 @@ export class IsStringRecordConstraint implements ValidatorConstraintInterface {
     }
 
     for (const [name, entry] of entries) {
-      if (!KEY_VALUE_NAME_PATTERN.test(name)) {
-        return `${args.property}: "${name}" no es un nombre valido (letras, digitos, ".", "-" y "_").`;
+      const namePattern = isHeaders
+        ? KEY_VALUE_NAME_PATTERN
+        : QUERY_PARAM_NAME_PATTERN;
+
+      if (!namePattern.test(name)) {
+        return `${args.property}: "${name}" no es un nombre valido (letras, digitos, ".", "-" y "_"${isHeaders ? '' : ', y corchetes'}).`;
       }
 
       if (isHeaders && FORBIDDEN_HEADER_NAMES.has(name.toLowerCase())) {
@@ -361,7 +396,11 @@ export class HttpGenericDestinationConfigDto {
   })
   timeoutMs?: number;
 
-  @ApiPropertyOptional({ minimum: 0, maximum: MAX_HTTP_GENERIC_RETRY_ATTEMPTS })
+  @ApiPropertyOptional({
+    description: `Reintentos ante 5xx, timeout o red caida, con backoff exponencial. Por defecto ${DEFAULT_HTTP_GENERIC_IDEMPOTENT_RETRY_ATTEMPTS} en GET/PUT/DELETE y ${DEFAULT_HTTP_GENERIC_RETRY_ATTEMPTS} en POST/PATCH`,
+    minimum: 0,
+    maximum: MAX_HTTP_GENERIC_RETRY_ATTEMPTS,
+  })
   @IsOptional()
   @IsInt({ message: 'retryAttempts debe ser un entero.' })
   @Min(0, { message: 'retryAttempts no puede ser negativo.' })
@@ -399,18 +438,22 @@ const trimmedOrNull = (value: string | undefined): string | null => {
  */
 export const resolveHttpGenericDestinationConfig = (
   dto: HttpGenericDestinationConfigDto,
-): ResolvedHttpGenericDestinationConfig => ({
-  targetUrl: trimmedOrNull(dto.targetUrl),
-  method: dto.method ?? DEFAULT_HTTP_GENERIC_METHOD,
-  headers: { ...(dto.headers ?? {}) },
-  queryParams: { ...(dto.queryParams ?? {}) },
-  bodyType: dto.bodyType ?? DEFAULT_HTTP_GENERIC_BODY_TYPE,
-  bodyTemplate:
-    dto.bodyTemplate === undefined || dto.bodyTemplate.trim().length === 0
-      ? null
-      : dto.bodyTemplate,
-  authType: dto.authType ?? DEFAULT_HTTP_GENERIC_AUTH_TYPE,
-  credentialId: trimmedOrNull(dto.authConfig?.credentialId),
-  timeoutMs: dto.timeoutMs ?? DEFAULT_HTTP_GENERIC_TIMEOUT_MS,
-  retryAttempts: dto.retryAttempts ?? DEFAULT_HTTP_GENERIC_RETRY_ATTEMPTS,
-});
+): ResolvedHttpGenericDestinationConfig => {
+  const method = dto.method ?? DEFAULT_HTTP_GENERIC_METHOD;
+
+  return {
+    targetUrl: trimmedOrNull(dto.targetUrl),
+    method,
+    headers: { ...(dto.headers ?? {}) },
+    queryParams: { ...(dto.queryParams ?? {}) },
+    bodyType: dto.bodyType ?? DEFAULT_HTTP_GENERIC_BODY_TYPE,
+    bodyTemplate:
+      dto.bodyTemplate === undefined || dto.bodyTemplate.trim().length === 0
+        ? null
+        : dto.bodyTemplate,
+    authType: dto.authType ?? DEFAULT_HTTP_GENERIC_AUTH_TYPE,
+    credentialId: trimmedOrNull(dto.authConfig?.credentialId),
+    timeoutMs: dto.timeoutMs ?? DEFAULT_HTTP_GENERIC_TIMEOUT_MS,
+    retryAttempts: dto.retryAttempts ?? defaultRetryAttemptsFor(method),
+  };
+};

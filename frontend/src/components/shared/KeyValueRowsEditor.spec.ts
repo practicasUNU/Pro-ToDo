@@ -1,9 +1,15 @@
 // @vitest-environment happy-dom
 import { mount } from '@vue/test-utils';
-import { QBtn, QIcon, QInput, QMenu, QTooltip, Quasar } from 'quasar';
+import { QBtn, QIcon, QInput, QMenu, QSelect, QTooltip, Quasar } from 'quasar';
 import { describe, expect, it } from 'vitest';
 
 import KeyValueRowsEditor from '@components/shared/KeyValueRowsEditor.vue';
+
+import {
+  HEADER_NAME_PRESETS,
+  HEADER_VALUE_PRESETS,
+  describeHeader,
+} from '@/types/nodes/http-generic-destination.types';
 
 import type { KeyValueRow } from '@/types/nodes/http-generic-destination.types';
 
@@ -12,7 +18,25 @@ const mountEditor = (rows: KeyValueRow[], maxRows = 3): ReturnType<typeof mount>
     props: { rows, context: [], testId: 'headers', maxRows },
     global: {
       plugins: [Quasar],
-      components: { QBtn, QIcon, QInput, QMenu, QTooltip },
+      components: { QBtn, QIcon, QInput, QMenu, QSelect, QTooltip },
+      stubs: { VariableExplorer: true },
+    },
+  });
+
+const mountWithPresets = (rows: KeyValueRow[]): ReturnType<typeof mount> =>
+  mount(KeyValueRowsEditor, {
+    props: {
+      rows,
+      context: [],
+      testId: 'headers',
+      maxRows: 3,
+      namePresets: HEADER_NAME_PRESETS,
+      valuePresets: HEADER_VALUE_PRESETS,
+      describeRow: describeHeader,
+    },
+    global: {
+      plugins: [Quasar],
+      components: { QBtn, QIcon, QInput, QMenu, QSelect, QTooltip },
       stubs: { VariableExplorer: true },
     },
   });
@@ -78,5 +102,48 @@ describe('KeyValueRowsEditor.vue', () => {
     expect(wrapper.get('[data-test="headers-add"]').findComponent(QBtn).props('disable')).toBe(
       true,
     );
+  });
+
+  describe('2. Presets y ayuda', () => {
+    it('2.1 deberia ofrecer selectores con los presets en vez de inputs llanos', () => {
+      // 1. Arrange 📐 + 2. Act ⚙️
+      const wrapper = mountWithPresets([{ name: '', value: '' }]);
+      const [nameSelect, valueSelect] = wrapper.findAllComponents(QSelect);
+
+      // 3. Assert 🎯
+      expect(nameSelect?.props('options')).toEqual([...HEADER_NAME_PRESETS]);
+      expect(valueSelect?.props('options')).toEqual([...HEADER_VALUE_PRESETS]);
+      expect(nameSelect?.props('useInput')).toBe(true);
+    });
+
+    it('2.2 deberia aceptar una cabecera personalizada tecleada', () => {
+      // 1. Arrange 📐
+      const wrapper = mountWithPresets([{ name: '', value: '' }]);
+
+      // 2. Act ⚙️
+      wrapper.findAllComponents(QSelect)[0]?.vm.$emit('input-value', 'X-Origen');
+
+      // 3. Assert 🎯
+      expect(lastEmitted(wrapper)).toEqual([{ name: 'X-Origen', value: '' }]);
+    });
+
+    it('2.3 deberia mostrar el icono de ayuda con el texto de JSON:API', () => {
+      // 1. Arrange 📐 + 2. Act ⚙️
+      const wrapper = mountWithPresets([
+        { name: 'Content-Type', value: 'application/vnd.api+json' },
+      ]);
+      const help = wrapper.get('[data-test="headers-help-0"]');
+
+      // 3. Assert 🎯
+      expect(help.attributes('aria-label')).toContain('JSON:API');
+    });
+
+    it('2.4 no deberia mostrar ayuda para una cabecera desconocida', () => {
+      // 1. Arrange 📐 + 2. Act ⚙️
+      const wrapper = mountWithPresets([{ name: 'X-Propia', value: 'v' }]);
+
+      // 3. Assert 🎯
+      expect(wrapper.find('[data-test="headers-help-0"]').exists()).toBe(false);
+    });
   });
 });

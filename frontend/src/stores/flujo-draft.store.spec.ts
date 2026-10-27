@@ -1788,7 +1788,7 @@ describe('useFlujoDraftStore · modo edicion', () => {
             mailbox: 'INBOX',
             pollIntervalMs: 60_000,
             unreadOnly: true,
-            subjectFilterRegex: 'Notiweb',
+            subjectFilterRegex: '^notiweb',
           },
         },
         [MAPPER_NODE_ID]: {
@@ -1833,7 +1833,7 @@ describe('useFlujoDraftStore · modo edicion', () => {
       const mapper = useTemplateMapperStore(MAPPER_NODE_ID);
 
       expect(trigger.config.host).toBe('imap.unuware.com');
-      expect(trigger.config.subjectFilterRegex).toBe('Notiweb');
+      expect(trigger.config.subjectFilterRegex).toBe('^notiweb');
       expect(mapper.config.templateId).toBe(HTML_TEMPLATE_ID);
       expect(mapper.config.outputNamespace).toBe('rendered_html');
     });

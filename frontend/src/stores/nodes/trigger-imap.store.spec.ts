@@ -85,6 +85,8 @@ describe('useTriggerImapStore · configuracion del nodo TRIGGER_IMAP', () => {
         pollIntervalMs: DEFAULT_POLL_INTERVAL_MS,
         fromFilter: '',
         subjectFilterRegex: '',
+        subjectKeywords: [],
+        subjectKeywordMatch: 'AL_MENOS_UNA',
         unreadOnly: DEFAULT_UNREAD_ONLY,
         // Opt-IN, al reves que `unreadOnly`: el base64 de los adjuntos se
         // reserializa en cada checkpoint, asi que se activa a proposito.
@@ -524,7 +526,7 @@ describe('useTriggerImapStore · configuracion del nodo TRIGGER_IMAP', () => {
       const store = useTriggerImapStore(NODE_ID);
       const node = buildSavedNode({
         fromFilter: 'redaccion@noticias.es',
-        subjectFilterRegex: 'Notiweb',
+        subjectFilterRegex: '^notiweb',
       });
 
       // 2. Act
@@ -554,7 +556,27 @@ describe('useTriggerImapStore · configuracion del nodo TRIGGER_IMAP', () => {
       const params = store.toNodeParams();
 
       expect(params).not.toHaveProperty('subjectFilter');
-      expect(params.subjectFilterRegex).toBe('(?:verificacion|titulos)');
+      // El patron heredado por subcadena se reescribe como palabras completas.
+      expect(params).not.toHaveProperty('subjectFilterRegex');
+      expect(params.subjectKeywords).toEqual(['verificacion', 'titulos']);
+      expect(params.subjectMatchMode).toBe('AL_MENOS_UNA');
+    });
+
+    it('4ter.1ter deberia reproducir palabras clave en modo AND (ida y vuelta)', () => {
+      // 1. Arrange 📐
+      const store = useTriggerImapStore(NODE_ID);
+      const node = buildSavedNode({
+        subjectKeywords: ['verificacion', 'titulos'],
+        subjectMatchMode: 'TODAS_LAS_PALABRAS',
+      });
+
+      // 2. Act ⚙️
+      store.hydrateFromNode(node);
+
+      // 3. Assert 🎯
+      expect(store.subjectMatchMode).toBe('ALL_WORDS');
+      expect(store.subjectMatchDraft).toBe('verificacion, titulos');
+      expect(store.toNodeParams()).toEqual(node.params);
     });
 
     it('4ter.2 deberia reponer los filtros que el esquema omite', () => {

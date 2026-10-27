@@ -301,15 +301,16 @@ export const buildResponseContractInstruction = (
     'Respeta estrictamente sus etiquetas, clases CSS e imagenes: no anadas,',
     'renombres ni elimines elementos, y no envuelvas el HTML en bloques de codigo.',
     // Regla aparte para las tablas porque es donde los modelos "ordenan" el
-    // markup: la plantilla de Verificacion de Titulos lleva DOS `<tbody>` en la
-    // misma tabla (`.panel-titulos-body`, vacio para las filas generadas, y uno
-    // estatico de evaluadores), y fusionarlos o descartar el vacio dejaba el
-    // flujo PAUSADO con ERR_POST_IA_DOM_MUTATED.
+    // markup: una plantilla puede llevar varios `<tbody>` en la misma tabla
+    // (uno vacio para las filas generadas y otros estaticos), y fusionarlos o
+    // descartar el vacio dejaba el flujo PAUSADO con ERR_POST_IA_DOM_MUTATED.
+    // La regla es agnostica a proposito: el selector concreto que se audita
+    // despues lo declara cada nodo ESCUDO_POST_IA en `requiredSelectors`.
     'En las tablas conserva cada <thead>, <tbody> y <tfoot> con su clase y en su',
     'orden original, aunque una tabla tenga varios <tbody> o alguno venga vacio.',
-    'La etiqueta <tbody class="panel-titulos-body"> debe mantenerse intacta:',
-    'las filas <tr> que generes van DENTRO de ella; nunca la fusiones con otro',
-    '<tbody>, la renombres ni la elimines, y deja sin tocar los <tbody> estaticos.',
+    'Un <tbody> vacio de la plantilla es el contenedor de las filas generadas:',
+    'las filas <tr> que generes van DENTRO de el; nunca lo fusiones con otro',
+    '<tbody>, lo renombres ni lo elimines, y deja sin tocar los <tbody> estaticos.',
   ].join(' ');
 };
 

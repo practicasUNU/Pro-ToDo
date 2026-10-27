@@ -16,6 +16,7 @@ import {
   createImapClient,
 } from '@modules/nodes/services/imap-client.factory';
 import { PASSWORD_ENV_KEY_PATTERN } from '@modules/nodes/dto/imap-trigger-config.dto';
+import { SubjectMatchMode } from '@modules/nodes/strategies/imap-trigger.types';
 import { UserRole } from '@modules/users/enums/user-role.enum';
 import { UsersService } from '@modules/users/users.service';
 import { NodeCatalogEntry } from '@modules/nodes/entities/node-catalog.entity';
@@ -947,6 +948,8 @@ export class InboundEmailResumeService
       unreadOnly: true,
       includeAttachments: false,
       maxAttachmentBytes: 0,
+      subjectKeywords: [],
+      subjectMatchMode: SubjectMatchMode.AL_MENOS_UNA,
     };
   }
 

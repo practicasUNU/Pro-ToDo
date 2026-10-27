@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import {
+  buildContainsPattern,
   buildSubjectPattern,
   escapeRegExpLiteral,
   normalizeSubjectText,
@@ -12,7 +13,7 @@ describe('subject-filter-mode · composicion y lectura del filtro de asunto', ()
   describe('1. Composicion del patron', () => {
     it('1.1 deberia unir varios terminos en una alternancia', () => {
       // 1. Arrange 📐 + 2. Act ⚙️
-      const pattern = buildSubjectPattern('CONTAINS', 'licitacion, convocatoria');
+      const pattern = buildContainsPattern('licitacion, convocatoria');
 
       // 3. Assert 🎯
       expect(pattern).toBe('(?:licitacion|convocatoria)');
@@ -21,7 +22,7 @@ describe('subject-filter-mode · composicion y lectura del filtro de asunto', ()
     it('1.2 deberia omitir el grupo con un solo termino', () => {
       // 1. Arrange 📐 + 2. Act ⚙️: `(?:x)` y `x` casan lo mismo, y el segundo es
       //    el que el operador reconoce al reabrir el formulario.
-      expect(buildSubjectPattern('CONTAINS', 'licitacion')).toBe('licitacion');
+      expect(buildContainsPattern('licitacion')).toBe('licitacion');
     });
 
     it('1.3 deberia anclar el prefijo normalizado en el modo "empieza por"', () => {
@@ -32,7 +33,7 @@ describe('subject-filter-mode · composicion y lectura del filtro de asunto', ()
     it('1.4 deberia escapar los metacaracteres que teclee el operador', () => {
       // 1. Arrange 📐 + 2. Act ⚙️: sin escapar, un punto casaria cualquier
       //    caracter y el filtro admitiria correos que nadie quiso admitir.
-      const pattern = buildSubjectPattern('CONTAINS', 'acta n.1 (2026)');
+      const pattern = buildContainsPattern('acta n.1 (2026)');
 
       // 3. Assert 🎯
       expect(pattern).toBe(escapeRegExpLiteral('acta n.1 (2026)'));
@@ -43,7 +44,7 @@ describe('subject-filter-mode · composicion y lectura del filtro de asunto', ()
     it('1.5 deberia devolver cadena vacia cuando no hay terminos', () => {
       // 1. Arrange 📐 + 2. Act ⚙️: vacio significa "sin filtro", y el store lo
       //    omite de los `params` porque el DTO rechaza `''`.
-      expect(buildSubjectPattern('CONTAINS', '  ,  , ')).toBe('');
+      expect(buildContainsPattern('  ,  , ')).toBe('');
       expect(buildSubjectPattern('STARTS_WITH', '   ')).toBe('');
     });
 
@@ -103,7 +104,7 @@ describe('subject-filter-mode · composicion y lectura del filtro de asunto', ()
       const draft = 'acta n.1, resolucion (final)';
 
       // 2. Act ⚙️
-      const reading = readSubjectPattern(buildSubjectPattern('CONTAINS', draft));
+      const reading = readSubjectPattern(buildContainsPattern(draft));
 
       // 3. Assert 🎯
       expect(reading).toEqual({ mode: 'CONTAINS', draft });
@@ -112,7 +113,7 @@ describe('subject-filter-mode · composicion y lectura del filtro de asunto', ()
   describe('4. Normalizacion canonica de los terminos', () => {
     it('4.1 deberia plegar mayusculas, acentos y espacios redundantes', () => {
       // 1. Arrange 📐 + 2. Act ⚙️
-      const pattern = buildSubjectPattern('CONTAINS', '  PRÚEBA ,  IÁ  ,  GÉMINI  ,  AÑO  ');
+      const pattern = buildContainsPattern('  PRÚEBA ,  IÁ  ,  GÉMINI  ,  AÑO  ');
 
       // 3. Assert 🎯: la enie sobrevive; el resto de diacriticos no.
       expect(pattern).toBe('(?:prueba|ia|gemini|año)');
@@ -135,7 +136,7 @@ describe('subject-filter-mode · composicion y lectura del filtro de asunto', ()
 
     it('4.4 deberia devolver el borrador ya normalizado al reabrir el formulario', () => {
       // 1. Arrange 📐 + 2. Act ⚙️
-      const reading = readSubjectPattern(buildSubjectPattern('CONTAINS', 'PRÚEBA, GÉMINI'));
+      const reading = readSubjectPattern(buildContainsPattern('PRÚEBA, GÉMINI'));
 
       // 3. Assert 🎯: se acepta perder la grafia tecleada a cambio de que el
       //    patron persistido sea el mismo que compara el backend.

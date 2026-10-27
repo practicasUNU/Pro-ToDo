@@ -397,7 +397,7 @@ export class PostIaSanitizerStrategy implements INodeStrategy {
       parts.push(`no son selectores validos: ${invalid.join(', ')}`);
     }
 
-    return `El HTML devuelto por la IA incumple el contrato estructural del nodo: ${parts.join('; ')}.`;
+    return `El marcado HTML devuelto por la IA no contiene la estructura o elementos inyectables requeridos: ${parts.join('; ')}.`;
   }
 
   /**

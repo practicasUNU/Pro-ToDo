@@ -592,7 +592,7 @@ describe('WizardService', () => {
       expect((run.mock.calls[0]?.[0] as URL).toString()).toBe(SCRAPE_URL);
       expect(run.mock.calls[0]?.[1]).toEqual({
         timeoutMs: 30_000,
-        maxRetries: 2,
+        maxRetries: 3,
         retryDelayMs: 2_000,
       });
     });

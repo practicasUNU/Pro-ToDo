@@ -269,11 +269,10 @@ const hasTextOrMedia = (node: Cheerio<AnyNode>): boolean =>
  * Decide si UN elemento que casa con un selector exigido viene relleno.
  *
  * Se evalua elemento a elemento, nunca la coleccion entera: `Cheerio.text()`
- * concatena el texto de TODAS las coincidencias, y con la plantilla de
- * Verificacion de Titulos —dos `<tbody>` en la misma tabla, el
- * `.panel-titulos-body` vacio y el de evaluadores estatico— un selector como
- * `table.tableform tbody` pasaba la auditoria con el panel en blanco, porque
- * el texto del tbody estatico tapaba el hueco.
+ * concatena el texto de TODAS las coincidencias, y con una plantilla de dos
+ * `<tbody>` en la misma tabla —uno vacio para las filas generadas y otro
+ * estatico— un selector generico como `table tbody` pasaba la auditoria con
+ * el panel en blanco, porque el texto del tbody estatico tapaba el hueco.
  */
 const hasSlotContent = ($: CheerioAPI, element: AnyNode): boolean => {
   const node = $(element);
@@ -653,7 +652,7 @@ export class TemplateRendererService {
         //
         // TODAS las coincidencias deben venir rellenas: basta una vacia para
         // reportar el selector. Los elementos que NO casan con el selector —el
-        // `<tbody>` estatico junto a `.panel-titulos-body`— no se juzgan nunca,
+        // `<tbody>` estatico junto al de las filas generadas— no se juzgan nunca,
         // de modo que varias secciones en la misma tabla no producen falsos
         // positivos.
         const everyFilled = matched

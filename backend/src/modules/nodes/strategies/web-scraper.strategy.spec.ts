@@ -211,7 +211,7 @@ describe('WebScraperStrategy', () => {
 
       expect(options).toEqual({
         timeoutMs: 20_000,
-        maxRetries: 2,
+        maxRetries: 3,
         retryDelayMs: 2_000,
       });
     });

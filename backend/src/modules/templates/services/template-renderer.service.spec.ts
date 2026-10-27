@@ -1042,14 +1042,14 @@ describe('TemplateRendererService', () => {
 
     /**
      * Plantilla de Verificacion de Titulos (migraciones 033/034): DOS `<tbody>`
-     * en la misma tabla. `.panel-titulos-body` llega vacio para que la IA
+     * en la misma tabla. `.panel-filas-body` llega vacio para que la IA
      * emita una fila por titulacion; el segundo es estatico (evaluadores).
      */
     describe('tablas con varios <tbody>', () => {
       const STATIC_TBODY =
         '<tbody><tr><th>Evaluador/Institución</th><th class="eval-presidente"></th></tr></tbody>';
       const titlesPanel = (rows: string): string =>
-        `<table class="tableform"><tbody class="panel-titulos-body">${rows}</tbody>${STATIC_TBODY}</table>`;
+        `<table class="tableform"><tbody class="panel-filas-body">${rows}</tbody>${STATIC_TBODY}</table>`;
       const TITLE_ROW =
         '<tr><th>2501234</th><th colspan="2">Grado en Ingeniería Informática</th></tr>';
 
@@ -1059,11 +1059,11 @@ describe('TemplateRendererService', () => {
 
         // 2. Act ⚙️
         const audit = renderer.auditFilledSlots(html, [
-          'tbody.panel-titulos-body',
+          'tbody.panel-filas-body',
         ]);
 
         // 3. Assert 🎯
-        expect(audit.empty).toEqual(['tbody.panel-titulos-body']);
+        expect(audit.empty).toEqual(['tbody.panel-filas-body']);
         expect(audit.missing).toEqual([]);
       });
 
@@ -1075,7 +1075,7 @@ describe('TemplateRendererService', () => {
         // 2. Act ⚙️
         const audit = renderer.auditFilledSlots(html, [
           'table.tableform',
-          'tbody.panel-titulos-body',
+          'tbody.panel-filas-body',
         ]);
 
         // 3. Assert 🎯
@@ -1103,11 +1103,11 @@ describe('TemplateRendererService', () => {
 
         // 2. Act ⚙️
         const audit = renderer.auditFilledSlots(html, [
-          'tbody.panel-titulos-body',
+          'tbody.panel-filas-body',
         ]);
 
         // 3. Assert 🎯
-        expect(audit.empty).toEqual(['tbody.panel-titulos-body']);
+        expect(audit.empty).toEqual(['tbody.panel-filas-body']);
       });
 
       it('deberia contar como rellena una fila cuyo unico contenido es una imagen', () => {
@@ -1118,7 +1118,7 @@ describe('TemplateRendererService', () => {
 
         // 2. Act ⚙️
         const audit = renderer.auditFilledSlots(html, [
-          'tbody.panel-titulos-body',
+          'tbody.panel-filas-body',
         ]);
 
         // 3. Assert 🎯

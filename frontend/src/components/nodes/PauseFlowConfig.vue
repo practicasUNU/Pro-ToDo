@@ -182,7 +182,7 @@ const delayFieldClass = computed<string>(() => {
           new-value-mode="add"
           input-debounce="0"
           :max-values="MAX_ALERT_RECIPIENTS"
-          class="q-mt-xs"
+          class="q-mt-xs pd-recipients-field"
           :hint="RECIPIENT_HINT"
           :rules="[
             (val: string[]) => val.length > 0 || 'Indica a quien avisar',
@@ -199,13 +199,14 @@ const delayFieldClass = computed<string>(() => {
         <q-banner
           v-if="store.invalidRecipients.length > 0"
           dense
-          class="pd-invalid-banner q-mt-sm"
+          class="pd-invalid-banner q-mt-md"
           role="alert"
           data-test="invalid-recipients"
         >
           <template #avatar>
             <q-icon name="error_outline" size="20px" class="pd-invalid-icon" />
           </template>
+          <div class="pd-label pd-invalid-title">{{ RECIPIENTS_RULE }}</div>
           <p class="pd-subtitle pd-mono q-mb-none">{{ invalidSummary }}</p>
         </q-banner>
       </div>

@@ -116,7 +116,7 @@ describe('CheckScraperDto', () => {
       // 1. Arrange & 2. Act
       const errors = await validateBody({
         targetUrl: VALID_URL,
-        maxRetries: 4,
+        maxRetries: 6,
       });
 
       // 3. Assert

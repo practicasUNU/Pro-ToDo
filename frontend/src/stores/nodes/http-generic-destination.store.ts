@@ -11,7 +11,6 @@ import {
   DEFAULT_HTTP_GENERIC_AUTH_TYPE,
   DEFAULT_HTTP_GENERIC_BODY_TYPE,
   DEFAULT_HTTP_GENERIC_METHOD,
-  DEFAULT_HTTP_GENERIC_RETRY_ATTEMPTS,
   DEFAULT_HTTP_GENERIC_TIMEOUT_MS,
   FORBIDDEN_HEADER_NAMES,
   HTTP_MARKER_PATTERN,
@@ -26,7 +25,9 @@ import {
   MAX_KEY_VALUE_VALUE_LENGTH,
   MAX_TARGET_URL_LENGTH,
   MIN_HTTP_GENERIC_TIMEOUT_MS,
+  QUERY_PARAM_NAME_PATTERN,
   TARGET_URL_PATTERN,
+  defaultRetryAttemptsFor,
 } from '@/types/nodes/http-generic-destination.types';
 
 import type { HydratableNode, UpstreamNamespace } from '@stores/nodes/node-store-registry';
@@ -105,7 +106,7 @@ const buildInitialConfig = (): HttpGenericDestinationNodeConfig => ({
   authType: DEFAULT_HTTP_GENERIC_AUTH_TYPE,
   credentialId: null,
   timeoutMs: DEFAULT_HTTP_GENERIC_TIMEOUT_MS,
-  retryAttempts: DEFAULT_HTTP_GENERIC_RETRY_ATTEMPTS,
+  retryAttempts: defaultRetryAttemptsFor(DEFAULT_HTTP_GENERIC_METHOD),
 });
 
 // Estado reactivo del nodo DESTINO_HTTP_GENERICO (regla frontend-quasar.md §3.1).
@@ -217,8 +218,10 @@ const httpGenericDestinationSetup = () => {
     for (const row of rows) {
       const name = row.name.trim();
 
-      if (!KEY_VALUE_NAME_PATTERN.test(name)) {
-        return `${label}: "${name}" no es un nombre valido (letras, digitos, ".", "-" y "_").`;
+      const namePattern = isHeaders ? KEY_VALUE_NAME_PATTERN : QUERY_PARAM_NAME_PATTERN;
+
+      if (!namePattern.test(name)) {
+        return `${label}: "${name}" no es un nombre valido (letras, digitos, ".", "-" y "_"${isHeaders ? '' : ', y corchetes'}).`;
       }
 
       if (isHeaders && FORBIDDEN_HEADER_NAMES.has(name.toLowerCase())) {
@@ -370,6 +373,17 @@ const httpGenericDestinationSetup = () => {
     // operador descubra el 400 al guardar.
     if (BODYLESS_METHODS.has(next.method)) next.bodyType = HttpGenericBodyType.NONE;
 
+    // Los reintentos por defecto dependen del verbo. Si el operador no los
+    // habia tocado (siguen en el default del verbo anterior), acompanan al
+    // cambio de verbo; un valor elegido a mano se respeta.
+    if (
+      patch.method !== undefined &&
+      patch.retryAttempts === undefined &&
+      config.value.retryAttempts === defaultRetryAttemptsFor(config.value.method)
+    ) {
+      next.retryAttempts = defaultRetryAttemptsFor(next.method);
+    }
+
     // Cambiar a otro tipo de autenticacion invalida la credencial elegida,
     // salvo que el mismo parche traiga ya la nueva.
     if (
@@ -429,7 +443,7 @@ const httpGenericDestinationSetup = () => {
     }
 
     if (current.timeoutMs !== DEFAULT_HTTP_GENERIC_TIMEOUT_MS) params.timeoutMs = current.timeoutMs;
-    if (current.retryAttempts !== DEFAULT_HTTP_GENERIC_RETRY_ATTEMPTS) {
+    if (current.retryAttempts !== defaultRetryAttemptsFor(current.method)) {
       params.retryAttempts = current.retryAttempts;
     }
 
@@ -444,9 +458,15 @@ const httpGenericDestinationSetup = () => {
         ? (params.authConfig as Record<string, unknown>)
         : {};
 
+    const method = asEnum(
+      params.method,
+      Object.values(HttpGenericMethod),
+      DEFAULT_HTTP_GENERIC_METHOD,
+    );
+
     config.value = {
       targetUrl: asNullableText(params.targetUrl),
-      method: asEnum(params.method, Object.values(HttpGenericMethod), DEFAULT_HTTP_GENERIC_METHOD),
+      method,
       headers: asRows(params.headers),
       queryParams: asRows(params.queryParams),
       bodyType: asEnum(
@@ -472,7 +492,7 @@ const httpGenericDestinationSetup = () => {
       ),
       retryAttempts: asInteger(
         params.retryAttempts,
-        DEFAULT_HTTP_GENERIC_RETRY_ATTEMPTS,
+        defaultRetryAttemptsFor(method),
         0,
         MAX_HTTP_GENERIC_RETRY_ATTEMPTS,
       ),

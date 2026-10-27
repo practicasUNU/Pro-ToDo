@@ -296,9 +296,10 @@ describe('AnthropicLlmProvider · cliente de Claude sobre la Messages API', () =
       const system = sentBody(http).system as string;
       expect(system).toContain('"filled_markup"');
       expect(system).toContain('Respeta estrictamente');
-      // Los dos `<tbody>` de Verificacion de Titulos: el modelo no puede
-      // fusionarlos ni descartar el vacio que el escudo audita despues.
-      expect(system).toContain('<tbody class="panel-titulos-body">');
+      // Varios `<tbody>` en la misma tabla: el modelo no puede fusionarlos ni
+      // descartar el vacio que el escudo audita despues.
+      expect(system).toContain('Un <tbody> vacio de la plantilla');
+      expect(system).not.toContain('panel-titulos-body');
     });
 
     it('1.6 deberia exigir el JSON por esquema en vez de rescatarlo con regex', async () => {

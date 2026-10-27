@@ -48,12 +48,16 @@ const SUBJECT_REGEX_HINT =
  * al abrir un flujo. Ver `@/utils/subject-filter-mode`.
  */
 const SUBJECT_MODE_OPTIONS: readonly { label: string; value: SubjectMatchMode }[] = [
-  { label: 'Contiene texto', value: 'CONTAINS' },
+  { label: 'Al menos una palabra', value: 'CONTAINS' },
+  { label: 'Todas las palabras', value: 'ALL_WORDS' },
   { label: 'Empieza por', value: 'STARTS_WITH' },
 ];
 
 const SUBJECT_CONTAINS_HINT =
-  'Escribe palabras clave separadas por comas, ej: licitacion, convocatoria. Basta con que el asunto contenga una de ellas; no se distinguen mayusculas, minusculas ni acentos.';
+  'Escribe palabras clave separadas por comas, ej: licitacion, convocatoria. Basta con que el asunto contenga una de ellas como palabra completa ("de" no coincide con "destino"); no se distinguen mayusculas, minusculas ni acentos.';
+
+const SUBJECT_ALL_WORDS_HINT =
+  'Escribe palabras clave separadas por comas, ej: verificacion, titulos. El asunto debe contener TODAS como palabras completas, en cualquier orden; no se distinguen mayusculas, minusculas ni acentos.';
 
 const SUBJECT_STARTS_WITH_HINT =
   'El asunto debe EMPEZAR por este texto, ej: S_2026_. No se distinguen mayusculas, minusculas ni acentos.';
@@ -74,9 +78,10 @@ const SUBJECT_ADVANCED_NOTICE =
   'Al escribir una expresion regular a mano dejas de usar los modos asistidos: el texto de arriba se sustituye por lo que escribas aqui.';
 
 /** Ayuda del campo asistido, segun el modo activo. */
-const subjectDraftHint = computed(() =>
-  store.subjectMatchMode === 'STARTS_WITH' ? SUBJECT_STARTS_WITH_HINT : SUBJECT_CONTAINS_HINT,
-);
+const subjectDraftHint = computed(() => {
+  if (store.subjectMatchMode === 'STARTS_WITH') return SUBJECT_STARTS_WITH_HINT;
+  return store.subjectMatchMode === 'ALL_WORDS' ? SUBJECT_ALL_WORDS_HINT : SUBJECT_CONTAINS_HINT;
+});
 
 /** Rotulo del campo asistido, segun el modo activo. */
 const subjectDraftLabel = computed(() =>
@@ -95,7 +100,14 @@ const subjectDraftPlaceholder = computed(() =>
  * caja negra: el operador que quiera afinarlo sabe con que parte en el acordeon
  * de modo avanzado.
  */
-const effectiveSubjectPattern = computed(() => store.config.subjectFilterRegex);
+const effectiveSubjectPattern = computed(() => {
+  const { subjectKeywords, subjectKeywordMatch, subjectFilterRegex } = store.config;
+
+  if (subjectKeywords.length === 0) return subjectFilterRegex;
+
+  const joiner = subjectKeywordMatch === 'TODAS_LAS_PALABRAS' ? ' Y ' : ' O ';
+  return subjectKeywords.map((keyword) => `«${keyword}»`).join(joiner);
+});
 
 const UNREAD_ONLY_WARNING =
   'Con el filtro desactivado el flujo puede volver a procesar un correo ya leido en cada sondeo.';

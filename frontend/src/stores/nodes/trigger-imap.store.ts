@@ -5,12 +5,17 @@ import * as triggerImapService from '@services/nodes/trigger-imap.service';
 
 import {
   DEFAULT_SUBJECT_MATCH_MODE,
+  buildContainsPattern,
   buildSubjectPattern,
+  fromKeywordMatchMode,
+  isKeywordMode,
   readSubjectPattern,
+  splitSubjectTerms,
+  toKeywordMatchMode,
 } from '@/utils/subject-filter-mode';
 
 import type { HydratableNode } from '@stores/nodes/node-store-registry';
-import type { SubjectMatchMode } from '@/utils/subject-filter-mode';
+import type { KeywordMatchMode, SubjectMatchMode } from '@/utils/subject-filter-mode';
 
 import type { CheckImapPayload, CheckImapResult } from '@/types/pipeline';
 
@@ -88,6 +93,15 @@ export interface TriggerImapFilters {
    * heredado lo purga del esquema.
    */
   subjectFilterRegex: string;
+  /**
+   * Palabras clave del asunto, ya normalizadas. Lista vacia = sin filtro.
+   *
+   * Las publican los modos `CONTAINS` y `ALL_WORDS`; el backend las compara
+   * como palabras completas, no por subcadena.
+   */
+  subjectKeywords: readonly string[];
+  /** Combinacion de `subjectKeywords`: AND u OR. */
+  subjectKeywordMatch: KeywordMatchMode;
   unreadOnly: boolean;
 }
 
@@ -135,6 +149,10 @@ export interface TriggerImapConfig extends TriggerImapFilters {
  */
 const asText = (value: unknown): string => (typeof value === 'string' ? value : '');
 
+/** Lee una lista de cadenas de los `params`, descartando lo que no lo sea. */
+const asTextList = (value: unknown): string[] =>
+  Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string') : [];
+
 /** Lee un numero de los `params`, con el default del backend como respaldo. */
 const asNumber = (value: unknown, fallback: number): number =>
   typeof value === 'number' && Number.isFinite(value) ? value : fallback;
@@ -174,6 +192,8 @@ const buildInitialConfig = (): TriggerImapConfig => ({
   pollIntervalMs: DEFAULT_POLL_INTERVAL_MS,
   fromFilter: '',
   subjectFilterRegex: '',
+  subjectKeywords: [],
+  subjectKeywordMatch: 'AL_MENOS_UNA',
   unreadOnly: DEFAULT_UNREAD_ONLY,
   includeAttachments: false,
   markAsRead: DEFAULT_MARK_AS_READ,
@@ -353,8 +373,12 @@ const triggerImapSetup = () => {
    * la prueba de credenciales.
    */
   const syncSubjectPattern = (): void => {
+    const keywordMode = isKeywordMode(subjectMatchMode.value);
+
     patchFilters({
       subjectFilterRegex: buildSubjectPattern(subjectMatchMode.value, subjectMatchDraft.value),
+      subjectKeywords: keywordMode ? splitSubjectTerms(subjectMatchDraft.value) : [],
+      subjectKeywordMatch: toKeywordMatchMode(subjectMatchMode.value),
     });
   };
 
@@ -376,8 +400,15 @@ const triggerImapSetup = () => {
     if (mode === subjectMatchMode.value) return;
 
     if (mode === 'ADVANCED') {
-      subjectMatchDraft.value = config.value.subjectFilterRegex;
+      // Desde un modo de palabras clave no hay patron que volcar: se parte del
+      // patron por subcadena equivalente, que el operador afina a mano.
+      const pattern = isKeywordMode(subjectMatchMode.value)
+        ? buildContainsPattern(subjectMatchDraft.value)
+        : config.value.subjectFilterRegex;
+
+      subjectMatchDraft.value = pattern;
       subjectMatchMode.value = mode;
+      patchFilters({ subjectFilterRegex: pattern, subjectKeywords: [] });
       return;
     }
 
@@ -386,8 +417,11 @@ const triggerImapSetup = () => {
 
       if (reading.mode === 'ADVANCED') return;
 
-      subjectMatchMode.value = reading.mode;
+      // Entre los dos modos de palabras clave manda lo que pide el operador.
+      subjectMatchMode.value =
+        isKeywordMode(reading.mode) && isKeywordMode(mode) ? mode : reading.mode;
       subjectMatchDraft.value = reading.draft;
+      syncSubjectPattern();
       return;
     }
 
@@ -418,7 +452,7 @@ const triggerImapSetup = () => {
   const setAdvancedSubjectPattern = (pattern: string): void => {
     subjectMatchMode.value = 'ADVANCED';
     subjectMatchDraft.value = pattern;
-    patchFilters({ subjectFilterRegex: pattern });
+    patchFilters({ subjectFilterRegex: pattern, subjectKeywords: [] });
   };
 
   /**
@@ -486,6 +520,14 @@ const triggerImapSetup = () => {
       // que purga del esquema los flujos heredados en cuanto se vuelven a
       // guardar.
       ...(subjectFilterRegex !== '' ? { subjectFilterRegex } : {}),
+      // Se omiten cuando no hay palabras: el DTO tolera la ausencia y asi un
+      // flujo sin filtro de asunto no arrastra un modo que no aplica.
+      ...(config.value.subjectKeywords.length > 0
+        ? {
+            subjectKeywords: [...config.value.subjectKeywords],
+            subjectMatchMode: config.value.subjectKeywordMatch,
+          }
+        : {}),
     };
   };
 
@@ -537,6 +579,8 @@ const triggerImapSetup = () => {
       pollIntervalMs: asNumber(params.pollIntervalMs, DEFAULT_POLL_INTERVAL_MS),
       fromFilter: asText(params.fromFilter),
       subjectFilterRegex: asText(params.subjectFilterRegex),
+      subjectKeywords: asTextList(params.subjectKeywords),
+      subjectKeywordMatch: toKeywordMatchMode(fromKeywordMatchMode(params.subjectMatchMode)),
       unreadOnly: params.unreadOnly !== false,
       // Comparacion estricta y no `!== false` como el de arriba: aquel es un
       // opt-OUT cuyo defecto es `true`, y este un opt-IN cuyo defecto es
@@ -552,9 +596,19 @@ const triggerImapSetup = () => {
     // El modo no viaja en los `params`: se deduce de la forma del patron. Lo
     // que no encaje en una forma generada se abre en modo avanzado con su
     // expresion intacta.
-    const reading = readSubjectPattern(config.value.subjectFilterRegex);
-    subjectMatchMode.value = reading.mode;
-    subjectMatchDraft.value = reading.draft;
+    if (config.value.subjectKeywords.length > 0) {
+      subjectMatchMode.value = fromKeywordMatchMode(params.subjectMatchMode);
+      subjectMatchDraft.value = config.value.subjectKeywords.join(', ');
+    } else {
+      const reading = readSubjectPattern(config.value.subjectFilterRegex);
+      subjectMatchMode.value = reading.mode;
+      subjectMatchDraft.value = reading.draft;
+
+      // Un patron heredado del antiguo "contiene" por subcadena se reescribe
+      // como palabras clave: al volver a guardar, el flujo deja de casar "de"
+      // dentro de "DESTINO".
+      if (isKeywordMode(reading.mode)) syncSubjectPattern();
+    }
 
     connectionVerified.value = true;
     lastCheckResult.value = null;

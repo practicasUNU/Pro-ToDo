@@ -36,10 +36,10 @@ export const MIN_SCRAPER_TIMEOUT_MS = 5_000;
 export const MAX_SCRAPER_TIMEOUT_MS = 60_000;
 
 /** Reintentos rapidos por defecto, adicionales al primer intento. */
-export const DEFAULT_SCRAPER_MAX_RETRIES = 2;
+export const DEFAULT_SCRAPER_MAX_RETRIES = 3;
 
 /** Techo de reintentos internos. Ver la nota sobre `retryPolicy` mas abajo. */
-export const MAX_SCRAPER_RETRIES = 3;
+export const MAX_SCRAPER_RETRIES = 5;
 
 /** Espera por defecto entre reintentos internos: dos segundos. */
 export const DEFAULT_SCRAPER_RETRY_DELAY_MS = 2_000;

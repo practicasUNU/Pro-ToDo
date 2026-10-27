@@ -1,6 +1,9 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import {
+  ArrayMaxSize,
+  IsArray,
   IsBoolean,
+  IsEnum,
   IsInt,
   IsNotEmpty,
   IsOptional,
@@ -8,6 +11,7 @@ import {
   IsString,
   Matches,
   Max,
+  MaxLength,
   Min,
   Validate,
   ValidatorConstraint,
@@ -16,6 +20,12 @@ import {
 import type { ValidatorConstraintInterface } from 'class-validator';
 
 import { OUTPUT_NAMESPACE_PATTERN } from '@core/fsm/types/pipeline-schema.types';
+import {
+  DEFAULT_SUBJECT_MATCH_MODE,
+  MAX_SUBJECT_KEYWORD_LENGTH,
+  MAX_SUBJECT_KEYWORDS,
+  SubjectMatchMode,
+} from '@modules/nodes/strategies/imap-trigger.types';
 
 /** Puerto IMAPS por defecto (IMAP sobre TLS implicito, RFC 8314). */
 export const DEFAULT_IMAP_PORT = 993;
@@ -329,6 +339,46 @@ export class ImapTriggerConfigDto {
   @Validate(IsValidRegexConstraint)
   subjectFilterRegex?: string;
 
+  /**
+   * Palabras clave del asunto, comparadas como palabras COMPLETAS.
+   *
+   * Sustituye al patron `(?:a|b)` del antiguo modo "contiene", que casaba por
+   * subcadena ("de" dentro de "DESTINO"). Si hay palabras clave se evaluan
+   * ANTES que `subjectFilterRegex`, y ambos deben casar.
+   */
+  @ApiPropertyOptional({
+    description:
+      'Palabras clave del asunto, comparadas como palabras completas (sin acentos ni mayusculas). Omitir para no filtrar',
+    example: ['verificacion', 'titulos'],
+    type: [String],
+  })
+  @IsOptional()
+  @IsArray({ message: 'subjectKeywords debe ser una lista de cadenas.' })
+  @ArrayMaxSize(MAX_SUBJECT_KEYWORDS, {
+    message: `subjectKeywords admite como maximo ${MAX_SUBJECT_KEYWORDS} palabras.`,
+  })
+  @IsString({ each: true, message: 'Cada palabra clave debe ser una cadena.' })
+  @IsNotEmpty({
+    each: true,
+    message: 'Las palabras clave no pueden estar vacias.',
+  })
+  @MaxLength(MAX_SUBJECT_KEYWORD_LENGTH, {
+    each: true,
+    message: `Cada palabra clave admite como maximo ${MAX_SUBJECT_KEYWORD_LENGTH} caracteres.`,
+  })
+  subjectKeywords?: string[];
+
+  @ApiPropertyOptional({
+    description: `Como se combinan las palabras clave: TODAS_LAS_PALABRAS (AND) o AL_MENOS_UNA (OR). Por defecto ${DEFAULT_SUBJECT_MATCH_MODE}`,
+    enum: SubjectMatchMode,
+    default: DEFAULT_SUBJECT_MATCH_MODE,
+  })
+  @IsOptional()
+  @IsEnum(SubjectMatchMode, {
+    message: 'subjectMatchMode debe ser TODAS_LAS_PALABRAS o AL_MENOS_UNA.',
+  })
+  subjectMatchMode?: SubjectMatchMode;
+
   @ApiPropertyOptional({
     description: `Si true, ingiere los adjuntos del correo en el payload. Por defecto ${String(DEFAULT_INCLUDE_ATTACHMENTS)}`,
     example: DEFAULT_INCLUDE_ATTACHMENTS,
@@ -397,6 +447,9 @@ export interface ResolvedImapConfig {
   /** Si `false`, `raw_email.attachments` sera siempre `[]`. */
   readonly includeAttachments: boolean;
   readonly maxAttachmentBytes: number;
+  /** Palabras clave del asunto; lista vacia cuando no se filtra por palabras. */
+  readonly subjectKeywords: readonly string[];
+  readonly subjectMatchMode: SubjectMatchMode;
 }
 
 /**
@@ -442,4 +495,7 @@ export const resolveImapConfig = (
   // creyera modificado cada flujo existente, reprogramando sus sondeos.
   includeAttachments: dto.includeAttachments ?? DEFAULT_INCLUDE_ATTACHMENTS,
   maxAttachmentBytes: dto.maxAttachmentBytes ?? DEFAULT_MAX_ATTACHMENT_BYTES,
+  // Al final, por el mismo motivo de orden que las dos anteriores.
+  subjectKeywords: dto.subjectKeywords ?? [],
+  subjectMatchMode: dto.subjectMatchMode ?? DEFAULT_SUBJECT_MATCH_MODE,
 });

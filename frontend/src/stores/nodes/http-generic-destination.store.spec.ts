@@ -356,4 +356,44 @@ describe('useHttpGenericDestinationStore (DESTINO_HTTP_GENERICO)', () => {
       expect(store.configWarnings.join(' ')).toContain('ya no existe');
     });
   });
+
+  describe('Reintentos por defecto segun el verbo', () => {
+    it('deberia pasar a 3 reintentos al elegir GET y volver a 0 con POST', () => {
+      // 1. Arrange 📐
+      const store = useHttpGenericDestinationStore(nextNodeId());
+
+      // 2. Act ⚙️
+      store.updateConfig({ method: HttpGenericMethod.GET });
+      const afterGet = store.config.retryAttempts;
+      store.updateConfig({ method: HttpGenericMethod.POST });
+
+      // 3. Assert 🎯
+      expect(afterGet).toBe(3);
+      expect(store.config.retryAttempts).toBe(0);
+    });
+
+    it('deberia respetar un valor elegido a mano al cambiar de verbo', () => {
+      // 1. Arrange 📐
+      const store = useHttpGenericDestinationStore(nextNodeId());
+      store.updateConfig({ retryAttempts: 5 });
+
+      // 2. Act ⚙️
+      store.updateConfig({ method: HttpGenericMethod.PUT });
+
+      // 3. Assert 🎯
+      expect(store.config.retryAttempts).toBe(5);
+    });
+
+    it('deberia omitir retryAttempts en los params cuando coincide con el default del verbo', () => {
+      // 1. Arrange 📐
+      const store = useHttpGenericDestinationStore(nextNodeId());
+      store.updateConfig({ targetUrl: 'https://api.ejemplo.org', method: HttpGenericMethod.GET });
+
+      // 2. Act ⚙️
+      const params = store.toNodeParams();
+
+      // 3. Assert 🎯
+      expect(params).not.toHaveProperty('retryAttempts');
+    });
+  });
 });

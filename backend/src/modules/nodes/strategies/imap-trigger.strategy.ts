@@ -17,6 +17,7 @@ import {
 } from '@modules/nodes/services/imap-client.factory';
 import { FALLBACK_ATTACHMENT_NAME_PREFIX } from '@modules/nodes/interfaces/raw-email-attachment.interface';
 import { normalizeSubjectText } from '@modules/nodes/utils/diacritics.util';
+import { matchesSubjectKeywords } from '@modules/nodes/strategies/imap-filter.util';
 // Import de VALOR y no `import type`: se inyecta por constructor, y con
 // `emitDecoratorMetadata` un `import type` se borra al transpilar dejando a Nest
 // sin el token que necesita para resolver la dependencia.
@@ -713,7 +714,7 @@ export class ImapTriggerStrategy implements INodeStrategy {
           success: true,
           data: { status: SUBJECT_FILTERED_STATUS },
           halt: {
-            reason: `El asunto no coincide con el filtro configurado (${String(config.subjectFilterRegex)}).`,
+            reason: `El asunto no coincide con el filtro configurado (${this.describeSubjectFilter(config)}).`,
           },
         };
       }
@@ -923,6 +924,24 @@ export class ImapTriggerStrategy implements INodeStrategy {
     parsed: ParsedMail,
     config: ResolvedImapConfig,
   ): boolean {
+    const subject = asString(parsed.subject);
+
+    // Las palabras clave se comparan como palabras completas (`imap-filter.util`)
+    // y van primero: son el filtro que ofrece el asistente, y el patron queda
+    // como modo avanzado. Si ambos estan declarados, deben casar los dos.
+    if (
+      !matchesSubjectKeywords(
+        subject,
+        config.subjectKeywords,
+        config.subjectMatchMode,
+      )
+    ) {
+      this.logger.log(
+        `OMITIDO | REASON: SUBJECT_MISMATCH | asunto normalizado: "${normalizeSubjectText(subject)}" | palabras: "${config.subjectKeywords.join(', ')}" (${config.subjectMatchMode})`,
+      );
+      return false;
+    }
+
     if (config.subjectFilterRegex === null) {
       return true;
     }
@@ -941,7 +960,7 @@ export class ImapTriggerStrategy implements INodeStrategy {
       return true;
     }
 
-    const normalizedSubject = normalizeSubjectText(asString(parsed.subject));
+    const normalizedSubject = normalizeSubjectText(subject);
 
     if (pattern.test(normalizedSubject)) {
       return true;
@@ -955,6 +974,23 @@ export class ImapTriggerStrategy implements INodeStrategy {
     );
 
     return false;
+  }
+
+  /** Resumen legible del filtro de asunto para el motivo del OMITIDO. */
+  private describeSubjectFilter(config: ResolvedImapConfig): string {
+    const parts: string[] = [];
+
+    if (config.subjectKeywords.length > 0) {
+      parts.push(
+        `${config.subjectMatchMode}: ${config.subjectKeywords.join(', ')}`,
+      );
+    }
+
+    if (config.subjectFilterRegex !== null) {
+      parts.push(config.subjectFilterRegex);
+    }
+
+    return parts.join(' + ');
   }
 
   private toExtractedEmail(

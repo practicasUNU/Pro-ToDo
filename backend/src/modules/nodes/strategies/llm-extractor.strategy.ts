@@ -348,8 +348,8 @@ export class LlmExtractorStrategy implements INodeStrategy {
     //
     // Con plantilla, el contrato de formato que anade el proveedor
     // (`buildResponseContractInstruction`) obliga al modelo a conservar cada
-    // `<tbody>` —en particular `<tbody class="panel-titulos-body">`—, que es el
-    // selector que despues audita el ESCUDO_POST_IA.
+    // `<tbody>` —en particular el vacio destinado a las filas generadas—, que es
+    // lo que despues audita el ESCUDO_POST_IA con sus `requiredSelectors`.
     const expectsFilledMarkup = BASE_TEMPLATE_MARKER_PATTERN.test(
       promptResolution.prompt,
     );

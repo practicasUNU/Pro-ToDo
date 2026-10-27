@@ -2,8 +2,12 @@ import { plainToInstance } from 'class-transformer';
 import { validate } from 'class-validator';
 
 import {
+  DEFAULT_HTTP_GENERIC_IDEMPOTENT_RETRY_ATTEMPTS,
+  DEFAULT_HTTP_GENERIC_RETRY_ATTEMPTS,
   HttpGenericDestinationConfigDto,
+  HttpGenericMethod,
   MAX_KEY_VALUE_ENTRIES,
+  resolveHttpGenericDestinationConfig,
 } from './http-generic-destination-config.dto';
 
 /** Mensajes de error de un `params` dado, con las opciones del validador real. */
@@ -70,6 +74,7 @@ describe('HttpGenericDestinationConfigDto', () => {
     ],
     [{ headers: { Authorization: 'Bearer x' } }, 'credencial'],
     [{ headers: { 'X Bad': 'v' } }, 'no es un nombre valido'],
+    [{ headers: { 'page[number]': '1' } }, 'no es un nombre valido'],
     [{ headers: { 'X-Ok': 'a\r\nX-Inyectada: 1' } }, 'saltos de linea'],
     [{ targetUrl: 'ftp://ejemplo.org' }, 'URL absoluta http(s)'],
     [{ targetUrl: '{{sin_cerrar' }, 'URL absoluta http(s)'],
@@ -95,5 +100,43 @@ describe('HttpGenericDestinationConfigDto', () => {
     await expect(errorsOf({ headers })).resolves.toContain(
       'no puede declarar mas de',
     );
+  });
+
+  it.each([
+    [HttpGenericMethod.GET, DEFAULT_HTTP_GENERIC_IDEMPOTENT_RETRY_ATTEMPTS],
+    [HttpGenericMethod.PUT, DEFAULT_HTTP_GENERIC_IDEMPOTENT_RETRY_ATTEMPTS],
+    [HttpGenericMethod.DELETE, DEFAULT_HTTP_GENERIC_IDEMPOTENT_RETRY_ATTEMPTS],
+    [HttpGenericMethod.POST, DEFAULT_HTTP_GENERIC_RETRY_ATTEMPTS],
+    [HttpGenericMethod.PATCH, DEFAULT_HTTP_GENERIC_RETRY_ATTEMPTS],
+  ])(
+    '3.1 deberia aplicar a %s los reintentos por defecto segun su idempotencia',
+    (method, expected) => {
+      // 1. Arrange 📐
+      const dto = plainToInstance(HttpGenericDestinationConfigDto, { method });
+
+      // 2. Act ⚙️
+      const resolved = resolveHttpGenericDestinationConfig(dto);
+
+      // 3. Assert 🎯: un POST/PATCH repetido puede duplicar en el remoto.
+      expect(resolved.retryAttempts).toBe(expected);
+    },
+  );
+
+  it('3.2 deberia respetar los reintentos declarados aunque el verbo sea POST', () => {
+    // 1. Arrange 📐
+    const dto = plainToInstance(HttpGenericDestinationConfigDto, {
+      method: HttpGenericMethod.POST,
+      retryAttempts: 5,
+    });
+
+    // 2. Act ⚙️ + 3. Assert 🎯
+    expect(resolveHttpGenericDestinationConfig(dto).retryAttempts).toBe(5);
+  });
+
+  it('3.3 deberia aceptar los parametros de consulta de JSON:API con corchetes', async () => {
+    // 1. Arrange 📐 + 2. Act ⚙️ + 3. Assert 🎯
+    await expect(
+      errorsOf({ queryParams: { 'page[number]': '1', 'filter[search]': 'x' } }),
+    ).resolves.toBe('');
   });
 });

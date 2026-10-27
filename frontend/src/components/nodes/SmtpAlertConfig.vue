@@ -97,7 +97,7 @@ const {
           hide-dropdown-icon
           new-value-mode="add"
           input-debounce="0"
-          class="q-mt-xs"
+          class="q-mt-xs pd-recipients-field"
           :max-values="MAX_ALERT_RECIPIENTS"
           :hint="RECIPIENTS_HINT"
           :rules="[
@@ -214,24 +214,9 @@ const {
   color: var(--pd-primary);
 }
 
-.pd-invalid-icon {
-  color: var(--pd-negative);
-}
-
-.pd-invalid-title {
-  color: var(--pd-negative);
-}
-
 .pd-info-banner {
   background: var(--pd-surface-muted);
   border: 1px solid var(--pd-border);
-  border-radius: $generic-border-radius;
-  color: var(--pd-text-primary);
-}
-
-.pd-invalid-banner {
-  background: var(--pd-row-urgente);
-  border: 1px solid var(--pd-negative);
   border-radius: $generic-border-radius;
   color: var(--pd-text-primary);
 }
@@ -335,11 +320,6 @@ const {
   color: var(--pd-text-secondary);
 }
 
-// Chips de destinatario sobre los tokens de acento, como los chips de variable
-// del mapeador.
-:deep(.q-chip) {
-  background: var(--pd-surface-muted);
-  color: var(--pd-accent-text);
-  border: 1px solid var(--pd-border);
-}
+// Chips de destinatario y aviso de direcciones invalidas: `.pd-recipients-field`
+// y `.pd-invalid-banner` en app.scss, compartidos con la pausa de flujo.
 </style>

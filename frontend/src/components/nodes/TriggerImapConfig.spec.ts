@@ -215,7 +215,7 @@ describe('TriggerImapConfig · filtro de asunto por expresion regular', () => {
       expect(draftInput(wrapper).props('modelValue')).toBe('');
     });
 
-    it('4.2 deberia componer una alternancia desde palabras separadas por comas', async () => {
+    it('4.2 deberia publicar palabras clave completas desde texto separado por comas', async () => {
       // 1. Arrange 📐
       const nodeId = nextNodeId();
       const wrapper = mountComponent(nodeId);
@@ -224,9 +224,11 @@ describe('TriggerImapConfig · filtro de asunto por expresion regular', () => {
       // 2. Act ⚙️
       await draftInput(wrapper).setValue('licitacion, convocatoria');
 
-      // 3. Assert 🎯: lo que se guarda sigue siendo un patron; el modo es solo
-      //    la forma de componerlo sin teclear expresiones regulares.
-      expect(store.config.subjectFilterRegex).toBe('(?:licitacion|convocatoria)');
+      // 3. Assert 🎯: el modo asistido ya no compone un patron por subcadena:
+      //    publica palabras que el backend compara como palabras completas.
+      expect(store.config.subjectFilterRegex).toBe('');
+      expect(store.config.subjectKeywords).toEqual(['licitacion', 'convocatoria']);
+      expect(store.config.subjectKeywordMatch).toBe('AL_MENOS_UNA');
     });
 
     it('4.3 deberia anclar el texto al cambiar a "empieza por"', async () => {

@@ -820,6 +820,71 @@ describe('ImapTriggerStrategy', () => {
     });
   });
 
+  describe('2quater. Palabras clave por palabra completa', () => {
+    it('2quater.1 no deberia casar "de" dentro de "DESTINO"', async () => {
+      // 1. Arrange 📐
+      const client = buildClient();
+      useClient(client);
+      simpleParser.mockResolvedValue(
+        buildParsedMail({ subject: 'PRUEBA DESTINO HTTP' }),
+      );
+      const { strategy } = buildStrategy();
+
+      // 2. Act ⚙️
+      const result = await strategy.execute(
+        buildContext(),
+        buildParams({ subjectKeywords: ['de'] }),
+      );
+
+      // 3. Assert 🎯
+      expect(result.success).toBe(true);
+      expect(result.data).toEqual({ status: SUBJECT_FILTERED_STATUS });
+      expect(result.halt).toBeDefined();
+    });
+
+    it('2quater.2 deberia casar todas las palabras con tildes en modo AND', async () => {
+      // 1. Arrange 📐
+      const client = buildClient();
+      useClient(client);
+      simpleParser.mockResolvedValue(
+        buildParsedMail({ subject: 'Solicitud de VERIFICACIÓN de títulos' }),
+      );
+      const { strategy } = buildStrategy();
+
+      // 2. Act ⚙️
+      const result = await strategy.execute(
+        buildContext(),
+        buildParams({
+          subjectKeywords: ['verificacion', 'titulos'],
+          subjectMatchMode: 'TODAS_LAS_PALABRAS',
+        }),
+      );
+
+      // 3. Assert 🎯
+      expect(result.success).toBe(true);
+      expect(result.halt).toBeUndefined();
+      expect(result.data?.subject).toBe('Solicitud de VERIFICACIÓN de títulos');
+    });
+
+    it('2quater.3 deberia rechazar un modo desconocido como configuracion invalida', async () => {
+      // 1. Arrange 📐
+      const client = buildClient();
+      useClient(client);
+      const { strategy } = buildStrategy();
+
+      // 2. Act ⚙️
+      const result = await strategy.execute(
+        buildContext(),
+        buildParams({ subjectKeywords: ['x'], subjectMatchMode: 'CUALQUIERA' }),
+      );
+
+      // 3. Assert 🎯
+      expect(result.success).toBe(false);
+      expect(result.error?.code).toBe(ERR_IMAP_CONFIG);
+      expect(result.error?.missingFields).toContain('subjectMatchMode');
+    });
+  });
+
   /**
    * El plegado es SIMETRICO: se aplica al patron y al asunto. Los dos primeros
    * casos son las dos mitades del mismo problema, y por eso van juntos: plegar

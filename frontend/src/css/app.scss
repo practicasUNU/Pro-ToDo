@@ -976,3 +976,49 @@ $pd-fork-height: 56px;
     color: var(--pd-text-primary);
   }
 }
+
+// ---------------------------------------------------------------------------
+// Selector de destinatarios de correo (`q-select` con chips).
+//
+// Compartido por la alerta SMTP y la pausa de flujo, que antes solo coincidian
+// en el marcado: los estilos vivian en el `<style scoped>` de SmtpAlertConfig y
+// la pausa pintaba los chips con el gris por defecto de Quasar, ilegible en
+// modo oscuro. Un unico bloque global garantiza el mismo borde, relleno y
+// contraste en los dos nodos y en los dos temas.
+.pd-recipients-field {
+  &.q-field--outlined .q-field__control {
+    background: var(--pd-card-bg);
+  }
+
+  &.q-field--outlined .q-field__control::before {
+    border-color: var(--pd-border);
+  }
+
+  .q-field__native::placeholder {
+    color: var(--pd-text-secondary);
+  }
+
+  .q-field__messages {
+    color: var(--pd-text-secondary);
+  }
+
+  // Chips sobre los tokens de acento, como los chips de variable del mapeador.
+  .q-chip {
+    background: var(--pd-surface-muted);
+    color: var(--pd-accent-text);
+    border: 1px solid var(--pd-border);
+  }
+}
+
+// Aviso de direcciones invalidas bajo el selector de destinatarios.
+.pd-invalid-banner {
+  background: var(--pd-row-urgente);
+  border: 1px solid var(--pd-negative);
+  border-radius: $generic-border-radius;
+  color: var(--pd-text-primary);
+}
+
+.pd-invalid-icon,
+.pd-invalid-title {
+  color: var(--pd-negative);
+}

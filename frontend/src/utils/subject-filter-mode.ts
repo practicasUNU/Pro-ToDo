@@ -11,11 +11,34 @@
 /**
  * Modos de coincidencia del asunto.
  *
- * `ADVANCED` es la valvula de escape y tambien el respaldo: cualquier patron
- * que no se reconozca como generado por los otros dos cae aqui, de modo que un
- * flujo heredado jamas pierde su expresion.
+ * - `CONTAINS`: al menos una de las palabras clave, como palabra COMPLETA (OR).
+ * - `ALL_WORDS`: todas las palabras clave, como palabras completas (AND).
+ * - `STARTS_WITH`: prefijo literal, compuesto como patron anclado.
+ * - `ADVANCED`: la valvula de escape y tambien el respaldo: cualquier patron
+ *   que no se reconozca como generado por los modos asistidos cae aqui, de modo
+ *   que un flujo heredado jamas pierde su expresion.
+ *
+ * Los dos modos de palabras clave NO componen patron: se publican como
+ * `subjectKeywords` + `subjectMatchMode` y el backend los compara palabra a
+ * palabra (`imap-filter.util.ts`). Un patron `(?:a|b)` casaba por subcadena, de
+ * modo que "de" atrapaba cualquier asunto con "DESTINO".
  */
-export type SubjectMatchMode = 'CONTAINS' | 'STARTS_WITH' | 'ADVANCED';
+export type SubjectMatchMode = 'CONTAINS' | 'ALL_WORDS' | 'STARTS_WITH' | 'ADVANCED';
+
+/** Valores de `params.subjectMatchMode`, replica del enum del backend. */
+export type KeywordMatchMode = 'TODAS_LAS_PALABRAS' | 'AL_MENOS_UNA';
+
+/** Los modos asistidos que se publican como palabras clave y no como patron. */
+export const isKeywordMode = (mode: SubjectMatchMode): boolean =>
+  mode === 'CONTAINS' || mode === 'ALL_WORDS';
+
+/** Traduce un modo de palabras clave al valor que persiste el backend. */
+export const toKeywordMatchMode = (mode: SubjectMatchMode): KeywordMatchMode =>
+  mode === 'ALL_WORDS' ? 'TODAS_LAS_PALABRAS' : 'AL_MENOS_UNA';
+
+/** Inverso de `toKeywordMatchMode`; cualquier valor desconocido es OR. */
+export const fromKeywordMatchMode = (value: unknown): SubjectMatchMode =>
+  value === 'TODAS_LAS_PALABRAS' ? 'ALL_WORDS' : 'CONTAINS';
 
 /** Modo con el que arranca un nodo nuevo. */
 export const DEFAULT_SUBJECT_MATCH_MODE: SubjectMatchMode = 'CONTAINS';
@@ -119,9 +142,14 @@ export const buildStartsWithPattern = (draft: string): string => {
   return prefix === '' ? '' : `^${escapeRegExpLiteral(prefix)}`;
 };
 
-/** Compone el patron correspondiente al modo activo. */
+/**
+ * Compone el patron correspondiente al modo activo.
+ *
+ * Los modos de palabras clave devuelven `''`: no filtran por patron sino por
+ * `subjectKeywords` (ver `SubjectMatchMode`).
+ */
 export const buildSubjectPattern = (mode: SubjectMatchMode, draft: string): string => {
-  if (mode === 'CONTAINS') return buildContainsPattern(draft);
+  if (isKeywordMode(mode)) return '';
   if (mode === 'STARTS_WITH') return buildStartsWithPattern(draft);
 
   // En `ADVANCED` el operador escribe el patron directamente: no hay nada que
@@ -137,6 +165,10 @@ export interface SubjectPatternReading {
 
 /**
  * Deduce de que modo salio un patron guardado.
+ *
+ * Un patron `(?:a|b)` o un literal llano son HEREDADOS del antiguo modo
+ * "contiene" por subcadena: se leen como `CONTAINS`, y al volver a guardar el
+ * flujo se publican como palabras clave, que es la correccion buscada.
  *
  * El orden importa: `^S_2026_` tambien es un literal escapado valido, asi que
  * la forma anclada se comprueba ANTES que la llana.

@@ -320,7 +320,7 @@ describe('useWebScraperStore · configuracion del nodo EXTRACTOR_WEB', () => {
       expect(store.isConfigValid).toBe(true);
     });
 
-    it.each([-1, 4])('3.3 deberia rechazar un maxRetries de %p', (maxRetries: number) => {
+    it.each([-1, 6])('3.3 deberia rechazar un maxRetries de %p', (maxRetries: number) => {
       // 1. Arrange
       const store = buildConfiguredStore();
 
