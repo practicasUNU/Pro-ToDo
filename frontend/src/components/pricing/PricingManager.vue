@@ -7,7 +7,6 @@ import { usePricingStore } from '@stores/pricing.store';
 import { usePanelRefresh } from '@/composables/usePanelRefresh';
 
 import AuditDetailsMenu from '@components/shared/AuditDetailsMenu.vue';
-import AuditStampCell from '@components/shared/AuditStampCell.vue';
 import StatusBadge from '@components/shared/StatusBadge.vue';
 import WarningModal from '@components/shared/WarningModal.vue';
 
@@ -110,14 +109,6 @@ const columns: QTableColumn<ModelPricing>[] = [
     format: (value: string) => formatDateTime(value),
   },
   { name: 'active', label: 'Estado', field: 'active', align: 'left', sortable: true },
-  {
-    // Ultimo cambio a la vista; el alta completa sigue en `AuditDetailsMenu`.
-    // Sin orden: la API no ordena por autor y la fecha sola enganaria.
-    name: 'updatedAt',
-    label: 'Ultima modificacion',
-    field: 'updatedAt',
-    align: 'left',
-  },
   { name: 'actions', label: 'Acciones', field: 'id', align: 'center' },
 ];
 
@@ -409,12 +400,6 @@ onMounted(() => {
           <status-badge
             :display="describeEnabled(cellProps.row.active, { on: 'Vigente', off: 'Histórico' })"
           />
-        </q-td>
-      </template>
-
-      <template #body-cell-updatedAt="cellProps">
-        <q-td :props="cellProps">
-          <AuditStampCell :audit="cellProps.row" />
         </q-td>
       </template>
 

@@ -396,4 +396,42 @@ describe('useHttpGenericDestinationStore (DESTINO_HTTP_GENERICO)', () => {
       expect(params).not.toHaveProperty('retryAttempts');
     });
   });
+
+  describe('Rango de reintentos segun el verbo', () => {
+    it.each([
+      [HttpGenericMethod.POST, 4, false],
+      [HttpGenericMethod.PATCH, 3, true],
+      [HttpGenericMethod.PATCH, 4, false],
+      [HttpGenericMethod.GET, 5, true],
+      [HttpGenericMethod.PUT, 6, false],
+      [HttpGenericMethod.DELETE, -1, false],
+    ])('%s con %i reintentos deberia dejar isConfigValid en %s', (method, retryAttempts, valid) => {
+      // 1. Arrange 📐
+      const store = useHttpGenericDestinationStore(nextNodeId());
+
+      // 2. Act ⚙️
+      store.updateConfig({ targetUrl: 'https://api.ejemplo.org', method });
+      store.updateConfig({ retryAttempts });
+
+      // 3. Assert 🎯
+      expect(store.isConfigValid).toBe(valid);
+      if (!valid) {
+        expect(store.malformedParams.join(' ')).toContain(`reintentos para ${method}`);
+      }
+    });
+
+    it('deberia invalidar 5 reintentos al pasar de GET a POST', () => {
+      // 1. Arrange 📐
+      const store = useHttpGenericDestinationStore(nextNodeId());
+      store.updateConfig({ targetUrl: 'https://api.ejemplo.org', method: HttpGenericMethod.GET });
+      store.updateConfig({ retryAttempts: 5 });
+
+      // 2. Act ⚙️
+      store.updateConfig({ method: HttpGenericMethod.POST });
+
+      // 3. Assert 🎯: el valor elegido a mano se respeta, pero ya no vale.
+      expect(store.config.retryAttempts).toBe(5);
+      expect(store.isConfigValid).toBe(false);
+    });
+  });
 });

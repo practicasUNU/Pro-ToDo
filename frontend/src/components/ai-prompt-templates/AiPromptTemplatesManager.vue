@@ -6,7 +6,6 @@ import { useAiPromptTemplatesStore } from '@stores/ai-prompt-templates.store';
 import AiPromptTemplateDialog from '@components/ai-prompt-templates/AiPromptTemplateDialog.vue';
 import StatusBadge from '@components/shared/StatusBadge.vue';
 import AuditDetailsMenu from '@components/shared/AuditDetailsMenu.vue';
-import AuditStampCell from '@components/shared/AuditStampCell.vue';
 import SafeDeleteModal from '@components/shared/SafeDeleteModal.vue';
 
 import { extractApiErrorMessage } from '@/utils/api-error';
@@ -40,14 +39,6 @@ const columns: QTableColumn<AiPromptTemplate>[] = [
     field: 'createdAt',
     align: 'left',
     sortable: true,
-  },
-  {
-    // Ultimo cambio a la vista; el alta completa sigue en `AuditDetailsMenu`.
-    // Sin orden: la API no ordena por autor y la fecha sola enganaria.
-    name: 'updatedAt',
-    label: 'Ultima modificacion',
-    field: 'updatedAt',
-    align: 'left',
   },
   { name: 'actions', label: 'Acciones', field: 'id', align: 'center' },
 ];
@@ -241,12 +232,6 @@ onMounted(loadPrompts);
       <template #body-cell-createdAt="cellProps">
         <q-td :props="cellProps">
           {{ formatDateTime(cellProps.value) }}
-        </q-td>
-      </template>
-
-      <template #body-cell-updatedAt="cellProps">
-        <q-td :props="cellProps">
-          <AuditStampCell :audit="cellProps.row" />
         </q-td>
       </template>
 

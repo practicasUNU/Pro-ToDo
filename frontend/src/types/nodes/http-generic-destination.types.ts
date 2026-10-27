@@ -117,6 +117,37 @@ export const IDEMPOTENT_HTTP_GENERIC_METHODS: ReadonlySet<HttpGenericMethod> = n
   HttpGenericMethod.DELETE,
 ]);
 
+/**
+ * Techo de reintentos de los verbos NO idempotentes (POST, PATCH).
+ *
+ * Mas bajo que `MAX_HTTP_GENERIC_RETRY_ATTEMPTS`: cada reintento de un POST
+ * tras un timeout es una oportunidad mas de duplicar el recurso remoto.
+ */
+export const MAX_HTTP_GENERIC_NON_IDEMPOTENT_RETRY_ATTEMPTS = 3;
+
+/** Reintentos maximos admitidos para un verbo. */
+export const maxRetryAttemptsFor = (method: HttpGenericMethod): number =>
+  IDEMPOTENT_HTTP_GENERIC_METHODS.has(method)
+    ? MAX_HTTP_GENERIC_RETRY_ATTEMPTS
+    : MAX_HTTP_GENERIC_NON_IDEMPOTENT_RETRY_ATTEMPTS;
+
+/**
+ * Motivo por el que `retryAttempts` no vale para ese verbo, o `null` si vale.
+ *
+ * Unica fuente del mensaje: lo usan la regla del campo y `malformedParams`
+ * del store, que es lo que pone `isConfigValid` a `false`.
+ */
+export const describeRetryAttemptsProblem = (
+  method: HttpGenericMethod,
+  retryAttempts: number,
+): string | null => {
+  const max = maxRetryAttemptsFor(method);
+
+  return Number.isInteger(retryAttempts) && retryAttempts >= 0 && retryAttempts <= max
+    ? null
+    : `El número de reintentos para ${method} debe estar entre 0 y ${max}`;
+};
+
 /** Reintentos que aplica el backend cuando el nodo no declara `retryAttempts`. */
 export const defaultRetryAttemptsFor = (method: HttpGenericMethod): number =>
   IDEMPOTENT_HTTP_GENERIC_METHODS.has(method)

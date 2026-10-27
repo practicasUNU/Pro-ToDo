@@ -28,6 +28,7 @@ import {
   QUERY_PARAM_NAME_PATTERN,
   TARGET_URL_PATTERN,
   defaultRetryAttemptsFor,
+  describeRetryAttemptsProblem,
 } from '@/types/nodes/http-generic-destination.types';
 
 import type { HydratableNode, UpstreamNamespace } from '@stores/nodes/node-store-registry';
@@ -284,6 +285,9 @@ const httpGenericDestinationSetup = () => {
 
     const queryProblem = describeRowsProblem(current.queryParams, 'Parametros', false);
     if (queryProblem !== null) problems.push(queryProblem);
+
+    const retriesProblem = describeRetryAttemptsProblem(current.method, current.retryAttempts);
+    if (retriesProblem !== null) problems.push(retriesProblem);
 
     if (isBodyless.value && current.bodyType !== HttpGenericBodyType.NONE) {
       problems.push(

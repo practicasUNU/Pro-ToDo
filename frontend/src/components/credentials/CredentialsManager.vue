@@ -5,7 +5,6 @@ import { useQuasar, type QTableColumn } from 'quasar';
 import { useCredentialsStore } from '@stores/credentials.store';
 
 import AuditDetailsMenu from '@components/shared/AuditDetailsMenu.vue';
-import AuditStampCell from '@components/shared/AuditStampCell.vue';
 import SafeDeleteModal from '@components/shared/SafeDeleteModal.vue';
 
 import CredentialDialog from './CredentialDialog.vue';
@@ -34,15 +33,6 @@ const columns: QTableColumn<Credential>[] = [
     name: 'authType',
     label: 'Tipo',
     field: (row: Credential) => CREDENTIAL_AUTH_TYPE_LABELS[row.authType],
-    align: 'left',
-    sortable: true,
-  },
-  {
-    // Quien y cuando toco la credencial por ultima vez: un alta, un renombrado
-    // o una rotacion del secreto (migracion 058).
-    name: 'updatedAt',
-    label: 'Ultima modificacion',
-    field: 'updatedAt',
     align: 'left',
     sortable: true,
   },
@@ -163,12 +153,6 @@ onMounted(loadCredentials);
           <q-badge class="pd-badge pd-badge--role">
             {{ CREDENTIAL_AUTH_TYPE_LABELS[cellProps.row.authType as CredentialAuthType] }}
           </q-badge>
-        </q-td>
-      </template>
-
-      <template #body-cell-updatedAt="cellProps">
-        <q-td :props="cellProps">
-          <AuditStampCell :audit="cellProps.row" />
         </q-td>
       </template>
 

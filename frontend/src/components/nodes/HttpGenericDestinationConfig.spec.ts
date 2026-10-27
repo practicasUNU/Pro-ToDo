@@ -198,4 +198,48 @@ describe('HttpGenericDestinationConfig.vue', () => {
       expect(wrapper.find('[data-test="url-source-select"]').exists()).toBe(false);
     });
   });
+
+  describe('3. Rango de reintentos segun el verbo', () => {
+    const retryRule = (wrapper: ReturnType<typeof mount>) => {
+      // El `data-test` de un QInput acaba en el `<input>` nativo: se localiza
+      // el componente por su ayuda, que solo lleva el campo de reintentos.
+      const input = wrapper
+        .findAllComponents(QInput)
+        .find((candidate) => String(candidate.props('hint') ?? '').includes('espera exponencial'));
+      const rules = (input?.props('rules') ?? []) as Array<() => true | string>;
+      return rules[0]?.();
+    };
+
+    it('3.1 deberia mostrar el error de POST por encima de 3 y bloquear el nodo', async () => {
+      // 1. Arrange 📐
+      const nodeId = nextNodeId();
+      const wrapper = mountComponent(nodeId);
+      const store = useHttpGenericDestinationStore(nodeId);
+      store.updateConfig({ targetUrl: 'https://api.ejemplo.org', method: HttpGenericMethod.POST });
+
+      // 2. Act ⚙️
+      store.updateConfig({ retryAttempts: 4 });
+      await wrapper.vm.$nextTick();
+
+      // 3. Assert 🎯
+      expect(retryRule(wrapper)).toBe('El número de reintentos para POST debe estar entre 0 y 3');
+      expect(store.isConfigValid).toBe(false);
+    });
+
+    it('3.2 deberia admitir 5 reintentos en GET', async () => {
+      // 1. Arrange 📐
+      const nodeId = nextNodeId();
+      const wrapper = mountComponent(nodeId);
+      const store = useHttpGenericDestinationStore(nodeId);
+      store.updateConfig({ targetUrl: 'https://api.ejemplo.org', method: HttpGenericMethod.GET });
+
+      // 2. Act ⚙️
+      store.updateConfig({ retryAttempts: 5 });
+      await wrapper.vm.$nextTick();
+
+      // 3. Assert 🎯
+      expect(retryRule(wrapper)).toBe(true);
+      expect(store.isConfigValid).toBe(true);
+    });
+  });
 });

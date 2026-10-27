@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onMounted, ref } from 'vue';
+import { computed, nextTick, onMounted, ref, watch } from 'vue';
 import { useQuasar } from 'quasar';
 
 import { useHttpGenericDestinationStore } from '@stores/nodes/http-generic-destination.store';
@@ -18,7 +18,6 @@ import {
   HttpGenericAuthType,
   HttpGenericBodyType,
   HttpGenericMethod,
-  MAX_HTTP_GENERIC_RETRY_ATTEMPTS,
   MAX_HTTP_GENERIC_TIMEOUT_MS,
   MAX_KEY_VALUE_ENTRIES,
   MAX_TARGET_URL_LENGTH,
@@ -26,6 +25,8 @@ import {
   QUERY_PARAM_NAME_PRESETS,
   describeHeader,
   describeQueryParam,
+  describeRetryAttemptsProblem,
+  maxRetryAttemptsFor,
 } from '@/types/nodes/http-generic-destination.types';
 
 import type { QInput } from 'quasar';
@@ -80,6 +81,27 @@ const BODY_HINTS: Readonly<Record<HttpGenericBodyType, string>> = {
 };
 
 const urlInputRef = ref<QInput | null>(null);
+const retryInputRef = ref<QInput | null>(null);
+
+/** Techo de reintentos del verbo elegido: 3 en POST/PATCH, 5 en el resto. */
+const maxRetryAttempts = computed(() => maxRetryAttemptsFor(store.config.method));
+
+/**
+ * Regla del campo de reintentos. Lee el verbo del store y no solo el valor: el
+ * mismo numero puede ser valido en GET e invalido en POST.
+ */
+const retryAttemptsRule = (): true | string =>
+  describeRetryAttemptsProblem(store.config.method, store.config.retryAttempts) ?? true;
+
+// QInput solo revalida cuando cambia SU valor. Pasar de GET (5) a POST deja el
+// mismo numero fuera de rango, y sin esto el error rojo no apareceria.
+watch(
+  () => store.config.method,
+  async () => {
+    await nextTick();
+    void retryInputRef.value?.validate();
+  },
+);
 
 /**
  * Si el campo de URL ha tenido el foco alguna vez.
@@ -433,14 +455,17 @@ onMounted(async () => {
           <label class="pd-label" for="http-retries">Reintentos ante fallo transitorio</label>
           <q-input
             id="http-retries"
+            ref="retryInputRef"
             :model-value="store.config.retryAttempts"
             type="number"
             outlined
             dense
             class="q-mt-xs"
             :min="0"
-            :max="MAX_HTTP_GENERIC_RETRY_ATTEMPTS"
-            hint="Entre 0 y 5, con espera exponencial ante 5xx, timeout o red caida. Por defecto 3 en GET/PUT/DELETE y 0 en POST/PATCH: un POST reintentado puede duplicar el recurso."
+            :max="maxRetryAttempts"
+            :rules="[retryAttemptsRule]"
+            :hint="`Entre 0 y ${maxRetryAttempts} para ${store.config.method}, con espera exponencial ante 5xx, timeout o red caida. Por defecto 3 en GET/PUT/DELETE y 0 en POST/PATCH: un POST reintentado puede duplicar el recurso.`"
+            data-test="retry-input"
             @keydown="blockNonNumericKeys"
             @update:model-value="
               store.updateConfig({ retryAttempts: toInteger($event, store.config.retryAttempts) })

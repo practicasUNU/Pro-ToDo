@@ -8,7 +8,6 @@ import { useWorkflowTemplatesStore } from '@stores/workflow-templates.store';
 import { useWorkflowsStore } from '@stores/workflows.store';
 
 import AuditDetailsMenu from '@components/shared/AuditDetailsMenu.vue';
-import AuditStampCell from '@components/shared/AuditStampCell.vue';
 import SafeDeleteModal from '@components/shared/SafeDeleteModal.vue';
 import StatusBadge from '@components/shared/StatusBadge.vue';
 
@@ -89,14 +88,6 @@ const columns: QTableColumn<PipelineSummary>[] = [
     sortable: true,
   },
   { name: 'status', label: 'Estado', field: 'status', align: 'center', sortable: true },
-  {
-    // Ultimo cambio a la vista; el alta completa sigue en `AuditDetailsMenu`.
-    // Sin orden: la API no ordena por autor y la fecha sola enganaria.
-    name: 'updatedAt',
-    label: 'Ultima modificacion',
-    field: 'updatedAt',
-    align: 'left',
-  },
   { name: 'actions', label: 'Acciones', field: 'id', align: 'center' },
 ];
 
@@ -555,12 +546,6 @@ onBeforeUnmount(() => {
               }}
             </q-tooltip>
           </template>
-        </q-td>
-      </template>
-
-      <template #body-cell-updatedAt="cellProps">
-        <q-td :props="cellProps">
-          <AuditStampCell :audit="cellProps.row" />
         </q-td>
       </template>
 
