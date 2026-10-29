@@ -9068,3 +9068,47 @@ reanudar flujos ya persistidos que nacieron antes de estas reglas; se corrigen a
 El backend publicaba la fila con la ejecucion todavia PAUSADO (el motor la mueve despues), y nada
 la republicaba al terminar. Ahora se publica EN_PROCESO al reanudar y la foto final cuando el motor
 devuelve el control.
+
+---
+
+## Telemetria de IA realista, estado por modelo y atribucion de usuario
+
+### Por que la tasa de exito se restringe a ejecuciones con IA
+
+La tarjeta vive en el informe de consumo de IA, pero contaba todas las ejecuciones concluidas.
+Un flujo sin IA que sondea un buzon cada minuto movia la metrica sin haber llamado a ningun
+modelo. El `EXISTS` contra `telemetria_tokens_ia` deja solo las que invocaron IA y aplica los
+mismos filtros de proveedor, modelo y nodo que el resto del informe.
+
+### Por que toda llamada fallida deja fila
+
+Antes solo se registraban los fallos que el proveedor facturaba (respuesta truncada o contrato
+roto). Un timeout no dejaba rastro, y la tasa por modelo habria salido inflada. Ahora el fallo de
+transporte deja una fila `FAILED` con ceros y el modelo configurado. Ese registro es best-effort:
+si no se puede escribir, no detiene el nodo, porque no hay gasto sin trazar.
+
+### Por que la cuenta de respaldo es un DEFAULT de la base de datos
+
+Cron, los disparos IMAP con remitente desconocido y las acciones de sistema no tienen JWT. El
+backend omite la columna y PostgreSQL pone `fn_usuario_respaldo()`. Asi no hace falta una variable
+nueva ni una consulta extra en el camino caliente. El login fallido escribe NULL explicito:
+atribuirlo a una cuenta real falsearia la traza de seguridad. La atribucion deja de distinguir
+"lo hizo el sistema" de "lo hizo la cuenta de respaldo".
+
+### Por que el remitente IMAP no pisa al usuario manual
+
+El remitente se conoce cuando el disparador ya ha leido el correo. El motor actualiza la fila con
+un `UPDATE` condicional (`usuario_id IS NULL OR = fn_usuario_respaldo()`): quien lanzo o reanudo el
+flujo a mano sigue siendo el responsable.
+
+### Por que el diff de auditoria baja hasta las hojas
+
+Editar el prompt de un nodo OCR aparecia como un cambio en `pipelineSchema` y obligaba a comparar
+dos volcados JSON a ojo. Ahora la tabla, el modal, el CSV y el PDF muestran la ruta exacta con su
+valor antes y despues. El interceptor sigue comparando columnas de primer nivel, porque es asi como
+reconoce un cambio de rol o de estado.
+
+### Checklist de dependencias
+
+- [ ] Aplicar la migracion 060 y reiniciar Nest
+- [ ] Confirmar que la cuenta de respaldo existe en `usuarios`; si no, el DEFAULT queda en NULL

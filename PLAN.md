@@ -4860,3 +4860,57 @@ CredentialsController(@CurrentUser) -> CredentialsService.create/update(actorId)
 - [x] Reintentos por verbo y presets con ayuda en el destino HTTP
 - [x] Guia de pruebas reestructurada en tres secciones
 - [ ] Pendiente — aplicar las migraciones 058 y 059 (`cd backend && npm run db:migrate`) y reiniciar Nest
+
+---
+
+## Telemetria de IA realista, estado por modelo y atribucion de usuario
+
+Rama: `feat/destino-http-generico`. Migracion `060-telemetria-estado-y-usuario-ejecucion.sql`.
+
+### Contratos
+
+| Pieza | Contrato |
+|---|---|
+| `AiCallStatus` | `SUCCESS` \| `FAILED`; columna `telemetria_tokens_ia.estado` (CHECK) + `mensaje_error` (500) |
+| `RecordTelemetryDto` | `status`, `errorMessage?`, `userId?`; el INSERT resuelve `COALESCE(:userId, usuario de la ejecucion, fn_usuario_respaldo())` |
+| `recordFailedCallUsage(..., model)` | Toda llamada fallida deja fila `FAILED`; sin `usage`, con ceros y el modelo configurado (best-effort) |
+| `StatePayloadContext` | `getInitiatorUserId()` / `assignInitiator()`; en el banco de pruebas el iniciador es el `userId` del ambito |
+| `NodeResult.initiatorUserId?` | Lo devuelve `TRIGGER_IMAP` si el remitente es un usuario activo; el motor lo persiste solo sobre un iniciador vacio o de respaldo |
+| `FsmExecution.initiatedByUserId` | `ejecuciones_flujo.usuario_id`; `createExecution(..., userId)` y `prepareResume(..., resumedByUserId)` |
+| `fn_usuario_respaldo()` | DEFAULT de `usuario_id` en telemetria, ejecuciones y auditoria; el login fallido conserva NULL |
+| `getSummary` | Tasa de exito solo de ejecuciones con fila en `telemetria_tokens_ia` (`EXISTS`, con proveedor/modelo/nodo) |
+| `getBreakdownByModel` | + `succeeded`, `failed`, `successRate`; orden por `breakdownSortBy`/`breakdownSortOrder` |
+| `GET /telemetry/filter-options` | `providers`, `models`, `flows`, `nodes` del rango (selectores cerrados) |
+| `TelemetryExportQueryDto` | Filtros + `sortBy`/`sortOrder` del historial: CSV y PDF salen como la pantalla |
+| `ListExecutionsQueryDto` | + `from` / `to` sobre `fecha_inicio` con `CAST(... AS timestamptz)` |
+| `AuditActionType.NODE_SANDBOX_RUN` | `PRUEBA_NODO`, tabla logica `banco_pruebas`, `{ nodeType, success, errorCode, durationMs }` |
+| `changedAuditPaths` / `computeAuditDiff` | Diferencia por rutas hoja (`pipelineSchema.nodes[0].params.customPrompt`) |
+
+### Diagrama de inyeccion de dependencias
+
+```
+ImapTriggerStrategy -> InboundEmailResumeService.resolveSenderUserId -> UsersService.findByEmail
+FsmEngineService.assignInitiator -(UPDATE condicional)-> ejecuciones_flujo.usuario_id
+LlmExtractorStrategy / OcrProcessorStrategy -> inference-telemetry -> TelemetryService
+NodeSandboxService -> AuditLoggerService.record(PRUEBA_NODO)
+TelemetryController -> TelemetryQueryService (summary, breakdown, filter-options, export)
+```
+
+### Decisiones
+
+- `contracena` no existe: el secreto Basic es `password` y va cifrado. Solo cambian las etiquetas
+  de la interfaz a "Clave".
+- Sin tabla de ajustes para el prompt OCR: sigue `PROMPT_OCR_MULTIMODAL` con `customPrompt` por nodo,
+  cuya edicion ya audita el `ACTUALIZAR` del flujo (ahora con diff anidado).
+- La cuenta de respaldo se resuelve en la base de datos, no en `.env`.
+
+### Estado de las tareas
+
+- [x] Estado y error por llamada de IA, tasa de flujos con IA y tasa por modelo
+- [x] Usuario en ejecuciones (JWT, reanudacion, remitente IMAP) y cuenta de respaldo
+- [x] Auditoria `PRUEBA_NODO` del banco de pruebas
+- [x] Diff anidado en el visor de auditoria, CSV y PDF
+- [x] Filtros y orden del informe de consumo; exportaciones con los mismos filtros
+- [x] Panel de control a ancho completo y filtros del historial de ejecuciones
+- [x] Etiquetas "Clave", botones "Exportar" y Auditoria al extremo derecho de las acciones
+- [ ] Pendiente — aplicar la migracion 060 (`cd backend && npm run db:migrate`) y reiniciar Nest
