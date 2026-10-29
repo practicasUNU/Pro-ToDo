@@ -28,6 +28,8 @@ export enum AuditActionValue {
   RESUME = 'REANUDAR',
   /** Descarte manual de una ejecucion detenida (CU-09, migracion 059). */
   FLOW_DISCARDED = 'FLUJO_DESCARTADO',
+  /** Prueba aislada de un nodo en el banco de pruebas (migracion 060). */
+  NODE_SANDBOX_RUN = 'PRUEBA_NODO',
 }
 
 /** Valores del enum `AuditTable` del backend: nombres reales de tabla. */

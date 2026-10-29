@@ -5,7 +5,7 @@ import { renderHtmlToPdf } from '@common/utils/html-to-pdf.util';
 import { AuditActionType } from '@modules/audit/enums/audit-action.enum';
 import { AUDIT_REPORT_TEMPLATE } from '@modules/audit/reports/audit-report.template';
 import {
-  changedAuditKeys,
+  changedAuditPaths,
   labelAuditAction,
   labelAuditTable,
 } from '@modules/audit/reports/audit-labels';
@@ -121,7 +121,7 @@ export class AuditPdfRenderer {
         recordId: item.recordId ?? EMPTY_VALUE,
         sourceIp: item.sourceIp ?? EMPTY_VALUE,
         changedKeys:
-          changedAuditKeys(item.previousData, item.newData).join(', ') ||
+          changedAuditPaths(item.previousData, item.newData).join(', ') ||
           EMPTY_VALUE,
       })),
       truncatedNote:

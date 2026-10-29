@@ -1,6 +1,6 @@
 import { buildCsvDocument, escapeCsvText } from '@common/utils/csv.util';
 import {
-  changedAuditKeys,
+  changedAuditPaths,
   labelAuditAction,
   labelAuditTable,
 } from '@modules/audit/reports/audit-labels';
@@ -33,7 +33,9 @@ const toRecord = (event: AuditEventResponseDto): string[] => [
   escapeCsvText(labelAuditTable(event.affectedTable)),
   escapeCsvText(event.recordId ?? EMPTY_CELL),
   escapeCsvText(event.sourceIp ?? EMPTY_CELL),
-  escapeCsvText(changedAuditKeys(event.previousData, event.newData).join(', ')),
+  escapeCsvText(
+    changedAuditPaths(event.previousData, event.newData).join(', '),
+  ),
   toJsonCell(event.previousData),
   toJsonCell(event.newData),
 ];

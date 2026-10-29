@@ -102,8 +102,9 @@ watch(
   },
 );
 
-const requiredSecret = (label: string) => (val: string) =>
-  !secretsRequired.value || val !== '' || `${label} es obligatorio`;
+/** `message` completo y no solo el sujeto: "la clave" pide "obligatoria". */
+const requiredSecret = (message: string) => (val: string) =>
+  !secretsRequired.value || val !== '' || message;
 
 const maxSecret = (val: string) =>
   val.length <= MAX_SECRET_LENGTH || `Maximo ${MAX_SECRET_LENGTH} caracteres`;
@@ -220,7 +221,7 @@ const onSubmit = async (): Promise<void> => {
                 outlined
                 dense
                 class="q-mt-xs pd-mono"
-                :rules="[requiredSecret('El token'), maxSecret]"
+                :rules="[requiredSecret('El token es obligatorio'), maxSecret]"
               />
             </div>
           </template>
@@ -238,14 +239,14 @@ const onSubmit = async (): Promise<void> => {
                 dense
                 class="q-mt-xs"
                 :rules="[
-                  requiredSecret('El usuario'),
+                  requiredSecret('El usuario es obligatorio'),
                   (val: string) => !val.includes(':') || 'El usuario no puede contener «:»',
                 ]"
               />
             </div>
             <div data-test="credential-password-field">
               <label class="pd-label" for="credential-password">
-                Contraseña<span v-if="secretsRequired" class="pd-required">*</span>
+                Clave<span v-if="secretsRequired" class="pd-required">*</span>
               </label>
               <q-input
                 id="credential-password"
@@ -255,7 +256,7 @@ const onSubmit = async (): Promise<void> => {
                 outlined
                 dense
                 class="q-mt-xs"
-                :rules="[requiredSecret('La contraseña'), maxSecret]"
+                :rules="[requiredSecret('La clave es obligatoria'), maxSecret]"
               />
             </div>
           </template>

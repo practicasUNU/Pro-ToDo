@@ -290,18 +290,39 @@ export class StatePayloadContext {
   private activeCursor: string;
   private namespaces: Record<string, Record<string, unknown>>;
   private readonly sandboxScope: SandboxOperationScope | null;
+  private initiatorUserId: string | null;
 
   constructor(
     executionId: string,
     workflowId: string,
     initialStep: string,
     sandboxScope: SandboxOperationScope | null = null,
+    initiatorUserId: string | null = null,
   ) {
     this.executionId = executionId;
     this.workflowId = workflowId;
     this.activeCursor = initialStep;
     this.namespaces = {};
     this.sandboxScope = sandboxScope;
+    this.initiatorUserId = sandboxScope?.userId ?? initiatorUserId;
+  }
+
+  /**
+   * Usuario al que se imputa la ejecucion (migracion 060): quien la lanzo o
+   * reanudo, el remitente de un disparo IMAP si es un usuario registrado, o la
+   * cuenta de respaldo. `null` solo si la fila aun no lo tiene resuelto.
+   */
+  public getInitiatorUserId(): string | null {
+    return this.initiatorUserId;
+  }
+
+  /**
+   * Fija el iniciador una vez que el motor lo ha persistido. Unica mutacion
+   * permitida fuera de los namespaces: la identidad del disparo IMAP solo se
+   * conoce cuando el nodo disparador ya ha leido el correo.
+   */
+  public assignInitiator(userId: string): void {
+    this.initiatorUserId = userId;
   }
 
   /**

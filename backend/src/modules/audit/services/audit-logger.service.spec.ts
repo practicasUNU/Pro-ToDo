@@ -153,6 +153,45 @@ describe('AuditLoggerService', () => {
       );
     });
 
+    it('1.2b deberia omitir el autor desconocido para que el DEFAULT ponga la cuenta de respaldo', async () => {
+      // 1. Arrange 📐: accion de sistema sin JWT (migracion 060).
+      const { repository } = buildRepository();
+      const service = buildService(repository);
+
+      // 2. Act ⚙️
+      await service.record({
+        userId: null,
+        action: AuditActionType.DEACTIVATE,
+        affectedTable: AuditTable.WORKFLOWS,
+        recordId: TARGET_ID,
+        sourceIp: null,
+      });
+
+      // 3. Assert 🎯: sin la clave TypeORM escribe DEFAULT, no NULL.
+      const [entity] = repository.save.mock.calls[0];
+      expect(entity).not.toHaveProperty('userId');
+    });
+
+    it('1.2c deberia conservar el NULL explicito en un login fallido', async () => {
+      // 1. Arrange 📐: atribuirlo a una cuenta real falsearia la traza.
+      const { repository } = buildRepository();
+      const service = buildService(repository);
+
+      // 2. Act ⚙️
+      await service.record({
+        userId: null,
+        action: AuditActionType.LOGIN_FAILED,
+        affectedTable: AuditTable.USERS,
+        recordId: null,
+        sourceIp: null,
+      });
+
+      // 3. Assert 🎯
+      expect(repository.save).toHaveBeenCalledWith(
+        expect.objectContaining({ userId: null }),
+      );
+    });
+
     it('1.3 NO deberia lanzar si la base de datos falla (best-effort)', async () => {
       // 1. Arrange 📐: la mutacion auditada ya esta confirmada.
       const { repository } = buildRepository();

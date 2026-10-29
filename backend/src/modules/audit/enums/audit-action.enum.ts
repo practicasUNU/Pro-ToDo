@@ -43,4 +43,10 @@ export enum AuditActionType {
    * necesita su motivo y el estado del que venia.
    */
   FLOW_DISCARDED = 'FLUJO_DESCARTADO',
+  /**
+   * Prueba aislada de un nodo en el banco de pruebas (migracion 060). Tiene
+   * efectos reales —la IA factura, el destino HTTP envia— y el auditor
+   * necesita saber quien la lanzo y con que resultado.
+   */
+  NODE_SANDBOX_RUN = 'PRUEBA_NODO',
 }

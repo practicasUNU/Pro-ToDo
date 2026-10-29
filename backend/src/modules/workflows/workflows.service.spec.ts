@@ -287,6 +287,7 @@ describe('WorkflowsService (despacho manual de pruebas, Camino B)', () => {
       expect(engine.createExecution).toHaveBeenCalledWith(
         WORKFLOW_ID,
         MOCK_DATA,
+        null,
       );
       expect(response).toEqual({
         executionId: EXECUTION_ID,
@@ -309,6 +310,7 @@ describe('WorkflowsService (despacho manual de pruebas, Camino B)', () => {
       expect(engine.createExecution).toHaveBeenCalledWith(
         WORKFLOW_ID,
         DEFAULT_MOCK_NAMESPACES,
+        null,
       );
     });
 
@@ -342,6 +344,7 @@ describe('WorkflowsService (despacho manual de pruebas, Camino B)', () => {
       expect(engine.createExecution).toHaveBeenCalledWith(
         WORKFLOW_ID,
         MOCK_DATA,
+        null,
       );
       const [, seeded] = engine.createExecution.mock.calls[0];
       expect(seeded).not.toHaveProperty('raw_email');

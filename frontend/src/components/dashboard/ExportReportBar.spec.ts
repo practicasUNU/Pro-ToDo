@@ -106,4 +106,13 @@ describe('ExportReportBar', () => {
     expect(wrapper.get('[data-test="export-pdf"]').attributes('disabled')).toBeDefined();
     expect(wrapper.get('[data-test="export-csv"]').attributes('disabled')).toBeDefined();
   });
+
+  it('1.5 deberia nombrar los dos botones con el verbo Exportar', () => {
+    // 1. Arrange 📐 + 2. Act ⚙️
+    const wrapper = mountBar();
+
+    // 3. Assert 🎯
+    const labels = wrapper.findAllComponents(QBtn).map((button) => button.props('label'));
+    expect(labels).toEqual(['Exportar CSV', 'Exportar informe PDF']);
+  });
 });

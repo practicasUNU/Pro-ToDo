@@ -164,6 +164,8 @@ interface CheckpointPatch {
   logFilePath?: string | null;
   /** Motivo legible del cierre. Lo escribe el desenlace por severidad LEVE. */
   failureReason?: string | null;
+  /** Usuario al que se imputa la ejecucion; lo escribe la reanudacion manual. */
+  initiatedByUserId?: string;
 }
 
 /**
@@ -575,6 +577,8 @@ export class FsmEngineService {
    * @param flowId Flujo de `flujos` al que pertenece la ejecucion.
    * @param initialContext Namespaces con los que se siembra `contexto_acumulado`,
    *        para que `buildContext()` los restaure de forma inmutable.
+   * @param initiatedByUserId Usuario del JWT que lanza el flujo. Sin el (Cron,
+   *        IMAP) la columna se omite y su DEFAULT pone la cuenta de respaldo.
    * @returns La fila persistida, con su `executionId` ya asignado.
    * @throws ConflictException Si el flujo agota su cupo de instancias activas.
    * @throws SystemCapacityExceededException Si el motor, en su conjunto, ya
@@ -583,6 +587,7 @@ export class FsmEngineService {
   public async createExecution(
     flowId: string,
     initialContext: Record<string, Record<string, unknown>> = {},
+    initiatedByUserId: string | null = null,
   ): Promise<FsmExecution> {
     const maxAllowed =
       Number(
@@ -611,6 +616,8 @@ export class FsmEngineService {
       activeCursor: null,
       contextPayload: initialContext,
       retryState: {},
+      // `undefined` y no `null`: TypeORM escribe DEFAULT para lo omitido.
+      ...(initiatedByUserId !== null ? { initiatedByUserId } : {}),
     });
 
     return this.fsmExecutionRepo.save(execution);
@@ -683,6 +690,8 @@ export class FsmEngineService {
    *        el —asi lo hacia antes de que existiera la purga— y hay llamantes
    *        internos que no lo tienen a mano; omitirlo conserva el contexto
    *        entero, que es el comportamiento historico.
+   * @param resumedByUserId Quien reanuda. Pasa a ser el usuario de la
+   *        ejecucion: la inferencia que se haga desde aqui la pidio el.
    * @returns La fila ya preparada.
    * @throws NotFoundException Si la ejecucion no existe.
    */
@@ -692,6 +701,7 @@ export class FsmEngineService {
     resetRetries = true,
     targetStepId?: string,
     schema?: PipelineSchemaDto,
+    resumedByUserId?: string,
   ): Promise<FsmExecution> {
     const execution = await this.fsmExecutionRepo.findOne({
       where: { executionId },
@@ -750,6 +760,9 @@ export class FsmEngineService {
       // reanudar, y borrarlo dejaria al operador sin nada que mirar si el
       // reintento se rompe por lo mismo. Lo sustituira el proximo fallo.
       failureReason: null,
+      ...(resumedByUserId !== undefined
+        ? { initiatedByUserId: resumedByUserId }
+        : {}),
     });
 
     return execution;
@@ -1353,6 +1366,14 @@ export class FsmEngineService {
             },
           );
 
+          if (result.initiatorUserId !== undefined) {
+            await this.assignInitiator(
+              execution,
+              context,
+              result.initiatorUserId,
+            );
+          }
+
           // Liberacion de binarios. Va JUSTO aqui, y no repetida en cada rama de
           // salida, porque este punto domina las tres que siguen —`halt`, nodo
           // terminal y transicion normal— y todas ellas persisten el checkpoint
@@ -1744,6 +1765,8 @@ export class FsmEngineService {
       executionId,
       schema.flowId,
       cursorStart,
+      null,
+      execution.initiatedByUserId ?? null,
     );
 
     for (const [namespace, data] of Object.entries(
@@ -2592,6 +2615,43 @@ export class FsmEngineService {
    * El `Object.assign` evita un `findOne` extra al final: la instancia que se
    * devuelve al llamante ya refleja el estado final.
    */
+  /**
+   * Imputa la ejecucion al usuario que un nodo identifico (remitente IMAP).
+   *
+   * El UPDATE es condicional: solo sustituye una fila sin usuario o con la
+   * cuenta de respaldo que puso el DEFAULT. Quien lanzo o reanudo el flujo a
+   * mano sigue siendo el responsable aunque el correo lo mandara otro.
+   *
+   * Best-effort: un fallo aqui solo cuesta la atribucion, y abortar por ello
+   * una ejecucion que ya proceso su correo seria peor que dejarla al respaldo.
+   */
+  private async assignInitiator(
+    execution: FsmExecution,
+    context: StatePayloadContext,
+    userId: string,
+  ): Promise<void> {
+    try {
+      const result = await this.fsmExecutionRepo
+        .createQueryBuilder()
+        .update(FsmExecution)
+        .set({ initiatedByUserId: userId })
+        .where('id_ejecucion = :executionId', {
+          executionId: execution.executionId,
+        })
+        .andWhere('(usuario_id IS NULL OR usuario_id = fn_usuario_respaldo())')
+        .execute();
+
+      if ((result.affected ?? 0) > 0) {
+        execution.initiatedByUserId = userId;
+        context.assignInitiator(userId);
+      }
+    } catch (error) {
+      this.logger.warn(
+        `ejecucion=${execution.executionId} | No se pudo imputar la ejecucion al usuario ${userId}: ${this.describeError(error)}`,
+      );
+    }
+  }
+
   private async saveCheckpoint(
     execution: FsmExecution,
     patch: CheckpointPatch,

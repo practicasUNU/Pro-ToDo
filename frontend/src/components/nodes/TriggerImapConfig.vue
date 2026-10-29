@@ -31,7 +31,7 @@ const store = useTriggerImapStore(props.nodeId);
 // Mensajes de regla como constantes: el mismo texto lo usan la regla del campo y
 // la ayuda bajo el input, y duplicarlo los dejaria divergir.
 const PASSWORD_ENV_KEY_HINT =
-  'Solo se admiten variables con el formato IMAP_*PASSWORD. La contrasena vive en el .env del servidor: aqui se declara unicamente el NOMBRE de la variable.';
+  'Solo se admiten variables con el formato IMAP_*PASSWORD. La clave vive en el .env del servidor: aqui se declara unicamente el NOMBRE de la variable.';
 
 const POLL_INTERVAL_HINT = `El backend rechaza periodos por debajo de ${MIN_POLL_INTERVAL_MS / 1000} s para no exceder los limites de tasa del proveedor IMAP.`;
 
@@ -298,7 +298,7 @@ const onTestConnection = async (): Promise<void> => {
 
       <div class="col-12">
         <label class="pd-label" for="imap-password-env-key">
-          Variable de entorno con la contrasena<span class="pd-required">*</span>
+          Variable de entorno con la clave<span class="pd-required">*</span>
         </label>
         <q-input
           id="imap-password-env-key"

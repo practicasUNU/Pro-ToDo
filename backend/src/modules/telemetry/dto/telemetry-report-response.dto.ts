@@ -1,5 +1,6 @@
 import { ApiProperty } from '@nestjs/swagger';
 
+import { AiCallStatus } from '@modules/telemetry/enums/ai-call-status.enum';
 import { TelemetryOperationOrigin } from '@modules/telemetry/enums/telemetry-origin.enum';
 
 /** Rango efectivo de un informe, ya resuelto (instantes ISO, `to` excluido). */
@@ -35,11 +36,12 @@ export class TelemetrySummaryResponseDto {
   readonly estimatedInvocations: number;
 
   @ApiProperty({
-    description: 'Ejecuciones concluidas: EXITOSO + FALLIDO + DESCARTADO',
+    description:
+      'Ejecuciones concluidas (EXITOSO + FALLIDO + DESCARTADO) que invocaron al menos un modelo de IA',
   })
   readonly executionsTotal: number;
 
-  @ApiProperty({ description: 'Ejecuciones EXITOSO' })
+  @ApiProperty({ description: 'Ejecuciones EXITOSO que invocaron IA' })
   readonly executionsSucceeded: number;
 
   @ApiProperty({
@@ -76,6 +78,19 @@ export class ModelBreakdownResponseDto {
 
   @ApiProperty({ description: 'Coste estimado en USD' })
   readonly costUsd: number;
+
+  @ApiProperty({ description: 'Llamadas con estado SUCCESS' })
+  readonly succeeded: number;
+
+  @ApiProperty({ description: 'Llamadas con estado FAILED' })
+  readonly failed: number;
+
+  @ApiProperty({
+    description: 'succeeded / invocations, entre 0 y 1. `null` sin llamadas',
+    nullable: true,
+    type: Number,
+  })
+  readonly successRate: number | null;
 }
 
 /** Una inferencia registrada, con el nombre del flujo resuelto. */
@@ -141,6 +156,68 @@ export class TelemetryHistoryItemResponseDto {
 
   @ApiProperty()
   readonly isEstimated: boolean;
+
+  @ApiProperty({ enum: AiCallStatus })
+  readonly status: AiCallStatus;
+
+  @ApiProperty({ nullable: true, type: String })
+  readonly errorMessage: string | null;
+
+  @ApiProperty({ format: 'uuid', nullable: true, type: String })
+  readonly userId: string | null;
+
+  @ApiProperty({
+    nullable: true,
+    type: String,
+    description: 'Correo del usuario al que se imputa la llamada',
+  })
+  readonly userEmail: string | null;
+}
+
+/** Opcion de filtro de modelo, ligada a su proveedor. */
+export class TelemetryModelOptionDto {
+  @ApiProperty()
+  readonly aiProvider: string;
+
+  @ApiProperty()
+  readonly aiModel: string;
+}
+
+/** Opcion de filtro de flujo, con su nombre. */
+export class TelemetryFlowOptionDto {
+  @ApiProperty({ format: 'uuid' })
+  readonly id: string;
+
+  @ApiProperty()
+  readonly name: string;
+}
+
+/** Opcion de filtro de nodo, ligada a su flujo. */
+export class TelemetryNodeOptionDto {
+  @ApiProperty({ format: 'uuid' })
+  readonly flowId: string;
+
+  @ApiProperty()
+  readonly nodeId: string;
+}
+
+/**
+ * Valores que aparecen en la telemetria del rango
+ * (`GET /api/telemetry/filter-options`). Alimenta selectores cerrados: el
+ * usuario solo puede filtrar por lo que existe (Poka-Yoke).
+ */
+export class TelemetryFilterOptionsResponseDto {
+  @ApiProperty({ type: [String] })
+  readonly providers: string[];
+
+  @ApiProperty({ type: [TelemetryModelOptionDto] })
+  readonly models: TelemetryModelOptionDto[];
+
+  @ApiProperty({ type: [TelemetryFlowOptionDto] })
+  readonly flows: TelemetryFlowOptionDto[];
+
+  @ApiProperty({ type: [TelemetryNodeOptionDto] })
+  readonly nodes: TelemetryNodeOptionDto[];
 }
 
 /** Pagina del historial (`GET /api/telemetry/history`). */

@@ -55,7 +55,7 @@ const download = async (format: ReportFormat): Promise<void> => {
       no-caps
       icon="picture_as_pdf"
       icon-right="north_east"
-      label="Descargar informe PDF"
+      label="Exportar informe PDF"
       :loading="telemetryStore.exporting.pdf"
       :disable="!telemetryStore.isRangeValid"
       data-test="export-pdf"

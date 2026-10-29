@@ -1,21 +1,20 @@
 import { Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { In } from 'typeorm';
+import { In, Raw } from 'typeorm';
 
 import { FsmExecution } from '@core/fsm/entities/fsm-execution.entity';
 import { ExecutionState } from '@core/fsm/types/fsm.enums';
 
+import type { DateRange } from '@common/utils/date-range.util';
 import type { ResolvedSort } from '@common/utils/sort-whitelist.util';
-import type {
-  FindOptionsOrder,
-  FindOptionsSelect,
-  Repository,
-} from 'typeorm';
+import type { FindOptionsOrder, FindOptionsSelect, Repository } from 'typeorm';
 
 /** Filtros y ventana de un listado de ejecuciones. */
 export interface ExecutionFilter {
   readonly flowId?: string | undefined;
   readonly state?: ExecutionState | undefined;
+  /** Rango semiabierto `[from, to)` sobre la fecha de inicio. */
+  readonly startedBetween?: DateRange | undefined;
   readonly limit: number;
   readonly offset: number;
   /**
@@ -80,6 +79,7 @@ export class FsmExecutionQueryService {
     const where: {
       flowId?: string;
       currentState?: ExecutionState;
+      createdAt?: ReturnType<typeof Raw>;
     } = {};
 
     if (filter.flowId !== undefined) {
@@ -88,6 +88,20 @@ export class FsmExecutionQueryService {
 
     if (filter.state !== undefined) {
       where.currentState = filter.state;
+    }
+
+    if (filter.startedBetween !== undefined) {
+      // CAST a `timestamptz` y limites en ISO: `fecha_inicio` es TIMESTAMP SIN
+      // zona, y un `Date` a secas se compararia en la zona del proceso de Node
+      // y desplazaria el rango horas (mismo criterio que la telemetria).
+      where.createdAt = Raw(
+        (column) =>
+          `${column} >= CAST(:startedFrom AS timestamptz) AND ${column} < CAST(:startedTo AS timestamptz)`,
+        {
+          startedFrom: filter.startedBetween.from.toISOString(),
+          startedTo: filter.startedBetween.to.toISOString(),
+        },
+      );
     }
 
     // Por defecto, fecha de inicio y no de actualizacion: el operador busca

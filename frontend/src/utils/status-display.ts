@@ -9,6 +9,7 @@
 import { presentationOf } from '@/utils/alert-categorizer';
 
 import { WorkflowStatus } from '@/types/pipeline';
+import { AiCallStatus } from '@/types/telemetry';
 
 import type { NodeErrorSeverity } from '@/types/execution';
 
@@ -75,3 +76,20 @@ export const describeEnabled = (
   enabled
     ? { label: labels.on, icon: 'check_circle', badgeClass: 'pd-badge--active' }
     : { label: labels.off, icon: 'do_not_disturb_on', badgeClass: 'pd-badge--inactive' };
+
+const AI_CALL_STATUS_DISPLAY: Readonly<Record<AiCallStatus, StatusDisplay>> = {
+  [AiCallStatus.SUCCESS]: {
+    label: 'Exitosa',
+    icon: 'check_circle',
+    badgeClass: 'pd-badge--active',
+  },
+  [AiCallStatus.FAILED]: {
+    label: 'Fallida',
+    icon: 'error_outline',
+    badgeClass: 'pd-badge--failed',
+  },
+};
+
+/** Resultado de una llamada a un modelo de IA (migracion 060). */
+export const describeAiCallStatus = (status: AiCallStatus): StatusDisplay =>
+  AI_CALL_STATUS_DISPLAY[status];

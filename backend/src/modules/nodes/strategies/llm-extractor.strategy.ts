@@ -413,6 +413,7 @@ export class LlmExtractorStrategy implements INodeStrategy {
           context,
           attempt.provider,
           error,
+          attempt.model,
         );
 
         if (telemetryFailure !== null) {

@@ -11,21 +11,24 @@ import { ExecutionState } from '@/types/execution';
 import { EXECUTION_SORT_KEYS } from '@/types/sort';
 import { extractApiErrorMessage } from '@/utils/api-error';
 import { formatDateTime } from '@/utils/date-format';
+import { datePickerBounds, isFutureDate } from '@/utils/date-range';
 import { toTableSort } from '@/utils/table-sort';
 import { canInspectLog } from '@/utils/execution-log';
 import { describeExecutionState } from '@/utils/execution-state-display';
 
 import type { QTableColumn, QTableProps } from 'quasar';
 import type { ExecutionSummary } from '@/types/execution';
+import type { ExecutionHistoryFilters } from '@stores/executions.store';
 
 /**
  * Historial de ejecuciones, paginado en el servidor.
  *
  * El estado se comunica con icono, texto y color a la vez (WCAG 1.4.1): el
- * color solo refuerza. El filtro es un `q-select` cerrado con los estados del
- * motor (Poka-Yoke): no hay texto libre que pueda pedir un estado inexistente.
+ * color solo refuerza. Los filtros de estado y flujo son `q-select` cerrados
+ * (Poka-Yoke): no hay texto libre que pueda pedir un estado o un flujo
+ * inexistente. El rango de fechas acota por la fecha de inicio.
  *
- * `compact` es la variante del dashboard: sin filtro y con menos filas.
+ * `compact` es la variante del dashboard: los mismos filtros y menos filas.
  */
 const props = defineProps<{
   compact?: boolean;
@@ -122,13 +125,83 @@ const pagination = computed<NonNullable<QTableProps['pagination']>>({
   },
 });
 
+const FLOW_OPTIONS = computed(() =>
+  workflowsStore.workflows.map((workflow) => ({ value: workflow.id, label: workflow.name })),
+);
+
+const { min: MIN_DATE, max: MAX_DATE } = datePickerBounds();
+
+const isSelectableDate = (date: string): boolean => date >= MIN_DATE && date <= MAX_DATE;
+
+/**
+ * Aplica un filtro conservando los demas y vuelve a la primera pagina. Las
+ * claves vacias se quitan: `undefined` es "sin filtrar".
+ */
+const applyFilter = (patch: {
+  [K in keyof ExecutionHistoryFilters]?: ExecutionHistoryFilters[K] | undefined;
+}): void => {
+  const merged: Record<string, string | undefined> = { ...executionsStore.filters, ...patch };
+  const next = Object.fromEntries(
+    Object.entries(merged).filter(([, value]) => value !== undefined && value !== ''),
+  ) as ExecutionHistoryFilters;
+
+  executionsStore.setFilters(next);
+  void loadPage({ offset: 0 });
+};
+
 const stateFilter = computed<ExecutionState | null>({
   get: () => executionsStore.filters.state ?? null,
-  set: (state) => {
-    executionsStore.setFilters(state === null ? {} : { state });
-    void loadPage();
-  },
+  set: (state) => applyFilter({ state: state ?? undefined }),
 });
+
+const flowFilter = computed<string | null>({
+  get: () => executionsStore.filters.flowId ?? null,
+  set: (flowId) => applyFilter({ flowId: flowId ?? undefined }),
+});
+
+/**
+ * Fechas que se estan editando; solo se aplican si forman un rango valido.
+ * `null` es lo que deja el boton de borrar de `q-input`.
+ */
+const fromDate = ref<string | null>(executionsStore.filters.from ?? '');
+const toDate = ref<string | null>(executionsStore.filters.to ?? '');
+
+const DATE_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
+
+/** Una fecha a medio teclear no es un error: simplemente aun no se aplica. */
+const dateRangeRule = (): true | string => {
+  const from = fromDate.value ?? '';
+  const to = toDate.value ?? '';
+
+  if (isFutureDate(from) || isFutureDate(to)) {
+    return 'No se pueden consultar fechas futuras.';
+  }
+
+  if (DATE_PATTERN.test(from) && DATE_PATTERN.test(to)) {
+    return from <= to || 'La fecha de inicio debe ser anterior o igual.';
+  }
+
+  return true;
+};
+
+const applyDates = (): void => {
+  const from = fromDate.value ?? '';
+  const to = toDate.value ?? '';
+  const complete = (value: string): boolean => value === '' || DATE_PATTERN.test(value);
+
+  if (!complete(from) || !complete(to) || dateRangeRule() !== true) return;
+
+  applyFilter({ from: from || undefined, to: to || undefined });
+};
+
+const clearFilters = (): void => {
+  fromDate.value = '';
+  toDate.value = '';
+  executionsStore.setFilters({});
+  void loadPage({ offset: 0 });
+};
+
+const hasFilters = computed(() => Object.keys(executionsStore.filters).length > 0);
 
 const loadPage = async (page: { limit?: number; offset?: number } = {}): Promise<void> => {
   try {
@@ -182,20 +255,109 @@ onMounted(async () => {
     no-data-label="No hay ejecuciones registradas."
     @request="onRequest"
   >
-    <template v-if="!compact" #top-right>
-      <q-select
-        v-model="stateFilter"
-        class="pd-search-input"
-        dense
-        outlined
-        clearable
-        emit-value
-        map-options
-        :options="STATE_OPTIONS"
-        label="Filtrar por estado"
-        aria-label="Filtrar ejecuciones por estado"
-        data-test="state-filter"
-      />
+    <template #top-right>
+      <div class="pd-executions-filters" role="group" aria-label="Filtros del historial">
+        <q-select
+          v-model="stateFilter"
+          class="pd-search-input pd-executions-filters__field"
+          dense
+          outlined
+          clearable
+          emit-value
+          map-options
+          :options="STATE_OPTIONS"
+          label="Estado"
+          aria-label="Filtrar ejecuciones por estado"
+          data-test="state-filter"
+        />
+        <q-select
+          v-model="flowFilter"
+          class="pd-executions-filters__field"
+          dense
+          outlined
+          clearable
+          emit-value
+          map-options
+          :options="FLOW_OPTIONS"
+          label="Flujo"
+          aria-label="Filtrar ejecuciones por flujo"
+          data-test="flow-filter"
+        />
+        <q-input
+          v-model="fromDate"
+          class="pd-executions-filters__date"
+          dense
+          outlined
+          clearable
+          label="Desde"
+          stack-label
+          mask="####-##-##"
+          :rules="[dateRangeRule]"
+          hide-bottom-space
+          data-test="executions-from"
+          @update:model-value="applyDates"
+        >
+          <template #append>
+            <q-icon name="event" class="cursor-pointer">
+              <q-popup-proxy cover transition-show="scale" transition-hide="scale">
+                <q-date
+                  v-model="fromDate"
+                  mask="YYYY-MM-DD"
+                  class="pd-date-popup"
+                  :options="isSelectableDate"
+                  @update:model-value="applyDates"
+                >
+                  <div class="row items-center justify-end">
+                    <q-btn v-close-popup flat no-caps label="Cerrar" class="pd-btn-secondary" />
+                  </div>
+                </q-date>
+              </q-popup-proxy>
+            </q-icon>
+          </template>
+        </q-input>
+        <q-input
+          v-model="toDate"
+          class="pd-executions-filters__date"
+          dense
+          outlined
+          clearable
+          label="Hasta"
+          stack-label
+          mask="####-##-##"
+          :rules="[dateRangeRule]"
+          hide-bottom-space
+          data-test="executions-to"
+          @update:model-value="applyDates"
+        >
+          <template #append>
+            <q-icon name="event" class="cursor-pointer">
+              <q-popup-proxy cover transition-show="scale" transition-hide="scale">
+                <q-date
+                  v-model="toDate"
+                  mask="YYYY-MM-DD"
+                  class="pd-date-popup"
+                  :options="isSelectableDate"
+                  @update:model-value="applyDates"
+                >
+                  <div class="row items-center justify-end">
+                    <q-btn v-close-popup flat no-caps label="Cerrar" class="pd-btn-secondary" />
+                  </div>
+                </q-date>
+              </q-popup-proxy>
+            </q-icon>
+          </template>
+        </q-input>
+        <q-btn
+          v-if="hasFilters"
+          class="pd-btn-secondary"
+          flat
+          no-caps
+          icon="filter_alt_off"
+          label="Limpiar"
+          data-test="executions-clear"
+          @click="clearFilters"
+        />
+      </div>
     </template>
 
     <template #body-cell-state="cellProps">
@@ -250,6 +412,21 @@ onMounted(async () => {
 </template>
 
 <style scoped lang="scss">
+.pd-executions-filters {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: 8px;
+}
+
+.pd-executions-filters__field {
+  min-width: 170px;
+}
+
+.pd-executions-filters__date {
+  width: 150px;
+}
+
 .pd-execution-badge {
   display: inline-flex;
   align-items: center;

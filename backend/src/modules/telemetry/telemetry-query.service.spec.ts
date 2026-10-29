@@ -3,6 +3,8 @@ import {
   TelemetryQueryService,
 } from '@modules/telemetry/telemetry-query.service';
 
+import { LlmProvider } from '@modules/nodes/strategies/interfaces/llm-provider.interface';
+
 import type { Repository } from 'typeorm';
 import type { FsmExecution } from '@core/fsm/entities/fsm-execution.entity';
 import type { TelemetriaTokensIa } from '@modules/telemetry/entities/telemetria-tokens-ia.entity';
@@ -23,6 +25,8 @@ const CHAIN_METHODS = [
   'leftJoin',
   'take',
   'skip',
+  'innerJoin',
+  'distinct',
 ] as const;
 
 type QueryBuilderMock = Record<(typeof CHAIN_METHODS)[number], jest.Mock> & {
@@ -68,6 +72,10 @@ const buildRow = (index: number): TelemetriaTokensIa =>
     reasoningRateUsd: 0.3,
     estimatedCostUsd: 0.00001,
     isEstimated: false,
+    status: 'FAILED',
+    errorMessage: 'timeout',
+    userId: 'u-1',
+    user: { id: 'u-1', email: 'practicas@unuware.com' },
   }) as unknown as TelemetriaTokensIa;
 
 const buildService = () => {
@@ -155,6 +163,52 @@ describe('TelemetryQueryService', () => {
     });
   });
 
+  describe('getSummary · tasa de exito de flujos con IA', () => {
+    it('should calculate flow success rate filtering exclusively executions associated with IA telemetry', async () => {
+      // 1. Arrange 📐: 2 de 5 ejecuciones con IA terminaron bien.
+      const { service, executionBuilder } = buildService();
+      executionBuilder.getRawOne.mockResolvedValue({
+        executionsTotal: '5',
+        executionsSucceeded: '2',
+      });
+
+      // 2. Act ⚙️
+      const summary = await service.getSummary({});
+
+      // 3. Assert 🎯: el EXISTS contra `telemetria_tokens_ia` excluye las
+      //    ejecuciones que no invocaron ningun modelo.
+      expect(executionBuilder.andWhere).toHaveBeenCalledWith(
+        'EXISTS (SELECT 1 FROM telemetria_tokens_ia ti WHERE ti.ejecucion_id = e.id_ejecucion)',
+        expect.any(Object),
+      );
+      expect(summary.executionsTotal).toBe(5);
+      expect(summary.executionsSucceeded).toBe(2);
+      expect(summary.successRate).toBe(0.4);
+    });
+
+    it('deberia aplicar proveedor, modelo y nodo dentro del EXISTS', async () => {
+      // 1. Arrange 📐
+      const { service, executionBuilder } = buildService();
+
+      // 2. Act ⚙️
+      await service.getSummary({
+        aiProvider: LlmProvider.GEMINI,
+        aiModel: 'gemini-3.6-flash',
+        nodeId: 'nodo_ia',
+      });
+
+      // 3. Assert 🎯
+      expect(executionBuilder.andWhere).toHaveBeenCalledWith(
+        'EXISTS (SELECT 1 FROM telemetria_tokens_ia ti WHERE ti.ejecucion_id = e.id_ejecucion AND ti.proveedor_ia = :aiProvider AND ti.modelo_ia = :aiModel AND ti.nodo_id = :nodeId)',
+        {
+          aiProvider: LlmProvider.GEMINI,
+          aiModel: 'gemini-3.6-flash',
+          nodeId: 'nodo_ia',
+        },
+      );
+    });
+  });
+
   describe('getBreakdownByModel', () => {
     it('deberia agrupar por proveedor y modelo y devolver numeros', async () => {
       // 1. Arrange 📐
@@ -169,6 +223,8 @@ describe('TelemetryQueryService', () => {
           reasoningTokens: '0',
           totalTokens: '3000',
           costUsd: '0.014000',
+          succeeded: '2',
+          failed: '0',
         },
       ]);
 
@@ -188,8 +244,152 @@ describe('TelemetryQueryService', () => {
           reasoningTokens: 0,
           totalTokens: 3_000,
           costUsd: 0.014,
+          succeeded: 2,
+          failed: 0,
+          successRate: 1,
         },
       ]);
+    });
+
+    it('should calculate success rate percentage grouped by model_ia for SUCCESS and FAILED status', async () => {
+      // 1. Arrange 📐: Sonnet con 3 de 4 llamadas buenas, Flash sin ninguna.
+      const { service, telemetryBuilder } = buildService();
+      telemetryBuilder.getRawMany.mockResolvedValue([
+        {
+          aiProvider: 'ANTHROPIC',
+          aiModel: 'claude-sonnet-5-5',
+          invocations: '4',
+          succeeded: '3',
+          failed: '1',
+        },
+        {
+          aiProvider: 'GEMINI',
+          aiModel: 'gemini-3.6-flash',
+          invocations: '2',
+          succeeded: '0',
+          failed: '2',
+        },
+      ]);
+
+      // 2. Act ⚙️
+      const rows = await service.getBreakdownByModel({});
+
+      // 3. Assert 🎯: la tasa sale del `estado` de cada llamada, agrupada por modelo.
+      expect(telemetryBuilder.addSelect).toHaveBeenCalledWith(
+        'COUNT(*) FILTER (WHERE t.estado = :success)',
+        'succeeded',
+      );
+      expect(telemetryBuilder.addSelect).toHaveBeenCalledWith(
+        'COUNT(*) FILTER (WHERE t.estado = :failed)',
+        'failed',
+      );
+      expect(telemetryBuilder.setParameter).toHaveBeenCalledWith(
+        'success',
+        'SUCCESS',
+      );
+      expect(telemetryBuilder.setParameter).toHaveBeenCalledWith(
+        'failed',
+        'FAILED',
+      );
+      expect(telemetryBuilder.addGroupBy).toHaveBeenCalledWith('t.modelo_ia');
+      expect(
+        rows.map(({ aiModel, succeeded, failed, successRate }) => ({
+          aiModel,
+          succeeded,
+          failed,
+          successRate,
+        })),
+      ).toEqual([
+        {
+          aiModel: 'claude-sonnet-5-5',
+          succeeded: 3,
+          failed: 1,
+          successRate: 0.75,
+        },
+        {
+          aiModel: 'gemini-3.6-flash',
+          succeeded: 0,
+          failed: 2,
+          successRate: 0,
+        },
+      ]);
+    });
+
+    it('deberia ordenar el desglose por la columna de la lista blanca', async () => {
+      // 1. Arrange 📐
+      const { service, telemetryBuilder } = buildService();
+
+      // 2. Act ⚙️
+      await service.getBreakdownByModel({
+        breakdownSortBy: 'invocations',
+        breakdownSortOrder: 'ASC',
+      });
+
+      // 3. Assert 🎯
+      expect(telemetryBuilder.orderBy).toHaveBeenCalledWith(
+        '"invocations"',
+        'ASC',
+      );
+    });
+
+    it('deberia ordenar por coste descendente si no se pide orden', async () => {
+      // 1. Arrange 📐
+      const { service, telemetryBuilder } = buildService();
+
+      // 2. Act ⚙️
+      await service.getBreakdownByModel({});
+
+      // 3. Assert 🎯
+      expect(telemetryBuilder.orderBy).toHaveBeenCalledWith(
+        '"costUsd"',
+        'DESC',
+      );
+    });
+
+    it('deberia filtrar por modelo y por nodo', async () => {
+      // 1. Arrange 📐
+      const { service, telemetryBuilder } = buildService();
+
+      // 2. Act ⚙️
+      await service.getBreakdownByModel({
+        aiModel: 'gemini-3.6-flash',
+        nodeId: 'nodo_ia',
+      });
+
+      // 3. Assert 🎯
+      expect(telemetryBuilder.andWhere).toHaveBeenCalledWith(
+        't.modelo_ia = :aiModel',
+        { aiModel: 'gemini-3.6-flash' },
+      );
+      expect(telemetryBuilder.andWhere).toHaveBeenCalledWith(
+        't.nodo_id = :nodeId',
+        { nodeId: 'nodo_ia' },
+      );
+    });
+  });
+
+  describe('getFilterOptions', () => {
+    it('deberia devolver proveedores unicos, modelos, flujos y nodos del rango', async () => {
+      // 1. Arrange 📐: las tres consultas comparten el doble; se encadenan.
+      const { service, telemetryBuilder } = buildService();
+      telemetryBuilder.getRawMany
+        .mockResolvedValueOnce([
+          { aiProvider: 'ANTHROPIC', aiModel: 'claude-haiku-5-5' },
+          { aiProvider: 'ANTHROPIC', aiModel: 'claude-sonnet-5-5' },
+          { aiProvider: 'GEMINI', aiModel: 'gemini-3.6-flash' },
+        ])
+        .mockResolvedValueOnce([{ id: FLOW_ID, name: 'Notiweb' }])
+        .mockResolvedValueOnce([{ flowId: FLOW_ID, nodeId: 'nodo_ia' }]);
+
+      // 2. Act ⚙️
+      const options = await service.getFilterOptions({});
+
+      // 3. Assert 🎯
+      expect(options.providers).toEqual(['ANTHROPIC', 'GEMINI']);
+      expect(options.models).toHaveLength(3);
+      expect(options.flows).toEqual([{ id: FLOW_ID, name: 'Notiweb' }]);
+      expect(options.nodes).toEqual([{ flowId: FLOW_ID, nodeId: 'nodo_ia' }]);
+      expect(telemetryBuilder.distinct).toHaveBeenCalledWith(true);
     });
   });
 
@@ -211,7 +411,17 @@ describe('TelemetryQueryService', () => {
         createdAt: '2026-10-22T08:30:00.000Z',
         operationOrigin: 'EJECUCION_FLUJO',
         flowName: 'Notiweb',
+        status: 'FAILED',
+        errorMessage: 'timeout',
+        userId: 'u-1',
+        userEmail: 'practicas@unuware.com',
       });
+      // Del usuario solo se proyectan id y correo: nunca su `secreto_otp`.
+      expect(telemetryBuilder.leftJoin).toHaveBeenCalledWith('t.user', 'u');
+      expect(telemetryBuilder.addSelect).toHaveBeenCalledWith([
+        'u.id',
+        'u.email',
+      ]);
       expect(telemetryBuilder.orderBy).toHaveBeenLastCalledWith(
         't.createdAt',
         'DESC',
@@ -235,6 +445,23 @@ describe('TelemetryQueryService', () => {
       expect(telemetryBuilder.addOrderBy).toHaveBeenLastCalledWith(
         't.id',
         'ASC',
+      );
+    });
+  });
+
+  describe('getExportRows · orden', () => {
+    it('deberia exportar en el mismo orden que el historial en pantalla', async () => {
+      // 1. Arrange 📐
+      const { service, telemetryBuilder } = buildService();
+
+      // 2. Act ⚙️
+      await service.getExportRows({ sortBy: 'totalTokens', sortOrder: 'ASC' });
+
+      // 3. Assert 🎯
+      expect(telemetryBuilder.orderBy).toHaveBeenLastCalledWith(
+        't.totalTokens',
+        'ASC',
+        'NULLS LAST',
       );
     });
   });

@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import {
+  describeAiCallStatus,
   describeEnabled,
   describeSeverity,
   describeWorkflowStatus,
@@ -8,6 +9,7 @@ import {
 } from './status-display';
 
 import { WorkflowStatus } from '@/types/pipeline';
+import { AiCallStatus } from '@/types/telemetry';
 
 import type { NodeErrorSeverity } from '@/types/execution';
 
@@ -61,5 +63,20 @@ describe('status-display (WCAG 1.4.1: nunca solo color)', () => {
     // 1. Arrange + 2. Act + 3. Assert
     expect(isNodeErrorSeverity('GRAVE')).toBe(true);
     expect(isNodeErrorSeverity('ADVERTENCIA')).toBe(false);
+  });
+
+  it('deberia describir el estado de una llamada de IA con texto e icono', () => {
+    // 1. Arrange 📐 + 2. Act ⚙️
+    const success = describeAiCallStatus(AiCallStatus.SUCCESS);
+    const failed = describeAiCallStatus(AiCallStatus.FAILED);
+
+    // 3. Assert 🎯
+    expect(success).toEqual({
+      label: 'Exitosa',
+      icon: 'check_circle',
+      badgeClass: 'pd-badge--active',
+    });
+    expect(failed.label).toBe('Fallida');
+    expect(failed.badgeClass).toBe('pd-badge--failed');
   });
 });

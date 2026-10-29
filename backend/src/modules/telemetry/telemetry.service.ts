@@ -7,6 +7,10 @@ import {
   PrecioModeloIa,
 } from '@modules/telemetry/entities/precio-modelo-ia.entity';
 import { TelemetriaTokensIa } from '@modules/telemetry/entities/telemetria-tokens-ia.entity';
+import {
+  AI_CALL_ERROR_MESSAGE_MAX_LENGTH,
+  AiCallStatus,
+} from '@modules/telemetry/enums/ai-call-status.enum';
 import { TelemetryOperationOrigin } from '@modules/telemetry/enums/telemetry-origin.enum';
 
 import type {
@@ -44,6 +48,25 @@ export const buildZeroUsageMetrics = (): TokenUsageMetrics => ({
   estimatedCostUsd: 0,
   isEstimated: false,
 });
+
+/**
+ * Mensaje de error tal y como se guarda: solo en las llamadas fallidas, y
+ * recortado al ancho de `mensaje_error` para que un volcado largo del
+ * proveedor no tumbe el INSERT.
+ */
+const toStoredErrorMessage = (
+  dto: Pick<RecordTelemetryDto, 'status' | 'errorMessage'>,
+): string | null => {
+  if (dto.status !== AiCallStatus.FAILED) {
+    return null;
+  }
+
+  const message = dto.errorMessage?.trim() ?? '';
+
+  return message === ''
+    ? null
+    : message.slice(0, AI_CALL_ERROR_MESSAGE_MAX_LENGTH);
+};
 
 /**
  * Calcula el coste de cada inferencia de IA y lo persiste en
@@ -110,6 +133,9 @@ export class TelemetryService {
    * `flujo_id` sale de `ejecuciones_flujo` en la misma operacion, de modo que no
    * hay ventana entre leer la ejecucion y escribir la fila. Si la ejecucion no
    * existe, el subselect da NULL y el `NOT NULL` de la columna lo rechaza.
+   *
+   * El usuario sigue la misma idea: el del contexto si lo trae, el de la fila
+   * de la ejecucion si no, y la cuenta de respaldo como ultimo recurso.
    */
   public async recordTokenUsage(
     dto: RecordTelemetryDto,
@@ -126,6 +152,10 @@ export class TelemetryService {
         flowId: () =>
           '(SELECT id_flujo FROM ejecuciones_flujo WHERE id_ejecucion = :executionId)',
         nodeId: dto.nodeId,
+        userId: () =>
+          'COALESCE(CAST(:userId AS uuid), (SELECT usuario_id FROM ejecuciones_flujo WHERE id_ejecucion = :executionId), fn_usuario_respaldo())',
+        status: dto.status,
+        errorMessage: toStoredErrorMessage(dto),
         aiProvider: dto.aiProvider,
         aiModel: dto.aiModel,
         promptTokens: metrics.promptTokens,
@@ -139,6 +169,7 @@ export class TelemetryService {
         isEstimated: metrics.isEstimated,
       })
       .setParameter('executionId', dto.executionId)
+      .setParameter('userId', dto.userId ?? null)
       .execute();
 
     return metrics;
@@ -167,6 +198,8 @@ export class TelemetryService {
         executionId: null,
         flowId: null,
         nodeId: null,
+        status: dto.status,
+        errorMessage: toStoredErrorMessage(dto),
         aiProvider: dto.aiProvider,
         aiModel: dto.aiModel,
         promptTokens: metrics.promptTokens,

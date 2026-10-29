@@ -247,11 +247,14 @@ export class WorkflowsController {
   public async executeTest(
     @Param('id', ParseUUIDPipe) id: string,
     @Body() executeTestWorkflowDto: ExecuteTestWorkflowDto,
+    // Quien lanza el ensayo: la telemetria de IA que genere se le imputa.
+    @CurrentUser() currentUser: AuthenticatedUser,
   ): Promise<WorkflowExecutionResponseDto> {
     try {
       return await this.workflowsService.executeTest(
         id,
         executeTestWorkflowDto,
+        currentUser.id,
       );
     } catch (error: unknown) {
       throw toIssueContractException(error);

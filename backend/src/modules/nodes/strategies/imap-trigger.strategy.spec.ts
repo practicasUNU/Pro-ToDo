@@ -151,6 +151,7 @@ const buildStrategy = (
   strategy: ImapTriggerStrategy;
   get: jest.Mock;
   processMessage: jest.Mock;
+  resolveSenderUserId: jest.Mock;
 } => {
   const get = jest.fn((key: string) => env[key]);
   const configService = { get } as unknown as ConfigService;
@@ -158,16 +159,22 @@ const buildStrategy = (
   // Doble del canal de ordenes. Devuelve `false` por defecto —"no era una
   // orden"— para que las pruebas de ingesta normal no dependan de el.
   const processMessage = jest.fn().mockResolvedValue(false);
+  // Remitente no registrado por defecto: la imputacion es opcional.
+  const resolveSenderUserId = jest.fn().mockResolvedValue(null);
   const inboundResume = {
     processMessage,
+    resolveSenderUserId,
   } as unknown as InboundEmailResumeService;
 
   return {
     strategy: new ImapTriggerStrategy(configService, inboundResume),
     get,
     processMessage,
+    resolveSenderUserId,
   };
 };
+
+const SENDER_USER_ID = '6f1c2b3a-4d5e-4f60-8a71-b2c3d4e5f601';
 
 const buildContext = (): StatePayloadContext =>
   createMockStatePayloadContext({ currentStep: 'trigger_imap' });
@@ -185,6 +192,34 @@ describe('ImapTriggerStrategy', () => {
 
     // 3. Assert: la factoria indexa por este valor.
     expect(strategy.nodeType).toBe(NodeType.TRIGGER_IMAP);
+  });
+
+  describe('0. Imputacion de la ejecucion al remitente (migracion 060)', () => {
+    it('0.1 deberia devolver el usuario del remitente si esta registrado', async () => {
+      // 1. Arrange
+      const { strategy, resolveSenderUserId } = buildStrategy();
+      resolveSenderUserId.mockResolvedValue(SENDER_USER_ID);
+
+      // 2. Act
+      const result = await strategy.execute(buildContext(), buildParams());
+
+      // 3. Assert
+      expect(resolveSenderUserId).toHaveBeenCalledWith('prensa@unuware.com');
+      expect(result.success).toBe(true);
+      expect(result.initiatorUserId).toBe(SENDER_USER_ID);
+    });
+
+    it('0.2 no deberia imputar nada si el remitente no es un usuario', async () => {
+      // 1. Arrange
+      const { strategy } = buildStrategy();
+
+      // 2. Act
+      const result = await strategy.execute(buildContext(), buildParams());
+
+      // 3. Assert: sin la clave, el motor deja la cuenta de respaldo.
+      expect(result.success).toBe(true);
+      expect(result).not.toHaveProperty('initiatorUserId');
+    });
   });
 
   describe('1. Extraccion del correo UNSEEN', () => {

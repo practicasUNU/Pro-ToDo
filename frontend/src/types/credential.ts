@@ -20,7 +20,7 @@ export enum ApiKeyPlacement {
 
 export const CREDENTIAL_AUTH_TYPE_LABELS: Readonly<Record<CredentialAuthType, string>> = {
   [CredentialAuthType.BEARER_TOKEN]: 'Token Bearer',
-  [CredentialAuthType.BASIC_AUTH]: 'Usuario y contraseña (Basic)',
+  [CredentialAuthType.BASIC_AUTH]: 'Usuario y clave (Basic)',
   [CredentialAuthType.API_KEY]: 'API key',
 };
 

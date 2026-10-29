@@ -748,6 +748,34 @@ export class InboundEmailResumeService
     return null;
   }
 
+  /**
+   * Identificador del usuario ACTIVO cuyo correo es `fromAddress`, o `null`.
+   *
+   * Lo usa `TRIGGER_IMAP` para imputar la ejecucion al remitente (migracion
+   * 060). No exige rol: atribuir no es autorizar, y el correo ya entro por el
+   * buzon del flujo. Nunca lanza: un fallo de lectura deja la ejecucion en la
+   * cuenta de respaldo en vez de romper el disparo.
+   */
+  public async resolveSenderUserId(
+    fromAddress: string,
+  ): Promise<string | null> {
+    if (fromAddress.trim() === '') {
+      return null;
+    }
+
+    try {
+      const user = await this.usersService.findByEmail(fromAddress);
+
+      return user !== null && user.isActive ? user.id : null;
+    } catch (error: unknown) {
+      this.logger.warn(
+        `[InboundEmailResume] No se pudo resolver el remitente ${fromAddress}: ${this.describe(error)}`,
+      );
+
+      return null;
+    }
+  }
+
   /** El remitente, si existe, sigue activo y tiene rol suficiente. */
   private async resolveAuthorizedUser(
     fromAddress: string,

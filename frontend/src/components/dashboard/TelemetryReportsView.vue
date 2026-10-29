@@ -8,24 +8,31 @@ import { usePanelRefresh } from '@/composables/usePanelRefresh';
 
 import ExportReportBar from '@components/dashboard/ExportReportBar.vue';
 import TelemetryCostChart from '@components/dashboard/TelemetryCostChart.vue';
-import TelemetryDateRangeFilter from '@components/dashboard/TelemetryDateRangeFilter.vue';
 import TelemetryHistoryTable from '@components/dashboard/TelemetryHistoryTable.vue';
 import TelemetryModelBreakdownTable from '@components/dashboard/TelemetryModelBreakdownTable.vue';
+import TelemetryReportFilters from '@components/dashboard/TelemetryReportFilters.vue';
 import TelemetrySummaryCards from '@components/dashboard/TelemetrySummaryCards.vue';
 
 import { extractApiErrorMessage } from '@/utils/api-error';
 
 /**
- * Informes de consumo de IA: periodo elegible, KPIs, desglose por modelo,
- * detalle por inferencia y descarga CSV/PDF del mismo periodo.
+ * Informes de consumo de IA: periodo y filtros elegibles, KPIs, desglose por
+ * modelo, detalle por inferencia y descarga CSV/PDF con esos mismos filtros.
  */
 const $q = useQuasar();
 const telemetryStore = useTelemetryStore();
 
-/** KPIs, desglose y primera pagina del detalle, para el periodo vigente. */
+/**
+ * KPIs, desglose, primera pagina del detalle y opciones de los filtros, para
+ * el periodo y los filtros vigentes.
+ */
 const loadReport = async (): Promise<void> => {
   try {
-    await Promise.all([telemetryStore.loadDashboard(), telemetryStore.loadHistory({ offset: 0 })]);
+    await Promise.all([
+      telemetryStore.loadDashboard(),
+      telemetryStore.loadHistory({ offset: 0 }),
+      telemetryStore.loadFilterOptions(),
+    ]);
   } catch (error) {
     $q.notify({
       type: 'negative',
@@ -48,17 +55,21 @@ usePanelRefresh(loadReport, { onFlowCompleted: true });
       <div>
         <h1 class="pd-h1">Informes de consumo de IA</h1>
         <p class="pd-subtitle pd-text-secondary">
-          Tokens, coste estimado y detalle por inferencia del periodo elegido.
+          Tokens, coste estimado, tasa de éxito y detalle por inferencia del periodo elegido.
         </p>
       </div>
       <ExportReportBar />
     </header>
 
-    <section class="pd-card pd-reports__filter" aria-label="Periodo del informe">
-      <TelemetryDateRangeFilter @apply="loadReport" />
+    <section class="pd-card pd-reports__filter" aria-label="Filtros del informe">
+      <TelemetryReportFilters @apply="loadReport" />
     </section>
 
-    <TelemetrySummaryCards :summary="telemetryStore.summary" :loading="telemetryStore.isLoading" />
+    <TelemetrySummaryCards
+      :summary="telemetryStore.summary"
+      :breakdown="telemetryStore.breakdown"
+      :loading="telemetryStore.isLoading"
+    />
 
     <div class="pd-reports__grid">
       <TelemetryCostChart

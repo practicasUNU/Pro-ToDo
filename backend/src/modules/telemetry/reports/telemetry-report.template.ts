@@ -66,6 +66,7 @@ export const TELEMETRY_REPORT_TEMPLATE = `<!doctype html>
     <div class="brand">UNUWARE · Proto-Do</div>
     <h1>Informe de consumo de IA</h1>
     <p>Periodo: {{rangeLabel}} · Emitido el {{issuedAt}}</p>
+    {{#if filtersLabel}}<p>Filtros: {{filtersLabel}}</p>{{/if}}
   </header>
 
   <section class="kpis">
@@ -80,19 +81,21 @@ export const TELEMETRY_REPORT_TEMPLATE = `<!doctype html>
     <thead>
       <tr>
         <th>Proveedor</th><th>Modelo</th><th class="num">Invocaciones</th>
-        <th class="num">Tokens totales</th><th class="num">Coste (USD)</th>
+        <th class="num">Tokens totales</th><th class="num">Fallidas</th><th class="num">Éxito</th>
+        <th class="num">Coste (USD)</th>
       </tr>
     </thead>
     <tbody>
       {{#each breakdown}}
       <tr>
         <td>{{aiProvider}}</td><td class="mono">{{aiModel}}</td><td class="num">{{invocations}}</td>
-        <td class="num">{{totalTokens}}</td><td class="num">{{costUsd}}</td>
+        <td class="num">{{totalTokens}}</td><td class="num">{{failed}}</td><td class="num">{{successRate}}</td>
+        <td class="num">{{costUsd}}</td>
       </tr>
       {{/each}}
     </tbody>
     <tfoot>
-      <tr><td colspan="4">Total</td><td class="num">{{totalCostUsd}}</td></tr>
+      <tr><td colspan="6">Total</td><td class="num">{{totalCostUsd}}</td></tr>
     </tfoot>
   </table>
   {{else}}
@@ -104,7 +107,7 @@ export const TELEMETRY_REPORT_TEMPLATE = `<!doctype html>
   <table>
     <thead>
       <tr>
-        <th>Fecha</th><th>Flujo</th><th>Nodo</th><th>Modelo</th>
+        <th>Fecha</th><th>Flujo</th><th>Nodo</th><th>Modelo</th><th>Usuario</th><th>Estado</th>
         <th class="num">Prompt</th><th class="num">Completación</th><th class="num">Razonamiento</th>
         <th class="num">Coste (USD)</th>
       </tr>
@@ -113,6 +116,7 @@ export const TELEMETRY_REPORT_TEMPLATE = `<!doctype html>
       {{#each items}}
       <tr>
         <td>{{createdAt}}</td><td>{{flowName}}</td><td class="mono">{{nodeId}}</td><td class="mono">{{aiModel}}</td>
+        <td>{{userEmail}}</td><td>{{status}}</td>
         <td class="num">{{promptTokens}}</td><td class="num">{{completionTokens}}</td><td class="num">{{reasoningTokens}}</td>
         <td class="num">{{#if isEstimated}}<span class="estimated" title="Coste aproximado">≈ </span>{{/if}}{{estimatedCostUsd}}</td>
       </tr>

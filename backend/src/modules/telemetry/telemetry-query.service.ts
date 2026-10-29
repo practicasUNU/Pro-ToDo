@@ -7,16 +7,20 @@ import { ExecutionState } from '@core/fsm/types/fsm.enums';
 import { resolveSort } from '@common/utils/sort-whitelist.util';
 import {
   DEFAULT_HISTORY_LIMIT,
+  TELEMETRY_BREAKDOWN_SORT_COLUMNS,
   TELEMETRY_HISTORY_SORT_COLUMNS,
+  TelemetryExportQueryDto,
   TelemetryHistoryQueryDto,
   TelemetryQueryDto,
 } from '@modules/telemetry/dto/telemetry-query.dto';
+import { AiCallStatus } from '@modules/telemetry/enums/ai-call-status.enum';
 import { TelemetriaTokensIa } from '@modules/telemetry/entities/telemetria-tokens-ia.entity';
 import { resolveTelemetryRange } from '@modules/telemetry/utils/telemetry-range.util';
 
 import type { SelectQueryBuilder } from 'typeorm';
 import type {
   ModelBreakdownResponseDto,
+  TelemetryFilterOptionsResponseDto,
   TelemetryHistoryItemResponseDto,
   TelemetryHistoryPageResponseDto,
   TelemetrySummaryResponseDto,
@@ -73,6 +77,17 @@ const toRangeParameters = (
 const toNumber = (value: string | null | undefined): number =>
   value === null || value === undefined ? 0 : Number(value);
 
+/** Proporcion entre 0 y 1, o `null` si no hay base sobre la que calcularla. */
+const toRate = (part: number, total: number): number | null =>
+  total === 0 ? null : part / total;
+
+/** Tasa de exito de las ejecuciones que invocaron IA. */
+interface AiFlowSuccessRate {
+  readonly executionsTotal: number;
+  readonly executionsSucceeded: number;
+  readonly successRate: number | null;
+}
+
 /**
  * Lecturas agregadas de `telemetria_tokens_ia` para el dashboard y los
  * informes.
@@ -107,6 +122,41 @@ export class TelemetryQueryService {
       )
       .getRawOne<RawAggregate>();
 
+    const executions = await this.getAiOnlyFlowSuccessRate(query, range);
+
+    return {
+      range: { from: range.from.toISOString(), to: range.to.toISOString() },
+      totalTokens: toNumber(usage?.totalTokens),
+      totalCostUsd: toNumber(usage?.totalCostUsd),
+      aiInvocations: toNumber(usage?.aiInvocations),
+      estimatedInvocations: toNumber(usage?.estimatedInvocations),
+      ...executions,
+    };
+  }
+
+  /**
+   * Tasa de exito de los flujos CON IA: solo cuentan las ejecuciones concluidas
+   * que dejaron al menos una fila en `telemetria_tokens_ia`.
+   *
+   * Antes se contaban todas, y un flujo sin IA que sondea cada minuto hundia o
+   * inflaba una metrica que se presenta en el informe de consumo de IA. El
+   * `EXISTS` aplica los mismos filtros de proveedor, modelo y nodo que el resto
+   * del informe: con "solo Gemini" activo, la tasa es la de los flujos que
+   * llamaron a Gemini.
+   */
+  private async getAiOnlyFlowSuccessRate(
+    query: TelemetryQueryDto,
+    range: TelemetryRange,
+  ): Promise<AiFlowSuccessRate> {
+    const telemetryFilters = [
+      'ti.ejecucion_id = e.id_ejecucion',
+      ...(query.aiProvider !== undefined
+        ? ['ti.proveedor_ia = :aiProvider']
+        : []),
+      ...(query.aiModel !== undefined ? ['ti.modelo_ia = :aiModel'] : []),
+      ...(query.nodeId !== undefined ? ['ti.nodo_id = :nodeId'] : []),
+    ];
+
     const executionsQuery = this.executionRepository
       .createQueryBuilder('e')
       .select('COUNT(*)', 'executionsTotal')
@@ -125,6 +175,14 @@ export class TelemetryQueryService {
         'e.fecha_inicio >= CAST(:from AS timestamptz) AND e.fecha_inicio < CAST(:to AS timestamptz)',
         toRangeParameters(range),
       )
+      .andWhere(
+        `EXISTS (SELECT 1 FROM telemetria_tokens_ia ti WHERE ${telemetryFilters.join(' AND ')})`,
+        {
+          aiProvider: query.aiProvider,
+          aiModel: query.aiModel,
+          nodeId: query.nodeId,
+        },
+      )
       .setParameter('succeeded', ExecutionState.EXITOSO);
 
     if (query.flowId !== undefined) {
@@ -139,23 +197,30 @@ export class TelemetryQueryService {
     const executionsSucceeded = toNumber(executions?.executionsSucceeded);
 
     return {
-      range: { from: range.from.toISOString(), to: range.to.toISOString() },
-      totalTokens: toNumber(usage?.totalTokens),
-      totalCostUsd: toNumber(usage?.totalCostUsd),
-      aiInvocations: toNumber(usage?.aiInvocations),
-      estimatedInvocations: toNumber(usage?.estimatedInvocations),
       executionsTotal,
       executionsSucceeded,
-      successRate:
-        executionsTotal === 0 ? null : executionsSucceeded / executionsTotal,
+      successRate: toRate(executionsSucceeded, executionsTotal),
     };
   }
 
-  /** Consumo agregado por proveedor y modelo, del mas caro al mas barato. */
+  /**
+   * Consumo y tasa de exito agregados por proveedor y modelo. Por defecto del
+   * mas caro al mas barato; `breakdownSortBy`/`breakdownSortOrder` lo cambian.
+   *
+   * La tasa por modelo sale de `estado` (migracion 060): cada llamada, buena o
+   * fallida, deja su fila, asi que SUCCESS / total es la fiabilidad real del
+   * modelo y no solo la de las llamadas que se facturaron.
+   */
   public async getBreakdownByModel(
     query: TelemetryQueryDto,
   ): Promise<ModelBreakdownResponseDto[]> {
     const range = resolveTelemetryRange(query);
+    const sort = resolveSort(
+      TELEMETRY_BREAKDOWN_SORT_COLUMNS,
+      query.breakdownSortBy,
+      query.breakdownSortOrder,
+      { key: 'costUsd', order: 'DESC' },
+    );
 
     const rows = await this.filteredTelemetry(query, range)
       .select('t.proveedor_ia', 'aiProvider')
@@ -166,22 +231,93 @@ export class TelemetryQueryService {
       .addSelect('SUM(t.tokens_razonamiento)', 'reasoningTokens')
       .addSelect('SUM(t.tokens_totales)', 'totalTokens')
       .addSelect('SUM(t.costo_estimado_usd)', 'costUsd')
+      .addSelect('COUNT(*) FILTER (WHERE t.estado = :success)', 'succeeded')
+      .addSelect('COUNT(*) FILTER (WHERE t.estado = :failed)', 'failed')
+      .setParameter('success', AiCallStatus.SUCCESS)
+      .setParameter('failed', AiCallStatus.FAILED)
       .groupBy('t.proveedor_ia')
       .addGroupBy('t.modelo_ia')
-      .orderBy('"costUsd"', 'DESC')
+      .orderBy(sort.column, sort.order)
       .addOrderBy('"totalTokens"', 'DESC')
       .getRawMany<RawAggregate>();
 
-    return rows.map((row) => ({
+    return rows.map((row) => this.toBreakdownRow(row));
+  }
+
+  /**
+   * Proveedores, modelos, flujos y nodos que aparecen en la telemetria del
+   * rango, para los selectores cerrados del informe. Solo el rango acota: un
+   * filtro activo no debe esconder las opciones a las que se querria cambiar.
+   */
+  public async getFilterOptions(
+    query: TelemetryQueryDto,
+  ): Promise<TelemetryFilterOptionsResponseDto> {
+    const range = resolveTelemetryRange(query);
+    const inRange = (): SelectQueryBuilder<TelemetriaTokensIa> =>
+      this.telemetryRepository
+        .createQueryBuilder('t')
+        .where(
+          't.creado_en >= CAST(:from AS timestamptz) AND t.creado_en < CAST(:to AS timestamptz)',
+          toRangeParameters(range),
+        );
+
+    const [models, flows, nodes] = await Promise.all([
+      inRange()
+        .select('t.proveedor_ia', 'aiProvider')
+        .addSelect('t.modelo_ia', 'aiModel')
+        .distinct(true)
+        .orderBy('"aiProvider"')
+        .addOrderBy('"aiModel"')
+        .getRawMany<RawAggregate>(),
+      inRange()
+        .innerJoin('t.flow', 'f')
+        .select('f.id', 'id')
+        .addSelect('f.name', 'name')
+        .distinct(true)
+        .orderBy('"name"')
+        .getRawMany<RawAggregate>(),
+      inRange()
+        .select('t.flujo_id', 'flowId')
+        .addSelect('t.nodo_id', 'nodeId')
+        .andWhere('t.flujo_id IS NOT NULL AND t.nodo_id IS NOT NULL')
+        .distinct(true)
+        .orderBy('"nodeId"')
+        .getRawMany<RawAggregate>(),
+    ]);
+
+    const modelOptions = models.map((row) => ({
       aiProvider: row.aiProvider ?? '',
       aiModel: row.aiModel ?? '',
-      invocations: toNumber(row.invocations),
+    }));
+
+    return {
+      providers: [...new Set(modelOptions.map((row) => row.aiProvider))],
+      models: modelOptions,
+      flows: flows.map((row) => ({ id: row.id ?? '', name: row.name ?? '' })),
+      nodes: nodes.map((row) => ({
+        flowId: row.flowId ?? '',
+        nodeId: row.nodeId ?? '',
+      })),
+    };
+  }
+
+  private toBreakdownRow(row: RawAggregate): ModelBreakdownResponseDto {
+    const invocations = toNumber(row.invocations);
+    const succeeded = toNumber(row.succeeded);
+
+    return {
+      aiProvider: row.aiProvider ?? '',
+      aiModel: row.aiModel ?? '',
+      invocations,
       promptTokens: toNumber(row.promptTokens),
       completionTokens: toNumber(row.completionTokens),
       reasoningTokens: toNumber(row.reasoningTokens),
       totalTokens: toNumber(row.totalTokens),
       costUsd: toNumber(row.costUsd),
-    }));
+      succeeded,
+      failed: toNumber(row.failed),
+      successRate: toRate(succeeded, invocations),
+    };
   }
 
   /**
@@ -195,19 +331,7 @@ export class TelemetryQueryService {
     const limit = query.limit ?? DEFAULT_HISTORY_LIMIT;
     const offset = query.offset ?? 0;
 
-    const sort = resolveSort(
-      TELEMETRY_HISTORY_SORT_COLUMNS,
-      query.sortBy,
-      query.sortOrder,
-      { key: 'createdAt', order: 'DESC' },
-    );
-
-    // `NULLS LAST` en los dos sentidos: un nodo o flujo ausente (consumo del
-    // asistente de prompts) no es "el menor" ni "el mayor", es un hueco, y
-    // va al final. El id desempata para que la paginacion sea estable.
-    const [rows, total] = await this.historyQuery(query, range)
-      .orderBy(sort.column, sort.order, 'NULLS LAST')
-      .addOrderBy('t.id', sort.order)
+    const [rows, total] = await this.sortedHistoryQuery(query, range)
       .take(limit)
       .skip(offset)
       .getManyAndCount();
@@ -220,15 +344,18 @@ export class TelemetryQueryService {
     };
   }
 
-  /** Todas las filas del rango para exportar, hasta `MAX_EXPORT_ROWS`. */
+  /**
+   * Todas las filas del rango para exportar, hasta `MAX_EXPORT_ROWS`, con los
+   * mismos filtros y el mismo orden que el historial en pantalla.
+   */
   public async getExportRows(
-    query: TelemetryQueryDto,
+    query: TelemetryExportQueryDto,
   ): Promise<TelemetryExportRows> {
     const range = resolveTelemetryRange(query);
 
     // Se pide UNA fila de mas para saber si el techo corto el informe sin
     // lanzar un COUNT aparte sobre el mismo rango.
-    const rows = await this.historyQuery(query, range)
+    const rows = await this.sortedHistoryQuery(query, range)
       .take(MAX_EXPORT_ROWS + 1)
       .getMany();
 
@@ -267,13 +394,43 @@ export class TelemetryQueryService {
       });
     }
 
+    if (query.aiModel !== undefined) {
+      builder.andWhere('t.modelo_ia = :aiModel', { aiModel: query.aiModel });
+    }
+
+    if (query.nodeId !== undefined) {
+      builder.andWhere('t.nodo_id = :nodeId', { nodeId: query.nodeId });
+    }
+
     return builder;
   }
 
   /**
-   * Filas completas con el NOMBRE del flujo. Del flujo solo se seleccionan id y
-   * nombre: la entidad completa arrastraria el `configuracion_pipeline` de cada
-   * fila, que puede pesar kilobytes, a un listado que no lo usa.
+   * Historial ordenado segun `sortBy`/`sortOrder`. `NULLS LAST` en los dos
+   * sentidos: un nodo o flujo ausente (consumo del asistente de prompts) no es
+   * "el menor" ni "el mayor", es un hueco, y va al final. El id desempata para
+   * que la paginacion sea estable.
+   */
+  private sortedHistoryQuery(
+    query: TelemetryExportQueryDto,
+    range: TelemetryRange,
+  ): SelectQueryBuilder<TelemetriaTokensIa> {
+    const sort = resolveSort(
+      TELEMETRY_HISTORY_SORT_COLUMNS,
+      query.sortBy,
+      query.sortOrder,
+      { key: 'createdAt', order: 'DESC' },
+    );
+
+    return this.historyQuery(query, range)
+      .orderBy(sort.column, sort.order, 'NULLS LAST')
+      .addOrderBy('t.id', sort.order);
+  }
+
+  /**
+   * Filas completas con el NOMBRE del flujo y el CORREO del usuario. De cada
+   * relacion solo se seleccionan dos columnas: el flujo completo arrastraria
+   * el `configuracion_pipeline` de cada fila, y el usuario su `secreto_otp`.
    */
   private historyQuery(
     query: TelemetryQueryDto,
@@ -282,6 +439,8 @@ export class TelemetryQueryService {
     return this.filteredTelemetry(query, range)
       .leftJoin('t.flow', 'f')
       .addSelect(['f.id', 'f.name'])
+      .leftJoin('t.user', 'u')
+      .addSelect(['u.id', 'u.email'])
       .orderBy('t.createdAt', 'DESC')
       .addOrderBy('t.id', 'DESC');
   }
@@ -308,6 +467,10 @@ export class TelemetryQueryService {
       reasoningRateUsd: row.reasoningRateUsd,
       estimatedCostUsd: row.estimatedCostUsd,
       isEstimated: row.isEstimated,
+      status: row.status,
+      errorMessage: row.errorMessage,
+      userId: row.userId,
+      userEmail: row.user?.email ?? null,
     };
   }
 }

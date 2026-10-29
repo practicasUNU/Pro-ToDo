@@ -1,14 +1,16 @@
 <script setup lang="ts">
 import { ref } from 'vue';
 
-import { formatInteger, formatUsd } from '@/utils/number-format';
+import { formatInteger, formatPercent, formatUsd } from '@/utils/number-format';
 
 import type { QTableColumn, QTableProps } from 'quasar';
 import type { ModelBreakdownRow } from '@/types/telemetry';
 
 /**
  * Desglose del consumo por proveedor y modelo, con las cifras exactas que el
- * grafico de barras resume. Presentacional: recibe las filas ya cargadas.
+ * grafico de barras resume y la tasa de exito de cada modelo (llamadas
+ * SUCCESS sobre las registradas). Presentacional: recibe las filas ya
+ * cargadas, en el orden que pidio el filtro del informe.
  */
 defineProps<{
   breakdown: readonly ModelBreakdownRow[];
@@ -60,6 +62,22 @@ const columns: QTableColumn<ModelBreakdownRow>[] = [
     field: 'reasoningTokens',
     align: 'right',
     format: (value: number) => formatInteger(value),
+  },
+  {
+    name: 'failed',
+    label: 'Fallidas',
+    field: 'failed',
+    align: 'right',
+    sortable: true,
+    format: (value: number) => formatInteger(value),
+  },
+  {
+    name: 'successRate',
+    label: 'Éxito (%)',
+    field: 'successRate',
+    align: 'right',
+    sortable: true,
+    format: (value: number | null) => formatPercent(value),
   },
   {
     name: 'costUsd',

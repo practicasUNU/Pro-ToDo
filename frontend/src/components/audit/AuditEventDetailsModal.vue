@@ -1,23 +1,20 @@
 <script setup lang="ts">
-import { computed } from 'vue';
+import AuditDiffViewer from '@components/audit/AuditDiffViewer.vue';
 
-import {
-  changedKeys,
-  formatSnapshot,
-  labelAuditAction,
-  labelAuditTable,
-} from '@/utils/audit-display';
+import { formatSnapshot, labelAuditAction, labelAuditTable } from '@/utils/audit-display';
 import { formatDateTime } from '@/utils/date-format';
 
 import type { AuditEvent } from '@/types/audit';
 
 /**
- * Detalle de un evento de auditoria: quien, cuando, desde donde y las dos
- * fotografias del registro (antes / despues) en JSON.
+ * Detalle de un evento de auditoria: quien, cuando, desde donde y la
+ * diferencia campo a campo entre las dos fotografias, con los objetos anidados
+ * aplanados (`AuditDiffViewer`). El JSON completo queda plegado debajo para
+ * quien necesite el contexto entero.
  *
  * Solo lectura y sin llamadas: el evento ya llega completo en la fila.
  */
-const props = defineProps<{
+defineProps<{
   modelValue: boolean;
   /** Evento a mostrar; `null` mientras no hay ninguno elegido. */
   event: AuditEvent | null;
@@ -26,10 +23,6 @@ const props = defineProps<{
 const emit = defineEmits<{
   'update:modelValue': [value: boolean];
 }>();
-
-const modifiedKeys = computed(() =>
-  props.event === null ? [] : changedKeys(props.event.previousData, props.event.newData),
-);
 
 const close = (): void => {
   emit('update:modelValue', false);
@@ -71,31 +64,31 @@ const close = (): void => {
         </dl>
 
         <h3 class="pd-label pd-audit-details__heading">Campos modificados</h3>
-        <div
-          v-if="modifiedKeys.length > 0"
-          class="pd-audit-details__keys"
-          data-test="audit-detail-keys"
-        >
-          <q-chip v-for="key in modifiedKeys" :key="key" dense square class="pd-mono">
-            {{ key }}
-          </q-chip>
-        </div>
-        <p v-else class="pd-text-secondary">Sin cambios de datos registrados.</p>
+        <AuditDiffViewer :previous="event.previousData" :next="event.newData" />
 
-        <div class="pd-audit-details__snapshots">
-          <section>
-            <h3 class="pd-label pd-audit-details__heading">Datos anteriores</h3>
-            <pre class="pd-mono pd-audit-details__json" data-test="audit-detail-previous">{{
-              formatSnapshot(event.previousData)
-            }}</pre>
-          </section>
-          <section>
-            <h3 class="pd-label pd-audit-details__heading">Datos nuevos</h3>
-            <pre class="pd-mono pd-audit-details__json" data-test="audit-detail-new">{{
-              formatSnapshot(event.newData)
-            }}</pre>
-          </section>
-        </div>
+        <q-expansion-item
+          dense
+          dense-toggle
+          icon="data_object"
+          label="Ver fotografías completas (JSON)"
+          class="pd-audit-details__raw"
+          data-test="audit-detail-raw"
+        >
+          <div class="pd-audit-details__snapshots">
+            <section>
+              <h3 class="pd-label pd-audit-details__heading">Datos anteriores</h3>
+              <pre class="pd-mono pd-audit-details__json" data-test="audit-detail-previous">{{
+                formatSnapshot(event.previousData)
+              }}</pre>
+            </section>
+            <section>
+              <h3 class="pd-label pd-audit-details__heading">Datos nuevos</h3>
+              <pre class="pd-mono pd-audit-details__json" data-test="audit-detail-new">{{
+                formatSnapshot(event.newData)
+              }}</pre>
+            </section>
+          </div>
+        </q-expansion-item>
       </q-card-section>
 
       <q-card-actions align="right" class="q-px-md q-pb-md">
@@ -139,10 +132,8 @@ const close = (): void => {
   margin: 16px 0 6px;
 }
 
-.pd-audit-details__keys {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 4px;
+.pd-audit-details__raw {
+  margin-top: 12px;
 }
 
 .pd-audit-details__snapshots {

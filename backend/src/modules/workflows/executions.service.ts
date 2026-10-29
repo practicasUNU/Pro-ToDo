@@ -12,6 +12,7 @@ import {
   FsmEngineService,
 } from '@core/fsm/services/fsm-engine.service';
 import { ExecutionEventsCoordinator } from '@common/services/execution-events.coordinator';
+import { resolveDateRange } from '@common/utils/date-range.util';
 import { resolveSort } from '@common/utils/sort-whitelist.util';
 import { FsmExecutionQueryService } from '@core/fsm/services/fsm-execution-query.service';
 import { PipelineValidatorService } from '@core/fsm/services/pipeline-validator.service';
@@ -42,6 +43,13 @@ import type { AuthenticatedUser } from '@modules/auth/interfaces/jwt-payload.int
 import type { PipelineSchemaDto } from '@core/fsm/dto/pipeline-schema.dto';
 import type { Repository } from 'typeorm';
 import type { DiscardAuditContext } from '@modules/workflows/workflows.service';
+import type { DateRange } from '@common/utils/date-range.util';
+
+/**
+ * Horizonte del filtro "hasta tal dia" cuando no llega `from`: un siglo cubre
+ * cualquier historico real sin dejar el limite inferior abierto en SQL.
+ */
+const OPEN_RANGE_DAYS = 36_500;
 
 /** Lo que el controlador aporta al evento `FLUJO_DESCARTADO`. */
 type DiscardAuditInput = Pick<DiscardAuditContext, 'reason' | 'sourceIp'>;
@@ -89,6 +97,7 @@ export class ExecutionsService {
     const { items, total } = await this.fsmExecutionQueryService.findPage({
       flowId: query.flowId,
       state: query.state,
+      startedBetween: this.resolveStartedBetween(query),
       limit,
       offset,
       sort: resolveSort(EXECUTION_SORT_COLUMNS, query.sortBy, query.sortOrder, {
@@ -109,6 +118,22 @@ export class ExecutionsService {
       limit,
       offset,
     };
+  }
+
+  /**
+   * Rango de fechas del listado, solo si el cliente pidio alguno: sin `from` ni
+   * `to` el historial no se acota, a diferencia de los informes.
+   */
+  private resolveStartedBetween(
+    query: ListExecutionsQueryDto,
+  ): DateRange | undefined {
+    if (query.from === undefined && query.to === undefined) {
+      return undefined;
+    }
+
+    // Sin `from`, un horizonte que cubre cualquier historico real: el filtro es
+    // "hasta tal dia", no "los ultimos N dias".
+    return resolveDateRange(query, OPEN_RANGE_DAYS);
   }
 
   /**
@@ -269,6 +294,8 @@ export class ExecutionsService {
       // Habilita la purga selectiva: sin el grafo el motor no sabe que pasos
       // vienen despues del cursor y conserva el contexto entero.
       schema,
+      // Quien reanuda pasa a ser el usuario de la ejecucion (migracion 060).
+      user.id,
     );
 
     // Marca de demarcacion en la trazabilidad. Reanudar NO borra ni invalida

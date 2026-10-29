@@ -1,3 +1,4 @@
+import { AiCallStatus } from '@modules/telemetry/enums/ai-call-status.enum';
 import { ANY_MODEL } from '@modules/telemetry/entities/precio-modelo-ia.entity';
 import { TelemetryOperationOrigin } from '@modules/telemetry/enums/telemetry-origin.enum';
 import { TelemetryService } from '@modules/telemetry/telemetry.service';
@@ -20,6 +21,7 @@ const buildDto = (
   completionTokens: 500_000,
   reasoningTokens: 100_000,
   usageReported: true,
+  status: AiCallStatus.SUCCESS,
   ...overrides,
 });
 
@@ -193,6 +195,55 @@ describe('TelemetryService', () => {
       expect(metrics.estimatedCostUsd).toBe(2.3);
     });
 
+    it('deberia imputar la fila al iniciador, a la ejecucion o a la cuenta de respaldo', async () => {
+      // 1. Arrange 📐
+      const { service, chain } = buildService();
+      const userId = '3a8f0c1d-2b4e-4f6a-9c7d-1e2f3a4b5c6d';
+
+      // 2. Act ⚙️
+      await service.recordTokenUsage(buildDto({ userId }));
+
+      // 3. Assert 🎯: COALESCE en SQL, en el mismo INSERT, sin ventana.
+      const values = chain.values.mock.calls[0]?.[0] ?? {};
+      const userExpression = (values.userId as () => string)();
+      expect(userExpression).toContain('CAST(:userId AS uuid)');
+      expect(userExpression).toContain(
+        'SELECT usuario_id FROM ejecuciones_flujo',
+      );
+      expect(userExpression).toContain('fn_usuario_respaldo()');
+      expect(chain.setParameter).toHaveBeenCalledWith('userId', userId);
+    });
+
+    it('deberia guardar el estado FAILED con el motivo recortado a 500', async () => {
+      // 1. Arrange 📐
+      const { service, chain } = buildService();
+
+      // 2. Act ⚙️
+      await service.recordTokenUsage(
+        buildDto({
+          status: AiCallStatus.FAILED,
+          errorMessage: `  ${'x'.repeat(600)}  `,
+        }),
+      );
+
+      // 3. Assert 🎯
+      const values = chain.values.mock.calls[0]?.[0] ?? {};
+      expect(values.status).toBe(AiCallStatus.FAILED);
+      expect((values.errorMessage as string).length).toBe(500);
+    });
+
+    it('deberia descartar el mensaje de error en una llamada exitosa', async () => {
+      // 1. Arrange 📐
+      const { service, chain } = buildService();
+
+      // 2. Act ⚙️
+      await service.recordTokenUsage(buildDto({ errorMessage: 'residuo' }));
+
+      // 3. Assert 🎯
+      const values = chain.values.mock.calls[0]?.[0] ?? {};
+      expect(values.errorMessage).toBeNull();
+    });
+
     it('deberia propagar el fallo del INSERT para que el nodo decida', async () => {
       // 1. Arrange 📐
       const { service, chain } = buildService();
@@ -224,6 +275,7 @@ describe('TelemetryService', () => {
         completionTokens: 500_000,
         reasoningTokens: 100_000,
         usageReported: true,
+        status: AiCallStatus.SUCCESS,
       });
 
       // 3. Assert 🎯: misma tarifa y coste que una inferencia de un flujo.

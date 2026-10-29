@@ -54,7 +54,7 @@ const download = async (format: AuditReportFormat): Promise<void> => {
       no-caps
       icon="picture_as_pdf"
       icon-right="north_east"
-      label="Descargar informe PDF"
+      label="Exportar informe PDF"
       :loading="auditStore.exporting.pdf"
       :disable="!auditStore.isRangeValid"
       data-test="audit-export-pdf"

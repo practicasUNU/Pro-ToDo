@@ -366,6 +366,114 @@ describe('FsmEngineService (PROT-09)', () => {
     });
   });
 
+  describe('1.0 Imputacion al remitente del disparo (migracion 060)', () => {
+    /** Doble del `UPDATE` condicional de `assignInitiator`. */
+    const withUpdateBuilder = (
+      repo: Repository<FsmExecution>,
+      affected: number,
+    ): { andWhere: jest.Mock; set: jest.Mock } => {
+      const builder = {
+        update: jest.fn(),
+        set: jest.fn(),
+        where: jest.fn(),
+        andWhere: jest.fn(),
+        execute: jest.fn().mockResolvedValue({ affected }),
+      };
+      builder.update.mockReturnValue(builder);
+      builder.set.mockReturnValue(builder);
+      builder.where.mockReturnValue(builder);
+      builder.andWhere.mockReturnValue(builder);
+      Object.assign(repo, { createQueryBuilder: jest.fn(() => builder) });
+
+      return builder;
+    };
+
+    it('deberia imputar la ejecucion al usuario que devuelve el disparador', async () => {
+      // 1. Arrange: el IMAP identifica al remitente como usuario registrado.
+      const execution = buildExecution();
+      const { repo } = buildRepository(execution);
+      const builder = withUpdateBuilder(repo, 1);
+      const userId = '6f1c2b3a-4d5e-4f60-8a71-b2c3d4e5f601';
+      const contexts: StatePayloadContext[] = [];
+      const executeA = jest
+        .fn()
+        .mockResolvedValue({ success: true, initiatorUserId: userId });
+      const executeB = jest.fn((context: StatePayloadContext) => {
+        contexts.push(context);
+        return Promise.resolve({ success: true });
+      });
+
+      factory.registerStrategy(buildStrategy(NodeType.TRIGGER_IMAP, executeA));
+      factory.registerStrategy(buildStrategy(NodeType.PROCESADOR_IA, executeB));
+      factory.registerStrategy(
+        buildStrategy(
+          NodeType.DESTINO_DRUPAL,
+          jest.fn().mockResolvedValue({ success: true }),
+        ),
+      );
+
+      // 2. Act
+      const result = await buildEngine(repo).executeWorkflow(
+        EXECUTION_ID,
+        buildLinearSchema(),
+      );
+
+      // 3. Assert: solo sustituye un iniciador vacio o de respaldo, y el nodo
+      //    de IA siguiente ya ve al usuario en su contexto.
+      expect(builder.set).toHaveBeenCalledWith({ initiatedByUserId: userId });
+      expect(builder.andWhere).toHaveBeenCalledWith(
+        '(usuario_id IS NULL OR usuario_id = fn_usuario_respaldo())',
+      );
+      expect(result.initiatedByUserId).toBe(userId);
+      expect(contexts[0]?.getInitiatorUserId()).toBe(userId);
+    });
+
+    it('no deberia pisar al usuario que lanzo el flujo a mano', async () => {
+      // 1. Arrange: el UPDATE condicional no afecta a ninguna fila.
+      const execution = buildExecution();
+      const manualUser = '3a8f0c1d-2b4e-4f6a-9c7d-1e2f3a4b5c6d';
+      Object.assign(execution, { initiatedByUserId: manualUser });
+      const { repo } = buildRepository(execution);
+      withUpdateBuilder(repo, 0);
+      const contexts: StatePayloadContext[] = [];
+
+      factory.registerStrategy(
+        buildStrategy(
+          NodeType.TRIGGER_IMAP,
+          jest.fn().mockResolvedValue({
+            success: true,
+            initiatorUserId: '6f1c2b3a-4d5e-4f60-8a71-b2c3d4e5f601',
+          }),
+        ),
+      );
+      factory.registerStrategy(
+        buildStrategy(
+          NodeType.PROCESADOR_IA,
+          jest.fn((context: StatePayloadContext) => {
+            contexts.push(context);
+            return Promise.resolve({ success: true });
+          }),
+        ),
+      );
+      factory.registerStrategy(
+        buildStrategy(
+          NodeType.DESTINO_DRUPAL,
+          jest.fn().mockResolvedValue({ success: true }),
+        ),
+      );
+
+      // 2. Act
+      const result = await buildEngine(repo).executeWorkflow(
+        EXECUTION_ID,
+        buildLinearSchema(),
+      );
+
+      // 3. Assert
+      expect(result.initiatedByUserId).toBe(manualUser);
+      expect(contexts[0]?.getInitiatorUserId()).toBe(manualUser);
+    });
+  });
+
   describe('1.1 Parada ordenada pedida por un nodo (`halt`)', () => {
     it('deberia cerrar en OMITIDO sin invocar los nodos siguientes', async () => {
       // 1. Arrange: el disparador no encuentra nada que procesar y pide parar.
@@ -1971,6 +2079,33 @@ describe('FsmEngineService (PROT-09)', () => {
       expect(execution.currentState).toBe(ExecutionState.INACTIVO);
       expect(execution.activeCursor).toBeNull();
       expect(execution.contextPayload).toEqual(initialContext);
+    });
+
+    it('deberia guardar el usuario que lanza la ejecucion (migracion 060)', async () => {
+      // 1. Arrange
+      const { repo, save } = buildCreationRepository(0);
+      const userId = '3a8f0c1d-2b4e-4f6a-9c7d-1e2f3a4b5c6d';
+
+      // 2. Act
+      await buildEngine(repo).createExecution(FLOW_ID, {}, userId);
+
+      // 3. Assert
+      expect(save).toHaveBeenCalledWith(
+        expect.objectContaining({ initiatedByUserId: userId }),
+      );
+    });
+
+    it('deberia omitir el usuario sin iniciador para que el DEFAULT ponga el respaldo', async () => {
+      // 1. Arrange: Cron e IMAP de partida no traen JWT.
+      const { repo, save } = buildCreationRepository(0);
+
+      // 2. Act
+      await buildEngine(repo).createExecution(FLOW_ID, {});
+
+      // 3. Assert: la propiedad no existe, ni siquiera a `null` (TypeORM
+      //    escribiria NULL y anularia el DEFAULT de la columna).
+      const [entity] = save.mock.calls[0] as [FsmExecution];
+      expect(entity).not.toHaveProperty('initiatedByUserId');
     });
 
     it('deberia lanzar ConflictException si el flujo ya tiene una instancia EN_PROCESO', async () => {

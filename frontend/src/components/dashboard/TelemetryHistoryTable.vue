@@ -4,9 +4,12 @@ import { useQuasar } from 'quasar';
 
 import { useTelemetryStore } from '@stores/telemetry.store';
 
+import StatusBadge from '@components/shared/StatusBadge.vue';
+
 import { extractApiErrorMessage } from '@/utils/api-error';
 import { formatDateTime } from '@/utils/date-format';
 import { formatInteger, formatUsd } from '@/utils/number-format';
+import { describeAiCallStatus } from '@/utils/status-display';
 import { toTableSort } from '@/utils/table-sort';
 
 import { TELEMETRY_HISTORY_SORT_KEYS } from '@/types/sort';
@@ -19,7 +22,9 @@ import type { TelemetryHistoryItem } from '@/types/telemetry';
  * Detalle de consumos: una fila por inferencia de IA, paginada en el servidor.
  *
  * Las inferencias con coste aproximado llevan icono + texto "Aproximado"; el
- * color de aviso solo refuerza.
+ * color de aviso solo refuerza. El estado va en un `StatusBadge` con texto e
+ * icono, y el motivo del fallo en su tooltip. El usuario es el correo al que el
+ * backend imputa la llamada (iniciador, remitente o cuenta de respaldo).
  */
 const $q = useQuasar();
 const telemetryStore = useTelemetryStore();
@@ -54,6 +59,15 @@ const columns: QTableColumn<TelemetryHistoryItem>[] = [
     sortable: true,
   },
   { name: 'aiModel', label: 'Modelo', field: 'aiModel', align: 'left', sortable: true },
+  {
+    name: 'user',
+    label: 'Usuario',
+    field: (row) => row.userEmail ?? '—',
+    align: 'left',
+    sortable: true,
+    classes: 'pd-cell--long',
+  },
+  { name: 'status', label: 'Estado', field: 'status', align: 'left', sortable: true },
   {
     name: 'totalTokens',
     label: 'Tokens',
@@ -153,6 +167,13 @@ const onRequest: QTableProps['onRequest'] = ({ pagination: requested }) => {
       <q-td :props="cellProps">
         <span class="pd-mono">{{ cellProps.value }}</span>
         <span class="pd-history__provider">{{ cellProps.row.aiProvider }}</span>
+      </q-td>
+    </template>
+
+    <template #body-cell-status="cellProps">
+      <q-td :props="cellProps">
+        <StatusBadge :display="describeAiCallStatus(cellProps.row.status)" />
+        <q-tooltip v-if="cellProps.row.errorMessage">{{ cellProps.row.errorMessage }}</q-tooltip>
       </q-td>
     </template>
 

@@ -28,8 +28,12 @@ const props = defineProps<{
   subject: string;
 }>();
 
-/** Texto cuando el cambio no tiene autor registrado. */
-const UNKNOWN_AUTHOR = 'Sin registro';
+/**
+ * Texto cuando el cambio no tiene autor. Desde la migracion 060 las filas sin
+ * autor se atribuyen a la cuenta de respaldo, asi que solo aparece si esa
+ * cuenta no existe en la instalacion.
+ */
+const UNKNOWN_AUTHOR = '—';
 
 interface AuditRow {
   readonly key: 'created' | 'updated';

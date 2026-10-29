@@ -164,6 +164,7 @@ describe('WorkflowsController (POST /workflows/:id/execute-test)', () => {
       expect(workflowsServiceMock.executeTest).toHaveBeenCalledWith(
         WORKFLOW_ID,
         { mockData: { parsed_email: { clean_title: 'Titular' } } },
+        EDITOR_USER.id,
       );
     });
 
@@ -179,6 +180,7 @@ describe('WorkflowsController (POST /workflows/:id/execute-test)', () => {
       expect(workflowsServiceMock.executeTest).toHaveBeenCalledWith(
         WORKFLOW_ID,
         {},
+        EDITOR_USER.id,
       );
     });
 

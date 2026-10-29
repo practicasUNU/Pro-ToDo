@@ -14,6 +14,7 @@ import {
   ERR_PROMPT_OPTIMIZER_EMPTY,
   PromptOptimizerService,
 } from '@modules/prompts/prompt-optimizer.service';
+import { AiCallStatus } from '@modules/telemetry/enums/ai-call-status.enum';
 import { TelemetryOperationOrigin } from '@modules/telemetry/enums/telemetry-origin.enum';
 import { UserRole } from '@modules/users/enums/user-role.enum';
 import { createMockTelemetryService } from '@test/factories/telemetry-service.factory';
@@ -159,6 +160,8 @@ describe('PromptOptimizerService', () => {
         completionTokens: 400,
         reasoningTokens: 100,
         usageReported: true,
+        status: AiCallStatus.SUCCESS,
+        errorMessage: null,
       });
       // Doble: 2 USD/MTok prompt, 10 completacion y razonamiento.
       expect(result.telemetry).toEqual({
@@ -304,7 +307,7 @@ describe('PromptOptimizerService', () => {
       );
     });
 
-    it('2.2 no deberia registrar nada si el fallo fue de transporte', async () => {
+    it('2.2 deberia registrar FAILED con ceros si el fallo fue de transporte', async () => {
       // 1. Arrange 📐
       const { service, telemetry, generateCompletion } = buildFixture();
       generateCompletion.mockRejectedValue(new Error('ECONNRESET'));
@@ -313,7 +316,16 @@ describe('PromptOptimizerService', () => {
       await expect(
         service.optimize({ draftPrompt: DRAFT, targetFormat: 'html' }, EDITOR),
       ).rejects.toThrow(BadGatewayException);
-      expect(telemetry.recordAssistUsage).not.toHaveBeenCalled();
+      expect(telemetry.recordAssistUsage).toHaveBeenCalledWith(
+        expect.objectContaining({
+          userId: EDITOR.id,
+          promptTokens: 0,
+          completionTokens: 0,
+          usageReported: false,
+          status: AiCallStatus.FAILED,
+          errorMessage: 'ECONNRESET',
+        }),
+      );
     });
 
     it('2.3 deberia responder 502 ERR_PROMPT_OPTIMIZER_EMPTY sin prompt, pero registrar el gasto', async () => {

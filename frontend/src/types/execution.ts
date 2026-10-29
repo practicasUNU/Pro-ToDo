@@ -80,6 +80,10 @@ export interface ExecutionDetail extends ExecutionSummary {
 export interface ExecutionListQuery extends SortQuery<ExecutionSortKey> {
   readonly flowId?: string;
   readonly state?: ExecutionState;
+  /** Inicio del rango de fecha de inicio (incluido), `YYYY-MM-DD` o ISO. */
+  readonly from?: string;
+  /** Fin del rango; una fecha sin hora incluye el dia completo. */
+  readonly to?: string;
   readonly limit?: number;
   readonly offset?: number;
 }

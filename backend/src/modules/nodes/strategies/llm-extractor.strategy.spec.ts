@@ -27,6 +27,7 @@ import {
   ERR_HTTP_UPSTREAM_UNAVAILABLE,
 } from '@core/http/http-client.service';
 import { createMockStatePayloadContext } from '@test/factories/state-payload-context.factory';
+import { AiCallStatus } from '@modules/telemetry/enums/ai-call-status.enum';
 import { createMockTelemetryService } from '@test/factories/telemetry-service.factory';
 
 import type { StatePayloadContext } from '@core/fsm/context/state-payload.context';
@@ -2059,12 +2060,15 @@ describe('LlmExtractorStrategy', () => {
       expect(telemetry.recordTokenUsage).toHaveBeenCalledWith({
         executionId: EXECUTION_ID,
         nodeId: NODE_ID,
+        userId: null,
         aiProvider: LlmProvider.ANTHROPIC,
         aiModel: 'claude-sonnet-5-5',
         promptTokens: 1_000,
         completionTokens: 500,
         reasoningTokens: 0,
         usageReported: true,
+        status: AiCallStatus.SUCCESS,
+        errorMessage: null,
       });
     });
 

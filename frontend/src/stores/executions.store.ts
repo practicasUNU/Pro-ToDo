@@ -35,6 +35,9 @@ const STATES_NEEDING_RELOAD: ReadonlySet<ExecutionState> = new Set([
 export interface ExecutionHistoryFilters {
   readonly state?: ExecutionState;
   readonly flowId?: string;
+  /** Rango de fecha de inicio, en fechas locales `YYYY-MM-DD`. */
+  readonly from?: string;
+  readonly to?: string;
 }
 
 // Historial paginado de ejecuciones para el dashboard. Distinto de

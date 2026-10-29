@@ -11,11 +11,11 @@ import AuditEventDetailsModal from '@components/audit/AuditEventDetailsModal.vue
 import AuditExportBar from '@components/audit/AuditExportBar.vue';
 
 import { extractApiErrorMessage } from '@/utils/api-error';
+import { changedPaths } from '@/utils/audit-diff';
 import {
   AUDIT_ACTION_BADGES,
   AUDIT_ACTION_LABELS,
   AUDIT_TABLE_LABELS,
-  changedKeys,
   labelAuditAction,
   labelAuditTable,
   toSelectOptions,
@@ -111,7 +111,7 @@ const columns: QTableColumn<AuditEvent>[] = [
   {
     name: 'changes',
     label: 'Campos modificados',
-    field: (row) => changedKeys(row.previousData, row.newData).join(', '),
+    field: (row) => changedPaths(row.previousData, row.newData).join(', '),
     align: 'left',
     classes: 'pd-cell--long',
   },

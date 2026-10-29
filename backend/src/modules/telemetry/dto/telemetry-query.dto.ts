@@ -5,16 +5,15 @@ import {
   IsISO8601,
   IsInt,
   IsOptional,
+  IsString,
   IsUUID,
   Max,
+  MaxLength,
   Min,
 } from 'class-validator';
 
 import { LlmProvider } from '@modules/nodes/strategies/interfaces/llm-provider.interface';
-import {
-  SortByField,
-  SortOrderField,
-} from '@common/utils/sort-whitelist.util';
+import { SortByField, SortOrderField } from '@common/utils/sort-whitelist.util';
 
 import type {
   SortOrder,
@@ -41,12 +40,34 @@ export const TELEMETRY_HISTORY_SORT_COLUMNS = {
   nodeId: 't.nodeId',
   aiProvider: 't.aiProvider',
   aiModel: 't.aiModel',
+  promptTokens: 't.promptTokens',
+  completionTokens: 't.completionTokens',
+  reasoningTokens: 't.reasoningTokens',
   totalTokens: 't.totalTokens',
   estimatedCostUsd: 't.estimatedCostUsd',
+  status: 't.status',
+  user: 'u.email',
 } as const satisfies SortWhitelist;
 
 export type TelemetryHistorySortKey =
   keyof typeof TELEMETRY_HISTORY_SORT_COLUMNS;
+
+/**
+ * Lista blanca de orden del desglose por modelo. Los valores son los ALIAS de
+ * las columnas agregadas, entre comillas porque PostgreSQL pliega a minusculas
+ * los identificadores sin comillas.
+ */
+export const TELEMETRY_BREAKDOWN_SORT_COLUMNS = {
+  invocations: '"invocations"',
+  promptTokens: '"promptTokens"',
+  completionTokens: '"completionTokens"',
+  reasoningTokens: '"reasoningTokens"',
+  totalTokens: '"totalTokens"',
+  costUsd: '"costUsd"',
+} as const satisfies SortWhitelist;
+
+export type TelemetryBreakdownSortKey =
+  keyof typeof TELEMETRY_BREAKDOWN_SORT_COLUMNS;
 
 /**
  * Filtros comunes a los agregados y a las exportaciones de telemetria.
@@ -89,10 +110,46 @@ export class TelemetryQueryDto {
     message: `aiProvider debe ser uno de: ${Object.values(LlmProvider).join(', ')}.`,
   })
   readonly aiProvider?: LlmProvider;
+
+  @ApiPropertyOptional({
+    description: 'Acota el consumo a un modelo exacto',
+    example: 'gemini-3.6-flash',
+  })
+  @IsOptional()
+  @IsString({ message: 'aiModel debe ser texto.' })
+  @MaxLength(100, { message: 'aiModel no puede superar 100 caracteres.' })
+  readonly aiModel?: string;
+
+  @ApiPropertyOptional({
+    description: 'Acota el consumo a un nodo del pipeline (`nodeId`)',
+  })
+  @IsOptional()
+  @IsString({ message: 'nodeId debe ser texto.' })
+  @MaxLength(50, { message: 'nodeId no puede superar 50 caracteres.' })
+  readonly nodeId?: string;
+
+  /** Orden del desglose por modelo; por defecto, del mas caro al mas barato. */
+  @SortByField(Object.keys(TELEMETRY_BREAKDOWN_SORT_COLUMNS))
+  readonly breakdownSortBy?: TelemetryBreakdownSortKey;
+
+  @SortOrderField()
+  readonly breakdownSortOrder?: SortOrder;
 }
 
-/** Filtros del historial paginado: los comunes mas la pagina. */
-export class TelemetryHistoryQueryDto extends TelemetryQueryDto {
+/**
+ * Filtros de las exportaciones: los comunes mas el orden del historial, para
+ * que el CSV y el PDF salgan en el mismo orden que la tabla en pantalla.
+ */
+export class TelemetryExportQueryDto extends TelemetryQueryDto {
+  @SortByField(Object.keys(TELEMETRY_HISTORY_SORT_COLUMNS))
+  readonly sortBy?: TelemetryHistorySortKey;
+
+  @SortOrderField()
+  readonly sortOrder?: SortOrder;
+}
+
+/** Filtros del historial paginado: los de exportacion mas la pagina. */
+export class TelemetryHistoryQueryDto extends TelemetryExportQueryDto {
   @ApiPropertyOptional({
     description: 'Filas por pagina',
     default: DEFAULT_HISTORY_LIMIT,
@@ -114,10 +171,4 @@ export class TelemetryHistoryQueryDto extends TelemetryQueryDto {
   @IsInt({ message: 'offset debe ser un numero entero.' })
   @Min(0, { message: 'offset no puede ser negativo.' })
   readonly offset?: number;
-
-  @SortByField(Object.keys(TELEMETRY_HISTORY_SORT_COLUMNS))
-  readonly sortBy?: TelemetryHistorySortKey;
-
-  @SortOrderField()
-  readonly sortOrder?: SortOrder;
 }

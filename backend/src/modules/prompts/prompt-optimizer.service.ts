@@ -22,6 +22,7 @@ import {
   buildOptimizerUserPrompt,
   extractPlaceholders,
 } from '@modules/prompts/prompt-meta.template';
+import { AiCallStatus } from '@modules/telemetry/enums/ai-call-status.enum';
 import { TelemetryOperationOrigin } from '@modules/telemetry/enums/telemetry-origin.enum';
 import { TelemetryService } from '@modules/telemetry/telemetry.service';
 import { UserRole } from '@modules/users/enums/user-role.enum';
@@ -189,13 +190,25 @@ export class PromptOptimizerService {
         },
       );
     } catch (error) {
-      // Un fallo DESPUES de la respuesta (contrato roto, truncado) se factura:
-      // se registra antes de traducir el error.
-      if (error instanceof LlmProviderException && error.usage !== undefined) {
-        await this.recordUsage(target, error.usage, user.id);
-      }
-
       const reason = error instanceof Error ? error.message : String(error);
+
+      // Toda llamada fallida deja fila FAILED (migracion 060). Si el fallo llego
+      // DESPUES de la respuesta (contrato roto, truncado) se factura con su
+      // `usage`; si fue de transporte, va con ceros y el modelo pedido.
+      await this.recordUsage(
+        target,
+        error instanceof LlmProviderException && error.usage !== undefined
+          ? error.usage
+          : {
+              modelUsed: target.model,
+              tokensPrompt: 0,
+              tokensCompletion: 0,
+              tokensReasoning: 0,
+              usageReported: false,
+            },
+        user.id,
+        reason,
+      );
       this.logger.warn(
         `Optimizacion de prompt fallida con ${target.provider}/${target.model}: ${reason}`,
       );
@@ -335,14 +348,20 @@ export class PromptOptimizerService {
    * la inferencia ya esta pagada, y devolver un 500 empujaria a reintentar y
    * pagarla dos veces. El fallo se deja en el log como error y las metricas se
    * calculan igual para el cliente.
+   *
+   * @param errorMessage Motivo del fallo; si llega, la fila se guarda `FAILED`.
    */
   private async recordUsage(
     target: ResolvedTarget,
     usage: LlmTokenUsage,
     userId: string,
+    errorMessage: string | null = null,
   ): Promise<TokenUsageMetrics> {
     const dto = {
       userId,
+      status:
+        errorMessage === null ? AiCallStatus.SUCCESS : AiCallStatus.FAILED,
+      errorMessage,
       origin: TelemetryOperationOrigin.PROMPT_OPTIMIZATION,
       aiProvider: target.provider,
       aiModel: usage.modelUsed || target.model,

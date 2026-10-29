@@ -2,15 +2,16 @@ import {
   ERR_TELEMETRY_PERSIST_FAILED,
   buildZeroUsageMetrics,
 } from '@modules/telemetry/telemetry.service';
-import { LlmProviderException } from '@modules/nodes/strategies/interfaces/llm-provider.interface';
+import {
+  LlmProvider,
+  LlmProviderException,
+} from '@modules/nodes/strategies/interfaces/llm-provider.interface';
+import { AiCallStatus } from '@modules/telemetry/enums/ai-call-status.enum';
 import { TelemetryOperationOrigin } from '@modules/telemetry/enums/telemetry-origin.enum';
 
 import type { StatePayloadContext } from '@core/fsm/context/state-payload.context';
 import type { NodeErrorDetail } from '@core/fsm/types/node-strategy.types';
-import type {
-  LlmProvider,
-  LlmResponsePayload,
-} from '@modules/nodes/strategies/interfaces/llm-provider.interface';
+import type { LlmResponsePayload } from '@modules/nodes/strategies/interfaces/llm-provider.interface';
 import type { TokenUsageMetrics } from '@modules/telemetry/dto/record-telemetry.dto';
 import type { TelemetryService } from '@modules/telemetry/telemetry.service';
 
@@ -24,6 +25,9 @@ import type { TelemetryService } from '@modules/telemetry/telemetry.service';
  *    `ERR_TELEMETRY_PERSIST_FAILED`: seguir sin trazabilidad del gasto es lo
  *    que la telemetria existe para impedir.
  * 3. El simulador no se registra: no cuesta nada y ensuciaria los agregados.
+ * 4. Toda llamada fallida deja fila `FAILED` (migracion 060), con su `usage` si
+ *    el proveedor lo informo y con ceros si no: sin ella la tasa de exito por
+ *    modelo solo veria los fallos que se facturan.
  */
 
 /** Resultado del registro: las metricas, o el fallo que debe devolver el nodo. */
@@ -57,29 +61,60 @@ export const recordResponseUsage = async (
     tokensCompletion: metadata.tokensCompletion,
     tokensReasoning: metadata.tokensReasoning ?? 0,
     usageReported: metadata.usageReported ?? true,
+    status: AiCallStatus.SUCCESS,
+    errorMessage: null,
   });
 };
 
 /**
- * Consumo de una llamada que fallo DESPUES de que el proveedor respondiera.
+ * Registra una llamada fallida como `FAILED`.
  *
- * Devuelve `null` cuando no hay nada que registrar (fallo de transporte, sin
- * `usage`) o cuando se registro bien; el nodo sigue entonces con su propio
- * tratamiento del error. Solo devuelve un fallo si el registro no se pudo hacer.
+ * Si el fallo llego DESPUES de que el proveedor respondiera (contrato roto,
+ * respuesta truncada), la inferencia se facturo y se registra con su `usage`;
+ * si el registro no se puede hacer, devuelve el fallo GRAVE que debe devolver
+ * el nodo, igual que en una respuesta buena.
+ *
+ * Si fue de transporte (timeout, 5xx sin cuerpo) no hay consumo: la fila va con
+ * ceros y el modelo configurado, solo para la tasa de exito. Ese registro es
+ * best-effort y nunca detiene el nodo, que ya tiene su propio error que tratar.
+ *
+ * @param model Modelo configurado para el intento: el que habria respondido.
  */
 export const recordFailedCallUsage = async (
   telemetry: TelemetryService,
   context: StatePayloadContext,
   provider: LlmProvider,
   error: unknown,
+  model: string,
 ): Promise<NodeErrorDetail | null> => {
-  if (!(error instanceof LlmProviderException) || error.usage === undefined) {
+  if (provider === LlmProvider.MOCK) {
     return null;
   }
 
-  const outcome = await persist(telemetry, context, provider, error.usage);
+  const errorMessage = error instanceof Error ? error.message : String(error);
+  const usage = error instanceof LlmProviderException ? error.usage : undefined;
 
-  return 'failure' in outcome ? outcome.failure : null;
+  if (usage !== undefined) {
+    const outcome = await persist(telemetry, context, provider, {
+      ...usage,
+      status: AiCallStatus.FAILED,
+      errorMessage,
+    });
+
+    return 'failure' in outcome ? outcome.failure : null;
+  }
+
+  await persist(telemetry, context, provider, {
+    modelUsed: model,
+    tokensPrompt: 0,
+    tokensCompletion: 0,
+    tokensReasoning: 0,
+    usageReported: false,
+    status: AiCallStatus.FAILED,
+    errorMessage,
+  });
+
+  return null;
 };
 
 /** Forma publica de las metricas dentro de `metadata`. */
@@ -103,6 +138,8 @@ const persist = async (
     readonly tokensCompletion: number;
     readonly tokensReasoning: number;
     readonly usageReported: boolean;
+    readonly status: AiCallStatus;
+    readonly errorMessage: string | null;
   },
 ): Promise<InferenceTelemetryOutcome> => {
   try {
@@ -121,6 +158,8 @@ const persist = async (
         completionTokens: usage.tokensCompletion,
         reasoningTokens: usage.tokensReasoning,
         usageReported: usage.usageReported,
+        status: usage.status,
+        errorMessage: usage.errorMessage,
       });
 
       return { metrics: sandboxMetrics };
@@ -130,12 +169,15 @@ const persist = async (
       executionId: context.getExecutionId(),
       // El cursor ES el `nodeId` en curso: el motor lo mueve antes de ejecutar.
       nodeId: context.getCursor(),
+      userId: context.getInitiatorUserId(),
       aiProvider: provider,
       aiModel: usage.modelUsed,
       promptTokens: usage.tokensPrompt,
       completionTokens: usage.tokensCompletion,
       reasoningTokens: usage.tokensReasoning,
       usageReported: usage.usageReported,
+      status: usage.status,
+      errorMessage: usage.errorMessage,
     });
 
     return { metrics };

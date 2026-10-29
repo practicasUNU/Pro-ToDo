@@ -3,10 +3,16 @@ import { computed } from 'vue';
 
 import { EMPTY_VALUE, formatInteger, formatPercent, formatUsd } from '@/utils/number-format';
 
-import type { TelemetrySummary } from '@/types/telemetry';
+import type { ModelBreakdownRow, TelemetrySummary } from '@/types/telemetry';
 
 /**
- * Cuatro KPI del consumo de IA: tokens, coste, invocaciones y tasa de exito.
+ * KPI del consumo de IA: tokens, coste, invocaciones y dos tasas de exito
+ * DISTINTAS a proposito:
+ *
+ * - Flujos con IA: ejecuciones concluidas con exito sobre las que invocaron al
+ *   menos un modelo. Un flujo sin IA no entra en la cuenta.
+ * - Llamadas por modelo: llamadas SUCCESS sobre todas las registradas, con el
+ *   modelo menos fiable en la pista. Solo aparece si se pasa el desglose.
  *
  * Presentacional: recibe el resumen ya cargado. Cada tarjeta es un `<article>`
  * con su titulo como encabezado, de modo que un lector de pantalla anuncia
@@ -14,6 +20,8 @@ import type { TelemetrySummary } from '@/types/telemetry';
  */
 const props = defineProps<{
   summary: TelemetrySummary | null;
+  /** Desglose por modelo; sin el no se pinta la tarjeta de exito por modelo. */
+  breakdown?: readonly ModelBreakdownRow[] | undefined;
   loading?: boolean;
 }>();
 
@@ -25,15 +33,52 @@ interface KpiCard {
   readonly hint: string;
 }
 
+const FLOW_SUCCESS_LABEL = 'Tasa de éxito de flujos con IA';
+const MODEL_SUCCESS_LABEL = 'Tasa de éxito por modelo';
+
+/**
+ * Exito de las llamadas sumando todos los modelos, con el modelo de menor tasa
+ * como pista: es el que conviene revisar.
+ */
+const modelSuccessCard = computed<KpiCard | null>(() => {
+  if (props.breakdown === undefined) return null;
+
+  const rows = props.breakdown;
+  const invocations = rows.reduce((total, row) => total + row.invocations, 0);
+  const succeeded = rows.reduce((total, row) => total + row.succeeded, 0);
+  const worst = rows
+    .filter((row) => row.successRate !== null)
+    .reduce<ModelBreakdownRow | null>(
+      (lowest, row) =>
+        lowest === null || (row.successRate ?? 1) < (lowest.successRate ?? 1) ? row : lowest,
+      null,
+    );
+
+  return {
+    key: 'model-success',
+    icon: 'insights',
+    label: MODEL_SUCCESS_LABEL,
+    value: invocations === 0 ? EMPTY_VALUE : formatPercent(succeeded / invocations),
+    hint:
+      worst === null
+        ? 'Sin llamadas a modelos en el periodo'
+        : rows.length === 1
+          ? `${worst.aiModel}: ${formatInteger(worst.failed)} fallidas`
+          : `Menor: ${worst.aiModel} (${formatPercent(worst.successRate)})`,
+  };
+});
+
 const cards = computed<KpiCard[]>(() => {
   const summary = props.summary;
+  const extra = modelSuccessCard.value === null ? [] : [modelSuccessCard.value];
 
   if (summary === null) {
     return [
       { key: 'tokens', icon: 'data_usage', label: 'Tokens totales', value: EMPTY_VALUE, hint: '' },
       { key: 'cost', icon: 'payments', label: 'Coste total', value: EMPTY_VALUE, hint: '' },
       { key: 'calls', icon: 'smart_toy', label: 'Invocaciones IA', value: EMPTY_VALUE, hint: '' },
-      { key: 'success', icon: 'task_alt', label: 'Tasa de éxito', value: EMPTY_VALUE, hint: '' },
+      { key: 'success', icon: 'task_alt', label: FLOW_SUCCESS_LABEL, value: EMPTY_VALUE, hint: '' },
+      ...extra.map((card) => ({ ...card, value: EMPTY_VALUE, hint: '' })),
     ];
   }
 
@@ -60,18 +105,19 @@ const cards = computed<KpiCard[]>(() => {
       icon: 'smart_toy',
       label: 'Invocaciones IA',
       value: formatInteger(summary.aiInvocations),
-      hint: 'Inferencias facturadas en el periodo',
+      hint: 'Llamadas registradas, exitosas y fallidas',
     },
     {
       key: 'success',
       icon: 'task_alt',
-      label: 'Tasa de éxito',
+      label: FLOW_SUCCESS_LABEL,
       value: formatPercent(summary.successRate),
       hint:
         summary.executionsTotal === 0
-          ? 'Sin ejecuciones concluidas en el periodo'
-          : `${formatInteger(summary.executionsSucceeded)} de ${formatInteger(summary.executionsTotal)} ejecuciones`,
+          ? 'Sin ejecuciones con IA concluidas en el periodo'
+          : `${formatInteger(summary.executionsSucceeded)} de ${formatInteger(summary.executionsTotal)} ejecuciones con IA`,
     },
+    ...extra,
   ];
 });
 </script>

@@ -158,7 +158,6 @@ onMounted(loadCredentials);
 
       <template #body-cell-actions="cellProps">
         <q-td :props="cellProps" class="q-gutter-x-xs">
-          <AuditDetailsMenu :audit="cellProps.row" :subject="cellProps.row.name" />
           <q-btn
             class="pd-btn-icon"
             outline
@@ -182,6 +181,9 @@ onMounted(loadCredentials);
           >
             <q-tooltip>Eliminar credencial</q-tooltip>
           </q-btn>
+
+          <!-- Auditoria siempre al extremo derecho: Editar -> Eliminar -> Auditoria. -->
+          <AuditDetailsMenu :audit="cellProps.row" :subject="cellProps.row.name" />
         </q-td>
       </template>
     </q-table>

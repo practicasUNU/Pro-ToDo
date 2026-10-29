@@ -7,6 +7,7 @@ import { NodeSandboxController } from '@modules/nodes/sandbox/node-sandbox.contr
 import { NodeSandboxService } from '@modules/nodes/sandbox/node-sandbox.service';
 import { HttpCoreModule } from '@core/http/http-core.module';
 import { AiPromptTemplatesModule } from '@modules/ai-prompt-templates/ai-prompt-templates.module';
+import { AuditModule } from '@modules/audit/audit.module';
 import { CredentialsModule } from '@modules/credentials/credentials.module';
 import { LogsModule } from '@modules/logs/logs.module';
 import { TelemetryModule } from '@modules/telemetry/telemetry.module';
@@ -94,6 +95,9 @@ import type { OnModuleInit } from '@nestjs/common';
     // Boveda cifrada: `HttpGenericDestinationStrategy` descifra ahi, y solo
     // ahi, la credencial de cada peticion. Hoja del grafo; no importa este.
     CredentialsModule,
+    // `NodeSandboxService` deja un evento `PRUEBA_NODO` por prueba. Hoja del
+    // grafo (solo su repositorio y `BrowserModule`): no cierra ningun ciclo.
+    AuditModule,
     // El sondeo lee `flujos` para descubrir que buzones vigilar; el catalogo
     // sirve `GET /api/nodos`.
     TypeOrmModule.forFeature([Workflow, NodeCatalogEntry]),

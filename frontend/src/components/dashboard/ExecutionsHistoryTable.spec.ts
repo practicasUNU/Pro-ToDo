@@ -1,7 +1,19 @@
 // @vitest-environment happy-dom
 import { flushPromises, mount } from '@vue/test-utils';
 import { createPinia, setActivePinia } from 'pinia';
-import { Notify, QBadge, QBtn, QIcon, QSelect, QTable, QTd, QTooltip, QTr, Quasar } from 'quasar';
+import {
+  Notify,
+  QBadge,
+  QBtn,
+  QIcon,
+  QInput,
+  QSelect,
+  QTable,
+  QTd,
+  QTooltip,
+  QTr,
+  Quasar,
+} from 'quasar';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 vi.mock('@services/fsm-executions.service', () => ({
@@ -48,7 +60,7 @@ const mountTable = (compact = false) =>
     props: { compact },
     global: {
       plugins: [[Quasar, { plugins: { Notify } }]],
-      components: { QBadge, QBtn, QIcon, QSelect, QTable, QTd, QTooltip, QTr },
+      components: { QBadge, QBtn, QIcon, QInput, QSelect, QTable, QTd, QTooltip, QTr },
     },
   });
 
@@ -114,7 +126,7 @@ describe('ExecutionsHistoryTable', () => {
     expect(wrapper.text()).toContain('Notiweb');
   });
 
-  it('1.3 la variante compacta deberia pedir 5 filas y no ofrecer filtro', async () => {
+  it('1.3 la variante compacta deberia pedir 5 filas y ofrecer los filtros de estado, flujo y fecha', async () => {
     // 1. Arrange 📐
     vi.mocked(fetchExecutions).mockResolvedValue({ items: [], total: 0, limit: 5, offset: 0 });
 
@@ -122,9 +134,56 @@ describe('ExecutionsHistoryTable', () => {
     const wrapper = mountTable(true);
     await flushPromises();
 
-    // 3. Assert 🎯
+    // 3. Assert 🎯: el panel de control filtra igual que la vista completa.
     expect(fetchExecutions).toHaveBeenCalledWith({ limit: 5, offset: 0 });
-    expect(wrapper.find('[data-test="state-filter"]').exists()).toBe(false);
+    const selectLabels = wrapper.findAllComponents(QSelect).map((select) => select.props('label'));
+    const inputLabels = wrapper.findAllComponents(QInput).map((input) => input.props('label'));
+    expect(selectLabels).toEqual(expect.arrayContaining(['Estado', 'Flujo']));
+    expect(inputLabels).toEqual(expect.arrayContaining(['Desde', 'Hasta']));
+  });
+
+  it('1.4 deberia filtrar por estado y volver a la primera pagina', async () => {
+    // 1. Arrange 📐
+    vi.mocked(fetchExecutions).mockResolvedValue({ items: [], total: 0, limit: 5, offset: 0 });
+    const wrapper = mountTable(true);
+    await flushPromises();
+    const stateSelect = wrapper
+      .findAllComponents(QSelect)
+      .find((select) => select.props('label') === 'Estado');
+
+    // 2. Act ⚙️
+    stateSelect?.vm.$emit('update:modelValue', ExecutionState.FALLIDO);
+    await flushPromises();
+
+    // 3. Assert 🎯
+    expect(fetchExecutions).toHaveBeenLastCalledWith(
+      expect.objectContaining({ state: ExecutionState.FALLIDO, offset: 0 }),
+    );
+  });
+
+  it('1.5 deberia aplicar el rango de fechas solo cuando esta completo', async () => {
+    // 1. Arrange 📐
+    vi.mocked(fetchExecutions).mockResolvedValue({ items: [], total: 0, limit: 5, offset: 0 });
+    const wrapper = mountTable(true);
+    await flushPromises();
+    const inputs = wrapper.findAllComponents(QInput);
+    const from = inputs.find((input) => input.props('label') === 'Desde');
+    const to = inputs.find((input) => input.props('label') === 'Hasta');
+    const callsBefore = vi.mocked(fetchExecutions).mock.calls.length;
+
+    // 2. Act ⚙️: una fecha a medio teclear no dispara nada.
+    from?.vm.$emit('update:modelValue', '2026-10');
+    await flushPromises();
+    const callsWhileTyping = vi.mocked(fetchExecutions).mock.calls.length;
+    from?.vm.$emit('update:modelValue', '2026-10-01');
+    to?.vm.$emit('update:modelValue', '2026-10-22');
+    await flushPromises();
+
+    // 3. Assert 🎯
+    expect(callsWhileTyping).toBe(callsBefore);
+    expect(fetchExecutions).toHaveBeenLastCalledWith(
+      expect.objectContaining({ from: '2026-10-01', to: '2026-10-22', offset: 0 }),
+    );
   });
 
   describe('2. Boton Ver log', () => {

@@ -7,6 +7,7 @@ import { OTP_THROTTLER_NAME } from '@common/constants/throttler.constants';
 import { NodeStrategyFactory } from '@core/fsm/factories/node-strategy.factory';
 import { PipelineValidatorService } from '@core/fsm/services/pipeline-validator.service';
 import { NodeType } from '@core/fsm/types/pipeline-schema.types';
+import { AuditLoggerService } from '@modules/audit/services/audit-logger.service';
 import { JwtAuthGuard } from '@modules/auth/guards/jwt-auth.guard';
 import { UserRole } from '@modules/users/enums/user-role.enum';
 
@@ -65,6 +66,10 @@ describe('NodeSandboxController (POST /nodes/sandbox/run)', () => {
           useValue: {
             validateStandaloneParams: jest.fn().mockResolvedValue([]),
           },
+        },
+        {
+          provide: AuditLoggerService,
+          useValue: { record: jest.fn().mockResolvedValue(undefined) },
         },
       ],
     })

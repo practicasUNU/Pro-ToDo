@@ -6,7 +6,12 @@
  * Fechas como `string` ISO: es lo que llega por JSON.
  */
 
-import type { SortQuery, TelemetryHistorySortKey } from '@/types/sort';
+import type {
+  SortOrder,
+  SortQuery,
+  TelemetryBreakdownSortKey,
+  TelemetryHistorySortKey,
+} from '@/types/sort';
 
 /** Filtros comunes de `/telemetry/*`. Replica `TelemetryQueryDto`. */
 export interface TelemetryQuery {
@@ -16,12 +21,45 @@ export interface TelemetryQuery {
   readonly to?: string;
   readonly flowId?: string;
   readonly aiProvider?: string;
+  readonly aiModel?: string;
+  readonly nodeId?: string;
+  /** Orden del desglose por modelo; sin el, del mas caro al mas barato. */
+  readonly breakdownSortBy?: TelemetryBreakdownSortKey;
+  readonly breakdownSortOrder?: SortOrder;
 }
 
+/** Filtros de las exportaciones. Replica `TelemetryExportQueryDto`. */
+export interface TelemetryExportQuery extends TelemetryQuery, SortQuery<TelemetryHistorySortKey> {}
+
 /** Filtros del historial paginado. Replica `TelemetryHistoryQueryDto`. */
-export interface TelemetryHistoryQuery extends TelemetryQuery, SortQuery<TelemetryHistorySortKey> {
+export interface TelemetryHistoryQuery extends TelemetryExportQuery {
   readonly limit?: number;
   readonly offset?: number;
+}
+
+/**
+ * Filtros que el usuario elige en el informe, ademas del rango. Todos
+ * opcionales: `undefined` es "sin filtrar".
+ */
+export interface TelemetryFilters {
+  readonly aiProvider?: string;
+  readonly aiModel?: string;
+  readonly flowId?: string;
+  readonly nodeId?: string;
+}
+
+/** Opciones de los selectores. Replica `TelemetryFilterOptionsResponseDto`. */
+export interface TelemetryFilterOptions {
+  readonly providers: string[];
+  readonly models: { readonly aiProvider: string; readonly aiModel: string }[];
+  readonly flows: { readonly id: string; readonly name: string }[];
+  readonly nodes: { readonly flowId: string; readonly nodeId: string }[];
+}
+
+/** Resultado de una llamada de IA. Replica `AiCallStatus` (migracion 060). */
+export enum AiCallStatus {
+  SUCCESS = 'SUCCESS',
+  FAILED = 'FAILED',
 }
 
 /** Rango que el backend aplico de verdad, ya resuelto. */
@@ -37,7 +75,10 @@ export interface TelemetrySummary {
   readonly totalCostUsd: number;
   readonly aiInvocations: number;
   readonly estimatedInvocations: number;
-  /** Ejecuciones concluidas: EXITOSO + FALLIDO + DESCARTADO. */
+  /**
+   * Ejecuciones concluidas (EXITOSO + FALLIDO + DESCARTADO) que invocaron al
+   * menos un modelo de IA.
+   */
   readonly executionsTotal: number;
   readonly executionsSucceeded: number;
   /** Entre 0 y 1; `null` si no hubo ejecuciones concluidas en el rango. */
@@ -54,6 +95,11 @@ export interface ModelBreakdownRow {
   readonly reasoningTokens: number;
   readonly totalTokens: number;
   readonly costUsd: number;
+  /** Llamadas SUCCESS / FAILED del modelo. */
+  readonly succeeded: number;
+  readonly failed: number;
+  /** `succeeded / invocations`, entre 0 y 1; `null` sin llamadas. */
+  readonly successRate: number | null;
 }
 
 /** Valores de `TelemetryOperationOrigin` del backend (migraciones 049 y 057). */
@@ -95,6 +141,12 @@ export interface TelemetryHistoryItem {
   readonly estimatedCostUsd: number;
   /** `true` si el coste es aproximado (sin uso informado o tarifa generica). */
   readonly isEstimated: boolean;
+  readonly status: AiCallStatus;
+  /** Motivo del fallo; `null` en las llamadas exitosas. */
+  readonly errorMessage: string | null;
+  readonly userId: string | null;
+  /** Correo del usuario al que se imputa la llamada. */
+  readonly userEmail: string | null;
 }
 
 /** Pagina del historial. Replica `TelemetryHistoryPageResponseDto`. */

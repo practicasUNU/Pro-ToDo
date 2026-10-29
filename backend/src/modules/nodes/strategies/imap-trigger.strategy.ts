@@ -719,9 +719,18 @@ export class ImapTriggerStrategy implements INodeStrategy {
         };
       }
 
+      const extracted = this.toExtractedEmail(parsed, config);
+      // Imputacion de la ejecucion al remitente (migracion 060): solo si es un
+      // usuario registrado; si no, el motor deja la cuenta de respaldo.
+      const initiatorUserId =
+        await this.inboundEmailResumeService.resolveSenderUserId(
+          extracted.from,
+        );
+
       return {
         success: true,
-        data: { ...this.toExtractedEmail(parsed, config) },
+        data: { ...extracted },
+        ...(initiatorUserId !== null ? { initiatorUserId } : {}),
       };
     } catch (error) {
       const detail = error instanceof Error ? error.message : String(error);

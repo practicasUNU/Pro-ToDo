@@ -154,6 +154,7 @@ export class WorkflowsService
    * @param workflowId Identificador de la fila de `flujos`.
    * @param executeTestWorkflowDto Namespaces iniciales; si no trae `mockData`
    *        se aplica `DEFAULT_MOCK_NAMESPACES`.
+   * @param initiatedByUserId Usuario del JWT que lanza el ensayo (migracion 060).
    * @throws NotFoundException Si el flujo no existe.
    * @throws BadRequestException Si no tiene esquema o el esquema no es integro.
    * @throws ConflictException Por dos vias distintas: la guarda de cupo de
@@ -163,6 +164,7 @@ export class WorkflowsService
   public async executeTest(
     workflowId: string,
     executeTestWorkflowDto: ExecuteTestWorkflowDto,
+    initiatedByUserId: string | null = null,
   ): Promise<WorkflowExecutionResponseDto> {
     const workflow = await this.findOne(workflowId);
 
@@ -182,6 +184,7 @@ export class WorkflowsService
     const execution = await this.fsmEngineService.createExecution(
       workflow.id,
       executeTestWorkflowDto.mockData ?? DEFAULT_MOCK_NAMESPACES,
+      initiatedByUserId,
     );
 
     this.logger.log(

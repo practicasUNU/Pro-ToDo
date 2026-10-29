@@ -10,6 +10,7 @@ vi.mock('@services/telemetry.service', () => ({
   fetchSummary: vi.fn(),
   fetchBreakdownByModel: vi.fn(),
   fetchHistory: vi.fn(),
+  fetchFilterOptions: vi.fn(),
 }));
 
 vi.mock('@services/reports.service', () => ({
@@ -22,6 +23,7 @@ const reportsService = await import('@services/reports.service');
 const fetchSummary = vi.mocked(telemetryService.fetchSummary);
 const fetchBreakdownByModel = vi.mocked(telemetryService.fetchBreakdownByModel);
 const fetchHistory = vi.mocked(telemetryService.fetchHistory);
+const fetchFilterOptions = vi.mocked(telemetryService.fetchFilterOptions);
 const downloadCsv = vi.mocked(reportsService.downloadCsv);
 const downloadPdf = vi.mocked(reportsService.downloadPdf);
 
@@ -47,6 +49,9 @@ const BREAKDOWN: ModelBreakdownRow[] = [
     reasoningTokens: 100,
     totalTokens: 1_600,
     costUsd: 2.3,
+    succeeded: 3,
+    failed: 1,
+    successRate: 0.75,
   },
 ];
 
@@ -170,5 +175,75 @@ describe('useTelemetryStore', () => {
     expect(fetchHistory).toHaveBeenCalledWith(
       expect.objectContaining({ sortBy: 'estimatedCostUsd', sortOrder: 'DESC' }),
     );
+  });
+
+  describe('4. Filtros y orden del informe', () => {
+    it('4.1 deberia enviar proveedor, modelo, flujo, nodo y orden del desglose', async () => {
+      // 1. Arrange 📐
+      fetchSummary.mockResolvedValue(buildSummary());
+      fetchBreakdownByModel.mockResolvedValue(BREAKDOWN);
+      const store = useTelemetryStore();
+      store.setFilters({ aiProvider: 'GEMINI', aiModel: 'gemini-3.6-flash', nodeId: 'nodo_ia' });
+      store.setBreakdownSort({ sortBy: 'invocations', descending: false });
+
+      // 2. Act ⚙️
+      await store.loadDashboard();
+
+      // 3. Assert 🎯
+      expect(fetchBreakdownByModel).toHaveBeenCalledWith(
+        expect.objectContaining({
+          aiProvider: 'GEMINI',
+          aiModel: 'gemini-3.6-flash',
+          nodeId: 'nodo_ia',
+          breakdownSortBy: 'invocations',
+          breakdownSortOrder: 'ASC',
+        }),
+      );
+      expect(fetchBreakdownByModel.mock.calls[0]?.[0]).not.toHaveProperty('flowId');
+    });
+
+    it('4.2 deberia exportar con los filtros, el orden del desglose y el del historial', async () => {
+      // 1. Arrange 📐: el fichero tiene que decir lo mismo que la pantalla.
+      downloadCsv.mockResolvedValue(new Blob(['csv']));
+      const store = useTelemetryStore();
+      store.setFilters({ flowId: 'f1' });
+      store.setBreakdownSort({ sortBy: 'costUsd', descending: true });
+      store.setHistorySort({ sortBy: 'totalTokens', descending: false });
+
+      // 2. Act ⚙️
+      await store.exportReport('csv');
+
+      // 3. Assert 🎯
+      expect(downloadCsv).toHaveBeenCalledWith(
+        expect.objectContaining({
+          flowId: 'f1',
+          breakdownSortBy: 'costUsd',
+          breakdownSortOrder: 'DESC',
+          sortBy: 'totalTokens',
+          sortOrder: 'ASC',
+        }),
+      );
+    });
+
+    it('4.3 deberia cargar las opciones de los selectores para el rango', async () => {
+      // 1. Arrange 📐
+      const options = {
+        providers: ['GEMINI'],
+        models: [{ aiProvider: 'GEMINI', aiModel: 'gemini-3.6-flash' }],
+        flows: [{ id: 'f1', name: 'Notiweb' }],
+        nodes: [{ flowId: 'f1', nodeId: 'nodo_ia' }],
+      };
+      fetchFilterOptions.mockResolvedValue(options);
+      const store = useTelemetryStore();
+
+      // 2. Act ⚙️
+      await store.loadFilterOptions();
+
+      // 3. Assert 🎯
+      expect(fetchFilterOptions).toHaveBeenCalledWith(
+        expect.objectContaining({ from: expect.any(String) as string }),
+      );
+      expect(store.filterOptions).toEqual(options);
+    });
   });
 });

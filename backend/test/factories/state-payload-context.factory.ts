@@ -17,6 +17,8 @@ export interface MockContextOptions {
   readonly namespaces?: Record<string, Record<string, unknown>>;
   /** Ambito de banco de pruebas: nodo aislado, sin fila de ejecucion. */
   readonly sandboxScope?: SandboxOperationScope;
+  /** Usuario al que se imputa la ejecucion (migracion 060). */
+  readonly initiatorUserId?: string;
 }
 
 /**
@@ -40,6 +42,7 @@ export const createMockStatePayloadContext = (
     options.workflowId ?? DEFAULT_WORKFLOW_ID,
     options.currentStep ?? DEFAULT_CURRENT_STEP,
     options.sandboxScope ?? null,
+    options.initiatorUserId ?? null,
   );
 
   for (const [namespace, data] of Object.entries(options.namespaces ?? {})) {

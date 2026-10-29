@@ -8,6 +8,7 @@ import {
   recordResponseUsage,
   toUsageMetadata,
 } from '@modules/nodes/strategies/inference-telemetry';
+import { AiCallStatus } from '@modules/telemetry/enums/ai-call-status.enum';
 import { TelemetryOperationOrigin } from '@modules/telemetry/enums/telemetry-origin.enum';
 import { ERR_TELEMETRY_PERSIST_FAILED } from '@modules/telemetry/telemetry.service';
 import { createMockStatePayloadContext } from '@test/factories/state-payload-context.factory';
@@ -19,6 +20,8 @@ import type { TelemetryServiceMock } from '@test/factories/telemetry-service.fac
 
 const EXECUTION_ID = 'exec-11111111-1111-4111-8111-111111111111';
 const NODE_ID = 'nodo_ia';
+const INITIATOR_ID = '3a8f0c1d-2b4e-4f6a-9c7d-1e2f3a4b5c6d';
+const CONFIGURED_MODEL = 'gemini-3.6-flash';
 
 const buildMetadata = (
   overrides: Partial<LlmResponsePayload['metadata']> = {},
@@ -36,6 +39,7 @@ const buildContext = () =>
   createMockStatePayloadContext({
     executionId: EXECUTION_ID,
     currentStep: NODE_ID,
+    initiatorUserId: INITIATOR_ID,
   });
 
 const asService = (mock: TelemetryServiceMock): TelemetryService =>
@@ -111,12 +115,15 @@ describe('inference-telemetry', () => {
       expect(telemetry.recordTokenUsage).toHaveBeenCalledWith({
         executionId: EXECUTION_ID,
         nodeId: NODE_ID,
+        userId: INITIATOR_ID,
         aiProvider: LlmProvider.GEMINI,
         aiModel: 'gemini-3.6-flash',
         promptTokens: 1_000,
         completionTokens: 500,
         reasoningTokens: 200,
         usageReported: true,
+        status: AiCallStatus.SUCCESS,
+        errorMessage: null,
       });
       expect('metrics' in outcome).toBe(true);
     });
@@ -195,6 +202,7 @@ describe('inference-telemetry', () => {
         buildContext(),
         LlmProvider.GEMINI,
         error,
+        CONFIGURED_MODEL,
       );
 
       // 3. Assert 🎯
@@ -203,12 +211,15 @@ describe('inference-telemetry', () => {
         expect.objectContaining({
           completionTokens: 4_096,
           reasoningTokens: 960,
+          status: AiCallStatus.FAILED,
+          errorMessage: 'corte',
         }),
       );
     });
 
-    it('2.2 no deberia registrar nada si el fallo fue de transporte', async () => {
-      // 1. Arrange 📐: sin respuesta no hay consumo que medir.
+    it('2.2 deberia registrar FAILED con ceros y el modelo configurado si el fallo fue de transporte', async () => {
+      // 1. Arrange 📐: sin respuesta no hay consumo, pero la llamada fallo y
+      //    la tasa de exito por modelo tiene que verla.
       const telemetry = createMockTelemetryService();
 
       // 2. Act ⚙️
@@ -217,10 +228,57 @@ describe('inference-telemetry', () => {
         buildContext(),
         LlmProvider.GEMINI,
         new Error('ECONNRESET'),
+        CONFIGURED_MODEL,
       );
 
       // 3. Assert 🎯
       expect(failure).toBeNull();
+      expect(telemetry.recordTokenUsage).toHaveBeenCalledWith(
+        expect.objectContaining({
+          aiModel: CONFIGURED_MODEL,
+          promptTokens: 0,
+          completionTokens: 0,
+          reasoningTokens: 0,
+          usageReported: false,
+          userId: INITIATOR_ID,
+          status: AiCallStatus.FAILED,
+          errorMessage: 'ECONNRESET',
+        }),
+      );
+    });
+
+    it('2.2b no deberia detener el nodo si falla el registro de un fallo sin consumo', async () => {
+      // 1. Arrange 📐: no hay gasto sin trazar, solo se pierde la estadistica.
+      const telemetry = createMockTelemetryService();
+      telemetry.recordTokenUsage.mockRejectedValue(new Error('BD caida'));
+
+      // 2. Act ⚙️
+      const failure = await recordFailedCallUsage(
+        asService(telemetry),
+        buildContext(),
+        LlmProvider.GEMINI,
+        new Error('timeout'),
+        CONFIGURED_MODEL,
+      );
+
+      // 3. Assert 🎯
+      expect(failure).toBeNull();
+    });
+
+    it('2.2c no deberia registrar los fallos del simulador', async () => {
+      // 1. Arrange 📐
+      const telemetry = createMockTelemetryService();
+
+      // 2. Act ⚙️
+      await recordFailedCallUsage(
+        asService(telemetry),
+        buildContext(),
+        LlmProvider.MOCK,
+        new Error('simulado'),
+        'mock',
+      );
+
+      // 3. Assert 🎯
       expect(telemetry.recordTokenUsage).not.toHaveBeenCalled();
     });
 
@@ -246,6 +304,7 @@ describe('inference-telemetry', () => {
         buildContext(),
         LlmProvider.GEMINI,
         error,
+        CONFIGURED_MODEL,
       );
 
       // 3. Assert 🎯

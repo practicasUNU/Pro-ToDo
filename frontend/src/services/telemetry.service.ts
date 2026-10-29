@@ -2,6 +2,7 @@ import { api } from '@boot/axios';
 
 import type {
   ModelBreakdownRow,
+  TelemetryFilterOptions,
   TelemetryHistoryPage,
   TelemetryHistoryQuery,
   TelemetryQuery,
@@ -24,11 +25,22 @@ export const fetchSummary = async (query: TelemetryQuery = {}): Promise<Telemetr
   return data;
 };
 
-/** Consumo agregado por proveedor y modelo, del mas caro al mas barato. */
+/** Consumo y tasa de exito por proveedor y modelo, en el orden pedido. */
 export const fetchBreakdownByModel = async (
   query: TelemetryQuery = {},
 ): Promise<ModelBreakdownRow[]> => {
   const { data } = await api.get<ModelBreakdownRow[]>(`${TELEMETRY_PATH}/breakdown-by-model`, {
+    params: query,
+  });
+
+  return data;
+};
+
+/** Proveedores, modelos, flujos y nodos con telemetria en el rango. */
+export const fetchFilterOptions = async (
+  query: Pick<TelemetryQuery, 'from' | 'to'> = {},
+): Promise<TelemetryFilterOptions> => {
+  const { data } = await api.get<TelemetryFilterOptions>(`${TELEMETRY_PATH}/filter-options`, {
     params: query,
   });
 

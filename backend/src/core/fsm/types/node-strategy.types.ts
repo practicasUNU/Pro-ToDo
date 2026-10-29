@@ -242,6 +242,16 @@ export interface NodeResult {
    * gobierna la transicion es esto.
    */
   pause?: { reason: string };
+  /**
+   * Usuario al que imputar la ejecucion, cuando solo el propio nodo puede
+   * saberlo (migracion 060). Hoy lo devuelve `TRIGGER_IMAP` con el remitente
+   * del correo si es un usuario registrado y activo.
+   *
+   * Campo tipado por el mismo motivo que `pause`: lo lee el motor. Solo se
+   * atiende en un exito, y solo sustituye a un iniciador vacio o de respaldo:
+   * nunca pisa a quien lanzo o reanudo el flujo a mano.
+   */
+  initiatorUserId?: string;
   error?: NodeErrorDetail;
 }
 

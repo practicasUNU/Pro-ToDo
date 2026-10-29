@@ -4,6 +4,7 @@ import {
   HttpCode,
   HttpStatus,
   Post,
+  Req,
   UseGuards,
 } from '@nestjs/common';
 import {
@@ -18,6 +19,7 @@ import { Throttle, ThrottlerGuard } from '@nestjs/throttler';
 
 import { OTP_THROTTLER_NAME } from '@common/constants/throttler.constants';
 import { CurrentUser } from '@common/decorators/current-user.decorator';
+import { extractClientIp } from '@common/utils/client-ip.util';
 import { Roles } from '@common/decorators/roles.decorator';
 import { JwtAuthGuard } from '@modules/auth/guards/jwt-auth.guard';
 import { RolesGuard } from '@common/guards/roles.guard';
@@ -31,6 +33,7 @@ import { NodeSandboxService } from '@modules/nodes/sandbox/node-sandbox.service'
 import { UserRole } from '@modules/users/enums/user-role.enum';
 
 import type { AuthenticatedUser } from '@modules/auth/interfaces/jwt-payload.interface';
+import type { Request } from 'express';
 
 /**
  * Banco de pruebas: ejecucion aislada de un nodo.
@@ -78,7 +81,11 @@ export class NodeSandboxController {
   public async run(
     @Body() runNodeSandboxDto: RunNodeSandboxDto,
     @CurrentUser() currentUser: AuthenticatedUser,
+    // La IP va al evento `PRUEBA_NODO` de `audit_eventos`.
+    @Req() request: Request,
   ): Promise<NodeSandboxResultDto> {
-    return this.nodeSandboxService.run(runNodeSandboxDto, currentUser);
+    return this.nodeSandboxService.run(runNodeSandboxDto, currentUser, {
+      sourceIp: extractClientIp(request),
+    });
   }
 }

@@ -1,3 +1,4 @@
+import { AiCallStatus } from '@modules/telemetry/enums/ai-call-status.enum';
 import { TelemetryOperationOrigin } from '@modules/telemetry/enums/telemetry-origin.enum';
 import {
   CSV_HEADERS,
@@ -29,6 +30,10 @@ const buildItem = (
   reasoningRateUsd: 0.3,
   estimatedCostUsd: 0.000255,
   isEstimated: false,
+  status: AiCallStatus.SUCCESS,
+  errorMessage: null,
+  userId: 'u1b2c3d4-0000-4000-8000-000000000004',
+  userEmail: 'practicas@unuware.com',
   ...overrides,
 });
 
@@ -67,9 +72,27 @@ describe('telemetry-csv.builder', () => {
     // 3. Assert 🎯: cabecera + 2 filas + linea vacia final (CRLF de cierre).
     expect(records).toHaveLength(4);
     expect(records[1]).toBe(
-      '2026-10-22T08:30:00.000Z;Notiweb;e1b2c3d4-0000-4000-8000-000000000002;nodo_ia;GEMINI;gemini-3.6-flash;1000;500;100;1600;0,075000;0,300000;0,300000;0,000255;No;Ejecución de flujo',
+      '2026-10-22T08:30:00.000Z;Notiweb;e1b2c3d4-0000-4000-8000-000000000002;nodo_ia;GEMINI;gemini-3.6-flash;1000;500;100;1600;0,075000;0,300000;0,300000;0,000255;No;Ejecución de flujo;practicas@unuware.com;Exitosa;',
     );
-    expect(records[2]?.endsWith(';Sí;Ejecución de flujo')).toBe(true);
+    expect(
+      records[2]?.endsWith(
+        ';Sí;Ejecución de flujo;practicas@unuware.com;Exitosa;',
+      ),
+    ).toBe(true);
+  });
+
+  it('deberia exportar el estado fallido con su motivo', () => {
+    // 1. Arrange 📐
+    const item = buildItem({
+      status: AiCallStatus.FAILED,
+      errorMessage: 'Tiempo de espera agotado',
+    });
+
+    // 2. Act ⚙️
+    const [, record] = recordsOf(buildTelemetryCsv([item]));
+
+    // 3. Assert 🎯
+    expect(record?.endsWith(';Fallida;Tiempo de espera agotado')).toBe(true);
   });
 
   it('deberia etiquetar el consumo del asistente de prompts, que no tiene flujo', () => {
@@ -90,7 +113,7 @@ describe('telemetry-csv.builder', () => {
     expect(cells[1]).toBe('Optimización de prompt');
     expect(cells[2]).toBe('');
     expect(cells[3]).toBe('');
-    expect(cells.at(-1)).toBe('Optimización de prompt');
+    expect(cells.at(-4)).toBe('Optimización de prompt');
   });
 
   it('deberia usar el id del flujo cuando no hay nombre', () => {

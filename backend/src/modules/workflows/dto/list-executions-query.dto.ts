@@ -1,6 +1,14 @@
 import { ApiPropertyOptional } from '@nestjs/swagger';
 import { Type } from 'class-transformer';
-import { IsEnum, IsInt, IsOptional, IsUUID, Max, Min } from 'class-validator';
+import {
+  IsEnum,
+  IsISO8601,
+  IsInt,
+  IsOptional,
+  IsUUID,
+  Max,
+  Min,
+} from 'class-validator';
 
 import { ExecutionState } from '@core/fsm/types/fsm.enums';
 import { SortByField, SortOrderField } from '@common/utils/sort-whitelist.util';
@@ -69,6 +77,22 @@ export class ListExecutionsQueryDto {
     message: `state debe ser uno de: ${Object.values(ExecutionState).join(', ')}.`,
   })
   readonly state?: ExecutionState;
+
+  @ApiPropertyOptional({
+    description: 'Inicio del rango de fecha de inicio (incluido)',
+    example: '2026-10-01',
+  })
+  @IsOptional()
+  @IsISO8601({}, { message: 'from debe ser una fecha ISO 8601.' })
+  readonly from?: string;
+
+  @ApiPropertyOptional({
+    description: 'Fin del rango. Una fecha sin hora incluye el dia completo',
+    example: '2026-10-22',
+  })
+  @IsOptional()
+  @IsISO8601({}, { message: 'to debe ser una fecha ISO 8601.' })
+  readonly to?: string;
 
   @ApiPropertyOptional({
     description: 'Filas por pagina',

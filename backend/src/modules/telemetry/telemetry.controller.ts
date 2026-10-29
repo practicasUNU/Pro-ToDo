@@ -20,11 +20,13 @@ import { Roles } from '@common/decorators/roles.decorator';
 import { RolesGuard } from '@common/guards/roles.guard';
 import { JwtAuthGuard } from '@modules/auth/guards/jwt-auth.guard';
 import {
+  TelemetryExportQueryDto,
   TelemetryHistoryQueryDto,
   TelemetryQueryDto,
 } from '@modules/telemetry/dto/telemetry-query.dto';
 import {
   ModelBreakdownResponseDto,
+  TelemetryFilterOptionsResponseDto,
   TelemetryHistoryPageResponseDto,
   TelemetrySummaryResponseDto,
 } from '@modules/telemetry/dto/telemetry-report-response.dto';
@@ -78,6 +80,18 @@ export class TelemetryController {
     return this.telemetryQueryService.getBreakdownByModel(query);
   }
 
+  @Get('filter-options')
+  @ApiOperation({
+    summary:
+      'Proveedores, modelos, flujos y nodos con telemetria en el rango, para los filtros',
+  })
+  @ApiOkResponse({ type: TelemetryFilterOptionsResponseDto })
+  public async getFilterOptions(
+    @Query() query: TelemetryQueryDto,
+  ): Promise<TelemetryFilterOptionsResponseDto> {
+    return this.telemetryQueryService.getFilterOptions(query);
+  }
+
   @Get('history')
   @ApiOperation({ summary: 'Inferencias registradas, paginadas' })
   @ApiOkResponse({ type: TelemetryHistoryPageResponseDto })
@@ -91,7 +105,7 @@ export class TelemetryController {
   @ApiOperation({ summary: 'Descarga el consumo del rango en CSV' })
   @ApiProduces('text/csv')
   public async exportCsv(
-    @Query() query: TelemetryQueryDto,
+    @Query() query: TelemetryExportQueryDto,
   ): Promise<StreamableFile> {
     const { items } = await this.telemetryQueryService.getExportRows(query);
 
@@ -108,7 +122,7 @@ export class TelemetryController {
   })
   @ApiProduces('application/pdf')
   public async exportPdf(
-    @Query() query: TelemetryQueryDto,
+    @Query() query: TelemetryExportQueryDto,
     @CurrentUser() currentUser: AuthenticatedUser,
   ): Promise<StreamableFile> {
     // Secuencial y no en paralelo: comparten el pool de PostgreSQL con el
@@ -126,6 +140,7 @@ export class TelemetryController {
       items,
       truncated,
       requestedBy: currentUser.email,
+      filters: query,
     });
 
     return new StreamableFile(pdf, {

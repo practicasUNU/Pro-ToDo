@@ -1,3 +1,4 @@
+import type { AiCallStatus } from '@modules/telemetry/enums/ai-call-status.enum';
 import type { TelemetryOperationOrigin } from '@modules/telemetry/enums/telemetry-origin.enum';
 
 /**
@@ -23,6 +24,15 @@ export interface RecordTelemetryDto {
   readonly reasoningTokens: number;
   /** `false` si el proveedor no informo de uso: el coste sera estimado. */
   readonly usageReported: boolean;
+  /** Resultado de la llamada; las fallidas sin `usage` llegan con ceros. */
+  readonly status: AiCallStatus;
+  /** Motivo del fallo; se ignora en las exitosas. */
+  readonly errorMessage?: string | null;
+  /**
+   * Usuario al que se imputa: el iniciador de la ejecucion que lleva el
+   * contexto. Si falta, se toma el de la fila de `ejecuciones_flujo`.
+   */
+  readonly userId?: string | null;
 }
 
 /**
@@ -32,7 +42,7 @@ export interface RecordTelemetryDto {
  */
 export interface RecordAssistUsageDto extends Omit<
   RecordTelemetryDto,
-  'executionId' | 'nodeId'
+  'executionId' | 'nodeId' | 'userId'
 > {
   /** `id_usuario` de quien pidio la inferencia. */
   readonly userId: string;

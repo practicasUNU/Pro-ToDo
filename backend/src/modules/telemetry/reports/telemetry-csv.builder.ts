@@ -3,6 +3,7 @@ import {
   escapeCsvText,
   formatCsvDecimal,
 } from '@common/utils/csv.util';
+import { AI_CALL_STATUS_LABELS } from '@modules/telemetry/enums/ai-call-status.enum';
 import { TELEMETRY_ORIGIN_LABELS } from '@modules/telemetry/enums/telemetry-origin.enum';
 import { describeTelemetrySource } from '@modules/telemetry/reports/telemetry-source.util';
 
@@ -33,6 +34,9 @@ export const CSV_HEADERS: readonly string[] = [
   'Coste estimado (USD)',
   'Coste aproximado',
   'Origen',
+  'Usuario',
+  'Estado',
+  'Error',
 ];
 
 const toRecord = (item: TelemetryHistoryItemResponseDto): string[] => [
@@ -52,6 +56,9 @@ const toRecord = (item: TelemetryHistoryItemResponseDto): string[] => [
   formatCsvDecimal(item.estimatedCostUsd),
   item.isEstimated ? 'Sí' : 'No',
   escapeCsvText(TELEMETRY_ORIGIN_LABELS[item.operationOrigin]),
+  escapeCsvText(item.userEmail ?? ''),
+  escapeCsvText(AI_CALL_STATUS_LABELS[item.status]),
+  escapeCsvText(item.errorMessage ?? ''),
 ];
 
 /**

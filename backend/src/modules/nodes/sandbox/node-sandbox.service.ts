@@ -10,6 +10,8 @@ import {
 import { StatePayloadContext } from '@core/fsm/context/state-payload.context';
 import { NodeStrategyFactory } from '@core/fsm/factories/node-strategy.factory';
 import { PipelineValidatorService } from '@core/fsm/services/pipeline-validator.service';
+import { AuditActionType } from '@modules/audit/enums/audit-action.enum';
+import { AuditLoggerService } from '@modules/audit/services/audit-logger.service';
 import {
   ERR_SANDBOX_NODE_TYPE,
   ERR_SANDBOX_PARAMS,
@@ -20,6 +22,16 @@ import {
 import type { AuthenticatedUser } from '@modules/auth/interfaces/jwt-payload.interface';
 import type { RunNodeSandboxDto } from '@modules/nodes/sandbox/dto/run-node-sandbox.dto';
 import type { NodeSandboxResultDto } from '@modules/nodes/sandbox/dto/node-sandbox-result.dto';
+import type { NodeResult } from '@core/fsm/types/node-strategy.types';
+
+/** Tabla logica de los eventos `PRUEBA_NODO`: el banco no tiene fila propia. */
+const SANDBOX_AUDIT_TABLE = 'banco_pruebas';
+
+/** Datos de la peticion que no viajan en el cuerpo. */
+export interface NodeSandboxRequestMeta {
+  /** IP de origen, para el evento `PRUEBA_NODO` de `audit_eventos`. */
+  readonly sourceIp: string | null;
+}
 
 /**
  * Ejecucion AISLADA de un nodo desde el banco de pruebas.
@@ -38,7 +50,9 @@ import type { NodeSandboxResultDto } from '@modules/nodes/sandbox/dto/node-sandb
  *
  * Los efectos son los de produccion, y es deliberado: la IA factura (la
  * telemetria lo imputa al usuario con el origen BANCO_PRUEBAS) y el destino
- * HTTP envia la peticion de verdad, por la misma guarda SSRF.
+ * HTTP envia la peticion de verdad, por la misma guarda SSRF. Por eso cada
+ * prueba que llega a ejecutarse deja ademas un evento `PRUEBA_NODO` en
+ * `audit_eventos` con el usuario, el tipo de nodo y el resultado.
  */
 @Injectable()
 export class NodeSandboxService {
@@ -47,11 +61,13 @@ export class NodeSandboxService {
   constructor(
     private readonly strategyFactory: NodeStrategyFactory,
     private readonly pipelineValidator: PipelineValidatorService,
+    private readonly auditLogger: AuditLoggerService,
   ) {}
 
   public async run(
     dto: RunNodeSandboxDto,
     user: AuthenticatedUser,
+    meta: NodeSandboxRequestMeta = { sourceIp: null },
   ): Promise<NodeSandboxResultDto> {
     const allowedRoles = SANDBOX_ROLES_BY_NODE_TYPE[dto.nodeType];
 
@@ -89,8 +105,28 @@ export class NodeSandboxService {
       `Banco de pruebas: ${dto.nodeType} lanzado por ${user.email} (${user.id})`,
     );
 
-    const result = await strategy.execute(context, dto.params);
+    let result: NodeResult;
+
+    try {
+      result = await strategy.execute(context, dto.params);
+    } catch (error: unknown) {
+      // Una estrategia que revienta tambien es una prueba hecha: se audita
+      // antes de dejar que la excepcion siga su curso.
+      await this.recordAudit(dto, user, meta, {
+        success: false,
+        errorCode: 'ERR_NODE_CRASHED',
+        durationMs: Date.now() - startedAt,
+      });
+      throw error;
+    }
+
     const durationMs = Date.now() - startedAt;
+
+    await this.recordAudit(dto, user, meta, {
+      success: result.success,
+      errorCode: result.error?.code ?? null,
+      durationMs,
+    });
 
     if (result.success) {
       return { success: true, data: result.data ?? {}, durationMs };
@@ -120,6 +156,36 @@ export class NodeSandboxService {
         : {}),
       durationMs,
     };
+  }
+
+  /**
+   * Evento `PRUEBA_NODO`. Sin los `params` ni los datos simulados: pueden
+   * llevar contenido real del usuario, y el auditor solo necesita saber quien
+   * probo que nodo y como acabo. `AuditLoggerService` nunca lanza.
+   */
+  private async recordAudit(
+    dto: RunNodeSandboxDto,
+    user: AuthenticatedUser,
+    meta: NodeSandboxRequestMeta,
+    outcome: {
+      readonly success: boolean;
+      readonly errorCode: string | null;
+      readonly durationMs: number;
+    },
+  ): Promise<void> {
+    await this.auditLogger.record({
+      userId: user.id,
+      action: AuditActionType.NODE_SANDBOX_RUN,
+      affectedTable: SANDBOX_AUDIT_TABLE,
+      recordId: null,
+      newData: {
+        nodeType: dto.nodeType,
+        success: outcome.success,
+        errorCode: outcome.errorCode,
+        durationMs: outcome.durationMs,
+      },
+      sourceIp: meta.sourceIp,
+    });
   }
 
   /** Contexto efimero con los namespaces simulados y el ambito de banco. */

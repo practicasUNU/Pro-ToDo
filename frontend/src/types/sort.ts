@@ -33,10 +33,29 @@ export const TELEMETRY_HISTORY_SORT_KEYS = [
   'nodeId',
   'aiProvider',
   'aiModel',
+  'promptTokens',
+  'completionTokens',
+  'reasoningTokens',
   'totalTokens',
   'estimatedCostUsd',
+  'status',
+  'user',
 ] as const;
 export type TelemetryHistorySortKey = (typeof TELEMETRY_HISTORY_SORT_KEYS)[number];
+
+/**
+ * Claves de orden del desglose por modelo (`TELEMETRY_BREAKDOWN_SORT_COLUMNS`),
+ * que viajan como `breakdownSortBy` / `breakdownSortOrder`.
+ */
+export const TELEMETRY_BREAKDOWN_SORT_KEYS = [
+  'invocations',
+  'promptTokens',
+  'completionTokens',
+  'reasoningTokens',
+  'totalTokens',
+  'costUsd',
+] as const;
+export type TelemetryBreakdownSortKey = (typeof TELEMETRY_BREAKDOWN_SORT_KEYS)[number];
 
 /** Claves de orden de `GET /api/audit/events` (`AUDIT_SORT_COLUMNS`). */
 export const AUDIT_SORT_KEYS = [

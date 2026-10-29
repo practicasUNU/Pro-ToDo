@@ -5,7 +5,7 @@ import { ExecutionState } from '@core/fsm/types/fsm.enums';
 import { FsmExecutionQueryService } from './fsm-execution-query.service';
 
 import type { FsmExecution } from '@core/fsm/entities/fsm-execution.entity';
-import type { Repository } from 'typeorm';
+import type { FindOperator, Repository } from 'typeorm';
 
 const FLOW_ID = 'b6c1f0d2-3e4a-4b5c-8d6e-7f8091a2b3c4';
 const EXECUTION_ID = '1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d';
@@ -128,6 +128,38 @@ describe('FsmExecutionQueryService (lectura de ejecuciones_flujo)', () => {
         expect.objectContaining({
           where: { flowId: FLOW_ID, currentState: ExecutionState.PAUSADO },
         }),
+      );
+    });
+
+    it('1.4b deberia acotar la fecha de inicio con CAST a timestamptz', async () => {
+      // 1. Arrange: `fecha_inicio` es TIMESTAMP SIN zona; un `Date` a secas se
+      //    compararia en la zona del proceso de Node.
+      const { repo, findAndCount } = buildRepository();
+
+      // 2. Act
+      await new FsmExecutionQueryService(repo).findPage({
+        startedBetween: {
+          from: new Date('2026-10-01T00:00:00.000Z'),
+          to: new Date('2026-10-23T00:00:00.000Z'),
+        },
+        limit: 25,
+        offset: 0,
+      });
+
+      // 3. Assert
+      const [options] = findAndCount.mock.calls[0] as [
+        { where: { createdAt: FindOperator<unknown> } },
+      ];
+      const operator = options.where.createdAt;
+      expect(operator.type).toBe('raw');
+      expect(operator.objectLiteralParameters).toEqual({
+        startedFrom: '2026-10-01T00:00:00.000Z',
+        startedTo: '2026-10-23T00:00:00.000Z',
+      });
+      expect(
+        (operator.getSql as (alias: string) => string)('fecha_inicio'),
+      ).toBe(
+        'fecha_inicio >= CAST(:startedFrom AS timestamptz) AND fecha_inicio < CAST(:startedTo AS timestamptz)',
       );
     });
 

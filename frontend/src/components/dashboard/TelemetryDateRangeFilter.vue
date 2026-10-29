@@ -3,12 +3,7 @@ import { ref, watch } from 'vue';
 
 import { useTelemetryStore } from '@stores/telemetry.store';
 
-import {
-  datePickerBounds,
-  defaultDateRange,
-  isFutureDate,
-  toIsoRange,
-} from '@/utils/date-range';
+import { datePickerBounds, defaultDateRange, isFutureDate, toIsoRange } from '@/utils/date-range';
 
 /**
  * Selector del periodo del informe: dos fechas locales y un boton para aplicar.
@@ -70,7 +65,8 @@ const apply = (): void => {
 };
 
 /**
- * Devuelve el periodo al de partida y recarga.
+ * Devuelve el periodo al de partida, quita proveedor, modelo, flujo, nodo y
+ * orden, y recarga.
  *
  * Reutiliza `defaultDateRange()` en vez de vaciar los campos: el informe no
  * admite un rango abierto —el backend exige las dos fechas— y dejarlos en
@@ -82,6 +78,8 @@ const clear = (): void => {
   from.value = range.from;
   to.value = range.to;
   telemetryStore.setDateRange(range);
+  telemetryStore.setFilters({});
+  telemetryStore.setBreakdownSort({ sortBy: null, descending: true });
   emit('apply');
 };
 </script>
@@ -109,11 +107,11 @@ const clear = (): void => {
         <q-icon name="event" class="cursor-pointer">
           <q-popup-proxy cover transition-show="scale" transition-hide="scale">
             <q-date
-                  v-model="from"
-                  mask="YYYY-MM-DD"
-                  class="pd-date-popup"
-                  :options="isSelectableDate"
-                >
+              v-model="from"
+              mask="YYYY-MM-DD"
+              class="pd-date-popup"
+              :options="isSelectableDate"
+            >
               <div class="row items-center justify-end">
                 <q-btn v-close-popup flat no-caps label="Cerrar" class="pd-btn-secondary" />
               </div>
@@ -136,11 +134,11 @@ const clear = (): void => {
         <q-icon name="event" class="cursor-pointer">
           <q-popup-proxy cover transition-show="scale" transition-hide="scale">
             <q-date
-                  v-model="to"
-                  mask="YYYY-MM-DD"
-                  class="pd-date-popup"
-                  :options="isSelectableDate"
-                >
+              v-model="to"
+              mask="YYYY-MM-DD"
+              class="pd-date-popup"
+              :options="isSelectableDate"
+            >
               <div class="row items-center justify-end">
                 <q-btn v-close-popup flat no-caps label="Cerrar" class="pd-btn-secondary" />
               </div>

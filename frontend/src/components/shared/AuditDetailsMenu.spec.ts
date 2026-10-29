@@ -78,9 +78,7 @@ describe('AuditDetailsMenu', () => {
     expect(menu?.querySelector('[data-test="audit-created"] time')?.getAttribute('datetime')).toBe(
       AUDIT.createdAt,
     );
-    // Sin autor registrado se dice, no se deja el hueco.
-    expect(menu?.querySelector('[data-test="audit-updated"]')?.textContent).toContain(
-      'Sin registro',
-    );
+    // Sin autor (ni cuenta de respaldo, migracion 060) se marca con un guion.
+    expect(menu?.querySelector('[data-test="audit-updated"]')?.textContent).toContain('—');
   });
 });

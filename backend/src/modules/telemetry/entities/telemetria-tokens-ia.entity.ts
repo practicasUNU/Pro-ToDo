@@ -9,6 +9,7 @@ import {
 
 import { FsmExecution } from '@core/fsm/entities/fsm-execution.entity';
 import { Workflow } from '@modules/workflows/entities/workflow.entity';
+import { AiCallStatus } from '@modules/telemetry/enums/ai-call-status.enum';
 import { TelemetryOperationOrigin } from '@modules/telemetry/enums/telemetry-origin.enum';
 import { numericTransformer } from '@modules/telemetry/utils/numeric.transformer';
 
@@ -71,7 +72,10 @@ export class TelemetriaTokensIa {
   })
   operationOrigin: TelemetryOperationOrigin;
 
-  /** Quien pidio la inferencia fuera de una ejecucion (asistente de prompts). */
+  /**
+   * Quien pidio la inferencia o lanzo la ejecucion. Si el backend la omite, el
+   * DEFAULT de la columna pone la cuenta de respaldo (migracion 060).
+   */
   @Column({ name: 'usuario_id', type: 'uuid', nullable: true })
   userId: string | null;
 
@@ -141,6 +145,24 @@ export class TelemetriaTokensIa {
 
   @Column({ name: 'es_estimado', type: 'boolean', default: false })
   isEstimated: boolean;
+
+  /** Si el proveedor respondio o la llamada fallo (migracion 060). */
+  @Column({
+    name: 'estado',
+    type: 'varchar',
+    length: 10,
+    default: AiCallStatus.SUCCESS,
+  })
+  status: AiCallStatus;
+
+  /** Motivo del fallo, recortado; NULL en las llamadas exitosas. */
+  @Column({
+    name: 'mensaje_error',
+    type: 'varchar',
+    length: 500,
+    nullable: true,
+  })
+  errorMessage: string | null;
 
   @CreateDateColumn({ name: 'creado_en', type: 'timestamptz' })
   createdAt: Date;

@@ -17,6 +17,7 @@ export const AUDIT_ACTION_LABELS: Readonly<Record<AuditActionValue, string>> = {
   [AuditActionValue.DEACTIVATE]: 'Desactivación',
   [AuditActionValue.RESUME]: 'Reanudación',
   [AuditActionValue.FLOW_DISCARDED]: 'Flujo descartado',
+  [AuditActionValue.NODE_SANDBOX_RUN]: 'Prueba de nodo',
 };
 
 export const AUDIT_TABLE_LABELS: Readonly<Record<AuditTableValue, string>> = {
@@ -54,6 +55,9 @@ export const AUDIT_ACTION_BADGES: Readonly<Record<AuditActionValue, string>> = {
   [AuditActionValue.RESUME]: 'pd-badge--running',
   // Rojo de fallo: el trabajo pendiente se abandona y no se puede reanudar.
   [AuditActionValue.FLOW_DISCARDED]: 'pd-badge--failed',
+  // Azul de informacion: una prueba no cambia ningun registro, solo lo deja
+  // constar (y la IA que factura).
+  [AuditActionValue.NODE_SANDBOX_RUN]: 'pd-badge--info',
 };
 
 /** Opciones cerradas de un `q-select` (Poka-Yoke): `{ label, value }`. */
@@ -65,8 +69,13 @@ export const toSelectOptions = <T extends string>(
 export const labelAuditAction = (action: string): string =>
   AUDIT_ACTION_LABELS[action as AuditActionValue] ?? action;
 
+/** Tablas logicas sin maestra detras (replica de `LOGICAL_AUDIT_TABLE_LABELS`). */
+const LOGICAL_AUDIT_TABLE_LABELS: Readonly<Record<string, string>> = {
+  banco_pruebas: 'Banco de pruebas',
+};
+
 export const labelAuditTable = (table: string): string =>
-  AUDIT_TABLE_LABELS[table as AuditTableValue] ?? table;
+  AUDIT_TABLE_LABELS[table as AuditTableValue] ?? LOGICAL_AUDIT_TABLE_LABELS[table] ?? table;
 
 /**
  * Claves de auditoria que cambian en TODA modificacion: listarlas como "campos

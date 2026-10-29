@@ -55,6 +55,12 @@ CREATE TABLE usuarios (
     fecha_actualizacion TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
+-- Cuenta a la que se atribuye lo que no tiene autor conocido (migracion 060).
+CREATE OR REPLACE FUNCTION fn_usuario_respaldo() RETURNS UUID
+    LANGUAGE sql STABLE AS $$
+        SELECT id_usuario FROM usuarios WHERE correo = 'practicas@unuware.com'
+    $$;
+
 -- =============================================================================
 -- Tabla: NODOS (catálogo estático)
 -- Duplicada en db/migrations/011-catalogo-nodos.sql para las bases de datos ya
@@ -270,7 +276,11 @@ CREATE TABLE ejecuciones_flujo (
     motivo_fallo VARCHAR(255),
     fecha_inicio TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     fecha_actualizacion TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    fecha_fin TIMESTAMP
+    fecha_fin TIMESTAMP,
+    -- Quien lanzo o reanudo la ejecucion; NULL solo si no existe la cuenta de
+    -- respaldo (migracion 060).
+    usuario_id UUID NULL DEFAULT fn_usuario_respaldo()
+        REFERENCES usuarios(id_usuario) ON DELETE SET NULL
 );
 
 -- =============================================================================
@@ -493,8 +503,10 @@ CREATE TABLE telemetria_tokens_ia (
     nodo_id VARCHAR(50) NULL,
     -- 'EJECUCION_FLUJO' | 'PROMPT_OPTIMIZATION' (migracion 049).
     origen_operacion VARCHAR(30) NOT NULL DEFAULT 'EJECUCION_FLUJO',
-    -- Quien pidio la inferencia fuera de una ejecucion.
-    usuario_id UUID NULL REFERENCES usuarios(id_usuario) ON DELETE SET NULL,
+    -- Quien pidio la inferencia o lanzo la ejecucion; por defecto, la cuenta
+    -- de respaldo (migracion 060).
+    usuario_id UUID NULL DEFAULT fn_usuario_respaldo()
+        REFERENCES usuarios(id_usuario) ON DELETE SET NULL,
     proveedor_ia VARCHAR(30) NOT NULL,
     modelo_ia VARCHAR(100) NOT NULL,
     tokens_prompt INTEGER NOT NULL DEFAULT 0 CHECK (tokens_prompt >= 0),
@@ -507,6 +519,10 @@ CREATE TABLE telemetria_tokens_ia (
     costo_estimado_usd NUMERIC(12, 6) NOT NULL DEFAULT 0 CHECK (costo_estimado_usd >= 0),
     es_estimado BOOLEAN NOT NULL DEFAULT FALSE,
     creado_en TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    -- Resultado de la llamada y su motivo si fallo (migracion 060).
+    estado VARCHAR(10) NOT NULL DEFAULT 'SUCCESS',
+    mensaje_error VARCHAR(500) NULL,
+    CONSTRAINT chk_telemetria_estado CHECK (estado IN ('SUCCESS', 'FAILED')),
     -- Cada origen trae sus columnas: sin filas a medias.
     CONSTRAINT chk_telemetria_origen_coherente CHECK (
         (origen_operacion = 'EJECUCION_FLUJO'
@@ -519,6 +535,7 @@ CREATE INDEX idx_telemetria_tokens_ejecucion ON telemetria_tokens_ia (ejecucion_
 CREATE INDEX idx_telemetria_tokens_flujo_fecha ON telemetria_tokens_ia (flujo_id, creado_en);
 CREATE INDEX idx_telemetria_tokens_proveedor_modelo ON telemetria_tokens_ia (proveedor_ia, modelo_ia, creado_en);
 CREATE INDEX idx_telemetria_tokens_origen_fecha ON telemetria_tokens_ia (origen_operacion, creado_en);
+CREATE INDEX idx_telemetria_tokens_modelo_estado ON telemetria_tokens_ia (modelo_ia, estado, creado_en);
 
 -- =============================================================================
 -- Tabla: audit_eventos (migracion 048)
@@ -532,7 +549,8 @@ CREATE INDEX idx_telemetria_tokens_origen_fecha ON telemetria_tokens_ia (origen_
 CREATE TABLE audit_eventos (
     id_audit_evento UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     -- NULL en un login fallido con un correo que no existe.
-    usuario_id UUID NULL REFERENCES usuarios(id_usuario) ON DELETE SET NULL,
+    usuario_id UUID NULL DEFAULT fn_usuario_respaldo()
+        REFERENCES usuarios(id_usuario) ON DELETE SET NULL,
     -- Literales en castellano (migracion 050) mas `REANUDAR` (migracion 053)
     -- y `FLUJO_DESCARTADO` (migracion 059).
     -- El nombre de la restriccion es explicito para que las migraciones
@@ -541,7 +559,8 @@ CREATE TABLE audit_eventos (
         CONSTRAINT audit_eventos_accion_check CHECK (accion IN (
             'CREAR', 'ACTUALIZAR', 'ELIMINAR', 'CAMBIO_ROL',
             'INICIO_SESION', 'INICIO_SESION_FALLIDO', 'CIERRE_SESION',
-            'ACTIVAR', 'DESACTIVAR', 'REANUDAR', 'FLUJO_DESCARTADO'
+            'ACTIVAR', 'DESACTIVAR', 'REANUDAR', 'FLUJO_DESCARTADO',
+            'PRUEBA_NODO'
         )),
     tabla_afectada VARCHAR(60) NOT NULL,
     registro_id VARCHAR(64) NULL,

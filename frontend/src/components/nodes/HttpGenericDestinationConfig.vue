@@ -67,7 +67,7 @@ const BODY_TYPE_OPTIONS: readonly LabeledOption<HttpGenericBodyType>[] = [
 const AUTH_TYPE_OPTIONS: readonly LabeledOption<HttpGenericAuthType>[] = [
   { label: 'Sin autenticacion', value: HttpGenericAuthType.NONE },
   { label: 'Token Bearer', value: HttpGenericAuthType.BEARER_TOKEN },
-  { label: 'Usuario y contrasena (Basic)', value: HttpGenericAuthType.BASIC_AUTH },
+  { label: 'Usuario y clave (Basic)', value: HttpGenericAuthType.BASIC_AUTH },
   { label: 'API key', value: HttpGenericAuthType.API_KEY },
 ];
 

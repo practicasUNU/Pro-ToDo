@@ -11,6 +11,7 @@ import {
   DEFAULT_AUDIT_RANGE_DAYS,
 } from '@modules/audit/dto/list-audit-events-query.dto';
 import { AuditEvento } from '@modules/audit/entities/audit-evento.entity';
+import { AuditActionType } from '@modules/audit/enums/audit-action.enum';
 
 import type { SelectQueryBuilder } from 'typeorm';
 import type { DateRange } from '@common/utils/date-range.util';
@@ -22,7 +23,6 @@ import type {
   AuditEventPageResponseDto,
   AuditEventResponseDto,
 } from '@modules/audit/dto/audit-event-response.dto';
-import type { AuditActionType } from '@modules/audit/enums/audit-action.enum';
 import type { AuditSnapshot } from '@modules/audit/services/audit-snapshot.service';
 
 /**
@@ -85,7 +85,13 @@ export class AuditLoggerService {
       // `create` + `save` y no `insert`: el tipado de `insert` no admite un
       // `Record` arbitrario en una columna JSONB.
       const event = this.auditRepository.create({
-        userId: input.userId,
+        // Sin autor conocido se omite la columna y su DEFAULT pone la cuenta de
+        // respaldo (migracion 060). El login fallido es la excepcion: no tiene
+        // autor por definicion y atribuirselo a alguien falsearia la traza.
+        ...(input.userId !== null ||
+        input.action === AuditActionType.LOGIN_FAILED
+          ? { userId: input.userId }
+          : {}),
         action: input.action,
         affectedTable: input.affectedTable,
         recordId: input.recordId,

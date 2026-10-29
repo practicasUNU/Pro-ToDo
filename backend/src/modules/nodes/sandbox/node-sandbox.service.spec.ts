@@ -6,7 +6,10 @@ import { UserRole } from '@modules/users/enums/user-role.enum';
 import { SANDBOX_NODE_ID } from './node-sandbox.constants';
 import { NodeSandboxService } from './node-sandbox.service';
 
+import { AuditActionType } from '@modules/audit/enums/audit-action.enum';
+
 import type { StatePayloadContext } from '@core/fsm/context/state-payload.context';
+import type { AuditLoggerService } from '@modules/audit/services/audit-logger.service';
 import type { NodeStrategyFactory } from '@core/fsm/factories/node-strategy.factory';
 import type { PipelineValidatorService } from '@core/fsm/services/pipeline-validator.service';
 import type { AuthenticatedUser } from '@modules/auth/interfaces/jwt-payload.interface';
@@ -24,17 +27,21 @@ const buildHarness = (
   service: NodeSandboxService;
   execute: jest.Mock;
   validateStandaloneParams: jest.Mock;
+  record: jest.Mock;
 } => {
   const execute = jest.fn().mockResolvedValue({ success: true, data: {} });
   const validateStandaloneParams = jest.fn().mockResolvedValue(issues);
+  const record = jest.fn().mockResolvedValue(undefined);
 
   return {
     service: new NodeSandboxService(
       { getStrategy: () => ({ execute }) } as unknown as NodeStrategyFactory,
       { validateStandaloneParams } as unknown as PipelineValidatorService,
+      { record } as unknown as AuditLoggerService,
     ),
     execute,
     validateStandaloneParams,
+    record,
   };
 };
 
@@ -129,6 +136,88 @@ describe('NodeSandboxService', () => {
     expect(first?.getExecutionId()).not.toBe(second?.getExecutionId());
     expect(second?.getNamespace('parsed_email')).toEqual({
       clean_body: 'Otro',
+    });
+  });
+
+  describe('2. Atribucion al usuario activo (migracion 060)', () => {
+    it('should associate active user_id when running nodes in sandbox mode', async () => {
+      // 1. Arrange 📐
+      const { service, execute, record } = buildHarness();
+
+      // 2. Act ⚙️
+      await service.run(DTO, ADMIN, { sourceIp: '10.0.0.7' });
+
+      // 3. Assert 🎯: el contexto lleva al usuario del JWT como iniciador (la
+      //    telemetria de IA se le imputa) y la prueba deja su evento de auditoria.
+      const [context] = execute.mock.calls[0] as [StatePayloadContext];
+
+      expect(context.getSandboxScope()).toEqual({ userId: ADMIN.id });
+      expect(context.getInitiatorUserId()).toBe(ADMIN.id);
+      expect(record).toHaveBeenCalledWith({
+        userId: ADMIN.id,
+        action: AuditActionType.NODE_SANDBOX_RUN,
+        affectedTable: 'banco_pruebas',
+        recordId: null,
+        newData: {
+          nodeType: NodeType.PROCESADOR_IA,
+          success: true,
+          errorCode: null,
+          durationMs: expect.any(Number) as number,
+        },
+        sourceIp: '10.0.0.7',
+      });
+    });
+
+    it('2.2 deberia auditar tambien la prueba que falla, con su codigo', async () => {
+      // 1. Arrange 📐
+      const { service, execute, record } = buildHarness();
+      execute.mockResolvedValue({
+        success: false,
+        error: { level: 'GRAVE', code: 'ERR_LLM_PROVIDER', message: '503' },
+      });
+
+      // 2. Act ⚙️
+      await service.run(DTO, ADMIN);
+
+      // 3. Assert 🎯
+      expect(record).toHaveBeenCalledWith(
+        expect.objectContaining({
+          newData: expect.objectContaining({
+            success: false,
+            errorCode: 'ERR_LLM_PROVIDER',
+          }) as unknown,
+          sourceIp: null,
+        }),
+      );
+    });
+
+    it('2.3 deberia auditar la estrategia que revienta y propagar la excepcion', async () => {
+      // 1. Arrange 📐
+      const { service, execute, record } = buildHarness();
+      execute.mockRejectedValue(new Error('boom'));
+
+      // 2. Act ⚙️ + 3. Assert 🎯
+      await expect(service.run(DTO, ADMIN)).rejects.toThrow('boom');
+      expect(record).toHaveBeenCalledWith(
+        expect.objectContaining({
+          newData: expect.objectContaining({
+            errorCode: 'ERR_NODE_CRASHED',
+          }) as unknown,
+        }),
+      );
+    });
+
+    it('2.4 no deberia auditar una peticion rechazada antes de ejecutar', async () => {
+      // 1. Arrange 📐
+      const { service, record } = buildHarness([
+        { field: 'params.promptText', constraints: ['obligatorio'] },
+      ]);
+
+      // 2. Act ⚙️ + 3. Assert 🎯
+      await expect(service.run(DTO, ADMIN)).rejects.toBeInstanceOf(
+        BadRequestException,
+      );
+      expect(record).not.toHaveBeenCalled();
     });
   });
 });

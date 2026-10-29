@@ -237,6 +237,30 @@ describe('ExecutionsService (consulta y reintento manual CU-09)', () => {
       expect(page.total).toBe(1);
     });
 
+    it('1.1.c deberia acotar por fecha de inicio solo si llega un rango', async () => {
+      // 1. Arrange
+      const { service, query } = buildHarness();
+
+      // 2. Act
+      await service.findAll({});
+      await service.findAll({ from: '2026-10-01', to: '2026-10-22' });
+
+      // 3. Assert: sin rango no se acota; "hasta el 22" incluye el dia entero.
+      expect(query.findPage).toHaveBeenNthCalledWith(
+        1,
+        expect.objectContaining({ startedBetween: undefined }),
+      );
+      expect(query.findPage).toHaveBeenNthCalledWith(
+        2,
+        expect.objectContaining({
+          startedBetween: {
+            from: new Date('2026-10-01T00:00:00.000Z'),
+            to: new Date('2026-10-23T00:00:00.000Z'),
+          },
+        }),
+      );
+    });
+
     it('1.1.b deberia traducir `sortBy` a la propiedad de la lista blanca', async () => {
       // 1. Arrange: la clave publica `startedAt` es la fecha de alta de la fila.
       const { service, query } = buildHarness();
@@ -359,6 +383,7 @@ describe('ExecutionsService (consulta y reintento manual CU-09)', () => {
         true,
         PAUSED_NODE_ID,
         buildSchema(),
+        CURRENT_USER.id,
       );
     });
 
@@ -415,6 +440,7 @@ describe('ExecutionsService (consulta y reintento manual CU-09)', () => {
         false,
         PAUSED_NODE_ID,
         buildSchema(),
+        CURRENT_USER.id,
       );
     });
 
@@ -453,6 +479,7 @@ describe('ExecutionsService (consulta y reintento manual CU-09)', () => {
         true,
         'nodo_a',
         buildSchema(),
+        CURRENT_USER.id,
       );
     });
 
@@ -510,6 +537,7 @@ describe('ExecutionsService (consulta y reintento manual CU-09)', () => {
         true,
         PAUSED_NODE_ID,
         buildSchema(),
+        CURRENT_USER.id,
       );
     });
 
@@ -754,6 +782,7 @@ describe('ExecutionsService (consulta y reintento manual CU-09)', () => {
         true,
         PAUSED_NODE_ID,
         buildSchema(),
+        CURRENT_USER.id,
       );
       expect(engine.executeWorkflow).toHaveBeenCalledTimes(1);
       expect(response.executionId).toBe(EXECUTION_ID);

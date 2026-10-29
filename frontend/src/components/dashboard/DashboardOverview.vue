@@ -68,15 +68,21 @@ usePanelRefresh(loadDashboard, { onFlowCompleted: true });
       </div>
     </header>
 
-    <TelemetrySummaryCards :summary="telemetryStore.summary" :loading="telemetryStore.isLoading" />
+    <TelemetrySummaryCards
+      :summary="telemetryStore.summary"
+      :breakdown="telemetryStore.breakdown"
+      :loading="telemetryStore.isLoading"
+    />
 
-    <div class="pd-dashboard__grid">
-      <TelemetryCostChart
-        :breakdown="telemetryStore.breakdown"
-        :loading="telemetryStore.isLoading"
-      />
-      <ExecutionsHistoryTable compact />
-    </div>
+    <!-- Fila completa cada bloque: el coste por modelo con sus porcentajes
+         necesita el ancho para leerse, y el historial va debajo con sus
+         propios filtros de estado, flujo y fecha. -->
+    <TelemetryCostChart
+      class="col-12"
+      :breakdown="telemetryStore.breakdown"
+      :loading="telemetryStore.isLoading"
+    />
+    <ExecutionsHistoryTable compact class="col-12" />
   </div>
 </template>
 
@@ -108,18 +114,5 @@ usePanelRefresh(loadDashboard, { onFlowCompleted: true });
   flex-wrap: wrap;
   gap: 8px;
   align-items: center;
-}
-
-.pd-dashboard__grid {
-  display: grid;
-  grid-template-columns: minmax(280px, 1fr) minmax(0, 2fr);
-  gap: 16px;
-  align-items: start;
-}
-
-@media (max-width: 1023px) {
-  .pd-dashboard__grid {
-    grid-template-columns: 1fr;
-  }
 }
 </style>

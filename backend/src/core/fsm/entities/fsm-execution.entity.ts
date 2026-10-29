@@ -61,6 +61,15 @@ export class FsmExecution {
   @Column({ name: 'contexto_acumulado', type: 'jsonb', default: {} })
   contextPayload: Record<string, Record<string, unknown>>;
 
+  /**
+   * Usuario al que se imputa la ejecucion (migracion 060): quien la lanzo o
+   * reanudo desde la UI, el remitente de un disparo IMAP si esta registrado, o
+   * la cuenta de respaldo que pone el DEFAULT de la columna cuando el backend la
+   * omite (Cron). Sin relacion declarada: solo se lee el identificador.
+   */
+  @Column({ name: 'usuario_id', type: 'uuid', nullable: true })
+  initiatedByUserId: string | null;
+
   /** Intentos consumidos por nodo, para contrastarlos con su `RetryPolicy`. */
   @Column({ name: 'retry_state', type: 'jsonb', default: {} })
   retryState: Record<string, unknown>;

@@ -24,6 +24,7 @@ import {
 } from '@modules/nodes/strategies/ocr-processor.strategy';
 
 import { createMockStatePayloadContext } from '../../../../test/factories/state-payload-context.factory';
+import { AiCallStatus } from '@modules/telemetry/enums/ai-call-status.enum';
 import { createMockTelemetryService } from '@test/factories/telemetry-service.factory';
 import { ERR_TELEMETRY_PERSIST_FAILED } from '@modules/telemetry/telemetry.service';
 
@@ -1356,12 +1357,15 @@ describe('OcrProcessorStrategy · nodo satelite PROCESADOR_OCR', () => {
       expect(telemetry.recordTokenUsage).toHaveBeenCalledWith({
         executionId: context.getExecutionId(),
         nodeId: 'ocr_ia',
+        userId: null,
         aiProvider: LlmProvider.GEMINI,
         aiModel: 'gemini-3.6-flash',
         promptTokens: 2_000,
         completionTokens: 300,
         reasoningTokens: 100,
         usageReported: true,
+        status: AiCallStatus.SUCCESS,
+        errorMessage: null,
       });
     });
 
