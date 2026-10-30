@@ -14,6 +14,7 @@ import { HttpClientService } from '@core/http/http-client.service';
 import { BaseHttpDestinationStrategy } from './base/base-http-destination.strategy';
 import { planPanelDispatch } from './drupal-universities';
 import { selectVisibleTarget } from '../utils/visible-target.util';
+import { wrapTenderBlock } from '../utils/tender-block.util';
 import {
   isSafeLinkValue,
   replaceLinkAttribute,
@@ -355,6 +356,7 @@ export class DrupalHttpStrategy extends BaseHttpDestinationStrategy {
       config.titleTemplate,
       config.summaryTemplate,
       config.linkValueTemplate,
+      config.expedienteTemplate,
     ]) {
       if (template !== null) {
         for (const root of extractNamespaceRoots(template)) {
@@ -475,7 +477,14 @@ export class DrupalHttpStrategy extends BaseHttpDestinationStrategy {
       return { success: false, error: resolution.failure };
     }
 
-    const { config } = resolution;
+    // Borrador forzado en Sandbox, pero solo si el entorno esta GUARDADO en
+    // los params: los flujos anteriores al toggle no traen la clave y se
+    // resuelven a Sandbox por defecto, y apagarles la publicacion en silencio
+    // convertiria cada noticia de produccion en un borrador olvidado.
+    const config =
+      params.isSandbox === true
+        ? { ...resolution.config, publishStatus: false }
+        : resolution.config;
 
     // Guarda de credencial, antes de construir ninguna peticion: sin ella la
     // respuesta de Drupal seria un 401 indistinguible de una cuenta caducada.
@@ -668,7 +677,21 @@ export class DrupalHttpStrategy extends BaseHttpDestinationStrategy {
         ? markup
         : this.tryInjectAttachmentLink(markup, uploaded, config);
 
-    const inserted = this.insertBlock(fetched.node.bodyHtml, enriched, config);
+    // Envoltorio estandar de licitacion (`div.pd-licitacion-block`), salvo en
+    // los paneles de acordeon, que se reparten por universidad y no son
+    // licitaciones. El expediente sale del propio marcado o de la plantilla.
+    const expediente = this.interpolate(context, config.expedienteTemplate);
+
+    if (expediente !== null && typeof expediente !== 'string') {
+      return { success: false, error: expediente };
+    }
+
+    const block =
+      planPanelDispatch(enriched).length > 0
+        ? enriched
+        : wrapTenderBlock(enriched, expediente);
+
+    const inserted = this.insertBlock(fetched.node.bodyHtml, block, config);
 
     if (typeof inserted !== 'string') {
       return { success: false, error: inserted };

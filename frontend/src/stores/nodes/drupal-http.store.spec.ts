@@ -80,12 +80,14 @@ describe('useDrupalHttpStore · configuracion del nodo DESTINO_DRUPAL', () => {
         summaryTemplate: null,
         bodyFieldName: DEFAULT_DRUPAL_BODY_FIELD,
         bodyFormat: DEFAULT_DRUPAL_BODY_FORMAT,
-        publishStatus: true,
+        // Nace en Sandbox, donde lo creado es siempre borrador.
+        publishStatus: false,
         targetNodeUuid: null,
         destinationNodeUuid: null,
         containerSelector: null,
         itemSelector: null,
         insertPosition: 'PREPEND',
+        expedienteTemplate: null,
         linkSelector: null,
         linkAttribute: 'href',
         linkValueTemplate: null,
@@ -503,7 +505,7 @@ describe('useDrupalHttpStore · configuracion del nodo DESTINO_DRUPAL', () => {
       // 3. Assert 🎯: `.licitacion-entry` es la clase del envoltorio que siembra
       //    la plantilla de apertura; sin ella el traslado no encuentra que mover.
       expect(store.config.operationMode).toBe(DrupalOperationMode.TRANSFER_HTML_BLOCK);
-      expect(store.config.itemSelector).toBe('.licitacion-entry');
+      expect(store.config.itemSelector).toBe('.pd-licitacion-block, .licitacion-entry');
       expect(store.config.insertPosition).toBe('APPEND');
     });
 
@@ -572,7 +574,7 @@ describe('useDrupalHttpStore · configuracion del nodo DESTINO_DRUPAL', () => {
       //    ya no lo lee, y reapareceria al volver al otro modo.
       const store = useDrupalHttpStore(nextNodeId());
       store.applyCerrarLicitacionPreset();
-      expect(store.config.itemSelector).toBe('.licitacion-entry');
+      expect(store.config.itemSelector).toBe('.pd-licitacion-block, .licitacion-entry');
 
       // 2. Act ⚙️
       store.applyAbrirLicitacionPreset();
@@ -626,14 +628,18 @@ describe('useDrupalHttpStore · configuracion del nodo DESTINO_DRUPAL', () => {
       expect(params).toEqual({
         isSandbox: true,
         operationMode: DrupalOperationMode.CREATE_NODE,
+        // En Sandbox el borrador es obligatorio y viaja explicito.
+        publishStatus: false,
         titleTemplate: 'Titular',
       });
     });
 
     it('7.3 deberia publicar publishStatus solo cuando es false', () => {
       // 1. Arrange 📐: `true` es el defecto y significa "no he dicho nada".
+      //    Solo en Produccion: en Sandbox nunca se publica.
       const store = useDrupalHttpStore(nextNodeId());
-      store.updateConfig({ titleTemplate: 'Titular' });
+      store.setSandbox(false);
+      store.updateConfig({ titleTemplate: 'Titular', publishStatus: true });
 
       // 2. Act ⚙️ & 3. Assert 🎯
       expect(store.toNodeParams()).not.toHaveProperty('publishStatus');
@@ -783,7 +789,9 @@ describe('useDrupalHttpStore · configuracion del nodo DESTINO_DRUPAL', () => {
       // 3. Assert 🎯
       expect(store.config.operationMode).toBe(DrupalOperationMode.CREATE_NODE);
       expect(store.config.attachmentIndex).toBe(0);
-      expect(store.config.publishStatus).toBe(true);
+      // El defecto del jsonb es publicar, pero sin `isSandbox` el nodo se
+      // hidrata en Sandbox, y alli es siempre borrador.
+      expect(store.config.publishStatus).toBe(false);
       expect(store.config.insertPosition).toBe('PREPEND');
       expect(store.config.bundle).toBe(DEFAULT_DRUPAL_BUNDLE);
     });
@@ -973,6 +981,58 @@ describe('useDrupalHttpStore · configuracion del nodo DESTINO_DRUPAL', () => {
       // 3. Assert 🎯
       expect(store.config.publishStatus).toBe(false);
       expect(store.toNodeParams()).toMatchObject({ publishStatus: false });
+    });
+  });
+
+  describe('11. Innobar, expediente y borrador en Sandbox', () => {
+    it('11.1 deberia ignorar publishStatus true mientras el nodo este en Sandbox', () => {
+      // 1. Arrange 📐
+      const store = useDrupalHttpStore(nextNodeId());
+
+      // 2. Act ⚙️
+      store.updateConfig({ publishStatus: true });
+
+      // 3. Assert 🎯
+      expect(store.config.publishStatus).toBe(false);
+    });
+
+    it('11.2 deberia forzar borrador al volver a Sandbox', () => {
+      // 1. Arrange 📐
+      const store = useDrupalHttpStore(nextNodeId());
+      store.setSandbox(false);
+      store.updateConfig({ publishStatus: true });
+
+      // 2. Act ⚙️
+      store.setSandbox(true);
+
+      // 3. Assert 🎯
+      expect(store.config.publishStatus).toBe(false);
+    });
+
+    it('11.3 deberia publicar e hidratar expedienteTemplate', () => {
+      // 1. Arrange 📐
+      const store = useDrupalHttpStore(nextNodeId());
+      store.applyAbrirLicitacionPreset();
+      store.updateConfig({ expedienteTemplate: '{{llm_response.expediente}}' });
+
+      // 2. Act ⚙️
+      const params = store.toNodeParams();
+      const other = useDrupalHttpStore(nextNodeId());
+      other.hydrateFromNode({ outputNamespace: 'http_result', params });
+
+      // 3. Assert 🎯
+      expect(params.expedienteTemplate).toBe('{{llm_response.expediente}}');
+      expect(other.config.expedienteTemplate).toBe('{{llm_response.expediente}}');
+    });
+
+    it('11.4 deberia cargar Innobar como actualizacion de enlace', () => {
+      // 1. Arrange 📐 + 2. Act ⚙️
+      const store = useDrupalHttpStore(nextNodeId());
+      store.applyInnobarPreset();
+
+      // 3. Assert 🎯
+      expect(store.config.operationMode).toBe(DrupalOperationMode.UPDATE_LINK_SOURCE);
+      expect(store.config.linkAttribute).toBe('href');
     });
   });
 });

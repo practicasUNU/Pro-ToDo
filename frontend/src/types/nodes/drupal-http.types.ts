@@ -266,7 +266,12 @@ const SANDBOX_TITULOS_UUID = 'b17d69d8-6998-4883-b8dc-153b55dbd9c5';
  */
 export const DRUPAL_PRESETS: Readonly<
   Record<
-    'ABRIR_LICITACION' | 'CERRAR_LICITACION' | 'VERIFICACION_TITULOS' | 'INNODAYS' | 'NOTIWEB',
+    | 'ABRIR_LICITACION'
+    | 'CERRAR_LICITACION'
+    | 'VERIFICACION_TITULOS'
+    | 'INNODAYS'
+    | 'INNOBAR'
+    | 'NOTIWEB',
     DrupalPreset
   >
 > = {
@@ -311,7 +316,12 @@ export const DRUPAL_PRESETS: Readonly<
     containerSelector: null,
     // La clase del envoltorio que siembra la plantilla de apertura. Afinarla a
     // un expediente concreto (`[data-expediente="..."]`) es trabajo del flujo.
-    itemSelector: '.licitacion-entry',
+    // Selector COMPUESTO: `.pd-licitacion-block` es el envoltorio estandar que
+    // pone el backend al abrir una licitacion, y `.licitacion-entry` el de las
+    // creadas antes —o a mano en Drupal—, que tambien hay que poder cerrar.
+    // Afinarlo a un expediente concreto (`[data-expediente="..."]`) es trabajo
+    // del flujo.
+    itemSelector: '.pd-licitacion-block, .licitacion-entry',
     // En cerradas el orden cronologico se lee al reves: lo ultimo en cerrarse va
     // al final, detras de lo que lleva mas tiempo archivado.
     insertPosition: 'APPEND',
@@ -399,7 +409,36 @@ export const DRUPAL_PRESETS: Readonly<
         destinationNodeUuid: null,
       },
       PRODUCTION: {
-        path: '/innodays',
+        path: '/innodays-madrid',
+        nid: null,
+        targetNodeUuid: null,
+        destinationNodeUuid: null,
+      },
+    },
+  },
+  INNOBAR: {
+    label: 'Innobar',
+    description:
+      'Actualiza el href o el src de UN elemento de la página de Innobar sin tocar el resto del HTML. En Sandbox comparte la página de pruebas de Innodays.',
+    operationMode: DrupalOperationMode.UPDATE_LINK_SOURCE,
+    bundle: 'node--page',
+    containerSelector: null,
+    itemSelector: null,
+    insertPosition: DEFAULT_DRUPAL_INSERT_POSITION,
+    publishStatus: true,
+    linkSelector: null,
+    linkAttribute: 'href',
+    associatedTemplateName: null,
+    environments: {
+      // Misma pagina de pruebas que Innodays: no hay una propia de Innobar.
+      SANDBOX: {
+        path: '/prueba-innodays',
+        nid: null,
+        targetNodeUuid: null,
+        destinationNodeUuid: null,
+      },
+      PRODUCTION: {
+        path: '/innobar',
         nid: null,
         targetNodeUuid: null,
         destinationNodeUuid: null,
@@ -467,6 +506,12 @@ export interface DrupalHttpNodeConfig {
   containerSelector: string | null;
   itemSelector: string | null;
   insertPosition: DrupalInsertPosition;
+
+  /**
+   * Plantilla del codigo de expediente con el que el backend envuelve una
+   * licitacion nueva (`div.pd-licitacion-block`) si su marcado no lo trae.
+   */
+  expedienteTemplate: string | null;
 
   /** Selector CSS del UNICO elemento cuyo enlace cambia `UPDATE_LINK_SOURCE`. */
   linkSelector: string | null;

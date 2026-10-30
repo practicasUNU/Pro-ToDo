@@ -396,6 +396,18 @@ export class DrupalHttpConfigDto {
 
   @ApiPropertyOptional({
     description:
+      'Plantilla interpolable del codigo de expediente con el que se envuelve una licitacion nueva en APPEND_HTML_BLOCK (`div.pd-licitacion-block[data-expediente]`). Solo se usa si el marcado no trae ya su propio `data-expediente`.',
+    example: '{{llm_response.expediente}}',
+  })
+  @IsOptional()
+  @IsString({ message: 'expedienteTemplate debe ser una cadena.' })
+  @MaxLength(MAX_SELECTOR_LENGTH, {
+    message: `expedienteTemplate no puede superar ${MAX_SELECTOR_LENGTH} caracteres.`,
+  })
+  expedienteTemplate?: string;
+
+  @ApiPropertyOptional({
+    description:
       "Selector CSS del UNICO elemento cuyo enlace se actualiza en UPDATE_LINK_SOURCE (ej. `table tr:contains('Agrifood') a`).",
     example: "table tr:contains('Agrifood') a",
   })
@@ -522,6 +534,7 @@ export interface ResolvedDrupalHttpConfig {
   readonly containerSelector: string | null;
   readonly itemSelector: string | null;
   readonly insertPosition: DrupalInsertPosition;
+  readonly expedienteTemplate: string | null;
   readonly linkSelector: string | null;
   readonly linkAttribute: DrupalLinkAttribute;
   readonly linkValueTemplate: string | null;
@@ -571,6 +584,7 @@ export const resolveDrupalHttpConfig = (
   containerSelector: trimmedOrNull(dto.containerSelector),
   itemSelector: trimmedOrNull(dto.itemSelector),
   insertPosition: dto.insertPosition ?? DEFAULT_DRUPAL_INSERT_POSITION,
+  expedienteTemplate: trimmedOrNull(dto.expedienteTemplate),
   linkSelector: trimmedOrNull(dto.linkSelector),
   linkAttribute: dto.linkAttribute ?? DEFAULT_DRUPAL_LINK_ATTRIBUTE,
   linkValueTemplate: trimmedOrNull(dto.linkValueTemplate),

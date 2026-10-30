@@ -124,6 +124,16 @@ const asEnum = <T extends string>(value: unknown, allowed: readonly T[], fallbac
   typeof value === 'string' && allowed.includes(value as T) ? (value as T) : fallback;
 
 /** Configuracion inicial; se reutiliza en `resetConfig`. */
+/**
+ * En Sandbox no se publica nunca: lo creado queda como borrador.
+ *
+ * Se aplica en CADA escritura de la configuracion y no solo en el toggle: un
+ * preset, una hidratacion o un `updateConfig` con `publishStatus: true` no
+ * deben poder colar una publicacion en el entorno de pruebas.
+ */
+const withSandboxDraft = (next: DrupalHttpNodeConfig): DrupalHttpNodeConfig =>
+  next.isSandbox && next.publishStatus ? { ...next, publishStatus: false } : next;
+
 const buildInitialConfig = (): DrupalHttpNodeConfig => ({
   isSandbox: DEFAULT_DRUPAL_IS_SANDBOX,
   operationMode: DEFAULT_DRUPAL_MODE,
@@ -134,12 +144,14 @@ const buildInitialConfig = (): DrupalHttpNodeConfig => ({
   summaryTemplate: null,
   bodyFieldName: DEFAULT_DRUPAL_BODY_FIELD,
   bodyFormat: DEFAULT_DRUPAL_BODY_FORMAT,
-  publishStatus: true,
+  // Falso porque el nodo nace en Sandbox, donde no se publica nunca.
+  publishStatus: !DEFAULT_DRUPAL_IS_SANDBOX,
   targetNodeUuid: null,
   destinationNodeUuid: null,
   containerSelector: null,
   itemSelector: null,
   insertPosition: DEFAULT_DRUPAL_INSERT_POSITION,
+  expedienteTemplate: null,
   linkSelector: null,
   linkAttribute: DEFAULT_DRUPAL_LINK_ATTRIBUTE,
   linkValueTemplate: null,
@@ -260,6 +272,7 @@ const drupalHttpSetup = () => {
         ['itemSelector', current.itemSelector, MAX_DRUPAL_SELECTOR_LENGTH],
         ['attachmentListSelector', current.attachmentListSelector, MAX_DRUPAL_SELECTOR_LENGTH],
         ['linkSelector', current.linkSelector, MAX_DRUPAL_SELECTOR_LENGTH],
+        ['expedienteTemplate', current.expedienteTemplate, MAX_DRUPAL_SELECTOR_LENGTH],
         ['linkValueTemplate', current.linkValueTemplate, MAX_DRUPAL_LINK_TEMPLATE_LENGTH],
       ] as const
     ).forEach(([key, value, limit]) => {
@@ -350,7 +363,7 @@ const drupalHttpSetup = () => {
 
   /** Aplica un parche parcial conservando la inmutabilidad de `config`. */
   const updateConfig = (patch: Partial<DrupalHttpNodeConfig>): void => {
-    config.value = { ...config.value, ...patch };
+    config.value = withSandboxDraft({ ...config.value, ...patch });
   };
 
   /**
@@ -449,6 +462,10 @@ const drupalHttpSetup = () => {
     applyPreset('INNODAYS');
   };
 
+  const applyInnobarPreset = (): void => {
+    applyPreset('INNOBAR');
+  };
+
   const applyNotiwebPreset = (): void => {
     applyPreset('NOTIWEB');
   };
@@ -528,6 +545,7 @@ const drupalHttpSetup = () => {
     putNullable('destinationNodeUuid', current.destinationNodeUuid);
     putNullable('containerSelector', current.containerSelector);
     putNullable('itemSelector', current.itemSelector);
+    putNullable('expedienteTemplate', current.expedienteTemplate);
     putNullable('linkSelector', current.linkSelector);
     putNullable('linkValueTemplate', current.linkValueTemplate);
 
@@ -568,7 +586,7 @@ const drupalHttpSetup = () => {
     const { params } = node;
 
     activePresetKey.value = null;
-    config.value = {
+    config.value = withSandboxDraft({
       isSandbox: asBoolean(params.isSandbox, DEFAULT_DRUPAL_IS_SANDBOX),
       operationMode: asEnum(
         params.operationMode,
@@ -592,6 +610,7 @@ const drupalHttpSetup = () => {
         DRUPAL_INSERT_POSITIONS,
         DEFAULT_DRUPAL_INSERT_POSITION,
       ),
+      expedienteTemplate: asNullableText(params.expedienteTemplate),
       linkSelector: asNullableText(params.linkSelector),
       linkAttribute: asEnum<DrupalLinkAttribute>(
         params.linkAttribute,
@@ -612,7 +631,7 @@ const drupalHttpSetup = () => {
       uploadAttachment: asBoolean(params.uploadAttachment, DEFAULT_DRUPAL_UPLOAD_ATTACHMENT),
       attachmentListSelector:
         asText(params.attachmentListSelector).trim() || DEFAULT_DRUPAL_ATTACHMENT_LIST_SELECTOR,
-    };
+    });
   };
 
   const resetConfig = (): void => {
@@ -639,6 +658,7 @@ const drupalHttpSetup = () => {
     applyCerrarLicitacionPreset,
     applyVerificacionTitulosPreset,
     applyInnodaysPreset,
+    applyInnobarPreset,
     applyNotiwebPreset,
     setAvailableUpstreamContext,
     toNodeParams,

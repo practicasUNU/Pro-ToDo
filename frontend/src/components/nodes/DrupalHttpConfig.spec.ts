@@ -553,7 +553,7 @@ describe('DrupalHttpConfig · configurador del nodo DESTINO_DRUPAL', () => {
 
     // 3. Assert 🎯
     expect(store.config.operationMode).toBe(DrupalOperationMode.TRANSFER_HTML_BLOCK);
-    expect(store.config.itemSelector).toBe('.licitacion-entry');
+    expect(store.config.itemSelector).toBe('.pd-licitacion-block, .licitacion-entry');
     expect(store.config.destinationNodeUuid).toBeNull();
     expect(store.isConfigValid).toBe(false);
   });
@@ -571,6 +571,7 @@ describe('DrupalHttpConfig · configurador del nodo DESTINO_DRUPAL', () => {
         'preset-cerrar_licitacion',
         'preset-verificacion_titulos',
         'preset-innodays',
+        'preset-innobar',
         'preset-notiweb',
       ]);
       expect(wrapper.get('[data-test="preset-innodays"]').text()).toContain('Innodays (Sandbox)');
@@ -624,6 +625,71 @@ describe('DrupalHttpConfig · configurador del nodo DESTINO_DRUPAL', () => {
       expect(wrapper.find('[data-test="link-attribute-field"]').exists()).toBe(true);
       expect(wrapper.find('[data-test="link-value-field"]').exists()).toBe(true);
       expect(wrapper.find('[data-test="target-uuid-field"]').exists()).toBe(true);
+    });
+  });
+
+  describe('5ter. Innobar y borrador en Sandbox', () => {
+    it('should render Innobar preset button between Innodays and Notiweb', () => {
+      // 1. Arrange 📐 + 2. Act ⚙️
+      const wrapper = mountComponent(nextNodeId());
+
+      // 3. Assert 🎯
+      const keys = wrapper
+        .findAll('[data-test^="preset-"]')
+        .map((button) => button.attributes('data-test'));
+      const innobar = keys.indexOf('preset-innobar');
+      expect(keys[innobar - 1]).toBe('preset-innodays');
+      expect(keys[innobar + 1]).toBe('preset-notiweb');
+      expect(wrapper.get('[data-test="preset-innobar"]').text()).toContain('Innobar (Sandbox)');
+    });
+
+    it('should set separate production URLs for Innodays and Innobar when isSandbox is false', () => {
+      // 1. Arrange 📐
+      const innodays = DRUPAL_PRESETS.INNODAYS.environments;
+      const innobar = DRUPAL_PRESETS.INNOBAR.environments;
+
+      // 2. Act ⚙️ + 3. Assert 🎯: en pruebas comparten pagina; en el portal no.
+      expect(innodays.SANDBOX.path).toBe('/prueba-innodays');
+      expect(innobar.SANDBOX.path).toBe('/prueba-innodays');
+      expect(innodays.PRODUCTION.path).toBe('/innodays-madrid');
+      expect(innobar.PRODUCTION.path).toBe('/innobar');
+    });
+
+    it('5ter.2bis deberia cargar Innobar con el modo de enlace', async () => {
+      // 1. Arrange 📐
+      const nodeId = nextNodeId();
+      const wrapper = mountComponent(nodeId);
+      useDrupalHttpStore(nodeId).setSandbox(false);
+
+      // 2. Act ⚙️
+      await wrapper.get('[data-test="preset-innobar"]').trigger('click');
+
+      // 3. Assert 🎯
+      const store = useDrupalHttpStore(nodeId);
+      expect(store.config.operationMode).toBe(DrupalOperationMode.UPDATE_LINK_SOURCE);
+      expect(store.activePresetKey).toBe('INNOBAR');
+    });
+
+    it('should disable publish toggle and force false state when in sandbox mode', async () => {
+      // 1. Arrange 📐: un nodo que publicaba en Produccion se abre en el banco.
+      const nodeId = nextNodeId();
+      const store = useDrupalHttpStore(nodeId);
+      store.setSandbox(false);
+      store.updateConfig({ publishStatus: true });
+
+      // 2. Act ⚙️
+      const wrapper = mountComponent(nodeId, true);
+      await wrapper.vm.$nextTick();
+      store.updateConfig({ publishStatus: true });
+
+      // 3. Assert 🎯: borrador forzado, control bloqueado y la nota a la vista.
+      const toggle = wrapper.get('[data-test="publish-status-field"]').findComponent(QCheckbox);
+      expect(store.config.isSandbox).toBe(true);
+      expect(store.config.publishStatus).toBe(false);
+      expect(toggle.props('disable')).toBe(true);
+      expect(wrapper.get('[data-test="sandbox-draft-notice"]').text()).toContain(
+        'En Sandbox el contenido siempre se guarda como borrador despublicado (status = false)',
+      );
     });
   });
 

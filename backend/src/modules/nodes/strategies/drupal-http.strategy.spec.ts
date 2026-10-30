@@ -298,6 +298,31 @@ describe('DrupalHttpStrategy', () => {
       });
     });
 
+    it('should enforce status false on jsonapi payload during sandbox execution', async () => {
+      // 1. Arrange 📐: el mismo nodo pide publicar, con y sin Sandbox guardado.
+      const sandbox = buildHttpMock();
+      sandbox.requestWithStatus.mockResolvedValue(entityResponse());
+      const legacy = buildHttpMock();
+      legacy.requestWithStatus.mockResolvedValue(entityResponse());
+      const params = { titleTemplate: 'Titular fijo', publishStatus: true };
+
+      // 2. Act ⚙️
+      await buildStrategy(sandbox).execute(buildContext(), {
+        ...params,
+        isSandbox: true,
+      });
+      await buildStrategy(legacy).execute(buildContext(), params);
+
+      // 3. Assert 🎯: en Sandbox siempre borrador; un flujo antiguo sin la
+      //    clave sigue publicando como hasta ahora.
+      expect(callBody(sandbox, 0).data).toMatchObject({
+        attributes: { status: false },
+      });
+      expect(callBody(legacy, 0).data).toMatchObject({
+        attributes: { status: true },
+      });
+    });
+
     it('1.2 deberia armar el cuerpo JSON:API con el markup del escudo', async () => {
       const httpClient = buildHttpMock();
       httpClient.requestWithStatus.mockResolvedValue(entityResponse());
@@ -403,6 +428,73 @@ describe('DrupalHttpStrategy', () => {
       bundle: 'node--page',
       targetNodeUuid: PAGE_UUID,
     };
+
+    /** `body.value` que se envio en el PATCH (llamada 1, tras el GET). */
+    const appendedHtml = (httpClient: HttpMock): string =>
+      (
+        (callBody(httpClient, 1).data?.attributes as Record<string, unknown>)
+          .body as Record<string, string>
+      ).value ?? '';
+
+    it('should wrap new tender HTML inside pd-licitacion-block container with data-expediente attribute', async () => {
+      // 1. Arrange 📐: dos licitaciones nuevas. La primera trae su propio
+      //    envoltorio con expediente (plantilla de apertura); la segunda no, y
+      //    el expediente sale de la plantilla del nodo, con una comilla dentro.
+      const ownWrapper =
+        '<div class="licitacion-entry" data-expediente="S_2026_020"><p>Nueva</p></div>';
+      const reused = buildHttpMock();
+      reused.requestWithStatus
+        .mockResolvedValueOnce(pageResponse(OTHER_BLOCK))
+        .mockResolvedValueOnce(pageResponse(''));
+      const wrapped = buildHttpMock();
+      wrapped.requestWithStatus
+        .mockResolvedValueOnce(pageResponse(OTHER_BLOCK))
+        .mockResolvedValueOnce(pageResponse(''));
+
+      // 2. Act ⚙️
+      await buildStrategy(reused).execute(
+        buildContext({ [SOURCE_NAMESPACE]: { [SOURCE_FIELD]: ownWrapper } }),
+        appendParams,
+      );
+      await buildStrategy(wrapped).execute(
+        buildContext({
+          [SOURCE_NAMESPACE]: { [SOURCE_FIELD]: MARKUP },
+          llm_response: { expediente: 'S_2026_"021"' },
+        }),
+        { ...appendParams, expedienteTemplate: '{{llm_response.expediente}}' },
+      );
+
+      // 3. Assert 🎯: el envoltorio propio gana la clase, sin doble div; el
+      //    nuevo lleva el expediente escapado, sin romper el atributo.
+      const $reused = cheerio.load(appendedHtml(reused), null, false);
+      const block = $reused('.pd-licitacion-block');
+      expect(block).toHaveLength(1);
+      expect(block.hasClass('licitacion-entry')).toBe(true);
+      expect(block.attr('data-expediente')).toBe('S_2026_020');
+
+      expect(appendedHtml(wrapped)).toContain(
+        '<div class="pd-licitacion-block" data-expediente="S_2026_&quot;021&quot;">',
+      );
+      const $wrapped = cheerio.load(appendedHtml(wrapped), null, false);
+      expect($wrapped('.pd-licitacion-block').attr('data-expediente')).toBe(
+        'S_2026_"021"',
+      );
+      expect($wrapped('.pd-licitacion-block h1.titular')).toHaveLength(1);
+    });
+
+    it('2.0bis NO deberia envolver si no hay expediente', async () => {
+      // 1. Arrange 📐
+      const httpClient = buildHttpMock();
+      httpClient.requestWithStatus
+        .mockResolvedValueOnce(pageResponse(''))
+        .mockResolvedValueOnce(pageResponse(''));
+
+      // 2. Act ⚙️
+      await buildStrategy(httpClient).execute(buildContext(), appendParams);
+
+      // 3. Assert 🎯
+      expect(appendedHtml(httpClient)).not.toContain('pd-licitacion-block');
+    });
 
     it('2.1 deberia leer el HTML actual antes de escribir', async () => {
       const httpClient = buildHttpMock();
@@ -1396,6 +1488,27 @@ describe('DrupalHttpStrategy', () => {
       const result = await strategy.execute(
         linkContext(' java\tscript:alert(1)'),
         linkParams,
+      );
+
+      // 3. Assert 🎯
+      expect(result.success).toBe(false);
+      expect(result.error?.code).toBe(ERR_DRUPAL_MISSING_PAYLOAD);
+      expect(httpClient.requestWithStatus).not.toHaveBeenCalled();
+    });
+
+    it('3bis.4bis deberia rechazar un data: en el src del preset Innobar', async () => {
+      // 1. Arrange 📐: Innobar comparte modo con Innodays.
+      const httpClient = buildHttpMock();
+      const strategy = buildStrategy(httpClient);
+
+      // 2. Act ⚙️
+      const result = await strategy.execute(
+        linkContext('data:image/svg+xml;base64,PHN2Zz4='),
+        {
+          ...linkParams,
+          linkSelector: '#carousel-track img:first-child',
+          linkAttribute: 'src',
+        },
       );
 
       // 3. Assert 🎯

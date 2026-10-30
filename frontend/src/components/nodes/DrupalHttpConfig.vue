@@ -120,6 +120,7 @@ const PRESET_ICONS: Readonly<Record<DrupalPresetKey, string>> = {
   CERRAR_LICITACION: 'archive',
   VERIFICACION_TITULOS: 'school',
   INNODAYS: 'link',
+  INNOBAR: 'local_bar',
   NOTIWEB: 'newspaper',
 };
 
@@ -142,6 +143,10 @@ const SANDBOX_LOCK_NOTICE =
  */
 const MANUAL_PAGE_NOTICE =
   'indica a mano el UUID de la pagina, que no esta confirmado, antes de poder guardar';
+
+/** Por que «Publicar al crear» esta bloqueado en Sandbox. */
+const SANDBOX_DRAFT_NOTICE =
+  'En Sandbox el contenido siempre se guarda como borrador despublicado (status = false)';
 
 const LINK_NOTICE =
   'Modo enlace: se lee la pagina, se cambia SOLO el atributo del elemento elegido y se guarda. El resto del HTML, los estilos y los scripts no se tocan. El selector debe encontrar exactamente un elemento.';
@@ -749,6 +754,21 @@ const toNullableText = (value: string | number | null): string | null => {
         </q-banner>
       </div>
 
+      <div v-if="mutatesContainer" class="col-12 col-md-6" data-test="expediente-template-field">
+        <label class="pd-label" for="drupal-expediente">Codigo de expediente</label>
+        <q-input
+          id="drupal-expediente"
+          :model-value="store.config.expedienteTemplate"
+          outlined
+          dense
+          class="q-mt-xs pd-mono"
+          placeholder="{{llm_response.expediente}}"
+          :maxlength="MAX_DRUPAL_SELECTOR_LENGTH"
+          hint="Envuelve la licitacion en div.pd-licitacion-block con este data-expediente. Solo se usa si el marcado no trae ya el suyo; los paneles de acordeon no se envuelven."
+          @update:model-value="store.updateConfig({ expedienteTemplate: toNullableText($event) })"
+        />
+      </div>
+
       <div v-if="mutatesContainer" class="col-12 col-md-6" data-test="container-selector-field">
         <!-- SIN asterisco: el campo no es obligatorio. `REQUIRED_PARAMS_BY_MODE`
              solo exige `targetNodeUuid` en este modo, y con el campo vacio el
@@ -843,9 +863,18 @@ const toNullableText = (value: string | number | null): string | null => {
               :model-value="store.config.publishStatus"
               label="Publicar al crear"
               class="pd-label"
+              :disable="store.config.isSandbox || sandboxLocked"
+              data-test="publish-status-toggle"
               @update:model-value="store.updateConfig({ publishStatus: $event === true })"
             />
-            <p class="pd-subtitle q-mb-none">
+            <p
+              v-if="store.config.isSandbox || sandboxLocked"
+              class="pd-subtitle q-mb-none"
+              data-test="sandbox-draft-notice"
+            >
+              {{ SANDBOX_DRAFT_NOTICE }}
+            </p>
+            <p v-else class="pd-subtitle q-mb-none">
               Desmarcado, el contenido se crea como borrador y alguien debe publicarlo a mano en
               Drupal.
             </p>
