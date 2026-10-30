@@ -9161,3 +9161,23 @@ comportaba asi; los tests lo dejan fijado para que un cambio futuro no lo rompa.
 Las fechas esperaban al boton y los selectores consultaban al instante, con los botones en mitad de
 la barra. Ahora la barra es un solo formulario, como en Auditoria y el Historial: se edita en
 borrador y "Aplicar" lanza una unica consulta.
+
+## Telemetria de "Probar conexion"
+
+### Por que la prueba de conexion deja fila
+
+El boton lanza una inferencia real que el proveedor factura, y hasta ahora no aparecia en el
+informe de consumo. Una credencial rechazada tampoco quedaba registrada, de modo que la tasa por
+modelo no veia esos fallos. Ahora cada prueba deja una fila con origen propio y el usuario que la
+lanzo. La de OCR usa el mismo endpoint, asi que queda cubierta con el mismo cambio.
+
+### Por que un fallo del registro se avisa y no se calla
+
+La prueba ya se hizo y su resultado es lo que el usuario espera ver, asi que no se convierte en un
+error. Pero la inferencia se facturo, y si no se pudo registrar no aparecera en el informe: la
+respuesta trae un aviso que la interfaz muestra junto al resultado.
+
+### Checklist de dependencias
+
+- [ ] Aplicar la migracion 061 y reiniciar Nest; sin ella, el CHECK rechaza el nuevo origen y la
+      prueba devuelve el aviso de registro fallido

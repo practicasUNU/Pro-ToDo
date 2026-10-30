@@ -4979,3 +4979,22 @@ Rama: `feat/destino-http-generico`. Sin migracion.
 - [x] Tests que fijan que solo los fallos de la API cuentan como `FAILED`
 - [x] Barra de Informes en una sola tarjeta con el orden de acciones comun
 - [x] Iconos en las acciones de filtros de Tarifas
+
+## Telemetria de "Probar conexion" en los nodos de IA y OCR
+
+Rama: `feat/destino-http-generico`. Migracion `061-telemetria-origen-probar-conexion.sql`.
+
+### Contratos
+
+| Pieza | Contrato |
+|---|---|
+| `TelemetryOperationOrigin.CONNECTION_TEST` | Nuevo origen `PROBAR_CONEXION`: sin ejecucion, flujo ni nodo, con el usuario que pulsa el boton |
+| `LlmProviderCatalogService.testConnection(dto, userId)` | Exito real: fila `SUCCESS` con los tokens de la respuesta. Fallo de la API: fila `FAILED` con el mensaje y el consumo de la excepcion, o ceros. El simulador no registra |
+| `LlmTestConnectionResponseDto.telemetryWarning?` | Presente si la prueba se hizo pero su consumo no quedo registrado; la interfaz lo muestra |
+| `POST /llm/test-connection` | Pasa `currentUser.id`; lo usan los nodos de IA y de OCR |
+
+### Estado de las tareas
+
+- [x] Consumo y fallos de "Probar conexion" en la telemetria, con origen propio
+- [x] Aviso en la interfaz si el registro falla
+- [ ] Pendiente: aplicar la migracion 061 (`cd backend && npm run db:migrate`) y reiniciar Nest
