@@ -11,6 +11,7 @@ import {
   collectNamespaceRoots,
   extractNamespaceRoots,
 } from '@core/fsm/context/state-payload.context';
+import { stripDocumentTextMarkers } from '@core/fsm/context/document-text-coalescing.util';
 import {
   PipelineNodeConfigDto,
   PipelineSchemaDto,
@@ -402,7 +403,12 @@ export class PipelineValidatorService {
         // mandaria a reordenar un flujo cuyo orden esta bien.
         if (text === undefined) continue;
 
-        for (const namespace of extractNamespaceRoots(text)) {
+        // Sin los marcadores de texto documental, igual que el prompt en linea
+        // en `LlmExtractorStrategy.getRequiredNamespaces`: se degradan en
+        // ejecucion y no deben exigir un PROCESADOR_OCR delante.
+        for (const namespace of extractNamespaceRoots(
+          stripDocumentTextMarkers(text),
+        )) {
           namespaces.add(namespace);
           // La primera procedencia gana: con `templatePromptId` y `promptCode`
           // solo se declara una referencia (ver `getPromptReferences`), asi que

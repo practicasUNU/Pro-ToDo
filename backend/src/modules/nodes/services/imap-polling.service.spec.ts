@@ -509,6 +509,10 @@ describe('ImapPollingService', () => {
       );
       expect(client.download).toBeUndefined();
       expect(client.messageFlagsAdd).toBeUndefined();
+      // EXAMINE y no SELECT: el sondeo no tiene permiso para tocar banderas.
+      expect(client.getMailboxLock).toHaveBeenCalledWith('INBOX', {
+        readOnly: true,
+      });
     });
 
     it('2.5 deberia sondear con los MISMOS filtros que usara la estrategia', async () => {

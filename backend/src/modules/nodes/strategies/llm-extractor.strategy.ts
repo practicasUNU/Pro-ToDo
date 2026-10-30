@@ -6,6 +6,10 @@ import {
   MissingContextVariableException,
   extractNamespaceRoots,
 } from '@core/fsm/context/state-payload.context';
+import {
+  coalesceDocumentTextMarkers,
+  stripDocumentTextMarkers,
+} from '@core/fsm/context/document-text-coalescing.util';
 import { AiDefaultsConfig } from '@core/config/ai-defaults.config';
 import { NodeType } from '@core/fsm/types/pipeline-schema.types';
 import { AiPromptTemplatesService } from '@modules/ai-prompt-templates/ai-prompt-templates.service';
@@ -333,10 +337,16 @@ export class LlmExtractorStrategy implements INodeStrategy {
       return { success: false, error: promptResolution.failure };
     }
 
+    // Coalescencia del texto documental ANTES que todo lo demas: tanto la
+    // materia prima como la deteccion de plantilla deben ver el marcador ya
+    // redirigido. Si no, `buildInputText` no reconoceria como "ya citado" el
+    // origen que de verdad sirve el marcador y lo mandaria dos veces.
+    const prompt = this.coalescePrompt(context, promptResolution.prompt);
+
     // La materia prima se ensambla AQUI y no en la guarda de arriba porque
     // necesita el prompt SIN interpolar: es lo unico que permite saber que
     // origenes ya viajan dentro de la instruccion y no hay que repetir.
-    const inputText = this.buildInputText(context, promptResolution.prompt);
+    const inputText = this.buildInputText(context, prompt);
 
     // Deteccion de plantilla base. Se hace sobre el prompt RESUELTO pero SIN
     // INTERPOLAR, y el orden no es negociable: `getInterpolatedValue` sustituye
@@ -350,13 +360,11 @@ export class LlmExtractorStrategy implements INodeStrategy {
     // (`buildResponseContractInstruction`) obliga al modelo a conservar cada
     // `<tbody>` —en particular el vacio destinado a las filas generadas—, que es
     // lo que despues audita el ESCUDO_POST_IA con sus `requiredSelectors`.
-    const expectsFilledMarkup = BASE_TEMPLATE_MARKER_PATTERN.test(
-      promptResolution.prompt,
-    );
+    const expectsFilledMarkup = BASE_TEMPLATE_MARKER_PATTERN.test(prompt);
 
     this.warnOnOrphanAttachments(context);
 
-    const interpolated = this.interpolate(context, promptResolution.prompt);
+    const interpolated = this.interpolate(context, prompt);
 
     if ('failure' in interpolated) {
       this.consecutiveFailures.delete(brakeKey);
@@ -519,8 +527,11 @@ export class LlmExtractorStrategy implements INodeStrategy {
   public getRequiredNamespaces(
     params: Record<string, unknown>,
   ): readonly string[] {
+    // Los marcadores de texto documental no cuentan: se degradan en ejecucion
+    // (`coalesceDocumentTextMarkers`) y exigir su namespace obligaria a poner
+    // un PROCESADOR_OCR delante de cualquier prompt que cite `ocr_result`.
     return typeof params.inlinePrompt === 'string'
-      ? extractNamespaceRoots(params.inlinePrompt)
+      ? extractNamespaceRoots(stripDocumentTextMarkers(params.inlinePrompt))
       : [];
   }
 
@@ -640,6 +651,30 @@ export class LlmExtractorStrategy implements INodeStrategy {
    * Una cadena de solo espacios cuenta como ausencia: mandarla al modelo
    * facturaria tokens por procesar nada.
    */
+  /**
+   * Redirige los marcadores de texto documental ausentes hacia el primer
+   * origen con texto de `DOCUMENT_TEXT_FALLBACK_CHAIN`, y deja traza de cada
+   * redireccion: el operador debe poder ver en el log que el prompt pidio el
+   * OCR y recibio el cuerpo del correo.
+   */
+  private coalescePrompt(context: StatePayloadContext, prompt: string): string {
+    const coalesced = coalesceDocumentTextMarkers(prompt, (path) => {
+      const [namespace, field] = path.split('.');
+
+      return namespace === undefined || field === undefined
+        ? null
+        : this.readSource(context, namespace, field);
+    });
+
+    for (const { from, to } of coalesced.substitutions) {
+      this.logger.log(
+        `ejecucion=${context.getExecutionId()} | {{${from}}} sin texto: se usa {{${to}}}`,
+      );
+    }
+
+    return coalesced.prompt;
+  }
+
   private readSource(
     context: StatePayloadContext,
     namespace: string,

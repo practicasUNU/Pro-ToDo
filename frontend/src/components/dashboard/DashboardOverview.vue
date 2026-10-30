@@ -9,6 +9,7 @@ import { usePanelRefresh } from '@/composables/usePanelRefresh';
 import ExecutionsHistoryTable from '@components/dashboard/ExecutionsHistoryTable.vue';
 import ExportReportBar from '@components/dashboard/ExportReportBar.vue';
 import TelemetryCostChart from '@components/dashboard/TelemetryCostChart.vue';
+import TelemetryModelSuccessChart from '@components/dashboard/TelemetryModelSuccessChart.vue';
 import TelemetrySummaryCards from '@components/dashboard/TelemetrySummaryCards.vue';
 
 import { extractApiErrorMessage } from '@/utils/api-error';
@@ -74,14 +75,26 @@ usePanelRefresh(loadDashboard, { onFlowCompleted: true });
       :loading="telemetryStore.isLoading"
     />
 
-    <!-- Fila completa cada bloque: el coste por modelo con sus porcentajes
-         necesita el ancho para leerse, y el historial va debajo con sus
-         propios filtros de estado, flujo y fecha. -->
-    <TelemetryCostChart
-      class="col-12"
-      :breakdown="telemetryStore.breakdown"
-      :loading="telemetryStore.isLoading"
-    />
+    <!-- Coste y exito por modelo, mitad y mitad: se leen juntos (un modelo
+         barato que falla mucho no sale barato). En movil se apilan. -->
+    <div class="row q-col-gutter-md" data-test="model-charts">
+      <div class="col-12 col-md-6">
+        <TelemetryCostChart
+          class="pd-dashboard__chart"
+          :breakdown="telemetryStore.breakdown"
+          :loading="telemetryStore.isLoading"
+        />
+      </div>
+      <div class="col-12 col-md-6">
+        <TelemetryModelSuccessChart
+          class="pd-dashboard__chart"
+          :breakdown="telemetryStore.breakdown"
+          :loading="telemetryStore.isLoading"
+        />
+      </div>
+    </div>
+
+    <!-- El historial, a ancho completo y con sus propios filtros. -->
     <ExecutionsHistoryTable compact class="col-12" />
   </div>
 </template>
@@ -107,6 +120,10 @@ usePanelRefresh(loadDashboard, { onFlowCompleted: true });
 
 .pd-subtitle {
   margin: 4px 0 0;
+}
+
+.pd-dashboard__chart {
+  height: 100%;
 }
 
 .pd-dashboard__actions {

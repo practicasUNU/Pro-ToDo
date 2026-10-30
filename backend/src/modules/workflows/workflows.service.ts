@@ -105,6 +105,9 @@ const TEST_MODE_SKIPPED_NODE_TYPES: readonly NodeType[] = [
   NodeType.TRIGGER_CRON,
 ];
 
+/** Motivo que la auditoria guarda cuando la politica de corrida unica apaga un flujo. */
+const AUTO_DEACTIVATION_REASON = 'executionPolicy.stopOnFirstSuccess';
+
 @Injectable()
 export class WorkflowsService
   implements WorkflowStatusPort, OnModuleInit, OnModuleDestroy
@@ -312,11 +315,15 @@ export class WorkflowsService
    * `executeTestWorkflow` queda fuera a proposito: el banco de pruebas existe
    * para iterar sobre un flujo, y apagarlo en cada prueba exitosa lo
    * convertiria en un interruptor.
+   *
+   * @param actorUserId Quien reanudo la ejecucion, o `null` en el despacho
+   *        automatico: la auditoria cae entonces en la cuenta de respaldo.
    */
   public async applyStopOnFirstSuccess(
     workflow: Workflow,
     schema: PipelineSchema,
     finished: FsmExecution,
+    actorUserId: string | null = null,
   ): Promise<void> {
     if (
       schema.executionPolicy?.stopOnFirstSuccess !== true ||
@@ -327,11 +334,19 @@ export class WorkflowsService
       return;
     }
 
+    const previousStatus = workflow.status;
     workflow.status = WorkflowStatus.INACTIVO;
     const saved = await this.workflowRepository.save(workflow);
 
     this.logger.log(
       `Flujo "${workflow.name}" (${workflow.id}) desactivado automaticamente por executionPolicy.stopOnFirstSuccess | ejecucion=${finished.executionId}`,
+    );
+
+    await this.recordAutoDeactivation(
+      saved,
+      previousStatus,
+      finished.executionId,
+      actorUserId,
     );
 
     // SIN ESTO el apagado era invisible. Era el unico de los cuatro caminos que
@@ -345,6 +360,47 @@ export class WorkflowsService
     // —temporizador en memoria y ejecuciones vivas— y duplicar el orden de esas
     // dos operaciones seria duplicar tambien la razon por la que va en ese orden.
     await this.releaseDeactivatedFlow(workflow);
+  }
+
+  /**
+   * Deja en la auditoria el apagado por `stopOnFirstSuccess`.
+   *
+   * Sin esto, el unico rastro era una linea de log: la tabla de auditoria
+   * mostraba el flujo ACTIVO en su ultima edicion y nadie podia saber por que
+   * estaba apagado. No pasa por el interceptor porque ningun endpoint lo
+   * dispara directamente.
+   *
+   * Best-effort: el flujo YA esta apagado y su sondeo debe soltarse igual. Un
+   * fallo aqui que saliese hacia arriba dejaria el temporizador vivo sobre un
+   * flujo INACTIVO, que es peor que un evento de auditoria perdido.
+   */
+  private async recordAutoDeactivation(
+    workflow: Workflow,
+    previousStatus: WorkflowStatus,
+    executionId: string,
+    actorUserId: string | null,
+  ): Promise<void> {
+    try {
+      // Claves en castellano: son DATO que el auditor lee en crudo, como en
+      // `deactivateAfterDiscard`.
+      await this.auditLogger.record({
+        userId: actorUserId,
+        action: AuditActionType.DEACTIVATE,
+        affectedTable: AuditTable.WORKFLOWS,
+        recordId: workflow.id,
+        previousData: { estado_flujo: previousStatus },
+        newData: {
+          estado_flujo: WorkflowStatus.INACTIVO,
+          motivo: AUTO_DEACTIVATION_REASON,
+          ejecucion_id: executionId,
+        },
+        sourceIp: null,
+      });
+    } catch (error) {
+      this.logger.warn(
+        `No se pudo auditar la desactivacion automatica del flujo ${workflow.id}: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
   }
 
   /**

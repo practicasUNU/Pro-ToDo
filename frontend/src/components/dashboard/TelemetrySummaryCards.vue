@@ -31,14 +31,30 @@ interface KpiCard {
   readonly label: string;
   readonly value: string;
   readonly hint: string;
+  /** Pista en varias lineas; si existe, sustituye a `hint`. */
+  readonly hintLines?: readonly string[];
 }
 
 const FLOW_SUCCESS_LABEL = 'Tasa de éxito de flujos con IA';
 const MODEL_SUCCESS_LABEL = 'Tasa de éxito por modelo';
 
+/** Modelo con la tasa mas alta (`pick > 0`) o mas baja (`pick < 0`). */
+const extremeModel = (rows: readonly ModelBreakdownRow[], pick: 1 | -1): ModelBreakdownRow | null =>
+  rows
+    .filter((row) => row.successRate !== null)
+    .reduce<ModelBreakdownRow | null>(
+      (best, row) =>
+        best === null || ((row.successRate ?? 0) - (best.successRate ?? 0)) * pick > 0 ? row : best,
+      null,
+    );
+
+const describeModel = (row: ModelBreakdownRow): string =>
+  `${row.aiModel} (${formatPercent(row.successRate)})`;
+
 /**
- * Exito de las llamadas sumando todos los modelos, con el modelo de menor tasa
- * como pista: es el que conviene revisar.
+ * Exito de las llamadas sumando todos los modelos, con el mejor y el peor
+ * modelo debajo: el segundo es el que conviene revisar, y el primero dice si
+ * hay una alternativa mejor a mano.
  */
 const modelSuccessCard = computed<KpiCard | null>(() => {
   if (props.breakdown === undefined) return null;
@@ -46,25 +62,18 @@ const modelSuccessCard = computed<KpiCard | null>(() => {
   const rows = props.breakdown;
   const invocations = rows.reduce((total, row) => total + row.invocations, 0);
   const succeeded = rows.reduce((total, row) => total + row.succeeded, 0);
-  const worst = rows
-    .filter((row) => row.successRate !== null)
-    .reduce<ModelBreakdownRow | null>(
-      (lowest, row) =>
-        lowest === null || (row.successRate ?? 1) < (lowest.successRate ?? 1) ? row : lowest,
-      null,
-    );
+  const highest = extremeModel(rows, 1);
+  const lowest = extremeModel(rows, -1);
 
   return {
     key: 'model-success',
     icon: 'insights',
     label: MODEL_SUCCESS_LABEL,
     value: invocations === 0 ? EMPTY_VALUE : formatPercent(succeeded / invocations),
-    hint:
-      worst === null
-        ? 'Sin llamadas a modelos en el periodo'
-        : rows.length === 1
-          ? `${worst.aiModel}: ${formatInteger(worst.failed)} fallidas`
-          : `Menor: ${worst.aiModel} (${formatPercent(worst.successRate)})`,
+    hint: 'Sin llamadas a modelos en el periodo',
+    ...(highest !== null && lowest !== null
+      ? { hintLines: [`Mayor: ${describeModel(highest)}`, `Menor: ${describeModel(lowest)}`] }
+      : {}),
   };
 });
 
@@ -78,7 +87,8 @@ const cards = computed<KpiCard[]>(() => {
       { key: 'cost', icon: 'payments', label: 'Coste total', value: EMPTY_VALUE, hint: '' },
       { key: 'calls', icon: 'smart_toy', label: 'Invocaciones IA', value: EMPTY_VALUE, hint: '' },
       { key: 'success', icon: 'task_alt', label: FLOW_SUCCESS_LABEL, value: EMPTY_VALUE, hint: '' },
-      ...extra.map((card) => ({ ...card, value: EMPTY_VALUE, hint: '' })),
+      // Sin resumen tampoco hay Mayor/Menor que mostrar: solo la etiqueta.
+      ...extra.map(({ key, icon, label }) => ({ key, icon, label, value: EMPTY_VALUE, hint: '' })),
     ];
   }
 
@@ -138,7 +148,17 @@ const cards = computed<KpiCard[]>(() => {
         <h3 class="pd-kpi__label">{{ card.label }}</h3>
         <q-skeleton v-if="loading" type="text" width="80%" class="pd-kpi__skeleton" />
         <p v-else class="pd-kpi__value" data-test="kpi-value">{{ card.value }}</p>
-        <p v-if="!loading && card.hint" class="pd-kpi__hint">{{ card.hint }}</p>
+        <template v-if="!loading && card.hintLines">
+          <p
+            v-for="line in card.hintLines"
+            :key="line"
+            class="pd-kpi__hint"
+            data-test="kpi-hint-line"
+          >
+            {{ line }}
+          </p>
+        </template>
+        <p v-else-if="!loading && card.hint" class="pd-kpi__hint">{{ card.hint }}</p>
       </div>
     </article>
   </section>

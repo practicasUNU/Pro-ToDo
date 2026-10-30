@@ -214,6 +214,21 @@ describe('TelemetryService', () => {
       expect(chain.setParameter).toHaveBeenCalledWith('userId', userId);
     });
 
+    it('should resolve fallback user ID for practicas@unuware.com when initiator is null', async () => {
+      // 1. Arrange 📐: Cron o remitente desconocido, sin iniciador explicito.
+      const { service, chain } = buildService();
+
+      // 2. Act ⚙️
+      await service.recordTokenUsage(buildDto({ userId: null }));
+
+      // 3. Assert 🎯: el COALESCE termina en la funcion de BD que busca la
+      //    cuenta de respaldo por su correo; no hay variable de entorno.
+      const values = chain.values.mock.calls[0]?.[0] ?? {};
+      const userExpression = (values.userId as () => string)();
+      expect(userExpression).toMatch(/fn_usuario_respaldo\(\)\s*\)$/);
+      expect(chain.setParameter).toHaveBeenCalledWith('userId', null);
+    });
+
     it('deberia guardar el estado FAILED con el motivo recortado a 500', async () => {
       // 1. Arrange 📐
       const { service, chain } = buildService();

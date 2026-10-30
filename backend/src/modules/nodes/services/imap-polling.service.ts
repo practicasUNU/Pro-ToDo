@@ -639,7 +639,9 @@ export class ImapPollingService implements OnModuleInit, OnModuleDestroy {
       );
 
       await client.connect();
-      lock = await client.getMailboxLock(config.mailbox);
+      // Solo lectura (EXAMINE): el sondeo solo cuenta, y abrir en SELECT le
+      // daria permiso para alterar banderas que son de la estrategia.
+      lock = await client.getMailboxLock(config.mailbox, { readOnly: true });
 
       // La consulta se registra ENTERA: un filtro mal escrito en el asistente no
       // produce ningun error, solo un buzon que "nunca tiene correo". Ver la

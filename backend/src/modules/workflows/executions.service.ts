@@ -400,6 +400,7 @@ export class ExecutionsService {
       workflow,
       schema,
       finished,
+      user.id,
     );
 
     // La reanudacion publico la fila "En proceso"; sin esta segunda foto la

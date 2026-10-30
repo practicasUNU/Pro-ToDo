@@ -325,6 +325,23 @@ export class ImapTriggerConfigDto {
   @IsBoolean({ message: 'unreadOnly debe ser un booleano.' })
   unreadOnly?: boolean;
 
+  /**
+   * Omite la ventana de 48 horas de `buildImapSearchQuery`.
+   *
+   * SOLO surte efecto en el banco de pruebas: la estrategia lo combina con el
+   * `sandboxScope` del contexto y lo ignora en un sondeo real. Por eso NO pasa
+   * a `ResolvedImapConfig`: ni cambia lo que hace el sondeo ni debe alterar la
+   * cadena que compara `ImapPollingService.hasConfigChanged`.
+   */
+  @ApiPropertyOptional({
+    description:
+      'Solo banco de pruebas: si true, busca sin la ventana de 48 horas para ensayar con correos antiguos. Se ignora en ejecuciones reales',
+    default: false,
+  })
+  @IsOptional()
+  @IsBoolean({ message: 'bypassRecentWindow debe ser un booleano.' })
+  bypassRecentWindow?: boolean;
+
   @ApiPropertyOptional({
     description:
       'Expresion regular aplicada al asunto YA decodificado. El correo que no case se descarta sin ejecutar el resto del flujo. Omitir para no filtrar',
@@ -496,6 +513,11 @@ export const resolveImapConfig = (
   includeAttachments: dto.includeAttachments ?? DEFAULT_INCLUDE_ATTACHMENTS,
   maxAttachmentBytes: dto.maxAttachmentBytes ?? DEFAULT_MAX_ATTACHMENT_BYTES,
   // Al final, por el mismo motivo de orden que las dos anteriores.
-  subjectKeywords: dto.subjectKeywords ?? [],
+  // Recortadas y en minusculas: la comparacion ya tokeniza (`parseKeywords`),
+  // pero los logs y el motivo del OMITIDO las muestran tal cual, y " Licitacion"
+  // con su espacio parecia una palabra distinta de "licitacion".
+  subjectKeywords: (dto.subjectKeywords ?? [])
+    .map((term) => term.trim().toLowerCase())
+    .filter((term) => term.length > 0),
   subjectMatchMode: dto.subjectMatchMode ?? DEFAULT_SUBJECT_MATCH_MODE,
 });

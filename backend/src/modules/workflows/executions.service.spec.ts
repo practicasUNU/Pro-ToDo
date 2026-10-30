@@ -624,6 +624,8 @@ describe('ExecutionsService (consulta y reintento manual CU-09)', () => {
         // la politica se leen de ahi (`currentState`, `haltReason`,
         // `tookContingency`).
         expect.objectContaining({ currentState: ExecutionState.EXITOSO }),
+        // Quien reanuda firma el apagado en la auditoria.
+        CURRENT_USER.id,
       );
     });
 

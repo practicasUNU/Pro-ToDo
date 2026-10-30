@@ -25,6 +25,7 @@ import {
   RESUME_COMMAND_STATUS,
   SUBJECT_FILTERED_STATUS,
 } from './imap-trigger.strategy';
+import { parseKeywords } from './imap-filter.util';
 
 import type { StatePayloadContext } from '@core/fsm/context/state-payload.context';
 import type { RawEmailAttachment } from '@modules/nodes/interfaces/raw-email-attachment.interface';
@@ -427,6 +428,29 @@ describe('ImapTriggerStrategy', () => {
       expect(untouched.messageFlagsAdd).not.toHaveBeenCalled();
     });
 
+    it('should preserve \\Seen flag when markAsRead is configured as false', async () => {
+      // 1. Arrange 📐
+      const client = buildClient();
+      useClient(client);
+      const { strategy } = buildStrategy();
+
+      // 2. Act ⚙️
+      const result = await strategy.execute(
+        buildContext(),
+        buildParams({ markAsRead: false }),
+      );
+
+      // 3. Assert 🎯: el correo se descarga y procesa, pero sin ninguna
+      //    escritura de banderas. `download` de imapflow ya pide BODY.PEEK.
+      expect(result.success).toBe(true);
+      expect(client.download).toHaveBeenCalledWith(
+        String(MESSAGE_UID),
+        undefined,
+        { uid: true },
+      );
+      expect(client.messageFlagsAdd).not.toHaveBeenCalled();
+    });
+
     it('1.7bis NO deberia tocar el buzon si nadie declara markAsRead', async () => {
       // 1. Arrange 📐: el defecto se invirtio a proposito. El buzon es
       //    corporativo y compartido, y que un automatismo marque como leidos
@@ -671,6 +695,43 @@ describe('ImapTriggerStrategy', () => {
       );
     });
 
+    it('1bis.7 deberia saltar la ventana de 48 h en el banco de pruebas con bypassRecentWindow', async () => {
+      // 1. Arrange 📐: ensayo con un correo antiguo desde el banco de pruebas.
+      const { strategy } = buildStrategy();
+      const client = buildClient();
+      useClient(client);
+      const sandbox = createMockStatePayloadContext({
+        currentStep: 'trigger_imap',
+        sandboxScope: { userId: SENDER_USER_ID },
+      });
+
+      // 2. Act ⚙️
+      await strategy.execute(
+        sandbox,
+        buildParams({ unreadOnly: false, bypassRecentWindow: true }),
+      );
+
+      // 3. Assert 🎯: sin otro criterio queda el buzon entero.
+      expect(client.search).toHaveBeenCalledWith({ all: true }, { uid: true });
+    });
+
+    it('1bis.8 deberia ignorar bypassRecentWindow fuera del banco de pruebas', async () => {
+      // 1. Arrange 📐: un sondeo real con la bandera puesta por error.
+      const { strategy } = buildStrategy();
+      const client = buildClient();
+      useClient(client);
+
+      // 2. Act ⚙️
+      await strategy.execute(
+        buildContext(),
+        buildParams({ unreadOnly: false, bypassRecentWindow: true }),
+      );
+
+      // 3. Assert 🎯: sin ventana, cada ciclo evaluaria el buzon historico.
+      const [query] = client.search.mock.calls[0] as [Record<string, unknown>];
+      expect(query.since).toBeInstanceOf(Date);
+    });
+
     it('1bis.6 deberia rechazar un filtro vacio como GRAVE sin abrir conexion', async () => {
       // 1. Arrange
       const { strategy } = buildStrategy();
@@ -875,6 +936,31 @@ describe('ImapTriggerStrategy', () => {
       expect(result.success).toBe(true);
       expect(result.data).toEqual({ status: SUBJECT_FILTERED_STATUS });
       expect(result.halt).toBeDefined();
+    });
+
+    it('should correctly trim and normalize comma-separated subject keywords', async () => {
+      // 1. Arrange 📐: el operador escribio "Licitacion, APERTURA ,  ".
+      const keywords = [' Licitacion', 'APERTURA ', '  '];
+      simpleParser.mockResolvedValue(
+        buildParsedMail({ subject: 'Licitación: apertura de plicas' }),
+      );
+      const { strategy } = buildStrategy();
+
+      // 2. Act ⚙️
+      const config = resolveImapConfig({
+        ...buildParams(),
+        subjectKeywords: keywords,
+      } as unknown as Parameters<typeof resolveImapConfig>[0]);
+      const tokens = parseKeywords('Licitacion, APERTURA ,  ');
+      const result = await strategy.execute(
+        buildContext(),
+        buildParams({ subjectKeywords: keywords.slice(0, 2) }),
+      );
+
+      // 3. Assert 🎯
+      expect(config.subjectKeywords).toEqual(['licitacion', 'apertura']);
+      expect(tokens).toEqual(['licitacion', 'apertura']);
+      expect(result.data).not.toEqual({ status: SUBJECT_FILTERED_STATUS });
     });
 
     it('2quater.2 deberia casar todas las palabras con tildes en modo AND', async () => {

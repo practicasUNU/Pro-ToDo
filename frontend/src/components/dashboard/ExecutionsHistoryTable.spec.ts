@@ -5,6 +5,7 @@ import {
   Notify,
   QBadge,
   QBtn,
+  QForm,
   QIcon,
   QInput,
   QSelect,
@@ -60,7 +61,7 @@ const mountTable = (compact = false) =>
     props: { compact },
     global: {
       plugins: [[Quasar, { plugins: { Notify } }]],
-      components: { QBadge, QBtn, QIcon, QInput, QSelect, QTable, QTd, QTooltip, QTr },
+      components: { QBadge, QBtn, QForm, QIcon, QInput, QSelect, QTable, QTd, QTooltip, QTr },
     },
   });
 
@@ -142,7 +143,7 @@ describe('ExecutionsHistoryTable', () => {
     expect(inputLabels).toEqual(expect.arrayContaining(['Desde', 'Hasta']));
   });
 
-  it('1.4 deberia filtrar por estado y volver a la primera pagina', async () => {
+  it('1.4 deberia filtrar por estado solo al pulsar Aplicar, y volver a la primera pagina', async () => {
     // 1. Arrange 📐
     vi.mocked(fetchExecutions).mockResolvedValue({ items: [], total: 0, limit: 5, offset: 0 });
     const wrapper = mountTable(true);
@@ -150,12 +151,17 @@ describe('ExecutionsHistoryTable', () => {
     const stateSelect = wrapper
       .findAllComponents(QSelect)
       .find((select) => select.props('label') === 'Estado');
+    const callsBefore = vi.mocked(fetchExecutions).mock.calls.length;
 
-    // 2. Act ⚙️
+    // 2. Act ⚙️: elegir no consulta; enviar el formulario si.
     stateSelect?.vm.$emit('update:modelValue', ExecutionState.FALLIDO);
+    await flushPromises();
+    const callsAfterSelect = vi.mocked(fetchExecutions).mock.calls.length;
+    await wrapper.findComponent(QForm).trigger('submit');
     await flushPromises();
 
     // 3. Assert 🎯
+    expect(callsAfterSelect).toBe(callsBefore);
     expect(fetchExecutions).toHaveBeenLastCalledWith(
       expect.objectContaining({ state: ExecutionState.FALLIDO, offset: 0 }),
     );
@@ -171,12 +177,14 @@ describe('ExecutionsHistoryTable', () => {
     const to = inputs.find((input) => input.props('label') === 'Hasta');
     const callsBefore = vi.mocked(fetchExecutions).mock.calls.length;
 
-    // 2. Act ⚙️: una fecha a medio teclear no dispara nada.
+    // 2. Act ⚙️: una fecha a medio teclear no se envia ni al aplicar.
     from?.vm.$emit('update:modelValue', '2026-10');
+    await wrapper.findComponent(QForm).trigger('submit');
     await flushPromises();
     const callsWhileTyping = vi.mocked(fetchExecutions).mock.calls.length;
     from?.vm.$emit('update:modelValue', '2026-10-01');
     to?.vm.$emit('update:modelValue', '2026-10-22');
+    await wrapper.findComponent(QForm).trigger('submit');
     await flushPromises();
 
     // 3. Assert 🎯
@@ -184,6 +192,29 @@ describe('ExecutionsHistoryTable', () => {
     expect(fetchExecutions).toHaveBeenLastCalledWith(
       expect.objectContaining({ from: '2026-10-01', to: '2026-10-22', offset: 0 }),
     );
+  });
+
+  it('1.6 deberia ofrecer Limpiar filtros y Aplicar, y limpiar resetea la consulta', async () => {
+    // 1. Arrange 📐
+    vi.mocked(fetchExecutions).mockResolvedValue({ items: [], total: 0, limit: 5, offset: 0 });
+    const wrapper = mountTable(true);
+    await flushPromises();
+    wrapper
+      .findAllComponents(QSelect)
+      .find((select) => select.props('label') === 'Estado')
+      ?.vm.$emit('update:modelValue', ExecutionState.FALLIDO);
+    await wrapper.findComponent(QForm).trigger('submit');
+    await flushPromises();
+
+    // 2. Act ⚙️
+    await wrapper.find('[data-test="executions-clear"]').trigger('click');
+    await flushPromises();
+
+    // 3. Assert 🎯
+    expect(wrapper.find('[data-test="executions-apply"]').text()).toContain('Aplicar');
+    expect(wrapper.find('[data-test="executions-clear"]').text()).toContain('Limpiar filtros');
+    const lastQuery = vi.mocked(fetchExecutions).mock.calls.at(-1)?.[0];
+    expect(lastQuery).not.toHaveProperty('state');
   });
 
   describe('2. Boton Ver log', () => {

@@ -99,9 +99,23 @@ describe('TelemetrySummaryCards', () => {
     );
     expect(wrapper.get('[data-test="kpi-success"]').text()).toContain('3 de 4 ejecuciones con IA');
     expect(valueOf(wrapper, 'model-success')).toMatch(/75\s%/);
-    expect(wrapper.get('[data-test="kpi-model-success"]').text()).toContain(
-      'Menor: gemini-3.6-flash',
-    );
+    const lines = wrapper
+      .get('[data-test="kpi-model-success"]')
+      .findAll('[data-test="kpi-hint-line"]')
+      .map((line) => line.text());
+    expect(lines).toHaveLength(2);
+    expect(lines[0]).toMatch(/^Mayor: claude-sonnet-5-5 \(100\s%\)$/);
+    expect(lines[1]).toMatch(/^Menor: gemini-3.6-flash \(50\s%\)$/);
+  });
+
+  it('1.4bis deberia decir que no hubo llamadas en vez de Mayor/Menor vacios', () => {
+    // 1. Arrange 📐 + 2. Act ⚙️
+    const wrapper = mountCards(SUMMARY, false, []);
+
+    // 3. Assert 🎯
+    const card = wrapper.get('[data-test="kpi-model-success"]');
+    expect(card.findAll('[data-test="kpi-hint-line"]')).toHaveLength(0);
+    expect(card.text()).toContain('Sin llamadas a modelos en el periodo');
   });
 
   it('1.5 no deberia pintar la tarjeta por modelo sin desglose', () => {

@@ -686,6 +686,40 @@ describe('LlmExtractorStrategy', () => {
       ]);
     });
 
+    it('4.2bis deberia seguir en GRAVE si ningun texto documental existe', async () => {
+      // 1. Arrange 📐: solo hay articulo web; la cadena documental esta vacia.
+      const strategy = buildStrategy(buildPromptService());
+      const context = buildContext({
+        scraped_web: { full_article_content: 'Articulo.' },
+      });
+
+      // 2. Act ⚙️
+      const result = await strategy.execute(context, {
+        inlinePrompt: 'Resume {{ocr_result.clean_body}}.',
+      });
+
+      // 3. Assert 🎯: interpolar una cadena vacia facturaria una inferencia
+      //    sobre nada; el marcador original sigue siendo el que falta.
+      expect(result.success).toBe(false);
+      expect(result.error?.level).toBe('GRAVE');
+      expect(result.error?.code).toBe(ERR_LLM_INTERPOLATION);
+      expect(result.error?.missingFields).toEqual(['ocr_result.clean_body']);
+    });
+
+    it('4.2ter NO deberia exigir ocr_result en el validador de topologia', () => {
+      // 1. Arrange 📐
+      const strategy = buildStrategy(buildPromptService());
+
+      // 2. Act ⚙️
+      const required = strategy.getRequiredNamespaces({
+        inlinePrompt:
+          'Resume {{ocr_result.clean_body}} de {{trigger.flow_name}}',
+      });
+
+      // 3. Assert 🎯
+      expect(required).toEqual(['trigger']);
+    });
+
     it('4.3 deberia declarar los namespaces que el prompt en linea necesita', () => {
       // 1. Arrange
       const strategy = buildStrategy(buildPromptService());
@@ -1525,6 +1559,49 @@ describe('LlmExtractorStrategy', () => {
       expect(materialOf(generateCompletion)).toBe(
         MATERIAL_IN_INSTRUCTIONS_NOTICE,
       );
+    });
+
+    it('should fallback to parsed_email.extracted_documents_text or clean_body when ocr_result is missing', async () => {
+      // 1. Arrange 📐: el prompt pide el OCR, pero el correo traia un adjunto
+      //    ofimatico y no paso por PROCESADOR_OCR.
+      const generateCompletion = buildSpyProvider();
+      const strategy = buildStrategy(buildPromptService(), {
+        provider: LlmProvider.GEMINI,
+        generateCompletion,
+      });
+      const withDocuments = buildContext({
+        parsed_email: {
+          clean_body: CLEAN_BODY,
+          extracted_documents_text: DOCUMENTS_TABLE,
+        },
+      });
+      const bodyOnly = buildContext({
+        parsed_email: { clean_body: CLEAN_BODY },
+      });
+      const config = {
+        inlinePrompt: 'Resume:\n{{ocr_result.clean_body}}',
+        provider: LlmProvider.GEMINI,
+      };
+
+      // 2. Act ⚙️
+      const withDocumentsResult = await strategy.execute(withDocuments, config);
+      const bodyOnlyResult = await strategy.execute(bodyOnly, config);
+
+      // 3. Assert 🎯: cada uno cae al primer texto disponible de la cadena, y
+      //    ese texto viaja una sola vez (en la instruccion, no en el material).
+      expect(withDocumentsResult.success).toBe(true);
+      expect(bodyOnlyResult.success).toBe(true);
+
+      const [firstMaterial, firstInstruction] = generateCompletion.mock
+        .calls[0] as [string, string];
+      expect(firstInstruction).toBe(`Resume:\n${DOCUMENTS_TABLE}`);
+      expect(firstMaterial).toBe(CLEAN_BODY);
+
+      const [, secondInstruction] = generateCompletion.mock.calls[1] as [
+        string,
+        string,
+      ];
+      expect(secondInstruction).toBe(`Resume:\n${CLEAN_BODY}`);
     });
 
     it('11.5 deberia avisar de adjuntos que no aportaron texto, SIN fallar', async () => {

@@ -26,7 +26,8 @@ import type { ExecutionHistoryFilters } from '@stores/executions.store';
  * El estado se comunica con icono, texto y color a la vez (WCAG 1.4.1): el
  * color solo refuerza. Los filtros de estado y flujo son `q-select` cerrados
  * (Poka-Yoke): no hay texto libre que pueda pedir un estado o un flujo
- * inexistente. El rango de fechas acota por la fecha de inicio.
+ * inexistente. El rango de fechas acota por la fecha de inicio. Como en
+ * Auditoria, los filtros se aplican juntos con "Aplicar".
  *
  * `compact` es la variante del dashboard: los mismos filtros y menos filas.
  */
@@ -134,35 +135,13 @@ const { min: MIN_DATE, max: MAX_DATE } = datePickerBounds();
 const isSelectableDate = (date: string): boolean => date >= MIN_DATE && date <= MAX_DATE;
 
 /**
- * Aplica un filtro conservando los demas y vuelve a la primera pagina. Las
- * claves vacias se quitan: `undefined` es "sin filtrar".
+ * Borrador de los filtros, igual que en Auditoria: se editan sin consultar y
+ * solo viajan al backend al pulsar "Aplicar". Aplicar cada cambio en el acto
+ * lanzaba una peticion por campo y, con las fechas, otra por cada tecla que
+ * completaba un dia valido. `null` es lo que deja el boton de borrar.
  */
-const applyFilter = (patch: {
-  [K in keyof ExecutionHistoryFilters]?: ExecutionHistoryFilters[K] | undefined;
-}): void => {
-  const merged: Record<string, string | undefined> = { ...executionsStore.filters, ...patch };
-  const next = Object.fromEntries(
-    Object.entries(merged).filter(([, value]) => value !== undefined && value !== ''),
-  ) as ExecutionHistoryFilters;
-
-  executionsStore.setFilters(next);
-  void loadPage({ offset: 0 });
-};
-
-const stateFilter = computed<ExecutionState | null>({
-  get: () => executionsStore.filters.state ?? null,
-  set: (state) => applyFilter({ state: state ?? undefined }),
-});
-
-const flowFilter = computed<string | null>({
-  get: () => executionsStore.filters.flowId ?? null,
-  set: (flowId) => applyFilter({ flowId: flowId ?? undefined }),
-});
-
-/**
- * Fechas que se estan editando; solo se aplican si forman un rango valido.
- * `null` es lo que deja el boton de borrar de `q-input`.
- */
+const stateDraft = ref<ExecutionState | null>(executionsStore.filters.state ?? null);
+const flowDraft = ref<string | null>(executionsStore.filters.flowId ?? null);
 const fromDate = ref<string | null>(executionsStore.filters.from ?? '');
 const toDate = ref<string | null>(executionsStore.filters.to ?? '');
 
@@ -184,24 +163,39 @@ const dateRangeRule = (): true | string => {
   return true;
 };
 
-const applyDates = (): void => {
+/**
+ * Aplica el borrador entero y vuelve a la primera pagina. Una fecha a medio
+ * teclear o un rango invertido no se envian: los marca la regla del campo.
+ */
+const applyFilters = (): void => {
   const from = fromDate.value ?? '';
   const to = toDate.value ?? '';
   const complete = (value: string): boolean => value === '' || DATE_PATTERN.test(value);
 
   if (!complete(from) || !complete(to) || dateRangeRule() !== true) return;
 
-  applyFilter({ from: from || undefined, to: to || undefined });
+  const candidate: Record<string, string | null> = {
+    state: stateDraft.value,
+    flowId: flowDraft.value,
+    from,
+    to,
+  };
+  const next = Object.fromEntries(
+    Object.entries(candidate).filter(([, value]) => value !== null && value !== ''),
+  ) as ExecutionHistoryFilters;
+
+  executionsStore.setFilters(next);
+  void loadPage({ offset: 0 });
 };
 
 const clearFilters = (): void => {
+  stateDraft.value = null;
+  flowDraft.value = null;
   fromDate.value = '';
   toDate.value = '';
   executionsStore.setFilters({});
   void loadPage({ offset: 0 });
 };
-
-const hasFilters = computed(() => Object.keys(executionsStore.filters).length > 0);
 
 const loadPage = async (page: { limit?: number; offset?: number } = {}): Promise<void> => {
   try {
@@ -256,9 +250,15 @@ onMounted(async () => {
     @request="onRequest"
   >
     <template #top-right>
-      <div class="pd-executions-filters" role="group" aria-label="Filtros del historial">
+      <q-form
+        class="pd-executions-filters"
+        role="group"
+        aria-label="Filtros del historial"
+        data-test="executions-filters"
+        @submit.prevent="applyFilters"
+      >
         <q-select
-          v-model="stateFilter"
+          v-model="stateDraft"
           class="pd-search-input pd-executions-filters__field"
           dense
           outlined
@@ -271,7 +271,7 @@ onMounted(async () => {
           data-test="state-filter"
         />
         <q-select
-          v-model="flowFilter"
+          v-model="flowDraft"
           class="pd-executions-filters__field"
           dense
           outlined
@@ -295,7 +295,6 @@ onMounted(async () => {
           :rules="[dateRangeRule]"
           hide-bottom-space
           data-test="executions-from"
-          @update:model-value="applyDates"
         >
           <template #append>
             <q-icon name="event" class="cursor-pointer">
@@ -305,7 +304,6 @@ onMounted(async () => {
                   mask="YYYY-MM-DD"
                   class="pd-date-popup"
                   :options="isSelectableDate"
-                  @update:model-value="applyDates"
                 >
                   <div class="row items-center justify-end">
                     <q-btn v-close-popup flat no-caps label="Cerrar" class="pd-btn-secondary" />
@@ -327,7 +325,6 @@ onMounted(async () => {
           :rules="[dateRangeRule]"
           hide-bottom-space
           data-test="executions-to"
-          @update:model-value="applyDates"
         >
           <template #append>
             <q-icon name="event" class="cursor-pointer">
@@ -337,7 +334,6 @@ onMounted(async () => {
                   mask="YYYY-MM-DD"
                   class="pd-date-popup"
                   :options="isSelectableDate"
-                  @update:model-value="applyDates"
                 >
                   <div class="row items-center justify-end">
                     <q-btn v-close-popup flat no-caps label="Cerrar" class="pd-btn-secondary" />
@@ -347,17 +343,28 @@ onMounted(async () => {
             </q-icon>
           </template>
         </q-input>
-        <q-btn
-          v-if="hasFilters"
-          class="pd-btn-secondary"
-          flat
-          no-caps
-          icon="filter_alt_off"
-          label="Limpiar"
-          data-test="executions-clear"
-          @click="clearFilters"
-        />
-      </div>
+        <div class="pd-executions-filters__actions">
+          <q-btn
+            type="button"
+            class="pd-btn-secondary"
+            flat
+            no-caps
+            icon="filter_alt_off"
+            label="Limpiar filtros"
+            data-test="executions-clear"
+            @click="clearFilters"
+          />
+          <q-btn
+            type="submit"
+            class="pd-btn-primary"
+            unelevated
+            no-caps
+            icon="filter_alt"
+            label="Aplicar"
+            data-test="executions-apply"
+          />
+        </div>
+      </q-form>
     </template>
 
     <template #body-cell-state="cellProps">
@@ -425,6 +432,17 @@ onMounted(async () => {
 
 .pd-executions-filters__date {
   width: 150px;
+}
+
+// Mismo bloque de acciones que la barra de Auditoria: al final de la fila y
+// alineado con la altura de los campos.
+.pd-executions-filters__actions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+  align-items: center;
+  min-height: 40px;
+  margin-left: auto;
 }
 
 .pd-execution-badge {

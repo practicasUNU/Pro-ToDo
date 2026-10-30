@@ -481,6 +481,70 @@ describe('WorkflowsService (despacho manual de pruebas, Camino B)', () => {
       expect(coordinator.stopPollingForFlow).toHaveBeenCalledWith(WORKFLOW_ID);
     });
 
+    it('should deactivate workflow when execution concludes with SUCCESS and stopOnFirstSuccess is true', async () => {
+      // 1. Arrange 📐: despacho automatico, sin usuario que lo inicie.
+      const { service, validator, repository, auditLogger } = buildHarness();
+      validator.validateSchema.mockResolvedValue(schemaWithPolicy());
+
+      // 2. Act ⚙️
+      await service.runAutomaticWorkflow(WORKFLOW_ID);
+
+      // 3. Assert 🎯: queda INACTIVO y el apagado deja rastro en la auditoria.
+      //    `userId: null` hace que la fila tome la cuenta de respaldo por DEFAULT.
+      expect(repository.save).toHaveBeenCalledWith(
+        expect.objectContaining({ status: WorkflowStatus.INACTIVO }),
+      );
+      expect(auditLogger.record).toHaveBeenCalledWith(
+        expect.objectContaining({
+          userId: null,
+          action: AuditActionType.DEACTIVATE,
+          affectedTable: AuditTable.WORKFLOWS,
+          recordId: WORKFLOW_ID,
+        }),
+      );
+      const [event] = auditLogger.record.mock.calls[0] as [
+        { newData: Record<string, unknown> },
+      ];
+      expect(event.newData).toMatchObject({
+        estado_flujo: WorkflowStatus.INACTIVO,
+        motivo: 'executionPolicy.stopOnFirstSuccess',
+      });
+    });
+
+    it('2c.1ter deberia imputar el apagado a quien reanudo la ejecucion', async () => {
+      // 1. Arrange 📐: la reanudacion llama directamente con el usuario.
+      const { service, auditLogger } = buildHarness();
+
+      // 2. Act ⚙️
+      await service.applyStopOnFirstSuccess(
+        buildWorkflow(),
+        schemaWithPolicy(),
+        buildExecution(),
+        'user-resume',
+      );
+
+      // 3. Assert 🎯
+      expect(auditLogger.record).toHaveBeenCalledWith(
+        expect.objectContaining({
+          userId: 'user-resume',
+          action: AuditActionType.DEACTIVATE,
+        }),
+      );
+    });
+
+    it('2c.1quater deberia soltar el sondeo aunque falle la auditoria', async () => {
+      // 1. Arrange 📐: la auditoria es best-effort.
+      const { service, validator, auditLogger, coordinator } = buildHarness();
+      validator.validateSchema.mockResolvedValue(schemaWithPolicy());
+      auditLogger.record.mockRejectedValue(new Error('BD caida'));
+
+      // 2. Act ⚙️
+      await service.runAutomaticWorkflow(WORKFLOW_ID);
+
+      // 3. Assert 🎯
+      expect(coordinator.stopPollingForFlow).toHaveBeenCalledWith(WORKFLOW_ID);
+    });
+
     it('2c.1bis deberia difundir el apagado a las sesiones abiertas', async () => {
       // 1. Arrange 📐. Era el UNICO de los cuatro caminos que escriben `activo`
       //    sin difundir la mutacion, y precisamente el que nadie esta mirando
@@ -559,13 +623,14 @@ describe('WorkflowsService (despacho manual de pruebas, Camino B)', () => {
 
     it('2c.4 NO deberia desactivar un flujo sin politica declarada', async () => {
       // 1. Arrange: `buildSchema()` no trae `executionPolicy`.
-      const { service, repository, coordinator } = buildHarness();
+      const { service, repository, coordinator, auditLogger } = buildHarness();
 
       // 2. Act
       await service.runAutomaticWorkflow(WORKFLOW_ID);
 
       // 3. Assert: la ausencia de politica debe comportarse como siempre.
       expect(repository.save).not.toHaveBeenCalled();
+      expect(auditLogger.record).not.toHaveBeenCalled();
       expect(coordinator.stopPollingForFlow).not.toHaveBeenCalled();
     });
 

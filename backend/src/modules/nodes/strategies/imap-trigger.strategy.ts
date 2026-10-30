@@ -445,11 +445,14 @@ const resolveAttachmentFilename = (
  */
 export const buildImapSearchQuery = (
   config: ResolvedImapConfig,
+  options: ImapSearchOptions = {},
 ): SearchObject => {
   const query: SearchObject = {
     ...(config.unreadOnly
       ? { seen: false }
-      : { since: new Date(Date.now() - RECENT_WINDOW_MS) }),
+      : options.skipRecentWindow === true
+        ? {}
+        : { since: new Date(Date.now() - RECENT_WINDOW_MS) }),
     ...(config.fromFilter !== null ? { from: config.fromFilter } : {}),
     ...(config.subjectFilter !== null && config.subjectFilterRegex === null
       ? { subject: config.subjectFilter }
@@ -457,11 +460,21 @@ export const buildImapSearchQuery = (
   };
 
   // IMAP SEARCH exige al menos un criterio, y `{}` seria una sentencia
-  // invalida. Ya no puede ocurrir —las dos ramas de `unreadOnly` aportan uno—,
-  // pero la guarda se conserva: es la unica defensa si alguien añade mañana un
-  // tercer caso que no escriba nada.
+  // invalida. Ocurre al saltar la ventana en el banco de pruebas sin ningun
+  // otro filtro: ahi `{ all: true }` es justo lo que se pide, el buzon entero.
   return Object.keys(query).length === 0 ? { all: true } : query;
 };
+
+/**
+ * Opciones de la busqueda que no forman parte de la config del nodo.
+ *
+ * `skipRecentWindow` omite la ventana de 48 horas. Solo lo activa el banco de
+ * pruebas (`bypassRecentWindow` con `sandboxScope`), para ensayar el flujo con
+ * un correo antiguo sin tener que reenviarlo.
+ */
+export interface ImapSearchOptions {
+  readonly skipRecentWindow?: boolean;
+}
 
 /**
  * Nodo TRIGGER_IMAP: lee el correo mas reciente que casa con los criterios del
@@ -564,7 +577,7 @@ export class ImapTriggerStrategy implements INodeStrategy {
   ) {}
 
   public async execute(
-    _context: StatePayloadContext,
+    context: StatePayloadContext,
     params: Record<string, unknown>,
   ): Promise<NodeResult> {
     // 1. Configuracion y secreto, antes de abrir ningun socket.
@@ -576,8 +589,17 @@ export class ImapTriggerStrategy implements INodeStrategy {
 
     const { config, password } = resolution;
 
+    // La ventana de 48 horas solo se salta en el banco de pruebas: fuera de el
+    // `bypassRecentWindow` se ignora, porque un sondeo de produccion sin
+    // ventana volveria a evaluar el buzon historico entero en cada ciclo.
+    const searchOptions: ImapSearchOptions = {
+      skipRecentWindow:
+        context.getSandboxScope() !== null &&
+        params.bypassRecentWindow === true,
+    };
+
     // 2. Lectura del buzon.
-    return this.readLatestUnseen(config, password);
+    return this.readLatestUnseen(config, password, searchOptions);
   }
 
   /**
@@ -641,6 +663,7 @@ export class ImapTriggerStrategy implements INodeStrategy {
   private async readLatestUnseen(
     config: ResolvedImapConfig,
     password: string,
+    searchOptions: ImapSearchOptions = {},
   ): Promise<NodeResult> {
     // El oyente de 'error' lo exige la firma de la factoria: sin el, un evento
     // de socket derribaria el proceso. El fallo ya se refleja en el `NodeResult`
@@ -662,7 +685,11 @@ export class ImapTriggerStrategy implements INodeStrategy {
       await client.connect();
       lock = await client.getMailboxLock(config.mailbox);
 
-      const uid = await this.findLatestMatchingUid(client, config);
+      const uid = await this.findLatestMatchingUid(
+        client,
+        config,
+        searchOptions,
+      );
 
       if (uid === null) {
         // El filtro de remitente lo resuelve el servidor IMAP dentro de la
@@ -870,10 +897,14 @@ export class ImapTriggerStrategy implements INodeStrategy {
   private async findLatestMatchingUid(
     client: ImapFlow,
     config: ResolvedImapConfig,
+    searchOptions: ImapSearchOptions,
   ): Promise<number | null> {
-    const uids = await client.search(buildImapSearchQuery(config), {
-      uid: true,
-    });
+    const uids = await client.search(
+      buildImapSearchQuery(config, searchOptions),
+      {
+        uid: true,
+      },
+    );
 
     if (uids === false || !Array.isArray(uids) || uids.length === 0) {
       return null;
