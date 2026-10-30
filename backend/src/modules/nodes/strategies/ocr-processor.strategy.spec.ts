@@ -1408,6 +1408,29 @@ describe('OcrProcessorStrategy · nodo satelite PROCESADOR_OCR', () => {
       expect(result.error?.code).toBe(ERR_OCR_EMPTY_TRANSCRIPTION);
     });
 
+    it('10.4bis NO deberia registrar telemetria si falla antes de llamar a la API', async () => {
+      // 1. Arrange 📐: un param fuera del contrato y un correo sin adjuntos,
+      //    los dos rechazados antes de tocar el proveedor.
+      const telemetry = createMockTelemetryService();
+      const generateCompletion = buildGeminiReply();
+      const strategy = buildGeminiStrategy(generateCompletion, telemetry);
+
+      // 2. Act ⚙️
+      const invalidConfig = await strategy.execute(buildContext(), {
+        provider: LlmProvider.GEMINI,
+        unknownParam: true,
+      });
+      const noAttachments = await strategy.execute(buildContext([]), {
+        provider: LlmProvider.GEMINI,
+      });
+
+      // 3. Assert 🎯: sin llamada no hay fila, y la tasa por modelo no se toca.
+      expect(invalidConfig.error?.code).toBe(ERR_OCR_CONFIG);
+      expect(noAttachments.error?.code).toBe(ERR_OCR_NO_ATTACHMENTS);
+      expect(generateCompletion).not.toHaveBeenCalled();
+      expect(telemetry.recordTokenUsage).not.toHaveBeenCalled();
+    });
+
     it('10.5 no deberia registrar las transcripciones del simulador', async () => {
       // 1. Arrange 📐
       const telemetry = createMockTelemetryService();

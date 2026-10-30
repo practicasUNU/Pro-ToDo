@@ -339,6 +339,7 @@ onMounted(() => {
           <q-btn
             flat
             no-caps
+            icon="filter_alt_off"
             label="Limpiar filtros"
             class="pd-btn-secondary"
             data-test="pricing-filter-clear"
@@ -349,6 +350,7 @@ onMounted(() => {
             unelevated
             no-caps
             type="submit"
+            icon="filter_alt"
             label="Aplicar fechas"
             data-test="pricing-filter-apply"
           />

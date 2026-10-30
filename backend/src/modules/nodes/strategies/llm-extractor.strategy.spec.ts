@@ -2224,5 +2224,91 @@ describe('LlmExtractorStrategy', () => {
       expect(result.success).toBe(false);
       expect(result.error?.code).toBe(ERR_LLM_MAX_RETRIES_EXCEEDED);
     });
+
+    /** Estrategia contra Anthropic con un cliente doblado y la telemetria espiada. */
+    const buildAnthropicStrategy = (
+      generateCompletion: jest.Mock,
+      telemetry: TelemetryServiceMock,
+    ): LlmExtractorStrategy =>
+      buildStrategy(
+        buildPromptService(),
+        {},
+        new MockLlmProvider(),
+        buildAiDefaults(),
+        { provider: LlmProvider.ANTHROPIC, generateCompletion },
+        buildProviderCatalog(),
+        telemetry,
+      );
+
+    it('should persist FAILED telemetry record only when LLM API client throws exception during inferencing', async () => {
+      // 1. Arrange 📐: la API rechaza la peticion sin devolver consumo. El
+      //    codigo no justifica cambiar de proveedor, asi que hay UN intento.
+      const telemetry = createMockTelemetryService();
+      const generateCompletion = jest
+        .fn()
+        .mockRejectedValue(
+          new LlmProviderException(
+            'Anthropic respondio 400: peticion invalida',
+            ERR_HTTP_CLIENT_REJECTED,
+          ),
+        );
+      const strategy = buildAnthropicStrategy(generateCompletion, telemetry);
+
+      // 2. Act ⚙️
+      const result = await strategy.execute(
+        buildContext({ parsed_email: { clean_body: CLEAN_BODY } }),
+        {
+          inlinePrompt: 'Redacta la noticia.',
+          provider: LlmProvider.ANTHROPIC,
+          model: 'claude-sonnet-5-5',
+        },
+      );
+
+      // 3. Assert 🎯: una fila FAILED con el modelo configurado, el mensaje de
+      //    la API y el consumo a cero, porque el proveedor no lo informo.
+      expect(result.success).toBe(false);
+      expect(generateCompletion).toHaveBeenCalledTimes(1);
+      expect(telemetry.recordTokenUsage).toHaveBeenCalledTimes(1);
+      expect(telemetry.recordTokenUsage).toHaveBeenCalledWith(
+        expect.objectContaining({
+          aiProvider: LlmProvider.ANTHROPIC,
+          aiModel: 'claude-sonnet-5-5',
+          promptTokens: 0,
+          completionTokens: 0,
+          reasoningTokens: 0,
+          usageReported: false,
+          status: AiCallStatus.FAILED,
+          errorMessage: 'Anthropic respondio 400: peticion invalida',
+        }),
+      );
+    });
+
+    it('should NOT persist telemetry record when pre-processing/validation fails before API call', async () => {
+      // 1. Arrange 📐: dos fallos locales, ambos anteriores a la llamada: un
+      //    marcador que no resuelve y un contexto sin texto que procesar.
+      const telemetry = createMockTelemetryService();
+      const generateCompletion = buildAnthropicReply();
+      const strategy = buildAnthropicStrategy(generateCompletion, telemetry);
+
+      // 2. Act ⚙️
+      const interpolation = await strategy.execute(
+        buildContext({ parsed_email: { clean_body: CLEAN_BODY } }),
+        {
+          inlinePrompt: 'Redacta sobre {{scraped_web.article_title}}.',
+          provider: LlmProvider.ANTHROPIC,
+        },
+      );
+      const missingInput = await strategy.execute(
+        buildContext({ cron_trigger: { fired_at: 'ayer' } }),
+        { inlinePrompt: 'Redacta.', provider: LlmProvider.ANTHROPIC },
+      );
+
+      // 3. Assert 🎯: ninguno llego al proveedor, asi que ninguno cuenta
+      //    contra la tasa de exito del modelo.
+      expect(interpolation.error?.code).toBe(ERR_LLM_INTERPOLATION);
+      expect(missingInput.error?.code).toBe(ERR_LLM_MISSING_INPUT_TEXT);
+      expect(generateCompletion).not.toHaveBeenCalled();
+      expect(telemetry.recordTokenUsage).not.toHaveBeenCalled();
+    });
   });
 });

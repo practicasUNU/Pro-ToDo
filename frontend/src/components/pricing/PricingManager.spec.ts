@@ -214,4 +214,25 @@ describe('PricingManager', () => {
       expect.objectContaining({ sortBy: 'aiModel', sortOrder: 'DESC' }),
     );
   });
+
+  it('1.8 deberia ordenar Limpiar filtros antes de Aplicar, cada uno con su icono', async () => {
+    // 1. Arrange 📐 + 2. Act ⚙️
+    const wrapper = mountManager();
+    await flushPromises();
+
+    // 3. Assert 🎯: misma pareja de acciones que Auditoria e Informes.
+    const buttonByLabel = (label: string) =>
+      wrapper.findAllComponents(QBtn).find((button) => button.props('label') === label);
+    const clear = buttonByLabel('Limpiar filtros');
+    const apply = buttonByLabel('Aplicar fechas');
+    const actions = wrapper
+      .findAll('[data-test^="pricing-filter-"]')
+      .map((node) => node.attributes('data-test'));
+
+    expect(clear?.props('icon')).toBe('filter_alt_off');
+    expect(apply?.props('icon')).toBe('filter_alt');
+    expect(actions.indexOf('pricing-filter-clear')).toBeLessThan(
+      actions.indexOf('pricing-filter-apply'),
+    );
+  });
 });

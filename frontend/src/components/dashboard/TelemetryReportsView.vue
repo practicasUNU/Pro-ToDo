@@ -109,8 +109,9 @@ usePanelRefresh(loadReport, { onFlowCompleted: true });
   margin: 4px 0 0;
 }
 
+// Mismo encuadre que los filtros de Auditoria.
 .pd-reports__filter {
-  padding: 12px 16px 0;
+  padding: 16px;
 }
 
 .pd-reports__grid {
