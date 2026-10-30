@@ -9112,3 +9112,37 @@ reconoce un cambio de rol o de estado.
 
 - [ ] Aplicar la migracion 060 y reiniciar Nest
 - [ ] Confirmar que la cuenta de respaldo existe en `usuarios`; si no, el DEFAULT queda en NULL
+
+## Autodesactivacion auditada, coalescencia del texto documental y filtros del panel
+
+### Por que el apagado por `stopOnFirstSuccess` se audita
+
+La politica de corrida unica ya apagaba el flujo tras el primer exito, pero solo lo dejaba en el
+log. En Auditoria el flujo seguia apareciendo como activo en su ultima edicion, y nadie podia saber
+por que estaba apagado. Ahora queda un `DESACTIVAR` con el motivo y la ejecucion que lo provoco.
+Lo firma quien reanudo la ejecucion o, en el despacho automatico, la cuenta de respaldo. Si la
+auditoria falla, el sondeo se suelta igual: un temporizador vivo sobre un flujo apagado es peor que
+un evento perdido.
+
+### Por que el prompt coalesce el texto documental
+
+Un mismo prompt sirve para correos escaneados, con adjuntos ofimaticos o sin adjuntos. Exigir el
+marcador exacto pausaba el flujo con `ERR_LLM_INTERPOLATION` aunque el texto estuviera en el
+contexto bajo otra clave. La redireccion se hace antes de ensamblar la materia prima, para que el
+texto viaje una sola vez. Si no hay ningun texto documental, el error se mantiene.
+
+### Por que el sondeo IMAP abre en solo lectura
+
+El sondeo solo cuenta mensajes. Abrir el buzon en `EXAMINE` le quita la posibilidad de alterar
+banderas, que son trabajo de la estrategia. La estrategia sigue en lectura-escritura porque marca
+las ordenes de reanudacion, pero descarga con `BODY.PEEK` y solo marca el contenido si
+`markAsRead` es verdadero.
+
+### Por que los filtros del historial esperan a "Aplicar"
+
+Aplicar cada cambio lanzaba una consulta por campo y, con las fechas, otra cada vez que se
+completaba un dia valido. Con un borrador y "Aplicar" la barra se comporta como la de Auditoria.
+
+### Checklist de dependencias
+
+- [ ] Ninguna: esta ronda no lleva migracion

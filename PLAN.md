@@ -4914,3 +4914,49 @@ TelemetryController -> TelemetryQueryService (summary, breakdown, filter-options
 - [x] Panel de control a ancho completo y filtros del historial de ejecuciones
 - [x] Etiquetas "Clave", botones "Exportar" y Auditoria al extremo derecho de las acciones
 - [ ] Pendiente — aplicar la migracion 060 (`cd backend && npm run db:migrate`) y reiniciar Nest
+
+## Autodesactivacion auditada, coalescencia del texto documental, banderas IMAP y filtros del panel
+
+Rama: `feat/destino-http-generico`. Sin migracion.
+
+### Contratos
+
+| Pieza | Contrato |
+|---|---|
+| `applyStopOnFirstSuccess(..., actorUserId)` | Al apagar el flujo registra `DESACTIVAR` con `{ estado_flujo, motivo, ejecucion_id }`; `actorUserId` es quien reanudo, o `null` (cuenta de respaldo) en el despacho automatico. Best-effort |
+| `DOCUMENT_TEXT_FALLBACK_CHAIN` | `ocr_result.clean_body` → `parsed_email.extracted_documents_text` → `parsed_email.clean_body` |
+| `coalesceDocumentTextMarkers(prompt, readText)` | Redirige cada marcador de la cadena sin texto hacia la primera ruta con texto, desde su posicion hacia abajo. Sin texto en toda la cadena deja el marcador y la interpolacion sigue fallando en GRAVE |
+| `stripDocumentTextMarkers` | Los marcadores de la cadena no cuentan como dependencias en el validador de topologia |
+| `ImapTriggerConfigDto.bypassRecentWindow` | Solo con `sandboxScope`: la busqueda omite la ventana de 48 h. No entra en `ResolvedImapConfig` |
+| `resolveImapConfig.subjectKeywords` | Recortadas, en minusculas y sin vacias |
+| `ImapPollingService.countMatchingMessages` | Abre el buzon en solo lectura (`EXAMINE`) |
+| `TelemetryModelSuccessChart` | Barras de tasa de exito por modelo con porcentaje y fallidas como texto |
+| `ExecutionsHistoryTable` | Borrador de filtros; se aplican con "Aplicar" y se vacian con "Limpiar filtros" |
+
+### Diagrama de inyeccion de dependencias
+
+```
+ExecutionsService.resumeExecution -> WorkflowsService.applyStopOnFirstSuccess(user.id) -> AuditLoggerService.record(DESACTIVAR)
+WorkflowsService.runAutomaticWorkflow -> applyStopOnFirstSuccess(null)
+LlmExtractorStrategy -> coalesceDocumentTextMarkers (@core, puro) -> StatePayloadContext.getInterpolatedValue
+PipelineValidatorService -> stripDocumentTextMarkers -> extractNamespaceRoots
+ImapTriggerStrategy -> buildImapSearchQuery(config, { skipRecentWindow })
+```
+
+### Decisiones
+
+- El despacho manual de pruebas sigue sin apagar el flujo: el banco de pruebas existe para iterar.
+- Sin ningun texto documental, el prompt sigue fallando con `ERR_LLM_INTERPOLATION`: interpolar una
+  cadena vacia facturaria una inferencia sobre nada.
+- No se crea un servicio de atribucion en Nest: la cuenta de respaldo ya la resuelve la base de datos.
+- `parsed_email.text` no existe; la cadena termina en `parsed_email.clean_body`.
+- La descarga IMAP ya usa `BODY.PEEK`; la estrategia sigue en modo lectura-escritura porque las
+  ordenes de reanudacion deben marcarse como leidas.
+
+### Estado de las tareas
+
+- [x] Auditoria de la autodesactivacion por `stopOnFirstSuccess`
+- [x] Coalescencia del texto documental en el prompt y en el validador de topologia
+- [x] Palabras clave normalizadas, sondeo en solo lectura y ventana de 48 h omitible en pruebas
+- [x] Panel: coste y exito por modelo al 50 %, tarjeta Mayor/Menor, historial a ancho completo
+- [x] Barra de filtros del historial con "Limpiar filtros" y "Aplicar"
