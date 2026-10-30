@@ -9215,3 +9215,19 @@ Vacio, el paso se queda en rojo hasta que alguien escriba la pagina correcta.
 - [ ] Declarar en `backend/.env` los UUID de las paginas de pruebas de cerradas e Innodays; hasta
       entonces el Banco de Pruebas rechaza esas paginas
 - [ ] Facilitar los UUID de Produccion para cablearlos en los presets
+
+## Innobar, borrador en Sandbox y envoltorio de licitaciones
+
+### Por que el borrador solo se fuerza con `isSandbox` guardado
+
+Los flujos anteriores al toggle no traen la clave y se resuelven a Sandbox por defecto. Forzar el
+borrador con ese defecto convertiria en silencio cada noticia de produccion en un borrador
+olvidado. La estrategia solo lo aplica cuando el entorno esta escrito en el esquema; la interfaz,
+en cambio, lo aplica siempre que el toggle este en Sandbox.
+
+### Por que el envoltorio reutiliza el del marcado
+
+La plantilla de apertura ya emite `div.licitacion-entry` con su `data-expediente`. Envolverlo otra
+vez solo anadiria un nivel; basta con darle la clase estandar. Cerrar licitacion busca las dos
+clases para seguir encontrando las licitaciones antiguas. El expediente se escapa porque un codigo
+con comillas cerraria el atributo y dejaria el resto como marcado.

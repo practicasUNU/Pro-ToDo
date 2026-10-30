@@ -5041,3 +5041,25 @@ NodeConfigSandboxPage --provide(NODE_SANDBOX_MODE_KEY)--> DrupalHttpConfig -> us
 - [x] Nodo Drupal en el Banco de Pruebas, encerrado en las paginas de pruebas
 - [ ] Pendiente: declarar en `backend/.env` los UUID de pruebas que falten (cerradas, Innodays) y reiniciar Nest
 - [ ] Pendiente: confirmar los UUID de Produccion e Innodays para cablearlos en los presets
+
+## Innobar, borrador obligatorio en Sandbox y envoltorio de licitaciones
+
+Rama: `feat/drupal-and-acens-nodes-dev`. Sin migracion.
+
+### Contratos
+
+| Pieza | Contrato |
+|---|---|
+| Preset `INNOBAR` | `UPDATE_LINK_SOURCE` entre Innodays y Notiweb. Sandbox comparte `/prueba-innodays`; Produccion `/innobar` (Innodays pasa a `/innodays-madrid`). UUID vacios hasta confirmarlos |
+| Borrador en Sandbox (estrategia) | `params.isSandbox === true` guardado fuerza `status: false`. Los flujos sin la clave siguen como antes |
+| Borrador en Sandbox (store) | Toda escritura de la config con `isSandbox` deja `publishStatus: false`; el control queda deshabilitado con su nota |
+| `expedienteTemplate` | Plantilla del codigo de expediente para `APPEND_HTML_BLOCK` |
+| `wrapTenderBlock` | Si el marcado trae su `data-expediente`, le anade `pd-licitacion-block`; si no, lo envuelve en `div.pd-licitacion-block` con el expediente escapado. Paneles de acordeon y bloques sin expediente no se tocan |
+| Cerrar licitacion | `itemSelector` compuesto `.pd-licitacion-block, .licitacion-entry` para cerrar tambien las antiguas |
+
+### Estado de las tareas
+
+- [x] Preset Innobar y rutas de Produccion separadas
+- [x] Publicacion bloqueada en Sandbox (interfaz y estrategia)
+- [x] Envoltorio estandar de licitaciones con expediente escapado
+- [ ] Pendiente: UUID de Innobar e Innodays en ambos entornos
