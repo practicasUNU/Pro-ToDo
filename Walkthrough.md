@@ -9146,3 +9146,18 @@ completaba un dia valido. Con un borrador y "Aplicar" la barra se comporta como 
 ### Checklist de dependencias
 
 - [ ] Ninguna: esta ronda no lleva migracion
+
+## Fallos de API en la telemetria y barras de filtros
+
+### Por que un fallo local no cuenta contra el modelo
+
+La tasa de exito por modelo mide al proveedor. Un prompt con un marcador que no resuelve o un
+correo sin texto se rechazan antes de llamar a la API, y el modelo no tiene culpa de ello: si
+dejaran fila `FAILED`, un flujo mal configurado hundiria la tasa de un modelo sano. El codigo ya se
+comportaba asi; los tests lo dejan fijado para que un cambio futuro no lo rompa.
+
+### Por que Informes aplica todo con un solo boton
+
+Las fechas esperaban al boton y los selectores consultaban al instante, con los botones en mitad de
+la barra. Ahora la barra es un solo formulario, como en Auditoria y el Historial: se edita en
+borrador y "Aplicar" lanza una unica consulta.

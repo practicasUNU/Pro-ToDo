@@ -4960,3 +4960,22 @@ ImapTriggerStrategy -> buildImapSearchQuery(config, { skipRecentWindow })
 - [x] Palabras clave normalizadas, sondeo en solo lectura y ventana de 48 h omitible en pruebas
 - [x] Panel: coste y exito por modelo al 50 %, tarjeta Mayor/Menor, historial a ancho completo
 - [x] Barra de filtros del historial con "Limpiar filtros" y "Aplicar"
+
+## Fallos de API en la telemetria y barras de filtros de Informes y Tarifas
+
+Rama: `feat/destino-http-generico`. Sin migracion.
+
+### Contratos
+
+| Pieza | Contrato |
+|---|---|
+| `recordFailedCallUsage` | Solo se invoca en el `catch` que envuelve `generateCompletion` (LLM y OCR). Los fallos anteriores a la llamada (prompt, interpolacion, falta de texto, configuracion, adjuntos) no escriben fila |
+| `TelemetryReportFilters` | Un unico formulario: periodo, proveedor, modelo, flujo, nodo y orden en borrador; "Aplicar" los vuelca juntos al store y "Limpiar filtros" restablece el periodo por defecto |
+| `TelemetryDateRangeFilter` | Eliminado; su logica vive en `TelemetryReportFilters` |
+| Acciones de filtros | `[Limpiar filtros · filter_alt_off]` → `[Aplicar · filter_alt]` en Auditoria, Historial, Informes y Tarifas |
+
+### Estado de las tareas
+
+- [x] Tests que fijan que solo los fallos de la API cuentan como `FAILED`
+- [x] Barra de Informes en una sola tarjeta con el orden de acciones comun
+- [x] Iconos en las acciones de filtros de Tarifas
