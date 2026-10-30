@@ -156,10 +156,14 @@ describe('LlmCatalogController · perimetro de /api/llm', () => {
       // 3. Assert 🎯
       expect(response.status).toBe(200);
       expect(response.body).toEqual(TEST_RESULT);
-      expect(catalogServiceMock.testConnection).toHaveBeenCalledWith({
-        provider: LlmProvider.ANTHROPIC,
-        model: 'claude-sonnet-5-5',
-      });
+      expect(catalogServiceMock.testConnection).toHaveBeenCalledWith(
+        {
+          provider: LlmProvider.ANTHROPIC,
+          model: 'claude-sonnet-5-5',
+        },
+        // Quien pulsa el boton firma la fila de telemetria.
+        EDITOR_USER.id,
+      );
     });
 
     it('2.2 deberia devolver 400 con un proveedor fuera del enum', async () => {
@@ -202,10 +206,13 @@ describe('LlmCatalogController · perimetro de /api/llm', () => {
 
       // 3. Assert 🎯: el servicio recibe exactamente los dos campos del DTO.
       expect(response.status).toBe(200);
-      expect(catalogServiceMock.testConnection).toHaveBeenCalledWith({
-        provider: LlmProvider.MOCK,
-        model: 'mock-engine',
-      });
+      expect(catalogServiceMock.testConnection).toHaveBeenCalledWith(
+        {
+          provider: LlmProvider.MOCK,
+          model: 'mock-engine',
+        },
+        ADMIN_USER.id,
+      );
     });
 
     it('2.5 deberia propagar success:false como 200, no como error HTTP', async () => {

@@ -198,4 +198,12 @@ export class LlmTestConnectionResponseDto {
     type: LlmTestConnectionErrorDto,
   })
   error?: LlmTestConnectionErrorDto;
+
+  @ApiPropertyOptional({
+    description:
+      'Presente solo si la prueba se hizo pero su consumo no quedo registrado en la telemetria de IA',
+    example:
+      'La prueba se realizó, pero no se pudo registrar su consumo en el informe de IA.',
+  })
+  telemetryWarning?: string;
 }

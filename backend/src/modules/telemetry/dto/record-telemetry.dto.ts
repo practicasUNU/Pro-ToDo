@@ -37,7 +37,7 @@ export interface RecordTelemetryDto {
 
 /**
  * Consumo de una inferencia hecha FUERA de una ejecucion del FSM (asistente de
- * prompts o banco de pruebas), para `TelemetryService.recordAssistUsage`. No tiene ejecucion ni
+ * prompts, banco de pruebas o prueba de conexion), para `TelemetryService.recordAssistUsage`. No tiene ejecucion ni
  * nodo: en su lugar lleva el usuario que la pidio y el origen.
  */
 export interface RecordAssistUsageDto extends Omit<
@@ -48,7 +48,8 @@ export interface RecordAssistUsageDto extends Omit<
   readonly userId: string;
   readonly origin:
     | TelemetryOperationOrigin.PROMPT_OPTIMIZATION
-    | TelemetryOperationOrigin.NODE_SANDBOX;
+    | TelemetryOperationOrigin.NODE_SANDBOX
+    | TelemetryOperationOrigin.CONNECTION_TEST;
 }
 
 /** Contadores y coste ya calculados, con las tarifas que se aplicaron. */

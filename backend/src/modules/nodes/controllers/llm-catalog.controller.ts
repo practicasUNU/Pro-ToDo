@@ -18,6 +18,7 @@ import {
   ApiUnauthorizedResponse,
 } from '@nestjs/swagger';
 
+import { CurrentUser } from '@common/decorators/current-user.decorator';
 import { Roles } from '@common/decorators/roles.decorator';
 import { RolesGuard } from '@common/guards/roles.guard';
 import { JwtAuthGuard } from '@modules/auth/guards/jwt-auth.guard';
@@ -28,6 +29,8 @@ import {
 } from '@modules/nodes/dto/llm-catalog.dto';
 import { LlmProviderCatalogService } from '@modules/nodes/services/llm-provider-catalog.service';
 import { UserRole } from '@modules/users/enums/user-role.enum';
+
+import type { AuthenticatedUser } from '@modules/auth/interfaces/jwt-payload.interface';
 
 /**
  * Validacion estricta del cuerpo, igual que en `WizardController`.
@@ -116,7 +119,13 @@ export class LlmCatalogController {
   })
   public async testConnection(
     @Body(STRICT_VALIDATION) llmTestConnectionDto: LlmTestConnectionDto,
+    @CurrentUser() currentUser: AuthenticatedUser,
   ): Promise<LlmTestConnectionResponseDto> {
-    return this.llmProviderCatalogService.testConnection(llmTestConnectionDto);
+    // El usuario firma la fila de telemetria (origen PROBAR_CONEXION): la
+    // prueba se factura y debe aparecer en el informe de consumo.
+    return this.llmProviderCatalogService.testConnection(
+      llmTestConnectionDto,
+      currentUser.id,
+    );
   }
 }

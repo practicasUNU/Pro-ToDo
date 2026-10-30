@@ -133,6 +133,12 @@ const onTestConnection = async (): Promise<void> => {
   try {
     const result = await store.testConnection();
 
+    // Aparte del desenlace: la prueba se facturo y no aparecera en el informe
+    // de consumo. Callarlo dejaria un gasto sin rastro.
+    if (result.telemetryWarning !== undefined) {
+      $q.notify({ type: 'warning', message: result.telemetryWarning });
+    }
+
     if (!result.success) {
       $q.notify({
         type: 'warning',

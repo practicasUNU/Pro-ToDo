@@ -592,6 +592,37 @@ describe('LlmExtractorConfig · configurador del nodo PROCESADOR_IA', () => {
       expect(store.lastConnectionResult?.isMock).toBe(true);
     });
 
+    it('6.6bis deberia avisar si la prueba no quedo registrada en la telemetria', async () => {
+      // 1. Arrange 📐: la conexion funciono, pero su consumo no se pudo
+      //    registrar. La inferencia ya se facturo: callarlo dejaria un gasto
+      //    sin rastro en el informe.
+      const warning =
+        'La prueba se realizó, pero no se pudo registrar su consumo en el informe de IA.';
+      const nodeId = nextNodeId();
+      const wrapper = mountComponent(nodeId);
+      await flushPromises();
+      useLlmExtractorStore(nodeId).updateConfig({
+        provider: LlmProvider.ANTHROPIC,
+        model: 'claude-sonnet-5-5',
+      });
+      testLlmConnection.mockResolvedValue({
+        success: true,
+        latencyMs: 90,
+        isMock: false,
+        outputPreview: 'Conexion verificada',
+        telemetryWarning: warning,
+      });
+      await wrapper.vm.$nextTick();
+
+      // 2. Act ⚙️
+      await wrapper.get('[data-test="test-connection-btn"]').trigger('click');
+      await flushPromises();
+
+      // 3. Assert 🎯: Notify pinta en el `body`, fuera del componente.
+      expect(document.body.textContent).toContain(warning);
+      expect(document.body.textContent).toContain('Conexion correcta');
+    });
+
     it('6.7 deberia absorber una peticion rota sin dejar el boton girando', async () => {
       // 1. Arrange 📐: una excepcion del servicio no es un diagnostico del
       //    proveedor, es que no se pudo hablar con el banco de pruebas. El

@@ -102,12 +102,14 @@ export interface ModelBreakdownRow {
   readonly successRate: number | null;
 }
 
-/** Valores de `TelemetryOperationOrigin` del backend (migraciones 049 y 057). */
+/** Valores de `TelemetryOperationOrigin` del backend (migraciones 049, 057 y 061). */
 export enum TelemetryOperationOrigin {
   FLOW_EXECUTION = 'EJECUCION_FLUJO',
   PROMPT_OPTIMIZATION = 'PROMPT_OPTIMIZATION',
   /** Prueba individual de un nodo en el banco de pruebas: sin flujo. */
   NODE_SANDBOX = 'BANCO_PRUEBAS',
+  /** Boton "Probar conexion" de los nodos de IA y OCR: sin flujo. */
+  CONNECTION_TEST = 'PROBAR_CONEXION',
 }
 
 /** Etiqueta del origen, replica de `TELEMETRY_ORIGIN_LABELS` del backend. */
@@ -115,6 +117,7 @@ export const TELEMETRY_ORIGIN_LABELS: Readonly<Record<TelemetryOperationOrigin, 
   [TelemetryOperationOrigin.FLOW_EXECUTION]: 'Ejecución de flujo',
   [TelemetryOperationOrigin.PROMPT_OPTIMIZATION]: 'Optimización de prompt',
   [TelemetryOperationOrigin.NODE_SANDBOX]: 'Banco de pruebas',
+  [TelemetryOperationOrigin.CONNECTION_TEST]: 'Prueba de conexión',
 };
 
 /** Una inferencia registrada. Replica `TelemetryHistoryItemResponseDto`. */

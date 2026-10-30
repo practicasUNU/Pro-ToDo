@@ -6,7 +6,10 @@ import {
   LlmModelDescriptor,
   LlmTestConnectionResponseDto,
 } from '@modules/nodes/dto/llm-catalog.dto';
-import { LlmProvider } from '@modules/nodes/strategies/interfaces/llm-provider.interface';
+import {
+  LlmProvider,
+  LlmProviderException,
+} from '@modules/nodes/strategies/interfaces/llm-provider.interface';
 import { UserRole } from '@modules/users/enums/user-role.enum';
 import { LlmProviderFactory } from '@modules/nodes/strategies/llm-provider.factory';
 import { ANTHROPIC_API_KEY_VAR } from '@modules/nodes/strategies/providers/anthropic-llm.provider';
@@ -15,8 +18,12 @@ import {
   GEMINI_API_KEY_VAR,
 } from '@modules/nodes/strategies/providers/gemini-llm.provider';
 import { MOCK_LLM_MODEL } from '@modules/nodes/strategies/providers/mock-llm.provider';
+import { AiCallStatus } from '@modules/telemetry/enums/ai-call-status.enum';
+import { TelemetryOperationOrigin } from '@modules/telemetry/enums/telemetry-origin.enum';
+import { TelemetryService } from '@modules/telemetry/telemetry.service';
 
 import type { LlmTestConnectionDto } from '@modules/nodes/dto/llm-catalog.dto';
+import type { LlmTokenUsage } from '@modules/nodes/strategies/interfaces/llm-provider.interface';
 
 /**
  * Credencial que habilita a cada proveedor, por nombre de variable.
@@ -163,6 +170,14 @@ const PING_PROMPT =
 const TEST_CONNECTION_TIMEOUT_MS = 8_000;
 
 /**
+ * Aviso que acompana a la respuesta cuando la prueba se hizo pero su consumo
+ * no quedo registrado. Se devuelve en vez de callarlo: la inferencia ya se
+ * facturo, y el informe de consumo no la va a mostrar.
+ */
+export const TELEMETRY_NOT_RECORDED_WARNING =
+  'La prueba se realizó, pero no se pudo registrar su consumo en el informe de IA.';
+
+/**
  * Catalogo de modelos de lenguaje y banco de pruebas de conectividad.
  *
  * Existe para que el asistente deje de adivinar. Hasta ahora el formulario del
@@ -179,6 +194,7 @@ export class LlmProviderCatalogService {
   constructor(
     private readonly configService: ConfigService,
     private readonly providerFactory: LlmProviderFactory,
+    private readonly telemetryService: TelemetryService,
   ) {}
 
   /**
@@ -206,6 +222,7 @@ export class LlmProviderCatalogService {
    */
   public async testConnection(
     dto: LlmTestConnectionDto,
+    userId: string,
   ): Promise<LlmTestConnectionResponseDto> {
     // Guarda temprana: sin cliente no hay nada que probar, y pedirselo a la
     // factoria devolveria el simulador. Una prueba que responde "correcto"
@@ -247,11 +264,26 @@ export class LlmProviderCatalogService {
         }`,
       );
 
+      // Una respuesta simulada no cuesta nada ni dice nada del proveedor: no
+      // se registra, igual que las inferencias del simulador en un flujo.
+      const recorded = payload.metadata.isMock
+        ? true
+        : await this.recordUsage(dto, userId, {
+            modelUsed: payload.metadata.modelUsed || dto.model,
+            tokensPrompt: payload.metadata.tokensPrompt,
+            tokensCompletion: payload.metadata.tokensCompletion,
+            tokensReasoning: payload.metadata.tokensReasoning ?? 0,
+            usageReported: payload.metadata.usageReported ?? true,
+          });
+
       return {
         success: true,
         latencyMs,
         isMock: payload.metadata.isMock,
         outputPreview: this.buildPreview(payload.headline, payload.summary),
+        ...(recorded
+          ? {}
+          : { telemetryWarning: TELEMETRY_NOT_RECORDED_WARNING }),
       };
     } catch (error) {
       const latencyMs = Date.now() - startedAt;
@@ -261,13 +293,77 @@ export class LlmProviderCatalogService {
         `Prueba de conectividad fallida ${dto.provider}/${dto.model} tras ${latencyMs} ms: ${message}`,
       );
 
+      // El fallo de la API tambien cuenta para la tasa del modelo. Si el
+      // proveedor llego a responder (contrato roto, respuesta truncada) su
+      // consumo viaja en la excepcion; si no, la fila va con ceros.
+      const recorded =
+        dto.provider === LlmProvider.MOCK
+          ? true
+          : await this.recordUsage(
+              dto,
+              userId,
+              (error instanceof LlmProviderException
+                ? error.usage
+                : undefined) ?? {
+                modelUsed: dto.model,
+                tokensPrompt: 0,
+                tokensCompletion: 0,
+                tokensReasoning: 0,
+                usageReported: false,
+              },
+              message,
+            );
+
       return {
         success: false,
         latencyMs,
         isMock: false,
         outputPreview: '',
         error: { level: 'GRAVE', message: this.translateFailure(message) },
+        ...(recorded
+          ? {}
+          : { telemetryWarning: TELEMETRY_NOT_RECORDED_WARNING }),
       };
+    }
+  }
+
+  /**
+   * Registra la prueba en la telemetria con origen `PROBAR_CONEXION`.
+   *
+   * Best-effort y sin lanzar, como el resto de esta operacion: la prueba ya se
+   * hizo y su resultado es lo que el usuario espera ver. Devuelve `false` si no
+   * se pudo escribir, para que la respuesta lo avise en lugar de callarlo.
+   *
+   * @param errorMessage Mensaje de la API si la llamada fallo; `null` si fue bien.
+   */
+  private async recordUsage(
+    dto: LlmTestConnectionDto,
+    userId: string,
+    usage: LlmTokenUsage,
+    errorMessage: string | null = null,
+  ): Promise<boolean> {
+    try {
+      await this.telemetryService.recordAssistUsage({
+        userId,
+        origin: TelemetryOperationOrigin.CONNECTION_TEST,
+        status:
+          errorMessage === null ? AiCallStatus.SUCCESS : AiCallStatus.FAILED,
+        errorMessage,
+        aiProvider: dto.provider,
+        aiModel: usage.modelUsed || dto.model,
+        promptTokens: usage.tokensPrompt,
+        completionTokens: usage.tokensCompletion,
+        reasoningTokens: usage.tokensReasoning,
+        usageReported: usage.usageReported,
+      });
+
+      return true;
+    } catch (error) {
+      this.logger.error(
+        `No se pudo registrar el consumo de la prueba de conectividad ${dto.provider}/${dto.model} (usuario ${userId}): ${error instanceof Error ? error.message : String(error)}`,
+      );
+
+      return false;
     }
   }
 

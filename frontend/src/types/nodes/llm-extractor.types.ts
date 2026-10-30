@@ -209,6 +209,8 @@ export interface LlmTestConnectionResult {
   readonly isMock: boolean;
   readonly outputPreview: string;
   readonly error?: { readonly level: string; readonly message: string };
+  /** Solo si la prueba se hizo pero su consumo no quedo registrado. */
+  readonly telemetryWarning?: string;
 }
 
 /** Estado de un modelo en el selector, para elegir el color del distintivo. */

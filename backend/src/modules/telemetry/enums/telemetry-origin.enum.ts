@@ -15,6 +15,11 @@ export enum TelemetryOperationOrigin {
    * ejecucion ni flujo, con el usuario que la lanzo.
    */
   NODE_SANDBOX = 'BANCO_PRUEBAS',
+  /**
+   * Boton "Probar conexion" de los nodos de IA y OCR (migracion 061): una
+   * inferencia minima que se factura, con el usuario que la lanzo.
+   */
+  CONNECTION_TEST = 'PROBAR_CONEXION',
 }
 
 /** Etiqueta en castellano del origen, para informes y tablas. */
@@ -24,4 +29,5 @@ export const TELEMETRY_ORIGIN_LABELS: Readonly<
   [TelemetryOperationOrigin.FLOW_EXECUTION]: 'Ejecución de flujo',
   [TelemetryOperationOrigin.PROMPT_OPTIMIZATION]: 'Optimización de prompt',
   [TelemetryOperationOrigin.NODE_SANDBOX]: 'Banco de pruebas',
+  [TelemetryOperationOrigin.CONNECTION_TEST]: 'Prueba de conexión',
 };

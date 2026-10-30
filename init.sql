@@ -527,7 +527,8 @@ CREATE TABLE telemetria_tokens_ia (
     CONSTRAINT chk_telemetria_origen_coherente CHECK (
         (origen_operacion = 'EJECUCION_FLUJO'
             AND ejecucion_id IS NOT NULL AND flujo_id IS NOT NULL AND nodo_id IS NOT NULL)
-        OR (origen_operacion IN ('PROMPT_OPTIMIZATION', 'BANCO_PRUEBAS') AND usuario_id IS NOT NULL)
+        OR (origen_operacion IN ('PROMPT_OPTIMIZATION', 'BANCO_PRUEBAS', 'PROBAR_CONEXION')
+            AND usuario_id IS NOT NULL)
     )
 );
 

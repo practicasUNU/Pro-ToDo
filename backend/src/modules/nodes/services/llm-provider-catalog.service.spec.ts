@@ -1,6 +1,9 @@
 import { describe, expect, it, jest } from '@jest/globals';
 
-import { LlmProvider } from '@modules/nodes/strategies/interfaces/llm-provider.interface';
+import {
+  LlmProvider,
+  LlmProviderException,
+} from '@modules/nodes/strategies/interfaces/llm-provider.interface';
 import { LlmProviderFactory } from '@modules/nodes/strategies/llm-provider.factory';
 import { ANTHROPIC_API_KEY_VAR } from '@modules/nodes/strategies/providers/anthropic-llm.provider';
 import {
@@ -11,12 +14,20 @@ import {
   MOCK_LLM_MODEL,
   MockLlmProvider,
 } from '@modules/nodes/strategies/providers/mock-llm.provider';
-import { LlmProviderCatalogService } from '@modules/nodes/services/llm-provider-catalog.service';
+import {
+  LlmProviderCatalogService,
+  TELEMETRY_NOT_RECORDED_WARNING,
+} from '@modules/nodes/services/llm-provider-catalog.service';
+import { AiCallStatus } from '@modules/telemetry/enums/ai-call-status.enum';
+import { TelemetryOperationOrigin } from '@modules/telemetry/enums/telemetry-origin.enum';
+import { createMockTelemetryService } from '@test/factories/telemetry-service.factory';
 
 import type { ConfigService } from '@nestjs/config';
 import type { AnthropicLlmProvider } from '@modules/nodes/strategies/providers/anthropic-llm.provider';
 import type { GeminiLlmProvider } from '@modules/nodes/strategies/providers/gemini-llm.provider';
 import type { LlmResponsePayload } from '@modules/nodes/strategies/interfaces/llm-provider.interface';
+import type { TelemetryService } from '@modules/telemetry/telemetry.service';
+import type { TelemetryServiceMock } from '@test/factories/telemetry-service.factory';
 
 /**
  * Suite del catalogo y del banco de pruebas.
@@ -29,6 +40,9 @@ import type { LlmResponsePayload } from '@modules/nodes/strategies/interfaces/ll
 
 const ANTHROPIC_MODEL = 'claude-sonnet-5-5';
 const GEMINI_MODEL = 'gemini-3.6-flash';
+
+/** Quien pulsa "Probar conexion": firma la fila de telemetria. */
+const USER_ID = '0b9e2f4a-6c1d-4e8b-9a7f-3d5c2b1a0e9f';
 
 /** Respuesta valida de un proveedor real. */
 const buildPayload = (isMock = false): LlmResponsePayload => ({
@@ -57,6 +71,7 @@ const buildConfig = (env: Record<string, string> = {}): ConfigService =>
 interface Harness {
   readonly service: LlmProviderCatalogService;
   readonly generateCompletion: jest.Mock<() => Promise<LlmResponsePayload>>;
+  readonly telemetry: TelemetryServiceMock;
 }
 
 /**
@@ -83,11 +98,17 @@ const buildHarness = (env: Record<string, string> = {}): Harness => {
   );
   jest.spyOn(factory['logger'], 'warn').mockImplementation(() => undefined);
 
-  const service = new LlmProviderCatalogService(buildConfig(env), factory);
+  const telemetry = createMockTelemetryService();
+  const service = new LlmProviderCatalogService(
+    buildConfig(env),
+    factory,
+    telemetry as unknown as TelemetryService,
+  );
   jest.spyOn(service['logger'], 'log').mockImplementation(() => undefined);
   jest.spyOn(service['logger'], 'warn').mockImplementation(() => undefined);
+  jest.spyOn(service['logger'], 'error').mockImplementation(() => undefined);
 
-  return { service, generateCompletion };
+  return { service, generateCompletion, telemetry };
 };
 
 /** Localiza un modelo del catalogo por su identificador tecnico. */
@@ -193,10 +214,13 @@ describe('LlmProviderCatalogService · catalogo de modelos y conectividad', () =
       });
 
       // 2. Act ⚙️
-      const result = await service.testConnection({
-        provider: LlmProvider.ANTHROPIC,
-        model: ANTHROPIC_MODEL,
-      });
+      const result = await service.testConnection(
+        {
+          provider: LlmProvider.ANTHROPIC,
+          model: ANTHROPIC_MODEL,
+        },
+        USER_ID,
+      );
 
       // 3. Assert 🎯
       expect(result.success).toBe(true);
@@ -212,10 +236,13 @@ describe('LlmProviderCatalogService · catalogo de modelos y conectividad', () =
       const { service, generateCompletion } = buildHarness();
 
       // 2. Act ⚙️
-      await service.testConnection({
-        provider: LlmProvider.ANTHROPIC,
-        model: ANTHROPIC_MODEL,
-      });
+      await service.testConnection(
+        {
+          provider: LlmProvider.ANTHROPIC,
+          model: ANTHROPIC_MODEL,
+        },
+        USER_ID,
+      );
 
       // 3. Assert 🎯
       expect(generateCompletion).toHaveBeenCalledWith(
@@ -237,10 +264,13 @@ describe('LlmProviderCatalogService · catalogo de modelos y conectividad', () =
       generateCompletion.mockResolvedValue(buildPayload(true));
 
       // 2. Act ⚙️
-      const result = await service.testConnection({
-        provider: LlmProvider.ANTHROPIC,
-        model: ANTHROPIC_MODEL,
-      });
+      const result = await service.testConnection(
+        {
+          provider: LlmProvider.ANTHROPIC,
+          model: ANTHROPIC_MODEL,
+        },
+        USER_ID,
+      );
 
       // 3. Assert 🎯
       expect(result.success).toBe(true);
@@ -261,10 +291,13 @@ describe('LlmProviderCatalogService · catalogo de modelos y conectividad', () =
       );
 
       // 2. Act ⚙️
-      const result = await service.testConnection({
-        provider: LlmProvider.ANTHROPIC,
-        model: ANTHROPIC_MODEL,
-      });
+      const result = await service.testConnection(
+        {
+          provider: LlmProvider.ANTHROPIC,
+          model: ANTHROPIC_MODEL,
+        },
+        USER_ID,
+      );
 
       // 3. Assert 🎯: el mensaje original se conserva detras de la pista.
       expect(result.success).toBe(false);
@@ -282,10 +315,13 @@ describe('LlmProviderCatalogService · catalogo de modelos y conectividad', () =
       );
 
       // 2. Act ⚙️
-      const result = await service.testConnection({
-        provider: LlmProvider.ANTHROPIC,
-        model: ANTHROPIC_MODEL,
-      });
+      const result = await service.testConnection(
+        {
+          provider: LlmProvider.ANTHROPIC,
+          model: ANTHROPIC_MODEL,
+        },
+        USER_ID,
+      );
 
       // 3. Assert 🎯
       expect(result.success).toBe(false);
@@ -299,10 +335,13 @@ describe('LlmProviderCatalogService · catalogo de modelos y conectividad', () =
       const { service, generateCompletion } = buildHarness();
 
       // 2. Act ⚙️
-      const result = await service.testConnection({
-        provider: LlmProvider.OPENAI,
-        model: 'gpt-4o',
-      });
+      const result = await service.testConnection(
+        {
+          provider: LlmProvider.OPENAI,
+          model: 'gpt-4o',
+        },
+        USER_ID,
+      );
 
       // 3. Assert 🎯
       expect(result.success).toBe(false);
@@ -318,14 +357,144 @@ describe('LlmProviderCatalogService · catalogo de modelos y conectividad', () =
       const { service } = buildHarness();
 
       // 2. Act ⚙️
-      const result = await service.testConnection({
-        provider: LlmProvider.MOCK,
-        model: MOCK_LLM_MODEL,
-      });
+      const result = await service.testConnection(
+        {
+          provider: LlmProvider.MOCK,
+          model: MOCK_LLM_MODEL,
+        },
+        USER_ID,
+      );
 
       // 3. Assert 🎯
       expect(result.success).toBe(true);
       expect(result.isMock).toBe(true);
+    });
+  });
+
+  describe('5. Telemetria de la prueba (origen PROBAR_CONEXION)', () => {
+    const ANTHROPIC_DTO = {
+      provider: LlmProvider.ANTHROPIC,
+      model: ANTHROPIC_MODEL,
+    } as const;
+
+    it('should persist SUCCESS telemetry record with origen PROBAR_CONEXION when test inference succeeds', async () => {
+      // 1. Arrange 📐: el proveedor real responde con su consumo.
+      const { service, telemetry } = buildHarness({
+        [ANTHROPIC_API_KEY_VAR]: 'sk-ant-clave',
+      });
+
+      // 2. Act ⚙️
+      const result = await service.testConnection(ANTHROPIC_DTO, USER_ID);
+
+      // 3. Assert 🎯: una fila con el usuario, el modelo probado y los tokens.
+      //    El coste lo calcula el servicio de telemetria con la tarifa vigente.
+      expect(result.success).toBe(true);
+      expect(result.telemetryWarning).toBeUndefined();
+      expect(telemetry.recordAssistUsage).toHaveBeenCalledTimes(1);
+      expect(telemetry.recordAssistUsage).toHaveBeenCalledWith({
+        userId: USER_ID,
+        origin: TelemetryOperationOrigin.CONNECTION_TEST,
+        status: AiCallStatus.SUCCESS,
+        errorMessage: null,
+        aiProvider: LlmProvider.ANTHROPIC,
+        aiModel: ANTHROPIC_MODEL,
+        promptTokens: 5,
+        completionTokens: 7,
+        reasoningTokens: 0,
+        usageReported: true,
+      });
+    });
+
+    it('should persist FAILED telemetry record with error message when test inference throws API exception', async () => {
+      // 1. Arrange 📐: credencial rechazada; la API no devolvio consumo.
+      const { service, generateCompletion, telemetry } = buildHarness({
+        [ANTHROPIC_API_KEY_VAR]: 'sk-ant-caducada',
+      });
+      generateCompletion.mockRejectedValue(
+        new LlmProviderException(
+          'ERR_HTTP_CLIENT_REJECTED: El servicio remoto rechazo la peticion con 401',
+          'ERR_HTTP_CLIENT_REJECTED',
+        ),
+      );
+
+      // 2. Act ⚙️
+      const result = await service.testConnection(ANTHROPIC_DTO, USER_ID);
+
+      // 3. Assert 🎯: fila FAILED con el mensaje de la API y todo a cero.
+      expect(result.success).toBe(false);
+      expect(telemetry.recordAssistUsage).toHaveBeenCalledWith({
+        userId: USER_ID,
+        origin: TelemetryOperationOrigin.CONNECTION_TEST,
+        status: AiCallStatus.FAILED,
+        errorMessage:
+          'ERR_HTTP_CLIENT_REJECTED: El servicio remoto rechazo la peticion con 401',
+        aiProvider: LlmProvider.ANTHROPIC,
+        aiModel: ANTHROPIC_MODEL,
+        promptTokens: 0,
+        completionTokens: 0,
+        reasoningTokens: 0,
+        usageReported: false,
+      });
+    });
+
+    it('5.3 deberia registrar el consumo que trae la excepcion si el proveedor llego a facturar', async () => {
+      // 1. Arrange 📐: respuesta truncada; se cobro aunque no sirva.
+      const { service, generateCompletion, telemetry } = buildHarness();
+      const truncated = new LlmProviderException(
+        'corte por tope',
+        'ERR_LLM_PROVIDER_TRUNCATED',
+      );
+      truncated.usage = {
+        modelUsed: ANTHROPIC_MODEL,
+        tokensPrompt: 20,
+        tokensCompletion: 64,
+        tokensReasoning: 0,
+        usageReported: true,
+      };
+      generateCompletion.mockRejectedValue(truncated);
+
+      // 2. Act ⚙️
+      await service.testConnection(ANTHROPIC_DTO, USER_ID);
+
+      // 3. Assert 🎯
+      expect(telemetry.recordAssistUsage).toHaveBeenCalledWith(
+        expect.objectContaining({
+          status: AiCallStatus.FAILED,
+          promptTokens: 20,
+          completionTokens: 64,
+        }),
+      );
+    });
+
+    it('5.4 NO deberia registrar nada cuando responde el simulador', async () => {
+      // 1. Arrange 📐: sin credencial el cliente degrada; coste cero.
+      const { service, generateCompletion, telemetry } = buildHarness();
+      generateCompletion.mockResolvedValue(buildPayload(true));
+
+      // 2. Act ⚙️
+      await service.testConnection(ANTHROPIC_DTO, USER_ID);
+      await service.testConnection(
+        { provider: LlmProvider.MOCK, model: MOCK_LLM_MODEL },
+        USER_ID,
+      );
+
+      // 3. Assert 🎯
+      expect(telemetry.recordAssistUsage).not.toHaveBeenCalled();
+    });
+
+    it('5.5 deberia avisar en la respuesta si no pudo registrar el consumo, sin lanzar', async () => {
+      // 1. Arrange 📐: la prueba fue bien, pero el INSERT falla.
+      const { service, telemetry } = buildHarness({
+        [ANTHROPIC_API_KEY_VAR]: 'sk-ant-clave',
+      });
+      telemetry.recordAssistUsage.mockRejectedValue(new Error('BD caida'));
+
+      // 2. Act ⚙️
+      const result = await service.testConnection(ANTHROPIC_DTO, USER_ID);
+
+      // 3. Assert 🎯: el resultado de la prueba se conserva y el aviso viaja.
+      expect(result.success).toBe(true);
+      expect(result.telemetryWarning).toBe(TELEMETRY_NOT_RECORDED_WARNING);
     });
   });
 
