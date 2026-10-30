@@ -4998,3 +4998,46 @@ Rama: `feat/destino-http-generico`. Migracion `061-telemetria-origen-probar-cone
 - [x] Consumo y fallos de "Probar conexion" en la telemetria, con origen propio
 - [x] Aviso en la interfaz si el registro falla
 - [ ] Pendiente: aplicar la migracion 061 (`cd backend && npm run db:migrate`) y reiniciar Nest
+
+## Nodo Drupal: entorno Sandbox/Produccion, Innodays y bloqueo en el Banco de Pruebas
+
+Rama: `feat/drupal-and-acens-nodes-dev`. Sin migracion.
+
+### Contratos
+
+| Pieza | Contrato |
+|---|---|
+| `DrupalHttpConfigDto.isSandbox` | Entorno del destino; por defecto `true`. El frontend lo publica siempre en los `params` |
+| `DrupalOperationMode.UPDATE_LINK_SOURCE` | `linkSelector` + `linkAttribute` (`href` \| `src`) + `linkValueTemplate` interpolable. GET → cambia el atributo del UNICO elemento que casa → PATCH |
+| `replaceLinkAttribute` | Cirugia sobre el texto original con las posiciones de parse5: el resto del HTML vuelve a Drupal byte a byte |
+| `isSafeLinkValue` | Solo rutas relativas y `http(s)` (y `mailto` en `href`); `javascript:` y `data:` se rechazan con `ERR_DRUPAL_MISSING_PAYLOAD` |
+| `DrupalApiConfig.sandboxNodeUuids` | Lista blanca leida de las variables de paginas de pruebas del `.env` |
+| `NodeSandboxService` + `DESTINO_DRUPAL` | ADMIN y EDITOR. Rechaza `isSandbox: false` y paginas fuera de la lista blanca (`ERR_SANDBOX_DRUPAL_PRODUCTION`); fuerza `isSandbox: true` y `publishStatus: false` |
+| `DRUPAL_PRESETS` | Orden: Abrir licitacion, Cerrar licitacion, Verificacion de titulos, Innodays, Notiweb. Cada uno con su pagina por entorno; los UUID no confirmados quedan vacios |
+| `NODE_SANDBOX_MODE_KEY` | `provide` del Banco de Pruebas: el toggle queda fijo en Sandbox y deshabilitado |
+
+### Diagrama de inyeccion de dependencias
+
+```
+NodeSandboxController -> NodeSandboxService -> DrupalApiConfig.sandboxNodeUuids
+                                            -> PipelineValidatorService -> DrupalHttpStrategy
+DrupalHttpStrategy.runUpdateLinkSource -> replaceLinkAttribute (puro) -> HttpClientService (GET + PATCH)
+NodeConfigSandboxPage --provide(NODE_SANDBOX_MODE_KEY)--> DrupalHttpConfig -> useDrupalHttpStore.setSandbox
+```
+
+### Decisiones
+
+- Los UUID de Produccion, Innodays y licitaciones cerradas no se conocen: los presets los dejan vacios y
+  el paso no se puede guardar hasta escribirlos. Nunca se inventa un UUID.
+- La seccion se llama Innodays (madri+d).
+- El selector de `UPDATE_LINK_SOURCE` debe casar con exactamente un elemento; con cero o varios, `ERR_DRUPAL_DOM_TARGET` sin escribir nada.
+- `isSandbox` no cambia la ejecucion de un flujo normal: decide que paginas cargan los presets. La
+  garantia dura vive en el Banco de Pruebas.
+
+### Estado de las tareas
+
+- [x] Modo `UPDATE_LINK_SOURCE` con escritura quirurgica y validacion del esquema del enlace
+- [x] Toggle de entorno y cinco presets ordenados con rotulo y pagina por entorno
+- [x] Nodo Drupal en el Banco de Pruebas, encerrado en las paginas de pruebas
+- [ ] Pendiente: declarar en `backend/.env` los UUID de pruebas que falten (cerradas, Innodays) y reiniciar Nest
+- [ ] Pendiente: confirmar los UUID de Produccion e Innodays para cablearlos en los presets

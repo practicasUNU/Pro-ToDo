@@ -9181,3 +9181,37 @@ respuesta trae un aviso que la interfaz muestra junto al resultado.
 
 - [ ] Aplicar la migracion 061 y reiniciar Nest; sin ella, el CHECK rechaza el nuevo origen y la
       prueba devuelve el aviso de registro fallido
+
+## Nodo Drupal: entorno, Innodays y Banco de Pruebas
+
+### Por que Innodays no re-serializa la pagina
+
+La pagina de Innodays lleva estilos, scripts y un carrusel. Cargarla con cheerio y devolver
+`$.html()` cambiaria comillas, entidades y atributos de toda la pagina, y la revision en Drupal
+mostraria cientos de cambios donde solo hubo uno. Cheerio solo localiza el elemento: parse5 da la
+posicion exacta del atributo en el texto original y se sustituye ese tramo. Si el selector casa con
+cero o con varios elementos no se escribe nada, porque elegir uno seria adivinar.
+
+### Por que el nuevo enlace se valida
+
+El valor sale de una plantilla que interpola contexto, a veces texto de un modelo. Un
+`javascript:` en el `href` de una pagina publica seria un XSS persistente en el portal, asi que
+solo pasan rutas relativas y `http(s)`. Se comprueba antes de leer la pagina, sin gastar peticiones.
+
+### Por que el Banco de Pruebas no se fia del toggle
+
+Las paginas de pruebas y las publicas viven en la misma instalacion de Drupal, con la misma
+credencial: lo unico que las separa es el UUID. El toggle bloqueado es la parte visible; la garantia
+la da el backend, que rechaza `isSandbox: false` y cualquier pagina fuera de la lista blanca del
+`.env`, y deja despublicada toda noticia creada desde alli.
+
+### Por que los presets dejan UUID vacios
+
+Un UUID inventado pasaria la validacion y fallaria en ejecucion con un 404 y el flujo ya pausado.
+Vacio, el paso se queda en rojo hasta que alguien escriba la pagina correcta.
+
+### Checklist de dependencias
+
+- [ ] Declarar en `backend/.env` los UUID de las paginas de pruebas de cerradas e Innodays; hasta
+      entonces el Banco de Pruebas rechaza esas paginas
+- [ ] Facilitar los UUID de Produccion para cablearlos en los presets
