@@ -11,6 +11,8 @@ import {
   DEFAULT_DRUPAL_BUNDLE,
   DEFAULT_DRUPAL_FILE_FIELD_NAME,
   DEFAULT_DRUPAL_INSERT_POSITION,
+  DEFAULT_DRUPAL_IS_SANDBOX,
+  DEFAULT_DRUPAL_LINK_ATTRIBUTE,
   DEFAULT_DRUPAL_MODE,
   DEFAULT_DRUPAL_SOURCE_FIELD,
   DEFAULT_DRUPAL_SOURCE_NAMESPACE,
@@ -18,13 +20,16 @@ import {
   DRUPAL_BUNDLE_PATTERN,
   DRUPAL_FIELD_NAME_PATTERN,
   DRUPAL_INSERT_POSITIONS,
-  DRUPAL_SANDBOX_PRESETS,
+  DRUPAL_LINK_ATTRIBUTES,
+  DRUPAL_PRESETS,
   DrupalOperationMode,
   MAX_DRUPAL_ATTACHMENT_INDEX,
+  MAX_DRUPAL_LINK_TEMPLATE_LENGTH,
   MAX_DRUPAL_SELECTOR_LENGTH,
   MAX_DRUPAL_SUMMARY_LENGTH,
   MAX_DRUPAL_TITLE_LENGTH,
   UUID_V4_PATTERN,
+  toDrupalEnvironment,
 } from '@/types/nodes/drupal-http.types';
 import { NodeType, OUTPUT_NAMESPACE_PATTERN } from '@/types/pipeline';
 
@@ -33,7 +38,8 @@ import type { HydratableNode, UpstreamNamespace } from '@stores/nodes/node-store
 import type {
   DrupalHttpNodeConfig,
   DrupalInsertPosition,
-  DrupalSandboxPresetKey,
+  DrupalLinkAttribute,
+  DrupalPresetKey,
 } from '@/types/nodes/drupal-http.types';
 
 /** Prefijo del id de Pinia; el sufijo es el `nodeId` del `pipeline_schema`. */
@@ -62,6 +68,7 @@ const REQUIRED_PARAMS_BY_MODE: Readonly<
     'destinationNodeUuid',
     'itemSelector',
   ],
+  [DrupalOperationMode.UPDATE_LINK_SOURCE]: ['targetNodeUuid', 'linkSelector', 'linkValueTemplate'],
   [DrupalOperationMode.UPLOAD_ATTACHMENT]: ['targetNodeUuid'],
 };
 
@@ -118,6 +125,7 @@ const asEnum = <T extends string>(value: unknown, allowed: readonly T[], fallbac
 
 /** Configuracion inicial; se reutiliza en `resetConfig`. */
 const buildInitialConfig = (): DrupalHttpNodeConfig => ({
+  isSandbox: DEFAULT_DRUPAL_IS_SANDBOX,
   operationMode: DEFAULT_DRUPAL_MODE,
   bundle: DEFAULT_DRUPAL_BUNDLE,
   sourceNamespace: DEFAULT_DRUPAL_SOURCE_NAMESPACE,
@@ -132,6 +140,9 @@ const buildInitialConfig = (): DrupalHttpNodeConfig => ({
   containerSelector: null,
   itemSelector: null,
   insertPosition: DEFAULT_DRUPAL_INSERT_POSITION,
+  linkSelector: null,
+  linkAttribute: DEFAULT_DRUPAL_LINK_ATTRIBUTE,
+  linkValueTemplate: null,
   attachmentNamespace: DEFAULT_DRUPAL_ATTACHMENT_NAMESPACE,
   attachmentField: DEFAULT_DRUPAL_ATTACHMENT_FIELD,
   attachmentIndex: DEFAULT_DRUPAL_ATTACHMENT_INDEX,
@@ -248,6 +259,8 @@ const drupalHttpSetup = () => {
         ['containerSelector', current.containerSelector, MAX_DRUPAL_SELECTOR_LENGTH],
         ['itemSelector', current.itemSelector, MAX_DRUPAL_SELECTOR_LENGTH],
         ['attachmentListSelector', current.attachmentListSelector, MAX_DRUPAL_SELECTOR_LENGTH],
+        ['linkSelector', current.linkSelector, MAX_DRUPAL_SELECTOR_LENGTH],
+        ['linkValueTemplate', current.linkValueTemplate, MAX_DRUPAL_LINK_TEMPLATE_LENGTH],
       ] as const
     ).forEach(([key, value, limit]) => {
       if (value !== null && value.length > limit) malformed.push(key);
@@ -341,12 +354,20 @@ const drupalHttpSetup = () => {
   };
 
   /**
-   * Carga uno de los destinos operativos confirmados en produccion.
+   * Preset aplicado por ultima vez, para que el toggle de entorno lo siga.
    *
-   * Escribe los SIETE campos del destino en UNA sola llamada, y las dos cosas
+   * `null` en cuanto se hidrata un nodo guardado: lo que venga del esquema es
+   * del operador, y el toggle no debe reescribirlo.
+   */
+  const activePresetKey = ref<DrupalPresetKey | null>(null);
+
+  /**
+   * Carga uno de los destinos operativos en el entorno del toggle.
+   *
+   * Escribe todos los campos del destino en UNA sola llamada, y las dos cosas
    * importan:
    *
-   * - De una en una no significan nada. El UUID de la agregadora de
+   * - De uno en uno no significan nada. El UUID de la agregadora de
    *   licitaciones solo tiene sentido con `node--page` y un modo que mute HTML,
    *   y un `TRANSFER_HTML_BLOCK` sin `itemSelector` no es media configuracion:
    *   es una que falla en ejecucion.
@@ -355,22 +376,58 @@ const drupalHttpSetup = () => {
    *   a «abrir licitacion» dejaria el `itemSelector` del traslado colgado en una
    *   configuracion que ya no lo lee, y reaparecería al volver al otro modo.
    *
-   * Una sola llamada a `updateConfig` y no siete: cada una reemplaza el objeto
-   * entero y volveria a disparar los `computed` de validacion, que recorren los
-   * parametros del modo activo.
+   * No toca las plantillas (`titleTemplate`, `linkValueTemplate`): son el
+   * mapeo del contenido del flujo, no del destino.
    */
-  const applyPreset = (presetKey: DrupalSandboxPresetKey): void => {
-    const preset = DRUPAL_SANDBOX_PRESETS[presetKey];
+  const applyPreset = (presetKey: DrupalPresetKey): void => {
+    const preset = DRUPAL_PRESETS[presetKey];
+    const target = preset.environments[toDrupalEnvironment(config.value.isSandbox)];
 
     updateConfig({
       operationMode: preset.operationMode,
       bundle: preset.bundle,
-      targetNodeUuid: preset.targetNodeUuid,
-      destinationNodeUuid: preset.destinationNodeUuid,
+      targetNodeUuid: target.targetNodeUuid,
+      destinationNodeUuid: target.destinationNodeUuid,
       containerSelector: preset.containerSelector,
       itemSelector: preset.itemSelector,
       insertPosition: preset.insertPosition,
+      publishStatus: preset.publishStatus,
+      linkSelector: preset.linkSelector,
+      linkAttribute: preset.linkAttribute,
     });
+    activePresetKey.value = presetKey;
+  };
+
+  /**
+   * Cambia de entorno y, si hay un preset aplicado, mueve sus paginas al nuevo.
+   *
+   * Solo se reescriben las paginas si siguen siendo las del preset en el
+   * entorno anterior. Si el operador tecleo otra —el caso normal en Produccion,
+   * donde los UUID vienen vacios—, se respeta: el toggle no debe borrar trabajo
+   * hecho a mano.
+   */
+  const setSandbox = (isSandbox: boolean): void => {
+    const presetKey = activePresetKey.value;
+    const previous =
+      presetKey === null
+        ? null
+        : DRUPAL_PRESETS[presetKey].environments[toDrupalEnvironment(config.value.isSandbox)];
+
+    updateConfig({ isSandbox });
+
+    if (
+      presetKey !== null &&
+      previous !== null &&
+      previous.targetNodeUuid === config.value.targetNodeUuid &&
+      previous.destinationNodeUuid === config.value.destinationNodeUuid
+    ) {
+      const next = DRUPAL_PRESETS[presetKey].environments[toDrupalEnvironment(isSandbox)];
+
+      updateConfig({
+        targetNodeUuid: next.targetNodeUuid,
+        destinationNodeUuid: next.destinationNodeUuid,
+      });
+    }
   };
 
   // Atajos nominales. El componente invoca estos y no `applyPreset('...')` con
@@ -386,6 +443,10 @@ const drupalHttpSetup = () => {
 
   const applyVerificacionTitulosPreset = (): void => {
     applyPreset('VERIFICACION_TITULOS');
+  };
+
+  const applyInnodaysPreset = (): void => {
+    applyPreset('INNODAYS');
   };
 
   const applyNotiwebPreset = (): void => {
@@ -423,7 +484,13 @@ const drupalHttpSetup = () => {
    */
   const toNodeParams = (): Record<string, unknown> => {
     const { value: current } = config;
-    const params: Record<string, unknown> = { operationMode: current.operationMode };
+    // `isSandbox` viaja SIEMPRE, como `operationMode`: el entorno es una
+    // decision que tiene que leerse en el esquema guardado, no deducirse de un
+    // defecto que cambiaria de significado si cambiara el defecto.
+    const params: Record<string, unknown> = {
+      isSandbox: current.isSandbox,
+      operationMode: current.operationMode,
+    };
 
     const putDefaulted = (key: string, value: string, fallback: string): void => {
       const trimmed = value.trim();
@@ -461,6 +528,12 @@ const drupalHttpSetup = () => {
     putNullable('destinationNodeUuid', current.destinationNodeUuid);
     putNullable('containerSelector', current.containerSelector);
     putNullable('itemSelector', current.itemSelector);
+    putNullable('linkSelector', current.linkSelector);
+    putNullable('linkValueTemplate', current.linkValueTemplate);
+
+    if (current.linkAttribute !== DEFAULT_DRUPAL_LINK_ATTRIBUTE) {
+      params.linkAttribute = current.linkAttribute;
+    }
 
     if (current.insertPosition !== DEFAULT_DRUPAL_INSERT_POSITION) {
       params.insertPosition = current.insertPosition;
@@ -494,7 +567,9 @@ const drupalHttpSetup = () => {
   const hydrateFromNode = (node: HydratableNode): void => {
     const { params } = node;
 
+    activePresetKey.value = null;
     config.value = {
+      isSandbox: asBoolean(params.isSandbox, DEFAULT_DRUPAL_IS_SANDBOX),
       operationMode: asEnum(
         params.operationMode,
         Object.values(DrupalOperationMode),
@@ -517,6 +592,13 @@ const drupalHttpSetup = () => {
         DRUPAL_INSERT_POSITIONS,
         DEFAULT_DRUPAL_INSERT_POSITION,
       ),
+      linkSelector: asNullableText(params.linkSelector),
+      linkAttribute: asEnum<DrupalLinkAttribute>(
+        params.linkAttribute,
+        DRUPAL_LINK_ATTRIBUTES,
+        DEFAULT_DRUPAL_LINK_ATTRIBUTE,
+      ),
+      linkValueTemplate: asNullableText(params.linkValueTemplate),
       attachmentNamespace:
         asText(params.attachmentNamespace).trim() || DEFAULT_DRUPAL_ATTACHMENT_NAMESPACE,
       attachmentField: asText(params.attachmentField).trim() || DEFAULT_DRUPAL_ATTACHMENT_FIELD,
@@ -534,6 +616,7 @@ const drupalHttpSetup = () => {
   };
 
   const resetConfig = (): void => {
+    activePresetKey.value = null;
     config.value = buildInitialConfig();
     availableUpstreamContext.value = [];
   };
@@ -548,11 +631,14 @@ const drupalHttpSetup = () => {
     malformedParams,
     isConfigValid,
     configWarnings,
+    activePresetKey,
     updateConfig,
+    setSandbox,
     applyPreset,
     applyAbrirLicitacionPreset,
     applyCerrarLicitacionPreset,
     applyVerificacionTitulosPreset,
+    applyInnodaysPreset,
     applyNotiwebPreset,
     setAvailableUpstreamContext,
     toNodeParams,

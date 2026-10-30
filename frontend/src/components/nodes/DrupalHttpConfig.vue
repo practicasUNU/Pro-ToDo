@@ -1,25 +1,34 @@
 <script setup lang="ts">
 import { useQuasar } from 'quasar';
-import { computed } from 'vue';
+import { computed, inject, watch } from 'vue';
 
 import { useDrupalHttpStore } from '@stores/nodes/drupal-http.store';
+
+import { NODE_SANDBOX_MODE_KEY } from '@components/nodes/node-sandbox-mode';
 
 import { useSelectFilter } from '@/composables/useSelectFilter';
 
 import { NODE_TYPE_LABELS, NodeType } from '@/types/pipeline';
 import {
   DRUPAL_BUNDLES,
-  DRUPAL_SANDBOX_PRESETS,
+  DRUPAL_PRESETS,
   DrupalOperationMode,
   MAX_DRUPAL_ATTACHMENT_INDEX,
+  MAX_DRUPAL_LINK_TEMPLATE_LENGTH,
   MAX_DRUPAL_SELECTOR_LENGTH,
   MAX_DRUPAL_SUMMARY_LENGTH,
   MAX_DRUPAL_TITLE_LENGTH,
   UUID_V4_PATTERN,
+  describePresetLabel,
+  toDrupalEnvironment,
 } from '@/types/nodes/drupal-http.types';
 import { blockNonNumericKeys } from '@/utils/numeric-input';
 
-import type { DrupalInsertPosition, DrupalSandboxPresetKey } from '@/types/nodes/drupal-http.types';
+import type {
+  DrupalInsertPosition,
+  DrupalLinkAttribute,
+  DrupalPresetKey,
+} from '@/types/nodes/drupal-http.types';
 
 interface Props {
   /** Identificador del nodo en el `pipeline_schema` (contrato uniforme §3.1). */
@@ -35,24 +44,49 @@ const store = useDrupalHttpStore(props.nodeId);
 const $q = useQuasar();
 
 /**
+ * El formulario esta montado dentro del Banco de Pruebas.
+ *
+ * Alli el nodo solo puede apuntar a las paginas de pruebas: el toggle se fuerza
+ * a Sandbox y se deshabilita. Es la mitad VISIBLE de la garantia; la que manda
+ * es la del backend (`NodeSandboxService`), que rechaza cualquier pagina fuera
+ * de la lista blanca aunque el cliente la mande.
+ */
+const sandboxLocked = inject(NODE_SANDBOX_MODE_KEY, false);
+
+watch(
+  () => store.config.isSandbox,
+  (isSandbox) => {
+    if (sandboxLocked && !isSandbox) store.setSandbox(true);
+  },
+  { immediate: true },
+);
+
+/**
  * Carga un destino y lo confirma por `q-notify`.
  *
  * El acuse importa: un preset escribe siete campos repartidos por secciones que
  * pueden estar plegadas, de modo que sin aviso el unico indicio visible de que
- * el boton hizo algo seria el UUID. Los presets de traslado dejan ademas un
- * campo obligatorio vacio A PROPOSITO, y el aviso lo dice para que no se lea
- * como un fallo del boton.
+ * el boton hizo algo seria el UUID. Los presets cuya pagina no tiene UUID
+ * conocido en este entorno dejan ademas un campo obligatorio vacio A PROPOSITO,
+ * y el aviso lo dice —con la ruta— para que no se lea como un fallo del boton.
  */
-const onPresetClick = (presetKey: DrupalSandboxPresetKey): void => {
+const onPresetClick = (presetKey: DrupalPresetKey): void => {
   store.applyPreset(presetKey);
 
-  const needsDestination =
-    DRUPAL_SANDBOX_PRESETS[presetKey].operationMode === DrupalOperationMode.TRANSFER_HTML_BLOCK;
+  const preset = DRUPAL_PRESETS[presetKey];
+  const target = preset.environments[toDrupalEnvironment(store.config.isSandbox)];
+  const needsPage =
+    preset.operationMode !== DrupalOperationMode.CREATE_NODE &&
+    (target.targetNodeUuid === null ||
+      (preset.operationMode === DrupalOperationMode.TRANSFER_HTML_BLOCK &&
+        target.destinationNodeUuid === null));
 
   $q.notify({
-    type: needsDestination ? 'warning' : 'positive',
-    message: needsDestination ? TRANSFER_NOTICE : 'Preset cargado exitosamente',
-    timeout: needsDestination ? 6000 : 2000,
+    type: needsPage ? 'warning' : 'positive',
+    message: needsPage
+      ? `${describePresetLabel(preset, store.config.isSandbox)}: ${MANUAL_PAGE_NOTICE} (${target.path}).`
+      : 'Preset cargado exitosamente',
+    timeout: needsPage ? 6000 : 2000,
   });
 };
 
@@ -77,30 +111,45 @@ const BUNDLE_HINT =
  * Icono de cada destino operativo.
  *
  * Vive aqui y no en el catalogo de tipos porque es decision de PRESENTACION:
- * `DRUPAL_SANDBOX_PRESETS` describe una configuracion de Drupal y no deberia
+ * `DRUPAL_PRESETS` describe una configuracion de Drupal y no deberia
  * saber que existe Material Icons. El `Record` es completo, de modo que anadir
  * un preset sin icono no compila.
  */
-const PRESET_ICONS: Readonly<Record<DrupalSandboxPresetKey, string>> = {
+const PRESET_ICONS: Readonly<Record<DrupalPresetKey, string>> = {
   ABRIR_LICITACION: 'post_add',
   CERRAR_LICITACION: 'archive',
   VERIFICACION_TITULOS: 'school',
+  INNODAYS: 'link',
   NOTIWEB: 'newspaper',
 };
 
-const SANDBOX_NOTICE =
-  'Destinos confirmados en produccion. Cada uno rellena identificador, bundle, modo y selectores a la vez: por separado no significan nada.';
+const PRESETS_NOTICE =
+  'Destinos del portal en el entorno elegido arriba. Cada uno rellena pagina, bundle, modo y selectores a la vez: por separado no significan nada.';
+
+const ENVIRONMENT_HINT =
+  'Activado, los destinos rapidos apuntan a las paginas de pruebas del portal. Desactivado, a las paginas publicas.';
+
+/** Por que el toggle no se puede mover en el Banco de Pruebas. */
+const SANDBOX_LOCK_NOTICE =
+  'En el Banco de Pruebas solo está permitido ejecutar sobre el entorno Sandbox';
 
 /**
- * Por que «Cerrar licitacion» deja un campo pendiente.
+ * Por que un preset deja la pagina pendiente.
  *
- * Sin este aviso el operador lee el asterisco de `destinationNodeUuid` como un
- * fallo del preset y vuelve a pulsarlo. La pagina de licitaciones CERRADAS no
- * tiene UUID conocido todavia, y apuntarla a la de abiertas «para probar» seria
- * destructivo (ver el TSDoc de `destinationNodeUuid` en los tipos).
+ * Sin este aviso el operador lee el asterisco del UUID como un fallo del preset
+ * y vuelve a pulsarlo. Esas paginas no tienen UUID confirmado, y apuntarlas a
+ * otra «para probar» puede ser destructivo (ver `DrupalPresetTarget`).
  */
-const TRANSFER_NOTICE =
-  'Cerrar licitacion deja a proposito la pagina de destino sin rellenar: hay que indicar la de licitaciones cerradas antes de poder guardar.';
+const MANUAL_PAGE_NOTICE =
+  'indica a mano el UUID de la pagina, que no esta confirmado, antes de poder guardar';
+
+const LINK_NOTICE =
+  'Modo enlace: se lee la pagina, se cambia SOLO el atributo del elemento elegido y se guarda. El resto del HTML, los estilos y los scripts no se tocan. El selector debe encontrar exactamente un elemento.';
+
+const LINK_ATTRIBUTE_OPTIONS: readonly { label: string; value: DrupalLinkAttribute }[] = [
+  { label: 'href — destino de un enlace', value: 'href' },
+  { label: 'src — origen de una imagen', value: 'src' },
+];
 
 const SOURCE_HINT =
   'Solo se ofrecen los namespaces que publican los pasos ANTERIORES de este flujo. Elegir uno que nadie produzca rechaza el guardado con ERR_MISSING_UPSTREAM_CONTEXT.';
@@ -166,6 +215,10 @@ const MODE_OPTIONS: readonly LabeledOption[] = [
     value: DrupalOperationMode.TRANSFER_HTML_BLOCK,
   },
   {
+    label: 'Actualizar el enlace o la imagen de un elemento (Innodays)',
+    value: DrupalOperationMode.UPDATE_LINK_SOURCE,
+  },
+  {
     label: 'Subir un adjunto del correo como fichero fisico',
     value: DrupalOperationMode.UPLOAD_ATTACHMENT,
   },
@@ -229,6 +282,10 @@ const isUploadAttachment = computed<boolean>(
 
 const isTransfer = computed<boolean>(
   () => store.config.operationMode === DrupalOperationMode.TRANSFER_HTML_BLOCK,
+);
+
+const isLinkUpdate = computed<boolean>(
+  () => store.config.operationMode === DrupalOperationMode.UPDATE_LINK_SOURCE,
 );
 
 /** Todos los modos menos `CREATE_NODE` apuntan a una entidad que ya existe. */
@@ -300,6 +357,22 @@ const itemSelectorRules = [
     `El selector no puede superar ${MAX_DRUPAL_SELECTOR_LENGTH} caracteres`,
 ];
 
+const linkSelectorRules = [
+  (value: string | null): boolean | string =>
+    (value ?? '').trim() !== '' || 'Hace falta para localizar el elemento',
+  (value: string | null): boolean | string =>
+    (value ?? '').length <= MAX_DRUPAL_SELECTOR_LENGTH ||
+    `El selector no puede superar ${MAX_DRUPAL_SELECTOR_LENGTH} caracteres`,
+];
+
+const linkValueRules = [
+  (value: string | null): boolean | string =>
+    (value ?? '').trim() !== '' || 'Hace falta el nuevo valor del enlace',
+  (value: string | null): boolean | string =>
+    (value ?? '').length <= MAX_DRUPAL_LINK_TEMPLATE_LENGTH ||
+    `El valor no puede superar ${MAX_DRUPAL_LINK_TEMPLATE_LENGTH} caracteres`,
+];
+
 const containerSelectorRules = [
   (value: string | null): boolean | string =>
     (value ?? '').length <= MAX_DRUPAL_SELECTOR_LENGTH ||
@@ -347,6 +420,20 @@ const toNullableText = (value: string | number | null): string | null => {
       </template>
       <p class="pd-subtitle q-mb-none">{{ DESTINATION_NOTICE }}</p>
     </q-banner>
+
+    <div class="q-mb-md" data-test="environment-field">
+      <q-toggle
+        :model-value="store.config.isSandbox"
+        label="Usar entorno de pruebas (Sandbox)"
+        :disable="sandboxLocked"
+        data-test="environment-toggle"
+        @update:model-value="store.setSandbox($event)"
+      />
+      <p v-if="sandboxLocked" class="pd-subtitle q-mb-none" data-test="sandbox-lock-notice">
+        <q-icon name="lock" size="16px" class="q-mr-xs" />{{ SANDBOX_LOCK_NOTICE }}
+      </p>
+      <p v-else class="pd-subtitle q-mb-none">{{ ENVIRONMENT_HINT }}</p>
+    </div>
 
     <h3 class="pd-h2 q-mt-lg q-mb-md">Destino</h3>
 
@@ -402,13 +489,13 @@ const toNullableText = (value: string | number | null): string | null => {
       </div>
     </div>
 
-    <p class="pd-subtitle q-mt-md q-mb-xs">{{ SANDBOX_NOTICE }}</p>
+    <p class="pd-subtitle q-mt-md q-mb-xs">{{ PRESETS_NOTICE }}</p>
     <div class="row q-gutter-sm q-mb-sm" data-test="sandbox-presets">
-      <!-- Se recorre el catalogo en vez de escribir tres bloques iguales:
-           anadir un destino operativo pasa a ser una entrada en
-           DRUPAL_SANDBOX_PRESETS y no un cuarto `q-btn` aqui. -->
+      <!-- Se recorre el catalogo en vez de escribir cinco bloques iguales: el
+           orden de los botones es el de DRUPAL_PRESETS, y anadir un destino
+           operativo pasa a ser una entrada alli y no un `q-btn` mas aqui. -->
       <q-btn
-        v-for="(preset, key) in DRUPAL_SANDBOX_PRESETS"
+        v-for="(preset, key) in DRUPAL_PRESETS"
         :key="key"
         flat
         dense
@@ -416,12 +503,15 @@ const toNullableText = (value: string | number | null): string | null => {
         :icon="PRESET_ICONS[key]"
         icon-right="north_east"
         class="pd-preset-btn"
-        :label="preset.label"
+        :label="describePresetLabel(preset, store.config.isSandbox)"
         :data-test="`preset-${key.toLowerCase()}`"
         @click="onPresetClick(key)"
       >
         <q-tooltip class="pd-preset-tooltip" anchor="bottom left" self="top left">
           <div>{{ preset.description }}</div>
+          <div class="q-mt-xs pd-mono">
+            {{ preset.environments[toDrupalEnvironment(store.config.isSandbox)].path }}
+          </div>
           <div v-if="preset.associatedTemplateName !== null" class="q-mt-xs">
             Plantilla: {{ preset.associatedTemplateName }}
           </div>
@@ -565,6 +655,67 @@ const toNullableText = (value: string | number | null): string | null => {
           hint="Se escribe AQUI primero: si fallara despues la retirada del origen, el bloque queda duplicado y no perdido."
           :rules="requiredUuidRules"
           @update:model-value="store.updateConfig({ destinationNodeUuid: toNullableText($event) })"
+        />
+      </div>
+
+      <div v-if="isLinkUpdate" class="col-12">
+        <q-banner dense class="pd-info-banner q-mb-sm" data-test="link-notice">
+          <template #avatar>
+            <q-icon name="link" size="20px" class="pd-node-icon" />
+          </template>
+          <p class="pd-subtitle q-mb-none">{{ LINK_NOTICE }}</p>
+        </q-banner>
+      </div>
+
+      <div v-if="isLinkUpdate" class="col-12 col-md-8" data-test="link-selector-field">
+        <label class="pd-label" for="drupal-link-selector">
+          Elemento a actualizar (Selector CSS)<span class="pd-required">*</span>
+        </label>
+        <q-input
+          id="drupal-link-selector"
+          :model-value="store.config.linkSelector"
+          outlined
+          dense
+          class="q-mt-xs pd-mono"
+          placeholder="table tr:contains('Agrifood') a"
+          :maxlength="MAX_DRUPAL_SELECTOR_LENGTH"
+          :rules="linkSelectorRules"
+          @update:model-value="store.updateConfig({ linkSelector: toNullableText($event) })"
+        />
+      </div>
+
+      <div v-if="isLinkUpdate" class="col-12 col-md-4" data-test="link-attribute-field">
+        <label class="pd-label" for="drupal-link-attribute">
+          Atributo<span class="pd-required">*</span>
+        </label>
+        <q-select
+          id="drupal-link-attribute"
+          :model-value="store.config.linkAttribute"
+          :options="LINK_ATTRIBUTE_OPTIONS"
+          outlined
+          dense
+          emit-value
+          map-options
+          class="q-mt-xs"
+          @update:model-value="store.updateConfig({ linkAttribute: $event as DrupalLinkAttribute })"
+        />
+      </div>
+
+      <div v-if="isLinkUpdate" class="col-12" data-test="link-value-field">
+        <label class="pd-label" for="drupal-link-value">
+          Nuevo valor<span class="pd-required">*</span>
+        </label>
+        <q-input
+          id="drupal-link-value"
+          :model-value="store.config.linkValueTemplate"
+          outlined
+          dense
+          class="q-mt-xs pd-mono"
+          placeholder="{{llm_response.url}}"
+          hint="Admite marcadores {{namespace.campo}}. Solo rutas relativas y http(s); un javascript: o un data: se rechazan al ejecutar."
+          :maxlength="MAX_DRUPAL_LINK_TEMPLATE_LENGTH"
+          :rules="linkValueRules"
+          @update:model-value="store.updateConfig({ linkValueTemplate: toNullableText($event) })"
         />
       </div>
 

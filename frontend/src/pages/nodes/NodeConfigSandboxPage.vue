@@ -1,11 +1,12 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, shallowRef, watch } from 'vue';
+import { computed, onMounted, provide, ref, shallowRef, watch } from 'vue';
 
 import { useNodeCatalogStore } from '@stores/node-catalog.store';
 import { resolveNodeStore } from '@stores/nodes/node-store-registry';
 
 import { configurableNodeTypes, nodeConfigRegistry } from '@components/nodes/node-config-registry';
 import NodeSandboxRunner from '@components/nodes/NodeSandboxRunner.vue';
+import { NODE_SANDBOX_MODE_KEY } from '@components/nodes/node-sandbox-mode';
 
 import { buildContextForNamespaces } from '@/utils/upstream-catalog';
 
@@ -37,6 +38,10 @@ import type { NodeConfigStore, UpstreamNamespace } from '@stores/nodes/node-stor
  * es lo que permite alternar entre tipos sin perder lo escrito en cada uno.
  */
 const SANDBOX_NODE_ID = 'nodo_demo';
+
+// Los configuradores montados aqui saben que estan en el banco: el destino
+// Drupal se encierra en el entorno de pruebas (toggle fijo en Sandbox).
+provide(NODE_SANDBOX_MODE_KEY, true);
 
 const selectedNodeType = ref<NodeType>(NodeType.MAPEADOR_PLANTILLA);
 

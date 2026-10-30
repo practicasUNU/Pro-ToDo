@@ -40,6 +40,21 @@ export const DRUPAL_AUTH_TYPE_VAR = 'DRUPAL_AUTH_TYPE';
 export const DRUPAL_API_TIMEOUT_MS_VAR = 'DRUPAL_API_TIMEOUT_MS';
 
 /**
+ * Variables con los UUID de las paginas de PRUEBAS del portal.
+ *
+ * Son la lista blanca del banco de pruebas: un nodo DESTINO_DRUPAL lanzado
+ * desde alli solo puede escribir en estas paginas. Se leen del entorno y no se
+ * cablean porque otra instalacion de Drupal tendra otras paginas de pruebas.
+ * Las que no esten declaradas simplemente no entran en la lista.
+ */
+export const DRUPAL_SANDBOX_NODE_UUID_VARS = [
+  'DRUPAL_SANDBOX_LICITACIONES_UUID',
+  'DRUPAL_SANDBOX_LICITACIONES_CERRADAS_UUID',
+  'DRUPAL_SANDBOX_TITULOS_UUID',
+  'DRUPAL_SANDBOX_INNODAYS_UUID',
+] as const;
+
+/**
  * Esquemas de autenticacion que la estrategia sabe componer.
  *
  * `BASIC` es el que acepta la instalacion de Madrid+D, que monta el modulo
@@ -164,5 +179,19 @@ export class DrupalApiConfig {
     if (this.token.length === 0) return false;
 
     return this.authType === 'BEARER' || this.user.length > 0;
+  }
+
+  /**
+   * UUID de las paginas de pruebas declaradas en el entorno, en minusculas.
+   *
+   * Se recalcula en cada lectura, como el resto de esta clase: una pagina
+   * anadida al `.env` vale tras reiniciar sin tocar codigo.
+   */
+  public get sandboxNodeUuids(): ReadonlySet<string> {
+    const uuids = DRUPAL_SANDBOX_NODE_UUID_VARS.map((variable) =>
+      this.configService.get<string>(variable)?.trim().toLowerCase(),
+    ).filter((uuid): uuid is string => uuid !== undefined && uuid !== '');
+
+    return new Set(uuids);
   }
 }

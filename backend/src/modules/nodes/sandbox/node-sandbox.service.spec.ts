@@ -3,11 +3,15 @@ import { BadRequestException } from '@nestjs/common';
 import { NodeType } from '@core/fsm/types/pipeline-schema.types';
 import { UserRole } from '@modules/users/enums/user-role.enum';
 
-import { SANDBOX_NODE_ID } from './node-sandbox.constants';
+import {
+  ERR_SANDBOX_DRUPAL_PRODUCTION,
+  SANDBOX_NODE_ID,
+} from './node-sandbox.constants';
 import { NodeSandboxService } from './node-sandbox.service';
 
 import { AuditActionType } from '@modules/audit/enums/audit-action.enum';
 
+import type { DrupalApiConfig } from '@core/config/drupal-api.config';
 import type { StatePayloadContext } from '@core/fsm/context/state-payload.context';
 import type { AuditLoggerService } from '@modules/audit/services/audit-logger.service';
 import type { NodeStrategyFactory } from '@core/fsm/factories/node-strategy.factory';
@@ -19,6 +23,17 @@ const ADMIN: AuthenticatedUser = {
   id: '3f1c2b64-8a5e-4c2f-9d3a-7b6e5f4c1a20',
   email: 'admin@unuware.com',
   role: UserRole.ADMIN,
+};
+
+/** Paginas de pruebas declaradas en el `.env` simulado. */
+const SANDBOX_PAGE_UUID = '7f1700bf-b54b-4c12-b71a-8a71f1f0ee38';
+const SANDBOX_CLOSED_UUID = '0a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d';
+const PRODUCTION_PAGE_UUID = '11111111-2222-4333-8444-555555555555';
+
+const EDITOR: AuthenticatedUser = {
+  id: '9e8d7c6b-5a4f-4e3d-8c2b-1a0f9e8d7c6b',
+  email: 'editor@unuware.com',
+  role: UserRole.EDITOR,
 };
 
 const buildHarness = (
@@ -38,6 +53,9 @@ const buildHarness = (
       { getStrategy: () => ({ execute }) } as unknown as NodeStrategyFactory,
       { validateStandaloneParams } as unknown as PipelineValidatorService,
       { record } as unknown as AuditLoggerService,
+      {
+        sandboxNodeUuids: new Set([SANDBOX_PAGE_UUID, SANDBOX_CLOSED_UUID]),
+      } as unknown as DrupalApiConfig,
     ),
     execute,
     validateStandaloneParams,
@@ -218,6 +236,117 @@ describe('NodeSandboxService', () => {
         BadRequestException,
       );
       expect(record).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('3. Nodo Drupal encerrado en el entorno de pruebas', () => {
+    /** `params` con los que se llamo a la estrategia en la primera ejecucion. */
+    const executedParams = (execute: jest.Mock): Record<string, unknown> =>
+      (
+        execute.mock.calls[0] as [StatePayloadContext, Record<string, unknown>]
+      )[1];
+
+    const drupalDto = (params: Record<string, unknown>): RunNodeSandboxDto => ({
+      nodeType: NodeType.DESTINO_DRUPAL,
+      params,
+      upstreamContext: {},
+    });
+
+    it('should enforce isSandbox to true when executing drupal node inside node sandbox', async () => {
+      // 1. Arrange 📐: el formulario no manda `isSandbox`; un EDITOR prueba a
+      //    trasladar una licitacion entre dos paginas de pruebas.
+      const { service, execute, validateStandaloneParams } = buildHarness();
+      const params = {
+        operationMode: 'TRANSFER_HTML_BLOCK',
+        bundle: 'node--page',
+        targetNodeUuid: SANDBOX_PAGE_UUID,
+        destinationNodeUuid: SANDBOX_CLOSED_UUID.toUpperCase(),
+        itemSelector: '.licitacion-entry',
+      };
+
+      // 2. Act ⚙️
+      await service.run(drupalDto(params), EDITOR);
+
+      // 3. Assert 🎯: lo validado y lo ejecutado llevan el entorno forzado y
+      //    el alta despublicada, aunque el cliente no lo pidiera.
+      const expected = { ...params, isSandbox: true, publishStatus: false };
+      expect(validateStandaloneParams).toHaveBeenCalledWith(
+        NodeType.DESTINO_DRUPAL,
+        expected,
+      );
+      expect(executedParams(execute)).toEqual(expected);
+    });
+
+    it('3.2 deberia rechazar isSandbox:false sin ejecutar ni auditar', async () => {
+      // 1. Arrange 📐
+      const { service, execute, record } = buildHarness();
+
+      // 2. Act ⚙️
+      const run = service.run(
+        drupalDto({ isSandbox: false, targetNodeUuid: SANDBOX_PAGE_UUID }),
+        ADMIN,
+      );
+
+      // 3. Assert 🎯
+      await expect(run).rejects.toMatchObject({
+        response: { code: ERR_SANDBOX_DRUPAL_PRODUCTION },
+      });
+      expect(execute).not.toHaveBeenCalled();
+      expect(record).not.toHaveBeenCalled();
+    });
+
+    it('3.3 deberia rechazar una pagina fuera de la lista blanca aunque diga isSandbox', async () => {
+      // 1. Arrange 📐: un UUID de produccion tecleado a mano.
+      const { service, execute } = buildHarness();
+
+      // 2. Act ⚙️
+      const run = service.run(
+        drupalDto({
+          isSandbox: true,
+          operationMode: 'APPEND_HTML_BLOCK',
+          targetNodeUuid: PRODUCTION_PAGE_UUID,
+        }),
+        EDITOR,
+      );
+
+      // 3. Assert 🎯
+      await expect(run).rejects.toBeInstanceOf(BadRequestException);
+      await expect(run).rejects.toMatchObject({
+        response: { code: ERR_SANDBOX_DRUPAL_PRODUCTION },
+      });
+      expect(execute).not.toHaveBeenCalled();
+    });
+
+    it('3.4 deberia dejar crear una noticia sin pagina, siempre despublicada', async () => {
+      // 1. Arrange 📐: CREATE_NODE no cita pagina alguna.
+      const { service, execute } = buildHarness();
+
+      // 2. Act ⚙️
+      await service.run(
+        drupalDto({
+          operationMode: 'CREATE_NODE',
+          titleTemplate: 'Prueba',
+          publishStatus: true,
+        }),
+        ADMIN,
+      );
+
+      // 3. Assert 🎯
+      expect(executedParams(execute)).toMatchObject({
+        isSandbox: true,
+        publishStatus: false,
+      });
+    });
+
+    it('3.5 NO deberia tocar los params de otros nodos', async () => {
+      // 1. Arrange 📐
+      const { service, execute } = buildHarness();
+
+      // 2. Act ⚙️
+      await service.run(DTO, ADMIN);
+
+      // 3. Assert 🎯
+      expect(executedParams(execute)).toEqual(DTO.params);
     });
   });
 });

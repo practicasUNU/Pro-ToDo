@@ -19,18 +19,42 @@ import { MAX_SELECTOR_LENGTH } from './template-mapper-config.dto';
 /**
  * Modos operativos del nodo DESTINO_DRUPAL contra Drupal JSON:API.
  *
- * Son cuatro trabajos distintos sobre el mismo CMS y no cuatro variantes del
- * mismo: `CREATE_NODE` crea una entidad propia, los dos de HTML mutan el
- * `body.value` de una pagina AGREGADORA que acumula bloques, y
- * `UPLOAD_ATTACHMENT` sube un binario. Un enum y no un union type porque
- * `@IsEnum()` necesita un objeto disponible en runtime.
+ * Son cinco trabajos distintos sobre el mismo CMS y no cinco variantes del
+ * mismo: `CREATE_NODE` crea una entidad propia, los dos de bloques mutan el
+ * `body.value` de una pagina AGREGADORA que acumula bloques,
+ * `UPDATE_LINK_SOURCE` cambia un unico atributo `href`/`src` de esa misma
+ * clase de pagina (Innodays) y `UPLOAD_ATTACHMENT` sube un binario. Un enum y
+ * no un union type porque `@IsEnum()` necesita un objeto disponible en runtime.
  */
 export enum DrupalOperationMode {
   CREATE_NODE = 'CREATE_NODE',
   APPEND_HTML_BLOCK = 'APPEND_HTML_BLOCK',
   TRANSFER_HTML_BLOCK = 'TRANSFER_HTML_BLOCK',
+  UPDATE_LINK_SOURCE = 'UPDATE_LINK_SOURCE',
   UPLOAD_ATTACHMENT = 'UPLOAD_ATTACHMENT',
 }
+
+/** Atributo que reescribe `UPDATE_LINK_SOURCE`: el destino de un enlace o de una imagen. */
+export type DrupalLinkAttribute = 'href' | 'src';
+
+export const DRUPAL_LINK_ATTRIBUTES: readonly DrupalLinkAttribute[] = [
+  'href',
+  'src',
+];
+
+export const DEFAULT_DRUPAL_LINK_ATTRIBUTE: DrupalLinkAttribute = 'href';
+
+/** Longitud maxima de la plantilla del nuevo enlace: una URL, no un texto. */
+export const MAX_DRUPAL_LINK_TEMPLATE_LENGTH = 2048;
+
+/**
+ * Entorno por defecto del nodo: el de pruebas.
+ *
+ * Un nodo nuevo apunta al sandbox hasta que alguien lo cambie a conciencia:
+ * equivocarse en ese sentido cuesta una prueba repetida, y en el contrario
+ * cuesta publicar en el portal real.
+ */
+export const DEFAULT_DRUPAL_IS_SANDBOX = true;
 
 /** Donde se inserta un bloque nuevo dentro del contenedor de la pagina. */
 export type DrupalInsertPosition = 'PREPEND' | 'APPEND';
@@ -189,6 +213,15 @@ const UUID_V4_PATTERN =
  * resultado; declararlo tambien aqui crearia una segunda fuente de verdad.
  */
 export class DrupalHttpConfigDto {
+  @ApiPropertyOptional({
+    description:
+      'Entorno del destino: true para las paginas de pruebas, false para las del portal. En el banco de pruebas se fuerza a true.',
+    default: DEFAULT_DRUPAL_IS_SANDBOX,
+  })
+  @IsOptional()
+  @IsBoolean({ message: 'isSandbox debe ser booleano.' })
+  isSandbox?: boolean;
+
   @ApiPropertyOptional({
     description:
       'Modo operativo de publicacion o mutacion en Drupal. Por defecto CREATE_NODE.',
@@ -363,6 +396,41 @@ export class DrupalHttpConfigDto {
 
   @ApiPropertyOptional({
     description:
+      "Selector CSS del UNICO elemento cuyo enlace se actualiza en UPDATE_LINK_SOURCE (ej. `table tr:contains('Agrifood') a`).",
+    example: "table tr:contains('Agrifood') a",
+  })
+  @IsOptional()
+  @IsString({ message: 'linkSelector debe ser una cadena.' })
+  @MaxLength(MAX_SELECTOR_LENGTH, {
+    message: `linkSelector no puede superar ${MAX_SELECTOR_LENGTH} caracteres.`,
+  })
+  linkSelector?: string;
+
+  @ApiPropertyOptional({
+    description: 'Atributo que se reescribe en UPDATE_LINK_SOURCE.',
+    enum: DRUPAL_LINK_ATTRIBUTES,
+    default: DEFAULT_DRUPAL_LINK_ATTRIBUTE,
+  })
+  @IsOptional()
+  @IsIn(DRUPAL_LINK_ATTRIBUTES, {
+    message: 'linkAttribute debe ser href o src.',
+  })
+  linkAttribute?: DrupalLinkAttribute;
+
+  @ApiPropertyOptional({
+    description:
+      'Plantilla interpolable del nuevo valor del atributo en UPDATE_LINK_SOURCE (ej. "{{llm_response.url}}").',
+    example: '{{llm_response.url}}',
+  })
+  @IsOptional()
+  @IsString({ message: 'linkValueTemplate debe ser una cadena.' })
+  @MaxLength(MAX_DRUPAL_LINK_TEMPLATE_LENGTH, {
+    message: `linkValueTemplate no puede superar ${MAX_DRUPAL_LINK_TEMPLATE_LENGTH} caracteres.`,
+  })
+  linkValueTemplate?: string;
+
+  @ApiPropertyOptional({
+    description:
       'Namespace del que sale el binario del adjunto. Por defecto `raw_email`: es el UNICO que lleva `contentBase64` (`parsed_email` publica el inventario sin bytes).',
     default: DEFAULT_DRUPAL_ATTACHMENT_NAMESPACE,
     pattern: OUTPUT_NAMESPACE_PATTERN.source,
@@ -439,6 +507,7 @@ export class DrupalHttpConfigDto {
 
 /** Configuracion del destino Drupal con los valores por defecto ya aplicados. */
 export interface ResolvedDrupalHttpConfig {
+  readonly isSandbox: boolean;
   readonly operationMode: DrupalOperationMode;
   readonly bundle: string;
   readonly sourceNamespace: string;
@@ -453,6 +522,9 @@ export interface ResolvedDrupalHttpConfig {
   readonly containerSelector: string | null;
   readonly itemSelector: string | null;
   readonly insertPosition: DrupalInsertPosition;
+  readonly linkSelector: string | null;
+  readonly linkAttribute: DrupalLinkAttribute;
+  readonly linkValueTemplate: string | null;
   readonly attachmentNamespace: string;
   readonly attachmentField: string;
   readonly attachmentIndex: number;
@@ -483,6 +555,7 @@ const trimmedOrNull = (value: string | undefined): string | null => {
 export const resolveDrupalHttpConfig = (
   dto: DrupalHttpConfigDto,
 ): ResolvedDrupalHttpConfig => ({
+  isSandbox: dto.isSandbox ?? DEFAULT_DRUPAL_IS_SANDBOX,
   operationMode: dto.operationMode ?? DEFAULT_DRUPAL_MODE,
   bundle: trimmedOrNull(dto.bundle) ?? DEFAULT_DRUPAL_BUNDLE,
   sourceNamespace:
@@ -498,6 +571,9 @@ export const resolveDrupalHttpConfig = (
   containerSelector: trimmedOrNull(dto.containerSelector),
   itemSelector: trimmedOrNull(dto.itemSelector),
   insertPosition: dto.insertPosition ?? DEFAULT_DRUPAL_INSERT_POSITION,
+  linkSelector: trimmedOrNull(dto.linkSelector),
+  linkAttribute: dto.linkAttribute ?? DEFAULT_DRUPAL_LINK_ATTRIBUTE,
+  linkValueTemplate: trimmedOrNull(dto.linkValueTemplate),
   attachmentNamespace:
     trimmedOrNull(dto.attachmentNamespace) ??
     DEFAULT_DRUPAL_ATTACHMENT_NAMESPACE,

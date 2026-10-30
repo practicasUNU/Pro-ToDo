@@ -12,7 +12,7 @@ import {
   DEFAULT_DRUPAL_FILE_FIELD_NAME,
   DEFAULT_DRUPAL_SOURCE_FIELD,
   DEFAULT_DRUPAL_SOURCE_NAMESPACE,
-  DRUPAL_SANDBOX_PRESETS,
+  DRUPAL_PRESETS,
   DrupalOperationMode,
   MAX_DRUPAL_ATTACHMENT_INDEX,
   MAX_DRUPAL_SELECTOR_LENGTH,
@@ -38,7 +38,7 @@ const nextNodeId = (): string => `destino_http_${(nodeCounter += 1)}`;
 // de Notiweb, que da de alta contenido nuevo y no cuelga de ninguna pagina. El
 // de apertura SI declara uno, asi que se estrecha aqui en vez de salpicar cada
 // aserto con una comprobacion que no es lo que la prueba mide.
-const SOURCE_UUID = DRUPAL_SANDBOX_PRESETS.ABRIR_LICITACION.targetNodeUuid as string;
+const SOURCE_UUID = DRUPAL_PRESETS.ABRIR_LICITACION.environments.SANDBOX.targetNodeUuid as string;
 const DESTINATION_UUID = '3b9f5c21-7d84-4a6e-9c13-2f8e5a0d4b77';
 
 /** Contexto tipico de un flujo completo: escudo delante del destino. */
@@ -71,6 +71,7 @@ describe('useDrupalHttpStore · configuracion del nodo DESTINO_DRUPAL', () => {
       // 2. Act ⚙️ & 3. Assert 🎯: la replica tiene que coincidir campo a campo,
       //    o la interfaz mostraria una configuracion distinta de la que corre.
       expect(store.config).toEqual({
+        isSandbox: true,
         operationMode: DrupalOperationMode.CREATE_NODE,
         bundle: DEFAULT_DRUPAL_BUNDLE,
         sourceNamespace: DEFAULT_DRUPAL_SOURCE_NAMESPACE,
@@ -85,6 +86,9 @@ describe('useDrupalHttpStore · configuracion del nodo DESTINO_DRUPAL', () => {
         containerSelector: null,
         itemSelector: null,
         insertPosition: 'PREPEND',
+        linkSelector: null,
+        linkAttribute: 'href',
+        linkValueTemplate: null,
         attachmentNamespace: DEFAULT_DRUPAL_ATTACHMENT_NAMESPACE,
         attachmentField: DEFAULT_DRUPAL_ATTACHMENT_FIELD,
         attachmentIndex: 0,
@@ -460,7 +464,7 @@ describe('useDrupalHttpStore · configuracion del nodo DESTINO_DRUPAL', () => {
       // 1. Arrange 📐: juntos o no significan nada. El UUID de la agregadora
       //    solo tiene sentido con `node--page` y un modo que mute HTML.
       const store = useDrupalHttpStore(nextNodeId());
-      const preset = DRUPAL_SANDBOX_PRESETS.ABRIR_LICITACION;
+      const preset = DRUPAL_PRESETS.ABRIR_LICITACION;
 
       // 2. Act ⚙️
       store.applyAbrirLicitacionPreset();
@@ -468,7 +472,7 @@ describe('useDrupalHttpStore · configuracion del nodo DESTINO_DRUPAL', () => {
       // 3. Assert 🎯
       expect(store.config.operationMode).toBe(DrupalOperationMode.APPEND_HTML_BLOCK);
       expect(store.config.bundle).toBe('node--page');
-      expect(store.config.targetNodeUuid).toBe(preset.targetNodeUuid);
+      expect(store.config.targetNodeUuid).toBe(preset.environments.SANDBOX.targetNodeUuid);
       expect(store.config.destinationNodeUuid).toBeNull();
       // Contra el propio preset y no contra un literal: el selector del panel
       // desplegable es un dato del portal, y repetirlo aqui crearia una segunda
@@ -524,7 +528,7 @@ describe('useDrupalHttpStore · configuracion del nodo DESTINO_DRUPAL', () => {
     it('6.5 deberia cargar VERIFICACION_TITULOS con su bundle y modo propios', () => {
       // 1. Arrange 📐
       const store = useDrupalHttpStore(nextNodeId());
-      const preset = DRUPAL_SANDBOX_PRESETS.VERIFICACION_TITULOS;
+      const preset = DRUPAL_PRESETS.VERIFICACION_TITULOS;
 
       // 2. Act ⚙️
       store.applyVerificacionTitulosPreset();
@@ -535,7 +539,7 @@ describe('useDrupalHttpStore · configuracion del nodo DESTINO_DRUPAL', () => {
       //    alcanzaria desde la pagina que lo agrega.
       expect(store.config.operationMode).toBe(DrupalOperationMode.APPEND_HTML_BLOCK);
       expect(store.config.bundle).toBe('node--page');
-      expect(store.config.targetNodeUuid).toBe(preset.targetNodeUuid);
+      expect(store.config.targetNodeUuid).toBe(preset.environments.SANDBOX.targetNodeUuid);
       // El contenedor es el acordeon RAIZ y actua de respaldo: el destino real
       // lo decide cada panel por su `data-parent`. Apuntarlo a la universidad
       // CEU mandaria alli los paneles sin destino resoluble.
@@ -616,9 +620,11 @@ describe('useDrupalHttpStore · configuracion del nodo DESTINO_DRUPAL', () => {
       store.updateConfig({ titleTemplate: 'Titular' });
       const params = store.toNodeParams();
 
-      // 3. Assert 🎯: un flujo recien creado no debe escribir dieciocho claves
-      //    que nadie ha tocado; el motor repone el mismo valor.
+      // 3. Assert 🎯: un flujo recien creado no debe escribir veinte claves
+      //    que nadie ha tocado; el motor repone el mismo valor. El entorno y el
+      //    modo viajan siempre.
       expect(params).toEqual({
+        isSandbox: true,
         operationMode: DrupalOperationMode.CREATE_NODE,
         titleTemplate: 'Titular',
       });
@@ -664,7 +670,11 @@ describe('useDrupalHttpStore · configuracion del nodo DESTINO_DRUPAL', () => {
       //    clave de mas no se ignora: devuelve un 400 al guardar el flujo.
       const store = useDrupalHttpStore(nextNodeId());
       const allowed = new Set([
+        'isSandbox',
         'operationMode',
+        'linkSelector',
+        'linkAttribute',
+        'linkValueTemplate',
         'bundle',
         'sourceNamespace',
         'sourceField',
@@ -735,6 +745,7 @@ describe('useDrupalHttpStore · configuracion del nodo DESTINO_DRUPAL', () => {
       // 1. Arrange 📐: la invariante del contrato `NodeConfigStore`.
       const store = useDrupalHttpStore(nextNodeId());
       const params: Record<string, unknown> = {
+        isSandbox: false,
         operationMode: DrupalOperationMode.TRANSFER_HTML_BLOCK,
         bundle: 'node--page',
         targetNodeUuid: SOURCE_UUID,
@@ -852,6 +863,116 @@ describe('useDrupalHttpStore · configuracion del nodo DESTINO_DRUPAL', () => {
       //    pagina conocida. Un UUID v4 inventado casaria el patron, dejaria el
       //    paso valido y reventaria en ejecucion con un 404 ya PAUSADO.
       expect(store.config.targetNodeUuid).toBeNull();
+    });
+  });
+
+  describe('10. Entorno Sandbox / Produccion', () => {
+    it('10.1 deberia arrancar en Sandbox y publicarlo siempre en los params', () => {
+      // 1. Arrange 📐 + 2. Act ⚙️
+      const store = useDrupalHttpStore(nextNodeId());
+
+      // 3. Assert 🎯: el entorno se lee en el esquema, no se deduce.
+      expect(store.config.isSandbox).toBe(true);
+      expect(store.toNodeParams()).toMatchObject({ isSandbox: true });
+    });
+
+    it('10.2 deberia mover las paginas del preset al cambiar de entorno', () => {
+      // 1. Arrange 📐
+      const store = useDrupalHttpStore(nextNodeId());
+      store.applyAbrirLicitacionPreset();
+
+      // 2. Act ⚙️
+      store.setSandbox(false);
+
+      // 3. Assert 🎯: en Produccion el UUID no esta confirmado y queda vacio,
+      //    de modo que el paso exige escribirlo antes de guardar.
+      expect(store.config.isSandbox).toBe(false);
+      expect(store.config.targetNodeUuid).toBeNull();
+      expect(store.isConfigValid).toBe(false);
+
+      // 2. Act ⚙️ (vuelta)
+      store.setSandbox(true);
+
+      // 3. Assert 🎯
+      expect(store.config.targetNodeUuid).toBe(
+        DRUPAL_PRESETS.ABRIR_LICITACION.environments.SANDBOX.targetNodeUuid,
+      );
+    });
+
+    it('10.3 NO deberia pisar un UUID tecleado a mano al cambiar de entorno', () => {
+      // 1. Arrange 📐: el operador escribio la pagina de produccion.
+      const store = useDrupalHttpStore(nextNodeId());
+      store.setSandbox(false);
+      store.applyAbrirLicitacionPreset();
+      const typed = '11111111-2222-4333-8444-555555555555';
+      store.updateConfig({ targetNodeUuid: typed });
+
+      // 2. Act ⚙️
+      store.setSandbox(true);
+
+      // 3. Assert 🎯
+      expect(store.config.targetNodeUuid).toBe(typed);
+    });
+
+    it('10.4 deberia cargar Innodays como actualizacion de enlace con la pagina pendiente', () => {
+      // 1. Arrange 📐
+      const store = useDrupalHttpStore(nextNodeId());
+
+      // 2. Act ⚙️
+      store.applyInnodaysPreset();
+
+      // 3. Assert 🎯: modo, bundle y atributo listos; pagina, selector y
+      //    valor los pone el operador.
+      expect(store.config.operationMode).toBe(DrupalOperationMode.UPDATE_LINK_SOURCE);
+      expect(store.config.bundle).toBe('node--page');
+      expect(store.config.linkAttribute).toBe('href');
+      expect(store.missingRequiredParams).toEqual([
+        'targetNodeUuid',
+        'linkSelector',
+        'linkValueTemplate',
+      ]);
+    });
+
+    it('10.5 deberia emitir y recuperar los params del modo enlace', () => {
+      // 1. Arrange 📐
+      const store = useDrupalHttpStore(nextNodeId());
+      store.applyInnodaysPreset();
+      store.updateConfig({
+        targetNodeUuid: '3c2b1a0f-9e8d-4c7b-8a69-5f4e3d2c1b0a',
+        linkSelector: '#carousel-track img:first-child',
+        linkAttribute: 'src',
+        linkValueTemplate: '{{llm_response.url}}',
+      });
+
+      // 2. Act ⚙️
+      const params = store.toNodeParams();
+      const other = useDrupalHttpStore(nextNodeId());
+      other.hydrateFromNode({ outputNamespace: 'http_result', params });
+
+      // 3. Assert 🎯
+      expect(params).toMatchObject({
+        isSandbox: true,
+        operationMode: DrupalOperationMode.UPDATE_LINK_SOURCE,
+        linkSelector: '#carousel-track img:first-child',
+        linkAttribute: 'src',
+        linkValueTemplate: '{{llm_response.url}}',
+      });
+      expect(other.config).toMatchObject({
+        isSandbox: true,
+        linkAttribute: 'src',
+        linkValueTemplate: '{{llm_response.url}}',
+      });
+      expect(other.isConfigValid).toBe(true);
+    });
+
+    it('10.6 deberia dejar Notiweb como borrador despublicado', () => {
+      // 1. Arrange 📐 + 2. Act ⚙️
+      const store = useDrupalHttpStore(nextNodeId());
+      store.applyNotiwebPreset();
+
+      // 3. Assert 🎯
+      expect(store.config.publishStatus).toBe(false);
+      expect(store.toNodeParams()).toMatchObject({ publishStatus: false });
     });
   });
 });

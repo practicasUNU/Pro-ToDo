@@ -7,12 +7,16 @@ import {
   Logger,
 } from '@nestjs/common';
 
+import { DrupalApiConfig } from '@core/config/drupal-api.config';
 import { StatePayloadContext } from '@core/fsm/context/state-payload.context';
 import { NodeStrategyFactory } from '@core/fsm/factories/node-strategy.factory';
 import { PipelineValidatorService } from '@core/fsm/services/pipeline-validator.service';
+import { NodeType } from '@core/fsm/types/pipeline-schema.types';
 import { AuditActionType } from '@modules/audit/enums/audit-action.enum';
 import { AuditLoggerService } from '@modules/audit/services/audit-logger.service';
 import {
+  DRUPAL_SANDBOX_TARGET_PARAMS,
+  ERR_SANDBOX_DRUPAL_PRODUCTION,
   ERR_SANDBOX_NODE_TYPE,
   ERR_SANDBOX_PARAMS,
   SANDBOX_NODE_ID,
@@ -62,6 +66,7 @@ export class NodeSandboxService {
     private readonly strategyFactory: NodeStrategyFactory,
     private readonly pipelineValidator: PipelineValidatorService,
     private readonly auditLogger: AuditLoggerService,
+    private readonly drupalApiConfig: DrupalApiConfig,
   ) {}
 
   public async run(
@@ -84,9 +89,16 @@ export class NodeSandboxService {
       );
     }
 
+    // Lo que de verdad se valida y se ejecuta. Solo difiere de `dto.params`
+    // en Drupal, que el banco encierra en el entorno de pruebas.
+    const params =
+      dto.nodeType === NodeType.DESTINO_DRUPAL
+        ? this.lockDrupalToSandbox(dto.params)
+        : dto.params;
+
     const issues = await this.pipelineValidator.validateStandaloneParams(
       dto.nodeType,
-      dto.params,
+      params,
     );
 
     if (issues.length > 0) {
@@ -108,7 +120,7 @@ export class NodeSandboxService {
     let result: NodeResult;
 
     try {
-      result = await strategy.execute(context, dto.params);
+      result = await strategy.execute(context, params);
     } catch (error: unknown) {
       // Una estrategia que revienta tambien es una prueba hecha: se audita
       // antes de dejar que la excepcion siga su curso.
@@ -156,6 +168,56 @@ export class NodeSandboxService {
         : {}),
       durationMs,
     };
+  }
+
+  /**
+   * Encierra una prueba de Drupal en el entorno de pruebas.
+   *
+   * El banco ejecuta la estrategia REAL contra el portal REAL: las paginas de
+   * pruebas y las publicas viven en la misma instalacion, con la misma
+   * credencial. Lo unico que las separa es el UUID, asi que la garantia no
+   * puede depender de lo que diga el formulario:
+   *
+   * 1. `isSandbox: false` se rechaza en vez de corregirse en silencio: quien lo
+   *    manda cree estar probando contra produccion, y debe saber que no.
+   * 2. Toda pagina citada (`targetNodeUuid`, `destinationNodeUuid`) debe estar
+   *    en la lista blanca del `.env`. Un UUID de produccion tecleado a mano no
+   *    pasa, aunque el toggle diga Sandbox.
+   * 3. Se fuerza `isSandbox: true` y `publishStatus: false`: una noticia dada
+   *    de alta desde el banco nace despublicada y no aparece en el portal.
+   *
+   * @throws BadRequestException `ERR_SANDBOX_DRUPAL_PRODUCTION`.
+   */
+  private lockDrupalToSandbox(
+    params: Record<string, unknown>,
+  ): Record<string, unknown> {
+    if (params.isSandbox === false) {
+      throw new BadRequestException({
+        code: ERR_SANDBOX_DRUPAL_PRODUCTION,
+        message:
+          'En el Banco de Pruebas solo está permitido ejecutar sobre el entorno Sandbox.',
+      });
+    }
+
+    const allowed = this.drupalApiConfig.sandboxNodeUuids;
+    const outside = DRUPAL_SANDBOX_TARGET_PARAMS.filter((key) => {
+      const value = params[key];
+
+      return (
+        typeof value === 'string' &&
+        value.trim() !== '' &&
+        !allowed.has(value.trim().toLowerCase())
+      );
+    });
+
+    if (outside.length > 0) {
+      throw new BadRequestException({
+        code: ERR_SANDBOX_DRUPAL_PRODUCTION,
+        message: `En el Banco de Pruebas solo se puede escribir en las páginas de pruebas declaradas en el servidor. Fuera de la lista: ${outside.join(', ')}.`,
+      });
+    }
+
+    return { ...params, isSandbox: true, publishStatus: false };
   }
 
   /**

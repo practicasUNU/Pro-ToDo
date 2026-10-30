@@ -271,6 +271,33 @@ describe('DrupalHttpStrategy', () => {
       });
     });
 
+    it('should create node draft with status false when mode is CREATE_NODE for Notiweb', async () => {
+      // 1. Arrange 📐: el preset de Notiweb da de alta la noticia despublicada;
+      //    un editor la revisa y la publica en Drupal.
+      const httpClient = buildHttpMock();
+      httpClient.requestWithStatus.mockResolvedValue(
+        entityResponse({ drupal_internal__nid: 77 }, 'uuid-noticia'),
+      );
+      const strategy = buildStrategy(httpClient);
+
+      // 2. Act ⚙️
+      const result = await strategy.execute(buildContext(), {
+        operationMode: DrupalOperationMode.CREATE_NODE,
+        bundle: 'node--noticias',
+        titleTemplate: 'Titular fijo',
+        publishStatus: false,
+      });
+
+      // 3. Assert 🎯: POST a la coleccion de noticias con `status: false`.
+      expect(result.success).toBe(true);
+      expect(callConfig(httpClient, 0).method).toBe('POST');
+      expect(callConfig(httpClient, 0).url).toBe(`${BASE_URL}/node/noticias`);
+      expect(callBody(httpClient, 0).data).toMatchObject({
+        type: 'node--noticias',
+        attributes: { status: false },
+      });
+    });
+
     it('1.2 deberia armar el cuerpo JSON:API con el markup del escudo', async () => {
       const httpClient = buildHttpMock();
       httpClient.requestWithStatus.mockResolvedValue(entityResponse());
@@ -1072,6 +1099,35 @@ describe('DrupalHttpStrategy', () => {
         .mockResolvedValueOnce(pageResponse('', PAGE_UUID));
     };
 
+    it('should execute TRANSFER_HTML_BLOCK by cutting DOM block from open tenders page and pasting to closed tenders page', async () => {
+      // 1. Arrange 📐: el bloque del expediente vive en abiertas; cerradas
+      //    esta vacia.
+      const httpClient = buildHttpMock();
+      mockHappyPath(httpClient);
+      const strategy = buildStrategy(httpClient);
+
+      // 2. Act ⚙️
+      const result = await strategy.execute(buildContext(), transferParams);
+
+      // 3. Assert 🎯: PATCH a cerradas con el bloque y PATCH a abiertas sin el.
+      const bodyOf = (index: number): string =>
+        (
+          (
+            callBody(httpClient, index).data?.attributes as Record<
+              string,
+              unknown
+            >
+          ).body as Record<string, string>
+        ).value ?? '';
+
+      expect(result.success).toBe(true);
+      expect(callConfig(httpClient, 2).url).toContain(CLOSED_UUID);
+      expect(bodyOf(2)).toContain('data-expediente="S_2026_015"');
+      expect(callConfig(httpClient, 3).url).toContain(PAGE_UUID);
+      expect(bodyOf(3)).not.toContain('S_2026_015');
+      expect(bodyOf(3)).toContain('S_2026_001');
+    });
+
     it('3.1 deberia escribir PRIMERO en destino y DESPUES retirar de origen', async () => {
       // 1. Arrange 📐: es la decision central del modo. Al reves, el fallo de la
       //    segunda escritura PIERDE el bloque —ya no esta en origen y nunca
@@ -1223,6 +1279,164 @@ describe('DrupalHttpStrategy', () => {
           ([config]) => config.method === 'GET',
         ),
       ).toBe(true);
+    });
+  });
+
+  describe('3bis. UPDATE_LINK_SOURCE (Innodays)', () => {
+    const INNODAYS_UUID = '3c2b1a0f-9e8d-4c7b-8a69-5f4e3d2c1b0a';
+    const INNODAYS_HTML = [
+      '<style>.x{color:red}</style>',
+      '<table><tr><td>Agrifood</td><td><a class=\'btn\' href="/old-agrifood.pdf">PDF</a></td></tr>',
+      '<tr><td>Salud</td><td><a href="/old-salud.pdf">PDF</a></td></tr></table>',
+      '<div id="carousel-track"><img src=a.jpg alt="1"><img src="b.jpg"></div>',
+      '<script>var a = 1 < 2;</script>',
+    ].join('\n');
+
+    const linkParams = {
+      operationMode: DrupalOperationMode.UPDATE_LINK_SOURCE,
+      bundle: 'node--page',
+      targetNodeUuid: INNODAYS_UUID,
+      linkSelector: "table tr:contains('Agrifood') a",
+      linkAttribute: 'href',
+      linkValueTemplate: '{{llm_response.url}}',
+    };
+
+    const linkContext = (url: string): StatePayloadContext =>
+      buildContext({ llm_response: { url } });
+
+    /** Cuerpo del PATCH (llamada 1, tras el GET). */
+    const patchedBody = (httpClient: HttpMock): string =>
+      (
+        (callBody(httpClient, 1).data?.attributes as Record<string, unknown>)
+          .body as Record<string, string>
+      ).value ?? '';
+
+    it('should execute UPDATE_LINK_SOURCE by updating href/src attribute for Inodace preset', async () => {
+      // 1. Arrange 📐: pagina con estilos, tabla, carrusel y script.
+      const httpClient = buildHttpMock();
+      httpClient.requestWithStatus
+        .mockResolvedValueOnce(pageResponse(INNODAYS_HTML, INNODAYS_UUID))
+        .mockResolvedValueOnce(pageResponse('', INNODAYS_UUID));
+      const strategy = buildStrategy(httpClient);
+
+      // 2. Act ⚙️
+      const result = await strategy.execute(
+        linkContext('https://www.madrimasd.org/innodays/agrifood-2026.pdf'),
+        linkParams,
+      );
+
+      // 3. Assert 🎯: GET + PATCH, y el HTML devuelto es el original salvo
+      //    ESE atributo: comillas, estilos y script intactos byte a byte.
+      expect(result.success).toBe(true);
+      expect(callConfig(httpClient, 0).method).toBe('GET');
+      expect(callConfig(httpClient, 1).method).toBe('PATCH');
+      expect(patchedBody(httpClient)).toBe(
+        INNODAYS_HTML.replace(
+          'href="/old-agrifood.pdf"',
+          'href="https://www.madrimasd.org/innodays/agrifood-2026.pdf"',
+        ),
+      );
+      expect(result.data).toMatchObject({
+        node_id: INNODAYS_UUID,
+        operation_applied: DrupalOperationMode.UPDATE_LINK_SOURCE,
+      });
+    });
+
+    it('3bis.2 deberia actualizar el src de una imagen del carrusel', async () => {
+      // 1. Arrange 📐
+      const httpClient = buildHttpMock();
+      httpClient.requestWithStatus
+        .mockResolvedValueOnce(pageResponse(INNODAYS_HTML, INNODAYS_UUID))
+        .mockResolvedValueOnce(pageResponse('', INNODAYS_UUID));
+      const strategy = buildStrategy(httpClient);
+
+      // 2. Act ⚙️
+      await strategy.execute(linkContext('/sites/default/files/nuevo.jpg'), {
+        ...linkParams,
+        linkSelector: '#carousel-track img:first-child',
+        linkAttribute: 'src',
+      });
+
+      // 3. Assert 🎯: el atributo sin comillas tambien se sustituye limpio.
+      expect(patchedBody(httpClient)).toBe(
+        INNODAYS_HTML.replace(
+          'src=a.jpg',
+          'src="/sites/default/files/nuevo.jpg"',
+        ),
+      );
+    });
+
+    it('3bis.3 NO deberia escribir si el selector casa con varios elementos', async () => {
+      // 1. Arrange 📐: `table a` casa con los dos PDF; elegir uno seria adivinar.
+      const httpClient = buildHttpMock();
+      httpClient.requestWithStatus.mockResolvedValueOnce(
+        pageResponse(INNODAYS_HTML, INNODAYS_UUID),
+      );
+      const strategy = buildStrategy(httpClient);
+
+      // 2. Act ⚙️
+      const result = await strategy.execute(linkContext('/nuevo.pdf'), {
+        ...linkParams,
+        linkSelector: 'table a',
+      });
+
+      // 3. Assert 🎯
+      expect(result.success).toBe(false);
+      expect(result.error?.code).toBe(ERR_DRUPAL_DOM_TARGET);
+      expect(result.error?.message).toContain('2 elementos');
+      expect(httpClient.requestWithStatus).toHaveBeenCalledTimes(1);
+    });
+
+    it('3bis.4 deberia rechazar un esquema javascript: sin llamar a Drupal', async () => {
+      // 1. Arrange 📐: el valor sale de una plantilla que interpola contexto.
+      const httpClient = buildHttpMock();
+      const strategy = buildStrategy(httpClient);
+
+      // 2. Act ⚙️
+      const result = await strategy.execute(
+        linkContext(' java\tscript:alert(1)'),
+        linkParams,
+      );
+
+      // 3. Assert 🎯
+      expect(result.success).toBe(false);
+      expect(result.error?.code).toBe(ERR_DRUPAL_MISSING_PAYLOAD);
+      expect(httpClient.requestWithStatus).not.toHaveBeenCalled();
+    });
+
+    it('3bis.5 NO deberia hacer PATCH si el enlace ya apuntaba ahi', async () => {
+      // 1. Arrange 📐: reintento tras un PATCH que si llego a aplicarse.
+      const httpClient = buildHttpMock();
+      httpClient.requestWithStatus.mockResolvedValueOnce(
+        pageResponse(INNODAYS_HTML, INNODAYS_UUID),
+      );
+      const strategy = buildStrategy(httpClient);
+
+      // 2. Act ⚙️
+      const result = await strategy.execute(
+        linkContext('/old-agrifood.pdf'),
+        linkParams,
+      );
+
+      // 3. Assert 🎯
+      expect(result.success).toBe(true);
+      expect(httpClient.requestWithStatus).toHaveBeenCalledTimes(1);
+    });
+
+    it('3bis.6 deberia exigir pagina, selector y plantilla para activar el flujo', () => {
+      // 1. Arrange 📐 + 2. Act ⚙️
+      const strategy = buildStrategy(buildHttpMock());
+
+      // 3. Assert 🎯
+      expect(
+        strategy.getIncompleteParams({
+          operationMode: DrupalOperationMode.UPDATE_LINK_SOURCE,
+        }),
+      ).toEqual(['targetNodeUuid', 'linkSelector', 'linkValueTemplate']);
+      expect(strategy.getRequiredNamespaces(linkParams)).toContain(
+        'llm_response',
+      );
+      expect(strategy.getUnreachableErrorCodes(linkParams)).toEqual([]);
     });
   });
 

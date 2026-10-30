@@ -3,22 +3,55 @@
 //
 // El DTO se valida con `{ whitelist: true, forbidNonWhitelisted: true }`: una
 // clave que no figure alli es un 400 al guardar el flujo, no un campo ignorado.
-// Por eso esta replica enumera EXACTAMENTE los 18 params y ni uno mas.
+// Por eso esta replica enumera EXACTAMENTE los 22 params y ni uno mas.
 
 /**
  * Modos operativos del nodo contra Drupal JSON:API.
  *
- * Son cuatro trabajos distintos sobre el mismo CMS y no cuatro variantes del
+ * Son cinco trabajos distintos sobre el mismo CMS y no cinco variantes del
  * mismo, de ahi que cada uno pida sus propios campos: `CREATE_NODE` crea una
- * entidad propia, los dos de HTML mutan el `body.value` de una pagina
- * AGREGADORA que acumula bloques, y `UPLOAD_ATTACHMENT` sube un binario.
+ * entidad propia, los dos de bloques mutan el `body.value` de una pagina
+ * AGREGADORA, `UPDATE_LINK_SOURCE` cambia un unico `href`/`src` (Innodays) y
+ * `UPLOAD_ATTACHMENT` sube un binario.
  */
 export enum DrupalOperationMode {
   CREATE_NODE = 'CREATE_NODE',
   APPEND_HTML_BLOCK = 'APPEND_HTML_BLOCK',
   TRANSFER_HTML_BLOCK = 'TRANSFER_HTML_BLOCK',
+  UPDATE_LINK_SOURCE = 'UPDATE_LINK_SOURCE',
   UPLOAD_ATTACHMENT = 'UPLOAD_ATTACHMENT',
 }
+
+/** Atributo que reescribe `UPDATE_LINK_SOURCE`. Replica de `DrupalLinkAttribute`. */
+export type DrupalLinkAttribute = 'href' | 'src';
+
+export const DRUPAL_LINK_ATTRIBUTES: readonly DrupalLinkAttribute[] = ['href', 'src'];
+
+export const DEFAULT_DRUPAL_LINK_ATTRIBUTE: DrupalLinkAttribute = 'href';
+
+/** Tope de la plantilla del nuevo enlace, replicado de `MAX_DRUPAL_LINK_TEMPLATE_LENGTH`. */
+export const MAX_DRUPAL_LINK_TEMPLATE_LENGTH = 2048;
+
+/**
+ * Entorno por defecto: el de pruebas. Replica de `DEFAULT_DRUPAL_IS_SANDBOX`.
+ *
+ * Equivocarse hacia este lado cuesta repetir una prueba; hacia el otro,
+ * publicar en el portal real.
+ */
+export const DEFAULT_DRUPAL_IS_SANDBOX = true;
+
+/** Los dos entornos del portal: las paginas de pruebas y las publicas. */
+export type DrupalEnvironment = 'SANDBOX' | 'PRODUCTION';
+
+/** Rotulo del entorno, el que acompana a cada boton de preset. */
+export const DRUPAL_ENVIRONMENT_LABELS: Readonly<Record<DrupalEnvironment, string>> = {
+  SANDBOX: 'Sandbox',
+  PRODUCTION: 'Producción',
+};
+
+/** Entorno al que apunta el toggle. */
+export const toDrupalEnvironment = (isSandbox: boolean): DrupalEnvironment =>
+  isSandbox ? 'SANDBOX' : 'PRODUCTION';
 
 /** Donde se inserta un bloque nuevo dentro del contenedor de la pagina. */
 export type DrupalInsertPosition = 'PREPEND' | 'APPEND';
@@ -146,52 +179,59 @@ export const DRUPAL_BUNDLES: readonly string[] = [
 ];
 
 /**
+ * Pagina de un preset en UN entorno.
+ *
+ * `null` en los UUID significa «lo pone el operador». Es lo que vale para todo
+ * destino cuyo UUID no esta confirmado —todos los de Produccion, Innodays y la
+ * pagina de licitaciones cerradas—: sembrar un UUID inventado para «dejarlo
+ * relleno» seria el peor de los rellenos. El patron v4 casaria, el paso quedaria
+ * valido y el fallo saldria en ejecucion como un 404 con el flujo ya PAUSADO.
+ * Nulo, `isConfigValid` lo reclama en el momento de configurar.
+ */
+export interface DrupalPresetTarget {
+  /** Ruta publica de la pagina, para que el operador sepa a donde apunta. */
+  readonly path: string;
+
+  /** Identificador interno del nodo en Drupal. Informativo: la API usa el UUID. */
+  readonly nid: number | null;
+
+  /** Pagina o entidad sobre la que actua el destino. */
+  readonly targetNodeUuid: string | null;
+
+  /** Pagina receptora, solo en `TRANSFER_HTML_BLOCK`. */
+  readonly destinationNodeUuid: string | null;
+}
+
+/**
  * Un destino operativo completo, para los botones de carga rapida.
  *
  * Declara TODO lo que el modo elegido necesita, y no solo el identificador: un
  * `TRANSFER_HTML_BLOCK` sin `itemSelector` o un `APPEND_HTML_BLOCK` sin bundle
  * no son configuraciones a medias, son configuraciones que fallan en ejecucion.
+ *
+ * Lo que cambia entre Sandbox y Produccion es SOLO la pagina (`environments`):
+ * modo, bundle y selectores son los mismos, porque las paginas de pruebas son
+ * copias de las publicas.
  */
-export interface DrupalSandboxPreset {
-  /** Rotulo del boton. Corto: va dentro de un `q-btn` en una fila de tres. */
+export interface DrupalPreset {
+  /** Rotulo base del boton; el entorno se le anade al pintarlo. */
   readonly label: string;
 
   /** Que hace este destino, para el `q-tooltip`. */
   readonly description: string;
 
-  /** Identificador interno del nodo en Drupal. Informativo: la API usa el UUID. */
-  readonly nid: number;
-
   readonly operationMode: DrupalOperationMode;
   readonly bundle: string;
-
-  /**
-   * Pagina o entidad sobre la que actua el destino.
-   *
-   * `null` en los presets que dan de alta contenido nuevo sin colgarlo de una
-   * pagina conocida. Sembrar aqui un UUID inventado para «dejarlo relleno»
-   * seria el peor de los rellenos: el patron v4 casaria, el paso quedaria
-   * valido y el fallo saldria en ejecucion como un 404 con el flujo ya
-   * PAUSADO. Nulo, `isConfigValid` lo reclama en el momento de configurar.
-   */
-  readonly targetNodeUuid: string | null;
-
-  /**
-   * Pagina receptora en `TRANSFER_HTML_BLOCK`.
-   *
-   * `null` significa «lo pone el operador», y en el unico preset de traslado lo
-   * es a proposito: la pagina de licitaciones CERRADAS aun no tiene UUID
-   * conocido. Apuntarlo a la misma pagina de origen para «poder probar» seria
-   * destructivo —`runTransferHtmlBlock` lee origen y destino por separado y el
-   * segundo PATCH pisa al primero con un DOM ya obsoleto, de modo que el bloque
-   * se borra sin dejar copia y el nodo devuelve exito—. Dejandolo nulo, el paso
-   * queda invalido hasta que alguien escriba el destino de verdad.
-   */
-  readonly destinationNodeUuid: string | null;
-
   readonly containerSelector: string | null;
   readonly itemSelector: string | null;
   readonly insertPosition: DrupalInsertPosition;
+
+  /** Estado de publicacion de lo que se crea. Solo lo lee `CREATE_NODE`. */
+  readonly publishStatus: boolean;
+
+  /** Selector y atributo de `UPDATE_LINK_SOURCE`; `null` en los demas modos. */
+  readonly linkSelector: string | null;
+  readonly linkAttribute: DrupalLinkAttribute;
 
   /**
    * Plantilla de `plantillas_html` que acompana a este destino.
@@ -199,39 +239,43 @@ export interface DrupalSandboxPreset {
    * Es una PISTA para el operador —se muestra en el tooltip—, no una clave
    * ajena: nada la resuelve ni la valida. El nodo que elige plantilla es el
    * MAPEADOR_PLANTILLA, varios pasos antes, y un store de nodo no puede leer el
-   * de otro (`frontend-quasar.md` §3.1). Se identifica por NOMBRE porque
-   * `plantillas_html` no tiene columna `codigo`: su unica clave estable, aparte
-   * del UUID que cambia en cada instalacion, es el nombre con indice unico.
+   * de otro (`frontend-quasar.md` §3.1).
    */
   readonly associatedTemplateName: string | null;
+
+  /** La pagina de este destino en cada entorno. */
+  readonly environments: Readonly<Record<DrupalEnvironment, DrupalPresetTarget>>;
 }
 
+/** UUID de la pagina agregadora de licitaciones de PRUEBAS (`/prueba-licitaciones`). */
+const SANDBOX_LICITACIONES_UUID = '7f1700bf-b54b-4c12-b71a-8a71f1f0ee38';
+
+/** UUID de la pagina de verificacion de titulos de PRUEBAS. */
+const SANDBOX_TITULOS_UUID = 'b17d69d8-6998-4883-b8dc-153b55dbd9c5';
+
 /**
- * Destinos operativos confirmados en el Drupal de Madrid+D.
+ * Destinos operativos del Drupal de Madrid+D, en el ORDEN en que se pintan.
  *
- * Son UUID publicos de dos paginas de sandbox, no credenciales: viajan en el
- * bundle sin exponer nada. El token (`DRUPAL_API_TOKEN`) vive exclusivamente en
- * `backend/.env` y jamas llega al cliente (`security-and-scope.md` §0.1).
+ * Los UUID son publicos, no credenciales: viajan en el bundle sin exponer nada.
+ * El token (`DRUPAL_API_TOKEN`) vive exclusivamente en `backend/.env` y jamas
+ * llega al cliente (`security-and-scope.md` §0.1).
  *
  * Existen porque teclear un UUID v4 a mano es el error mas caro de este
  * formulario: un digito cambiado no se detecta al guardar —el patron sigue
  * casando— sino en ejecucion, con un 404 de Drupal y el flujo ya PAUSADO.
  */
-export const DRUPAL_SANDBOX_PRESETS: Readonly<
+export const DRUPAL_PRESETS: Readonly<
   Record<
-    'ABRIR_LICITACION' | 'CERRAR_LICITACION' | 'VERIFICACION_TITULOS' | 'NOTIWEB',
-    DrupalSandboxPreset
+    'ABRIR_LICITACION' | 'CERRAR_LICITACION' | 'VERIFICACION_TITULOS' | 'INNODAYS' | 'NOTIWEB',
+    DrupalPreset
   >
 > = {
   ABRIR_LICITACION: {
     label: 'Abrir licitación',
     description:
       'Antepone el bloque de la convocatoria a la página agregadora de licitaciones abiertas.',
-    nid: 55937,
     operationMode: DrupalOperationMode.APPEND_HTML_BLOCK,
     bundle: 'node--page',
-    targetNodeUuid: '7f1700bf-b54b-4c12-b71a-8a71f1f0ee38',
-    destinationNodeUuid: null,
     // Panel desplegable de "convocatorias abiertas" en la pagina agregadora.
     // Sin el, el bloque se antepondria al cuerpo entero del nodo y quedaria
     // fuera del acordeon que el portal presenta.
@@ -239,18 +283,31 @@ export const DRUPAL_SANDBOX_PRESETS: Readonly<
     itemSelector: null,
     // Lo ultimo convocado se lee arriba, que es como el portal presenta la lista.
     insertPosition: 'PREPEND',
+    publishStatus: true,
+    linkSelector: null,
+    linkAttribute: DEFAULT_DRUPAL_LINK_ATTRIBUTE,
     associatedTemplateName: 'Licitaciones · Convocatoria abierta (Madrid+D)',
+    environments: {
+      SANDBOX: {
+        path: '/prueba-licitaciones',
+        nid: 55937,
+        targetNodeUuid: SANDBOX_LICITACIONES_UUID,
+        destinationNodeUuid: null,
+      },
+      PRODUCTION: {
+        path: '/convocatorias-abiertas',
+        nid: null,
+        targetNodeUuid: null,
+        destinationNodeUuid: null,
+      },
+    },
   },
   CERRAR_LICITACION: {
     label: 'Cerrar licitación',
     description:
       'Traslada un bloque de licitación desde la página de abiertas a la de cerradas. Exige indicar a mano la página de destino.',
-    nid: 55937,
     operationMode: DrupalOperationMode.TRANSFER_HTML_BLOCK,
     bundle: 'node--page',
-    targetNodeUuid: '7f1700bf-b54b-4c12-b71a-8a71f1f0ee38',
-    // Ver el TSDoc del campo: queda nulo a proposito.
-    destinationNodeUuid: null,
     containerSelector: null,
     // La clase del envoltorio que siembra la plantilla de apertura. Afinarla a
     // un expediente concreto (`[data-expediente="..."]`) es trabajo del flujo.
@@ -258,72 +315,130 @@ export const DRUPAL_SANDBOX_PRESETS: Readonly<
     // En cerradas el orden cronologico se lee al reves: lo ultimo en cerrarse va
     // al final, detras de lo que lleva mas tiempo archivado.
     insertPosition: 'APPEND',
+    publishStatus: true,
+    linkSelector: null,
+    linkAttribute: DEFAULT_DRUPAL_LINK_ATTRIBUTE,
     associatedTemplateName: 'Licitaciones · Convocatoria cerrada (Madrid+D)',
+    environments: {
+      // La pagina de cerradas queda nula en los dos entornos. Apuntarla a la de
+      // abiertas «para probar» seria destructivo: `runTransferHtmlBlock` lee
+      // origen y destino por separado y el segundo PATCH pisa al primero con un
+      // DOM ya obsoleto, de modo que el bloque se borra sin dejar copia.
+      SANDBOX: {
+        path: '/prueba-licitaciones → /prueba-licitaciones-cerradas',
+        nid: 55937,
+        targetNodeUuid: SANDBOX_LICITACIONES_UUID,
+        destinationNodeUuid: null,
+      },
+      PRODUCTION: {
+        path: '/convocatorias-abiertas → /convocatorias-cerradas',
+        nid: null,
+        targetNodeUuid: null,
+        destinationNodeUuid: null,
+      },
+    },
   },
   VERIFICACION_TITULOS: {
     label: 'Verificación de títulos',
     description:
       'Antepone el panel colapsable del comité dentro del acordeón de la página agregadora.',
-    nid: 55938,
-    // APPEND_HTML_BLOCK y ya no CREATE_NODE. El canal daba de alta una entidad
-    // por panel, pero lo que el portal presenta en
-    // `/prueba-verificador-titulos` es un ACORDEON: cada comite es un panel
-    // colapsable DENTRO del HTML de la pagina agregadora, no un nodo suelto.
-    // Dar de alta la entidad publicaba un contenido que nadie llegaba a ver
-    // desde la pagina que lo agrega.
+    // APPEND_HTML_BLOCK y no CREATE_NODE: lo que el portal presenta es un
+    // ACORDEON, y cada comite es un panel colapsable DENTRO del HTML de la
+    // pagina agregadora, no un nodo suelto.
     operationMode: DrupalOperationMode.APPEND_HTML_BLOCK,
     bundle: 'node--page',
-    targetNodeUuid: 'b17d69d8-6998-4883-b8dc-153b55dbd9c5',
-    destinationNodeUuid: null,
-    // Acordeon RAIZ del portal, y es un RESPALDO, no el destino.
-    //
-    // El destino real lo decide cada panel por su `data-parent`, y la estrategia
-    // lo reparte al sub-acordeon de su universidad. Este selector solo entra en
-    // juego con marcado que no declara destino ninguno.
-    //
-    // Estuvo en `#accordionCEU`, que era el acordeon de UNA universidad
-    // concreta: un panel sin destino resoluble acababa publicado dentro de CEU,
-    // que es un error bastante mas dificil de ver que dejarlo en la raiz.
+    // Acordeon RAIZ del portal, y es un RESPALDO, no el destino: el destino
+    // real lo decide cada panel por su `data-parent`, y la estrategia lo reparte
+    // al sub-acordeon de su universidad.
     containerSelector: '#accordion',
     // El envoltorio que siembra la plantilla base, equivalente a
-    // `.licitacion-entry` en el canal de licitaciones. Afinarlo a un comite
-    // concreto (`[data-comite="CEU1"]`) es trabajo del flujo.
+    // `.licitacion-entry` en el canal de licitaciones.
     itemSelector: '.panel-default',
-    // Al FINAL, y no al principio como el resto de canales. Aqui el destino no
-    // es una lista cronologica sino el sub-acordeon de UNA universidad, donde
-    // los comites se leen como un listado estable: encabezarlo con el ultimo
-    // recibido reordena en cada ejecucion paneles que ya estaban publicados.
-    //
-    // Se muestra en el QSelect como "Al final" (ver INSERT_POSITION_OPTIONS en
-    // DrupalHttpConfig.vue). Ojo: al dejar de coincidir con el defecto del
-    // backend —PREPEND—, `buildParams` empieza a EMITIR esta clave en los
-    // params del nodo, que es justo lo que hace falta para que el motor use
-    // `.append()`.
+    // Al FINAL: el destino es el sub-acordeon de UNA universidad, donde los
+    // comites se leen como un listado estable, no como una lista cronologica.
     insertPosition: 'APPEND',
+    publishStatus: true,
+    linkSelector: null,
+    linkAttribute: DEFAULT_DRUPAL_LINK_ATTRIBUTE,
     associatedTemplateName: 'Verificación de Títulos · Panel de evaluación',
+    environments: {
+      SANDBOX: {
+        path: '/prueba-verificador-titulos',
+        nid: 55938,
+        targetNodeUuid: SANDBOX_TITULOS_UUID,
+        destinationNodeUuid: null,
+      },
+      PRODUCTION: {
+        path: '/titulos',
+        nid: null,
+        targetNodeUuid: null,
+        destinationNodeUuid: null,
+      },
+    },
+  },
+  INNODAYS: {
+    label: 'Innodays',
+    description:
+      'Actualiza el href o el src de UN elemento de la página de Innodays madri+d (un PDF de la tabla, una imagen del carrusel) sin tocar el resto del HTML.',
+    operationMode: DrupalOperationMode.UPDATE_LINK_SOURCE,
+    bundle: 'node--page',
+    containerSelector: null,
+    itemSelector: null,
+    insertPosition: DEFAULT_DRUPAL_INSERT_POSITION,
+    publishStatus: true,
+    // El elemento depende de cada edicion (que fila, que imagen): lo escribe el
+    // operador. El placeholder del campo muestra la forma.
+    linkSelector: null,
+    linkAttribute: 'href',
+    associatedTemplateName: null,
+    environments: {
+      SANDBOX: {
+        path: '/prueba-innodays',
+        nid: null,
+        targetNodeUuid: null,
+        destinationNodeUuid: null,
+      },
+      PRODUCTION: {
+        path: '/innodays',
+        nid: null,
+        targetNodeUuid: null,
+        destinationNodeUuid: null,
+      },
+    },
   },
   NOTIWEB: {
     label: 'Notiweb',
     description:
-      'Da de alta una noticia individual de Notiweb. No cuelga de ninguna pagina agregadora: cada publicacion es su propio nodo.',
-    // Sin pagina receptora: este canal crea entidades sueltas. Se deja el nid
-    // del agregador de licitaciones fuera a proposito y se marca con 0, que es
-    // el valor que dice "no aplica" sin inventar un identificador.
-    nid: 0,
+      'Da de alta una noticia individual de Notiweb, DESPUBLICADA: un editor la revisa y la publica en Drupal. No cuelga de ninguna página agregadora.',
     operationMode: DrupalOperationMode.CREATE_NODE,
     bundle: 'node--noticias',
-    // El operador lo escribe: no hay una entidad fija a la que apuntar.
-    targetNodeUuid: null,
-    destinationNodeUuid: null,
     containerSelector: null,
     itemSelector: null,
     insertPosition: 'PREPEND',
+    // Borrador: `status = false` al crear, en los dos entornos.
+    publishStatus: false,
+    linkSelector: null,
+    linkAttribute: DEFAULT_DRUPAL_LINK_ATTRIBUTE,
     associatedTemplateName: 'Notiweb · Noticia institucional',
+    environments: {
+      // Sin pagina receptora: este canal crea entidades sueltas.
+      SANDBOX: {
+        path: '/prueba-noticias',
+        nid: null,
+        targetNodeUuid: null,
+        destinationNodeUuid: null,
+      },
+      PRODUCTION: { path: '/noticias', nid: null, targetNodeUuid: null, destinationNodeUuid: null },
+    },
   },
 };
 
-/** Claves de `DRUPAL_SANDBOX_PRESETS`, para tipar el selector sin `string`. */
-export type DrupalSandboxPresetKey = keyof typeof DRUPAL_SANDBOX_PRESETS;
+/** Claves de `DRUPAL_PRESETS`, para tipar el selector sin `string`. */
+export type DrupalPresetKey = keyof typeof DRUPAL_PRESETS;
+
+/** Rotulo del boton con su entorno: «Innodays (Sandbox)». */
+export const describePresetLabel = (preset: DrupalPreset, isSandbox: boolean): string =>
+  `${preset.label} (${DRUPAL_ENVIRONMENT_LABELS[toDrupalEnvironment(isSandbox)]})`;
 
 /**
  * Configuracion del nodo `DESTINO_DRUPAL` en el cliente.
@@ -336,6 +451,8 @@ export type DrupalSandboxPresetKey = keyof typeof DRUPAL_SANDBOX_PRESETS;
  * decide que se publica en el `pipeline_schema` y que se omite.
  */
 export interface DrupalHttpNodeConfig {
+  /** Entorno: paginas de pruebas (`true`) o del portal. Lo gobierna el toggle. */
+  isSandbox: boolean;
   operationMode: DrupalOperationMode;
   bundle: string;
   sourceNamespace: string;
@@ -350,6 +467,13 @@ export interface DrupalHttpNodeConfig {
   containerSelector: string | null;
   itemSelector: string | null;
   insertPosition: DrupalInsertPosition;
+
+  /** Selector CSS del UNICO elemento cuyo enlace cambia `UPDATE_LINK_SOURCE`. */
+  linkSelector: string | null;
+  linkAttribute: DrupalLinkAttribute;
+
+  /** Plantilla interpolable del nuevo valor (`{{llm_response.url}}`). */
+  linkValueTemplate: string | null;
   attachmentNamespace: string;
   attachmentField: string;
   attachmentIndex: number;

@@ -4,6 +4,7 @@ import { ThrottlerModule } from '@nestjs/throttler';
 import request from 'supertest';
 
 import { OTP_THROTTLER_NAME } from '@common/constants/throttler.constants';
+import { DrupalApiConfig } from '@core/config/drupal-api.config';
 import { NodeStrategyFactory } from '@core/fsm/factories/node-strategy.factory';
 import { PipelineValidatorService } from '@core/fsm/services/pipeline-validator.service';
 import { NodeType } from '@core/fsm/types/pipeline-schema.types';
@@ -70,6 +71,10 @@ describe('NodeSandboxController (POST /nodes/sandbox/run)', () => {
         {
           provide: AuditLoggerService,
           useValue: { record: jest.fn().mockResolvedValue(undefined) },
+        },
+        {
+          provide: DrupalApiConfig,
+          useValue: { sandboxNodeUuids: new Set<string>() },
         },
       ],
     })

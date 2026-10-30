@@ -14,6 +14,10 @@ import { HttpClientService } from '@core/http/http-client.service';
 import { BaseHttpDestinationStrategy } from './base/base-http-destination.strategy';
 import { planPanelDispatch } from './drupal-universities';
 import { selectVisibleTarget } from '../utils/visible-target.util';
+import {
+  isSafeLinkValue,
+  replaceLinkAttribute,
+} from '../utils/link-attribute.util';
 
 import {
   DrupalHttpConfigDto,
@@ -239,7 +243,7 @@ const sanitizeFilename = (filename: string): string => {
  * nombran el destino y no el transporte. Lo que de verdad es generico vive
  * ahora en `BaseHttpDestinationStrategy`, que es donde lo heredara Acens.
  *
- * CUATRO MODOS, que son cuatro trabajos distintos y no variantes del mismo:
+ * CINCO MODOS, que son cinco trabajos distintos y no variantes del mismo:
  *
  * 1. `CREATE_NODE` crea una entidad propia por cada contenido (Notiweb).
  * 2. `APPEND_HTML_BLOCK` antepone un bloque al `body.value` de una pagina
@@ -247,7 +251,9 @@ const sanitizeFilename = (filename: string): string => {
  *    HTML de una sola pagina, asi que abrir una es una mutacion del DOM remoto.
  * 3. `TRANSFER_HTML_BLOCK` mueve uno de esos bloques de la pagina de abiertas a
  *    la de cerradas. Ver el orden invertido en `runTransferHtmlBlock`.
- * 4. `UPLOAD_ATTACHMENT` sube un binario y devuelve su URL publica.
+ * 4. `UPDATE_LINK_SOURCE` cambia el `href` o el `src` de UN elemento de una
+ *    pagina (Innodays), sin tocar nada mas de su HTML.
+ * 5. `UPLOAD_ATTACHMENT` sube un binario y devuelve su URL publica.
  *
  * NO escribe en el contexto: devuelve `data` y es `FsmEngineService` quien la
  * deposita en el `outputNamespace` declarado por el nodo.
@@ -345,7 +351,11 @@ export class DrupalHttpStrategy extends BaseHttpDestinationStrategy {
     // Las raices citadas en las plantillas, con el MISMO helper que usa el
     // validador de topologia: una segunda expresion regular equivalente
     // acabaria divergiendo de la que de verdad interpola.
-    for (const template of [config.titleTemplate, config.summaryTemplate]) {
+    for (const template of [
+      config.titleTemplate,
+      config.summaryTemplate,
+      config.linkValueTemplate,
+    ]) {
       if (template !== null) {
         for (const root of extractNamespaceRoots(template)) {
           required.add(root);
@@ -415,6 +425,18 @@ export class DrupalHttpStrategy extends BaseHttpDestinationStrategy {
           missing.push('itemSelector');
         }
         break;
+
+      case DrupalOperationMode.UPDATE_LINK_SOURCE:
+        if (config.targetNodeUuid === null) {
+          missing.push('targetNodeUuid');
+        }
+        if (config.linkSelector === null) {
+          missing.push('linkSelector');
+        }
+        if (config.linkValueTemplate === null) {
+          missing.push('linkValueTemplate');
+        }
+        break;
     }
 
     return missing;
@@ -437,7 +459,8 @@ export class DrupalHttpStrategy extends BaseHttpDestinationStrategy {
 
     const touchesDom =
       config.operationMode === DrupalOperationMode.APPEND_HTML_BLOCK ||
-      config.operationMode === DrupalOperationMode.TRANSFER_HTML_BLOCK;
+      config.operationMode === DrupalOperationMode.TRANSFER_HTML_BLOCK ||
+      config.operationMode === DrupalOperationMode.UPDATE_LINK_SOURCE;
 
     return touchesDom ? [] : [ERR_DRUPAL_DOM_TARGET];
   }
@@ -478,6 +501,9 @@ export class DrupalHttpStrategy extends BaseHttpDestinationStrategy {
 
       case DrupalOperationMode.TRANSFER_HTML_BLOCK:
         return this.runTransferHtmlBlock(config);
+
+      case DrupalOperationMode.UPDATE_LINK_SOURCE:
+        return this.runUpdateLinkSource(context, config);
 
       case DrupalOperationMode.UPLOAD_ATTACHMENT:
         return this.runUploadAttachment(context, config);
@@ -665,6 +691,129 @@ export class DrupalHttpStrategy extends BaseHttpDestinationStrategy {
           internalNid: fetched.node.internalNid,
           pathAlias: fetched.node.pathAlias,
           attachmentUrl: uploaded?.url ?? NEUTRAL_TEXT,
+          httpStatus: patched.status,
+          publishedAt: this.readChangedAt(patched.data.data?.attributes ?? {}),
+        },
+        config.operationMode,
+      ),
+    };
+  }
+
+  /**
+   * Cambia el `href` o el `src` de UN elemento de una pagina (Innodays).
+   *
+   * GET de la pagina, cirugia sobre el texto original (`replaceLinkAttribute`)
+   * y PATCH. El HTML que vuelve a Drupal es el mismo byte a byte salvo el
+   * atributo: re-serializar el DOM entero con cheerio cambiaria comillas y
+   * entidades de toda la pagina, y el diff de la revision en Drupal mostraria
+   * cientos de cambios donde solo hubo uno.
+   *
+   * El valor se valida ANTES de leer la pagina: si la plantilla no resuelve o
+   * produce un esquema peligroso (`javascript:`), no hay nada que publicar y
+   * no se gasta ninguna peticion.
+   */
+  private async runUpdateLinkSource(
+    context: StatePayloadContext,
+    config: ResolvedDrupalHttpConfig,
+  ): Promise<NodeResult> {
+    const uuid = config.targetNodeUuid;
+    const selector = config.linkSelector;
+
+    if (uuid === null) {
+      return this.missingParam('targetNodeUuid');
+    }
+    if (selector === null) {
+      return this.missingParam('linkSelector');
+    }
+
+    const interpolated = this.interpolate(context, config.linkValueTemplate);
+
+    if (interpolated === null) {
+      return this.missingParam('linkValueTemplate');
+    }
+    if (typeof interpolated !== 'string') {
+      return { success: false, error: interpolated };
+    }
+
+    const value = interpolated.trim();
+
+    if (!isSafeLinkValue(value, config.linkAttribute)) {
+      return {
+        success: false,
+        error: {
+          level: 'GRAVE',
+          code: ERR_DRUPAL_MISSING_PAYLOAD,
+          message: `El nuevo valor de "${config.linkAttribute}" esta vacio o usa un esquema no permitido ("${value.slice(0, 80)}"). Solo se admiten rutas relativas y http(s)${config.linkAttribute === 'href' ? ' o mailto' : ''}.`,
+          missingFields: ['linkValueTemplate'],
+        },
+      };
+    }
+
+    const fetched = await this.fetchNode(uuid, config);
+
+    if ('failure' in fetched) {
+      return this.failFetched(fetched, config, 'leer la pagina del enlace');
+    }
+
+    const update = replaceLinkAttribute(
+      fetched.node.bodyHtml,
+      selector,
+      config.linkAttribute,
+      value,
+    );
+
+    if ('invalidSelector' in update || 'matches' in update) {
+      const detail =
+        'invalidSelector' in update
+          ? 'no es un selector CSS valido'
+          : `encuentra ${update.matches} elementos y debe encontrar exactamente uno`;
+
+      return {
+        success: false,
+        error: {
+          level: 'GRAVE',
+          code: ERR_DRUPAL_DOM_TARGET,
+          message: `El selector "${selector}" ${detail} en la pagina ${uuid}. No se ha modificado nada.`,
+          missingFields: [selector],
+        },
+      };
+    }
+
+    // Ya apuntaba ahi: no hay revision que crear. Reintentar el nodo despues
+    // de un PATCH que si llego a aplicarse converge sin escribir de nuevo.
+    if (update.previousValue === value) {
+      return {
+        success: true,
+        data: this.buildPayload(
+          {
+            nodeId: uuid,
+            internalNid: fetched.node.internalNid,
+            pathAlias: fetched.node.pathAlias,
+            httpStatus: NEUTRAL_STATUS,
+            publishedAt: new Date().toISOString(),
+          },
+          config.operationMode,
+        ),
+      };
+    }
+
+    const patched = await this.patchNodeBody(uuid, update.html, config);
+
+    if ('failure' in patched) {
+      return this.failWith(
+        patched,
+        config,
+        'actualizar el enlace de la pagina',
+      );
+    }
+
+    return {
+      success: true,
+      data: this.buildPayload(
+        {
+          nodeId: uuid,
+          internalNid: fetched.node.internalNid,
+          pathAlias: fetched.node.pathAlias,
           httpStatus: patched.status,
           publishedAt: this.readChangedAt(patched.data.data?.attributes ?? {}),
         },

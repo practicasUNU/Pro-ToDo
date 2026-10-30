@@ -13,16 +13,18 @@ import {
   QIcon,
   QInput,
   QSelect,
+  QToggle,
   QTooltip,
   Quasar,
 } from 'quasar';
 import { beforeEach, describe, expect, it } from 'vitest';
 
 import DrupalHttpConfig from '@components/nodes/DrupalHttpConfig.vue';
+import { NODE_SANDBOX_MODE_KEY } from '@components/nodes/node-sandbox-mode';
 import { useDrupalHttpStore } from '@stores/nodes/drupal-http.store';
 
 import { NodeType } from '@/types/pipeline';
-import { DRUPAL_SANDBOX_PRESETS, DrupalOperationMode } from '@/types/nodes/drupal-http.types';
+import { DRUPAL_PRESETS, DrupalOperationMode } from '@/types/nodes/drupal-http.types';
 
 import type { UpstreamNamespace } from '@stores/nodes/node-store-registry';
 
@@ -42,6 +44,7 @@ const QUASAR_COMPONENTS = {
   QIcon,
   QInput,
   QSelect,
+  QToggle,
   QTooltip,
 };
 
@@ -61,7 +64,7 @@ const UPSTREAM: UpstreamNamespace[] = [
   },
 ];
 
-const mountComponent = (nodeId: string): ReturnType<typeof mount> =>
+const mountComponent = (nodeId: string, inSandbox = false): ReturnType<typeof mount> =>
   mount(DrupalHttpConfig, {
     props: { nodeId },
     // `Notify` se instala explicitamente: los botones de preset acusan recibo
@@ -70,6 +73,8 @@ const mountComponent = (nodeId: string): ReturnType<typeof mount> =>
     global: {
       plugins: [[Quasar, { plugins: { Notify } }]],
       components: QUASAR_COMPONENTS,
+      // Lo que hace el Banco de Pruebas al montar un configurador.
+      provide: inSandbox ? { [NODE_SANDBOX_MODE_KEY as symbol]: true } : {},
     },
   });
 
@@ -445,7 +450,7 @@ describe('DrupalHttpConfig · configurador del nodo DESTINO_DRUPAL', () => {
    */
   describe('5. Presets de destinos operativos', () => {
     it('5.1 deberia pintar un boton por cada destino del catalogo', () => {
-      // 1. Arrange 📐: la barra se recorre sobre `DRUPAL_SANDBOX_PRESETS`, de
+      // 1. Arrange 📐: la barra se recorre sobre `DRUPAL_PRESETS`, de
       //    modo que anadir un destino no obliga a tocar la plantilla. Esta
       //    prueba es la que lo sostiene: si alguien volviera a escribir los
       //    botones a mano, el recuento dejaria de cuadrar al anadir el cuarto.
@@ -453,7 +458,7 @@ describe('DrupalHttpConfig · configurador del nodo DESTINO_DRUPAL', () => {
 
       // 3. Assert 🎯
       const botones = wrapper.findAll('[data-test^="preset-"]');
-      expect(botones).toHaveLength(Object.keys(DRUPAL_SANDBOX_PRESETS).length);
+      expect(botones).toHaveLength(Object.keys(DRUPAL_PRESETS).length);
       expect(wrapper.find('[data-test="preset-abrir_licitacion"]').exists()).toBe(true);
       expect(wrapper.find('[data-test="preset-cerrar_licitacion"]').exists()).toBe(true);
       expect(wrapper.find('[data-test="preset-verificacion_titulos"]').exists()).toBe(true);
@@ -491,7 +496,7 @@ describe('DrupalHttpConfig · configurador del nodo DESTINO_DRUPAL', () => {
       await flushNotifications();
 
       // 3. Assert 🎯
-      expect(notificationsSince(previas)).toContain('destino');
+      expect(notificationsSince(previas)).toContain('UUID');
     });
   });
 
@@ -509,7 +514,7 @@ describe('DrupalHttpConfig · configurador del nodo DESTINO_DRUPAL', () => {
 
     // 3. Assert 🎯
     expect(store.config.targetNodeUuid).toBe(
-      DRUPAL_SANDBOX_PRESETS.ABRIR_LICITACION.targetNodeUuid,
+      DRUPAL_PRESETS.ABRIR_LICITACION.environments.SANDBOX.targetNodeUuid,
     );
     expect(store.config.bundle).toBe('node--page');
     expect(store.config.operationMode).toBe(DrupalOperationMode.APPEND_HTML_BLOCK);
@@ -527,7 +532,7 @@ describe('DrupalHttpConfig · configurador del nodo DESTINO_DRUPAL', () => {
 
     // 3. Assert 🎯
     expect(store.config.targetNodeUuid).toBe(
-      DRUPAL_SANDBOX_PRESETS.VERIFICACION_TITULOS.targetNodeUuid,
+      DRUPAL_PRESETS.VERIFICACION_TITULOS.environments.SANDBOX.targetNodeUuid,
     );
     expect(store.config.bundle).toBe('node--page');
     expect(store.config.operationMode).toBe(DrupalOperationMode.APPEND_HTML_BLOCK);
@@ -552,6 +557,76 @@ describe('DrupalHttpConfig · configurador del nodo DESTINO_DRUPAL', () => {
     expect(store.config.destinationNodeUuid).toBeNull();
     expect(store.isConfigValid).toBe(false);
   });
+  describe('5bis. Entorno y presets ordenados', () => {
+    it('should render Innodays preset button positioned strictly between Verificación de títulos and Notiweb', () => {
+      // 1. Arrange 📐 + 2. Act ⚙️
+      const wrapper = mountComponent(nextNodeId());
+
+      // 3. Assert 🎯: el orden exacto de la barra, y cada boton con su entorno.
+      const keys = wrapper
+        .findAll('[data-test^="preset-"]')
+        .map((button) => button.attributes('data-test'));
+      expect(keys).toEqual([
+        'preset-abrir_licitacion',
+        'preset-cerrar_licitacion',
+        'preset-verificacion_titulos',
+        'preset-innodays',
+        'preset-notiweb',
+      ]);
+      expect(wrapper.get('[data-test="preset-innodays"]').text()).toContain('Innodays (Sandbox)');
+    });
+
+    it('5bis.2 deberia rotular los presets como Produccion al apagar el toggle', async () => {
+      // 1. Arrange 📐
+      const nodeId = nextNodeId();
+      const wrapper = mountComponent(nodeId);
+
+      // 2. Act ⚙️
+      wrapper.findComponent(QToggle).vm.$emit('update:modelValue', false);
+      await wrapper.vm.$nextTick();
+
+      // 3. Assert 🎯
+      expect(useDrupalHttpStore(nodeId).config.isSandbox).toBe(false);
+      expect(wrapper.get('[data-test="preset-notiweb"]').text()).toContain('Notiweb (Producción)');
+    });
+
+    it('should disable environment selection and lock to sandbox when rendered in sandbox mode', async () => {
+      // 1. Arrange 📐: un nodo que llega configurado contra Produccion.
+      const nodeId = nextNodeId();
+      useDrupalHttpStore(nodeId).setSandbox(false);
+
+      // 2. Act ⚙️
+      const wrapper = mountComponent(nodeId, true);
+      await wrapper.vm.$nextTick();
+
+      // 3. Assert 🎯: forzado a Sandbox, toggle bloqueado y el motivo a la vista.
+      const toggle = wrapper.findComponent(QToggle);
+      expect(useDrupalHttpStore(nodeId).config.isSandbox).toBe(true);
+      expect(toggle.props('disable')).toBe(true);
+      expect(toggle.props('modelValue')).toBe(true);
+      expect(wrapper.get('[data-test="sandbox-lock-notice"]').text()).toContain(
+        'En el Banco de Pruebas solo está permitido ejecutar sobre el entorno Sandbox',
+      );
+      expect(wrapper.get('[data-test="preset-abrir_licitacion"]').text()).toContain('(Sandbox)');
+    });
+
+    it('5bis.4 deberia pedir selector, atributo y valor en el modo enlace', async () => {
+      // 1. Arrange 📐
+      const nodeId = nextNodeId();
+      const wrapper = mountComponent(nodeId);
+
+      // 2. Act ⚙️
+      await wrapper.get('[data-test="preset-innodays"]').trigger('click');
+      await wrapper.vm.$nextTick();
+
+      // 3. Assert 🎯
+      expect(wrapper.find('[data-test="link-selector-field"]').exists()).toBe(true);
+      expect(wrapper.find('[data-test="link-attribute-field"]').exists()).toBe(true);
+      expect(wrapper.find('[data-test="link-value-field"]').exists()).toBe(true);
+      expect(wrapper.find('[data-test="target-uuid-field"]').exists()).toBe(true);
+    });
+  });
+
   describe('6. Avisos', () => {
     it('6.1 deberia pintar los avisos que levanta el store', async () => {
       // 1. Arrange 📐: un flujo sin escudo delante no publica el namespace que

@@ -13,6 +13,9 @@ export const SANDBOX_ROLES_BY_NODE_TYPE: Readonly<Partial<Record<NodeType, reado
     [NodeType.PROCESADOR_IA]: [UserRole.ADMIN],
     [NodeType.PROCESADOR_OCR]: [UserRole.ADMIN],
     [NodeType.DESTINO_HTTP_GENERICO]: [UserRole.ADMIN, UserRole.EDITOR],
+    // Encerrado en las paginas de pruebas: el backend fuerza `isSandbox` y
+    // rechaza cualquier pagina fuera de su lista blanca.
+    [NodeType.DESTINO_DRUPAL]: [UserRole.ADMIN, UserRole.EDITOR],
   };
 
 /** Tipos cuya prueba cuesta dinero: piden confirmacion antes de lanzarse. */
