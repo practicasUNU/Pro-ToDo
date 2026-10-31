@@ -5,6 +5,7 @@ import { validate } from 'class-validator';
 
 import { DrupalApiConfig } from '@core/config/drupal-api.config';
 import {
+  INTERPOLATION_PATTERN,
   MissingContextVariableException,
   extractNamespaceRoots,
 } from '@core/fsm/context/state-payload.context';
@@ -12,15 +13,21 @@ import { NodeType } from '@core/fsm/types/pipeline-schema.types';
 import { HttpClientService } from '@core/http/http-client.service';
 
 import { BaseHttpDestinationStrategy } from './base/base-http-destination.strategy';
-import { planPanelDispatch } from './drupal-universities';
+import {
+  planPanelDispatch,
+  resolvePanelContainer,
+} from './drupal-universities';
 import { selectVisibleTarget } from '../utils/visible-target.util';
 import { wrapTenderBlock } from '../utils/tender-block.util';
 import {
+  escapeSelectorString,
   isSafeLinkValue,
   replaceLinkAttribute,
 } from '../utils/link-attribute.util';
 
 import {
+  DRUPAL_NEWS_BUNDLE,
+  DRUPAL_NEWS_TAXONOMY_TYPES,
   DrupalHttpConfigDto,
   DrupalOperationMode,
   resolveDrupalHttpConfig,
@@ -83,6 +90,17 @@ const NEUTRAL_NID = 0;
 
 /** «No hubo respuesta HTTP que clasificar». */
 const NEUTRAL_STATUS = 0;
+
+/** Dia ISO al principio de un valor: `2026-10-29` o `2026-10-29T08:00:00Z`. */
+const ISO_DAY_PATTERN =
+  /^(\d{4}-\d{2}-\d{2})(?:[T ][\d:.]+(?:Z|[+-]\d{2}:?\d{2})?)?$/;
+
+/** Texto recortado, o `null` si no hay texto: Drupal guarda `null`, no `""`. */
+const emptyToNull = (value: string | null): string | null => {
+  const trimmed = value?.trim() ?? '';
+
+  return trimmed.length === 0 ? null : trimmed;
+};
 
 /** Campos del payload, antes de pasar por el constructor que fija la paridad. */
 interface DrupalResultFields {
@@ -355,6 +373,9 @@ export class DrupalHttpStrategy extends BaseHttpDestinationStrategy {
     for (const template of [
       config.titleTemplate,
       config.summaryTemplate,
+      config.authorTemplate,
+      config.dateTemplate,
+      config.linkSelector,
       config.linkValueTemplate,
       config.expedienteTemplate,
     ]) {
@@ -501,6 +522,21 @@ export class DrupalHttpStrategy extends BaseHttpDestinationStrategy {
       };
     }
 
+    const productionTarget =
+      params.isSandbox === true ? this.findProductionTarget(config) : null;
+
+    if (productionTarget !== null) {
+      return {
+        success: false,
+        error: {
+          level: 'GRAVE',
+          code: ERR_DRUPAL_CONFIG,
+          message: `El nodo esta en el entorno Sandbox pero ${productionTarget.param} apunta a una pagina del portal (${productionTarget.uuid}). No se ha enviado ninguna peticion.`,
+          missingFields: [productionTarget.param],
+        },
+      };
+    }
+
     switch (config.operationMode) {
       case DrupalOperationMode.CREATE_NODE:
         return this.runCreateNode(context, config);
@@ -587,21 +623,35 @@ export class DrupalHttpStrategy extends BaseHttpDestinationStrategy {
       return { success: false, error: summary };
     }
 
+    // El resumen viaja DENTRO del campo de cuerpo (`body.summary`): el bundle
+    // de noticias no declara ningun campo de resumen propio, el cuerpo es un
+    // texto con resumen. El antiguo `field_resumen` suelto provocaba un 422 en
+    // cuanto se rellenaba la plantilla.
     const attributes: Record<string, unknown> = {
       title,
       [config.bodyFieldName]: {
         value: markup,
         format: config.bodyFormat,
+        summary: emptyToNull(summary),
       },
       status: config.publishStatus,
     };
 
-    // El resumen se OMITE si no se configuro, en vez de viajar vacio: un
-    // atributo que el bundle no declara provoca un 422 en Drupal, de modo que
-    // mandarlo «por si acaso» romperia los bundles que no lo tienen.
-    if (summary !== null) {
-      attributes.field_resumen = summary;
+    const news = this.buildNewsFields(context, config);
+
+    if ('failure' in news) {
+      return { success: false, error: news.failure };
     }
+
+    Object.assign(attributes, news.attributes);
+
+    const document: Record<string, unknown> = {
+      type: config.bundle,
+      attributes,
+      ...(Object.keys(news.relationships).length > 0
+        ? { relationships: news.relationships }
+        : {}),
+    };
 
     const outcome =
       await this.httpClient.requestWithStatus<DrupalEntityResponse>(
@@ -609,7 +659,7 @@ export class DrupalHttpStrategy extends BaseHttpDestinationStrategy {
           url: `${this.drupalApiConfig.baseUrl}/${this.resolveEntityPath(config.bundle)}`,
           method: 'POST',
           headers: this.buildJsonApiHeaders(),
-          data: { data: { type: config.bundle, attributes } },
+          data: { data: document },
         },
         // Sin reintentos: un POST repetido tras un 5xx que SI se aplico crea una
         // segunda noticia. La idempotencia aqui no la da el verbo, asi que la
@@ -740,13 +790,18 @@ export class DrupalHttpStrategy extends BaseHttpDestinationStrategy {
     config: ResolvedDrupalHttpConfig,
   ): Promise<NodeResult> {
     const uuid = config.targetNodeUuid;
-    const selector = config.linkSelector;
 
     if (uuid === null) {
       return this.missingParam('targetNodeUuid');
     }
-    if (selector === null) {
+    if (config.linkSelector === null) {
       return this.missingParam('linkSelector');
+    }
+
+    const selector = this.interpolateSelector(context, config.linkSelector);
+
+    if (typeof selector !== 'string') {
+      return { success: false, error: selector };
     }
 
     const interpolated = this.interpolate(context, config.linkValueTemplate);
@@ -940,10 +995,17 @@ export class DrupalHttpStrategy extends BaseHttpDestinationStrategy {
     let destinationChangedAt = new Date().toISOString();
 
     if (!alreadyMoved) {
+      // El contenedor de la pagina RECEPTORA, si se declaro: en un traslado
+      // hay dos paginas y el `containerSelector` del nodo no tiene por que
+      // existir en la de destino. Si no casa, `insertBlock` falla con
+      // ERR_DRUPAL_DOM_TARGET ANTES de cualquier PATCH, y el bloque sigue
+      // intacto en origen.
       const merged = this.insertBlock(
         destination.node.bodyHtml,
         blockHtml,
-        config,
+        config.targetContainerSelector === null
+          ? config
+          : { ...config, containerSelector: config.targetContainerSelector },
       );
 
       if (typeof merged !== 'string') {
@@ -1510,10 +1572,15 @@ export class DrupalHttpStrategy extends BaseHttpDestinationStrategy {
     plan: readonly PanelDispatch[],
     config: ResolvedDrupalHttpConfig,
   ): string | NodeErrorDetail {
-    const unplaceable = plan.filter(
-      (panel) =>
-        panel.targetSelector === null || $(panel.targetSelector).length === 0,
-    );
+    // Se resuelven TODOS antes de tocar nada: es lo que hace el todo o nada.
+    const placements = plan.map((panel) => ({
+      panel,
+      container: resolvePanelContainer($, panel),
+    }));
+
+    const unplaceable = placements
+      .filter((placement) => placement.container === null)
+      .map((placement) => placement.panel);
 
     if (unplaceable.length > 0) {
       const detail = unplaceable
@@ -1535,15 +1602,13 @@ export class DrupalHttpStrategy extends BaseHttpDestinationStrategy {
       };
     }
 
-    for (const panel of plan) {
-      // `targetSelector` no puede ser null aqui: la guarda de arriba ya
-      // devolvio en ese caso. El `?? ''` es para el compilador, no para el
-      // flujo —un selector vacio no casaria con nada y la guarda ya lo habria
-      // cazado—.
-      // Mismo motivo que en `insertBlock`: entre varios candidatos se prefiere
-      // el que no cuelga de un subarbol oculto. Si TODOS cuelgan de uno, se
-      // devuelve el primero igual y lo destapa el `removeClass` de aqui abajo.
-      const container = selectVisibleTarget($, panel.targetSelector ?? '');
+    for (const { panel, container } of placements) {
+      // `container` no puede ser null aqui: la guarda de arriba ya devolvio en
+      // ese caso. La comprobacion es para el compilador, no para el flujo.
+      // `resolvePanelContainer` ya prefiere, entre varios candidatos, el que no
+      // cuelga de un subarbol oculto; si TODOS cuelgan de uno, devuelve el
+      // primero igual y lo destapa el `removeClass` de aqui abajo.
+      if (container === null) continue;
 
       // Un sub-acordeon al que todavia no se le ha inyectado ningun comite
       // puede venir oculto, y entonces el primero que reciba se publicaria sin
@@ -1631,6 +1696,150 @@ export class DrupalHttpStrategy extends BaseHttpDestinationStrategy {
 
       throw error;
     }
+  }
+
+  /**
+   * Interpola un selector CSS escapando CADA valor por separado.
+   *
+   * No basta con interpolar la plantilla entera y escapar el resultado: eso
+   * escaparia tambien la sintaxis que escribio el operador (`:contains('...')`)
+   * y el selector dejaria de serlo. Se resuelve marca a marca y solo el VALOR
+   * pasa por `escapeSelectorString`, de modo que un nombre de evento con
+   * comillas o parentesis casa como texto literal y no abre otra clausula.
+   *
+   * La `replace` exterior recoge todas las coincidencias antes de llamar a la
+   * funcion de sustitucion, asi que reutilizar el mismo patron global dentro
+   * de `getInterpolatedValue` no le mueve el `lastIndex`.
+   */
+  private interpolateSelector(
+    context: StatePayloadContext,
+    template: string,
+  ): string | NodeErrorDetail {
+    try {
+      return template.replace(INTERPOLATION_PATTERN, (marker: string) =>
+        escapeSelectorString(context.getInterpolatedValue(marker)),
+      );
+    } catch (error) {
+      if (error instanceof MissingContextVariableException) {
+        return {
+          level: 'GRAVE',
+          code: ERR_DRUPAL_MISSING_PAYLOAD,
+          message: `No se pudo componer el selector del enlace: ${error.message}`,
+          missingFields: [error.variable],
+          ...stackTraceOf(error),
+        };
+      }
+
+      throw error;
+    }
+  }
+
+  /**
+   * Atributos y relaciones propios de una noticia de Notiweb.
+   *
+   * Solo para `node--noticias`: los demas bundles no declaran estos campos y
+   * Drupal responde 422 a un atributo desconocido. Cada taxonomia viaja SOLO
+   * si su UUID esta configurado; una relacion vacia borraria la que el editor
+   * ponga despues a mano en una noticia ya creada.
+   */
+  private buildNewsFields(
+    context: StatePayloadContext,
+    config: ResolvedDrupalHttpConfig,
+  ):
+    | {
+        readonly attributes: Record<string, unknown>;
+        readonly relationships: Record<string, unknown>;
+      }
+    | { readonly failure: NodeErrorDetail } {
+    if (config.bundle !== DRUPAL_NEWS_BUNDLE) {
+      return { attributes: {}, relationships: {} };
+    }
+
+    const author = this.interpolate(context, config.authorTemplate);
+
+    if (author !== null && typeof author !== 'string') {
+      return { failure: author };
+    }
+
+    const date = this.interpolate(context, config.dateTemplate);
+
+    if (date !== null && typeof date !== 'string') {
+      return { failure: date };
+    }
+
+    const fecha = emptyToNull(date);
+
+    // `field_fecha` es una fecha sin hora: Drupal rechaza con 422 cualquier
+    // otra forma, y su mensaje no dice que campo era. Se recorta un instante
+    // ISO a su dia y se rechaza aqui todo lo demas, nombrando el param.
+    const day =
+      fecha === null ? null : (ISO_DAY_PATTERN.exec(fecha)?.[1] ?? '');
+
+    if (day === '') {
+      return {
+        failure: {
+          level: 'GRAVE',
+          code: ERR_DRUPAL_MISSING_PAYLOAD,
+          message: `La fecha de la noticia debe resolverse a AAAA-MM-DD y se resolvio a "${(fecha ?? '').slice(0, 40)}".`,
+          missingFields: ['dateTemplate'],
+        },
+      };
+    }
+
+    const terms: Record<
+      keyof typeof DRUPAL_NEWS_TAXONOMY_TYPES,
+      string | null
+    > = {
+      field_fuente_noticia: config.newsSourceTermUuid,
+      field_noticia_seccion: config.newsSectionTermUuid,
+      field_noticia_tipo: config.newsTypeTermUuid,
+    };
+
+    const relationships = Object.fromEntries(
+      Object.entries(terms)
+        .filter(
+          (entry): entry is [keyof typeof DRUPAL_NEWS_TAXONOMY_TYPES, string] =>
+            entry[1] !== null,
+        )
+        .map(([field, id]) => [
+          field,
+          { data: { type: DRUPAL_NEWS_TAXONOMY_TYPES[field], id } },
+        ]),
+    );
+
+    return {
+      attributes: {
+        field_autor: emptyToNull(author),
+        field_fecha: day,
+        field_orden: config.orderValue,
+      },
+      relationships,
+    };
+  }
+
+  /**
+   * Primera pagina del portal a la que apunta un nodo en Sandbox, o `null`.
+   *
+   * `execute` solo lo consulta cuando el entorno esta GUARDADO como Sandbox,
+   * por el mismo motivo que el borrador forzado: los flujos sin la clave se
+   * resuelven a Sandbox por defecto y negarles su pagina de produccion los
+   * romperia.
+   */
+  private findProductionTarget(
+    config: ResolvedDrupalHttpConfig,
+  ): { readonly param: string; readonly uuid: string } | null {
+    const production = this.drupalApiConfig.productionNodeUuids;
+
+    for (const [param, uuid] of [
+      ['targetNodeUuid', config.targetNodeUuid],
+      ['destinationNodeUuid', config.destinationNodeUuid],
+    ] as const) {
+      if (uuid !== null && production.has(uuid.toLowerCase())) {
+        return { param, uuid };
+      }
+    }
+
+    return null;
   }
 
   // --- Construccion de resultados ----------------------------------------

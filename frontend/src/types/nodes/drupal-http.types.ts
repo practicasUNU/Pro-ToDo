@@ -3,7 +3,7 @@
 //
 // El DTO se valida con `{ whitelist: true, forbidNonWhitelisted: true }`: una
 // clave que no figure alli es un 400 al guardar el flujo, no un campo ignorado.
-// Por eso esta replica enumera EXACTAMENTE los 22 params y ni uno mas.
+// Por eso esta replica enumera EXACTAMENTE los params del DTO y ni uno mas.
 
 /**
  * Modos operativos del nodo contra Drupal JSON:API.
@@ -138,6 +138,26 @@ export const MAX_DRUPAL_TITLE_LENGTH = 255;
 /** Tope del resumen, replicado de `MAX_DRUPAL_SUMMARY_LENGTH`. */
 export const MAX_DRUPAL_SUMMARY_LENGTH = 2000;
 
+/** Tope de la plantilla del autor, replicado de `MAX_DRUPAL_AUTHOR_LENGTH`. */
+export const MAX_DRUPAL_AUTHOR_LENGTH = 255;
+
+/** Tope de la plantilla de la fecha, replicado de `MAX_DRUPAL_DATE_TEMPLATE_LENGTH`. */
+export const MAX_DRUPAL_DATE_TEMPLATE_LENGTH = 128;
+
+/** Orden por defecto de una noticia, replicado de `DEFAULT_DRUPAL_NEWS_ORDER`. */
+export const DEFAULT_DRUPAL_NEWS_ORDER = 1;
+
+/** Tope del orden, replicado de `MAX_DRUPAL_NEWS_ORDER`. */
+export const MAX_DRUPAL_NEWS_ORDER = 9999;
+
+/**
+ * Bundle de las noticias de Notiweb, replicado de `DRUPAL_NEWS_BUNDLE`.
+ *
+ * Es el unico que recibe autor, fecha, orden y taxonomias: la interfaz solo
+ * pinta esos campos cuando el bundle es este.
+ */
+export const DRUPAL_NEWS_BUNDLE = 'node--noticias';
+
 /**
  * Tope de un selector CSS.
  *
@@ -233,6 +253,13 @@ export interface DrupalPreset {
   readonly linkSelector: string | null;
   readonly linkAttribute: DrupalLinkAttribute;
 
+  /** Contenedor de la pagina receptora; solo `TRANSFER_HTML_BLOCK`. */
+  readonly targetContainerSelector: string | null;
+
+  /** Terminos de taxonomia fijos de las noticias; solo Notiweb. */
+  readonly newsSectionTermUuid: string | null;
+  readonly newsTypeTermUuid: string | null;
+
   /**
    * Plantilla de `plantillas_html` que acompana a este destino.
    *
@@ -252,6 +279,14 @@ const SANDBOX_LICITACIONES_UUID = '7f1700bf-b54b-4c12-b71a-8a71f1f0ee38';
 
 /** UUID de la pagina de verificacion de titulos de PRUEBAS. */
 const SANDBOX_TITULOS_UUID = 'b17d69d8-6998-4883-b8dc-153b55dbd9c5';
+
+/**
+ * Terminos de taxonomia de una noticia de Notiweb: seccion «Notiweb» y tipo
+ * «Noticias». Leidos del vocabulario real de Drupal; la misma instalacion sirve
+ * a los dos entornos, asi que valen en ambos.
+ */
+const NOTIWEB_SECTION_TERM_UUID = 'd4964d27-7819-4975-81ca-c0554ee7b233';
+const NOTIWEB_TYPE_TERM_UUID = '6c18cd7a-a5cd-4332-8271-6bdee4ef9834';
 
 /**
  * Destinos operativos del Drupal de Madrid+D, en el ORDEN en que se pintan.
@@ -291,7 +326,13 @@ export const DRUPAL_PRESETS: Readonly<
     publishStatus: true,
     linkSelector: null,
     linkAttribute: DEFAULT_DRUPAL_LINK_ATTRIBUTE,
-    associatedTemplateName: 'Licitaciones · Convocatoria abierta (Madrid+D)',
+    // El nombre VIGENTE en `plantillas_html`: el gestor la renombro con el
+    // sufijo de version, y la pista tiene que coincidir con lo que el operador
+    // ve en el selector del MAPEADOR_PLANTILLA.
+    associatedTemplateName: 'Licitaciones · Convocatoria abierta (Madrid+D) V1',
+    targetContainerSelector: null,
+    newsSectionTermUuid: null,
+    newsTypeTermUuid: null,
     environments: {
       SANDBOX: {
         path: '/prueba-licitaciones',
@@ -322,13 +363,18 @@ export const DRUPAL_PRESETS: Readonly<
     // Afinarlo a un expediente concreto (`[data-expediente="..."]`) es trabajo
     // del flujo.
     itemSelector: '.pd-licitacion-block, .licitacion-entry',
-    // En cerradas el orden cronologico se lee al reves: lo ultimo en cerrarse va
-    // al final, detras de lo que lleva mas tiempo archivado.
-    insertPosition: 'APPEND',
+    // Lo ultimo cerrado se lee arriba, dentro del panel de cerradas: es como
+    // el portal presenta tambien la lista de abiertas.
+    insertPosition: 'PREPEND',
     publishStatus: true,
     linkSelector: null,
     linkAttribute: DEFAULT_DRUPAL_LINK_ATTRIBUTE,
     associatedTemplateName: 'Licitaciones · Convocatoria cerrada (Madrid+D)',
+    // Cuerpo del acordeon de la pagina de cerradas: sin el, el bloque iria a la
+    // raiz del cuerpo y quedaria fuera del panel que el portal despliega.
+    targetContainerSelector: '#collapse2 > .panel-body',
+    newsSectionTermUuid: null,
+    newsTypeTermUuid: null,
     environments: {
       // La pagina de cerradas queda nula en los dos entornos. Apuntarla a la de
       // abiertas «para probar» seria destructivo: `runTransferHtmlBlock` lee
@@ -371,6 +417,9 @@ export const DRUPAL_PRESETS: Readonly<
     linkSelector: null,
     linkAttribute: DEFAULT_DRUPAL_LINK_ATTRIBUTE,
     associatedTemplateName: 'Verificación de Títulos · Panel de evaluación',
+    targetContainerSelector: null,
+    newsSectionTermUuid: null,
+    newsTypeTermUuid: null,
     environments: {
       SANDBOX: {
         path: '/prueba-verificador-titulos',
@@ -401,6 +450,9 @@ export const DRUPAL_PRESETS: Readonly<
     linkSelector: null,
     linkAttribute: 'href',
     associatedTemplateName: null,
+    targetContainerSelector: null,
+    newsSectionTermUuid: null,
+    newsTypeTermUuid: null,
     environments: {
       SANDBOX: {
         path: '/prueba-innodays',
@@ -429,6 +481,9 @@ export const DRUPAL_PRESETS: Readonly<
     linkSelector: null,
     linkAttribute: 'href',
     associatedTemplateName: null,
+    targetContainerSelector: null,
+    newsSectionTermUuid: null,
+    newsTypeTermUuid: null,
     environments: {
       // Misma pagina de pruebas que Innodays: no hay una propia de Innobar.
       SANDBOX: {
@@ -438,7 +493,7 @@ export const DRUPAL_PRESETS: Readonly<
         destinationNodeUuid: null,
       },
       PRODUCTION: {
-        path: '/innobar',
+        path: '/innobar-madrid',
         nid: null,
         targetNodeUuid: null,
         destinationNodeUuid: null,
@@ -459,6 +514,9 @@ export const DRUPAL_PRESETS: Readonly<
     linkSelector: null,
     linkAttribute: DEFAULT_DRUPAL_LINK_ATTRIBUTE,
     associatedTemplateName: 'Notiweb · Noticia institucional',
+    targetContainerSelector: null,
+    newsSectionTermUuid: NOTIWEB_SECTION_TERM_UUID,
+    newsTypeTermUuid: NOTIWEB_TYPE_TERM_UUID,
     environments: {
       // Sin pagina receptora: este canal crea entidades sueltas.
       SANDBOX: {
@@ -497,7 +555,19 @@ export interface DrupalHttpNodeConfig {
   sourceNamespace: string;
   sourceField: string;
   titleTemplate: string | null;
+
+  /** Resumen de la noticia; el backend lo envia dentro de `body.summary`. */
   summaryTemplate: string | null;
+
+  /** Autor, fecha (`AAAA-MM-DD`) y orden de una noticia; solo `node--noticias`. */
+  authorTemplate: string | null;
+  dateTemplate: string | null;
+  orderValue: number;
+
+  /** Terminos de taxonomia de la noticia; la relacion solo viaja si hay UUID. */
+  newsSourceTermUuid: string | null;
+  newsSectionTermUuid: string | null;
+  newsTypeTermUuid: string | null;
   bodyFieldName: string;
   bodyFormat: string;
   publishStatus: boolean;
@@ -505,6 +575,9 @@ export interface DrupalHttpNodeConfig {
   destinationNodeUuid: string | null;
   containerSelector: string | null;
   itemSelector: string | null;
+
+  /** Contenedor de la pagina RECEPTORA en `TRANSFER_HTML_BLOCK`. */
+  targetContainerSelector: string | null;
   insertPosition: DrupalInsertPosition;
 
   /**

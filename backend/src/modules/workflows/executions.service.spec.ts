@@ -11,6 +11,7 @@ import { NodeLogStatus } from '@modules/logs/entities/log-nodo.entity';
 import { UserRole } from '@modules/users/enums/user-role.enum';
 import { NodeType } from '@core/fsm/types/pipeline-schema.types';
 
+import { MAX_EXPORT_ROWS } from './dto/list-executions-query.dto';
 import { ExecutionsService } from './executions.service';
 
 import type { FsmExecution } from '@core/fsm/entities/fsm-execution.entity';
@@ -103,7 +104,7 @@ interface ServiceHarness {
     findById: jest.Mock;
     findLiveByFlow: jest.Mock;
   };
-  repository: { findOne: jest.Mock };
+  repository: { findOne: jest.Mock; find: jest.Mock };
   validator: { validateSchema: jest.Mock };
   engine: {
     assertGlobalCapacityAvailable: jest.Mock;
@@ -141,6 +142,10 @@ const buildHarness = (): ServiceHarness => {
   };
   const repository = {
     findOne: jest.fn().mockResolvedValue(buildWorkflow()),
+    // Nombres de flujo del informe CSV: una consulta por exportacion.
+    find: jest
+      .fn()
+      .mockResolvedValue([{ id: FLOW_ID, name: 'Flujo de prueba' }]),
   };
   const validator = {
     validateSchema: jest.fn().mockResolvedValue(buildSchema()),
@@ -340,6 +345,140 @@ describe('ExecutionsService (consulta y reintento manual CU-09)', () => {
       await expect(service.findOne(EXECUTION_ID)).rejects.toBeInstanceOf(
         NotFoundException,
       );
+    });
+  });
+
+  describe('1 bis. Exportacion CSV del historial', () => {
+    it('1e.1 deberia aplicar cada filtro y el orden del listado, sin la ventana de pagina', async () => {
+      // 1. Arrange 📐
+      const { service, query } = buildHarness();
+
+      // 2. Act ⚙️
+      await service.findAllForExport({
+        flowId: FLOW_ID,
+        state: ExecutionState.FALLIDO,
+        from: '2026-10-01',
+        to: '2026-10-22',
+        sortBy: 'updatedAt',
+        sortOrder: 'ASC',
+      });
+
+      // 3. Assert 🎯: los mismos criterios que la pantalla, desde la fila 0 y
+      //    con UNA fila de mas para detectar el corte.
+      expect(query.findPage).toHaveBeenCalledWith({
+        flowId: FLOW_ID,
+        state: ExecutionState.FALLIDO,
+        startedBetween: {
+          from: new Date('2026-10-01T00:00:00.000Z'),
+          to: new Date('2026-10-23T00:00:00.000Z'),
+        },
+        sort: { column: 'updatedAt', order: 'ASC' },
+        limit: MAX_EXPORT_ROWS + 1,
+        offset: 0,
+      });
+    });
+
+    it('1e.2 deberia exportar en el orden por defecto del listado y sin filtros si no llegan', async () => {
+      // 1. Arrange 📐
+      const { service, query } = buildHarness();
+
+      // 2. Act ⚙️
+      await service.findAllForExport({});
+      await service.findAll({});
+
+      // 3. Assert 🎯: mismo criterio que `findAll`, salvo la ventana.
+      const [exportCall, listCall] = query.findPage.mock.calls as [
+        [Record<string, unknown>],
+        [Record<string, unknown>],
+      ];
+      expect(exportCall[0]).toEqual({
+        flowId: undefined,
+        state: undefined,
+        startedBetween: undefined,
+        sort: { column: 'createdAt', order: 'DESC' },
+        limit: MAX_EXPORT_ROWS + 1,
+        offset: 0,
+      });
+      expect({ ...exportCall[0], limit: 0, offset: 0 }).toEqual({
+        ...listCall[0],
+        limit: 0,
+        offset: 0,
+      });
+    });
+
+    it('1e.3 deberia cortar en MAX_EXPORT_ROWS y marcar el informe como truncado', async () => {
+      // 1. Arrange 📐: el repositorio devuelve el techo mas la fila centinela.
+      const { service, query } = buildHarness();
+      const overflowing = Array.from({ length: MAX_EXPORT_ROWS + 1 }, () =>
+        buildExecution(),
+      );
+      query.findPage.mockResolvedValue({
+        items: overflowing,
+        total: MAX_EXPORT_ROWS + 1,
+      });
+
+      // 2. Act ⚙️
+      const { rows, truncated } = await service.findAllForExport({});
+
+      // 3. Assert 🎯
+      expect(rows).toHaveLength(MAX_EXPORT_ROWS);
+      expect(truncated).toBe(true);
+    });
+
+    it('1e.4 NO deberia marcar truncado un informe que cabe en el techo', async () => {
+      // 1. Arrange 📐
+      const { service } = buildHarness();
+
+      // 2. Act ⚙️
+      const { rows, truncated } = await service.findAllForExport({});
+
+      // 3. Assert 🎯
+      expect(rows).toHaveLength(1);
+      expect(truncated).toBe(false);
+    });
+
+    it('1e.5 deberia resolver el nombre del flujo con UNA consulta y dejar null el de un flujo borrado', async () => {
+      // 1. Arrange 📐: dos filas del mismo flujo y una de un flujo que ya no existe.
+      const { service, query, repository, alertQuery } = buildHarness();
+      const orphanFlowId = 'c0ffee00-0000-4000-8000-000000000000';
+      query.findPage.mockResolvedValue({
+        items: [
+          buildExecution(),
+          buildExecution({ executionId: 'otra' }),
+          buildExecution({ executionId: 'huerfana', flowId: orphanFlowId }),
+        ],
+        total: 3,
+      });
+      alertQuery.findExecutionIdsWithAlerts.mockResolvedValue(
+        new Set([EXECUTION_ID]),
+      );
+
+      // 2. Act ⚙️
+      const { rows } = await service.findAllForExport({});
+
+      // 3. Assert 🎯
+      expect(repository.find).toHaveBeenCalledTimes(1);
+      expect(rows.map((row) => row.flowName)).toEqual([
+        'Flujo de prueba',
+        'Flujo de prueba',
+        null,
+      ]);
+      expect(rows.map((row) => row.hasAlerts)).toEqual([true, false, false]);
+      expect(rows[0]?.startedAt).toBe('2026-10-10T08:00:00.000Z');
+    });
+
+    it('1e.6 NO deberia consultar flujos si el informe sale vacio', async () => {
+      // 1. Arrange 📐: `In([])` seria un `IN ()` que PostgreSQL rechaza.
+      const { service, query, repository } = buildHarness();
+      query.findPage.mockResolvedValue({ items: [], total: 0 });
+
+      // 2. Act ⚙️
+      const { rows, truncated } = await service.findAllForExport({});
+
+      // 3. Assert 🎯
+      expect(rows).toEqual([]);
+      expect(truncated).toBe(false);
+      expect(repository.find).not.toHaveBeenCalled();
     });
   });
 

@@ -14,6 +14,7 @@ import {
   DEFAULT_DRUPAL_IS_SANDBOX,
   DEFAULT_DRUPAL_LINK_ATTRIBUTE,
   DEFAULT_DRUPAL_MODE,
+  DEFAULT_DRUPAL_NEWS_ORDER,
   DEFAULT_DRUPAL_SOURCE_FIELD,
   DEFAULT_DRUPAL_SOURCE_NAMESPACE,
   DEFAULT_DRUPAL_UPLOAD_ATTACHMENT,
@@ -24,7 +25,10 @@ import {
   DRUPAL_PRESETS,
   DrupalOperationMode,
   MAX_DRUPAL_ATTACHMENT_INDEX,
+  MAX_DRUPAL_AUTHOR_LENGTH,
+  MAX_DRUPAL_DATE_TEMPLATE_LENGTH,
   MAX_DRUPAL_LINK_TEMPLATE_LENGTH,
+  MAX_DRUPAL_NEWS_ORDER,
   MAX_DRUPAL_SELECTOR_LENGTH,
   MAX_DRUPAL_SUMMARY_LENGTH,
   MAX_DRUPAL_TITLE_LENGTH,
@@ -142,6 +146,12 @@ const buildInitialConfig = (): DrupalHttpNodeConfig => ({
   sourceField: DEFAULT_DRUPAL_SOURCE_FIELD,
   titleTemplate: null,
   summaryTemplate: null,
+  authorTemplate: null,
+  dateTemplate: null,
+  orderValue: DEFAULT_DRUPAL_NEWS_ORDER,
+  newsSourceTermUuid: null,
+  newsSectionTermUuid: null,
+  newsTypeTermUuid: null,
   bodyFieldName: DEFAULT_DRUPAL_BODY_FIELD,
   bodyFormat: DEFAULT_DRUPAL_BODY_FORMAT,
   // Falso porque el nodo nace en Sandbox, donde no se publica nunca.
@@ -150,6 +160,7 @@ const buildInitialConfig = (): DrupalHttpNodeConfig => ({
   destinationNodeUuid: null,
   containerSelector: null,
   itemSelector: null,
+  targetContainerSelector: null,
   insertPosition: DEFAULT_DRUPAL_INSERT_POSITION,
   expedienteTemplate: null,
   linkSelector: null,
@@ -259,6 +270,9 @@ const drupalHttpSetup = () => {
       [
         ['targetNodeUuid', current.targetNodeUuid],
         ['destinationNodeUuid', current.destinationNodeUuid],
+        ['newsSourceTermUuid', current.newsSourceTermUuid],
+        ['newsSectionTermUuid', current.newsSectionTermUuid],
+        ['newsTypeTermUuid', current.newsTypeTermUuid],
       ] as const
     ).forEach(([key, value]) => {
       if (value !== null && !UUID_V4_PATTERN.test(value)) malformed.push(key);
@@ -268,6 +282,9 @@ const drupalHttpSetup = () => {
       [
         ['titleTemplate', current.titleTemplate, MAX_DRUPAL_TITLE_LENGTH],
         ['summaryTemplate', current.summaryTemplate, MAX_DRUPAL_SUMMARY_LENGTH],
+        ['authorTemplate', current.authorTemplate, MAX_DRUPAL_AUTHOR_LENGTH],
+        ['dateTemplate', current.dateTemplate, MAX_DRUPAL_DATE_TEMPLATE_LENGTH],
+        ['targetContainerSelector', current.targetContainerSelector, MAX_DRUPAL_SELECTOR_LENGTH],
         ['containerSelector', current.containerSelector, MAX_DRUPAL_SELECTOR_LENGTH],
         ['itemSelector', current.itemSelector, MAX_DRUPAL_SELECTOR_LENGTH],
         ['attachmentListSelector', current.attachmentListSelector, MAX_DRUPAL_SELECTOR_LENGTH],
@@ -285,6 +302,14 @@ const drupalHttpSetup = () => {
       current.attachmentIndex > MAX_DRUPAL_ATTACHMENT_INDEX
     ) {
       malformed.push('attachmentIndex');
+    }
+
+    if (
+      !Number.isInteger(current.orderValue) ||
+      current.orderValue < 0 ||
+      current.orderValue > MAX_DRUPAL_NEWS_ORDER
+    ) {
+      malformed.push('orderValue');
     }
 
     return malformed;
@@ -407,6 +432,9 @@ const drupalHttpSetup = () => {
       publishStatus: preset.publishStatus,
       linkSelector: preset.linkSelector,
       linkAttribute: preset.linkAttribute,
+      targetContainerSelector: preset.targetContainerSelector,
+      newsSectionTermUuid: preset.newsSectionTermUuid,
+      newsTypeTermUuid: preset.newsTypeTermUuid,
     });
     activePresetKey.value = presetKey;
   };
@@ -541,6 +569,12 @@ const drupalHttpSetup = () => {
 
     putNullable('titleTemplate', current.titleTemplate);
     putNullable('summaryTemplate', current.summaryTemplate);
+    putNullable('authorTemplate', current.authorTemplate);
+    putNullable('dateTemplate', current.dateTemplate);
+    putNullable('newsSourceTermUuid', current.newsSourceTermUuid);
+    putNullable('newsSectionTermUuid', current.newsSectionTermUuid);
+    putNullable('newsTypeTermUuid', current.newsTypeTermUuid);
+    putNullable('targetContainerSelector', current.targetContainerSelector);
     putNullable('targetNodeUuid', current.targetNodeUuid);
     putNullable('destinationNodeUuid', current.destinationNodeUuid);
     putNullable('containerSelector', current.containerSelector);
@@ -559,6 +593,10 @@ const drupalHttpSetup = () => {
 
     if (current.attachmentIndex !== DEFAULT_DRUPAL_ATTACHMENT_INDEX) {
       params.attachmentIndex = current.attachmentIndex;
+    }
+
+    if (current.orderValue !== DEFAULT_DRUPAL_NEWS_ORDER) {
+      params.orderValue = current.orderValue;
     }
 
     // Simetrico a `publishStatus`: solo viaja cuando se aparta del defecto. Y
@@ -598,6 +636,12 @@ const drupalHttpSetup = () => {
       sourceField: asText(params.sourceField).trim() || DEFAULT_DRUPAL_SOURCE_FIELD,
       titleTemplate: asNullableText(params.titleTemplate),
       summaryTemplate: asNullableText(params.summaryTemplate),
+      authorTemplate: asNullableText(params.authorTemplate),
+      dateTemplate: asNullableText(params.dateTemplate),
+      orderValue: asInteger(params.orderValue, DEFAULT_DRUPAL_NEWS_ORDER, 0, MAX_DRUPAL_NEWS_ORDER),
+      newsSourceTermUuid: asNullableText(params.newsSourceTermUuid),
+      newsSectionTermUuid: asNullableText(params.newsSectionTermUuid),
+      newsTypeTermUuid: asNullableText(params.newsTypeTermUuid),
       bodyFieldName: asText(params.bodyFieldName).trim() || DEFAULT_DRUPAL_BODY_FIELD,
       bodyFormat: asText(params.bodyFormat).trim() || DEFAULT_DRUPAL_BODY_FORMAT,
       publishStatus: asBoolean(params.publishStatus, true),
@@ -605,6 +649,7 @@ const drupalHttpSetup = () => {
       destinationNodeUuid: asNullableText(params.destinationNodeUuid),
       containerSelector: asNullableText(params.containerSelector),
       itemSelector: asNullableText(params.itemSelector),
+      targetContainerSelector: asNullableText(params.targetContainerSelector),
       insertPosition: asEnum<DrupalInsertPosition>(
         params.insertPosition,
         DRUPAL_INSERT_POSITIONS,

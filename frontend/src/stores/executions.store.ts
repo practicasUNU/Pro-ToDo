@@ -56,6 +56,8 @@ export const useExecutionsStore = defineStore('executions', () => {
   /** Orden del historial ENTERO, resuelto en el servidor. */
   const sort = ref<TableSort<ExecutionSortKey>>({ sortBy: null, descending: false });
   const isLoading = ref(false);
+  /** Descarga del CSV en curso: deshabilita el boton para no pedirla dos veces. */
+  const isExporting = ref(false);
   /** El historial se ha cargado alguna vez: sin el, un evento no pide nada. */
   const hasLoaded = ref(false);
   let refreshTimer: ReturnType<typeof setTimeout> | null = null;
@@ -90,6 +92,28 @@ export const useExecutionsStore = defineStore('executions', () => {
       hasLoaded.value = true;
     } finally {
       isLoading.value = false;
+    }
+  };
+
+  /**
+   * Bytes del historial en CSV con los filtros APLICADOS y el orden vigente,
+   * para que el fichero diga lo mismo que la tabla. Nunca la pagina: el informe
+   * trae todas las filas que cumplen el filtro (hasta el techo del backend).
+   *
+   * Lee `filters` y no el borrador del formulario: un filtro tecleado pero sin
+   * "Aplicar" no esta en pantalla y tampoco debe estar en el fichero. El store
+   * no guarda los bytes en disco: eso toca el DOM y lo hace el componente.
+   */
+  const exportHistory = async (): Promise<Blob> => {
+    isExporting.value = true;
+
+    try {
+      return await fsmExecutionsService.downloadExecutionsCsv({
+        ...filters.value,
+        ...toSortQuery(sort.value),
+      });
+    } finally {
+      isExporting.value = false;
     }
   };
 
@@ -150,9 +174,11 @@ export const useExecutionsStore = defineStore('executions', () => {
     filters,
     sort,
     isLoading,
+    isExporting,
     setFilters,
     setSort,
     fetchPage,
+    exportHistory,
     applyExecutionUpdate,
   };
 });

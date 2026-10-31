@@ -6,6 +6,7 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
+import { In } from 'typeorm';
 
 import {
   CACHED_EXTRACTION_NODE_TYPES,
@@ -26,7 +27,9 @@ import { WorkflowsService } from '@modules/workflows/workflows.service';
 import {
   DEFAULT_PAGE_LIMIT,
   EXECUTION_SORT_COLUMNS,
+  ExportExecutionsQueryDto,
   ListExecutionsQueryDto,
+  MAX_EXPORT_ROWS,
 } from './dto/list-executions-query.dto';
 import { requirePipelineSchema } from './validators/require-pipeline-schema.validator';
 
@@ -39,6 +42,7 @@ import type {
 import type { ResumeExecutionDto } from './dto/resume-execution.dto';
 import type { WorkflowExecutionResponseDto } from './dto/workflow-execution-response.dto';
 import type { FsmExecution } from '@core/fsm/entities/fsm-execution.entity';
+import type { ExecutionFilter } from '@core/fsm/services/fsm-execution-query.service';
 import type { AuthenticatedUser } from '@modules/auth/interfaces/jwt-payload.interface';
 import type { PipelineSchemaDto } from '@core/fsm/dto/pipeline-schema.dto';
 import type { Repository } from 'typeorm';
@@ -53,6 +57,26 @@ const OPEN_RANGE_DAYS = 36_500;
 
 /** Lo que el controlador aporta al evento `FLUJO_DESCARTADO`. */
 type DiscardAuditInput = Pick<DiscardAuditContext, 'reason' | 'sourceIp'>;
+
+/** Filtros y orden de una consulta de ejecuciones, sin la ventana de pagina. */
+type ExecutionCriteria = Omit<ExecutionFilter, 'limit' | 'offset'>;
+
+/**
+ * Fila del informe CSV: el resumen del listado mas el nombre del flujo.
+ *
+ * El nombre no esta en `ejecuciones_flujo`; la tabla de la interfaz lo resuelve
+ * contra el catalogo, y el informe hace lo mismo en el servidor. `null` si el
+ * flujo ya no existe: el informe cae entonces a su identificador.
+ */
+export interface ExecutionExportRow extends ExecutionSummaryResponseDto {
+  readonly flowName: string | null;
+}
+
+/** Resultado de una exportacion: las filas y si se cortaron en el techo. */
+export interface ExecutionExportRows {
+  readonly rows: ExecutionExportRow[];
+  readonly truncated: boolean;
+}
 
 /**
  * Consulta de ejecuciones y reintento manual (CU-09).
@@ -95,15 +119,9 @@ export class ExecutionsService {
     const offset = query.offset ?? 0;
 
     const { items, total } = await this.fsmExecutionQueryService.findPage({
-      flowId: query.flowId,
-      state: query.state,
-      startedBetween: this.resolveStartedBetween(query),
+      ...this.buildCriteria(query),
       limit,
       offset,
-      sort: resolveSort(EXECUTION_SORT_COLUMNS, query.sortBy, query.sortOrder, {
-        key: 'startedAt',
-        order: 'DESC',
-      }),
     });
 
     const withAlerts = await this.alertQueryService.findExecutionIdsWithAlerts(
@@ -121,11 +139,85 @@ export class ExecutionsService {
   }
 
   /**
+   * Todas las ejecuciones que cumplen el filtro, hasta `MAX_EXPORT_ROWS`, con
+   * los mismos criterios y el mismo orden que el historial en pantalla.
+   */
+  public async findAllForExport(
+    query: ExportExecutionsQueryDto,
+  ): Promise<ExecutionExportRows> {
+    // Se pide UNA fila de mas para saber si el techo corto el informe, igual
+    // que la exportacion de telemetria.
+    const { items } = await this.fsmExecutionQueryService.findPage({
+      ...this.buildCriteria(query),
+      limit: MAX_EXPORT_ROWS + 1,
+      offset: 0,
+    });
+    const kept = items.slice(0, MAX_EXPORT_ROWS);
+
+    // Secuencial y no en paralelo: comparten el pool de PostgreSQL con el
+    // motor, y un informe no debe ocupar varias conexiones a la vez.
+    const withAlerts = await this.alertQueryService.findExecutionIdsWithAlerts(
+      kept.map((execution) => execution.executionId),
+    );
+    const flowNames = await this.resolveFlowNames(kept);
+
+    return {
+      rows: kept.map((execution) => ({
+        ...this.toSummary(execution, withAlerts.has(execution.executionId)),
+        flowName: flowNames.get(execution.flowId) ?? null,
+      })),
+      truncated: items.length > MAX_EXPORT_ROWS,
+    };
+  }
+
+  /**
+   * Filtros y orden comunes al listado y a la exportacion. Vivian dentro de
+   * `findAll`; se extraen para que el CSV no pueda filtrar distinto que la
+   * pantalla de la que sale.
+   */
+  private buildCriteria(query: ExportExecutionsQueryDto): ExecutionCriteria {
+    return {
+      flowId: query.flowId,
+      state: query.state,
+      startedBetween: this.resolveStartedBetween(query),
+      sort: resolveSort(EXECUTION_SORT_COLUMNS, query.sortBy, query.sortOrder, {
+        key: 'startedAt',
+        order: 'DESC',
+      }),
+    };
+  }
+
+  /**
+   * Nombre de cada flujo presente en las filas, con UNA consulta por informe y
+   * no una por fila. Solo las columnas que hacen falta: `configuracion_pipeline`
+   * es un `jsonb` que no pinta nada en un CSV.
+   */
+  private async resolveFlowNames(
+    executions: readonly FsmExecution[],
+  ): Promise<Map<string, string>> {
+    const flowIds = [
+      ...new Set(executions.map((execution) => execution.flowId)),
+    ];
+
+    // `In([])` genera un `IN ()` que PostgreSQL rechaza.
+    if (flowIds.length === 0) {
+      return new Map();
+    }
+
+    const workflows = await this.workflowRepository.find({
+      where: { id: In(flowIds) },
+      select: { id: true, name: true },
+    });
+
+    return new Map(workflows.map((workflow) => [workflow.id, workflow.name]));
+  }
+
+  /**
    * Rango de fechas del listado, solo si el cliente pidio alguno: sin `from` ni
    * `to` el historial no se acota, a diferencia de los informes.
    */
   private resolveStartedBetween(
-    query: ListExecutionsQueryDto,
+    query: ExportExecutionsQueryDto,
   ): DateRange | undefined {
     if (query.from === undefined && query.to === undefined) {
       return undefined;

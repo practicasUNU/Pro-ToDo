@@ -10,10 +10,12 @@ import type { ExecutionSummary } from '@/types/execution';
 // Sin esto se cargaria `@boot/axios`, que necesita entorno de navegador.
 vi.mock('@services/fsm-executions.service', () => ({
   fetchExecutions: vi.fn(),
+  downloadExecutionsCsv: vi.fn(),
 }));
 
 const executionsService = await import('@services/fsm-executions.service');
 const fetchExecutions = vi.mocked(executionsService.fetchExecutions);
+const downloadExecutionsCsv = vi.mocked(executionsService.downloadExecutionsCsv);
 
 describe('useExecutionsStore', () => {
   beforeEach(() => {
@@ -159,6 +161,88 @@ describe('useExecutionsStore', () => {
       // 3. Assert 🎯
       expect(store.items).toEqual([]);
       expect(fetchExecutions).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('3. Exportacion CSV', () => {
+    const FLOW_ID = '7c0e5c2a-1b3d-4e5f-8a9b-0c1d2e3f4a5b';
+    const CSV_BLOB = new Blob(['Ejecución;Flujo'], { type: 'text/csv' });
+
+    it('should filter exported execution history report dataset based on active UI filter parameters', async () => {
+      // 1. Arrange 📐: filtros aplicados, orden elegido y la pagina 3 abierta.
+      fetchExecutions.mockResolvedValue({ items: [], total: 60, limit: 10, offset: 20 });
+      downloadExecutionsCsv.mockResolvedValue(CSV_BLOB);
+      const store = useExecutionsStore();
+      store.setFilters({
+        state: ExecutionState.FALLIDO,
+        flowId: FLOW_ID,
+        from: '2026-10-01',
+        to: '2026-10-22',
+      });
+      store.setSort({ sortBy: 'updatedAt', descending: true });
+      await store.fetchPage({ limit: 10, offset: 20 });
+
+      // 2. Act ⚙️
+      const blob = await store.exportHistory();
+
+      // 3. Assert 🎯: EXACTAMENTE los filtros aplicados y el orden, sin la
+      //    ventana de pagina: el informe trae todas las filas, no la pagina 3.
+      expect(downloadExecutionsCsv).toHaveBeenCalledTimes(1);
+      expect(downloadExecutionsCsv).toHaveBeenCalledWith({
+        state: ExecutionState.FALLIDO,
+        flowId: FLOW_ID,
+        from: '2026-10-01',
+        to: '2026-10-22',
+        sortBy: 'updatedAt',
+        sortOrder: 'DESC',
+      });
+      const [query] = downloadExecutionsCsv.mock.calls[0] ?? [];
+      expect(query).not.toHaveProperty('limit');
+      expect(query).not.toHaveProperty('offset');
+      expect(blob).toBe(CSV_BLOB);
+    });
+
+    it('3.2 sin filtros ni orden no deberia enviar ningun parametro', async () => {
+      // 1. Arrange 📐
+      downloadExecutionsCsv.mockResolvedValue(CSV_BLOB);
+      const store = useExecutionsStore();
+
+      // 2. Act ⚙️
+      await store.exportHistory();
+
+      // 3. Assert 🎯
+      expect(downloadExecutionsCsv).toHaveBeenCalledWith({});
+    });
+
+    it('3.3 deberia marcar isExporting mientras descarga y apagarlo al terminar', async () => {
+      // 1. Arrange 📐
+      let resolveDownload: (blob: Blob) => void = () => undefined;
+      downloadExecutionsCsv.mockReturnValue(
+        new Promise<Blob>((resolve) => {
+          resolveDownload = resolve;
+        }),
+      );
+      const store = useExecutionsStore();
+
+      // 2. Act ⚙️
+      const pending = store.exportHistory();
+      const duringDownload = store.isExporting;
+      resolveDownload(CSV_BLOB);
+      await pending;
+
+      // 3. Assert 🎯
+      expect(duringDownload).toBe(true);
+      expect(store.isExporting).toBe(false);
+    });
+
+    it('3.4 deberia propagar el error y apagar isExporting aunque la API falle', async () => {
+      // 1. Arrange 📐: el mensaje lo decide el componente, no el store.
+      downloadExecutionsCsv.mockRejectedValue(new Error('500'));
+      const store = useExecutionsStore();
+
+      // 2. Act ⚙️ + 3. Assert 🎯
+      await expect(store.exportHistory()).rejects.toThrow('500');
+      expect(store.isExporting).toBe(false);
     });
   });
 });

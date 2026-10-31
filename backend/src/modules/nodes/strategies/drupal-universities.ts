@@ -1,6 +1,10 @@
 import * as cheerio from 'cheerio';
 
 import { foldDiacritics } from '@modules/nodes/utils/diacritics.util';
+import { selectVisibleTarget } from '@modules/nodes/utils/visible-target.util';
+
+import type { Cheerio, CheerioAPI } from 'cheerio';
+import type { AnyNode } from 'domhandler';
 
 /**
  * Catalogo de las universidades del acordeon de Madrid+D y despacho de paneles.
@@ -188,18 +192,161 @@ const containsPhrase = (haystack: string, needle: string): boolean => {
  * nombre con tilde —«Universidad Politécnica de Madrid», «Autónoma», «Alcalá»,
  * «Camilo José Cela»— podia encontrarse a si mismo.
  */
-export const resolveUniversityAccordion = (
-  textOrCode: string,
-): string | null => {
-  const normalized = normalize(textOrCode);
+export const resolveUniversityAccordion = (textOrCode: string): string | null =>
+  findUniversity(textOrCode)?.accordionId ?? null;
 
-  const match = DRUPAL_UNIVERSITIES_CATALOG.find(
+/**
+ * Universidad del catalogo que menciona un texto, o `undefined`.
+ *
+ * Los espacios se colapsan ANTES de plegar: el texto de un encabezado de Drupal
+ * llega con saltos de linea, tabuladores y `&nbsp;` de la indentacion, y
+ * `\s` cubre los tres (U+00A0 incluido).
+ */
+const findUniversity = (text: string): UniversityMapping | undefined => {
+  const normalized = normalize(text.replace(/\s+/g, ' ').trim());
+
+  return DRUPAL_UNIVERSITIES_CATALOG.find(
     (university) =>
       university.aliases.some((alias) => containsPhrase(normalized, alias)) ||
       containsPhrase(normalized, normalize(university.name)),
   );
+};
 
-  return match?.accordionId ?? null;
+/** Enlace de un encabezado de panel que despliega un colapsable de la pagina. */
+const PANEL_TOGGLE_SELECTOR = '.panel-heading a[href^="#"]';
+
+/** Identificador HTML que se puede buscar sin escapar nada. */
+const SAFE_ID_PATTERN = /^[A-Za-z][\w-]*$/;
+
+/**
+ * Sub-acordeon de una universidad localizado por el TEXTO de su encabezado.
+ *
+ * Es el ultimo recurso del despacho, para cuando el identificador resuelto no
+ * existe en la pagina: el portal no garantiza que el panel de una universidad
+ * se llame como dice el catalogo, y en el de ESIC el colapsable ha aparecido
+ * como `#collapseESIC` y como `#collapseUFV`. Lo estable es el texto visible
+ * del encabezado («ESIC Universidad»), asi que se busca por el y se sigue su
+ * `href` hasta el `.panel-group` que cuelga dentro.
+ *
+ * Tres guardas, y las tres vienen de averias reales:
+ *
+ * - El encabezado tiene que nombrar a LA MISMA universidad del catalogo que el
+ *   comite. Francisco de Vitoria comparte pagina con ESIC y NO esta en el
+ *   catalogo: su encabezado no resuelve a ninguna universidad y se descarta, de
+ *   modo que un comite de ESIC no puede acabar en su acordeon (ver migracion
+ *   038, que revirtio exactamente ese error).
+ * - El `href` se resuelve DENTRO del `.panel` del propio encabezado y no con un
+ *   `$('#collapseUFV')` global: si dos paneles repiten identificador, el global
+ *   devuelve el primero del documento, que puede ser el de otra universidad.
+ * - El destino tiene que ser un `.panel-group` con id. El encabezado de un
+ *   COMITE («ESIC 1 Facultad...») tambien nombra a ESIC, pero su colapsable no
+ *   contiene ningun sub-acordeon, asi que se salta solo.
+ *
+ * Funcion pura sobre el DOM ya cargado: no lo modifica.
+ */
+export const findAccordionByHeading = (
+  $: CheerioAPI,
+  committeeHeading: string,
+): Cheerio<AnyNode> | null => {
+  const university = findUniversity(committeeHeading);
+
+  if (university === undefined) {
+    return null;
+  }
+
+  for (const element of $(PANEL_TOGGLE_SELECTOR).toArray()) {
+    const link = $(element);
+
+    if (findUniversity(link.text()) !== university) {
+      continue;
+    }
+
+    const targetId = (link.attr('href') ?? '').slice(1);
+
+    if (!SAFE_ID_PATTERN.test(targetId)) {
+      continue;
+    }
+
+    const group = link
+      .closest('.panel')
+      .find(`[id="${targetId}"]`)
+      .first()
+      .find('.panel-group[id]')
+      .first();
+
+    if (group.length > 0) {
+      return group;
+    }
+  }
+
+  return null;
+};
+
+/**
+ * Trocea un selector en sus alternativas, separadas por comas de primer nivel.
+ *
+ * `data-parent="#collapseESIC, #collapseUFV"` se lee como ALTERNATIVAS EN
+ * ORDEN y no como un grupo de cheerio: el grupo devolveria los candidatos de
+ * las dos en orden de documento, y el primero podria ser el de la segunda
+ * aunque la primera exista. Las comas dentro de parentesis, corchetes o
+ * comillas (`:is(a, b)`, `[title="a, b"]`) no separan.
+ */
+export const splitSelectorAlternatives = (selector: string): string[] => {
+  const parts: string[] = [];
+  let depth = 0;
+  let quote: string | null = null;
+  let current = '';
+
+  for (const char of selector) {
+    if (quote !== null) {
+      if (char === quote) quote = null;
+    } else if (char === '"' || char === "'") {
+      quote = char;
+    } else if (char === '(' || char === '[') {
+      depth += 1;
+    } else if (char === ')' || char === ']') {
+      depth = Math.max(0, depth - 1);
+    } else if (char === ',' && depth === 0) {
+      parts.push(current);
+      current = '';
+      continue;
+    }
+
+    current += char;
+  }
+
+  parts.push(current);
+
+  return parts.map((part) => part.trim()).filter((part) => part.length > 0);
+};
+
+/**
+ * Contenedor donde va un panel, o `null` si la pagina no tiene ninguno.
+ *
+ * Primero las alternativas declaradas, en orden y prefiriendo la copia visible
+ * de cada una; despues, si ninguna existe, el encabezado por texto. Un selector
+ * que cheerio no sabe leer cuenta como inexistente: es el mismo desenlace —no
+ * hay donde insertar— y debe acabar en el mismo error que nombra el comite.
+ */
+export const resolvePanelContainer = (
+  $: CheerioAPI,
+  panel: PanelDispatch,
+): Cheerio<AnyNode> | null => {
+  for (const alternative of splitSelectorAlternatives(
+    panel.targetSelector ?? '',
+  )) {
+    try {
+      const container = selectVisibleTarget($, alternative);
+
+      if (container.length > 0) {
+        return container;
+      }
+    } catch {
+      // Selector invalido: se prueba la siguiente alternativa.
+    }
+  }
+
+  return findAccordionByHeading($, panel.heading);
 };
 
 /** Un panel del marcado entrante, con el destino que se le ha resuelto. */
@@ -209,6 +356,9 @@ export interface PanelDispatch {
 
   /** Sub-acordeon de destino, o `null` si no se ha podido deducir. */
   readonly targetSelector: string | null;
+
+  /** Texto del `.panel-heading`, para el ultimo recurso por encabezado. */
+  readonly heading: string;
 
   /** El panel entero, listo para insertar. */
   readonly html: string;
@@ -262,6 +412,7 @@ export const planPanelDispatch = (markup: string): readonly PanelDispatch[] => {
           heading.trim() ||
           'comite sin codigo',
         targetSelector,
+        heading,
         // `$.html(panel)` y no `panel.html()`: el segundo devolveria el
         // CONTENIDO del panel y perderia el `<div class="panel panel-default">`
         // que lo envuelve, que es justo lo que el acordeon necesita.

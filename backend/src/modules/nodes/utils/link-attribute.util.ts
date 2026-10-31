@@ -87,6 +87,54 @@ export const isSafeLinkValue = (
   return scheme === undefined || ALLOWED_SCHEMES[attribute].includes(scheme);
 };
 
+/**
+ * Caracteres con significado en la gramatica de selectores de css-what.
+ *
+ * Los delimitadores de cadena (`'` `"`) y de argumento (`(` `)`), los de
+ * atributo (`[` `]`), los combinadores (`>` `+` `~` `,`) y los que abren un
+ * pseudo, una clase o un id. Se escapan TODOS aunque dentro de una cadena
+ * entrecomillada solo cierre la comilla: el operador puede escribir el
+ * argumento sin comillas (`:contains({{ns.campo}})`), y ahi cualquiera de ellos
+ * corta el selector.
+ */
+const SELECTOR_RESERVED_PATTERN = /[\\'"()[\]{}:,>+~*=^$|!#.@%]/g;
+
+/**
+ * Caracter de control C0, DEL o C1: no forma parte de ningun texto visible.
+ *
+ * Por codigo y no con una clase de caracteres en una regex, igual que
+ * `isSafeLinkValue`: la regla `no-control-regex` las prohibe, con razon, porque
+ * suelen ser un error de escritura.
+ */
+const isControlChar = (char: string): boolean => {
+  const code = char.charCodeAt(0);
+
+  return code < 0x20 || (code >= 0x7f && code <= 0x9f);
+};
+
+/**
+ * Prepara un valor del contexto para entrar en un selector CSS.
+ *
+ * Es lo que hace seguro interpolar `linkSelector`: sin escapar, un nombre de
+ * evento como `x') a, tr:contains('Otro` cerraria el `:contains()` y abriria
+ * una segunda clausula que casa con OTRA fila de la pagina. Escapado, el valor
+ * solo puede casar como texto literal.
+ *
+ * - Colapsa espacios (`\s+` incluye `&nbsp;`) y recorta: el texto de la celda
+ *   se compara tal como lo pinta el navegador, no como lo indento Drupal.
+ * - Quita los caracteres de control, que no aparecen en el texto de la pagina.
+ * - Escapa con barra invertida los reservados. css-what deshace el escape
+ *   dentro de la cadena, de modo que `Mentoring \(Encuentro Anual\)` sigue
+ *   casando con «Mentoring (Encuentro Anual)».
+ */
+export const escapeSelectorString = (value: string): string =>
+  [...value]
+    .map((char) => (isControlChar(char) ? ' ' : char))
+    .join('')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .replace(SELECTOR_RESERVED_PATTERN, (char) => `\\${char}`);
+
 /** Escapa un valor para ir entre comillas dobles dentro de un atributo. */
 const escapeAttributeValue = (value: string): string =>
   value

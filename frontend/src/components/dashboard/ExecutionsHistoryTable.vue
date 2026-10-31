@@ -12,6 +12,7 @@ import { EXECUTION_SORT_KEYS } from '@/types/sort';
 import { extractApiErrorMessage } from '@/utils/api-error';
 import { formatDateTime } from '@/utils/date-format';
 import { datePickerBounds, isFutureDate } from '@/utils/date-range';
+import { executionsHistoryFilename, saveBlob } from '@/utils/file-download';
 import { toTableSort } from '@/utils/table-sort';
 import { canInspectLog } from '@/utils/execution-log';
 import { describeExecutionState } from '@/utils/execution-state-display';
@@ -30,6 +31,9 @@ import type { ExecutionHistoryFilters } from '@stores/executions.store';
  * Auditoria, los filtros se aplican juntos con "Aplicar".
  *
  * `compact` es la variante del dashboard: los mismos filtros y menos filas.
+ *
+ * "Exportar CSV" descarga el historial con los filtros APLICADOS, no con el
+ * borrador: el fichero dice lo mismo que la tabla, pero entero y no paginado.
  */
 const props = defineProps<{
   compact?: boolean;
@@ -208,6 +212,23 @@ const loadPage = async (page: { limit?: number; offset?: number } = {}): Promise
   }
 };
 
+/**
+ * Descarga el CSV que genera el servidor. El store elige los filtros; aqui solo
+ * se guarda el fichero y se decide el mensaje (frontend-architecture.md §2.1).
+ */
+const exportCsv = async (): Promise<void> => {
+  try {
+    const blob = await executionsStore.exportHistory();
+    saveBlob(blob, executionsHistoryFilename());
+    $q.notify({ type: 'positive', message: 'Se ha descargado el historial de ejecuciones.' });
+  } catch (error) {
+    $q.notify({
+      type: 'negative',
+      message: extractApiErrorMessage(error, 'No se pudo exportar el historial de ejecuciones.'),
+    });
+  }
+};
+
 /** Paginacion server-side: QTable pide la pagina y el store la trae. */
 const onRequest: QTableProps['onRequest'] = ({ pagination: requested }) => {
   const rowsPerPage = requested.rowsPerPage || executionsStore.limit;
@@ -344,6 +365,21 @@ onMounted(async () => {
           </template>
         </q-input>
         <div class="pd-executions-filters__actions">
+          <!-- `type="button"`: dentro del formulario, sin el enviaria los
+               filtros en vez de exportar. -->
+          <q-btn
+            type="button"
+            class="pd-btn-secondary"
+            flat
+            no-caps
+            icon="table_view"
+            label="Exportar CSV"
+            aria-label="Exportar el historial filtrado en CSV"
+            :loading="executionsStore.isExporting"
+            :disable="executionsStore.isExporting"
+            data-test="executions-export"
+            @click="exportCsv"
+          />
           <q-btn
             type="button"
             class="pd-btn-secondary"

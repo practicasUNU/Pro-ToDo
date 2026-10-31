@@ -52,6 +52,23 @@ export const DRUPAL_SANDBOX_NODE_UUID_VARS = [
   'DRUPAL_SANDBOX_LICITACIONES_CERRADAS_UUID',
   'DRUPAL_SANDBOX_TITULOS_UUID',
   'DRUPAL_SANDBOX_INNODAYS_UUID',
+  'DRUPAL_SANDBOX_INNOBAR_UUID',
+] as const;
+
+/**
+ * Variables con los UUID de las paginas del PORTAL (produccion).
+ *
+ * No habilitan nada: son la lista NEGRA del entorno de pruebas. Un nodo con
+ * `isSandbox: true` que apunte a una de estas paginas se niega a escribir. Las
+ * paginas de pruebas y las publicas comparten instalacion y credencial, asi que
+ * el UUID es lo unico que las separa.
+ */
+export const DRUPAL_PRODUCTION_NODE_UUID_VARS = [
+  'DRUPAL_PRODUCTION_ABRIR_LICITACION_UUID',
+  'DRUPAL_PRODUCTION_CERRAR_LICITACION_UUID',
+  'DRUPAL_PRODUCTION_VERIFICACION_TITULOS_UUID',
+  'DRUPAL_PRODUCTION_INNODAYS_UUID',
+  'DRUPAL_PRODUCTION_INNOBAR_UUID',
 ] as const;
 
 /**
@@ -188,9 +205,21 @@ export class DrupalApiConfig {
    * anadida al `.env` vale tras reiniciar sin tocar codigo.
    */
   public get sandboxNodeUuids(): ReadonlySet<string> {
-    const uuids = DRUPAL_SANDBOX_NODE_UUID_VARS.map((variable) =>
-      this.configService.get<string>(variable)?.trim().toLowerCase(),
-    ).filter((uuid): uuid is string => uuid !== undefined && uuid !== '');
+    return this.readUuidSet(DRUPAL_SANDBOX_NODE_UUID_VARS);
+  }
+
+  /** UUID de las paginas del portal declaradas en el entorno, en minusculas. */
+  public get productionNodeUuids(): ReadonlySet<string> {
+    return this.readUuidSet(DRUPAL_PRODUCTION_NODE_UUID_VARS);
+  }
+
+  /** Conjunto de UUID declarados en esas variables; las vacias no cuentan. */
+  private readUuidSet(variables: readonly string[]): ReadonlySet<string> {
+    const uuids = variables
+      .map((variable) =>
+        this.configService.get<string>(variable)?.trim().toLowerCase(),
+      )
+      .filter((uuid): uuid is string => uuid !== undefined && uuid !== '');
 
     return new Set(uuids);
   }

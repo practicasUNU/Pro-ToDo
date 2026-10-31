@@ -1,7 +1,12 @@
+import * as cheerio from 'cheerio';
+
 import {
   DRUPAL_UNIVERSITIES_CATALOG,
+  findAccordionByHeading,
   planPanelDispatch,
+  resolvePanelContainer,
   resolveUniversityAccordion,
+  splitSelectorAlternatives,
 } from '@modules/nodes/strategies/drupal-universities';
 import { accordionsInSeededPrompt } from '@test/helpers/prompt-migrations.helper';
 
@@ -290,6 +295,126 @@ describe('Catalogo de universidades de Drupal', () => {
       expect(planPanelDispatch(markup)[0]?.targetSelector).toBe(
         '#accordionPadreId',
       );
+    });
+  });
+
+  describe('4. Resolucion del contenedor en la pagina', () => {
+    /** Panel de universidad de primer nivel, al molde del portal. */
+    const universityPanel = (
+      heading: string,
+      collapseId: string,
+      groupId: string,
+      extraClass = '',
+    ): string =>
+      `<div class="panel panel-default${extraClass}"><div class="panel-heading"><h4>` +
+      `<a href="#${collapseId}" data-parent="#accordion">${heading}</a></h4>` +
+      `<div class="collapse" id="${collapseId}">` +
+      `<div class="panel-group" id="${groupId}"></div></div></div></div>`;
+
+    const load = (html: string): cheerio.CheerioAPI =>
+      cheerio.load(html, { xml: { xmlMode: false } }, false);
+
+    it('4.1 deberia trocear alternativas por comas de primer nivel', () => {
+      // 3. Assert 🎯: las comas dentro de parentesis, corchetes o comillas no
+      //    separan alternativas.
+      expect(splitSelectorAlternatives('#collapseESIC, #collapseUFV')).toEqual([
+        '#collapseESIC',
+        '#collapseUFV',
+      ]);
+      expect(
+        splitSelectorAlternatives(':is(#a, #b) .x, [title="a, b"]'),
+      ).toEqual([':is(#a, #b) .x', '[title="a, b"]']);
+      expect(splitSelectorAlternatives(' , ')).toEqual([]);
+    });
+
+    it('4.2 deberia encontrar el sub-acordeon por el texto del encabezado aunque traiga espacios de Drupal', () => {
+      // 1. Arrange 📐: saltos de linea, tabulador y `&nbsp;` en el enlace.
+      const $ = load(
+        universityPanel(
+          '\n    ESIC&nbsp;&nbsp;Universidad \t',
+          'collapseESIC',
+          'accordionESIC',
+        ),
+      );
+
+      // 2. Act ⚙️
+      const group = findAccordionByHeading($, 'ESIC 2 Facultad de Empresa');
+
+      // 3. Assert 🎯
+      expect(group?.attr('id')).toBe('accordionESIC');
+    });
+
+    it('4.3 NO deberia aceptar el encabezado de una universidad distinta', () => {
+      // 1. Arrange 📐: Francisco de Vitoria no esta en el catalogo, asi que su
+      //    encabezado no resuelve a ESIC aunque comparta identificadores.
+      const $ = load(
+        universityPanel(
+          'Universidad Francisco de Vitoria',
+          'collapseUFV',
+          'accordionUFV',
+        ),
+      );
+
+      // 2. Act ⚙️ + 3. Assert 🎯
+      expect(findAccordionByHeading($, 'ESIC 2')).toBeNull();
+    });
+
+    it('4.4 deberia saltarse el encabezado de un comite, que no contiene sub-acordeon', () => {
+      // 1. Arrange 📐: el comite «ESIC 1» va primero en el documento.
+      const committee =
+        '<div class="panel panel-default"><div class="panel-heading"><h5>' +
+        '<a href="#collapseESIC1">ESIC 1</a></h5></div>' +
+        '<div class="collapse" id="collapseESIC1"><p>Cuerpo</p></div></div>';
+      const $ = load(
+        committee +
+          universityPanel('ESIC Universidad', 'collapseESIC', 'accordionESIC'),
+      );
+
+      // 2. Act ⚙️ + 3. Assert 🎯
+      expect(findAccordionByHeading($, 'ESIC 2')?.attr('id')).toBe(
+        'accordionESIC',
+      );
+    });
+
+    it('4.5 deberia probar las alternativas declaradas EN ORDEN', () => {
+      // 1. Arrange 📐: las dos existen y la segunda va antes en el documento.
+      //    Un grupo de cheerio devolveria la segunda.
+      const $ = load('<div id="segunda"></div><div id="primera"></div>');
+
+      // 2. Act ⚙️
+      const container = resolvePanelContainer($, {
+        committeeCode: 'ESIC 2',
+        targetSelector: '#primera, #segunda',
+        heading: 'ESIC 2',
+        html: '',
+      });
+
+      // 3. Assert 🎯
+      expect(container?.attr('id')).toBe('primera');
+    });
+
+    it('4.6 deberia saltarse una alternativa invalida sin reventar', () => {
+      // 1. Arrange 📐: `div:nope` lanza en cheerio; la siguiente existe.
+      const $ = load('<div id="ok"></div>');
+      const panel = {
+        committeeCode: 'X',
+        heading: 'X',
+        html: '',
+      };
+
+      // 2. Act ⚙️
+      const fallback = resolvePanelContainer($, {
+        ...panel,
+        targetSelector: 'div:nope, #ok',
+      });
+      const onlyInvalid = resolvePanelContainer($, {
+        ...panel,
+        targetSelector: 'div:nope',
+      });
+
+      // 3. Assert 🎯: invalida cuenta como inexistente, sin excepcion.
+      expect(fallback?.attr('id')).toBe('ok');
+      expect(onlyInvalid).toBeNull();
     });
   });
 });

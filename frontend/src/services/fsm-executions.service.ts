@@ -5,6 +5,7 @@ import { ExecutionState } from '@/types/execution';
 import type {
   DiscardExecutionResult,
   ExecutionDetail,
+  ExecutionExportQuery,
   ExecutionListQuery,
   ExecutionPage,
   WorkflowExecutionResult,
@@ -26,6 +27,24 @@ const EXECUTIONS_PATH = '/executions';
 export const fetchExecutions = async (query: ExecutionListQuery = {}): Promise<ExecutionPage> => {
   const { data } = await api.get<ExecutionPage>(EXECUTIONS_PATH, {
     params: query,
+  });
+
+  return data;
+};
+
+/**
+ * Bytes del historial en CSV con los filtros y el orden indicados.
+ *
+ * `responseType: 'blob'` es obligatorio: con el `json` por defecto Axios
+ * intentaria parsear el fichero. Guardarlo en disco es cosa del componente
+ * (`utils/file-download.ts`), porque toca el DOM.
+ *
+ * @throws AxiosError 400 si algun filtro no es valido.
+ */
+export const downloadExecutionsCsv = async (query: ExecutionExportQuery = {}): Promise<Blob> => {
+  const { data } = await api.get<Blob>(`${EXECUTIONS_PATH}/export/csv`, {
+    params: query,
+    responseType: 'blob',
   });
 
   return data;

@@ -78,6 +78,12 @@ describe('useDrupalHttpStore · configuracion del nodo DESTINO_DRUPAL', () => {
         sourceField: DEFAULT_DRUPAL_SOURCE_FIELD,
         titleTemplate: null,
         summaryTemplate: null,
+        authorTemplate: null,
+        dateTemplate: null,
+        orderValue: 1,
+        newsSourceTermUuid: null,
+        newsSectionTermUuid: null,
+        newsTypeTermUuid: null,
         bodyFieldName: DEFAULT_DRUPAL_BODY_FIELD,
         bodyFormat: DEFAULT_DRUPAL_BODY_FORMAT,
         // Nace en Sandbox, donde lo creado es siempre borrador.
@@ -86,6 +92,7 @@ describe('useDrupalHttpStore · configuracion del nodo DESTINO_DRUPAL', () => {
         destinationNodeUuid: null,
         containerSelector: null,
         itemSelector: null,
+        targetContainerSelector: null,
         insertPosition: 'PREPEND',
         expedienteTemplate: null,
         linkSelector: null,
@@ -506,7 +513,10 @@ describe('useDrupalHttpStore · configuracion del nodo DESTINO_DRUPAL', () => {
       //    la plantilla de apertura; sin ella el traslado no encuentra que mover.
       expect(store.config.operationMode).toBe(DrupalOperationMode.TRANSFER_HTML_BLOCK);
       expect(store.config.itemSelector).toBe('.pd-licitacion-block, .licitacion-entry');
-      expect(store.config.insertPosition).toBe('APPEND');
+      // Dentro del cuerpo del acordeon de cerradas, y arriba: lo ultimo cerrado
+      // se lee primero, como en la pagina de abiertas.
+      expect(store.config.targetContainerSelector).toBe('#collapse2 > .panel-body');
+      expect(store.config.insertPosition).toBe('PREPEND');
     });
 
     it('6.4 deberia dejar CERRAR_LICITACION INVALIDO por falta de destino', () => {
@@ -1033,6 +1043,88 @@ describe('useDrupalHttpStore · configuracion del nodo DESTINO_DRUPAL', () => {
       // 3. Assert 🎯
       expect(store.config.operationMode).toBe(DrupalOperationMode.UPDATE_LINK_SOURCE);
       expect(store.config.linkAttribute).toBe('href');
+    });
+  });
+
+  describe('12. Contenedor de destino y campos de Notiweb', () => {
+    it('12.1 deberia prefijar seccion y tipo de Notiweb y limpiarlos al cambiar de preset', () => {
+      // 1. Arrange 📐
+      const store = useDrupalHttpStore(nextNodeId());
+
+      // 2. Act ⚙️
+      store.applyNotiwebPreset();
+      const notiweb = { ...store.config };
+      store.applyAbrirLicitacionPreset();
+
+      // 3. Assert 🎯: seccion «Notiweb» y tipo «Noticias»; la fuente depende de
+      //    cada noticia y queda a cargo del operador.
+      expect(notiweb.newsSectionTermUuid).toBe('d4964d27-7819-4975-81ca-c0554ee7b233');
+      expect(notiweb.newsTypeTermUuid).toBe('6c18cd7a-a5cd-4332-8271-6bdee4ef9834');
+      expect(notiweb.newsSourceTermUuid).toBeNull();
+      expect(store.config.newsSectionTermUuid).toBeNull();
+      expect(store.config.newsTypeTermUuid).toBeNull();
+    });
+
+    it('12.2 deberia publicar los campos nuevos en los params y recuperarlos al hidratar', () => {
+      // 1. Arrange 📐
+      const store = useDrupalHttpStore(nextNodeId());
+      store.applyNotiwebPreset();
+      store.updateConfig({
+        authorTemplate: '{{parsed_email.from}}',
+        dateTemplate: '{{parsed_email.date}}',
+        orderValue: 3,
+      });
+
+      // 2. Act ⚙️
+      const params = store.toNodeParams();
+      const copy = useDrupalHttpStore(nextNodeId());
+      copy.hydrateFromNode({ outputNamespace: 'drupal_result', params });
+
+      // 3. Assert 🎯: ida y vuelta sin perdidas.
+      expect(params).toMatchObject({
+        authorTemplate: '{{parsed_email.from}}',
+        dateTemplate: '{{parsed_email.date}}',
+        orderValue: 3,
+        newsSectionTermUuid: 'd4964d27-7819-4975-81ca-c0554ee7b233',
+        newsTypeTermUuid: '6c18cd7a-a5cd-4332-8271-6bdee4ef9834',
+      });
+      expect(params).not.toHaveProperty('newsSourceTermUuid');
+      expect(copy.toNodeParams()).toEqual(params);
+    });
+
+    it('12.3 NO deberia publicar el orden cuando es el de por defecto', () => {
+      const store = useDrupalHttpStore(nextNodeId());
+
+      store.applyNotiwebPreset();
+
+      expect(store.toNodeParams()).not.toHaveProperty('orderValue');
+    });
+
+    it('12.4 deberia publicar el contenedor de destino del traslado', () => {
+      const store = useDrupalHttpStore(nextNodeId());
+
+      store.applyCerrarLicitacionPreset();
+
+      const params = store.toNodeParams();
+
+      // `PREPEND` es el defecto del backend, asi que no viaja.
+      expect(params).toMatchObject({ targetContainerSelector: '#collapse2 > .panel-body' });
+      expect(params).not.toHaveProperty('insertPosition');
+    });
+
+    it('12.5 deberia invalidar un UUID de taxonomia mal formado y un orden fuera de rango', () => {
+      // 1. Arrange 📐
+      const store = useDrupalHttpStore(nextNodeId());
+      store.applyNotiwebPreset();
+
+      // 2. Act ⚙️
+      store.updateConfig({ newsSourceTermUuid: 'no-es-un-uuid', orderValue: 10_000 });
+
+      // 3. Assert 🎯
+      expect(store.malformedParams).toEqual(
+        expect.arrayContaining(['newsSourceTermUuid', 'orderValue']),
+      );
+      expect(store.isConfigValid).toBe(false);
     });
   });
 });

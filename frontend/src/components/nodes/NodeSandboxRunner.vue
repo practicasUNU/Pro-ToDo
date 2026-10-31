@@ -8,6 +8,7 @@ import { useSessionStore } from '@stores/session.store';
 import { extractApiErrorMessage } from '@/utils/api-error';
 import {
   buildSampleContext,
+  buildSampleOverrides,
   parseSampleContext,
   readFileAsBase64,
   withAttachment,
@@ -67,14 +68,27 @@ const resultJson = computed<string>(() =>
   JSON.stringify(result.value?.success === true ? result.value.data : result.value?.error, null, 2),
 );
 
+/**
+ * Ejemplos propios del nodo, serializados para vigilarlos por VALOR: `params`
+ * se reconstruye en cada cambio de la config, y vigilar el objeto regeneraria
+ * el ejemplo —borrando lo que el operador edito— con cada tecla.
+ */
+const sampleOverridesKey = computed<string>(() =>
+  JSON.stringify(buildSampleOverrides(props.nodeType, props.params)),
+);
+
 /** Rehace los datos de ejemplo a partir de los namespaces simulados. */
 const regenerateContext = (): void => {
-  contextText.value = JSON.stringify(buildSampleContext(props.upstream), null, 2);
+  contextText.value = JSON.stringify(
+    buildSampleContext(props.upstream, buildSampleOverrides(props.nodeType, props.params)),
+    null,
+    2,
+  );
 };
 
 // Cambiar de tipo o de namespaces invalida el ejemplo y el resultado anterior.
 watch(
-  () => [props.nodeType, props.upstream] as const,
+  () => [props.nodeType, props.upstream, sampleOverridesKey.value] as const,
   () => {
     regenerateContext();
     sandboxStore.clearResult();

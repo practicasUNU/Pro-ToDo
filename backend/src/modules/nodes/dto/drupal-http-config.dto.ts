@@ -177,6 +177,41 @@ export const MAX_DRUPAL_TITLE_LENGTH = 255;
 /** Tope del resumen, generoso pero acotado para que quepa en una traza. */
 export const MAX_DRUPAL_SUMMARY_LENGTH = 2000;
 
+/** Tope de la plantilla del autor de una noticia. */
+export const MAX_DRUPAL_AUTHOR_LENGTH = 255;
+
+/**
+ * Tope de la plantilla de la fecha. Holgado sobre los 10 caracteres de
+ * `YYYY-MM-DD` porque lo que se guarda es la PLANTILLA (`{{ns.campo}}`), no la
+ * fecha ya resuelta.
+ */
+export const MAX_DRUPAL_DATE_TEMPLATE_LENGTH = 128;
+
+/** Orden de una noticia nueva en los listados de Drupal si no se configura otro. */
+export const DEFAULT_DRUPAL_NEWS_ORDER = 1;
+
+/** Tope del orden: holgado, pero evita un `99999999` tecleado por error. */
+export const MAX_DRUPAL_NEWS_ORDER = 9999;
+
+/**
+ * Bundle de las noticias de Notiweb.
+ *
+ * Es el UNICO bundle que recibe `field_autor`, `field_fecha`, `field_orden` y
+ * las tres taxonomias: enviarlos a otro bundle que no los declara provoca un 422.
+ */
+export const DRUPAL_NEWS_BUNDLE = 'node--noticias';
+
+/**
+ * `data.type` de JSON:API de cada vocabulario de las noticias, leido del esquema
+ * real de `node--noticias` en Sandbox. Una relacion con el tipo equivocado la
+ * rechaza Drupal aunque el UUID del termino sea correcto.
+ */
+export const DRUPAL_NEWS_TAXONOMY_TYPES = {
+  field_fuente_noticia: 'taxonomy_term--fuente_noticia',
+  field_noticia_seccion: 'taxonomy_term--tax_seccion',
+  field_noticia_tipo: 'taxonomy_term--tax_tipos_noticia',
+} as const;
+
 /**
  * Forma de un `data.type` de JSON:API: `entidad--bundle`.
  *
@@ -292,18 +327,90 @@ export class DrupalHttpConfigDto {
 
   @ApiPropertyOptional({
     description:
-      'Plantilla interpolable del resumen (`field_resumen`). Si se omite, el atributo NO viaja en el payload.',
+      'Plantilla interpolable del resumen. Viaja dentro del campo de texto largo (`body.summary`); si se omite, el resumen va a null.',
     example: '{{llm_response.summary}}',
   })
-  // Se omite y no se envia vacio a proposito: un atributo que el bundle no
-  // declara provoca un 422 en Drupal, asi que mandarlo "por si acaso" rompe los
-  // bundles que no lo tienen.
+  // Va DENTRO del campo de cuerpo y no en un atributo propio: el bundle de
+  // noticias no declara ningun campo de resumen, el cuerpo es un texto con
+  // resumen. Un `field_resumen` suelto provocaba un 422 en cuanto se rellenaba.
   @IsOptional()
   @IsString({ message: 'summaryTemplate debe ser una cadena.' })
   @MaxLength(MAX_DRUPAL_SUMMARY_LENGTH, {
     message: `summaryTemplate no puede superar ${MAX_DRUPAL_SUMMARY_LENGTH} caracteres.`,
   })
   summaryTemplate?: string;
+
+  @ApiPropertyOptional({
+    description:
+      'Plantilla interpolable del autor (`field_autor`). Solo se envia al bundle de noticias.',
+    example: '{{llm_response.author}}',
+  })
+  @IsOptional()
+  @IsString({ message: 'authorTemplate debe ser una cadena.' })
+  @MaxLength(MAX_DRUPAL_AUTHOR_LENGTH, {
+    message: `authorTemplate no puede superar ${MAX_DRUPAL_AUTHOR_LENGTH} caracteres.`,
+  })
+  authorTemplate?: string;
+
+  @ApiPropertyOptional({
+    description:
+      'Plantilla interpolable de la fecha (`field_fecha`), que debe resolverse a `YYYY-MM-DD`. Solo se envia al bundle de noticias.',
+    example: '{{parsed_email.date}}',
+  })
+  @IsOptional()
+  @IsString({ message: 'dateTemplate debe ser una cadena.' })
+  @MaxLength(MAX_DRUPAL_DATE_TEMPLATE_LENGTH, {
+    message: `dateTemplate no puede superar ${MAX_DRUPAL_DATE_TEMPLATE_LENGTH} caracteres.`,
+  })
+  dateTemplate?: string;
+
+  @ApiPropertyOptional({
+    description:
+      'Orden de la noticia en los listados (`field_orden`). Solo se envia al bundle de noticias.',
+    default: DEFAULT_DRUPAL_NEWS_ORDER,
+    minimum: 0,
+    maximum: MAX_DRUPAL_NEWS_ORDER,
+  })
+  @IsOptional()
+  @IsInt({ message: 'orderValue debe ser un numero entero.' })
+  @Min(0, { message: 'orderValue no puede ser negativo.' })
+  @Max(MAX_DRUPAL_NEWS_ORDER, {
+    message: `orderValue no puede superar ${MAX_DRUPAL_NEWS_ORDER}.`,
+  })
+  orderValue?: number;
+
+  @ApiPropertyOptional({
+    description:
+      'UUID v4 del termino de la taxonomia de fuente (`field_fuente_noticia`). Si se omite, la relacion no viaja.',
+  })
+  @IsOptional()
+  @IsString({ message: 'newsSourceTermUuid debe ser una cadena.' })
+  @Matches(UUID_V4_PATTERN, {
+    message: 'newsSourceTermUuid debe ser un UUID v4 valido.',
+  })
+  newsSourceTermUuid?: string;
+
+  @ApiPropertyOptional({
+    description:
+      'UUID v4 del termino de la taxonomia de seccion (`field_noticia_seccion`). Si se omite, la relacion no viaja.',
+  })
+  @IsOptional()
+  @IsString({ message: 'newsSectionTermUuid debe ser una cadena.' })
+  @Matches(UUID_V4_PATTERN, {
+    message: 'newsSectionTermUuid debe ser un UUID v4 valido.',
+  })
+  newsSectionTermUuid?: string;
+
+  @ApiPropertyOptional({
+    description:
+      'UUID v4 del termino de la taxonomia de tipo (`field_noticia_tipo`). Si se omite, la relacion no viaja.',
+  })
+  @IsOptional()
+  @IsString({ message: 'newsTypeTermUuid debe ser una cadena.' })
+  @Matches(UUID_V4_PATTERN, {
+    message: 'newsTypeTermUuid debe ser un UUID v4 valido.',
+  })
+  newsTypeTermUuid?: string;
 
   @ApiPropertyOptional({
     description: 'Campo de texto largo de la entidad.',
@@ -384,6 +491,21 @@ export class DrupalHttpConfigDto {
   itemSelector?: string;
 
   @ApiPropertyOptional({
+    description:
+      'Selector CSS del contenedor de la pagina DESTINO donde se inserta el bloque en TRANSFER_HTML_BLOCK (ej. `#collapse2 > .panel-body`). Si se omite, se usa `containerSelector`.',
+    example: '#collapse2 > .panel-body',
+  })
+  // Campo propio y no `containerSelector`: en un traslado hay DOS paginas, y el
+  // contenedor que importa es el de la receptora, que no tiene por que llamarse
+  // igual que el de la pagina de origen.
+  @IsOptional()
+  @IsString({ message: 'targetContainerSelector debe ser una cadena.' })
+  @MaxLength(MAX_SELECTOR_LENGTH, {
+    message: `targetContainerSelector no puede superar ${MAX_SELECTOR_LENGTH} caracteres.`,
+  })
+  targetContainerSelector?: string;
+
+  @ApiPropertyOptional({
     description: 'Donde insertar el bloque dentro del contenedor.',
     enum: DRUPAL_INSERT_POSITIONS,
     default: DEFAULT_DRUPAL_INSERT_POSITION,
@@ -408,7 +530,7 @@ export class DrupalHttpConfigDto {
 
   @ApiPropertyOptional({
     description:
-      "Selector CSS del UNICO elemento cuyo enlace se actualiza en UPDATE_LINK_SOURCE (ej. `table tr:contains('Agrifood') a`).",
+      "Selector CSS del UNICO elemento cuyo enlace se actualiza en UPDATE_LINK_SOURCE (ej. `table tr:contains('{{ns.evento_nombre}}') a`). Interpolable: cada valor se escapa antes de entrar en el selector.",
     example: "table tr:contains('Agrifood') a",
   })
   @IsOptional()
@@ -526,6 +648,12 @@ export interface ResolvedDrupalHttpConfig {
   readonly sourceField: string;
   readonly titleTemplate: string | null;
   readonly summaryTemplate: string | null;
+  readonly authorTemplate: string | null;
+  readonly dateTemplate: string | null;
+  readonly orderValue: number;
+  readonly newsSourceTermUuid: string | null;
+  readonly newsSectionTermUuid: string | null;
+  readonly newsTypeTermUuid: string | null;
   readonly bodyFieldName: string;
   readonly bodyFormat: string;
   readonly publishStatus: boolean;
@@ -533,6 +661,7 @@ export interface ResolvedDrupalHttpConfig {
   readonly destinationNodeUuid: string | null;
   readonly containerSelector: string | null;
   readonly itemSelector: string | null;
+  readonly targetContainerSelector: string | null;
   readonly insertPosition: DrupalInsertPosition;
   readonly expedienteTemplate: string | null;
   readonly linkSelector: string | null;
@@ -576,6 +705,12 @@ export const resolveDrupalHttpConfig = (
   sourceField: trimmedOrNull(dto.sourceField) ?? DEFAULT_DRUPAL_SOURCE_FIELD,
   titleTemplate: trimmedOrNull(dto.titleTemplate),
   summaryTemplate: trimmedOrNull(dto.summaryTemplate),
+  authorTemplate: trimmedOrNull(dto.authorTemplate),
+  dateTemplate: trimmedOrNull(dto.dateTemplate),
+  orderValue: dto.orderValue ?? DEFAULT_DRUPAL_NEWS_ORDER,
+  newsSourceTermUuid: trimmedOrNull(dto.newsSourceTermUuid),
+  newsSectionTermUuid: trimmedOrNull(dto.newsSectionTermUuid),
+  newsTypeTermUuid: trimmedOrNull(dto.newsTypeTermUuid),
   bodyFieldName: trimmedOrNull(dto.bodyFieldName) ?? DEFAULT_DRUPAL_BODY_FIELD,
   bodyFormat: trimmedOrNull(dto.bodyFormat) ?? DEFAULT_DRUPAL_BODY_FORMAT,
   publishStatus: dto.publishStatus ?? true,
@@ -583,6 +718,7 @@ export const resolveDrupalHttpConfig = (
   destinationNodeUuid: trimmedOrNull(dto.destinationNodeUuid),
   containerSelector: trimmedOrNull(dto.containerSelector),
   itemSelector: trimmedOrNull(dto.itemSelector),
+  targetContainerSelector: trimmedOrNull(dto.targetContainerSelector),
   insertPosition: dto.insertPosition ?? DEFAULT_DRUPAL_INSERT_POSITION,
   expedienteTemplate: trimmedOrNull(dto.expedienteTemplate),
   linkSelector: trimmedOrNull(dto.linkSelector),

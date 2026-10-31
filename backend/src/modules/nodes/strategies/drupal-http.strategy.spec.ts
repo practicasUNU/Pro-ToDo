@@ -70,7 +70,10 @@ type HttpMock = jest.Mocked<Pick<HttpClientService, 'requestWithStatus'>>;
 const buildHttpMock = (): HttpMock => ({ requestWithStatus: jest.fn() });
 
 /** Config del entorno con credenciales utiles, salvo que se diga lo contrario. */
-const buildApiConfig = (token: string = TOKEN): DrupalApiConfig =>
+const buildApiConfig = (
+  token: string = TOKEN,
+  productionNodeUuids: ReadonlySet<string> = new Set(),
+): DrupalApiConfig =>
   ({
     baseUrl: BASE_URL,
     token,
@@ -81,6 +84,7 @@ const buildApiConfig = (token: string = TOKEN): DrupalApiConfig =>
     authHeader: token.length > 0 ? BASIC_AUTH_HEADER : `Bearer ${token}`,
     timeoutMs: 15_000,
     isUsable: token.length > 0,
+    productionNodeUuids,
   }) as DrupalApiConfig;
 
 const buildStrategy = (
@@ -323,6 +327,30 @@ describe('DrupalHttpStrategy', () => {
       });
     });
 
+    it('1.0bis deberia negarse a escribir en una pagina del portal con Sandbox guardado', async () => {
+      // 1. Arrange 📐: el UUID de la pagina de abiertas figura como pagina de
+      //    Produccion en el entorno.
+      const httpClient = buildHttpMock();
+      const strategy = buildStrategy(
+        httpClient,
+        buildApiConfig(TOKEN, new Set([PAGE_UUID])),
+      );
+
+      // 2. Act ⚙️
+      const result = await strategy.execute(buildContext(), {
+        isSandbox: true,
+        operationMode: DrupalOperationMode.APPEND_HTML_BLOCK,
+        bundle: 'node--page',
+        targetNodeUuid: PAGE_UUID.toUpperCase(),
+      });
+
+      // 3. Assert 🎯: ni siquiera el GET; se nombra el param culpable.
+      expect(result.success).toBe(false);
+      expect(result.error?.code).toBe(ERR_DRUPAL_CONFIG);
+      expect(result.error?.missingFields).toEqual(['targetNodeUuid']);
+      expect(httpClient.requestWithStatus).not.toHaveBeenCalled();
+    });
+
     it('1.2 deberia armar el cuerpo JSON:API con el markup del escudo', async () => {
       const httpClient = buildHttpMock();
       httpClient.requestWithStatus.mockResolvedValue(entityResponse());
@@ -335,8 +363,11 @@ describe('DrupalHttpStrategy', () => {
           type: 'node--noticias',
           attributes: {
             title: 'Titular fijo',
-            body: { value: MARKUP, format: 'full_html' },
+            body: { value: MARKUP, format: 'full_html', summary: null },
             status: true,
+            field_autor: null,
+            field_fecha: null,
+            field_orden: 1,
           },
         },
       });
@@ -374,6 +405,133 @@ describe('DrupalHttpStrategy', () => {
       expect(callBody(httpClient, 0).data?.attributes).not.toHaveProperty(
         'field_resumen',
       );
+    });
+
+    it('should nest summary into attributes.body.summary and omit field_resumen when creating node--noticias', async () => {
+      // 1. Arrange 📐: el bundle de noticias no declara ningun campo de
+      //    resumen; el cuerpo es un texto con resumen. Un `field_resumen`
+      //    suelto era un 422 en cuanto se rellenaba la plantilla.
+      const httpClient = buildHttpMock();
+      httpClient.requestWithStatus.mockResolvedValue(entityResponse());
+      const strategy = buildStrategy(httpClient);
+
+      // 2. Act ⚙️
+      await strategy.execute(
+        buildContext({
+          [SOURCE_NAMESPACE]: { [SOURCE_FIELD]: MARKUP },
+          llm_response: { summary: 'Resumen de la noticia' },
+        }),
+        {
+          bundle: 'node--noticias',
+          titleTemplate: 'Titular',
+          summaryTemplate: '{{llm_response.summary}}',
+        },
+      );
+
+      // 3. Assert 🎯
+      const attributes = callBody(httpClient, 0).data?.attributes as Record<
+        string,
+        unknown
+      >;
+
+      expect(attributes.body).toEqual({
+        value: MARKUP,
+        format: 'full_html',
+        summary: 'Resumen de la noticia',
+      });
+      expect(attributes).not.toHaveProperty('field_resumen');
+    });
+
+    it('1.4bis deberia enviar autor, fecha, orden y las taxonomias configuradas de Notiweb', async () => {
+      // 1. Arrange 📐: seccion y tipo configurados, fuente sin configurar.
+      const httpClient = buildHttpMock();
+      httpClient.requestWithStatus.mockResolvedValue(entityResponse());
+      const strategy = buildStrategy(httpClient);
+      const sectionUuid = 'd4964d27-7819-4975-81ca-c0554ee7b233';
+      const typeUuid = '6c18cd7a-a5cd-4332-8271-6bdee4ef9834';
+
+      // 2. Act ⚙️
+      await strategy.execute(
+        buildContext({
+          [SOURCE_NAMESPACE]: { [SOURCE_FIELD]: MARKUP },
+          parsed_email: {
+            from: '  Redaccion madri+d ',
+            date: '2026-10-29T08:15:00Z',
+          },
+        }),
+        {
+          bundle: 'node--noticias',
+          titleTemplate: 'Titular',
+          authorTemplate: '{{parsed_email.from}}',
+          dateTemplate: '{{parsed_email.date}}',
+          orderValue: 3,
+          newsSectionTermUuid: sectionUuid,
+          newsTypeTermUuid: typeUuid,
+        },
+      );
+
+      // 3. Assert 🎯: el instante se recorta a su dia, el autor se recorta y
+      //    la fuente, sin UUID, NO viaja: una relacion vacia borraria la que el
+      //    editor ponga despues a mano.
+      const document = callBody(httpClient, 0).data;
+
+      expect(document?.attributes).toMatchObject({
+        field_autor: 'Redaccion madri+d',
+        field_fecha: '2026-10-29',
+        field_orden: 3,
+      });
+      expect(document?.relationships).toEqual({
+        field_noticia_seccion: {
+          data: { type: 'taxonomy_term--tax_seccion', id: sectionUuid },
+        },
+        field_noticia_tipo: {
+          data: { type: 'taxonomy_term--tax_tipos_noticia', id: typeUuid },
+        },
+      });
+    });
+
+    it('1.4ter NO deberia enviar los campos de Notiweb a otro bundle', async () => {
+      // 1. Arrange 📐: un atributo que el bundle no declara es un 422.
+      const httpClient = buildHttpMock();
+      httpClient.requestWithStatus.mockResolvedValue(entityResponse());
+      const strategy = buildStrategy(httpClient);
+
+      // 2. Act ⚙️
+      await strategy.execute(buildContext(), {
+        bundle: 'node--article',
+        titleTemplate: 'Titular',
+        orderValue: 3,
+        newsTypeTermUuid: '6c18cd7a-a5cd-4332-8271-6bdee4ef9834',
+      });
+
+      // 3. Assert 🎯
+      const document = callBody(httpClient, 0).data;
+
+      expect(document?.attributes).not.toHaveProperty('field_orden');
+      expect(document?.attributes).not.toHaveProperty('field_autor');
+      expect(document).not.toHaveProperty('relationships');
+    });
+
+    it('1.4quater deberia rechazar una fecha que no se resuelve a AAAA-MM-DD sin llamar a Drupal', async () => {
+      // 1. Arrange 📐: `field_fecha` es una fecha sin hora y el 422 de Drupal
+      //    no dice que campo era.
+      const httpClient = buildHttpMock();
+      const strategy = buildStrategy(httpClient);
+
+      // 2. Act ⚙️
+      const result = await strategy.execute(
+        buildContext({
+          [SOURCE_NAMESPACE]: { [SOURCE_FIELD]: MARKUP },
+          parsed_email: { date: '29 de octubre' },
+        }),
+        { titleTemplate: 'Titular', dateTemplate: '{{parsed_email.date}}' },
+      );
+
+      // 3. Assert 🎯
+      expect(result.success).toBe(false);
+      expect(result.error?.code).toBe(ERR_DRUPAL_MISSING_PAYLOAD);
+      expect(result.error?.missingFields).toEqual(['dateTemplate']);
+      expect(httpClient.requestWithStatus).not.toHaveBeenCalled();
     });
 
     it('1.5 NO deberia reintentar el POST', async () => {
@@ -975,6 +1133,83 @@ describe('DrupalHttpStrategy', () => {
       expect($('#accordionUCM .panel-comite-codigo').text()).toBe('UCM 3');
     });
 
+    it('should resolve accordion panel ID dynamically via text search when target is ESIC/UFV in Verificación de Títulos', async () => {
+      // 1. Arrange 📐: la colision real. El panel de ESIC despliega
+      //    `#collapseUFV`, Francisco de Vitoria REPITE ese identificador y va
+      //    antes en el documento, y `#accordionESIC` no existe. El encabezado de
+      //    ESIC llega con la indentacion y los `&nbsp;` de Drupal.
+      const page =
+        '<div id="accordion">' +
+        '<div class="panel panel-default d-none"><div class="panel-heading"><h4>' +
+        '<a href="#collapseUFV" data-parent="#accordion">Universidad Francisco de Vitoria</a>' +
+        '</h4></div><div class="collapse" id="collapseUFV">' +
+        '<div class="panel-group" id="accordionUFV"></div></div></div>' +
+        '<div class="panel panel-default"><div class="panel-heading"><h4>' +
+        '<a href="#collapseUFV" data-parent="#accordion">\n   ESIC&nbsp;&nbsp;Universidad \t</a>' +
+        '</h4></div><div class="collapse" id="collapseUFV">' +
+        '<div class="panel-group" id="accordionUFV"></div></div></div>' +
+        '</div>';
+      const httpClient = buildHttpMock();
+      httpClient.requestWithStatus
+        .mockResolvedValueOnce(pageResponse(page))
+        .mockResolvedValueOnce(pageResponse(''));
+      const strategy = buildStrategy(httpClient);
+
+      // 2. Act ⚙️
+      const result = await strategy.execute(
+        buildContext({
+          [SOURCE_NAMESPACE]: {
+            [SOURCE_FIELD]: panel('ESIC 2', '#accordionESIC'),
+          },
+        }),
+        appendParams,
+      );
+
+      // 3. Assert 🎯: en el panel de ESIC y NUNCA en el de Francisco de Vitoria.
+      const $ = cheerio.load(
+        sentHtml(httpClient, 1),
+        {
+          xml: { xmlMode: false },
+        },
+        false,
+      );
+      const universities = $('#accordion > .panel');
+
+      expect(result.success).toBe(true);
+      expect(universities.eq(1).find('.panel-comite-codigo').text()).toBe(
+        'ESIC 2',
+      );
+      expect(universities.eq(0).find('.panel-comite-codigo')).toHaveLength(0);
+    });
+
+    it('2bis.1bis NO deberia mandar un comite de ESIC al acordeon de Francisco de Vitoria', async () => {
+      // 1. Arrange 📐: la pagina solo tiene el panel de Francisco de Vitoria.
+      const page =
+        '<div id="accordion"><div class="panel panel-default"><div class="panel-heading"><h4>' +
+        '<a href="#collapseUFV">Universidad Francisco de Vitoria</a></h4></div>' +
+        '<div class="collapse" id="collapseUFV"><div class="panel-group" id="accordionUFV"></div></div>' +
+        '</div></div>';
+      const httpClient = buildHttpMock();
+      httpClient.requestWithStatus.mockResolvedValueOnce(pageResponse(page));
+      const strategy = buildStrategy(httpClient);
+
+      // 2. Act ⚙️
+      const result = await strategy.execute(
+        buildContext({
+          [SOURCE_NAMESPACE]: {
+            [SOURCE_FIELD]: panel('ESIC 2', '#accordionESIC'),
+          },
+        }),
+        appendParams,
+      );
+
+      // 3. Assert 🎯: todo o nada, sin PATCH.
+      expect(result.success).toBe(false);
+      expect(result.error?.code).toBe(ERR_DRUPAL_DOM_TARGET);
+      expect(result.error?.missingFields).toEqual(['ESIC 2']);
+      expect(httpClient.requestWithStatus).toHaveBeenCalledTimes(1);
+    });
+
     it('2bis.2 NO deberia tocar la pagina si un destino no existe', async () => {
       // 1. Arrange 📐: todo o nada. Mandar el huerfano al `containerSelector`
       //    es justo la averia que esto arregla: aterriza en la raiz, la
@@ -1218,6 +1453,62 @@ describe('DrupalHttpStrategy', () => {
       expect(callConfig(httpClient, 3).url).toContain(PAGE_UUID);
       expect(bodyOf(3)).not.toContain('S_2026_015');
       expect(bodyOf(3)).toContain('S_2026_001');
+    });
+
+    it('should insert extracted HTML block inside targetContainerSelector element during TRANSFER_HTML_BLOCK', async () => {
+      // 1. Arrange 📐: la pagina de cerradas es un acordeon; el bloque tiene
+      //    que entrar en su cuerpo y no en la raiz.
+      const closedPage =
+        '<div id="collapse2"><div class="panel-body"><p>Antigua</p></div></div>';
+      const httpClient = buildHttpMock();
+      httpClient.requestWithStatus
+        .mockResolvedValueOnce(pageResponse(BLOCK + OTHER_BLOCK, PAGE_UUID))
+        .mockResolvedValueOnce(pageResponse(closedPage, CLOSED_UUID, 55_938))
+        .mockResolvedValueOnce(pageResponse('', CLOSED_UUID, 55_938))
+        .mockResolvedValueOnce(pageResponse('', PAGE_UUID));
+      const strategy = buildStrategy(httpClient);
+
+      // 2. Act ⚙️
+      const result = await strategy.execute(buildContext(), {
+        ...transferParams,
+        targetContainerSelector: '#collapse2 > .panel-body',
+        insertPosition: 'PREPEND',
+      });
+
+      // 3. Assert 🎯: dentro del contenedor y DELANTE de lo que ya habia.
+      const sent = (
+        (callBody(httpClient, 2).data?.attributes as Record<string, unknown>)
+          .body as Record<string, string>
+      ).value;
+      const $ = cheerio.load(sent, { xml: { xmlMode: false } }, false);
+      const children = $('#collapse2 > .panel-body').children();
+
+      expect(result.success).toBe(true);
+      expect(children.first().attr('data-expediente')).toBe('S_2026_015');
+      expect(children.last().text()).toBe('Antigua');
+    });
+
+    it('3.0bis NO deberia escribir nada si el contenedor de destino no existe', async () => {
+      // 1. Arrange 📐: cerradas no tiene el acordeon esperado.
+      const httpClient = buildHttpMock();
+      httpClient.requestWithStatus
+        .mockResolvedValueOnce(pageResponse(BLOCK + OTHER_BLOCK, PAGE_UUID))
+        .mockResolvedValueOnce(
+          pageResponse('<p>Otra</p>', CLOSED_UUID, 55_938),
+        );
+      const strategy = buildStrategy(httpClient);
+
+      // 2. Act ⚙️
+      const result = await strategy.execute(buildContext(), {
+        ...transferParams,
+        targetContainerSelector: '#collapse2 > .panel-body',
+      });
+
+      // 3. Assert 🎯: dos GET y ningun PATCH; el bloque sigue en origen.
+      expect(result.success).toBe(false);
+      expect(result.error?.code).toBe(ERR_DRUPAL_DOM_TARGET);
+      expect(result.error?.missingFields).toEqual(['#collapse2 > .panel-body']);
+      expect(httpClient.requestWithStatus).toHaveBeenCalledTimes(2);
     });
 
     it('3.1 deberia escribir PRIMERO en destino y DESPUES retirar de origen', async () => {
@@ -1550,6 +1841,112 @@ describe('DrupalHttpStrategy', () => {
         'llm_response',
       );
       expect(strategy.getUnreachableErrorCodes(linkParams)).toEqual([]);
+    });
+  });
+
+  describe('3ter. UPDATE_LINK_SOURCE con selector interpolado (Innodays/Innobar)', () => {
+    const EVENTS_UUID = '3c2b1a0f-9e8d-4c7b-8a69-5f4e3d2c1b0a';
+    const EVENTS_HTML =
+      '<table>' +
+      '<tr><td>Mentoring (Encuentro Anual)</td><td><a href="/old-1">Ver</a></td></tr>' +
+      '<tr><td>O\'Donnell &amp; Cía.</td><td><a href="/old-2">Ver</a></td></tr>' +
+      '<tr><td>Otro</td><td><a href="/old-3">Ver</a></td></tr>' +
+      '</table>';
+
+    const eventParams = {
+      operationMode: DrupalOperationMode.UPDATE_LINK_SOURCE,
+      bundle: 'node--page',
+      targetNodeUuid: EVENTS_UUID,
+      linkSelector: "table tr:contains('{{evento.nombre}}') a",
+      linkAttribute: 'href',
+      linkValueTemplate: '{{evento.url}}',
+    };
+
+    const eventContext = (nombre: string): StatePayloadContext =>
+      buildContext({ evento: { nombre, url: 'https://madrimasd.org/nuevo' } });
+
+    const patchedHtml = (httpClient: HttpMock): string =>
+      (
+        (callBody(httpClient, 1).data?.attributes as Record<string, unknown>)
+          .body as Record<string, string>
+      ).value ?? '';
+
+    it('should throw ERR_ELEMENT_NOT_FOUND if selector is not present in target DOM during UPDATE_LINK_SOURCE', async () => {
+      // 1. Arrange 📐: el codigo del contrato es ERR_DRUPAL_DOM_TARGET; las
+      //    rutas `onErrorStep` ya guardadas se ramifican por el.
+      const httpClient = buildHttpMock();
+      httpClient.requestWithStatus.mockResolvedValueOnce(
+        pageResponse(EVENTS_HTML, EVENTS_UUID),
+      );
+      const strategy = buildStrategy(httpClient);
+
+      // 2. Act ⚙️
+      const result = await strategy.execute(
+        eventContext('Evento inexistente'),
+        eventParams,
+      );
+
+      // 3. Assert 🎯: solo el GET, ningun PATCH.
+      expect(result.success).toBe(false);
+      expect(result.error?.code).toBe(ERR_DRUPAL_DOM_TARGET);
+      expect(httpClient.requestWithStatus).toHaveBeenCalledTimes(1);
+    });
+
+    it.each([
+      ['parentesis', 'Mentoring (Encuentro Anual)', '/old-1'],
+      ['comilla y punto', "O'Donnell & Cía.", '/old-2'],
+      ['espacios de mas', '  Mentoring\n (Encuentro   Anual) ', '/old-1'],
+    ])(
+      '3ter.%# deberia casar como texto literal un nombre con %s',
+      async (_case, nombre, previous) => {
+        // 1. Arrange 📐
+        const httpClient = buildHttpMock();
+        httpClient.requestWithStatus
+          .mockResolvedValueOnce(pageResponse(EVENTS_HTML, EVENTS_UUID))
+          .mockResolvedValueOnce(pageResponse('', EVENTS_UUID));
+        const strategy = buildStrategy(httpClient);
+
+        // 2. Act ⚙️
+        const result = await strategy.execute(
+          eventContext(nombre),
+          eventParams,
+        );
+
+        // 3. Assert 🎯: cambia SOLO el enlace de esa fila.
+        const html = patchedHtml(httpClient);
+
+        expect(result.success).toBe(true);
+        expect(html).not.toContain(`href="${previous}"`);
+        expect(html).toContain('href="https://madrimasd.org/nuevo"');
+        expect(html.match(/madrimasd\.org\/nuevo/g)).toHaveLength(1);
+      },
+    );
+
+    it('3ter.4 NO deberia dejar que un valor abra una segunda clausula del selector', async () => {
+      // 1. Arrange 📐: sin escapar, este nombre cerraria el `:contains()` y
+      //    casaria con la fila «Otro».
+      const httpClient = buildHttpMock();
+      httpClient.requestWithStatus.mockResolvedValueOnce(
+        pageResponse(EVENTS_HTML, EVENTS_UUID),
+      );
+      const strategy = buildStrategy(httpClient);
+
+      // 2. Act ⚙️
+      const result = await strategy.execute(
+        eventContext("zzz') a, tr:contains('Otro"),
+        eventParams,
+      );
+
+      // 3. Assert 🎯
+      expect(result.success).toBe(false);
+      expect(result.error?.code).toBe(ERR_DRUPAL_DOM_TARGET);
+      expect(httpClient.requestWithStatus).toHaveBeenCalledTimes(1);
+    });
+
+    it('3ter.5 deberia exigir el namespace citado en el selector', () => {
+      const strategy = buildStrategy(buildHttpMock());
+
+      expect(strategy.getRequiredNamespaces(eventParams)).toEqual(['evento']);
     });
   });
 

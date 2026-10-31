@@ -1,20 +1,25 @@
 <script setup lang="ts">
 import { useQuasar } from 'quasar';
-import { computed, inject, watch } from 'vue';
+import { computed, inject, nextTick, watch } from 'vue';
 
 import { useDrupalHttpStore } from '@stores/nodes/drupal-http.store';
 
 import { NODE_SANDBOX_MODE_KEY } from '@components/nodes/node-sandbox-mode';
+import VariableInsertButton from '@components/shared/VariableInsertButton.vue';
 
 import { useSelectFilter } from '@/composables/useSelectFilter';
 
 import { NODE_TYPE_LABELS, NodeType } from '@/types/pipeline';
 import {
   DRUPAL_BUNDLES,
+  DRUPAL_NEWS_BUNDLE,
   DRUPAL_PRESETS,
   DrupalOperationMode,
   MAX_DRUPAL_ATTACHMENT_INDEX,
+  MAX_DRUPAL_AUTHOR_LENGTH,
+  MAX_DRUPAL_DATE_TEMPLATE_LENGTH,
   MAX_DRUPAL_LINK_TEMPLATE_LENGTH,
+  MAX_DRUPAL_NEWS_ORDER,
   MAX_DRUPAL_SELECTOR_LENGTH,
   MAX_DRUPAL_SUMMARY_LENGTH,
   MAX_DRUPAL_TITLE_LENGTH,
@@ -23,8 +28,10 @@ import {
   toDrupalEnvironment,
 } from '@/types/nodes/drupal-http.types';
 import { blockNonNumericKeys } from '@/utils/numeric-input';
+import { insertAtCaret } from '@/utils/url-source-options';
 
 import type {
+  DrupalHttpNodeConfig,
   DrupalInsertPosition,
   DrupalLinkAttribute,
   DrupalPresetKey,
@@ -182,6 +189,15 @@ const HIERARCHICAL_DISPATCH_NOTICE =
  * Lo que sigue cayendo aqui es el marcado que NO viene en paneles, que es el de
  * los otros canales que publican por este modo —licitaciones, Notiweb—.
  */
+const TARGET_CONTAINER_HINT =
+  'Donde entra el bloque dentro de la pagina de DESTINO. Si no existe, el traslado se detiene antes de escribir nada y el bloque sigue en origen.';
+
+const LINK_SELECTOR_HINT =
+  'Admite marcadores {{namespace.campo}}: cada valor se escapa antes de entrar en el selector, asi que parentesis o comillas en el nombre del evento no lo rompen.';
+
+const NEWS_TAXONOMY_HINT =
+  'UUID v4 del termino en Drupal. Vacio: la noticia se crea sin esa taxonomia y el editor la asigna despues.';
+
 const CONTAINER_SELECTOR_HINT =
   'Destino del marcado que NO viene en paneles de acordeon. Vacio: la raiz del cuerpo de la pagina.';
 
@@ -399,6 +415,79 @@ const attachmentIndexRules = [
     `Indice entre 0 y ${MAX_DRUPAL_ATTACHMENT_INDEX}`,
 ];
 
+const authorRules = [
+  (value: string | null): boolean | string =>
+    (value ?? '').length <= MAX_DRUPAL_AUTHOR_LENGTH ||
+    `El autor no puede superar ${MAX_DRUPAL_AUTHOR_LENGTH} caracteres`,
+];
+
+const dateRules = [
+  (value: string | null): boolean | string =>
+    (value ?? '').length <= MAX_DRUPAL_DATE_TEMPLATE_LENGTH ||
+    `La fecha no puede superar ${MAX_DRUPAL_DATE_TEMPLATE_LENGTH} caracteres`,
+];
+
+const orderRules = [
+  (value: number | null): boolean | string =>
+    (value !== null && Number.isInteger(value) && value >= 0 && value <= MAX_DRUPAL_NEWS_ORDER) ||
+    `Orden entre 0 y ${MAX_DRUPAL_NEWS_ORDER}`,
+];
+
+const optionalUuidRules = [
+  (value: string | null): boolean | string =>
+    (value ?? '').trim() === '' ||
+    UUID_V4_PATTERN.test((value ?? '').trim()) ||
+    'No es un UUID v4 valido',
+];
+
+/** Autor, fecha, orden y taxonomias solo existen en el bundle de noticias. */
+const isNewsBundle = computed<boolean>(
+  () => isCreateNode.value && store.config.bundle === DRUPAL_NEWS_BUNDLE,
+);
+
+/** Plantillas en las que se puede insertar un marcador `{{namespace.campo}}`. */
+type TemplateField = Extract<
+  keyof DrupalHttpNodeConfig,
+  | 'titleTemplate'
+  | 'summaryTemplate'
+  | 'authorTemplate'
+  | 'dateTemplate'
+  | 'linkSelector'
+  | 'linkValueTemplate'
+  | 'expedienteTemplate'
+>;
+
+/**
+ * Ultimo control nativo que tuvo el foco en cada plantilla.
+ *
+ * El menu de variables le roba el foco al campo, pero el `<input>` conserva su
+ * `selectionStart`/`selectionEnd`: guardando la referencia al enfocarlo, el
+ * marcador entra donde estaba el cursor y no siempre al final. Un campo que
+ * nunca tuvo el foco no esta aqui, y entonces se anade al final.
+ */
+const caretInputs = new Map<TemplateField, HTMLInputElement | HTMLTextAreaElement>();
+
+const rememberCaret = (field: TemplateField, event: Event): void => {
+  const { target } = event;
+
+  if (target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement) {
+    caretInputs.set(field, target);
+  }
+};
+
+const insertVariable = (field: TemplateField, token: string): void => {
+  const native = caretInputs.get(field);
+  const { text, caret } = insertAtCaret(
+    store.config[field] ?? '',
+    token,
+    native?.selectionStart ?? null,
+    native?.selectionEnd ?? null,
+  );
+
+  store.updateConfig({ [field]: text });
+  void nextTick(() => native?.setSelectionRange(caret, caret));
+};
+
 /** Normaliza lo tecleado en un campo opcional: vacio significa `null`. */
 const toNullableText = (value: string | number | null): string | null => {
   const text = String(value ?? '').trim();
@@ -610,8 +699,17 @@ const toNullableText = (value: string | number | null): string | null => {
           placeholder="{{validated_drupal_json.headline}}"
           hint="Admite marcadores {{namespace.campo}} resueltos contra el contexto del flujo."
           :rules="titleRules"
+          @focus="rememberCaret('titleTemplate', $event)"
           @update:model-value="store.updateConfig({ titleTemplate: toNullableText($event) })"
-        />
+        >
+          <template #append>
+            <VariableInsertButton
+              :context="store.availableUpstreamContext"
+              field-label="el titulo"
+              @insert="insertVariable('titleTemplate', $event)"
+            />
+          </template>
+        </q-input>
       </div>
 
       <div v-if="isCreateNode" class="col-12" data-test="summary-template-field">
@@ -625,8 +723,125 @@ const toNullableText = (value: string | number | null): string | null => {
           autogrow
           class="q-mt-xs"
           :maxlength="MAX_DRUPAL_SUMMARY_LENGTH"
+          hint="Viaja como resumen del cuerpo (body.summary) de la entidad."
           :rules="summaryRules"
+          @focus="rememberCaret('summaryTemplate', $event)"
           @update:model-value="store.updateConfig({ summaryTemplate: toNullableText($event) })"
+        >
+          <template #append>
+            <VariableInsertButton
+              :context="store.availableUpstreamContext"
+              field-label="el resumen"
+              @insert="insertVariable('summaryTemplate', $event)"
+            />
+          </template>
+        </q-input>
+      </div>
+
+      <div v-if="isNewsBundle" class="col-12 col-md-5" data-test="author-template-field">
+        <label class="pd-label" for="drupal-author">Autor</label>
+        <q-input
+          id="drupal-author"
+          :model-value="store.config.authorTemplate"
+          outlined
+          dense
+          class="q-mt-xs"
+          :maxlength="MAX_DRUPAL_AUTHOR_LENGTH"
+          :rules="authorRules"
+          @focus="rememberCaret('authorTemplate', $event)"
+          @update:model-value="store.updateConfig({ authorTemplate: toNullableText($event) })"
+        >
+          <template #append>
+            <VariableInsertButton
+              :context="store.availableUpstreamContext"
+              field-label="el autor"
+              @insert="insertVariable('authorTemplate', $event)"
+            />
+          </template>
+        </q-input>
+      </div>
+
+      <div v-if="isNewsBundle" class="col-12 col-md-4" data-test="date-template-field">
+        <label class="pd-label" for="drupal-date">Fecha</label>
+        <q-input
+          id="drupal-date"
+          :model-value="store.config.dateTemplate"
+          outlined
+          dense
+          class="q-mt-xs pd-mono"
+          placeholder="{{parsed_email.date}}"
+          hint="Debe resolverse a AAAA-MM-DD; un instante ISO se recorta a su dia."
+          :maxlength="MAX_DRUPAL_DATE_TEMPLATE_LENGTH"
+          :rules="dateRules"
+          @focus="rememberCaret('dateTemplate', $event)"
+          @update:model-value="store.updateConfig({ dateTemplate: toNullableText($event) })"
+        >
+          <template #append>
+            <VariableInsertButton
+              :context="store.availableUpstreamContext"
+              field-label="la fecha"
+              @insert="insertVariable('dateTemplate', $event)"
+            />
+          </template>
+        </q-input>
+      </div>
+
+      <div v-if="isNewsBundle" class="col-12 col-md-3" data-test="order-value-field">
+        <label class="pd-label" for="drupal-order">Orden</label>
+        <q-input
+          id="drupal-order"
+          :model-value="store.config.orderValue"
+          type="number"
+          outlined
+          dense
+          class="q-mt-xs"
+          :min="0"
+          :max="MAX_DRUPAL_NEWS_ORDER"
+          :rules="orderRules"
+          @keydown="blockNonNumericKeys"
+          @update:model-value="store.updateConfig({ orderValue: Number($event ?? 0) })"
+        />
+      </div>
+
+      <div v-if="isNewsBundle" class="col-12 col-md-4" data-test="news-source-term-field">
+        <label class="pd-label" for="drupal-news-source">Fuente (taxonomia)</label>
+        <q-input
+          id="drupal-news-source"
+          :model-value="store.config.newsSourceTermUuid"
+          outlined
+          dense
+          class="q-mt-xs pd-mono"
+          :hint="NEWS_TAXONOMY_HINT"
+          :rules="optionalUuidRules"
+          @update:model-value="store.updateConfig({ newsSourceTermUuid: toNullableText($event) })"
+        />
+      </div>
+
+      <div v-if="isNewsBundle" class="col-12 col-md-4" data-test="news-section-term-field">
+        <label class="pd-label" for="drupal-news-section">Seccion (taxonomia)</label>
+        <q-input
+          id="drupal-news-section"
+          :model-value="store.config.newsSectionTermUuid"
+          outlined
+          dense
+          class="q-mt-xs pd-mono"
+          :hint="NEWS_TAXONOMY_HINT"
+          :rules="optionalUuidRules"
+          @update:model-value="store.updateConfig({ newsSectionTermUuid: toNullableText($event) })"
+        />
+      </div>
+
+      <div v-if="isNewsBundle" class="col-12 col-md-4" data-test="news-type-term-field">
+        <label class="pd-label" for="drupal-news-type">Tipo (taxonomia)</label>
+        <q-input
+          id="drupal-news-type"
+          :model-value="store.config.newsTypeTermUuid"
+          outlined
+          dense
+          class="q-mt-xs pd-mono"
+          :hint="NEWS_TAXONOMY_HINT"
+          :rules="optionalUuidRules"
+          @update:model-value="store.updateConfig({ newsTypeTermUuid: toNullableText($event) })"
         />
       </div>
 
@@ -682,11 +897,21 @@ const toNullableText = (value: string | number | null): string | null => {
           outlined
           dense
           class="q-mt-xs pd-mono"
-          placeholder="table tr:contains('Agrifood') a"
+          placeholder="table tr:contains('{{ns.evento_nombre}}') a"
+          :hint="LINK_SELECTOR_HINT"
           :maxlength="MAX_DRUPAL_SELECTOR_LENGTH"
           :rules="linkSelectorRules"
+          @focus="rememberCaret('linkSelector', $event)"
           @update:model-value="store.updateConfig({ linkSelector: toNullableText($event) })"
-        />
+        >
+          <template #append>
+            <VariableInsertButton
+              :context="store.availableUpstreamContext"
+              field-label="el selector"
+              @insert="insertVariable('linkSelector', $event)"
+            />
+          </template>
+        </q-input>
       </div>
 
       <div v-if="isLinkUpdate" class="col-12 col-md-4" data-test="link-attribute-field">
@@ -720,8 +945,17 @@ const toNullableText = (value: string | number | null): string | null => {
           hint="Admite marcadores {{namespace.campo}}. Solo rutas relativas y http(s); un javascript: o un data: se rechazan al ejecutar."
           :maxlength="MAX_DRUPAL_LINK_TEMPLATE_LENGTH"
           :rules="linkValueRules"
+          @focus="rememberCaret('linkValueTemplate', $event)"
           @update:model-value="store.updateConfig({ linkValueTemplate: toNullableText($event) })"
-        />
+        >
+          <template #append>
+            <VariableInsertButton
+              :context="store.availableUpstreamContext"
+              field-label="el nuevo valor"
+              @insert="insertVariable('linkValueTemplate', $event)"
+            />
+          </template>
+        </q-input>
       </div>
 
       <div v-if="isTransfer" class="col-12 col-md-6" data-test="item-selector-field">
@@ -738,6 +972,28 @@ const toNullableText = (value: string | number | null): string | null => {
           :maxlength="MAX_DRUPAL_SELECTOR_LENGTH"
           :rules="itemSelectorRules"
           @update:model-value="store.updateConfig({ itemSelector: toNullableText($event) })"
+        />
+      </div>
+
+      <div v-if="isTransfer" class="col-12 col-md-6" data-test="target-container-selector-field">
+        <!-- SIN asterisco: vacio, el bloque va a la raiz del cuerpo de destino. -->
+        <label class="pd-label" for="drupal-target-container">
+          Contenedor de destino (Selector CSS)
+        </label>
+        <q-input
+          id="drupal-target-container"
+          :model-value="store.config.targetContainerSelector"
+          outlined
+          dense
+          class="q-mt-xs pd-mono"
+          placeholder="#collapse2 > .panel-body"
+          :maxlength="MAX_DRUPAL_SELECTOR_LENGTH"
+          :hint="TARGET_CONTAINER_HINT"
+          :rules="containerSelectorRules"
+          data-test="target-container-selector"
+          @update:model-value="
+            store.updateConfig({ targetContainerSelector: toNullableText($event) })
+          "
         />
       </div>
 
@@ -765,8 +1021,17 @@ const toNullableText = (value: string | number | null): string | null => {
           placeholder="{{llm_response.expediente}}"
           :maxlength="MAX_DRUPAL_SELECTOR_LENGTH"
           hint="Envuelve la licitacion en div.pd-licitacion-block con este data-expediente. Solo se usa si el marcado no trae ya el suyo; los paneles de acordeon no se envuelven."
+          @focus="rememberCaret('expedienteTemplate', $event)"
           @update:model-value="store.updateConfig({ expedienteTemplate: toNullableText($event) })"
-        />
+        >
+          <template #append>
+            <VariableInsertButton
+              :context="store.availableUpstreamContext"
+              field-label="el expediente"
+              @insert="insertVariable('expedienteTemplate', $event)"
+            />
+          </template>
+        </q-input>
       </div>
 
       <div v-if="mutatesContainer" class="col-12 col-md-6" data-test="container-selector-field">

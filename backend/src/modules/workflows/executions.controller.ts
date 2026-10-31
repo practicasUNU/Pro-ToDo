@@ -10,6 +10,7 @@ import {
   Post,
   Query,
   Req,
+  StreamableFile,
   UseGuards,
 } from '@nestjs/common';
 import {
@@ -20,6 +21,7 @@ import {
   ApiNotFoundResponse,
   ApiOkResponse,
   ApiOperation,
+  ApiProduces,
   ApiTags,
   ApiTooManyRequestsResponse,
   ApiUnauthorizedResponse,
@@ -37,13 +39,20 @@ import { DiscardExecutionResponseDto } from './dto/discard-execution-response.dt
 import { DiscardExecutionDto } from './dto/discard-execution.dto';
 import { ExecutionDetailResponseDto } from './dto/execution-detail-response.dto';
 import { ExecutionPageResponseDto } from './dto/execution-summary-response.dto';
-import { ListExecutionsQueryDto } from './dto/list-executions-query.dto';
+import {
+  ExportExecutionsQueryDto,
+  ListExecutionsQueryDto,
+} from './dto/list-executions-query.dto';
 import { ResumeExecutionDto } from './dto/resume-execution.dto';
 import { WorkflowExecutionResponseDto } from './dto/workflow-execution-response.dto';
 import { ExecutionsService } from './executions.service';
+import { buildExecutionsCsv } from './reports/executions-csv.builder';
 
 import type { Request } from 'express';
 import type { AuthenticatedUser } from '@modules/auth/interfaces/jwt-payload.interface';
+
+/** Nombre de descarga fijo, igual que los informes de telemetria y auditoria. */
+export const CSV_FILENAME = 'historial-ejecuciones.csv';
 
 /**
  * Superficie HTTP de la trazabilidad de ejecuciones y del reintento manual.
@@ -87,6 +96,35 @@ export class ExecutionsController {
     @Query() listExecutionsQueryDto: ListExecutionsQueryDto,
   ): Promise<ExecutionPageResponseDto> {
     return this.executionsService.findAll(listExecutionsQueryDto);
+  }
+
+  /**
+   * Historial filtrado en CSV.
+   *
+   * Declarada ANTES de `@Get(':id')`: Express resuelve por orden de registro, y
+   * detras de ella `export` llegaria como id y responderia 400 por no ser UUID.
+   */
+  @Get('export/csv')
+  @ApiOperation({
+    summary:
+      'Descarga en CSV el historial con los mismos filtros y orden que el listado',
+  })
+  @ApiProduces('text/csv')
+  @ApiBadRequestResponse({
+    description:
+      'Algun filtro no es valido, o llego `limit`/`offset`: el informe no pagina',
+  })
+  public async exportCsv(
+    @Query() exportExecutionsQueryDto: ExportExecutionsQueryDto,
+  ): Promise<StreamableFile> {
+    const { rows } = await this.executionsService.findAllForExport(
+      exportExecutionsQueryDto,
+    );
+
+    return new StreamableFile(buildExecutionsCsv(rows), {
+      type: 'text/csv; charset=utf-8',
+      disposition: `attachment; filename=${CSV_FILENAME}`,
+    });
   }
 
   @Get(':id')

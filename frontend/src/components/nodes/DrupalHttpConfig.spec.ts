@@ -21,6 +21,7 @@ import { beforeEach, describe, expect, it } from 'vitest';
 
 import DrupalHttpConfig from '@components/nodes/DrupalHttpConfig.vue';
 import { NODE_SANDBOX_MODE_KEY } from '@components/nodes/node-sandbox-mode';
+import VariableInsertButton from '@components/shared/VariableInsertButton.vue';
 import { useDrupalHttpStore } from '@stores/nodes/drupal-http.store';
 
 import { NodeType } from '@/types/pipeline';
@@ -643,7 +644,7 @@ describe('DrupalHttpConfig · configurador del nodo DESTINO_DRUPAL', () => {
       expect(wrapper.get('[data-test="preset-innobar"]').text()).toContain('Innobar (Sandbox)');
     });
 
-    it('should set separate production URLs for Innodays and Innobar when isSandbox is false', () => {
+    it('should set separate production URLs for Innodays (/innodays-madrid) and Innobar (/innobar-madrid)', () => {
       // 1. Arrange 📐
       const innodays = DRUPAL_PRESETS.INNODAYS.environments;
       const innobar = DRUPAL_PRESETS.INNOBAR.environments;
@@ -652,7 +653,7 @@ describe('DrupalHttpConfig · configurador del nodo DESTINO_DRUPAL', () => {
       expect(innodays.SANDBOX.path).toBe('/prueba-innodays');
       expect(innobar.SANDBOX.path).toBe('/prueba-innodays');
       expect(innodays.PRODUCTION.path).toBe('/innodays-madrid');
-      expect(innobar.PRODUCTION.path).toBe('/innobar');
+      expect(innobar.PRODUCTION.path).toBe('/innobar-madrid');
     });
 
     it('5ter.2bis deberia cargar Innobar con el modo de enlace', async () => {
@@ -752,6 +753,101 @@ describe('DrupalHttpConfig · configurador del nodo DESTINO_DRUPAL', () => {
       // 3. Assert 🎯: avisar mientras carga el catalogo seria una falsa alarma
       //    en cada apertura del asistente.
       expect(wrapper.findAll('[data-test="config-warning"]')).toHaveLength(0);
+    });
+  });
+
+  describe('7. Contenedor de destino, Notiweb y variables', () => {
+    it('should render targetContainerSelector input field when mode is TRANSFER_HTML_BLOCK', async () => {
+      // 1. Arrange 📐
+      const nodeId = nextNodeId();
+      const wrapper = mountComponent(nodeId);
+      const store = useDrupalHttpStore(nodeId);
+      expect(wrapper.find('[data-test="target-container-selector-field"]').exists()).toBe(false);
+
+      // 2. Act ⚙️
+      store.applyCerrarLicitacionPreset();
+      await wrapper.vm.$nextTick();
+
+      // 3. Assert 🎯: visible y con el panel de cerradas que trae el preset.
+      const field = wrapper.find('[data-test="target-container-selector-field"]');
+
+      expect(field.exists()).toBe(true);
+      expect(field.text()).toContain('Contenedor de destino (Selector CSS)');
+      expect(field.find('input').element.value).toBe('#collapse2 > .panel-body');
+    });
+
+    it('7.2 deberia escribir en el store el contenedor de destino tecleado', async () => {
+      // 1. Arrange 📐
+      const nodeId = nextNodeId();
+      const wrapper = mountComponent(nodeId);
+      const store = useDrupalHttpStore(nodeId);
+      store.updateConfig({ operationMode: DrupalOperationMode.TRANSFER_HTML_BLOCK });
+      await wrapper.vm.$nextTick();
+
+      // 2. Act ⚙️
+      await wrapper
+        .find('[data-test="target-container-selector-field"]')
+        .findComponent(QInput)
+        .setValue('#collapse3 .panel-body');
+
+      // 3. Assert 🎯
+      expect(store.config.targetContainerSelector).toBe('#collapse3 .panel-body');
+    });
+
+    it('7.3 deberia pintar autor, fecha, orden y taxonomias solo en el bundle de noticias', async () => {
+      // 1. Arrange 📐
+      const nodeId = nextNodeId();
+      const wrapper = mountComponent(nodeId);
+      const store = useDrupalHttpStore(nodeId);
+
+      // 2. Act ⚙️
+      store.applyNotiwebPreset();
+      await wrapper.vm.$nextTick();
+      const withNews = wrapper.find('[data-test="news-section-term-field"]').exists();
+      store.updateConfig({ bundle: 'node--page' });
+      await wrapper.vm.$nextTick();
+
+      // 3. Assert 🎯
+      expect(withNews).toBe(true);
+      expect(wrapper.find('[data-test="author-template-field"]').exists()).toBe(false);
+      expect(wrapper.find('[data-test="news-section-term-field"]').exists()).toBe(false);
+    });
+
+    it('7.4 deberia insertar el marcador elegido en el titulo', async () => {
+      // 1. Arrange 📐: el campo nunca tuvo el foco, asi que va al final.
+      const nodeId = nextNodeId();
+      const wrapper = mountComponent(nodeId);
+      const store = useDrupalHttpStore(nodeId);
+      store.setAvailableUpstreamContext(UPSTREAM);
+      store.updateConfig({ titleTemplate: 'Noticia: ' });
+      await wrapper.vm.$nextTick();
+
+      // 2. Act ⚙️
+      wrapper
+        .find('[data-test="title-template-field"]')
+        .findComponent(VariableInsertButton)
+        .vm.$emit('insert', '{{validated_drupal_json.audit_status}}');
+      await wrapper.vm.$nextTick();
+
+      // 3. Assert 🎯
+      expect(store.config.titleTemplate).toBe('Noticia: {{validated_drupal_json.audit_status}}');
+    });
+
+    it('7.5 deberia ofrecer variables en el selector y en el valor del enlace', async () => {
+      // 1. Arrange 📐
+      const nodeId = nextNodeId();
+      const wrapper = mountComponent(nodeId);
+
+      // 2. Act ⚙️
+      useDrupalHttpStore(nodeId).applyInnobarPreset();
+      await wrapper.vm.$nextTick();
+
+      // 3. Assert 🎯
+      for (const testId of ['link-selector-field', 'link-value-field']) {
+        expect(
+          wrapper.find(`[data-test="${testId}"]`).findComponent(VariableInsertButton).exists(),
+        ).toBe(true);
+      }
     });
   });
 });

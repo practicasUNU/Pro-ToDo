@@ -17,8 +17,24 @@ import {
 } from 'quasar';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
+// El aviso se observa doblando `useQuasar`: espiar el plugin llega tarde
+// porque el componente captura `$q` al montarse.
+const { notify } = vi.hoisted(() => ({ notify: vi.fn() }));
+
+vi.mock('quasar', async () => ({
+  ...(await vi.importActual<Record<string, unknown>>('quasar')),
+  useQuasar: () => ({ notify }),
+}));
+
 vi.mock('@services/fsm-executions.service', () => ({
   fetchExecutions: vi.fn(),
+  downloadExecutionsCsv: vi.fn(),
+}));
+
+// Guardar en disco toca el DOM real del navegador: se observa la intencion.
+vi.mock('@/utils/file-download', async () => ({
+  ...(await vi.importActual<Record<string, unknown>>('@/utils/file-download')),
+  saveBlob: vi.fn(),
 }));
 
 vi.mock('@services/workflows.service', () => ({
@@ -32,8 +48,10 @@ vi.mock('@services/logs.service', () => ({
 import ExecutionsHistoryTable from '@components/dashboard/ExecutionsHistoryTable.vue';
 import { useWorkflowsStore } from '@stores/workflows.store';
 
-import { fetchExecutions } from '@services/fsm-executions.service';
+import { downloadExecutionsCsv, fetchExecutions } from '@services/fsm-executions.service';
 import { fetchExecutionLog } from '@services/logs.service';
+import { toDateInputValue } from '@/utils/date-range';
+import { saveBlob } from '@/utils/file-download';
 
 import { ExecutionState } from '@/types/execution';
 import { WorkflowStatus } from '@/types/pipeline';
@@ -269,6 +287,98 @@ describe('ExecutionsHistoryTable', () => {
 
       // 3. Assert 🎯
       expect(fetchExecutionLog).toHaveBeenCalledWith('fallida');
+    });
+  });
+
+  describe('3. Exportar CSV', () => {
+    const CSV_BLOB = new Blob(['Ejecución;Flujo'], { type: 'text/csv' });
+
+    const mountLoaded = async () => {
+      vi.mocked(fetchExecutions).mockResolvedValue({ items: [], total: 0, limit: 5, offset: 0 });
+      const wrapper = mountTable(true);
+      await flushPromises();
+
+      return wrapper;
+    };
+
+    const exportButton = (wrapper: Awaited<ReturnType<typeof mountLoaded>>) =>
+      wrapper
+        .findAllComponents(QBtn)
+        .find((button) => button.attributes('data-test') === 'executions-export');
+
+    it('3.1 deberia descargar el historial con el nombre fechado del dia', async () => {
+      // 1. Arrange 📐
+      vi.mocked(downloadExecutionsCsv).mockResolvedValue(CSV_BLOB);
+      const wrapper = await mountLoaded();
+
+      // 2. Act ⚙️
+      await wrapper.get('[data-test="executions-export"]').trigger('click');
+      await flushPromises();
+
+      // 3. Assert 🎯
+      expect(downloadExecutionsCsv).toHaveBeenCalledTimes(1);
+      expect(saveBlob).toHaveBeenCalledWith(
+        CSV_BLOB,
+        `historial-ejecuciones-${toDateInputValue(new Date())}.csv`,
+      );
+      expect(notify).toHaveBeenCalledWith(expect.objectContaining({ type: 'positive' }));
+    });
+
+    it('3.2 deberia exportar los filtros APLICADOS y no el borrador sin aplicar', async () => {
+      // 1. Arrange 📐: se aplica FALLIDO y despues se elige PAUSADO sin aplicar.
+      vi.mocked(downloadExecutionsCsv).mockResolvedValue(CSV_BLOB);
+      const wrapper = await mountLoaded();
+      const stateSelect = () =>
+        wrapper.findAllComponents(QSelect).find((select) => select.props('label') === 'Estado');
+      stateSelect()?.vm.$emit('update:modelValue', ExecutionState.FALLIDO);
+      await wrapper.findComponent(QForm).trigger('submit');
+      await flushPromises();
+      stateSelect()?.vm.$emit('update:modelValue', ExecutionState.PAUSADO);
+      await flushPromises();
+
+      // 2. Act ⚙️
+      await wrapper.get('[data-test="executions-export"]').trigger('click');
+      await flushPromises();
+
+      // 3. Assert 🎯: lo que muestra la tabla, sin la ventana de pagina.
+      expect(downloadExecutionsCsv).toHaveBeenCalledWith({ state: ExecutionState.FALLIDO });
+    });
+
+    it('3.3 deberia deshabilitarse mientras se descarga', async () => {
+      // 1. Arrange 📐
+      let resolveDownload: (blob: Blob) => void = () => undefined;
+      vi.mocked(downloadExecutionsCsv).mockReturnValue(
+        new Promise<Blob>((resolve) => {
+          resolveDownload = resolve;
+        }),
+      );
+      const wrapper = await mountLoaded();
+
+      // 2. Act ⚙️
+      await wrapper.get('[data-test="executions-export"]').trigger('click');
+      await flushPromises();
+      const disabledDuringDownload = exportButton(wrapper)?.props('disable');
+      resolveDownload(CSV_BLOB);
+      await flushPromises();
+
+      // 3. Assert 🎯
+      expect(disabledDuringDownload).toBe(true);
+      expect(exportButton(wrapper)?.props('disable')).toBe(false);
+    });
+
+    it('3.4 deberia avisar del fallo sin guardar ningun fichero', async () => {
+      // 1. Arrange 📐
+      vi.mocked(downloadExecutionsCsv).mockRejectedValue(new Error('Network Error'));
+      const wrapper = await mountLoaded();
+
+      // 2. Act ⚙️
+      await wrapper.get('[data-test="executions-export"]').trigger('click');
+      await flushPromises();
+
+      // 3. Assert 🎯
+      expect(saveBlob).not.toHaveBeenCalled();
+      expect(notify).toHaveBeenCalledWith(expect.objectContaining({ type: 'negative' }));
+      expect(exportButton(wrapper)?.props('disable')).toBe(false);
     });
   });
 });

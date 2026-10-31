@@ -88,6 +88,12 @@ export interface ExecutionListQuery extends SortQuery<ExecutionSortKey> {
   readonly offset?: number;
 }
 
+/**
+ * Filtros de `GET /executions/export/csv`. Replica `ExportExecutionsQueryDto`:
+ * los del listado sin la ventana de pagina, que el backend rechaza con 400.
+ */
+export type ExecutionExportQuery = Omit<ExecutionListQuery, 'limit' | 'offset'>;
+
 /** Desenlace de una reanudacion. Replica `WorkflowExecutionResponseDto`. */
 export interface WorkflowExecutionResult {
   readonly executionId: string;

@@ -1,4 +1,4 @@
-import { ApiPropertyOptional } from '@nestjs/swagger';
+import { ApiPropertyOptional, OmitType } from '@nestjs/swagger';
 import { Type } from 'class-transformer';
 import {
   IsEnum,
@@ -29,6 +29,15 @@ export const DEFAULT_PAGE_LIMIT = 25;
  * volcado de la tabla entera.
  */
 export const MAX_PAGE_LIMIT = 100;
+
+/**
+ * Techo de filas de la exportacion CSV del historial.
+ *
+ * El mismo valor que `MAX_EXPORT_ROWS` de la telemetria, y por el mismo motivo:
+ * el CSV no pagina, pero un sondeo por minuto acumula cientos de miles de
+ * ejecuciones al ano y montarlas todas en memoria tumbaria el proceso.
+ */
+export const MAX_EXPORT_ROWS = 50_000;
 
 /**
  * Lista blanca de orden: clave de la API -> propiedad de `FsmExecution`.
@@ -126,3 +135,17 @@ export class ListExecutionsQueryDto {
   @SortOrderField()
   readonly sortOrder?: SortOrder;
 }
+
+/**
+ * Filtros de `GET /api/executions/export/csv`: los del listado sin la ventana.
+ *
+ * `OmitType` y no una clase escrita a mano: el fichero tiene que decir lo mismo
+ * que la pantalla, y dos DTOs paralelos acabarian divergiendo en cuanto el
+ * listado ganase un filtro. Sin `limit`/`offset` porque el informe no pagina:
+ * lo acota `MAX_EXPORT_ROWS`. Con `forbidNonWhitelisted` (pipe global), un
+ * `limit` u `offset` colado responde 400 en vez de recortar el informe a escondidas.
+ */
+export class ExportExecutionsQueryDto extends OmitType(ListExecutionsQueryDto, [
+  'limit',
+  'offset',
+] as const) {}
