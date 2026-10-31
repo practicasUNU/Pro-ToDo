@@ -9275,3 +9275,30 @@ esta escrito en el esquema.
 - [ ] Aplicar la 062
 - [x] Seccion y tipo de Notiweb prefijados en el preset; la fuente queda a cargo del operador
 - [ ] Declarar los UUID de Produccion en `backend/.env` y reiniciar Nest
+
+## Traslado sin perdidas y paginas desde el backend
+
+### Por que el traslado perdia licitaciones
+
+«Ya trasladado» era «el selector casa en la pagina de destino». Con el selector generico del preset,
+la pagina de cerradas casaba siempre por las licitaciones que ya tenia: se saltaba la escritura en
+destino, se retiraba el bloque de origen y el nodo terminaba EXITOSO. Ahora decide el expediente del
+bloque concreto; sin expediente se escribe siempre, y lo peor posible es un duplicado visible.
+
+### Por que las paginas de los presets salen del backend
+
+El mismo UUID era lista blanca del Banco de Pruebas en el backend y constante en el cliente, y cambiar
+una pagina obligaba a tocar los dos. Ahora el `.env` es la unica fuente; un valor mal escrito cuenta
+como no declarado, para que el preset deje el campo al operador en vez de apuntar a una pagina que no
+existe.
+
+### Por que Innodays e Innobar usan headline y summary
+
+El PROCESADOR_IA solo publica `headline`, `summary` y `body_paragraphs`: los proveedores descartan
+cualquier otra clave. El nombre del evento va en `headline`, como el expediente en el prompt de
+licitaciones, y el selector de la fila lo escapa antes de buscarlo.
+
+### Checklist de dependencias
+
+- [ ] Aplicar las migraciones 063 y 064
+- [ ] Unir en una linea el UUID de Produccion de Cerrar licitacion en `backend/.env` y reiniciar Nest

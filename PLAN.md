@@ -5096,3 +5096,35 @@ Rama: `feat/drupal-and-acens-nodes-dev`. Migracion `062`.
 - [x] Exportacion del Historial de Ejecuciones
 - [ ] Pendiente: aplicar la 062 (`npm run db:migrate`)
 - [ ] Pendiente: declarar los UUID de Produccion e Innobar en `backend/.env` y reiniciar Nest
+
+## Traslado sin perdidas, prompts de Innodays e Innobar, paginas desde el backend y PDF del Historial
+
+Rama: `feat/drupal-and-acens-nodes-dev`. Migraciones `063` y `064`.
+
+### Contratos
+
+| Pieza | Contrato |
+|---|---|
+| `063-plantillas-prompts-drupal.sql` | Prompts `INNODAYS_ENLACE_DEFAULT` e `INNOBAR_ENLACE_DEFAULT`: nombre literal del evento en `headline`, enlace en `summary`. Sin plantilla base |
+| `064-actualizar-plantilla-y-prompt-notiweb.sql` | Plantilla de Notiweb reducida al cuerpo (parrafos y referencia bibliografica); regla de referencia en `NOTIWEB_DEFAULT` |
+| `TRANSFER_HTML_BLOCK` | «Ya trasladado» se decide por el `data-expediente` del bloque, no por el selector. `itemSelector` interpolable y escapado. Selector invalido o contenedor ausente: `ERR_DRUPAL_DOM_TARGET` antes de escribir, nombrando la pagina |
+| `GET /api/nodos/drupal/targets` | Paginas (UUID y NID) de cada preset por entorno, leidas del `.env` con una tabla explicita. Innobar usa la pagina de pruebas de Innodays si no tiene la suya. Valores mal formados: `null` |
+| `raw_email.from_name` | Nombre visible del remitente; cadena vacia si el correo no lo trae |
+| `authorFallback` | Autor de Notiweb cuando `authorTemplate` se resuelve a vacio |
+| `GET /executions/export/pdf` | Informe PDF del historial con los filtros aplicados |
+
+### Decisiones
+
+- Los prompts de Innodays e Innobar reutilizan `headline` y `summary`: el contrato de salida del PROCESADOR_IA es cerrado.
+- La plantilla de Notiweb no lleva marcadores: el MAPEADOR_PLANTILLA los rechaza.
+- Los presets solo rellenan plantillas vacias.
+- Los botones de exportacion de telemetria salen del Panel de control; siguen en Informes.
+
+### Estado de las tareas
+
+- [x] Traslado por identidad y selector interpolable
+- [x] Paginas de los presets servidas por el backend
+- [x] Remitente visible y autor de respaldo
+- [x] PDF del Historial de Ejecuciones
+- [ ] Pendiente: aplicar 063 y 064 (`npm run db:migrate`)
+- [ ] Pendiente: corregir en `backend/.env` el UUID de Produccion de Cerrar licitacion, partido en dos lineas
