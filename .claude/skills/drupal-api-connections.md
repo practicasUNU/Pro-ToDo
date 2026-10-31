@@ -123,17 +123,27 @@ Crea una entidad independiente por cada noticia procesada.
     "type": "node--noticias",
     "attributes": {
       "title": "{{validated_drupal_json.headline}}",
-      "field_resumen": "{{validated_drupal_json.summary}}",
       "body": {
         "value": "{{validated_drupal_json.compiled_markup}}",
-        "format": "full_html"
+        "format": "full_html",
+        "summary": "{{validated_drupal_json.summary}}"
       },
-      "status": true
+      "status": false,
+      "field_autor": "{{parsed_email.from}}",
+      "field_fecha": "2026-10-29",
+      "field_orden": 1
+    },
+    "relationships": {
+      "field_noticia_seccion": { "data": { "type": "taxonomy_term--tax_seccion", "id": "<uuid-del-termino>" } },
+      "field_noticia_tipo": { "data": { "type": "taxonomy_term--tax_tipos_noticia", "id": "<uuid-del-termino>" } }
     }
   }
 }
 
 ```
+
+* **Resumen:** va en `body.summary`. El bundle de noticias no declara ningún `field_resumen`; enviarlo devuelve un 422.
+* **Campos de noticia:** `field_autor`, `field_fecha` (`AAAA-MM-DD`) y `field_orden` solo se envían a `node--noticias`. Cada taxonomía (`field_fuente_noticia`, `field_noticia_seccion`, `field_noticia_tipo`) viaja solo si su UUID está configurado.
 
 ### Modo B: `APPEND_HTML_BLOCK` (Abrir Licitación)
 

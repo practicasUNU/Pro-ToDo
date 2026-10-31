@@ -5063,3 +5063,36 @@ Rama: `feat/drupal-and-acens-nodes-dev`. Sin migracion.
 - [x] Publicacion bloqueada en Sandbox (interfaz y estrategia)
 - [x] Envoltorio estandar de licitaciones con expediente escapado
 - [ ] Pendiente: UUID de Innobar e Innodays en ambos entornos
+
+## Contenedor de destino, Notiweb en `body.summary`, paneles por texto y exportacion del Historial
+
+Rama: `feat/drupal-and-acens-nodes-dev`. Migracion `062`.
+
+### Contratos
+
+| Pieza | Contrato |
+|---|---|
+| `062-plantilla-apertura-envoltorio-licitacion.sql` | Anade `pd-licitacion-block` a la raiz del esqueleto de apertura por expresion regular (comillas simples o dobles, otras clases). Plantilla ausente: WARNING; raiz irreconocible: EXCEPTION. Sin marcadores `{{...}}` |
+| `DrupalHttpConfigDto.targetContainerSelector` | Solo `TRANSFER_HTML_BLOCK`. Contenedor del destino donde se inserta el bloque, segun `insertPosition`. Si no existe: `ERR_DRUPAL_DOM_TARGET` antes de cualquier PATCH |
+| `CREATE_NODE` | Resumen en `attributes.<bodyFieldName>.summary`; `field_resumen` desaparece. Con `node--noticias`: `field_autor`, `field_fecha` (fecha `YYYY-MM-DD`) y `field_orden` (por defecto 1), y las relaciones `field_fuente_noticia`, `field_noticia_seccion`, `field_noticia_tipo` solo si su UUID esta configurado |
+| `NEWS_TAXONOMY_TYPES` | `taxonomy_term--fuente_noticia`, `taxonomy_term--tax_seccion`, `taxonomy_term--tax_tipos_noticia` |
+| `linkSelector` interpolable | Cada valor pasa por `escapeSelectorString` (espacios colapsados, reservados de CSS escapados) antes de entrar en el selector |
+| Despacho de paneles | Si el sub-acordeon resuelto no existe, se busca el encabezado de primer nivel por texto normalizado y se sigue su `href`. Nunca se acepta el panel de otra universidad del catalogo |
+| `DRUPAL_PRODUCTION_*_UUID` | Paginas de Produccion; con `isSandbox: true` la estrategia se niega a escribir en ellas |
+| `GET /executions/export/csv` | ADMIN y EDITOR. Mismos filtros y orden que el listado, sin paginacion, con tope de filas |
+
+### Decisiones
+
+- Se mantiene `ERR_DRUPAL_DOM_TARGET`: las rutas `onErrorStep` leen el codigo, y renombrarlo romperia flujos guardados.
+- ESIC no se resuelve nunca al panel de Francisco de Vitoria (ver migracion 038).
+- Los UUID de taxonomia son valores fijos del nodo, escritos por el operador; no se inventan.
+
+### Estado de las tareas
+
+- [x] Fase 0: esquema de `node--noticias` leido en Sandbox, migracion 062 validada en seco
+- [x] Estrategia, DTO y configuracion de entornos
+- [x] Interfaz del nodo Drupal y selector de variables (`VariableInsertButton`)
+- [x] Ejemplo envuelto de «Abrir licitación» en el Banco de Pruebas
+- [x] Exportacion del Historial de Ejecuciones
+- [ ] Pendiente: aplicar la 062 (`npm run db:migrate`)
+- [ ] Pendiente: declarar los UUID de Produccion e Innobar en `backend/.env` y reiniciar Nest

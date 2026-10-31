@@ -9231,3 +9231,47 @@ La plantilla de apertura ya emite `div.licitacion-entry` con su `data-expediente
 vez solo anadiria un nivel; basta con darle la clase estandar. Cerrar licitacion busca las dos
 clases para seguir encontrando las licitaciones antiguas. El expediente se escapa porque un codigo
 con comillas cerraria el atributo y dejaria el resto como marcado.
+
+## Contenedor de destino, Notiweb y paneles por texto
+
+### Por que la migracion 062 no siembra marcadores
+
+El MAPEADOR_PLANTILLA rechaza cualquier plantilla con variables pendientes. Las plantillas dinamicas
+del destino Drupal viven en los params del nodo, que es donde se interpolan; la plantilla HTML solo
+gana la clase que Cerrar licitacion busca.
+
+### Por que la 062 busca la plantilla por prefijo y por expresion regular
+
+El nombre y el marcado se editan desde el gestor: la plantilla ya no se llama como la sembro la 028.
+Un WHERE por igualdad o un REPLACE literal habrian dejado 0 filas cambiadas y la migracion
+"aplicada". Si la plantilla no existe se avisa y se sigue; si existe y no se reconoce, se aborta.
+
+### Por que el resumen va en `body.summary`
+
+El bundle de noticias no declara ningun campo de resumen propio: el cuerpo es un texto con resumen.
+Enviar el resumen aparte provocaba un 422 en cuanto se configuraba.
+
+### Por que el selector del enlace escapa cada valor y no la plantilla
+
+Interpolar la plantilla entera y escaparla despues romperia la sintaxis que escribio el operador
+(`:contains('...')`). Se resuelve marca a marca y solo el valor se escapa: un nombre de evento con
+parentesis o comillas casa como texto literal y no puede abrir otra clausula del selector.
+
+### Por que ESIC se busca por el texto del encabezado y nunca por UFV
+
+El panel de ESIC ha aparecido con el colapsable `#collapseUFV`, y Francisco de Vitoria comparte
+pagina. El encabezado se busca por su texto, el `href` se resuelve dentro de su propio panel y se
+descarta cualquier encabezado que nombre a otra universidad: un identificador repetido no puede
+mandar un comite al acordeon ajeno.
+
+### Por que el borrador y la lista negra solo miran el entorno guardado
+
+Los flujos sin la clave `isSandbox` se resuelven a Sandbox por defecto y apuntan a paginas reales.
+Negarles su pagina de Produccion los romperia; la red de seguridad solo actua cuando el entorno
+esta escrito en el esquema.
+
+### Checklist de dependencias
+
+- [ ] Aplicar la 062
+- [x] Seccion y tipo de Notiweb prefijados en el preset; la fuente queda a cargo del operador
+- [ ] Declarar los UUID de Produccion en `backend/.env` y reiniciar Nest
