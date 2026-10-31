@@ -17,7 +17,7 @@ import {
   QTooltip,
   Quasar,
 } from 'quasar';
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import DrupalHttpConfig from '@components/nodes/DrupalHttpConfig.vue';
 import { NODE_SANDBOX_MODE_KEY } from '@components/nodes/node-sandbox-mode';
@@ -26,8 +26,19 @@ import { useDrupalHttpStore } from '@stores/nodes/drupal-http.store';
 
 import { NodeType } from '@/types/pipeline';
 import { DRUPAL_PRESETS, DrupalOperationMode } from '@/types/nodes/drupal-http.types';
+import { fetchDrupalPresetTargets } from '@services/nodes/drupal-http.service';
+import {
+  DRUPAL_PRESET_TARGETS_FIXTURE,
+  SANDBOX_LICITACIONES_UUID,
+  SANDBOX_TITULOS_UUID,
+} from '@/testing/drupal-preset-targets.fixture';
 
 import type { UpstreamNamespace } from '@stores/nodes/node-store-registry';
+
+// `@boot/axios` importa `#q-app`, que no existe fuera de Quasar.
+vi.mock('@services/nodes/drupal-http.service', () => ({
+  fetchDrupalPresetTargets: vi.fn(),
+}));
 
 /** `nodeId` unico por prueba: las definiciones de Pinia se memoizan por modulo. */
 let nodeCounter = 0;
@@ -65,8 +76,21 @@ const UPSTREAM: UpstreamNamespace[] = [
   },
 ];
 
-const mountComponent = (nodeId: string, inSandbox = false): ReturnType<typeof mount> =>
-  mount(DrupalHttpConfig, {
+/**
+ * Monta el configurador. Por defecto con las paginas de los destinos rapidos YA
+ * cargadas en el store, para que un clic en un preset no dependa de una promesa
+ * pendiente; las pruebas de la carga en si pasan `preloadTargets: false`.
+ */
+const mountComponent = (
+  nodeId: string,
+  inSandbox = false,
+  preloadTargets = true,
+): ReturnType<typeof mount> => {
+  if (preloadTargets) {
+    useDrupalHttpStore(nodeId).presetTargets = DRUPAL_PRESET_TARGETS_FIXTURE;
+  }
+
+  return mount(DrupalHttpConfig, {
     props: { nodeId },
     // `Notify` se instala explicitamente: los botones de preset acusan recibo
     // con `$q.notify`, y sin el plugin `useQuasar()` devuelve un `$q` sin ese
@@ -78,6 +102,7 @@ const mountComponent = (nodeId: string, inSandbox = false): ReturnType<typeof mo
       provide: inSandbox ? { [NODE_SANDBOX_MODE_KEY as symbol]: true } : {},
     },
   });
+};
 
 /**
  * El control de un campo, localizado por el `data-test` de su CONTENEDOR.
@@ -514,9 +539,7 @@ describe('DrupalHttpConfig · configurador del nodo DESTINO_DRUPAL', () => {
     await flushNotifications();
 
     // 3. Assert 🎯
-    expect(store.config.targetNodeUuid).toBe(
-      DRUPAL_PRESETS.ABRIR_LICITACION.environments.SANDBOX.targetNodeUuid,
-    );
+    expect(store.config.targetNodeUuid).toBe(SANDBOX_LICITACIONES_UUID);
     expect(store.config.bundle).toBe('node--page');
     expect(store.config.operationMode).toBe(DrupalOperationMode.APPEND_HTML_BLOCK);
   });
@@ -532,9 +555,7 @@ describe('DrupalHttpConfig · configurador del nodo DESTINO_DRUPAL', () => {
     await flushNotifications();
 
     // 3. Assert 🎯
-    expect(store.config.targetNodeUuid).toBe(
-      DRUPAL_PRESETS.VERIFICACION_TITULOS.environments.SANDBOX.targetNodeUuid,
-    );
+    expect(store.config.targetNodeUuid).toBe(SANDBOX_TITULOS_UUID);
     expect(store.config.bundle).toBe('node--page');
     expect(store.config.operationMode).toBe(DrupalOperationMode.APPEND_HTML_BLOCK);
   });
@@ -848,6 +869,86 @@ describe('DrupalHttpConfig · configurador del nodo DESTINO_DRUPAL', () => {
           wrapper.find(`[data-test="${testId}"]`).findComponent(VariableInsertButton).exists(),
         ).toBe(true);
       }
+    });
+  });
+
+  describe('8. Paginas del backend, traslado y autor de respaldo', () => {
+    it('8.1 deberia pedir las paginas al montar y rellenar el preset con ellas', async () => {
+      // 1. Arrange 📐: sin precarga, como en la aplicacion real.
+      vi.mocked(fetchDrupalPresetTargets).mockClear();
+      vi.mocked(fetchDrupalPresetTargets).mockResolvedValue(DRUPAL_PRESET_TARGETS_FIXTURE);
+      const nodeId = nextNodeId();
+      const wrapper = mountComponent(nodeId, false, false);
+      await flushNotifications();
+
+      // 2. Act ⚙️
+      await wrapper.get('[data-test="preset-verificacion_titulos"]').trigger('click');
+
+      // 3. Assert 🎯
+      expect(fetchDrupalPresetTargets).toHaveBeenCalledTimes(1);
+      expect(useDrupalHttpStore(nodeId).config.targetNodeUuid).toBe(SANDBOX_TITULOS_UUID);
+    });
+
+    it('8.2 deberia avisar si no se pueden cargar las paginas, sin bloquear el formulario', async () => {
+      // 1. Arrange 📐
+      vi.mocked(fetchDrupalPresetTargets).mockRejectedValue(new Error('503'));
+      const before = notificationSnapshot().length;
+
+      // 2. Act ⚙️
+      const wrapper = mountComponent(nextNodeId(), false, false);
+      await flushNotifications();
+
+      // 3. Assert 🎯
+      const fresh = notificationSnapshot().slice(before);
+      expect(fresh.some((node) => node.textContent?.includes('No se pudieron cargar'))).toBe(true);
+      expect(wrapper.find('[data-test="preset-abrir_licitacion"]').exists()).toBe(true);
+    });
+
+    it('8.3 deberia dejar elegir la posicion de insercion tambien en el traslado', async () => {
+      // 1. Arrange 📐
+      const nodeId = nextNodeId();
+      const wrapper = mountComponent(nodeId);
+      const store = useDrupalHttpStore(nodeId);
+
+      // 2. Act ⚙️
+      store.applyCerrarLicitacionPreset();
+      await wrapper.vm.$nextTick();
+      wrapper
+        .get('[data-test="insert-position-field"]')
+        .findComponent(QSelect)
+        .vm.$emit('update:model-value', 'APPEND');
+      await wrapper.vm.$nextTick();
+
+      // 3. Assert 🎯: PREPEND por defecto en el preset, APPEND al elegirlo.
+      expect(store.config.insertPosition).toBe('APPEND');
+      expect(store.toNodeParams()).toMatchObject({ insertPosition: 'APPEND' });
+    });
+
+    it('8.4 deberia ofrecer variables en el selector del bloque a trasladar', async () => {
+      const nodeId = nextNodeId();
+      const wrapper = mountComponent(nodeId);
+
+      useDrupalHttpStore(nodeId).applyCerrarLicitacionPreset();
+      await wrapper.vm.$nextTick();
+
+      expect(
+        wrapper
+          .get('[data-test="item-selector-field"]')
+          .findComponent(VariableInsertButton)
+          .exists(),
+      ).toBe(true);
+    });
+
+    it('8.5 deberia pintar el autor de respaldo de Notiweb con su valor del preset', async () => {
+      const nodeId = nextNodeId();
+      const wrapper = mountComponent(nodeId);
+
+      useDrupalHttpStore(nodeId).applyNotiwebPreset();
+      await wrapper.vm.$nextTick();
+
+      expect(wrapper.get('[data-test="author-fallback-field"]').find('input').element.value).toBe(
+        'Madrid+D',
+      );
     });
   });
 });

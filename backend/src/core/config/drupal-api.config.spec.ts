@@ -176,4 +176,96 @@ describe('DrupalApiConfig', () => {
       expect(config.timeoutMs).toBe(15_000);
     });
   });
+
+  describe('5. Paginas de los destinos rapidos (presetTargets)', () => {
+    const LICITACIONES = '7f1700bf-b54b-4c12-b71a-8a71f1f0ee38';
+    const CERRADAS = 'a1b2c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d';
+    const INNODAYS = '3c2b1a0f-9e8d-4c7b-8a69-5f4e3d2c1b0a';
+    const INNOBAR = '9f8e7d6c-5b4a-4392-8f1e-2d3c4b5a6978';
+
+    it('5.1 deberia leer origen, destino y NID de Cerrar licitacion en pruebas', () => {
+      // 1. Arrange 📐
+      const config = buildConfig({
+        DRUPAL_SANDBOX_LICITACIONES_UUID: LICITACIONES.toUpperCase(),
+        DRUPAL_SANDBOX_LICITACIONES_NID: ' 55937 ',
+        DRUPAL_SANDBOX_LICITACIONES_CERRADAS_UUID: CERRADAS,
+      });
+
+      // 2. Act ⚙️
+      const { SANDBOX } = config.presetTargets;
+
+      // 3. Assert 🎯: abrir y cerrar comparten la pagina de abiertas.
+      expect(SANDBOX.CERRAR_LICITACION).toEqual({
+        targetNodeUuid: LICITACIONES,
+        destinationNodeUuid: CERRADAS,
+        nid: 55937,
+      });
+      expect(SANDBOX.ABRIR_LICITACION).toEqual({
+        targetNodeUuid: LICITACIONES,
+        destinationNodeUuid: null,
+        nid: 55937,
+      });
+    });
+
+    it('5.2 deberia usar la pagina de pruebas de Innodays para Innobar si no tiene la suya', () => {
+      // 1. Arrange 📐: el NID de Innobar suelto NO debe mezclarse con el UUID
+      //    de Innodays.
+      const config = buildConfig({
+        DRUPAL_SANDBOX_INNODAYS_UUID: INNODAYS,
+        DRUPAL_SANDBOX_INNODAYS_NID: '60001',
+        DRUPAL_SANDBOX_INNOBAR_NID: '60002',
+      });
+
+      // 2. Act ⚙️ + 3. Assert 🎯
+      expect(config.presetTargets.SANDBOX.INNOBAR).toEqual({
+        targetNodeUuid: INNODAYS,
+        destinationNodeUuid: null,
+        nid: 60001,
+      });
+    });
+
+    it('5.3 deberia preferir la pagina propia de Innobar cuando esta declarada', () => {
+      const config = buildConfig({
+        DRUPAL_SANDBOX_INNODAYS_UUID: INNODAYS,
+        DRUPAL_SANDBOX_INNOBAR_UUID: INNOBAR,
+      });
+
+      expect(config.presetTargets.SANDBOX.INNOBAR.targetNodeUuid).toBe(INNOBAR);
+    });
+
+    it('5.4 deberia tratar un UUID partido o un NID no numerico como no declarados', () => {
+      // 1. Arrange 📐: el UUID quedo partido en dos lineas del `.env`.
+      const config = buildConfig({
+        DRUPAL_PRODUCTION_ABRIR_LICITACION_UUID: LICITACIONES,
+        DRUPAL_PRODUCTION_CERRAR_LICITACION_UUID: 'a1b2c3d4-e5f6-4a7',
+        DRUPAL_PRODUCTION_ABRIR_LICITACION_NID: '12a',
+      });
+
+      // 2. Act ⚙️
+      const { PRODUCTION } = config.presetTargets;
+
+      // 3. Assert 🎯
+      expect(PRODUCTION.CERRAR_LICITACION).toEqual({
+        targetNodeUuid: LICITACIONES,
+        destinationNodeUuid: null,
+        nid: null,
+      });
+    });
+
+    it('5.5 deberia dejar Notiweb sin pagina y NO aplicar el respaldo de Innobar en el portal', () => {
+      const config = buildConfig({
+        DRUPAL_PRODUCTION_INNODAYS_UUID: INNODAYS,
+      });
+
+      const { PRODUCTION, SANDBOX } = config.presetTargets;
+
+      expect(PRODUCTION.INNOBAR.targetNodeUuid).toBeNull();
+      expect(PRODUCTION.NOTIWEB).toEqual({
+        targetNodeUuid: null,
+        destinationNodeUuid: null,
+        nid: null,
+      });
+      expect(SANDBOX.NOTIWEB.targetNodeUuid).toBeNull();
+    });
+  });
 });

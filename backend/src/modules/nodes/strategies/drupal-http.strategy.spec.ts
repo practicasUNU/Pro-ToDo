@@ -490,6 +490,56 @@ describe('DrupalHttpStrategy', () => {
       });
     });
 
+    it.each([
+      ['el nombre del remitente', 'Juan Pérez', 'Juan Pérez'],
+      ['el respaldo si el remitente no trae nombre', '', 'Madrid+D'],
+    ])(
+      '1.4bis.%# deberia publicar como autor %s',
+      async (_case, fromName, expected) => {
+        // 1. Arrange 📐
+        const httpClient = buildHttpMock();
+        httpClient.requestWithStatus.mockResolvedValue(entityResponse());
+        const strategy = buildStrategy(httpClient);
+
+        // 2. Act ⚙️
+        await strategy.execute(
+          buildContext({
+            [SOURCE_NAMESPACE]: { [SOURCE_FIELD]: MARKUP },
+            raw_email: { from_name: fromName },
+          }),
+          {
+            bundle: 'node--noticias',
+            titleTemplate: 'Titular',
+            authorTemplate: '{{raw_email.from_name}}',
+            authorFallback: 'Madrid+D',
+          },
+        );
+
+        // 3. Assert 🎯
+        expect(callBody(httpClient, 0).data?.attributes).toMatchObject({
+          field_autor: expected,
+        });
+      },
+    );
+
+    it('1.4bis.3 deberia dejar el autor a null sin nombre ni respaldo', async () => {
+      const httpClient = buildHttpMock();
+      httpClient.requestWithStatus.mockResolvedValue(entityResponse());
+      const strategy = buildStrategy(httpClient);
+
+      await strategy.execute(
+        buildContext({
+          [SOURCE_NAMESPACE]: { [SOURCE_FIELD]: MARKUP },
+          raw_email: { from_name: '' },
+        }),
+        { titleTemplate: 'Titular', authorTemplate: '{{raw_email.from_name}}' },
+      );
+
+      expect(callBody(httpClient, 0).data?.attributes).toMatchObject({
+        field_autor: null,
+      });
+    });
+
     it('1.4ter NO deberia enviar los campos de Notiweb a otro bundle', async () => {
       // 1. Arrange 📐: un atributo que el bundle no declara es un 422.
       const httpClient = buildHttpMock();
@@ -1509,6 +1559,176 @@ describe('DrupalHttpStrategy', () => {
       expect(result.error?.code).toBe(ERR_DRUPAL_DOM_TARGET);
       expect(result.error?.missingFields).toEqual(['#collapse2 > .panel-body']);
       expect(httpClient.requestWithStatus).toHaveBeenCalledTimes(2);
+    });
+
+    it('3.0ter deberia nombrar la pagina de destino cuando le falta el contenedor', async () => {
+      // 1. Arrange 📐
+      const httpClient = buildHttpMock();
+      httpClient.requestWithStatus
+        .mockResolvedValueOnce(pageResponse(BLOCK + OTHER_BLOCK, PAGE_UUID))
+        .mockResolvedValueOnce(
+          pageResponse('<p>Otra</p>', CLOSED_UUID, 55_938),
+        );
+      const strategy = buildStrategy(httpClient);
+
+      // 2. Act ⚙️
+      const result = await strategy.execute(buildContext(), {
+        ...transferParams,
+        targetContainerSelector: '#collapse2 > .panel-body',
+      });
+
+      // 3. Assert 🎯: que pagina, que contenedor y que el bloque sigue en origen.
+      expect(result.error?.message).toContain(CLOSED_UUID);
+      expect(result.error?.message).toContain('#collapse2 > .panel-body');
+      expect(result.error?.message).toContain(
+        'el bloque sigue en la de origen',
+      );
+    });
+
+    describe('3.0quater Identidad del bloque trasladado', () => {
+      const GENERIC = '.pd-licitacion-block, .licitacion-entry';
+      const tender = (code: string, text: string): string =>
+        `<div class="pd-licitacion-block" data-expediente="${code}"><p>${text}</p></div>`;
+      const CLOSED_PAGE =
+        '<div id="collapse2"><div class="panel-body">' +
+        tender('S_2025_090', 'Cerrada hace tiempo') +
+        '</div></div>';
+
+      const sentBody = (httpClient: HttpMock, index: number): string =>
+        (
+          (
+            callBody(httpClient, index).data?.attributes as Record<
+              string,
+              unknown
+            >
+          ).body as Record<string, string>
+        ).value;
+
+      it('should write the block to the destination even if it already holds other tenders when the selector is generic', async () => {
+        // 1. Arrange 📐: LA AVERIA. Cerradas ya tenia una licitacion, el
+        //    selector generico casaba en destino y el traslado se daba por
+        //    hecho: se retiraba de origen sin escribirse en destino.
+        const httpClient = buildHttpMock();
+        httpClient.requestWithStatus
+          .mockResolvedValueOnce(
+            pageResponse(tender('S_2026_015', 'Abierta'), PAGE_UUID),
+          )
+          .mockResolvedValueOnce(pageResponse(CLOSED_PAGE, CLOSED_UUID, 55_938))
+          .mockResolvedValueOnce(pageResponse('', CLOSED_UUID, 55_938))
+          .mockResolvedValueOnce(pageResponse('', PAGE_UUID));
+        const strategy = buildStrategy(httpClient);
+
+        // 2. Act ⚙️
+        const result = await strategy.execute(buildContext(), {
+          ...transferParams,
+          itemSelector: GENERIC,
+          targetContainerSelector: '#collapse2 > .panel-body',
+        });
+
+        // 3. Assert 🎯: PRIMERO destino con el bloque, DESPUES origen sin el.
+        expect(result.success).toBe(true);
+        expect(callConfig(httpClient, 2).url).toContain(CLOSED_UUID);
+        expect(sentBody(httpClient, 2)).toContain(
+          'data-expediente="S_2026_015"',
+        );
+        expect(sentBody(httpClient, 2)).toContain('S_2025_090');
+        expect(callConfig(httpClient, 3).url).toContain(PAGE_UUID);
+        expect(sentBody(httpClient, 3)).not.toContain('S_2026_015');
+      });
+
+      it('3.0quater.2 NO deberia dar por hecho el traslado con un selector generico y el origen vacio', async () => {
+        // 1. Arrange 📐: no hay nada que cerrar en abiertas.
+        const httpClient = buildHttpMock();
+        httpClient.requestWithStatus
+          .mockResolvedValueOnce(
+            pageResponse('<p>Sin licitaciones</p>', PAGE_UUID),
+          )
+          .mockResolvedValueOnce(
+            pageResponse(CLOSED_PAGE, CLOSED_UUID, 55_938),
+          );
+        const strategy = buildStrategy(httpClient);
+
+        // 2. Act ⚙️
+        const result = await strategy.execute(buildContext(), {
+          ...transferParams,
+          itemSelector: GENERIC,
+        });
+
+        // 3. Assert 🎯: error explicito y ningun PATCH.
+        expect(result.success).toBe(false);
+        expect(result.error?.code).toBe(ERR_DRUPAL_DOM_TARGET);
+        expect(result.error?.message).toContain(PAGE_UUID);
+        expect(httpClient.requestWithStatus).toHaveBeenCalledTimes(2);
+      });
+
+      it('3.0quater.3 deberia cerrar el expediente que pide el contexto y no el primero de la pagina', async () => {
+        // 1. Arrange 📐: el elegido es el SEGUNDO de abiertas.
+        const httpClient = buildHttpMock();
+        httpClient.requestWithStatus
+          .mockResolvedValueOnce(
+            pageResponse(
+              tender('S_2026_001', 'Primera') + tender('S_2026_015', 'Elegida'),
+              PAGE_UUID,
+            ),
+          )
+          .mockResolvedValueOnce(pageResponse('', CLOSED_UUID, 55_938))
+          .mockResolvedValueOnce(pageResponse('', CLOSED_UUID, 55_938))
+          .mockResolvedValueOnce(pageResponse('', PAGE_UUID));
+        const strategy = buildStrategy(httpClient);
+
+        // 2. Act ⚙️
+        const result = await strategy.execute(
+          buildContext({ llm_response: { headline: 'S_2026_015' } }),
+          {
+            ...transferParams,
+            itemSelector: '[data-expediente="{{llm_response.headline}}"]',
+          },
+        );
+
+        // 3. Assert 🎯
+        expect(result.success).toBe(true);
+        expect(sentBody(httpClient, 2)).toContain('Elegida');
+        expect(sentBody(httpClient, 2)).not.toContain('Primera');
+        expect(sentBody(httpClient, 3)).toContain('Primera');
+      });
+
+      it('3.0quater.4 deberia exigir el namespace citado en el selector del bloque', () => {
+        const strategy = buildStrategy(buildHttpMock());
+
+        expect(
+          strategy.getRequiredNamespaces({
+            ...transferParams,
+            itemSelector: '[data-expediente="{{llm_response.headline}}"]',
+          }),
+        ).toEqual(['llm_response']);
+      });
+
+      it.each([
+        ['itemSelector', { itemSelector: 'div:nope' }, 1],
+        ['targetContainerSelector', { targetContainerSelector: 'a >> b' }, 2],
+      ])(
+        '3.0quater.5 deberia convertir un %s invalido en ERR_DRUPAL_DOM_TARGET sin escribir',
+        async (_param, override, reads) => {
+          // 1. Arrange 📐: cheerio LANZA con estos selectores; antes la
+          //    excepcion salia de la estrategia y el motor la hacia URGENTE.
+          const httpClient = buildHttpMock();
+          httpClient.requestWithStatus
+            .mockResolvedValueOnce(pageResponse(BLOCK + OTHER_BLOCK, PAGE_UUID))
+            .mockResolvedValueOnce(pageResponse('', CLOSED_UUID, 55_938));
+          const strategy = buildStrategy(httpClient);
+
+          // 2. Act ⚙️
+          const result = await strategy.execute(buildContext(), {
+            ...transferParams,
+            ...override,
+          });
+
+          // 3. Assert 🎯: solo lecturas, ninguna escritura.
+          expect(result.success).toBe(false);
+          expect(result.error?.code).toBe(ERR_DRUPAL_DOM_TARGET);
+          expect(httpClient.requestWithStatus).toHaveBeenCalledTimes(reads);
+        },
+      );
     });
 
     it('3.1 deberia escribir PRIMERO en destino y DESPUES retirar de origen', async () => {

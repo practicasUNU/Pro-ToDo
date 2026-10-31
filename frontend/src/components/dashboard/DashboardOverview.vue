@@ -7,7 +7,6 @@ import { useTelemetryStore } from '@stores/telemetry.store';
 import { usePanelRefresh } from '@/composables/usePanelRefresh';
 
 import ExecutionsHistoryTable from '@components/dashboard/ExecutionsHistoryTable.vue';
-import ExportReportBar from '@components/dashboard/ExportReportBar.vue';
 import TelemetryCostChart from '@components/dashboard/TelemetryCostChart.vue';
 import TelemetryModelSuccessChart from '@components/dashboard/TelemetryModelSuccessChart.vue';
 import TelemetrySummaryCards from '@components/dashboard/TelemetrySummaryCards.vue';
@@ -17,8 +16,9 @@ import { defaultDateRange } from '@/utils/date-range';
 
 /**
  * Panel principal: KPIs de consumo de IA de los ultimos 30 dias, coste por
- * modelo y las ultimas ejecuciones. El analisis con rango y detalle completo
- * vive en Informes, enlazado desde la cabecera.
+ * modelo y las ultimas ejecuciones. El analisis con rango y detalle completo,
+ * y sus exportaciones, viven en Informes (menu lateral); la cabecera del panel
+ * solo titula. El historial exporta su propio CSV/PDF con sus filtros.
  */
 const $q = useQuasar();
 const telemetryStore = useTelemetryStore();
@@ -48,25 +48,11 @@ usePanelRefresh(loadDashboard, { onFlowCompleted: true });
 
 <template>
   <div class="pd-dashboard">
-    <header class="pd-dashboard__header">
-      <div>
-        <h1 class="pd-h1">Panel de control</h1>
-        <p class="pd-subtitle pd-text-secondary">
-          Consumo de IA y actividad de los flujos en los últimos 30 días.
-        </p>
-      </div>
-      <div class="pd-dashboard__actions">
-        <q-btn
-          class="pd-btn-secondary"
-          flat
-          no-caps
-          icon="assessment"
-          label="Ver informes"
-          to="/informes"
-          data-test="go-reports"
-        />
-        <ExportReportBar />
-      </div>
+    <header class="pd-dashboard__header" data-test="dashboard-header">
+      <h1 class="pd-h1">Panel de control</h1>
+      <p class="pd-subtitle pd-text-secondary">
+        Consumo de IA y actividad de los flujos en los últimos 30 días.
+      </p>
     </header>
 
     <TelemetrySummaryCards
@@ -106,14 +92,6 @@ usePanelRefresh(loadDashboard, { onFlowCompleted: true });
   gap: 16px;
 }
 
-.pd-dashboard__header {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 16px;
-  flex-wrap: wrap;
-}
-
 .pd-dashboard__header .pd-h1 {
   margin: 0;
 }
@@ -124,12 +102,5 @@ usePanelRefresh(loadDashboard, { onFlowCompleted: true });
 
 .pd-dashboard__chart {
   height: 100%;
-}
-
-.pd-dashboard__actions {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-  align-items: center;
 }
 </style>

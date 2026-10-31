@@ -17,6 +17,7 @@ import { WorkflowsModule } from '@modules/workflows/workflows.module';
 
 import { BrowserModule } from './browser.module';
 import { NodeCatalogEntry } from './entities/node-catalog.entity';
+import { DrupalTargetsController } from './controllers/drupal-targets.controller';
 import { LlmCatalogController } from './controllers/llm-catalog.controller';
 import { NodeCatalogController } from './controllers/node-catalog.controller';
 import { CronSchedulingService } from './services/cron-scheduling.service';
@@ -104,6 +105,7 @@ import type { OnModuleInit } from '@nestjs/common';
   ],
   controllers: [
     NodeCatalogController,
+    DrupalTargetsController,
     LlmCatalogController,
     NodeSandboxController,
   ],

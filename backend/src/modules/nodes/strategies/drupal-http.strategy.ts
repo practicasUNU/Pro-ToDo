@@ -18,7 +18,12 @@ import {
   resolvePanelContainer,
 } from './drupal-universities';
 import { selectVisibleTarget } from '../utils/visible-target.util';
-import { wrapTenderBlock } from '../utils/tender-block.util';
+import {
+  expedienteSelector,
+  readExpediente,
+  selectorPinsExpediente,
+  wrapTenderBlock,
+} from '../utils/tender-block.util';
 import {
   escapeSelectorString,
   isSafeLinkValue,
@@ -42,7 +47,8 @@ import type {
 import type { HttpClientStatusOutcome } from '@core/http/http-client.service';
 import type { PanelDispatch } from './drupal-universities';
 import type { ResolvedDrupalHttpConfig } from '../dto/drupal-http-config.dto';
-import type { CheerioAPI } from 'cheerio';
+import type { Cheerio, CheerioAPI } from 'cheerio';
+import type { AnyNode } from 'domhandler';
 import type { ValidatorOptions } from 'class-validator';
 
 /**
@@ -94,6 +100,27 @@ const NEUTRAL_STATUS = 0;
 /** Dia ISO al principio de un valor: `2026-10-29` o `2026-10-29T08:00:00Z`. */
 const ISO_DAY_PATTERN =
   /^(\d{4}-\d{2}-\d{2})(?:[T ][\d:.]+(?:Z|[+-]\d{2}:?\d{2})?)?$/;
+
+/** Primera letra en mayuscula, para abrir un mensaje con un fragmento. */
+const capitalize = (text: string): string =>
+  text.charAt(0).toUpperCase() + text.slice(1);
+
+/**
+ * Coincidencias de un selector, o `null` si cheerio no sabe leerlo.
+ *
+ * Un selector invalido LANZA, y una excepcion que sale de la estrategia la
+ * normaliza el motor a URGENTE, que no se reintenta nunca.
+ */
+const querySelectorSafely = (
+  $: CheerioAPI,
+  selector: string,
+): Cheerio<AnyNode> | null => {
+  try {
+    return $(selector);
+  } catch {
+    return null;
+  }
+};
 
 /** Texto recortado, o `null` si no hay texto: Drupal guarda `null`, no `""`. */
 const emptyToNull = (value: string | null): string | null => {
@@ -378,6 +405,7 @@ export class DrupalHttpStrategy extends BaseHttpDestinationStrategy {
       config.linkSelector,
       config.linkValueTemplate,
       config.expedienteTemplate,
+      config.itemSelector,
     ]) {
       if (template !== null) {
         for (const root of extractNamespaceRoots(template)) {
@@ -545,7 +573,7 @@ export class DrupalHttpStrategy extends BaseHttpDestinationStrategy {
         return this.runAppendHtmlBlock(context, config);
 
       case DrupalOperationMode.TRANSFER_HTML_BLOCK:
-        return this.runTransferHtmlBlock(config);
+        return this.runTransferHtmlBlock(context, config);
 
       case DrupalOperationMode.UPDATE_LINK_SOURCE:
         return this.runUpdateLinkSource(context, config);
@@ -919,13 +947,22 @@ export class DrupalHttpStrategy extends BaseHttpDestinationStrategy {
    *
    * JSON:API no ofrece transaccion multi-entidad, asi que la ventana no se
    * puede eliminar. Solo se puede elegir de que lado cae.
+   *
+   * LA IDEMPOTENCIA SE DECIDE POR IDENTIDAD, no por el selector. Antes,
+   * «ya trasladado» era «el `itemSelector` casa en destino», y con el selector
+   * generico del preset (`.pd-licitacion-block, .licitacion-entry`) la pagina
+   * de cerradas casaba SIEMPRE por las licitaciones que ya tenia: se saltaba la
+   * escritura en destino, se retiraba el bloque de origen y el nodo terminaba
+   * EXITOSO con la licitacion perdida. Ahora solo cuenta el `data-expediente`
+   * del bloque concreto; sin expediente se escribe siempre, y lo peor que puede
+   * pasar es un duplicado visible.
    */
   private async runTransferHtmlBlock(
+    context: StatePayloadContext,
     config: ResolvedDrupalHttpConfig,
   ): Promise<NodeResult> {
     const sourceUuid = config.targetNodeUuid;
     const destinationUuid = config.destinationNodeUuid;
-    const selector = config.itemSelector;
 
     if (sourceUuid === null) {
       return this.missingParam('targetNodeUuid');
@@ -933,8 +970,16 @@ export class DrupalHttpStrategy extends BaseHttpDestinationStrategy {
     if (destinationUuid === null) {
       return this.missingParam('destinationNodeUuid');
     }
-    if (selector === null) {
+    if (config.itemSelector === null) {
       return this.missingParam('itemSelector');
+    }
+
+    // Interpolable para poder cerrar UNA licitacion concreta
+    // (`[data-expediente="{{llm_response.headline}}"]`); cada valor se escapa.
+    const selector = this.interpolateSelector(context, config.itemSelector);
+
+    if (typeof selector !== 'string') {
+      return { success: false, error: selector };
     }
 
     // --- 1. Origen: localizar y aislar el bloque.
@@ -945,7 +990,13 @@ export class DrupalHttpStrategy extends BaseHttpDestinationStrategy {
     }
 
     const sourceDom = loadFragment(source.node.bodyHtml);
-    const block = sourceDom(selector).first();
+    const sourceMatches = querySelectorSafely(sourceDom, selector);
+
+    if (sourceMatches === null) {
+      return this.invalidSelector(selector, 'itemSelector');
+    }
+
+    const block = sourceMatches.first();
 
     const destination = await this.fetchNode(destinationUuid, config);
 
@@ -954,13 +1005,19 @@ export class DrupalHttpStrategy extends BaseHttpDestinationStrategy {
     }
 
     const destinationDom = loadFragment(destination.node.bodyHtml);
-    const alreadyMoved = destinationDom(selector).length > 0;
 
     if (block.length === 0) {
-      // No esta en origen. Si YA esta en destino, un intento anterior llego a
-      // completarse: el trabajo esta hecho y repetirlo no tiene sentido. Es la
-      // mitad de la idempotencia que hace seguro reintentar este nodo.
-      if (alreadyMoved) {
+      // No esta en origen. Solo es «ya trasladado» si el selector nombra UN
+      // expediente y ese esta en destino: un intento anterior llego a
+      // completarse y repetirlo no tiene sentido. Con un selector generico,
+      // que destino case no prueba nada —la pagina de cerradas siempre tiene
+      // licitaciones—, y dar el traslado por hecho ocultaria que no habia nada
+      // que mover.
+      const alreadyCompleted =
+        selectorPinsExpediente(selector) &&
+        (querySelectorSafely(destinationDom, selector)?.length ?? 0) > 0;
+
+      if (alreadyCompleted) {
         return {
           success: true,
           data: this.buildPayload(
@@ -981,13 +1038,21 @@ export class DrupalHttpStrategy extends BaseHttpDestinationStrategy {
         error: {
           level: 'GRAVE',
           code: ERR_DRUPAL_DOM_TARGET,
-          message: `El selector "${selector}" no encuentra ningun bloque ni en la pagina de origen (${sourceUuid}) ni en la de destino (${destinationUuid}). No se ha modificado nada.`,
+          message: `El selector "${selector}" no encuentra ningun bloque que trasladar en la pagina de origen (${sourceUuid}). No se ha modificado ninguna pagina.`,
           missingFields: [selector],
         },
       };
     }
 
     const blockHtml = sourceDom.html(block);
+    const expediente = readExpediente(block);
+
+    // Identidad del bloque CONCRETO. Sin expediente no hay forma de saber si
+    // destino ya lo tiene, y se escribe: un duplicado se ve y se corrige, una
+    // licitacion borrada de las dos paginas no.
+    const alreadyMoved =
+      expediente !== null &&
+      destinationDom(expedienteSelector(expediente)).length > 0;
 
     // --- 2. Destino PRIMERO. Un fallo aqui no pierde nada: el bloque sigue
     //        intacto en origen y el nodo entero se puede reintentar.
@@ -1006,6 +1071,11 @@ export class DrupalHttpStrategy extends BaseHttpDestinationStrategy {
         config.targetContainerSelector === null
           ? config
           : { ...config, containerSelector: config.targetContainerSelector },
+        {
+          page: `la pagina de destino (${destinationUuid})`,
+          consequence:
+            'No se ha escrito en ninguna pagina: el bloque sigue en la de origen.',
+        },
       );
 
       if (typeof merged !== 'string') {
@@ -1507,12 +1577,17 @@ export class DrupalHttpStrategy extends BaseHttpDestinationStrategy {
    *   declaran destino ninguno.
    *
    * Devuelve el HTML resultante, o el `NodeErrorDetail` si algun destino no
-   * existe.
+   * existe. `where` nombra la pagina en el mensaje: en un traslado hay dos, y
+   * «el contenedor no existe» sin decir en cual obliga a abrir las dos.
    */
   private insertBlock(
     currentHtml: string,
     blockHtml: string,
     config: ResolvedDrupalHttpConfig,
+    where: { readonly page: string; readonly consequence: string } = {
+      page: 'el HTML actual de la pagina',
+      consequence: 'No se ha modificado nada.',
+    },
   ): string | NodeErrorDetail {
     const $ = loadFragment(currentHtml);
     const plan = planPanelDispatch(blockHtml);
@@ -1529,16 +1604,30 @@ export class DrupalHttpStrategy extends BaseHttpDestinationStrategy {
     // `.first()` de mas abajo se quedaba con el, de modo que el bloque se
     // publicaba dentro de la muestra oculta —PATCH 200, nodo EXITOSO— y no se
     // veia en la pagina.
-    const container =
-      config.containerSelector === null
-        ? $.root()
-        : selectVisibleTarget($, config.containerSelector);
+    let container: Cheerio<AnyNode>;
+
+    try {
+      container =
+        config.containerSelector === null
+          ? $.root()
+          : selectVisibleTarget($, config.containerSelector);
+    } catch {
+      // Un selector que cheerio no sabe leer lanzaba, y el motor convertia la
+      // excepcion en URGENTE sin reintento. Es el mismo desenlace que un
+      // contenedor ausente —no hay donde insertar— y se informa igual.
+      return {
+        level: 'GRAVE',
+        code: ERR_DRUPAL_DOM_TARGET,
+        message: `El contenedor "${config.containerSelector ?? ''}" no es un selector CSS valido para ${where.page}. ${where.consequence}`,
+        missingFields: [config.containerSelector ?? ''],
+      };
+    }
 
     if (container.length === 0) {
       return {
         level: 'GRAVE',
         code: ERR_DRUPAL_DOM_TARGET,
-        message: `El contenedor "${config.containerSelector ?? ''}" no existe en el HTML actual de la pagina. No se ha modificado nada.`,
+        message: `${capitalize(where.page)} no contiene el contenedor esperado "${config.containerSelector ?? ''}". ${where.consequence}`,
         missingFields: [config.containerSelector ?? ''],
       };
     }
@@ -1809,7 +1898,9 @@ export class DrupalHttpStrategy extends BaseHttpDestinationStrategy {
 
     return {
       attributes: {
-        field_autor: emptyToNull(author),
+        // El respaldo cubre el correo sin nombre de remitente: `from_name`
+        // llega vacio y la noticia saldria sin autor.
+        field_autor: emptyToNull(author) ?? config.authorFallback,
         field_fecha: day,
         field_orden: config.orderValue,
       },
@@ -1927,6 +2018,19 @@ export class DrupalHttpStrategy extends BaseHttpDestinationStrategy {
     }
 
     return 'Las credenciales de Drupal estan incompletas en el entorno.';
+  }
+
+  /** Selector que cheerio no sabe leer: se informa antes de escribir nada. */
+  private invalidSelector(selector: string, param: string): NodeResult {
+    return {
+      success: false,
+      error: {
+        level: 'GRAVE',
+        code: ERR_DRUPAL_DOM_TARGET,
+        message: `"${selector}" no es un selector CSS valido (${param}). No se ha modificado ninguna pagina.`,
+        missingFields: [param],
+      },
+    };
   }
 
   /** Param obligatorio ausente en ejecucion pese a `getIncompleteParams`. */

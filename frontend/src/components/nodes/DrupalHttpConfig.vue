@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { useQuasar } from 'quasar';
-import { computed, inject, nextTick, watch } from 'vue';
+import { computed, inject, nextTick, onMounted, watch } from 'vue';
 
 import { useDrupalHttpStore } from '@stores/nodes/drupal-http.store';
 
@@ -81,7 +81,8 @@ const onPresetClick = (presetKey: DrupalPresetKey): void => {
   store.applyPreset(presetKey);
 
   const preset = DRUPAL_PRESETS[presetKey];
-  const target = preset.environments[toDrupalEnvironment(store.config.isSandbox)];
+  const { path } = preset.environments[toDrupalEnvironment(store.config.isSandbox)];
+  const target = store.resolvePresetTarget(presetKey, store.config.isSandbox);
   const needsPage =
     preset.operationMode !== DrupalOperationMode.CREATE_NODE &&
     (target.targetNodeUuid === null ||
@@ -91,11 +92,30 @@ const onPresetClick = (presetKey: DrupalPresetKey): void => {
   $q.notify({
     type: needsPage ? 'warning' : 'positive',
     message: needsPage
-      ? `${describePresetLabel(preset, store.config.isSandbox)}: ${MANUAL_PAGE_NOTICE} (${target.path}).`
+      ? `${describePresetLabel(preset, store.config.isSandbox)}: ${MANUAL_PAGE_NOTICE} (${path}).`
       : 'Preset cargado exitosamente',
     timeout: needsPage ? 6000 : 2000,
   });
 };
+
+/**
+ * Trae las paginas de los destinos rapidos al montar.
+ *
+ * Un fallo no bloquea el formulario: los presets siguen cargando modo, bundle y
+ * selectores, y la pagina queda para el operador con su aviso de siempre. Se
+ * avisa una vez para que no se lea como «el .env no tiene la pagina».
+ */
+onMounted(async () => {
+  try {
+    await store.loadPresetTargets();
+  } catch {
+    $q.notify({
+      type: 'warning',
+      message: PRESET_TARGETS_FAILED_NOTICE,
+      timeout: 6000,
+    });
+  }
+});
 
 /** Opcion de un selector cerrado con etiqueta legible. */
 interface LabeledOption {
@@ -148,6 +168,9 @@ const SANDBOX_LOCK_NOTICE =
  * y vuelve a pulsarlo. Esas paginas no tienen UUID confirmado, y apuntarlas a
  * otra «para probar» puede ser destructivo (ver `DrupalPresetTarget`).
  */
+const PRESET_TARGETS_FAILED_NOTICE =
+  'No se pudieron cargar las paginas de los destinos rapidos: los presets se aplican, pero el UUID de la pagina habra que escribirlo a mano.';
+
 const MANUAL_PAGE_NOTICE =
   'indica a mano el UUID de la pagina, que no esta confirmado, antes de poder guardar';
 
@@ -189,6 +212,9 @@ const HIERARCHICAL_DISPATCH_NOTICE =
  * Lo que sigue cayendo aqui es el marcado que NO viene en paneles, que es el de
  * los otros canales que publican por este modo —licitaciones, Notiweb—.
  */
+const ITEM_SELECTOR_HINT =
+  'Con el selector generico se traslada la primera licitacion de la pagina. Para cerrar una concreta: [data-expediente="{{llm_response.headline}}"].';
+
 const TARGET_CONTAINER_HINT =
   'Donde entra el bloque dentro de la pagina de DESTINO. Si no existe, el traslado se detiene antes de escribir nada y el bloque sigue en origen.';
 
@@ -455,6 +481,8 @@ type TemplateField = Extract<
   | 'linkSelector'
   | 'linkValueTemplate'
   | 'expedienteTemplate'
+  | 'itemSelector'
+  | 'authorFallback'
 >;
 
 /**
@@ -761,6 +789,23 @@ const toNullableText = (value: string | number | null): string | null => {
         </q-input>
       </div>
 
+      <div v-if="isNewsBundle" class="col-12 col-md-5" data-test="author-fallback-field">
+        <label class="pd-label" for="drupal-author-fallback">
+          Autor si el remitente no trae nombre
+        </label>
+        <q-input
+          id="drupal-author-fallback"
+          :model-value="store.config.authorFallback"
+          outlined
+          dense
+          class="q-mt-xs"
+          placeholder="Madrid+D"
+          :maxlength="MAX_DRUPAL_AUTHOR_LENGTH"
+          :rules="authorRules"
+          @update:model-value="store.updateConfig({ authorFallback: toNullableText($event) })"
+        />
+      </div>
+
       <div v-if="isNewsBundle" class="col-12 col-md-4" data-test="date-template-field">
         <label class="pd-label" for="drupal-date">Fecha</label>
         <q-input
@@ -969,10 +1014,20 @@ const toNullableText = (value: string | number | null): string | null => {
           dense
           class="q-mt-xs pd-mono"
           placeholder='[data-expediente="S_2026_015"]'
+          :hint="ITEM_SELECTOR_HINT"
           :maxlength="MAX_DRUPAL_SELECTOR_LENGTH"
           :rules="itemSelectorRules"
+          @focus="rememberCaret('itemSelector', $event)"
           @update:model-value="store.updateConfig({ itemSelector: toNullableText($event) })"
-        />
+        >
+          <template #append>
+            <VariableInsertButton
+              :context="store.availableUpstreamContext"
+              field-label="el selector del bloque"
+              @insert="insertVariable('itemSelector', $event)"
+            />
+          </template>
+        </q-input>
       </div>
 
       <div v-if="isTransfer" class="col-12 col-md-6" data-test="target-container-selector-field">
@@ -1055,7 +1110,13 @@ const toNullableText = (value: string | number | null): string | null => {
         />
       </div>
 
-      <div v-if="mutatesContainer" class="col-12 col-md-6" data-test="insert-position-field">
+      <!-- Tambien en el traslado: decide si el bloque entra delante o detras de
+           lo que ya hay en el contenedor de destino. -->
+      <div
+        v-if="mutatesContainer || isTransfer"
+        class="col-12 col-md-6"
+        data-test="insert-position-field"
+      >
         <label class="pd-label" for="drupal-insert-position">Posicion de insercion</label>
         <q-select
           id="drupal-insert-position"

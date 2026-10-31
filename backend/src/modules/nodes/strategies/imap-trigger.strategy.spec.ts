@@ -224,7 +224,7 @@ describe('ImapTriggerStrategy', () => {
   });
 
   describe('1. Extraccion del correo UNSEEN', () => {
-    it('1.1 deberia exponer las siete claves deterministas del correo', async () => {
+    it('1.1 deberia exponer las ocho claves deterministas del correo', async () => {
       // 1. Arrange
       const { strategy } = buildStrategy();
 
@@ -236,6 +236,7 @@ describe('ImapTriggerStrategy', () => {
       expect(result.data).toEqual({
         message_id: '<abc-123@unuware.com>',
         from: 'prensa@unuware.com',
+        from_name: 'Prensa',
         subject: 'Innovacion en Madrid',
         text: 'Innovacion en texto plano',
         html: '<h1>Innovacion</h1>',
@@ -287,6 +288,7 @@ describe('ImapTriggerStrategy', () => {
       expect(Object.keys(result.data ?? {})).toEqual([
         'message_id',
         'from',
+        'from_name',
         'subject',
         'text',
         'html',
@@ -362,6 +364,7 @@ describe('ImapTriggerStrategy', () => {
       expect(result.data).toEqual({
         message_id: '',
         from: '',
+        from_name: '',
         subject: '',
         text: '',
         html: '',
@@ -377,6 +380,35 @@ describe('ImapTriggerStrategy', () => {
         expect(typeof value).toBe('string');
       }
     });
+
+    it.each([
+      ['Juan Pérez', 'Juan Pérez'],
+      ['  "Pérez,   Juan"  ', 'Pérez, Juan'],
+      [undefined, ''],
+    ])(
+      '1.5bis deberia publicar el nombre visible del remitente en from_name (%s)',
+      async (name, expected) => {
+        // 1. Arrange 📐: `Juan Pérez <jp@x.es>`, el mismo remitente con el
+        //    nombre entrecomillado y espacios de mas, y uno sin nombre.
+        simpleParser.mockResolvedValue(
+          buildParsedMail({
+            from: {
+              value: [{ address: 'jp@x.es', name: name as string }],
+              html: '',
+              text: 'jp@x.es',
+            },
+          }),
+        );
+        const { strategy } = buildStrategy();
+
+        // 2. Act ⚙️
+        const result = await strategy.execute(buildContext(), buildParams());
+
+        // 3. Assert 🎯: `from` sigue siendo la direccion limpia.
+        expect(result.data?.from_name).toBe(expected);
+        expect(result.data?.from).toBe('jp@x.es');
+      },
+    );
 
     it('1.6 deberia usar el nombre formateado cuando el remitente no trae direccion', async () => {
       // 1. Arrange
@@ -1784,6 +1816,7 @@ describe('ImapTriggerStrategy', () => {
       expect(Object.keys(result.data ?? {})).toEqual([
         'message_id',
         'from',
+        'from_name',
         'subject',
         'text',
         'html',
@@ -2271,6 +2304,7 @@ describe('ImapTriggerStrategy', () => {
       expect(strategy.outputFields?.map((field) => field.name)).toEqual([
         'message_id',
         'from',
+        'from_name',
         'subject',
         'text',
         'html',

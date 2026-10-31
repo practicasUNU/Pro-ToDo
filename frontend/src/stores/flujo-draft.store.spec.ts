@@ -77,6 +77,7 @@ vi.mock('@services/nodes/llm-extractor.service', () => ({
   fetchLlmModels: vi.fn(),
   testLlmConnection: vi.fn(),
 }));
+vi.mock('@services/nodes/drupal-http.service', () => ({ fetchDrupalPresetTargets: vi.fn() }));
 vi.mock('@services/nodes/web-scraper.service', () => ({
   checkScraper: vi.fn(),
 }));

@@ -49,6 +49,7 @@ vi.mock('@services/ai-prompt-templates.service', () => ({
 }));
 vi.mock('@services/nodes/trigger-imap.service', () => ({ checkImapConnection: vi.fn() }));
 vi.mock('@services/nodes/parser-email.service', () => ({ checkParser: vi.fn() }));
+vi.mock('@services/nodes/drupal-http.service', () => ({ fetchDrupalPresetTargets: vi.fn() }));
 vi.mock('@services/nodes/web-scraper.service', () => ({ checkScraper: vi.fn() }));
 vi.mock('@services/nodes/llm-extractor.service', () => ({
   fetchLlmModels: vi.fn(),

@@ -1,5 +1,5 @@
 import { createPinia, setActivePinia } from 'pinia';
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { NodeType } from '@/types/pipeline';
 import {
@@ -19,6 +19,12 @@ import {
   MAX_DRUPAL_TITLE_LENGTH,
 } from '@/types/nodes/drupal-http.types';
 
+import {
+  DRUPAL_PRESET_TARGETS_FIXTURE,
+  SANDBOX_LICITACIONES_UUID,
+  SANDBOX_TITULOS_UUID,
+} from '@/testing/drupal-preset-targets.fixture';
+
 import { useDrupalHttpStore } from './drupal-http.store';
 
 import type { UpstreamNamespace } from '@stores/nodes/node-store-registry';
@@ -30,15 +36,27 @@ import type { UpstreamNamespace } from '@stores/nodes/node-store-registry';
  * entre pruebas, asi que reutilizar un id arrastraria el estado de la anterior.
  * `setActivePinia` reinicia las instancias, no el mapa de definiciones.
  */
+// `@boot/axios` importa `#q-app`, que no existe fuera de Quasar.
+vi.mock('@services/nodes/drupal-http.service', () => ({
+  fetchDrupalPresetTargets: vi.fn(),
+}));
+
 let nodeCounter = 0;
 const nextNodeId = (): string => `destino_http_${(nodeCounter += 1)}`;
 
+/**
+ * Store con las paginas de los destinos rapidos ya cargadas, como las dejaria
+ * el componente al montarse tras `GET /api/nodos/drupal/targets`.
+ */
+const buildStore = (): ReturnType<typeof useDrupalHttpStore> => {
+  const store = useDrupalHttpStore(nextNodeId());
+  store.presetTargets = DRUPAL_PRESET_TARGETS_FIXTURE;
+
+  return store;
+};
+
 /** UUID v4 validos, para no depender de literales repetidos por el archivo. */
-// `targetNodeUuid` del catalogo es `string | null` desde que existe el preset
-// de Notiweb, que da de alta contenido nuevo y no cuelga de ninguna pagina. El
-// de apertura SI declara uno, asi que se estrecha aqui en vez de salpicar cada
-// aserto con una comprobacion que no es lo que la prueba mide.
-const SOURCE_UUID = DRUPAL_PRESETS.ABRIR_LICITACION.environments.SANDBOX.targetNodeUuid as string;
+const SOURCE_UUID = SANDBOX_LICITACIONES_UUID;
 const DESTINATION_UUID = '3b9f5c21-7d84-4a6e-9c13-2f8e5a0d4b77';
 
 /** Contexto tipico de un flujo completo: escudo delante del destino. */
@@ -66,7 +84,7 @@ describe('useDrupalHttpStore · configuracion del nodo DESTINO_DRUPAL', () => {
   describe('1. Estado inicial', () => {
     it('1.1 deberia arrancar con los mismos defectos que resuelve el DTO', () => {
       // 1. Arrange 📐
-      const store = useDrupalHttpStore(nextNodeId());
+      const store = buildStore();
 
       // 2. Act ⚙️ & 3. Assert 🎯: la replica tiene que coincidir campo a campo,
       //    o la interfaz mostraria una configuracion distinta de la que corre.
@@ -79,6 +97,7 @@ describe('useDrupalHttpStore · configuracion del nodo DESTINO_DRUPAL', () => {
         titleTemplate: null,
         summaryTemplate: null,
         authorTemplate: null,
+        authorFallback: null,
         dateTemplate: null,
         orderValue: 1,
         newsSourceTermUuid: null,
@@ -109,7 +128,7 @@ describe('useDrupalHttpStore · configuracion del nodo DESTINO_DRUPAL', () => {
 
     it('1.2 NO deberia nacer valido: el modo por defecto exige un titulo', () => {
       // 1. Arrange 📐
-      const store = useDrupalHttpStore(nextNodeId());
+      const store = buildStore();
 
       // 2. Act ⚙️ & 3. Assert 🎯: a diferencia del escudo, cuyo DTO admite
       //    `params: {}` ejecutables, este nodo no puede publicar sin titulo.
@@ -119,8 +138,8 @@ describe('useDrupalHttpStore · configuracion del nodo DESTINO_DRUPAL', () => {
 
     it('1.3 deberia aislar la configuracion entre dos nodos del mismo tipo', () => {
       // 1. Arrange 📐: un flujo puede crear la noticia Y cerrar su licitacion.
-      const first = useDrupalHttpStore(nextNodeId());
-      const second = useDrupalHttpStore(nextNodeId());
+      const first = buildStore();
+      const second = buildStore();
 
       // 2. Act ⚙️
       first.updateConfig({ bundle: 'node--page' });
@@ -133,7 +152,7 @@ describe('useDrupalHttpStore · configuracion del nodo DESTINO_DRUPAL', () => {
   describe('2. Validez por modo de operacion', () => {
     it('2.1 CREATE_NODE deberia ser valido con solo el titulo', () => {
       // 1. Arrange 📐
-      const store = useDrupalHttpStore(nextNodeId());
+      const store = buildStore();
 
       // 2. Act ⚙️
       store.updateConfig({ titleTemplate: '{{validated_drupal_json.headline}}' });
@@ -145,7 +164,7 @@ describe('useDrupalHttpStore · configuracion del nodo DESTINO_DRUPAL', () => {
 
     it('2.2 APPEND_HTML_BLOCK deberia exigir el identificador de la pagina', () => {
       // 1. Arrange 📐
-      const store = useDrupalHttpStore(nextNodeId());
+      const store = buildStore();
 
       // 2. Act ⚙️
       store.updateConfig({ operationMode: DrupalOperationMode.APPEND_HTML_BLOCK });
@@ -160,7 +179,7 @@ describe('useDrupalHttpStore · configuracion del nodo DESTINO_DRUPAL', () => {
 
     it('2.3 TRANSFER_HTML_BLOCK deberia exigir origen, destino y selector', () => {
       // 1. Arrange 📐
-      const store = useDrupalHttpStore(nextNodeId());
+      const store = buildStore();
 
       // 2. Act ⚙️
       store.updateConfig({ operationMode: DrupalOperationMode.TRANSFER_HTML_BLOCK });
@@ -183,7 +202,7 @@ describe('useDrupalHttpStore · configuracion del nodo DESTINO_DRUPAL', () => {
 
     it('2.4 UPLOAD_ATTACHMENT deberia exigir solo el nodo anfitrion', () => {
       // 1. Arrange 📐
-      const store = useDrupalHttpStore(nextNodeId());
+      const store = buildStore();
 
       // 2. Act ⚙️
       store.updateConfig({
@@ -198,7 +217,7 @@ describe('useDrupalHttpStore · configuracion del nodo DESTINO_DRUPAL', () => {
 
     it('2.5 deberia reevaluar al cambiar de modo, sin arrastrar el juicio anterior', () => {
       // 1. Arrange 📐: valido como CREATE_NODE.
-      const store = useDrupalHttpStore(nextNodeId());
+      const store = buildStore();
       store.updateConfig({ titleTemplate: 'Titular' });
 
       // 2. Act ⚙️: el mismo estado bajo otro modo pide otra cosa.
@@ -213,7 +232,7 @@ describe('useDrupalHttpStore · configuracion del nodo DESTINO_DRUPAL', () => {
   describe('3. Formatos que el DTO rechazaria con un 400', () => {
     it('3.1 deberia invalidar un bundle sin el doble guion', () => {
       // 1. Arrange 📐
-      const store = useDrupalHttpStore(nextNodeId());
+      const store = buildStore();
       store.updateConfig({ titleTemplate: 'Titular' });
 
       // 2. Act ⚙️: un solo guion es el error tipico, y el patron lo rechaza.
@@ -227,7 +246,7 @@ describe('useDrupalHttpStore · configuracion del nodo DESTINO_DRUPAL', () => {
 
     it('3.2 deberia invalidar un identificador que no sea UUID v4', () => {
       // 1. Arrange 📐
-      const store = useDrupalHttpStore(nextNodeId());
+      const store = buildStore();
 
       // 2. Act ⚙️
       store.updateConfig({
@@ -242,7 +261,7 @@ describe('useDrupalHttpStore · configuracion del nodo DESTINO_DRUPAL', () => {
 
     it('3.3 deberia aceptar un UUID v4 en mayusculas', () => {
       // 1. Arrange 📐: el patron del backend lleva la bandera `i`.
-      const store = useDrupalHttpStore(nextNodeId());
+      const store = buildStore();
 
       // 2. Act ⚙️
       store.updateConfig({
@@ -257,7 +276,7 @@ describe('useDrupalHttpStore · configuracion del nodo DESTINO_DRUPAL', () => {
 
     it('3.4 deberia invalidar un titulo mas largo de lo que admite Drupal', () => {
       // 1. Arrange 📐
-      const store = useDrupalHttpStore(nextNodeId());
+      const store = buildStore();
 
       // 2. Act ⚙️
       store.updateConfig({ titleTemplate: 'x'.repeat(MAX_DRUPAL_TITLE_LENGTH + 1) });
@@ -269,7 +288,7 @@ describe('useDrupalHttpStore · configuracion del nodo DESTINO_DRUPAL', () => {
 
     it('3.5 deberia invalidar un selector mas largo que el tope del DTO', () => {
       // 1. Arrange 📐
-      const store = useDrupalHttpStore(nextNodeId());
+      const store = buildStore();
 
       // 2. Act ⚙️
       store.updateConfig({
@@ -286,7 +305,7 @@ describe('useDrupalHttpStore · configuracion del nodo DESTINO_DRUPAL', () => {
 
     it('3.6 deberia invalidar un indice de adjunto fuera de rango', () => {
       // 1. Arrange 📐
-      const store = useDrupalHttpStore(nextNodeId());
+      const store = buildStore();
       store.updateConfig({
         operationMode: DrupalOperationMode.UPLOAD_ATTACHMENT,
         targetNodeUuid: SOURCE_UUID,
@@ -302,7 +321,7 @@ describe('useDrupalHttpStore · configuracion del nodo DESTINO_DRUPAL', () => {
 
     it('3.7 deberia invalidar un nombre de campo que no sea snake_case', () => {
       // 1. Arrange 📐
-      const store = useDrupalHttpStore(nextNodeId());
+      const store = buildStore();
       store.updateConfig({ titleTemplate: 'Titular' });
 
       // 2. Act ⚙️
@@ -317,7 +336,7 @@ describe('useDrupalHttpStore · configuracion del nodo DESTINO_DRUPAL', () => {
   describe('4. Selectores cerrados del contexto', () => {
     it('4.1 deberia ofrecer solo los namespaces de los pasos anteriores', () => {
       // 1. Arrange 📐
-      const store = useDrupalHttpStore(nextNodeId());
+      const store = buildStore();
 
       // 2. Act ⚙️
       store.setAvailableUpstreamContext(FULL_UPSTREAM);
@@ -328,7 +347,7 @@ describe('useDrupalHttpStore · configuracion del nodo DESTINO_DRUPAL', () => {
 
     it('4.2 deberia ofrecer los campos del namespace de origen elegido', () => {
       // 1. Arrange 📐: el defecto ya apunta a `validated_drupal_json`.
-      const store = useDrupalHttpStore(nextNodeId());
+      const store = buildStore();
 
       // 2. Act ⚙️
       store.setAvailableUpstreamContext(FULL_UPSTREAM);
@@ -339,7 +358,7 @@ describe('useDrupalHttpStore · configuracion del nodo DESTINO_DRUPAL', () => {
 
     it('4.3 deberia separar los campos del adjunto de los del markup', () => {
       // 1. Arrange 📐: son dos namespaces distintos y cada selector es suyo.
-      const store = useDrupalHttpStore(nextNodeId());
+      const store = buildStore();
 
       // 2. Act ⚙️
       store.setAvailableUpstreamContext(FULL_UPSTREAM);
@@ -350,7 +369,7 @@ describe('useDrupalHttpStore · configuracion del nodo DESTINO_DRUPAL', () => {
 
     it('4.4 deberia copiar el contexto y no guardar la referencia del anfitrion', () => {
       // 1. Arrange 📐
-      const store = useDrupalHttpStore(nextNodeId());
+      const store = buildStore();
       const context = [...FULL_UPSTREAM];
 
       // 2. Act ⚙️
@@ -365,7 +384,7 @@ describe('useDrupalHttpStore · configuracion del nodo DESTINO_DRUPAL', () => {
   describe('5. Avisos no bloqueantes', () => {
     it('5.1 deberia avisar cuando nadie publica el namespace de origen', () => {
       // 1. Arrange 📐: un flujo sin escudo delante.
-      const store = useDrupalHttpStore(nextNodeId());
+      const store = buildStore();
       store.updateConfig({ titleTemplate: 'Titular' });
 
       // 2. Act ⚙️
@@ -382,7 +401,7 @@ describe('useDrupalHttpStore · configuracion del nodo DESTINO_DRUPAL', () => {
 
     it('5.2 NO deberia avisar mientras el contexto esta vacio', () => {
       // 1. Arrange 📐: el catalogo de nodos todavia no ha cargado.
-      const store = useDrupalHttpStore(nextNodeId());
+      const store = buildStore();
 
       // 2. Act ⚙️ & 3. Assert 🎯: con el contexto vacio no se puede afirmar
       //    nada, y avisar seria una falsa alarma en cada apertura.
@@ -391,7 +410,7 @@ describe('useDrupalHttpStore · configuracion del nodo DESTINO_DRUPAL', () => {
 
     it('5.3 NO deberia avisar del origen en TRANSFER_HTML_BLOCK', () => {
       // 1. Arrange 📐: ese modo no lee el contexto, saca el bloque del DOM.
-      const store = useDrupalHttpStore(nextNodeId());
+      const store = buildStore();
 
       // 2. Act ⚙️
       store.updateConfig({ operationMode: DrupalOperationMode.TRANSFER_HTML_BLOCK });
@@ -406,7 +425,7 @@ describe('useDrupalHttpStore · configuracion del nodo DESTINO_DRUPAL', () => {
     it('5.4 deberia avisar de un parser por delante en UPLOAD_ATTACHMENT', () => {
       // 1. Arrange 📐: el motor libera los bytes del adjunto en cuanto un nodo
       //    publica texto, asi que el inventario llega con `contentBase64` nulo.
-      const store = useDrupalHttpStore(nextNodeId());
+      const store = buildStore();
 
       // 2. Act ⚙️
       store.updateConfig({
@@ -428,7 +447,7 @@ describe('useDrupalHttpStore · configuracion del nodo DESTINO_DRUPAL', () => {
       // 1. Arrange 📐: la regla 11 obliga a que el destino cierre el flujo, asi
       //    que la subida no puede ir en un nodo propio por delante del parser.
       //    Cabe en el APPEND, pero entonces depende de `skipDocumentExtraction`.
-      const store = useDrupalHttpStore(nextNodeId());
+      const store = buildStore();
 
       // 2. Act ⚙️
       store.updateConfig({
@@ -452,7 +471,7 @@ describe('useDrupalHttpStore · configuracion del nodo DESTINO_DRUPAL', () => {
     it('5.6 NO deberia avisar del parser si el APPEND no sube nada', () => {
       // 1. Arrange 📐: sin subida, los bytes del adjunto dan igual. Avisar
       //    aqui seria ruido en el caso mas comun del nodo.
-      const store = useDrupalHttpStore(nextNodeId());
+      const store = buildStore();
 
       // 2. Act ⚙️
       store.updateConfig({
@@ -472,7 +491,7 @@ describe('useDrupalHttpStore · configuracion del nodo DESTINO_DRUPAL', () => {
     it('6.1 deberia cargar los siete campos de ABRIR_LICITACION a la vez', () => {
       // 1. Arrange 📐: juntos o no significan nada. El UUID de la agregadora
       //    solo tiene sentido con `node--page` y un modo que mute HTML.
-      const store = useDrupalHttpStore(nextNodeId());
+      const store = buildStore();
       const preset = DRUPAL_PRESETS.ABRIR_LICITACION;
 
       // 2. Act ⚙️
@@ -481,7 +500,7 @@ describe('useDrupalHttpStore · configuracion del nodo DESTINO_DRUPAL', () => {
       // 3. Assert 🎯
       expect(store.config.operationMode).toBe(DrupalOperationMode.APPEND_HTML_BLOCK);
       expect(store.config.bundle).toBe('node--page');
-      expect(store.config.targetNodeUuid).toBe(preset.environments.SANDBOX.targetNodeUuid);
+      expect(store.config.targetNodeUuid).toBe(SANDBOX_LICITACIONES_UUID);
       expect(store.config.destinationNodeUuid).toBeNull();
       // Contra el propio preset y no contra un literal: el selector del panel
       // desplegable es un dato del portal, y repetirlo aqui crearia una segunda
@@ -493,7 +512,7 @@ describe('useDrupalHttpStore · configuracion del nodo DESTINO_DRUPAL', () => {
 
     it('6.2 deberia dejar el paso ya valido tras cargar ABRIR_LICITACION', () => {
       // 1. Arrange 📐: es el objetivo del boton, ahorrar el UUID tecleado.
-      const store = useDrupalHttpStore(nextNodeId());
+      const store = buildStore();
 
       // 2. Act ⚙️
       store.applyAbrirLicitacionPreset();
@@ -504,7 +523,7 @@ describe('useDrupalHttpStore · configuracion del nodo DESTINO_DRUPAL', () => {
 
     it('6.3 deberia cargar CERRAR_LICITACION con su selector de bloque', () => {
       // 1. Arrange 📐
-      const store = useDrupalHttpStore(nextNodeId());
+      const store = buildStore();
 
       // 2. Act ⚙️
       store.applyCerrarLicitacionPreset();
@@ -526,7 +545,7 @@ describe('useDrupalHttpStore · configuracion del nodo DESTINO_DRUPAL', () => {
       //    lee origen y destino por separado, y el segundo PATCH pisa al primero
       //    con un DOM ya obsoleto, borrando el bloque sin dejar copia. Que el
       //    paso quede invalido es lo que obliga a escribir el destino de verdad.
-      const store = useDrupalHttpStore(nextNodeId());
+      const store = buildStore();
 
       // 2. Act ⚙️
       store.applyCerrarLicitacionPreset();
@@ -539,8 +558,7 @@ describe('useDrupalHttpStore · configuracion del nodo DESTINO_DRUPAL', () => {
 
     it('6.5 deberia cargar VERIFICACION_TITULOS con su bundle y modo propios', () => {
       // 1. Arrange 📐
-      const store = useDrupalHttpStore(nextNodeId());
-      const preset = DRUPAL_PRESETS.VERIFICACION_TITULOS;
+      const store = buildStore();
 
       // 2. Act ⚙️
       store.applyVerificacionTitulosPreset();
@@ -551,7 +569,7 @@ describe('useDrupalHttpStore · configuracion del nodo DESTINO_DRUPAL', () => {
       //    alcanzaria desde la pagina que lo agrega.
       expect(store.config.operationMode).toBe(DrupalOperationMode.APPEND_HTML_BLOCK);
       expect(store.config.bundle).toBe('node--page');
-      expect(store.config.targetNodeUuid).toBe(preset.environments.SANDBOX.targetNodeUuid);
+      expect(store.config.targetNodeUuid).toBe(SANDBOX_TITULOS_UUID);
       // El contenedor es el acordeon RAIZ y actua de respaldo: el destino real
       // lo decide cada panel por su `data-parent`. Apuntarlo a la universidad
       // CEU mandaria alli los paneles sin destino resoluble.
@@ -568,7 +586,7 @@ describe('useDrupalHttpStore · configuracion del nodo DESTINO_DRUPAL', () => {
       //    backend, que es PREPEND. Mientras el preset valia PREPEND la clave
       //    NO viajaba en el pipeline_schema; ahora debe viajar, porque es lo
       //    unico que hace que el motor llame a `.append()`.
-      const store = useDrupalHttpStore(nextNodeId());
+      const store = buildStore();
 
       // 2. Act ⚙️
       store.applyVerificacionTitulosPreset();
@@ -582,7 +600,7 @@ describe('useDrupalHttpStore · configuracion del nodo DESTINO_DRUPAL', () => {
       //    apertura. Si el preset solo parcheara los campos que le aplican, el
       //    `itemSelector` del traslado quedaria colgado en una configuracion que
       //    ya no lo lee, y reapareceria al volver al otro modo.
-      const store = useDrupalHttpStore(nextNodeId());
+      const store = buildStore();
       store.applyCerrarLicitacionPreset();
       expect(store.config.itemSelector).toBe('.pd-licitacion-block, .licitacion-entry');
 
@@ -598,8 +616,8 @@ describe('useDrupalHttpStore · configuracion del nodo DESTINO_DRUPAL', () => {
       // 1. Arrange 📐: los atajos existen para que renombrar una clave sea un
       //    error de compilacion, pero el generico es el que recorre el catalogo
       //    desde la plantilla. Los dos caminos tienen que coincidir.
-      const porAtajo = useDrupalHttpStore(nextNodeId());
-      const porClave = useDrupalHttpStore(nextNodeId());
+      const porAtajo = buildStore();
+      const porClave = buildStore();
 
       // 2. Act ⚙️
       porAtajo.applyVerificacionTitulosPreset();
@@ -613,7 +631,7 @@ describe('useDrupalHttpStore · configuracion del nodo DESTINO_DRUPAL', () => {
   describe('7. Ensamblado de `params`', () => {
     it('7.1 deberia publicar SIEMPRE el modo, aunque sea el defecto', () => {
       // 1. Arrange 📐
-      const store = useDrupalHttpStore(nextNodeId());
+      const store = buildStore();
       store.updateConfig({ titleTemplate: 'Titular' });
 
       // 2. Act ⚙️
@@ -626,7 +644,7 @@ describe('useDrupalHttpStore · configuracion del nodo DESTINO_DRUPAL', () => {
 
     it('7.2 deberia omitir lo que coincide con el defecto del backend', () => {
       // 1. Arrange 📐
-      const store = useDrupalHttpStore(nextNodeId());
+      const store = buildStore();
 
       // 2. Act ⚙️
       store.updateConfig({ titleTemplate: 'Titular' });
@@ -647,7 +665,7 @@ describe('useDrupalHttpStore · configuracion del nodo DESTINO_DRUPAL', () => {
     it('7.3 deberia publicar publishStatus solo cuando es false', () => {
       // 1. Arrange 📐: `true` es el defecto y significa "no he dicho nada".
       //    Solo en Produccion: en Sandbox nunca se publica.
-      const store = useDrupalHttpStore(nextNodeId());
+      const store = buildStore();
       store.setSandbox(false);
       store.updateConfig({ titleTemplate: 'Titular', publishStatus: true });
 
@@ -662,7 +680,7 @@ describe('useDrupalHttpStore · configuracion del nodo DESTINO_DRUPAL', () => {
       // 1. Arrange 📐: simetrico a `publishStatus` y por un motivo mas
       //    fuerte: subir un fichero escribe en Drupal, y un efecto externo no
       //    puede quedar encendido por un defecto que nadie eligio.
-      const store = useDrupalHttpStore(nextNodeId());
+      const store = buildStore();
       store.updateConfig({
         operationMode: DrupalOperationMode.APPEND_HTML_BLOCK,
         targetNodeUuid: SOURCE_UUID,
@@ -684,7 +702,7 @@ describe('useDrupalHttpStore · configuracion del nodo DESTINO_DRUPAL', () => {
     it('7.4 NO deberia publicar ninguna clave ajena al DTO', () => {
       // 1. Arrange 📐: el DTO se valida con `forbidNonWhitelisted`, asi que una
       //    clave de mas no se ignora: devuelve un 400 al guardar el flujo.
-      const store = useDrupalHttpStore(nextNodeId());
+      const store = buildStore();
       const allowed = new Set([
         'isSandbox',
         'operationMode',
@@ -742,7 +760,7 @@ describe('useDrupalHttpStore · configuracion del nodo DESTINO_DRUPAL', () => {
       // 1. Arrange 📐: el DTO declara los dieciocho, asi que publicarlos no es
       //    un `forbidNonWhitelisted`; borrarlos perderia el trabajo del
       //    operador que vuelve al modo anterior.
-      const store = useDrupalHttpStore(nextNodeId());
+      const store = buildStore();
 
       // 2. Act ⚙️
       store.updateConfig({
@@ -759,7 +777,7 @@ describe('useDrupalHttpStore · configuracion del nodo DESTINO_DRUPAL', () => {
   describe('8. Hidratacion de un flujo guardado', () => {
     it('8.1 deberia reproducir los params en el viaje de ida y vuelta', () => {
       // 1. Arrange 📐: la invariante del contrato `NodeConfigStore`.
-      const store = useDrupalHttpStore(nextNodeId());
+      const store = buildStore();
       const params: Record<string, unknown> = {
         isSandbox: false,
         operationMode: DrupalOperationMode.TRANSFER_HTML_BLOCK,
@@ -782,7 +800,7 @@ describe('useDrupalHttpStore · configuracion del nodo DESTINO_DRUPAL', () => {
     it('8.2 deberia caer al defecto ante un tipo inesperado en el jsonb', () => {
       // 1. Arrange 📐: la columna pudo escribirse por SQL directo, y un
       //    `undefined` enlazado a un control de Quasar lo deja descontrolado.
-      const store = useDrupalHttpStore(nextNodeId());
+      const store = buildStore();
 
       // 2. Act ⚙️
       store.hydrateFromNode({
@@ -810,7 +828,7 @@ describe('useDrupalHttpStore · configuracion del nodo DESTINO_DRUPAL', () => {
       // 1. Arrange 📐: el backend resuelve con `trimmedOrNull`, asi que un
       //    `"  "` no cuenta como valor declarado. Mostrarlo como configurado
       //    dejaria el paso en verde con un titulo que el motor vera vacio.
-      const store = useDrupalHttpStore(nextNodeId());
+      const store = buildStore();
 
       // 2. Act ⚙️
       store.hydrateFromNode({
@@ -825,7 +843,7 @@ describe('useDrupalHttpStore · configuracion del nodo DESTINO_DRUPAL', () => {
 
     it('8.4 deberia aceptar los params vacios de una plantilla de flujo', () => {
       // 1. Arrange 📐: una plantilla es topologia sin operativa.
-      const store = useDrupalHttpStore(nextNodeId());
+      const store = buildStore();
 
       // 2. Act ⚙️
       store.hydrateFromNode({ outputNamespace: 'http_result', params: {} });
@@ -840,7 +858,7 @@ describe('useDrupalHttpStore · configuracion del nodo DESTINO_DRUPAL', () => {
     it('9.1 deberia devolver config y contexto a su estado inicial', () => {
       // 1. Arrange 📐: la instancia del store sobrevive a la topologia que la
       //    creo, asi que sin esto un flujo nuevo arrancaria con el anterior.
-      const store = useDrupalHttpStore(nextNodeId());
+      const store = buildStore();
       store.updateConfig({ titleTemplate: 'Titular', bundle: 'node--page' });
       store.setAvailableUpstreamContext(FULL_UPSTREAM);
 
@@ -857,7 +875,7 @@ describe('useDrupalHttpStore · configuracion del nodo DESTINO_DRUPAL', () => {
   describe('7. Preset de Notiweb', () => {
     it('7.1 deberia dar de alta contenido nuevo sin pagina receptora', () => {
       // 1. Arrange 📐
-      const store = useDrupalHttpStore(nextNodeId());
+      const store = buildStore();
 
       // 2. Act ⚙️
       store.applyNotiwebPreset();
@@ -872,7 +890,7 @@ describe('useDrupalHttpStore · configuracion del nodo DESTINO_DRUPAL', () => {
 
     it('7.2 deberia dejar el UUID sin rellenar en vez de inventar uno', () => {
       // 1. Arrange 📐
-      const store = useDrupalHttpStore(nextNodeId());
+      const store = buildStore();
 
       // 2. Act ⚙️
       store.applyNotiwebPreset();
@@ -887,7 +905,7 @@ describe('useDrupalHttpStore · configuracion del nodo DESTINO_DRUPAL', () => {
   describe('10. Entorno Sandbox / Produccion', () => {
     it('10.1 deberia arrancar en Sandbox y publicarlo siempre en los params', () => {
       // 1. Arrange 📐 + 2. Act ⚙️
-      const store = useDrupalHttpStore(nextNodeId());
+      const store = buildStore();
 
       // 3. Assert 🎯: el entorno se lee en el esquema, no se deduce.
       expect(store.config.isSandbox).toBe(true);
@@ -896,7 +914,7 @@ describe('useDrupalHttpStore · configuracion del nodo DESTINO_DRUPAL', () => {
 
     it('10.2 deberia mover las paginas del preset al cambiar de entorno', () => {
       // 1. Arrange 📐
-      const store = useDrupalHttpStore(nextNodeId());
+      const store = buildStore();
       store.applyAbrirLicitacionPreset();
 
       // 2. Act ⚙️
@@ -912,14 +930,12 @@ describe('useDrupalHttpStore · configuracion del nodo DESTINO_DRUPAL', () => {
       store.setSandbox(true);
 
       // 3. Assert 🎯
-      expect(store.config.targetNodeUuid).toBe(
-        DRUPAL_PRESETS.ABRIR_LICITACION.environments.SANDBOX.targetNodeUuid,
-      );
+      expect(store.config.targetNodeUuid).toBe(SANDBOX_LICITACIONES_UUID);
     });
 
     it('10.3 NO deberia pisar un UUID tecleado a mano al cambiar de entorno', () => {
       // 1. Arrange 📐: el operador escribio la pagina de produccion.
-      const store = useDrupalHttpStore(nextNodeId());
+      const store = buildStore();
       store.setSandbox(false);
       store.applyAbrirLicitacionPreset();
       const typed = '11111111-2222-4333-8444-555555555555';
@@ -934,26 +950,23 @@ describe('useDrupalHttpStore · configuracion del nodo DESTINO_DRUPAL', () => {
 
     it('10.4 deberia cargar Innodays como actualizacion de enlace con la pagina pendiente', () => {
       // 1. Arrange 📐
-      const store = useDrupalHttpStore(nextNodeId());
+      const store = buildStore();
 
       // 2. Act ⚙️
       store.applyInnodaysPreset();
 
-      // 3. Assert 🎯: modo, bundle y atributo listos; pagina, selector y
-      //    valor los pone el operador.
+      // 3. Assert 🎯: modo, bundle, atributo, fila del evento y enlace listos
+      //    (prompts de la migracion 063); la pagina la pone el backend, y aqui
+      //    no esta declarada.
       expect(store.config.operationMode).toBe(DrupalOperationMode.UPDATE_LINK_SOURCE);
       expect(store.config.bundle).toBe('node--page');
       expect(store.config.linkAttribute).toBe('href');
-      expect(store.missingRequiredParams).toEqual([
-        'targetNodeUuid',
-        'linkSelector',
-        'linkValueTemplate',
-      ]);
+      expect(store.missingRequiredParams).toEqual(['targetNodeUuid']);
     });
 
     it('10.5 deberia emitir y recuperar los params del modo enlace', () => {
       // 1. Arrange 📐
-      const store = useDrupalHttpStore(nextNodeId());
+      const store = buildStore();
       store.applyInnodaysPreset();
       store.updateConfig({
         targetNodeUuid: '3c2b1a0f-9e8d-4c7b-8a69-5f4e3d2c1b0a',
@@ -964,7 +977,7 @@ describe('useDrupalHttpStore · configuracion del nodo DESTINO_DRUPAL', () => {
 
       // 2. Act ⚙️
       const params = store.toNodeParams();
-      const other = useDrupalHttpStore(nextNodeId());
+      const other = buildStore();
       other.hydrateFromNode({ outputNamespace: 'http_result', params });
 
       // 3. Assert 🎯
@@ -985,7 +998,7 @@ describe('useDrupalHttpStore · configuracion del nodo DESTINO_DRUPAL', () => {
 
     it('10.6 deberia dejar Notiweb como borrador despublicado', () => {
       // 1. Arrange 📐 + 2. Act ⚙️
-      const store = useDrupalHttpStore(nextNodeId());
+      const store = buildStore();
       store.applyNotiwebPreset();
 
       // 3. Assert 🎯
@@ -997,7 +1010,7 @@ describe('useDrupalHttpStore · configuracion del nodo DESTINO_DRUPAL', () => {
   describe('11. Innobar, expediente y borrador en Sandbox', () => {
     it('11.1 deberia ignorar publishStatus true mientras el nodo este en Sandbox', () => {
       // 1. Arrange 📐
-      const store = useDrupalHttpStore(nextNodeId());
+      const store = buildStore();
 
       // 2. Act ⚙️
       store.updateConfig({ publishStatus: true });
@@ -1008,7 +1021,7 @@ describe('useDrupalHttpStore · configuracion del nodo DESTINO_DRUPAL', () => {
 
     it('11.2 deberia forzar borrador al volver a Sandbox', () => {
       // 1. Arrange 📐
-      const store = useDrupalHttpStore(nextNodeId());
+      const store = buildStore();
       store.setSandbox(false);
       store.updateConfig({ publishStatus: true });
 
@@ -1021,13 +1034,13 @@ describe('useDrupalHttpStore · configuracion del nodo DESTINO_DRUPAL', () => {
 
     it('11.3 deberia publicar e hidratar expedienteTemplate', () => {
       // 1. Arrange 📐
-      const store = useDrupalHttpStore(nextNodeId());
+      const store = buildStore();
       store.applyAbrirLicitacionPreset();
       store.updateConfig({ expedienteTemplate: '{{llm_response.expediente}}' });
 
       // 2. Act ⚙️
       const params = store.toNodeParams();
-      const other = useDrupalHttpStore(nextNodeId());
+      const other = buildStore();
       other.hydrateFromNode({ outputNamespace: 'http_result', params });
 
       // 3. Assert 🎯
@@ -1037,7 +1050,7 @@ describe('useDrupalHttpStore · configuracion del nodo DESTINO_DRUPAL', () => {
 
     it('11.4 deberia cargar Innobar como actualizacion de enlace', () => {
       // 1. Arrange 📐 + 2. Act ⚙️
-      const store = useDrupalHttpStore(nextNodeId());
+      const store = buildStore();
       store.applyInnobarPreset();
 
       // 3. Assert 🎯
@@ -1049,7 +1062,7 @@ describe('useDrupalHttpStore · configuracion del nodo DESTINO_DRUPAL', () => {
   describe('12. Contenedor de destino y campos de Notiweb', () => {
     it('12.1 deberia prefijar seccion y tipo de Notiweb y limpiarlos al cambiar de preset', () => {
       // 1. Arrange 📐
-      const store = useDrupalHttpStore(nextNodeId());
+      const store = buildStore();
 
       // 2. Act ⚙️
       store.applyNotiwebPreset();
@@ -1067,7 +1080,7 @@ describe('useDrupalHttpStore · configuracion del nodo DESTINO_DRUPAL', () => {
 
     it('12.2 deberia publicar los campos nuevos en los params y recuperarlos al hidratar', () => {
       // 1. Arrange 📐
-      const store = useDrupalHttpStore(nextNodeId());
+      const store = buildStore();
       store.applyNotiwebPreset();
       store.updateConfig({
         authorTemplate: '{{parsed_email.from}}',
@@ -1077,7 +1090,7 @@ describe('useDrupalHttpStore · configuracion del nodo DESTINO_DRUPAL', () => {
 
       // 2. Act ⚙️
       const params = store.toNodeParams();
-      const copy = useDrupalHttpStore(nextNodeId());
+      const copy = buildStore();
       copy.hydrateFromNode({ outputNamespace: 'drupal_result', params });
 
       // 3. Assert 🎯: ida y vuelta sin perdidas.
@@ -1093,7 +1106,7 @@ describe('useDrupalHttpStore · configuracion del nodo DESTINO_DRUPAL', () => {
     });
 
     it('12.3 NO deberia publicar el orden cuando es el de por defecto', () => {
-      const store = useDrupalHttpStore(nextNodeId());
+      const store = buildStore();
 
       store.applyNotiwebPreset();
 
@@ -1101,7 +1114,7 @@ describe('useDrupalHttpStore · configuracion del nodo DESTINO_DRUPAL', () => {
     });
 
     it('12.4 deberia publicar el contenedor de destino del traslado', () => {
-      const store = useDrupalHttpStore(nextNodeId());
+      const store = buildStore();
 
       store.applyCerrarLicitacionPreset();
 
@@ -1114,7 +1127,7 @@ describe('useDrupalHttpStore · configuracion del nodo DESTINO_DRUPAL', () => {
 
     it('12.5 deberia invalidar un UUID de taxonomia mal formado y un orden fuera de rango', () => {
       // 1. Arrange 📐
-      const store = useDrupalHttpStore(nextNodeId());
+      const store = buildStore();
       store.applyNotiwebPreset();
 
       // 2. Act ⚙️
@@ -1125,6 +1138,84 @@ describe('useDrupalHttpStore · configuracion del nodo DESTINO_DRUPAL', () => {
         expect.arrayContaining(['newsSourceTermUuid', 'orderValue']),
       );
       expect(store.isConfigValid).toBe(false);
+    });
+  });
+
+  describe('13. Paginas servidas por el backend', () => {
+    it('13.1 deberia cargar las paginas una sola vez y aplicarlas al preset', async () => {
+      // 1. Arrange 📐
+      const { fetchDrupalPresetTargets } = await import('@services/nodes/drupal-http.service');
+      vi.mocked(fetchDrupalPresetTargets).mockResolvedValue(DRUPAL_PRESET_TARGETS_FIXTURE);
+      vi.mocked(fetchDrupalPresetTargets).mockClear();
+      const store = useDrupalHttpStore(nextNodeId());
+
+      // 2. Act ⚙️
+      await store.loadPresetTargets();
+      await store.loadPresetTargets();
+      store.applyVerificacionTitulosPreset();
+
+      // 3. Assert 🎯
+      expect(fetchDrupalPresetTargets).toHaveBeenCalledTimes(1);
+      expect(store.config.targetNodeUuid).toBe(SANDBOX_TITULOS_UUID);
+      expect(store.isLoadingPresetTargets).toBe(false);
+    });
+
+    it('13.2 deberia dejar la pagina para el operador si la carga falla', async () => {
+      // 1. Arrange 📐
+      const { fetchDrupalPresetTargets } = await import('@services/nodes/drupal-http.service');
+      vi.mocked(fetchDrupalPresetTargets).mockRejectedValue(new Error('503'));
+      const store = useDrupalHttpStore(nextNodeId());
+
+      // 2. Act ⚙️: el error se propaga, el componente decide el aviso.
+      await expect(store.loadPresetTargets()).rejects.toThrow('503');
+      store.applyAbrirLicitacionPreset();
+
+      // 3. Assert 🎯
+      expect(store.isLoadingPresetTargets).toBe(false);
+      expect(store.config.targetNodeUuid).toBeNull();
+      expect(store.missingRequiredParams).toContain('targetNodeUuid');
+    });
+
+    it('13.3 deberia proponer las plantillas de Notiweb sin pisar las ya escritas', () => {
+      // 1. Arrange 📐
+      const store = buildStore();
+      store.updateConfig({ titleTemplate: 'Titular a mano' });
+
+      // 2. Act ⚙️
+      store.applyNotiwebPreset();
+
+      // 3. Assert 🎯
+      expect(store.config).toMatchObject({
+        titleTemplate: 'Titular a mano',
+        summaryTemplate: '{{llm_response.summary}}',
+        authorTemplate: '{{raw_email.from_name}}',
+        authorFallback: 'Madrid+D',
+        dateTemplate: '{{raw_email.date}}',
+      });
+    });
+
+    it('13.4 deberia cargar Innodays con la fila del evento y el enlace del PROCESADOR_IA', () => {
+      const store = buildStore();
+
+      store.applyInnodaysPreset();
+
+      expect(store.config.linkSelector).toBe("table tr:contains('{{llm_response.headline}}') a");
+      expect(store.config.linkValueTemplate).toBe('{{llm_response.summary}}');
+    });
+
+    it('13.5 deberia publicar y recuperar el autor de respaldo', () => {
+      // 1. Arrange 📐
+      const store = buildStore();
+      store.applyNotiwebPreset();
+
+      // 2. Act ⚙️
+      const params = store.toNodeParams();
+      const copy = buildStore();
+      copy.hydrateFromNode({ outputNamespace: 'drupal_result', params });
+
+      // 3. Assert 🎯
+      expect(params.authorFallback).toBe('Madrid+D');
+      expect(copy.config.authorFallback).toBe('Madrid+D');
     });
   });
 });

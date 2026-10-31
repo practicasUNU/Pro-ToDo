@@ -354,6 +354,20 @@ export class DrupalHttpConfigDto {
 
   @ApiPropertyOptional({
     description:
+      'Autor que se publica cuando `authorTemplate` se resuelve a vacio (ej. un correo sin nombre de remitente).',
+    example: 'Madrid+D',
+  })
+  // Param y no constante del backend: el nombre de la institucion es un dato
+  // del flujo, no del codigo, y otro portal tendra el suyo.
+  @IsOptional()
+  @IsString({ message: 'authorFallback debe ser una cadena.' })
+  @MaxLength(MAX_DRUPAL_AUTHOR_LENGTH, {
+    message: `authorFallback no puede superar ${MAX_DRUPAL_AUTHOR_LENGTH} caracteres.`,
+  })
+  authorFallback?: string;
+
+  @ApiPropertyOptional({
+    description:
       'Plantilla interpolable de la fecha (`field_fecha`), que debe resolverse a `YYYY-MM-DD`. Solo se envia al bundle de noticias.',
     example: '{{parsed_email.date}}',
   })
@@ -649,6 +663,7 @@ export interface ResolvedDrupalHttpConfig {
   readonly titleTemplate: string | null;
   readonly summaryTemplate: string | null;
   readonly authorTemplate: string | null;
+  readonly authorFallback: string | null;
   readonly dateTemplate: string | null;
   readonly orderValue: number;
   readonly newsSourceTermUuid: string | null;
@@ -706,6 +721,7 @@ export const resolveDrupalHttpConfig = (
   titleTemplate: trimmedOrNull(dto.titleTemplate),
   summaryTemplate: trimmedOrNull(dto.summaryTemplate),
   authorTemplate: trimmedOrNull(dto.authorTemplate),
+  authorFallback: trimmedOrNull(dto.authorFallback),
   dateTemplate: trimmedOrNull(dto.dateTemplate),
   orderValue: dto.orderValue ?? DEFAULT_DRUPAL_NEWS_ORDER,
   newsSourceTermUuid: trimmedOrNull(dto.newsSourceTermUuid),

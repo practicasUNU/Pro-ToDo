@@ -11,11 +11,13 @@ import type { ExecutionSummary } from '@/types/execution';
 vi.mock('@services/fsm-executions.service', () => ({
   fetchExecutions: vi.fn(),
   downloadExecutionsCsv: vi.fn(),
+  downloadExecutionsPdf: vi.fn(),
 }));
 
 const executionsService = await import('@services/fsm-executions.service');
 const fetchExecutions = vi.mocked(executionsService.fetchExecutions);
 const downloadExecutionsCsv = vi.mocked(executionsService.downloadExecutionsCsv);
+const downloadExecutionsPdf = vi.mocked(executionsService.downloadExecutionsPdf);
 
 describe('useExecutionsStore', () => {
   beforeEach(() => {
@@ -243,6 +245,77 @@ describe('useExecutionsStore', () => {
       // 2. Act ⚙️ + 3. Assert 🎯
       await expect(store.exportHistory()).rejects.toThrow('500');
       expect(store.isExporting).toBe(false);
+    });
+  });
+
+  describe('4. Exportacion PDF', () => {
+    const FLOW_ID = '7c0e5c2a-1b3d-4e5f-8a9b-0c1d2e3f4a5b';
+    const PDF_BLOB = new Blob(['%PDF-1.7'], { type: 'application/pdf' });
+
+    it('4.1 deberia pedir el PDF con los filtros aplicados y el orden, sin paginar', async () => {
+      // 1. Arrange 📐: filtros aplicados, orden elegido y la pagina 3 abierta.
+      fetchExecutions.mockResolvedValue({ items: [], total: 60, limit: 10, offset: 20 });
+      downloadExecutionsPdf.mockResolvedValue(PDF_BLOB);
+      const store = useExecutionsStore();
+      store.setFilters({
+        state: ExecutionState.PAUSADO,
+        flowId: FLOW_ID,
+        from: '2026-10-01',
+        to: '2026-10-22',
+      });
+      store.setSort({ sortBy: 'startedAt', descending: false });
+      await store.fetchPage({ limit: 10, offset: 20 });
+
+      // 2. Act ⚙️
+      const blob = await store.exportHistory('pdf');
+
+      // 3. Assert 🎯: la misma consulta que el CSV y por la ruta del PDF.
+      expect(downloadExecutionsPdf).toHaveBeenCalledTimes(1);
+      expect(downloadExecutionsPdf).toHaveBeenCalledWith({
+        state: ExecutionState.PAUSADO,
+        flowId: FLOW_ID,
+        from: '2026-10-01',
+        to: '2026-10-22',
+        sortBy: 'startedAt',
+        sortOrder: 'ASC',
+      });
+      const [query] = downloadExecutionsPdf.mock.calls[0] ?? [];
+      expect(query).not.toHaveProperty('limit');
+      expect(query).not.toHaveProperty('offset');
+      expect(downloadExecutionsCsv).not.toHaveBeenCalled();
+      expect(blob).toBe(PDF_BLOB);
+    });
+
+    it('4.2 deberia marcar solo exporting.pdf mientras descarga y apagarlo al terminar', async () => {
+      // 1. Arrange 📐
+      let resolveDownload: (blob: Blob) => void = () => undefined;
+      downloadExecutionsPdf.mockReturnValue(
+        new Promise<Blob>((resolve) => {
+          resolveDownload = resolve;
+        }),
+      );
+      const store = useExecutionsStore();
+
+      // 2. Act ⚙️
+      const pending = store.exportHistory('pdf');
+      const duringDownload = { ...store.exporting, any: store.isExporting };
+      resolveDownload(PDF_BLOB);
+      await pending;
+
+      // 3. Assert 🎯: el CSV sigue disponible mientras se imprime el PDF.
+      expect(duringDownload).toEqual({ csv: false, pdf: true, any: true });
+      expect(store.exporting).toEqual({ csv: false, pdf: false });
+      expect(store.isExporting).toBe(false);
+    });
+
+    it('4.3 deberia propagar el error y apagar exporting.pdf aunque la API falle', async () => {
+      // 1. Arrange 📐: el mensaje lo decide el componente, no el store.
+      downloadExecutionsPdf.mockRejectedValue(new Error('500'));
+      const store = useExecutionsStore();
+
+      // 2. Act ⚙️ + 3. Assert 🎯
+      await expect(store.exportHistory('pdf')).rejects.toThrow('500');
+      expect(store.exporting.pdf).toBe(false);
     });
   });
 });

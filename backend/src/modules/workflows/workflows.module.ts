@@ -4,6 +4,7 @@ import { TypeOrmModule } from '@nestjs/typeorm';
 import { FsmModule } from '@core/fsm/fsm.module';
 import { AuditModule } from '@modules/audit/audit.module';
 import { LogsModule } from '@modules/logs/logs.module';
+import { BrowserModule } from '@modules/nodes/browser.module';
 import { NodeCatalogEntry } from '@modules/nodes/entities/node-catalog.entity';
 import { UsersModule } from '@modules/users/users.module';
 import { WorkflowTemplatesModule } from '@modules/workflow-templates/workflow-templates.module';
@@ -12,6 +13,7 @@ import { Workflow } from './entities/workflow.entity';
 import { ExecutionsController } from './executions.controller';
 import { ExecutionsService } from './executions.service';
 import { InboundEmailResumeService } from './inbound-email-resume.service';
+import { ExecutionsPdfRenderer } from './reports/executions-pdf.renderer';
 import { WorkflowsController } from './workflows.controller';
 import { WorkflowsService } from './workflows.service';
 
@@ -54,9 +56,18 @@ import { WorkflowsService } from './workflows.service';
     // con `@AuditAction` y se registra a mano como `REANUDAR`. `AuditModule`
     // es hoja del grafo, asi que no abre ningun ciclo.
     AuditModule,
+    // Por `BrowserPoolService`: el Chromium compartido que imprime el PDF del
+    // historial. `BrowserModule` es hoja y es la UNICA declaracion del pool,
+    // asi que importarlo no abre ciclos ni lanza un segundo navegador.
+    BrowserModule,
   ],
   controllers: [WorkflowsController, ExecutionsController],
-  providers: [WorkflowsService, ExecutionsService, InboundEmailResumeService],
+  providers: [
+    WorkflowsService,
+    ExecutionsService,
+    InboundEmailResumeService,
+    ExecutionsPdfRenderer,
+  ],
   // `InboundEmailResumeService` se exporta para `ImapTriggerStrategy`
   // (`NodesModule`), que se topa con las ordenes de reanudacion en el buzon que
   // sondea el propio flujo —el operador responde al correo de alerta— y tiene

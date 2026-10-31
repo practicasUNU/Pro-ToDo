@@ -71,6 +71,141 @@ export const DRUPAL_PRODUCTION_NODE_UUID_VARS = [
   'DRUPAL_PRODUCTION_INNOBAR_UUID',
 ] as const;
 
+/** Destinos rapidos del nodo Drupal; replica de `DrupalPresetKey` del cliente. */
+export const DRUPAL_PRESET_KEYS = [
+  'ABRIR_LICITACION',
+  'CERRAR_LICITACION',
+  'VERIFICACION_TITULOS',
+  'INNODAYS',
+  'INNOBAR',
+  'NOTIWEB',
+] as const;
+
+export type DrupalPresetKey = (typeof DRUPAL_PRESET_KEYS)[number];
+
+/** Los dos entornos del portal. */
+export type DrupalEnvironment = 'SANDBOX' | 'PRODUCTION';
+
+/** Pagina (o par de paginas) de un preset en un entorno. */
+export interface DrupalPresetTarget {
+  readonly targetNodeUuid: string | null;
+  readonly destinationNodeUuid: string | null;
+  readonly nid: number | null;
+}
+
+/** Variables de las que sale UNA fuente de paginas de un preset. */
+interface PresetTargetSource {
+  readonly target: string;
+  readonly destination?: string;
+  readonly nid: string;
+}
+
+/**
+ * De que variables sale la pagina de cada preset en cada entorno.
+ *
+ * Tabla EXPLICITA y no una convencion de nombres, porque las variables no la
+ * siguen: las de pruebas se nombran por PAGINA (`LICITACIONES`, `TITULOS`) y
+ * las del portal por PRESET (`ABRIR_LICITACION`); abrir y cerrar comparten la
+ * pagina de abiertas como origen, y el NID de titulos del portal se declaro
+ * como `DRUPAL_PRODUCTION_TITULOS_NID`.
+ *
+ * Cada preset lista sus fuentes EN ORDEN y gana la primera con un UUID valido.
+ * Es lo que da a Innobar el respaldo de Innodays en pruebas: si su variable no
+ * esta declarada, comparte la pagina de pruebas de Innodays —UUID y NID juntos,
+ * para que no se mezclen los de dos paginas—. Notiweb no tiene ninguna:
+ * `CREATE_NODE` crea entidades sueltas y no apunta a pagina alguna.
+ */
+export const DRUPAL_PRESET_TARGET_VARS: Readonly<
+  Record<
+    DrupalEnvironment,
+    Readonly<Record<DrupalPresetKey, readonly PresetTargetSource[]>>
+  >
+> = {
+  SANDBOX: {
+    ABRIR_LICITACION: [
+      {
+        target: 'DRUPAL_SANDBOX_LICITACIONES_UUID',
+        nid: 'DRUPAL_SANDBOX_LICITACIONES_NID',
+      },
+    ],
+    CERRAR_LICITACION: [
+      {
+        target: 'DRUPAL_SANDBOX_LICITACIONES_UUID',
+        destination: 'DRUPAL_SANDBOX_LICITACIONES_CERRADAS_UUID',
+        nid: 'DRUPAL_SANDBOX_LICITACIONES_NID',
+      },
+    ],
+    VERIFICACION_TITULOS: [
+      {
+        target: 'DRUPAL_SANDBOX_TITULOS_UUID',
+        nid: 'DRUPAL_SANDBOX_TITULOS_NID',
+      },
+    ],
+    INNODAYS: [
+      {
+        target: 'DRUPAL_SANDBOX_INNODAYS_UUID',
+        nid: 'DRUPAL_SANDBOX_INNODAYS_NID',
+      },
+    ],
+    INNOBAR: [
+      {
+        target: 'DRUPAL_SANDBOX_INNOBAR_UUID',
+        nid: 'DRUPAL_SANDBOX_INNOBAR_NID',
+      },
+      {
+        target: 'DRUPAL_SANDBOX_INNODAYS_UUID',
+        nid: 'DRUPAL_SANDBOX_INNODAYS_NID',
+      },
+    ],
+    NOTIWEB: [],
+  },
+  PRODUCTION: {
+    ABRIR_LICITACION: [
+      {
+        target: 'DRUPAL_PRODUCTION_ABRIR_LICITACION_UUID',
+        nid: 'DRUPAL_PRODUCTION_ABRIR_LICITACION_NID',
+      },
+    ],
+    CERRAR_LICITACION: [
+      {
+        target: 'DRUPAL_PRODUCTION_ABRIR_LICITACION_UUID',
+        destination: 'DRUPAL_PRODUCTION_CERRAR_LICITACION_UUID',
+        nid: 'DRUPAL_PRODUCTION_ABRIR_LICITACION_NID',
+      },
+    ],
+    VERIFICACION_TITULOS: [
+      {
+        target: 'DRUPAL_PRODUCTION_VERIFICACION_TITULOS_UUID',
+        nid: 'DRUPAL_PRODUCTION_TITULOS_NID',
+      },
+    ],
+    INNODAYS: [
+      {
+        target: 'DRUPAL_PRODUCTION_INNODAYS_UUID',
+        nid: 'DRUPAL_PRODUCTION_INNODAYS_NID',
+      },
+    ],
+    INNOBAR: [
+      {
+        target: 'DRUPAL_PRODUCTION_INNOBAR_UUID',
+        nid: 'DRUPAL_PRODUCTION_INNOBAR_NID',
+      },
+    ],
+    NOTIWEB: [],
+  },
+};
+
+/** UUID v4: el identificador con el que JSON:API direcciona cada entidad. */
+const UUID_V4_PATTERN =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+/** Pagina vacia: el preset carga, pero el operador tiene que escribirla. */
+const EMPTY_PRESET_TARGET: DrupalPresetTarget = {
+  targetNodeUuid: null,
+  destinationNodeUuid: null,
+  nid: null,
+};
+
 /**
  * Esquemas de autenticacion que la estrategia sabe componer.
  *
@@ -211,6 +346,73 @@ export class DrupalApiConfig {
   /** UUID de las paginas del portal declaradas en el entorno, en minusculas. */
   public get productionNodeUuids(): ReadonlySet<string> {
     return this.readUuidSet(DRUPAL_PRODUCTION_NODE_UUID_VARS);
+  }
+
+  /**
+   * Pagina de cada preset en cada entorno, para que el cliente la rellene.
+   *
+   * Los UUID son identificadores PUBLICOS de nodos de Drupal, no credenciales:
+   * servirlos al cliente no expone nada (`security-and-scope.md` §0.1). Un
+   * valor que no sea un UUID v4 o un entero cuenta como no declarado: un UUID
+   * partido en dos lineas del `.env` dejaria si no el preset apuntando a una
+   * pagina que no existe, y el fallo saldria como un 404 en ejecucion.
+   */
+  public get presetTargets(): Readonly<
+    Record<
+      DrupalEnvironment,
+      Readonly<Record<DrupalPresetKey, DrupalPresetTarget>>
+    >
+  > {
+    const resolveEnvironment = (
+      environment: DrupalEnvironment,
+    ): Readonly<Record<DrupalPresetKey, DrupalPresetTarget>> =>
+      Object.fromEntries(
+        DRUPAL_PRESET_KEYS.map((key) => [
+          key,
+          this.resolvePresetTarget(DRUPAL_PRESET_TARGET_VARS[environment][key]),
+        ]),
+      ) as Record<DrupalPresetKey, DrupalPresetTarget>;
+
+    return {
+      SANDBOX: resolveEnvironment('SANDBOX'),
+      PRODUCTION: resolveEnvironment('PRODUCTION'),
+    };
+  }
+
+  /** Primera fuente con un UUID de pagina valido, o la pagina vacia. */
+  private resolvePresetTarget(
+    sources: readonly PresetTargetSource[],
+  ): DrupalPresetTarget {
+    for (const source of sources) {
+      const targetNodeUuid = this.readUuid(source.target);
+
+      if (targetNodeUuid !== null) {
+        return {
+          targetNodeUuid,
+          destinationNodeUuid:
+            source.destination === undefined
+              ? null
+              : this.readUuid(source.destination),
+          nid: this.readNid(source.nid),
+        };
+      }
+    }
+
+    return EMPTY_PRESET_TARGET;
+  }
+
+  /** UUID v4 de una variable, en minusculas, o `null`. */
+  private readUuid(variable: string): string | null {
+    const value = this.configService.get<string>(variable)?.trim() ?? '';
+
+    return UUID_V4_PATTERN.test(value) ? value.toLowerCase() : null;
+  }
+
+  /** NID entero y positivo de una variable, o `null`. */
+  private readNid(variable: string): number | null {
+    const value = this.configService.get<string>(variable)?.trim() ?? '';
+
+    return /^\d+$/.test(value) && Number(value) > 0 ? Number(value) : null;
   }
 
   /** Conjunto de UUID declarados en esas variables; las vacias no cuentan. */

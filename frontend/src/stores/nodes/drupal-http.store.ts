@@ -1,6 +1,8 @@
 import { defineStore, acceptHMRUpdate } from 'pinia';
 import { computed, ref } from 'vue';
 
+import { fetchDrupalPresetTargets } from '@services/nodes/drupal-http.service';
+
 import {
   DEFAULT_DRUPAL_ATTACHMENT_FIELD,
   DEFAULT_DRUPAL_ATTACHMENT_INDEX,
@@ -24,6 +26,7 @@ import {
   DRUPAL_LINK_ATTRIBUTES,
   DRUPAL_PRESETS,
   DrupalOperationMode,
+  EMPTY_DRUPAL_PRESET_PAGE,
   MAX_DRUPAL_ATTACHMENT_INDEX,
   MAX_DRUPAL_AUTHOR_LENGTH,
   MAX_DRUPAL_DATE_TEMPLATE_LENGTH,
@@ -44,6 +47,8 @@ import type {
   DrupalInsertPosition,
   DrupalLinkAttribute,
   DrupalPresetKey,
+  DrupalPresetPage,
+  DrupalPresetTargets,
 } from '@/types/nodes/drupal-http.types';
 
 /** Prefijo del id de Pinia; el sufijo es el `nodeId` del `pipeline_schema`. */
@@ -147,6 +152,7 @@ const buildInitialConfig = (): DrupalHttpNodeConfig => ({
   titleTemplate: null,
   summaryTemplate: null,
   authorTemplate: null,
+  authorFallback: null,
   dateTemplate: null,
   orderValue: DEFAULT_DRUPAL_NEWS_ORDER,
   newsSourceTermUuid: null,
@@ -176,12 +182,11 @@ const buildInitialConfig = (): DrupalHttpNodeConfig => ({
 
 // Estado reactivo del nodo DESTINO_DRUPAL (regla frontend-quasar.md §3.1).
 //
-// SIN capa de servicios, como TRIGGER_CRON, DESTINO_SMTP y ESCUDO_POST_IA, y
-// por el mismo motivo: no hay nada que preguntarle al backend.
-// `@Controller('nodos')` expone UNA ruta, `GET /api/nodos`, de solo lectura, y
-// no existe ningun endpoint que valide los `params` de un nodo suelto. La
-// validacion de verdad la hace `paramsSchema` al guardar el esquema; lo de aqui
-// es el espejo en diseno que evita llegar alli con un 400.
+// Su unica pregunta al backend son las paginas de los destinos rapidos
+// (`GET /api/nodos/drupal/targets`, via `drupal-http.service`). No existe ningun
+// endpoint que valide los `params` de un nodo suelto: la validacion de verdad la
+// hace `paramsSchema` al guardar el esquema, y lo de aqui es el espejo en diseno
+// que evita llegar alli con un 400.
 const drupalHttpSetup = () => {
   const config = ref<DrupalHttpNodeConfig>(buildInitialConfig());
 
@@ -283,6 +288,7 @@ const drupalHttpSetup = () => {
         ['titleTemplate', current.titleTemplate, MAX_DRUPAL_TITLE_LENGTH],
         ['summaryTemplate', current.summaryTemplate, MAX_DRUPAL_SUMMARY_LENGTH],
         ['authorTemplate', current.authorTemplate, MAX_DRUPAL_AUTHOR_LENGTH],
+        ['authorFallback', current.authorFallback, MAX_DRUPAL_AUTHOR_LENGTH],
         ['dateTemplate', current.dateTemplate, MAX_DRUPAL_DATE_TEMPLATE_LENGTH],
         ['targetContainerSelector', current.targetContainerSelector, MAX_DRUPAL_SELECTOR_LENGTH],
         ['containerSelector', current.containerSelector, MAX_DRUPAL_SELECTOR_LENGTH],
@@ -400,6 +406,38 @@ const drupalHttpSetup = () => {
   const activePresetKey = ref<DrupalPresetKey | null>(null);
 
   /**
+   * Paginas de los destinos rapidos, tal como las sirve el backend.
+   *
+   * `null` hasta que se cargan, o si la carga fallo: los presets siguen
+   * funcionando y dejan la pagina para el operador, que es lo mismo que ocurre
+   * con una pagina no declarada en el `.env`.
+   */
+  const presetTargets = ref<DrupalPresetTargets | null>(null);
+  const isLoadingPresetTargets = ref(false);
+
+  /**
+   * Carga las paginas una vez por instancia. Son datos de la instalacion:
+   * cambian al reiniciar el backend, no mientras se configura un flujo.
+   *
+   * Los errores se propagan (regla §2.1): el componente decide el aviso.
+   */
+  const loadPresetTargets = async (force = false): Promise<void> => {
+    if (!force && presetTargets.value !== null) return;
+
+    isLoadingPresetTargets.value = true;
+
+    try {
+      presetTargets.value = await fetchDrupalPresetTargets();
+    } finally {
+      isLoadingPresetTargets.value = false;
+    }
+  };
+
+  /** Pagina de un preset en el entorno indicado, o la pagina vacia. */
+  const resolvePresetTarget = (presetKey: DrupalPresetKey, isSandbox: boolean): DrupalPresetPage =>
+    presetTargets.value?.[toDrupalEnvironment(isSandbox)][presetKey] ?? EMPTY_DRUPAL_PRESET_PAGE;
+
+  /**
    * Carga uno de los destinos operativos en el entorno del toggle.
    *
    * Escribe todos los campos del destino en UNA sola llamada, y las dos cosas
@@ -414,12 +452,18 @@ const drupalHttpSetup = () => {
    *   a «abrir licitacion» dejaria el `itemSelector` del traslado colgado en una
    *   configuracion que ya no lo lee, y reaparecería al volver al otro modo.
    *
-   * No toca las plantillas (`titleTemplate`, `linkValueTemplate`): son el
-   * mapeo del contenido del flujo, no del destino.
+   * Las plantillas que propone el preset (`titleTemplate`, `linkValueTemplate`)
+   * se escriben SOLO sobre campos vacios: son el mapeo del contenido del flujo,
+   * no del destino, y pisar lo que el operador ya escribio borraria trabajo.
    */
   const applyPreset = (presetKey: DrupalPresetKey): void => {
     const preset = DRUPAL_PRESETS[presetKey];
-    const target = preset.environments[toDrupalEnvironment(config.value.isSandbox)];
+    const target = resolvePresetTarget(presetKey, config.value.isSandbox);
+    const emptyTemplates = Object.fromEntries(
+      Object.entries(preset.templates).filter(
+        ([key]) => asNullableText(config.value[key as keyof DrupalHttpNodeConfig]) === null,
+      ),
+    ) as Partial<DrupalHttpNodeConfig>;
 
     updateConfig({
       operationMode: preset.operationMode,
@@ -435,6 +479,7 @@ const drupalHttpSetup = () => {
       targetContainerSelector: preset.targetContainerSelector,
       newsSectionTermUuid: preset.newsSectionTermUuid,
       newsTypeTermUuid: preset.newsTypeTermUuid,
+      ...emptyTemplates,
     });
     activePresetKey.value = presetKey;
   };
@@ -450,9 +495,7 @@ const drupalHttpSetup = () => {
   const setSandbox = (isSandbox: boolean): void => {
     const presetKey = activePresetKey.value;
     const previous =
-      presetKey === null
-        ? null
-        : DRUPAL_PRESETS[presetKey].environments[toDrupalEnvironment(config.value.isSandbox)];
+      presetKey === null ? null : resolvePresetTarget(presetKey, config.value.isSandbox);
 
     updateConfig({ isSandbox });
 
@@ -462,7 +505,7 @@ const drupalHttpSetup = () => {
       previous.targetNodeUuid === config.value.targetNodeUuid &&
       previous.destinationNodeUuid === config.value.destinationNodeUuid
     ) {
-      const next = DRUPAL_PRESETS[presetKey].environments[toDrupalEnvironment(isSandbox)];
+      const next = resolvePresetTarget(presetKey, isSandbox);
 
       updateConfig({
         targetNodeUuid: next.targetNodeUuid,
@@ -570,6 +613,7 @@ const drupalHttpSetup = () => {
     putNullable('titleTemplate', current.titleTemplate);
     putNullable('summaryTemplate', current.summaryTemplate);
     putNullable('authorTemplate', current.authorTemplate);
+    putNullable('authorFallback', current.authorFallback);
     putNullable('dateTemplate', current.dateTemplate);
     putNullable('newsSourceTermUuid', current.newsSourceTermUuid);
     putNullable('newsSectionTermUuid', current.newsSectionTermUuid);
@@ -637,6 +681,7 @@ const drupalHttpSetup = () => {
       titleTemplate: asNullableText(params.titleTemplate),
       summaryTemplate: asNullableText(params.summaryTemplate),
       authorTemplate: asNullableText(params.authorTemplate),
+      authorFallback: asNullableText(params.authorFallback),
       dateTemplate: asNullableText(params.dateTemplate),
       orderValue: asInteger(params.orderValue, DEFAULT_DRUPAL_NEWS_ORDER, 0, MAX_DRUPAL_NEWS_ORDER),
       newsSourceTermUuid: asNullableText(params.newsSourceTermUuid),
@@ -696,6 +741,10 @@ const drupalHttpSetup = () => {
     isConfigValid,
     configWarnings,
     activePresetKey,
+    presetTargets,
+    isLoadingPresetTargets,
+    loadPresetTargets,
+    resolvePresetTarget,
     updateConfig,
     setSandbox,
     applyPreset,

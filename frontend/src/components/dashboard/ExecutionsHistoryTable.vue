@@ -18,7 +18,7 @@ import { canInspectLog } from '@/utils/execution-log';
 import { describeExecutionState } from '@/utils/execution-state-display';
 
 import type { QTableColumn, QTableProps } from 'quasar';
-import type { ExecutionSummary } from '@/types/execution';
+import type { ExecutionExportFormat, ExecutionSummary } from '@/types/execution';
 import type { ExecutionHistoryFilters } from '@stores/executions.store';
 
 /**
@@ -32,8 +32,9 @@ import type { ExecutionHistoryFilters } from '@stores/executions.store';
  *
  * `compact` es la variante del dashboard: los mismos filtros y menos filas.
  *
- * "Exportar CSV" descarga el historial con los filtros APLICADOS, no con el
- * borrador: el fichero dice lo mismo que la tabla, pero entero y no paginado.
+ * "Exportar CSV" y "Exportar informe PDF" descargan el historial con los
+ * filtros APLICADOS, no con el borrador: el fichero dice lo mismo que la tabla,
+ * pero entero y no paginado.
  */
 const props = defineProps<{
   compact?: boolean;
@@ -213,18 +214,30 @@ const loadPage = async (page: { limit?: number; offset?: number } = {}): Promise
 };
 
 /**
- * Descarga el CSV que genera el servidor. El store elige los filtros; aqui solo
- * se guarda el fichero y se decide el mensaje (frontend-architecture.md §2.1).
+ * Descarga el CSV o el PDF que genera el servidor. El store elige los filtros;
+ * aqui solo se guarda el fichero y se decide el mensaje
+ * (frontend-architecture.md §2.1).
  */
-const exportCsv = async (): Promise<void> => {
+const exportHistory = async (format: ExecutionExportFormat): Promise<void> => {
   try {
-    const blob = await executionsStore.exportHistory();
-    saveBlob(blob, executionsHistoryFilename());
-    $q.notify({ type: 'positive', message: 'Se ha descargado el historial de ejecuciones.' });
+    const blob = await executionsStore.exportHistory(format);
+    saveBlob(blob, executionsHistoryFilename(format));
+    $q.notify({
+      type: 'positive',
+      message:
+        format === 'pdf'
+          ? 'Se ha descargado el informe PDF del historial de ejecuciones.'
+          : 'Se ha descargado el historial de ejecuciones.',
+    });
   } catch (error) {
     $q.notify({
       type: 'negative',
-      message: extractApiErrorMessage(error, 'No se pudo exportar el historial de ejecuciones.'),
+      message: extractApiErrorMessage(
+        error,
+        format === 'pdf'
+          ? 'No se pudo generar el informe PDF del historial de ejecuciones.'
+          : 'No se pudo exportar el historial de ejecuciones.',
+      ),
     });
   }
 };
@@ -375,10 +388,23 @@ onMounted(async () => {
             icon="table_view"
             label="Exportar CSV"
             aria-label="Exportar el historial filtrado en CSV"
-            :loading="executionsStore.isExporting"
-            :disable="executionsStore.isExporting"
+            :loading="executionsStore.exporting.csv"
+            :disable="executionsStore.exporting.csv"
             data-test="executions-export"
-            @click="exportCsv"
+            @click="exportHistory('csv')"
+          />
+          <q-btn
+            type="button"
+            class="pd-btn-secondary"
+            flat
+            no-caps
+            icon="picture_as_pdf"
+            label="Exportar informe PDF"
+            aria-label="Exportar el historial filtrado en un informe PDF"
+            :loading="executionsStore.exporting.pdf"
+            :disable="executionsStore.exporting.pdf"
+            data-test="executions-export-pdf"
+            @click="exportHistory('pdf')"
           />
           <q-btn
             type="button"

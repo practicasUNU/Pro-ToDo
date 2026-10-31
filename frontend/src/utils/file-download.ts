@@ -4,6 +4,8 @@
 
 import { toDateInputValue } from '@/utils/date-range';
 
+import type { ExecutionExportFormat } from '@/types/execution';
+
 /** Nombres de descarga, iguales a los que fija el backend en `Content-Disposition`. */
 export const REPORT_FILENAMES = {
   csv: 'informe-telemetria.csv',
@@ -22,10 +24,13 @@ export const AUDIT_REPORT_FILENAMES = {
  * A diferencia de los informes de telemetria, lleva fecha: el historial se
  * exporta a menudo para comparar dias, y varios ficheros con el mismo nombre
  * acaban como `(1)`, `(2)` en la carpeta de descargas. El dia es el local y no
- * el UTC, que de madrugada en Espana seria todavia "ayer".
+ * el UTC, que de madrugada en Espana seria todavia "ayer". La extension sigue
+ * al formato pedido (CSV o PDF).
  */
-export const executionsHistoryFilename = (now: Date = new Date()): string =>
-  `historial-ejecuciones-${toDateInputValue(now)}.csv`;
+export const executionsHistoryFilename = (
+  format: ExecutionExportFormat = 'csv',
+  now: Date = new Date(),
+): string => `historial-ejecuciones-${toDateInputValue(now)}.${format}`;
 
 /**
  * Guarda un `Blob` con el nombre indicado.

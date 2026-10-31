@@ -47,12 +47,14 @@ import { ResumeExecutionDto } from './dto/resume-execution.dto';
 import { WorkflowExecutionResponseDto } from './dto/workflow-execution-response.dto';
 import { ExecutionsService } from './executions.service';
 import { buildExecutionsCsv } from './reports/executions-csv.builder';
+import { ExecutionsPdfRenderer } from './reports/executions-pdf.renderer';
 
 import type { Request } from 'express';
 import type { AuthenticatedUser } from '@modules/auth/interfaces/jwt-payload.interface';
 
 /** Nombre de descarga fijo, igual que los informes de telemetria y auditoria. */
 export const CSV_FILENAME = 'historial-ejecuciones.csv';
+export const PDF_FILENAME = 'historial-ejecuciones.pdf';
 
 /**
  * Superficie HTTP de la trazabilidad de ejecuciones y del reintento manual.
@@ -77,7 +79,10 @@ export const CSV_FILENAME = 'historial-ejecuciones.csv';
 @Roles(UserRole.ADMIN, UserRole.EDITOR)
 @Controller('executions')
 export class ExecutionsController {
-  constructor(private readonly executionsService: ExecutionsService) {}
+  constructor(
+    private readonly executionsService: ExecutionsService,
+    private readonly pdfRenderer: ExecutionsPdfRenderer,
+  ) {}
 
   @Get()
   @ApiOperation({
@@ -124,6 +129,44 @@ export class ExecutionsController {
     return new StreamableFile(buildExecutionsCsv(rows), {
       type: 'text/csv; charset=utf-8',
       disposition: `attachment; filename=${CSV_FILENAME}`,
+    });
+  }
+
+  /**
+   * Historial filtrado en PDF, firmado con el correo de quien lo pide.
+   *
+   * Mismas filas que el CSV (`findAllForExport`), asi que ambos ficheros dicen
+   * lo mismo que la tabla. Tambien declarada ANTES de `@Get(':id')`, por el
+   * mismo motivo que `exportCsv`.
+   */
+  @Get('export/pdf')
+  @ApiOperation({
+    summary:
+      'Descarga en PDF el historial con los mismos filtros y orden que el listado',
+  })
+  @ApiProduces('application/pdf')
+  @ApiBadRequestResponse({
+    description:
+      'Algun filtro no es valido, o llego `limit`/`offset`: el informe no pagina',
+  })
+  public async exportPdf(
+    @Query() exportExecutionsQueryDto: ExportExecutionsQueryDto,
+    @CurrentUser() currentUser: AuthenticatedUser,
+  ): Promise<StreamableFile> {
+    const { rows, truncated } = await this.executionsService.findAllForExport(
+      exportExecutionsQueryDto,
+    );
+
+    const pdf = await this.pdfRenderer.render({
+      rows,
+      truncated,
+      filters: exportExecutionsQueryDto,
+      requestedBy: currentUser.email,
+    });
+
+    return new StreamableFile(pdf, {
+      type: 'application/pdf',
+      disposition: `attachment; filename=${PDF_FILENAME}`,
     });
   }
 

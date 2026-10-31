@@ -29,6 +29,7 @@ vi.mock('quasar', async () => ({
 vi.mock('@services/fsm-executions.service', () => ({
   fetchExecutions: vi.fn(),
   downloadExecutionsCsv: vi.fn(),
+  downloadExecutionsPdf: vi.fn(),
 }));
 
 // Guardar en disco toca el DOM real del navegador: se observa la intencion.
@@ -48,7 +49,11 @@ vi.mock('@services/logs.service', () => ({
 import ExecutionsHistoryTable from '@components/dashboard/ExecutionsHistoryTable.vue';
 import { useWorkflowsStore } from '@stores/workflows.store';
 
-import { downloadExecutionsCsv, fetchExecutions } from '@services/fsm-executions.service';
+import {
+  downloadExecutionsCsv,
+  downloadExecutionsPdf,
+  fetchExecutions,
+} from '@services/fsm-executions.service';
 import { fetchExecutionLog } from '@services/logs.service';
 import { toDateInputValue } from '@/utils/date-range';
 import { saveBlob } from '@/utils/file-download';
@@ -379,6 +384,126 @@ describe('ExecutionsHistoryTable', () => {
       expect(saveBlob).not.toHaveBeenCalled();
       expect(notify).toHaveBeenCalledWith(expect.objectContaining({ type: 'negative' }));
       expect(exportButton(wrapper)?.props('disable')).toBe(false);
+    });
+  });
+
+  describe('4. Exportar informe PDF', () => {
+    const PDF_BLOB = new Blob(['%PDF-1.7'], { type: 'application/pdf' });
+
+    const mountLoaded = async () => {
+      vi.mocked(fetchExecutions).mockResolvedValue({ items: [], total: 0, limit: 5, offset: 0 });
+      const wrapper = mountTable(true);
+      await flushPromises();
+
+      return wrapper;
+    };
+
+    const pdfButton = (wrapper: Awaited<ReturnType<typeof mountLoaded>>) =>
+      wrapper
+        .findAllComponents(QBtn)
+        .find((button) => button.attributes('data-test') === 'executions-export-pdf');
+
+    it('4.1 deberia colocarse entre Exportar CSV y Limpiar filtros', async () => {
+      // 1. Arrange 📐 + 2. Act ⚙️
+      const wrapper = await mountLoaded();
+
+      // 3. Assert 🎯: orden real del DOM, no solo que existan.
+      const actionOrder = wrapper
+        .findAll('.pd-executions-filters__actions [data-test]')
+        .map((node) => node.attributes('data-test'));
+      expect(actionOrder).toEqual([
+        'executions-export',
+        'executions-export-pdf',
+        'executions-clear',
+        'executions-apply',
+      ]);
+      expect(wrapper.get('[data-test="executions-export-pdf"]').text()).toContain(
+        'Exportar informe PDF',
+      );
+    });
+
+    it('4.2 deberia descargar el PDF con el nombre fechado del dia', async () => {
+      // 1. Arrange 📐
+      vi.mocked(downloadExecutionsPdf).mockResolvedValue(PDF_BLOB);
+      const wrapper = await mountLoaded();
+
+      // 2. Act ⚙️
+      await wrapper.get('[data-test="executions-export-pdf"]').trigger('click');
+      await flushPromises();
+
+      // 3. Assert 🎯
+      expect(downloadExecutionsPdf).toHaveBeenCalledTimes(1);
+      expect(downloadExecutionsCsv).not.toHaveBeenCalled();
+      expect(saveBlob).toHaveBeenCalledWith(
+        PDF_BLOB,
+        `historial-ejecuciones-${toDateInputValue(new Date())}.pdf`,
+      );
+      expect(notify).toHaveBeenCalledWith(expect.objectContaining({ type: 'positive' }));
+    });
+
+    it('4.3 deberia exportar los filtros APLICADOS', async () => {
+      // 1. Arrange 📐
+      vi.mocked(downloadExecutionsPdf).mockResolvedValue(PDF_BLOB);
+      const wrapper = await mountLoaded();
+      wrapper
+        .findAllComponents(QSelect)
+        .find((select) => select.props('label') === 'Estado')
+        ?.vm.$emit('update:modelValue', ExecutionState.FALLIDO);
+      await wrapper.findComponent(QForm).trigger('submit');
+      await flushPromises();
+
+      // 2. Act ⚙️
+      await wrapper.get('[data-test="executions-export-pdf"]').trigger('click');
+      await flushPromises();
+
+      // 3. Assert 🎯
+      expect(downloadExecutionsPdf).toHaveBeenCalledWith({ state: ExecutionState.FALLIDO });
+    });
+
+    it('4.4 deberia deshabilitarse solo el boton PDF mientras se genera', async () => {
+      // 1. Arrange 📐
+      let resolveDownload: (blob: Blob) => void = () => undefined;
+      vi.mocked(downloadExecutionsPdf).mockReturnValue(
+        new Promise<Blob>((resolve) => {
+          resolveDownload = resolve;
+        }),
+      );
+      const wrapper = await mountLoaded();
+      const csvButton = () =>
+        wrapper
+          .findAllComponents(QBtn)
+          .find((button) => button.attributes('data-test') === 'executions-export');
+
+      // 2. Act ⚙️
+      await wrapper.get('[data-test="executions-export-pdf"]').trigger('click');
+      await flushPromises();
+      const pdfDuringDownload = {
+        disable: pdfButton(wrapper)?.props('disable'),
+        loading: pdfButton(wrapper)?.props('loading'),
+      };
+      const csvDisabledDuringDownload = csvButton()?.props('disable');
+      resolveDownload(PDF_BLOB);
+      await flushPromises();
+
+      // 3. Assert 🎯
+      expect(pdfDuringDownload).toEqual({ disable: true, loading: true });
+      expect(csvDisabledDuringDownload).toBe(false);
+      expect(pdfButton(wrapper)?.props('disable')).toBe(false);
+    });
+
+    it('4.5 deberia avisar del fallo sin guardar ningun fichero', async () => {
+      // 1. Arrange 📐
+      vi.mocked(downloadExecutionsPdf).mockRejectedValue(new Error('Network Error'));
+      const wrapper = await mountLoaded();
+
+      // 2. Act ⚙️
+      await wrapper.get('[data-test="executions-export-pdf"]').trigger('click');
+      await flushPromises();
+
+      // 3. Assert 🎯
+      expect(saveBlob).not.toHaveBeenCalled();
+      expect(notify).toHaveBeenCalledWith(expect.objectContaining({ type: 'negative' }));
+      expect(pdfButton(wrapper)?.props('disable')).toBe(false);
     });
   });
 });

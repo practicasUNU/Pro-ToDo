@@ -89,10 +89,14 @@ export interface ExecutionListQuery extends SortQuery<ExecutionSortKey> {
 }
 
 /**
- * Filtros de `GET /executions/export/csv`. Replica `ExportExecutionsQueryDto`:
- * los del listado sin la ventana de pagina, que el backend rechaza con 400.
+ * Filtros de `GET /executions/export/csv` y `/export/pdf`. Replica
+ * `ExportExecutionsQueryDto`: los del listado sin la ventana de pagina, que el
+ * backend rechaza con 400.
  */
 export type ExecutionExportQuery = Omit<ExecutionListQuery, 'limit' | 'offset'>;
+
+/** Formatos de descarga del historial, uno por ruta `export/*` del backend. */
+export type ExecutionExportFormat = 'csv' | 'pdf';
 
 /** Desenlace de una reanudacion. Replica `WorkflowExecutionResponseDto`. */
 export interface WorkflowExecutionResult {

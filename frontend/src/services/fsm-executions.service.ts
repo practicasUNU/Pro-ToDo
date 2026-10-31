@@ -50,6 +50,21 @@ export const downloadExecutionsCsv = async (query: ExecutionExportQuery = {}): P
   return data;
 };
 
+/**
+ * Bytes del historial en PDF, con los mismos filtros y orden que el CSV. El
+ * backend firma el informe con el correo de la sesion; no viaja en la query.
+ *
+ * @throws AxiosError 400 si algun filtro no es valido.
+ */
+export const downloadExecutionsPdf = async (query: ExecutionExportQuery = {}): Promise<Blob> => {
+  const { data } = await api.get<Blob>(`${EXECUTIONS_PATH}/export/pdf`, {
+    params: query,
+    responseType: 'blob',
+  });
+
+  return data;
+};
+
 /** Ejecucion completa, con su checkpoint y su estado de reintentos. */
 export const fetchExecution = async (executionId: string): Promise<ExecutionDetail> => {
   const { data } = await api.get<ExecutionDetail>(`${EXECUTIONS_PATH}/${executionId}`);

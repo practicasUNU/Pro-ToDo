@@ -1,5 +1,5 @@
 import { defineStore, acceptHMRUpdate } from 'pinia';
-import { ref } from 'vue';
+import { computed, ref } from 'vue';
 
 import * as fsmExecutionsService from '@services/fsm-executions.service';
 
@@ -7,7 +7,11 @@ import { toSortQuery } from '@/utils/table-sort';
 
 import { ExecutionState } from '@/types/execution';
 
-import type { ExecutionSummary, ExecutionUpdatedEvent } from '@/types/execution';
+import type {
+  ExecutionExportFormat,
+  ExecutionSummary,
+  ExecutionUpdatedEvent,
+} from '@/types/execution';
 import type { ExecutionSortKey, TableSort } from '@/types/sort';
 
 /** Filas por pagina del historial de ejecuciones. */
@@ -56,8 +60,13 @@ export const useExecutionsStore = defineStore('executions', () => {
   /** Orden del historial ENTERO, resuelto en el servidor. */
   const sort = ref<TableSort<ExecutionSortKey>>({ sortBy: null, descending: false });
   const isLoading = ref(false);
-  /** Descarga del CSV en curso: deshabilita el boton para no pedirla dos veces. */
-  const isExporting = ref(false);
+  /**
+   * Descarga en curso POR FORMATO, como en `useTelemetryStore`: cada boton se
+   * deshabilita mientras corre la suya, sin bloquear la del otro formato.
+   */
+  const exporting = ref<Record<ExecutionExportFormat, boolean>>({ csv: false, pdf: false });
+  /** Alguna descarga en curso, sea cual sea su formato. */
+  const isExporting = computed(() => exporting.value.csv || exporting.value.pdf);
   /** El historial se ha cargado alguna vez: sin el, un evento no pide nada. */
   const hasLoaded = ref(false);
   let refreshTimer: ReturnType<typeof setTimeout> | null = null;
@@ -96,24 +105,25 @@ export const useExecutionsStore = defineStore('executions', () => {
   };
 
   /**
-   * Bytes del historial en CSV con los filtros APLICADOS y el orden vigente,
-   * para que el fichero diga lo mismo que la tabla. Nunca la pagina: el informe
-   * trae todas las filas que cumplen el filtro (hasta el techo del backend).
+   * Bytes del historial (CSV o PDF) con los filtros APLICADOS y el orden
+   * vigente, para que el fichero diga lo mismo que la tabla. Nunca la pagina:
+   * el informe trae todas las filas que cumplen el filtro (hasta el techo del
+   * backend).
    *
    * Lee `filters` y no el borrador del formulario: un filtro tecleado pero sin
    * "Aplicar" no esta en pantalla y tampoco debe estar en el fichero. El store
    * no guarda los bytes en disco: eso toca el DOM y lo hace el componente.
    */
-  const exportHistory = async (): Promise<Blob> => {
-    isExporting.value = true;
+  const exportHistory = async (format: ExecutionExportFormat = 'csv'): Promise<Blob> => {
+    exporting.value = { ...exporting.value, [format]: true };
+    const query = { ...filters.value, ...toSortQuery(sort.value) };
 
     try {
-      return await fsmExecutionsService.downloadExecutionsCsv({
-        ...filters.value,
-        ...toSortQuery(sort.value),
-      });
+      return format === 'csv'
+        ? await fsmExecutionsService.downloadExecutionsCsv(query)
+        : await fsmExecutionsService.downloadExecutionsPdf(query);
     } finally {
-      isExporting.value = false;
+      exporting.value = { ...exporting.value, [format]: false };
     }
   };
 
@@ -174,6 +184,7 @@ export const useExecutionsStore = defineStore('executions', () => {
     filters,
     sort,
     isLoading,
+    exporting,
     isExporting,
     setFilters,
     setSort,

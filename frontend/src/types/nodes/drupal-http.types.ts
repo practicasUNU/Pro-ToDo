@@ -199,28 +199,62 @@ export const DRUPAL_BUNDLES: readonly string[] = [
 ];
 
 /**
- * Pagina de un preset en UN entorno.
+ * Lo que el preset ENSENA de su pagina en un entorno: la ruta publica.
  *
- * `null` en los UUID significa «lo pone el operador». Es lo que vale para todo
- * destino cuyo UUID no esta confirmado —todos los de Produccion, Innodays y la
- * pagina de licitaciones cerradas—: sembrar un UUID inventado para «dejarlo
- * relleno» seria el peor de los rellenos. El patron v4 casaria, el paso quedaria
- * valido y el fallo saldria en ejecucion como un 404 con el flujo ya PAUSADO.
- * Nulo, `isConfigValid` lo reclama en el momento de configurar.
+ * Los identificadores ya no viven aqui. Los sirve el backend desde su `.env`
+ * (`GET /api/nodos/drupal/targets`), que es tambien de donde sale la lista
+ * blanca del Banco de Pruebas: copiarlos aqui creaba dos fuentes de verdad que
+ * se desincronizaban en cuanto cambiaba una pagina.
  */
 export interface DrupalPresetTarget {
   /** Ruta publica de la pagina, para que el operador sepa a donde apunta. */
   readonly path: string;
+}
 
-  /** Identificador interno del nodo en Drupal. Informativo: la API usa el UUID. */
-  readonly nid: number | null;
-
+/**
+ * Pagina de un preset en UN entorno, tal como la sirve el backend. Replica de
+ * `DrupalPresetTargetDto`.
+ *
+ * `null` significa «no declarada en el entorno» y deja el campo para el
+ * operador: un UUID inventado pasaria la validacion y fallaria en ejecucion con
+ * un 404 y el flujo ya PAUSADO.
+ */
+export interface DrupalPresetPage {
   /** Pagina o entidad sobre la que actua el destino. */
   readonly targetNodeUuid: string | null;
 
   /** Pagina receptora, solo en `TRANSFER_HTML_BLOCK`. */
   readonly destinationNodeUuid: string | null;
+
+  /** Identificador interno del nodo en Drupal. Informativo: la API usa el UUID. */
+  readonly nid: number | null;
 }
+
+/** Pagina sin declarar: el preset carga y el operador la escribe a mano. */
+export const EMPTY_DRUPAL_PRESET_PAGE: DrupalPresetPage = {
+  targetNodeUuid: null,
+  destinationNodeUuid: null,
+  nid: null,
+};
+
+/**
+ * Plantillas que un preset propone. Solo se escriben sobre campos VACIOS: son
+ * el mapeo del contenido del flujo, y pisar lo que el operador ya escribio
+ * borraria trabajo hecho a mano.
+ */
+export type DrupalPresetTemplates = Readonly<
+  Partial<
+    Record<
+      | 'titleTemplate'
+      | 'summaryTemplate'
+      | 'authorTemplate'
+      | 'authorFallback'
+      | 'dateTemplate'
+      | 'linkValueTemplate',
+      string
+    >
+  >
+>;
 
 /**
  * Un destino operativo completo, para los botones de carga rapida.
@@ -270,15 +304,22 @@ export interface DrupalPreset {
    */
   readonly associatedTemplateName: string | null;
 
-  /** La pagina de este destino en cada entorno. */
+  /** Plantillas que propone; solo rellenan campos vacios. */
+  readonly templates: DrupalPresetTemplates;
+
+  /** La ruta de este destino en cada entorno. */
   readonly environments: Readonly<Record<DrupalEnvironment, DrupalPresetTarget>>;
 }
 
-/** UUID de la pagina agregadora de licitaciones de PRUEBAS (`/prueba-licitaciones`). */
-const SANDBOX_LICITACIONES_UUID = '7f1700bf-b54b-4c12-b71a-8a71f1f0ee38';
+/**
+ * Selector de la fila de un evento por su nombre literal. El PROCESADOR_IA deja
+ * el nombre en `headline` (prompts INNODAYS/INNOBAR_ENLACE_DEFAULT, migracion
+ * 063): su contrato de salida es cerrado y no admite una clave propia.
+ */
+const EVENT_ROW_LINK_SELECTOR = "table tr:contains('{{llm_response.headline}}') a";
 
-/** UUID de la pagina de verificacion de titulos de PRUEBAS. */
-const SANDBOX_TITULOS_UUID = 'b17d69d8-6998-4883-b8dc-153b55dbd9c5';
+/** Enlace nuevo del evento, que esos mismos prompts dejan en `summary`. */
+const EVENT_LINK_VALUE_TEMPLATE = '{{llm_response.summary}}';
 
 /**
  * Terminos de taxonomia de una noticia de Notiweb: seccion «Notiweb» y tipo
@@ -291,9 +332,8 @@ const NOTIWEB_TYPE_TERM_UUID = '6c18cd7a-a5cd-4332-8271-6bdee4ef9834';
 /**
  * Destinos operativos del Drupal de Madrid+D, en el ORDEN en que se pintan.
  *
- * Los UUID son publicos, no credenciales: viajan en el bundle sin exponer nada.
- * El token (`DRUPAL_API_TOKEN`) vive exclusivamente en `backend/.env` y jamas
- * llega al cliente (`security-and-scope.md` §0.1).
+ * Las paginas (UUID y NID) las sirve el backend; aqui solo queda lo que no
+ * depende de la instalacion: modo, bundle, selectores, ruta y plantillas.
  *
  * Existen porque teclear un UUID v4 a mano es el error mas caro de este
  * formulario: un digito cambiado no se detecta al guardar —el patron sigue
@@ -333,18 +373,13 @@ export const DRUPAL_PRESETS: Readonly<
     targetContainerSelector: null,
     newsSectionTermUuid: null,
     newsTypeTermUuid: null,
+    templates: {},
     environments: {
       SANDBOX: {
         path: '/prueba-licitaciones',
-        nid: 55937,
-        targetNodeUuid: SANDBOX_LICITACIONES_UUID,
-        destinationNodeUuid: null,
       },
       PRODUCTION: {
         path: '/convocatorias-abiertas',
-        nid: null,
-        targetNodeUuid: null,
-        destinationNodeUuid: null,
       },
     },
   },
@@ -375,22 +410,16 @@ export const DRUPAL_PRESETS: Readonly<
     targetContainerSelector: '#collapse2 > .panel-body',
     newsSectionTermUuid: null,
     newsTypeTermUuid: null,
+    templates: {},
     environments: {
-      // La pagina de cerradas queda nula en los dos entornos. Apuntarla a la de
-      // abiertas «para probar» seria destructivo: `runTransferHtmlBlock` lee
-      // origen y destino por separado y el segundo PATCH pisa al primero con un
-      // DOM ya obsoleto, de modo que el bloque se borra sin dejar copia.
+      // Origen y destino salen del backend por separado. Nunca la MISMA pagina:
+      // `runTransferHtmlBlock` lee origen y destino por separado y el segundo
+      // PATCH pisaria al primero con un DOM ya obsoleto.
       SANDBOX: {
         path: '/prueba-licitaciones → /prueba-licitaciones-cerradas',
-        nid: 55937,
-        targetNodeUuid: SANDBOX_LICITACIONES_UUID,
-        destinationNodeUuid: null,
       },
       PRODUCTION: {
         path: '/convocatorias-abiertas → /convocatorias-cerradas',
-        nid: null,
-        targetNodeUuid: null,
-        destinationNodeUuid: null,
       },
     },
   },
@@ -420,18 +449,13 @@ export const DRUPAL_PRESETS: Readonly<
     targetContainerSelector: null,
     newsSectionTermUuid: null,
     newsTypeTermUuid: null,
+    templates: {},
     environments: {
       SANDBOX: {
         path: '/prueba-verificador-titulos',
-        nid: 55938,
-        targetNodeUuid: SANDBOX_TITULOS_UUID,
-        destinationNodeUuid: null,
       },
       PRODUCTION: {
         path: '/titulos',
-        nid: null,
-        targetNodeUuid: null,
-        destinationNodeUuid: null,
       },
     },
   },
@@ -445,26 +469,21 @@ export const DRUPAL_PRESETS: Readonly<
     itemSelector: null,
     insertPosition: DEFAULT_DRUPAL_INSERT_POSITION,
     publishStatus: true,
-    // El elemento depende de cada edicion (que fila, que imagen): lo escribe el
-    // operador. El placeholder del campo muestra la forma.
-    linkSelector: null,
+    // La fila del evento, por su nombre literal. Para una imagen del carrusel
+    // el operador lo cambia a mano.
+    linkSelector: EVENT_ROW_LINK_SELECTOR,
     linkAttribute: 'href',
     associatedTemplateName: null,
     targetContainerSelector: null,
     newsSectionTermUuid: null,
     newsTypeTermUuid: null,
+    templates: { linkValueTemplate: EVENT_LINK_VALUE_TEMPLATE },
     environments: {
       SANDBOX: {
         path: '/prueba-innodays',
-        nid: null,
-        targetNodeUuid: null,
-        destinationNodeUuid: null,
       },
       PRODUCTION: {
         path: '/innodays-madrid',
-        nid: null,
-        targetNodeUuid: null,
-        destinationNodeUuid: null,
       },
     },
   },
@@ -478,25 +497,20 @@ export const DRUPAL_PRESETS: Readonly<
     itemSelector: null,
     insertPosition: DEFAULT_DRUPAL_INSERT_POSITION,
     publishStatus: true,
-    linkSelector: null,
+    linkSelector: EVENT_ROW_LINK_SELECTOR,
     linkAttribute: 'href',
     associatedTemplateName: null,
     targetContainerSelector: null,
     newsSectionTermUuid: null,
     newsTypeTermUuid: null,
+    templates: { linkValueTemplate: EVENT_LINK_VALUE_TEMPLATE },
     environments: {
-      // Misma pagina de pruebas que Innodays: no hay una propia de Innobar.
+      // Sin pagina de pruebas propia declarada, el backend le da la de Innodays.
       SANDBOX: {
         path: '/prueba-innodays',
-        nid: null,
-        targetNodeUuid: null,
-        destinationNodeUuid: null,
       },
       PRODUCTION: {
         path: '/innobar-madrid',
-        nid: null,
-        targetNodeUuid: null,
-        destinationNodeUuid: null,
       },
     },
   },
@@ -517,21 +531,36 @@ export const DRUPAL_PRESETS: Readonly<
     targetContainerSelector: null,
     newsSectionTermUuid: NOTIWEB_SECTION_TERM_UUID,
     newsTypeTermUuid: NOTIWEB_TYPE_TERM_UUID,
+    // El prompt NOTIWEB_DEFAULT deja titular y entradilla en `headline` y
+    // `summary`; autor y fecha salen del correo, con respaldo si el remitente
+    // no trae nombre.
+    templates: {
+      titleTemplate: '{{llm_response.headline}}',
+      summaryTemplate: '{{llm_response.summary}}',
+      authorTemplate: '{{raw_email.from_name}}',
+      authorFallback: 'Madrid+D',
+      dateTemplate: '{{raw_email.date}}',
+    },
     environments: {
       // Sin pagina receptora: este canal crea entidades sueltas.
       SANDBOX: {
         path: '/prueba-noticias',
-        nid: null,
-        targetNodeUuid: null,
-        destinationNodeUuid: null,
       },
-      PRODUCTION: { path: '/noticias', nid: null, targetNodeUuid: null, destinationNodeUuid: null },
+      PRODUCTION: { path: '/noticias' },
     },
   },
 };
 
 /** Claves de `DRUPAL_PRESETS`, para tipar el selector sin `string`. */
 export type DrupalPresetKey = keyof typeof DRUPAL_PRESETS;
+
+/**
+ * Paginas de todos los presets en los dos entornos, tal como las sirve
+ * `GET /api/nodos/drupal/targets`. Replica de `DrupalPresetTargetsResponseDto`.
+ */
+export type DrupalPresetTargets = Readonly<
+  Record<DrupalEnvironment, Readonly<Record<DrupalPresetKey, DrupalPresetPage>>>
+>;
 
 /** Rotulo del boton con su entorno: «Innodays (Sandbox)». */
 export const describePresetLabel = (preset: DrupalPreset, isSandbox: boolean): string =>
@@ -561,6 +590,9 @@ export interface DrupalHttpNodeConfig {
 
   /** Autor, fecha (`AAAA-MM-DD`) y orden de una noticia; solo `node--noticias`. */
   authorTemplate: string | null;
+
+  /** Autor si `authorTemplate` se resuelve a vacio (correo sin nombre de remitente). */
+  authorFallback: string | null;
   dateTemplate: string | null;
   orderValue: number;
 

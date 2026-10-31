@@ -354,6 +354,7 @@ type ImapConfigResolution =
 interface ExtractedEmail {
   readonly message_id: string;
   readonly from: string;
+  readonly from_name: string;
   readonly subject: string;
   readonly text: string;
   readonly html: string;
@@ -381,6 +382,33 @@ const extractFromAddress = (from: AddressObject | undefined): string => {
   }
 
   return asString(from?.text);
+};
+
+/**
+ * Nombre visible del remitente («Juan Pérez» de `Juan Pérez <jp@x.es>`).
+ *
+ * Clave PROPIA y no un cambio de `from`: `from` es la direccion limpia, y de
+ * ella dependen la imputacion de la ejecucion al remitente y los filtros del
+ * buzon. Cadena vacia —nunca `undefined`— cuando el MIME no trae nombre, por el
+ * mismo motivo que `date`: una plantilla que la interpole no debe fallar por
+ * variable ausente, sino caer a su valor de respaldo.
+ *
+ * Se colapsan los espacios y se quitan las comillas que envuelven el nombre
+ * entero (`"Pérez, Juan"`): `mailparser` ya las retira casi siempre, pero un
+ * remitente mal formado las deja y acabarian publicadas como autor.
+ */
+export const extractFromName = (from: AddressObject | undefined): string => {
+  const name = from?.value?.[0]?.name;
+
+  if (typeof name !== 'string') {
+    return '';
+  }
+
+  return name
+    .replace(/\s+/g, ' ')
+    .trim()
+    .replace(/^"(.*)"$/, '$1')
+    .trim();
 };
 
 /**
@@ -545,6 +573,12 @@ export class ImapTriggerStrategy implements INodeStrategy {
       name: 'from',
       type: 'text',
       description: 'Direccion del remitente, ya aplanada a cadena',
+    },
+    {
+      name: 'from_name',
+      type: 'text',
+      description:
+        'Nombre visible del remitente, vacio si el correo no lo trae',
     },
     { name: 'subject', type: 'text', description: 'Asunto del correo' },
     {
@@ -1064,6 +1098,7 @@ export class ImapTriggerStrategy implements INodeStrategy {
     return {
       message_id: messageId,
       from: extractFromAddress(parsed.from),
+      from_name: extractFromName(parsed.from),
       subject: asString(parsed.subject),
       // Lo que `mailparser` haya podido extraer como texto: la parte
       // `text/plain` si existe, o la conversion del marcado si el mensaje era un

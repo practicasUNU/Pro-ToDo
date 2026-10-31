@@ -7,6 +7,11 @@
 
 import * as cheerio from 'cheerio';
 
+import { escapeSelectorString } from './link-attribute.util';
+
+import type { Cheerio } from 'cheerio';
+import type { AnyNode } from 'domhandler';
+
 /** Clase del envoltorio estandar de una licitacion. */
 export const TENDER_BLOCK_CLASS = 'pd-licitacion-block';
 
@@ -58,3 +63,37 @@ export const wrapTenderBlock = (
 
   return `<div class="${TENDER_BLOCK_CLASS}" data-expediente="${escapeHtmlAttribute(code)}">${markup}</div>`;
 };
+
+/**
+ * Codigo de expediente de un bloque de licitacion, o `null` si no lo trae.
+ *
+ * Es la IDENTIDAD del bloque en un traslado. Se mira el propio elemento y, si
+ * no lo lleva, el envoltorio mas cercano que si: un selector que case con el
+ * `div.licitacion-entry` interior de un `div.pd-licitacion-block` sigue
+ * hablando de la misma licitacion.
+ */
+export const readExpediente = (block: Cheerio<AnyNode>): string | null => {
+  const own = block.attr('data-expediente');
+  const code = (
+    own ??
+    block.closest('[data-expediente]').attr('data-expediente') ??
+    ''
+  ).trim();
+
+  return code === '' ? null : code;
+};
+
+/** Selector exacto del bloque con ese expediente, con el codigo escapado. */
+export const expedienteSelector = (code: string): string =>
+  `[data-expediente="${escapeSelectorString(code)}"]`;
+
+/**
+ * Si un selector apunta a UN expediente concreto, y no a «cualquier licitacion».
+ *
+ * Solo entonces encontrar el bloque en la pagina de destino demuestra que el
+ * traslado ya se hizo. Con un selector generico (`.pd-licitacion-block`), la
+ * pagina de cerradas casa siempre por las licitaciones que ya tenia, y tomarlo
+ * por «ya trasladado» borraba el bloque de origen sin escribirlo en destino.
+ */
+export const selectorPinsExpediente = (selector: string): boolean =>
+  /\[\s*data-expediente\s*=/i.test(selector);
