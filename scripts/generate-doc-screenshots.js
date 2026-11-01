@@ -66,15 +66,6 @@ const code = (file, anchor, lines) => ({ kind: "code", file, anchor, lines });
 /** Panel con el resultado de una consulta de solo lectura. */
 const query = (title, sql) => ({ kind: "query", title, sql });
 
-/** Wizard: abre la primera plantilla admitida (solo borrador, no guarda). */
-async function openFirstWizardTemplate(page) {
-  await page
-    .locator(".pd-pipeline-card:not(.pd-pipeline-card--blocked)")
-    .first()
-    .click();
-  await page.locator(".q-stepper").waitFor({ timeout: NAVIGATION_TIMEOUT_MS });
-}
-
 /** Canvas: entra por "Supervisar"; prefiere un flujo Notiweb si existe. */
 async function openWorkflowCanvas(page) {
   // Con `to`, el q-btn se renderiza como enlace: se localiza por aria-label.
@@ -95,31 +86,37 @@ async function openWorkflowCanvas(page) {
 
 /** Reduce solo en la captura el grafo, para que quepa el flujo completo. */
 async function fitCanvasToViewport(page) {
-  await page.addStyleTag({ content: ".pd-canvas { zoom: 0.7; }" });
+  await page.addStyleTag({ content: ".pd-canvas { zoom: 0.66; }" });
 }
 
+// Un PNG por tema y como maximo 2-3 paneles: en mosaicos de 4-6 el texto
+// dejaba de leerse.
 const CAPTURES = [
   {
-    file: "captura_01_seguridad.png",
-    title: "Seguridad perimetral: OTP, lista blanca CIDR y RBAC",
+    file: "captura_01a_seguridad_codigo.png",
+    title: "Seguridad: verificacion OTP, red local (CIDR) y RBAC",
     panels: [
       code(
         "backend/src/modules/auth/auth.service.ts",
         /public async verifyOtp\(/,
-        45,
+        55,
       ),
       code(
         "backend/src/common/middlewares/red-local.middleware.ts",
         /public async use\(/,
-        35,
+        30,
       ),
       code(
         "backend/src/common/guards/roles.guard.ts",
         /public canActivate\(/,
         30,
       ),
-      ui("/ip-whitelist", "Lista blanca de IP (CIDR)"),
     ],
+  },
+  {
+    file: "captura_01b_seguridad_ui.png",
+    title: "Seguridad: mantenimiento de la lista blanca de IPs",
+    panels: [ui("/ip-whitelist", "Lista blanca de IP (CIDR)")],
   },
   {
     file: "captura_02_persistencia.png",
@@ -176,23 +173,29 @@ const CAPTURES = [
     ],
   },
   {
-    file: "captura_05_http_acens.png",
-    title: "Destino HTTP generico / Acens con credencial cifrada AES-256-GCM",
+    file: "captura_05a_acens_codigo.png",
+    title: "Destino HTTP generico y Acens: credencial aplicada al envio",
     panels: [
       code(
         "backend/src/modules/nodes/strategies/http-generic-destination.strategy.ts",
         /private async applyCredential\(/,
-        45,
+        60,
       ),
       code(
         "backend/src/modules/nodes/strategies/acens-http.strategy.ts",
         /public async execute\(/,
-        50,
+        60,
       ),
+    ],
+  },
+  {
+    file: "captura_05b_acens_vault_ui.png",
+    title: "Boveda de credenciales: cifrado AES-256-GCM",
+    panels: [
       code(
         "backend/src/core/security/encryption.service.ts",
         /public encrypt\(/,
-        45,
+        60,
       ),
       ui("/credenciales", "Boveda de credenciales"),
     ],
@@ -205,47 +208,64 @@ const CAPTURES = [
       code(
         "backend/src/core/fsm/services/fsm-engine.service.ts",
         /private async pauseAt\(/,
-        55,
+        60,
       ),
     ],
   },
   {
-    file: "captura_07_wizard.png",
-    title:
-      "Asistente guiado (Poka-Yoke) y formularios de nodo con selectores cerrados",
+    file: "captura_07a_wizard_seleccion.png",
+    title: "Asistente guiado: eleccion de la plantilla del flujo",
     panels: [
       ui("/flujos/nuevo", "Asistente: eleccion de plantilla", {
-        key: "wizard-selector",
         waitFor: ".pd-pipeline-card",
       }),
-      ui("/flujos/nuevo", "Asistente: primer paso del flujo", {
-        key: "wizard-step",
-        prepare: openFirstWizardTemplate,
-      }),
-      sandbox("TRIGGER_IMAP", "Disparador IMAP"),
-      sandbox("EXTRACTOR_WEB", "Extractor web"),
-      sandbox("PROCESADOR_IA", "Procesador IA"),
-      sandbox("ESCUDO_POST_IA", "Escudo post-IA"),
     ],
   },
   {
-    file: "captura_08_crud_ws.png",
-    title: "Mantenimientos CRUD y cliente WebSocket",
+    file: "captura_07b_nodo_trigger_imap.png",
+    title: "Formulario del nodo: Disparador IMAP",
+    panels: [sandbox("TRIGGER_IMAP", "Disparador IMAP")],
+  },
+  {
+    file: "captura_07c_nodo_extractor_web.png",
+    title: "Formulario del nodo: Extractor web",
+    panels: [sandbox("EXTRACTOR_WEB", "Extractor web")],
+  },
+  {
+    file: "captura_07d_nodo_procesador_ia.png",
+    title: "Formulario del nodo: Procesador IA",
+    panels: [sandbox("PROCESADOR_IA", "Procesador IA")],
+  },
+  {
+    file: "captura_07e_nodo_escudo_post_ia.png",
+    title: "Formulario del nodo: Escudo post-IA",
+    panels: [sandbox("ESCUDO_POST_IA", "Escudo post-IA")],
+  },
+  {
+    file: "captura_07f_nodo_mapeador_plantilla.png",
+    title: "Formulario del nodo: Mapeador de plantilla",
+    panels: [sandbox("MAPEADOR_PLANTILLA", "Mapeador de plantilla")],
+  },
+  {
+    file: "captura_08a_cruds_ui.png",
+    title: "Mantenimientos: usuarios e IPs autorizadas",
+    panels: [ui("/users", "Usuarios"), ui("/ip-whitelist", "IPs autorizadas")],
+  },
+  {
+    file: "captura_08b_plantillas_ws.png",
+    title: "Catalogo de plantillas y cliente WebSocket",
     panels: [
-      ui("/users", "Usuarios"),
-      ui("/ip-whitelist", "IPs autorizadas"),
       ui("/templates", "Plantillas"),
       code(
         "frontend/src/services/socket.client.ts",
         /export const connectSocket/,
-        45,
+        60,
       ),
     ],
   },
   {
-    file: "captura_09_panel_supervision.png",
-    title: "Panel de supervision: canvas del flujo, ejecuciones y costes de IA",
-    layout: "hero",
+    file: "captura_09a_canvas_flujo.png",
+    title: "Canvas de topologia del flujo",
     panels: [
       ui(null, "Canvas de topologia del flujo", {
         key: "canvas",
@@ -253,8 +273,15 @@ const CAPTURES = [
         waitFor: ".pd-canvas",
         prepare: fitCanvasToViewport,
       }),
+    ],
+  },
+  {
+    file: "captura_09b_supervision_ejecuciones.png",
+    title:
+      "Supervision: ejecuciones en tiempo real, pausas HITL y costes de IA",
+    panels: [
       ui("/flujos", "Ejecuciones en tiempo real"),
-      ui("/informes", "Telemetria y costes de IA"),
+      ui("/informes", "Resumen de costes de IA"),
     ],
   },
   {
@@ -280,15 +307,31 @@ const CAPTURES = [
     ],
   },
   {
-    file: "captura_11_telemetria.png",
-    title: "Telemetria de tokens, coste estimado en USD y tarifas de IA",
+    file: "captura_11a_telemetria_ui.png",
+    title: "Telemetria de IA: informe de consumo y tarifas por modelo",
     panels: [
-      ui("/informes", "Telemetria de tokens"),
+      ui("/informes", "Informe de consumo de IA"),
       ui("/precios", "Gestion de tarifas"),
+    ],
+  },
+  {
+    file: "captura_11b_telemetria_codigo.png",
+    title: "Telemetria de IA: tokens y coste estimado en USD",
+    panels: [
       code(
         "backend/src/modules/telemetry/telemetry.service.ts",
         /public async computeUsage\(/,
-        50,
+        60,
+      ),
+      code(
+        "backend/src/modules/telemetry/telemetry.service.ts",
+        /public async recordTokenUsage\(/,
+        60,
+      ),
+      code(
+        "backend/src/modules/nodes/strategies/inference-telemetry.ts",
+        /export const recordResponseUsage/,
+        60,
       ),
     ],
   },
@@ -328,9 +371,71 @@ const renderCodePanel = (panel) => {
   return `<section class="panel"><h2>${escapeHtml(panel.file)}</h2><pre>${rows}</pre></section>`;
 };
 
-const renderImagePanel = (panel) =>
-  `<section class="panel"><h2>${escapeHtml(panel.title)} · <span class="mono">${escapeHtml(panel.route)}</span></h2>` +
-  `<div class="shot"><img src="data:image/png;base64,${panel.image}"></div></section>`;
+/** Geometria del lienzo compuesto, en px (cabecera 64, margen 16, hueco 16). */
+const CANVAS = { width: 1888, height: 984, gap: 16, panelChrome: 35 };
+const SLICE_GAP = 12;
+const MAX_SLICES = 4;
+
+/** Area util (ancho, alto) del panel `index` segun el layout de la captura. */
+const slotSize = (capture, index, count) => {
+  const { width, height, gap, panelChrome } = CANVAS;
+  let slotWidth;
+  let slotHeight;
+
+  if (capture.layout === "hero") {
+    const usable = width - gap;
+    slotWidth = index === 0 ? (usable * 3) / 5 : (usable * 2) / 5;
+    slotHeight =
+      index === 0 ? height : (height - gap * (count - 2)) / (count - 1);
+  } else {
+    const columns = count <= 3 ? count : Math.ceil(count / 2);
+    const rows = count <= 3 ? 1 : 2;
+    slotWidth = (width - gap * (columns - 1)) / columns;
+    slotHeight = (height - gap * (rows - 1)) / rows;
+  }
+
+  return { width: slotWidth - 2, height: slotHeight - panelChrome };
+};
+
+/**
+ * Numero de columnas en que se trocea una vista alta: el que maximiza la
+ * escala. Un formulario de 2500 px en una sola columna quedaria ilegible.
+ */
+const bestSlicing = (image, slot) => {
+  let best = { slices: 1, scale: 0 };
+
+  for (let slices = 1; slices <= MAX_SLICES; slices += 1) {
+    const sliceHeight = Math.ceil(image.height / slices);
+    const scale = Math.min(
+      1,
+      (slot.width - SLICE_GAP * (slices - 1)) / (slices * image.width),
+      slot.height / sliceHeight,
+    );
+
+    if (scale > best.scale + 0.01) {
+      best = { slices, scale, sliceHeight };
+    }
+  }
+
+  return best;
+};
+
+const renderImagePanel = (panel, slot) => {
+  const { slices, scale, sliceHeight } = bestSlicing(panel, slot);
+  const width = Math.floor(panel.width * scale);
+  const height = Math.ceil(sliceHeight * scale);
+  const columns = Array.from(
+    { length: slices },
+    (_, index) =>
+      `<div class="slice" style="width:${width}px;height:${height}px">` +
+      `<img src="data:image/png;base64,${panel.image}" style="width:${width}px;transform:translateY(-${index * height}px)"></div>`,
+  ).join("");
+
+  return (
+    `<section class="panel"><h2>${escapeHtml(panel.title)} · <span class="mono">${escapeHtml(panel.route)}</span></h2>` +
+    `<div class="shot">${columns}</div></section>`
+  );
+};
 
 const renderQueryPanel = (panel) => {
   const body =
@@ -387,8 +492,10 @@ const renderComposite = (capture, panels) => {
     pre { flex: 1; overflow: hidden; padding: 8px 0; font-size: 12px; line-height: 1.45; color: #E4EAFB; }
     .ln { display: flex; white-space: pre; }
     .no { width: 52px; flex: none; padding-right: 12px; text-align: right; color: #5B5B66; }
-    .shot { flex: 1; min-height: 0; display: flex; align-items: flex-start; justify-content: center; background: #0D0F26; }
-    .shot img { max-width: 100%; max-height: 100%; object-fit: contain; }
+    .shot { flex: 1; min-height: 0; display: flex; gap: ${SLICE_GAP}px; align-items: flex-start; justify-content: center; background: #0D0F26; overflow: hidden; }
+    .slice { flex: none; overflow: hidden; border-right: 1px dashed rgba(184,192,222,.25); }
+    .slice:last-child { border-right: none; }
+    .slice img { display: block; max-width: none; }
     .scroll { flex: 1; overflow: hidden; padding: 8px 12px; }
     table { width: 100%; border-collapse: collapse; font-family: 'JetBrains Mono', ui-monospace, monospace; font-size: 13px; }
     th, td { text-align: left; padding: 5px 8px; border-bottom: 1px solid rgba(184,192,222,.2); }
@@ -396,7 +503,7 @@ const renderComposite = (capture, panels) => {
     .muted { color: #B8C0DE; }
   </style></head><body>
     <header><h1>${escapeHtml(capture.title)}</h1><span>Proto-Do · UNUWARE</span></header>
-    <main class="${capture.layout ?? ""}">${panels.map((panel) => RENDERERS[panel.kind](panel)).join("")}</main>
+    <main class="${capture.layout ?? ""}">${panels.map((panel, index) => RENDERERS[panel.kind](panel, slotSize(capture, index, panels.length))).join("")}</main>
   </body></html>`;
 };
 
@@ -456,12 +563,29 @@ const login = async (page, email) => {
 };
 
 /** Captura de una vista de la app, en memoria y en base64 (cacheada por clave). */
-const captureUi = async (page, panel, cache) => {
-  const key = panel.key ?? panel.route;
+/** Ancho del drawer del shell, que queda fuera de `.q-page`. */
+const DRAWER_WIDTH = 220;
+
+/**
+ * Ventana a la que se renderiza una vista: cercana al ancho de su panel, para
+ * que en un mosaico de 2 no se encoja a la mitad. Nunca por debajo de 1100 px,
+ * para no cruzar el punto en que Quasar pliega el drawer.
+ */
+const viewportWidthFor = (slot) =>
+  Math.min(
+    VIEWPORT.width,
+    Math.max(1100, Math.round(slot.width / 0.9) + DRAWER_WIDTH),
+  );
+
+const captureUi = async (page, panel, cache, slot) => {
+  const width = viewportWidthFor(slot);
+  const key = `${panel.key ?? panel.route}@${width}`;
 
   if (cache.has(key)) {
     return cache.get(key);
   }
+
+  await page.setViewportSize({ width, height: VIEWPORT.height });
 
   if (panel.navigate) {
     await panel.navigate(page);
@@ -483,24 +607,24 @@ const captureUi = async (page, panel, cache) => {
   await page.waitForTimeout(SETTLE_DELAY_MS);
   // Los avisos efimeros (p. ej. "codigo enviado") no forman parte de la vista.
   await page.addStyleTag({
-    content: ".q-notifications { display: none !important; }",
+    // Cabecera y drawer son fijos: al capturar un elemento alto se
+    // superpondrian a el. `visibility` no altera el layout.
+    content:
+      ".q-notifications { display: none !important; } .q-header, .q-drawer { visibility: hidden !important; }",
   });
 
-  // Recorte al elemento, acotado a la ventana: un formulario largo se ve por
-  // su parte superior en vez de encogerse hasta ser ilegible.
-  const box = await page.locator(panel.clip).first().boundingBox();
-  const clip =
-    box === null
-      ? undefined
-      : {
-          x: Math.max(0, box.x),
-          y: Math.max(0, box.y),
-          width: Math.min(box.width, VIEWPORT.width - Math.max(0, box.x)),
-          height: Math.min(box.height, VIEWPORT.height - Math.max(0, box.y)),
-        };
-  const buffer = await page.screenshot({ type: "png", clip });
+  // Elemento COMPLETO, aunque supere la ventana: si es alto, el compositor
+  // lo trocea en columnas en vez de cortarlo.
+  const region = page.locator(panel.clip).first();
+  const buffer =
+    (await region.count()) > 0
+      ? await region.screenshot({ type: "png" })
+      : await page.screenshot({ type: "png" });
   const shot = {
     image: buffer.toString("base64"),
+    // Cabecera IHDR del PNG: ancho y alto en los bytes 16-23.
+    width: buffer.readUInt32BE(16),
+    height: buffer.readUInt32BE(20),
     route: new URL(page.url()).hash.replace(/^#/, ""),
   };
 
@@ -534,9 +658,9 @@ const runQuery = async (sql) => {
   }
 };
 
-const resolvePanel = async (panel, page, cache) => {
+const resolvePanel = async (panel, page, cache, slot) => {
   if (panel.kind === "ui") {
-    return { ...panel, ...(await captureUi(page, panel, cache)) };
+    return { ...panel, ...(await captureUi(page, panel, cache, slot)) };
   }
 
   if (panel.kind === "query") {
@@ -576,8 +700,9 @@ const main = async () => {
       console.log(`- ${capture.file}`);
       const panels = [];
 
-      for (const panel of capture.panels) {
-        panels.push(await resolvePanel(panel, page, cache));
+      for (const [index, panel] of capture.panels.entries()) {
+        const slot = slotSize(capture, index, capture.panels.length);
+        panels.push(await resolvePanel(panel, page, cache, slot));
       }
 
       await composer.setContent(renderComposite(capture, panels), {
@@ -589,9 +714,23 @@ const main = async () => {
       });
     }
 
+    // Solo tras generar todo: borra las capturas de catalogos anteriores.
+    const expected = new Set(CAPTURES.map((capture) => capture.file));
+    for (const file of fs.readdirSync(OUTPUT_DIR)) {
+      if (/^captura_.*\.png$/.test(file) && !expected.has(file)) {
+        fs.unlinkSync(path.join(OUTPUT_DIR, file));
+      }
+    }
+
     console.log(
       `Listo: ${CAPTURES.length} capturas en ${path.relative(ROOT, OUTPUT_DIR)}/`,
     );
+    for (const capture of CAPTURES) {
+      const png = fs.readFileSync(path.join(OUTPUT_DIR, capture.file));
+      console.log(
+        `  ${capture.file}  ${png.readUInt32BE(16)}x${png.readUInt32BE(20)}`,
+      );
+    }
   } finally {
     await browser.close();
   }
