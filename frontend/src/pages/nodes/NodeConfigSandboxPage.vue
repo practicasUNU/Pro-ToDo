@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, provide, ref, shallowRef, watch } from 'vue';
+import { useRoute } from 'vue-router';
 
 import { useNodeCatalogStore } from '@stores/node-catalog.store';
 import { resolveNodeStore } from '@stores/nodes/node-store-registry';
@@ -9,6 +10,7 @@ import NodeSandboxRunner from '@components/nodes/NodeSandboxRunner.vue';
 import { NODE_SANDBOX_MODE_KEY } from '@components/nodes/node-sandbox-mode';
 
 import { buildContextForNamespaces } from '@/utils/upstream-catalog';
+import { parseSandboxNodeType } from '@/utils/sandbox-node-type';
 
 import { TEMPLATE_NAMESPACES } from '@/types/html-template';
 import { useSelectFilter } from '@/composables/useSelectFilter';
@@ -43,7 +45,24 @@ const SANDBOX_NODE_ID = 'nodo_demo';
 // Drupal se encierra en el entorno de pruebas (toggle fijo en Sandbox).
 provide(NODE_SANDBOX_MODE_KEY, true);
 
-const selectedNodeType = ref<NodeType>(NodeType.MAPEADOR_PLANTILLA);
+const route = useRoute();
+
+// Enlace profundo `?nodeType=DESTINO_DRUPAL`: abre el banco en ese configurador.
+const selectedNodeType = ref<NodeType>(
+  parseSandboxNodeType(route.query.nodeType, configurableNodeTypes) ?? NodeType.MAPEADOR_PLANTILLA,
+);
+
+// Misma ruta con otra query: Vue reutiliza la pagina, asi que se vigila.
+watch(
+  () => route.query.nodeType,
+  (value) => {
+    const requested = parseSandboxNodeType(value, configurableNodeTypes);
+
+    if (requested !== null) {
+      selectedNodeType.value = requested;
+    }
+  },
+);
 
 const nodeTypeOptions = computed(() =>
   configurableNodeTypes.map((nodeType) => ({

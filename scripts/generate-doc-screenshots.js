@@ -39,14 +39,64 @@ const FRONTEND_URL = (
   "http://localhost:9000"
 ).replace(/\/+$/, "");
 
-/** Panel de vista real de la app. */
-const ui = (route, title) => ({ kind: "ui", route, title: title ?? route });
+/**
+ * Panel de vista real de la app. Opciones: `clip` (selector que se recorta;
+ * por defecto `.q-page`, sin el shell), `prepare(page)` (clics previos a la
+ * captura) y `navigate(page)` (sustituye al `goto` cuando la ruta es dinamica).
+ */
+const ui = (route, title, options = {}) => ({
+  kind: "ui",
+  route,
+  title: title ?? route,
+  clip: ".q-page",
+  ...options,
+});
+
+/** Formulario de un nodo en el Banco de Pruebas (`?nodeType=`). */
+const sandbox = (nodeType, title) =>
+  ui(`/nodos/config-sandbox?nodeType=${nodeType}`, title, {
+    key: `sandbox-${nodeType}`,
+    waitFor: ".sandbox-grid",
+    clip: ".sandbox-grid > div:first-child",
+  });
 
 /** Panel de codigo: el fragmento se localiza por regex, no por numero de linea. */
 const code = (file, anchor, lines) => ({ kind: "code", file, anchor, lines });
 
 /** Panel con el resultado de una consulta de solo lectura. */
 const query = (title, sql) => ({ kind: "query", title, sql });
+
+/** Wizard: abre la primera plantilla admitida (solo borrador, no guarda). */
+async function openFirstWizardTemplate(page) {
+  await page
+    .locator(".pd-pipeline-card:not(.pd-pipeline-card--blocked)")
+    .first()
+    .click();
+  await page.locator(".q-stepper").waitFor({ timeout: NAVIGATION_TIMEOUT_MS });
+}
+
+/** Canvas: entra por "Supervisar"; prefiere un flujo Notiweb si existe. */
+async function openWorkflowCanvas(page) {
+  // Con `to`, el q-btn se renderiza como enlace: se localiza por aria-label.
+  await page.goto(appUrl("/flujos"), { waitUntil: "networkidle" });
+  const supervise = page.locator('[aria-label^="Supervisar "]');
+  await supervise.first().waitFor({ timeout: NAVIGATION_TIMEOUT_MS });
+  const preferred = supervise.filter({
+    has: page.locator(
+      "xpath=self::*[contains(translate(@aria-label, 'NOTIWEB', 'notiweb'), 'notiweb')]",
+    ),
+  });
+  const target = (await preferred.count()) > 0 ? preferred : supervise;
+  await target.first().click();
+  await page.waitForURL((url) => /^#\/flujos\/[0-9a-f-]{36}/.test(url.hash), {
+    timeout: NAVIGATION_TIMEOUT_MS,
+  });
+}
+
+/** Reduce solo en la captura el grafo, para que quepa el flujo completo. */
+async function fitCanvasToViewport(page) {
+  await page.addStyleTag({ content: ".pd-canvas { zoom: 0.7; }" });
+}
 
 const CAPTURES = [
   {
@@ -109,17 +159,19 @@ const CAPTURES = [
   {
     file: "captura_04_drupal.png",
     title:
-      "Nodo DESTINO_DRUPAL: creacion de nodo y mutacion de paginas agregadoras",
+      "Nodo DESTINO_DRUPAL: formulario de configuracion y estrategia del backend",
+    layout: "hero",
     panels: [
+      sandbox("DESTINO_DRUPAL", "DrupalHttpConfig.vue en el Banco de Pruebas"),
       code(
         "backend/src/modules/nodes/strategies/drupal-http.strategy.ts",
         /private async runCreateNode\(/,
-        70,
+        34,
       ),
       code(
         "backend/src/modules/nodes/strategies/drupal-http.strategy.ts",
         /private async runAppendHtmlBlock\(/,
-        70,
+        34,
       ),
     ],
   },
@@ -160,8 +212,21 @@ const CAPTURES = [
   {
     file: "captura_07_wizard.png",
     title:
-      "Asistente guiado (Poka-Yoke): validacion por paso y selectores cerrados",
-    panels: [ui("/flujos/nuevo", "Asistente de creacion de flujo")],
+      "Asistente guiado (Poka-Yoke) y formularios de nodo con selectores cerrados",
+    panels: [
+      ui("/flujos/nuevo", "Asistente: eleccion de plantilla", {
+        key: "wizard-selector",
+        waitFor: ".pd-pipeline-card",
+      }),
+      ui("/flujos/nuevo", "Asistente: primer paso del flujo", {
+        key: "wizard-step",
+        prepare: openFirstWizardTemplate,
+      }),
+      sandbox("TRIGGER_IMAP", "Disparador IMAP"),
+      sandbox("EXTRACTOR_WEB", "Extractor web"),
+      sandbox("PROCESADOR_IA", "Procesador IA"),
+      sandbox("ESCUDO_POST_IA", "Escudo post-IA"),
+    ],
   },
   {
     file: "captura_08_crud_ws.png",
@@ -179,11 +244,17 @@ const CAPTURES = [
   },
   {
     file: "captura_09_panel_supervision.png",
-    title: "Panel de supervision: ejecuciones, pausas HITL y costes de IA",
+    title: "Panel de supervision: canvas del flujo, ejecuciones y costes de IA",
+    layout: "hero",
     panels: [
+      ui(null, "Canvas de topologia del flujo", {
+        key: "canvas",
+        navigate: openWorkflowCanvas,
+        waitFor: ".pd-canvas",
+        prepare: fitCanvasToViewport,
+      }),
       ui("/flujos", "Ejecuciones en tiempo real"),
-      ui("/informes", "Informes y costes de IA"),
-      ui("/precios", "Tarifas de IA"),
+      ui("/informes", "Telemetria y costes de IA"),
     ],
   },
   {
@@ -284,10 +355,19 @@ const RENDERERS = {
 };
 
 /** Pagina compuesta con la paleta oscura UNUWARE; sin fuentes externas. */
-const renderComposite = (capture, panels) => {
-  const columns = panels.length === 4 ? 2 : panels.length;
-  const rows = panels.length === 4 ? 2 : 1;
+const gridTemplate = (capture, count) => {
+  // "hero": el primer panel ocupa la columna ancha; el resto se apila al lado.
+  if (capture.layout === "hero") {
+    return `grid-template-columns: 3fr 2fr; grid-template-rows: repeat(${count - 1}, minmax(0, 1fr));`;
+  }
 
+  const columns = count <= 3 ? count : Math.ceil(count / 2);
+  const rows = count <= 3 ? 1 : 2;
+
+  return `grid-template-columns: repeat(${columns}, minmax(0, 1fr)); grid-template-rows: repeat(${rows}, minmax(0, 1fr));`;
+};
+
+const renderComposite = (capture, panels) => {
   return `<!doctype html><html lang="es"><head><meta charset="utf-8"><style>
     * { box-sizing: border-box; margin: 0; }
     body { width: 1920px; height: 1080px; background: #0D0F26; color: #FFFFFF;
@@ -297,7 +377,8 @@ const renderComposite = (capture, panels) => {
     header h1 { font-size: 24px; font-weight: 600; }
     header span { margin-left: auto; font-size: 14px; color: #E4EAFB; }
     main { flex: 1; min-height: 0; padding: 16px; display: grid; gap: 16px;
-      grid-template-columns: repeat(${columns}, minmax(0, 1fr)); grid-template-rows: repeat(${rows}, minmax(0, 1fr)); }
+      ${gridTemplate(capture, panels.length)} }
+    main.hero > .panel:first-child { grid-row: 1 / -1; }
     .panel { min-height: 0; display: flex; flex-direction: column; background: #12142E;
       border: 1px solid rgba(184,192,222,.4); border-radius: 8px; overflow: hidden; }
     .panel h2 { font-size: 13px; font-weight: 600; padding: 8px 12px; background: #161A3D; color: #B8C0DE;
@@ -306,7 +387,7 @@ const renderComposite = (capture, panels) => {
     pre { flex: 1; overflow: hidden; padding: 8px 0; font-size: 12px; line-height: 1.45; color: #E4EAFB; }
     .ln { display: flex; white-space: pre; }
     .no { width: 52px; flex: none; padding-right: 12px; text-align: right; color: #5B5B66; }
-    .shot { flex: 1; min-height: 0; display: flex; align-items: center; justify-content: center; background: #0D0F26; }
+    .shot { flex: 1; min-height: 0; display: flex; align-items: flex-start; justify-content: center; background: #0D0F26; }
     .shot img { max-width: 100%; max-height: 100%; object-fit: contain; }
     .scroll { flex: 1; overflow: hidden; padding: 8px 12px; }
     table { width: 100%; border-collapse: collapse; font-family: 'JetBrains Mono', ui-monospace, monospace; font-size: 13px; }
@@ -315,7 +396,7 @@ const renderComposite = (capture, panels) => {
     .muted { color: #B8C0DE; }
   </style></head><body>
     <header><h1>${escapeHtml(capture.title)}</h1><span>Proto-Do · UNUWARE</span></header>
-    <main>${panels.map((panel) => RENDERERS[panel.kind](panel)).join("")}</main>
+    <main class="${capture.layout ?? ""}">${panels.map((panel) => RENDERERS[panel.kind](panel)).join("")}</main>
   </body></html>`;
 };
 
@@ -374,21 +455,57 @@ const login = async (page, email) => {
     });
 };
 
-/** Captura de una ruta de la app, en memoria y en base64. */
-const captureRoute = async (page, route, cache) => {
-  if (!cache.has(route)) {
-    await page.goto(appUrl(route), {
+/** Captura de una vista de la app, en memoria y en base64 (cacheada por clave). */
+const captureUi = async (page, panel, cache) => {
+  const key = panel.key ?? panel.route;
+
+  if (cache.has(key)) {
+    return cache.get(key);
+  }
+
+  if (panel.navigate) {
+    await panel.navigate(page);
+  } else {
+    await page.goto(appUrl(panel.route), {
       waitUntil: "networkidle",
       timeout: NAVIGATION_TIMEOUT_MS,
     });
-    await page.waitForTimeout(SETTLE_DELAY_MS);
-    cache.set(
-      route,
-      (await page.screenshot({ type: "png" })).toString("base64"),
-    );
   }
 
-  return cache.get(route);
+  if (panel.waitFor) {
+    await page
+      .locator(panel.waitFor)
+      .first()
+      .waitFor({ timeout: NAVIGATION_TIMEOUT_MS });
+  }
+
+  await panel.prepare?.(page);
+  await page.waitForTimeout(SETTLE_DELAY_MS);
+  // Los avisos efimeros (p. ej. "codigo enviado") no forman parte de la vista.
+  await page.addStyleTag({
+    content: ".q-notifications { display: none !important; }",
+  });
+
+  // Recorte al elemento, acotado a la ventana: un formulario largo se ve por
+  // su parte superior en vez de encogerse hasta ser ilegible.
+  const box = await page.locator(panel.clip).first().boundingBox();
+  const clip =
+    box === null
+      ? undefined
+      : {
+          x: Math.max(0, box.x),
+          y: Math.max(0, box.y),
+          width: Math.min(box.width, VIEWPORT.width - Math.max(0, box.x)),
+          height: Math.min(box.height, VIEWPORT.height - Math.max(0, box.y)),
+        };
+  const buffer = await page.screenshot({ type: "png", clip });
+  const shot = {
+    image: buffer.toString("base64"),
+    route: new URL(page.url()).hash.replace(/^#/, ""),
+  };
+
+  cache.set(key, shot);
+  return shot;
 };
 
 /** Consulta de solo lectura; `rows: null` si la BD no responde. */
@@ -419,7 +536,7 @@ const runQuery = async (sql) => {
 
 const resolvePanel = async (panel, page, cache) => {
   if (panel.kind === "ui") {
-    return { ...panel, image: await captureRoute(page, panel.route, cache) };
+    return { ...panel, ...(await captureUi(page, panel, cache)) };
   }
 
   if (panel.kind === "query") {
