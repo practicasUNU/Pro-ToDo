@@ -9364,3 +9364,10 @@ mapeador.
 - **Por que `?nodeType=` y no `/sandbox/:nodeType`:** la miga de pan del layout se resuelve por ruta exacta; un parametro de ruta la habria dejado vacia.
 - **Por que se recortan las vistas:** sin el shell y acotadas a la ventana, los formularios se leen; a pantalla completa quedaban diminutos dentro del mosaico.
 - **El canvas se reduce solo en la captura** (`zoom` inyectado por el script) para que quepa el flujo completo.
+
+---
+
+## Capturas desglosadas en PNG dedicados
+
+- **Por que se renderiza cada vista al ancho de su panel:** capturada a 1920 px y encogida a media pantalla, una tabla quedaba al 50 % y no se leia.
+- **Por que se ocultan cabecera y drawer al capturar:** son fijos, y al capturar un formulario mas alto que la ventana se superponian sobre el.

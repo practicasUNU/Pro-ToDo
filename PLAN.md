@@ -5191,3 +5191,11 @@ Rama: `feat/drupal-and-acens-nodes-dev`. Migraciones `065` y `066`.
 
 - **Banco de pruebas:** acepta el enlace profundo `/nodos/config-sandbox?nodeType=<TIPO>` (`parseSandboxNodeType`). Un tipo sin configurador deja el banco en su valor por defecto.
 - **Capturas 04/07/09:** formulario Drupal junto a su estrategia; selector y primer paso del asistente junto a los formularios IMAP, extractor web, IA y escudo; canvas del flujo junto a ejecuciones y telemetria.
+
+---
+
+## Capturas desglosadas en PNG dedicados
+
+- El catalogo pasa de 11 composiciones a 21 PNG (01a/01b, 05a/05b, 07a–07f, 08a/08b, 09a/09b, 11a/11b), con un maximo de 3 paneles por imagen.
+- Cada vista se captura entera; si es alta, el compositor la trocea en columnas para que no se encoja.
+- Al terminar, el script borra de `docs/capturas/` las PNG que ya no estan en el catalogo y lista la resolucion de cada imagen.
