@@ -5,7 +5,6 @@ import { LLM_RETRY_BASE_DELAY_MS } from '@modules/nodes/dto/llm-extractor-config
 import { LlmProvider } from '@modules/nodes/strategies/interfaces/llm-provider.interface';
 import {
   ERR_LLM_EMERGENCY_BRAKE,
-  ERR_LLM_INTERPOLATION,
   ERR_LLM_MISSING_INPUT_TEXT,
   ERR_LLM_PROMPT_UNRESOLVED,
   ERR_LLM_MAX_RETRIES_EXCEEDED,
@@ -625,6 +624,20 @@ describe('LlmExtractorStrategy', () => {
   });
 
   describe('4. Interpolacion del prompt', () => {
+    /** Respuesta minima de Gemini para los casos de interpolacion. */
+    const buildGeminiReply = (): jest.Mock =>
+      jest.fn().mockResolvedValue({
+        headline: 'h',
+        summary: 's',
+        body_paragraphs: [],
+        metadata: {
+          tokensPrompt: 1,
+          tokensCompletion: 2,
+          modelUsed: 'gemini-3.6-flash',
+          isMock: false,
+        },
+      });
+
     it('4.1 deberia resolver {{parsed_email.clean_title}} antes de llamar al proveedor', async () => {
       // 1. Arrange
       const generateCompletion = jest.fn().mockResolvedValue({
@@ -664,46 +677,70 @@ describe('LlmExtractorStrategy', () => {
       );
     });
 
-    it('4.2 deberia fallar en GRAVE si un marcador no resuelve', async () => {
-      // 1. Arrange
-      const strategy = buildStrategy(buildPromptService());
+    it('4.2 deberia sustituir por "" un marcador que no resuelve y continuar', async () => {
+      // 1. Arrange 📐
+      const generateCompletion = buildGeminiReply();
+      const strategy = buildStrategy(buildPromptService(), {
+        provider: LlmProvider.GEMINI,
+        generateCompletion,
+      });
+      const warn = jest
+        .spyOn(strategy['logger'], 'warn')
+        .mockImplementation(() => undefined);
       const context = buildContext({
         parsed_email: { clean_body: CLEAN_BODY },
       });
 
-      // 2. Act
+      // 2. Act ⚙️
       const result = await strategy.execute(context, {
         inlinePrompt: 'Redacta sobre {{scraped_web.article_title}}.',
+        provider: LlmProvider.GEMINI,
       });
 
-      // 3. Assert: dejar escapar la excepcion la normalizaria el motor a
-      //    URGENTE, que `canRetry` nunca reintenta.
-      expect(result.success).toBe(false);
-      expect(result.error?.level).toBe('GRAVE');
-      expect(result.error?.code).toBe(ERR_LLM_INTERPOLATION);
-      expect(result.error?.missingFields).toEqual([
-        'scraped_web.article_title',
-      ]);
+      // 3. Assert 🎯: un dato opcional ausente no pausa el flujo.
+      expect(result.success).toBe(true);
+      expect(generateCompletion).toHaveBeenCalledWith(
+        CLEAN_BODY,
+        'Redacta sobre .',
+        expect.anything(),
+      );
+      expect(warn).toHaveBeenCalledWith(
+        expect.stringContaining('scraped_web.article_title'),
+      );
     });
 
-    it('4.2bis deberia seguir en GRAVE si ningun texto documental existe', async () => {
-      // 1. Arrange 📐: solo hay articulo web; la cadena documental esta vacia.
-      const strategy = buildStrategy(buildPromptService());
+    it('4.2bis deberia interpolar un autor nulo del prompt Notiweb sin dejar marcadores', async () => {
+      // 1. Arrange 📐: el extractor no encontro autor.
+      const generateCompletion = buildGeminiReply();
+      const strategy = buildStrategy(buildPromptService(), {
+        provider: LlmProvider.GEMINI,
+        generateCompletion,
+      });
+      jest
+        .spyOn(strategy['logger'], 'warn')
+        .mockImplementation(() => undefined);
       const context = buildContext({
-        scraped_web: { full_article_content: 'Articulo.' },
+        scraped_web: {
+          full_article_content: 'Articulo.',
+          author: null,
+          article_title: 'F-Droid 1.20',
+        },
       });
 
       // 2. Act ⚙️
       const result = await strategy.execute(context, {
-        inlinePrompt: 'Resume {{ocr_result.clean_body}}.',
+        inlinePrompt:
+          'Autor: {{scraped_web.author}}\nTitulo: {{scraped_web.article_title}}\nResume {{ocr_result.clean_body}}.',
+        provider: LlmProvider.GEMINI,
       });
 
-      // 3. Assert 🎯: interpolar una cadena vacia facturaria una inferencia
-      //    sobre nada; el marcador original sigue siendo el que falta.
-      expect(result.success).toBe(false);
-      expect(result.error?.level).toBe('GRAVE');
-      expect(result.error?.code).toBe(ERR_LLM_INTERPOLATION);
-      expect(result.error?.missingFields).toEqual(['ocr_result.clean_body']);
+      // 3. Assert 🎯
+      expect(result.success).toBe(true);
+      const [[, sentPrompt]] = generateCompletion.mock.calls as [
+        [string, string],
+      ];
+      expect(sentPrompt).not.toContain('{{');
+      expect(sentPrompt).toContain('Autor: \nTitulo: F-Droid 1.20');
     });
 
     it('4.2ter NO deberia exigir ocr_result en el validador de topologia', () => {
@@ -2284,28 +2321,19 @@ describe('LlmExtractorStrategy', () => {
     });
 
     it('should NOT persist telemetry record when pre-processing/validation fails before API call', async () => {
-      // 1. Arrange 📐: dos fallos locales, ambos anteriores a la llamada: un
-      //    marcador que no resuelve y un contexto sin texto que procesar.
+      // 1. Arrange 📐: un contexto sin texto que procesar falla antes de la llamada.
       const telemetry = createMockTelemetryService();
       const generateCompletion = buildAnthropicReply();
       const strategy = buildAnthropicStrategy(generateCompletion, telemetry);
 
       // 2. Act ⚙️
-      const interpolation = await strategy.execute(
-        buildContext({ parsed_email: { clean_body: CLEAN_BODY } }),
-        {
-          inlinePrompt: 'Redacta sobre {{scraped_web.article_title}}.',
-          provider: LlmProvider.ANTHROPIC,
-        },
-      );
       const missingInput = await strategy.execute(
         buildContext({ cron_trigger: { fired_at: 'ayer' } }),
         { inlinePrompt: 'Redacta.', provider: LlmProvider.ANTHROPIC },
       );
 
-      // 3. Assert 🎯: ninguno llego al proveedor, asi que ninguno cuenta
-      //    contra la tasa de exito del modelo.
-      expect(interpolation.error?.code).toBe(ERR_LLM_INTERPOLATION);
+      // 3. Assert 🎯: no llego al proveedor, asi que no cuenta contra la
+      //    tasa de exito del modelo.
       expect(missingInput.error?.code).toBe(ERR_LLM_MISSING_INPUT_TEXT);
       expect(generateCompletion).not.toHaveBeenCalled();
       expect(telemetry.recordTokenUsage).not.toHaveBeenCalled();

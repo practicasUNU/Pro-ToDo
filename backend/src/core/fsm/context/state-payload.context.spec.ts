@@ -462,6 +462,52 @@ describe('StatePayloadContext (PROT-08)', () => {
     });
   });
 
+  describe('5bis. Interpolacion tolerante (getInterpolatedValueLenient)', () => {
+    it('5bis.1 deberia sustituir por "" namespaces, campos nulos y rutas ausentes', () => {
+      // 1. Arrange 📐
+      context.setNamespace('scraped_web', {
+        author: null,
+        article_title: 'Titulo',
+        meta: { site: 'F-Droid' },
+      });
+      const template =
+        'A:{{scraped_web.author}}|T:{{ scraped_web.article_title }}|S:{{scraped_web.meta.site}}|X:{{ocr_result.clean_body}}|Y:{{scraped_web.meta.nada}}';
+
+      // 2. Act ⚙️
+      const { text, missing } = context.getInterpolatedValueLenient(template);
+
+      // 3. Assert 🎯
+      expect(text).toBe('A:|T:Titulo|S:F-Droid|X:|Y:');
+      expect(text).not.toContain('{{');
+      expect(missing).toEqual([
+        'scraped_web.author',
+        'ocr_result.clean_body',
+        'scraped_web.meta.nada',
+      ]);
+    });
+
+    it('5bis.2 deberia seguir bloqueando la cadena de prototipos', () => {
+      // 1. Arrange 📐
+      context.setNamespace('ns', { dato: { a: 1 } });
+
+      // 2. Act ⚙️
+      const { text, missing } = context.getInterpolatedValueLenient(
+        '[{{ns.dato.__proto__.toString}}][{{ns.dato.constructor}}]',
+      );
+
+      // 3. Assert 🎯
+      expect(text).toBe('[][]');
+      expect(missing).toHaveLength(2);
+    });
+
+    it('5bis.3 deberia dejar intacta la variante estricta', () => {
+      // 2. Act + 3. Assert 🎯
+      expect(() =>
+        context.getInterpolatedValue('{{scraped_web.author}}'),
+      ).toThrow(MissingContextVariableException);
+    });
+  });
+
   describe('6. resolvePath como funcion pura (PROT-10)', () => {
     const namespaces = {
       ns: { lista: [{ id: 1 }], texto: 'hola' },

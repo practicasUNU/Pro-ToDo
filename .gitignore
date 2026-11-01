@@ -78,3 +78,5 @@ Thumbs.db
 *.njsproj
 *.sln
 *.sw?
+# Capturas generadas para el informe tecnico (scripts/generate-doc-screenshots.js)
+docs/capturas/

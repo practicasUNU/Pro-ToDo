@@ -2,10 +2,7 @@ import { Injectable, Logger } from '@nestjs/common';
 import { plainToInstance } from 'class-transformer';
 import { validate } from 'class-validator';
 
-import {
-  MissingContextVariableException,
-  extractNamespaceRoots,
-} from '@core/fsm/context/state-payload.context';
+import { extractNamespaceRoots } from '@core/fsm/context/state-payload.context';
 import {
   coalesceDocumentTextMarkers,
   stripDocumentTextMarkers,
@@ -56,6 +53,7 @@ import type { ValidatorOptions } from 'class-validator';
 export const ERR_LLM_CONFIG = 'ERR_LLM_CONFIG';
 export const ERR_LLM_MISSING_INPUT_TEXT = 'ERR_LLM_MISSING_INPUT_TEXT';
 export const ERR_LLM_PROMPT_UNRESOLVED = 'ERR_LLM_PROMPT_UNRESOLVED';
+/** Reservado: la interpolacion del prompt ya es tolerante y no lo emite. */
 export const ERR_LLM_INTERPOLATION = 'ERR_LLM_INTERPOLATION';
 /**
  * @deprecated Ya no se emite: desde los defaults por entorno, un proveedor sin
@@ -366,12 +364,6 @@ export class LlmExtractorStrategy implements INodeStrategy {
 
     const interpolated = this.interpolate(context, prompt);
 
-    if ('failure' in interpolated) {
-      this.consecutiveFailures.delete(brakeKey);
-
-      return { success: false, error: interpolated.failure };
-    }
-
     const attempts = this.resolveAttempts(config);
 
     let response: LlmResponsePayload | undefined;
@@ -520,9 +512,8 @@ export class LlmExtractorStrategy implements INodeStrategy {
    * texto de la plantilla vive en `plantillas_prompts_ia` y leerlo seria I/O,
    * mientras que
    * el contrato de `INodeStrategy` exige que este metodo sea PURO y SINCRONO.
-   * La comprobacion no se pierde, se mueve: un marcador que no resuelva se
-   * diagnostica en ejecucion como `ERR_LLM_INTERPOLATION`, nombrando la
-   * variable concreta.
+   * En ejecucion, un marcador que no resuelva se sustituye por `''` y se
+   * registra como aviso, nombrando la variable concreta.
    */
   public getRequiredNamespaces(
     params: Record<string, unknown>,
@@ -876,35 +867,23 @@ export class LlmExtractorStrategy implements INodeStrategy {
   }
 
   /**
-   * Interpola los marcadores del prompt contra el contexto acumulado.
-   *
-   * `getInterpolatedValue` LANZA si la ruta no resuelve, de modo que la
-   * excepcion se captura aqui y se traduce a GRAVE: dejarla salir la
-   * normalizaria el motor a URGENTE, que `canRetry` nunca reintenta y que el
-   * operador no puede corregir desde el flujo PAUSADO.
+   * Interpola el prompt en modo TOLERANTE: una variable ausente o nula queda
+   * como `''` y se avisa en el log, sin pausar el flujo. La guarda de texto
+   * de entrada vacio sigue impidiendo facturar una inferencia sobre nada.
    */
   private interpolate(
     context: StatePayloadContext,
     prompt: string,
-  ): { readonly prompt: string } | { readonly failure: NodeErrorDetail } {
-    try {
-      return { prompt: context.getInterpolatedValue(prompt) };
-    } catch (error) {
-      if (error instanceof MissingContextVariableException) {
-        return {
-          failure: {
-            level: 'GRAVE',
-            code: ERR_LLM_INTERPOLATION,
-            message: `No se pudo resolver el prompt contra el contexto: ${error.message}`,
-            missingFields: [error.variable],
-            ...stackTraceOf(error),
-          },
-        };
-      }
+  ): { readonly prompt: string } {
+    const { text, missing } = context.getInterpolatedValueLenient(prompt);
 
-      // Imprevisto de verdad: que lo normalice el motor a URGENTE.
-      throw error;
+    if (missing.length > 0) {
+      this.logger.warn(
+        `ejecucion=${context.getExecutionId()} | variables sin valor en el prompt, sustituidas por "": ${missing.join(', ')}`,
+      );
     }
+
+    return { prompt: text };
   }
 
   /**

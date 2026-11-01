@@ -252,5 +252,63 @@ describe('extractArticle', () => {
         { title: 'Revista', url: 'https://revista.example/art' },
       ]);
     });
+
+    describe('2bis. Autor sin meta-etiquetas', () => {
+      it.each([
+        [
+          'linea de firma tipo F-Droid con avatar',
+          '<header><h1>F-Droid 1.20</h1><p class="post-meta">Posted on Oct 3, 2026 by <a href="/u/hans"><img src="a.png" alt="avatar de hans"> Hans-Christoph</a></p></header>',
+          'Hans-Christoph',
+        ],
+        [
+          'a[rel=author]',
+          '<p>Escrito por <a rel="author" href="/a/ana">Ana Perez</a></p>',
+          'Ana Perez',
+        ],
+        [
+          'itemprop=author con name anidado',
+          '<div itemprop="author"><img src="x.png" alt="foto"><span itemprop="name">Luis Gil</span></div>',
+          'Luis Gil',
+        ],
+        [
+          'regex "Por" en la cabecera',
+          '<header><h1>Titular</h1><span>Por José Pérez el 3 de octubre</span></header>',
+          'José Pérez',
+        ],
+      ])('deberia capturar el autor desde %s', (_case, header, expected) => {
+        // 1. Arrange 📐
+        const html = buildDocument(`${header}<p>${FILLER}</p>`);
+
+        // 2. Act ⚙️
+        const article = extractArticle(html, SOURCE_URL);
+
+        // 3. Assert 🎯
+        expect(article?.author).toBe(expected);
+      });
+
+      it('deberia dar prioridad al <meta> sobre el DOM', () => {
+        // 1. Arrange 📐
+        const html = withHead(
+          '<meta name="author" content="Ana Perez">',
+          `<span class="author">Otro Nombre</span><p>${FILLER}</p>`,
+        );
+
+        // 2. Act + 3. Assert 🎯
+        expect(extractArticle(html, SOURCE_URL)?.author).toBe('Ana Perez');
+      });
+
+      it('NO deberia tomar una biografia larga, una fecha suelta ni "nearby"', () => {
+        // 1. Arrange 📐
+        const bio = 'Periodista especializada en ciencia. '.repeat(4);
+        const html = buildDocument(
+          `<header><h1>Titular</h1><p>The nearby lab opened.</p></header>` +
+            `<div class="author">${bio}</div>` +
+            `<p class="post-meta">Oct 3, 2026</p><p>${FILLER}</p>`,
+        );
+
+        // 2. Act + 3. Assert 🎯
+        expect(extractArticle(html, SOURCE_URL)?.author).toBeNull();
+      });
+    });
   });
 });

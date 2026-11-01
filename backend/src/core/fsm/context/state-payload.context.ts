@@ -409,4 +409,33 @@ export class StatePayloadContext {
       stringifyResolved(resolvePath(this.namespaces, rawPath)),
     );
   }
+
+  /**
+   * Variante TOLERANTE: una variable ausente o nula se sustituye por `''`.
+   * Solo para prompts de IA, donde un dato opcional (`scraped_web.author`)
+   * no debe pausar el flujo. Devuelve las rutas omitidas para registrarlas.
+   */
+  public getInterpolatedValueLenient(template: string): {
+    readonly text: string;
+    readonly missing: readonly string[];
+  } {
+    const missing: string[] = [];
+    const text = template.replace(
+      INTERPOLATION_PATTERN,
+      (_match, rawPath: string) => {
+        try {
+          return stringifyResolved(resolvePath(this.namespaces, rawPath));
+        } catch (error) {
+          if (!(error instanceof MissingContextVariableException)) {
+            throw error;
+          }
+
+          missing.push(rawPath);
+          return '';
+        }
+      },
+    );
+
+    return { text, missing };
+  }
 }

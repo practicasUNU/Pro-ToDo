@@ -32,6 +32,39 @@ const AUTHOR_SELECTORS = [
   'meta[name="dc.creator"]',
 ];
 
+/** Selectores DOM de autor, para blogs sin meta-etiquetas (F-Droid). */
+const AUTHOR_DOM_SELECTORS = [
+  'a[rel="author"]',
+  '[itemprop="author"]',
+  '.author',
+  '.byline',
+  '.post-meta',
+  '.post-byline',
+];
+
+/** Contenedores de linea de firma: primero se busca "por/by" dentro. */
+const BYLINE_CONTAINERS = new Set(['.byline', '.post-meta', '.post-byline']);
+
+/** Cabeceras del articulo donde se busca la firma por regex. */
+const HEADER_SELECTORS = [
+  'article header',
+  '.entry-header',
+  '.entry-meta',
+  '.post-header',
+];
+
+/** Tope del autor: un texto mas largo es una biografia, no un nombre. */
+const MAX_AUTHOR_LENGTH = 80;
+
+/** Tope del texto de cabecera examinado por regex. */
+const MAX_HEADER_SCAN_LENGTH = 400;
+
+/** "por X" / "by X". `\b` evita "nearby"; `\p{L}` admite tildes. */
+const BYLINE_PATTERN = /\b(?:por|by)\s+([\p{L}0-9_.\- ]{2,60})/iu;
+
+/** Conectores que cierran el nombre: "by Hans on 3 Oct" → "Hans". */
+const AUTHOR_STOP_PATTERN = /\s+(?:on|at|in|el|en|a las|\||-|—)\s+.*$/iu;
+
 const DATE_SELECTORS = [
   'meta[property="article:published_time"]',
   'meta[name="article:published_time"]',
@@ -112,6 +145,91 @@ const jsonLdAuthorName = (value: unknown): string | null => {
   return names.length > 0 ? names.join(', ') : null;
 };
 
+/**
+ * Limpia un candidato a autor: quita el prefijo "Por"/"By", colapsa espacios
+ * y descarta vacios o textos largos (cajas de biografia).
+ */
+const cleanAuthorText = (raw: string): string | null => {
+  const collapsed = normalizeWhitespace(raw.replace(/\s+/g, ' '));
+
+  if (collapsed.length > MAX_AUTHOR_LENGTH) {
+    return null;
+  }
+
+  const text = collapsed
+    .replace(/^(?:por|by)\s+/iu, '')
+    .replace(AUTHOR_STOP_PATTERN, '')
+    .replace(/[\s,.;:·|-]+$/u, '')
+    .trim();
+
+  return text.length > 0 && text.length <= MAX_AUTHOR_LENGTH ? text : null;
+};
+
+/** Nombre tras "por"/"by" en un texto, ya limpio. */
+const matchByline = (text: string): string | null => {
+  const firstLine = text.match(BYLINE_PATTERN)?.[1]?.split('\n')[0] ?? '';
+
+  return cleanAuthorText(firstLine);
+};
+
+/**
+ * Texto visible de un nodo. `textContent` ignora los `<img>` (avatares) y su
+ * `alt`; `itemprop=author` puede ser `<meta content>` o llevar `[itemprop=name]`.
+ */
+const authorNodeText = (element: Element): string =>
+  element.getAttribute('content') ??
+  element.querySelector('[itemprop="name"]')?.textContent ??
+  element.textContent ??
+  '';
+
+/** Autor por selectores DOM comunes, en orden de fiabilidad. */
+const authorFromDom = (document: Document): string | null => {
+  for (const selector of AUTHOR_DOM_SELECTORS) {
+    for (const element of Array.from(document.querySelectorAll(selector))) {
+      const text = authorNodeText(element);
+      // En una linea de firma sin "por/by", un texto con cifras es la fecha.
+      const author = BYLINE_CONTAINERS.has(selector)
+        ? (matchByline(text) ??
+          (/\d/.test(text) ? null : cleanAuthorText(text)))
+        : cleanAuthorText(text);
+
+      if (author !== null) {
+        return author;
+      }
+    }
+  }
+
+  return null;
+};
+
+/** Texto con un espacio entre nodos: evita pegar "TitularPor Ana". */
+const spacedText = (node: Node): string =>
+  node.nodeType === node.TEXT_NODE
+    ? (node.textContent ?? '')
+    : Array.from(node.childNodes).map(spacedText).join(' ');
+
+/** Ultimo recurso: "por X"/"by X" en la cabecera del articulo. */
+const authorFromHeaderText = (document: Document): string | null => {
+  const headers = [
+    ...HEADER_SELECTORS.map((selector) => document.querySelector(selector)),
+    document.querySelector('h1')?.parentElement ?? null,
+  ];
+
+  for (const header of headers) {
+    const text = (header === null ? '' : spacedText(header)).slice(
+      0,
+      MAX_HEADER_SCAN_LENGTH,
+    );
+    const author = matchByline(text);
+
+    if (author !== null) {
+      return author;
+    }
+  }
+
+  return null;
+};
+
 /** Fecha en ISO 8601, o `null` si no se puede interpretar. */
 const toIsoDate = (raw: string | null): string | null => {
   if (raw === null) {
@@ -124,9 +242,9 @@ const toIsoDate = (raw: string | null): string | null => {
 };
 
 /**
- * Autor y fecha de publicacion, por orden de fiabilidad:
- * `<meta>` explicitos, luego JSON-LD (`author`, `datePublished`) y, para la
- * fecha, el primer `<time datetime>` del documento.
+ * Autor y fecha de publicacion, por orden de fiabilidad. Autor: `<meta>`,
+ * JSON-LD, selectores DOM y regex "por/by" en la cabecera. Fecha: `<meta>`,
+ * JSON-LD `datePublished` y el primer `<time datetime>`.
  */
 export const extractHeadMetadata = (
   document: Document,
@@ -135,7 +253,8 @@ export const extractHeadMetadata = (
   const author =
     firstMetaContent(document, AUTHOR_SELECTORS) ??
     jsonLd.map((node) => jsonLdAuthorName(node.author)).find(Boolean) ??
-    null;
+    authorFromDom(document) ??
+    authorFromHeaderText(document);
   const rawDate =
     firstMetaContent(document, DATE_SELECTORS) ??
     jsonLd
