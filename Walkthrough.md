@@ -9347,3 +9347,12 @@ mapeador.
 ### Checklist de dependencias
 
 - [ ] Aplicar la migracion 067
+
+---
+
+## Interpolacion tolerante, autor robusto y capturas del informe
+
+- **Por que la tolerancia solo afecta a la IA:** un dato opcional ausente (el autor) no justifica pausar una redaccion. En un destino real, en cambio, un campo vacio se publicaria; por eso alli se mantiene el fallo. La guarda de texto de entrada vacio sigue evitando pagar una inferencia sobre nada.
+- **Por que la regex lleva `\b` y `\p{L}`:** sin el limite de palabra, «nearby» se leia como firma; sin `\p{L}`, «José Pérez» quedaba fuera.
+- **Por que los fragmentos se localizan por regex:** con numeros de linea, cada edicion del codigo descuadraria las capturas.
+- **Limitacion:** la captura de resiliencia muestra las ejecuciones que existan en staging; el script no provoca ningun fallo.

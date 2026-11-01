@@ -5176,3 +5176,11 @@ Rama: `feat/drupal-and-acens-nodes-dev`. Migraciones `065` y `066`.
 - **EXTRACTOR_WEB:** `article-metadata.util.ts` publica en `scraped_web` los campos `author`, `published_at`, `references` (`url[]`) y `references_text`.
 - **Migracion 067:** referencia autonoma en `NOTIWEB_DEFAULT`, con esta prioridad: obras citadas → articulo original en APA 7 → reconstruccion a partir de la URL del correo.
 - [ ] Pendiente: aplicar 067 (`npm run db:migrate`)
+
+---
+
+## Interpolacion tolerante en el Procesador IA, autor robusto y script de capturas
+
+- **PROCESADOR_IA:** `StatePayloadContext.getInterpolatedValueLenient` sustituye por `""` las variables ausentes o nulas y devuelve sus rutas para el log. La variante estricta `getInterpolatedValue` no cambia: Drupal, HTTP y el mapeador siguen deteniendose.
+- **EXTRACTOR_WEB:** el autor sigue esta cascada: `<meta>` → JSON-LD → selectores DOM (`a[rel=author]`, `[itemprop=author]`, `.author`, `.byline`, `.post-meta`, `.post-byline`) → regex «por/by» en la cabecera → `byline` de Readability.
+- **Capturas:** `scripts/generate-doc-screenshots.js` combina vistas reales de la app con fragmentos de codigo y genera 11 PNG en `docs/capturas/` (ignorada en Git). El login usa OTP por terminal o con `PROTODO_OTP_CODE`.
