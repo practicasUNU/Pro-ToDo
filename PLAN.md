@@ -5166,3 +5166,13 @@ Rama: `feat/drupal-and-acens-nodes-dev`. Migraciones `065` y `066`.
 - [x] Pausas encadenadas en el canvas
 - [ ] Pendiente: aplicar 065 y 066 (`npm run db:migrate`)
 - [ ] Pendiente: declarar `ACENS_API_BASE_URL`, `ACENS_API_KEY` (y opcionalmente `ACENS_API_TIMEOUT_MS`) en `backend/.env` y reiniciar Nest
+
+---
+
+## Busqueda IMAP multi-UID, reanudacion por diccionario y metadatos del scraper
+
+- **TRIGGER_IMAP:** `findMatchingUidsDescending` sustituye a `Math.max(uids)`. Recorre hasta `MAX_SCAN_CANDIDATES = 25` no leidos, del mas reciente al mas antiguo, y procesa el primero que casa con el asunto (`normalizeSubjectText`: trim, NFD, minusculas).
+- **Reanudacion:** `normalizeStepKey` compacta el nombre ("Destino Drupal" → `destinodrupal`). `resolveTargetStep` prueba por niveles, en este orden: etiqueta, identificador o namespace, `nodeType` y, al final, el diccionario `STEP_ALIASES`.
+- **EXTRACTOR_WEB:** `article-metadata.util.ts` publica en `scraped_web` los campos `author`, `published_at`, `references` (`url[]`) y `references_text`.
+- **Migracion 067:** referencia autonoma en `NOTIWEB_DEFAULT`, con esta prioridad: obras citadas → articulo original en APA 7 → reconstruccion a partir de la URL del correo.
+- [ ] Pendiente: aplicar 067 (`npm run db:migrate`)

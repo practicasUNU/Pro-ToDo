@@ -9334,3 +9334,16 @@ mapeador.
 
 - [ ] Aplicar las migraciones 065 y 066
 - [ ] Declarar las variables de Acens en `backend/.env` y reiniciar Nest
+
+---
+
+## Busqueda IMAP multi-UID, reanudacion por diccionario y metadatos del scraper
+
+- **Por que se recorren los candidatos:** con `markAsRead` apagado, un correo reciente que no casaba con el asunto tapaba en cada sondeo a los anteriores que si casaban. El tope de 25 acota las descargas MIME completas.
+- **Por que la prioridad va por niveles:** una etiqueta real del canvas no debe perder frente a un sinonimo generico («Drupal»). El diccionario solo actua cuando el grafo no reconoce el nombre.
+- **Por que los metadatos se leen antes que Readability:** Readability reescribe el DOM y se lleva los `<meta>` y el JSON-LD.
+- **Referencia APA 7:** si el extractor falla, la IA reconstruye la referencia a partir de la URL del correo y de su conocimiento del tema, por decision del usuario. Nunca inventa DOI, volumen ni paginas.
+
+### Checklist de dependencias
+
+- [ ] Aplicar la migracion 067
