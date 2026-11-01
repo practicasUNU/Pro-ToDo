@@ -21,7 +21,10 @@ import { matchesSubjectKeywords } from '@modules/nodes/strategies/imap-filter.ut
 // Import de VALOR y no `import type`: se inyecta por constructor, y con
 // `emitDecoratorMetadata` un `import type` se borra al transpilar dejando a Nest
 // sin el token que necesita para resolver la dependencia.
-import { InboundEmailResumeService } from '@modules/workflows/inbound-email-resume.service';
+import {
+  InboundEmailResumeService,
+  looksLikeResumeCommand,
+} from '@modules/workflows/inbound-email-resume.service';
 
 import type { StatePayloadContext } from '@core/fsm/context/state-payload.context';
 import type {
@@ -72,18 +75,15 @@ export const SUBJECT_FILTERED_STATUS = 'SUBJECT_FILTERED';
  */
 export const RESUME_COMMAND_STATUS = 'RESUME_COMMAND_EXECUTED';
 
-/**
- * Reconoce una orden de reanudacion en el asunto o en la cabecera del cuerpo.
- *
- * Tolera los `Re:` acumulados que los clientes de correo anteponen al
- * responder, que es como llega SIEMPRE: nadie redacta estas ordenes desde cero.
- * No valida el testigo —de eso se encarga `InboundEmailResumeService` con el
- * hash persistido—, solo decide si el mensaje es contenido o es mando.
- */
-const RESUME_COMMAND_HINT = /^\s*(?:re\s*:\s*)*reanudar\s+[a-f0-9]{8,64}\b/i;
-
 /** Lineas del cuerpo que se inspeccionan buscando el comando. */
 const RESUME_COMMAND_BODY_LINES = 5;
+
+/**
+ * Tope de ordenes ANTERIORES del mismo buzon que se atienden en un sondeo,
+ * ademas de la mas reciente. Acota la vuelta como `MAX_COMMANDS_PER_RUN` del
+ * servicio de reanudacion: un hilo largo no puede bloquear el disparador.
+ */
+const MAX_PENDING_RESUME_COMMANDS = 10;
 
 /**
  * Tope del marcado que viaja en el payload, en caracteres.
@@ -466,8 +466,9 @@ const resolveAttachmentFilename = (
  *
  * CONTRAPARTIDA, asumida: sin el criterio `SUBJECT` el sondeo se trae el correo
  * mas reciente del buzon y lo descarta en OMITIDO si no casa el patron. Con los
- * valores por defecto (`unreadOnly` y `markAsRead` a `true`) el buzon se consume
- * de uno en uno y no se pierde nada; con `markAsRead: false` el flujo se atasca
+ * valores `unreadOnly: true` y `markAsRead: true` el buzon se consume de uno en
+ * uno y no se pierde nada; con `markAsRead: false` (el defecto desde que el
+ * buzon se deja intacto, ver `DEFAULT_MARK_AS_READ`) el flujo se atasca
  * en el mismo mensaje, que es el riesgo que el comentario de `execute` ya
  * describe y que corre igual cualquier flujo que hoy use solo el patron.
  */
@@ -760,17 +761,15 @@ export class ImapTriggerStrategy implements INodeStrategy {
         return this.dispatchResumeCommand(client, uid, parsed);
       }
 
-      // El marcado va DESPUES de parsear con exito. Al reves, un MIME que
-      // reventase el parser quedaria como leido y nadie volveria a procesarlo.
-      if (config.markAsRead) {
-        await client.messageFlagsAdd(String(uid), ['\\Seen'], { uid: true });
-      }
-
-      // El filtro se evalua tras el marcado a proposito: un correo descartado
-      // que quedase sin leer volveria a descargarse en cada sondeo, un minuto
-      // tras otro, y ningun mensaje posterior llegaria nunca a procesarse
-      // porque `findLatestMatchingUid` reencontraria siempre el mismo.
+      // Un correo descartado por el filtro SI se marca (con `markAsRead`): el
+      // descarte es un desenlace correcto, no un fallo, y sin marcar volveria
+      // a descargarse en cada sondeo y `findLatestMatchingUid` reencontraria
+      // siempre el mismo, bloqueando todo mensaje posterior.
       if (!this.matchesSubjectFilter(parsed, config)) {
+        if (config.markAsRead) {
+          await client.messageFlagsAdd(String(uid), ['\\Seen'], { uid: true });
+        }
+
         return {
           success: true,
           data: { status: SUBJECT_FILTERED_STATUS },
@@ -787,6 +786,14 @@ export class ImapTriggerStrategy implements INodeStrategy {
         await this.inboundEmailResumeService.resolveSenderUserId(
           extracted.from,
         );
+
+      // TRANSACCIONAL: el `\Seen` va lo ULTIMO, con el payload ya compuesto.
+      // Si parsear, extraer o imputar lanza, el `catch` devuelve el fallo y el
+      // correo sigue sin leer para el proximo sondeo; marcarlo antes lo daria
+      // por procesado sin que el flujo llegara a recibir su contenido.
+      if (config.markAsRead) {
+        await client.messageFlagsAdd(String(uid), ['\\Seen'], { uid: true });
+      }
 
       return {
         success: true,
@@ -843,19 +850,22 @@ export class ImapTriggerStrategy implements INodeStrategy {
    * `REANUDAR <testigo>` que el propio nodo de alerta escribio— y buscar ahi
    * daria por mando cualquier respuesta, incluida una que solo dijera "recibido".
    *
+   * Tolera los `Re:` acumulados, las tildes y el verbo `RESUME`: la pista es
+   * `looksLikeResumeCommand`, la MISMA que usa el servicio de reanudacion.
+   *
    * Solo RECONOCE. Validar el testigo contra su hash y al remitente contra
    * `usuarios` es trabajo de `InboundEmailResumeService`, y duplicarlo aqui
    * crearia una segunda puerta con sus propias reglas.
    */
   private isResumeCommandEmail(parsed: ParsedMail): boolean {
-    if (RESUME_COMMAND_HINT.test(parsed.subject ?? '')) {
+    if (looksLikeResumeCommand(parsed.subject ?? '')) {
       return true;
     }
 
     return (parsed.text ?? '')
       .split(/\r?\n/)
       .slice(0, RESUME_COMMAND_BODY_LINES)
-      .some((line) => RESUME_COMMAND_HINT.test(line));
+      .some((line) => looksLikeResumeCommand(line));
   }
 
   /**
@@ -896,6 +906,7 @@ export class ImapTriggerStrategy implements INodeStrategy {
     }
 
     await this.markSeenQuietly(client, uid);
+    await this.dispatchPendingResumeCommands(client, uid);
 
     // `halt` y no una salida normal: sin el, el motor avanzaria al nodo
     // siguiente con el namespace del disparador vacio, que es exactamente el
@@ -908,6 +919,59 @@ export class ImapTriggerStrategy implements INodeStrategy {
           'El mensaje era una orden de reanudacion, no contenido que procesar.',
       },
     };
+  }
+
+  /**
+   * Atiende, en orden de llegada, las demas ordenes SIN LEER del buzon.
+   *
+   * El disparador solo descarga el mensaje mas reciente por sondeo. En un hilo
+   * con varias respuestas (un operador reanuda, otro corrige el paso) las
+   * anteriores quedaban esperando a un sondeo cada una, o para siempre si
+   * llegaba contenido nuevo por encima. Se buscan SOLO no leidos —un correo ya
+   * leido no se inspecciona nunca— y solo se toca lo que es orden: el contenido
+   * se queda intacto para su propio sondeo.
+   *
+   * Cada mensaje va aislado: uno que falle no descarrila a los siguientes.
+   */
+  private async dispatchPendingResumeCommands(
+    client: ImapFlow,
+    handledUid: number,
+  ): Promise<void> {
+    let uids: number[];
+
+    try {
+      const found = await client.search({ seen: false }, { uid: true });
+
+      uids = Array.isArray(found) ? found : [];
+    } catch (error) {
+      this.logger.warn(
+        `No se pudieron buscar mas ordenes de reanudacion pendientes: ${error instanceof Error ? error.message : String(error)}`,
+      );
+
+      return;
+    }
+
+    const pending = uids
+      .filter((candidate) => candidate !== handledUid)
+      .sort((left, right) => left - right)
+      .slice(0, MAX_PENDING_RESUME_COMMANDS);
+
+    for (const uid of pending) {
+      try {
+        const parsed = await this.downloadAndParse(client, uid);
+
+        if (!this.isResumeCommandEmail(parsed)) {
+          continue;
+        }
+
+        await this.inboundEmailResumeService.processMessage(parsed);
+        await this.markSeenQuietly(client, uid);
+      } catch (error) {
+        this.logger.warn(
+          `No se pudo atender la orden pendiente uid=${uid}; se reintentara en el proximo sondeo: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+    }
   }
 
   /** Marca `\Seen` sin propagar: el flujo ya decidio su desenlace. */

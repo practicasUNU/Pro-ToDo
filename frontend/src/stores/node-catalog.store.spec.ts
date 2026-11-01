@@ -30,8 +30,8 @@ const buildEntry = (overrides: Partial<NodeCatalogEntry> = {}): NodeCatalogEntry
 const IMPLEMENTED = buildEntry();
 const NOT_IMPLEMENTED = buildEntry({
   id: 'a2',
-  code: 'DESTINO_ACENS',
-  name: 'Destino Acens',
+  code: 'DESTINO_LEGADO',
+  name: 'Destino legado',
   implemented: false,
 });
 
@@ -136,7 +136,7 @@ describe('useNodeCatalogStore · catalogo de tipos de nodo', () => {
       await store.fetchCatalog();
 
       // 2. Act
-      const found = store.findByCode('DESTINO_ACENS');
+      const found = store.findByCode('DESTINO_LEGADO');
 
       // 3. Assert
       expect(found).toEqual(NOT_IMPLEMENTED);

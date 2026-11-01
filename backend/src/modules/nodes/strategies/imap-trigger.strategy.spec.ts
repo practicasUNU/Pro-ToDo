@@ -518,6 +518,45 @@ describe('ImapTriggerStrategy', () => {
       expect(result.success).toBe(false);
       expect(client.messageFlagsAdd).not.toHaveBeenCalled();
     });
+
+    it('1.8bis deberia conservar el correo sin leer si la imputacion del remitente falla', async () => {
+      // 1. Arrange 📐: el payload aun no se ha emitido cuando revienta.
+      const client = buildClient();
+      useClient(client);
+      simpleParser.mockResolvedValue(buildParsedMail());
+      const { strategy, resolveSenderUserId } = buildStrategy();
+      resolveSenderUserId.mockRejectedValue(new Error('Base no disponible'));
+
+      // 2. Act ⚙️
+      const result = await strategy.execute(
+        buildContext(),
+        buildParams({ markAsRead: true }),
+      );
+
+      // 3. Assert 🎯
+      expect(result.success).toBe(false);
+      expect(client.messageFlagsAdd).not.toHaveBeenCalled();
+    });
+
+    it('1.8ter deberia marcar \\Seen solo con el payload ya compuesto', async () => {
+      // 1. Arrange 📐
+      const client = buildClient();
+      useClient(client);
+      simpleParser.mockResolvedValue(buildParsedMail());
+      const { strategy, resolveSenderUserId } = buildStrategy();
+
+      // 2. Act ⚙️
+      const result = await strategy.execute(
+        buildContext(),
+        buildParams({ markAsRead: true }),
+      );
+
+      // 3. Assert 🎯: la imputacion (ultimo paso del payload) va antes del flag.
+      expect(result.success).toBe(true);
+      expect(resolveSenderUserId.mock.invocationCallOrder[0]).toBeLessThan(
+        client.messageFlagsAdd.mock.invocationCallOrder[0] ?? 0,
+      );
+    });
   });
 
   describe('1bis. Filtros de disparo (SEARCH)', () => {
@@ -2370,7 +2409,10 @@ describe('ImapTriggerStrategy', () => {
     const RESUME_TOKEN = 'a1b2c3d4e5f60718293a';
 
     it('13.1 deberia delegar la orden y parar, sin publicar el correo', async () => {
-      // 1. Arrange 📐
+      // 1. Arrange 📐: un solo no leido, para aislar la orden de las de 13.7.
+      useClient(
+        buildClient({ search: jest.fn().mockResolvedValue([MESSAGE_UID]) }),
+      );
       const { strategy, processMessage } = buildStrategy();
       const parsed = buildParsedMail({
         subject: `Re: [Proto-Do] Flujo detenido`,
@@ -2397,6 +2439,9 @@ describe('ImapTriggerStrategy', () => {
     it('13.2 deberia reconocer la orden tambien en el asunto con `Re:` encadenados', async () => {
       // 1. Arrange 📐: es como llega de verdad; nadie redacta estas ordenes
       //    desde cero.
+      useClient(
+        buildClient({ search: jest.fn().mockResolvedValue([MESSAGE_UID]) }),
+      );
       const { strategy, processMessage } = buildStrategy();
       simpleParser.mockResolvedValue(
         buildParsedMail({
@@ -2462,6 +2507,9 @@ describe('ImapTriggerStrategy', () => {
       //    asunto es el de aquel con un `Re:` delante y NO casa con el filtro
       //    del flujo. Evaluada despues, saldria por SUBJECT_FILTERED y la
       //    reanudacion no se atenderia jamas.
+      useClient(
+        buildClient({ search: jest.fn().mockResolvedValue([MESSAGE_UID]) }),
+      );
       const { strategy, processMessage } = buildStrategy();
       simpleParser.mockResolvedValue(
         buildParsedMail({
@@ -2507,6 +2555,38 @@ describe('ImapTriggerStrategy', () => {
       // 3. Assert 🎯
       expect(processMessage).not.toHaveBeenCalled();
       expect(result.data).toMatchObject({ subject: 'Convocatoria abierta' });
+    });
+
+    it('13.7 deberia atender en orden las demas ordenes sin leer del hilo, sin tocar el contenido', async () => {
+      // 1. Arrange 📐: tres no leidos; el mas reciente (42) y el 7 son ordenes,
+      //    el 12 es contenido del flujo y debe quedar intacto.
+      const client = buildClient({
+        search: jest.fn().mockResolvedValue([12, MESSAGE_UID, 7]),
+      });
+      useClient(client);
+      const { strategy, processMessage } = buildStrategy();
+      const order = buildParsedMail({ text: `REANUDAR ${RESUME_TOKEN}` });
+      const content = buildParsedMail({ subject: 'Convocatoria abierta' });
+      simpleParser
+        .mockResolvedValueOnce(order) // 42, el mas reciente
+        .mockResolvedValueOnce(order) // 7
+        .mockResolvedValueOnce(content); // 12
+
+      // 2. Act ⚙️
+      await strategy.execute(buildContext(), buildParams());
+
+      // 3. Assert 🎯
+      expect(processMessage).toHaveBeenCalledTimes(2);
+      expect(
+        client.download.mock.calls.map((call: unknown[]) => call[0]),
+      ).toEqual([String(MESSAGE_UID), '7', '12']);
+      expect(
+        client.messageFlagsAdd.mock.calls.map((call: unknown[]) => call[0]),
+      ).toEqual([String(MESSAGE_UID), '7']);
+      expect(client.search).toHaveBeenLastCalledWith(
+        { seen: false },
+        { uid: true },
+      );
     });
   });
 });

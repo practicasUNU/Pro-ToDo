@@ -19,6 +19,11 @@ import {
 } from '@modules/credentials/enums/credential-auth-type.enum';
 
 import { BaseHttpDestinationStrategy } from './base/base-http-destination.strategy';
+import {
+  MAX_RESPONSE_BODY_CHARS,
+  boundResponseBody,
+  mapJsonStrings,
+} from './base/http-destination.utils';
 
 import {
   HttpGenericAuthType,
@@ -59,14 +64,8 @@ export const ERR_HTTP_GENERIC_NETWORK = 'ERR_HTTP_GENERIC_NETWORK';
 
 const ERROR_PREFIX = 'ERR_HTTP_GENERIC';
 
-/**
- * Techo del cuerpo de respuesta que se publica en el namespace.
- *
- * El namespace acaba en `contexto_acumulado` (jsonb) en CADA checkpoint, y una
- * API que devuelva un listado entero multiplicaria la fila por cada paso. Se
- * conserva el principio, marcado, que es donde las APIs ponen el resultado.
- */
-export const MAX_RESPONSE_BODY_CHARS = 64_000;
+/** Re-exportado: los consumidores lo conocian desde esta estrategia. */
+export { MAX_RESPONSE_BODY_CHARS };
 
 /**
  * Cabeceras de respuesta que no se publican: `set-cookie` puede traer una
@@ -114,46 +113,6 @@ type Composition =
 
 const stackTraceOf = (error: Error): { stackTrace?: string } =>
   error.stack === undefined ? {} : { stackTrace: error.stack };
-
-/** Sustituye cada cadena de un valor JSON aplicando `interpolate`. */
-const mapJsonStrings = (
-  value: unknown,
-  interpolate: (template: string) => string,
-): unknown => {
-  if (typeof value === 'string') {
-    return interpolate(value);
-  }
-
-  if (Array.isArray(value)) {
-    return value.map((item) => mapJsonStrings(item, interpolate));
-  }
-
-  if (typeof value === 'object' && value !== null) {
-    return Object.fromEntries(
-      Object.entries(value).map(([key, item]) => [
-        key,
-        mapJsonStrings(item, interpolate),
-      ]),
-    );
-  }
-
-  return value;
-};
-
-/** Cuerpo de respuesta acotado a `MAX_RESPONSE_BODY_CHARS`. */
-const boundResponseBody = (body: unknown): unknown => {
-  if (body === undefined || body === '') {
-    return null;
-  }
-
-  const serialized = typeof body === 'string' ? body : JSON.stringify(body);
-
-  if (serialized.length <= MAX_RESPONSE_BODY_CHARS) {
-    return body;
-  }
-
-  return `${serialized.slice(0, MAX_RESPONSE_BODY_CHARS)}… [recortado: ${serialized.length} caracteres]`;
-};
 
 /**
  * Conector de salida HTTP generico (MOD-03, nodo DESTINO_HTTP_GENERICO).

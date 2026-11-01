@@ -1,12 +1,16 @@
 import { Injectable } from '@nestjs/common';
+import * as cheerio from 'cheerio';
 import { plainToInstance } from 'class-transformer';
 import { validate } from 'class-validator';
+import sanitizeHtml from 'sanitize-html';
 
 import { NodeType } from '@core/fsm/types/pipeline-schema.types';
 import { TemplateRendererService } from '@modules/templates/services/template-renderer.service';
 import { RESIDUAL_MARKER_PATTERN } from '@modules/templates/templates.service';
 
 import {
+  DEFAULT_POST_IA_SOURCE_NAMESPACE,
+  PostIaContentMode,
   PostIaSanitizerConfigDto,
   resolvePostIaSanitizerConfig,
 } from '../dto/post-ia-sanitizer-config.dto';
@@ -158,6 +162,12 @@ export class PostIaSanitizerStrategy implements INodeStrategy {
       type: 'text',
       description: 'Marca ISO del instante en que se aprobo el markup',
     },
+    {
+      name: 'validated_fields',
+      type: 'object',
+      description:
+        'Modo TEXT: cada campo auditado, en texto plano sin etiquetas (p. ej. validated_fields.headline). Vacio en modo HTML',
+    },
   ];
 
   constructor(
@@ -213,19 +223,34 @@ export class PostIaSanitizerStrategy implements INodeStrategy {
       };
     }
 
-    // 3. El campo concreto. Es el camino que recorre hoy un flujo real: ningun
-    //    nodo publica todavia `filled_markup` (ver el DTO), asi que el fallo es
-    //    exacto a proposito —nombra la ruta completa— para que el operador no
-    //    tenga que adivinar que le falta.
+    // 2bis. Flujos sin maquetacion: el escudo audita los campos de texto del
+    //       modelo y no necesita ningun MAPEADOR_PLANTILLA por delante.
+    if (resolution.config.contentMode === PostIaContentMode.TEXT) {
+      return this.auditTextFields(
+        sourcePayload,
+        sourceNamespace,
+        resolution.config.sourceFields,
+      );
+    }
+
+    // 3. El campo concreto. El fallo es exacto a proposito —nombra la ruta
+    //    completa— para que el operador no tenga que adivinar que le falta.
     const rawMarkup = sourcePayload[sourceField];
 
     if (typeof rawMarkup !== 'string' || rawMarkup.trim().length === 0) {
+      // `filled_markup` nulo en `llm_response` es el sintoma exacto de un
+      // prompt SIN plantilla: el nodo es valido, solo esta en el modo errado.
+      const hint =
+        sourceNamespace === DEFAULT_POST_IA_SOURCE_NAMESPACE
+          ? ' Si el flujo no usa plantilla HTML, configura el escudo con contentMode "TEXT".'
+          : '';
+
       return {
         success: false,
         error: {
           level: 'GRAVE',
           code: ERR_POST_IA_EMPTY_HTML,
-          message: `El campo "${sourceNamespace}.${sourceField}" no contiene markup: ${this.describeValue(rawMarkup)}. El escudo no puede auditar lo que no existe.`,
+          message: `El campo "${sourceNamespace}.${sourceField}" no contiene markup: ${this.describeValue(rawMarkup)}. El escudo no puede auditar lo que no existe.${hint}`,
           missingFields: [`${sourceNamespace}.${sourceField}`],
         },
       };
@@ -312,8 +337,113 @@ export class PostIaSanitizerStrategy implements INodeStrategy {
         character_count: validatedMarkup.length,
         audit_status: AUDIT_STATUS_PASSED,
         sanitized_at: new Date().toISOString(),
+        validated_fields: {},
       },
     };
+  }
+
+  /**
+   * Modo TEXT: audita cada campo de texto del modelo.
+   *
+   * Mismo orden que el modo HTML y por el mismo motivo: los marcadores
+   * residuales se buscan ANTES de sanear. El saneado aqui no tiene lista
+   * blanca: TODA etiqueta sobra en un titular o un resumen, y un `<script>`
+   * se descarta con su contenido (`nonTextTags` de sanitize-html). Las
+   * entidades se decodifican despues, porque el destino escapa por su cuenta
+   * y un `&amp;` llegaria impreso.
+   *
+   * `validated_markup` sale vacio: la forma del payload es la misma en los dos
+   * modos, y el asistente nunca ofrece una variable que no exista.
+   */
+  private auditTextFields(
+    sourcePayload: Record<string, unknown>,
+    sourceNamespace: string,
+    sourceFields: readonly string[],
+  ): NodeResult {
+    const missing = sourceFields.filter((field) => {
+      const value = sourcePayload[field];
+
+      return typeof value !== 'string' || value.trim().length === 0;
+    });
+
+    if (missing.length > 0) {
+      return {
+        success: false,
+        error: {
+          level: 'GRAVE',
+          code: ERR_POST_IA_EMPTY_HTML,
+          message: `El escudo (modo TEXT) no encuentra texto en: ${missing.map((field) => `${sourceNamespace}.${field}`).join(', ')}.`,
+          missingFields: missing.map((field) => `${sourceNamespace}.${field}`),
+        },
+      };
+    }
+
+    const texts = sourceFields.map((field) => [
+      field,
+      this.stripCodeFences(String(sourcePayload[field])),
+    ]);
+    const residualMarkers = [
+      ...new Set(texts.flatMap(([, text]) => this.findResidualMarkers(text))),
+    ];
+
+    if (residualMarkers.length > 0) {
+      return {
+        success: false,
+        error: {
+          level: 'GRAVE',
+          code: ERR_POST_IA_RESIDUAL_VARS,
+          message: `El modelo devolvio ${residualMarkers.length} marcador(es) sin resolver: ${residualMarkers.join(', ')}. Publicarlos imprimiria las llaves literales.`,
+          missingFields: residualMarkers,
+        },
+      };
+    }
+
+    const validatedFields = Object.fromEntries(
+      texts.map(([field, text]) => [field, this.toPlainText(text)]),
+    );
+    const emptied = sourceFields.filter(
+      (field) => validatedFields[field]?.length === 0,
+    );
+
+    if (emptied.length > 0) {
+      return {
+        success: false,
+        error: {
+          level: 'GRAVE',
+          code: ERR_POST_IA_EMPTY_AFTER_SANITIZE,
+          message: `Quedaron vacios tras el saneado (todo su contenido eran etiquetas): ${emptied.map((field) => `${sourceNamespace}.${field}`).join(', ')}.`,
+          missingFields: emptied.map((field) => `${sourceNamespace}.${field}`),
+        },
+      };
+    }
+
+    return {
+      success: true,
+      data: {
+        validated_markup: '',
+        character_count: Object.values(validatedFields).reduce(
+          (total, text) => total + text.length,
+          0,
+        ),
+        audit_status: AUDIT_STATUS_PASSED,
+        sanitized_at: new Date().toISOString(),
+        validated_fields: validatedFields,
+      },
+    };
+  }
+
+  /** Texto sin ninguna etiqueta y con las entidades ya decodificadas. */
+  private toPlainText(text: string): string {
+    const stripped = sanitizeHtml(text, {
+      allowedTags: [],
+      allowedAttributes: {},
+    });
+
+    return cheerio
+      .load(stripped, null, false)
+      .text()
+      .replace(/[ \t]+/g, ' ')
+      .trim();
   }
 
   /**

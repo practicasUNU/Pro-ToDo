@@ -12,6 +12,7 @@ import {
   DEFAULT_POST_IA_SOURCE_NAMESPACE,
   MAX_REQUIRED_SELECTORS,
   MAX_SELECTOR_LENGTH,
+  PostIaContentMode,
 } from '@/types/nodes/post-ia-sanitizer.types';
 
 import { usePostIaSanitizerStore } from './post-ia-sanitizer.store';
@@ -483,6 +484,71 @@ describe('usePostIaSanitizerStore · configuracion del nodo ESCUDO_POST_IA', () 
 
       // 3. Assert 🎯
       expect(tras_vision.config.requiredSelectors).toEqual([]);
+    });
+  });
+
+  describe('9. Modo TEXT: escudo sin MAPEADOR_PLANTILLA', () => {
+    const LLM_ONLY: UpstreamNamespace[] = [
+      {
+        namespace: 'llm_response',
+        nodeType: NodeType.PROCESADOR_IA,
+        fields: [
+          { name: 'headline', type: 'text' },
+          { name: 'summary', type: 'text' },
+        ],
+      },
+    ];
+
+    it('9.1 no deberia avisar de la falta de mapeador en modo TEXT', () => {
+      // 1. Arrange 📐
+      const store = usePostIaSanitizerStore(nextNodeId());
+      store.setAvailableUpstreamContext(LLM_ONLY);
+
+      // 2. Act ⚙️
+      store.updateConfig({ contentMode: PostIaContentMode.TEXT });
+
+      // 3. Assert 🎯
+      expect(store.isConfigValid).toBe(true);
+      expect(store.configWarnings.some((warning) => warning.includes('MAPEADOR'))).toBe(false);
+    });
+
+    it('9.2 deberia publicar solo modo y campos, y volver por hydrateFromNode', () => {
+      // 1. Arrange 📐
+      const store = usePostIaSanitizerStore(nextNodeId());
+      store.updateConfig({
+        contentMode: PostIaContentMode.TEXT,
+        sourceFields: ['headline'],
+        requiredSelectors: ['h1'],
+      });
+
+      // 2. Act ⚙️
+      const params = store.toNodeParams();
+      const other = usePostIaSanitizerStore(nextNodeId());
+      other.hydrateFromNode({ outputNamespace: 'validated_drupal_json', params });
+
+      // 3. Assert 🎯
+      expect(params).toEqual({ contentMode: 'TEXT', sourceFields: ['headline'] });
+      expect(other.config.contentMode).toBe(PostIaContentMode.TEXT);
+      expect(other.config.sourceFields).toEqual(['headline']);
+    });
+
+    it('9.3 deberia invalidar el modo TEXT sin campos y avisar de campos que no existen', () => {
+      // 1. Arrange 📐
+      const empty = usePostIaSanitizerStore(nextNodeId());
+      const stale = usePostIaSanitizerStore(nextNodeId());
+      stale.setAvailableUpstreamContext(LLM_ONLY);
+
+      // 2. Act ⚙️
+      empty.updateConfig({ contentMode: PostIaContentMode.TEXT, sourceFields: [] });
+      stale.updateConfig({
+        contentMode: PostIaContentMode.TEXT,
+        sourceFields: ['headline', 'body_paragraphs'],
+      });
+
+      // 3. Assert 🎯
+      expect(empty.isConfigValid).toBe(false);
+      expect(stale.missingTextFields).toEqual(['body_paragraphs']);
+      expect(stale.hasStaleSource).toBe(true);
     });
   });
 });

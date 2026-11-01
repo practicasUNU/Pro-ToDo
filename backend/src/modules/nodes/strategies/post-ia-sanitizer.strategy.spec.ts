@@ -557,7 +557,7 @@ describe('PostIaSanitizerStrategy', () => {
   });
 
   describe('7. Inventario de salida (outputFields)', () => {
-    it('7.1 deberia declarar las cuatro claves del namespace', () => {
+    it('7.1 deberia declarar las cinco claves del namespace', () => {
       // 1. Arrange & 2. Act ⚙️
       const strategy = buildStrategy();
 
@@ -567,6 +567,7 @@ describe('PostIaSanitizerStrategy', () => {
         'character_count',
         'audit_status',
         'sanitized_at',
+        'validated_fields',
       ]);
     });
 
@@ -631,6 +632,113 @@ describe('PostIaSanitizerStrategy', () => {
 
       // 3. Assert 🎯
       expect(renderer.prepareInjectableMarkup).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('9. Modo TEXT: flujos sin maquetacion (Innodays, Innobar, Cerrar licitacion)', () => {
+    const TEXT_PAYLOAD = {
+      headline: 'Innodays &amp; Innobar 2026',
+      summary: 'Resumen <script>alert(1)</script><b>destacado</b>.',
+      filled_markup: null,
+    };
+
+    it('9.1 deberia aprobar los campos de texto sin exigir MAPEADOR_PLANTILLA', async () => {
+      // 1. Arrange 📐: `filled_markup` es nulo, como lo deja un prompt sin plantilla.
+      const strategy = buildStrategy();
+
+      // 2. Act ⚙️
+      const result = await strategy.execute(buildContext(TEXT_PAYLOAD), {
+        contentMode: 'TEXT',
+      });
+
+      // 3. Assert 🎯
+      expect(result.success).toBe(true);
+      expect(result.data).toMatchObject({
+        validated_markup: '',
+        audit_status: 'PASSED',
+        validated_fields: {
+          headline: 'Innodays & Innobar 2026',
+          summary: 'Resumen destacado.',
+        },
+      });
+    });
+
+    it('9.2 deberia fallar con EMPTY_HTML si falta un campo declarado', async () => {
+      // 1. Arrange 📐
+      const strategy = buildStrategy();
+
+      // 2. Act ⚙️
+      const result = await strategy.execute(buildContext(TEXT_PAYLOAD), {
+        contentMode: 'TEXT',
+        sourceFields: ['headline', 'body_paragraphs'],
+      });
+
+      // 3. Assert 🎯
+      expect(result.success).toBe(false);
+      expect(result.error?.level).toBe('GRAVE');
+      expect(result.error?.code).toBe(ERR_POST_IA_EMPTY_HTML);
+      expect(result.error?.missingFields).toEqual([
+        'llm_response.body_paragraphs',
+      ]);
+    });
+
+    it('9.3 deberia rechazar marcadores residuales en un campo de texto', async () => {
+      // 1. Arrange 📐
+      const strategy = buildStrategy();
+
+      // 2. Act ⚙️
+      const result = await strategy.execute(
+        buildContext({
+          headline: 'Hola {{parsed_email.clean_title}}',
+          summary: 'ok',
+        }),
+        { contentMode: 'TEXT' },
+      );
+
+      // 3. Assert 🎯
+      expect(result.error?.code).toBe(ERR_POST_IA_RESIDUAL_VARS);
+      expect(result.error?.missingFields).toEqual([
+        '{{parsed_email.clean_title}}',
+      ]);
+    });
+
+    it('9.4 deberia fallar si el campo solo traia etiquetas', async () => {
+      // 1. Arrange 📐: una inyeccion de prompt que devuelve solo un script.
+      const strategy = buildStrategy();
+
+      // 2. Act ⚙️
+      const result = await strategy.execute(
+        buildContext({ headline: '<script>robar()</script>', summary: 'ok' }),
+        { contentMode: 'TEXT' },
+      );
+
+      // 3. Assert 🎯
+      expect(result.error?.code).toBe(ERR_POST_IA_EMPTY_AFTER_SANITIZE);
+    });
+
+    it('9.5 en modo HTML deberia sugerir TEXT cuando filled_markup es nulo', async () => {
+      // 1. Arrange 📐
+      const strategy = buildStrategy();
+
+      // 2. Act ⚙️
+      const result = await strategy.execute(buildContext(TEXT_PAYLOAD), {});
+
+      // 3. Assert 🎯
+      expect(result.error?.code).toBe(ERR_POST_IA_EMPTY_HTML);
+      expect(result.error?.message).toContain('contentMode "TEXT"');
+    });
+
+    it('9.6 deberia rechazar un contentMode desconocido', async () => {
+      // 1. Arrange 📐
+      const strategy = buildStrategy();
+
+      // 2. Act ⚙️
+      const result = await strategy.execute(buildContext(TEXT_PAYLOAD), {
+        contentMode: 'MARKDOWN',
+      });
+
+      // 3. Assert 🎯
+      expect(result.error?.code).toBe(ERR_POST_IA_CONFIG);
     });
   });
 });

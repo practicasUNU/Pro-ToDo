@@ -16,6 +16,9 @@ export const SANDBOX_ROLES_BY_NODE_TYPE: Readonly<Partial<Record<NodeType, reado
     // Encerrado en las paginas de pruebas: el backend fuerza `isSandbox` y
     // rechaza cualquier pagina fuera de su lista blanca.
     [NodeType.DESTINO_DRUPAL]: [UserRole.ADMIN, UserRole.EDITOR],
+    // Solo ADMIN: Acens no tiene entorno de pruebas y la peticion es real
+    // contra la raiz que declara el servidor.
+    [NodeType.DESTINO_ACENS]: [UserRole.ADMIN],
   };
 
 /** Tipos cuya prueba cuesta dinero: piden confirmacion antes de lanzarse. */

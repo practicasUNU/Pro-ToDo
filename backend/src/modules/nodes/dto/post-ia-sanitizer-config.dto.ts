@@ -2,6 +2,7 @@ import { ApiPropertyOptional } from '@nestjs/swagger';
 import {
   ArrayMaxSize,
   IsArray,
+  IsEnum,
   IsNotEmpty,
   IsOptional,
   IsString,
@@ -28,14 +29,10 @@ export const DEFAULT_POST_IA_SOURCE_NAMESPACE = 'llm_response';
 /**
  * Campo del que se lee el markup, si el nodo no declara otro.
  *
- * ADVERTENCIA DE ESTADO: a dia de hoy `LlmExtractorStrategy` NO publica esta
- * clave. Sus `outputFields` son `headline`, `summary`, `body_paragraphs` y
- * `metadata`, y los tres clientes de proveedor piden la respuesta por esquema
- * JSON con los tres primeros como obligatorios. El defecto apunta, por tanto, al
- * campo que publicara el modo de salida HTML cuando se implemente; mientras
- * tanto el escudo falla con `ERR_POST_IA_EMPTY_HTML`, que es la conducta
- * correcta: un escudo que aprueba un payload inexistente es peor que uno que no
- * corre.
+ * `LlmExtractorStrategy` lo publica cuando su prompt cita
+ * `{{rendered_html.compiled_markup}}` (flujos con plantilla, como Notiweb o
+ * Abrir licitacion). Sin plantilla vale `null`, y para esos flujos —Cerrar
+ * licitacion, Innodays, Innobar— esta `contentMode: 'TEXT'`.
  *
  * Se llama `filled_markup` y no `compiled_markup` para no colisionar con
  * `rendered_html.compiled_markup`, que es la plantilla base VACIA. Dos
@@ -53,6 +50,31 @@ export const DEFAULT_POST_IA_SOURCE_FIELD = 'filled_markup';
  * ilegible para el motor aunque el payload lo trajera.
  */
 const SOURCE_FIELD_PATTERN = /^[a-z0-9_]+$/;
+
+/**
+ * Que audita el escudo.
+ *
+ * - `HTML`: un campo con markup (por defecto `filled_markup`), saneado con la
+ *   lista blanca y auditado por selectores. Es el modo historico.
+ * - `TEXT`: varios campos de TEXTO del modelo (`headline`, `summary`...),
+ *   despojados de TODA etiqueta. Es el que permite poner el escudo detras de un
+ *   `PROCESADOR_IA` sin `MAPEADOR_PLANTILLA`, en los flujos que no maquetan.
+ */
+export enum PostIaContentMode {
+  HTML = 'HTML',
+  TEXT = 'TEXT',
+}
+
+export const DEFAULT_POST_IA_CONTENT_MODE = PostIaContentMode.HTML;
+
+/** Campos que se auditan en modo TEXT si el nodo no declara otros. */
+export const DEFAULT_POST_IA_SOURCE_FIELDS: readonly string[] = [
+  'headline',
+  'summary',
+];
+
+/** Techo de campos en modo TEXT. */
+export const MAX_POST_IA_SOURCE_FIELDS = 20;
 
 /** Nombre de etiqueta HTML en minusculas, tal y como lo escribe el saneador. */
 const HTML_TAG_PATTERN = /^[a-z][a-z0-9]*$/;
@@ -96,8 +118,38 @@ export class PostIaSanitizerConfigDto {
   sourceNamespace?: string;
 
   @ApiPropertyOptional({
+    enum: PostIaContentMode,
+    default: DEFAULT_POST_IA_CONTENT_MODE,
     description:
-      'Campo del namespace de origen que contiene el HTML a auditar. Ver la advertencia de estado en DEFAULT_POST_IA_SOURCE_FIELD: hoy ningun nodo lo publica todavia.',
+      'HTML audita un campo de markup; TEXT audita varios campos de texto plano (sin MAPEADOR_PLANTILLA delante).',
+  })
+  @IsOptional()
+  @IsEnum(PostIaContentMode, {
+    message: `contentMode debe ser uno de: ${Object.values(PostIaContentMode).join(', ')}.`,
+  })
+  contentMode?: PostIaContentMode;
+
+  @ApiPropertyOptional({
+    description:
+      'Solo en modo TEXT: campos del namespace de origen que se auditan como texto plano.',
+    type: [String],
+    default: DEFAULT_POST_IA_SOURCE_FIELDS,
+  })
+  @IsOptional()
+  @IsArray({ message: 'sourceFields debe ser un arreglo.' })
+  @ArrayMaxSize(MAX_POST_IA_SOURCE_FIELDS, {
+    message: `sourceFields no puede declarar mas de ${MAX_POST_IA_SOURCE_FIELDS} campos.`,
+  })
+  @IsString({ each: true, message: 'Cada campo debe ser una cadena.' })
+  @Matches(SOURCE_FIELD_PATTERN, {
+    each: true,
+    message: 'Cada campo de sourceFields debe ser snake_case alfanumerico.',
+  })
+  sourceFields?: string[];
+
+  @ApiPropertyOptional({
+    description:
+      'Modo HTML: campo del namespace de origen que contiene el HTML a auditar (lo publica el PROCESADOR_IA cuando rellena una plantilla).',
     default: DEFAULT_POST_IA_SOURCE_FIELD,
     pattern: SOURCE_FIELD_PATTERN.source,
   })
@@ -154,7 +206,10 @@ export class PostIaSanitizerConfigDto {
 
 /** Configuracion del escudo con los valores por defecto ya aplicados. */
 export interface ResolvedPostIaSanitizerConfig {
+  readonly contentMode: PostIaContentMode;
   readonly sourceNamespace: string;
+  /** Solo se lee en modo TEXT. */
+  readonly sourceFields: readonly string[];
   readonly sourceField: string;
   readonly requiredSelectors: readonly string[];
   /** Vacio significa "toda la lista blanca del saneador", nunca "ninguna". */
@@ -171,7 +226,12 @@ export interface ResolvedPostIaSanitizerConfig {
 export const resolvePostIaSanitizerConfig = (
   dto: PostIaSanitizerConfigDto,
 ): ResolvedPostIaSanitizerConfig => ({
+  contentMode: dto.contentMode ?? DEFAULT_POST_IA_CONTENT_MODE,
   sourceNamespace: dto.sourceNamespace ?? DEFAULT_POST_IA_SOURCE_NAMESPACE,
+  sourceFields:
+    dto.sourceFields === undefined || dto.sourceFields.length === 0
+      ? DEFAULT_POST_IA_SOURCE_FIELDS
+      : dto.sourceFields,
   sourceField: dto.sourceField ?? DEFAULT_POST_IA_SOURCE_FIELD,
   requiredSelectors: dto.requiredSelectors ?? [],
   allowedTags: dto.allowedTags ?? [],

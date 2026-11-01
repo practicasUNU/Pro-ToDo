@@ -271,13 +271,13 @@ onMounted(async () => {
 
     <!-- Acciones sobre la plantilla elegida, mismo par que en el mapeador:
          comprobar que es la que se creia, y crear una sin salir del asistente. -->
-    <div class="row items-center q-gutter-sm q-mt-md">
+    <div class="pd-actions q-mt-md">
       <q-btn
         class="pd-btn-icon"
         outline
         no-caps
         dense
-        icon-right="north_east"
+        icon="visibility"
         label="Previsualizar"
         data-test="preview-prompt"
         :disable="store.config.templatePromptId === null"
@@ -288,7 +288,7 @@ onMounted(async () => {
         outline
         no-caps
         dense
-        icon-right="north_east"
+        icon="add"
         label="Nueva plantilla"
         data-test="create-prompt"
         @click="isEditorOpen = true"
@@ -468,9 +468,9 @@ onMounted(async () => {
 
       <!-- Poka-Yoke: proyecta el coste ANTES de ejecutar, para que el operador no
            descubra que se quedo corto en forma de JSON cortado a media cadena.
-           Se calla entera sin plantilla base delante: sin marcado que medir, una
-           tarjeta que siempre dice lo mismo solo anade ruido. -->
-      <div v-if="store.hasResourceEstimation" class="col-12">
+           Visible SIEMPRE: sin plantilla base delante estima a partir del
+           prompt y del contexto que interpola, y la razon lo dice. -->
+      <div class="col-12">
         <div class="pd-estimate" data-test="resource-estimate">
           <div class="row items-center q-gutter-sm">
             <span
@@ -482,24 +482,28 @@ onMounted(async () => {
             </span>
             <span class="pd-estimate-figures pd-mono">
               ~{{ store.resourceEstimation.estimatedOutputTokens }} tokens de salida ·
-              {{ Math.round(store.resourceEstimation.recommendedTimeoutMs / 1000) }} s recomendados
+              {{ Math.round(store.resourceEstimation.recommendedTimeoutMs / 1000) }} s ·
+              {{ store.resourceEstimation.recommendedMaxRetries }} reintento(s) recomendados
             </span>
           </div>
 
-          <p class="pd-estimate-reason">{{ store.resourceEstimation.reason }}</p>
+          <p class="pd-estimate-reason" data-test="estimate-reason">
+            {{ store.resourceEstimation.reason }}
+          </p>
 
           <q-btn
             no-caps
             dense
             icon="auto_fix_high"
-            label="Aplicar recomendacion"
+            label="Recomendar presupuesto (tokens, timeout y reintentos)"
             class="pd-btn-primary"
             data-test="apply-recommendation"
             @click="store.applyRecommendedResources()"
           >
             <q-tooltip max-width="320px">
-              Escribe la espera y el presupuesto sugeridos en los campos de abajo. Es una estimacion
-              heuristica: los campos siguen siendo tuyos y puedes corregirlos.
+              Escribe la espera, el presupuesto de tokens y los reintentos sugeridos en los campos
+              de abajo. Es una estimacion heuristica: los campos siguen siendo tuyos y puedes
+              corregirlos.
             </q-tooltip>
           </q-btn>
         </div>
@@ -675,6 +679,13 @@ onMounted(async () => {
 </template>
 
 <style scoped lang="scss">
+// Mismo contenedor de acciones que `TemplateMapperConfig.vue`.
+.pd-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
 // Superficie de SOLO LECTURA, distinta de un campo: se ve que no se edita antes
 // de intentar escribir en ella. `pre` conserva los saltos, que en una
 // instruccion son parte de su significado.

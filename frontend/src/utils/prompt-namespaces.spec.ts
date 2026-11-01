@@ -48,7 +48,7 @@ const FULL_CATALOG: NodeCatalogEntry[] = [
   }),
   buildEntry({ id: '7', code: NodeType.MAPEADOR_PLANTILLA }),
   buildEntry({ id: '8', code: NodeType.DESTINO_DRUPAL, category: NodeCategory.DESTINO }),
-  buildEntry({ id: '9', code: 'DESTINO_ACENS', category: NodeCategory.DESTINO, outputFields: [] }),
+  buildEntry({ id: '9', code: 'DESTINO_LEGADO', category: NodeCategory.DESTINO, outputFields: [] }),
   buildEntry({ id: '10', code: NodeType.PROCESADOR_OCR }),
   buildEntry({ id: '11', code: NodeType.DESTINO_SMTP, category: NodeCategory.DESTINO }),
 ];

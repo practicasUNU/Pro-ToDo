@@ -50,6 +50,7 @@ export const NODE_OUTPUT_NAMESPACES = [
   'ocr_result',
   'pause_context',
   'http_generic_response',
+  'acens_result',
 ] as const;
 
 /**
@@ -135,8 +136,9 @@ export const SEMVER_PATTERN = /^\d+\.\d+\.\d+$/;
  * `nodos`, el catalogo estatico de tipos (ver `db/migrations/011-catalogo-nodos.sql`;
  * la tabla se llamaba `tipos_nodo` hasta esa migracion).
  *
- * El catalogo tiene TRECE filas y este enum declara doce: `DESTINO_ACENS` sigue
- * sin estrategia, asi que no es expresable en un `pipeline_schema`.
+ * El enum declara las TRECE filas del catalogo. `DESTINO_ACENS` (migracion 066)
+ * fue la ultima en ganar estrategia: entrega a la API de Acens, cuya URL base y
+ * clave viven en el entorno (`AcensApiConfig`), no en los `params` del nodo.
  *
  * `DESTINO_HTTP_GENERICO` (migracion 056, MOD-03) es el conector de salida a
  * cualquier API REST publica, autenticado con la boveda de credenciales.
@@ -176,6 +178,7 @@ export enum NodeType {
   PROCESADOR_OCR = 'PROCESADOR_OCR',
   PAUSA_FLOW = 'PAUSA_FLOW',
   DESTINO_HTTP_GENERICO = 'DESTINO_HTTP_GENERICO',
+  DESTINO_ACENS = 'DESTINO_ACENS',
 }
 
 /**
@@ -205,6 +208,7 @@ export const DESTINO_NODE_TYPES: ReadonlySet<NodeType> = new Set([
   NodeType.DESTINO_DRUPAL,
   NodeType.DESTINO_SMTP,
   NodeType.DESTINO_HTTP_GENERICO,
+  NodeType.DESTINO_ACENS,
 ]);
 
 /**
@@ -244,6 +248,7 @@ export const NODE_TYPE_LABELS: Readonly<Record<NodeType, string>> = {
   [NodeType.PROCESADOR_OCR]: 'Procesador OCR',
   [NodeType.PAUSA_FLOW]: 'Pausa de flujo',
   [NodeType.DESTINO_HTTP_GENERICO]: 'Destino HTTP genérico',
+  [NodeType.DESTINO_ACENS]: 'Destino Acens',
 };
 
 /** Politica de reintentos de un nodo ante un `NodeResult` fallido. */

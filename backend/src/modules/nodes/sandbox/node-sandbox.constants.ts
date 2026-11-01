@@ -17,6 +17,9 @@ import { UserRole } from '@modules/users/enums/user-role.enum';
  *   servicio fuerza `isSandbox`, deja las altas despublicadas y rechaza
  *   cualquier pagina que no este en la lista blanca de pruebas del `.env`.
  *
+ * - `DESTINO_ACENS`, solo ADMIN: Acens no tiene entorno de pruebas propio, asi
+ *   que la prueba es una peticion REAL contra la raiz del `.env`.
+ *
  * Replicado en el frontend (`types/node-sandbox.ts`) solo para ocultar el
  * boton a quien no puede usarlo; la autoridad es esta tabla.
  */
@@ -27,6 +30,7 @@ export const SANDBOX_ROLES_BY_NODE_TYPE: Readonly<
   [NodeType.PROCESADOR_OCR]: [UserRole.ADMIN],
   [NodeType.DESTINO_HTTP_GENERICO]: [UserRole.ADMIN, UserRole.EDITOR],
   [NodeType.DESTINO_DRUPAL]: [UserRole.ADMIN, UserRole.EDITOR],
+  [NodeType.DESTINO_ACENS]: [UserRole.ADMIN],
 };
 
 /** Cursor con el que se siembra el contexto del nodo aislado. */

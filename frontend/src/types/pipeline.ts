@@ -22,6 +22,7 @@ export enum NodeType {
   PROCESADOR_OCR = 'PROCESADOR_OCR',
   PAUSA_FLOW = 'PAUSA_FLOW',
   DESTINO_HTTP_GENERICO = 'DESTINO_HTTP_GENERICO',
+  DESTINO_ACENS = 'DESTINO_ACENS',
 }
 
 /** Etiquetas legibles para los selectores; el enum viaja crudo al backend. */
@@ -38,6 +39,7 @@ export const NODE_TYPE_LABELS: Record<NodeType, string> = {
   [NodeType.PROCESADOR_OCR]: 'Procesador OCR',
   [NodeType.PAUSA_FLOW]: 'Pausa de flujo',
   [NodeType.DESTINO_HTTP_GENERICO]: 'Destino HTTP genérico',
+  [NodeType.DESTINO_ACENS]: 'Destino Acens',
 };
 
 /**
@@ -73,6 +75,7 @@ export const DESTINO_NODE_TYPES: ReadonlySet<string> = new Set<string>([
   NodeType.DESTINO_DRUPAL,
   NodeType.DESTINO_SMTP,
   NodeType.DESTINO_HTTP_GENERICO,
+  NodeType.DESTINO_ACENS,
 ]);
 
 /**
@@ -126,6 +129,7 @@ export const NODE_OUTPUT_NAMESPACES = [
   'ocr_result',
   'pause_context',
   'http_generic_response',
+  'acens_result',
 ] as const;
 
 /**
@@ -159,6 +163,7 @@ export const DEFAULT_OUTPUT_NAMESPACE_BY_NODE_TYPE: Record<NodeType, string> = {
   [NodeType.PROCESADOR_OCR]: 'ocr_result',
   [NodeType.PAUSA_FLOW]: 'pause_context',
   [NodeType.DESTINO_HTTP_GENERICO]: 'http_generic_response',
+  [NodeType.DESTINO_ACENS]: 'acens_result',
 };
 
 /**
@@ -248,6 +253,8 @@ export const DEFAULT_PARAMS_BY_NODE_TYPE: Record<NodeType, Record<string, unknow
   // Vacio: los defectos (POST, JSON, sin autenticacion) los aplica el backend y
   // el store del nodo los pinta en sus selectores sin necesidad de sembrarlos.
   [NodeType.DESTINO_HTTP_GENERICO]: {},
+  // Vacio: URL base y clave son del servidor; el resto tiene defecto (POST).
+  [NodeType.DESTINO_ACENS]: {},
 };
 
 /**

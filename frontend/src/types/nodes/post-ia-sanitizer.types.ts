@@ -22,6 +22,26 @@ export const DEFAULT_POST_IA_SOURCE_NAMESPACE = 'llm_response';
  */
 export const DEFAULT_POST_IA_SOURCE_FIELD = 'filled_markup';
 
+/**
+ * Que audita el escudo. Replica de `PostIaContentMode`.
+ *
+ * `TEXT` permite poner el escudo directamente detras de un `PROCESADOR_IA`, sin
+ * `MAPEADOR_PLANTILLA`, en los flujos que no maquetan (Cerrar licitacion,
+ * Innodays, Innobar): audita campos de texto y les quita toda etiqueta.
+ */
+export enum PostIaContentMode {
+  HTML = 'HTML',
+  TEXT = 'TEXT',
+}
+
+export const DEFAULT_POST_IA_CONTENT_MODE = PostIaContentMode.HTML;
+
+/** Campos que audita el modo TEXT por defecto; replica de `DEFAULT_POST_IA_SOURCE_FIELDS`. */
+export const DEFAULT_POST_IA_SOURCE_FIELDS: readonly string[] = ['headline', 'summary'];
+
+/** Techo de campos en modo TEXT; replica de `MAX_POST_IA_SOURCE_FIELDS`. */
+export const MAX_POST_IA_SOURCE_FIELDS = 20;
+
 /** Tope de selectores estructurales, replicado de `MAX_REQUIRED_SELECTORS`. */
 export const MAX_REQUIRED_SELECTORS = 10;
 
@@ -166,7 +186,10 @@ export const ALLOWED_TAG_PRESETS: Readonly<Record<AllowedTagPresetKey, AllowedTa
  * `pipeline_schema` y que se omite.
  */
 export interface PostIaSanitizerNodeConfig {
+  contentMode: PostIaContentMode;
   sourceNamespace: string;
+  /** Solo modo TEXT. */
+  sourceFields: string[];
   sourceField: string;
   requiredSelectors: string[];
   allowedTags: string[];

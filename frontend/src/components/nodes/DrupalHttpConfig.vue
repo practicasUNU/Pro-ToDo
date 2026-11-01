@@ -1073,7 +1073,7 @@ const toNullableText = (value: string | number | null): string | null => {
           outlined
           dense
           class="q-mt-xs pd-mono"
-          placeholder="{{llm_response.expediente}}"
+          placeholder="{{llm_response.headline}}"
           :maxlength="MAX_DRUPAL_SELECTOR_LENGTH"
           hint="Envuelve la licitacion en div.pd-licitacion-block con este data-expediente. Solo se usa si el marcado no trae ya el suyo; los paneles de acordeon no se envuelven."
           @focus="rememberCaret('expedienteTemplate', $event)"
@@ -1317,6 +1317,21 @@ const toNullableText = (value: string | number | null): string | null => {
       </div>
     </q-expansion-item>
 
+    <!-- Bloqueo, no aviso: sin escudo NI procesador por delante no hay marcado
+         que publicar, y el paso no se puede guardar. -->
+    <q-banner
+      v-if="store.sourceNamespaceBlockReason !== null"
+      dense
+      class="pd-error-banner q-mt-md"
+      role="alert"
+      data-test="source-namespace-block"
+    >
+      <template #avatar>
+        <q-icon name="block" size="20px" class="pd-error-icon" />
+      </template>
+      <p class="pd-subtitle q-mb-none">{{ store.sourceNamespaceBlockReason }}</p>
+    </q-banner>
+
     <q-banner
       v-for="warning in store.configWarnings"
       :key="warning"
@@ -1356,6 +1371,17 @@ const toNullableText = (value: string | number | null): string | null => {
 .pd-warn-banner {
   background: var(--pd-surface-muted);
   border: 1px solid var(--pd-warning);
+  border-radius: $generic-border-radius;
+  color: var(--pd-text-primary);
+}
+
+.pd-error-icon {
+  color: var(--pd-negative);
+}
+
+.pd-error-banner {
+  background: var(--pd-surface-muted);
+  border: 1px solid var(--pd-negative);
   border-radius: $generic-border-radius;
   color: var(--pd-text-primary);
 }

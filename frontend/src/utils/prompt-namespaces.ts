@@ -28,10 +28,10 @@ import type { UpstreamNamespace } from '@stores/nodes/node-store-registry';
  * con mas sentido para un prompt de redaccion, y esconderlo obligaba al operador
  * a teclear el marcador de memoria.
  *
- * Los destinos no estan aqui sino en `isExcludedCategory`: son dos hoy
- * (`DESTINO_DRUPAL`, `DESTINO_ACENS`) pero la regla es "todo lo que cierre el
- * flujo", y enumerarlos obligaria a acordarse de esta lista al anadir el
- * tercero.
+ * Los destinos no estan aqui sino en `isExcludedCategory`: son varios
+ * (`DESTINO_DRUPAL`, `DESTINO_ACENS`, `DESTINO_HTTP_GENERICO`...) y la regla es
+ * "todo lo que cierre el flujo", y enumerarlos obligaria a acordarse de esta
+ * lista al anadir el siguiente.
  */
 export const PROMPT_EXCLUDED_NODE_TYPES: ReadonlySet<string> = new Set<string>([
   NodeType.PROCESADOR_IA,
@@ -90,12 +90,11 @@ export const buildPromptContextFromCatalog = (
 ): UpstreamNamespace[] =>
   entries
     .filter(
-      (entry) =>
-        !isExcludedCategory(entry.category, entry.code) && !isExcludedNodeType(entry.code),
+      (entry) => !isExcludedCategory(entry.category, entry.code) && !isExcludedNodeType(entry.code),
     )
     // Un nodo sin campos declarados no aporta nada al explorador: seleccionarlo
-    // dejaria el segundo selector vacio sin explicar por que. Hoy es el caso de
-    // DESTINO_ACENS, que no tiene estrategia ni valor de enum. PROCESADOR_IA y
+    // dejaria el segundo selector vacio sin explicar por que (una fila del
+    // catalogo aun sin estrategia, por ejemplo). PROCESADOR_IA y
     // ESCUDO_POST_IA ya declaran los suyos, pero no llegan hasta aqui: los dos
     // salen antes por `isExcludedNodeType`.
     .filter((entry) => entry.outputFields.length > 0)
@@ -117,21 +116,20 @@ export const buildPromptContextFromCatalog = (
 export const filterPromptContext = (context: readonly UpstreamNamespace[]): UpstreamNamespace[] =>
   context.filter(({ nodeType }) => !isExcludedNodeType(nodeType)).map((entry) => ({ ...entry }));
 
-
 /**
  * Namespace por defecto de un codigo del catalogo.
  *
  * Se invierte `NODE_TYPE_BY_NAMESPACE` en vez de leer
  * `DEFAULT_OUTPUT_NAMESPACE_BY_NODE_TYPE` directamente para no anadir una
  * segunda fuente: aquel mapa ya es la unica inversion declarada del proyecto, y
- * un codigo fuera del enum —`DESTINO_ACENS`— no figura en ninguno de los dos.
+ * un codigo fuera del enum no figura en ninguno de los dos.
  * Cae a su propio codigo en minusculas, que nunca llegara al explorador porque
  * esas filas no declaran campos.
  */
 const namespaceOf = (code: string): string => {
   // La comparacion se hace entre cadenas a proposito: `code` es `string` y no
-  // `NodeType` porque el catalogo tiene una fila de mas (`DESTINO_ACENS`), asi
-  // que enfrentarlo al enum seria comparar dos dominios distintos.
+  // `NodeType` porque el catalogo puede tener filas fuera del enum, asi que
+  // enfrentarlo al enum seria comparar dos dominios distintos.
   const found = Object.entries(NODE_TYPE_BY_NAMESPACE).find(
     ([, nodeType]) => (nodeType as string) === code,
   );

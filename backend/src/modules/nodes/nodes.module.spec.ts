@@ -5,6 +5,7 @@ import { createTemplateRendererService } from '@test/factories/template-renderer
 import { NodesModule } from './nodes.module';
 import { CronTriggerStrategy } from './strategies/cron-trigger.strategy';
 import { DrupalHttpStrategy } from './strategies/drupal-http.strategy';
+import { AcensHttpStrategy } from './strategies/acens-http.strategy';
 import { HttpGenericDestinationStrategy } from './strategies/http-generic-destination.strategy';
 import { ImapTriggerStrategy } from './strategies/imap-trigger.strategy';
 import { LlmExtractorStrategy } from './strategies/llm-extractor.strategy';
@@ -18,6 +19,7 @@ import { WebScraperStrategy } from './strategies/web-scraper.strategy';
 
 import type { ConfigService } from '@nestjs/config';
 import type { InboundEmailResumeService } from '@modules/workflows/inbound-email-resume.service';
+import type { AcensApiConfig } from '@core/config/acens-api.config';
 import type { DrupalApiConfig } from '@core/config/drupal-api.config';
 import type { HttpClientService } from '@core/http/http-client.service';
 import type { OutboundTargetGuard } from '@core/http/outbound-url.guard';
@@ -55,6 +57,7 @@ const buildHarness = (): {
   drupal: DrupalHttpStrategy;
   pause: PauseFlowStrategy;
   httpGeneric: HttpGenericDestinationStrategy;
+  acens: AcensHttpStrategy;
   module: NodesModule;
 } => {
   const factory = new NodeStrategyFactory();
@@ -123,6 +126,12 @@ const buildHarness = (): {
     {} as OutboundTargetGuard,
   );
 
+  // Inscribirla no lee el entorno ni despacha nada a Acens.
+  const acens = new AcensHttpStrategy(
+    {} as HttpClientService,
+    {} as AcensApiConfig,
+  );
+
   return {
     factory,
     mapper,
@@ -137,6 +146,7 @@ const buildHarness = (): {
     drupal,
     pause,
     httpGeneric,
+    acens,
     module: new NodesModule(
       factory,
       mapper,
@@ -151,6 +161,7 @@ const buildHarness = (): {
       drupal,
       pause,
       httpGeneric,
+      acens,
     ),
   };
 };
@@ -305,5 +316,16 @@ describe('NodesModule', () => {
     expect(factory.getStrategy(NodeType.DESTINO_HTTP_GENERICO)).toBe(
       httpGeneric,
     );
+  });
+
+  it('1.13 deberia registrar AcensHttpStrategy en la factoria al iniciarse', () => {
+    // 1. Arrange 📐
+    const { factory, acens, module } = buildHarness();
+
+    // 2. Act ⚙️
+    module.onModuleInit();
+
+    // 3. Assert 🎯
+    expect(factory.getStrategy(NodeType.DESTINO_ACENS)).toBe(acens);
   });
 });

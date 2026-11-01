@@ -380,17 +380,41 @@ export const useCanvasStore = defineStore('canvas', () => {
    * que un `PAUSA_FLOW` reconfigurado publicaria en otro sitio y la vista
    * dejaria de encontrarlo en silencio. El motor escribe `pausedAtStepId` sea
    * cual sea el namespace, y esa clave es lo que se busca.
+   *
+   * CON VARIAS PAUSAS gana la ACTIVA, no la primera que aparezca. Al reanudar
+   * solo se purga `error_context`, asi que el `pausedAtStepId` de una pausa ya
+   * superada sobrevive en su namespace; y `jsonb` ordena las claves por
+   * longitud, de modo que `pause_context` sale siempre antes que
+   * `pause_context_2`. Tomar la primera pintaba la pausa vieja en PAUSADO y la
+   * real en espera. La activa es la que dejo el cursor donde esta ahora
+   * (`resumeStepId === activeCursor`); si ninguna lo dice, la mas avanzada del
+   * recorrido. Las anteriores quedan COMPLETADAS por el historico.
    */
   const resolveProgrammedPauseStep = (execution: ExecutionDetail): string | null => {
-    for (const namespace of Object.values(execution.context)) {
-      const pausedAt = namespace.pausedAtStepId;
+    const candidates = Object.values(execution.context)
+      .map((namespace) => ({
+        pausedAt: namespace.pausedAtStepId,
+        resumeAt: namespace.resumeStepId,
+      }))
+      .filter(
+        (entry): entry is { pausedAt: string; resumeAt: unknown } =>
+          typeof entry.pausedAt === 'string' && entry.pausedAt !== '',
+      );
 
-      if (typeof pausedAt === 'string' && pausedAt !== '') {
-        return pausedAt;
-      }
-    }
+    if (candidates.length === 0) return null;
 
-    return null;
+    const byCursor = candidates.find(
+      (entry) => execution.activeCursor !== null && entry.resumeAt === execution.activeCursor,
+    );
+
+    if (byCursor !== undefined) return byCursor.pausedAt;
+
+    const indexOf = (nodeId: string): number =>
+      orderedSteps.value.findIndex((step) => step.nodeId === nodeId);
+
+    return candidates.reduce((latest, entry) =>
+      indexOf(entry.pausedAt) > indexOf(latest.pausedAt) ? entry : latest,
+    ).pausedAt;
   };
 
   /**

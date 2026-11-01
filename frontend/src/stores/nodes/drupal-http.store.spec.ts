@@ -383,13 +383,19 @@ describe('useDrupalHttpStore · configuracion del nodo DESTINO_DRUPAL', () => {
 
   describe('5. Avisos no bloqueantes', () => {
     it('5.1 deberia avisar cuando nadie publica el namespace de origen', () => {
-      // 1. Arrange 📐: un flujo sin escudo delante.
+      // 1. Arrange 📐: hay escudo delante, pero publica una COPIA numerada y el
+      //    origen sigue en el defecto.
       const store = buildStore();
       store.updateConfig({ titleTemplate: 'Titular' });
 
       // 2. Act ⚙️
       store.setAvailableUpstreamContext([
         { namespace: 'raw_email', nodeType: NodeType.TRIGGER_IMAP, fields: [] },
+        {
+          namespace: 'validated_drupal_json_2',
+          nodeType: NodeType.ESCUDO_POST_IA,
+          fields: [{ name: 'validated_markup', type: 'text' }],
+        },
       ]);
 
       // 3. Assert 🎯: avisa y NO bloquea; el 400 de la regla 7 no nombra el
@@ -455,9 +461,11 @@ describe('useDrupalHttpStore · configuracion del nodo DESTINO_DRUPAL', () => {
         targetNodeUuid: SOURCE_UUID,
         uploadAttachment: true,
       });
+      // El escudo va delante: sin el (ni procesador IA) el APPEND se bloquea.
       store.setAvailableUpstreamContext([
         { namespace: 'raw_email', nodeType: NodeType.TRIGGER_IMAP, fields: [] },
         { namespace: 'parsed_email', nodeType: NodeType.PARSER_PRE_IA, fields: [] },
+        { namespace: 'validated_drupal_json', nodeType: NodeType.ESCUDO_POST_IA, fields: [] },
       ]);
 
       // 3. Assert 🎯: el texto del aviso es OTRO, porque el remedio tambien
@@ -1036,7 +1044,7 @@ describe('useDrupalHttpStore · configuracion del nodo DESTINO_DRUPAL', () => {
       // 1. Arrange 📐
       const store = buildStore();
       store.applyAbrirLicitacionPreset();
-      store.updateConfig({ expedienteTemplate: '{{llm_response.expediente}}' });
+      store.updateConfig({ expedienteTemplate: '{{llm_response.headline}}' });
 
       // 2. Act ⚙️
       const params = store.toNodeParams();
@@ -1044,8 +1052,8 @@ describe('useDrupalHttpStore · configuracion del nodo DESTINO_DRUPAL', () => {
       other.hydrateFromNode({ outputNamespace: 'http_result', params });
 
       // 3. Assert 🎯
-      expect(params.expedienteTemplate).toBe('{{llm_response.expediente}}');
-      expect(other.config.expedienteTemplate).toBe('{{llm_response.expediente}}');
+      expect(params.expedienteTemplate).toBe('{{llm_response.headline}}');
+      expect(other.config.expedienteTemplate).toBe('{{llm_response.headline}}');
     });
 
     it('11.4 deberia cargar Innobar como actualizacion de enlace', () => {
@@ -1216,6 +1224,102 @@ describe('useDrupalHttpStore · configuracion del nodo DESTINO_DRUPAL', () => {
       // 3. Assert 🎯
       expect(params.authorFallback).toBe('Madrid+D');
       expect(copy.config.authorFallback).toBe('Madrid+D');
+    });
+  });
+
+  describe('12. Origen del marcado: escudo primero, procesador IA de respaldo', () => {
+    const SHIELD: UpstreamNamespace = {
+      namespace: 'validated_drupal_json',
+      nodeType: NodeType.ESCUDO_POST_IA,
+      fields: [{ name: 'validated_markup', type: 'text' }],
+    };
+    const LLM: UpstreamNamespace = {
+      namespace: 'llm_response',
+      nodeType: NodeType.PROCESADOR_IA,
+      fields: [{ name: 'filled_markup', type: 'text' }],
+    };
+    const TRIGGER: UpstreamNamespace = {
+      namespace: 'raw_email',
+      nodeType: NodeType.TRIGGER_IMAP,
+      fields: [],
+    };
+
+    const buildCreateNodeStore = (): ReturnType<typeof useDrupalHttpStore> => {
+      const store = buildStore();
+      store.updateConfig({
+        operationMode: DrupalOperationMode.CREATE_NODE,
+        titleTemplate: 'Titular',
+      });
+
+      return store;
+    };
+
+    it('12.1 deberia preferir el escudo y no tocar el origen por defecto', () => {
+      // 1. Arrange 📐
+      const store = buildCreateNodeStore();
+
+      // 2. Act ⚙️
+      store.setAvailableUpstreamContext([TRIGGER, LLM, SHIELD]);
+
+      // 3. Assert 🎯
+      expect(store.config.sourceNamespace).toBe(DEFAULT_DRUPAL_SOURCE_NAMESPACE);
+      expect(store.config.sourceField).toBe(DEFAULT_DRUPAL_SOURCE_FIELD);
+      expect(store.sourceNamespaceBlockReason).toBeNull();
+      expect(store.isConfigValid).toBe(true);
+    });
+
+    it('12.2 sin escudo deberia caer al procesador IA y avisar', () => {
+      // 1. Arrange 📐
+      const store = buildCreateNodeStore();
+
+      // 2. Act ⚙️
+      store.setAvailableUpstreamContext([TRIGGER, LLM]);
+
+      // 3. Assert 🎯
+      expect(store.config.sourceNamespace).toBe('llm_response');
+      expect(store.config.sourceField).toBe('filled_markup');
+      expect(store.sourceNamespaceBlockReason).toBeNull();
+      expect(store.isConfigValid).toBe(true);
+      expect(store.configWarnings.some((warning) => warning.includes('Escudo'))).toBe(true);
+    });
+
+    it('12.3 deberia bloquear el guardado sin escudo NI procesador IA', () => {
+      // 1. Arrange 📐
+      const store = buildCreateNodeStore();
+
+      // 2. Act ⚙️
+      store.setAvailableUpstreamContext([TRIGGER]);
+
+      // 3. Assert 🎯
+      expect(store.sourceNamespaceBlockReason).toContain('Escudo posterior a IA');
+      expect(store.isConfigValid).toBe(false);
+    });
+
+    it('12.4 no deberia bloquear modos que no publican marcado ni con contexto vacio', () => {
+      // 1. Arrange 📐
+      const transfer = buildStore();
+      transfer.updateConfig({ operationMode: DrupalOperationMode.TRANSFER_HTML_BLOCK });
+      const notLoaded = buildCreateNodeStore();
+
+      // 2. Act ⚙️
+      transfer.setAvailableUpstreamContext([TRIGGER]);
+      notLoaded.setAvailableUpstreamContext([]);
+
+      // 3. Assert 🎯
+      expect(transfer.sourceNamespaceBlockReason).toBeNull();
+      expect(notLoaded.sourceNamespaceBlockReason).toBeNull();
+    });
+
+    it('12.5 no deberia reescribir un origen elegido a mano', () => {
+      // 1. Arrange 📐
+      const store = buildCreateNodeStore();
+      store.updateConfig({ sourceNamespace: 'ocr_result', sourceField: 'clean_body' });
+
+      // 2. Act ⚙️
+      store.setAvailableUpstreamContext([TRIGGER, LLM]);
+
+      // 3. Assert 🎯
+      expect(store.config.sourceNamespace).toBe('ocr_result');
     });
   });
 });

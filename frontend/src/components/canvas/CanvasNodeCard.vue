@@ -30,6 +30,7 @@ const NODE_ICONS: Record<NodeType, string> = {
   [NodeType.PROCESADOR_OCR]: 'document_scanner',
   [NodeType.PAUSA_FLOW]: 'pause_circle',
   [NodeType.DESTINO_HTTP_GENERICO]: 'http',
+  [NodeType.DESTINO_ACENS]: 'cloud_upload',
 };
 
 /**

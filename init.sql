@@ -641,11 +641,10 @@ CREATE INDEX idx_alertas_error_pendientes
 -- despues. Un volumen recien creado nace, por tanto, sin prompts.
 -- =============================================================================
 
--- Los 12 codigos con estrategia replican el enum `NodeType` del backend
+-- Los 13 codigos replican el enum `NodeType` del backend
 -- (`@core/fsm/types/pipeline-schema.types`): son los unicos que un
--- `pipeline_schema` puede declarar hoy. `DESTINO_ACENS` sigue en el catalogo a
--- la espera de su estrategia; hasta entonces no es referenciable desde
--- `flujos.configuracion_pipeline` (ver migracion 005).
+-- `pipeline_schema` puede declarar. `DESTINO_ACENS` gano estrategia en la
+-- migracion 066.
 INSERT INTO nodos (codigo, nombre, categoria, descripcion) VALUES
     ('TRIGGER_IMAP', 'Disparador IMAP', 'TRIGGER', 'Inicia el flujo mediante la lectura de correos entrantes'),
     ('PARSER_PRE_IA', 'Parser de Correo', 'PROCESAMIENTO', 'Procesa y limpia correos entrantes, extrayendo asunto, texto plano sin firmas y URLs de referencia.'),
@@ -655,7 +654,7 @@ INSERT INTO nodos (codigo, nombre, categoria, descripcion) VALUES
     ('MAPEADOR_PLANTILLA', 'Mapeador de Plantilla', 'PROCESAMIENTO', 'Inyecta una plantilla HTML del gestor, ya saneada y sin interpolar, para que un PROCESADOR_IA posterior la rellene. Verifica que conserva los selectores estructurales exigidos.'),
     ('DESTINO_DRUPAL', 'Destino Drupal', 'DESTINO', 'Publica el resultado final en el CMS Drupal mediante JSON:API'),
     ('TRIGGER_CRON', 'Disparador Cron', 'TRIGGER', 'Inicia el flujo mediante una programacion temporal'),
-    ('DESTINO_ACENS', 'Destino Acens', 'DESTINO', 'Realiza el envio masivo a traves de Acens'),
+    ('DESTINO_ACENS', 'Destino Acens', 'DESTINO', 'Entrega el resultado del flujo a la API de Acens (GET, POST, PUT o DELETE) con ruta, cabeceras y cuerpo JSON interpolados y desinfectados. La URL base y la clave se leen del entorno del servidor, nunca del flujo.'),
     ('DESTINO_SMTP', 'Alerta por Correo', 'DESTINO', 'Envia un correo de aviso interpolando datos del flujo. Pensado como destino de las rutas de recuperacion ante error.'),
     ('PROCESADOR_OCR', 'Procesador OCR', 'PROCESAMIENTO', 'Transcribe los adjuntos de un correo sin texto aprovechable (imagen o PDF escaneado). Pensado como destino de la ruta de contingencia del parser.'),
     ('PAUSA_FLOW', 'Pausa de Flujo', 'CONTROL', 'Detiene el flujo de forma deliberada y lo deja reanudable por un operador (CU-09). Admite pausa inmediata o tras un retardo, y puede avisar por correo.'),

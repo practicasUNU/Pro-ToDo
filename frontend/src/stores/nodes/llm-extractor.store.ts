@@ -354,10 +354,16 @@ const llmExtractorSetup = () => {
    * que sea la orden.
    */
   const resourceEstimation = computed<LlmResourceEstimate>(() =>
-    estimateLlmResources(upstreamBaseMarkup.value),
+    estimateLlmResources(
+      upstreamBaseMarkup.value,
+      availableUpstreamContext.value.reduce((total, entry) => total + entry.fields.length, 0),
+    ),
   );
 
-  /** Hay plantilla base delante y, por tanto, algo que estimar. */
+  /**
+   * Hay plantilla base delante. Ya NO oculta la tarjeta (se ve siempre, con la
+   * estimacion por prompt cuando falta la plantilla): solo distingue el origen.
+   */
   const hasResourceEstimation = computed<boolean>(
     () => (upstreamBaseMarkup.value?.trim().length ?? 0) > 0,
   );
@@ -382,6 +388,7 @@ const llmExtractorSetup = () => {
     updateConfig({
       timeoutMs: estimate.recommendedTimeoutMs,
       maxTokens: estimate.recommendedMaxTokens,
+      maxRetries: estimate.recommendedMaxRetries,
     });
   };
 

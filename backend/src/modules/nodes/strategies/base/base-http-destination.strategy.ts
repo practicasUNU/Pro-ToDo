@@ -21,8 +21,7 @@ const NEUTRAL_STATUS = 0;
  *
  * Primera clase abstracta del backend: las demas estrategias implementan
  * `INodeStrategy` directamente. Se introduce aqui porque `DESTINO_DRUPAL` y el
- * futuro `DESTINO_ACENS` —que ya tiene fila en el catalogo `nodos` a la espera
- * de su estrategia— comparten exactamente dos cosas: el cliente HTTP con su
+ * `DESTINO_ACENS` (`AcensHttpStrategy`) comparten exactamente dos cosas: el cliente HTTP con su
  * politica de reintentos y la traduccion del estado de respuesta a la taxonomia
  * de errores de la FSM. Todo lo demas (el dialecto de la API, la forma del
  * payload de salida) es de cada destino.

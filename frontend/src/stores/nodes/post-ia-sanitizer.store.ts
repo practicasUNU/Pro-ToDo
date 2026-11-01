@@ -3,12 +3,16 @@ import { computed, ref } from 'vue';
 
 import {
   ALLOWED_TAG_PRESETS,
+  DEFAULT_POST_IA_CONTENT_MODE,
   DEFAULT_POST_IA_SOURCE_FIELD,
+  DEFAULT_POST_IA_SOURCE_FIELDS,
   DEFAULT_POST_IA_SOURCE_NAMESPACE,
   HTML_TAG_PATTERN,
   MAX_ALLOWED_TAGS,
   MAX_REQUIRED_SELECTORS,
+  MAX_POST_IA_SOURCE_FIELDS,
   MAX_SELECTOR_LENGTH,
+  PostIaContentMode,
   SANITIZER_ALLOWED_TAGS,
 } from '@/types/nodes/post-ia-sanitizer.types';
 
@@ -48,7 +52,9 @@ const asStringList = (value: unknown): string[] =>
 
 /** Configuracion inicial; se reutiliza en `resetConfig`. */
 const buildInitialConfig = (): PostIaSanitizerNodeConfig => ({
+  contentMode: DEFAULT_POST_IA_CONTENT_MODE,
   sourceNamespace: DEFAULT_POST_IA_SOURCE_NAMESPACE,
+  sourceFields: [...DEFAULT_POST_IA_SOURCE_FIELDS],
   sourceField: DEFAULT_POST_IA_SOURCE_FIELD,
   requiredSelectors: [],
   allowedTags: [],
@@ -120,10 +126,22 @@ const postIaSanitizerSetup = () => {
    * vacio no se puede afirmar nada, y pintar un aviso mientras carga el catalogo
    * seria una falsa alarma en cada apertura del asistente.
    */
+  /** Modo TEXT: audita campos de texto, sin plantilla base. */
+  const isTextMode = computed<boolean>(() => config.value.contentMode === PostIaContentMode.TEXT);
+
+  /** Campos de texto elegidos que el namespace de origen no publica. */
+  const missingTextFields = computed<readonly string[]>(() =>
+    fieldOptions.value.length === 0
+      ? []
+      : config.value.sourceFields.filter((field) => !fieldOptions.value.includes(field)),
+  );
+
   const hasStaleSource = computed<boolean>(() => {
     if (availableUpstreamContext.value.length === 0) return false;
 
     if (selectedNamespace.value === undefined) return true;
+
+    if (isTextMode.value) return missingTextFields.value.length > 0;
 
     return fieldOptions.value.length > 0 && !fieldOptions.value.includes(config.value.sourceField);
   });
@@ -190,7 +208,10 @@ const postIaSanitizerSetup = () => {
   const isConfigValid = computed<boolean>(
     () =>
       config.value.sourceNamespace.trim() !== '' &&
-      config.value.sourceField.trim() !== '' &&
+      (isTextMode.value
+        ? config.value.sourceFields.length > 0 &&
+          config.value.sourceFields.length <= MAX_POST_IA_SOURCE_FIELDS
+        : config.value.sourceField.trim() !== '') &&
       config.value.requiredSelectors.length <= MAX_REQUIRED_SELECTORS &&
       oversizedSelectors.value.length === 0 &&
       config.value.allowedTags.length <= MAX_ALLOWED_TAGS &&
@@ -202,14 +223,21 @@ const postIaSanitizerSetup = () => {
     const warnings: string[] = [];
 
     if (hasStaleSource.value) {
+      const origin = isTextMode.value
+        ? `${config.value.sourceNamespace}.{${config.value.sourceFields.join(', ')}}`
+        : `${config.value.sourceNamespace}.${config.value.sourceField}`;
+
       warnings.push(
-        `El origen guardado "${config.value.sourceNamespace}.${config.value.sourceField}" ya no lo publica ningun paso anterior del flujo. El escudo fallara con ERR_POST_IA_MISSING_PAYLOAD o ERR_POST_IA_EMPTY_HTML en la primera ejecucion.`,
+        `El origen guardado "${origin}" ya no lo publica ningun paso anterior del flujo. El escudo fallara con ERR_POST_IA_MISSING_PAYLOAD o ERR_POST_IA_EMPTY_HTML en la primera ejecucion.`,
       );
     }
 
+    // En modo TEXT no hay marcado que rellenar: el mapeador no hace falta.
+    if (isTextMode.value) return warnings;
+
     if (availableUpstreamContext.value.length > 0 && !hasBaseTemplateUpstream.value) {
       warnings.push(
-        'No hay ningun MAPEADOR_PLANTILLA por delante. El PROCESADOR_IA solo rellena el marcado cuando su instruccion cita una plantilla base, asi que sin mapeador este escudo no tendra nada que auditar.',
+        'No hay ningun MAPEADOR_PLANTILLA por delante. El PROCESADOR_IA solo rellena el marcado cuando su instruccion cita una plantilla base, asi que sin mapeador este escudo no tendra nada que auditar. Si el flujo no maqueta HTML, cambia el escudo a modo «Texto».',
       );
     }
 
@@ -253,6 +281,22 @@ const postIaSanitizerSetup = () => {
 
     if (sourceNamespace !== '' && sourceNamespace !== DEFAULT_POST_IA_SOURCE_NAMESPACE) {
       params.sourceNamespace = sourceNamespace;
+    }
+
+    // Modo TEXT: solo viajan el modo y los campos; ni campo HTML, ni selectores
+    // ni etiquetas, que el backend ignora en este modo.
+    if (isTextMode.value) {
+      params.contentMode = PostIaContentMode.TEXT;
+
+      const isDefaultFields =
+        config.value.sourceFields.length === DEFAULT_POST_IA_SOURCE_FIELDS.length &&
+        config.value.sourceFields.every(
+          (field, index) => field === DEFAULT_POST_IA_SOURCE_FIELDS[index],
+        );
+
+      if (!isDefaultFields) params.sourceFields = [...config.value.sourceFields];
+
+      return params;
     }
 
     if (sourceField !== '' && sourceField !== DEFAULT_POST_IA_SOURCE_FIELD) {
@@ -318,8 +362,15 @@ const postIaSanitizerSetup = () => {
   const hydrateFromNode = (node: HydratableNode): void => {
     const { params } = node;
 
+    const sourceFields = asStringList(params.sourceFields);
+
     config.value = {
+      contentMode:
+        params.contentMode === PostIaContentMode.TEXT
+          ? PostIaContentMode.TEXT
+          : DEFAULT_POST_IA_CONTENT_MODE,
       sourceNamespace: asText(params.sourceNamespace) || DEFAULT_POST_IA_SOURCE_NAMESPACE,
+      sourceFields: sourceFields.length > 0 ? sourceFields : [...DEFAULT_POST_IA_SOURCE_FIELDS],
       sourceField: asText(params.sourceField) || DEFAULT_POST_IA_SOURCE_FIELD,
       requiredSelectors: asStringList(params.requiredSelectors),
       allowedTags: asStringList(params.allowedTags),
@@ -341,6 +392,8 @@ const postIaSanitizerSetup = () => {
     detectedSelectorOptions,
     hasStaleSource,
     hasBaseTemplateUpstream,
+    isTextMode,
+    missingTextFields,
     oversizedSelectors,
     unsupportedTags,
     isConfigValid,

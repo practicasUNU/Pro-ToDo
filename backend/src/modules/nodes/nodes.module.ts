@@ -25,6 +25,7 @@ import { ImapPollingService } from './services/imap-polling.service';
 import { NodeCatalogService } from './services/node-catalog.service';
 import { CronTriggerStrategy } from './strategies/cron-trigger.strategy';
 import { DrupalHttpStrategy } from './strategies/drupal-http.strategy';
+import { AcensHttpStrategy } from './strategies/acens-http.strategy';
 import { HttpGenericDestinationStrategy } from './strategies/http-generic-destination.strategy';
 import { ImapTriggerStrategy } from './strategies/imap-trigger.strategy';
 import { LlmExtractorStrategy } from './strategies/llm-extractor.strategy';
@@ -32,6 +33,7 @@ import { OcrProcessorStrategy } from './strategies/ocr-processor.strategy';
 import { PauseFlowStrategy } from './strategies/pause-flow.strategy';
 import { SmtpAlertStrategy } from './strategies/smtp-alert.strategy';
 import { AiDefaultsConfig } from '@core/config/ai-defaults.config';
+import { AcensApiConfig } from '@core/config/acens-api.config';
 import { DrupalApiConfig } from '@core/config/drupal-api.config';
 import { ParserEmailStrategy } from './strategies/parser-email.strategy';
 import { PostIaSanitizerStrategy } from './strategies/post-ia-sanitizer.strategy';
@@ -123,8 +125,10 @@ import type { OnModuleInit } from '@nestjs/common';
     OcrProcessorStrategy,
     DrupalHttpStrategy,
     HttpGenericDestinationStrategy,
+    AcensHttpStrategy,
     AiDefaultsConfig,
     DrupalApiConfig,
+    AcensApiConfig,
     // Los clientes de LLM son providers del contenedor y no instancias que la
     // estrategia construya: `GeminiLlmProvider` necesita `HttpClientService` y
     // `ConfigService`, y fabricarlo a mano dejaria sin inyectar ambos.
@@ -150,6 +154,7 @@ import type { OnModuleInit } from '@nestjs/common';
     OcrProcessorStrategy,
     DrupalHttpStrategy,
     HttpGenericDestinationStrategy,
+    AcensHttpStrategy,
     ImapPollingService,
     CronSchedulingService,
     NodeCatalogService,
@@ -182,6 +187,7 @@ export class NodesModule implements OnModuleInit {
     private readonly drupalHttpStrategy: DrupalHttpStrategy,
     private readonly pauseFlowStrategy: PauseFlowStrategy,
     private readonly httpGenericDestinationStrategy: HttpGenericDestinationStrategy,
+    private readonly acensHttpStrategy: AcensHttpStrategy,
   ) {}
 
   public onModuleInit(): void {
@@ -206,5 +212,6 @@ export class NodesModule implements OnModuleInit {
     // Conector de salida generico (MOD-03): cualquier API REST publica, con
     // la credencial de la boveda y la guarda SSRF de `OutboundTargetGuard`.
     this.strategyFactory.registerStrategy(this.httpGenericDestinationStrategy);
+    this.strategyFactory.registerStrategy(this.acensHttpStrategy);
   }
 }

@@ -113,7 +113,7 @@ describe('NodeCatalogService · lectura del catalogo de tipos de nodo', () => {
     });
 
     // Dos familias distintas de "sin estrategia", y las dos deben salir en
-    // `false`: `DESTINO_ACENS` ni siquiera esta en el enum, mientras que
+    // `false`: `DESTINO_LEGADO` (fila ficticia) ni siquiera esta en el enum, mientras que
     // `PROCESADOR_IA` y `DESTINO_DRUPAL` SI lo estan y en produccion YA tienen
     // estrategia registrada (`LlmExtractorStrategy` y `DrupalHttpStrategy`),
     // pero aqui la factoria doble no las inscribe: `REGISTERED_TYPES` es un
@@ -121,7 +121,11 @@ describe('NodeCatalogService · lectura del catalogo de tipos de nodo', () => {
     // marca sigue a la factoria, no al enum ni a lo que hoy este implementado—,
     // y es la que antes se incumplia dejando al asistente elegir nodos que
     // reventaban al ejecutarse.
-    it.each(['DESTINO_ACENS', NodeType.PROCESADOR_IA, NodeType.DESTINO_DRUPAL])(
+    it.each([
+      'DESTINO_LEGADO',
+      NodeType.PROCESADOR_IA,
+      NodeType.DESTINO_DRUPAL,
+    ])(
       '2.2 deberia marcar implemented en false para %s, que no tiene estrategia',
       async (code: string) => {
         // 1. Arrange
@@ -140,7 +144,7 @@ describe('NodeCatalogService · lectura del catalogo de tipos de nodo', () => {
       // 1. Arrange
       const repository = buildRepository([
         buildEntry({ code: NodeType.TRIGGER_IMAP }),
-        buildEntry({ code: 'DESTINO_ACENS' }),
+        buildEntry({ code: 'DESTINO_LEGADO' }),
       ]);
       const service = buildService(repository);
 
@@ -239,10 +243,11 @@ describe('NodeCatalogService · lectura del catalogo de tipos de nodo', () => {
     });
 
     it('3.3 deberia devolver campos vacios para un tipo sin estrategia registrada', async () => {
-      // 1. Arrange: DESTINO_ACENS esta en el catalogo pero no tiene estrategia
+      // 1. Arrange: una fila de catalogo sin estrategia (ficticia: desde la
+      // migracion 066 todas las filas reales tienen la suya)
       const entry = buildEntry({
-        code: 'DESTINO_ACENS',
-        name: 'Destino Acens',
+        code: 'DESTINO_LEGADO',
+        name: 'Destino legado',
         category: NodeCategory.DESTINO,
       });
       const repository = buildRepository([entry]);

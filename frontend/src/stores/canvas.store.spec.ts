@@ -1677,4 +1677,123 @@ describe('useCanvasStore · supervision visual de un flujo', () => {
       expect(store.statusOf('nodo_b')).toBe('RUNNING');
     });
   });
+
+  /**
+   * Dos `PAUSA_FLOW` seguidos. Al avanzar de la primera a la segunda, el
+   * contexto conserva el `pausedAtStepId` de ambas; la vieja tiene que quedar
+   * COMPLETADA y solo la activa en PAUSADO.
+   */
+  describe('12. Varias pausas programadas en el mismo flujo', () => {
+    const buildTwoPauseWorkflow = (): WorkflowDetail => ({
+      ...buildWorkflow(),
+      pipelineSchema: {
+        flowId: FLOW_ID,
+        name: 'Pipeline con dos pausas',
+        version: '1.0.0',
+        entrypoint: 'procesador_ia',
+        nodes: {
+          procesador_ia: {
+            nodeId: 'procesador_ia',
+            nodeType: NodeType.PROCESADOR_IA,
+            outputNamespace: 'llm_response',
+            nextStep: 'pausa_uno',
+            onErrorStep: null,
+            params: {},
+          },
+          pausa_uno: {
+            nodeId: 'pausa_uno',
+            nodeType: NodeType.PAUSA_FLOW,
+            outputNamespace: 'pause_context',
+            nextStep: 'pausa_dos',
+            onErrorStep: null,
+            params: {},
+          },
+          pausa_dos: {
+            nodeId: 'pausa_dos',
+            nodeType: NodeType.PAUSA_FLOW,
+            outputNamespace: 'pause_context_2',
+            nextStep: 'escudo_post_ia',
+            onErrorStep: null,
+            params: {},
+          },
+          escudo_post_ia: {
+            nodeId: 'escudo_post_ia',
+            nodeType: NodeType.ESCUDO_POST_IA,
+            outputNamespace: 'validated_drupal_json',
+            nextStep: null,
+            onErrorStep: null,
+            params: {},
+          },
+        },
+      },
+    });
+
+    /** Detenida en la SEGUNDA pausa; la primera sigue en el contexto. */
+    const pausedAtSecondPause = () =>
+      buildExecution({
+        state: ExecutionState.PAUSADO,
+        activeCursor: 'escudo_post_ia',
+        context: {
+          llm_response: { titulo: 'Innovacion en Madrid' },
+          // Mismo orden que devuelve `jsonb`: la clave corta primero.
+          pause_context: { pausedAtStepId: 'pausa_uno', resumeStepId: 'pausa_dos' },
+          pause_context_2: { pausedAtStepId: 'pausa_dos', resumeStepId: 'escudo_post_ia' },
+        },
+      });
+
+    it('12.1 tras recargar deberia completar la pausa vieja y pausar solo la activa', async () => {
+      // 1. Arrange 📐
+      fetchWorkflow.mockResolvedValue(buildTwoPauseWorkflow());
+      fetchActiveExecution.mockResolvedValue(pausedAtSecondPause());
+      const store = useCanvasStore();
+
+      // 2. Act ⚙️
+      await store.loadCanvas(FLOW_ID);
+
+      // 3. Assert 🎯
+      expect(store.statusOf('pausa_uno')).toBe('COMPLETED');
+      expect(store.statusOf('pausa_dos')).toBe('PAUSED');
+      expect(store.statusOf('escudo_post_ia')).toBe('IDLE');
+    });
+
+    it('12.2 en vivo deberia pasar la pausa previa a COMPLETED al detenerse en la siguiente', async () => {
+      // 1. Arrange 📐: detenida en la primera pausa.
+      fetchWorkflow.mockResolvedValue(buildTwoPauseWorkflow());
+      fetchActiveExecution.mockResolvedValue(
+        buildExecution({
+          state: ExecutionState.PAUSADO,
+          activeCursor: 'pausa_dos',
+          context: {
+            llm_response: { titulo: 'Innovacion en Madrid' },
+            pause_context: { pausedAtStepId: 'pausa_uno', resumeStepId: 'pausa_dos' },
+          },
+        }),
+      );
+      const store = useCanvasStore();
+      await store.loadCanvas(FLOW_ID);
+      expect(store.statusOf('pausa_uno')).toBe('PAUSED');
+
+      // 2. Act ⚙️: se reanuda y la segunda pausa detiene el flujo.
+      store.handleFlowResumed({
+        executionId: EXECUTION_ID,
+        flowId: FLOW_ID,
+        emittedAt: '2026-10-16T08:05:00.000Z',
+        activeCursor: 'pausa_dos',
+        previousCursor: 'pausa_uno',
+        resumedBy: { id: 'u-1', email: 'editor@unuware.com' },
+      });
+      store.handleFlowPaused({
+        executionId: EXECUTION_ID,
+        flowId: FLOW_ID,
+        emittedAt: '2026-10-16T08:06:00.000Z',
+        activeCursor: 'escudo_post_ia',
+        pausedStepId: 'pausa_dos',
+        isProgrammedPause: true,
+      });
+
+      // 3. Assert 🎯
+      expect(store.statusOf('pausa_uno')).toBe('COMPLETED');
+      expect(store.statusOf('pausa_dos')).toBe('PAUSED');
+    });
+  });
 });

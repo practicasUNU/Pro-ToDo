@@ -1,5 +1,6 @@
 import {
   DEFAULT_LLM_MARKUP_MAX_TOKENS,
+  DEFAULT_LLM_MAX_RETRIES,
   DEFAULT_LLM_TIMEOUT_MS,
   MAX_LLM_MAX_TOKENS,
   MAX_LLM_TIMEOUT_MS,
@@ -35,7 +36,20 @@ export interface LlmResourceEstimate {
    */
   readonly recommendedMaxTokens: number | null;
 
+  /**
+   * Reintentos sugeridos ante un fallo de red. Cada reintento FACTURA de nuevo
+   * la inferencia entera, asi que en una coleccion larga se recomienda cero: es
+   * preferible una espera mayor que pagar dos veces la misma tabla.
+   */
+  readonly recommendedMaxRetries: number;
+
   readonly complexityLevel: LlmComplexityLevel;
+
+  /**
+   * De donde sale la proyeccion: del marcado de la plantilla base o, sin ella,
+   * de una estimacion a partir del prompt y del contexto que interpola.
+   */
+  readonly source: 'TEMPLATE' | 'PROMPT';
 
   /** Frase para el operador: por que sale este nivel y no otro. */
   readonly reason: string;
@@ -104,6 +118,21 @@ const MEDIUM_TIMEOUT_MS = 35_000;
 /** Espera sugerida para una coleccion. Es el valor que el `.env` ya recomienda. */
 const HIGH_TIMEOUT_MS = 60_000;
 
+/**
+ * Tokens que aporta cada campo del contexto interpolado, sin plantilla base.
+ *
+ * Heuristica gruesa: un campo tipico de un paso anterior (asunto, cuerpo de un
+ * correo, texto extraido de una web) ronda unos cientos de tokens. No se conoce
+ * su valor real hasta ejecutar, asi que se estima por lo alto.
+ */
+const TOKENS_PER_UPSTREAM_FIELD = 250;
+
+/** Salida tipica de una redaccion sin plantilla (titular, resumen, parrafos). */
+const PROMPT_ONLY_OUTPUT_TOKENS = 900;
+
+/** Campos de contexto a partir de los cuales la redaccion deja de ser corta. */
+const PROMPT_ONLY_MEDIUM_FIELDS = 6;
+
 /** Tokens de un texto, por la heuristica de arriba. */
 const estimateTokens = (text: string): number => Math.ceil(text.length / CHARS_PER_TOKEN);
 
@@ -118,16 +147,28 @@ const roundUpToStep = (tokens: number): number => Math.ceil(tokens / TOKEN_STEP)
 const clamp = (value: number, minimum: number, maximum: number): number =>
   Math.min(Math.max(value, minimum), maximum);
 
-/** Estimacion vacia: no hay plantilla base aguas arriba que mirar. */
-const buildEmptyEstimate = (): LlmResourceEstimate => ({
-  estimatedPromptTokens: 0,
-  estimatedOutputTokens: 0,
-  recommendedTimeoutMs: DEFAULT_LLM_TIMEOUT_MS,
-  recommendedMaxTokens: null,
-  complexityLevel: 'BAJA',
-  reason:
-    'Sin plantilla base aguas arriba no hay nada que medir: la inferencia devuelve una redaccion corta y los valores por defecto le sobran.',
-});
+/**
+ * Estimacion sin plantilla base: a partir del prompt y del contexto que
+ * interpola. Sin marcado que medir, la unica senal es cuanto material llega de
+ * los pasos anteriores.
+ */
+const buildPromptOnlyEstimate = (upstreamFieldCount: number): LlmResourceEstimate => {
+  const fields = Math.max(upstreamFieldCount, 0);
+  const isMedium = fields >= PROMPT_ONLY_MEDIUM_FIELDS;
+
+  return {
+    estimatedPromptTokens: fields * TOKENS_PER_UPSTREAM_FIELD,
+    estimatedOutputTokens: PROMPT_ONLY_OUTPUT_TOKENS,
+    recommendedTimeoutMs: isMedium ? MEDIUM_TIMEOUT_MS : DEFAULT_LLM_TIMEOUT_MS,
+    recommendedMaxTokens: null,
+    recommendedMaxRetries: DEFAULT_LLM_MAX_RETRIES,
+    complexityLevel: isMedium ? 'MEDIA' : 'BAJA',
+    source: 'PROMPT',
+    reason: isMedium
+      ? `Sin plantilla base: estimado a partir del prompt y de ${fields} campos de contexto. La redaccion es mas larga de lo habitual; conviene algo mas de espera.`
+      : 'Sin plantilla base: estimado a partir del prompt. La inferencia devuelve una redaccion corta y los valores por defecto le sobran.',
+  };
+};
 
 /**
  * Proyecta lo que va a costar la inferencia a partir del MARCADO que la
@@ -143,11 +184,14 @@ const buildEmptyEstimate = (): LlmResourceEstimate => ({
  * operador con un boton, y los campos manuales siguen mandando (Poka-Yoke de
  * `frontend-quasar.md` §4 — prevenir el error, no decidir por el usuario).
  */
-export const estimateLlmResources = (baseMarkup: string | null): LlmResourceEstimate => {
+export const estimateLlmResources = (
+  baseMarkup: string | null,
+  upstreamFieldCount = 0,
+): LlmResourceEstimate => {
   const markup = baseMarkup?.trim() ?? '';
 
   if (markup.length === 0) {
-    return buildEmptyEstimate();
+    return buildPromptOnlyEstimate(upstreamFieldCount);
   }
 
   const estimatedPromptTokens = estimateTokens(markup);
@@ -169,7 +213,9 @@ export const estimateLlmResources = (baseMarkup: string | null): LlmResourceEsti
       // pone solo ante una plantilla base ya cubre esto de sobra, y fijarlo
       // aqui solo serviria para congelarlo.
       recommendedMaxTokens: null,
+      recommendedMaxRetries: DEFAULT_LLM_MAX_RETRIES,
       complexityLevel: 'MEDIA',
+      source: 'TEMPLATE',
       reason:
         'La plantilla base tiene estructura fija y ninguna coleccion que repetir. El presupuesto que el backend aplica por tener plantilla deberia bastar.',
     };
@@ -185,7 +231,10 @@ export const estimateLlmResources = (baseMarkup: string | null): LlmResourceEsti
     // pondria por su cuenta puede quedarse corto. El suelo es ese mismo valor:
     // recomendar menos seria empeorar la situacion de partida.
     recommendedMaxTokens: clamp(withMargin, DEFAULT_LLM_MARKUP_MAX_TOKENS, MAX_LLM_MAX_TOKENS),
+    // Cero: cada reintento volveria a facturar la tabla entera.
+    recommendedMaxRetries: 0,
     complexityLevel: 'ALTA',
+    source: 'TEMPLATE',
     reason: `La plantilla base repite fichas (${rows} filas detectadas) y el modelo debe devolverla entera y rellena. Es el escenario que agota el presupuesto y corta la respuesta a media cadena JSON.`,
   };
 };

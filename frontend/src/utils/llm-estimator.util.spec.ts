@@ -33,10 +33,21 @@ describe('estimateLlmResources', () => {
       // 2. Act ⚙️
       const estimate = estimateLlmResources(null);
 
-      // 3. Assert 🎯
+      // 3. Assert 🎯: se estima por prompt, sin fijar tope.
       expect(estimate.complexityLevel).toBe('BAJA');
-      expect(estimate.estimatedOutputTokens).toBe(0);
+      expect(estimate.source).toBe('PROMPT');
       expect(estimate.recommendedMaxTokens).toBeNull();
+      expect(estimate.recommendedMaxRetries).toBe(1);
+    });
+
+    it('1.3 deberia subir a MEDIA con mucho contexto interpolado', () => {
+      // 1. Arrange 📐 + 2. Act ⚙️
+      const estimate = estimateLlmResources(null, 8);
+
+      // 3. Assert 🎯
+      expect(estimate.complexityLevel).toBe('MEDIA');
+      expect(estimate.estimatedPromptTokens).toBeGreaterThan(0);
+      expect(estimate.reason).toContain('8 campos');
     });
 
     it('1.2 deberia tratar una cadena de solo espacios como ausencia', () => {

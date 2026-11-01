@@ -1,7 +1,7 @@
 // @vitest-environment happy-dom
 import { config, mount } from '@vue/test-utils';
 import { createPinia, setActivePinia } from 'pinia';
-import { QBanner, QBtn, QIcon, QSelect, Quasar } from 'quasar';
+import { QBanner, QBtn, QBtnToggle, QIcon, QSelect, Quasar } from 'quasar';
 import { beforeEach, describe, expect, it } from 'vitest';
 
 import PostIaSanitizerConfig from '@components/nodes/PostIaSanitizerConfig.vue';
@@ -11,6 +11,7 @@ import { NodeType } from '@/types/pipeline';
 import {
   ALLOWED_TAG_PRESETS,
   MAX_REQUIRED_SELECTORS,
+  PostIaContentMode,
   SANITIZER_ALLOWED_TAGS,
 } from '@/types/nodes/post-ia-sanitizer.types';
 
@@ -24,7 +25,7 @@ const NODE_ID = 'nodo_escudo';
  * Se registran a mano porque el plugin `Quasar` instala directivas y plugins
  * pero NO componentes.
  */
-const QUASAR_COMPONENTS = { QBanner, QBtn, QIcon, QSelect };
+const QUASAR_COMPONENTS = { QBanner, QBtn, QBtnToggle, QIcon, QSelect };
 
 const UPSTREAM: UpstreamNamespace[] = [
   {
@@ -366,6 +367,25 @@ describe('PostIaSanitizerConfig · configurador del nodo ESCUDO_POST_IA', () => 
       // 3. Assert 🎯: vacio NO es "ninguna etiqueta" sino "no recortes nada";
       //    el saneador aplica entonces su propia lista blanca entera.
       expect(store.config.allowedTags).toEqual([]);
+    });
+  });
+
+  describe('9. Modo TEXT', () => {
+    it('9.1 deberia cambiar el campo HTML por los campos de texto y ocultar selectores', async () => {
+      // 1. Arrange 📐
+      const wrapper = mountComponent();
+      const store = usePostIaSanitizerStore(NODE_ID);
+
+      // 2. Act ⚙️
+      store.updateConfig({ contentMode: PostIaContentMode.TEXT });
+      await wrapper.vm.$nextTick();
+
+      // 3. Assert 🎯
+      expect(wrapper.find('[data-test="source-fields-field"]').exists()).toBe(true);
+      expect(wrapper.find('[data-test="source-field-field"]').exists()).toBe(false);
+      expect(wrapper.find('[data-test="required-selectors-field"]').exists()).toBe(false);
+      expect(wrapper.find('[data-test="allowed-tags-field"]').exists()).toBe(false);
+      expect(wrapper.find('[data-test="text-mode-notice"]').exists()).toBe(true);
     });
   });
 });

@@ -56,7 +56,61 @@ import type { Repository } from 'typeorm';
  * que para eso conoce el grafo.
  */
 const RESUME_COMMAND_REGEX =
-  /^(?:REANUDAR|RESUME)\s+([a-f0-9]{8,64})(?:\s+(?:DESDE|FROM)\s+(.+?))?\s*$/i;
+  /^(?:REANUDAR|REANUDA|RESUME)[\s_]+([a-f0-9]{8,64})(?:[\s_]+(?:DESDE|DESE|DE|FROM)[\s_]+(.+?))?\s*$/i;
+
+/**
+ * Pista RAPIDA de que una linea es una orden, sin anclar el final.
+ *
+ * La usa `ImapTriggerStrategy` para apartar los mensajes de mando del contenido
+ * del flujo; la validacion completa sigue siendo `RESUME_COMMAND_REGEX`. Vive
+ * aqui, junto a ella, para que las dos puertas no diverjan: antes el disparador
+ * solo reconocia `reanudar` y una orden `RESUME` entraba como contenido.
+ */
+const RESUME_COMMAND_HINT =
+  /^(?:\s*(?:re|rv|fw|fwd)\s*:\s*)*(?:reanudar|reanuda|resume)[\s_]+[a-f0-9]{8,64}\b/i;
+
+/**
+ * Pliega diacriticos y espacios raros antes de evaluar una orden.
+ *
+ * NO sustituye espacios por `_` (eso es `normalizeResumeText`, para los alias):
+ * aqui el espacio separa verbo, testigo y paso, y la expresion los admite
+ * igualmente separados por `_`. El testigo es hexadecimal y no le afecta.
+ */
+const foldCommandText = (raw: string): string =>
+  raw
+    .normalize('NFD')
+    .replace(/\p{Diacritic}/gu, '')
+    .replace(/[\u00A0\u2000-\u200B]/g, ' ');
+
+/** `true` si el asunto o la linea parecen una orden de reanudacion. */
+export const looksLikeResumeCommand = (line: string): boolean =>
+  RESUME_COMMAND_HINT.test(foldCommandText(line).trim());
+
+/**
+ * Lee la orden de una linea ya aislada: testigo y paso nombrado, o `null`.
+ *
+ * Helper PURO. Tolera las erratas habituales del conector (`DESE`, `DE`) y el
+ * verbo sin la `r` final; el anclaje de principio a fin se mantiene.
+ */
+export const parseResumeCommand = (
+  line: string,
+): {
+  readonly token: string;
+  readonly targetIdentifier: string | null;
+} | null => {
+  const match = RESUME_COMMAND_REGEX.exec(foldCommandText(line).trim());
+
+  if (match === null) {
+    return null;
+  }
+
+  const target = match[2]?.trim() ?? '';
+
+  return {
+    token: (match[1] ?? '').toLowerCase(),
+    targetIdentifier: target.length === 0 ? null : target,
+  };
+};
 
 /**
  * Prefijos de respuesta y reenvio que los clientes acumulan en el asunto.
@@ -118,22 +172,73 @@ export const cleanSubject = (rawSubject: string): string =>
   rawSubject.replace(SUBJECT_REPLY_PREFIXES, '').trim();
 
 /**
- * Forma canonica con la que se comparan los alias de un paso.
+ * Forma canonica de un texto de reanudacion: sin diacriticos, en minusculas y
+ * con cualquier tramo de espacios o guiones convertido en `_`.
  *
- * Helper PURO, como los dos de arriba. Hace tres cosas y las tres hacen falta
- * para que "Disparador IMAP" escrito de memoria case con la fila del catalogo:
- * recorta, baja a minusculas y PLIEGA LOS DIACRITICOS, porque los nombres de
- * los nodos llevan tildes («Procesador de IA», «Escudo Post-IA») y nadie las
- * escribe al responder desde el movil. El espacio interior se colapsa para que
- * un doble espacio accidental no rompa la coincidencia.
+ * Helper PURO. Plegar las tildes hace falta porque los nombres de los nodos
+ * las llevan («Procesador de IA», «Escudo Post-IA») y nadie las escribe al
+ * responder desde el movil.
+ *
+ * Es la que permite que «Trigger IMAP», «trigger-imap» y «TRIGGER_IMAP» sean
+ * el mismo paso: el `nodeType` y los namespaces ya van en `snake_case`.
  */
-export const normalizeStepAlias = (raw: string): string =>
+export const normalizeResumeText = (raw: string): string =>
   raw
     .normalize('NFD')
     .replace(/\p{Diacritic}/gu, '')
     .trim()
     .toLowerCase()
-    .replace(/\s+/g, ' ');
+    .replace(/[\s-]+/g, '_')
+    .replace(/_+/g, '_')
+    .replace(/^_|_$/g, '');
+
+/**
+ * Alias en lenguaje natural de cada tipo de nodo, ya normalizados.
+ *
+ * Las etiquetas del catalogo (`nodos.nombre`) ya se comparan, pero el operador
+ * escribe de memoria y mezcla idiomas: «disparador imap», «trigger imap»,
+ * «procesador ia». Cada alias apunta al `nodeType` en minusculas, que es como
+ * queda tras `normalizeResumeText`.
+ */
+export const STEP_ALIASES: Readonly<Record<string, string>> = {
+  trigger_imap: 'trigger_imap',
+  disparador_imap: 'trigger_imap',
+  imap: 'trigger_imap',
+  trigger_cron: 'trigger_cron',
+  disparador_cron: 'trigger_cron',
+  cron: 'trigger_cron',
+  parser: 'parser_pre_ia',
+  parser_de_correo: 'parser_pre_ia',
+  parser_correo: 'parser_pre_ia',
+  extractor_web: 'extractor_web',
+  scraper: 'extractor_web',
+  web_scraper: 'extractor_web',
+  procesador_ia: 'procesador_ia',
+  procesador_de_ia: 'procesador_ia',
+  ia: 'procesador_ia',
+  llm: 'procesador_ia',
+  procesador_ocr: 'procesador_ocr',
+  ocr: 'procesador_ocr',
+  escudo: 'escudo_post_ia',
+  escudo_post_ia: 'escudo_post_ia',
+  escudo_posterior_a_ia: 'escudo_post_ia',
+  mapeador: 'mapeador_plantilla',
+  mapeador_plantilla: 'mapeador_plantilla',
+  mapeador_de_plantilla: 'mapeador_plantilla',
+  pausa: 'pausa_flow',
+  pausa_de_flujo: 'pausa_flow',
+  destino_drupal: 'destino_drupal',
+  drupal: 'destino_drupal',
+  destino_acens: 'destino_acens',
+  acens: 'destino_acens',
+};
+
+/** Canoniza un nombre de paso: normaliza y resuelve su alias si lo tiene. */
+export const canonicalStepName = (raw: string): string => {
+  const normalized = normalizeResumeText(raw);
+
+  return STEP_ALIASES[normalized] ?? normalized;
+};
 
 /** Roles que pueden dar la orden. Mismos que los de la API. */
 const AUTHORIZED_ROLES: ReadonlySet<UserRole> = new Set([
@@ -171,6 +276,15 @@ const DEFAULT_RESUME_POLL_MS = 60_000;
 
 /** Suelo del intervalo: por debajo se maltrata al servidor de correo. */
 const MIN_RESUME_POLL_MS = 15_000;
+
+/**
+ * Espera MINIMA entre sondeos que exige el contrato del canal (5 s).
+ *
+ * Es una cota inferior documentada, no el intervalo efectivo: el suelo real
+ * (`MIN_RESUME_POLL_MS`) y el defecto (`DEFAULT_RESUME_POLL_MS`) ya la
+ * superan, y ningun valor de `INBOUND_RESUME_POLL_MS` puede bajar de ella.
+ */
+export const RESUME_MAIL_POLL_INTERVAL_MS = 5_000;
 
 /**
  * Que se hizo con un mensaje del buzon, para decidir si se marca `\Seen`.
@@ -445,7 +559,11 @@ export class InboundEmailResumeService
       // devolviendo en cada busqueda de no-leidos: filtrarlos al final dejaria
       // que una conversacion larga copara las diez plazas del lote y las
       // ordenes reales no se atenderian nunca.
-      const pending = uids
+      // Orden ASCENDENTE de UID: las respuestas de un mismo hilo se atienden en
+      // el orden en que llegaron, y una segunda orden nunca adelanta a la
+      // primera. El servidor no garantiza el orden de la respuesta a SEARCH.
+      const pending = [...uids]
+        .sort((left, right) => left - right)
         .filter((uid) => !this.skippedUids.has(uid))
         .slice(0, MAX_COMMANDS_PER_RUN);
 
@@ -672,12 +790,12 @@ export class InboundEmailResumeService
       cleanSubject(parsed.subject ?? ''),
     ];
 
-    const match = candidates.reduce<RegExpExecArray | null>(
+    const match = candidates.reduce<ReturnType<typeof parseResumeCommand>>(
       (found, candidate) =>
         found ??
         (candidate === null || candidate.length === 0
           ? null
-          : RESUME_COMMAND_REGEX.exec(candidate)),
+          : parseResumeCommand(candidate)),
       null,
     );
 
@@ -702,8 +820,8 @@ export class InboundEmailResumeService
     return {
       uid,
       fromAddress,
-      token: match[1] ?? '',
-      targetIdentifier: match[2] ?? null,
+      token: match.token,
+      targetIdentifier: match.targetIdentifier,
     };
   }
 
@@ -835,9 +953,9 @@ export class InboundEmailResumeService
    * Acepta las CUATRO formas con las que una persona nombra un paso de memoria:
    * su identificador (`trigger_imap`), su tipo (`TRIGGER_IMAP`), el namespace
    * que publica (`raw_email`) y su ETIQUETA del catalogo (`Disparador IMAP`).
-   * Todas se comparan por `normalizeStepAlias`, asi que ni las mayusculas ni
-   * las tildes cuentan: un asunto de correo pasa por varios clientes que lo
-   * reescriben.
+   * Todas se comparan por `canonicalStepName` (sin tildes ni mayusculas,
+   * espacios y guiones como `_`, y con los alias de `STEP_ALIASES`): un asunto
+   * de correo pasa por varios clientes que lo reescriben.
    *
    * La cuarta forma es la que de verdad usa un operador, y es la unica que no
    * vive en el esquema: `PipelineNodeConfigDto` no tiene `name` ni `label`, de
@@ -871,7 +989,7 @@ export class InboundEmailResumeService
       return null;
     }
 
-    const wanted = normalizeStepAlias(identifier);
+    const wanted = canonicalStepName(identifier);
     const labelsByCode = await this.loadCatalogLabels();
     const ambiguous: string[] = [];
     let resolved: string | null = null;
@@ -887,7 +1005,7 @@ export class InboundEmailResumeService
 
       if (
         !candidates.some(
-          (value) => value.length > 0 && normalizeStepAlias(value) === wanted,
+          (value) => value.length > 0 && canonicalStepName(value) === wanted,
         )
       ) {
         continue;

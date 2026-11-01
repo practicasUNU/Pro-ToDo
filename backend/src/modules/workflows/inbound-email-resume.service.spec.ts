@@ -2,7 +2,13 @@ import { createHash } from 'node:crypto';
 
 import { UserRole } from '@modules/users/enums/user-role.enum';
 
-import { InboundEmailResumeService } from './inbound-email-resume.service';
+import {
+  InboundEmailResumeService,
+  RESUME_MAIL_POLL_INTERVAL_MS,
+  canonicalStepName,
+  looksLikeResumeCommand,
+  normalizeResumeText,
+} from './inbound-email-resume.service';
 
 import type { ConfigService } from '@nestjs/config';
 import type { FsmExecutionQueryService } from '@core/fsm/services/fsm-execution-query.service';
@@ -524,14 +530,35 @@ describe('InboundEmailResumeService (ordenes de reanudacion por correo)', () => 
       );
     });
 
-    it('4.7 deberia reanudar desde el cursor si el catalogo no responde', async () => {
+    it('4.7 deberia resolver por alias aunque el catalogo no responda', async () => {
+      // 1. Arrange 📐: «Disparador IMAP» es un alias fijo de TRIGGER_IMAP
+      //    (`STEP_ALIASES`), asi que no depende de la tabla `nodos`.
+      const { service, executions, nodeCatalog } = buildHarness();
+      nodeCatalog.find.mockRejectedValue(new Error('Base no disponible'));
+      simpleParser.mockResolvedValue(
+        inboundMessage(`REANUDAR ${TOKEN} DESDE Disparador IMAP`),
+      );
+
+      // 2. Act ⚙️
+      await service.processInbox();
+
+      // 3. Assert 🎯
+      expect(executions.resumeExecution).toHaveBeenCalledWith(
+        EXECUTION_ID,
+        { targetStepId: 'nodo_a' },
+        expect.anything(),
+        { isEmailResume: true },
+      );
+    });
+
+    it('4.8 deberia reanudar desde el cursor si el paso no se reconoce y el catalogo no responde', async () => {
       // 1. Arrange 📐: perder la forma comoda de nombrar un paso es un
       //    inconveniente; dejar sin reanudar un flujo detenido porque la tabla
       //    `nodos` no contesto seria el fallo de verdad.
       const { service, executions, nodeCatalog } = buildHarness();
       nodeCatalog.find.mockRejectedValue(new Error('Base no disponible'));
       simpleParser.mockResolvedValue(
-        inboundMessage(`REANUDAR ${TOKEN} DESDE Disparador IMAP`),
+        inboundMessage(`REANUDAR ${TOKEN} DESDE Revision editorial`),
       );
 
       // 2. Act ⚙️
@@ -545,6 +572,36 @@ describe('InboundEmailResumeService (ordenes de reanudacion por correo)', () => 
         { isEmailResume: true },
       );
     });
+
+    it.each([
+      ['errata DESE', `REANUDAR ${TOKEN} DESE trigger imap`, 'nodo_a'],
+      ['errata DE', `REANUDAR ${TOKEN} DE trigger imap`, 'nodo_a'],
+      ['guion', `REANUDAR ${TOKEN} DESDE disparador-imap`, 'nodo_a'],
+      [
+        'guion bajo y tildes',
+        `Reanudár ${TOKEN} desde procesador_de_ía`,
+        'nodo_c',
+      ],
+      ['verbo RESUME', `RESUME ${TOKEN} FROM pausa`, 'pausa_revision'],
+    ])(
+      '4.9 deberia tolerar la variante "%s"',
+      async (_label, line, expected) => {
+        // 1. Arrange 📐
+        const { service, executions } = buildHarness();
+        simpleParser.mockResolvedValue(inboundMessage(line));
+
+        // 2. Act ⚙️
+        await service.processInbox();
+
+        // 3. Assert 🎯
+        expect(executions.resumeExecution).toHaveBeenCalledWith(
+          EXECUTION_ID,
+          { targetStepId: expected },
+          expect.anything(),
+          { isEmailResume: true },
+        );
+      },
+    );
   });
 
   describe('5. Higiene del buzon', () => {
@@ -635,6 +692,72 @@ describe('InboundEmailResumeService (ordenes de reanudacion por correo)', () => 
       // 3. Assert 🎯
       expect(dispatched).toBe(1);
       expect(executions.resumeExecution).toHaveBeenCalledTimes(1);
+    });
+    it('5.6 deberia buscar EXCLUSIVAMENTE mensajes no leidos', async () => {
+      // 1. Arrange 📐: un correo ya leido no se inspecciona bajo ningun concepto.
+      const { service, client } = buildHarness();
+
+      // 2. Act ⚙️
+      await service.processInbox();
+
+      // 3. Assert 🎯
+      expect(client.search).toHaveBeenCalledWith(
+        { seen: false },
+        { uid: true },
+      );
+    });
+
+    it('5.7 deberia atender en orden todas las respuestas del hilo aunque una falle', async () => {
+      // 1. Arrange 📐: tres respuestas al mismo aviso, devueltas desordenadas
+      //    por el servidor; la del medio trae un MIME roto.
+      const { service, client } = buildHarness();
+      client.search.mockResolvedValue([12, 10, 11]);
+      simpleParser
+        .mockResolvedValueOnce(inboundMessage(`REANUDAR ${TOKEN}`))
+        .mockRejectedValueOnce(new Error('MIME corrupto'))
+        .mockResolvedValueOnce(inboundMessage(`REANUDAR ${TOKEN} DESE pausa`));
+
+      // 2. Act ⚙️
+      await service.processInbox();
+
+      // 3. Assert 🎯: descargadas en orden de llegada y las tres retiradas.
+      expect(
+        client.download.mock.calls.map((call: unknown[]) => call[0]),
+      ).toEqual(['10', '11', '12']);
+      expect(client.messageFlagsAdd).toHaveBeenCalledTimes(3);
+    });
+  });
+
+  describe('5bis. Normalizacion del texto de reanudacion (helpers puros)', () => {
+    it('5bis.1 deberia plegar tildes, mayusculas, espacios y guiones a `_`', () => {
+      // 1. Arrange 📐 + 2. Act ⚙️ + 3. Assert 🎯
+      expect(normalizeResumeText('  Escudo Post-IA ')).toBe('escudo_post_ia');
+      expect(normalizeResumeText('Procesador  de   IÁ')).toBe(
+        'procesador_de_ia',
+      );
+    });
+
+    it.each([
+      ['trigger imap', 'trigger_imap'],
+      ['Disparador IMAP', 'trigger_imap'],
+      ['disparador-imap', 'trigger_imap'],
+      ['TRIGGER_IMAP', 'trigger_imap'],
+      ['procesador ia', 'procesador_ia'],
+    ])('5bis.2 deberia mapear el alias "%s" a %s', (alias, expected) => {
+      // 1. Arrange 📐 + 2. Act ⚙️ + 3. Assert 🎯
+      expect(canonicalStepName(alias)).toBe(expected);
+    });
+
+    it('5bis.3 deberia reconocer la pista de orden con prefijos y tildes', () => {
+      // 1. Arrange 📐 + 2. Act ⚙️ + 3. Assert 🎯
+      expect(looksLikeResumeCommand(`Re: RE: reanudár ${TOKEN}`)).toBe(true);
+      expect(looksLikeResumeCommand(`RESUME ${TOKEN}`)).toBe(true);
+      expect(looksLikeResumeCommand('Re: dudas del boletin')).toBe(false);
+    });
+
+    it('5bis.4 deberia declarar una espera minima de sondeo de 5000 ms', () => {
+      // 1. Arrange 📐 + 2. Act ⚙️ + 3. Assert 🎯
+      expect(RESUME_MAIL_POLL_INTERVAL_MS).toBeGreaterThanOrEqual(5000);
     });
   });
 

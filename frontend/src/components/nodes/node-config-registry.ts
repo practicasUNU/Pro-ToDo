@@ -60,6 +60,9 @@ export const nodeConfigRegistry: Partial<Record<NodeType, Component>> = {
   [NodeType.DESTINO_HTTP_GENERICO]: defineAsyncComponent(
     () => import('@components/nodes/HttpGenericDestinationConfig.vue'),
   ),
+  [NodeType.DESTINO_ACENS]: defineAsyncComponent(
+    () => import('@components/nodes/AcensHttpConfig.vue'),
+  ),
 };
 
 /** Tipos de nodo con configurador disponible, para poblar selectores. */

@@ -96,6 +96,23 @@ const REQUIRED_CONTEXT_FIELD_BY_MODE: Readonly<
   [DrupalOperationMode.UPLOAD_ATTACHMENT]: 'attachmentNamespace',
 };
 
+/**
+ * Modos que publican el MARCADO de un paso anterior: los unicos que necesitan
+ * un ESCUDO_POST_IA o, en su defecto, un PROCESADOR_IA por delante.
+ */
+const MARKUP_SOURCE_MODES: ReadonlySet<DrupalOperationMode> = new Set([
+  DrupalOperationMode.CREATE_NODE,
+  DrupalOperationMode.APPEND_HTML_BLOCK,
+]);
+
+/** Namespace y campo del PROCESADOR_IA, origen de respaldo sin escudo. */
+const LLM_SOURCE_NAMESPACE = 'llm_response';
+const LLM_SOURCE_FIELD = 'filled_markup';
+
+/** `ns` o una de sus copias numeradas (`ns_2`), como las genera el asistente. */
+const isNamespaceOf = (namespace: string, base: string): boolean =>
+  namespace === base || new RegExp(`^${base}_\\d+$`).test(namespace);
+
 /** Lee una cadena de los `params` crudos del esquema. */
 const asText = (value: unknown): string => (typeof value === 'string' ? value : '');
 
@@ -329,8 +346,58 @@ const drupalHttpSetup = () => {
    * Que el contexto publique o no el namespace elegido es un aviso y no un
    * bloqueo; el porque esta en `configWarnings`.
    */
+  /** Primer namespace aguas arriba del ESCUDO_POST_IA, o `undefined`. */
+  const shieldUpstream = computed<UpstreamNamespace | undefined>(() =>
+    availableUpstreamContext.value.find(
+      (entry) =>
+        entry.nodeType === NodeType.ESCUDO_POST_IA ||
+        isNamespaceOf(entry.namespace, DEFAULT_DRUPAL_SOURCE_NAMESPACE),
+    ),
+  );
+
+  /** Primer namespace aguas arriba del PROCESADOR_IA, o `undefined`. */
+  const llmUpstream = computed<UpstreamNamespace | undefined>(() =>
+    availableUpstreamContext.value.find(
+      (entry) =>
+        entry.nodeType === NodeType.PROCESADOR_IA ||
+        isNamespaceOf(entry.namespace, LLM_SOURCE_NAMESPACE),
+    ),
+  );
+
+  /**
+   * Motivo por el que el nodo NO puede guardarse por falta de origen, o `null`.
+   *
+   * Orden de preferencia: primero el `ESCUDO_POST_IA` (marcado ya saneado);
+   * si no hay, el `PROCESADOR_IA` directamente. Solo bloquea cuando no hay
+   * NINGUNO de los dos, y solo con el contexto ya cargado: llega vacio hasta
+   * que responde `GET /api/nodos`, y bloquear sobre eso dejaria el paso en rojo
+   * en cada apertura del asistente.
+   */
+  const sourceNamespaceBlockReason = computed<string | null>(() => {
+    if (!MARKUP_SOURCE_MODES.has(config.value.operationMode)) return null;
+    if (availableUpstreamContext.value.length === 0) return null;
+    if (shieldUpstream.value !== undefined || llmUpstream.value !== undefined) return null;
+
+    return (
+      'Este modo publica el marcado de un paso anterior y no hay ninguno que lo produzca. ' +
+      'Coloca delante un Escudo posterior a IA (recomendado: entrega el HTML saneado) o, ' +
+      'como minimo, un Procesador IA.'
+    );
+  });
+
+  /**
+   * Contrato uniforme del nodo (§3.1): lo unico que el asistente consulta.
+   *
+   * Tres familias: lo que el modo activo exige —calco de `getIncompleteParams`—,
+   * lo que el DTO rechazaria por formato y, en los modos que publican marcado,
+   * que exista por delante un ESCUDO_POST_IA o un PROCESADOR_IA. Que el
+   * namespace concreto elegido exista es un aviso; ver `configWarnings`.
+   */
   const isConfigValid = computed<boolean>(
-    () => missingRequiredParams.value.length === 0 && malformedParams.value.length === 0,
+    () =>
+      missingRequiredParams.value.length === 0 &&
+      malformedParams.value.length === 0 &&
+      sourceNamespaceBlockReason.value === null,
   );
 
   /** Avisos no bloqueantes del paso (contrato de `NodeConfigStore`). */
@@ -356,6 +423,21 @@ const drupalHttpSetup = () => {
             'o elige otro origen.',
         );
       }
+    }
+
+    // 1bis. Respaldo sin escudo: se publica la salida del PROCESADOR_IA tal
+    //       cual, sin el saneado ni la auditoria del ESCUDO_POST_IA. Es valido,
+    //       pero el operador debe saber que renuncia a esa barrera.
+    if (
+      MARKUP_SOURCE_MODES.has(config.value.operationMode) &&
+      shieldUpstream.value === undefined &&
+      llmUpstream.value !== undefined
+    ) {
+      warnings.push(
+        `No hay Escudo posterior a IA por delante: se publicara "${llmUpstream.value.namespace}" ` +
+          'del Procesador IA sin su saneado XSS ni auditoria estructural. Anade el escudo si el ' +
+          'marcado llega a produccion.',
+      );
     }
 
     // 2. Advertencia topologica del propio DTO: el motor LIBERA los bytes de
@@ -542,8 +624,37 @@ const drupalHttpSetup = () => {
   };
 
   /** Se COPIA el arreglo: el anfitrion reconstruye el suyo en cada sincronizacion. */
+  /**
+   * Recibe el contexto de los pasos anteriores y, si hace falta, reorienta el
+   * origen del marcado.
+   *
+   * Solo toca un origen que sigue en el DEFECTO (`validated_drupal_json`) y que
+   * ningun paso publica: si no hay escudo pero si un PROCESADOR_IA, el nodo
+   * pasa a leer su `filled_markup`. Un origen elegido a mano no se reescribe.
+   */
   const setAvailableUpstreamContext = (context: UpstreamNamespace[]): void => {
     availableUpstreamContext.value = [...context];
+
+    const current = config.value;
+    const publishesDefault = context.some(
+      (entry) => entry.namespace === DEFAULT_DRUPAL_SOURCE_NAMESPACE,
+    );
+
+    if (
+      !MARKUP_SOURCE_MODES.has(current.operationMode) ||
+      current.sourceNamespace !== DEFAULT_DRUPAL_SOURCE_NAMESPACE ||
+      publishesDefault ||
+      shieldUpstream.value !== undefined ||
+      llmUpstream.value === undefined
+    ) {
+      return;
+    }
+
+    config.value = {
+      ...current,
+      sourceNamespace: llmUpstream.value.namespace,
+      sourceField: LLM_SOURCE_FIELD,
+    };
   };
 
   /**
@@ -733,6 +844,7 @@ const drupalHttpSetup = () => {
   return {
     config,
     availableUpstreamContext,
+    sourceNamespaceBlockReason,
     namespaceOptions,
     fieldOptions,
     attachmentFieldOptions,

@@ -3,7 +3,9 @@ import { validate } from 'class-validator';
 
 import {
   DEFAULT_POST_IA_SOURCE_FIELD,
+  DEFAULT_POST_IA_SOURCE_FIELDS,
   DEFAULT_POST_IA_SOURCE_NAMESPACE,
+  PostIaContentMode,
   PostIaSanitizerConfigDto,
   resolvePostIaSanitizerConfig,
 } from './post-ia-sanitizer-config.dto';
@@ -242,8 +244,10 @@ describe('PostIaSanitizerConfigDto', () => {
 
       // 3. Assert 🎯
       expect(config).toEqual({
+        contentMode: PostIaContentMode.HTML,
         sourceNamespace: DEFAULT_POST_IA_SOURCE_NAMESPACE,
         sourceField: DEFAULT_POST_IA_SOURCE_FIELD,
+        sourceFields: DEFAULT_POST_IA_SOURCE_FIELDS,
         requiredSelectors: [],
         allowedTags: [],
       });

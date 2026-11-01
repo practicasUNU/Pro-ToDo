@@ -1,3 +1,4 @@
+import { useAcensHttpStore } from '@stores/nodes/acens-http.store';
 import { useDrupalHttpStore } from '@stores/nodes/drupal-http.store';
 import { useHttpGenericDestinationStore } from '@stores/nodes/http-generic-destination.store';
 import { useLlmExtractorStore } from '@stores/nodes/llm-extractor.store';
@@ -295,6 +296,7 @@ export const nodeStoreRegistry: Partial<Record<NodeType, NodeStoreHook>> = {
   [NodeType.ESCUDO_POST_IA]: usePostIaSanitizerStore,
   [NodeType.DESTINO_DRUPAL]: useDrupalHttpStore,
   [NodeType.DESTINO_HTTP_GENERICO]: useHttpGenericDestinationStore,
+  [NodeType.DESTINO_ACENS]: useAcensHttpStore,
 };
 
 /**

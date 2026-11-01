@@ -284,13 +284,29 @@ describe('LlmExtractorConfig · configurador del nodo PROCESADOR_IA', () => {
       () => '<tr><td>{{universidad}}</td></tr>',
     ).join('')}</tbody></table>`;
 
-    it('3bis.1 NO deberia pintar la tarjeta sin plantilla base delante', () => {
-      // 1. Arrange 📐 + 2. Act ⚙️: sin marcado que medir, una tarjeta que
-      //    siempre dice lo mismo solo anade ruido al formulario.
+    it('3bis.1 deberia pintar la tarjeta SIEMPRE, estimada por prompt sin plantilla base', () => {
+      // 1. Arrange 📐 + 2. Act ⚙️: el boton de presupuesto ya no se esconde.
       const wrapper = mountComponent(nextNodeId());
 
       // 3. Assert 🎯
-      expect(wrapper.find('[data-test="resource-estimate"]').exists()).toBe(false);
+      expect(wrapper.find('[data-test="resource-estimate"]').exists()).toBe(true);
+      expect(wrapper.get('[data-test="estimate-reason"]').text()).toContain('prompt');
+      expect(wrapper.get('[data-test="apply-recommendation"]').text()).toContain(
+        'Recomendar presupuesto (tokens, timeout y reintentos)',
+      );
+    });
+
+    it('3bis.1bis deberia homologar Previsualizar y Nueva plantilla con el mapeador', () => {
+      // 1. Arrange 📐 + 2. Act ⚙️
+      const wrapper = mountComponent(nextNodeId());
+
+      // 3. Assert 🎯: icono a la izquierda (visibility / add), sin flecha diagonal.
+      const preview = wrapper.get('[data-test="preview-prompt"]');
+      const create = wrapper.get('[data-test="create-prompt"]');
+      expect(preview.html()).toContain('visibility');
+      expect(create.html()).toContain('add');
+      expect(preview.html()).not.toContain('north_east');
+      expect(create.html()).not.toContain('north_east');
     });
 
     it('3bis.2 deberia pintarla con el nivel ALTA ante una coleccion', async () => {
@@ -323,6 +339,7 @@ describe('LlmExtractorConfig · configurador del nodo PROCESADOR_IA', () => {
       // 3. Assert 🎯
       expect(store.config.timeoutMs).toBe(60_000);
       expect(store.config.maxTokens).toBeGreaterThanOrEqual(8_192);
+      expect(store.config.maxRetries).toBe(0);
     });
   });
 

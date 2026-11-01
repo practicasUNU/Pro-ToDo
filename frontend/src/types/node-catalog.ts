@@ -46,10 +46,10 @@ export const NODE_CATEGORY_LABELS: Record<NodeCategory, string> = {
 /**
  * Entrada del catalogo servida por `GET /api/nodos`.
  *
- * `code` es un `string` y NO un `NodeType`: el catalogo tiene nueve filas y el
- * enum declara ocho. Tiparlo como `NodeType` obligaria a mentir sobre
- * `DESTINO_ACENS`, que esta en la tabla precisamente por no ser expresable
- * todavia. `implemented` es la marca que separa unos de otros, y
+ * `code` es un `string` y NO un `NodeType`: la tabla `nodos` puede tener filas
+ * que el enum aun no declara (asi estuvo `DESTINO_ACENS` hasta la migracion
+ * 066), y tiparlo como `NodeType` obligaria a mentir sobre ellas.
+ * `implemented` es la marca que separa unos de otros, y
  * `isImplementedNodeType` el estrechamiento seguro.
  */
 export interface NodeCatalogEntry {
