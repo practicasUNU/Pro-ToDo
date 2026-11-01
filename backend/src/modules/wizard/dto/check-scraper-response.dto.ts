@@ -34,6 +34,24 @@ export class ScrapedWebPreviewDto {
   })
   byline: string | null;
 
+  @ApiProperty({
+    description: 'Autor de los metadatos (meta/JSON-LD), o la firma si no hay',
+    nullable: true,
+  })
+  author: string | null;
+
+  @ApiProperty({
+    description: 'Fecha de publicacion ISO 8601, o null si no consta',
+    nullable: true,
+  })
+  published_at: string | null;
+
+  @ApiProperty({
+    description: 'URLs externas citadas en el cuerpo del articulo',
+    type: [String],
+  })
+  references: string[];
+
   @ApiProperty({ description: 'Marca temporal ISO 8601 de la extraccion' })
   scraped_at: string;
 }

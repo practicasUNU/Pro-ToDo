@@ -86,6 +86,23 @@ const RESUME_COMMAND_BODY_LINES = 5;
 const MAX_PENDING_RESUME_COMMANDS = 10;
 
 /**
+ * Tope de correos que un sondeo descarga buscando uno que case el asunto.
+ * Cada candidato baja su MIME completo: el tope impide que un buzon con
+ * cientos de no leidos irrelevantes sature la conexion.
+ */
+export const MAX_SCAN_CANDIDATES = 25;
+
+/** Desenlace del recorrido de candidatos por asunto. */
+type SubjectScanResult =
+  | {
+      readonly kind: 'match';
+      readonly uid: number;
+      readonly parsed: ParsedMail;
+    }
+  | { readonly kind: 'resume'; readonly result: NodeResult }
+  | { readonly kind: 'none' };
+
+/**
  * Tope del marcado que viaja en el payload, en caracteres.
  *
  * Ya NO es la defensa contra las imagenes incrustadas: de esas se ocupa
@@ -464,13 +481,9 @@ const resolveAttachmentFilename = (
  * flag `\Seen`, y añadir la ventana descartaria en silencio un correo sin leer
  * mas antiguo, que es justo el que nadie ha atendido.
  *
- * CONTRAPARTIDA, asumida: sin el criterio `SUBJECT` el sondeo se trae el correo
- * mas reciente del buzon y lo descarta en OMITIDO si no casa el patron. Con los
- * valores `unreadOnly: true` y `markAsRead: true` el buzon se consume de uno en
- * uno y no se pierde nada; con `markAsRead: false` (el defecto desde que el
- * buzon se deja intacto, ver `DEFAULT_MARK_AS_READ`) el flujo se atasca
- * en el mismo mensaje, que es el riesgo que el comentario de `execute` ya
- * describe y que corre igual cualquier flujo que hoy use solo el patron.
+ * SIN `SUBJECT` en el servidor, el asunto se filtra en local recorriendo los
+ * candidatos (`findFirstSubjectMatch`): un correo reciente irrelevante ya no
+ * tapa a uno anterior que si casa.
  */
 export const buildImapSearchQuery = (
   config: ResolvedImapConfig,
@@ -720,25 +733,21 @@ export class ImapTriggerStrategy implements INodeStrategy {
       await client.connect();
       lock = await client.getMailboxLock(config.mailbox);
 
-      const uid = await this.findLatestMatchingUid(
+      const candidates = await this.findMatchingUidsDescending(
         client,
         config,
         searchOptions,
       );
 
-      if (uid === null) {
-        // El filtro de remitente lo resuelve el servidor IMAP dentro de la
-        // query, de modo que un correo descartado por `fromFilter` jamas llega
-        // hasta aqui: lo unico observable es que no vuelve ningun UID. Por eso
-        // la traza enumera los filtros activos en lugar de un valor recibido.
+      if (candidates.length === 0) {
+        // `fromFilter` lo resuelve el servidor en la query: un correo descartado
+        // por remitente nunca llega aqui, solo se observa la ausencia de UIDs.
         this.logger.log(
           `OMITIDO | REASON: NO_MESSAGES | filtros activos → from: "${config.fromFilter ?? '(ninguno)'}" | unreadOnly: ${config.unreadOnly}`,
         );
 
-        // Buzon vacio: exito con parada. `success: true` porque no ha fallado
-        // nada —el sondeo corre cada minuto y lo habitual es no encontrar nada—
-        // y `halt` para que el motor cierre la ejecucion en OMITIDO en vez de
-        // pasar al nodo siguiente, que esperaria las claves de un correo.
+        // Exito con parada: no encontrar nada es lo habitual en un sondeo, y
+        // `halt` cierra en OMITIDO sin pasar al nodo siguiente.
         return {
           success: true,
           data: { status: NO_MESSAGES_STATUS },
@@ -748,37 +757,27 @@ export class ImapTriggerStrategy implements INodeStrategy {
         };
       }
 
-      const parsed = await this.downloadAndParse(client, uid);
+      const match = await this.findFirstSubjectMatch(
+        client,
+        config,
+        candidates,
+      );
 
-      // --- ORDENES DE MANDO, antes que nada mas.
-      //
-      // Va por delante del filtro de asunto a proposito: la orden llega como
-      // RESPUESTA al correo de alerta, asi que su asunto es el de aquel con un
-      // `Re:` delante y no casa con el filtro del flujo. Evaluado despues, el
-      // mensaje saldria por `SUBJECT_FILTERED` y la reanudacion no se atenderia
-      // jamas.
-      if (this.isResumeCommandEmail(parsed)) {
-        return this.dispatchResumeCommand(client, uid, parsed);
+      if (match.kind === 'resume') {
+        return match.result;
       }
 
-      // Un correo descartado por el filtro SI se marca (con `markAsRead`): el
-      // descarte es un desenlace correcto, no un fallo, y sin marcar volveria
-      // a descargarse en cada sondeo y `findLatestMatchingUid` reencontraria
-      // siempre el mismo, bloqueando todo mensaje posterior.
-      if (!this.matchesSubjectFilter(parsed, config)) {
-        if (config.markAsRead) {
-          await client.messageFlagsAdd(String(uid), ['\\Seen'], { uid: true });
-        }
-
+      if (match.kind === 'none') {
         return {
           success: true,
           data: { status: SUBJECT_FILTERED_STATUS },
           halt: {
-            reason: `El asunto no coincide con el filtro configurado (${this.describeSubjectFilter(config)}).`,
+            reason: `Ninguno de los ${candidates.length} correo(s) revisados coincide con el filtro de asunto (${this.describeSubjectFilter(config)}).`,
           },
         };
       }
 
+      const { uid, parsed } = match;
       const extracted = this.toExtractedEmail(parsed, config);
       // Imputacion de la ejecucion al remitente (migracion 060): solo si es un
       // usuario registrado; si no, el motor deja la cuenta de respaldo.
@@ -879,7 +878,7 @@ export class ImapTriggerStrategy implements INodeStrategy {
    * orden se acepte o se rechace. Esa bandera gobierna los correos de
    * CONTENIDO —si marcarlos altera un buzon compartido es una decision del
    * operador—, pero un mensaje de mando sin marcar lo reencuentra
-   * `findLatestMatchingUid` en cada sondeo: se reejecutaria en bucle y, peor,
+   * `findMatchingUidsDescending` en cada sondeo: se reejecutaria en bucle y, peor,
    * ningun correo posterior llegaria a procesarse nunca porque el maximo UID
    * seria siempre este.
    *
@@ -986,29 +985,65 @@ export class ImapTriggerStrategy implements INodeStrategy {
   }
 
   /**
-   * UID del mensaje coincidente mas reciente, o `null` si no hay ninguno.
+   * UIDs coincidentes del mas reciente al mas antiguo, acotados por sondeo.
    *
-   * Se toma el maximo y no el ultimo elemento: el orden de la respuesta del
-   * servidor no esta garantizado por el protocolo, mientras que un UID mayor
-   * siempre corresponde a un mensaje mas nuevo dentro del mismo UIDVALIDITY.
+   * Antes se tomaba solo `Math.max(uids)`: si ese correo no casaba el asunto
+   * (y `markAsRead` estaba apagado) el flujo se atascaba en el para siempre y
+   * nunca llegaba a los anteriores que si casaban.
    */
-  private async findLatestMatchingUid(
+  private async findMatchingUidsDescending(
     client: ImapFlow,
     config: ResolvedImapConfig,
     searchOptions: ImapSearchOptions,
-  ): Promise<number | null> {
+  ): Promise<number[]> {
     const uids = await client.search(
       buildImapSearchQuery(config, searchOptions),
-      {
-        uid: true,
-      },
+      { uid: true },
     );
 
-    if (uids === false || !Array.isArray(uids) || uids.length === 0) {
-      return null;
+    if (uids === false || !Array.isArray(uids)) {
+      return [];
     }
 
-    return Math.max(...uids);
+    return [...uids]
+      .sort((left, right) => right - left)
+      .slice(0, MAX_SCAN_CANDIDATES);
+  }
+
+  /**
+   * Recorre los candidatos hasta el primero que casa con el filtro de asunto.
+   *
+   * La orden de reanudacion se evalua antes que el asunto: llega como `Re:`
+   * del aviso y no casaria nunca. Un descartado se marca `\Seen` solo con
+   * `markAsRead`, igual que antes; sin el, se salta y se sigue buscando.
+   */
+  private async findFirstSubjectMatch(
+    client: ImapFlow,
+    config: ResolvedImapConfig,
+    candidates: readonly number[],
+  ): Promise<SubjectScanResult> {
+    for (const uid of candidates) {
+      const parsed = await this.downloadAndParse(client, uid);
+
+      if (this.isResumeCommandEmail(parsed)) {
+        return {
+          kind: 'resume',
+          result: await this.dispatchResumeCommand(client, uid, parsed),
+        };
+      }
+
+      if (this.matchesSubjectFilter(parsed, config)) {
+        return { kind: 'match', uid, parsed };
+      }
+
+      this.logger.log(`OMITIDO | REASON: SUBJECT_MISMATCH | uid=${uid}`);
+
+      if (config.markAsRead) {
+        await client.messageFlagsAdd(String(uid), ['\\Seen'], { uid: true });
+      }
+    }
+
+    return { kind: 'none' };
   }
 
   /** Descarga el MIME crudo del UID indicado y lo decodifica con mailparser. */

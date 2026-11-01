@@ -445,6 +445,21 @@ const onRunSandboxTest = async (): Promise<void> => {
           {{ preview.byline ?? 'Sin firma' }}
         </p>
 
+        <div class="pd-label">Autor y fecha de publicacion</div>
+        <p class="q-mt-xs q-mb-md pd-text-secondary" data-test="scraper-preview-metadata">
+          {{ preview.author ?? 'Sin autor' }} · {{ preview.published_at ?? 'Sin fecha' }}
+        </p>
+
+        <div class="pd-label">Referencias citadas</div>
+        <ul
+          v-if="preview.references.length > 0"
+          class="q-mt-xs q-mb-md pd-mono pd-url-option"
+          data-test="scraper-preview-references"
+        >
+          <li v-for="reference in preview.references" :key="reference">{{ reference }}</li>
+        </ul>
+        <p v-else class="q-mt-xs q-mb-md pd-text-secondary">Sin referencias externas</p>
+
         <div class="pd-label">URL final</div>
         <p class="q-mt-xs q-mb-md pd-mono pd-url-option">{{ preview.source_url }}</p>
 

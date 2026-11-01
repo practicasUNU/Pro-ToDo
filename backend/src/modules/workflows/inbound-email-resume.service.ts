@@ -72,7 +72,7 @@ const RESUME_COMMAND_HINT =
 /**
  * Pliega diacriticos y espacios raros antes de evaluar una orden.
  *
- * NO sustituye espacios por `_` (eso es `normalizeResumeText`, para los alias):
+ * NO compacta separadores (eso es `normalizeStepKey`, para nombrar el paso):
  * aqui el espacio separa verbo, testigo y paso, y la expresion los admite
  * igualmente separados por `_`. El testigo es hexadecimal y no le afecta.
  */
@@ -172,72 +172,66 @@ export const cleanSubject = (rawSubject: string): string =>
   rawSubject.replace(SUBJECT_REPLY_PREFIXES, '').trim();
 
 /**
- * Forma canonica de un texto de reanudacion: sin diacriticos, en minusculas y
- * con cualquier tramo de espacios o guiones convertido en `_`.
+ * Clave compacta de un nombre de paso: sin tildes, en minusculas y sin
+ * espacios, guiones ni signos ("Destino Drupal" → "destinodrupal").
  *
- * Helper PURO. Plegar las tildes hace falta porque los nombres de los nodos
- * las llevan («Procesador de IA», «Escudo Post-IA») y nadie las escribe al
- * responder desde el movil.
- *
- * Es la que permite que «Trigger IMAP», «trigger-imap» y «TRIGGER_IMAP» sean
- * el mismo paso: el `nodeType` y los namespaces ya van en `snake_case`.
+ * Helper PURO. Compactar hace equivalentes «Trigger IMAP», «trigger-imap» y
+ * «TRIGGER_IMAP» sin tener que adivinar el separador que uso el operador.
  */
-export const normalizeResumeText = (raw: string): string =>
+export const normalizeStepKey = (raw: string): string =>
   raw
     .normalize('NFD')
     .replace(/\p{Diacritic}/gu, '')
-    .trim()
     .toLowerCase()
-    .replace(/[\s-]+/g, '_')
-    .replace(/_+/g, '_')
-    .replace(/^_|_$/g, '');
+    .replace(/[^a-z0-9]/g, '');
 
 /**
- * Alias en lenguaje natural de cada tipo de nodo, ya normalizados.
+ * Diccionario de sinonimos → `nodeType`, con las claves ya compactadas.
  *
- * Las etiquetas del catalogo (`nodos.nombre`) ya se comparan, pero el operador
- * escribe de memoria y mezcla idiomas: «disparador imap», «trigger imap»,
- * «procesador ia». Cada alias apunta al `nodeType` en minusculas, que es como
- * queda tras `normalizeResumeText`.
+ * Es el ULTIMO recurso de `resolveTargetStep`: etiqueta, identificador y tipo
+ * reales del grafo se prueban antes. Cubre lo que el operador escribe de
+ * memoria, mezclando idiomas o nombrando el namespace en vez del nodo.
  */
 export const STEP_ALIASES: Readonly<Record<string, string>> = {
-  trigger_imap: 'trigger_imap',
-  disparador_imap: 'trigger_imap',
-  imap: 'trigger_imap',
-  trigger_cron: 'trigger_cron',
-  disparador_cron: 'trigger_cron',
-  cron: 'trigger_cron',
-  parser: 'parser_pre_ia',
-  parser_de_correo: 'parser_pre_ia',
-  parser_correo: 'parser_pre_ia',
-  extractor_web: 'extractor_web',
-  scraper: 'extractor_web',
-  web_scraper: 'extractor_web',
-  procesador_ia: 'procesador_ia',
-  procesador_de_ia: 'procesador_ia',
-  ia: 'procesador_ia',
-  llm: 'procesador_ia',
-  procesador_ocr: 'procesador_ocr',
-  ocr: 'procesador_ocr',
-  escudo: 'escudo_post_ia',
-  escudo_post_ia: 'escudo_post_ia',
-  escudo_posterior_a_ia: 'escudo_post_ia',
-  mapeador: 'mapeador_plantilla',
-  mapeador_plantilla: 'mapeador_plantilla',
-  mapeador_de_plantilla: 'mapeador_plantilla',
-  pausa: 'pausa_flow',
-  pausa_de_flujo: 'pausa_flow',
-  destino_drupal: 'destino_drupal',
-  drupal: 'destino_drupal',
-  destino_acens: 'destino_acens',
-  acens: 'destino_acens',
-};
-
-/** Canoniza un nombre de paso: normaliza y resuelve su alias si lo tiene. */
-export const canonicalStepName = (raw: string): string => {
-  const normalized = normalizeResumeText(raw);
-
-  return STEP_ALIASES[normalized] ?? normalized;
+  triggerimap: 'TRIGGER_IMAP',
+  disparadorimap: 'TRIGGER_IMAP',
+  imap: 'TRIGGER_IMAP',
+  triggercron: 'TRIGGER_CRON',
+  disparadorcron: 'TRIGGER_CRON',
+  cron: 'TRIGGER_CRON',
+  parser: 'PARSER_PRE_IA',
+  parserdecorreo: 'PARSER_PRE_IA',
+  parsercorreo: 'PARSER_PRE_IA',
+  extractorweb: 'EXTRACTOR_WEB',
+  scraper: 'EXTRACTOR_WEB',
+  webscraper: 'EXTRACTOR_WEB',
+  procesadorocr: 'PROCESADOR_OCR',
+  ocr: 'PROCESADOR_OCR',
+  ocria: 'PROCESADOR_OCR',
+  mapeador: 'MAPEADOR_PLANTILLA',
+  mapeadorplantilla: 'MAPEADOR_PLANTILLA',
+  mapeadordeplantilla: 'MAPEADOR_PLANTILLA',
+  mapeadorhtml: 'MAPEADOR_PLANTILLA',
+  renderhtml: 'MAPEADOR_PLANTILLA',
+  renderedhtml: 'MAPEADOR_PLANTILLA',
+  procesadoria: 'PROCESADOR_IA',
+  procesadordeia: 'PROCESADOR_IA',
+  ia: 'PROCESADOR_IA',
+  llm: 'PROCESADOR_IA',
+  llmresponse: 'PROCESADOR_IA',
+  escudo: 'ESCUDO_POST_IA',
+  escudopostia: 'ESCUDO_POST_IA',
+  escudoposterioraia: 'ESCUDO_POST_IA',
+  postia: 'ESCUDO_POST_IA',
+  pausa: 'PAUSA_FLOW',
+  pausadeflujo: 'PAUSA_FLOW',
+  pausaflujo: 'PAUSA_FLOW',
+  pausaflow: 'PAUSA_FLOW',
+  pausecontext: 'PAUSA_FLOW',
+  destinodrupal: 'DESTINO_DRUPAL',
+  drupal: 'DESTINO_DRUPAL',
+  destinoacens: 'DESTINO_ACENS',
+  acens: 'DESTINO_ACENS',
 };
 
 /** Roles que pueden dar la orden. Mismos que los de la API. */
@@ -950,24 +944,11 @@ export class InboundEmailResumeService
   /**
    * Traduce lo que el operador escribio tras "DESDE" a un `nodeId`.
    *
-   * Acepta las CUATRO formas con las que una persona nombra un paso de memoria:
-   * su identificador (`trigger_imap`), su tipo (`TRIGGER_IMAP`), el namespace
-   * que publica (`raw_email`) y su ETIQUETA del catalogo (`Disparador IMAP`).
-   * Todas se comparan por `canonicalStepName` (sin tildes ni mayusculas,
-   * espacios y guiones como `_`, y con los alias de `STEP_ALIASES`): un asunto
-   * de correo pasa por varios clientes que lo reescriben.
+   * Prioridad: 1) etiqueta visible (`label` del esquema o la del catalogo
+   * `nodos`), 2) identificador o namespace, 3) `nodeType`, 4) diccionario
+   * `STEP_ALIASES`. Todo se compara por `normalizeStepKey`.
    *
-   * La cuarta forma es la que de verdad usa un operador, y es la unica que no
-   * vive en el esquema: `PipelineNodeConfigDto` no tiene `name` ni `label`, de
-   * modo que la etiqueta legible solo existe en la tabla `nodos` (`codigo` →
-   * `nombre`). Se lee de ahi en lugar de replicar el diccionario aqui, que es
-   * la misma razon por la que el frontend tampoco lo replica.
-   *
-   * La etiqueta identifica un TIPO, no una instancia: en un grafo con dos nodos
-   * del mismo tipo, «Procesador de IA» es ambiguo. Se resuelve al primero por
-   * orden de declaracion —igual que ya ocurria al nombrar el paso por su
-   * `nodeType`— y se deja constancia en el registro para que el operador sepa
-   * por que aterrizo donde aterrizo.
+   * Con dos nodos del mismo tipo gana el primero declarado y queda traza.
    */
   private async resolveTargetStep(
     execution: FsmExecution,
@@ -989,40 +970,44 @@ export class InboundEmailResumeService
       return null;
     }
 
-    const wanted = canonicalStepName(identifier);
+    const wanted = normalizeStepKey(identifier);
     const labelsByCode = await this.loadCatalogLabels();
-    const ambiguous: string[] = [];
-    let resolved: string | null = null;
-
-    for (const [nodeId, node] of Object.entries(nodes)) {
+    const entries = Object.entries(nodes).map(([nodeId, node]) => {
       const nodeType = typeof node.nodeType === 'string' ? node.nodeType : '';
-      const candidates = [
+      const label = typeof node.label === 'string' ? node.label : '';
+
+      return {
         nodeId,
         nodeType,
-        typeof node.outputNamespace === 'string' ? node.outputNamespace : '',
-        labelsByCode.get(nodeType) ?? '',
-      ];
+        label: label.length > 0 ? label : (labelsByCode.get(nodeType) ?? ''),
+        namespace:
+          typeof node.outputNamespace === 'string' ? node.outputNamespace : '',
+      };
+    });
+    const aliasType = STEP_ALIASES[wanted] ?? null;
+    const sameKey = (value: string): boolean =>
+      value.length > 0 && normalizeStepKey(value) === wanted;
 
-      if (
-        !candidates.some(
-          (value) => value.length > 0 && canonicalStepName(value) === wanted,
-        )
-      ) {
+    // Prioridad SECUENCIAL: gana el primer nivel con alguna coincidencia, de
+    // modo que una etiqueta real nunca la pisa un sinonimo generico.
+    const levels: readonly ((entry: (typeof entries)[number]) => boolean)[] = [
+      (entry) => sameKey(entry.label),
+      (entry) => sameKey(entry.nodeId) || sameKey(entry.namespace),
+      (entry) => sameKey(entry.nodeType),
+      (entry) => aliasType !== null && entry.nodeType === aliasType,
+    ];
+
+    for (const matches of levels) {
+      const found = entries.filter(matches).map((entry) => entry.nodeId);
+      const [resolved, ...ambiguous] = found;
+
+      if (resolved === undefined) {
         continue;
       }
 
-      if (resolved === null) {
-        resolved = nodeId;
-        continue;
-      }
-
-      ambiguous.push(nodeId);
-    }
-
-    if (resolved !== null) {
       if (ambiguous.length > 0) {
         this.logger.warn(
-          `[InboundEmailResume] El paso "${identifier}" nombra a varios nodos del flujo ${execution.flowId} (${[resolved, ...ambiguous].join(', ')}): se reanuda desde el primero, "${resolved}".`,
+          `[InboundEmailResume] El paso "${identifier}" nombra a varios nodos del flujo ${execution.flowId} (${found.join(', ')}): se reanuda desde el primero, "${resolved}".`,
         );
       }
 

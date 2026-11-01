@@ -67,6 +67,9 @@ const buildPreview = (overrides: Partial<ScrapedWebPayload> = {}): ScrapedWebPay
   article_title: 'Titular de la nota',
   full_article_content: 'Primer parrafo.\n\nSegundo parrafo.',
   byline: 'Redaccion Local',
+  author: 'Redaccion Local',
+  published_at: null,
+  references: [],
   scraped_at: '2026-09-21T10:00:00.000Z',
   ...overrides,
 });

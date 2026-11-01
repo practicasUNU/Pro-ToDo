@@ -171,4 +171,86 @@ describe('extractArticle', () => {
       expect(onReadabilityFailure).toHaveBeenCalledTimes(1);
     });
   });
+
+  describe('2. Metadatos editoriales (autor, fecha y referencias)', () => {
+    const withHead = (head: string, body: string): string =>
+      `<!DOCTYPE html><html lang="es"><head><title>Titular de la nota</title>${head}</head>` +
+      `<body><article>${body}</article></body></html>`;
+
+    it('2.1 deberia leer autor y fecha de los <meta>', () => {
+      // 1. Arrange 📐
+      const html = withHead(
+        '<meta name="author" content="Ana Perez">' +
+          '<meta property="article:published_time" content="2026-09-20T08:00:00Z">',
+        `<p>${FILLER}</p>`,
+      );
+
+      // 2. Act ⚙️
+      const article = extractArticle(html, SOURCE_URL);
+
+      // 3. Assert 🎯
+      expect(article?.author).toBe('Ana Perez');
+      expect(article?.publishedAt).toBe('2026-09-20T08:00:00.000Z');
+    });
+
+    it('2.2 deberia caer en JSON-LD con @graph y autores en array', () => {
+      // 1. Arrange 📐
+      const jsonLd = JSON.stringify({
+        '@graph': [
+          {
+            '@type': 'NewsArticle',
+            author: [{ name: 'Ana Perez' }, 'Luis Gil'],
+            datePublished: '2026-09-19',
+          },
+        ],
+      });
+      const html = withHead(
+        `<script type="application/ld+json">${jsonLd}</script>`,
+        `<p>${FILLER}</p>`,
+      );
+
+      // 2. Act ⚙️
+      const article = extractArticle(html, SOURCE_URL);
+
+      // 3. Assert 🎯
+      expect(article?.author).toBe('Ana Perez, Luis Gil');
+      expect(article?.publishedAt).toBe('2026-09-19T00:00:00.000Z');
+    });
+
+    it('2.3 NO deberia romperse con un JSON-LD malformado y usar <time>', () => {
+      // 1. Arrange 📐
+      const html = withHead(
+        '<script type="application/ld+json">{ roto </script>',
+        `<time datetime="2026-09-18T10:00:00Z">18 sep</time><p>${FILLER}</p>`,
+      );
+
+      // 2. Act ⚙️
+      const article = extractArticle(html, SOURCE_URL);
+
+      // 3. Assert 🎯
+      expect(article).not.toBeNull();
+      expect(article?.author).toBeNull();
+      expect(article?.publishedAt).toBe('2026-09-18T10:00:00.000Z');
+    });
+
+    it('2.4 deberia citar solo enlaces externos, sin duplicados ni mailto', () => {
+      // 1. Arrange 📐
+      const html = buildDocument(
+        `<p>${FILLER} <a href="https://doi.org/10.1000/xyz">Estudio</a>` +
+          ` <a href="https://doi.org/10.1000/xyz#sec">Estudio bis</a>` +
+          ` <a href="/otra-nota">Interna</a>` +
+          ` <a href="mailto:prensa@diario.example">Prensa</a>` +
+          ` <a href="https://revista.example/art">Revista</a></p>`,
+      );
+
+      // 2. Act ⚙️
+      const article = extractArticle(html, SOURCE_URL);
+
+      // 3. Assert 🎯
+      expect(article?.references).toEqual([
+        { title: 'Estudio', url: 'https://doi.org/10.1000/xyz' },
+        { title: 'Revista', url: 'https://revista.example/art' },
+      ]);
+    });
+  });
 });

@@ -26,6 +26,12 @@ export interface ScrapedWebPayload {
   readonly full_article_content: string;
   /** `null` es "sin firma", distinto de una cadena vacia. */
   readonly byline: string | null;
+  /** Autor de los metadatos (meta/JSON-LD), o la firma si no hay. */
+  readonly author: string | null;
+  /** Fecha de publicacion ISO 8601, o `null` si no consta. */
+  readonly published_at: string | null;
+  /** URLs externas citadas en el cuerpo. */
+  readonly references: string[];
   readonly scraped_at: string;
 }
 

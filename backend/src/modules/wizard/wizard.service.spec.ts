@@ -94,6 +94,9 @@ function buildScrapeSuccess(
       title: 'Titular de la nota',
       byline: 'Redaccion Local',
       content: 'Primer parrafo.\n\nSegundo parrafo.',
+      author: 'Redaccion Local',
+      publishedAt: null,
+      references: [],
     },
     attempts: 1,
     ...overrides,
@@ -557,7 +560,7 @@ describe('WizardService', () => {
   });
 
   describe('5. Banco de pruebas del extractor web', () => {
-    it('5.1 deberia devolver las cinco claves de scraped_web', async () => {
+    it('5.1 deberia devolver las claves de scraped_web, metadatos incluidos', async () => {
       // 1. Arrange
       const { service } = buildService();
 
@@ -570,8 +573,11 @@ describe('WizardService', () => {
       expect(result.success).toBe(true);
       expect(Object.keys(result.preview ?? {}).sort()).toEqual([
         'article_title',
+        'author',
         'byline',
         'full_article_content',
+        'published_at',
+        'references',
         'scraped_at',
         'source_url',
       ]);

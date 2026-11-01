@@ -14,6 +14,7 @@ import {
   resolveWebScraperConfig,
 } from '@modules/nodes/dto/web-scraper-config.dto';
 import { WebScraperRunner } from '@modules/nodes/services/web-scraper.runner';
+import { formatReferencesText } from '@modules/nodes/utils/article-metadata.util';
 
 import type { StatePayloadContext } from '@core/fsm/context/state-payload.context';
 import type {
@@ -100,6 +101,10 @@ const buildNeutralPayload = (
   article_title: '',
   full_article_content: '',
   byline: null,
+  author: null,
+  published_at: null,
+  references: [],
+  references_text: '',
   scraped_at: new Date().toISOString(),
   character_count: 0,
   status,
@@ -217,6 +222,26 @@ export class WebScraperStrategy implements INodeStrategy {
       description: 'Cuerpo del articulo aislado',
     },
     { name: 'byline', type: 'text', description: 'Firma, o nulo si no hay' },
+    {
+      name: 'author',
+      type: 'text',
+      description: 'Autor de los metadatos (meta/JSON-LD), o la firma',
+    },
+    {
+      name: 'published_at',
+      type: 'text',
+      description: 'Fecha de publicacion ISO, o nulo si no consta',
+    },
+    {
+      name: 'references',
+      type: 'url[]',
+      description: 'URLs externas citadas en el articulo',
+    },
+    {
+      name: 'references_text',
+      type: 'text',
+      description: 'Referencias citadas, una por linea (Titulo — URL)',
+    },
     { name: 'scraped_at', type: 'text', description: 'Marca de tiempo ISO' },
     {
       name: 'character_count',
@@ -354,6 +379,10 @@ export class WebScraperStrategy implements INodeStrategy {
         article_title: outcome.article.title,
         full_article_content: outcome.article.content,
         byline: outcome.article.byline,
+        author: outcome.article.author,
+        published_at: outcome.article.publishedAt,
+        references: outcome.article.references.map(({ url }) => url),
+        references_text: formatReferencesText(outcome.article.references),
         scraped_at: new Date().toISOString(),
         character_count: outcome.article.content.length,
         status: SCRAPER_STATUS_OK,

@@ -5,9 +5,9 @@ import { UserRole } from '@modules/users/enums/user-role.enum';
 import {
   InboundEmailResumeService,
   RESUME_MAIL_POLL_INTERVAL_MS,
-  canonicalStepName,
   looksLikeResumeCommand,
-  normalizeResumeText,
+  normalizeStepKey,
+  STEP_ALIASES,
 } from './inbound-email-resume.service';
 
 import type { ConfigService } from '@nestjs/config';
@@ -108,6 +108,7 @@ interface Harness {
   service: InboundEmailResumeService;
   executions: { resumeExecution: jest.Mock };
   users: { findByEmail: jest.Mock };
+  workflows: { findOne: jest.Mock };
   nodeCatalog: { find: jest.Mock };
   client: {
     connect: jest.Mock;
@@ -245,6 +246,7 @@ const buildHarness = (
     service,
     executions,
     users,
+    workflows: repository,
     client: mockClient,
     nodeCatalog,
     warnSpy,
@@ -604,6 +606,91 @@ describe('InboundEmailResumeService (ordenes de reanudacion por correo)', () => 
     );
   });
 
+  describe('4bis. Prioridad secuencial y diccionario de sinonimos', () => {
+    const resumeFrom = async (
+      written: string,
+      extraNodes: Record<string, Record<string, unknown>> = {},
+    ): Promise<jest.Mock> => {
+      const { service, executions, workflows } = buildHarness();
+      const workflow = buildWorkflow() as unknown as {
+        pipelineSchema: { nodes: Record<string, unknown> };
+      };
+      workflows.findOne.mockResolvedValue({
+        ...workflow,
+        pipelineSchema: {
+          ...workflow.pipelineSchema,
+          nodes: { ...workflow.pipelineSchema.nodes, ...extraNodes },
+        },
+      });
+      simpleParser.mockResolvedValue(
+        inboundMessage(`REANUDAR ${TOKEN} DESDE ${written}`),
+      );
+      await service.processInbox();
+
+      return executions.resumeExecution;
+    };
+
+    it.each(['Destino Drupal', 'destino-drupal', 'DESTINO_DRUPAL', 'drupal'])(
+      '4bis.1 deberia resolver "%s" al nodo DESTINO_DRUPAL',
+      async (written) => {
+        // 1. Arrange 📐 + 2. Act ⚙️
+        const resume = await resumeFrom(written, {
+          destino: { nodeId: 'destino', nodeType: 'DESTINO_DRUPAL' },
+        });
+
+        // 3. Assert 🎯
+        expect(resume).toHaveBeenCalledWith(
+          EXECUTION_ID,
+          { targetStepId: 'destino' },
+          expect.anything(),
+          { isEmailResume: true },
+        );
+      },
+    );
+
+    it.each([
+      [
+        'render html',
+        'mapeo',
+        { nodeId: 'mapeo', nodeType: 'MAPEADOR_PLANTILLA' },
+      ],
+      ['pause_context', 'pausa_revision', null],
+    ])(
+      '4bis.2 deberia resolver el sinonimo "%s"',
+      async (written, expected, node) => {
+        // 1. Arrange 📐 + 2. Act ⚙️
+        const resume = await resumeFrom(
+          written,
+          node === null ? {} : { [expected]: node },
+        );
+
+        // 3. Assert 🎯
+        expect(resume).toHaveBeenCalledWith(
+          EXECUTION_ID,
+          { targetStepId: expected },
+          expect.anything(),
+          { isEmailResume: true },
+        );
+      },
+    );
+
+    it('4bis.3 la etiqueta visible deberia ganar al diccionario', async () => {
+      // 1. Arrange 📐: «Drupal» es sinonimo de DESTINO_DRUPAL, pero hay un
+      //    nodo cuya etiqueta en el canvas es literalmente «Drupal».
+      const resume = await resumeFrom('Drupal', {
+        destino: { nodeId: 'destino', nodeType: 'DESTINO_DRUPAL' },
+        aviso: { nodeId: 'aviso', nodeType: 'DESTINO_HTTP', label: 'Drupal' },
+      });
+
+      // 3. Assert 🎯
+      expect(resume).toHaveBeenCalledWith(
+        EXECUTION_ID,
+        { targetStepId: 'aviso' },
+        expect.anything(),
+        { isEmailResume: true },
+      );
+    });
+  });
   describe('5. Higiene del buzon', () => {
     it('5.1 deberia marcar como leido un comando ACEPTADO', async () => {
       // 1. Arrange 📐
@@ -729,23 +816,30 @@ describe('InboundEmailResumeService (ordenes de reanudacion por correo)', () => 
   });
 
   describe('5bis. Normalizacion del texto de reanudacion (helpers puros)', () => {
-    it('5bis.1 deberia plegar tildes, mayusculas, espacios y guiones a `_`', () => {
+    it('5bis.1 deberia compactar tildes, mayusculas, espacios y signos', () => {
       // 1. Arrange 📐 + 2. Act ⚙️ + 3. Assert 🎯
-      expect(normalizeResumeText('  Escudo Post-IA ')).toBe('escudo_post_ia');
-      expect(normalizeResumeText('Procesador  de   IÁ')).toBe(
-        'procesador_de_ia',
-      );
+      expect(normalizeStepKey('Destino Drupal')).toBe('destinodrupal');
+      expect(normalizeStepKey('  Escudo Post-IA ')).toBe('escudopostia');
+      expect(normalizeStepKey('Procesador  de   IÁ')).toBe('procesadordeia');
+      expect(normalizeStepKey('DESTINO_DRUPAL')).toBe('destinodrupal');
     });
 
     it.each([
-      ['trigger imap', 'trigger_imap'],
-      ['Disparador IMAP', 'trigger_imap'],
-      ['disparador-imap', 'trigger_imap'],
-      ['TRIGGER_IMAP', 'trigger_imap'],
-      ['procesador ia', 'procesador_ia'],
-    ])('5bis.2 deberia mapear el alias "%s" a %s', (alias, expected) => {
+      ['trigger imap', 'TRIGGER_IMAP'],
+      ['disparador-imap', 'TRIGGER_IMAP'],
+      ['extractor web', 'EXTRACTOR_WEB'],
+      ['scraper', 'EXTRACTOR_WEB'],
+      ['ocr_ia', 'PROCESADOR_OCR'],
+      ['mapeador html', 'MAPEADOR_PLANTILLA'],
+      ['rendered_html', 'MAPEADOR_PLANTILLA'],
+      ['llm_response', 'PROCESADOR_IA'],
+      ['post_ia', 'ESCUDO_POST_IA'],
+      ['pausa flow', 'PAUSA_FLOW'],
+      ['pause_context', 'PAUSA_FLOW'],
+      ['drupal', 'DESTINO_DRUPAL'],
+    ])('5bis.2 deberia mapear el sinonimo "%s" a %s', (alias, expected) => {
       // 1. Arrange 📐 + 2. Act ⚙️ + 3. Assert 🎯
-      expect(canonicalStepName(alias)).toBe(expected);
+      expect(STEP_ALIASES[normalizeStepKey(alias)]).toBe(expected);
     });
 
     it('5bis.3 deberia reconocer la pista de orden con prefijos y tildes', () => {

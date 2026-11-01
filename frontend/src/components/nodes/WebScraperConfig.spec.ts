@@ -79,6 +79,9 @@ const buildResult = (): CheckScraperResult => ({
     article_title: 'Titular de la nota',
     full_article_content: 'Primer parrafo.\n\nSegundo parrafo.',
     byline: null,
+    author: 'Ana Perez',
+    published_at: '2026-09-20T08:00:00.000Z',
+    references: ['https://doi.org/10.1000/xyz'],
     scraped_at: '2026-09-21T10:00:00.000Z',
   },
   metrics: {
@@ -198,9 +201,7 @@ describe('WebScraperConfig · configurador del nodo EXTRACTOR_WEB', () => {
       store.updateConfig({ skipIfEmpty: false });
       await wrapper.vm.$nextTick();
 
-      expect(
-        wrapper.findComponent({ name: 'QToggle' }).props('modelValue'),
-      ).toBe(false);
+      expect(wrapper.findComponent({ name: 'QToggle' }).props('modelValue')).toBe(false);
     });
 
     it('1.5 deberia escribir en el store al conmutar el toggle', async () => {
@@ -209,9 +210,7 @@ describe('WebScraperConfig · configurador del nodo EXTRACTOR_WEB', () => {
       const store = useWebScraperStore(NODE_ID);
 
       // 2. Act
-      await wrapper
-        .findComponent({ name: 'QToggle' })
-        .vm.$emit('update:model-value', false);
+      await wrapper.findComponent({ name: 'QToggle' }).vm.$emit('update:model-value', false);
 
       // 3. Assert: el componente no guarda estado propio; el store es el dueno.
       expect(store.config.skipIfEmpty).toBe(false);
@@ -350,6 +349,10 @@ describe('WebScraperConfig · configurador del nodo EXTRACTOR_WEB', () => {
       expect(wrapper.find('[data-test="sandbox-result"]').exists()).toBe(true);
       expect(wrapper.text()).toContain('Titular de la nota');
       expect(wrapper.text()).toContain('Sin firma');
+      expect(wrapper.get('[data-test="scraper-preview-metadata"]').text()).toContain('Ana Perez');
+      expect(wrapper.get('[data-test="scraper-preview-references"]').text()).toContain(
+        'https://doi.org/10.1000/xyz',
+      );
     });
   });
 
@@ -379,14 +382,10 @@ describe('WebScraperConfig · configurador del nodo EXTRACTOR_WEB', () => {
       const wrapper = mountComponent();
 
       // 3. Assert
-      const toggle = wrapper.find(
-        '[data-test="ignore-extraction-failure-toggle"]',
-      );
+      const toggle = wrapper.find('[data-test="ignore-extraction-failure-toggle"]');
 
       expect(toggle.exists()).toBe(true);
-      expect(useWebScraperStore(NODE_ID).config.ignoreExtractionFailure).toBe(
-        true,
-      );
+      expect(useWebScraperStore(NODE_ID).config.ignoreExtractionFailure).toBe(true);
     });
 
     it('4.2 deberia propagar el cambio al store', () => {
@@ -399,9 +398,7 @@ describe('WebScraperConfig · configurador del nodo EXTRACTOR_WEB', () => {
       const toggle = wrapper
         .findAllComponents(QToggle)
         .find(
-          (candidate) =>
-            candidate.attributes('data-test') ===
-            'ignore-extraction-failure-toggle',
+          (candidate) => candidate.attributes('data-test') === 'ignore-extraction-failure-toggle',
         );
 
       toggle?.vm.$emit('update:model-value', false);
@@ -423,9 +420,7 @@ describe('WebScraperConfig · configurador del nodo EXTRACTOR_WEB', () => {
       // 3. Assert
       expect(store.isSkipIfEmptyLocked).toBe(true);
       expect(
-        wrapper
-          .find('[data-test="ignore-extraction-failure-toggle"]')
-          .attributes('disabled'),
+        wrapper.find('[data-test="ignore-extraction-failure-toggle"]').attributes('disabled'),
       ).toBeUndefined();
     });
   });

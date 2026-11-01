@@ -2,13 +2,25 @@ import { Readability } from '@mozilla/readability';
 import { JSDOM } from 'jsdom';
 import sanitizeHtml from 'sanitize-html';
 
+import {
+  extractHeadMetadata,
+  extractReferences,
+} from '@modules/nodes/utils/article-metadata.util';
 import { normalizeWhitespace } from '@modules/nodes/utils/email-sanitizer.util';
+
+import type { ArticleReference } from '@modules/nodes/utils/article-metadata.util';
 
 /** Articulo aislado de una pagina y aplanado a texto plano. */
 export interface ExtractedArticle {
   readonly title: string;
   readonly byline: string | null;
   readonly content: string;
+  /** Autor de los metadatos (`<meta>`/JSON-LD), o la firma si no hay. */
+  readonly author: string | null;
+  /** Fecha de publicacion en ISO 8601, o `null` si no consta. */
+  readonly publishedAt: string | null;
+  /** Enlaces externos citados en el cuerpo. */
+  readonly references: readonly ArticleReference[];
 }
 
 /** Avisos no bloqueantes de la extraccion. */
@@ -174,6 +186,8 @@ export const extractArticle = (
   }
 
   const dom = new JSDOM(html, { url: sourceUrl });
+  // Los metadatos se leen ANTES: Readability reescribe el DOM al puntuarlo.
+  const head = extractHeadMetadata(dom.window.document);
   const article = new Readability(dom.window.document).parse();
 
   if (article === null || article.content === null) {
@@ -200,5 +214,8 @@ export const extractArticle = (
     title: normalizeWhitespace(article.title ?? ''),
     byline: byline.length > 0 ? byline : null,
     content,
+    author: head.author ?? (byline.length > 0 ? byline : null),
+    publishedAt: head.publishedAt,
+    references: extractReferences(article.content ?? '', sourceUrl),
   };
 };

@@ -38,6 +38,10 @@ const NEUTRAL_PAYLOAD = {
   article_title: '',
   full_article_content: '',
   byline: null,
+  author: null,
+  published_at: null,
+  references: [],
+  references_text: '',
   character_count: 0,
   status: 'SKIPPED_EMPTY',
 };
@@ -53,6 +57,11 @@ const successOutcome = (
       title: 'Titular de la nota',
       byline: null,
       content: 'Primer parrafo.\n\nSegundo parrafo.',
+      author: 'Ana Perez',
+      publishedAt: '2026-09-20T08:00:00.000Z',
+      references: [
+        { title: 'Estudio original', url: 'https://doi.org/10.1000/xyz' },
+      ],
     },
     attempts: 1,
     ...overrides,
@@ -328,9 +337,13 @@ describe('WebScraperStrategy', () => {
       //    `toEqual` con `expect.any`, que devuelve `any` y el lint rechaza.
       expect(Object.keys(result.data ?? {}).sort()).toEqual([
         'article_title',
+        'author',
         'byline',
         'character_count',
         'full_article_content',
+        'published_at',
+        'references',
+        'references_text',
         'scraped_at',
         'source_url',
         'status',
@@ -338,6 +351,12 @@ describe('WebScraperStrategy', () => {
       expect(result.data?.source_url).toBe(TARGET_URL);
       expect(result.data?.article_title).toBe('Titular de la nota');
       expect(result.data?.byline).toBeNull();
+      expect(result.data?.author).toBe('Ana Perez');
+      expect(result.data?.published_at).toBe('2026-09-20T08:00:00.000Z');
+      expect(result.data?.references).toEqual(['https://doi.org/10.1000/xyz']);
+      expect(result.data?.references_text).toBe(
+        'Estudio original — https://doi.org/10.1000/xyz',
+      );
       expect(typeof result.data?.scraped_at).toBe('string');
       expect(result.data?.status).toBe('OK');
       expect(result.data?.character_count).toBe(
@@ -479,9 +498,13 @@ describe('WebScraperStrategy', () => {
       // 3. Assert 🎯
       expect(Object.keys(result.data ?? {}).sort()).toEqual([
         'article_title',
+        'author',
         'byline',
         'character_count',
         'full_article_content',
+        'published_at',
+        'references',
+        'references_text',
         'scraped_at',
         'source_url',
         'status',

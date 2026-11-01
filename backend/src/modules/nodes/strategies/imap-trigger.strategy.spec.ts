@@ -19,6 +19,7 @@ import {
   ImapTriggerStrategy,
   INLINE_ATTACHMENT_MARKER,
   MAX_HTML_LENGTH,
+  MAX_SCAN_CANDIDATES,
   MAX_TOTAL_ATTACHMENT_BYTES,
   NO_MESSAGES_STATUS,
   RECENT_WINDOW_MS,
@@ -945,10 +946,94 @@ describe('ImapTriggerStrategy', () => {
         buildParams({ subjectFilterRegex: '^S_2026_' }),
       );
 
-      // 3. Assert 🎯: sin la bandera \\Seen, `findLatestMatchingUid` volveria a
-      // encontrar este mismo correo en cada sondeo y ningun mensaje posterior
-      // llegaria jamas a procesarse.
-      expect(client.messageFlagsAdd).toHaveBeenCalledTimes(1);
+      // 3. Assert 🎯: los TRES candidatos no casan y cada uno queda marcado,
+      // para que el siguiente sondeo no vuelva a descargarlos.
+      expect(client.messageFlagsAdd).toHaveBeenCalledTimes(3);
+    });
+
+    it('2bis.3bis deberia saltar el correo reciente que no casa y procesar uno anterior', async () => {
+      // 1. Arrange 📐: el mas reciente (42) es irrelevante; el 12 si casa.
+      const client = buildClient();
+      useClient(client);
+      simpleParser
+        .mockResolvedValueOnce(buildParsedMail({ subject: 'Boletin semanal' }))
+        .mockResolvedValueOnce(
+          buildParsedMail({ subject: 'S_2026_ apertura' }),
+        );
+      const { strategy } = buildStrategy();
+
+      // 2. Act ⚙️
+      const result = await strategy.execute(
+        buildContext(),
+        buildParams({ subjectFilterRegex: '^S_2026_' }),
+      );
+
+      // 3. Assert 🎯: antes se tomaba solo Math.max(uids) y se paraba aqui.
+      expect(result.halt).toBeUndefined();
+      expect(result.data?.subject).toBe('S_2026_ apertura');
+      expect(client.download).toHaveBeenCalledTimes(2);
+      expect(
+        client.download.mock.calls.map((call: unknown[]) => call[0]),
+      ).toEqual([String(MESSAGE_UID), '12']);
+    });
+
+    it('2bis.3ter deberia parar con SUBJECT_FILTERED tras revisar todos los candidatos', async () => {
+      // 1. Arrange 📐
+      const client = buildClient();
+      useClient(client);
+      const { strategy } = buildStrategy();
+
+      // 2. Act ⚙️
+      const result = await strategy.execute(
+        buildContext(),
+        buildParams({ subjectFilterRegex: '^S_2026_' }),
+      );
+
+      // 3. Assert 🎯
+      expect(result.data).toEqual({ status: SUBJECT_FILTERED_STATUS });
+      expect(result.halt?.reason).toContain('3 correo(s)');
+      expect(client.download).toHaveBeenCalledTimes(3);
+    });
+
+    it('2bis.3quater deberia acotar el recorrido a MAX_SCAN_CANDIDATES', async () => {
+      // 1. Arrange 📐: 40 no leidos irrelevantes.
+      const client = buildClient({
+        search: jest
+          .fn()
+          .mockResolvedValue(Array.from({ length: 40 }, (_, i) => i + 1)),
+      });
+      useClient(client);
+      const { strategy } = buildStrategy();
+
+      // 2. Act ⚙️
+      await strategy.execute(
+        buildContext(),
+        buildParams({ subjectFilterRegex: '^S_2026_' }),
+      );
+
+      // 3. Assert 🎯: del 40 hacia abajo, y nunca mas del tope.
+      expect(client.download).toHaveBeenCalledTimes(MAX_SCAN_CANDIDATES);
+      expect(client.download).toHaveBeenNthCalledWith(1, '40', undefined, {
+        uid: true,
+      });
+    });
+
+    it('2bis.3quinquies deberia casar "empieza por" con tildes, mayusculas y espacios laterales', async () => {
+      // 1. Arrange 📐
+      simpleParser.mockResolvedValue(
+        buildParsedMail({ subject: '   VERIFICACIÓN de títulos  ' }),
+      );
+      const { strategy } = buildStrategy();
+
+      // 2. Act ⚙️
+      const result = await strategy.execute(
+        buildContext(),
+        buildParams({ subjectFilterRegex: '^verificacion de titulos' }),
+      );
+
+      // 3. Assert 🎯
+      expect(result.halt).toBeUndefined();
+      expect(result.success).toBe(true);
     });
 
     it('2bis.4 deberia fallar GRAVE sin conectar cuando el patron no compila', async () => {
