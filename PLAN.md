@@ -5184,3 +5184,10 @@ Rama: `feat/drupal-and-acens-nodes-dev`. Migraciones `065` y `066`.
 - **PROCESADOR_IA:** `StatePayloadContext.getInterpolatedValueLenient` sustituye por `""` las variables ausentes o nulas y devuelve sus rutas para el log. La variante estricta `getInterpolatedValue` no cambia: Drupal, HTTP y el mapeador siguen deteniendose.
 - **EXTRACTOR_WEB:** el autor sigue esta cascada: `<meta>` → JSON-LD → selectores DOM (`a[rel=author]`, `[itemprop=author]`, `.author`, `.byline`, `.post-meta`, `.post-byline`) → regex «por/by» en la cabecera → `byline` de Readability.
 - **Capturas:** `scripts/generate-doc-screenshots.js` combina vistas reales de la app con fragmentos de codigo y genera 11 PNG en `docs/capturas/` (ignorada en Git). El login usa OTP por terminal o con `PROTODO_OTP_CODE`.
+
+---
+
+## Capturas: canvas, formulario Drupal y asistente
+
+- **Banco de pruebas:** acepta el enlace profundo `/nodos/config-sandbox?nodeType=<TIPO>` (`parseSandboxNodeType`). Un tipo sin configurador deja el banco en su valor por defecto.
+- **Capturas 04/07/09:** formulario Drupal junto a su estrategia; selector y primer paso del asistente junto a los formularios IMAP, extractor web, IA y escudo; canvas del flujo junto a ejecuciones y telemetria.

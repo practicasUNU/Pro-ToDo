@@ -9356,3 +9356,11 @@ mapeador.
 - **Por que la regex lleva `\b` y `\p{L}`:** sin el limite de palabra, «nearby» se leia como firma; sin `\p{L}`, «José Pérez» quedaba fuera.
 - **Por que los fragmentos se localizan por regex:** con numeros de linea, cada edicion del codigo descuadraria las capturas.
 - **Limitacion:** la captura de resiliencia muestra las ejecuciones que existan en staging; el script no provoca ningun fallo.
+
+---
+
+## Capturas: canvas, formulario Drupal y asistente
+
+- **Por que `?nodeType=` y no `/sandbox/:nodeType`:** la miga de pan del layout se resuelve por ruta exacta; un parametro de ruta la habria dejado vacia.
+- **Por que se recortan las vistas:** sin el shell y acotadas a la ventana, los formularios se leen; a pantalla completa quedaban diminutos dentro del mosaico.
+- **El canvas se reduce solo en la captura** (`zoom` inyectado por el script) para que quepa el flujo completo.
