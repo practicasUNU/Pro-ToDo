@@ -247,6 +247,46 @@ const CAPTURES = [
     panels: [sandbox("MAPEADOR_PLANTILLA", "Mapeador de plantilla")],
   },
   {
+    file: "captura_07g_nodo_parser_correo.png",
+    title: "Formulario del nodo: Parser de correo",
+    panels: [sandbox("PARSER_PRE_IA", "Parser de correo")],
+  },
+  {
+    file: "captura_07h_nodo_destino_drupal.png",
+    title: "Formulario del nodo: Destino Drupal",
+    panels: [sandbox("DESTINO_DRUPAL", "Destino Drupal")],
+  },
+  {
+    file: "captura_07i_nodo_destino_http.png",
+    title: "Formulario del nodo: Destino HTTP generico",
+    panels: [sandbox("DESTINO_HTTP_GENERICO", "Destino HTTP generico")],
+  },
+  {
+    file: "captura_07j_nodo_destino_acens.png",
+    title: "Formulario del nodo: Destino ACENS",
+    panels: [sandbox("DESTINO_ACENS", "Destino ACENS")],
+  },
+  {
+    file: "captura_07k_nodo_pausa_flujo.png",
+    title: "Formulario del nodo: Pausa de flujo",
+    panels: [sandbox("PAUSA_FLOW", "Pausa de flujo")],
+  },
+  {
+    file: "captura_07l_nodo_disparador_cron.png",
+    title: "Formulario del nodo: Disparador Cron",
+    panels: [sandbox("TRIGGER_CRON", "Disparador Cron")],
+  },
+  {
+    file: "captura_07m_nodo_procesador_ocr.png",
+    title: "Formulario del nodo: Procesador OCR",
+    panels: [sandbox("PROCESADOR_OCR", "Procesador OCR")],
+  },
+  {
+    file: "captura_07n_nodo_destino_smtp.png",
+    title: "Formulario del nodo: Destino SMTP",
+    panels: [sandbox("DESTINO_SMTP", "Destino SMTP")],
+  },
+  {
     file: "captura_08a_cruds_ui.png",
     title: "Mantenimientos: usuarios e IPs autorizadas",
     panels: [ui("/users", "Usuarios"), ui("/ip-whitelist", "IPs autorizadas")],
@@ -277,12 +317,13 @@ const CAPTURES = [
   },
   {
     file: "captura_09b_supervision_ejecuciones.png",
-    title:
-      "Supervision: ejecuciones en tiempo real, pausas HITL y costes de IA",
-    panels: [
-      ui("/flujos", "Ejecuciones en tiempo real"),
-      ui("/informes", "Resumen de costes de IA"),
-    ],
+    title: "Supervision: ejecuciones en tiempo real y panel de inicio",
+    panels: [ui("/flujos", "Ejecuciones en tiempo real"), ui("/", "Inicio")],
+  },
+  {
+    file: "captura_09c_telemetria_informes.png",
+    title: "Informe de consumo de IA",
+    panels: [ui("/informes", "Informe de consumo de IA")],
   },
   {
     file: "captura_10_hitl_ws.png",
@@ -308,11 +349,8 @@ const CAPTURES = [
   },
   {
     file: "captura_11a_telemetria_ui.png",
-    title: "Telemetria de IA: informe de consumo y tarifas por modelo",
-    panels: [
-      ui("/informes", "Informe de consumo de IA"),
-      ui("/precios", "Gestion de tarifas"),
-    ],
+    title: "Telemetria de IA: tarifas por modelo",
+    panels: [ui("/precios", "Gestion de tarifas")],
   },
   {
     file: "captura_11b_telemetria_codigo.png",
