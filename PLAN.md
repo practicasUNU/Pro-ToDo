@@ -5128,3 +5128,41 @@ Rama: `feat/drupal-and-acens-nodes-dev`. Migraciones `063` y `064`.
 - [x] PDF del Historial de Ejecuciones
 - [ ] Pendiente: aplicar 063 y 064 (`npm run db:migrate`)
 - [ ] Pendiente: corregir en `backend/.env` el UUID de Produccion de Cerrar licitacion, partido en dos lineas
+
+## Nodo DESTINO_ACENS, reanudacion por correo tolerante, disparador transaccional y escudo en modo texto
+
+Rama: `feat/drupal-and-acens-nodes-dev`. Migraciones `065` y `066`.
+
+### Contratos
+
+| Pieza | Contrato |
+|---|---|
+| `AcensApiConfig` | `ACENS_API_BASE_URL` (https) y `ACENS_API_KEY` se leen SOLO del `.env`; `isUsable` exige las dos. La clave viaja como `Authorization: Bearer` |
+| `AcensHttpConfigDto` | `method` (GET, POST, PUT, DELETE), `endpointPath` relativa (`^/`, sin `//`, `..` ni esquema), `headers` (sin `Authorization`), `payloadTemplate` JSON (prohibido en GET/DELETE), `timeoutMs` |
+| `AcensHttpStrategy` | Extiende `BaseHttpDestinationStrategy`. Interpola marca a marca: en la ruta con `encodeURIComponent`, en el payload hoja a hoja; cada valor se desinfecta sin etiquetas ni caracteres de control. La URL final conserva el origen de la raiz. 4xx/5xx: `ERR_DESTINO_ACENS_FAILED` (GRAVE). Salida `acens_result` |
+| `066-nodo-destino-acens.sql` | Upsert de la fila `DESTINO_ACENS` con su nueva descripcion |
+| `InboundEmailResumeService` | Busqueda `{ seen: false }`. Orden normalizada (sin tildes) y tolerante (`REANUDA`, `DESE`, `DE`). Pasos por `canonicalStepName` + `STEP_ALIASES`. UID en orden ascendente, cada mensaje aislado. `RESUME_MAIL_POLL_INTERVAL_MS = 5000` como cota inferior documentada |
+| `ImapTriggerStrategy` | `\Seen` solo con el payload compuesto (tras filtro, extraccion e imputacion). Barre las demas ordenes sin leer del buzon. Reconoce tambien `RESUME` |
+| `PostIaSanitizerConfigDto` | `contentMode: HTML \| TEXT`. En `TEXT`, `sourceFields` (por defecto `headline`, `summary`) sin etiquetas, publicados en `validated_fields` |
+| `DrupalHttpConfig` | Origen del marcado: escudo; si no hay, `llm_response.filled_markup`. Bloquea el guardado solo sin ninguno de los dos |
+| `canvas.store` | Con varias pausas gana la activa (`resumeStepId === activeCursor`), y las anteriores quedan COMPLETADAS |
+| `065-notiweb-encabezados-y-apa7.sql` | `NOTIWEB_DEFAULT` exige 2 o mas `<h2>`/`<h3>` y la referencia en APA 7 estricto |
+
+### Decisiones
+
+- La raiz y la clave de Acens son de infraestructura: no van a los `params` ni pasan por la boveda.
+- El polling de reanudacion no se toca: el defecto (60 s) y el suelo (15 s) ya superan los 5000 ms.
+- Un correo descartado por el filtro de asunto se sigue marcando (con `markAsRead`): sin marcar, bloquearia el buzon.
+- El presupuesto del Procesador IA se ve siempre. Sin plantilla base se estima por prompt y propone tambien `maxRetries`.
+
+### Estado de las tareas
+
+- [x] Nodo DESTINO_ACENS (backend, frontend, registro y banco de pruebas solo para ADMIN)
+- [x] Reanudacion por correo tolerante y por hilos
+- [x] `\Seen` transaccional en el disparador IMAP
+- [x] Presupuesto siempre visible y botones homologados en el Procesador IA
+- [x] Respaldo de namespaces en Drupal
+- [x] Escudo en modo TEXT
+- [x] Pausas encadenadas en el canvas
+- [ ] Pendiente: aplicar 065 y 066 (`npm run db:migrate`)
+- [ ] Pendiente: declarar `ACENS_API_BASE_URL`, `ACENS_API_KEY` (y opcionalmente `ACENS_API_TIMEOUT_MS`) en `backend/.env` y reiniciar Nest

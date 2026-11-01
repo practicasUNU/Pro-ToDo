@@ -9302,3 +9302,35 @@ licitaciones, y el selector de la fila lo escapa antes de buscarlo.
 
 - [ ] Aplicar las migraciones 063 y 064
 - [ ] Unir en una linea el UUID de Produccion de Cerrar licitacion en `backend/.env` y reiniciar Nest
+
+## Acens, reanudacion tolerante y disparador transaccional
+
+### Por que la URL de Acens no esta en el nodo
+
+Es el unico destino de envio masivo y tiene una sola cuenta. Si la raiz estuviera en los `params`,
+cualquier EDITOR podria mandar la clave a otro host editando un flujo. Por eso el nodo solo elige la
+ruta relativa, y la estrategia comprueba que la URL compuesta conserve el origen de la raiz.
+
+### Por que el `\Seen` va al final
+
+El disparador marcaba el correo antes del filtro de asunto y de la imputacion del remitente. Un fallo
+en esos pasos dejaba el mensaje leido sin que el flujo recibiera su contenido. Ahora el marcado es lo
+ultimo. La excepcion es el descarte por filtro, que no es un fallo: sin marcar, el mismo UID tapaba a
+todos los posteriores.
+
+### Por que la orden de reanudacion admite erratas
+
+Las respuestas se escriben desde el movil: «Reanudár … DE trigger imap». Se pliegan las tildes, se
+admiten `DESE` y `DE`, y el paso se compara en forma `snake_case` con alias fijos. Asi «disparador
+imap» resuelve aunque la tabla `nodos` no responda.
+
+### Por que el escudo tiene modo texto
+
+Cerrar licitacion, Innodays e Innobar no maquetan: `filled_markup` llega a `null` y el escudo fallaba
+siempre con `ERR_POST_IA_EMPTY_HTML`. En modo TEXT audita `headline` y `summary` sin pedir ningun
+mapeador.
+
+### Checklist de dependencias
+
+- [ ] Aplicar las migraciones 065 y 066
+- [ ] Declarar las variables de Acens en `backend/.env` y reiniciar Nest
