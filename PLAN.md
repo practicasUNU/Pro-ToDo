@@ -5199,3 +5199,10 @@ Rama: `feat/drupal-and-acens-nodes-dev`. Migraciones `065` y `066`.
 - El catalogo pasa de 11 composiciones a 21 PNG (01a/01b, 05a/05b, 07a–07f, 08a/08b, 09a/09b, 11a/11b), con un maximo de 3 paneles por imagen.
 - Cada vista se captura entera; si es alta, el compositor la trocea en columnas para que no se encoja.
 - Al terminar, el script borra de `docs/capturas/` las PNG que ya no estan en el catalogo y lista la resolucion de cada imagen.
+
+---
+
+## Capturas: informes, tarifas y cobertura completa de nodos
+
+- 09b pasa a ejecuciones + inicio; el informe de consumo tiene su propia captura (09c) y 11a queda solo con tarifas.
+- 07g–07n cubren el resto de configuradores del registro: los 13 tipos de nodo con formulario quedan capturados.

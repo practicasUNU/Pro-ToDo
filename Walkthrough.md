@@ -9371,3 +9371,10 @@ mapeador.
 
 - **Por que se renderiza cada vista al ancho de su panel:** capturada a 1920 px y encogida a media pantalla, una tabla quedaba al 50 % y no se leia.
 - **Por que se ocultan cabecera y drawer al capturar:** son fijos, y al capturar un formulario mas alto que la ventana se superponian sobre el.
+
+---
+
+## Capturas: informes, tarifas y cobertura completa de nodos
+
+- **Nombres reales del enum:** el banco solo acepta tipos registrados, asi que se usan `PARSER_PRE_IA`, `PAUSA_FLOW` y `TRIGGER_CRON` (no PARSER_CORREO, PAUSA_FLUJO ni DISPARADOR_CRON).
+- **Destino SMTP (07n)** se anade aunque no estaba en la lista: era el unico configurador sin captura.
