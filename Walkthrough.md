@@ -9378,3 +9378,18 @@ mapeador.
 
 - **Nombres reales del enum:** el banco solo acepta tipos registrados, asi que se usan `PARSER_PRE_IA`, `PAUSA_FLOW` y `TRIGGER_CRON` (no PARSER_CORREO, PAUSA_FLUJO ni DISPARADOR_CRON).
 - **Destino SMTP (07n)** se anade aunque no estaba en la lista: era el unico configurador sin captura.
+
+---
+
+## Marcas obligatorias en prompts
+
+- **Por que se extiende la gramatica existente y no se crea un motor aparte:** el contexto, el validador, la coalescencia documental y los editores del frontend comparten un unico patron. Un segundo patron limitado a `ns.campo` habria dejado sin interpolar las rutas profundas e indices (`urls[0]`) y acabaria divergiendo.
+- **Por que el asterisco va en un grupo no capturante:** el grupo 1 sigue siendo la ruta, asi que `extractNamespaceRoots`, `collectNamespaceRoots` y el validador de topologia entienden la marca sin cambios.
+- **Por que una obligatoria en blanco cuenta como ausente:** `"   "` no es materia prima; facturar una inferencia sobre eso es pagar por nada.
+- **Por que el corte va despues de la coalescencia:** el texto documental ya intento degradarse a otra ruta con material; solo si ninguna tiene texto la marca queda ausente.
+- **Por que el `*` no vale en campos URL ni plantillas HTML:** solo tiene semantica en la interpolacion tolerante; en la estricta toda variable ya es obligatoria.
+
+### Checklist de dependencias
+
+- [ ] Selector en el frontend
+- [ ] E2E con la base de pruebas al dia (migraciones 061–067)

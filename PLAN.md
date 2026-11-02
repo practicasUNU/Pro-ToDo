@@ -5206,3 +5206,16 @@ Rama: `feat/drupal-and-acens-nodes-dev`. Migraciones `065` y `066`.
 
 - 09b pasa a ejecuciones + inicio; el informe de consumo tiene su propia captura (09c) y 11a queda solo con tarifas.
 - 07g–07n cubren el resto de configuradores del registro: los 13 tipos de nodo con formulario quedan capturados.
+
+---
+
+## Marcas obligatorias en prompts, escudo post-IA y e2e de pipelines operativos
+
+- **Gramatica:** `INTERPOLATION_PATTERN` admite `{{*ns.campo}}` (asterisco no capturante, con espacios tolerados). `isRequiredMarker` distingue la marca por su texto. Los patrones anclados de DTO siguen rechazando el `*`.
+- **Interpolacion tolerante:** `getInterpolatedValueLenient` devuelve ademas `missingRequired` (obligatoria ausente, nula o en blanco).
+- **PROCESADOR_IA:** con alguna obligatoria ausente devuelve GRAVE `ERR_PROMPT_REQUIRED_VARIABLE_MISSING` antes de invocar a cualquier proveedor; las opcionales siguen sustituyendose por `""`.
+- **Coalescencia y optimizador:** degradar el texto documental y optimizar un borrador conservan el asterisco; perderlo se avisa como marcador perdido.
+- [ ] Selector Obligatorio/Opcional en el editor de prompts
+- [ ] Escudo post-IA: recorte de fences compartido
+- [ ] Huecos de pruebas unitarias de estrategias
+- [ ] E2E de los pipelines operativos
