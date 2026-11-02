@@ -44,6 +44,7 @@ export const E2E_SLOTS = {
   CANVAS: 4,
   RESILIENCE_EDITOR: 5,
   RESILIENCE_REVOKED: 6,
+  PIPELINES: 7,
 } as const;
 
 /**
