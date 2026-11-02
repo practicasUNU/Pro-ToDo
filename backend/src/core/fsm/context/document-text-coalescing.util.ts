@@ -7,7 +7,10 @@
 // encajaba pausaba el flujo con ERR_LLM_INTERPOLATION aunque el texto estuviera
 // en el contexto bajo otra clave.
 
-import { INTERPOLATION_PATTERN } from './state-payload.context';
+import {
+  INTERPOLATION_PATTERN,
+  isRequiredMarker,
+} from './state-payload.context';
 
 /**
  * Rutas de texto documental, de la mas especifica a la mas generica.
@@ -70,7 +73,8 @@ export const coalesceDocumentTextMarkers = (
       if (fallback === undefined) return marker;
 
       substitutions.push({ from: rawPath, to: fallback });
-      return `{{${fallback}}}`;
+      // Se conserva el asterisco: degradar la ruta no rebaja la obligatoriedad.
+      return isRequiredMarker(marker) ? `{{*${fallback}}}` : `{{${fallback}}}`;
     },
   );
 

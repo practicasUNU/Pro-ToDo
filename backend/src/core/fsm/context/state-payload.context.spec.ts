@@ -1,6 +1,8 @@
 import {
   collectNamespaceRoots,
   extractNamespaceRoots,
+  INTERPOLATION_ONLY_PATTERN,
+  isRequiredMarker,
   MissingContextVariableException,
   resolvePath,
   StatePayloadContext,
@@ -505,6 +507,149 @@ describe('StatePayloadContext (PROT-08)', () => {
       expect(() =>
         context.getInterpolatedValue('{{scraped_web.author}}'),
       ).toThrow(MissingContextVariableException);
+    });
+  });
+
+  describe('5ter. Marcas obligatorias {{*ns.campo}} frente a opcionales', () => {
+    it('5ter.1 deberia interpolar una obligatoria presente sin reportar ausencias', () => {
+      // 1. Arrange 📐
+      context.setNamespace('parsed_email', { clean_body: 'Cuerpo limpio' });
+
+      // 2. Act ⚙️
+      const result = context.getInterpolatedValueLenient(
+        'Texto: {{*parsed_email.clean_body}}',
+      );
+
+      // 3. Assert 🎯
+      expect(result.text).toBe('Texto: Cuerpo limpio');
+      expect(result.missingRequired).toEqual([]);
+      expect(result.missing).toEqual([]);
+    });
+
+    it('5ter.2 deberia vaciar y reportar una obligatoria cuyo namespace o clave falta', () => {
+      // 1. Arrange 📐
+      context.setNamespace('scraped_web', { article_title: 'Titulo' });
+
+      // 2. Act ⚙️
+      const absentKey = context.getInterpolatedValueLenient(
+        '[{{*scraped_web.full_article_content}}]',
+      );
+      const absentNamespace = buildContext().getInterpolatedValueLenient(
+        '[{{*scraped_web.full_article_content}}]',
+      );
+
+      // 3. Assert 🎯
+      expect(absentKey.text).toBe('[]');
+      expect(absentKey.missingRequired).toEqual([
+        'scraped_web.full_article_content',
+      ]);
+      expect(absentNamespace.missingRequired).toEqual([
+        'scraped_web.full_article_content',
+      ]);
+    });
+
+    it('5ter.3 deberia sustituir por "" una opcional ausente sin marcarla como obligatoria', () => {
+      // 1. Arrange 📐
+      context.setNamespace('scraped_web', { article_title: 'Titulo' });
+
+      // 2. Act ⚙️
+      const result = context.getInterpolatedValueLenient(
+        'Por {{scraped_web.byline}}.',
+      );
+
+      // 3. Assert 🎯
+      expect(result.text).toBe('Por .');
+      expect(result.missingRequired).toEqual([]);
+      expect(result.missing).toEqual(['scraped_web.byline']);
+    });
+
+    it('5ter.4 deberia resolver un mixto con espacios: obligatoria presente y opcional ausente', () => {
+      // 1. Arrange 📐
+      context.setNamespace('parsed_email', { clean_title: 'Convocatoria' });
+
+      // 2. Act ⚙️
+      const result = context.getInterpolatedValueLenient(
+        'Hola {{ * parsed_email.clean_title }} - {{ parsed_email.sender }}',
+      );
+
+      // 3. Assert 🎯
+      expect(result.text).toBe('Hola Convocatoria - ');
+      expect(result.missingRequired).toEqual([]);
+      expect(result.missing).toEqual(['parsed_email.sender']);
+    });
+
+    it('5ter.5 deberia tratar como ausente una obligatoria en blanco', () => {
+      // 1. Arrange 📐
+      context.setNamespace('parsed_email', { clean_body: '   ' });
+
+      // 2. Act ⚙️
+      const required = context.getInterpolatedValueLenient(
+        '{{*parsed_email.clean_body}}',
+      );
+      const optional = context.getInterpolatedValueLenient(
+        '{{parsed_email.clean_body}}',
+      );
+
+      // 3. Assert 🎯
+      expect(required.missingRequired).toEqual(['parsed_email.clean_body']);
+      expect(optional.missingRequired).toEqual([]);
+      expect(optional.text).toBe('   ');
+    });
+
+    it('5ter.6 deberia admitir rutas profundas e indices con asterisco', () => {
+      // 1. Arrange 📐
+      context.setNamespace('scraped_web', {
+        urls: ['https://a.es'],
+        meta: { site: { name: 'Madri+d' } },
+      });
+
+      // 2. Act ⚙️
+      const result = context.getInterpolatedValueLenient(
+        '{{*scraped_web.urls[0]}}|{{*scraped_web.meta.site.name}}',
+      );
+
+      // 3. Assert 🎯
+      expect(result.text).toBe('https://a.es|Madri+d');
+      expect(result.missingRequired).toEqual([]);
+    });
+
+    it('5ter.7 deberia aceptar el asterisco como redundante en la variante estricta', () => {
+      // 1. Arrange 📐
+      context.setNamespace('parsed_email', { subject: 'Asunto' });
+
+      // 2. Act + 3. Assert 🎯
+      expect(context.getInterpolatedValue('{{*parsed_email.subject}}')).toBe(
+        'Asunto',
+      );
+      expect(() =>
+        context.getInterpolatedValue('{{*parsed_email.nada}}'),
+      ).toThrow(MissingContextVariableException);
+    });
+
+    it('5ter.8 deberia extraer la raiz de una marca obligatoria', () => {
+      // 2. Act + 3. Assert 🎯
+      expect(
+        extractNamespaceRoots(
+          '{{*scraped_web.url}} {{ * ocr_result.clean_body }}',
+        ),
+      ).toEqual(['scraped_web', 'ocr_result']);
+    });
+
+    it('5ter.9 deberia rechazar el asterisco en los patrones anclados de DTO', () => {
+      // 2. Act + 3. Assert 🎯
+      expect(INTERPOLATION_ONLY_PATTERN.test('{{parsed_email.url}}')).toBe(
+        true,
+      );
+      expect(INTERPOLATION_ONLY_PATTERN.test('{{*parsed_email.url}}')).toBe(
+        false,
+      );
+    });
+
+    it('5ter.10 deberia distinguir marcas obligatorias por su texto', () => {
+      // 2. Act + 3. Assert 🎯
+      expect(isRequiredMarker('{{*ns.campo}}')).toBe(true);
+      expect(isRequiredMarker('{{ * ns.campo }}')).toBe(true);
+      expect(isRequiredMarker('{{ns.campo}}')).toBe(false);
     });
   });
 

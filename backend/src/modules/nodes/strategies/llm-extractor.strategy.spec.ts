@@ -8,6 +8,7 @@ import {
   ERR_LLM_MISSING_INPUT_TEXT,
   ERR_LLM_PROMPT_UNRESOLVED,
   ERR_LLM_MAX_RETRIES_EXCEEDED,
+  ERR_PROMPT_REQUIRED_VARIABLE_MISSING,
   LLM_OUTPUT_KEYS,
   LlmExtractorStrategy,
   MATERIAL_IN_INSTRUCTIONS_NOTICE,
@@ -741,6 +742,92 @@ describe('LlmExtractorStrategy', () => {
       ];
       expect(sentPrompt).not.toContain('{{');
       expect(sentPrompt).toContain('Autor: \nTitulo: F-Droid 1.20');
+    });
+
+    it('4.2quater deberia abortar con GRAVE y $0 si falta una variable obligatoria', async () => {
+      // 1. Arrange 📐
+      const generateCompletion = buildGeminiReply();
+      const anthropicCompletion = buildGeminiReply();
+      const telemetry = createMockTelemetryService();
+      const strategy = buildStrategy(
+        buildPromptService(),
+        { provider: LlmProvider.GEMINI, generateCompletion },
+        new MockLlmProvider(),
+        buildAiDefaults(),
+        {
+          provider: LlmProvider.ANTHROPIC,
+          generateCompletion: anthropicCompletion,
+        },
+        buildProviderCatalog(),
+        telemetry,
+      );
+      const context = buildContext({
+        parsed_email: { clean_body: CLEAN_BODY },
+      });
+
+      // 2. Act ⚙️
+      const result = await strategy.execute(context, {
+        inlinePrompt:
+          'Resume {{*scraped_web.full_article_content}} para {{parsed_email.clean_title}}.',
+        provider: LlmProvider.GEMINI,
+      });
+
+      // 3. Assert 🎯: ningun cliente invocado, nada facturado.
+      expect(result.success).toBe(false);
+      expect(result.error?.level).toBe('GRAVE');
+      expect(result.error?.code).toBe(ERR_PROMPT_REQUIRED_VARIABLE_MISSING);
+      expect(result.error?.missingFields).toEqual([
+        'scraped_web.full_article_content',
+      ]);
+      expect(result.error?.message).toContain(
+        'Variables obligatorias ausentes en el prompt',
+      );
+      expect(generateCompletion).not.toHaveBeenCalled();
+      expect(anthropicCompletion).not.toHaveBeenCalled();
+      expect(telemetry.recordTokenUsage).not.toHaveBeenCalled();
+    });
+
+    it('4.2quinquies deberia invocar al proveedor con el prompt limpio si solo faltan opcionales', async () => {
+      // 1. Arrange 📐
+      const generateCompletion = buildGeminiReply();
+      const strategy = buildStrategy(buildPromptService(), {
+        provider: LlmProvider.GEMINI,
+        generateCompletion,
+      });
+      jest
+        .spyOn(strategy['logger'], 'warn')
+        .mockImplementation(() => undefined);
+      const context = buildContext({
+        parsed_email: { clean_body: CLEAN_BODY, clean_title: 'Convocatoria' },
+      });
+
+      // 2. Act ⚙️
+      const result = await strategy.execute(context, {
+        inlinePrompt:
+          'Titulo {{ * parsed_email.clean_title }} - autor {{ scraped_web.byline }}.',
+        provider: LlmProvider.GEMINI,
+      });
+
+      // 3. Assert 🎯
+      expect(result.success).toBe(true);
+      expect(generateCompletion).toHaveBeenCalledWith(
+        CLEAN_BODY,
+        'Titulo Convocatoria - autor .',
+        expect.anything(),
+      );
+    });
+
+    it('4.2sexies deberia declarar la raiz de una marca obligatoria en linea', () => {
+      // 1. Arrange 📐
+      const strategy = buildStrategy(buildPromptService());
+
+      // 2. Act ⚙️
+      const required = strategy.getRequiredNamespaces({
+        inlinePrompt: 'Usa {{*scraped_web.full_article_content}}.',
+      });
+
+      // 3. Assert 🎯
+      expect(required).toEqual(['scraped_web']);
     });
 
     it('4.2ter NO deberia exigir ocr_result en el validador de topologia', () => {

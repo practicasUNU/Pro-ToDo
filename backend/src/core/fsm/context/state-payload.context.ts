@@ -9,6 +9,7 @@
  *   {{ parsed_email.headers.routing.ip }}
  *   {{ parsed_email.extracted_urls[0] }}
  *   {{ llm_response.articles[1].title }}
+ *   {{*parsed_email.clean_body}}   (marca obligatoria, ver `isRequiredMarker`)
  *
  * Los identificadores se limitan a `[a-zA-Z0-9_]`, el mismo juego de caracteres
  * que `OUTPUT_NAMESPACE_PATTERN` impone a los namespaces en
@@ -19,7 +20,27 @@
  * namespace entero no es un valor interpolable.
  */
 export const INTERPOLATION_PATTERN =
-  /\{\{\s*([a-zA-Z0-9_]+(?:\.[a-zA-Z0-9_]+|\[\d+\])+)\s*\}\}/g;
+  /\{\{\s*(?:\*\s*)?([a-zA-Z0-9_]+(?:\.[a-zA-Z0-9_]+|\[\d+\])+)\s*\}\}/g;
+
+/**
+ * Marca OBLIGATORIA de prompt: `{{*ns.campo}}` (espacios tolerados: `{{ * ns.campo }}`).
+ *
+ * `INTERPOLATION_PATTERN` admite el asterisco en un grupo NO capturante, de modo
+ * que el grupo 1 sigue siendo la ruta y todos sus consumidores
+ * (`extractNamespaceRoots`, el validador, la coalescencia documental) entienden
+ * la marca sin cambios. Para saber si una coincidencia concreta es obligatoria
+ * basta con mirar su texto con este patron anclado al inicio.
+ *
+ * Solo tiene semantica en la interpolacion TOLERANTE (prompts de IA): en la
+ * estricta toda variable ya es obligatoria y el asterisco resulta redundante.
+ * Los patrones anclados de DTO (`INTERPOLATION_ONLY_PATH_PATTERN`) no lo
+ * admiten: un campo URL no es un prompt.
+ */
+export const REQUIRED_MARKER_PREFIX_PATTERN = /^\{\{\s*\*/;
+
+/** Indica si el texto de una marca ya casada es una marca obligatoria (`{{*...}}`). */
+export const isRequiredMarker = (marker: string): boolean =>
+  REQUIRED_MARKER_PREFIX_PATTERN.test(marker);
 
 /**
  * Variante ANCLADA: la cadena ENTERA debe ser una sola marca y nada mas.
@@ -414,28 +435,55 @@ export class StatePayloadContext {
    * Variante TOLERANTE: una variable ausente o nula se sustituye por `''`.
    * Solo para prompts de IA, donde un dato opcional (`scraped_web.author`)
    * no debe pausar el flujo. Devuelve las rutas omitidas para registrarlas.
+   *
+   * Las marcas OBLIGATORIAS (`{{*ns.campo}}`) tambien se sustituyen por `''`,
+   * pero ademas se listan en `missingRequired` cuando faltan, son nulas o su
+   * texto queda en blanco: un prompt sin su materia prima no debe facturarse,
+   * y es el llamante quien decide abortar antes de invocar al proveedor.
+   * `missing` incluye TODAS las ausentes (obligatorias y opcionales).
    */
   public getInterpolatedValueLenient(template: string): {
     readonly text: string;
     readonly missing: readonly string[];
+    readonly missingRequired: readonly string[];
   } {
     const missing: string[] = [];
+    const missingRequired: string[] = [];
     const text = template.replace(
       INTERPOLATION_PATTERN,
-      (_match, rawPath: string) => {
+      (marker: string, rawPath: string) => {
+        const required = isRequiredMarker(marker);
+
         try {
-          return stringifyResolved(resolvePath(this.namespaces, rawPath));
+          const value = stringifyResolved(
+            resolvePath(this.namespaces, rawPath),
+          );
+
+          // Una obligatoria en blanco equivale a ausente: `"   "` no es materia
+          // prima para el modelo.
+          if (required && value.trim() === '') {
+            missing.push(rawPath);
+            missingRequired.push(rawPath);
+            return '';
+          }
+
+          return value;
         } catch (error) {
           if (!(error instanceof MissingContextVariableException)) {
             throw error;
           }
 
           missing.push(rawPath);
+
+          if (required) {
+            missingRequired.push(rawPath);
+          }
+
           return '';
         }
       },
     );
 
-    return { text, missing };
+    return { text, missing, missingRequired };
   }
 }

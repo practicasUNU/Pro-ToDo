@@ -56,6 +56,13 @@ export const ERR_LLM_PROMPT_UNRESOLVED = 'ERR_LLM_PROMPT_UNRESOLVED';
 /** Reservado: la interpolacion del prompt ya es tolerante y no lo emite. */
 export const ERR_LLM_INTERPOLATION = 'ERR_LLM_INTERPOLATION';
 /**
+ * El prompt marca como OBLIGATORIA (`{{*ns.campo}}`) una variable que el
+ * contexto no trae. Se emite ANTES de instanciar el proveedor: cero tokens
+ * facturados, y la FSM pausa para que el operador repare el origen.
+ */
+export const ERR_PROMPT_REQUIRED_VARIABLE_MISSING =
+  'ERR_PROMPT_REQUIRED_VARIABLE_MISSING';
+/**
  * @deprecated Ya no se emite: desde los defaults por entorno, un proveedor sin
  * cliente degrada al simulador con un aviso en vez de fallar (ver
  * `resolveProvider`). Se conserva exportado porque puede figurar en el
@@ -158,7 +165,7 @@ export const MATERIAL_IN_INSTRUCTIONS_NOTICE =
  * (`security-and-scope.md` §3).
  */
 const markerPattern = (namespace: string, field: string): RegExp =>
-  new RegExp(`\\{\\{\\s*${namespace}\\.${field}\\s*\\}\\}`);
+  new RegExp(`\\{\\{\\s*(?:\\*\\s*)?${namespace}\\.${field}\\s*\\}\\}`);
 
 /**
  * Marcador de una plantilla base, venga del namespace que venga.
@@ -180,7 +187,7 @@ const markerPattern = (namespace: string, field: string): RegExp =>
  * namespace nada que el motor no pudiera resolver.
  */
 const BASE_TEMPLATE_MARKER_PATTERN =
-  /\{\{\s*[a-z0-9_]+\.compiled_markup\s*\}\}/;
+  /\{\{\s*(?:\*\s*)?[a-z0-9_]+\.compiled_markup\s*\}\}/;
 
 /** Union discriminada: o hay configuracion, o hay un fallo que devolver. */
 type LlmConfigResolution =
@@ -363,6 +370,15 @@ export class LlmExtractorStrategy implements INodeStrategy {
     this.warnOnOrphanAttachments(context);
 
     const interpolated = this.interpolate(context, prompt);
+
+    // Guarda de marcas OBLIGATORIAS. Va despues de la coalescencia —que ya
+    // intento degradar el texto documental a otra ruta con material— y antes
+    // de cualquier proveedor: abortar aqui cuesta $0.
+    if ('failure' in interpolated) {
+      this.consecutiveFailures.delete(brakeKey);
+
+      return { success: false, error: interpolated.failure };
+    }
 
     const attempts = this.resolveAttempts(config);
 
@@ -870,12 +886,28 @@ export class LlmExtractorStrategy implements INodeStrategy {
    * Interpola el prompt en modo TOLERANTE: una variable ausente o nula queda
    * como `''` y se avisa en el log, sin pausar el flujo. La guarda de texto
    * de entrada vacio sigue impidiendo facturar una inferencia sobre nada.
+   *
+   * Excepcion: una marca OBLIGATORIA (`{{*ns.campo}}`) ausente devuelve un
+   * fallo GRAVE (`ERR_PROMPT_REQUIRED_VARIABLE_MISSING`) que `execute` propaga
+   * antes de tocar ningun proveedor.
    */
   private interpolate(
     context: StatePayloadContext,
     prompt: string,
-  ): { readonly prompt: string } {
-    const { text, missing } = context.getInterpolatedValueLenient(prompt);
+  ): { readonly prompt: string } | { readonly failure: NodeErrorDetail } {
+    const { text, missing, missingRequired } =
+      context.getInterpolatedValueLenient(prompt);
+
+    if (missingRequired.length > 0) {
+      return {
+        failure: {
+          level: 'GRAVE',
+          code: ERR_PROMPT_REQUIRED_VARIABLE_MISSING,
+          message: `Variables obligatorias ausentes en el prompt: ${missingRequired.join(', ')}`,
+          missingFields: [...missingRequired],
+        },
+      };
+    }
 
     if (missing.length > 0) {
       this.logger.warn(

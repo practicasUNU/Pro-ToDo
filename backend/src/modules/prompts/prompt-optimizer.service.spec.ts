@@ -264,6 +264,27 @@ describe('PromptOptimizerService', () => {
       );
     });
 
+    it('1.4b deberia avisar si la propuesta degrada un marcador obligatorio a opcional', async () => {
+      // 1. Arrange 📐: el modelo conservo la ruta pero quito el asterisco.
+      const { service } = buildFixture({
+        payload: buildPayload({
+          summary: 'Resume {{scraped_web.body}}.',
+        }),
+      });
+
+      // 2. Act ⚙️
+      const result = await service.optimize(
+        {
+          draftPrompt: 'Resume {{ * scraped_web.body }}.',
+          targetFormat: 'text',
+        },
+        EDITOR,
+      );
+
+      // 3. Assert 🎯
+      expect(result.recommendations[0]).toContain('{{*scraped_web.body}}');
+    });
+
     it('1.5 NO deberia fallar si la telemetria no se puede persistir', async () => {
       // 1. Arrange 📐: la inferencia ya esta pagada; un 500 empujaria a pagarla dos veces.
       const { service, telemetry } = buildFixture();

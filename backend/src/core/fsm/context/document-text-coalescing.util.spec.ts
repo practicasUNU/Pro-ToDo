@@ -42,6 +42,20 @@ describe('coalesceDocumentTextMarkers', () => {
     ]);
   });
 
+  it('deberia conservar el asterisco al degradar una marca obligatoria', () => {
+    // 1. Arrange 📐
+    const prompt = 'Resume {{*ocr_result.clean_body}}';
+
+    // 2. Act ⚙️
+    const result = coalesceDocumentTextMarkers(
+      prompt,
+      readerOf({ 'parsed_email.clean_body': 'cuerpo' }),
+    );
+
+    // 3. Assert 🎯
+    expect(result.prompt).toBe('Resume {{*parsed_email.clean_body}}');
+  });
+
   it('deberia buscar desde la posicion del marcador, nunca hacia arriba', () => {
     // 1. Arrange 📐: pedir los adjuntos no debe devolver el OCR.
     const prompt = '{{parsed_email.extracted_documents_text}}';

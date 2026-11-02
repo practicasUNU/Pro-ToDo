@@ -42,7 +42,7 @@ const GENERAL_RULES: readonly string[] = [
   'Especifica el FORMATO DE SALIDA de forma inequivoca.',
   'Usa delimitadores claros para separar instrucciones de datos de entrada.',
   'Elimina ambiguedades, redundancias y expresiones vagas ("intenta", "si puedes").',
-  'Conserva LITERALMENTE cada marcador de variable con la forma {{namespace.campo}}: no los traduzcas, renombres, elimines ni anadas nuevos.',
+  'Conserva LITERALMENTE cada marcador de variable con la forma {{namespace.campo}} o {{*namespace.campo}} (el asterisco marca un dato obligatorio y debe mantenerse): no los traduzcas, renombres, elimines ni anadas nuevos.',
   'Conserva el idioma del borrador (por defecto, espanol).',
 ];
 
@@ -81,14 +81,22 @@ export const buildOptimizerSystemPrompt = (
 export const buildOptimizerUserPrompt = (draftPrompt: string): string =>
   `<borrador>\n${draftPrompt}\n</borrador>`;
 
-/** Marcadores `{{namespace.campo}}`, mismo patron que la interpolacion del FSM. */
-const PLACEHOLDER_PATTERN = /\{\{\s*([a-zA-Z0-9_]+)\.([a-zA-Z0-9_]+)\s*\}\}/g;
+/**
+ * Marcadores `{{namespace.campo}}` y `{{*namespace.campo}}` (obligatorio),
+ * mismo patron que la interpolacion del FSM.
+ */
+const PLACEHOLDER_PATTERN =
+  /\{\{\s*(\*?)\s*([a-zA-Z0-9_]+)\.([a-zA-Z0-9_]+)\s*\}\}/g;
 
-/** Marcadores distintos de un texto, normalizados sin espacios. */
+/**
+ * Marcadores distintos de un texto, normalizados sin espacios. El asterisco se
+ * conserva: una propuesta que degrade `{{*ns.campo}}` a `{{ns.campo}}` cambia la
+ * semantica del flujo (dejaria de pausar) y debe avisarse como perdida.
+ */
 export const extractPlaceholders = (text: string): string[] => [
   ...new Set(
     [...text.matchAll(PLACEHOLDER_PATTERN)].map(
-      ([, namespace, field]) => `{{${namespace}.${field}}}`,
+      ([, star, namespace, field]) => `{{${star}${namespace}.${field}}}`,
     ),
   ),
 ];
