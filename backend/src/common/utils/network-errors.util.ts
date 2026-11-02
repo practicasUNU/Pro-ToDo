@@ -17,6 +17,15 @@ const TRANSIENT_ERROR_CODES: readonly string[] = [
   'ENETDOWN',
   'EPIPE',
   'EAI_AGAIN',
+  // Codigos propios de `imapflow` (v1.7): sus temporizadores de conexion,
+  // saludo, STARTTLS e inactividad no conservan el `errno` del socket, sino que
+  // fabrican un error con uno de estos `code`. Sin ellos, el
+  // "Failed to establish connection in required time" de un microcorte se
+  // clasificaba como averia del buzon y escalaba a `logger.error` en cada ciclo.
+  'CONNECT_TIMEOUT',
+  'GREETING_TIMEOUT',
+  'UPGRADE_TIMEOUT',
+  'ETIMEOUT',
 ];
 
 /**
@@ -32,6 +41,9 @@ const TRANSIENT_MESSAGE_FRAGMENTS: readonly string[] = [
   'socket timeout',
   'socket closed',
   'network is unreachable',
+  // Mensaje del `CONNECT_TIMEOUT` de `imapflow` cuando llega reenvuelto sin
+  // `code` por una capa intermedia.
+  'failed to establish connection',
 ];
 
 /** Profundidad maxima al desenvolver `cause` / `AggregateError.errors`. */

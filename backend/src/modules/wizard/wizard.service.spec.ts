@@ -37,18 +37,30 @@ const buildDto = (
     ...overrides,
   });
 
-/** Doble del cliente: la comprobacion solo usa connect, status y logout. */
-const buildClient = (
-  overrides: Record<string, jest.Mock> = {},
-): Record<string, jest.Mock> => ({
+/**
+ * Doble del cliente: la comprobacion usa connect, status y el cierre comun
+ * (`closeImapClientQuietly`), que consulta `usable` y llama a logout y close.
+ */
+interface ClientDouble {
+  connect: jest.Mock;
+  status: jest.Mock;
+  logout: jest.Mock;
+  close: jest.Mock;
+  on: jest.Mock;
+  usable: boolean;
+}
+
+const buildClient = (overrides: Partial<ClientDouble> = {}): ClientDouble => ({
   connect: jest.fn().mockResolvedValue(undefined),
   status: jest.fn().mockResolvedValue({ path: 'INBOX', messages: 12 }),
   logout: jest.fn().mockResolvedValue(undefined),
+  close: jest.fn(),
   on: jest.fn(),
+  usable: true,
   ...overrides,
 });
 
-const useClient = (client: Record<string, jest.Mock>): void => {
+const useClient = (client: ClientDouble): void => {
   ImapFlow.mockImplementation(() => client);
 };
 
@@ -265,6 +277,29 @@ describe('WizardService', () => {
 
       // 3. Assert
       expect(client.logout).toHaveBeenCalledTimes(1);
+      expect(client.close).toHaveBeenCalledTimes(1);
+    });
+
+    it('2.7 deberia destruir el socket aunque logout lance por un enlace caido', async () => {
+      // 1. Arrange 📐: la conexion se cae a mitad de la comprobacion. Antes,
+      //    el logout lanzaba y el socket TCP sobrevivia a la peticion.
+      const client = buildClient({
+        status: jest
+          .fn()
+          .mockRejectedValue(new Error('Connection not available')),
+        logout: jest
+          .fn()
+          .mockRejectedValue(new Error('Connection not available')),
+      });
+      useClient(client);
+      const { service } = buildService();
+
+      // 2. Act ⚙️
+      const result = await service.checkImap(buildDto());
+
+      // 3. Assert 🎯
+      expect(result.success).toBe(false);
+      expect(client.close).toHaveBeenCalledTimes(1);
     });
   });
 

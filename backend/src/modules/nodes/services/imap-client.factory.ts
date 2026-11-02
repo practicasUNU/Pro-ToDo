@@ -40,6 +40,20 @@ export const PROBE_SOCKET_TIMEOUT_MS = 15_000;
 export const DOWNLOAD_SOCKET_TIMEOUT_MS = 60_000;
 
 /**
+ * Temporizadores de un cliente IMAP, en milisegundos.
+ *
+ * Todos opcionales: quien solo necesita otra inactividad de socket pasa
+ * `socketTimeoutMs`, y quien necesita acotar tambien la conexion —el worker de
+ * reanudacion, que prefiere rendirse antes y reintentar en el ciclo
+ * siguiente— pasa los tres.
+ */
+export interface ImapClientTimeouts {
+  connectionTimeoutMs?: number;
+  greetingTimeoutMs?: number;
+  socketTimeoutMs?: number;
+}
+
+/**
  * Construye un cliente IMAP con las opciones endurecidas del proyecto.
  *
  * Existe para que las tres rutas que hablan IMAP —la estrategia del nodo, el
@@ -63,14 +77,24 @@ export const DOWNLOAD_SOCKET_TIMEOUT_MS = 60_000;
  * @param config Configuracion del nodo con los defaults ya aplicados.
  * @param password Secreto ya resuelto desde el entorno. Nunca se registra.
  * @param onSocketError Oyente del evento `error` del cliente.
- * @param socketTimeoutMs Inactividad maxima; por defecto la de una comprobacion.
+ * @param timeouts Inactividad maxima del socket en ms (por defecto la de una
+ *        comprobacion), u objeto con los tres temporizadores. Los que no se
+ *        indiquen conservan los valores del proyecto.
  */
 export const createImapClient = (
   config: ResolvedImapConfig,
   password: string,
   onSocketError: (error: Error) => void,
-  socketTimeoutMs: number = PROBE_SOCKET_TIMEOUT_MS,
+  timeouts: number | ImapClientTimeouts = PROBE_SOCKET_TIMEOUT_MS,
 ): ImapFlow => {
+  const {
+    connectionTimeoutMs = CONNECTION_TIMEOUT_MS,
+    greetingTimeoutMs = GREETING_TIMEOUT_MS,
+    socketTimeoutMs = PROBE_SOCKET_TIMEOUT_MS,
+  }: ImapClientTimeouts = typeof timeouts === 'number'
+    ? { socketTimeoutMs: timeouts }
+    : timeouts;
+
   const client = new ImapFlow({
     host: config.host,
     port: config.port,
@@ -79,8 +103,8 @@ export const createImapClient = (
     logger: false,
     emitLogs: false,
     disableAutoIdle: true,
-    connectionTimeout: CONNECTION_TIMEOUT_MS,
-    greetingTimeout: GREETING_TIMEOUT_MS,
+    connectionTimeout: connectionTimeoutMs,
+    greetingTimeout: greetingTimeoutMs,
     socketTimeout: socketTimeoutMs,
   });
 

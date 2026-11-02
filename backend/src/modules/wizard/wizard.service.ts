@@ -4,7 +4,10 @@ import { ConfigService } from '@nestjs/config';
 import { resolveImapConfig } from '@modules/nodes/dto/imap-trigger-config.dto';
 import { resolveParserEmailConfig } from '@modules/nodes/dto/parser-email-config.dto';
 import { resolveWebScraperConfig } from '@modules/nodes/dto/web-scraper-config.dto';
-import { createImapClient } from '@modules/nodes/services/imap-client.factory';
+import {
+  closeImapClientQuietly,
+  createImapClient,
+} from '@modules/nodes/services/imap-client.factory';
 import { WebScraperRunner } from '@modules/nodes/services/web-scraper.runner';
 import { buildParsedEmail } from '@modules/nodes/utils/parsed-email-payload.util';
 
@@ -209,15 +212,20 @@ export class WizardService {
     }
   }
 
-  /** Cierra la sesion sin dejar escapar errores de cierre. */
+  /**
+   * Cierra la sesion sin dejar escapar errores de cierre.
+   *
+   * Delega en `closeImapClientQuietly` y no en un `logout()` propio: el
+   * `logout()` solo lanzaba sobre un socket ya roto —justo cuando la
+   * comprobacion fallaba por red— y entonces nunca llegaba a llamarse a
+   * `close()`, de modo que cada comprobacion fallida dejaba un socket TCP vivo.
+   */
   private async logoutQuietly(client: ImapFlow): Promise<void> {
-    try {
-      await client.logout();
-    } catch (error) {
+    await closeImapClientQuietly(client, (error: unknown) => {
       this.logger.warn(
         `No se pudo cerrar la sesion IMAP de la comprobacion: ${error instanceof Error ? error.message : String(error)}`,
       );
-    }
+    });
   }
 
   /**

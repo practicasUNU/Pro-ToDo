@@ -25,6 +25,7 @@ import { Workflow } from '@modules/workflows/entities/workflow.entity';
 import { ExecutionsService } from './executions.service';
 
 import type { ResolvedImapConfig } from '@modules/nodes/dto/imap-trigger-config.dto';
+import type { ImapClientTimeouts } from '@modules/nodes/services/imap-client.factory';
 import type { FsmExecution } from '@core/fsm/entities/fsm-execution.entity';
 import type { AuthenticatedUser } from '@modules/auth/interfaces/jwt-payload.interface';
 import type { User } from '@modules/users/entities/user.entity';
@@ -253,8 +254,22 @@ const MAX_COMMANDS_PER_RUN = 10;
  */
 const MAX_SKIPPED_UIDS = 500;
 
-/** Inactividad maxima del socket durante la descarga de un mensaje. */
-const SOCKET_TIMEOUT_MS = 30_000;
+/**
+ * Temporizadores del cliente IMAP del canal de ordenes.
+ *
+ * Mas cortos que los de la fabrica en la CONEXION (45 s frente a 60 s) y mas
+ * holgados en la inactividad (60 s frente a 30 s), por la naturaleza del
+ * worker: corre en segundo plano cada minuto, de modo que rendirse antes ante un
+ * servidor que no contesta solo cuesta esperar al ciclo siguiente, mientras que
+ * colgarse en la conexion encadenaba ciclos saltados por `isPolling`. Una vez
+ * conectado, en cambio, viaja un MIME completo y un corte prematuro tiraria una
+ * orden valida a medio descargar.
+ */
+const RESUME_IMAP_TIMEOUTS: ImapClientTimeouts = {
+  connectionTimeoutMs: 45_000,
+  greetingTimeoutMs: 30_000,
+  socketTimeoutMs: 60_000,
+};
 
 /** Nombre del intervalo en el `SchedulerRegistry`, para poder darlo de baja. */
 const RESUME_POLL_INTERVAL_NAME = 'inbound-resume-poll';
@@ -532,7 +547,7 @@ export class InboundEmailResumeService
           `[InboundEmailResume] Error de socket contra el buzon: ${error.message}`,
         );
       },
-      SOCKET_TIMEOUT_MS,
+      RESUME_IMAP_TIMEOUTS,
     );
 
     let lock: MailboxLockObject | undefined;

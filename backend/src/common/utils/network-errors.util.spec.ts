@@ -59,6 +59,31 @@ describe('isTransientNetworkError', () => {
       // 2. Act ⚙️ & 3. Assert 🎯
       expect(isTransientNetworkError(wrapped)).toBe(true);
     });
+    it.each([
+      'CONNECT_TIMEOUT',
+      'GREETING_TIMEOUT',
+      'UPGRADE_TIMEOUT',
+      'ETIMEOUT',
+    ])(
+      '1.5 deberia reconocer el temporizador %s de imapflow',
+      (code: string) => {
+        // 1. Arrange 📐: `imapflow` fabrica estos errores con su propio `code`.
+        const error = Object.assign(new Error('timeout de imapflow'), { code });
+
+        // 2. Act ⚙️ & 3. Assert 🎯
+        expect(isTransientNetworkError(error)).toBe(true);
+      },
+    );
+
+    it('1.6 deberia reconocer "Failed to establish connection in required time" sin code', () => {
+      // 1. Arrange 📐: el mismo fallo reenvuelto por una capa que pierde el `code`.
+      const error = new Error(
+        'Failed to establish connection in required time',
+      );
+
+      // 2. Act ⚙️ & 3. Assert 🎯
+      expect(isTransientNetworkError(error)).toBe(true);
+    });
   });
 
   describe('2. Averias que SI hay que escalar', () => {

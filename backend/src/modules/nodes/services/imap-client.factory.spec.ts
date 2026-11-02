@@ -83,6 +83,23 @@ describe('createImapClient', () => {
     expect(download.socketTimeout).toBe(DOWNLOAD_SOCKET_TIMEOUT_MS);
   });
 
+  it('2b. deberia aceptar los tres temporizadores por objeto y completar los que falten', () => {
+    // 1. Arrange 📐: el worker de reanudacion acota tambien la conexion.
+
+    // 2. Act ⚙️
+    createImapClient(CONFIG, 'secreto', jest.fn(), {
+      connectionTimeoutMs: 45_000,
+      socketTimeoutMs: 60_000,
+    });
+
+    // 3. Assert 🎯: el saludo, que no se indico, conserva el del proyecto.
+    expect(lastOptions()).toMatchObject({
+      connectionTimeout: 45_000,
+      greetingTimeout: GREETING_TIMEOUT_MS,
+      socketTimeout: 60_000,
+    });
+  });
+
   it('3. deberia mantener silenciada la conversacion IMAP', () => {
     // 1. Arrange 📐: sin esto `imapflow` vuelca al stdout las cabeceras de
     //    autenticacion, saltandose el Logger de Nest. Es una decision de

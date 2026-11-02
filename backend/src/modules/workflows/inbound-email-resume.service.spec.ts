@@ -1117,5 +1117,58 @@ describe('InboundEmailResumeService (ordenes de reanudacion por correo)', () => 
       expect(client.logout).toHaveBeenCalledTimes(1);
       expect(client.close).toHaveBeenCalledTimes(1);
     });
+
+    it('8.5 deberia tratar el CONNECT_TIMEOUT de imapflow como aviso y liberar el socket', async () => {
+      // 1. Arrange 📐: el error exacto que imapflow fabrica cuando el servidor
+      //    no completa la conexion a tiempo. Antes se registraba como averia.
+      const { service, client, warnSpy, errorSpy } = buildHarness();
+      client.usable = false;
+      client.connect
+        .mockRejectedValueOnce(
+          Object.assign(
+            new Error('Failed to establish connection in required time'),
+            {
+              code: 'CONNECT_TIMEOUT',
+            },
+          ),
+        )
+        .mockResolvedValue(undefined);
+
+      // 2. Act ⚙️: un ciclo que expira y otro que ya conecta.
+      const first = await service.processInbox();
+      client.usable = true;
+      await service.processInbox();
+
+      // 3. Assert 🎯
+      expect(first).toBe(0);
+      expect(client.close).toHaveBeenCalledTimes(2);
+      expect(warnSpy).toHaveBeenCalledWith(
+        expect.stringContaining('Enlace no disponible temporalmente'),
+      );
+      expect(errorSpy).not.toHaveBeenCalled();
+      // El ciclo siguiente no quedo bloqueado por la guarda de solapamiento.
+      expect(client.search).toHaveBeenCalledTimes(1);
+    });
+
+    it('8.6 deberia abrir el cliente con timeouts explicitos de conexion, saludo y socket', async () => {
+      // 1. Arrange 📐
+      const { service } = buildHarness();
+      createImapClient.mockClear();
+
+      // 2. Act ⚙️
+      await service.processInbox();
+
+      // 3. Assert 🎯: 45 s para conectar, 30 s de saludo y 60 s de inactividad.
+      expect(createImapClient).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.any(String),
+        expect.any(Function),
+        {
+          connectionTimeoutMs: 45_000,
+          greetingTimeoutMs: 30_000,
+          socketTimeoutMs: 60_000,
+        },
+      );
+    });
   });
 });
