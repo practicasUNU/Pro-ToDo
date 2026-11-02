@@ -43,6 +43,8 @@ import { DrupalOperationMode } from '@modules/nodes/dto/drupal-http-config.dto';
 import { ERR_PROMPT_REQUIRED_VARIABLE_MISSING } from '@modules/nodes/strategies/llm-extractor.strategy';
 import { MOCK_LLM_MODEL } from '@modules/nodes/strategies/providers/mock-llm.provider';
 import { ERR_PARSER_UNEXTRACTABLE_MEDIA } from '@modules/nodes/strategies/parser-email.strategy';
+import { WebScraperRunner } from '@modules/nodes/services/web-scraper.runner';
+import { extractArticle } from '@modules/nodes/utils/article-extractor.util';
 
 import { AppModule } from './../src/app.module';
 import {
@@ -55,6 +57,7 @@ import {
 
 import type { INestApplication } from '@nestjs/common';
 import type { PipelineSchemaDto } from '@core/fsm/dto/pipeline-schema.dto';
+import type { ScrapeOutcome } from '@modules/nodes/services/web-scraper.runner';
 import type { AxiosRequestConfig } from 'axios';
 import type { Socket } from 'socket.io-client';
 import type { App } from 'supertest/types';
@@ -69,7 +72,11 @@ import type { Repository } from 'typeorm';
  * - Drupal: `HttpClientService` se sustituye por un portal en memoria que
  *   registra cada peticion y mantiene el HTML de cada pagina.
  * - IA y OCR: proveedor `MOCK`, el simulador del propio backend. Coste $0 y
- *   salida determinista, pero con la telemetria real escribiendo en la BD.
+ *   salida determinista: el titular es el primer parrafo del prompt, y con
+ *   una plantilla base devuelve tambien `filled_markup`.
+ * - Navegador del extractor web: `WebScraperRunner` se sustituye por uno que
+ *   pasa un HTML fijo por el extractor REAL (`extractArticle`), de modo que la
+ *   fecha por URL y el autor por dominio se ejercitan de verdad.
  * - Correo entrante: el `raw_email` se siembra en el contexto, como si el
  *   disparador IMAP ya hubiera corrido.
  *
@@ -108,6 +115,25 @@ const PNG_1X1_BASE64 =
   'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==';
 
 const DOCX_FIXTURE = join(__dirname, 'fixtures', 'tabla-simple.docx');
+
+/** Articulo enlazado por el editor de Notiweb: fecha en la ruta, sin firma. */
+const ARTICLE_URL =
+  'https://f-droid.org/es/2026/02/24/open-letter-to-the-community/';
+
+/** Raiz publica del portal doblado: la base de la API sin `/jsonapi`. */
+const DRUPAL_SITE_ROOT = 'https://drupal.e2e.invalid';
+
+/**
+ * HTML del articulo, SIN `<meta>` de autor ni de fecha: obliga al extractor a
+ * caer en la fecha de la URL y en la organizacion del dominio.
+ */
+const ARTICLE_HTML =
+  '<!DOCTYPE html><html lang="es"><head><title>Carta abierta a la comunidad</title></head>' +
+  '<body><article><h1>Carta abierta a la comunidad</h1>' +
+  '<p>El proyecto explica en esta carta abierta como afectan las nuevas reglas de distribucion de aplicaciones a los repositorios libres y a quienes los mantienen.</p>' +
+  '<p>La comunidad de desarrolladores ha reunido firmas de organizaciones europeas que piden mantener la instalacion directa de aplicaciones sin intermediarios.</p>' +
+  '<p>El texto propone una mesa de trabajo con los reguladores y recuerda que la soberania digital depende de poder auditar el software que se instala.</p>' +
+  '</article></body></html>';
 
 // ---------------------------------------------------------------------------
 // Portal Drupal en memoria
@@ -318,11 +344,12 @@ const rawEmail = (
   subject: string,
   text: string,
   attachments: readonly Record<string, unknown>[] = [],
+  html = '',
 ): Record<string, unknown> => ({
   subject,
   from: 'convocatorias@madrimasd.org',
   text,
-  html: '',
+  html,
   attachments,
 });
 
@@ -370,6 +397,32 @@ describe('Pipelines operativos de la FSM (e2e)', () => {
 
   const portal = new FakeDrupalPortal();
   const seededFlowIds: string[] = [];
+  const seededTemplateIds: string[] = [];
+
+  /**
+   * Navegador doblado: sin Playwright ni red, pero con el extractor real. Solo
+   * conoce `ARTICLE_URL`; cualquier otra direccion falla como un portal caido.
+   */
+  const scraper = {
+    run: jest.fn((url: URL): Promise<ScrapeOutcome> => {
+      const sourceUrl = url.toString();
+      const article =
+        sourceUrl === ARTICLE_URL
+          ? extractArticle(ARTICLE_HTML, sourceUrl)
+          : null;
+
+      return Promise.resolve(
+        article === null
+          ? {
+              success: false,
+              code: 'ERR_EXTERNAL_SERVER_UNREACHABLE',
+              message: `El navegador doblado no conoce ${sourceUrl}`,
+              attempts: 1,
+            }
+          : { success: true, sourceUrl, article, attempts: 1 },
+      );
+    }),
+  };
   const openSockets: Socket[] = [];
 
   const httpServer = (): App => app.getHttpServer() as App;
@@ -398,6 +451,26 @@ describe('Pipelines operativos de la FSM (e2e)', () => {
     );
 
     return flowId;
+  };
+
+  /** Plantilla HTML propia de la suite, para el MAPEADOR_PLANTILLA. */
+  const seedTemplate = async (label: string, html: string): Promise<string> => {
+    const rows = await dataSource.query<Array<{ id_plantilla: string }>>(
+      `INSERT INTO plantillas_html (nombre, descripcion, contenido_html, id_usuario_creador)
+       VALUES ($1, $2, $3, $4)
+       RETURNING id_plantilla`,
+      [
+        `${E2E_FLOW_PREFIX} ${label} ${Date.now()}-${seededTemplateIds.length}`,
+        'Plantilla sembrada por la suite de pipelines operativos.',
+        html,
+        creatorId,
+      ],
+    );
+
+    const [{ id_plantilla: templateId }] = rows;
+    seededTemplateIds.push(templateId);
+
+    return templateId;
   };
 
   /**
@@ -522,6 +595,8 @@ describe('Pipelines operativos de la FSM (e2e)', () => {
     })
       .overrideProvider(HttpClientService)
       .useValue(portal)
+      .overrideProvider(WebScraperRunner)
+      .useValue(scraper)
       .compile();
 
     app = moduleRef.createNestApplication();
@@ -559,6 +634,7 @@ describe('Pipelines operativos de la FSM (e2e)', () => {
 
   beforeEach(() => {
     portal.reset();
+    scraper.run.mockClear();
   });
 
   afterAll(async () => {
@@ -574,15 +650,29 @@ describe('Pipelines operativos de la FSM (e2e)', () => {
       ]);
     }
 
+    if (seededTemplateIds.length > 0) {
+      // Despues de los flujos, que son quienes las citaban.
+      await dataSource.query(
+        `DELETE FROM plantillas_html WHERE id_plantilla = ANY($1)`,
+        [seededTemplateIds],
+      );
+    }
+
     await removeE2eUsers(dataSource, [E2E_EDITOR]);
     await app.close();
   });
 
   describe('1. Notiweb: redaccion con moderacion humana', () => {
     it(
-      '1.1 deberia pausar ante la aprobacion y publicar en Drupal al reanudar',
+      '1.1 deberia pausar ante la aprobacion y publicar en Drupal con su enlace al reanudar',
       async () => {
-        // 1. Arrange 📐
+        // 1. Arrange 📐: topologia canonica. El MAPEADOR va DESPUES del
+        //    extractor y ANTES de la IA, que rellena su cascaron.
+        const templateId = await seedTemplate(
+          'Notiweb',
+          '<div class="notiweb-cuerpo"><hr /><h2>Referencia bibliográfica</h2>' +
+            '<p class="notiweb-referencia"></p></div>',
+        );
         const flowId = await seedFlow((id) =>
           schemaOf(id, 'Notiweb', 'disparador_imap', [
             imapTrigger('parser'),
@@ -590,12 +680,34 @@ describe('Pipelines operativos de la FSM (e2e)', () => {
               'parser',
               NodeType.PARSER_PRE_IA,
               'parsed_email',
+              'extractor_web',
+            ),
+            node(
+              'extractor_web',
+              NodeType.EXTRACTOR_WEB,
+              'scraped_web',
+              'mapeador',
+              {
+                targetUrl: '{{parsed_email.extracted_urls}}',
+                skipIfEmpty: true,
+                maxRetries: 0,
+              },
+            ),
+            node(
+              'mapeador',
+              NodeType.MAPEADOR_PLANTILLA,
+              'rendered_html',
               'redaccion_ia',
+              { templateId },
             ),
             mockLlm(
               'redaccion_ia',
               'escudo',
-              'Redacta una noticia sobre {{*parsed_email.clean_title}}. Remitente: {{parsed_email.sender_name}}.',
+              [
+                'Redacta una noticia sobre {{*parsed_email.clean_title}}.',
+                'Articulo de {{scraped_web.author}} ({{scraped_web.published_at}}): {{scraped_web.full_article_content}}',
+                'PLANTILLA BASE: {{*rendered_html.compiled_markup}}',
+              ].join('\n\n'),
             ),
             node(
               'escudo',
@@ -603,9 +715,9 @@ describe('Pipelines operativos de la FSM (e2e)', () => {
               'validated_drupal_json',
               'aprobacion',
               {
-                contentMode: 'TEXT',
+                contentMode: 'HTML',
                 sourceNamespace: 'llm_response',
-                sourceFields: ['headline', 'summary'],
+                sourceField: 'filled_markup',
               },
             ),
             node(
@@ -624,22 +736,22 @@ describe('Pipelines operativos de la FSM (e2e)', () => {
               null,
               {
                 operationMode: DrupalOperationMode.CREATE_NODE,
-                sourceNamespace: 'llm_response',
-                sourceField: 'summary',
-                titleTemplate:
-                  '{{validated_drupal_json.validated_fields.headline}}',
+                sourceNamespace: 'validated_drupal_json',
+                sourceField: 'validated_markup',
+                titleTemplate: '{{llm_response.headline}}',
               },
             ),
           ]),
         );
         const executionId = await seedExecution(flowId, 'parser', {
+          // El enlace va en la parte HTML: es de donde el parser saca
+          // `extracted_urls` (el texto plano parte las URL a 78 columnas).
           raw_email: rawEmail(
-            'Investigadores de Madrid descubren una enzima que degrada plasticos',
-            [
-              'Un equipo del CSIC ha identificado una enzima capaz de degradar PET en 48 horas.',
-              'El estudio, publicado en Nature, abre la via a reciclar envases sin calor.',
-              'Articulo original: https://www.nature.com/articles/s41586-026-00001-x',
-            ].join('\n'),
+            'Carta abierta sobre la distribucion de aplicaciones libres',
+            'Preparad una noticia para Notiweb sobre esta carta abierta.',
+            [],
+            '<p>Preparad una noticia para Notiweb sobre esta carta abierta.</p>' +
+              `<p><a href="${ARTICLE_URL}">Articulo original</a></p>`,
           ),
         });
         const socket = await joinFlowRoom(flowId);
@@ -658,9 +770,23 @@ describe('Pipelines operativos de la FSM (e2e)', () => {
         expect(atGate.activeCursor).toBe('destino_drupal');
         expect(pauseEvent.pausedStepId).toBe('aprobacion');
         expect(portal.calls).toHaveLength(0);
+        // El extractor REAL leyo el articulo: fecha de la ruta y organizacion
+        // del dominio, porque el HTML no declara ninguna de las dos.
+        expect(scraper.run).toHaveBeenCalledTimes(1);
+        expect(atGate.contextPayload.scraped_web).toMatchObject({
+          published_at: '2026-02-24',
+          author: 'F-Droid',
+          byline: 'F-Droid',
+        });
+        expect(atGate.contextPayload.rendered_html).toBeDefined();
 
         // 2. Act ⚙️: un EDITOR aprueba y reanuda.
+        const completed = waitForEvent<Record<string, unknown>>(
+          socket,
+          'flow:completed',
+        );
         await resume(executionId);
+        const completedEvent = await completed;
         const done = await readExecution(executionId);
 
         // 3. Assert 🎯
@@ -673,36 +799,72 @@ describe('Pipelines operativos de la FSM (e2e)', () => {
           posts[0]?.body as { data: { attributes: { title: string } } }
         ).data.attributes.title;
         expect(sentTitle).toBe(
-          (
-            done.contextPayload.validated_drupal_json
-              ?.validated_fields as Record<string, string>
-          ).headline,
+          (done.contextPayload.llm_response as Record<string, string>).headline,
         );
+        expect(readBodyValue(posts[0]?.body)).toBe(
+          (done.contextPayload.validated_drupal_json as Record<string, string>)
+            .validated_markup,
+        );
+        // El enlace a la noticia creada, en el namespace y en el aviso.
         expect(done.contextPayload.http_result).toMatchObject({
           node_id: CREATED_NODE_UUID,
+          published_url: `${DRUPAL_SITE_ROOT}/e2e`,
+          exit_page: '/e2e',
+        });
+        expect(completedEvent).toMatchObject({
+          executionId,
+          finalState: ExecutionState.EXITOSO,
+          publishedUrl: `${DRUPAL_SITE_ROOT}/e2e`,
+          exitPage: '/e2e',
         });
       },
-      EVENT_TIMEOUT_MS * 2,
+      EVENT_TIMEOUT_MS * 3,
     );
   });
 
   describe('2. Apertura de licitaciones (APPEND_HTML_BLOCK)', () => {
     it(
-      '2.1 deberia extraer el .docx sin OCR y anteponer el bloque en la pagina de abiertas',
+      '2.1 deberia rellenar la plantilla con el .docx y anteponer el bloque en abiertas',
       async () => {
         // 1. Arrange 📐
         portal.pages.set(
           OPEN_TENDERS_UUID,
           '<div data-expediente="LIC-2026-001"><p>Licitacion anterior</p></div>',
         );
+        const templateId = await seedTemplate(
+          'Apertura',
+          '<div class="licitacion-entry pd-licitacion-block" data-expediente="">' +
+            '<h3 class="licitacion-title"></h3></div>',
+        );
         const flowId = await seedFlow((id) =>
           schemaOf(id, 'Apertura de licitaciones', 'disparador_imap', [
             imapTrigger('parser'),
+            node('parser', NodeType.PARSER_PRE_IA, 'parsed_email', 'mapeador'),
             node(
-              'parser',
-              NodeType.PARSER_PRE_IA,
-              'parsed_email',
+              'mapeador',
+              NodeType.MAPEADOR_PLANTILLA,
+              'rendered_html',
+              'extraccion_ia',
+              { templateId },
+            ),
+            // El prompt NO interpola el adjunto: asi viaja como materia prima
+            // (`buildInputText`), que es de donde el simulador redacta.
+            mockLlm(
+              'extraccion_ia',
+              'escudo',
+              'Rellena la convocatoria de {{*parsed_email.clean_title}} con el pliego adjunto.\n\n' +
+                'PLANTILLA BASE: {{*rendered_html.compiled_markup}}',
+            ),
+            node(
+              'escudo',
+              NodeType.ESCUDO_POST_IA,
+              'validated_drupal_json',
               'destino_drupal',
+              {
+                contentMode: 'HTML',
+                sourceNamespace: 'llm_response',
+                sourceField: 'filled_markup',
+              },
             ),
             node(
               'destino_drupal',
@@ -713,8 +875,8 @@ describe('Pipelines operativos de la FSM (e2e)', () => {
                 operationMode: DrupalOperationMode.APPEND_HTML_BLOCK,
                 bundle: 'node--page',
                 targetNodeUuid: OPEN_TENDERS_UUID,
-                sourceNamespace: 'parsed_email',
-                sourceField: 'extracted_documents_text',
+                sourceNamespace: 'validated_drupal_json',
+                sourceField: 'validated_markup',
               },
             ),
           ]),
@@ -737,7 +899,8 @@ describe('Pipelines operativos de la FSM (e2e)', () => {
         await resume(executionId);
         const done = await readExecution(executionId);
 
-        // 3. Assert 🎯: GET + PATCH, bloque nuevo DELANTE del anterior.
+        // 3. Assert 🎯: GET + PATCH, bloque nuevo DELANTE del anterior, y es el
+        //    marcado que valido el escudo, no el texto crudo del adjunto.
         expect(done.currentState).toBe(ExecutionState.EXITOSO);
         const [patched] = portal.patchedHtml(OPEN_TENDERS_UUID);
         expect(patched).toContain('Madrid');
@@ -746,18 +909,25 @@ describe('Pipelines operativos de la FSM (e2e)', () => {
         );
         expect(done.contextPayload.http_result).toMatchObject({
           operation_applied: DrupalOperationMode.APPEND_HTML_BLOCK,
+          published_url: `${DRUPAL_SITE_ROOT}/e2e`,
+          exit_page: '/e2e',
         });
 
-        // Sin ninguna fila ERROR y con los dos nodos en OK. El parser puede
-        // dejar ademas una ADVERTENCIA (aviso LEVE del adjunto), que no cuenta.
+        // Sin ninguna fila ERROR y con los cinco nodos en OK, en orden. El
+        // parser puede dejar ademas una ADVERTENCIA, que no cuenta.
         const logs = await readNodeLogs(executionId);
         expect(logs.filter((log) => log.estado_nodo === 'ERROR')).toEqual([]);
         expect(
           logs
             .filter((log) => log.estado_nodo === 'OK')
             .map((log) => log.id_nodo),
-        ).toEqual(['parser', 'destino_drupal']);
-        expect(await countTelemetry(executionId)).toBe(0);
+        ).toEqual([
+          'parser',
+          'mapeador',
+          'extraccion_ia',
+          'escudo',
+          'destino_drupal',
+        ]);
       },
       CASE_TIMEOUT_MS,
     );
@@ -765,9 +935,10 @@ describe('Pipelines operativos de la FSM (e2e)', () => {
 
   describe('3. Cierre de licitaciones (TRANSFER_HTML_BLOCK)', () => {
     it(
-      '3.1 deberia trasladar el expediente de abiertas a cerradas sin tocar la IA',
+      '3.1 deberia identificar el expediente con IA y trasladarlo sin mapeador de plantilla',
       async () => {
-        // 1. Arrange 📐
+        // 1. Arrange 📐: el simulador devuelve como titular la primera linea
+        //    de la materia prima (el correo), que hace aqui de expediente.
         portal.pages.set(
           OPEN_TENDERS_UUID,
           '<div data-expediente="LIC-2026-004"><p>Suministros IT</p></div>' +
@@ -775,14 +946,28 @@ describe('Pipelines operativos de la FSM (e2e)', () => {
         );
         portal.pages.set(CLOSED_TENDERS_UUID, '');
         const flowId = await seedFlow((id) =>
-          schemaOf(id, 'Cierre de licitaciones', 'disparador_cron', [
+          schemaOf(id, 'Cierre de licitaciones', 'disparador_imap', [
+            imapTrigger('parser'),
             node(
-              'disparador_cron',
-              NodeType.TRIGGER_CRON,
-              'cron_trigger',
+              'parser',
+              NodeType.PARSER_PRE_IA,
+              'parsed_email',
+              'identificacion_ia',
+            ),
+            mockLlm(
+              'identificacion_ia',
+              'escudo',
+              'Identifica el expediente que se cierra en "{{*parsed_email.clean_title}}".',
+            ),
+            node(
+              'escudo',
+              NodeType.ESCUDO_POST_IA,
+              'validated_drupal_json',
               'destino_drupal',
               {
-                cronExpression: '0 8 * * 1-5',
+                contentMode: 'TEXT',
+                sourceNamespace: 'llm_response',
+                sourceFields: ['headline', 'summary'],
               },
             ),
             node(
@@ -795,14 +980,19 @@ describe('Pipelines operativos de la FSM (e2e)', () => {
                 bundle: 'node--page',
                 targetNodeUuid: OPEN_TENDERS_UUID,
                 destinationNodeUuid: CLOSED_TENDERS_UUID,
-                // Selector fijo: el trabajo programado se da de alta por
-                // expediente, igual que un cierre agendado en el portal.
-                itemSelector: '[data-expediente="LIC-2026-004"]',
+                // El selector fija el expediente VALIDADO por el escudo.
+                itemSelector:
+                  '[data-expediente="{{validated_drupal_json.validated_fields.headline}}"]',
               },
             ),
           ]),
         );
-        const executionId = await seedExecution(flowId, 'disparador_cron', {});
+        const executionId = await seedExecution(flowId, 'parser', {
+          raw_email: rawEmail(
+            'Cierre de la licitacion LIC-2026-004',
+            'LIC-2026-004\nSe comunica la adjudicacion del expediente de suministros IT.',
+          ),
+        });
 
         // 2. Act ⚙️
         await resume(executionId);
@@ -815,8 +1005,25 @@ describe('Pipelines operativos de la FSM (e2e)', () => {
           'LIC-2026-004',
         );
         expect(portal.pages.get(OPEN_TENDERS_UUID)).toContain('LIC-2026-001');
-        // Coste $0: ninguna inferencia registrada.
-        expect(await countTelemetry(executionId)).toBe(0);
+        // Hubo inferencia (simulada) y validacion post-IA, pero NO mapeador.
+        expect(done.contextPayload.llm_response?.metadata).toMatchObject({
+          isMock: true,
+        });
+        expect(done.contextPayload.rendered_html).toBeUndefined();
+        const okNodes = (await readNodeLogs(executionId))
+          .filter((log) => log.estado_nodo === 'OK')
+          .map((log) => log.id_nodo);
+        expect(okNodes).toEqual([
+          'parser',
+          'identificacion_ia',
+          'escudo',
+          'destino_drupal',
+        ]);
+        // El enlace apunta a la pagina de DESTINO del traslado.
+        expect(done.contextPayload.http_result).toMatchObject({
+          published_url: `${DRUPAL_SITE_ROOT}/e2e`,
+          exit_page: '/e2e',
+        });
       },
       CASE_TIMEOUT_MS,
     );
@@ -824,7 +1031,7 @@ describe('Pipelines operativos de la FSM (e2e)', () => {
 
   describe('4. Verificacion de titulos universitarios', () => {
     it(
-      '4.1 deberia insertar la tabla del .xlsx en el acordeon de su sigla y purgar el binario',
+      '4.1 deberia ensamblar el .xlsx en la plantilla e insertarlo en el acordeon de su sigla',
       async () => {
         // 1. Arrange 📐
         portal.pages.set(
@@ -834,14 +1041,37 @@ describe('Pipelines operativos de la FSM (e2e)', () => {
             '<div class="panel"><div id="collapseUPM"><p>Politecnica</p></div></div>' +
             '</div>',
         );
+        const templateId = await seedTemplate(
+          'Titulos',
+          '<div class="panel panel-default"><div class="panel-body"></div></div>',
+        );
         const flowId = await seedFlow((id) =>
           schemaOf(id, 'Verificacion de titulos', 'disparador_imap', [
             imapTrigger('parser'),
+            node('parser', NodeType.PARSER_PRE_IA, 'parsed_email', 'mapeador'),
             node(
-              'parser',
-              NodeType.PARSER_PRE_IA,
-              'parsed_email',
+              'mapeador',
+              NodeType.MAPEADOR_PLANTILLA,
+              'rendered_html',
+              'estructuracion_ia',
+              { templateId },
+            ),
+            mockLlm(
+              'estructuracion_ia',
+              'escudo',
+              'Estructura el panel de {{*parsed_email.clean_title}} con la tabla adjunta.\n\n' +
+                'PLANTILLA BASE: {{*rendered_html.compiled_markup}}',
+            ),
+            node(
+              'escudo',
+              NodeType.ESCUDO_POST_IA,
+              'validated_drupal_json',
               'destino_drupal',
+              {
+                contentMode: 'HTML',
+                sourceNamespace: 'llm_response',
+                sourceField: 'filled_markup',
+              },
             ),
             node(
               'destino_drupal',
@@ -853,8 +1083,8 @@ describe('Pipelines operativos de la FSM (e2e)', () => {
                 bundle: 'node--page',
                 targetNodeUuid: TITLES_UUID,
                 containerSelector: '#collapseUPM',
-                sourceNamespace: 'parsed_email',
-                sourceField: 'extracted_documents_text',
+                sourceNamespace: 'validated_drupal_json',
+                sourceField: 'validated_markup',
               },
             ),
           ]),
@@ -887,6 +1117,10 @@ describe('Pipelines operativos de la FSM (e2e)', () => {
         expect($('#collapseUCM').text()).not.toContain(
           'Grado en Ingenieria Informatica',
         );
+        expect(done.contextPayload.rendered_html).toBeDefined();
+        expect(
+          typeof done.contextPayload.validated_drupal_json?.audit_status,
+        ).toBe('string');
 
         // Purga del binario: el checkpoint ya no guarda los bytes del adjunto.
         const attachments = done.contextPayload.raw_email?.attachments as Array<
@@ -978,29 +1212,33 @@ describe('Pipelines operativos de la FSM (e2e)', () => {
 
   describe('6. Innodays / Innobar (UPDATE_LINK_SOURCE)', () => {
     it(
-      '6.1 deberia cambiar solo el href del enlace seleccionado',
+      '6.1 deberia extraer el enlace con IA, validarlo y cambiar solo el href seleccionado',
       async () => {
-        // 1. Arrange 📐
+        // 1. Arrange 📐: sin mapeador. El simulador devuelve como titular la
+        //    primera linea del correo, que hace aqui de URL extraida.
         const html =
           '<table><tr><td>Agrifood</td><td><a href="/old-agrifood.pdf">PDF</a></td></tr>' +
           '<tr><td>Salud</td><td><a href="/old-salud.pdf">PDF</a></td></tr></table>';
         portal.pages.set(INNODAYS_UUID, html);
         const flowId = await seedFlow((id) =>
-          // La IA que redacta la URL va en el esquema porque el validador
-          // exige un productor de `llm_response`; el cursor arranca despues de
-          // ella con su salida ya sembrada, asi que no corre.
           schemaOf(id, 'Innodays', 'disparador_imap', [
             imapTrigger('parser'),
-            node(
-              'parser',
-              NodeType.PARSER_PRE_IA,
-              'parsed_email',
-              'redaccion_ia',
-            ),
+            node('parser', NodeType.PARSER_PRE_IA, 'parsed_email', 'enlace_ia'),
             mockLlm(
-              'redaccion_ia',
+              'enlace_ia',
+              'escudo',
+              'Extrae el enlace del evento de "{{*parsed_email.clean_title}}".',
+            ),
+            node(
+              'escudo',
+              NodeType.ESCUDO_POST_IA,
+              'validated_drupal_json',
               'destino_drupal',
-              'Extrae la URL del PDF de Agrifood.',
+              {
+                contentMode: 'TEXT',
+                sourceNamespace: 'llm_response',
+                sourceFields: ['headline'],
+              },
             ),
             node(
               'destino_drupal',
@@ -1013,15 +1251,18 @@ describe('Pipelines operativos de la FSM (e2e)', () => {
                 targetNodeUuid: INNODAYS_UUID,
                 linkSelector: "table tr:contains('Agrifood') a",
                 linkAttribute: 'href',
-                linkValueTemplate: '{{llm_response.url}}',
+                // El valor que escribe es el que VALIDO el escudo.
+                linkValueTemplate:
+                  '{{validated_drupal_json.validated_fields.headline}}',
               },
             ),
           ]),
         );
-        const executionId = await seedExecution(flowId, 'destino_drupal', {
-          llm_response: {
-            url: 'https://www.madrimasd.org/innodays/agrifood-2026.pdf',
-          },
+        const executionId = await seedExecution(flowId, 'parser', {
+          raw_email: rawEmail(
+            'Innoday Agrifood: enlace de inscripcion',
+            'https://www.madrimasd.org/innodays/agrifood-2026.pdf\nYa esta disponible el programa del Innoday Agrifood.',
+          ),
         });
 
         // 2. Act ⚙️
@@ -1036,6 +1277,19 @@ describe('Pipelines operativos de la FSM (e2e)', () => {
             'href="https://www.madrimasd.org/innodays/agrifood-2026.pdf"',
           ),
         );
+        expect(done.contextPayload.llm_response?.metadata).toMatchObject({
+          isMock: true,
+        });
+        expect(done.contextPayload.rendered_html).toBeUndefined();
+        expect(
+          (await readNodeLogs(executionId))
+            .filter((log) => log.estado_nodo === 'OK')
+            .map((log) => log.id_nodo),
+        ).toEqual(['parser', 'enlace_ia', 'escudo', 'destino_drupal']);
+        expect(done.contextPayload.http_result).toMatchObject({
+          published_url: `${DRUPAL_SITE_ROOT}/e2e`,
+          exit_page: '/e2e',
+        });
       },
       CASE_TIMEOUT_MS,
     );
