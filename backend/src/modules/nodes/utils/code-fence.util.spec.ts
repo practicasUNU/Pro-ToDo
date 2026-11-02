@@ -65,4 +65,16 @@ describe('stripCodeFence · purga de vallas de bloque', () => {
     // 3. Assert 🎯
     expect(second).toBe(first);
   });
+
+  it('6. deberia tolerar espacios previos, CRLF y la etiqueta ```html del escudo', () => {
+    // 1. Arrange 📐: el escudo post-IA recibe markup con estas variantes, y
+    //    hasta ahora tenia su propia pareja de patrones para cubrirlas.
+    const wrapped = '  \r\n```HTML\r\n<p>Hola</p>\r\n```  \n';
+
+    // 2. Act ⚙️
+    const clean = stripCodeFence(wrapped);
+
+    // 3. Assert 🎯
+    expect(clean).toBe('<p>Hola</p>');
+  });
 });

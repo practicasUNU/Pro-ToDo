@@ -7,6 +7,7 @@ import sanitizeHtml from 'sanitize-html';
 import { NodeType } from '@core/fsm/types/pipeline-schema.types';
 import { TemplateRendererService } from '@modules/templates/services/template-renderer.service';
 import { RESIDUAL_MARKER_PATTERN } from '@modules/templates/templates.service';
+import { stripCodeFence } from '@modules/nodes/utils/code-fence.util';
 
 import {
   DEFAULT_POST_IA_SOURCE_NAMESPACE,
@@ -53,25 +54,6 @@ const VALIDATION_OPTIONS: ValidatorOptions = {
   whitelist: true,
   forbidNonWhitelisted: true,
 };
-
-/**
- * Valla de bloque de codigo markdown al principio del texto.
- *
- * Los modelos envuelven el HTML en ```` ```html ```` por habito de chat aunque
- * el prompt pida markup pelado, y esas seis comillas invertidas publicadas tal
- * cual aparecerian como texto literal en el articulo. Se podan en vez de
- * rechazarse: es un tic de formato del proveedor, no un fallo del contenido, y
- * detener el flujo por el obligaria a reintentar la inferencia —que cuesta
- * dinero— por algo que se arregla con un recorte.
- *
- * Anclada al inicio y tolerante a espacios y saltos previos. Un ```` ``` ```` en
- * MITAD del documento no se toca a proposito: ahi no es una valla envolvente
- * sino, con toda probabilidad, un bloque de codigo legitimo del articulo.
- */
-const LEADING_CODE_FENCE_PATTERN = /^\s*```[a-z]*[ \t]*\r?\n?/i;
-
-/** Valla de cierre al final del texto. Hermana de la anterior. */
-const TRAILING_CODE_FENCE_PATTERN = /\r?\n?[ \t]*```\s*$/;
 
 /**
  * Estado con el que el nodo sella un markup aprobado.
@@ -256,7 +238,7 @@ export class PostIaSanitizerStrategy implements INodeStrategy {
       };
     }
 
-    const markup = this.stripCodeFences(rawMarkup);
+    const markup = stripCodeFence(rawMarkup);
 
     // 4. Interpolaciones que el modelo dejo sin resolver. Va ANTES del saneado:
     //    ver el TSDoc de la clase.
@@ -380,7 +362,7 @@ export class PostIaSanitizerStrategy implements INodeStrategy {
 
     const texts = sourceFields.map((field) => [
       field,
-      this.stripCodeFences(String(sourcePayload[field])),
+      stripCodeFence(String(sourcePayload[field])),
     ]);
     const residualMarkers = [
       ...new Set(texts.flatMap(([, text]) => this.findResidualMarkers(text))),
@@ -474,18 +456,6 @@ export class PostIaSanitizerStrategy implements INodeStrategy {
     }
 
     return { config: resolvePostIaSanitizerConfig(dto) };
-  }
-
-  /**
-   * Retira las vallas de bloque de codigo que envuelven la respuesta.
-   *
-   * Solo las de los extremos; ver el TSDoc de `LEADING_CODE_FENCE_PATTERN`.
-   */
-  private stripCodeFences(text: string): string {
-    return text
-      .replace(LEADING_CODE_FENCE_PATTERN, '')
-      .replace(TRAILING_CODE_FENCE_PATTERN, '')
-      .trim();
   }
 
   /**

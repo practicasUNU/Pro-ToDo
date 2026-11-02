@@ -5,12 +5,12 @@
  * contenido legitimo del documento transcrito, y borrarlo seria destruir
  * justamente lo que el nodo de OCR viene a conservar.
  */
-const CODE_FENCE_PATTERN = /^```(?:[a-zA-Z]*)?[ \t]*\n?|\n?[ \t]*```$/g;
+const CODE_FENCE_PATTERN = /^\s*```[a-zA-Z]*[ \t]*\r?\n?|\r?\n?[ \t]*```\s*$/g;
 
 /**
  * Quita las vallas de los extremos y el espacio sobrante.
  *
- * Tiene DOS consumidores con el mismo problema y en momentos distintos del
+ * Tiene TRES consumidores con el mismo problema y en momentos distintos del
  * camino:
  *
  * 1. Los clientes de proveedor, ANTES de `JSON.parse`. Se le pide al modelo un
@@ -21,6 +21,10 @@ const CODE_FENCE_PATTERN = /^```(?:[a-zA-Z]*)?[ \t]*\n?|\n?[ \t]*```$/g;
  *    prohibe las vallas al modelo, pero esto es la red —una que se cuele acaba
  *    publicada tal cual en la noticia, porque nada mas abajo vuelve a mirar el
  *    texto—.
+ * 3. El ESCUDO_POST_IA, sobre el markup o el texto que audita: los modelos
+ *    envuelven el HTML en ```html por habito de chat. Tenia su propia pareja de
+ *    patrones (tolerante a espacios previos y a CRLF); se unificaron aqui para
+ *    que la regla no diverja entre el proveedor, el OCR y el escudo.
  *
  * Vivia dentro de `ocr-processor.strategy.ts` y era privada del modulo, asi que
  * el primer consumidor no podia usarla; copiarla habria dejado dos reglas que
