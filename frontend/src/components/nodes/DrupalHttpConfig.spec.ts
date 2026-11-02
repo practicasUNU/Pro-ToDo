@@ -892,15 +892,21 @@ describe('DrupalHttpConfig · configurador del nodo DESTINO_DRUPAL', () => {
     it('8.2 deberia avisar si no se pueden cargar las paginas, sin bloquear el formulario', async () => {
       // 1. Arrange 📐
       vi.mocked(fetchDrupalPresetTargets).mockRejectedValue(new Error('503'));
-      const before = notificationSnapshot().length;
+      // Por IDENTIDAD y no por recuento: si una notificacion de una prueba
+      // anterior caduca mientras esta corre, `slice(before)` se saltaria la
+      // nueva. Pasaba en la suite completa, donde el archivo va mas lento.
+      const previous = new Set(notificationSnapshot());
 
       // 2. Act ⚙️
       const wrapper = mountComponent(nextNodeId(), false, false);
-      await flushNotifications();
 
       // 3. Assert 🎯
-      const fresh = notificationSnapshot().slice(before);
-      expect(fresh.some((node) => node.textContent?.includes('No se pudieron cargar'))).toBe(true);
+      await vi.waitFor(() => {
+        const fresh = notificationSnapshot().filter((node) => !previous.has(node));
+        expect(fresh.some((node) => node.textContent?.includes('No se pudieron cargar'))).toBe(
+          true,
+        );
+      });
       expect(wrapper.find('[data-test="preset-abrir_licitacion"]').exists()).toBe(true);
     });
 
