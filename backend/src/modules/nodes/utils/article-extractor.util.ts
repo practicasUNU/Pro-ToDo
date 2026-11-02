@@ -3,6 +3,8 @@ import { JSDOM } from 'jsdom';
 import sanitizeHtml from 'sanitize-html';
 
 import {
+  deriveOrganizationFromHost,
+  extractDateFromUrl,
   extractHeadMetadata,
   extractReferences,
 } from '@modules/nodes/utils/article-metadata.util';
@@ -155,6 +157,32 @@ const flattenToPlainText = (markup: string): string => {
 };
 
 /**
+ * Fecha de publicacion por orden de fiabilidad: metadatos de cabecera (meta,
+ * JSON-LD, `<time>`), la que Readability deduce del documento y, por ultimo, la
+ * fecha codificada en la ruta de la URL.
+ *
+ * La de la URL va al final porque es la mas pobre (sin hora), pero basta para
+ * que la referencia bibliografica cite el dia real en vez de `(s. f.)`.
+ */
+const resolvePublishedAt = (
+  headDate: string | null,
+  readabilityDate: string | null | undefined,
+  sourceUrl: string,
+): string | null => {
+  if (headDate !== null) {
+    return headDate;
+  }
+
+  const parsed = readabilityDate ? Date.parse(readabilityDate) : Number.NaN;
+
+  if (!Number.isNaN(parsed)) {
+    return new Date(parsed).toISOString();
+  }
+
+  return extractDateFromUrl(sourceUrl);
+};
+
+/**
  * Aisla el articulo de una pagina web y lo devuelve como texto plano.
  *
  * Funcion PURA: no hace red ni toca disco, asi que se prueba con marcado fijo
@@ -206,16 +234,25 @@ export const extractArticle = (
     return null;
   }
 
-  // `byline` conserva el `null`: una cadena vacia diria "el autor es la cadena
-  // vacia", y el contrato de salida distingue "sin firma" de "firmado por nadie".
-  const byline = normalizeWhitespace(article.byline ?? '');
+  // Cadena vacia y ausencia se unifican en `null`: "firmado por nadie" no es
+  // una firma.
+  const rawByline = normalizeWhitespace(article.byline ?? '');
+  const readabilityByline = rawByline.length > 0 ? rawByline : null;
+  // Ultimo recurso de la firma: la organizacion que publica, deducida del
+  // dominio. Es el autor que APA 7 exige para una pagina sin firma personal.
+  const organization = deriveOrganizationFromHost(sourceUrl);
+  const author = head.author ?? readabilityByline ?? organization;
 
   return {
     title: normalizeWhitespace(article.title ?? ''),
-    byline: byline.length > 0 ? byline : null,
+    byline: readabilityByline ?? author,
     content,
-    author: head.author ?? (byline.length > 0 ? byline : null),
-    publishedAt: head.publishedAt,
+    author,
+    publishedAt: resolvePublishedAt(
+      head.publishedAt,
+      article.publishedTime,
+      sourceUrl,
+    ),
     references: extractReferences(article.content ?? '', sourceUrl),
   };
 };

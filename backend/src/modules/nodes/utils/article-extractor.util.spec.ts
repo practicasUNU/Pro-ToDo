@@ -126,9 +126,11 @@ describe('extractArticle', () => {
       // 2. Act
       const article = extractArticle(html, SOURCE_URL);
 
-      // 3. Assert: `null` y no cadena vacia. El contrato de salida distingue
-      //    "sin firma" de "firmado por nadie".
-      expect(article?.byline).toBeNull();
+      // 3. Assert: sin firma en el marcado, la firma es la organizacion que
+      //    publica, deducida del dominio (`diario.example` → `Diario`). Es el
+      //    autor que APA 7 usa para una pagina sin autor personal.
+      expect(article?.byline).toBe('Diario');
+      expect(article?.author).toBe('Diario');
     });
   });
 
@@ -229,7 +231,8 @@ describe('extractArticle', () => {
 
       // 3. Assert 🎯
       expect(article).not.toBeNull();
-      expect(article?.author).toBeNull();
+      // Sin autor legible, el del dominio; nunca el JSON-LD roto.
+      expect(article?.author).toBe('Diario');
       expect(article?.publishedAt).toBe('2026-09-18T10:00:00.000Z');
     });
 
@@ -306,9 +309,66 @@ describe('extractArticle', () => {
             `<p class="post-meta">Oct 3, 2026</p><p>${FILLER}</p>`,
         );
 
-        // 2. Act + 3. Assert 🎯
-        expect(extractArticle(html, SOURCE_URL)?.author).toBeNull();
+        // 2. Act + 3. Assert 🎯: ni la biografia ni la fecha suelta; cae en el
+        //    nombre del dominio.
+        expect(extractArticle(html, SOURCE_URL)?.author).toBe('Diario');
       });
+    });
+  });
+
+  describe('3. Fallbacks de fecha y autor', () => {
+    const F_DROID_URL =
+      'https://f-droid.org/es/2026/02/24/open-letter-to-the-community.html/';
+
+    it('3.1 deberia extraer la fecha de la URL cuando el documento no la declara', () => {
+      // 1. Arrange 📐
+      const html = buildDocument(`<p>${FILLER}</p><p>${FILLER}</p>`);
+
+      // 2. Act ⚙️
+      const article = extractArticle(html, F_DROID_URL);
+
+      // 3. Assert 🎯
+      expect(article?.publishedAt).toBe('2026-02-24');
+    });
+
+    it('3.2 deberia preferir la fecha de los <meta> a la de la URL', () => {
+      // 1. Arrange 📐
+      const html =
+        `<!DOCTYPE html><html lang="es"><head><title>Titular de la nota</title>` +
+        `<meta property="article:published_time" content="2026-02-25T09:30:00Z"></head>` +
+        `<body><article><p>${FILLER}</p></article></body></html>`;
+
+      // 2. Act ⚙️
+      const article = extractArticle(html, F_DROID_URL);
+
+      // 3. Assert 🎯
+      expect(article?.publishedAt).toBe('2026-02-25T09:30:00.000Z');
+    });
+
+    it('3.3 deberia firmar con la organizacion del dominio cuando no hay autor', () => {
+      // 1. Arrange 📐
+      const html = buildDocument(`<p>${FILLER}</p><p>${FILLER}</p>`);
+
+      // 2. Act ⚙️
+      const article = extractArticle(html, F_DROID_URL);
+
+      // 3. Assert 🎯
+      expect(article?.author).toBe('F-Droid');
+      expect(article?.byline).toBe('F-Droid');
+    });
+
+    it('3.4 deberia respetar el autor de los <meta> antes que el dominio', () => {
+      // 1. Arrange 📐
+      const html =
+        `<!DOCTYPE html><html lang="es"><head><title>Titular de la nota</title>` +
+        `<meta name="author" content="Equipo F-Droid"></head>` +
+        `<body><article><p>${FILLER}</p></article></body></html>`;
+
+      // 2. Act ⚙️
+      const article = extractArticle(html, F_DROID_URL);
+
+      // 3. Assert 🎯
+      expect(article?.author).toBe('Equipo F-Droid');
     });
   });
 });

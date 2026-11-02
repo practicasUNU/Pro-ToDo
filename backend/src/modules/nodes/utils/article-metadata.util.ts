@@ -242,6 +242,130 @@ const toIsoDate = (raw: string | null): string | null => {
 };
 
 /**
+ * Fecha estructurada en la ruta de la URL: `/2026/02/24/` o `/2026-02-24/`.
+ *
+ * Exige separadores a ambos lados para no confundir un identificador numerico
+ * (`/noticia/20260224123/`) con una fecha. El final de la ruta tambien cierra.
+ */
+export const URL_DATE_PATTERN = /\/(\d{4})[/-](\d{1,2})[/-](\d{1,2})(?:\/|$)/;
+
+/** Ventana de anios plausibles para una fecha de publicacion leida de la URL. */
+const MIN_URL_YEAR = 1990;
+const MAX_URL_YEAR = 2100;
+
+/**
+ * Segundos niveles genericos bajo un dominio de pais (`.com.es`, `.co.uk`):
+ * con ellos la etiqueta registrable es la tercera empezando por el final.
+ */
+const GENERIC_SECOND_LEVEL_LABELS = new Set([
+  'ac',
+  'co',
+  'com',
+  'edu',
+  'gob',
+  'gov',
+  'net',
+  'nom',
+  'org',
+]);
+
+/** Hostname IPv4 literal: no tiene un nombre de organizacion que derivar. */
+const IPV4_HOST_PATTERN = /^\d{1,3}(?:\.\d{1,3}){3}$/;
+
+const parseUrl = (url: string): URL | null => {
+  try {
+    return new URL(url);
+  } catch {
+    return null;
+  }
+};
+
+/**
+ * Ultimo recurso para la fecha de publicacion: la que el portal codifica en la
+ * ruta, habitual en blogs y salas de prensa
+ * (`https://f-droid.org/es/2026/02/24/open-letter-...`).
+ *
+ * Valida el dia REAL del calendario: `2026/02/31` no existe y devolverlo haria
+ * citar en APA una fecha que el portal nunca publico. Devuelve `YYYY-MM-DD` y
+ * no una marca ISO con hora, porque la URL no dice la hora y inventar la
+ * medianoche UTC desplazaria el dia en husos negativos.
+ *
+ * @param url URL final del articulo.
+ * @returns `YYYY-MM-DD`, o `null` si la ruta no trae una fecha valida.
+ */
+export const extractDateFromUrl = (url: string): string | null => {
+  const pathname = parseUrl(url)?.pathname;
+  const match = pathname === undefined ? null : URL_DATE_PATTERN.exec(pathname);
+
+  if (match === null) {
+    return null;
+  }
+
+  const [year, month, day] = match.slice(1, 4).map(Number);
+
+  if (year < MIN_URL_YEAR || year > MAX_URL_YEAR) {
+    return null;
+  }
+
+  const date = new Date(Date.UTC(year, month - 1, day));
+  const isRealDay =
+    date.getUTCFullYear() === year &&
+    date.getUTCMonth() === month - 1 &&
+    date.getUTCDate() === day;
+
+  return isRealDay ? date.toISOString().slice(0, 10) : null;
+};
+
+/** `f-droid` → `F-Droid`: cada tramo separado por guion, con mayuscula inicial. */
+const capitalizeLabel = (label: string): string =>
+  label
+    .split('-')
+    .filter((segment) => segment.length > 0)
+    .map((segment) => segment.charAt(0).toUpperCase() + segment.slice(1))
+    .join('-');
+
+/**
+ * Nombre de la organizacion editora deducido del dominio, para cuando el
+ * articulo no trae firma (`f-droid.org` → `F-Droid`).
+ *
+ * En APA 7 una pagina sin autor personal se cita por la organizacion que la
+ * publica, de modo que este valor no es un relleno: es el autor correcto de la
+ * referencia. Se descarta `www.` y se toma la etiqueta registrable, saltando
+ * los segundos niveles genericos (`ejemplo.com.es` → `Ejemplo`).
+ *
+ * @param url URL final del articulo.
+ * @returns El nombre, o `null` si la URL no tiene un dominio con nombre.
+ */
+export const deriveOrganizationFromHost = (url: string): string | null => {
+  const hostname = parseUrl(url)
+    ?.hostname.toLowerCase()
+    .replace(/^www\./, '');
+
+  if (
+    hostname === undefined ||
+    hostname === '' ||
+    IPV4_HOST_PATTERN.test(hostname)
+  ) {
+    return null;
+  }
+
+  const labels = hostname.split('.').filter((label) => label.length > 0);
+
+  if (labels.length < 2) {
+    return null;
+  }
+
+  const secondLevel = labels[labels.length - 2];
+  const registrable =
+    labels.length >= 3 && GENERIC_SECOND_LEVEL_LABELS.has(secondLevel)
+      ? labels[labels.length - 3]
+      : secondLevel;
+  const name = capitalizeLabel(registrable);
+
+  return name.length > 0 ? name : null;
+};
+
+/**
  * Autor y fecha de publicacion, por orden de fiabilidad. Autor: `<meta>`,
  * JSON-LD, selectores DOM y regex "por/by" en la cabecera. Fecha: `<meta>`,
  * JSON-LD `datePublished` y el primer `<time datetime>`.
