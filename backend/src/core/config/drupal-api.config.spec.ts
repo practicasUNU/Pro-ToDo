@@ -175,6 +175,26 @@ describe('DrupalApiConfig', () => {
       // 3. Assert 🎯
       expect(config.timeoutMs).toBe(15_000);
     });
+
+    it('3.4 deberia derivar la raiz publica quitando /jsonapi', () => {
+      // 1. Arrange 📐: es contra lo que se resuelven los alias publicados.
+      const config = buildConfig({
+        [DRUPAL_API_BASE_URL_VAR]: 'https://cms.example/jsonapi/',
+      });
+
+      // 3. Assert 🎯
+      expect(config.siteRootUrl).toBe('https://cms.example');
+    });
+
+    it('3.5 deberia usar el origen si la base no termina en /jsonapi', () => {
+      // 1. Arrange 📐: un proxy que monta la API en otra ruta.
+      const config = buildConfig({
+        [DRUPAL_API_BASE_URL_VAR]: 'https://cms.example/api/v1',
+      });
+
+      // 3. Assert 🎯
+      expect(config.siteRootUrl).toBe('https://cms.example');
+    });
   });
 
   describe('5. Paginas de los destinos rapidos (presetTargets)', () => {

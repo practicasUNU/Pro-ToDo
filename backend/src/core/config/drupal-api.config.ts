@@ -230,6 +230,9 @@ export const DEFAULT_DRUPAL_AUTH_TYPE: DrupalAuthType = 'BASIC';
  */
 export const DEFAULT_DRUPAL_API_BASE_URL = 'https://www.madrimasd.org/jsonapi';
 
+/** Sufijo del modulo JSON:API dentro de la base de la API. */
+const JSONAPI_SUFFIX = '/jsonapi';
+
 @Injectable()
 export class DrupalApiConfig {
   constructor(private readonly configService: ConfigService) {}
@@ -242,6 +245,28 @@ export class DrupalApiConfig {
       raw === undefined || raw.length === 0 ? DEFAULT_DRUPAL_API_BASE_URL : raw;
 
     return resolved.replace(/\/+$/, '');
+  }
+
+  /**
+   * Raiz PUBLICA del portal, sin barra final: la base de la API sin `/jsonapi`.
+   *
+   * Es contra lo que se resuelve el alias de un nodo para dar al operador el
+   * enlace que abre la pagina publicada (`https://portal/noticias/x`), no el
+   * recurso JSON:API. Si la base no termina en `/jsonapi` —un proxy que la
+   * monta en otra ruta— se usa su origen, que es la apuesta menos sorprendente.
+   */
+  public get siteRootUrl(): string {
+    const base = this.baseUrl;
+
+    if (base.toLowerCase().endsWith(JSONAPI_SUFFIX)) {
+      return base.slice(0, -JSONAPI_SUFFIX.length);
+    }
+
+    try {
+      return new URL(base).origin;
+    } catch {
+      return base;
+    }
   }
 
   /** Credencial de la cuenta, o cadena vacia si el entorno no la declara. */

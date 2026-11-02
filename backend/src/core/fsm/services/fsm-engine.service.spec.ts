@@ -4222,6 +4222,75 @@ describe('FsmEngineService (PROT-09)', () => {
       );
     });
 
+    it('36.1b deberia adjuntar la pagina publicada cuando cierra un destino Drupal', async () => {
+      // 1. Arrange 📐: el destino deja su enlace en SU namespace (`salida_c`
+      //    en este esquema), no necesariamente en `http_result`.
+      const { repo } = buildRepository(buildExecution());
+      const { engine, events } = buildListeningEngine(repo);
+      const emitFlowCompleted = jest.spyOn(events, 'emitFlowCompleted');
+
+      for (const nodeType of [NodeType.TRIGGER_IMAP, NodeType.PROCESADOR_IA]) {
+        factory.registerStrategy(
+          buildStrategy(
+            nodeType,
+            jest.fn().mockResolvedValue({ success: true, data: {} }),
+          ),
+        );
+      }
+      factory.registerStrategy(
+        buildStrategy(
+          NodeType.DESTINO_DRUPAL,
+          jest.fn().mockResolvedValue({
+            success: true,
+            data: {
+              published_url: 'https://portal.example/noticias/innovacion',
+              exit_page: '/noticias/innovacion',
+            },
+          }),
+        ),
+      );
+
+      // 2. Act ⚙️
+      await engine.executeWorkflow(EXECUTION_ID, buildLinearSchema());
+
+      // 3. Assert 🎯
+      expect(emitFlowCompleted).toHaveBeenCalledWith(
+        expect.objectContaining({
+          finalState: ExecutionState.EXITOSO,
+          publishedUrl: 'https://portal.example/noticias/innovacion',
+          exitPage: '/noticias/innovacion',
+        }),
+      );
+    });
+
+    it('36.1c NO deberia adjuntar enlace si el destino no devolvio URL', async () => {
+      // 1. Arrange 📐: la interfaz decide por la presencia del campo.
+      const { repo } = buildRepository(buildExecution());
+      const { engine, events } = buildListeningEngine(repo);
+      const emitFlowCompleted = jest.spyOn(events, 'emitFlowCompleted');
+
+      for (const nodeType of [
+        NodeType.TRIGGER_IMAP,
+        NodeType.PROCESADOR_IA,
+        NodeType.DESTINO_DRUPAL,
+      ]) {
+        factory.registerStrategy(
+          buildStrategy(
+            nodeType,
+            jest.fn().mockResolvedValue({ success: true, data: {} }),
+          ),
+        );
+      }
+
+      // 2. Act ⚙️
+      await engine.executeWorkflow(EXECUTION_ID, buildLinearSchema());
+
+      // 3. Assert 🎯
+      const [event] = emitFlowCompleted.mock.calls[0] ?? [];
+      expect(event).toBeDefined();
+      expect(event).not.toHaveProperty('publishedUrl');
+    });
+
     it('36.2 deberia anunciar OMITIDO cuando un nodo pide parada ordenada', async () => {
       // 1. Arrange 📐: un buzon vacio no es un exito, y anunciarlo como tal
       //    haria creer que se publico algo.

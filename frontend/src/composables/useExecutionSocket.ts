@@ -8,6 +8,8 @@ import { useExecutionStore } from '@stores/execution.store';
 import { useExecutionsStore } from '@stores/executions.store';
 import { useWorkflowsStore } from '@stores/workflows.store';
 
+import DrupalPublishSuccessModal from '@components/workflows/DrupalPublishSuccessModal.vue';
+
 import { ExecutionState } from '@/types/execution';
 import {
   ALERTING_SEVERITIES,
@@ -281,6 +283,21 @@ export const useExecutionSocket = (): void => {
    * `OMITIDO` —el buzon no traia nada— en verde haria creer que se publico
    * algo, y en rojo mandaria a investigar una ejecucion que funciono.
    */
+  /**
+   * Si este cliente debe ofrecer el enlace de la publicacion.
+   *
+   * `flow:completed` se emite a TODOS los clientes conectados, asi que un
+   * dialogo persistente sin este filtro interrumpiria a cada operador con las
+   * publicaciones de flujos ajenos. Solo lo ve quien tiene abierta la sala del
+   * flujo, es decir, quien lo esta siguiendo; los demas reciben el toast.
+   */
+  const shouldOfferPublication = (
+    event: FlowCompletedEvent,
+  ): event is FlowCompletedEvent & { publishedUrl: string } =>
+    typeof event.publishedUrl === 'string' &&
+    event.publishedUrl.length > 0 &&
+    executionStore.joinedFlowIds.has(event.flowId);
+
   const onFlowCompleted = (event: FlowCompletedEvent): void => {
     executionStore.handleFlowCompleted(event);
     // El flujo dejo de estar PAUSADO: su banner ya no describe nada cierto.
@@ -289,6 +306,21 @@ export const useExecutionSocket = (): void => {
     canvasStore.handleFlowCompleted(event);
 
     const flow = describeFlow(event.flowName, event.flowId);
+
+    if (event.finalState === ExecutionState.EXITOSO && shouldOfferPublication(event)) {
+      // Dialogo persistente y no toast: el enlace es lo unico util del aviso,
+      // y un toast que se desvanece lo perderia si el operador no esta mirando.
+      $q.dialog({
+        component: DrupalPublishSuccessModal,
+        componentProps: {
+          publishedUrl: event.publishedUrl,
+          exitPage: event.exitPage,
+          flowName: event.flowName,
+        },
+      });
+
+      return;
+    }
 
     if (event.finalState === ExecutionState.EXITOSO) {
       $q.notify({

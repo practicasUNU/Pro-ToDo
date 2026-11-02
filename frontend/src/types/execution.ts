@@ -210,6 +210,13 @@ export interface FlowCompletedEvent extends ExecutionEventBase {
   readonly finalState: ExecutionState;
   readonly flowName?: string;
   readonly failureReason?: string | null;
+  /**
+   * URL absoluta de la pagina publicada. Solo llega en un `EXITOSO` cuyo
+   * ultimo nodo fue `DESTINO_DRUPAL` y devolvio una pagina.
+   */
+  readonly publishedUrl?: string;
+  /** Ruta publica (alias o `/node/{nid}`) de esa misma pagina. */
+  readonly exitPage?: string;
 }
 
 export interface FlowResumedEvent extends ExecutionEventBase {

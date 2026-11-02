@@ -8,7 +8,10 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { useExecutionSocket } from './useExecutionSocket';
 
 import { useCanvasStore } from '@stores/canvas.store';
+import { useExecutionStore } from '@stores/execution.store';
 import { useWorkflowsStore } from '@stores/workflows.store';
+
+import DrupalPublishSuccessModal from '@components/workflows/DrupalPublishSuccessModal.vue';
 
 import { ExecutionState } from '@/types/execution';
 
@@ -52,6 +55,8 @@ vi.mock('@services/socket-events.service', () => ({
  * y un doble que devuelva `undefined` haria pasar las pruebas sin comprobarlo.
  */
 const dismiss = vi.fn();
+/** Doble de `$q.dialog`: el modal de publicacion se abre por el plugin. */
+const dialog = vi.fn();
 const notify = vi.fn((options: QNotifyCreateOptions) => {
   void options;
   return dismiss;
@@ -59,7 +64,7 @@ const notify = vi.fn((options: QNotifyCreateOptions) => {
 
 vi.mock('quasar', async () => {
   const actual = await vi.importActual<typeof QuasarModule>('quasar');
-  return { ...actual, useQuasar: () => ({ notify }) };
+  return { ...actual, useQuasar: () => ({ notify, dialog }) };
 });
 
 // Sin esto se cargaria `@boot/axios`, que necesita entorno de navegador.
@@ -161,6 +166,7 @@ describe('useExecutionSocket', () => {
     registered = null;
     notify.mockClear();
     dismiss.mockClear();
+    dialog.mockClear();
     unsubscribe.mockClear();
     // Faltaba: es compartido entre pruebas, asi que cualquier otra que
     // desmonte el anfitrion le sumaba una llamada a la que lo comprueba.
@@ -442,6 +448,57 @@ describe('useExecutionSocket', () => {
     const options = lastNotifyOptions();
     expect(options.type).toBe('positive');
     expect(options.message).toContain('NOTIWEB Licitaciones');
+  });
+
+  describe('Publicacion en Drupal', () => {
+    const PUBLISHED = {
+      publishedUrl: 'https://portal.example/noticias/innovacion',
+      exitPage: '/noticias/innovacion',
+    };
+
+    it('deberia abrir el modal persistente con el enlace si se sigue el flujo', () => {
+      // Arrange 📐: el operador tiene abierta la sala del flujo.
+      mountHost();
+      useExecutionStore().joinedFlowIds = new Set([FLOW_ID]);
+
+      // Act ⚙️
+      registered?.onFlowCompleted?.(buildCompleted(PUBLISHED));
+
+      // Assert 🎯: dialogo en lugar de toast, con la URL y la pagina.
+      expect(dialog).toHaveBeenCalledWith({
+        component: DrupalPublishSuccessModal,
+        componentProps: {
+          ...PUBLISHED,
+          flowName: 'NOTIWEB Licitaciones',
+        },
+      });
+      expect(notify).not.toHaveBeenCalled();
+    });
+
+    it('NO deberia interrumpir con el modal a quien no sigue el flujo', () => {
+      // Arrange 📐: `flow:completed` llega a todos los clientes conectados.
+      mountHost();
+
+      // Act ⚙️
+      registered?.onFlowCompleted?.(buildCompleted(PUBLISHED));
+
+      // Assert 🎯
+      expect(dialog).not.toHaveBeenCalled();
+      expect(lastNotifyOptions().type).toBe('positive');
+    });
+
+    it('NO deberia abrir el modal si el cierre no trae enlace', () => {
+      // Arrange 📐
+      mountHost();
+      useExecutionStore().joinedFlowIds = new Set([FLOW_ID]);
+
+      // Act ⚙️
+      registered?.onFlowCompleted?.(buildCompleted());
+
+      // Assert 🎯
+      expect(dialog).not.toHaveBeenCalled();
+      expect(lastNotifyOptions().type).toBe('positive');
+    });
   });
 
   it('NO deberia pintar como exito un cierre OMITIDO', () => {

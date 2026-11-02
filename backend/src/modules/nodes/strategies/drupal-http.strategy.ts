@@ -129,6 +129,27 @@ const emptyToNull = (value: string | null): string | null => {
   return trimmed.length === 0 ? null : trimmed;
 };
 
+/**
+ * Contrato del namespace `http_result` que deposita el destino Drupal.
+ *
+ * Los nueve campos se emiten SIEMPRE, con valores neutros donde no aplican
+ * (`''`, `0`), para que un nodo posterior pueda interpolar cualquiera sin saber
+ * con que modo corrio el destino.
+ */
+export interface DrupalHttpResultData {
+  node_id: string;
+  drupal_internal__nid: number;
+  path_alias: string;
+  operation_applied: string;
+  http_status: number;
+  published_at: string;
+  attachment_url: string;
+  /** URL absoluta de la pagina publicada o afectada; vacia si no hay pagina. */
+  published_url: string;
+  /** Ruta publica (alias o `/node/{nid}`) de la pagina publicada o afectada. */
+  exit_page: string;
+}
+
 /** Campos del payload, antes de pasar por el constructor que fija la paridad. */
 interface DrupalResultFields {
   readonly nodeId?: string;
@@ -317,9 +338,10 @@ export class DrupalHttpStrategy extends BaseHttpDestinationStrategy {
   public readonly paramsSchema = DrupalHttpConfigDto;
 
   /**
-   * Las seis claves que este nodo deposita en su namespace.
+   * Las nueve claves que este nodo deposita en su namespace
+   * (`DrupalHttpResultData`).
    *
-   * Los CUATRO modos emiten las seis, con valores neutros donde no aplican. Es
+   * Los CINCO modos emiten las nueve, con valores neutros donde no aplican. Es
    * lo que permite que un nodo de aguas abajo —o la trazabilidad— interpole
    * `{{http_result.node_id}}` sin saber con que modo corrio el destino.
    */
@@ -362,6 +384,18 @@ export class DrupalHttpStrategy extends BaseHttpDestinationStrategy {
       type: 'text',
       description:
         'URL publica del fichero subido; vacia si el modo no sube nada o si la subida se omitio',
+    },
+    {
+      name: 'published_url',
+      type: 'text',
+      description:
+        'URL absoluta de la pagina publicada (CREATE_NODE) o de la pagina afectada por la mutacion; en UPLOAD_ATTACHMENT, la del fichero',
+    },
+    {
+      name: 'exit_page',
+      type: 'text',
+      description:
+        'Ruta publica (alias o /node/{nid}) de la pagina publicada o afectada; vacia si no hay pagina',
     },
   ];
 
@@ -1947,7 +1981,7 @@ export class DrupalHttpStrategy extends BaseHttpDestinationStrategy {
     fields: DrupalResultFields,
     mode: DrupalOperationMode,
   ): Record<string, unknown> {
-    return {
+    const payload: DrupalHttpResultData = {
       node_id: fields.nodeId ?? NEUTRAL_TEXT,
       drupal_internal__nid: fields.internalNid ?? NEUTRAL_NID,
       path_alias: fields.pathAlias ?? NEUTRAL_TEXT,
@@ -1955,6 +1989,56 @@ export class DrupalHttpStrategy extends BaseHttpDestinationStrategy {
       http_status: fields.httpStatus ?? NEUTRAL_STATUS,
       published_at: fields.publishedAt ?? NEUTRAL_TEXT,
       attachment_url: fields.attachmentUrl ?? NEUTRAL_TEXT,
+      ...this.resolvePublicLocation(fields, mode),
+    };
+
+    return { ...payload };
+  }
+
+  /**
+   * Donde puede el operador ver el resultado: ruta publica y URL absoluta.
+   *
+   * Se deriva de lo que Drupal DEVOLVIO (alias o nid del nodo creado, o de la
+   * pagina mutada que ya se leyo para el PATCH), no de la configuracion: el
+   * UUID del nodo no es navegable y un alias escrito a mano en el flujo se
+   * desactualiza en cuanto un editor renombra la pagina. Sin alias se usa la
+   * ruta canonica `/node/{nid}`, que Drupal resuelve siempre.
+   *
+   * UPLOAD_ATTACHMENT es la excepcion: no afecta a ninguna pagina, y su
+   * `path_alias` ya lleva la URL del fichero, que es lo unico que abrir.
+   */
+  private resolvePublicLocation(
+    fields: DrupalResultFields,
+    mode: DrupalOperationMode,
+  ): Pick<DrupalHttpResultData, 'published_url' | 'exit_page'> {
+    if (mode === DrupalOperationMode.UPLOAD_ATTACHMENT) {
+      const fileUrl = fields.attachmentUrl?.trim() ?? '';
+
+      return {
+        // Drupal devuelve la ruta del fichero relativa al sitio.
+        published_url: fileUrl.startsWith('/')
+          ? `${this.drupalApiConfig.siteRootUrl}${fileUrl}`
+          : fileUrl,
+        exit_page: NEUTRAL_TEXT,
+      };
+    }
+
+    const alias = fields.pathAlias?.trim() ?? '';
+    const nid = fields.internalNid ?? NEUTRAL_NID;
+    let exitPage: string = NEUTRAL_TEXT;
+
+    if (alias.length > 0) {
+      exitPage = alias.startsWith('/') ? alias : `/${alias}`;
+    } else if (nid > 0) {
+      exitPage = `/node/${nid}`;
+    }
+
+    return {
+      published_url:
+        exitPage.length > 0
+          ? `${this.drupalApiConfig.siteRootUrl}${exitPage}`
+          : NEUTRAL_TEXT,
+      exit_page: exitPage,
     };
   }
 

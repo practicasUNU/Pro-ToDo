@@ -76,6 +76,7 @@ const buildApiConfig = (
 ): DrupalApiConfig =>
   ({
     baseUrl: BASE_URL,
+    siteRootUrl: BASE_URL.replace(/\/jsonapi$/, ''),
     token,
     user: API_USER,
     authType: 'BASIC',
@@ -626,6 +627,30 @@ describe('DrupalHttpStrategy', () => {
         operation_applied: DrupalOperationMode.CREATE_NODE,
         http_status: 200,
         published_at: '2026-10-05T12:00:00+00:00',
+        // La raiz publica es la base de la API sin `/jsonapi`.
+        published_url: 'https://drupal.example/noticias/innovacion',
+        exit_page: '/noticias/innovacion',
+      });
+    });
+
+    it('1.7 deberia caer en /node/{nid} cuando Drupal no devuelve alias', async () => {
+      // 1. Arrange 📐: un nodo sin Pathauto no tiene alias, pero Drupal
+      //    resuelve siempre su ruta canonica.
+      const httpClient = buildHttpMock();
+      httpClient.requestWithStatus.mockResolvedValue(
+        entityResponse({ drupal_internal__nid: 55_941 }, 'uuid-sin-alias'),
+      );
+      const strategy = buildStrategy(httpClient);
+
+      // 2. Act ⚙️
+      const result = await strategy.execute(buildContext(), {
+        titleTemplate: 'Titular',
+      });
+
+      // 3. Assert 🎯
+      expect(result.data).toMatchObject({
+        published_url: 'https://drupal.example/node/55941',
+        exit_page: '/node/55941',
       });
     });
   });
@@ -800,6 +825,9 @@ describe('DrupalHttpStrategy', () => {
         drupal_internal__nid: 55_937,
         path_alias: '/prueba-licitaciones',
         http_status: 204,
+        // La pagina afectada por la insercion, no un nodo nuevo.
+        published_url: 'https://drupal.example/prueba-licitaciones',
+        exit_page: '/prueba-licitaciones',
       });
     });
 
@@ -2298,6 +2326,10 @@ describe('DrupalHttpStrategy', () => {
         node_id: 'uuid-fichero',
         path_alias: '/sites/default/files/expediente.pdf',
         drupal_internal__nid: 0,
+        // No hay pagina afectada: el enlace util es el del fichero, absoluto.
+        published_url:
+          'https://drupal.example/sites/default/files/expediente.pdf',
+        exit_page: '',
       });
     });
 
@@ -2399,7 +2431,7 @@ describe('DrupalHttpStrategy', () => {
       ]);
     });
 
-    it('5.8 deberia conservar las SIETE claves de salida tambien al fallar', async () => {
+    it('5.8 deberia conservar las NUEVE claves de salida tambien al fallar', async () => {
       // 1. Arrange 📐: es la regresion que vigila esta prueba. El reparto de
       //    codigos vive ahora en `BaseHttpDestinationStrategy`, compartido con
       //    el futuro destino de Acens, pero el `data` NO: cada nodo tiene su
@@ -2421,13 +2453,17 @@ describe('DrupalHttpStrategy', () => {
       expect(Object.keys(result.data ?? {}).sort()).toEqual([
         'attachment_url',
         'drupal_internal__nid',
+        'exit_page',
         'http_status',
         'node_id',
         'operation_applied',
         'path_alias',
         'published_at',
+        'published_url',
       ]);
       expect(result.data?.http_status).toBe(503);
+      // Sin pagina publicada no hay enlace que ofrecer.
+      expect(result.data).toMatchObject({ published_url: '', exit_page: '' });
     });
 
     it('5.7 deberia conservar el diagnostico que ya traia el cliente HTTP', async () => {
@@ -2526,7 +2562,7 @@ describe('DrupalHttpStrategy', () => {
   });
 
   describe('7. Inventario de salida (outputFields)', () => {
-    it('7.1 deberia declarar las siete claves del namespace', () => {
+    it('7.1 deberia declarar las nueve claves del namespace', () => {
       const strategy = buildStrategy(buildHttpMock());
 
       expect(strategy.outputFields.map((field) => field.name)).toEqual([
@@ -2537,6 +2573,8 @@ describe('DrupalHttpStrategy', () => {
         'http_status',
         'published_at',
         'attachment_url',
+        'published_url',
+        'exit_page',
       ]);
     });
 
@@ -2557,7 +2595,7 @@ describe('DrupalHttpStrategy', () => {
       );
     };
 
-    it('7.2 deberia emitir las siete claves en CREATE_NODE', async () => {
+    it('7.2 deberia emitir las nueve claves en CREATE_NODE', async () => {
       const httpClient = buildHttpMock();
       httpClient.requestWithStatus.mockResolvedValue(entityResponse());
       const strategy = buildStrategy(httpClient);
@@ -2569,7 +2607,7 @@ describe('DrupalHttpStrategy', () => {
       expectParity(strategy, result.data);
     });
 
-    it('7.3 deberia emitir las siete claves en APPEND_HTML_BLOCK', async () => {
+    it('7.3 deberia emitir las nueve claves en APPEND_HTML_BLOCK', async () => {
       const httpClient = buildHttpMock();
       httpClient.requestWithStatus
         .mockResolvedValueOnce(pageResponse(''))
@@ -2585,7 +2623,7 @@ describe('DrupalHttpStrategy', () => {
       expectParity(strategy, result.data);
     });
 
-    it('7.4 deberia emitir las siete claves en TRANSFER_HTML_BLOCK', async () => {
+    it('7.4 deberia emitir las nueve claves en TRANSFER_HTML_BLOCK', async () => {
       const httpClient = buildHttpMock();
       httpClient.requestWithStatus
         .mockResolvedValueOnce(pageResponse(BLOCK, PAGE_UUID))
@@ -2605,7 +2643,46 @@ describe('DrupalHttpStrategy', () => {
       expectParity(strategy, result.data);
     });
 
-    it('7.5 deberia emitir las siete claves en UPLOAD_ATTACHMENT', async () => {
+    it('7.4b deberia enlazar la pagina de DESTINO en TRANSFER_HTML_BLOCK', async () => {
+      // 1. Arrange 📐: el expediente acaba en la pagina de cerradas, que es la
+      //    que el operador quiere abrir para comprobar el traslado.
+      const closedPage = (): { data: unknown; status: number } =>
+        entityResponse(
+          {
+            drupal_internal__nid: 55_938,
+            path: { alias: '/prueba-licitaciones-cerradas' },
+            body: { value: '', format: 'full_html' },
+            changed: '2026-10-05T10:00:00+00:00',
+          },
+          CLOSED_UUID,
+          { field_adjuntos: { data: null } },
+        );
+      const httpClient = buildHttpMock();
+      httpClient.requestWithStatus
+        .mockResolvedValueOnce(pageResponse(BLOCK, PAGE_UUID))
+        .mockResolvedValueOnce(closedPage())
+        .mockResolvedValueOnce(closedPage())
+        .mockResolvedValueOnce(pageResponse('', PAGE_UUID));
+      const strategy = buildStrategy(httpClient);
+
+      // 2. Act ⚙️
+      const result = await strategy.execute(buildContext(), {
+        operationMode: DrupalOperationMode.TRANSFER_HTML_BLOCK,
+        bundle: 'node--page',
+        targetNodeUuid: PAGE_UUID,
+        destinationNodeUuid: CLOSED_UUID,
+        itemSelector: EXPEDIENTE,
+      });
+
+      // 3. Assert 🎯
+      expect(result.success).toBe(true);
+      expect(result.data).toMatchObject({
+        published_url: 'https://drupal.example/prueba-licitaciones-cerradas',
+        exit_page: '/prueba-licitaciones-cerradas',
+      });
+    });
+
+    it('7.5 deberia emitir las nueve claves en UPLOAD_ATTACHMENT', async () => {
       const httpClient = buildHttpMock();
       httpClient.requestWithStatus.mockResolvedValue(entityResponse());
       const strategy = buildStrategy(httpClient);

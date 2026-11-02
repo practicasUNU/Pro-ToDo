@@ -47,6 +47,7 @@ import type { NodeTraceReceipt } from '@modules/logs/services/hybrid-logger.serv
 import type { ResolvedErrorRoute } from '@core/fsm/utils/pipeline-topology.util';
 import type { Repository } from 'typeorm';
 import type { QueryDeepPartialEntity } from 'typeorm/query-builder/QueryPartialEntity';
+import type { FlowCompletedEvent } from '@common/types/execution-events.types';
 
 /** Namespace reservado donde aterriza el `initialPayload` del disparador. */
 export const TRIGGER_NAMESPACE = 'trigger';
@@ -421,6 +422,38 @@ const resolveReportedAttempts = (
 /** Espera pasiva; solo se invoca cuando el nodo declara un backoff real. */
 const sleep = (milliseconds: number): Promise<void> =>
   new Promise((resolve) => setTimeout(resolve, milliseconds));
+
+/** Enlace a la pagina publicada que acompana al aviso de cierre. */
+type DrupalPublication = Pick<FlowCompletedEvent, 'publishedUrl' | 'exitPage'>;
+
+/**
+ * Lee del contexto final la pagina que publico el destino Drupal, en el
+ * namespace que declaro ese nodo (por convencion `http_result`).
+ *
+ * Devuelve un objeto vacio, y no campos con cadena vacia, cuando no hay URL: el
+ * evento solo debe llevar `publishedUrl` si de verdad hay algo que abrir, y la
+ * interfaz decide por la mera presencia del campo.
+ */
+const readDrupalPublication = (
+  context: StatePayloadContext,
+  namespace: string,
+): DrupalPublication => {
+  const result = context.getNamespace(namespace);
+  const publishedUrl = result?.published_url;
+
+  if (typeof publishedUrl !== 'string' || publishedUrl.trim().length === 0) {
+    return {};
+  }
+
+  const exitPage = result?.exit_page;
+
+  return {
+    publishedUrl,
+    ...(typeof exitPage === 'string' && exitPage.length > 0
+      ? { exitPage }
+      : {}),
+  };
+};
 
 /**
  * Orquestador del motor FSM.
@@ -1142,6 +1175,9 @@ export class FsmEngineService {
        * avisa; si reincorpora el flujo y llega al nodo final, el trabajo se hizo.
        */
       let lastCompletedNodeType: NodeType | null = null;
+      // Namespace del mismo nodo: el aviso de cierre lee de ahi la pagina que
+      // publico un destino Drupal, sin suponer que se llama `http_result`.
+      let lastCompletedNamespace: string | null = null;
 
       while (cursor !== null) {
         /**
@@ -1349,6 +1385,7 @@ export class FsmEngineService {
 
         if (result.success) {
           lastCompletedNodeType = node.nodeType;
+          lastCompletedNamespace = node.outputNamespace;
 
           // Mismo punto y mismo motivo que la liberacion de binarios: domina
           // las tres salidas de exito que siguen. No hay simetrico para el
@@ -1607,6 +1644,7 @@ export class FsmEngineService {
           retryState,
           contingency,
           lastCompletedNodeType,
+          lastCompletedNamespace,
           // Se lee de la entidad y no de una variable del bucle porque es donde
           // lo dejo la rama de `halt`, unas lineas mas arriba.
           execution.haltReason !== undefined,
@@ -2301,6 +2339,7 @@ export class FsmEngineService {
    *
    * @param contingency Ultimo desvio, o `null` si el recorrido fue nominal.
    * @param lastCompletedNodeType Tipo del ultimo nodo que completo con exito.
+   * @param lastCompletedNamespace Namespace donde escribio ese mismo nodo.
    * @param wasHalted El bucle termino porque un nodo pidio parada ordenada.
    * @param flowName Nombre legible del flujo, para los avisos de la interfaz.
    */
@@ -2316,6 +2355,7 @@ export class FsmEngineService {
       trace: NodeTraceReceipt;
     } | null,
     lastCompletedNodeType: NodeType | null,
+    lastCompletedNamespace: string | null,
     wasHalted: boolean,
     options: ExecuteWorkflowOptions,
   ): Promise<void> {
@@ -2348,7 +2388,17 @@ export class FsmEngineService {
         retryState,
       });
 
-      this.emitCompleted(execution, finalState, options.flowName);
+      this.emitCompleted(
+        execution,
+        finalState,
+        options.flowName,
+        undefined,
+        finalState === ExecutionState.EXITOSO &&
+          lastCompletedNodeType === NodeType.DESTINO_DRUPAL &&
+          lastCompletedNamespace !== null
+          ? readDrupalPublication(context, lastCompletedNamespace)
+          : {},
+      );
       return;
     }
 
@@ -2541,6 +2591,7 @@ export class FsmEngineService {
     finalState: ExecutionState,
     flowName?: string,
     failureReason?: string | null,
+    publication: DrupalPublication = {},
   ): void {
     this.executionEvents.emitFlowCompleted({
       executionId: execution.executionId,
@@ -2549,6 +2600,7 @@ export class FsmEngineService {
       finalState,
       ...(flowName !== undefined ? { flowName } : {}),
       ...(failureReason !== undefined ? { failureReason } : {}),
+      ...publication,
     });
   }
 

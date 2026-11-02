@@ -193,6 +193,14 @@ export interface FlowCompletedEvent extends ExecutionEventBase {
   readonly flowName?: string;
   /** Motivo persistido en `motivo_fallo`, o `null` si no hubo. */
   readonly failureReason?: string | null;
+  /**
+   * URL absoluta de la pagina publicada en Drupal. Solo en un `EXITOSO` cuyo
+   * ultimo nodo fue `DESTINO_DRUPAL`: es lo que permite a la interfaz ofrecer
+   * el enlace sin pedir el checkpoint.
+   */
+  readonly publishedUrl?: string;
+  /** Ruta publica (alias o `/node/{nid}`) de esa misma pagina. */
+  readonly exitPage?: string;
 }
 
 /**
