@@ -1,5 +1,8 @@
 import { NodeType } from '@core/fsm/types/pipeline-schema.types';
-import { BlockedOutboundTargetError } from '@core/http/outbound-url.guard';
+import {
+  BlockedOutboundTargetError,
+  OutboundTargetGuard,
+} from '@core/http/outbound-url.guard';
 import {
   ApiKeyPlacement,
   CredentialAuthType,
@@ -347,6 +350,41 @@ describe('HttpGenericDestinationStrategy (DESTINO_HTTP_GENERICO)', () => {
       // 3. Assert 🎯
       expect(sentConfig(http).lookup).toBe(guard.lookup);
     });
+    it.each([
+      ['loopback con puerto', 'http://127.0.0.1:8080/admin'],
+      ['red privada 192.168/16', 'http://192.168.1.50'],
+      ['red privada 10/8', 'http://10.0.0.7/api'],
+      ['red privada 172.16/12', 'http://172.20.4.1/hook'],
+      [
+        'enlace local (metadatos cloud)',
+        'http://169.254.169.254/latest/meta-data',
+      ],
+    ])(
+      '2.3 deberia bloquear con la guarda REAL un destino %s (%s)',
+      async (_label, targetUrl) => {
+        // 1. Arrange 📐: guarda de verdad; con IP literal no hay resolucion DNS
+        //    externa, de modo que la prueba sigue sin tocar la red.
+        const http: HttpMock = {
+          requestWithResponse: jest.fn().mockResolvedValue(OK_RESPONSE),
+        };
+        const vault: VaultMock = {
+          resolveSecret: jest.fn().mockResolvedValue({ reason: 'NOT_FOUND' }),
+        };
+        const strategy = new HttpGenericDestinationStrategy(
+          http as unknown as HttpClientService,
+          vault as unknown as CredentialsService,
+          new OutboundTargetGuard(),
+        );
+
+        // 2. Act ⚙️
+        const result = await strategy.execute(buildContext(), { targetUrl });
+
+        // 3. Assert 🎯
+        expect(result.success).toBe(false);
+        expect(result.error?.code).toBe(ERR_HTTP_GENERIC_TARGET_BLOCKED);
+        expect(http.requestWithResponse).not.toHaveBeenCalled();
+      },
+    );
   });
 
   describe('3. Autenticacion por credencial de la boveda', () => {
