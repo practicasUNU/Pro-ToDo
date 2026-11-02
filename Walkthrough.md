@@ -9406,3 +9406,34 @@ mapeador.
 - [x] Selector en el frontend
 - [x] E2E con la base de pruebas al dia (migraciones 061–067)
 - [ ] Validar el texto de los prompts al guardarlos
+
+## Resiliencia IMAP y metadatos del extractor web
+
+- **Por que el fallo era de clasificacion y no de timeouts:** la fabrica ya fijaba los temporizadores y el `finally` ya cerraba el socket. Lo que faltaba es que el `CONNECT_TIMEOUT` de `imapflow` no lleva `errno`, asi que cada microcorte se registraba como averia del buzon en cada ciclo.
+- **Por que 45 s de conexion en el worker y no 60:** corre cada minuto en segundo plano; rendirse antes solo cuesta esperar al ciclo siguiente, y colgarse encadenaba ciclos saltados por la guarda de solapamiento.
+- **Por que la fecha de la URL va al final de la cascada:** no tiene hora; basta para citar el dia real en APA, pero una meta o un JSON-LD son mas fiables.
+- **Por que el autor cae en la organizacion del dominio:** en APA 7 una pagina sin autor personal se cita por la organizacion editora; no es un relleno.
+
+## Enlace de la publicacion en Drupal
+
+- **Por que se deriva del nodo devuelto y no de la configuracion:** el UUID no es navegable y un alias escrito a mano se desactualiza cuando un editor renombra la pagina; Drupal resuelve siempre `/node/{nid}`.
+- **Por que el modal solo se abre a quien sigue la sala:** `flow:completed` se emite a todos los clientes; un dialogo persistente sin filtro interrumpiria a cada operador con publicaciones ajenas.
+- **Por que el motor lee el namespace del propio nodo:** el destino puede escribir en otro namespace que `http_result`; atarse al nombre fallaria en silencio.
+
+## Prompts institucionales y optimizador
+
+- **Por que se retira "sin encabezados ni vinetas":** convivia con "AL MENOS DOS encabezados" y el modelo resolvia el conflicto con `<p><strong>` como falso titulo.
+- **Por que `{{scraped_web.full_article_content}}` sigue opcional:** el extractor puede terminar en `SKIPPED_EMPTY`; marcarla pausaria noticias que se pueden redactar con la directiva del editor.
+- **Por que las variables recomendadas se calculan del texto:** la lista y el prompt no pueden contradecirse, y el contrato JSON compartido por los proveedores no admite claves nuevas. Ascender una opcional a obligatoria ya no se avisa como perdida; degradarla si.
+
+## Ecosistema maestro (migracion 069)
+
+- **Por que hacia falta:** las semillas antiguas tomaban como autor "el primer ADMIN"; en una base creada antes de tenerlo no hicieron nada, y los parches posteriores tampoco encontraron filas. La migracion inserta los textos finales completos.
+- **Por que blueprints y no flujos:** `id_flujo` es UUID (sin clave legible para `ON CONFLICT`) y un flujo ACTIVO con disparador IMAP sondearia el buzon real. El slug va en `flowId`.
+- **Por que no hay columna `implemented` en `nodos`:** estar en el catalogo ya significa que el motor sabe ejecutarlo.
+- **Por que una tarifa vigente no se reescribe:** cambiar un precio es una fila nueva con su vigencia; sobrescribirla falsearia el historico de costes.
+- **Por que el prompt de cierre deja de pedir la plantilla base:** el cierre no lleva mapeador y el traslado mueve el bloque ya publicado; el validador rechazaria la dependencia de `rendered_html`.
+- **Por que la auditoria usa `accion = 'CREAR'`:** el CHECK de `audit_eventos` no admite otros valores; el origen viaja en `datos_nuevos.origen = 'SEED_MASTER_DATA'`.
+- [x] Migraciones 068 y 069 aplicadas en la base de pruebas e idempotentes al reejecutarlas
+- [x] Ensayo en la base de desarrollo dentro de una transaccion revertida
+- [ ] Aplicar en desarrollo (`npm run db:migrate`)

@@ -5223,3 +5223,24 @@ Rama: `feat/drupal-and-acens-nodes-dev`. Migraciones `065` y `066`.
 - [x] Huecos de pruebas unitarias de estrategias
 - [x] E2E de los pipelines operativos
 - [ ] Pendiente: validar el texto de los prompts al guardarlos (sigue abierto)
+
+---
+
+## Resiliencia IMAP, metadatos web, enlace de publicacion y ecosistema maestro
+
+- **IMAP (worker de reanudacion):** `isTransientNetworkError` reconoce los codigos de temporizador de `imapflow` y el mensaje "Failed to establish connection"; el ciclo los registra como aviso y sigue. `createImapClient(config, password, onError, timeouts)` admite `number | ImapClientTimeouts`. La comprobacion del asistente cierra con `closeImapClientQuietly` (antes no llamaba a `close()`).
+- **Extractor web:** `extractDateFromUrl` (`/AAAA/MM/DD/`, dia real validado, devuelve `AAAA-MM-DD`) y `deriveOrganizationFromHost` (`f-droid.org` -> `F-Droid`) en `article-metadata.util.ts`; `extractArticle` los usa como ultimo recurso. El contrato de `scraped_web` no cambia.
+- **Destino Drupal:** `DrupalHttpResultData` con nueve claves; `published_url = siteRootUrl + alias` (o `/node/{nid}`), `exit_page = alias`. Pagina afectada: nodo creado (CREATE_NODE), pagina objetivo (APPEND, UPDATE_LINK) o de destino (TRANSFER); en UPLOAD_ATTACHMENT, la URL absoluta del fichero. `DrupalApiConfig.siteRootUrl` quita `/jsonapi`.
+- **Evento de cierre:** `FlowCompletedEvent` admite `publishedUrl`/`exitPage`; el motor los lee del namespace del ultimo nodo si fue `DESTINO_DRUPAL` y el desenlace es EXITOSO.
+- **Quasar:** `components/workflows/DrupalPublishSuccessModal.vue` (dialogo del plugin, `persistent`, enlace `target=_blank rel=noopener noreferrer`, "Entendido y Cerrar"). `useExecutionSocket` lo abre solo si la sala del flujo esta en `joinedFlowIds`; si no, el toast de siempre.
+- **Optimizador:** `OptimizePromptResponseDto` anade `recommendedVariables` y `rationale` (alias `OptimizedPromptResponseDto`). Las variables se clasifican del texto con `classifyPromptVariables`; el contrato JSON de los proveedores no cambia. El modal pinta los chips.
+- **Migraciones:** 068 (Notiweb: encabezados semanticos, fecha APA, marcas obligatorias y rotulo `<h2>` en la plantilla) y 069 (ecosistema maestro). Ambas idempotentes; la 068 avisa y no hace nada si la fila no existe.
+- **Blueprints maestros (`plantillas_flujo`):** Notiweb, apertura, cierre, Innodays/Innobar y verificacion de titulos, con la topologia canonica. Cierre e Innodays/Innobar no llevan mapeador y arrancan por IMAP porque el parser exige `raw_email`. Los UUID de Drupal y las credenciales IMAP quedan vacios: los rellena el asistente con el preset.
+- [x] Timeout y fuga de sockets IMAP
+- [x] Fecha y autor del extractor web
+- [x] `published_url` y modal persistente de exito
+- [x] Encabezados `<h2>` y recomendacion obligatoria/opcional
+- [x] Migraciones maestras y e2e de integridad
+- [x] E2E alineada con la topologia canonica
+- [ ] Pendiente: aplicar las migraciones 068 y 069 en la base de desarrollo (`npm run db:migrate`)
+- [ ] Pendiente: validar el texto de los prompts al guardarlos (sigue abierto)
