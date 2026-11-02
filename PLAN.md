@@ -5215,7 +5215,11 @@ Rama: `feat/drupal-and-acens-nodes-dev`. Migraciones `065` y `066`.
 - **Interpolacion tolerante:** `getInterpolatedValueLenient` devuelve ademas `missingRequired` (obligatoria ausente, nula o en blanco).
 - **PROCESADOR_IA:** con alguna obligatoria ausente devuelve GRAVE `ERR_PROMPT_REQUIRED_VARIABLE_MISSING` antes de invocar a cualquier proveedor; las opcionales siguen sustituyendose por `""`.
 - **Coalescencia y optimizador:** degradar el texto documental y optimizar un borrador conservan el asterisco; perderlo se avisa como marcador perdido.
-- [ ] Selector Obligatorio/Opcional en el editor de prompts
-- [ ] Escudo post-IA: recorte de fences compartido
-- [ ] Huecos de pruebas unitarias de estrategias
-- [ ] E2E de los pipelines operativos
+- **Quasar:** `VariableExplorer` gana el conmutador Obligatorio (*) / Opcional (solo en el editor de prompts). La gramatica de prompt vive en `utils/prompt-markers.ts`; el editor CodeMirror pinta `.pd-chip-mandatory` / `.pd-chip-optional` y el configurador del `PROCESADOR_IA` lista las obligatorias del prompt elegido.
+- **Escudo post-IA:** el recorte de vallas usa la utilidad compartida `stripCodeFence`, ampliada a espacios previos y CRLF. Ajv no se incorpora: el escudo audita HTML o texto, nunca un documento JSON.
+- **Pruebas:** anti-SSRF con la guarda real (loopback, 10/8, 172.16/12, 192.168/16, 169.254/16) y siete casos e2e de pipelines operativos con Drupal en memoria y proveedor `MOCK`.
+- [x] Selector Obligatorio/Opcional en el editor de prompts
+- [x] Escudo post-IA: recorte de vallas compartido
+- [x] Huecos de pruebas unitarias de estrategias
+- [x] E2E de los pipelines operativos
+- [ ] Pendiente: validar el texto de los prompts al guardarlos (sigue abierto)

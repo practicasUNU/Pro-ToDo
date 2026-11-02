@@ -9389,7 +9389,20 @@ mapeador.
 - **Por que el corte va despues de la coalescencia:** el texto documental ya intento degradarse a otra ruta con material; solo si ninguna tiene texto la marca queda ausente.
 - **Por que el `*` no vale en campos URL ni plantillas HTML:** solo tiene semantica en la interpolacion tolerante; en la estricta toda variable ya es obligatoria.
 
+- **Por que el conmutador solo vive en el editor de prompts:** en plantillas HTML y campos URL toda variable ya es obligatoria; ofrecer el asterisco alli invitaria a un marcador que el backend rechaza.
+- **Por que el chip obligatorio usa `--pd-on-negative` y no blanco:** el blanco no llega a 4.5:1 sobre el rojo del modo oscuro; es el mismo par que `.pd-badge--failed`, ya cubierto por la prueba de contraste. El asterisco visible evita depender solo del color.
+- **Por que la gramatica de prompt sale a `prompt-markers.ts`:** la usan el store y el selector de variables, que no deben arrastrar CodeMirror ni romper la carga diferida del editor.
+- **Por que no se incorpora Ajv al escudo:** lo que llega al escudo es HTML o texto; el contrato JSON de la respuesta ya lo validan los clientes de proveedor al parsear.
+
+## E2E de pipelines operativos
+
+- **Por que se conduce con `POST /executions/:id/resume`:** es la misma via que la suite del canvas y valida el esquema antes de arrancar, de modo que los fixtures respetan los namespaces cerrados y la regla de productores aguas arriba.
+- **Por que Drupal se dobla en `HttpClientService`:** el portal en memoria mantiene el HTML de cada pagina y registra cada peticion; ademas la URL base apunta a un dominio `.invalid` como segunda barrera.
+- **Por que la telemetria se comprueba en `metadata` y no en la tabla:** el simulador no escribe filas por diseno (no factura y no debe contaminar la tasa de exito de los modelos reales). Pedir filas reales exigiria un proveedor de pago.
+- **Por que sin TRUNCATE:** la limpieza borra solo los flujos de la suite y el resto cae en cascada; un TRUNCATE contra la base equivocada arrasaria datos ajenos.
+
 ### Checklist de dependencias
 
-- [ ] Selector en el frontend
-- [ ] E2E con la base de pruebas al dia (migraciones 061–067)
+- [x] Selector en el frontend
+- [x] E2E con la base de pruebas al dia (migraciones 061–067)
+- [ ] Validar el texto de los prompts al guardarlos
