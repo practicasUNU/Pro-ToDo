@@ -28,6 +28,7 @@ import { useSessionStore } from '@stores/session.store';
 import { buildModelOptions } from '@/utils/llm-model-options';
 import { estimateLlmResources } from '@/utils/llm-estimator.util';
 import { filterPromptContext } from '@/utils/prompt-namespaces';
+import { buildMarker, extractMandatoryPromptVariables } from '@/utils/prompt-markers';
 
 import type { HydratableNode, UpstreamNamespace } from '@stores/nodes/node-store-registry';
 
@@ -53,9 +54,12 @@ export interface PromptVariableOption {
   readonly group: string;
 }
 
-/** Marcador de un campo, tal y como se interpola en el prompt. */
-export const promptMarkerFor = (namespace: string, field: string): string =>
-  `{{${namespace}.${field}}}`;
+/**
+ * Marcador de un campo, tal y como se interpola en el prompt. Con `required`
+ * sale la marca obligatoria `{{*ns.campo}}`.
+ */
+export const promptMarkerFor = (namespace: string, field: string, required = false): string =>
+  buildMarker(namespace, field, required);
 
 const asText = (value: unknown): string => (typeof value === 'string' ? value : '');
 
@@ -199,6 +203,29 @@ const llmExtractorSetup = () => {
   );
 
   const hasInlinePrompt = computed<boolean>(() => config.value.inlinePrompt.trim() !== '');
+
+  /**
+   * Texto del prompt guardado que el nodo tiene elegido, si ya se trajo.
+   *
+   * El listado del repositorio omite `promptText` (ver `types/ai-prompt-template.ts`),
+   * asi que se pide el detalle con `loadSelectedPromptText` al cambiar la eleccion.
+   */
+  const selectedPromptText = ref<string | null>(null);
+
+  /**
+   * Variables que el prompt efectivo marca como OBLIGATORIAS (`{{*ns.campo}}`).
+   *
+   * El prompt efectivo es el que elegira el backend: la plantilla si la hay, y
+   * si no el texto en linea heredado. Son las que pausaran el flujo, sin
+   * facturar la inferencia, si el contexto no las trae.
+   */
+  const requiredPromptVariables = computed<string[]>(() => {
+    const text = hasTemplatePrompt.value
+      ? (selectedPromptText.value ?? '')
+      : config.value.inlinePrompt;
+
+    return extractMandatoryPromptVariables(text);
+  });
 
   /**
    * Si los dos prompts estan puestos a la vez.
@@ -412,6 +439,27 @@ const llmExtractorSetup = () => {
   };
 
   /**
+   * Trae el texto del prompt elegido para derivar sus variables obligatorias.
+   * Sin plantilla elegida se limpia. Los errores suben al componente.
+   */
+  const loadSelectedPromptText = async (): Promise<void> => {
+    const promptId = config.value.templatePromptId;
+
+    if (promptId === null || promptId.trim() === '') {
+      selectedPromptText.value = null;
+      return;
+    }
+
+    const detail = await promptsStore.loadPromptById(promptId);
+
+    // La eleccion pudo cambiar mientras viajaba la peticion: solo se guarda si
+    // el texto corresponde todavia al prompt elegido.
+    if (config.value.templatePromptId === promptId) {
+      selectedPromptText.value = detail.promptText;
+    }
+  };
+
+  /**
    * Trae el catalogo de modelos.
    *
    * SIN memoizar, al contrario que `loadPrompts`. La disponibilidad depende de
@@ -547,6 +595,8 @@ const llmExtractorSetup = () => {
     canTestConnection,
     promptOptions,
     promptVariableOptions,
+    requiredPromptVariables,
+    selectedPromptText,
     hasTemplatePrompt,
     hasInlinePrompt,
     hasConflictingPrompts,
@@ -559,6 +609,7 @@ const llmExtractorSetup = () => {
     hasResourceEstimation,
     applyRecommendedResources,
     loadPrompts,
+    loadSelectedPromptText,
     fetchAvailableModels,
     testConnection,
     toNodeParams,

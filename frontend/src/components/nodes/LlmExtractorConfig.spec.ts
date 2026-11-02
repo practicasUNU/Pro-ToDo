@@ -65,6 +65,7 @@ const testLlmConnection = vi.mocked(llmExtractorService.testLlmConnection);
 
 const aiPromptTemplatesService = await import('@services/ai-prompt-templates.service');
 const fetchAiPromptTemplates = vi.mocked(aiPromptTemplatesService.fetchAiPromptTemplates);
+const fetchAiPromptTemplateById = vi.mocked(aiPromptTemplatesService.fetchAiPromptTemplateById);
 
 const PROMPT_ID = 'a7b8c9d0-1e2f-4a3b-8c4d-5e6f7a8b9c0d';
 
@@ -485,6 +486,38 @@ describe('LlmExtractorConfig · configurador del nodo PROCESADOR_IA', () => {
       );
       expect(wrapper.find('[data-test="inline-prompt-field"]').exists()).toBe(false);
       expect(store.toNodeParams().inlinePrompt).toBe('Instruccion antigua');
+    });
+  });
+
+  describe('6b. Variables obligatorias del prompt', () => {
+    it('6b.1 deberia pintar como chip cada {{*ns.campo}} del prompt elegido', async () => {
+      // 1. Arrange 📐
+      fetchAiPromptTemplates.mockResolvedValue([PROMPT]);
+      fetchAiPromptTemplateById.mockResolvedValue({
+        ...PROMPT,
+        promptText: 'Usa {{*scraped_web.full_article_content}} y {{parsed_email.sender}}.',
+      });
+      const nodeId = nextNodeId();
+      const wrapper = mountComponent(nodeId);
+      const store = useLlmExtractorStore(nodeId);
+
+      // 2. Act ⚙️
+      store.updateConfig({ templatePromptId: PROMPT_ID });
+      await flushPromises();
+
+      // 3. Assert 🎯: texto con asterisco, no solo color; la opcional no sale.
+      const chips = wrapper.findAll('[data-test="required-prompt-variable"]');
+      expect(chips.map((chip) => chip.text())).toEqual(['*scraped_web.full_article_content']);
+      expect(chips[0]?.classes()).toContain('pd-chip-mandatory');
+    });
+
+    it('6b.2 no deberia pintar la seccion sin variables obligatorias', async () => {
+      // 1. Arrange 📐 + 2. Act ⚙️
+      const wrapper = mountComponent(nextNodeId());
+      await flushPromises();
+
+      // 3. Assert 🎯
+      expect(wrapper.find('[data-test="required-prompt-variables"]').exists()).toBe(false);
     });
   });
 

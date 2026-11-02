@@ -3,6 +3,7 @@ import { computed, ref, watch } from 'vue';
 import { copyToClipboard, useQuasar } from 'quasar';
 
 import { useSelectFilter } from '@/composables/useSelectFilter';
+import { buildMarker, chipClassFor } from '@/utils/prompt-markers';
 
 import type { NodeOutputField } from '@/types/node-catalog';
 import type { UpstreamNamespace } from '@stores/nodes/node-store-registry';
@@ -36,11 +37,24 @@ interface Props {
    * de que llegara el catalogo concluia que no habia variables disponibles.
    */
   loading?: boolean;
+  /**
+   * Muestra el conmutador Obligatorio (*) / Opcional.
+   *
+   * Solo lo activa el editor de prompts de IA: alli `{{*ns.campo}}` pausa el
+   * flujo si el dato falta, sin facturar la inferencia. En una plantilla HTML o
+   * en un campo URL toda variable ya es obligatoria y el asterisco no significa
+   * nada, asi que ofrecerlo seria invitar a un marcador que el backend rechaza.
+   */
+  requirednessToggle?: boolean;
 }
+
+/** Obligatoriedad del marcador que se va a componer. */
+type MarkerRequiredness = 'mandatory' | 'optional';
 
 const props = withDefaults(defineProps<Props>(), {
   insertLabel: 'Insertar',
   loading: false,
+  requirednessToggle: false,
 });
 
 const emit = defineEmits<{ insert: [token: string] }>();
@@ -58,6 +72,29 @@ const selectedNamespace = ref<string | null>(null);
  * secas o el marcador habria salido mal.
  */
 const selectedField = ref<string | null>(null);
+
+/**
+ * Por defecto OPCIONAL: es el comportamiento historico del prompt (una
+ * ausencia se sustituye por `""`), y marcar algo como obligatorio debe ser una
+ * decision explicita del autor.
+ */
+const requiredness = ref<MarkerRequiredness>('optional');
+
+const REQUIREDNESS_OPTIONS: { label: string; value: MarkerRequiredness }[] = [
+  { label: 'Obligatorio (*)', value: 'mandatory' },
+  { label: 'Opcional', value: 'optional' },
+];
+
+/** Explicacion bajo el conmutador; cambia con la opcion elegida. */
+const REQUIREDNESS_HINTS: Record<MarkerRequiredness, string> = {
+  mandatory: 'Si el dato falta, el flujo se pausa antes de llamar a la IA (sin coste).',
+  optional: 'Si el dato falta, se sustituye por texto vacío y el flujo continúa.',
+};
+
+/** Solo se marca como obligatorio si el anfitrion ofrece el conmutador. */
+const isMandatory = computed<boolean>(
+  () => props.requirednessToggle && requiredness.value === 'mandatory',
+);
 
 /** Paso 1 del explorador. El `nodeType` va en la etiqueta, no en el valor. */
 const namespaceOptions = computed(() =>
@@ -124,8 +161,13 @@ const fieldLabel = (field: NodeOutputField): string =>
 /** Marcador resultante, o cadena vacia mientras la eleccion este incompleta. */
 const interpolatedToken = computed<string>(() =>
   selectedNamespace.value !== null && selectedField.value !== null
-    ? `{{${selectedNamespace.value}.${selectedField.value}}}`
+    ? buildMarker(selectedNamespace.value, selectedField.value, isMandatory.value)
     : '',
+);
+
+/** Chip de la tarjeta: rojo si es obligatorio, azul si es opcional. */
+const tokenChipClass = computed<string>(() =>
+  props.requirednessToggle ? chipClassFor(interpolatedToken.value) : '',
 );
 
 // Cambiar de origen invalida el campo: pertenecia al anterior, y dejarlo
@@ -138,6 +180,7 @@ watch(selectedNamespace, () => {
 const reset = (): void => {
   selectedNamespace.value = null;
   selectedField.value = null;
+  requiredness.value = 'optional';
 };
 
 defineExpose({ reset });
@@ -255,8 +298,26 @@ const handleInsertToken = (): void => {
       </q-select>
     </div>
 
+    <!-- Conmutador de obligatoriedad (solo prompts de IA). -->
+    <div v-if="props.requirednessToggle" class="q-mt-sm" data-test="requiredness-toggle">
+      <q-btn-toggle
+        v-model="requiredness"
+        :options="REQUIREDNESS_OPTIONS"
+        no-caps
+        dense
+        unelevated
+        spread
+        toggle-color="primary"
+      />
+      <p class="pd-subtitle q-mt-xs q-mb-none" data-test="requiredness-hint">
+        {{ REQUIREDNESS_HINTS[requiredness] }}
+      </p>
+    </div>
+
     <div v-if="selectedFieldDetail" class="pd-token-card q-mt-sm" data-test="token-detail">
-      <div class="pd-mono pd-token-value">{{ interpolatedToken }}</div>
+      <div class="pd-mono pd-token-value">
+        <span :class="tokenChipClass" data-test="token-value">{{ interpolatedToken }}</span>
+      </div>
       <div class="row items-center q-gutter-xs q-mt-xs">
         <span class="pd-badge pd-badge--role">{{ selectedFieldDetail.type }}</span>
         <span v-if="selectedFieldDetail.description" class="col pd-subtitle q-mb-none">

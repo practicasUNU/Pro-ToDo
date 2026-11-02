@@ -419,6 +419,31 @@ body {
   border: 1px solid var(--pd-border);
 }
 
+// Chips de marcador de prompt: `{{*ns.campo}}` (obligatorio) y `{{ns.campo}}`
+// (opcional). Los pinta el editor CodeMirror de prompts, el selector de
+// variables y la ficha del nodo IA. Texto sobre rojo con `--pd-on-negative` y
+// no blanco: el blanco no llega a 4.5:1 sobre el rojo del modo oscuro (mismo
+// par que `.pd-badge--failed`, ya cubierto por `color-contrast.spec.ts`). El
+// asterisco visible en el texto evita comunicar el estado solo por color.
+.pd-chip-mandatory,
+.pd-chip-optional {
+  border-radius: 4px;
+  padding: 0.0625rem 0.25rem;
+  font-weight: 600;
+}
+
+.pd-chip-mandatory {
+  background: var(--pd-negative);
+  color: var(--pd-on-negative);
+  border: 1px solid var(--pd-negative);
+}
+
+.pd-chip-optional {
+  background: var(--pd-accent-soft);
+  color: var(--pd-accent-text);
+  border: 1px solid var(--pd-accent);
+}
+
 // Fallido: el motor se rindió y alguien tiene que mirarlo. Rojo de severidad.
 .pd-badge--failed {
   background: var(--pd-negative);

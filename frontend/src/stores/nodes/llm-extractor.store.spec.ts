@@ -21,7 +21,7 @@ import {
 } from '@/types/nodes/llm-extractor.types';
 import { NodeType } from '@/types/pipeline';
 
-import { useLlmExtractorStore } from './llm-extractor.store';
+import { promptMarkerFor, useLlmExtractorStore } from './llm-extractor.store';
 import { AUDIT_FIXTURE } from '@/testing/audit.fixture';
 
 import type { AiPromptTemplate } from '@/types/ai-prompt-template';
@@ -52,6 +52,7 @@ vi.mock('@services/nodes/llm-extractor.service', () => ({
 
 const aiPromptTemplatesService = await import('@services/ai-prompt-templates.service');
 const fetchAiPromptTemplates = vi.mocked(aiPromptTemplatesService.fetchAiPromptTemplates);
+const fetchAiPromptTemplateById = vi.mocked(aiPromptTemplatesService.fetchAiPromptTemplateById);
 
 const llmExtractorService = await import('@services/nodes/llm-extractor.service');
 const fetchLlmModels = vi.mocked(llmExtractorService.fetchLlmModels);
@@ -675,6 +676,55 @@ describe('useLlmExtractorStore · configuracion del nodo PROCESADOR_IA', () => {
       expect(fetchAiPromptTemplates).toHaveBeenCalledTimes(1);
       expect(second.promptOptions).toHaveLength(1);
       expect(useAiPromptTemplatesStore().prompts).toHaveLength(1);
+    });
+  });
+
+  describe('6b. Variables obligatorias del prompt ({{*ns.campo}})', () => {
+    it('6b.1 deberia componer el marcador obligatorio con promptMarkerFor', () => {
+      // 1. Arrange 📐 + 2. Act ⚙️ + 3. Assert 🎯
+      expect(promptMarkerFor('parsed_email', 'clean_body', true)).toBe(
+        '{{*parsed_email.clean_body}}',
+      );
+      expect(promptMarkerFor('parsed_email', 'clean_body')).toBe('{{parsed_email.clean_body}}');
+    });
+
+    it('6b.2 deberia listar las obligatorias del prompt guardado elegido', async () => {
+      // 1. Arrange 📐
+      const store = useLlmExtractorStore(nextNodeId());
+      fetchAiPromptTemplateById.mockResolvedValue({
+        ...buildPrompt(),
+        promptText: 'Resume {{*scraped_web.full_article_content}} por {{scraped_web.byline}}.',
+      });
+      store.updateConfig({ templatePromptId: PROMPT_ID });
+
+      // 2. Act ⚙️
+      await store.loadSelectedPromptText();
+
+      // 3. Assert 🎯
+      expect(fetchAiPromptTemplateById).toHaveBeenCalledWith(PROMPT_ID);
+      expect(store.requiredPromptVariables).toEqual(['scraped_web.full_article_content']);
+    });
+
+    it('6b.3 deberia leer el texto en linea heredado cuando no hay plantilla', () => {
+      // 1. Arrange 📐 + 2. Act ⚙️
+      const store = useLlmExtractorStore(nextNodeId());
+      store.updateConfig({ inlinePrompt: 'Titular {{ * parsed_email.clean_title }}' });
+
+      // 3. Assert 🎯
+      expect(store.requiredPromptVariables).toEqual(['parsed_email.clean_title']);
+    });
+
+    it('6b.4 deberia limpiar el texto al quitar la plantilla sin pedir nada', async () => {
+      // 1. Arrange 📐
+      const store = useLlmExtractorStore(nextNodeId());
+
+      // 2. Act ⚙️
+      await store.loadSelectedPromptText();
+
+      // 3. Assert 🎯
+      expect(fetchAiPromptTemplateById).not.toHaveBeenCalled();
+      expect(store.selectedPromptText).toBeNull();
+      expect(store.requiredPromptVariables).toEqual([]);
     });
   });
 

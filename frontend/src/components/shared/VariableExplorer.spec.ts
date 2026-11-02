@@ -1,6 +1,6 @@
 // @vitest-environment happy-dom
 import { config, mount } from '@vue/test-utils';
-import { QBtn, QSelect, Quasar } from 'quasar';
+import { QBtn, QBtnToggle, QSelect, Quasar } from 'quasar';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import VariableExplorer from './VariableExplorer.vue';
@@ -30,10 +30,13 @@ const CONTEXT: UpstreamNamespace[] = [
   { namespace: '_assets', fields: [{ name: 'base_url', type: 'text' }] },
 ];
 
-const mountExplorer = (context: readonly UpstreamNamespace[] = CONTEXT) =>
+const mountExplorer = (
+  context: readonly UpstreamNamespace[] = CONTEXT,
+  extraProps: { requirednessToggle?: boolean } = {},
+) =>
   mount(VariableExplorer, {
-    props: { context },
-    global: { plugins: [Quasar], components: { QBtn, QSelect } },
+    props: { context, ...extraProps },
+    global: { plugins: [Quasar], components: { QBtn, QBtnToggle, QSelect } },
   });
 
 const selectByField = (wrapper: VueWrapper, field: string) =>
@@ -152,9 +155,10 @@ describe('VariableExplorer · selector determinista de variables', () => {
       await wrapper.vm.$nextTick();
 
       // 2. Act ⚙️
-      const optionLabel = selectByField(wrapper, 'variable-field').props('optionLabel') as (
-        field: { name: string; description?: string },
-      ) => string;
+      const optionLabel = selectByField(wrapper, 'variable-field').props('optionLabel') as (field: {
+        name: string;
+        description?: string;
+      }) => string;
 
       // 3. Assert 🎯
       expect(optionLabel({ name: 'clean_title', description: 'Titular saneado' })).toBe(
@@ -170,9 +174,10 @@ describe('VariableExplorer · selector determinista de variables', () => {
       await wrapper.vm.$nextTick();
 
       // 2. Act ⚙️
-      const optionLabel = selectByField(wrapper, 'variable-field').props('optionLabel') as (
-        field: { name: string; description?: string },
-      ) => string;
+      const optionLabel = selectByField(wrapper, 'variable-field').props('optionLabel') as (field: {
+        name: string;
+        description?: string;
+      }) => string;
 
       // 3. Assert 🎯
       expect(optionLabel({ name: 'extracted_urls' })).toBe('extracted_urls');
@@ -228,6 +233,63 @@ describe('VariableExplorer · selector determinista de variables', () => {
 
       // 3. Assert
       expect(wrapper.find('[data-test="token-detail"]').exists()).toBe(false);
+    });
+  });
+
+  describe('5. Obligatoriedad del marcador (prompts de IA)', () => {
+    it('5.1 no deberia mostrar el conmutador si el anfitrion no lo pide', () => {
+      // 1. Arrange & 2. Act
+      const wrapper = mountExplorer();
+
+      // 3. Assert 🎯: plantillas HTML y campos URL no conocen el asterisco.
+      expect(wrapper.find('[data-test="requiredness-toggle"]').exists()).toBe(false);
+    });
+
+    it('5.2 deberia componer un marcador opcional por defecto', async () => {
+      // 1. Arrange 📐
+      const wrapper = mountExplorer(CONTEXT, { requirednessToggle: true });
+
+      // 2. Act ⚙️
+      await chooseVariable(wrapper, 'parsed_email');
+      await buttonByTest(wrapper, 'insert-token').trigger('click');
+
+      // 3. Assert 🎯
+      expect(wrapper.emitted('insert')?.[0]).toEqual(['{{parsed_email.clean_title}}']);
+      expect(wrapper.get('[data-test="token-value"]').classes()).toContain('pd-chip-optional');
+    });
+
+    it('5.3 deberia insertar {{*ns.campo}} al elegir Obligatorio (*)', async () => {
+      // 1. Arrange 📐
+      const wrapper = mountExplorer(CONTEXT, { requirednessToggle: true });
+      await chooseVariable(wrapper, 'parsed_email');
+
+      // 2. Act ⚙️
+      wrapper
+        .get('[data-test="requiredness-toggle"]')
+        .findComponent(QBtnToggle)
+        .vm.$emit('update:modelValue', 'mandatory');
+      await wrapper.vm.$nextTick();
+      await buttonByTest(wrapper, 'insert-token').trigger('click');
+
+      // 3. Assert 🎯
+      expect(wrapper.emitted('insert')?.[0]).toEqual(['{{*parsed_email.clean_title}}']);
+      expect(wrapper.get('[data-test="token-value"]').classes()).toContain('pd-chip-mandatory');
+      expect(wrapper.get('[data-test="requiredness-hint"]').text()).toContain('se pausa');
+    });
+
+    it('5.4 deberia ofrecer las dos opciones con sus etiquetas', () => {
+      // 1. Arrange & 2. Act
+      const wrapper = mountExplorer(CONTEXT, { requirednessToggle: true });
+      const options = wrapper
+        .get('[data-test="requiredness-toggle"]')
+        .findComponent(QBtnToggle)
+        .props('options') as { label: string; value: string }[];
+
+      // 3. Assert 🎯
+      expect(options).toEqual([
+        { label: 'Obligatorio (*)', value: 'mandatory' },
+        { label: 'Opcional', value: 'optional' },
+      ]);
     });
   });
 });

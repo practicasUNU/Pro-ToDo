@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue';
+import { computed, onMounted, ref, watch } from 'vue';
 import { useQuasar } from 'quasar';
 
 import { useLlmExtractorStore } from '@stores/nodes/llm-extractor.store';
@@ -209,10 +209,39 @@ const onPromptCreated = async (prompt: AiPromptTemplateDetail): Promise<void> =>
   $q.notify({ type: 'positive', message: 'Plantilla creada y seleccionada' });
 };
 
+/** Explicacion de los chips de variables obligatorias. */
+const REQUIRED_VARIABLES_NOTICE =
+  'Si alguna falta en el contexto, el flujo se pausa antes de llamar a la IA (sin coste).';
+
+/**
+ * Trae el texto del prompt elegido para listar sus variables obligatorias.
+ * Un fallo no bloquea el paso: solo deja la lista sin pintar y lo avisa.
+ */
+const loadSelectedPromptText = async (): Promise<void> => {
+  try {
+    await store.loadSelectedPromptText();
+  } catch (error) {
+    $q.notify({
+      type: 'warning',
+      message: extractApiErrorMessage(
+        error,
+        'No se pudo leer el prompt elegido para listar sus variables obligatorias',
+      ),
+    });
+  }
+};
+
+watch(
+  () => store.config.templatePromptId,
+  () => {
+    void loadSelectedPromptText();
+  },
+);
+
 onMounted(async () => {
-  // En paralelo: son dos recursos independientes y encadenarlos solo sumaria
+  // En paralelo: son recursos independientes y encadenarlos solo sumaria
   // latencias al abrir el paso.
-  await Promise.all([loadPrompts(), loadModels()]);
+  await Promise.all([loadPrompts(), loadModels(), loadSelectedPromptText()]);
 });
 </script>
 
@@ -293,6 +322,26 @@ onMounted(async () => {
         data-test="create-prompt"
         @click="isEditorOpen = true"
       />
+    </div>
+
+    <!-- Variables OBLIGATORIAS del prompt efectivo ({{*ns.campo}}). Con texto
+         y asterisco visible, no solo color. -->
+    <div
+      v-if="store.requiredPromptVariables.length > 0"
+      class="q-mt-md"
+      data-test="required-prompt-variables"
+    >
+      <label class="pd-label">Variables obligatorias del prompt</label>
+      <div class="row q-gutter-xs q-mt-xs">
+        <span
+          v-for="variable in store.requiredPromptVariables"
+          :key="variable"
+          class="pd-mono pd-chip-mandatory"
+          data-test="required-prompt-variable"
+          >*{{ variable }}</span
+        >
+      </div>
+      <p class="pd-subtitle q-mt-xs q-mb-none">{{ REQUIRED_VARIABLES_NOTICE }}</p>
     </div>
 
     <!-- Instruccion en linea HEREDADA. Ya no se puede escribir una: el prompt es

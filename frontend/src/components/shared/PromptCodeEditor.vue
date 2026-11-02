@@ -5,7 +5,7 @@ import { defaultKeymap, history, historyKeymap } from '@codemirror/commands';
 import { EditorState } from '@codemirror/state';
 import { EditorView, keymap, lineNumbers } from '@codemirror/view';
 
-import { markerHighlighter } from '@/utils/codemirror-markers';
+import { promptMarkerHighlighter } from '@/utils/codemirror-markers';
 import { unuwareEditorTheme } from '@/utils/codemirror-theme';
 
 import type { ViewUpdate } from '@codemirror/view';
@@ -93,7 +93,7 @@ onMounted(() => {
         keymap.of([...defaultKeymap, ...historyKeymap]),
         EditorView.lineWrapping,
         unuwareEditorTheme,
-        markerHighlighter,
+        promptMarkerHighlighter,
         changeListener,
       ],
     }),
@@ -131,14 +131,7 @@ defineExpose({ insertTextAtCursor });
   height: 100%;
 }
 
-// Mismo chip que en el editor de plantillas: es el mismo lenguaje y debe
-// reconocerse igual en los dos sitios.
-:deep(.cm-pd-template-marker) {
-  background: var(--pd-accent-soft);
-  color: var(--pd-accent);
-  border: 1px solid var(--pd-accent);
-  border-radius: 4px;
-  padding: 1px 4px;
-  font-weight: 600;
-}
+// El chip del marcador (`.pd-chip-mandatory` / `.pd-chip-optional`) es global,
+// en `app.scss`: el mismo aspecto lo usan el selector de variables y la ficha
+// del nodo IA, y redefinir su radio aqui violaria los radios canonicos.
 </style>

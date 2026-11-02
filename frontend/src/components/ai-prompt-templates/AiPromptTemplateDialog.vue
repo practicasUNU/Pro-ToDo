@@ -44,6 +44,13 @@ const MAX_DESCRIPTION_LENGTH = 255;
  */
 const MARKER_EXAMPLE = '{{nodo.campo}}';
 
+/** Ejemplo de marcador OBLIGATORIO, por el mismo motivo que `MARKER_EXAMPLE`. */
+const MANDATORY_MARKER_EXAMPLE = '{{*nodo.campo}}';
+
+/** Leyenda de los dos chips junto al editor. */
+const MARKER_LEGEND =
+  'Obligatorio: si falta, el flujo se pausa sin llamar a la IA. Opcional: si falta, queda vacío.';
+
 /**
  * Por que el desplegable de origenes no los ofrece todos.
  *
@@ -401,6 +408,7 @@ const onSubmit = async (): Promise<void> => {
               ref="variableExplorerRef"
               :context="variableContext"
               insert-label="Insertar en el prompt"
+              requiredness-toggle
               @insert="handleInsertToken"
             />
 
@@ -447,7 +455,18 @@ const onSubmit = async (): Promise<void> => {
               <label class="pd-label col" for="prompt-text">
                 Instruccion / Prompt del sistema<span class="pd-required">*</span>
               </label>
-              <span class="pd-mono pd-prompt-badge">{{ MARKER_EXAMPLE }}</span>
+              <span
+                class="pd-mono pd-prompt-legend pd-chip-mandatory q-mr-xs"
+                :title="MARKER_LEGEND"
+                data-test="marker-legend-mandatory"
+                >{{ MANDATORY_MARKER_EXAMPLE }}</span
+              >
+              <span
+                class="pd-mono pd-prompt-legend pd-chip-optional"
+                :title="MARKER_LEGEND"
+                data-test="marker-legend-optional"
+                >{{ MARKER_EXAMPLE }}</span
+              >
               <q-btn
                 class="pd-btn-icon q-ml-sm"
                 outline
@@ -560,8 +579,8 @@ const onSubmit = async (): Promise<void> => {
   height: 100%;
 }
 
-.pd-prompt-badge {
-  color: var(--pd-text-secondary);
+// Solo el tamano: el color lo ponen los chips globales `.pd-chip-*`.
+.pd-prompt-legend {
   font-size: 0.7188rem;
 }
 
