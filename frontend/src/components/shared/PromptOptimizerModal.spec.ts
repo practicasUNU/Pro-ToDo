@@ -37,6 +37,11 @@ const DRAFT = 'Resume la noticia de {{parsed_email.clean_title}}.';
 const RESULT: PromptOptimizationResult = {
   optimizedPrompt:
     'Eres un redactor institucional. Resume en tres parrafos {{parsed_email.clean_title}}.',
+  recommendedVariables: {
+    mandatory: ['parsed_email.clean_body'],
+    optional: ['parsed_email.clean_title', 'scraped_web.published_at'],
+  },
+  rationale: 'El borrador no define rol; la directiva del editor es indispensable.',
   recommendations: ['Se anadio un rol explicito.', 'Se fijo la extension de la salida.'],
   telemetry: {
     tokensPrompt: 1_200,
@@ -124,6 +129,44 @@ describe('PromptOptimizerModal', () => {
     expect(Array.from(items ?? []).map((item) => item.textContent?.trim())).toEqual(
       RESULT.recommendations,
     );
+  });
+
+  it('1.3b deberia pintar las variables obligatorias en rojo y las opcionales en acento', async () => {
+    // 1. Arrange 📐 + 2. Act ⚙️
+    await mountWithProposal();
+
+    // 3. Assert 🎯: el texto lleva el asterisco, ademas del color.
+    const mandatory = document.body.querySelectorAll('[data-test="optimizer-variable-mandatory"]');
+    const optional = document.body.querySelectorAll('[data-test="optimizer-variable-optional"]');
+    expect(Array.from(mandatory).map((chip) => chip.textContent)).toEqual([
+      '{{*parsed_email.clean_body}}',
+    ]);
+    expect(mandatory[0]?.classList.contains('pd-chip-mandatory')).toBe(true);
+    expect(Array.from(optional).map((chip) => chip.textContent)).toEqual([
+      '{{parsed_email.clean_title}}',
+      '{{scraped_web.published_at}}',
+    ]);
+    expect(optional[0]?.classList.contains('pd-chip-optional')).toBe(true);
+    expect(find('[data-test="optimizer-rationale"]')?.textContent).toContain(
+      'la directiva del editor es indispensable',
+    );
+  });
+
+  it('1.3c NO deberia mostrar el bloque de variables si la propuesta no tiene ninguna', async () => {
+    // 1. Arrange 📐
+    vi.mocked(optimizePrompt).mockResolvedValue({
+      ...RESULT,
+      recommendedVariables: { mandatory: [], optional: [] },
+    });
+    mountModal();
+    await flushPromises();
+
+    // 2. Act ⚙️
+    find('[data-test="optimizer-generate"]')?.click();
+    await flushPromises();
+
+    // 3. Assert 🎯
+    expect(find('[data-test="optimizer-variables"]')).toBeNull();
   });
 
   it('1.4 deberia desplegar el consumo de tokens y el coste en USD', async () => {

@@ -285,6 +285,115 @@ describe('PromptOptimizerService', () => {
       expect(result.recommendations[0]).toContain('{{*scraped_web.body}}');
     });
 
+    it('1.4c NO deberia avisar cuando la propuesta asciende una opcional a obligatoria', async () => {
+      // 1. Arrange 📐: anteponer el asterisco es lo que el optimizador tiene
+      //    permitido; no es una perdida del marcador.
+      const { service } = buildFixture({
+        payload: buildPayload({
+          summary:
+            'Resume {{*scraped_web.body}} titulado {{parsed_email.clean_title}}.',
+        }),
+      });
+
+      // 2. Act ⚙️
+      const result = await service.optimize(
+        {
+          draftPrompt:
+            'Resume {{scraped_web.body}} titulado {{parsed_email.clean_title}}.',
+          targetFormat: 'text',
+        },
+        EDITOR,
+      );
+
+      // 3. Assert 🎯
+      expect(result.recommendations[0]).not.toContain('Atención');
+    });
+
+    it('1.4d deberia discriminar variables obligatorias y opcionales del prompt propuesto', async () => {
+      // 1. Arrange 📐
+      const { service } = buildFixture({
+        payload: buildPayload({
+          summary:
+            'Redacta a partir de {{*parsed_email.clean_body}} y {{ * scraped_web.full_article_content }}. ' +
+            'Fecha: {{scraped_web.published_at}}. Autor: {{scraped_web.byline}}. ' +
+            'Repite {{*parsed_email.clean_body}} y {{parsed_email.clean_body}}.',
+        }),
+      });
+
+      // 2. Act ⚙️
+      const result = await service.optimize(
+        { draftPrompt: DRAFT, targetFormat: 'html' },
+        EDITOR,
+      );
+
+      // 3. Assert 🎯: sin llaves, sin duplicados, y la que aparece con
+      //    asterisco en alguna ocurrencia cuenta como obligatoria.
+      expect(result.recommendedVariables).toEqual({
+        mandatory: [
+          'parsed_email.clean_body',
+          'scraped_web.full_article_content',
+        ],
+        optional: ['scraped_web.published_at', 'scraped_web.byline'],
+      });
+    });
+
+    it('1.4e deberia devolver listas vacias si la propuesta no tiene variables', async () => {
+      // 1. Arrange 📐
+      const { service } = buildFixture({
+        payload: buildPayload({
+          summary: 'Eres un redactor. Resume el texto.',
+        }),
+      });
+
+      // 2. Act ⚙️
+      const result = await service.optimize(
+        { draftPrompt: 'Resume el texto.', targetFormat: 'text' },
+        EDITOR,
+      );
+
+      // 3. Assert 🎯
+      expect(result.recommendedVariables).toEqual({
+        mandatory: [],
+        optional: [],
+      });
+    });
+
+    it('1.4f deberia exponer el diagnostico del modelo como justificacion', async () => {
+      // 1. Arrange 📐
+      const { service } = buildFixture();
+
+      // 2. Act ⚙️
+      const result = await service.optimize(
+        { draftPrompt: DRAFT, targetFormat: 'html' },
+        EDITOR,
+      );
+
+      // 3. Assert 🎯
+      expect(result.rationale).toBe(
+        'El borrador no define rol ni formato de salida.',
+      );
+    });
+
+    it('1.4g deberia pedir al modelo que clasifique las variables por necesidad', async () => {
+      // 1. Arrange 📐
+      const { service, generateCompletion } = buildFixture();
+
+      // 2. Act ⚙️
+      await service.optimize(
+        { draftPrompt: DRAFT, targetFormat: 'html' },
+        EDITOR,
+      );
+
+      // 3. Assert 🎯
+      const [, systemPrompt] = generateCompletion.mock.calls[0] as [
+        string,
+        string,
+      ];
+      expect(systemPrompt).toContain('{{*parsed_email.clean_body}}');
+      expect(systemPrompt).toContain('{{scraped_web.published_at}}');
+      expect(systemPrompt).toContain('Nunca quites un asterisco existente');
+    });
+
     it('1.5 NO deberia fallar si la telemetria no se puede persistir', async () => {
       // 1. Arrange 📐: la inferencia ya esta pagada; un 500 empujaria a pagarla dos veces.
       const { service, telemetry } = buildFixture();

@@ -7,6 +7,7 @@ import { usePromptOptimizerStore } from '@stores/prompt-optimizer.store';
 import { extractApiErrorCode, extractApiErrorMessage } from '@/utils/api-error';
 import { ALERT_TIMEOUT_MS } from '@/utils/alert-categorizer';
 import { formatInteger, formatUsd } from '@/utils/number-format';
+import { MANDATORY_CHIP_CLASS, OPTIONAL_CHIP_CLASS, buildMarker } from '@/utils/prompt-markers';
 
 import type { PromptTargetFormat } from '@/types/prompt-optimizer';
 
@@ -54,6 +55,22 @@ const result = computed(() => optimizerStore.result);
 const canGenerate = computed(
   () => props.draftPrompt.trim().length > 0 && !optimizerStore.isLoading,
 );
+
+/** `ns.campo` -> `{{*ns.campo}}` o `{{ns.campo}}`, tal como va en el prompt. */
+const markerForPath = (path: string, mandatory: boolean): string => {
+  const separator = path.indexOf('.');
+
+  return separator < 0
+    ? path
+    : buildMarker(path.slice(0, separator), path.slice(separator + 1), mandatory);
+};
+
+/** Hay alguna variable que mostrar en el bloque de recomendadas. */
+const hasRecommendedVariables = computed(() => {
+  const variables = result.value?.recommendedVariables;
+
+  return (variables?.mandatory.length ?? 0) + (variables?.optional.length ?? 0) > 0;
+});
 
 /** Texto del chip de consumo: tokens totales y coste en USD. */
 const usageLabel = computed(() => {
@@ -191,6 +208,41 @@ const applyPrompt = (): void => {
             result.optimizedPrompt
           }}</pre>
 
+          <p
+            v-if="result.rationale"
+            class="pd-subtitle pd-prompt-optimizer__rationale"
+            data-test="optimizer-rationale"
+          >
+            {{ result.rationale }}
+          </p>
+
+          <template v-if="hasRecommendedVariables">
+            <h3 class="pd-label pd-prompt-optimizer__heading">Variables recomendadas</h3>
+            <!-- El asterisco visible acompaña al color: el estado no depende
+                 solo del rojo/azul. -->
+            <div class="pd-prompt-optimizer__variables" data-test="optimizer-variables">
+              <span
+                v-for="path in result.recommendedVariables.mandatory"
+                :key="`m-${path}`"
+                class="pd-mono"
+                :class="MANDATORY_CHIP_CLASS"
+                data-test="optimizer-variable-mandatory"
+                >{{ markerForPath(path, true) }}</span
+              >
+              <span
+                v-for="path in result.recommendedVariables.optional"
+                :key="`o-${path}`"
+                class="pd-mono"
+                :class="OPTIONAL_CHIP_CLASS"
+                data-test="optimizer-variable-optional"
+                >{{ markerForPath(path, false) }}</span
+              >
+            </div>
+            <p class="pd-text-secondary pd-prompt-optimizer__hint">
+              Obligatoria: el flujo se pausa si falta. Opcional: se sustituye por texto vacío.
+            </p>
+          </template>
+
           <h3 class="pd-label pd-prompt-optimizer__heading">Recomendaciones</h3>
           <ul
             v-if="result.recommendations.length > 0"
@@ -270,6 +322,21 @@ const applyPrompt = (): void => {
 
 .pd-prompt-optimizer__heading {
   margin: 16px 0 6px;
+}
+
+.pd-prompt-optimizer__rationale {
+  margin: 12px 0 0;
+}
+
+.pd-prompt-optimizer__variables {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.pd-prompt-optimizer__hint {
+  margin: 6px 0 0;
+  font-size: 0.75rem;
 }
 
 .pd-prompt-optimizer__proposal {

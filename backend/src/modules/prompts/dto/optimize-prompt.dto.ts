@@ -77,10 +77,41 @@ export class PromptOptimizationTelemetryDto {
   readonly model: string;
 }
 
+/** Variables del prompt optimizado, separadas por necesidad. */
+export class RecommendedVariablesDto {
+  @ApiProperty({
+    type: [String],
+    description:
+      'Rutas `ns.campo` marcadas como {{*ns.campo}}: si faltan, el flujo se pausa',
+    example: ['parsed_email.clean_body'],
+  })
+  readonly mandatory: string[];
+
+  @ApiProperty({
+    type: [String],
+    description:
+      'Rutas `ns.campo` opcionales ({{ns.campo}}): si faltan, texto vacio',
+    example: ['scraped_web.published_at'],
+  })
+  readonly optional: string[];
+}
+
 /** Respuesta de `POST /api/prompts/optimize`. */
 export class OptimizePromptResponseDto {
   @ApiProperty({ description: 'Prompt reescrito, listo para aplicar' })
   readonly optimizedPrompt: string;
+
+  @ApiProperty({
+    type: RecommendedVariablesDto,
+    description: 'Variables del prompt optimizado, obligatorias y opcionales',
+  })
+  readonly recommendedVariables: RecommendedVariablesDto;
+
+  @ApiProperty({
+    description:
+      'Diagnostico del borrador y justificacion de las variables obligatorias',
+  })
+  readonly rationale: string;
 
   @ApiProperty({ type: [String] })
   readonly recommendations: string[];
@@ -88,3 +119,6 @@ export class OptimizePromptResponseDto {
   @ApiProperty({ type: PromptOptimizationTelemetryDto })
   readonly telemetry: PromptOptimizationTelemetryDto;
 }
+
+/** Alias con el nombre que usa la especificacion funcional. */
+export type OptimizedPromptResponseDto = OptimizePromptResponseDto;

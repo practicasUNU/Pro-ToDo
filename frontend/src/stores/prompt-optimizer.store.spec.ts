@@ -15,6 +15,8 @@ const optimizePrompt = vi.mocked(promptsService.optimizePrompt);
 
 const RESULT: PromptOptimizationResult = {
   optimizedPrompt: 'Eres un redactor institucional.',
+  recommendedVariables: { mandatory: [], optional: [] },
+  rationale: 'Sin rol definido.',
   recommendations: ['Se anadio un rol.'],
   telemetry: {
     tokensPrompt: 100,

@@ -25,8 +25,19 @@ export interface PromptOptimizationTelemetry {
   readonly model: string;
 }
 
+/** Variables del prompt optimizado como rutas `ns.campo`, separadas por necesidad. */
+export interface RecommendedPromptVariables {
+  /** Marcadas `{{*ns.campo}}`: si faltan, el flujo se pausa antes de la IA. */
+  readonly mandatory: string[];
+  /** Marcadas `{{ns.campo}}`: si faltan, se sustituyen por texto vacio. */
+  readonly optional: string[];
+}
+
 export interface PromptOptimizationResult {
   readonly optimizedPrompt: string;
+  readonly recommendedVariables: RecommendedPromptVariables;
+  /** Diagnostico del borrador y justificacion de las obligatorias. */
+  readonly rationale: string;
   readonly recommendations: string[];
   readonly telemetry: PromptOptimizationTelemetry;
 }

@@ -20,6 +20,7 @@ import { DEFAULT_GEMINI_MODEL } from '@modules/nodes/strategies/providers/gemini
 import {
   buildOptimizerSystemPrompt,
   buildOptimizerUserPrompt,
+  classifyPromptVariables,
   extractPlaceholders,
 } from '@modules/prompts/prompt-meta.template';
 import { AiCallStatus } from '@modules/telemetry/enums/ai-call-status.enum';
@@ -243,6 +244,8 @@ export class PromptOptimizerService {
 
     return {
       optimizedPrompt,
+      recommendedVariables: classifyPromptVariables(optimizedPrompt),
+      rationale: (payload.headline ?? '').trim(),
       recommendations: this.buildRecommendations(
         payload,
         dto.draftPrompt,
@@ -397,8 +400,13 @@ export class PromptOptimizerService {
       .filter((paragraph) => paragraph.length > 0);
 
     const kept = new Set(extractPlaceholders(optimizedPrompt));
+    // Ascender una opcional a obligatoria (`{{ns.c}}` -> `{{*ns.c}}`) es lo que
+    // el optimizador tiene permitido, no una perdida. Degradar una obligatoria
+    // si lo es: el flujo dejaria de pausar cuando falta el dato.
     const lost = extractPlaceholders(draftPrompt).filter(
-      (placeholder) => !kept.has(placeholder),
+      (placeholder) =>
+        !kept.has(placeholder) &&
+        !kept.has(placeholder.replace(/^\{\{(?!\*)/, '{{*')),
     );
 
     return lost.length > 0
