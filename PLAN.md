@@ -5242,5 +5242,18 @@ Rama: `feat/drupal-and-acens-nodes-dev`. Migraciones `065` y `066`.
 - [x] Encabezados `<h2>` y recomendacion obligatoria/opcional
 - [x] Migraciones maestras y e2e de integridad
 - [x] E2E alineada con la topologia canonica
-- [ ] Pendiente: aplicar las migraciones 068 y 069 en la base de desarrollo (`npm run db:migrate`)
+- [x] Migraciones 068 y 069 aplicadas en la base de desarrollo
+- [ ] Pendiente: validar el texto de los prompts al guardarlos (sigue abierto)
+
+---
+
+## Reanudacion por bolsa de palabras y prompts maestros enriquecidos
+
+- **Reanudacion por correo:** `tokenizeStepWords` (reutiliza `tokenizeSubject` del filtro del `TRIGGER_IMAP`; parte tambien por `_` y descarta `de`, `del`, `el`, `la`, `los`, `las`) y `matchesStepWords` (todas las palabras pedidas, en cualquier orden). `resolveTargetStep` las usa como quinto nivel, detras de etiqueta, id/namespace, tipo y `STEP_ALIASES`. Sin coincidencia: aviso y reanudacion desde el cursor persistido. La expresion de la orden y la limpieza de sockets no cambian.
+- **Migracion 069, paso 5b (parches por marcador):** directiva de polivalencia Markdown en Notiweb, apertura y titulos (literal) y en cierre, Innodays e Innobar (variante sin plantilla); instruccion DOM de `h3.licitacion-title` en apertura; estructura bibliografica `<h2>` + `p.notiweb-referencia` en Notiweb; `{{ocr_result.clean_body}}` opcional junto a `{{parsed_email.extracted_documents_text}}`; normalizacion de marcas obligatorias. Auditoria `ACTUALIZAR` solo para filas que ya existian.
+- **Migracion 069, paso 6b:** `requiredSelectors: ["h3.licitacion-title"]` en el escudo del maestro de apertura.
+- [x] Bolsa de palabras en la reanudacion por correo
+- [x] Prompts maestros enriquecidos y ranura DOM de apertura
+- [x] Cobertura unitaria y e2e de integridad
+- [ ] Pendiente: reejecutar la 069 en la base de desarrollo con `psql -f` (el runner ya la tiene registrada)
 - [ ] Pendiente: validar el texto de los prompts al guardarlos (sigue abierto)

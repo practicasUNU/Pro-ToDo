@@ -9436,4 +9436,20 @@ mapeador.
 - **Por que la auditoria usa `accion = 'CREAR'`:** el CHECK de `audit_eventos` no admite otros valores; el origen viaja en `datos_nuevos.origen = 'SEED_MASTER_DATA'`.
 - [x] Migraciones 068 y 069 aplicadas en la base de pruebas e idempotentes al reejecutarlas
 - [x] Ensayo en la base de desarrollo dentro de una transaccion revertida
-- [ ] Aplicar en desarrollo (`npm run db:migrate`)
+- [x] Aplicada en desarrollo
+
+## Reanudacion por bolsa de palabras
+
+- **Por que un quinto nivel y no sustituir los cuatro:** los niveles estrictos (etiqueta, id, tipo, sinonimo) ya resuelven lo habitual sin ambiguedad. La bolsa de palabras es laxa: «ia» casaria tambien con `escudo_post_ia`. Va la ultima para que solo atienda lo que nadie mas entiende, como el orden invertido («plantilla mapeador»).
+- **Por que partir tambien por `_`:** con el guion bajo dentro de la palabra, `mapeador_plantilla` seria un unico termino y ninguna orden escrita a mano lo encontraria.
+- **Por que el mismo tokenizador que el filtro del Trigger:** quien configura un flujo aprende una sola regla de normalizacion para las dos puertas de correo.
+
+## Prompts maestros enriquecidos
+
+- **Por que dos variantes de la directiva Markdown:** cierre e Innodays/Innobar no tienen plantilla base ni `filled_markup`. Hablarles de transpolar a la PLANTILLA BASE invitaria al modelo a inventarse un HTML que nadie publica; su variante pide texto plano en `headline`, `summary` y `body_paragraphs`.
+- **Por que la ranura de apertura se exige en el escudo y no solo en el prompt:** sin `requiredSelectors` el escudo no audita ninguna ranura, y una instruccion que el modelo ignore llegaria a Drupal. Con el selector, un `<h3>` suprimido, sin clase o vacio pausa el flujo con `ERR_POST_IA_DOM_MUTATED`.
+- **Por que el OCR va junto al texto de los adjuntos:** respeta el contrato de variables opcionales. Coste asumido: la cadena de degradacion (OCR -> adjuntos -> cuerpo) puede repetir material en un correo sin adjuntos.
+- **Por que dentro de la 069 y no en una migracion nueva:** el contenido maestro queda en un solo fichero; cada parche se protege con su marcador, y una base que ya tenia la 069 la vuelve a pasar con `psql -f` sin duplicar nada.
+- [x] 069 reejecutada dos veces en la base de pruebas sin cambios en el segundo pase
+- [x] Ensayo en desarrollo dentro de una transaccion revertida
+- [ ] Reejecutar la 069 en desarrollo (`psql -f`)
