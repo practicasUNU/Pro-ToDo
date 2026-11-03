@@ -398,6 +398,54 @@ export class StatePayloadContext {
     };
   }
 
+  /**
+   * Contexto DERIVADO con algunos namespaces superpuestos; este no cambia.
+   *
+   * Lo usan los destinos que recorren un lote (cardinalidad 1 a N): para el
+   * elemento k se superpone su contenido a los namespaces de los que leen las
+   * plantillas, y `{{llm_response.headline}}` resuelve el titular de ESE
+   * elemento sin reescribir ninguna plantilla del flujo.
+   *
+   * Cada superposicion se FUSIONA sobre el namespace existente con spread, igual
+   * que `setNamespace`, y solo ella se clona en profundidad. Los namespaces no
+   * superpuestos se comparten por referencia con el contexto original: un
+   * `raw_email` con adjuntos en Base64 no se duplica en memoria por cada
+   * elemento del lote. La inmutabilidad no se resiente, porque ningun metodo
+   * expone esos objetos internos sin clonarlos antes (`getNamespace`,
+   * `getAllContext`) y `setNamespace` reconstruye el mapa entero.
+   *
+   * @param overlays Namespace -> claves a superponer para este elemento.
+   * @returns Un contexto nuevo con la misma ejecucion, flujo, cursor e iniciador.
+   */
+  public withNamespaceOverlays(
+    overlays: Readonly<Record<string, Record<string, unknown>>>,
+  ): StatePayloadContext {
+    const derived = new StatePayloadContext(
+      this.executionId,
+      this.workflowId,
+      this.activeCursor,
+      this.sandboxScope,
+      this.initiatorUserId,
+    );
+    const merged = Object.entries(overlays).map(
+      ([namespace, data]) =>
+        [
+          namespace,
+          {
+            ...structuredClone(this.namespaces[namespace] ?? {}),
+            ...structuredClone(data),
+          },
+        ] as const,
+    );
+
+    derived.namespaces = {
+      ...this.namespaces,
+      ...Object.fromEntries(merged),
+    };
+
+    return derived;
+  }
+
   /** Copia profunda del namespace, o `undefined` si ningun nodo lo ha escrito. */
   public getNamespace(namespace: string): Record<string, unknown> | undefined {
     const stored = this.namespaces[namespace];

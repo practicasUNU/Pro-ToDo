@@ -7,6 +7,7 @@ import { useAiPromptTemplatesStore } from '@stores/ai-prompt-templates.store';
 import {
   DEFAULT_LLM_EMERGENCY_BRAKE_THRESHOLD,
   DEFAULT_LLM_MAX_RETRIES,
+  DEFAULT_LLM_OUTPUT_CARDINALITY,
   DEFAULT_LLM_MODEL,
   DEFAULT_LLM_PROVIDER,
   DEFAULT_LLM_TIMEOUT_MS,
@@ -97,6 +98,7 @@ const buildInitialConfig = (): LlmExtractorNodeConfig => ({
   emergencyBrakeThreshold: DEFAULT_LLM_EMERGENCY_BRAKE_THRESHOLD,
   // `null` = "decide tu". Ver el TSDoc del campo en los tipos.
   maxTokens: null,
+  outputCardinality: DEFAULT_LLM_OUTPUT_CARDINALITY,
 });
 
 /** Prefijo del id de Pinia; el sufijo es el `nodeId` del `pipeline_schema`. */
@@ -538,6 +540,12 @@ const llmExtractorSetup = () => {
       // del backend. Publicar un numero fijaria el presupuesto para siempre y
       // desactivaria la subida automatica ante una plantilla.
       ...(config.value.maxTokens === null ? {} : { maxTokens: config.value.maxTokens }),
+      // Solo se publica el lote: `SINGLE` es el defecto del backend, y omitirlo
+      // mantiene el viaje de ida y vuelta de los nodos guardados antes de que
+      // existiera la clave.
+      ...(config.value.outputCardinality === 'MULTIPLE'
+        ? { outputCardinality: config.value.outputCardinality }
+        : {}),
     };
   };
 
@@ -573,6 +581,8 @@ const llmExtractorSetup = () => {
       // Ausente vuelve a `null` y NO al tope de marcado: el contrato de ida y
       // vuelta exige que un nodo guardado sin la clave la siga omitiendo.
       maxTokens: typeof params.maxTokens === 'number' ? params.maxTokens : null,
+      outputCardinality:
+        params.outputCardinality === 'MULTIPLE' ? 'MULTIPLE' : DEFAULT_LLM_OUTPUT_CARDINALITY,
     };
   };
 

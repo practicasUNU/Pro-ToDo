@@ -127,6 +127,36 @@ export const LLM_RETRIES_WARNING_THRESHOLD = DEFAULT_LLM_MAX_RETRIES;
  * Vue. La ausencia se representa con `''` o `null`, y es `toNodeParams()` quien
  * decide que se publica en el `pipeline_schema`.
  */
+/**
+ * Cardinalidad de la salida del nodo de IA. Replica de `LlmOutputCardinality`
+ * (@modules/nodes/dto/llm-extractor-config.dto.ts).
+ *
+ * `MULTIPLE` pide un lote: el primer elemento en la raiz del JSON y el resto en
+ * `items`. El escudo valida cada uno y los destinos los publican en bucle.
+ */
+export type LlmOutputCardinality = 'SINGLE' | 'MULTIPLE';
+
+export const DEFAULT_LLM_OUTPUT_CARDINALITY: LlmOutputCardinality = 'SINGLE';
+
+/** Opciones cerradas del selector (Poka-Yoke): nada de texto libre. */
+export const LLM_OUTPUT_CARDINALITY_OPTIONS: ReadonlyArray<{
+  readonly value: LlmOutputCardinality;
+  readonly label: string;
+  readonly description: string;
+}> = [
+  {
+    value: 'SINGLE',
+    label: 'Un elemento (1:1)',
+    description: 'Una noticia, un expediente o un enlace por correo.',
+  },
+  {
+    value: 'MULTIPLE',
+    label: 'Varios elementos (lote 1:N)',
+    description:
+      'El correo puede traer varios: la respuesta incluye "items" y los destinos publican cada uno.',
+  },
+];
+
 export interface LlmExtractorNodeConfig {
   /** UUID de la plantilla de prompt, o `null` si se escribe en linea. */
   templatePromptId: string | null;
@@ -152,6 +182,8 @@ export interface LlmExtractorNodeConfig {
    * y el defecto del proveedor— y un numero aqui colapsaria los dos ultimos.
    */
   maxTokens: number | null;
+  /** Un elemento o un lote. Ver `LlmOutputCardinality`. */
+  outputCardinality: LlmOutputCardinality;
 }
 
 /**

@@ -7,6 +7,7 @@ import sanitizeHtml from 'sanitize-html';
 import { NodeType } from '@core/fsm/types/pipeline-schema.types';
 import { TemplateRendererService } from '@modules/templates/services/template-renderer.service';
 import { RESIDUAL_MARKER_PATTERN } from '@modules/templates/templates.service';
+import { normalizeItems } from '@common/utils/cardinality-normalizer.util';
 import { stripCodeFence } from '@modules/nodes/utils/code-fence.util';
 
 import {
@@ -48,6 +49,19 @@ export const ERR_POST_IA_UNSUPPORTED_TAGS = 'ERR_POST_IA_UNSUPPORTED_TAGS';
 export const ERR_POST_IA_EMPTY_AFTER_SANITIZE =
   'ERR_POST_IA_EMPTY_AFTER_SANITIZE';
 export const ERR_POST_IA_DOM_MUTATED = 'ERR_POST_IA_DOM_MUTATED';
+
+/** Clave del lote en la salida del nodo de IA (cardinalidad 1 a N). */
+const RESPONSE_ITEMS_FIELD = 'items';
+
+/** Campos de texto que acompanan al markup y se publican saneados. */
+const HTML_COMPANION_FIELDS = ['headline', 'summary', 'source_url'] as const;
+
+/** Un elemento del lote ya auditado, tal y como se publica. */
+interface ValidatedItem {
+  readonly validated_markup: string;
+  readonly validated_fields: Record<string, string>;
+  readonly character_count: number;
+}
 
 /** Las mismas que aplica `PipelineValidatorService` al guardar el esquema. */
 const VALIDATION_OPTIONS: ValidatorOptions = {
@@ -148,7 +162,13 @@ export class PostIaSanitizerStrategy implements INodeStrategy {
       name: 'validated_fields',
       type: 'object',
       description:
-        'Modo TEXT: cada campo auditado, en texto plano sin etiquetas (p. ej. validated_fields.headline). Vacio en modo HTML',
+        'Campos en texto plano sin etiquetas (p. ej. validated_fields.headline): los auditados en modo TEXT, o titular, resumen y source_url en modo HTML',
+    },
+    {
+      name: 'validated_items',
+      type: 'object',
+      description:
+        'Elementos del lote del segundo en adelante, ya auditados: [{ validated_markup, validated_fields, character_count }]. Vacio con un solo elemento',
     },
   ];
 
@@ -207,14 +227,88 @@ export class PostIaSanitizerStrategy implements INodeStrategy {
 
     // 2bis. Flujos sin maquetacion: el escudo audita los campos de texto del
     //       modelo y no necesita ningun MAPEADOR_PLANTILLA por delante.
-    if (resolution.config.contentMode === PostIaContentMode.TEXT) {
-      return this.auditTextFields(
-        sourcePayload,
-        sourceNamespace,
-        resolution.config.sourceFields,
-      );
+    const isTextMode = resolution.config.contentMode === PostIaContentMode.TEXT;
+    const audit = (
+      record: Record<string, unknown>,
+      label: string,
+    ): NodeResult =>
+      isTextMode
+        ? this.auditTextFields(record, label, resolution.config.sourceFields)
+        : this.auditHtml(record, label, {
+            sourceField,
+            allowedTags,
+            requiredSelectors,
+          });
+
+    // 3. La raiz: el primer (o unico) elemento, exactamente como hasta ahora.
+    const rootResult = audit(sourcePayload, sourceNamespace);
+
+    if (!rootResult.success) {
+      return rootResult;
     }
 
+    // 4. Lote (cardinalidad 1 a N): cada elemento de `items` pasa por las
+    //    MISMAS comprobaciones que la raiz. Es lo que permite a los destinos
+    //    recorrer `validated_items` sin volver a sanear: un elemento que no
+    //    supera la auditoria detiene el nodo entero, con su ruta exacta
+    //    (`llm_response.items[2].filled_markup`), en vez de publicarse a medias.
+    const items = normalizeItems<Record<string, unknown>>(
+      sourcePayload[RESPONSE_ITEMS_FIELD],
+    ).filter(
+      (item): item is Record<string, unknown> =>
+        typeof item === 'object' && !Array.isArray(item),
+    );
+    const validatedItems: ValidatedItem[] = [];
+
+    for (const [index, item] of items.entries()) {
+      const itemResult = audit(
+        item,
+        `${sourceNamespace}.${RESPONSE_ITEMS_FIELD}[${index}]`,
+      );
+
+      if (!itemResult.success) {
+        return itemResult;
+      }
+
+      validatedItems.push({
+        validated_markup:
+          typeof itemResult.data?.validated_markup === 'string'
+            ? itemResult.data.validated_markup
+            : '',
+        validated_fields: (itemResult.data?.validated_fields ?? {}) as Record<
+          string,
+          string
+        >,
+        character_count: Number(itemResult.data?.character_count ?? 0),
+      });
+    }
+
+    return {
+      success: true,
+      data: { ...rootResult.data, validated_items: validatedItems },
+    };
+  }
+
+  /**
+   * Modo HTML sobre un registro: el de la raiz o el de un elemento del lote.
+   *
+   * `label` es la ruta que se cita en los mensajes y en `missingFields`
+   * (`llm_response` o `llm_response.items[1]`), de modo que el operador sepa
+   * QUE elemento fallo sin tener que contarlos.
+   */
+  private auditHtml(
+    sourcePayload: Record<string, unknown>,
+    sourceNamespace: string,
+    {
+      sourceField,
+      allowedTags,
+      requiredSelectors,
+    }: {
+      readonly sourceField: string;
+      readonly allowedTags: readonly string[];
+      readonly requiredSelectors: readonly string[];
+    },
+  ): NodeResult {
     // 3. El campo concreto. El fallo es exacto a proposito —nombra la ruta
     //    completa— para que el operador no tenga que adivinar que le falta.
     const rawMarkup = sourcePayload[sourceField];
@@ -319,7 +413,10 @@ export class PostIaSanitizerStrategy implements INodeStrategy {
         character_count: validatedMarkup.length,
         audit_status: AUDIT_STATUS_PASSED,
         sanitized_at: new Date().toISOString(),
-        validated_fields: {},
+        // Los campos de texto que acompanan al markup, saneados: con ellos un
+        // destino puede titular cada elemento del lote sin leer el texto en
+        // bruto del modelo.
+        validated_fields: this.plainCompanionFields(sourcePayload),
       },
     };
   }
@@ -412,6 +509,31 @@ export class PostIaSanitizerStrategy implements INodeStrategy {
         validated_fields: validatedFields,
       },
     };
+  }
+
+  /**
+   * `headline`, `summary` y `source_url` en texto plano, los que vengan.
+   *
+   * Solo en modo HTML, donde antes `validated_fields` iba vacio. Un campo
+   * ausente o que queda vacio tras el saneado simplemente no aparece: el markup
+   * es lo que se audita aqui, y estos campos son su acompanamiento.
+   */
+  private plainCompanionFields(
+    record: Record<string, unknown>,
+  ): Record<string, string> {
+    return Object.fromEntries(
+      HTML_COMPANION_FIELDS.flatMap((field) => {
+        const value = record[field];
+
+        if (typeof value !== 'string') {
+          return [];
+        }
+
+        const plain = this.toPlainText(stripCodeFence(value));
+
+        return plain.length > 0 ? [[field, plain]] : [];
+      }),
+    );
   }
 
   /** Texto sin ninguna etiqueta y con las entidades ya decodificadas. */

@@ -23,6 +23,13 @@ const MOCK_HEADLINE_LENGTH = 120;
 const MOCK_MAX_PARAGRAPHS = 5;
 
 /**
+ * Elementos adicionales que como mucho devuelve un lote simulado. Holgado para
+ * un boletin real (un puñado de noticias) y acotado para que un material largo
+ * no convierta cada linea en una publicacion.
+ */
+const MOCK_MAX_ITEMS = 20;
+
+/**
  * Transcripcion que devuelve la simulacion en modo OCR.
  *
  * Literal y no derivada del prompt, al contrario que la redaccion simulada: el
@@ -105,6 +112,46 @@ export class MockLlmProvider implements ILlmProviderClient {
       firstParagraph ?? 'Contenido simulado sin titular',
       MOCK_HEADLINE_LENGTH,
     );
+
+    // Lote (cardinalidad 1 a N): cada parrafo del material es un elemento. La
+    // raiz describe solo el PRIMERO e `items` el resto, con el mismo reparto
+    // asimetrico que se exige a los proveedores reales. Determinista: la misma
+    // entrada da el mismo lote, y sin examinar el prompt (ver `mode`).
+    if (config?.expectsItems === true) {
+      const [first, ...rest] = paragraphs;
+      const rootParagraphs = first === undefined ? [] : [first];
+
+      return Promise.resolve({
+        headline,
+        summary: truncate(
+          first ?? 'Contenido simulado sin cuerpo',
+          MOCK_SUMMARY_LENGTH,
+        ),
+        body_paragraphs: rootParagraphs,
+        ...(config.expectsFilledMarkup === true
+          ? { filled_markup: this.buildMarkup(headline, rootParagraphs) }
+          : {}),
+        items: rest.slice(0, MOCK_MAX_ITEMS).map((paragraph) => {
+          const itemHeadline = truncate(paragraph, MOCK_HEADLINE_LENGTH);
+
+          return {
+            headline: itemHeadline,
+            summary: truncate(paragraph, MOCK_SUMMARY_LENGTH),
+            body_paragraphs: [paragraph],
+            ...(config.expectsFilledMarkup === true
+              ? { filled_markup: this.buildMarkup(itemHeadline, [paragraph]) }
+              : {}),
+          };
+        }),
+        metadata: {
+          tokensPrompt: 0,
+          tokensCompletion: 0,
+          modelUsed: MOCK_LLM_MODEL,
+          isMock: true,
+        },
+      });
+    }
+
     const bodyParagraphs =
       paragraphs.length > 0 ? paragraphs.slice(0, MOCK_MAX_PARAGRAPHS) : [];
 

@@ -123,6 +123,19 @@ export const DEFAULT_LLM_MARKUP_MAX_TOKENS = 8_192;
 export const MIN_LLM_MAX_TOKENS = 256;
 export const MAX_LLM_MAX_TOKENS = 32_768;
 
+/**
+ * Cardinalidad de la salida del nodo de IA.
+ *
+ * `SINGLE` es el contrato de siempre: un elemento en la raiz del JSON.
+ * `MULTIPLE` anade `items` con el reparto asimetrico (raiz = primer elemento,
+ * `items` = el resto), para correos que traen un lote: un boletin con varias
+ * noticias, varios expedientes o varios paneles de evaluacion.
+ */
+export enum LlmOutputCardinality {
+  SINGLE = 'SINGLE',
+  MULTIPLE = 'MULTIPLE',
+}
+
 /** Fallos consecutivos que activan el freno de emergencia por defecto. */
 export const DEFAULT_LLM_EMERGENCY_BRAKE_THRESHOLD = 3;
 
@@ -299,6 +312,18 @@ export class LlmExtractorConfigDto {
     message: `maxTokens no puede ser mayor que ${MAX_LLM_MAX_TOKENS}.`,
   })
   maxTokens?: number;
+
+  @ApiPropertyOptional({
+    description:
+      'SINGLE (por defecto): un elemento. MULTIPLE: la respuesta admite un lote, con el primer elemento en la raiz y el resto en "items".',
+    enum: LlmOutputCardinality,
+    default: LlmOutputCardinality.SINGLE,
+  })
+  @IsOptional()
+  @IsEnum(LlmOutputCardinality, {
+    message: `outputCardinality debe ser uno de: ${Object.values(LlmOutputCardinality).join(', ')}.`,
+  })
+  outputCardinality?: LlmOutputCardinality;
 }
 
 /** Configuracion del nodo de IA con los valores por defecto ya aplicados. */
@@ -331,6 +356,7 @@ export interface ResolvedLlmExtractorConfig {
    * es `resolveMaxTokens`, en la estrategia.
    */
   readonly maxTokens: number | null;
+  readonly outputCardinality: LlmOutputCardinality;
 }
 
 /**
@@ -386,4 +412,5 @@ export const resolveLlmExtractorConfig = (
   emergencyBrakeThreshold:
     dto.emergencyBrakeThreshold ?? DEFAULT_LLM_EMERGENCY_BRAKE_THRESHOLD,
   maxTokens: dto.maxTokens ?? null,
+  outputCardinality: dto.outputCardinality ?? LlmOutputCardinality.SINGLE,
 });

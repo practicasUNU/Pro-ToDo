@@ -648,7 +648,7 @@ describe('PostIaSanitizerStrategy', () => {
   });
 
   describe('7. Inventario de salida (outputFields)', () => {
-    it('7.1 deberia declarar las cinco claves del namespace', () => {
+    it('7.1 deberia declarar las seis claves del namespace', () => {
       // 1. Arrange & 2. Act ⚙️
       const strategy = buildStrategy();
 
@@ -659,6 +659,7 @@ describe('PostIaSanitizerStrategy', () => {
         'audit_status',
         'sanitized_at',
         'validated_fields',
+        'validated_items',
       ]);
     });
 

@@ -252,7 +252,52 @@ export interface LlmExecutionOptions {
    * el contrato de tres claves de siempre.
    */
   readonly expectsFilledMarkup?: boolean;
+
+  /**
+   * Si la respuesta puede traer un LOTE de elementos (cardinalidad 1 a N).
+   *
+   * Con el activo, el contrato anade la clave `items` con el reparto
+   * ASIMETRICO: la raiz describe el primer elemento —como siempre— e `items`
+   * solo los restantes, del segundo en adelante (vacio si hay uno). Asi el
+   * marcado del primero no se genera dos veces y todo lo que hoy lee la raiz
+   * (`{{llm_response.headline}}`) sigue valiendo.
+   *
+   * INDICADOR y no deduccion del prompt, por el mismo motivo que
+   * `expectsFilledMarkup`. OPCIONAL, con `false` implicito.
+   */
+  readonly expectsItems?: boolean;
 }
+
+/**
+ * Un elemento adicional del lote (`items`), con las mismas claves que la raiz.
+ *
+ * `source_url` es opcional: solo lo aporta el modelo cuando el material cita
+ * de donde sale cada elemento (por ejemplo, una noticia de un boletin).
+ */
+export interface LlmResponseItem {
+  headline: string;
+  summary: string;
+  body_paragraphs: string[];
+  filled_markup?: string;
+  source_url?: string;
+}
+
+/**
+ * Regla de cardinalidad que se anade al contrato cuando se espera un lote.
+ *
+ * Exportada para que el optimizador de prompts y las pruebas citen el MISMO
+ * texto que reciben los proveedores.
+ */
+export const RESPONSE_ITEMS_RULE = [
+  'Incluye ademas la clave "items" (array de objetos). REGLA DE CARDINALIDAD:',
+  'si el material contiene un unico elemento, colocalo en la raiz y deja "items"',
+  'como array vacio []. Si contiene varios, coloca en la raiz el PRIMER elemento',
+  'y en "items" un objeto por cada elemento RESTANTE (del segundo en adelante),',
+  'cada uno con sus propias claves "headline", "summary" y "body_paragraphs",',
+  'su "filled_markup" si se te pide maquetado, y "source_url" si el material',
+  'indica de donde procede. Queda prohibido repetir el primer elemento dentro',
+  'de "items".',
+].join(' ');
 
 /**
  * Frase que describe al modelo la forma exacta de la respuesta.
@@ -278,12 +323,16 @@ export interface LlmExecutionOptions {
  */
 export const buildResponseContractInstruction = (
   expectsFilledMarkup: boolean,
+  expectsItems = false,
 ): string => {
-  const base = [
+  const keys = [
     'Responde EXCLUSIVAMENTE con un objeto JSON valido, sin texto adicional',
     'ni marcas de bloque de codigo, con exactamente estas claves:',
     '"headline" (string), "summary" (string) y "body_paragraphs" (array de strings).',
   ].join(' ');
+  // La regla del lote va justo detras de las claves y antes del maquetado: la
+  // directiva de `filled_markup` aplica igual a la raiz y a cada elemento.
+  const base = expectsItems ? `${keys} ${RESPONSE_ITEMS_RULE}` : keys;
 
   if (!expectsFilledMarkup) {
     return base;
@@ -328,28 +377,59 @@ export const buildResponseContractInstruction = (
  * no se reproducen a voluntad. Cuando NO se espera, exigirlo seria peor:
  * obligaria a inventar markup a un flujo que no tiene plantilla ninguna.
  */
-export const buildResponseJsonSchema = (expectsFilledMarkup: boolean) =>
-  ({
+export const buildResponseJsonSchema = (
+  expectsFilledMarkup: boolean,
+  expectsItems = false,
+) => {
+  const fieldProperties = {
+    headline: { type: 'string' },
+    summary: { type: 'string' },
+    body_paragraphs: { type: 'array', items: { type: 'string' } },
+    ...(expectsFilledMarkup
+      ? {
+          filled_markup: {
+            type: 'string',
+            description:
+              'La plantilla HTML base suministrada, con el contenido redactado ya inyectado en sus contenedores semanticos.',
+          },
+        }
+      : {}),
+  };
+  const fieldRequired = expectsFilledMarkup
+    ? ['headline', 'summary', 'body_paragraphs', 'filled_markup']
+    : ['headline', 'summary', 'body_paragraphs'];
+
+  // Cada elemento del lote repite el contrato de la raiz, mas un `source_url`
+  // opcional. `items` es OBLIGATORIO cuando se pide —puede ir vacio—, por el
+  // mismo motivo que `filled_markup`: un campo opcional es el que el modelo
+  // omite bajo un prompt largo, y un lote callado se publicaria como uno solo.
+  return {
     type: 'object',
     properties: {
-      headline: { type: 'string' },
-      summary: { type: 'string' },
-      body_paragraphs: { type: 'array', items: { type: 'string' } },
-      ...(expectsFilledMarkup
+      ...fieldProperties,
+      ...(expectsItems
         ? {
-            filled_markup: {
-              type: 'string',
+            items: {
+              type: 'array',
               description:
-                'La plantilla HTML base suministrada, con el contenido redactado ya inyectado en sus contenedores semanticos.',
+                'Elementos del lote a partir del SEGUNDO; vacio si solo hay uno.',
+              items: {
+                type: 'object',
+                properties: {
+                  ...fieldProperties,
+                  source_url: { type: 'string' },
+                },
+                required: fieldRequired,
+                additionalProperties: false,
+              },
             },
           }
         : {}),
     },
-    required: expectsFilledMarkup
-      ? ['headline', 'summary', 'body_paragraphs', 'filled_markup']
-      : ['headline', 'summary', 'body_paragraphs'],
+    required: expectsItems ? [...fieldRequired, 'items'] : fieldRequired,
     additionalProperties: false,
-  }) as const;
+  } as const;
+};
 
 /**
  * Contrato FORMAL de salida del nodo de IA.
@@ -385,6 +465,12 @@ export interface LlmResponsePayload {
    * describiendo el contrato de tres claves sin mencionarlo.
    */
   filled_markup?: string;
+  /**
+   * Elementos del lote del segundo en adelante, cuando se pidio con
+   * `LlmExecutionOptions.expectsItems`. OPCIONAL por el mismo motivo que
+   * `filled_markup`: los literales de prueba de otros nodos no lo usan.
+   */
+  items?: LlmResponseItem[];
   metadata: {
     tokensPrompt: number;
     tokensCompletion: number;
@@ -425,3 +511,61 @@ export interface ILlmProviderClient {
     attachments?: readonly LlmInlineAttachment[],
   ): Promise<LlmResponsePayload>;
 }
+
+/**
+ * Normaliza la clave `items` que redacto el modelo, sea cual sea el proveedor.
+ *
+ * Vive aqui y no en cada cliente por el motivo de `buildResponseContractInstruction`:
+ * es CONTRATO, y dos copias divergirian. Descarta todo lo que no sea un objeto
+ * y recorta cada campo como lo hacen los clientes con la raiz; un elemento sin
+ * titular, sin resumen y sin parrafos no describe nada y tambien se descarta.
+ *
+ * Devuelve `undefined` si `raw` no es un array, para que el cliente propague la
+ * clave solo cuando el modelo la emitio, igual que hace con `filled_markup`.
+ */
+export const normalizeResponseItems = (
+  raw: unknown,
+): LlmResponseItem[] | undefined => {
+  if (!Array.isArray(raw)) {
+    return undefined;
+  }
+
+  const asText = (value: unknown): string =>
+    typeof value === 'string' ? value.trim() : '';
+  const asOptionalText = (value: unknown): string | undefined => {
+    const text = asText(value);
+
+    return text.length > 0 ? text : undefined;
+  };
+
+  return raw
+    .filter(
+      (entry): entry is Record<string, unknown> =>
+        typeof entry === 'object' && entry !== null && !Array.isArray(entry),
+    )
+    .map((entry) => {
+      const paragraphs = Array.isArray(entry.body_paragraphs)
+        ? entry.body_paragraphs
+            .filter((item): item is string => typeof item === 'string')
+            .map((item) => item.trim())
+            .filter((item) => item.length > 0)
+        : [];
+      const filledMarkup = asOptionalText(entry.filled_markup);
+      const sourceUrl = asOptionalText(entry.source_url);
+
+      return {
+        headline: asText(entry.headline),
+        summary: asText(entry.summary),
+        body_paragraphs: paragraphs,
+        ...(filledMarkup === undefined ? {} : { filled_markup: filledMarkup }),
+        ...(sourceUrl === undefined ? {} : { source_url: sourceUrl }),
+      };
+    })
+    .filter(
+      (item) =>
+        item.headline.length > 0 ||
+        item.summary.length > 0 ||
+        item.body_paragraphs.length > 0 ||
+        item.filled_markup !== undefined,
+    );
+};

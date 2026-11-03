@@ -13,6 +13,7 @@ import { AiPromptTemplatesService } from '@modules/ai-prompt-templates/ai-prompt
 import {
   DEFAULT_LLM_MARKUP_MAX_TOKENS,
   LlmExtractorConfigDto,
+  LlmOutputCardinality,
   resolveLlmExtractorConfig,
 } from '@modules/nodes/dto/llm-extractor-config.dto';
 import {
@@ -102,6 +103,7 @@ export const LLM_OUTPUT_KEYS = [
   'summary',
   'body_paragraphs',
   'filled_markup',
+  'items',
   'metadata',
 ] as const;
 
@@ -251,7 +253,7 @@ export class LlmExtractorStrategy implements INodeStrategy {
   private readonly consecutiveFailures = new Map<string, number>();
 
   /**
-   * Las cuatro claves que este nodo deposita en su namespace.
+   * Las claves que este nodo deposita en su namespace.
    *
    * `body_paragraphs` y `metadata` se declaran `object` y no un tipo de arreglo
    * porque `NodeOutputFieldType` no contempla `text[]`. Ampliar ese union
@@ -271,6 +273,12 @@ export class LlmExtractorStrategy implements INodeStrategy {
       type: 'text',
       description:
         'La plantilla base devuelta ya rellena, o null si el prompt no cito ninguna',
+    },
+    {
+      name: 'items',
+      type: 'object',
+      description:
+        'Elementos del lote del segundo en adelante (cardinalidad MULTIPLE); vacio con un solo elemento',
     },
     {
       name: 'metadata',
@@ -367,6 +375,12 @@ export class LlmExtractorStrategy implements INodeStrategy {
     // lo que despues audita el ESCUDO_POST_IA con sus `requiredSelectors`.
     const expectsFilledMarkup = BASE_TEMPLATE_MARKER_PATTERN.test(prompt);
 
+    // Lote: lo decide el PARAMETRO del nodo y no el texto del prompt. El
+    // contrato con `items` cuesta tokens y cambia lo que publica el nodo; no
+    // puede activarse porque una instruccion mencione la palabra "lote".
+    const expectsItems =
+      config.outputCardinality === LlmOutputCardinality.MULTIPLE;
+
     this.warnOnOrphanAttachments(context);
 
     const interpolated = this.interpolate(context, prompt);
@@ -411,6 +425,7 @@ export class LlmExtractorStrategy implements INodeStrategy {
           maxRetries: config.maxRetries,
           baseDelayMs: config.baseDelayMs,
           expectsFilledMarkup,
+          expectsItems,
           // Se OMITE cuando no hay nada que decir, en vez de mandar un numero:
           // asi el defecto lo sigue publicando cada proveedor, que es como ha
           // funcionado hasta hoy. Ver `resolveMaxTokens`.
@@ -500,6 +515,10 @@ export class LlmExtractorStrategy implements INodeStrategy {
         // es ademas lo que `PostIaSanitizerStrategy` lee como
         // ERR_POST_IA_EMPTY_HTML, que es el diagnostico correcto.
         filled_markup: filledMarkup,
+        // SIEMPRE publicada, por el mismo motivo que `filled_markup`: con un
+        // solo elemento —o con cardinalidad SINGLE— es un arreglo vacio, y los
+        // consumidores (escudo, destinos) recorren la raiz mas este arreglo.
+        items: expectsItems ? (response.items ?? []) : [],
         metadata: {
           ...response.metadata,
           provider: usedProvider,

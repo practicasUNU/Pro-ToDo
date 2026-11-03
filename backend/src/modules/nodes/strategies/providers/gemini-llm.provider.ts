@@ -9,6 +9,7 @@ import {
   LlmProviderException,
   attachUsage,
   buildResponseContractInstruction,
+  normalizeResponseItems,
 } from '@modules/nodes/strategies/interfaces/llm-provider.interface';
 import { stripCodeFence } from '@modules/nodes/utils/code-fence.util';
 import { MockLlmProvider } from '@modules/nodes/strategies/providers/mock-llm.provider';
@@ -110,6 +111,7 @@ interface GeminiGeneratedContract {
   readonly summary?: unknown;
   readonly body_paragraphs?: unknown;
   readonly filled_markup?: unknown;
+  readonly items?: unknown;
 }
 
 /** Error del proveedor. Lo captura la estrategia para mover el freno. */
@@ -196,6 +198,7 @@ export class GeminiLlmProvider implements ILlmProviderClient {
                 text: this.buildSystemInstruction(
                   systemPrompt,
                   config?.expectsFilledMarkup ?? false,
+                  config?.expectsItems ?? false,
                 ),
               },
             ],
@@ -344,9 +347,13 @@ export class GeminiLlmProvider implements ILlmProviderClient {
   private buildSystemInstruction(
     systemPrompt: string | undefined,
     expectsFilledMarkup: boolean,
+    expectsItems: boolean,
   ): string {
     const operatorInstruction = systemPrompt?.trim() ?? '';
-    const contract = buildResponseContractInstruction(expectsFilledMarkup);
+    const contract = buildResponseContractInstruction(
+      expectsFilledMarkup,
+      expectsItems,
+    );
 
     return operatorInstruction.length === 0
       ? contract
@@ -405,6 +412,9 @@ export class GeminiLlmProvider implements ILlmProviderClient {
     const generated = this.parseContract(rawText);
 
     const filledMarkup = this.asOptionalText(generated.filled_markup);
+    // Lote (cardinalidad 1 a N): condicional por el mismo motivo que
+    // `filled_markup`; el normalizador comun descarta lo que no es un elemento.
+    const items = normalizeResponseItems(generated.items);
 
     return {
       headline: this.asText(generated.headline),
@@ -413,6 +423,7 @@ export class GeminiLlmProvider implements ILlmProviderClient {
       // Condicional, igual que en Anthropic: sin la clave, el payload sigue
       // describiendo literalmente el contrato de tres claves.
       ...(filledMarkup === undefined ? {} : { filled_markup: filledMarkup }),
+      ...(items === undefined ? {} : { items }),
       metadata: { ...usage, isMock: false },
     };
   }

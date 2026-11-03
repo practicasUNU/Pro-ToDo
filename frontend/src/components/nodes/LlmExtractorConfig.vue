@@ -16,13 +16,17 @@ import { rangeClass } from '@/utils/field-range';
 import { NODE_TYPE_LABELS, NodeType } from '@/types/pipeline';
 import { blockNonNumericKeys } from '@/utils/numeric-input';
 import type { AiPromptTemplateDetail } from '@/types/ai-prompt-template';
-import type { LlmModelAvailability } from '@/types/nodes/llm-extractor.types';
+import type {
+  LlmModelAvailability,
+  LlmOutputCardinality,
+} from '@/types/nodes/llm-extractor.types';
 import {
   ADMIN_ONLY_LABEL,
   ADMIN_ONLY_TOKEN,
   IMPLEMENTED_LLM_PROVIDERS,
   LLM_AVAILABILITY_LABELS,
   LLM_AVAILABILITY_TOKENS,
+  LLM_OUTPUT_CARDINALITY_OPTIONS,
   LLM_PROVIDER_LABELS,
   LlmProvider,
   MAX_LLM_EMERGENCY_BRAKE_THRESHOLD,
@@ -692,6 +696,36 @@ onMounted(async () => {
             })
           "
         />
+      </div>
+    </div>
+
+    <!-- Cardinalidad: selector cerrado (Poka-Yoke). Con lote, el escudo valida
+         cada elemento y los destinos publican uno por uno. -->
+    <div class="row q-col-gutter-md items-start q-mt-sm">
+      <div class="col-12 col-md-6" data-test="output-cardinality-field">
+        <label class="pd-label" for="llm-output-cardinality">Elementos por correo</label>
+        <q-select
+          id="llm-output-cardinality"
+          :model-value="store.config.outputCardinality"
+          :options="LLM_OUTPUT_CARDINALITY_OPTIONS"
+          outlined
+          dense
+          emit-value
+          map-options
+          class="q-mt-xs"
+          @update:model-value="
+            store.updateConfig({ outputCardinality: $event as LlmOutputCardinality })
+          "
+        >
+          <template #option="scope">
+            <q-item v-bind="scope.itemProps">
+              <q-item-section>
+                <q-item-label>{{ scope.opt.label }}</q-item-label>
+                <q-item-label caption>{{ scope.opt.description }}</q-item-label>
+              </q-item-section>
+            </q-item>
+          </template>
+        </q-select>
       </div>
     </div>
 
