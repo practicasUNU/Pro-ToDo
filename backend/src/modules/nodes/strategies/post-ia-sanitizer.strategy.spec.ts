@@ -540,6 +540,66 @@ describe('PostIaSanitizerStrategy', () => {
       expect(result.error?.code).toBe(ERR_POST_IA_DOM_MUTATED);
       expect(result.error?.missingFields).toContain('section.extra');
     });
+
+    describe('5.6 Ranura del maestro de apertura (h3.licitacion-title)', () => {
+      /** El mismo selector que exige el escudo del maestro de apertura. */
+      const APERTURA_SELECTORS = ['h3.licitacion-title'];
+
+      /** Envoltorio de la plantilla de convocatoria abierta, ya relleno. */
+      const aperturaMarkup = (title: string): string =>
+        '<div class="licitacion-entry" data-expediente="LIC-2026-001">' +
+        '<hr class="licitacion-separator" />' +
+        title +
+        '<p class="valor-estimado">120000.00</p></div>';
+
+      it('5.6.1 deberia aprobar el objeto del contrato dentro de la ranura', async () => {
+        // 1. Arrange 📐
+        const strategy = buildStrategy();
+        const context = buildContext({
+          [SOURCE_FIELD]: aperturaMarkup(
+            '<h3 class="licitacion-title">Objeto válido</h3>',
+          ),
+        });
+
+        // 2. Act ⚙️
+        const result = await strategy.execute(context, {
+          requiredSelectors: APERTURA_SELECTORS,
+        });
+
+        // 3. Assert 🎯
+        expect(result.success).toBe(true);
+        expect(result.error).toBeUndefined();
+        expect(result.data?.validated_markup).toContain(
+          '<h3 class="licitacion-title">Objeto válido</h3>',
+        );
+      });
+
+      it.each([
+        ['borro la clase', '<h3>Objeto válido</h3>'],
+        ['suprimio el <h3>', '<p>Objeto válido</p>'],
+        ['dejo el <h3> vacio', '<h3 class="licitacion-title"></h3>'],
+      ])(
+        '5.6.2 deberia pausar con ERR_POST_IA_DOM_MUTATED si la IA %s',
+        async (_case, title) => {
+          // 1. Arrange 📐
+          const strategy = buildStrategy();
+          const context = buildContext({
+            [SOURCE_FIELD]: aperturaMarkup(title),
+          });
+
+          // 2. Act ⚙️
+          const result = await strategy.execute(context, {
+            requiredSelectors: APERTURA_SELECTORS,
+          });
+
+          // 3. Assert 🎯
+          expect(result.success).toBe(false);
+          expect(result.error?.level).toBe('GRAVE');
+          expect(result.error?.code).toBe(ERR_POST_IA_DOM_MUTATED);
+          expect(result.error?.missingFields).toEqual(APERTURA_SELECTORS);
+        },
+      );
+    });
   });
 
   describe('6. Inmutabilidad del contexto', () => {

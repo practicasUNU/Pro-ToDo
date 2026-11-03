@@ -114,9 +114,20 @@ export const composeSeededPrompt = (): string => {
         continue;
       }
 
+      const head = assignment.trimStart();
+
+      // Asignacion CALCULADA en PL/pgSQL (`SET texto_prompt = patched`, paso 5b
+      // de la 069): el valor no es un literal del fichero, sino el resultado de
+      // parches por marcador que solo anaden directivas antes del material y
+      // normalizan marcas. No tocan la tabla de universidades, y tomar como
+      // prompt los literales que vienen detras la sustituiria por basura.
+      if (!head.startsWith('REPLACE(') && !/^E?'/.test(head)) {
+        continue;
+      }
+
       const literals = literalsIn(assignment);
 
-      if (assignment.trimStart().startsWith('REPLACE(')) {
+      if (head.startsWith('REPLACE(')) {
         const [target, replacement] = literals;
 
         if (target !== undefined && replacement !== undefined) {

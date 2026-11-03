@@ -46,6 +46,31 @@ const MASTER_SLUGS = [
 /** Proveedores de pago: cada uno necesita al menos una tarifa vigente. */
 const PAID_PROVIDERS = ['ANTHROPIC', 'OPENAI', 'GEMINI'] as const;
 
+/** Prompts que rellenan una PLANTILLA BASE (flujos con mapeador). */
+const TEMPLATED_PROMPTS: readonly string[] = [
+  'NOTIWEB_DEFAULT',
+  'LICITACION_APERTURA_DEFAULT',
+  'VERIFICADOR_TITULOS_DEFAULT',
+];
+
+/** Prompts sin plantilla: solo devuelven campos de texto. */
+const PLAIN_TEXT_PROMPTS: readonly string[] = [
+  'LICITACION_CIERRE_DEFAULT',
+  'INNODAYS_ENLACE_DEFAULT',
+  'INNOBAR_ENLACE_DEFAULT',
+];
+
+/** Prompts que leen documentos adjuntos y, por tanto, tambien el OCR. */
+const DOCUMENT_PROMPTS: readonly string[] = [
+  'NOTIWEB_DEFAULT',
+  'LICITACION_APERTURA_DEFAULT',
+  'LICITACION_CIERRE_DEFAULT',
+  'VERIFICADOR_TITULOS_DEFAULT',
+];
+
+/** Marcador obligatorio `{{*ns.campo}}`; el grupo 1 es la ruta. */
+const MANDATORY_MARKER = /\{\{\s*\*\s*([a-z_]+\.[a-z_]+)\s*\}\}/g;
+
 interface BlueprintRow {
   readonly nombre: string;
   readonly configuracion_pipeline: {
@@ -286,5 +311,96 @@ describe('Siembra maestra de los cinco pipelines (e2e)', () => {
 
     // 3. Assert 🎯
     expect(rows.map((row) => row.tabla_afectada)).toContain('plantillas_flujo');
+  });
+
+  describe('11. Prompts maestros enriquecidos (paso 5b)', () => {
+    let promptsByCode: ReadonlyMap<string, string>;
+
+    beforeAll(async () => {
+      const rows = await dataSource.query<
+        { codigo: string; texto_prompt: string }[]
+      >(
+        'SELECT codigo, texto_prompt FROM plantillas_prompts_ia WHERE codigo = ANY($1)',
+        [[...TEMPLATED_PROMPTS, ...PLAIN_TEXT_PROMPTS]],
+      );
+      promptsByCode = new Map(
+        rows.map((row) => [row.codigo, row.texto_prompt]),
+      );
+    });
+
+    const promptOf = (code: string): string => {
+      const text = promptsByCode.get(code);
+
+      if (text === undefined) {
+        throw new Error(`No se sembro el prompt ${code}.`);
+      }
+
+      return text;
+    };
+
+    it('11.1 deberia llevar la directiva de polivalencia adecuada a cada prompt', () => {
+      // 3. Assert 🎯: literal donde hay PLANTILLA BASE, variante de texto
+      //    plano donde no la hay.
+      for (const code of TEMPLATED_PROMPTS) {
+        expect(promptOf(code)).toContain(
+          'DIRECTIVA DE POLIVALENCIA Y ESTRUCTURACIÓN HTML',
+        );
+      }
+      for (const code of PLAIN_TEXT_PROMPTS) {
+        expect(promptOf(code)).toContain(
+          'DIRECTIVA DE POLIVALENCIA Y ESTRUCTURACIÓN DE TEXTO',
+        );
+        expect(promptOf(code)).not.toContain('"filled_markup"');
+      }
+    });
+
+    it('11.2 deberia blindar la ranura de apertura y el rotulo bibliografico de Notiweb', () => {
+      // 3. Assert 🎯
+      expect(promptOf('LICITACION_APERTURA_DEFAULT')).toContain(
+        'INSTRUCCIÓN OBLIGATORIA DE MAQUETACIÓN DOM',
+      );
+      expect(promptOf('LICITACION_APERTURA_DEFAULT')).toContain(
+        '"licitacion-title"',
+      );
+      expect(promptOf('NOTIWEB_DEFAULT')).toContain(
+        '<h2>Referencia bibliográfica</h2>, seguido de uno o varios párrafos <p class="notiweb-referencia">',
+      );
+    });
+
+    it('11.3 deberia ofrecer el OCR como opcional junto al texto de los adjuntos', () => {
+      // 3. Assert 🎯: una sola vez, para no repetir material en el prompt.
+      for (const code of DOCUMENT_PROMPTS) {
+        expect(promptOf(code).split('{{ocr_result.clean_body}}')).toHaveLength(
+          2,
+        );
+      }
+    });
+
+    it('11.4 deberia marcar como obligatorias solo la directiva y la plantilla base', () => {
+      // 3. Assert 🎯
+      for (const code of [...TEMPLATED_PROMPTS, ...PLAIN_TEXT_PROMPTS]) {
+        const mandatory = new Set(
+          [...promptOf(code).matchAll(MANDATORY_MARKER)].map(
+            (match) => match[1],
+          ),
+        );
+        const expected = TEMPLATED_PROMPTS.includes(code)
+          ? ['parsed_email.clean_body', 'rendered_html.compiled_markup']
+          : ['parsed_email.clean_body'];
+
+        expect([...mandatory].sort()).toEqual(expected);
+      }
+    });
+  });
+
+  it('12. deberia exigir la ranura h3.licitacion-title en el escudo del maestro de apertura', () => {
+    // 3. Assert 🎯
+    const escudo:
+      BlueprintRow['configuracion_pipeline']['nodes'][string] | undefined =
+      blueprintBySlug('wf-licitacion-abrir').configuracion_pipeline.nodes[
+        'escudo'
+      ];
+
+    expect(escudo?.params.requiredSelectors).toEqual(['h3.licitacion-title']);
   });
 });

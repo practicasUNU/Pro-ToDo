@@ -6,8 +6,10 @@ import {
   InboundEmailResumeService,
   RESUME_MAIL_POLL_INTERVAL_MS,
   looksLikeResumeCommand,
+  matchesStepWords,
   normalizeStepKey,
   STEP_ALIASES,
+  tokenizeStepWords,
 } from './inbound-email-resume.service';
 
 import type { ConfigService } from '@nestjs/config';
@@ -691,6 +693,140 @@ describe('InboundEmailResumeService (ordenes de reanudacion por correo)', () => 
       );
     });
   });
+  describe('4ter. Coincidencia por bolsa de palabras', () => {
+    /** Nodo mapeador SIN etiqueta: solo lo nombran su id y su tipo. */
+    const MAPPER_NODE = {
+      mapeador_plantilla: {
+        nodeId: 'mapeador_plantilla',
+        nodeType: 'MAPEADOR_PLANTILLA',
+        outputNamespace: 'rendered_html',
+      },
+    };
+
+    const resumeFrom = async (
+      written: string,
+      extraNodes: Record<string, Record<string, unknown>> = MAPPER_NODE,
+    ): Promise<Harness> => {
+      const harness = buildHarness();
+      const workflow = buildWorkflow() as unknown as {
+        pipelineSchema: { nodes: Record<string, unknown> };
+      };
+      harness.workflows.findOne.mockResolvedValue({
+        ...workflow,
+        pipelineSchema: {
+          ...workflow.pipelineSchema,
+          nodes: { ...workflow.pipelineSchema.nodes, ...extraNodes },
+        },
+      });
+      simpleParser.mockResolvedValue(
+        inboundMessage(`REANUDAR ${TOKEN} DESDE ${written}`),
+      );
+      await harness.service.processInbox();
+
+      return harness;
+    };
+
+    const expectResumedFrom = (
+      harness: Harness,
+      targetStepId: string,
+    ): void => {
+      expect(harness.executions.resumeExecution).toHaveBeenCalledWith(
+        EXECUTION_ID,
+        { targetStepId },
+        expect.anything(),
+        { isEmailResume: true },
+      );
+    };
+
+    it('4ter.1 deberia resolver "MAPEADOR DE PLANTILLA" a mapeador_plantilla', async () => {
+      // 1. Arrange 📐 + 2. Act ⚙️
+      const harness = await resumeFrom('MAPEADOR DE PLANTILLA');
+
+      // 3. Assert 🎯
+      expectResumedFrom(harness, 'mapeador_plantilla');
+    });
+
+    it('4ter.2 deberia resolver el orden invertido "plantilla mapeador"', async () => {
+      // 1. Arrange 📐 + 2. Act ⚙️: ningun nivel estricto lo entiende —la clave
+      //    compacta "plantillamapeador" no es id, tipo ni sinonimo—; solo la
+      //    bolsa de palabras, que parte `mapeador_plantilla` por el `_`.
+      const harness = await resumeFrom('plantilla mapeador');
+
+      // 3. Assert 🎯
+      expectResumedFrom(harness, 'mapeador_plantilla');
+      expect(harness.warnSpy).not.toHaveBeenCalledWith(
+        expect.stringContaining('no existe en el flujo'),
+      );
+    });
+
+    it('4ter.3 deberia resolver "Mapeador de Plantillas" por el nombre visual del nodo', async () => {
+      // 1. Arrange 📐: el plural no casa con el id ni con el tipo; lo resuelve
+      //    la etiqueta que el operador ve en el canvas.
+      const harness = await resumeFrom('Mapeador de Plantillas', {
+        mapeo: {
+          nodeId: 'mapeo',
+          nodeType: 'MAPEADOR_PLANTILLA',
+          outputNamespace: 'rendered_html',
+          label: 'Mapeador de Plantillas',
+        },
+      });
+
+      // 3. Assert 🎯
+      expectResumedFrom(harness, 'mapeo');
+    });
+
+    it('4ter.4 deberia volver al activeCursor si "PASO_INEXISTENTE" no nombra ningun nodo', async () => {
+      // 1. Arrange 📐 + 2. Act ⚙️
+      const harness = await resumeFrom('PASO_INEXISTENTE');
+
+      // 3. Assert 🎯: sin `targetStepId`, el motor reanuda desde el cursor
+      //    persistido; la orden no se aborta por una errata.
+      expect(harness.executions.resumeExecution).toHaveBeenCalledWith(
+        EXECUTION_ID,
+        {},
+        expect.anything(),
+        { isEmailResume: true },
+      );
+      expect(harness.warnSpy).toHaveBeenCalledWith(
+        expect.stringContaining('"PASO_INEXISTENTE" no existe en el flujo'),
+      );
+    });
+
+    it('4ter.5 deberia elegir el primero declarado y avisar si las palabras nombran a varios', async () => {
+      // 1. Arrange 📐 + 2. Act ⚙️: «revision pausa» casa por palabras con dos
+      //    nodos (ninguno por etiqueta, id, tipo ni sinonimo exactos).
+      const harness = await resumeFrom('revision pausa', {
+        pausa_revision_final: {
+          nodeId: 'pausa_revision_final',
+          nodeType: 'PAUSA_FLOW',
+          outputNamespace: 'pause_final',
+        },
+      });
+
+      // 3. Assert 🎯
+      expectResumedFrom(harness, 'pausa_revision');
+      expect(harness.warnSpy).toHaveBeenCalledWith(
+        expect.stringContaining('nombra a varios nodos'),
+      );
+    });
+
+    it('4ter.6 un sinonimo exacto deberia ganar a la bolsa de palabras', async () => {
+      // 1. Arrange 📐 + 2. Act ⚙️: «ia» casaria por palabras con
+      //    `escudo_post_ia`, declarado antes, pero el diccionario lo resuelve
+      //    al PROCESADOR_IA en un nivel previo.
+      const harness = await resumeFrom('ia', {
+        escudo_post_ia: {
+          nodeId: 'escudo_post_ia',
+          nodeType: 'ESCUDO_POST_IA',
+          outputNamespace: 'validated_drupal_json',
+        },
+      });
+
+      // 3. Assert 🎯
+      expectResumedFrom(harness, 'nodo_c');
+    });
+  });
+
   describe('5. Higiene del buzon', () => {
     it('5.1 deberia marcar como leido un comando ACEPTADO', async () => {
       // 1. Arrange 📐
@@ -847,6 +983,34 @@ describe('InboundEmailResumeService (ordenes de reanudacion por correo)', () => 
       expect(looksLikeResumeCommand(`Re: RE: reanudár ${TOKEN}`)).toBe(true);
       expect(looksLikeResumeCommand(`RESUME ${TOKEN}`)).toBe(true);
       expect(looksLikeResumeCommand('Re: dudas del boletin')).toBe(false);
+    });
+
+    it('5bis.5 deberia partir el nombre de un paso como el filtro de asunto del Trigger', () => {
+      // 1. Arrange 📐 + 2. Act ⚙️ + 3. Assert 🎯: `_` separa, las tildes se
+      //    pliegan y los articulos y preposiciones se descartan.
+      expect(tokenizeStepWords('MAPEADOR_PLANTILLA')).toEqual([
+        'mapeador',
+        'plantilla',
+      ]);
+      expect(tokenizeStepWords('el Mapeador de la Plantilla')).toEqual([
+        'mapeador',
+        'plantilla',
+      ]);
+      expect(tokenizeStepWords('Extracción Web')).toEqual([
+        'extraccion',
+        'web',
+      ]);
+      expect(tokenizeStepWords('de la')).toEqual([]);
+    });
+
+    it('5bis.6 deberia exigir todas las palabras pedidas, en cualquier orden', () => {
+      // 1. Arrange 📐
+      const candidate = new Set(['mapeador', 'plantilla', 'rendered', 'html']);
+
+      // 2. Act ⚙️ + 3. Assert 🎯
+      expect(matchesStepWords(['plantilla', 'mapeador'], candidate)).toBe(true);
+      expect(matchesStepWords(['mapeador', 'web'], candidate)).toBe(false);
+      expect(matchesStepWords([], candidate)).toBe(false);
     });
 
     it('5bis.4 deberia declarar una espera minima de sondeo de 5000 ms', () => {
@@ -1118,7 +1282,7 @@ describe('InboundEmailResumeService (ordenes de reanudacion por correo)', () => 
       expect(client.close).toHaveBeenCalledTimes(1);
     });
 
-    it('8.5 deberia tratar el CONNECT_TIMEOUT de imapflow como aviso y liberar el socket', async () => {
+    it('8.5 deberia tratar el CONNECT_TIMEOUT de imapflow como aviso LEVE y cerrar el socket en el finally', async () => {
       // 1. Arrange 📐: el error exacto que imapflow fabrica cuando el servidor
       //    no completa la conexion a tiempo. Antes se registraba como averia.
       const { service, client, warnSpy, errorSpy } = buildHarness();
