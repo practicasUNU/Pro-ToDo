@@ -5269,5 +5269,27 @@ Rama: `feat/drupal-and-acens-nodes-dev`. Migraciones `065` y `066`.
 - [x] Palabras vacias y guarda anti-bucle
 - [x] Prompt de apertura canonico y OCR en Innodays/Innobar
 - [x] Pruebas unitarias y e2e de integridad
+- [x] 069 reejecutada en la base de desarrollo
+- [ ] Pendiente: validar el texto de los prompts al guardarlos (sigue abierto)
+
+---
+
+## Cardinalidad 1 a N y campana de Acens
+
+- **Contrato de lote (asimetrico):** la raiz del JSON es el primer elemento; `items` lleva del segundo en adelante (vacio con uno). Asi no se duplica el marcado del primero y las plantillas existentes siguen resolviendo la raiz.
+- **Helpers:** `normalizeItems<T>(payload, containerKey?)` y `expandRootAndItems<T>(root, itemsKey)` en `@common/utils/cardinality-normalizer.util`.
+- **PROCESADOR_IA:** parametro `outputCardinality` (`SINGLE` | `MULTIPLE`). Presupuestos por defecto `DEFAULT_MAX_TOKENS_SINGLE = 8192` y `DEFAULT_MAX_TOKENS_MULTIPLE = 16384`, techo `MAX_HARD_CEILING_TOKENS = 32768`. Siempre viaja un tope: un nodo sin plantilla ya no deja decidir al proveedor. `items` se publica siempre (`[]` con `SINGLE`).
+- **Escudo:** audita la raiz y cada elemento con las mismas reglas; el primer fallo detiene el lote con la ruta exacta. Nueva salida `validated_items`; en modo HTML, `validated_fields` lleva tambien titular, resumen y `source_url` saneados.
+- **Drupal:** N = 1 + `validated_items`; nunca se recorre `items` en bruto. Contexto por elemento con `StatePayloadContext.withNamespaceOverlays` (comparte por referencia los namespaces no superpuestos: los adjuntos en Base64 no se duplican). CREATE_NODE: un POST por elemento y, si falla a mitad, `CREATE_NODE_PARTIAL` con `published_nodes`; al reanudar se saltan las `item_key` ya creadas. APPEND: un GET, bloques en orden unidos en UN fragmento y un PATCH; se omite el expediente ya publicado (selector exacto, no subcadena). TRANSFER: plan completo en memoria, un PATCH por pagina. UPDATE_LINK: un GET y un PATCH. Salida: las nueve claves de siempre mas `total_published`, `total_appended`, `total_transferred`, `total_updated` y `published_nodes`.
+- **Acens:** la triada existente gana el discriminador `operation: 'RAW_REQUEST' | 'CREATE_CAMPAIGN'`. La campana va a `/api/1/createCampaign/` con el token del entorno como `auth_token` en el cuerpo, nombre y asunto con la fecha (Europe/Madrid) y el contenido validado del lote. Sandbox: `TEST_MODE`. Salida `acens_result` con `campaign_id`, `status`, `dispatched_at`, `recipient_list`, `raw_response`.
+- **Regla 11 del validador:** un destino puede encadenar otro destino (nunca procesamiento). El aviso de cierre lee el ultimo `DESTINO_DRUPAL` ejecutado.
+- **Optimizador de prompts:** `cardinality` en `OptimizePromptDto`; con `MULTIPLE` inyecta la directiva de lote y reserva 16384 tokens (con `SINGLE` se mantienen los 10 000). Toggle «Lote 1:N» en el modal.
+- **Migracion 069:** pasos 2b (descripcion de Acens), 5c (regla de cardinalidad en los seis prompts), 6c (`MULTIPLE` en los cinco maestros y campana de Acens tras Drupal en Notiweb).
+- [x] Normalizador, contrato de la IA y escudo con lote
+- [x] Presupuestos de tokens y estimador del asistente
+- [x] Drupal en bucle con orden conservado
+- [x] Modo campana de Acens y su triada
+- [x] Optimizador con cardinalidad
+- [x] Migracion 069 y pruebas unitarias y e2e
 - [ ] Pendiente: reejecutar la 069 en la base de desarrollo con `psql -f`
 - [ ] Pendiente: validar el texto de los prompts al guardarlos (sigue abierto)

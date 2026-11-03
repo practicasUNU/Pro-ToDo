@@ -9468,4 +9468,23 @@ mapeador.
 - **Por que la regla de no estimar:** al exigir los tres importes, un correo que solo trae el total empujaria al modelo a calcular base e IVA. En una licitacion publica un importe inventado es peor que un hueco.
 - **Por que los spans no van en `requiredSelectors`:** una convocatoria que solo publica el total pausaria el flujo sin motivo; el escudo exige solo el titulo.
 - [x] 069 reejecutada dos veces en la base de pruebas sin cambios en el segundo pase
+- [x] 069 reejecutada en desarrollo
+
+## Cardinalidad 1 a N
+
+- **Por que raiz = primero e `items` = resto:** con `items` repitiendo tambien el primero, un correo de una sola noticia generaria su HTML dos veces (casi el doble de tokens). Ademas, todo lo que hoy lee la raiz (`{{llm_response.headline}}`) sigue valiendo sin tocar ningun flujo.
+- **Por que los destinos recorren `validated_items` y no `items`:** cada elemento del lote tiene que pasar por el saneado XSS del escudo; recorrer la salida en bruto de la IA abriria una via para publicar un elemento sin auditar.
+- **Por que un contexto por elemento:** las plantillas del nodo no cambian; para el elemento k se superpone su contenido a los namespaces que citan. Se comparten por referencia los namespaces no superpuestos para no duplicar adjuntos en memoria.
+- **Por que un solo fragmento en APPEND:** insertar con `prepend` uno a uno deja el lote invertido; unir los bloques en orden y anteponer una vez deja el primero arriba.
+- **Por que CREATE_NODE recuerda lo creado:** un POST no es idempotente. Si el lote falla a mitad, el resultado parcial queda en el contexto y la reanudacion salta las noticias ya creadas en vez de duplicarlas.
+- **Por que siempre viaja un tope de tokens:** el coste maximo de cada inferencia pasa a ser predecible, y un lote no hereda un tope pensado para un solo elemento.
+
+## Campana de Acens
+
+- **Por que el token sigue en el entorno:** la regla de seguridad del proyecto declara la clave de Acens secreto exclusivo del servidor. Viaja como `auth_token` en el cuerpo, que es lo que espera la API, y nunca en el flujo, el contexto ni la traza.
+- **Por que el contenido es el marcado validado:** la plantilla base que inyecta el mapeador esta vacia; lo publicable es lo que audito el escudo, de todas las noticias del lote.
+- **Por que el banco de pruebas no crea la campana:** crearla seria un envio real a listas de destinatarios; la prueba devuelve la peticion prevista (`TEST_MODE`).
+- **Por que se relaja la regla 11:** el maestro de Notiweb publica en Drupal y despues crea la campana con el mismo marcado. Encadenar una entrega tras otra es seguro (si la segunda falla, se reanuda desde ella); lo que sigue prohibido es procesar despues de entregar.
+- [x] 069 reejecutada dos veces en la base de pruebas sin cambios en el segundo pase
+- [x] Ensayo en desarrollo dentro de una transaccion revertida
 - [ ] Reejecutar la 069 en desarrollo (`psql -f`)
