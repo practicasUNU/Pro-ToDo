@@ -15,9 +15,21 @@
 --      <h2>/<h3>, fecha APA y marcas {{*...}}). LICITACION_CIERRE_DEFAULT se
 --      reescribe si aun pide la plantilla base: el cierre no lleva mapeador y
 --      el validador rechazaria la dependencia de `rendered_html`.
+--   5b. Parches de contenido sobre los prompts, ya existieran o no:
+--      - Directiva de polivalencia Markdown: literal en los tres prompts con
+--        PLANTILLA BASE (Notiweb, apertura, titulos) y en variante de texto
+--        plano en los que no la tienen (cierre, Innodays, Innobar), donde
+--        hablar de "filled_markup" empujaria al modelo a inventarse HTML.
+--      - Apertura: la ranura <h3 class="licitacion-title"> es obligatoria.
+--      - Notiweb: la seccion bibliografica va bajo <h2>, nunca <p><strong>.
+--      - {{ocr_result.clean_body}} opcional junto al texto de los adjuntos.
+--      - Contrato de marcas: solo {{*parsed_email.clean_body}} y, con
+--        mapeador, {{*rendered_html.compiled_markup}} son obligatorias.
 --   6. Los cinco blueprints de `plantillas_flujo`, con el slug en `flowId` y
 --      en la descripcion (`id_flujo` es UUID y no puede llevarlo).
---   7. Una fila de `audit_eventos` por cada entidad creada, con
+--   6b. El escudo del maestro de apertura exige `h3.licitacion-title`: sin
+--      `requiredSelectors` la compuerta ERR_POST_IA_DOM_MUTATED no corre.
+--   7. Una fila de `audit_eventos` por cada entidad creada o parcheada, con
 --      `datos_nuevos.origen = 'SEED_MASTER_DATA'`, y un resumen final.
 --
 -- POR QUE EXISTE: las semillas 023, 028, 031 y 032 tomaban como autor "el
@@ -25,16 +37,19 @@
 -- WARNING), y las de parche posteriores tampoco encontraron filas. Esta
 -- migracion cierra ese hueco insertando los textos completos.
 --
--- IDEMPOTENTE: cada insercion lleva ON CONFLICT DO NOTHING o NOT EXISTS, y la
--- auditoria solo registra lo que realmente se creo. Reejecutarla no cambia
--- nada.
+-- IDEMPOTENTE: cada insercion lleva ON CONFLICT DO NOTHING o NOT EXISTS, cada
+-- parche se protege con un marcador `position(...)`, y la auditoria solo
+-- registra lo que realmente cambio. Reejecutarla no cambia nada.
 --
 -- Los UUID de paginas Drupal y las credenciales IMAP de los blueprints quedan
 -- vacios a proposito: dependen del entorno y los rellena el asistente con el
 -- preset al instanciar el flujo.
 --
 -- ARCHIVO GENERADO: los textos se copian literalmente de las plantillas y
--- prompts vigentes. Para cambiar uno, crea una migracion nueva de parche.
+-- prompts vigentes. Los parches de contenido de los prompts maestros se
+-- consolidan aqui (pasos 5b y 6b) y no en migraciones sueltas: el runner
+-- registra la migracion por nombre, asi que una base que ya la tenia la
+-- vuelve a pasar a mano (`psql -f`) y los marcadores evitan duplicados.
 --
 -- Aplicar con:
 --   npm run db:migrate          (desde backend/)
@@ -54,9 +69,32 @@ DECLARE
     template_notiweb UUID;
     template_abierta UUID;
     template_titulos UUID;
+    rec RECORD;
+    patched TEXT;
+    insertion TEXT;
+    created_prompts TEXT[] := '{}';
+    clause_poly_html CONSTANT TEXT := $clause$DIRECTIVA DE POLIVALENCIA Y ESTRUCTURACIÓN HTML:
+- La información de entrada puede contener tablas, listas o textos en formato Markdown (| tabla |, # títulos, - listas, **negritas**).
+- Queda TERMINANTEMENTE PROHIBIDO copiar y pegar sintaxis Markdown en "filled_markup".
+- Tu tarea es transpolar y redactar la información adaptándola al 100% a la estructura HTML de la PLANTILLA BASE.
+- Las tablas en Markdown deben convertirse en elementos <table>, <tr>, <td> con las clases de la plantilla; los encabezados en <h2> o <h3>; y las listas en <ul> y <li>.$clause$;
+    clause_poly_text CONSTANT TEXT := $clause$DIRECTIVA DE POLIVALENCIA Y ESTRUCTURACIÓN DE TEXTO:
+- La información de entrada puede contener tablas, listas o textos en formato Markdown (| tabla |, # títulos, - listas, **negritas**).
+- Queda TERMINANTEMENTE PROHIBIDO copiar sintaxis Markdown en "headline", "summary" o "body_paragraphs": ni barras de tabla, ni almohadillas, ni guiones de lista, ni asteriscos.
+- Este flujo no tiene PLANTILLA BASE: localiza el dato dentro de la tabla o la lista en la que aparezca y devuélvelo como texto plano, sin etiquetas HTML.$clause$;
+    clause_dom CONSTANT TEXT := $clause$INSTRUCCIÓN OBLIGATORIA DE MAQUETACIÓN DOM:
+- En "filled_markup", debes utilizar la PLANTILLA BASE respetando todas sus etiquetas contenedor.
+- La etiqueta <h3> con clase "licitacion-title" DEBE contener el objeto del contrato o título de la licitación.
+- Queda TERMINANTEMENTE PROHIBIDO suprimir la etiqueta <h3>, borrar la clase "licitacion-title" o dejarla vacía.$clause$;
+    clause_biblio CONSTANT TEXT := $clause$ESTRUCTURA DE LA SECCIÓN BIBLIOGRÁFICA:
+- La sección bibliográfica va encabezada por el título semántico <h2>Referencia bibliográfica</h2>, seguido de uno o varios párrafos <p class="notiweb-referencia">.
+- Queda TERMINANTEMENTE PROHIBIDO escribir ese rótulo como párrafo, por ejemplo <p><strong>Referencia bibliográfica:</strong></p>.$clause$;
+    -- Inicio de la primera seccion de material: linea en blanco, hasta dos
+    -- rotulos sin llaves ("DATOS DE ENTRADA:", "Correo:") y el primer marcador.
+    material_anchor CONSTANT TEXT := '\n\n((?:[^\n{]*\n){0,2})\{\{';
     summary JSONB := jsonb_build_object(
         'nodos', 0, 'tarifas', 0, 'plantillas_html', 0,
-        'prompts', 0, 'blueprints', 0);
+        'prompts', 0, 'blueprints', 0, 'prompts_parcheados', 0, 'blueprints_parcheados', 0);
     seed_tag CONSTANT JSONB := jsonb_build_object('origen', 'SEED_MASTER_DATA', 'recurso', 'SYSTEM_INITIALIZATION', 'migracion', '069');
 BEGIN
     -- 1. ADMIN ancla ---------------------------------------------------------
@@ -444,6 +482,7 @@ PLANTILLA BASE:
     RETURNING id_plantilla_prompt_ia INTO inserted_id;
     IF inserted_id IS NOT NULL THEN
         summary := jsonb_set(summary, '{prompts}', to_jsonb((summary->>'prompts')::INT + 1));
+        created_prompts := created_prompts || 'NOTIWEB_DEFAULT'::TEXT;
         INSERT INTO audit_eventos (usuario_id, accion, tabla_afectada, registro_id, datos_nuevos)
         VALUES (admin_id, 'CREAR', 'plantillas_prompts_ia', inserted_id::TEXT, seed_tag || jsonb_build_object('codigo', 'NOTIWEB_DEFAULT'));
     END IF;
@@ -484,6 +523,7 @@ PLANTILLA BASE:
     RETURNING id_plantilla_prompt_ia INTO inserted_id;
     IF inserted_id IS NOT NULL THEN
         summary := jsonb_set(summary, '{prompts}', to_jsonb((summary->>'prompts')::INT + 1));
+        created_prompts := created_prompts || 'LICITACION_APERTURA_DEFAULT'::TEXT;
         INSERT INTO audit_eventos (usuario_id, accion, tabla_afectada, registro_id, datos_nuevos)
         VALUES (admin_id, 'CREAR', 'plantillas_prompts_ia', inserted_id::TEXT, seed_tag || jsonb_build_object('codigo', 'LICITACION_APERTURA_DEFAULT'));
     END IF;
@@ -530,6 +570,7 @@ Documentos adjuntos:
     RETURNING id_plantilla_prompt_ia INTO inserted_id;
     IF inserted_id IS NOT NULL THEN
         summary := jsonb_set(summary, '{prompts}', to_jsonb((summary->>'prompts')::INT + 1));
+        created_prompts := created_prompts || 'LICITACION_CIERRE_DEFAULT'::TEXT;
         INSERT INTO audit_eventos (usuario_id, accion, tabla_afectada, registro_id, datos_anteriores, datos_nuevos)
         VALUES (admin_id, CASE WHEN previous_text IS NULL THEN 'CREAR' ELSE 'ACTUALIZAR' END,
                 'plantillas_prompts_ia', inserted_id::TEXT,
@@ -562,6 +603,7 @@ Correo:
     RETURNING id_plantilla_prompt_ia INTO inserted_id;
     IF inserted_id IS NOT NULL THEN
         summary := jsonb_set(summary, '{prompts}', to_jsonb((summary->>'prompts')::INT + 1));
+        created_prompts := created_prompts || 'INNODAYS_ENLACE_DEFAULT'::TEXT;
         INSERT INTO audit_eventos (usuario_id, accion, tabla_afectada, registro_id, datos_nuevos)
         VALUES (admin_id, 'CREAR', 'plantillas_prompts_ia', inserted_id::TEXT, seed_tag || jsonb_build_object('codigo', 'INNODAYS_ENLACE_DEFAULT'));
     END IF;
@@ -589,6 +631,7 @@ Correo:
     RETURNING id_plantilla_prompt_ia INTO inserted_id;
     IF inserted_id IS NOT NULL THEN
         summary := jsonb_set(summary, '{prompts}', to_jsonb((summary->>'prompts')::INT + 1));
+        created_prompts := created_prompts || 'INNOBAR_ENLACE_DEFAULT'::TEXT;
         INSERT INTO audit_eventos (usuario_id, accion, tabla_afectada, registro_id, datos_nuevos)
         VALUES (admin_id, 'CREAR', 'plantillas_prompts_ia', inserted_id::TEXT, seed_tag || jsonb_build_object('codigo', 'INNOBAR_ENLACE_DEFAULT'));
     END IF;
@@ -632,6 +675,7 @@ PLANTILLA BASE:
     RETURNING id_plantilla_prompt_ia INTO inserted_id;
     IF inserted_id IS NOT NULL THEN
         summary := jsonb_set(summary, '{prompts}', to_jsonb((summary->>'prompts')::INT + 1));
+        created_prompts := created_prompts || 'VERIFICADOR_TITULOS_DEFAULT'::TEXT;
         INSERT INTO audit_eventos (usuario_id, accion, tabla_afectada, registro_id, datos_nuevos)
         VALUES (admin_id, 'CREAR', 'plantillas_prompts_ia', inserted_id::TEXT, seed_tag || jsonb_build_object('codigo', 'VERIFICADOR_TITULOS_DEFAULT'));
     END IF;
@@ -651,9 +695,89 @@ PLANTILLA BASE:
     RETURNING id_plantilla_prompt_ia INTO inserted_id;
     IF inserted_id IS NOT NULL THEN
         summary := jsonb_set(summary, '{prompts}', to_jsonb((summary->>'prompts')::INT + 1));
+        created_prompts := created_prompts || 'PROMPT_OCR_MULTIMODAL'::TEXT;
         INSERT INTO audit_eventos (usuario_id, accion, tabla_afectada, registro_id, datos_nuevos)
         VALUES (admin_id, 'CREAR', 'plantillas_prompts_ia', inserted_id::TEXT, seed_tag || jsonb_build_object('codigo', 'PROMPT_OCR_MULTIMODAL'));
     END IF;
+
+    -- 5b. Parches de contenido de los prompts maestros ----------------------
+    -- Corren tambien sobre filas que ya existian (desarrollo): cada uno se
+    -- protege con su marcador, de modo que reejecutar no duplica nada. Las
+    -- marcas se normalizan ANTES de anadir el OCR para que una forma
+    -- {{*ocr_result.clean_body}} puesta a mano cuente como ya presente.
+    FOR rec IN
+        SELECT * FROM (VALUES
+            ('NOTIWEB_DEFAULT', TRUE, TRUE),
+            ('LICITACION_APERTURA_DEFAULT', TRUE, TRUE),
+            ('VERIFICADOR_TITULOS_DEFAULT', TRUE, TRUE),
+            ('LICITACION_CIERRE_DEFAULT', FALSE, TRUE),
+            ('INNODAYS_ENLACE_DEFAULT', FALSE, FALSE),
+            ('INNOBAR_ENLACE_DEFAULT', FALSE, FALSE)
+        ) AS t(codigo, with_template, with_documents)
+    LOOP
+        SELECT id_plantilla_prompt_ia, texto_prompt INTO inserted_id, previous_text
+          FROM plantillas_prompts_ia WHERE codigo = rec.codigo;
+        IF NOT FOUND THEN
+            CONTINUE;
+        END IF;
+
+        -- Contrato de marcas: obligatoria la directiva y, con mapeador, la
+        -- plantilla base; el resto, opcional.
+        patched := regexp_replace(previous_text, '\{\{\s*\*?\s*parsed_email\.clean_body\s*\}\}', '{{*parsed_email.clean_body}}', 'g');
+        IF rec.with_template THEN
+            patched := regexp_replace(patched, '\{\{\s*\*?\s*rendered_html\.compiled_markup\s*\}\}', '{{*rendered_html.compiled_markup}}', 'g');
+        END IF;
+        patched := regexp_replace(patched, '\{\{\s*\*\s*(ocr_result\.clean_body|parsed_email\.extracted_documents_text|scraped_web\.[a-z_]+)\s*\}\}', '{{\1}}', 'g');
+
+        -- Directivas, insertadas antes de la primera seccion de material.
+        insertion := '';
+        IF position('DIRECTIVA DE POLIVALENCIA' IN patched) = 0 THEN
+            insertion := CASE WHEN rec.with_template THEN clause_poly_html ELSE clause_poly_text END;
+        END IF;
+        IF rec.codigo = 'LICITACION_APERTURA_DEFAULT'
+           AND position('INSTRUCCIÓN OBLIGATORIA DE MAQUETACIÓN DOM' IN patched) = 0 THEN
+            insertion := concat_ws(E'\n\n', NULLIF(insertion, ''), clause_dom);
+        END IF;
+        IF rec.codigo = 'NOTIWEB_DEFAULT'
+           AND position('ESTRUCTURA DE LA SECCIÓN BIBLIOGRÁFICA' IN patched) = 0 THEN
+            insertion := concat_ws(E'\n\n', NULLIF(insertion, ''), clause_biblio);
+        END IF;
+        IF insertion <> '' THEN
+            IF patched ~ material_anchor THEN
+                patched := regexp_replace(patched, material_anchor, E'\n\n' || insertion || E'\n\n\\1{{');
+            ELSE
+                -- Texto editado a mano sin secciones reconocibles: la directiva
+                -- se anade al final, que el modelo tambien lee.
+                patched := patched || E'\n\n' || insertion;
+                RAISE WARNING '069: % no tiene una seccion de material reconocible; las directivas se anaden al final.', rec.codigo;
+            END IF;
+        END IF;
+
+        -- OCR opcional junto al texto de los adjuntos (misma cadena de
+        -- degradacion: OCR -> adjuntos -> cuerpo).
+        IF rec.with_documents AND position('{{ocr_result.clean_body}}' IN patched) = 0 THEN
+            IF position('{{parsed_email.extracted_documents_text}}' IN patched) > 0 THEN
+                patched := regexp_replace(patched, '\{\{parsed_email\.extracted_documents_text\}\}',
+                                          '{{parsed_email.extracted_documents_text}} o {{ocr_result.clean_body}}');
+            ELSE
+                RAISE WARNING '069: % no cita el texto de los adjuntos; no se anade el OCR.', rec.codigo;
+            END IF;
+        END IF;
+
+        IF patched IS DISTINCT FROM previous_text THEN
+            UPDATE plantillas_prompts_ia
+               SET texto_prompt = patched, actualizado_por = admin_id, fecha_actualizacion = NOW()
+             WHERE codigo = rec.codigo;
+            summary := jsonb_set(summary, '{prompts_parcheados}', to_jsonb((summary->>'prompts_parcheados')::INT + 1));
+            -- Un prompt creado en este mismo pase ya tiene su fila CREAR.
+            IF NOT (rec.codigo = ANY (created_prompts)) THEN
+                INSERT INTO audit_eventos (usuario_id, accion, tabla_afectada, registro_id, datos_anteriores, datos_nuevos)
+                VALUES (admin_id, 'ACTUALIZAR', 'plantillas_prompts_ia', inserted_id::TEXT,
+                        jsonb_build_object('texto_prompt', previous_text),
+                        seed_tag || jsonb_build_object('codigo', rec.codigo, 'parche', 'polivalencia_markdown_ocr_marcas'));
+            END IF;
+        END IF;
+    END LOOP;
 
     -- 6. Blueprints maestros -------------------------------------------------
     SELECT id_plantilla INTO template_notiweb FROM plantillas_html WHERE nombre = 'Notiweb · Noticia institucional';
@@ -844,7 +968,10 @@ PLANTILLA BASE:
       "params": {
         "contentMode": "HTML",
         "sourceNamespace": "llm_response",
-        "sourceField": "filled_markup"
+        "sourceField": "filled_markup",
+        "requiredSelectors": [
+          "h3.licitacion-title"
+        ]
       }
     },
     "destino_drupal": {
@@ -1129,10 +1256,28 @@ PLANTILLA BASE:
         VALUES (admin_id, 'CREAR', 'plantillas_flujo', inserted_id::TEXT, seed_tag || jsonb_build_object('slug', 'wf-titulos-verificacion', 'nombre', 'Maestro · Verificación de títulos'));
     END IF;
 
+    -- 6b. Ranura DOM obligatoria en el escudo del maestro de apertura -------
+    UPDATE plantillas_flujo
+       SET configuracion_pipeline = jsonb_set(configuracion_pipeline,
+               '{nodes,escudo,params,requiredSelectors}', '["h3.licitacion-title"]'::JSONB),
+           actualizado_por = admin_id,
+           fecha_actualizacion = NOW()
+     WHERE configuracion_pipeline->>'flowId' = 'wf-licitacion-abrir'
+       AND configuracion_pipeline #> '{nodes,escudo,params}' IS NOT NULL
+       AND NOT (configuracion_pipeline #> '{nodes,escudo,params}' ? 'requiredSelectors')
+    RETURNING id_plantilla_flujo INTO inserted_id;
+    IF FOUND THEN
+        summary := jsonb_set(summary, '{blueprints_parcheados}', to_jsonb((summary->>'blueprints_parcheados')::INT + 1));
+        INSERT INTO audit_eventos (usuario_id, accion, tabla_afectada, registro_id, datos_nuevos)
+        VALUES (admin_id, 'ACTUALIZAR', 'plantillas_flujo', inserted_id::TEXT,
+                seed_tag || jsonb_build_object('slug', 'wf-licitacion-abrir', 'requiredSelectors', '["h3.licitacion-title"]'::JSONB));
+    END IF;
+
     -- 7. Resumen de la siembra ----------------------------------------------
     -- Solo si se creo algo: una reejecucion no deja rastro nuevo.
     IF (summary->>'nodos')::INT + (summary->>'tarifas')::INT + (summary->>'plantillas_html')::INT
-       + (summary->>'prompts')::INT + (summary->>'blueprints')::INT > 0 THEN
+       + (summary->>'prompts')::INT + (summary->>'blueprints')::INT
+       + (summary->>'prompts_parcheados')::INT + (summary->>'blueprints_parcheados')::INT > 0 THEN
         INSERT INTO audit_eventos (usuario_id, accion, tabla_afectada, registro_id, datos_nuevos)
         VALUES (admin_id, 'CREAR', 'plantillas_flujo', NULL, seed_tag || jsonb_build_object('resumen', summary));
     END IF;
