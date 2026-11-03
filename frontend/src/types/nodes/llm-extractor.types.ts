@@ -109,6 +109,15 @@ export const MIN_LLM_MAX_TOKENS = 256;
 export const MAX_LLM_MAX_TOKENS = 32_768;
 
 /**
+ * Presupuestos por defecto segun la cardinalidad. Replica de las constantes
+ * homonimas de `llm-extractor-config.dto.ts`: sin `maxTokens` declarado, el
+ * backend envia 8192 con un elemento y 16384 con un lote.
+ */
+export const DEFAULT_MAX_TOKENS_SINGLE = DEFAULT_LLM_MARKUP_MAX_TOKENS;
+export const DEFAULT_MAX_TOKENS_MULTIPLE = 16_384;
+export const MAX_HARD_CEILING_TOKENS = MAX_LLM_MAX_TOKENS;
+
+/**
  * Umbral de `maxRetries` a partir del cual se avisa del efecto multiplicativo.
  *
  * Se ata al defecto del backend, que no merece aviso. Por encima, el TSDoc del

@@ -124,6 +124,18 @@ export const MIN_LLM_MAX_TOKENS = 256;
 export const MAX_LLM_MAX_TOKENS = 32_768;
 
 /**
+ * Presupuestos por defecto segun la cardinalidad de la salida.
+ *
+ * `SINGLE` hereda los 8192 del maquetado (ver arriba). `MULTIPLE` los duplica:
+ * un lote devuelve la raiz MAS un elemento por cada pieza adicional del
+ * correo, cada uno con su propio `filled_markup`, y quedarse corto corta el
+ * JSON a media cadena. El techo es el mismo que valida el DTO.
+ */
+export const DEFAULT_MAX_TOKENS_SINGLE = DEFAULT_LLM_MARKUP_MAX_TOKENS;
+export const DEFAULT_MAX_TOKENS_MULTIPLE = 16_384;
+export const MAX_HARD_CEILING_TOKENS = MAX_LLM_MAX_TOKENS;
+
+/**
  * Cardinalidad de la salida del nodo de IA.
  *
  * `SINGLE` es el contrato de siempre: un elemento en la raiz del JSON.

@@ -1,6 +1,7 @@
 import {
   DEFAULT_LLM_MARKUP_MAX_TOKENS,
   DEFAULT_LLM_MAX_RETRIES,
+  DEFAULT_MAX_TOKENS_MULTIPLE,
   DEFAULT_LLM_TIMEOUT_MS,
   MAX_LLM_MAX_TOKENS,
   MAX_LLM_TIMEOUT_MS,
@@ -10,6 +11,8 @@ import {
 // E/S y sin dependencia de Pinia. Responde a UNA pregunta —cuanto va a costar
 // esta inferencia— para que el operador la vea ANTES de ejecutar el flujo y no
 // despues, en forma de ERR_HTTP_TIMEOUT o de JSON cortado a media cadena.
+
+import type { LlmOutputCardinality } from '@/types/nodes/llm-extractor.types';
 
 /** Cuanto trabajo se le viene encima al modelo. */
 export type LlmComplexityLevel = 'BAJA' | 'MEDIA' | 'ALTA';
@@ -134,6 +137,16 @@ const PROMPT_ONLY_OUTPUT_TOKENS = 900;
 const PROMPT_ONLY_MEDIUM_FIELDS = 6;
 
 /** Tokens de un texto, por la heuristica de arriba. */
+/**
+ * Factor de lote: un correo con varias piezas devuelve la raiz MAS un elemento
+ * por pieza adicional. Tres es un boletin corto; el suelo de abajo cubre el
+ * caso de un elemento grande (una plantilla HTML entera por noticia).
+ */
+const BATCH_OUTPUT_FACTOR = 3;
+
+/** Suelo de la salida proyectada de un lote: el presupuesto de un elemento. */
+const BATCH_MIN_OUTPUT_TOKENS = 8_192;
+
 const estimateTokens = (text: string): number => Math.ceil(text.length / CHARS_PER_TOKEN);
 
 /** Filas de coleccion presentes en el marcado. */
@@ -187,6 +200,45 @@ const buildPromptOnlyEstimate = (upstreamFieldCount: number): LlmResourceEstimat
 export const estimateLlmResources = (
   baseMarkup: string | null,
   upstreamFieldCount = 0,
+  cardinality: LlmOutputCardinality = 'SINGLE',
+): LlmResourceEstimate => {
+  const single = estimateSingleItem(baseMarkup, upstreamFieldCount);
+
+  return cardinality === 'MULTIPLE' ? scaleForBatch(single) : single;
+};
+
+/**
+ * Escala una estimacion de un elemento a un lote (cardinalidad 1 a N).
+ *
+ * La salida proyectada se multiplica por el factor de lote con un suelo de
+ * 8192 tokens, y se recomienda al menos el presupuesto de lote del backend
+ * (16384). Cero reintentos: cada vuelta volveria a facturar el lote entero.
+ */
+const scaleForBatch = (single: LlmResourceEstimate): LlmResourceEstimate => {
+  const estimatedOutputTokens = Math.max(
+    single.estimatedOutputTokens * BATCH_OUTPUT_FACTOR,
+    BATCH_MIN_OUTPUT_TOKENS,
+  );
+
+  return {
+    ...single,
+    estimatedOutputTokens,
+    recommendedTimeoutMs: clamp(HIGH_TIMEOUT_MS, MEDIUM_TIMEOUT_MS, MAX_LLM_TIMEOUT_MS),
+    recommendedMaxTokens: clamp(
+      roundUpToStep(Math.ceil(estimatedOutputTokens * OUTPUT_SAFETY_MARGIN)),
+      DEFAULT_MAX_TOKENS_MULTIPLE,
+      MAX_LLM_MAX_TOKENS,
+    ),
+    recommendedMaxRetries: 0,
+    complexityLevel: 'ALTA',
+    reason: `Modo lote (1:N): la respuesta trae un elemento por cada pieza del correo y se factura entera. Se proyectan unos ${estimatedOutputTokens} tokens de salida. ${single.reason}`,
+  };
+};
+
+/** Estimacion de UN elemento: la de siempre, a partir de la plantilla o del prompt. */
+const estimateSingleItem = (
+  baseMarkup: string | null,
+  upstreamFieldCount: number,
 ): LlmResourceEstimate => {
   const markup = baseMarkup?.trim() ?? '';
 

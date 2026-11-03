@@ -8,6 +8,7 @@ import {
   DEFAULT_LLM_EMERGENCY_BRAKE_THRESHOLD,
   DEFAULT_LLM_MAX_RETRIES,
   DEFAULT_LLM_OUTPUT_CARDINALITY,
+  DEFAULT_MAX_TOKENS_MULTIPLE,
   DEFAULT_LLM_MODEL,
   DEFAULT_LLM_PROVIDER,
   DEFAULT_LLM_TIMEOUT_MS,
@@ -296,6 +297,14 @@ const llmExtractorSetup = () => {
       );
     }
 
+    // Coste de lote: no bloquea, pero el operador debe saber que una sola
+    // ejecucion puede devolver (y facturar) varias piezas enteras.
+    if (config.value.outputCardinality === 'MULTIPLE') {
+      warnings.push(
+        `Modo lote (1:N): la respuesta incluye un elemento por cada pieza del correo y se factura entera. Se proyectan unos ${resourceEstimation.value.estimatedOutputTokens} tokens de salida; sin un tope propio, el nodo reserva ${DEFAULT_MAX_TOKENS_MULTIPLE}.`,
+      );
+    }
+
     if (maxRetries > LLM_RETRIES_WARNING_THRESHOLD) {
       warnings.push(
         `Los reintentos de red se MULTIPLICAN con el retryPolicy del esquema, y cada vuelta factura tokens. Con ${maxRetries} aqui y una politica de reintentos en el flujo, una sola ejecucion puede pagar decenas de inferencias.`,
@@ -386,6 +395,7 @@ const llmExtractorSetup = () => {
     estimateLlmResources(
       upstreamBaseMarkup.value,
       availableUpstreamContext.value.reduce((total, entry) => total + entry.fields.length, 0),
+      config.value.outputCardinality,
     ),
   );
 

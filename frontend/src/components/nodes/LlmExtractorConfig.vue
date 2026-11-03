@@ -30,7 +30,8 @@ import {
   LLM_PROVIDER_LABELS,
   LlmProvider,
   MAX_LLM_EMERGENCY_BRAKE_THRESHOLD,
-  DEFAULT_LLM_MARKUP_MAX_TOKENS,
+  DEFAULT_MAX_TOKENS_MULTIPLE,
+  DEFAULT_MAX_TOKENS_SINGLE,
   MAX_LLM_MAX_TOKENS,
   MAX_LLM_RETRIES,
   MAX_LLM_TIMEOUT_MS,
@@ -78,7 +79,7 @@ const RETRIES_HINT =
   'Reintentos RAPIDOS DE RED, distintos del retryPolicy del esquema. Los dos niveles se multiplican y cada vuelta factura tokens.';
 
 const MAX_TOKENS_HINT =
-  'Dejalo VACIO salvo que sepas lo que haces: el nodo lo resuelve solo, y sube el presupuesto a 8192 cuando su instruccion cita una plantilla base, que es cuando la respuesta tiene que traer el HTML entero. Un tope corto no acorta la respuesta: la parte a media cadena JSON y el nodo muere por contrato.';
+  'Dejalo VACIO salvo que sepas lo que haces: el nodo reserva 8192 tokens con un elemento y 16384 con un lote. Un tope corto no acorta la respuesta: la parte a media cadena JSON y el nodo muere por contrato.';
 
 const BRAKE_HINT =
   'Fallos consecutivos del proveedor que pausan el flujo. Es el corte de la espiral de gasto: al alcanzarlo, la ejecucion queda PAUSADA con el cursor intacto.';
@@ -681,7 +682,13 @@ onMounted(async () => {
           dense
           clearable
           class="q-mt-xs"
-          :placeholder="String(DEFAULT_LLM_MARKUP_MAX_TOKENS)"
+          :placeholder="
+            String(
+              store.config.outputCardinality === 'MULTIPLE'
+                ? DEFAULT_MAX_TOKENS_MULTIPLE
+                : DEFAULT_MAX_TOKENS_SINGLE,
+            )
+          "
           :hint="MAX_TOKENS_HINT"
           :rules="[
             (val: number | string | null) =>

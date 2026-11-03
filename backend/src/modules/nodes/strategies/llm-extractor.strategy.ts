@@ -11,9 +11,11 @@ import { AiDefaultsConfig } from '@core/config/ai-defaults.config';
 import { NodeType } from '@core/fsm/types/pipeline-schema.types';
 import { AiPromptTemplatesService } from '@modules/ai-prompt-templates/ai-prompt-templates.service';
 import {
-  DEFAULT_LLM_MARKUP_MAX_TOKENS,
+  DEFAULT_MAX_TOKENS_MULTIPLE,
+  DEFAULT_MAX_TOKENS_SINGLE,
   LlmExtractorConfigDto,
   LlmOutputCardinality,
+  MAX_HARD_CEILING_TOKENS,
   resolveLlmExtractorConfig,
 } from '@modules/nodes/dto/llm-extractor-config.dto';
 import {
@@ -414,7 +416,7 @@ export class LlmExtractorStrategy implements INodeStrategy {
         // un prompt como "resume esto en tres parrafos" es perfectamente valido
         // y no menciona ningun namespace. Con el reparto contrario, ese prompt
         // facturaria una inferencia sobre ningun contenido.
-        const maxTokens = this.resolveMaxTokens(config, expectsFilledMarkup);
+        const maxTokens = this.resolveMaxTokens(config);
 
         response = await this.resolveClient(
           attempt.provider,
@@ -426,10 +428,9 @@ export class LlmExtractorStrategy implements INodeStrategy {
           baseDelayMs: config.baseDelayMs,
           expectsFilledMarkup,
           expectsItems,
-          // Se OMITE cuando no hay nada que decir, en vez de mandar un numero:
-          // asi el defecto lo sigue publicando cada proveedor, que es como ha
-          // funcionado hasta hoy. Ver `resolveMaxTokens`.
-          ...(maxTokens === null ? {} : { maxTokens }),
+          // Siempre un numero: el del nodo o el de su cardinalidad. Ver
+          // `resolveMaxTokens`.
+          maxTokens,
         });
 
         usedProvider = attempt.provider;
@@ -966,30 +967,28 @@ export class LlmExtractorStrategy implements INodeStrategy {
    * siendo la unica senal fiable.
    */
   /**
-   * Presupuesto de tokens de la respuesta, o `null` para dejar mandar al proveedor.
+   * Presupuesto de tokens de la respuesta.
    *
-   * Tres escalones, de mayor a menor precedencia: lo que declare el nodo, el
-   * tope de marcado cuando toca devolver una plantilla, y el defecto del
-   * proveedor.
+   * Dos escalones: lo que declare el nodo —con el techo `MAX_HARD_CEILING_TOKENS`
+   * como red, aunque el DTO ya lo valida al guardar— y, si no declara nada, el
+   * defecto de su cardinalidad: `DEFAULT_MAX_TOKENS_MULTIPLE` para un lote y
+   * `DEFAULT_MAX_TOKENS_SINGLE` para un elemento.
    *
-   * EL TERCER ESCALON ES `null` Y NO UN NUMERO, A PROPOSITO. Fijar aqui un tope
-   * para las inferencias SIN plantilla no seria conservador, seria un cambio de
-   * conducta: hoy este nodo no envia `maxTokens` en absoluto, de modo que
-   * Anthropic aplica su propio tope de 4096 y Gemini el del modelo. Cualquier
-   * cifra que se escribiera aqui por debajo de eso recortaria en silencio
-   * flujos que llevan meses redactando articulos largos sin problema, y el
-   * sintoma —una noticia cortada a media frase— no se parece en nada a su causa.
-   * Subir el presupuesto cuando hace falta es seguro; bajarlo no.
+   * CAMBIO DE CONDUCTA DELIBERADO. Antes, un nodo sin plantilla no enviaba tope
+   * y mandaba el defecto de cada proveedor; ahora siempre viaja un numero, para
+   * que el coste maximo de cada inferencia sea predecible y un lote no herede
+   * un tope pensado para un solo elemento. En la gama Gemini 3.x ese numero
+   * incluye los tokens de pensamiento: un nodo que redacte muy largo con
+   * razonamiento alto debe declarar su `maxTokens`.
    */
-  private resolveMaxTokens(
-    config: ResolvedLlmExtractorConfig,
-    expectsFilledMarkup: boolean,
-  ): number | null {
+  private resolveMaxTokens(config: ResolvedLlmExtractorConfig): number {
     if (config.maxTokens !== null) {
-      return config.maxTokens;
+      return Math.min(config.maxTokens, MAX_HARD_CEILING_TOKENS);
     }
 
-    return expectsFilledMarkup ? DEFAULT_LLM_MARKUP_MAX_TOKENS : null;
+    return config.outputCardinality === LlmOutputCardinality.MULTIPLE
+      ? DEFAULT_MAX_TOKENS_MULTIPLE
+      : DEFAULT_MAX_TOKENS_SINGLE;
   }
 
   /**

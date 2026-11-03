@@ -2074,9 +2074,9 @@ describe('LlmExtractorStrategy', () => {
       expect(optionsOf(completion).expectsFilledMarkup).toBe(true);
     });
 
-    it('13.5 deberia elevar el presupuesto de tokens solo con plantilla', async () => {
-      // 1. Arrange: quedarse corto corta la respuesta a media cadena JSON, y el
-      //    nodo muere por contrato sin que el mensaje hable de presupuesto.
+    it('13.5 deberia fijar 8192 tokens con cardinalidad SINGLE, con o sin plantilla', async () => {
+      // 1. Arrange: el presupuesto ya no depende de la plantilla sino de la
+      //    cardinalidad; un elemento siempre viaja con el mismo tope.
       const conPlantilla = buildCapturingProvider(MARKUP);
       const sinPlantilla = buildCapturingProvider();
       const context = buildContext({
@@ -2097,13 +2097,9 @@ describe('LlmExtractorStrategy', () => {
         { inlinePrompt: 'Redacta.', provider: LlmProvider.GEMINI },
       );
 
-      // 3. Assert: sin plantilla se OMITE, no se fija un numero. Fijarlo
-      //    recortaria en silencio flujos que hoy redactan articulos largos con
-      //    el tope de 4096 que Anthropic aplica por su cuenta.
+      // 3. Assert
       expect(optionsOf(conPlantilla.completion).maxTokens).toBe(8_192);
-      expect(optionsOf(sinPlantilla.completion)).not.toHaveProperty(
-        'maxTokens',
-      );
+      expect(optionsOf(sinPlantilla.completion).maxTokens).toBe(8_192);
     });
 
     it('13.6 deberia respetar un maxTokens declarado por el nodo', async () => {
