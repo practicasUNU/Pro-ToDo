@@ -30,10 +30,17 @@
 --        si el prompt no los cita (Innodays, Innobar), tras el correo.
 --      - Contrato de marcas: solo {{*parsed_email.clean_body}} y, con
 --        mapeador, {{*rendered_html.compiled_markup}} son obligatorias.
+--   5c. Cardinalidad 1 a N: la "REGLA DE CARDINALIDAD FLEXIBLE" (raiz = primer
+--      elemento, "items" = el resto) en los seis prompts, con lo que es un
+--      elemento en cada flujo (noticia, expediente, enlace, panel).
 --   6. Los cinco blueprints de `plantillas_flujo`, con el slug en `flowId` y
 --      en la descripcion (`id_flujo` es UUID y no puede llevarlo).
 --   6b. El escudo del maestro de apertura exige `h3.licitacion-title`: sin
 --      `requiredSelectors` la compuerta ERR_POST_IA_DOM_MUTATED no corre.
+--   6c. Los cinco PROCESADOR_IA con `outputCardinality: MULTIPLE`, y Notiweb
+--      con el nodo `campana_acens` (DESTINO_ACENS, CREATE_CAMPAIGN) tras
+--      Drupal: el boletin con el marcado ya validado de todas las noticias.
+--   2b. El catalogo describe el modo campana de DESTINO_ACENS.
 --   7. Una fila de `audit_eventos` por cada entidad creada o parcheada, con
 --      `datos_nuevos.origen = 'SEED_MASTER_DATA'`, y un resumen final.
 --
@@ -50,11 +57,12 @@
 -- vacios a proposito: dependen del entorno y los rellena el asistente con el
 -- preset al instanciar el flujo.
 --
--- ARCHIVO GENERADO: los textos se copian literalmente de las plantillas y
--- prompts vigentes. Los parches de contenido de los prompts maestros se
--- consolidan aqui (pasos 5b y 6b) y no en migraciones sueltas: el runner
--- registra la migracion por nombre, asi que una base que ya la tenia la
--- vuelve a pasar a mano (`psql -f`) y los marcadores evitan duplicados.
+-- FUENTE UNICA: este fichero se mantiene directamente (el generador con el
+-- que nacio no se versiona). Los parches de contenido de los prompts y de los
+-- maestros se consolidan aqui (pasos 2b, 5a-5c y 6b-6c) y no en migraciones
+-- sueltas: el runner registra la migracion por nombre, asi que una base que ya
+-- la tenia la vuelve a pasar a mano (`psql -f`) y los marcadores evitan
+-- duplicados.
 --
 -- Aplicar con:
 --   npm run db:migrate          (desde backend/)
@@ -95,7 +103,8 @@ DECLARE
     material_anchor CONSTANT TEXT := '\n\n((?:[^\n{]*\n){0,2})\{\{';
     summary JSONB := jsonb_build_object(
         'nodos', 0, 'tarifas', 0, 'plantillas_html', 0,
-        'prompts', 0, 'blueprints', 0, 'prompts_parcheados', 0, 'blueprints_parcheados', 0);
+        'prompts', 0, 'blueprints', 0, 'prompts_parcheados', 0, 'blueprints_parcheados', 0,
+        'nodos_parcheados', 0);
     seed_tag CONSTANT JSONB := jsonb_build_object('origen', 'SEED_MASTER_DATA', 'recurso', 'SYSTEM_INITIALIZATION', 'migracion', '069');
 BEGIN
     -- 1. ADMIN ancla ---------------------------------------------------------
@@ -202,7 +211,7 @@ BEGIN
     END IF;
     inserted_id := NULL;
     INSERT INTO nodos (codigo, nombre, categoria, descripcion)
-    VALUES ('DESTINO_ACENS', 'Destino Acens', 'DESTINO', 'Entrega el resultado del flujo a la API de Acens (GET, POST, PUT o DELETE) con ruta, cabeceras y cuerpo JSON interpolados y desinfectados. La URL base y la clave se leen del entorno del servidor, nunca del flujo.')
+    VALUES ('DESTINO_ACENS', 'Destino Acens', 'DESTINO', 'Entrega el resultado a la API de Acens: crea la campana del boletin con el marcado ya validado del lote (CREATE_CAMPAIGN) o envia una peticion libre interpolada y desinfectada. URL base y clave salen del entorno del servidor, nunca del flujo.')
     ON CONFLICT (codigo) DO NOTHING
     RETURNING id_nodo INTO inserted_id;
     IF inserted_id IS NOT NULL THEN
@@ -249,6 +258,19 @@ BEGIN
         summary := jsonb_set(summary, '{nodos}', to_jsonb((summary->>'nodos')::INT + 1));
         INSERT INTO audit_eventos (usuario_id, accion, tabla_afectada, registro_id, datos_nuevos)
         VALUES (admin_id, 'CREAR', 'nodos', inserted_id::TEXT, seed_tag || jsonb_build_object('codigo', 'DESTINO_HTTP_GENERICO'));
+    END IF;
+
+    -- 2b. Catalogo: DESTINO_ACENS describe tambien el modo campana ----------
+    UPDATE nodos
+       SET descripcion = 'Entrega el resultado a la API de Acens: crea la campana del boletin con el marcado ya validado del lote (CREATE_CAMPAIGN) o envia una peticion libre interpolada y desinfectada. URL base y clave salen del entorno del servidor, nunca del flujo.'
+     WHERE codigo = 'DESTINO_ACENS'
+       AND descripcion IS DISTINCT FROM 'Entrega el resultado a la API de Acens: crea la campana del boletin con el marcado ya validado del lote (CREATE_CAMPAIGN) o envia una peticion libre interpolada y desinfectada. URL base y clave salen del entorno del servidor, nunca del flujo.'
+    RETURNING id_nodo INTO inserted_id;
+    IF FOUND THEN
+        summary := jsonb_set(summary, '{nodos_parcheados}', to_jsonb((summary->>'nodos_parcheados')::INT + 1));
+        INSERT INTO audit_eventos (usuario_id, accion, tabla_afectada, registro_id, datos_nuevos)
+        VALUES (admin_id, 'ACTUALIZAR', 'nodos', inserted_id::TEXT,
+                seed_tag || jsonb_build_object('codigo', 'DESTINO_ACENS', 'parche', 'modo_campana'));
     END IF;
 
     -- 3. Tarifas de referencia (USD por millon de tokens) ---------------------
@@ -851,6 +873,68 @@ PLANTILLA BASE:
         END IF;
     END LOOP;
 
+    -- 5c. Cardinalidad 1 a N en los prompts maestros -------------------------
+    -- La regla asimetrica que exige `outputCardinality: MULTIPLE`, con lo que
+    -- es un elemento en cada flujo. Por marcador y antes del material, como 5b.
+    FOR rec IN
+        SELECT * FROM (VALUES
+            ('NOTIWEB_DEFAULT', $rule$REGLA DE CARDINALIDAD FLEXIBLE (1 A 1 Y 1 A N):
+- El material de entrada puede contener una sola solicitud o un lote de varios registros.
+- Si contiene un unico elemento, colocalo en la raiz del JSON y deja "items" como array vacio [].
+- Si contiene varios, coloca en la raiz el PRIMER elemento y en "items" un objeto completo por cada elemento RESTANTE (del segundo en adelante). Nunca repitas el primero dentro de "items".
+- Cada noticia es un elemento, con su "headline", "summary", "body_paragraphs", su "filled_markup" (su propia copia de la PLANTILLA BASE, con sus encabezados <h2> y su <h2>Referencia bibliográfica</h2> seguido de <p class="notiweb-referencia">) y "source_url" con el enlace de esa noticia.$rule$),
+            ('LICITACION_APERTURA_DEFAULT', $rule$REGLA DE CARDINALIDAD FLEXIBLE (1 A 1 Y 1 A N):
+- El material de entrada puede contener una sola solicitud o un lote de varios registros.
+- Si contiene un unico elemento, colocalo en la raiz del JSON y deja "items" como array vacio [].
+- Si contiene varios, coloca en la raiz el PRIMER elemento y en "items" un objeto completo por cada elemento RESTANTE (del segundo en adelante). Nunca repitas el primero dentro de "items".
+- Cada expediente de licitacion es un elemento: su bloque HTML integro en "filled_markup", con <h3 class="licitacion-title"> relleno, "data-expediente" con su codigo y los spans de presupuesto. Nunca uses el asunto del correo ni saludos como titulo.$rule$),
+            ('LICITACION_CIERRE_DEFAULT', $rule$REGLA DE CARDINALIDAD FLEXIBLE (1 A 1 Y 1 A N):
+- El material de entrada puede contener una sola solicitud o un lote de varios registros.
+- Si contiene un unico elemento, colocalo en la raiz del JSON y deja "items" como array vacio [].
+- Si contiene varios, coloca en la raiz el PRIMER elemento y en "items" un objeto completo por cada elemento RESTANTE (del segundo en adelante). Nunca repitas el primero dentro de "items".
+- Cada expediente que se cierra es un elemento, en texto plano: SOLO su codigo en "headline" y el objeto del contrato en "summary".$rule$),
+            ('INNODAYS_ENLACE_DEFAULT', $rule$REGLA DE CARDINALIDAD FLEXIBLE (1 A 1 Y 1 A N):
+- El material de entrada puede contener una sola solicitud o un lote de varios registros.
+- Si contiene un unico elemento, colocalo en la raiz del JSON y deja "items" como array vacio [].
+- Si contiene varios, coloca en la raiz el PRIMER elemento y en "items" un objeto completo por cada elemento RESTANTE (del segundo en adelante). Nunca repitas el primero dentro de "items".
+- Cada enlace o imagen a sincronizar es un elemento, en texto plano: el nombre del evento en "headline" y la URL nueva en "summary".$rule$),
+            ('INNOBAR_ENLACE_DEFAULT', $rule$REGLA DE CARDINALIDAD FLEXIBLE (1 A 1 Y 1 A N):
+- El material de entrada puede contener una sola solicitud o un lote de varios registros.
+- Si contiene un unico elemento, colocalo en la raiz del JSON y deja "items" como array vacio [].
+- Si contiene varios, coloca en la raiz el PRIMER elemento y en "items" un objeto completo por cada elemento RESTANTE (del segundo en adelante). Nunca repitas el primero dentro de "items".
+- Cada enlace o imagen a sincronizar es un elemento, en texto plano: el nombre del encuentro en "headline" y la URL nueva en "summary".$rule$),
+            ('VERIFICADOR_TITULOS_DEFAULT', $rule$REGLA DE CARDINALIDAD FLEXIBLE (1 A 1 Y 1 A N):
+- El material de entrada puede contener una sola solicitud o un lote de varios registros.
+- Si contiene un unico elemento, colocalo en la raiz del JSON y deja "items" como array vacio [].
+- Si contiene varios, coloca en la raiz el PRIMER elemento y en "items" un objeto completo por cada elemento RESTANTE (del segundo en adelante). Nunca repitas el primero dentro de "items".
+- Cada panel de comite (una universidad o centro) es un elemento: su panel completo en "filled_markup", con su matriz de evaluadores, su universidad y sus titulaciones.$rule$)
+        ) AS t(codigo, rule_text)
+    LOOP
+        SELECT id_plantilla_prompt_ia, texto_prompt INTO inserted_id, previous_text
+          FROM plantillas_prompts_ia WHERE codigo = rec.codigo;
+        IF NOT FOUND OR position('REGLA DE CARDINALIDAD FLEXIBLE' IN previous_text) > 0 THEN
+            CONTINUE;
+        END IF;
+
+        IF previous_text ~ material_anchor THEN
+            patched := regexp_replace(previous_text, material_anchor, E'\n\n' || rec.rule_text || E'\n\n\\1{{');
+        ELSE
+            patched := previous_text || E'\n\n' || rec.rule_text;
+            RAISE WARNING '069: % no tiene una seccion de material reconocible; la regla de cardinalidad se anade al final.', rec.codigo;
+        END IF;
+
+        UPDATE plantillas_prompts_ia
+           SET texto_prompt = patched, actualizado_por = admin_id, fecha_actualizacion = NOW()
+         WHERE codigo = rec.codigo;
+        summary := jsonb_set(summary, '{prompts_parcheados}', to_jsonb((summary->>'prompts_parcheados')::INT + 1));
+        IF NOT (rec.codigo = ANY (created_prompts)) THEN
+            INSERT INTO audit_eventos (usuario_id, accion, tabla_afectada, registro_id, datos_anteriores, datos_nuevos)
+            VALUES (admin_id, 'ACTUALIZAR', 'plantillas_prompts_ia', inserted_id::TEXT,
+                    jsonb_build_object('texto_prompt', previous_text),
+                    seed_tag || jsonb_build_object('codigo', rec.codigo, 'parche', 'cardinalidad_1_a_n'));
+        END IF;
+    END LOOP;
+
     -- 6. Blueprints maestros -------------------------------------------------
     SELECT id_plantilla INTO template_notiweb FROM plantillas_html WHERE nombre = 'Notiweb · Noticia institucional';
     SELECT id_plantilla INTO template_abierta FROM plantillas_html WHERE nombre = 'Licitaciones · Convocatoria abierta (Madrid+D) V1';
@@ -928,7 +1012,8 @@ PLANTILLA BASE:
       "nextStep": "escudo",
       "onErrorStep": null,
       "params": {
-        "promptCode": "NOTIWEB_DEFAULT"
+        "promptCode": "NOTIWEB_DEFAULT",
+        "outputCardinality": "MULTIPLE"
       }
     },
     "escudo": {
@@ -957,7 +1042,7 @@ PLANTILLA BASE:
       "nodeId": "destino_drupal",
       "nodeType": "DESTINO_DRUPAL",
       "outputNamespace": "http_result",
-      "nextStep": null,
+      "nextStep": "campana_acens",
       "onErrorStep": null,
       "params": {
         "operationMode": "CREATE_NODE",
@@ -967,6 +1052,17 @@ PLANTILLA BASE:
         "titleTemplate": "{{llm_response.headline}}",
         "summaryTemplate": "{{llm_response.summary}}",
         "publishStatus": false
+      }
+    },
+    "campana_acens": {
+      "nodeId": "campana_acens",
+      "nodeType": "DESTINO_ACENS",
+      "outputNamespace": "acens_result",
+      "nextStep": null,
+      "onErrorStep": null,
+      "params": {
+        "operation": "CREATE_CAMPAIGN",
+        "contentNamespace": "validated_drupal_json"
       }
     }
   }
@@ -1028,7 +1124,8 @@ PLANTILLA BASE:
       "nextStep": "escudo",
       "onErrorStep": null,
       "params": {
-        "promptCode": "LICITACION_APERTURA_DEFAULT"
+        "promptCode": "LICITACION_APERTURA_DEFAULT",
+        "outputCardinality": "MULTIPLE"
       }
     },
     "escudo": {
@@ -1111,7 +1208,8 @@ PLANTILLA BASE:
       "nextStep": "escudo",
       "onErrorStep": null,
       "params": {
-        "promptCode": "LICITACION_CIERRE_DEFAULT"
+        "promptCode": "LICITACION_CIERRE_DEFAULT",
+        "outputCardinality": "MULTIPLE"
       }
     },
     "escudo": {
@@ -1192,7 +1290,8 @@ PLANTILLA BASE:
       "nextStep": "escudo",
       "onErrorStep": null,
       "params": {
-        "promptCode": "INNODAYS_ENLACE_DEFAULT"
+        "promptCode": "INNODAYS_ENLACE_DEFAULT",
+        "outputCardinality": "MULTIPLE"
       }
     },
     "escudo": {
@@ -1283,7 +1382,8 @@ PLANTILLA BASE:
       "nextStep": "escudo",
       "onErrorStep": null,
       "params": {
-        "promptCode": "VERIFICADOR_TITULOS_DEFAULT"
+        "promptCode": "VERIFICADOR_TITULOS_DEFAULT",
+        "outputCardinality": "MULTIPLE"
       }
     },
     "escudo": {
@@ -1345,11 +1445,60 @@ PLANTILLA BASE:
                 seed_tag || jsonb_build_object('slug', 'wf-licitacion-abrir', 'requiredSelectors', '["h3.licitacion-title"]'::JSONB));
     END IF;
 
+    -- 6c. Lote en los maestros existentes y campana de Acens en Notiweb -----
+    FOR rec IN
+        SELECT * FROM (VALUES
+            ('wf-notiweb-madridmasd', 'redaccion_ia'),
+            ('wf-licitacion-abrir', 'extraccion_ia'),
+            ('wf-licitacion-cerrar', 'identificacion_ia'),
+            ('wf-innodays-sync', 'enlace_ia'),
+            ('wf-titulos-verificacion', 'estructuracion_ia')
+        ) AS t(slug, ia_node)
+    LOOP
+        UPDATE plantillas_flujo
+           SET configuracion_pipeline = jsonb_set(configuracion_pipeline,
+                   ARRAY['nodes', rec.ia_node, 'params', 'outputCardinality'], '"MULTIPLE"'::JSONB),
+               actualizado_por = admin_id,
+               fecha_actualizacion = NOW()
+         WHERE configuracion_pipeline->>'flowId' = rec.slug
+           AND configuracion_pipeline #> ARRAY['nodes', rec.ia_node, 'params'] IS NOT NULL
+           AND NOT (configuracion_pipeline #> ARRAY['nodes', rec.ia_node, 'params'] ? 'outputCardinality')
+        RETURNING id_plantilla_flujo INTO inserted_id;
+        IF FOUND THEN
+            summary := jsonb_set(summary, '{blueprints_parcheados}', to_jsonb((summary->>'blueprints_parcheados')::INT + 1));
+            INSERT INTO audit_eventos (usuario_id, accion, tabla_afectada, registro_id, datos_nuevos)
+            VALUES (admin_id, 'ACTUALIZAR', 'plantillas_flujo', inserted_id::TEXT,
+                    seed_tag || jsonb_build_object('slug', rec.slug, 'outputCardinality', 'MULTIPLE'));
+        END IF;
+    END LOOP;
+
+    -- Solo si Drupal sigue siendo el ultimo paso: un maestro editado a mano
+    -- que ya continua tras Drupal no se toca.
+    UPDATE plantillas_flujo
+       SET configuracion_pipeline = jsonb_set(
+               jsonb_set(configuracion_pipeline, '{nodes,destino_drupal,nextStep}', '"campana_acens"'::JSONB),
+               '{nodes,campana_acens}',
+               '{"nodeId": "campana_acens", "nodeType": "DESTINO_ACENS", "outputNamespace": "acens_result", "nextStep": null, "onErrorStep": null, "params": {"operation": "CREATE_CAMPAIGN", "contentNamespace": "validated_drupal_json"}}'::JSONB),
+           actualizado_por = admin_id,
+           fecha_actualizacion = NOW()
+     WHERE configuracion_pipeline->>'flowId' = 'wf-notiweb-madridmasd'
+       AND NOT (configuracion_pipeline->'nodes' ? 'campana_acens')
+       AND configuracion_pipeline #> '{nodes,destino_drupal}' IS NOT NULL
+       AND jsonb_typeof(configuracion_pipeline #> '{nodes,destino_drupal,nextStep}') IS DISTINCT FROM 'string'
+    RETURNING id_plantilla_flujo INTO inserted_id;
+    IF FOUND THEN
+        summary := jsonb_set(summary, '{blueprints_parcheados}', to_jsonb((summary->>'blueprints_parcheados')::INT + 1));
+        INSERT INTO audit_eventos (usuario_id, accion, tabla_afectada, registro_id, datos_nuevos)
+        VALUES (admin_id, 'ACTUALIZAR', 'plantillas_flujo', inserted_id::TEXT,
+                seed_tag || jsonb_build_object('slug', 'wf-notiweb-madridmasd', 'nodo_anadido', 'campana_acens'));
+    END IF;
+
     -- 7. Resumen de la siembra ----------------------------------------------
     -- Solo si se creo algo: una reejecucion no deja rastro nuevo.
     IF (summary->>'nodos')::INT + (summary->>'tarifas')::INT + (summary->>'plantillas_html')::INT
        + (summary->>'prompts')::INT + (summary->>'blueprints')::INT
-       + (summary->>'prompts_parcheados')::INT + (summary->>'blueprints_parcheados')::INT > 0 THEN
+       + (summary->>'prompts_parcheados')::INT + (summary->>'blueprints_parcheados')::INT
+       + (summary->>'nodos_parcheados')::INT > 0 THEN
         INSERT INTO audit_eventos (usuario_id, accion, tabla_afectada, registro_id, datos_nuevos)
         VALUES (admin_id, 'CREAR', 'plantillas_flujo', NULL, seed_tag || jsonb_build_object('resumen', summary));
     END IF;
