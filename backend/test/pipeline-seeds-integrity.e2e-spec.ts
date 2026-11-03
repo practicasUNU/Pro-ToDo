@@ -184,6 +184,7 @@ describe('Siembra maestra de los cinco pipelines (e2e)', () => {
       NodeType;
     const { PROCESADOR_IA, ESCUDO_POST_IA, PAUSA_FLOW, DESTINO_DRUPAL } =
       NodeType;
+    const { DESTINO_ACENS } = NodeType;
     const path = (slug: string): NodeType[] =>
       orderedTypes(blueprintBySlug(slug), 'disparador_imap');
 
@@ -196,6 +197,9 @@ describe('Siembra maestra de los cinco pipelines (e2e)', () => {
       ESCUDO_POST_IA,
       PAUSA_FLOW,
       DESTINO_DRUPAL,
+      // Destino tras destino (regla 11): la campana del boletin con el mismo
+      // marcado validado que se publico.
+      DESTINO_ACENS,
     ]);
     for (const slug of ['wf-licitacion-abrir', 'wf-titulos-verificacion']) {
       expect(path(slug)).toEqual([
@@ -419,5 +423,65 @@ describe('Siembra maestra de los cinco pipelines (e2e)', () => {
       ];
 
     expect(escudo?.params.requiredSelectors).toEqual(['h3.licitacion-title']);
+  });
+
+  describe('13. Cardinalidad 1 a N', () => {
+    it('13.1 deberia pedir un lote (MULTIPLE) al PROCESADOR_IA de los cinco maestros', () => {
+      // 3. Assert 🎯
+      for (const slug of MASTER_SLUGS) {
+        const processors = Object.values(
+          blueprintBySlug(slug).configuracion_pipeline.nodes,
+        ).filter((entry) => entry.nodeType === NodeType.PROCESADOR_IA);
+
+        expect(processors).toHaveLength(1);
+        expect(processors[0]?.params.outputCardinality).toBe('MULTIPLE');
+      }
+    });
+
+    it('13.2 deberia llevar la regla de cardinalidad asimetrica en los seis prompts', async () => {
+      // 1. Arrange 📐 + 2. Act ⚙️
+      const rows = await dataSource.query<
+        { codigo: string; texto_prompt: string }[]
+      >(
+        'SELECT codigo, texto_prompt FROM plantillas_prompts_ia WHERE codigo = ANY($1)',
+        [[...TEMPLATED_PROMPTS, ...PLAIN_TEXT_PROMPTS]],
+      );
+
+      // 3. Assert 🎯: una vez cada uno, con el reparto raiz = primero.
+      expect(rows).toHaveLength(6);
+      for (const row of rows) {
+        expect(
+          row.texto_prompt.split('REGLA DE CARDINALIDAD FLEXIBLE'),
+        ).toHaveLength(2);
+        expect(row.texto_prompt).toContain('el PRIMER elemento');
+      }
+    });
+
+    it('13.3 deberia cerrar Notiweb con la campana de Acens sobre el marcado validado', () => {
+      // 3. Assert 🎯
+      const { nodes } = blueprintBySlug(
+        'wf-notiweb-madridmasd',
+      ).configuracion_pipeline;
+
+      expect(nodes['destino_drupal']?.nextStep).toBe('campana_acens');
+      expect(nodes['campana_acens']).toMatchObject({
+        nodeType: NodeType.DESTINO_ACENS,
+        nextStep: null,
+        params: {
+          operation: 'CREATE_CAMPAIGN',
+          contentNamespace: 'validated_drupal_json',
+        },
+      });
+    });
+
+    it('13.4 deberia describir el modo campana de DESTINO_ACENS en el catalogo', async () => {
+      // 1. Arrange 📐 + 2. Act ⚙️
+      const [row] = await dataSource.query<{ descripcion: string }[]>(
+        "SELECT descripcion FROM nodos WHERE codigo = 'DESTINO_ACENS'",
+      );
+
+      // 3. Assert 🎯
+      expect(row?.descripcion).toContain('CREATE_CAMPAIGN');
+    });
   });
 });

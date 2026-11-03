@@ -128,4 +128,25 @@ describe('estimateLlmResources', () => {
       expect(estimateLlmResources(unaFila).complexityLevel).toBe('ALTA');
     });
   });
+
+  describe('Cardinalidad MULTIPLE (lote 1:N)', () => {
+    it('deberia escalar la salida con un suelo de 8192 y recomendar al menos 16384', () => {
+      // 1. Arrange 📐 + 2. Act ⚙️
+      const single = estimateLlmResources(null, 2);
+      const batch = estimateLlmResources(null, 2, 'MULTIPLE');
+
+      // 3. Assert 🎯
+      expect(batch.estimatedOutputTokens).toBeGreaterThanOrEqual(8_192);
+      expect(batch.estimatedOutputTokens).toBeGreaterThan(single.estimatedOutputTokens);
+      expect(batch.recommendedMaxTokens).toBeGreaterThanOrEqual(16_384);
+      expect(batch.recommendedMaxRetries).toBe(0);
+      expect(batch.complexityLevel).toBe('ALTA');
+      expect(batch.reason).toContain('Modo lote');
+    });
+
+    it('deberia dejar intacta la estimacion de un elemento', () => {
+      // 1. Arrange 📐 + 2. Act ⚙️ + 3. Assert 🎯
+      expect(estimateLlmResources(null, 2, 'SINGLE')).toEqual(estimateLlmResources(null, 2));
+    });
+  });
 });

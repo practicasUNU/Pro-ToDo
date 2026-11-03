@@ -2185,6 +2185,139 @@ describe('LlmExtractorStrategy', () => {
     });
   });
 
+  describe('13bis. Cardinalidad 1 a N y presupuesto de tokens', () => {
+    /** Doble que captura las opciones y responde con un lote opcional. */
+    const buildBatchProvider = (
+      items?: unknown[],
+    ): { client: ILlmProviderClient; completion: jest.Mock } => {
+      const completion = jest.fn().mockResolvedValue({
+        headline: 'Primera',
+        summary: 's',
+        body_paragraphs: [],
+        ...(items === undefined ? {} : { items }),
+        metadata: {
+          tokensPrompt: 0,
+          tokensCompletion: 0,
+          modelUsed: 'gemini-3.6-flash',
+          isMock: false,
+        },
+      });
+
+      return {
+        client: {
+          provider: LlmProvider.GEMINI,
+          generateCompletion: completion,
+        },
+        completion,
+      };
+    };
+
+    const optionsOf = (completion: jest.Mock): Record<string, unknown> =>
+      (
+        completion.mock.calls[0] as [string, string, Record<string, unknown>]
+      )[2];
+
+    const batchContext = (): StatePayloadContext =>
+      buildContext({ parsed_email: { clean_body: CLEAN_BODY } });
+
+    it('13bis.1 deberia pedir el lote y reservar 16384 tokens con MULTIPLE', async () => {
+      // 1. Arrange 📐
+      const { client, completion } = buildBatchProvider([
+        { headline: 'Segunda', summary: 's2', body_paragraphs: [] },
+      ]);
+      const strategy = buildStrategy(buildPromptService(), client);
+
+      // 2. Act ⚙️
+      const result = await strategy.execute(batchContext(), {
+        inlinePrompt: 'Redacta cada noticia.',
+        provider: LlmProvider.GEMINI,
+        outputCardinality: 'MULTIPLE',
+      });
+
+      // 3. Assert 🎯
+      expect(optionsOf(completion)).toMatchObject({
+        expectsItems: true,
+        maxTokens: 16_384,
+      });
+      expect(result.data?.items).toEqual([
+        { headline: 'Segunda', summary: 's2', body_paragraphs: [] },
+      ]);
+    });
+
+    it('13bis.2 deberia reservar 8192 tokens y publicar items vacio con SINGLE', async () => {
+      // 1. Arrange 📐: aunque el proveedor devolviera un lote, SINGLE no lo
+      //    publica: el contrato del nodo no lo pidio.
+      const { client, completion } = buildBatchProvider([
+        { headline: 'Intrusa', summary: '', body_paragraphs: [] },
+      ]);
+      const strategy = buildStrategy(buildPromptService(), client);
+
+      // 2. Act ⚙️
+      const result = await strategy.execute(batchContext(), {
+        inlinePrompt: 'Redacta.',
+        provider: LlmProvider.GEMINI,
+      });
+
+      // 3. Assert 🎯
+      expect(optionsOf(completion)).toMatchObject({
+        expectsItems: false,
+        maxTokens: 8_192,
+      });
+      expect(result.data?.items).toEqual([]);
+    });
+
+    it('13bis.3 deberia publicar items vacio si el lote vino sin elementos adicionales', async () => {
+      // 1. Arrange 📐
+      const { client } = buildBatchProvider();
+      const strategy = buildStrategy(buildPromptService(), client);
+
+      // 2. Act ⚙️
+      const result = await strategy.execute(batchContext(), {
+        inlinePrompt: 'Redacta cada noticia.',
+        provider: LlmProvider.GEMINI,
+        outputCardinality: 'MULTIPLE',
+      });
+
+      // 3. Assert 🎯
+      expect(result.success).toBe(true);
+      expect(result.data?.items).toEqual([]);
+    });
+
+    it('13bis.4 deberia respetar un maxTokens declarado tambien con MULTIPLE', async () => {
+      // 1. Arrange 📐
+      const { client, completion } = buildBatchProvider([]);
+      const strategy = buildStrategy(buildPromptService(), client);
+
+      // 2. Act ⚙️
+      await strategy.execute(batchContext(), {
+        inlinePrompt: 'Redacta cada noticia.',
+        provider: LlmProvider.GEMINI,
+        outputCardinality: 'MULTIPLE',
+        maxTokens: 24_000,
+      });
+
+      // 3. Assert 🎯
+      expect(optionsOf(completion).maxTokens).toBe(24_000);
+    });
+
+    it('13bis.5 deberia rechazar una cardinalidad desconocida al validar', async () => {
+      // 1. Arrange 📐
+      const { client, completion } = buildBatchProvider();
+      const strategy = buildStrategy(buildPromptService(), client);
+
+      // 2. Act ⚙️
+      const result = await strategy.execute(batchContext(), {
+        inlinePrompt: 'Redacta.',
+        provider: LlmProvider.GEMINI,
+        outputCardinality: 'TODAS',
+      });
+
+      // 3. Assert 🎯
+      expect(result.success).toBe(false);
+      expect(completion).not.toHaveBeenCalled();
+    });
+  });
+
   describe('14. Telemetria de tokens', () => {
     /** Respuesta real de Anthropic con contadores conocidos. */
     const buildAnthropicReply = (): jest.Mock =>

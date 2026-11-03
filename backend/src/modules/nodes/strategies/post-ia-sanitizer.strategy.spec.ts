@@ -833,4 +833,172 @@ describe('PostIaSanitizerStrategy', () => {
       expect(result.error?.code).toBe(ERR_POST_IA_CONFIG);
     });
   });
+
+  describe('10. Lote (cardinalidad 1 a N)', () => {
+    const block = (code: string): string =>
+      `<div data-expediente="${code}"><h3 class="licitacion-title">Objeto ${code}</h3></div>`;
+
+    it('10.1 deberia auditar cada elemento y publicarlo en validated_items', async () => {
+      // 1. Arrange 📐
+      const strategy = buildStrategy();
+      const context = buildContext({
+        headline: 'LIC-1',
+        [SOURCE_FIELD]: block('LIC-1'),
+        items: [
+          { headline: 'LIC-2', summary: 'Dos', [SOURCE_FIELD]: block('LIC-2') },
+          {
+            headline: 'LIC-3',
+            summary: 'Tres',
+            [SOURCE_FIELD]: block('LIC-3'),
+          },
+        ],
+      });
+
+      // 2. Act ⚙️
+      const result = await strategy.execute(context, {
+        requiredSelectors: ['h3.licitacion-title'],
+      });
+
+      // 3. Assert 🎯: la raiz es el primero; los demas, en orden y saneados.
+      const items = result.data?.validated_items as {
+        validated_markup: string;
+        validated_fields: Record<string, string>;
+      }[];
+
+      expect(result.success).toBe(true);
+      expect(result.data?.validated_markup).toContain('Objeto LIC-1');
+      expect(result.data?.validated_fields).toMatchObject({
+        headline: 'LIC-1',
+      });
+      expect(items.map((item) => item.validated_fields.headline)).toEqual([
+        'LIC-2',
+        'LIC-3',
+      ]);
+      expect(items[1]?.validated_markup).toContain('Objeto LIC-3');
+    });
+
+    it('10.2 deberia publicar validated_items vacio con un solo elemento', async () => {
+      // 1. Arrange 📐 + 2. Act ⚙️
+      const result = await buildStrategy().execute(buildContext(), {});
+
+      // 3. Assert 🎯
+      expect(result.success).toBe(true);
+      expect(result.data?.validated_items).toEqual([]);
+    });
+
+    it('10.3 deberia detener el lote entero si un elemento rompe una ranura, nombrando su ruta', async () => {
+      // 1. Arrange 📐: el 2.º elemento llega sin titulo.
+      const strategy = buildStrategy();
+      const context = buildContext({
+        [SOURCE_FIELD]: block('LIC-1'),
+        items: [
+          { [SOURCE_FIELD]: block('LIC-2') },
+          {
+            [SOURCE_FIELD]:
+              '<div data-expediente="LIC-3"><h3 class="licitacion-title"></h3></div>',
+          },
+        ],
+      });
+
+      // 2. Act ⚙️
+      const result = await strategy.execute(context, {
+        requiredSelectors: ['h3.licitacion-title'],
+      });
+
+      // 3. Assert 🎯
+      expect(result.success).toBe(false);
+      expect(result.error?.code).toBe(ERR_POST_IA_DOM_MUTATED);
+      expect(result.data).toBeUndefined();
+    });
+
+    it('10.4 deberia rechazar un elemento con un marcador sin resolver, con su ruta exacta', async () => {
+      // 1. Arrange 📐
+      const strategy = buildStrategy();
+      const context = buildContext({
+        [SOURCE_FIELD]: FILLED_HTML,
+        items: [{ [SOURCE_FIELD]: '<p>{{llm_response.headline}}</p>' }],
+      });
+
+      // 2. Act ⚙️
+      const result = await strategy.execute(context, {});
+
+      // 3. Assert 🎯
+      expect(result.success).toBe(false);
+      expect(result.error?.code).toBe(ERR_POST_IA_RESIDUAL_VARS);
+    });
+
+    it('10.5 deberia vaciar de scripts el marcado de cada elemento', async () => {
+      // 1. Arrange 📐
+      const strategy = buildStrategy();
+      const context = buildContext({
+        [SOURCE_FIELD]: FILLED_HTML,
+        items: [
+          {
+            [SOURCE_FIELD]:
+              '<p>Noticia dos</p><script>alert("xss")</script><img src="x" onerror="alert(1)">',
+          },
+        ],
+      });
+
+      // 2. Act ⚙️
+      const result = await strategy.execute(context, {});
+
+      // 3. Assert 🎯
+      const [item] = result.data?.validated_items as {
+        validated_markup: string;
+      }[];
+
+      expect(result.success).toBe(true);
+      expect(item?.validated_markup).toContain('Noticia dos');
+      expect(item?.validated_markup).not.toContain('<script');
+      expect(item?.validated_markup).not.toContain('onerror');
+    });
+
+    it('10.6 deberia auditar en modo TEXT cada elemento y nombrar el que viene vacio', async () => {
+      // 1. Arrange 📐
+      const strategy = buildStrategy();
+      const context = buildContext({
+        headline: 'EXP-1',
+        summary: 'Uno',
+        items: [
+          { headline: '<b>EXP-2</b>', summary: 'Dos' },
+          { headline: '', summary: 'Tres' },
+        ],
+      });
+
+      // 2. Act ⚙️
+      const result = await strategy.execute(context, { contentMode: 'TEXT' });
+
+      // 3. Assert 🎯
+      expect(result.success).toBe(false);
+      expect(result.error?.code).toBe(ERR_POST_IA_EMPTY_HTML);
+      expect(result.error?.missingFields).toEqual([
+        `${SOURCE_NAMESPACE}.items[1].headline`,
+      ]);
+    });
+
+    it('10.7 deberia publicar en texto plano los campos de cada elemento en modo TEXT', async () => {
+      // 1. Arrange 📐
+      const strategy = buildStrategy();
+      const context = buildContext({
+        headline: 'EXP-1',
+        summary: 'Uno',
+        items: [{ headline: '<b>EXP-2</b>', summary: 'Dos' }],
+      });
+
+      // 2. Act ⚙️
+      const result = await strategy.execute(context, { contentMode: 'TEXT' });
+
+      // 3. Assert 🎯
+      const [item] = result.data?.validated_items as {
+        validated_fields: Record<string, string>;
+      }[];
+
+      expect(result.success).toBe(true);
+      expect(item?.validated_fields).toEqual({
+        headline: 'EXP-2',
+        summary: 'Dos',
+      });
+    });
+  });
 });

@@ -65,4 +65,16 @@ describe('usePromptOptimizerStore', () => {
     expect(store.result).toBeNull();
     expect(store.isLoading).toBe(false);
   });
+
+  it('3.1 clear deberia devolver la cardinalidad a SINGLE', () => {
+    // 1. Arrange 📐
+    const store = usePromptOptimizerStore();
+    store.outputCardinality = 'MULTIPLE';
+
+    // 2. Act ⚙️
+    store.clear();
+
+    // 3. Assert 🎯
+    expect(store.outputCardinality).toBe('SINGLE');
+  });
 });

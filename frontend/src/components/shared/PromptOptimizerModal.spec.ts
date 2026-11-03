@@ -2,6 +2,7 @@
 import { flushPromises, mount } from '@vue/test-utils';
 import { createPinia, setActivePinia } from 'pinia';
 import {
+  QBanner,
   QBtn,
   QCard,
   QCardActions,
@@ -11,6 +12,7 @@ import {
   QIcon,
   QSelect,
   QSpinner,
+  QToggle,
   Quasar,
 } from 'quasar';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -29,6 +31,7 @@ vi.mock('@services/prompts.service', () => ({
 import PromptOptimizerModal from '@components/shared/PromptOptimizerModal.vue';
 
 import { optimizePrompt } from '@services/prompts.service';
+import { usePromptOptimizerStore } from '@stores/prompt-optimizer.store';
 
 import type { PromptOptimizationResult } from '@/types/prompt-optimizer';
 
@@ -61,6 +64,7 @@ const mountModal = () =>
     global: {
       plugins: [Quasar],
       components: {
+        QBanner,
         QBtn,
         QCard,
         QCardActions,
@@ -70,6 +74,7 @@ const mountModal = () =>
         QIcon,
         QSelect,
         QSpinner,
+        QToggle,
       },
     },
   });
@@ -209,5 +214,33 @@ describe('PromptOptimizerModal', () => {
     // 3. Assert 🎯
     expect(notify).toHaveBeenCalledWith(expect.objectContaining({ type: 'negative' }));
     expect(find('[data-test="optimizer-apply"]')?.hasAttribute('disabled')).toBe(true);
+  });
+
+  it('2.1 deberia enviar cardinality MULTIPLE con el modo lote y avisar del contrato', async () => {
+    // 1. Arrange 📐
+    vi.mocked(optimizePrompt).mockResolvedValue(RESULT);
+    mountModal();
+    await flushPromises();
+    expect(find('[data-test="optimizer-cardinality-badge"]')?.textContent).toContain(
+      'UNITARIO (1:1)',
+    );
+
+    // 2. Act ⚙️: el toggle del modal.
+    find('[data-test="optimizer-cardinality-toggle"]')?.click();
+    await flushPromises();
+    find('[data-test="optimizer-generate"]')?.click();
+    await flushPromises();
+
+    // 3. Assert 🎯
+    expect(usePromptOptimizerStore().outputCardinality).toBe('MULTIPLE');
+    expect(find('[data-test="optimizer-cardinality-badge"]')?.textContent).toContain(
+      'LOTE (1:N)',
+    );
+    expect(find('[data-test="optimizer-batch-notice"]')).not.toBeNull();
+    expect(optimizePrompt).toHaveBeenCalledWith({
+      draftPrompt: DRAFT,
+      targetFormat: 'html',
+      cardinality: 'MULTIPLE',
+    });
   });
 });

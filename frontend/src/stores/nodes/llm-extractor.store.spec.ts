@@ -904,4 +904,46 @@ describe('useLlmExtractorStore · configuracion del nodo PROCESADOR_IA', () => {
       expect(resumen.config.maxRetries).toBe(DEFAULT_LLM_MAX_RETRIES);
     });
   });
+
+  describe('9. Cardinalidad 1 a N', () => {
+    it('9.1 deberia publicar outputCardinality solo con lote y conservar el viaje de ida y vuelta', () => {
+      // 1. Arrange 📐
+      const store = useLlmExtractorStore(nextNodeId());
+
+      // 2. Act ⚙️
+      const single = store.toNodeParams();
+      store.updateConfig({ outputCardinality: 'MULTIPLE' });
+      const batch = store.toNodeParams();
+      store.hydrateFromNode({ nodeId: 'otro', params: batch } as never);
+
+      // 3. Assert 🎯
+      expect(single).not.toHaveProperty('outputCardinality');
+      expect(batch.outputCardinality).toBe('MULTIPLE');
+      expect(store.config.outputCardinality).toBe('MULTIPLE');
+    });
+
+    it('9.2 deberia avisar del coste de lote y proyectar al menos 8192 tokens', () => {
+      // 1. Arrange 📐
+      const store = useLlmExtractorStore(nextNodeId());
+
+      // 2. Act ⚙️
+      store.updateConfig({ outputCardinality: 'MULTIPLE' });
+
+      // 3. Assert 🎯
+      expect(store.configWarnings.some((warning) => warning.startsWith('Modo lote'))).toBe(true);
+      expect(store.resourceEstimation.estimatedOutputTokens).toBeGreaterThanOrEqual(8_192);
+    });
+
+    it('9.3 deberia volver a SINGLE al hidratar un nodo sin la clave', () => {
+      // 1. Arrange 📐
+      const store = useLlmExtractorStore(nextNodeId());
+      store.updateConfig({ outputCardinality: 'MULTIPLE' });
+
+      // 2. Act ⚙️
+      store.hydrateFromNode({ nodeId: 'viejo', params: { inlinePrompt: 'x' } } as never);
+
+      // 3. Assert 🎯
+      expect(store.config.outputCardinality).toBe('SINGLE');
+    });
+  });
 });

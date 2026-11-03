@@ -1,4 +1,12 @@
 import {
+  MULTIPLE_CARDINALITY_DIRECTIVE,
+  PromptCardinality,
+} from '@modules/prompts/prompt-meta.template';
+import {
+  OPTIMIZER_MAX_TOKENS_MULTIPLE,
+  OPTIMIZER_MAX_TOKENS_SINGLE,
+} from '@modules/prompts/prompt-optimizer.service';
+import {
   BadGatewayException,
   BadRequestException,
   ForbiddenException,
@@ -241,6 +249,58 @@ describe('PromptOptimizerService', () => {
         maxTokens: 10_000,
         maxRetries: 3,
       });
+    });
+
+    it('1.3c deberia inyectar la directiva de lote y reservar 16384 tokens con MULTIPLE', async () => {
+      // 1. Arrange 📐
+      const { service, generateCompletion } = buildFixture();
+
+      // 2. Act ⚙️
+      await service.optimize(
+        {
+          draftPrompt: DRAFT,
+          targetFormat: 'html',
+          cardinality: PromptCardinality.MULTIPLE,
+        },
+        EDITOR,
+      );
+
+      // 3. Assert 🎯
+      const [, systemPrompt, options] = generateCompletion.mock.calls[0] as [
+        string,
+        string,
+        { maxTokens: number },
+      ];
+      expect(systemPrompt).toContain(MULTIPLE_CARDINALITY_DIRECTIVE);
+      expect(systemPrompt).toContain('"items"');
+      expect(options.maxTokens).toBe(OPTIMIZER_MAX_TOKENS_MULTIPLE);
+      expect(OPTIMIZER_MAX_TOKENS_MULTIPLE).toBe(16_384);
+    });
+
+    it('1.3d con SINGLE no deberia mencionar items y deberia conservar los 10 000 tokens', async () => {
+      // 1. Arrange 📐: un elemento no baja a 8192; reintroduciria los
+      //    truncados que motivaron subir el techo.
+      const { service, generateCompletion } = buildFixture();
+
+      // 2. Act ⚙️
+      await service.optimize(
+        {
+          draftPrompt: DRAFT,
+          targetFormat: 'html',
+          cardinality: PromptCardinality.SINGLE,
+        },
+        EDITOR,
+      );
+
+      // 3. Assert 🎯
+      const [, systemPrompt, options] = generateCompletion.mock.calls[0] as [
+        string,
+        string,
+        { maxTokens: number },
+      ];
+      expect(systemPrompt).not.toContain('DIRECTIVA DE CARDINALIDAD');
+      expect(systemPrompt).not.toContain('"items"');
+      expect(options.maxTokens).toBe(OPTIMIZER_MAX_TOKENS_SINGLE);
     });
 
     it('1.4 deberia avisar si la propuesta pierde marcadores del borrador', async () => {

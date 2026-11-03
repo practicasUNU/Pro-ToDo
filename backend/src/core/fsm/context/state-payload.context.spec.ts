@@ -815,4 +815,71 @@ describe('StatePayloadContext (PROT-08)', () => {
       expect(collectNamespaceRoots(deep)).toEqual([]);
     });
   });
+
+  describe('withNamespaceOverlays (contexto por elemento del lote)', () => {
+    it('deberia superponer el elemento sin tocar el contexto original', () => {
+      // 1. Arrange 📐
+      const base = buildContext();
+      base.setNamespace('llm_response', { headline: 'Primera', summary: 'R1' });
+      base.setNamespace('raw_email', { subject: 'Boletin' });
+
+      // 2. Act ⚙️
+      const derived = base.withNamespaceOverlays({
+        llm_response: { headline: 'Segunda' },
+      });
+
+      // 3. Assert 🎯: fusion con spread, y el original intacto.
+      expect(derived.getInterpolatedValue('{{llm_response.headline}}')).toBe(
+        'Segunda',
+      );
+      expect(derived.getNamespace('llm_response')).toEqual({
+        headline: 'Segunda',
+        summary: 'R1',
+      });
+      expect(derived.getNamespace('raw_email')).toEqual({ subject: 'Boletin' });
+      expect(base.getInterpolatedValue('{{llm_response.headline}}')).toBe(
+        'Primera',
+      );
+    });
+
+    it('deberia conservar ejecucion, flujo y cursor', () => {
+      // 1. Arrange 📐
+      const base = buildContext();
+
+      // 2. Act ⚙️
+      const derived = base.withNamespaceOverlays({ ns: { a: 1 } });
+
+      // 3. Assert 🎯
+      expect(derived.getExecutionId()).toBe(EXECUTION_ID);
+      expect(derived.getWorkflowId()).toBe(WORKFLOW_ID);
+      expect(derived.getCursor()).toBe(INITIAL_STEP);
+      expect(base.getNamespace('ns')).toBeUndefined();
+    });
+
+    it('no deberia propagar al original una mutacion de la superposicion', () => {
+      // 1. Arrange 📐
+      const base = buildContext();
+      const overlay = { headline: 'Segunda', tags: ['a'] };
+      const derived = base.withNamespaceOverlays({ llm_response: overlay });
+
+      // 2. Act ⚙️
+      overlay.tags.push('b');
+
+      // 3. Assert 🎯
+      expect(derived.getNamespace('llm_response')).toEqual({
+        headline: 'Segunda',
+        tags: ['a'],
+      });
+    });
+
+    it('deberia listar los namespaces escritos sin clonar su contenido', () => {
+      // 1. Arrange 📐
+      const base = buildContext();
+      base.setNamespace('a', { x: 1 });
+      base.setNamespace('b', { y: 2 });
+
+      // 2. Act ⚙️ + 3. Assert 🎯
+      expect(base.getNamespaceNames().sort()).toEqual(['a', 'b']);
+    });
+  });
 });

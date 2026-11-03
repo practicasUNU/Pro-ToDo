@@ -19,6 +19,10 @@ process.env.DRUPAL_API_BASE_URL = 'https://drupal.e2e.invalid/jsonapi';
 process.env.DRUPAL_API_TOKEN = 'token-e2e';
 process.env.DRUPAL_API_USER = 'editor_e2e';
 process.env.DRUPAL_AUTH_TYPE = 'BASIC';
+// Acens doblado: la campana del boletin sale por el mismo cliente HTTP, que el
+// portal en memoria contesta.
+process.env.ACENS_API_BASE_URL = 'https://acens.e2e.invalid';
+process.env.ACENS_API_KEY = 'acens-token-e2e';
 // La base sale de `DB_NAME` del entorno y la valida `test/helpers/e2e-database.guard.ts`
 // (cargado por `setupFiles`) antes de este archivo: nada de nombres escritos aqui.
 
@@ -123,6 +127,10 @@ const ARTICLE_URL =
 /** Raiz publica del portal doblado: la base de la API sin `/jsonapi`. */
 const DRUPAL_SITE_ROOT = 'https://drupal.e2e.invalid';
 
+/** Ruta absoluta de la creacion de campanas en el Acens doblado. */
+const ACENS_CAMPAIGN_URL = 'https://acens.e2e.invalid/api/1/createCampaign/';
+const ACENS_CAMPAIGN_ID = 'campana-e2e-1';
+
 /**
  * HTML del articulo, SIN `<meta>` de autor ni de fecha: obliga al extractor a
  * caer en la fecha de la URL y en la organizacion del dominio.
@@ -196,6 +204,13 @@ class FakeDrupalPortal {
     this.requestWithResponse.mockClear();
   }
 
+  /** Peticiones registradas con ese verbo cuya URL empieza por `prefix`. */
+  public callsTo(method: string, prefix: string): RecordedCall[] {
+    return this.calls.filter(
+      (call) => call.method === method && call.url.startsWith(prefix),
+    );
+  }
+
   /** Cuerpos `body.value` enviados en los PATCH a una pagina, en orden. */
   public patchedHtml(uuid: string): string[] {
     return this.calls
@@ -213,6 +228,11 @@ class FakeDrupalPortal {
       headers: { ...(config.headers as Record<string, unknown>) },
       body: config.data,
     });
+
+    // Acens: solo la creacion de campanas; contesta con un id fijo.
+    if (method === 'POST' && url === ACENS_CAMPAIGN_URL) {
+      return { status: 200, data: { campaign_id: ACENS_CAMPAIGN_ID } };
+    }
 
     const path = url.startsWith(DRUPAL_BASE_URL)
       ? url.slice(DRUPAL_BASE_URL.length).split('?')[0]
@@ -1336,6 +1356,461 @@ describe('Pipelines operativos de la FSM (e2e)', () => {
         );
         expect(iaLog?.codigo_error).toBe(ERR_PROMPT_REQUIRED_VARIABLE_MISSING);
         expect(await countTelemetry(executionId)).toBe(0);
+      },
+      CASE_TIMEOUT_MS,
+    );
+  });
+
+  describe('8. Cardinalidad 1 a N (lotes)', () => {
+    /**
+     * Tramo IA -> escudo -> destino con la ejecucion parada en el ESCUDO y un
+     * `llm_response` ya sembrado. Fija el marcado exacto de cada elemento
+     * (bloques de licitacion, paneles por universidad) sin depender del
+     * simulador, y deja que escudo y destino corran de verdad.
+     */
+    const shieldedSchema = (
+      flowId: string,
+      name: string,
+      shieldParams: Record<string, unknown>,
+      destinationParams: Record<string, unknown>,
+    ): PipelineSchemaDto =>
+      schemaOf(flowId, name, 'disparador_imap', [
+        imapTrigger('parser'),
+        node('parser', NodeType.PARSER_PRE_IA, 'parsed_email', 'lote_ia'),
+        mockLlm('lote_ia', 'escudo', 'Procesa el lote.', {
+          params: {
+            inlinePrompt: 'Procesa el lote.',
+            provider: 'MOCK',
+            model: MOCK_LLM_MODEL,
+            outputCardinality: 'MULTIPLE',
+          },
+        }),
+        node(
+          'escudo',
+          NodeType.ESCUDO_POST_IA,
+          'validated_drupal_json',
+          'destino_drupal',
+          { sourceNamespace: 'llm_response', ...shieldParams },
+        ),
+        node(
+          'destino_drupal',
+          NodeType.DESTINO_DRUPAL,
+          'http_result',
+          null,
+          destinationParams,
+        ),
+      ]);
+
+    /** Bloque de apertura con su titulo formal, como lo exige el prompt. */
+    const tenderBlock = (code: string, title: string): string =>
+      `<div class="licitacion-entry pd-licitacion-block" data-expediente="${code}">` +
+      `<h3 class="licitacion-title">${title}</h3>` +
+      '<ul class="licitacion-presupuesto"><li><span class="total">39.930,00 euros</span></li></ul>' +
+      '</div>';
+
+    /** Panel de comite que apunta al sub-acordeon de su universidad. */
+    const universityPanel = (code: string, accordion: string): string =>
+      '<div class="panel panel-default"><div class="panel-heading"><h5 class="panel-title">' +
+      `<a class="panel-toggle-link" data-parent="${accordion}" href="#collapse${code}">` +
+      `<strong class="panel-comite-codigo">${code}</strong></a></h5></div>` +
+      `<div class="collapse" id="collapse${code}"><div class="panel-body"><p>Comite ${code}</p></div></div></div>`;
+
+    it(
+      '8.1 Notiweb (N=5): deberia crear cinco noticias en Drupal y UNA campana en Acens con todas',
+      async () => {
+        // 1. Arrange 📐: el correo reenviado de un boletin con cinco noticias y
+        //    un Word adjunto. El simulador, con cardinalidad MULTIPLE, devuelve
+        //    un elemento por parrafo: la raiz y cuatro en `items`.
+        const templateId = await seedTemplate(
+          'Notiweb lote',
+          '<div class="notiweb-cuerpo"></div>',
+        );
+        const news = [
+          'La Comunidad abre la convocatoria de doctorados industriales',
+          'Un consorcio madrileno lidera un proyecto europeo de baterias',
+          'El parque cientifico estrena un laboratorio de biotecnologia',
+          'Cuatro universidades firman una alianza de ciencia abierta',
+          'La red de incubadoras incorpora diez nuevas empresas de base tecnologica',
+        ];
+        const flowId = await seedFlow((id) =>
+          schemaOf(id, 'Notiweb en lote', 'disparador_imap', [
+            imapTrigger('parser'),
+            node('parser', NodeType.PARSER_PRE_IA, 'parsed_email', 'mapeador'),
+            node(
+              'mapeador',
+              NodeType.MAPEADOR_PLANTILLA,
+              'rendered_html',
+              'redaccion_ia',
+              { templateId },
+            ),
+            // El prompt cita el adjunto como marcador: asi la materia prima es
+            // SOLO el cuerpo del correo, sin etiqueta, y cada noticia es un
+            // parrafo para el simulador.
+            mockLlm('redaccion_ia', 'escudo', '', {
+              params: {
+                inlinePrompt:
+                  'Redacta cada noticia del boletin. Adjuntos: {{parsed_email.extracted_documents_text}}\n\n' +
+                  'PLANTILLA BASE: {{*rendered_html.compiled_markup}}',
+                provider: 'MOCK',
+                model: MOCK_LLM_MODEL,
+                outputCardinality: 'MULTIPLE',
+              },
+            }),
+            node(
+              'escudo',
+              NodeType.ESCUDO_POST_IA,
+              'validated_drupal_json',
+              'destino_drupal',
+              {
+                contentMode: 'HTML',
+                sourceNamespace: 'llm_response',
+                sourceField: 'filled_markup',
+              },
+            ),
+            node(
+              'destino_drupal',
+              NodeType.DESTINO_DRUPAL,
+              'http_result',
+              'campana_acens',
+              {
+                operationMode: DrupalOperationMode.CREATE_NODE,
+                bundle: 'node--article',
+                sourceNamespace: 'validated_drupal_json',
+                sourceField: 'validated_markup',
+                titleTemplate: '{{llm_response.headline}}',
+                publishStatus: false,
+              },
+            ),
+            node(
+              'campana_acens',
+              NodeType.DESTINO_ACENS,
+              'acens_result',
+              null,
+              {
+                operation: 'CREATE_CAMPAIGN',
+                listId: 'boletin-e2e',
+              },
+            ),
+          ]),
+        );
+        const executionId = await seedExecution(flowId, 'parser', {
+          raw_email: rawEmail(
+            'RV: NOTIWEB 03 de noviembre',
+            news.join('\n\n'),
+            [
+              attachment(
+                'boletin.docx',
+                'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+                readFileSync(DOCX_FIXTURE),
+              ),
+            ],
+          ),
+        });
+
+        // 2. Act ⚙️
+        await resume(executionId);
+        const done = await readExecution(executionId);
+
+        // 3. Assert 🎯: cinco altas, en orden y cada una con su titular.
+        expect(done.currentState).toBe(ExecutionState.EXITOSO);
+        const creations = portal.callsTo('POST', `${DRUPAL_BASE_URL}/node/`);
+        expect(creations).toHaveLength(5);
+        expect(
+          creations.map(
+            (call) =>
+              (call.body as { data: { attributes: { title: string } } }).data
+                .attributes.title,
+          ),
+        ).toEqual(news);
+        expect(done.contextPayload.http_result).toMatchObject({
+          total_published: 5,
+        });
+
+        // Una sola campana, con el marcado validado de las cinco noticias, la
+        // lista pedida y el token del entorno SOLO en la peticion.
+        const campaigns = portal.callsTo('POST', ACENS_CAMPAIGN_URL);
+        expect(campaigns).toHaveLength(1);
+        const campaign = campaigns[0]?.body as Record<string, unknown>;
+        expect(campaign.auth_token).toBe('acens-token-e2e');
+        expect(campaign.lists).toEqual({ '0': 'boletin-e2e' });
+        for (const headline of news) {
+          expect(String(campaign.content)).toContain(headline);
+        }
+        expect(done.contextPayload.acens_result).toMatchObject({
+          status: 'CAMPAIGN_CREATED',
+          campaign_id: ACENS_CAMPAIGN_ID,
+          recipient_list: 'boletin-e2e',
+        });
+        expect(JSON.stringify(done.contextPayload)).not.toContain(
+          'acens-token-e2e',
+        );
+      },
+      CASE_TIMEOUT_MS,
+    );
+
+    it(
+      '8.2 Apertura (N=2): deberia anteponer los dos expedientes en orden, con su titulo formal y un solo PATCH',
+      async () => {
+        // 1. Arrange 📐
+        portal.pages.set(
+          OPEN_TENDERS_UUID,
+          '<div data-expediente="LIC-2026-001"><p>Licitacion anterior</p></div>',
+        );
+        const flowId = await seedFlow((id) =>
+          shieldedSchema(
+            id,
+            'Apertura en lote',
+            {
+              contentMode: 'HTML',
+              sourceField: 'filled_markup',
+              requiredSelectors: ['h3.licitacion-title'],
+            },
+            {
+              operationMode: DrupalOperationMode.APPEND_HTML_BLOCK,
+              bundle: 'node--page',
+              targetNodeUuid: OPEN_TENDERS_UUID,
+              expedienteTemplate: '{{llm_response.headline}}',
+            },
+          ),
+        );
+        const executionId = await seedExecution(flowId, 'escudo', {
+          raw_email: rawEmail('Abrir licitacion V5', 'Dos expedientes nuevos.'),
+          llm_response: {
+            headline: 'S_2026_015',
+            summary: 'Servicios de apoyo al emprendimiento innovador',
+            body_paragraphs: [],
+            filled_markup: tenderBlock(
+              'S_2026_015',
+              'S_2026_015 Servicios de apoyo al emprendimiento innovador',
+            ),
+            items: [
+              {
+                headline: 'S_2026_016',
+                summary: 'Mantenimiento de la plataforma de datos',
+                body_paragraphs: [],
+                filled_markup: tenderBlock(
+                  'S_2026_016',
+                  'S_2026_016 Mantenimiento de la plataforma de datos',
+                ),
+              },
+            ],
+          },
+        });
+
+        // 2. Act ⚙️
+        await resume(executionId);
+        const done = await readExecution(executionId);
+
+        // 3. Assert 🎯
+        expect(done.currentState).toBe(ExecutionState.EXITOSO);
+        const patches = portal.patchedHtml(OPEN_TENDERS_UUID);
+        expect(patches).toHaveLength(1);
+        const [patched] = patches;
+        expect(patched.indexOf('S_2026_015 Servicios')).toBeLessThan(
+          patched.indexOf('S_2026_016 Mantenimiento'),
+        );
+        expect(patched.indexOf('S_2026_016 Mantenimiento')).toBeLessThan(
+          patched.indexOf('Licitacion anterior'),
+        );
+        // El asunto del correo no acaba como titulo de nada.
+        expect(patched).not.toContain('Abrir licitacion V5');
+        expect(done.contextPayload.http_result).toMatchObject({
+          total_appended: 2,
+        });
+      },
+      CASE_TIMEOUT_MS,
+    );
+
+    it(
+      '8.3 Cierre (N=2): deberia trasladar los dos expedientes sin mapeador ni inferencia',
+      async () => {
+        // 1. Arrange 📐: la ejecucion arranca en el escudo; ningun nodo de IA
+        //    corre.
+        portal.pages.set(
+          OPEN_TENDERS_UUID,
+          '<div data-expediente="LIC-2026-004"><p>Cuatro</p></div>' +
+            '<div data-expediente="LIC-2026-005"><p>Cinco</p></div>' +
+            '<div data-expediente="LIC-2026-006"><p>Sigue abierta</p></div>',
+        );
+        portal.pages.set(CLOSED_TENDERS_UUID, '<p>Cerradas</p>');
+        const flowId = await seedFlow((id) =>
+          shieldedSchema(
+            id,
+            'Cierre en lote',
+            { contentMode: 'TEXT', sourceFields: ['headline'] },
+            {
+              operationMode: DrupalOperationMode.TRANSFER_HTML_BLOCK,
+              bundle: 'node--page',
+              targetNodeUuid: OPEN_TENDERS_UUID,
+              destinationNodeUuid: CLOSED_TENDERS_UUID,
+              itemSelector:
+                '[data-expediente="{{validated_drupal_json.validated_fields.headline}}"]',
+            },
+          ),
+        );
+        const executionId = await seedExecution(flowId, 'escudo', {
+          llm_response: {
+            headline: 'LIC-2026-004',
+            summary: 'Adjudicada',
+            body_paragraphs: [],
+            items: [
+              {
+                headline: 'LIC-2026-005',
+                summary: 'Desierta',
+                body_paragraphs: [],
+              },
+            ],
+          },
+        });
+
+        // 2. Act ⚙️
+        await resume(executionId);
+        const done = await readExecution(executionId);
+
+        // 3. Assert 🎯: un PATCH por pagina, los dos movidos y el tercero quieto.
+        expect(done.currentState).toBe(ExecutionState.EXITOSO);
+        const [closed] = portal.patchedHtml(CLOSED_TENDERS_UUID);
+        const [open] = portal.patchedHtml(OPEN_TENDERS_UUID);
+        expect(portal.patchedHtml(CLOSED_TENDERS_UUID)).toHaveLength(1);
+        expect(closed).toContain('LIC-2026-004');
+        expect(closed).toContain('LIC-2026-005');
+        expect(open).not.toContain('LIC-2026-004');
+        expect(open).toContain('LIC-2026-006');
+        expect(done.contextPayload.http_result).toMatchObject({
+          total_transferred: 2,
+        });
+        expect(
+          (await readNodeLogs(executionId)).map((log) => log.id_nodo),
+        ).not.toContain('lote_ia');
+      },
+      CASE_TIMEOUT_MS,
+    );
+
+    it(
+      '8.4 Titulos (N>1): deberia repartir los paneles de ESIC, UAM, UPM y URJC en sus acordeones',
+      async () => {
+        // 1. Arrange 📐
+        portal.pages.set(
+          TITLES_UUID,
+          '<div id="accordion">' +
+            ['ESIC', 'UAM', 'UPM', 'URJC']
+              .map((code) => `<div id="accordion${code}"></div>`)
+              .join('') +
+            '</div>',
+        );
+        const flowId = await seedFlow((id) =>
+          shieldedSchema(
+            id,
+            'Titulos en lote',
+            { contentMode: 'HTML', sourceField: 'filled_markup' },
+            {
+              operationMode: DrupalOperationMode.APPEND_HTML_BLOCK,
+              bundle: 'node--page',
+              targetNodeUuid: TITLES_UUID,
+              containerSelector: '#accordion',
+              insertPosition: 'APPEND',
+            },
+          ),
+        );
+        const executionId = await seedExecution(flowId, 'escudo', {
+          llm_response: {
+            headline: 'ESIC',
+            summary: '',
+            body_paragraphs: [],
+            filled_markup: universityPanel('ESIC1', '#accordionESIC'),
+            items: ['UAM', 'UPM', 'URJC'].map((code) => ({
+              headline: code,
+              summary: '',
+              body_paragraphs: [],
+              filled_markup: universityPanel(`${code}1`, `#accordion${code}`),
+            })),
+          },
+        });
+
+        // 2. Act ⚙️
+        await resume(executionId);
+        const done = await readExecution(executionId);
+
+        // 3. Assert 🎯: un solo PATCH y cada panel dentro de su universidad.
+        expect(done.currentState).toBe(ExecutionState.EXITOSO);
+        const patches = portal.patchedHtml(TITLES_UUID);
+        expect(patches).toHaveLength(1);
+        const $ = cheerio.load(
+          patches[0] ?? '',
+          { xml: { xmlMode: false } },
+          false,
+        );
+        for (const code of ['ESIC', 'UAM', 'UPM', 'URJC']) {
+          expect($(`#accordion${code} .panel-comite-codigo`).text()).toBe(
+            `${code}1`,
+          );
+        }
+      },
+      CASE_TIMEOUT_MS,
+    );
+
+    it(
+      '8.5 Innodays (N=2): deberia sustituir los dos enlaces con un solo PATCH',
+      async () => {
+        // 1. Arrange 📐
+        const html =
+          '<table><tr><td>Agrifood</td><td><a href="/old-agrifood.pdf">PDF</a></td></tr>' +
+          '<tr><td>Salud</td><td><a href="/old-salud.pdf">PDF</a></td></tr>' +
+          '<tr><td>Energia</td><td><a href="/old-energia.pdf">PDF</a></td></tr></table>';
+        portal.pages.set(INNODAYS_UUID, html);
+        const flowId = await seedFlow((id) =>
+          shieldedSchema(
+            id,
+            'Innodays en lote',
+            { contentMode: 'TEXT', sourceFields: ['headline', 'summary'] },
+            {
+              operationMode: DrupalOperationMode.UPDATE_LINK_SOURCE,
+              bundle: 'node--page',
+              targetNodeUuid: INNODAYS_UUID,
+              linkSelector:
+                "table tr:contains('{{validated_drupal_json.validated_fields.headline}}') a",
+              linkAttribute: 'href',
+              linkValueTemplate:
+                '{{validated_drupal_json.validated_fields.summary}}',
+            },
+          ),
+        );
+        const executionId = await seedExecution(flowId, 'escudo', {
+          llm_response: {
+            headline: 'Agrifood',
+            summary: 'https://www.madrimasd.org/innodays/agrifood-2026.pdf',
+            body_paragraphs: [],
+            items: [
+              {
+                headline: 'Salud',
+                summary: 'https://www.madrimasd.org/innodays/salud-2026.pdf',
+                body_paragraphs: [],
+              },
+            ],
+          },
+        });
+
+        // 2. Act ⚙️
+        await resume(executionId);
+        const done = await readExecution(executionId);
+
+        // 3. Assert 🎯: dos enlaces nuevos, el tercero intacto y un PATCH.
+        expect(done.currentState).toBe(ExecutionState.EXITOSO);
+        expect(portal.patchedHtml(INNODAYS_UUID)).toHaveLength(1);
+        expect(portal.pages.get(INNODAYS_UUID)).toBe(
+          html
+            .replace(
+              'href="/old-agrifood.pdf"',
+              'href="https://www.madrimasd.org/innodays/agrifood-2026.pdf"',
+            )
+            .replace(
+              'href="/old-salud.pdf"',
+              'href="https://www.madrimasd.org/innodays/salud-2026.pdf"',
+            ),
+        );
+        expect(done.contextPayload.http_result).toMatchObject({
+          total_updated: 2,
+        });
       },
       CASE_TIMEOUT_MS,
     );
