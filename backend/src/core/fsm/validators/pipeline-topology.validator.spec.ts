@@ -976,9 +976,10 @@ describe('validatePipelineTopology', () => {
       expect(issues).toEqual([]);
     });
 
-    it('11.4 deberia rechazar tambien un destino encadenado a otro destino', () => {
-      // 1. Arrange 📐: publicar y notificar se modela con la ruta de error o
-      //    con dos flujos, no encadenando entregas.
+    it('11.4 deberia ADMITIR un destino encadenado a otro destino', () => {
+      // 1. Arrange 📐: cardinalidad 1 a N. El maestro de Notiweb publica en
+      //    Drupal y despues crea la campana de Acens; una entrega tras otra ya
+      //    no es un error, solo lo es el procesamiento tras una entrega.
       const schema = withDestination('nodo_alerta');
 
       schema.nodes.nodo_alerta = {
@@ -994,7 +995,7 @@ describe('validatePipelineTopology', () => {
       const issues = validatePipelineTopology(schema);
 
       // 3. Assert 🎯
-      expect(fieldsOf(issues)).toContain('nodes.nodo_extractor.nextStep');
+      expect(fieldsOf(issues)).not.toContain('nodes.nodo_extractor.nextStep');
     });
 
     it('11.5 NO deberia afectar a los nodos que no son de destino', () => {

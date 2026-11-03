@@ -133,6 +133,14 @@ export interface SchemaIssue {
 const hasNode = (schema: PipelineSchemaDto, nodeId: string): boolean =>
   Object.hasOwn(schema.nodes, nodeId);
 
+/** `true` si `stepId` es un nodo del mapa de categoria DESTINO. */
+const isDestinationStep = (
+  schema: PipelineSchemaDto,
+  stepId: string,
+): boolean =>
+  hasNode(schema, stepId) &&
+  DESTINO_NODE_TYPES.has(schema.nodes[stepId]?.nodeType);
+
 /** Codigo de la regla 11: un nodo DESTINO encadena un paso posterior. */
 export const ERR_TOPOLOGY_DESTINATION_NOT_TERMINAL =
   'ERR_TOPOLOGY_DESTINATION_NOT_TERMINAL';
@@ -207,17 +215,22 @@ export const duplicateNodeTypeMessage = (label: string): string =>
  *    namespace `trigger` que nadie habia escrito. La regla mira solo el primer
  *    nodo: un disparador en una posicion posterior es raro pero no se prohibe,
  *    para no invalidar plantillas ya guardadas.
- * 11. Un nodo de categoria DESTINO (`DESTINO_NODE_TYPES`) cierra el flujo:
- *    `nextStep` debe ser `null`. Encadenar procesamiento DESPUES de haber
- *    publicado en Drupal o enviado el correo no tiene marcha atras —el efecto
- *    externo ya ocurrio—, y si ese nodo posterior falla el flujo queda FALLIDO
- *    describiendo una entrega que si se realizo.
+ * 11. Un nodo de categoria DESTINO (`DESTINO_NODE_TYPES`) cierra el flujo o
+ *    encadena OTRO destino: su `nextStep` es `null` o un nodo de categoria
+ *    DESTINO. Encadenar PROCESAMIENTO despues de haber publicado en Drupal o
+ *    enviado el correo no tiene marcha atras —el efecto externo ya ocurrio—, y
+ *    si ese nodo posterior falla el flujo queda FALLIDO describiendo una entrega
+ *    que si se realizo.
+ *
+ *    Un destino tras otro SI se admite desde la cardinalidad 1 a N: el maestro
+ *    de Notiweb publica las noticias en Drupal y despues crea la campana del
+ *    boletin en Acens con el mismo marcado validado. Si el segundo falla, el
+ *    flujo se detiene en el, con el primero ya hecho, y se reanuda desde ahi:
+ *    ninguna entrega se repite.
  *
  *    `onErrorStep` SI se permite, y es la valvula de escape deliberada: un
  *    destino que falla debe poder derivar a un `DESTINO_SMTP` de alerta. Por eso
- *    la regla mira `nextStep` y no la salida del nodo en general. Un destino
- *    encadenado a otro destino tambien se rechaza: publicar y notificar se
- *    modela con la ruta de error o con dos flujos distintos.
+ *    la regla mira `nextStep` y no la salida del nodo en general.
  *
  *    Se comprueba sobre el MAPA COMPLETO, como las reglas 2 a 5 y 10, y no solo
  *    sobre el camino activo: una rama en construccion con esta forma es un error
@@ -299,13 +312,17 @@ export const validatePipelineTopology = (
       });
     }
 
-    // 11. Un nodo de destino es terminal.
-    if (DESTINO_NODE_TYPES.has(node.nodeType) && node.nextStep !== null) {
+    // 11. Un nodo de destino es terminal, salvo que encadene OTRO destino.
+    if (
+      DESTINO_NODE_TYPES.has(node.nodeType) &&
+      node.nextStep !== null &&
+      !isDestinationStep(schema, node.nextStep)
+    ) {
       issues.push({
         field: `nodes.${key}.nextStep`,
         code: ERR_TOPOLOGY_DESTINATION_NOT_TERMINAL,
         constraints: [
-          `"${key}" es un nodo de destino y debe cerrar el flujo; no puede encadenar "${node.nextStep}". Para reaccionar a un fallo de la entrega, usa onErrorStep.`,
+          `"${key}" es un nodo de destino: solo puede cerrar el flujo o encadenar otro destino, y "${node.nextStep}" no lo es. Para reaccionar a un fallo de la entrega, usa onErrorStep.`,
         ],
       });
     }

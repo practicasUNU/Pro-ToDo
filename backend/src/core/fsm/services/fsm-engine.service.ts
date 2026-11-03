@@ -1175,9 +1175,12 @@ export class FsmEngineService {
        * avisa; si reincorpora el flujo y llega al nodo final, el trabajo se hizo.
        */
       let lastCompletedNodeType: NodeType | null = null;
-      // Namespace del mismo nodo: el aviso de cierre lee de ahi la pagina que
-      // publico un destino Drupal, sin suponer que se llama `http_result`.
-      let lastCompletedNamespace: string | null = null;
+      // Namespace del ULTIMO destino Drupal que completo: el aviso de cierre lee
+      // de ahi la pagina publicada, sin suponer que se llama `http_result`. Se
+      // sigue aparte del ultimo nodo porque un destino puede encadenar otro
+      // (Drupal -> campana de Acens, regla 11), y entonces Drupal ya no es el
+      // ultimo paso del recorrido.
+      let lastDrupalNamespace: string | null = null;
 
       while (cursor !== null) {
         /**
@@ -1385,7 +1388,10 @@ export class FsmEngineService {
 
         if (result.success) {
           lastCompletedNodeType = node.nodeType;
-          lastCompletedNamespace = node.outputNamespace;
+
+          if (node.nodeType === NodeType.DESTINO_DRUPAL) {
+            lastDrupalNamespace = node.outputNamespace;
+          }
 
           // Mismo punto y mismo motivo que la liberacion de binarios: domina
           // las tres salidas de exito que siguen. No hay simetrico para el
@@ -1644,7 +1650,7 @@ export class FsmEngineService {
           retryState,
           contingency,
           lastCompletedNodeType,
-          lastCompletedNamespace,
+          lastDrupalNamespace,
           // Se lee de la entidad y no de una variable del bucle porque es donde
           // lo dejo la rama de `halt`, unas lineas mas arriba.
           execution.haltReason !== undefined,
@@ -2339,7 +2345,8 @@ export class FsmEngineService {
    *
    * @param contingency Ultimo desvio, o `null` si el recorrido fue nominal.
    * @param lastCompletedNodeType Tipo del ultimo nodo que completo con exito.
-   * @param lastCompletedNamespace Namespace donde escribio ese mismo nodo.
+   * @param lastDrupalNamespace Namespace del ultimo DESTINO_DRUPAL que completo
+   *        en este recorrido, o `null`: de ahi sale el enlace del aviso.
    * @param wasHalted El bucle termino porque un nodo pidio parada ordenada.
    * @param flowName Nombre legible del flujo, para los avisos de la interfaz.
    */
@@ -2355,7 +2362,7 @@ export class FsmEngineService {
       trace: NodeTraceReceipt;
     } | null,
     lastCompletedNodeType: NodeType | null,
-    lastCompletedNamespace: string | null,
+    lastDrupalNamespace: string | null,
     wasHalted: boolean,
     options: ExecuteWorkflowOptions,
   ): Promise<void> {
@@ -2393,10 +2400,8 @@ export class FsmEngineService {
         finalState,
         options.flowName,
         undefined,
-        finalState === ExecutionState.EXITOSO &&
-          lastCompletedNodeType === NodeType.DESTINO_DRUPAL &&
-          lastCompletedNamespace !== null
-          ? readDrupalPublication(context, lastCompletedNamespace)
+        finalState === ExecutionState.EXITOSO && lastDrupalNamespace !== null
+          ? readDrupalPublication(context, lastDrupalNamespace)
           : {},
       );
       return;
