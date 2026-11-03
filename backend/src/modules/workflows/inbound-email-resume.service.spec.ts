@@ -20,6 +20,7 @@ import type { Workflow } from '@modules/workflows/entities/workflow.entity';
 import type { ExecutionsService } from './executions.service';
 import type { SchedulerRegistry } from '@nestjs/schedule';
 import type { NodeCatalogEntry } from '@modules/nodes/entities/node-catalog.entity';
+import type { AlertQueryService } from '@modules/logs/services/alert-query.service';
 import type { Repository } from 'typeorm';
 
 const EXECUTION_ID = '1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d';
@@ -112,6 +113,7 @@ interface Harness {
   users: { findByEmail: jest.Mock };
   workflows: { findOne: jest.Mock };
   nodeCatalog: { find: jest.Mock };
+  alertQuery: { findLastNodeErrorCode: jest.Mock };
   client: {
     connect: jest.Mock;
     getMailboxLock: jest.Mock;
@@ -214,6 +216,11 @@ const buildHarness = (
   const nodeCatalog = {
     find: jest.fn().mockResolvedValue(CATALOG_ENTRIES),
   };
+  // Traza de nodos: sin fallo previo por defecto, de modo que la guarda
+  // anti-bucle del escudo no interviene salvo en las pruebas que la ejercitan.
+  const alertQuery = {
+    findLastNodeErrorCode: jest.fn().mockResolvedValue(null),
+  };
   const config = {
     get: jest.fn((key: string) => env[key]),
   };
@@ -233,6 +240,7 @@ const buildHarness = (
     repository as unknown as Repository<Workflow>,
     nodeCatalog as unknown as Repository<NodeCatalogEntry>,
     scheduler as unknown as SchedulerRegistry,
+    alertQuery as unknown as AlertQueryService,
   );
 
   jest.spyOn(service['logger'], 'log').mockImplementation(() => undefined);
@@ -251,6 +259,7 @@ const buildHarness = (
     workflows: repository,
     client: mockClient,
     nodeCatalog,
+    alertQuery,
     warnSpy,
     errorSpy,
   };

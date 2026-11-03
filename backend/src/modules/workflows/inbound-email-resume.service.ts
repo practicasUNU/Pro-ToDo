@@ -5,6 +5,7 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { simpleParser } from 'mailparser';
 
 import { FsmExecutionQueryService } from '@core/fsm/services/fsm-execution-query.service';
+import { NodeType } from '@core/fsm/types/pipeline-schema.types';
 // Del util y no de `pause-flow.strategy`, que solo lo reexportaba: un servicio
 // importando de una estrategia es la direccion equivocada —aquella es un
 // detalle de ejecucion de un nodo concreto y esto verifica testigos de
@@ -17,6 +18,11 @@ import {
 } from '@modules/nodes/services/imap-client.factory';
 import { PASSWORD_ENV_KEY_PATTERN } from '@modules/nodes/dto/imap-trigger-config.dto';
 import { tokenizeSubject } from '@modules/nodes/strategies/imap-filter.util';
+import {
+  ERR_POST_IA_CONFIG,
+  ERR_POST_IA_UNSUPPORTED_TAGS,
+} from '@modules/nodes/strategies/post-ia-sanitizer.strategy';
+import { AlertQueryService } from '@modules/logs/services/alert-query.service';
 import { SubjectMatchMode } from '@modules/nodes/strategies/imap-trigger.types';
 import { UserRole } from '@modules/users/enums/user-role.enum';
 import { UsersService } from '@modules/users/users.service';
@@ -239,18 +245,86 @@ export const STEP_ALIASES: Readonly<Record<string, string>> = {
 /**
  * Palabras vacias que se descartan al nombrar un paso por sus palabras.
  *
- * Articulos y preposiciones que el operador intercala al escribir de memoria
- * ("DESDE el mapeador de la plantilla") y que ningun nodo lleva en su
- * identificador: conservarlas haria imposible la coincidencia.
+ * Articulos, preposiciones y los sustantivos genericos con que el operador
+ * envuelve el nombre ("DESDE EL NODO escudo post ia", "desde el paso del
+ * mapeador"): ningun nodo los lleva como rasgo distintivo, y conservarlos
+ * haria imposible la coincidencia. Se descartan tambien del lado del nodo, de
+ * modo que un id como `nodo_c` queda reducido a lo que de verdad lo nombra.
  */
 export const STEP_STOPWORDS: ReadonlySet<string> = new Set([
-  'de',
-  'del',
   'el',
   'la',
   'los',
   'las',
+  'de',
+  'del',
+  'al',
+  'en',
+  'nodo',
+  'nodos',
+  'paso',
+  'pasos',
+  'step',
+  'node',
 ]);
+
+/**
+ * Codigos del escudo que NO se arreglan regenerando la respuesta de la IA.
+ *
+ * Los dos describen los `params` del propio escudo (configuracion invalida o
+ * etiquetas fuera de la lista blanca). Volver a la IA gastaria tokens para
+ * fallar exactamente igual en el escudo; con ellos se reanuda donde se pidio.
+ */
+const NON_REGENERABLE_POST_IA_CODES: ReadonlySet<string> = new Set([
+  ERR_POST_IA_CONFIG,
+  ERR_POST_IA_UNSUPPORTED_TAGS,
+]);
+
+/** Prefijo comun de los codigos de fallo de `ESCUDO_POST_IA`. */
+const POST_IA_ERROR_PREFIX = 'ERR_POST_IA_';
+
+/**
+ * `true` si el fallo del escudo se debe a la RESPUESTA de la IA y, por tanto,
+ * se corrige regenerandola: DOM mutado, marcadores residuales, markup vacio...
+ */
+export const isRegenerablePostIaError = (code: string | null): boolean =>
+  code !== null &&
+  code.startsWith(POST_IA_ERROR_PREFIX) &&
+  !NON_REGENERABLE_POST_IA_CODES.has(code);
+
+/** Forma minima de un nodo del esquema que lee este servicio. */
+type SchemaNode = Record<string, unknown>;
+
+/**
+ * El nodo que produce lo que audita un escudo, o `null`.
+ *
+ * Primero por contrato de datos: el nodo cuyo `outputNamespace` es el
+ * `sourceNamespace` del escudo (por defecto `llm_response`, el del
+ * `PROCESADOR_IA`). Si ninguno lo declara, por topologia: el nodo cuyo
+ * `nextStep` es el escudo. Helper PURO.
+ */
+export const findShieldProducer = (
+  nodes: Readonly<Record<string, SchemaNode>>,
+  shieldId: string,
+): string | null => {
+  const params = nodes[shieldId]?.params as SchemaNode | undefined;
+  const sourceNamespace =
+    typeof params?.sourceNamespace === 'string'
+      ? params.sourceNamespace
+      : 'llm_response';
+  const entries = Object.entries(nodes).filter(
+    ([nodeId]) => nodeId !== shieldId,
+  );
+  const byNamespace = entries.find(
+    ([, node]) => node.outputNamespace === sourceNamespace,
+  );
+
+  if (byNamespace !== undefined) {
+    return byNamespace[0];
+  }
+
+  return entries.find(([, node]) => node.nextStep === shieldId)?.[0] ?? null;
+};
 
 /**
  * Parte el nombre de un paso en palabras utiles.
@@ -454,6 +528,9 @@ export class InboundEmailResumeService
     @InjectRepository(NodeCatalogEntry)
     private readonly nodeCatalogRepository: Repository<NodeCatalogEntry>,
     private readonly schedulerRegistry: SchedulerRegistry,
+    // Solo lectura de la traza: la guarda anti-bucle del escudo necesita el
+    // ultimo codigo de error del nodo, que no vive en la ejecucion.
+    private readonly alertQueryService: AlertQueryService,
   ) {}
 
   /**
@@ -999,6 +1076,34 @@ export class InboundEmailResumeService
   }
 
   /**
+   * Decide desde que paso se reanuda: el que pidio el operador, corregido por
+   * la guarda anti-bucle del escudo. `null` significa "desde el cursor".
+   */
+  private async resolveTargetStep(
+    execution: FsmExecution,
+    identifier: string | null,
+  ): Promise<string | null> {
+    const workflow = await this.workflowRepository.findOne({
+      where: { id: execution.flowId },
+    });
+    const nodes = (
+      workflow?.pipelineSchema as
+        { nodes?: Record<string, SchemaNode> } | null | undefined
+    )?.nodes;
+
+    if (nodes === undefined) {
+      return null;
+    }
+
+    const requested =
+      identifier === null
+        ? null
+        : await this.matchStepIdentifier(execution, nodes, identifier);
+
+    return this.avoidShieldLoop(execution, nodes, requested);
+  }
+
+  /**
    * Traduce lo que el operador escribio tras "DESDE" a un `nodeId`.
    *
    * Prioridad: 1) etiqueta visible (`label` del esquema o la del catalogo
@@ -1009,26 +1114,11 @@ export class InboundEmailResumeService
    *
    * Con dos nodos del mismo tipo gana el primero declarado y queda traza.
    */
-  private async resolveTargetStep(
+  private async matchStepIdentifier(
     execution: FsmExecution,
-    identifier: string | null,
+    nodes: Readonly<Record<string, SchemaNode>>,
+    identifier: string,
   ): Promise<string | null> {
-    if (identifier === null) {
-      return null;
-    }
-
-    const workflow = await this.workflowRepository.findOne({
-      where: { id: execution.flowId },
-    });
-    const nodes = (
-      workflow?.pipelineSchema as
-        { nodes?: Record<string, Record<string, unknown>> } | null | undefined
-    )?.nodes;
-
-    if (nodes === undefined) {
-      return null;
-    }
-
     const wanted = normalizeStepKey(identifier);
     const labelsByCode = await this.loadCatalogLabels();
     const entries = Object.entries(nodes).map(([nodeId, node]) => {
@@ -1092,6 +1182,72 @@ export class InboundEmailResumeService
     );
 
     return null;
+  }
+
+  /**
+   * Guarda contra el bucle del escudo.
+   *
+   * Un `ESCUDO_POST_IA` es determinista: si rechazo una respuesta de la IA,
+   * volver a ejecutarlo sobre esa MISMA respuesta —que sigue en el contexto—
+   * falla otra vez al instante y deja el flujo pausado en bucle. Por eso, si el
+   * paso efectivo (el pedido o, sin el, el cursor) es un escudo cuyo ultimo
+   * desenlace fue un fallo regenerable, se reanuda desde su productor para que
+   * la IA genere una respuesta nueva.
+   *
+   * Se aplica TAMBIEN a un «DESDE escudo» explicito: el operador pide repetir
+   * la validacion, pero lo que necesita es otra respuesta que validar.
+   *
+   * Nunca impide la reanudacion: sin productor localizable o sin traza legible
+   * se deja el paso como estaba, con un aviso.
+   */
+  private async avoidShieldLoop(
+    execution: FsmExecution,
+    nodes: Readonly<Record<string, SchemaNode>>,
+    requested: string | null,
+  ): Promise<string | null> {
+    const effective = requested ?? execution.activeCursor;
+
+    if (
+      effective === null ||
+      nodes[effective]?.nodeType !== NodeType.ESCUDO_POST_IA
+    ) {
+      return requested;
+    }
+
+    let lastCode: string | null;
+
+    try {
+      lastCode = await this.alertQueryService.findLastNodeErrorCode(
+        execution.executionId,
+        effective,
+      );
+    } catch (error: unknown) {
+      this.logger.warn(
+        `[InboundEmailResume] No se pudo leer la traza del escudo "${effective}": ${this.describe(error)}. Se reanuda desde el paso pedido.`,
+      );
+
+      return requested;
+    }
+
+    if (!isRegenerablePostIaError(lastCode)) {
+      return requested;
+    }
+
+    const producer = findShieldProducer(nodes, effective);
+
+    if (producer === null) {
+      this.logger.warn(
+        `[InboundEmailResume] El escudo "${effective}" fallo con ${lastCode}, pero no se encontro el nodo que produce su entrada en el flujo ${execution.flowId}: se reanuda desde el escudo.`,
+      );
+
+      return requested;
+    }
+
+    this.logger.warn(
+      `[InboundEmailResume] El escudo "${effective}" fallo con ${lastCode}: reanudarlo sobre la misma respuesta volveria a fallar. Se reanuda desde "${producer}" para regenerarla.`,
+    );
+
+    return producer;
   }
 
   /**

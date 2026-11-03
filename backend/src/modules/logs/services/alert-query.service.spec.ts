@@ -2,6 +2,7 @@ import { AlertQueryService } from '@modules/logs/services/alert-query.service';
 
 import type { Repository } from 'typeorm';
 import type { AlertaError } from '@modules/logs/entities/alerta-error.entity';
+import type { LogNodo } from '@modules/logs/entities/log-nodo.entity';
 
 const buildService = (rows: Array<{ executionId: string }> = []) => {
   const builder = {
@@ -13,11 +14,13 @@ const buildService = (rows: Array<{ executionId: string }> = []) => {
   builder.where.mockReturnValue(builder);
 
   const repository = { createQueryBuilder: jest.fn(() => builder) };
+  const nodeLogRepository = { findOne: jest.fn().mockResolvedValue(null) };
   const service = new AlertQueryService(
     repository as unknown as Repository<AlertaError>,
+    nodeLogRepository as unknown as Repository<LogNodo>,
   );
 
-  return { service, repository, builder };
+  return { service, repository, builder, nodeLogRepository };
 };
 
 describe('AlertQueryService', () => {
