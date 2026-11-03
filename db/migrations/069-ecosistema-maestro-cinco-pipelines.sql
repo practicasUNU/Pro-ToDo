@@ -15,14 +15,19 @@
 --      <h2>/<h3>, fecha APA y marcas {{*...}}). LICITACION_CIERRE_DEFAULT se
 --      reescribe si aun pide la plantilla base: el cierre no lleva mapeador y
 --      el validador rechazaria la dependencia de `rendered_html`.
+--   5a. LICITACION_APERTURA_DEFAULT se reescribe entero si no tiene las
+--      "REGLAS DE EXTRACCIÓN Y TITULACIÓN OBLIGATORIAS": prohibe usar el
+--      asunto del correo como titulo, exige el titulo formal en
+--      h3.licitacion-title, el expediente en data-expediente y los importes
+--      en sus spans, sin estimar nunca un dato ausente.
 --   5b. Parches de contenido sobre los prompts, ya existieran o no:
 --      - Directiva de polivalencia Markdown: literal en los tres prompts con
 --        PLANTILLA BASE (Notiweb, apertura, titulos) y en variante de texto
 --        plano en los que no la tienen (cierre, Innodays, Innobar), donde
 --        hablar de "filled_markup" empujaria al modelo a inventarse HTML.
---      - Apertura: la ranura <h3 class="licitacion-title"> es obligatoria.
 --      - Notiweb: la seccion bibliografica va bajo <h2>, nunca <p><strong>.
---      - {{ocr_result.clean_body}} opcional junto al texto de los adjuntos.
+--      - {{ocr_result.clean_body}} opcional junto al texto de los adjuntos o,
+--        si el prompt no los cita (Innodays, Innobar), tras el correo.
 --      - Contrato de marcas: solo {{*parsed_email.clean_body}} y, con
 --        mapeador, {{*rendered_html.compiled_markup}} son obligatorias.
 --   6. Los cinco blueprints de `plantillas_flujo`, con el slug en `flowId` y
@@ -82,10 +87,6 @@ DECLARE
 - La información de entrada puede contener tablas, listas o textos en formato Markdown (| tabla |, # títulos, - listas, **negritas**).
 - Queda TERMINANTEMENTE PROHIBIDO copiar sintaxis Markdown en "headline", "summary" o "body_paragraphs": ni barras de tabla, ni almohadillas, ni guiones de lista, ni asteriscos.
 - Este flujo no tiene PLANTILLA BASE: localiza el dato dentro de la tabla o la lista en la que aparezca y devuélvelo como texto plano, sin etiquetas HTML.$clause$;
-    clause_dom CONSTANT TEXT := $clause$INSTRUCCIÓN OBLIGATORIA DE MAQUETACIÓN DOM:
-- En "filled_markup", debes utilizar la PLANTILLA BASE respetando todas sus etiquetas contenedor.
-- La etiqueta <h3> con clase "licitacion-title" DEBE contener el objeto del contrato o título de la licitación.
-- Queda TERMINANTEMENTE PROHIBIDO suprimir la etiqueta <h3>, borrar la clase "licitacion-title" o dejarla vacía.$clause$;
     clause_biblio CONSTANT TEXT := $clause$ESTRUCTURA DE LA SECCIÓN BIBLIOGRÁFICA:
 - La sección bibliográfica va encabezada por el título semántico <h2>Referencia bibliográfica</h2>, seguido de uno o varios párrafos <p class="notiweb-referencia">.
 - Queda TERMINANTEMENTE PROHIBIDO escribir ese rótulo como párrafo, por ejemplo <p><strong>Referencia bibliográfica:</strong></p>.$clause$;
@@ -490,34 +491,46 @@ PLANTILLA BASE:
     INSERT INTO plantillas_prompts_ia (codigo, nombre, descripcion, texto_prompt,
                                        id_usuario_creador, creado_por, actualizado_por)
     VALUES ('LICITACION_APERTURA_DEFAULT', 'Licitaciones · Apertura de convocatoria', 'Extrae expediente, importes desglosados, fechas limite y enlaces de contratacion, y rellena la plantilla base de convocatoria abierta.',
-            $prompt$Eres un tecnico de contratacion administrativa publica de Madrid+D y maquetador del portal. Se anuncia la APERTURA de una convocatoria. Extrae los datos del expediente que aparece en el material de mas abajo y vuelcalos sobre la plantilla base.
+            $prompt$Eres un tecnico de contratacion administrativa publica de Madrid+D y maquetador oficial del portal. Se anuncia la APERTURA de una convocatoria de contratacion. Debes extraer los datos del expediente del material suministrado y volcarlos con estricta rigurosidad sobre la PLANTILLA BASE.
 
-Datos que debes localizar:
-- expediente (codigo identificador)
-- objeto_contrato
-- pliegos: un enlace por cada documento del expediente (pliego administrativo, de prescripciones tecnicas, anexos)
-- presupuesto_base: base_imponible, iva e importe total, los tres por separado
-- valor_estimado del contrato
-- plazo_recepcion: fecha limite de presentacion de ofertas en formato ISO 8601, y hora
-- duracion_meses
-- direccion_postal de presentacion
-- enlace_consulta al perfil de contratante
+REGLAS DE EXTRACCIÓN Y TITULACIÓN OBLIGATORIAS:
+1. EXTRACCIÓN DEL TÍTULO Y EXPEDIENTE:
+   - El título formal del contrato SIEMPRE se ubica en el cuerpo del correo o en el pliego adjunto (ej. "S_2026_015_LICITACIÓN DEL CONTRATO DE SERVICIOS DE APOYO A LA GESTIÓN DE ACTIVIDADES DEL EMPRENDIMIENTO INNOVADOR A LA FUNDACIÓN").
+   - QUEDA TERMINANTEMENTE PROHIBIDO utilizar como título el asunto del correo (subject), nombres de prueba, saludos o expresiones coloquiales (ej. "Abrir licitación V5", "PRUEBILLA", "Prueba de abrir licitación").
+   - El código de expediente suele tener formato estructurado (ej. "S_2026_015", "LIC-2026-X"). Asígnalo a "headline" y al atributo data-expediente del bloque.
 
-Reglas:
-- Un dato que no aparezca en el material se deja vacio. NUNCA lo estimes ni lo deduzcas.
-- Los importes van en euros, con punto decimal y sin separador de millares. Si solo consta el total, deja vacias la base imponible y el IVA en vez de calcularlas.
-- El numero de pliegos cambia en cada convocatoria: emite una entrada por cada uno que encuentres, ni mas ni menos.
+2. ASIGNACIÓN EN EL JSON DE SALIDA:
+   - "headline": Debe contener ÚNICAMENTE el código del expediente (ej. "S_2026_015"). Si no hay código formal, usa el título abreviado de la licitación. NUNCA el asunto del correo.
+   - "summary": Debe contener el objeto completo del contrato de la licitación.
+   - "body_paragraphs": Array estructurado con las líneas "campo: valor" para base_imponible, iva, importe_total, valor_estimado, plazo_recepcion, duracion_meses, direccion_postal y enlace_consulta.
 
-Coloca el codigo de expediente en "headline", el objeto del contrato en "summary" y, en "body_paragraphs", una entrada por cada dato restante con el formato "campo: valor".
+3. INYECCIÓN OBLIGATORIA EN "filled_markup" (PLANTILLA BASE):
+   - En la etiqueta <h3 class="licitacion-title">: DEBES inyectar obligatoriamente el título formal completo del contrato. NUNCA la dejes vacía ni borres la etiqueta o su clase CSS.
+   - En el contenedor raíz <div class="licitacion-entry pd-licitacion-block" data-expediente>: inyecta el código en el atributo data-expediente (ej. data-expediente="S_2026_015").
+   - En las etiquetas de presupuesto: inyecta las cantidades numéricas correspondientes dentro de:
+     * <span class="base-imponible">: la base imponible con euros (ej. "33.000,00 euros").
+     * <span class="iva">: el importe del IVA (ej. "6.390,00 euros").
+     * <span class="total">: el importe total de adjudicación (ej. "39.930,00 euros").
+   - En <p class="valor-estimado">: "Valor estimado del contrato: [monto] euros".
+   - En <strong class="plazo">: inyecta la fecha y hora límite en formato legible.
+   - En <a class="link-consulta">: asigna la URL oficial al atributo href y mantén el texto visible.
+   - En <p class="duracion-contrato">: inyecta la duración indicada en el material.
+   - Un importe o dato que no figure en el material se deja vacío en su etiqueta: NUNCA lo calcules, lo deduzcas ni lo estimes (por ejemplo, no derives la base imponible ni el IVA a partir del total).
+
+DIRECTIVA DE POLIVALENCIA Y RESTRICCIÓN DE MARKDOWN:
+- Si recibes tablas o listas en Markdown desde los adjuntos, transfórmalas a marcado HTML nativo compatible con la plantilla. Queda TERMINANTEMENTE PROHIBIDO copiar sintaxis Markdown cruda (| tablas |, # títulos, - listas) dentro de "filled_markup".
 
 Correo:
-{{parsed_email.clean_body}}
+{{*parsed_email.clean_body}}
 
-Documentos adjuntos:
+Documentos adjuntos (texto documental):
 {{parsed_email.extracted_documents_text}}
 
+Texto recuperado por OCR (imágenes/pliegos escaneados):
+{{ocr_result.clean_body}}
+
 PLANTILLA BASE:
-{{rendered_html.compiled_markup}}$prompt$,
+{{*rendered_html.compiled_markup}}$prompt$,
             admin_id, admin_id, admin_id)
     ON CONFLICT (codigo) DO NOTHING
     RETURNING id_plantilla_prompt_ia INTO inserted_id;
@@ -700,6 +713,66 @@ PLANTILLA BASE:
         VALUES (admin_id, 'CREAR', 'plantillas_prompts_ia', inserted_id::TEXT, seed_tag || jsonb_build_object('codigo', 'PROMPT_OCR_MULTIMODAL'));
     END IF;
 
+    -- 5a. Reescritura canonica del prompt de apertura -----------------------
+    -- Texto completo y no un parche: el anterior dejaba usar el asunto del
+    -- correo como titulo y no exigia los importes. Se protege por marcador,
+    -- asi que una segunda pasada no lo vuelve a tocar.
+    SELECT id_plantilla_prompt_ia, texto_prompt INTO inserted_id, previous_text
+      FROM plantillas_prompts_ia WHERE codigo = 'LICITACION_APERTURA_DEFAULT';
+    IF FOUND AND position('REGLAS DE EXTRACCIÓN Y TITULACIÓN OBLIGATORIAS' IN previous_text) = 0 THEN
+        UPDATE plantillas_prompts_ia
+           SET texto_prompt = $prompt$Eres un tecnico de contratacion administrativa publica de Madrid+D y maquetador oficial del portal. Se anuncia la APERTURA de una convocatoria de contratacion. Debes extraer los datos del expediente del material suministrado y volcarlos con estricta rigurosidad sobre la PLANTILLA BASE.
+
+REGLAS DE EXTRACCIÓN Y TITULACIÓN OBLIGATORIAS:
+1. EXTRACCIÓN DEL TÍTULO Y EXPEDIENTE:
+   - El título formal del contrato SIEMPRE se ubica en el cuerpo del correo o en el pliego adjunto (ej. "S_2026_015_LICITACIÓN DEL CONTRATO DE SERVICIOS DE APOYO A LA GESTIÓN DE ACTIVIDADES DEL EMPRENDIMIENTO INNOVADOR A LA FUNDACIÓN").
+   - QUEDA TERMINANTEMENTE PROHIBIDO utilizar como título el asunto del correo (subject), nombres de prueba, saludos o expresiones coloquiales (ej. "Abrir licitación V5", "PRUEBILLA", "Prueba de abrir licitación").
+   - El código de expediente suele tener formato estructurado (ej. "S_2026_015", "LIC-2026-X"). Asígnalo a "headline" y al atributo data-expediente del bloque.
+
+2. ASIGNACIÓN EN EL JSON DE SALIDA:
+   - "headline": Debe contener ÚNICAMENTE el código del expediente (ej. "S_2026_015"). Si no hay código formal, usa el título abreviado de la licitación. NUNCA el asunto del correo.
+   - "summary": Debe contener el objeto completo del contrato de la licitación.
+   - "body_paragraphs": Array estructurado con las líneas "campo: valor" para base_imponible, iva, importe_total, valor_estimado, plazo_recepcion, duracion_meses, direccion_postal y enlace_consulta.
+
+3. INYECCIÓN OBLIGATORIA EN "filled_markup" (PLANTILLA BASE):
+   - En la etiqueta <h3 class="licitacion-title">: DEBES inyectar obligatoriamente el título formal completo del contrato. NUNCA la dejes vacía ni borres la etiqueta o su clase CSS.
+   - En el contenedor raíz <div class="licitacion-entry pd-licitacion-block" data-expediente>: inyecta el código en el atributo data-expediente (ej. data-expediente="S_2026_015").
+   - En las etiquetas de presupuesto: inyecta las cantidades numéricas correspondientes dentro de:
+     * <span class="base-imponible">: la base imponible con euros (ej. "33.000,00 euros").
+     * <span class="iva">: el importe del IVA (ej. "6.390,00 euros").
+     * <span class="total">: el importe total de adjudicación (ej. "39.930,00 euros").
+   - En <p class="valor-estimado">: "Valor estimado del contrato: [monto] euros".
+   - En <strong class="plazo">: inyecta la fecha y hora límite en formato legible.
+   - En <a class="link-consulta">: asigna la URL oficial al atributo href y mantén el texto visible.
+   - En <p class="duracion-contrato">: inyecta la duración indicada en el material.
+   - Un importe o dato que no figure en el material se deja vacío en su etiqueta: NUNCA lo calcules, lo deduzcas ni lo estimes (por ejemplo, no derives la base imponible ni el IVA a partir del total).
+
+DIRECTIVA DE POLIVALENCIA Y RESTRICCIÓN DE MARKDOWN:
+- Si recibes tablas o listas en Markdown desde los adjuntos, transfórmalas a marcado HTML nativo compatible con la plantilla. Queda TERMINANTEMENTE PROHIBIDO copiar sintaxis Markdown cruda (| tablas |, # títulos, - listas) dentro de "filled_markup".
+
+Correo:
+{{*parsed_email.clean_body}}
+
+Documentos adjuntos (texto documental):
+{{parsed_email.extracted_documents_text}}
+
+Texto recuperado por OCR (imágenes/pliegos escaneados):
+{{ocr_result.clean_body}}
+
+PLANTILLA BASE:
+{{*rendered_html.compiled_markup}}$prompt$,
+               actualizado_por = admin_id,
+               fecha_actualizacion = NOW()
+         WHERE codigo = 'LICITACION_APERTURA_DEFAULT';
+        summary := jsonb_set(summary, '{prompts_parcheados}', to_jsonb((summary->>'prompts_parcheados')::INT + 1));
+        IF NOT ('LICITACION_APERTURA_DEFAULT' = ANY (created_prompts)) THEN
+            INSERT INTO audit_eventos (usuario_id, accion, tabla_afectada, registro_id, datos_anteriores, datos_nuevos)
+            VALUES (admin_id, 'ACTUALIZAR', 'plantillas_prompts_ia', inserted_id::TEXT,
+                    jsonb_build_object('texto_prompt', previous_text),
+                    seed_tag || jsonb_build_object('codigo', 'LICITACION_APERTURA_DEFAULT', 'parche', 'apertura_titulo_e_importes'));
+        END IF;
+    END IF;
+
     -- 5b. Parches de contenido de los prompts maestros ----------------------
     -- Corren tambien sobre filas que ya existian (desarrollo): cada uno se
     -- protege con su marcador, de modo que reejecutar no duplica nada. Las
@@ -711,8 +784,8 @@ PLANTILLA BASE:
             ('LICITACION_APERTURA_DEFAULT', TRUE, TRUE),
             ('VERIFICADOR_TITULOS_DEFAULT', TRUE, TRUE),
             ('LICITACION_CIERRE_DEFAULT', FALSE, TRUE),
-            ('INNODAYS_ENLACE_DEFAULT', FALSE, FALSE),
-            ('INNOBAR_ENLACE_DEFAULT', FALSE, FALSE)
+            ('INNODAYS_ENLACE_DEFAULT', FALSE, TRUE),
+            ('INNOBAR_ENLACE_DEFAULT', FALSE, TRUE)
         ) AS t(codigo, with_template, with_documents)
     LOOP
         SELECT id_plantilla_prompt_ia, texto_prompt INTO inserted_id, previous_text
@@ -733,10 +806,6 @@ PLANTILLA BASE:
         insertion := '';
         IF position('DIRECTIVA DE POLIVALENCIA' IN patched) = 0 THEN
             insertion := CASE WHEN rec.with_template THEN clause_poly_html ELSE clause_poly_text END;
-        END IF;
-        IF rec.codigo = 'LICITACION_APERTURA_DEFAULT'
-           AND position('INSTRUCCIÓN OBLIGATORIA DE MAQUETACIÓN DOM' IN patched) = 0 THEN
-            insertion := concat_ws(E'\n\n', NULLIF(insertion, ''), clause_dom);
         END IF;
         IF rec.codigo = 'NOTIWEB_DEFAULT'
            AND position('ESTRUCTURA DE LA SECCIÓN BIBLIOGRÁFICA' IN patched) = 0 THEN
@@ -760,7 +829,10 @@ PLANTILLA BASE:
                 patched := regexp_replace(patched, '\{\{parsed_email\.extracted_documents_text\}\}',
                                           '{{parsed_email.extracted_documents_text}} o {{ocr_result.clean_body}}');
             ELSE
-                RAISE WARNING '069: % no cita el texto de los adjuntos; no se anade el OCR.', rec.codigo;
+                -- Sin seccion de adjuntos (Innodays, Innobar): el OCR va en una
+                -- seccion propia justo detras del cuerpo del correo.
+                patched := regexp_replace(patched, '\{\{\*parsed_email\.clean_body\}\}',
+                                          E'{{*parsed_email.clean_body}}\n\nTexto recuperado por OCR (imágenes o documentos escaneados):\n{{ocr_result.clean_body}}');
             END IF;
         END IF;
 
