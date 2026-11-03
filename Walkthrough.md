@@ -9452,4 +9452,20 @@ mapeador.
 - **Por que dentro de la 069 y no en una migracion nueva:** el contenido maestro queda en un solo fichero; cada parche se protege con su marcador, y una base que ya tenia la 069 la vuelve a pasar con `psql -f` sin duplicar nada.
 - [x] 069 reejecutada dos veces en la base de pruebas sin cambios en el segundo pase
 - [x] Ensayo en desarrollo dentro de una transaccion revertida
+- [x] 069 reejecutada en desarrollo
+
+## Guarda contra el bucle del escudo
+
+- **Por que existe:** el escudo es determinista. Reanudarlo sobre la misma respuesta de la IA que rechazo, que sigue en el contexto, vuelve a fallar al instante y deja el flujo pausado otra vez.
+- **Por que tambien con un DESDE explicito:** quien escribe "DESDE el escudo" quiere repetir la validacion, pero lo que necesita es otra respuesta que validar.
+- **Por que se excluyen `ERR_POST_IA_CONFIG` y `ERR_POST_IA_UNSUPPORTED_TAGS`:** son errores de los params del propio escudo; regenerar con la IA gastaria tokens para fallar igual.
+- **Por que el ultimo desenlace y no el ultimo error:** cada reanudacion deja una fila `ADVERTENCIA` y un escudo puede haber fallado y despues pasado. Solo cuenta como bucle si lo ultimo que hizo el nodo fue fallar.
+- **Por que nunca bloquea:** sin productor localizable o sin traza legible, se reanuda donde se pidio con un aviso; la guarda no puede ser la razon de que un flujo no arranque.
+
+## Apertura de licitaciones canonica
+
+- **Por que reescribir el prompt entero:** el anterior dejaba que el asunto del correo ("Abrir licitacion V5") acabara como titulo y no pedia los importes. Un parche por fragmentos sobre textos editados a mano no garantizaba el resultado.
+- **Por que la regla de no estimar:** al exigir los tres importes, un correo que solo trae el total empujaria al modelo a calcular base e IVA. En una licitacion publica un importe inventado es peor que un hueco.
+- **Por que los spans no van en `requiredSelectors`:** una convocatoria que solo publica el total pausaria el flujo sin motivo; el escudo exige solo el titulo.
+- [x] 069 reejecutada dos veces en la base de pruebas sin cambios en el segundo pase
 - [ ] Reejecutar la 069 en desarrollo (`psql -f`)

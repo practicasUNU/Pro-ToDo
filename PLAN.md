@@ -5255,5 +5255,19 @@ Rama: `feat/drupal-and-acens-nodes-dev`. Migraciones `065` y `066`.
 - [x] Bolsa de palabras en la reanudacion por correo
 - [x] Prompts maestros enriquecidos y ranura DOM de apertura
 - [x] Cobertura unitaria y e2e de integridad
-- [ ] Pendiente: reejecutar la 069 en la base de desarrollo con `psql -f` (el runner ya la tiene registrada)
+- [x] 069 reejecutada en la base de desarrollo
+- [ ] Pendiente: validar el texto de los prompts al guardarlos (sigue abierto)
+
+---
+
+## Guarda anti-bucle del escudo y apertura de licitaciones canonica
+
+- **Palabras vacias:** `STEP_STOPWORDS` = `el, la, los, las, de, del, al, en, nodo, nodos, paso, pasos, step, node`. `DESDE EL NODO ESCUDO POST IA` resuelve a `escudo_post_ia`.
+- **Guarda (`InboundEmailResumeService.avoidShieldLoop`):** se aplica al paso efectivo, explicito o de fallback. Si es un `ESCUDO_POST_IA` y `isRegenerablePostIaError(ultimoCodigo)`, devuelve `findShieldProducer(nodes, escudo)` (por `sourceNamespace`, y si no, por `nextStep`). Sin productor o sin traza, deja el paso como estaba con un aviso.
+- **`AlertQueryService.findLastNodeErrorCode(executionId, nodeId)`:** ultimo desenlace `OK`/`ERROR` del nodo en `logs_nodo`; devuelve el codigo solo si fue `ERROR`.
+- **Migracion 069, paso 5a:** reescritura completa de `LICITACION_APERTURA_DEFAULT` si no tiene las "REGLAS DE EXTRACCIÓN Y TITULACIÓN OBLIGATORIAS". Paso 5b: Innodays e Innobar reciben el OCR en una seccion propia; se retira la clausula DOM suelta, ya cubierta por el nuevo texto.
+- [x] Palabras vacias y guarda anti-bucle
+- [x] Prompt de apertura canonico y OCR en Innodays/Innobar
+- [x] Pruebas unitarias y e2e de integridad
+- [ ] Pendiente: reejecutar la 069 en la base de desarrollo con `psql -f`
 - [ ] Pendiente: validar el texto de los prompts al guardarlos (sigue abierto)
