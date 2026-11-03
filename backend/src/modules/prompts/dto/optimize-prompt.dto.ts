@@ -1,5 +1,6 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import {
+  IsEnum,
   IsIn,
   IsNotEmpty,
   IsOptional,
@@ -8,7 +9,10 @@ import {
 } from 'class-validator';
 
 import { TrimmedString } from '@common/decorators/trimmed-string.decorator';
-import { PROMPT_TARGET_FORMATS } from '@modules/prompts/prompt-meta.template';
+import {
+  PROMPT_TARGET_FORMATS,
+  PromptCardinality,
+} from '@modules/prompts/prompt-meta.template';
 
 import type { PromptTargetFormat } from '@modules/prompts/prompt-meta.template';
 
@@ -49,6 +53,18 @@ export class OptimizePromptDto {
   @IsString({ message: 'model debe ser un texto.' })
   @MaxLength(100, { message: 'model no puede superar 100 caracteres.' })
   readonly model?: string;
+
+  @ApiPropertyOptional({
+    enum: PromptCardinality,
+    default: PromptCardinality.SINGLE,
+    description:
+      'SINGLE: un elemento. MULTIPLE: el prompt optimizado exigira el contrato de lote (raiz = primero, items = resto).',
+  })
+  @IsOptional()
+  @IsEnum(PromptCardinality, {
+    message: `cardinality debe ser uno de: ${Object.values(PromptCardinality).join(', ')}.`,
+  })
+  readonly cardinality?: PromptCardinality = PromptCardinality.SINGLE;
 }
 
 /** Consumo de la optimizacion, para el chip del modal. */

@@ -114,7 +114,11 @@ describe('PromptOptimizerModal', () => {
     await mountWithProposal();
 
     // 3. Assert 🎯
-    expect(optimizePrompt).toHaveBeenCalledWith({ draftPrompt: DRAFT, targetFormat: 'html' });
+    expect(optimizePrompt).toHaveBeenCalledWith({
+      draftPrompt: DRAFT,
+      targetFormat: 'html',
+      cardinality: 'SINGLE',
+    });
   });
 
   it('1.3 deberia mostrar la propuesta y cada recomendacion', async () => {

@@ -44,7 +44,11 @@ describe('usePromptOptimizerStore', () => {
     await store.optimize({ draftPrompt: 'Resume.', targetFormat: 'text' });
 
     // 3. Assert 🎯
-    expect(optimizePrompt).toHaveBeenCalledWith({ draftPrompt: 'Resume.', targetFormat: 'text' });
+    expect(optimizePrompt).toHaveBeenCalledWith({
+      draftPrompt: 'Resume.',
+      targetFormat: 'text',
+      cardinality: 'SINGLE',
+    });
     expect(store.result).toEqual(RESULT);
     expect(store.isLoading).toBe(false);
   });

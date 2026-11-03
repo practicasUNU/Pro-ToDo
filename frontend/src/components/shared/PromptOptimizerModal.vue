@@ -52,6 +52,14 @@ const targetFormat = ref<PromptTargetFormat>(props.defaultFormat);
 
 const result = computed(() => optimizerStore.result);
 
+/** Puente del `q-toggle` con la cardinalidad del store. */
+const isMultipleCardinality = computed<boolean>({
+  get: () => optimizerStore.outputCardinality === 'MULTIPLE',
+  set: (isMultiple) => {
+    optimizerStore.outputCardinality = isMultiple ? 'MULTIPLE' : 'SINGLE';
+  },
+});
+
 const canGenerate = computed(
   () => props.draftPrompt.trim().length > 0 && !optimizerStore.isLoading,
 );
@@ -171,6 +179,24 @@ const applyPrompt = (): void => {
             label="Formato de salida"
             data-test="optimizer-format"
           />
+          <div class="pd-prompt-optimizer__cardinality" data-test="optimizer-cardinality">
+            <q-toggle
+              v-model="isMultipleCardinality"
+              label="Soporte para múltiples peticiones (Lote 1:N)"
+              data-test="optimizer-cardinality-toggle"
+            />
+            <span
+              class="pd-badge"
+              :class="
+                isMultipleCardinality
+                  ? 'pd-prompt-optimizer__badge--batch'
+                  : 'pd-prompt-optimizer__badge--single'
+              "
+              data-test="optimizer-cardinality-badge"
+            >
+              {{ isMultipleCardinality ? 'LOTE (1:N)' : 'UNITARIO (1:1)' }}
+            </span>
+          </div>
           <q-btn
             class="pd-btn-secondary"
             flat
@@ -183,6 +209,20 @@ const applyPrompt = (): void => {
             @click="generate"
           />
         </div>
+
+        <q-banner
+          v-if="isMultipleCardinality"
+          dense
+          class="pd-prompt-optimizer__batch-notice q-mt-sm"
+          data-test="optimizer-batch-notice"
+        >
+          <template #avatar>
+            <q-icon name="layers" size="20px" class="pd-prompt-optimizer__icon" />
+          </template>
+          Modo lote: el prompt optimizado exigirá el contrato asimétrico — el primer elemento en la
+          raíz del JSON y el resto en «items». Úsalo con un procesador de IA configurado como «Varios
+          elementos (lote 1:N)».
+        </q-banner>
 
         <div v-if="optimizerStore.isLoading" class="pd-prompt-optimizer__loading" role="status">
           <q-spinner size="24px" />
@@ -300,6 +340,30 @@ const applyPrompt = (): void => {
   flex-wrap: wrap;
   align-items: center;
   gap: 8px;
+}
+
+.pd-prompt-optimizer__cardinality {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.pd-prompt-optimizer__badge--batch {
+  background: var(--pd-accent);
+  color: var(--pd-on-accent);
+}
+
+.pd-prompt-optimizer__badge--single {
+  background: var(--pd-surface-muted);
+  color: var(--pd-text-secondary);
+  border: 1px solid var(--pd-border);
+}
+
+.pd-prompt-optimizer__batch-notice {
+  background: var(--pd-surface-muted);
+  border: 1px solid var(--pd-accent);
+  border-radius: $generic-border-radius;
+  color: var(--pd-text-primary);
 }
 
 .pd-prompt-optimizer__format {

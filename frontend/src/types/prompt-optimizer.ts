@@ -6,11 +6,19 @@
 /** Formatos de salida que sabe optimizar. Replica de `PROMPT_TARGET_FORMATS`. */
 export type PromptTargetFormat = 'html' | 'text' | 'markdown' | 'json';
 
+/**
+ * Cardinalidad del prompt. Replica de `PromptCardinality`: con `MULTIPLE` el
+ * prompt optimizado exige el contrato de lote (raiz = primero, `items` = resto).
+ */
+export type PromptCardinality = 'SINGLE' | 'MULTIPLE';
+
 export interface OptimizePromptPayload {
   readonly draftPrompt: string;
   readonly targetFormat: PromptTargetFormat;
   /** Modelo del catalogo; sin el, el backend usa el de texto del entorno. */
   readonly model?: string;
+  /** Sin ella, el backend asume `SINGLE`. */
+  readonly cardinality?: PromptCardinality;
 }
 
 /** Consumo de la optimizacion, ya registrado en la telemetria. */

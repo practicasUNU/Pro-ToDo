@@ -22,6 +22,7 @@ import {
   buildOptimizerUserPrompt,
   classifyPromptVariables,
   extractPlaceholders,
+  PromptCardinality,
 } from '@modules/prompts/prompt-meta.template';
 import { AiCallStatus } from '@modules/telemetry/enums/ai-call-status.enum';
 import { TelemetryOperationOrigin } from '@modules/telemetry/enums/telemetry-origin.enum';
@@ -78,9 +79,15 @@ const OPTIMIZER_MAX_RETRIES = 3;
  *
  * Se sube de 8_192 a 10_000 porque el truncado no avisa de forma util: el
  * proveedor corta a mitad de frase y lo que vuelve es un prompt incompleto que
- * parece valido.
+ * parece valido. Por eso un elemento NO baja a 8192: reintroduciria ese fallo.
  */
-const OPTIMIZER_MAX_TOKENS = 10_000;
+export const OPTIMIZER_MAX_TOKENS_SINGLE = 10_000;
+
+/**
+ * Techo con cardinalidad `MULTIPLE`: el prompt reescrito incluye ademas la
+ * especificacion del lote y su ejemplo, y es sensiblemente mas largo.
+ */
+export const OPTIMIZER_MAX_TOKENS_MULTIPLE = 16_384;
 
 /**
  * Consejo de recuperacion segun por que se rompio.
@@ -171,6 +178,7 @@ export class PromptOptimizerService {
     user: AuthenticatedUser,
   ): Promise<OptimizePromptResponseDto> {
     const target = this.resolveTarget(dto.model, user.role);
+    const cardinality = dto.cardinality ?? PromptCardinality.SINGLE;
     const client = this.providerFactory.getClient(target.provider);
 
     let payload: LlmResponsePayload;
@@ -178,7 +186,7 @@ export class PromptOptimizerService {
     try {
       payload = await client.generateCompletion(
         buildOptimizerUserPrompt(dto.draftPrompt),
-        buildOptimizerSystemPrompt(dto.targetFormat),
+        buildOptimizerSystemPrompt(dto.targetFormat, cardinality),
         {
           model: target.model,
           timeoutMs: OPTIMIZER_TIMEOUT_MS,
@@ -186,7 +194,10 @@ export class PromptOptimizerService {
           ...(target.provider === LlmProvider.ANTHROPIC
             ? {}
             : { temperature: OPTIMIZER_TEMPERATURE }),
-          maxTokens: OPTIMIZER_MAX_TOKENS,
+          maxTokens:
+            cardinality === PromptCardinality.MULTIPLE
+              ? OPTIMIZER_MAX_TOKENS_MULTIPLE
+              : OPTIMIZER_MAX_TOKENS_SINGLE,
           mode: 'text',
         },
       );

@@ -89,8 +89,13 @@ describe('PromptsController', () => {
     // 3. Assert 🎯
     expect(response.status).toBe(200);
     expect(response.body).toEqual(RESPONSE);
+    // `cardinality` llega con su defecto (SINGLE) aunque el cliente no la envie.
     expect(optimizer.optimize).toHaveBeenCalledWith(
-      { draftPrompt: 'Resume esto.', targetFormat: 'markdown' },
+      expect.objectContaining({
+        draftPrompt: 'Resume esto.',
+        targetFormat: 'markdown',
+        cardinality: 'SINGLE',
+      }),
       EDITOR_USER,
     );
   });
