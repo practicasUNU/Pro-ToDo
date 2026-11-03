@@ -1,8 +1,11 @@
+import { createHash } from 'node:crypto';
+
 import { Injectable } from '@nestjs/common';
 import * as cheerio from 'cheerio';
 import { plainToInstance } from 'class-transformer';
 import { validate } from 'class-validator';
 
+import { normalizeItems } from '@common/utils/cardinality-normalizer.util';
 import { DrupalApiConfig } from '@core/config/drupal-api.config';
 import {
   INTERPOLATION_PATTERN,
@@ -88,6 +91,27 @@ const VALIDATION_OPTIONS: ValidatorOptions = {
  */
 export const TRANSFER_PARTIAL_OPERATION = 'TRANSFER_HTML_BLOCK_PARTIAL';
 
+/**
+ * Valor de `operation_applied` cuando un lote de CREATE_NODE quedo a medias.
+ *
+ * Igual que el de TRANSFER, es un estado y no un matiz del mensaje: ademas de
+ * permitir ramificar, es lo que la propia estrategia busca en el contexto al
+ * reanudar para no volver a crear lo que ya existe.
+ */
+export const CREATE_PARTIAL_OPERATION = 'CREATE_NODE_PARTIAL';
+
+/** Clave del lote ya auditado que publica el ESCUDO_POST_IA. */
+const VALIDATED_ITEMS_FIELD = 'validated_items';
+
+/** Clave del lote en bruto que publica el PROCESADOR_IA. */
+const RAW_ITEMS_FIELD = 'items';
+
+/**
+ * Longitud de la huella de un elemento (hexadecimal). 24 caracteres son 96
+ * bits: de sobra para distinguir las noticias de un lote y cortos en la traza.
+ */
+const ITEM_KEY_LENGTH = 24;
+
 /** Texto neutro de un campo que este modo no puede rellenar. */
 const NEUTRAL_TEXT = '';
 
@@ -122,6 +146,10 @@ const querySelectorSafely = (
   }
 };
 
+/** Objeto plano (no arreglo ni `null`): la forma de un elemento del lote. */
+const isPlainRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === 'object' && value !== null && !Array.isArray(value);
+
 /** Texto recortado, o `null` si no hay texto: Drupal guarda `null`, no `""`. */
 const emptyToNull = (value: string | null): string | null => {
   const trimmed = value?.trim() ?? '';
@@ -148,7 +176,49 @@ export interface DrupalHttpResultData {
   published_url: string;
   /** Ruta publica (alias o `/node/{nid}`) de la pagina publicada o afectada. */
   exit_page: string;
+  /** Entidades creadas por CREATE_NODE en esta ejecucion (lote 1 a N). */
+  total_published: number;
+  /** Bloques insertados por APPEND_HTML_BLOCK. */
+  total_appended: number;
+  /** Bloques trasladados por TRANSFER_HTML_BLOCK. */
+  total_transferred: number;
+  /** Enlaces cambiados por UPDATE_LINK_SOURCE. */
+  total_updated: number;
+  /** Una entrada por entidad creada por CREATE_NODE, en el orden del lote. */
+  published_nodes: PublishedNodeEntry[];
 }
+
+/** Entidad creada por un elemento del lote de CREATE_NODE. */
+export interface PublishedNodeEntry {
+  /** Posicion del elemento en el lote (0 = la raiz). */
+  item_index: number;
+  /** Huella del elemento (titulo + marcado) para no duplicarlo al reanudar. */
+  item_key: string;
+  node_id: string;
+  drupal_internal__nid: number;
+  path_alias: string;
+  published_url: string;
+}
+
+/** Lee una entrada de `published_nodes` del contexto, o `null` si no lo es. */
+const toPublishedNodeEntry = (value: unknown): PublishedNodeEntry | null => {
+  if (!isPlainRecord(value) || typeof value.item_key !== 'string') {
+    return null;
+  }
+
+  return {
+    item_index: typeof value.item_index === 'number' ? value.item_index : 0,
+    item_key: value.item_key,
+    node_id: typeof value.node_id === 'string' ? value.node_id : '',
+    drupal_internal__nid:
+      typeof value.drupal_internal__nid === 'number'
+        ? value.drupal_internal__nid
+        : 0,
+    path_alias: typeof value.path_alias === 'string' ? value.path_alias : '',
+    published_url:
+      typeof value.published_url === 'string' ? value.published_url : '',
+  };
+};
 
 /** Campos del payload, antes de pasar por el constructor que fija la paridad. */
 interface DrupalResultFields {
@@ -159,6 +229,11 @@ interface DrupalResultFields {
   readonly httpStatus?: number;
   readonly publishedAt?: string;
   readonly attachmentUrl?: string;
+  readonly totalPublished?: number;
+  readonly totalAppended?: number;
+  readonly totalTransferred?: number;
+  readonly totalUpdated?: number;
+  readonly publishedNodes?: readonly PublishedNodeEntry[];
 }
 
 /**
@@ -338,10 +413,11 @@ export class DrupalHttpStrategy extends BaseHttpDestinationStrategy {
   public readonly paramsSchema = DrupalHttpConfigDto;
 
   /**
-   * Las nueve claves que este nodo deposita en su namespace
-   * (`DrupalHttpResultData`).
+   * Las catorce claves que este nodo deposita en su namespace
+   * (`DrupalHttpResultData`): las nueve de siempre, que describen el PRIMER
+   * elemento del lote, y los contadores y la lista del lote (1 a N).
    *
-   * Los CINCO modos emiten las nueve, con valores neutros donde no aplican. Es
+   * Los CINCO modos emiten las catorce, con valores neutros donde no aplican. Es
    * lo que permite que un nodo de aguas abajo —o la trazabilidad— interpole
    * `{{http_result.node_id}}` sin saber con que modo corrio el destino.
    */
@@ -396,6 +472,35 @@ export class DrupalHttpStrategy extends BaseHttpDestinationStrategy {
       type: 'text',
       description:
         'Ruta publica (alias o /node/{nid}) de la pagina publicada o afectada; vacia si no hay pagina',
+    },
+    {
+      name: 'total_published',
+      type: 'number',
+      description:
+        'Entidades creadas por CREATE_NODE en el lote (1 con un solo elemento); 0 en los demas modos',
+    },
+    {
+      name: 'total_appended',
+      type: 'number',
+      description:
+        'Bloques insertados por APPEND_HTML_BLOCK; 0 si todos estaban ya publicados',
+    },
+    {
+      name: 'total_transferred',
+      type: 'number',
+      description: 'Bloques trasladados por TRANSFER_HTML_BLOCK',
+    },
+    {
+      name: 'total_updated',
+      type: 'number',
+      description:
+        'Enlaces cambiados por UPDATE_LINK_SOURCE; 0 si ya apuntaban al valor nuevo',
+    },
+    {
+      name: 'published_nodes',
+      type: 'object',
+      description:
+        'CREATE_NODE: [{ item_index, item_key, node_id, drupal_internal__nid, path_alias, published_url }], una por entidad del lote',
     },
   ];
 
@@ -649,27 +754,133 @@ export class DrupalHttpStrategy extends BaseHttpDestinationStrategy {
 
   // --- Modos -------------------------------------------------------------
 
-  /** Crea una entidad independiente (Notiweb). */
+  /**
+   * Crea una entidad independiente por cada elemento del lote (Notiweb).
+   *
+   * Un POST por elemento y en orden: JSON:API no crea varias entidades en una
+   * sola peticion. Con un solo elemento el comportamiento es el de siempre.
+   *
+   * IDEMPOTENCIA DEL LOTE. Un POST no es idempotente, y un lote que falla en el
+   * elemento k ya creo los k-1 anteriores. El fallo devuelve `data` con
+   * `operation_applied: CREATE_NODE_PARTIAL` y `published_nodes`, que el motor
+   * deja en el contexto; al reanudar se saltan los elementos cuya `item_key`
+   * (huella de titulo y marcado) ya figura ahi. Sin esto, cada reintento
+   * duplicaria las noticias que si llegaron a crearse.
+   */
   private async runCreateNode(
     context: StatePayloadContext,
     config: ResolvedDrupalHttpConfig,
   ): Promise<NodeResult> {
+    const itemContexts = this.buildItemContexts(context, config);
+    const alreadyPublished = this.readPartialCreation(context);
+    const publishedNodes: PublishedNodeEntry[] = [];
+    let firstFields: DrupalResultFields | null = null;
+
+    for (const [index, itemContext] of itemContexts.entries()) {
+      const prepared = this.prepareNodeDocument(itemContext, config);
+
+      if ('failure' in prepared) {
+        return this.failCreateBatch(
+          { success: false, error: prepared.failure },
+          publishedNodes,
+          firstFields,
+          config,
+        );
+      }
+
+      const previous = alreadyPublished.get(prepared.itemKey);
+
+      if (previous !== undefined) {
+        publishedNodes.push({ ...previous, item_index: index });
+        firstFields ??= {
+          nodeId: previous.node_id,
+          internalNid: previous.drupal_internal__nid,
+          pathAlias: previous.path_alias,
+          httpStatus: NEUTRAL_STATUS,
+          publishedAt: new Date().toISOString(),
+        };
+        continue;
+      }
+
+      const outcome =
+        await this.httpClient.requestWithStatus<DrupalEntityResponse>(
+          {
+            url: `${this.drupalApiConfig.baseUrl}/${this.resolveEntityPath(config.bundle)}`,
+            method: 'POST',
+            headers: this.buildJsonApiHeaders(),
+            data: { data: prepared.document },
+          },
+          // Sin reintentos: un POST repetido tras un 5xx que SI se aplico crea
+          // una segunda noticia. La idempotencia aqui no la da el verbo, asi que
+          // la decision de reintentar es del operador y no del cliente HTTP.
+          { timeoutMs: this.drupalApiConfig.timeoutMs, maxRetries: 0 },
+        );
+
+      if ('failure' in outcome) {
+        return this.failCreateBatch(
+          this.failWith(outcome, config, 'crear la entidad'),
+          publishedNodes,
+          firstFields,
+          config,
+        );
+      }
+
+      const attributesOut = outcome.data.data?.attributes ?? {};
+      const fields: DrupalResultFields = {
+        nodeId: toText(outcome.data.data?.id, NEUTRAL_TEXT),
+        internalNid: toNumber(attributesOut.drupal_internal__nid, NEUTRAL_NID),
+        pathAlias: this.readPathAlias(attributesOut),
+        httpStatus: outcome.status,
+        publishedAt: this.readChangedAt(attributesOut),
+      };
+
+      firstFields ??= fields;
+      publishedNodes.push(
+        this.toPublishedNode(fields, index, prepared.itemKey, config),
+      );
+    }
+
+    return {
+      success: true,
+      data: this.buildPayload(
+        {
+          ...(firstFields ?? {}),
+          totalPublished: publishedNodes.length,
+          publishedNodes,
+        },
+        config.operationMode,
+      ),
+    };
+  }
+
+  /**
+   * Documento JSON:API de UNA entidad, a partir del contexto de su elemento.
+   *
+   * Es la mitad pura de `runCreateNode`: lee el marcado, interpola titulo y
+   * resumen y compone los campos de noticia, sin hablar con Drupal. Devuelve
+   * tambien la `item_key` que identifica al elemento entre reintentos.
+   */
+  private prepareNodeDocument(
+    context: StatePayloadContext,
+    config: ResolvedDrupalHttpConfig,
+  ):
+    | { readonly document: Record<string, unknown>; readonly itemKey: string }
+    | { readonly failure: NodeErrorDetail } {
     const markup = this.readSourceMarkup(context, config);
 
     if (typeof markup !== 'string') {
-      return { success: false, error: markup };
+      return { failure: markup };
     }
 
     const title = this.interpolate(context, config.titleTemplate);
 
     if (title !== null && typeof title !== 'string') {
-      return { success: false, error: title };
+      return { failure: title };
     }
 
     if (title === null) {
       return {
-        success: false,
-        error: {
+        failure: {
           level: 'GRAVE',
           code: ERR_DRUPAL_CONFIG,
           message:
@@ -682,7 +893,7 @@ export class DrupalHttpStrategy extends BaseHttpDestinationStrategy {
     const summary = this.interpolate(context, config.summaryTemplate);
 
     if (summary !== null && typeof summary !== 'string') {
-      return { success: false, error: summary };
+      return { failure: summary };
     }
 
     // El resumen viaja DENTRO del campo de cuerpo (`body.summary`): el bundle
@@ -702,66 +913,226 @@ export class DrupalHttpStrategy extends BaseHttpDestinationStrategy {
     const news = this.buildNewsFields(context, config);
 
     if ('failure' in news) {
-      return { success: false, error: news.failure };
+      return { failure: news.failure };
     }
-
-    Object.assign(attributes, news.attributes);
-
-    const document: Record<string, unknown> = {
-      type: config.bundle,
-      attributes,
-      ...(Object.keys(news.relationships).length > 0
-        ? { relationships: news.relationships }
-        : {}),
-    };
-
-    const outcome =
-      await this.httpClient.requestWithStatus<DrupalEntityResponse>(
-        {
-          url: `${this.drupalApiConfig.baseUrl}/${this.resolveEntityPath(config.bundle)}`,
-          method: 'POST',
-          headers: this.buildJsonApiHeaders(),
-          data: { data: document },
-        },
-        // Sin reintentos: un POST repetido tras un 5xx que SI se aplico crea una
-        // segunda noticia. La idempotencia aqui no la da el verbo, asi que la
-        // decision de reintentar es del operador y no del cliente HTTP.
-        { timeoutMs: this.drupalApiConfig.timeoutMs, maxRetries: 0 },
-      );
-
-    if ('failure' in outcome) {
-      return this.failWith(outcome, config, 'crear la entidad');
-    }
-
-    const attributesOut = outcome.data.data?.attributes ?? {};
 
     return {
-      success: true,
-      data: this.buildPayload(
-        {
-          nodeId: toText(outcome.data.data?.id, NEUTRAL_TEXT),
-          internalNid: toNumber(
-            attributesOut.drupal_internal__nid,
-            NEUTRAL_NID,
-          ),
-          pathAlias: this.readPathAlias(attributesOut),
-          httpStatus: outcome.status,
-          publishedAt: this.readChangedAt(attributesOut),
-        },
-        config.operationMode,
-      ),
+      document: {
+        type: config.bundle,
+        attributes: { ...attributes, ...news.attributes },
+        ...(Object.keys(news.relationships).length > 0
+          ? { relationships: news.relationships }
+          : {}),
+      },
+      itemKey: createHash('sha256')
+        .update(`${title}\u0000${markup}`)
+        .digest('hex')
+        .slice(0, ITEM_KEY_LENGTH),
     };
   }
 
-  /** Antepone un bloque al HTML acumulado de una pagina agregadora. */
+  /**
+   * Fallo dentro de un lote de CREATE_NODE.
+   *
+   * Si todavia no se habia creado nada, es el fallo de siempre, sin `data`. Si
+   * ya habia elementos publicados, se devuelve ademas el resultado PARCIAL:
+   * el motor lo deja en el contexto y es lo que permite reanudar sin duplicar.
+   */
+  private failCreateBatch(
+    failure: NodeResult,
+    publishedNodes: readonly PublishedNodeEntry[],
+    firstFields: DrupalResultFields | null,
+    config: ResolvedDrupalHttpConfig,
+  ): NodeResult {
+    if (publishedNodes.length === 0 || failure.error === undefined) {
+      return failure;
+    }
+
+    return {
+      success: false,
+      data: this.buildPayload(
+        {
+          ...(firstFields ?? {}),
+          operationApplied: CREATE_PARTIAL_OPERATION,
+          totalPublished: publishedNodes.length,
+          publishedNodes,
+        },
+        config.operationMode,
+      ),
+      error: {
+        ...failure.error,
+        message: `${failure.error.message} | Ya se habian creado ${publishedNodes.length} entidad(es) del lote; reanudar este nodo las reconoce y no las duplica.`,
+      },
+    };
+  }
+
+  /** Lo que ya publico un intento anterior del lote, por `item_key`. */
+  private readPartialCreation(
+    context: StatePayloadContext,
+  ): ReadonlyMap<string, PublishedNodeEntry> {
+    const published = new Map<string, PublishedNodeEntry>();
+
+    // Se busca por FORMA y no por nombre: la estrategia no conoce el
+    // `outputNamespace` que el esquema le asigno.
+    for (const name of context.getNamespaceNames()) {
+      const payload = context.getNamespace(name);
+
+      if (
+        payload?.operation_applied !== CREATE_PARTIAL_OPERATION ||
+        !Array.isArray(payload.published_nodes)
+      ) {
+        continue;
+      }
+
+      for (const entry of payload.published_nodes) {
+        const parsed = toPublishedNodeEntry(entry);
+
+        if (parsed !== null) {
+          published.set(parsed.item_key, parsed);
+        }
+      }
+    }
+
+    return published;
+  }
+
+  /** Entrada de `published_nodes` para un elemento recien creado. */
+  private toPublishedNode(
+    fields: DrupalResultFields,
+    itemIndex: number,
+    itemKey: string,
+    config: ResolvedDrupalHttpConfig,
+  ): PublishedNodeEntry {
+    return {
+      item_index: itemIndex,
+      item_key: itemKey,
+      node_id: fields.nodeId ?? NEUTRAL_TEXT,
+      drupal_internal__nid: fields.internalNid ?? NEUTRAL_NID,
+      path_alias: fields.pathAlias ?? NEUTRAL_TEXT,
+      published_url: this.resolvePublicLocation(fields, config.operationMode)
+        .published_url,
+    };
+  }
+
+  /**
+   * Un contexto por elemento del lote (cardinalidad 1 a N).
+   *
+   * El primero es el propio contexto: la raiz del JSON ES el primer elemento.
+   * Para el elemento k se superpone `validated_items[k-1]` del namespace de
+   * origen y, en cada namespace que citan las plantillas del nodo, su
+   * `items[k-1]`. Asi `{{llm_response.headline}}` o
+   * `{{validated_drupal_json.validated_fields.headline}}` resuelven el titular
+   * de ESE elemento sin cambiar ninguna plantilla.
+   *
+   * El numero de elementos lo fija `validated_items`, nunca `items` en bruto:
+   * solo se publica lo que el escudo audito.
+   */
+  private buildItemContexts(
+    context: StatePayloadContext,
+    config: ResolvedDrupalHttpConfig,
+  ): StatePayloadContext[] {
+    const validatedItems = normalizeItems<unknown>(
+      context.getNamespace(config.sourceNamespace)?.[VALIDATED_ITEMS_FIELD],
+    ).filter(isPlainRecord);
+
+    if (validatedItems.length === 0) {
+      return [context];
+    }
+
+    const rawItemsByNamespace = this.templateNamespaces(config)
+      .filter((namespace) => namespace !== config.sourceNamespace)
+      .map(
+        (namespace) =>
+          [
+            namespace,
+            normalizeItems<unknown>(
+              context.getNamespace(namespace)?.[RAW_ITEMS_FIELD],
+            ).filter(isPlainRecord),
+          ] as const,
+      )
+      .filter(([, items]) => items.length > 0);
+
+    return [
+      context,
+      ...validatedItems.map((validated, index) =>
+        context.withNamespaceOverlays({
+          [config.sourceNamespace]: validated,
+          ...Object.fromEntries(
+            rawItemsByNamespace.flatMap(([namespace, items]) => {
+              const item = items[index];
+
+              return item === undefined ? [] : [[namespace, item]];
+            }),
+          ),
+        }),
+      ),
+    ];
+  }
+
+  /** Raices de namespace que citan las plantillas y selectores del nodo. */
+  private templateNamespaces(config: ResolvedDrupalHttpConfig): string[] {
+    const roots = new Set<string>();
+
+    for (const template of [
+      config.titleTemplate,
+      config.summaryTemplate,
+      config.authorTemplate,
+      config.dateTemplate,
+      config.linkSelector,
+      config.linkValueTemplate,
+      config.expedienteTemplate,
+      config.itemSelector,
+    ]) {
+      if (template !== null) {
+        for (const root of extractNamespaceRoots(template)) {
+          roots.add(root);
+        }
+      }
+    }
+
+    return [...roots];
+  }
+
+  /**
+   * Antepone (o anexa) los bloques del lote al HTML de una pagina agregadora.
+   *
+   * Un GET y un unico PATCH para todo el lote. Los bloques se preparan ANTES
+   * de leer la pagina —un marcado vacio o un expediente irresoluble falla sin
+   * gastar peticiones— y se insertan como UN SOLO fragmento, en el orden del
+   * lote. Insertarlos uno a uno con `prepend` los dejaria invertidos: el ultimo
+   * elemento quedaria arriba del todo.
+   *
+   * Un bloque cuyo `data-expediente` ya esta en la pagina se omite: es lo que
+   * hace convergente reintentar el nodo despues de un PATCH que si se aplico.
+   * La comprobacion es por selector exacto en el DOM y no por subcadena, que
+   * confundiria «LIC-1» con «LIC-10».
+   */
   private async runAppendHtmlBlock(
     context: StatePayloadContext,
     config: ResolvedDrupalHttpConfig,
   ): Promise<NodeResult> {
-    const markup = this.readSourceMarkup(context, config);
+    const prepared: { markup: string; expediente: string | null }[] = [];
 
-    if (typeof markup !== 'string') {
-      return { success: false, error: markup };
+    for (const itemContext of this.buildItemContexts(context, config)) {
+      const markup = this.readSourceMarkup(itemContext, config);
+
+      if (typeof markup !== 'string') {
+        return { success: false, error: markup };
+      }
+
+      // Envoltorio estandar de licitacion (`div.pd-licitacion-block`), salvo
+      // en los paneles de acordeon, que se reparten por universidad y no son
+      // licitaciones. El expediente sale del propio marcado o de la plantilla.
+      const expediente = this.interpolate(
+        itemContext,
+        config.expedienteTemplate,
+      );
+
+      if (expediente !== null && typeof expediente !== 'string') {
+        return { success: false, error: expediente };
+      }
+
+      prepared.push({ markup, expediente });
     }
 
     const uuid = config.targetNodeUuid;
@@ -779,31 +1150,66 @@ export class DrupalHttpStrategy extends BaseHttpDestinationStrategy {
     // Subida DESPUES del GET, y no antes, por dos razones que apuntan al mismo
     // sitio: el campo de destino se descubre en las relaciones que devuelve esa
     // misma respuesta, y si el GET falla no queda un fichero huerfano colgando
-    // de Drupal por una publicacion que nunca llego a ocurrir.
+    // de Drupal por una publicacion que nunca llego a ocurrir. El adjunto es
+    // del correo, no de cada elemento: se sube una vez y se enlaza en el
+    // primero.
     const uploaded = config.uploadAttachment
       ? await this.tryUploadAttachment(context, config, uuid, fetched.node)
       : null;
 
-    const enriched =
-      uploaded === null
-        ? markup
-        : this.tryInjectAttachmentLink(markup, uploaded, config);
+    const page = loadFragment(fetched.node.bodyHtml);
+    const blocks: string[] = [];
 
-    // Envoltorio estandar de licitacion (`div.pd-licitacion-block`), salvo en
-    // los paneles de acordeon, que se reparten por universidad y no son
-    // licitaciones. El expediente sale del propio marcado o de la plantilla.
-    const expediente = this.interpolate(context, config.expedienteTemplate);
+    for (const [index, item] of prepared.entries()) {
+      const enriched =
+        index === 0 && uploaded !== null
+          ? this.tryInjectAttachmentLink(item.markup, uploaded, config)
+          : item.markup;
 
-    if (expediente !== null && typeof expediente !== 'string') {
-      return { success: false, error: expediente };
+      if (planPanelDispatch(enriched).length > 0) {
+        blocks.push(enriched);
+        continue;
+      }
+
+      const block = wrapTenderBlock(enriched, item.expediente);
+      const code = readExpediente(
+        loadFragment(block).root().children().first(),
+      );
+
+      if (code !== null && page(expedienteSelector(code)).length > 0) {
+        this.logger.debug(
+          `El expediente "${code}" ya esta en la pagina ${uuid}; no se vuelve a insertar.`,
+        );
+        continue;
+      }
+
+      blocks.push(block);
     }
 
-    const block =
-      planPanelDispatch(enriched).length > 0
-        ? enriched
-        : wrapTenderBlock(enriched, expediente);
+    // Todo el lote estaba ya publicado: nada que escribir.
+    if (blocks.length === 0) {
+      return {
+        success: true,
+        data: this.buildPayload(
+          {
+            nodeId: uuid,
+            internalNid: fetched.node.internalNid,
+            pathAlias: fetched.node.pathAlias,
+            attachmentUrl: uploaded?.url ?? NEUTRAL_TEXT,
+            httpStatus: NEUTRAL_STATUS,
+            publishedAt: new Date().toISOString(),
+            totalAppended: 0,
+          },
+          config.operationMode,
+        ),
+      };
+    }
 
-    const inserted = this.insertBlock(fetched.node.bodyHtml, block, config);
+    const inserted = this.insertBlock(
+      fetched.node.bodyHtml,
+      blocks.join('\n'),
+      config,
+    );
 
     if (typeof inserted !== 'string') {
       return { success: false, error: inserted };
@@ -828,6 +1234,7 @@ export class DrupalHttpStrategy extends BaseHttpDestinationStrategy {
           attachmentUrl: uploaded?.url ?? NEUTRAL_TEXT,
           httpStatus: patched.status,
           publishedAt: this.readChangedAt(patched.data.data?.attributes ?? {}),
+          totalAppended: blocks.length,
         },
         config.operationMode,
       ),
@@ -835,17 +1242,19 @@ export class DrupalHttpStrategy extends BaseHttpDestinationStrategy {
   }
 
   /**
-   * Cambia el `href` o el `src` de UN elemento de una pagina (Innodays).
+   * Cambia el `href` o el `src` de un elemento por cada elemento del lote
+   * (Innodays / Innobar).
    *
    * GET de la pagina, cirugia sobre el texto original (`replaceLinkAttribute`)
-   * y PATCH. El HTML que vuelve a Drupal es el mismo byte a byte salvo el
-   * atributo: re-serializar el DOM entero con cheerio cambiaria comillas y
-   * entidades de toda la pagina, y el diff de la revision en Drupal mostraria
-   * cientos de cambios donde solo hubo uno.
+   * encadenada para todo el lote y UN PATCH. El HTML que vuelve a Drupal es el
+   * mismo byte a byte salvo los atributos: re-serializar el DOM entero con
+   * cheerio cambiaria comillas y entidades de toda la pagina, y el diff de la
+   * revision en Drupal mostraria cientos de cambios donde solo hubo unos pocos.
    *
-   * El valor se valida ANTES de leer la pagina: si la plantilla no resuelve o
-   * produce un esquema peligroso (`javascript:`), no hay nada que publicar y
-   * no se gasta ninguna peticion.
+   * Los valores se validan ANTES de leer la pagina: si una plantilla no
+   * resuelve o produce un esquema peligroso (`javascript:`), no hay nada que
+   * publicar y no se gasta ninguna peticion. Un selector que no casa con
+   * exactamente un elemento detiene el lote entero sin escribir nada.
    */
   private async runUpdateLinkSource(
     context: StatePayloadContext,
@@ -860,33 +1269,45 @@ export class DrupalHttpStrategy extends BaseHttpDestinationStrategy {
       return this.missingParam('linkSelector');
     }
 
-    const selector = this.interpolateSelector(context, config.linkSelector);
+    const updates: { selector: string; value: string }[] = [];
 
-    if (typeof selector !== 'string') {
-      return { success: false, error: selector };
-    }
+    for (const itemContext of this.buildItemContexts(context, config)) {
+      const selector = this.interpolateSelector(
+        itemContext,
+        config.linkSelector,
+      );
 
-    const interpolated = this.interpolate(context, config.linkValueTemplate);
+      if (typeof selector !== 'string') {
+        return { success: false, error: selector };
+      }
 
-    if (interpolated === null) {
-      return this.missingParam('linkValueTemplate');
-    }
-    if (typeof interpolated !== 'string') {
-      return { success: false, error: interpolated };
-    }
+      const interpolated = this.interpolate(
+        itemContext,
+        config.linkValueTemplate,
+      );
 
-    const value = interpolated.trim();
+      if (interpolated === null) {
+        return this.missingParam('linkValueTemplate');
+      }
+      if (typeof interpolated !== 'string') {
+        return { success: false, error: interpolated };
+      }
 
-    if (!isSafeLinkValue(value, config.linkAttribute)) {
-      return {
-        success: false,
-        error: {
-          level: 'GRAVE',
-          code: ERR_DRUPAL_MISSING_PAYLOAD,
-          message: `El nuevo valor de "${config.linkAttribute}" esta vacio o usa un esquema no permitido ("${value.slice(0, 80)}"). Solo se admiten rutas relativas y http(s)${config.linkAttribute === 'href' ? ' o mailto' : ''}.`,
-          missingFields: ['linkValueTemplate'],
-        },
-      };
+      const value = interpolated.trim();
+
+      if (!isSafeLinkValue(value, config.linkAttribute)) {
+        return {
+          success: false,
+          error: {
+            level: 'GRAVE',
+            code: ERR_DRUPAL_MISSING_PAYLOAD,
+            message: `El nuevo valor de "${config.linkAttribute}" esta vacio o usa un esquema no permitido ("${value.slice(0, 80)}"). Solo se admiten rutas relativas y http(s)${config.linkAttribute === 'href' ? ' o mailto' : ''}.`,
+            missingFields: ['linkValueTemplate'],
+          },
+        };
+      }
+
+      updates.push({ selector, value });
     }
 
     const fetched = await this.fetchNode(uuid, config);
@@ -895,33 +1316,43 @@ export class DrupalHttpStrategy extends BaseHttpDestinationStrategy {
       return this.failFetched(fetched, config, 'leer la pagina del enlace');
     }
 
-    const update = replaceLinkAttribute(
-      fetched.node.bodyHtml,
-      selector,
-      config.linkAttribute,
-      value,
-    );
+    let html = fetched.node.bodyHtml;
+    let changed = 0;
 
-    if ('invalidSelector' in update || 'matches' in update) {
-      const detail =
-        'invalidSelector' in update
-          ? 'no es un selector CSS valido'
-          : `encuentra ${update.matches} elementos y debe encontrar exactamente uno`;
+    for (const { selector, value } of updates) {
+      const update = replaceLinkAttribute(
+        html,
+        selector,
+        config.linkAttribute,
+        value,
+      );
 
-      return {
-        success: false,
-        error: {
-          level: 'GRAVE',
-          code: ERR_DRUPAL_DOM_TARGET,
-          message: `El selector "${selector}" ${detail} en la pagina ${uuid}. No se ha modificado nada.`,
-          missingFields: [selector],
-        },
-      };
+      if ('invalidSelector' in update || 'matches' in update) {
+        const detail =
+          'invalidSelector' in update
+            ? 'no es un selector CSS valido'
+            : `encuentra ${update.matches} elementos y debe encontrar exactamente uno`;
+
+        return {
+          success: false,
+          error: {
+            level: 'GRAVE',
+            code: ERR_DRUPAL_DOM_TARGET,
+            message: `El selector "${selector}" ${detail} en la pagina ${uuid}. No se ha modificado nada.`,
+            missingFields: [selector],
+          },
+        };
+      }
+
+      // Ya apuntaba ahi: este elemento no aporta revision. Reintentar el nodo
+      // despues de un PATCH que si llego a aplicarse converge sin escribir.
+      if (update.previousValue !== value) {
+        html = update.html;
+        changed += 1;
+      }
     }
 
-    // Ya apuntaba ahi: no hay revision que crear. Reintentar el nodo despues
-    // de un PATCH que si llego a aplicarse converge sin escribir de nuevo.
-    if (update.previousValue === value) {
+    if (changed === 0) {
       return {
         success: true,
         data: this.buildPayload(
@@ -931,13 +1362,14 @@ export class DrupalHttpStrategy extends BaseHttpDestinationStrategy {
             pathAlias: fetched.node.pathAlias,
             httpStatus: NEUTRAL_STATUS,
             publishedAt: new Date().toISOString(),
+            totalUpdated: 0,
           },
           config.operationMode,
         ),
       };
     }
 
-    const patched = await this.patchNodeBody(uuid, update.html, config);
+    const patched = await this.patchNodeBody(uuid, html, config);
 
     if ('failure' in patched) {
       return this.failWith(
@@ -956,6 +1388,7 @@ export class DrupalHttpStrategy extends BaseHttpDestinationStrategy {
           pathAlias: fetched.node.pathAlias,
           httpStatus: patched.status,
           publishedAt: this.readChangedAt(patched.data.data?.attributes ?? {}),
+          totalUpdated: changed,
         },
         config.operationMode,
       ),
@@ -990,6 +1423,12 @@ export class DrupalHttpStrategy extends BaseHttpDestinationStrategy {
    * EXITOSO con la licitacion perdida. Ahora solo cuenta el `data-expediente`
    * del bloque concreto; sin expediente se escribe siempre, y lo peor que puede
    * pasar es un duplicado visible.
+   *
+   * LOTE (cardinalidad 1 a N): un selector por elemento, planificado entero en
+   * memoria antes de escribir. Un expediente ausente detiene el traslado sin
+   * tocar ninguna pagina; si todos se resuelven, se escribe UNA vez en destino
+   * —con los bloques en un solo fragmento, en el orden del lote— y UNA en
+   * origen.
    */
   private async runTransferHtmlBlock(
     context: StatePayloadContext,
@@ -1008,15 +1447,25 @@ export class DrupalHttpStrategy extends BaseHttpDestinationStrategy {
       return this.missingParam('itemSelector');
     }
 
-    // Interpolable para poder cerrar UNA licitacion concreta
+    // Interpolable para poder cerrar licitaciones concretas
     // (`[data-expediente="{{llm_response.headline}}"]`); cada valor se escapa.
-    const selector = this.interpolateSelector(context, config.itemSelector);
+    // Un selector por elemento del lote.
+    const selectors: string[] = [];
 
-    if (typeof selector !== 'string') {
-      return { success: false, error: selector };
+    for (const itemContext of this.buildItemContexts(context, config)) {
+      const selector = this.interpolateSelector(
+        itemContext,
+        config.itemSelector,
+      );
+
+      if (typeof selector !== 'string') {
+        return { success: false, error: selector };
+      }
+
+      selectors.push(selector);
     }
 
-    // --- 1. Origen: localizar y aislar el bloque.
+    // --- 1. Leer las dos paginas.
     const source = await this.fetchNode(sourceUuid, config);
 
     if ('failure' in source) {
@@ -1024,13 +1473,16 @@ export class DrupalHttpStrategy extends BaseHttpDestinationStrategy {
     }
 
     const sourceDom = loadFragment(source.node.bodyHtml);
-    const sourceMatches = querySelectorSafely(sourceDom, selector);
 
-    if (sourceMatches === null) {
-      return this.invalidSelector(selector, 'itemSelector');
+    // Un selector que cheerio no sabe leer se rechaza ANTES de leer la pagina
+    // de destino: no hay nada que comparar alli.
+    const unreadable = selectors.find(
+      (selector) => querySelectorSafely(sourceDom, selector) === null,
+    );
+
+    if (unreadable !== undefined) {
+      return this.invalidSelector(unreadable, 'itemSelector');
     }
-
-    const block = sourceMatches.first();
 
     const destination = await this.fetchNode(destinationUuid, config);
 
@@ -1040,75 +1492,111 @@ export class DrupalHttpStrategy extends BaseHttpDestinationStrategy {
 
     const destinationDom = loadFragment(destination.node.bodyHtml);
 
-    if (block.length === 0) {
-      // No esta en origen. Solo es «ya trasladado» si el selector nombra UN
-      // expediente y ese esta en destino: un intento anterior llego a
-      // completarse y repetirlo no tiene sentido. Con un selector generico,
-      // que destino case no prueba nada —la pagina de cerradas siempre tiene
-      // licitaciones—, y dar el traslado por hecho ocultaria que no habia nada
-      // que mover.
-      const alreadyCompleted =
-        selectorPinsExpediente(selector) &&
-        (querySelectorSafely(destinationDom, selector)?.length ?? 0) > 0;
+    // --- 2. Planificar el lote ENTERO en memoria antes de escribir nada: un
+    //        expediente que no aparece detiene el traslado sin tocar ninguna
+    //        pagina, y no a mitad de camino.
+    const blocksToInsert: string[] = [];
+    const movedSelectors: string[] = [];
 
-      if (alreadyCompleted) {
+    for (const selector of selectors) {
+      const sourceMatches = querySelectorSafely(sourceDom, selector);
+
+      if (sourceMatches === null) {
+        return this.invalidSelector(selector, 'itemSelector');
+      }
+
+      const block = sourceMatches.first();
+
+      if (block.length === 0) {
+        // No esta en origen. Solo es «ya trasladado» si el selector nombra UN
+        // expediente y ese esta en destino: un intento anterior llego a
+        // completarse y repetirlo no tiene sentido. Con un selector generico,
+        // que destino case no prueba nada —la pagina de cerradas siempre tiene
+        // licitaciones—, y dar el traslado por hecho ocultaria que no habia
+        // nada que mover.
+        const alreadyCompleted =
+          selectorPinsExpediente(selector) &&
+          (querySelectorSafely(destinationDom, selector)?.length ?? 0) > 0;
+
+        if (alreadyCompleted) {
+          continue;
+        }
+
         return {
-          success: true,
-          data: this.buildPayload(
-            {
-              nodeId: destinationUuid,
-              internalNid: destination.node.internalNid,
-              pathAlias: destination.node.pathAlias,
-              httpStatus: NEUTRAL_STATUS,
-              publishedAt: new Date().toISOString(),
-            },
-            config.operationMode,
-          ),
+          success: false,
+          error: {
+            level: 'GRAVE',
+            code: ERR_DRUPAL_DOM_TARGET,
+            message: `El selector "${selector}" no encuentra ningun bloque que trasladar en la pagina de origen (${sourceUuid}). No se ha modificado ninguna pagina.`,
+            missingFields: [selector],
+          },
         };
       }
 
+      const blockHtml = sourceDom.html(block);
+      const expediente = readExpediente(block);
+
+      // Identidad del bloque CONCRETO. Sin expediente no hay forma de saber si
+      // destino ya lo tiene, y se escribe: un duplicado se ve y se corrige,
+      // una licitacion borrada de las dos paginas no.
+      const alreadyMoved =
+        expediente !== null &&
+        destinationDom(expedienteSelector(expediente)).length > 0;
+
+      if (!alreadyMoved) {
+        blocksToInsert.push(blockHtml);
+      }
+
+      // Solo en memoria: la pagina de origen se escribe DESPUES de la de
+      // destino (ver el TSDoc del metodo).
+      block.remove();
+      movedSelectors.push(selector);
+    }
+
+    const moved = movedSelectors.length;
+
+    // Todo el lote estaba ya trasladado por un intento anterior.
+    if (moved === 0) {
       return {
-        success: false,
-        error: {
-          level: 'GRAVE',
-          code: ERR_DRUPAL_DOM_TARGET,
-          message: `El selector "${selector}" no encuentra ningun bloque que trasladar en la pagina de origen (${sourceUuid}). No se ha modificado ninguna pagina.`,
-          missingFields: [selector],
-        },
+        success: true,
+        data: this.buildPayload(
+          {
+            nodeId: destinationUuid,
+            internalNid: destination.node.internalNid,
+            pathAlias: destination.node.pathAlias,
+            httpStatus: NEUTRAL_STATUS,
+            publishedAt: new Date().toISOString(),
+            totalTransferred: 0,
+          },
+          config.operationMode,
+        ),
       };
     }
 
-    const blockHtml = sourceDom.html(block);
-    const expediente = readExpediente(block);
-
-    // Identidad del bloque CONCRETO. Sin expediente no hay forma de saber si
-    // destino ya lo tiene, y se escribe: un duplicado se ve y se corrige, una
-    // licitacion borrada de las dos paginas no.
-    const alreadyMoved =
-      expediente !== null &&
-      destinationDom(expedienteSelector(expediente)).length > 0;
-
-    // --- 2. Destino PRIMERO. Un fallo aqui no pierde nada: el bloque sigue
-    //        intacto en origen y el nodo entero se puede reintentar.
+    // --- 3. Destino PRIMERO, con todo el lote en un solo fragmento para
+    //        conservar su orden. Un fallo aqui no pierde nada: los bloques
+    //        siguen intactos en origen y el nodo entero se puede reintentar.
     let destinationStatus = NEUTRAL_STATUS;
     let destinationChangedAt = new Date().toISOString();
 
-    if (!alreadyMoved) {
+    if (blocksToInsert.length > 0) {
       // El contenedor de la pagina RECEPTORA, si se declaro: en un traslado
       // hay dos paginas y el `containerSelector` del nodo no tiene por que
       // existir en la de destino. Si no casa, `insertBlock` falla con
-      // ERR_DRUPAL_DOM_TARGET ANTES de cualquier PATCH, y el bloque sigue
-      // intacto en origen.
+      // ERR_DRUPAL_DOM_TARGET ANTES de cualquier PATCH, y los bloques siguen
+      // intactos en origen.
       const merged = this.insertBlock(
         destination.node.bodyHtml,
-        blockHtml,
+        blocksToInsert.join('\n'),
         config.targetContainerSelector === null
           ? config
           : { ...config, containerSelector: config.targetContainerSelector },
         {
           page: `la pagina de destino (${destinationUuid})`,
           consequence:
-            'No se ha escrito en ninguna pagina: el bloque sigue en la de origen.',
+            blocksToInsert.length === 1
+              ? 'No se ha escrito en ninguna pagina: el bloque sigue en la de origen.'
+              : 'No se ha escrito en ninguna pagina: los bloques siguen en la de origen.',
         },
       );
 
@@ -1136,9 +1624,8 @@ export class DrupalHttpStrategy extends BaseHttpDestinationStrategy {
       );
     }
 
-    // --- 3. Origen despues. Un fallo aqui deja el bloque DUPLICADO, no perdido.
-    block.remove();
-
+    // --- 4. Origen despues. Un fallo aqui deja los bloques DUPLICADOS, no
+    //        perdidos.
     const patchedSource = await this.patchNodeBody(
       sourceUuid,
       sourceDom.html(),
@@ -1167,12 +1654,16 @@ export class DrupalHttpStrategy extends BaseHttpDestinationStrategy {
             operationApplied: TRANSFER_PARTIAL_OPERATION,
             httpStatus: patchedSource.status,
             publishedAt: destinationChangedAt,
+            totalTransferred: moved,
           },
           config.operationMode,
         ),
         error: {
           ...failure,
-          message: `${failure.message} | El bloque "${selector}" YA esta publicado en la pagina de destino (${destinationUuid}) pero NO se pudo retirar de la de origen (${sourceUuid}): aparece DUPLICADO, no perdido. Reintentar este nodo es seguro e idempotente; si no, retirarlo a mano de la pagina de origen.`,
+          message:
+            moved === 1
+              ? `${failure.message} | El bloque "${movedSelectors[0] ?? ''}" YA esta publicado en la pagina de destino (${destinationUuid}) pero NO se pudo retirar de la de origen (${sourceUuid}): aparece DUPLICADO, no perdido. Reintentar este nodo es seguro e idempotente; si no, retirarlo a mano de la pagina de origen.`
+              : `${failure.message} | Los ${moved} bloques del lote YA estan publicados en la pagina de destino (${destinationUuid}) pero NO se pudieron retirar de la de origen (${sourceUuid}): aparecen DUPLICADOS, no perdidos. Reintentar este nodo es seguro e idempotente; si no, retirarlos a mano de la pagina de origen.`,
         },
       };
     }
@@ -1191,6 +1682,7 @@ export class DrupalHttpStrategy extends BaseHttpDestinationStrategy {
               ? patchedSource.status
               : destinationStatus,
           publishedAt: destinationChangedAt,
+          totalTransferred: moved,
         },
         config.operationMode,
       ),
@@ -1990,6 +2482,11 @@ export class DrupalHttpStrategy extends BaseHttpDestinationStrategy {
       published_at: fields.publishedAt ?? NEUTRAL_TEXT,
       attachment_url: fields.attachmentUrl ?? NEUTRAL_TEXT,
       ...this.resolvePublicLocation(fields, mode),
+      total_published: fields.totalPublished ?? 0,
+      total_appended: fields.totalAppended ?? 0,
+      total_transferred: fields.totalTransferred ?? 0,
+      total_updated: fields.totalUpdated ?? 0,
+      published_nodes: [...(fields.publishedNodes ?? [])],
     };
 
     return { ...payload };

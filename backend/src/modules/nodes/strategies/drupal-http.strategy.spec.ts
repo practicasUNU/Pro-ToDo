@@ -2431,7 +2431,7 @@ describe('DrupalHttpStrategy', () => {
       ]);
     });
 
-    it('5.8 deberia conservar las NUEVE claves de salida tambien al fallar', async () => {
+    it('5.8 deberia conservar las CATORCE claves de salida tambien al fallar', async () => {
       // 1. Arrange 📐: es la regresion que vigila esta prueba. El reparto de
       //    codigos vive ahora en `BaseHttpDestinationStrategy`, compartido con
       //    el futuro destino de Acens, pero el `data` NO: cada nodo tiene su
@@ -2459,7 +2459,12 @@ describe('DrupalHttpStrategy', () => {
         'operation_applied',
         'path_alias',
         'published_at',
+        'published_nodes',
         'published_url',
+        'total_appended',
+        'total_published',
+        'total_transferred',
+        'total_updated',
       ]);
       expect(result.data?.http_status).toBe(503);
       // Sin pagina publicada no hay enlace que ofrecer.
@@ -2562,7 +2567,7 @@ describe('DrupalHttpStrategy', () => {
   });
 
   describe('7. Inventario de salida (outputFields)', () => {
-    it('7.1 deberia declarar las nueve claves del namespace', () => {
+    it('7.1 deberia declarar las catorce claves del namespace', () => {
       const strategy = buildStrategy(buildHttpMock());
 
       expect(strategy.outputFields.map((field) => field.name)).toEqual([
@@ -2575,6 +2580,11 @@ describe('DrupalHttpStrategy', () => {
         'attachment_url',
         'published_url',
         'exit_page',
+        'total_published',
+        'total_appended',
+        'total_transferred',
+        'total_updated',
+        'published_nodes',
       ]);
     });
 

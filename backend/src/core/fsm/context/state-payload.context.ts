@@ -453,6 +453,16 @@ export class StatePayloadContext {
     return stored === undefined ? undefined : structuredClone(stored);
   }
 
+  /**
+   * Nombres de los namespaces escritos, sin clonar su contenido.
+   *
+   * Para buscar un namespace por su FORMA (p. ej. el resultado parcial de un
+   * lote) sin pagar `getAllContext`, que clona tambien los adjuntos en Base64.
+   */
+  public getNamespaceNames(): string[] {
+    return Object.keys(this.namespaces);
+  }
+
   /** Copia profunda de todo el contexto; es lo que se vuelca al checkpoint. */
   public getAllContext(): Record<string, Record<string, unknown>> {
     return structuredClone(this.namespaces);
