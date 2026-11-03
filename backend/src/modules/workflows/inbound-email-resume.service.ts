@@ -16,6 +16,7 @@ import {
   createImapClient,
 } from '@modules/nodes/services/imap-client.factory';
 import { PASSWORD_ENV_KEY_PATTERN } from '@modules/nodes/dto/imap-trigger-config.dto';
+import { tokenizeSubject } from '@modules/nodes/strategies/imap-filter.util';
 import { SubjectMatchMode } from '@modules/nodes/strategies/imap-trigger.types';
 import { UserRole } from '@modules/users/enums/user-role.enum';
 import { UsersService } from '@modules/users/users.service';
@@ -234,6 +235,47 @@ export const STEP_ALIASES: Readonly<Record<string, string>> = {
   destinoacens: 'DESTINO_ACENS',
   acens: 'DESTINO_ACENS',
 };
+
+/**
+ * Palabras vacias que se descartan al nombrar un paso por sus palabras.
+ *
+ * Articulos y preposiciones que el operador intercala al escribir de memoria
+ * ("DESDE el mapeador de la plantilla") y que ningun nodo lleva en su
+ * identificador: conservarlas haria imposible la coincidencia.
+ */
+export const STEP_STOPWORDS: ReadonlySet<string> = new Set([
+  'de',
+  'del',
+  'el',
+  'la',
+  'los',
+  'las',
+]);
+
+/**
+ * Parte el nombre de un paso en palabras utiles.
+ *
+ * Helper PURO. Delega en `tokenizeSubject`, el MISMO que usa el filtro de
+ * asunto de `TRIGGER_IMAP`: quien configura un flujo aprende una sola regla de
+ * normalizacion (sin tildes, minusculas, sin signos) y le vale para las dos
+ * puertas. Ese tokenizador corta por todo lo que no es letra ni digito, `_`
+ * incluido, y eso es imprescindible aqui: `mapeador_plantilla` tiene que dar
+ * dos palabras para que «plantilla mapeador» lo encuentre.
+ */
+export const tokenizeStepWords = (raw: string): string[] =>
+  tokenizeSubject(raw).filter((token) => !STEP_STOPWORDS.has(token));
+
+/**
+ * `true` si TODAS las palabras pedidas estan entre las del nodo, en cualquier
+ * orden. Sin palabras pedidas no hay coincidencia: un «DESDE de la» no puede
+ * elegir el primer nodo del grafo por accidente.
+ */
+export const matchesStepWords = (
+  queryTokens: readonly string[],
+  candidateTokens: ReadonlySet<string>,
+): boolean =>
+  queryTokens.length > 0 &&
+  queryTokens.every((token) => candidateTokens.has(token));
 
 /** Roles que pueden dar la orden. Mismos que los de la API. */
 const AUTHORIZED_ROLES: ReadonlySet<UserRole> = new Set([
@@ -961,7 +1003,9 @@ export class InboundEmailResumeService
    *
    * Prioridad: 1) etiqueta visible (`label` del esquema o la del catalogo
    * `nodos`), 2) identificador o namespace, 3) `nodeType`, 4) diccionario
-   * `STEP_ALIASES`. Todo se compara por `normalizeStepKey`.
+   * `STEP_ALIASES`, todos comparados por `normalizeStepKey`; y 5) bolsa de
+   * palabras (`tokenizeStepWords`): todas las palabras pedidas, en cualquier
+   * orden, entre las de identificador, etiqueta, namespace y tipo del nodo.
    *
    * Con dos nodos del mismo tipo gana el primero declarado y queda traza.
    */
@@ -1002,14 +1046,28 @@ export class InboundEmailResumeService
     const aliasType = STEP_ALIASES[wanted] ?? null;
     const sameKey = (value: string): boolean =>
       value.length > 0 && normalizeStepKey(value) === wanted;
+    const queryTokens = tokenizeStepWords(identifier);
+    const wordsOf = (entry: (typeof entries)[number]): ReadonlySet<string> =>
+      new Set(
+        [entry.nodeId, entry.label, entry.namespace, entry.nodeType].flatMap(
+          tokenizeStepWords,
+        ),
+      );
 
     // Prioridad SECUENCIAL: gana el primer nivel con alguna coincidencia, de
     // modo que una etiqueta real nunca la pisa un sinonimo generico.
+    //
+    // La bolsa de palabras va la ULTIMA a proposito: es el nivel mas laxo. Un
+    // «DESDE ia» casaria por palabras tambien con `escudo_post_ia`; puesto
+    // detras del diccionario, ese caso lo resuelve antes el sinonimo exacto y
+    // la bolsa solo atiende lo que ningun nivel estricto entiende, como el
+    // orden invertido («plantilla mapeador»).
     const levels: readonly ((entry: (typeof entries)[number]) => boolean)[] = [
       (entry) => sameKey(entry.label),
       (entry) => sameKey(entry.nodeId) || sameKey(entry.namespace),
       (entry) => sameKey(entry.nodeType),
       (entry) => aliasType !== null && entry.nodeType === aliasType,
+      (entry) => matchesStepWords(queryTokens, wordsOf(entry)),
     ];
 
     for (const matches of levels) {
