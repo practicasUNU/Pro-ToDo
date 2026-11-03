@@ -12,13 +12,23 @@ import {
   QTooltip,
   Quasar,
 } from 'quasar';
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import AcensHttpConfig from '@components/nodes/AcensHttpConfig.vue';
 import VariableInsertButton from '@components/shared/VariableInsertButton.vue';
 import { useAcensHttpStore } from '@stores/nodes/acens-http.store';
 
 import { AcensHttpMethod } from '@/types/nodes/acens-http.types';
+
+vi.mock('@services/nodes/acens-http.service', () => ({ testCampaignDispatch: vi.fn() }));
+// La sesion decide si se ofrece la prueba de campana (solo ADMIN), y su
+// servicio importa `@boot/axios`, que no resuelve en Vitest.
+vi.mock('@services/auth.service', () => ({
+  requestOtp: vi.fn(),
+  verifyOtp: vi.fn(),
+  refreshSession: vi.fn(),
+  logout: vi.fn(),
+}));
 
 /** `nodeId` unico por prueba: las definiciones de Pinia se memoizan por modulo. */
 let nodeCounter = 0;

@@ -1,11 +1,24 @@
 import { defineStore, acceptHMRUpdate } from 'pinia';
 import { computed, ref } from 'vue';
 
+import { testCampaignDispatch as runCampaignTest } from '@services/nodes/acens-http.service';
+
 import {
+  ACENS_EMAIL_PATTERN,
   ACENS_ENDPOINT_PATH_PATTERN,
+  ACENS_LIST_ID_PATTERN,
+  ACENS_NAMESPACE_PATTERN,
   AcensHttpMethod,
   BODYLESS_ACENS_METHODS,
+  DEFAULT_ACENS_CAMPAIGN_FROM_EMAIL,
+  DEFAULT_ACENS_CAMPAIGN_FROM_NAME,
+  DEFAULT_ACENS_CAMPAIGN_NAME_PREFIX,
+  DEFAULT_ACENS_CAMPAIGN_SUBJECT_PREFIX,
+  DEFAULT_ACENS_CONTENT_NAMESPACE,
   DEFAULT_ACENS_METHOD,
+  DEFAULT_ACENS_OPERATION,
+  MAX_ACENS_CAMPAIGN_TEXT_LENGTH,
+  MAX_ACENS_LIST_ID_LENGTH,
   DEFAULT_ACENS_TIMEOUT_MS,
   MAX_ACENS_ENDPOINT_PATH_LENGTH,
   MAX_ACENS_PAYLOAD_TEMPLATE_LENGTH,
@@ -22,7 +35,8 @@ import {
 
 import type { HydratableNode, UpstreamNamespace } from '@stores/nodes/node-store-registry';
 
-import type { AcensHttpNodeConfig } from '@/types/nodes/acens-http.types';
+import type { NodeSandboxResult } from '@/types/node-sandbox';
+import type { AcensHttpNodeConfig, AcensOperation } from '@/types/nodes/acens-http.types';
 import type { KeyValueRow } from '@/types/nodes/http-generic-destination.types';
 
 /** Prefijo del id de Pinia; el sufijo es el `nodeId` del `pipeline_schema`. */
@@ -56,21 +70,41 @@ const toRecord = (rows: readonly KeyValueRow[]): Record<string, string> =>
     rows.filter((row) => row.name.trim() !== '').map((row) => [row.name.trim(), row.value]),
   );
 
+const asOperation = (value: unknown): AcensOperation =>
+  value === 'CREATE_CAMPAIGN' ? 'CREATE_CAMPAIGN' : DEFAULT_ACENS_OPERATION;
+
+const asTextOr = (value: unknown, fallback: string): string =>
+  typeof value === 'string' && value.trim() !== '' ? value.trim() : fallback;
+
 const buildInitialConfig = (): AcensHttpNodeConfig => ({
+  operation: DEFAULT_ACENS_OPERATION,
   method: DEFAULT_ACENS_METHOD,
   endpointPath: null,
   headers: [],
   payloadTemplate: null,
   timeoutMs: DEFAULT_ACENS_TIMEOUT_MS,
+  listId: '',
+  fromName: DEFAULT_ACENS_CAMPAIGN_FROM_NAME,
+  fromEmail: DEFAULT_ACENS_CAMPAIGN_FROM_EMAIL,
+  campaignNamePrefix: DEFAULT_ACENS_CAMPAIGN_NAME_PREFIX,
+  subjectPrefix: DEFAULT_ACENS_CAMPAIGN_SUBJECT_PREFIX,
+  contentNamespace: DEFAULT_ACENS_CONTENT_NAMESPACE,
 });
 
 // Estado reactivo del nodo DESTINO_ACENS (regla frontend-quasar.md §3.1).
 //
-// SIN servicio: el nodo no pide nada al backend. La URL base y la clave son del
-// servidor (`AcensApiConfig`) y nunca llegan al navegador; aqui solo se edita la
-// ruta relativa, el verbo, las cabeceras extra, el cuerpo y la espera.
+// La URL base y la clave son del servidor (`AcensApiConfig`) y nunca llegan al
+// navegador. El unico servicio es la prueba de campana, que pasa por el banco
+// de pruebas de nodos y no crea la campana real (`TEST_MODE`).
 const acensHttpSetup = () => {
   const config = ref<AcensHttpNodeConfig>(buildInitialConfig());
+
+  /** Modo campana: ruta, cabeceras y cuerpo los compone el backend. */
+  const isCampaign = computed(() => config.value.operation === 'CREATE_CAMPAIGN');
+
+  /** Prueba de campana en curso y su ultimo resultado. */
+  const isTestingCampaign = ref(false);
+  const lastCampaignTest = ref<NodeSandboxResult | null>(null);
 
   /** Namespaces que publican los pasos ANTERIORES, con sus campos. */
   const availableUpstreamContext = ref<UpstreamNamespace[]>([]);
@@ -106,9 +140,43 @@ const acensHttpSetup = () => {
   });
 
   /** Lo que falta para EJECUTAR: calco de `getIncompleteParams` del backend. */
-  const missingRequiredParams = computed<readonly string[]>(() =>
-    asNullableText(config.value.endpointPath) === null ? ['endpointPath'] : [],
-  );
+  const missingRequiredParams = computed<readonly string[]>(() => {
+    if (isCampaign.value) {
+      return config.value.listId.trim() === '' ? ['listId'] : [];
+    }
+
+    return asNullableText(config.value.endpointPath) === null ? ['endpointPath'] : [];
+  });
+
+  /** Formato de los campos de campana: espejo de los validadores del DTO. */
+  const campaignProblems = (current: AcensHttpNodeConfig): string[] => {
+    const problems: string[] = [];
+    const listId = current.listId.trim();
+
+    if (
+      listId !== '' &&
+      (listId.length > MAX_ACENS_LIST_ID_LENGTH || !ACENS_LIST_ID_PATTERN.test(listId))
+    ) {
+      problems.push('La lista solo admite letras, digitos, guion y guion bajo.');
+    }
+    if (!ACENS_EMAIL_PATTERN.test(current.fromEmail.trim())) {
+      problems.push('El correo del remitente no es valido.');
+    }
+    if (
+      [current.fromName, current.campaignNamePrefix, current.subjectPrefix].some(
+        (text) => text.length > MAX_ACENS_CAMPAIGN_TEXT_LENGTH,
+      )
+    ) {
+      problems.push(
+        `Remitente, nombre y asunto no pueden superar ${MAX_ACENS_CAMPAIGN_TEXT_LENGTH} caracteres.`,
+      );
+    }
+    if (!ACENS_NAMESPACE_PATTERN.test(current.contentNamespace)) {
+      problems.push('El origen del contenido debe ser un namespace del flujo.');
+    }
+
+    return problems;
+  };
 
   const describeHeadersProblem = (rows: readonly KeyValueRow[]): string | null => {
     if (rows.length > MAX_KEY_VALUE_ENTRIES) {
@@ -142,8 +210,13 @@ const acensHttpSetup = () => {
 
   /** Lo que el DTO rechazaria por formato, mas los marcadores sin origen. */
   const malformedParams = computed<readonly string[]>(() => {
-    const problems: string[] = [];
     const { value: current } = config;
+
+    if (isCampaign.value) {
+      return campaignProblems(current);
+    }
+
+    const problems: string[] = [];
     const path = asNullableText(current.endpointPath);
 
     if (
@@ -192,13 +265,19 @@ const acensHttpSetup = () => {
   );
 
   /** Avisos no bloqueantes del paso (contrato de `NodeConfigStore`). */
-  const configWarnings = computed<readonly string[]>(() =>
-    config.value.method === AcensHttpMethod.POST
+  const configWarnings = computed<readonly string[]>(() => {
+    if (isCampaign.value) {
+      return [
+        `Cada ejecucion crea una campana REAL en Acens para la lista "${config.value.listId.trim() || '(sin lista)'}". No se reintenta: un reintento podria crear una segunda campana.`,
+      ];
+    }
+
+    return config.value.method === AcensHttpMethod.POST
       ? [
           'Un POST a Acens no se reintenta automaticamente: un envio masivo repetido podria salir dos veces.',
         ]
-      : [],
-  );
+      : [];
+  });
 
   /** Aplica un parche parcial conservando la inmutabilidad de `config`. */
   const updateConfig = (patch: Partial<AcensHttpNodeConfig>): void => {
@@ -212,6 +291,33 @@ const acensHttpSetup = () => {
   /** `params` del nodo; `method` viaja siempre, el resto solo si difiere del defecto. */
   const toNodeParams = (): Record<string, unknown> => {
     const { value: current } = config;
+
+    // Campana: solo los campos tipados que difieren del defecto. Ruta,
+    // cabeceras y cuerpo no viajan: los compone el backend.
+    if (current.operation === 'CREATE_CAMPAIGN') {
+      const campaign: Record<string, unknown> = { operation: current.operation };
+      const listId = current.listId.trim();
+      const optional: ReadonlyArray<readonly [string, string, string]> = [
+        ['fromName', current.fromName.trim(), DEFAULT_ACENS_CAMPAIGN_FROM_NAME],
+        ['fromEmail', current.fromEmail.trim(), DEFAULT_ACENS_CAMPAIGN_FROM_EMAIL],
+        [
+          'campaignNamePrefix',
+          current.campaignNamePrefix.trim(),
+          DEFAULT_ACENS_CAMPAIGN_NAME_PREFIX,
+        ],
+        ['subjectPrefix', current.subjectPrefix.trim(), DEFAULT_ACENS_CAMPAIGN_SUBJECT_PREFIX],
+        ['contentNamespace', current.contentNamespace.trim(), DEFAULT_ACENS_CONTENT_NAMESPACE],
+      ];
+
+      if (listId !== '') campaign.listId = listId;
+      for (const [key, value, fallback] of optional) {
+        if (value !== '' && value !== fallback) campaign[key] = value;
+      }
+      if (current.timeoutMs !== DEFAULT_ACENS_TIMEOUT_MS) campaign.timeoutMs = current.timeoutMs;
+
+      return campaign;
+    }
+
     const params: Record<string, unknown> = { method: current.method };
 
     const path = asNullableText(current.endpointPath);
@@ -234,6 +340,7 @@ const acensHttpSetup = () => {
     const { params } = node;
 
     config.value = {
+      operation: asOperation(params.operation),
       method: asMethod(params.method),
       endpointPath: asNullableText(params.endpointPath),
       headers: asRows(params.headers),
@@ -247,17 +354,46 @@ const acensHttpSetup = () => {
         MIN_ACENS_TIMEOUT_MS,
         MAX_ACENS_TIMEOUT_MS,
       ),
+      listId: typeof params.listId === 'string' ? params.listId.trim() : '',
+      fromName: asTextOr(params.fromName, DEFAULT_ACENS_CAMPAIGN_FROM_NAME),
+      fromEmail: asTextOr(params.fromEmail, DEFAULT_ACENS_CAMPAIGN_FROM_EMAIL),
+      campaignNamePrefix: asTextOr(params.campaignNamePrefix, DEFAULT_ACENS_CAMPAIGN_NAME_PREFIX),
+      subjectPrefix: asTextOr(params.subjectPrefix, DEFAULT_ACENS_CAMPAIGN_SUBJECT_PREFIX),
+      contentNamespace: asTextOr(params.contentNamespace, DEFAULT_ACENS_CONTENT_NAMESPACE),
     };
+  };
+
+  /**
+   * Prueba la campana en el banco de pruebas: NO crea la campana real.
+   *
+   * Las excepciones se propagan (frontend-architecture.md §2.1): el componente
+   * decide el mensaje. Solo se garantiza apagar `isTestingCampaign`.
+   */
+  const testCampaignDispatch = async (): Promise<NodeSandboxResult> => {
+    isTestingCampaign.value = true;
+
+    try {
+      const result = await runCampaignTest(toNodeParams(), config.value.contentNamespace);
+      lastCampaignTest.value = result;
+
+      return result;
+    } finally {
+      isTestingCampaign.value = false;
+    }
   };
 
   const resetConfig = (): void => {
     config.value = buildInitialConfig();
     availableUpstreamContext.value = [];
+    lastCampaignTest.value = null;
   };
 
   return {
     config,
     availableUpstreamContext,
+    isCampaign,
+    isTestingCampaign,
+    lastCampaignTest,
     isBodyless,
     unknownMarkers,
     missingRequiredParams,
@@ -269,6 +405,7 @@ const acensHttpSetup = () => {
     toNodeParams,
     hydrateFromNode,
     resetConfig,
+    testCampaignDispatch,
   };
 };
 

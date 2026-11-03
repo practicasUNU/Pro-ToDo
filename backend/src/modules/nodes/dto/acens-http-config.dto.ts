@@ -1,5 +1,7 @@
 import { ApiPropertyOptional } from '@nestjs/swagger';
 import {
+  IsEmail,
+  IsEnum,
   IsInt,
   IsObject,
   IsOptional,
@@ -92,6 +94,40 @@ const describePayloadProblem = (dto: AcensHttpConfigDto): string | null => {
 };
 
 /**
+ * Que hace el nodo con Acens.
+ *
+ * - `RAW_REQUEST` (defecto): peticion libre (verbo, ruta, cabeceras y cuerpo
+ *   interpolados). Es el comportamiento de siempre.
+ * - `CREATE_CAMPAIGN`: crea la campana del boletin en
+ *   `POST /api/1/createCampaign/` con parametros tipados; la ruta y el cuerpo
+ *   los compone la estrategia, no el flujo.
+ */
+export enum AcensOperation {
+  RAW_REQUEST = 'RAW_REQUEST',
+  CREATE_CAMPAIGN = 'CREATE_CAMPAIGN',
+}
+
+/** Ruta FIJA de la creacion de campanas, relativa a `ACENS_API_BASE_URL`. */
+export const ACENS_CREATE_CAMPAIGN_PATH = '/api/1/createCampaign/';
+
+export const DEFAULT_ACENS_CAMPAIGN_FROM_NAME = 'Notiweb';
+export const DEFAULT_ACENS_CAMPAIGN_FROM_EMAIL = 'notiweb@madrimasd.org';
+export const DEFAULT_ACENS_CAMPAIGN_NAME_PREFIX = 'Notiweb';
+export const DEFAULT_ACENS_CAMPAIGN_SUBJECT_PREFIX =
+  'Servicio NotiWEB de madri+d';
+/** Namespace del que sale el marcado ya validado de las noticias. */
+export const DEFAULT_ACENS_CONTENT_NAMESPACE = 'validated_drupal_json';
+
+export const MAX_ACENS_CAMPAIGN_TEXT_LENGTH = 200;
+export const MAX_ACENS_LIST_ID_LENGTH = 64;
+
+/** Identificador de lista: alfanumerico, guion o guion bajo. */
+export const ACENS_LIST_ID_PATTERN = /^[A-Za-z0-9_-]+$/;
+
+/** Nombre de namespace del contexto (snake_case). */
+export const ACENS_NAMESPACE_PATTERN = /^[a-z][a-z0-9_]*$/;
+
+/**
  * `params` del nodo DESTINO_ACENS.
  *
  * NO lleva URL base ni credencial: salen de `AcensApiConfig` (entorno). Todo es
@@ -157,6 +193,64 @@ export class AcensHttpConfigDto {
     message: `timeoutMs no puede superar ${MAX_ACENS_TIMEOUT_MS}.`,
   })
   timeoutMs?: number;
+
+  @ApiPropertyOptional({
+    enum: AcensOperation,
+    default: AcensOperation.RAW_REQUEST,
+  })
+  @IsOptional()
+  @IsEnum(AcensOperation, {
+    message: `operation debe ser uno de: ${Object.values(AcensOperation).join(', ')}.`,
+  })
+  operation?: AcensOperation;
+
+  @ApiPropertyOptional({ description: 'Lista de destinatarios de la campana' })
+  @IsOptional()
+  @IsString({ message: 'listId debe ser una cadena.' })
+  @MaxLength(MAX_ACENS_LIST_ID_LENGTH, {
+    message: `listId no puede superar ${MAX_ACENS_LIST_ID_LENGTH} caracteres.`,
+  })
+  @Matches(ACENS_LIST_ID_PATTERN, {
+    message: 'listId solo admite letras, digitos, guion y guion bajo.',
+  })
+  listId?: string;
+
+  @ApiPropertyOptional({ default: DEFAULT_ACENS_CAMPAIGN_FROM_NAME })
+  @IsOptional()
+  @IsString({ message: 'fromName debe ser una cadena.' })
+  @MaxLength(MAX_ACENS_CAMPAIGN_TEXT_LENGTH, {
+    message: `fromName no puede superar ${MAX_ACENS_CAMPAIGN_TEXT_LENGTH} caracteres.`,
+  })
+  fromName?: string;
+
+  @ApiPropertyOptional({ default: DEFAULT_ACENS_CAMPAIGN_FROM_EMAIL })
+  @IsOptional()
+  @IsEmail({}, { message: 'fromEmail debe ser un correo valido.' })
+  fromEmail?: string;
+
+  @ApiPropertyOptional({ default: DEFAULT_ACENS_CAMPAIGN_NAME_PREFIX })
+  @IsOptional()
+  @IsString({ message: 'campaignNamePrefix debe ser una cadena.' })
+  @MaxLength(MAX_ACENS_CAMPAIGN_TEXT_LENGTH, {
+    message: `campaignNamePrefix no puede superar ${MAX_ACENS_CAMPAIGN_TEXT_LENGTH} caracteres.`,
+  })
+  campaignNamePrefix?: string;
+
+  @ApiPropertyOptional({ default: DEFAULT_ACENS_CAMPAIGN_SUBJECT_PREFIX })
+  @IsOptional()
+  @IsString({ message: 'subjectPrefix debe ser una cadena.' })
+  @MaxLength(MAX_ACENS_CAMPAIGN_TEXT_LENGTH, {
+    message: `subjectPrefix no puede superar ${MAX_ACENS_CAMPAIGN_TEXT_LENGTH} caracteres.`,
+  })
+  subjectPrefix?: string;
+
+  @ApiPropertyOptional({ default: DEFAULT_ACENS_CONTENT_NAMESPACE })
+  @IsOptional()
+  @IsString({ message: 'contentNamespace debe ser una cadena.' })
+  @Matches(ACENS_NAMESPACE_PATTERN, {
+    message: 'contentNamespace debe ser un namespace en snake_case.',
+  })
+  contentNamespace?: string;
 }
 
 /** Configuracion con los defectos aplicados. */
@@ -166,6 +260,14 @@ export interface ResolvedAcensHttpConfig {
   readonly headers: Readonly<Record<string, string>>;
   readonly payloadTemplate: string | null;
   readonly timeoutMs: number;
+  readonly operation: AcensOperation;
+  /** `null` si no se declaro: obligatorio para ejecutar una campana. */
+  readonly listId: string | null;
+  readonly fromName: string;
+  readonly fromEmail: string;
+  readonly campaignNamePrefix: string;
+  readonly subjectPrefix: string;
+  readonly contentNamespace: string;
 }
 
 /** Aplica los defectos sobre un DTO ya validado. Funcion pura. */
@@ -181,5 +283,16 @@ export const resolveAcensHttpConfig = (
     headers: { ...(dto.headers ?? {}) },
     payloadTemplate: payloadTemplate.length === 0 ? null : payloadTemplate,
     timeoutMs: dto.timeoutMs ?? DEFAULT_ACENS_TIMEOUT_MS,
+    operation: dto.operation ?? AcensOperation.RAW_REQUEST,
+    listId:
+      (dto.listId?.trim() ?? '') === '' ? null : (dto.listId?.trim() ?? null),
+    fromName: dto.fromName?.trim() || DEFAULT_ACENS_CAMPAIGN_FROM_NAME,
+    fromEmail: dto.fromEmail?.trim() || DEFAULT_ACENS_CAMPAIGN_FROM_EMAIL,
+    campaignNamePrefix:
+      dto.campaignNamePrefix?.trim() || DEFAULT_ACENS_CAMPAIGN_NAME_PREFIX,
+    subjectPrefix:
+      dto.subjectPrefix?.trim() || DEFAULT_ACENS_CAMPAIGN_SUBJECT_PREFIX,
+    contentNamespace:
+      dto.contentNamespace?.trim() || DEFAULT_ACENS_CONTENT_NAMESPACE,
   };
 };

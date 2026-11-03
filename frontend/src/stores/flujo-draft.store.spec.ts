@@ -64,6 +64,7 @@ vi.mock('@services/workflows.service', () => ({
   fetchWorkflow: vi.fn(),
   updateWorkflow: vi.fn(),
 }));
+vi.mock('@services/nodes/acens-http.service', () => ({ testCampaignDispatch: vi.fn() }));
 vi.mock('@services/nodes/trigger-imap.service', () => ({
   checkImapConnection: vi.fn(),
 }));

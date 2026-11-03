@@ -47,6 +47,7 @@ vi.mock('@services/ai-prompt-templates.service', () => ({
   fetchAiPromptTemplates: vi.fn(),
   fetchAiPromptTemplateById: vi.fn(),
 }));
+vi.mock('@services/nodes/acens-http.service', () => ({ testCampaignDispatch: vi.fn() }));
 vi.mock('@services/nodes/trigger-imap.service', () => ({ checkImapConnection: vi.fn() }));
 vi.mock('@services/nodes/parser-email.service', () => ({ checkParser: vi.fn() }));
 vi.mock('@services/nodes/drupal-http.service', () => ({ fetchDrupalPresetTargets: vi.fn() }));

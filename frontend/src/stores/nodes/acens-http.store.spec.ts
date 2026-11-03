@@ -1,5 +1,5 @@
 import { createPinia, setActivePinia } from 'pinia';
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { NodeType } from '@/types/pipeline';
 import { AcensHttpMethod } from '@/types/nodes/acens-http.types';
@@ -7,6 +7,8 @@ import { AcensHttpMethod } from '@/types/nodes/acens-http.types';
 import { useAcensHttpStore } from './acens-http.store';
 
 import type { UpstreamNamespace } from '@stores/nodes/node-store-registry';
+
+vi.mock('@services/nodes/acens-http.service', () => ({ testCampaignDispatch: vi.fn() }));
 
 /** `nodeId` unico por prueba: las definiciones de Pinia se memoizan por modulo. */
 let nodeCounter = 0;

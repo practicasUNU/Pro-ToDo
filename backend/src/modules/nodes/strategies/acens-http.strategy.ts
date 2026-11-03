@@ -3,6 +3,7 @@ import { plainToInstance } from 'class-transformer';
 import { validate } from 'class-validator';
 import sanitizeHtml from 'sanitize-html';
 
+import { expandRootAndItems } from '@common/utils/cardinality-normalizer.util';
 import { AcensApiConfig } from '@core/config/acens-api.config';
 import {
   INTERPOLATION_PATTERN,
@@ -23,6 +24,8 @@ import {
   AcensHttpConfigDto,
   AcensHttpMethod,
   resolveAcensHttpConfig,
+  ACENS_CREATE_CAMPAIGN_PATH,
+  AcensOperation,
 } from '../dto/acens-http-config.dto';
 
 import type { StatePayloadContext } from '@core/fsm/context/state-payload.context';
@@ -48,6 +51,78 @@ export const ERR_DESTINO_ACENS_MISSING_CONTEXT =
 export const ERR_DESTINO_ACENS_NETWORK = 'ERR_DESTINO_ACENS_NETWORK';
 
 const ERROR_PREFIX = 'ERR_DESTINO_ACENS';
+
+/** Estado de la campana tal y como se publica en `acens_result.status`. */
+export type AcensCampaignStatus =
+  'CAMPAIGN_CREATED' | 'QUEUED' | 'TEST_MODE' | '';
+
+/**
+ * Contrato del namespace `acens_result`.
+ *
+ * Las tres claves de la peticion libre se conservan (los flujos guardados las
+ * interpolan) y se anaden las de la campana, siempre presentes con valores
+ * neutros donde no aplican: el asistente nunca ofrece una clave fantasma.
+ */
+export interface AcensResultData {
+  statusCode: number;
+  responseBody: unknown;
+  dispatchedAt: string;
+  campaign_id: string;
+  status: AcensCampaignStatus;
+  dispatched_at: string;
+  recipient_list: string;
+  raw_response: unknown;
+}
+
+/** Marca con la que se sustituye el token si el remoto llegara a reflejarlo. */
+const REDACTED = '[REDACTADO]';
+
+/** Fecha DD/MM/AAAA en la zona del portal, para nombre y asunto de campana. */
+const CAMPAIGN_DATE_FORMAT = new Intl.DateTimeFormat('es-ES', {
+  timeZone: 'Europe/Madrid',
+  day: '2-digit',
+  month: '2-digit',
+  year: 'numeric',
+});
+
+/**
+ * Sustituye `secret` en todas las cadenas de un valor JSON. Defensa en
+ * profundidad: el token viaja en el CUERPO de la peticion, y una API que lo
+ * reflejara en su respuesta lo dejaria en el contexto y en la traza.
+ */
+const redactSecret = (value: unknown, secret: string): unknown => {
+  if (secret.length === 0) return value;
+  if (typeof value === 'string') return value.split(secret).join(REDACTED);
+  if (Array.isArray(value))
+    return value.map((item) => redactSecret(item, secret));
+  if (typeof value === 'object' && value !== null) {
+    return Object.fromEntries(
+      Object.entries(value).map(([key, item]) => [
+        key,
+        redactSecret(item, secret),
+      ]),
+    );
+  }
+
+  return value;
+};
+
+/** Identificador de campana en las formas habituales de respuesta. */
+const readCampaignId = (body: unknown): string => {
+  if (typeof body !== 'object' || body === null) return '';
+
+  const record = body as Record<string, unknown>;
+  const nested =
+    typeof record.data === 'object' && record.data !== null
+      ? (record.data as Record<string, unknown>)
+      : {};
+  const candidate =
+    record.campaign_id ?? record.id ?? nested.campaign_id ?? nested.id;
+
+  return typeof candidate === 'string' || typeof candidate === 'number'
+    ? String(candidate)
+    : '';
+};
 
 const VALIDATION_OPTIONS: ValidatorOptions = {
   whitelist: true,
@@ -124,6 +199,34 @@ export class AcensHttpStrategy extends BaseHttpDestinationStrategy {
       type: 'text',
       description: 'Marca ISO del instante en que se despacho la peticion',
     },
+    {
+      name: 'campaign_id',
+      type: 'text',
+      description:
+        'CREATE_CAMPAIGN: identificador de la campana creada; vacio en modo prueba o en peticion libre',
+    },
+    {
+      name: 'status',
+      type: 'text',
+      description:
+        'CREATE_CAMPAIGN: CAMPAIGN_CREATED, QUEUED o TEST_MODE; vacio en peticion libre',
+    },
+    {
+      name: 'dispatched_at',
+      type: 'text',
+      description: 'Marca ISO del envio (igual que dispatchedAt)',
+    },
+    {
+      name: 'recipient_list',
+      type: 'text',
+      description: 'CREATE_CAMPAIGN: lista de destinatarios usada',
+    },
+    {
+      name: 'raw_response',
+      type: 'object',
+      description:
+        'CREATE_CAMPAIGN: respuesta de Acens (o la peticion prevista en modo prueba), sin el token',
+    },
   ];
 
   constructor(
@@ -138,6 +241,10 @@ export class AcensHttpStrategy extends BaseHttpDestinationStrategy {
   ): readonly string[] {
     const config = this.resolveLoosely(params);
 
+    if (config.operation === AcensOperation.CREATE_CAMPAIGN) {
+      return [config.contentNamespace];
+    }
+
     return collectNamespaceRoots([
       config.endpointPath,
       config.headers,
@@ -145,13 +252,20 @@ export class AcensHttpStrategy extends BaseHttpDestinationStrategy {
     ]);
   }
 
-  /** Lo unico imprescindible para EJECUTAR es la ruta. */
+  /**
+   * Lo unico imprescindible para EJECUTAR: la ruta en la peticion libre, la
+   * lista de destinatarios en la creacion de campana.
+   */
   public getIncompleteParams(
     params: Record<string, unknown>,
   ): readonly string[] {
-    return this.resolveLoosely(params).endpointPath === null
-      ? ['endpointPath']
-      : [];
+    const config = this.resolveLoosely(params);
+
+    if (config.operation === AcensOperation.CREATE_CAMPAIGN) {
+      return config.listId === null ? ['listId'] : [];
+    }
+
+    return config.endpointPath === null ? ['endpointPath'] : [];
   }
 
   /** Sin interpolacion no hay variable de contexto que pueda faltar. */
@@ -174,6 +288,11 @@ export class AcensHttpStrategy extends BaseHttpDestinationStrategy {
     }
 
     const { config } = resolution;
+
+    if (config.operation === AcensOperation.CREATE_CAMPAIGN) {
+      return this.runCreateCampaign(context, config);
+    }
+
     const composition = this.compose(context, config);
 
     if ('failure' in composition) {
@@ -226,6 +345,166 @@ export class AcensHttpStrategy extends BaseHttpDestinationStrategy {
         statusCode: outcome.status,
         responseBody: boundResponseBody(outcome.data),
         dispatchedAt,
+      }),
+    };
+  }
+
+  /**
+   * Crea la campana del boletin en Acens (`POST /api/1/createCampaign/`).
+   *
+   * El contenido es el marcado YA VALIDADO por el escudo de todos los elementos
+   * del lote (raiz + `validated_items`), en orden: nunca la plantilla base sin
+   * rellenar ni la salida en bruto de la IA. El token sale del entorno
+   * (`ACENS_API_KEY`) y viaja como `auth_token` en el cuerpo; no aparece en
+   * `data`, en la traza ni en los mensajes.
+   *
+   * MODO PRUEBA. Desde el banco de pruebas del nodo no se crea la campana:
+   * hacerlo la crearia contra listas reales. Se devuelve `TEST_MODE` con la
+   * peticion prevista, sin el token y sin el contenido completo.
+   *
+   * Sin reintentos: un POST repetido tras un 5xx que si se aplico crearia una
+   * segunda campana.
+   */
+  private async runCreateCampaign(
+    context: StatePayloadContext,
+    config: ResolvedAcensHttpConfig,
+  ): Promise<NodeResult> {
+    const source = context.getNamespace(config.contentNamespace);
+
+    if (source === undefined) {
+      return this.fail({
+        level: 'GRAVE',
+        code: ERR_DESTINO_ACENS_MISSING_CONTEXT,
+        message: `La campana lee su contenido de "${config.contentNamespace}" y ningun nodo anterior lo ha escrito. Coloca el destino Acens despues del escudo posterior a IA.`,
+        missingFields: [config.contentNamespace],
+      });
+    }
+
+    const content = expandRootAndItems(source, 'validated_items')
+      .map((item) =>
+        typeof item.validated_markup === 'string'
+          ? item.validated_markup.trim()
+          : '',
+      )
+      .filter((markup) => markup.length > 0)
+      .join('\n');
+
+    if (content.length === 0) {
+      return this.fail({
+        level: 'GRAVE',
+        code: ERR_DESTINO_ACENS_MISSING_CONTEXT,
+        message: `"${config.contentNamespace}" no trae marcado validado (validated_markup ni validated_items): no hay boletin que enviar.`,
+        missingFields: [`${config.contentNamespace}.validated_markup`],
+      });
+    }
+
+    // `getIncompleteParams` ya lo garantiza; la guarda es para el compilador.
+    const listId = config.listId ?? '';
+    const date = CAMPAIGN_DATE_FORMAT.format(new Date());
+    const request = {
+      name: `${config.campaignNamePrefix} ${date}`,
+      from_name: config.fromName,
+      from_email: config.fromEmail,
+      subject: `${config.subjectPrefix} ${date}`,
+      content,
+      lists: { '0': listId },
+    };
+    const url = this.joinWithBase(ACENS_CREATE_CAMPAIGN_PATH);
+    const dispatchedAt = new Date().toISOString();
+
+    if (url === null) {
+      return this.fail({
+        level: 'GRAVE',
+        code: ERR_DESTINO_ACENS_CONFIG,
+        message: `La ruta de campanas ${ACENS_CREATE_CAMPAIGN_PATH} sale de la URL base de Acens: revisa ACENS_API_BASE_URL.`,
+      });
+    }
+
+    if (context.getSandboxScope() !== null) {
+      // Sin el contenido completo: basta su longitud para revisar la prueba.
+      const preview = {
+        name: request.name,
+        from_name: request.from_name,
+        from_email: request.from_email,
+        subject: request.subject,
+        lists: request.lists,
+        content_length: content.length,
+      };
+
+      return {
+        success: true,
+        data: this.buildPayload({
+          dispatchedAt,
+          status: 'TEST_MODE',
+          recipientList: listId,
+          rawResponse: {
+            dry_run: true,
+            url,
+            request: preview,
+          },
+        }),
+      };
+    }
+
+    const outcome = await this.httpClient.requestWithResponse<unknown>(
+      {
+        url,
+        method: 'POST',
+        headers: {
+          Accept: 'application/json',
+          'Content-Type': 'application/json',
+        },
+        data: { auth_token: this.acensConfig.apiKey, ...request },
+        // Sin redirecciones: un 302 llevaria el token a otro host.
+        maxRedirects: 0,
+      },
+      {
+        timeoutMs: Math.min(config.timeoutMs, this.acensConfig.timeoutMs),
+        maxRetries: 0,
+      },
+    );
+    const secret = this.acensConfig.apiKey;
+
+    if ('failure' in outcome) {
+      const failure = this.mapHttpFailure(
+        outcome.failure,
+        outcome.status,
+        ERROR_PREFIX,
+        'crear la campana en Acens',
+      );
+      const status = outcome.status ?? 0;
+      const safeFailure = {
+        ...failure,
+        message: String(redactSecret(failure.message, secret)),
+      };
+
+      return {
+        success: false,
+        data: this.buildPayload({
+          statusCode: status,
+          dispatchedAt,
+          recipientList: listId,
+        }),
+        error:
+          status >= 400
+            ? { ...safeFailure, code: ERR_DESTINO_ACENS_FAILED }
+            : safeFailure,
+      };
+    }
+
+    const body = redactSecret(boundResponseBody(outcome.data), secret);
+
+    return {
+      success: true,
+      data: this.buildPayload({
+        statusCode: outcome.status,
+        responseBody: body,
+        dispatchedAt,
+        campaignId: readCampaignId(body),
+        // 202 = aceptada para procesar mas tarde; cualquier otro 2xx, creada.
+        status: outcome.status === 202 ? 'QUEUED' : 'CAMPAIGN_CREATED',
+        recipientList: listId,
+        rawResponse: body,
       }),
     };
   }
@@ -393,12 +672,23 @@ export class AcensHttpStrategy extends BaseHttpDestinationStrategy {
     readonly statusCode?: number;
     readonly responseBody?: unknown;
     readonly dispatchedAt?: string;
+    readonly campaignId?: string;
+    readonly status?: AcensCampaignStatus;
+    readonly recipientList?: string;
+    readonly rawResponse?: unknown;
   }): Record<string, unknown> {
-    return {
+    const payload: AcensResultData = {
       statusCode: fields.statusCode ?? 0,
       responseBody: fields.responseBody ?? null,
       dispatchedAt: fields.dispatchedAt ?? '',
+      campaign_id: fields.campaignId ?? '',
+      status: fields.status ?? '',
+      dispatched_at: fields.dispatchedAt ?? '',
+      recipient_list: fields.recipientList ?? '',
+      raw_response: fields.rawResponse ?? null,
     };
+
+    return { ...payload };
   }
 
   private fail(error: NodeErrorDetail): NodeResult {

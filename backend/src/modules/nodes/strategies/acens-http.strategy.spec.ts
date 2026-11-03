@@ -83,6 +83,11 @@ describe('AcensHttpStrategy (DESTINO_ACENS)', () => {
         'statusCode',
         'responseBody',
         'dispatchedAt',
+        'campaign_id',
+        'status',
+        'dispatched_at',
+        'recipient_list',
+        'raw_response',
       ]);
     });
 

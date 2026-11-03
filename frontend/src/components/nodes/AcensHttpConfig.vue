@@ -1,7 +1,10 @@
 <script setup lang="ts">
-import { nextTick } from 'vue';
+import { computed, nextTick } from 'vue';
+
+import { useQuasar } from 'quasar';
 
 import { useAcensHttpStore } from '@stores/nodes/acens-http.store';
+import { useSessionStore } from '@stores/session.store';
 
 import KeyValueRowsEditor from '@components/shared/KeyValueRowsEditor.vue';
 import VariableInsertButton from '@components/shared/VariableInsertButton.vue';
@@ -11,7 +14,10 @@ import { insertAtCaret } from '@/utils/url-source-options';
 
 import { NODE_TYPE_LABELS, NodeType } from '@/types/pipeline';
 import {
+  ACENS_OPERATION_OPTIONS,
   AcensHttpMethod,
+  MAX_ACENS_CAMPAIGN_TEXT_LENGTH,
+  MAX_ACENS_LIST_ID_LENGTH,
   MAX_ACENS_ENDPOINT_PATH_LENGTH,
   MAX_ACENS_TIMEOUT_MS,
   MIN_ACENS_TIMEOUT_MS,
@@ -23,6 +29,7 @@ import {
   describeHeader,
 } from '@/types/nodes/http-generic-destination.types';
 
+import type { AcensOperation } from '@/types/nodes/acens-http.types';
 import type { KeyValueRow } from '@/types/nodes/http-generic-destination.types';
 
 interface Props {
@@ -34,6 +41,16 @@ const props = defineProps<Props>();
 
 // Store POR NODO: un flujo podria entregar a dos recursos de Acens.
 const store = useAcensHttpStore(props.nodeId);
+const sessionStore = useSessionStore();
+const $q = useQuasar();
+
+/** Origenes de contenido: solo namespaces que publican los pasos anteriores. */
+const contentNamespaceOptions = computed(() =>
+  store.availableUpstreamContext.map((entry) => ({
+    label: entry.namespace,
+    value: entry.namespace,
+  })),
+);
 
 /** Campos de texto que admiten variables en el cursor. */
 type InterpolableField = 'endpointPath' | 'payloadTemplate';
@@ -82,6 +99,25 @@ const toInteger = (value: string | number | null, fallback: number): number => {
 
   return Number.isInteger(parsed) ? parsed : fallback;
 };
+
+/** Ensaya la campana (sin crearla) y avisa del resultado. */
+const runCampaignTest = async (): Promise<void> => {
+  try {
+    const result = await store.testCampaignDispatch();
+
+    $q.notify({
+      type: result.success ? 'positive' : 'negative',
+      message: result.success
+        ? 'Prueba correcta: la campana se compondria asi (modo prueba, no se ha creado).'
+        : `La prueba fallo: ${result.error?.message ?? 'sin detalle'}`,
+    });
+  } catch (error: unknown) {
+    $q.notify({
+      type: 'negative',
+      message: `No se pudo lanzar la prueba: ${error instanceof Error ? error.message : 'error desconocido'}`,
+    });
+  }
+};
 </script>
 
 <template>
@@ -103,6 +139,146 @@ const toInteger = (value: string | number | null, fallback: number): number => {
       <p class="pd-subtitle q-mb-none">{{ DESTINATION_NOTICE }}</p>
     </q-banner>
 
+    <div class="row q-col-gutter-md items-start q-mb-md">
+      <div class="col-12 col-md-6" data-test="operation-field">
+        <label class="pd-label" for="acens-operation">
+          Operacion<span class="pd-required">*</span>
+        </label>
+        <q-select
+          id="acens-operation"
+          :model-value="store.config.operation"
+          :options="ACENS_OPERATION_OPTIONS"
+          outlined
+          dense
+          emit-value
+          map-options
+          class="q-mt-xs"
+          data-test="operation-select"
+          @update:model-value="store.updateConfig({ operation: $event as AcensOperation })"
+        >
+          <template #option="scope">
+            <q-item v-bind="scope.itemProps">
+              <q-item-section>
+                <q-item-label>{{ scope.opt.label }}</q-item-label>
+                <q-item-label caption>{{ scope.opt.description }}</q-item-label>
+              </q-item-section>
+            </q-item>
+          </template>
+        </q-select>
+      </div>
+    </div>
+
+    <template v-if="store.isCampaign">
+      <h3 class="pd-h2 q-mt-lg q-mb-md">Campana del boletin</h3>
+      <p class="pd-subtitle q-mb-sm">
+        Se crea en /api/1/createCampaign/ con el marcado ya validado de todas las noticias del lote.
+        El token lo anade el servidor; el nombre y el asunto llevan la fecha del envio.
+      </p>
+
+      <div class="row q-col-gutter-md items-start" data-test="campaign-fields">
+        <div class="col-12 col-md-4" data-test="list-id-field">
+          <label class="pd-label" for="acens-list-id">
+            Lista de destinatarios<span class="pd-required">*</span>
+          </label>
+          <q-input
+            id="acens-list-id"
+            :model-value="store.config.listId"
+            outlined
+            dense
+            class="q-mt-xs pd-mono"
+            :maxlength="MAX_ACENS_LIST_ID_LENGTH"
+            hint="Identificador de la lista en Acens."
+            data-test="list-id-input"
+            @update:model-value="store.updateConfig({ listId: String($event ?? '') })"
+          />
+        </div>
+        <div class="col-12 col-md-4" data-test="from-name-field">
+          <label class="pd-label" for="acens-from-name">Nombre del remitente</label>
+          <q-input
+            id="acens-from-name"
+            :model-value="store.config.fromName"
+            outlined
+            dense
+            class="q-mt-xs"
+            :maxlength="MAX_ACENS_CAMPAIGN_TEXT_LENGTH"
+            data-test="from-name-input"
+            @update:model-value="store.updateConfig({ fromName: String($event ?? '') })"
+          />
+        </div>
+        <div class="col-12 col-md-4" data-test="from-email-field">
+          <label class="pd-label" for="acens-from-email">Correo del remitente</label>
+          <q-input
+            id="acens-from-email"
+            :model-value="store.config.fromEmail"
+            type="email"
+            outlined
+            dense
+            class="q-mt-xs"
+            data-test="from-email-input"
+            @update:model-value="store.updateConfig({ fromEmail: String($event ?? '') })"
+          />
+        </div>
+        <div class="col-12 col-md-6" data-test="name-prefix-field">
+          <label class="pd-label" for="acens-name-prefix">Nombre de la campana</label>
+          <q-input
+            id="acens-name-prefix"
+            :model-value="store.config.campaignNamePrefix"
+            outlined
+            dense
+            class="q-mt-xs"
+            :maxlength="MAX_ACENS_CAMPAIGN_TEXT_LENGTH"
+            hint="Se completa con la fecha: «Notiweb DD/MM/AAAA»."
+            @update:model-value="store.updateConfig({ campaignNamePrefix: String($event ?? '') })"
+          />
+        </div>
+        <div class="col-12 col-md-6" data-test="subject-prefix-field">
+          <label class="pd-label" for="acens-subject-prefix">Asunto</label>
+          <q-input
+            id="acens-subject-prefix"
+            :model-value="store.config.subjectPrefix"
+            outlined
+            dense
+            class="q-mt-xs"
+            :maxlength="MAX_ACENS_CAMPAIGN_TEXT_LENGTH"
+            hint="Se completa con la fecha del envio."
+            @update:model-value="store.updateConfig({ subjectPrefix: String($event ?? '') })"
+          />
+        </div>
+        <div class="col-12 col-md-6" data-test="content-namespace-field">
+          <label class="pd-label" for="acens-content-namespace">Origen del contenido</label>
+          <q-select
+            id="acens-content-namespace"
+            :model-value="store.config.contentNamespace"
+            :options="contentNamespaceOptions"
+            outlined
+            dense
+            emit-value
+            map-options
+            class="q-mt-xs pd-mono"
+            hint="El namespace del escudo posterior a IA (marcado ya validado)."
+            data-test="content-namespace-select"
+            @update:model-value="store.updateConfig({ contentNamespace: String($event ?? '') })"
+          />
+        </div>
+      </div>
+
+      <div v-if="sessionStore.isAdmin" class="row items-center q-gutter-sm q-mt-md">
+        <q-btn
+          class="pd-btn-secondary"
+          flat
+          no-caps
+          icon="science"
+          label="Probar campana (modo prueba)"
+          :loading="store.isTestingCampaign"
+          :disable="!store.isConfigValid"
+          data-test="campaign-test-button"
+          @click="runCampaignTest"
+        />
+        <span class="pd-subtitle">No crea la campana: devuelve la peticion prevista.</span>
+      </div>
+    </template>
+
+    <template v-else>
     <h3 class="pd-h2 q-mt-lg q-mb-md">Destino</h3>
 
     <div class="row q-col-gutter-md items-start">
@@ -197,6 +373,7 @@ const toInteger = (value: string | number | null, fallback: number): number => {
     <p v-else class="pd-subtitle" data-test="bodyless-notice">
       Un {{ store.config.method }} no lleva cuerpo.
     </p>
+    </template>
 
     <q-expansion-item
       class="pd-advanced q-mt-lg"
