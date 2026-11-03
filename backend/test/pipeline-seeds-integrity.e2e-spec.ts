@@ -60,12 +60,17 @@ const PLAIN_TEXT_PROMPTS: readonly string[] = [
   'INNOBAR_ENLACE_DEFAULT',
 ];
 
-/** Prompts que leen documentos adjuntos y, por tanto, tambien el OCR. */
+/**
+ * Prompts que ofrecen el OCR: todos los que leen el correo. Los que citan
+ * adjuntos lo llevan junto a ellos; Innodays e Innobar, tras el correo.
+ */
 const DOCUMENT_PROMPTS: readonly string[] = [
   'NOTIWEB_DEFAULT',
   'LICITACION_APERTURA_DEFAULT',
   'LICITACION_CIERRE_DEFAULT',
   'VERIFICADOR_TITULOS_DEFAULT',
+  'INNODAYS_ENLACE_DEFAULT',
+  'INNOBAR_ENLACE_DEFAULT',
 ];
 
 /** Marcador obligatorio `{{*ns.campo}}`; el grupo 1 es la ruta. */
@@ -339,12 +344,14 @@ describe('Siembra maestra de los cinco pipelines (e2e)', () => {
     };
 
     it('11.1 deberia llevar la directiva de polivalencia adecuada a cada prompt', () => {
-      // 3. Assert 🎯: literal donde hay PLANTILLA BASE, variante de texto
-      //    plano donde no la hay.
+      // 3. Assert 🎯: donde hay PLANTILLA BASE, la que prohibe volcar
+      //    Markdown en "filled_markup" (apertura trae su propia redaccion,
+      //    "RESTRICCIÓN DE MARKDOWN"); donde no la hay, la de texto plano.
       for (const code of TEMPLATED_PROMPTS) {
-        expect(promptOf(code)).toContain(
-          'DIRECTIVA DE POLIVALENCIA Y ESTRUCTURACIÓN HTML',
+        expect(promptOf(code)).toMatch(
+          /DIRECTIVA DE POLIVALENCIA Y (ESTRUCTURACIÓN HTML|RESTRICCIÓN DE MARKDOWN)/,
         );
+        expect(promptOf(code)).toContain('"filled_markup"');
       }
       for (const code of PLAIN_TEXT_PROMPTS) {
         expect(promptOf(code)).toContain(
@@ -354,20 +361,30 @@ describe('Siembra maestra de los cinco pipelines (e2e)', () => {
       }
     });
 
-    it('11.2 deberia blindar la ranura de apertura y el rotulo bibliografico de Notiweb', () => {
-      // 3. Assert 🎯
-      expect(promptOf('LICITACION_APERTURA_DEFAULT')).toContain(
-        'INSTRUCCIÓN OBLIGATORIA DE MAQUETACIÓN DOM',
+    it('11.2 deberia blindar la extraccion de apertura y el rotulo bibliografico de Notiweb', () => {
+      // 3. Assert 🎯: titulo formal y nunca el asunto, expediente e importes
+      //    en sus ranuras, y ningun dato estimado.
+      const apertura = promptOf('LICITACION_APERTURA_DEFAULT');
+
+      expect(apertura).toContain(
+        'REGLAS DE EXTRACCIÓN Y TITULACIÓN OBLIGATORIAS',
       );
-      expect(promptOf('LICITACION_APERTURA_DEFAULT')).toContain(
-        '"licitacion-title"',
+      expect(apertura).toContain('NUNCA el asunto del correo');
+      expect(apertura).toContain('<h3 class="licitacion-title">');
+      expect(apertura).toContain('data-expediente="S_2026_015"');
+      for (const slot of ['base-imponible', 'iva', 'total']) {
+        expect(apertura).toContain(`<span class="${slot}">`);
+      }
+      expect(apertura).toContain(
+        'NUNCA lo calcules, lo deduzcas ni lo estimes',
       );
+      expect(apertura).not.toContain('QUIDA');
       expect(promptOf('NOTIWEB_DEFAULT')).toContain(
         '<h2>Referencia bibliográfica</h2>, seguido de uno o varios párrafos <p class="notiweb-referencia">',
       );
     });
 
-    it('11.3 deberia ofrecer el OCR como opcional junto al texto de los adjuntos', () => {
+    it('11.3 deberia ofrecer el OCR como opcional, una sola vez, en todos los prompts del correo', () => {
       // 3. Assert 🎯: una sola vez, para no repetir material en el prompt.
       for (const code of DOCUMENT_PROMPTS) {
         expect(promptOf(code).split('{{ocr_result.clean_body}}')).toHaveLength(

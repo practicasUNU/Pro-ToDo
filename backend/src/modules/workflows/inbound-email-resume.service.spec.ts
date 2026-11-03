@@ -5,6 +5,8 @@ import { UserRole } from '@modules/users/enums/user-role.enum';
 import {
   InboundEmailResumeService,
   RESUME_MAIL_POLL_INTERVAL_MS,
+  findShieldProducer,
+  isRegenerablePostIaError,
   looksLikeResumeCommand,
   matchesStepWords,
   normalizeStepKey,
@@ -836,6 +838,215 @@ describe('InboundEmailResumeService (ordenes de reanudacion por correo)', () => 
     });
   });
 
+  describe('4quater. Palabras vacias y guarda contra el bucle del escudo', () => {
+    /** Tramo IA -> escudo del maestro de apertura, con ids de la instruccion. */
+    const SHIELD_NODES = {
+      procesador_ia: {
+        nodeId: 'procesador_ia',
+        nodeType: 'PROCESADOR_IA',
+        outputNamespace: 'llm_response',
+        nextStep: 'escudo_post_ia',
+      },
+      escudo_post_ia: {
+        nodeId: 'escudo_post_ia',
+        nodeType: 'ESCUDO_POST_IA',
+        outputNamespace: 'validated_drupal_json',
+        params: {
+          sourceNamespace: 'llm_response',
+          sourceField: 'filled_markup',
+        },
+      },
+      mapeador_plantilla: {
+        nodeId: 'mapeador_plantilla',
+        nodeType: 'MAPEADOR_PLANTILLA',
+        outputNamespace: 'rendered_html',
+      },
+    };
+
+    /**
+     * Reanuda con el cuerpo `body`, el cursor detenido en `cursor` y, como
+     * ultimo desenlace del escudo, `lastCode`.
+     */
+    const resumeWith = async ({
+      body,
+      cursor = 'escudo_post_ia',
+      lastCode = null,
+      nodes = SHIELD_NODES,
+    }: {
+      body: string;
+      cursor?: string;
+      lastCode?: string | null | Error;
+      nodes?: Record<string, Record<string, unknown>>;
+    }): Promise<Harness> => {
+      const harness = buildHarness(
+        VALID_ENV,
+        buildExecution({ activeCursor: cursor }),
+      );
+      // El grafo se SUSTITUYE, no se mezcla con el de `buildWorkflow`: aquel
+      // ya trae un PROCESADOR_IA que publica `llm_response`, y dos productores
+      // del mismo namespace son un esquema que la regla 5 nunca dejaria pasar.
+      const workflow = buildWorkflow() as unknown as {
+        pipelineSchema: Record<string, unknown>;
+      };
+      harness.workflows.findOne.mockResolvedValue({
+        ...workflow,
+        pipelineSchema: { ...workflow.pipelineSchema, nodes },
+      });
+      if (lastCode instanceof Error) {
+        harness.alertQuery.findLastNodeErrorCode.mockRejectedValue(lastCode);
+      } else {
+        harness.alertQuery.findLastNodeErrorCode.mockResolvedValue(lastCode);
+      }
+      simpleParser.mockResolvedValue(inboundMessage(body));
+      await harness.service.processInbox();
+
+      return harness;
+    };
+
+    const resumedWith = (harness: Harness): unknown =>
+      (harness.executions.resumeExecution.mock.calls as unknown[][])[0]?.[1];
+
+    it.each([
+      ['EL NODO ESCUDO POST IA', 'escudo_post_ia'],
+      ['EL NODO MAPEADOR DE PLANTILLA', 'mapeador_plantilla'],
+      ['mapeador plantilla', 'mapeador_plantilla'],
+      ['el paso del mapeador en plantilla', 'mapeador_plantilla'],
+    ])(
+      '4quater.1 deberia resolver "DESDE %s" descartando las palabras vacias',
+      async (written, expected) => {
+        // 1. Arrange 📐 + 2. Act ⚙️: sin fallo previo del escudo, sin guarda.
+        const harness = await resumeWith({
+          body: `REANUDAR ${TOKEN} DESDE ${written}`,
+          cursor: 'procesador_ia',
+        });
+
+        // 3. Assert 🎯
+        expect(resumedWith(harness)).toEqual({ targetStepId: expected });
+      },
+    );
+
+    it('4quater.2 deberia volver a la IA si el cursor es el escudo y fallo por DOM mutado', async () => {
+      // 1. Arrange 📐 + 2. Act ⚙️: orden sin DESDE, cursor en el escudo.
+      const harness = await resumeWith({
+        body: `REANUDAR ${TOKEN}`,
+        lastCode: 'ERR_POST_IA_DOM_MUTATED',
+      });
+
+      // 3. Assert 🎯
+      expect(resumedWith(harness)).toEqual({ targetStepId: 'procesador_ia' });
+      expect(harness.alertQuery.findLastNodeErrorCode).toHaveBeenCalledWith(
+        EXECUTION_ID,
+        'escudo_post_ia',
+      );
+      expect(harness.warnSpy).toHaveBeenCalledWith(
+        expect.stringContaining(
+          'Se reanuda desde "procesador_ia" para regenerarla',
+        ),
+      );
+    });
+
+    it('4quater.3 deberia volver a la IA tambien si el DESDE no resuelve', async () => {
+      // 1. Arrange 📐 + 2. Act ⚙️
+      const harness = await resumeWith({
+        body: `REANUDAR ${TOKEN} DESDE PASO_INEXISTENTE`,
+        lastCode: 'ERR_POST_IA_RESIDUAL_VARS',
+      });
+
+      // 3. Assert 🎯
+      expect(resumedWith(harness)).toEqual({ targetStepId: 'procesador_ia' });
+    });
+
+    it('4quater.4 deberia redirigir un "DESDE EL NODO ESCUDO POST IA" explicito tras un fallo regenerable', async () => {
+      // 1. Arrange 📐 + 2. Act ⚙️: el operador pide el escudo, pero su entrada
+      //    sigue siendo la respuesta que ya rechazo.
+      const harness = await resumeWith({
+        body: `REANUDAR ${TOKEN} DESDE EL NODO ESCUDO POST IA`,
+        lastCode: 'ERR_POST_IA_DOM_MUTATED',
+      });
+
+      // 3. Assert 🎯
+      expect(resumedWith(harness)).toEqual({ targetStepId: 'procesador_ia' });
+      expect(harness.warnSpy).toHaveBeenCalledWith(
+        expect.stringContaining('ERR_POST_IA_DOM_MUTATED'),
+      );
+    });
+
+    it('4quater.5 deberia respetar el escudo explicito si su ultimo desenlace no fue un fallo', async () => {
+      // 1. Arrange 📐 + 2. Act ⚙️
+      const harness = await resumeWith({
+        body: `REANUDAR ${TOKEN} DESDE escudo post ia`,
+        lastCode: null,
+      });
+
+      // 3. Assert 🎯
+      expect(resumedWith(harness)).toEqual({ targetStepId: 'escudo_post_ia' });
+    });
+
+    it.each(['ERR_POST_IA_CONFIG', 'ERR_POST_IA_UNSUPPORTED_TAGS'])(
+      '4quater.6 no deberia volver a la IA ante %s: es un error de los params del escudo',
+      async (code) => {
+        // 1. Arrange 📐 + 2. Act ⚙️
+        const harness = await resumeWith({
+          body: `REANUDAR ${TOKEN}`,
+          lastCode: code,
+        });
+
+        // 3. Assert 🎯: sin DESDE, sigue siendo el cursor.
+        expect(resumedWith(harness)).toEqual({});
+      },
+    );
+
+    it('4quater.7 no deberia consultar la traza si el cursor no es un escudo', async () => {
+      // 1. Arrange 📐 + 2. Act ⚙️
+      const harness = await resumeWith({
+        body: `REANUDAR ${TOKEN}`,
+        cursor: 'procesador_ia',
+      });
+
+      // 3. Assert 🎯
+      expect(resumedWith(harness)).toEqual({});
+      expect(harness.alertQuery.findLastNodeErrorCode).not.toHaveBeenCalled();
+    });
+
+    it('4quater.8 deberia quedarse en el escudo, con aviso, si no hay productor', async () => {
+      // 1. Arrange 📐 + 2. Act ⚙️: nadie publica `llm_response` ni apunta al
+      //    escudo con su `nextStep`.
+      const harness = await resumeWith({
+        body: `REANUDAR ${TOKEN}`,
+        lastCode: 'ERR_POST_IA_DOM_MUTATED',
+        nodes: {
+          escudo_post_ia: {
+            ...SHIELD_NODES.escudo_post_ia,
+            params: { sourceNamespace: 'otra_fuente' },
+          },
+        },
+      });
+
+      // 3. Assert 🎯
+      expect(resumedWith(harness)).toEqual({});
+      expect(harness.warnSpy).toHaveBeenCalledWith(
+        expect.stringContaining(
+          'no se encontro el nodo que produce su entrada',
+        ),
+      );
+    });
+
+    it('4quater.9 no deberia bloquear la reanudacion si la traza no se puede leer', async () => {
+      // 1. Arrange 📐 + 2. Act ⚙️
+      const harness = await resumeWith({
+        body: `REANUDAR ${TOKEN}`,
+        lastCode: new Error('conexion perdida'),
+      });
+
+      // 3. Assert 🎯
+      expect(harness.executions.resumeExecution).toHaveBeenCalledTimes(1);
+      expect(resumedWith(harness)).toEqual({});
+      expect(harness.warnSpy).toHaveBeenCalledWith(
+        expect.stringContaining('No se pudo leer la traza del escudo'),
+      );
+    });
+  });
+
   describe('5. Higiene del buzon', () => {
     it('5.1 deberia marcar como leido un comando ACEPTADO', async () => {
       // 1. Arrange 📐
@@ -1010,6 +1221,12 @@ describe('InboundEmailResumeService (ordenes de reanudacion por correo)', () => 
         'web',
       ]);
       expect(tokenizeStepWords('de la')).toEqual([]);
+      expect(tokenizeStepWords('EL NODO ESCUDO POST IA')).toEqual([
+        'escudo',
+        'post',
+        'ia',
+      ]);
+      expect(tokenizeStepWords('paso al nodo en step node')).toEqual([]);
     });
 
     it('5bis.6 deberia exigir todas las palabras pedidas, en cualquier orden', () => {
@@ -1020,6 +1237,36 @@ describe('InboundEmailResumeService (ordenes de reanudacion por correo)', () => 
       expect(matchesStepWords(['plantilla', 'mapeador'], candidate)).toBe(true);
       expect(matchesStepWords(['mapeador', 'web'], candidate)).toBe(false);
       expect(matchesStepWords([], candidate)).toBe(false);
+    });
+
+    it.each([
+      ['ERR_POST_IA_DOM_MUTATED', true],
+      ['ERR_POST_IA_RESIDUAL_VARS', true],
+      ['ERR_POST_IA_EMPTY_HTML', true],
+      ['ERR_POST_IA_CONFIG', false],
+      ['ERR_POST_IA_UNSUPPORTED_TAGS', false],
+      ['ERR_LLM_INTERPOLATION', false],
+      [null, false],
+    ])('5bis.7 %s deberia ser regenerable: %s', (code, expected) => {
+      // 1. Arrange 📐 + 2. Act ⚙️ + 3. Assert 🎯
+      expect(isRegenerablePostIaError(code)).toBe(expected);
+    });
+
+    it('5bis.8 deberia localizar el productor por namespace y, si no, por nextStep', () => {
+      // 1. Arrange 📐
+      const byNamespace = {
+        ia: { outputNamespace: 'llm_response' },
+        escudo: { nodeType: 'ESCUDO_POST_IA', params: {} },
+      };
+      const byTopology = {
+        previo: { outputNamespace: 'otra', nextStep: 'escudo' },
+        escudo: { params: { sourceNamespace: 'inexistente' } },
+      };
+
+      // 2. Act ⚙️ + 3. Assert 🎯
+      expect(findShieldProducer(byNamespace, 'escudo')).toBe('ia');
+      expect(findShieldProducer(byTopology, 'escudo')).toBe('previo');
+      expect(findShieldProducer({ escudo: {} }, 'escudo')).toBeNull();
     });
 
     it('5bis.4 deberia declarar una espera minima de sondeo de 5000 ms', () => {

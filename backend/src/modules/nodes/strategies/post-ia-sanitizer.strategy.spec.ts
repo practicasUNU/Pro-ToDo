@@ -574,6 +574,37 @@ describe('PostIaSanitizerStrategy', () => {
         );
       });
 
+      it('5.6.3 deberia aprobar el bloque completo y conservar expediente e importes', async () => {
+        // 1. Arrange 📐: lo que el prompt de apertura exige rellenar.
+        const strategy = buildStrategy();
+        const context = buildContext({
+          [SOURCE_FIELD]:
+            '<div class="licitacion-entry pd-licitacion-block" data-expediente="S_2026_015">' +
+            '<h3 class="licitacion-title">S_2026_015 Servicios de apoyo al emprendimiento innovador</h3>' +
+            '<ul class="licitacion-presupuesto">' +
+            '<li><strong>Base Imponible:</strong> <span class="base-imponible">33.000,00 euros</span></li>' +
+            '<li><strong>Importe del I.V.A.:</strong> <span class="iva">6.930,00 euros</span></li>' +
+            '<li><strong>Importe total:</strong> <span class="total">39.930,00 euros</span></li>' +
+            '</ul></div>',
+        });
+
+        // 2. Act ⚙️
+        const result = await strategy.execute(context, {
+          requiredSelectors: APERTURA_SELECTORS,
+        });
+
+        // 3. Assert 🎯: el saneado no se lleva el atributo que localiza el
+        //    bloque ni las clases de los importes.
+        const markup = String(result.data?.validated_markup);
+        expect(result.success).toBe(true);
+        expect(markup).toContain('data-expediente="S_2026_015"');
+        expect(markup).toContain(
+          '<span class="base-imponible">33.000,00 euros</span>',
+        );
+        expect(markup).toContain('<span class="iva">6.930,00 euros</span>');
+        expect(markup).toContain('<span class="total">39.930,00 euros</span>');
+      });
+
       it.each([
         ['borro la clase', '<h3>Objeto válido</h3>'],
         ['suprimio el <h3>', '<p>Objeto válido</p>'],
