@@ -5308,3 +5308,15 @@ Rama: `feat/drupal-and-acens-nodes-dev`. Migraciones `065` y `066`.
 - [x] Cardinalidad AUTO de punta a punta y buscador de plantillas
 - [x] 069 con contingencias y prompts blindados, idempotente
 - [ ] Pendiente: reejecutar la 069 en la base de desarrollo con `psql -f`
+
+## Reanudacion por ejecucion, OCR por imagen citada y prompts consolidados
+
+- **Reanudacion desacoplada:** `ExecutionsService.startResumeExecution` hace todo lo que puede rechazar la orden (validaciones, capacidad, `prepareResume`, reactivacion, aviso) y devuelve `{ executionId, completion }` con el motor ya en marcha. `resumeExecution` espera `completion` y conserva su contrato HTTP. El canal de correo no la espera: su barrido es global y quedaba ocupado hasta que el flujo reanudado terminaba.
+- **Guarda por ejecucion:** `InboundEmailResumeService.resumingExecutions` ignora una orden duplicada sobre una ejecucion cuyo recorrido sigue en marcha; las de otras ejecuciones corren en paralelo. El mutex `idx_flujo_activo` sigue siendo por flujo (RNF-09).
+- **Frontend:** `execution.store` lleva `resumingExecutionIds` / `discardingExecutionIds` y los getters `isResumingExecution(id)` / `isDiscardingExecution(id)`; cada boton de la tabla, del canvas y del panel de inspeccion se apaga solo para su ejecucion.
+- **Parser:** ademas del texto util bajo el umbral, pide vision cuando el cuerpo cita una imagen en linea (`[image: ...]`, `[imagen: ...]`, `[cid: ...]`) y hay una captura sin texto de al menos `MIN_INLINE_CAPTURE_BYTES` (20 000 bytes; los logotipos de firma quedan fuera). Con `failOnUnextractableMedia` el maestro la desvia a `ocr_ia`.
+- **Migracion 069, paso 5d consolidado:** Notiweb con deteccion de lote y fuentes mixtas (articulo para la principal; titulo, fuente y entradilla del listado para las secundarias, "Blog del dia" incluido), MINIMO DE 4 PARRAFOS por noticia y cierre APA 7 obligatorio; titulos con respaldos para `.panel-comite-codigo` (siglas) y `.panel-facultad-nombre` (titulacion o universidad) y la regla de no inventar sin datos. Sustituye el bloque de la version anterior del paso.
+- [x] Reanudacion independiente por ejecucion (correo y asistente)
+- [x] OCR para capturas citadas en el cuerpo
+- [x] Prompts consolidados e idempotentes
+- [ ] Pendiente: reejecutar la 069 en la base de desarrollo con `psql -f`

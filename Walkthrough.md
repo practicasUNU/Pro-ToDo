@@ -9501,3 +9501,14 @@ mapeador.
 - [x] 069 aplicada dos veces en la base de pruebas: el segundo pase no cambia nada
 - [x] Ensayo en desarrollo con transaccion revertida
 - [ ] Reejecutar la 069 en desarrollo (`psql -f`)
+
+## Reanudacion independiente y capturas en imagen
+
+- **Por que el bloqueo no estaba en el motor:** su unica guarda es la de la propia ejecucion y el mutex por flujo. El bloqueo lo producian el barrido del correo, que esperaba el flujo entero, y un unico `isResuming` en la interfaz que deshabilitaba todos los botones mientras la peticion seguia abierta.
+- **Por que se separa arranque y recorrido:** lo que puede rechazar la orden tiene que contestarse en el acto; el recorrido puede durar minutos y nadie debe esperarlo salvo quien lo pidio por HTTP.
+- **Por que el fallo de titulos no era del prompt:** la tabla venia en una imagen en linea y el cuerpo superaba el umbral de texto, asi que la IA nunca la vio. Un prompt con respaldos pero sin la regla de no inventar habria publicado un panel rellenado a ciegas.
+- **Por que el umbral de 20 KB:** los logotipos de firma tambien dejan su marcador en el texto plano; una captura con datos pesa decenas de kilobytes.
+- **Por que el paso 5d sustituye su bloque anterior:** la base de desarrollo ya tenia la version previa; insertar al lado habria dejado dos reglas de extension contradictorias.
+- [x] 069 aplicada dos veces en la base de pruebas sin cambios en el segundo pase
+- [x] Camino de base nueva comprobado en transaccion revertida
+- [ ] Reejecutar la 069 en desarrollo (`psql -f`)
