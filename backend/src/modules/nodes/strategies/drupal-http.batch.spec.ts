@@ -35,17 +35,20 @@ type HttpMock = jest.Mocked<Pick<HttpClientService, 'requestWithStatus'>>;
 const buildHttpMock = (): HttpMock => ({ requestWithStatus: jest.fn() });
 
 const buildStrategy = (httpClient: HttpMock): DrupalHttpStrategy =>
-  new DrupalHttpStrategy(httpClient as unknown as HttpClientService, {
-    baseUrl: BASE_URL,
-    siteRootUrl: 'https://drupal.example',
-    token: 'token',
-    user: 'editor_api',
-    authType: 'BASIC',
-    authHeader: 'Basic dGVzdA==',
-    timeoutMs: 15_000,
-    isUsable: true,
-    productionNodeUuids: new Set<string>(),
-  } as unknown as DrupalApiConfig);
+  new DrupalHttpStrategy(
+    httpClient as unknown as HttpClientService,
+    {
+      baseUrl: BASE_URL,
+      siteRootUrl: 'https://drupal.example',
+      token: 'token',
+      user: 'editor_api',
+      authType: 'BASIC',
+      authHeader: 'Basic dGVzdA==',
+      timeoutMs: 15_000,
+      isUsable: true,
+      productionNodeUuids: new Set<string>(),
+    } as unknown as DrupalApiConfig,
+  );
 
 const buildContext = (
   namespaces: Record<string, Record<string, unknown>>,
@@ -74,9 +77,7 @@ const pageResponse = (
     id,
   );
 
-const createdResponse = (
-  nid: number,
-): { data: unknown; status: number } => ({
+const createdResponse = (nid: number): { data: unknown; status: number } => ({
   data: {
     data: {
       id: `uuid-${nid}`,
@@ -209,9 +210,9 @@ describe('DrupalHttpStrategy · lotes (cardinalidad 1 a N)', () => {
       expect(result.data?.total_published).toBe(3);
       expect(result.data?.drupal_internal__nid).toBe(1);
       expect(
-        (result.data?.published_nodes as { drupal_internal__nid: number }[]).map(
-          (entry) => entry.drupal_internal__nid,
-        ),
+        (
+          result.data?.published_nodes as { drupal_internal__nid: number }[]
+        ).map((entry) => entry.drupal_internal__nid),
       ).toEqual([1, 2, 3]);
     });
 
@@ -252,6 +253,149 @@ describe('DrupalHttpStrategy · lotes (cardinalidad 1 a N)', () => {
       expect(secondRun.requestWithStatus).toHaveBeenCalledTimes(1);
       expect(sentTitle(secondRun, 0)).toBe('Noticia 2');
       expect(resumed.data?.total_published).toBe(2);
+    });
+  });
+
+  describe('1bis. URLs del lote (urls, created_nodes, url)', () => {
+    const createParams = {
+      operationMode: DrupalOperationMode.CREATE_NODE,
+      bundle: 'node--article',
+      titleTemplate: '{{llm_response.headline}}',
+    };
+
+    it('1bis.1 deberia acumular las TRES URLs del lote, en orden, con id y titulo', async () => {
+      // 1. Arrange 📐
+      const httpClient = buildHttpMock();
+      httpClient.requestWithStatus
+        .mockResolvedValueOnce(createdResponse(1))
+        .mockResolvedValueOnce(createdResponse(2))
+        .mockResolvedValueOnce(createdResponse(3));
+
+      // 2. Act ⚙️
+      const result = await buildStrategy(httpClient).execute(
+        batchContext([
+          { headline: 'Noticia 1', markup: '<p>Uno</p>' },
+          { headline: 'Noticia 2', markup: '<p>Dos</p>' },
+          { headline: 'Noticia 3', markup: '<p>Tres</p>' },
+        ]),
+        createParams,
+      );
+
+      // 3. Assert 🎯
+      expect(result.success).toBe(true);
+      expect(result.data?.urls).toEqual([
+        'https://drupal.example/noticia-1',
+        'https://drupal.example/noticia-2',
+        'https://drupal.example/noticia-3',
+      ]);
+      expect(result.data?.created_nodes).toEqual([
+        {
+          id: 'uuid-1',
+          url: 'https://drupal.example/noticia-1',
+          title: 'Noticia 1',
+        },
+        {
+          id: 'uuid-2',
+          url: 'https://drupal.example/noticia-2',
+          title: 'Noticia 2',
+        },
+        {
+          id: 'uuid-3',
+          url: 'https://drupal.example/noticia-3',
+          title: 'Noticia 3',
+        },
+      ]);
+      // Retrocompatible: `url` y `published_url` siguen siendo la primera.
+      expect(result.data?.url).toBe('https://drupal.example/noticia-1');
+      expect(result.data?.published_url).toBe(
+        'https://drupal.example/noticia-1',
+      );
+    });
+
+    it('1bis.2 deberia devolver una sola URL con un solo elemento', async () => {
+      // 1. Arrange 📐
+      const httpClient = buildHttpMock();
+      httpClient.requestWithStatus.mockResolvedValueOnce(createdResponse(7));
+
+      // 2. Act ⚙️
+      const result = await buildStrategy(httpClient).execute(
+        batchContext([{ headline: 'Unica', markup: '<p>Unica</p>' }]),
+        createParams,
+      );
+
+      // 3. Assert 🎯
+      expect(result.data?.urls).toEqual(['https://drupal.example/noticia-7']);
+      expect(result.data?.url).toBe('https://drupal.example/noticia-7');
+    });
+
+    it('1bis.3 deberia incluir al reanudar las URLs de lo que ya se habia creado', async () => {
+      // 1. Arrange 📐: primer intento con el 2.º POST caido.
+      const elements = [
+        { headline: 'Noticia 1', markup: '<p>Uno</p>' },
+        { headline: 'Noticia 2', markup: '<p>Dos</p>' },
+      ];
+      const firstRun = buildHttpMock();
+      firstRun.requestWithStatus
+        .mockResolvedValueOnce(createdResponse(1))
+        .mockResolvedValueOnce(httpFailure(503));
+      const failed = await buildStrategy(firstRun).execute(
+        batchContext(elements),
+        createParams,
+      );
+      const resumedContext = batchContext(elements);
+      resumedContext.setNamespace('http_result', failed.data ?? {});
+      const secondRun = buildHttpMock();
+      secondRun.requestWithStatus.mockResolvedValueOnce(createdResponse(2));
+
+      // 2. Act ⚙️
+      const resumed = await buildStrategy(secondRun).execute(
+        resumedContext,
+        createParams,
+      );
+
+      // 3. Assert 🎯: el parcial ya llevaba su URL, y la reanudacion las dos.
+      expect(failed.data?.urls).toEqual(['https://drupal.example/noticia-1']);
+      expect(resumed.data?.urls).toEqual([
+        'https://drupal.example/noticia-1',
+        'https://drupal.example/noticia-2',
+      ]);
+      expect(
+        (resumed.data?.created_nodes as { title: string }[]).map(
+          (node) => node.title,
+        ),
+      ).toEqual(['Noticia 1', 'Noticia 2']);
+    });
+
+    it('1bis.4 deberia dejar urls vacia y url en blanco en los modos que no crean entidades', async () => {
+      // 1. Arrange 📐: UPDATE_LINK_SOURCE no crea nada.
+      const httpClient = buildHttpMock();
+      httpClient.requestWithStatus.mockResolvedValueOnce(
+        pageResponse(
+          '<p><a class="enlace" href="https://viejo.example">Jornada</a></p>',
+        ),
+      );
+
+      // 2. Act ⚙️
+      const result = await buildStrategy(httpClient).execute(
+        buildContext({
+          llm_response: {
+            headline: 'Jornada',
+            summary: 'https://viejo.example',
+          },
+          validated_drupal_json: { validated_fields: {} },
+        }),
+        {
+          operationMode: DrupalOperationMode.UPDATE_LINK_SOURCE,
+          targetNodeUuid: PAGE_UUID,
+          linkSelector: 'a.enlace',
+          linkValueTemplate: '{{llm_response.summary}}',
+        },
+      );
+
+      // 3. Assert 🎯: tenga exito o no, la forma es la misma.
+      expect(result.data?.urls).toEqual([]);
+      expect(result.data?.created_nodes).toEqual([]);
+      expect(result.data?.url).toBe('');
     });
   });
 

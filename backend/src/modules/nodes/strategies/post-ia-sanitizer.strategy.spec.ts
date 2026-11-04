@@ -15,6 +15,11 @@ import {
   PostIaSanitizerStrategy,
 } from './post-ia-sanitizer.strategy';
 
+import {
+  CANONICAL_ALLOWED_TAGS,
+  TEMPLATE_SANITIZER_CONFIG,
+} from '@modules/templates/services/template-renderer.service';
+
 import type { StatePayloadContext } from '@core/fsm/context/state-payload.context';
 import type { TemplateRendererService } from '@modules/templates/services/template-renderer.service';
 
@@ -998,6 +1003,187 @@ describe('PostIaSanitizerStrategy', () => {
       expect(item?.validated_fields).toEqual({
         headline: 'EXP-2',
         summary: 'Dos',
+      });
+    });
+  });
+
+  /**
+   * El defecto que lo motivo: el atajo "Estructura completa" del asistente
+   * escribia un `allowedTags` sin `h2`, y el escudo, obediente, borraba los
+   * encabezados de seccion y la cabecera "Referencia bibliografica".
+   */
+  describe('11. Encabezados y lista canonica', () => {
+    const NOTIWEB_MARKUP =
+      '<div class="notiweb-cuerpo"><p>Uno.</p><h2>Contexto</h2><p>Dos.</p><h3 class="sub">Detalle</h3><p>Tres.</p></div><hr /><h2>Referencia bibliográfica</h2><p class="notiweb-referencia">Autor, A. (2026). Titulo.</p>';
+
+    /** El atajo antiguo, tal cual quedo guardado en los flujos. */
+    const OLD_FULL_STRUCTURE = [
+      'p',
+      'strong',
+      'em',
+      'ul',
+      'li',
+      'a',
+      'img',
+      'table',
+      'tr',
+      'th',
+      'td',
+      'div',
+      'span',
+      'h3',
+      'h4',
+      'h5',
+      'hr',
+    ];
+
+    it('11.1 deberia conservar intactos <h2> y <h3> sin recorte de etiquetas', async () => {
+      // 1. Arrange 📐
+      const strategy = buildStrategy();
+      const context = buildContext({ [SOURCE_FIELD]: NOTIWEB_MARKUP });
+
+      // 2. Act ⚙️
+      const result = await strategy.execute(context, {});
+
+      // 3. Assert 🎯
+      expect(result.success).toBe(true);
+      expect(result.data?.validated_markup).toContain('<h2>Contexto</h2>');
+      expect(result.data?.validated_markup).toContain(
+        '<h2>Referencia bibliográfica</h2>',
+      );
+      expect(result.data?.validated_markup).toContain(
+        '<h3 class="sub">Detalle</h3>',
+      );
+    });
+
+    it('11.2 deberia conservarlos tambien con la lista canonica como allowedTags', async () => {
+      // 1. Arrange 📐: la lista que escribe ahora el atajo del asistente.
+      const strategy = buildStrategy();
+      const context = buildContext({
+        [SOURCE_FIELD]: `${NOTIWEB_MARKUP}<p><strike>8 de octubre</strike> 15 de octubre</p>`,
+      });
+
+      // 2. Act ⚙️
+      const result = await strategy.execute(context, {
+        allowedTags: [...CANONICAL_ALLOWED_TAGS],
+      });
+
+      // 3. Assert 🎯
+      expect(result.success).toBe(true);
+      expect(result.data?.validated_markup).toContain(
+        '<h2>Referencia bibliográfica</h2>',
+      );
+      expect(result.data?.validated_markup).toContain('<h3 class="sub">');
+      expect(result.data?.validated_markup).toContain(
+        '<strike>8 de octubre</strike>',
+      );
+    });
+
+    it('11.3 deberia documentar la causa: el atajo antiguo sin h2 los borraba', async () => {
+      // 1. Arrange 📐
+      const strategy = buildStrategy();
+      const context = buildContext({ [SOURCE_FIELD]: NOTIWEB_MARKUP });
+
+      // 2. Act ⚙️
+      const result = await strategy.execute(context, {
+        allowedTags: OLD_FULL_STRUCTURE,
+      });
+
+      // 3. Assert 🎯: el recorte se obedece, por eso habia que corregir el atajo.
+      expect(result.success).toBe(true);
+      expect(result.data?.validated_markup).not.toContain('<h2>');
+      expect(result.data?.validated_markup).toContain('<h3 class="sub">');
+    });
+
+    it('11.4 la lista canonica deberia ser un subconjunto de la lista blanca del saneador', () => {
+      // 1. Arrange 📐 + 2. Act ⚙️
+      const whitelist = TEMPLATE_SANITIZER_CONFIG.allowedTags as string[];
+
+      // 3. Assert 🎯
+      expect(whitelist).toEqual(
+        expect.arrayContaining([...CANONICAL_ALLOWED_TAGS]),
+      );
+      expect(CANONICAL_ALLOWED_TAGS).toEqual(
+        expect.arrayContaining([
+          'h2',
+          'h3',
+          'h4',
+          'h5',
+          'h6',
+          'strike',
+          'thead',
+        ]),
+      );
+    });
+
+    it('11.5 deberia conservar class, id y data-* en enlaces y contenedores, y colspan en celdas', async () => {
+      // 1. Arrange 📐
+      const strategy = buildStrategy();
+      const context = buildContext({
+        [SOURCE_FIELD]:
+          '<div class="panel" id="p1" data-parent="#accordion"><a class="panel-toggle-link" id="l1" href="#collapse1" title="Abrir">Abrir</a><table><tbody><tr><td colspan="2" rowspan="1">X</td></tr></tbody></table></div>',
+      });
+
+      // 2. Act ⚙️
+      const result = await strategy.execute(context, {});
+
+      // 3. Assert 🎯
+      const markup = String(result.data?.validated_markup);
+      expect(result.success).toBe(true);
+      expect(markup).toContain('data-parent="#accordion"');
+      expect(markup).toContain('class="panel-toggle-link"');
+      expect(markup).toContain('id="l1"');
+      expect(markup).toContain('colspan="2"');
+    });
+
+    describe('11.6 encabezado del panel de titulos', () => {
+      const PANEL_SELECTORS = [
+        '.panel-title',
+        '.panel-comite-codigo',
+        '.panel-facultad-nombre',
+      ];
+      const panel = (codigo: string, facultad: string): string =>
+        `<div class="panel panel-default"><div class="panel-heading"><h5 class="panel-title"><a class="panel-toggle-link" href="#collapseESIC1"><strong class="panel-comite-codigo">${codigo}</strong>&nbsp;<span class="panel-facultad-nombre">${facultad}</span></a></h5></div></div>`;
+
+      it('deberia rechazar con ERR_POST_IA_DOM_MUTATED un .panel-title vacio', async () => {
+        // 1. Arrange 📐
+        const strategy = buildStrategy();
+        const context = buildContext({ [SOURCE_FIELD]: panel('', '') });
+
+        // 2. Act ⚙️
+        const result = await strategy.execute(context, {
+          requiredSelectors: PANEL_SELECTORS,
+        });
+
+        // 3. Assert 🎯
+        expect(result.success).toBe(false);
+        expect(result.error?.level).toBe('GRAVE');
+        expect(result.error?.code).toBe(ERR_POST_IA_DOM_MUTATED);
+        expect(result.error?.missingFields).toEqual(
+          expect.arrayContaining([
+            '.panel-comite-codigo',
+            '.panel-facultad-nombre',
+          ]),
+        );
+      });
+
+      it('deberia aceptar el panel con sus tres ranuras rellenas', async () => {
+        // 1. Arrange 📐
+        const strategy = buildStrategy();
+        const context = buildContext({
+          [SOURCE_FIELD]: panel('ESIC 1', 'Facultad de Ciencias Sociales'),
+        });
+
+        // 2. Act ⚙️
+        const result = await strategy.execute(context, {
+          requiredSelectors: PANEL_SELECTORS,
+        });
+
+        // 3. Assert 🎯
+        expect(result.success).toBe(true);
+        expect(result.data?.validated_markup).toContain(
+          '<h5 class="panel-title">',
+        );
       });
     });
   });

@@ -8,6 +8,8 @@ import {
   QCardSection,
   QDialog,
   QIcon,
+  QItem,
+  QList,
   Quasar,
 } from 'quasar';
 import { describe, expect, it } from 'vitest';
@@ -33,7 +35,7 @@ const mountModal = (props: Record<string, unknown> = {}): ReturnType<typeof moun
     props: { publishedUrl: PUBLISHED_URL, ...props },
     global: {
       plugins: [Quasar],
-      components: { QBtn, QCard, QCardActions, QCardSection, QDialog, QIcon },
+      components: { QBtn, QCard, QCardActions, QCardSection, QDialog, QIcon, QItem, QList },
       directives: { ClosePopup },
     },
     attachTo: document.body,
@@ -73,6 +75,35 @@ describe('DrupalPublishSuccessModal', () => {
     expect(query('[data-test="drupal-publish-close"]')?.textContent).toContain(
       'Entendido y Cerrar',
     );
+    wrapper.unmount();
+  });
+
+  it('3. deberia enlazar TODAS las paginas de un lote, en orden', async () => {
+    // Arrange 📐 & Act ⚙️: un boletin de tres noticias.
+    const urls = [
+      'https://portal.example/n-1',
+      'https://portal.example/n-2',
+      'https://portal.example/n-3',
+    ];
+    const wrapper = mountModal({ publishedUrl: urls[0], publishedUrls: urls });
+    await openModal(wrapper);
+
+    // Assert 🎯
+    const links = [...document.body.querySelectorAll('[data-test="drupal-publish-link"]')];
+    expect(links.map((link) => link.getAttribute('href'))).toEqual(urls);
+    expect(links.every((link) => link.getAttribute('rel') === 'noopener noreferrer')).toBe(true);
+    expect(query('[data-test="drupal-publish-count"]')?.textContent).toContain('(3)');
+    wrapper.unmount();
+  });
+
+  it('4. deberia mostrar un solo enlace si el lote trae una sola URL', async () => {
+    // Arrange 📐 & Act ⚙️
+    const wrapper = mountModal({ publishedUrls: [PUBLISHED_URL] });
+    await openModal(wrapper);
+
+    // Assert 🎯
+    expect(document.body.querySelectorAll('[data-test="drupal-publish-link"]')).toHaveLength(1);
+    expect(query('[data-test="drupal-publish-count"]')).toBeNull();
     wrapper.unmount();
   });
 });

@@ -4263,6 +4263,58 @@ describe('FsmEngineService (PROT-09)', () => {
       );
     });
 
+    it.each([
+      [
+        'adjuntar todas las URLs de un lote',
+        [
+          'https://portal.example/n-1',
+          'https://portal.example/n-2',
+          'https://portal.example/n-3',
+        ],
+        true,
+      ],
+      [
+        'omitir publishedUrls con una sola URL',
+        ['https://portal.example/n-1'],
+        false,
+      ],
+    ])('36.1b-bis deberia %s', async (_caso, urls, expectsList) => {
+      // 1. Arrange 📐: el destino publico un lote (o un solo elemento).
+      const { repo } = buildRepository(buildExecution());
+      const { engine, events } = buildListeningEngine(repo);
+      const emitFlowCompleted = jest.spyOn(events, 'emitFlowCompleted');
+
+      for (const nodeType of [NodeType.TRIGGER_IMAP, NodeType.PROCESADOR_IA]) {
+        factory.registerStrategy(
+          buildStrategy(
+            nodeType,
+            jest.fn().mockResolvedValue({ success: true, data: {} }),
+          ),
+        );
+      }
+      factory.registerStrategy(
+        buildStrategy(
+          NodeType.DESTINO_DRUPAL,
+          jest.fn().mockResolvedValue({
+            success: true,
+            data: { published_url: urls[0], exit_page: '/n-1', urls },
+          }),
+        ),
+      );
+
+      // 2. Act ⚙️
+      await engine.executeWorkflow(EXECUTION_ID, buildLinearSchema());
+
+      // 3. Assert 🎯
+      const [event] = emitFlowCompleted.mock.calls[0] ?? [];
+      expect(event).toMatchObject({ publishedUrl: urls[0] });
+      if (expectsList) {
+        expect(event).toMatchObject({ publishedUrls: urls });
+      } else {
+        expect(event).not.toHaveProperty('publishedUrls');
+      }
+    });
+
     it('36.1c NO deberia adjuntar enlace si el destino no devolvio URL', async () => {
       // 1. Arrange 📐: la interfaz decide por la presencia del campo.
       const { repo } = buildRepository(buildExecution());

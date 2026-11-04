@@ -1,6 +1,7 @@
 import { MockLlmProvider } from '@modules/nodes/strategies/providers/mock-llm.provider';
 
 import {
+  RESPONSE_ITEMS_AUTO_RULE,
   RESPONSE_ITEMS_RULE,
   buildResponseContractInstruction,
   buildResponseJsonSchema,
@@ -81,6 +82,27 @@ describe('Contrato de salida del nodo de IA · cardinalidad 1 a N', () => {
         RESPONSE_ITEMS_RULE,
       );
       expect(RESPONSE_ITEMS_RULE).toContain('PRIMER elemento');
+    });
+
+    it('2.2 deberia usar la regla tolerante solo en modo AUTO', () => {
+      // 1. Arrange 📐 + 2. Act ⚙️
+      const strict = buildResponseContractInstruction(true, true);
+      const tolerant = buildResponseContractInstruction(true, true, true);
+
+      // 3. Assert 🎯
+      expect(strict).toContain(RESPONSE_ITEMS_RULE);
+      expect(strict).not.toContain(RESPONSE_ITEMS_AUTO_RULE);
+      expect(tolerant).toContain(RESPONSE_ITEMS_AUTO_RULE);
+      expect(tolerant).not.toContain(RESPONSE_ITEMS_RULE);
+      expect(RESPONSE_ITEMS_AUTO_RULE).toContain('TOLERANTE');
+      expect(RESPONSE_ITEMS_AUTO_RULE).toContain('no lo dividas');
+    });
+
+    it('2.3 deberia ignorar autoDetectItems si no se pide lote', () => {
+      // 1. Arrange 📐 + 2. Act ⚙️ + 3. Assert 🎯
+      expect(buildResponseContractInstruction(true, false, true)).not.toContain(
+        'items',
+      );
     });
   });
 

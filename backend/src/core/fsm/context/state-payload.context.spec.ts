@@ -872,6 +872,112 @@ describe('StatePayloadContext (PROT-08)', () => {
       });
     });
 
+    it('deberia purgar el contentBase64 de los adjuntos en el contexto derivado', () => {
+      // 1. Arrange 📐: un correo con un adjunto binario y otro ya liberado.
+      const base = buildContext();
+      base.setNamespace('raw_email', {
+        subject: 'RV: NOTIWEB',
+        attachments: [
+          {
+            filename: 'escaneo.png',
+            contentType: 'image/png',
+            size: 4,
+            contentBase64: 'iVBORw==',
+          },
+          {
+            filename: 'nota.txt',
+            contentType: 'text/plain',
+            size: 2,
+            contentBase64: null,
+          },
+        ],
+      });
+
+      // 2. Act ⚙️
+      const derived = base.withNamespaceOverlays({
+        llm_response: { headline: 'Segunda' },
+      });
+
+      // 3. Assert 🎯: el binario sale a null y los metadatos se conservan.
+      expect(derived.getNamespace('raw_email')).toEqual({
+        subject: 'RV: NOTIWEB',
+        attachments: [
+          {
+            filename: 'escaneo.png',
+            contentType: 'image/png',
+            size: 4,
+            contentBase64: null,
+          },
+          {
+            filename: 'nota.txt',
+            contentType: 'text/plain',
+            size: 2,
+            contentBase64: null,
+          },
+        ],
+      });
+      expect(JSON.stringify(derived.getAllContext())).not.toContain('iVBORw==');
+    });
+
+    it('deberia conservar el Base64 en el contexto original', () => {
+      // 1. Arrange 📐
+      const base = buildContext();
+      base.setNamespace('raw_email', {
+        attachments: [{ filename: 'a.pdf', contentBase64: 'JVBERi0=' }],
+      });
+
+      // 2. Act ⚙️
+      base.withNamespaceOverlays({ llm_response: { headline: 'Segunda' } });
+
+      // 3. Assert 🎯: UPLOAD_ATTACHMENT lee de aqui, y aqui sigue el binario.
+      expect(base.getNamespace('raw_email')).toEqual({
+        attachments: [{ filename: 'a.pdf', contentBase64: 'JVBERi0=' }],
+      });
+    });
+
+    it('deberia purgar tambien el Base64 que traiga una superposicion', () => {
+      // 1. Arrange 📐
+      const base = buildContext();
+
+      // 2. Act ⚙️
+      const derived = base.withNamespaceOverlays({
+        ns: { attachments: [{ filename: 'b.png', contentBase64: 'AAAA' }] },
+      });
+
+      // 3. Assert 🎯
+      expect(derived.getNamespace('ns')).toEqual({
+        attachments: [{ filename: 'b.png', contentBase64: null }],
+      });
+    });
+
+    it('deberia seguir compartiendo por referencia los namespaces sin binarios', () => {
+      // 1. Arrange 📐
+      const base = buildContext();
+      base.setNamespace('parsed_email', { clean_body: 'Texto' });
+      base.setNamespace('raw_email', {
+        attachments: [{ filename: 'a.pdf', contentBase64: 'JVBERi0=' }],
+      });
+      const internals = (
+        ctx: StatePayloadContext,
+      ): Record<string, Record<string, unknown>> =>
+        (
+          ctx as unknown as {
+            namespaces: Record<string, Record<string, unknown>>;
+          }
+        ).namespaces;
+
+      // 2. Act ⚙️
+      const derived = base.withNamespaceOverlays({
+        llm_response: { headline: 'Segunda' },
+      });
+
+      // 3. Assert 🎯: el ligero no se copia; el que llevaba binario si.
+      expect(internals(derived).parsed_email).toBe(
+        internals(base).parsed_email,
+      );
+      expect(internals(derived).raw_email).not.toBe(internals(base).raw_email);
+    });
+
     it('deberia listar los namespaces escritos sin clonar su contenido', () => {
       // 1. Arrange 📐
       const base = buildContext();

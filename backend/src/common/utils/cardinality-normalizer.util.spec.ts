@@ -1,7 +1,11 @@
 import {
   expandRootAndItems,
+  normalizeCardinality,
   normalizeItems,
+  resolveCardinality,
 } from '@common/utils/cardinality-normalizer.util';
+
+import type { OutputCardinalityMode } from '@common/utils/cardinality-normalizer.util';
 
 describe('cardinality-normalizer.util', () => {
   describe('normalizeItems', () => {
@@ -87,6 +91,109 @@ describe('cardinality-normalizer.util', () => {
         { validated_markup: '<p>2</p>' },
       ]);
       expect(root.validated_items).toHaveLength(1);
+    });
+  });
+
+  describe('resolveCardinality', () => {
+    it.each<[OutputCardinalityMode, number, 'SINGLE' | 'MULTIPLE']>([
+      ['SINGLE', 1, 'SINGLE'],
+      ['SINGLE', 3, 'SINGLE'],
+      ['MULTIPLE', 1, 'MULTIPLE'],
+      ['MULTIPLE', 3, 'MULTIPLE'],
+      ['AUTO', 1, 'SINGLE'],
+      ['AUTO', 3, 'MULTIPLE'],
+    ])(
+      'deberia resolver %s con %i elemento(s) como %s',
+      (mode, count, expected) => {
+        // 1. Arrange 📐 + 2. Act ⚙️ + 3. Assert 🎯
+        expect(resolveCardinality(mode, count)).toBe(expected);
+      },
+    );
+  });
+
+  describe('normalizeCardinality (tri-estado)', () => {
+    it.each<OutputCardinalityMode>(['MULTIPLE', 'AUTO'])(
+      'deberia entregar la raiz limpia e items: [root] con N=1 en %s',
+      (mode) => {
+        // 1. Arrange 📐: contrato asimetrico con un solo elemento.
+        const payload = { headline: 'Unica', items: [] };
+
+        // 2. Act ⚙️
+        const normalized = normalizeCardinality(payload, mode);
+
+        // 3. Assert 🎯
+        expect(normalized.root).toEqual({ headline: 'Unica' });
+        expect(normalized.items).toEqual([normalized.root]);
+        expect(normalized.items[0]).toBe(normalized.root);
+      },
+    );
+
+    it('deberia resolver N=1 como SINGLE en AUTO y como MULTIPLE en MULTIPLE', () => {
+      // 1. Arrange 📐
+      const payload = { headline: 'Unica', items: [] };
+
+      // 2. Act ⚙️ + 3. Assert 🎯
+      expect(normalizeCardinality(payload, 'AUTO').cardinality).toBe('SINGLE');
+      expect(normalizeCardinality(payload, 'MULTIPLE').cardinality).toBe(
+        'MULTIPLE',
+      );
+    });
+
+    it.each<OutputCardinalityMode>(['MULTIPLE', 'AUTO'])(
+      'deberia entregar la lista completa en orden con N=3 en %s sin mutar la entrada',
+      (mode) => {
+        // 1. Arrange 📐
+        const payload = {
+          headline: 'Uno',
+          items: [{ headline: 'Dos' }, { headline: 'Tres' }],
+        };
+
+        // 2. Act ⚙️
+        const normalized = normalizeCardinality(payload, mode);
+
+        // 3. Assert 🎯
+        expect(normalized.cardinality).toBe('MULTIPLE');
+        expect(normalized.root).toEqual({ headline: 'Uno' });
+        expect(normalized.items.map((item) => item.headline)).toEqual([
+          'Uno',
+          'Dos',
+          'Tres',
+        ]);
+        expect(payload.items).toHaveLength(2);
+      },
+    );
+
+    it('deberia ignorar el lote en SINGLE y quedarse con la raiz', () => {
+      // 1. Arrange 📐
+      const payload = { headline: 'Uno', items: [{ headline: 'Dos' }] };
+
+      // 2. Act ⚙️
+      const normalized = normalizeCardinality(payload, 'SINGLE');
+
+      // 3. Assert 🎯
+      expect(normalized.cardinality).toBe('SINGLE');
+      expect(normalized.items).toEqual([{ headline: 'Uno' }]);
+    });
+
+    it('deberia admitir otra clave de contenedor (validated_items)', () => {
+      // 1. Arrange 📐
+      const payload = {
+        validated_markup: '<p>1</p>',
+        validated_items: [{ validated_markup: '<p>2</p>' }],
+      };
+
+      // 2. Act ⚙️
+      const normalized = normalizeCardinality(
+        payload,
+        'MULTIPLE',
+        'validated_items',
+      );
+
+      // 3. Assert 🎯
+      expect(normalized.items).toEqual([
+        { validated_markup: '<p>1</p>' },
+        { validated_markup: '<p>2</p>' },
+      ]);
     });
   });
 });

@@ -305,6 +305,31 @@ describe('PostIaSanitizerConfig · configurador del nodo ESCUDO_POST_IA', () => 
       expect(offered.filter((tag) => !SANITIZER_ALLOWED_TAGS.includes(tag))).toEqual([]);
     });
 
+    it('deberia conservar los encabezados h2-h6 en el atajo "Estructura completa"', () => {
+      // 1. Arrange 📐 + 2. Act ⚙️
+      const { tags } = ALLOWED_TAG_PRESETS.FULL_STRUCTURE;
+
+      // 3. Assert 🎯: sin h2 el escudo borraba las secciones de cada noticia y
+      //    la cabecera "Referencia bibliografica".
+      expect(tags).toEqual(
+        expect.arrayContaining([
+          'h2',
+          'h3',
+          'h4',
+          'h5',
+          'h6',
+          'b',
+          'i',
+          'u',
+          'strike',
+          'ol',
+          'br',
+          'thead',
+          'tbody',
+        ]),
+      );
+    });
+
     it('deberia escribir la lista del atajo pulsado', async () => {
       // 1. Arrange 📐
       const wrapper = mountComponent();

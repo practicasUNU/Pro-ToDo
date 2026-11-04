@@ -2316,6 +2316,75 @@ describe('LlmExtractorStrategy', () => {
       expect(result.success).toBe(false);
       expect(completion).not.toHaveBeenCalled();
     });
+
+    it('13bis.6 deberia pedir el lote en modo tolerante y reservar 16384 tokens con AUTO', async () => {
+      // 1. Arrange 📐
+      const { client, completion } = buildBatchProvider([]);
+      const strategy = buildStrategy(buildPromptService(), client);
+
+      // 2. Act ⚙️
+      await strategy.execute(batchContext(), {
+        inlinePrompt: 'Redacta cada noticia.',
+        provider: LlmProvider.GEMINI,
+        outputCardinality: 'AUTO',
+      });
+
+      // 3. Assert 🎯: mismo esquema que MULTIPLE, regla tolerante y
+      //    presupuesto de lote, porque el numero de elementos no se conoce.
+      expect(optionsOf(completion)).toMatchObject({
+        expectsItems: true,
+        autoDetectItems: true,
+        maxTokens: 16_384,
+      });
+    });
+
+    it.each([
+      ['AUTO', [], 'SINGLE'],
+      [
+        'AUTO',
+        [{ headline: 'Segunda', summary: 's2', body_paragraphs: [] }],
+        'MULTIPLE',
+      ],
+      ['MULTIPLE', [], 'MULTIPLE'],
+      ['SINGLE', undefined, 'SINGLE'],
+    ])(
+      '13bis.7 deberia publicar resolved_cardinality segun la respuesta (%s)',
+      async (mode, items, expected) => {
+        // 1. Arrange 📐
+        const { client } = buildBatchProvider(items);
+        const strategy = buildStrategy(buildPromptService(), client);
+
+        // 2. Act ⚙️
+        const result = await strategy.execute(batchContext(), {
+          inlinePrompt: 'Redacta cada noticia.',
+          provider: LlmProvider.GEMINI,
+          outputCardinality: mode,
+        });
+
+        // 3. Assert 🎯
+        expect(result.success).toBe(true);
+        expect(result.data?.resolved_cardinality).toBe(expected);
+      },
+    );
+
+    it('13bis.8 no deberia marcar autoDetectItems con MULTIPLE estricto', async () => {
+      // 1. Arrange 📐
+      const { client, completion } = buildBatchProvider([]);
+      const strategy = buildStrategy(buildPromptService(), client);
+
+      // 2. Act ⚙️
+      await strategy.execute(batchContext(), {
+        inlinePrompt: 'Redacta cada noticia.',
+        provider: LlmProvider.GEMINI,
+        outputCardinality: 'MULTIPLE',
+      });
+
+      // 3. Assert 🎯
+      expect(optionsOf(completion)).toMatchObject({
+        expectsItems: true,
+        autoDetectItems: false,
+      });
+    });
   });
 
   describe('14. Telemetria de tokens', () => {

@@ -14,6 +14,7 @@ import {
   DEFAULT_LLM_MAX_RETRIES,
   DEFAULT_LLM_MODEL,
   DEFAULT_LLM_TIMEOUT_MS,
+  LLM_OUTPUT_CARDINALITY_OPTIONS,
   LlmProvider,
   MAX_LLM_MAX_TOKENS,
   MAX_LLM_TIMEOUT_MS,
@@ -944,6 +945,54 @@ describe('useLlmExtractorStore · configuracion del nodo PROCESADOR_IA', () => {
 
       // 3. Assert 🎯
       expect(store.config.outputCardinality).toBe('SINGLE');
+    });
+
+    it('9.4 deberia publicar AUTO y recuperarlo al hidratar', () => {
+      // 1. Arrange 📐
+      const store = useLlmExtractorStore(nextNodeId());
+
+      // 2. Act ⚙️
+      store.updateConfig({ outputCardinality: 'AUTO' });
+      const params = store.toNodeParams();
+      store.resetConfig();
+      store.hydrateFromNode({ nodeId: 'auto', params } as never);
+
+      // 3. Assert 🎯
+      expect(params.outputCardinality).toBe('AUTO');
+      expect(store.config.outputCardinality).toBe('AUTO');
+    });
+
+    it('9.5 deberia estimar AUTO como un lote y avisar de su coste', () => {
+      // 1. Arrange 📐
+      const store = useLlmExtractorStore(nextNodeId());
+
+      // 2. Act ⚙️
+      store.updateConfig({ outputCardinality: 'AUTO' });
+
+      // 3. Assert 🎯
+      expect(store.resourceEstimation.estimatedOutputTokens).toBeGreaterThanOrEqual(8_192);
+      expect(store.configWarnings.some((warning) => warning.startsWith('Autodeteccion'))).toBe(
+        true,
+      );
+    });
+
+    it('9.6 deberia ofrecer las tres cardinalidades con su presupuesto', () => {
+      // 1. Arrange 📐 + 2. Act ⚙️
+      const labels = LLM_OUTPUT_CARDINALITY_OPTIONS.map((option) => option.label);
+
+      // 3. Assert 🎯
+      expect(LLM_OUTPUT_CARDINALITY_OPTIONS.map((option) => option.value)).toEqual([
+        'SINGLE',
+        'MULTIPLE',
+        'AUTO',
+      ]);
+      expect(labels).toEqual([
+        'Un elemento (1:1 Estricto)',
+        'Lote de elementos (1:N Estricto)',
+        'Autodetección Tolerante (1:1 / 1:N)',
+      ]);
+      expect(LLM_OUTPUT_CARDINALITY_OPTIONS[0]?.description).toContain('8192');
+      expect(LLM_OUTPUT_CARDINALITY_OPTIONS[1]?.description).toContain('16384');
     });
   });
 });

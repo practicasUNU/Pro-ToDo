@@ -153,7 +153,6 @@ const previewSteps = (template: WorkflowTemplateSummary): string =>
         class="pd-search-input pd-template-search q-mb-md"
         outlined
         dense
-        debounce="150"
         placeholder="Buscar plantilla por nombre, código o nodo"
         aria-label="Buscar plantilla"
         data-test="template-search"

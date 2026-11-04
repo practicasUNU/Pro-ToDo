@@ -85,6 +85,10 @@ interface BlueprintRow {
       {
         readonly nodeType: NodeType;
         readonly nextStep: string | null;
+        readonly onErrorStep:
+          | string
+          | { readonly targetNode: string; readonly catchErrors?: string[] }
+          | null;
         readonly params: Record<string, unknown>;
       }
     >;
@@ -482,6 +486,123 @@ describe('Siembra maestra de los cinco pipelines (e2e)', () => {
 
       // 3. Assert 🎯
       expect(row?.descripcion).toContain('CREATE_CAMPAIGN');
+    });
+  });
+
+  describe('14. Contingencias y prompts blindados (pasos 5d y 6d-6e)', () => {
+    /** Tipos que deben avisar por correo cuando fallan. */
+    const ALERTED_TYPES: ReadonlySet<NodeType> = new Set([
+      NodeType.EXTRACTOR_WEB,
+      NodeType.MAPEADOR_PLANTILLA,
+      NodeType.PROCESADOR_IA,
+      NodeType.ESCUDO_POST_IA,
+      NodeType.DESTINO_DRUPAL,
+      NodeType.DESTINO_ACENS,
+      NodeType.PROCESADOR_OCR,
+    ]);
+
+    it('14.1 deberia declarar un unico alerta_smtp (DESTINO_SMTP) terminal en los cinco maestros', () => {
+      // 3. Assert 🎯
+      for (const slug of MASTER_SLUGS) {
+        const { nodes } = blueprintBySlug(slug).configuracion_pipeline;
+        const smtpNodes = Object.values(nodes).filter(
+          (entry) => entry.nodeType === NodeType.DESTINO_SMTP,
+        );
+
+        expect(smtpNodes).toHaveLength(1);
+        expect(nodes['alerta_smtp']).toMatchObject({
+          nodeType: NodeType.DESTINO_SMTP,
+          nextStep: null,
+          onErrorStep: null,
+        });
+      }
+    });
+
+    it('14.2 deberia enrutar a alerta_smtp el fallo de cada nodo de procesamiento y destino', () => {
+      // 3. Assert 🎯
+      for (const slug of MASTER_SLUGS) {
+        const { nodes } = blueprintBySlug(slug).configuracion_pipeline;
+        const alerted = Object.entries(nodes).filter(([, entry]) =>
+          ALERTED_TYPES.has(entry.nodeType),
+        );
+
+        expect(alerted.length).toBeGreaterThan(0);
+        for (const [key, entry] of alerted) {
+          expect({ slug, key, onErrorStep: entry.onErrorStep }).toEqual({
+            slug,
+            key,
+            onErrorStep: 'alerta_smtp',
+          });
+        }
+      }
+    });
+
+    it('14.3 deberia desviar SOLO los escaneos del parser al satelite ocr_ia', () => {
+      // 3. Assert 🎯
+      for (const slug of MASTER_SLUGS) {
+        const { nodes } = blueprintBySlug(slug).configuracion_pipeline;
+        const parser = nodes['parser'];
+
+        expect(parser?.onErrorStep).toEqual({
+          targetNode: 'ocr_ia',
+          catchErrors: ['ERR_PARSER_UNEXTRACTABLE_MEDIA'],
+        });
+        expect(parser?.params.failOnUnextractableMedia).toBe(true);
+        expect(nodes['ocr']).toBeUndefined();
+        expect(nodes['ocr_ia']).toMatchObject({
+          nodeType: NodeType.PROCESADOR_OCR,
+          outputNamespace: 'ocr_result',
+          // Se reincorpora en el paso nominal que sigue al parser.
+          nextStep: parser?.nextStep,
+          onErrorStep: 'alerta_smtp',
+        });
+      }
+    });
+
+    it('14.4 deberia exigir el encabezado del panel en el escudo del maestro de titulos', () => {
+      // 3. Assert 🎯
+      const escudo = blueprintBySlug('wf-titulos-verificacion')
+        .configuracion_pipeline.nodes['escudo'];
+
+      expect(escudo?.params.requiredSelectors).toEqual([
+        '.panel-title',
+        '.panel-comite-codigo',
+        '.panel-facultad-nombre',
+      ]);
+    });
+
+    it('14.5 deberia blindar los prompts de Notiweb y de titulos una sola vez', async () => {
+      // 1. Arrange 📐 + 2. Act ⚙️
+      const rows = await dataSource.query<
+        { codigo: string; texto_prompt: string }[]
+      >(
+        'SELECT codigo, texto_prompt FROM plantillas_prompts_ia WHERE codigo = ANY($1)',
+        [['NOTIWEB_DEFAULT', 'VERIFICADOR_TITULOS_DEFAULT']],
+      );
+      const textOf = (code: string): string =>
+        rows.find((row) => row.codigo === code)?.texto_prompt ?? '';
+
+      // 3. Assert 🎯
+      const notiweb = textOf('NOTIWEB_DEFAULT');
+      expect(
+        notiweb.split('DESARROLLO MÍNIMO Y CIERRE DE CADA NOTICIA'),
+      ).toHaveLength(2);
+      expect(notiweb).toContain('MÍNIMO DE 3 Y UN MÁXIMO DE 4 párrafos');
+      expect(notiweb).toContain(
+        '<hr /><h2>Referencia bibliográfica</h2><p class="notiweb-referencia">',
+      );
+      expect(notiweb).toContain('APA 7');
+
+      const titulos = textOf('VERIFICADOR_TITULOS_DEFAULT');
+      expect(
+        titulos.split('CONTRATO DE PANEL (VERIFICACIÓN DE TÍTULOS)'),
+      ).toHaveLength(2);
+      expect(titulos).toContain('<h5 class="panel-title">');
+      expect(titulos).not.toContain('<h4 class="panel-title">');
+      expect(titulos).not.toContain(
+        'Devuelve unica y exclusivamente el marcado HTML',
+      );
+      expect(titulos).toContain('Cardinalidad tolerante 1 a N');
     });
   });
 });
