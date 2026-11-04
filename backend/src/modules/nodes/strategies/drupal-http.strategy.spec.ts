@@ -1291,6 +1291,36 @@ describe('DrupalHttpStrategy', () => {
       expect(httpClient.requestWithStatus).toHaveBeenCalledTimes(1);
     });
 
+    it('2bis.1ter deberia publicar un comite de ESIC en el #accordionUFV bajo el encabezado de ESIC', async () => {
+      // 1. Arrange 📐: pagina de produccion; la seccion de ESIC lleva el id
+      //    heredado UFV y el panel trae el `data-parent` generico.
+      const page =
+        '<div id="accordion"><div class="panel panel-default"><div class="panel-heading"><h4>' +
+        '<a href="#collapseUFV">ESIC Universidad</a></h4></div>' +
+        '<div class="collapse" id="collapseUFV"><div class="panel-group" id="accordionUFV"></div></div>' +
+        '</div></div>';
+      const httpClient = buildHttpMock();
+      httpClient.requestWithStatus
+        .mockResolvedValueOnce(pageResponse(page))
+        .mockResolvedValueOnce(pageResponse(''));
+      const strategy = buildStrategy(httpClient);
+
+      // 2. Act ⚙️
+      const result = await strategy.execute(
+        buildContext({
+          [SOURCE_NAMESPACE]: {
+            [SOURCE_FIELD]: panel('ESIC 1', '#accordion'),
+          },
+        }),
+        appendParams,
+      );
+
+      // 3. Assert 🎯
+      expect(result.success).toBe(true);
+      const $ = cheerio.load(sentHtml(httpClient, 1), null, false);
+      expect($('#accordionUFV .panel-comite-codigo').text()).toBe('ESIC 1');
+    });
+
     it('2bis.2 NO deberia tocar la pagina si un destino no existe', async () => {
       // 1. Arrange 📐: todo o nada. Mandar el huerfano al `containerSelector`
       //    es justo la averia que esto arregla: aterriza en la raiz, la

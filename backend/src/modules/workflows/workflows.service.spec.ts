@@ -623,6 +623,60 @@ describe('WorkflowsService (despacho manual de pruebas, Camino B)', () => {
       expect(repository.save).not.toHaveBeenCalled();
     });
 
+    it.each([
+      ExecutionState.FALLIDO,
+      ExecutionState.OMITIDO,
+      ExecutionState.DESCARTADO,
+    ])(
+      '2c.3bis NO deberia desactivar un intento que termino en %s',
+      async (state) => {
+        // 1. Arrange 📐: solo cuenta el estado FINAL del intento actual.
+        const { service, validator, engine, repository } = buildHarness();
+        validator.validateSchema.mockResolvedValue(schemaWithPolicy());
+        engine.executeWorkflow.mockResolvedValue(
+          buildExecution({ currentState: state, tookContingency: true }),
+        );
+
+        // 2. Act ⚙️
+        await service.runAutomaticWorkflow(WORKFLOW_ID);
+
+        // 3. Assert 🎯
+        expect(repository.save).not.toHaveBeenCalled();
+      },
+    );
+
+    it('2c.6bis deberia difundir el apagado tras una recuperacion con reintentos previos', async () => {
+      // 1. Arrange 📐: el intento acumulo reintentos de red y un desvio al OCR
+      //    antes de cerrar EXITOSO. Nada de ese historial frena el apagado.
+      const { service, validator, engine, crudEvents } = buildHarness();
+      validator.validateSchema.mockResolvedValue(schemaWithPolicy());
+      engine.executeWorkflow.mockResolvedValue(
+        buildExecution({
+          tookContingency: true,
+          retryState: { parser: 2, ocr_ia: 1 },
+        }),
+      );
+
+      // 2. Act ⚙️
+      await service.runAutomaticWorkflow(WORKFLOW_ID);
+
+      // 3. Assert 🎯: el interruptor se apaga en tiempo real en el frontend.
+      const [event] = (crudEvents.dispatch.mock.calls.at(-1) ?? []) as [
+        {
+          entity: string;
+          action: string;
+          id: string;
+          data: { status: WorkflowStatus };
+        }?,
+      ];
+      expect(event).toMatchObject({
+        entity: 'workflows',
+        action: 'UPDATED',
+        id: WORKFLOW_ID,
+      });
+      expect(event?.data.status).toBe(WorkflowStatus.INACTIVO);
+    });
+
     it('2c.4 NO deberia desactivar un flujo sin politica declarada', async () => {
       // 1. Arrange: `buildSchema()` no trae `executionPolicy`.
       const { service, repository, coordinator, auditLogger } = buildHarness();

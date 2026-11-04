@@ -3,7 +3,9 @@ import * as cheerio from 'cheerio';
 import {
   DRUPAL_UNIVERSITIES_CATALOG,
   findAccordionByHeading,
+  isEsicCommittee,
   planPanelDispatch,
+  resolveEsicContainer,
   resolvePanelContainer,
   resolveUniversityAccordion,
   splitSelectorAlternatives,
@@ -416,6 +418,133 @@ describe('Catalogo de universidades de Drupal', () => {
       // 3. Assert 🎯: invalida cuenta como inexistente, sin excepcion.
       expect(fallback?.attr('id')).toBe('ok');
       expect(onlyInvalid).toBeNull();
+    });
+  });
+
+  describe('5. Contenedor de ESIC (UFV guardado por encabezado)', () => {
+    /** Seccion de una universidad: enlace con su encabezado y su sub-acordeon. */
+    const section = (
+      heading: string,
+      collapseId: string,
+      accordionId: string,
+    ): string =>
+      '<div class="panel panel-default"><div class="panel-heading"><h4 class="panel-title">' +
+      `<a href="#${collapseId}" data-parent="#accordion">${heading}</a></h4></div>` +
+      `<div class="collapse" id="${collapseId}"><div class="panel-body">` +
+      `<div class="panel-group" id="${accordionId}"></div></div></div></div>`;
+
+    const load = (html: string): cheerio.CheerioAPI =>
+      cheerio.load(`<div id="accordion">${html}</div>`, null, false);
+
+    it('5.1 deberia reconocer a un comite de ESIC por su encabezado', () => {
+      // 1. Arrange 📐 + 2. Act ⚙️ + 3. Assert 🎯
+      expect(isEsicCommittee('ESIC 1 Facultad de Ciencias Juridicas')).toBe(
+        true,
+      );
+      expect(isEsicCommittee('ESIC Universidad')).toBe(true);
+      expect(isEsicCommittee('Universidad Francisco de Vitoria')).toBe(false);
+      expect(isEsicCommittee('UPM 2')).toBe(false);
+    });
+
+    it('5.2 deberia preferir #collapseUFV cuando cuelga del encabezado de ESIC (produccion)', () => {
+      // 1. Arrange 📐: la pagina de produccion, con ESIC bajo el id heredado
+      //    UFV, y ademas un `#accordionESIC` de sandbox que NO debe ganar.
+      const $ = load(
+        section('ESIC Universidad', 'collapseUFV', 'accordionUFV') +
+          '<div id="accordionESIC"></div>',
+      );
+
+      // 2. Act ⚙️
+      const container = resolveEsicContainer($);
+
+      // 3. Assert 🎯
+      expect(container?.attr('id')).toBe('accordionUFV');
+    });
+
+    it('5.3 NO deberia caer en el UFV de la Universidad Francisco de Vitoria', () => {
+      // 1. Arrange 📐: la averia que revirtio la migracion 038. El unico
+      //    `#collapseUFV` de la pagina es el de Francisco de Vitoria.
+      const $ = load(
+        section(
+          'Universidad Francisco de Vitoria',
+          'collapseUFV',
+          'accordionUFV',
+        ) + section('ESIC Universidad', 'collapseESIC', 'accordionESIC'),
+      );
+
+      // 2. Act ⚙️
+      const container = resolveEsicContainer($);
+
+      // 3. Assert 🎯: cae en el respaldo de ESIC, nunca en el de UFV.
+      expect(container?.attr('id')).toBe('accordionESIC');
+    });
+
+    it('5.4 deberia usar el .panel-group de #collapseESIC si el sub-acordeon no se llama accordionESIC', () => {
+      // 1. Arrange 📐
+      const $ = load(section('ESIC Universidad', 'collapseESIC', 'grupoESIC'));
+
+      // 2. Act ⚙️ + 3. Assert 🎯
+      expect(resolveEsicContainer($)?.attr('id')).toBe('grupoESIC');
+    });
+
+    it('5.5 deberia devolver null si la pagina no tiene seccion de ESIC', () => {
+      // 1. Arrange 📐: solo Francisco de Vitoria y UPM.
+      const $ = load(
+        section(
+          'Universidad Francisco de Vitoria',
+          'collapseUFV',
+          'accordionUFV',
+        ) +
+          section(
+            'Universidad Politecnica de Madrid',
+            'collapseUPM',
+            'accordionUPM',
+          ),
+      );
+
+      // 2. Act ⚙️ + 3. Assert 🎯
+      expect(resolveEsicContainer($)).toBeNull();
+    });
+
+    it('5.6 deberia aplicar la regla de ESIC por encima del data-parent generico del panel', () => {
+      // 1. Arrange 📐: la plantilla siembra `#accordion`, que existe y
+      //    mandaria el comite a la raiz del acordeon.
+      const $ = load(
+        section('ESIC Universidad', 'collapseUFV', 'accordionUFV'),
+      );
+
+      // 2. Act ⚙️
+      const container = resolvePanelContainer($, {
+        committeeCode: 'ESIC 1',
+        targetSelector: '#accordion',
+        heading: 'ESIC 1 Facultad de Ciencias Juridicas',
+        html: '',
+      });
+
+      // 3. Assert 🎯
+      expect(container?.attr('id')).toBe('accordionUFV');
+    });
+
+    it('5.7 no deberia cambiar el destino de un comite de otra universidad', () => {
+      // 1. Arrange 📐
+      const $ = load(
+        section(
+          'Universidad Politecnica de Madrid',
+          'collapseUPM',
+          'accordionUPM',
+        ),
+      );
+
+      // 2. Act ⚙️
+      const container = resolvePanelContainer($, {
+        committeeCode: 'UPM 2',
+        targetSelector: '#accordionUPM',
+        heading: 'UPM 2',
+        html: '',
+      });
+
+      // 3. Assert 🎯
+      expect(container?.attr('id')).toBe('accordionUPM');
     });
   });
 });

@@ -1023,6 +1023,69 @@ describe('ExecutionsService (consulta y reintento manual CU-09)', () => {
       );
     });
 
+    it('2q.5 deberia aplicar stopOnFirstSuccess dentro de completion con el flujo RELEIDO', async () => {
+      // 1. Arrange 📐: reanudacion por correo de una ejecucion que habia
+      //    pasado por PAUSADO; el flujo cambio mientras corria (la reactivacion
+      //    lo paso a ACTIVO por otra via).
+      const { service, repository, workflows, engine } = buildHarness();
+      const refreshed = buildWorkflow({ name: 'Flujo releido' });
+      repository.findOne
+        .mockResolvedValueOnce(buildWorkflow())
+        .mockResolvedValueOnce(refreshed);
+      engine.executeWorkflow.mockResolvedValue(
+        buildExecution({
+          currentState: ExecutionState.EXITOSO,
+          activeCursor: null,
+          tookContingency: true,
+        }),
+      );
+
+      // 2. Act ⚙️
+      const started = await service.startResumeExecution(
+        EXECUTION_ID,
+        {},
+        CURRENT_USER,
+        { isEmailResume: true },
+      );
+      await started.completion;
+
+      // 3. Assert 🎯: la politica recibe la foto ACTUAL del flujo y el
+      //    desenlace real del intento, recuperado por contingencia incluido.
+      expect(workflows.applyStopOnFirstSuccess).toHaveBeenCalledWith(
+        refreshed,
+        expect.anything(),
+        expect.objectContaining({
+          currentState: ExecutionState.EXITOSO,
+          tookContingency: true,
+        }),
+        CURRENT_USER.id,
+      );
+    });
+
+    it('2q.6 un fallo de la politica no deberia impedir la foto final ni perder el desenlace', async () => {
+      // 1. Arrange 📐
+      const { service, workflows } = buildHarness();
+      workflows.applyStopOnFirstSuccess.mockRejectedValue(
+        new Error('PostgreSQL no disponible'),
+      );
+      jest
+        .spyOn(service['logger'], 'error')
+        .mockImplementation(() => undefined);
+
+      // 2. Act ⚙️
+      const started = await service.startResumeExecution(
+        EXECUTION_ID,
+        {},
+        CURRENT_USER,
+      );
+
+      // 3. Assert 🎯
+      await expect(started.completion).resolves.toMatchObject({
+        status: ExecutionState.EXITOSO,
+      });
+      expect(workflows.publishWorkflowSnapshot).toHaveBeenCalledTimes(1);
+    });
+
     it('2q.4 resumeExecution deberia seguir esperando al estado final', async () => {
       // 1. Arrange 📐
       const { service } = buildHarness();
