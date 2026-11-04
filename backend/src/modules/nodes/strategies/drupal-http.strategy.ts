@@ -186,6 +186,27 @@ export interface DrupalHttpResultData {
   total_updated: number;
   /** Una entrada por entidad creada por CREATE_NODE, en el orden del lote. */
   published_nodes: PublishedNodeEntry[];
+  /**
+   * URL publica de CADA entidad creada, en el orden del lote.
+   *
+   * `published_url` solo describe la primera: con un boletin de cinco noticias
+   * el aviso de exito mostraba un enlace y callaba los otros cuatro.
+   */
+  urls: string[];
+  /** Resumen navegable de lo creado: `{ id, url, title }` por entidad. */
+  created_nodes: CreatedNodeLink[];
+  /** Primera URL del lote, o vacia. Alias retrocompatible de `urls[0]`. */
+  url: string;
+}
+
+/** Entidad creada, reducida a lo que necesita quien la enlaza. */
+export interface CreatedNodeLink {
+  /** UUID de la entidad en Drupal. */
+  id: string;
+  /** URL publica absoluta; vacia si no se pudo derivar. */
+  url: string;
+  /** Titulo con el que se creo (el `titleTemplate` interpolado). */
+  title: string;
 }
 
 /** Entidad creada por un elemento del lote de CREATE_NODE. */
@@ -198,6 +219,8 @@ export interface PublishedNodeEntry {
   drupal_internal__nid: number;
   path_alias: string;
   published_url: string;
+  /** Titulo interpolado del elemento; vacio en un parcial anterior a este campo. */
+  title: string;
 }
 
 /** Lee una entrada de `published_nodes` del contexto, o `null` si no lo es. */
@@ -217,6 +240,7 @@ const toPublishedNodeEntry = (value: unknown): PublishedNodeEntry | null => {
     path_alias: typeof value.path_alias === 'string' ? value.path_alias : '',
     published_url:
       typeof value.published_url === 'string' ? value.published_url : '',
+    title: typeof value.title === 'string' ? value.title : '',
   };
 };
 
@@ -500,7 +524,27 @@ export class DrupalHttpStrategy extends BaseHttpDestinationStrategy {
       name: 'published_nodes',
       type: 'object',
       description:
-        'CREATE_NODE: [{ item_index, item_key, node_id, drupal_internal__nid, path_alias, published_url }], una por entidad del lote',
+        'CREATE_NODE: [{ item_index, item_key, node_id, drupal_internal__nid, path_alias, published_url, title }], una por entidad del lote',
+    },
+    {
+      name: 'urls',
+      type: 'object',
+      description:
+        'CREATE_NODE: URL publica de cada entidad creada, en el orden del lote; [] en los demas modos',
+    },
+    {
+      name: 'created_nodes',
+      type: 'object',
+      description:
+        'CREATE_NODE: [{ id, url, title }] por entidad creada; [] en los demas modos',
+    },
+    {
+      name: 'url',
+      // 'text' como `published_url`: es una salida para avisos y plantillas,
+      // no un enlace que deba ofrecerse a un extractor web aguas abajo.
+      type: 'text',
+      description:
+        'Primera URL del lote (retrocompatible); vacia si no se creo ninguna entidad',
     },
   ];
 
@@ -791,7 +835,13 @@ export class DrupalHttpStrategy extends BaseHttpDestinationStrategy {
       const previous = alreadyPublished.get(prepared.itemKey);
 
       if (previous !== undefined) {
-        publishedNodes.push({ ...previous, item_index: index });
+        publishedNodes.push({
+          ...previous,
+          item_index: index,
+          // Un parcial guardado antes de que existiera `title` lo trae vacio;
+          // el del documento recien preparado es el mismo titulo.
+          title: previous.title.length > 0 ? previous.title : prepared.title,
+        });
         firstFields ??= {
           nodeId: previous.node_id,
           internalNid: previous.drupal_internal__nid,
@@ -836,7 +886,13 @@ export class DrupalHttpStrategy extends BaseHttpDestinationStrategy {
 
       firstFields ??= fields;
       publishedNodes.push(
-        this.toPublishedNode(fields, index, prepared.itemKey, config),
+        this.toPublishedNode(
+          fields,
+          index,
+          prepared.itemKey,
+          prepared.title,
+          config,
+        ),
       );
     }
 
@@ -864,7 +920,11 @@ export class DrupalHttpStrategy extends BaseHttpDestinationStrategy {
     context: StatePayloadContext,
     config: ResolvedDrupalHttpConfig,
   ):
-    | { readonly document: Record<string, unknown>; readonly itemKey: string }
+    | {
+        readonly document: Record<string, unknown>;
+        readonly itemKey: string;
+        readonly title: string;
+      }
     | { readonly failure: NodeErrorDetail } {
     const markup = this.readSourceMarkup(context, config);
 
@@ -928,6 +988,7 @@ export class DrupalHttpStrategy extends BaseHttpDestinationStrategy {
         .update(`${title}\u0000${markup}`)
         .digest('hex')
         .slice(0, ITEM_KEY_LENGTH),
+      title,
     };
   }
 
@@ -1001,6 +1062,7 @@ export class DrupalHttpStrategy extends BaseHttpDestinationStrategy {
     fields: DrupalResultFields,
     itemIndex: number,
     itemKey: string,
+    title: string,
     config: ResolvedDrupalHttpConfig,
   ): PublishedNodeEntry {
     return {
@@ -1011,6 +1073,7 @@ export class DrupalHttpStrategy extends BaseHttpDestinationStrategy {
       path_alias: fields.pathAlias ?? NEUTRAL_TEXT,
       published_url: this.resolvePublicLocation(fields, config.operationMode)
         .published_url,
+      title,
     };
   }
 
@@ -2473,6 +2536,16 @@ export class DrupalHttpStrategy extends BaseHttpDestinationStrategy {
     fields: DrupalResultFields,
     mode: DrupalOperationMode,
   ): Record<string, unknown> {
+    // `urls`, `created_nodes` y `url` se DERIVAN de `published_nodes` aqui y no
+    // se pasan aparte: asi un modo no puede emitir unas sin las otras, y un
+    // parcial lleva exactamente las URLs de lo que si se creo.
+    const publishedNodes = [...(fields.publishedNodes ?? [])];
+    const createdNodes: CreatedNodeLink[] = publishedNodes.map((node) => ({
+      id: node.node_id,
+      url: node.published_url,
+      title: node.title,
+    }));
+    const urls = createdNodes.map((node) => node.url);
     const payload: DrupalHttpResultData = {
       node_id: fields.nodeId ?? NEUTRAL_TEXT,
       drupal_internal__nid: fields.internalNid ?? NEUTRAL_NID,
@@ -2486,7 +2559,10 @@ export class DrupalHttpStrategy extends BaseHttpDestinationStrategy {
       total_appended: fields.totalAppended ?? 0,
       total_transferred: fields.totalTransferred ?? 0,
       total_updated: fields.totalUpdated ?? 0,
-      published_nodes: [...(fields.publishedNodes ?? [])],
+      published_nodes: publishedNodes,
+      urls,
+      created_nodes: createdNodes,
+      url: urls[0] ?? NEUTRAL_TEXT,
     };
 
     return { ...payload };

@@ -6,6 +6,11 @@ import { useDialogPluginComponent } from 'quasar';
 interface Props {
   /** URL absoluta de la pagina publicada (`http_result.published_url`). */
   publishedUrl: string;
+  /**
+   * URL de cada entidad de un lote (`http_result.urls`), solo cuando hay mas
+   * de una. Sin esto el aviso enlazaba la primera noticia y callaba el resto.
+   */
+  publishedUrls?: readonly string[];
   /** Ruta publica de esa pagina (`http_result.exit_page`), si se conoce. */
   exitPage?: string;
   /** Nombre legible del flujo que publico. */
@@ -17,6 +22,13 @@ const props = defineProps<Props>();
 defineEmits([...useDialogPluginComponent.emits]);
 
 const { dialogRef, onDialogHide } = useDialogPluginComponent();
+
+/** Enlaces a ofrecer: todos los del lote o, si no hay lote, el unico. */
+const links = computed<readonly string[]>(() =>
+  props.publishedUrls !== undefined && props.publishedUrls.length > 1
+    ? props.publishedUrls
+    : [props.publishedUrl],
+);
 
 /** Frase de contexto: nombra el flujo cuando el motor lo envio. */
 const summary = computed<string>(() =>
@@ -51,6 +63,7 @@ const summary = computed<string>(() =>
         <!-- `noopener noreferrer`: la pestaña nueva no recibe `window.opener` ni
              la URL de la aplicación como Referer. -->
         <q-btn
+          v-if="links.length === 1"
           class="pd-btn-secondary pd-publish-link"
           flat
           no-caps
@@ -61,6 +74,26 @@ const summary = computed<string>(() =>
           icon-right="north_east"
           data-test="drupal-publish-link"
         />
+        <template v-else>
+          <p class="pd-label q-mb-xs" data-test="drupal-publish-count">
+            Páginas publicadas ({{ links.length }}):
+          </p>
+          <q-list dense>
+            <q-item v-for="(url, index) in links" :key="`${index}-${url}`" class="q-px-none">
+              <q-btn
+                class="pd-btn-secondary pd-publish-link"
+                flat
+                no-caps
+                :href="url"
+                target="_blank"
+                rel="noopener noreferrer"
+                :label="`Abrir la página ${index + 1}`"
+                icon-right="north_east"
+                data-test="drupal-publish-link"
+              />
+            </q-item>
+          </q-list>
+        </template>
       </q-card-section>
 
       <q-card-actions align="right" class="q-px-md q-pb-md">

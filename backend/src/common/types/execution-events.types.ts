@@ -199,6 +199,11 @@ export interface FlowCompletedEvent extends ExecutionEventBase {
    * el enlace sin pedir el checkpoint.
    */
   readonly publishedUrl?: string;
+  /**
+   * URL de CADA entidad creada cuando el destino publico un lote de mas de un
+   * elemento, en su orden. Ausente con un solo elemento: `publishedUrl` basta.
+   */
+  readonly publishedUrls?: readonly string[];
   /** Ruta publica (alias o `/node/{nid}`) de esa misma pagina. */
   readonly exitPage?: string;
 }

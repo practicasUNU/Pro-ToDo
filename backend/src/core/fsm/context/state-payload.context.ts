@@ -305,6 +305,50 @@ export interface SandboxOperationScope {
  * interno, corrompiendo un checkpoint que quiza ya se habia dado por bueno.
  * El clon profundo en ambas direcciones cierra esa via.
  */
+/** Clave que guarda el inventario de adjuntos dentro de un namespace. */
+const ATTACHMENTS_KEY = 'attachments';
+
+/** Clave del binario en Base64 de cada adjunto. */
+const BINARY_CONTENT_KEY = 'contentBase64';
+
+/** Un adjunto que todavia arrastra su binario: objeto con Base64 de tipo cadena. */
+const holdsBinaryContent = (value: unknown): value is Record<string, unknown> =>
+  typeof value === 'object' &&
+  value !== null &&
+  !Array.isArray(value) &&
+  typeof (value as Record<string, unknown>)[BINARY_CONTENT_KEY] === 'string';
+
+/**
+ * El namespace sin los binarios de sus adjuntos, o EL MISMO objeto si no lleva.
+ *
+ * Criterio ESTRUCTURAL (`attachments[].contentBase64`), el mismo con el que el
+ * motor libera la memoria del checkpoint: el contexto no sabe que namespace es
+ * `raw_email` y no debe saberlo. El Base64 pasa a `null` —contrato
+ * `string | null` del adjunto— en vez de borrarse, para que `filename`,
+ * `contentType` y `size` sigan diciendo que hubo un adjunto.
+ *
+ * Devolver la misma referencia cuando no hay nada que purgar no es un detalle:
+ * es lo que mantiene la comparticion por referencia de los namespaces ligeros.
+ */
+const withoutBinaryAttachments = (
+  namespace: Record<string, unknown>,
+): Record<string, unknown> => {
+  const attachments = namespace[ATTACHMENTS_KEY];
+
+  if (!Array.isArray(attachments) || !attachments.some(holdsBinaryContent)) {
+    return namespace;
+  }
+
+  return {
+    ...namespace,
+    [ATTACHMENTS_KEY]: attachments.map((attachment: unknown) =>
+      holdsBinaryContent(attachment)
+        ? { ...attachment, [BINARY_CONTENT_KEY]: null }
+        : attachment,
+    ),
+  };
+};
+
 export class StatePayloadContext {
   private readonly executionId: string;
   private readonly workflowId: string;
@@ -408,11 +452,18 @@ export class StatePayloadContext {
    *
    * Cada superposicion se FUSIONA sobre el namespace existente con spread, igual
    * que `setNamespace`, y solo ella se clona en profundidad. Los namespaces no
-   * superpuestos se comparten por referencia con el contexto original: un
-   * `raw_email` con adjuntos en Base64 no se duplica en memoria por cada
-   * elemento del lote. La inmutabilidad no se resiente, porque ningun metodo
-   * expone esos objetos internos sin clonarlos antes (`getNamespace`,
-   * `getAllContext`) y `setNamespace` reconstruye el mapa entero.
+   * superpuestos se comparten por referencia con el contexto original. La
+   * inmutabilidad no se resiente, porque ningun metodo expone esos objetos
+   * internos sin clonarlos antes (`getNamespace`, `getAllContext`) y
+   * `setNamespace` reconstruye el mapa entero.
+   *
+   * PURGA DE BINARIOS. El contexto derivado no lleva el `contentBase64` de
+   * ningun adjunto (queda a `null`; metadatos intactos). Un elemento del lote
+   * solo interpola texto, y el binario es justo lo que inflaba cualquier
+   * `getAllContext` o volcado de ese contexto, una vez por elemento. La purga es
+   * un spread SUPERFICIAL del namespace y de cada adjunto: el Base64 no se copia
+   * ni se clona nunca. El contexto original lo conserva intacto, que es de donde
+   * lee `UPLOAD_ATTACHMENT`.
    *
    * @param overlays Namespace -> claves a superponer para este elemento.
    * @returns Un contexto nuevo con la misma ejecucion, flujo, cursor e iniciador.
@@ -427,19 +478,25 @@ export class StatePayloadContext {
       this.sandboxScope,
       this.initiatorUserId,
     );
+    const purged = Object.fromEntries(
+      Object.entries(this.namespaces).map(
+        ([namespace, data]) =>
+          [namespace, withoutBinaryAttachments(data)] as const,
+      ),
+    );
     const merged = Object.entries(overlays).map(
       ([namespace, data]) =>
         [
           namespace,
           {
-            ...structuredClone(this.namespaces[namespace] ?? {}),
-            ...structuredClone(data),
+            ...structuredClone(purged[namespace] ?? {}),
+            ...withoutBinaryAttachments(structuredClone(data)),
           },
         ] as const,
     );
 
     derived.namespaces = {
-      ...this.namespaces,
+      ...purged,
       ...Object.fromEntries(merged),
     };
 

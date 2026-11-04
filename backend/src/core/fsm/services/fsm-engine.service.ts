@@ -424,7 +424,10 @@ const sleep = (milliseconds: number): Promise<void> =>
   new Promise((resolve) => setTimeout(resolve, milliseconds));
 
 /** Enlace a la pagina publicada que acompana al aviso de cierre. */
-type DrupalPublication = Pick<FlowCompletedEvent, 'publishedUrl' | 'exitPage'>;
+type DrupalPublication = Pick<
+  FlowCompletedEvent,
+  'publishedUrl' | 'publishedUrls' | 'exitPage'
+>;
 
 /**
  * Lee del contexto final la pagina que publico el destino Drupal, en el
@@ -446,9 +449,18 @@ const readDrupalPublication = (
   }
 
   const exitPage = result?.exit_page;
+  // Con un lote de CREATE_NODE `published_url` es solo la primera noticia: el
+  // aviso tiene que poder enlazarlas todas. Se omite con una sola URL para no
+  // repetir lo que ya dice `publishedUrl`.
+  const publishedUrls = Array.isArray(result?.urls)
+    ? result.urls.filter(
+        (url): url is string => typeof url === 'string' && url.length > 0,
+      )
+    : [];
 
   return {
     publishedUrl,
+    ...(publishedUrls.length > 1 ? { publishedUrls } : {}),
     ...(typeof exitPage === 'string' && exitPage.length > 0
       ? { exitPage }
       : {}),

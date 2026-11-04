@@ -314,6 +314,7 @@ export const useExecutionSocket = (): void => {
         component: DrupalPublishSuccessModal,
         componentProps: {
           publishedUrl: event.publishedUrl,
+          publishedUrls: event.publishedUrls,
           exitPage: event.exitPage,
           flowName: event.flowName,
         },

@@ -215,6 +215,11 @@ export interface FlowCompletedEvent extends ExecutionEventBase {
    * ultimo nodo fue `DESTINO_DRUPAL` y devolvio una pagina.
    */
   readonly publishedUrl?: string;
+  /**
+   * URL de cada entidad creada cuando el destino publico un lote de mas de un
+   * elemento, en su orden. Ausente con un solo elemento.
+   */
+  readonly publishedUrls?: readonly string[];
   /** Ruta publica (alias o `/node/{nid}`) de esa misma pagina. */
   readonly exitPage?: string;
 }

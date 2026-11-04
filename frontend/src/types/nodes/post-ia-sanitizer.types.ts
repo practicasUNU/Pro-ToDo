@@ -84,6 +84,7 @@ export const SANITIZER_ALLOWED_TAGS: readonly string[] = [
   'strong',
   'em',
   'u',
+  'strike',
   'ul',
   'ol',
   'li',
@@ -131,7 +132,7 @@ export interface AllowedTagPreset {
  *
  * `UNRESTRICTED` es la lista VACIA y no la lista entera: un `allowedTags: []`
  * significa "no recortes nada" y deja que el saneador aplique su propia lista
- * blanca. Copiar aqui las 39 etiquetas crearia una segunda fuente de verdad que
+ * blanca. Copiar aqui la lista entera crearia una segunda fuente de verdad que
  * se quedaria atras en cuanto el saneador admitiese una mas.
  */
 export const ALLOWED_TAG_PRESETS: Readonly<Record<AllowedTagPresetKey, AllowedTagPreset>> = {
@@ -146,28 +147,42 @@ export const ALLOWED_TAG_PRESETS: Readonly<Record<AllowedTagPresetKey, AllowedTa
   // su cuenta dentro de la tabla.
   PANEL_ACORDEON: {
     label: 'Panel colapsable (acordeon)',
-    tags: ['div', 'h5', 'a', 'strong', 'span', 'table', 'tbody', 'tr', 'th', 'td'],
+    tags: ['div', 'h5', 'a', 'strong', 'span', 'table', 'thead', 'tbody', 'tr', 'th', 'td'],
   },
+  // Lista canonica del cuerpo de una noticia (`CANONICAL_ALLOWED_TAGS` del
+  // backend). Antes dejaba fuera `h2`, `ol`, `br`, `thead`... y el escudo, que
+  // obedece el recorte, borraba los encabezados de seccion y la cabecera
+  // "Referencia bibliografica" de Notiweb.
   FULL_STRUCTURE: {
     label: 'Estructura completa',
     tags: [
-      'p',
-      'strong',
-      'em',
-      'ul',
-      'li',
-      'a',
-      'img',
-      'table',
-      'tr',
-      'th',
-      'td',
-      'div',
-      'span',
+      'h2',
       'h3',
       'h4',
       'h5',
+      'h6',
+      'p',
+      'a',
+      'b',
+      'i',
+      'strong',
+      'em',
+      'u',
+      'strike',
+      'ul',
+      'ol',
+      'li',
+      'table',
+      'thead',
+      'tbody',
+      'tr',
+      'th',
+      'td',
       'hr',
+      'br',
+      'div',
+      'span',
+      'img',
     ],
   },
   UNRESTRICTED: {

@@ -90,6 +90,9 @@ export const TEMPLATE_SANITIZER_CONFIG: sanitizeHtml.IOptions = {
     // de convocatoria ("Hasta el dia 8 de octubre"). Es presentacion pura, sin
     // superficie de ataque, y su ausencia rechazaba el marcado real completo.
     'u',
+    // Tachado: lo usan los avisos de plazo corregido ("<strike>8 de octubre</strike>
+    // 15 de octubre"). Presentacion pura, como `u`.
+    'strike',
     'ul',
     'ol',
     'li',
@@ -161,6 +164,46 @@ export const TEMPLATE_SANITIZER_CONFIG: sanitizeHtml.IOptions = {
   nonTextTags: ['script', 'style', 'textarea', 'option', 'xmp', 'iframe'],
   transformTags: { a: forceSafeLinkRel },
 };
+
+/**
+ * Lista canonica de etiquetas de CUERPO que un escudo post-IA debe conservar.
+ *
+ * Es un SUBCONJUNTO de `TEMPLATE_SANITIZER_CONFIG.allowedTags`, no una segunda
+ * lista blanca: el saneador sigue aplicando la suya. Existe para fijar en un
+ * solo sitio lo minimo que no puede perderse —encabezados `h2`-`h6` incluidos—
+ * y que las pruebas lo comprueben. El defecto que la motiva fue un atajo del
+ * asistente que recortaba `allowedTags` sin `h2`: el escudo, obediente, borraba
+ * la cabecera "Referencia bibliografica" y las secciones de cada noticia.
+ */
+export const CANONICAL_ALLOWED_TAGS: readonly string[] = [
+  'h2',
+  'h3',
+  'h4',
+  'h5',
+  'h6',
+  'p',
+  'a',
+  'b',
+  'i',
+  'strong',
+  'em',
+  'u',
+  'strike',
+  'ul',
+  'ol',
+  'li',
+  'table',
+  'thead',
+  'tbody',
+  'tr',
+  'th',
+  'td',
+  'hr',
+  'br',
+  'div',
+  'span',
+  'img',
+];
 
 /**
  * Sonda para detectar si la lista blanca ELIMINARIA algo de un markup dado.
