@@ -45,6 +45,7 @@ import type { FsmExecution } from '@core/fsm/entities/fsm-execution.entity';
 import type { ExecutionFilter } from '@core/fsm/services/fsm-execution-query.service';
 import type { AuthenticatedUser } from '@modules/auth/interfaces/jwt-payload.interface';
 import type { PipelineSchemaDto } from '@core/fsm/dto/pipeline-schema.dto';
+import type { NodeType } from '@core/fsm/types/pipeline-schema.types';
 import type { Repository } from 'typeorm';
 import type { DiscardAuditContext } from '@modules/workflows/workflows.service';
 import type { DateRange } from '@common/utils/date-range.util';
@@ -60,6 +61,26 @@ type DiscardAuditInput = Pick<DiscardAuditContext, 'reason' | 'sourceIp'>;
 
 /** Filtros y orden de una consulta de ejecuciones, sin la ventana de pagina. */
 type ExecutionCriteria = Omit<ExecutionFilter, 'limit' | 'offset'>;
+
+/** Opciones de una reanudacion manual (CU-09). */
+export interface ResumeExecutionOptions {
+  readonly isEmailResume?: boolean;
+  /** IP de la peticion HTTP; ausente cuando la orden llega por correo. */
+  readonly sourceIp?: string | null;
+}
+
+/**
+ * Reanudacion ya ARRANCADA: validada, preparada y anunciada.
+ *
+ * `completion` es la promesa del recorrido del motor, ya en marcha. Quien la
+ * recibe decide si espera —la peticion HTTP, que responde con el estado final—
+ * o si la deja correr —el canal de correo, que no puede quedarse bloqueado
+ * mientras un flujo tarda minutos en terminar—.
+ */
+export interface StartedResume {
+  readonly executionId: string;
+  readonly completion: Promise<WorkflowExecutionResponseDto>;
+}
 
 /**
  * Fila del informe CSV: el resumen del listado mas el nombre del flujo.
@@ -289,12 +310,36 @@ export class ExecutionsService {
     executionId: string,
     resumeExecutionDto: ResumeExecutionDto,
     user: AuthenticatedUser,
-    options: {
-      readonly isEmailResume?: boolean;
-      /** IP de la peticion HTTP; ausente cuando la orden llega por correo. */
-      readonly sourceIp?: string | null;
-    } = {},
+    options: ResumeExecutionOptions = {},
   ): Promise<WorkflowExecutionResponseDto> {
+    const { completion } = await this.startResumeExecution(
+      executionId,
+      resumeExecutionDto,
+      user,
+      options,
+    );
+
+    return completion;
+  }
+
+  /**
+   * Primera mitad de `resumeExecution`: todo lo que puede RECHAZAR la orden.
+   *
+   * Valida, prepara el contexto, reactiva el flujo y anuncia la reanudacion, y
+   * devuelve en cuanto el motor arranca, sin esperar a que el flujo termine.
+   * Existe por el canal de correo: esperaba el recorrido entero dentro de su
+   * barrido, que es GLOBAL, y una sola reanudacion de un flujo largo dejaba sin
+   * atender las ordenes de cualquier otra ejecucion hasta que acabara.
+   *
+   * Las excepciones de validacion se lanzan AQUI, como antes; las del recorrido
+   * viajan en `completion`. Mismos `@throws` que `resumeExecution`.
+   */
+  public async startResumeExecution(
+    executionId: string,
+    resumeExecutionDto: ResumeExecutionDto,
+    user: AuthenticatedUser,
+    options: ResumeExecutionOptions = {},
+  ): Promise<StartedResume> {
     const execution = await this.requireExecution(executionId);
 
     // Un 409 y no un 400: la peticion esta bien formada y el recurso existe; lo
@@ -467,13 +512,40 @@ export class ExecutionsService {
     // `CACHED_EXTRACTION_NODE_TYPES` —cuya salida solo depende del correo de
     // entrada, que no cambia entre intentos— y su namespace ya trae datos. Si
     // el operador quiere rehacer la extraccion, reanuda desde el disparador.
+    // La promesa se crea AQUI y no se espera: el motor ya esta en marcha
+    // cuando esta funcion devuelve, y cada llamante elige si aguarda.
+    const completion = this.completeResume(
+      executionId,
+      schema,
+      workflow,
+      user,
+      preservesCachedExtraction && resumeNode !== undefined
+        ? [resumeNode.nodeType]
+        : [],
+    );
+
+    return { executionId, completion };
+  }
+
+  /**
+   * Segunda mitad de `resumeExecution`: el recorrido del motor y su cierre.
+   *
+   * @param skipNodeTypes Extraccion cara que el motor conservo y no se repite.
+   */
+  private async completeResume(
+    executionId: string,
+    schema: PipelineSchemaDto,
+    workflow: Workflow,
+    user: AuthenticatedUser,
+    skipNodeTypes: readonly NodeType[],
+  ): Promise<WorkflowExecutionResponseDto> {
     const finished = await this.fsmEngineService.executeWorkflow(
       executionId,
       schema,
       {
         flowName: workflow.name,
-        ...(preservesCachedExtraction && resumeNode !== undefined
-          ? { skipNodeTypes: [resumeNode.nodeType] }
+        ...(skipNodeTypes.length > 0
+          ? { skipNodeTypes: [...skipNodeTypes] }
           : {}),
       },
     );

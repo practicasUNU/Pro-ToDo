@@ -274,7 +274,7 @@ const sourcesText = computed<string | null>(() => {
         dense
         icon="play_arrow"
         color="warning"
-        :loading="executionStore.isResuming"
+        :loading="executionStore.isResumingExecution(canvasStore.observedExecution?.executionId)"
         data-test="resume-from-node"
         :aria-label="`Reanudar la ejecucion desde ${label}`"
         @click.stop="requestResume"

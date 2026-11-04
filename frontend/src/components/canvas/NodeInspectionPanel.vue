@@ -157,14 +157,18 @@ const handleDiscard = async (): Promise<void> => {
             flat
             class="pd-btn-secondary"
             label="Descartar"
-            :loading="executionStore.isDiscarding"
+            :loading="
+              executionStore.isDiscardingExecution(canvasStore.observedExecution?.executionId)
+            "
             @click="isDiscardOpen = true"
           />
           <q-btn
             label="Reanudar desde este paso"
             icon="play_arrow"
             color="warning"
-            :loading="executionStore.isResuming"
+            :loading="
+              executionStore.isResumingExecution(canvasStore.observedExecution?.executionId)
+            "
             @click="handleResume"
           />
         </q-card-actions>

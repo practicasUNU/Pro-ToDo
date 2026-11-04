@@ -46,8 +46,35 @@ export const useExecutionStore = defineStore('execution', () => {
   const nodeEvents = ref<NodeErrorEvent[]>([]);
   const joinedFlowIds = ref<Set<string>>(new Set());
   const isLoading = ref(false);
-  const isResuming = ref(false);
-  const isDiscarding = ref(false);
+  /**
+   * Ejecuciones con una reanudacion o un descarte en vuelo, POR IDENTIFICADOR.
+   *
+   * Antes eran dos booleanos del store entero. La peticion de reanudar dura lo
+   * que dura el flujo, asi que reanudar uno dejaba girando —y deshabilitados— los
+   * botones de todas las demas filas y cajas: un bloqueo de interfaz sobre
+   * ejecuciones que nada tenian que ver. Se reasigna un `Set` nuevo en cada
+   * cambio porque mutar el existente no dispara la reactividad.
+   */
+  const resumingExecutionIds = ref<ReadonlySet<string>>(new Set());
+  const discardingExecutionIds = ref<ReadonlySet<string>>(new Set());
+
+  /** Hay ALGUNA reanudacion en vuelo. Para indicadores globales, no para botones. */
+  const isResuming = computed<boolean>(() => resumingExecutionIds.value.size > 0);
+  const isDiscarding = computed<boolean>(() => discardingExecutionIds.value.size > 0);
+
+  /** Si ESTA ejecucion se esta reanudando; es lo que debe pintar cada boton. */
+  const isResumingExecution = (executionId: string | null | undefined): boolean =>
+    typeof executionId === 'string' && resumingExecutionIds.value.has(executionId);
+
+  /** Si ESTA ejecucion se esta descartando. */
+  const isDiscardingExecution = (executionId: string | null | undefined): boolean =>
+    typeof executionId === 'string' && discardingExecutionIds.value.has(executionId);
+
+  const withId = (ids: ReadonlySet<string>, id: string): ReadonlySet<string> =>
+    new Set([...ids, id]);
+
+  const withoutId = (ids: ReadonlySet<string>, id: string): ReadonlySet<string> =>
+    new Set([...ids].filter((current) => current !== id));
 
   const activeCursor = computed<string | null>(() => activeExecution.value?.activeCursor ?? null);
 
@@ -289,7 +316,7 @@ export const useExecutionStore = defineStore('execution', () => {
     executionId: string,
     targetStepId?: string,
   ): Promise<WorkflowExecutionResult> => {
-    isResuming.value = true;
+    resumingExecutionIds.value = withId(resumingExecutionIds.value, executionId);
 
     try {
       const result = await fsmExecutionsService.resumeExecution(executionId, targetStepId);
@@ -302,7 +329,7 @@ export const useExecutionStore = defineStore('execution', () => {
 
       return result;
     } finally {
-      isResuming.value = false;
+      resumingExecutionIds.value = withoutId(resumingExecutionIds.value, executionId);
     }
   };
 
@@ -322,7 +349,7 @@ export const useExecutionStore = defineStore('execution', () => {
     executionId: string,
     reason: string | null = null,
   ): Promise<DiscardExecutionResult> => {
-    isDiscarding.value = true;
+    discardingExecutionIds.value = withId(discardingExecutionIds.value, executionId);
 
     try {
       // Un motivo en blanco es lo mismo que no darlo.
@@ -340,7 +367,7 @@ export const useExecutionStore = defineStore('execution', () => {
 
       return result;
     } finally {
-      isDiscarding.value = false;
+      discardingExecutionIds.value = withoutId(discardingExecutionIds.value, executionId);
     }
   };
 
@@ -412,6 +439,8 @@ export const useExecutionStore = defineStore('execution', () => {
     isLoading,
     isResuming,
     isDiscarding,
+    isResumingExecution,
+    isDiscardingExecution,
     activeCursor,
     currentState,
     isPaused,

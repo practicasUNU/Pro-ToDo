@@ -111,7 +111,7 @@ const buildWorkflow = (): Workflow =>
 
 interface Harness {
   service: InboundEmailResumeService;
-  executions: { resumeExecution: jest.Mock };
+  executions: { startResumeExecution: jest.Mock };
   users: { findByEmail: jest.Mock };
   workflows: { findOne: jest.Mock };
   nodeCatalog: { find: jest.Mock };
@@ -201,8 +201,16 @@ const buildHarness = (
   // servicio.
   Object.assign(mockClient, client);
 
+  // Solo el ARRANQUE: el canal de correo ya no espera el recorrido del motor.
   const executions = {
-    resumeExecution: jest.fn().mockResolvedValue({ status: 'EXITOSO' }),
+    startResumeExecution: jest
+      .fn()
+      .mockImplementation((executionId: string) =>
+        Promise.resolve({
+          executionId,
+          completion: Promise.resolve({ status: 'EXITOSO' }),
+        }),
+      ),
   };
   const users = { findByEmail: jest.fn().mockResolvedValue(buildUser()) };
   const query = {
@@ -328,7 +336,7 @@ describe('InboundEmailResumeService (ordenes de reanudacion por correo)', () => 
 
       // 3. Assert 🎯
       expect(dispatched).toBe(1);
-      expect(executions.resumeExecution).toHaveBeenCalledWith(
+      expect(executions.startResumeExecution).toHaveBeenCalledWith(
         EXECUTION_ID,
         {},
         { id: USER_ID, email: EDITOR_EMAIL, role: UserRole.EDITOR },
@@ -349,7 +357,7 @@ describe('InboundEmailResumeService (ordenes de reanudacion por correo)', () => 
       await service.processInbox();
 
       // 3. Assert 🎯
-      expect(executions.resumeExecution).not.toHaveBeenCalled();
+      expect(executions.startResumeExecution).not.toHaveBeenCalled();
       expect(warnSpy).toHaveBeenCalledWith(
         expect.stringContaining('Intento no autorizado desde'),
       );
@@ -371,7 +379,7 @@ describe('InboundEmailResumeService (ordenes de reanudacion por correo)', () => 
       await service.processInbox();
 
       // 3. Assert 🎯
-      expect(executions.resumeExecution).not.toHaveBeenCalled();
+      expect(executions.startResumeExecution).not.toHaveBeenCalled();
     });
 
     it('2.4 NO deberia preguntar por el remitente antes que por el testigo', async () => {
@@ -404,7 +412,7 @@ describe('InboundEmailResumeService (ordenes de reanudacion por correo)', () => 
       await service.processInbox();
 
       // 3. Assert 🎯
-      expect(executions.resumeExecution).not.toHaveBeenCalled();
+      expect(executions.startResumeExecution).not.toHaveBeenCalled();
       expect(warnSpy).toHaveBeenCalledWith(
         expect.stringContaining('atacante@gmail.com'),
       );
@@ -419,7 +427,7 @@ describe('InboundEmailResumeService (ordenes de reanudacion por correo)', () => 
       await service.processInbox();
 
       // 3. Assert 🎯
-      expect(executions.resumeExecution).not.toHaveBeenCalled();
+      expect(executions.startResumeExecution).not.toHaveBeenCalled();
     });
 
     it('3.3 deberia ACEPTAR a un ADMIN', async () => {
@@ -431,7 +439,7 @@ describe('InboundEmailResumeService (ordenes de reanudacion por correo)', () => 
       await service.processInbox();
 
       // 3. Assert 🎯
-      expect(executions.resumeExecution).toHaveBeenCalledTimes(1);
+      expect(executions.startResumeExecution).toHaveBeenCalledTimes(1);
     });
 
     it('3.4 deberia RECHAZAR un mensaje sin remitente legible', async () => {
@@ -443,7 +451,7 @@ describe('InboundEmailResumeService (ordenes de reanudacion por correo)', () => 
       await service.processInbox();
 
       // 3. Assert 🎯
-      expect(executions.resumeExecution).not.toHaveBeenCalled();
+      expect(executions.startResumeExecution).not.toHaveBeenCalled();
     });
   });
 
@@ -473,7 +481,7 @@ describe('InboundEmailResumeService (ordenes de reanudacion por correo)', () => 
         await service.processInbox();
 
         // 3. Assert 🎯
-        expect(executions.resumeExecution).toHaveBeenCalledWith(
+        expect(executions.startResumeExecution).toHaveBeenCalledWith(
           EXECUTION_ID,
           { targetStepId: expected },
           expect.anything(),
@@ -493,7 +501,7 @@ describe('InboundEmailResumeService (ordenes de reanudacion por correo)', () => 
       await service.processInbox();
 
       // 3. Assert 🎯
-      expect(executions.resumeExecution).toHaveBeenCalledWith(
+      expect(executions.startResumeExecution).toHaveBeenCalledWith(
         EXECUTION_ID,
         { targetStepId: 'pausa_revision' },
         expect.anything(),
@@ -513,7 +521,7 @@ describe('InboundEmailResumeService (ordenes de reanudacion por correo)', () => 
       await service.processInbox();
 
       // 3. Assert 🎯
-      expect(executions.resumeExecution).toHaveBeenCalledWith(
+      expect(executions.startResumeExecution).toHaveBeenCalledWith(
         EXECUTION_ID,
         {},
         expect.anything(),
@@ -537,7 +545,7 @@ describe('InboundEmailResumeService (ordenes de reanudacion por correo)', () => 
       await service.processInbox();
 
       // 3. Assert 🎯
-      expect(executions.resumeExecution).toHaveBeenCalledWith(
+      expect(executions.startResumeExecution).toHaveBeenCalledWith(
         EXECUTION_ID,
         { targetStepId: 'nodo_a' },
         expect.anything(),
@@ -558,7 +566,7 @@ describe('InboundEmailResumeService (ordenes de reanudacion por correo)', () => 
       await service.processInbox();
 
       // 3. Assert 🎯
-      expect(executions.resumeExecution).toHaveBeenCalledWith(
+      expect(executions.startResumeExecution).toHaveBeenCalledWith(
         EXECUTION_ID,
         { targetStepId: 'nodo_a' },
         expect.anything(),
@@ -580,7 +588,7 @@ describe('InboundEmailResumeService (ordenes de reanudacion por correo)', () => 
       await service.processInbox();
 
       // 3. Assert 🎯: se reanuda igual, solo que sin el paso pedido.
-      expect(executions.resumeExecution).toHaveBeenCalledWith(
+      expect(executions.startResumeExecution).toHaveBeenCalledWith(
         EXECUTION_ID,
         {},
         expect.anything(),
@@ -609,7 +617,7 @@ describe('InboundEmailResumeService (ordenes de reanudacion por correo)', () => 
         await service.processInbox();
 
         // 3. Assert 🎯
-        expect(executions.resumeExecution).toHaveBeenCalledWith(
+        expect(executions.startResumeExecution).toHaveBeenCalledWith(
           EXECUTION_ID,
           { targetStepId: expected },
           expect.anything(),
@@ -640,7 +648,7 @@ describe('InboundEmailResumeService (ordenes de reanudacion por correo)', () => 
       );
       await service.processInbox();
 
-      return executions.resumeExecution;
+      return executions.startResumeExecution;
     };
 
     it.each(['Destino Drupal', 'destino-drupal', 'DESTINO_DRUPAL', 'drupal'])(
@@ -741,7 +749,7 @@ describe('InboundEmailResumeService (ordenes de reanudacion por correo)', () => 
       harness: Harness,
       targetStepId: string,
     ): void => {
-      expect(harness.executions.resumeExecution).toHaveBeenCalledWith(
+      expect(harness.executions.startResumeExecution).toHaveBeenCalledWith(
         EXECUTION_ID,
         { targetStepId },
         expect.anything(),
@@ -792,7 +800,7 @@ describe('InboundEmailResumeService (ordenes de reanudacion por correo)', () => 
 
       // 3. Assert 🎯: sin `targetStepId`, el motor reanuda desde el cursor
       //    persistido; la orden no se aborta por una errata.
-      expect(harness.executions.resumeExecution).toHaveBeenCalledWith(
+      expect(harness.executions.startResumeExecution).toHaveBeenCalledWith(
         EXECUTION_ID,
         {},
         expect.anything(),
@@ -904,7 +912,7 @@ describe('InboundEmailResumeService (ordenes de reanudacion por correo)', () => 
     };
 
     const resumedWith = (harness: Harness): unknown =>
-      (harness.executions.resumeExecution.mock.calls as unknown[][])[0]?.[1];
+      (harness.executions.startResumeExecution.mock.calls as unknown[][])[0]?.[1];
 
     it.each([
       ['EL NODO ESCUDO POST IA', 'escudo_post_ia'],
@@ -1039,7 +1047,7 @@ describe('InboundEmailResumeService (ordenes de reanudacion por correo)', () => 
       });
 
       // 3. Assert 🎯
-      expect(harness.executions.resumeExecution).toHaveBeenCalledTimes(1);
+      expect(harness.executions.startResumeExecution).toHaveBeenCalledTimes(1);
       expect(resumedWith(harness)).toEqual({});
       expect(harness.warnSpy).toHaveBeenCalledWith(
         expect.stringContaining('No se pudo leer la traza del escudo'),
@@ -1087,7 +1095,7 @@ describe('InboundEmailResumeService (ordenes de reanudacion por correo)', () => 
       await service.processInbox();
 
       // 3. Assert 🎯
-      expect(executions.resumeExecution).not.toHaveBeenCalled();
+      expect(executions.startResumeExecution).not.toHaveBeenCalled();
       expect(client.messageFlagsAdd).not.toHaveBeenCalled();
     });
 
@@ -1134,7 +1142,7 @@ describe('InboundEmailResumeService (ordenes de reanudacion por correo)', () => 
 
       // 3. Assert 🎯
       expect(dispatched).toBe(1);
-      expect(executions.resumeExecution).toHaveBeenCalledTimes(1);
+      expect(executions.startResumeExecution).toHaveBeenCalledTimes(1);
     });
     it('5.6 deberia buscar EXCLUSIVAMENTE mensajes no leidos', async () => {
       // 1. Arrange 📐: un correo ya leido no se inspecciona bajo ningun concepto.
@@ -1298,7 +1306,7 @@ describe('InboundEmailResumeService (ordenes de reanudacion por correo)', () => 
 
       // 3. Assert 🎯
       expect(dispatched).toBe(1);
-      expect(executions.resumeExecution).toHaveBeenCalledTimes(1);
+      expect(executions.startResumeExecution).toHaveBeenCalledTimes(1);
     });
 
     it('6.2 deberia descontar los `Re:` encadenados del asunto de respaldo', async () => {
@@ -1314,7 +1322,7 @@ describe('InboundEmailResumeService (ordenes de reanudacion por correo)', () => 
 
       // 3. Assert 🎯
       expect(dispatched).toBe(1);
-      expect(executions.resumeExecution).toHaveBeenCalledTimes(1);
+      expect(executions.startResumeExecution).toHaveBeenCalledTimes(1);
     });
 
     it('6.3 deberia descartar la CITA del aviso original', async () => {
@@ -1340,7 +1348,7 @@ describe('InboundEmailResumeService (ordenes de reanudacion por correo)', () => 
 
       // 3. Assert 🎯
       expect(dispatched).toBe(0);
-      expect(executions.resumeExecution).not.toHaveBeenCalled();
+      expect(executions.startResumeExecution).not.toHaveBeenCalled();
     });
 
     it('6.4 deberia rechazar un cuerpo con texto de mas detras de la orden', async () => {
@@ -1360,7 +1368,7 @@ describe('InboundEmailResumeService (ordenes de reanudacion por correo)', () => 
 
       // 3. Assert 🎯
       expect(dispatched).toBe(0);
-      expect(executions.resumeExecution).not.toHaveBeenCalled();
+      expect(executions.startResumeExecution).not.toHaveBeenCalled();
     });
 
     it('6.5 deberia aceptar la orden con DESDE leida del cuerpo', async () => {
@@ -1378,7 +1386,7 @@ describe('InboundEmailResumeService (ordenes de reanudacion por correo)', () => 
       await service.processInbox();
 
       // 3. Assert 🎯
-      expect(executions.resumeExecution).toHaveBeenCalledWith(
+      expect(executions.startResumeExecution).toHaveBeenCalledWith(
         EXECUTION_ID,
         { targetStepId: 'pausa_revision' },
         expect.anything(),
@@ -1405,7 +1413,7 @@ describe('InboundEmailResumeService (ordenes de reanudacion por correo)', () => 
 
       // 3. Assert 🎯
       expect(dispatched).toBe(0);
-      expect(executions.resumeExecution).not.toHaveBeenCalled();
+      expect(executions.startResumeExecution).not.toHaveBeenCalled();
     });
   });
 
@@ -1427,7 +1435,7 @@ describe('InboundEmailResumeService (ordenes de reanudacion por correo)', () => 
 
       // 3. Assert 🎯
       expect(resumed).toBe(true);
-      expect(executions.resumeExecution).toHaveBeenCalledTimes(1);
+      expect(executions.startResumeExecution).toHaveBeenCalledTimes(1);
       // No abre ninguna conexion: el mensaje ya venia descargado.
       expect(client.connect).not.toHaveBeenCalled();
     });
@@ -1448,7 +1456,7 @@ describe('InboundEmailResumeService (ordenes de reanudacion por correo)', () => 
 
       // 3. Assert 🎯
       expect(resumed).toBe(false);
-      expect(executions.resumeExecution).not.toHaveBeenCalled();
+      expect(executions.startResumeExecution).not.toHaveBeenCalled();
     });
   });
 

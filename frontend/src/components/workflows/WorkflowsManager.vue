@@ -492,7 +492,7 @@ onBeforeUnmount(() => {
               dense
               icon="play_arrow"
               data-test="resume-execution"
-              :loading="executionStore.isResuming"
+              :loading="executionStore.isResumingExecution(resolveExecutionId(cellProps.row))"
               @click="requestResume(cellProps.row)"
             >
               <q-tooltip>Reanudar la ejecucion detenida (CU-09)</q-tooltip>
@@ -504,7 +504,7 @@ onBeforeUnmount(() => {
               icon="delete_sweep"
               color="negative"
               data-test="discard-execution"
-              :loading="executionStore.isDiscarding"
+              :loading="executionStore.isDiscardingExecution(resolveExecutionId(cellProps.row))"
               @click="requestDiscard(cellProps.row)"
             >
               <q-tooltip>Descartar la ejecucion: no se podra reanudar</q-tooltip>

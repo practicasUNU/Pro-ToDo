@@ -1,4 +1,4 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { ConflictException, Injectable, Logger } from '@nestjs/common';
 import { SchedulerRegistry } from '@nestjs/schedule';
 import { ConfigService } from '@nestjs/config';
 import { InjectRepository } from '@nestjs/typeorm';
@@ -35,6 +35,7 @@ import type { ResolvedImapConfig } from '@modules/nodes/dto/imap-trigger-config.
 import type { ImapClientTimeouts } from '@modules/nodes/services/imap-client.factory';
 import type { FsmExecution } from '@core/fsm/entities/fsm-execution.entity';
 import type { AuthenticatedUser } from '@modules/auth/interfaces/jwt-payload.interface';
+import type { WorkflowExecutionResponseDto } from '@modules/workflows/dto/workflow-execution-response.dto';
 import type { User } from '@modules/users/entities/user.entity';
 import type { OnModuleDestroy, OnModuleInit } from '@nestjs/common';
 import type { ImapFlow, MailboxLockObject } from 'imapflow';
@@ -512,6 +513,19 @@ export class InboundEmailResumeService
    */
   private readonly skippedUids = new Set<number>();
 
+  /**
+   * Ejecuciones reanudadas desde este canal cuyo recorrido sigue en marcha.
+   *
+   * La guarda es POR EJECUCION y no global. El barrido ya no espera a que el
+   * flujo reanudado termine —esperarlo bloqueaba las ordenes de cualquier otra
+   * ejecucion durante minutos—, asi que dos ordenes sobre el MISMO testigo en
+   * el mismo lote, o en ciclos seguidos, llegarian a preparar la reanudacion
+   * dos veces antes de que el motor marcase la fila EN_PROCESO. Con esto la
+   * segunda se reconoce como duplicada y no toca nada; las de otras ejecuciones
+   * siguen su curso en paralelo.
+   */
+  private readonly resumingExecutions = new Set<string>();
+
   constructor(
     private readonly configService: ConfigService,
     private readonly executionQueryService: FsmExecutionQueryService,
@@ -880,12 +894,27 @@ export class InboundEmailResumeService
       command.targetIdentifier,
     );
 
-    await this.executionsService.resumeExecution(
+    // --- 4. Guarda por ejecucion: su recorrido anterior sigue en marcha.
+    if (this.resumingExecutions.has(execution.executionId)) {
+      this.logger.warn(
+        `[InboundEmailResume] Orden duplicada de ${user.email}: la ejecucion ${execution.executionId} ya se esta reanudando; se ignora.`,
+      );
+
+      return false;
+    }
+
+    // Se espera SOLO el arranque: es lo que puede rechazar la orden (estado,
+    // cursor, esquema, capacidad), y su excepcion sube como siempre. El
+    // recorrido del motor no se espera; si se esperase, el barrido —global—
+    // quedaria ocupado hasta que el flujo terminase.
+    const { completion } = await this.executionsService.startResumeExecution(
       execution.executionId,
       targetStepId === null ? {} : { targetStepId },
       user,
       { isEmailResume: true },
     );
+
+    this.trackBackgroundResume(execution.executionId, completion);
 
     this.logger.log(
       `[InboundEmailResume] Ejecucion ${execution.executionId} reanudada por ${user.email}${
@@ -894,6 +923,43 @@ export class InboundEmailResumeService
     );
 
     return true;
+  }
+
+  /**
+   * Acompana el recorrido de una reanudacion lanzada sin esperarla.
+   *
+   * Registra el desenlace y libera la guarda de su ejecucion. El `catch` no es
+   * opcional: una promesa rechazada sin manejador tumba el proceso de Node. El
+   * motor ya deja su propia traza del fallo; aqui solo se dice que vino de una
+   * orden por correo.
+   */
+  private trackBackgroundResume(
+    executionId: string,
+    completion: Promise<WorkflowExecutionResponseDto>,
+  ): void {
+    this.resumingExecutions.add(executionId);
+
+    void completion
+      .then((result) => {
+        this.logger.log(
+          `[InboundEmailResume] La ejecucion ${executionId} reanudada por correo termino en ${result.status}.`,
+        );
+      })
+      .catch((error: unknown) => {
+        // Un 409 aqui es el mutex POR FLUJO (RNF-09): otra ejecucion del mismo
+        // flujo esta EN_PROCESO. No es una averia; la ejecucion sigue PAUSADO
+        // y la orden se puede repetir cuando aquella termine.
+        const message = `[InboundEmailResume] La reanudacion por correo de ${executionId} no pudo completarse: ${this.describe(error)}`;
+
+        if (error instanceof ConflictException) {
+          this.logger.warn(message);
+        } else {
+          this.logger.error(message);
+        }
+      })
+      .finally(() => {
+        this.resumingExecutions.delete(executionId);
+      });
   }
 
   /**
