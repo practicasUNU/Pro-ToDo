@@ -382,10 +382,11 @@ describe('Catalogo de universidades de Drupal', () => {
       const $ = load('<div id="segunda"></div><div id="primera"></div>');
 
       // 2. Act ⚙️
+      // UPM y no ESIC: ESIC tiene destino fijo y no lee `data-parent`.
       const container = resolvePanelContainer($, {
-        committeeCode: 'ESIC 2',
+        committeeCode: 'UPM 2',
         targetSelector: '#primera, #segunda',
-        heading: 'ESIC 2',
+        heading: 'UPM 2',
         html: '',
       });
 

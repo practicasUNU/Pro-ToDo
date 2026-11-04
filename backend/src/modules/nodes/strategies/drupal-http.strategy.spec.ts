@@ -13,6 +13,7 @@ import {
   ERR_DRUPAL_AUTH,
   ERR_DRUPAL_CONFIG,
   ERR_DRUPAL_DOM_TARGET,
+  ERR_DRUPAL_TARGET_NOT_FOUND,
   ERR_DRUPAL_MISSING_PAYLOAD,
   ERR_DRUPAL_NETWORK,
   ERR_DRUPAL_REQUEST,
@@ -243,7 +244,7 @@ describe('DrupalHttpStrategy', () => {
         strategy.getUnreachableErrorCodes({
           operationMode: DrupalOperationMode.CREATE_NODE,
         }),
-      ).toEqual([ERR_DRUPAL_DOM_TARGET]);
+      ).toEqual([ERR_DRUPAL_DOM_TARGET, ERR_DRUPAL_TARGET_NOT_FOUND]);
       expect(
         strategy.getUnreachableErrorCodes({
           operationMode: DrupalOperationMode.APPEND_HTML_BLOCK,
@@ -1281,9 +1282,11 @@ describe('DrupalHttpStrategy', () => {
         appendParams,
       );
 
-      // 3. Assert 🎯: todo o nada, sin PATCH.
+      // 3. Assert 🎯: todo o nada, sin PATCH. El `#collapseUFV` de la pagina
+      //    cuelga de «Universidad Francisco de Vitoria», no de ESIC: la guarda
+      //    por encabezado lo descarta y el comite se queda sin destino.
       expect(result.success).toBe(false);
-      expect(result.error?.code).toBe(ERR_DRUPAL_DOM_TARGET);
+      expect(result.error?.code).toBe(ERR_DRUPAL_TARGET_NOT_FOUND);
       expect(result.error?.missingFields).toEqual(['ESIC 2']);
       expect(httpClient.requestWithStatus).toHaveBeenCalledTimes(1);
     });

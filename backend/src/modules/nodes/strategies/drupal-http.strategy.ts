@@ -17,6 +17,7 @@ import { HttpClientService } from '@core/http/http-client.service';
 
 import { BaseHttpDestinationStrategy } from './base/base-http-destination.strategy';
 import {
+  isEsicCommittee,
   planPanelDispatch,
   resolvePanelContainer,
 } from './drupal-universities';
@@ -73,6 +74,16 @@ export const ERR_DRUPAL_AUTH = 'ERR_DRUPAL_AUTH';
 export const ERR_DRUPAL_REQUEST = 'ERR_DRUPAL_REQUEST';
 export const ERR_DRUPAL_SERVER = 'ERR_DRUPAL_SERVER';
 export const ERR_DRUPAL_DOM_TARGET = 'ERR_DRUPAL_DOM_TARGET';
+
+/**
+ * Un comite de ESIC no encuentra su contenedor: ni el UFV de produccion bajo el
+ * encabezado de ESIC ni el `#accordionESIC` / `#collapseESIC` del sandbox.
+ *
+ * Codigo propio y no `ERR_DRUPAL_DOM_TARGET` porque la causa es distinta y
+ * tiene su propio arreglo: la pagina no tiene la seccion de ESIC donde se
+ * espera. GRAVE: no se escribe nada y la ejecucion queda PAUSADA y reanudable.
+ */
+export const ERR_DRUPAL_TARGET_NOT_FOUND = 'ERR_DRUPAL_TARGET_NOT_FOUND';
 export const ERR_DRUPAL_NETWORK = 'ERR_DRUPAL_NETWORK';
 
 /** Las mismas que aplica `PipelineValidatorService` al guardar el esquema. */
@@ -696,7 +707,9 @@ export class DrupalHttpStrategy extends BaseHttpDestinationStrategy {
       config.operationMode === DrupalOperationMode.TRANSFER_HTML_BLOCK ||
       config.operationMode === DrupalOperationMode.UPDATE_LINK_SOURCE;
 
-    return touchesDom ? [] : [ERR_DRUPAL_DOM_TARGET];
+    return touchesDom
+      ? []
+      : [ERR_DRUPAL_DOM_TARGET, ERR_DRUPAL_TARGET_NOT_FOUND];
   }
 
   public async execute(
@@ -2268,11 +2281,20 @@ export class DrupalHttpStrategy extends BaseHttpDestinationStrategy {
         )
         .join('; ');
 
+      // Un comite de ESIC sin destino lleva su propio codigo: la causa es que
+      // falta la seccion de ESIC, no un selector mal escrito.
+      const esicMissing = unplaceable.some((panel) =>
+        isEsicCommittee(panel.heading),
+      );
+
       return {
         level: 'GRAVE',
-        code: ERR_DRUPAL_DOM_TARGET,
+        code: esicMissing ? ERR_DRUPAL_TARGET_NOT_FOUND : ERR_DRUPAL_DOM_TARGET,
         message:
           `No existe en la pagina el contenedor de ${unplaceable.length} de los ${plan.length} paneles recibidos: ${detail}. ` +
+          (esicMissing
+            ? 'Para ESIC se busco #collapseUFV bajo el encabezado «ESIC Universidad» y despues #accordionESIC / #collapseESIC. '
+            : '') +
           'No se ha modificado nada. Revisa el mapeo de universidades del prompt o la estructura de la pagina agregadora.',
         // El CODIGO DEL COMITE y no el selector: es lo que permite localizar el
         // panel en el material de origen, que es donde esta la correccion.

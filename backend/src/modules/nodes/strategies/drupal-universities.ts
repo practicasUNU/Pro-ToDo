@@ -137,6 +137,12 @@ export const DRUPAL_UNIVERSITIES_CATALOG: readonly UniversityMapping[] = [
     // —oculta con `d-none`, con su propio comite UFV D1— y es una universidad
     // DISTINTA. El resultado de aquel cambio fue que los comites de ESIC se
     // publicaron dentro del acordeon de Francisco de Vitoria.
+    //
+    // En PRODUCCION la seccion de ESIC lleva el colapsable `#collapseUFV` bajo
+    // su propio encabezado «ESIC Universidad». Por eso los comites de ESIC no
+    // usan esta entrada para resolver su destino sino `resolveEsicContainer`,
+    // que prueba ese UFV SOLO bajo el encabezado de ESIC y cae despues en los
+    // identificadores de esta entrada (sandbox).
     collapseId: '#collapseESIC',
     accordionId: '#accordionESIC',
     aliases: ['esic'],
@@ -282,6 +288,84 @@ export const findAccordionByHeading = (
   return null;
 };
 
+/** Entrada del catalogo de ESIC Universidad. */
+const ESIC_UNIVERSITY = DRUPAL_UNIVERSITIES_CATALOG.find(
+  (university) => university.collapseId === '#collapseESIC',
+);
+
+/**
+ * Colapsable de la seccion de ESIC en PRODUCCION.
+ *
+ * Es un identificador heredado que comparte nombre con la Universidad
+ * Francisco de Vitoria: solo se acepta cuando cuelga del encabezado de ESIC.
+ */
+export const ESIC_PRODUCTION_COLLAPSE_ID = 'collapseUFV';
+
+/** Sub-acordeon de comites de ESIC en el sandbox. */
+export const ESIC_SANDBOX_ACCORDION_SELECTOR = '#accordionESIC';
+
+/** Seccion de ESIC en el sandbox, para cuando el sub-acordeon no tiene id propio. */
+export const ESIC_SANDBOX_COLLAPSE_SELECTOR = '#collapseESIC';
+
+/** Si un texto (encabezado de comite o de seccion) nombra a ESIC Universidad. */
+export const isEsicCommittee = (text: string): boolean =>
+  ESIC_UNIVERSITY !== undefined && findUniversity(text) === ESIC_UNIVERSITY;
+
+/**
+ * Contenedor de los comites de ESIC, o `null` si la pagina no tiene ninguno.
+ *
+ * Prioridad fija, de produccion a sandbox:
+ *
+ *   1. `#collapseUFV` / su `.panel-group` (`#accordionUFV`), pero SOLO si el
+ *      enlace que lo despliega dice «ESIC Universidad». Nunca un
+ *      `$('#collapseUFV')` global: la Universidad Francisco de Vitoria vive en
+ *      la misma pagina con su propio UFV, y caer en el suyo es exactamente la
+ *      averia que revirtio la migracion 038.
+ *   2. `#accordionESIC`, o el `.panel-group` dentro de `#collapseESIC`.
+ *
+ * Funcion pura sobre el DOM ya cargado: no lo modifica.
+ */
+export const resolveEsicContainer = (
+  $: CheerioAPI,
+): Cheerio<AnyNode> | null => {
+  for (const element of $(PANEL_TOGGLE_SELECTOR).toArray()) {
+    const link = $(element);
+
+    if (
+      link.attr('href') !== `#${ESIC_PRODUCTION_COLLAPSE_ID}` ||
+      !isEsicCommittee(link.text())
+    ) {
+      continue;
+    }
+
+    const group = link
+      .closest('.panel')
+      .find(`[id="${ESIC_PRODUCTION_COLLAPSE_ID}"]`)
+      .first()
+      .find('.panel-group[id]')
+      .first();
+
+    if (group.length > 0) {
+      return group;
+    }
+  }
+
+  const sandboxAccordion = selectVisibleTarget(
+    $,
+    ESIC_SANDBOX_ACCORDION_SELECTOR,
+  );
+
+  if (sandboxAccordion.length > 0) {
+    return sandboxAccordion;
+  }
+
+  const sandboxGroup = selectVisibleTarget($, ESIC_SANDBOX_COLLAPSE_SELECTOR)
+    .find('.panel-group[id]')
+    .first();
+
+  return sandboxGroup.length > 0 ? sandboxGroup : null;
+};
+
 /**
  * Trocea un selector en sus alternativas, separadas por comas de primer nivel.
  *
@@ -332,6 +416,13 @@ export const resolvePanelContainer = (
   $: CheerioAPI,
   panel: PanelDispatch,
 ): Cheerio<AnyNode> | null => {
+  // ESIC tiene destino fijo (UFV guardado y despues ESIC), por encima del
+  // `data-parent` que traiga el panel: la plantilla siembra un `#accordion`
+  // generico que lo mandaria a la raiz del acordeon, fuera de su universidad.
+  if (isEsicCommittee(panel.heading)) {
+    return resolveEsicContainer($);
+  }
+
   for (const alternative of splitSelectorAlternatives(
     panel.targetSelector ?? '',
   )) {
