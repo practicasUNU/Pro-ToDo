@@ -571,7 +571,7 @@ describe('Siembra maestra de los cinco pipelines (e2e)', () => {
       ]);
     });
 
-    it('14.5 deberia blindar los prompts de Notiweb y de titulos una sola vez', async () => {
+    it('14.5 deberia consolidar los prompts de Notiweb y de titulos una sola vez', async () => {
       // 1. Arrange 📐 + 2. Act ⚙️
       const rows = await dataSource.query<
         { codigo: string; texto_prompt: string }[]
@@ -582,21 +582,40 @@ describe('Siembra maestra de los cinco pipelines (e2e)', () => {
       const textOf = (code: string): string =>
         rows.find((row) => row.codigo === code)?.texto_prompt ?? '';
 
-      // 3. Assert 🎯
+      // 3. Assert 🎯: Notiweb, lote con fuentes mixtas y minimo de 4 parrafos.
       const notiweb = textOf('NOTIWEB_DEFAULT');
-      expect(
-        notiweb.split('DESARROLLO MÍNIMO Y CIERRE DE CADA NOTICIA'),
-      ).toHaveLength(2);
-      expect(notiweb).toContain('MÍNIMO DE 3 Y UN MÁXIMO DE 4 párrafos');
+      expect(notiweb.split('DETECCIÓN DE LOTE Y FUENTES MIXTAS')).toHaveLength(
+        2,
+      );
+      expect(notiweb).toContain('MÍNIMO DE 4 PÁRRAFOS');
+      expect(notiweb).toContain('Título, su Fuente y su Entradilla');
+      expect(notiweb).toContain('"Blog del día"');
       expect(notiweb).toContain(
         '<hr /><h2>Referencia bibliográfica</h2><p class="notiweb-referencia">',
       );
       expect(notiweb).toContain('APA 7');
+      // Ningun rango anterior sobrevive, ni el bloque que lo contenia.
+      expect(notiweb).not.toMatch(
+        /M[IÍ]NIMO DE 3|M[AÁ]XIMO DE 4|\b[23] a 4 p[aá]rrafos/i,
+      );
+      expect(notiweb).not.toContain(
+        'DESARROLLO MÍNIMO Y CIERRE DE CADA NOTICIA',
+      );
+      // El cierre ya no se puede eliminar.
+      expect(notiweb).not.toContain('Elimina del marcado el <hr>');
 
+      // Titulos: respaldos del encabezado y prohibicion de inventar.
       const titulos = textOf('VERIFICADOR_TITULOS_DEFAULT');
-      expect(
-        titulos.split('CONTRATO DE PANEL (VERIFICACIÓN DE TÍTULOS)'),
-      ).toHaveLength(2);
+      expect(titulos.split('RESPALDO DEL ENCABEZADO DEL PANEL (')).toHaveLength(
+        2,
+      );
+      expect(titulos).not.toContain('CONTRATO DE PANEL');
+      expect(titulos).toContain('usa las siglas de la universidad');
+      expect(titulos).toContain('usa la titulación principal evaluada');
+      expect(titulos).toContain('SIN DATOS, NO INVENTES');
+      expect(titulos).toContain(
+        'La unica salvedad son las dos ranuras del encabezado del panel',
+      );
       expect(titulos).toContain('<h5 class="panel-title">');
       expect(titulos).not.toContain('<h4 class="panel-title">');
       expect(titulos).not.toContain(
