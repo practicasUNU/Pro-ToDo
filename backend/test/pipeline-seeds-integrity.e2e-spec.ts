@@ -582,11 +582,15 @@ describe('Siembra maestra de los cinco pipelines (e2e)', () => {
       const textOf = (code: string): string =>
         rows.find((row) => row.codigo === code)?.texto_prompt ?? '';
 
-      // 3. Assert 🎯: Notiweb, lote con fuentes mixtas y minimo de 4 parrafos.
+      // 3. Assert 🎯: Notiweb, secciones y extension segun la cardinalidad.
       const notiweb = textOf('NOTIWEB_DEFAULT');
-      expect(notiweb.split('DETECCIÓN DE LOTE Y FUENTES MIXTAS')).toHaveLength(
-        2,
-      );
+      expect(
+        notiweb.split(
+          'DETECCIÓN DE LOTE, FUENTES MIXTAS Y EXTENSIÓN (NOTIWEB)',
+        ),
+      ).toHaveLength(2);
+      expect(notiweb).toContain('ENTRE 3 Y 4 SECCIONES TEMÁTICAS');
+      expect(notiweb).toContain('ENTRE 12 Y 14 PÁRRAFOS');
       expect(notiweb).toContain('MÍNIMO DE 4 PÁRRAFOS');
       expect(notiweb).toContain('Título, su Fuente y su Entradilla');
       expect(notiweb).toContain('"Blog del día"');
@@ -594,34 +598,54 @@ describe('Siembra maestra de los cinco pipelines (e2e)', () => {
         '<hr /><h2>Referencia bibliográfica</h2><p class="notiweb-referencia">',
       );
       expect(notiweb).toContain('APA 7');
-      // Ningun rango anterior sobrevive, ni el bloque que lo contenia.
-      expect(notiweb).not.toMatch(
-        /M[IÍ]NIMO DE 3|M[AÁ]XIMO DE 4|\b[23] a 4 p[aá]rrafos/i,
-      );
+      // Ninguna version anterior del bloque ni de las reglas sobrevive.
       expect(notiweb).not.toContain(
         'DESARROLLO MÍNIMO Y CIERRE DE CADA NOTICIA',
       );
-      // El cierre ya no se puede eliminar.
+      expect(notiweb).not.toContain(
+        'DETECCIÓN DE LOTE Y FUENTES MIXTAS (NOTIWEB)',
+      );
+      expect(notiweb).not.toContain('AL MENOS DOS encabezados');
+      expect(notiweb).not.toMatch(/M[IÍ]NIMO DE 3|M[AÁ]XIMO DE 4/i);
       expect(notiweb).not.toContain('Elimina del marcado el <hr>');
 
-      // Titulos: respaldos del encabezado y prohibicion de inventar.
+      // Titulos: respaldos, identificador UFV de ESIC y no inventar.
       const titulos = textOf('VERIFICADOR_TITULOS_DEFAULT');
-      expect(titulos.split('RESPALDO DEL ENCABEZADO DEL PANEL (')).toHaveLength(
-        2,
-      );
+      expect(
+        titulos.split(
+          'ENCABEZADO DEL PANEL E IDENTIFICADORES (VERIFICACIÓN DE TÍTULOS)',
+        ),
+      ).toHaveLength(2);
       expect(titulos).not.toContain('CONTRATO DE PANEL');
+      expect(titulos).not.toContain('RESPALDO DEL ENCABEZADO DEL PANEL (');
+      expect(titulos).toContain(
+        'Para comités de ESIC, asigna SIEMPRE el identificador UFV',
+      );
+      expect(titulos).toContain('href="#collapseUFV1"');
+      expect(titulos).toContain('id="collapseUFV1"');
+      expect(titulos).not.toContain('href="#collapseESIC1"');
       expect(titulos).toContain('usa las siglas de la universidad');
       expect(titulos).toContain('usa la titulación principal evaluada');
       expect(titulos).toContain('SIN DATOS, NO INVENTES');
-      expect(titulos).toContain(
-        'La unica salvedad son las dos ranuras del encabezado del panel',
-      );
       expect(titulos).toContain('<h5 class="panel-title">');
       expect(titulos).not.toContain('<h4 class="panel-title">');
       expect(titulos).not.toContain(
         'Devuelve unica y exclusivamente el marcado HTML',
       );
       expect(titulos).toContain('Cardinalidad tolerante 1 a N');
+    });
+
+    it('14.6 deberia dar al nodo de redaccion de Notiweb el presupuesto de generacion extensa', () => {
+      // 3. Assert 🎯: 12 a 14 parrafos mas el lote no caben en el tope por
+      //    defecto, y el validador de autoria (prueba 6) admite los 180 s.
+      const redaccion = blueprintBySlug('wf-notiweb-madridmasd')
+        .configuracion_pipeline.nodes['redaccion_ia'];
+
+      expect(redaccion?.params).toMatchObject({
+        maxTokens: 32_768,
+        timeoutMs: 180_000,
+        outputCardinality: 'MULTIPLE',
+      });
     });
   });
 });

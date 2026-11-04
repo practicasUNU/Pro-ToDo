@@ -33,13 +33,13 @@
 --   5c. Cardinalidad 1 a N: la "REGLA DE CARDINALIDAD FLEXIBLE" (raiz = primer
 --      elemento, "items" = el resto) en los seis prompts, con lo que es un
 --      elemento en cada flujo (noticia, expediente, enlace, panel).
---   5d. Prompts consolidados: Notiweb detecta el lote y sus fuentes mixtas
---      (articulo para la principal; titulo, fuente y entradilla del listado
---      para las secundarias, "Blog del dia" incluido), exige un minimo de 4
---      parrafos por noticia y el cierre <hr /><h2>Referencia bibliográfica</h2>
---      en APA 7; titulos fija h5.panel-title (la plantilla), da respaldos a sus
---      dos ranuras, prohibe inventar sin datos y elimina las frases que lo
---      contradecian. Sustituye el bloque de la version anterior de este paso.
+--   5d. Prompts consolidados (v3): Notiweb detecta el lote y sus fuentes
+--      mixtas, divide cada noticia en 3 a 4 secciones <h2>, exige 12 a 14
+--      parrafos a la individual o principal y un minimo de 4 a cada secundaria,
+--      con cierre <hr /><h2>Referencia bibliográfica</h2> en APA 7; titulos fija
+--      h5.panel-title, da respaldos a sus dos ranuras, asigna el identificador
+--      UFV a ESIC y prohibe inventar sin datos. Sustituye los bloques de las
+--      versiones anteriores de este paso.
 --   6. Los cinco blueprints de `plantillas_flujo`, con el slug en `flowId` y
 --      en la descripcion (`id_flujo` es UUID y no puede llevarlo).
 --   6b. El escudo del maestro de apertura exige `h3.licitacion-title`: sin
@@ -51,6 +51,7 @@
 --      el onErrorStep de procesamiento y destinos, y el satelite `ocr_ia`
 --      (PROCESADOR_OCR) al que el parser desvia solo los escaneos.
 --   6e. El escudo de titulos exige .panel-title y sus dos ranuras.
+--   6g. El nodo de redaccion del maestro de Notiweb con 32768 tokens y 180 s.
 --   6f. Escudos de `flujos` y `plantillas_flujo` con el atajo antiguo
 --      "Estructura completa" (sin h2) pasan a la lista canonica.
 --   2b. El catalogo describe el modo campana de DESTINO_ACENS.
@@ -72,7 +73,7 @@
 --
 -- FUENTE UNICA: este fichero se mantiene directamente (el generador con el
 -- que nacio no se versiona). Los parches de contenido de los prompts y de los
--- maestros se consolidan aqui (pasos 2b, 5a-5d y 6b-6f) y no en migraciones
+-- maestros se consolidan aqui (pasos 2b, 5a-5d y 6b-6g) y no en migraciones
 -- sueltas: el runner registra la migracion por nombre, asi que una base que ya
 -- la tenia la vuelve a pasar a mano (`psql -f`) y los marcadores evitan
 -- duplicados.
@@ -102,6 +103,8 @@ DECLARE
     pipeline JSONB;
     node_key TEXT;
     parser_key TEXT;
+    old_rule TEXT;
+    replaced_old BOOLEAN;
     old_full_structure CONSTANT TEXT[] := ARRAY['a', 'div', 'em', 'h3', 'h4', 'h5', 'hr', 'img', 'li', 'p', 'span', 'strong', 'table', 'td', 'th', 'tr', 'ul'];
     canonical_tags CONSTANT JSONB := '["h2", "h3", "h4", "h5", "h6", "p", "a", "b", "i", "strong", "em", "u", "strike", "ul", "ol", "li", "table", "thead", "tbody", "tr", "th", "td", "hr", "br", "div", "span", "img"]'::JSONB;
     clause_poly_html CONSTANT TEXT := $clause$DIRECTIVA DE POLIVALENCIA Y ESTRUCTURACIÓN HTML:
@@ -954,40 +957,59 @@ PLANTILLA BASE:
     END LOOP;
 
     -- 5d. Prompts consolidados de Notiweb y de verificacion de titulos ------
-    -- Notiweb: deteccion de lote y fuentes mixtas (la noticia del articulo y
-    -- las secundarias desde su titulo, fuente y entradilla del listado), un
-    -- minimo de 4 parrafos por noticia y cierre bibliografico APA 7. Titulos:
-    -- h5.panel-title como la plantilla, respaldos para sus dos ranuras y la
-    -- regla de no inventar si no hay datos (la valida el escudo).
+    -- Notiweb: deteccion de lote y fuentes mixtas, 3 a 4 secciones <h2>, 12 a
+    -- 14 parrafos para la noticia individual o principal y un minimo de 4 para
+    -- cada secundaria del lote, con cierre bibliografico APA 7. Titulos:
+    -- h5.panel-title, respaldos de sus ranuras, identificador UFV para ESIC y
+    -- la regla de no inventar sin datos (la valida el escudo).
     --
-    -- Tres estados posibles de la base: sin bloque (se inserta antes del
-    -- material), con el bloque de una version anterior de este paso (se
-    -- SUSTITUYE entero, `old_rule`) o ya consolidada (marcador presente).
+    -- VERSIONADO: `old_rules` lleva los bloques de las versiones anteriores de
+    -- este paso. Si la base tiene alguno, se SUSTITUYE entero (nunca conviven
+    -- dos reglas de extension); si no tiene ninguno, se inserta antes del
+    -- material; si ya tiene el marcador actual, no se toca.
     FOR rec IN
         SELECT * FROM (VALUES
-            ('NOTIWEB_DEFAULT', 'DETECCIÓN DE LOTE Y FUENTES MIXTAS', $old_rule$DESARROLLO MÍNIMO Y CIERRE DE CADA NOTICIA:
+            ('NOTIWEB_DEFAULT', 'DETECCIÓN DE LOTE, FUENTES MIXTAS Y EXTENSIÓN (NOTIWEB)', ARRAY[$old_rule$DESARROLLO MÍNIMO Y CIERRE DE CADA NOTICIA:
 - Cada noticia —la de la raíz y cada una de "items"— desarrolla su cuerpo en un MÍNIMO DE 3 Y UN MÁXIMO DE 4 párrafos <p> dentro de div.notiweb-cuerpo, sin contar los encabezados <h2>/<h3> ni la referencia. Sus "body_paragraphs" contienen esos mismos 3 o 4 párrafos.
 - Si el material de una noticia es escaso, desarrolla el contexto institucional y el alcance de lo anunciado con los datos que sí figuran; nunca inventes cifras, nombres ni declaraciones para alcanzar el mínimo.
-- Cada "filled_markup" termina OBLIGATORIAMENTE con <hr /><h2>Referencia bibliográfica</h2><p class="notiweb-referencia">...</p>, con la referencia en formato APA 7 estricto según las reglas de "Referencia bibliografica". Nunca la escribas como <p><strong>...</strong></p>.$old_rule$, $rule$DETECCIÓN DE LOTE Y FUENTES MIXTAS (NOTIWEB):
+- Cada "filled_markup" termina OBLIGATORIAMENTE con <hr /><h2>Referencia bibliográfica</h2><p class="notiweb-referencia">...</p>, con la referencia en formato APA 7 estricto según las reglas de "Referencia bibliografica". Nunca la escribas como <p><strong>...</strong></p>.$old_rule$, $old_rule$DETECCIÓN DE LOTE Y FUENTES MIXTAS (NOTIWEB):
 - El correo puede traer una sola noticia o un listado (tabla del correo o de los documentos adjuntos) con varias. Cada fila del listado es una noticia independiente: la primera va en la raíz del JSON y cada una de las restantes es un objeto de "items".
 - La noticia cuya URL coincide con la "URL" de "Metadatos del articulo original" se redacta a partir de "Articulo original" (el texto completo del artículo extraído).
 - Cada noticia secundaria del listado sin texto en el artículo original se desarrolla OBLIGATORIAMENTE usando como único insumo factual su Título, su Fuente y su Entradilla tal como figuran en la tabla del correo o en los adjuntos. Nunca la omitas ni la fusiones con otra.
 - Las filas especiales del listado, como "Blog del día", son un elemento más de "items" y se redactan con las mismas reglas.
 - EXTENSIÓN: cada noticia —la de la raíz y cada una de "items", haya una sola o un lote— se desarrolla con un MÍNIMO DE 4 PÁRRAFOS <p> dentro de div.notiweb-cuerpo, sin contar los encabezados <h2>/<h3> ni la referencia bibliográfica. Sus "body_paragraphs" contienen esos mismos párrafos.
 - Cuando el insumo de una noticia es escaso (solo título, fuente y entradilla), alcanza el mínimo desarrollando el contexto institucional, el ámbito y el alcance de lo anunciado con los datos que sí figuran; nunca inventes cifras, nombres, fechas ni declaraciones.
+- Cada "filled_markup" termina OBLIGATORIAMENTE con <hr /><h2>Referencia bibliográfica</h2><p class="notiweb-referencia">...</p>, con la referencia en formato APA 7 estricto según las reglas de "Referencia bibliografica". En las noticias secundarias, construye la referencia de página web con la fuente, la fecha y el título que figuran en el listado. Nunca la escribas como <p><strong>...</strong></p>.$old_rule$], $rule$DETECCIÓN DE LOTE, FUENTES MIXTAS Y EXTENSIÓN (NOTIWEB):
+- El correo puede traer una sola noticia o un listado (tabla del correo o de los documentos adjuntos) con varias. Cada fila del listado es una noticia independiente: la primera va en la raíz del JSON y cada una de las restantes es un objeto de "items".
+- La noticia cuya URL coincide con la "URL" de "Metadatos del articulo original" se redacta a partir de "Articulo original" (el texto completo del artículo extraído).
+- Cada noticia secundaria del listado sin texto en el artículo original se desarrolla OBLIGATORIAMENTE usando como único insumo factual su Título, su Fuente y su Entradilla tal como figuran en la tabla del correo o en los adjuntos. Nunca la omitas ni la fusiones con otra.
+- Las filas especiales del listado, como "Blog del día", son un elemento más de "items" y se redactan con las mismas reglas.
+- SECCIONES: el cuerpo de cada noticia se divide en ENTRE 3 Y 4 SECCIONES TEMÁTICAS, cada una encabezada por <h2> (y <h3> solo para sus subsecciones), intercaladas de forma homogénea entre los <p> dentro de div.notiweb-cuerpo y nunca antes del primer párrafo. Cada encabezado resume en pocas palabras su sección; no repitas el titular.
+- EXTENSIÓN DE LA NOTICIA INDIVIDUAL O PRINCIPAL: cuando el correo trae una sola noticia, y siempre para la noticia principal con el texto completo del artículo, desarrolla ENTRE 12 Y 14 PÁRRAFOS <p> dentro de div.notiweb-cuerpo (de 3 a 4 por sección), sin contar los encabezados ni la referencia bibliográfica.
+- EXTENSIÓN EN LOTE: cada noticia secundaria del lote se desarrolla con un MÍNIMO DE 4 PÁRRAFOS <p> dentro de div.notiweb-cuerpo, sin contar los encabezados ni la referencia bibliográfica.
+- Los "body_paragraphs" de cada noticia contienen exactamente esos mismos párrafos, sin los encabezados.
+- Cuando el insumo de una noticia es escaso (solo título, fuente y entradilla), alcanza la extensión desarrollando el contexto institucional, el ámbito y el alcance de lo anunciado con los datos que sí figuran; nunca inventes cifras, nombres, fechas ni declaraciones.
 - Cada "filled_markup" termina OBLIGATORIAMENTE con <hr /><h2>Referencia bibliográfica</h2><p class="notiweb-referencia">...</p>, con la referencia en formato APA 7 estricto según las reglas de "Referencia bibliografica". En las noticias secundarias, construye la referencia de página web con la fuente, la fecha y el título que figuran en el listado. Nunca la escribas como <p><strong>...</strong></p>.$rule$),
-            ('VERIFICADOR_TITULOS_DEFAULT', 'RESPALDO DEL ENCABEZADO DEL PANEL', $old_rule$CONTRATO DE PANEL (VERIFICACIÓN DE TÍTULOS):
+            ('VERIFICADOR_TITULOS_DEFAULT', 'ENCABEZADO DEL PANEL E IDENTIFICADORES (VERIFICACIÓN DE TÍTULOS)', ARRAY[$old_rule$CONTRATO DE PANEL (VERIFICACIÓN DE TÍTULOS):
 - Cada panel —el de la raíz y cada uno de "items"— conserva el encabezado de la PLANTILLA BASE tal cual: <h5 class="panel-title"> con su <a class="panel-toggle-link">. Nunca lo cambies por <h4> ni por otro nivel.
 - Rellena SIEMPRE las tres ranuras del encabezado: el href de "a.panel-toggle-link" (igual al id de su "div.collapse"), ".panel-comite-codigo" con el código del comité y ".panel-facultad-nombre" con el centro o la facultad. Si el material no nombra la facultad, usa el nombre del centro o de la universidad tal como figure. Un panel con cualquiera de esas ranuras vacía se rechaza entero; esta obligación prevalece sobre la regla de dejar vacío un dato ausente, que sigue valiendo para el resto de celdas.
-- Cardinalidad tolerante 1 a N: un panel por comité. Si el material trae un solo comité, va en la raíz y "items" es []; si trae varios, el primero en la raíz y uno por cada comité restante en "items", sin repetir el primero.$old_rule$, $rule$RESPALDO DEL ENCABEZADO DEL PANEL (VERIFICACIÓN DE TÍTULOS):
+- Cardinalidad tolerante 1 a N: un panel por comité. Si el material trae un solo comité, va en la raíz y "items" es []; si trae varios, el primero en la raíz y uno por cada comité restante en "items", sin repetir el primero.$old_rule$, $old_rule$RESPALDO DEL ENCABEZADO DEL PANEL (VERIFICACIÓN DE TÍTULOS):
 - Cada panel —el de la raíz y cada uno de "items"— conserva el encabezado de la PLANTILLA BASE tal cual: <h5 class="panel-title"> con su <a class="panel-toggle-link">. Nunca lo cambies por <h4> ni por otro nivel.
 - Cuando el material trae un comité, <h5 class="panel-title"> y su <a class="panel-toggle-link"> NUNCA quedan vacíos de texto. Rellena SIEMPRE sus dos ranuras con estos respaldos:
   - ".panel-comite-codigo": el identificador del comité (ej. "UPM 1", "ESIC 1"). Si en el material no figura un número de comité, usa las siglas de la universidad (ej. "UPM").
   - ".panel-facultad-nombre": el nombre del centro o la facultad. Si no figura de forma explícita, usa la titulación principal evaluada y, en su defecto, el nombre de la universidad.
 - El href de "a.panel-toggle-link" y el id de su "div.collapse" se derivan del valor final de ".panel-comite-codigo" (ej. "#collapseUPM1" e id="collapseUPM1") y deben coincidir exactamente.
 - SIN DATOS, NO INVENTES: si el material no contiene NINGÚN comité, universidad ni titulación (por ejemplo, porque la tabla venía en una imagen que no se pudo leer), no fabriques ningún encabezado ni texto de relleno: deja el panel sin rellenar para que la validación posterior detenga la publicación.
+- Cardinalidad tolerante 1 a N: un panel por comité. Si el material trae un solo comité, va en la raíz y "items" es []; si trae varios, el primero en la raíz y uno por cada comité restante en "items", sin repetir el primero.$old_rule$], $rule$ENCABEZADO DEL PANEL E IDENTIFICADORES (VERIFICACIÓN DE TÍTULOS):
+- Cada panel —el de la raíz y cada uno de "items"— conserva el encabezado de la PLANTILLA BASE tal cual: <h5 class="panel-title"> con su <a class="panel-toggle-link">. Nunca lo cambies por <h4> ni por otro nivel.
+- RESPALDO DEL ENCABEZADO DEL PANEL: cuando el material trae un comité, <h5 class="panel-title"> y su <a class="panel-toggle-link"> NUNCA quedan vacíos de texto. Rellena SIEMPRE sus dos ranuras con estos respaldos:
+  - ".panel-comite-codigo": el identificador del comité (ej. "UPM 1", "ESIC 1"). Si en el material no figura un número de comité, usa las siglas de la universidad (ej. "UPM").
+  - ".panel-facultad-nombre": el nombre del centro o la facultad. Si no figura de forma explícita, usa la titulación principal evaluada y, en su defecto, el nombre de la universidad.
+- IDENTIFICADORES: el href de "a.panel-toggle-link" y el id de su "div.collapse" deben coincidir exactamente y se derivan del valor final de ".panel-comite-codigo" (ej. "UPM 1" → href="#collapseUPM1" e id="collapseUPM1").
+- IDENTIFICADOR DE ESIC: Para comités de ESIC, asigna SIEMPRE el identificador UFV en las etiquetas: href="#collapseUFV<N>" en "a.panel-toggle-link" e id="collapseUFV<N>" en su "div.collapse", donde <N> es el número del comité (ej. "ESIC 1" → href="#collapseUFV1" e id="collapseUFV1"). Nunca uses "collapseESIC" para ESIC.
+- SIN DATOS, NO INVENTES: si el material no contiene NINGÚN comité, universidad ni titulación (por ejemplo, porque la tabla venía en una imagen que no se pudo leer), no fabriques ningún encabezado ni texto de relleno: deja el panel sin rellenar para que la validación posterior detenga la publicación.
 - Cardinalidad tolerante 1 a N: un panel por comité. Si el material trae un solo comité, va en la raíz y "items" es []; si trae varios, el primero en la raíz y uno por cada comité restante en "items", sin repetir el primero.$rule$)
-        ) AS t(codigo, marker, old_rule, rule_text)
+        ) AS t(codigo, marker, old_rules, rule_text)
     LOOP
         SELECT id_plantilla_prompt_ia, texto_prompt INTO inserted_id, previous_text
           FROM plantillas_prompts_ia WHERE codigo = rec.codigo;
@@ -1003,26 +1025,40 @@ PLANTILLA BASE:
             patched := replace(patched,
                 $old$- Si esas tablas vienen agrupadas por secciones o epigrafes, envuelve cada seccion en un panel: <div class="panel panel-default"> con el titulo en <div class="panel-heading"><h4 class="panel-title">...</h4></div> y el contenido en <div class="panel-body">. Respeta las clases exactamente como estan escritas aqui: son las que el portal sabe pintar y las que audita el nodo de validacion posterior.$old$,
                 $new$- Si esas tablas vienen agrupadas por comites, cada comite es un panel independiente con la estructura EXACTA de la PLANTILLA BASE (<div class="panel panel-default">, encabezado <h5 class="panel-title"> y contenido en <div class="panel-body">). Respeta las clases exactamente como estan escritas en la plantilla: son las que el portal sabe pintar y las que audita el nodo de validacion posterior.$new$);
-            -- La regla general de dejar vacio un dato ausente contradecia la
-            -- obligacion de rellenar el encabezado: queda con su salvedad.
             patched := replace(patched,
                 $old$- Un dato que no aparezca en el material se deja vacio. NUNCA lo estimes ni lo deduzcas.$old$,
                 $new$- Un dato que no aparezca en el material se deja vacio. NUNCA lo estimes ni lo deduzcas. La unica salvedad son las dos ranuras del encabezado del panel, que siguen el RESPALDO DEL ENCABEZADO DEL PANEL.$new$);
+            -- El ejemplo de la instruccion base usaba collapseESIC1, que
+            -- contradice el identificador UFV de ESIC.
+            patched := replace(patched,
+                $old$(ej. href="#collapseESIC1" e id="collapseESIC1", con almohadilla solo en el href)$old$,
+                $new$(ej. href="#collapseUPM1" e id="collapseUPM1", con almohadilla solo en el href; para ESIC, ver IDENTIFICADOR DE ESIC)$new$);
         ELSE
-            -- El cierre bibliografico es obligatorio: la vieja excepcion que
-            -- permitia eliminarlo lo contradecia.
             patched := replace(patched,
                 $old$- Elimina del marcado el <hr>, el encabezado <h2>Referencia bibliográfica</h2> y su parrafo SOLO si no hay estudio citado, ni articulo original, ni URL en la directiva del editor.$old$,
                 $new$- No elimines nunca el cierre bibliografico (<hr>, <h2>Referencia bibliográfica</h2> y su parrafo): sin estudio citado ni articulo original, referencia la fuente que figura en el listado del correo.$new$);
+            -- Dos criterios de secciones no pueden convivir.
+            patched := replace(patched,
+                $old$- Estructura el desarrollo con AL MENOS DOS encabezados intermedios dentro de div.notiweb-cuerpo, intercalados entre los <p> y nunca antes del primer parrafo: <h2> para cada apartado principal y <h3> para sus subsecciones. Cada encabezado resume en pocas palabras la seccion que introduce; no repitas el titular.$old$,
+                $new$- Estructura el desarrollo en ENTRE 3 Y 4 SECCIONES TEMATICAS dentro de div.notiweb-cuerpo, como indica "SECCIONES" mas abajo: <h2> para cada seccion y <h3> solo para sus subsecciones.$new$);
         END IF;
 
-        IF position(rec.old_rule IN patched) > 0 THEN
-            patched := replace(patched, rec.old_rule, rec.rule_text);
-        ELSIF patched ~ material_anchor THEN
-            patched := regexp_replace(patched, material_anchor, E'\n\n' || rec.rule_text || E'\n\n\\1{{');
-        ELSE
-            patched := patched || E'\n\n' || rec.rule_text;
-            RAISE WARNING '069: % no tiene una seccion de material reconocible; el bloque consolidado se anade al final.', rec.codigo;
+        replaced_old := FALSE;
+        FOREACH old_rule IN ARRAY rec.old_rules LOOP
+            IF position(old_rule IN patched) > 0 THEN
+                patched := replace(patched, old_rule, rec.rule_text);
+                replaced_old := TRUE;
+                EXIT;
+            END IF;
+        END LOOP;
+
+        IF NOT replaced_old THEN
+            IF patched ~ material_anchor THEN
+                patched := regexp_replace(patched, material_anchor, E'\n\n' || rec.rule_text || E'\n\n\\1{{');
+            ELSE
+                patched := patched || E'\n\n' || rec.rule_text;
+                RAISE WARNING '069: % no tiene una seccion de material reconocible; el bloque consolidado se anade al final.', rec.codigo;
+            END IF;
         END IF;
 
         UPDATE plantillas_prompts_ia
@@ -1033,7 +1069,7 @@ PLANTILLA BASE:
             INSERT INTO audit_eventos (usuario_id, accion, tabla_afectada, registro_id, datos_anteriores, datos_nuevos)
             VALUES (admin_id, 'ACTUALIZAR', 'plantillas_prompts_ia', inserted_id::TEXT,
                     jsonb_build_object('texto_prompt', previous_text),
-                    seed_tag || jsonb_build_object('codigo', rec.codigo, 'parche', 'prompts_consolidados'));
+                    seed_tag || jsonb_build_object('codigo', rec.codigo, 'parche', 'prompts_consolidados_v3'));
         END IF;
     END LOOP;
 
@@ -1107,7 +1143,9 @@ PLANTILLA BASE:
       "onErrorStep": "alerta_smtp",
       "params": {
         "promptCode": "NOTIWEB_DEFAULT",
-        "outputCardinality": "MULTIPLE"
+        "outputCardinality": "MULTIPLE",
+        "maxTokens": 32768,
+        "timeoutMs": 180000
       }
     },
     "escudo": {
@@ -1837,6 +1875,29 @@ PLANTILLA BASE:
                 jsonb_build_object('allowedTags', rec.configuracion_pipeline #> ARRAY['nodes', rec.escudo_key, 'params', 'allowedTags']),
                 seed_tag || jsonb_build_object('nodo', rec.escudo_key, 'parche', 'escudo_lista_canonica', 'allowedTags', canonical_tags));
     END LOOP;
+
+    -- 6g. Presupuesto de generacion extensa en el maestro de Notiweb --------
+    -- 12 a 14 parrafos por noticia principal, mas el lote, viajan dos veces
+    -- (marcado y body_paragraphs): con el tope por defecto el JSON se cortaba.
+    -- Solo si faltan: un maestro ajustado a mano conserva sus valores.
+    UPDATE plantillas_flujo
+       SET configuracion_pipeline = jsonb_set(configuracion_pipeline,
+               '{nodes,redaccion_ia,params}',
+               '{"maxTokens": 32768, "timeoutMs": 180000}'::JSONB
+               || (configuracion_pipeline #> '{nodes,redaccion_ia,params}')),
+           actualizado_por = admin_id,
+           fecha_actualizacion = NOW()
+     WHERE configuracion_pipeline->>'flowId' = 'wf-notiweb-madridmasd'
+       AND configuracion_pipeline #> '{nodes,redaccion_ia,params}' IS NOT NULL
+       AND NOT (configuracion_pipeline #> '{nodes,redaccion_ia,params}' ? 'maxTokens'
+                AND configuracion_pipeline #> '{nodes,redaccion_ia,params}' ? 'timeoutMs')
+    RETURNING id_plantilla_flujo INTO inserted_id;
+    IF FOUND THEN
+        summary := jsonb_set(summary, '{blueprints_parcheados}', to_jsonb((summary->>'blueprints_parcheados')::INT + 1));
+        INSERT INTO audit_eventos (usuario_id, accion, tabla_afectada, registro_id, datos_nuevos)
+        VALUES (admin_id, 'ACTUALIZAR', 'plantillas_flujo', inserted_id::TEXT,
+                seed_tag || jsonb_build_object('slug', 'wf-notiweb-madridmasd', 'parche', 'presupuesto_generacion_extensa'));
+    END IF;
 
     -- 7. Resumen de la siembra ----------------------------------------------
     -- Solo si se creo algo: una reejecucion no deja rastro nuevo.
