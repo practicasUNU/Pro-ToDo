@@ -3,7 +3,7 @@ import { plainToInstance } from 'class-transformer';
 import { validate } from 'class-validator';
 import sanitizeHtml from 'sanitize-html';
 
-import { expandRootAndItems } from '@common/utils/cardinality-normalizer.util';
+import { normalizeCardinality } from '@common/utils/cardinality-normalizer.util';
 import { AcensApiConfig } from '@core/config/acens-api.config';
 import {
   INTERPOLATION_PATTERN,
@@ -380,8 +380,11 @@ export class AcensHttpStrategy extends BaseHttpDestinationStrategy {
       });
     }
 
-    const content = expandRootAndItems(source, 'validated_items')
-      .map((item) =>
+    // Vista SIMETRICA del lote: raiz + resto, `[root]` con un solo elemento.
+    // El modo es MULTIPLE porque aqui no se decide cardinalidad, solo se lee lo
+    // que el escudo valido; un `validated_items` vacio ya da un unico elemento.
+    const content = normalizeCardinality(source, 'MULTIPLE', 'validated_items')
+      .items.map((item) =>
         typeof item.validated_markup === 'string'
           ? item.validated_markup.trim()
           : '',

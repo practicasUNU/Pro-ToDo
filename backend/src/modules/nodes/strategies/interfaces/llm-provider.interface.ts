@@ -266,6 +266,14 @@ export interface LlmExecutionOptions {
    * `expectsFilledMarkup`. OPCIONAL, con `false` implicito.
    */
   readonly expectsItems?: boolean;
+
+  /**
+   * Cardinalidad TOLERANTE (modo `AUTO` del nodo). Solo tiene efecto junto a
+   * `expectsItems`: el esquema es el mismo, pero la regla del contrato pide al
+   * modelo que DETECTE si el material trae uno o varios elementos en vez de
+   * darlo por hecho. OPCIONAL, con `false` implicito.
+   */
+  readonly autoDetectItems?: boolean;
 }
 
 /**
@@ -300,6 +308,25 @@ export const RESPONSE_ITEMS_RULE = [
 ].join(' ');
 
 /**
+ * Variante tolerante de `RESPONSE_ITEMS_RULE` para la cardinalidad `AUTO`.
+ *
+ * Mismo reparto asimetrico y mismas claves; cambia el tono: el lote no se da
+ * por supuesto. Con un unico elemento la respuesta es exactamente la de 1 a 1
+ * mas `"items": []`, y nunca se trocea un elemento para fabricar un lote.
+ */
+export const RESPONSE_ITEMS_AUTO_RULE = [
+  'Incluye ademas la clave "items" (array de objetos). REGLA DE CARDINALIDAD',
+  'TOLERANTE: primero determina si el material describe UN elemento o VARIOS',
+  'independientes. Si es uno, colocalo en la raiz y deja "items" como array',
+  'vacio []; no lo dividas en partes para fabricar un lote. Si son varios, coloca',
+  'en la raiz el PRIMER elemento y en "items" un objeto por cada elemento',
+  'RESTANTE, cada uno con sus propias claves "headline", "summary" y',
+  '"body_paragraphs", su "filled_markup" si se te pide maquetado, y "source_url"',
+  'si el material indica de donde procede. Queda prohibido repetir el primer',
+  'elemento dentro de "items".',
+].join(' ');
+
+/**
  * Frase que describe al modelo la forma exacta de la respuesta.
  *
  * POR QUE VIVE AQUI Y NO EN CADA CLIENTE. Hasta ahora este literal estaba
@@ -324,6 +351,7 @@ export const RESPONSE_ITEMS_RULE = [
 export const buildResponseContractInstruction = (
   expectsFilledMarkup: boolean,
   expectsItems = false,
+  autoDetectItems = false,
 ): string => {
   const keys = [
     'Responde EXCLUSIVAMENTE con un objeto JSON valido, sin texto adicional',
@@ -332,7 +360,10 @@ export const buildResponseContractInstruction = (
   ].join(' ');
   // La regla del lote va justo detras de las claves y antes del maquetado: la
   // directiva de `filled_markup` aplica igual a la raiz y a cada elemento.
-  const base = expectsItems ? `${keys} ${RESPONSE_ITEMS_RULE}` : keys;
+  const itemsRule = autoDetectItems
+    ? RESPONSE_ITEMS_AUTO_RULE
+    : RESPONSE_ITEMS_RULE;
+  const base = expectsItems ? `${keys} ${itemsRule}` : keys;
 
   if (!expectsFilledMarkup) {
     return base;

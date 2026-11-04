@@ -13,6 +13,7 @@ import {
   DEFAULT_LLM_PROVIDER,
   DEFAULT_LLM_TIMEOUT_MS,
   IMPLEMENTED_LLM_PROVIDERS,
+  isBatchCardinality,
   LLM_PROVIDER_LABELS,
   LLM_RETRIES_WARNING_THRESHOLD,
   LlmProvider,
@@ -299,9 +300,9 @@ const llmExtractorSetup = () => {
 
     // Coste de lote: no bloquea, pero el operador debe saber que una sola
     // ejecucion puede devolver (y facturar) varias piezas enteras.
-    if (config.value.outputCardinality === 'MULTIPLE') {
+    if (isBatchCardinality(config.value.outputCardinality)) {
       warnings.push(
-        `Modo lote (1:N): la respuesta incluye un elemento por cada pieza del correo y se factura entera. Se proyectan unos ${resourceEstimation.value.estimatedOutputTokens} tokens de salida; sin un tope propio, el nodo reserva ${DEFAULT_MAX_TOKENS_MULTIPLE}.`,
+        `${config.value.outputCardinality === 'AUTO' ? 'Autodeteccion (1:1 / 1:N), presupuestada como lote' : 'Modo lote (1:N)'}: la respuesta incluye un elemento por cada pieza del correo y se factura entera. Se proyectan unos ${resourceEstimation.value.estimatedOutputTokens} tokens de salida; sin un tope propio, el nodo reserva ${DEFAULT_MAX_TOKENS_MULTIPLE}.`,
       );
     }
 
@@ -550,10 +551,10 @@ const llmExtractorSetup = () => {
       // del backend. Publicar un numero fijaria el presupuesto para siempre y
       // desactivaria la subida automatica ante una plantilla.
       ...(config.value.maxTokens === null ? {} : { maxTokens: config.value.maxTokens }),
-      // Solo se publica el lote: `SINGLE` es el defecto del backend, y omitirlo
-      // mantiene el viaje de ida y vuelta de los nodos guardados antes de que
-      // existiera la clave.
-      ...(config.value.outputCardinality === 'MULTIPLE'
+      // Solo se publica lo que no es `SINGLE`: es el defecto del backend, y
+      // omitirlo mantiene el viaje de ida y vuelta de los nodos guardados antes
+      // de que existiera la clave.
+      ...(isBatchCardinality(config.value.outputCardinality)
         ? { outputCardinality: config.value.outputCardinality }
         : {}),
     };
@@ -592,7 +593,9 @@ const llmExtractorSetup = () => {
       // vuelta exige que un nodo guardado sin la clave la siga omitiendo.
       maxTokens: typeof params.maxTokens === 'number' ? params.maxTokens : null,
       outputCardinality:
-        params.outputCardinality === 'MULTIPLE' ? 'MULTIPLE' : DEFAULT_LLM_OUTPUT_CARDINALITY,
+        params.outputCardinality === 'MULTIPLE' || params.outputCardinality === 'AUTO'
+          ? params.outputCardinality
+          : DEFAULT_LLM_OUTPUT_CARDINALITY,
     };
   };
 

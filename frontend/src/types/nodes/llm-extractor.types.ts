@@ -142,8 +142,15 @@ export const LLM_RETRIES_WARNING_THRESHOLD = DEFAULT_LLM_MAX_RETRIES;
  *
  * `MULTIPLE` pide un lote: el primer elemento en la raiz del JSON y el resto en
  * `items`. El escudo valida cada uno y los destinos los publican en bucle.
+ * `AUTO` usa el mismo esquema, pero el modelo detecta si hay uno o varios
+ * elementos; el backend publica la cardinalidad efectiva en
+ * `resolved_cardinality`.
  */
-export type LlmOutputCardinality = 'SINGLE' | 'MULTIPLE';
+export type LlmOutputCardinality = 'SINGLE' | 'MULTIPLE' | 'AUTO';
+
+/** Si la cardinalidad presupuesta y estima como un lote (todo salvo `SINGLE`). */
+export const isBatchCardinality = (cardinality: LlmOutputCardinality): boolean =>
+  cardinality !== 'SINGLE';
 
 export const DEFAULT_LLM_OUTPUT_CARDINALITY: LlmOutputCardinality = 'SINGLE';
 
@@ -155,14 +162,21 @@ export const LLM_OUTPUT_CARDINALITY_OPTIONS: ReadonlyArray<{
 }> = [
   {
     value: 'SINGLE',
-    label: 'Un elemento (1:1)',
-    description: 'Una noticia, un expediente o un enlace por correo.',
+    label: 'Un elemento (1:1 Estricto)',
+    description:
+      'Una noticia, un expediente o un enlace por correo. Presupuesto: 8192 tokens como maximo.',
   },
   {
     value: 'MULTIPLE',
-    label: 'Varios elementos (lote 1:N)',
+    label: 'Lote de elementos (1:N Estricto)',
     description:
-      'El correo puede traer varios: la respuesta incluye "items" y los destinos publican cada uno.',
+      'El correo trae varios: la respuesta incluye "items" y los destinos publican cada uno. Presupuesto: 16384 tokens como maximo.',
+  },
+  {
+    value: 'AUTO',
+    label: 'Autodetección Tolerante (1:1 / 1:N)',
+    description:
+      'El modelo decide si hay uno o varios elementos y la cardinalidad se ajusta a su respuesta. Presupuesta como un lote.',
   },
 ];
 

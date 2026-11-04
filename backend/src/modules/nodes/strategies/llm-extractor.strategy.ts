@@ -2,6 +2,7 @@ import { Injectable, Logger } from '@nestjs/common';
 import { plainToInstance } from 'class-transformer';
 import { validate } from 'class-validator';
 
+import { resolveCardinality } from '@common/utils/cardinality-normalizer.util';
 import { extractNamespaceRoots } from '@core/fsm/context/state-payload.context';
 import {
   coalesceDocumentTextMarkers,
@@ -106,6 +107,7 @@ export const LLM_OUTPUT_KEYS = [
   'body_paragraphs',
   'filled_markup',
   'items',
+  'resolved_cardinality',
   'metadata',
 ] as const;
 
@@ -280,7 +282,13 @@ export class LlmExtractorStrategy implements INodeStrategy {
       name: 'items',
       type: 'object',
       description:
-        'Elementos del lote del segundo en adelante (cardinalidad MULTIPLE); vacio con un solo elemento',
+        'Elementos del lote del segundo en adelante (cardinalidad MULTIPLE o AUTO); vacio con un solo elemento',
+    },
+    {
+      name: 'resolved_cardinality',
+      type: 'text',
+      description:
+        'Cardinalidad efectiva de la respuesta: SINGLE (un elemento) o MULTIPLE (lote). En AUTO depende de cuantos elementos devolvio el modelo',
     },
     {
       name: 'metadata',
@@ -380,8 +388,15 @@ export class LlmExtractorStrategy implements INodeStrategy {
     // Lote: lo decide el PARAMETRO del nodo y no el texto del prompt. El
     // contrato con `items` cuesta tokens y cambia lo que publica el nodo; no
     // puede activarse porque una instruccion mencione la palabra "lote".
+    //
+    // `AUTO` usa el MISMO esquema que `MULTIPLE` —el modelo tiene que poder
+    // devolver `items`— y solo cambia la regla del contrato, que le pide
+    // detectar si hay lote en vez de darlo por hecho.
     const expectsItems =
-      config.outputCardinality === LlmOutputCardinality.MULTIPLE;
+      config.outputCardinality === LlmOutputCardinality.MULTIPLE ||
+      config.outputCardinality === LlmOutputCardinality.AUTO;
+    const autoDetectItems =
+      config.outputCardinality === LlmOutputCardinality.AUTO;
 
     this.warnOnOrphanAttachments(context);
 
@@ -428,6 +443,7 @@ export class LlmExtractorStrategy implements INodeStrategy {
           baseDelayMs: config.baseDelayMs,
           expectsFilledMarkup,
           expectsItems,
+          autoDetectItems,
           // Siempre un numero: el del nodo o el de su cardinalidad. Ver
           // `resolveMaxTokens`.
           maxTokens,
@@ -491,6 +507,10 @@ export class LlmExtractorStrategy implements INodeStrategy {
     }
 
     const filledMarkup = this.normalizeMarkup(response.filled_markup);
+    // SIEMPRE publicada, por el mismo motivo que `filled_markup`: con un solo
+    // elemento —o con cardinalidad SINGLE— es un arreglo vacio, y los
+    // consumidores (escudo, destinos) recorren la raiz mas este arreglo.
+    const publishedItems = expectsItems ? (response.items ?? []) : [];
 
     // Aviso, no fallo: quien decide es el ESCUDO_POST_IA, que para eso existe.
     // Pero sin esta linea el primer indicio de que el modelo ignoro la plantilla
@@ -516,10 +536,13 @@ export class LlmExtractorStrategy implements INodeStrategy {
         // es ademas lo que `PostIaSanitizerStrategy` lee como
         // ERR_POST_IA_EMPTY_HTML, que es el diagnostico correcto.
         filled_markup: filledMarkup,
-        // SIEMPRE publicada, por el mismo motivo que `filled_markup`: con un
-        // solo elemento —o con cardinalidad SINGLE— es un arreglo vacio, y los
-        // consumidores (escudo, destinos) recorren la raiz mas este arreglo.
-        items: expectsItems ? (response.items ?? []) : [],
+        items: publishedItems,
+        // Lo que de verdad trajo la respuesta: en `AUTO` un solo elemento es
+        // 1 a 1 aunque el esquema admitiera un lote.
+        resolved_cardinality: resolveCardinality(
+          config.outputCardinality,
+          1 + publishedItems.length,
+        ),
         metadata: {
           ...response.metadata,
           provider: usedProvider,
@@ -986,9 +1009,11 @@ export class LlmExtractorStrategy implements INodeStrategy {
       return Math.min(config.maxTokens, MAX_HARD_CEILING_TOKENS);
     }
 
-    return config.outputCardinality === LlmOutputCardinality.MULTIPLE
-      ? DEFAULT_MAX_TOKENS_MULTIPLE
-      : DEFAULT_MAX_TOKENS_SINGLE;
+    // `AUTO` presupuesta como un lote: cuantos elementos vendran no se sabe
+    // hasta despues de llamar, y quedarse corto trunca el JSON a media cadena.
+    return config.outputCardinality === LlmOutputCardinality.SINGLE
+      ? DEFAULT_MAX_TOKENS_SINGLE
+      : DEFAULT_MAX_TOKENS_MULTIPLE;
   }
 
   /**

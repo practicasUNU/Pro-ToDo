@@ -71,3 +71,73 @@ export const expandRootAndItems = <T extends Record<string, unknown>>(
 
   return [first, ...normalizeItems<Record<string, unknown>>(rest)];
 };
+
+/**
+ * Modo de cardinalidad declarado por un nodo.
+ *
+ * - `SINGLE`: 1 a 1 estricto; un solo elemento en la raiz.
+ * - `MULTIPLE`: 1 a N estricto; el modelo recibe la regla del lote.
+ * - `AUTO`: tolerante; el modelo decide si el material trae uno o varios, y la
+ *   cardinalidad efectiva se resuelve DESPUES, al contar lo que devolvio.
+ */
+export type OutputCardinalityMode = 'SINGLE' | 'MULTIPLE' | 'AUTO';
+
+/** Cardinalidad ya resuelta: la que de verdad tiene una respuesta concreta. */
+export type ResolvedCardinality = 'SINGLE' | 'MULTIPLE';
+
+/**
+ * Cardinalidad efectiva de una respuesta con `itemCount` elementos.
+ *
+ * Los modos estrictos mandan sobre el recuento; `AUTO` lo mira: mas de un
+ * elemento es un lote y uno solo (o ninguno) es 1 a 1.
+ */
+export const resolveCardinality = (
+  mode: OutputCardinalityMode,
+  itemCount: number,
+): ResolvedCardinality => {
+  if (mode === 'SINGLE') return 'SINGLE';
+  if (mode === 'MULTIPLE') return 'MULTIPLE';
+
+  return itemCount > 1 ? 'MULTIPLE' : 'SINGLE';
+};
+
+/** Vista normalizada de un payload con cardinalidad: raiz + lista completa. */
+export interface NormalizedCardinality {
+  /** Cardinalidad efectiva (ver `resolveCardinality`). */
+  readonly cardinality: ResolvedCardinality;
+  /** Primer elemento, sin la clave del contenedor. */
+  readonly root: Record<string, unknown>;
+  /**
+   * TODOS los elementos, raiz incluida y en orden. Con un solo elemento es
+   * `[root]` en cualquier modo, de modo que quien itera nunca distingue 1 a 1
+   * de 1 a N.
+   */
+  readonly items: readonly Record<string, unknown>[];
+}
+
+/**
+ * Normalizacion tri-estado sobre el contrato ASIMETRICO del cable.
+ *
+ * El JSON que publican la IA y el escudo sigue siendo asimetrico (raiz = 1.er
+ * elemento, `itemsKey` = el resto, vacio con uno solo): asi un elemento nunca se
+ * publica dos veces. Esta funcion es la vista SIMETRICA para los consumidores:
+ * `items` es la lista completa y, con N = 1 en `MULTIPLE` o `AUTO`, vale
+ * `[root]` sin que nadie tenga que fabricar un lote de uno.
+ *
+ * Con `SINGLE` se ignora cualquier `itemsKey` que hubiera: el nodo pidio un
+ * solo elemento y lo que sobre no se publica.
+ */
+export const normalizeCardinality = (
+  payload: Record<string, unknown>,
+  mode: OutputCardinalityMode,
+  itemsKey = DEFAULT_CONTAINER_KEY,
+): NormalizedCardinality => {
+  const [root, ...rest] = expandRootAndItems(payload, itemsKey);
+  const items = mode === 'SINGLE' ? [root] : [root, ...rest];
+
+  return {
+    cardinality: resolveCardinality(mode, items.length),
+    root,
+    items,
+  };
+};

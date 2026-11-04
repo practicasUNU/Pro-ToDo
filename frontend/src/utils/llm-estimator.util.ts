@@ -2,6 +2,7 @@ import {
   DEFAULT_LLM_MARKUP_MAX_TOKENS,
   DEFAULT_LLM_MAX_RETRIES,
   DEFAULT_MAX_TOKENS_MULTIPLE,
+  isBatchCardinality,
   DEFAULT_LLM_TIMEOUT_MS,
   MAX_LLM_MAX_TOKENS,
   MAX_LLM_TIMEOUT_MS,
@@ -204,7 +205,9 @@ export const estimateLlmResources = (
 ): LlmResourceEstimate => {
   const single = estimateSingleItem(baseMarkup, upstreamFieldCount);
 
-  return cardinality === 'MULTIPLE' ? scaleForBatch(single) : single;
+  // `AUTO` se estima como un lote: el numero de elementos no se conoce hasta
+  // que responde el modelo, y el backend le reserva el presupuesto de lote.
+  return isBatchCardinality(cardinality) ? scaleForBatch(single) : single;
 };
 
 /**

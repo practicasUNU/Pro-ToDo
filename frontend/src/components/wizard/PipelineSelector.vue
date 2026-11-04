@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted } from 'vue';
+import { computed, onMounted, ref } from 'vue';
 
 import { useNodeCatalogStore } from '@stores/node-catalog.store';
 
@@ -26,6 +26,40 @@ const emit = defineEmits<{
 }>();
 
 const catalogStore = useNodeCatalogStore();
+
+/** Texto del buscador. Estado local de la vista: muere con el selector. */
+const searchQuery = ref('');
+
+/** Si el operador esta filtrando; distingue "sin coincidencias" de "sin plantillas". */
+const isSearching = computed<boolean>(() => searchQuery.value.trim().length > 0);
+
+/**
+ * Plantillas que casan con la busqueda, sin distinguir mayusculas.
+ *
+ * Se busca en el nombre, en la descripcion —que lleva el slug `[wf-…]` del
+ * maestro, el unico "codigo" que tiene una plantilla de flujo— y en los rotulos
+ * de sus nodos, para encontrar "todas las que publican en Acens" sin recordar
+ * como se llaman. Filtrar no altera `props.templates`: solo cambia lo que se
+ * pinta.
+ */
+const filteredTemplates = computed<WorkflowTemplateSummary[]>(() => {
+  const query = searchQuery.value.trim().toLowerCase();
+
+  if (query.length === 0) return props.templates;
+
+  return props.templates.filter(
+    (template) =>
+      template.name.toLowerCase().includes(query) ||
+      (template.description?.toLowerCase().includes(query) ?? false) ||
+      template.topology.some((step) =>
+        NODE_TYPE_LABELS[step.nodeType].toLowerCase().includes(query),
+      ),
+  );
+});
+
+const clearSearch = (): void => {
+  searchQuery.value = '';
+};
 
 // El catalogo hace falta para saber que tipos sabe ejecutar el motor. Se pide
 // aqui y no en la pagina porque es este componente quien lo necesita, y la
@@ -112,74 +146,147 @@ const previewSteps = (template: WorkflowTemplateSummary): string =>
       />
     </div>
 
-    <div v-else class="row q-col-gutter-md">
-      <div v-for="template in props.templates" :key="template.id" class="col-12 col-md-6 col-lg-4">
-        <q-card
-          class="pd-card pd-pipeline-card"
-          :class="{ 'pd-pipeline-card--blocked': unsupportedTypes(template).length > 0 }"
-          flat
-          @click="onSelect(template)"
-        >
-          <div class="pd-pipeline-card__banner">
-            <q-icon name="account_tree" size="22px" />
-          </div>
+    <template v-else>
+      <!-- Buscador Poka-Yoke: solo filtra lo que ya existe, no crea nada. -->
+      <q-input
+        v-model="searchQuery"
+        class="pd-search-input pd-template-search q-mb-md"
+        outlined
+        dense
+        debounce="150"
+        placeholder="Buscar plantilla por nombre, código o nodo"
+        aria-label="Buscar plantilla"
+        data-test="template-search"
+      >
+        <template #prepend>
+          <q-icon name="search" />
+        </template>
+        <template #append>
+          <q-btn
+            v-if="searchQuery"
+            flat
+            round
+            dense
+            icon="close"
+            aria-label="Limpiar búsqueda"
+            data-test="template-search-clear"
+            @click="clearSearch"
+          />
+        </template>
+      </q-input>
 
-          <q-card-section>
-            <div class="row items-center no-wrap q-gutter-xs">
-              <div class="pd-h2 ellipsis">{{ template.name }}</div>
-              <q-space />
-              <q-badge
-                class="pd-badge"
-                :class="
-                  unsupportedTypes(template).length > 0 ? 'pd-badge--inactive' : 'pd-badge--active'
-                "
-              >
-                {{
-                  unsupportedTypes(template).length > 0
-                    ? 'No disponible'
-                    : `${template.topology.length} nodos`
-                }}
-              </q-badge>
+      <div
+        v-if="isSearching && filteredTemplates.length === 0"
+        class="pd-card q-pa-lg text-center"
+        data-test="template-search-empty"
+      >
+        <span class="pd-icon-circle q-mb-sm">
+          <q-icon name="search_off" size="20px" class="pd-empty-icon" />
+        </span>
+        <div class="pd-h2">Ninguna plantilla coincide</div>
+        <p class="pd-search-empty-text q-mt-sm q-mb-md">
+          No hay plantillas cuyo nombre, código o nodos contengan «{{ searchQuery.trim() }}».
+        </p>
+        <q-btn
+          class="pd-btn-secondary"
+          flat
+          no-caps
+          label="Limpiar búsqueda"
+          data-test="template-search-reset"
+          @click="clearSearch"
+        />
+      </div>
+
+      <div v-else class="row q-col-gutter-md">
+        <div
+          v-for="template in filteredTemplates"
+          :key="template.id"
+          class="col-12 col-md-6 col-lg-4"
+        >
+          <q-card
+            class="pd-card pd-pipeline-card"
+            :class="{ 'pd-pipeline-card--blocked': unsupportedTypes(template).length > 0 }"
+            flat
+            @click="onSelect(template)"
+          >
+            <div class="pd-pipeline-card__banner">
+              <q-icon name="account_tree" size="22px" />
             </div>
 
-            <p class="pd-subtitle q-mt-xs q-mb-sm">
-              {{ template.description ?? 'Sin descripcion' }}
-            </p>
+            <q-card-section>
+              <div class="row items-center no-wrap q-gutter-xs">
+                <div class="pd-h2 ellipsis">{{ template.name }}</div>
+                <q-space />
+                <q-badge
+                  class="pd-badge"
+                  :class="
+                    unsupportedTypes(template).length > 0
+                      ? 'pd-badge--inactive'
+                      : 'pd-badge--active'
+                  "
+                >
+                  {{
+                    unsupportedTypes(template).length > 0
+                      ? 'No disponible'
+                      : `${template.topology.length} nodos`
+                  }}
+                </q-badge>
+              </div>
 
-            <div class="pd-mono pd-pipeline-card__steps">{{ previewSteps(template) }}</div>
+              <p class="pd-subtitle q-mt-xs q-mb-sm">
+                {{ template.description ?? 'Sin descripcion' }}
+              </p>
 
-            <!-- Se bloquea la tarjeta en vez de ocultarla: una plantilla que el
+              <div class="pd-mono pd-pipeline-card__steps">{{ previewSteps(template) }}</div>
+
+              <!-- Se bloquea la tarjeta en vez de ocultarla: una plantilla que el
                  operador creo no debe desaparecer sin decir por que. -->
-            <p
-              v-if="unsupportedTypes(template).length > 0"
-              class="pd-subtitle pd-pipeline-card__blocked q-mt-sm q-mb-none"
-            >
-              Contiene nodos sin estrategia en el motor:
-              {{ unsupportedTypes(template).join(', ') }}. Editala en Plantillas de Flujo para
-              poder usarla.
-            </p>
-          </q-card-section>
+              <p
+                v-if="unsupportedTypes(template).length > 0"
+                class="pd-subtitle pd-pipeline-card__blocked q-mt-sm q-mb-none"
+              >
+                Contiene nodos sin estrategia en el motor:
+                {{ unsupportedTypes(template).join(', ') }}. Editala en Plantillas de Flujo para
+                poder usarla.
+              </p>
+            </q-card-section>
 
-          <q-card-actions align="right" class="q-px-md q-pb-md q-pt-none">
-            <q-btn
-              class="pd-btn-primary"
-              unelevated
-              no-caps
-              label="Configurar"
-              icon-right="north_east"
-              :disable="unsupportedTypes(template).length > 0"
-              @click.stop="onSelect(template)"
-            />
-          </q-card-actions>
-        </q-card>
+            <q-card-actions align="right" class="q-px-md q-pb-md q-pt-none">
+              <q-btn
+                class="pd-btn-primary"
+                unelevated
+                no-caps
+                label="Configurar"
+                icon-right="north_east"
+                :disable="unsupportedTypes(template).length > 0"
+                @click.stop="onSelect(template)"
+              />
+            </q-card-actions>
+          </q-card>
+        </div>
       </div>
-    </div>
+    </template>
   </section>
 </template>
 
 <style scoped lang="scss">
 .pd-empty-icon {
   color: var(--pd-primary);
+}
+
+// Ocupa el ancho de la rejilla (en las tablas va en una esquina) y se apoya en
+// la superficie secundaria: es un panel de filtrado, no un campo de formulario.
+.pd-template-search {
+  width: 100%;
+  max-width: 30rem;
+
+  :deep(.q-field__control) {
+    background: var(--pd-surface-muted);
+  }
+}
+
+.pd-search-empty-text {
+  color: var(--pd-text-secondary);
 }
 
 .pd-pipeline-card {

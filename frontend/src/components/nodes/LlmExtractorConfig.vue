@@ -24,6 +24,7 @@ import {
   ADMIN_ONLY_LABEL,
   ADMIN_ONLY_TOKEN,
   IMPLEMENTED_LLM_PROVIDERS,
+  isBatchCardinality,
   LLM_AVAILABILITY_LABELS,
   LLM_AVAILABILITY_TOKENS,
   LLM_OUTPUT_CARDINALITY_OPTIONS,
@@ -684,7 +685,7 @@ onMounted(async () => {
           class="q-mt-xs"
           :placeholder="
             String(
-              store.config.outputCardinality === 'MULTIPLE'
+              isBatchCardinality(store.config.outputCardinality)
                 ? DEFAULT_MAX_TOKENS_MULTIPLE
                 : DEFAULT_MAX_TOKENS_SINGLE,
             )

@@ -201,6 +201,7 @@ export class AnthropicLlmProvider implements ILlmProviderClient {
             systemPrompt,
             config?.expectsFilledMarkup ?? false,
             config?.expectsItems ?? false,
+            config?.autoDetectItems ?? false,
           ),
           messages: [
             { role: 'user', content: this.buildContent(prompt, attachments) },
@@ -315,11 +316,13 @@ export class AnthropicLlmProvider implements ILlmProviderClient {
     systemPrompt: string | undefined,
     expectsFilledMarkup: boolean,
     expectsItems: boolean,
+    autoDetectItems: boolean,
   ): string {
     const operatorInstruction = systemPrompt?.trim() ?? '';
     const contract = buildResponseContractInstruction(
       expectsFilledMarkup,
       expectsItems,
+      autoDetectItems,
     );
 
     return operatorInstruction.length === 0

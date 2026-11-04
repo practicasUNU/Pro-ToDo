@@ -142,10 +142,14 @@ export const MAX_HARD_CEILING_TOKENS = MAX_LLM_MAX_TOKENS;
  * `MULTIPLE` anade `items` con el reparto asimetrico (raiz = primer elemento,
  * `items` = el resto), para correos que traen un lote: un boletin con varias
  * noticias, varios expedientes o varios paneles de evaluacion.
+ * `AUTO` es la variante tolerante: mismo esquema que `MULTIPLE`, pero el modelo
+ * decide si el material trae uno o varios elementos, y la cardinalidad efectiva
+ * se resuelve al contar lo que devolvio (`resolved_cardinality`).
  */
 export enum LlmOutputCardinality {
   SINGLE = 'SINGLE',
   MULTIPLE = 'MULTIPLE',
+  AUTO = 'AUTO',
 }
 
 /** Fallos consecutivos que activan el freno de emergencia por defecto. */
@@ -327,7 +331,7 @@ export class LlmExtractorConfigDto {
 
   @ApiPropertyOptional({
     description:
-      'SINGLE (por defecto): un elemento. MULTIPLE: la respuesta admite un lote, con el primer elemento en la raiz y el resto en "items".',
+      'SINGLE (por defecto): un elemento. MULTIPLE: la respuesta admite un lote, con el primer elemento en la raiz y el resto en "items". AUTO: como MULTIPLE, pero el modelo detecta si hay uno o varios elementos.',
     enum: LlmOutputCardinality,
     default: LlmOutputCardinality.SINGLE,
   })
