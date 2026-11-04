@@ -5320,3 +5320,14 @@ Rama: `feat/drupal-and-acens-nodes-dev`. Migraciones `065` y `066`.
 - [x] OCR para capturas citadas en el cuerpo
 - [x] Prompts consolidados e idempotentes
 - [ ] Pendiente: reejecutar la 069 en la base de desarrollo con `psql -f`
+
+## Apagado tras el primer exito, contenedor de ESIC y generacion extensa
+
+- **stopOnFirstSuccess:** `WorkflowsService.applyStopOnFirstSuccess` solo mira la politica y que el intento ACTUAL cierre EXITOSO. Se retira la excepcion de `tookContingency`: una recuperacion por OCR cierra EXITOSO y el flujo seguia ACTIVO, de modo que el sondeo volvia a publicar el mismo correo. En la reanudacion (`ExecutionsService.completeResume`) el flujo se relee antes de apagarlo y un fallo de la politica no impide la foto final.
+- **ESIC:** `resolveEsicContainer` prueba primero `#collapseUFV` / `#accordionUFV` SOLO bajo el encabezado «ESIC Universidad» (produccion) y despues `#accordionESIC` / `#collapseESIC` (sandbox). Los comites de ESIC ignoran el `data-parent` generico. Sin contenedor: `ERR_DRUPAL_TARGET_NOT_FOUND` (GRAVE, sin escribir nada).
+- **Recomendador del asistente:** detecta la generacion extensa por los parrafos que pide el prompt (8 o mas) y recomienda hasta 32768 tokens, 180 s y un reintento; los lotes, 120 s y un reintento. `MAX_LLM_TIMEOUT_MS` sube a 180 000.
+- **Migracion 069:** paso 5d en su version 3 (sustituye las anteriores): Notiweb con 3 a 4 secciones `<h2>`, 12 a 14 parrafos para la noticia individual o principal y un minimo de 4 por secundaria; titulos con el identificador UFV para ESIC. Paso 6g: el nodo de redaccion del maestro de Notiweb con 32768 tokens y 180 s.
+- [x] Apagado incondicional ante EXITOSO
+- [x] Contenedor UFV/ESIC guardado por encabezado
+- [x] Recomendador para generacion extensa y lotes
+- [ ] Pendiente: reejecutar la 069 en la base de desarrollo con `psql -f`

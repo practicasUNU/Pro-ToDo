@@ -9512,3 +9512,13 @@ mapeador.
 - [x] 069 aplicada dos veces en la base de pruebas sin cambios en el segundo pase
 - [x] Camino de base nueva comprobado en transaccion revertida
 - [ ] Reejecutar la 069 en desarrollo (`psql -f`)
+
+## Apagado, ESIC y generacion extensa
+
+- **Por que el flujo seguia disparando:** la politica descartaba las ejecuciones recuperadas por contingencia. Con el desvio de los escaneos al OCR, eso afectaba a cualquier correo escaneado: cada sondeo publicaba de nuevo.
+- **Por que se apaga el flujo y no la plantilla:** el sondeo lee el estado del flujo instanciado; la plantilla es un molde que no dispara nada.
+- **Por que UFV va guardado por encabezado:** la pagina tiene tambien la Universidad Francisco de Vitoria con su propio UFV; un selector global repetiria el error que revirtio la migracion 038.
+- **Por que el estimador lee el prompt:** una noticia larga no se nota en la plantilla, que es corta y vacia; lo que la alarga son los parrafos que el prompt exige.
+- **Por que un solo reintento:** cada vuelta repite la espera entera y vuelve a facturar la salida; con 180 s, el peor caso ya son seis minutos por proveedor.
+- [x] 069 v3 aplicada dos veces en la base de pruebas sin cambios en el segundo pase
+- [ ] Reejecutar la 069 en desarrollo (`psql -f`)
