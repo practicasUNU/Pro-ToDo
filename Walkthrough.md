@@ -9488,3 +9488,16 @@ mapeador.
 - [x] 069 reejecutada dos veces en la base de pruebas sin cambios en el segundo pase
 - [x] Ensayo en desarrollo dentro de una transaccion revertida
 - [ ] Reejecutar la 069 en desarrollo (`psql -f`)
+
+## Escudo, lote y contingencias
+
+- **Por que el h2 se perdia sin que el saneador lo prohibiera:** `allowedTags` solo puede RESTAR de la lista blanca, y el atajo del asistente restaba de mas. El escudo hacia lo que se le pedia; la correccion es el atajo, mas un paso de la 069 que repara los flujos guardados con esa lista exacta y respeta las escritas a mano.
+- **Por que `urls` vive en el namespace de Drupal:** cada nodo escribe solo en el suyo; poner las URLs en el del escudo romperia la inmutabilidad del contexto.
+- **Por que `items: [root]` solo existe en el normalizador:** si el JSON de la IA lo llevara, Drupal y Acens publicarian dos veces el unico elemento. La vista simetrica se construye al leer, nunca se publica.
+- **Por que AUTO presupuesta como lote:** cuantos elementos devolvera el modelo no se sabe antes de llamarlo, y quedarse corto trunca el JSON.
+- **Por que la purga de Base64 en el overlay no toca el checkpoint:** los contextos por elemento no se persisten; la purga evita arrastrar binarios en cada uno. La memoria persistida la sigue liberando el motor cuando alguien extrae el texto.
+- **Por que `alerta_smtp` no rompe la reanudacion:** con un fallo GRAVE el motor pausa en el nodo que fallo despues de avisar; la rama de contingencia solo notifica.
+- **Por que la ruta al OCR es selectiva:** con `catchErrors: [ERR_PARSER_UNEXTRACTABLE_MEDIA]` solo los escaneos van a `ocr_ia`; un correo vacio u otro fallo del parser no tiene nada que transcribir.
+- [x] 069 aplicada dos veces en la base de pruebas: el segundo pase no cambia nada
+- [x] Ensayo en desarrollo con transaccion revertida
+- [ ] Reejecutar la 069 en desarrollo (`psql -f`)

@@ -5293,3 +5293,18 @@ Rama: `feat/drupal-and-acens-nodes-dev`. Migraciones `065` y `066`.
 - [x] Migracion 069 y pruebas unitarias y e2e
 - [ ] Pendiente: reejecutar la 069 en la base de desarrollo con `psql -f`
 - [ ] Pendiente: validar el texto de los prompts al guardarlos (sigue abierto)
+
+## Escudo con h2, URLs del lote, cardinalidad AUTO y contingencias de los maestros
+
+- **Lista canonica del escudo:** la lista blanca del saneador ya admitia `h2`-`h6`. El defecto estaba en el atajo «Estructura completa» del asistente, que escribia un `allowedTags` sin `h2` (ni `b`, `i`, `u`, `ol`, `br`, `thead`, `tbody`). Ahora el atajo es `CANONICAL_ALLOWED_TAGS` (`template-renderer.service.ts`, subconjunto documentado de la lista blanca) y `strike` entra en la lista blanca y en su replica del cliente.
+- **Drupal, URLs del lote:** el payload de CREATE_NODE suma `urls: string[]`, `created_nodes: [{ id, url, title }]` y `url` (la primera, retrocompatible). Se derivan de `published_nodes` en el constructor unico del payload, asi que un parcial lleva exactamente las URLs de lo creado. Viajan en el namespace PROPIO del destino, no en el del escudo. El evento de cierre anade `publishedUrls` cuando hay mas de una y el modal de exito las enlaza todas.
+- **Purga Base64 en el contexto por elemento:** `withNamespaceOverlays` deja a `null` el `contentBase64` de cualquier `attachments[]` (criterio estructural, como la liberacion del motor) con spread superficial; el contexto original conserva el binario para `UPLOAD_ATTACHMENT`.
+- **Cardinalidad tri-estado:** `OutputCardinalityMode = 'SINGLE' | 'MULTIPLE' | 'AUTO'`, `resolveCardinality(mode, itemCount)` y `normalizeCardinality(payload, mode, itemsKey)`, que entrega `{ cardinality, root, items }` con la lista COMPLETA (`[root]` con un solo elemento). El cable sigue asimetrico: ningun elemento se publica dos veces. `AUTO` usa el esquema del lote, la regla tolerante `RESPONSE_ITEMS_AUTO_RULE` y el presupuesto de 16384; `llm_response.resolved_cardinality` dice lo que trajo la respuesta.
+- **Asistente:** selector «Un elemento (1:1 Estricto)» / «Lote de elementos (1:N Estricto)» / «Autodeteccion Tolerante (1:1 / 1:N)», y buscador en la eleccion de plantilla (nombre, slug de la descripcion y rotulos de nodo) con estado vacio propio.
+- **Migracion 069:** 5d (Notiweb: 3 a 4 parrafos por noticia y cierre `<hr /><h2>Referencia bibliográfica</h2>` en APA 7; titulos: `h5.panel-title` como la plantilla, tres ranuras obligatorias y contrato 1 a N tolerante), 6d (`alerta_smtp` en el `onErrorStep` de procesamiento y destinos de los cinco maestros, satelite `ocr_ia` con ruta selectiva desde el parser), 6e (selectores del panel en el escudo de titulos) y 6f (escudos con el atajo antiguo pasan a la lista canonica).
+- [x] Lista canonica y atajo corregido
+- [x] URLs del lote y aviso con todas ellas
+- [x] Purga Base64 en el contexto por elemento
+- [x] Cardinalidad AUTO de punta a punta y buscador de plantillas
+- [x] 069 con contingencias y prompts blindados, idempotente
+- [ ] Pendiente: reejecutar la 069 en la base de desarrollo con `psql -f`
