@@ -33,6 +33,10 @@
 --   5c. Cardinalidad 1 a N: la "REGLA DE CARDINALIDAD FLEXIBLE" (raiz = primer
 --      elemento, "items" = el resto) en los seis prompts, con lo que es un
 --      elemento en cada flujo (noticia, expediente, enlace, panel).
+--   5d. Prompts blindados: Notiweb exige 3 a 4 parrafos por noticia y cierre
+--      <hr /><h2>Referencia bibliográfica</h2> en APA 7; titulos fija
+--      h5.panel-title (la plantilla), exige sus tres ranuras y elimina la
+--      frase "solo HTML" que contradecia el contrato JSON.
 --   6. Los cinco blueprints de `plantillas_flujo`, con el slug en `flowId` y
 --      en la descripcion (`id_flujo` es UUID y no puede llevarlo).
 --   6b. El escudo del maestro de apertura exige `h3.licitacion-title`: sin
@@ -40,6 +44,12 @@
 --   6c. Los cinco PROCESADOR_IA con `outputCardinality: MULTIPLE`, y Notiweb
 --      con el nodo `campana_acens` (DESTINO_ACENS, CREATE_CAMPAIGN) tras
 --      Drupal: el boletin con el marcado ya validado de todas las noticias.
+--   6d. Contingencias en los cinco maestros: `alerta_smtp` (DESTINO_SMTP) en
+--      el onErrorStep de procesamiento y destinos, y el satelite `ocr_ia`
+--      (PROCESADOR_OCR) al que el parser desvia solo los escaneos.
+--   6e. El escudo de titulos exige .panel-title y sus dos ranuras.
+--   6f. Escudos de `flujos` y `plantillas_flujo` con el atajo antiguo
+--      "Estructura completa" (sin h2) pasan a la lista canonica.
 --   2b. El catalogo describe el modo campana de DESTINO_ACENS.
 --   7. Una fila de `audit_eventos` por cada entidad creada o parcheada, con
 --      `datos_nuevos.origen = 'SEED_MASTER_DATA'`, y un resumen final.
@@ -59,7 +69,7 @@
 --
 -- FUENTE UNICA: este fichero se mantiene directamente (el generador con el
 -- que nacio no se versiona). Los parches de contenido de los prompts y de los
--- maestros se consolidan aqui (pasos 2b, 5a-5c y 6b-6c) y no en migraciones
+-- maestros se consolidan aqui (pasos 2b, 5a-5d y 6b-6f) y no en migraciones
 -- sueltas: el runner registra la migracion por nombre, asi que una base que ya
 -- la tenia la vuelve a pasar a mano (`psql -f`) y los marcadores evitan
 -- duplicados.
@@ -86,6 +96,11 @@ DECLARE
     patched TEXT;
     insertion TEXT;
     created_prompts TEXT[] := '{}';
+    pipeline JSONB;
+    node_key TEXT;
+    parser_key TEXT;
+    old_full_structure CONSTANT TEXT[] := ARRAY['a', 'div', 'em', 'h3', 'h4', 'h5', 'hr', 'img', 'li', 'p', 'span', 'strong', 'table', 'td', 'th', 'tr', 'ul'];
+    canonical_tags CONSTANT JSONB := '["h2", "h3", "h4", "h5", "h6", "p", "a", "b", "i", "strong", "em", "u", "strike", "ul", "ol", "li", "table", "thead", "tbody", "tr", "th", "td", "hr", "br", "div", "span", "img"]'::JSONB;
     clause_poly_html CONSTANT TEXT := $clause$DIRECTIVA DE POLIVALENCIA Y ESTRUCTURACIÓN HTML:
 - La información de entrada puede contener tablas, listas o textos en formato Markdown (| tabla |, # títulos, - listas, **negritas**).
 - Queda TERMINANTEMENTE PROHIBIDO copiar y pegar sintaxis Markdown en "filled_markup".
@@ -104,7 +119,7 @@ DECLARE
     summary JSONB := jsonb_build_object(
         'nodos', 0, 'tarifas', 0, 'plantillas_html', 0,
         'prompts', 0, 'blueprints', 0, 'prompts_parcheados', 0, 'blueprints_parcheados', 0,
-        'nodos_parcheados', 0);
+        'nodos_parcheados', 0, 'flujos_reparados', 0);
     seed_tag CONSTANT JSONB := jsonb_build_object('origen', 'SEED_MASTER_DATA', 'recurso', 'SYSTEM_INITIALIZATION', 'migracion', '069');
 BEGIN
     -- 1. ADMIN ancla ---------------------------------------------------------
@@ -935,6 +950,59 @@ PLANTILLA BASE:
         END IF;
     END LOOP;
 
+    -- 5d. Prompts blindados de Notiweb y de verificacion de titulos ---------
+    -- Notiweb: 3 a 4 parrafos por noticia y cierre bibliografico APA 7 bajo
+    -- <h2>. Titulos: se elimina la contradiccion h4/h5 (la plantilla usa
+    -- <h5 class="panel-title">), la frase que pedia "solo HTML" frente al
+    -- contrato JSON, y se exige rellenar las tres ranuras del encabezado, que
+    -- el escudo del maestro audita con requiredSelectors.
+    FOR rec IN
+        SELECT * FROM (VALUES
+            ('NOTIWEB_DEFAULT', 'DESARROLLO MÍNIMO Y CIERRE DE CADA NOTICIA', $rule$DESARROLLO MÍNIMO Y CIERRE DE CADA NOTICIA:
+- Cada noticia —la de la raíz y cada una de "items"— desarrolla su cuerpo en un MÍNIMO DE 3 Y UN MÁXIMO DE 4 párrafos <p> dentro de div.notiweb-cuerpo, sin contar los encabezados <h2>/<h3> ni la referencia. Sus "body_paragraphs" contienen esos mismos 3 o 4 párrafos.
+- Si el material de una noticia es escaso, desarrolla el contexto institucional y el alcance de lo anunciado con los datos que sí figuran; nunca inventes cifras, nombres ni declaraciones para alcanzar el mínimo.
+- Cada "filled_markup" termina OBLIGATORIAMENTE con <hr /><h2>Referencia bibliográfica</h2><p class="notiweb-referencia">...</p>, con la referencia en formato APA 7 estricto según las reglas de "Referencia bibliografica". Nunca la escribas como <p><strong>...</strong></p>.$rule$),
+            ('VERIFICADOR_TITULOS_DEFAULT', 'CONTRATO DE PANEL (VERIFICACIÓN DE TÍTULOS)', $rule$CONTRATO DE PANEL (VERIFICACIÓN DE TÍTULOS):
+- Cada panel —el de la raíz y cada uno de "items"— conserva el encabezado de la PLANTILLA BASE tal cual: <h5 class="panel-title"> con su <a class="panel-toggle-link">. Nunca lo cambies por <h4> ni por otro nivel.
+- Rellena SIEMPRE las tres ranuras del encabezado: el href de "a.panel-toggle-link" (igual al id de su "div.collapse"), ".panel-comite-codigo" con el código del comité y ".panel-facultad-nombre" con el centro o la facultad. Si el material no nombra la facultad, usa el nombre del centro o de la universidad tal como figure. Un panel con cualquiera de esas ranuras vacía se rechaza entero; esta obligación prevalece sobre la regla de dejar vacío un dato ausente, que sigue valiendo para el resto de celdas.
+- Cardinalidad tolerante 1 a N: un panel por comité. Si el material trae un solo comité, va en la raíz y "items" es []; si trae varios, el primero en la raíz y uno por cada comité restante en "items", sin repetir el primero.$rule$)
+        ) AS t(codigo, marker, rule_text)
+    LOOP
+        SELECT id_plantilla_prompt_ia, texto_prompt INTO inserted_id, previous_text
+          FROM plantillas_prompts_ia WHERE codigo = rec.codigo;
+        IF NOT FOUND OR position(rec.marker IN previous_text) > 0 THEN
+            CONTINUE;
+        END IF;
+
+        patched := previous_text;
+        IF rec.codigo = 'VERIFICADOR_TITULOS_DEFAULT' THEN
+            patched := replace(patched,
+                $old$- Devuelve unica y exclusivamente el marcado HTML inyectable resultante.$old$,
+                $new$- En "filled_markup" devuelve unicamente el marcado HTML inyectable resultante, sin texto alrededor; el resto de claves del JSON se rellenan como se indica al final.$new$);
+            patched := replace(patched,
+                $old$- Si esas tablas vienen agrupadas por secciones o epigrafes, envuelve cada seccion en un panel: <div class="panel panel-default"> con el titulo en <div class="panel-heading"><h4 class="panel-title">...</h4></div> y el contenido en <div class="panel-body">. Respeta las clases exactamente como estan escritas aqui: son las que el portal sabe pintar y las que audita el nodo de validacion posterior.$old$,
+                $new$- Si esas tablas vienen agrupadas por comites, cada comite es un panel independiente con la estructura EXACTA de la PLANTILLA BASE (<div class="panel panel-default">, encabezado <h5 class="panel-title"> y contenido en <div class="panel-body">). Respeta las clases exactamente como estan escritas en la plantilla: son las que el portal sabe pintar y las que audita el nodo de validacion posterior.$new$);
+        END IF;
+
+        IF patched ~ material_anchor THEN
+            patched := regexp_replace(patched, material_anchor, E'\n\n' || rec.rule_text || E'\n\n\\1{{');
+        ELSE
+            patched := patched || E'\n\n' || rec.rule_text;
+            RAISE WARNING '069: % no tiene una seccion de material reconocible; el blindaje se anade al final.', rec.codigo;
+        END IF;
+
+        UPDATE plantillas_prompts_ia
+           SET texto_prompt = patched, actualizado_por = admin_id, fecha_actualizacion = NOW()
+         WHERE codigo = rec.codigo;
+        summary := jsonb_set(summary, '{prompts_parcheados}', to_jsonb((summary->>'prompts_parcheados')::INT + 1));
+        IF NOT (rec.codigo = ANY (created_prompts)) THEN
+            INSERT INTO audit_eventos (usuario_id, accion, tabla_afectada, registro_id, datos_anteriores, datos_nuevos)
+            VALUES (admin_id, 'ACTUALIZAR', 'plantillas_prompts_ia', inserted_id::TEXT,
+                    jsonb_build_object('texto_prompt', previous_text),
+                    seed_tag || jsonb_build_object('codigo', rec.codigo, 'parche', 'prompts_blindados'));
+        END IF;
+    END LOOP;
+
     -- 6. Blueprints maestros -------------------------------------------------
     SELECT id_plantilla INTO template_notiweb FROM plantillas_html WHERE nombre = 'Notiweb · Noticia institucional';
     SELECT id_plantilla INTO template_abierta FROM plantillas_html WHERE nombre = 'Licitaciones · Convocatoria abierta (Madrid+D) V1';
@@ -942,7 +1010,7 @@ PLANTILLA BASE:
 
     inserted_id := NULL;
     INSERT INTO plantillas_flujo (nombre, descripcion, activo, configuracion_pipeline, creado_por, actualizado_por)
-    VALUES ('Maestro · Notiweb', '[wf-notiweb-madridmasd] Redaccion de una noticia institucional a partir del correo del editor y del articulo enlazado, con aprobacion humana antes de crearla en Drupal (CREATE_NODE, despublicada). Si el correo solo trae un escaneo, el parser desvia al OCR, que se reincorpora en el extractor web.', TRUE,
+    VALUES ('Maestro · Notiweb', '[wf-notiweb-madridmasd] Redaccion de una noticia institucional a partir del correo del editor y del articulo enlazado, con aprobacion humana antes de crearla en Drupal (CREATE_NODE, despublicada). Si el correo solo trae un escaneo, el parser desvia al OCR (ocr_ia), que se reincorpora en el extractor web; cualquier otro fallo avisa por correo (alerta_smtp).', TRUE,
             replace(replace(replace(
                 $pipeline${
   "flowId": "wf-notiweb-madridmasd",
@@ -967,7 +1035,7 @@ PLANTILLA BASE:
       "outputNamespace": "parsed_email",
       "nextStep": "extractor_web",
       "onErrorStep": {
-        "targetNode": "ocr",
+        "targetNode": "ocr_ia",
         "catchErrors": [
           "ERR_PARSER_UNEXTRACTABLE_MEDIA"
         ]
@@ -976,20 +1044,12 @@ PLANTILLA BASE:
         "failOnUnextractableMedia": true
       }
     },
-    "ocr": {
-      "nodeId": "ocr",
-      "nodeType": "PROCESADOR_OCR",
-      "outputNamespace": "ocr_result",
-      "nextStep": "extractor_web",
-      "onErrorStep": null,
-      "params": {}
-    },
     "extractor_web": {
       "nodeId": "extractor_web",
       "nodeType": "EXTRACTOR_WEB",
       "outputNamespace": "scraped_web",
       "nextStep": "mapeador",
-      "onErrorStep": null,
+      "onErrorStep": "alerta_smtp",
       "params": {
         "targetUrl": "{{parsed_email.extracted_urls}}",
         "skipIfEmpty": true
@@ -1000,7 +1060,7 @@ PLANTILLA BASE:
       "nodeType": "MAPEADOR_PLANTILLA",
       "outputNamespace": "rendered_html",
       "nextStep": "redaccion_ia",
-      "onErrorStep": null,
+      "onErrorStep": "alerta_smtp",
       "params": {
         "templateId": "__TPL_NOTIWEB__"
       }
@@ -1010,7 +1070,7 @@ PLANTILLA BASE:
       "nodeType": "PROCESADOR_IA",
       "outputNamespace": "llm_response",
       "nextStep": "escudo",
-      "onErrorStep": null,
+      "onErrorStep": "alerta_smtp",
       "params": {
         "promptCode": "NOTIWEB_DEFAULT",
         "outputCardinality": "MULTIPLE"
@@ -1021,7 +1081,7 @@ PLANTILLA BASE:
       "nodeType": "ESCUDO_POST_IA",
       "outputNamespace": "validated_drupal_json",
       "nextStep": "aprobacion",
-      "onErrorStep": null,
+      "onErrorStep": "alerta_smtp",
       "params": {
         "contentMode": "HTML",
         "sourceNamespace": "llm_response",
@@ -1043,7 +1103,7 @@ PLANTILLA BASE:
       "nodeType": "DESTINO_DRUPAL",
       "outputNamespace": "http_result",
       "nextStep": "campana_acens",
-      "onErrorStep": null,
+      "onErrorStep": "alerta_smtp",
       "params": {
         "operationMode": "CREATE_NODE",
         "bundle": "node--noticias",
@@ -1059,11 +1119,27 @@ PLANTILLA BASE:
       "nodeType": "DESTINO_ACENS",
       "outputNamespace": "acens_result",
       "nextStep": null,
-      "onErrorStep": null,
+      "onErrorStep": "alerta_smtp",
       "params": {
         "operation": "CREATE_CAMPAIGN",
         "contentNamespace": "validated_drupal_json"
       }
+    },
+    "ocr_ia": {
+      "nodeId": "ocr_ia",
+      "nodeType": "PROCESADOR_OCR",
+      "outputNamespace": "ocr_result",
+      "nextStep": "extractor_web",
+      "onErrorStep": "alerta_smtp",
+      "params": {}
+    },
+    "alerta_smtp": {
+      "nodeId": "alerta_smtp",
+      "nodeType": "DESTINO_SMTP",
+      "outputNamespace": "smtp_result",
+      "nextStep": null,
+      "onErrorStep": null,
+      "params": {}
     }
   }
 }$pipeline$,
@@ -1104,15 +1180,22 @@ PLANTILLA BASE:
       "nodeType": "PARSER_PRE_IA",
       "outputNamespace": "parsed_email",
       "nextStep": "mapeador",
-      "onErrorStep": null,
-      "params": {}
+      "onErrorStep": {
+        "targetNode": "ocr_ia",
+        "catchErrors": [
+          "ERR_PARSER_UNEXTRACTABLE_MEDIA"
+        ]
+      },
+      "params": {
+        "failOnUnextractableMedia": true
+      }
     },
     "mapeador": {
       "nodeId": "mapeador",
       "nodeType": "MAPEADOR_PLANTILLA",
       "outputNamespace": "rendered_html",
       "nextStep": "extraccion_ia",
-      "onErrorStep": null,
+      "onErrorStep": "alerta_smtp",
       "params": {
         "templateId": "__TPL_ABIERTA__"
       }
@@ -1122,7 +1205,7 @@ PLANTILLA BASE:
       "nodeType": "PROCESADOR_IA",
       "outputNamespace": "llm_response",
       "nextStep": "escudo",
-      "onErrorStep": null,
+      "onErrorStep": "alerta_smtp",
       "params": {
         "promptCode": "LICITACION_APERTURA_DEFAULT",
         "outputCardinality": "MULTIPLE"
@@ -1133,7 +1216,7 @@ PLANTILLA BASE:
       "nodeType": "ESCUDO_POST_IA",
       "outputNamespace": "validated_drupal_json",
       "nextStep": "destino_drupal",
-      "onErrorStep": null,
+      "onErrorStep": "alerta_smtp",
       "params": {
         "contentMode": "HTML",
         "sourceNamespace": "llm_response",
@@ -1148,7 +1231,7 @@ PLANTILLA BASE:
       "nodeType": "DESTINO_DRUPAL",
       "outputNamespace": "http_result",
       "nextStep": null,
-      "onErrorStep": null,
+      "onErrorStep": "alerta_smtp",
       "params": {
         "operationMode": "APPEND_HTML_BLOCK",
         "bundle": "node--page",
@@ -1158,6 +1241,22 @@ PLANTILLA BASE:
         "insertPosition": "PREPEND",
         "expedienteTemplate": "{{llm_response.headline}}"
       }
+    },
+    "ocr_ia": {
+      "nodeId": "ocr_ia",
+      "nodeType": "PROCESADOR_OCR",
+      "outputNamespace": "ocr_result",
+      "nextStep": "mapeador",
+      "onErrorStep": "alerta_smtp",
+      "params": {}
+    },
+    "alerta_smtp": {
+      "nodeId": "alerta_smtp",
+      "nodeType": "DESTINO_SMTP",
+      "outputNamespace": "smtp_result",
+      "nextStep": null,
+      "onErrorStep": null,
+      "params": {}
     }
   }
 }$pipeline$,
@@ -1198,15 +1297,22 @@ PLANTILLA BASE:
       "nodeType": "PARSER_PRE_IA",
       "outputNamespace": "parsed_email",
       "nextStep": "identificacion_ia",
-      "onErrorStep": null,
-      "params": {}
+      "onErrorStep": {
+        "targetNode": "ocr_ia",
+        "catchErrors": [
+          "ERR_PARSER_UNEXTRACTABLE_MEDIA"
+        ]
+      },
+      "params": {
+        "failOnUnextractableMedia": true
+      }
     },
     "identificacion_ia": {
       "nodeId": "identificacion_ia",
       "nodeType": "PROCESADOR_IA",
       "outputNamespace": "llm_response",
       "nextStep": "escudo",
-      "onErrorStep": null,
+      "onErrorStep": "alerta_smtp",
       "params": {
         "promptCode": "LICITACION_CIERRE_DEFAULT",
         "outputCardinality": "MULTIPLE"
@@ -1217,7 +1323,7 @@ PLANTILLA BASE:
       "nodeType": "ESCUDO_POST_IA",
       "outputNamespace": "validated_drupal_json",
       "nextStep": "destino_drupal",
-      "onErrorStep": null,
+      "onErrorStep": "alerta_smtp",
       "params": {
         "contentMode": "TEXT",
         "sourceNamespace": "llm_response",
@@ -1232,7 +1338,7 @@ PLANTILLA BASE:
       "nodeType": "DESTINO_DRUPAL",
       "outputNamespace": "http_result",
       "nextStep": null,
-      "onErrorStep": null,
+      "onErrorStep": "alerta_smtp",
       "params": {
         "operationMode": "TRANSFER_HTML_BLOCK",
         "bundle": "node--page",
@@ -1240,6 +1346,22 @@ PLANTILLA BASE:
         "targetContainerSelector": "#collapse2 > .panel-body",
         "insertPosition": "PREPEND"
       }
+    },
+    "ocr_ia": {
+      "nodeId": "ocr_ia",
+      "nodeType": "PROCESADOR_OCR",
+      "outputNamespace": "ocr_result",
+      "nextStep": "identificacion_ia",
+      "onErrorStep": "alerta_smtp",
+      "params": {}
+    },
+    "alerta_smtp": {
+      "nodeId": "alerta_smtp",
+      "nodeType": "DESTINO_SMTP",
+      "outputNamespace": "smtp_result",
+      "nextStep": null,
+      "onErrorStep": null,
+      "params": {}
     }
   }
 }$pipeline$,
@@ -1280,15 +1402,22 @@ PLANTILLA BASE:
       "nodeType": "PARSER_PRE_IA",
       "outputNamespace": "parsed_email",
       "nextStep": "enlace_ia",
-      "onErrorStep": null,
-      "params": {}
+      "onErrorStep": {
+        "targetNode": "ocr_ia",
+        "catchErrors": [
+          "ERR_PARSER_UNEXTRACTABLE_MEDIA"
+        ]
+      },
+      "params": {
+        "failOnUnextractableMedia": true
+      }
     },
     "enlace_ia": {
       "nodeId": "enlace_ia",
       "nodeType": "PROCESADOR_IA",
       "outputNamespace": "llm_response",
       "nextStep": "escudo",
-      "onErrorStep": null,
+      "onErrorStep": "alerta_smtp",
       "params": {
         "promptCode": "INNODAYS_ENLACE_DEFAULT",
         "outputCardinality": "MULTIPLE"
@@ -1299,7 +1428,7 @@ PLANTILLA BASE:
       "nodeType": "ESCUDO_POST_IA",
       "outputNamespace": "validated_drupal_json",
       "nextStep": "destino_drupal",
-      "onErrorStep": null,
+      "onErrorStep": "alerta_smtp",
       "params": {
         "contentMode": "TEXT",
         "sourceNamespace": "llm_response",
@@ -1314,7 +1443,7 @@ PLANTILLA BASE:
       "nodeType": "DESTINO_DRUPAL",
       "outputNamespace": "http_result",
       "nextStep": null,
-      "onErrorStep": null,
+      "onErrorStep": "alerta_smtp",
       "params": {
         "operationMode": "UPDATE_LINK_SOURCE",
         "bundle": "node--page",
@@ -1322,6 +1451,22 @@ PLANTILLA BASE:
         "linkAttribute": "href",
         "linkValueTemplate": "{{validated_drupal_json.validated_fields.summary}}"
       }
+    },
+    "ocr_ia": {
+      "nodeId": "ocr_ia",
+      "nodeType": "PROCESADOR_OCR",
+      "outputNamespace": "ocr_result",
+      "nextStep": "enlace_ia",
+      "onErrorStep": "alerta_smtp",
+      "params": {}
+    },
+    "alerta_smtp": {
+      "nodeId": "alerta_smtp",
+      "nodeType": "DESTINO_SMTP",
+      "outputNamespace": "smtp_result",
+      "nextStep": null,
+      "onErrorStep": null,
+      "params": {}
     }
   }
 }$pipeline$,
@@ -1362,15 +1507,22 @@ PLANTILLA BASE:
       "nodeType": "PARSER_PRE_IA",
       "outputNamespace": "parsed_email",
       "nextStep": "mapeador",
-      "onErrorStep": null,
-      "params": {}
+      "onErrorStep": {
+        "targetNode": "ocr_ia",
+        "catchErrors": [
+          "ERR_PARSER_UNEXTRACTABLE_MEDIA"
+        ]
+      },
+      "params": {
+        "failOnUnextractableMedia": true
+      }
     },
     "mapeador": {
       "nodeId": "mapeador",
       "nodeType": "MAPEADOR_PLANTILLA",
       "outputNamespace": "rendered_html",
       "nextStep": "estructuracion_ia",
-      "onErrorStep": null,
+      "onErrorStep": "alerta_smtp",
       "params": {
         "templateId": "__TPL_TITULOS__"
       }
@@ -1380,7 +1532,7 @@ PLANTILLA BASE:
       "nodeType": "PROCESADOR_IA",
       "outputNamespace": "llm_response",
       "nextStep": "escudo",
-      "onErrorStep": null,
+      "onErrorStep": "alerta_smtp",
       "params": {
         "promptCode": "VERIFICADOR_TITULOS_DEFAULT",
         "outputCardinality": "MULTIPLE"
@@ -1391,11 +1543,16 @@ PLANTILLA BASE:
       "nodeType": "ESCUDO_POST_IA",
       "outputNamespace": "validated_drupal_json",
       "nextStep": "destino_drupal",
-      "onErrorStep": null,
+      "onErrorStep": "alerta_smtp",
       "params": {
         "contentMode": "HTML",
         "sourceNamespace": "llm_response",
-        "sourceField": "filled_markup"
+        "sourceField": "filled_markup",
+        "requiredSelectors": [
+          ".panel-title",
+          ".panel-comite-codigo",
+          ".panel-facultad-nombre"
+        ]
       }
     },
     "destino_drupal": {
@@ -1403,7 +1560,7 @@ PLANTILLA BASE:
       "nodeType": "DESTINO_DRUPAL",
       "outputNamespace": "http_result",
       "nextStep": null,
-      "onErrorStep": null,
+      "onErrorStep": "alerta_smtp",
       "params": {
         "operationMode": "APPEND_HTML_BLOCK",
         "bundle": "node--page",
@@ -1413,6 +1570,22 @@ PLANTILLA BASE:
         "itemSelector": ".panel-default",
         "insertPosition": "APPEND"
       }
+    },
+    "ocr_ia": {
+      "nodeId": "ocr_ia",
+      "nodeType": "PROCESADOR_OCR",
+      "outputNamespace": "ocr_result",
+      "nextStep": "mapeador",
+      "onErrorStep": "alerta_smtp",
+      "params": {}
+    },
+    "alerta_smtp": {
+      "nodeId": "alerta_smtp",
+      "nodeType": "DESTINO_SMTP",
+      "outputNamespace": "smtp_result",
+      "nextStep": null,
+      "onErrorStep": null,
+      "params": {}
     }
   }
 }$pipeline$,
@@ -1493,12 +1666,150 @@ PLANTILLA BASE:
                 seed_tag || jsonb_build_object('slug', 'wf-notiweb-madridmasd', 'nodo_anadido', 'campana_acens'));
     END IF;
 
+    -- 6d. Contingencias en los cinco maestros: alerta SMTP y rescate OCR ----
+    -- Un unico DESTINO_SMTP (`alerta_smtp`, regla 12) recibe el onErrorStep de
+    -- cada nodo de procesamiento y destino. Con un GRAVE el motor pausa en el
+    -- nodo que fallo tras avisar, asi que la reanudacion sigue funcionando. El
+    -- parser desvia SOLO los escaneos (ERR_PARSER_UNEXTRACTABLE_MEDIA, con
+    -- `failOnUnextractableMedia`, regla 10) al satelite `ocr_ia`, que se
+    -- reincorpora en el paso nominal siguiente al parser. Marcador: el mapa de
+    -- nodos ya tiene `alerta_smtp`.
+    FOR rec IN
+        SELECT id_plantilla_flujo, configuracion_pipeline
+          FROM plantillas_flujo
+         WHERE configuracion_pipeline->>'flowId' IN (
+               'wf-notiweb-madridmasd', 'wf-licitacion-abrir', 'wf-licitacion-cerrar',
+               'wf-innodays-sync', 'wf-titulos-verificacion')
+           AND NOT (configuracion_pipeline->'nodes' ? 'alerta_smtp')
+    LOOP
+        pipeline := rec.configuracion_pipeline;
+
+        SELECT n.key INTO parser_key
+          FROM jsonb_each(pipeline->'nodes') n
+         WHERE n.value->>'nodeType' = 'PARSER_PRE_IA'
+         ORDER BY n.key
+         LIMIT 1;
+        IF parser_key IS NULL THEN
+            RAISE WARNING '069: el maestro % no tiene parser; se omiten sus contingencias.', pipeline->>'flowId';
+            CONTINUE;
+        END IF;
+
+        -- Notiweb ya traia el satelite como `ocr`: se renombra.
+        IF (pipeline->'nodes' ? 'ocr') AND NOT (pipeline->'nodes' ? 'ocr_ia') THEN
+            pipeline := jsonb_set(pipeline, '{nodes}',
+                ((pipeline->'nodes') - 'ocr')
+                || jsonb_build_object('ocr_ia', (pipeline #> '{nodes,ocr}') || '{"nodeId": "ocr_ia"}'::JSONB));
+        END IF;
+
+        IF NOT (pipeline->'nodes' ? 'ocr_ia') THEN
+            pipeline := jsonb_set(pipeline, '{nodes,ocr_ia}', jsonb_build_object(
+                'nodeId', 'ocr_ia',
+                'nodeType', 'PROCESADOR_OCR',
+                'outputNamespace', 'ocr_result',
+                'nextStep', pipeline #> ARRAY['nodes', parser_key, 'nextStep'],
+                'onErrorStep', NULL,
+                'params', '{}'::JSONB));
+        END IF;
+
+        pipeline := jsonb_set(pipeline, ARRAY['nodes', parser_key, 'onErrorStep'],
+            '{"targetNode": "ocr_ia", "catchErrors": ["ERR_PARSER_UNEXTRACTABLE_MEDIA"]}'::JSONB);
+        pipeline := jsonb_set(pipeline, ARRAY['nodes', parser_key, 'params'],
+            COALESCE(pipeline #> ARRAY['nodes', parser_key, 'params'], '{}'::JSONB)
+            || '{"failOnUnextractableMedia": true}'::JSONB);
+
+        FOR node_key IN
+            SELECT n.key
+              FROM jsonb_each(pipeline->'nodes') n
+             WHERE n.value->>'nodeType' IN ('EXTRACTOR_WEB', 'MAPEADOR_PLANTILLA', 'PROCESADOR_IA',
+                                            'ESCUDO_POST_IA', 'DESTINO_DRUPAL', 'DESTINO_ACENS',
+                                            'PROCESADOR_OCR')
+               AND jsonb_typeof(n.value->'onErrorStep') IS DISTINCT FROM 'string'
+               AND jsonb_typeof(n.value->'onErrorStep') IS DISTINCT FROM 'object'
+        LOOP
+            pipeline := jsonb_set(pipeline, ARRAY['nodes', node_key, 'onErrorStep'], '"alerta_smtp"'::JSONB);
+        END LOOP;
+
+        pipeline := jsonb_set(pipeline, '{nodes,alerta_smtp}',
+            '{"nodeId": "alerta_smtp", "nodeType": "DESTINO_SMTP", "outputNamespace": "smtp_result", "nextStep": null, "onErrorStep": null, "params": {}}'::JSONB);
+
+        UPDATE plantillas_flujo
+           SET configuracion_pipeline = pipeline, actualizado_por = admin_id, fecha_actualizacion = NOW()
+         WHERE id_plantilla_flujo = rec.id_plantilla_flujo;
+        summary := jsonb_set(summary, '{blueprints_parcheados}', to_jsonb((summary->>'blueprints_parcheados')::INT + 1));
+        INSERT INTO audit_eventos (usuario_id, accion, tabla_afectada, registro_id, datos_anteriores, datos_nuevos)
+        VALUES (admin_id, 'ACTUALIZAR', 'plantillas_flujo', rec.id_plantilla_flujo::TEXT,
+                jsonb_build_object('configuracion_pipeline', rec.configuracion_pipeline),
+                seed_tag || jsonb_build_object('slug', pipeline->>'flowId', 'parche', 'contingencias_ocr_smtp'));
+    END LOOP;
+
+    -- 6e. Encabezado del panel obligatorio en el maestro de titulos --------
+    -- Con estos selectores la auditoria `empty` del escudo rechaza
+    -- (ERR_POST_IA_DOM_MUTATED) un panel con el h5.panel-title sin rellenar.
+    UPDATE plantillas_flujo
+       SET configuracion_pipeline = jsonb_set(configuracion_pipeline,
+               '{nodes,escudo,params,requiredSelectors}',
+               '[".panel-title", ".panel-comite-codigo", ".panel-facultad-nombre"]'::JSONB),
+           actualizado_por = admin_id,
+           fecha_actualizacion = NOW()
+     WHERE configuracion_pipeline->>'flowId' = 'wf-titulos-verificacion'
+       AND configuracion_pipeline #> '{nodes,escudo,params}' IS NOT NULL
+       AND NOT (configuracion_pipeline #> '{nodes,escudo,params}' ? 'requiredSelectors')
+    RETURNING id_plantilla_flujo INTO inserted_id;
+    IF FOUND THEN
+        summary := jsonb_set(summary, '{blueprints_parcheados}', to_jsonb((summary->>'blueprints_parcheados')::INT + 1));
+        INSERT INTO audit_eventos (usuario_id, accion, tabla_afectada, registro_id, datos_nuevos)
+        VALUES (admin_id, 'ACTUALIZAR', 'plantillas_flujo', inserted_id::TEXT,
+                seed_tag || jsonb_build_object('slug', 'wf-titulos-verificacion',
+                    'requiredSelectors', '[".panel-title", ".panel-comite-codigo", ".panel-facultad-nombre"]'::JSONB));
+    END IF;
+
+    -- 6f. Reparacion del atajo "Estructura completa" del escudo ------------
+    -- El asistente escribia un `allowedTags` sin h2, b, i, u, ol, br, thead ni
+    -- tbody, y el escudo borraba los encabezados de seccion y la cabecera
+    -- "Referencia bibliografica". Solo se tocan las listas IDENTICAS a ese
+    -- atajo (comparadas como conjunto): una lista escrita a mano es una
+    -- decision del operador y se respeta.
+    FOR rec IN
+        SELECT f.id_flujo AS id, 'flujos' AS tabla, n.key AS escudo_key, f.configuracion_pipeline
+          FROM flujos f, jsonb_each(f.configuracion_pipeline->'nodes') n
+         WHERE n.value->>'nodeType' = 'ESCUDO_POST_IA'
+           AND jsonb_typeof(n.value #> '{params,allowedTags}') = 'array'
+           AND ARRAY(SELECT DISTINCT t FROM jsonb_array_elements_text(n.value #> '{params,allowedTags}') t ORDER BY t) = old_full_structure
+        UNION ALL
+        SELECT p.id_plantilla_flujo, 'plantillas_flujo', n.key, p.configuracion_pipeline
+          FROM plantillas_flujo p, jsonb_each(p.configuracion_pipeline->'nodes') n
+         WHERE n.value->>'nodeType' = 'ESCUDO_POST_IA'
+           AND jsonb_typeof(n.value #> '{params,allowedTags}') = 'array'
+           AND ARRAY(SELECT DISTINCT t FROM jsonb_array_elements_text(n.value #> '{params,allowedTags}') t ORDER BY t) = old_full_structure
+    LOOP
+        IF rec.tabla = 'flujos' THEN
+            UPDATE flujos
+               SET configuracion_pipeline = jsonb_set(configuracion_pipeline,
+                       ARRAY['nodes', rec.escudo_key, 'params', 'allowedTags'], canonical_tags),
+                   actualizado_por = admin_id,
+                   fecha_actualizacion = NOW()
+             WHERE id_flujo = rec.id;
+        ELSE
+            UPDATE plantillas_flujo
+               SET configuracion_pipeline = jsonb_set(configuracion_pipeline,
+                       ARRAY['nodes', rec.escudo_key, 'params', 'allowedTags'], canonical_tags),
+                   actualizado_por = admin_id,
+                   fecha_actualizacion = NOW()
+             WHERE id_plantilla_flujo = rec.id;
+        END IF;
+        summary := jsonb_set(summary, '{flujos_reparados}', to_jsonb((summary->>'flujos_reparados')::INT + 1));
+        INSERT INTO audit_eventos (usuario_id, accion, tabla_afectada, registro_id, datos_anteriores, datos_nuevos)
+        VALUES (admin_id, 'ACTUALIZAR', rec.tabla, rec.id::TEXT,
+                jsonb_build_object('allowedTags', rec.configuracion_pipeline #> ARRAY['nodes', rec.escudo_key, 'params', 'allowedTags']),
+                seed_tag || jsonb_build_object('nodo', rec.escudo_key, 'parche', 'escudo_lista_canonica', 'allowedTags', canonical_tags));
+    END LOOP;
+
     -- 7. Resumen de la siembra ----------------------------------------------
     -- Solo si se creo algo: una reejecucion no deja rastro nuevo.
     IF (summary->>'nodos')::INT + (summary->>'tarifas')::INT + (summary->>'plantillas_html')::INT
        + (summary->>'prompts')::INT + (summary->>'blueprints')::INT
        + (summary->>'prompts_parcheados')::INT + (summary->>'blueprints_parcheados')::INT
-       + (summary->>'nodos_parcheados')::INT > 0 THEN
+       + (summary->>'nodos_parcheados')::INT + (summary->>'flujos_reparados')::INT > 0 THEN
         INSERT INTO audit_eventos (usuario_id, accion, tabla_afectada, registro_id, datos_nuevos)
         VALUES (admin_id, 'CREAR', 'plantillas_flujo', NULL, seed_tag || jsonb_build_object('resumen', summary));
     END IF;
