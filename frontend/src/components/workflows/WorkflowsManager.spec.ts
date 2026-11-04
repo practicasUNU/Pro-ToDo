@@ -336,6 +336,39 @@ describe('WorkflowsManager · telemetria en vivo del catalogo', () => {
       expect(wrapper.find('[data-test="discard-execution"]').exists()).toBe(true);
     });
 
+    it('3.1a deberia mostrar cargando solo en la fila de la ejecucion que se reanuda', async () => {
+      // 1. Arrange 📐: dos flujos pausados; solo el primero se esta reanudando.
+      const OTHER_EXECUTION_ID = 'e6a4f5b7-8d9e-4fa0-b1c2-3d4e5f607182';
+      vi.mocked(fetchWorkflows).mockResolvedValue([
+        buildWorkflow(),
+        buildWorkflow({ id: OTHER_FLOW_ID, name: 'Licitaciones' }),
+      ]);
+      const executionStore = useExecutionStore();
+      executionStore.executions = [
+        buildExecution({ state: ExecutionState.PAUSADO }),
+        buildExecution({
+          executionId: OTHER_EXECUTION_ID,
+          flowId: OTHER_FLOW_ID,
+          state: ExecutionState.PAUSADO,
+        }),
+      ];
+      vi.spyOn(executionStore, 'isResumingExecution').mockImplementation(
+        (executionId) => executionId === EXECUTION_ID,
+      );
+
+      // 2. Act ⚙️
+      const wrapper = mountManager();
+      await flushPromises();
+
+      // 3. Assert 🎯: el boton de la otra fila sigue libre.
+      const loadingStates = wrapper
+        .findAllComponents(QBtn)
+        .filter((button) => button.attributes('data-test') === 'resume-execution')
+        .map((button) => button.props('loading') as boolean);
+      expect(loadingStates).toHaveLength(2);
+      expect(loadingStates.filter(Boolean)).toHaveLength(1);
+    });
+
     it('3.1b deberia PREGUNTAR antes de reanudar, en vez de lanzar el reintento', async () => {
       // 1. Arrange 📐: hasta ahora el boton disparaba el POST de un clic. Las
       //    dos formas de reanudar llevan a sitios muy distintos —una ejecuta y

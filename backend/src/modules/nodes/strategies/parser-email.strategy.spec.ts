@@ -372,6 +372,38 @@ describe('ParserEmailStrategy', () => {
       expect(result.error?.message).toContain('imagen o PDF');
     });
 
+    it('2ter.2b deberia desviar tambien la captura citada en un correo con texto de sobra', async () => {
+      // 1. Arrange 📐: el correo de presentacion con la tabla en una imagen en
+      //    linea. Su texto supera el umbral, pero los datos estan en la imagen.
+      const strategy = new ParserEmailStrategy();
+      jest
+        .spyOn(strategy['logger'], 'warn')
+        .mockImplementation(() => undefined);
+      const context = buildContext(
+        buildRawEmail({
+          text: `${'Buenos dias, os adjuntamos la captura del panel. '.repeat(8)}\n[image: image.png]`,
+          attachments: [
+            {
+              filename: 'inline-image-1.png',
+              contentType: 'image/png',
+              size: 52_314,
+              contentBase64: Buffer.alloc(52_314, 1).toString('base64'),
+            },
+          ],
+        }),
+      );
+
+      // 2. Act ⚙️
+      const result = await strategy.execute(context, {
+        failOnUnextractableMedia: true,
+      });
+
+      // 3. Assert 🎯: el codigo que el maestro desvia a `ocr_ia`.
+      expect(result.success).toBe(false);
+      expect(result.error?.code).toBe(ERR_PARSER_UNEXTRACTABLE_MEDIA);
+      expect(result.error?.message).toContain('cita una imagen en linea');
+    });
+
     it('2ter.3 deberia llevar el payload completo en el fallo, para error_context', async () => {
       // 1. Arrange 📐
       const strategy = new ParserEmailStrategy();

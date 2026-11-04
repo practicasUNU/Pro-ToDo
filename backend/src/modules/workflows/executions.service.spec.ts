@@ -949,6 +949,96 @@ describe('ExecutionsService (consulta y reintento manual CU-09)', () => {
     });
   });
 
+  describe('2 quater. Arranque desacoplado (startResumeExecution)', () => {
+    it('2q.1 deberia devolver en cuanto el motor arranca, sin esperar a que termine', async () => {
+      // 1. Arrange 📐: el recorrido del motor no termina hasta que la prueba
+      //    lo suelte. Es lo que antes dejaba el canal de correo bloqueado.
+      const { service, engine, workflows } = buildHarness();
+      let finishEngine: (execution: unknown) => void = () => undefined;
+      engine.executeWorkflow.mockReturnValue(
+        new Promise((resolve) => {
+          finishEngine = resolve;
+        }),
+      );
+
+      // 2. Act ⚙️
+      const started = await service.startResumeExecution(
+        EXECUTION_ID,
+        {},
+        CURRENT_USER,
+        { isEmailResume: true },
+      );
+
+      // 3. Assert 🎯: preparado, reactivado y con el motor en marcha, pero el
+      //    cierre del recorrido todavia no ha ocurrido.
+      expect(started.executionId).toBe(EXECUTION_ID);
+      expect(engine.prepareResume).toHaveBeenCalledTimes(1);
+      expect(workflows.reactivateAfterResume).toHaveBeenCalledTimes(1);
+      expect(engine.executeWorkflow).toHaveBeenCalledTimes(1);
+      expect(workflows.publishWorkflowSnapshot).not.toHaveBeenCalled();
+
+      finishEngine(
+        buildExecution({
+          currentState: ExecutionState.EXITOSO,
+          activeCursor: null,
+        }),
+      );
+      await expect(started.completion).resolves.toMatchObject({
+        status: ExecutionState.EXITOSO,
+      });
+      expect(workflows.publishWorkflowSnapshot).toHaveBeenCalledTimes(1);
+    });
+
+    it('2q.2 deberia lanzar en el arranque los rechazos de validacion', async () => {
+      // 1. Arrange 📐
+      const { service, query, engine } = buildHarness();
+      query.findById.mockResolvedValue(
+        buildExecution({ currentState: ExecutionState.EN_PROCESO }),
+      );
+
+      // 2. Act ⚙️ + 3. Assert 🎯: el 409 no viaja dentro de `completion`.
+      await expect(
+        service.startResumeExecution(EXECUTION_ID, {}, CURRENT_USER),
+      ).rejects.toBeInstanceOf(ConflictException);
+      expect(engine.executeWorkflow).not.toHaveBeenCalled();
+    });
+
+    it('2q.3 deberia llevar el fallo del recorrido en completion, no en el arranque', async () => {
+      // 1. Arrange 📐
+      const { service, engine } = buildHarness();
+      engine.executeWorkflow.mockRejectedValue(
+        new ConflictException('el flujo ya tiene otra EN_PROCESO'),
+      );
+
+      // 2. Act ⚙️
+      const started = await service.startResumeExecution(
+        EXECUTION_ID,
+        {},
+        CURRENT_USER,
+      );
+
+      // 3. Assert 🎯
+      await expect(started.completion).rejects.toBeInstanceOf(
+        ConflictException,
+      );
+    });
+
+    it('2q.4 resumeExecution deberia seguir esperando al estado final', async () => {
+      // 1. Arrange 📐
+      const { service } = buildHarness();
+
+      // 2. Act ⚙️
+      const response = await service.resumeExecution(
+        EXECUTION_ID,
+        {},
+        CURRENT_USER,
+      );
+
+      // 3. Assert 🎯: el contrato HTTP no cambia.
+      expect(response.status).toBe(ExecutionState.EXITOSO);
+    });
+  });
+
   describe('3. Guardas de estado', () => {
     // `FALLIDO` NO figura: desde la invalidacion selectiva es reanudable, y su
     // caso vive en el bloque 3 bis.

@@ -395,6 +395,72 @@ describe('useExecutionStore · estado reactivo de las ejecuciones del motor', ()
       // 3. Assert
       expect(store.isResuming).toBe(false);
     });
+
+    it('5.3 deberia acotar el estado de carga a la ejecucion que se reanuda', async () => {
+      // 1. Arrange 📐: la peticion dura lo que dura el flujo; se deja abierta.
+      const store = useExecutionStore();
+      const OTHER_ID = 'otra-ejecucion';
+      let finish: (value: Awaited<ReturnType<typeof resumeExecution>>) => void = () => undefined;
+      resumeExecution.mockReturnValueOnce(
+        new Promise((resolve) => {
+          finish = resolve;
+        }),
+      );
+
+      // 2. Act ⚙️
+      const pending = store.resumeExecution(EXECUTION_ID);
+
+      // 3. Assert 🎯: solo SU boton gira; los de otras ejecuciones no.
+      expect(store.isResumingExecution(EXECUTION_ID)).toBe(true);
+      expect(store.isResumingExecution(OTHER_ID)).toBe(false);
+      expect(store.isResumingExecution(null)).toBe(false);
+      expect(store.isResuming).toBe(true);
+
+      finish({
+        executionId: EXECUTION_ID,
+        workflowId: 'flujo',
+        status: ExecutionState.EXITOSO,
+        activeCursor: null,
+        context: {},
+      });
+      await pending;
+      expect(store.isResumingExecution(EXECUTION_ID)).toBe(false);
+    });
+
+    it('5.4 deberia permitir dos reanudaciones en vuelo y liberar cada una por separado', async () => {
+      // 1. Arrange 📐
+      const store = useExecutionStore();
+      const OTHER_ID = 'otra-ejecucion';
+      const resolvers: ((value: Awaited<ReturnType<typeof resumeExecution>>) => void)[] = [];
+      resumeExecution.mockImplementation(
+        () =>
+          new Promise((resolve) => {
+            resolvers.push(resolve);
+          }),
+      );
+      const result = (executionId: string) =>
+        ({
+          executionId,
+          workflowId: 'flujo',
+          status: ExecutionState.EXITOSO,
+          activeCursor: null,
+          context: {},
+        }) as Awaited<ReturnType<typeof resumeExecution>>;
+
+      // 2. Act ⚙️
+      const first = store.resumeExecution(EXECUTION_ID);
+      const second = store.resumeExecution(OTHER_ID);
+      resolvers[1]?.(result(OTHER_ID));
+      await second;
+
+      // 3. Assert 🎯: terminar la segunda no libera la primera.
+      expect(store.isResumingExecution(OTHER_ID)).toBe(false);
+      expect(store.isResumingExecution(EXECUTION_ID)).toBe(true);
+
+      resolvers[0]?.(result(EXECUTION_ID));
+      await first;
+      expect(store.isResuming).toBe(false);
+    });
   });
   describe('6. Salas del canal de eventos', () => {
     beforeEach(() => {

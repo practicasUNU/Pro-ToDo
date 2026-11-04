@@ -1167,6 +1167,38 @@ describe('PostIaSanitizerStrategy', () => {
         );
       });
 
+      it.each([
+        [
+          'siglas de la universidad como comite',
+          'UPM',
+          'Facultad de Informatica',
+        ],
+        ['titulacion principal como centro', 'UAM 2', 'Grado en Biologia'],
+        ['universidad como centro', 'URJC', 'Universidad Rey Juan Carlos'],
+      ])(
+        'deberia aceptar el encabezado rellenado con respaldos (%s)',
+        async (_caso, codigo, facultad) => {
+          // 1. Arrange 📐: lo que el prompt maestro ordena cuando el correo no
+          //    trae numero de comite o no nombra la facultad.
+          const strategy = buildStrategy();
+          const context = buildContext({
+            [SOURCE_FIELD]: panel(codigo, facultad),
+          });
+
+          // 2. Act ⚙️
+          const result = await strategy.execute(context, {
+            requiredSelectors: PANEL_SELECTORS,
+          });
+
+          // 3. Assert 🎯: pasa la compuerta sin ERR_POST_IA_DOM_MUTATED.
+          expect(result.success).toBe(true);
+          expect(result.error).toBeUndefined();
+          expect(result.data?.validated_markup).toContain(
+            `<strong class="panel-comite-codigo">${codigo}</strong>`,
+          );
+        },
+      );
+
       it('deberia aceptar el panel con sus tres ranuras rellenas', async () => {
         // 1. Arrange 📐
         const strategy = buildStrategy();

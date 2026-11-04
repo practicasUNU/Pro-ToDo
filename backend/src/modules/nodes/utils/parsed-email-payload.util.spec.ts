@@ -4,6 +4,7 @@ import { resolveParserEmailConfig } from '@modules/nodes/dto/parser-email-config
 
 import {
   EXCLUDED_BY_CONFIG_NOTICE,
+  MIN_INLINE_CAPTURE_BYTES,
   buildParsedEmail,
   extractEmailBody,
 } from './parsed-email-payload.util';
@@ -266,6 +267,76 @@ describe('parsed-email-payload.util', () => {
       expect(payload.requires_multimodal_fallback).toBe(true);
       expect(payload.multimodal_reason).toContain('100000');
     });
+  });
+
+  describe('3bis. Imagen en linea citada en el cuerpo', () => {
+    /** Imagen en linea con el tamano indicado; el contenido da igual. */
+    const inlineImage = (bytes: number): Record<string, unknown> => ({
+      filename: 'inline-image-1.png',
+      contentType: 'image/png',
+      size: bytes,
+      contentBase64: Buffer.alloc(bytes, 1).toString('base64'),
+    });
+
+    /** Correo de presentacion: texto de sobra, pero la tabla va en la imagen. */
+    const COVER_LETTER = `${LONG_BODY}\nPor favor, publicad la captura que os adjuntamos:\n\n[image: image.png]`;
+
+    it('3bis.1 deberia pedir vision aunque el cuerpo supere el umbral', async () => {
+      // 1. Arrange 📐: el caso que la motivo, una captura de 52 KB citada.
+      const source = buildSource({
+        text: COVER_LETTER,
+        attachments: [inlineImage(52_314)],
+      });
+
+      // 2. Act ⚙️
+      const payload = await buildParsedEmail(source, buildConfig());
+
+      // 3. Assert 🎯
+      expect(payload.requires_multimodal_fallback).toBe(true);
+      expect(payload.multimodal_reason).toContain('cita una imagen en linea');
+    });
+
+    it('3bis.2 NO deberia pedirla por un logotipo de firma citado', async () => {
+      // 1. Arrange 📐: los logotipos tambien dejan su marcador en el texto.
+      const source = buildSource({
+        text: `${LONG_BODY}\n--\n[image: logo.png]`,
+        attachments: [inlineImage(MIN_INLINE_CAPTURE_BYTES - 1)],
+      });
+
+      // 2. Act ⚙️
+      const payload = await buildParsedEmail(source, buildConfig());
+
+      // 3. Assert 🎯
+      expect(payload.requires_multimodal_fallback).toBe(false);
+    });
+
+    it('3bis.3 NO deberia pedirla por una imagen grande que el cuerpo no cita', async () => {
+      // 1. Arrange 📐: un boletin con una cabecera grande y texto de sobra.
+      const source = buildSource({ attachments: [inlineImage(52_314)] });
+
+      // 2. Act ⚙️
+      const payload = await buildParsedEmail(source, buildConfig());
+
+      // 3. Assert 🎯
+      expect(payload.requires_multimodal_fallback).toBe(false);
+    });
+
+    it.each(['[cid:image001.png@01DA0000.00000000]', '[imagen: tabla.png]'])(
+      '3bis.4 deberia reconocer tambien el marcador %s',
+      async (placeholder) => {
+        // 1. Arrange 📐: Outlook y los clientes en espanol.
+        const source = buildSource({
+          text: `${LONG_BODY}\n${placeholder}`,
+          attachments: [inlineImage(52_314)],
+        });
+
+        // 2. Act ⚙️
+        const payload = await buildParsedEmail(source, buildConfig());
+
+        // 3. Assert 🎯
+        expect(payload.requires_multimodal_fallback).toBe(true);
+      },
+    );
   });
 
   describe('4. Inventario de adjuntos', () => {

@@ -5489,4 +5489,143 @@ describe('FsmEngineService (PROT-09)', () => {
       expect(prepared.contextPayload.error_context).toBeUndefined();
     });
   });
+
+  describe('42. Reanudacion concurrente acotada por ejecucion', () => {
+    const SECOND_EXECUTION_ID = 'e5d4c3b2-1a0f-4e9d-8c7b-6a5f4e3d2c1b';
+    const SECOND_FLOW_ID = 'c4e2d3f5-6b7c-4d8e-9f0a-1b2c3d4e5f6a';
+
+    /**
+     * Repositorio con VARIAS filas, indexadas por `executionId`.
+     *
+     * `update` aplica el parche a la fila, de modo que una segunda lectura ve
+     * el EN_PROCESO que dejo el primer checkpoint: es lo que permite comprobar
+     * la guarda por ejecucion contra el estado real y no contra un doble fijo.
+     */
+    const buildMultiRepository = (
+      rows: readonly FsmExecution[],
+    ): Repository<FsmExecution> => {
+      const byId = new Map(rows.map((row) => [row.executionId, { ...row }]));
+
+      return {
+        findOne: jest.fn(({ where }: { where: { executionId: string } }) =>
+          Promise.resolve(byId.get(where.executionId) ?? null),
+        ),
+        update: jest.fn((id: string, patch: Partial<FsmExecution>) => {
+          const row = byId.get(id);
+
+          if (row !== undefined) {
+            Object.assign(row, patch);
+          }
+
+          return Promise.resolve({ affected: row === undefined ? 0 : 1 });
+        }),
+      } as unknown as Repository<FsmExecution>;
+    };
+
+    const pausedAt = (executionId: string, flowId: string): FsmExecution =>
+      buildExecution({
+        executionId,
+        flowId,
+        currentState: ExecutionState.PAUSADO,
+        activeCursor: 'nodo_b',
+        contextPayload: { salida_a: { valorA: 1 } },
+      });
+
+    it('42.1 deberia reanudar dos ejecuciones de flujos distintos sin bloqueo cruzado', async () => {
+      // 1. Arrange 📐: el nodo de IA de la PRIMERA queda colgado hasta que la
+      //    prueba lo suelte; el de la segunda responde al momento.
+      let releaseFirst: (result: NodeResult) => void = () => undefined;
+      const firstPending = new Promise<NodeResult>((resolve) => {
+        releaseFirst = resolve;
+      });
+      let firstStarted: () => void = () => undefined;
+      const firstReachedNode = new Promise<void>((resolve) => {
+        firstStarted = resolve;
+      });
+      const executeIa = jest.fn((context: StatePayloadContext) => {
+        if (context.getExecutionId() === EXECUTION_ID) {
+          firstStarted();
+          return firstPending;
+        }
+
+        return Promise.resolve({ success: true, data: { valorB: 2 } });
+      });
+      factory.registerStrategy(
+        buildStrategy(NodeType.PROCESADOR_IA, executeIa),
+      );
+      factory.registerStrategy(
+        buildStrategy(
+          NodeType.DESTINO_DRUPAL,
+          jest.fn().mockResolvedValue({ success: true, data: {} }),
+        ),
+      );
+      const engine = buildEngine(
+        buildMultiRepository([
+          pausedAt(EXECUTION_ID, FLOW_ID),
+          pausedAt(SECOND_EXECUTION_ID, SECOND_FLOW_ID),
+        ]),
+      );
+      const secondSchema = { ...buildLinearSchema(), flowId: SECOND_FLOW_ID };
+
+      // 2. Act ⚙️: la primera arranca y se queda dentro de su nodo de IA.
+      const first = engine.executeWorkflow(EXECUTION_ID, buildLinearSchema());
+      await firstReachedNode;
+      const second = await engine.executeWorkflow(
+        SECOND_EXECUTION_ID,
+        secondSchema,
+      );
+
+      // 3. Assert 🎯: la segunda termina mientras la primera sigue en curso.
+      expect(second.currentState).toBe(ExecutionState.EXITOSO);
+
+      releaseFirst({ success: true, data: { valorB: 1 } });
+      const firstResult = await first;
+      expect(firstResult.currentState).toBe(ExecutionState.EXITOSO);
+    });
+
+    it('42.2 deberia rechazar solo la MISMA ejecucion mientras sigue en curso', async () => {
+      // 1. Arrange 📐
+      let releaseFirst: (result: NodeResult) => void = () => undefined;
+      let firstStarted: () => void = () => undefined;
+      const firstReachedNode = new Promise<void>((resolve) => {
+        firstStarted = resolve;
+      });
+      factory.registerStrategy(
+        buildStrategy(
+          NodeType.PROCESADOR_IA,
+          jest.fn(() => {
+            firstStarted();
+            return new Promise<NodeResult>((resolve) => {
+              releaseFirst = resolve;
+            });
+          }),
+        ),
+      );
+      factory.registerStrategy(
+        buildStrategy(
+          NodeType.DESTINO_DRUPAL,
+          jest.fn().mockResolvedValue({ success: true, data: {} }),
+        ),
+      );
+      const engine = buildEngine(
+        buildMultiRepository([pausedAt(EXECUTION_ID, FLOW_ID)]),
+      );
+
+      // 2. Act ⚙️
+      const first = engine.executeWorkflow(EXECUTION_ID, buildLinearSchema());
+      await firstReachedNode;
+      const duplicate = engine.executeWorkflow(
+        EXECUTION_ID,
+        buildLinearSchema(),
+      );
+
+      // 3. Assert 🎯: la guarda la da el `executionId`, no un candado global.
+      await expect(duplicate).rejects.toBeInstanceOf(ConflictException);
+
+      releaseFirst({ success: true, data: {} });
+      await expect(first).resolves.toMatchObject({
+        currentState: ExecutionState.EXITOSO,
+      });
+    });
+  });
 });

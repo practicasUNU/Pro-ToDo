@@ -1,5 +1,7 @@
 import { createHash } from 'node:crypto';
 
+import { ConflictException } from '@nestjs/common';
+
 import { UserRole } from '@modules/users/enums/user-role.enum';
 
 import {
@@ -203,14 +205,12 @@ const buildHarness = (
 
   // Solo el ARRANQUE: el canal de correo ya no espera el recorrido del motor.
   const executions = {
-    startResumeExecution: jest
-      .fn()
-      .mockImplementation((executionId: string) =>
-        Promise.resolve({
-          executionId,
-          completion: Promise.resolve({ status: 'EXITOSO' }),
-        }),
-      ),
+    startResumeExecution: jest.fn().mockImplementation((executionId: string) =>
+      Promise.resolve({
+        executionId,
+        completion: Promise.resolve({ status: 'EXITOSO' }),
+      }),
+    ),
   };
   const users = { findByEmail: jest.fn().mockResolvedValue(buildUser()) };
   const query = {
@@ -912,7 +912,9 @@ describe('InboundEmailResumeService (ordenes de reanudacion por correo)', () => 
     };
 
     const resumedWith = (harness: Harness): unknown =>
-      (harness.executions.startResumeExecution.mock.calls as unknown[][])[0]?.[1];
+      (
+        harness.executions.startResumeExecution.mock.calls as unknown[][]
+      )[0]?.[1];
 
     it.each([
       ['EL NODO ESCUDO POST IA', 'escudo_post_ia'],
@@ -1176,6 +1178,120 @@ describe('InboundEmailResumeService (ordenes de reanudacion por correo)', () => 
         client.download.mock.calls.map((call: unknown[]) => call[0]),
       ).toEqual(['10', '11', '12']);
       expect(client.messageFlagsAdd).toHaveBeenCalledTimes(3);
+    });
+  });
+
+  describe('5ter. Reanudaciones independientes por ejecucion', () => {
+    const SECOND_EXECUTION_ID = '2b3c4d5e-6f7a-4b8c-9d0e-1f2a3b4c5d6e';
+    const SECOND_TOKEN = 'f0e1d2c3b4a596877869';
+
+    /** Recorrido del motor que no termina: un flujo largo todavia en marcha. */
+    const neverEnding = (): Promise<never> =>
+      new Promise<never>(() => undefined);
+
+    const pausedExecutions = (): FsmExecution[] => [
+      buildExecution(),
+      buildExecution({
+        executionId: SECOND_EXECUTION_ID,
+        contextPayload: {
+          raw_email: { subject: 'Otra nota' },
+          pause_context: {
+            pausedAtStepId: 'pausa_revision',
+            resumeStepId: 'nodo_c',
+            resume_token_hash: hashOf(SECOND_TOKEN),
+            token_expires_at: new Date(Date.now() + 86_400_000).toISOString(),
+          },
+        },
+      }),
+    ];
+
+    const useExecutions = (
+      service: InboundEmailResumeService,
+      rows: FsmExecution[],
+    ): void => {
+      (
+        service as unknown as {
+          executionQueryService: { findPausedWithContext: jest.Mock };
+        }
+      ).executionQueryService.findPausedWithContext.mockResolvedValue(rows);
+    };
+
+    it('5ter.1 deberia despachar dos ordenes del mismo barrido sin esperar a que terminen sus flujos', async () => {
+      // 1. Arrange 📐: los dos recorridos quedan en marcha indefinidamente.
+      const { service, client, executions } = buildHarness();
+      useExecutions(service, pausedExecutions());
+      executions.startResumeExecution.mockImplementation(
+        (executionId: string) =>
+          Promise.resolve({ executionId, completion: neverEnding() }),
+      );
+      client.search.mockResolvedValue([7, 8]);
+      simpleParser
+        .mockResolvedValueOnce(inboundMessage(`REANUDAR ${TOKEN}`))
+        .mockResolvedValueOnce(inboundMessage(`REANUDAR ${SECOND_TOKEN}`));
+
+      // 2. Act ⚙️: si el barrido esperase el recorrido, no volveria nunca.
+      const dispatched = await service.processInbox();
+
+      // 3. Assert 🎯
+      expect(dispatched).toBe(2);
+      expect(
+        executions.startResumeExecution.mock.calls.map(
+          (call: unknown[]) => call[0],
+        ),
+      ).toEqual([EXECUTION_ID, SECOND_EXECUTION_ID]);
+      expect(service['isPolling']).toBe(false);
+    });
+
+    it('5ter.2 no deberia despachar dos veces la MISMA ejecucion mientras sigue en curso', async () => {
+      // 1. Arrange 📐: la misma orden llega dos veces en el mismo barrido.
+      const { service, client, executions, warnSpy } = buildHarness();
+      executions.startResumeExecution.mockImplementation(
+        (executionId: string) =>
+          Promise.resolve({ executionId, completion: neverEnding() }),
+      );
+      client.search.mockResolvedValue([7, 8]);
+      simpleParser
+        .mockResolvedValueOnce(inboundMessage(`REANUDAR ${TOKEN}`))
+        .mockResolvedValueOnce(inboundMessage(`REANUDAR ${TOKEN}`));
+
+      // 2. Act ⚙️
+      const dispatched = await service.processInbox();
+
+      // 3. Assert 🎯
+      expect(dispatched).toBe(1);
+      expect(executions.startResumeExecution).toHaveBeenCalledTimes(1);
+      expect(warnSpy).toHaveBeenCalledWith(
+        expect.stringContaining('ya se esta reanudando'),
+      );
+    });
+
+    it('5ter.3 deberia liberar la ejecucion al terminar su recorrido y registrar el fallo', async () => {
+      // 1. Arrange 📐: el recorrido falla por el mutex del flujo.
+      const { service, client, executions, warnSpy } = buildHarness();
+      executions.startResumeExecution.mockImplementation(
+        (executionId: string) =>
+          Promise.resolve({
+            executionId,
+            completion: Promise.reject(
+              new ConflictException('el flujo ya tiene otra EN_PROCESO'),
+            ),
+          }),
+      );
+      client.search.mockResolvedValue([7]);
+      simpleParser.mockResolvedValue(inboundMessage(`REANUDAR ${TOKEN}`));
+
+      // 2. Act ⚙️: un segundo barrido tras el fallo.
+      await service.processInbox();
+      await new Promise((resolve) => setImmediate(resolve));
+      client.search.mockResolvedValue([9]);
+      const secondDispatch = await service.processInbox();
+
+      // 3. Assert 🎯: no queda bloqueada para siempre y el 409 sale como aviso.
+      expect(secondDispatch).toBe(1);
+      expect(executions.startResumeExecution).toHaveBeenCalledTimes(2);
+      expect(warnSpy).toHaveBeenCalledWith(
+        expect.stringContaining('no pudo completarse'),
+      );
     });
   });
 
