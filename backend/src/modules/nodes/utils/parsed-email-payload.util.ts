@@ -28,6 +28,25 @@ import type { RawEmailAttachmentMetadata } from '@modules/nodes/interfaces/raw-e
 export const MULTIMODAL_CONTENT_TYPE_PATTERN = /^(?:image\/|application\/pdf$)/;
 
 /**
+ * Marcador que deja en el texto plano una imagen insertada en el cuerpo.
+ *
+ * Gmail escribe `[image: captura.png]`, Outlook `[cid:image001.png@...]` y los
+ * clientes en espanol `[imagen: ...]`. Es la senal de que el remitente PUSO
+ * contenido en una imagen dentro del propio mensaje, no en un adjunto aparte.
+ */
+export const INLINE_IMAGE_PLACEHOLDER_PATTERN =
+  /\[(?:image|imagen|cid):[^\]]*\]/i;
+
+/**
+ * Tamano minimo, en bytes, de una imagen citada para considerarla una captura.
+ *
+ * Por debajo estan los logotipos e iconos de firma, que tambien dejan su
+ * marcador en el texto plano y no llevan datos. Una captura de una tabla pesa
+ * decenas de kilobytes (la que motivo la regla, 52 KB).
+ */
+export const MIN_INLINE_CAPTURE_BYTES = 20_000;
+
+/**
  * Origen del cuerpo textual que el parser saneo.
  *
  * NOTA DE COMPATIBILIDAD: hasta el saneador existio un cuarto valor,
@@ -248,6 +267,8 @@ export const extractEmailBody = (
 interface DocumentsExtraction {
   readonly text: string;
   readonly visualCandidateCount: number;
+  /** Candidatos a vision con tamano de captura (`MIN_INLINE_CAPTURE_BYTES`). */
+  readonly captureCandidateCount: number;
 }
 
 /**
@@ -314,12 +335,13 @@ const extractAttachmentDocuments = async (
   // unico trabajo que queda es no hacerlo, y pasar por el bucle solo serviria
   // para volcar a memoria los megabytes en base64 que luego se descartan.
   if (config.skipDocumentExtraction) {
-    return { text: '', visualCandidateCount: 0 };
+    return { text: '', visualCandidateCount: 0, captureCandidateCount: 0 };
   }
 
   const excluded = new Set(config.excludedExtensions);
   const chunks: string[] = [];
   let visualCandidateCount = 0;
+  let captureCandidateCount = 0;
 
   for (const raw of rawAttachments) {
     const record =
@@ -391,10 +413,20 @@ const extractAttachmentDocuments = async (
     // aqui retendria sus megabytes para una llamada que no puede servir.
     if (MULTIMODAL_CONTENT_TYPE_PATTERN.test(contentType)) {
       visualCandidateCount += 1;
+
+      // Bytes REALES decodificados: el `size` del inventario lo declara el
+      // remitente y un jsonb rehidratado puede no traerlo.
+      if (buffer.length >= MIN_INLINE_CAPTURE_BYTES) {
+        captureCandidateCount += 1;
+      }
     }
   }
 
-  return { text: chunks.join('\n\n'), visualCandidateCount };
+  return {
+    text: chunks.join('\n\n'),
+    visualCandidateCount,
+    captureCandidateCount,
+  };
 };
 
 /**
@@ -455,14 +487,28 @@ export const buildParsedEmail = async (
   // gastarla ahi seria la llamada mas cara del pipeline sin motivo. El caso
   // que si la merece es el contrario: un correo cuyo unico contenido real es
   // un PDF escaneado o una captura, de los que no se saco ni un caracter.
-  const requiresMultimodal =
+  const lacksUsefulText =
     documents.visualCandidateCount > 0 && usefulLength < config.minBodyLength;
+
+  // SEGUNDA via, independiente del listado: el cuerpo CITA una imagen en linea
+  // y hay una captura sin texto. Es el correo de presentacion —"os adjuntamos
+  // la captura del panel"— con la tabla dentro de una imagen: sus cuatrocientos
+  // caracteres superaban el umbral, el modelo no veia la tabla y respondia que
+  // no habia datos. El tamano minimo deja fuera los logotipos de firma, que
+  // tambien dejan su marcador en el texto plano.
+  const citesInlineCapture =
+    documents.captureCandidateCount > 0 &&
+    INLINE_IMAGE_PLACEHOLDER_PATTERN.test(body.clean);
+
+  const requiresMultimodal = lacksUsefulText || citesInlineCapture;
 
   // Cadena vacia y nunca `null` cuando la bandera es `false`: un booleano
   // suelto en el checkpoint no explica nada seis horas despues.
-  const multimodalReason = requiresMultimodal
+  const multimodalReason = lacksUsefulText
     ? `Texto util de ${usefulLength} caracteres (cuerpo ${bodyLength} + documentos ${documents.text.length}, umbral ${config.minBodyLength}) con ${documents.visualCandidateCount} adjunto(s) de tipo imagen o PDF sin texto extraible.`
-    : '';
+    : citesInlineCapture
+      ? `El cuerpo cita una imagen en linea y hay ${documents.captureCandidateCount} captura(s) sin texto extraible (al menos ${MIN_INLINE_CAPTURE_BYTES} bytes): sus datos solo se leen con vision.`
+      : '';
 
   if (requiresMultimodal) {
     hooks.onMultimodalFallback?.(multimodalReason);
