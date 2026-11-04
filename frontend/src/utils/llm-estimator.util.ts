@@ -57,6 +57,13 @@ export interface LlmResourceEstimate {
 
   /** Frase para el operador: por que sale este nivel y no otro. */
   readonly reason: string;
+
+  /**
+   * El prompt pide generacion EXTENSA (`LONG_FORM_PARAGRAPH_THRESHOLD` parrafos
+   * o mas por elemento). Es lo que justifica el presupuesto alto, la espera de
+   * tres minutos y el aviso del asistente cuando los campos se quedan cortos.
+   */
+  readonly longForm: boolean;
 }
 
 /**
@@ -119,8 +126,42 @@ const TOKEN_STEP = 1_024;
 /** Espera sugerida para un marcado sin colecciones. */
 const MEDIUM_TIMEOUT_MS = 35_000;
 
-/** Espera sugerida para una coleccion. Es el valor que el `.env` ya recomienda. */
-const HIGH_TIMEOUT_MS = 60_000;
+/**
+ * Espera sugerida para una coleccion o un lote.
+ *
+ * Dos minutos y no uno: un lote devuelve varias piezas enteras, y con 60 s el
+ * proveedor cortaba la respuesta antes de cerrar el JSON.
+ */
+const HIGH_TIMEOUT_MS = 120_000;
+
+/** Espera sugerida para la generacion extensa (el techo del DTO). */
+const EXTENDED_TIMEOUT_MS = 180_000;
+
+/**
+ * Parrafos por elemento a partir de los cuales la redaccion es EXTENSA.
+ *
+ * Ocho deja fuera los "minimo de 4" de un lote corto y atrapa las noticias de
+ * 12 a 14 parrafos de Notiweb.
+ */
+export const LONG_FORM_PARAGRAPH_THRESHOLD = 8;
+
+/** Tokens de un parrafo periodistico de longitud media, en espanol. */
+const TOKENS_PER_PARAGRAPH = 180;
+
+/**
+ * Cada parrafo viaja DOS veces en la respuesta: dentro del marcado
+ * (`filled_markup`) y en `body_paragraphs`.
+ */
+const PARAGRAPH_DUPLICATION = 2;
+
+/** Titular, entradilla, encabezados, referencia y envoltorio JSON. */
+const LONG_FORM_OVERHEAD_TOKENS = 1_500;
+
+/** «entre 12 y 14 parrafos», «3 a 4 parrafos», «12-14 parrafos». */
+const PARAGRAPH_RANGE_PATTERN = /(\d{1,2})\s*(?:y|a|-|–)\s*(\d{1,2})\s*p[aáAÁ]rrafos/gi;
+
+/** «minimo de 4 parrafos». */
+const PARAGRAPH_MINIMUM_PATTERN = /m[iíIÍ]nimo\s+de\s+(\d{1,2})\s+p[aáAÁ]rrafos/gi;
 
 /**
  * Tokens que aporta cada campo del contexto interpolado, sin plantilla base.
@@ -150,6 +191,30 @@ const BATCH_MIN_OUTPUT_TOKENS = 8_192;
 
 const estimateTokens = (text: string): number => Math.ceil(text.length / CHARS_PER_TOKEN);
 
+/**
+ * Mayor numero de parrafos POR ELEMENTO que pide el prompt, o 0.
+ *
+ * Se queda con el extremo superior de cada rango y con cada minimo declarado:
+ * lo que importa para el presupuesto es lo maximo que el modelo puede escribir.
+ */
+export const requestedParagraphs = (promptText: string | null | undefined): number => {
+  if (promptText === null || promptText === undefined || promptText.trim() === '') {
+    return 0;
+  }
+
+  let requested = 0;
+
+  for (const match of promptText.matchAll(PARAGRAPH_RANGE_PATTERN)) {
+    requested = Math.max(requested, Number(match[2]));
+  }
+
+  for (const match of promptText.matchAll(PARAGRAPH_MINIMUM_PATTERN)) {
+    requested = Math.max(requested, Number(match[1]));
+  }
+
+  return requested;
+};
+
 /** Filas de coleccion presentes en el marcado. */
 const countCollectionRows = (markup: string): number =>
   markup.match(COLLECTION_ROW_PATTERN)?.length ?? 0;
@@ -178,6 +243,7 @@ const buildPromptOnlyEstimate = (upstreamFieldCount: number): LlmResourceEstimat
     recommendedMaxRetries: DEFAULT_LLM_MAX_RETRIES,
     complexityLevel: isMedium ? 'MEDIA' : 'BAJA',
     source: 'PROMPT',
+    longForm: false,
     reason: isMedium
       ? `Sin plantilla base: estimado a partir del prompt y de ${fields} campos de contexto. La redaccion es mas larga de lo habitual; conviene algo mas de espera.`
       : 'Sin plantilla base: estimado a partir del prompt. La inferencia devuelve una redaccion corta y los valores por defecto le sobran.',
@@ -202,12 +268,59 @@ export const estimateLlmResources = (
   baseMarkup: string | null,
   upstreamFieldCount = 0,
   cardinality: LlmOutputCardinality = 'SINGLE',
+  promptText: string | null = null,
 ): LlmResourceEstimate => {
   const single = estimateSingleItem(baseMarkup, upstreamFieldCount);
 
   // `AUTO` se estima como un lote: el numero de elementos no se conoce hasta
   // que responde el modelo, y el backend le reserva el presupuesto de lote.
-  return isBatchCardinality(cardinality) ? scaleForBatch(single) : single;
+  const isBatch = isBatchCardinality(cardinality);
+  const base = isBatch ? scaleForBatch(single) : single;
+  const paragraphs = requestedParagraphs(promptText);
+
+  return paragraphs >= LONG_FORM_PARAGRAPH_THRESHOLD
+    ? applyLongForm(base, paragraphs, isBatch)
+    : base;
+};
+
+/**
+ * Ajusta la estimacion a una redaccion EXTENSA pedida por el propio prompt.
+ *
+ * El marcado no lo delata: una plantilla de noticia es corta y vacia, y lo que
+ * la llena son los parrafos que el prompt exige. Se proyectan a partir de ese
+ * numero, duplicados porque viajan en el marcado y en `body_paragraphs`, y con
+ * lote se escalan por el mismo factor que el resto de la estimacion.
+ *
+ * UN reintento y no cero: con generacion larga un corte de red a mitad es mas
+ * probable, y el reintento es lo que la salva. Y no mas de uno: cada vuelta
+ * repite la espera entera y vuelve a facturar la salida.
+ */
+const applyLongForm = (
+  base: LlmResourceEstimate,
+  paragraphs: number,
+  isBatch: boolean,
+): LlmResourceEstimate => {
+  const perItem =
+    paragraphs * TOKENS_PER_PARAGRAPH * PARAGRAPH_DUPLICATION + LONG_FORM_OVERHEAD_TOKENS;
+  const estimatedOutputTokens = Math.max(
+    base.estimatedOutputTokens,
+    isBatch ? perItem * BATCH_OUTPUT_FACTOR : perItem,
+  );
+
+  return {
+    ...base,
+    estimatedOutputTokens,
+    recommendedTimeoutMs: clamp(EXTENDED_TIMEOUT_MS, MEDIUM_TIMEOUT_MS, MAX_LLM_TIMEOUT_MS),
+    recommendedMaxTokens: clamp(
+      roundUpToStep(Math.ceil(estimatedOutputTokens * OUTPUT_SAFETY_MARGIN)),
+      isBatch ? DEFAULT_MAX_TOKENS_MULTIPLE : DEFAULT_LLM_MARKUP_MAX_TOKENS,
+      MAX_LLM_MAX_TOKENS,
+    ),
+    recommendedMaxRetries: DEFAULT_LLM_MAX_RETRIES,
+    complexityLevel: 'ALTA',
+    longForm: true,
+    reason: `Generacion extensa: el prompt pide hasta ${paragraphs} parrafos por noticia${isBatch ? ', en lote' : ''}, que viajan dos veces (marcado y "body_paragraphs"). Se proyectan unos ${estimatedOutputTokens} tokens de salida. Con ${EXTENDED_TIMEOUT_MS / 1000} s y un reintento, el peor caso son ${(EXTENDED_TIMEOUT_MS * 2) / 60_000} min por proveedor.`,
+  };
 };
 
 /**
@@ -215,7 +328,9 @@ export const estimateLlmResources = (
  *
  * La salida proyectada se multiplica por el factor de lote con un suelo de
  * 8192 tokens, y se recomienda al menos el presupuesto de lote del backend
- * (16384). Cero reintentos: cada vuelta volveria a facturar el lote entero.
+ * (16384), hasta el techo de 32768. Dos minutos de espera y UN reintento: un
+ * lote tarda, y un corte de red a mitad perderia todas sus piezas; mas de uno
+ * repetiria la espera y la factura del lote entero sin necesidad.
  */
 const scaleForBatch = (single: LlmResourceEstimate): LlmResourceEstimate => {
   const estimatedOutputTokens = Math.max(
@@ -232,9 +347,9 @@ const scaleForBatch = (single: LlmResourceEstimate): LlmResourceEstimate => {
       DEFAULT_MAX_TOKENS_MULTIPLE,
       MAX_LLM_MAX_TOKENS,
     ),
-    recommendedMaxRetries: 0,
+    recommendedMaxRetries: DEFAULT_LLM_MAX_RETRIES,
     complexityLevel: 'ALTA',
-    reason: `Modo lote (1:N): la respuesta trae un elemento por cada pieza del correo y se factura entera. Se proyectan unos ${estimatedOutputTokens} tokens de salida. ${single.reason}`,
+    reason: `Modo lote (1:N): la respuesta trae un elemento por cada pieza del correo y se factura entera. Se proyectan unos ${estimatedOutputTokens} tokens de salida; un reintento como maximo, porque cada vuelta repite la espera y la factura. ${single.reason}`,
   };
 };
 
@@ -271,6 +386,7 @@ const estimateSingleItem = (
       recommendedMaxRetries: DEFAULT_LLM_MAX_RETRIES,
       complexityLevel: 'MEDIA',
       source: 'TEMPLATE',
+      longForm: false,
       reason:
         'La plantilla base tiene estructura fija y ninguna coleccion que repetir. El presupuesto que el backend aplica por tener plantilla deberia bastar.',
     };
@@ -290,6 +406,7 @@ const estimateSingleItem = (
     recommendedMaxRetries: 0,
     complexityLevel: 'ALTA',
     source: 'TEMPLATE',
+    longForm: false,
     reason: `La plantilla base repite fichas (${rows} filas detectadas) y el modelo debe devolverla entera y rellena. Es el escenario que agota el presupuesto y corta la respuesta a media cadena JSON.`,
   };
 };

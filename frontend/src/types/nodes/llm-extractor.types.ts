@@ -66,7 +66,7 @@ export const MIN_LLM_TIMEOUT_MS = 1_000;
  * forma de arreglarlo sin desplegar. Son los mismos 120 000 que ya admite el
  * nodo de OCR.
  */
-export const MAX_LLM_TIMEOUT_MS = 120_000;
+export const MAX_LLM_TIMEOUT_MS = 180_000;
 
 /**
  * Reintentos RAPIDOS DE RED, adicionales al primer intento.

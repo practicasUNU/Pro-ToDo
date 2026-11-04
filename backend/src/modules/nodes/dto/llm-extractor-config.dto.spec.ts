@@ -1,3 +1,6 @@
+import { plainToInstance } from 'class-transformer';
+import { validate } from 'class-validator';
+
 import {
   DEFAULT_LLM_MAX_RETRIES,
   DEFAULT_LLM_TIMEOUT_MS,
@@ -147,6 +150,38 @@ describe('resolveLlmExtractorConfig · politica de red', () => {
           maxRetries: null,
         }).timeoutMs,
       ).toBe(MIN_LLM_TIMEOUT_MS);
+    });
+  });
+
+  describe('2bis. Techo de la espera para generacion extensa', () => {
+    it('2bis.1 deberia admitir 180 s, la espera que recomienda el asistente', async () => {
+      // 1. Arrange 📐: una noticia de 12 a 14 parrafos, o un lote, pasa de los
+      //    dos minutos en algunos proveedores.
+      const dto = plainToInstance(LlmExtractorConfigDto, {
+        inlinePrompt: 'Redacta.',
+        timeoutMs: 180_000,
+      });
+
+      // 2. Act ⚙️
+      const errors = await validate(dto);
+
+      // 3. Assert 🎯
+      expect(MAX_LLM_TIMEOUT_MS).toBe(180_000);
+      expect(errors).toHaveLength(0);
+    });
+
+    it('2bis.2 deberia rechazar una espera por encima del techo', async () => {
+      // 1. Arrange 📐
+      const dto = plainToInstance(LlmExtractorConfigDto, {
+        inlinePrompt: 'Redacta.',
+        timeoutMs: 180_001,
+      });
+
+      // 2. Act ⚙️
+      const errors = await validate(dto);
+
+      // 3. Assert 🎯
+      expect(errors.map((error) => error.property)).toContain('timeoutMs');
     });
   });
 

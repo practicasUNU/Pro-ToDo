@@ -49,11 +49,21 @@ export const MIN_LLM_TIMEOUT_MS = 1_000;
  * techo, en cambio, ya no puede ser un minuto: redactar una plantilla
  * institucional a partir de una tabla de trece comisiones universitarias se
  * pasa de largo de ese minuto, y con el tope ahi el operador no tenia forma de
- * arreglarlo sin desplegar. Son los mismos 120 000 ms que ya admite
- * `MAX_OCR_TIMEOUT_MS`, de modo que los dos nodos que llaman a un modelo
- * comparten limite.
+ * arreglarlo sin desplegar.
+ *
+ * 180 000 desde la generacion extensa: una noticia de 12 a 14 parrafos con su
+ * marcado, o un lote de noticias, tarda mas de dos minutos en algunos
+ * proveedores, y con el techo en 120 s el recomendador del asistente no podia
+ * proponer una espera que el DTO admitiera. Ya NO coincide con
+ * `MAX_OCR_TIMEOUT_MS` (120 s): la transcripcion de un escaneo no escribe
+ * paginas de prosa.
+ *
+ * COSTE REAL: la espera se paga `timeoutMs x (maxRetries + 1)` veces por
+ * proveedor (`ERR_HTTP_TIMEOUT` se reintenta y ademas salta al siguiente de la
+ * cadena), asi que 180 s con un reintento son hasta seis minutos por proveedor
+ * con el motor ocupado en este nodo.
  */
-export const MAX_LLM_TIMEOUT_MS = 120_000;
+export const MAX_LLM_TIMEOUT_MS = 180_000;
 
 /**
  * Reintentos rapidos de red por defecto, adicionales al primer intento.

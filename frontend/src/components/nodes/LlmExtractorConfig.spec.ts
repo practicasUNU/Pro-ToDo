@@ -338,7 +338,7 @@ describe('LlmExtractorConfig · configurador del nodo PROCESADOR_IA', () => {
       await wrapper.get('[data-test="apply-recommendation"]').trigger('click');
 
       // 3. Assert 🎯
-      expect(store.config.timeoutMs).toBe(60_000);
+      expect(store.config.timeoutMs).toBe(120_000);
       expect(store.config.maxTokens).toBeGreaterThanOrEqual(8_192);
       expect(store.config.maxRetries).toBe(0);
     });

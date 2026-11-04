@@ -6,6 +6,7 @@ import { useAiPromptTemplatesStore } from '@stores/ai-prompt-templates.store';
 
 import {
   DEFAULT_LLM_EMERGENCY_BRAKE_THRESHOLD,
+  DEFAULT_LLM_MARKUP_MAX_TOKENS,
   DEFAULT_LLM_MAX_RETRIES,
   DEFAULT_LLM_OUTPUT_CARDINALITY,
   DEFAULT_MAX_TOKENS_MULTIPLE,
@@ -217,6 +218,16 @@ const llmExtractorSetup = () => {
   const selectedPromptText = ref<string | null>(null);
 
   /**
+   * Prompt que usara el backend, con su misma precedencia: plantilla por UUID,
+   * plantilla por codigo y, si no hay ninguna, el texto en linea.
+   */
+  const effectivePromptText = computed<string | null>(() =>
+    hasTemplatePrompt.value || config.value.promptCode.trim() !== ''
+      ? selectedPromptText.value
+      : config.value.inlinePrompt,
+  );
+
+  /**
    * Variables que el prompt efectivo marca como OBLIGATORIAS (`{{*ns.campo}}`).
    *
    * El prompt efectivo es el que elegira el backend: la plantilla si la hay, y
@@ -304,6 +315,29 @@ const llmExtractorSetup = () => {
       warnings.push(
         `${config.value.outputCardinality === 'AUTO' ? 'Autodeteccion (1:1 / 1:N), presupuestada como lote' : 'Modo lote (1:N)'}: la respuesta incluye un elemento por cada pieza del correo y se factura entera. Se proyectan unos ${resourceEstimation.value.estimatedOutputTokens} tokens de salida; sin un tope propio, el nodo reserva ${DEFAULT_MAX_TOKENS_MULTIPLE}.`,
       );
+    }
+
+    // Generacion extensa con un presupuesto o una espera por debajo de lo que
+    // pide: es el corte a media cadena JSON, o el ERR_HTTP_TIMEOUT, que el
+    // operador veria por primera vez en produccion.
+    const estimate = resourceEstimation.value;
+
+    if (estimate.longForm) {
+      const effectiveMaxTokens =
+        config.value.maxTokens ??
+        (isBatchCardinality(config.value.outputCardinality)
+          ? DEFAULT_MAX_TOKENS_MULTIPLE
+          : DEFAULT_LLM_MARKUP_MAX_TOKENS);
+      const shortTokens =
+        estimate.recommendedMaxTokens !== null &&
+        effectiveMaxTokens < estimate.recommendedMaxTokens;
+      const shortTimeout = config.value.timeoutMs < estimate.recommendedTimeoutMs;
+
+      if (shortTokens || shortTimeout) {
+        warnings.push(
+          `Generacion extensa: el prompt pide redaccion larga y la configuracion se queda corta (${effectiveMaxTokens} tokens y ${Math.round(config.value.timeoutMs / 1000)} s frente a ${estimate.recommendedMaxTokens ?? effectiveMaxTokens} tokens y ${Math.round(estimate.recommendedTimeoutMs / 1000)} s recomendados). Pulsa "Recomendar presupuesto" para evitar respuestas cortadas o timeouts.`,
+        );
+      }
     }
 
     if (maxRetries > LLM_RETRIES_WARNING_THRESHOLD) {
@@ -397,6 +431,9 @@ const llmExtractorSetup = () => {
       upstreamBaseMarkup.value,
       availableUpstreamContext.value.reduce((total, entry) => total + entry.fields.length, 0),
       config.value.outputCardinality,
+      // El texto SI importa para una cosa: cuantos parrafos exige. Es lo que
+      // delata una generacion extensa que el marcado, corto y vacio, no dice.
+      effectivePromptText.value,
     ),
   );
 
@@ -457,17 +494,33 @@ const llmExtractorSetup = () => {
    */
   const loadSelectedPromptText = async (): Promise<void> => {
     const promptId = config.value.templatePromptId;
+    const promptCode = config.value.promptCode.trim();
 
-    if (promptId === null || promptId.trim() === '') {
+    // Un nodo con `promptCode` (los maestros) tambien tiene texto: se resuelve
+    // su id en el listado, que trae el codigo aunque omita el texto.
+    let resolvedId = promptId !== null && promptId.trim() !== '' ? promptId : null;
+
+    if (resolvedId === null && promptCode !== '') {
+      if (promptsStore.prompts.length === 0) {
+        await promptsStore.loadPrompts();
+      }
+
+      resolvedId = promptsStore.prompts.find((prompt) => prompt.code === promptCode)?.id ?? null;
+    }
+
+    if (resolvedId === null) {
       selectedPromptText.value = null;
       return;
     }
 
-    const detail = await promptsStore.loadPromptById(promptId);
+    const detail = await promptsStore.loadPromptById(resolvedId);
 
     // La eleccion pudo cambiar mientras viajaba la peticion: solo se guarda si
     // el texto corresponde todavia al prompt elegido.
-    if (config.value.templatePromptId === promptId) {
+    if (
+      config.value.templatePromptId === promptId &&
+      config.value.promptCode.trim() === promptCode
+    ) {
       selectedPromptText.value = detail.promptText;
     }
   };

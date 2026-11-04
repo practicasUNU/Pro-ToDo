@@ -16,10 +16,7 @@ import { rangeClass } from '@/utils/field-range';
 import { NODE_TYPE_LABELS, NodeType } from '@/types/pipeline';
 import { blockNonNumericKeys } from '@/utils/numeric-input';
 import type { AiPromptTemplateDetail } from '@/types/ai-prompt-template';
-import type {
-  LlmModelAvailability,
-  LlmOutputCardinality,
-} from '@/types/nodes/llm-extractor.types';
+import type { LlmModelAvailability, LlmOutputCardinality } from '@/types/nodes/llm-extractor.types';
 import {
   ADMIN_ONLY_LABEL,
   ADMIN_ONLY_TOKEN,
@@ -534,6 +531,13 @@ onMounted(async () => {
               data-test="estimate-level"
             >
               {{ store.resourceEstimation.complexityLevel }}
+            </span>
+            <span
+              v-if="store.resourceEstimation.longForm"
+              class="pd-badge pd-estimate--alta"
+              data-test="estimate-long-form"
+            >
+              Generación extensa
             </span>
             <span class="pd-estimate-figures pd-mono">
               ~{{ store.resourceEstimation.estimatedOutputTokens }} tokens de salida ·

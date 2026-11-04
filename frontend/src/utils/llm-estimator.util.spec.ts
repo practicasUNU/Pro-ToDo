@@ -1,10 +1,16 @@
 import { describe, expect, it } from 'vitest';
 
-import { estimateLlmResources } from '@/utils/llm-estimator.util';
+import {
+  LONG_FORM_PARAGRAPH_THRESHOLD,
+  estimateLlmResources,
+  requestedParagraphs,
+} from '@/utils/llm-estimator.util';
 
 import {
   DEFAULT_LLM_MARKUP_MAX_TOKENS,
+  DEFAULT_MAX_TOKENS_MULTIPLE,
   MAX_LLM_MAX_TOKENS,
+  MAX_LLM_TIMEOUT_MS,
 } from '@/types/nodes/llm-extractor.types';
 
 /** Plantilla de estructura fija: titular, entradilla y un par de parrafos. */
@@ -91,7 +97,7 @@ describe('estimateLlmResources', () => {
 
       // 3. Assert 🎯
       expect(estimate.complexityLevel).toBe('ALTA');
-      expect(estimate.recommendedTimeoutMs).toBe(60_000);
+      expect(estimate.recommendedTimeoutMs).toBe(120_000);
       expect(estimate.reason).toContain('13 filas');
     });
 
@@ -139,7 +145,7 @@ describe('estimateLlmResources', () => {
       expect(batch.estimatedOutputTokens).toBeGreaterThanOrEqual(8_192);
       expect(batch.estimatedOutputTokens).toBeGreaterThan(single.estimatedOutputTokens);
       expect(batch.recommendedMaxTokens).toBeGreaterThanOrEqual(16_384);
-      expect(batch.recommendedMaxRetries).toBe(0);
+      expect(batch.recommendedMaxRetries).toBe(1);
       expect(batch.complexityLevel).toBe('ALTA');
       expect(batch.reason).toContain('Modo lote');
     });
@@ -147,6 +153,70 @@ describe('estimateLlmResources', () => {
     it('deberia dejar intacta la estimacion de un elemento', () => {
       // 1. Arrange 📐 + 2. Act ⚙️ + 3. Assert 🎯
       expect(estimateLlmResources(null, 2, 'SINGLE')).toEqual(estimateLlmResources(null, 2));
+    });
+  });
+
+  describe('Generacion extensa (parrafos pedidos por el prompt)', () => {
+    const NOTIWEB_PROMPT =
+      'Para la noticia principal desarrolla ENTRE 12 Y 14 PÁRRAFOS <p>. Cada noticia secundaria, un MÍNIMO DE 4 PÁRRAFOS.';
+
+    it.each([
+      ['entre 12 y 14 párrafos', 14],
+      ['ENTRE 12 Y 14 PÁRRAFOS', 14],
+      ['de 3 a 4 parrafos por seccion', 4],
+      ['un MÍNIMO DE 4 PÁRRAFOS', 4],
+      ['12-14 párrafos', 14],
+      ['Redacta una noticia breve.', 0],
+      ['', 0],
+    ])('requestedParagraphs(%s) deberia dar %i', (text, expected) => {
+      // 1. Arrange 📐 + 2. Act ⚙️ + 3. Assert 🎯
+      expect(requestedParagraphs(text)).toBe(expected);
+    });
+
+    it('deberia recomendar espera de 180 s, un reintento y un tope suficiente para 12-14 parrafos', () => {
+      // 1. Arrange 📐 + 2. Act ⚙️
+      const estimate = estimateLlmResources(MARCADO_SIMPLE, 0, 'SINGLE', NOTIWEB_PROMPT);
+
+      // 3. Assert 🎯
+      expect(estimate.longForm).toBe(true);
+      expect(estimate.recommendedTimeoutMs).toBe(180_000);
+      expect(estimate.recommendedMaxRetries).toBe(1);
+      expect(estimate.recommendedMaxTokens).toBeGreaterThanOrEqual(DEFAULT_LLM_MARKUP_MAX_TOKENS);
+      expect(estimate.estimatedOutputTokens).toBeGreaterThanOrEqual(14 * 180 * 2);
+      expect(estimate.reason).toContain('Generacion extensa');
+    });
+
+    it('deberia acercarse al techo de 32768 con un lote extenso sin superarlo', () => {
+      // 1. Arrange 📐 + 2. Act ⚙️
+      const estimate = estimateLlmResources(MARCADO_SIMPLE, 0, 'AUTO', NOTIWEB_PROMPT);
+
+      // 3. Assert 🎯
+      expect(estimate.recommendedMaxTokens).toBeGreaterThanOrEqual(DEFAULT_MAX_TOKENS_MULTIPLE);
+      expect(estimate.recommendedMaxTokens).toBeLessThanOrEqual(MAX_LLM_MAX_TOKENS);
+      expect(estimate.recommendedTimeoutMs).toBeLessThanOrEqual(MAX_LLM_TIMEOUT_MS);
+    });
+
+    it('deberia recomendar 120 s y un reintento a un lote sin redaccion extensa', () => {
+      // 1. Arrange 📐 + 2. Act ⚙️
+      const estimate = estimateLlmResources(
+        MARCADO_SIMPLE,
+        0,
+        'MULTIPLE',
+        'Cada noticia con un MÍNIMO DE 4 PÁRRAFOS.',
+      );
+
+      // 3. Assert 🎯: cuatro parrafos no llegan al umbral de generacion extensa.
+      expect(LONG_FORM_PARAGRAPH_THRESHOLD).toBeGreaterThan(4);
+      expect(estimate.longForm).toBe(false);
+      expect(estimate.recommendedTimeoutMs).toBe(120_000);
+      expect(estimate.recommendedMaxRetries).toBe(1);
+    });
+
+    it('deberia conservar la estimacion de siempre con un prompt corto', () => {
+      // 1. Arrange 📐 + 2. Act ⚙️ + 3. Assert 🎯
+      expect(estimateLlmResources(MARCADO_SIMPLE, 0, 'SINGLE', 'Redacta una nota.')).toEqual(
+        estimateLlmResources(MARCADO_SIMPLE, 0, 'SINGLE'),
+      );
     });
   });
 });

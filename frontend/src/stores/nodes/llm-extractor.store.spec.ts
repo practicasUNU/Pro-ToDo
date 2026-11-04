@@ -339,7 +339,7 @@ describe('useLlmExtractorStore · configuracion del nodo PROCESADOR_IA', () => {
 
       // 3. Assert 🎯
       expect(store.isConfigValid).toBe(true);
-      expect(store.config.timeoutMs).toBe(60_000);
+      expect(store.config.timeoutMs).toBe(120_000);
       expect(store.config.maxTokens).toBeGreaterThanOrEqual(8_192);
     });
 
@@ -993,6 +993,62 @@ describe('useLlmExtractorStore · configuracion del nodo PROCESADOR_IA', () => {
       ]);
       expect(LLM_OUTPUT_CARDINALITY_OPTIONS[0]?.description).toContain('8192');
       expect(LLM_OUTPUT_CARDINALITY_OPTIONS[1]?.description).toContain('16384');
+    });
+  });
+
+  describe('10. Generacion extensa', () => {
+    const LONG_PROMPT =
+      'Redacta la noticia con ENTRE 12 Y 14 PÁRRAFOS <p> repartidos en secciones.';
+
+    it('10.1 deberia estimar a partir del texto del prompt y avisar si el presupuesto se queda corto', () => {
+      // 1. Arrange 📐
+      const store = useLlmExtractorStore(nextNodeId());
+
+      // 2. Act ⚙️
+      store.updateConfig({ inlinePrompt: LONG_PROMPT });
+
+      // 3. Assert 🎯
+      expect(store.resourceEstimation.longForm).toBe(true);
+      expect(store.configWarnings.some((warning) => warning.startsWith('Generacion extensa'))).toBe(
+        true,
+      );
+    });
+
+    it('10.2 deberia retirar el aviso al aplicar la recomendacion', () => {
+      // 1. Arrange 📐
+      const store = useLlmExtractorStore(nextNodeId());
+      store.updateConfig({ inlinePrompt: LONG_PROMPT });
+
+      // 2. Act ⚙️
+      store.applyRecommendedResources();
+
+      // 3. Assert 🎯
+      expect(store.config.timeoutMs).toBe(180_000);
+      expect(store.config.maxRetries).toBe(1);
+      expect(store.configWarnings.some((warning) => warning.startsWith('Generacion extensa'))).toBe(
+        false,
+      );
+    });
+
+    it('10.3 deberia cargar el texto de un nodo que elige el prompt por codigo', async () => {
+      // 1. Arrange 📐: los maestros nombran el prompt por `promptCode`.
+      const store = useLlmExtractorStore(nextNodeId());
+      fetchAiPromptTemplates.mockResolvedValue([buildPrompt({ code: 'NOTIWEB_DEFAULT' })]);
+      fetchAiPromptTemplateById.mockResolvedValue({
+        ...buildPrompt({ code: 'NOTIWEB_DEFAULT' }),
+        promptText: LONG_PROMPT,
+      });
+      store.hydrateFromNode({
+        nodeId: 'maestro',
+        params: { promptCode: 'NOTIWEB_DEFAULT' },
+      } as never);
+
+      // 2. Act ⚙️
+      await store.loadSelectedPromptText();
+
+      // 3. Assert 🎯
+      expect(fetchAiPromptTemplateById).toHaveBeenCalledWith(PROMPT_ID);
+      expect(store.resourceEstimation.longForm).toBe(true);
     });
   });
 });
