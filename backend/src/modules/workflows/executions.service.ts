@@ -556,16 +556,34 @@ export class ExecutionsService {
     // despacho automatico, de modo que bastaba una intervencion manual para
     // que el flujo siguiera disparando ejecuciones que ya no debia disparar.
     //
-    // Va DESPUES del motor y no antes por lo obvio —hasta que `executeWorkflow`
-    // no devuelve no se sabe como termino—, y el propio metodo vuelve a leer
-    // las cuatro condiciones, asi que una reanudacion que acaba PAUSADA otra
-    // vez, OMITIDA o desviada por contingencia no apaga nada.
-    await this.workflowsService.applyStopOnFirstSuccess(
-      workflow,
-      schema,
-      finished,
-      user.id,
-    );
+    // Va DESPUES del motor —hasta que `executeWorkflow` no devuelve no se sabe
+    // como termino— y dentro de `completion`, de modo que se aplica igual si la
+    // reanudacion llego por la interfaz o por correo. La politica solo mira si
+    // ESTE intento cerro EXITOSO.
+    //
+    // El flujo se RELEE antes de apagarlo: el que se cargo al arrancar es una
+    // foto de hace minutos —la reactivacion lo paso a ACTIVO por otra via— y
+    // guardarlo tal cual pisaria cualquier cambio hecho mientras corria.
+    try {
+      const current =
+        (await this.workflowRepository.findOne({
+          where: { id: workflow.id },
+        })) ?? workflow;
+
+      await this.workflowsService.applyStopOnFirstSuccess(
+        current,
+        schema,
+        finished,
+        user.id,
+      );
+    } catch (error: unknown) {
+      // Que falle el apagado no puede dejar la tabla con la foto "En proceso"
+      // ni perder el desenlace de una ejecucion que SI termino: se registra y
+      // se sigue.
+      this.logger.error(
+        `No se pudo aplicar stopOnFirstSuccess tras reanudar la ejecucion ${executionId} del flujo ${workflow.id}: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
 
     // La reanudacion publico la fila "En proceso"; sin esta segunda foto la
     // tabla de flujos se quedaba con ese estado aunque la ejecucion ya hubiera

@@ -569,13 +569,15 @@ describe('WorkflowsService (despacho manual de pruebas, Camino B)', () => {
     });
 
     it('2c.2 NO deberia desactivar una ejecucion detenida por halt', async () => {
-      // 1. Arrange: el disparador no encontro nada que procesar. Cierra en
-      //    EXITOSO igual que un recorrido completo, pero no hizo trabajo alguno.
+      // 1. Arrange: el disparador no encontro nada que procesar. El motor
+      //    cierra la parada ordenada en OMITIDO (migracion 030), que es lo que
+      //    la politica lee: no hizo trabajo alguno.
       const { service, validator, engine, repository, coordinator } =
         buildHarness();
       validator.validateSchema.mockResolvedValue(schemaWithPolicy());
       engine.executeWorkflow.mockResolvedValue(
         buildExecution({
+          currentState: ExecutionState.OMITIDO,
           haltReason: 'El buzon no contiene mensajes nuevos que procesar.',
         }),
       );
@@ -634,11 +636,10 @@ describe('WorkflowsService (despacho manual de pruebas, Camino B)', () => {
       expect(coordinator.stopPollingForFlow).not.toHaveBeenCalled();
     });
 
-    it('2c.6 NO deberia desactivar una ejecucion que se desvio por contingencia', async () => {
-      // 1. Arrange: una recuperacion funcional cierra EXITOSO con razon —el
-      //    trabajo se hizo—, pero esta politica describe un flujo que YA
-      //    funciona sin incidencias, y una ejecucion que necesito un desvio no
-      //    lo demuestra.
+    it('2c.6 deberia desactivar tambien una ejecucion recuperada por contingencia', async () => {
+      // 1. Arrange 📐: el rescate por OCR cierra EXITOSO —el trabajo se hizo—
+      //    tras desviarse por `onErrorStep`. Antes esto NO apagaba el flujo, y el
+      //    sondeo volvia a publicar el mismo correo en cada vuelta.
       const { service, validator, engine, repository, coordinator } =
         buildHarness();
       validator.validateSchema.mockResolvedValue(schemaWithPolicy());
@@ -646,13 +647,14 @@ describe('WorkflowsService (despacho manual de pruebas, Camino B)', () => {
         buildExecution({ tookContingency: true }),
       );
 
-      // 2. Act
+      // 2. Act ⚙️
       await service.runAutomaticWorkflow(WORKFLOW_ID);
 
-      // 3. Assert: apagarlo aqui enterraria el fallo junto con el flujo, y
-      //    nadie volveria a mirar ninguno de los dos.
-      expect(repository.save).not.toHaveBeenCalled();
-      expect(coordinator.stopPollingForFlow).not.toHaveBeenCalled();
+      // 3. Assert 🎯: solo cuenta el estado final de este intento.
+      expect(repository.save).toHaveBeenCalledWith(
+        expect.objectContaining({ status: WorkflowStatus.INACTIVO }),
+      );
+      expect(coordinator.stopPollingForFlow).toHaveBeenCalledTimes(1);
     });
 
     it('2c.7 deberia pasar el nombre del flujo al motor', async () => {

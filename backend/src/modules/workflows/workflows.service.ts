@@ -281,23 +281,25 @@ export class WorkflowsService
   /**
    * Apaga el flujo si su esquema declara `executionPolicy.stopOnFirstSuccess`.
    *
-   * Tres condiciones, y las tres importan:
+   * Dos condiciones, y solo dos:
    *
    * 1. La politica esta declarada y en `true`.
-   * 2. La ejecucion cerro en EXITOSO. Una detenida por `halt` cierra en
-   *    OMITIDO desde la migracion 030, de modo que esta sola condicion ya la
-   *    descarta.
-   * 3. `haltReason` es `undefined`, es decir, recorrio el grafo ENTERO. Hoy es
-   *    REDUNDANTE con la condicion 2 y se conserva a proposito: es la
-   *    comprobacion directa del hecho que importa —"no hizo ningun trabajo"—,
-   *    mientras que el estado es una consecuencia de el. Sin alguna de las dos,
-   *    un flujo IMAP con la politica activa se apagaria en su primer sondeo en
-   *    vacio, antes de haber procesado un solo correo.
-   * 4. `tookContingency` no esta puesto, es decir, no se desvio por ninguna
-   *    ruta de error. Una recuperacion funcional cierra EXITOSO con razon —el
-   *    trabajo se hizo— pero esta politica describe un flujo que ya funciona sin
-   *    incidencias, y una ejecucion que necesito un desvio no lo demuestra.
-   *    Apagarlo ahi enterraria el fallo junto con el flujo.
+   * 2. El intento ACTUAL cerro en EXITOSO. Es lo unico que se mira: ni el
+   *    historial de la ejecucion ni sus reintentos anteriores.
+   *
+   * Lo que NO bloquea el apagado, y por que:
+   *
+   * - Una parada ordenada (`haltReason`) ya cierra en OMITIDO desde la
+   *   migracion 030, asi que la condicion 2 la descarta sola: un flujo IMAP con
+   *   la politica activa no se apaga en su primer sondeo en vacio.
+   * - Un desvio por `onErrorStep` (`tookContingency`). Antes bloqueaba, con la
+   *   idea de no "enterrar" el fallo, y era el defecto: el rescate por OCR
+   *   cierra EXITOSO —el trabajo se hizo— pero el flujo seguia ACTIVO y el
+   *   sondeo volvia a publicar en cada vuelta. Un desvio que solo AVISA
+   *   (`alerta_smtp`) no llega aqui: cierra PAUSADO o FALLIDO, nunca EXITOSO.
+   *   La incidencia sigue en `logs_nodo` y en `error_context`.
+   * - Una pausa previa. La reanudacion (CU-09) entra por
+   *   `ExecutionsService.completeResume` y evalua el desenlace de ESE intento.
    *
    * Vive aqui y no en `FsmEngineService` porque desactivar es tocar la entidad
    * `Workflow`, que pertenece a `@modules`: el motor esta en `@core` y no puede
@@ -327,9 +329,7 @@ export class WorkflowsService
   ): Promise<void> {
     if (
       schema.executionPolicy?.stopOnFirstSuccess !== true ||
-      finished.currentState !== ExecutionState.EXITOSO ||
-      finished.haltReason !== undefined ||
-      finished.tookContingency === true
+      finished.currentState !== ExecutionState.EXITOSO
     ) {
       return;
     }
