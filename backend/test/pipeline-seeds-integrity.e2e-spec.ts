@@ -647,5 +647,43 @@ describe('Siembra maestra de los cinco pipelines (e2e)', () => {
         outputCardinality: 'MULTIPLE',
       });
     });
+
+    it('14.7 deberia exigir la eliminacion de prefijos del nombre en Innodays e Innobar', async () => {
+      // 1. Arrange 📐 + 2. Act ⚙️
+      const rows = await dataSource.query<
+        { codigo: string; texto_prompt: string }[]
+      >(
+        'SELECT codigo, texto_prompt FROM plantillas_prompts_ia WHERE codigo = ANY($1)',
+        [['INNODAYS_ENLACE_DEFAULT', 'INNOBAR_ENLACE_DEFAULT']],
+      );
+
+      // 3. Assert 🎯: la fila de Drupal se localiza por la denominacion
+      //    tematica, asi que ambos prompts la exigen sin prefijos de formato,
+      //    con la clausula una sola vez y la regla en "Reglas".
+      expect(rows).toHaveLength(2);
+      for (const { texto_prompt: text } of rows) {
+        expect(
+          text.split(
+            'NORMALIZACIÓN DEL NOMBRE DEL EVENTO (INNODAYS E INNOBAR):',
+          ),
+        ).toHaveLength(2);
+        expect(text).toContain(
+          'ELIMINA SIEMPRE los prefijos de formato o de categoría',
+        );
+        expect(text).toContain('Elimina SIEMPRE del nombre');
+        expect(text).toContain('SOLO la denominacion tematica canonica');
+        for (const prefix of [
+          '"InnoBar de"',
+          '"InnoDays de"',
+          '"Jornada de"',
+          '"Encuentro sectorial de"',
+        ]) {
+          expect(text).toContain(prefix);
+        }
+        // La version que pedia el nombre literal ya no sobrevive.
+        expect(text).not.toContain('EXACTAMENTE como figura en el correo');
+        expect(text).not.toContain('se busca por ese texto literal');
+      }
+    });
   });
 });

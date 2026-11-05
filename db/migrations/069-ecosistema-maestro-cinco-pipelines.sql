@@ -40,6 +40,11 @@
 --      h5.panel-title, da respaldos a sus dos ranuras, asigna el identificador
 --      UFV a ESIC y prohibe inventar sin datos. Sustituye los bloques de las
 --      versiones anteriores de este paso.
+--   5e. Innodays e Innobar: el nombre del evento se reduce a su denominacion
+--      tematica canonica, sin prefijos de formato ("InnoBar de", "InnoDays
+--      de", "Jornada de", "Encuentro sectorial de"...), que es lo que localiza
+--      la fila en Drupal. Reescribe la linea del campo y la regla y anade la
+--      "NORMALIZACIÓN DEL NOMBRE DEL EVENTO" antes del material.
 --   6. Los cinco blueprints de `plantillas_flujo`, con el slug en `flowId` y
 --      en la descripcion (`id_flujo` es UUID y no puede llevarlo).
 --   6b. El escudo del maestro de apertura exige `h3.licitacion-title`: sin
@@ -105,6 +110,7 @@ DECLARE
     parser_key TEXT;
     old_rule TEXT;
     replaced_old BOOLEAN;
+    pair_index INT;
     old_full_structure CONSTANT TEXT[] := ARRAY['a', 'div', 'em', 'h3', 'h4', 'h5', 'hr', 'img', 'li', 'p', 'span', 'strong', 'table', 'td', 'th', 'tr', 'ul'];
     canonical_tags CONSTANT JSONB := '["h2", "h3", "h4", "h5", "h6", "p", "a", "b", "i", "strong", "em", "u", "strike", "ul", "ol", "li", "table", "thead", "tbody", "tr", "th", "td", "hr", "br", "div", "span", "img"]'::JSONB;
     clause_poly_html CONSTANT TEXT := $clause$DIRECTIVA DE POLIVALENCIA Y ESTRUCTURACIÓN HTML:
@@ -119,6 +125,11 @@ DECLARE
     clause_biblio CONSTANT TEXT := $clause$ESTRUCTURA DE LA SECCIÓN BIBLIOGRÁFICA:
 - La sección bibliográfica va encabezada por el título semántico <h2>Referencia bibliográfica</h2>, seguido de uno o varios párrafos <p class="notiweb-referencia">.
 - Queda TERMINANTEMENTE PROHIBIDO escribir ese rótulo como párrafo, por ejemplo <p><strong>Referencia bibliográfica:</strong></p>.$clause$;
+    clause_event_name CONSTANT TEXT := $clause$NORMALIZACIÓN DEL NOMBRE DEL EVENTO (INNODAYS E INNOBAR):
+- En "headline" va SOLO la denominación temática canónica del evento, la que identifica su fila en la tabla del portal (por ejemplo "Agrifood", "Deeptech", "Talento Emprendedor").
+- ELIMINA SIEMPRE los prefijos de formato o de categoría que la preceden: "InnoBar de", "InnoBar", "InnoDays de", "InnoDays", "InnoDay", "Jornada de", "Encuentro sectorial de", "Encuentro de", "Afterwork de", junto con las comillas o los dos puntos que los acompañen.
+- Ejemplos: "InnoBar de Talento Emprendedor" -> "Talento Emprendedor"; "Encuentro sectorial de Agrifood" -> "Agrifood"; "Jornada de Deeptech" -> "Deeptech".
+- Conserva exactamente las mayúsculas, tildes y signos de la denominación que queda; no la traduzcas, abrevies ni completes.$clause$;
     -- Inicio de la primera seccion de material: linea en blanco, hasta dos
     -- rotulos sin llaves ("DATOS DE ENTRADA:", "Correo:") y el primer marcador.
     material_anchor CONSTANT TEXT := '\n\n((?:[^\n{]*\n){0,2})\{\{';
@@ -640,11 +651,12 @@ Documentos adjuntos:
             $prompt$Eres el gestor de la agenda de Innodays e Innobar de Madrid+D. A partir del correo que se te proporciona a continuacion, identifica el nombre de la jornada o encuentro sectorial y la URL que debe publicarse en la tabla del portal.
 
 Datos a localizar:
-- Nombre del evento: Identifica el nombre propio o tematica principal del encuentro (por ejemplo "Agrifood", "Deeptech", "Talento Emprendedor"). Si el correo dice "encuentro sectorial de Agrifood" o "InnoDay Agrifood", extrae unicamente la palabra clave del evento ("Agrifood"). Conserva sus mayusculas y tildes exactas.
+- Nombre del evento: SOLO la denominacion tematica canonica del encuentro (por ejemplo "Agrifood", "Deeptech", "Talento Emprendedor"), sin ningun prefijo de formato ni de categoria ("InnoDays de", "InnoDay", "Jornada de", "Encuentro sectorial de"...). Si el correo dice "encuentro sectorial de Agrifood" o "InnoDay Agrifood", extrae unicamente "Agrifood". Conserva sus mayusculas y tildes exactas.
 - Enlace: La URL completa (http:// o https://) enviada en el correo para la inscripcion o publicacion.
 
 Reglas:
 - No inventes URLs ni nombres.
+- Elimina SIEMPRE del nombre del evento los prefijos de formato o de categoria ("InnoBar de", "InnoDays de", "Jornada de", "Encuentro sectorial de"...): la fila del portal en Drupal se localiza solo por la denominacion tematica.
 - Si el correo menciona la tematica o nombre del evento, NUNCA dejes el campo de nombre vacio.
 
 Formato de salida:
@@ -670,11 +682,11 @@ Correo:
             $prompt$Eres el gestor de la agenda de Innobar de Madrid+D, los afterworks y encuentros de networking informal entre investigadores, empresas y emprendedores. A partir del correo que se te da mas abajo, identifica el encuentro al que se refiere y el enlace que debe publicarse para el en la tabla de eventos del portal.
 
 Datos que debes localizar:
-- evento_nombre (el nombre del encuentro EXACTAMENTE como figura en el correo, con sus mayusculas, tildes y signos, sin comillas ni prefijos como "Encuentro:")
+- evento_nombre (SOLO la denominacion tematica canonica del encuentro, con sus mayusculas, tildes y signos exactos, sin comillas ni prefijos de formato o de categoria como "Encuentro:", "InnoBar de", "InnoBar" o "Encuentro de")
 - enlace (la URL completa de inscripcion o de la convocatoria del encuentro que el correo pide publicar)
 
 Reglas:
-- No reformules, abrevies ni traduzcas el nombre: la tabla del portal se busca por ese texto literal y cualquier variacion deja el enlace sin actualizar.
+- Elimina SIEMPRE del nombre los prefijos de formato o de categoria ("InnoBar de", "InnoDays de", "Jornada de", "Encuentro sectorial de"...) y no reformules, abrevies ni traduzcas la denominacion tematica que queda: la fila del portal en Drupal se localiza solo por ese texto y cualquier variacion deja el enlace sin actualizar.
 - El enlace empieza por https:// o http://. Si el correo trae varios, elige el que el remitente pide publicar; si no lo indica, el de inscripcion.
 - Si falta alguno de los dos datos, deja su campo vacio. No inventes ni completes URLs.
 
@@ -1070,6 +1082,71 @@ PLANTILLA BASE:
             VALUES (admin_id, 'ACTUALIZAR', 'plantillas_prompts_ia', inserted_id::TEXT,
                     jsonb_build_object('texto_prompt', previous_text),
                     seed_tag || jsonb_build_object('codigo', rec.codigo, 'parche', 'prompts_consolidados_v3'));
+        END IF;
+    END LOOP;
+
+    -- 5e. Nombre canonico del evento en Innodays e Innobar ------------------
+    -- La fila de Drupal se localiza por la denominacion tematica, no por el
+    -- formato del encuentro: un "InnoBar de Agrifood" en "headline" deja el
+    -- enlace sin actualizar. Cada sustitucion se protege con su texto nuevo y
+    -- la clausula con su rotulo, asi que reejecutar no cambia nada.
+    -- Pares (texto antiguo, texto nuevo). Innodays tiene dos redacciones
+    -- previas: la de este fichero y la literal de la 063, que es la que
+    -- conservan las bases sembradas antes de la 069.
+    FOR rec IN
+        SELECT 'INNODAYS_ENLACE_DEFAULT' AS codigo,
+            ARRAY[
+                $old$- Nombre del evento: Identifica el nombre propio o tematica principal del encuentro (por ejemplo "Agrifood", "Deeptech", "Talento Emprendedor"). Si el correo dice "encuentro sectorial de Agrifood" o "InnoDay Agrifood", extrae unicamente la palabra clave del evento ("Agrifood"). Conserva sus mayusculas y tildes exactas.$old$,
+                $old$- No inventes URLs ni nombres.$old$,
+                $old$- evento_nombre (el nombre de la jornada EXACTAMENTE como figura en el correo, con sus mayusculas, tildes y signos, sin comillas ni prefijos como "Jornada:")$old$,
+                $old$- No reformules, abrevies ni traduzcas el nombre: la tabla del portal se busca por ese texto literal y cualquier variacion deja el enlace sin actualizar.$old$] AS old_texts,
+            ARRAY[
+                $new$- Nombre del evento: SOLO la denominacion tematica canonica del encuentro (por ejemplo "Agrifood", "Deeptech", "Talento Emprendedor"), sin ningun prefijo de formato ni de categoria ("InnoDays de", "InnoDay", "Jornada de", "Encuentro sectorial de"...). Si el correo dice "encuentro sectorial de Agrifood" o "InnoDay Agrifood", extrae unicamente "Agrifood". Conserva sus mayusculas y tildes exactas.$new$,
+                $new$- No inventes URLs ni nombres.
+- Elimina SIEMPRE del nombre del evento los prefijos de formato o de categoria ("InnoBar de", "InnoDays de", "Jornada de", "Encuentro sectorial de"...): la fila del portal en Drupal se localiza solo por la denominacion tematica.$new$,
+                $new$- evento_nombre (SOLO la denominacion tematica canonica de la jornada, con sus mayusculas, tildes y signos exactos, sin comillas ni prefijos de formato o de categoria como "Jornada:", "InnoDays de", "InnoDay", "Jornada de" o "Encuentro sectorial de")$new$,
+                $new$- Elimina SIEMPRE del nombre los prefijos de formato o de categoria ("InnoBar de", "InnoDays de", "Jornada de", "Encuentro sectorial de"...) y no reformules, abrevies ni traduzcas la denominacion tematica que queda: la fila del portal en Drupal se localiza solo por ese texto y cualquier variacion deja el enlace sin actualizar.$new$] AS new_texts
+        UNION ALL
+        SELECT 'INNOBAR_ENLACE_DEFAULT',
+            ARRAY[
+                $old$- evento_nombre (el nombre del encuentro EXACTAMENTE como figura en el correo, con sus mayusculas, tildes y signos, sin comillas ni prefijos como "Encuentro:")$old$,
+                $old$- No reformules, abrevies ni traduzcas el nombre: la tabla del portal se busca por ese texto literal y cualquier variacion deja el enlace sin actualizar.$old$],
+            ARRAY[
+                $new$- evento_nombre (SOLO la denominacion tematica canonica del encuentro, con sus mayusculas, tildes y signos exactos, sin comillas ni prefijos de formato o de categoria como "Encuentro:", "InnoBar de", "InnoBar" o "Encuentro de")$new$,
+                $new$- Elimina SIEMPRE del nombre los prefijos de formato o de categoria ("InnoBar de", "InnoDays de", "Jornada de", "Encuentro sectorial de"...) y no reformules, abrevies ni traduzcas la denominacion tematica que queda: la fila del portal en Drupal se localiza solo por ese texto y cualquier variacion deja el enlace sin actualizar.$new$]
+    LOOP
+        SELECT id_plantilla_prompt_ia, texto_prompt INTO inserted_id, previous_text
+          FROM plantillas_prompts_ia WHERE codigo = rec.codigo;
+        IF NOT FOUND THEN
+            CONTINUE;
+        END IF;
+
+        patched := previous_text;
+        FOR pair_index IN 1 .. array_length(rec.old_texts, 1) LOOP
+            IF position(rec.new_texts[pair_index] IN patched) = 0 THEN
+                patched := replace(patched, rec.old_texts[pair_index], rec.new_texts[pair_index]);
+            END IF;
+        END LOOP;
+        IF position('NORMALIZACIÓN DEL NOMBRE DEL EVENTO' IN patched) = 0 THEN
+            IF patched ~ material_anchor THEN
+                patched := regexp_replace(patched, material_anchor, E'\n\n' || clause_event_name || E'\n\n\\1{{');
+            ELSE
+                patched := patched || E'\n\n' || clause_event_name;
+                RAISE WARNING '069: % no tiene una seccion de material reconocible; la normalizacion del nombre se anade al final.', rec.codigo;
+            END IF;
+        END IF;
+
+        IF patched IS DISTINCT FROM previous_text THEN
+            UPDATE plantillas_prompts_ia
+               SET texto_prompt = patched, actualizado_por = admin_id, fecha_actualizacion = NOW()
+             WHERE codigo = rec.codigo;
+            summary := jsonb_set(summary, '{prompts_parcheados}', to_jsonb((summary->>'prompts_parcheados')::INT + 1));
+            IF NOT (rec.codigo = ANY (created_prompts)) THEN
+                INSERT INTO audit_eventos (usuario_id, accion, tabla_afectada, registro_id, datos_anteriores, datos_nuevos)
+                VALUES (admin_id, 'ACTUALIZAR', 'plantillas_prompts_ia', inserted_id::TEXT,
+                        jsonb_build_object('texto_prompt', previous_text),
+                        seed_tag || jsonb_build_object('codigo', rec.codigo, 'parche', 'nombre_evento_canonico'));
+            END IF;
         END IF;
     END LOOP;
 
