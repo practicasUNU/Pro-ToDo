@@ -168,6 +168,7 @@ Pro-ToDo/
 
 * `architecture-patterns.md`: Ciclo de vida del motor FSM, patrón Strategy (`INodeStrategy`), contrato inmutable de `StatePayloadContext` y librerías externas por tipo de nodo.
 * `code-conventions.md`: Idioma de identificadores, estándares TypeScript/Vue y orden obligatorio de archivos.
+* `dependency-security.md`: Instalación determinista con `npm ci`, `package-lock.json` versionado, runtime fijado con `.nvmrc` + `engines` y auditoría `npm audit --audit-level=high` (guía: `docs/PRODUCTION_DEPS_GUIDE.md`).
 * `frontend-architecture.md`: Capa de servicios HTTP, flujo Componente → Store → Servicio y patrón Layouts vs Componentes.
 * `frontend-quasar.md`: Sistema de diseño y tokens `--pd-*`, tríada modular de nodos del pipeline y filosofía Poka-Yoke en Vue 3 + Quasar.
 * `git-workflow.md`: Convención de ramas (`feat/`, `fix/`) y Conventional Commits.
