@@ -182,9 +182,13 @@ y se revisa en cada auditoría.
 
 Vulnerabilidades `high`/`critical` conocidas y aceptadas temporalmente. Revisión: 2026-11-04.
 
-| Proyecto | Paquete | Severidad | Alcance | Motivo | Seguimiento |
-|---|---|---|---|---|---|
-| `backend` | `nodemailer` (`^9.1.1`) | high | Producción: envío del OTP y alertas SMTP | El arreglo es la versión mayor `10.x`; `npm audit fix` no la aplica | Rama propia para migrar a `10.x` con las suites de correo y alertas SMTP en verde |
-| `frontend` | `happy-dom` (`^20.14.5`) | high | Solo desarrollo: entorno DOM de algunos specs de Vitest; no llega al bundle | El arreglo es la versión mayor `21.x` | Subir a `21.x` y ejecutar la suite completa del frontend |
+Ninguna: `npm audit --audit-level=high` sale sin hallazgos en `backend/` y `frontend/`.
+
+Historial:
+
+| Fecha | Paquete | Resolución |
+|---|---|---|
+| 2026-11-04 | `nodemailer` (backend, high) | Subido de `9.x` a `10.x` (único cambio incompatible: exige Node ≥ 20) |
+| 2026-11-04 | `happy-dom` (frontend, high, solo desarrollo) | Subido de `20.x` a `21.x` |
 
 `overrides` / parches locales activos: ninguno.
