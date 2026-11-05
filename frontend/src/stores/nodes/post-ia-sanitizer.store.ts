@@ -1,0 +1,443 @@
+import { defineStore, acceptHMRUpdate } from 'pinia';
+import { computed, ref } from 'vue';
+
+import {
+  ALLOWED_TAG_PRESETS,
+  DEFAULT_POST_IA_CONTENT_MODE,
+  DEFAULT_POST_IA_SOURCE_FIELD,
+  DEFAULT_POST_IA_SOURCE_FIELDS,
+  DEFAULT_POST_IA_SOURCE_NAMESPACE,
+  HTML_TAG_PATTERN,
+  MAX_ALLOWED_TAGS,
+  MAX_REQUIRED_SELECTORS,
+  MAX_POST_IA_SOURCE_FIELDS,
+  MAX_SELECTOR_LENGTH,
+  PostIaContentMode,
+  SANITIZER_ALLOWED_TAGS,
+} from '@/types/nodes/post-ia-sanitizer.types';
+
+import { extractStructuralSelectors } from '@/utils/structural-selectors';
+
+import type { HydratableNode, UpstreamNamespace } from '@stores/nodes/node-store-registry';
+
+import type {
+  AllowedTagPresetKey,
+  PostIaSanitizerNodeConfig,
+} from '@/types/nodes/post-ia-sanitizer.types';
+
+/** Prefijo del id de Pinia; el sufijo es el `nodeId` del `pipeline_schema`. */
+const STORE_ID_PREFIX = 'postIaSanitizerNode';
+
+/**
+ * Clave del campo que publica el MAPEADOR_PLANTILLA.
+ *
+ * Se usa para detectar si hay una plantilla base en el flujo, y por el CAMPO y
+ * no por el namespace: `outputNamespace` es propiedad del nodo y no de su tipo,
+ * exactamente igual que en `BASE_TEMPLATE_MARKER_PATTERN` del backend.
+ */
+const BASE_TEMPLATE_FIELD = 'compiled_markup';
+
+/** Lee una cadena de los `params` crudos del esquema. */
+const asText = (value: unknown): string => (typeof value === 'string' ? value : '');
+
+/**
+ * Lee un arreglo de cadenas de los `params` crudos.
+ *
+ * La columna es `jsonb` y pudo escribirse por SQL directo, asi que se filtra en
+ * vez de confiar: un `null` dentro del arreglo dejaria un chip vacio imposible
+ * de borrar desde la interfaz.
+ */
+const asStringList = (value: unknown): string[] =>
+  Array.isArray(value) ? value.filter((entry): entry is string => typeof entry === 'string') : [];
+
+/** Configuracion inicial; se reutiliza en `resetConfig`. */
+const buildInitialConfig = (): PostIaSanitizerNodeConfig => ({
+  contentMode: DEFAULT_POST_IA_CONTENT_MODE,
+  sourceNamespace: DEFAULT_POST_IA_SOURCE_NAMESPACE,
+  sourceFields: [...DEFAULT_POST_IA_SOURCE_FIELDS],
+  sourceField: DEFAULT_POST_IA_SOURCE_FIELD,
+  requiredSelectors: [],
+  allowedTags: [],
+});
+
+// Estado reactivo del nodo ESCUDO_POST_IA (regla frontend-quasar.md §3.1).
+//
+// SIN capa de servicios, como el disparador Cron y la alerta SMTP, y por el
+// mismo motivo: no hay nada que preguntarle al backend. `@Controller('nodos')`
+// expone UNA ruta, `GET /api/nodos`, y es de solo lectura; no existe ningun
+// endpoint que valide los `params` de un nodo suelto. Un
+// `post-ia-sanitizer.service.ts` que no conociera ninguna ruta contradiria su
+// propia definicion (`frontend-architecture.md` §2.1), y uno que inventara una
+// seria un 404 en produccion. La validez se resuelve entera en el cliente, y la
+// de verdad la hace `paramsSchema` al guardar el esquema.
+const postIaSanitizerSetup = () => {
+  const config = ref<PostIaSanitizerNodeConfig>(buildInitialConfig());
+
+  /** Namespaces que publican los pasos ANTERIORES, con sus campos. */
+  const availableUpstreamContext = ref<UpstreamNamespace[]>([]);
+
+  /**
+   * HTML de la plantilla base que aporta un MAPEADOR_PLANTILLA anterior.
+   *
+   * Lo empuja el anfitrion (`setUpstreamBaseMarkup`), que se lo pide al nodo que
+   * lo conoce. Este store NO va a buscarlo al store del mapeador: §3.1 prohibe
+   * que un nodo conozca la forma interna de otro, y hacerlo ataria los dos
+   * configuradores entre si.
+   *
+   * `null` mientras no haya plantilla elegida. Es lo mismo que no haber llegado
+   * todavia a ese paso, y las dos cosas significan "sin sugerencias".
+   */
+  const upstreamBaseMarkup = ref<string | null>(null);
+
+  /**
+   * Opciones del selector de namespace de origen.
+   *
+   * CERRADO y no texto libre (Poka-Yoke, `frontend-quasar.md` §4): el namespace
+   * acaba siendo la raiz de una lectura del contexto, y un nombre tecleado a
+   * mano que no exista produce `ERR_POST_IA_MISSING_PAYLOAD` en ejecucion, con
+   * el flujo ya PAUSADO. Lo que se ofrece es lo que de verdad hay delante.
+   */
+  const namespaceOptions = computed<readonly string[]>(() =>
+    availableUpstreamContext.value.map((entry) => entry.namespace),
+  );
+
+  /** Entrada del contexto que corresponde al namespace elegido, si existe. */
+  const selectedNamespace = computed<UpstreamNamespace | undefined>(() =>
+    availableUpstreamContext.value.find(
+      (entry) => entry.namespace === config.value.sourceNamespace,
+    ),
+  );
+
+  /**
+   * Campos que publica el namespace elegido.
+   *
+   * Salen del catalogo de nodos, que los declara la estrategia que construye el
+   * payload. Vacio significa "todavia no hay nada que ofrecer" —el catalogo no
+   * ha cargado, o el tipo no declara campos—, nunca un error.
+   */
+  const fieldOptions = computed<readonly string[]>(() =>
+    (selectedNamespace.value?.fields ?? []).map((field) => field.name),
+  );
+
+  /**
+   * El origen elegido ya no lo produce ningun paso anterior.
+   *
+   * Se distingue de "no hay contexto todavia" a proposito: con el contexto
+   * vacio no se puede afirmar nada, y pintar un aviso mientras carga el catalogo
+   * seria una falsa alarma en cada apertura del asistente.
+   */
+  /** Modo TEXT: audita campos de texto, sin plantilla base. */
+  const isTextMode = computed<boolean>(() => config.value.contentMode === PostIaContentMode.TEXT);
+
+  /** Campos de texto elegidos que el namespace de origen no publica. */
+  const missingTextFields = computed<readonly string[]>(() =>
+    fieldOptions.value.length === 0
+      ? []
+      : config.value.sourceFields.filter((field) => !fieldOptions.value.includes(field)),
+  );
+
+  const hasStaleSource = computed<boolean>(() => {
+    if (availableUpstreamContext.value.length === 0) return false;
+
+    if (selectedNamespace.value === undefined) return true;
+
+    if (isTextMode.value) return missingTextFields.value.length > 0;
+
+    return fieldOptions.value.length > 0 && !fieldOptions.value.includes(config.value.sourceField);
+  });
+
+  /**
+   * Hay un MAPEADOR_PLANTILLA por delante.
+   *
+   * Importa porque el `PROCESADOR_IA` solo rellena `filled_markup` cuando su
+   * prompt cita una plantilla base (ver `BASE_TEMPLATE_MARKER_PATTERN` en el
+   * backend). Sin mapeador delante, el escudo no tendra markup que auditar y
+   * fallara con `ERR_POST_IA_EMPTY_HTML` en la primera ejecucion.
+   *
+   * Se busca por el CAMPO y no por el tipo de nodo ni por el namespace: el
+   * `outputNamespace` lo elige el esquema, y preguntar por `compiled_markup` es
+   * preguntar por lo unico que de verdad identifica una plantilla base.
+   */
+  const hasBaseTemplateUpstream = computed<boolean>(() =>
+    availableUpstreamContext.value.some((entry) =>
+      entry.fields.some((field) => field.name === BASE_TEMPLATE_FIELD),
+    ),
+  );
+
+  /**
+   * Ranuras que la plantilla base declara de verdad, para sugerirlas.
+   *
+   * Es la diferencia entre pedir un selector CSS a ciegas y ofrecer los que el
+   * documento tiene. El parseo vive en `@/utils/structural-selectors` y no aqui
+   * porque no depende de este nodo —es "dado este HTML, que ranuras hay"— y
+   * desde `src/utils/` se prueba aislado (`frontend-architecture.md` §2.1).
+   *
+   * Las ya elegidas se excluyen: ofrecer de nuevo lo que ya es un chip hace que
+   * el desplegable parezca no responder al pulsarlo.
+   */
+  const detectedSelectorOptions = computed<readonly string[]>(() => {
+    const detected = extractStructuralSelectors(upstreamBaseMarkup.value ?? '');
+
+    return detected.filter((selector) => !config.value.requiredSelectors.includes(selector));
+  });
+
+  /** Selectores que superan el limite de longitud del DTO. */
+  const oversizedSelectors = computed<readonly string[]>(() =>
+    config.value.requiredSelectors.filter((selector) => selector.length > MAX_SELECTOR_LENGTH),
+  );
+
+  /** Etiquetas pedidas que la lista blanca global no admite. */
+  const unsupportedTags = computed<readonly string[]>(() =>
+    config.value.allowedTags.filter(
+      (tag) => !HTML_TAG_PATTERN.test(tag) || !SANITIZER_ALLOWED_TAGS.includes(tag),
+    ),
+  );
+
+  /**
+   * Unico dato que el anfitrion consulta para habilitar "Siguiente".
+   *
+   * Replica el criterio del backend: el DTO admite todos los campos ausentes
+   * —una plantilla de flujo se guarda con `params: {}`— pero rechaza con un 400
+   * sobre el esquema ENTERO cualquier valor mal formado. Comprobarlo aqui es la
+   * diferencia entre una regla de campo y un error de guardado que no nombra el
+   * control que lo causa.
+   *
+   * `requiredSelectors` vacio es VALIDO: significa "no exijo ninguna ranura", y
+   * el escudo sigue saneando y rechazando marcadores residuales.
+   */
+  const isConfigValid = computed<boolean>(
+    () =>
+      config.value.sourceNamespace.trim() !== '' &&
+      (isTextMode.value
+        ? config.value.sourceFields.length > 0 &&
+          config.value.sourceFields.length <= MAX_POST_IA_SOURCE_FIELDS
+        : config.value.sourceField.trim() !== '') &&
+      config.value.requiredSelectors.length <= MAX_REQUIRED_SELECTORS &&
+      oversizedSelectors.value.length === 0 &&
+      config.value.allowedTags.length <= MAX_ALLOWED_TAGS &&
+      unsupportedTags.value.length === 0,
+  );
+
+  /** Avisos que NO bloquean; lo que debe impedir guardar va en `isConfigValid`. */
+  const configWarnings = computed<readonly string[]>(() => {
+    const warnings: string[] = [];
+
+    if (hasStaleSource.value) {
+      const origin = isTextMode.value
+        ? `${config.value.sourceNamespace}.{${config.value.sourceFields.join(', ')}}`
+        : `${config.value.sourceNamespace}.${config.value.sourceField}`;
+
+      warnings.push(
+        `El origen guardado "${origin}" ya no lo publica ningun paso anterior del flujo. El escudo fallara con ERR_POST_IA_MISSING_PAYLOAD o ERR_POST_IA_EMPTY_HTML en la primera ejecucion.`,
+      );
+    }
+
+    // En modo TEXT no hay marcado que rellenar: el mapeador no hace falta.
+    if (isTextMode.value) return warnings;
+
+    if (availableUpstreamContext.value.length > 0 && !hasBaseTemplateUpstream.value) {
+      warnings.push(
+        'No hay ningun MAPEADOR_PLANTILLA por delante. El PROCESADOR_IA solo rellena el marcado cuando su instruccion cita una plantilla base, asi que sin mapeador este escudo no tendra nada que auditar. Si el flujo no maqueta HTML, cambia el escudo a modo «Texto».',
+      );
+    }
+
+    if (config.value.requiredSelectors.length === 0) {
+      warnings.push(
+        'Sin selectores exigidos, el escudo sanea el HTML y rechaza los marcadores sin resolver, pero NO detectara que la IA se haya llevado por delante el titular o el cuerpo.',
+      );
+    }
+
+    return warnings;
+  });
+
+  const updateConfig = (patch: Partial<PostIaSanitizerNodeConfig>): void => {
+    config.value = { ...config.value, ...patch };
+  };
+
+  /**
+   * Escribe de golpe una lista de etiquetas conocida.
+   *
+   * Vive en el store y no en la plantilla por lo mismo que `applyPreset` en el
+   * nodo de Drupal: es una decision sobre la configuracion del nodo, no sobre
+   * como se pinta. La lista se COPIA porque la del preset es `readonly` y
+   * compartida entre todos los nodos del flujo.
+   */
+  const applyTagPreset = (key: AllowedTagPresetKey): void => {
+    updateConfig({ allowedTags: [...ALLOWED_TAG_PRESETS[key].tags] });
+  };
+
+  /**
+   * `params` del nodo para el `pipeline_schema`.
+   *
+   * LO QUE COINCIDE CON EL DEFECTO SE OMITE, igual que hace el extractor web con
+   * sus numericos: el backend resuelve el mismo valor con `??`, y publicarlo
+   * ademas aqui dejaria dos sitios que mantener sincronizados sin ganar nada.
+   * Las listas vacias tampoco viajan: en el DTO significan lo mismo ausentes.
+   */
+  const toNodeParams = (): Record<string, unknown> => {
+    const params: Record<string, unknown> = {};
+    const sourceNamespace = config.value.sourceNamespace.trim();
+    const sourceField = config.value.sourceField.trim();
+
+    if (sourceNamespace !== '' && sourceNamespace !== DEFAULT_POST_IA_SOURCE_NAMESPACE) {
+      params.sourceNamespace = sourceNamespace;
+    }
+
+    // Modo TEXT: solo viajan el modo y los campos; ni campo HTML, ni selectores
+    // ni etiquetas, que el backend ignora en este modo.
+    if (isTextMode.value) {
+      params.contentMode = PostIaContentMode.TEXT;
+
+      const isDefaultFields =
+        config.value.sourceFields.length === DEFAULT_POST_IA_SOURCE_FIELDS.length &&
+        config.value.sourceFields.every(
+          (field, index) => field === DEFAULT_POST_IA_SOURCE_FIELDS[index],
+        );
+
+      if (!isDefaultFields) params.sourceFields = [...config.value.sourceFields];
+
+      return params;
+    }
+
+    if (sourceField !== '' && sourceField !== DEFAULT_POST_IA_SOURCE_FIELD) {
+      params.sourceField = sourceField;
+    }
+
+    if (config.value.requiredSelectors.length > 0) {
+      params.requiredSelectors = [...config.value.requiredSelectors];
+    }
+
+    if (config.value.allowedTags.length > 0) {
+      params.allowedTags = [...config.value.allowedTags];
+    }
+
+    return params;
+  };
+
+  /** Declara los namespaces anteriores CON los campos que publica cada uno. */
+  /** Canal del marcado base; lo invoca el anfitrion al sincronizar un paso. */
+  const setUpstreamBaseMarkup = (markup: string | null): void => {
+    upstreamBaseMarkup.value = markup;
+  };
+
+  /**
+   * Carga de golpe las ranuras detectadas que quepan bajo el tope.
+   *
+   * ANADE, no reemplaza: lo que el operador ya haya escrito a mano —una ranura
+   * que la plantilla no declara pero que el espera del modelo— sobrevive al
+   * boton. Reemplazar convertiria un atajo en una trampa.
+   *
+   * Corta en `MAX_REQUIRED_SELECTORS` en vez de rechazar la operacion entera:
+   * llenar hasta el tope es exactamente lo que el operador ha pedido, y fallar
+   * porque sobran dos candidatos no le acerca a su objetivo.
+   */
+  const autoPopulateCriticalSelectors = (): void => {
+    const free = MAX_REQUIRED_SELECTORS - config.value.requiredSelectors.length;
+
+    if (free <= 0) return;
+
+    updateConfig({
+      requiredSelectors: [
+        ...config.value.requiredSelectors,
+        ...detectedSelectorOptions.value.slice(0, free),
+      ],
+    });
+  };
+
+  const setAvailableUpstreamContext = (context: UpstreamNamespace[]): void => {
+    availableUpstreamContext.value = [...context];
+  };
+
+  /**
+   * Carga la configuracion de un nodo ya guardado en el `pipeline_schema`.
+   *
+   * Contrato de ida y vuelta: `hydrateFromNode(n)` seguido de `toNodeParams()`
+   * debe reproducir `n.params`. Los dos campos de origen se reponen con su
+   * DEFECTO cuando faltan —y no con `''`— porque es lo que hace el backend al
+   * resolver la config: un nodo guardado sin ellos corre contra
+   * `llm_response.filled_markup`, y mostrarlo en blanco mentiria sobre de donde
+   * lee. `toNodeParams` vuelve a omitirlos por ser iguales al defecto, de modo
+   * que la ida y vuelta se cierra igualmente.
+   */
+  const hydrateFromNode = (node: HydratableNode): void => {
+    const { params } = node;
+
+    const sourceFields = asStringList(params.sourceFields);
+
+    config.value = {
+      contentMode:
+        params.contentMode === PostIaContentMode.TEXT
+          ? PostIaContentMode.TEXT
+          : DEFAULT_POST_IA_CONTENT_MODE,
+      sourceNamespace: asText(params.sourceNamespace) || DEFAULT_POST_IA_SOURCE_NAMESPACE,
+      sourceFields: sourceFields.length > 0 ? sourceFields : [...DEFAULT_POST_IA_SOURCE_FIELDS],
+      sourceField: asText(params.sourceField) || DEFAULT_POST_IA_SOURCE_FIELD,
+      requiredSelectors: asStringList(params.requiredSelectors),
+      allowedTags: asStringList(params.allowedTags),
+    };
+  };
+
+  const resetConfig = (): void => {
+    config.value = buildInitialConfig();
+    availableUpstreamContext.value = [];
+    upstreamBaseMarkup.value = null;
+  };
+
+  return {
+    config,
+    availableUpstreamContext,
+    upstreamBaseMarkup,
+    namespaceOptions,
+    fieldOptions,
+    detectedSelectorOptions,
+    hasStaleSource,
+    hasBaseTemplateUpstream,
+    isTextMode,
+    missingTextFields,
+    oversizedSelectors,
+    unsupportedTags,
+    isConfigValid,
+    configWarnings,
+    updateConfig,
+    applyTagPreset,
+    autoPopulateCriticalSelectors,
+    setAvailableUpstreamContext,
+    setUpstreamBaseMarkup,
+    toNodeParams,
+    hydrateFromNode,
+    resetConfig,
+  };
+};
+
+/**
+ * Definicion de Pinia para UN nodo concreto.
+ *
+ * El id lleva el `nodeId` dentro por el mismo motivo que en los demas nodos: dos
+ * escudos en el mismo flujo —uno tras la redaccion y otro tras un reintento con
+ * vision— tendrian cada uno sus selectores, y con un id fijo compartirian una
+ * sola instancia.
+ */
+const buildPostIaSanitizerStore = (nodeId: string) =>
+  defineStore(`${STORE_ID_PREFIX}:${nodeId}`, postIaSanitizerSetup);
+
+/** Instancia del store, para tipar helpers y consumidores sin `any`. */
+export type PostIaSanitizerStore = ReturnType<ReturnType<typeof buildPostIaSanitizerStore>>;
+
+/** Definiciones ya creadas, indexadas por `nodeId`. */
+const definitions = new Map<string, ReturnType<typeof buildPostIaSanitizerStore>>();
+
+/** Store del nodo ESCUDO_POST_IA identificado por `nodeId`. */
+export const usePostIaSanitizerStore = (nodeId: string): PostIaSanitizerStore => {
+  const cached = definitions.get(nodeId);
+
+  if (cached !== undefined) return cached();
+
+  const definition = buildPostIaSanitizerStore(nodeId);
+  definitions.set(nodeId, definition);
+
+  if (import.meta.hot) {
+    import.meta.hot.accept(acceptHMRUpdate(definition, import.meta.hot));
+  }
+
+  return definition();
+};

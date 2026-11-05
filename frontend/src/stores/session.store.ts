@@ -4,6 +4,7 @@ import { computed, ref } from 'vue';
 import * as authService from '@services/auth.service';
 
 import { getOrCreateDeviceId } from '@/utils/device-id';
+import { UserRole } from '@/types/user';
 import { getExpiresAtMs, getTokenLifetimeMs } from '@/utils/jwt';
 import {
   clearSession,
@@ -40,6 +41,17 @@ export const useSessionStore = defineStore('session', () => {
   const isAuthenticated = computed<boolean>(
     () => Boolean(accessToken.value) && Boolean(user.value),
   );
+
+  /**
+   * ¿El usuario de la sesion es administrador?
+   *
+   * Vive aqui y no repetida en cada componente porque la comparacion con el
+   * enum es exactamente el tipo de detalle que se escribe mal una vez y abre
+   * un agujero: `role === 'admin'` en minuscula no falla, simplemente deja de
+   * ser cierto nunca. Es COMODIDAD de interfaz, no una barrera: quien decide
+   * es el backend al guardar el flujo.
+   */
+  const isAdmin = computed<boolean>(() => user.value?.role === UserRole.ADMIN);
 
   /**
    * Instante de caducidad del access token, en ms desde epoch; `null` si no hay
@@ -234,6 +246,7 @@ export const useSessionStore = defineStore('session', () => {
     otpVerified,
     isLoading,
     isAuthenticated,
+    isAdmin,
     accessTokenExpiresAt,
     accessTokenLifetimeMs,
     getMillisecondsUntilExpiry,

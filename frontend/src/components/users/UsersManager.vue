@@ -4,12 +4,15 @@ import { useQuasar, type QTableColumn } from 'quasar';
 
 import { useUsersStore } from '@stores/users.store';
 
+import AuditDetailsMenu from '@components/shared/AuditDetailsMenu.vue';
+import StatusBadge from '@components/shared/StatusBadge.vue';
 import SafeDeleteModal from '@components/shared/SafeDeleteModal.vue';
 
 import UserDialog from './UserDialog.vue';
 
 import { extractApiErrorMessage } from '@/utils/api-error';
 import { deriveDisplayName, roleDisplayLabel, roleIconName } from '@/utils/user-display';
+import { describeEnabled } from '@/utils/status-display';
 
 import type { User, UserRole } from '@/types/user';
 
@@ -24,6 +27,14 @@ const userToDeactivate = ref<User | null>(null);
 
 // El id tecnico (UUID) no ocupa columna propia: se expone en el tooltip del
 // nombre para no romper la legibilidad de la tabla.
+// Termino de busqueda. Lo consume el `filterMethod` por defecto de QTable, que
+// recorre los `field` de las columnas visibles.
+//
+// El tipo admite `null` porque el boton `clearable` de QInput escribe eso, no
+// una cadena vacia. QTable declara su prop `filter` como `any`, asi que el
+// compilador no delataria la mentira: mas vale que el ref diga la verdad.
+const filter = ref<string | null>('');
+
 const columns: QTableColumn<User>[] = [
   {
     name: 'name',
@@ -32,7 +43,14 @@ const columns: QTableColumn<User>[] = [
     align: 'left',
     sortable: true,
   },
-  { name: 'email', label: 'Correo Corporativo', field: 'email', align: 'left', sortable: true },
+  {
+    name: 'email',
+    label: 'Correo Corporativo',
+    field: 'email',
+    align: 'left',
+    sortable: true,
+    classes: 'pd-cell--long',
+  },
   { name: 'role', label: 'Rol', field: 'role', align: 'left', sortable: true },
   { name: 'status', label: 'Estado', field: 'isActive', align: 'center', sortable: true },
   { name: 'actions', label: 'Acciones', field: 'id', align: 'center' },
@@ -124,7 +142,26 @@ onMounted(loadUsers);
       :columns="columns"
       row-key="id"
       :loading="usersStore.isLoading"
+      :filter="filter"
+      no-results-label="Ningun resultado para la busqueda"
     >
+      <template #top-right>
+        <q-input
+          v-model="filter"
+          dense
+          outlined
+          clearable
+          debounce="300"
+          placeholder="Buscar..."
+          class="pd-search-input"
+          aria-label="Filtrar la tabla"
+        >
+          <template #append>
+            <q-icon name="search" />
+          </template>
+        </q-input>
+      </template>
+
       <template #body-cell-name="cellProps">
         <q-td :props="cellProps">
           {{ cellProps.value }}
@@ -155,12 +192,7 @@ onMounted(loadUsers);
 
       <template #body-cell-status="cellProps">
         <q-td :props="cellProps">
-          <q-badge
-            class="pd-badge"
-            :class="cellProps.row.isActive ? 'pd-badge--active' : 'pd-badge--inactive'"
-          >
-            {{ cellProps.row.isActive ? 'Activo' : 'Inactivo' }}
-          </q-badge>
+          <status-badge :display="describeEnabled(cellProps.row.isActive)" />
         </q-td>
       </template>
 
@@ -203,6 +235,9 @@ onMounted(loadUsers);
           >
             <q-tooltip>Reactivar usuario</q-tooltip>
           </q-btn>
+          <!-- Ver mas: auditoria de la fila (migracion 045). Va la ultima
+               porque es consulta, no accion. -->
+          <AuditDetailsMenu :audit="cellProps.row" :subject="cellProps.row.email" />
         </q-td>
       </template>
     </q-table>

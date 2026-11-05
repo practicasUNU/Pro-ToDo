@@ -1,0 +1,921 @@
+import { createPinia, setActivePinia } from 'pinia';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+
+import {
+  DEFAULT_IMAP_PORT,
+  DEFAULT_MAILBOX,
+  DEFAULT_POLL_INTERVAL_MS,
+  DEFAULT_MARK_AS_READ,
+  DEFAULT_UNREAD_ONLY,
+  MIN_POLL_INTERVAL_MS,
+  UNVERIFIED_CONNECTION_WARNING,
+  isValidRegexPattern,
+  useTriggerImapStore,
+} from './trigger-imap.store';
+
+import type { TriggerImapConfig } from './trigger-imap.store';
+import type { CheckImapResult } from '@/types/pipeline';
+
+// Sin esto se cargaria `@boot/axios`, que necesita entorno de navegador.
+vi.mock('@services/nodes/trigger-imap.service', () => ({
+  checkImapConnection: vi.fn(),
+}));
+
+const triggerImapService = await import('@services/nodes/trigger-imap.service');
+const checkImapConnection = vi.mocked(triggerImapService.checkImapConnection);
+
+/**
+ * `nodeId` del nodo bajo prueba.
+ *
+ * El store se instancia POR NODO, asi que toda prueba tiene que nombrar el nodo
+ * al que pregunta. El aislamiento entre dos `nodeId` distintos se comprueba
+ * aparte, en `flujo-draft.store.spec.ts`.
+ */
+const NODE_ID = 'trigger_imap';
+
+const VALID_HOST = 'imap.unuware.com';
+const VALID_USER = 'notiweb@unuware.com';
+const VALID_ENV_KEY = 'IMAP_PASSWORD';
+
+/** Configuracion completa y admisible; cada prueba altera lo que le concierne. */
+const VALID_CONFIG: Partial<TriggerImapConfig> = {
+  host: VALID_HOST,
+  user: VALID_USER,
+  passwordEnvKey: VALID_ENV_KEY,
+};
+
+const SUCCESS_RESULT: CheckImapResult = {
+  success: true,
+  message: 'Conexión exitosa',
+};
+
+const FAILURE_RESULT: CheckImapResult = {
+  success: false,
+  error: { level: 'GRAVE', message: 'Invalid credentials' },
+};
+
+/** Store con los campos completos y la conexion YA verificada. */
+const buildVerifiedStore = (): ReturnType<typeof useTriggerImapStore> => {
+  const store = useTriggerImapStore(NODE_ID);
+  store.patchConfig(VALID_CONFIG);
+  store.connectionVerified = true;
+
+  return store;
+};
+
+describe('useTriggerImapStore · configuracion del nodo TRIGGER_IMAP', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia());
+    vi.clearAllMocks();
+  });
+
+  describe('1. Valores por defecto', () => {
+    it('1.1 deberia replicar los defaults del DTO backend', () => {
+      // 1. Arrange & 2. Act
+      const store = useTriggerImapStore(NODE_ID);
+
+      // 3. Assert
+      expect(store.config).toEqual({
+        host: '',
+        port: DEFAULT_IMAP_PORT,
+        secure: true,
+        user: '',
+        passwordEnvKey: '',
+        mailbox: DEFAULT_MAILBOX,
+        pollIntervalMs: DEFAULT_POLL_INTERVAL_MS,
+        fromFilter: '',
+        subjectFilterRegex: '',
+        subjectKeywords: [],
+        subjectKeywordMatch: 'AL_MENOS_UNA',
+        unreadOnly: DEFAULT_UNREAD_ONLY,
+        // Opt-IN, al reves que `unreadOnly`: el base64 de los adjuntos se
+        // reserializa en cada checkpoint, asi que se activa a proposito.
+        includeAttachments: false,
+        // Opt-IN tambien: el buzon corporativo es compartido y marcar como
+        // leidos los correos de otra persona es irreversible.
+        markAsRead: DEFAULT_MARK_AS_READ,
+      });
+      expect(DEFAULT_MARK_AS_READ).toBe(false);
+      expect(DEFAULT_IMAP_PORT).toBe(993);
+      expect(DEFAULT_MAILBOX).toBe('INBOX');
+      expect(DEFAULT_POLL_INTERVAL_MS).toBe(60_000);
+      expect(DEFAULT_UNREAD_ONLY).toBe(true);
+    });
+
+    it('1.2 deberia arrancar sin verificar y sin resultado previo', () => {
+      // 1. Arrange & 2. Act
+      const store = useTriggerImapStore(NODE_ID);
+
+      // 3. Assert
+      expect(store.connectionVerified).toBe(false);
+      expect(store.lastCheckResult).toBeNull();
+      expect(store.isConfigValid).toBe(false);
+    });
+  });
+
+  describe('2. Validacion de campos', () => {
+    it('2.1 deberia invalidar si falta el host', () => {
+      // 1. Arrange
+      const store = useTriggerImapStore(NODE_ID);
+
+      // 2. Act
+      store.patchConfig({ ...VALID_CONFIG, host: '   ' });
+
+      // 3. Assert: espacios en blanco no cuentan como host.
+      expect(store.hasValidFields).toBe(false);
+    });
+
+    it('2.2 deberia invalidar si falta el usuario', () => {
+      // 1. Arrange
+      const store = useTriggerImapStore(NODE_ID);
+
+      // 2. Act
+      store.patchConfig({ ...VALID_CONFIG, user: '' });
+
+      // 3. Assert
+      expect(store.hasValidFields).toBe(false);
+    });
+
+    it('2.3 deberia invalidar si el buzon esta vacio', () => {
+      // 1. Arrange
+      const store = useTriggerImapStore(NODE_ID);
+
+      // 2. Act
+      store.patchConfig({ ...VALID_CONFIG, mailbox: '' });
+
+      // 3. Assert
+      expect(store.hasValidFields).toBe(false);
+    });
+
+    it('2.4 deberia rechazar una passwordEnvKey fuera del patron', () => {
+      // 1. Arrange: intento de apuntar a otro secreto del entorno.
+      const store = useTriggerImapStore(NODE_ID);
+
+      // 2. Act & 3. Assert: el patron acota lo que el nodo puede leer del
+      //    entorno a credenciales de correo.
+      for (const envKey of [
+        'JWT_SECRET',
+        'MI_PASSWORD',
+        'IMAP_TOKEN',
+        'imap_password',
+        'DB_PASSWORD',
+      ]) {
+        store.patchConfig({ ...VALID_CONFIG, passwordEnvKey: envKey });
+        expect(store.hasValidFields).toBe(false);
+      }
+    });
+
+    it('2.5 deberia aceptar las claves IMAP_*PASSWORD legitimas', () => {
+      // 1. Arrange
+      const store = useTriggerImapStore(NODE_ID);
+
+      // 2. Act & 3. Assert
+      for (const envKey of ['IMAP_PASSWORD', 'IMAP_NOTIWEB_PASSWORD']) {
+        store.patchConfig({ ...VALID_CONFIG, passwordEnvKey: envKey });
+        expect(store.hasValidFields).toBe(true);
+      }
+    });
+
+    it('2.6 deberia rechazar un pollIntervalMs bajo el minimo del backend', () => {
+      // 1. Arrange
+      const store = useTriggerImapStore(NODE_ID);
+
+      // 2. Act
+      store.patchConfig({ ...VALID_CONFIG, pollIntervalMs: 1_000 });
+
+      // 3. Assert: sin esta regla el formulario dejaria enviar un valor que el
+      //    backend devuelve como 400.
+      expect(store.hasValidFields).toBe(false);
+
+      // 2. Act (limite exacto)
+      store.patchConfig({ pollIntervalMs: MIN_POLL_INTERVAL_MS });
+
+      // 3. Assert
+      expect(store.hasValidFields).toBe(true);
+    });
+
+    it('2.7 deberia rechazar un puerto fuera de rango', () => {
+      // 1. Arrange
+      const store = useTriggerImapStore(NODE_ID);
+
+      // 2. Act & 3. Assert
+      store.patchConfig({ ...VALID_CONFIG, port: 0 });
+      expect(store.hasValidFields).toBe(false);
+
+      store.patchConfig({ port: 70_000 });
+      expect(store.hasValidFields).toBe(false);
+
+      store.patchConfig({ port: 993 });
+      expect(store.hasValidFields).toBe(true);
+    });
+  });
+
+  describe('3. Prueba de conexion', () => {
+    it('3.1 deberia invocar al servicio con el payload recortado', async () => {
+      // 1. Arrange
+      const store = useTriggerImapStore(NODE_ID);
+      store.patchConfig({ ...VALID_CONFIG, host: '  imap.unuware.com  ' });
+      checkImapConnection.mockResolvedValue(SUCCESS_RESULT);
+
+      // 2. Act
+      await store.testConnection();
+
+      // 3. Assert: sin `password` en ningun caso, y con los espacios sobrantes
+      //    ya eliminados para que no lleguen al servidor de correo.
+      expect(checkImapConnection).toHaveBeenCalledWith({
+        host: VALID_HOST,
+        port: DEFAULT_IMAP_PORT,
+        secure: true,
+        user: VALID_USER,
+        passwordEnvKey: VALID_ENV_KEY,
+        mailbox: DEFAULT_MAILBOX,
+        pollIntervalMs: DEFAULT_POLL_INTERVAL_MS,
+      });
+      expect(checkImapConnection.mock.calls[0]?.[0]).not.toHaveProperty('password');
+    });
+
+    it('3.2 deberia habilitar isConfigValid tras una conexion correcta', async () => {
+      // 1. Arrange
+      const store = useTriggerImapStore(NODE_ID);
+      store.patchConfig(VALID_CONFIG);
+      checkImapConnection.mockResolvedValue(SUCCESS_RESULT);
+
+      // 2. Act
+      await store.testConnection();
+
+      // 3. Assert
+      expect(store.connectionVerified).toBe(true);
+      expect(store.isConfigValid).toBe(true);
+      expect(store.lastCheckResult).toEqual(SUCCESS_RESULT);
+    });
+
+    it('3.3 no deberia dar por verificada la conexion si el backend responde success false', async () => {
+      // 1. Arrange
+      const store = useTriggerImapStore(NODE_ID);
+      store.patchConfig(VALID_CONFIG);
+      checkImapConnection.mockResolvedValue(FAILURE_RESULT);
+
+      // 2. Act
+      await store.testConnection();
+
+      // 3. Assert: un fallo de credenciales llega como 200, asi que hay que
+      //    mirar el `success` del cuerpo y no solo el status. Con la prueba
+      //    fallida y sin reconocimiento, el paso NO avanza: los campos estan
+      //    bien formados, pero se sabe que no sirven.
+      expect(store.connectionVerified).toBe(false);
+      expect(store.lastCheckResult?.error?.level).toBe('GRAVE');
+      expect(store.isConfigValid).toBe(false);
+      expect(store.configWarnings).toHaveLength(1);
+    });
+
+    it('3.4 no deberia dar por valido el paso con los campos completos pero sin probar', () => {
+      // 1. Arrange & 2. Act
+      const store = useTriggerImapStore(NODE_ID);
+      store.patchConfig(VALID_CONFIG);
+
+      // 3. Assert: el Poka-Yoke del paso. Unas credenciales con formato correcto
+      //    pero equivocadas no fallarian hasta el primer sondeo en produccion.
+      expect(store.hasValidFields).toBe(true);
+      expect(store.isConfigValid).toBe(false);
+      expect(store.configWarnings).toEqual([UNVERIFIED_CONNECTION_WARNING]);
+    });
+
+    it('3.4.1 deberia desbloquear el paso cuando el operador declara que no comprueba', () => {
+      // 1. Arrange: la valvula de escape para un entorno sin servidor IMAP
+      //    alcanzable, que es lo que hacia inservible el bloqueo sin salida.
+      const store = useTriggerImapStore(NODE_ID);
+      store.patchConfig(VALID_CONFIG);
+
+      // 2. Act
+      store.skipCheckAcknowledged = true;
+
+      // 3. Assert: avanza, pero el aviso NO desaparece: el dialogo de guardado
+      //    sigue pidiendo confirmacion explicita.
+      expect(store.isConfigValid).toBe(true);
+      expect(store.configWarnings).toEqual([UNVERIFIED_CONNECTION_WARNING]);
+    });
+
+    it('3.4.2 deberia sobrevivir el reconocimiento a un cambio de credenciales', () => {
+      // 1. Arrange
+      const store = useTriggerImapStore(NODE_ID);
+      store.patchConfig(VALID_CONFIG);
+      store.skipCheckAcknowledged = true;
+
+      // 2. Act: corregir el host no cambia que el entorno siga sin servidor.
+      store.patchConfig({ host: 'otro.imap.unuware.com' });
+
+      // 3. Assert: `patchConfig` invalida la VERIFICACION, que es una afirmacion
+      //    sobre unos valores concretos, pero no el RECONOCIMIENTO, que es una
+      //    postura sobre el entorno. Invalidarlo obligaria a remarcarlo en cada
+      //    pulsacion de tecla.
+      expect(store.connectionVerified).toBe(false);
+      expect(store.skipCheckAcknowledged).toBe(true);
+      expect(store.isConfigValid).toBe(true);
+    });
+
+    it('3.4.3 deberia limpiar el reconocimiento en resetConfig', () => {
+      // 1. Arrange
+      const store = useTriggerImapStore(NODE_ID);
+      store.patchConfig(VALID_CONFIG);
+      store.skipCheckAcknowledged = true;
+
+      // 2. Act: esto no es corregir un campo, es empezar un nodo distinto.
+      store.resetConfig();
+
+      // 3. Assert
+      expect(store.skipCheckAcknowledged).toBe(false);
+      expect(store.isConfigValid).toBe(false);
+    });
+
+    it('3.5 deberia apagar isLoading aunque el servicio lance', async () => {
+      // 1. Arrange
+      const store = useTriggerImapStore(NODE_ID);
+      store.patchConfig(VALID_CONFIG);
+      checkImapConnection.mockRejectedValue(new Error('Network Error'));
+
+      // 2. Act & 3. Assert: la excepcion se propaga al componente, pero el
+      //    `finally` deja el spinner apagado.
+      await expect(store.testConnection()).rejects.toThrow('Network Error');
+      expect(store.isLoading).toBe(false);
+      expect(store.connectionVerified).toBe(false);
+    });
+  });
+
+  describe('4. Invalidacion de la verificacion', () => {
+    it('4.1 deberia invalidar la prueba al cambiar el host', () => {
+      // 1. Arrange
+      const store = buildVerifiedStore();
+      expect(store.isConfigValid).toBe(true);
+
+      // 2. Act
+      store.patchConfig({ host: 'imap.atacante.com' });
+
+      // 3. Assert: probar con un host correcto y cambiarlo despues avanzaria
+      //    con una configuracion que nunca se comprobo, asi que el aviso vuelve.
+      expect(store.connectionVerified).toBe(false);
+      expect(store.configWarnings).toHaveLength(1);
+    });
+
+    it('4.2 deberia invalidar la prueba al cambiar cualquier campo de conexion', () => {
+      // 1. Arrange & 2. Act & 3. Assert
+      const cases: Partial<TriggerImapConfig>[] = [
+        { user: 'otro@unuware.com' },
+        { passwordEnvKey: 'IMAP_NOTIWEB_PASSWORD' },
+        { port: 143 },
+        { secure: false },
+        { mailbox: 'Archivo' },
+        { pollIntervalMs: 120_000 },
+      ];
+
+      for (const patch of cases) {
+        const store = buildVerifiedStore();
+        store.patchConfig(patch);
+        expect(store.connectionVerified).toBe(false);
+      }
+    });
+
+    it('4.3 deberia descartar el resultado previo al cambiar la configuracion', () => {
+      // 1. Arrange
+      const store = buildVerifiedStore();
+      store.lastCheckResult = SUCCESS_RESULT;
+
+      // 2. Act
+      store.patchConfig({ host: 'otro.host.com' });
+
+      // 3. Assert: conservarlo mostraria un "Conexión exitosa" que ya no
+      //    corresponde a lo que hay en el formulario.
+      expect(store.lastCheckResult).toBeNull();
+    });
+  });
+
+  describe('4bis. Filtros de disparo', () => {
+    it('4bis.1 deberia publicar unreadOnly y omitir los filtros vacios', () => {
+      // 1. Arrange
+      const store = buildVerifiedStore();
+
+      // 2. Act
+      const params = store.toNodeParams();
+
+      // 3. Assert: el DTO del backend rechaza un filtro vacio con
+      // `@IsNotEmpty()`, porque en IMAP SEARCH `''` casa con todo.
+      expect(params.unreadOnly).toBe(true);
+      expect(params).not.toHaveProperty('fromFilter');
+      expect(params).not.toHaveProperty('subjectFilterRegex');
+    });
+
+    it('4bis.2 deberia publicar los filtros recortados cuando tienen valor', () => {
+      // 1. Arrange
+      const store = buildVerifiedStore();
+      store.patchFilters({
+        fromFilter: '  redaccion@noticias.es  ',
+        subjectFilterRegex: '  Notiweb  ',
+        unreadOnly: false,
+      });
+
+      // 2. Act
+      const params = store.toNodeParams();
+
+      // 3. Assert
+      expect(params.fromFilter).toBe('redaccion@noticias.es');
+      expect(params.subjectFilterRegex).toBe('Notiweb');
+      expect(params.unreadOnly).toBe(false);
+    });
+
+    it('4bis.3 NO deberia enviar los filtros en la comprobacion de conexion', () => {
+      // 1. Arrange
+      const store = buildVerifiedStore();
+      store.patchFilters({ fromFilter: 'redaccion@noticias.es' });
+
+      // 2. Act
+      const payload = store.checkPayload;
+
+      // 3. Assert: `/wizard/check-imap` valida con `forbidNonWhitelisted`, asi
+      // que un filtro de mas en ese cuerpo devolveria un 400.
+      expect(payload).not.toHaveProperty('fromFilter');
+      expect(payload).not.toHaveProperty('unreadOnly');
+    });
+
+    it('4bis.4 NO deberia invalidar la conexion verificada al cambiar un filtro', () => {
+      // 1. Arrange
+      const store = buildVerifiedStore();
+
+      // 2. Act
+      store.patchFilters({ fromFilter: 'redaccion@noticias.es' });
+
+      // 3. Assert: un filtro no interviene en la conexion; obligar a reprobarla
+      // por escribir un remitente seria ruido, no seguridad.
+      expect(store.connectionVerified).toBe(true);
+      expect(store.isConfigValid).toBe(true);
+    });
+
+    it('4bis.5 SI deberia invalidarla al cambiar un campo de conexion', () => {
+      // 1. Arrange
+      const store = buildVerifiedStore();
+
+      // 2. Act
+      store.patchConfig({ host: 'otro.servidor.com' });
+
+      // 3. Assert: contraste con 4bis.4, que es lo que da sentido a la
+      // separacion entre `patchFilters` y `patchConfig`.
+      expect(store.connectionVerified).toBe(false);
+      expect(store.configWarnings).toHaveLength(1);
+    });
+  });
+
+  describe('4quater. Avisos de configuracion', () => {
+    it('4quater.1 no deberia avisar con los campos incompletos', () => {
+      // 1. Arrange & 2. Act: el paso ya es invalido por si solo.
+      const store = useTriggerImapStore(NODE_ID);
+
+      // 3. Assert: avisar encima de un bloqueo seria ruido.
+      expect(store.isConfigValid).toBe(false);
+      expect(store.configWarnings).toEqual([]);
+    });
+
+    it('4quater.2 deberia avisar con los campos completos y sin probar', () => {
+      // 1. Arrange & 2. Act
+      const store = useTriggerImapStore(NODE_ID);
+      store.patchConfig(VALID_CONFIG);
+
+      // 3. Assert
+      expect(store.configWarnings).toEqual([UNVERIFIED_CONNECTION_WARNING]);
+    });
+
+    it('4quater.3 no deberia avisar tras una prueba correcta', () => {
+      // 1. Arrange & 2. Act
+      const store = buildVerifiedStore();
+
+      // 3. Assert
+      expect(store.configWarnings).toEqual([]);
+    });
+
+    it('4quater.4 no deberia avisar tras cambiar solo un filtro', () => {
+      // 1. Arrange
+      const store = buildVerifiedStore();
+
+      // 2. Act
+      store.patchFilters({ fromFilter: 'redaccion@noticias.es' });
+
+      // 3. Assert: un filtro no toca las credenciales, asi que no hay nada nuevo
+      //    que advertir.
+      expect(store.configWarnings).toEqual([]);
+    });
+  });
+
+  describe('4ter. Hidratacion desde un nodo guardado', () => {
+    /** Nodo tal y como viene en el `pipeline_schema` de un flujo existente. */
+    const buildSavedNode = (params: Record<string, unknown> = {}) => ({
+      outputNamespace: 'raw_email',
+      params: {
+        host: VALID_HOST,
+        port: 993,
+        secure: true,
+        user: VALID_USER,
+        passwordEnvKey: VALID_ENV_KEY,
+        mailbox: 'INBOX',
+        pollIntervalMs: 60_000,
+        unreadOnly: true,
+        includeAttachments: false,
+        markAsRead: false,
+        ...params,
+      },
+    });
+
+    it('4ter.1 deberia reproducir los params originales (ida y vuelta)', () => {
+      // 1. Arrange
+      const store = useTriggerImapStore(NODE_ID);
+      const node = buildSavedNode({
+        fromFilter: 'redaccion@noticias.es',
+        subjectFilterRegex: '^notiweb',
+      });
+
+      // 2. Act
+      store.hydrateFromNode(node);
+
+      // 3. Assert: el contrato del registro es que hidratar y volver a serializar
+      // devuelva lo mismo. Si no, editar un flujo perderia campos en silencio.
+      expect(store.toNodeParams()).toEqual(node.params);
+    });
+
+    it('4ter.1bis deberia PURGAR el subjectFilter de un flujo heredado', () => {
+      // 1. Arrange 📐: es la unica excepcion deliberada al viaje de ida y
+      //    vuelta de arriba. Ese campo era el criterio SUBJECT de IMAP SEARCH y
+      //    descartaba los correos con tilde antes de que el patron local
+      //    pudiera plegar los acentos; conservarlo al reguardar perpetuaria la
+      //    colision en el flujo que alguien acaba de abrir para arreglarla.
+      const store = useTriggerImapStore(NODE_ID);
+      const node = buildSavedNode({
+        subjectFilter: 'Verificacion',
+        subjectFilterRegex: '(?:verificacion|titulos)',
+      });
+
+      // 2. Act ⚙️
+      store.hydrateFromNode(node);
+
+      // 3. Assert 🎯
+      const params = store.toNodeParams();
+
+      expect(params).not.toHaveProperty('subjectFilter');
+      // El patron heredado por subcadena se reescribe como palabras completas.
+      expect(params).not.toHaveProperty('subjectFilterRegex');
+      expect(params.subjectKeywords).toEqual(['verificacion', 'titulos']);
+      expect(params.subjectMatchMode).toBe('AL_MENOS_UNA');
+    });
+
+    it('4ter.1ter deberia reproducir palabras clave en modo AND (ida y vuelta)', () => {
+      // 1. Arrange 📐
+      const store = useTriggerImapStore(NODE_ID);
+      const node = buildSavedNode({
+        subjectKeywords: ['verificacion', 'titulos'],
+        subjectMatchMode: 'TODAS_LAS_PALABRAS',
+      });
+
+      // 2. Act ⚙️
+      store.hydrateFromNode(node);
+
+      // 3. Assert 🎯
+      expect(store.subjectMatchMode).toBe('ALL_WORDS');
+      expect(store.subjectMatchDraft).toBe('verificacion, titulos');
+      expect(store.toNodeParams()).toEqual(node.params);
+    });
+
+    it('4ter.2 deberia reponer los filtros que el esquema omite', () => {
+      // 1. Arrange: `toNodeParams()` OMITE los filtros vacios, asi que un nodo
+      // sin filtrar no trae esas claves.
+      const store = useTriggerImapStore(NODE_ID);
+
+      // 2. Act
+      store.hydrateFromNode(buildSavedNode());
+
+      // 3. Assert: `''` y no `undefined`, que dejaria el `<q-input>` como campo
+      // descontrolado en Vue.
+      expect(store.config.fromFilter).toBe('');
+      expect(store.config.subjectFilterRegex).toBe('');
+    });
+
+    it('4ter.3 deberia dar la configuracion por verificada', () => {
+      // 1. Arrange
+      const store = useTriggerImapStore(NODE_ID);
+
+      // 2. Act
+      store.hydrateFromNode(buildSavedNode());
+
+      // 3. Assert: ya supero la prueba cuando el flujo se creo; volver a
+      // exigirla obligaria a reprobar el buzon por cambiar una palabra.
+      expect(store.connectionVerified).toBe(true);
+      expect(store.isConfigValid).toBe(true);
+    });
+
+    it('4ter.4 deberia recurrir a los defaults ante un esquema incompleto', () => {
+      // 1. Arrange: la columna es `jsonb` y pudo escribirse por SQL directo.
+      const store = useTriggerImapStore(NODE_ID);
+
+      // 2. Act
+      store.hydrateFromNode({ outputNamespace: 'raw_email', params: {} });
+
+      // 3. Assert
+      expect(store.config.port).toBe(DEFAULT_IMAP_PORT);
+      expect(store.config.mailbox).toBe(DEFAULT_MAILBOX);
+      expect(store.config.pollIntervalMs).toBe(DEFAULT_POLL_INTERVAL_MS);
+      expect(store.config.host).toBe('');
+    });
+  });
+
+  describe('4quinquies. Ingesta de adjuntos', () => {
+    it('4quinquies.1 deberia hidratar el valor guardado como true', () => {
+      // 1. Arrange
+      const store = useTriggerImapStore(NODE_ID);
+
+      // 2. Act
+      store.hydrateFromNode({
+        outputNamespace: 'raw_email',
+        params: { includeAttachments: true },
+      });
+
+      // 3. Assert
+      expect(store.config.includeAttachments).toBe(true);
+    });
+
+    it('4quinquies.2 deberia caer a false cuando el esquema omite la clave', () => {
+      // 1. Arrange: los flujos guardados antes de que el campo existiera.
+      const store = useTriggerImapStore(NODE_ID);
+
+      // 2. Act
+      store.hydrateFromNode({ outputNamespace: 'raw_email', params: {} });
+
+      // 3. Assert
+      expect(store.config.includeAttachments).toBe(false);
+    });
+
+    it('4quinquies.3 NO deberia tomar la cadena "false" por un true', () => {
+      // 1. Arrange: `configuracion_pipeline` es jsonb y pudo escribirse por SQL
+      // directo. Una cadena no vacia es *truthy* en JavaScript, asi que sin la
+      // comparacion estricta el operador veria encendida una ingesta que el
+      // backend interpreta como apagada.
+      const store = useTriggerImapStore(NODE_ID);
+
+      // 2. Act
+      store.hydrateFromNode({
+        outputNamespace: 'raw_email',
+        params: { includeAttachments: 'false' },
+      });
+
+      // 3. Assert
+      expect(store.config.includeAttachments).toBe(false);
+    });
+
+    it('4quinquies.4 deberia emitirlo como booleano real en los params', () => {
+      // 1. Arrange
+      const store = useTriggerImapStore(NODE_ID);
+      store.patchConfig({ ...VALID_CONFIG, includeAttachments: true });
+
+      // 2. Act
+      const params = store.toNodeParams();
+
+      // 3. Assert: el DTO del backend lo valida con `@IsBoolean()`; una cadena
+      // haria fallar el nodo entero al ejecutarse.
+      expect(params.includeAttachments).toBe(true);
+      expect(typeof params.includeAttachments).toBe('boolean');
+    });
+
+    it('4quinquies.5 NO deberia viajar en el payload de la prueba de conexion', () => {
+      // 1. Arrange: `POST /api/wizard/check-imap` solo comprueba que el buzon
+      // responde; los adjuntos no le aportan nada.
+      const store = useTriggerImapStore(NODE_ID);
+      store.patchConfig({ ...VALID_CONFIG, includeAttachments: true });
+
+      // 2. Act
+      const payload = store.checkPayload;
+
+      // 3. Assert
+      expect(payload).not.toHaveProperty('includeAttachments');
+    });
+  });
+
+  describe('5. Reseteo', () => {
+    it('5.1 deberia devolver el nodo a su estado inicial', () => {
+      // 1. Arrange
+      const store = buildVerifiedStore();
+      store.lastCheckResult = SUCCESS_RESULT;
+
+      // 2. Act
+      store.resetConfig();
+
+      // 3. Assert
+      expect(store.config.host).toBe('');
+      expect(store.config.port).toBe(DEFAULT_IMAP_PORT);
+      expect(store.connectionVerified).toBe(false);
+      expect(store.lastCheckResult).toBeNull();
+      expect(store.isConfigValid).toBe(false);
+    });
+  });
+
+  describe('Parametros impuestos por la plantilla', () => {
+    it('deberia encender y BLOQUEAR la ingesta de adjuntos que pide la plantilla', () => {
+      // 1. Arrange 📐: la ruta de contingencia de vision IA lee
+      //    `raw_email.attachments`. Si el operador pudiera apagarlos desde el
+      //    asistente, el desvio pasaria la validacion y llamaria al modelo sin
+      //    nada que leer: un respaldo mudo.
+      const store = useTriggerImapStore('trigger_plantilla');
+
+      // 2. Act ⚙️
+      store.applyTemplateParams({ includeAttachments: true });
+
+      // 3. Assert 🎯
+      expect(store.config.includeAttachments).toBe(true);
+      expect(store.isFieldLockedByTemplate('includeAttachments')).toBe(true);
+    });
+
+    it('NO deberia bloquear nada si la plantilla lo deja apagado', () => {
+      // 1. Arrange 📐: un `false` no sostiene ninguna ruta, y bloquearlo solo
+      //    le quitaria al operador una decision que es suya.
+      const store = useTriggerImapStore('trigger_sin_adjuntos');
+
+      // 2. Act ⚙️
+      store.applyTemplateParams({ includeAttachments: false });
+
+      // 3. Assert 🎯
+      expect(store.isFieldLockedByTemplate('includeAttachments')).toBe(false);
+    });
+
+    it('NO deberia dar por probada la conexion', () => {
+      // 1. Arrange 📐: es la razon de que este sea un canal APARTE de
+      //    `hydrateFromNode`. Una plantilla no prueba ningun buzon, y darlo por
+      //    verificado dejaria pasar unas credenciales que nadie ha comprobado.
+      const store = useTriggerImapStore('trigger_sin_verificar');
+
+      // 2. Act ⚙️
+      store.applyTemplateParams({ includeAttachments: true });
+
+      // 3. Assert 🎯
+      expect(store.connectionVerified).toBe(false);
+    });
+
+    it('deberia soltar el bloqueo al resetear el nodo', () => {
+      // 1. Arrange 📐: el bloqueo pertenece a la plantilla que se abandona;
+      //    conservarlo dejaria un campo deshabilitado en un flujo que ya no lo
+      //    exige.
+      const store = useTriggerImapStore('trigger_reset');
+      store.applyTemplateParams({ includeAttachments: true });
+
+      // 2. Act ⚙️
+      store.resetConfig();
+
+      // 3. Assert 🎯
+      expect(store.isFieldLockedByTemplate('includeAttachments')).toBe(false);
+    });
+  });
+  describe('4sexies. Filtro de asunto por expresion regular', () => {
+    it('4sexies.1 deberia arrancar sin filtro', () => {
+      // 1. Arrange 📐 + 2. Act ⚙️
+      const store = useTriggerImapStore(NODE_ID);
+
+      // 3. Assert 🎯: es opt-in; un patron sugerido descartaria correos en un
+      //    flujo que nadie configuro para eso.
+      expect(store.config.subjectFilterRegex).toBe('');
+    });
+
+    it('4sexies.2 NO deberia invalidar la conexion ya probada', () => {
+      // 1. Arrange 📐
+      const store = useTriggerImapStore(NODE_ID);
+
+      store.$patch({ connectionVerified: true });
+
+      // 2. Act ⚙️
+      store.patchFilters({ subjectFilterRegex: '^S_2026_' });
+
+      // 3. Assert 🎯: a que asuntos se atiende no cambia las credenciales.
+      expect(store.connectionVerified).toBe(true);
+    });
+
+    it('4sexies.3 deberia publicar el patron solo cuando no esta vacio', () => {
+      // 1. Arrange 📐
+      const store = useTriggerImapStore(NODE_ID);
+
+      store.patchConfig(VALID_CONFIG);
+
+      // 2. Act ⚙️ + 3. Assert 🎯
+      expect(store.toNodeParams()).not.toHaveProperty('subjectFilterRegex');
+
+      store.patchFilters({ subjectFilterRegex: '  ^S_2026_  ' });
+
+      expect(store.toNodeParams()).toMatchObject({
+        subjectFilterRegex: '^S_2026_',
+      });
+    });
+
+    it('4sexies.4 deberia bloquear el paso con un patron que no compila', () => {
+      // 1. Arrange 📐
+      const verified = buildVerifiedStore();
+
+      expect(verified.isConfigValid).toBe(true);
+
+      // 2. Act ⚙️
+      verified.patchFilters({ subjectFilterRegex: '([' });
+
+      // 3. Assert 🎯: dejarlo avanzar guardaria un esquema que el backend
+      //    rechaza, con el error apareciendo lejos del campo que lo causo.
+      expect(verified.hasValidFields).toBe(false);
+      expect(verified.isConfigValid).toBe(false);
+    });
+
+    it('4sexies.5 deberia rehidratar el patron guardado', () => {
+      // 1. Arrange 📐
+      const store = useTriggerImapStore(NODE_ID);
+
+      // 2. Act ⚙️
+      store.hydrateFromNode({
+        outputNamespace: 'raw_email',
+        params: { ...VALID_CONFIG, subjectFilterRegex: '^Notiweb' },
+      });
+
+      // 3. Assert 🎯
+      expect(store.config.subjectFilterRegex).toBe('^Notiweb');
+    });
+
+    it('4sexies.6 deberia aceptar el vacio como "sin filtro" en el validador', () => {
+      // 1. Arrange 📐 + 2. Act ⚙️ + 3. Assert 🎯: la ausencia del campo no es un
+      //    error de sintaxis, igual que en el DTO del backend.
+      expect(isValidRegexPattern('')).toBe(true);
+      expect(isValidRegexPattern('^S_2026_.*')).toBe(true);
+      expect(isValidRegexPattern('([')).toBe(false);
+    });
+  });
+
+  describe('4septies. Marcado de lectura del buzon', () => {
+    /**
+     * El campo existia en el DTO del backend desde el principio, pero ninguna
+     * pieza del frontend lo contemplaba: no habia forma de decidirlo desde el
+     * asistente y todo flujo se guardaba con el defecto.
+     */
+    /** Nodo guardado minimo; `buildSavedNode` vive en otro bloque. */
+    const savedNode = (params: Record<string, unknown>) => ({
+      outputNamespace: 'raw_email',
+      params: {
+        host: VALID_HOST,
+        port: 993,
+        secure: true,
+        user: VALID_USER,
+        passwordEnvKey: VALID_ENV_KEY,
+        mailbox: 'INBOX',
+        ...params,
+      },
+    });
+
+    it('4septies.1 deberia nacer SIN marcar, como el DTO', () => {
+      // 1. Arrange 📐 & 2. Act ⚙️
+      const store = useTriggerImapStore(NODE_ID);
+
+      // 3. Assert 🎯: el buzon es corporativo y compartido; marcar como leidos
+      // los correos de otra persona es irreversible.
+      expect(store.config.markAsRead).toBe(false);
+    });
+
+    it('4septies.2 deberia publicarlo SIEMPRE, tambien apagado', () => {
+      // 1. Arrange 📐: omitirlo dejaria que mandara el defecto del DTO, que hoy
+      //    coincide pero no tiene por que seguir haciendolo.
+      const store = useTriggerImapStore(NODE_ID);
+
+      // 2. Act ⚙️
+      const params = store.toNodeParams();
+
+      // 3. Assert 🎯
+      expect(params).toHaveProperty('markAsRead', false);
+    });
+
+    it('4septies.3 deberia publicar el valor que eligio el operador', () => {
+      // 1. Arrange 📐
+      const store = useTriggerImapStore(NODE_ID);
+
+      // 2. Act ⚙️
+      store.patchConfig({ markAsRead: true });
+
+      // 3. Assert 🎯
+      expect(store.toNodeParams()).toHaveProperty('markAsRead', true);
+    });
+
+    it('4septies.4 deberia rehidratarlo de un nodo guardado', () => {
+      // 1. Arrange 📐
+      const store = useTriggerImapStore(NODE_ID);
+
+      // 2. Act ⚙️
+      store.hydrateFromNode(savedNode({ markAsRead: true }));
+
+      // 3. Assert 🎯
+      expect(store.config.markAsRead).toBe(true);
+    });
+
+    it('4septies.5 deberia descartar la cadena "false" de una escritura por SQL', () => {
+      // 1. Arrange 📐: en JavaScript esa cadena es *truthy*, asi que una
+      //    comparacion laxa encenderia el marcado sobre un flujo que lo tenia
+      //    apagado — y el efecto es irreversible sobre un buzon compartido.
+      const store = useTriggerImapStore(NODE_ID);
+
+      // 2. Act ⚙️
+      store.hydrateFromNode(savedNode({ markAsRead: 'false' }));
+
+      // 3. Assert 🎯
+      expect(store.config.markAsRead).toBe(false);
+    });
+  });
+});

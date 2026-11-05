@@ -5,6 +5,7 @@ import {
   HttpCode,
   HttpStatus,
   Post,
+  Req,
   UseGuards,
   UseInterceptors,
 } from '@nestjs/common';
@@ -18,12 +19,14 @@ import {
 import { Throttle, ThrottlerGuard } from '@nestjs/throttler';
 
 import { OTP_THROTTLER_NAME } from '@common/constants/throttler.constants';
+import { extractClientIp } from '@common/utils/client-ip.util';
 import { AuthService } from '@modules/auth/auth.service';
 import { RefreshTokenDto } from '@modules/auth/dto/refresh-token.dto';
 import { RequestOtpDto } from '@modules/auth/dto/request-otp.dto';
 import { VerifyOtpDto } from '@modules/auth/dto/verify-otp.dto';
 import { OtpConfigService } from '@modules/auth/services/otp-config.service';
 
+import type { Request } from 'express';
 import type {
   AuthTokenResponse,
   OtpRequestResponse,
@@ -103,11 +106,13 @@ export class AuthController {
   @ApiTooManyRequestsResponse({ description: 'Limite de intentos excedido' })
   public async validate(
     @Body() verifyOtpDto: VerifyOtpDto,
+    @Req() request: Request,
   ): Promise<AuthTokenResponse> {
     return this.authService.verifyOtp(
       verifyOtpDto.email,
       verifyOtpDto.code,
       verifyOtpDto.deviceId,
+      extractClientIp(request),
     );
   }
 
@@ -138,8 +143,15 @@ export class AuthController {
     status: HttpStatus.NO_CONTENT,
     description: 'Sesion cerrada (idempotente)',
   })
-  public async logout(@Body() refreshTokenDto: RefreshTokenDto): Promise<void> {
+  public async logout(
+    @Body() refreshTokenDto: RefreshTokenDto,
+    @Req() request: Request,
+  ): Promise<void> {
     // Idempotente: cerrar una sesion ya cerrada no es un error para el cliente.
-    await this.authService.logout(refreshTokenDto.refreshToken);
+    // La IP viaja para la traza de `CIERRE_SESION`, igual que en el login.
+    await this.authService.logout(
+      refreshTokenDto.refreshToken,
+      extractClientIp(request),
+    );
   }
 }

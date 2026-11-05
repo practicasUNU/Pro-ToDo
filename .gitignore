@@ -6,6 +6,7 @@ backend/node_modules/
 frontend/node_modules/
 .pnp
 .pnp.js
+ultima_ejecucion.json
 
 # =============================================================================
 # Compilación y Salidas de Build
@@ -33,8 +34,16 @@ frontend/.env
 # =============================================================================
 # Logs físicos y Depuración
 # =============================================================================
-logs/
-backend/logs/
+# `backend/logs/` con ruta, y NO un `logs/` suelto: sin la ruta, el patron ignora
+# cualquier directorio llamado `logs` a cualquier profundidad, y eso se tragaba
+# `backend/src/modules/logs/` entero —el modulo de trazabilidad— dejandolo fuera
+# del repositorio sin avisar.
+#
+# Y apuntando al CONTENIDO (`/*`) y no al directorio: git no desciende a un
+# directorio excluido, asi que sobre `backend/logs/` la negacion de abajo seria
+# inerte y el `.gitkeep` nunca se versionaria.
+backend/logs/*
+!backend/logs/.gitkeep
 *.log
 npm-debug.log*
 yarn-debug.log*
@@ -69,3 +78,5 @@ Thumbs.db
 *.njsproj
 *.sln
 *.sw?
+# Capturas generadas para el informe tecnico (scripts/generate-doc-screenshots.js)
+docs/capturas/

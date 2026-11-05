@@ -73,25 +73,33 @@ Cada estrategia y servicio debe contar obligatoriamente con pruebas negativas qu
 
 
 ```typescript
-it('should return GRAVE error when mandatory fields are missing', async () => {
+it('deberia devolver un GRAVE cuando la plantilla aun trae marcadores', async () => {
   // Arrange 📐
-  const strategy = new TemplateMapperStrategy();
-  const context = new StatePayloadContext('exec-124', 'MAPEADOR_PLANTILLA');
-  // Contexto sin la clave "titulo" esperada
+  const templatesService = { findOne: jest.fn().mockResolvedValue(template) };
+  const strategy = new TemplateMapperStrategy(
+    templatesService as unknown as TemplatesService,
+    createTemplateRendererService(),
+  );
+  const context = createMockStatePayloadContext({ currentStep: 'MAPEADOR_PLANTILLA' });
 
   // Act ⚙️
-  const result = await strategy.execute(context, {
-    templateId: 'tpl-1',
-    variableMapping: { title: 'nodo_sanitizado.titulo' },
-  });
+  const result = await strategy.execute(context, { templateId: TEMPLATE_ID });
 
   // Assert 🎯
   expect(result.success).toBe(false);
   expect(result.error?.level).toBe('GRAVE');
-  expect(result.error?.missingFields).toContain('nodo_sanitizado.titulo');
+  expect(result.error?.code).toBe(ERR_TEMPLATE_PENDING_VARS);
+  expect(result.error?.missingFields).toContain('parsed_email.clean_title');
 });
 
 ```
+
+> Nota: el `MAPEADOR_PLANTILLA` ya **no** mapea pares de variables, de modo que no
+> existe ningun `params.variableMapping`. Desde el cambio de semantica inyecta la
+> plantilla base saneada para que la rellene un `PROCESADOR_IA` posterior, y
+> rechaza con `ERR_TEMPLATE_PENDING_VARS` cualquier plantilla que aun interpole.
+> Siempre se afirma sobre `error.code` ademas de sobre `error.level`: el codigo es
+> el contrato que leen las rutas `onErrorStep`.
 
 ---
 

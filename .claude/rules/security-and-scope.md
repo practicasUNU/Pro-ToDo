@@ -32,9 +32,9 @@
   - Envío del código OTP exclusivamente al correo corporativo del usuario.
   - Emisión de un token JWT tras la validación exitosa del OTP.
 - **Límite de Tasa (Rate Limiting):** Proteger los endpoints de generación y validación de OTP con `@nestjs/throttler` para mitigar ataques de fuerza bruta o saturación de correos.
-- **Control de Acceso Basado en Roles (RBAC):**
-  - **Administrador:** Acceso completo al sistema y exclusivo al módulo CRUD de usuarios.
-  - **Editor:** Operación, configuración y auditoría de flujos y plantillas; sin acceso a la gestión de cuentas de usuario.
+- **Control de Acceso Basado en Roles (RBAC):** el enum `UserRole` (`backend/src/modules/users/enums/user-role.enum.ts`) usa los valores en inglés `ADMIN` / `EDITOR`, aplicados vía `@Roles(...)` y `RolesGuard` (403 `ForbiddenException` si el rol es insuficiente). "Administrador" y "Editor" son las etiquetas en español que muestra la UI, no los valores literales del enum.
+  - **`ADMIN` (Administrador):** Acceso completo al sistema y exclusivo al módulo CRUD de usuarios.
+  - **`EDITOR` (Editor):** Operación, configuración y auditoría de flujos y plantillas; sin acceso a la gestión de cuentas de usuario.
 
 ---
 

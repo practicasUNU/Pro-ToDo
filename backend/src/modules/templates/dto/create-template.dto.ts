@@ -1,0 +1,66 @@
+import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
+import {
+  IsBoolean,
+  IsNotEmpty,
+  IsOptional,
+  IsString,
+  MaxLength,
+} from 'class-validator';
+
+import { TrimmedString } from '@common/decorators/trimmed-string.decorator';
+
+/**
+ * Alta de plantilla (PROT-11.1).
+ *
+ * No incluye `requiredVariables` ni `createdById` a proposito: la primera la
+ * deriva el servicio del propio HTML y la segunda sale del JWT. Aceptarlas por
+ * el cuerpo permitiria declarar variables que la plantilla no usa o suplantar
+ * la autoria.
+ */
+export class CreateTemplateDto {
+  @ApiProperty({
+    description: 'Nombre unico de la plantilla',
+    example: 'noticia-basica',
+    maxLength: 120,
+  })
+  @TrimmedString()
+  @IsString()
+  @IsNotEmpty()
+  @MaxLength(120)
+  name: string;
+
+  @ApiPropertyOptional({
+    description: 'Proposito de la plantilla, para el listado administrativo',
+    example: 'Cuerpo de noticia con titular y resumen generado por IA',
+    maxLength: 255,
+  })
+  @TrimmedString()
+  @IsOptional()
+  @IsString()
+  @MaxLength(255)
+  description?: string;
+
+  @ApiProperty({
+    description:
+      'HTML con variables {{namespace.campo}}. Solo sustitucion determinista: ' +
+      'quedan prohibidos los bloques ({{#if}}), los parciales ({{>}}) y el ' +
+      'triple-stash ({{{ }}}).',
+    example:
+      '<h1>{{parsed_email.clean_title}}</h1><p>{{llm_response.summary}}</p>',
+  })
+  @TrimmedString()
+  @IsString()
+  @IsNotEmpty()
+  htmlContent: string;
+
+  @ApiPropertyOptional({
+    description:
+      'Disponibilidad de la plantilla. En el alta se ignora (toda plantilla nace activa); ' +
+      'en la edicion es la via para reactivar una retirada desde la tabla administrativa.',
+    example: true,
+    default: true,
+  })
+  @IsOptional()
+  @IsBoolean()
+  active?: boolean;
+}

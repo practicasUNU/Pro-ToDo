@@ -69,7 +69,13 @@ onBeforeUnmount(clearCountdown);
       </q-card-section>
 
       <q-card-actions align="right" class="q-px-md q-pb-md">
-        <q-btn flat no-caps label="Cerrar sesion" class="pd-btn-cancel" @click="onDialogCancel" />
+        <q-btn
+          flat
+          no-caps
+          label="Cerrar sesion"
+          class="pd-btn-secondary"
+          @click="onDialogCancel"
+        />
         <q-btn
           class="pd-btn-primary"
           unelevated
@@ -88,12 +94,8 @@ onBeforeUnmount(clearCountdown);
   color: var(--pd-warning);
 }
 
-.pd-btn-cancel {
-  color: var(--pd-text-secondary);
-}
-
 .pd-countdown {
   color: var(--pd-negative);
-  font-size: 18px;
+  font-size: 1.125rem;
 }
 </style>

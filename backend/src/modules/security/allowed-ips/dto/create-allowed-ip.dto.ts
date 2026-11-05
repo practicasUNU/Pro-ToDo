@@ -1,8 +1,11 @@
 import { IsNotEmpty, IsString, Matches, MaxLength } from 'class-validator';
 
+import { TrimmedString } from '@common/decorators/trimmed-string.decorator';
+
 import { IP_OR_CIDR_REGEX } from '@common/constants/security.constants';
 
 export class CreateAllowedIpDto {
+  @TrimmedString()
   @IsString()
   @IsNotEmpty()
   @MaxLength(64)
@@ -12,6 +15,7 @@ export class CreateAllowedIpDto {
   })
   ipOrCidr: string;
 
+  @TrimmedString()
   @IsString()
   @IsNotEmpty()
   @MaxLength(255)

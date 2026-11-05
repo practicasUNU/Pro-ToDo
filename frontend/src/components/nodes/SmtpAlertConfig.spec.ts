@@ -1,0 +1,264 @@
+// @vitest-environment happy-dom
+//
+// Directiva POR ARCHIVO, igual que en `WebScraperConfig.spec.ts`: los specs de
+// store no necesitan DOM y arrancan mas rapido sin el.
+import { config, mount } from '@vue/test-utils';
+import { createPinia, setActivePinia } from 'pinia';
+import { Notify, QBanner, QIcon, QInput, QSelect, Quasar } from 'quasar';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+
+import SmtpAlertConfig from '@components/nodes/SmtpAlertConfig.vue';
+import { useSmtpAlertStore } from '@stores/nodes/smtp-alert.store';
+
+import { DEFAULT_ALERT_SUBJECT } from '@/types/nodes/smtp-alert.types';
+
+const RECIPIENT = 'guardia@unuware.com';
+
+/** `nodeId` unico por prueba: las definiciones de Pinia se memoizan por modulo. */
+let nodeCounter = 0;
+const nextNodeId = (): string => `smtp_alert_view_${(nodeCounter += 1)}`;
+
+const QUASAR_COMPONENTS = { QBanner, QIcon, QInput, QSelect };
+
+const mountComponent = (nodeId: string): ReturnType<typeof mount> =>
+  mount(SmtpAlertConfig, {
+    props: { nodeId },
+    global: { plugins: [[Quasar, { plugins: { Notify } }]], components: QUASAR_COMPONENTS },
+  });
+
+/**
+ * El control de un campo, localizado por el `data-test` de su CONTENEDOR.
+ *
+ * Quasar derrama los atributos sobre un div interno, asi que marcar el propio
+ * `q-select` no serviria para encontrarlo.
+ */
+const selectByField = (wrapper: ReturnType<typeof mount>, field: string) =>
+  wrapper.get(`[data-test="${field}"]`).findComponent(QSelect);
+
+describe('SmtpAlertConfig · configurador del nodo DESTINO_SMTP', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia());
+    config.global.plugins = [];
+  });
+
+  describe('1. Montaje', () => {
+    it('1.1 deberia pintar los tres campos configurables', () => {
+      // 1. Arrange 📐 + 2. Act ⚙️: `use-chips` no se usaba en ningun otro sitio
+      //    del proyecto, y un selector que revienta al renderizar no lo detecta
+      //    `vue-tsc`.
+      const wrapper = mountComponent(nextNodeId());
+
+      // 3. Assert 🎯
+      expect(wrapper.find('[data-test="recipients-field"]').exists()).toBe(true);
+      expect(wrapper.find('[data-test="subject-field"]').exists()).toBe(true);
+      expect(wrapper.find('[data-test="custom-message-field"]').exists()).toBe(true);
+      // La copia se retiro: un aviso de incidencia tiene destinatarios, y "en
+      // copia" solo multiplicaba las direcciones que sanear sin anadir nada.
+      expect(wrapper.find('[data-test="cc-field"]').exists()).toBe(false);
+    });
+
+    it('1.1bis deberia sanear una lista pegada en el campo de destinatarios', async () => {
+      // 1. Arrange 📐: sin interceptar el pegado, `new-value-mode="add-unique"`
+      //    registraba la cadena ENTERA como una sola direccion, y el chip solo
+      //    se descubria invalido al guardar, con un 400 del backend.
+      const nodeId = nextNodeId();
+      const wrapper = mountComponent(nodeId);
+      const store = useSmtpAlertStore(nodeId);
+
+      // 2. Act ⚙️
+      await wrapper
+        .get('[data-test="recipients-field"]')
+        .find('input')
+        .trigger('paste', {
+          clipboardData: { getData: () => 'a@x.com, b@y.com;; basura c@z.com' },
+        });
+
+      // 3. Assert 🎯: tres direcciones limpias y el fragmento suelto descartado.
+      expect(store.config.to).toEqual(['a@x.com', 'b@y.com', 'c@z.com']);
+    });
+
+    it('1.2 deberia mostrar el asunto por defecto ya escrito', () => {
+      // 1. Arrange 📐 + 2. Act ⚙️
+      const wrapper = mountComponent(nextNodeId());
+
+      // 3. Assert 🎯
+      const subject = wrapper.get('[data-test="subject-field"]').findComponent(QInput);
+
+      expect(subject.props('modelValue')).toBe(DEFAULT_ALERT_SUBJECT);
+    });
+
+    it('1.3 deberia pintar la vista previa de la carta', () => {
+      // 1. Arrange 📐 + 2. Act ⚙️
+      const wrapper = mountComponent(nextNodeId());
+
+      // 3. Assert 🎯: es maqueta ESTRUCTURAL, no replica de la carta real.
+      const preview = wrapper.get('[data-test="letter-preview"]');
+
+      expect(preview.text()).toContain('Diagnostico tecnico');
+      expect(preview.text()).toContain('Aqui se incrustara la nota');
+    });
+  });
+
+  describe('2. Enlace con el store', () => {
+    it('2.1 deberia reflejar la nota en la vista previa al escribirla', () => {
+      // 1. Arrange 📐
+      const nodeId = nextNodeId();
+      const wrapper = mountComponent(nodeId);
+      const store = useSmtpAlertStore(nodeId);
+
+      // 2. Act ⚙️
+      store.updateConfig({ customMessage: 'Llamar al movil de guardia.' });
+
+      // 3. Assert 🎯: es lo que el operador necesita saber —donde cae su nota—,
+      //    y por eso la maqueta no es estatica del todo.
+      return wrapper.vm.$nextTick().then(() => {
+        expect(wrapper.get('[data-test="letter-preview"]').text()).toContain(
+          'Llamar al movil de guardia.',
+        );
+      });
+    });
+
+    it('2.2 deberia cerrar el chip al pulsar Enter sobre lo tecleado', async () => {
+      // 1. Arrange 📐: `update:model-value` solo se emite al confirmar, asi que
+      //    el componente espeja lo tecleado con `@input-value` y lo convierte en
+      //    chip al pulsar Enter, ya recortado y validado.
+      const nodeId = nextNodeId();
+      const wrapper = mountComponent(nodeId);
+      const store = useSmtpAlertStore(nodeId);
+      const recipients = selectByField(wrapper, 'recipients-field');
+
+      // 2. Act ⚙️
+      await recipients.vm.$emit('input-value', RECIPIENT);
+      await recipients.vm.$emit('keydown', new KeyboardEvent('keydown', { key: 'Enter' }));
+
+      // 3. Assert 🎯
+      expect(store.config.to).toEqual([RECIPIENT]);
+      expect(store.isConfigValid).toBe(true);
+    });
+
+    it('2.2b deberia cerrar el chip con la coma, el separador que se teclea de memoria', async () => {
+      // 1. Arrange 📐: sin interceptarla la coma quedaria DENTRO del chip y el
+      //    backend devolveria un 400 sobre el esquema entero.
+      const nodeId = nextNodeId();
+      const wrapper = mountComponent(nodeId);
+      const store = useSmtpAlertStore(nodeId);
+      const recipients = selectByField(wrapper, 'recipients-field');
+
+      // 2. Act ⚙️
+      await recipients.vm.$emit('input-value', RECIPIENT);
+      await recipients.vm.$emit('keydown', new KeyboardEvent('keydown', { key: ',' }));
+
+      // 3. Assert 🎯
+      expect(store.config.to).toEqual([RECIPIENT]);
+    });
+
+    it('2.2c deberia recoger al salir del campo un correo tecleado y no confirmado', async () => {
+      // 1. Arrange 📐: la pieza critica, aprendida del selector de zona horaria
+      //    del cron: sin esto el texto a medio confirmar se perderia al pulsar
+      //    Guardar mientras la pantalla lo sigue mostrando.
+      const nodeId = nextNodeId();
+      const wrapper = mountComponent(nodeId);
+      const store = useSmtpAlertStore(nodeId);
+      const recipients = selectByField(wrapper, 'recipients-field');
+
+      // 2. Act ⚙️
+      await recipients.vm.$emit('input-value', RECIPIENT);
+      await recipients.vm.$emit('blur');
+
+      // 3. Assert 🎯
+      expect(store.config.to).toEqual([RECIPIENT]);
+    });
+
+    it('2.3 no deberia duplicar un destinatario ya presente', async () => {
+      // 1. Arrange 📐: confirmar dos veces el mismo texto es trivial de provocar
+      //    —Enter repetido— y no debe dejar dos chips iguales.
+      const nodeId = nextNodeId();
+      const wrapper = mountComponent(nodeId);
+      const store = useSmtpAlertStore(nodeId);
+      const recipients = selectByField(wrapper, 'recipients-field');
+
+      // 2. Act ⚙️
+      await recipients.vm.$emit('input-value', RECIPIENT);
+      await recipients.vm.$emit('keydown', new KeyboardEvent('keydown', { key: 'Enter' }));
+      await recipients.vm.$emit('input-value', RECIPIENT);
+      await recipients.vm.$emit('keydown', new KeyboardEvent('keydown', { key: 'Enter' }));
+
+      // 3. Assert 🎯
+      expect(store.config.to).toEqual([RECIPIENT]);
+    });
+
+    it('2.3b deberia avisar y no crear chip si lo confirmado no es un correo', async () => {
+      // 1. Arrange 📐: al pulsar Enter el operador AFIRMA que eso es una
+      //    direccion; descartarla en silencio —como el ruido de un pegado—
+      //    dejaria el campo vacio sin explicar por que.
+      const nodeId = nextNodeId();
+      const wrapper = mountComponent(nodeId);
+      const store = useSmtpAlertStore(nodeId);
+      // Se dobla `notify` SOBRE el objeto `$q` que `useQuasar()` ya resolvio: el
+      // setup guarda ese objeto, no la funcion, asi que sustituir la propiedad
+      // si alcanza a la llamada real.
+      const notifySpy = vi.fn();
+      (
+        wrapper.vm.$.appContext.config.globalProperties.$q as unknown as {
+          notify: typeof notifySpy;
+        }
+      ).notify = notifySpy;
+      const recipients = selectByField(wrapper, 'recipients-field');
+
+      // 2. Act ⚙️
+      await recipients.vm.$emit('input-value', 'guardia@unuware');
+      await recipients.vm.$emit('keydown', new KeyboardEvent('keydown', { key: 'Enter' }));
+
+      // 3. Assert 🎯
+      expect(store.config.to).toEqual([]);
+      expect(notifySpy).toHaveBeenCalledWith(expect.objectContaining({ type: 'negative' }));
+    });
+
+    it('2.4 deberia ignorar una entrada en blanco', async () => {
+      // 1. Arrange 📐: QSelect emite la cadena vacia al abrir y al limpiar el
+      //    campo; anadirla dejaria un chip vacio imposible de leer.
+      const nodeId = nextNodeId();
+      const wrapper = mountComponent(nodeId);
+      const store = useSmtpAlertStore(nodeId);
+
+      // 2. Act ⚙️
+      await selectByField(wrapper, 'recipients-field').vm.$emit('input-value', '   ');
+
+      // 3. Assert 🎯
+      expect(store.config.to).toEqual([]);
+    });
+  });
+
+  describe('3. Aviso de direcciones invalidas', () => {
+    it('3.1 deberia nombrarlas una a una', async () => {
+      // 1. Arrange 📐: con chips, decir "hay un correo mal" obliga al operador a
+      //    revisarlos todos a ojo.
+      const nodeId = nextNodeId();
+      const wrapper = mountComponent(nodeId);
+      const store = useSmtpAlertStore(nodeId);
+
+      // 2. Act ⚙️
+      store.updateConfig({ to: [RECIPIENT, 'roto', 'tambien@roto'] });
+      await wrapper.vm.$nextTick();
+
+      // 3. Assert 🎯
+      const banner = wrapper.get('[data-test="invalid-recipients"]');
+
+      expect(banner.text()).toContain('roto, tambien@roto');
+    });
+
+    it('3.2 no deberia aparecer con todo correcto', async () => {
+      // 1. Arrange 📐
+      const nodeId = nextNodeId();
+      const wrapper = mountComponent(nodeId);
+      const store = useSmtpAlertStore(nodeId);
+
+      // 2. Act ⚙️
+      store.updateConfig({ to: [RECIPIENT] });
+      await wrapper.vm.$nextTick();
+
+      // 3. Assert 🎯
+      expect(wrapper.find('[data-test="invalid-recipients"]').exists()).toBe(false);
+    });
+  });
+});

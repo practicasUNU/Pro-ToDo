@@ -1,13 +1,14 @@
-import {
-  Column,
-  CreateDateColumn,
-  Entity,
-  PrimaryGeneratedColumn,
-  UpdateDateColumn,
-} from 'typeorm';
+import { Column, Entity, PrimaryGeneratedColumn } from 'typeorm';
 
+import { AuditableEntity } from '@common/entities/auditable.entity';
+
+/**
+ * `creado_en` / `actualizado_en` pasaron a `fecha_creacion` /
+ * `fecha_actualizacion` en la migracion 045, que es lo que hereda de
+ * `AuditableEntity`.
+ */
 @Entity('allowed_ips')
-export class AllowedIp {
+export class AllowedIp extends AuditableEntity {
   @PrimaryGeneratedColumn('uuid', { name: 'id' })
   id: string;
 
@@ -16,10 +17,4 @@ export class AllowedIp {
 
   @Column({ name: 'descripcion', type: 'varchar', length: 255 })
   description: string;
-
-  @CreateDateColumn({ name: 'creado_en', type: 'timestamptz' })
-  createdAt: Date;
-
-  @UpdateDateColumn({ name: 'actualizado_en', type: 'timestamptz' })
-  updatedAt: Date;
 }

@@ -24,6 +24,9 @@ import {
 import { CurrentUser } from '@common/decorators/current-user.decorator';
 import { Roles } from '@common/decorators/roles.decorator';
 import { RolesGuard } from '@common/guards/roles.guard';
+import { AuditTable } from '@modules/audit/audit-tables';
+import { AuditAction } from '@modules/audit/decorators/audit-action.decorator';
+import { AuditActionType } from '@modules/audit/enums/audit-action.enum';
 import { JwtAuthGuard } from '@modules/auth/guards/jwt-auth.guard';
 
 import { CreateUserDto } from './dto/create-user.dto';
@@ -81,16 +84,21 @@ export class UsersController {
   }
 
   @Post()
+  @AuditAction({ table: AuditTable.USERS, action: AuditActionType.CREATE })
   @ApiOperation({
     summary: 'Crea un usuario con correo de dominio corporativo',
   })
   public async create(
     @Body() createUserDto: CreateUserDto,
+    @CurrentUser() currentUser: AuthenticatedUser,
   ): Promise<UserResponseDto> {
-    return this.toResponse(await this.usersService.create(createUserDto));
+    return this.toResponse(
+      await this.usersService.create(createUserDto, currentUser.id),
+    );
   }
 
   @Patch(':id')
+  @AuditAction({ table: AuditTable.USERS, action: AuditActionType.UPDATE })
   @ApiOperation({ summary: 'Actualiza los datos de un usuario' })
   public async update(
     @Param('id', ParseUUIDPipe) id: string,
@@ -99,11 +107,14 @@ export class UsersController {
   ): Promise<UserResponseDto> {
     this.assertNotOperatingOnSelf(currentUser, id);
 
-    return this.toResponse(await this.usersService.update(id, updateUserDto));
+    return this.toResponse(
+      await this.usersService.update(id, updateUserDto, currentUser.id),
+    );
   }
 
   // Borrado logico: nunca elimina fisicamente el registro
   @Delete(':id')
+  @AuditAction({ table: AuditTable.USERS, action: AuditActionType.DELETE })
   @ApiOperation({ summary: 'Desactiva un usuario (borrado logico)' })
   public async remove(
     @Param('id', ParseUUIDPipe) id: string,
@@ -111,7 +122,7 @@ export class UsersController {
   ): Promise<UserResponseDto> {
     this.assertNotOperatingOnSelf(currentUser, id);
 
-    return this.toResponse(await this.usersService.remove(id));
+    return this.toResponse(await this.usersService.remove(id, currentUser.id));
   }
 
   /**

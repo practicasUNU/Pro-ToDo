@@ -1,0 +1,63 @@
+import type { AuditableData } from '@/types/auditable';
+
+/**
+ * Contratos del repositorio de prompts de IA (PROT-15.2).
+ *
+ * Replica de los DTOs que sirve `AiPromptTemplatesController`. El desdoble entre
+ * `AiPromptTemplate` y `AiPromptTemplateDetail` NO es cosmetico: el listado del backend omite
+ * `promptText` a proposito —una tabla con decenas de filas no necesita
+ * kilobytes de instruccion por fila—, asi que editar obliga a pedir el detalle
+ * por id.
+ *
+ * `createdAt` y `updatedAt` son `string` y no `Date`: lo que llega por JSON es
+ * una cadena ISO-8601, y tiparlas como `Date` seria una mentira que solo se
+ * descubriria al llamar a un metodo que no existe.
+ */
+export interface AiPromptTemplate extends AuditableData {
+  id: string;
+  /**
+   * Clave de maquina, inmutable. Es lo que se teclea en `promptCode` del nodo
+   * PROCESADOR_IA, asi que la interfaz tiene que mostrarla: el backend la
+   * deriva del nombre cuando no se suministra, y sin verla el operador no
+   * sabria con que codigo quedo su plantilla.
+   */
+  code: string;
+  name: string;
+  description: string | null;
+  active: boolean;
+  createdById: string;
+}
+
+/** Prompt con su instruccion completa, tal como lo devuelve `GET /ai-prompt-templates/:id`. */
+export interface AiPromptTemplateDetail extends AiPromptTemplate {
+  promptText: string;
+}
+
+/**
+ * Alta de prompt.
+ *
+ * Sin `createdById`: la autoria la toma el backend del JWT. Sin proveedor ni
+ * modelo: un prompt es un activo de texto, y que modelo lo ejecuta lo decide la
+ * configuracion del nodo.
+ */
+export interface CreateAiPromptTemplatePayload {
+  /** Omitirlo hace que el backend lo derive del nombre. */
+  code?: string;
+  name: string;
+  description?: string;
+  promptText: string;
+}
+
+/**
+ * Edicion parcial; todo opcional, como el `PartialType` del backend.
+ *
+ * SIN `code` a proposito, aunque el `PartialType` del backend lo herede: el
+ * codigo es inmutable y el servicio lo ignora en la edicion. Declararlo aqui
+ * invitaria a enviarlo para que lo tirasen en silencio.
+ */
+export interface UpdateAiPromptTemplatePayload {
+  name?: string;
+  description?: string;
+  promptText?: string;
+  active?: boolean;
+}

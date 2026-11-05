@@ -8,9 +8,26 @@ import type { OnModuleDestroy } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { createTransport } from 'nodemailer';
 
+import {
+  BRAND_BORDER,
+  BRAND_PRIMARY,
+  BRAND_PRIMARY_LIGHT,
+  BRAND_SURFACE,
+  BRAND_TEXT,
+  BRAND_TEXT_MUTED,
+  FONT_STACK,
+} from '@common/constants/email-brand.constants';
+
 import type { Transporter } from 'nodemailer';
 
-/** Puerto SMTP por defecto si `SMTP_PORT` no esta definido (envio con STARTTLS). */
+/**
+ * Puerto SMTP por defecto si `SMTP_OTP_PORT` no esta definido (STARTTLS).
+ *
+ * Las variables llevan el infijo `OTP_` desde la separacion de transportes: este
+ * servicio y el nodo `DESTINO_SMTP` pueden salir por buzones distintos, y con un
+ * unico bloque `SMTP_*` cambiar el remitente de las alertas del sistema habria
+ * cambiado tambien el de los codigos de acceso. Ver `SmtpNodeMailerService`.
+ */
 const DEFAULT_SMTP_PORT = 587;
 
 /** Puerto SMTP implicito de TLS directo: solo en el 465 se conecta ya cifrado. */
@@ -22,20 +39,32 @@ const MAX_SMTP_CONNECTIONS = 1;
 /** Mensajes por conexion antes de reciclarla. */
 const MAX_MESSAGES_PER_CONNECTION = 100;
 
-/** Paleta institucional embebida: los clientes de correo ignoran las hojas externas. */
-const BRAND_PRIMARY = '#2C4FC7';
-const BRAND_PRIMARY_LIGHT = '#4E74E8';
-const BRAND_TEXT = '#12142E';
-const BRAND_TEXT_MUTED = '#4A4F6B';
-const BRAND_SURFACE = '#EEF1FA';
-const BRAND_BORDER = '#D3D8EE';
+/**
+ * Espera maxima para establecer la conexion TCP con el servidor SMTP.
+ *
+ * Los tres topes replican los del transporte de avisos
+ * (`smtp-node-mailer.service.ts`) a proposito: son la misma clase de dialogo
+ * —un correo corto contra un relay corporativo— y divergir en ellos solo
+ * produciria dos comportamientos distintos ante la misma caida.
+ */
+const CONNECTION_TIMEOUT_MS = 10_000;
 
-const FONT_STACK =
-  "-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif";
+/** Espera maxima del saludo SMTP una vez ya hay socket. */
+const GREETING_TIMEOUT_MS = 5_000;
+
+/** Inactividad maxima del socket durante el dialogo SMTP, `DATA` incluido. */
+const SOCKET_TIMEOUT_MS = 15_000;
 
 /**
- * Unico punto del backend que conoce SMTP. Los servicios de negocio piden "envia
- * este codigo a este correo" y no saben nada del transporte.
+ * Unico punto del backend que conoce el SMTP de AUTENTICACION. Los servicios de
+ * negocio piden "envia este codigo a este correo" y no saben nada del
+ * transporte.
+ *
+ * Su gemelo es `SmtpNodeMailerService`, que atiende al nodo `DESTINO_SMTP`. Son
+ * dos servicios y dos pools y no uno parametrizado a proposito: el correo de
+ * login y el de una alerta de flujo tienen publicos, volumenes y remitentes
+ * distintos, y compartir transporte ataba las dos decisiones. Aqui el volumen es
+ * un mensaje por inicio de sesion; alli, uno por incidencia.
  */
 @Injectable()
 export class EmailService implements OnModuleDestroy {
@@ -45,17 +74,17 @@ export class EmailService implements OnModuleDestroy {
 
   constructor(private readonly configService: ConfigService) {
     const port =
-      this.configService.get<number>('SMTP_PORT') ?? DEFAULT_SMTP_PORT;
-    const user = this.configService.get<string>('SMTP_USER');
-    const password = this.configService.get<string>('SMTP_PASSWORD');
+      this.configService.get<number>('SMTP_OTP_PORT') ?? DEFAULT_SMTP_PORT;
+    const user = this.configService.get<string>('SMTP_OTP_USER');
+    const password = this.configService.get<string>('SMTP_OTP_PASS');
 
     this.sender =
-      this.configService.get<string>('SMTP_FROM') ??
+      this.configService.get<string>('SMTP_OTP_FROM') ??
       user ??
       'no-reply@unuware.com';
 
     this.transporter = createTransport({
-      host: this.configService.get<string>('SMTP_HOST'),
+      host: this.configService.get<string>('SMTP_OTP_HOST'),
       port: Number(port),
       // Solo el 465 habla TLS desde el saludo; el 587 negocia STARTTLS.
       secure: Number(port) === IMPLICIT_TLS_PORT,
@@ -72,6 +101,14 @@ export class EmailService implements OnModuleDestroy {
       // Tras 100 mensajes se recicla la conexion, por si el servidor la corta
       // por su cuenta al alcanzar su propio limite.
       maxMessages: MAX_MESSAGES_PER_CONNECTION,
+
+      // Mismos topes que el transporte de los avisos de nodo, y por una razon
+      // aun mas directa: este correo esta en el camino critico del LOGIN. Sin
+      // ellos, un relay que acepta la conexion y calla deja la peticion de OTP
+      // colgada sin limite, y el usuario no recibe ni el codigo ni un error.
+      connectionTimeout: CONNECTION_TIMEOUT_MS,
+      greetingTimeout: GREETING_TIMEOUT_MS,
+      socketTimeout: SOCKET_TIMEOUT_MS,
     });
   }
 
@@ -119,8 +156,12 @@ export class EmailService implements OnModuleDestroy {
    * Todo el CSS va EN LINEA y la maquetacion usa tablas a proposito: Gmail y
    * Outlook descartan las hojas de estilo externas y `<style>` del `<head>`, y su
    * soporte de flex/grid es irregular. Es la unica parte del proyecto exenta de
-   * la regla de tokens CSS — los `var(--pd-*)` no existen en un cliente de correo,
-   * asi que la paleta se replica como constantes de este archivo.
+   * la regla de tokens CSS — los `var(--pd-*)` no existen en un cliente de correo.
+   *
+   * La paleta vivia como constantes de este archivo y se mudo a
+   * `@common/constants/email-brand.constants` al aparecer la segunda carta, la de
+   * incidencia del nodo `DESTINO_SMTP`: dos copias de `#2C4FC7` divergen a la
+   * primera revision de marca.
    */
   private buildOtpTemplate(code: string): string {
     return `

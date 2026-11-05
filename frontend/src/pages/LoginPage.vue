@@ -31,6 +31,12 @@ const secondsRemaining = ref(0);
 
 let countdownId: ReturnType<typeof setInterval> | undefined;
 
+/**
+ * Correo tal como viaja al backend: sin los espacios del portapapeles y en
+ * minusculas, igual que lo normaliza `@NormalizedEmail` en los DTOs de OTP.
+ */
+const normalizedEmail = computed(() => email.value.trim().toLowerCase());
+
 const isCodeExpired = computed(() => otpSent.value && secondsRemaining.value <= 0);
 
 const isCodeComplete = computed(() => code.value.length === OTP_LENGTH);
@@ -40,7 +46,7 @@ const submitLabel = computed(() => (otpSent.value ? 'Verificar Codigo' : 'Enviar
 // Poka-Yoke: el boton no se habilita hasta que el campo del paso actual valida.
 const isSubmitDisabled = computed(() => {
   if (sessionStore.isLoading) return true;
-  if (!otpSent.value) return !email.value || !isCorporateEmail(email.value);
+  if (!otpSent.value) return !normalizedEmail.value || !isCorporateEmail(normalizedEmail.value);
 
   return !isCodeComplete.value || isCodeExpired.value;
 });
@@ -77,7 +83,7 @@ const resetToEmailStep = (): void => {
 
 const sendOtp = async (): Promise<void> => {
   try {
-    const expiresInSeconds = await sessionStore.requestOtp(email.value);
+    const expiresInSeconds = await sessionStore.requestOtp(normalizedEmail.value);
 
     otpSent.value = true;
     code.value = '';
@@ -100,7 +106,7 @@ const sendOtp = async (): Promise<void> => {
 
 const verifyOtp = async (): Promise<void> => {
   try {
-    await sessionStore.verifyOtp(email.value, code.value);
+    await sessionStore.verifyOtp(normalizedEmail.value, code.value);
     clearCountdown();
 
     // `redirect` lo deja la guarda del router al interceptar una ruta protegida.
@@ -172,7 +178,7 @@ onBeforeUnmount(clearCountdown);
             :class="{ 'pd-login-brand__logo--inverted': themeStore.isDark }"
           />
 
-          <h1 class="pd-h1 pd-login-brand__title q-mb-xs">Pro-ToDo</h1>
+          <h1 class="pd-h1 pd-login-brand__title q-mb-xs">Proto-Do</h1>
 
           <a class="pd-link pd-nav" href="https://unuware.com" target="_blank" rel="noopener">
             unuware.com
@@ -223,7 +229,7 @@ onBeforeUnmount(clearCountdown);
                   placeholder="usuario@unuware.com"
                   :rules="[
                     (val: string) => !!val || 'El correo es obligatorio',
-                    (val: string) => isCorporateEmail(val) || corporateEmailErrorMessage,
+                    (val: string) => isCorporateEmail(val.trim()) || corporateEmailErrorMessage,
                   ]"
                 />
               </div>
@@ -239,7 +245,7 @@ onBeforeUnmount(clearCountdown);
                   </template>
                   Codigo caducado
                   <div class="pd-banner-expired__hint">
-                    El codigo enviado a {{ email }} ya no es valido.
+                    El codigo enviado a {{ normalizedEmail }} ya no es valido.
                   </div>
                 </q-banner>
               </div>
@@ -255,7 +261,7 @@ onBeforeUnmount(clearCountdown);
                   @complete="onCodeComplete"
                 />
 
-                <div class="pd-subtitle q-mt-sm">{{ email }}</div>
+                <div class="pd-subtitle q-mt-sm">{{ normalizedEmail }}</div>
               </div>
             </q-card-section>
 
@@ -481,15 +487,15 @@ onBeforeUnmount(clearCountdown);
 // Solo escala: la familia la sigue heredando de .pd-h1, para no declarar
 // `font-family` en el componente (regla §2, Tipografia).
 .pd-login-brand__title {
-  font-size: 34px;
-  line-height: 42px;
+  font-size: 2.125rem;
+  line-height: 2.625rem;
 }
 
 // Idem: .pd-h2 aporta familia y peso; aqui solo se sube un paso la escala
 // para que el titulo de la tarjeta no compita con el h1 de marca.
 .pd-login-card__title {
-  font-size: 19px;
-  line-height: 26px;
+  font-size: 1.1875rem;
+  line-height: 1.625rem;
 }
 
 .pd-login-brand__description {
@@ -520,8 +526,8 @@ onBeforeUnmount(clearCountdown);
 
 .pd-banner-expired__hint {
   font-weight: 400;
-  font-size: 12.5px;
-  line-height: 18px;
+  font-size: 0.7812rem;
+  line-height: 1.125rem;
   opacity: 0.9;
 }
 </style>

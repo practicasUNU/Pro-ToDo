@@ -34,6 +34,10 @@ const EXISTING_USER: User = {
   role: UserRole.EDITOR,
   otpSecret: LEAKY_OTP_SECRET,
   isActive: true,
+  createdByUserId: null,
+  updatedByUserId: null,
+  createdAt: new Date('2026-01-01T00:00:00.000Z'),
+  updatedAt: new Date('2026-01-01T00:00:00.000Z'),
 };
 
 /** Lo que el cliente debe ver: la entidad menos `otpSecret`. */
@@ -42,6 +46,8 @@ const EXISTING_USER_RESPONSE = {
   email: EXISTING_USER.email,
   role: EXISTING_USER.role,
   isActive: EXISTING_USER.isActive,
+  createdAt: '2026-01-01T00:00:00.000Z',
+  updatedAt: '2026-01-01T00:00:00.000Z',
 };
 
 describe('UsersController (RBAC, PROT-04.2)', () => {
@@ -194,7 +200,11 @@ describe('UsersController (RBAC, PROT-04.2)', () => {
 
       // 3. Assert
       expect(response.status).toBe(201);
-      expect(usersServiceMock.create).toHaveBeenCalledWith(payload);
+      // El autor sale del JWT, nunca del cuerpo (auditoria, migracion 045).
+      expect(usersServiceMock.create).toHaveBeenCalledWith(
+        payload,
+        ADMIN_USER.id,
+      );
     });
 
     it('deberia desactivar un usuario en DELETE /users/:id (borrado logico)', async () => {
@@ -206,7 +216,10 @@ describe('UsersController (RBAC, PROT-04.2)', () => {
       // 3. Assert
       expect(response.status).toBe(200);
       expect((response.body as User).isActive).toBe(false);
-      expect(usersServiceMock.remove).toHaveBeenCalledWith(EXISTING_USER.id);
+      expect(usersServiceMock.remove).toHaveBeenCalledWith(
+        EXISTING_USER.id,
+        ADMIN_USER.id,
+      );
     });
 
     it('deberia rechazar con 400 un identificador que no es UUID (ParseUUIDPipe)', async () => {
@@ -279,6 +292,34 @@ describe('UsersController (RBAC, PROT-04.2)', () => {
       expect(response.status).toBe(200);
       expect(JSON.stringify(response.body)).not.toContain(LEAKY_OTP_SECRET);
       expect(response.body).toEqual([EXISTING_USER_RESPONSE]);
+    });
+
+    it('deberia proyectar los autores de la auditoria a { id, email }', async () => {
+      // 1. Arrange: la relacion `createdBy` llega como entidad `User` completa,
+      //    con su secreto cargado. Solo su id y su correo pueden salir.
+      usersServiceMock.findOne.mockResolvedValueOnce({
+        ...EXISTING_USER,
+        createdByUserId: ADMIN_USER.id,
+        createdBy: {
+          ...EXISTING_USER,
+          id: ADMIN_USER.id,
+          email: ADMIN_USER.email,
+          role: UserRole.ADMIN,
+        },
+      });
+
+      // 2. Act
+      const response = await request(httpServer()).get(
+        `/users/${EXISTING_USER.id}`,
+      );
+
+      // 3. Assert
+      expect(response.status).toBe(200);
+      expect((response.body as Record<string, unknown>).createdBy).toEqual({
+        id: ADMIN_USER.id,
+        email: ADMIN_USER.email,
+      });
+      expect(JSON.stringify(response.body)).not.toContain(LEAKY_OTP_SECRET);
     });
 
     it('deberia filtrar otpSecret en todos los verbos, no solo en el listado', async () => {

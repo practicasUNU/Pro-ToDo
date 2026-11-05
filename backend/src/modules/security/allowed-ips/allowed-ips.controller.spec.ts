@@ -29,6 +29,8 @@ const EXISTING_ENTRY: AllowedIp = {
   id: 'c8a1f2d3-5b6e-4790-8c1d-2e3f4a5b6c7d',
   ipOrCidr: '192.168.1.0/24',
   description: 'VPN Corporativa Madrid',
+  createdByUserId: null,
+  updatedByUserId: null,
   createdAt: new Date('2026-01-01T00:00:00.000Z'),
   updatedAt: new Date('2026-01-01T00:00:00.000Z'),
 };
@@ -149,7 +151,10 @@ describe('AllowedIpsController (RBAC, PROT-04.2)', () => {
 
       // 3. Assert
       expect(response.status).toBe(201);
-      expect(allowedIpsServiceMock.create).toHaveBeenCalledWith(payload);
+      expect(allowedIpsServiceMock.create).toHaveBeenCalledWith(
+        payload,
+        ADMIN_USER.id,
+      );
     });
 
     it('deberia rechazar con 400 un ipOrCidr con formato invalido', async () => {
@@ -174,6 +179,7 @@ describe('AllowedIpsController (RBAC, PROT-04.2)', () => {
       expect(allowedIpsServiceMock.update).toHaveBeenCalledWith(
         EXISTING_ENTRY.id,
         { description: 'Descripcion nueva' },
+        ADMIN_USER.id,
       );
     });
 

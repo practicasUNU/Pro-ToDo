@@ -1,0 +1,263 @@
+import {
+  Body,
+  Controller,
+  Get,
+  HttpCode,
+  HttpStatus,
+  Param,
+  ParseUUIDPipe,
+  Patch,
+  Post,
+  UseGuards,
+} from '@nestjs/common';
+import {
+  ApiBadRequestResponse,
+  ApiBearerAuth,
+  ApiConflictResponse,
+  ApiCreatedResponse,
+  ApiForbiddenResponse,
+  ApiNotFoundResponse,
+  ApiOkResponse,
+  ApiOperation,
+  ApiTags,
+  ApiUnauthorizedResponse,
+} from '@nestjs/swagger';
+
+import { CurrentUser } from '@common/decorators/current-user.decorator';
+import { Roles } from '@common/decorators/roles.decorator';
+import { toIssueContractException } from '@core/fsm/utils/schema-issue-contract.util';
+import { RolesGuard } from '@common/guards/roles.guard';
+import { AuditTable } from '@modules/audit/audit-tables';
+import { AuditAction } from '@modules/audit/decorators/audit-action.decorator';
+import { AuditActionType } from '@modules/audit/enums/audit-action.enum';
+import { JwtAuthGuard } from '@modules/auth/guards/jwt-auth.guard';
+import { UserRole } from '@modules/users/enums/user-role.enum';
+
+import { CreateWorkflowDto } from './dto/create-workflow.dto';
+import { UpdateWorkflowDto } from './dto/update-workflow.dto';
+import { PipelineSummaryResponseDto } from './dto/pipeline-summary-response.dto';
+import { WorkflowDetailResponseDto } from './dto/workflow-detail-response.dto';
+import { ExecuteTestWorkflowDto } from './dto/execute-test-workflow.dto';
+import { WorkflowExecutionResponseDto } from './dto/workflow-execution-response.dto';
+import { WorkflowsService } from './workflows.service';
+
+import type { AuthenticatedUser } from '@modules/auth/interfaces/jwt-payload.interface';
+
+/**
+ * Superficie HTTP de operacion de flujos.
+ *
+ * Doble barrera, igual que `TemplatesController`: la ruta no lleva `@PublicIp()`,
+ * de modo que el `IpWhitelistGuard` global (PROT-05) la cubre, y ademas exige
+ * JWT y rol. Abierta a ADMIN y EDITOR porque operar y auditar flujos es
+ * competencia del EDITOR (`security-and-scope.md` §2); la gestion de cuentas es
+ * lo unico reservado al ADMIN.
+ *
+ * Los guards y los roles se declaran a nivel de CLASE para que ningun endpoint
+ * que se anada despues quede desprotegido por olvido (Poka-Yoke).
+ */
+@ApiTags('workflows')
+@ApiBearerAuth()
+@ApiUnauthorizedResponse({ description: 'Token ausente, expirado o invalido' })
+@ApiForbiddenResponse({
+  description: 'IP fuera de la red corporativa o rol distinto de ADMIN/EDITOR',
+})
+@UseGuards(JwtAuthGuard, RolesGuard)
+@Roles(UserRole.ADMIN, UserRole.EDITOR)
+@Controller('workflows')
+export class WorkflowsController {
+  constructor(private readonly workflowsService: WorkflowsService) {}
+
+  /**
+   * Catalogo de flujos utilizables como plantilla en el asistente.
+   *
+   * Devuelve la topologia YA ORDENADA para que el cliente pinte el stepper sin
+   * recorrer el grafo, y sin los `params` de cada nodo: ahi viven el host, el
+   * usuario y la clave de entorno del buzon, que no tienen por que llegar al
+   * navegador solo para poblar un selector.
+   *
+   * No lleva guards propios: los de clase (`JwtAuthGuard`, `RolesGuard`,
+   * `@Roles(ADMIN, EDITOR)`) y el `IpWhitelistGuard` global ya lo cubren. Es el
+   * motivo por el que se declaran a nivel de clase y no por endpoint.
+   */
+  @Get()
+  @ApiOperation({
+    summary:
+      'Lista los flujos con pipeline configurado y su topologia en orden de ejecucion',
+  })
+  @ApiOkResponse({
+    description: 'Flujos seleccionables, sin los params de sus nodos',
+    type: [PipelineSummaryResponseDto],
+  })
+  public async findSelectablePipelines(): Promise<
+    PipelineSummaryResponseDto[]
+  > {
+    return this.workflowsService.findSelectablePipelines();
+  }
+
+  /**
+   * Un flujo con su grafo completo, para el asistente de EDICION.
+   *
+   * A diferencia del listado de arriba, este SI devuelve los `params` de cada
+   * nodo, y es deliberado: el listado alimenta un selector que no los necesita,
+   * mientras que esto alimenta el formulario que los edita. Sin ellos el
+   * asistente no podria mostrar el filtro que el operador quiere cambiar, y al
+   * guardar reescribiria el grafo con el formulario en blanco.
+   *
+   * Sigue sin viajar ningun secreto: `passwordEnvKey` es el NOMBRE de la
+   * variable de entorno, no la contrasena. Mismo trato y mismos roles que
+   * `GET /workflow-templates/:id`, que ya expone el esquema completo.
+   */
+  @Get(':id')
+  @ApiOperation({
+    summary: 'Obtiene un flujo con su configuracion_pipeline completa',
+  })
+  @ApiOkResponse({
+    description: 'Flujo con su topologia ordenada y el grafo crudo',
+    type: WorkflowDetailResponseDto,
+  })
+  @ApiNotFoundResponse({ description: 'No existe ningun flujo con ese id' })
+  public async findOneDetail(
+    @Param('id', ParseUUIDPipe) id: string,
+  ): Promise<WorkflowDetailResponseDto> {
+    return this.workflowsService.findOneDetail(id);
+  }
+
+  /**
+   * Alta de un flujo con el pipeline que ensamblo el asistente.
+   *
+   * Deja el 201 por defecto de `@Post`, a diferencia de `execute-test`: aqui SI se
+   * crea un recurso, y se devuelve con la misma forma que el listado para que el
+   * cliente no tenga que tratar de forma distinta el flujo que acaba de crear.
+   *
+   * La autoria sale del token y nunca del cuerpo, de modo que no se pueda
+   * suplantar; `CreateWorkflowDto` no tiene campo para ella.
+   */
+  @Post()
+  @AuditAction({ table: AuditTable.WORKFLOWS, action: AuditActionType.CREATE })
+  @ApiOperation({
+    summary: 'Crea un flujo con su configuracion de pipeline validada',
+  })
+  @ApiCreatedResponse({
+    description:
+      'Flujo creado; se devuelve su resumen con la topologia ordenada',
+    type: PipelineSummaryResponseDto,
+  })
+  @ApiBadRequestResponse({
+    description:
+      'El esquema no supera PipelineValidatorService (forma, tipos o integridad del grafo)',
+  })
+  public async createWorkflow(
+    @Body() createWorkflowDto: CreateWorkflowDto,
+    @CurrentUser() currentUser: AuthenticatedUser,
+  ): Promise<PipelineSummaryResponseDto> {
+    try {
+      // `await` dentro del `try`, y no un `return` de la promesa: sin el, el
+      // rechazo escapa de este bloque y los issues volverian a salir crudos.
+      return await this.workflowsService.createWorkflow(
+        createWorkflowDto,
+        currentUser.id,
+        currentUser.role,
+      );
+    } catch (error: unknown) {
+      throw toIssueContractException(error);
+    }
+  }
+
+  /**
+   * Edita un flujo: nombre, descripcion, grafo o estado.
+   *
+   * Es la unica via por la que un flujo se HABILITA. Nace inactivo por decision
+   * de seguridad, y antes de este endpoint solo SQL directo podia activarlo.
+   *
+   * No hay `@Delete`: retirar un flujo es `PATCH { "active": false }`. Un
+   * borrado fisico dejaria las ejecuciones ya trazadas apuntando a un flujo que
+   * no existe.
+   */
+  @Patch(':id')
+  @AuditAction({ table: AuditTable.WORKFLOWS, action: AuditActionType.UPDATE })
+  @ApiOperation({
+    summary: 'Actualiza un flujo; tambien lo activa o lo desactiva',
+  })
+  @ApiOkResponse({
+    description: 'Flujo actualizado, con su topologia ordenada',
+    type: PipelineSummaryResponseDto,
+  })
+  @ApiBadRequestResponse({
+    description:
+      'El esquema nuevo no es integro, o se intenta activar un flujo sin pipeline_schema',
+  })
+  @ApiNotFoundResponse({ description: 'No existe ningun flujo con ese id' })
+  @ApiForbiddenResponse({
+    description:
+      'El esquema usa un modelo de pago y el rol no es ADMIN, o la IP esta fuera de la red corporativa',
+  })
+  public async updateWorkflow(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() updateWorkflowDto: UpdateWorkflowDto,
+    // El rol cubre los modelos de pago, reservados al ADMIN: editar un flujo es
+    // otra via de meter uno y sin esto la restriccion del alta se saltaria con
+    // un PATCH. El id firma la auditoria (`actualizado_por`, migracion 045).
+    @CurrentUser() currentUser: AuthenticatedUser,
+  ): Promise<PipelineSummaryResponseDto> {
+    try {
+      return await this.workflowsService.updateWorkflow(
+        id,
+        updateWorkflowDto,
+        currentUser.role,
+        currentUser.id,
+      );
+    } catch (error: unknown) {
+      throw toIssueContractException(error);
+    }
+  }
+
+  /**
+   * Despacho manual de pruebas de un flujo (Camino B).
+   *
+   * `HttpStatus.OK` y no el 201 que Nest asigna por defecto a `@Post`: el
+   * recurso que interesa al cliente no es la fila creada en `ejecuciones_flujo`,
+   * sino el RESULTADO del recorrido, que se devuelve en el mismo cuerpo. La
+   * peticion es sincrona: no retorna hasta que el motor alcanza un estado
+   * terminal (EXITOSO, OMITIDO, PAUSADO o FALLIDO).
+   *
+   * El cuerpo es opcional en la practica: sin `mockData` se aplica el fixture
+   * estandar de `raw_email`, de modo que `POST` con `{}` ya rinde una prueba
+   * completa del pipeline.
+   */
+  @Post(':id/execute-test')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary:
+      'Dispara un flujo completo con datos simulados, omitiendo la conexion real del nodo disparador',
+  })
+  @ApiOkResponse({
+    description:
+      'El motor alcanzo un estado terminal; se devuelve el checkpoint con el contexto acumulado',
+    type: WorkflowExecutionResponseDto,
+  })
+  @ApiNotFoundResponse({ description: 'No existe ningun flujo con ese id' })
+  @ApiBadRequestResponse({
+    description:
+      'El flujo no tiene configuracion_pipeline, o su esquema no supera PipelineValidatorService',
+  })
+  @ApiConflictResponse({
+    description:
+      'Conflicto de concurrencia (RNF-09): el flujo ya tiene una ejecucion EN_PROCESO',
+  })
+  public async executeTest(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() executeTestWorkflowDto: ExecuteTestWorkflowDto,
+    // Quien lanza el ensayo: la telemetria de IA que genere se le imputa.
+    @CurrentUser() currentUser: AuthenticatedUser,
+  ): Promise<WorkflowExecutionResponseDto> {
+    try {
+      return await this.workflowsService.executeTest(
+        id,
+        executeTestWorkflowDto,
+        currentUser.id,
+      );
+    } catch (error: unknown) {
+      throw toIssueContractException(error);
+    }
+  }
+}

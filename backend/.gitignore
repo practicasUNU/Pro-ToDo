@@ -4,7 +4,15 @@
 /build
 
 # Logs
-logs
+# Anclado con `/`: sin la barra, el patron ignora CUALQUIER directorio llamado
+# `logs` a cualquier profundidad, y eso se tragaba `src/modules/logs/` entero
+# —el modulo de trazabilidad— dejandolo fuera del repositorio sin avisar.
+#
+# Y con `/*` —el CONTENIDO— en vez de `/logs` —el directorio—: git no desciende
+# a un directorio excluido, asi que sobre `/logs` la negacion de abajo seria
+# inerte y el `.gitkeep` nunca se versionaria. Mismo patron que `static/uploads`.
+/logs/*
+!/logs/.gitkeep
 *.log
 npm-debug.log*
 pnpm-debug.log*
@@ -54,3 +62,9 @@ pids
 
 # Diagnostic reports (https://nodejs.org/api/report.html)
 report.[0-9]*.[0-9]*.[0-9]*.[0-9]*.json
+
+# Archivos estaticos servidos por ServeStaticModule.
+# Se versiona el directorio (via .gitkeep) pero nunca los binarios que contiene:
+# las imagenes de los articulos las sube el operador y no son codigo fuente.
+/static/uploads/*
+!/static/uploads/.gitkeep

@@ -5,8 +5,10 @@
      del area de pagina, via las custom properties --pd-*. -->
 <script setup lang="ts">
 import { computed } from 'vue';
+import { useQuasar } from 'quasar';
 import { useRouter } from 'vue-router';
 
+import AccessibilityMenu from '@components/shared/AccessibilityMenu.vue';
 import ThemeToggle from '@components/shared/ThemeToggle.vue';
 import { useSessionStore } from '@stores/session.store';
 
@@ -22,8 +24,16 @@ withDefaults(defineProps<AppHeaderProps>(), {
 
 defineEmits<{ 'toggle-drawer': [] }>();
 
+const $q = useQuasar();
 const router = useRouter();
 const sessionStore = useSessionStore();
+
+/**
+ * Pantalla de movil (< 600px, breakpoint `sm` de Quasar). El conmutador de tema
+ * pasa al menu de accesibilidad: con los objetivos de 44px activados, cuatro
+ * controles junto al logotipo no caben en 360px y la cabecera desbordaba.
+ */
+const isCompact = computed(() => $q.screen.lt.sm);
 
 const userEmail = computed(() => sessionStore.user?.email ?? '');
 
@@ -78,10 +88,24 @@ const onLogout = async (): Promise<void> => {
 
       <!-- `variant="shell"` porque el toggle vive sobre el degradado oscuro:
            el azul de marca no contrastaria contra el propio header. -->
-      <theme-toggle variant="shell" class="q-mr-sm" />
+      <!-- Accesibilidad junto al modo oscuro: son las dos preferencias de
+           presentacion, y quien necesita una suele buscar la otra al lado. -->
+      <accessibility-menu class="q-mr-xs" :include-theme-toggle="isCompact" />
+      <theme-toggle v-if="!isCompact" variant="shell" class="q-mr-sm" />
 
-      <q-avatar size="30px" class="pd-header-avatar cursor-pointer">
-        {{ userInitials }}
+      <!-- El avatar va DENTRO de un boton: un q-avatar suelto no recibe foco de
+           teclado, y el menu de perfil (con el cierre de sesion) quedaba fuera
+           del alcance de quien no usa raton. -->
+      <q-btn
+        flat
+        round
+        dense
+        class="pd-header-profile"
+        :aria-label="`Menu de usuario ${userEmail}`"
+      >
+        <q-avatar size="30px" class="pd-header-avatar">
+          {{ userInitials }}
+        </q-avatar>
 
         <q-menu anchor="bottom right" self="top right">
           <q-list class="pd-menu">
@@ -114,7 +138,7 @@ const onLogout = async (): Promise<void> => {
             </div>
           </q-list>
         </q-menu>
-      </q-avatar>
+      </q-btn>
     </q-toolbar>
   </q-header>
 </template>
@@ -138,8 +162,8 @@ const onLogout = async (): Promise<void> => {
 
 .pd-header-breadcrumb {
   color: var(--pd-shell-text-secondary);
-  font-size: 12.5px;
-  line-height: 18px;
+  font-size: 0.7812rem;
+  line-height: 1.125rem;
 }
 
 .pd-header-separator {
@@ -150,7 +174,7 @@ const onLogout = async (): Promise<void> => {
 .pd-header-avatar {
   background: var(--pd-panel-solid);
   color: var(--pd-shell-text);
-  font-size: 12px;
+  font-size: 0.75rem;
   font-weight: 700;
 }
 
@@ -173,5 +197,23 @@ const onLogout = async (): Promise<void> => {
 
 .pd-menu__actions {
   padding: 8px;
+}
+
+// Movil (breakpoint `xs` de Quasar). La cabecera no hace scroll horizontal: el
+// breadcrumb y su separador se ocultan —el titulo de la vista ya dice donde
+// se esta— y el logotipo encoge sin perder su proporcion.
+@media (max-width: 599px) {
+  .pd-header-logo {
+    height: 24px;
+    flex: 0 1 auto;
+    min-width: 0;
+    max-width: 40vw;
+    object-fit: contain;
+  }
+
+  .pd-header-separator,
+  .pd-header-breadcrumb {
+    display: none;
+  }
 }
 </style>

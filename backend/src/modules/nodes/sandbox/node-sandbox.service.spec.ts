@@ -1,0 +1,352 @@
+import { BadRequestException } from '@nestjs/common';
+
+import { NodeType } from '@core/fsm/types/pipeline-schema.types';
+import { UserRole } from '@modules/users/enums/user-role.enum';
+
+import {
+  ERR_SANDBOX_DRUPAL_PRODUCTION,
+  SANDBOX_NODE_ID,
+} from './node-sandbox.constants';
+import { NodeSandboxService } from './node-sandbox.service';
+
+import { AuditActionType } from '@modules/audit/enums/audit-action.enum';
+
+import type { DrupalApiConfig } from '@core/config/drupal-api.config';
+import type { StatePayloadContext } from '@core/fsm/context/state-payload.context';
+import type { AuditLoggerService } from '@modules/audit/services/audit-logger.service';
+import type { NodeStrategyFactory } from '@core/fsm/factories/node-strategy.factory';
+import type { PipelineValidatorService } from '@core/fsm/services/pipeline-validator.service';
+import type { AuthenticatedUser } from '@modules/auth/interfaces/jwt-payload.interface';
+import type { RunNodeSandboxDto } from './dto/run-node-sandbox.dto';
+
+const ADMIN: AuthenticatedUser = {
+  id: '3f1c2b64-8a5e-4c2f-9d3a-7b6e5f4c1a20',
+  email: 'admin@unuware.com',
+  role: UserRole.ADMIN,
+};
+
+/** Paginas de pruebas declaradas en el `.env` simulado. */
+const SANDBOX_PAGE_UUID = '7f1700bf-b54b-4c12-b71a-8a71f1f0ee38';
+const SANDBOX_CLOSED_UUID = '0a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d';
+const PRODUCTION_PAGE_UUID = '11111111-2222-4333-8444-555555555555';
+
+const EDITOR: AuthenticatedUser = {
+  id: '9e8d7c6b-5a4f-4e3d-8c2b-1a0f9e8d7c6b',
+  email: 'editor@unuware.com',
+  role: UserRole.EDITOR,
+};
+
+const buildHarness = (
+  issues: unknown[] = [],
+): {
+  service: NodeSandboxService;
+  execute: jest.Mock;
+  validateStandaloneParams: jest.Mock;
+  record: jest.Mock;
+} => {
+  const execute = jest.fn().mockResolvedValue({ success: true, data: {} });
+  const validateStandaloneParams = jest.fn().mockResolvedValue(issues);
+  const record = jest.fn().mockResolvedValue(undefined);
+
+  return {
+    service: new NodeSandboxService(
+      { getStrategy: () => ({ execute }) } as unknown as NodeStrategyFactory,
+      { validateStandaloneParams } as unknown as PipelineValidatorService,
+      { record } as unknown as AuditLoggerService,
+      {
+        sandboxNodeUuids: new Set([SANDBOX_PAGE_UUID, SANDBOX_CLOSED_UUID]),
+      } as unknown as DrupalApiConfig,
+    ),
+    execute,
+    validateStandaloneParams,
+    record,
+  };
+};
+
+const DTO: RunNodeSandboxDto = {
+  nodeType: NodeType.PROCESADOR_IA,
+  params: { promptText: 'Resume {{parsed_email.clean_body}}' },
+  upstreamContext: { parsed_email: { clean_body: 'Texto del correo' } },
+};
+
+describe('NodeSandboxService', () => {
+  it('1.1 deberia sembrar el contexto simulado y marcarlo como banco de pruebas', async () => {
+    // 1. Arrange 📐
+    const { service, execute } = buildHarness();
+
+    // 2. Act ⚙️
+    await service.run(DTO, ADMIN);
+
+    // 3. Assert 🎯: el ambito lleva al usuario, que es a quien se imputa el
+    //    gasto de la inferencia (origen BANCO_PRUEBAS).
+    const [context, params] = execute.mock.calls[0] as [
+      StatePayloadContext,
+      Record<string, unknown>,
+    ];
+
+    expect(params).toEqual(DTO.params);
+    expect(context.getNamespace('parsed_email')).toEqual({
+      clean_body: 'Texto del correo',
+    });
+    expect(context.getCursor()).toBe(SANDBOX_NODE_ID);
+    expect(context.getSandboxScope()).toEqual({ userId: ADMIN.id });
+    expect(context.getExecutionId()).toMatch(/^sandbox-/);
+  });
+
+  it('1.2 deberia rechazar params invalidos sin ejecutar la estrategia', async () => {
+    // 1. Arrange 📐
+    const { service, execute } = buildHarness([
+      { field: 'params.promptText', constraints: ['obligatorio'] },
+    ]);
+
+    // 2. Act ⚙️ + 3. Assert 🎯
+    await expect(service.run(DTO, ADMIN)).rejects.toBeInstanceOf(
+      BadRequestException,
+    );
+    expect(execute).not.toHaveBeenCalled();
+  });
+
+  it('1.3 deberia devolver el fallo del nodo SIN la traza de pila', async () => {
+    // 1. Arrange 📐: un 503 del proveedor, con su traza interna.
+    const { service, execute } = buildHarness();
+    execute.mockResolvedValue({
+      success: false,
+      error: {
+        level: 'GRAVE',
+        code: 'ERR_LLM_PROVIDER',
+        message: 'El proveedor respondio 503',
+        stackTrace: 'Error: 503\n    at /srv/app/...',
+        metadata: { exhausted: true },
+      },
+    });
+
+    // 2. Act ⚙️
+    const result = await service.run(DTO, ADMIN);
+
+    // 3. Assert 🎯: es un 200 con `success: false`, y la traza no sale.
+    expect(result.success).toBe(false);
+    expect(result.error).toEqual({
+      level: 'GRAVE',
+      code: 'ERR_LLM_PROVIDER',
+      message: 'El proveedor respondio 503',
+    });
+    expect(JSON.stringify(result)).not.toContain('/srv/app');
+  });
+
+  it('1.4 deberia aislar cada prueba en su propio contexto', async () => {
+    // 1. Arrange 📐: dos pruebas simultaneas no comparten namespaces.
+    const { service, execute } = buildHarness();
+
+    // 2. Act ⚙️
+    await Promise.all([
+      service.run(DTO, ADMIN),
+      service.run(
+        { ...DTO, upstreamContext: { parsed_email: { clean_body: 'Otro' } } },
+        ADMIN,
+      ),
+    ]);
+
+    // 3. Assert 🎯
+    const [first, second] = execute.mock.calls.map(
+      ([context]) => context as StatePayloadContext,
+    );
+
+    expect(first?.getExecutionId()).not.toBe(second?.getExecutionId());
+    expect(second?.getNamespace('parsed_email')).toEqual({
+      clean_body: 'Otro',
+    });
+  });
+
+  describe('2. Atribucion al usuario activo (migracion 060)', () => {
+    it('should associate active user_id when running nodes in sandbox mode', async () => {
+      // 1. Arrange 📐
+      const { service, execute, record } = buildHarness();
+
+      // 2. Act ⚙️
+      await service.run(DTO, ADMIN, { sourceIp: '10.0.0.7' });
+
+      // 3. Assert 🎯: el contexto lleva al usuario del JWT como iniciador (la
+      //    telemetria de IA se le imputa) y la prueba deja su evento de auditoria.
+      const [context] = execute.mock.calls[0] as [StatePayloadContext];
+
+      expect(context.getSandboxScope()).toEqual({ userId: ADMIN.id });
+      expect(context.getInitiatorUserId()).toBe(ADMIN.id);
+      expect(record).toHaveBeenCalledWith({
+        userId: ADMIN.id,
+        action: AuditActionType.NODE_SANDBOX_RUN,
+        affectedTable: 'banco_pruebas',
+        recordId: null,
+        newData: {
+          nodeType: NodeType.PROCESADOR_IA,
+          success: true,
+          errorCode: null,
+          durationMs: expect.any(Number) as number,
+        },
+        sourceIp: '10.0.0.7',
+      });
+    });
+
+    it('2.2 deberia auditar tambien la prueba que falla, con su codigo', async () => {
+      // 1. Arrange 📐
+      const { service, execute, record } = buildHarness();
+      execute.mockResolvedValue({
+        success: false,
+        error: { level: 'GRAVE', code: 'ERR_LLM_PROVIDER', message: '503' },
+      });
+
+      // 2. Act ⚙️
+      await service.run(DTO, ADMIN);
+
+      // 3. Assert 🎯
+      expect(record).toHaveBeenCalledWith(
+        expect.objectContaining({
+          newData: expect.objectContaining({
+            success: false,
+            errorCode: 'ERR_LLM_PROVIDER',
+          }) as unknown,
+          sourceIp: null,
+        }),
+      );
+    });
+
+    it('2.3 deberia auditar la estrategia que revienta y propagar la excepcion', async () => {
+      // 1. Arrange 📐
+      const { service, execute, record } = buildHarness();
+      execute.mockRejectedValue(new Error('boom'));
+
+      // 2. Act ⚙️ + 3. Assert 🎯
+      await expect(service.run(DTO, ADMIN)).rejects.toThrow('boom');
+      expect(record).toHaveBeenCalledWith(
+        expect.objectContaining({
+          newData: expect.objectContaining({
+            errorCode: 'ERR_NODE_CRASHED',
+          }) as unknown,
+        }),
+      );
+    });
+
+    it('2.4 no deberia auditar una peticion rechazada antes de ejecutar', async () => {
+      // 1. Arrange 📐
+      const { service, record } = buildHarness([
+        { field: 'params.promptText', constraints: ['obligatorio'] },
+      ]);
+
+      // 2. Act ⚙️ + 3. Assert 🎯
+      await expect(service.run(DTO, ADMIN)).rejects.toBeInstanceOf(
+        BadRequestException,
+      );
+      expect(record).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('3. Nodo Drupal encerrado en el entorno de pruebas', () => {
+    /** `params` con los que se llamo a la estrategia en la primera ejecucion. */
+    const executedParams = (execute: jest.Mock): Record<string, unknown> =>
+      (
+        execute.mock.calls[0] as [StatePayloadContext, Record<string, unknown>]
+      )[1];
+
+    const drupalDto = (params: Record<string, unknown>): RunNodeSandboxDto => ({
+      nodeType: NodeType.DESTINO_DRUPAL,
+      params,
+      upstreamContext: {},
+    });
+
+    it('should enforce isSandbox to true when executing drupal node inside node sandbox', async () => {
+      // 1. Arrange 📐: el formulario no manda `isSandbox`; un EDITOR prueba a
+      //    trasladar una licitacion entre dos paginas de pruebas.
+      const { service, execute, validateStandaloneParams } = buildHarness();
+      const params = {
+        operationMode: 'TRANSFER_HTML_BLOCK',
+        bundle: 'node--page',
+        targetNodeUuid: SANDBOX_PAGE_UUID,
+        destinationNodeUuid: SANDBOX_CLOSED_UUID.toUpperCase(),
+        itemSelector: '.licitacion-entry',
+      };
+
+      // 2. Act ⚙️
+      await service.run(drupalDto(params), EDITOR);
+
+      // 3. Assert 🎯: lo validado y lo ejecutado llevan el entorno forzado y
+      //    el alta despublicada, aunque el cliente no lo pidiera.
+      const expected = { ...params, isSandbox: true, publishStatus: false };
+      expect(validateStandaloneParams).toHaveBeenCalledWith(
+        NodeType.DESTINO_DRUPAL,
+        expected,
+      );
+      expect(executedParams(execute)).toEqual(expected);
+    });
+
+    it('3.2 deberia rechazar isSandbox:false sin ejecutar ni auditar', async () => {
+      // 1. Arrange 📐
+      const { service, execute, record } = buildHarness();
+
+      // 2. Act ⚙️
+      const run = service.run(
+        drupalDto({ isSandbox: false, targetNodeUuid: SANDBOX_PAGE_UUID }),
+        ADMIN,
+      );
+
+      // 3. Assert 🎯
+      await expect(run).rejects.toMatchObject({
+        response: { code: ERR_SANDBOX_DRUPAL_PRODUCTION },
+      });
+      expect(execute).not.toHaveBeenCalled();
+      expect(record).not.toHaveBeenCalled();
+    });
+
+    it('3.3 deberia rechazar una pagina fuera de la lista blanca aunque diga isSandbox', async () => {
+      // 1. Arrange 📐: un UUID de produccion tecleado a mano.
+      const { service, execute } = buildHarness();
+
+      // 2. Act ⚙️
+      const run = service.run(
+        drupalDto({
+          isSandbox: true,
+          operationMode: 'APPEND_HTML_BLOCK',
+          targetNodeUuid: PRODUCTION_PAGE_UUID,
+        }),
+        EDITOR,
+      );
+
+      // 3. Assert 🎯
+      await expect(run).rejects.toBeInstanceOf(BadRequestException);
+      await expect(run).rejects.toMatchObject({
+        response: { code: ERR_SANDBOX_DRUPAL_PRODUCTION },
+      });
+      expect(execute).not.toHaveBeenCalled();
+    });
+
+    it('3.4 deberia dejar crear una noticia sin pagina, siempre despublicada', async () => {
+      // 1. Arrange 📐: CREATE_NODE no cita pagina alguna.
+      const { service, execute } = buildHarness();
+
+      // 2. Act ⚙️
+      await service.run(
+        drupalDto({
+          operationMode: 'CREATE_NODE',
+          titleTemplate: 'Prueba',
+          publishStatus: true,
+        }),
+        ADMIN,
+      );
+
+      // 3. Assert 🎯
+      expect(executedParams(execute)).toMatchObject({
+        isSandbox: true,
+        publishStatus: false,
+      });
+    });
+
+    it('3.5 NO deberia tocar los params de otros nodos', async () => {
+      // 1. Arrange 📐
+      const { service, execute } = buildHarness();
+
+      // 2. Act ⚙️
+      await service.run(DTO, ADMIN);
+
+      // 3. Assert 🎯
+      expect(executedParams(execute)).toEqual(DTO.params);
+    });
+  });
+});

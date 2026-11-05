@@ -96,6 +96,4 @@ export const clearSession = (): void => {
  * que este modulo siga siendo el unico dueño de los nombres de clave.
  */
 export const isSessionStorageKey = (key: string | null): boolean =>
-  key === ACCESS_TOKEN_KEY ||
-  key === REFRESH_TOKEN_KEY ||
-  key === USER_KEY;
+  key === ACCESS_TOKEN_KEY || key === REFRESH_TOKEN_KEY || key === USER_KEY;

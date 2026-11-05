@@ -1,0 +1,165 @@
+import {
+  Column,
+  CreateDateColumn,
+  Entity,
+  Index,
+  PrimaryGeneratedColumn,
+  UpdateDateColumn,
+} from 'typeorm';
+
+import { ExecutionState } from '@core/fsm/types/fsm.enums';
+
+/**
+ * Checkpoint persistente de una ejecucion del motor FSM.
+ *
+ * Mapea la tabla `ejecuciones_flujo` que ya define `init.sql` en lugar de crear
+ * una tabla paralela: `logs_nodo` y `alertas_error` tienen claves foraneas
+ * apuntandole, y duplicarla habria dejado dos fuentes de verdad para el mismo
+ * concepto. De ahi que las propiedades esten en ingles y las columnas en
+ * espanol, igual que en `User` y `RefreshToken`.
+ *
+ * MUTEX DE EJECUCION: `idx_flujo_activo` es un indice unico PARCIAL — solo
+ * aplica mientras `estado = 'EN_PROCESO'`. Con el, la propia base de datos
+ * garantiza que un flujo no tenga dos ejecuciones vivas a la vez, sin depender
+ * de un bloqueo en memoria que se perderia al escalar a varios procesos. Los
+ * estados terminales quedan fuera del indice, asi que un flujo puede acumular
+ * todas las ejecuciones historicas que haga falta.
+ *
+ * OJO: con `synchronize: false`, TypeORM NO crea este indice. El decorador es
+ * declarativo; el indice real lo crea `db/migrations/006-fsm-execution-mutex.sql`.
+ */
+@Entity('ejecuciones_flujo')
+@Index('idx_flujo_activo', ['flowId'], {
+  unique: true,
+  where: "estado = 'EN_PROCESO'",
+})
+export class FsmExecution {
+  @PrimaryGeneratedColumn('uuid', { name: 'id_ejecucion' })
+  executionId: string;
+
+  @Column({ name: 'id_flujo', type: 'uuid' })
+  flowId: string;
+
+  @Column({
+    name: 'estado',
+    type: 'enum',
+    enum: ExecutionState,
+    enumName: 'enum_estado',
+    default: ExecutionState.INACTIVO,
+  })
+  currentState: ExecutionState;
+
+  /** `nodeId` del paso en curso. Nulo mientras la ejecucion esta INACTIVO. */
+  @Column({ name: 'paso_actual', type: 'varchar', length: 50, nullable: true })
+  activeCursor: string | null;
+
+  /**
+   * Volcado de `StatePayloadContext.getAllContext()`: los namespaces acumulados
+   * por los nodos ya ejecutados. Es lo que permite reanudar desde el cursor sin
+   * repetir el trabajo previo.
+   */
+  @Column({ name: 'contexto_acumulado', type: 'jsonb', default: {} })
+  contextPayload: Record<string, Record<string, unknown>>;
+
+  /**
+   * Usuario al que se imputa la ejecucion (migracion 060): quien la lanzo o
+   * reanudo desde la UI, el remitente de un disparo IMAP si esta registrado, o
+   * la cuenta de respaldo que pone el DEFAULT de la columna cuando el backend la
+   * omite (Cron). Sin relacion declarada: solo se lee el identificador.
+   */
+  @Column({ name: 'usuario_id', type: 'uuid', nullable: true })
+  initiatedByUserId: string | null;
+
+  /** Intentos consumidos por nodo, para contrastarlos con su `RetryPolicy`. */
+  @Column({ name: 'retry_state', type: 'jsonb', default: {} })
+  retryState: Record<string, unknown>;
+
+  /**
+   * Ruta del ultimo archivo de registro relevante para esta ejecucion.
+   *
+   * Es el eslabon entre los dos destinos de la persistencia hibrida
+   * (`architecture-patterns.md` §4): el stack trace y el payload viven en disco
+   * —demasiado voluminosos para una columna— y aqui queda la referencia que
+   * permite encontrarlos.
+   *
+   * Apunta a UNO DE DOS ARCHIVOS DISTINTOS, segun como se detuviera la
+   * ejecucion, y conviene saberlo antes de abrirlo:
+   *
+   * - `fsm-*.log` — volcado forense de un fallo catastrofico, con el stack
+   *   trace completo. Lo escribe `failCatastrophically`.
+   * - `execution-*.log` — traza por nodo del paso que dejo la ejecucion
+   *   PAUSADO. La escribe `pauseAt` con el acuse de `logNodeExecution`.
+   *
+   * `null` mientras no haya ocurrido ninguno de los dos, y tambien cuando
+   * ocurrieron pero el volcado a disco no pudo escribirse. Una reanudacion
+   * (CU-09) NO lo limpia: es el rastro de por que hubo que reanudar, y se
+   * conserva hasta que un fallo nuevo lo sustituya.
+   */
+  @Column({
+    name: 'ruta_archivo_log',
+    type: 'varchar',
+    length: 255,
+    nullable: true,
+  })
+  logFilePath: string | null;
+
+  /**
+   * Motivo legible del fallo cuando NO lo explica un volcado forense.
+   *
+   * Complementa a `logFilePath`, no lo sustituye: aquel apunta al stack trace de
+   * un fallo tecnico, y este describe un fallo que ningun nodo provoco. El caso
+   * que lo motiva es la desactivacion del flujo padre —una decision del
+   * operador, sin excepcion que volcar—, tras la cual las ejecuciones vivas se
+   * cierran como FALLIDO y sin esta columna serian indistinguibles de una averia
+   * cuyo log se hubiera perdido.
+   *
+   * `null` en toda ejecucion que no ha fallado y en la que si lo hizo por la via
+   * tecnica, donde el detalle vive en el fichero.
+   */
+  @Column({
+    name: 'motivo_fallo',
+    type: 'varchar',
+    length: 255,
+    nullable: true,
+  })
+  failureReason: string | null;
+
+  @CreateDateColumn({ name: 'fecha_inicio', type: 'timestamp' })
+  createdAt: Date;
+
+  @UpdateDateColumn({ name: 'fecha_actualizacion', type: 'timestamp' })
+  updatedAt: Date;
+
+  /**
+   * Motivo por el que un nodo detuvo el flujo ANTES de llegar al nodo terminal.
+   *
+   * NO es una columna, y por eso no lleva `@Column`: vive solo en la instancia
+   * que `executeWorkflow` devuelve. Nacio porque las dos salidas buenas del
+   * bucle —recorrer el grafo entero y pararse porque no habia nada que hacer—
+   * dejaban la fila EXACTAMENTE igual: EXITOSO con el cursor nulo.
+   *
+   * Desde la migracion 030 el ESTADO ya las separa (`OMITIDO`), asi que esto
+   * deja de ser la unica senal y pasa a ser la mas precisa: lleva el MOTIVO
+   * —que buzon, que filtro— y no solo el hecho. Sigue siendo transitorio a
+   * proposito: persistirlo seria una columna con su migracion, y su unico
+   * lector corre en el mismo proceso que lo escribe. Si la trazabilidad llega
+   * a mostrar por que una ejecucion se omitio, entonces se promueve.
+   */
+  haltReason?: string;
+
+  /**
+   * Si la ejecucion se desvio alguna vez por una ruta `onErrorStep`.
+   *
+   * Transitorio por el mismo motivo que `haltReason`, y con la misma disciplina:
+   * persistirlo seria una columna con su migracion, y hoy tiene un unico lector
+   * —`applyStopOnFirstSuccess`—, que corre en el mismo proceso que lo escribe.
+   *
+   * Existe porque el desenlace por si solo no lo cuenta todo. Una recuperacion
+   * funcional —el fallback de vision que reincorpora el flujo— cierra EXITOSO
+   * con razon: el trabajo se hizo. Pero la politica de "apagar tras el primer
+   * exito" describe un flujo que YA funciona sin incidencias, y una ejecucion
+   * que necesito un desvio no lo demuestra: apagarlo ahi lo dejaria enterrado
+   * junto con el fallo que nadie ha mirado.
+   */
+  tookContingency?: boolean;
+}

@@ -1,0 +1,587 @@
+// @vitest-environment happy-dom
+import { createPinia, setActivePinia } from 'pinia';
+import { defineComponent, h } from 'vue';
+
+import { mount } from '@vue/test-utils';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+
+import { useExecutionSocket } from './useExecutionSocket';
+
+import { useCanvasStore } from '@stores/canvas.store';
+import { useExecutionStore } from '@stores/execution.store';
+import { useWorkflowsStore } from '@stores/workflows.store';
+
+import DrupalPublishSuccessModal from '@components/workflows/DrupalPublishSuccessModal.vue';
+
+import { ExecutionState } from '@/types/execution';
+
+import type {
+  ExecutionEventHandlers,
+  FlowCompletedEvent,
+  FlowDiscardedEvent,
+  FlowPausedEvent,
+  FlowResumedEvent,
+  NodeErrorEvent,
+} from '@/types/execution';
+import type * as QuasarModule from 'quasar';
+import type { QNotifyCreateOptions } from 'quasar';
+
+// El canal se intercepta para QUEDARSE con los manejadores que el composable
+// registra: asi el spec puede dispararlos a mano, sin socket ni servidor.
+let registered: ExecutionEventHandlers | null = null;
+const unsubscribe = vi.fn();
+
+// El oyente de reconexion se intercepta igual que los de dominio: el spec lo
+// dispara a mano para comprobar que la vista se reconcilia sin socket real.
+let registeredReconnect: (() => void) | null = null;
+const unsubscribeReconnect = vi.fn();
+
+vi.mock('@services/socket-events.service', () => ({
+  subscribeToExecutionEvents: vi.fn((handlers: ExecutionEventHandlers) => {
+    registered = handlers;
+    return unsubscribe;
+  }),
+  subscribeToReconnect: vi.fn((handler: () => void) => {
+    registeredReconnect = handler;
+    return unsubscribeReconnect;
+  }),
+}));
+
+// Solo se sustituye `useQuasar`: el resto del paquete se conserva porque el
+// store y los tipos siguen necesitandolo.
+/**
+ * `notify` devuelve la funcion de cierre que Quasar entrega de verdad: el
+ * composable la guarda para poder retirar el banner persistente desde fuera,
+ * y un doble que devuelva `undefined` haria pasar las pruebas sin comprobarlo.
+ */
+const dismiss = vi.fn();
+/** Doble de `$q.dialog`: el modal de publicacion se abre por el plugin. */
+const dialog = vi.fn();
+const notify = vi.fn((options: QNotifyCreateOptions) => {
+  void options;
+  return dismiss;
+});
+
+vi.mock('quasar', async () => {
+  const actual = await vi.importActual<typeof QuasarModule>('quasar');
+  return { ...actual, useQuasar: () => ({ notify, dialog }) };
+});
+
+// Sin esto se cargaria `@boot/axios`, que necesita entorno de navegador.
+vi.mock('@services/fsm-executions.service', () => ({
+  fetchExecutions: vi.fn(),
+  fetchExecution: vi.fn(),
+  resumeExecution: vi.fn(),
+  discardExecution: vi.fn(),
+  fetchActiveExecution: vi.fn(),
+}));
+
+// El composable alimenta tambien al canvas, que arrastra el servicio de
+// flujos; mismo motivo que el mock anterior.
+vi.mock('@services/workflows.service', () => ({
+  fetchWorkflow: vi.fn(),
+}));
+
+const service = await import('@services/fsm-executions.service');
+const resumeExecution = vi.mocked(service.resumeExecution);
+
+const EXECUTION_ID = '7c9e6679-7425-40de-944b-e07fc1f90ae7';
+const FLOW_ID = 'b3f1c2d4-5a6b-4c7d-8e9f-0a1b2c3d4e5f';
+
+const buildPaused = (overrides: Partial<FlowPausedEvent> = {}): FlowPausedEvent => ({
+  executionId: EXECUTION_ID,
+  flowId: FLOW_ID,
+  emittedAt: '2026-10-10T07:30:00.000Z',
+  activeCursor: 'nodo_ia',
+  severity: 'GRAVE',
+  errorMessage: 'La plantilla aun trae marcadores',
+  logFilePath: '/logs/execution.log',
+  flowName: 'NOTIWEB Licitaciones',
+  nodeType: 'PROCESADOR_IA',
+  errorCode: 'ERR_TEMPLATE_PENDING_VARS',
+  attempts: 3,
+  errorDetail: 'Causa raiz: el proveedor devolvio 503.',
+  ...overrides,
+});
+
+const buildDiscarded = (overrides: Partial<FlowDiscardedEvent> = {}): FlowDiscardedEvent => ({
+  executionId: EXECUTION_ID,
+  flowId: FLOW_ID,
+  emittedAt: '2026-10-10T07:45:00.000Z',
+  discardedBy: 'practicas@unuware.com',
+  lastCursor: 'nodo_ia',
+  workflowDeactivated: true,
+  ...overrides,
+});
+
+const buildCompleted = (overrides: Partial<FlowCompletedEvent> = {}): FlowCompletedEvent => ({
+  executionId: EXECUTION_ID,
+  flowId: FLOW_ID,
+  emittedAt: '2026-10-10T07:50:00.000Z',
+  finalState: ExecutionState.EXITOSO,
+  flowName: 'NOTIWEB Licitaciones',
+  ...overrides,
+});
+
+const buildResumed = (overrides: Partial<FlowResumedEvent> = {}): FlowResumedEvent => ({
+  executionId: EXECUTION_ID,
+  flowId: FLOW_ID,
+  emittedAt: '2026-10-10T07:40:00.000Z',
+  activeCursor: 'nodo_ia',
+  resumedBy: { id: 'u-1', email: 'practicas@unuware.com' },
+  ...overrides,
+});
+
+const buildNodeError = (overrides: Partial<NodeErrorEvent> = {}): NodeErrorEvent => ({
+  executionId: EXECUTION_ID,
+  flowId: FLOW_ID,
+  emittedAt: '2026-10-10T07:35:00.000Z',
+  nodeId: 'nodo_ia',
+  severity: 'URGENTE',
+  errorCode: 'ERR_TEMPLATE_PENDING_VARS',
+  errorMessage: 'Faltan variables',
+  logFilePath: '/logs/execution.log',
+  attempt: 2,
+  ...overrides,
+});
+
+/** Monta un anfitrion minimo: `useQuasar` y los hooks exigen componente vivo. */
+const mountHost = (): ReturnType<typeof mount> =>
+  mount(
+    defineComponent({
+      setup() {
+        useExecutionSocket();
+        return () => h('div');
+      },
+    }),
+  );
+
+/** Ultimas opciones entregadas a `notify`, ya tipadas. */
+const lastNotifyOptions = (): QNotifyCreateOptions =>
+  notify.mock.calls.at(-1)?.[0] as QNotifyCreateOptions;
+
+describe('useExecutionSocket', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia());
+    registered = null;
+    notify.mockClear();
+    dismiss.mockClear();
+    dialog.mockClear();
+    unsubscribe.mockClear();
+    // Faltaba: es compartido entre pruebas, asi que cualquier otra que
+    // desmonte el anfitrion le sumaba una llamada a la que lo comprueba.
+    unsubscribeReconnect.mockClear();
+    resumeExecution.mockReset();
+  });
+
+  it.each([
+    ['reanudarse', () => registered?.onFlowResumed?.(buildResumed())],
+    ['descartarse', () => registered?.onFlowDiscarded?.(buildDiscarded())],
+    ['terminar', () => registered?.onFlowCompleted?.(buildCompleted())],
+  ])('deberia retirar el banner de pausa al %s el flujo', (_label, act) => {
+    // Arrange: el aviso de pausa es persistente porque lleva el boton de
+    // reanudar. Sin esto se quedaba indefinidamente en pantalla invitando a
+    // reanudar algo que ya no estaba detenido.
+    mountHost();
+    registered?.onFlowPaused?.(buildPaused());
+    expect(dismiss).not.toHaveBeenCalled();
+
+    // Act
+    act();
+
+    // Assert
+    expect(dismiss).toHaveBeenCalledTimes(1);
+  });
+
+  it('NO deberia apilar dos banners del mismo flujo', () => {
+    // Arrange: un flujo que se pausa, se reanuda desde otra pestana y vuelve a
+    // caer sin que nadie cerrase el primer aviso.
+    mountHost();
+    registered?.onFlowPaused?.(buildPaused());
+
+    // Act
+    registered?.onFlowPaused?.(buildPaused());
+
+    // Assert: el primero se retira antes de poner el segundo.
+    expect(dismiss).toHaveBeenCalledTimes(1);
+    expect(notify).toHaveBeenCalledTimes(2);
+  });
+
+  it('deberia purgar los banners vivos al desmontarse', () => {
+    // Arrange: los avisos persistentes sobreviven al componente que los creo,
+    // asi que salir del layout —al cerrar sesion— los dejaria en pantalla.
+    const host = mountHost();
+    registered?.onFlowPaused?.(buildPaused());
+
+    // Act
+    host.unmount();
+
+    // Assert
+    expect(dismiss).toHaveBeenCalledTimes(1);
+  });
+
+  it('deberia avisar con un toast persistente y accionable al pausarse un flujo', () => {
+    // Arrange
+    mountHost();
+
+    // Act
+    registered?.onFlowPaused?.(buildPaused());
+
+    // Assert
+    expect(notify).toHaveBeenCalledTimes(1);
+
+    const options = lastNotifyOptions();
+    expect(options.type).toBe('warning');
+    expect(options.icon).toBe('pause_circle');
+    // `timeout: 0` es el contrato del aviso accionable: si se desvaneciese, el
+    // reintento dependeria de haber estado mirando la pantalla.
+    expect(options.timeout).toBe(0);
+    expect(options.multiLine).toBe(true);
+    expect(options.classes).toContain('pd-accent-grave');
+
+    // El desglose completo, que es lo que distingue este aviso de un «algo
+    // fallo»: nombre del flujo, nodo CON su tipo, severidad, codigo y mensaje.
+    // Sin el tipo y el codigo, el operador sabe que hay un problema pero no a
+    // que pantalla ir.
+    expect(options.message).toContain('NOTIWEB Licitaciones');
+    expect(options.message).toContain('nodo_ia');
+    expect(options.message).toContain('PROCESADOR_IA');
+    expect(options.caption).toContain('GRAVE');
+    expect(options.caption).toContain('ERR_TEMPLATE_PENDING_VARS');
+    expect(options.caption).toContain('La plantilla aun trae marcadores');
+
+    expect(options.actions).toHaveLength(2);
+  });
+
+  it('deberia caer al identificador abreviado cuando la pausa no trae nombre de flujo', () => {
+    // Arrange
+    mountHost();
+
+    // Act. `flowName` solo llega si quien despacho paso el nombre al motor: su
+    // ausencia es un caso real, no defensivo.
+    // Las claves se QUITAN en vez de pasarse como `undefined`: con
+    // `exactOptionalPropertyTypes` no son lo mismo, y el evento real
+    // sencillamente no las trae.
+    const complete = buildPaused();
+    const withoutNames: FlowPausedEvent = {
+      executionId: complete.executionId,
+      flowId: complete.flowId,
+      emittedAt: complete.emittedAt,
+      activeCursor: complete.activeCursor,
+      errorMessage: 'El proveedor devolvio 503',
+    };
+
+    registered?.onFlowPaused?.(withoutNames);
+
+    // Assert
+    const options = lastNotifyOptions();
+    expect(options.message).toContain(FLOW_ID.slice(0, 8));
+    // Sin tipo de nodo no se inventa ningun parentesis vacio.
+    expect(options.message).not.toContain('()');
+  });
+
+  it('deberia reanudar la ejecucion al pulsar la accion del toast (CU-09)', async () => {
+    // Arrange
+    resumeExecution.mockResolvedValue({
+      executionId: EXECUTION_ID,
+      workflowId: FLOW_ID,
+      status: 'EN_PROCESO',
+      activeCursor: 'nodo_ia',
+      context: {},
+    } as Awaited<ReturnType<typeof service.resumeExecution>>);
+
+    mountHost();
+    registered?.onFlowPaused?.(buildPaused());
+
+    const [resumeAction] = lastNotifyOptions().actions ?? [];
+
+    // Act
+    (resumeAction?.handler as () => void)();
+    await vi.waitFor(() => expect(notify).toHaveBeenCalledTimes(2));
+
+    // Assert: la cadena llega hasta el servicio REST, no se queda en el store.
+    // El segundo argumento va `undefined`: desde el aviso se reanuda siempre
+    // desde el cursor persistido; elegir paso es cosa del canvas.
+    expect(resumeExecution).toHaveBeenCalledWith(EXECUTION_ID, undefined);
+    expect(lastNotifyOptions().type).toBe('positive');
+  });
+
+  it('deberia avisar en negativo cuando la reanudacion falla', async () => {
+    // Arrange: el store propaga la excepcion; el mensaje lo decide el consumidor.
+    resumeExecution.mockRejectedValue(new Error('La ejecucion ya no esta PAUSADO'));
+
+    mountHost();
+    registered?.onFlowPaused?.(buildPaused());
+
+    const [resumeAction] = lastNotifyOptions().actions ?? [];
+
+    // Act
+    (resumeAction?.handler as () => void)();
+    await vi.waitFor(() => expect(notify).toHaveBeenCalledTimes(2));
+
+    // Assert
+    const options = lastNotifyOptions();
+    expect(options.type).toBe('negative');
+    expect(options.caption).toBe('La ejecucion ya no esta PAUSADO');
+  });
+
+  it('deberia avisar en positivo al reanudarse el flujo', () => {
+    // Arrange
+    mountHost();
+
+    // Act
+    registered?.onFlowResumed?.(buildResumed());
+
+    // Assert
+    expect(lastNotifyOptions().type).toBe('positive');
+  });
+
+  it('deberia pasar a En proceso la fila del flujo reanudado en la tabla', () => {
+    // Arrange: la tabla aun pinta la fila que dejo la pausa.
+    mountHost();
+    const workflowsStore = useWorkflowsStore();
+    const markExecutionResumed = vi.spyOn(workflowsStore, 'markExecutionResumed');
+
+    // Act
+    registered?.onFlowResumed?.(buildResumed());
+
+    // Assert
+    expect(markExecutionResumed).toHaveBeenCalledWith(FLOW_ID, EXECUTION_ID);
+  });
+
+  it('deberia avisar de un fallo de nodo GRAVE o URGENTE', () => {
+    // Arrange
+    mountHost();
+
+    // Act
+    registered?.onNodeError?.(buildNodeError({ severity: 'GRAVE' }));
+
+    // Assert: ambar y no rojo. Un GRAVE es el unico que el motor REINTENTA y
+    // el unico que deja la ejecucion reanudable; pintarlo igual que un
+    // URGENTE irrecuperable hacia indistinguibles dos desenlaces opuestos.
+    const options = lastNotifyOptions();
+    expect(options.type).toBe('warning');
+    expect(options.message).toContain('nodo_ia');
+    expect(options.caption).toContain('Intento 2');
+    expect(options.caption).toContain('ERR_TEMPLATE_PENDING_VARS');
+  });
+
+  it('deberia distinguir un URGENTE de un GRAVE por el color', () => {
+    // Arrange: el par del anterior, y la razon de que exista el categorizador.
+    mountHost();
+
+    // Act
+    registered?.onNodeError?.(buildNodeError({ severity: 'URGENTE' }));
+
+    // Assert
+    const options = lastNotifyOptions();
+    expect(options.type).toBe('negative');
+    expect(options.classes).toContain('pd-accent-urgente');
+  });
+
+  it('NO deberia avisar de un fallo de nodo LEVE', () => {
+    // Arrange: un LEVE lo emite un nodo que va a reintentar; el flujo sigue.
+    mountHost();
+
+    // Act
+    registered?.onNodeError?.(buildNodeError({ severity: 'LEVE' }));
+
+    // Assert
+    expect(notify).not.toHaveBeenCalled();
+  });
+
+  it('deberia llevar el fallo al canvas incluso cuando no se avisa', () => {
+    // Arrange: son dos preguntas distintas. El filtro de severidad decide si
+    // hay que interrumpir al operador; pintar la caja de rojo no interrumpe a
+    // nadie y es justo lo que el canvas existe para contar. Sin esto, una
+    // tarjeta que falla se queda girando en «Procesando» mientras reintenta.
+    const canvasStore = useCanvasStore();
+    const handleNodeError = vi.spyOn(canvasStore, 'handleNodeError');
+    mountHost();
+
+    // Act
+    registered?.onNodeError?.(buildNodeError({ severity: 'LEVE' }));
+
+    // Assert
+    expect(handleNodeError).toHaveBeenCalledTimes(1);
+    expect(notify).not.toHaveBeenCalled();
+  });
+
+  it('deberia retirar los listeners al desmontarse el anfitrion', () => {
+    // Arrange
+    const wrapper = mountHost();
+
+    // Act
+    wrapper.unmount();
+
+    // Assert: los DOS juegos, el de dominio y el de reconexion. Sin la segunda
+    // baja, remontar el layout apilaria un sondeo REST por montaje.
+    expect(unsubscribe).toHaveBeenCalledTimes(1);
+    expect(unsubscribeReconnect).toHaveBeenCalledTimes(1);
+  });
+
+  it('deberia reconciliar el canvas al reconectar el socket', () => {
+    // Arrange 📐: las salas vuelven solas, pero lo ocurrido durante el corte no
+    // se reenvia a nadie. Sin esta lectura el canvas se queda en la ultima foto
+    // que recibio hasta que alguien recarga a mano.
+    const canvasStore = useCanvasStore();
+    const syncCurrentExecution = vi
+      .spyOn(canvasStore, 'syncCurrentExecution')
+      .mockResolvedValue(undefined);
+
+    mountHost();
+
+    // Act ⚙️
+    registeredReconnect?.();
+
+    // Assert 🎯
+    expect(syncCurrentExecution).toHaveBeenCalledTimes(1);
+  });
+  it('deberia felicitar en positivo al completarse un flujo con exito', () => {
+    // Arrange
+    mountHost();
+
+    // Act
+    registered?.onFlowCompleted?.(buildCompleted());
+
+    // Assert
+    const options = lastNotifyOptions();
+    expect(options.type).toBe('positive');
+    expect(options.message).toContain('NOTIWEB Licitaciones');
+  });
+
+  describe('Publicacion en Drupal', () => {
+    const PUBLISHED = {
+      publishedUrl: 'https://portal.example/noticias/innovacion',
+      exitPage: '/noticias/innovacion',
+    };
+
+    it('deberia abrir el modal persistente con el enlace si se sigue el flujo', () => {
+      // Arrange 📐: el operador tiene abierta la sala del flujo.
+      mountHost();
+      useExecutionStore().joinedFlowIds = new Set([FLOW_ID]);
+
+      // Act ⚙️
+      registered?.onFlowCompleted?.(buildCompleted(PUBLISHED));
+
+      // Assert 🎯: dialogo en lugar de toast, con la URL y la pagina.
+      expect(dialog).toHaveBeenCalledWith({
+        component: DrupalPublishSuccessModal,
+        componentProps: {
+          ...PUBLISHED,
+          flowName: 'NOTIWEB Licitaciones',
+        },
+      });
+      expect(notify).not.toHaveBeenCalled();
+    });
+
+    it('NO deberia interrumpir con el modal a quien no sigue el flujo', () => {
+      // Arrange 📐: `flow:completed` llega a todos los clientes conectados.
+      mountHost();
+
+      // Act ⚙️
+      registered?.onFlowCompleted?.(buildCompleted(PUBLISHED));
+
+      // Assert 🎯
+      expect(dialog).not.toHaveBeenCalled();
+      expect(lastNotifyOptions().type).toBe('positive');
+    });
+
+    it('NO deberia abrir el modal si el cierre no trae enlace', () => {
+      // Arrange 📐
+      mountHost();
+      useExecutionStore().joinedFlowIds = new Set([FLOW_ID]);
+
+      // Act ⚙️
+      registered?.onFlowCompleted?.(buildCompleted());
+
+      // Assert 🎯
+      expect(dialog).not.toHaveBeenCalled();
+      expect(lastNotifyOptions().type).toBe('positive');
+    });
+  });
+
+  it('NO deberia pintar como exito un cierre OMITIDO', () => {
+    // Arrange. Un OMITIDO es un buzon vacio: en verde haria creer que se
+    // publico algo, y en rojo mandaria a investigar una ejecucion que funciono.
+    mountHost();
+
+    // Act
+    registered?.onFlowCompleted?.(buildCompleted({ finalState: ExecutionState.OMITIDO }));
+
+    // Assert
+    expect(lastNotifyOptions().type).toBe('info');
+  });
+
+  it('deberia avisar en negativo del cierre FALLIDO con su motivo', () => {
+    // Arrange
+    mountHost();
+
+    // Act
+    registered?.onFlowCompleted?.(
+      buildCompleted({
+        finalState: ExecutionState.FALLIDO,
+        failureReason: 'El nodo "nodo_ia" fallo (URGENTE)',
+      }),
+    );
+
+    // Assert
+    const options = lastNotifyOptions();
+    expect(options.type).toBe('negative');
+    expect(options.caption).toContain('El nodo "nodo_ia" fallo (URGENTE)');
+  });
+
+  it('deberia avisar del descarte indicando que el flujo queda inactivo', () => {
+    // Arrange
+    mountHost();
+
+    // Act
+    registered?.onFlowDiscarded?.(buildDiscarded());
+
+    // Assert
+    const options = lastNotifyOptions();
+    expect(options.type).toBe('info');
+    expect(options.message).toContain('nodo_ia');
+    expect(options.caption).toContain('inactivo');
+  });
+  it('deberia desglosar los intentos agotados en el aviso de pausa', () => {
+    // Arrange. Es el dato que decide si reanudar ahora mismo sirve de algo: un
+    // fallo al primer intento invita a reintentar, y uno tras agotar tres dice
+    // que el problema esta en el otro extremo.
+    mountHost();
+
+    // Act
+    registered?.onFlowPaused?.(buildPaused());
+
+    // Assert
+    const options = lastNotifyOptions();
+    expect(options.message).toContain('3 intentos');
+    expect(options.caption).toContain('Causa raiz: el proveedor devolvio 503.');
+  });
+
+  it('NO deberia anunciar los intentos cuando solo hubo uno', () => {
+    // Arrange. Un unico intento es el caso normal; el distintivo solo sirve
+    // para avisar de lo contrario, y ponerlo siempre lo volveria invisible.
+    mountHost();
+
+    // Act
+    registered?.onFlowPaused?.(buildPaused({ attempts: 1 }));
+
+    // Assert
+    expect(lastNotifyOptions().message).not.toContain('intentos');
+  });
+
+  it('deberia desvanecer el aviso de exito, que no lleva ninguna accion', () => {
+    // Arrange. A diferencia de la pausa, no hay nada que el operador deba poder
+    // pulsar mas tarde, asi que un aviso permanente solo acumularia ruido.
+    mountHost();
+
+    // Act
+    registered?.onFlowCompleted?.(buildCompleted());
+
+    // Assert
+    const options = lastNotifyOptions();
+    expect(options.timeout).toBe(5000);
+    expect(options.icon).toBe('check_circle');
+  });
+});

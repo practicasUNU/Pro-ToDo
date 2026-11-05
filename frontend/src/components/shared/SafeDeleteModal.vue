@@ -1,8 +1,7 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, ref, watch } from 'vue';
+import { computed } from 'vue';
 
-// RNF: el boton de confirmacion permanece deshabilitado durante este tiempo forzado
-const COUNTDOWN_SECONDS = 5;
+import { useConfirmCountdown } from '@/composables/useConfirmCountdown';
 
 interface Props {
   modelValue: boolean;
@@ -23,50 +22,17 @@ const emit = defineEmits<{
   cancel: [];
 }>();
 
-const secondsRemaining = ref(COUNTDOWN_SECONDS);
-let intervalId: ReturnType<typeof setInterval> | undefined;
+// RNF: el boton de confirmacion permanece deshabilitado durante 5 s forzados.
+const { secondsRemaining, isLocked } = useConfirmCountdown(() => props.modelValue);
 
 const confirmButtonLabel = computed(() =>
-  secondsRemaining.value > 0 ? `Espera ${secondsRemaining.value}s` : props.confirmLabel,
-);
-
-const clearCountdown = (): void => {
-  if (intervalId) {
-    clearInterval(intervalId);
-    intervalId = undefined;
-  }
-};
-
-const startCountdown = (): void => {
-  clearCountdown();
-  secondsRemaining.value = COUNTDOWN_SECONDS;
-
-  intervalId = setInterval(() => {
-    if (secondsRemaining.value <= 1) {
-      secondsRemaining.value = 0;
-      clearCountdown();
-      return;
-    }
-
-    secondsRemaining.value -= 1;
-  }, 1000);
-};
-
-watch(
-  () => props.modelValue,
-  (isOpen) => {
-    if (isOpen) {
-      startCountdown();
-    } else {
-      clearCountdown();
-    }
-  },
+  isLocked.value ? `Espera ${secondsRemaining.value}s` : props.confirmLabel,
 );
 
 const onDialogToggle = (value: boolean): void => emit('update:modelValue', value);
 
 const onConfirm = (): void => {
-  if (secondsRemaining.value > 0) return;
+  if (isLocked.value) return;
 
   emit('confirm');
   emit('update:modelValue', false);
@@ -76,8 +42,6 @@ const onCancel = (): void => {
   emit('cancel');
   emit('update:modelValue', false);
 };
-
-onBeforeUnmount(clearCountdown);
 </script>
 
 <template>
@@ -94,14 +58,20 @@ onBeforeUnmount(clearCountdown);
         {{ message }}
       </q-card-section>
 
+      <!-- Campos opcionales del llamador (p. ej. el motivo de un descarte). No
+           alteran la cuenta atras: confirmar sigue bloqueado cinco segundos. -->
+      <q-card-section v-if="$slots.default" class="q-pt-none">
+        <slot />
+      </q-card-section>
+
       <q-card-actions align="right" class="q-px-md q-pb-md">
-        <q-btn flat no-caps label="Cancelar" class="pd-btn-cancel" @click="onCancel" />
+        <q-btn flat no-caps label="Cancelar" class="pd-btn-secondary" @click="onCancel" />
         <q-btn
           class="pd-btn-danger"
           unelevated
           no-caps
           :label="confirmButtonLabel"
-          :disable="secondsRemaining > 0"
+          :disable="isLocked"
           @click="onConfirm"
         />
       </q-card-actions>
@@ -112,9 +82,5 @@ onBeforeUnmount(clearCountdown);
 <style scoped lang="scss">
 .pd-danger-icon {
   color: var(--pd-negative);
-}
-
-.pd-btn-cancel {
-  color: var(--pd-text-secondary);
 }
 </style>

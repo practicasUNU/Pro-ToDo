@@ -1,0 +1,523 @@
+import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
+import {
+  ArrayMaxSize,
+  IsArray,
+  IsBoolean,
+  IsEnum,
+  IsInt,
+  IsNotEmpty,
+  IsOptional,
+  IsPositive,
+  IsString,
+  Matches,
+  Max,
+  MaxLength,
+  Min,
+  Validate,
+  ValidatorConstraint,
+} from 'class-validator';
+
+import type { ValidatorConstraintInterface } from 'class-validator';
+
+import { OUTPUT_NAMESPACE_PATTERN } from '@core/fsm/types/pipeline-schema.types';
+import {
+  DEFAULT_SUBJECT_MATCH_MODE,
+  MAX_SUBJECT_KEYWORD_LENGTH,
+  MAX_SUBJECT_KEYWORDS,
+  SubjectMatchMode,
+} from '@modules/nodes/strategies/imap-trigger.types';
+
+/** Puerto IMAPS por defecto (IMAP sobre TLS implicito, RFC 8314). */
+export const DEFAULT_IMAP_PORT = 993;
+
+/** Buzon por defecto sobre el que sondear mensajes entrantes. */
+export const DEFAULT_MAILBOX = 'INBOX';
+
+/** Periodo de sondeo por defecto: un minuto. */
+export const DEFAULT_POLL_INTERVAL_MS = 60_000;
+
+/**
+ * Namespace por defecto bajo el que el nodo declara escribir su salida.
+ *
+ * Es `raw_email` y no un nombre nuevo porque ese namespace ya esta reservado en
+ * `ALLOWED_NAMESPACES` (`templates.service.ts`) para el correo crudo: una
+ * plantilla puede interpolar `{{raw_email.subject}}` sin tocar el gestor. Un
+ * namespace fuera de esa lista blanca haria que el gestor rechazase la plantilla
+ * con un 400, aunque el nodo lo hubiera escrito correctamente en el contexto.
+ *
+ * No confundir con el `nodeId` del nodo, que es una clave de topologia: un nodo
+ * llamado `nodo_trigger` escribe en el namespace `raw_email`.
+ */
+export const DEFAULT_OUTPUT_NAMESPACE = 'raw_email';
+
+/**
+ * Por defecto el buzon se deja INTACTO: no se marca ningun correo como leido.
+ *
+ * Invierte el defecto original, y el cambio tiene coste: la bandera `\Seen` era
+ * el marcador de "ya tratado" que, combinado con `unreadOnly`, impedia
+ * reprocesar el mismo correo en el siguiente sondeo. Sin ella la deduplicacion
+ * recae en la ventana de 48 h de `buildImapSearchQuery` y en el filtro de
+ * asunto, de modo que un flujo con filtros laxos PUEDE volver a publicar un
+ * correo ya tratado.
+ *
+ * Se asume a proposito: el buzon es corporativo y compartido, y que un
+ * automatismo marque como leidos los correos de una persona es un efecto
+ * irreversible sobre datos que no son suyos. Quien prefiera el comportamiento
+ * anterior lo declara con `markAsRead: true` en el nodo.
+ */
+export const DEFAULT_MARK_AS_READ = false;
+
+/**
+ * Por defecto solo disparan los correos NO leidos.
+ *
+ * Es lo que evita reprocesar el historico del buzon en el primer sondeo: la
+ * bandera `\Seen` es el unico marcador de "ya tratado" que sobrevive a un
+ * reinicio del servicio, porque vive en el servidor de correo y no en memoria.
+ */
+export const DEFAULT_UNREAD_ONLY = true;
+
+/** Por defecto se exige TLS implicito; degradar a texto claro debe ser explicito. */
+export const DEFAULT_SECURE = true;
+
+/**
+ * Por defecto NO se ingieren adjuntos.
+ *
+ * Es opt-in y no opt-out porque el coste no se paga donde se ve: cada adjunto
+ * viaja en base64 dentro del `contexto_acumulado`, y `getAllContext()` se
+ * reserializa ENTERO en cada checkpoint —uno por nodo, mas uno por reintento—.
+ * Encender esto en un flujo que no los necesita multiplica el peso de cada fila
+ * de `ejecuciones_flujo` sin que nadie lo haya pedido.
+ */
+export const DEFAULT_INCLUDE_ATTACHMENTS = false;
+
+/** Tope por adjunto: 5 MiB de binario son ~6,8 MB de base64 en el payload. */
+export const DEFAULT_MAX_ATTACHMENT_BYTES = 5_242_880;
+
+/**
+ * Techo DURO de `maxAttachmentBytes`. El campo solo puede endurecer el limite.
+ *
+ * Sin el, un `maxAttachmentBytes: 500000000` escrito desde el asistente —que un
+ * rol EDITOR puede editar— convertiria una fila de `ejecuciones_flujo` en un
+ * problema de disco. Que el valor configurable coincida con el defecto es
+ * deliberado: hoy la unica libertad es bajar el tope, nunca subirlo.
+ */
+export const MAX_ATTACHMENT_BYTES_LIMIT = DEFAULT_MAX_ATTACHMENT_BYTES;
+
+/** Numero de puerto TCP mas alto valido. */
+const MAX_TCP_PORT = 65_535;
+
+/**
+ * Periodo minimo de sondeo. No es una preferencia: los proveedores IMAP aplican
+ * limites de tasa y bloquean cuentas que reconectan de forma agresiva.
+ */
+export const MIN_POLL_INTERVAL_MS = 30_000;
+
+/**
+ * Claves de entorno admisibles para `passwordEnvKey`.
+ *
+ * BARRERA DE SEGURIDAD, no validacion cosmetica. `params` es editable por un rol
+ * EDITOR desde el asistente de flujos. Sin esta restriccion, un editor podria
+ * declarar `host: imap.atacante.com` junto a `passwordEnvKey: JWT_SECRET` y el
+ * backend enviaria el secreto de firma de tokens como contrasena IMAP a un
+ * servidor ajeno. Limitar la clave al prefijo `IMAP_` y al sufijo `PASSWORD`
+ * acota lo que el nodo puede llegar a leer del entorno a credenciales de correo.
+ */
+export const PASSWORD_ENV_KEY_PATTERN = /^IMAP_[A-Z0-9_]*PASSWORD$/;
+
+/**
+ * Parametros del nodo TRIGGER_IMAP, tal como se declaran en `params` dentro del
+ * `pipeline_schema` (columna JSONB `flujos.configuracion_pipeline`).
+ *
+ * MODELO DE SEGURIDAD HIBRIDO: no existe campo `password`. La contrasena vive
+ * exclusivamente en `backend/.env` y el nodo solo guarda `passwordEnvKey`, el
+ * NOMBRE de la variable de entorno que la contiene. `ImapTriggerStrategy` la
+ * resuelve en tiempo de ejecucion con `ConfigService`.
+ *
+ * El motivo es que estos `params` se persisten en una columna JSONB y viajan al
+ * editor de flujos del frontend: un secreto aqui quedaria en claro en la base de
+ * datos y expuesto al cliente, contra `security-and-scope.md` §0.1. Y no es solo
+ * una convencion: la validacion corre con `forbidNonWhitelisted`, asi que un
+ * `params` que traiga `password` se RECHAZA en lugar de ignorarse en silencio.
+ *
+ * Los campos con valor por defecto se declaran opcionales y su default NO se
+ * aplica con un inicializador de propiedad: se resuelve en `resolveImapConfig`
+ * con `??`, siguiendo la convencion del repositorio (ver `DEFAULT_BACKOFF_FACTOR`
+ * en `FsmEngineService`). Un inicializador solo actuaria si `plainToInstance`
+ * corriera con `exposeDefaultValues`, que no es el caso.
+ */
+/**
+ * Comprueba que un patron sea compilable por el motor de expresiones regulares.
+ *
+ * Se valida al GUARDAR y no en el primer sondeo porque un patron roto no da la
+ * cara hasta que llega un correo: el flujo quedaria aparentemente configurado y
+ * fallaria en produccion horas despues, sin que nadie relacione el fallo con el
+ * formulario que lo origino.
+ *
+ * Devuelve `true` ante `undefined`, `null` o cadena vacia: la PRESENCIA del
+ * campo es asunto de `@IsOptional()` y su tipo lo cubre `@IsString()`. Mezclar
+ * aqui esas tres responsabilidades haria que borrar el campo en el formulario
+ * produjese un mensaje de error sobre sintaxis de regex.
+ */
+@ValidatorConstraint({ name: 'isValidRegex', async: false })
+export class IsValidRegexConstraint implements ValidatorConstraintInterface {
+  public validate(value: unknown): boolean {
+    if (typeof value !== 'string' || value.length === 0) {
+      return true;
+    }
+
+    try {
+      new RegExp(value);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  public defaultMessage(): string {
+    return 'subjectFilterRegex no es una expresion regular valida.';
+  }
+}
+
+export class ImapTriggerConfigDto {
+  @ApiProperty({
+    description: 'Host del servidor IMAP',
+    example: 'imap.unuware.com',
+  })
+  @IsString({ message: 'host debe ser una cadena.' })
+  @IsNotEmpty({ message: 'host no puede estar vacio.' })
+  host: string;
+
+  @ApiPropertyOptional({
+    description: `Puerto del servidor IMAP. Por defecto ${DEFAULT_IMAP_PORT}`,
+    example: DEFAULT_IMAP_PORT,
+    minimum: 1,
+    maximum: MAX_TCP_PORT,
+    default: DEFAULT_IMAP_PORT,
+  })
+  @IsOptional()
+  @IsInt({ message: 'port debe ser un numero entero.' })
+  @IsPositive({ message: 'port debe ser mayor que cero.' })
+  @Max(MAX_TCP_PORT, { message: `port no puede superar ${MAX_TCP_PORT}.` })
+  port?: number;
+
+  @ApiPropertyOptional({
+    description: `Si true, usa TLS implicito. Por defecto ${String(DEFAULT_SECURE)}`,
+    example: DEFAULT_SECURE,
+    default: DEFAULT_SECURE,
+  })
+  @IsOptional()
+  @IsBoolean({ message: 'secure debe ser un booleano.' })
+  secure?: boolean;
+
+  @ApiProperty({
+    description: 'Usuario de la cuenta de correo a sondear',
+    example: 'notiweb@unuware.com',
+  })
+  @IsString({ message: 'user debe ser una cadena.' })
+  @IsNotEmpty({ message: 'user no puede estar vacio.' })
+  user: string;
+
+  @ApiProperty({
+    description:
+      'NOMBRE de la variable de entorno que contiene la contrasena. Nunca la contrasena en si. Restringido a claves IMAP_*PASSWORD',
+    example: 'IMAP_PASSWORD',
+    pattern: PASSWORD_ENV_KEY_PATTERN.source,
+  })
+  @IsString({ message: 'passwordEnvKey debe ser una cadena.' })
+  @IsNotEmpty({ message: 'passwordEnvKey no puede estar vacio.' })
+  @Matches(PASSWORD_ENV_KEY_PATTERN, {
+    message:
+      'passwordEnvKey solo admite variables con el formato IMAP_*PASSWORD; no puede referenciar otros secretos del entorno.',
+  })
+  passwordEnvKey: string;
+
+  @ApiPropertyOptional({
+    description: `Buzon a sondear. Por defecto ${DEFAULT_MAILBOX}`,
+    example: DEFAULT_MAILBOX,
+    default: DEFAULT_MAILBOX,
+  })
+  @IsOptional()
+  @IsString({ message: 'mailbox debe ser una cadena.' })
+  @IsNotEmpty({ message: 'mailbox no puede estar vacio.' })
+  mailbox?: string;
+
+  @ApiPropertyOptional({
+    description: `Periodo de sondeo en milisegundos. Por defecto ${DEFAULT_POLL_INTERVAL_MS}`,
+    example: DEFAULT_POLL_INTERVAL_MS,
+    default: DEFAULT_POLL_INTERVAL_MS,
+  })
+  @IsOptional()
+  @IsInt({ message: 'pollIntervalMs debe ser un numero entero.' })
+  @IsPositive({ message: 'pollIntervalMs debe ser mayor que cero.' })
+  @Min(MIN_POLL_INTERVAL_MS, {
+    message: `pollIntervalMs no puede bajar de ${MIN_POLL_INTERVAL_MS} ms para no exceder los limites de tasa del proveedor IMAP.`,
+  })
+  pollIntervalMs?: number;
+
+  @ApiPropertyOptional({
+    description:
+      'Namespace declarado del nodo. El efectivo es el `outputNamespace` del pipeline_schema, que es el que usa el motor para escribir',
+    example: DEFAULT_OUTPUT_NAMESPACE,
+    default: DEFAULT_OUTPUT_NAMESPACE,
+    pattern: OUTPUT_NAMESPACE_PATTERN.source,
+  })
+  @IsOptional()
+  @IsString({ message: 'outputNamespace debe ser una cadena.' })
+  @Matches(OUTPUT_NAMESPACE_PATTERN, {
+    message: 'outputNamespace debe ser snake_case alfanumerico en minusculas.',
+  })
+  outputNamespace?: string;
+
+  @ApiPropertyOptional({
+    description: `Si true, marca el correo procesado con la bandera \\Seen. Por defecto ${String(DEFAULT_MARK_AS_READ)}`,
+    example: DEFAULT_MARK_AS_READ,
+    default: DEFAULT_MARK_AS_READ,
+  })
+  @IsOptional()
+  @IsBoolean({ message: 'markAsRead debe ser un booleano.' })
+  markAsRead?: boolean;
+
+  @ApiPropertyOptional({
+    description:
+      'Filtra por remitente (subcadena, criterio FROM de IMAP SEARCH). Omitir para no filtrar',
+    example: 'redaccion@noticias.es',
+  })
+  @IsOptional()
+  @IsString({ message: 'fromFilter debe ser una cadena.' })
+  @IsNotEmpty({
+    message: 'fromFilter no puede estar vacio; omitelo para no filtrar.',
+  })
+  fromFilter?: string;
+
+  /**
+   * DEPRECADO: lo sustituye `subjectFilterRegex`.
+   *
+   * Sigue declarado y validandose, pero `buildImapSearchQuery` lo IGNORA en
+   * cuanto hay un patron local, porque este criterio lo resuelve el servidor y
+   * no sabe de acentos: con los dos activos descartaba los correos con tilde
+   * antes de que el plegado NFD pudiera verlos.
+   *
+   * NO se retira de este DTO aunque el formulario ya no lo ofrezca. La
+   * validacion corre con `forbidNonWhitelisted`, de modo que borrar la
+   * propiedad convertiria en un 400 a cualquier flujo ya guardado que la traiga
+   * en su `configuracion_pipeline`. Mismo criterio que `outputNamespace` en
+   * `TemplateMapperConfigDto`: tolerado y deliberadamente ignorado.
+   */
+  @ApiPropertyOptional({
+    description:
+      'DEPRECADO (usa subjectFilterRegex). Filtra por asunto (subcadena, criterio SUBJECT de IMAP SEARCH), y se ignora cuando hay un patron local',
+    example: 'Notiweb',
+    deprecated: true,
+  })
+  @IsOptional()
+  @IsString({ message: 'subjectFilter debe ser una cadena.' })
+  @IsNotEmpty({
+    message: 'subjectFilter no puede estar vacio; omitelo para no filtrar.',
+  })
+  subjectFilter?: string;
+
+  @ApiPropertyOptional({
+    description: `Si true, solo considera correos sin la bandera \\Seen. Por defecto ${String(DEFAULT_UNREAD_ONLY)}`,
+    example: DEFAULT_UNREAD_ONLY,
+    default: DEFAULT_UNREAD_ONLY,
+  })
+  @IsOptional()
+  @IsBoolean({ message: 'unreadOnly debe ser un booleano.' })
+  unreadOnly?: boolean;
+
+  /**
+   * Omite la ventana de 48 horas de `buildImapSearchQuery`.
+   *
+   * SOLO surte efecto en el banco de pruebas: la estrategia lo combina con el
+   * `sandboxScope` del contexto y lo ignora en un sondeo real. Por eso NO pasa
+   * a `ResolvedImapConfig`: ni cambia lo que hace el sondeo ni debe alterar la
+   * cadena que compara `ImapPollingService.hasConfigChanged`.
+   */
+  @ApiPropertyOptional({
+    description:
+      'Solo banco de pruebas: si true, busca sin la ventana de 48 horas para ensayar con correos antiguos. Se ignora en ejecuciones reales',
+    default: false,
+  })
+  @IsOptional()
+  @IsBoolean({ message: 'bypassRecentWindow debe ser un booleano.' })
+  bypassRecentWindow?: boolean;
+
+  @ApiPropertyOptional({
+    description:
+      'Expresion regular aplicada al asunto YA decodificado. El correo que no case se descarta sin ejecutar el resto del flujo. Omitir para no filtrar',
+    example: '^S_2026_.*',
+  })
+  @IsOptional()
+  @IsString({ message: 'subjectFilterRegex debe ser una cadena.' })
+  @IsNotEmpty({
+    message:
+      'subjectFilterRegex no puede estar vacio; omitelo para no filtrar.',
+  })
+  @Validate(IsValidRegexConstraint)
+  subjectFilterRegex?: string;
+
+  /**
+   * Palabras clave del asunto, comparadas como palabras COMPLETAS.
+   *
+   * Sustituye al patron `(?:a|b)` del antiguo modo "contiene", que casaba por
+   * subcadena ("de" dentro de "DESTINO"). Si hay palabras clave se evaluan
+   * ANTES que `subjectFilterRegex`, y ambos deben casar.
+   */
+  @ApiPropertyOptional({
+    description:
+      'Palabras clave del asunto, comparadas como palabras completas (sin acentos ni mayusculas). Omitir para no filtrar',
+    example: ['verificacion', 'titulos'],
+    type: [String],
+  })
+  @IsOptional()
+  @IsArray({ message: 'subjectKeywords debe ser una lista de cadenas.' })
+  @ArrayMaxSize(MAX_SUBJECT_KEYWORDS, {
+    message: `subjectKeywords admite como maximo ${MAX_SUBJECT_KEYWORDS} palabras.`,
+  })
+  @IsString({ each: true, message: 'Cada palabra clave debe ser una cadena.' })
+  @IsNotEmpty({
+    each: true,
+    message: 'Las palabras clave no pueden estar vacias.',
+  })
+  @MaxLength(MAX_SUBJECT_KEYWORD_LENGTH, {
+    each: true,
+    message: `Cada palabra clave admite como maximo ${MAX_SUBJECT_KEYWORD_LENGTH} caracteres.`,
+  })
+  subjectKeywords?: string[];
+
+  @ApiPropertyOptional({
+    description: `Como se combinan las palabras clave: TODAS_LAS_PALABRAS (AND) o AL_MENOS_UNA (OR). Por defecto ${DEFAULT_SUBJECT_MATCH_MODE}`,
+    enum: SubjectMatchMode,
+    default: DEFAULT_SUBJECT_MATCH_MODE,
+  })
+  @IsOptional()
+  @IsEnum(SubjectMatchMode, {
+    message: 'subjectMatchMode debe ser TODAS_LAS_PALABRAS o AL_MENOS_UNA.',
+  })
+  subjectMatchMode?: SubjectMatchMode;
+
+  @ApiPropertyOptional({
+    description: `Si true, ingiere los adjuntos del correo en el payload. Por defecto ${String(DEFAULT_INCLUDE_ATTACHMENTS)}`,
+    example: DEFAULT_INCLUDE_ATTACHMENTS,
+    default: DEFAULT_INCLUDE_ATTACHMENTS,
+  })
+  @IsOptional()
+  @IsBoolean({ message: 'includeAttachments debe ser un booleano.' })
+  includeAttachments?: boolean;
+
+  @ApiPropertyOptional({
+    description: `Tope en bytes por adjunto. Los que lo superen se descartan sin detener el flujo. Por defecto ${DEFAULT_MAX_ATTACHMENT_BYTES}`,
+    example: DEFAULT_MAX_ATTACHMENT_BYTES,
+    default: DEFAULT_MAX_ATTACHMENT_BYTES,
+    maximum: MAX_ATTACHMENT_BYTES_LIMIT,
+  })
+  @IsOptional()
+  @IsInt({ message: 'maxAttachmentBytes debe ser un numero entero.' })
+  @IsPositive({ message: 'maxAttachmentBytes debe ser mayor que cero.' })
+  @Max(MAX_ATTACHMENT_BYTES_LIMIT, {
+    message: `maxAttachmentBytes no puede superar ${MAX_ATTACHMENT_BYTES_LIMIT} bytes.`,
+  })
+  maxAttachmentBytes?: number;
+}
+
+/**
+ * Configuracion del nodo con todos los valores por defecto ya aplicados.
+ *
+ * Existe para que ni la estrategia ni el servicio de sondeo repitan la cadena de
+ * `??`: con dos consumidores, un default divergente entre ambos significaria que
+ * el sondeo vigila un buzon distinto del que el nodo acaba leyendo.
+ */
+export interface ResolvedImapConfig {
+  readonly host: string;
+  readonly port: number;
+  readonly secure: boolean;
+  readonly user: string;
+  readonly passwordEnvKey: string;
+  readonly mailbox: string;
+  readonly pollIntervalMs: number;
+  readonly outputNamespace: string;
+  readonly markAsRead: boolean;
+  /** `null` cuando no se filtra por remitente; nunca cadena vacia. */
+  readonly fromFilter: string | null;
+  /**
+   * `null` cuando no se filtra por asunto; nunca cadena vacia.
+   *
+   * DEPRECADO: `buildImapSearchQuery` lo ignora si hay `subjectFilterRegex`. Se
+   * conserva en la config resuelta —y en este orden— porque
+   * `ImapPollingService.hasConfigChanged` compara con `JSON.stringify`, que
+   * respeta el orden de insercion: quitarlo reprogramaria todos los sondeos.
+   */
+  readonly subjectFilter: string | null;
+  /**
+   * Patron aplicado al asunto ya decodificado, o `null` si no se filtra.
+   *
+   * SUSTITUYE a `subjectFilter` en vez de complementarlo, al reves de lo que
+   * decia esta nota. Aquel es un criterio de IMAP SEARCH que resuelve el
+   * servidor (y por tanto descarta mensajes sin descargarlos), mientras que
+   * este se evalua en local sobre el asunto ya decodificado de MIME, que es la
+   * unica forma de aplicar anclas como `^` Y de plegar los acentos. Convivir
+   * los dos en AND no sumaba precision: el del servidor, que no sabe de
+   * acentos, descartaba antes de que este pudiera opinar.
+   */
+  readonly subjectFilterRegex: string | null;
+  readonly unreadOnly: boolean;
+  /** Si `false`, `raw_email.attachments` sera siempre `[]`. */
+  readonly includeAttachments: boolean;
+  readonly maxAttachmentBytes: number;
+  /** Palabras clave del asunto; lista vacia cuando no se filtra por palabras. */
+  readonly subjectKeywords: readonly string[];
+  readonly subjectMatchMode: SubjectMatchMode;
+}
+
+/**
+ * Aplica los valores por defecto sobre un DTO ya validado. Funcion pura.
+ *
+ * Acepta tambien una config YA resuelta, y es IDEMPOTENTE sobre ella: aplicar
+ * los defaults dos veces da el mismo resultado. `ImapPollingService.pollInbox`
+ * depende de esa propiedad, porque recibe indistintamente lo que extrajo del
+ * `pipeline_schema` (sin resolver) o lo que le pasa una prueba (ya resuelto).
+ *
+ * La union se declara de forma explicita desde que los filtros se normalizan a
+ * `null`: antes el segundo caso colaba por compatibilidad estructural, y una
+ * config resuelta ya no es asignable al DTO (`string | null` frente a
+ * `string | undefined`).
+ */
+export const resolveImapConfig = (
+  dto: ImapTriggerConfigDto | ResolvedImapConfig,
+): ResolvedImapConfig => ({
+  host: dto.host,
+  port: dto.port ?? DEFAULT_IMAP_PORT,
+  secure: dto.secure ?? DEFAULT_SECURE,
+  user: dto.user,
+  passwordEnvKey: dto.passwordEnvKey,
+  mailbox: dto.mailbox ?? DEFAULT_MAILBOX,
+  pollIntervalMs: dto.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS,
+  outputNamespace: dto.outputNamespace ?? DEFAULT_OUTPUT_NAMESPACE,
+  markAsRead: dto.markAsRead ?? DEFAULT_MARK_AS_READ,
+  // A `null` y no a cadena vacia: en IMAP SEARCH un criterio vacio no significa
+  // "sin filtro" sino "coincide con todo", que es justo lo contrario de lo que
+  // esperaria quien borra el campo en el formulario.
+  fromFilter: dto.fromFilter ?? null,
+  subjectFilter: dto.subjectFilter ?? null,
+  // Anadir esta clave altera por una sola vez la cadena que compara
+  // `ImapPollingService.hasConfigChanged`, de modo que el primer arranque tras
+  // el despliegue reprograma los sondeos existentes. Es inocuo y ocurre una
+  // unica vez; lo que no se puede es colocarla DESPUES de las dos ultimas.
+  subjectFilterRegex: dto.subjectFilterRegex ?? null,
+  unreadOnly: dto.unreadOnly ?? DEFAULT_UNREAD_ONLY,
+  // Las dos ultimas, y en este orden, a proposito:
+  // `ImapPollingService.hasConfigChanged` compara configuraciones con
+  // `JSON.stringify`, que respeta el orden de insercion. Colocarlas en medio
+  // cambiaria la cadena de TODA config ya resuelta y haria que el servicio
+  // creyera modificado cada flujo existente, reprogramando sus sondeos.
+  includeAttachments: dto.includeAttachments ?? DEFAULT_INCLUDE_ATTACHMENTS,
+  maxAttachmentBytes: dto.maxAttachmentBytes ?? DEFAULT_MAX_ATTACHMENT_BYTES,
+  // Al final, por el mismo motivo de orden que las dos anteriores.
+  // Recortadas y en minusculas: la comparacion ya tokeniza (`parseKeywords`),
+  // pero los logs y el motivo del OMITIDO las muestran tal cual, y " Licitacion"
+  // con su espacio parecia una palabra distinta de "licitacion".
+  subjectKeywords: (dto.subjectKeywords ?? [])
+    .map((term) => term.trim().toLowerCase())
+    .filter((term) => term.length > 0),
+  subjectMatchMode: dto.subjectMatchMode ?? DEFAULT_SUBJECT_MATCH_MODE,
+});

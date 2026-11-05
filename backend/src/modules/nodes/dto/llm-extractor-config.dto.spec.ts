@@ -1,0 +1,200 @@
+import { plainToInstance } from 'class-transformer';
+import { validate } from 'class-validator';
+
+import {
+  DEFAULT_LLM_MAX_RETRIES,
+  DEFAULT_LLM_TIMEOUT_MS,
+  LLM_RETRY_BASE_DELAY_MS,
+  LlmExtractorConfigDto,
+  MAX_LLM_RETRIES,
+  MAX_LLM_TIMEOUT_MS,
+  MIN_LLM_TIMEOUT_MS,
+  resolveLlmExtractorConfig,
+} from './llm-extractor-config.dto';
+
+import type { AiHttpDefaults } from '@core/config/ai-defaults.config';
+
+/** Entorno que no declara nada: el escenario de un `.env` sin estas variables. */
+const SIN_ENTORNO: AiHttpDefaults = { timeoutMs: null, maxRetries: null };
+
+/** DTO ya validado, construido a mano por ser una funcion pura la que se mide. */
+const buildDto = (
+  overrides: Partial<LlmExtractorConfigDto> = {},
+): LlmExtractorConfigDto =>
+  Object.assign(new LlmExtractorConfigDto(), overrides);
+
+describe('resolveLlmExtractorConfig · politica de red', () => {
+  describe('1. Precedencia: params del nodo > entorno > constante', () => {
+    it('1.1 deberia caer en las constantes cuando nadie declara nada', () => {
+      // 1. Arrange 📐: es el comportamiento que tenia el nodo antes de que
+      //    existieran las variables `LLM_HTTP_*`, y hay que conservarlo: una
+      //    plantilla de flujo guarda sus `params` vacios a proposito.
+      const dto = buildDto();
+
+      // 2. Act ⚙️
+      const config = resolveLlmExtractorConfig(dto, SIN_ENTORNO);
+
+      // 3. Assert 🎯
+      expect(config.timeoutMs).toBe(DEFAULT_LLM_TIMEOUT_MS);
+      expect(config.maxRetries).toBe(DEFAULT_LLM_MAX_RETRIES);
+    });
+
+    it('1.2 deberia preferir el entorno a la constante', () => {
+      // 1. Arrange 📐: el escalon intermedio. Es lo que permite alargar la
+      //    espera sin desplegar, que es el motivo de toda esta tanda.
+      const dto = buildDto();
+
+      // 2. Act ⚙️
+      const config = resolveLlmExtractorConfig(dto, {
+        timeoutMs: 60_000,
+        maxRetries: 2,
+      });
+
+      // 3. Assert 🎯
+      expect(config.timeoutMs).toBe(60_000);
+      expect(config.maxRetries).toBe(2);
+    });
+
+    it('1.3 el entorno deberia ser PISO de la espera y TECHO de los reintentos', () => {
+      // 1. Arrange 📐: aqui esta la inversion. El nodo pide MENOS espera que el
+      //    entorno —el caso del flujo guardado con los 15 000 de antes— y MENOS
+      //    reintentos de los que el entorno tolera.
+      //
+      //    La asimetria responde a de que lado esta el riesgo: quedarse corto
+      //    de espera mata una inferencia que iba bien, mientras que pasarse de
+      //    reintentos se paga en tokens.
+      const dto = buildDto({ timeoutMs: 20_000, maxRetries: 0 });
+
+      // 2. Act ⚙️
+      const config = resolveLlmExtractorConfig(dto, {
+        timeoutMs: 90_000,
+        maxRetries: 4,
+      });
+
+      // 3. Assert 🎯
+      expect(config.timeoutMs).toBe(90_000);
+      expect(config.maxRetries).toBe(0);
+    });
+
+    it('1.3bis los params del nodo deberian mandar cuando piden MAS espera', () => {
+      // 1. Arrange 📐: es un piso, no una imposicion. Un nodo que declaro dos
+      //    minutos sabe algo del documento que procesa que el `.env` no sabe.
+      const dto = buildDto({ timeoutMs: 120_000, maxRetries: 5 });
+
+      // 2. Act ⚙️
+      const config = resolveLlmExtractorConfig(dto, {
+        timeoutMs: 60_000,
+        maxRetries: 1,
+      });
+
+      // 3. Assert 🎯: y los reintentos van al reves — el entorno los recorta.
+      expect(config.timeoutMs).toBe(120_000);
+      expect(config.maxRetries).toBe(1);
+    });
+
+    it('1.3ter sin variables declaradas NO deberia cambiar nada', () => {
+      // 1. Arrange 📐: la guarda que hace inocuo el cambio en una instalacion
+      //    que no declare `LLM_HTTP_*`. Sin ella, la constante por defecto
+      //    actuaria de piso y elevaria en silencio este flujo a 15 000.
+      // `maxRetries: 3` es el techo del DTO desde que bajo de 5: sigue siendo
+      // distinto del defecto (1), que es lo que esta prueba necesita para
+      // demostrar que manda el nodo, y ademas no lo recorta el `clamp`.
+      const dto = buildDto({ timeoutMs: 5_000, maxRetries: 3 });
+
+      // 2. Act ⚙️
+      const config = resolveLlmExtractorConfig(dto, SIN_ENTORNO);
+
+      // 3. Assert 🎯
+      expect(config.timeoutMs).toBe(5_000);
+      expect(config.maxRetries).toBe(3);
+    });
+
+    it('1.4 deberia seguir siendo invocable sin entorno', () => {
+      // 1. Arrange 📐: el segundo parametro lleva valor por defecto para que los
+      //    llamantes que no tienen entorno que consultar —validadores,
+      //    asistente— no tengan que inventarse uno.
+      // 2. Act ⚙️ + 3. Assert 🎯
+      expect(resolveLlmExtractorConfig(buildDto()).timeoutMs).toBe(
+        DEFAULT_LLM_TIMEOUT_MS,
+      );
+    });
+  });
+
+  describe('2. Recorte del valor que llega del entorno', () => {
+    it('2.1 deberia recortar una espera desmesurada al techo del nodo', () => {
+      // 1. Arrange 📐: una variable del `.env` NO atraviesa `class-validator`,
+      //    asi que los `@Min`/`@Max` del DTO no la alcanzan y llegaria intacta
+      //    hasta Axios. Se recorta y no se rechaza porque una errata en el
+      //    `.env` no debe impedir que el flujo corra.
+      const dto = buildDto();
+
+      // 2. Act ⚙️
+      const config = resolveLlmExtractorConfig(dto, {
+        timeoutMs: 999_999_999,
+        maxRetries: 99,
+      });
+
+      // 3. Assert 🎯
+      expect(config.timeoutMs).toBe(MAX_LLM_TIMEOUT_MS);
+      expect(config.maxRetries).toBe(MAX_LLM_RETRIES);
+    });
+
+    it('2.2 deberia recortar una espera irrisoria al suelo del nodo', () => {
+      // 1. Arrange 📐: por debajo de un segundo ningun proveedor termina de
+      //    generar nada, y el nodo se pasaria la vida devolviendo timeouts
+      //    contra un servicio que funciona.
+      // 2. Act ⚙️ + 3. Assert 🎯
+      expect(
+        resolveLlmExtractorConfig(buildDto(), {
+          timeoutMs: 5,
+          maxRetries: null,
+        }).timeoutMs,
+      ).toBe(MIN_LLM_TIMEOUT_MS);
+    });
+  });
+
+  describe('2bis. Techo de la espera para generacion extensa', () => {
+    it('2bis.1 deberia admitir 180 s, la espera que recomienda el asistente', async () => {
+      // 1. Arrange 📐: una noticia de 12 a 14 parrafos, o un lote, pasa de los
+      //    dos minutos en algunos proveedores.
+      const dto = plainToInstance(LlmExtractorConfigDto, {
+        inlinePrompt: 'Redacta.',
+        timeoutMs: 180_000,
+      });
+
+      // 2. Act ⚙️
+      const errors = await validate(dto);
+
+      // 3. Assert 🎯
+      expect(MAX_LLM_TIMEOUT_MS).toBe(180_000);
+      expect(errors).toHaveLength(0);
+    });
+
+    it('2bis.2 deberia rechazar una espera por encima del techo', async () => {
+      // 1. Arrange 📐
+      const dto = plainToInstance(LlmExtractorConfigDto, {
+        inlinePrompt: 'Redacta.',
+        timeoutMs: 180_001,
+      });
+
+      // 2. Act ⚙️
+      const errors = await validate(dto);
+
+      // 3. Assert 🎯
+      expect(errors.map((error) => error.property)).toContain('timeoutMs');
+    });
+  });
+
+  describe('3. Espera base entre reintentos', () => {
+    it('3.1 deberia resolver siempre la constante, sin campo en el DTO', () => {
+      // 1. Arrange 📐: no es una decision del operador sino la distancia minima
+      //    que el proveedor necesita entre dos intentos. Los 500 ms por defecto
+      //    del cliente HTTP garantizan caer en el mismo 429 de cuota.
+      // 2. Act ⚙️ + 3. Assert 🎯
+      expect(
+        resolveLlmExtractorConfig(buildDto(), SIN_ENTORNO).baseDelayMs,
+      ).toBe(LLM_RETRY_BASE_DELAY_MS);
+      expect(LLM_RETRY_BASE_DELAY_MS).toBeGreaterThanOrEqual(2_500);
+    });
+  });
+});

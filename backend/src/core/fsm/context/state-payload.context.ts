@@ -1,0 +1,604 @@
+/**
+ * Patron de variable interpolable, con espacios opcionales dentro de las llaves.
+ *
+ * Gramatica soportada: un namespace raiz seguido de al menos un segmento, que
+ * puede ser una propiedad (`.campo`) o un indice de arreglo (`[0]`), encadenados
+ * sin limite:
+ *
+ *   {{ parsed_email.subject }}
+ *   {{ parsed_email.headers.routing.ip }}
+ *   {{ parsed_email.extracted_urls[0] }}
+ *   {{ llm_response.articles[1].title }}
+ *   {{*parsed_email.clean_body}}   (marca obligatoria, ver `isRequiredMarker`)
+ *
+ * Los identificadores se limitan a `[a-zA-Z0-9_]`, el mismo juego de caracteres
+ * que `OUTPUT_NAMESPACE_PATTERN` impone a los namespaces en
+ * `pipeline-schema.types.ts`: un namespace con guiones nunca podria resolverse
+ * desde una plantilla, y por eso el DTO lo prohibe de entrada.
+ *
+ * Exigir al menos un segmento deja fuera `{{ parsed_email }}` a proposito: un
+ * namespace entero no es un valor interpolable.
+ */
+export const INTERPOLATION_PATTERN =
+  /\{\{\s*(?:\*\s*)?([a-zA-Z0-9_]+(?:\.[a-zA-Z0-9_]+|\[\d+\])+)\s*\}\}/g;
+
+/**
+ * Marca OBLIGATORIA de prompt: `{{*ns.campo}}` (espacios tolerados: `{{ * ns.campo }}`).
+ *
+ * `INTERPOLATION_PATTERN` admite el asterisco en un grupo NO capturante, de modo
+ * que el grupo 1 sigue siendo la ruta y todos sus consumidores
+ * (`extractNamespaceRoots`, el validador, la coalescencia documental) entienden
+ * la marca sin cambios. Para saber si una coincidencia concreta es obligatoria
+ * basta con mirar su texto con este patron anclado al inicio.
+ *
+ * Solo tiene semantica en la interpolacion TOLERANTE (prompts de IA): en la
+ * estricta toda variable ya es obligatoria y el asterisco resulta redundante.
+ * Los patrones anclados de DTO (`INTERPOLATION_ONLY_PATH_PATTERN`) no lo
+ * admiten: un campo URL no es un prompt.
+ */
+export const REQUIRED_MARKER_PREFIX_PATTERN = /^\{\{\s*\*/;
+
+/** Indica si el texto de una marca ya casada es una marca obligatoria (`{{*...}}`). */
+export const isRequiredMarker = (marker: string): boolean =>
+  REQUIRED_MARKER_PREFIX_PATTERN.test(marker);
+
+/**
+ * Variante ANCLADA: la cadena ENTERA debe ser una sola marca y nada mas.
+ *
+ * Vive aqui, junto al patron que de verdad interpola, y no dentro del DTO que la
+ * usa: uno decide QUE se resuelve y el otro QUE se admite, y si dejaran de
+ * coincidir el sistema aceptaria al guardar plantillas que el motor no sabe
+ * resolver, o al reves.
+ *
+ * El anclaje no es cosmetico. Sin `^...$` bastaria con CONTENER una marca, y
+ * `https://otro-portal.es/?x={{ns.campo}}` pasaria el filtro: seria una URL
+ * literal disfrazada, que es justo lo que el campo deja de admitir.
+ *
+ * CON grupo de captura, para que quien necesite la ruta entera no tenga que
+ * escribir una segunda version anclada del mismo patron. Es la razon de que
+ * `INTERPOLATION_ONLY_PATTERN` sea un ALIAS de este objeto y no un literal
+ * aparte: un grupo de captura no altera lo que `.test()` responde, de modo que
+ * quien solo pregunta "si o no" obtiene exactamente el comportamiento anterior,
+ * y quien necesita la ruta la lee del mismo sitio. Dos literales equivalentes
+ * acabarian divergiendo, que es el fallo que este archivo viene evitando.
+ *
+ * El objeto se puede compartir porque NO lleva la bandera `g`: sin ella no hay
+ * `lastIndex` que arrastrar entre llamadas.
+ */
+export const INTERPOLATION_ONLY_PATH_PATTERN =
+  /^\{\{\s*([a-zA-Z0-9_]+(?:\.[a-zA-Z0-9_]+|\[\d+\])+)\s*\}\}$/;
+
+/**
+ * El mismo patron anclado, leido como una pregunta de si o no.
+ *
+ * Lo consumen los `@Matches` de los DTO, que solo deciden QUE se admite. De
+ * extraer la raiz sigue encargandose `extractNamespaceRoots`; de extraer la ruta
+ * completa, `INTERPOLATION_ONLY_PATH_PATTERN`.
+ */
+export const INTERPOLATION_ONLY_PATTERN = INTERPOLATION_ONLY_PATH_PATTERN;
+
+/** Normaliza `urls[0]` a `urls.0`: una sola gramatica que recorrer. */
+const BRACKET_INDEX_PATTERN = /\[(\d+)\]/g;
+
+/**
+ * Claves que abren la cadena de prototipos y jamas se navegan.
+ *
+ * Sin este filtro, una plantilla con `{{ ns.dato.__proto__.polluted }}` podria
+ * leer (y en otras implementaciones, escribir) sobre `Object.prototype`. El
+ * corte se refuerza con `Object.hasOwn` en cada salto, que cierra ademas el
+ * resto de la cadena heredada (`toString`, `valueOf`, `hasOwnProperty`...).
+ */
+const BLOCKED_KEYS: ReadonlySet<string> = new Set([
+  '__proto__',
+  'constructor',
+  'prototype',
+]);
+
+/** Falta una variable que una plantilla da por presente en el contexto. */
+export class MissingContextVariableException extends Error {
+  constructor(public readonly variable: string) {
+    super(
+      `La variable "${variable}" no existe en el contexto o su valor es nulo.`,
+    );
+    this.name = 'MissingContextVariableException';
+  }
+}
+
+/**
+ * Resuelve una ruta compuesta contra los namespaces acumulados.
+ *
+ * Funcion PURA: no lee ni escribe estado, asi que es testeable al margen de la
+ * clase y reutilizable por el nodo MAPEADOR_PLANTILLA cuando llegue. No hay
+ * `eval` ni parser de expresiones: solo troceado de cadena y navegacion por
+ * reduccion, tal y como exige `security-and-scope.md` §3.
+ *
+ * @param namespaces Mapa acumulado del contexto.
+ * @param rawPath Ruta tal y como aparece en la plantilla (`urls[0].id`).
+ * @returns El valor resuelto, garantizado no nulo.
+ * @throws MissingContextVariableException Si la ruta no resuelve o vale nulo.
+ */
+export const resolvePath = (
+  namespaces: Record<string, Record<string, unknown>>,
+  rawPath: string,
+): unknown => {
+  // 1. Normalizacion: los corchetes pasan a puntos y queda una sola gramatica.
+  const [namespaceKey, ...nestedKeys] = rawPath
+    .replace(BRACKET_INDEX_PATTERN, '.$1')
+    .split('.');
+
+  // 2. Guarda: sin namespace raiz no hay nada que navegar.
+  const root = namespaces[namespaceKey];
+
+  if (root === undefined || root === null) {
+    throw new MissingContextVariableException(rawPath);
+  }
+
+  // 3. Navegacion por reduccion, con tres cortes de seguridad en cada salto.
+  const resolved = nestedKeys.reduce<unknown>((current, key) => {
+    // a) Nunca se cruza hacia la cadena de prototipos.
+    if (BLOCKED_KEYS.has(key)) {
+      return undefined;
+    }
+
+    // b) Solo se navega sobre objetos y arreglos; un primitivo corta el camino.
+    if (current === null || typeof current !== 'object') {
+      return undefined;
+    }
+
+    // c) La propiedad debe ser PROPIA: cierra lo heredado (`toString`) y, de
+    //    paso, los indices fuera de rango, que tampoco son claves propias.
+    if (!Object.hasOwn(current, key)) {
+      return undefined;
+    }
+
+    return (current as Record<string, unknown>)[key];
+  }, root);
+
+  // 4. Fail-safe: se cita `rawPath` y no la ruta normalizada, para que el
+  //    mensaje mencione exactamente lo que el autor escribio en la plantilla.
+  if (resolved === undefined || resolved === null) {
+    throw new MissingContextVariableException(rawPath);
+  }
+
+  return resolved;
+};
+
+/**
+ * Namespaces raiz que una plantilla necesita para poder interpolarse.
+ *
+ * Funcion PURA, y deliberadamente basada en el MISMO `INTERPOLATION_PATTERN` que
+ * usa `getInterpolatedValue`: una segunda expresion regular equivalente acabaria
+ * divergiendo de la que de verdad interpola, y entonces la validacion aprobaria
+ * plantillas que la ejecucion no sabe resolver, o al reves.
+ *
+ * Devuelve solo la RAIZ de cada ruta (`parsed_email` de
+ * `{{parsed_email.extracted_urls[0]}}`), sin duplicados y en orden de aparicion.
+ * Una plantilla sin marcas —una URL literal, por ejemplo— no necesita nada y
+ * devuelve un arreglo vacio.
+ *
+ * `{{parsed_email}}` a secas NO se reconoce, y es correcto que no se reconozca:
+ * el patron exige al menos un segmento porque un namespace entero no es un valor
+ * interpolable.
+ */
+export const extractNamespaceRoots = (template: string): readonly string[] => {
+  const roots = new Set<string>();
+
+  // El patron es global y con estado (`lastIndex`), asi que se consume con
+  // `matchAll`, que trabaja sobre un clon interno y no deja el literal
+  // compartido a medio recorrer para el siguiente llamante.
+  for (const match of template.matchAll(INTERPOLATION_PATTERN)) {
+    const rawPath = match[1];
+
+    if (rawPath === undefined) {
+      continue;
+    }
+
+    const [root] = rawPath.replace(BRACKET_INDEX_PATTERN, '.$1').split('.');
+
+    if (root !== undefined && root.length > 0) {
+      roots.add(root);
+    }
+  }
+
+  return [...roots];
+};
+
+/**
+ * Profundidad maxima a la que se desciende dentro de unos `params`.
+ *
+ * `params` es una columna `jsonb` y puede haberse escrito por SQL directo, asi
+ * que no hay garantia de que sea razonable. Un tope fijo evita que un objeto
+ * absurdamente anidado convierta una validacion en un recorrido interminable.
+ * Seis niveles cubren con holgura cualquier configuracion de nodo real.
+ */
+const MAX_PARAMS_DEPTH = 6;
+
+/**
+ * Namespaces raiz que interpola CUALQUIER cadena dentro de un valor compuesto.
+ *
+ * Es la version recursiva de `extractNamespaceRoots`, y se apoya en ella en vez
+ * de repetir la expresion regular: por el mismo motivo que aquella comparte
+ * `INTERPOLATION_PATTERN` con `getInterpolatedValue`, una segunda regex
+ * equivalente acabaria divergiendo de la que de verdad resuelve.
+ *
+ * Existe porque `getRequiredNamespaces` es OPCIONAL en `INodeStrategy` y solo lo
+ * implementan las estrategias que saben deducir su dependencia de un campo
+ * concreto. Un nodo cuyo `params` interpole `{{scraped_web.url}}` en una clave
+ * cualquiera —o cuyo tipo aun no tenga estrategia— no declararia nada, y la
+ * regla 7 del validador de topologia se quedaria sin nada que comprobar.
+ *
+ * Recorre objetos y arreglos; ignora numeros, booleanos y nulos, que no pueden
+ * contener una marca. Sin duplicados y en orden de aparicion.
+ */
+export const collectNamespaceRoots = (
+  value: unknown,
+  depth: number = MAX_PARAMS_DEPTH,
+): readonly string[] => {
+  if (typeof value === 'string') {
+    return extractNamespaceRoots(value);
+  }
+
+  if (depth <= 0 || typeof value !== 'object' || value === null) {
+    return [];
+  }
+
+  const roots = new Set<string>();
+  const children = Array.isArray(value) ? value : Object.values(value);
+
+  for (const child of children) {
+    for (const root of collectNamespaceRoots(child, depth - 1)) {
+      roots.add(root);
+    }
+  }
+
+  return [...roots];
+};
+
+/**
+ * Convierte un valor del contexto en el texto que va a la plantilla.
+ *
+ * Las ramas se escriben con `typeof` explicito en vez de un `String(value)`
+ * sobre `unknown`: asi el compilador garantiza la cobertura y no se dispara
+ * `no-base-to-string`. El `bigint` acompana a los numeros porque
+ * `structuredClone` lo preserva y `JSON.stringify(1n)` lanza `TypeError`.
+ */
+const stringifyResolved = (value: unknown): string => {
+  if (typeof value === 'string') {
+    return value;
+  }
+
+  if (
+    typeof value === 'number' ||
+    typeof value === 'boolean' ||
+    typeof value === 'bigint'
+  ) {
+    return String(value);
+  }
+
+  // Objetos y arreglos. `String()` a secas los convertiria en "[object Object]",
+  // que se publicaria asi en el articulo destino: corrupcion silenciosa.
+  return JSON.stringify(value);
+};
+
+/**
+ * Ejecucion AISLADA de un nodo desde el banco de pruebas.
+ *
+ * Su `executionId` es efimero y no existe en `ejecuciones_flujo`, de modo que
+ * todo lo que se cuelgue de el en BD tiene que imputarse al usuario.
+ */
+export interface SandboxOperationScope {
+  readonly userId: string;
+}
+
+/**
+ * Contenedor inmutable de los resultados que los nodos van acumulando durante
+ * una ejecucion del motor FSM.
+ *
+ * NO es `@Injectable()`: se instancia una vez por ejecucion y viaja como
+ * argumento a `INodeStrategy.execute()`. Un provider de Nest seria un singleton
+ * compartido entre ejecuciones concurrentes, que es justo lo contrario de lo
+ * que este objeto necesita ser.
+ *
+ * INMUTABILIDAD ESTRICTA: toda entrada y toda salida pasa por `structuredClone`.
+ * Con solo el operador spread la copia seria superficial y un
+ * `context.getNamespace('ia').meta.titulo = 'otro'` alcanzaria el objeto
+ * interno, corrompiendo un checkpoint que quiza ya se habia dado por bueno.
+ * El clon profundo en ambas direcciones cierra esa via.
+ */
+/** Clave que guarda el inventario de adjuntos dentro de un namespace. */
+const ATTACHMENTS_KEY = 'attachments';
+
+/** Clave del binario en Base64 de cada adjunto. */
+const BINARY_CONTENT_KEY = 'contentBase64';
+
+/** Un adjunto que todavia arrastra su binario: objeto con Base64 de tipo cadena. */
+const holdsBinaryContent = (value: unknown): value is Record<string, unknown> =>
+  typeof value === 'object' &&
+  value !== null &&
+  !Array.isArray(value) &&
+  typeof (value as Record<string, unknown>)[BINARY_CONTENT_KEY] === 'string';
+
+/**
+ * El namespace sin los binarios de sus adjuntos, o EL MISMO objeto si no lleva.
+ *
+ * Criterio ESTRUCTURAL (`attachments[].contentBase64`), el mismo con el que el
+ * motor libera la memoria del checkpoint: el contexto no sabe que namespace es
+ * `raw_email` y no debe saberlo. El Base64 pasa a `null` —contrato
+ * `string | null` del adjunto— en vez de borrarse, para que `filename`,
+ * `contentType` y `size` sigan diciendo que hubo un adjunto.
+ *
+ * Devolver la misma referencia cuando no hay nada que purgar no es un detalle:
+ * es lo que mantiene la comparticion por referencia de los namespaces ligeros.
+ */
+const withoutBinaryAttachments = (
+  namespace: Record<string, unknown>,
+): Record<string, unknown> => {
+  const attachments = namespace[ATTACHMENTS_KEY];
+
+  if (!Array.isArray(attachments) || !attachments.some(holdsBinaryContent)) {
+    return namespace;
+  }
+
+  return {
+    ...namespace,
+    [ATTACHMENTS_KEY]: attachments.map((attachment: unknown) =>
+      holdsBinaryContent(attachment)
+        ? { ...attachment, [BINARY_CONTENT_KEY]: null }
+        : attachment,
+    ),
+  };
+};
+
+export class StatePayloadContext {
+  private readonly executionId: string;
+  private readonly workflowId: string;
+  private activeCursor: string;
+  private namespaces: Record<string, Record<string, unknown>>;
+  private readonly sandboxScope: SandboxOperationScope | null;
+  private initiatorUserId: string | null;
+
+  constructor(
+    executionId: string,
+    workflowId: string,
+    initialStep: string,
+    sandboxScope: SandboxOperationScope | null = null,
+    initiatorUserId: string | null = null,
+  ) {
+    this.executionId = executionId;
+    this.workflowId = workflowId;
+    this.activeCursor = initialStep;
+    this.namespaces = {};
+    this.sandboxScope = sandboxScope;
+    this.initiatorUserId = sandboxScope?.userId ?? initiatorUserId;
+  }
+
+  /**
+   * Usuario al que se imputa la ejecucion (migracion 060): quien la lanzo o
+   * reanudo, el remitente de un disparo IMAP si es un usuario registrado, o la
+   * cuenta de respaldo. `null` solo si la fila aun no lo tiene resuelto.
+   */
+  public getInitiatorUserId(): string | null {
+    return this.initiatorUserId;
+  }
+
+  /**
+   * Fija el iniciador una vez que el motor lo ha persistido. Unica mutacion
+   * permitida fuera de los namespaces: la identidad del disparo IMAP solo se
+   * conoce cuando el nodo disparador ya ha leido el correo.
+   */
+  public assignInitiator(userId: string): void {
+    this.initiatorUserId = userId;
+  }
+
+  /**
+   * Ambito de banco de pruebas, o `null` en una ejecucion real del motor.
+   *
+   * Quien registra efectos que exigen una fila en `ejecuciones_flujo` —la
+   * telemetria de tokens— pregunta aqui antes de escribir: un nodo probado en
+   * aislamiento no tiene ejecucion, y su gasto se imputa al usuario que lo
+   * lanzo.
+   */
+  public getSandboxScope(): SandboxOperationScope | null {
+    return this.sandboxScope;
+  }
+
+  public getExecutionId(): string {
+    return this.executionId;
+  }
+
+  public getWorkflowId(): string {
+    return this.workflowId;
+  }
+
+  public getCursor(): string {
+    return this.activeCursor;
+  }
+
+  public setCursor(nextStep: string): void {
+    this.activeCursor = nextStep;
+  }
+
+  /**
+   * Fusiona `data` en el namespace indicado sin mutar el estado anterior.
+   *
+   * Se clona el mapa completo y se reasigna: la referencia que tuviera un
+   * checkpoint ya serializado sigue apuntando al objeto antiguo, intacto. El
+   * spread sobre el namespace existente es una fusion, no un reemplazo, de modo
+   * que un nodo puede escribir en dos tandas sin perder lo anterior.
+   *
+   * @param namespace Espacio de nombres propio del nodo (`outputNamespace`).
+   * @param data Claves a incorporar; tambien se clona, para que mutarla despues
+   *             de la llamada no alcance al contexto.
+   */
+  public setNamespace(namespace: string, data: Record<string, unknown>): void {
+    const snapshot = structuredClone(this.namespaces);
+
+    this.namespaces = {
+      ...snapshot,
+      [namespace]: {
+        ...(snapshot[namespace] ?? {}),
+        ...structuredClone(data),
+      },
+    };
+  }
+
+  /**
+   * Contexto DERIVADO con algunos namespaces superpuestos; este no cambia.
+   *
+   * Lo usan los destinos que recorren un lote (cardinalidad 1 a N): para el
+   * elemento k se superpone su contenido a los namespaces de los que leen las
+   * plantillas, y `{{llm_response.headline}}` resuelve el titular de ESE
+   * elemento sin reescribir ninguna plantilla del flujo.
+   *
+   * Cada superposicion se FUSIONA sobre el namespace existente con spread, igual
+   * que `setNamespace`, y solo ella se clona en profundidad. Los namespaces no
+   * superpuestos se comparten por referencia con el contexto original. La
+   * inmutabilidad no se resiente, porque ningun metodo expone esos objetos
+   * internos sin clonarlos antes (`getNamespace`, `getAllContext`) y
+   * `setNamespace` reconstruye el mapa entero.
+   *
+   * PURGA DE BINARIOS. El contexto derivado no lleva el `contentBase64` de
+   * ningun adjunto (queda a `null`; metadatos intactos). Un elemento del lote
+   * solo interpola texto, y el binario es justo lo que inflaba cualquier
+   * `getAllContext` o volcado de ese contexto, una vez por elemento. La purga es
+   * un spread SUPERFICIAL del namespace y de cada adjunto: el Base64 no se copia
+   * ni se clona nunca. El contexto original lo conserva intacto, que es de donde
+   * lee `UPLOAD_ATTACHMENT`.
+   *
+   * @param overlays Namespace -> claves a superponer para este elemento.
+   * @returns Un contexto nuevo con la misma ejecucion, flujo, cursor e iniciador.
+   */
+  public withNamespaceOverlays(
+    overlays: Readonly<Record<string, Record<string, unknown>>>,
+  ): StatePayloadContext {
+    const derived = new StatePayloadContext(
+      this.executionId,
+      this.workflowId,
+      this.activeCursor,
+      this.sandboxScope,
+      this.initiatorUserId,
+    );
+    const purged = Object.fromEntries(
+      Object.entries(this.namespaces).map(
+        ([namespace, data]) =>
+          [namespace, withoutBinaryAttachments(data)] as const,
+      ),
+    );
+    const merged = Object.entries(overlays).map(
+      ([namespace, data]) =>
+        [
+          namespace,
+          {
+            ...structuredClone(purged[namespace] ?? {}),
+            ...withoutBinaryAttachments(structuredClone(data)),
+          },
+        ] as const,
+    );
+
+    derived.namespaces = {
+      ...purged,
+      ...Object.fromEntries(merged),
+    };
+
+    return derived;
+  }
+
+  /** Copia profunda del namespace, o `undefined` si ningun nodo lo ha escrito. */
+  public getNamespace(namespace: string): Record<string, unknown> | undefined {
+    const stored = this.namespaces[namespace];
+
+    return stored === undefined ? undefined : structuredClone(stored);
+  }
+
+  /**
+   * Nombres de los namespaces escritos, sin clonar su contenido.
+   *
+   * Para buscar un namespace por su FORMA (p. ej. el resultado parcial de un
+   * lote) sin pagar `getAllContext`, que clona tambien los adjuntos en Base64.
+   */
+  public getNamespaceNames(): string[] {
+    return Object.keys(this.namespaces);
+  }
+
+  /** Copia profunda de todo el contexto; es lo que se vuelca al checkpoint. */
+  public getAllContext(): Record<string, Record<string, unknown>> {
+    return structuredClone(this.namespaces);
+  }
+
+  /**
+   * Sustituye las variables `{{ruta}}` de una plantilla por su valor.
+   *
+   * Admite rutas compuestas de cualquier profundidad, con notacion de punto y
+   * de corchete indistintamente (ver `INTERPOLATION_PATTERN`). Una plantilla
+   * sin marcas `{{ }}` se devuelve intacta.
+   *
+   * A diferencia de la implementacion de referencia de
+   * `architecture-patterns.md` §3, una variable ausente NO se resuelve como
+   * cadena vacia: lanza. Interpolar en silencio publicaria una noticia con el
+   * titulo en blanco en vez de detener el flujo y levantar la alerta, y el
+   * fallo apareceria aguas abajo, ya en Drupal, lejos de su causa.
+   *
+   * @throws MissingContextVariableException Si alguna ruta no resuelve.
+   */
+  public getInterpolatedValue(template: string): string {
+    return template.replace(INTERPOLATION_PATTERN, (_match, rawPath: string) =>
+      stringifyResolved(resolvePath(this.namespaces, rawPath)),
+    );
+  }
+
+  /**
+   * Variante TOLERANTE: una variable ausente o nula se sustituye por `''`.
+   * Solo para prompts de IA, donde un dato opcional (`scraped_web.author`)
+   * no debe pausar el flujo. Devuelve las rutas omitidas para registrarlas.
+   *
+   * Las marcas OBLIGATORIAS (`{{*ns.campo}}`) tambien se sustituyen por `''`,
+   * pero ademas se listan en `missingRequired` cuando faltan, son nulas o su
+   * texto queda en blanco: un prompt sin su materia prima no debe facturarse,
+   * y es el llamante quien decide abortar antes de invocar al proveedor.
+   * `missing` incluye TODAS las ausentes (obligatorias y opcionales).
+   */
+  public getInterpolatedValueLenient(template: string): {
+    readonly text: string;
+    readonly missing: readonly string[];
+    readonly missingRequired: readonly string[];
+  } {
+    const missing: string[] = [];
+    const missingRequired: string[] = [];
+    const text = template.replace(
+      INTERPOLATION_PATTERN,
+      (marker: string, rawPath: string) => {
+        const required = isRequiredMarker(marker);
+
+        try {
+          const value = stringifyResolved(
+            resolvePath(this.namespaces, rawPath),
+          );
+
+          // Una obligatoria en blanco equivale a ausente: `"   "` no es materia
+          // prima para el modelo.
+          if (required && value.trim() === '') {
+            missing.push(rawPath);
+            missingRequired.push(rawPath);
+            return '';
+          }
+
+          return value;
+        } catch (error) {
+          if (!(error instanceof MissingContextVariableException)) {
+            throw error;
+          }
+
+          missing.push(rawPath);
+
+          if (required) {
+            missingRequired.push(rawPath);
+          }
+
+          return '';
+        }
+      },
+    );
+
+    return { text, missing, missingRequired };
+  }
+}

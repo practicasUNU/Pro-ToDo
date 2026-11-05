@@ -18,7 +18,7 @@
 
 ## 3. 🪝 Scripts de Automatización (Git Hooks Locales)
 
-Los scripts versionados en [`.git/hooks/pre-commit`](../../.git/hooks/pre-commit) y [`.git/hooks/commit-msg`](../../.git/hooks/commit-msg) son la fuente de verdad; se copian a `.git/hooks/` de la máquina local (ver activación de permisos abajo). Identificadores en inglés, mensajes al desarrollador en español:
+Los scripts en `.git/hooks/pre-commit` y `.git/hooks/commit-msg` son la fuente de verdad de este comportamiento, pero viven **únicamente en cada máquina local**: `.git/` queda fuera del control de versiones por definición, por lo que estos archivos no se distribuyen mediante el repositorio (no existe una copia versionada en `scripts/` ni en ningún otro directorio rastreado). Deben recrearse manualmente tras cada clonado (ver activación de permisos abajo). Identificadores en inglés, mensajes al desarrollador en español:
 
 - **Pre-commit:** bloquea cualquier commit directo sobre `main` (salvo que sea un merge en curso, `.git/MERGE_HEAD`).
 - **Commit-msg:** valida el patrón `tipo(alcance): descripción` contra los tipos permitidos (`feat|fix|docs|style|refactor|test|chore|perf`) y exige que el `alcance` coincida con el sufijo de la rama activa (`feat/<alcance>`).

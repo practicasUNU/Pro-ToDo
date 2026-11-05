@@ -1,42 +1,68 @@
-import { Logger, ValidationPipe } from '@nestjs/common';
+import { Logger } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
 import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
 
+import { configureBodyParsers } from '@common/http/configure-body-parsers';
 import { RedLocalMiddleware } from '@common/middlewares/red-local.middleware';
+import { createGlobalValidationPipe } from '@common/pipes/global-validation.pipe';
 
 import { AppModule } from './app.module';
 
+import type { NestExpressApplication } from '@nestjs/platform-express';
+
 const API_PREFIX = 'api';
 const SWAGGER_PATH = 'api/docs';
+const ASSETS_PATH = '/static/uploads';
 
 /**
- * Rutas de Swagger a cubrir con el perimetro de red. `SwaggerModule` registra el
- * documento JSON/YAML como rutas HERMANAS (`api/docs-json`), no anidadas, por lo que
- * montar solo el prefijo `/api/docs` dejaria expuesto el inventario de endpoints.
+ * Rutas a cubrir con el perimetro de red (PROT-05), y el motivo de que haya que
+ * montarlo A MANO sobre ellas.
+ *
+ * Las dos familias comparten causa: `SwaggerModule` y `ServeStaticModule` NO
+ * registran sus rutas en el router de Nest, sino directamente en el adaptador
+ * de Express (`useStaticAssets`). El `IpWhitelistGuard` global, que es un
+ * `APP_GUARD` del router, jamas las alcanza, asi que sin este middleware
+ * quedarian abiertas a cualquier origen.
+ *
+ * - Swagger: el documento JSON/YAML son rutas HERMANAS (`api/docs-json`), no
+ *   anidadas, de modo que cubrir solo `/api/docs` dejaria expuesto el
+ *   inventario de endpoints.
+ * - Assets: `security-and-scope.md` §1 exige que toda ruta protegida pase por
+ *   aqui, y las imagenes de los articulos no son una excepcion. Si algun dia el
+ *   CMS de destino tuviera que descargarlas desde fuera del rango corporativo,
+ *   este es el punto exacto donde relajarlo.
  */
-const SWAGGER_PERIMETER_PATHS = [
+const PERIMETER_PATHS = [
   `/${SWAGGER_PATH}`,
   `/${SWAGGER_PATH}-json`,
   `/${SWAGGER_PATH}-yaml`,
+  ASSETS_PATH,
 ];
 
 async function bootstrap() {
-  const app = await NestFactory.create(AppModule);
+  // Sin parser automatico: los monta `configureBodyParsers`, mas abajo.
+  const app = await NestFactory.create<NestExpressApplication>(AppModule, {
+    bodyParser: false,
+  });
 
   // CORS: en desarrollo local se permite '*' si FRONTEND_URL no esta definida
   app.enableCors({ origin: process.env.FRONTEND_URL || '*' });
 
-  app.useGlobalPipes(new ValidationPipe({ whitelist: true, transform: true }));
+  // Fabrica compartida con las e2e: lo que se prueba es lo que se despliega.
+  app.useGlobalPipes(createGlobalValidationPipe());
   app.setGlobalPrefix(API_PREFIX);
 
-  // Perimetro de red para Swagger (PROT-05): sus rutas las registra el adaptador Express,
-  // fuera del router de Nest, por lo que el IpWhitelistGuard global nunca las alcanza.
-  // Se monta antes de SwaggerModule.setup porque Express resuelve por orden de registro.
+  // Se monta antes de SwaggerModule.setup porque Express resuelve por orden de
+  // registro. Los estaticos se cubren igual: ServeStaticModule los registra en
+  // `app.init()`, es decir durante el `listen()` de mas abajo, asi que este
+  // `use` entra antes en la pila y se evalua primero (ver PERIMETER_PATHS).
   const redLocalMiddleware = app.get(RedLocalMiddleware);
-  app.use(
-    SWAGGER_PERIMETER_PATHS,
-    redLocalMiddleware.use.bind(redLocalMiddleware),
-  );
+
+  app.use(PERIMETER_PATHS, redLocalMiddleware.use.bind(redLocalMiddleware));
+
+  // Antes de `listen()`: los middlewares de Express se evaluan por orden de
+  // registro, y las rutas de los controladores entran en `init()`.
+  configureBodyParsers(app);
 
   const swaggerConfig = new DocumentBuilder()
     .setTitle('Proto-Do API')
@@ -46,6 +72,11 @@ async function bootstrap() {
     .build();
   const swaggerDocument = SwaggerModule.createDocument(app, swaggerConfig);
   SwaggerModule.setup(SWAGGER_PATH, app, swaggerDocument);
+
+  // Sin esto, `onModuleDestroy` NO se ejecuta al recibir SIGTERM/SIGINT: los
+  // intervalos del sondeo IMAP sobrevivirian a cada reinicio de `--watch` y el
+  // mismo buzon acabaria sondeado por varias generaciones del proceso.
+  app.enableShutdownHooks();
 
   const port = Number(process.env.PORT);
   await app.listen(port);

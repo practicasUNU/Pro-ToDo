@@ -95,7 +95,7 @@ describe('extractClientIp (PROT-05.1)', () => {
     expect(result).toBe('192.168.1.10');
   });
 
-  it('deberia conservar intacta una IPv6 nativa', () => {
+  it('deberia traducir el loopback IPv6 "::1" a 127.0.0.1', () => {
     // 1. Arrange
     const req = buildRequest({ remoteAddress: '::1' });
 
@@ -103,7 +103,34 @@ describe('extractClientIp (PROT-05.1)', () => {
     const result = extractClientIp(req);
 
     // 3. Assert
-    expect(result).toBe('::1');
+    // Las dos formas nombran al mismo host: si `::1` saliera intacto,
+    // `RedLocalMiddleware` lo compararia contra rangos CIDR IPv4, no casaria
+    // con ninguno y devolveria un 403 a una peticion desde la propia maquina.
+    expect(result).toBe('127.0.0.1');
+  });
+
+  it('deberia traducir tambien la forma mapeada del loopback', () => {
+    // 1. Arrange
+    const req = buildRequest({ remoteAddress: '::ffff:127.0.0.1' });
+
+    // 2. Act
+    const result = extractClientIp(req);
+
+    // 3. Assert
+    expect(result).toBe('127.0.0.1');
+  });
+
+  it('deberia conservar intacta una IPv6 nativa que no sea el loopback', () => {
+    // 1. Arrange
+    const req = buildRequest({ remoteAddress: '2001:db8::8a2e:370:7334' });
+
+    // 2. Act
+    const result = extractClientIp(req);
+
+    // 3. Assert
+    // No hay traduccion posible a IPv4: se entrega tal cual y es
+    // `RedLocalMiddleware` quien decide si algun rango la admite.
+    expect(result).toBe('2001:db8::8a2e:370:7334');
   });
 
   it('deberia devolver null cuando no hay ninguna fuente de IP (caso fail-closed)', () => {

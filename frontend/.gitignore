@@ -4,6 +4,11 @@ node_modules
 
 # .env files
 .env*
+# ...salvo la PLANTILLA, que `security-and-scope.md` §0.1 exige versionada: es de
+# donde cada clonado construye su propio `.env`. La negacion va aqui y no en el
+# `.gitignore` de la raiz porque un patron de un `.gitignore` mas profundo gana
+# sobre el de arriba, de modo que el `!.env.example` de la raiz no la alcanzaba.
+!.env.example
 
 # Quasar core related directories
 .quasar

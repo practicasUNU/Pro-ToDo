@@ -1,6 +1,8 @@
 import { ApiProperty } from '@nestjs/swagger';
 import { IsNotEmpty, IsString, MaxLength } from 'class-validator';
 
+import { TrimmedString } from '@common/decorators/trimmed-string.decorator';
+
 /**
  * Payload de renovacion y de cierre de sesion (`POST /auth/refresh`, `POST /auth/logout`).
  *
@@ -14,6 +16,7 @@ export class RefreshTokenDto {
     example: 'xQ8kZ2m1Rr9pV6tL0sYbN4hJ7wC3dF5gA1eU8iO2kM0',
     maxLength: 512,
   })
+  @TrimmedString()
   @IsString()
   @IsNotEmpty({ message: 'El token de renovacion es obligatorio.' })
   @MaxLength(512)

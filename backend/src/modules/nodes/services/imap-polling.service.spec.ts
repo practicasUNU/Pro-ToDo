@@ -1,0 +1,1593 @@
+import { BadRequestException, ConflictException } from '@nestjs/common';
+import { SchedulerRegistry } from '@nestjs/schedule';
+
+import { FlowPollingCoordinator } from '@common/services/flow-polling.coordinator';
+import { FsmConfig } from '@core/config/fsm.config';
+import { SystemCapacityExceededException } from '@core/fsm/exceptions/system-capacity-exceeded.exception';
+
+import type { HybridLoggerService } from '@modules/logs/services/hybrid-logger.service';
+import { NodeType } from '@core/fsm/types/pipeline-schema.types';
+import {
+  DEFAULT_POLL_INTERVAL_MS,
+  MIN_POLL_INTERVAL_MS,
+} from '@modules/nodes/dto/imap-trigger-config.dto';
+
+import { ImapPollingService } from './imap-polling.service';
+
+import type { ConfigService } from '@nestjs/config';
+import type { ImapTriggerConfigDto } from '@modules/nodes/dto/imap-trigger-config.dto';
+import { WorkflowStatus } from '@modules/workflows/enums/workflow-status.enum';
+import type { Workflow } from '@modules/workflows/entities/workflow.entity';
+import type { WorkflowsService } from '@modules/workflows/workflows.service';
+import type { Repository } from 'typeorm';
+
+jest.mock('imapflow');
+
+/* eslint-disable @typescript-eslint/no-require-imports */
+const { ImapFlow } = require('imapflow') as { ImapFlow: jest.Mock };
+/* eslint-enable @typescript-eslint/no-require-imports */
+
+const FLOW_ID = 'b3f1c2d4-5e6a-4b7c-8d9e-0f1a2b3c4d5e';
+const OTHER_FLOW_ID = 'c4a2d3e5-6f7b-4c8d-9e0f-1a2b3c4d5e6f';
+const PASSWORD_ENV_KEY = 'IMAP_PASSWORD';
+const IMAP_PASSWORD = 'clave-de-buzon-solo-para-pruebas';
+const POLL_INTERVAL_MS = 30_000;
+const EXECUTION_ID = 'd5b3e4f6-7a8c-4d9e-8f0a-1b2c3d4e5f60';
+
+type WorkflowsMock = jest.Mocked<
+  Pick<WorkflowsService, 'runAutomaticWorkflow'>
+>;
+type RepositoryMock = jest.Mocked<Pick<Repository<Workflow>, 'find'>>;
+
+/** `params` validos del nodo TRIGGER_IMAP. */
+const buildParams = (
+  overrides: Partial<ImapTriggerConfigDto> = {},
+): ImapTriggerConfigDto => ({
+  host: 'imap.unuware.com',
+  port: 993,
+  secure: true,
+  user: 'notiweb@unuware.com',
+  passwordEnvKey: PASSWORD_ENV_KEY,
+  mailbox: 'INBOX',
+  pollIntervalMs: POLL_INTERVAL_MS,
+  markAsRead: true,
+  ...overrides,
+});
+
+/**
+ * Flujo con un nodo IMAP como entrypoint.
+ *
+ * Los `params` del nodo entran por parametro y no por `overrides` para no tener
+ * que repetir el `pipeline_schema` entero solo por cambiar un campo. El `as
+ * Workflow` del final es el que absorbe la varianza entre el DTO y el
+ * `Record<string, unknown>` de `PipelineNodeConfig.params`.
+ */
+const buildWorkflow = (
+  overrides: Partial<Workflow> = {},
+  params: ImapTriggerConfigDto = buildParams(),
+): Workflow =>
+  ({
+    id: FLOW_ID,
+    name: 'Noticias entrantes',
+    description: null,
+    status: WorkflowStatus.ACTIVO,
+    createdById: null,
+    createdAt: new Date('2026-01-01T00:00:00.000Z'),
+    pipelineSchema: {
+      flowId: FLOW_ID,
+      name: 'Noticias entrantes',
+      version: '1.0.0',
+      entrypoint: 'trigger_imap',
+      nodes: {
+        trigger_imap: {
+          nodeId: 'trigger_imap',
+          nodeType: NodeType.TRIGGER_IMAP,
+          outputNamespace: 'raw_email',
+          nextStep: null,
+          onErrorStep: null,
+          params,
+        },
+      },
+    },
+    ...overrides,
+  }) as Workflow;
+
+/**
+ * Doble del cliente IMAP: el sondeo usa connect, getMailboxLock, search y logout.
+ *
+ * `search` y no `status`: el sondeo debe aplicar los mismos filtros que la
+ * estrategia, y `STATUS` no admite criterios. El coste es seleccionar el buzon,
+ * de ahi el `getMailboxLock`.
+ *
+ * @param matches Cuantos UID devuelve la busqueda; 0 simula "nada que disparar".
+ */
+/**
+ * Doble del cliente IMAP.
+ *
+ * `usable` y `close` NO son adorno: el cierre del sondeo pregunta por el
+ * primero antes de despedirse y llama al segundo SIEMPRE. Un doble sin ellos
+ * describiria un cliente que no existe y dejaria sin cubrir justo el paso que
+ * impide la fuga de sockets.
+ */
+interface ImapClientDouble {
+  connect: jest.Mock;
+  getMailboxLock: jest.Mock;
+  search: jest.Mock;
+  logout: jest.Mock;
+  close: jest.Mock;
+  on: jest.Mock;
+  release: jest.Mock;
+  usable: boolean;
+  /**
+   * Declarados como AUSENTES a proposito, y por eso aparecen en el contrato.
+   *
+   * El sondeo solo hace `SEARCH`: quien descarga y marca `\Seen` es la
+   * estrategia, dentro de una ejecucion. Varias pruebas afirman que estos dos
+   * metodos no existen en el doble; sin declararlos aqui, esa afirmacion seria
+   * un error de tipos en vez de la barrera que pretende ser.
+   */
+  download?: undefined;
+  messageFlagsAdd?: undefined;
+}
+
+const buildClient = (matches = 3): ImapClientDouble => {
+  const release = jest.fn();
+
+  return {
+    connect: jest.fn().mockResolvedValue(undefined),
+    getMailboxLock: jest.fn().mockResolvedValue({ path: 'INBOX', release }),
+    search: jest
+      .fn()
+      .mockResolvedValue(
+        Array.from({ length: matches }, (_, index) => index + 1),
+      ),
+    logout: jest.fn().mockResolvedValue(undefined),
+    close: jest.fn(),
+    on: jest.fn(),
+    release,
+    usable: true,
+  };
+};
+
+interface Harness {
+  service: ImapPollingService;
+  workflows: WorkflowsMock;
+  repository: RepositoryMock;
+  registry: SchedulerRegistry;
+  client: ImapClientDouble;
+  coordinator: FlowPollingCoordinator;
+  /** Doble del logger hibrido, para aseverar el escalado a `alertas_error`. */
+  hybridLogger: { logWorkerFailure: jest.Mock };
+  /** Spies del logger, para aseverar el NIVEL con el que se registra un caso. */
+  warnSpy: jest.SpyInstance;
+  errorSpy: jest.SpyInstance;
+}
+
+/**
+ * Monta el servicio con dobles.
+ *
+ * `SchedulerRegistry` va REAL: es una clase pura en memoria, sin I/O, y su
+ * comportamiento (lanzar ante un nombre duplicado, hacer `clearInterval` al
+ * borrar) es justo parte del contrato que este servicio debe respetar. Un doble
+ * convertiria las aserciones en tautologias.
+ */
+const buildHarness = (
+  options: {
+    workflowRows?: Workflow[];
+    env?: Record<string, string>;
+    matches?: number;
+  } = {},
+): Harness => {
+  const {
+    workflowRows = [buildWorkflow()],
+    env = {
+      IMAP_POLLING_ENABLED: 'true',
+      [PASSWORD_ENV_KEY]: IMAP_PASSWORD,
+    },
+    matches = 3,
+  } = options;
+
+  const workflows: WorkflowsMock = {
+    runAutomaticWorkflow: jest.fn().mockResolvedValue(EXECUTION_ID),
+  };
+  const repository: RepositoryMock = {
+    find: jest.fn().mockResolvedValue(workflowRows),
+  };
+  const registry = new SchedulerRegistry();
+  const configService = {
+    get: jest.fn((key: string) => env[key]),
+  } as unknown as ConfigService;
+
+  const client = buildClient(matches);
+  ImapFlow.mockImplementation(() => client);
+
+  // Coordinador REAL, por el mismo motivo que `SchedulerRegistry`: no tiene I/O
+  // y lo que interesa aseverar es que el servicio queda alcanzable a traves de
+  // el, no que se llamo a un `jest.fn()`.
+  const coordinator = new FlowPollingCoordinator();
+  jest
+    .spyOn(coordinator['logger'], 'error')
+    .mockImplementation(() => undefined);
+
+  // Doble y no el servicio real: el real abriria transportes de winston y
+  // necesitaria dos repositorios. Lo que aqui interesa es CUANDO se le llama.
+  const hybridLogger = {
+    logWorkerFailure: jest.fn().mockResolvedValue(undefined),
+  };
+
+  const service = new ImapPollingService(
+    repository as unknown as Repository<Workflow>,
+    workflows as unknown as WorkflowsService,
+    registry,
+    configService,
+    coordinator,
+    hybridLogger as unknown as HybridLoggerService,
+    // `FsmConfig` REAL sobre el mismo `ConfigService` del harness: es una clase
+    // pura sin I/O, asi que sembrar `MAX_EXECUTIONS_PER_POLL_TICK` en `env`
+    // basta para gobernar el tamano del lote. Mismo criterio que
+    // `SchedulerRegistry` y `FlowPollingCoordinator`.
+    new FsmConfig(configService),
+  );
+
+  jest.spyOn(service['logger'], 'log').mockImplementation(() => undefined);
+  jest.spyOn(service['logger'], 'debug').mockImplementation(() => undefined);
+  const warnSpy = jest
+    .spyOn(service['logger'], 'warn')
+    .mockImplementation(() => undefined);
+  const errorSpy = jest
+    .spyOn(service['logger'], 'error')
+    .mockImplementation(() => undefined);
+
+  return {
+    service,
+    workflows,
+    repository,
+    registry,
+    client,
+    coordinator,
+    hybridLogger,
+    warnSpy,
+    errorSpy,
+  };
+};
+
+const intervalNameOf = (flowId: string): string => `imap-poll:${flowId}`;
+
+/**
+ * Intervalos de SONDEO inscritos, excluyendo el de reconciliacion.
+ *
+ * `getIntervals()` devuelve tambien `imap-reconcile`, que no es un buzon
+ * vigilado sino la recarga periodica de la tabla: contarlo como uno mas haria
+ * que "ningun flujo programado" pareciera "un flujo programado".
+ */
+const pollIntervalsOf = (registry: SchedulerRegistry): string[] =>
+  registry.getIntervals().filter((name) => name.startsWith('imap-poll:'));
+
+describe('ImapPollingService', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    jest.useFakeTimers();
+  });
+
+  afterEach(() => {
+    jest.useRealTimers();
+  });
+
+  describe('1. Programacion de intervalos', () => {
+    it('1.1 no deberia programar nada si IMAP_POLLING_ENABLED no es "true"', async () => {
+      // 1. Arrange
+      const { service, repository, registry } = buildHarness({ env: {} });
+
+      // 2. Act
+      await service.onModuleInit();
+
+      // 3. Assert: fallo por omision seguro; ni se consulta la base de datos.
+      expect(repository.find).not.toHaveBeenCalled();
+      expect(registry.getIntervals()).toHaveLength(0);
+    });
+
+    it('1.2 deberia inscribir un intervalo por flujo elegible', async () => {
+      // 1. Arrange
+      const { service, registry } = buildHarness();
+
+      // 2. Act
+      await service.onModuleInit();
+
+      // 3. Assert
+      expect(registry.getIntervals()).toContain(intervalNameOf(FLOW_ID));
+      service.onModuleDestroy();
+    });
+
+    it('1.3 deberia consultar solo los flujos activos', async () => {
+      // 1. Arrange
+      const { service, repository } = buildHarness();
+
+      // 2. Act
+      await service.onModuleInit();
+
+      // 3. Assert: `status` gobierna los disparadores automaticos, y solo el
+      //    valor ACTIVO los habilita.
+      expect(repository.find).toHaveBeenCalledWith({
+        where: { status: WorkflowStatus.ACTIVO },
+      });
+      service.onModuleDestroy();
+    });
+
+    it('1.4 deberia ignorar un flujo sin pipeline_schema', async () => {
+      // 1. Arrange
+      const { service, registry } = buildHarness({
+        workflowRows: [buildWorkflow({ pipelineSchema: null })],
+      });
+
+      // 2. Act
+      await service.onModuleInit();
+
+      // 3. Assert
+      expect(pollIntervalsOf(registry)).toHaveLength(0);
+    });
+
+    it('1.5 deberia ignorar un flujo sin nodo TRIGGER_IMAP', async () => {
+      // 1. Arrange
+      const workflow = buildWorkflow();
+      const schema = workflow.pipelineSchema;
+
+      if (schema !== null) {
+        schema.nodes.trigger_imap.nodeType = NodeType.MAPEADOR_PLANTILLA;
+      }
+
+      const { service, registry } = buildHarness({
+        workflowRows: [workflow],
+      });
+
+      // 2. Act
+      await service.onModuleInit();
+
+      // 3. Assert
+      expect(pollIntervalsOf(registry)).toHaveLength(0);
+    });
+
+    it('1.5.1 deberia ignorar un nodo IMAP que NO es el entrypoint, y avisar', async () => {
+      // 1. Arrange: el disparador existe pero el flujo arranca en otro nodo, asi
+      //    que el motor nunca lo ejecutaria. Antes se sondeaba igual.
+      const workflow = buildWorkflow();
+      const schema = workflow.pipelineSchema;
+
+      if (schema !== null) {
+        schema.nodes.nodo_previo = {
+          nodeId: 'nodo_previo',
+          nodeType: NodeType.MAPEADOR_PLANTILLA,
+          outputNamespace: 'rendered_html',
+          nextStep: 'trigger_imap',
+          onErrorStep: null,
+          params: {},
+        };
+        schema.entrypoint = 'nodo_previo';
+      }
+
+      const { service, registry, warnSpy } = buildHarness({
+        workflowRows: [workflow],
+      });
+
+      // 2. Act
+      await service.onModuleInit();
+
+      // 3. Assert: no se programa, y el aviso es lo que hace diagnosticable que
+      //    un flujo que antes corria haya dejado de hacerlo.
+      expect(pollIntervalsOf(registry)).toHaveLength(0);
+      expect(warnSpy).toHaveBeenCalledTimes(1);
+      expect(warnSpy).toHaveBeenCalledWith(
+        expect.stringContaining('entrypoint'),
+      );
+    });
+
+    it('1.5.2 no deberia avisar de un flujo que simplemente no es IMAP', async () => {
+      // 1. Arrange: un flujo Cron pasando por el sondeo IMAP es el caso NORMAL;
+      //    avisarlo llenaria el log de ruido que taparia los avisos reales.
+      const workflow = buildWorkflow();
+      const schema = workflow.pipelineSchema;
+
+      if (schema !== null) {
+        schema.nodes.trigger_imap.nodeType = NodeType.TRIGGER_CRON;
+      }
+
+      const { service, registry, warnSpy } = buildHarness({
+        workflowRows: [workflow],
+      });
+
+      // 2. Act
+      await service.onModuleInit();
+
+      // 3. Assert
+      expect(pollIntervalsOf(registry)).toHaveLength(0);
+      expect(warnSpy).not.toHaveBeenCalled();
+    });
+
+    it('1.6 deberia ignorar un flujo cuyo nodo IMAP tiene params invalidos', async () => {
+      // 1. Arrange: un esquema a medio escribir no debe impedir que el resto
+      //    de los flujos queden programados.
+      const broken = buildWorkflow();
+      const brokenSchema = broken.pipelineSchema;
+
+      if (brokenSchema !== null) {
+        brokenSchema.nodes.trigger_imap.params = { host: '' };
+      }
+
+      const healthy = buildWorkflow({ id: OTHER_FLOW_ID });
+      const { service, registry } = buildHarness({
+        workflowRows: [broken, healthy],
+      });
+
+      // 2. Act
+      await service.onModuleInit();
+
+      // 3. Assert
+      expect(pollIntervalsOf(registry)).toEqual([
+        intervalNameOf(OTHER_FLOW_ID),
+      ]);
+      service.onModuleDestroy();
+    });
+
+    it('1.7 deberia sondear cuando vence el pollIntervalMs del nodo', async () => {
+      // 1. Arrange
+      const { service, workflows } = buildHarness();
+      await service.onModuleInit();
+
+      // 2. Act
+      await jest.advanceTimersByTimeAsync(POLL_INTERVAL_MS);
+
+      // 3. Assert
+      expect(workflows.runAutomaticWorkflow).toHaveBeenCalledWith(FLOW_ID);
+      service.onModuleDestroy();
+    });
+
+    it('1.8 deberia poder reprogramar sin chocar con el nombre ya inscrito', async () => {
+      // 1. Arrange
+      const { service, registry } = buildHarness();
+      await service.onModuleInit();
+
+      // 2. Act: `addInterval` lanzaria si no se borrase antes.
+      await service.refreshSchedules();
+
+      // 3. Assert
+      expect(pollIntervalsOf(registry)).toEqual([intervalNameOf(FLOW_ID)]);
+      service.onModuleDestroy();
+    });
+
+    it('1.9 deberia borrar todos los intervalos en onModuleDestroy', async () => {
+      // 1. Arrange
+      const { service, registry, workflows } = buildHarness();
+      await service.onModuleInit();
+
+      // 2. Act
+      service.onModuleDestroy();
+      await jest.advanceTimersByTimeAsync(POLL_INTERVAL_MS * 3);
+
+      // 3. Assert: sin esto, cada recarga de `--watch` dejaria temporizadores
+      //    vivos de la generacion anterior del proceso.
+      expect(registry.getIntervals()).toHaveLength(0);
+      expect(workflows.runAutomaticWorkflow).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('2. Deteccion y disparo', () => {
+    it('2.1 deberia disparar el flujo cuando hay correo sin leer', async () => {
+      // 1. Arrange
+      const { service, workflows } = buildHarness({ matches: 2 });
+
+      // 2. Act
+      const dispatched = await service.pollInbox(FLOW_ID, buildParams());
+
+      // 3. Assert
+      expect(dispatched).toBe(true);
+      expect(workflows.runAutomaticWorkflow).toHaveBeenCalledWith(FLOW_ID);
+    });
+
+    it('2.2 no deberia disparar el flujo con el buzon vacio', async () => {
+      // 1. Arrange
+      const { service, workflows } = buildHarness({ matches: 0 });
+
+      // 2. Act
+      const dispatched = await service.pollInbox(FLOW_ID, buildParams());
+
+      // 3. Assert
+      expect(dispatched).toBe(false);
+      expect(workflows.runAutomaticWorkflow).not.toHaveBeenCalled();
+    });
+
+    it('2.3 deberia detectar con SEARCH y no descargar ni marcar nada', async () => {
+      // 1. Arrange
+      const { service, client } = buildHarness();
+
+      // 2. Act
+      await service.pollInbox(FLOW_ID, buildParams());
+
+      // 3. Assert: un solo lector del buzon. El sondeo detecta; la estrategia
+      //    descarga y marca `\Seen`.
+      expect(client.search).toHaveBeenCalledWith(
+        { seen: false },
+        { uid: true },
+      );
+      expect(client.download).toBeUndefined();
+      expect(client.messageFlagsAdd).toBeUndefined();
+      // EXAMINE y no SELECT: el sondeo no tiene permiso para tocar banderas.
+      expect(client.getMailboxLock).toHaveBeenCalledWith('INBOX', {
+        readOnly: true,
+      });
+    });
+
+    it('2.5 deberia sondear con los MISMOS filtros que usara la estrategia', async () => {
+      // 1. Arrange
+      const { service, client } = buildHarness();
+
+      // 2. Act
+      await service.pollInbox(
+        FLOW_ID,
+        buildParams({
+          fromFilter: 'redaccion@noticias.es',
+          subjectFilter: 'Notiweb',
+        }),
+      );
+
+      // 3. Assert: si detectase con un criterio y la estrategia extrajese con
+      //    otro, cada correo no leido ajeno al filtro arrancaria una ejecucion
+      //    que muere sin datos en el mapeador.
+      expect(client.search).toHaveBeenCalledWith(
+        {
+          seen: false,
+          from: 'redaccion@noticias.es',
+          subject: 'Notiweb',
+        },
+        { uid: true },
+      );
+    });
+
+    it('2.5bis deberia soltar el SUBJECT del servidor igual que la estrategia', async () => {
+      // 1. Arrange 📐: el sondeo y la estrategia comparten
+      //    `buildImapSearchQuery` justamente para no divergir. Este caso lo fija
+      //    en el escenario nuevo: con patron local, el criterio del servidor se
+      //    cae a los DOS lados o el sondeo despertaria por correos que la
+      //    estrategia no encuentra.
+      const { service, client } = buildHarness();
+
+      // 2. Act ⚙️
+      await service.pollInbox(
+        FLOW_ID,
+        buildParams({
+          subjectFilter: 'Verificacion',
+          subjectFilterRegex: '(?:verificacion|titulos)',
+        }),
+      );
+
+      // 3. Assert 🎯
+      expect(client.search).toHaveBeenCalledWith(
+        { seen: false },
+        { uid: true },
+      );
+    });
+
+    it('2.6 NO deberia disparar el flujo si ningun correo casa con los filtros', async () => {
+      // 1. Arrange
+      const { service, workflows } = buildHarness({ matches: 0 });
+
+      // 2. Act
+      const dispatched = await service.pollInbox(
+        FLOW_ID,
+        buildParams({ fromFilter: 'nadie@ejemplo.com' }),
+      );
+
+      // 3. Assert
+      expect(dispatched).toBe(false);
+      expect(workflows.runAutomaticWorkflow).not.toHaveBeenCalled();
+    });
+
+    it('2.7 deberia liberar el buzon tras sondear', async () => {
+      // 1. Arrange
+      const { service, client } = buildHarness();
+
+      // 2. Act
+      await service.pollInbox(FLOW_ID, buildParams());
+
+      // 3. Assert: SEARCH exige seleccionar el buzon; no liberarlo dejaria la
+      //    conexion bloqueada para el siguiente ciclo.
+      expect(client.release).toHaveBeenCalledTimes(1);
+    });
+
+    it('2.4 deberia cerrar la sesion IMAP tras sondear', async () => {
+      // 1. Arrange
+      const { service, client } = buildHarness();
+
+      // 2. Act
+      await service.pollInbox(FLOW_ID, buildParams());
+
+      // 3. Assert
+      expect(client.logout).toHaveBeenCalledTimes(1);
+    });
+
+    it('2.5 deberia registrar un oyente de error en el cliente IMAP', async () => {
+      // 1. Arrange
+      const { service, client } = buildHarness();
+
+      // 2. Act
+      await service.pollInbox(FLOW_ID, buildParams());
+
+      // 3. Assert: un evento 'error' sin oyente tumbaria el proceso de Node.
+      expect(client.on).toHaveBeenCalledWith('error', expect.any(Function));
+    });
+
+    it('2.6 no deberia sondear si la variable de la contrasena falta', async () => {
+      // 1. Arrange
+      const { service, workflows } = buildHarness({
+        env: { IMAP_POLLING_ENABLED: 'true' },
+      });
+
+      // 2. Act
+      const dispatched = await service.pollInbox(FLOW_ID, buildParams());
+
+      // 3. Assert
+      expect(dispatched).toBe(false);
+      expect(ImapFlow).not.toHaveBeenCalled();
+      expect(workflows.runAutomaticWorkflow).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('3. Resiliencia del tick', () => {
+    it('3.1 no deberia propagar un fallo de conexion', async () => {
+      // 1. Arrange: una excepcion escapando del callback de `setInterval`
+      //    terminaria el proceso entero.
+      const { service, workflows } = buildHarness();
+      ImapFlow.mockImplementation(() => ({
+        connect: jest.fn().mockRejectedValue(new Error('ECONNREFUSED')),
+        getMailboxLock: jest.fn(),
+        search: jest.fn(),
+        logout: jest.fn().mockResolvedValue(undefined),
+        close: jest.fn(),
+        on: jest.fn(),
+        usable: true,
+      }));
+
+      // 2. Act
+      const dispatched = await service.pollInbox(FLOW_ID, buildParams());
+
+      // 3. Assert
+      expect(dispatched).toBe(false);
+      expect(workflows.runAutomaticWorkflow).not.toHaveBeenCalled();
+    });
+
+    it('3.2 deberia volver a sondear tras un fallo (libera la guarda)', async () => {
+      // 1. Arrange
+      const { service, client } = buildHarness();
+      ImapFlow.mockImplementationOnce(() => ({
+        connect: jest.fn().mockRejectedValue(new Error('ECONNREFUSED')),
+        getMailboxLock: jest.fn(),
+        search: jest.fn(),
+        logout: jest.fn().mockResolvedValue(undefined),
+        close: jest.fn(),
+        on: jest.fn(),
+        usable: true,
+      }));
+
+      // 2. Act
+      await service.pollInbox(FLOW_ID, buildParams());
+      const second = await service.pollInbox(FLOW_ID, buildParams());
+
+      // 3. Assert: el `finally` limpia `inFlight`, asi que el ciclo siguiente
+      //    vuelve a intentarlo.
+      expect(second).toBe(true);
+      expect(client.search).toHaveBeenCalledTimes(1);
+    });
+
+    it('3.3 deberia descartar un tick solapado del mismo flujo', async () => {
+      // 1. Arrange: el primer sondeo se queda colgado a proposito.
+      const { service } = buildHarness();
+      let unblock: () => void = () => undefined;
+      const pending = new Promise<void>((resolve) => {
+        unblock = resolve;
+      });
+
+      ImapFlow.mockImplementation(() => ({
+        connect: jest.fn().mockReturnValue(pending),
+        getMailboxLock: jest
+          .fn()
+          .mockResolvedValue({ path: 'INBOX', release: jest.fn() }),
+        search: jest.fn().mockResolvedValue([1]),
+        logout: jest.fn().mockResolvedValue(undefined),
+        close: jest.fn(),
+        on: jest.fn(),
+        usable: true,
+      }));
+
+      // 2. Act
+      const first = service.pollInbox(FLOW_ID, buildParams());
+      const second = await service.pollInbox(FLOW_ID, buildParams());
+      unblock();
+      await first;
+
+      // 3. Assert: sin la guarda, un sondeo mas lento que su intervalo abriria
+      //    conexiones IMAP en cascada contra el mismo buzon.
+      expect(second).toBe(false);
+      expect(ImapFlow).toHaveBeenCalledTimes(1);
+    });
+
+    it('3.4 deberia tratar el 409 de concurrencia como condicion normal', async () => {
+      // 1. Arrange
+      const { service, workflows } = buildHarness();
+      workflows.runAutomaticWorkflow.mockRejectedValue(
+        new ConflictException('El flujo ya tiene una ejecucion EN_PROCESO.'),
+      );
+
+      // 2. Act
+      const dispatched = await service.pollInbox(FLOW_ID, buildParams());
+
+      // 3. Assert: no lanza. El correo sigue sin leer y el proximo ciclo lo
+      //    recogera; fallar aqui llenaria la traza por un solape esperado.
+      expect(dispatched).toBe(false);
+    });
+
+    it('3.5 no deberia propagar un fallo inesperado del motor', async () => {
+      // 1. Arrange
+      const { service, workflows } = buildHarness();
+      workflows.runAutomaticWorkflow.mockRejectedValue(
+        new Error('La base de datos se cayo'),
+      );
+
+      // 2. Act
+      const dispatched = await service.pollInbox(FLOW_ID, buildParams());
+
+      // 3. Assert
+      expect(dispatched).toBe(false);
+    });
+
+    it('3.6 no deberia impedir el arranque si la consulta de flujos falla', async () => {
+      // 1. Arrange
+      const { service, repository, registry } = buildHarness();
+      repository.find.mockRejectedValue(new Error('Sin conexion a PostgreSQL'));
+
+      // 2. Act & 3. Assert: degradacion, no motivo para dejar la API sin
+      //    arrancar.
+      await expect(service.onModuleInit()).resolves.toBeUndefined();
+      expect(pollIntervalsOf(registry)).toHaveLength(0);
+
+      // La reconciliacion SI queda armada: es lo que reintentara la consulta
+      // cuando PostgreSQL vuelva, sin necesidad de reiniciar el proceso.
+      expect(registry.doesExist('interval', 'imap-reconcile')).toBe(true);
+      service.onModuleDestroy();
+    });
+
+    it('3.7 deberia tratar la desactivacion en vuelo como condicion normal', async () => {
+      // 1. Arrange: el tick ya habia empezado cuando alguien desactivo el
+      //    flujo, asi que el motor lo rechaza con un 400.
+      const { service, workflows, warnSpy, errorSpy } = buildHarness();
+      workflows.runAutomaticWorkflow.mockRejectedValue(
+        new BadRequestException(
+          'El flujo "Noticias entrantes" esta desactivado',
+        ),
+      );
+
+      // 2. Act
+      const dispatched = await service.pollInbox(FLOW_ID, buildParams());
+
+      // 3. Assert: sin esta rama se registraria como "falla critica de conexion
+      //    IMAP", acusando al buzon de algo que no ha pasado.
+      expect(dispatched).toBe(false);
+      expect(errorSpy).not.toHaveBeenCalled();
+      expect(warnSpy).toHaveBeenCalledWith(
+        expect.stringContaining('esta desactivado'),
+      );
+    });
+
+    it('3.8 deberia seguir registrando como error un fallo inesperado del motor', async () => {
+      // 1. Arrange: pareja del anterior, para que la degradacion no se coma los
+      //    fallos que si son averias.
+      const { service, workflows, errorSpy } = buildHarness();
+      workflows.runAutomaticWorkflow.mockRejectedValue(
+        new Error('PostgreSQL no responde'),
+      );
+
+      // 2. Act
+      const dispatched = await service.pollInbox(FLOW_ID, buildParams());
+
+      // 3. Assert
+      expect(dispatched).toBe(false);
+      expect(errorSpy).toHaveBeenCalled();
+    });
+
+    /**
+     * EL DEFECTO QUE CIERRA ESTE BLOQUE. Apagar la VPN tumbaba el ciclo con un
+     * `AggregateError [ETIMEDOUT]`, dejaba el socket vivo porque `logout()`
+     * fallaba sobre el, y escalaba a `alertas_error` una incidencia GRAVE que
+     * se resolvia sola en cuanto volvia el enlace.
+     */
+    it('3.9 deberia tratar un AggregateError [ETIMEDOUT] como corte transitorio', async () => {
+      // 1. Arrange 📐: asi entrega Node el fallo de una resolucion con varias
+      //    direcciones; el `code` real vive en `.errors`, no arriba.
+      const { service, hybridLogger, warnSpy, errorSpy, registry } =
+        buildHarness();
+      await service.onModuleInit();
+
+      const timeout = Object.assign(new Error('connect ETIMEDOUT'), {
+        code: 'ETIMEDOUT',
+      });
+      const close = jest.fn();
+
+      ImapFlow.mockImplementation(() => ({
+        connect: jest
+          .fn()
+          .mockRejectedValue(new AggregateError([timeout], 'ETIMEDOUT')),
+        getMailboxLock: jest.fn(),
+        search: jest.fn(),
+        logout: jest.fn().mockResolvedValue(undefined),
+        close,
+        on: jest.fn(),
+        usable: false,
+      }));
+
+      // 2. Act ⚙️
+      const dispatched = await service.pollInbox(FLOW_ID, buildParams());
+
+      // 3. Assert 🎯
+      expect(dispatched).toBe(false);
+      // El socket se destruye aunque `logout()` no sea posible: es lo unico que
+      // impide que cada ciclo deje un cliente huerfano.
+      expect(close).toHaveBeenCalledTimes(1);
+      expect(warnSpy).toHaveBeenCalledWith(
+        expect.stringContaining('Enlace no disponible'),
+      );
+      expect(errorSpy).not.toHaveBeenCalled();
+      // NI alerta GRAVE NI baja del worker: el intervalo sigue programado para
+      // reconectar solo en el ciclo siguiente.
+      expect(hybridLogger.logWorkerFailure).not.toHaveBeenCalled();
+      expect(pollIntervalsOf(registry)).toContain(`imap-poll:${FLOW_ID}`);
+
+      service.onModuleDestroy();
+    });
+
+    it('3.10 deberia tratar "Connection not available" como corte transitorio', async () => {
+      // 1. Arrange 📐: el mismo corte visto desde `imapflow`, que pierde el
+      //    `errno` original y solo deja el mensaje.
+      const { service, hybridLogger, warnSpy, errorSpy } = buildHarness();
+      const close = jest.fn();
+
+      ImapFlow.mockImplementation(() => ({
+        connect: jest
+          .fn()
+          .mockRejectedValue(new Error('Connection not available')),
+        getMailboxLock: jest.fn(),
+        search: jest.fn(),
+        logout: jest.fn().mockResolvedValue(undefined),
+        close,
+        on: jest.fn(),
+        usable: false,
+      }));
+
+      // 2. Act ⚙️
+      const dispatched = await service.pollInbox(FLOW_ID, buildParams());
+
+      // 3. Assert 🎯
+      expect(dispatched).toBe(false);
+      expect(close).toHaveBeenCalledTimes(1);
+      expect(warnSpy).toHaveBeenCalledWith(
+        expect.stringContaining('Enlace no disponible'),
+      );
+      expect(errorSpy).not.toHaveBeenCalled();
+      expect(hybridLogger.logWorkerFailure).not.toHaveBeenCalled();
+    });
+
+    it('3.11 deberia seguir escalando a GRAVE un fallo que NO es de red', async () => {
+      // 1. Arrange 📐: control negativo del par anterior. Sin el, la
+      //    clasificacion podria tragarse tambien las averias reales y el buzon
+      //    caeria en silencio.
+      const { service, hybridLogger, errorSpy } = buildHarness();
+
+      ImapFlow.mockImplementation(() => ({
+        connect: jest
+          .fn()
+          .mockRejectedValue(new Error('Invalid credentials (Failure)')),
+        getMailboxLock: jest.fn(),
+        search: jest.fn(),
+        logout: jest.fn().mockResolvedValue(undefined),
+        close: jest.fn(),
+        on: jest.fn(),
+        usable: false,
+      }));
+
+      // 2. Act ⚙️
+      const dispatched = await service.pollInbox(FLOW_ID, buildParams());
+
+      // 3. Assert 🎯
+      expect(dispatched).toBe(false);
+      expect(errorSpy).toHaveBeenCalled();
+      expect(hybridLogger.logWorkerFailure).toHaveBeenCalledWith(
+        expect.objectContaining({ level: 'GRAVE', flowId: FLOW_ID }),
+      );
+    });
+
+    it('3.12 deberia cerrar el socket tambien en el ciclo nominal', async () => {
+      // 1. Arrange 📐: el camino normal es el que mas veces corre, asi que es
+      //    donde una fuga de sockets se acumula mas rapido.
+      const { service, client } = buildHarness();
+
+      // 2. Act ⚙️
+      await service.pollInbox(FLOW_ID, buildParams());
+
+      // 3. Assert 🎯: despedida limpia Y destruccion, no una de las dos.
+      expect(client.logout).toHaveBeenCalledTimes(1);
+      expect(client.close).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe('4. Reconciliacion periodica', () => {
+    it('4.1 deberia inscribir el intervalo de reconciliacion al arrancar', async () => {
+      // 1. Arrange
+      const { service, registry } = buildHarness();
+
+      // 2. Act
+      await service.onModuleInit();
+
+      // 3. Assert: es la via por la que el sondeo descubre los flujos que el
+      //    asistente crea, sin que `WorkflowsService` tenga que notificar nada
+      //    (eso crearia un ciclo de modulos).
+      expect(registry.doesExist('interval', 'imap-reconcile')).toBe(true);
+      service.onModuleDestroy();
+    });
+
+    it('4.2 no deberia inscribirla si el sondeo esta deshabilitado', async () => {
+      // 1. Arrange
+      const { service, registry } = buildHarness({ env: {} });
+
+      // 2. Act
+      await service.onModuleInit();
+
+      // 3. Assert
+      expect(registry.getIntervals()).toHaveLength(0);
+    });
+
+    it('4.3 deberia recoger un flujo nuevo en el siguiente ciclo', async () => {
+      // 1. Arrange: al arrancar no hay ningun flujo con nodo IMAP.
+      const { service, repository, registry } = buildHarness({
+        workflowRows: [],
+      });
+      await service.onModuleInit();
+      expect(pollIntervalsOf(registry)).toHaveLength(0);
+
+      // 2. Act: el asistente crea uno y vence la reconciliacion.
+      repository.find.mockResolvedValue([buildWorkflow()]);
+      await jest.advanceTimersByTimeAsync(60_000);
+
+      // 3. Assert: queda programado sin que nadie haya notificado el alta.
+      expect(pollIntervalsOf(registry)).toEqual([intervalNameOf(FLOW_ID)]);
+      service.onModuleDestroy();
+    });
+
+    it('4.4 deberia dejar de sondear un flujo que se desactiva', async () => {
+      // 1. Arrange
+      const { service, repository, registry } = buildHarness();
+      await service.onModuleInit();
+      expect(pollIntervalsOf(registry)).toHaveLength(1);
+
+      // 2. Act: el flujo deja de estar activo y vence la reconciliacion.
+      repository.find.mockResolvedValue([]);
+      await jest.advanceTimersByTimeAsync(60_000);
+
+      // 3. Assert: cubre un caso que una notificacion puntual del alta no veria.
+      expect(pollIntervalsOf(registry)).toHaveLength(0);
+      service.onModuleDestroy();
+    });
+
+    it('4.5 no deberia propagar un fallo de la reconciliacion', async () => {
+      // 1. Arrange
+      const { service, repository, registry } = buildHarness();
+      await service.onModuleInit();
+      repository.find.mockRejectedValue(new Error('Sin conexion a PostgreSQL'));
+
+      // 2. Act & 3. Assert: corre dentro de un `setInterval`, asi que una
+      //    promesa rechazada sin manejar terminaria el proceso de Node.
+      await expect(
+        jest.advanceTimersByTimeAsync(60_000),
+      ).resolves.toBeUndefined();
+      expect(registry.doesExist('interval', 'imap-reconcile')).toBe(true);
+      service.onModuleDestroy();
+    });
+
+    it('4.7 deberia CONSERVAR el temporizador de un flujo que no ha cambiado', async () => {
+      // 1. Arrange
+      const { service, registry } = buildHarness();
+      await service.onModuleInit();
+      const before = registry.getInterval(intervalNameOf(FLOW_ID));
+
+      // 2. Act: la reconciliacion vence y la base de datos devuelve lo mismo.
+      await jest.advanceTimersByTimeAsync(60_000);
+
+      // 3. Assert: EL MISMO objeto Timeout, no uno equivalente. Recrearlo
+      //    reiniciaria su cuenta atras (ver 4.10).
+      expect(registry.getInterval(intervalNameOf(FLOW_ID))).toBe(before);
+      service.onModuleDestroy();
+    });
+
+    it('4.8 deberia reinscribir el temporizador si cambia la configuracion', async () => {
+      // 1. Arrange
+      const { service, repository, registry } = buildHarness();
+      await service.onModuleInit();
+      const before = registry.getInterval(intervalNameOf(FLOW_ID));
+
+      // 2. Act: el asistente cambia el buzon del nodo.
+      repository.find.mockResolvedValue([
+        buildWorkflow({}, buildParams({ mailbox: 'Archivo' })),
+      ]);
+      await jest.advanceTimersByTimeAsync(60_000);
+
+      // 3. Assert: el callback captura la config en su clausura, asi que un
+      //    cambio EXIGE un temporizador nuevo o el worker seguiria con el
+      //    buzon viejo.
+      expect(registry.getInterval(intervalNameOf(FLOW_ID))).not.toBe(before);
+      service.onModuleDestroy();
+    });
+
+    it('4.9 deberia reinscribirlo si cambia el pollIntervalMs', async () => {
+      // 1. Arrange
+      const { service, repository, registry } = buildHarness();
+      await service.onModuleInit();
+      const before = registry.getInterval(intervalNameOf(FLOW_ID));
+
+      // 2. Act
+      repository.find.mockResolvedValue([
+        buildWorkflow({}, buildParams({ pollIntervalMs: 45_000 })),
+      ]);
+      await jest.advanceTimersByTimeAsync(60_000);
+
+      // 3. Assert: el periodo vive en el propio `setInterval`; sin recrearlo el
+      //    cambio no tendria ningun efecto.
+      expect(registry.getInterval(intervalNameOf(FLOW_ID))).not.toBe(before);
+      service.onModuleDestroy();
+    });
+
+    it('4.10 deberia sondear un flujo cuyo periodo supera al de reconciliacion', async () => {
+      // 1. Arrange: sondeo cada 120 s, reconciliacion cada 60 s. Es el caso que
+      //    el barrido y recreacion rompia: al reinscribirse el temporizador en
+      //    cada ciclo de reconciliacion, su cuenta atras volvia a empezar y NUNCA
+      //    llegaba a cumplirse. Con los valores por defecto (60 s y 60 s) la
+      //    carrera se decidia por milisegundos.
+      const { service, workflows, repository } = buildHarness({
+        workflowRows: [
+          buildWorkflow({}, buildParams({ pollIntervalMs: 120_000 })),
+        ],
+      });
+      await service.onModuleInit();
+
+      // 2. Act: dos ciclos de reconciliacion y uno de sondeo.
+      await jest.advanceTimersByTimeAsync(120_000);
+
+      // 3. Assert: el flujo llego a sondearse pese a las reconciliaciones
+      //    intermedias, que es justo lo que antes no ocurria.
+      expect(repository.find).toHaveBeenCalledTimes(3);
+      expect(workflows.runAutomaticWorkflow).toHaveBeenCalledWith(FLOW_ID);
+      service.onModuleDestroy();
+    });
+
+    it('4.6 deberia borrar la reconciliacion en onModuleDestroy', async () => {
+      // 1. Arrange
+      const { service, registry } = buildHarness();
+      await service.onModuleInit();
+
+      // 2. Act
+      service.onModuleDestroy();
+
+      // 3. Assert: sin esto, cada recarga del `--watch` acumularia una recarga
+      //    periodica de la generacion anterior del proceso.
+      expect(registry.getIntervals()).toHaveLength(0);
+    });
+  });
+
+  describe('5. Periodo por defecto via IMAP_POLLING_INTERVAL_MS', () => {
+    /** Periodo con el que quedo inscrito el flujo, leido del registro paralelo. */
+    const scheduledIntervalOf = (
+      service: ImapPollingService,
+    ): number | undefined => service['scheduled'].get(FLOW_ID)?.pollIntervalMs;
+
+    const envWith = (interval?: string): Record<string, string> => ({
+      IMAP_POLLING_ENABLED: 'true',
+      [PASSWORD_ENV_KEY]: IMAP_PASSWORD,
+      ...(interval === undefined ? {} : { IMAP_POLLING_INTERVAL_MS: interval }),
+    });
+
+    /** Nodo que NO declara periodo, para que aplique el de la instalacion. */
+    const workflowWithoutInterval = (): Workflow[] => {
+      const params = buildParams();
+      delete params.pollIntervalMs;
+
+      return [buildWorkflow({}, params)];
+    };
+
+    it('5.1 deberia aplicar la variable a un nodo que no declara pollIntervalMs', async () => {
+      // 1. Arrange
+      const { service } = buildHarness({
+        env: envWith('120000'),
+        workflowRows: workflowWithoutInterval(),
+      });
+
+      // 2. Act
+      await service.onModuleInit();
+
+      // 3. Assert
+      expect(scheduledIntervalOf(service)).toBe(120_000);
+      service.onModuleDestroy();
+    });
+
+    it('5.2 NO deberia pisar el pollIntervalMs que declara el nodo', async () => {
+      // 1. Arrange: el esquema fija su propio periodo
+      const { service } = buildHarness({ env: envWith('120000') });
+
+      // 2. Act
+      await service.onModuleInit();
+
+      // 3. Assert: el periodo es un parametro POR NODO; la variable es solo el
+      //    valor de reserva para quien no lo fija.
+      expect(scheduledIntervalOf(service)).toBe(POLL_INTERVAL_MS);
+      service.onModuleDestroy();
+    });
+
+    it('5.3 deberia caer al valor por defecto sin la variable', async () => {
+      // 1. Arrange
+      const { service } = buildHarness({
+        env: envWith(),
+        workflowRows: workflowWithoutInterval(),
+      });
+
+      // 2. Act
+      await service.onModuleInit();
+
+      // 3. Assert
+      expect(scheduledIntervalOf(service)).toBe(DEFAULT_POLL_INTERVAL_MS);
+      service.onModuleDestroy();
+    });
+
+    // Un `0` o un valor de dos digitos escrito por error martillearia el
+    // servidor IMAP hasta que el proveedor cortase la cuenta, y en silencio. El
+    // DTO ya impone este suelo a los nodos; la variable no puede ser la puerta
+    // trasera que lo evita.
+    it.each(['0', '1000', 'sesenta-mil', '', '60000.5'])(
+      '5.4 deberia rechazar el valor %p y usar el de por defecto',
+      async (rawValue: string) => {
+        // 1. Arrange
+        const { service } = buildHarness({
+          env: envWith(rawValue),
+          workflowRows: workflowWithoutInterval(),
+        });
+
+        // 2. Act
+        await service.onModuleInit();
+
+        // 3. Assert
+        expect(scheduledIntervalOf(service)).toBe(DEFAULT_POLL_INTERVAL_MS);
+        service.onModuleDestroy();
+      },
+    );
+
+    it('5.5 deberia aceptar exactamente el suelo permitido', async () => {
+      // 1. Arrange
+      const { service } = buildHarness({
+        env: envWith(String(MIN_POLL_INTERVAL_MS)),
+        workflowRows: workflowWithoutInterval(),
+      });
+
+      // 2. Act
+      await service.onModuleInit();
+
+      // 3. Assert
+      expect(scheduledIntervalOf(service)).toBe(MIN_POLL_INTERVAL_MS);
+      service.onModuleDestroy();
+    });
+  });
+
+  describe('6. Parada bajo demanda al desactivar un flujo', () => {
+    it('6.1 deberia registrarse en el coordinador al arrancar', async () => {
+      // 1. Arrange
+      const { service, coordinator, registry } = buildHarness();
+
+      // 2. Act
+      await service.onModuleInit();
+
+      // 3. Assert: es lo que permite a `WorkflowsService` pararlo sin inyectar
+      //    este servicio, que cerraria un ciclo de modulos.
+      coordinator.stopPollingForFlow(FLOW_ID);
+      expect(pollIntervalsOf(registry)).toHaveLength(0);
+      service.onModuleDestroy();
+    });
+
+    it('6.2 no deberia registrarse si el sondeo esta deshabilitado', async () => {
+      // 1. Arrange: sin sondeo no hay nada que parar, y sobre todo nada que
+      //    deba poder arrancarse desde fuera saltandose la bandera.
+      const { service, coordinator, repository } = buildHarness({ env: {} });
+      await service.onModuleInit();
+
+      // 2. Act
+      await coordinator.refreshPolling();
+
+      // 3. Assert
+      expect(repository.find).not.toHaveBeenCalled();
+    });
+
+    it('6.3 deberia borrar el intervalo del flujo indicado', async () => {
+      // 1. Arrange
+      const { service, registry } = buildHarness();
+      await service.onModuleInit();
+
+      // 2. Act
+      service.stopPollingForFlow(FLOW_ID);
+
+      // 3. Assert
+      expect(registry.doesExist('interval', intervalNameOf(FLOW_ID))).toBe(
+        false,
+      );
+      service.onModuleDestroy();
+    });
+
+    it('6.4 no deberia lanzar si el flujo no tenia intervalo inscrito', async () => {
+      // 1. Arrange: caso normal al desactivar un flujo sin nodo IMAP.
+      const { service } = buildHarness();
+      await service.onModuleInit();
+
+      // 2. Act + 3. Assert: `deleteInterval` lanza ante un nombre desconocido.
+      expect(() => service.stopPollingForFlow(OTHER_FLOW_ID)).not.toThrow();
+      service.onModuleDestroy();
+    });
+
+    it('6.5 no deberia tocar los intervalos de los demas flujos', async () => {
+      // 1. Arrange
+      const { service, registry } = buildHarness({
+        workflowRows: [buildWorkflow(), buildWorkflow({ id: OTHER_FLOW_ID })],
+      });
+      await service.onModuleInit();
+
+      // 2. Act
+      service.stopPollingForFlow(FLOW_ID);
+
+      // 3. Assert
+      expect(pollIntervalsOf(registry)).toEqual([
+        intervalNameOf(OTHER_FLOW_ID),
+      ]);
+      service.onModuleDestroy();
+    });
+
+    it('6.6 deberia dejar de sondear el buzon inmediatamente', async () => {
+      // 1. Arrange: la ventana se queda por debajo de los 60 s de la
+      //    reconciliacion a proposito. Este flujo sigue `activo` en la base de
+      //    datos —el spec no simula el UPDATE—, asi que el siguiente ciclo lo
+      //    reinscribiria y enmascararia justo lo que se quiere medir: que el
+      //    tick deja de dispararse SIN esperar a la reconciliacion.
+      const { service, workflows } = buildHarness();
+      await service.onModuleInit();
+
+      // 2. Act
+      service.stopPollingForFlow(FLOW_ID);
+      await jest.advanceTimersByTimeAsync(POLL_INTERVAL_MS);
+
+      // 3. Assert: el objetivo entero del camino rapido.
+      expect(workflows.runAutomaticWorkflow).not.toHaveBeenCalled();
+      service.onModuleDestroy();
+    });
+
+    it('6.7 deberia permitir que la reconciliacion reinscriba el flujo reactivado', async () => {
+      // 1. Arrange: se para el flujo y la base de datos sigue devolviendolo,
+      //    que es lo que ocurre si el operador lo reactiva antes del ciclo.
+      const { service, registry } = buildHarness();
+      await service.onModuleInit();
+      service.stopPollingForFlow(FLOW_ID);
+
+      // 2. Act
+      await jest.advanceTimersByTimeAsync(60_000);
+
+      // 3. Assert: si la parada no limpiara el registro paralelo, el diffing lo
+      //    daria por "intacto" y el flujo quedaria activo y mudo para siempre.
+      expect(registry.doesExist('interval', intervalNameOf(FLOW_ID))).toBe(
+        true,
+      );
+      service.onModuleDestroy();
+    });
+
+    it('6.8 deberia dejar de recibir despachos del coordinador tras onModuleDestroy', async () => {
+      // 1. Arrange: el coordinador guarda un `Set` de puertos, asi que la baja
+      //    solo funciona si se le pasa LA MISMA referencia que se inscribio.
+      const { service, coordinator } = buildHarness();
+      await service.onModuleInit();
+      const stopSpy = jest.spyOn(service, 'stopPollingForFlow');
+
+      // 2. Act
+      service.onModuleDestroy();
+      coordinator.stopPollingForFlow(FLOW_ID);
+
+      // 3. Assert: sin la baja, una recarga del `--watch` dejaria este servicio
+      //    muerto atendiendo paradas que nunca llegarian a la instancia viva.
+      expect(stopSpy).not.toHaveBeenCalled();
+    });
+  });
+  describe('4. Escalado de la averia del worker a alertas_error', () => {
+    /** Cliente que siempre falla al conectar. */
+    const failingClient = (message = 'ECONNREFUSED') => ({
+      connect: jest.fn().mockRejectedValue(new Error(message)),
+      getMailboxLock: jest.fn(),
+      search: jest.fn(),
+      logout: jest.fn().mockResolvedValue(undefined),
+      close: jest.fn(),
+      on: jest.fn(),
+      usable: true,
+    });
+
+    it('4.1 deberia registrar una alerta GRAVE atribuida al flujo', async () => {
+      // 1. Arrange: el fallo ocurre ANTES de despachar, asi que no hay ejecucion
+      //    a la que colgar la alerta; se atribuye al flujo.
+      const { service, hybridLogger } = buildHarness();
+      ImapFlow.mockImplementation(() => failingClient());
+
+      // 2. Act
+      await service.pollInbox(FLOW_ID, buildParams());
+
+      // 3. Assert
+      expect(hybridLogger.logWorkerFailure).toHaveBeenCalledTimes(1);
+      expect(hybridLogger.logWorkerFailure).toHaveBeenCalledWith(
+        expect.objectContaining({
+          flowId: FLOW_ID,
+          source: 'ImapPollingService',
+          level: 'GRAVE',
+          message: expect.stringContaining('ECONNREFUSED') as string,
+        }),
+      );
+    });
+
+    it('4.2 deberia alertar UNA sola vez mientras la averia persiste', async () => {
+      // 1. Arrange: el sondeo corre cada minuto. Sin el corte por transicion, un
+      //    buzon caido un dia dejaria 1.440 filas identicas en la bandeja.
+      const { service, hybridLogger, errorSpy } = buildHarness();
+      ImapFlow.mockImplementation(() => failingClient());
+
+      // 2. Act: tres ciclos consecutivos fallando.
+      await service.pollInbox(FLOW_ID, buildParams());
+      await service.pollInbox(FLOW_ID, buildParams());
+      await service.pollInbox(FLOW_ID, buildParams());
+
+      // 3. Assert: una alerta, pero la consola registra los tres ciclos —ahi el
+      //    detalle repetido si sirve para ver si el fallo es constante.
+      expect(hybridLogger.logWorkerFailure).toHaveBeenCalledTimes(1);
+      expect(errorSpy).toHaveBeenCalledTimes(3);
+    });
+
+    it('4.3 deberia volver a alertar tras recuperarse y caer de nuevo', async () => {
+      // 1. Arrange: el corte de ruido no puede silenciar una averia NUEVA.
+      const { service, hybridLogger } = buildHarness();
+
+      // 2. Act: falla, se recupera, vuelve a fallar.
+      ImapFlow.mockImplementationOnce(() => failingClient());
+      await service.pollInbox(FLOW_ID, buildParams());
+      await service.pollInbox(FLOW_ID, buildParams());
+      ImapFlow.mockImplementationOnce(() => failingClient());
+      await service.pollInbox(FLOW_ID, buildParams());
+
+      // 3. Assert
+      expect(hybridLogger.logWorkerFailure).toHaveBeenCalledTimes(2);
+    });
+
+    it('4.4 no deberia alertar por un solapamiento de ejecuciones (409)', async () => {
+      // 1. Arrange: el 409 de RNF-09 es la condicion NORMAL del sondeo, no una
+      //    averia. El correo sigue sin leer y el siguiente ciclo lo recoge.
+      const { service, hybridLogger, workflows } = buildHarness();
+      workflows.runAutomaticWorkflow.mockRejectedValue(
+        new ConflictException('Ya hay una ejecucion EN_PROCESO'),
+      );
+
+      // 2. Act
+      await service.pollInbox(FLOW_ID, buildParams());
+
+      // 3. Assert
+      expect(hybridLogger.logWorkerFailure).not.toHaveBeenCalled();
+    });
+
+    it('4.5 deberia anunciar la recuperacion solo si venia de una averia', async () => {
+      // 1. Arrange: anunciar "sigue funcionando" cada minuto seria el mismo
+      //    ruido que esto evita, en el otro sentido.
+      const { service } = buildHarness();
+      const logSpy = jest.spyOn(service['logger'], 'log');
+
+      // 2. Act: dos ciclos sanos seguidos, sin averia previa.
+      await service.pollInbox(FLOW_ID, buildParams());
+      await service.pollInbox(FLOW_ID, buildParams());
+
+      // 3. Assert
+      expect(logSpy).not.toHaveBeenCalledWith(
+        expect.stringContaining('se recupero'),
+      );
+
+      // 2b. Act: ahora si, una averia seguida de un ciclo sano.
+      ImapFlow.mockImplementationOnce(() => failingClient());
+      await service.pollInbox(FLOW_ID, buildParams());
+      await service.pollInbox(FLOW_ID, buildParams());
+
+      // 3b. Assert
+      expect(logSpy).toHaveBeenCalledWith(
+        expect.stringContaining('se recupero'),
+      );
+    });
+
+    it('4.6 no deberia propagar un fallo del registro de la alerta', async () => {
+      // 1. Arrange: esto corre dentro de un `setInterval`. Una excepcion que
+      //    escapara terminaria el proceso de Node entero.
+      const { service, hybridLogger } = buildHarness();
+      ImapFlow.mockImplementation(() => failingClient());
+      hybridLogger.logWorkerFailure.mockRejectedValue(
+        new Error('connection terminated'),
+      );
+
+      // 2. Act & 3. Assert
+      await expect(service.pollInbox(FLOW_ID, buildParams())).resolves.toBe(
+        false,
+      );
+    });
+
+    it('4.7 deberia reintentar la alerta si su registro fallo', async () => {
+      // 1. Arrange: sin retirar la marca, un fallo puntual al registrar
+      //    silenciaria la averia para siempre — la transicion ya habria
+      //    "ocurrido" sin dejar rastro en la bandeja.
+      const { service, hybridLogger } = buildHarness();
+      ImapFlow.mockImplementation(() => failingClient());
+      hybridLogger.logWorkerFailure.mockRejectedValueOnce(
+        new Error('connection terminated'),
+      );
+
+      // 2. Act: dos ciclos fallando; el registro del primero se cae.
+      await service.pollInbox(FLOW_ID, buildParams());
+      await service.pollInbox(FLOW_ID, buildParams());
+
+      // 3. Assert: se intento las dos veces, y la segunda si cuajo.
+      expect(hybridLogger.logWorkerFailure).toHaveBeenCalledTimes(2);
+    });
+  });
+
+  describe('7. Contrapresion ante la saturacion global del motor', () => {
+    /** Entorno del harness con un tamano de lote explicito. */
+    const envWithBatch = (batchSize?: string): Record<string, string> => ({
+      IMAP_POLLING_ENABLED: 'true',
+      [PASSWORD_ENV_KEY]: IMAP_PASSWORD,
+      ...(batchSize === undefined
+        ? {}
+        : { MAX_EXECUTIONS_PER_POLL_TICK: batchSize }),
+    });
+
+    it('7.1 deberia frenar el despacho y no marcar correos como leidos si el motor reporta saturacion global', async () => {
+      // 1. Arrange: el buzon trae tres correos que casan, pero el motor esta
+      //    lleno y rechaza ya el primer despacho.
+      const { service, workflows, client, hybridLogger, warnSpy } =
+        buildHarness({ matches: 3 });
+      workflows.runAutomaticWorkflow.mockRejectedValue(
+        new SystemCapacityExceededException(5, 5),
+      );
+
+      // 2. Act
+      const dispatched = await service.pollInbox(FLOW_ID, buildParams());
+
+      // 3. Assert
+      expect(dispatched).toBe(false);
+
+      // El lote se corta en el primer rechazo: insistir con los otros dos
+      // repetiria el mismo rechazo contra el mismo estado del motor.
+      expect(workflows.runAutomaticWorkflow).toHaveBeenCalledTimes(1);
+
+      // NINGUN correo queda marcado. Este servicio solo hace SEARCH —nunca
+      // FETCH ni `messageFlagsAdd`—, y quien marca `\Seen` es la estrategia,
+      // dentro de una ejecucion que con saturacion jamas llego a arrancar. El
+      // doble del cliente IMAP no expone siquiera ese metodo: si algun dia
+      // alguien lo necesitase aqui, esta asercion se caeria y obligaria a
+      // justificar por que el sondeo empieza a consumir el buzon.
+      expect(client['messageFlagsAdd']).toBeUndefined();
+      expect(client.search).toHaveBeenCalledTimes(1);
+
+      // Consola en cada ciclo...
+      expect(warnSpy).toHaveBeenCalledWith(
+        expect.stringContaining('Motor saturado'),
+      );
+      // ...y bandeja una sola vez, en la transicion.
+      expect(hybridLogger.logWorkerFailure).toHaveBeenCalledTimes(1);
+    });
+
+    it('7.2 no deberia repetir la alerta mientras la saturacion se mantenga', async () => {
+      // 1. Arrange: sin la marca en memoria, un buzon sondeado cada minuto
+      //    contra un motor lleno dejaria una fila GRAVE por minuto.
+      const { service, workflows, hybridLogger } = buildHarness({ matches: 1 });
+      workflows.runAutomaticWorkflow.mockRejectedValue(
+        new SystemCapacityExceededException(5, 5),
+      );
+
+      // 2. Act: tres ciclos consecutivos saturados
+      await service.pollInbox(FLOW_ID, buildParams());
+      await service.pollInbox(FLOW_ID, buildParams());
+      await service.pollInbox(FLOW_ID, buildParams());
+
+      // 3. Assert
+      expect(hybridLogger.logWorkerFailure).toHaveBeenCalledTimes(1);
+    });
+
+    it('7.3 deberia volver a alertar si el motor se libera y vuelve a saturarse', async () => {
+      // 1. Arrange
+      const { service, workflows, hybridLogger } = buildHarness({ matches: 1 });
+      workflows.runAutomaticWorkflow
+        .mockRejectedValueOnce(new SystemCapacityExceededException(5, 5))
+        .mockResolvedValueOnce(EXECUTION_ID)
+        .mockRejectedValueOnce(new SystemCapacityExceededException(5, 5));
+
+      // 2. Act: saturado, recuperado, saturado otra vez
+      await service.pollInbox(FLOW_ID, buildParams());
+      await service.pollInbox(FLOW_ID, buildParams());
+      await service.pollInbox(FLOW_ID, buildParams());
+
+      // 3. Assert: la recuperacion rearma la alerta. Sin ella, una saturacion
+      // posterior —ya con otra causa— quedaria muda para siempre.
+      expect(hybridLogger.logWorkerFailure).toHaveBeenCalledTimes(2);
+    });
+
+    it('7.4 no deberia escalar la saturacion como averia de conexion IMAP', async () => {
+      // 1. Arrange: el 429 llega por la misma via que un fallo de socket, pero
+      //    no es una averia del buzon. Registrarlo a nivel `error` acusaria al
+      //    servidor IMAP de algo que no ha pasado.
+      const { service, workflows, errorSpy } = buildHarness({ matches: 1 });
+      workflows.runAutomaticWorkflow.mockRejectedValue(
+        new SystemCapacityExceededException(5, 5),
+      );
+
+      // 2. Act
+      await service.pollInbox(FLOW_ID, buildParams());
+
+      // 3. Assert
+      expect(errorSpy).not.toHaveBeenCalled();
+    });
+
+    it('7.5 deberia drenar hasta MAX_EXECUTIONS_PER_POLL_TICK correos en un solo ciclo', async () => {
+      // 1. Arrange: cinco correos esperando, lote de tres
+      const { service, workflows } = buildHarness({
+        matches: 5,
+        env: envWithBatch('3'),
+      });
+
+      // 2. Act
+      const dispatched = await service.pollInbox(FLOW_ID, buildParams());
+
+      // 3. Assert: el techo manda sobre lo que hay en el buzon. Los dos
+      // restantes esperan al siguiente ciclo.
+      expect(dispatched).toBe(true);
+      expect(workflows.runAutomaticWorkflow).toHaveBeenCalledTimes(3);
+    });
+
+    it('7.6 no deberia despachar mas veces que correos haya', async () => {
+      // 1. Arrange: un solo correo, lote de tres
+      const { service, workflows, client } = buildHarness({
+        matches: 1,
+        env: envWithBatch('3'),
+      });
+
+      // 2. Act
+      await service.pollInbox(FLOW_ID, buildParams());
+
+      // 3. Assert: lo que hay en el buzon manda sobre el techo. Y el recuento
+      // sale de UN solo SEARCH: preguntar antes de cada despacho abriria una
+      // conexion TLS por correo, justo lo contrario de lo que busca la barrera.
+      expect(workflows.runAutomaticWorkflow).toHaveBeenCalledTimes(1);
+      expect(client.search).toHaveBeenCalledTimes(1);
+    });
+
+    it('7.7 deberia cortar el lote ante el 409 de concurrencia por flujo', async () => {
+      // 1. Arrange: el primer despacho arranca, el segundo choca con RNF-09
+      //    porque el flujo ya tiene su ejecucion viva.
+      const { service, workflows } = buildHarness({
+        matches: 3,
+        env: envWithBatch('3'),
+      });
+      workflows.runAutomaticWorkflow
+        .mockResolvedValueOnce(EXECUTION_ID)
+        .mockRejectedValue(new ConflictException('RNF-09'));
+
+      // 2. Act
+      const dispatched = await service.pollInbox(FLOW_ID, buildParams());
+
+      // 3. Assert: se despacho uno, el rechazo corta el resto del lote, y el
+      // ciclo cuenta como productivo porque algo si se proceso.
+      expect(dispatched).toBe(true);
+      expect(workflows.runAutomaticWorkflow).toHaveBeenCalledTimes(2);
+    });
+  });
+});

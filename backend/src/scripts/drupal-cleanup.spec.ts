@@ -1,0 +1,488 @@
+import {
+  INJECTED_MARKER_SELECTOR,
+  buildPurgeSelectors,
+  describeDuplicateCommittees,
+  describeKeepFirstTargets,
+  describePurgeTargets,
+  parseFlags,
+  purgeDuplicateCommittees,
+  purgeKeepingFirst,
+} from './drupal-cleanup';
+
+import { purgeMarkedBlocks } from './cleanup-drupal-sandbox';
+
+import type { PurgeGuard } from './cleanup-drupal-sandbox';
+
+/**
+ * El guard que esta herramienta usa en produccion: ninguno.
+ *
+ * `drupal-cleanup` es la via MANUAL —exige `--uuid`, simula por defecto y
+ * enumera lo que va a quitar—, de modo que manda el selector del operador y no
+ * la heuristica de `preserveLoneInjectedCommittee`, que es la red del script de
+ * sandbox automatico. Estas pruebas reproducen esa decision; si se omitiera,
+ * estarian verificando un camino que el script no recorre.
+ */
+const NEUTRAL_GUARD: PurgeGuard = () => false;
+
+/** Panel de universidad: estructura del portal, SIN marcador de inyeccion. */
+const UNIVERSITY_PANEL = (siglas: string): string =>
+  `<div class="panel panel-default">` +
+  `<div class="panel-heading"><h4>Universidad ${siglas}</h4></div>` +
+  `<div class="collapse" id="collapse${siglas}"><div id="accordion${siglas}"></div></div>` +
+  '</div>';
+
+/** Comite inyectado por un flujo: lleva el marcador de la plantilla. */
+const COMMITTEE_PANEL = (code: string): string =>
+  `<div class="panel panel-default" data-protodo-injected="true">` +
+  `<div class="panel-heading"><h5><strong class="panel-comite-codigo">${code}</strong></h5></div>` +
+  '</div>';
+
+/**
+ * Pagina agregadora REAL: un acordeon de DOS niveles.
+ *
+ * La anidacion no es decorativa. Los paneles de universidad y los de comite
+ * comparten la clase `.panel`, y es justo esa ambiguedad la que hizo
+ * desaparecer `ESIC Universidad` de la pagina. Un fixture plano no podria
+ * detectar una regresion de ese tipo, porque no habria panel padre al que
+ * alcanzar por error.
+ */
+const TWO_LEVEL_PAGE = (
+  committeesBySchool: Record<string, readonly string[]>,
+): string =>
+  '<div class="panel-group" id="accordion">' +
+  Object.entries(committeesBySchool)
+    .map(
+      ([siglas, codes]) =>
+        `<div class="panel panel-default"><div class="panel-heading"><h4>Universidad ${siglas}</h4></div>` +
+        `<div class="panel-group" id="accordion${siglas}">` +
+        codes.map(COMMITTEE_PANEL).join('') +
+        '</div></div>',
+    )
+    .join('') +
+  '</div>';
+
+describe('drupal-cleanup · purga quirurgica', () => {
+  describe('1. Banderas', () => {
+    it('1.1 deberia SIMULAR por defecto', () => {
+      // 1. Arrange 📐: la decision de seguridad de la herramienta. Un olvido de
+      //    bandera no puede borrar contenido de un portal publicado.
+      // 2. Act ⚙️ + 3. Assert 🎯
+      expect(parseFlags(['--uuid=abc', '--injected-only']).write).toBe(false);
+    });
+
+    it('1.2 solo --write deberia habilitar el PATCH', () => {
+      // 1. Arrange 📐 + 2. Act ⚙️ + 3. Assert 🎯
+      expect(parseFlags(['--uuid=abc', '--write']).write).toBe(true);
+    });
+
+    it('1.3 --dry-run deberia CANCELAR un --write', () => {
+      // 1. Arrange 📐: ante dos banderas contradictorias gana la que no borra.
+      //    Al reves —que --write ganase— convertiria una duda del operador en
+      //    una escritura.
+      // 2. Act ⚙️ + 3. Assert 🎯
+      expect(parseFlags(['--write', '--dry-run']).write).toBe(false);
+    });
+
+    it('1.4 deberia leer los valores con signo igual', () => {
+      // 1. Arrange 📐 + 2. Act ⚙️
+      const flags = parseFlags([
+        '--uuid=b17d69d8-6998-4883-b8dc-153b55dbd9c5',
+        '--selector=.panel-default:has(.panel-heading:contains("UAM 9"))',
+        '--root=#accordionPrincipal',
+      ]);
+
+      // 3. Assert 🎯
+      expect(flags.uuid).toBe('b17d69d8-6998-4883-b8dc-153b55dbd9c5');
+      expect(flags.selector).toContain('UAM 9');
+      expect(flags.rootSelector).toBe('#accordionPrincipal');
+    });
+
+    it('1.5 deberia caer al acordeon raiz por defecto', () => {
+      // 1. Arrange 📐 + 2. Act ⚙️ + 3. Assert 🎯
+      expect(parseFlags([]).rootSelector).toBe('#accordion');
+    });
+  });
+
+  describe('2. Composicion de selectores', () => {
+    it('2.1 deberia exigir el MARCADOR en los paneles de primer nivel', () => {
+      // 1. Arrange 📐: el matiz mas importante de la herramienta. El selector
+      //    obvio —`#accordion > .panel.panel-default`— se llevaria por delante
+      //    los catorce paneles de universidad, que son hijos directos del
+      //    acordeon raiz. Lo unico que distingue a un comite es el marcador.
+      // 2. Act ⚙️
+      const [selector] = buildPurgeSelectors(
+        parseFlags(['--remove-root-panels']),
+      );
+
+      // 3. Assert 🎯
+      expect(selector).toBe(
+        `#accordion > .panel.panel-default${INJECTED_MARKER_SELECTOR}`,
+      );
+    });
+
+    it('2.2 deberia acumular las banderas pedidas', () => {
+      // 1. Arrange 📐 + 2. Act ⚙️
+      const selectors = buildPurgeSelectors(
+        parseFlags([
+          '--injected-only',
+          '--remove-root-panels',
+          '--selector=#collapseUAM9',
+        ]),
+      );
+
+      // 3. Assert 🎯
+      expect(selectors).toHaveLength(3);
+      expect(selectors[0]).toBe(INJECTED_MARKER_SELECTOR);
+      expect(selectors[2]).toBe('#collapseUAM9');
+    });
+
+    it('2.3 sin banderas no deberia componer NINGUN selector', () => {
+      // 1. Arrange 📐: es lo que hace que el script se niegue a correr en vacio
+      //    en vez de purgar algo por defecto.
+      // 2. Act ⚙️ + 3. Assert 🎯
+      expect(buildPurgeSelectors(parseFlags(['--uuid=abc']))).toHaveLength(0);
+    });
+  });
+
+  describe('3. Seguridad de --remove-root-panels', () => {
+    /** La pagina real: universidades de primer nivel y un comite mal colocado. */
+    const PAGE =
+      '<div id="accordion">' +
+      UNIVERSITY_PANEL('UAM') +
+      UNIVERSITY_PANEL('UCM') +
+      COMMITTEE_PANEL('UAM 9') +
+      '</div>';
+
+    it('3.1 NO deberia tocar los paneles de universidad', () => {
+      // 1. Arrange 📐: EL caso que justifica toda la prueba. Si este test cae,
+      //    la herramienta borra la pagina agregadora entera.
+      const selectors = buildPurgeSelectors(
+        parseFlags(['--remove-root-panels']),
+      );
+
+      // 2. Act ⚙️
+      const purged = purgeMarkedBlocks(PAGE, selectors, NEUTRAL_GUARD);
+
+      // 3. Assert 🎯
+      expect(purged.purgedCount).toBe(1);
+      expect(purged.html).toContain('Universidad UAM');
+      expect(purged.html).toContain('Universidad UCM');
+      expect(purged.html).not.toContain('UAM 9');
+    });
+
+    it('3.2 tampoco deberia tocar una universidad SIN comites todavia', () => {
+      // 1. Arrange 📐: la razon de no usar `:not(:has(.panel))`, que parecia la
+      //    via elegante. Una universidad a la que no se le ha inyectado nada no
+      //    anida ningun panel y caeria con los demas.
+      const vacia = `<div id="accordion">${UNIVERSITY_PANEL('ESIC')}</div>`;
+
+      // 2. Act ⚙️
+      const purged = purgeMarkedBlocks(
+        vacia,
+        buildPurgeSelectors(parseFlags(['--remove-root-panels'])),
+        NEUTRAL_GUARD,
+      );
+
+      // 3. Assert 🎯
+      expect(purged.purgedCount).toBe(0);
+      expect(purged.html).toBe(vacia);
+    });
+
+    it('3.3 NO deberia tocar un comite BIEN colocado dentro de su universidad', () => {
+      // 1. Arrange 📐: la bandera retira los que cuelgan de la raiz, no los que
+      //    estan en su sitio. Son hijos del sub-acordeon, no del raiz.
+      const bien =
+        '<div id="accordion"><div class="panel panel-default">' +
+        `<div class="collapse" id="collapseUAM"><div id="accordionUAM">${COMMITTEE_PANEL('UAM 9')}</div></div>` +
+        '</div></div>';
+
+      // 2. Act ⚙️
+      const purged = purgeMarkedBlocks(
+        bien,
+        buildPurgeSelectors(parseFlags(['--remove-root-panels'])),
+        NEUTRAL_GUARD,
+      );
+
+      // 3. Assert 🎯
+      expect(purged.purgedCount).toBe(0);
+      expect(purged.html).toContain('UAM 9');
+    });
+
+    it('3.4 --injected-only SI alcanza a los que estan bien colocados', () => {
+      // 1. Arrange 📐: es la diferencia entre las dos banderas, y conviene que
+      //    este fijada. `--injected-only` purga TODO lo que un flujo publico,
+      //    este donde este; es la purga global, no la quirurgica.
+      const bien =
+        '<div id="accordion"><div id="accordionUAM">' +
+        COMMITTEE_PANEL('UAM 9') +
+        '</div></div>';
+
+      // 2. Act ⚙️
+      const purged = purgeMarkedBlocks(
+        bien,
+        buildPurgeSelectors(parseFlags(['--injected-only'])),
+        NEUTRAL_GUARD,
+      );
+
+      // 3. Assert 🎯
+      expect(purged.purgedCount).toBe(1);
+    });
+  });
+
+  describe('4. Inventario del simulacro', () => {
+    it('4.1 deberia nombrar cada elemento por su codigo de comite', () => {
+      // 1. Arrange 📐: «3 elementos» no permite decidir si seguir adelante, y
+      //    decidir es justo lo que el simulacro existe para que ocurra.
+      const page = `<div id="accordion">${COMMITTEE_PANEL('UAM 9')}${COMMITTEE_PANEL('UCM 3')}</div>`;
+
+      // 2. Act ⚙️
+      const [target] = describePurgeTargets(page, [INJECTED_MARKER_SELECTOR]);
+
+      // 3. Assert 🎯
+      expect(target?.matches).toEqual(['UAM 9', 'UCM 3']);
+    });
+
+    it('4.2 deberia devolver una entrada por selector, aunque no case nada', () => {
+      // 1. Arrange 📐: un selector sin coincidencias es informacion —dice que
+      //    esa bandera no hizo nada— y callarlo lo haria pasar por aplicado.
+      // 2. Act ⚙️
+      const targets = describePurgeTargets('<div id="accordion"></div>', [
+        INJECTED_MARKER_SELECTOR,
+        '#collapseUAM9',
+      ]);
+
+      // 3. Assert 🎯
+      expect(targets).toHaveLength(2);
+      expect(targets.every((t) => t.matches.length === 0)).toBe(true);
+    });
+  });
+
+  describe('5. Deduplicacion de comites', () => {
+    it('5.1 parseFlags deberia reconocer --dedup-committees', () => {
+      // 1. Arrange 📐 + 2. Act ⚙️ + 3. Assert 🎯
+      expect(
+        parseFlags(['--uuid=abc', '--dedup-committees']).dedupCommittees,
+      ).toBe(true);
+      expect(parseFlags(['--uuid=abc']).dedupCommittees).toBe(false);
+    });
+
+    it('5.2 deberia conservar UNA copia por codigo y quitar el resto', () => {
+      // 1. Arrange 📐: tres ejemplares de "UAM 9" publicados por un flujo que
+      //    se ejecuto de mas.
+      const html = TWO_LEVEL_PAGE({ UAM: ['UAM 9', 'UAM 9', 'UAM 9'] });
+
+      // 2. Act ⚙️
+      const result = purgeDuplicateCommittees(html);
+
+      // 3. Assert 🎯
+      expect(result.purgedCount).toBe(2);
+      expect(result.html.match(/UAM 9/g)).toHaveLength(1);
+    });
+
+    it('5.3 NO deberia tocar los codigos que ya son unicos', () => {
+      // 1. Arrange 📐: la pagina sana. Si la herramienta tocara algo aqui,
+      //    estaria borrando contenido editorial legitimo.
+      const html = TWO_LEVEL_PAGE({ UAM: ['UAM 9', 'UAM 3'] });
+
+      // 2. Act ⚙️
+      const result = purgeDuplicateCommittees(html);
+
+      // 3. Assert 🎯: y se devuelve el ORIGINAL sin serializar, de modo que una
+      //    pagina limpia no recibe la normalizacion de cheerio por el mero
+      //    hecho de haberla revisado.
+      expect(result.purgedCount).toBe(0);
+      expect(result.html).toBe(html);
+    });
+
+    it('5.4 NO deberia alcanzar el panel de la universidad contenedor', () => {
+      // 1. Arrange 📐: LA PRUEBA QUE IMPORTA. Un `.panel:has(.panel-comite-codigo)`
+      //    sin anclar casa tambien con la universidad que contiene el comite, y
+      //    el `.remove()` se la lleva entera con todos sus hijos. Le paso a
+      //    `ESIC Universidad`.
+      const html = TWO_LEVEL_PAGE({ UAM: ['UAM 9', 'UAM 9'] });
+
+      // 2. Act ⚙️
+      const result = purgeDuplicateCommittees(html);
+
+      // 3. Assert 🎯
+      expect(result.html).toContain('Universidad UAM');
+      expect(result.html).toContain('id="accordionUAM"');
+    });
+
+    it('5.5 deberia deduplicar por separado dentro de cada universidad', () => {
+      // 1. Arrange 📐: dos universidades distintas que hospedan un comite con
+      //    el MISMO codigo no son duplicados entre si... pero el codigo es la
+      //    unica identidad que el panel expone, de modo que se documenta el
+      //    comportamiento real: la agrupacion es GLOBAL a la pagina.
+      const html = TWO_LEVEL_PAGE({ UAM: ['UAM 9'], UCM: ['UAM 9'] });
+
+      // 2. Act ⚙️
+      const result = purgeDuplicateCommittees(html);
+
+      // 3. Assert 🎯: se conserva el primero, que es el de UAM.
+      expect(result.purgedCount).toBe(1);
+      expect(result.html).toContain('Universidad UCM');
+      expect(result.html.match(/UAM 9/g)).toHaveLength(1);
+    });
+
+    it('5.6 deberia IGNORAR los paneles sin codigo legible', () => {
+      // 1. Arrange 📐: sin codigo no hay forma de saber de que comite son
+      //    copia, y agruparlos bajo la cadena vacia borraria paneles sin
+      //    ninguna relacion entre si.
+      const html =
+        '<div class="panel-group" id="accordion">' +
+        '<div class="panel panel-default"><div class="panel-group">' +
+        COMMITTEE_PANEL('') +
+        COMMITTEE_PANEL('') +
+        '</div></div></div>';
+
+      // 2. Act ⚙️
+      const result = purgeDuplicateCommittees(html);
+
+      // 3. Assert 🎯
+      expect(result.purgedCount).toBe(0);
+    });
+
+    it('5.7 el inventario deberia nombrar los duplicados por su codigo', () => {
+      // 1. Arrange 📐: «2 elementos» no permite decidir si seguir adelante, y
+      //    decidir es para lo que el simulacro existe.
+      const html = TWO_LEVEL_PAGE({ UAM: ['UAM 9', 'UAM 9', 'UAM 3'] });
+
+      // 2. Act ⚙️
+      const summary = describeDuplicateCommittees(html);
+
+      // 3. Assert 🎯
+      expect(summary.matches).toEqual(['UAM 9']);
+    });
+  });
+
+  describe('6. Preservacion ordinal (--keep-count)', () => {
+    /** Cuatro paneles identicos, como los deja un flujo ejecutado de mas. */
+    const FOUR = TWO_LEVEL_PAGE({
+      UAM: ['UAM 9', 'UAM 9', 'UAM 9', 'UAM 9'],
+    });
+
+    const PANEL_SELECTOR = '.panel-group .panel-group > .panel';
+
+    it('6.1 parseFlags deberia leer --keep-count=<n>', () => {
+      // 1. Arrange 📐 + 2. Act ⚙️ + 3. Assert 🎯
+      expect(parseFlags(['--uuid=abc', '--keep-count=2']).keepCount).toBe(2);
+      expect(parseFlags(['--uuid=abc']).keepCount).toBe(0);
+    });
+
+    it('6.2 parseFlags deberia RECHAZAR un valor no entero', () => {
+      // 1. Arrange 📐: LA GUARDA QUE IMPORTA. Un `--keep-count=dos` degradado
+      //    en silencio a 0 purgaria TODAS las coincidencias del selector, que
+      //    es exactamente lo contrario de lo que se acaba de pedir.
+      // 2. Act ⚙️ + 3. Assert 🎯
+      expect(() => parseFlags(['--uuid=abc', '--keep-count=dos'])).toThrow(
+        '--keep-count debe ser un entero no negativo',
+      );
+      expect(() => parseFlags(['--uuid=abc', '--keep-count=-1'])).toThrow(
+        '--keep-count debe ser un entero no negativo',
+      );
+      expect(() => parseFlags(['--uuid=abc', '--keep-count=2abc'])).toThrow(
+        '--keep-count debe ser un entero no negativo',
+      );
+    });
+
+    it('6.3 deberia conservar 1 de 4 y purgar 3', () => {
+      // 1. Arrange 📐 + 2. Act ⚙️
+      const result = purgeKeepingFirst(FOUR, PANEL_SELECTOR, 1);
+
+      // 3. Assert 🎯
+      expect(result.purgedCount).toBe(3);
+      expect(result.preservedCount).toBe(1);
+      expect(result.html.match(/UAM 9/g)).toHaveLength(1);
+    });
+
+    it('6.4 deberia conservar los n primeros con n>1', () => {
+      // 1. Arrange 📐 + 2. Act ⚙️
+      const result = purgeKeepingFirst(FOUR, PANEL_SELECTOR, 2);
+
+      // 3. Assert 🎯
+      expect(result.purgedCount).toBe(2);
+      expect(result.preservedCount).toBe(2);
+      expect(result.html.match(/UAM 9/g)).toHaveLength(2);
+    });
+
+    it('6.5 con 1 sola coincidencia el recuento de purga deberia ser 0', () => {
+      // 1. Arrange 📐: el NOOP. No hay sobrantes, de modo que no hay nada que
+      //    escribir y la pagina queda intacta.
+      const one = TWO_LEVEL_PAGE({ UAM: ['UAM 9'] });
+
+      // 2. Act ⚙️
+      const result = purgeKeepingFirst(one, PANEL_SELECTOR, 1);
+
+      // 3. Assert 🎯: y se devuelve el ORIGINAL sin serializar, para que una
+      //    pagina ya limpia no reciba la normalizacion de cheerio.
+      expect(result.purgedCount).toBe(0);
+      expect(result.preservedCount).toBe(1);
+      expect(result.html).toBe(one);
+    });
+
+    it('6.6 con keepCount=0 deberia purgar todas las coincidencias', () => {
+      // 1. Arrange 📐: es el comportamiento historico, el de no pasar la
+      //    bandera. Se fija para que anadirla no lo haya cambiado.
+      // 2. Act ⚙️
+      const result = purgeKeepingFirst(FOUR, PANEL_SELECTOR, 0);
+
+      // 3. Assert 🎯
+      expect(result.purgedCount).toBe(4);
+      expect(result.preservedCount).toBe(0);
+      expect(result.html).not.toContain('UAM 9');
+    });
+
+    it('6.7 NO deberia alcanzar el panel de la universidad contenedor', () => {
+      // 1. Arrange 📐: el selector lo escribe el operador, pero la prueba fija
+      //    que el acotamiento al segundo nivel hace su trabajo tambien por
+      //    esta via. Ver COMMANDS.md §6.4.
+      // 2. Act ⚙️
+      const result = purgeKeepingFirst(FOUR, PANEL_SELECTOR, 1);
+
+      // 3. Assert 🎯
+      expect(result.html).toContain('Universidad UAM');
+      expect(result.html).toContain('id="accordionUAM"');
+    });
+
+    it('6.8 el inventario deberia separar preservados de purgados', () => {
+      // 1. Arrange 📐: ver CUALES sobreviven es lo que permite comprobar que el
+      //    orden del documento es el que el operador cree.
+      // 2. Act ⚙️
+      const summary = describeKeepFirstTargets(FOUR, PANEL_SELECTOR, 1);
+
+      // 3. Assert 🎯
+      expect(summary.preserved).toEqual(['UAM 9']);
+      expect(summary.purged).toEqual(['UAM 9', 'UAM 9', 'UAM 9']);
+    });
+
+    it('6.9 buildPurgeSelectors deberia EXCLUIR el selector con keep-count', () => {
+      // 1. Arrange 📐: si el selector entrara en la lista que va a
+      //    `purgeMarkedBlocks`, este retiraria TODAS sus coincidencias antes de
+      //    que `purgeKeepingFirst` pudiera preservar ninguna.
+      const flags = parseFlags([
+        '--uuid=abc',
+        '--selector=.panel',
+        '--keep-count=1',
+      ]);
+
+      // 2. Act ⚙️
+      const selectors = buildPurgeSelectors(flags);
+
+      // 3. Assert 🎯
+      expect(selectors).toEqual([]);
+    });
+
+    it('6.10 buildPurgeSelectors deberia incluirlo SIN keep-count', () => {
+      // 1. Arrange 📐: la contrapartida de 6.9, que protege el camino de
+      //    siempre.
+      const flags = parseFlags(['--uuid=abc', '--selector=.panel']);
+
+      // 2. Act ⚙️
+      const selectors = buildPurgeSelectors(flags);
+
+      // 3. Assert 🎯
+      expect(selectors).toEqual(['.panel']);
+    });
+  });
+});

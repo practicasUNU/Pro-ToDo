@@ -1,0 +1,96 @@
+import { ApiPropertyOptional } from '@nestjs/swagger';
+import {
+  IsIn,
+  IsNotEmptyObject,
+  IsObject,
+  IsOptional,
+  IsString,
+  MaxLength,
+  ValidateIf,
+} from 'class-validator';
+
+import { TrimmedString } from '@common/decorators/trimmed-string.decorator';
+import {
+  EDITABLE_WORKFLOW_STATUSES,
+  WorkflowStatus,
+} from '@modules/workflows/enums/workflow-status.enum';
+
+/** Longitud de `flujos.nombre` en el esquema SQL. */
+const MAX_NAME_LENGTH = 100;
+
+/** Longitud de `flujos.descripcion` en el esquema SQL. */
+const MAX_DESCRIPTION_LENGTH = 255;
+
+/**
+ * Cuerpo de `PATCH /api/workflows/:id`: edicion de un flujo ya instanciado.
+ *
+ * NO es un `PartialType(CreateWorkflowDto)`, y la diferencia importa: ese DTO
+ * incluye `templateId`, y el maestro del que nacio un flujo es un hecho
+ * historico. Dejar reescribirlo permitiria falsear la procedencia de un flujo
+ * despues de crearlo, que es justo lo que la columna existe para registrar.
+ *
+ * `pipelineSchema` se declara como objeto sin validar su estructura aqui, por el
+ * mismo motivo que en `CreateWorkflowDto`: lo hace `PipelineValidatorService` en
+ * sus dos capas y con un unico formato de error.
+ *
+ * Todos los campos son opcionales para que un cambio de estado sea
+ * `{ "active": true }` a secas, sin obligar a reenviar el grafo completo.
+ *
+ * Los dos campos de texto usan `@ValidateIf` en lugar de `@IsOptional()`, y no
+ * es cosmetico: `@IsOptional()` omite TODA la validacion cuando el valor es
+ * `undefined` O `null`, y `whitelist: true` no descarta una clave declarada con
+ * `null`. Un `PATCH { "description": null }` colaba entero hasta el servicio,
+ * que ejecutaba `null.trim()` y devolvia un 500 donde correspondia un 400.
+ * `@ValidateIf` solo salta el campo cuando esta AUSENTE, de modo que un `null`
+ * explicito llega a `@IsString()` y se rechaza con su mensaje.
+ */
+export class UpdateWorkflowDto {
+  @ApiPropertyOptional({
+    description: 'Nombre institucional del flujo',
+    maxLength: MAX_NAME_LENGTH,
+  })
+  @ValidateIf((_, value: unknown) => value !== undefined)
+  @TrimmedString()
+  @IsString({ message: 'name debe ser una cadena.' })
+  @MaxLength(MAX_NAME_LENGTH, {
+    message: `name no puede superar ${MAX_NAME_LENGTH} caracteres.`,
+  })
+  readonly name?: string;
+
+  @ApiPropertyOptional({
+    description: 'Descripcion legible del proposito del flujo',
+    maxLength: MAX_DESCRIPTION_LENGTH,
+  })
+  @ValidateIf((_, value: unknown) => value !== undefined)
+  @TrimmedString()
+  @IsString({ message: 'description debe ser una cadena.' })
+  @MaxLength(MAX_DESCRIPTION_LENGTH, {
+    message: `description no puede superar ${MAX_DESCRIPTION_LENGTH} caracteres.`,
+  })
+  readonly description?: string;
+
+  @ApiPropertyOptional({
+    enum: EDITABLE_WORKFLOW_STATUSES,
+    description:
+      'Habilitacion frente a los disparadores automaticos (Cron, IMAP). Activar exige un pipeline_schema valido. PAUSADO no se admite: lo escribe el motor al detener una ejecucion',
+  })
+  @IsOptional()
+  @IsIn(EDITABLE_WORKFLOW_STATUSES, {
+    message: `status solo admite ${EDITABLE_WORKFLOW_STATUSES.join(' o ')}: PAUSADO lo escribe el motor al detener una ejecucion reanudable.`,
+  })
+  readonly status?: WorkflowStatus;
+
+  @ApiPropertyOptional({
+    description:
+      'Grafo declarativo nuevo. Se revalida por completo antes de escribirse',
+    type: 'object',
+    additionalProperties: true,
+  })
+  @IsOptional()
+  @IsObject({ message: 'pipelineSchema debe ser un objeto.' })
+  @IsNotEmptyObject(
+    { nullable: false },
+    { message: 'pipelineSchema no puede estar vacio.' },
+  )
+  readonly pipelineSchema?: Record<string, unknown>;
+}

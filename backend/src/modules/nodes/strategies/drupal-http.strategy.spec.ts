@@ -1,0 +1,2933 @@
+import * as cheerio from 'cheerio';
+
+import { NodeType } from '@core/fsm/types/pipeline-schema.types';
+import { createMockStatePayloadContext } from '@test/factories/state-payload-context.factory';
+
+import {
+  DrupalHttpConfigDto,
+  DrupalOperationMode,
+} from '../dto/drupal-http-config.dto';
+
+import {
+  DrupalHttpStrategy,
+  ERR_DRUPAL_AUTH,
+  ERR_DRUPAL_CONFIG,
+  ERR_DRUPAL_DOM_TARGET,
+  ERR_DRUPAL_TARGET_NOT_FOUND,
+  ERR_DRUPAL_MISSING_PAYLOAD,
+  ERR_DRUPAL_NETWORK,
+  ERR_DRUPAL_REQUEST,
+  ERR_DRUPAL_SERVER,
+  TRANSFER_PARTIAL_OPERATION,
+} from './drupal-http.strategy';
+
+import type { DrupalApiConfig } from '@core/config/drupal-api.config';
+import type { StatePayloadContext } from '@core/fsm/context/state-payload.context';
+import type { NodeErrorDetail } from '@core/fsm/types/node-strategy.types';
+import type { HttpClientService } from '@core/http/http-client.service';
+import type { AxiosRequestConfig } from 'axios';
+
+/**
+ * Suite del CONTRATO con Drupal, no de la API de Drupal.
+ *
+ * Lo que aqui se fija es la forma exacta de lo que sale por el cable —ruta,
+ * verbo, cabeceras y cuerpo JSON:API— y el reparto de codigos de fallo. Es un
+ * contrato con un servicio externo que una prueba unitaria no puede ejercitar,
+ * y el unico punto donde un cambio silencioso —un `data.id` perdido en un
+ * PATCH, un nivel degradado a LEVE— se detecta antes de produccion.
+ *
+ * El cliente HTTP va MOCKEADO, al contrario que el renderer en la suite del
+ * escudo: aqui el colaborador no es puro, es la red.
+ */
+
+const BASE_URL = 'https://drupal.example/jsonapi';
+const TOKEN = 'token-de-prueba';
+const API_USER = 'editor_api';
+
+/**
+ * Cabecera que emite `DrupalApiConfig.authHeader` en modo BASIC con las dos
+ * constantes de arriba. Se fija como literal y no se recalcula con `Buffer`
+ * para que la prueba falle si alguien cambia el formato de la cabecera: un
+ * valor derivado del mismo codigo que se esta probando no prueba nada.
+ */
+const BASIC_AUTH_HEADER = 'Basic ZWRpdG9yX2FwaTp0b2tlbi1kZS1wcnVlYmE=';
+
+const SOURCE_NAMESPACE = 'validated_drupal_json';
+const SOURCE_FIELD = 'validated_markup';
+
+const MARKUP = '<h1 class="titular">Innovacion en Madrid</h1>';
+
+const PAGE_UUID = '7f1700bf-b54b-4c12-b71a-8a71f1f0ee38';
+const CLOSED_UUID = 'b17d69d8-6998-4883-b8dc-153b55dbd9c5';
+
+const EXPEDIENTE = '[data-expediente="S_2026_015"]';
+const BLOCK =
+  '<div data-expediente="S_2026_015"><p>Licitacion abierta</p></div>';
+const OTHER_BLOCK = '<div data-expediente="S_2026_001"><p>Otra</p></div>';
+
+/** Doble del cliente HTTP, acotado al unico metodo que la estrategia invoca. */
+type HttpMock = jest.Mocked<Pick<HttpClientService, 'requestWithStatus'>>;
+
+const buildHttpMock = (): HttpMock => ({ requestWithStatus: jest.fn() });
+
+/** Config del entorno con credenciales utiles, salvo que se diga lo contrario. */
+const buildApiConfig = (
+  token: string = TOKEN,
+  productionNodeUuids: ReadonlySet<string> = new Set(),
+): DrupalApiConfig =>
+  ({
+    baseUrl: BASE_URL,
+    siteRootUrl: BASE_URL.replace(/\/jsonapi$/, ''),
+    token,
+    user: API_USER,
+    authType: 'BASIC',
+    // La estrategia nunca compone la cabecera: la pide ya hecha. El doble la
+    // sirve como literal, igual que el getter real.
+    authHeader: token.length > 0 ? BASIC_AUTH_HEADER : `Bearer ${token}`,
+    timeoutMs: 15_000,
+    isUsable: token.length > 0,
+    productionNodeUuids,
+  }) as DrupalApiConfig;
+
+const buildStrategy = (
+  httpClient: HttpMock,
+  apiConfig: DrupalApiConfig = buildApiConfig(),
+): DrupalHttpStrategy =>
+  new DrupalHttpStrategy(httpClient as unknown as HttpClientService, apiConfig);
+
+const buildContext = (
+  namespaces: Record<string, Record<string, unknown>> = {
+    [SOURCE_NAMESPACE]: { [SOURCE_FIELD]: MARKUP },
+  },
+): StatePayloadContext =>
+  createMockStatePayloadContext({ currentStep: 'destino_drupal', namespaces });
+
+/** Respuesta de una entidad JSON:API con los atributos indicados. */
+const entityResponse = (
+  attributes: Record<string, unknown> = {},
+  id = PAGE_UUID,
+  relationships: Record<string, unknown> = {},
+): { data: unknown; status: number } => ({
+  data: { data: { id, attributes, relationships } },
+  status: 200,
+});
+
+/** Respuesta de una pagina agregadora con el HTML dado en `body.value`. */
+const pageResponse = (
+  html: string,
+  id = PAGE_UUID,
+  nid = 55_937,
+  // Por defecto el bundle declara el campo de fichero canonico: asi las
+  // pruebas que no van de adjuntos no tienen que saber que esto existe.
+  relationships: Record<string, unknown> = { field_adjuntos: { data: null } },
+): { data: unknown; status: number } =>
+  entityResponse(
+    {
+      drupal_internal__nid: nid,
+      path: { alias: '/prueba-licitaciones' },
+      body: { value: html, format: 'full_html' },
+      changed: '2026-10-05T10:00:00+00:00',
+    },
+    id,
+    relationships,
+  );
+
+/** Fallo del cliente HTTP con el estado indicado. */
+const httpFailure = (
+  status?: number,
+): { failure: NodeErrorDetail; status?: number } => ({
+  failure: {
+    level: 'GRAVE',
+    code: 'ERR_HTTP_CLIENT_REJECTED',
+    message: `el remoto respondio ${status ?? 'nada'}`,
+  },
+  ...(status === undefined ? {} : { status }),
+});
+
+/** Config de la llamada numero `index` que recibio el cliente. */
+const callConfig = (httpClient: HttpMock, index: number): AxiosRequestConfig =>
+  httpClient.requestWithStatus.mock.calls[index]?.[0];
+
+/** Cuerpo JSON:API de esa misma llamada. */
+const callBody = (
+  httpClient: HttpMock,
+  index: number,
+): Record<string, Record<string, unknown>> =>
+  callConfig(httpClient, index).data as Record<string, Record<string, unknown>>;
+
+describe('DrupalHttpStrategy', () => {
+  afterEach(() => {
+    jest.clearAllMocks();
+  });
+
+  describe('0. Identidad y contratos declarativos', () => {
+    it('0.1 deberia declararse como el destino DESTINO_DRUPAL', () => {
+      // 1. Arrange 📐: el tipo se llamo DESTINO_HTTP entre las migraciones 005
+      //    y 027; el valor vigente nombra el destino, no el transporte.
+      //    La clase conserva el nombre comercial, el enum no.
+      const strategy = buildStrategy(buildHttpMock());
+
+      // 3. Assert 🎯
+      expect(strategy.nodeType).toBe(NodeType.DESTINO_DRUPAL);
+    });
+
+    it('0.2 deberia someter sus params a validacion estricta al guardar', () => {
+      const strategy = buildStrategy(buildHttpMock());
+
+      expect(strategy.paramsSchema).toBe(DrupalHttpConfigDto);
+    });
+
+    it('0.3 deberia exigir el namespace de origen en CREATE_NODE', () => {
+      const strategy = buildStrategy(buildHttpMock());
+
+      expect(
+        strategy.getRequiredNamespaces({
+          operationMode: DrupalOperationMode.CREATE_NODE,
+          titleTemplate: '{{llm_response.headline}}',
+        }),
+      ).toEqual(expect.arrayContaining(['llm_response', SOURCE_NAMESPACE]));
+    });
+
+    it('0.4 NO deberia exigir ningun namespace en TRANSFER_HTML_BLOCK', () => {
+      // 1. Arrange 📐: el bloque se extrae del DOM REMOTO, no del contexto.
+      //    Exigir `validated_drupal_json` haria que la regla 7 del validador
+      //    rechazara al guardar un cierre de licitacion perfectamente valido.
+      const strategy = buildStrategy(buildHttpMock());
+
+      // 3. Assert 🎯
+      expect(
+        strategy.getRequiredNamespaces({
+          operationMode: DrupalOperationMode.TRANSFER_HTML_BLOCK,
+        }),
+      ).toEqual([]);
+    });
+
+    it('0.5 deberia exigir el namespace de adjuntos en UPLOAD_ATTACHMENT', () => {
+      const strategy = buildStrategy(buildHttpMock());
+
+      expect(
+        strategy.getRequiredNamespaces({
+          operationMode: DrupalOperationMode.UPLOAD_ATTACHMENT,
+        }),
+      ).toEqual(['raw_email']);
+    });
+
+    it('0.6 deberia reclamar los tres params del traslado', () => {
+      const strategy = buildStrategy(buildHttpMock());
+
+      expect(
+        strategy.getIncompleteParams({
+          operationMode: DrupalOperationMode.TRANSFER_HTML_BLOCK,
+        }),
+      ).toEqual(['targetNodeUuid', 'destinationNodeUuid', 'itemSelector']);
+    });
+
+    it('0.7 deberia dar por completo un CREATE_NODE con titulo declarado', () => {
+      const strategy = buildStrategy(buildHttpMock());
+
+      expect(
+        strategy.getIncompleteParams({
+          operationMode: DrupalOperationMode.CREATE_NODE,
+          titleTemplate: '{{llm_response.headline}}',
+        }),
+      ).toEqual([]);
+    });
+
+    it('0.8 deberia declarar ERR_DRUPAL_DOM_TARGET inalcanzable sin DOM', () => {
+      // 1. Arrange 📐: una ruta de recuperacion contra un codigo que el nodo no
+      //    puede emitir es un nodo de respaldo que jamas corre, y el sintoma es
+      //    mudo. La regla 10 del validador lo rechaza al guardar gracias a esto.
+      const strategy = buildStrategy(buildHttpMock());
+
+      // 3. Assert 🎯
+      expect(
+        strategy.getUnreachableErrorCodes({
+          operationMode: DrupalOperationMode.CREATE_NODE,
+        }),
+      ).toEqual([ERR_DRUPAL_DOM_TARGET, ERR_DRUPAL_TARGET_NOT_FOUND]);
+      expect(
+        strategy.getUnreachableErrorCodes({
+          operationMode: DrupalOperationMode.APPEND_HTML_BLOCK,
+        }),
+      ).toEqual([]);
+    });
+  });
+
+  describe('1. CREATE_NODE', () => {
+    it('1.1 deberia hacer POST a la coleccion derivada del bundle', async () => {
+      // 1. Arrange 📐: `node--noticias` es a la vez el `data.type` y la ruta.
+      const httpClient = buildHttpMock();
+      httpClient.requestWithStatus.mockResolvedValue(
+        entityResponse({ drupal_internal__nid: 42 }, 'uuid-nuevo'),
+      );
+      const strategy = buildStrategy(httpClient);
+
+      // 2. Act ⚙️
+      await strategy.execute(buildContext(), {
+        titleTemplate: 'Titular fijo',
+      });
+
+      // 3. Assert 🎯
+      expect(callConfig(httpClient, 0).url).toBe(`${BASE_URL}/node/noticias`);
+      expect(callConfig(httpClient, 0).method).toBe('POST');
+      expect(callConfig(httpClient, 0).headers).toMatchObject({
+        Authorization: BASIC_AUTH_HEADER,
+        Accept: 'application/vnd.api+json',
+        'Content-Type': 'application/vnd.api+json',
+      });
+    });
+
+    it('should create node draft with status false when mode is CREATE_NODE for Notiweb', async () => {
+      // 1. Arrange 📐: el preset de Notiweb da de alta la noticia despublicada;
+      //    un editor la revisa y la publica en Drupal.
+      const httpClient = buildHttpMock();
+      httpClient.requestWithStatus.mockResolvedValue(
+        entityResponse({ drupal_internal__nid: 77 }, 'uuid-noticia'),
+      );
+      const strategy = buildStrategy(httpClient);
+
+      // 2. Act ⚙️
+      const result = await strategy.execute(buildContext(), {
+        operationMode: DrupalOperationMode.CREATE_NODE,
+        bundle: 'node--noticias',
+        titleTemplate: 'Titular fijo',
+        publishStatus: false,
+      });
+
+      // 3. Assert 🎯: POST a la coleccion de noticias con `status: false`.
+      expect(result.success).toBe(true);
+      expect(callConfig(httpClient, 0).method).toBe('POST');
+      expect(callConfig(httpClient, 0).url).toBe(`${BASE_URL}/node/noticias`);
+      expect(callBody(httpClient, 0).data).toMatchObject({
+        type: 'node--noticias',
+        attributes: { status: false },
+      });
+    });
+
+    it('should enforce status false on jsonapi payload during sandbox execution', async () => {
+      // 1. Arrange 📐: el mismo nodo pide publicar, con y sin Sandbox guardado.
+      const sandbox = buildHttpMock();
+      sandbox.requestWithStatus.mockResolvedValue(entityResponse());
+      const legacy = buildHttpMock();
+      legacy.requestWithStatus.mockResolvedValue(entityResponse());
+      const params = { titleTemplate: 'Titular fijo', publishStatus: true };
+
+      // 2. Act ⚙️
+      await buildStrategy(sandbox).execute(buildContext(), {
+        ...params,
+        isSandbox: true,
+      });
+      await buildStrategy(legacy).execute(buildContext(), params);
+
+      // 3. Assert 🎯: en Sandbox siempre borrador; un flujo antiguo sin la
+      //    clave sigue publicando como hasta ahora.
+      expect(callBody(sandbox, 0).data).toMatchObject({
+        attributes: { status: false },
+      });
+      expect(callBody(legacy, 0).data).toMatchObject({
+        attributes: { status: true },
+      });
+    });
+
+    it('1.0bis deberia negarse a escribir en una pagina del portal con Sandbox guardado', async () => {
+      // 1. Arrange 📐: el UUID de la pagina de abiertas figura como pagina de
+      //    Produccion en el entorno.
+      const httpClient = buildHttpMock();
+      const strategy = buildStrategy(
+        httpClient,
+        buildApiConfig(TOKEN, new Set([PAGE_UUID])),
+      );
+
+      // 2. Act ⚙️
+      const result = await strategy.execute(buildContext(), {
+        isSandbox: true,
+        operationMode: DrupalOperationMode.APPEND_HTML_BLOCK,
+        bundle: 'node--page',
+        targetNodeUuid: PAGE_UUID.toUpperCase(),
+      });
+
+      // 3. Assert 🎯: ni siquiera el GET; se nombra el param culpable.
+      expect(result.success).toBe(false);
+      expect(result.error?.code).toBe(ERR_DRUPAL_CONFIG);
+      expect(result.error?.missingFields).toEqual(['targetNodeUuid']);
+      expect(httpClient.requestWithStatus).not.toHaveBeenCalled();
+    });
+
+    it('1.2 deberia armar el cuerpo JSON:API con el markup del escudo', async () => {
+      const httpClient = buildHttpMock();
+      httpClient.requestWithStatus.mockResolvedValue(entityResponse());
+      const strategy = buildStrategy(httpClient);
+
+      await strategy.execute(buildContext(), { titleTemplate: 'Titular fijo' });
+
+      expect(callBody(httpClient, 0)).toEqual({
+        data: {
+          type: 'node--noticias',
+          attributes: {
+            title: 'Titular fijo',
+            body: { value: MARKUP, format: 'full_html', summary: null },
+            status: true,
+            field_autor: null,
+            field_fecha: null,
+            field_orden: 1,
+          },
+        },
+      });
+    });
+
+    it('1.3 deberia interpolar el titulo contra el contexto', async () => {
+      const httpClient = buildHttpMock();
+      httpClient.requestWithStatus.mockResolvedValue(entityResponse());
+      const strategy = buildStrategy(httpClient);
+
+      await strategy.execute(
+        buildContext({
+          [SOURCE_NAMESPACE]: { [SOURCE_FIELD]: MARKUP },
+          llm_response: { headline: 'Innovacion en Madrid' },
+        }),
+        { titleTemplate: '{{llm_response.headline}}' },
+      );
+
+      expect(callBody(httpClient, 0).data?.attributes).toMatchObject({
+        title: 'Innovacion en Madrid',
+      });
+    });
+
+    it('1.4 deberia OMITIR field_resumen cuando no hay plantilla de resumen', async () => {
+      // 1. Arrange 📐: un atributo que el bundle no declara provoca un 422, asi
+      //    que mandarlo vacio «por si acaso» romperia los bundles sin resumen.
+      const httpClient = buildHttpMock();
+      httpClient.requestWithStatus.mockResolvedValue(entityResponse());
+      const strategy = buildStrategy(httpClient);
+
+      // 2. Act ⚙️
+      await strategy.execute(buildContext(), { titleTemplate: 'Titular' });
+
+      // 3. Assert 🎯
+      expect(callBody(httpClient, 0).data?.attributes).not.toHaveProperty(
+        'field_resumen',
+      );
+    });
+
+    it('should nest summary into attributes.body.summary and omit field_resumen when creating node--noticias', async () => {
+      // 1. Arrange 📐: el bundle de noticias no declara ningun campo de
+      //    resumen; el cuerpo es un texto con resumen. Un `field_resumen`
+      //    suelto era un 422 en cuanto se rellenaba la plantilla.
+      const httpClient = buildHttpMock();
+      httpClient.requestWithStatus.mockResolvedValue(entityResponse());
+      const strategy = buildStrategy(httpClient);
+
+      // 2. Act ⚙️
+      await strategy.execute(
+        buildContext({
+          [SOURCE_NAMESPACE]: { [SOURCE_FIELD]: MARKUP },
+          llm_response: { summary: 'Resumen de la noticia' },
+        }),
+        {
+          bundle: 'node--noticias',
+          titleTemplate: 'Titular',
+          summaryTemplate: '{{llm_response.summary}}',
+        },
+      );
+
+      // 3. Assert 🎯
+      const attributes = callBody(httpClient, 0).data?.attributes as Record<
+        string,
+        unknown
+      >;
+
+      expect(attributes.body).toEqual({
+        value: MARKUP,
+        format: 'full_html',
+        summary: 'Resumen de la noticia',
+      });
+      expect(attributes).not.toHaveProperty('field_resumen');
+    });
+
+    it('1.4bis deberia enviar autor, fecha, orden y las taxonomias configuradas de Notiweb', async () => {
+      // 1. Arrange 📐: seccion y tipo configurados, fuente sin configurar.
+      const httpClient = buildHttpMock();
+      httpClient.requestWithStatus.mockResolvedValue(entityResponse());
+      const strategy = buildStrategy(httpClient);
+      const sectionUuid = 'd4964d27-7819-4975-81ca-c0554ee7b233';
+      const typeUuid = '6c18cd7a-a5cd-4332-8271-6bdee4ef9834';
+
+      // 2. Act ⚙️
+      await strategy.execute(
+        buildContext({
+          [SOURCE_NAMESPACE]: { [SOURCE_FIELD]: MARKUP },
+          parsed_email: {
+            from: '  Redaccion madri+d ',
+            date: '2026-10-29T08:15:00Z',
+          },
+        }),
+        {
+          bundle: 'node--noticias',
+          titleTemplate: 'Titular',
+          authorTemplate: '{{parsed_email.from}}',
+          dateTemplate: '{{parsed_email.date}}',
+          orderValue: 3,
+          newsSectionTermUuid: sectionUuid,
+          newsTypeTermUuid: typeUuid,
+        },
+      );
+
+      // 3. Assert 🎯: el instante se recorta a su dia, el autor se recorta y
+      //    la fuente, sin UUID, NO viaja: una relacion vacia borraria la que el
+      //    editor ponga despues a mano.
+      const document = callBody(httpClient, 0).data;
+
+      expect(document?.attributes).toMatchObject({
+        field_autor: 'Redaccion madri+d',
+        field_fecha: '2026-10-29',
+        field_orden: 3,
+      });
+      expect(document?.relationships).toEqual({
+        field_noticia_seccion: {
+          data: { type: 'taxonomy_term--tax_seccion', id: sectionUuid },
+        },
+        field_noticia_tipo: {
+          data: { type: 'taxonomy_term--tax_tipos_noticia', id: typeUuid },
+        },
+      });
+    });
+
+    it.each([
+      ['el nombre del remitente', 'Juan Pérez', 'Juan Pérez'],
+      ['el respaldo si el remitente no trae nombre', '', 'Madrid+D'],
+    ])(
+      '1.4bis.%# deberia publicar como autor %s',
+      async (_case, fromName, expected) => {
+        // 1. Arrange 📐
+        const httpClient = buildHttpMock();
+        httpClient.requestWithStatus.mockResolvedValue(entityResponse());
+        const strategy = buildStrategy(httpClient);
+
+        // 2. Act ⚙️
+        await strategy.execute(
+          buildContext({
+            [SOURCE_NAMESPACE]: { [SOURCE_FIELD]: MARKUP },
+            raw_email: { from_name: fromName },
+          }),
+          {
+            bundle: 'node--noticias',
+            titleTemplate: 'Titular',
+            authorTemplate: '{{raw_email.from_name}}',
+            authorFallback: 'Madrid+D',
+          },
+        );
+
+        // 3. Assert 🎯
+        expect(callBody(httpClient, 0).data?.attributes).toMatchObject({
+          field_autor: expected,
+        });
+      },
+    );
+
+    it('1.4bis.3 deberia dejar el autor a null sin nombre ni respaldo', async () => {
+      const httpClient = buildHttpMock();
+      httpClient.requestWithStatus.mockResolvedValue(entityResponse());
+      const strategy = buildStrategy(httpClient);
+
+      await strategy.execute(
+        buildContext({
+          [SOURCE_NAMESPACE]: { [SOURCE_FIELD]: MARKUP },
+          raw_email: { from_name: '' },
+        }),
+        { titleTemplate: 'Titular', authorTemplate: '{{raw_email.from_name}}' },
+      );
+
+      expect(callBody(httpClient, 0).data?.attributes).toMatchObject({
+        field_autor: null,
+      });
+    });
+
+    it('1.4ter NO deberia enviar los campos de Notiweb a otro bundle', async () => {
+      // 1. Arrange 📐: un atributo que el bundle no declara es un 422.
+      const httpClient = buildHttpMock();
+      httpClient.requestWithStatus.mockResolvedValue(entityResponse());
+      const strategy = buildStrategy(httpClient);
+
+      // 2. Act ⚙️
+      await strategy.execute(buildContext(), {
+        bundle: 'node--article',
+        titleTemplate: 'Titular',
+        orderValue: 3,
+        newsTypeTermUuid: '6c18cd7a-a5cd-4332-8271-6bdee4ef9834',
+      });
+
+      // 3. Assert 🎯
+      const document = callBody(httpClient, 0).data;
+
+      expect(document?.attributes).not.toHaveProperty('field_orden');
+      expect(document?.attributes).not.toHaveProperty('field_autor');
+      expect(document).not.toHaveProperty('relationships');
+    });
+
+    it('1.4quater deberia rechazar una fecha que no se resuelve a AAAA-MM-DD sin llamar a Drupal', async () => {
+      // 1. Arrange 📐: `field_fecha` es una fecha sin hora y el 422 de Drupal
+      //    no dice que campo era.
+      const httpClient = buildHttpMock();
+      const strategy = buildStrategy(httpClient);
+
+      // 2. Act ⚙️
+      const result = await strategy.execute(
+        buildContext({
+          [SOURCE_NAMESPACE]: { [SOURCE_FIELD]: MARKUP },
+          parsed_email: { date: '29 de octubre' },
+        }),
+        { titleTemplate: 'Titular', dateTemplate: '{{parsed_email.date}}' },
+      );
+
+      // 3. Assert 🎯
+      expect(result.success).toBe(false);
+      expect(result.error?.code).toBe(ERR_DRUPAL_MISSING_PAYLOAD);
+      expect(result.error?.missingFields).toEqual(['dateTemplate']);
+      expect(httpClient.requestWithStatus).not.toHaveBeenCalled();
+    });
+
+    it('1.5 NO deberia reintentar el POST', async () => {
+      // 1. Arrange 📐: un POST repetido tras un 5xx que SI se aplico crea una
+      //    segunda noticia. La idempotencia no la da el verbo.
+      const httpClient = buildHttpMock();
+      httpClient.requestWithStatus.mockResolvedValue(entityResponse());
+      const strategy = buildStrategy(httpClient);
+
+      // 2. Act ⚙️
+      await strategy.execute(buildContext(), { titleTemplate: 'Titular' });
+
+      // 3. Assert 🎯
+      expect(httpClient.requestWithStatus.mock.calls[0]?.[1]).toMatchObject({
+        maxRetries: 0,
+      });
+    });
+
+    it('1.6 deberia publicar el UUID, el nid y el alias que devuelve Drupal', async () => {
+      const httpClient = buildHttpMock();
+      httpClient.requestWithStatus.mockResolvedValue(
+        entityResponse(
+          {
+            drupal_internal__nid: 55_940,
+            path: { alias: '/noticias/innovacion' },
+            changed: '2026-10-05T12:00:00+00:00',
+          },
+          'uuid-creado',
+        ),
+      );
+      const strategy = buildStrategy(httpClient);
+
+      const result = await strategy.execute(buildContext(), {
+        titleTemplate: 'Titular',
+      });
+
+      expect(result.success).toBe(true);
+      expect(result.data).toMatchObject({
+        node_id: 'uuid-creado',
+        drupal_internal__nid: 55_940,
+        path_alias: '/noticias/innovacion',
+        operation_applied: DrupalOperationMode.CREATE_NODE,
+        http_status: 200,
+        published_at: '2026-10-05T12:00:00+00:00',
+        // La raiz publica es la base de la API sin `/jsonapi`.
+        published_url: 'https://drupal.example/noticias/innovacion',
+        exit_page: '/noticias/innovacion',
+      });
+    });
+
+    it('1.7 deberia caer en /node/{nid} cuando Drupal no devuelve alias', async () => {
+      // 1. Arrange 📐: un nodo sin Pathauto no tiene alias, pero Drupal
+      //    resuelve siempre su ruta canonica.
+      const httpClient = buildHttpMock();
+      httpClient.requestWithStatus.mockResolvedValue(
+        entityResponse({ drupal_internal__nid: 55_941 }, 'uuid-sin-alias'),
+      );
+      const strategy = buildStrategy(httpClient);
+
+      // 2. Act ⚙️
+      const result = await strategy.execute(buildContext(), {
+        titleTemplate: 'Titular',
+      });
+
+      // 3. Assert 🎯
+      expect(result.data).toMatchObject({
+        published_url: 'https://drupal.example/node/55941',
+        exit_page: '/node/55941',
+      });
+    });
+  });
+
+  describe('2. APPEND_HTML_BLOCK', () => {
+    const appendParams = {
+      operationMode: DrupalOperationMode.APPEND_HTML_BLOCK,
+      bundle: 'node--page',
+      targetNodeUuid: PAGE_UUID,
+    };
+
+    /** `body.value` que se envio en el PATCH (llamada 1, tras el GET). */
+    const appendedHtml = (httpClient: HttpMock): string =>
+      (
+        (callBody(httpClient, 1).data?.attributes as Record<string, unknown>)
+          .body as Record<string, string>
+      ).value ?? '';
+
+    it('should wrap new tender HTML inside pd-licitacion-block container with data-expediente attribute', async () => {
+      // 1. Arrange 📐: dos licitaciones nuevas. La primera trae su propio
+      //    envoltorio con expediente (plantilla de apertura); la segunda no, y
+      //    el expediente sale de la plantilla del nodo, con una comilla dentro.
+      const ownWrapper =
+        '<div class="licitacion-entry" data-expediente="S_2026_020"><p>Nueva</p></div>';
+      const reused = buildHttpMock();
+      reused.requestWithStatus
+        .mockResolvedValueOnce(pageResponse(OTHER_BLOCK))
+        .mockResolvedValueOnce(pageResponse(''));
+      const wrapped = buildHttpMock();
+      wrapped.requestWithStatus
+        .mockResolvedValueOnce(pageResponse(OTHER_BLOCK))
+        .mockResolvedValueOnce(pageResponse(''));
+
+      // 2. Act ⚙️
+      await buildStrategy(reused).execute(
+        buildContext({ [SOURCE_NAMESPACE]: { [SOURCE_FIELD]: ownWrapper } }),
+        appendParams,
+      );
+      await buildStrategy(wrapped).execute(
+        buildContext({
+          [SOURCE_NAMESPACE]: { [SOURCE_FIELD]: MARKUP },
+          llm_response: { expediente: 'S_2026_"021"' },
+        }),
+        { ...appendParams, expedienteTemplate: '{{llm_response.expediente}}' },
+      );
+
+      // 3. Assert 🎯: el envoltorio propio gana la clase, sin doble div; el
+      //    nuevo lleva el expediente escapado, sin romper el atributo.
+      const $reused = cheerio.load(appendedHtml(reused), null, false);
+      const block = $reused('.pd-licitacion-block');
+      expect(block).toHaveLength(1);
+      expect(block.hasClass('licitacion-entry')).toBe(true);
+      expect(block.attr('data-expediente')).toBe('S_2026_020');
+
+      expect(appendedHtml(wrapped)).toContain(
+        '<div class="pd-licitacion-block" data-expediente="S_2026_&quot;021&quot;">',
+      );
+      const $wrapped = cheerio.load(appendedHtml(wrapped), null, false);
+      expect($wrapped('.pd-licitacion-block').attr('data-expediente')).toBe(
+        'S_2026_"021"',
+      );
+      expect($wrapped('.pd-licitacion-block h1.titular')).toHaveLength(1);
+    });
+
+    it('2.0bis NO deberia envolver si no hay expediente', async () => {
+      // 1. Arrange 📐
+      const httpClient = buildHttpMock();
+      httpClient.requestWithStatus
+        .mockResolvedValueOnce(pageResponse(''))
+        .mockResolvedValueOnce(pageResponse(''));
+
+      // 2. Act ⚙️
+      await buildStrategy(httpClient).execute(buildContext(), appendParams);
+
+      // 3. Assert 🎯
+      expect(appendedHtml(httpClient)).not.toContain('pd-licitacion-block');
+    });
+
+    it('2.1 deberia leer el HTML actual antes de escribir', async () => {
+      const httpClient = buildHttpMock();
+      httpClient.requestWithStatus
+        .mockResolvedValueOnce(pageResponse(OTHER_BLOCK))
+        .mockResolvedValueOnce(pageResponse(''));
+      const strategy = buildStrategy(httpClient);
+
+      await strategy.execute(buildContext(), appendParams);
+
+      expect(callConfig(httpClient, 0).method).toBe('GET');
+      expect(callConfig(httpClient, 0).url).toBe(
+        `${BASE_URL}/node/page/${PAGE_UUID}`,
+      );
+    });
+
+    it('2.2 deberia anteponer el bloque conservando el HTML previo', async () => {
+      // 1. Arrange 📐: la pagina agregadora acumula licitaciones. Perder las
+      //    anteriores al anadir una seria borrar el portal entero.
+      const httpClient = buildHttpMock();
+      httpClient.requestWithStatus
+        .mockResolvedValueOnce(pageResponse(OTHER_BLOCK))
+        .mockResolvedValueOnce(pageResponse(''));
+      const strategy = buildStrategy(httpClient);
+
+      // 2. Act ⚙️
+      await strategy.execute(buildContext(), appendParams);
+
+      // 3. Assert 🎯
+      const sent = (
+        callBody(httpClient, 1).data?.attributes as Record<string, unknown>
+      ).body as Record<string, string>;
+
+      expect(sent.value.indexOf(MARKUP)).toBeLessThan(
+        sent.value.indexOf(OTHER_BLOCK),
+      );
+      expect(sent.value).toContain(OTHER_BLOCK);
+    });
+
+    it('2.3 deberia respetar insertPosition APPEND', async () => {
+      const httpClient = buildHttpMock();
+      httpClient.requestWithStatus
+        .mockResolvedValueOnce(pageResponse(OTHER_BLOCK))
+        .mockResolvedValueOnce(pageResponse(''));
+      const strategy = buildStrategy(httpClient);
+
+      await strategy.execute(buildContext(), {
+        ...appendParams,
+        insertPosition: 'APPEND',
+      });
+
+      const sent = (
+        callBody(httpClient, 1).data?.attributes as Record<string, unknown>
+      ).body as Record<string, string>;
+
+      expect(sent.value.indexOf(MARKUP)).toBeGreaterThan(
+        sent.value.indexOf(OTHER_BLOCK),
+      );
+    });
+
+    it('2.4 deberia enviar data.id en el PATCH, como exige JSON:API', async () => {
+      // 1. Arrange 📐: omitirlo devuelve un 422 cuyo cuerpo no dice que falta.
+      const httpClient = buildHttpMock();
+      httpClient.requestWithStatus
+        .mockResolvedValueOnce(pageResponse(''))
+        .mockResolvedValueOnce(pageResponse(''));
+      const strategy = buildStrategy(httpClient);
+
+      // 2. Act ⚙️
+      await strategy.execute(buildContext(), appendParams);
+
+      // 3. Assert 🎯
+      expect(callConfig(httpClient, 1).method).toBe('PATCH');
+      expect(callBody(httpClient, 1).data).toMatchObject({
+        type: 'node--page',
+        id: PAGE_UUID,
+      });
+    });
+
+    it('2.5 deberia tomar el nid del GET y no de la respuesta del PATCH', async () => {
+      // 1. Arrange 📐: una instalacion de Drupal puede responder 204 a un
+      //    PATCH, y entonces no habria atributos que leer. El GET ya es
+      //    obligatorio en este modo, asi que el dato esta garantizado ahi.
+      const httpClient = buildHttpMock();
+      httpClient.requestWithStatus
+        .mockResolvedValueOnce(pageResponse('', PAGE_UUID, 55_937))
+        .mockResolvedValueOnce({ data: {}, status: 204 });
+      const strategy = buildStrategy(httpClient);
+
+      // 2. Act ⚙️
+      const result = await strategy.execute(buildContext(), appendParams);
+
+      // 3. Assert 🎯
+      expect(result.data).toMatchObject({
+        drupal_internal__nid: 55_937,
+        path_alias: '/prueba-licitaciones',
+        http_status: 204,
+        // La pagina afectada por la insercion, no un nodo nuevo.
+        published_url: 'https://drupal.example/prueba-licitaciones',
+        exit_page: '/prueba-licitaciones',
+      });
+    });
+
+    it('2.6 deberia fallar con ERR_DRUPAL_DOM_TARGET si el contenedor no existe', async () => {
+      const httpClient = buildHttpMock();
+      httpClient.requestWithStatus.mockResolvedValueOnce(
+        pageResponse('<div class="otra-cosa"></div>'),
+      );
+      const strategy = buildStrategy(httpClient);
+
+      const result = await strategy.execute(buildContext(), {
+        ...appendParams,
+        containerSelector: 'div.listado-licitaciones',
+      });
+
+      expect(result.success).toBe(false);
+      expect(result.error?.code).toBe(ERR_DRUPAL_DOM_TARGET);
+      expect(result.error?.level).toBe('GRAVE');
+      // No se llego a escribir: solo hubo el GET.
+      expect(httpClient.requestWithStatus).toHaveBeenCalledTimes(1);
+    });
+
+    /**
+     * Subida del adjunto consolidada en este mismo modo.
+     *
+     * Va aqui y no en un nodo propio porque la regla 11 del validador exige que
+     * todo DESTINO cierre el flujo (`nextStep === null`): un UPLOAD_ATTACHMENT
+     * intermedio no se puede ni guardar. El orden de peticiones pasa a ser
+     * GET -> POST -> PATCH, y el GET va primero porque de sus `relationships`
+     * sale el campo de fichero al que se sube.
+     */
+    const PLIEGO_BLOCK =
+      '<div class="licitacion-entry"><ul class="licitacion-pliegos"></ul></div>';
+    const ATTACHMENT_BASE64 = 'UERGLWRlLXBydWViYQ==';
+    const FILE_URL = '/sites/default/files/2026-10/pliego.pdf';
+    const FILE_UUID = '0d1a6a52-6a0f-4f1e-9a1a-6b6f0f3f1a21';
+
+    const uploadAppendParams = { ...appendParams, uploadAttachment: true };
+
+    const attachmentContext = (
+      contentBase64: unknown = ATTACHMENT_BASE64,
+      markup: string = PLIEGO_BLOCK,
+    ): StatePayloadContext =>
+      buildContext({
+        [SOURCE_NAMESPACE]: { [SOURCE_FIELD]: markup },
+        raw_email: {
+          attachments: [
+            {
+              filename: 'pliego.pdf',
+              contentType: 'application/pdf',
+              size: 12,
+              contentBase64,
+            },
+          ],
+        },
+      });
+
+    /** Respuesta del endpoint de campo de fichero de JSON:API. */
+    const fileResponse = (): { data: unknown; status: number } =>
+      entityResponse({ uri: { url: FILE_URL } }, FILE_UUID);
+
+    /** HTML que acaba viajando en el PATCH. */
+    const patchedHtml = (httpClient: HttpMock, index: number): string =>
+      (
+        (
+          callBody(httpClient, index).data?.attributes as Record<
+            string,
+            unknown
+          >
+        ).body as Record<string, string>
+      ).value;
+
+    it('2.7 deberia subir el adjunto y colgar su enlace de la lista de pliegos', async () => {
+      // 1. Arrange 📐: el caso que motiva todo. El PDF llega como adjunto del
+      //    correo, no como una URL que la IA pudiera haber leido del cuerpo.
+      const httpClient = buildHttpMock();
+      httpClient.requestWithStatus
+        .mockResolvedValueOnce(pageResponse(''))
+        .mockResolvedValueOnce(fileResponse())
+        .mockResolvedValueOnce(pageResponse(''));
+      const strategy = buildStrategy(httpClient);
+
+      // 2. Act ⚙️
+      const result = await strategy.execute(
+        attachmentContext(),
+        uploadAppendParams,
+      );
+
+      // 3. Assert 🎯
+      expect(result.success).toBe(true);
+      expect(patchedHtml(httpClient, 2)).toContain(
+        `<a class="pliego-link" href="${FILE_URL}" target="_blank">pliego.pdf</a>`,
+      );
+      // La URL se publica para que la trazabilidad la pueda auditar.
+      expect(result.data?.attachment_url).toBe(FILE_URL);
+    });
+
+    it('2.8 deberia enviar el binario con las cabeceras del endpoint de fichero', async () => {
+      // 1. Arrange 📐: este endpoint NO habla JSON:API, recibe bytes crudos.
+      const httpClient = buildHttpMock();
+      httpClient.requestWithStatus
+        .mockResolvedValueOnce(pageResponse(''))
+        .mockResolvedValueOnce(fileResponse())
+        .mockResolvedValueOnce(pageResponse(''));
+      const strategy = buildStrategy(httpClient);
+
+      // 2. Act ⚙️
+      await strategy.execute(attachmentContext(), uploadAppendParams);
+
+      // 3. Assert 🎯
+      const upload = callConfig(httpClient, 1);
+
+      expect(upload.method).toBe('POST');
+      expect(upload.url).toBe(
+        `${BASE_URL}/node/page/${PAGE_UUID}/field_adjuntos`,
+      );
+      expect(upload.headers).toMatchObject({
+        'Content-Type': 'application/octet-stream',
+        'Content-Disposition': 'file; filename="pliego.pdf"',
+        Authorization: BASIC_AUTH_HEADER,
+      });
+      expect(Buffer.isBuffer(upload.data)).toBe(true);
+    });
+
+    it('2.9 deberia CONVIVIR con los pliegos que ya puso la IA', async () => {
+      // 1. Arrange 📐: la plantilla sembrada deja la lista vacia porque es la IA
+      //    quien genera un <li> por cada pliego citado en el correo. Reemplazar
+      //    ahi dentro borraria ese trabajo; el adjunto es un pliego mas.
+      const httpClient = buildHttpMock();
+      httpClient.requestWithStatus
+        .mockResolvedValueOnce(pageResponse(''))
+        .mockResolvedValueOnce(fileResponse())
+        .mockResolvedValueOnce(pageResponse(''));
+      const strategy = buildStrategy(httpClient);
+      const previo =
+        '<li><a class="pliego-link" href="https://ejemplo.es/otro.pdf">otro.pdf</a></li>';
+
+      // 2. Act ⚙️
+      await strategy.execute(
+        attachmentContext(
+          ATTACHMENT_BASE64,
+          `<div class="licitacion-entry"><ul class="licitacion-pliegos">${previo}</ul></div>`,
+        ),
+        uploadAppendParams,
+      );
+
+      // 3. Assert 🎯
+      const sent = patchedHtml(httpClient, 2);
+
+      expect(sent).toContain('otro.pdf');
+      expect(sent).toContain(FILE_URL);
+    });
+
+    it('2.10 NO deberia subir nada si no se pidio la subida', async () => {
+      // 1. Arrange 📐: el efecto externo no se enciende por omision, aunque el
+      //    correo traiga adjuntos y los params por defecto apunten a ellos.
+      const httpClient = buildHttpMock();
+      httpClient.requestWithStatus
+        .mockResolvedValueOnce(pageResponse(''))
+        .mockResolvedValueOnce(pageResponse(''));
+      const strategy = buildStrategy(httpClient);
+
+      // 2. Act ⚙️
+      const result = await strategy.execute(attachmentContext(), appendParams);
+
+      // 3. Assert 🎯: solo GET y PATCH.
+      expect(httpClient.requestWithStatus).toHaveBeenCalledTimes(2);
+      expect(result.data?.attachment_url).toBe('');
+    });
+
+    it('2.11 deberia publicar igual si el motor ya libero el binario', async () => {
+      // 1. Arrange 📐: `contentBase64` a null es lo que deja un PARSER_PRE_IA
+      //    que extrajo el texto del PDF. Pausar el flujo por eso dejaria la
+      //    licitacion sin publicar, que es peor que publicarla sin el enlace.
+      const httpClient = buildHttpMock();
+      httpClient.requestWithStatus
+        .mockResolvedValueOnce(pageResponse(''))
+        .mockResolvedValueOnce(pageResponse(''));
+      const strategy = buildStrategy(httpClient);
+
+      // 2. Act ⚙️
+      const result = await strategy.execute(
+        attachmentContext(null),
+        uploadAppendParams,
+      );
+
+      // 3. Assert 🎯
+      expect(result.success).toBe(true);
+      expect(httpClient.requestWithStatus).toHaveBeenCalledTimes(2);
+      expect(result.data?.attachment_url).toBe('');
+      expect(patchedHtml(httpClient, 1)).toContain('licitacion-entry');
+    });
+
+    it('2.12 deberia publicar aunque el bloque no traiga lista de pliegos', async () => {
+      // 1. Arrange 📐: el fichero queda subido pero sin enlace. Se avisa y se
+      //    sigue: el bloque tiene valor por si solo.
+      const httpClient = buildHttpMock();
+      httpClient.requestWithStatus
+        .mockResolvedValueOnce(pageResponse(''))
+        .mockResolvedValueOnce(fileResponse())
+        .mockResolvedValueOnce(pageResponse(''));
+      const strategy = buildStrategy(httpClient);
+
+      // 2. Act ⚙️
+      const result = await strategy.execute(
+        attachmentContext(ATTACHMENT_BASE64, '<div class="sin-lista"></div>'),
+        uploadAppendParams,
+      );
+
+      // 3. Assert 🎯
+      expect(result.success).toBe(true);
+      expect(patchedHtml(httpClient, 2)).toContain('sin-lista');
+      expect(patchedHtml(httpClient, 2)).not.toContain('pliego-link');
+    });
+
+    it('2.13 deberia publicar el texto aunque la subida devuelva un fallo HTTP', async () => {
+      // 1. Arrange 📐: el coste asumido de la degradacion. Un 403 NO pausa la
+      //    ejecucion; queda en el warn y en un attachment_url vacio.
+      const httpClient = buildHttpMock();
+      httpClient.requestWithStatus
+        .mockResolvedValueOnce(pageResponse(''))
+        .mockResolvedValueOnce(httpFailure(403))
+        .mockResolvedValueOnce(pageResponse(''));
+      const strategy = buildStrategy(httpClient);
+
+      // 2. Act ⚙️
+      const result = await strategy.execute(
+        attachmentContext(),
+        uploadAppendParams,
+      );
+
+      // 3. Assert 🎯
+      expect(result.success).toBe(true);
+      expect(result.data?.attachment_url).toBe('');
+      expect(patchedHtml(httpClient, 2)).not.toContain('pliego-link');
+    });
+
+    it('2.14 deberia autodescubrir el campo de fichero que si declara el bundle', async () => {
+      // 1. Arrange 📐: el bundle no tiene `field_adjuntos` sino `field_archivos`.
+      //    Sin esto, el POST saldria contra un campo inexistente y volveria 404.
+      const httpClient = buildHttpMock();
+      httpClient.requestWithStatus
+        .mockResolvedValueOnce(
+          pageResponse('', PAGE_UUID, 55_937, {
+            field_archivos: { data: null },
+          }),
+        )
+        .mockResolvedValueOnce(fileResponse())
+        .mockResolvedValueOnce(pageResponse(''));
+      const strategy = buildStrategy(httpClient);
+
+      // 2. Act ⚙️
+      const result = await strategy.execute(
+        attachmentContext(),
+        uploadAppendParams,
+      );
+
+      // 3. Assert 🎯
+      expect(callConfig(httpClient, 1).url).toBe(
+        `${BASE_URL}/node/page/${PAGE_UUID}/field_archivos`,
+      );
+      expect(result.data?.attachment_url).toBe(FILE_URL);
+    });
+
+    it('2.14bis deberia preferir field_fichero_adjunto, el unico verificado', async () => {
+      // 1. Arrange 📐: el sondeo contra Madrid+D confirmo que `node--page`
+      //    declara `field_fichero_adjunto`. Encabeza la lista de candidatos
+      //    justamente por eso: los demas son conjeturas por convencion de
+      //    nombre, y ante un bundle que declarase dos hay que probar antes el
+      //    que se sabe que existe. Este caso fija esa precedencia.
+      const httpClient = buildHttpMock();
+      httpClient.requestWithStatus
+        .mockResolvedValueOnce(
+          pageResponse('', PAGE_UUID, 55_937, {
+            field_archivos: { data: null },
+            field_fichero_adjunto: { data: null },
+          }),
+        )
+        .mockResolvedValueOnce(fileResponse())
+        .mockResolvedValueOnce(pageResponse(''));
+      const strategy = buildStrategy(httpClient);
+
+      // 2. Act ⚙️: el configurado no existe en el bundle, asi que se autodescubre.
+      const result = await strategy.execute(attachmentContext(), {
+        ...uploadAppendParams,
+        fileFieldName: 'field_inexistente',
+      });
+
+      // 3. Assert 🎯
+      expect(callConfig(httpClient, 1).url).toBe(
+        `${BASE_URL}/node/page/${PAGE_UUID}/field_fichero_adjunto`,
+      );
+      expect(result.data?.attachment_url).toBe(FILE_URL);
+    });
+
+    it('2.15 NO deberia intentar la subida si el bundle no declara ficheros', async () => {
+      // 1. Arrange 📐: clausula de guarda. La peticion condenada se descarta
+      //    antes de tocar la red, no despues de que Drupal la rechace.
+      const httpClient = buildHttpMock();
+      httpClient.requestWithStatus
+        .mockResolvedValueOnce(pageResponse('', PAGE_UUID, 55_937, {}))
+        .mockResolvedValueOnce(pageResponse(''));
+      const strategy = buildStrategy(httpClient);
+
+      // 2. Act ⚙️
+      const result = await strategy.execute(
+        attachmentContext(),
+        uploadAppendParams,
+      );
+
+      // 3. Assert 🎯: solo GET y PATCH.
+      expect(result.success).toBe(true);
+      expect(httpClient.requestWithStatus).toHaveBeenCalledTimes(2);
+      expect(result.data?.attachment_url).toBe('');
+    });
+  });
+
+  describe('2bis. APPEND_HTML_BLOCK · despacho jerarquico de paneles', () => {
+    const appendParams = {
+      operationMode: DrupalOperationMode.APPEND_HTML_BLOCK,
+      bundle: 'node--page',
+      targetNodeUuid: PAGE_UUID,
+      containerSelector: '#accordion',
+    };
+
+    /** Panel de comite al molde de la plantilla de la migracion 034. */
+    const panel = (code: string, accordion: string): string =>
+      `<div class="panel panel-default" data-protodo-injected="true">` +
+      '<div class="panel-heading"><h5 class="panel-title">' +
+      `<a class="panel-toggle-link" data-parent="${accordion}" href="#collapse${code}">` +
+      `<strong class="panel-comite-codigo">${code}</strong></a>` +
+      `</h5></div><div class="collapse" id="collapse${code}"><p>Cuerpo</p></div></div>`;
+
+    /** Acordeon de dos niveles, como el del portal pero con dos universidades. */
+    const ACCORDION_PAGE =
+      '<div id="accordion">' +
+      '<div class="panel panel-default"><div class="collapse" id="collapseUAM">' +
+      '<div id="accordionUAM"></div></div></div>' +
+      '<div class="panel panel-default"><div class="collapse" id="collapseUCM">' +
+      '<div id="accordionUCM"></div></div></div>' +
+      '</div>';
+
+    /** El HTML que viajo en el PATCH de la llamada indicada. */
+    const sentHtml = (httpClient: HttpMock, index: number): string =>
+      (
+        (
+          callBody(httpClient, index).data?.attributes as Record<
+            string,
+            unknown
+          >
+        ).body as Record<string, string>
+      ).value;
+
+    it('2bis.1 deberia meter cada panel en el sub-acordeon de SU universidad', async () => {
+      // 1. Arrange 📐: EL caso. Antes, el fragmento entero iba al
+      //    `containerSelector` y los dos comites acababan juntos en la raiz,
+      //    fuera de la universidad que les corresponde.
+      const httpClient = buildHttpMock();
+      httpClient.requestWithStatus
+        .mockResolvedValueOnce(pageResponse(ACCORDION_PAGE))
+        .mockResolvedValueOnce(pageResponse(''));
+      const strategy = buildStrategy(httpClient);
+
+      // 2. Act ⚙️
+      const result = await strategy.execute(
+        buildContext({
+          [SOURCE_NAMESPACE]: {
+            [SOURCE_FIELD]:
+              panel('UAM 9', '#accordionUAM') + panel('UCM 3', '#accordionUCM'),
+          },
+        }),
+        appendParams,
+      );
+
+      // 3. Assert 🎯: cada panel DENTRO de su contenedor, no detras de el.
+      const html = sentHtml(httpClient, 1);
+      const $ = cheerio.load(html, { xml: { xmlMode: false } }, false);
+
+      expect(result.success).toBe(true);
+      expect($('#accordionUAM .panel-comite-codigo').text()).toBe('UAM 9');
+      expect($('#accordionUCM .panel-comite-codigo').text()).toBe('UCM 3');
+    });
+
+    it('should resolve accordion panel ID dynamically via text search when target is ESIC/UFV in Verificación de Títulos', async () => {
+      // 1. Arrange 📐: la colision real. El panel de ESIC despliega
+      //    `#collapseUFV`, Francisco de Vitoria REPITE ese identificador y va
+      //    antes en el documento, y `#accordionESIC` no existe. El encabezado de
+      //    ESIC llega con la indentacion y los `&nbsp;` de Drupal.
+      const page =
+        '<div id="accordion">' +
+        '<div class="panel panel-default d-none"><div class="panel-heading"><h4>' +
+        '<a href="#collapseUFV" data-parent="#accordion">Universidad Francisco de Vitoria</a>' +
+        '</h4></div><div class="collapse" id="collapseUFV">' +
+        '<div class="panel-group" id="accordionUFV"></div></div></div>' +
+        '<div class="panel panel-default"><div class="panel-heading"><h4>' +
+        '<a href="#collapseUFV" data-parent="#accordion">\n   ESIC&nbsp;&nbsp;Universidad \t</a>' +
+        '</h4></div><div class="collapse" id="collapseUFV">' +
+        '<div class="panel-group" id="accordionUFV"></div></div></div>' +
+        '</div>';
+      const httpClient = buildHttpMock();
+      httpClient.requestWithStatus
+        .mockResolvedValueOnce(pageResponse(page))
+        .mockResolvedValueOnce(pageResponse(''));
+      const strategy = buildStrategy(httpClient);
+
+      // 2. Act ⚙️
+      const result = await strategy.execute(
+        buildContext({
+          [SOURCE_NAMESPACE]: {
+            [SOURCE_FIELD]: panel('ESIC 2', '#accordionESIC'),
+          },
+        }),
+        appendParams,
+      );
+
+      // 3. Assert 🎯: en el panel de ESIC y NUNCA en el de Francisco de Vitoria.
+      const $ = cheerio.load(
+        sentHtml(httpClient, 1),
+        {
+          xml: { xmlMode: false },
+        },
+        false,
+      );
+      const universities = $('#accordion > .panel');
+
+      expect(result.success).toBe(true);
+      expect(universities.eq(1).find('.panel-comite-codigo').text()).toBe(
+        'ESIC 2',
+      );
+      expect(universities.eq(0).find('.panel-comite-codigo')).toHaveLength(0);
+    });
+
+    it('2bis.1bis NO deberia mandar un comite de ESIC al acordeon de Francisco de Vitoria', async () => {
+      // 1. Arrange 📐: la pagina solo tiene el panel de Francisco de Vitoria.
+      const page =
+        '<div id="accordion"><div class="panel panel-default"><div class="panel-heading"><h4>' +
+        '<a href="#collapseUFV">Universidad Francisco de Vitoria</a></h4></div>' +
+        '<div class="collapse" id="collapseUFV"><div class="panel-group" id="accordionUFV"></div></div>' +
+        '</div></div>';
+      const httpClient = buildHttpMock();
+      httpClient.requestWithStatus.mockResolvedValueOnce(pageResponse(page));
+      const strategy = buildStrategy(httpClient);
+
+      // 2. Act ⚙️
+      const result = await strategy.execute(
+        buildContext({
+          [SOURCE_NAMESPACE]: {
+            [SOURCE_FIELD]: panel('ESIC 2', '#accordionESIC'),
+          },
+        }),
+        appendParams,
+      );
+
+      // 3. Assert 🎯: todo o nada, sin PATCH. El `#collapseUFV` de la pagina
+      //    cuelga de «Universidad Francisco de Vitoria», no de ESIC: la guarda
+      //    por encabezado lo descarta y el comite se queda sin destino.
+      expect(result.success).toBe(false);
+      expect(result.error?.code).toBe(ERR_DRUPAL_TARGET_NOT_FOUND);
+      expect(result.error?.missingFields).toEqual(['ESIC 2']);
+      expect(httpClient.requestWithStatus).toHaveBeenCalledTimes(1);
+    });
+
+    it('2bis.1ter deberia publicar un comite de ESIC en el #accordionUFV bajo el encabezado de ESIC', async () => {
+      // 1. Arrange 📐: pagina de produccion; la seccion de ESIC lleva el id
+      //    heredado UFV y el panel trae el `data-parent` generico.
+      const page =
+        '<div id="accordion"><div class="panel panel-default"><div class="panel-heading"><h4>' +
+        '<a href="#collapseUFV">ESIC Universidad</a></h4></div>' +
+        '<div class="collapse" id="collapseUFV"><div class="panel-group" id="accordionUFV"></div></div>' +
+        '</div></div>';
+      const httpClient = buildHttpMock();
+      httpClient.requestWithStatus
+        .mockResolvedValueOnce(pageResponse(page))
+        .mockResolvedValueOnce(pageResponse(''));
+      const strategy = buildStrategy(httpClient);
+
+      // 2. Act ⚙️
+      const result = await strategy.execute(
+        buildContext({
+          [SOURCE_NAMESPACE]: {
+            [SOURCE_FIELD]: panel('ESIC 1', '#accordion'),
+          },
+        }),
+        appendParams,
+      );
+
+      // 3. Assert 🎯
+      expect(result.success).toBe(true);
+      const $ = cheerio.load(sentHtml(httpClient, 1), null, false);
+      expect($('#accordionUFV .panel-comite-codigo').text()).toBe('ESIC 1');
+    });
+
+    it('2bis.2 NO deberia tocar la pagina si un destino no existe', async () => {
+      // 1. Arrange 📐: todo o nada. Mandar el huerfano al `containerSelector`
+      //    es justo la averia que esto arregla: aterriza en la raiz, la
+      //    ejecucion se marca EXITOSA y nadie se entera a tiempo.
+      const httpClient = buildHttpMock();
+      httpClient.requestWithStatus.mockResolvedValueOnce(
+        pageResponse(ACCORDION_PAGE),
+      );
+      const strategy = buildStrategy(httpClient);
+
+      // 2. Act ⚙️
+      const result = await strategy.execute(
+        buildContext({
+          [SOURCE_NAMESPACE]: {
+            [SOURCE_FIELD]:
+              panel('UAM 9', '#accordionUAM') + panel('UPM 2', '#accordionUPM'),
+          },
+        }),
+        appendParams,
+      );
+
+      // 3. Assert 🎯: ningun PATCH, y el CODIGO DEL COMITE en `missingFields`
+      //    —es lo que permite localizarlo en el material de origen—.
+      expect(result.success).toBe(false);
+      expect(result.error?.code).toBe(ERR_DRUPAL_DOM_TARGET);
+      expect(result.error?.missingFields).toEqual(['UPM 2']);
+      expect(httpClient.requestWithStatus).toHaveBeenCalledTimes(1);
+    });
+
+    it('2bis.2bis deberia inyectar en el sub-acordeon VISIBLE y no en el oculto', async () => {
+      // 1. Arrange 📐: la pagina real trae una plantilla de muestra escondida en
+      //    un `<div class="d-none">` que DUPLICA los contenedores del portal, y
+      //    el duplicado aparece ANTES en el documento. Con `$(selector).first()`
+      //    el panel aterrizaba dentro de la muestra: el PATCH devolvia 200, el
+      //    nodo se marcaba EXITOSO y el comite no se veia en la pagina.
+      const PAGE_WITH_HIDDEN_SAMPLE =
+        '<div class="d-none"><div class="panel panel-default">' +
+        '<div id="accordionUFV"></div></div></div>' +
+        '<div id="accordion"><div class="panel panel-default">' +
+        '<div class="collapse" id="collapseUFV">' +
+        '<div id="accordionUFV"></div></div></div></div>';
+
+      const httpClient = buildHttpMock();
+      httpClient.requestWithStatus
+        .mockResolvedValueOnce(pageResponse(PAGE_WITH_HIDDEN_SAMPLE))
+        .mockResolvedValueOnce(pageResponse(''));
+      const strategy = buildStrategy(httpClient);
+
+      // 2. Act ⚙️
+      const result = await strategy.execute(
+        buildContext({
+          [SOURCE_NAMESPACE]: {
+            [SOURCE_FIELD]: panel('UFV 1', '#accordionUFV'),
+          },
+        }),
+        appendParams,
+      );
+
+      // 3. Assert 🎯
+      expect(result.success).toBe(true);
+
+      const html = sentHtml(httpClient, 1);
+      const $ = cheerio.load(html, { xml: { xmlMode: false } }, false);
+
+      // El panel esta DENTRO del acordeon visible...
+      expect($('#accordion #accordionUFV .panel-comite-codigo').text()).toBe(
+        'UFV 1',
+      );
+      // ...y la muestra oculta sigue vacia, sin haber recibido nada.
+      expect($('.d-none #accordionUFV').children()).toHaveLength(0);
+      // Y se inyecto UNA sola vez, no en los dos contenedores homonimos.
+      expect($('.panel-comite-codigo')).toHaveLength(1);
+    });
+
+    it('2bis.3 deberia cazar el relleno de la plantilla sin sustituir', async () => {
+      // 1. Arrange 📐: si el modelo no reemplaza el literal, el destino no
+      //    existe y el nodo para aqui en vez de publicar fuera de sitio.
+      const httpClient = buildHttpMock();
+      httpClient.requestWithStatus.mockResolvedValueOnce(
+        pageResponse(ACCORDION_PAGE),
+      );
+      const strategy = buildStrategy(httpClient);
+
+      // 2. Act ⚙️
+      const result = await strategy.execute(
+        buildContext({
+          [SOURCE_NAMESPACE]: {
+            [SOURCE_FIELD]: panel('UAM 9', '#accordionPadreId'),
+          },
+        }),
+        appendParams,
+      );
+
+      // 3. Assert 🎯
+      expect(result.success).toBe(false);
+      expect(result.error?.message).toContain('#accordionPadreId');
+    });
+
+    it('2bis.4 deberia respetar insertPosition dentro del sub-acordeon', async () => {
+      // 1. Arrange 📐: el despacho cambia el DONDE, no el orden.
+      const httpClient = buildHttpMock();
+      httpClient.requestWithStatus
+        .mockResolvedValueOnce(
+          pageResponse(
+            '<div id="accordion"><div id="accordionUAM">' +
+              '<div class="panel panel-default" data-previo="si"></div>' +
+              '</div></div>',
+          ),
+        )
+        .mockResolvedValueOnce(pageResponse(''));
+      const strategy = buildStrategy(httpClient);
+
+      // 2. Act ⚙️
+      await strategy.execute(
+        buildContext({
+          [SOURCE_NAMESPACE]: {
+            [SOURCE_FIELD]: panel('UAM 9', '#accordionUAM'),
+          },
+        }),
+        { ...appendParams, insertPosition: 'APPEND' },
+      );
+
+      // 3. Assert 🎯
+      const html = sentHtml(httpClient, 1);
+
+      expect(html.indexOf('UAM 9')).toBeGreaterThan(
+        html.indexOf('data-previo'),
+      );
+    });
+
+    it('2bis.4bis deberia DESTAPAR el sub-acordeon oculto que recibe el panel', async () => {
+      // 1. Arrange 📐: un sub-acordeon al que no se le ha inyectado nada
+      //    todavia puede venir oculto, y entonces el primer comite se publica
+      //    sin verse. No lo delata ninguna respuesta HTTP: el PATCH da 200.
+      //
+      //    Se ejercen las DOS convenciones porque la pagina y la plantilla no
+      //    usan la misma version de Bootstrap: el portal presenta `.panel` y
+      //    `.panel-heading` (BS3, donde la clase es `hidden`) mientras que la
+      //    plantilla emite `data-bs-toggle` (BS5, donde es `d-none`).
+      const httpClient = buildHttpMock();
+      httpClient.requestWithStatus
+        .mockResolvedValueOnce(
+          pageResponse(
+            '<div id="accordion">' +
+              '<div id="accordionUAM" class="panel-group d-none"></div>' +
+              '<div id="accordionUCM" class="panel-group hidden"></div>' +
+              '</div>',
+          ),
+        )
+        .mockResolvedValueOnce(pageResponse(''));
+      const strategy = buildStrategy(httpClient);
+
+      // 2. Act ⚙️
+      const result = await strategy.execute(
+        buildContext({
+          [SOURCE_NAMESPACE]: {
+            [SOURCE_FIELD]:
+              panel('UAM 9', '#accordionUAM') + panel('UCM 3', '#accordionUCM'),
+          },
+        }),
+        appendParams,
+      );
+
+      // 3. Assert 🎯: las utilidades de ocultacion caen y `panel-group`
+      //    SOBREVIVE. Vaciar la clase entera romperia la maquetacion del
+      //    portal, que es un precio mas alto que el problema que se arregla.
+      const $ = cheerio.load(
+        sentHtml(httpClient, 1),
+        { xml: { xmlMode: false } },
+        false,
+      );
+
+      expect(result.success).toBe(true);
+      expect($('#accordionUAM').attr('class')).toBe('panel-group');
+      expect($('#accordionUCM').attr('class')).toBe('panel-group');
+    });
+
+    it('2bis.5 NO deberia alterar la ruta de los flujos que no usan paneles', async () => {
+      // 1. Arrange 📐: licitaciones y Notiweb publican bloques que no son
+      //    `.panel.panel-default` y no declaran destino. Sin esta bifurcacion
+      //    se quedarian sin contenedor y fallarian en bloque.
+      const httpClient = buildHttpMock();
+      httpClient.requestWithStatus
+        .mockResolvedValueOnce(
+          pageResponse(`<div id="accordion">${OTHER_BLOCK}</div>`),
+        )
+        .mockResolvedValueOnce(pageResponse(''));
+      const strategy = buildStrategy(httpClient);
+
+      // 2. Act ⚙️
+      const result = await strategy.execute(buildContext(), appendParams);
+
+      // 3. Assert 🎯
+      expect(result.success).toBe(true);
+      expect(sentHtml(httpClient, 1)).toContain(MARKUP);
+    });
+  });
+
+  describe('3. TRANSFER_HTML_BLOCK: orden de escritura y atomicidad', () => {
+    const transferParams = {
+      operationMode: DrupalOperationMode.TRANSFER_HTML_BLOCK,
+      bundle: 'node--page',
+      targetNodeUuid: PAGE_UUID,
+      destinationNodeUuid: CLOSED_UUID,
+      itemSelector: EXPEDIENTE,
+    };
+
+    /** GET origen (con bloque), GET destino (vacio), PATCH destino, PATCH origen. */
+    const mockHappyPath = (httpClient: HttpMock): void => {
+      httpClient.requestWithStatus
+        .mockResolvedValueOnce(pageResponse(BLOCK + OTHER_BLOCK, PAGE_UUID))
+        .mockResolvedValueOnce(pageResponse('', CLOSED_UUID, 55_938))
+        .mockResolvedValueOnce(pageResponse('', CLOSED_UUID, 55_938))
+        .mockResolvedValueOnce(pageResponse('', PAGE_UUID));
+    };
+
+    it('should execute TRANSFER_HTML_BLOCK by cutting DOM block from open tenders page and pasting to closed tenders page', async () => {
+      // 1. Arrange 📐: el bloque del expediente vive en abiertas; cerradas
+      //    esta vacia.
+      const httpClient = buildHttpMock();
+      mockHappyPath(httpClient);
+      const strategy = buildStrategy(httpClient);
+
+      // 2. Act ⚙️
+      const result = await strategy.execute(buildContext(), transferParams);
+
+      // 3. Assert 🎯: PATCH a cerradas con el bloque y PATCH a abiertas sin el.
+      const bodyOf = (index: number): string =>
+        (
+          (
+            callBody(httpClient, index).data?.attributes as Record<
+              string,
+              unknown
+            >
+          ).body as Record<string, string>
+        ).value ?? '';
+
+      expect(result.success).toBe(true);
+      expect(callConfig(httpClient, 2).url).toContain(CLOSED_UUID);
+      expect(bodyOf(2)).toContain('data-expediente="S_2026_015"');
+      expect(callConfig(httpClient, 3).url).toContain(PAGE_UUID);
+      expect(bodyOf(3)).not.toContain('S_2026_015');
+      expect(bodyOf(3)).toContain('S_2026_001');
+    });
+
+    it('should insert extracted HTML block inside targetContainerSelector element during TRANSFER_HTML_BLOCK', async () => {
+      // 1. Arrange 📐: la pagina de cerradas es un acordeon; el bloque tiene
+      //    que entrar en su cuerpo y no en la raiz.
+      const closedPage =
+        '<div id="collapse2"><div class="panel-body"><p>Antigua</p></div></div>';
+      const httpClient = buildHttpMock();
+      httpClient.requestWithStatus
+        .mockResolvedValueOnce(pageResponse(BLOCK + OTHER_BLOCK, PAGE_UUID))
+        .mockResolvedValueOnce(pageResponse(closedPage, CLOSED_UUID, 55_938))
+        .mockResolvedValueOnce(pageResponse('', CLOSED_UUID, 55_938))
+        .mockResolvedValueOnce(pageResponse('', PAGE_UUID));
+      const strategy = buildStrategy(httpClient);
+
+      // 2. Act ⚙️
+      const result = await strategy.execute(buildContext(), {
+        ...transferParams,
+        targetContainerSelector: '#collapse2 > .panel-body',
+        insertPosition: 'PREPEND',
+      });
+
+      // 3. Assert 🎯: dentro del contenedor y DELANTE de lo que ya habia.
+      const sent = (
+        (callBody(httpClient, 2).data?.attributes as Record<string, unknown>)
+          .body as Record<string, string>
+      ).value;
+      const $ = cheerio.load(sent, { xml: { xmlMode: false } }, false);
+      const children = $('#collapse2 > .panel-body').children();
+
+      expect(result.success).toBe(true);
+      expect(children.first().attr('data-expediente')).toBe('S_2026_015');
+      expect(children.last().text()).toBe('Antigua');
+    });
+
+    it('3.0bis NO deberia escribir nada si el contenedor de destino no existe', async () => {
+      // 1. Arrange 📐: cerradas no tiene el acordeon esperado.
+      const httpClient = buildHttpMock();
+      httpClient.requestWithStatus
+        .mockResolvedValueOnce(pageResponse(BLOCK + OTHER_BLOCK, PAGE_UUID))
+        .mockResolvedValueOnce(
+          pageResponse('<p>Otra</p>', CLOSED_UUID, 55_938),
+        );
+      const strategy = buildStrategy(httpClient);
+
+      // 2. Act ⚙️
+      const result = await strategy.execute(buildContext(), {
+        ...transferParams,
+        targetContainerSelector: '#collapse2 > .panel-body',
+      });
+
+      // 3. Assert 🎯: dos GET y ningun PATCH; el bloque sigue en origen.
+      expect(result.success).toBe(false);
+      expect(result.error?.code).toBe(ERR_DRUPAL_DOM_TARGET);
+      expect(result.error?.missingFields).toEqual(['#collapse2 > .panel-body']);
+      expect(httpClient.requestWithStatus).toHaveBeenCalledTimes(2);
+    });
+
+    it('3.0ter deberia nombrar la pagina de destino cuando le falta el contenedor', async () => {
+      // 1. Arrange 📐
+      const httpClient = buildHttpMock();
+      httpClient.requestWithStatus
+        .mockResolvedValueOnce(pageResponse(BLOCK + OTHER_BLOCK, PAGE_UUID))
+        .mockResolvedValueOnce(
+          pageResponse('<p>Otra</p>', CLOSED_UUID, 55_938),
+        );
+      const strategy = buildStrategy(httpClient);
+
+      // 2. Act ⚙️
+      const result = await strategy.execute(buildContext(), {
+        ...transferParams,
+        targetContainerSelector: '#collapse2 > .panel-body',
+      });
+
+      // 3. Assert 🎯: que pagina, que contenedor y que el bloque sigue en origen.
+      expect(result.error?.message).toContain(CLOSED_UUID);
+      expect(result.error?.message).toContain('#collapse2 > .panel-body');
+      expect(result.error?.message).toContain(
+        'el bloque sigue en la de origen',
+      );
+    });
+
+    describe('3.0quater Identidad del bloque trasladado', () => {
+      const GENERIC = '.pd-licitacion-block, .licitacion-entry';
+      const tender = (code: string, text: string): string =>
+        `<div class="pd-licitacion-block" data-expediente="${code}"><p>${text}</p></div>`;
+      const CLOSED_PAGE =
+        '<div id="collapse2"><div class="panel-body">' +
+        tender('S_2025_090', 'Cerrada hace tiempo') +
+        '</div></div>';
+
+      const sentBody = (httpClient: HttpMock, index: number): string =>
+        (
+          (
+            callBody(httpClient, index).data?.attributes as Record<
+              string,
+              unknown
+            >
+          ).body as Record<string, string>
+        ).value;
+
+      it('should write the block to the destination even if it already holds other tenders when the selector is generic', async () => {
+        // 1. Arrange 📐: LA AVERIA. Cerradas ya tenia una licitacion, el
+        //    selector generico casaba en destino y el traslado se daba por
+        //    hecho: se retiraba de origen sin escribirse en destino.
+        const httpClient = buildHttpMock();
+        httpClient.requestWithStatus
+          .mockResolvedValueOnce(
+            pageResponse(tender('S_2026_015', 'Abierta'), PAGE_UUID),
+          )
+          .mockResolvedValueOnce(pageResponse(CLOSED_PAGE, CLOSED_UUID, 55_938))
+          .mockResolvedValueOnce(pageResponse('', CLOSED_UUID, 55_938))
+          .mockResolvedValueOnce(pageResponse('', PAGE_UUID));
+        const strategy = buildStrategy(httpClient);
+
+        // 2. Act ⚙️
+        const result = await strategy.execute(buildContext(), {
+          ...transferParams,
+          itemSelector: GENERIC,
+          targetContainerSelector: '#collapse2 > .panel-body',
+        });
+
+        // 3. Assert 🎯: PRIMERO destino con el bloque, DESPUES origen sin el.
+        expect(result.success).toBe(true);
+        expect(callConfig(httpClient, 2).url).toContain(CLOSED_UUID);
+        expect(sentBody(httpClient, 2)).toContain(
+          'data-expediente="S_2026_015"',
+        );
+        expect(sentBody(httpClient, 2)).toContain('S_2025_090');
+        expect(callConfig(httpClient, 3).url).toContain(PAGE_UUID);
+        expect(sentBody(httpClient, 3)).not.toContain('S_2026_015');
+      });
+
+      it('3.0quater.2 NO deberia dar por hecho el traslado con un selector generico y el origen vacio', async () => {
+        // 1. Arrange 📐: no hay nada que cerrar en abiertas.
+        const httpClient = buildHttpMock();
+        httpClient.requestWithStatus
+          .mockResolvedValueOnce(
+            pageResponse('<p>Sin licitaciones</p>', PAGE_UUID),
+          )
+          .mockResolvedValueOnce(
+            pageResponse(CLOSED_PAGE, CLOSED_UUID, 55_938),
+          );
+        const strategy = buildStrategy(httpClient);
+
+        // 2. Act ⚙️
+        const result = await strategy.execute(buildContext(), {
+          ...transferParams,
+          itemSelector: GENERIC,
+        });
+
+        // 3. Assert 🎯: error explicito y ningun PATCH.
+        expect(result.success).toBe(false);
+        expect(result.error?.code).toBe(ERR_DRUPAL_DOM_TARGET);
+        expect(result.error?.message).toContain(PAGE_UUID);
+        expect(httpClient.requestWithStatus).toHaveBeenCalledTimes(2);
+      });
+
+      it('3.0quater.3 deberia cerrar el expediente que pide el contexto y no el primero de la pagina', async () => {
+        // 1. Arrange 📐: el elegido es el SEGUNDO de abiertas.
+        const httpClient = buildHttpMock();
+        httpClient.requestWithStatus
+          .mockResolvedValueOnce(
+            pageResponse(
+              tender('S_2026_001', 'Primera') + tender('S_2026_015', 'Elegida'),
+              PAGE_UUID,
+            ),
+          )
+          .mockResolvedValueOnce(pageResponse('', CLOSED_UUID, 55_938))
+          .mockResolvedValueOnce(pageResponse('', CLOSED_UUID, 55_938))
+          .mockResolvedValueOnce(pageResponse('', PAGE_UUID));
+        const strategy = buildStrategy(httpClient);
+
+        // 2. Act ⚙️
+        const result = await strategy.execute(
+          buildContext({ llm_response: { headline: 'S_2026_015' } }),
+          {
+            ...transferParams,
+            itemSelector: '[data-expediente="{{llm_response.headline}}"]',
+          },
+        );
+
+        // 3. Assert 🎯
+        expect(result.success).toBe(true);
+        expect(sentBody(httpClient, 2)).toContain('Elegida');
+        expect(sentBody(httpClient, 2)).not.toContain('Primera');
+        expect(sentBody(httpClient, 3)).toContain('Primera');
+      });
+
+      it('3.0quater.4 deberia exigir el namespace citado en el selector del bloque', () => {
+        const strategy = buildStrategy(buildHttpMock());
+
+        expect(
+          strategy.getRequiredNamespaces({
+            ...transferParams,
+            itemSelector: '[data-expediente="{{llm_response.headline}}"]',
+          }),
+        ).toEqual(['llm_response']);
+      });
+
+      it.each([
+        ['itemSelector', { itemSelector: 'div:nope' }, 1],
+        ['targetContainerSelector', { targetContainerSelector: 'a >> b' }, 2],
+      ])(
+        '3.0quater.5 deberia convertir un %s invalido en ERR_DRUPAL_DOM_TARGET sin escribir',
+        async (_param, override, reads) => {
+          // 1. Arrange 📐: cheerio LANZA con estos selectores; antes la
+          //    excepcion salia de la estrategia y el motor la hacia URGENTE.
+          const httpClient = buildHttpMock();
+          httpClient.requestWithStatus
+            .mockResolvedValueOnce(pageResponse(BLOCK + OTHER_BLOCK, PAGE_UUID))
+            .mockResolvedValueOnce(pageResponse('', CLOSED_UUID, 55_938));
+          const strategy = buildStrategy(httpClient);
+
+          // 2. Act ⚙️
+          const result = await strategy.execute(buildContext(), {
+            ...transferParams,
+            ...override,
+          });
+
+          // 3. Assert 🎯: solo lecturas, ninguna escritura.
+          expect(result.success).toBe(false);
+          expect(result.error?.code).toBe(ERR_DRUPAL_DOM_TARGET);
+          expect(httpClient.requestWithStatus).toHaveBeenCalledTimes(reads);
+        },
+      );
+    });
+
+    it('3.1 deberia escribir PRIMERO en destino y DESPUES retirar de origen', async () => {
+      // 1. Arrange 📐: es la decision central del modo. Al reves, el fallo de la
+      //    segunda escritura PIERDE el bloque —ya no esta en origen y nunca
+      //    llego a destino—, y como solo vivia dentro del `body.value` de la
+      //    agregadora, la perdida es silenciosa e irreversible.
+      const httpClient = buildHttpMock();
+      mockHappyPath(httpClient);
+      const strategy = buildStrategy(httpClient);
+
+      // 2. Act ⚙️
+      await strategy.execute(buildContext(), transferParams);
+
+      // 3. Assert 🎯: las dos escrituras, en este orden.
+      const patches = httpClient.requestWithStatus.mock.calls
+        .map(([config]) => config)
+        .filter((config) => config.method === 'PATCH');
+
+      expect(patches).toHaveLength(2);
+      expect(patches[0]?.url).toContain(CLOSED_UUID);
+      expect(patches[1]?.url).toContain(PAGE_UUID);
+    });
+
+    it('3.2 deberia mover el bloque y dejar el resto de origen intacto', async () => {
+      const httpClient = buildHttpMock();
+      mockHappyPath(httpClient);
+      const strategy = buildStrategy(httpClient);
+
+      await strategy.execute(buildContext(), transferParams);
+
+      const toDestination = (
+        callBody(httpClient, 2).data?.attributes as Record<string, unknown>
+      ).body as Record<string, string>;
+      const toSource = (
+        callBody(httpClient, 3).data?.attributes as Record<string, unknown>
+      ).body as Record<string, string>;
+
+      expect(toDestination.value).toContain('S_2026_015');
+      expect(toSource.value).not.toContain('S_2026_015');
+      expect(toSource.value).toContain('S_2026_001');
+    });
+
+    it('3.3 NO deberia escribir nada si el selector no casa en ninguna pagina', async () => {
+      const httpClient = buildHttpMock();
+      httpClient.requestWithStatus
+        .mockResolvedValueOnce(pageResponse(OTHER_BLOCK, PAGE_UUID))
+        .mockResolvedValueOnce(pageResponse('', CLOSED_UUID));
+      const strategy = buildStrategy(httpClient);
+
+      const result = await strategy.execute(buildContext(), transferParams);
+
+      expect(result.success).toBe(false);
+      expect(result.error?.code).toBe(ERR_DRUPAL_DOM_TARGET);
+      expect(
+        httpClient.requestWithStatus.mock.calls.every(
+          ([config]) => config.method === 'GET',
+        ),
+      ).toBe(true);
+    });
+
+    it('3.4 deberia dejar el bloque INTACTO en origen si falla la escritura en destino', async () => {
+      // 1. Arrange 📐: esta es la ventana segura. Nada se ha perdido y el nodo
+      //    entero se puede reintentar.
+      const httpClient = buildHttpMock();
+      httpClient.requestWithStatus
+        .mockResolvedValueOnce(pageResponse(BLOCK, PAGE_UUID))
+        .mockResolvedValueOnce(pageResponse('', CLOSED_UUID))
+        .mockResolvedValueOnce(httpFailure(503));
+      const strategy = buildStrategy(httpClient);
+
+      // 2. Act ⚙️
+      const result = await strategy.execute(buildContext(), transferParams);
+
+      // 3. Assert 🎯: nunca se llego a tocar la pagina de origen.
+      expect(result.success).toBe(false);
+      expect(result.error?.code).toBe(ERR_DRUPAL_SERVER);
+      expect(
+        httpClient.requestWithStatus.mock.calls.some(
+          ([config]) =>
+            config.method === 'PATCH' && config.url?.includes(PAGE_UUID),
+        ),
+      ).toBe(false);
+    });
+
+    it('3.5 deberia marcar el traslado como PARCIAL si falla la retirada de origen', async () => {
+      // 1. Arrange 📐: la unica ventana de fallo real. Produce un DUPLICADO
+      //    visible, no una perdida, y hay que poder distinguirlo sin leer texto.
+      const httpClient = buildHttpMock();
+      httpClient.requestWithStatus
+        .mockResolvedValueOnce(pageResponse(BLOCK, PAGE_UUID))
+        .mockResolvedValueOnce(pageResponse('', CLOSED_UUID, 55_938))
+        .mockResolvedValueOnce(pageResponse('', CLOSED_UUID, 55_938))
+        .mockResolvedValueOnce(httpFailure(500));
+      const strategy = buildStrategy(httpClient);
+
+      // 2. Act ⚙️
+      const result = await strategy.execute(buildContext(), transferParams);
+
+      // 3. Assert 🎯
+      expect(result.success).toBe(false);
+      expect(result.data).toMatchObject({
+        operation_applied: TRANSFER_PARTIAL_OPERATION,
+        node_id: CLOSED_UUID,
+      });
+      expect(result.error?.message).toContain(CLOSED_UUID);
+      expect(result.error?.message).toContain(PAGE_UUID);
+      expect(result.error?.message).toContain('DUPLICADO');
+    });
+
+    it('3.6 deberia ser IDEMPOTENTE si el bloque ya esta en destino', async () => {
+      // 1. Arrange 📐: es lo que hace seguro reintentar tras un traslado
+      //    parcial. Sin esta guarda, el reintento duplicaria en destino.
+      const httpClient = buildHttpMock();
+      httpClient.requestWithStatus
+        .mockResolvedValueOnce(pageResponse(BLOCK, PAGE_UUID))
+        .mockResolvedValueOnce(pageResponse(BLOCK, CLOSED_UUID, 55_938))
+        .mockResolvedValueOnce(pageResponse('', PAGE_UUID));
+      const strategy = buildStrategy(httpClient);
+
+      // 2. Act ⚙️
+      const result = await strategy.execute(buildContext(), transferParams);
+
+      // 3. Assert 🎯: una sola escritura, y va a ORIGEN (la limpieza pendiente).
+      const patches = httpClient.requestWithStatus.mock.calls
+        .map(([config]) => config)
+        .filter((config) => config.method === 'PATCH');
+
+      expect(result.success).toBe(true);
+      expect(patches).toHaveLength(1);
+      expect(patches[0]?.url).toContain(PAGE_UUID);
+    });
+
+    it('3.7 deberia cerrar en exito si el traslado ya se completo entero', async () => {
+      // 1. Arrange 📐: ni en origen ni pendiente de limpiar. El trabajo ya
+      //    estaba hecho y repetirlo no tiene sentido.
+      const httpClient = buildHttpMock();
+      httpClient.requestWithStatus
+        .mockResolvedValueOnce(pageResponse(OTHER_BLOCK, PAGE_UUID))
+        .mockResolvedValueOnce(pageResponse(BLOCK, CLOSED_UUID, 55_938));
+      const strategy = buildStrategy(httpClient);
+
+      // 2. Act ⚙️
+      const result = await strategy.execute(buildContext(), transferParams);
+
+      // 3. Assert 🎯
+      expect(result.success).toBe(true);
+      expect(result.data).toMatchObject({ node_id: CLOSED_UUID });
+      expect(
+        httpClient.requestWithStatus.mock.calls.every(
+          ([config]) => config.method === 'GET',
+        ),
+      ).toBe(true);
+    });
+  });
+
+  describe('3bis. UPDATE_LINK_SOURCE (Innodays)', () => {
+    const INNODAYS_UUID = '3c2b1a0f-9e8d-4c7b-8a69-5f4e3d2c1b0a';
+    const INNODAYS_HTML = [
+      '<style>.x{color:red}</style>',
+      '<table><tr><td>Agrifood</td><td><a class=\'btn\' href="/old-agrifood.pdf">PDF</a></td></tr>',
+      '<tr><td>Salud</td><td><a href="/old-salud.pdf">PDF</a></td></tr></table>',
+      '<div id="carousel-track"><img src=a.jpg alt="1"><img src="b.jpg"></div>',
+      '<script>var a = 1 < 2;</script>',
+    ].join('\n');
+
+    const linkParams = {
+      operationMode: DrupalOperationMode.UPDATE_LINK_SOURCE,
+      bundle: 'node--page',
+      targetNodeUuid: INNODAYS_UUID,
+      linkSelector: "table tr:contains('Agrifood') a",
+      linkAttribute: 'href',
+      linkValueTemplate: '{{llm_response.url}}',
+    };
+
+    const linkContext = (url: string): StatePayloadContext =>
+      buildContext({ llm_response: { url } });
+
+    /** Cuerpo del PATCH (llamada 1, tras el GET). */
+    const patchedBody = (httpClient: HttpMock): string =>
+      (
+        (callBody(httpClient, 1).data?.attributes as Record<string, unknown>)
+          .body as Record<string, string>
+      ).value ?? '';
+
+    it('should execute UPDATE_LINK_SOURCE by updating href/src attribute for Inodace preset', async () => {
+      // 1. Arrange 📐: pagina con estilos, tabla, carrusel y script.
+      const httpClient = buildHttpMock();
+      httpClient.requestWithStatus
+        .mockResolvedValueOnce(pageResponse(INNODAYS_HTML, INNODAYS_UUID))
+        .mockResolvedValueOnce(pageResponse('', INNODAYS_UUID));
+      const strategy = buildStrategy(httpClient);
+
+      // 2. Act ⚙️
+      const result = await strategy.execute(
+        linkContext('https://www.madrimasd.org/innodays/agrifood-2026.pdf'),
+        linkParams,
+      );
+
+      // 3. Assert 🎯: GET + PATCH, y el HTML devuelto es el original salvo
+      //    ESE atributo: comillas, estilos y script intactos byte a byte.
+      expect(result.success).toBe(true);
+      expect(callConfig(httpClient, 0).method).toBe('GET');
+      expect(callConfig(httpClient, 1).method).toBe('PATCH');
+      expect(patchedBody(httpClient)).toBe(
+        INNODAYS_HTML.replace(
+          'href="/old-agrifood.pdf"',
+          'href="https://www.madrimasd.org/innodays/agrifood-2026.pdf"',
+        ),
+      );
+      expect(result.data).toMatchObject({
+        node_id: INNODAYS_UUID,
+        operation_applied: DrupalOperationMode.UPDATE_LINK_SOURCE,
+      });
+    });
+
+    it('3bis.2 deberia actualizar el src de una imagen del carrusel', async () => {
+      // 1. Arrange 📐
+      const httpClient = buildHttpMock();
+      httpClient.requestWithStatus
+        .mockResolvedValueOnce(pageResponse(INNODAYS_HTML, INNODAYS_UUID))
+        .mockResolvedValueOnce(pageResponse('', INNODAYS_UUID));
+      const strategy = buildStrategy(httpClient);
+
+      // 2. Act ⚙️
+      await strategy.execute(linkContext('/sites/default/files/nuevo.jpg'), {
+        ...linkParams,
+        linkSelector: '#carousel-track img:first-child',
+        linkAttribute: 'src',
+      });
+
+      // 3. Assert 🎯: el atributo sin comillas tambien se sustituye limpio.
+      expect(patchedBody(httpClient)).toBe(
+        INNODAYS_HTML.replace(
+          'src=a.jpg',
+          'src="/sites/default/files/nuevo.jpg"',
+        ),
+      );
+    });
+
+    it('3bis.3 NO deberia escribir si el selector casa con varios elementos', async () => {
+      // 1. Arrange 📐: `table a` casa con los dos PDF; elegir uno seria adivinar.
+      const httpClient = buildHttpMock();
+      httpClient.requestWithStatus.mockResolvedValueOnce(
+        pageResponse(INNODAYS_HTML, INNODAYS_UUID),
+      );
+      const strategy = buildStrategy(httpClient);
+
+      // 2. Act ⚙️
+      const result = await strategy.execute(linkContext('/nuevo.pdf'), {
+        ...linkParams,
+        linkSelector: 'table a',
+      });
+
+      // 3. Assert 🎯
+      expect(result.success).toBe(false);
+      expect(result.error?.code).toBe(ERR_DRUPAL_DOM_TARGET);
+      expect(result.error?.message).toContain('2 elementos');
+      expect(httpClient.requestWithStatus).toHaveBeenCalledTimes(1);
+    });
+
+    it('3bis.4 deberia rechazar un esquema javascript: sin llamar a Drupal', async () => {
+      // 1. Arrange 📐: el valor sale de una plantilla que interpola contexto.
+      const httpClient = buildHttpMock();
+      const strategy = buildStrategy(httpClient);
+
+      // 2. Act ⚙️
+      const result = await strategy.execute(
+        linkContext(' java\tscript:alert(1)'),
+        linkParams,
+      );
+
+      // 3. Assert 🎯
+      expect(result.success).toBe(false);
+      expect(result.error?.code).toBe(ERR_DRUPAL_MISSING_PAYLOAD);
+      expect(httpClient.requestWithStatus).not.toHaveBeenCalled();
+    });
+
+    it('3bis.4bis deberia rechazar un data: en el src del preset Innobar', async () => {
+      // 1. Arrange 📐: Innobar comparte modo con Innodays.
+      const httpClient = buildHttpMock();
+      const strategy = buildStrategy(httpClient);
+
+      // 2. Act ⚙️
+      const result = await strategy.execute(
+        linkContext('data:image/svg+xml;base64,PHN2Zz4='),
+        {
+          ...linkParams,
+          linkSelector: '#carousel-track img:first-child',
+          linkAttribute: 'src',
+        },
+      );
+
+      // 3. Assert 🎯
+      expect(result.success).toBe(false);
+      expect(result.error?.code).toBe(ERR_DRUPAL_MISSING_PAYLOAD);
+      expect(httpClient.requestWithStatus).not.toHaveBeenCalled();
+    });
+
+    it('3bis.5 NO deberia hacer PATCH si el enlace ya apuntaba ahi', async () => {
+      // 1. Arrange 📐: reintento tras un PATCH que si llego a aplicarse.
+      const httpClient = buildHttpMock();
+      httpClient.requestWithStatus.mockResolvedValueOnce(
+        pageResponse(INNODAYS_HTML, INNODAYS_UUID),
+      );
+      const strategy = buildStrategy(httpClient);
+
+      // 2. Act ⚙️
+      const result = await strategy.execute(
+        linkContext('/old-agrifood.pdf'),
+        linkParams,
+      );
+
+      // 3. Assert 🎯
+      expect(result.success).toBe(true);
+      expect(httpClient.requestWithStatus).toHaveBeenCalledTimes(1);
+    });
+
+    it('3bis.6 deberia exigir pagina, selector y plantilla para activar el flujo', () => {
+      // 1. Arrange 📐 + 2. Act ⚙️
+      const strategy = buildStrategy(buildHttpMock());
+
+      // 3. Assert 🎯
+      expect(
+        strategy.getIncompleteParams({
+          operationMode: DrupalOperationMode.UPDATE_LINK_SOURCE,
+        }),
+      ).toEqual(['targetNodeUuid', 'linkSelector', 'linkValueTemplate']);
+      expect(strategy.getRequiredNamespaces(linkParams)).toContain(
+        'llm_response',
+      );
+      expect(strategy.getUnreachableErrorCodes(linkParams)).toEqual([]);
+    });
+  });
+
+  describe('3ter. UPDATE_LINK_SOURCE con selector interpolado (Innodays/Innobar)', () => {
+    const EVENTS_UUID = '3c2b1a0f-9e8d-4c7b-8a69-5f4e3d2c1b0a';
+    const EVENTS_HTML =
+      '<table>' +
+      '<tr><td>Mentoring (Encuentro Anual)</td><td><a href="/old-1">Ver</a></td></tr>' +
+      '<tr><td>O\'Donnell &amp; Cía.</td><td><a href="/old-2">Ver</a></td></tr>' +
+      '<tr><td>Otro</td><td><a href="/old-3">Ver</a></td></tr>' +
+      '</table>';
+
+    const eventParams = {
+      operationMode: DrupalOperationMode.UPDATE_LINK_SOURCE,
+      bundle: 'node--page',
+      targetNodeUuid: EVENTS_UUID,
+      linkSelector: "table tr:contains('{{evento.nombre}}') a",
+      linkAttribute: 'href',
+      linkValueTemplate: '{{evento.url}}',
+    };
+
+    const eventContext = (nombre: string): StatePayloadContext =>
+      buildContext({ evento: { nombre, url: 'https://madrimasd.org/nuevo' } });
+
+    const patchedHtml = (httpClient: HttpMock): string =>
+      (
+        (callBody(httpClient, 1).data?.attributes as Record<string, unknown>)
+          .body as Record<string, string>
+      ).value ?? '';
+
+    it('should throw ERR_ELEMENT_NOT_FOUND if selector is not present in target DOM during UPDATE_LINK_SOURCE', async () => {
+      // 1. Arrange 📐: el codigo del contrato es ERR_DRUPAL_DOM_TARGET; las
+      //    rutas `onErrorStep` ya guardadas se ramifican por el.
+      const httpClient = buildHttpMock();
+      httpClient.requestWithStatus.mockResolvedValueOnce(
+        pageResponse(EVENTS_HTML, EVENTS_UUID),
+      );
+      const strategy = buildStrategy(httpClient);
+
+      // 2. Act ⚙️
+      const result = await strategy.execute(
+        eventContext('Evento inexistente'),
+        eventParams,
+      );
+
+      // 3. Assert 🎯: solo el GET, ningun PATCH.
+      expect(result.success).toBe(false);
+      expect(result.error?.code).toBe(ERR_DRUPAL_DOM_TARGET);
+      expect(httpClient.requestWithStatus).toHaveBeenCalledTimes(1);
+    });
+
+    it.each([
+      ['parentesis', 'Mentoring (Encuentro Anual)', '/old-1'],
+      ['comilla y punto', "O'Donnell & Cía.", '/old-2'],
+      ['espacios de mas', '  Mentoring\n (Encuentro   Anual) ', '/old-1'],
+    ])(
+      '3ter.%# deberia casar como texto literal un nombre con %s',
+      async (_case, nombre, previous) => {
+        // 1. Arrange 📐
+        const httpClient = buildHttpMock();
+        httpClient.requestWithStatus
+          .mockResolvedValueOnce(pageResponse(EVENTS_HTML, EVENTS_UUID))
+          .mockResolvedValueOnce(pageResponse('', EVENTS_UUID));
+        const strategy = buildStrategy(httpClient);
+
+        // 2. Act ⚙️
+        const result = await strategy.execute(
+          eventContext(nombre),
+          eventParams,
+        );
+
+        // 3. Assert 🎯: cambia SOLO el enlace de esa fila.
+        const html = patchedHtml(httpClient);
+
+        expect(result.success).toBe(true);
+        expect(html).not.toContain(`href="${previous}"`);
+        expect(html).toContain('href="https://madrimasd.org/nuevo"');
+        expect(html.match(/madrimasd\.org\/nuevo/g)).toHaveLength(1);
+      },
+    );
+
+    it('3ter.4 NO deberia dejar que un valor abra una segunda clausula del selector', async () => {
+      // 1. Arrange 📐: sin escapar, este nombre cerraria el `:contains()` y
+      //    casaria con la fila «Otro».
+      const httpClient = buildHttpMock();
+      httpClient.requestWithStatus.mockResolvedValueOnce(
+        pageResponse(EVENTS_HTML, EVENTS_UUID),
+      );
+      const strategy = buildStrategy(httpClient);
+
+      // 2. Act ⚙️
+      const result = await strategy.execute(
+        eventContext("zzz') a, tr:contains('Otro"),
+        eventParams,
+      );
+
+      // 3. Assert 🎯
+      expect(result.success).toBe(false);
+      expect(result.error?.code).toBe(ERR_DRUPAL_DOM_TARGET);
+      expect(httpClient.requestWithStatus).toHaveBeenCalledTimes(1);
+    });
+
+    it('3ter.5 deberia exigir el namespace citado en el selector', () => {
+      const strategy = buildStrategy(buildHttpMock());
+
+      expect(strategy.getRequiredNamespaces(eventParams)).toEqual(['evento']);
+    });
+  });
+
+  describe('4. UPLOAD_ATTACHMENT', () => {
+    const uploadParams = {
+      operationMode: DrupalOperationMode.UPLOAD_ATTACHMENT,
+      bundle: 'node--page',
+      targetNodeUuid: PAGE_UUID,
+    };
+
+    const withAttachment = (
+      attachment: Record<string, unknown>,
+    ): StatePayloadContext =>
+      buildContext({ raw_email: { attachments: [attachment] } });
+
+    const PDF = {
+      filename: 'expediente.pdf',
+      contentType: 'application/pdf',
+      size: 10,
+      contentBase64: 'JVBERi0xLjQK',
+    };
+
+    it('4.1 deberia hacer POST al endpoint de campo de fichero del anfitrion', async () => {
+      const httpClient = buildHttpMock();
+      httpClient.requestWithStatus.mockResolvedValue(
+        entityResponse({ uri: { url: '/sites/default/files/expediente.pdf' } }),
+      );
+      const strategy = buildStrategy(httpClient);
+
+      await strategy.execute(withAttachment(PDF), uploadParams);
+
+      expect(callConfig(httpClient, 0).url).toBe(
+        `${BASE_URL}/node/page/${PAGE_UUID}/field_adjuntos`,
+      );
+      expect(callConfig(httpClient, 0).method).toBe('POST');
+    });
+
+    it('4.2 deberia enviar los bytes decodificados con cabeceras de binario', async () => {
+      // 1. Arrange 📐: estas cabeceras SOBRESCRIBEN las de JSON:API; este
+      //    endpoint no recibe un documento, recibe el fichero.
+      const httpClient = buildHttpMock();
+      httpClient.requestWithStatus.mockResolvedValue(entityResponse());
+      const strategy = buildStrategy(httpClient);
+
+      // 2. Act ⚙️
+      await strategy.execute(withAttachment(PDF), uploadParams);
+
+      // 3. Assert 🎯
+      expect(callConfig(httpClient, 0).headers).toMatchObject({
+        'Content-Type': 'application/octet-stream',
+        'Content-Disposition': 'file; filename="expediente.pdf"',
+      });
+      expect(Buffer.isBuffer(callConfig(httpClient, 0).data)).toBe(true);
+      expect(
+        (callConfig(httpClient, 0).data as Buffer).toString('base64'),
+      ).toBe(PDF.contentBase64);
+    });
+
+    it('4.3 deberia sanear el nombre para no inyectar cabeceras', async () => {
+      // 1. Arrange 📐: `filename` lo controla quien ENVIA el correo, y aqui
+      //    acaba dentro de una cabecera HTTP. Un `\r\n` la parte en dos.
+      const httpClient = buildHttpMock();
+      httpClient.requestWithStatus.mockResolvedValue(entityResponse());
+      const strategy = buildStrategy(httpClient);
+
+      // 2. Act ⚙️
+      await strategy.execute(
+        withAttachment({
+          ...PDF,
+          filename: 'malo"\r\nX-Inyectado: si\r\n/../etc/passwd',
+        }),
+        uploadParams,
+      );
+
+      // 3. Assert 🎯
+      const disposition = (
+        callConfig(httpClient, 0).headers as Record<string, string>
+      )['Content-Disposition'];
+
+      expect(disposition).not.toContain('\r');
+      expect(disposition).not.toContain('\n');
+      expect(disposition).toBe(
+        'file; filename="maloX-Inyectado: si..etcpasswd"',
+      );
+    });
+
+    it('4.4 deberia seleccionar el adjunto por attachmentIndex', async () => {
+      const httpClient = buildHttpMock();
+      httpClient.requestWithStatus.mockResolvedValue(entityResponse());
+      const strategy = buildStrategy(httpClient);
+
+      await strategy.execute(
+        buildContext({
+          raw_email: {
+            attachments: [
+              PDF,
+              { ...PDF, filename: 'anexo.pdf', contentBase64: 'YW5leG8=' },
+            ],
+          },
+        }),
+        { ...uploadParams, attachmentIndex: 1 },
+      );
+
+      expect(
+        (callConfig(httpClient, 0).headers as Record<string, string>)[
+          'Content-Disposition'
+        ],
+      ).toContain('anexo.pdf');
+    });
+
+    it('4.5 deberia publicar la URL del fichero en path_alias', async () => {
+      // 1. Arrange 📐: es el dato util del modo —el APPEND posterior lo inyecta
+      //    en el `<a href>` del bloque— y el catalogo de salida es cerrado.
+      const httpClient = buildHttpMock();
+      httpClient.requestWithStatus.mockResolvedValue(
+        entityResponse(
+          { uri: { url: '/sites/default/files/expediente.pdf' } },
+          'uuid-fichero',
+        ),
+      );
+      const strategy = buildStrategy(httpClient);
+
+      // 2. Act ⚙️
+      const result = await strategy.execute(withAttachment(PDF), uploadParams);
+
+      // 3. Assert 🎯
+      expect(result.success).toBe(true);
+      expect(result.data).toMatchObject({
+        node_id: 'uuid-fichero',
+        path_alias: '/sites/default/files/expediente.pdf',
+        drupal_internal__nid: 0,
+        // No hay pagina afectada: el enlace util es el del fichero, absoluto.
+        published_url:
+          'https://drupal.example/sites/default/files/expediente.pdf',
+        exit_page: '',
+      });
+    });
+
+    it('4.6 deberia explicar la causa TOPOLOGICA si el motor libero el binario', async () => {
+      // 1. Arrange 📐: el caso que de verdad se dara en produccion. El motor
+      //    purga `contentBase64` en cuanto un nodo publica texto aprovechable,
+      //    asi que un UPLOAD detras de un PARSER_PRE_IA ve el inventario entero
+      //    y sin bytes. El mensaje tiene que mandar al operador a la topologia,
+      //    no al adjunto.
+      const httpClient = buildHttpMock();
+      const strategy = buildStrategy(httpClient);
+
+      // 2. Act ⚙️
+      const result = await strategy.execute(
+        withAttachment({ ...PDF, contentBase64: null }),
+        uploadParams,
+      );
+
+      // 3. Assert 🎯
+      expect(result.success).toBe(false);
+      expect(result.error?.code).toBe(ERR_DRUPAL_MISSING_PAYLOAD);
+      expect(result.error?.message).toContain('liberado por el motor');
+      expect(result.error?.message).toContain('PARSER_PRE_IA');
+      expect(httpClient.requestWithStatus).not.toHaveBeenCalled();
+    });
+
+    it('4.7 deberia fallar si el indice pedido no existe', async () => {
+      const httpClient = buildHttpMock();
+      const strategy = buildStrategy(httpClient);
+
+      const result = await strategy.execute(withAttachment(PDF), {
+        ...uploadParams,
+        attachmentIndex: 3,
+      });
+
+      expect(result.error?.code).toBe(ERR_DRUPAL_MISSING_PAYLOAD);
+    });
+  });
+
+  describe('5. Traduccion de fallos HTTP', () => {
+    const runWithFailure = async (
+      status?: number,
+    ): Promise<NodeErrorDetail | undefined> => {
+      const httpClient = buildHttpMock();
+      httpClient.requestWithStatus.mockResolvedValue(httpFailure(status));
+      const strategy = buildStrategy(httpClient);
+
+      const result = await strategy.execute(buildContext(), {
+        titleTemplate: 'Titular',
+      });
+
+      return result.error;
+    };
+
+    it('5.1 deberia traducir un 401 a ERR_DRUPAL_AUTH', async () => {
+      expect((await runWithFailure(401))?.code).toBe(ERR_DRUPAL_AUTH);
+    });
+
+    it('5.2 deberia traducir un 403 a ERR_DRUPAL_AUTH', async () => {
+      expect((await runWithFailure(403))?.code).toBe(ERR_DRUPAL_AUTH);
+    });
+
+    it('5.3 deberia traducir un 503 a ERR_DRUPAL_SERVER', async () => {
+      expect((await runWithFailure(503))?.code).toBe(ERR_DRUPAL_SERVER);
+    });
+
+    it('5.4 deberia traducir un 422 a ERR_DRUPAL_REQUEST', async () => {
+      expect((await runWithFailure(422))?.code).toBe(ERR_DRUPAL_REQUEST);
+    });
+
+    it('5.5 deberia traducir la AUSENCIA de estado a ERR_DRUPAL_NETWORK', async () => {
+      // 1. Arrange 📐: sin estado no hubo respuesta que clasificar. Es DNS,
+      //    conexion rechazada o timeout, y es justo eso lo que lo distingue de
+      //    un rechazo del servidor remoto.
+      expect((await runWithFailure(undefined))?.code).toBe(ERR_DRUPAL_NETWORK);
+    });
+
+    it('5.6 deberia emitir TODOS los fallos de red como GRAVE', async () => {
+      // 1. Arrange 📐: es la decision de diseno del nodo, y conviene que un
+      //    cambio la rompa en voz alta. GRAVE es el UNICO nivel que `canRetry`
+      //    reintenta y el unico que deja la ejecucion PAUSADO conservando el
+      //    cursor, que es lo que habilita el reintento manual de CU-09. Un LEVE
+      //    cerraria en FALLIDO con `activeCursor: null` —sin nada que
+      //    reanudar— y un URGENTE declararia irrecuperable un corte de red.
+      const levels = await Promise.all(
+        [401, 403, 422, 500, 503, undefined].map(
+          async (status) => (await runWithFailure(status))?.level,
+        ),
+      );
+
+      // 3. Assert 🎯
+      expect(levels).toEqual([
+        'GRAVE',
+        'GRAVE',
+        'GRAVE',
+        'GRAVE',
+        'GRAVE',
+        'GRAVE',
+      ]);
+    });
+
+    it('5.8 deberia conservar las DIECISIETE claves de salida tambien al fallar', async () => {
+      // 1. Arrange 📐: es la regresion que vigila esta prueba. El reparto de
+      //    codigos vive ahora en `BaseHttpDestinationStrategy`, compartido con
+      //    el futuro destino de Acens, pero el `data` NO: cada nodo tiene su
+      //    propio inventario. Si alguien «simplificara» el helper para que
+      //    devolviera el `NodeResult` entero —`{ success: false, error }`—,
+      //    todas las rutas de error dejarian de publicar `http_status`, que es
+      //    justo el campo que un `onErrorStep` necesita leer para decidir.
+      const httpClient = buildHttpMock();
+      httpClient.requestWithStatus.mockResolvedValue(httpFailure(503));
+      const strategy = buildStrategy(httpClient);
+
+      // 2. Act ⚙️
+      const result = await strategy.execute(buildContext(), {
+        titleTemplate: 'Titular',
+      });
+
+      // 3. Assert 🎯
+      expect(result.success).toBe(false);
+      expect(Object.keys(result.data ?? {}).sort()).toEqual([
+        'attachment_url',
+        'created_nodes',
+        'drupal_internal__nid',
+        'exit_page',
+        'http_status',
+        'node_id',
+        'operation_applied',
+        'path_alias',
+        'published_at',
+        'published_nodes',
+        'published_url',
+        'total_appended',
+        'total_published',
+        'total_transferred',
+        'total_updated',
+        'url',
+        'urls',
+      ]);
+      expect(result.data?.http_status).toBe(503);
+      // Sin pagina publicada no hay enlace que ofrecer.
+      expect(result.data).toMatchObject({ published_url: '', exit_page: '' });
+    });
+
+    it('5.7 deberia conservar el diagnostico que ya traia el cliente HTTP', async () => {
+      // 1. Arrange 📐: `describeRemoteBody` ya recorto el cuerpo del remoto, que
+      //    en Drupal es el `errors[].detail`. Perderlo obligaria a auditar a
+      //    mano lo que el otro lado ya habia explicado.
+      expect((await runWithFailure(422))?.message).toContain(
+        'el remoto respondio 422',
+      );
+    });
+  });
+
+  describe('6. Fallos de configuracion y de contexto', () => {
+    it('6.1 deberia rechazar una configuracion invalida', async () => {
+      const strategy = buildStrategy(buildHttpMock());
+
+      const result = await strategy.execute(buildContext(), {
+        operationMode: 'MODO_INVENTADO',
+      });
+
+      expect(result.success).toBe(false);
+      expect(result.error?.code).toBe(ERR_DRUPAL_CONFIG);
+      expect(result.error?.level).toBe('GRAVE');
+    });
+
+    it('6.2 deberia rechazar un param desconocido', async () => {
+      // 1. Arrange 📐: `forbidNonWhitelisted`, como en todo el proyecto. Un
+      //    `targetUuid` mal escrito debe doler al guardar y no en ejecucion.
+      const strategy = buildStrategy(buildHttpMock());
+
+      // 2. Act ⚙️
+      const result = await strategy.execute(buildContext(), {
+        targetUuid: PAGE_UUID,
+      });
+
+      // 3. Assert 🎯
+      expect(result.error?.code).toBe(ERR_DRUPAL_CONFIG);
+    });
+
+    it('6.3 deberia fallar sin DRUPAL_API_TOKEN antes de emitir ninguna peticion', async () => {
+      const httpClient = buildHttpMock();
+      const strategy = buildStrategy(httpClient, buildApiConfig(''));
+
+      const result = await strategy.execute(buildContext(), {
+        titleTemplate: 'Titular',
+      });
+
+      expect(result.error?.code).toBe(ERR_DRUPAL_CONFIG);
+      expect(result.error?.message).toContain('DRUPAL_API_TOKEN');
+      expect(httpClient.requestWithStatus).not.toHaveBeenCalled();
+    });
+
+    it('6.4 deberia fallar si el nodo de origen no llego a ejecutarse', async () => {
+      const strategy = buildStrategy(buildHttpMock());
+
+      const result = await strategy.execute(buildContext({}), {
+        titleTemplate: 'Titular',
+      });
+
+      expect(result.error?.code).toBe(ERR_DRUPAL_MISSING_PAYLOAD);
+      expect(result.error?.missingFields).toContain(SOURCE_NAMESPACE);
+    });
+
+    it('6.5 deberia fallar si el markup viene vacio en vez de publicar en blanco', async () => {
+      // 1. Arrange 📐: es la guarda que separa «no publicar» de «publicar una
+      //    noticia vacia en madrimasd.org con 200 OK y sin alerta».
+      const strategy = buildStrategy(buildHttpMock());
+
+      // 2. Act ⚙️
+      const result = await strategy.execute(
+        buildContext({ [SOURCE_NAMESPACE]: { [SOURCE_FIELD]: '   ' } }),
+        { titleTemplate: 'Titular' },
+      );
+
+      // 3. Assert 🎯
+      expect(result.error?.code).toBe(ERR_DRUPAL_MISSING_PAYLOAD);
+    });
+
+    it('6.6 deberia fallar si el titulo cita una variable que no existe', async () => {
+      // 1. Arrange 📐: `getInterpolatedValue` LANZA a proposito ante una
+      //    variable ausente, para no publicar un titular en blanco. Aqui se
+      //    atrapa y se convierte al contrato del nodo en vez de propagarse,
+      //    porque una excepcion la normaliza el motor a URGENTE.
+      const strategy = buildStrategy(buildHttpMock());
+
+      // 2. Act ⚙️
+      const result = await strategy.execute(buildContext(), {
+        titleTemplate: '{{llm_response.headline}}',
+      });
+
+      // 3. Assert 🎯
+      expect(result.success).toBe(false);
+      expect(result.error?.code).toBe(ERR_DRUPAL_MISSING_PAYLOAD);
+      expect(result.error?.level).toBe('GRAVE');
+    });
+  });
+
+  describe('7. Inventario de salida (outputFields)', () => {
+    it('7.1 deberia declarar las diecisiete claves del namespace', () => {
+      const strategy = buildStrategy(buildHttpMock());
+
+      expect(strategy.outputFields.map((field) => field.name)).toEqual([
+        'node_id',
+        'drupal_internal__nid',
+        'path_alias',
+        'operation_applied',
+        'http_status',
+        'published_at',
+        'attachment_url',
+        'published_url',
+        'exit_page',
+        'total_published',
+        'total_appended',
+        'total_transferred',
+        'total_updated',
+        'published_nodes',
+        'urls',
+        'created_nodes',
+        'url',
+      ]);
+    });
+
+    /**
+     * La paridad se comprueba en los CUATRO modos y no solo en uno.
+     *
+     * El inventario es lo que el selector del asistente ofrece como
+     * `{{http_result.campo}}`. Si un modo emitiera cinco claves y otro seis, el
+     * selector ofreceria variables que, segun con que modo corriera el destino,
+     * no resolverian.
+     */
+    const expectParity = (
+      strategy: DrupalHttpStrategy,
+      data: Record<string, unknown> | undefined,
+    ): void => {
+      expect(Object.keys(data ?? {}).sort()).toEqual(
+        strategy.outputFields.map((field) => field.name).sort(),
+      );
+    };
+
+    it('7.2 deberia emitir las nueve claves en CREATE_NODE', async () => {
+      const httpClient = buildHttpMock();
+      httpClient.requestWithStatus.mockResolvedValue(entityResponse());
+      const strategy = buildStrategy(httpClient);
+
+      const result = await strategy.execute(buildContext(), {
+        titleTemplate: 'Titular',
+      });
+
+      expectParity(strategy, result.data);
+    });
+
+    it('7.3 deberia emitir las nueve claves en APPEND_HTML_BLOCK', async () => {
+      const httpClient = buildHttpMock();
+      httpClient.requestWithStatus
+        .mockResolvedValueOnce(pageResponse(''))
+        .mockResolvedValueOnce(pageResponse(''));
+      const strategy = buildStrategy(httpClient);
+
+      const result = await strategy.execute(buildContext(), {
+        operationMode: DrupalOperationMode.APPEND_HTML_BLOCK,
+        bundle: 'node--page',
+        targetNodeUuid: PAGE_UUID,
+      });
+
+      expectParity(strategy, result.data);
+    });
+
+    it('7.4 deberia emitir las nueve claves en TRANSFER_HTML_BLOCK', async () => {
+      const httpClient = buildHttpMock();
+      httpClient.requestWithStatus
+        .mockResolvedValueOnce(pageResponse(BLOCK, PAGE_UUID))
+        .mockResolvedValueOnce(pageResponse('', CLOSED_UUID))
+        .mockResolvedValueOnce(pageResponse('', CLOSED_UUID))
+        .mockResolvedValueOnce(pageResponse('', PAGE_UUID));
+      const strategy = buildStrategy(httpClient);
+
+      const result = await strategy.execute(buildContext(), {
+        operationMode: DrupalOperationMode.TRANSFER_HTML_BLOCK,
+        bundle: 'node--page',
+        targetNodeUuid: PAGE_UUID,
+        destinationNodeUuid: CLOSED_UUID,
+        itemSelector: EXPEDIENTE,
+      });
+
+      expectParity(strategy, result.data);
+    });
+
+    it('7.4b deberia enlazar la pagina de DESTINO en TRANSFER_HTML_BLOCK', async () => {
+      // 1. Arrange 📐: el expediente acaba en la pagina de cerradas, que es la
+      //    que el operador quiere abrir para comprobar el traslado.
+      const closedPage = (): { data: unknown; status: number } =>
+        entityResponse(
+          {
+            drupal_internal__nid: 55_938,
+            path: { alias: '/prueba-licitaciones-cerradas' },
+            body: { value: '', format: 'full_html' },
+            changed: '2026-10-05T10:00:00+00:00',
+          },
+          CLOSED_UUID,
+          { field_adjuntos: { data: null } },
+        );
+      const httpClient = buildHttpMock();
+      httpClient.requestWithStatus
+        .mockResolvedValueOnce(pageResponse(BLOCK, PAGE_UUID))
+        .mockResolvedValueOnce(closedPage())
+        .mockResolvedValueOnce(closedPage())
+        .mockResolvedValueOnce(pageResponse('', PAGE_UUID));
+      const strategy = buildStrategy(httpClient);
+
+      // 2. Act ⚙️
+      const result = await strategy.execute(buildContext(), {
+        operationMode: DrupalOperationMode.TRANSFER_HTML_BLOCK,
+        bundle: 'node--page',
+        targetNodeUuid: PAGE_UUID,
+        destinationNodeUuid: CLOSED_UUID,
+        itemSelector: EXPEDIENTE,
+      });
+
+      // 3. Assert 🎯
+      expect(result.success).toBe(true);
+      expect(result.data).toMatchObject({
+        published_url: 'https://drupal.example/prueba-licitaciones-cerradas',
+        exit_page: '/prueba-licitaciones-cerradas',
+      });
+    });
+
+    it('7.5 deberia emitir las nueve claves en UPLOAD_ATTACHMENT', async () => {
+      const httpClient = buildHttpMock();
+      httpClient.requestWithStatus.mockResolvedValue(entityResponse());
+      const strategy = buildStrategy(httpClient);
+
+      const result = await strategy.execute(
+        buildContext({
+          raw_email: {
+            attachments: [
+              {
+                filename: 'a.pdf',
+                contentType: 'application/pdf',
+                size: 4,
+                contentBase64: 'YQ==',
+              },
+            ],
+          },
+        }),
+        {
+          operationMode: DrupalOperationMode.UPLOAD_ATTACHMENT,
+          bundle: 'node--page',
+          targetNodeUuid: PAGE_UUID,
+        },
+      );
+
+      expectParity(strategy, result.data);
+    });
+
+    it('7.6 deberia emitir las seis claves TAMBIEN en el payload de un fallo', async () => {
+      // 1. Arrange 📐: el motor publica el namespace cuando un fallo trae
+      //    payload, asi que un payload mutilado llegaria igual a los nodos de
+      //    aguas abajo.
+      const httpClient = buildHttpMock();
+      httpClient.requestWithStatus.mockResolvedValue(httpFailure(500));
+      const strategy = buildStrategy(httpClient);
+
+      // 2. Act ⚙️
+      const result = await strategy.execute(buildContext(), {
+        titleTemplate: 'Titular',
+      });
+
+      // 3. Assert 🎯
+      expect(result.success).toBe(false);
+      expectParity(strategy, result.data);
+    });
+  });
+
+  describe('9. Autenticacion', () => {
+    /**
+     * La cuestion es de ENRUTADO, no de formato.
+     *
+     * Quien decide entre `Basic` y `Bearer` es `DrupalApiConfig.authHeader`, y
+     * eso se prueba en su propio spec. Lo que se comprueba aqui es que los
+     * CUATRO modos consumen ese getter en vez de componer la cabecera por su
+     * cuenta: el 401 que motivo el cambio venia de que la estrategia cableaba
+     * `Bearer`, y basta con que un modo se quede atras para reproducirlo.
+     */
+    const authHeaderOf = (httpClient: HttpMock, index: number): unknown =>
+      (callConfig(httpClient, index).headers ?? {})[
+        'Authorization' as keyof AxiosRequestConfig['headers']
+      ];
+
+    it('9.1 deberia autenticar el POST de CREATE_NODE', async () => {
+      // 1. Arrange 📐
+      const httpClient = buildHttpMock();
+      httpClient.requestWithStatus.mockResolvedValue(entityResponse());
+      const strategy = buildStrategy(httpClient);
+
+      // 2. Act ⚙️
+      await strategy.execute(buildContext(), { titleTemplate: 'Titular' });
+
+      // 3. Assert 🎯
+      expect(authHeaderOf(httpClient, 0)).toBe(BASIC_AUTH_HEADER);
+    });
+
+    it('9.2 deberia autenticar el GET y el PATCH de APPEND_HTML_BLOCK', async () => {
+      // 1. Arrange 📐: son DOS peticiones, y el PATCH es la que de verdad
+      //    exigia credenciales: el GET de una pagina publica responde 200
+      //    aunque vaya anonimo, que es lo que enmascaro el fallo original.
+      const httpClient = buildHttpMock();
+      httpClient.requestWithStatus
+        .mockResolvedValueOnce(pageResponse(OTHER_BLOCK))
+        .mockResolvedValueOnce(pageResponse(OTHER_BLOCK));
+      const strategy = buildStrategy(httpClient);
+
+      // 2. Act ⚙️
+      await strategy.execute(buildContext(), {
+        operationMode: DrupalOperationMode.APPEND_HTML_BLOCK,
+        bundle: 'node--page',
+        targetNodeUuid: PAGE_UUID,
+      });
+
+      // 3. Assert 🎯
+      expect(httpClient.requestWithStatus).toHaveBeenCalledTimes(2);
+      expect(authHeaderOf(httpClient, 0)).toBe(BASIC_AUTH_HEADER);
+      expect(authHeaderOf(httpClient, 1)).toBe(BASIC_AUTH_HEADER);
+    });
+
+    it('9.3 deberia autenticar las CUATRO peticiones de TRANSFER_HTML_BLOCK', async () => {
+      // 1. Arrange 📐: dos lecturas y dos escrituras, en el orden invertido que
+      //    documenta `runTransferHtmlBlock`.
+      const httpClient = buildHttpMock();
+      httpClient.requestWithStatus
+        .mockResolvedValueOnce(pageResponse(BLOCK))
+        .mockResolvedValueOnce(pageResponse(OTHER_BLOCK))
+        .mockResolvedValueOnce(pageResponse(OTHER_BLOCK))
+        .mockResolvedValueOnce(pageResponse(''));
+      const strategy = buildStrategy(httpClient);
+
+      // 2. Act ⚙️
+      await strategy.execute(buildContext(), {
+        operationMode: DrupalOperationMode.TRANSFER_HTML_BLOCK,
+        bundle: 'node--page',
+        targetNodeUuid: PAGE_UUID,
+        destinationNodeUuid: CLOSED_UUID,
+        itemSelector: EXPEDIENTE,
+      });
+
+      // 3. Assert 🎯
+      const headers = httpClient.requestWithStatus.mock.calls.map((_call, i) =>
+        authHeaderOf(httpClient, i),
+      );
+      expect(headers).toHaveLength(4);
+      expect(headers.every((header) => header === BASIC_AUTH_HEADER)).toBe(
+        true,
+      );
+    });
+
+    it('9.4 deberia autenticar el POST binario de UPLOAD_ATTACHMENT', async () => {
+      // 1. Arrange 📐: este modo SOBRESCRIBE `Content-Type` y
+      //    `Content-Disposition` sobre las de JSON:API. La cabecera de
+      //    autenticacion tiene que sobrevivir a ese `spread`.
+      const httpClient = buildHttpMock();
+      httpClient.requestWithStatus.mockResolvedValue(
+        entityResponse({ uri: { url: '/sites/default/files/e.pdf' } }),
+      );
+      const strategy = buildStrategy(httpClient);
+
+      // 2. Act ⚙️
+      await strategy.execute(
+        buildContext({
+          raw_email: {
+            attachments: [
+              {
+                filename: 'expediente.pdf',
+                contentType: 'application/pdf',
+                size: 10,
+                contentBase64: 'JVBERi0xLjQK',
+              },
+            ],
+          },
+        }),
+        {
+          operationMode: DrupalOperationMode.UPLOAD_ATTACHMENT,
+          bundle: 'node--page',
+          targetNodeUuid: PAGE_UUID,
+        },
+      );
+
+      // 3. Assert 🎯
+      expect(authHeaderOf(httpClient, 0)).toBe(BASIC_AUTH_HEADER);
+      expect(callConfig(httpClient, 0).headers).toMatchObject({
+        'Content-Type': 'application/octet-stream',
+      });
+    });
+
+    it('9.5 NO deberia emitir ninguna peticion si faltan credenciales', async () => {
+      // 1. Arrange 📐: la guarda esta ANTES del `switch` justamente para no
+      //    gastar una peticion que se sabe que va a volver 401.
+      const httpClient = buildHttpMock();
+      const strategy = buildStrategy(httpClient, buildApiConfig(''));
+
+      // 2. Act ⚙️
+      const result = await strategy.execute(buildContext(), {
+        titleTemplate: 'Titular',
+      });
+
+      // 3. Assert 🎯
+      expect(result.error?.code).toBe(ERR_DRUPAL_CONFIG);
+      expect(httpClient.requestWithStatus).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('8. Inmutabilidad del contexto', () => {
+    it('8.1 no deberia escribir en el contexto: eso es cosa del motor', async () => {
+      // 1. Arrange 📐
+      const httpClient = buildHttpMock();
+      httpClient.requestWithStatus.mockResolvedValue(entityResponse());
+      const strategy = buildStrategy(httpClient);
+      const context = buildContext();
+      const spy = jest.spyOn(context, 'setNamespace');
+
+      // 2. Act ⚙️
+      await strategy.execute(context, { titleTemplate: 'Titular' });
+
+      // 3. Assert 🎯
+      expect(spy).not.toHaveBeenCalled();
+    });
+  });
+});

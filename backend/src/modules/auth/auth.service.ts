@@ -2,6 +2,9 @@ import { Injectable, Logger, UnauthorizedException } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
 
 import { EmailService } from '@common/services/email.service';
+import { AuditTable } from '@modules/audit/audit-tables';
+import { AuditActionType } from '@modules/audit/enums/audit-action.enum';
+import { AuditLoggerService } from '@modules/audit/services/audit-logger.service';
 import { OtpConfigService } from '@modules/auth/services/otp-config.service';
 import { RefreshTokenService } from '@modules/auth/services/refresh-token.service';
 import { UsersService } from '@modules/users/users.service';
@@ -34,6 +37,7 @@ export class AuthService {
     private readonly emailService: EmailService,
     private readonly jwtService: JwtService,
     private readonly refreshTokenService: RefreshTokenService,
+    private readonly auditLogger: AuditLoggerService,
   ) {}
 
   /**
@@ -83,6 +87,13 @@ export class AuthService {
   /**
    * Valida el codigo y, si es correcto, abre la sesion.
    *
+   * Deja rastro en `audit_eventos` de cada intento: `LOGIN` si abre sesion y
+   * `LOGIN_FAILED` si no. El fallo guarda solo el correo intentado (jamas el
+   * codigo) y, si la cuenta existe, su id; asi se ve un ataque de fuerza bruta
+   * contra una cuenta concreta. El registro no cambia la respuesta: el cliente
+   * sigue sin poder distinguir la causa.
+   *
+   * @param clientIp IP de origen ya resuelta por el controlador, para la auditoria.
    * @throws UnauthorizedException si el codigo es invalido, ha expirado, pertenece a
    *         otro usuario, o la cuenta no existe o esta desactivada.
    */
@@ -90,6 +101,7 @@ export class AuthService {
     email: string,
     code: string,
     deviceId: string,
+    clientIp: string | null = null,
   ): Promise<AuthTokenResponse> {
     const user = await this.usersService.findByEmailWithOtpSecret(email);
 
@@ -100,6 +112,12 @@ export class AuthService {
     // hay codigo legitimo que validar, e inscribirla en este punto convertiria la
     // ruta de validacion en un canal de alta silencioso.
     if (!user || !user.isActive || !user.otpSecret) {
+      await this.recordLoginAttempt(
+        AuditActionType.LOGIN_FAILED,
+        email,
+        user?.id ?? null,
+        clientIp,
+      );
       throw new UnauthorizedException(INVALID_CREDENTIALS_MESSAGE);
     }
 
@@ -110,10 +128,24 @@ export class AuthService {
 
     if (!isValidCode) {
       this.logger.warn(`Codigo OTP invalido para ${user.email}`);
+      await this.recordLoginAttempt(
+        AuditActionType.LOGIN_FAILED,
+        email,
+        user.id,
+        clientIp,
+      );
       throw new UnauthorizedException(INVALID_CREDENTIALS_MESSAGE);
     }
 
-    return this.buildTokenResponse(user, deviceId);
+    const response = await this.buildTokenResponse(user, deviceId);
+    await this.recordLoginAttempt(
+      AuditActionType.LOGIN,
+      user.email,
+      user.id,
+      clientIp,
+    );
+
+    return response;
   }
 
   /**
@@ -139,9 +171,56 @@ export class AuthService {
    * El access token sigue siendo valido hasta que caduque por su cuenta: es la
    * contrapartida de un JWT autocontenido, y el motivo de que su vigencia sea de
    * una hora y no de ocho.
+   *
+   * Deja un `CIERRE_SESION` en `audit_eventos` para cerrar el par con el
+   * `INICIO_SESION` de `recordLoginAttempt`: sin el, la traza decia cuando
+   * entraba alguien pero nunca cuando salia, y una sesion abierta de madrugada
+   * era indistinguible de una que siguio viva hasta la manana.
+   *
+   * SOLO si la revocacion encontro una sesion viva. El endpoint es idempotente
+   * y un cliente puede reintentarlo; anotar un cierre por cada llamada llenaria
+   * la tabla de eventos que no corresponden a nadie saliendo de ninguna parte.
+   *
+   * @param clientIp IP de origen, que el controlador extrae de la peticion.
    */
-  public async logout(rawToken: string): Promise<void> {
-    await this.refreshTokenService.revoke(rawToken);
+  public async logout(
+    rawToken: string,
+    clientIp: string | null = null,
+  ): Promise<void> {
+    const userId = await this.refreshTokenService.revoke(rawToken);
+
+    if (userId === null) {
+      return;
+    }
+
+    await this.auditLogger.record({
+      userId,
+      action: AuditActionType.LOGOUT,
+      affectedTable: AuditTable.USERS,
+      recordId: userId,
+      sourceIp: clientIp,
+    });
+  }
+
+  /**
+   * Evento de login en `audit_eventos`. `usuario_id` es quien actua: en un
+   * intento fallido sobre una cuenta existente se anota esa cuenta, porque es
+   * la que se esta intentando abrir. Best-effort: nunca lanza.
+   */
+  private async recordLoginAttempt(
+    action: AuditActionType.LOGIN | AuditActionType.LOGIN_FAILED,
+    email: string,
+    userId: string | null,
+    clientIp: string | null,
+  ): Promise<void> {
+    await this.auditLogger.record({
+      userId,
+      action,
+      affectedTable: AuditTable.USERS,
+      recordId: userId,
+      newData: { email },
+      sourceIp: clientIp,
+    });
   }
 
   /** Firma el access token, emite el refresh y arma la respuesta de sesion. */
@@ -153,6 +232,10 @@ export class AuthService {
       sub: user.id,
       email: user.email,
       role: user.role,
+      // Generacion vigente en el momento de firmar. `JwtStrategy` la compara
+      // contra la columna en cada peticion, de modo que un cambio de rol o una
+      // desactivacion invalidan este token sin esperar a que caduque.
+      tokenVersion: user.tokenVersion,
     };
     const authenticatedUser: AuthenticatedUser = {
       id: user.id,

@@ -1,9 +1,10 @@
-export interface AllowedIp {
+import type { AuditableData } from '@/types/auditable';
+
+/** Replica de `AllowedIpResponseDto` del backend, con su auditoria (045). */
+export interface AllowedIp extends AuditableData {
   id: string;
   ipOrCidr: string;
   description: string;
-  createdAt: string;
-  updatedAt: string;
 }
 
 export interface CreateAllowedIpPayload {

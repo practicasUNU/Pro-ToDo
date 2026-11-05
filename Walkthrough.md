@@ -4,6 +4,1669 @@ Registro técnico del "por qué" de cada decisión de implementación. Los estad
 
 ---
 
+## 2026-10-26 · Refactorizacion integral: filtro IMAP, tiempo real y trazabilidad — rama `feat/destino-http-generico`
+
+### "de" no es "destino"
+
+El modo "contiene" del disparador IMAP componia un patron `(?:a|b)` y lo evaluaba sin anclas, de modo
+que casaba por subcadena: el termino `de` atrapaba "PRUEBA DESTINO HTTP" y, en la practica, cualquier
+asunto en espanol. Se descarto anadir `\b` al patron porque en el motor de JavaScript `\b` solo
+conoce ASCII y partiria "año" en dos. En su lugar el asunto se tokeniza (`imap-filter.util.ts`):
+normalizacion diacritica, division por `[^\p{L}\p{N}]+` y comparacion contra palabras completas, en
+modo AND (`TODAS_LAS_PALABRAS`) u OR (`AL_MENOS_UNA`). Las palabras viajan como params propios y no
+dentro del regex, para que el backend sepa lo que el operador quiso decir. Un patron heredado se lee
+como palabras clave al reabrir el flujo, y al guardarlo queda corregido.
+
+### Un evento global para el historial
+
+El historial del panel no se une a ninguna sala de flujo, y los eventos de pausa, reanudacion y
+descarte solo iban a esas salas. Emitir todo al namespace habria multiplicado el trafico de
+`node:started`, asi que se anadio un resumen minimo, `execution:updated`, que el coordinador DERIVA de
+los eventos que ya existian (y de la primera vuelta del bucle, que es cuando una ejecucion nueva pasa a
+EN_PROCESO). El unico caso sin evento previo era `abortExecutionsForFlow`, que cierra filas por SQL:
+ahi el motor lo emite a mano. En el cliente la fila se parchea al instante y la pagina se relee con
+debounce, porque `hasAlerts` y `failureReason` no viajan en el evento.
+
+### Autoria en la boveda y en el descarte
+
+`credenciales` pasa a heredar `AuditableEntity` (migracion 058, con renombrado idempotente de las
+columnas de fecha) y todas las tablas maestras ganan la columna "Ultima modificacion"; el alta
+completa sigue en `AuditDetailsMenu`. El descarte registra `FLUJO_DESCARTADO` (migracion 059) desde
+`deactivateAfterDiscard`, que ya tenia el `AuditLoggerService` inyectado y conoce el estado del flujo
+antes de apagarlo. Las claves del payload van en castellano porque son dato que el auditor lee en
+crudo, igual que los valores del enum.
+
+### Reintentos segun el verbo
+
+El destino HTTP no reintentaba nunca por defecto, y con razon: un POST repetido tras un timeout puede
+publicar dos veces. Ahora el defecto depende del verbo (3 en GET/PUT/DELETE, 0 en POST/PATCH), y el
+store del frontend mueve el valor con el verbo mientras el operador no lo haya tocado. El backoff
+exponencial ya existia en `HttpClientService` y en el runner del scraper; no se duplico.
+
+### Lo que no se hizo, y por que
+
+- Presets `Authorization: Bearer {{token}}` / `Basic {{basic_auth}}`: dejarian el secreto en claro en
+  el `pipeline_schema`. La cabecera sigue prohibida y su ayuda remite a la boveda.
+- Las migraciones historicas que citan el selector heredado del escudo no se reescriben: ya estan
+  aplicadas y son la traza de lo que hubo.
+
+### Checklist
+
+- [x] Specs de AND/OR, tildes y la regresion "de" ⊂ "destino"
+- [x] Specs del evento global, del parcheo de filas y del debounce
+- [x] Specs de autoria en credenciales y de `FLUJO_DESCARTADO`
+- [ ] Aplicar las migraciones 058 y 059 y reiniciar Nest
+
+---
+
+## 2026-09-26 · Nodo de IA configurable y paso de contingencias — rama `feat/ui-contextual-branching`
+
+### Dos costuras de la tanda anterior
+
+PROT-18 dejó las rutas declarables, y con ellas dos cosas que se veían mal en cuanto se usaban. La
+primera: el formulario de destinatarios se incrustaba en **cada** paso que declaraba una rama, y
+todos editaban el mismo nodo. Con dos ramas el operador veía el mismo campo dos veces sin saber cuál
+mandaba (mandaban los dos: era la misma instancia de store). La segunda: la rama de visión apuntaba a
+un `PROCESADOR_IA` que seguía sin configurador, así que el asistente lo pintaba con el cartel
+«Configurador no disponible» y bloqueaba el guardado del flujo entero.
+
+### El nodo de IA no era un satélite
+
+El encargo pedía desplegar la configuración de ese «nodo satélite» dentro del paso del parser,
+conectada con un panel de bifurcación. Al ir a hacerlo apareció que la premisa no se sostiene.
+
+La ruta del parser apunta **hacia adelante**, al nodo que el flujo iba a ejecutar de todas formas:
+`TRIGGER → PARSER → IA → MAPEADOR`. Lo que cambia al desviarse no es el destino, es que el motor
+siembra `error_context` y eso conmuta el nodo a modo visión. La rama no es un desvío: es «sigue, pero
+leyendo la imagen en vez del texto». Dibujarla como una caja colgando del parser diría que ese nodo
+solo corre cuando algo falla, y es lo contrario de lo que pasa.
+
+Había además un argumento estructural. `WizardPage` es enteramente polimórfico —resuelve componente y
+store por `nodeType`—, así que en cuanto `PROCESADOR_IA` entró en los dos registros pasó a tener **su
+propio paso**, con su formulario completo, sin tocar una línea del anfitrión. Anidarlo bajo el parser
+habría pintado el mismo formulario del mismo nodo dos veces: exactamente la costura que esta misma
+tanda venía a quitar del SMTP.
+
+Así que `NodeBranchCard` quedó como **referencia cruzada**: dice que la rama existe, qué código
+atrapa, qué paso la recibe, y lleva hasta allí con un botón. Una sola configuración, en un solo
+sitio, y la topología legible desde los dos extremos.
+
+### Construir el nodo de IA era la mitad del trabajo
+
+Ocho campos, y ninguno inocente. El DTO del backend dedica más líneas a advertir que a describir, y
+esas advertencias no se deducen mirando un formulario, así que acabaron en `configWarnings` —el canal
+del contrato §3.1 que hasta ahora solo usaba el disparador IMAP—:
+
+- **Proveedor de pago sin simular**: cada ejecución del flujo factura tokens.
+- **Proveedor sin cliente**: desde PROT-16, elegir Claude u OpenAI no falla, **simula**. Lo único que
+  distingue una redacción real de una simulada es `metadata.isMock`. Elegirlo creyendo que escribe
+  Claude es el fallo caro, y ahora el formulario lo dice.
+- **Reintentos altos**: esta capa y el `retryPolicy` del esquema **se multiplican**. El TSDoc del DTO
+  advierte de hasta treinta y seis inferencias facturadas por una sola ejecución.
+
+El defecto del proveedor es el simulador, igual que en el backend y por el mismo motivo: un nodo al
+que nadie ha mirado la configuración no debe poder gastar dinero por omisión.
+
+Un detalle del contrato que costó decidir: **los numéricos se publican siempre**, aunque coincidan con
+el defecto. En el nodo de alerta lo vacío se omite, porque el respaldo del backend se activa con la
+clave ausente. Aquí es al revés: el valor tiene consecuencias económicas, y dejarlo implícito
+significaría que cambiar un defecto del backend cambia en silencio el coste de flujos ya guardados.
+
+### El paso que no es un nodo
+
+Los destinatarios se piden ahora una sola vez, en un paso «Contingencias por correo» que aparece
+entre el último nodo y la revisión, y solo si alguna rama provisiona el nodo de alerta. No podía
+derivarse de la topología —ese nodo se provisiona al ensamblar, no está en `pipelineTopology`—, así
+que es un paso sintético con un `WizardStep` fabricado, para que el panel de bloqueos de la revisión
+siga siendo clicable sin tocar su código. El mismo recurso que ya usaba «Revisión y guardado».
+
+La consecuencia menos obvia estaba en `isLastStep`, que se medía contra la longitud de la topología:
+sin reencuadrarlo, el botón del último nodo decía «Revisar y guardar» y saltaba por encima del
+formulario de destinatarios. Y el bloqueo por alerta incompleta dejó de repartirse entre los nodos
+fuente para señalar **el paso donde ahora está el formulario**; repartirlo mandaría al operador a
+corregirlo donde ya no se corrige.
+
+### Medio suite caído por un reexport
+
+`MULTIMODAL_FALLBACK_CODE` tenía que vivir en `types/pipeline.ts` según el encargo, y el reexport
+parecía lo limpio: una sola cadena, un solo sitio. Pero `error-branch.types.ts` ya importa `NodeType`
+de `pipeline.ts`, así que el reexport cerró un ciclo y el enum quedó `undefined` en tiempo de
+evaluación. Catorce archivos de prueba cayeron a la vez con
+`Cannot read properties of undefined (reading 'PARSER_PRE_IA')`, ninguno de ellos relacionado con el
+cambio. La constante se quedó junto al catálogo de disparadores, que es quien la usa.
+
+### Lo que NO se hizo
+
+- **Sin formulario anidado en la tarjeta de bifurcación** ni prop `is-embedded`: no se anida ningún
+  formulario, así que tocar el contrato uniforme de §3.1 no compraba nada.
+- **`getStepValidationStatus` no se enchufó al botón «Siguiente»**, aunque el encargo lo pedía. El
+  nodo que recibe la recuperación es un paso POSTERIOR: bloquear el avance del paso que la declara
+  dejaría el asistente en punto muerto, porque a ese nodo solo se llega pasando por este.
+- **Sin servicio propio para el nodo de IA.** Necesita el catálogo de prompts, pero ya lo sirven
+  `ai-prompt-templates.service` y su store de dominio; reexportarlos habría sido la capa vacía que
+  §2.1 desaconseja.
+- **Sin tocar el backend.** Las 55 suites siguen donde estaban.
+
+### Estado de la verificación
+
+Frontend **30 archivos / 599 pruebas** (desde 27 / 547), `vue-tsc` y eslint en cero. Backend
+**55 suites / 1265**, sin cambios. Los siete archivos que `prettier --check` señala son los mismos
+de siempre, todos ajenos a esta rama.
+
+El tipo que las pruebas usan como «sin configurador» rotó de `PROCESADOR_IA` a `ESCUDO_POST_IA`. El
+comentario de esa constante lo anticipaba desde la tanda del parser, y seguirá rotando: el último de
+la cola es `DESTINO_DRUPAL`.
+
+### Pendiente
+
+- La migración 021 y el `.env`, arrastrados desde PROT-16. **Sin ellos `DESTINO_SMTP` llega con
+  `implemented: false`.**
+- `ESCUDO_POST_IA` y `DESTINO_DRUPAL` son los dos tipos que quedan sin configurador, y ninguno tiene
+  estrategia en el motor: su turno va detrás del backend.
+
+---
+
+## 2026-09-26 · Bifurcaciones de contingencia en el asistente — rama `feat/ui-error-branching-smtp`
+
+### El destino existía y era inalcanzable
+
+Tres tandas construyendo la misma capacidad por partes: PROT-16 hizo que el motor supiera desviarse
+y entregara `error_context` al nodo de respaldo, PROT-17 construyó el nodo que avisa a una persona.
+Y sin embargo, hasta hoy, **nadie podía apuntar a ese nodo**. Un `grep` de `onErrorStep` en todo
+`frontend/src` devolvía el tipo, el literal `null` del ensamblador y prosa: ni una línea de producto
+que lo escribiera.
+
+El síntoma más elocuente estaba dentro del propio nodo de alerta: `SmtpAlertConfig.vue` habla de «la
+ruta declarada con onErrorStep» y su asunto por defecto interpola `{{error_context.failed_node_id}}`,
+un namespace que **solo existe si se llega por esa vía**. Un formulario describiendo un camino que no
+se podía trazar.
+
+### El comodín que no podía existir
+
+El encargo proponía un catálogo con `{ code: 'ANY_GRAVE_ERROR', label: 'Cualquier error grave' }`.
+Ese código no existe en el repositorio, y la cuestión no es que faltara darlo de alta: **no puede
+existir**. El DTO exige que `catchErrors` sea un array y `resolveErrorRoute` compara el código
+literal del fallo contra su contenido. Una ruta con un comodín inventado se habría guardado sin
+protestar, habría aparecido en la interfaz como configurada, y no se habría disparado nunca.
+
+Es exactamente el fallo mudo que la regla 10 del validador existe para impedir —y que ni la regla 10
+habría atrapado, porque solo pregunta por códigos que el nodo no puede emitir **con sus params**, no
+por códigos que no existen—. El correo que debía desviarse seguiría de largo, sin excepción, sin
+traza y sin forma de notarlo.
+
+La salida ya estaba escrita en el motor: la **forma de cadena**. `onErrorStep: "alerta_smtp"` es el
+respaldo incondicional de toda la vida, y su TSDoc dice literalmente que «atrapa todo». El precio es
+que una cadena no tiene dónde llevar `customMessage`, así que ese campo desapareció del formulario.
+No se echa de menos: `customMessage` SUSTITUYE al mensaje real del fallo en la traza —se queda uno
+sin saber qué pasó— y la nota que el operador quiera añadir al aviso ya tiene su sitio en el nodo de
+alerta desde PROT-17.
+
+### Un solo nodo de alerta, porque los namespaces son únicos
+
+El encargo pedía un satélite por nodo fuente, `${nodeId}_error_smtp`. Habría funcionado con una rama
+y devuelto un 400 con la segunda: la regla 5 del validador prohíbe que dos nodos escriban el mismo
+`outputNamespace`, y en la lista cerrada hay un único `smtp_result`. Con un `DESTINO_SMTP` ya
+colocado como destino principal, habría fallado incluso con la primera.
+
+Así que hay **un solo nodo de alerta por flujo**, compartido por todas las rutas. Y resulta que no es
+una concesión a la restricción, es mejor diseño: se configuran los destinatarios una vez, y como
+`error_context` ya lleva `failed_node_id`, la misma carta dice igualmente qué paso se detuvo. Si la
+plantilla ya trae un `DESTINO_SMTP`, se reutiliza ese y no se provisiona nada.
+
+La ruta de visión va más lejos y **no crea ningún nodo**. Un `PROCESADOR_IA` satélite chocaría con el
+del flujo en `llm_response` por la misma regla, y ese tipo sigue sin configurador, así que nadie
+podría rellenarle el prompt. Apunta al nodo de IA que el flujo ya tiene — que es precisamente el
+escenario para el que se escribió `collectVisionAttachments`: el modo visión se enciende solo al ver
+el código del parser en `error_context`. Sin nodo de IA en el flujo, la opción no se ofrece.
+
+### Declarar la ruta y configurar el nodo tienen que moverse juntos
+
+La rama «documento sin texto» solo funciona si el parser lleva `failOnUnextractableMedia: true`; si
+no, la regla 10 rechaza el esquema al guardar, y con razón. Pero el agregador no puede encender ese
+interruptor: §3.1 le prohíbe conocer la forma interna de la config de un nodo, y el nombre del campo
+es privado del parser.
+
+Se resolvió añadiendo al contrato `NodeConfigStore` un método opcional,
+`declareCaughtErrorCodes(codes)`, que es el espejo exacto del `getUnreachableErrorCodes` del backend
+—aquel responde «qué he apagado», este dice «esto es lo que mi ruta atrapa, ajústate»—. El agregador
+pregunta en vez de escribir, y un nodo futuro con la misma necesidad no obliga a tocarlo.
+
+Es reversible, y eso importa tanto como encenderlo: retirar la rama pasa una lista vacía y apaga el
+interruptor. Dejarlo puesto convertiría en `PAUSADO` un flujo que hoy atraviesa tranquilamente un
+correo de solo imagen, y el fallo no lo recogería ya nadie.
+
+### Un bug que llevaba meses esperando
+
+Al abrir el ensamblador apareció otra cosa: `AssemblerStep` no declaraba `onErrorStep`, así que un
+`assemble → disassemble → assemble` lo reescribía a `null`. Cualquier ruta escrita a mano en el panel
+JSON del editor de plantillas se **borraba al volver a guardar**, junto con los nodos satélite, que no
+están en el camino de `nextStep` y por tanto el desensamblador nunca los veía.
+
+Era latente porque nadie escribía rutas. Esta entrega las escribe, así que se arregló de paso: el
+paso transporta su ruta, `collectErrorSatellites` recupera los nodos que el recorrido no visita, y hay
+dos pruebas de regresión. El TSDoc que afirmaba «tampoco la pierde» era cierto solo para la
+reconstrucción del orden, no para el dato.
+
+### Dónde vive el panel
+
+En `WizardPage.vue`, dentro del `q-step` y bajo el configurador del nodo. No dentro de cada
+configurador: el anfitrión pasa solo `:node-id`, y meterlo en los seis habría obligado a editarlos
+todos y a que cada tipo nuevo se acordara. Una inserción lo da para los seis y para los que vengan.
+
+Las ramas tampoco viven en `pipelineTopology`, y no es un detalle de organización: el orden de ese
+arreglo ES la topología —`nextStep` es el elemento siguiente—, así que un nodo de alerta metido ahí
+acabaría en el camino feliz, enviando un aviso en cada ejecución correcta.
+
+### Lo que NO se hizo
+
+- **Sin `customMessage` en el formulario.** Incompatible con la forma de cadena, y sustituye al
+  mensaje real del fallo.
+- **Sin satélite de `PROCESADOR_IA`.** Colisión de namespace y, sobre todo, un nodo cuyo prompt nadie
+  podría configurar.
+- **Sin tocar el editor de plantillas.** Puede colocar un `DESTINO_SMTP` como destino normal desde
+  antes de esta tanda; lo que le falta es que el catálogo lo marque `implemented`, y eso depende de
+  la migración 021.
+- **Sin tocar el backend.** Las 55 suites siguen exactamente donde estaban.
+
+### Estado de la verificación
+
+Frontend **27 archivos / 547 pruebas** (desde 26 / 506), `vue-tsc` sin errores y eslint en cero.
+Backend **55 suites / 1265**, sin cambios. Los siete archivos que `prettier --check` señala son
+todos ajenos a esta rama.
+
+### Pendiente
+
+- La migración 021 y el `.env`, arrastrados desde PROT-16. **Sin ellos `DESTINO_SMTP` llega con
+  `implemented: false`** y el editor de plantillas lo deshabilita.
+- Configurador de `PROCESADOR_IA`: mientras no exista, la ruta de visión depende de que la plantilla
+  ya coloque ese nodo.
+
+---
+
+## 2026-09-26 · Configurador de `DESTINO_SMTP` y carta institucional de alerta — rama `feat/smtp-alert-ui`
+
+### Un nodo que funcionaba y que nadie podía configurar
+
+PROT-16 dejó el nodo listo: estrategia registrada, transporte propio, migración escrita. Y con eso
+lo dejó inservible en la práctica, porque la única forma de decirle a quién avisar era escribir el
+`pipeline_schema` a mano — que es exactamente lo que RNF-04 prohíbe y lo que el asistente existe para
+evitar. El aviso, además, salía como un párrafo de texto suelto, mientras el correo de acceso llevaba
+meses con su carta institucional.
+
+Las dos cosas se cierran bajo un mismo criterio, y conviene enunciarlo porque es el que decide casi
+todo lo demás: **el operador dice a quién avisar, con qué asunto y qué nota añadir. No escribe ni una
+etiqueta.** La carta la compone el sistema, con los datos que el motor ya dejó en `error_context`.
+
+De ahí sale la primera baja: `bodyTemplate`, que era obligatorio. Pedirle al operador que redactase
+el aviso entero en un `textarea` era pedirle que reprodujese en cada nodo lo que el sistema ya sabe
+decir, y el resultado previsible eran avisos que omitían justo el dato que hacía falta.
+
+### El asunto por defecto que no podía funcionar
+
+El encargo proponía pre-poblar el campo con
+`[ALERTA PROTO-DO] ... flujo {{trigger.flow_name}} - Nodo {{error_context.failed_node_id}}`. Es un
+asunto razonable y no habría enviado ni un correo.
+
+`getInterpolatedValue` **lanza** ante una ruta ausente —decisión deliberada del contexto, documentada
+en su propio TSDoc: interpolar en silencio publicaría una noticia con el titular en blanco—, y la
+estrategia traducía esa excepción a un fallo antes de abrir conexión. Y resulta que `trigger` **no lo
+siembra nadie** en los dos caminos reales de ejecución: `WorkflowsService` no pasa `initialPayload`
+en ninguna de sus dos llamadas, con un comentario en el motor explicando por qué. `error_context`,
+por su parte, solo existe si el nodo se alcanzó por `onErrorStep`, y este nodo puede colocarse
+perfectamente en el camino feliz para confirmar una publicación.
+
+Así que el nodo recién configurado, con el defecto puesto, habría fallado siempre.
+
+La salida no fue quitar el marcador, sino **invertir la aritmética del fallo en este nodo concreto**.
+En cualquier otro, no poder resolver una plantilla debe detener el flujo. Aquí no: este es la última
+vía por la que una persona se entera de la incidencia, y negarse a enviar por una errata en el asunto
+deja el fallo original sin testigo además de sin arreglar. Se envía con un asunto de respaldo
+—completo, no el original con agujeros, que parecería un correo roto del sistema— y la variable
+culpable viaja al pie de la carta y al log.
+
+El diagnóstico no se pierde: cambia de sitio. En vez de un flujo `PAUSADO` que nadie mira, la
+misconfiguración llega impresa en el correo que la persona ya está leyendo. Como efecto colateral,
+`ERR_SMTP_INTERPOLATION` desaparece: era el código de `bodyTemplate` y ya no queda nada que pueda
+emitirlo. Dejarlo exportado habría sido un código que `catchErrors` puede declarar y que no se
+dispara jamás — el fallo mudo que la regla 10 del validador existe para impedir.
+
+### Acotar una decisión de seguridad sin revertirla
+
+El transporte del nodo llevaba escrito «SOLO TEXTO PLANO», y el DTO, «NO hay campo de HTML». Las dos
+citaban la inyección de marcado. Enviar una carta HTML parecía contradecirlas.
+
+No las contradice, y la distinción importa lo bastante como para dejarla escrita en el TSDoc nuevo:
+lo que aquella regla protegía era que **el operador** aportase marcado, y eso sigue sin poder pasar
+—su nota se escapa carácter a carácter como cualquier otro dato—. Lo que se añade es HTML de
+plantilla fija cuyos huecos pasan todos por `escapeHtml`.
+
+El peligro nunca fue el HTML: era el HTML de procedencia ajena. Y esta carta lleva bastante:
+`error_message` cita el asunto del correo entrante, `partial_data` arrastra los nombres de los
+adjuntos. Los escribe cualquiera que sepa la dirección del buzón del flujo. Por eso el escapado es
+obligatorio sobre todo dato dinámico y hay dos pruebas que lo vigilan con un `<img onerror>` y un
+`<script>` dentro del payload.
+
+`sanitize-html`, que el proyecto ya tiene, no servía: retira etiquetas de un documento, mientras que
+aquí hace falta conservar el texto y volverlo inofensivo; y con `allowedTags: []` re-escapa lo que ya
+era texto plano, que es el defecto documentado en `article-extractor.util.ts`. Se escribió el util.
+
+### Lo que la maqueta del correo no hace
+
+La vista previa del configurador **no imita la carta**. Replicar en Vue sus colores y textos crearía
+una segunda plantilla, en otro lenguaje, que diverge en cuanto alguien toque el generador del
+backend — y entonces la vista previa mentiría, que es peor que no tenerla. Es una maqueta
+estructural: cabecera con el degradado, badge de ejemplo y recuadros punteados rotulados con lo que
+el motor rellenará. Lo único que refleja de verdad es **dónde cae la nota**, que es lo que el
+operador necesita saber.
+
+Por el mismo motivo usa tokens `--pd-*` y no los hex de la carta: esto se lee dentro de la
+aplicación, que sí conmuta con el tema.
+
+### Dos registros, no uno
+
+El encargo pedía dar de alta el componente en `node-config-registry.ts`. Con eso solo, el formulario
+se habría montado y el botón «Siguiente» no se habría habilitado nunca: hay un segundo registro,
+`node-store-registry.ts`, que es donde el anfitrión pregunta por `isConfigValid`. Uno resuelve qué
+pintar; el otro, a quién preguntar si lo pintado vale.
+
+El contrato del store tampoco admitía la forma propuesta (`configs` indexado por `nodeId`,
+`getConfig(nodeId)`, `isConfigValid(nodeId)`). Los stores de nodo **se instancian uno por nodo** —la
+indexación ya vive un nivel más arriba, en el id de Pinia— y el contrato exige además
+`toNodeParams`, `hydrateFromNode` y `resetConfig`. Los dos últimos no son ceremonia: sin
+`hydrateFromNode` el nodo sería imposible de reeditar, y guardar borraría los destinatarios que el
+operador venía a corregir.
+
+Un detalle de ese contrato que costó pensarlo: **`hydrateFromNode` NO repone el asunto por defecto**.
+El defecto es para nodos nuevos; un nodo guardado sin asunto lo está porque alguien lo borró a
+propósito, y reponerlo al reabrirlo cambiaría su configuración con solo mirarla. Su prueba está
+escrita.
+
+### La excepción Poka-Yoke, y la trampa que ya conocíamos
+
+`frontend-quasar.md` §4 prohíbe el texto libre en `QSelect`. Los dos campos de direcciones lo usan,
+porque no existe ni puede existir una lista cerrada de correos. Es el segundo caso del proyecto tras
+la zona horaria del cron, y de él se copió la pieza que de verdad importa: el manejador
+`@input-value`. `update:model-value` solo se emite al confirmar, así que sin él un correo tecleado y
+no convertido en chip se pierde al pulsar Guardar **mientras la pantalla lo sigue mostrando**. Con
+chips es aún más fácil de provocar, porque nada indica que al texto le falte convertirse en uno.
+
+También se añadió `isEmailAddress`: no había ninguna validación de formato de correo en el frontend.
+`isCorporateEmail` no servía —comprueba que el dominio esté entre los autorizados para iniciar
+sesión— y el destinatario de una alerta puede ser perfectamente externo, un proveedor o una guardia
+subcontratada. Justo el destinatario más probable de una incidencia de integración.
+
+### Lo que NO se hizo
+
+- **Sin `smtp-alert.service.ts`.** No hay endpoint que consultar, y validar un buzón de destino
+  exigiría enviar correo real a una persona real cada vez que alguien reabre el paso. `TRIGGER_CRON`
+  es el precedente explícito.
+- **Sin entrada en `nodeBaseParamsRegistry`.** Los destinatarios son operativa del flujo, no
+  topología: meterlos en una plantilla reutilizable los compartiría entre despliegues.
+- **Sin interpolación en `customMessage`.** Es una nota en texto plano; tratarla como plantilla le
+  añadiría un modo de fallo a un campo cuyo propósito es que siempre se lea.
+- **Sin tocar la migración 021 ni el `.env`.** Siguen pendientes de PROT-16, y sin ellos el nodo no
+  aparece en `GET /api/nodos`.
+
+### Estado de la verificación
+
+Backend **55 suites / 1265 pruebas** (desde 53 / 1223), `tsc --noEmit -p tsconfig.build.json` sin
+errores. Frontend **26 archivos / 506 pruebas** (desde 23 / 461), `vue-tsc --noEmit` sin errores y
+eslint en cero, que era su estado de partida.
+
+Se añadió spec de montaje del componente además del store: `use-chips` no se usaba en ningún otro
+sitio del proyecto, y un selector que revienta al renderizar no lo detecta `vue-tsc`.
+
+### Pendiente
+
+- Aplicar la migración 021 y actualizar el `.env` real (arrastrado de PROT-16). **El renombrado a
+  `SMTP_OTP_*` deja el login sin transporte hasta que se haga.**
+- Configurador de `PROCESADOR_IA`, el último tipo con estrategia y sin formulario. El registro cubre
+  6 de 9.
+- `types/nodes/` estrena subdirectorio; la convención hasta hoy era plana (`types/parser-email.ts`).
+  Queda anotado para que el próximo nodo elija a sabiendas y no por inercia.
+
+---
+
+## 2026-09-26 · Bifurcación de errores, nodo `DESTINO_SMTP` y visión multimodal — rama `feat/bifurcacion-errores`
+
+### Tres piezas que existían por separado y no se tocaban
+
+El punto de partida de esta tanda es que casi todo estaba ya escrito, y sin embargo no servía para
+nada. El motor sabía desviar por `onErrorStep` desde PROT-07, con una forma selectiva
+(`catchErrors`) más expresiva incluso que la que pedía el encargo. `PARSER_PRE_IA` sabía detectar el
+correo cuyo único contenido real es una imagen o un PDF escaneado, y lo marcaba con
+`requires_multimodal_fallback`. Y el motor tenía una política de retención de binarios colgada
+justamente de esa bandera, para no tirar los bytes del único contenido del correo.
+
+Lo que faltaba era el hilo entre las tres. El desvío era **ciego**: movía el cursor y persistía el
+checkpoint sin entregar al nodo de respaldo un solo dato sobre el fallo que lo invocaba, de modo que
+un nodo de alerta no podía decir qué había fallado. La bandera del parser no tenía consumidor: el
+nodo de IA solo hablaba texto, y no existía ningún nodo capaz de avisar a una persona. La detección
+terminaba en un booleano que nadie leía.
+
+Así que esta entrega escribe poco código nuevo de mecanismo y mucho de conexión.
+
+### `error_context`: lo que el nodo de respaldo necesita saber
+
+El motor siembra ahora un namespace reservado justo antes de saltar, con nueve claves: quién falló,
+con qué código y nivel, el mensaje, los campos que faltaban, los reintentos consumidos, la marca
+temporal y el payload parcial.
+
+Dos detalles cargados de consecuencia. El primero es **cuándo** se siembra: antes de mover el cursor,
+no después. Así el checkpoint de esa misma transición ya lo lleva, y si el proceso muere entre ambas
+sentencias la reanudación entra al respaldo con la misma información que habría tenido sin la caída.
+Sembrarlo después dejaba una ventana en la que el cursor apunta al respaldo y el contexto todavía no
+explica por qué.
+
+El segundo es que **todas las claves se escriben siempre**, incluso vacías. `setNamespace` fusiona
+por clave de primer nivel, así que un segundo desvío en la misma ejecución tiene que pisar las del
+primero: omitir `missing_fields` porque este fallo no los trae dejaría en pie los del anterior, y el
+nodo de respaldo acusaría de un campo ausente que no tiene nada que ver con su error. Hay una prueba
+dedicada a ese caso (5t.4), que es el que se rompe solo.
+
+`partial_data` obligó a ensanchar la semántica de `NodeResult.data`, hasta ahora documentada como
+"lo que se escribe en el `outputNamespace` si `success` es true". En un fallo ese payload no se
+publica —un nodo que falla no escribe su namespace, o los de aguas abajo leerían un resultado a
+medias— pero tirarlo perdía justo lo que hace accionable la rama: el inventario de adjuntos y el
+`multimodal_reason` que el parser ya había deducido.
+
+### Lo que NO se hizo: que el parser falle siempre
+
+El encargo pedía que `ParserEmailStrategy` devolviera `success: false` ante un correo sin texto
+procesable. Tal cual, habría roto tres cosas a la vez.
+
+El motor solo escribe el `outputNamespace` en la rama de éxito, así que `parsed_email` dejaría de
+publicarse para **todos** los flujos, incluidos los que hoy atraviesan sin incidencias un correo con
+el logotipo en PNG. La bandera `requires_multimodal_fallback` quedaría sin uso, y con ella el veto de
+`BINARY_RETENTION_KEYS`, que es lo único que impide al motor purgar el base64 cuando ese binario es
+la única fuente de datos que hay. Y `WizardService` comparte `buildParsedEmail` para el banco de
+pruebas del asistente, que pasaría a anunciar un fallo donde el operador espera ver un payload.
+
+La salida fue un interruptor en los `params`, `failOnUnextractableMedia`, con defecto `false`.
+Bifurcar es una decisión del diseñador del flujo, no del despliegue: sin ese defecto, activar esta
+entrega habría convertido en `PAUSADO` todos los flujos ya guardados sin que nadie lo pidiera.
+
+### Lo que NO se hizo: que la estrategia mirase su propio `onErrorStep`
+
+El encargo también pedía emitir el fallo «si el nodo tiene configurado un `onErrorStep`». No es
+expresable, y conviene dejar escrito por qué: `INodeStrategy.execute(context, params)` no recibe la
+configuración topológica de su nodo, y dársela rompería justo el aislamiento que permite reutilizar
+un mismo nodo en dos flujos que lo colocan en posiciones distintas.
+
+El único punto del sistema donde el interruptor y la ruta son visibles a la vez es la validación del
+esquema. Así que la intención se entrega ahí, como Poka-Yoke al guardar: la **regla 10** rechaza un
+nodo que declara `catchErrors: ['ERR_PARSER_UNEXTRACTABLE_MEDIA']` sin llevar el `param` puesto. Sin
+esa regla el síntoma sería mudo —ni excepción ni traza, solo un nodo de respaldo que no corre nunca y
+un correo que sigue de largo.
+
+El mecanismo quedó genérico (`getUnreachableErrorCodes` en `INodeStrategy`) y no como un caso
+especial del parser, porque `@core` no puede conocer códigos de `@modules` y centralizarlos obligaría
+a tocar el núcleo con cada nodo nuevo. La regla ignora a propósito la forma heredada de cadena: un
+`onErrorStep: "alerta"` está ahí para los demás fallos del nodo, y rechazarlo sería un falso positivo.
+
+### El nodo `DESTINO_SMTP` y dos transportes en vez de uno
+
+Categoría `DESTINO` y no `CONTROL`: el criterio de esa familia es escribir fuera del sistema, que es
+exactamente lo que hace. Que su contenido sea un aviso y no una publicación es una diferencia de
+propósito, no de papel en el grafo; `CONTROL` agrupa a los nodos que deciden si el flujo sigue, y
+éste no decide nada.
+
+Sus `getRequiredNamespaces` se derivan de sus propias plantillas con `extractNamespaceRoots`, no de
+una lista fija: lo que el nodo lee depende por completo de los marcadores que el operador escriba. Un
+aviso que cite `{{error_context.error_message}}` depende de `error_context`; uno que resuma la
+publicación, de `llm_response`. Una lista fija rechazaría cualquiera de los dos.
+
+Los destinatarios son direcciones **literales**, sin interpolación, y el cuerpo va en texto plano sin
+opción de HTML. Las dos restricciones apuntan al mismo sitio: un `to` interpolado dejaría que quien
+escribe a la bandeja del flujo eligiera a quién avisa el sistema, y un cuerpo HTML convertiría ese
+campo en una vía de inyección en el buzón de quien recibe la alerta.
+
+El transporte se partió en dos servicios con dos pools (`EmailService` con `SMTP_OTP_*`,
+`SmtpNodeMailerService` con `SMTP_NODE_*`). No es simetría decorativa: con un único bloque `SMTP_*`,
+apuntar las alertas de los flujos a un buzón de incidencias habría movido también el remitente de los
+códigos de acceso. Hoy pueden apuntar al mismo servidor; el día que no, no hay que tocar código.
+
+### Visión multimodal, y un riesgo que conviene tener escrito
+
+`generateCompletion` gana un cuarto parámetro opcional para adjuntos, y Gemini los manda como partes
+`inline_data`. El texto va **siempre** primero aunque venga vacío: el orden de las partes es
+significativo, y con la imagen delante el modelo tiende a describirla en vez de extraer lo que se le
+pide sobre ella.
+
+El modo visión se activa mirando `error_context.error_code`, no la mera presencia de adjuntos. La
+condición es deliberadamente estrecha: mandar a un modelo con visión el logotipo de cualquier boletín
+sería la inferencia más cara del pipeline gastada en nada. El código del parser es la afirmación
+explícita de que no hay texto y los bytes son la única fuente. Hay además un tope de tres adjuntos
+por llamada, porque los correos que traen diez imágenes son firmas, no contenido.
+
+Los defaults de IA pasan al entorno en dos pares, texto y OCR, porque redactar y leer un escaneado
+son trabajos distintos y el modelo bueno escribiendo no tiene por qué ser el bueno —ni el barato—
+haciendo OCR. La precedencia mira los `params` **crudos** y no la configuración ya resuelta: comparar
+contra las constantes del DTO casi funciona, y falla justo donde importa —un nodo que declara
+`provider: MOCK`, el mismo valor que el defecto, habría pasado por no haber declarado nada y el
+entorno le habría cambiado el proveedor a sus espaldas. Lo destapó la prueba 8.3.
+
+El cambio que más merece quedar por escrito es el otro. `ANTHROPIC` y `OPENAI` devolvían
+`ERR_LLM_PROVIDER_UNSUPPORTED` con un argumento explícito en su TSDoc: que una redacción simulada no
+llegase al `MAPEADOR_PLANTILLA` disfrazada de real. Ahora degradan al simulador con un aviso, por
+decisión explícita, porque `AI_DEFAULT_PROVIDER` puede nombrar un proveedor aún sin cliente y fallar
+habría pausado de golpe todo flujo que no declarase el suyo. **Lo único que sostiene la auditoría
+ahora es `metadata.isMock`**, que viaja en el namespace y queda en la traza; quien publique a
+producción debería mirarlo. La prueba 2.6 cambió de sentido en consecuencia, y su comentario explica
+el porqué para quien la lea dentro de seis meses.
+
+### Estado de la verificación
+
+- `npx tsc --noEmit -p tsconfig.build.json`: 0 errores
+- `npx tsc --noEmit` (con specs): 23 errores, todos preexistentes. La primera medición dio 29 y fue
+  un artefacto: `git stash` no arrastra los ficheros sin rastrear, así que los specs nuevos se
+  compilaban contra el código antiguo. Con `-u` la base es 23, idéntica.
+- Backend: **53 suites, 1223 pruebas en verde** (antes 50 y 1172). Tres specs nuevos:
+  `smtp-alert.strategy` (15), `gemini-llm.provider` (4) y `ai-defaults.config` (8).
+- `npx eslint`: 4 errores, todos preexistentes (3 en `imap-polling.service.spec.ts`, 1
+  `unbound-method` en el spec del nodo de IA que ya estaba en la línea 240).
+- Frontend: **23 archivos, 461 pruebas en verde**; `vue-tsc --noEmit` sin errores. El único cambio es
+  `src/types/pipeline.ts`, que es réplica exacta de los contratos del motor: `NodeType.DESTINO_SMTP`,
+  el namespace `smtp_result` y las tres entradas correspondientes en los `Record<NodeType, …>`.
+  Dejarlo divergir habría hecho que `GET /api/nodos` devolviera un tipo que la UI no sabe etiquetar.
+  El **configurador** del nodo sí queda fuera por decisión explícita.
+- `npm run test:e2e`: sigue roto al importar `sanitize-html`, igual que en la rama base (pendiente 67).
+
+### Pendiente
+
+- Aplicar la migración 021 en el contenedor y actualizar el `.env` real con los dos bloques SMTP y
+  las cuatro `AI_*`. **Es obligatorio antes de arrancar**: con los nombres `SMTP_*` viejos el login
+  OTP se queda sin transporte, y `--watch` no recarga el entorno.
+- Configurador Quasar de `DESTINO_SMTP`, fuera de alcance por decisión explícita. `PROCESADOR_IA`
+  tampoco lo tiene, así que `node-config-registry.ts` cubre 5 de los 9 tipos del enum: los otros dos
+  solo se configuran escribiendo el `pipeline_schema` a mano.
+- `AnthropicLlmProvider`. Hasta que exista, `AI_DEFAULT_PROVIDER=anthropic` degrada al simulador.
+
+---
+
+## 2026-09-26 · Nodo `PROCESADOR_IA`, cliente HTTP base y retirada de `ui_schema` — rama `feat/llm-extractor-node`
+
+### El eslabón que faltaba, y por qué no se podía añadir sin frenos
+
+`PROCESADOR_IA` llevaba declarado en el enum `NodeType` desde la migración 011 sin ninguna
+`INodeStrategy` registrada: un `pipeline_schema` que lo incluyera se guardaba sin protestar y
+reventaba en la primera ejecución con `StrategyNotFoundException`. Entre `EXTRACTOR_WEB` /
+`PARSER_PRE_IA`, que ya publican texto limpio, y `MAPEADOR_PLANTILLA`, que ya interpola variables,
+no había nada.
+
+Lo que hacía el hueco incómodo de rellenar no era la inferencia, sino el dinero. El motor reintenta
+los fallos `GRAVE` con backoff y checkpoint, y un cliente HTTP razonable reintenta también la
+petición. Las dos capas se **multiplican**, y en este nodo cada vuelta se factura. Un proveedor
+intermitente podía convertir una sola ejecución de un flujo en decenas de inferencias que nadie
+autorizó. De ahí que el nodo llegue con tres piezas que no son accesorias:
+
+- **`HttpClientService` (`@core/http/`)**, primer consumidor de `@nestjs/axios` en el proyecto.
+  Centraliza timeout (15 s por defecto), backoff exponencial y la traducción del error de Axios a
+  `NodeErrorDetail`. Reintenta timeouts, errores de red, `429` y `5xx`; **nunca** un `4xx` de
+  cliente, que es determinista y solo gastaría tiempo. Devuelve una unión discriminada en lugar de
+  lanzar: una excepción la clasificaría `toDomainFailure` como catastrófica y marcaría la ejecución
+  `FALLIDO`, cuando un portal caído es exactamente lo que el operador reintenta con el flujo
+  `PAUSADO` (CU-09).
+- **Freno de emergencia**, indexado por `${executionId}:${cursor}` en un `Map`. **No** es un contador
+  de instancia, y ese detalle es el que importa: la estrategia es un singleton de Nest compartido por
+  todas las ejecuciones concurrentes, así que un único número habría hecho que un flujo agotara el
+  umbral y pausara el nodo de IA de otro flujo sano que entrara después. El operador vería una
+  ejecución pausada sin un solo fallo propio que lo explique (`testing-standards.md` §4).
+  Al alcanzar el umbral devuelve `URGENTE` —que `canRetry` rechaza— **devolviéndolo, no lanzándolo**:
+  lanzar daría `FALLIDO` terminal y obligaría a relanzar el flujo desde cero, tirando el trabajo
+  válido de los nodos anteriores.
+- **Simulación de coste cero** (`MockLlmProvider`), determinista. Se activa con `dryRun: true`, con
+  `provider: MOCK` —que es el **defecto**, para que un nodo recién creado no pueda gastar por
+  omisión— y cuando `GEMINI_API_KEY` falta en el entorno. En ese último caso `GeminiLlmProvider`
+  degrada con un aviso en el log en vez de fallar: la ausencia de la clave es un estado normal en
+  desarrollo, y lo contrario obligaría a repartir credenciales de pago para probar una topología.
+
+### Lo que NO se hizo: caer al simulador cuando el proveedor no existe
+
+`ANTHROPIC` y `OPENAI` están en el enum pero no tienen cliente. La tentación era delegar en el mock
+—«al menos el flujo termina»— y es justo lo que no puede pasar: esa salida simulada seguiría hasta
+el `MAPEADOR_PLANTILLA`, que la publicaría en Drupal como si fuera una redacción real. Devuelven
+`ERR_LLM_PROVIDER_UNSUPPORTED` en `GRAVE`. Un fallo ruidoso es preferible a una noticia inventada en
+producción.
+
+Tampoco se construyó un rescatador de JSON a base de expresiones regulares sobre texto libre: se le
+pide el JSON al propio modelo con `responseMimeType: 'application/json'`. Lo otro es un parser de
+formato ad hoc, que `security-and-scope.md` §3 prohíbe.
+
+### El nodo no escribe en el contexto, y el `outputNamespace` no es suyo
+
+`outputNamespace` ya es campo de `PipelineNodeConfigDto`, validado contra `NODE_OUTPUT_NAMESPACES`
+—que incluye `llm_response`— y único por flujo, y `FsmEngineService` ya hace
+`context.setNamespace(node.outputNamespace, result.data)`. Declararlo también en el DTO del nodo
+habría creado una segunda fuente de verdad invisible para el validador de topología, y dos
+escrituras que divergen en cuanto los dos valores no coinciden. La estrategia devuelve `data` y
+punto, como las otras cinco.
+
+Detalle del reparto de los dos textos: el **contenido** viaja como `prompt` y la **instrucción** como
+`systemPrompt`, no al revés. Así el texto llega al modelo aunque la instrucción del operador no
+interpole ningún marcador —«resume esto en tres párrafos» es un prompt perfectamente válido y no
+menciona ningún namespace—. Con el reparto contrario, ese prompt facturaría una inferencia sobre
+ningún contenido.
+
+### `ui_schema`: retirada completa, no columna vacía
+
+La columna nació en la 011 prometiendo ser el contrato declarativo del formulario del frontend. Las
+nueve filas siguen con `'{}'` y el formulario lo resuelve `node-config-registry.ts` con componentes
+tipados. Quedaba como deuda registrada en la entrada del 2026-09-08 de esta bitácora.
+
+Se borra en lugar de dejarla vacía porque una columna que dice ser la fuente de verdad de la UI y no
+lo es acaba siendo usada por alguien, y desde ahí el formulario de un nodo queda definido en dos
+sitios que se desincronizan en la primera modificación. El mismo argumento por el que los contratos
+de **salida** viven en `outputFields` de la `INodeStrategy` y no en un jsonb.
+
+La retirada es en cascada —migración 020, `init.sql` (incluido el `UPDATE` que la 013 sembró para
+`TRIGGER_CRON`), entidad, `NodeCatalogResponseDto`, `NodeCatalogService`, el tipo del frontend y los
+seis specs que lo construían— porque dejar el DTO prometiendo un campo que la entidad ya no tiene
+devolvería `undefined` por `GET /api/nodos` con el tipo afirmando lo contrario.
+
+### Estado de la verificación
+
+- `npx tsc --noEmit`: 45 errores, los mismos 45 preexistentes de la rama base (todos en specs, fuera
+  de `tsconfig.build.json`). Cero nuevos.
+- Backend: 50 suites, 1172 pruebas en verde, incluidas las 24 nuevas de la estrategia y las 11 del
+  cliente HTTP.
+- Frontend: 23 archivos, 461 pruebas en verde; `vue-tsc --noEmit` limpio.
+- **`npm run test:e2e` falla, y ya fallaba antes de esta rama**: las dos suites revientan al importar
+  `sanitize-html` (problema de transformación ESM en `jest-e2e.json`). Verificado con `git stash`
+  contra la rama base. Queda como deuda ajena a este trabajo.
+
+### Pendiente
+
+- Aplicar la migración 020 contra el contenedor (la ejecuta el usuario):
+  ```bash
+  sudo docker exec -i protodo_postgres psql -U '<usuario_postgres>' -d '<nombre_bd_desarrollo>' \
+    < db/migrations/020-eliminar-ui-schema-nodos.sql
+  ```
+- Unificar el nombre de la credencial de Anthropic: el `.env` real declara `ANTHROPIC_API_KEY` y
+  `.env.example` `CLAUDE_API_KEY`. Ninguno se lee todavía —no hay proveedor Anthropic—, así que se
+  resuelve cuando se escriba.
+- `ESCUDO_POST_IA` sigue sin estrategia. Es el validador natural de la salida de este nodo antes de
+  que el mapeador la propague.
+
+---
+
+## 2026-09-19 · `extracted_urls` deja de salir vacío: enlaces para el pipeline Notiweb — rama `feat/enlaces-parser`
+
+### Dos causas, y arreglar una sola no servía de nada
+
+`EXTRACTOR_WEB` recibía `parsed_email.extracted_urls` vacío y no tenía nada que escrapear antes de
+que la IA redactase. El diagnóstico de partida apuntaba al orden de recolección, y era cierto a
+medias: había **dos** causas independientes y corregir solo una dejaba el arreglo igual de vacío.
+
+**La primera, y la que de verdad mordía: la cascada del cuerpo.** Un correo de Gmail trae parte de
+texto y parte HTML. `extractEmailBody` prefiere el texto plano —es más barato que montar el DOM— y
+esa rama devolvía `urls: []` **sin llegar a abrir el marcado**. Mientras eso siguiera así, cambiar
+cuándo se podan las firmas era irrelevante: nadie miraba el HTML. Ahora los enlaces se leen siempre
+del marcado, gane quien gane el cuerpo, vía una `extractEmailUrls` nueva que se salta el aplanado a
+texto porque aquí no hace falta.
+
+Del texto plano se sigue sin rescatar nada, y esa parte de la decisión original se mantiene: ese
+texto parte las URLs a 78 columnas (RFC 5322) y un `https?://\S+` produciría direcciones truncadas.
+El marcado del mismo correo las declara enteras.
+
+**La segunda: el momento de la recolección.** Se recogían después de retirar citas y firmas, para que
+`clean_body` y `extracted_urls` describieran el mismo documento. Buena regla para un boletín y mala
+para un recorte de prensa: en un correo **reenviado** el contenido entero —y con él las referencias
+bibliográficas— vive dentro del `<blockquote>` que la poda elimina. Se perdían todas.
+
+### Lo que se rompe a cambio, dicho sin adornos
+
+Recoger antes de podar significa que un enlace de una firma entra en `extracted_urls` aunque su texto
+ya no aparezca en el cuerpo. **Los enlaces dejan de describir el mismo documento que `clean_body`.**
+Es una pérdida real de una invariante que existía a propósito, y se acepta porque la alternativa
+—perder las referencias de todo correo reenviado— es peor para lo que este pipeline hace.
+
+Lo que acota el ruido es que **los diez filtros de `collectUrls` no se tocaron**. La especificación
+recibida pedía filtrar solo vacías, `mailto:` y `tel:`; leída al pie de la letra habría dejado pasar
+desuscripciones, redes sociales, redirectores de campaña y duplicados, sin tope. `EXTRACTOR_WEB`
+descarga cada URL con Playwright: mandarle la baja del boletín o el LinkedIn del remitente es gasto
+puro y ruido en la redacción.
+
+Tres pruebas afirmaban el comportamiento anterior y se **invirtieron**, no se borraron: 7.1 y 7.6 de
+la estrategia y 5.12 del saneador. Cada una lleva escrito en su `Arrange` por qué dice ahora lo
+contrario.
+
+### El aviso que faltaba
+
+Un `extracted_urls: []` era mudo: no distinguía «este correo no traía enlaces» de «algo va mal». Se
+añade `onNoUrlsFound`, cuarto hook de la serie, que emite un LEVE no bloqueante cuando **había
+marcado** y aun así no salió ni un enlace. La condición importa: en un correo `text/plain` puro no
+hay ningún `<a>` que recoger, y avisar ahí convertiría la señal en ruido constante. La estrategia lo
+manda a `logger.warn('LEVE | …')` y el asistente a `warnings[]`, que es lo que lo hace visible en el
+banco de pruebas.
+
+### Lo que este cambio NO arregla
+
+El correo que originó el encargo guarda en `raw_email.html` literalmente
+`href="[https://www.youtube.com/](https://www.youtube.com/)"`, con sintaxis Markdown dentro del
+atributo. Ese valor muere en `parseAbsoluteUrl` porque `new URL()` lanza —un esquema URI debe empezar
+por letra ASCII— y **el descarte es correcto**: `[https://…` no es navegable y el extractor fallaría
+al intentar descargarlo. Ese correo seguirá dando `[]`.
+
+Queda **pendiente, fuera de este cambio**: averiguar qué escribe esos `href`. `ImapTriggerStrategy`
+usa `simpleParser` de `mailparser`, que no markdowniza nada. Se dejó constancia del descarte en dos
+pruebas (7.10 y 5.15) para que la próxima persona que lo vea no lo confunda con un fallo del parser.
+
+### Normalización del texto documental (RNF-01)
+
+Arrastrado del mismo encargo: el texto que se saca de los adjuntos se normaliza antes de recortarlo.
+El orden no es indiferente —recortar primero gastaría parte del presupuesto de 100 000 caracteres en
+saltos de línea que iban a colapsarse igualmente— y se reutiliza `normalizeWhitespace`, ya exportada
+y probada, en vez de escribir un `\n{3,}` nuevo: hace un superconjunto de lo pedido (CRLF, espacios
+duros, rachas de espacio horizontal) y todo ello es exactamente economía de tokens. Cada lector pasa
+a devolver texto crudo y la normalización vive en un único sitio, para que un lector futuro no pueda
+olvidarse de aplicarla.
+
+### Lo que NO se implementó de la especificación
+
+- **`context.setNamespace('parsed_email', …)` desde la estrategia.** El contrato lo prohíbe, y no
+  habría fallado de forma ruidosa: `setNamespace` *fusiona*, así que habría dejado un `parsed_email`
+  de dos claves en lugar de trece, en silencio, perdiendo `clean_body` y
+  `requires_multimodal_fallback` —las dos que el motor lee para decidir la purga del base64—. La
+  inmutabilidad ya estaba garantizada: la estrategia devuelve `data` y el motor la deposita.
+- **`validator.normalizeEmail` sobre las URLs.** Normaliza direcciones de correo, no URLs. La
+  normalización real ya la hacían `parseAbsoluteUrl` y `withoutTrackingParams`.
+- **`extracted_urls` como propiedad nueva.** Ya existía: es la clave 8 de las 13.
+
+### Verificación
+
+**41 suites / 950 pruebas** (antes 936), `tsc --noEmit` limpio. Frontend **15 ficheros / 321
+pruebas**.
+
+Lo que **no** está cubierto: ninguna prueba ejecuta la cadena completa
+`TRIGGER_IMAP → PARSER_PRE_IA → EXTRACTOR_WEB`. Que el extractor reciba de verdad la lista solo se ha
+verificado por partes.
+
+---
+
+## 2026-09-19 · `npm audit` a cero sin tocar el major de NestJS — rama `feat/auditoria-dependencias`
+
+### Diecisiete avisos, cuatro causas
+
+El informe daba 17 vulnerabilidades y a primera vista parecía que el monolito entero estaba podrido:
+once de las entradas eran paquetes `@nestjs/*`. No lo estaban. Al leer el campo `via` de cada aviso,
+las once colgaban de una sola raíz — `@nestjs/platform-express` depende de `multer`, y `multer`
+arrastraba cuatro CVE de denegación de servicio— y el resto se agrupaba en tres más: `fast-uri`,
+`js-yaml`/`qs` y `nodemailer` (que a su vez marcaba `mailparser`).
+
+Cuatro arreglos, no diecisiete. Y ninguno exigía subir de major.
+
+### Por qué `--force` habría sido un desastre
+
+`npm audit fix --force` proponía `@nestjs/core@12.0.3`, `@nestjs/platform-express@12.0.3`,
+`@nestjs/swagger@12.0.1`, `@nestjs/typeorm@12.0.1` y cinco más: el salto de la 11 a la 12 en todo el
+monolito, y todo ello **para arreglar `multer`**, que este proyecto ni siquiera importa
+(`grep FileInterceptor` no da un solo resultado). Habría sido cambiar diecisiete avisos por una
+migración de framework no pedida.
+
+### El reparto: `audit fix` primero, override solo donde hacía falta
+
+`npm audit fix` sin `--force` resolvió por sí solo `fast-uri` (3.1.5 → 3.1.8), `js-yaml` (4.3.1 →
+4.3.2, y la copia 3.15.1 del árbol de cobertura a 3.15.2) y `qs` (6.15.3 → 6.16.0). De 17 a 13.
+
+Las dos que quedaban se trataron de forma distinta **a propósito**:
+
+- **`nodemailer` es dependencia DIRECTA.** Lo correcto ahí es corregir el rango declarado en
+  `dependencies` (`^9.0.5` → `^9.1.1`), no añadir un override. Un override sobre una dependencia
+  propia esconde el rango real: el `package.json` seguiría anunciando que acepta una versión
+  vulnerable y el arreglo viviría en otro sitio. Esto además cerró `mailparser`, que solo estaba
+  marcada por arrastrarla.
+- **`multer` sí necesitaba un override**, y es el único caso legítimo: `@nestjs/platform-express`
+  la fija en `"multer": "2.2.0"` **exacto**, sin caret, de modo que `audit fix` no tiene margen
+  para moverla por mucho que exista la 2.4.0. El override es la única vía, y es un salto *menor*
+  dentro de la 2.x.
+
+Todos los parches existían **dentro del major vigente**. Eso se comprobó versión a versión antes de
+escribir nada, precisamente para no acabar justificando un major a posteriori.
+
+### Verificación de que el override de `multer` no rompe nada
+
+Que la suite pase no demuestra que `platform-express` siga hablándose con un `multer` que no es el
+que declaró. El punto de contacto real es `FileInterceptor`, así que se comprobó directamente: se
+carga, se instancia y el `multer` efectivo es el 2.4.0. `nest build` compila y `@nestjs/*` se queda
+íntegro en 11.x, sin un solo major movido.
+
+### Un efecto lateral que resultó ser una mejora
+
+`npm audit fix` también movió `pdf-parse` de 1.1.1 a **1.1.4**, y conviene decir que fue a mejor:
+pierde la dependencia `debug` y elimina el bloque `isDebugMode = !module.parent` de su `index.js`
+—el cebo que obligó a montar una prueba de humo al introducir la librería el día anterior—. La
+entrada del 2026-09-18 afirmaba que la línea 1.x estaba «sin mantenimiento desde 2019»; era cierto
+al escribirla y ha dejado de serlo. Queda corregida allí con su fecha.
+
+### Estado final
+
+`npm audit` → **found 0 vulnerabilities**. `npx tsc --noEmit -p tsconfig.build.json` limpio,
+`nest build` en verde, **41 suites / 936 pruebas**.
+
+Lo que **no** se ha hecho: arrancar la aplicación contra la base de datos. La comprobación de
+`multer` es de integración de módulos, no de una subida de fichero real — algo que hoy no existe en
+el proyecto, pero que habría que ejercitar de verdad si algún día se añade un endpoint de carga.
+
+---
+
+## 2026-09-18 · Extracción nativa de texto de adjuntos en `PARSER_PRE_IA` — rama `feat/extractor-adjuntos`
+
+### El problema: pagar visión por un PDF que ya traía su texto
+
+El corpus del proyecto son notas de prensa institucionales, y su forma más habitual es un correo
+con un `Ver adjunto.` por cuerpo y el comunicado entero dentro de un PDF. Hasta ahora el nodo solo
+sabía leer el cuerpo del correo: `clean_body` salía con doce caracteres, `requires_multimodal_fallback`
+se levantaba y el flujo acababa mandando el binario a un modelo con visión — la llamada más cara
+del pipeline — para leer un documento cuyo texto estaba ahí, seleccionable, sin necesidad de mirarlo.
+
+Ahora ese texto se extrae en local. La bandera multimodal deja de ser la primera respuesta y pasa a
+ser la última: solo se levanta cuando de un adjunto de imagen o PDF no se sacó **ni un carácter**.
+
+### Cero OCR, y no por falta de ganas
+
+La extracción es estrictamente nativa. Una imagen devuelve cadena vacía sin que nadie toque el
+búfer, y esa ausencia es *informativa*: es justo lo que convierte al adjunto en candidato a visión.
+Meter un motor de OCR aquí habría hecho lo contrario de lo que el nodo persigue —gastar CPU para
+adivinar un texto que luego habría que mandar igualmente a revisar— además de arrastrar
+`tesseract.js`, que descarga ~10 MB de datos de idioma desde un CDN de terceros en la primera
+ejecución.
+
+### Tres decisiones de dependencia que no son de gusto
+
+**`xlsx` se descartó por seguridad, no por preferencia.** Es la librería obvia para hojas de
+cálculo, pero quedó congelada en npm en la 0.18.5 (2022) y `npm audit` la marca **high, sin parche
+disponible**: prototype pollution (GHSA-4r6h-8v6p-xvw6) y ReDoS (GHSA-5pgg-2g8v-p4x9). SheetJS
+publicó las correcciones solo en su CDN y nunca las devolvió a npm. Esta ruta analiza ficheros que
+manda cualquiera que sepa la dirección del buzón; una vulnerabilidad permanente ahí no es una deuda,
+es una puerta. Se usa `exceljs`, que trae un aviso **moderado** transitivo por `uuid@8` —no
+alcanzable desde aquí, porque ExcelJS llama a `uuid.v4()` sin búfer y en la ruta de *escritura*—
+cerrado de todos modos con un `overrides`. Los tres paquetes nuevos aportan **cero** avisos al
+proyecto; los 17 que `npm audit` sigue reportando son los preexistentes de la cadena de NestJS.
+
+**`pdf-parse` en la línea 1.x y no en la 2.x.** La 2.x arrastra `pdfjs-dist` y `@napi-rs/canvas`, un
+módulo NAPI nativo que existe para rasterizar páginas. Sin OCR no hay nada que rasterizar. La 1.x
+depende solo de `node-ensure`: JS puro. Queda anotado: si un PDF real rompe la 1.x, la salida es la
+2.x con su API de clase, ya verificada bajo este `tsconfig`.
+
+> **Corregido el 2026-09-19.** Esta entrada decía que la 1.x llevaba «sin mantenimiento desde 2019».
+> Era cierto al escribirla y dejó de serlo: la línea revivió en octubre de 2025 y la instalada es la
+> **1.1.4**, del mismo mantenedor y el mismo día que la 2.4.5. Mejora en lo que aquí importaba:
+> pierde la dependencia `debug` y elimina el bloque `isDebugMode = !module.parent` de `index.js`
+> —el cebo que motivó la prueba de humo del paso 0— que intentaba leer un PDF del propio paquete.
+
+**Un CSV no pasa por el analizador de hojas de cálculo.** Ya es texto. Leerlo con `exceljs` para
+volver a serializarlo como CSV es un viaje de ida y vuelta que solo puede perder información, y de
+paso expone la ruta al analizador con el ReDoS conocido.
+
+### La composición se volvió asíncrona, y eso se notó en cuatro sitios
+
+`buildParsedEmail` era síncrona y pura. Leer un PDF no lo es. La onda llegó exactamente donde se
+esperaba: la estrategia (ya `async`, solo añadió el `await`), el controlador del asistente, y
+`WizardService.checkParser`, que era **el único método del servicio sin `async`** y cuyo TSDoc lo
+justificaba explícitamente. Esa nota se reescribió: ahora sí hay algo que esperar.
+
+`extractEmailBody` se quedó síncrona a propósito. No toca adjuntos, y volverla asíncrona por simetría
+habría obligado a todo lector a buscar una espera que no existe.
+
+### Lo que el banco de pruebas puede y no puede demostrar
+
+`POST /wizard/check-parser` sigue **rechazando `contentBase64`**, con su tope de 50 kB. Una ruta del
+asistente no debe tragarse megabytes, y ese límite está calibrado por debajo del defecto de 100 kB de
+`express.json()` para que un cuerpo excesivo dé un 400 en castellano y no un 413 crudo de Express.
+
+La consecuencia es que ahí la extracción documental **no puede ocurrir**. Se resolvió diciéndolo, no
+disimulándolo: si la petición declara adjuntos, la respuesta trae un aviso explícito de que los
+binarios no se simulan. Lo que **no** se hizo fue forzar `requires_multimodal_fallback` a `false`
+desde el asistente. Una rama «estoy en el banco de pruebas» dentro de `buildParsedEmail` habría
+destruido su única razón de ser —ser la misma implementación que corre en producción— y habría
+metido en el núcleo un concepto que el núcleo no debe conocer. No hizo falta: sin `contentBase64` no
+hay candidatos visuales, y la bandera sale `false` por construcción. El aviso dice la verdad y el
+cálculo no miente.
+
+### Un adjunto ya purgado no es un adjunto sin texto
+
+La condición «trae `contentBase64` utilizable» de la regla multimodal parece defensiva y no lo es.
+El motor pone `contentBase64: null` en cuanto un nodo anterior emite texto útil, así que el parser
+puede encontrarse perfectamente con adjuntos ya liberados. Contarlos como «sin texto» los habría
+convertido en candidatos a visión, es decir, en una petición a un modelo multimodal sobre bytes que
+ya no existen: condenada a fallar. Queda fijado en la prueba 7.6.
+
+Esto obligó a recalibrar los *fixtures*, no la regla: `PDF_ATTACHMENT` modelaba un adjunto sin
+`contentBase64`, una forma que `ImapTriggerStrategy` no produce nunca. Se añadió `SCANNED_PDF`, que
+es el adjunto tal y como sale del disparador.
+
+### El motor tenía que enterarse
+
+`extracted_documents_text` se sumó a `EXTRACTED_TEXT_KEYS`. La nota de arquitectura del encargo daba
+por hecho que con la bandera en `false` el motor purgaría el Base64, y **no era cierto**: el motor
+decide con un vocabulario cerrado de claves, y sin la nueva en la lista el correo de cuerpo vacío con
+todo su contenido en un PDF dejaba `clean_body` vacío, `hasUsefulText` devolvía `false` y los
+megabytes se quedaban en `contexto_acumulado` para siempre, aun habiéndose extraído ya todo su texto.
+Una línea, y la nota pasa a ser verdad. (Matiz: el motor no hace `delete`; sustituye el valor por
+`null` y conserva `filename`, `contentType` y `size`, para que el inventario siga siendo legible en
+la traza forense.)
+
+### Por qué hay un PDF versionado en `test/fixtures/`
+
+La primera versión de la prueba generaba el PDF dentro del propio test, para no meter un binario
+opaco en el repositorio. No funcionó, y el motivo merece quedar escrito: `pdf-parse@1.1.1` empaqueta
+pdf.js **v1.10**, cuya recuperación de una tabla `xref` imperfecta es heurística. El fixture hecho a
+mano tenía entradas de 19 bytes donde la norma exige 20, pdf.js descartaba la tabla, la reconstruía
+por su cuenta, y **el resultado dependía de la cadena concreta del fixture**: `'Nota de prensa
+institucional'` extraía bien y `'UNUWARE'` devolvía vacío. Corregido el `xref`, seguía fallando de
+forma distinta según el texto.
+
+Se dejó de pelear con ello: hay un PDF real generado con Ghostscript, y su fuente PostScript de
+cuatro líneas se versiona al lado (`nota-nativa.ps`) para que el binario no sea opaco en una revisión.
+Dos conmutadores quedaron anotados como prohibidos al regenerarlo, comprobados variante a variante:
+`-dOmitID` deja a pdf.js sin extraer texto, y `-dOmitXMP` falla **solo bajo Jest**.
+
+Por ese mismo motivo, las suites del nodo y del asistente **doblan `pdf-parse`**. Examinan la regla
+—qué texto cuenta y cuándo sube la bandera—, no la capacidad de pdf.js de leer un fichero;
+ejercitarlo de verdad allí ataba el resultado a una versión concreta de pdf.js y dejaba su worker
+vivo tras el *teardown* de Jest, lo que tumbaba el proceso hijo. La extracción real se prueba donde
+corresponde, en `document-extractor.util.spec.ts`, contra ficheros de verdad.
+
+### Verificación
+
+Backend **41 suites / 936 pruebas** (antes 40/913), `tsc --noEmit` limpio y `npm audit` sin aportar
+un solo aviso nuevo. Frontend **15 ficheros / 321 pruebas**, `vue-tsc` limpio y `quasar build` en
+verde.
+
+Lo que **no** está cubierto: no hay ninguna prueba que ejecute un flujo completo con un correo real
+con adjunto. La extracción documental de punta a punta —disparador IMAP, parser, purga del motor—
+solo se ha verificado por partes, y conviene ejercitarla sobre un buzón de verdad antes de darla por
+buena en producción.
+
+---
+
+## 2026-09-10 · Parada inmediata del sondeo IMAP y saneado de ejecuciones huérfanas — rama `feat/trigger-imap`
+
+### Dos premisas del encargo que la auditoría matizó
+
+El diagnóstico de partida hablaba de un ciclo infinito que "sigue corriendo" al desactivar o
+**eliminar** un flujo. Al abrir el código, dos cosas no encajaban.
+
+**No existe borrado de flujos.** `WorkflowsController` lo documenta explícitamente: no hay
+`@Delete` porque un borrado físico arrastraría el histórico de ejecuciones por el
+`ON DELETE CASCADE` de `init.sql:155`. Retirar un flujo es `PATCH { "active": false }`. El
+trabajo se acotó, por tanto, a la desactivación, que es el único camino real.
+
+**La fuga estaba acotada, no era indefinida.** `refreshSchedules()` ya hacía diffing en tres
+fases, y su fase de bajas retira el intervalo de todo flujo que `findImapTriggerNodes()` —que
+filtra `active: true`— deja de devolver. Es decir: el temporizador del flujo desactivado **sí**
+moría, pero en el siguiente ciclo de reconciliación. Con los valores por defecto, hasta 60
+segundos abriendo sockets IMAP contra un buzón que ya nadie debería consultar. Lo que faltaba
+era la parada inmediata, no la parada.
+
+Lo que sí era exactamente como decía el encargo: las ejecuciones huérfanas. Nada las tocaba, y
+una fila `EN_PROCESO` no es solo ruido en la trazabilidad — reserva el índice único parcial
+`idx_flujo_activo`, así que si el flujo se reactivaba **nunca** podría arrancar otra ejecución.
+
+### `NodesModule` ya importaba `WorkflowsModule`, así que la flecha obvia estaba prohibida
+
+`ImapPollingService` inyecta `WorkflowsService` para despachar el flujo cuando detecta correo.
+Inyectar el sondeo dentro de `WorkflowsService` para pararlo habría cerrado el ciclo que el
+TSDoc de ambos módulos evita a propósito — y que de hecho `createWorkflow` documentaba como la
+razón de conformarse con la reconciliación periódica.
+
+Se descartó `forwardRef`: resuelve el ciclo en el contenedor pero lo deja en el diseño, y este
+código lo había evitado deliberadamente. En su lugar, un puerto: `FlowPollingCoordinator` en
+`CommonModule`, que ya es `@Global()` y ya alojaba `HybridLoggerService` por el mismo criterio
+—infraestructura transversal que no pertenece al dominio de ningún módulo—. El sondeo se
+inscribe hacia arriba en su `onModuleInit`; el dominio habla contra una interfaz que no sabe
+nada de IMAP ni de `SchedulerRegistry`. El grafo sigue siendo acíclico.
+
+El registro va **después** de la guarda de `IMAP_POLLING_ENABLED`, no antes. Sin sondeo no hay
+nada que parar, y sobre todo un `refreshPolling()` disparado desde fuera empezaría a inscribir
+temporizadores que ningún ciclo de reconciliación mantiene, saltándose la decisión de que el
+fallo por omisión sea *no* sondear.
+
+### Limpiar el `Map` no era opcional, y el test que lo demuestra tarda 60 segundos simulados
+
+`stopPollingForFlow` tiene que hacer dos cosas: borrar el intervalo **y** limpiar la entrada de
+`scheduled`, el registro paralelo que sostiene el diffing. Omitir lo segundo parece inofensivo
+—el siguiente reconcile se autocura si el flujo sigue desactivado— hasta que el operador
+reactiva el flujo antes de ese ciclo:
+
+| Momento | Estado |
+|---|---|
+| t=0 · desactivar | Intervalo borrado; `scheduled` conserva `flowId → configA` |
+| t=10 s · reactivar | La tabla vuelve a devolver el flujo |
+| t=60 s · reconcile | `desired` lo tiene → no entra en bajas. `scheduled.get()` devuelve `configA` → no es alta. `hasConfigChanged` es `false` → **no se reinscribe** |
+
+Resultado: flujo activo y mudo, para siempre, y el log reportando `intactos=1`. Es el mismo modo
+de fallo que el comentario de `clearSchedules` ya prevenía, reintroducido por la puerta de
+atrás. Por eso el `scheduled.delete` va en un `finally`, no dentro del bloque protegido: el Map
+es la fuente de verdad, y dejarlo sucio es peor que un intervalo huérfano.
+
+De paso se endureció la fase de altas de `refreshSchedules`, que ahora comprueba también
+`doesExist('interval', ...)`. Desde que existe un segundo escritor del par
+`scheduled` ↔ `SchedulerRegistry`, dar la invariante por supuesta es una apuesta; ahora el
+reconcile la repara en lugar de confiar en ella.
+
+### El `UPDATE` masivo era cosmético mientras el bucle siguiera vivo
+
+Marcar `EN_PROCESO → FALLIDO` por SQL no basta: el `while` de `executeWorkflow` puede seguir
+corriendo en este mismo proceso, y su próximo `saveCheckpoint` —un `UPDATE ... WHERE
+id_ejecucion = $1` incondicional, sin columna de versión— resucitaría la fila. Peor: si
+entretanto arrancó otra ejecución del flujo, esa escritura violaría `idx_flujo_activo` con un
+23505 que `saveCheckpoint` no filtra, acabando en volcado forense por algo que no es un fallo.
+
+De ahí la segunda mitad: un `Map` en memoria de `executionId → motivo` que el bucle consulta.
+Y hacía falta consultarlo en **dos** puntos, no en uno:
+
+- **Primera sentencia del `while`**, antes del circuit breaker: captura el aborto llegado
+  mientras se escribía el checkpoint anterior.
+- **Tras el `for(;;)` de reintentos, antes de `outcome.catastrophic`**: captura el caso
+  frecuente, el aborto llegado *mientras el nodo corría*, que es donde el bucle pasa casi todo
+  su tiempo. Comprobar solo arriba habría dejado que la rama de éxito escribiera `EN_PROCESO`
+  antes de salir, devolviendo la fila al mutex.
+
+En ambos se hace `break`, no `throw`: una excepción la atraparía el `catch` externo, que escribe
+volcado forense y vuelve a marcar `FALLIDO`, generando justo el ruido que se quiere evitar. Y
+como el cursor no es nulo al abortar, el `break` esquiva también el checkpoint `EXITOSO`.
+
+Solo se marcan las `EN_PROCESO`. Una `PAUSADO` es, por definición, una ejecución cuyo bucle ya
+terminó: no hay a quien avisar, y su identificador se quedaría en el mapa para siempre. Las que
+sí se marcan se limpian en el `finally` de `executeWorkflow` —que hubo que añadir, porque el
+`try` externo no tenía— y, además, al **entrar** en `executeWorkflow`: una marca superviviente
+envenenaría el reintento manual de CU-09, que reutiliza el mismo `executionId`.
+
+### El motivo no cabía en ninguna columna existente
+
+`ejecuciones_flujo` sabía *qué* había fallado y dónde estaba la autopsia (`ruta_archivo_log`),
+pero no *por qué* en términos legibles. Hasta ahora no hacía falta: todo `FALLIDO` lo decidía el
+motor tras agotar reintentos, y el detalle vivía en el volcado. Una desactivación es un fallo de
+otra naturaleza — no lo provoca ningún nodo y no hay stack trace que volcar.
+
+Se descartó `alertas_error`: esa tabla registra incidencias con severidad que alguien debe
+resolver (`resuelto BOOLEAN`), y una desactivación deliberada no es una incidencia pendiente. El
+motivo pertenece a la fila de la ejecución. Migración `012` + `failureReason` en la entidad, con
+truncado en código a 255: el texto puede interpolar el nombre de un flujo, que lo escribe un
+usuario, y sin recorte una desactivación legítima moriría con `value too long`.
+
+**Es un prerrequisito duro, no un extra.** Con `synchronize: false`, en cuanto la entidad declara
+la propiedad TypeORM enumera `motivo_fallo` en todo `SELECT` de `FsmExecution`, incluido el
+`findOne` de `executeWorkflow`. Entidad y migración se despliegan juntas o el motor no arranca.
+
+### Por qué la limpieza va después del `save`, y no antes
+
+`refreshSchedules` lee `flujos WHERE activo = true` y `runAutomaticWorkflow` relee la columna. Si
+paráramos el temporizador antes de comprometer el cambio, una reconciliación que se colara en
+esa ventana vería el flujo todavía activo, no lo encontraría en `scheduled` y **lo reinscribiría**
+— deshaciendo nuestra propia parada, esta vez sin nadie que la repita. Con `activo = false` ya
+persistido, cualquier ciclo posterior está de acuerdo con la parada y como mucho la repite.
+
+Entre las dos operaciones, primero parar y luego abortar: al revés, el intervalo podría disparar
+un tick más y crear una ejecución fresca justo después del barrido.
+
+Y ninguna de las dos propaga. La desactivación ya está comprometida cuando se ejecutan;
+convertir un fallo de limpieza en un 500 le diría al cliente que la operación falló cuando sí
+ocurrió, y su reintento sería un no-op que jamás volvería a intentar la limpieza.
+
+### La reactivación no aborta nada, pero sí adelanta la reinscripción
+
+Simétricamente, `false → true` **no** cierra ejecuciones: las `PAUSADO` conservan su
+`activeCursor` precisamente para el reintento de CU-09, y el operador que desactiva para
+arreglar algo y reactiva después esperaría encontrarlas. Lo que sí hace es un `refreshPolling()`
+inmediato: sin él, pulsar "Activar" y no ver actividad durante un minuto es el síntoma más
+visible que quedaba.
+
+### Un tick en vuelo acusaba al buzón de algo que no había pasado
+
+Parar el intervalo no cancela un `pollInbox` ya suspendido en la red. Al reanudar, llega a
+`dispatchFlow` y `runAutomaticWorkflow` lo rechaza con un `BadRequestException` — que se
+relanzaba y acababa en el `catch` de `pollInbox` registrado como *"[Worker] Falla critica de
+conexion IMAP"*, a nivel `error` y con stack. Cada desactivación con un tick en vuelo generaba
+una falsa alerta.
+
+Ahora `dispatchFlow` trata cualquier `HttpException` del motor como condición normal, junto al
+409 que ya contemplaba, **conservando el mensaje real**: por esa misma vía llega también el
+esquema corrupto, y ese sí debe quedar legible en la traza aunque deje de disfrazarse de caída
+IMAP. Un fallo que no sea `HttpException` sigue subiendo como `error`, y hay un test para cada
+mitad para que la degradación no se coma las averías de verdad.
+
+No se toca `inFlight`: tiene un único dueño, el `try/finally` de `pollInbox`, y borrarlo desde
+fuera podría habilitar dos conexiones concurrentes al mismo buzón — literalmente lo que esa
+guarda existe para impedir.
+
+### Las filas en PAUSADO no eran una cola de reintento, eran residuo de reinicios
+
+La migración 012 acabó llevando también un `UPDATE`: todo lo que quedaba en `PAUSADO` pasa a
+`INACTIVO`. La justificación no es cosmética. `PAUSADO` promete "se detuvo conservando el cursor
+culpable, para reintentar desde ahí", pero las filas acumuladas hasta hoy no cumplen esa
+promesa: casi todas proceden de la reconciliación de arranque de `FsmModule`, que pasa a
+`PAUSADO` cuanto encuentra `EN_PROCESO` al levantar el proceso. Como CU-09 todavía no tiene
+endpoint, nadie las ha reintentado nunca. Mientras figuren así, la trazabilidad afirma que hay
+trabajo pendiente que no existe.
+
+Lo que no era obvio al escribir la sentencia: **hacía falta anular también `paso_actual`**. El
+motor arranca con `execution.activeCursor ?? schema.entrypoint`, así que una fila `INACTIVO` que
+conservara su cursor reanudaría a media topología en vez de empezar por el entrypoint — es decir,
+exactamente lo contrario de lo que `INACTIVO` significa según el TSDoc de la propia entidad ("el
+motor todavía no ha tomado el primer paso"). Habría sido un saneado a medias: el estado diciendo
+"nueva" y el comportamiento siendo "reanudada". `contexto_acumulado` sí se conserva: es la única
+evidencia que queda de lo que esas ejecuciones llegaron a hacer, y no estorba.
+
+La idempotencia sale gratis porque el predicado es la guarda: tras la primera pasada no queda
+ninguna fila en `PAUSADO`, así que reejecutar afecta a 0 filas y sale con éxito. No hizo falta
+`IF EXISTS` ni envolverlo en un bloque `DO`. Tampoco se añadió `BEGIN`/`COMMIT`: el directorio
+entero se apoya en el autocommit de psql —la 006 lo documenta explícitamente, porque envolverla
+habría roto el uso de un valor de enum recién añadido— y las dos sentencias de la 012 son
+independientes entre sí, así que no hay atomicidad que preservar.
+
+### Deuda anotada y no corregida
+
+1. **El barrido cierra también las `PAUSADO`.** Son la cola de reintento de CU-09, que todavía no
+   tiene endpoint, así que hoy no destruye nada usable. Cuando exista, conviene decidir
+   explícitamente si desactivar un flujo debe vaciar su cola.
+2. **La cancelación cooperativa es memoria de proceso.** El `UPDATE` es global; el `Map` solo
+   corta bucles de *este* proceso. Cuando entre BullMQ, un worker de otro proceso seguiría
+   corriendo la ejecución abortada y la resucitaría. El arreglo eventual es un `UPDATE`
+   condicional (`estado <> 'FALLIDO'`) comprobando `affected`, que convierte la cooperación en
+   garantía.
+3. **`motivo_fallo` queda `NULL` en el resto de los `FALLIDO`.** Solo lo rellena el aborto. Si la
+   trazabilidad va a mostrarlo, conviene poblarlo también desde `failCatastrophically`.
+
+### Archivos
+
+**Nuevos:**
+- `backend/src/common/services/flow-polling.coordinator.ts`
+- `backend/src/common/services/flow-polling.coordinator.spec.ts`
+- `db/migrations/012-motivo-fallo-ejecucion.sql` (columna `motivo_fallo` + saneado `PAUSADO → INACTIVO`)
+
+**Modificados:**
+- `backend/src/common/common.module.ts`
+- `backend/src/core/fsm/entities/fsm-execution.entity.ts`
+- `backend/src/core/fsm/services/fsm-engine.service.ts` (+ spec)
+- `backend/src/modules/nodes/services/imap-polling.service.ts` (+ spec)
+- `backend/src/modules/workflows/workflows.service.ts` (+ spec)
+- `init.sql`
+
+### Estado de las pruebas
+
+```
+backend · npx jest        → 32 suites, 568 tests, 0 fallos  (antes: 31 / 537)
+backend · npx nest build  → limpio
+backend · eslint          → 18 errores preexistentes; 0 nuevos (antes: 25)
+```
+
+**Pendiente de verificación manual contra el contenedor** (Docker lo levanta el usuario; el
+socket no es accesible desde la sesión de trabajo). Aplicar la migración **dos veces** para
+comprobar la idempotencia: la primera pasada debe reportar `UPDATE <n>`, la segunda `UPDATE 0`,
+y ambas terminar con código de salida 0.
+
+```bash
+docker exec -i protodo_postgres psql -U '<usuario_postgres>' -d '<nombre_bd_desarrollo>' \
+  < db/migrations/012-motivo-fallo-ejecucion.sql
+```
+
+---
+
+## 2026-09-09 · Homologación del marcado de errores en CodeMirror — rama `feat/trigger-imap`
+
+### Tres premisas del encargo que la auditoría desmintió
+
+El encargo pedía replicar de `TemplateCodeEditor.vue` la configuración de `basicSetup`, los
+«compartimientos de temas» y «la instancia del linter de `@codemirror/lint`». **Nada de eso existe**:
+`grep -rn "linter(\|basicSetup\|Compartment" src/` devuelve cero resultados en todo el frontend. El
+patrón real del proyecto es una lista manual de extensiones más `lintGutter()` y despacho manual de
+`setDiagnostics`.
+
+Y la paridad visual **ya existía**: `unuwareTheme` era idéntico *byte a byte* en los dos componentes
+—se verificó comparando los dos bloques extraídos—, `.cm-lintRange-error` y `.cm-lint-marker-error`
+incluidos, ambos sobre `var(--pd-negative)`. No había nada que corregir ahí.
+
+Lo que sí estaba roto era otra cosa, y no la que el encargo señalaba.
+
+### El `changeListener` borraba los diagnósticos en cada pulsación
+
+Esa línea —`clearDiagnostics(update.view)`— es la razón por la que un lint de sintaxis local no
+podía existir: habría desaparecido con la tecla siguiente. El cambio central de la entrega es que
+pase de **limpiar** a **recalcular**.
+
+La distinción entre los dos orígenes se resuelve en el propio recálculo: el error de sintaxis se
+recomputa sobre el texto que acaba de quedar, y los `issues` del backend **no** se reinyectan, porque
+describen un documento anterior.
+
+### Un solo punto de despacho, porque `setDiagnostics` reemplaza la lista entera
+
+Es la restricción que obliga a fundir los dos orígenes en `refreshDiagnostics` en vez de tener una
+función por origen: dos llamadas separadas se pisarían y la segunda borraría lo que pintó la primera.
+
+La precedencia también es una decisión: **si el documento no parsea, los `issues` del backend se
+descartan**. Sus rutas no se pueden resolver sobre un JSON roto —`locateJsonPaths` las tiraría de
+todas formas— y además el mensaje correcto para el operador es uno solo: arregla la sintaxis primero.
+
+El conjunto se ordena por `from` antes de despachar. Cada localizador ordena lo suyo, pero la unión
+de los dos no queda ordenada por construcción, y CodeMirror lo exige.
+
+### V8 emite cuatro formas de `SyntaxError` y solo dos llevan posición
+
+Es el hallazgo que condicionó el diseño del helper. Se comprobó ejecutando `JSON.parse` sobre casos
+reales en Node 24:
+
+| Entrada | Mensaje |
+|---|---|
+| `{\n  "a": 1\n  "b": 2\n}` | `Expected ',' or '}' ... at position 13 (line 3 column 3)` |
+| `{\n  "a": 1,\n}` | `Expected double-quoted property name ... (line 3 column 1)` |
+| `{\n  "a": ,\n}` | `Unexpected token ',', "{...}" is not valid JSON` ← **sin posición** |
+| `   ` | `Unexpected end of JSON input` ← **sin posición** |
+
+El tercer caso es de los errores de tecleo más frecuentes, y V8 dejó de dar su offset: incrusta un
+fragmento del texto en su lugar. Así que parsear `(line X column Y)` cubre la mitad de los casos y la
+política de reserva no es un detalle. Sin posición se subraya el **documento entero**, que es la
+misma convención que `json-path-locator` aplica al centinela `(root)`: honesto —"hay un fallo y no se
+sabe dónde"— en lugar de señalar una línea al azar.
+
+### El rango de anchura cero era un bug silencioso, y lo encontró la prueba
+
+La primera versión mapeaba `to = Math.min(line.to, from + 1)` con reserva a `line.to`. Falla justo en
+el caso más común: V8 señala la coma que falta **después** del último carácter de la línea, así que
+`from` cae exactamente en `line.to` y el rango queda de anchura cero — ni subrayado ni marcador, un
+error que el editor simplemente no pinta.
+
+La corrección es subrayar la **línea entera** cuando eso ocurre: "el fallo está en esta línea" es la
+información útil. Lo destapó el caso 2.3 del spec, no la revisión visual.
+
+### El helper recibe `DocumentLines`, no un `EditorView`
+
+Se declara la forma estructural mínima (`lines`, `length`, `line(n)`) en vez de importar `Text` de
+`@codemirror/state`. `view.state.doc` la cumple tal cual, y a cambio la prueba construye un doble de
+tres propiedades sin arrastrar CodeMirror a una suite que corre con `environment: 'node'`. Es el
+mismo motivo por el que `violation-matcher` y `json-path-locator` viven en `src/utils/`: la lógica
+cuyo fallo es silencioso tiene que ser probable de forma aislada.
+
+### El tema se extrajo porque la paridad era por copia
+
+`unuwareEditorTheme` pasa a `src/utils/codemirror-theme.ts` y lo importan los dos editores. La
+paridad existía, pero la próxima corrección de estilo se habría aplicado a uno solo y el marcado de
+errores habría divergido entre el CRUD de plantillas y el editor de pipelines — que es exactamente lo
+que no puede pasar: el operador tiene que reconocer un error como «un error» en cualquiera de las dos
+pantallas.
+
+`unuwareHighlight` **no** se comparte: los tags de HTML (`tagName`, `attributeName`) y los de JSON
+(`propertyName`, `number`) son legítimamente distintos.
+
+### El despacho se difiere con `queueMicrotask`
+
+Despachar desde dentro de un `updateListener` es reentrante y CodeMirror lo desaconseja. El código ya
+lo hacía, pero limpiar era barato y recalcular más volver a pintar no lo es. El microtask corre antes
+del siguiente repintado, así que no hay latencia perceptible.
+
+### Los anfitriones no cambian
+
+La etiqueta de texto de `WorkflowTemplateDialog` (`schemaSyntaxError`) y la de `NodeSequenceBuilder`
+(`paramsErrorFor`) se conservan: cumplen el papel de resumen, igual que el panel «Errores del
+esquema» para los issues del backend, porque un error puede quedar fuera de la parte visible del
+documento. Dejan de ser el único indicio. El sub-editor de `params` de cada nodo hereda el marcado
+sin tocar una línea de su componente.
+
+`workflow-templates.store.ts` tampoco se toca: `schemaSyntaxError` sigue gobernando `isDraftValid`,
+`saveDraft` y `validateDraftSchema`. El editor calcula su propio rango a partir del texto que ya
+tiene; acoplar el store a las posiciones del documento habría sido peor.
+
+### Deuda anotada y no corregida
+
+`props.readonly` se aplica una sola vez en el montaje (`EditorView.editable.of(!props.readonly)`),
+sin `Compartment` ni `watch`, así que **cambiarlo en caliente no tiene efecto**. Hoy no se manifiesta
+porque los dos anfitriones pasan un literal estático.
+
+### Archivos
+
+**Nuevos:** `src/utils/json-syntax-locator.ts` (+ spec), `src/utils/codemirror-theme.ts`.
+**Modificados:** `src/components/JsonPipelinePreview.vue`, `src/components/templates/TemplateCodeEditor.vue`.
+
+### Estado de las pruebas
+
+```
+frontend · npx vue-tsc --noEmit  → limpio
+frontend · npx vitest run        → 12 archivos, 219 tests, 0 fallos  (antes: 11 / 210)
+frontend · eslint + prettier     → limpios en los archivos tocados
+```
+
+---
+
+## 2026-09-09 · Periodo de sondeo por entorno y errores catastróficos URGENTE → FALLIDO — rama `feat/trigger-imap`
+
+### Dos de las tres piezas del encargo ya existían
+
+El encargo pedía retirar un decorador `@Interval()` estático e inyectar `ConfigService` y
+`SchedulerRegistry`. Nada de eso hacía falta: `ImapPollingService` usa intervalos dinámicos desde la
+entrega del diffing, y ambos servicios ya estaban inyectados. El decorador nunca habría servido —
+`pollIntervalMs` es un parámetro POR NODO y un decorador se evalúa una sola vez en tiempo de clase.
+
+Lo que sí faltaba era el valor de **instalación**: el default vivía en un literal de módulo
+(`DEFAULT_POLL_INTERVAL_MS`) y no había forma de mover el ritmo de todos los buzones sin editar el
+esquema de cada flujo. `IMAP_POLLING_INTERVAL_MS` es ahora ese valor de reserva, y solo se aplica
+cuando el nodo NO declara el suyo: el periodo sigue siendo por nodo.
+
+Se le pone el **mismo suelo de 30 s que valida el DTO**. No es purismo: un `0` escrito por error en
+el `.env` martillearía el servidor IMAP hasta que el proveedor cortase la cuenta, y en silencio. El
+DTO ya impone ese suelo a los nodos; la variable de entorno no puede ser la puerta trasera que lo
+evita. De paso se documentó `IMAP_RECONCILE_INTERVAL_MS`, que estaba en `.env` pero no en la
+plantilla versionada.
+
+### `HybridLoggerService` no existía; Winston llevaba instalado sin usarse
+
+`winston` y `winston-daily-rotate-file` estaban en `package.json` y **cero importaciones** en todo
+`src/`. Las variables `LOG_DIR`, `LOG_MAX_FILES` y `LOG_MAX_SIZE` llevaban en `.env.example` desde el
+principio esperando a este servicio. Hubo que construirlo entero.
+
+**Híbrido** son dos destinos con dos propósitos, y por eso es un servicio y no un `logger.error`:
+el archivo guarda el material forense (stack trace, payload, metadatos) y PostgreSQL guarda la
+severidad y la RUTA de ese archivo. De ahí que `logCatastrophicFailure` **devuelva la ruta**: es el
+único eslabón entre ambos. Sin ese valor de retorno la fila sabría que hubo un fallo pero no dónde
+mirar, y el archivo sería un volcado huérfano.
+
+Dos decisiones que parecen detalles y no lo son:
+
+- **Nivel fijo `error`, no `LOG_LEVEL`.** Atarlo al nivel general significaría que subir la
+  aplicación a `warn` haría desaparecer en silencio la traza de los fallos catastróficos, que es
+  justo la que nunca puede faltar.
+- **No lanza nunca.** Se invoca desde el manejador de errores del motor: una excepción aquí
+  sustituiría el fallo real por uno de registro y dejaría la ejecución sin marcar. Si el disco falla
+  devuelve `null`, y el motor lo persiste tal cual — "hubo fallo, no hay archivo" es información
+  honesta.
+
+### La frontera es LANZAR frente a DEVOLVER, no el `level`
+
+Es la decisión de diseño de la entrega. El encargo hablaba de "error del dominio de los nodos" contra
+"excepción no controlada", y la tentación era discriminar por `result.error.level === 'URGENTE'`.
+Habría sido un error: una estrategia que **devuelve** `URGENTE` está diciendo "esto es grave y no
+tiene sentido reintentar", pero controlaba la situación. Una que **lanza** se ha roto, y el motor no
+sabe qué dejó a medias.
+
+Fundir ambos casos habría convertido en terminal un flujo que hoy se pausa y se reanuda con CU-09.
+De ahí el tipo `NodeOutcome`, cuyo `catastrophic` es explícito y no derivado.
+
+| Origen | Clasificación | Estado |
+|---|---|---|
+| `NodeResult{success:false}` devuelto, cualquier `level` | Dominio | `PAUSADO` |
+| `StrategyNotFoundException` lanzada | Dominio (configuración) | `PAUSADO` |
+| `HttpException` lanzada (timeout, validación) | Dominio | `PAUSADO` |
+| Cualquier otro `throw` | Catastrófico | `FALLIDO` |
+
+`StrategyNotFoundException` se queda del lado del dominio a propósito, contra la lectura literal del
+encargo: falta la estrategia de un tipo de nodo, que es un error de configuración del esquema. Marcar
+FALLIDO obligaría a relanzar el flujo desde cero después de corregirlo, cuando el trabajo de los
+nodos anteriores sigue siendo válido. El criterio es *"¿puede un operador arreglar esto sin tocar
+código?"*.
+
+### El desenlace catastrófico ni reintenta ni sigue `onErrorStep`
+
+Son dos cortes deliberados, ambos con prueba:
+
+- **Sin reintento**, aunque el nodo declare `retryPolicy`. No se sabe qué dejó a medias la estrategia
+  rota, así que volver a invocarla es apostar sobre un estado desconocido.
+- **Sin `onErrorStep`.** Esa ruta es una decisión del diseñador del flujo sobre fallos PREVISTOS.
+  Aquí se rompió el propio ejecutor, y encaminar a otro nodo prolongaría el bucle sobre un proceso en
+  estado desconocido — lo contrario de "proteger el hilo".
+
+### El orden disco → base de datos es la propiedad de corrección
+
+En `failCatastrophically` y en el catch externo, el volcado se escribe ANTES de tocar PostgreSQL. El
+escenario típico de un fallo catastrófico es precisamente que la base de datos no responda; al revés,
+un fallo de BD se llevaría por delante también el stack trace y no quedaría rastro del incidente en
+ninguna parte. El cursor se CONSERVA aunque el estado sea terminal: saber en qué nodo se rompió es la
+mitad del diagnóstico.
+
+### Cambio de contrato en una prueba existente
+
+La prueba 7 afirmaba que una excepción no controlada dejaba el flujo en `PAUSADO`. Es exactamente el
+comportamiento que el encargo cambia, así que se reescribió a `FALLIDO` y se acompañó de cinco casos
+nuevos que fijan la frontera en ambos sentidos. Las pruebas 6, 8 y 9 (URGENTE devuelto,
+`StrategyNotFoundException`, circuit breaker) pasan sin tocarlas, que era la señal de que la
+clasificación estaba bien puesta.
+
+### Sin migración SQL
+
+`ejecuciones_flujo.ruta_archivo_log VARCHAR(255)` ya estaba en `init.sql` desde el principio; la
+entidad `FsmExecution` simplemente no la mapeaba. Verificado contra la base real antes de asumirlo.
+
+### Archivos
+
+**Nuevos:** `src/common/services/hybrid-logger.service.ts` (+ spec).
+
+**Modificados:** `.env.example`, `src/common/common.module.ts`,
+`src/core/fsm/services/fsm-engine.service.ts` (+ spec),
+`src/core/fsm/entities/fsm-execution.entity.ts`,
+`src/modules/nodes/services/imap-polling.service.ts` (+ spec).
+
+### Estado de las pruebas
+
+```
+backend · npm test      → 31 suites, 537 tests, 0 fallos  (antes: 30 / 517)
+backend · npm run build → OK
+backend · eslint        → limpio en los archivos tocados
+```
+
+La suite NO escribe en disco: tanto el spec del logger como el del motor simulan el volcado. Se
+verificó borrando `logs/` y relanzando la suite completa; no se recrea.
+
+---
+
+## 2026-09-09 · Catálogo de nodos, visibilidad de plantillas retiradas y ensamblador secuencial — rama `feat/trigger-imap`
+
+Cuatro frentes independientes. Los tres primeros son correcciones acotadas; el cuarto abre el camino
+para componer una topología sin escribir JSON a mano.
+
+### La migración 011 podía destruir el catálogo, y eso solo se vio ejecutándola
+
+Es el hallazgo importante de la sesión. La 011 (sin commitear, ya aplicada a la base local) hacía un
+`DROP TABLE IF EXISTS nodos` incondicional antes de renombrar `tipos_nodo` a `nodos`. En la PRIMERA
+pasada es correcto: `nodos` es todavía la tabla de instancias. En la segunda, `nodos` ya es el
+catálogo — y el `DROP` se lo lleva con sus nueve filas, tras lo cual el renombrado no encuentra
+`tipos_nodo` y la migración muere a mitad.
+
+La migración se anunciaba idempotente y **no lo era**. Lo mismo ocurría con la columna de
+`logs_nodo`: el guard `IF EXISTS (column_name='id_nodo') THEN DROP COLUMN id_nodo` borraba en la
+segunda pasada la columna que la primera acababa de crear, porque `id_nodo` es a la vez el nombre
+viejo y el nuevo.
+
+Los dos casos tienen la misma forma —un nombre que significa dos cosas distintas según el estado— y
+la misma solución: **discriminar por contenido, no por nombre**.
+
+| Guard | Discriminante |
+|---|---|
+| `logs_nodo.id_nodo` | `data_type = 'uuid'` ⇒ es el puntero viejo, se suelta |
+| `DROP TABLE nodos` | existe la columna `id_flujo` ⇒ es la tabla de instancias, se borra |
+
+Ninguna revisión estática lo habría encontrado: el SQL era sintácticamente impecable. Se validó
+canalizando el archivo a `psql` dentro de `BEGIN … ROLLBACK`, primero una vez y luego dos veces
+seguidas en la misma transacción. El DDL de PostgreSQL es transaccional, así que la comprobación no
+deja rastro; se verificó después que la base seguía con `id_tipo_nodo` y sus nueve filas.
+
+### Las constraints se nombran con la columna, sin prefijos
+
+Convención fijada en esta entrega: `id_nodo`, `id_log_nodo`, `id_ejecucion`. Prohibidos `pk_`, `fk_`
+y `uq_`.
+
+La única excepción es la unicidad de `codigo`, que se llama **`nodos_codigo`** y no `codigo` a secas.
+No es estilo: una `UNIQUE` —y una `PRIMARY KEY`— crea un índice con su mismo nombre, y los índices
+comparten un único espacio de nombres por esquema. `codigo` es una columna que aparece en varias
+tablas, así que reservar ese nombre de índice para `nodos` bloquearía a la siguiente que lo pidiera.
+
+Los guards del renombrado se acotan con `conrelid`. Los nombres de constraint son únicos **por
+tabla**, no por esquema, así que un `conname = 'id_ejecucion'` global encontraría la de cualquier
+otra tabla y saltaría el renombrado que toca — `alertas_error` tiene precisamente una clave ajena
+homóloga.
+
+### `logs_nodo.id_nodo` NO es clave ajena, y el comentario existe para decirlo
+
+`nodos` es el catálogo de TIPOS; `logs_nodo.id_nodo` guarda el `nodeId` de la INSTANCIA del pipeline
+(`nodo_parser`), texto libre del JSONB que no existe como fila del catálogo. Una FK ahí rechazaría
+todos los inserts.
+
+El problema es que antes de la 011 ese par de nombres **sí** era una clave ajena. Un lector futuro lo
+dará por supuesto salvo que algo se lo desmienta, y por eso el comentario va en las dos tablas. Es la
+deuda que deja escoger nomenclatura por convención en vez de por semántica; asumida a conciencia.
+
+### Plantillas HTML: mostrar las inactivas exigía poder reactivarlas
+
+El encargo pedía el query param. Al implementarlo apareció que `CreateTemplateDto` no declara
+`active` y que `TemplatesService.update()` nunca lo toca: `softDelete` sabe apagar una plantilla y
+**nada** sabía encenderla. Listar las retiradas sin más habría llenado la tabla de filas visibles e
+irrecuperables.
+
+Se añadió `active?: boolean` al DTO y su rama en `update()`. `create()` no cambia —construye el
+objeto campo a campo, así que `active` se ignora en el alta y toda plantilla nace activa.
+
+El filtro sigue siendo del backend, con `onlyActive = true` por defecto: la tabla administrativa pasa
+`?includeInactive=true` y el selector Poka-Yoke del nodo `MAPEADOR_PLANTILLA` usa el default. Se
+exige el literal `"true"` y no una conversión laxa, porque `Boolean("false")` es `true` y un
+parámetro mal escrito debe caer del lado seguro.
+
+### `exact` en `/flujos`, o dos entradas del menú resaltadas a la vez
+
+Añadir «Nuevo Flujo» al drawer revirtió una decisión documentada (el comentario decía que el
+asistente se alcanzaba desde el botón de `/flujos`), y el comentario se actualizó para que el código
+no se contradiga.
+
+Efecto secundario que el enlace destapó: sin `exact`, vue-router marca `/flujos` como activa también
+en `/flujos/nuevo` y `/flujos/:id/editar`. Con las dos entradas en el menú eso se ve. `exact` en la
+primera lo resuelve; la segunda no lo necesita, porque no es padre de ninguna ruta.
+
+### El ensamblador escribe sobre el JSON en UNA dirección
+
+`NodeSequenceBuilder.vue` compone la topología y regenera `activeDraft.schemaText`. La sincronización
+inversa se descartó: un `watch` sobre el texto que reconstruyera la secuencia pelearía con el editor
+en cada pulsación —el JSON pasa por estados intermedios que no parsean— y el cursor saltaría solo.
+
+Lo que se conserva al reordenar son los `params`, indexados por `nodeId`; lo que se pierde es la
+topología escrita a mano. `rebuildSchemaFromSequence` respeta además `flowId`, `name` y `version` del
+documento vigente: el selector es dueño de la topología, no de los metadatos.
+
+`initDraft` deriva la secuencia recorriendo el grafo desde `entrypoint`. Sin eso, editar una
+plantilla existente mostraría el selector vacío junto a un JSON lleno, y el primer clic borraría la
+topología guardada.
+
+### El recorrido inverso se protege de los ciclos
+
+`disassemblePipelineSchema` lleva un conjunto de visitados. No es defensa teórica: el JSON es
+editable a mano, así que puede llegar con un `nextStep` que apunte hacia atrás, y un bucle infinito
+colgaría la pestaña sin ningún mensaje. Un puntero huérfano trunca el recorrido, que es la misma
+política que `buildOrderedTopology` aplica en el backend.
+
+### El encadenado se extrajo porque ya tenía dos dueños
+
+`flujo-draft.store.ts` construía `entrypoint` y la cadena de `nextStep` en una closure privada. El
+editor de plantillas necesitaba exactamente lo mismo desde otra entrada, y dos copias divergirían en
+cuanto una de las dos vistas cambiara —con el síntoma peor posible: un grafo que el validador rechaza
+solo desde una de ellas.
+
+`@/utils/pipeline-assembler.ts` es puro y no resuelve stores: recibe los `params` ya resueltos. Quien
+conoce el contrato de cada nodo es su propio store (§3.1), así que el anfitrión pregunta con
+`toNodeParams()` antes de llamar. Los 59 tests de `flujo-draft.store.spec.ts` verifican que el
+comportamiento no cambió.
+
+### `implemented` en vez de filtrar el catálogo
+
+La tabla `nodos` tiene nueve filas y el enum `NodeType` declara siete: `TRIGGER_CRON` y
+`DESTINO_ACENS` siguen sin estrategia y `@IsEnum(NodeType)` los rechazaría.
+
+`GET /api/nodos` los devuelve marcados con `implemented: false` en lugar de ocultarlos. Filtrarlos en
+el servidor haría que el endpoint mintiera sobre el contenido del catálogo, y ocultarlos en la UI
+convertiría una limitación conocida en una ausencia inexplicable. El selector los muestra
+deshabilitados: el operador ve que el tipo existe y que todavía no se puede usar.
+
+La autoridad es el enum del backend, no la tabla. El frontend estrecha con `isImplementedNodeType`,
+que se apoya en la marca del servidor y no en un `includes` propio: duplicar esa decisión crearía una
+segunda fuente de verdad que se desincronizaría con la octava estrategia.
+
+### El editor de `params` no propaga JSON a medio escribir
+
+Para los cinco tipos sin configurador dedicado, el sub-editor JSON solo emite cuando el texto parsea
+**y** es un objeto. Propagar un objeto incompleto regeneraría el grafo entero en cada pulsación y
+borraría lo tecleado. Mientras no parsee, el texto vive en el estado local del componente y el nodo
+muestra su error.
+
+---
+
+### Archivos de la sesión
+
+**Backend — nuevos**
+- `src/modules/nodes/entities/node-catalog.entity.ts`, `enums/node-category.enum.ts`
+- `src/modules/nodes/dto/node-catalog-response.dto.ts`
+- `src/modules/nodes/services/node-catalog.service.ts` (+ spec)
+- `src/modules/nodes/node-catalog.controller.ts`
+- `src/modules/templates/templates.controller.spec.ts`
+
+**Backend — modificados**
+- `src/modules/nodes/nodes.module.ts` (primer controlador del módulo)
+- `src/modules/templates/templates.controller.ts`, `templates.service.ts`, `dto/create-template.dto.ts`, `templates.service.spec.ts`
+- `src/core/fsm/types/pipeline-schema.types.ts` (TSDoc: `tipos_nodo` → `nodos`)
+
+**Frontend — nuevos**
+- `src/types/node-catalog.ts`, `src/services/node-catalog.service.ts`, `src/stores/node-catalog.store.ts` (+ spec)
+- `src/utils/pipeline-assembler.ts` (+ spec)
+- `src/components/workflow-templates/NodeSequenceBuilder.vue`
+
+**Frontend — modificados**
+- `src/stores/workflow-templates.store.ts` (secuencia + reconstrucción), `flujo-draft.store.ts` (delega en el helper)
+- `src/services/templates.service.ts`, `src/stores/templates.store.ts`, `src/components/templates/TemplatesManager.vue`
+- `src/layouts/MainLayout.vue`, `src/components/workflow-templates/WorkflowTemplateDialog.vue`
+- `src/types/html-template.ts`, `src/types/pipeline.ts`, `src/services/nodes/template-mapper.service.ts`
+
+**SQL**
+- `init.sql`, `db/migrations/011-catalogo-nodos.sql`
+
+### Estado de las pruebas
+
+```
+backend  · npm test              → 30 suites, 517 tests, 0 fallos
+backend  · npm run build         → OK
+frontend · npx vue-tsc --noEmit  → sin salida (limpio)
+frontend · npx vitest run        → 11 archivos, 210 tests, 0 fallos
+frontend · eslint + prettier     → limpio en los archivos tocados
+```
+
+Deuda de lint **preexistente**, en archivos que esta sesión no tocó: ~30 avisos de `prettier/prettier`
+más un `require-await` en `workflows.service.spec.ts:201` y tres `no-unsafe-assignment` en
+`imap-polling.service.spec.ts`. Se dejan como estaban para no mezclar reformateos con el cambio
+funcional; `npm run lint` los arregla en su mayoría.
+
+### Siguiente paso y reanudación
+
+Rama activa: `feat/trigger-imap`. Nada commiteado todavía.
+
+1. **Aplicar la migración** (la ejecuta el usuario):
+   ```bash
+   sudo docker exec -i protodo_postgres psql -U '<usuario_postgres>' -d '<nombre_bd_desarrollo>' \
+     < db/migrations/011-catalogo-nodos.sql
+   ```
+   La base local está en el estado "una pasada previa de la 011": `nodos` tiene `id_tipo_nodo` y
+   `ui_schema`, `logs_nodo` tiene `node_id`, `tipos_nodo` ya no existe. Es la rama (b) de los guards.
+   Sin aplicarla, `GET /api/nodos` devuelve 500: la entidad mapea `id_nodo` y la columna todavía se
+   llama `id_tipo_nodo`.
+
+2. **Comprobación manual end-to-end**, ya con la migración aplicada:
+   ```bash
+   cd backend && npm run start:dev
+   cd frontend && quasar dev
+   ```
+   «Plantillas de Flujo» → «Nueva Plantilla»: añadir dos o tres nodos y comprobar que el JSON se
+   regenera con `entrypoint` y la cadena de `nextStep`; reordenar y ver que los punteros cambian;
+   desplegar un `TRIGGER_IMAP` (formulario dedicado) y un `PROCESADOR_IA` (editor JSON); pulsar
+   «Validar» y forzar un error —dos nodos con el mismo `outputNamespace`— para ver el subrayado.
+   En «Plantillas»: desactivar una y confirmar que sigue en la tabla con el badge «Inactiva» y que
+   «Activar» la recupera.
+
+3. **Commit** cuando la comprobación manual pase:
+   ```bash
+   git add -A
+   git commit -m "feat(trigger-imap): catalogo de nodos, plantillas inactivas y ensamblador secuencial"
+   ```
+   El hook `commit-msg` exige que el ámbito coincida con el sufijo de la rama.
+
+4. **Pendiente de fondo, no abordado**: `nodos.ui_schema` sigue vacío (`'{}'`) en las nueve filas y
+   nadie lo lee. El editor polimórfico resuelve hoy por registro de componentes con respaldo JSON; el
+   renderizador dirigido por `ui_schema` es lo que permitiría retirar ese respaldo.
+
+---
+
 ## 2026-08-27 · Revocación de sesiones aislada por dispositivo + sincronización multi-pestaña — rama `feat/auth-otp`
 
 Cierra el pendiente que dejó la entrega anterior (*"el backend no persiste `deviceId`"*) y, con él, la deuda multi-pestaña que arrastraba la entrega del endurecimiento del JWT. Las dos mitades van juntas a propósito: la primera, sola, convertiría una pestaña desincronizada en un cierre de sesión global.
@@ -560,3 +2223,7302 @@ parámetro**, así que era estructuralmente imposible que leyeran el error real.
 automatizadas: el frontend no tiene arnés de tests todavía (deuda ya anotada en este archivo).
 Verificación manual pendiente para quien pruebe contra el backend real: editar/desactivar la
 propia cuenta ADMIN debe mostrar el mensaje de MOD-01 textual, no el genérico.
+
+---
+
+## 2026-08-29 · Contratos y validación topológica del `pipeline_schema` (PROT-07) — rama `feat/fsm-contracts`
+
+Primera pieza del motor FSM. Antes de escribir una sola estrategia hacía falta el contrato del grafo
+que el `FsmEngineService` va a recorrer: sin él, un `configuracion_pipeline` mal formado —un
+`nextStep` colgando, dos nodos escribiendo el mismo namespace, un camino que nunca termina— solo se
+descubriría en runtime, con la ejecución a medias y el `StatePayloadContext` ya corrompido. Este
+cambio mueve ese fallo al momento de guardar el flujo.
+
+### `@ValidateNested({ each: true })` no funciona sobre un `Record`
+
+El diseño de partida ponía `@ValidateNested({ each: true })` + `@Type(() => PipelineNodeConfigDto)`
+sobre `nodes: Record<string, PipelineNodeConfigDto>`. No valida nada. En class-validator 0.15.1
+(`node_modules/class-validator/cjs/validation/ValidationExecutor.js:272`) la rama `each` solo se
+activa para `Array`, `Set` y `Map`:
+
+```js
+if (Array.isArray(value) || value instanceof Set || value instanceof Map) { /* itera */ }
+else if (value instanceof Object) { this.execute(value, targetSchema, error.children); }
+```
+
+Un objeto plano cae a la segunda rama y valida el **mapa entero** como si fuera un único
+`PipelineNodeConfigDto`; `@Type` lo empeora convirtiendo el `Record` completo en una sola instancia.
+Sumado a `forbidNonWhitelisted: true`, el resultado habría sido un error `property nodo_trigger
+should not exist` por cada nodo, sin llegar a validar un solo campo real.
+
+La iteración se hace a mano en `PipelineValidatorService.validateNodes()`. No es solo un parche: al
+recorrer `Object.entries(nodes)` se conserva la clave del nodo en la ruta del error
+(`nodes.nodo_ia.retryPolicy.maxRetries`), que es exactamente lo que el wizard del frontend necesita
+para señalar el paso culpable. Con el decorador nunca se habría tenido esa ruta.
+
+### Por qué `onErrorStep` sí puede apuntar hacia atrás
+
+El recorrido de detección de ciclos sigue **solo** `nextStep`. Un `onErrorStep` que vuelve a un nodo
+anterior no es un defecto sino el patrón de reintento o recuperación; prohibirlo habría impedido
+modelar declarativamente lo que el protocolo de resiliencia (`architecture-patterns.md` §4) ya
+contempla. El grafo de `nextStep` es funcional —un sucesor como máximo por nodo—, así que basta un
+recorrido lineal con un `Set` de visitados: no hace falta DFS ni componentes fuertemente conexas.
+
+### Por qué los nodos huérfanos no invalidan el esquema
+
+Un nodo inalcanzable desde el `entrypoint` se ignora en silencio. Un flujo en construcción puede
+tener ramas todavía sin conectar, y rechazar el esquema entero por eso convertiría el validador en
+un estorbo durante la edición. Lo que sí es innegociable es que el camino activo **termine**: si
+`nextStep` cierra un ciclo, no hay nodo terminal y la ejecución no pararía nunca.
+
+### Detalles de implementación
+
+- `NodeType` es un `enum` de TypeScript y no un union type: `@IsEnum()` necesita un objeto
+  disponible en runtime.
+- `nextStep` / `onErrorStep` usan `@ValidateIf((_, value) => value !== null)` y no `@IsOptional()`.
+  `null` es un valor legítimo (nodo terminal), `undefined` no: `@IsOptional()` habría dejado pasar
+  un campo ausente. Comprobado que esto no rompe el whitelist —`ValidationExecutor.whitelist()` solo
+  descarta propiedades sin metadata alguna, y estas la tienen.
+- La topología se ejecuta **solo** si forma y tipos ya son válidos. Sobre un `nextStep` numérico o un
+  `nodes` que no es objeto, esas comprobaciones solo añadirían ruido sobre el error real.
+- `Object.hasOwn()` en lugar de `Object.prototype.hasOwnProperty.call()`: lo segundo devuelve `any` y
+  disparaba `@typescript-eslint/no-unsafe-return`.
+- El validador topológico es una función pura sin DI ni estado, testeable al margen de Nest.
+- `db/migrations/005-tipos-nodo-fsm.sql` alinea `tipos_nodo` con el enum: `NODO_PARSER_CORREO` →
+  `PARSER_PRE_IA`, `NODO_VALIDACION` → `ESCUDO_POST_IA`, `DESTINO_DRUPAL` → `DESTINO_DRUPAL`. Como
+  `codigo` es `VARCHAR(50) UNIQUE` y no un `ENUM` de PostgreSQL, basta un `UPDATE`. **No se borra
+  ninguna fila**: `nodos.id_tipo_nodo` es FK contra esta tabla, así que `TRIGGER_CRON` y
+  `DESTINO_ACENS` se quedan en el catálogo aunque hoy no sean declarables en un `pipeline_schema`.
+
+### Verificación
+
+16 pruebas nuevas en verde (109 en total en el backend), cubriendo los 5 casos obligatorios —Notiweb
+completo de 7 nodos, huérfano aceptado, ciclo rechazado, namespace duplicado, clave ≠ `nodeId`— más
+`entrypoint` inexistente, punteros colgantes, `nodeType` fuera del enum, `maxRetries > 5`,
+`onErrorStep` hacia atrás aceptado, propiedad desconocida, `outputNamespace` no snake_case, `version`
+no SemVer, nodo que no es objeto y payload que no es JSON. `npx tsc --noEmit` sin errores,
+`eslint "src/core/**/*.ts"` limpio.
+
+La migración `005` **no se pudo aplicar** en esta sesión: el demonio de Docker exige `sudo` con
+contraseña interactiva. Queda pendiente de ejecutar contra el contenedor.
+
+### Checklist de dependencias restantes
+
+- [ ] **Aplicar `db/migrations/005-tipos-nodo-fsm.sql`** contra `protodo_postgres` y comprobar el
+      `SELECT` final (7 códigos del enum + `TRIGGER_CRON` + `DESTINO_ACENS`).
+- [ ] **`FsmModule`**: `PipelineValidatorService` está `@Injectable()` pero no lo declara ningún
+      módulo. Se registrará cuando exista su primer consumidor (el CRUD de flujos).
+- [ ] **Entidad TypeORM `Flujo`** que mapee `flujos.configuracion_pipeline` a `PipelineSchema`, para
+      invocar el validador antes de persistir.
+- [ ] **`StatePayloadContext`, `INodeStrategy`, `NodeStrategyFactory`**: el resto del contrato del
+      motor sigue sin implementar (`architecture-patterns.md` §2 y §3).
+- [ ] **Ampliar `NodeType`** con `TRIGGER_CRON` y un destino Acens cuando se escriban sus
+      estrategias; hasta entonces esas dos filas del catálogo son inalcanzables desde un pipeline.
+- [ ] **`test/jest-e2e.json` sin `moduleNameMapper`**: los alias no resuelven en e2e, así que la
+      suite e2e sigue rota (deuda previa, ajena a PROT-07).
+
+---
+
+## 2026-08-29 · Contexto inmutable, mutex de ejecución y limpieza en arranque (PROT-08) — rama `feat/fsm-payload-context`
+
+PROT-07 dejó el contrato del grafo, pero el motor seguía sin poder ejecutar nada: faltaba la
+estructura que transporta los resultados entre nodos y la fila donde se persiste el checkpoint.
+Además `PipelineValidatorService` había quedado `@Injectable()` sin módulo que lo declarara — código
+inalcanzable desde el contenedor de Nest.
+
+### `structuredClone` en ambas direcciones, no *spread*
+
+El enunciado pedía inmutabilidad estricta y la implementación de referencia de
+`architecture-patterns.md` §3 la resuelve con *spread*. No basta: el *spread* copia superficialmente,
+así que `context.getNamespace('ia').meta.titulo = 'otro'` alcanza el objeto interno a través del
+segundo nivel y corrompe un checkpoint que quizá ya se había dado por bueno. `StatePayloadContext`
+clona en profundidad la entrada de `setNamespace`, su salida, y la de `getAllContext`. Hay tres
+pruebas que fuerzan exactamente esa fuga —mutando la salida en dos niveles, y mutando el objeto de
+entrada *después* de haberlo escrito— para que la garantía no dependa de que nadie toque el código.
+
+`setNamespace` además **fusiona** con el namespace existente en vez de reemplazarlo, de modo que un
+nodo pueda escribir en dos tandas sin perder lo anterior.
+
+### El mutex necesita la reconciliación, o se autobloquea
+
+`idx_flujo_activo` es un índice único **parcial**: `UNIQUE (id_flujo) WHERE estado = 'EN_PROCESO'`.
+La garantía la da PostgreSQL, no un bloqueo en memoria que se perdería al escalar a varios procesos,
+y al ser parcial deja fuera los estados terminales: un flujo puede acumular todo el histórico de
+ejecuciones que haga falta, pero solo una viva.
+
+Ese diseño tiene un fallo latente que obliga a la segunda mitad del cambio. Una fila `EN_PROCESO`
+afirma "hay un bucle atendiendo este flujo ahora mismo". Tras un reinicio esa afirmación es falsa:
+no queda ningún bucle, pero la fila **sigue reservando el mutex** y el flujo no podría volver a
+arrancar nunca. De ahí el `onModuleInit` de `FsmModule`, que las pasa a `PAUSADO` al levantar: libera
+el índice y las deja donde el protocolo de resiliencia (`architecture-patterns.md` §4) espera
+encontrarlas para el reintento de CU-09.
+
+El error de esa reconciliación **no se captura** a propósito: arrancar el motor sobre un estado que
+no se ha podido reconciliar es peor que no arrancar. Se registra con `Logger.warn` cuántas filas se
+reconciliaron, y silencio cuando son cero.
+
+La clase del módulo inyecta el repositorio directamente por constructor —Nest lo permite igual que en
+cualquier provider— en vez de crear un servicio intermedio que hoy no tendría más responsabilidad.
+
+### La interpolación falla en vez de callar
+
+`getInterpolatedValue` lanza `MissingContextVariableException` ante una variable ausente o nula, en
+lugar de resolverla como `''` como hace la implementación de referencia. Interpolar en silencio
+publicaría en Drupal un artículo con el título vacío, y el fallo aparecería aguas abajo, lejos de su
+causa. La excepción lleva el nombre de la variable culpable (`ia_result.titulo`) para que el mensaje
+sea accionable.
+
+Por el mismo motivo, un valor no escalar **no** se convierte con `String()`. El linter lo detectó
+(`@typescript-eslint/no-base-to-string`) y tenía razón: un objeto mapeado por error habría acabado
+como el literal `[object Object]` dentro del artículo publicado. Ahora las cadenas se insertan tal
+cual y todo lo demás pasa por `JSON.stringify`, que además resuelve números y booleanos sin añadir
+comillas (`42` → `42`).
+
+### Detalles de implementación
+
+- **`FsmExecution` mapea `ejecuciones_flujo`**, la tabla que ya existía, en vez de crear una
+  `fsm_executions` paralela. `logs_nodo` y `alertas_error` tienen FK apuntándole; duplicarla habría
+  dejado dos fuentes de verdad para el mismo concepto. Propiedades en inglés, columnas en español
+  vía `@Column({ name })`, igual que `User` y `RefreshToken`. Es la primera entidad del proyecto con
+  columnas `jsonb`.
+- `ruta_archivo_log` y `fecha_fin` quedan sin mapear, como `User` no mapea `fecha_creacion`; entran
+  con el protocolo de resiliencia.
+- **El decorador `@Index` no crea nada** con `synchronize: false`. Es declarativo; el índice real lo
+  crea la migración. Va dicho en un comentario de la entidad para que nadie lo dé por aplicado.
+- `StatePayloadContext` **no** es `@Injectable()`: se instancia una por ejecución. Un provider sería
+  un singleton compartido entre ejecuciones concurrentes, justo lo contrario de lo que necesita ser.
+- `db/migrations/006-fsm-execution-mutex.sql` añade `INACTIVO` al tipo `enum_estado` con
+  `BEFORE 'EN_PROCESO'` (orden natural del ciclo de vida), crea `retry_state` y
+  `fecha_actualizacion`, normaliza `contexto_acumulado` a `NOT NULL DEFAULT '{}'` y crea el mutex.
+  La cabecera avisa de dos cosas: es **requisito de arranque** (sin ella el `onModuleInit` falla por
+  la columna `fecha_actualizacion` que añade `@UpdateDateColumn` al `SET`), y **no debe envolverse en
+  `BEGIN`/`COMMIT`** porque PostgreSQL prohíbe usar un valor de enum en la misma transacción en que
+  se añade.
+- El endpoint `POST /api/fsm/validate-schema` lleva `@PublicIp()` y **queda sin ninguna protección**:
+  es el único guard global, `JwtAuthGuard` no lo es, y `RedLocalMiddleware` solo cubre las rutas de
+  Swagger. Es temporal y para Postman; va marcado con `TODO(PROT-08)` en el propio controlador.
+  Mitigación mientras tanto: no lee ni escribe en base de datos, solo valida un JSON en memoria.
+- Comprobado que el `ValidationPipe` global no interfiere con `@Body() rawJson: unknown`: `unknown`
+  emite `Object` como metatipo y `ValidationPipe.toValidate()` descarta ese tipo
+  (`validation.pipe.js:119`), así que el cuerpo llega intacto — imprescindible, porque el servicio
+  necesita ver las propiedades no declaradas para rechazarlas.
+
+### Verificación
+
+17 pruebas nuevas en verde (126 en total en el backend), cubriendo los 3 casos obligatorios —copias
+profundas, aislamiento entre namespaces, interpolación múltiple y excepción ante nulos— más fusión
+sin pérdida, clonado del objeto de entrada, `getAllContext`, namespace ausente, cursor e
+identificadores, espacios dentro de las llaves, plantilla sin variables, namespace inexistente,
+`null` explícito, el nombre de la variable en la excepción, y la serialización de números, booleanos
+y objetos. `npx tsc --noEmit` sin errores, `npm run lint` limpio (queda el warning preexistente de
+`main.ts:59`, ajeno a este cambio), `nest build` correcto.
+
+**Sin verificación contra la base de datos**: las migraciones las aplica el usuario. Ni el mutex ni
+la reconciliación de arranque se han ejercitado todavía contra PostgreSQL.
+
+### Checklist de dependencias restantes
+
+- [ ] **Aplicar `db/migrations/005-tipos-nodo-fsm.sql` y `006-fsm-execution-mutex.sql`**. La 006 es
+      requisito de arranque: sin ella el backend no levanta.
+- [ ] **Verificar el mutex** con dos `INSERT` `EN_PROCESO` del mismo `id_flujo` (debe violar
+      `idx_flujo_activo`) y la reconciliación reiniciando el backend con una fila viva.
+- [ ] **Proteger o retirar `POST /api/fsm/validate-schema`** antes de cualquier despliegue: quitar
+      `@PublicIp()` y añadir `@UseGuards(JwtAuthGuard, RolesGuard)`.
+- [ ] **Entidad `Flujo`** que mapee `flujos.configuracion_pipeline` a `PipelineSchema` e invoque el
+      validador antes de persistir.
+- [ ] **`FsmEngineService`, `INodeStrategy`, `NodeStrategyFactory`**: el bucle de ejecución que
+      consumirá `StatePayloadContext` y escribirá los checkpoints sigue sin implementar.
+- [ ] **Servicio de dominio sobre `FsmExecution`**: la entidad se declara y se reconcilia, pero
+      ninguna lógica de negocio la consulta todavía.
+- [ ] **Ampliar `NodeType`** con `TRIGGER_CRON` y un destino Acens cuando se escriban sus estrategias.
+- [ ] **`test/jest-e2e.json` sin `moduleNameMapper`**: los alias no resuelven en e2e (deuda previa).
+
+---
+
+## 2026-08-31 · Motor FSM, bucle de ejecución y factoría de estrategias (PROT-09) — rama `feat/fsm-engine`
+
+PROT-07 definió el grafo y PROT-08 la memoria inmutable con su checkpoint, pero nada los recorría:
+`StatePayloadContext` no lo consumía ningún servicio y `ejecuciones_flujo` solo se tocaba en la
+reconciliación de arranque. Este cambio pone el orquestador.
+
+### Resiliencia de dos niveles
+
+El motor tiene dos `try` con responsabilidades distintas, y confundirlos sería el error clásico:
+
+- **Interno (`runNode`)**: aísla el fallo de *un nodo*. Cualquier excepción no controlada de una
+  estrategia —incluida `StrategyNotFoundException`— se normaliza a un `NodeResult` con nivel
+  `URGENTE` en vez de propagarse. Un nodo defectuoso no puede tumbar la ejecución entera, y mucho
+  menos el proceso de Node.
+- **Externo**: atrapa el fallo catastrófico, típicamente que PostgreSQL deje de responder. Registra,
+  intenta marcar `FALLIDO` y **re-lanza**, porque quien invocó el motor tiene que enterarse.
+
+El intento de marcar `FALLIDO` va envuelto en su propio `try/catch`: si lo que falló fue justamente
+la base de datos, ese guardado también fallará, y no debe enmascarar el error original.
+
+### La validación previa queda fuera del `try` externo
+
+Buscar la ejecución, comprobar que no esté ya `EN_PROCESO` y marcarla se hacen **antes** de abrir el
+`try`. No es un descuido. Si marcar `EN_PROCESO` choca contra el mutex `idx_flujo_activo` —porque
+otra ejecución del mismo flujo está viva—, la excepción debe propagarse **sin** marcar `FALLIDO`: no
+ha fallado el flujo, simplemente no le tocaba el turno. Meterlo dentro del `try` habría convertido
+una colisión de concurrencia perfectamente normal en una ejecución marcada como rota.
+
+### Defensa en dos capas contra ciclos, y por qué los reintentos van anidados
+
+PROT-07 permite **a propósito** que `onErrorStep` apunte hacia atrás: es el patrón de recuperación.
+El precio es que `A → falla → B → A` es un esquema topológicamente válido que, con un
+`while (cursor !== null)` desnudo, colgaría el worker para siempre. De ahí las dos capas:
+
+| Capa | Mecanismo | Qué acota | Al agotarse |
+|---|---|---|---|
+| 1 | `@Max(5)` en `RetryPolicyDto` (ya existía, de PROT-07) | Reintentos intra-nodo, sin mover el cursor | Fallback a `onErrorStep` o `PAUSADO` |
+| 2 | `MAX_TRANSITIONS = 100` | Saltos entre nodos | Log `URGENTE` + `PAUSADO` |
+
+La decisión de diseño que las mantiene separadas: **los reintentos viven en un bucle anidado**, no en
+un `continue` del bucle externo. Reintentar con `continue` habría hecho que cada reintento consumiera
+presupuesto de transiciones, mezclando dos conceptos que no tienen nada que ver — un nodo con
+`maxRetries: 5` habría gastado cinco saltos de grafo sin moverse del sitio. Anidándolo, el contador
+cuenta saltos reales *por construcción*, sin excepciones que recordar al leer el código. Hay una
+prueba dedicada a eso: tres ejecuciones del mismo nodo producen una sola transición.
+
+### Otras decisiones que no son obvias
+
+- **Solo `GRAVE` reintenta.** `URGENTE` es irrecuperable (contrato roto, credenciales, dato corrupto)
+  y `LEVE` no justifica insistir; ambos van directos a `onErrorStep` o a `PAUSADO`. La severidad
+  gobierna el control de flujo, no solo la traza.
+- **El contador de reintentos no se limpia al tener éxito.** Es por ejecución, no por visita: si un
+  `onErrorStep` hacia atrás devuelve el flujo a un nodo que ya agotó intentos, no vuelve a
+  reintentar. Acota el trabajo total y complementa el circuit breaker.
+- **`initialPayload` aterriza en el namespace reservado `trigger`**, de modo que las plantillas lo
+  interpolan como `{{trigger.campo}}` con independencia de qué nodo dispare el flujo.
+- **Al terminar no se escribe un `EN_PROCESO` con cursor nulo.** La primera versión persistía ese
+  estado intermedio y acto seguido `EXITOSO`: dos `UPDATE` para el mismo instante lógico, y un estado
+  sin significado en la tabla. Lo detectó una aserción de la prueba del flujo lineal al contar los
+  checkpoints. Ahora el nodo terminal rompe el bucle y la finalización escribe `EXITOSO` directamente.
+- **`checkpoint()` hace `Object.assign` sobre la entidad en memoria** además del `update`, así la
+  instancia devuelta refleja el estado final sin un `findOne` extra.
+- **`QueryDeepPartialEntity` no admite un `Record` con firma de índice**: intenta hacerlo parcial
+  recursivamente y no cuadra con `Record<string, unknown>`. Hizo falta un cast acotado en el `update`,
+  documentado en el propio archivo; es seguro porque `CheckpointPatch` solo declara columnas reales.
+- **El registro de estrategias es explícito**, no por descubrimiento automático: una estrategia solo
+  entra en juego si alguien la declara, lo que evita que un archivo suelto en `src/strategies/` se
+  active sin querer. `NodeStrategyFactory` se exporta desde `FsmModule` para que los módulos de nodos
+  registren contra la misma instancia que consume el motor.
+
+### Verificación
+
+18 pruebas nuevas en verde (144 en total en el backend). Cubren los casos obligatorios —flujo lineal
+de 3 nodos, reintento intra-nodo sin alterar la ruta, límite del DTO, fallo con `onErrorStep`, fallo
+sin fallback, aislamiento de excepción, estrategia inexistente, circuit breaker cortando en
+exactamente 100 visitas, y reanudación desde el cursor persistido— más `LEVE` sin reintentar, el
+backoff exponencial con temporizadores falsos, el namespace `trigger` interpolable, y las
+precondiciones (`NotFoundException`, `ConflictException`) junto al fallo catastrófico.
+
+Las pruebas usan la **factoría real** con estrategias falsas registradas, no un doble de la factoría:
+así se ejercita de verdad el camino de registro y resolución, y el caso de estrategia inexistente
+sale gratis con no registrar nada.
+
+`npx tsc --noEmit` sin errores, `npm run lint` con 0 errores (queda el warning preexistente de
+`main.ts:59`), `nest build` correcto.
+
+**Sin verificación contra la base de datos**: el repositorio va mockeado y las migraciones siguen
+pendientes de aplicar.
+
+### Checklist de dependencias restantes
+
+- [ ] **Aplicar `db/migrations/005-tipos-nodo-fsm.sql` y `006-fsm-execution-mutex.sql`**. La 006 es
+      requisito de arranque: sin ella el backend no levanta.
+- [ ] **Estrategias concretas** en `src/strategies/` y su registro en `NodeStrategyFactory`
+      (PROT-10). Hoy la factoría arranca vacía y cualquier flujo pausaría en el primer nodo.
+- [ ] **Quién invoca `executeWorkflow`**: no hay endpoint, disparador ni consumidor de cola todavía.
+- [ ] **Volcado a `.log` físico con Winston** y fila en `alertas_error` ante un fallo
+      (`architecture-patterns.md` §4, pasos 1 y 2). Hoy el motor solo escribe en el `Logger` de Nest.
+- [ ] **Notificación WebSocket** (`node_started`, `node_completed`, `flow_finished`, `flow_failed`) a
+      la sala `flow_${flowId}` (§4 paso 4 y §5).
+- [ ] **Cola BullMQ**: «asíncrono» aquí es `async/await`; el bucle corre en el proceso que lo invoca
+      y el backoff duerme ese hilo. Las ejecuciones pesadas deben pasar a productor-consumidor (§5).
+- [ ] **Proteger o retirar `POST /api/fsm/validate-schema`**: sigue con `@PublicIp()` temporal.
+- [ ] **Entidad `Flujo`** que mapee `flujos.configuracion_pipeline` a `PipelineSchema`.
+- [ ] **`test/jest-e2e.json` sin `moduleNameMapper`**: los alias no resuelven en e2e (deuda previa).
+
+---
+
+## 2026-08-31 · Motor de interpolación funcional (PROT-10) — Épica 3 finalizada
+
+`getInterpolatedValue` solo sabía resolver rutas de **dos segmentos**: la regex capturaba
+`(nodo)\.(campo)` y hacía un acceso plano `namespaces[nodo]?.[campo]`. Basta para
+`{{parsed_email.subject}}`, pero se queda corto en cuanto llegan los datos reales — un correo trae
+cabeceras anidadas, el extractor devuelve arreglos de URLs y el nodo de IA responde con listas de
+artículos. `{{ llm_response.articles[1].title }}` ni siquiera casaba con el patrón: se habría
+quedado literal dentro del artículo publicado.
+
+### El algoritmo: normalizar y reducir
+
+Dos decisiones lo mantienen en veinte líneas sin `eval` ni parser de expresiones, ambos prohibidos
+por `security-and-scope.md` §3:
+
+1. **Normalizar los corchetes a puntos** (`urls[0]` → `urls.0`) antes de trocear. Así solo hay *una*
+   gramática que recorrer, y como efecto secundario `{{ node.items[0].id }}` y `{{ node.items.0.id }}`
+   resultan equivalentes gratis, sin código que los reconcilie.
+2. **Navegar por reducción** sobre los segmentos, con tres cortes de seguridad en cada salto: clave
+   bloqueada, nodo intermedio no navegable, propiedad no propia. Cualquiera de los tres devuelve
+   `undefined` y el fail-safe final lo convierte en `MissingContextVariableException`.
+
+`resolvePath` es una función **pura exportada**: no toca estado ni hace I/O, así que se prueba al
+margen de la clase y podrá reutilizarla el nodo `MAPEADOR_PLANTILLA` cuando llegue.
+
+La excepción cita siempre la ruta **literal** que escribió el autor
+(`parsed_email.extracted_urls[99]`), no la normalizada. El mensaje debe mencionar lo que esa persona
+puede buscar en su plantilla, no una forma interna que no reconocería.
+
+### Las dos barreras de seguridad, y por qué ninguna sobra
+
+Aquí está el hallazgo del ticket. El enunciado pedía una lista de bloqueo con `__proto__`,
+`constructor` y `prototype`. Al añadir además `Object.hasOwn` en cada salto, comprobé por mutación
+si cada guarda era portante — y la primera pasada dijo que **la lista de bloqueo era redundante**:
+retirarla no rompía ninguna prueba, porque esas tres claves son heredadas y `Object.hasOwn` ya las
+detenía.
+
+Esa conclusión era incompleta. `JSON.parse('{"__proto__":{"polluted":"si"}}')` crea `__proto__` como
+propiedad **propia** — no invoca el setter—, y comprobado en Node: sobrevive intacta a
+`structuredClone` y al spread de `setNamespace`. Es decir, `Object.hasOwn` devuelve `true` y sin la
+lista de bloqueo el interpolador leería datos controlados por el atacante. Y no es un vector
+hipotético: es exactamente el camino de la respuesta del nodo de IA, que llega como texto y se
+parsea.
+
+Con la prueba 5.13 escrita para ese caso concreto, ambas guardas quedan verificadas por mutación:
+
+| Barrera | Detiene | Prueba que falla si se retira |
+|---|---|---|
+| `BLOCKED_KEYS` | `__proto__` / `constructor` / `prototype` aunque sean **propias** | 5.13 (`__proto__` inyectado vía JSON) |
+| `Object.hasOwn` | Todo lo **heredado** (`toString`, `valueOf`, `hasOwnProperty`) | 5.10 (propiedades heredadas no listadas) |
+
+Sin `Object.hasOwn`, `{{ ns.dato.toString }}` devolvería una función; `JSON.stringify` de una función
+es `undefined`, así que la plantilla acabaría con ese literal dentro del artículo.
+
+Matiz sobre los índices fuera de rango: `{{ urls[99] }}` lo detiene el fail-safe final por sí solo,
+no `Object.hasOwn`. La guarda no le añade nada ahí; su aportación real es la cadena heredada.
+
+### Serialización estricta por tipo
+
+Las ramas se escriben con `typeof` explícito en vez de un `String(value)` sobre `unknown`, que
+volvería a disparar `no-base-to-string` como en PROT-08. El `bigint` acompaña a los números porque
+`structuredClone` lo preserva y `JSON.stringify(1n)` lanza `TypeError`.
+
+### Cierre del endpoint público
+
+Se retiró el `@PublicIp()` que PROT-08 dejó marcado con `TODO(PROT-08)` en `FsmController`, aplicando
+lo que el propio comentario prescribía: `@UseGuards(JwtAuthGuard, RolesGuard)` más `@ApiBearerAuth()`.
+Sin `@Roles(...)`, porque `RolesGuard` deja pasar cuando no hay metadata de roles y configurar flujos
+es competencia del rol EDITOR, no solo del ADMIN (`security-and-scope.md` §2). Al quitar `@PublicIp()`
+la ruta vuelve además bajo el `IpWhitelistGuard` global: doble barrera, igual que `AuthController`.
+
+### Verificación
+
+17 pruebas nuevas en verde (161 en total en el backend). La red de seguridad real fue la
+retrocompatibilidad: las 8 pruebas de interpolación de PROT-08 y las 2 del spec del motor pasaron
+**sin tocar una sola línea**, lo que confirma que el patrón nuevo —que exige al menos un segmento
+tras el namespace— sigue casando con `{{ns.campo}}` exactamente igual que el anterior.
+
+`npx tsc --noEmit` sin errores, `npm run lint` con 0 errores (queda el warning preexistente de
+`main.ts:59`), `nest build` correcto.
+
+---
+
+## Balance de cierre de la Épica 3
+
+| Ticket | Entregado | Verificado |
+|---|---|---|
+| PROT-07 · Contratos y validación topológica | `PipelineSchemaDto`, `validatePipelineTopology`, `PipelineValidatorService` | 16 pruebas unitarias |
+| PROT-08 · Contexto inmutable y persistencia | `StatePayloadContext`, `FsmExecution`, mutex `idx_flujo_activo`, reconciliación en arranque | 17 pruebas; **mutex y reconciliación sin ejercitar contra PostgreSQL** |
+| PROT-09 · Motor y bucle de ejecución | `FsmEngineService`, `NodeStrategyFactory`, resiliencia de dos niveles, circuit breaker | 18 pruebas con repositorio mockeado |
+| PROT-10 · Interpolación funcional | `resolvePath`, serialización por tipo, blindaje de prototipos | 17 pruebas, dos de ellas validadas por mutación |
+
+**Lo que la épica NO ha demostrado todavía**, y conviene tener presente antes de darla por buena:
+
+- **Nada se ha ejecutado contra PostgreSQL.** Las migraciones 005 y 006 siguen sin aplicar; toda la
+  persistencia está verificada con dobles. El mutex, la reconciliación de arranque y los checkpoints
+  no han tocado una base de datos real ni una vez.
+- **El motor no tiene nada que ejecutar.** `NodeStrategyFactory` arranca vacía: cualquier flujo real
+  pausaría en el primer nodo con `StrategyNotFoundException`. Las estrategias concretas son PROT-11+.
+- **Nadie invoca `executeWorkflow`.** No hay endpoint, disparador ni consumidor de cola.
+
+### Checklist de dependencias restantes
+
+- [ ] **Aplicar `db/migrations/005-tipos-nodo-fsm.sql` y `006-fsm-execution-mutex.sql`**. La 006 es
+      requisito de arranque: sin ella el backend no levanta.
+- [ ] **Verificar el mutex y la reconciliación** contra la base de datos real.
+- [x] **Proteger `POST /api/fsm/validate-schema`** — resuelto el 2026-08-31 en PROT-10.
+- [ ] **Estrategias concretas** en `src/strategies/` y su registro en la factoría.
+- [ ] **Quién invoca `executeWorkflow`**: endpoint, disparador IMAP/Cron o consumidor de cola.
+- [ ] **Volcado a `.log` físico con Winston** y fila en `alertas_error` (`architecture-patterns.md` §4).
+- [ ] **Notificación WebSocket** a la sala `flow_${flowId}` (§4 paso 4 y §5).
+- [ ] **Cola BullMQ**: hoy el bucle corre en el proceso que lo invoca y el backoff duerme ese hilo.
+- [ ] **Entidad `Flujo`** que mapee `flujos.configuracion_pipeline` a `PipelineSchema`.
+- [ ] **`test/jest-e2e.json` sin `moduleNameMapper`**: los alias no resuelven en e2e (deuda previa).
+
+---
+
+## 2026-08-31 · Primera ejecución real del motor contra PostgreSQL (runner E2E) — rama `feat/fsm-e2e`
+
+El balance de cierre de la Épica 3 dejaba una afirmación incómoda por escrito: **nada se había
+ejecutado contra PostgreSQL**. 161 pruebas, todas con dobles; el repositorio mockeado; la factoría
+vacía. El motor nunca había recorrido un pipeline de verdad ni escrito un checkpoint real, y el
+cableado de Nest jamás se había arrancado. Esta entrada cierra esa brecha.
+
+### El bloqueo que el enunciado no contemplaba
+
+La FASE 2 pedía insertar la ejecución con «`id_flujo`: UUID aleatorio (`v4()`)». Eso habría fallado
+en el primer intento: `ejecuciones_flujo.id_flujo` es **clave foránea a `flujos`**, y esa tabla
+estaba vacía. Y `flujos.id_usuario_creador` es a su vez FK contra `usuarios`. La siembra necesita la
+cadena entera: localizar un ADMIN activo → crear el flujo → crear la ejecución. Se reutiliza uno de
+los tres ADMIN que ya existen en lugar de inventar usuarios de prueba, y `flujos` se inserta con SQL
+directo porque todavía no tiene entidad TypeORM.
+
+### Estrategias dummy con tipos reales, no inventados
+
+El enunciado proponía `'DUMMY_INPUT' as any`. Se descartó: las tres dummy se registran bajo
+`TRIGGER_IMAP`, `MAPEADOR_PLANTILLA` y `DESTINO_DRUPAL`, que son exactamente los roles que representan
+y los huecos que ocuparán las estrategias definitivas. Cero casts, y una ventaja que no es cosmética:
+**el esquema dummy pasa el `PipelineValidatorService`**, así que el e2e asevera de paso que sigue
+siendo un pipeline legítimo según el contrato de PROT-07. Con un tipo inventado eso era imposible.
+
+### El andamiaje no puede cablearse en un módulo
+
+Las dummy y el runner viven en `src/` (donde los pedía el enunciado) pero se excluyen de
+`tsconfig.build.json` con `**/dummies/**` y `**/scripts/**`, para que no viajen a `dist/`. Eso tiene
+una consecuencia que condiciona el diseño: **si `FsmModule` los declarara en `providers`,
+`nest build` fallaría**, porque el módulo referenciaría archivos que la compilación deja fuera. Por
+eso no se cablean en ningún módulo; el runner y el spec los instancian con `new` y los pasan a
+`NodeStrategyFactory.registerStrategy()`, que es justo el punto de extensión que PROT-09 preparó.
+
+De ahí también que `DummyLogDispatcherStrategy` cree su `Logger` con `new` en lugar de inyectarlo:
+vive fuera del contenedor, no hay inyección que resolver.
+
+### Reparar la suite e2e costó tres pasadas
+
+`test/jest-e2e.json` llevaba roto desde que se introdujeron los alias, y arreglarlo tuvo más aristas
+de las esperadas:
+
+1. Faltaba el `moduleNameMapper`. Al añadirlo con `<rootDir>/src/...` **seguía fallando**: `rootDir`
+   es `"."` **relativo al propio archivo de configuración**, es decir `backend/test/`, no `backend/`.
+   Las rutas correctas son `<rootDir>/../src/...`.
+2. Después falló al resolver `otplib`, que publica fuentes TS/ESM. El jest principal ya lo
+   contemplaba con `transformIgnorePatterns` y `allowJs` en el transform; hubo que replicar ambos.
+
+Con eso, `app.e2e-spec.ts` —que estaba roto desde hacía tickets— **pasa por primera vez**.
+
+### Resultado de la primera ejecución real
+
+```
+[NodeStrategyFactory] Estrategia registrada para el nodo "TRIGGER_IMAP".
+[NodeStrategyFactory] Estrategia registrada para el nodo "MAPEADOR_PLANTILLA".
+[NodeStrategyFactory] Estrategia registrada para el nodo "DESTINO_DRUPAL".
+[RunDummyE2E] El esquema dummy supera PipelineValidatorService.
+[DummyLogDispatcherStrategy] [PROTO-DO MOTOR FSM] -> Salida generada:
+    Noticia: Innovacion en Madrid | remitente: prensa@unuware.com
+
+estado = EXITOSO | paso_actual = null
+namespaces = input_data, rendered_message, dispatch_result
+```
+
+La plantilla del nodo mapeador combina a propósito una ruta compuesta con índice de arreglo
+(`{{ input_data.articulos[0].titulo }}`) y otra simple, de modo que la corrida certifica que el
+resolutor funcional de PROT-10 opera sobre datos que ya pasaron por `structuredClone`, por el
+checkpoint y por una columna `jsonb` de PostgreSQL. Que la interpolación resuelva ahí es la prueba
+que ninguna suite con dobles podía dar.
+
+### Verificación
+
+- `npm run test:fsm:manual` — el runner completa el pipeline e imprime el checkpoint releído de la base.
+- `npm run test:e2e` — **7 pruebas en verde**: 1 de `app.e2e-spec.ts` (reparada) + 6 de
+  `fsm-engine.e2e-spec.ts`.
+- `npm test` — **161 unitarias**, que siguen sin necesitar base de datos: la suite unitaria no quedó
+  acoplada a Docker.
+- `npx tsc --noEmit` sin errores, `npm run lint` con 0 errores, `nest build` correcto y **`dist/`
+  verificado sin rastro** de `dummies/` ni `scripts/`.
+- Comprobado en la base: dos ejecuciones persistidas (runner + e2e), ambas `EXITOSO`, `paso_actual`
+  nulo y los tres namespaces en `contexto_acumulado`.
+
+La prueba que más valor aporta es la que lee con SQL directo, al margen del mapeo de TypeORM:
+comprueba lo que quedó **escrito**, no lo que el motor creía haber escrito.
+
+### Checklist de dependencias restantes
+
+- [x] **Aplicar las migraciones 005 y 006** — resuelto: verificadas como aplicadas el 2026-08-31.
+- [x] **Verificar el motor contra PostgreSQL real** — resuelto el 2026-08-31 con el runner y el e2e.
+- [x] **`test/jest-e2e.json` sin `moduleNameMapper`** — resuelto el 2026-08-31; `app.e2e-spec.ts`
+      vuelve a ejecutarse.
+- [ ] **Ejercitar el mutex `idx_flujo_activo` contra la base**: cada corrida crea su propio flujo, así
+      que dos ejecuciones nunca colisionan. Falta una prueba que fuerce dos `EN_PROCESO` del mismo
+      `id_flujo` y espere la violación de unicidad.
+- [ ] **Ejercitar la reanudación y la pausa contra la base**: el e2e solo cubre el camino feliz. Falta
+      un flujo que falle sin `onErrorStep`, quede `PAUSADO` y se reanude desde el cursor persistido.
+- [ ] **Estrategias reales** en `src/strategies/`: las dummy son andamiaje, no implementan IMAP,
+      plantillas ni publicación HTTP.
+- [ ] **Quién invoca `executeWorkflow`** en producción: endpoint, disparador o consumidor de cola.
+- [ ] **Volcado a `.log` con Winston** y fila en `alertas_error` (`architecture-patterns.md` §4).
+- [ ] **Notificación WebSocket** a la sala `flow_${flowId}` (§4 paso 4 y §5).
+- [ ] **Cola BullMQ**: el bucle sigue corriendo en el proceso que lo invoca.
+- [ ] **Entidad `Flujo`**: la siembra usa SQL directo porque `flujos` aún no está mapeada.
+
+---
+
+## 2026-09-02 · Gestor de plantillas HTML y nodo `MAPEADOR_PLANTILLA` (PROT-11.1 / PROT-11.2) — rama `feat/html-template-mapper`
+
+PROT-10 dejó la interpolación resuelta pero la plantilla seguía viviendo dentro del
+`pipeline_schema`, en `params.template`. Cambiar un `<h1>` obligaba a editar el JSON de cada flujo
+que lo usara, y dos flujos no podían compartir el mismo maquetado. Esta entrega mueve la plantilla a
+`plantillas_html` y deja al nodo declarando solo `params.templateId`.
+
+Lo que sigue son las cuatro decisiones donde el código **se separa del enunciado**, y el porqué.
+
+### La estrategia no escribe en el contexto
+
+El enunciado pedía que `execute()` terminase con
+`context.setNamespace(outputNamespace, { compiled_markup, mapped_at })`. No se hizo.
+
+`FsmEngineService` ya escribe `result.data` en `node.outputNamespace` en cuanto un nodo devuelve
+`success: true` (`fsm-engine.service.ts`, rama `if (result.success)`). Añadir la escritura desde la
+estrategia no la sustituye: la **duplica**. El payload acabaría en dos namespaces distintos —el
+`params.outputNamespace` que eligiera la estrategia y el `node.outputNamespace` del esquema— y una
+plantilla aguas abajo podría leer del que no toca sin que nada fallara. Además el TSDoc de
+`INodeStrategy` es explícito: el contexto llega para **leerse**, y quien escribe es el motor.
+
+La estrategia devuelve `data` y punto. El test `3.1` lo blinda comparando `getAllContext()` antes y
+después: si alguien vuelve a meter un `setNamespace` aquí, la suite lo caza.
+
+### `strict: true`, contra lo que pedía el enunciado
+
+Handlebars con `strict: false` (lo especificado) interpola una variable ausente como cadena vacía y
+sigue adelante. Eso es exactamente lo que PROT-10 decidió **no** hacer cuando
+`getInterpolatedValue` pasó a lanzar `MissingContextVariableException` en vez de callar: un titular
+en blanco se publicaría en Drupal sin que nadie se enterase, y el fallo aparecería lejos de su causa.
+
+Sería incoherente que el motor fuese estricto y el nodo que consume plantillas no lo fuese. Se compila
+con `strict: true` y el fallo se traduce a `NodeResult` con nivel `GRAVE`.
+
+### El pre-chequeo de variables existe para no informar de una en una
+
+Con `strict: true` bastaría para detener el flujo, pero Handlebars lanza en la **primera** variable
+ausente. Un operador con tres variables mal cableadas tendría que arreglar, reintentar, descubrir la
+siguiente, y así tres veces.
+
+Antes de compilar se recorre `requiredVariables` con `resolvePath` —la función pura que PROT-10 ya
+exportaba del contexto FSM, así que la comprobación usa exactamente la misma gramática de navegación
+que la interpolación real— y se acumulan **todas** las que faltan en `missingFields`. El `try/catch`
+alrededor de la compilación se queda como red: cubre el modo `rawTemplate`, donde no hay
+`requiredVariables` precalculadas.
+
+### La lista blanca valida la raíz, no dos segmentos
+
+El regex del enunciado (`/\{\{\s*([a-zA-Z0-9_]+)\.([a-zA-Z0-9_]+)\s*\}\}/g`) solo ve rutas de dos
+segmentos. Pero Handlebars resuelve `{{llm_response.articles.[0].title}}` igual de bien, así que esa
+ruta habría pasado sin que su namespace se comprobara nunca — el Poka-Yoke tendría un agujero del
+tamaño de cualquier ruta anidada.
+
+El patrón implementado captura la raíz y el resto por separado, a cualquier profundidad, y valida la
+raíz. Las rutas se guardan normalizadas (`.[0]` → `.0`) para que `resolvePath` las navegue tal cual.
+
+#### Y el residuo: lo que el patrón *no* reconoce
+
+Validar lo que casa no basta. `{{titulo}}` (namespace suelto), `{{mi-var.campo}}` (guion) o un
+marcador mal cerrado no casan con el patrón, así que sin más se colarían: pasarían la validación, no
+figurarían en `requiredVariables` y reventarían en ejecución con Handlebars estricto.
+
+La extracción usa el **residuo** del `replace` —el HTML con las variables válidas ya consumidas— y
+rechaza cualquier `{{...}}` que sobreviva. Analizar y limpiar en la misma pasada evita mantener dos
+gramáticas que podrían divergir.
+
+### Sintaxis prohibida: el añadido que no estaba en el enunciado
+
+`security-and-scope.md` §3 limita la transformación de datos a "sustitución determinista de
+variables". Handlebars trae bastante más, y todo se rechaza **al guardar**:
+
+| Token | Por qué se rechaza |
+|---|---|
+| `{{{` y `{{&` | Desactivan el escapado de HTML. Un valor del contexto (la respuesta del nodo de IA, por ejemplo) podría inyectar markup en el artículo publicado |
+| `{{#` y `{{/` | Bloques y helpers: lógica dentro de la plantilla |
+| `{{>` | Parciales: cargarían una plantilla externa, fuera del control del gestor |
+
+Prohibir el triple-stash es lo que permite confiar en el escapado por defecto de `{{ }}`. El test
+`1.4` de la estrategia lo comprueba de frente: un `<script>` en el contexto sale como `&lt;script&gt;`.
+
+### Detalles de implementación
+
+- **La tabla ya existía** en `init.sql` desde el esquema original, con `nombre VARCHAR(100)`, sin
+  `descripcion`, sin `activo` y con `contenido_html`/`variables_esperadas` anulables. La migración
+  `008` la alinea; `init.sql` se actualiza en paralelo para que un clonado nuevo nazca igual, como se
+  hizo con `allowed_ips`.
+- **`id_usuario_creador` se conserva** `NOT NULL` en vez de eliminarla. No entra por el DTO: el
+  controlador la toma de `@CurrentUser()`, de modo que el cliente no puede falsificar la autoría. Es
+  lo que sostiene la trazabilidad que justifica el borrado lógico.
+- **`variables_esperadas` pasa a `NOT NULL DEFAULT '[]'`**: el servicio la recalcula en cada
+  escritura, así que un `NULL` significaría "nunca se validó", estado que el gestor ya no permite
+  alcanzar.
+- **El cambio de tipo de `fecha_creacion`** (`TIMESTAMP` → `TIMESTAMPTZ`) va en su propia sentencia,
+  separado del `SET DEFAULT`: combinarlos en un mismo `ALTER TABLE` obliga a PostgreSQL a recastear
+  el default a medio camino del cambio de tipo.
+- **El registro de la estrategia** vive en `NodesModule.onModuleInit()`, no dentro de
+  `NodeStrategyFactory`. El enunciado pedía "añadir el mapeo al registro interno de la factoría",
+  pero la factoría es agnóstica a propósito: registro explícito, sin descubrimiento automático, para
+  que un archivo suelto no se active sin querer. `FsmModule` exporta la instancia justo para esto.
+- **`DummyTemplateMapperStrategy` sigue ganando en el e2e.** `fsm-engine.e2e-spec.ts` importa
+  `AppModule` (que ya registra la estrategia real) y después llama a `registerDummyStrategies`, que
+  la sustituye dejando un `warn`. Es lo correcto: el runner manual no debe depender de que haya
+  plantillas en la base.
+- **`PUT` y no `PATCH`**, siguiendo el enunciado, aunque el resto del repo use `PATCH`.
+- **El perímetro de red no necesitó nada.** El enunciado pedía `RedLocalMiddleware` sobre
+  `/templates`; ese middleware solo se monta sobre las rutas de Swagger porque escapan al router de
+  Nest. `/templates` ya lo cubre `IpWhitelistGuard`, registrado como `APP_GUARD` global.
+
+### Verificación
+
+```
+npx tsc --noEmit    13 errores, todos preexistentes en allowed-ips.service.spec.ts
+npm run lint        1 warning, preexistente en main.ts
+npm run build       OK
+npm test            18 suites, 217 pruebas (32 nuevas)
+```
+
+Las 32 pruebas nuevas se reparten en: 19 de `templates.service.spec.ts` (lista blanca, rutas
+profundas, sintaxis prohibida, residuo, unicidad, borrado lógico), 12 de
+`template-mapper.strategy.spec.ts` (compilación, escapado, los cinco fallos `GRAVE`, inmutabilidad
+del contexto) y 1 de `nodes.module.spec.ts`, que comprueba el registro en la factoría sin arrancar
+Nest ni PostgreSQL — sin ella, un cableado roto no se detectaría hasta que un flujo real reventase
+con `StrategyNotFoundException`.
+
+Los dos archivos SQL se validaron con `pglast` (el parser real de PostgreSQL, vía `libpg_query`): 11
+sentencias en la migración, 29 en `init.sql`, todas correctas. La semántica sobre datos reales queda
+pendiente de aplicar la migración.
+
+### Checklist de dependencias restantes
+
+- [ ] **Aplicar la migración 008** (`db/migrations/008-plantillas-html.sql`): la ejecuta el usuario.
+      Hasta entonces, el CRUD de `/templates` fallará contra la base aunque la suite unitaria pase.
+- [ ] **Entidad `Nodo` y `Flujo`**: `nodos.id_plantilla` sigue sin mapear, así que nada valida todavía
+      que el `templateId` de un `params` corresponda a la plantilla enlazada en el nodo.
+- [ ] **Frontend de Vista 4**: el `<q-select>` cerrado debe alimentarse de `requiredVariables`, que ya
+      viaja en la respuesta de `GET /templates`.
+- [ ] **Estrategias reales restantes**: IMAP, extracción web, IA y publicación HTTP siguen siendo
+      dummies. `MAPEADOR_PLANTILLA` es la primera real.
+- [ ] **Volcado a `.log` con Winston** y fila en `alertas_error`: los fallos `GRAVE` de este nodo aún
+      no se persisten (`architecture-patterns.md` §4).
+
+---
+
+## 2026-09-02 · Catálogo de plantillas y tríada modular de nodos (PROT-11 · Quasar) — rama `feat/html-template-mapper`
+
+El backend de PROT-11 quedó cerrado en el commit anterior, pero sin nada en el frontend: el catálogo
+no se podía administrar y el nodo `MAPEADOR_PLANTILLA` no tenía componente de configuración. Esta
+entrega cierra el ciclo, y antes fija una regla de arquitectura que no existía.
+
+### La regla se escribió sobre un hueco, no sobre un problema
+
+El encargo pedía "eliminar la nomenclatura secuencial acoplada (`StepN`)". Un `grep` sobre
+`frontend/src` no encontró **ningún** archivo `Step`, ni un `q-stepper`, ni un wizard: las únicas
+menciones a "Wizard" estaban en el propio `.md` de reglas. No había nada que renombrar.
+
+Eso cambia la naturaleza del trabajo pero no su valor: la regla es **preventiva**. El razonamiento
+que se dejó escrito es el que importa — el orden de un nodo es un dato del `pipeline_schema`, no una
+propiedad del componente. Con `Step1.vue`…`Step5.vue`, reordenar un flujo obligaría a renombrar
+archivos, y un mismo nodo no podría reutilizarse en dos flujos que lo colocan en posiciones
+distintas. El nombre describe el tipo funcional: `TemplateMapperConfig.vue`.
+
+### `tipo_nodo` no existe en el JSON
+
+El encargo pedía resolver los componentes "según la propiedad `tipo_nodo` del schema JSON". No hay
+tal propiedad: `PipelineNodeConfigDto` usa **`nodeType`**, y `tipo_nodo` es el nombre de la columna
+SQL de la tabla `nodos`. Escribir la regla con el nombre de la columna habría enviado a quien
+implemente el siguiente nodo a buscar un campo que no está, además de contradecir
+`code-conventions.md` §1 (identificadores en inglés). La regla dice `nodeType`.
+
+### El registro, y por qué no un `v-if`
+
+```typescript
+export const nodeConfigRegistry: Partial<Record<NodeType, Component>> = {
+  [NodeType.MAPEADOR_PLANTILLA]: defineAsyncComponent(
+    () => import('@components/nodes/TemplateMapperConfig.vue'),
+  ),
+};
+```
+
+Encadenar `v-if="node.nodeType === 'MAPEADOR_PLANTILLA'"` en el anfitrión funcionaría hoy, con un
+solo nodo. Con siete, cada tipo nuevo obliga a editar el anfitrión — que es exactamente el
+acoplamiento que la tríada quiere evitar, solo que movido de los nombres de archivo a una plantilla.
+El registro deja el anfitrión cerrado a modificación.
+
+`Partial` es deliberado: los seis tipos sin implementar simplemente no están, y el anfitrión debe
+contemplar el `undefined`. Cuando existan los siete, retirar el `Partial` hará que el compilador
+exija cobertura total, sin que nadie tenga que acordarse.
+
+El build confirma que la carga diferida hace su trabajo: `TemplateMapperConfig-ChsWNX52.js` sale como
+chunk propio, así que un flujo que use dos nodos no descarga los siete.
+
+### La vista previa vive en el backend, y esa es la decisión de fondo
+
+El encargo pedía que el servicio del nodo "probara compilación de payloads simulados", pero el
+backend no tenía endpoint de previsualización. Había tres salidas y dos eran malas:
+
+- Compilar en el navegador añadiendo `handlebars` al frontend: dos motores, y cualquier divergencia
+  futura (modo estricto, sintaxis prohibida) daría una vista previa que **miente** sobre lo que se va
+  a publicar. Es justo el fallo que PROT-11.1 se propuso evitar validando al guardar.
+- Pintar el HTML crudo sin interpolar: no verifica que la plantilla compile de verdad.
+- Añadir `POST /templates/:id/preview`. Más trabajo, pero una sola fuente de verdad.
+
+Se eligió la tercera, y para sostenerla se extrajo `TemplateRendererService`: la lógica de Handlebars
+sale de `TemplateMapperStrategy` y pasa a un servicio con **dos consumidores** —la estrategia en
+tiempo de ejecución y el endpoint del gestor—, cada uno traduciendo el mismo `RenderOutcome` a su
+propio contrato (`NodeResult` o respuesta HTTP). El renderer no conoce a ninguno de los dos.
+
+#### Marcadores autogenerados
+
+El endpoint construye el contexto a partir de `requiredVariables`, poniendo `«parsed_email.clean_title»`
+donde irá el titular, y fusiona encima el `samplePayload` que envíe el cliente. Así la vista previa
+**nunca falla por falta de datos**: el editor abre el diálogo y ve la maqueta al instante, y donde
+aporte valores reales se ven esos. Las comillas angulares se eligieron porque no aparecen en texto
+corriente y sobreviven al escapado de Handlebars sin convertirse en entidades.
+
+### El refactor del constructor y las pruebas que casi se vuelven mentira
+
+Extraer el renderer cambió la firma de `TemplateMapperStrategy` de uno a dos parámetros, lo que rompe
+la instanciación de las 12 pruebas existentes. Lo evidente era mockear el renderer en todas.
+
+No se hizo, porque cuatro de esas pruebas —`1.1` interpolación, `1.3` ruta con índice, `1.4` escapado
+de `<script>`, `2.5` variable ausente— dejarían de ejercitar Handlebars y pasarían a comprobar que un
+doble devuelve lo que se le dijo. Habrían seguido en verde sin verificar nada, y precisamente la
+cobertura perdida es la que impide que la vista previa mienta.
+
+La suite quedó partida en dos:
+
+| Bloque | Renderer | Qué prueba |
+|---|---|---|
+| 1–3 (las 12 originales) | **Real** | Compilación, escapado, rutas anidadas, fallos `GRAVE`, inmutabilidad |
+| 4 (nuevo, 6 pruebas) | **Mockeado** | Que se invoca `renderStrict(html, requiredVariables, namespaces)` y que las 3 variantes de `RenderOutcome` se traducen a su `NodeResult` |
+
+El renderer real es puro —sin repositorio, red ni estado—, así que usarlo no introduce I/O ni acopla
+la prueba a nada externo. `buildStrategy` lo instancia por defecto y admite el doble por parámetro.
+
+### `iframe sandbox` y no `v-html`
+
+El contenido de una plantilla es markup arbitrario escrito por un editor. Un `v-html` ejecutaría
+cualquier `<script>` que contenga, en el mismo origen que la sesión y con el JWT en `localStorage` al
+alcance. El `<iframe sandbox="">` sin ningún token `allow-*` desactiva scripts, formularios y
+navegación por completo.
+
+Es una barrera **independiente** del escapado de Handlebars, y ninguna sobra: el escapado protege de
+los valores del contexto (la respuesta del nodo de IA), el sandbox protege del HTML de la propia
+plantilla. Hacen falta las dos porque el vector es distinto.
+
+### Detalles de implementación
+
+- **Convención de nombres de store.** El encargo pedía `useTemplatesStore.ts` y
+  `nodes/useTemplateMapperStore.ts`. Se mantuvo `<dominio>.store.ts` (`templates.store.ts`,
+  `nodes/template-mapper.store.ts`), que es lo que usan los cinco stores existentes; adoptar el otro
+  estilo habría dejado el proyecto con dos convenciones de nombre de archivo conviviendo.
+- **`nativeEl`, no el ref del componente.** El primer intento de insertar el chip de namespace en el
+  cursor leía `selectionStart` del ref de la `QInput`, que apunta al **componente** y no al
+  `<textarea>`. Habría pasado el typecheck y fallado en silencio en tiempo de ejecución; se corrigió
+  a `htmlInput.value?.nativeEl`. La recolocación del caret va dentro de `nextTick` porque antes del
+  repintado el textarea aún contiene el texto viejo.
+- **Las llaves no pueden vivir en la plantilla.** `<span>{{ '{{#if}}' }}</span>` rompe el compilador
+  de Vue (`vue/no-parsing-error`): no distingue unas llaves literales de una interpolación anidada.
+  Los ejemplos con llaves se declararon como constantes en el `<script setup>`.
+- **`/templates` no lleva `requiresAdmin`.** A diferencia de `/users` y `/ip-whitelist`, el
+  `TemplatesController` admite `@Roles(ADMIN, EDITOR)`: configurar plantillas es operación de flujos,
+  no gestión de cuentas. La ruta espeja al backend.
+- **Se reutilizó `SafeDeleteModal`** tal cual: ya implementaba la cuenta regresiva de 5 segundos, no
+  se reimplementó nada.
+- **`PUT` y no `PATCH`** en `updateTemplate`, porque es lo que expone el controlador — a diferencia
+  de `/users` y `/allowed-ips`.
+- **Banco de pruebas en lugar de wizard.** Como Vista 3+4 no existe, `NodeConfigSandboxPage.vue`
+  reproduce lo único que el asistente hará con un configurador: resolverlo por `nodeType` desde el
+  registro y leer `isConfigValid`. Sin él, `TemplateMapperConfig.vue` compilaría y tiparía pero no se
+  podría ver funcionando hasta PROT-12.
+
+### Verificación
+
+```
+Backend
+  npm test          19 suites, 239 pruebas (antes 217; +22)
+  npx tsc --noEmit  13 errores, todos preexistentes en allowed-ips.service.spec.ts
+  npm run lint      1 warning, preexistente en main.ts
+  npm run build     OK
+
+Frontend
+  npm run typecheck  vue-tsc --noEmit, limpio
+  npm run lint       limpio
+  npm run build      OK — TemplateMapperConfig sale en su propio chunk
+```
+
+Las 22 pruebas nuevas del backend: 6 de delegación en la estrategia, 7 de previsualización en
+`templates.service.spec.ts` (marcadores autogenerados, override por `samplePayload`, ruta profunda,
+escapado, plantilla desactivada, `404`, `400` por HTML que no compila) y 9 del
+`template-renderer.service.spec.ts` aislado.
+
+### Checklist de dependencias restantes
+
+- [ ] **Asistente de flujos (Vista 3+4, PROT-12)**: el banco de pruebas es andamiaje. Falta el
+      `<q-stepper>` real, `useFlujoDraftStore` como agregador y la topología del pipeline.
+- [ ] **Los otros seis configuradores de nodo**: solo `MAPEADOR_PLANTILLA` está en el registro.
+      Al completarlos, retirar el `Partial` de `nodeConfigRegistry`.
+- [ ] **Sin pruebas en el frontend**: no hay runner instalado (ni vitest ni jest). `isConfigValid` y
+      la inserción de chips en el cursor son lógica que merece prueba unitaria.
+- [ ] **`samplePayload` real en la vista previa**: hoy siempre se envía vacío y se ven marcadores.
+      Podría alimentarse del último `contexto_acumulado` de una ejecución del flujo.
+- [ ] **Ocultar entradas del drawer por rol**: `/users` y `/ip-whitelist` se muestran a un EDITOR
+      aunque la guarda de ruta los bloquee. No es nuevo de esta entrega, pero se hace más visible al
+      añadir rutas con roles distintos.
+
+---
+
+## 2026-09-02 · Editor CodeMirror 6, split view y borrador en Pinia — rama `feat/html-template-mapper`
+
+El diálogo de plantillas entregado esta mañana era un modal de 620px con un `<q-textarea>` plano. Se
+podía escribir HTML, pero sin resaltado, sin números de línea y sin ninguna señal de qué era un
+marcador y qué era texto: el autor descubría el error cuando el backend devolvía un `400`. Este
+refactor separa las tres responsabilidades que el componente concentraba y hace el error **visible
+mientras se escribe**.
+
+### CodeMirror manda sobre el cursor, no el store
+
+El encargo especificaba dos caminos de inserción a la vez: `store.insertMarker(ns)`, que empalma
+strings sobre un `cursorPosition` guardado en Pinia, y `codeEditorRef.insertTextAtCursor(...)`, que
+despacha una transacción sobre el `EditorView`. Ejecutar ambos inserta `{{ns.}}` **dos veces**.
+
+Y no es solo eso: si el store fuese el dueño, cada inserción reemplazaría el documento entero por una
+cadena nueva, CodeMirror lo recibiría por prop y el cursor se iría al principio. El punto de control
+del propio encargo pedía lo contrario — "inserción atómica sin pérdida de foco".
+
+Gobierna CodeMirror. El chip despacha la transacción; el `update:modelValue` sincroniza el store
+después. `insertMarker` sobrevive como red por si el editor aún no ha resuelto su carga diferida, y
+`cursorPosition` queda como espejo que alimenta ese fallback. El TSDoc de ambos lo dice, para que
+nadie los tome por la ruta principal.
+
+Que la inserción sea **una sola transacción** —texto y selección en el mismo `dispatch`— es lo que
+hace que `Ctrl+Z` la deshaga entera en vez de dejar el caret descolocado.
+
+### La guarda contra el bucle de eco
+
+El `v-model` entre un componente Vue y un editor imperativo tiene una trampa clásica:
+
+```
+tecla → docChanged → emit → store → prop → watch → dispatch → docChanged → …
+```
+
+Sin cortar ese ciclo, cada pulsación reemplaza el documento completo y el cursor salta. El `watch`
+compara antes de despachar:
+
+```ts
+if (!view || view.state.doc.toString() === value) return;   // el cambio vino de aqui
+```
+
+Tres caracteres de comparación que son la diferencia entre un editor usable y uno que se pelea con
+quien escribe.
+
+### Un solo `HighlightStyle` para los dos modos
+
+`defaultHighlightStyle` de CodeMirror está pensado para fondo claro y sería ilegible en oscuro, que
+es el modo por defecto del proyecto. La salida habitual es mantener dos temas y conmutarlos con un
+`Compartment` observando `$q.dark`.
+
+No hizo falta: el tema y el resaltado se construyen sobre custom properties `--pd-*`, que ya conmutan
+solas con `body--dark`. Un único `EditorView.theme()` y un único `HighlightStyle` sirven para ambos
+modos, sin reconfigurar extensiones ni observar el store de tema.
+
+Los dos colores que el encargo pedía inline (`rgba(91,140,232,.15)` y `.25`) se añadieron antes como
+tokens `--pd-accent-soft` y `--pd-accent-selection`: `app.scss` declara que la lista `--pd-*` es
+cerrada y que todo color nuevo entra primero como token.
+
+### `:deep()` no es opcional aquí
+
+CodeMirror construye su DOM de forma imperativa, sin el atributo de scope que Vue añade a lo que él
+renderiza. Un `.cm-pd-template-marker` en `<style scoped>` normal **no alcanzaría** a esos nodos. El
+contenedor sí es un elemento de Vue, así que `:deep()` desde el componente hijo funciona.
+
+### `min-height: 0`, el detalle que decide si el modal funciona
+
+El split view es una cadena de contenedores flex: card → form → row → columna → editor. Un ítem flex
+tiene `min-height: auto` por defecto y **se niega a encogerse por debajo de su contenido**, así que
+sin `min-height: 0` en cada eslabón el editor empuja el modal más allá del `85vh` en vez de hacer
+scroll interno. Es exactamente el desbordamiento que el punto 2 de la verificación manual buscaba.
+
+### `vue-codemirror` no entró
+
+El encargo lo pedía, pero el wrapper obliga igualmente a sacar el `EditorView` del payload de su
+evento `@ready` para poder despachar transacciones — y con `no-unsafe-assignment` como *error* en el
+lint, ese payload hay que tiparlo a mano. A cambio de dos dependencias (`vue-codemirror` más el
+metapaquete `codemirror`, que declara como peer y faltaba en la lista), ahorraba unas 35 líneas de
+`onMounted`/`onBeforeUnmount`. Se montó el `EditorView` directamente.
+
+La lista de paquetes sí se corrigió por lo contrario: faltaban tres. `@codemirror/language` (sin él
+el HTML se parsea pero **no se colorea**), `@codemirror/commands` (sin él no hay deshacer/rehacer, lo
+que dejaría el editor por debajo de un `<textarea>`) y `@lezer/highlight` para los `tags`.
+
+### Detalles de implementación
+
+- **El `EditorView` no vive en un `ref`.** Envolver una instancia imperativa con estado interno en un
+  proxy reactivo de Vue es una fuente conocida de rarezas, y aquí no se necesita reactividad sobre
+  ella: es una variable del `setup`.
+- **Carga diferida.** El diálogo monta `TemplateCodeEditor` con `defineAsyncComponent`. El build lo
+  confirma: `TemplateCodeEditor-DPHlm0aB.js` pesa 451 KB y **no aparece** en el chunk principal
+  (167 KB), que es lo que importa porque el diálogo lo importan dos componentes distintos.
+- **El regex se alineó con el del backend**, índice `.[0]` incluido. Con el del encargo,
+  `{{llm_response.articles.[0].title}}` no habría salido en los chips aunque el backend sí la
+  registra en `requiredVariables`: los chips habrían mentido.
+- **`detectedVariables` detecta la forma, no la validez.** `{{contacto.telefono}}` se resalta y se
+  lista, y aun así el backend lo rechaza. Duplicar aquí la lista blanca crearía una segunda autoridad
+  sobre qué namespaces existen; hay una sola, y está en el backend.
+- **`exactOptionalPropertyTypes` en `initDraft`**: la entidad trae `description: string | null` y el
+  borrador la quiere `string | undefined`. No se puede asignar `undefined`: hay que **omitir la
+  clave**, con el mismo spread condicional que ya usaba `onSubmit`. Hay un test que lo fija
+  (`'description' in draft === false`), porque es el tipo de cosa que un refactor rompe en silencio.
+- **`.pd-btn-secondary` unificó cinco duplicados.** No existía; cinco diálogos repetían una
+  `.pd-btn-cancel` local idéntica. Se creó como utilidad global, se añadió a la tabla §2 de las
+  reglas y se migraron los cinco.
+- **Un solo borrador por aplicación.** `activeDraft` es un singleton: dos `TemplateEditorDialog`
+  montados a la vez compartirían buffer. No es un problema real porque los `<q-dialog>` son modales y
+  solo uno está abierto, e `initDraft` se llama al abrir — pero queda escrito en el TSDoc para que
+  nadie construya encima la suposición contraria.
+
+### Primer runner de pruebas del frontend
+
+Hasta ahora no había ninguno. El refactor movía a Pinia lógica pura que antes no existía —el regex de
+detección y la aritmética del offset del caret— y eso pedía red. Vitest 4 (declara `vite ^8.0.0`;
+instalado 8.2.2), con `vitest.config.ts` propio porque Vitest no lee los alias de `quasar.config.ts`.
+
+Los helpers se importan explícitamente en vez de activar `globals: true`: eso exigiría añadir
+`vitest/globals` a los `types` de `.quasar/tsconfig.json`, que es un archivo **generado** por
+`quasar prepare` y se perdería en el siguiente `postinstall`.
+
+`src/stores/templates.store.spec.ts`, 19 casos sin DOM ni red (`vi.mock` sobre el servicio evita
+cargar `@boot/axios`): `initDraft` con `description: null`, los cuatro casos de `isDraftValid`, siete
+de `detectedVariables` (dedupe, rutas profundas, índice, namespace suelto, recálculo tras cambio) y
+cuatro de `insertMarker` (posición, offset del caret, cursor desfasado y acotado).
+
+### Verificación
+
+```
+npm run typecheck   vue-tsc --noEmit, limpio
+npm run lint:check  limpio (exit 0)
+npm test            1 archivo, 19 pruebas
+npm run build       OK — CodeMirror aislado en su propio chunk, ausente del index
+```
+
+### Checklist de dependencias restantes
+
+- [x] **Sin pruebas en el frontend** — resuelto parcialmente: Vitest instalado y `templates.store.ts`
+      cubierto. Faltan las de componente (`@vue/test-utils` + `happy-dom` cuando haga falta).
+- [ ] **`TemplateCodeEditor` sin pruebas**: la guarda del bucle de eco y el offset de
+      `insertTextAtCursor` solo se verifican a mano. Necesitan entorno DOM.
+- [ ] **Autocompletado de campos tras el punto**: al insertar `{{parsed_email.}}` el editor podría
+      ofrecer los campos conocidos del namespace, pero el backend no expone hoy ese catálogo.
+- [ ] **Resaltar en rojo los namespaces fuera de la lista blanca**: el decorador valida la forma. Con
+      `TEMPLATE_NAMESPACES` ya en el frontend, distinguir válido de inválido dentro del editor es
+      barato y adelantaría el `400` al momento de teclear.
+- [ ] **Asistente de flujos (PROT-12)** y los otros seis configuradores de nodo, sin cambios.
+
+---
+
+## 2026-09-03 · Blindaje XSS, filtro de tablas y contrato de namespaces — rama `feat/html-template-mapper`
+
+Tres carencias con el mismo patrón de fondo: **el sistema no avisa hasta que ya es tarde**. Las
+tablas no se podían filtrar, el markup de una plantilla llegaba crudo a Drupal, y el nodo mapeador se
+declaraba válido con un contrato que se sabía roto.
+
+### Las dos barreras XSS cubren cosas distintas
+
+Ya existían dos protecciones y ninguna cubría el hueco real:
+
+- El **escapado `{{ }}` de Handlebars** protege de los *valores* del contexto — la respuesta del nodo
+  de IA, por ejemplo. No toca el HTML que el editor escribió en la plantilla.
+- El **`<iframe sandbox>`** de la vista previa protege al *operador de Proto-Do*. Al lector del
+  artículo publicado en Drupal no lo protege nadie: ahí no hay iframe.
+
+El hueco era el cuerpo de la plantilla. Un `<script>`, un `onerror=` o un `href="javascript:"`
+escritos ahí se compilaban tal cual. `sanitize-html` llevaba instalado desde el principio, sin usar.
+
+### Lo que el enunciado daba por hecho y no era cierto
+
+`disallowedTagsMode: 'discard'` supuestamente elimina "la etiqueta y su contenido" para `script`,
+`style` e `iframe`. Ejecutando la configuración propuesta antes de escribirla:
+
+```
+script -> "<p>ok</p>"                    purgado con su contenido
+iframe -> "contenido interno<p>ok</p>"   la etiqueta se fue, el TEXTO se quedó
+```
+
+`discard` solo borra el contenido de las etiquetas listadas en `nonTextTags`, y `iframe` no está en
+esa lista. Sin corregirlo, el texto interno de un `<iframe>` acabaría suelto en el artículo.
+
+#### Y el detalle que casi abre un agujero
+
+Declarar `nonTextTags` **sustituye** la lista por defecto, no la amplía. Escribir `['iframe']` a
+secas habría eliminado `script`, `style`, `textarea`, `option` y `xmp` de la protección. El propio
+código de la librería avisa sobre el último:
+
+> `xmp` is included because htmlparser2 treats it as a raw-text element, so markup inside is parsed
+> as text on input but would otherwise be re-emitted unescaped, allowing XSS bypass.
+
+La configuración declara los seis. El comentario en el código explica por qué no se puede acortar.
+
+### Detectar al guardar: dos pasadas del mismo parser
+
+Sanear en silencio deja al autor sin enterarse. Todo el gestor hace lo contrario —los namespaces se
+rechazan al guardar con un 400 que cita la variable—, así que el saneado debía comportarse igual.
+
+El problema: `sanitize-html` no informa de lo que elimina, y comparar su salida contra el HTML crudo
+daría falsos positivos constantes, porque el parser normaliza aunque no filtre (`<br>` → `<br />`,
+comillas, orden de atributos). La comparación válida es entre **dos pasadas del mismo parser**, una
+con lista blanca y otra sin ella: lo que difiera lo quitó el filtro, no el formateo.
+
+Y una trampa que solo apareció al probarlo: la primera versión **rechazaba un `<a target="_blank">`
+legítimo**. La pasada estricta le *añade* `rel="noopener noreferrer"` vía `transformTags` y la
+permisiva no, así que las salidas diferían por una **adición**. La sonda aplica ahora la misma
+transformación; el `forceSafeLinkRel` está extraído a una constante precisamente para que no puedan
+divergir.
+
+### Una aserción que medía lo que no era
+
+La prueba de que el escapado y el saneado se suman en vez de anularse empezó siendo
+`expect(markup).not.toContain('onerror=')`. Falló, y por una razón instructiva: Handlebars escapa el
+`=` como `&#x3D;`, pero `sanitize-html` lo re-serializa como `=` al normalizar entidades. El texto
+literal `onerror=` **sí** aparece en la salida.
+
+Y es inofensivo: está dentro de un nodo de texto, con el `<` como `&lt;`, así que el navegador nunca
+construye la etiqueta. La aserción correcta es sobre la salida completa, no sobre una subcadena. Es
+un buen recordatorio de que en seguridad la prueba tiene que medir la propiedad real —"no se forma un
+elemento"— y no un proxy textual de ella.
+
+### Jest no podía cargar sanitize-html
+
+Añadir el import rompió las cuatro suites que lo alcanzaban:
+
+```
+node_modules/sanitize-html/node_modules/htmlparser2/dist/index.js:1
+import { Parser } from "./Parser.js";
+SyntaxError: Cannot use import statement outside a module
+```
+
+`htmlparser2@12` es ESM puro y **no publica build CJS**. Node 22+ lo requiere sin problema —de ahí
+que la app funcione— pero el pipeline CommonJS de Jest no. La salida es dejar que ts-jest transforme
+esa cadena, y el repo ya tenía el precedente con `@scure`/`@noble`.
+
+El primer intento no funcionó: el lookahead `/node_modules/(?!htmlparser2/…)` se evalúa justo tras el
+**primer** `/node_modules/`, y `htmlparser2` vive en el anidado de `sanitize-html`. Hacía falta el
+prefijo `.*`, que es justo por lo que la excepción existente estaba escrita así.
+
+### Contrato de namespaces: el fallo se adelanta a la configuración
+
+`isConfigValid` gana una tercera condición: `missingRequiredVariables.length === 0`. Si la plantilla
+interpola `{{scraped_web.headline}}` y ningún nodo previo escribe `scraped_web`, antes se podía
+avanzar y el fallo aparecía en ejecución, como un `GRAVE` con `missingFields` y el flujo `PAUSADO`.
+
+Se valida la **raíz** de la ruta, no la ruta entera: lo que un nodo previo produce es el namespace
+completo, así que `llm_response.articles.0.title` se satisface con que alguien escriba
+`llm_response`. El banner nombra namespaces y no rutas por la misma razón — lo que hay que añadir al
+flujo es un nodo, no un campo.
+
+`availableUpstreamNamespaces` es un mock y el TSDoc lo dice: la fuente real son los `outputNamespace`
+de los nodos anteriores, que el asistente inyectará. El banco de pruebas lo suple con checkboxes, que
+es la única forma hoy de ver `isConfigValid` conmutar en vivo.
+
+### Detalles de implementación
+
+- **`ip-whitelist/IpWhitelistManager.vue` no existe.** El componente es
+  `allowed-ips/AllowedIpsManager.vue`; solo la *página* se llama `IpWhitelistPage.vue`.
+- **`color="grey-5"` no entró.** El proyecto está 100 % limpio de `grey-N` y `frontend-quasar.md` §2
+  lo prohíbe; el icono toma el color de `--pd-text-secondary` desde `.pd-search-input`.
+- **El ref del filtro se tipa `string | null`.** El botón `clearable` de QInput escribe `null`, y
+  QTable declara su prop `filter` como `any`: el compilador no habría delatado la mentira.
+- **Los botones de crear no se movieron** al slot de la tabla: los tres gestores conservan su
+  anatomía y el CTA su prominencia. Solo el buscador va en `#top-right`.
+- **`allowedTags` se amplió** con `figure`, `figcaption`, `code`, `pre`, `caption`, `tfoot`, `sub`,
+  `sup`, `small` y `time`. Todas semánticas y sin capacidad de ejecución; una imagen con pie de foto
+  es markup normal en una noticia y con la lista original se habría perdido.
+
+### Verificación
+
+```
+Backend
+  npm test          19 suites, 260 pruebas (antes 239; +21)
+  npx tsc --noEmit  13 errores, todos preexistentes en allowed-ips.service.spec.ts
+  npm run lint      1 warning, preexistente en main.ts
+  npm run build     OK
+
+Frontend
+  npm run typecheck  limpio
+  npm run lint:check limpio
+  npm test           2 archivos, 30 pruebas (antes 19; +11)
+  npm run build      OK
+```
+
+### Checklist de dependencias restantes
+
+- [ ] **Plantillas anteriores a este cambio** pueden contener markup no publicable: se sanea al
+      compilar, pero solo se rechaza al volver a guardarlas. Una consulta que las liste ayudaría.
+- [ ] **`allowedStyles` sin restringir**: el atributo `style` pasa con cualquier valor. Los vectores
+      clásicos (`expression()`, `url(javascript:)`) los bloquean los navegadores modernos, pero
+      acotar las propiedades permitidas cerraría el asunto del todo.
+- [ ] **El filtro es cliente**: con miles de filas habrá que pasar a paginación de servidor
+      (`@request` de QTable). Hoy las tres tablas caben en memoria de sobra.
+- [ ] **`availableUpstreamNamespaces` sigue siendo un mock** hasta que exista el asistente (PROT-12).
+- [ ] **`loadPreview` y `previewResult` del store del nodo son código muerto**: nadie los consume,
+      porque `TemplateMapperConfig` pasa `selectedTemplate` directo al diálogo de vista previa.
+
+---
+
+## 2026-09-03 · Diagnóstico visual del marcado rechazado — rama `feat/html-template-mapper`
+
+Desde el cambio anterior, guardar una plantilla con `<script>` devolvía un 400 y no persistía nada.
+El autor se enteraba, pero no sabía **dónde**: un `$q.notify` con un párrafo genérico y un editor sin
+marcar. En una plantilla de ochenta líneas eso es una búsqueda a ojo.
+
+Ahora el backend dice qué construcción sobra y el editor la subraya en rojo, con marcador en el
+gutter y tooltip, limpiándose sola al corregir.
+
+### El caso de aceptación era, literalmente, el que no funcionaba
+
+La receta prescribía `cheerio.load(html, null, false)` y, como comprobación manual, escribir
+`<body><p>Hola</p></body>` y confirmar el subrayado. Ejecutando lo primero antes de escribir nada:
+
+```
+cheerio.load('<body> <p>Hola</p> </body>', null, false)  ->  p
+cheerio.load('<p>ok</p><script>x</script>', null, true)  ->  html head body p script
+```
+
+Con `isDocument: false`, parse5 parsea en **modo fragmento** y descarta `<body>`, `<html>` y `<head>`
+por ser inválidos en ese contexto: el recorrido nunca los ve, y la infracción se vuelve
+indetectable. Con `isDocument: true` ocurre lo contrario — parse5 **sintetiza** los tres en cualquier
+entrada, así que el 100 % de las plantillas quedarían marcadas. Ninguno de los dos modos sirve.
+
+La salida es cambiar de parser a htmlparser2, con la opción pública `{ xml: { xmlMode: false } }`.
+Como **objeto** y no `xml: true`: basta con que sea truthy para elegir htmlparser2, pero `true`
+activa además el modo XML, que es sensible a mayúsculas y dejaría `<BODY>` como `BODY` — fuera de la
+lista blanca, y con el target del subrayado en mayúsculas.
+
+El beneficio de segundo orden acabó pesando más que el arreglo: htmlparser2 es el parser que ya usa
+`sanitize-html`. Auditor y saneador ven ahora **un único DOM**. Con parse5 verían dos, y el auditor
+podría aprobar algo que el saneador recorta, o al revés.
+
+### La detección ya existía; lo que faltaba era la localización
+
+Fácil de confundir: el 400 por `<body>` no es nuevo. La sonda de dos pasadas del cambio anterior ya
+lo rechazaba, junto con `<section>` y `srcset`.
+
+Eso descartó la idea de sustituir la sonda por la auditoría. Las reglas propuestas —etiqueta, `on*`,
+protocolo— **no cubren `srcset`** ni ningún otro atributo fuera de la lista blanca, así que cambiar
+una por otra habría sido una regresión de cobertura disfrazada de mejora. La sonda se queda como
+**puerta** (compara el saneador entero, es exhaustiva por construcción) y la auditoría entra como
+**localizador** que solo enriquece la excepción.
+
+### Una segunda lista blanca es una lista blanca que va a divergir
+
+La receta pedía declarar una constante `ALLOWED_TAGS` nueva. `TEMPLATE_SANITIZER_CONFIG.allowedTags`
+ya estaba en el mismo archivo. Con dos listas, añadir `section` al saneador dejaría al auditor
+marcándolo para siempre y el autor recibiría un 400 por algo que en realidad se publica sin problema.
+
+La auditoría deriva sus tres conjuntos de la config del saneador. Contrastar ambas sobre dieciséis
+casos —hay una prueba que lo hace, la 6.12— confirmó que coinciden, incluidos los que las reglas
+originales dejaban fuera.
+
+### El servicio puro sigue sin lanzar
+
+La receta situaba el `throw new BadRequestException` dentro de `TemplateRendererService`. Ese
+servicio devuelve uniones discriminadas precisamente para que cada consumidor construya su respuesta,
+y uno de ellos es `TemplateMapperStrategy`, que no habla HTTP: acoplarlo al transporte lo habría
+roto.
+
+`auditPublishableMarkup` devuelve `TemplateViolation[]` y no lanza. Quien lanza sigue siendo
+`TemplatesService.assertPublishableMarkup`, que ya existía y ya estaba invocado desde `create` y
+`update` — **cero puntos de llamada nuevos**.
+
+### El `target` tiene dos formas, y hay que decir cuál es cuál
+
+Al ampliar el alcance a las variables aparecieron tres emisores más, y sus targets no se parecen a
+los del markup. `invalidVariable` guarda `bad_ns.titulo`: sin llaves y con la ruta ya normalizada.
+Buscar eso en el documento fallaría cuando el autor escribiese `{{ bad_ns.titulo }}` con espacios, o
+`{{ llm_response.articles.[0].title }}`.
+
+De ahí la invariante que documenta el propio tipo:
+
+- `tag`, `attribute`, `protocol` → identificador **normalizado en minúsculas**; el editor lo busca
+  con un patrón estructural insensible a mayúsculas.
+- `variable` → subcadena **verbatim** del documento; búsqueda literal.
+
+El emisor de las variables pasa el match completo del regex, que hasta ahora se descartaba como
+`_match`.
+
+### Por qué el matcher no es un `indexOf`
+
+Es la pieza cuyo fallo sería silencioso: subrayar de menos o de más no rompe nada visible. Un
+`indexOf(target)` casa `<p` dentro de `<pre>`, `onerror=` dentro de `data-onerror=`, y la palabra
+«body» de un párrafo con la etiqueta. Cada tipo lleva su frontera —lookahead para las etiquetas,
+lookbehind para los atributos— y el target pasa siempre por un escapador: `{{{` sin escapar es un
+cuantificador inválido.
+
+Por eso vive en `src/utils/violation-matcher.ts` y no dentro del SFC. Vitest corre en entorno `node`,
+sin DOM, así que dentro del componente no habría forma de probarlo; fuera, son catorce pruebas contra
+un documento con señuelos deliberados para cada falso positivo.
+
+Los diagnósticos se limpian solos en el `updateListener` que ya existía. No hay bucle porque
+`setDiagnostics` despacha efectos de estado, no cambios de documento.
+
+### Dos cosas que se ajustaron sobre la marcha
+
+- **`expect.stringContaining` devuelve `any`** y dispara `no-unsafe-assignment`, que en este proyecto
+  es error y no aviso. Los mensajes se afirman por separado con `toContain`.
+- Una aserción propia estaba mal, no el código: en `<BODY><IMG ONERROR=…></BODY>` esperaba solo la
+  infracción de `body`. La guarda que salta los atributos de una etiqueta prohibida cubre los
+  atributos **del propio elemento**, no los de su descendencia — y debe ser así, porque `discard`
+  elimina el `<body>` pero conserva sus hijos: ese `onerror` llegaría al artículo publicado.
+
+### Verificación
+
+```
+Backend
+  npm test           19 suites, 275 pruebas (antes 260; +15)
+  npx tsc --noEmit   solo los 13 errores preexistentes de allowed-ips.service.spec.ts
+  npm run lint       solo el warning preexistente de main.ts
+  npm run build      OK
+
+Frontend
+  npm run typecheck  limpio
+  npm run lint:check limpio
+  npm test           3 archivos, 44 pruebas (antes 30; +14)
+  npm run build      OK
+```
+
+`cheerio` no necesitó tocar `transformIgnorePatterns`: es dual y su build CJS resuelve
+`htmlparser2@10` de raíz, no la copia `@12` ESM-only anidada bajo `sanitize-html` que rompió la suite
+en el cambio anterior.
+
+### Checklist de dependencias restantes
+
+- [ ] **Las infracciones no se acumulan**: `create` valida variables antes que markup, así que una
+      plantilla con las dos cosas mal reporta solo la primera. Es el *fail-fast* declarado, pero
+      obliga a dos rondas de guardado.
+- [ ] **El resaltado no sobrevive a una edición**: cualquier tecla limpia los diagnósticos, porque
+      las posiciones se calcularon sobre el documento enviado. Mapearlas a través de los `ChangeSet`
+      de CodeMirror permitiría conservarlas mientras el autor corrige.
+- [ ] **La vista previa no informa de infracciones**: `previewTemplate` compila y sanea, pero no
+      audita. Una plantilla guardada antes de estos cambios se ve recortada sin explicación.
+
+---
+
+## 2026-09-03 · Límite de sesiones activas y retirada de la purga muerta (MOD-01) — rama `feat/auth-token-cleanup`
+
+El encargo listaba tres defectos del ciclo de vida de los refresh tokens. **Dos no existían**, el
+tercero sí, y la forma en que el encargo proponía resolverlo habría abierto un fallo peor que el
+que cerraba.
+
+### Dos de los tres defectos ya estaban resueltos
+
+| Defecto del encargo | Realidad |
+|---|---|
+| «La purga solo evalúa `isRevoked`, dejando huérfanos los caducados» | `pruneDeadTokens` ya usaba un `where` en array, que en TypeORM es un **OR**: revocado **o** caducado. Ambos criterios, desde la entrada de poda transaccional del 27-08 |
+| «Múltiples peticiones del mismo `deviceId` generan filas redundantes» | `issue()` ya revocaba `{userId, deviceId, isRevoked: false}` **antes** de insertar, dentro de la transacción. `id_dispositivo` existe de punta a punta desde la migración `004` |
+| «Máximo de 5 dispositivos activos» | **Cierto, no existía.** El único trabajo real |
+
+Fácil de confundir con lo segundo: en el archivo ya había un `RETAINED_DEAD_TOKENS = 5`. Es otra
+cosa por completo — cuántos tokens *muertos* se conservan como ventana de detección de reuso, no
+cuántas sesiones *vivas* se permiten. Las dos constantes valen 5 y no tienen relación; el docblock
+de la nueva lo dice de forma explícita porque el próximo que lo lea va a asumir lo contrario.
+
+Añadí pruebas para los dos defectos inexistentes. No por ceremonia: el encargo los daba por rotos,
+así que conviene que quede escrito que funcionan y que no puedan romperse en silencio.
+
+### Revocar las sesiones sobrantes habría sido el fallo
+
+El encargo ofrecía «revocar **o** eliminar los más antiguos» como si fuesen intercambiables. No lo
+son, por cómo está construido `rotate()`:
+
+```
+El dispositivo expulsado presenta su token en /auth/refresh
+   │
+   ├── si se REVOCÓ   → la fila sigue ahí, con isRevoked = true
+   │                    → rotate() lo lee como REUTILIZACIÓN
+   │                    → revokeAllForUser() TUMBA LAS OTRAS 5 SESIONES
+   │                    → y deja una alerta de robo FALSA en el log
+   │
+   └── si se ELIMINÓ  → no hay fila → 401 corriente, mensaje opaco de siempre
+```
+
+Cada expulsión rutinaria por cupo se habría convertido en una falsa alarma de robo que echa al
+usuario de todos sus equipos. El límite **borra**.
+
+Es la contrapartida exacta de una decisión anterior: los tokens muertos se conservan porque son la
+ventana de detección, pero una sesión **viva** expulsada por cupo no debe dejar rastro revocado.
+Ese es el motivo de que no se reutilizara `revokeAllForUser` ni nada parecido.
+
+### Por qué el `skip` va después del `save`
+
+`enforceSessionLimit` corre dentro de la transacción que `issue()` ya abría, después del `save`.
+El token recién insertado es el más reciente, así que ordenando por `createdAt DESC` nunca cae en
+la cola del `skip` y no puede expulsarse a sí mismo — el mismo razonamiento que ya justificaba el
+orden insertar → podar.
+
+Se ordena por `createdAt DESC, id DESC`. El desempate no es adorno: dos tokens emitidos en el mismo
+instante comparten `createdAt`, y sin él, cuál de los dos cae del lado del corte lo decidiría el
+plan de ejecución de PostgreSQL.
+
+### El fallback de la vigencia no cubría lo que parecía
+
+`?? DEFAULT_EXPIRATION_DAYS` solo atrapa la variable ausente, y del `.env` siempre llega una cadena:
+
+| `REFRESH_TOKEN_EXPIRES_IN_DAYS` | Antes | Ahora |
+|---|---|---|
+| ausente | 7 días ✓ | 7 días |
+| `` (vacía) | `Number('') === 0` → **el token nace caducado y el login queda roto** | 7 días |
+| `abc` | `NaN` → fecha inválida | 7 días |
+| `-3` / `0` | expiración en el pasado | 7 días |
+
+El primero es el que asusta: la sesión no se abriría nunca y no habría un solo error en el log que
+lo explicara. Ahora se valida el número resultante, no la mera presencia de la variable.
+
+Se conservó el nombre `REFRESH_TOKEN_EXPIRES_IN_DAYS` en vez del `REFRESH_TOKEN_EXPIRES_IN` que
+pedía el encargo: lleva la unidad en el nombre, ya está en `.env` y `.env.example`, y el corto
+quedaría ambiguo junto a `JWT_EXPIRES_IN=1h`, que la lleva en el valor.
+
+### `purgeExpired()` retirada
+
+Código muerto: cero llamadas en todo `backend/src`, ni siquiera en tests. Y además incompleta —solo
+miraba `expiresAt`, sin retención—, así que engancharla a un `@Cron` habría borrado la ventana de
+detección de reuso de todos los usuarios. Un método muerto que encima es una trampa para el
+siguiente que lo encuentre no merece conservarse; la ruta viva ya purga en cada emisión.
+
+### El arnés de pruebas tuvo que aprender a distinguir dos consultas
+
+`issue()` lanza ahora **dos** `find` en la misma transacción, y el doble devolvía `[]` para
+cualquiera. Se discriminan por la forma del `where` —objeto para el cupo, array para el OR de la
+poda— y no por el orden de llamada: indexar por posición ataría las pruebas al orden interno de
+`issue()`, que es un detalle de implementación y ya cambió una vez en esta misma tarea.
+
+### Verificación
+
+```
+Backend
+  npm test           19 suites, 289 pruebas (antes 275; +14)
+  npx tsc --noEmit   solo los 13 errores preexistentes de allowed-ips.service.spec.ts
+  npm run lint       solo el warning preexistente de main.ts
+  npm run build      OK
+```
+
+Sin migración y sin tocar `.env`: no hay columna nueva y el nombre de la variable se mantiene.
+La migración `004` ya dejó dicho que `idx_refresh_tokens_id_usuario` cubre este filtro.
+
+### Checklist de dependencias restantes
+
+- [ ] **El cupo no se aplica al renovar sin emitir.** `enforceSessionLimit` vive en `issue()`, así
+      que un usuario con 6 sesiones abiertas de antes no baja a 5 hasta que alguna emita. En la
+      práctica renovar pasa por `issue()`, pero una cuenta inactiva conserva el exceso.
+- [ ] **`MAX_ACTIVE_SESSIONS` no es configurable por entorno.** Está fijo a 5, como pedía el
+      encargo. Si alguna vez hay que ajustarlo por despliegue, la variable no existe.
+- [ ] **Sigue sin haber barrido periódico.** `@nestjs/schedule` está instalado y `ScheduleModule`
+      nunca se importa. Si se añade, el barrido debe respetar la retención **por usuario**: uno
+      global destruiría la ventana de detección de reuso.
+- [ ] **`rotate()` e `issue()` no comparten transacción** (pendiente preexistente): si la emisión
+      fallara tras la revocación, el usuario queda sin sesión y debe reentrar por OTP.
+
+---
+
+## 2026-09-04 · Habilitador de despacho manual (Camino B) y namespace `_assets` — rama `feat/html-template-mapper`
+
+Primera ejecución del pipeline **completo** disparada por HTTP: `POST /api/workflows/:id/run-test`
+recorre `FsmEngineService` → `StatePayloadContext` → `TemplateMapperStrategy` →
+`TemplateRendererService` sin depender del listener IMAP.
+
+### Estados de la FSM ejercitados
+
+| Transición | Cómo se provocó | Resultado verificado |
+|---|---|---|
+| `INACTIVO → EN_PROCESO → EXITOSO` | Despacho con `initialPayload` completo | 200, `activeCursor: null`, markup compilado |
+| `INACTIVO → EN_PROCESO → PAUSADO` | Nodo `MAPEADOR_PLANTILLA` sin variable requerida | 200 con `finalState: PAUSADO` y el cursor culpable |
+| Rechazo previo al alta | Fila `EN_PROCESO` preexistente del mismo flujo | **409** `ConflictException` sin crear fila |
+| Rechazo previo a la validación | UUID sin fila en `flujos` | **404** `NotFoundException` |
+
+### El plan pedía `id_flujo: 'wf-test-template-e2e'` y eso no puede existir
+
+`flujos.id_flujo` es `UUID PRIMARY KEY` (`init.sql:83`) y el endpoint valida el parámetro con
+`ParseUUIDPipe`. Un identificador legible se habría rechazado con un 400 **antes de llegar al
+servicio**, o habría reventado en el `INSERT`. El seed usa una constante UUID v4 escrita a mano
+(`11111111-2222-4333-8444-555555555555`) y no un UUID aleatorio: fijarla permite dejar el `curl` en la
+documentación sin releer la base tras cada siembra. El seed la imprime ya sustituida.
+
+### `createExecution` no existía
+
+El plan lo daba por implementado. `FsmEngineService` solo tenía `executeWorkflow`, que **espera una
+fila ya creada**; las pruebas anteriores la sembraban a mano desde el fixture del runner. Se añadió
+con la guarda de cupo dentro, para que el 409 se decida en un solo sitio.
+
+También hubo que reconciliar nombres: el plan hablaba de `workflowId` y `fsmExecutionRepository`, pero
+la entidad expone `flowId` (columna `id_flujo`) y el motor inyecta `fsmExecutionRepo`. Se respetó lo
+que ya había: renombrar la columna habría arrastrado a `logs_nodo` y `alertas_error`, que le apuntan
+con clave foránea.
+
+### Por qué el cupo configurable no relaja nada
+
+`MAX_CONCURRENT_EXECUTIONS_PER_FLOW=1` coincide con lo que ya impone `idx_flujo_activo`, el índice
+único **parcial** de PROT-08. La guarda de aplicación no es la barrera —hay una ventana entre su
+`count` y el `UPDATE` a `EN_PROCESO`— sino el **diagnóstico**: convierte un 500 por violación de
+unicidad en un 409 que dice qué flujo y qué cupo. Subir la variable no levanta el límite real; solo
+devuelve el fallo feo. Queda anotado en el checklist.
+
+### `_assets` cupo en la gramática existente sin tocarla
+
+`TEMPLATE_VARIABLE_PATTERN` ya aceptaba `[a-zA-Z0-9_]+` como raíz del namespace, así que
+`{{_assets.base_url}}` se parsea sin modificar el validador. Solo hubo que añadir `_assets` a
+`ALLOWED_NAMESPACES` — y a su réplica del frontend (`TEMPLATE_NAMESPACES`), que alimenta los chips
+Poka-Yoke del editor. Dejarla desincronizada habría hecho que el backend aceptara una variable que el
+autor no puede seleccionar, que es exactamente el fallo que esa réplica existe para evitar.
+
+Se fusiona **al final** del spread, no al principio: un nodo que escribiera en `_assets` podría
+redirigir todas las imágenes del artículo a un dominio ajeno. Hay prueba dedicada (7.7).
+
+Y se inyecta **antes** del pre-chequeo de variables. Con el orden inverso, `_assets.base_url` figura
+en `requiredVariables` pero no en el contexto crudo, y el nodo fallaría siempre con un `missingFields`
+que el operador no podría corregir de ninguna manera.
+
+### La normalización de barras se limitó a las claves de ruta
+
+El plan decía «si un campo `image_path` (o ruta relativa) inicia con `/`, recortarlo». Interpretarlo
+como «toda cadena del contexto» habría corrompido datos: un `clean_body` que arranque con `/` o un
+`source_url` relativo perderían su primer carácter, y eso es un fallo silencioso mucho peor que la
+doble barra visible que se pretende evitar.
+
+La regla es determinista y está documentada en el código: `ASSET_PATH_KEY_PATTERN = /(?:^|_)path$/`,
+que cubre `image_path`, `path`, `file_path`, `thumbnail_path`. El recorrido es de un solo nivel; bajar
+recursivamente obligaría a clonar en profundidad todo el contexto en cada render para respetar la
+inmutabilidad del `StatePayloadContext`, y las rutas de asset que el pipeline produce viven en la raíz
+del namespace de su nodo.
+
+De paso se recorta la barra **final** del prefijo (`ASSETS_BASE_URL=…/uploads///`), que es el error de
+`.env` complementario y no cuesta nada cubrir.
+
+### `ConfigService` en el renderer obligó a tocar cuatro suites
+
+`TemplateRendererService` se instanciaba con `new TemplateRendererService()` en cuatro sitios
+(`nodes.module.spec`, `template-mapper.strategy.spec`, `templates.service.spec` y su propio spec).
+En vez de repetir el doble cuatro veces se añadió `test/factories/template-renderer.factory.ts`, con
+el `ConfigService` **real** sembrado por `internalConfig` y no un objeto casteado: así la prueba
+verifica también que la clave que el servicio pide (`ASSETS_BASE_URL`) es la que existe de verdad.
+
+Anotado en el propio archivo: `ConfigService.get()` da prioridad a `process.env` sobre el objeto
+interno, así que exportar `ASSETS_BASE_URL` en el shell haría que estas pruebas leyeran ese valor.
+
+Con la factoría hizo falta un alias: `@test/*` en `tsconfig.json`, `package.json` (jest) y
+`test/jest-e2e.json`. Sin él, importarla desde `src/modules/**` exigía `../../../../test/…`, que
+`code-conventions.md` §6 prohíbe.
+
+### Una prueba ajena se rompió, y estaba bien que se rompiera
+
+`templates.service.spec.ts` 8.1 transcribía la lista de namespaces dentro del mensaje esperado.
+Añadir `_assets` la tumbó. Se cambió por una plantilla derivada de `ALLOWED_NAMESPACES.join(', ')`:
+esa prueba verifica el **localizador de infracciones**, no el contenido de la lista blanca, y no debe
+volver a caerse cada vez que se añada un namespace.
+
+### El seed dejó de exportar sus constantes
+
+Al verificar contra PostgreSQL se importó `TEST_FLOW_ID` desde el seed… y el seed **se ejecutó**:
+el archivo llama a `main()` en el nivel superior. Exportar constantes desde un módulo autoejecutable
+es una trampa para el siguiente que las necesite, así que pasaron a locales. Lo que haya que
+compartir irá a un `*.fixture.ts` aparte, como ya hace `dummy-pipeline.fixture.ts` frente a
+`run-dummy-e2e.ts`.
+
+### `HttpStatus.OK` y no el 201 por defecto de `@Post`
+
+La petición es síncrona y el cuerpo devuelve el **resultado**, no la fila creada. Un flujo `PAUSADO`
+tampoco es un error HTTP: es un 200 con `finalState` y `activeCursor`, que es lo que necesita CU-09
+para el reintento manual.
+
+### Verificación
+
+```
+Backend
+  npm run build              OK
+  npm test                   20 suites, 307 pruebas (antes 289; +18)
+  npx tsc --noEmit           solo los 13 errores preexistentes de allowed-ips.service.spec.ts
+  npx eslint (ficheros tocados)  limpio
+  npm run seed:fsm-runner    OK, idempotente en la segunda pasada
+
+Frontend
+  npm run typecheck          OK
+  npm test                   3 ficheros, 44 pruebas
+
+E2E contra PostgreSQL (5433)
+  finalState                 EXITOSO
+  activeCursor               null
+  namespaces                 parsed_email, rendered_html
+  markup                     <img src="http://localhost:3000/static/uploads/2026/09/laboratorio.jpg" …>
+  doble barra                ausente
+  fila EN_PROCESO previa     409 ConflictException
+  UUID inexistente           404 NotFoundException
+```
+
+El `image_path` de entrada llevaba barra inicial (`/2026/09/laboratorio.jpg`): la URL de salida es la
+prueba de que la normalización actúa.
+
+### Checklist de dependencias restantes
+
+- [x] ~~**`ASSETS_BASE_URL` apunta al puerto 3000 y la API escucha en el 5000.**~~ Falsa alarma: el
+      `PORT=5000` que vi era el de `backend/.env.example`; el `backend/.env` real declara `PORT=3000`.
+      No había discrepancia.
+- [x] ~~**No existe la ruta `/static/uploads`.**~~ Resuelto el 2026-09-04 con `ServeStaticModule`
+      (ver la entrada siguiente).
+- [ ] **La carrera del cupo devuelve 500, no 409.** Dos despachos verdaderamente simultáneos pueden
+      pasar los dos el `count`; el segundo choca contra `idx_flujo_activo` en el `UPDATE` a
+      `EN_PROCESO`, que ocurre **fuera** del `try` de `executeWorkflow` y sube como `QueryFailedError`.
+      Traducirla exigiría atrapar la violación de unicidad de PostgreSQL (`23505`) y reemitirla como
+      `ConflictException`.
+- [ ] **El despacho manual ignora `flujos.activo` a propósito** (probar antes de habilitar). Cuando
+      exista el disparador automático, es él quien debe respetarla.
+- [ ] **Sin cola.** La petición bloquea el hilo HTTP hasta que el motor termina.
+      `architecture-patterns.md` §5 pide BullMQ para las ejecuciones pesadas; aquí el pipeline es de
+      un solo nodo y el bloqueo es aceptable para una herramienta de verificación, no para producción.
+- [ ] **Sin `NotificationGateway`.** El frontend no recibe `node_started` / `flow_finished`: no hay
+      WebSocket todavía, así que el resultado solo llega en la respuesta HTTP.
+- [ ] **Sin prueba e2e automatizada del endpoint.** La verificación de arriba se hizo con un script
+      desechable contra la base real; `test/` no tiene un `workflows.e2e-spec.ts` que la repita en CI.
+
+---
+
+## 2026-09-04 · Entrega de archivos estáticos (`ServeStaticModule`) — rama `feat/html-template-mapper`
+
+Cierra el pendiente que dejó el Camino B: `{{_assets.base_url}}` componía una URL correcta que no
+resolvía a ningún archivo. Ahora `backend/static/uploads/` se sirve en `/static/uploads`.
+
+### La versión 12 de `@nestjs/serve-static` no vale aquí
+
+`npm install @nestjs/serve-static` falló con `ERESOLVE`: la 12.0.0 exige `@nestjs/common@^12` y el
+proyecto va en Nest 11.2.3. **No** se resolvió con `--force` ni `--legacy-peer-deps`, que habrían
+dejado en el árbol un paquete construido contra una API distinta para que reventara en runtime. Se
+instaló la línea correspondiente a Nest 11: `@nestjs/serve-static@^5.0.5`
+(peer `@nestjs/common@^11.0.2`, `express@^5.0.1`; el proyecto tiene Express 5.2.1).
+
+Las dos vulnerabilidades que reporta `npm audit` (`fast-uri` alta, `qs` moderada) son **preexistentes**
+y transitivas de `ajv` y `express`; no las introduce este paquete y no se tocaron aquí.
+
+### Por qué `process.cwd()` y no `__dirname`
+
+`app.module.ts` se ejecuta desde `src/` en desarrollo y desde `dist/` en producción: una ruta relativa
+al módulo apuntaría a dos sitios distintos. El directorio de trabajo es `backend/` en ambos casos.
+
+Y por eso `static/` vive **fuera de `src/`**: `nest build` compila `src/` hacia `dist/` y lo limpia en
+cada build, así que un binario ahí dentro se perdería. Tampoco en la raíz del monorepo: la entrega de
+archivos es infraestructura del backend.
+
+### `serveRoot` no lleva el prefijo `/api`
+
+`ServeStaticModule` registra sus rutas con `httpAdapter.useStaticAssets()`, es decir, a nivel de
+Express y **fuera del router de Nest**, así que `setGlobalPrefix('api')` no las alcanza. Es el mismo
+motivo por el que Swagger vive en `/api/docs` y no en `/api/api/docs`.
+
+### ⚠️ Ese mismo hecho abre un agujero en el perímetro
+
+Comprobado contra el servidor en marcha, no deducido:
+
+| Petición con `X-Forwarded-For: 203.0.113.10` (fuera de rango) | Código |
+|---|---|
+| `GET /api/templates` (ruta Nest, guard global) | **403** |
+| `GET /api/docs` (Swagger, protegido a mano en `main.ts`) | **403** |
+| `GET /static/uploads/2026/09/laboratorio.jpg` | **200** |
+
+`IpWhitelistGuard` es un `APP_GUARD` del router de Nest y no ve estas rutas — exactamente el caso que
+`main.ts` ya documenta para Swagger y resuelve montando `RedLocalMiddleware` a mano.
+`security-and-scope.md` §1 exige que toda ruta protegida pase por él. **No se aplicó por decisión
+propia** porque cambia quién puede leer las imágenes: si el CMS de destino las descarga desde fuera
+del rango corporativo, cerrarlo rompería la publicación. Queda en el checklist para decidir.
+
+### Endurecimiento aplicado y verificado
+
+`index: false` y `redirect: false`. Con el servidor en marcha:
+
+| Petición | Resultado |
+|---|---|
+| `…/2026/09/laboratorio.jpg` | **200**, `Content-Type: image/jpeg`, 160 bytes |
+| `…/2026/09/` (directorio) | 404 — sin listado ni `index.html` implícito |
+| `…/no-existe.jpg` | 404 |
+| `…/..%2f..%2f.env` | 404 |
+| `…/../../.env` (`curl --path-as-is`) | 404 |
+| `…/.gitkeep` | 404 — `dotfiles: 'ignore'` por defecto |
+
+### Cadena completa, extremo a extremo
+
+```
+runWorkflowTest → EXITOSO
+  src interpolado : http://localhost:3000/static/uploads/2026/09/laboratorio.jpg
+  GET a esa URL   : 200  image/jpeg  160 bytes
+```
+
+El `image_path` de entrada seguía llevando barra inicial. La imagen de prueba (JPEG 1×1) se dejó en
+su sitio a propósito: hace que el fixture del Camino B produzca una URL que resuelve de verdad. Está
+cubierta por `.gitignore`, así que no se versiona.
+
+### Verificación
+
+```
+npm run build      OK
+npm test           20 suites, 307 pruebas (sin regresiones)
+npx tsc --noEmit   solo los 13 errores preexistentes de allowed-ips.service.spec.ts
+npm run lint       solo el warning preexistente de main.ts:59
+git check-ignore   backend/static/uploads/foto.jpg → ignorado; .gitkeep → versionado
+```
+
+### Checklist de dependencias restantes
+
+- [ ] **`/static/uploads` está fuera del perímetro de red** (evidencia arriba). Si estas imágenes solo
+      deben verse desde la red corporativa, basta replicar el patrón de Swagger en `main.ts`:
+      `app.use('/static/uploads', redLocalMiddleware.use.bind(redLocalMiddleware));`
+- [ ] **No hay endpoint de subida.** El directorio se puebla a mano; queda fuera del MVP igual que la
+      edición gráfica (`security-and-scope.md` §3). Cuando exista, necesitará validar tipo MIME real
+      —no la extensión—, tamaño máximo y un nombre de archivo saneado.
+- [ ] **Sin volumen en `docker-compose.yml`.** `backend/static/uploads/` vive en el sistema de
+      archivos del host; si el backend se contenedoriza, hay que mapearlo o las imágenes se pierden
+      en cada recreación.
+- [ ] **Sin caché.** `Cache-Control: public, max-age=0`: se revalida en cada petición. Para
+      producción convendría un `maxAge` real, ya que las rutas incluyen año y mes.
+
+---
+
+## 2026-09-04 · Perímetro sobre `/static/uploads` y traducción del conflicto 23505 — rama `feat/html-template-mapper`
+
+Cierra los dos huecos que quedaron anotados en las dos entradas anteriores.
+
+### 1. El perímetro ya cubre los estáticos
+
+`main.ts` renombra `SWAGGER_PERIMETER_PATHS` a `PERIMETER_PATHS` y le suma `/static/uploads`.
+Las dos familias comparten causa: ni `SwaggerModule` ni `ServeStaticModule` registran en el
+router de Nest, sino en el adaptador de Express, así que el `IpWhitelistGuard` —un `APP_GUARD`
+del router— nunca las alcanza. Comprobado contra el servidor en marcha:
+
+| Petición con `X-Forwarded-For: 203.0.113.10` | Antes | Ahora |
+|---|---|---|
+| `/static/uploads/2026/09/laboratorio.jpg` | 200 | **403** |
+| `/api/docs` | 403 | 403 |
+| Mismo estático desde localhost | 200 | 200 |
+
+El orden de registro funciona sin trucos: `app.use()` corre en `bootstrap()`, y
+`ServeStaticModule` no monta lo suyo hasta `app.init()` —o sea, dentro del `listen()` de más
+abajo—, así que el middleware perimetral entra antes en la pila de Express.
+
+### 2. La carrera del mutex ya devuelve 409, no 500
+
+`createExecution` cuenta las ejecuciones `EN_PROCESO` antes de insertar, pero entre ese `count`
+y el `UPDATE` a `EN_PROCESO` hay una ventana. Dos despachos simultáneos la pasan los dos, y el
+segundo choca contra `idx_flujo_activo`. Eso subía como `QueryFailedError` crudo.
+
+**Detección más estricta que la del encargo.** No basta con `driverError.code === '23505'`:
+
+```
+instanceof QueryFailedError  &&  driverError.code === '23505'
+&& (driverError.constraint === undefined || driverError.constraint === 'idx_flujo_activo')
+```
+
+El nombre de la restricción **estrecha cuando viene, pero no se exige**. Las dos rigideces
+alternativas fallan en direcciones opuestas: aceptar cualquier 23505 disfrazaría de 409 el bug
+de otra unicidad (fallo silencioso), y exigir siempre el nombre devolvería 500 en una carrera
+legítima si el driver no lo informa (`pg` solo asigna `code` y `constraint` cuando el servidor
+los envía). El helper se llama `isActiveFlowMutexViolation` y no `isUniqueViolation` a
+propósito: el predicado no es «cualquier unicidad», y el nombre genérico invitaría a
+reutilizarlo mal en otro servicio.
+
+Se verificó en `node_modules/typeorm@1.1.0` que `QueryFailedError<T extends Error = Error>`
+expone `driverError` y que su constructor copia las props del driver también a la raíz — de ahí
+que el `instanceof` vaya primero y la lectura sea por `driverError`, que es el camino tipado.
+
+**Solo se envuelve la primera escritura.** El índice es *parcial* (`WHERE estado = 'EN_PROCESO'`):
+una vez la fila ya está dentro, ella misma es la única entrada del índice para su `id_flujo`, y
+ninguna rival puede entrar mientras tanto. Los `saveCheckpoint` del bucle no pueden violarlo. El
+`try` es local y **no** el externo, conservando la intención ya documentada ahí: perder la
+carrera no es un fallo del flujo y no debe marcar `FALLIDO`.
+
+### 3. `saveCheckpoint` mutaba la entidad antes de escribir
+
+Hacía `Object.assign(execution, patch)` y *luego* el `UPDATE`. Si la escritura fallaba, la
+entidad en memoria anunciaba `EN_PROCESO` sobre una fila que seguía `INACTIVO`. Era inocuo
+mientras solo pasaba en el camino catastrófico; con el 409 esa mentira pasaba a estar en un
+desenlace **esperado**. Invertido el orden.
+
+No es un detalle cosmético y la prueba lo demuestra: con el orden antiguo,
+`NO deberia marcar FALLIDO al perder la carrera por el mutex` falla con
+`Expected: "INACTIVO" / Received: "EN_PROCESO"`.
+
+### Verificación
+
+Seis pruebas nuevas en `fsm-engine.service.spec.ts` (bloque `mutex de ejecucion
+idx_flujo_activo`), construyendo el `QueryFailedError` **real** de TypeORM y no un objeto de
+forma parecida: la guarda arranca con un `instanceof` y un doble suelto la dejaría sin
+ejercitar. Cubren el 23505 con y sin `constraint`, el 23505 de otra restricción, un
+`40001` y un `Error` ajeno a TypeORM.
+
+```
+npm run build      OK
+npm test           20 suites, 313 pruebas (antes 307; +6)
+npx tsc --noEmit   solo los 13 errores preexistentes de allowed-ips.service.spec.ts
+npm run lint       solo el warning preexistente de main.ts
+
+Carrera real contra PostgreSQL (script desechable):
+  createExecution sin rivales      -> ejecucion INACTIVO creada
+  se inserta una rival EN_PROCESO  -> reproduce la ventana del count
+  executeWorkflow                  -> ConflictException, httpStatus 409
+  estado de la fila                -> INACTIVO (no se marco FALLIDO)
+```
+
+### Checklist de dependencias restantes
+
+- [x] ~~`/static/uploads` está fuera del perímetro de red.~~ Resuelto aquí.
+- [x] ~~La carrera del cupo devuelve 500, no 409.~~ Resuelto aquí.
+- [ ] **La guarda de `createExecution` sigue sin ser atómica**, y así se queda: la barrera real
+      es el índice único parcial, que funciona incluso con varios procesos. Lo que hay ahora son
+      dos capas de *diagnóstico* sobre esa barrera, no dos barreras.
+- [ ] **Sin prueba e2e automatizada de la carrera.** La verificación de arriba es un script
+      desechable; reproducirla en CI exige dos conexiones concurrentes reales.
+
+---
+
+## 2026-09-07 · Nodo de ingesta `TRIGGER_IMAP` y sondeo periódico — rama `feat/trigger-imap`
+
+Primera estrategia **productora** del motor: hasta ahora todas las piezas reales consumían un contexto
+que alguien había sembrado por HTTP. `DummyInputStrategy` ocupaba el hueco de `NodeType.TRIGGER_IMAP`
+devolviendo sus propios `params`, y su TSDoc anticipaba el relevo: *"el dia que exista la estrategia
+IMAP de verdad ocupara exactamente este hueco"*. Ese día es hoy.
+
+### Estado de la FSM implementado
+
+```
+flujos.activo=true + IMAP_POLLING_ENABLED=true
+        │
+        ▼
+[intervalo imap-poll:<flowId>]  cada pollIntervalMs
+        │
+        ├─ STATUS unseen=0 ──────────────────────────► fin del ciclo (nada que hacer)
+        │
+        └─ STATUS unseen>0
+                 │
+                 ▼
+        createExecution ─── 409 ──► aviso, el correo sigue UNSEEN, próximo ciclo
+                 │
+                 ▼ INACTIVO → EN_PROCESO
+        ImapTriggerStrategy.execute()
+                 ├─ config inválida ────────────► success:false GRAVE → PAUSADO
+                 ├─ passwordEnvKey sin valor ───► success:false GRAVE → PAUSADO
+                 ├─ red / auth / timeout ───────► success:false GRAVE → PAUSADO (reintentable)
+                 ├─ buzón vacío ────────────────► success:true {status:NO_MESSAGES_FOUND}
+                 └─ correo UNSEEN ──────────────► success:true {6 claves} + \Seen
+                                                        │
+                                                        ▼
+                                     setNamespace(node.outputNamespace, data)
+```
+
+### El "por qué" de cuatro decisiones
+
+**1. `validate()` y no `validateOrReject()`.** El enunciado inicial pedía la segunda. No es un detalle
+de estilo: `validateOrReject` lanza, y `FsmEngineService.runNode` captura toda excepción y la normaliza
+a nivel `URGENTE`. Como `canRetry` solo reintenta los `GRAVE`, un `host` mal escrito habría quedado
+**permanentemente irrecuperable** en lugar de PAUSADO y corregible vía CU-09. Se valida con `validate()`
+y se traducen los errores a `NodeResult` GRAVE con `missingFields`, igual que hace el mapeador de
+plantillas con su plantilla ausente.
+
+**2. La contraseña por referencia, y el patrón que la acota.** El modelo híbrido (`passwordEnvKey` en
+`params`, secreto en `.env`) resuelve el problema obvio: no dejar la clave del buzón en la columna JSONB
+ni mandarla al editor de flujos. Pero abre uno menos obvio, y es el hallazgo que más cambió el código:
+`params` lo edita un rol EDITOR, así que con la clave libre un editor podía escribir
+`host: imap.atacante.com` + `passwordEnvKey: JWT_SECRET` y el backend habría entregado el secreto de
+firma de tokens, en claro, a un servidor ajeno, como si fuera una contraseña IMAP. De ahí el
+`@Matches(/^IMAP_[A-Z0-9_]*PASSWORD$/)`: acota lo que el nodo puede llegar a leer del entorno. La
+prueba 3.4 lo blinda comprobando que el rechazo ocurre **antes** de tocar `ConfigService`.
+
+**3. Un solo lector del buzón.** El sondeo podría leer el correo y pasarlo al motor como
+`initialPayload`, ahorrando una reconexión. Se descartó: el sondeo tendría que marcar `\Seen` al leer, y
+entonces cualquier fallo posterior (un 409 de concurrencia, el proceso muriendo entre la lectura y el
+arranque) dejaría el correo consumido **sin nada en el buzón que indique que hay que reprocesarlo**. Y
+si no lo marcase, el ciclo siguiente lo publicaría por segunda vez. No hay tercera opción. Con el
+sondeo limitado a `STATUS` —que no abre el buzón ni toca banderas— el correo permanece `UNSEEN` hasta
+que lo consume la estrategia, así que un ciclo perdido no pierde nada. Efecto secundario deseable: la
+misma estrategia sirve para el disparo manual del Camino B sin cambios.
+
+**4. `SchedulerRegistry`, no `@Cron`.** `pollIntervalMs` es un parámetro por nodo, y un decorador se
+evalúa una vez en tiempo de clase: no admite un periodo distinto por flujo. Tres trampas que el código
+tuvo que cubrir explícitamente:
+- `addInterval` **lanza** si el nombre ya está tomado ⇒ se borra antes de re-registrar.
+- `addInterval` **no** envuelve el callback en try/catch ⇒ `pollInbox` no puede rechazar nunca, o una
+  promesa sin manejar termina el proceso en Node ≥ 18.
+- `main.ts` no llamaba a `enableShutdownHooks()` ⇒ `onModuleDestroy` no corría con SIGTERM y los
+  intervalos habrían sobrevivido a cada recarga de `--watch`, sondeando el mismo buzón con varias
+  generaciones del proceso. Agujero preexistente que esta rama es la primera en convertir en problema
+  real; se añade la línea que faltaba.
+
+### Poka-Yoke: por qué el sondeo nace apagado
+
+`IMAP_POLLING_ENABLED=false` por defecto, y el código exige el literal `'true'` en lugar de
+`!== 'false'`. El motivo no es la prudencia genérica: la estrategia marca `\Seen`. Un backend arrancado
+en el portátil de un desarrollador apuntando al buzón corporativo **consumiría los correos de
+producción**, y el entorno que sí debía procesarlos no volvería a verlos. El fallo por omisión tiene que
+ser "no sondea". Con `flujos.activo` son dos interruptores en serie, uno global y otro por flujo.
+
+### Verificación
+
+```
+npm test          → 22 suites, 360 pruebas en verde (46 nuevas)
+tsc --noEmit      → limpio sobre tsconfig.build.json
+eslint            → limpio
+```
+
+Cobertura nueva: 25 pruebas de la estrategia (extracción, cascada `html → textAsHtml → text`, buzón
+vacío por `[]` y por `false`, resolución del secreto, exfiltración rechazada, `\Seen` posterior al
+parseo, cierre en `finally` sin enmascarar el error real, inmutabilidad del contexto) y 21 del sondeo
+(programación por flujo, filtros de elegibilidad, tick solapado, 409 tolerado, resiliencia del callback).
+
+### Checklist de dependencias restantes
+
+- [x] ~~`NodeType.TRIGGER_IMAP` sin estrategia real.~~ Resuelto aquí.
+- [x] ~~`main.ts` sin `enableShutdownHooks()`.~~ Resuelto aquí.
+- [x] ~~`nodo_trigger` no está en `ALLOWED_NAMESPACES`.~~ Resuelto en el commit siguiente: el default
+      pasa a `raw_email`, que ya estaba en la lista blanca, y `nodo_trigger` se retira del código.
+- [ ] **El disparo es en proceso, no encolado.** `architecture-patterns.md` §5 pide BullMQ para la
+      ingesta Cron/IMAP. Bloquea el temporizador, nunca el hilo HTTP, y el despliegue todavía no tiene
+      Redis. El salto consiste en sustituir el cuerpo de `dispatchFlow`, único punto que conoce el motor.
+- [ ] **`host` sin lista blanca.** El patrón de `passwordEnvKey` acota qué secreto puede leerse, pero un
+      EDITOR sigue pudiendo apuntar el nodo a un servidor IMAP arbitrario y ver ahí la contraseña del
+      buzón corporativo. Restringir el dominio contra una lista en `.env`.
+- [ ] **`@nestjs/schedule` es intra-proceso.** Con N réplicas del backend habría N sondeadores sobre el
+      mismo buzón. Seguro con el despliegue monoinstancia actual; el día que se replique, el mutex
+      `idx_flujo_activo` evita ejecuciones duplicadas pero no las conexiones IMAP redundantes.
+- [ ] **Sin `PARSER_PRE_IA`.** Es el consumidor natural de este payload: `text` viaja sin sanear a
+      propósito, y el escudo pre-IA es quien debe limpiarlo antes de gastar tokens.
+
+---
+
+## 2026-09-07 · Normalización a `raw_email`, retirada de `raw_html` y comprobación del asistente — rama `feat/trigger-imap`
+
+Tres correcciones sobre el nodo de ingesta, más el endpoint que faltaba para que el asistente pueda
+validar credenciales antes de guardar un flujo.
+
+### 1. `raw_email` como namespace canónico
+
+El default del DTO era `nodo_trigger`, un nombre que **no está en `ALLOWED_NAMESPACES`**: una plantilla
+que interpolase `{{nodo_trigger.subject}}` habría sido rechazada por el gestor con un 400, aunque el
+nodo hubiese escrito el dato correctamente en el contexto. Pasa a `raw_email`, que ya estaba reservado
+en esa lista para el correo crudo desde PROT-11.1. Cero cambios en el gestor de plantillas.
+
+`nodo_trigger` se retira del código por completo. Donde aparecía como **`nodeId`** —una clave de
+topología, concepto distinto de un namespace— pasa a `trigger_imap`, que describe el tipo funcional del
+nodo en lugar de su papel en el grafo. Que el mismo string sirviera para dos conceptos es precisamente
+lo que hacía fácil confundirlos:
+
+```
+nodeId: 'trigger_imap'        ← clave del nodo en el grafo
+outputNamespace: 'raw_email'  ← donde escribe en el StatePayloadContext
+```
+
+Se corrige también el ejemplo de Swagger de `PipelineNodeConfigDto.outputNamespace`, que enseñaba el
+nombre equivocado y habría propagado el error a cada flujo creado desde la documentación.
+
+### 2. `raw_html` fuera del payload
+
+El nodo pasa de seis claves a cinco: `message_id`, `from`, `subject`, `text`, `date`. Desaparece
+`raw_html` y con él la cascada `html → textAsHtml → text`.
+
+El motivo es de reparto de responsabilidades: el HTML de un correo arrastra estilos en línea, imágenes
+incrustadas como `data:` URI y etiquetas del cliente remitente, y **nadie aguas abajo lo necesita**.
+`PARSER_PRE_IA` trabaja sobre texto plano justamente para no gastar tokens en marcado, y el HTML final
+lo aporta la plantilla del gestor, no el correo de origen. Propagarlo solo engordaba el checkpoint
+JSONB con datos que ningún nodo iba a consumir.
+
+**Consecuencia que hay que conocer al configurar un flujo:** un correo que llegue únicamente en HTML,
+sin parte `text/plain`, deja `text` vacío. Derivar texto del marcado sería sanitizar, y eso es
+competencia del escudo pre-IA: `security-and-scope.md` §3 mantiene este nodo sin transformaciones. La
+prueba 1.4 fija ese comportamiento para que nadie lo tome por un descuido.
+
+> *Cumplido en la entrada del 2026-09-18:* el escudo pre-IA ya deriva el texto de ese marcado. La
+> prueba 1.4 de `imap-trigger.strategy.spec.ts` sigue vigente sin cambios, porque el reparto no se ha
+> movido: el nodo de ingesta continúa sin transformar nada.
+
+
+
+### 3. `POST /api/wizard/check-imap`
+
+Permite validar las credenciales antes de guardar el `pipeline_schema`, en lugar de descubrir el fallo
+la primera vez que el sondeo dispare el flujo.
+
+Comprueba **conexión y buzón** (`connect` + `status`), no solo el login: autenticar correctamente
+contra un `mailbox` que no existe es un falso positivo que el operador debe ver en el asistente. Un
+fallo devuelve 200 con `success: false` y severidad `GRAVE`, no un 4xx — el diagnóstico del servidor de
+correo es parte de la respuesta que la interfaz tiene que mostrar, y un código de error obligaría al
+cliente a distinguir "las credenciales son malas" de "la llamada al backend se rompió". La respuesta
+**no** lleva `stackTrace`: revelaría rutas del servidor sin aportar nada a quien rellena un formulario.
+
+Dos detalles que no son de gusto:
+
+- **`ValidationPipe` local con `forbidNonWhitelisted`.** El pipe global de `main.ts` solo lleva
+  `{ whitelist: true, transform: true }`, que *elimina en silencio* las propiedades desconocidas. Aquí
+  hace falta que las **rechace**: un cliente que envíe `password` en el cuerpo debe recibir un 400, no
+  un 200 tras haberse descartado el campo sin avisar. Es la misma opción que aplica la estrategia a los
+  `params` del nodo, así que asistente y ejecución usan idéntico criterio.
+- **El endpoint es un oráculo de conectividad.** Acepta `host` y `user` arbitrarios, así que sin el
+  patrón `IMAP_*PASSWORD` de `passwordEnvKey` cualquiera con rol EDITOR podría pedir al backend que
+  enviase `JWT_SECRET` a un servidor propio y confirmar el acierto leyendo el `success`. Las tres
+  barreras —perímetro de red, JWT+RBAC y el patrón del DTO— son las que hacen publicable este endpoint.
+
+### 4. `createImapClient`: una sola definición de las opciones endurecidas
+
+Con el wizard, las rutas que hablan IMAP pasaban a ser tres, cada una repitiendo `logger: false`,
+`emitLogs: false`, `disableAutoIdle`, los timeouts y el oyente de `error`. Son decisiones de seguridad
+—sin `logger: false`, `imapflow` vuelca la conversación IMAP con las cabeceras de autenticación al
+stdout del contenedor— y no pueden divergir entre consumidores. Se extraen a una función pura en
+`services/imap-client.factory.ts`.
+
+El oyente de `error` es un **parámetro obligatorio** de la firma, no opcional: `ImapFlow` es un
+`EventEmitter` y un evento `error` sin oyente derriba el proceso de Node. Exigirlo en el tipo convierte
+ese olvido en un error de compilación en lugar de una caída en producción.
+
+Se mantiene como función y no como provider inyectable a propósito: así `WizardModule` la consume por
+importación directa sin tener que importar `NodesModule`, que arrastraría el sondeo periódico, su
+repositorio de `flujos` y `WorkflowsModule` detrás para no usar ninguno de los tres.
+
+### Verificación
+
+```
+npm test          → 23 suites, 375 pruebas en verde (+15)
+tsc --noEmit      → limpio sobre tsconfig.build.json
+eslint            → limpio
+```
+
+Nuevas: 2 del namespace por defecto (incluida la que comprueba que el default está en
+`ALLOWED_NAMESPACES`, para que ambos no puedan separarse sin que falle la suite) y 13 del
+`WizardService`, con tres específicas de no filtración de secretos.
+
+---
+
+## 2026-09-07 · PROT-12.3 · Catálogo de pipelines para el asistente — rama `feat/trigger-imap`
+
+Primera tanda del wizard: el backend que alimenta la Fase 0. El asistente necesita listar los flujos
+que puede usar como plantilla, y no existía endpoint alguno — `WorkflowsController` solo tenía
+`POST /:id/run-test`.
+
+### Pasos 1-4 completados
+
+| Archivo | Estado |
+|---|---|
+| `backend/src/modules/workflows/dto/pipeline-summary-response.dto.ts` | creado |
+| `backend/src/modules/workflows/workflows.service.ts` | `findSelectablePipelines()` + `buildOrderedTopology()` |
+| `backend/src/modules/workflows/workflows.controller.ts` | `@Get()` añadido |
+| `backend/src/modules/workflows/workflows.service.spec.ts` | +9 pruebas (bloques 4, 5 y 6) |
+
+Verificación: **384 pruebas en verde** (23 suites, +9), `tsc -p tsconfig.build.json` limpio, `eslint src`
+sin errores (queda el warning preexistente de `bootstrap()` en `main.ts:78`).
+
+### El «por qué» de tres decisiones
+
+**1. `params` no viaja.** La proyección es deliberadamente parcial. En un nodo `TRIGGER_IMAP`, `params`
+contiene `host`, `user` y `passwordEnvKey`; en un `DESTINO_DRUPAL`, la URL interna del CMS. Devolver el
+esquema entero convertiría un endpoint de *listado* en una fuga de configuración de infraestructura
+hacia el navegador, y el selector del asistente no necesita ninguno de esos datos para pintar una
+tarjeta. La prueba 6.1 lo blinda serializando la respuesta y comprobando que no aparecen ni el host ni
+la clave de entorno.
+
+**2. El orden sale del grafo, no del mapa.** `schema.nodes` está indexado por `nodeId` y sus claves
+conservan el orden de escritura del JSON, que no tiene por qué coincidir con el camino de ejecución.
+`buildOrderedTopology` recorre desde `entrypoint` siguiendo `nextStep`. La prueba 5.1 usa un esquema
+con las claves **en orden inverso** al de ejecución: si la proyección usara `Object.values`, devolvería
+exactamente esa secuencia invertida y el stepper se pintaría al revés.
+
+**3. El `Set` de visitados no es redundante.** `validatePipelineTopology` ya garantiza que el camino
+activo es acíclico (garantía 5), así que sobre un esquema validado nunca hace falta. Cubre la fila
+escrita por SQL directo, que se salta esa validación: sin él, un `nextStep` circular colgaría la
+petición HTTP en un bucle infinito. Un puntero huérfano trunca el recorrido y registra un `warn` en
+lugar de lanzar — es un esquema roto, pero el catálogo debe seguir respondiendo para que el operador
+pueda verlo y corregirlo (pruebas 5.3 y 5.4).
+
+Detalle de TypeScript que obligó a una anotación explícita: `cursor` se reasigna desde `node.nextStep`
+y `node` se lee de `schema.nodes[cursor]`, así que sin anotar `node: PipelineNodeConfig | undefined` el
+compilador entra en inferencia circular y falla con TS7022.
+
+### Próximo paso exacto
+
+**Paso 5:** extender `frontend/src/types/pipeline.ts` con `PipelineStep`, `PipelineSummary` y
+`WizardStep` (este último enriquecido con `name`, derivado de `NODE_TYPE_LABELS[nodeType]`, que ya
+existe en ese archivo). El enum `NodeType` y `OUTPUT_NAMESPACE_PATTERN` ya están ahí.
+
+---
+
+## 2026-09-07 · PROT-12.4 · Servicios, tipos y store del nodo `TRIGGER_IMAP` — rama `feat/trigger-imap`
+
+Segunda tanda: la mitad no visual del paso 1 del asistente. Réplica de la tríada de §3.1 que el nodo
+mapeador ya estableció, para un segundo tipo de nodo.
+
+### Pasos 5-8 completados
+
+| Archivo | Estado |
+|---|---|
+| `frontend/src/types/pipeline.ts` | +`PipelineStep`, `PipelineSummary`, `WizardStep`, `toWizardStep`, `CheckImapPayload`, `CheckImapResult` |
+| `frontend/src/services/pipelines.service.ts` | creado |
+| `frontend/src/services/nodes/trigger-imap.service.ts` | creado |
+| `frontend/src/stores/nodes/trigger-imap.store.ts` | creado |
+| `frontend/src/stores/nodes/trigger-imap.store.spec.ts` | creado (18 pruebas) |
+
+Verificación: **72 pruebas en verde** (5 archivos, +18), `vue-tsc --noEmit` limpio, lint limpio.
+
+### El «por qué» de tres decisiones
+
+**1. Toda mutación pasa por `patchConfig`.** No es azúcar sintáctico: es lo que garantiza que no exista
+ninguna vía de modificar la configuración sin invalidar `connectionVerified`. Si la vista escribiera en
+`config` directamente, el store afirmaría que la conexión está probada para unos valores que ya no son
+los del formulario. La prueba 4.2 recorre los seis campos de conexión uno a uno.
+
+**2. `isConfigValid` exige conexión verificada, no solo campos válidos.** Unas credenciales con formato
+correcto pero equivocadas no fallarían hasta que el sondeo disparase el flujo en producción, con el
+flujo quedando PAUSADO y un `GRAVE` en la trazabilidad. Obligar a pulsar «Probar Conexión» traslada ese
+descubrimiento al momento de configurar, que es el propósito del paso. La prueba 3.4 fija que campos
+completos **sin probar** no bastan.
+
+**3. `name` del paso no viaja por la red.** `NODE_TYPE_LABELS` ya vive en `types/pipeline.ts`, así que
+mandar la etiqueta desde el backend duplicaría en dos idiomas la misma tabla de traducción, con el
+riesgo de que divergieran. Lo deriva `toWizardStep`.
+
+`PASSWORD_ENV_KEY_PATTERN` y `MIN_POLL_INTERVAL_MS` se replican del DTO backend. La copia no es
+redundante: sin ellas el formulario dejaría enviar valores que el backend rechaza con un 400, y el
+operador vería un error de servidor donde debería haber visto una regla de campo. La prueba 2.4 cubre
+cinco claves de entorno ilegítimas, `JWT_SECRET` incluida.
+
+Nota: `npm run lint` reformatea `src/utils/violation-matcher.spec.ts` (prettier, archivo ajeno a esta
+rama). Se revirtió para no mezclarlo; volverá a aparecer en cualquier `npm run lint` futuro.
+
+### Próximo paso exacto
+
+**Paso 9:** crear `frontend/src/components/nodes/TriggerImapConfig.vue` (prop única `nodeId`, cero
+HTTP, maquetación calcada de `UserDialog.vue`: `.pd-label` + `.pd-required`, inputs `outlined dense`,
+`passwordEnvKey` con `.pd-mono`, botón `.pd-btn-primary` con `icon-right="north_east"` y
+`:loading="store.isLoading"`) y añadir su entrada a `node-config-registry.ts`.
+
+---
+
+## 2026-09-07 · PROT-12.4 · Componente del trigger, registro de stores y agregador — rama `feat/trigger-imap`
+
+Tercera tanda: la UI del nodo y el agregador del asistente. Con esto el paso 1 del wizard está
+completo salvo el anfitrión que lo monta.
+
+### Pasos 9-12 completados
+
+| Archivo | Estado |
+|---|---|
+| `frontend/src/components/nodes/TriggerImapConfig.vue` | creado |
+| `frontend/src/components/nodes/node-config-registry.ts` | +entrada `TRIGGER_IMAP` |
+| `frontend/src/components/nodes/node-store-registry.ts` | creado |
+| `frontend/src/stores/flujo-draft.store.ts` | creado |
+| `frontend/src/stores/flujo-draft.store.spec.ts` | creado (21 pruebas) |
+
+Verificación: **93 pruebas en verde** (6 archivos, +21), `vue-tsc --noEmit` limpio, `eslint src` limpio.
+
+### El «por qué» de tres decisiones
+
+**1. `node-store-registry.ts` es hermano del de componentes, no un duplicado.** El registro de
+componentes resuelve *qué* pintar; este resuelve *a quién preguntar* si lo pintado es válido. Hacían
+falta los dos: el anfitrión monta el configurador por `nodeType`, pero también tiene que leer el
+`isConfigValid` del nodo activo para habilitar el botón Siguiente, y sin este mapa tendría que importar
+cada store por su nombre y encadenar condicionales por tipo — exactamente lo que §3.1 prohíbe. Cierra
+el TODO que `NodeConfigSandboxPage.vue` dejaba escrito.
+
+El contrato `NodeConfigStore` es deliberadamente estrecho (solo `isConfigValid`): tiparlo así impide que
+el anfitrión acabe inspeccionando la `config` interna de un nodo concreto.
+
+**2. El componente no escribe en `config` directamente.** Todos los `q-input` usan `:model-value` +
+`@update:model-value` contra `store.patchConfig(...)` en lugar de `v-model`. Con `v-model` sobre
+`store.config.host`, Pinia permitiría la mutación pero se saltaría la invalidación de
+`connectionVerified`, y el paso quedaría declarándose válido con unas credenciales que ya no son las
+probadas. Es el mismo motivo por el que el store canaliza todo por `patchConfig`.
+
+**3. La guarda de avance vive en el store, no solo en el `:disable`.** `goToNextStep()` comprueba
+`isActiveStepValid` antes de mover el cursor. El estado del borrador no debe depender de que la vista se
+acuerde de deshabilitar un botón; la prueba 4.1 lo fija llamando a la acción directamente.
+
+Un paso cuyo `nodeType` aún no tiene store registrado devuelve `isActiveStepValid: false` (prueba 3.3,
+sobre `PARSER_PRE_IA`): sin configurador no hay forma de declararlo válido, y dejar avanzar sería
+ensamblar un `pipeline_schema` con un nodo sin configurar.
+
+`upstreamNamespaces(stepIndex)` es la fuente real de lo que `template-mapper.store.ts` tiene hoy como
+lista fija marcada PROVISIONAL. Excluye el paso indicado a propósito: un nodo no puede leer su propia
+salida (prueba 5.3).
+
+### Próximo paso exacto
+
+**Paso 13:** crear `frontend/src/components/wizard/PipelineSelector.vue` (tarjetas con `--pd-gradient`,
+`.pd-h2`, `.pd-subtitle`) y `frontend/src/pages/WizardPage.vue` (Fase 0 vs Fase 1..N con
+`<q-stepper vertical animated>` montando `<component :is="nodeConfigRegistry[step.nodeType]" :node-id="step.nodeId" />`,
+sin `v-if` por tipo, botón Siguiente con `:disable="!draftStore.isActiveStepValid"`), y registrar la
+ruta en `src/router/routes.ts` más el breadcrumb y el `<q-item>` del drawer en `MainLayout.vue`.
+
+---
+
+## 2026-09-08 · PROT-12.3/12.4 · Anfitrión del asistente y cierre de la tanda — rama `feat/trigger-imap`
+
+Cuarta y última tanda: el anfitrión que monta los configuradores. Con esto el asistente recorre de
+punta a punta la topología que dicta el pipeline elegido.
+
+### Pasos 13-14 completados
+
+| Archivo | Estado |
+|---|---|
+| `frontend/src/components/wizard/PipelineSelector.vue` | creado (Fase 0) |
+| `frontend/src/pages/WizardPage.vue` | creado (Fase 1..N) |
+| `frontend/src/router/routes.ts` | +ruta `flujos/nuevo` |
+| `frontend/src/layouts/MainLayout.vue` | +breadcrumb y `<q-item>` del drawer |
+
+Verificación final de ambos lados:
+
+```
+Backend   → 384 pruebas · tsc limpio · eslint 0 errores
+Frontend  →  93 pruebas · vue-tsc limpio · eslint limpio · quasar build OK
+```
+
+El `quasar build` se ejecutó a propósito además del `typecheck`: `vue-tsc` no compila los templates de
+los SFC con la misma profundidad que el build real, así que es lo único que garantiza que el `<q-stepper>`
+dinámico y el `<component :is>` no tengan errores de plantilla.
+
+### El «por qué» de dos decisiones
+
+**1. Un solo punto de resolución, cero condicionales por tipo.** `resolveStepComponent(step)` es la
+única vía por la que `WizardPage` decide qué montar, y no hay ni un `v-if="step.nodeType === ..."` en la
+plantilla. Añadir un tipo de nodo es añadir una entrada a cada registro; el anfitrión no se toca. Es
+literalmente lo que §3.1 pide y el motivo de que los registros existan.
+
+**2. Un tipo sin configurador avisa, no rompe.** `nodeConfigRegistry` es `Partial` a propósito, así que
+un paso `PARSER_PRE_IA` (hoy sin interfaz) renderiza un panel `.pd-card--accent .pd-accent-grave` con
+`role="alert"` explicando qué falta, y el botón Siguiente queda deshabilitado porque
+`isActiveStepValid` devuelve `false` para un tipo sin store registrado. La alternativa —dejar el paso en
+blanco— habría parecido un fallo de carga.
+
+El selector cubre también el catálogo vacío con un estado explícito: sin él, un backend sin flujos
+configurados dejaría la vista en blanco y se leería como un error de red.
+
+### Pendientes anotados
+
+- **`upstreamNamespaces` aún no está conectado al mapeador.** El draft store ya lo expone, pero
+  `template-mapper.store.ts` sigue usando su lista fija marcada PROVISIONAL. Enlazarlos es una llamada a
+  `setAvailableUpstreamNamespaces(draftStore.upstreamNamespaces(index))` desde el anfitrión, y toca un
+  componente de otra tanda; queda para la siguiente.
+- **El asistente todavía no ensambla ni guarda el `pipeline_schema`.** Recorre y valida los pasos, pero
+  falta el `POST` final que persista el flujo con la `config` de cada store de nodo. Es el cierre natural
+  de PROT-12.
+- **Solo dos de los siete nodos tienen configurador** (`TRIGGER_IMAP`, `MAPEADOR_PLANTILLA`). Cuando
+  estén los siete, el `Partial` de ambos registros debe caer para que el compilador exija exhaustividad.
+- `npm run lint` reformatea `src/utils/violation-matcher.spec.ts` (prettier, archivo ajeno). Se revierte
+  en cada tanda para no mezclarlo.
+
+---
+
+## 2026-09-08 · PROT-12 · Persistencia del flujo (`POST /api/workflows`) — rama `feat/trigger-imap`
+
+Primera mitad del cierre de PROT-12: el endpoint que faltaba para que el asistente pueda guardar lo
+que ensambla.
+
+### Pasos 1-5 completados
+
+| Archivo | Estado |
+|---|---|
+| `backend/src/modules/workflows/dto/create-workflow.dto.ts` | creado |
+| `backend/src/modules/workflows/workflows.service.ts` | `createWorkflow()` + `toPipelineSummary()` |
+| `backend/src/modules/workflows/workflows.controller.ts` | `@Post()` añadido |
+| `backend/src/modules/nodes/services/imap-polling.service.ts` | reconciliación periódica |
+| `backend/src/modules/workflows/workflows.service.spec.ts` | +8 pruebas (bloques 7 y 8) |
+| `backend/src/modules/nodes/services/imap-polling.service.spec.ts` | +6 pruebas (bloque 4) |
+
+Verificación: **398 pruebas en verde** (23 suites, +14), `tsc` limpio, `eslint src` sin errores.
+
+### Desviación justificada: cómo se registra el sondeo de un flujo nuevo
+
+El enunciado pedía que `createWorkflow` registrase el intervalo invocando `ImapPollingService`. **No se
+ha hecho así, y no por comodidad:** `NodesModule` ya importa `WorkflowsModule` (el sondeo necesita
+`runAutomaticWorkflow` para despachar lo que detecta), así que inyectar `ImapPollingService` en
+`WorkflowsService` crearía un ciclo `workflows ⇄ nodes`. Resolverlo exigiría `forwardRef` en ambos
+módulos, o instalar `@nestjs/event-emitter`, que no está en el proyecto.
+
+En su lugar se implementó **reconciliación periódica**: un intervalo `imap-reconcile` (60 s por
+defecto, ajustable con `IMAP_RECONCILE_INTERVAL_MS`) que rearma la tabla de intervalos contra `flujos`.
+Es estrictamente más robusto que una notificación puntual del alta, porque cubre tres casos que esa no
+vería:
+
+- el `pipeline_schema` de un flujo **editado** después de guardarse (host, buzón o periodo nuevos),
+- un `activo` cambiado por SQL directo o desde otra vía,
+- un flujo **borrado** o desactivado, que debe dejar de sondearse (prueba 4.4).
+
+Coste: latencia de un ciclo hasta que el flujo nuevo entra en sondeo. Aceptable, sobre todo porque un
+flujo **nace inactivo** y no sería elegible de todos modos hasta que alguien lo active.
+
+El callback lleva `.catch()` explícito: corre dentro de un `setInterval` y una promesa rechazada sin
+manejar termina el proceso en Node ≥ 18 (prueba 4.5).
+
+### El «por qué» de tres decisiones más
+
+**1. El flujo nace INACTIVO.** `flujos.activo` gobierna los disparadores automáticos, y la estrategia
+IMAP marca los correos con `\Seen`. Un flujo que se activase solo al crearse empezaría a **consumir el
+buzón corporativo** sin que nadie hubiera revisado su configuración, y esos correos no volverían a
+verse. `active` es opcional en el DTO con default `false`; activarlo es un acto deliberado posterior.
+
+**2. `pipelineSchema` se declara como objeto y NO con `@ValidateNested()`.** `validateSchema()` ya hace
+las dos capas —forma y tipos con `PipelineSchemaDto`, integridad del grafo con
+`validatePipelineTopology`— y devuelve `BadRequestException` con la lista exacta de campos inválidos.
+Anidar el DTO duplicaría la primera capa y produciría **dos formatos de error distintos** para el mismo
+fallo según cuál saltara antes: el del `ValidationPipe` global o el del validador. La prueba 7.1 fija
+que la validación ocurre antes de tocar la base de datos, y la 7.2 que se persiste el esquema **ya
+validado** y no el crudo del cuerpo (guardar el crudo dejaría en la BD propiedades que `whitelist`
+descarta).
+
+**3. `toPipelineSummary` se comparte entre el alta y el listado.** Si divergieran, el cliente tendría
+que tratar el flujo que acaba de crear distinto de los que lee del catálogo. Como efecto secundario, el
+alta hereda gratis la exclusión de `params` (prueba 8.2).
+
+### Próximo paso exacto
+
+**Paso 6:** crear `frontend/src/services/workflows.service.ts` con `createWorkflow(payload)` contra
+`POST /workflows`, tipando el payload como `CreateWorkflowPayload` en `types/pipeline.ts`.
+
+---
+
+## 2026-09-08 · PROT-12 · Ensamblado del esquema y conexión de `upstreamNamespaces` — rama `feat/trigger-imap`
+
+Segunda mitad del cierre: el agregador ya sabe recolectar la configuración de cada nodo y persistir el
+flujo, y los nodos ya conocen su contrato aguas arriba de verdad.
+
+### Pasos 6-9 completados
+
+| Archivo | Estado |
+|---|---|
+| `frontend/src/types/pipeline.ts` | +`CreateWorkflowPayload`, `AssembledPipelineNode`, `AssembledPipelineSchema` |
+| `frontend/src/services/workflows.service.ts` | creado |
+| `frontend/src/components/nodes/node-store-registry.ts` | contrato ampliado |
+| `frontend/src/stores/nodes/trigger-imap.store.ts` | +`toNodeParams()` |
+| `frontend/src/stores/nodes/template-mapper.store.ts` | +`toNodeParams()` |
+| `frontend/src/stores/flujo-draft.store.ts` | +`assembleAndSaveWorkflow`, `assemblePipelineSchema`, `syncUpstreamNamespaces`, `invalidSteps`, `canSave` |
+| `frontend/src/stores/flujo-draft.store.spec.ts` | +15 pruebas (bloques 7, 8 y 9) |
+
+Verificación: **108 pruebas en verde** (6 archivos, +15), `vue-tsc` limpio, `eslint` limpio.
+
+### El «por qué» de cuatro decisiones
+
+**1. `toNodeParams()` en lugar de leer `config`.** El agregador podría haber copiado `store.config` tal
+cual, pero eso le obligaría a conocer la forma interna de cada nodo — lo que §3.1 prohíbe. Con este
+método el nodo **decide qué publica**, y hay un caso donde `config` y `params` no coinciden: el mapeador
+guarda `outputNamespace` en su config para la interfaz, pero en el esquema ese valor es propiedad del
+**nodo**, no de sus `params`. Publicarlo en ambos sitios crearía dos fuentes de verdad dentro del mismo
+JSON, y nada garantizaría que coincidieran (pruebas 8.1 y 8.2).
+
+Beneficio colateral de tipado: una `interface` no es asignable a `Record<string, unknown>` en
+TypeScript por no tener index signature implícita, así que exponer `config` directamente habría exigido
+convertir las interfaces de configuración a type aliases o meter un cast.
+
+**2. `setAvailableUpstreamNamespaces` es opcional en el contrato.** No todo nodo depende del contexto:
+un disparador es el primero del grafo y no tiene nada aguas arriba que declarar. El anfitrión comprueba
+su existencia con `?.()` antes de llamarlo (prueba 7.2).
+
+**3. La sincronización ocurre al elegir el pipeline, no al llegar al paso.** `selectPipeline` llama a
+`syncUpstreamNamespaces()` de inmediato: si se esperara a que el usuario llegase al paso del mapeador,
+su primera validación se haría contra una lista vacía y avisaría de variables ausentes que sí existen.
+Y se recalcula sobre **todos** los pasos al cambiar de pipeline, porque arrastrar la lista anterior le
+haría creer a un nodo que `raw_email` existe en un flujo donde nadie lo produce (prueba 7.3).
+
+Esto cierra el pendiente que arrastraba `template-mapper.store.ts`: su `DEFAULT_UPSTREAM_NAMESPACES`
+estaba marcado PROVISIONAL y validaba contra namespaces inventados. Ahora un flujo que arranca en
+`TRIGGER_IMAP` expone `raw_email` de verdad, y el mapeador puede afirmar que `{{raw_email.subject}}` es
+resoluble y que `{{scraped_web.headline}}` no lo es en ese flujo concreto (prueba 7.1).
+
+**4. `invalidSteps` pregunta a TODOS los pasos, no solo al activo.** El asistente permite retroceder,
+así que sin esta comprobación se podría guardar un flujo tras haber vaciado un paso anterior ya
+visitado. El error nombra los pasos que faltan en lugar de decir «hay errores» (pruebas 9.1 y 9.2).
+
+`onErrorStep` queda en `null` en todos los nodos: el asistente aún no ofrece configurar caminos de
+recuperación, y un puntero inventado sería peor que su ausencia — con `null`, el motor detiene la
+ejecución en el nodo que falla, que es el comportamiento correcto por defecto (prueba 8.4).
+
+### Próximo paso exacto
+
+**Paso 10:** añadir el paso terminal de «Revisión y Guardado» a `frontend/src/pages/WizardPage.vue`:
+campo `name` (requerido) y `description`, resumen de la topología configurada, botón «Crear Flujo»
+(`.pd-btn-primary`, `icon-right="north_east"`, `:loading="draftStore.isLoading"`,
+`:disable="!draftStore.canSave"`), `$q.notify` de éxito y redirección al catálogo.
+
+---
+
+## 2026-09-08 · PROT-12 · Paso terminal de revisión y cierre — rama `feat/trigger-imap`
+
+Última tanda: el asistente ya guarda. Con esto los tres pendientes que arrastraba PROT-12 quedan
+cerrados.
+
+### Pasos 10-11 completados
+
+| Archivo | Estado |
+|---|---|
+| `frontend/src/pages/WizardPage.vue` | +paso terminal de revisión y guardado |
+
+Verificación final:
+
+```
+Backend   → 398 pruebas · tsc limpio · eslint 0 errores
+Frontend  → 108 pruebas · vue-tsc limpio · eslint limpio · quasar build OK
+```
+
+### El «por qué» de tres decisiones
+
+**1. El nombre se pide AL FINAL, no al principio.** Un asistente que abre pidiendo un nombre obliga a
+bautizar algo que todavía no se ha configurado, y el operador acaba escribiendo un placeholder que
+nunca corrige. Al pedirlo en la revisión, ya sabe qué hace el flujo que está nombrando.
+
+**2. El paso de revisión NO es un nodo del grafo.** Su índice se deriva de `pipelineTopology.length`, y
+por eso `goToNextStep()` no lo alcanza: esa acción está pensada para moverse entre nodos y su guarda
+incluye `isLastStep`. El último nodo lleva un botón «Revisar y guardar» que salta al paso terminal con
+`onGoToReview`, y el terminal usa `canSave` en lugar de `isActiveStepValid` porque no tiene store de
+nodo que consultar. Derivar el índice en vez de fijar una constante mantiene el paso final realmente al
+final por muchos nodos que traiga el pipeline.
+
+**3. El aviso de «se creará inactivo» es explícito.** El flujo nace inactivo por decisión de seguridad
+(la estrategia marca `\Seen` y consumiría el buzón), pero eso solo es una buena decisión si el operador
+lo sabe **antes** de pulsar. Un flujo que se guarda y no se dispara nunca, sin explicación, se lee como
+un fallo. El mensaje se repite en la notificación de éxito.
+
+El borrador se limpia antes de navegar: si el operador vuelve al asistente, debe empezar de cero y no
+sobre los restos del flujo anterior.
+
+### Estado de los pendientes de PROT-12
+
+- [x] ~~`upstreamNamespaces` sin conectar al mapeador.~~ Resuelto: `syncUpstreamNamespaces()` lo propaga
+      al elegir el pipeline, y `template-mapper.store.ts` ya no valida contra su lista PROVISIONAL.
+- [x] ~~El asistente no ensambla ni guarda el `pipeline_schema`.~~ Resuelto: `assembleAndSaveWorkflow`
+      + `POST /api/workflows`.
+- [ ] **Solo 2 de los 7 nodos tienen configurador** (`TRIGGER_IMAP`, `MAPEADOR_PLANTILLA`). Un pipeline
+      que incluya cualquiera de los otros cinco no se puede completar: el paso avisa y bloquea el
+      avance. Cuando estén los siete, el `Partial` de ambos registros debe caer para que el compilador
+      exija exhaustividad.
+- [ ] **Sin endpoint para activar un flujo.** Nace inactivo por diseño, pero hoy la única vía de
+      habilitarlo es SQL directo. Falta un `PATCH /api/workflows/:id` con la activación, que además es
+      donde debería vivir la revalidación del esquema antes de exponerlo a los disparadores.
+- [ ] **El disparo sigue siendo en proceso, no encolado** (`architecture-patterns.md` §5 pide BullMQ).
+- [ ] **`host` sin lista blanca** en el nodo IMAP: el patrón de `passwordEnvKey` acota qué secreto se
+      puede leer, pero un EDITOR sigue pudiendo apuntar el nodo a un servidor arbitrario.
+- [ ] `npm run lint` reformatea `src/utils/violation-matcher.spec.ts` (prettier, archivo ajeno).
+
+---
+
+## 2026-09-08 · Correcciones arquitectónicas post-PROT-12 — rama `feat/trigger-imap`
+
+### Paso 0 completado — inyección de `ConfigService` en el sondeo IMAP
+
+| Archivo | Estado |
+|---|---|
+| `backend/src/modules/nodes/services/imap-polling.service.ts` | `import type` → import de valor |
+
+```
+Backend → 398 pruebas · 23 suites · tsc limpio · eslint 0 errores
+```
+
+**El «por qué».** `ImapPollingService` importaba `ConfigService` con `import type`. Con
+`emitDecoratorMetadata` activo, un `import type` desaparece por completo en la transpilación y el
+`design:paramtypes` que Nest lee para resolver el constructor queda en `Object`: **el módulo no
+arrancaría en un despliegue real**, con un `Nest can't resolve dependencies`. Las 398 pruebas no lo
+detectan porque instancian el servicio a mano pasándole un doble, que es precisamente el punto ciego de
+la prueba unitaria frente a un fallo de contenedor.
+
+Se auditaron los otros siete `import type { ConfigService }` del repositorio: todos están en archivos
+`*.spec.ts`, donde el símbolo solo se usa como tipo del doble y el `import type` es correcto. Este era
+el único archivo de producción con el patrón.
+
+Se descartó añadir `ConfigModule` a los `imports` de `NodesModule`: `app.module.ts` ya lo declara con
+`forRoot({ isGlobal: true })`, así que la entrada sería redundante y sugeriría falsamente que el módulo
+necesita importarlo para que la inyección funcione — cuando el problema era exclusivamente el import.
+
+**Próximo paso:** objetivo 1 — mover `frontend/src/components/nodes/node-store-registry.ts` a
+`frontend/src/stores/nodes/node-store-registry.ts` y actualizar su único consumidor
+(`flujo-draft.store.ts:4`).
+
+### Pasos 1-2 completados — capa del registro de stores y depuración del `.env.example`
+
+| Archivo | Estado |
+|---|---|
+| `frontend/src/components/nodes/node-store-registry.ts` | movido a `frontend/src/stores/nodes/` |
+| `frontend/src/stores/flujo-draft.store.ts` | import actualizado a `@stores/nodes/node-store-registry` |
+| `backend/.env.example` | sección 4 reducida a `IMAP_UNUWARE_PASSWORD` |
+
+```
+Frontend → 108 pruebas · 6 archivos · vue-tsc limpio · eslint limpio · quasar build OK
+```
+
+**1. El registro de stores no pertenecía a `components/`.** No importa ni resuelve un solo `.vue`
+—solo stores— y su único consumidor es otro store, el agregador del borrador. §3.1 fija la ruta del
+registro de COMPONENTES (`components/nodes/node-config-registry.ts`), que sí resuelve componentes y se
+queda donde está; para su hermano de stores la capa la manda lo que resuelve, no con quién comparte
+nombre. Un solo consumidor a actualizar y ninguna spec importaba la ruta antigua.
+
+**2. Del entorno solo sale el secreto.** `IMAP_HOST`, `IMAP_PORT`, `IMAP_USER` e `IMAP_SECURE` eran
+residuo del modelo anterior a las credenciales híbridas: se comprobó que **ninguna línea de `src/` las
+lee** (las únicas claves IMAP que el código resuelve son `IMAP_POLLING_ENABLED` e
+`IMAP_RECONCILE_INTERVAL_MS`, de la sección 8). Mantenerlas en la plantilla enseñaba un modelo de
+configuración que el código ya no implementa, y era una invitación a que alguien las rellenase esperando
+que surtieran efecto. Host, puerto, usuario, buzón y periodo son configuración POR FLUJO y viven en el
+`params` jsonb del nodo; dos flujos pueden vigilar dos buzones distintos en el mismo despliegue.
+
+`IMAP_PASSWORD` se renombra a `IMAP_UNUWARE_PASSWORD` para que la plantilla muestre el patrón real
+(`IMAP_*PASSWORD`) con un nombre de buzón concreto en vez de un genérico que se lee como «la» clave
+IMAP del sistema. El bloque `SMTP_*` se conserva íntegro: lo consume `EmailService` para los OTP y sí es
+configuración del servidor.
+
+⚠️ **Acción manual pendiente del desarrollador:** renombrar `IMAP_PASSWORD` → `IMAP_UNUWARE_PASSWORD`
+en el `backend/.env` real y usar ese nombre en el campo `passwordEnvKey` del asistente. Editar `.env`
+exige reiniciar Nest.
+
+Nota de formato: `npm run lint` (prettier) reflowó a 100 columnas seis archivos creados en la tanda
+anterior de esta misma rama. Se conservan los reformateos —son los que el formateador del proyecto
+impone— a diferencia de `src/utils/violation-matcher.spec.ts`, que es ajeno a la rama y se revierte en
+cada ronda.
+
+**Próximo paso:** objetivo 3a — envolver el setup de `trigger-imap.store.ts` y `template-mapper.store.ts`
+en una factoría `defineStore(\`<id>:${nodeId}\`)` memoizada, y cambiar `NodeStoreHook` a
+`(nodeId: string) => NodeConfigStore` con `resetConfig` obligatorio en el contrato.
+
+### Pasos 3a-3d completados — aislamiento de la configuración por `nodeId`
+
+| Archivo | Estado |
+|---|---|
+| `frontend/src/stores/nodes/trigger-imap.store.ts` | factoría `defineStore` por `nodeId` |
+| `frontend/src/stores/nodes/template-mapper.store.ts` | factoría `defineStore` por `nodeId` |
+| `frontend/src/stores/nodes/node-store-registry.ts` | `NodeStoreHook` recibe `nodeId`; `resetConfig` obligatorio |
+| `frontend/src/stores/flujo-draft.store.ts` | `nodeId` propagado + `resetNodeStores()` |
+| `frontend/src/components/nodes/TriggerImapConfig.vue` | store resuelto con `props.nodeId` |
+| `frontend/src/components/nodes/TemplateMapperConfig.vue` | store resuelto con `props.nodeId` |
+| `frontend/src/pages/nodes/NodeConfigSandboxPage.vue` | `SANDBOX_NODE_ID` compartido por componente y store |
+| `frontend/src/stores/nodes/trigger-imap.store.spec.ts` | 15 llamadas con `NODE_ID` |
+| `frontend/src/stores/nodes/template-mapper.store.spec.ts` | 3 llamadas con `NODE_ID` |
+| `frontend/src/stores/flujo-draft.store.spec.ts` | topología con constantes + bloque 10 (5 pruebas) |
+
+```
+Backend   → 398 pruebas · 23 suites · tsc limpio · eslint 0 errores
+Frontend  → 113 pruebas · 6 archivos · vue-tsc limpio · eslint limpio · quasar build OK
+```
+
+### El «por qué» de cuatro decisiones
+
+**1. La premisa reportada no era el defecto.** Se pedía corregir una acción de guardado que sobrescribía
+el diccionario `nodes` del pipeline. Esa acción no existe: `assemblePipelineSchema` construye un
+diccionario **local y nuevo** en cada llamada, lo puebla por llave (`nodes[step.nodeId] = …`)
+recorriendo la topología completa, y `nextStep` ya apuntaba al `nodeId` siguiente del arreglo —
+invariante que la prueba **8.3** fijaba ya en verde. La solución prescrita *era* la implementación.
+
+Lo que sí producía el síntoma («el nodo anterior desaparece») eran dos defectos adyacentes, y son los
+que se corrigen. La prueba **10.3** queda como candado de la invariante que se creía rota: verifica que
+los N nodos de la topología sobreviven al ensamblado y que la cadena está completa de punta a punta.
+
+**2. La identidad del estado de un nodo es su `nodeId`, no su `nodeType`.** `resolveNodeStore` resolvía
+un singleton de Pinia por tipo, así que un pipeline con dos disparadores IMAP contra buzones distintos
+compartía **una sola instancia**: configurar el segundo borraba los `params` del primero, y el esquema
+ensamblado salía con la misma configuración duplicada en ambos nodos. La topología canónica de Notiweb
+no repite tipos, de modo que el defecto estaba latente esperando el primer flujo que lo hiciera.
+
+Se eligió **instancia por nodo** (`defineStore(\`<prefijo>:${nodeId}\`)` con la definición memoizada)
+frente a un `Record<nodeId, Config>` dentro de un store único. Con la instancia por nodo el cuerpo del
+setup no cambia una línea y el contrato del anfitrión sigue siendo un `boolean` plano; con el
+diccionario habría que rekeyar `isConfigValid`, `isLoading` y `connectionVerified`, y cada `computed`
+pasaría a ser una función que devuelve un `computed` por nodo. El estado que se corrige no debía
+complicar la lectura de lo que ya funcionaba.
+
+Se memoiza la **definición** y no la instancia: de la instancia ya se encarga Pinia, que cachea por id.
+Lo que hay que evitar es reconstruir la definición en cada render, que descarta la identidad
+referencial del hook. Coste declarado: dos nodos mapeadores en el mismo flujo piden el catálogo de
+plantillas una vez cada uno.
+
+Contrapartida del HMR: con ids dinámicos no hay una definición única que declarar al cargar el módulo,
+así que `acceptHMRUpdate` se arma sobre cada definición nueva. Vite conserva un solo callback
+self-accept por módulo, de modo que hot-recarga el último nodo creado —en la práctica el que se está
+configurando— y los demás exigen recarga completa.
+
+**3. La instancia del store sobrevive a la topología que la creó.** Vive en la instancia de Pinia, no
+en el borrador, así que `resetDraft()` vaciando `pipelineTopology` no limpiaba nada: crear un flujo y
+volver al asistente arrancaba con los `params` del anterior ya cargados y `canSave` en `true` sin que
+el operador hubiera tocado un campo — el escenario exacto en el que un guardado accidental publica la
+configuración equivocada. `resetNodeStores()` recorre la topología **antes** de vaciarla (una vez vacía
+ya no hay a quién preguntar) y se invoca también en `selectPipeline`, porque cambiar de pipeline
+abandona una topología cuyos stores no deben sobrevivirle.
+
+**4. `resetConfig` pasa a ser obligatorio en `NodeConfigStore`.** Es lo que necesita la limpieza
+anterior, y exigirlo por tipo obliga a cualquier store de nodo futuro a implementarlo en vez de dejar
+una fuga silenciosa. `setAvailableUpstreamNamespaces` sigue opcional: un disparador es el primero del
+grafo y no tiene nada aguas arriba que declarar. Al cambiar la firma de `NodeStoreHook`, el compilador
+enumeró los 20 puntos de llamada afectados — el tipo hizo de lista de tareas.
+
+Nota de método: las cuatro pruebas de aislamiento (10.1, 10.2, 10.4 y 10.5) se comprobaron contra la
+implementación anterior antes de dar el paso por cerrado. Las cuatro fallan sin su corrección; 10.3
+pasa en ambas, que es precisamente su papel de candado.
+
+**Próximo paso:** ninguno pendiente de esta tanda. Los pendientes abiertos del proyecto siguen siendo
+los cinco listados al cierre de PROT-12, con el `PATCH /api/workflows/:id` de activación como el de
+mayor prioridad: la vía de creación termina hoy en un flujo que nadie puede habilitar desde la interfaz.
+
+---
+
+## 2026-09-08 · Estandarización de `refresh_tokens` → `tokens_sesion` — rama `feat/trigger-imap`
+
+| Archivo | Estado |
+|---|---|
+| `init.sql` | tabla, PK e índice renombrados + nota sobre las constraints |
+| `db/migrations/009-tokens-sesion.sql` | creado |
+| `db/migrations/001-refresh-tokens.sql` | nota de obsolescencia (solo cabecera) |
+| `db/migrations/004-device-id-refresh-tokens.sql` | nota de obsolescencia (solo cabecera) |
+| `backend/src/modules/auth/entities/refresh-token.entity.ts` | `@Entity`, PK e `@Index` |
+| `backend/src/modules/auth/services/refresh-token.service.ts` | comentario |
+| `backend/src/modules/auth/interfaces/jwt-payload.interface.ts` | TSDoc |
+| `PLAN.md` | §2.6, línea 145 y §14 |
+
+```
+Backend → 398 pruebas · 23 suites · tsc limpio · eslint 0 errores
+```
+
+### El «por qué» de cuatro decisiones
+
+**1. El renombrado toca seis objetos, no dos.** `ALTER TABLE … RENAME TO` en PostgreSQL **no arrastra
+los índices ni las constraints**: se quedan con el nombre autogenerado a partir del nombre viejo de la
+tabla. Como `init.sql` no las declara explícitamente, PostgreSQL las deriva allí del nombre nuevo, de
+modo que un clonado nuevo obtiene `tokens_sesion_pkey`, `tokens_sesion_hash_token_key` y
+`tokens_sesion_id_usuario_fkey` mientras una base migrada conservaría los tres `refresh_tokens_*`.
+Renombrar solo tabla y columna habría dejado las dos rutas de creación divergentes — exactamente la
+deriva que este repositorio evita manteniendo el DDL duplicado a propósito en `init.sql` y en
+`db/migrations/`. La 009 renombra tabla, columna PK, índice y las tres constraints.
+
+El nombre del índice además importa desde el código: la entidad lo declara con
+`@Index('idx_tokens_sesion_id_usuario')`.
+
+**2. El código se queda en inglés, y no es un renombrado a medias.** Las columnas de esta tabla ya
+seguían la convención castellana (`id_usuario`, `expiracion`, `revocado`, `fecha_creacion`); lo que
+quedaba fuera era el nombre de la tabla y de su PK, la última excepción del esquema. La clase
+`RefreshToken` **ya cumplía** `code-conventions.md` §1, igual que `User`/`usuarios` y `Workflow`/`flujos`:
+esquema en castellano, identificadores de código en inglés, puente en `@Entity()` / `@Column({ name })`.
+Renombrar la clase, los archivos o el `RefreshTokenService` habría roto la norma en vez de aplicarla, y
+habría dejado esta entidad como la única asimétrica de las nueve.
+
+Por el mismo motivo no se toca el contrato HTTP (`POST /auth/refresh`, `POST /auth/logout`, campo
+`refreshToken`): además de ser identificadores de código, cambiarlos invalidaría las sesiones ya
+guardadas en `localStorage` y obligaría a un cambio coordinado en cinco archivos del frontend para una
+ganancia nula. **Cero cambios en el frontend.** Queda anotado en el TSDoc de la entidad para que el
+próximo lector no interprete la asimetría como un descuido.
+
+**3. No se generó una migración de TypeORM porque el proyecto no tiene ese mecanismo.** No hay
+directorio `migrations/`, ni `DataSource` de CLI, ni scripts `migration:*`, y `app.module.ts` fija
+`synchronize: false` — que debe seguir así. El patrón vigente son archivos `.sql` idempotentes en
+`db/migrations/` que aplica el desarrollador, y la 009 lo sigue. Montar el CLI habría dejado una tabla
+`migrations` que no conoce ninguna de las ocho migraciones ya aplicadas: un registro de estado que
+miente desde el primer día.
+
+Idempotencia: `ALTER TABLE IF EXISTS … RENAME TO` y `ALTER INDEX IF EXISTS` lo son por sí mismos, pero
+`RENAME COLUMN` y `RENAME CONSTRAINT` **no admiten `IF EXISTS`** para su objeto y abortarían al
+reejecutarse. Por eso esos cuatro van dentro de un bloque `DO $$ … END $$;` con guardas contra
+`information_schema` y `pg_constraint`.
+
+**4. Las migraciones 001 y 004 se conservan intactas, solo con una nota.** Son un registro histórico
+ordenado y reescribirlas falsearía lo que se ejecutó; sobre una base antigua el orden correcto sigue
+siendo 001 → 004 → 009. La nota es necesaria porque la 001 es `CREATE TABLE IF NOT EXISTS
+refresh_tokens`: replayarla sobre una base posterior a la 009 no ve `tokens_sesion` y crearía **en
+silencio** una segunda tabla vacía con el nombre viejo.
+
+### Lo que las pruebas NO demuestran
+
+Las 398 pruebas pasan, pero **habrían pasado igual con el nombre de tabla equivocado**: las specs de
+autenticación mockean el repositorio de TypeORM, así que ejercitan la lógica y no el mapeo
+objeto-relacional. Ninguna referencia nombres de tabla, columna o índice (verificado por grep), y por eso
+no hubo ni una spec que adaptar. La única verificación real del renombrado es aplicar la 009 y ejecutar
+un login.
+
+Nada se ha ejecutado contra PostgreSQL: la infraestructura de base de datos la administra el
+desarrollador, y el servidor MCP `postgres-protodo` estaba caído en esta sesión (`CONNECTION_CLOSED`).
+
+### Pendiente inmediato
+
+- [ ] **Aplicar `db/migrations/009-tokens-sesion.sql`.** El repositorio queda en un estado que lo
+      **exige antes de volver a arrancar el backend**: la entidad ya apunta a `tokens_sesion`, así que
+      hasta aplicarla cualquier login o renovación falla con
+      `relation "tokens_sesion" does not exist`. Mismo aviso que llevaba la 004 en su día.
+
+      ```bash
+      sudo docker exec -i protodo_postgres psql -U '<usuario_postgres>' -d '<nombre_bd_desarrollo>' \
+        < db/migrations/009-tokens-sesion.sql
+      ```
+
+      Los dos `SELECT` finales deben mostrar `id_token_sesion` en primera posición y los cinco
+      índices/constraints con prefijo `tokens_sesion` / `idx_tokens_sesion`. Reejecutarla una segunda
+      vez debe terminar sin error.
+
+---
+
+## 2026-09-08 · Plantillas de flujo: separación blueprint / instancia — rama `feat/trigger-imap`
+
+### Paso 1 completado — esquema, entidades y helper de topología
+
+| Archivo | Estado |
+|---|---|
+| `db/migrations/010-plantillas-flujo.sql` | creado |
+| `init.sql` | tabla `plantillas_flujo` + `flujos.id_plantilla_origen` + índice |
+| `backend/src/modules/workflow-templates/entities/workflow-template.entity.ts` | creado |
+| `backend/src/modules/workflows/entities/workflow.entity.ts` | `templateId` + `@ManyToOne` |
+| `backend/src/core/fsm/utils/pipeline-topology.util.ts` | creado (extraído del servicio) |
+| `backend/src/core/fsm/utils/pipeline-topology.util.spec.ts` | creado, 7 pruebas |
+| `backend/src/modules/workflows/workflows.service.ts` | consume el helper |
+
+```
+Backend → 405 pruebas (antes 398) · 24 suites · tsc limpio · eslint 0 errores
+```
+
+### El «por qué» de cuatro decisiones
+
+**1. Blueprint e instancia eran la misma fila.** La Fase 0 del asistente listaba flujos ya instanciados
+con esquema (`findSelectablePipelines()`) y clonaba su topología. Consecuencias: editar el flujo del que
+otros partieron cambiaba la plantilla de facto, y no había manera de tener un maestro que no se pudiera
+disparar. `plantillas_flujo` es el catálogo de topologías base y no se ejecuta nunca: no tiene autor,
+ni estado, ni ejecuciones.
+
+**2. `flujos.id_plantilla_origen` es trazabilidad, no dependencia.** El flujo conserva su propia copia
+del grafo en `configuracion_pipeline`, así que editar la plantilla después **no** altera los flujos que
+ya salieron de ella. Esa independencia es el sentido de separar las dos cosas: si el flujo leyese el
+grafo del maestro, retocar un blueprint cambiaría el comportamiento de flujos en producción.
+
+Nullable por dos motivos distintos: los flujos anteriores a la 010 no vienen de ningún maestro, y el
+asistente debe poder crear uno desde cero. Un `NOT NULL` habría obligado a inventar una plantilla para
+las filas históricas. Sin lado inverso `@OneToMany`: nadie navega plantilla → flujos y declararlo
+cerraría un ciclo de imports entre las dos entidades.
+
+**3. La columna JSONB se llama `configuracion_pipeline`, no `pipeline_schema`.** Es una desviación
+deliberada del enunciado: sería la única columna con nombre inglés del esquema, y compartir el nombre
+con `flujos` es lo que hace legible el clonado. Aquí sí es `NOT NULL`, a diferencia de `flujos`: un
+flujo sin esquema es un borrador legítimo del asistente, pero una plantilla sin topología no es una
+plantilla. También `nombre VARCHAR(100)` y no 120 como `plantillas_html`: el nombre del blueprint se
+propone como nombre del flujo, y `flujos.nombre` es `VARCHAR(100)` — con 120 un nombre válido de
+plantilla no cabría en su instancia.
+
+**4. `buildOrderedTopology` sale del servicio.** Era un método `private` de `WorkflowsService`, y las
+plantillas necesitan exactamente el mismo recorrido `entrypoint → nextStep` para exponer su topología al
+selector. Duplicarlo dejaría dos lecturas del mismo grafo divergiendo en silencio. Vive ahora en
+`@core/fsm/utils/` como función pura con un callback `onTruncated` opcional: el aviso del puntero
+huérfano queda en manos del llamante, que es quien sabe si el esquema roto es de un flujo o de una
+plantilla. Su tipo de retorno se declara en el propio util y no se importa de `@modules/workflows`,
+porque `@core` no puede depender de un módulo funcional sin invertir las capas.
+
+Las 7 pruebas nuevas cubren lo que antes solo se probaba de forma indirecta: el orden real frente al de
+las claves del mapa (el fixture declara los nodos en orden inverso al de ejecución), el corte
+anticiclos, el truncado ante un puntero huérfano y el callback de aviso.
+
+**Próximo paso:** paso 2 — `backend/src/modules/workflow-templates/` con sus DTOs, servicio (con
+`PipelineValidatorService` y `assertNameAvailable`), controlador (`@Roles(ADMIN)` en las escrituras vía
+`getAllAndOverride`), módulo, registro en `AppModule` y `workflow-templates.service.spec.ts`.
+
+### Paso 2 completado — módulo `WorkflowTemplates`
+
+| Archivo | Estado |
+|---|---|
+| `backend/src/modules/workflow-templates/dto/create-workflow-template.dto.ts` | creado |
+| `backend/src/modules/workflow-templates/dto/update-workflow-template.dto.ts` | creado |
+| `backend/src/modules/workflow-templates/dto/workflow-template-response.dto.ts` | creado |
+| `backend/src/modules/workflow-templates/workflow-templates.service.ts` | creado |
+| `backend/src/modules/workflow-templates/workflow-templates.controller.ts` | creado |
+| `backend/src/modules/workflow-templates/workflow-templates.module.ts` | creado |
+| `backend/src/modules/workflow-templates/workflow-templates.service.spec.ts` | creado, 24 pruebas |
+| `backend/src/app.module.ts` | registra `WorkflowTemplatesModule` |
+| `backend/src/modules/workflows/workflows.service.spec.ts` | fixture con `templateId`/`template` en null |
+
+```
+Backend → 429 pruebas (antes 405) · 25 suites · tsc limpio · eslint 0 errores
+```
+
+### El «por qué» de cuatro decisiones
+
+**1. Lectura para EDITOR, escritura solo para ADMIN.** Es la diferencia con `TemplatesController`, que
+admite ambos roles en todo. El selector de la Fase 0 del asistente lo usa un EDITOR, así que el `GET`
+tiene que estar abierto; pero redefinir el maestro del que parten todos los flujos es más poderoso que
+editar un flujo suelto —cambiar la topología base decide qué nodos existen en cada flujo que alguien
+cree después. Los `@Roles(UserRole.ADMIN)` de método ganan al de clase porque `RolesGuard` resuelve con
+`getAllAndOverride`; los guards siguen declarados a nivel de clase para que un endpoint futuro no nazca
+desprotegido.
+
+**2. Dos DTO de respuesta, no uno.** El listado (`WorkflowTemplateResponseDto`) proyecta la topología y
+**omite** `pipelineSchema`, por el mismo criterio que `PipelineSummaryResponseDto`: los `params` de un
+TRIGGER_IMAP llevan `host`, `user` y `passwordEnvKey`. Devolverlos en el listado expondría la
+configuración de cada nodo de cada plantilla en la petición que el asistente hace en cada arranque. El
+detalle (`WorkflowTemplateDetailResponseDto`) sí lo incluye, porque es el objeto que el editor
+administrativo edita. La prueba 1.4 fija esa frontera serializando la respuesta y buscando
+`passwordEnvKey`.
+
+Reutiliza `PipelineStepDto` de `@modules/workflows` en lugar de declarar su propio paso: es la misma
+proyección, y así el frontend usa un único tipo para pintar el stepper venga de una plantilla o de un
+flujo.
+
+**3. La validación del grafo es la razón de ser del servicio, no el CRUD.** Una plantilla es el punto de
+partida de N flujos, así que un `nextStep` roto aquí se propaga a cada instancia que alguien cree. Se
+reutiliza `PipelineValidatorService` —el mismo que valida el esquema de un flujo— para que ambos caminos
+exijan exactamente lo mismo; replicarlo abriría la puerta a una plantilla que el catálogo acepta y el
+motor rechaza. En `update` se revalida siempre que el grafo viaje.
+
+El nombre se comprueba **antes** del grafo (prueba 3.4 verifica que `validateSchema` no llega a
+llamarse): es la validación más barata y la que el usuario corrige más a menudo.
+
+**4. `assertInstantiable` y no un simple `findOne`.** Lo consume `WorkflowsService` en el paso 3 para
+comprobar el `templateId` recibido. Una plantilla retirada devuelve 400: permitir instanciarla vaciaría
+de sentido el borrado lógico, que existe justo para que deje de usarse. Y el borrado es lógico porque
+los flujos instanciados apuntan a la fila con `id_plantilla_origen`.
+
+Nota de método: `update` comprueba `!== undefined` en cada campo y no la veracidad del valor. Es lo que
+permite que `{ active: false }` inactive de verdad y que una descripción vacía se guarde vacía; con un
+`if (updateDto.active)` ambos casos se ignorarían en silencio. La prueba 4.4 lo fija.
+
+Hallazgo colateral: `npx tsc -p tsconfig.json` (el que incluye las specs) arrastra **26 errores
+preexistentes** en `imap-polling.service.spec.ts` y `allowed-ips.service.spec.ts` —varianza de las
+firmas de los mocks de TypeORM y un `delete` sobre propiedad `readonly`—, ajenos a esta entrega. La
+puerta del proyecto es `tsconfig.build.json`, que excluye specs, y `ts-jest` transpila sin comprobar
+tipos (`isolatedModules`). De los 4 errores que aparecían en `workflows.service.spec.ts`, **1 lo
+introdujo esta entrega** (el fixture `buildWorkflow` dejó de satisfacer `Workflow` al ganar dos
+columnas) y quedó corregido; los otros 3 son de la misma familia preexistente.
+
+**Próximo paso:** paso 3 — `templateId` en `CreateWorkflowDto`, `WorkflowsService.createWorkflow`
+validando con `assertInstantiable`, `updateWorkflow` + `UpdateWorkflowDto`, `PATCH /api/workflows/:id`
+con la revalidación al activar, y ampliación de `workflows.service.spec.ts`.
+
+### Paso 3 completado — instanciación desde plantilla y habilitación de flujos
+
+| Archivo | Estado |
+|---|---|
+| `backend/src/modules/workflows/dto/create-workflow.dto.ts` | `templateId?` (`@IsUUID`) |
+| `backend/src/modules/workflows/dto/update-workflow.dto.ts` | creado |
+| `backend/src/modules/workflows/dto/pipeline-summary-response.dto.ts` | expone `templateId` |
+| `backend/src/modules/workflows/workflows.service.ts` | `templateId` en el alta + `updateWorkflow` + `assertActivatable` |
+| `backend/src/modules/workflows/workflows.controller.ts` | `@Patch(':id')` |
+| `backend/src/modules/workflows/workflows.module.ts` | importa `WorkflowTemplatesModule` |
+| `backend/src/modules/workflows/workflows.service.spec.ts` | bloques 9-11, 14 pruebas nuevas |
+
+```
+Backend → 443 pruebas (antes 429) · 25 suites · tsc limpio · eslint 0 errores
+```
+
+### El «por qué» de cuatro decisiones
+
+**1. El grafo se COPIA en el flujo, no se referencia.** `flujos.configuracion_pipeline` sigue llevando
+su propio esquema, e `id_plantilla_origen` es solo trazabilidad de la procedencia. Si el flujo leyese el
+grafo del maestro, retocar un blueprint cambiaría el comportamiento de flujos ya en producción — un
+cambio a distancia y sin aviso. La independencia es el sentido de separar blueprint e instancia, y la
+prueba 9.1 fija que se persiste el vínculo sin que el esquema deje de ser propio.
+
+**2. `UpdateWorkflowDto` no es un `PartialType(CreateWorkflowDto)`.** Ese DTO incluye `templateId`, y el
+maestro del que nació un flujo es un hecho histórico: dejar reescribirlo permitiría falsear la
+procedencia después de crearlo, que es justo lo que la columna existe para registrar. Se declara a mano
+con los cuatro campos editables.
+
+**3. Activar y desactivar no son simétricos.** `assertActivatable` solo se invoca al poner `active:
+true`, y hace dos cosas: rechaza un flujo sin `pipeline_schema` (un borrador legítimo del asistente,
+pero activarlo dejaría al sondeo disparando ejecuciones que fallan en el primer paso) y **revalida** el
+esquema existente, porque la fila pudo escribirse por SQL directo o quedar obsoleta si el contrato del
+grafo cambió. Habilitar un flujo lo expone al sondeo IMAP, que lo recoge en su reconciliación de 60 s
+sin volver a preguntar nada: este es el último punto de control.
+
+Desactivar, en cambio, no valida nada (pruebas 11.4 y 11.5). Retirar un flujo de los disparadores es la
+vía de emergencia para pararlo, y hacerla fallar por un esquema roto sería exactamente lo contrario de
+lo que hace falta en ese momento.
+
+**4. Sin `@Delete` en el controlador.** Retirar un flujo es `PATCH { "active": false }`. Un borrado
+físico dejaría las ejecuciones ya trazadas apuntando a un flujo inexistente, y la trazabilidad es el
+motivo de que `ejecuciones_flujo` exista.
+
+Con esto queda cerrado el pendiente que arrastraba PROT-12: **ya hay endpoint para activar un flujo**.
+Nacía inactivo por diseño y hasta ahora la única vía de habilitarlo era SQL directo.
+
+La comprobación de la plantilla va **antes** de validar el grafo (prueba 9.3 verifica que
+`validateSchema` no llega a llamarse): es una consulta barata y un `templateId` equivocado invalida la
+petición entera. `assertInstantiable` rechaza además las plantillas retiradas, porque permitir
+instanciarlas vaciaría de sentido el borrado lógico.
+
+**Próximo paso:** paso 4 — frontend completo: tipos, `workflow-templates.service.ts`, absorber
+`pipelines.service.ts` en `workflows.service.ts`, tres stores (`workflow-templates`, `workflows` y el
+refactor de `flujo-draft` con clonado inmutable), las vistas `/flujos` y `/plantillas-flujo`, router,
+`MainLayout` y las pruebas de Vitest.
+
+### Paso 4 completado — frontend: catálogo de flujos, CRUD de plantillas y asistente repuntado
+
+| Archivo | Estado |
+|---|---|
+| `frontend/src/types/pipeline.ts` | `WorkflowTemplateSummary`/`Detail`, payloads y `templateId` |
+| `frontend/src/services/workflow-templates.service.ts` | creado |
+| `frontend/src/services/workflows.service.ts` | absorbe `fetchWorkflows` + `updateWorkflow` |
+| `frontend/src/services/pipelines.service.ts` | **eliminado** |
+| `frontend/src/stores/workflow-templates.store.ts` | creado |
+| `frontend/src/stores/workflows.store.ts` | creado |
+| `frontend/src/stores/flujo-draft.store.ts` | parte de plantillas, con clonado inmutable |
+| `frontend/src/components/workflows/WorkflowsManager.vue` · `WorkflowDialog.vue` | creados |
+| `frontend/src/components/workflow-templates/WorkflowTemplatesManager.vue` · `WorkflowTemplateDialog.vue` | creados |
+| `frontend/src/pages/workflows/WorkflowsPage.vue` · `workflow-templates/WorkflowTemplatesPage.vue` | creados |
+| `frontend/src/components/wizard/PipelineSelector.vue` | recibe `templates`, estado vacío con salida |
+| `frontend/src/pages/WizardPage.vue` | Fase 0 desde plantillas; tras guardar va a `/flujos` |
+| `frontend/src/router/routes.ts` · `layouts/MainLayout.vue` | dos rutas, drawer y migas |
+| `frontend/src/stores/flujo-draft.store.spec.ts` | adaptada + bloques 11-12 |
+| `frontend/src/stores/workflow-templates.store.spec.ts` · `workflows.store.spec.ts` | creadas |
+
+```
+Backend   → 443 pruebas · 25 suites · tsc limpio · eslint 0 errores
+Frontend  → 149 pruebas (antes 113) · 8 archivos · vue-tsc limpio · eslint limpio · quasar build OK
+```
+
+### El «por qué» de cinco decisiones
+
+**1. `pipelines.service.ts` se elimina, no se deja como alias.** Apuntaba a la MISMA ruta `/workflows`
+que `workflows.service.ts`. `frontend-architecture.md` §1 fija un servicio por dominio, y tener dos fue
+literalmente la grieta por la que el asistente acabó leyendo flujos instanciados donde debía leer
+plantillas maestras: el nombre `fetchSelectablePipelines` sonaba a catálogo de blueprints y devolvía
+instancias. Conservar el archivo habría dejado el mismo malentendido a mano del siguiente.
+
+**2. El clonado inmutable se hace campo a campo, no con `structuredClone`.** Fue el intento inicial y
+**falla en ejecución**: los elementos de `availableTemplates` vienen envueltos en el Proxy reactivo de
+Vue, y `structuredClone` lanza `DataCloneError` sobre un Proxy. Lo detectaron las 37 pruebas del
+borrador al ponerse rojas de golpe. La copia explícita (`{ nodeId, nodeType, outputNamespace }`) es
+además mejor que el clon genérico: el literal obliga al compilador a exigir aquí cualquier campo que
+`PipelineStep` gane en el futuro, en vez de copiarlo por referencia sin avisar.
+
+Las pruebas 11.1-11.3 fijan las tres consecuencias: objetos distintos con los mismos valores, mutar el
+borrador no toca el catálogo, y reelegir la misma plantilla arranca de ella intacta y no del recorte
+anterior.
+
+**3. La prueba 9.5 cambia de sentido, no se borra.** Antes verificaba que el flujo creado se añadía al
+catálogo del asistente. Ahora verifica lo contrario: que **no** se añade, porque ese catálogo son
+plantillas y colar ahí una instancia la ofrecería como blueprint — exactamente el error que esta entrega
+corrige. El flujo se devuelve al llamante, que navega a `/flujos`.
+
+**4. `/plantillas-flujo` no lleva `requiresAdmin`, aunque las escrituras del backend sí sean de ADMIN.**
+Un EDITOR necesita consultar el catálogo para saber de qué puede partir; el 403 en el alta y la edición
+lo impone el servidor, que es la autoridad. Bloquear la ruta entera le ocultaría información que sí
+puede ver, y duplicaría en el router una regla que ya vive en el controlador.
+
+**5. Activar va por interruptor; desactivar pasa por el temporizador de 5 s.** Habilitar un flujo no
+destruye nada y el backend ya lo rechaza si el esquema no es íntegro, así que el `QToggle` basta.
+Desactivar corta la ingesta de un flujo en marcha, y eso es una acción crítica: `SafeDeleteModal` con su
+cuenta atrás (`frontend-quasar.md` §4). El store escribe siempre la **respuesta del servidor** y no un
+parche optimista: activar puede fallar con un 400, y pintar el interruptor en verde antes de saberlo
+mentiría sobre el estado real del flujo (prueba 3.3 de `workflows.store.spec.ts`).
+
+El editor de plantillas valida el JSON en el cliente solo en cuanto a FORMA (que parsee y sea un
+objeto). La coherencia del grafo la decide `PipelineValidatorService`, que es la única autoridad sobre la
+topología; comprobar la sintaxis aquí solo evita gastar una petición en un 400 seguro.
+
+### Pendientes
+
+- [ ] **Aplicar `db/migrations/009-tokens-sesion.sql` y `010-plantillas-flujo.sql`.** Las ejecuta el
+      usuario. Hasta la 009 el login falla; hasta la 010 falla cualquier consulta de flujos o
+      plantillas. Nada se ha ejecutado contra PostgreSQL.
+- [ ] **Sembrar la primera plantilla de flujo.** Hasta que exista una, el asistente muestra su estado
+      vacío con el enlace a `/plantillas-flujo`. La topología de Notiweb de 7 nodos está en
+      `pipeline-validator.service.spec.ts:15`.
+- [ ] Solo 2 de los 7 tipos de nodo tienen configurador (`TRIGGER_IMAP`, `MAPEADOR_PLANTILLA`), así que
+      una plantilla que incluya cualquiera de los otros cinco no se puede completar en el asistente.
+- [ ] El disparo sigue siendo en proceso, no encolado (`architecture-patterns.md` §5 pide BullMQ).
+- [ ] `host` sin lista blanca en el nodo IMAP.
+- [ ] 26 errores de tipo preexistentes en dos specs bajo `tsconfig.json` (varianza de mocks de TypeORM);
+      la puerta del proyecto es `tsconfig.build.json`, que excluye specs.
+
+---
+
+## 2026-09-08 · Control de estado alineado con el CRUD de usuarios (CU-10) — rama `feat/trigger-imap`
+
+| Archivo | Estado |
+|---|---|
+| `frontend/src/components/workflows/WorkflowsManager.vue` | badge + par de botones de usuarios |
+| `frontend/src/components/workflow-templates/WorkflowTemplatesManager.vue` | idem |
+| `frontend/src/components/workflow-templates/WorkflowTemplateDialog.vue` | `q-toggle` retirado |
+| `frontend/src/stores/workflow-templates.store.spec.ts` | pruebas 3.7 y 3.8 |
+
+```
+Frontend → 151 pruebas (antes 149) · 8 archivos · vue-tsc 0 errores · eslint limpio · quasar build OK
+```
+
+### El patrón replicado, verbatim de `UsersManager.vue`
+
+| Estado | Clases | Icono | Acción |
+|---|---|---|---|
+| Activo | `pd-btn-icon pd-btn-icon--danger` | `block` | `requestDeactivation` → `SafeDeleteModal` (5 s) |
+| Inactivo | `pd-btn-icon pd-btn-icon--positive` | `check_circle` | mutación directa |
+
+Ambos con `outline dense size="sm"`, `aria-label` con el nombre del registro y `q-tooltip`. La columna
+Estado pasa a `q-badge` con `pd-badge--active` / `pd-badge--inactive`, exactamente como
+`body-cell-status` de la tabla de usuarios.
+
+### El «por qué» de tres decisiones
+
+**1. El `q-toggle` no era solo una inconsistencia visual: era un agujero en CU-10.** Convivía con el
+botón `block` de la botonera, así que había dos controles para la misma mutación —pero solo uno pasaba
+por `SafeDeleteModal`. El interruptor desactivaba un flujo en marcha con un clic, sin cuenta atrás. La
+regla §4 exige el temporizador para «toda petición de borrado o desactivación», y el camino corto la
+incumplía. Ahora el estado solo se informa y la conmutación vive en un par de botones excluyentes.
+
+**2. La asimetría entre activar y desactivar es la del CRUD de usuarios, no una invención.**
+`activateUser` muta directo y `requestDeactivation` abre el modal. Tiene el mismo fundamento aquí:
+activar no destruye nada y es reversible, y el único riesgo real —un grafo roto expuesto al sondeo— lo
+cubre el backend, que revalida el esquema antes de habilitar. Desactivar corta la ingesta, y un correo
+que llegue mientras el flujo está retirado se queda en el buzón sin procesar hasta que alguien lo note.
+
+**3. El editor de plantillas también perdió su interruptor, y por precedente explícito.** `UserDialog.vue`
+no expone `isActive`: en el CRUD de usuarios el estado se cambia **solo** desde la tabla. El toggle del
+editor de plantillas era una tercera vía de mutar `active` y la más silenciosa —guardar el formulario
+con el toggle apagado retiraba la plantilla sin confirmación de ningún tipo. Se sustituye por un badge
+de solo lectura que remite al catálogo.
+
+Las pruebas 3.7 y 3.8 son las que hacen sostenible esa retirada: fijan que `saveDraft` conserva el
+`active` existente al editar y que un alta nace publicada. Sin ellas, un cambio futuro en `initDraft`
+podría reintroducir en silencio la mutación de estado al guardar.
+
+### Lo que las pruebas cubren y lo que no
+
+Vitest corre con `environment: 'node'` y sin `@vue/test-utils`, así que **el par de botones no es
+testeable**: es lógica de plantilla y exigiría montar el componente en un DOM. Lo verificado son las dos
+premisas de store sobre las que descansa el rediseño (3.7 y 3.8) más la sincronización reactiva, que ya
+estaba cubierta (4.1 y 4.3 en plantillas, 3.2 y 3.3 en flujos): el store escribe la respuesta del
+backend y no un parche optimista, de modo que el badge se repinta con lo que de verdad quedó guardado y
+un 400 deja la fila intacta.
+
+### Nota sobre `.pd-badge--inactive`
+
+Queda con sus tokens originales (`--pd-disabled-bg` / `--pd-disabled-text`), los mismos que usa el badge
+«Inactivo» de usuarios y plantillas HTML. Un intento anterior de moverlo a `--pd-surface-muted` se
+descartó: es una clase compartida y habría cambiado también `/templates` y `/users`, ajenos a esta
+petición.
+
+---
+
+## Adjuntos IMAP: por qué el motor libera el binario y no el nodo
+
+### El problema que se resuelve
+
+`ImapTriggerStrategy` descartaba `parsed.attachments` por completo: un correo con factura
+adjunta entraba al pipeline sin su adjunto. Añadir la ingesta es fácil; lo que no es trivial
+es el ciclo de vida de esos bytes. Un adjunto de 5 MiB son ~6,8 MB de base64, y
+`getAllContext()` reserializa el contexto **entero** en cada `saveCheckpoint` —uno por nodo,
+más uno por reintento—. Sin una política de liberación, una sola ejecución escribe decenas de
+MB en `contexto_acumulado`.
+
+### Por qué la purga vive en `FsmEngineService`
+
+La primera versión la puso en `ParserEmailStrategy`, que tras procesar el adjunto haría
+`context.setNamespace('raw_email', { attachments: purgados })`. Se descartó por tres motivos:
+
+1. **No cumplía el objetivo.** El motor persiste el checkpoint tras *cada* nodo. El base64 se
+   escribía en jsonb en el checkpoint posterior al nodo IMAP y solo se limpiaba en el
+   posterior al parser: había una ventana en la que los bytes estaban en la base de datos.
+2. **Rompe «un nodo, un namespace».** Una estrategia que escribe en un namespace ajeno y
+   anterior invierte el contrato de `INodeStrategy`, donde el contexto solo se lee y es el
+   motor quien escribe.
+3. **No se generaliza.** Obligaría a cada estrategia futura a acordarse de purgar, y a que el
+   flujo contuviera un `PARSER_PRE_IA` para que la liberación ocurriese siquiera.
+
+En el motor, la regla se aplica sola a cualquier nodo que declare texto, en un único punto.
+
+### Por qué la condición es «¿hubo texto útil?» y no «¿ya se procesó?»
+
+Purgar incondicionalmente tras el primer nodo destruiría justo el dato que el caso multimodal
+necesita: un PDF escaneado no tiene cuerpo textual, y sus bytes son la única fuente de
+información del correo. La regla acordada —liberar solo si algún nodo produjo `clean_body`,
+`text` o `extracted_text` con contenido— encadena sola:
+
+- Correo **con** cuerpo: el propio `TRIGGER_IMAP` emite `text`, así que los adjuntos se
+  liberan en el **mismo** checkpoint que los escribió. El base64 nunca toca PostgreSQL.
+- Correo **sin** cuerpo: no se purga, el binario sobrevive, y el parser levanta
+  `requires_multimodal_fallback` sobre ese mismo correo. Las dos decisiones coinciden porque
+  miran el mismo hecho.
+
+Una cadena en blanco no cuenta como texto: es ausencia de contenido con otra forma, y tratarla
+como válida vaciaría el adjunto de un correo que solo trae espacios.
+
+#### La condición no bastó (actualización del 2026-09-18)
+
+Lo anterior se sostenía sobre una coincidencia que dejó de darse. Mientras el parser devolvía
+`clean_body: null` en la rama HTML, el correo multimodal conservaba su binario **por
+accidente**: nadie declaraba texto. En cuanto el saneador empezó a producir texto real desde
+el marcado, ese mismo correo pasó a *declarar* un `clean_body` corto pero no vacío, y para el
+motor eso era texto útil. La regla habría purgado los bytes del único correo que los
+necesitaba.
+
+Por eso el vocabulario del motor creció en dos direcciones: una clave de **retención**
+(`requires_multimodal_fallback`) que veta la liberación, y un **listón de longitud**
+(`FSM_MIN_USEFUL_TEXT_LENGTH`, def. 50) por debajo del cual el texto no cuenta. El listón hace
+falta además del veto porque `TRIGGER_IMAP` emite `text` y corre *antes* del parser: un
+`"Ver adjunto."` de doce caracteres purgaba el PDF escaneado antes de que nadie pudiera
+vetarlo, y el veto del parser llegaba sobre un adjunto ya vacío. Ese hueco lo fija la prueba
+12.12.
+
+El veto gana sobre el texto cuando llegan juntos. La asimetría es deliberada: un binario no
+liberado pesa unos bytes en una fila; uno liberado de más destruye la única copia del dato con
+el checkpoint ya escrito.
+
+### El acoplamiento es un nombre de clave, no una dependencia
+
+`ParserEmailStrategy` no sabe que existe la purga. Publica `clean_body` porque es su salida
+natural, y el motor reconoce ese nombre como señal de «ya hay texto». El parser se puede
+sustituir entero sin tocar el motor, y el motor purga aunque el flujo no tenga parser.
+
+Con el veto siguen siendo nombres de clave, solo que ahora son **dos vocabularios**: uno
+positivo (`EXTRACTED_TEXT_KEYS`) y uno negativo (`BINARY_RETENTION_KEYS`). La dirección de las
+dependencias no cambia —`@core` no importa nada de `@modules`, los literales se declaran en el
+motor y `@modules/nodes` no importa nada del motor para esto—, y cualquier nodo futuro (un
+OCR, un transcriptor de audio) puede levantar la misma bandera sin tocar una línea de `@core`.
+La única novedad es que el vocabulario, que solo sabía afirmar, ahora también sabe negar.
+
+### El escape que casi se pasa por alto
+
+`logNodeOutcome` pasa `payloadSnapshot: result.data` al volcado forense, que escribe en
+`execution-*.log`. Ese archivo rota por tamaño (20m por defecto): una sola línea de 6,8 MB
+habría agotado la rotación de golpe, llevándose por delante la traza de todo lo demás. Por eso
+la redacción del snapshot es parte del mismo cambio, y sustituye el base64 por
+`[base64 omitido]` en vez de por `null`: en un log forense importa distinguir «aquí había
+bytes que no se han escrito» de «este adjunto ya venía vacío».
+
+### Decisiones menores con su porqué
+
+- **Opt-in (`includeAttachments: false`).** El coste no se paga donde se ve. Encenderlo por
+  defecto habría cambiado el peso de cada fila de `ejecuciones_flujo` en todos los flujos IMAP
+  ya guardados sin que nadie lo pidiera.
+- **`@Max` sobre `maxAttachmentBytes`.** El campo solo puede *endurecer* el tope de 5 MiB.
+  Sin techo, un `500000000` escrito desde el asistente —que un rol EDITOR puede editar—
+  convierte una fila en un problema de disco.
+- **Presupuesto acumulado.** `maxAttachmentBytes` acota un adjunto; veinte que lo cumplen
+  individualmente suman ~130 MB. `MAX_TOTAL_ATTACHMENT_BYTES` acota la suma.
+- **Exclusión de los `related`.** `simpleParser` ya incrusta las imágenes referenciadas desde
+  el HTML como `data:` URI dentro de `html`. Publicarlas también en `attachments` duplicaría
+  los mismos bytes en la misma fila. Se mira `related` y no la mera presencia de `cid`: hay
+  clientes que ponen `Content-ID` a adjuntos reales, y esos sí deben viajar.
+- **`attachments: []` y nunca ausente.** El payload ya sostenía la regla de que toda clave
+  está siempre presente. Que la forma del jsonb dependiera de un booleano de configuración
+  haría que cualquier diagnóstico sobre checkpoints históricos empezara por «depende de cómo
+  estuviera configurado ese día».
+
+### Lo que las pruebas cubren y lo que no
+
+El bloque 12 de `fsm-engine.service.spec.ts` es el que sostiene la regla: verifica que ningún
+`contextPayload` persistido contiene el base64 cuando hubo texto, que sí lo contiene mientras
+no lo hubo, que una cadena en blanco no dispara la purga y que un nodo fallido no la dispara
+—purgar antes de un fallo dejaría al reintento calculando sobre un adjunto ya vaciado—.
+
+El bloque 3 de `parser-email.strategy.spec.ts` fija la pureza: tras `execute`, el namespace
+`raw_email` queda byte a byte igual. Es lo que impide que alguien «optimice» devolviendo la
+purga al nodo.
+
+Lo que **no** está cubierto es el extremo a extremo con un buzón real: los dobles de
+`imapflow` y `mailparser` fijan el contrato, no el comportamiento de un servidor IMAP
+concreto ante un MIME malformado.
+
+Con el saneador se añaden: las pruebas 12.9 a 12.13 del motor —el veto, que sea *positivo
+only*, que una cadena `"true"` del jsonb no vete, el listón de longitud y que la variable de
+entorno se lea de verdad—, los bloques 6 a 9 de `parser-email.strategy.spec.ts` (saneado,
+enlaces, asunto y métricas) y la spec nueva `email-sanitizer.util.spec.ts`, donde viven los
+casos exhaustivos de cada expresión regular. El reparto es deliberado: la spec de la
+estrategia comprueba que el nodo *compone* bien; la del util, que cada heurística *decide*
+bien.
+
+Sigue sin cubrirse un corpus real de correos. Las heurísticas están calibradas contra fixtures
+escritos a mano, y ese es el riesgo de producto de la rama: el anti-falso-positivo del RGPD
+(prueba 6.7) protege el caso que sabemos nombrar, no los que todavía no hemos visto.
+
+### Deuda consciente — saldada el 2026-09-18
+
+En su día se asumió que `PARSER_PRE_IA` figurase como `implemented: true` en `GET /api/nodos`
+sin sanear el marcado, apoyándose en que el esqueleto ya hacía trabajo real (inventario de
+adjuntos y decisión multimodal) y en que `body_source: 'html_pending_sanitize'` declaraba
+honestamente lo que faltaba.
+
+Esa deuda está saldada: el nodo sanea, `'html_pending_sanitize'` desapareció de la unión —el
+valor describía una etapa del roadmap, y mantenerlo sería una mentira en el checkpoint— y el
+`implemented: true` pasa a ser honesto sin matices. Queda un residuo sin migración: las filas
+ya escritas de `ejecuciones_flujo.contexto_acumulado` pueden contener el literal viejo, así
+que cualquier lector futuro que ramifique sobre `body_source` debe tolerar valores fuera de la
+unión. Está anotado en el TSDoc del tipo.
+
+
+---
+
+## 2026-09-18 · Saneado de marcado, enlaces y métricas en `PARSER_PRE_IA` — rama `feat/parser-email`
+
+Cierra la rama que el esqueleto del nodo había dejado abierta: convertir el marcado en texto
+aprovechable, extraer los enlaces de contenido, normalizar el asunto y medir la reducción de
+caracteres (RNF-01). El payload crece de siete claves a doce y `clean_body` deja de admitir `null`.
+
+### Por qué `cheerio` y no `@mozilla/readability`
+
+Readability está instalado desde hace semanas y era el candidato natural. Se descartó por cuatro
+motivos, y el orden importa:
+
+1. Exige un `Document` real, es decir **jsdom completo** dentro del proceso que sostiene el motor.
+   Construir un `JSDOM` sobre marcado hostil de correo, en cada correo del sondeo y cada minuto, es
+   un sumidero de CPU que se paga donde no se ve.
+2. Su algoritmo puntúa densidad de `<p>` y **penaliza tablas**. Un correo de Outlook es,
+   estructuralmente, tablas anidadas: el resultado típico es `null` por no alcanzar el
+   `charThreshold`, o el pie de página.
+3. Necesita `doc.documentURI` para resolver URIs relativas. Un correo no tiene URL base.
+4. El payload de `parsed_email` es contrato y tiene que ser **reproducible**. El *scoring* de
+   Readability no es estable entre versiones menores.
+
+Hay además un argumento práctico: `transformIgnorePatterns` de Jest ya contempla toda la familia de
+`htmlparser2`, y cheerio ya se carga en verde en dos specs. jsdom y Readability son ESM, y el
+incidente de `htmlparser2@12` documentado más arriba dice bastante sobre lo que cuesta esa pelea.
+Ambos siguen reservados para `EXTRACTOR_WEB`, donde sí hay un artículo y sí hay URL base.
+
+Tampoco se usó `sanitize-html`: es el saneador de lista blanca para marcado **publicable**, y aquí no
+se produce marcado sino texto. Se descartan etiquetas enteras, no se filtran atributos.
+
+### El DOM resuelve la estructura; el regex resuelve la prosa
+
+Es la división de trabajo de todo el saneador, y evita el error de intentar hacerlo todo con una de
+las dos herramientas. Los contenedores de firma y cita (`.gmail_signature`, `#appendonsend`) son
+**estructura**: se resuelven con selectores. `-----Mensaje original-----` y `El … escribió:` son
+**prosa**: son texto plano, ningún `blockquote` los envuelve de forma fiable, y buscarlos en el DOM
+es perder el tiempo.
+
+Un detalle que costó una prueba: los marcadores de Outlook no *envuelven* la cita, la **preceden**
+como hermanos. Borrar el nodo deja el hilo entero dentro del cuerpo. Hay que subir por los ancestros
+barriendo los hermanos posteriores en cada nivel — y el barrido va **antes** de comprobar si queda
+padre, porque en modo fragmento `parent()` de un elemento de primer nivel devuelve vacío y
+comprobarlo en la condición del bucle deja sin barrer justo el último nivel.
+
+El aplanado muta el árbol insertando separadores y lee `$.root().text()`, en vez de recorrerlo
+recursivamente. Un *walk* obligaría a tipar los nodos con `Element` de `domhandler`, que es
+dependencia transitiva y no declarada — la misma razón por la que `TemplateRendererService` se
+estrecha con `'tagName' in element`. Mutar y leer solo necesita selectores.
+
+Las celdas de tabla se separan con **espacio** y no con salto: con `\n` una fila horizontal se
+convierte en una columna y una tabla de datos pierde la única estructura que tenía.
+
+### El fallo silencioso del espacio duro
+
+`&nbsp;` decodifica a **U+00A0**, que no es un espacio ASCII. Si la normalización del espacio duro va
+después del colapso horizontal, `/[ \t]+/` no lo toca y el cuerpo acaba lleno de blancos invisibles
+que inflan `character_count` sin que nada falle. El orden de los siete pasos de `normalizeWhitespace`
+está fijado por la prueba 0.6 justamente por esto.
+
+### Por qué la racha final y no todo el cuerpo
+
+La decisión más importante de la rama, y es de producto, no de ingeniería. El corpus son **notas de
+prensa institucionales**. Un comunicado sobre una nueva sede que mencione «RGPD» o «protección de
+datos» en su tercer párrafo es perfectamente esperable, y barrer por todo el cuerpo destruiría justo
+el contenido que el nodo existe para conservar.
+
+Por eso `stripTrailingBoilerplate` recorre **desde el final hacia atrás** y se detiene en el primer
+párrafo que no case o que supere los 800 caracteres. Que nada en mitad del artículo se pierda no es
+una expectativa: es una propiedad de la construcción. La prueba 6.7 la fija.
+
+El tope de longitud es la segunda red, para el aviso legal pegado al cuerpo sin línea en blanco de
+por medio: el párrafo resultante es largo, no se retira, y se prefiere conservar ruido a perder
+contenido. Por el mismo criterio se descartaron las heurísticas de teléfono, dirección y cargo para
+detectar firmas: en un corpus donde el último párrafo suele ser el contacto del gabinete de prensa,
+ese contacto a menudo **es** información que el flujo quiere.
+
+Hay una tercera guarda, simétrica, en el corte de citas: si cortar deja la cabeza vacía **no se
+corta**. Un reenvío puro —cuerpo vacío, toda la sustancia dentro de la cita— se quedaría sin nada, y
+es preferible entregar la cita que entregar la nada.
+
+### Por qué las URLs relativas se descartan
+
+Un correo no tiene documento base. Absolutizar contra el dominio del remitente fabricaría una
+dirección que puede no existir, y `EXTRACTOR_WEB` la descargaría, fallaría y levantaría su alerta.
+Las *protocol-relative* (`//host/ruta`) sí se rescatan promoviendo a `https:`, porque ahí el host es
+explícito y no se inventa nada.
+
+La recolección va **después** de podar el árbol y **antes** de aplanarlo. Así un enlace de
+desuscripción que vivía dentro de una firma ya eliminada no reaparece, y `clean_body` y
+`extracted_urls` describen el mismo documento. Devolver ambas salidas juntas desde una sola pasada no
+es solo ahorro: parsear dos veces permitiría que discrepasen sobre qué se eliminó.
+
+Los parámetros `utm_*` se retiran por un motivo operativo, no estético: dos enlaces al mismo artículo
+que solo difieren en `utm_content` sobreviven a la deduplicación por `Set`, y `EXTRACTOR_WEB` acaba
+pagando **dos navegaciones de Playwright** por la misma página. `ref` y `spm` se conservan porque hay
+sitios que los usan para enrutar.
+
+**YouTube, TikTok, Threads, WhatsApp y Telegram quedan fuera de la lista social a propósito.** Una
+nota de prensa que enlaza un vídeo institucional está enlazando contenido, y este pipeline es de
+recorte de prensa. Que nadie los añada «por simetría».
+
+En la ruta de texto plano la lista queda vacía. Rescatar enlaces con un `https?://\S+` es posible,
+pero el texto plano parte las URLs con saltos de línea a 78 columnas (RFC 5322) y produciría
+direcciones truncadas. Un arreglo vacío y honesto es mejor que una lista de enlaces rotos.
+
+### Por qué `original_character_count` depende de `body_source`
+
+Podría haber sido siempre `html.length`, y habría sido más simple. Sería también inútil: en un correo
+`text/plain` puro `html` está vacío, y el porcentaje saldría 0 % por división por cero, ocultando una
+reducción real. Al revés, medir siempre contra `text` daría 0 % en la ruta HTML — justo donde la
+reducción es del 80-95 % y donde RNF-01 tiene algo que medir.
+
+La pareja `(original, final)` tiene que ser la entrada y la salida de la **misma** transformación. Al
+atarla a `body_source`, ambas son auto-consistentes; y comparar dos correos con `body_source` distinto
+es comparar cosas distintas, que es precisamente para lo que existe esa clave.
+
+Consecuencia que conviene conocer: **la ruta `'text'` dejó de ser un `trim()`**. También pasa por el
+corte de citas, firma y pie legal. Si no, un `text/plain` con cuarenta líneas de hilo citado y un
+aviso de confidencialidad entraría entero al prompt, que es exactamente el gasto que el nodo existe
+para evitar.
+
+### Por qué el DTO no crece
+
+Se valoraron `stripSignatures` y `filterSocialUrls`, y se descartaron los dos. Cada interruptor
+multiplica las formas posibles del payload **histórico**: un `extracted_urls: []` significaría a veces
+«no había enlaces» y a veces «alguien apagó la extracción ese día», y ningún checkpoint de hace seis
+meses puede distinguirlas. Es literalmente el mismo argumento que ya se escribió para
+`attachments: []`.
+
+Además, `stripSignatures: false` no tiene caso de uso: un flujo que quiera la firma quiere el correo
+crudo, y ese sigue intacto en `raw_email`. Y `filterSocialUrls` es indecidible desde fuera: quien
+configura el flujo no sabe qué enlaces trae el correo. La política «un enlace social no es contenido»
+es del nodo, y si algún día resulta equivocada se corrige para todos, no flujo a flujo.
+
+`MAX_EXTRACTED_URLS = 50` va como constante por lo mismo: es un límite de integridad —el arreglo se
+reserializa entero en cada checkpoint posterior— y no una preferencia.
+
+Sí cambió un valor: `minBodyLength` baja de 200 a 50. Los 200 estaban calibrados contra texto **sin
+sanear**, donde una firma y un pie legal sumaban solos unos 300 caracteres y casi cualquier correo
+superaba el listón por puro ruido. Con el saneador, `clean_body` es texto útil.
+
+### El veto de purga y por qué gana sobre el texto
+
+Está desarrollado arriba, en «La condición no bastó». Lo que merece quedar dicho aquí es que **la
+regresión la introdujo esta rama**: mientras el parser devolvía `null`, el correo multimodal
+conservaba sus bytes por accidente. El veto y el listón no son una mejora oportunista colada en el
+commit, son la reparación de lo que el saneador rompía.
+
+Y que el listón de longitud (`FSM_MIN_USEFUL_TEXT_LENGTH`) hace falta **además** del veto, porque
+`TRIGGER_IMAP` corre antes que el parser y ya emitía `text`. Va calibrado contra el `minBodyLength`
+del nodo, y los dos números tienen que moverse juntos: cualquier hueco entre ellos reabre la ventana
+en la que un correo declara texto bastante para tirar los bytes e insuficiente para el modelo.
+
+### Dónde vive el código y por qué
+
+Las heurísticas salieron de la estrategia a `src/modules/nodes/utils/email-sanitizer.util.ts`, con el
+precedente de `@core/fsm/utils` y `@common/utils`. Son funciones `string → string`: probarlas a
+través de `strategy.execute()` obligaría a construir un `StatePayloadContext` y un `raw_email`
+completo en cada assert, y a navegar `result.data?.clean_body` con `?.` para comprobar una expresión
+regular. Con el util, `expect(cleanSubject(x)).toBe(y)` cabe en una línea y falla señalando la
+heurística, no «el nodo».
+
+Un solo archivo y no tres: las tres piezas comparten la misma pasada de DOM, y partirlo obligaría a
+exponer el `CheerioAPI` entre módulos. Vive en `@modules/nodes/utils` y no en `@common` porque es
+dominio correo y DOM, no transporte — y porque `EXTRACTOR_WEB` va a necesitar exactamente el aplanado
+y la normalización de URLs.
+
+### Lo que las pruebas cubren y lo que no
+
+870 pruebas en 38 suites, todas en verde. El reparto es deliberado: `email-sanitizer.util.spec.ts`
+(63 casos) comprueba que cada heurística **decide** bien, con sus tablas `it.each`;
+`parser-email.strategy.spec.ts` (43) comprueba que el nodo **compone** bien, con un fixture de correo
+de Outlook realista que sostiene a la vez los bloques de saneado, enlaces y métricas.
+
+Lo que **no** está cubierto sigue siendo lo mismo, y conviene no olvidarlo: no hay corpus real de
+correos. Las heurísticas están calibradas contra fixtures escritos a mano, así que el
+anti-falso-positivo del RGPD protege el caso que sabemos nombrar, no los que todavía no hemos visto.
+El primer buzón real será el que diga si los 800 caracteres del tope y la lista de patrones legales
+están donde tienen que estar.
+
+---
+
+## 2026-09-18 · Saneado de correo pre-IA en Wizard: tríada modular, endpoint de verificación y banco de pruebas — rama `feat/parser-email-ui`
+
+El nodo `PARSER_PRE_IA` llevaba funcionando desde el commit anterior, pero **no tenía interfaz**, y
+eso no era un detalle estético: `WizardPage` lo resolvía contra `nodeConfigRegistry`, no lo
+encontraba, y pintaba el panel «Configurador no disponible / No se puede continuar más allá de este
+paso». Cualquier plantilla de flujo que incluyera un parser era **imposible de guardar**. Ése era el
+desbloqueo real de esta tanda; todo lo demás es lo que hizo falta para que el desbloqueo fuese
+honesto.
+
+### Por qué la composición salió de la estrategia
+
+El encargo pedía un servicio de frontend que llamase a «los endpoints de prueba del nodo en NestJS».
+No existía ninguno: los once controladores del backend no tocan `ParserEmailStrategy`, y la única vía
+HTTP de ejecutarla era `POST /workflows/:id/execute-test`, que exige un flujo persistido, corre el
+pipeline entero y choca con el mutex de RNF-09. Había que crear el endpoint, y ahí apareció la
+decisión de verdad.
+
+`ParserEmailStrategy` es `@Injectable`, así que invocarla desde `WizardService` obligaba a importar
+`NodesModule` — que el TSDoc de `WizardModule` prohíbe explícitamente, porque arrastraría el sondeo
+periódico, su repositorio de `flujos` y `WorkflowsModule` detrás. Y había un segundo coste que ese
+TSDoc aún no conocía: `INodeStrategy.execute()` exige un `StatePayloadContext`, de modo que el
+asistente habría tenido que **fabricar un contexto falso** solo para poder llamar al nodo. Eso no es
+reutilizar la lógica, es simular el motor dentro del asistente.
+
+La alternativa perezosa —duplicar la cascada `text→html→none`, el AND multimodal y las métricas en el
+service del wizard— es exactamente lo que el TSDoc de `wizard.service.ts` existe para prohibir, y el
+síntoma habría sido el peor posible: un banco de pruebas anunciando «reducción 87 %» y la ejecución
+real produciendo otra cosa, divergiendo desde la primera corrección.
+
+Así que la composición se extrajo a `parsed-email-payload.util.ts` —`buildParsedEmail`,
+`extractEmailBody` y todo lo que era privado de la estrategia— y la consumen las dos capas. **Fichero
+nuevo y no dentro de `email-sanitizer.util.ts`** a propósito: el saneador es limpieza de texto y no
+depende de nada del módulo, mientras que la composición necesita `ResolvedParserEmailConfig` y
+`RawEmailAttachmentMetadata`. Son dos estratos, y el propio TSDoc de la estrategia ya lo afirmaba
+(«la maquinaria de limpieza vive en el saneador; aquí queda la composición y el contrato del nodo»).
+
+La prueba de que la extracción no cambió nada es que **`parser-email.strategy.spec.ts` pasa sus 43
+casos sin tocar una sola aserción**. Ése fue el primer comando ejecutado tras el refactor, y es la
+red que hace la operación defendible.
+
+### Los hooks, o por qué la función no puede tener un `Logger` dentro
+
+Para consumirse desde el wizard sin cablear DI, `buildParsedEmail` tiene que ser pura. Pero la
+estrategia sí registraba dos cosas útiles: el aviso de marcado no saneable y el motivo del respaldo
+multimodal. La salida es `ParsedEmailHooks`, con `onSanitizeFailure` y `onMultimodalFallback`, que el
+llamante enchufa donde quiera. Es el mismo patrón que `createImapClient(config, password, onError)`,
+que ya se consumía desde `WizardService` por esta misma razón.
+
+Y tiene un efecto que no era el objetivo pero resultó ser lo mejor del banco de pruebas: el aviso «no
+se pudo sanear el marcado», que en producción solo existe en el `.log` del servidor y que nadie que
+rellene un formulario llega a ver nunca, aquí viaja en `warnings` y se muestra.
+
+### Por qué `minBodyLength` exige `>= 1` en las dos capas
+
+La especificación inicial pedía `>= 0` en el frontend. El backend tiene `@IsInt` + `@IsPositive`, que
+impone `>= 1`, así que un `0` habría pasado la validación del formulario y reventado con un 400 al
+guardar. Había dos salidas, y la elegida fue **alinear el cliente sin desvirtuar el DTO**.
+
+Relajar el backend a `@Min(0)` era defendible sobre el papel —«0 significa: no activar nunca el
+respaldo multimodal»— pero es una lectura peligrosa: con umbral cero la condición
+`bodyLength < minBodyLength` es **imposible de satisfacer**, de modo que un correo cuyo único
+contenido real es un PDF escaneado pasaría al modelo de lenguaje sin absolutamente nada que leer, y
+el motor habría liberado sus binarios. El `@IsPositive()` no era una restricción arbitraria que
+estorbase al formulario: era la que impide configurar un nodo que no puede hacer su trabajo.
+
+De modo que el store replica el mínimo en `MIN_BODY_LENGTH = 1` y el campo lleva `min="1"` con la
+regla «El umbral debe ser mayor o igual a 1». Es el mismo criterio con el que
+`trigger-imap.store.ts` replica el `@Min(30000)` del backend en `MIN_POLL_INTERVAL_MS`, y por el
+mismo motivo declarado allí: **sin la copia, el operador vería un error de servidor donde debería
+haber visto una regla de campo**.
+
+### Por qué el sandbox simula el adjunto con un interruptor
+
+El panel de resultados tenía que mostrar `requires_multimodal_fallback`, y esa bandera exige **las
+dos** condiciones: cuerpo corto **y** un adjunto de imagen o PDF. Con un banco de pruebas que solo
+aceptase texto y HTML, el indicador habría sido una constante muerta en `false`, explicando una regla
+que era incapaz de demostrar. Por el mismo motivo se añadió el campo de asunto: sin él `clean_title`
+salía siempre vacío, y era otra de las cuatro cosas que el panel debía mostrar.
+
+La forma de simularlo es un `QToggle`, no un selector de ficheros, y la razón es que **la decisión del
+nodo solo mira `contentType`, nunca los bytes**. Subir un PDF real al asistente sería pagar megabytes
+de base64 —ida y vuelta por la red, más el coste de codificarlo— para producir un booleano. El DTO lo
+formaliza: `CheckParserAttachmentDto` no declara `contentBase64`, y como el endpoint valida con
+`forbidNonWhitelisted`, enviarlo devuelve un 400. No es una omisión, es una barrera: esta ruta del
+asistente no puede aceptar binarios por mucho que alguien lo intente.
+
+Ese mismo razonamiento gobierna los topes de longitud, que `check-imap` no necesita y éste sí.
+`sanitizeEmailHtml` monta un árbol DOM con cheerio, **síncrono y en el único hilo del proceso**: un
+correo de veinte megabytes bloquearía el bucle de eventos del backend entero durante segundos, y
+cualquier EDITOR autenticado tendría una denegación de servicio de una sola petición. Los
+`MAX_CHECK_PARSER_BODY_CHARS = 50_000` no son un número redondo elegido al azar: `main.ts` **no
+eleva** el límite de `express.json()`, así que su defecto de 100 kB sigue vigente, y un cuerpo por
+encima devolvería un 413 crudo de Express **sin** el mensaje en castellano del DTO. El tope tiene que
+quedar por debajo contando el escapado JSON, que casi dobla el tamaño en el peor caso.
+
+### Dos registros, y el que se olvida es el caro
+
+La especificación mencionaba `node-config-registry.ts`. Hay un segundo registro obligatorio,
+`stores/nodes/node-store-registry.ts`, y dar de alta solo el primero produce el fallo más
+desconcertante posible: el formulario se pinta con toda normalidad, el operador rellena los campos, y
+el guardado queda bloqueado para siempre con un «Nodo no ejecutable» que no tiene nada que ver con lo
+que hay escrito en la pantalla. `flujo-draft.store.ts` lo distingue explícitamente
+(`SIN_CONFIGURADOR` frente a `SIN_STORE`) precisamente porque son dos averías distintas.
+
+### El efecto colateral que registrar el nodo provoca
+
+`flujo-draft.store.spec.ts` usaba `PARSER_PRE_IA` como **el ejemplo canónico de tipo sin
+configurador**, así que registrarlo rompía tres pruebas con total certeza: la 3.3, la 16.1 y la 16.4.
+No era un accidente a parchear, era la señal de que el mundo cambió.
+
+El arreglo elegido **no toca `buildTemplate()`**, porque las pruebas de namespaces aguas arriba
+dependen de que el parser siga aportando `parsed_email` antes del mapeador. En su lugar se añadió una
+`UNSUPPORTED_TOPOLOGY` local con `EXTRACTOR_WEB`, que sigue sin triada, y se retargetearon solo esas
+tres. El criterio: el caso «nodo no ejecutable» tiene que probarse contra un tipo que de verdad no
+tenga store, o la prueba pasaría a verificar lo contrario de lo que su nombre dice.
+
+Y se añadió la **16.4.1**, que es el reverso y la que fija el desbloqueo: con la topología por
+defecto, `hasUnsupportedNodes` pasa a `false` y ningún paso reporta ya `SIN_CONFIGURADOR`. Sigue
+habiendo pasos incompletos —el disparador no se ha configurado— pero eso es una tarea del operador,
+no un muro.
+
+### El banco de pruebas mentía, y de paso se arregló
+
+`NodeConfigSandboxPage.vue` importaba `useTemplateMapperStore` directamente, de modo que elegir otro
+tipo en el selector montaba su formulario pero dejaba el panel de estado mostrando el del mapeador. El
+propio comentario del archivo lo anticipaba («cuando haya varios, el anfitrión resolverá también el
+store por tipo»), y la pieza para hacerlo —`resolveNodeStore`— ya existía.
+
+Al arreglarlo apareció algo más: `inspectedState` leía `requiredVariables`,
+`missingRequiredVariables` y `availableUpstreamNamespaces`, que **no están en `NodeConfigStore`**. Era
+justo la inspección de la configuración ajena que §3.1 prohíbe, y ataba el banco a un tipo concreto,
+que es lo contrario de lo que el banco existe para demostrar. Ahora el panel muestra solo el contrato
+público, y `setAvailableUpstreamNamespaces` se invoca con `?.()` porque es opcional: un disparador es
+el primero del grafo y no tiene nada aguas arriba que declarar. El `SANDBOX_NODE_ID` pasó de
+`'nodo_mapeador_demo'` a `'nodo_demo'` por lo mismo — un id único compartido no colisiona, porque cada
+store lleva su propio prefijo de Pinia, y es lo que permite alternar entre tipos sin perder lo escrito
+en cada uno.
+
+### Detalles menores con razón detrás
+
+- **`toNodeParams()` emite `sourceNamespace` solo si difiere de `raw_email`.** Emitirlo siempre
+  congelaría el defecto de hoy dentro de cada `pipeline_schema` guardado, que es el mismo fallo que
+  documenta el recalibrado de `DEFAULT_MIN_BODY_LENGTH` de 200 a 50. Omitirlo siempre reescribiría en
+  silencio un nodo de autoría manual que leyese de `scraped_web`, dejándolo fallando con
+  `ERR_PARSER_SOURCE_MISSING` sin que nadie lo pidiera. La prueba 3.2 del store fija el ida y vuelta.
+- **El store del parser no exige haber probado el saneado.** El disparador IMAP sí lo exige, y con
+  motivo: unas credenciales equivocadas no fallarían hasta el primer sondeo. Aquí no hay credenciales,
+  ni red, ni nada que pueda estar mal sin que el formulario lo vea, y copiar ese Poka-Yoke haría
+  imposible guardar un flujo con parser sin tener a mano un correo de ejemplo — una barrera sin
+  peligro detrás. La prueba 1.2 existe para que nadie lo «arregle» por simetría.
+- **`clean_body` se muestra en un `<pre>`.** Conserva los saltos de párrafo que el saneador
+  normalizó, y aplanarlos ocultaría justo la estructura que el nodo produce y que el modelo va a
+  recibir.
+- **El badge de reducción es verde a partir del 50 % y ámbar por debajo.** Es el criterio de RNF-01
+  hecho visible sobre el correo concreto que el operador acaba de pegar. Ámbar y no rojo: quedarse
+  corto no es un error suyo, es una propiedad de ese correo.
+- **`ParsedEmailPayload` pasó de interfaz privada a exportada.** Era el objetivo —el frontend la
+  replica en `types/parser-email.ts`— pero convierte el orden de las doce claves en contrato público.
+  La nota está en el TSDoc del util, y la prueba 1.1 de la estrategia es lo único que impide que un
+  reordenado pase inadvertido.
+
+### Lo que las pruebas cubren y lo que no
+
+Backend: **40 suites, 913 pruebas**. Añadidas en esta tanda,
+`parsed-email-payload.util.spec.ts` (21: las doce claves en orden, la cascada, la división por cero,
+el AND multimodal en sus cuatro ramas, los hooks y la degradación ante marcado patológico), el bloque
+4 de `wizard.service.spec.ts` (8, incluida la que verifica que este endpoint **no abre ninguna
+conexión de red**, a diferencia de su hermano) y `check-parser.dto.spec.ts` (14: el `0` y el decimal
+rechazados, los topes con mensaje en castellano, y `sourceNamespace` y `contentBase64` rechazados por
+la lista blanca).
+
+Frontend: **15 ficheros, 321 pruebas**. `parser-email.store.spec.ts` aporta 25 en seis bloques, con
+el aislamiento por `nodeId` y el contrato de ida y vuelta como los más valiosos.
+
+Lo que **no** está cubierto: `NodeConfigSandboxPage.vue` y `ParserEmailConfig.vue` no tienen prueba
+automatizada. Vitest corre con `environment: 'node'` y sin DOM, así que el arreglo del banco y el
+render del configurador se verifican a mano. Y sigue sin haber corpus real de correos: las heurísticas
+del saneador están calibradas contra fixtures escritos a mano, de modo que el banco de pruebas es hoy
+la única forma de enfrentarlas a un boletín de verdad — que es, precisamente, para lo que se
+construyó.
+
+---
+
+## Tanda actual — La fuga del contrato de issues y el selector que dejo de adivinar
+
+### El crash de la vista de plantillas no estaba donde parecia
+
+El sintoma era un `TypeError` en el editor JSON al guardar una plantilla invalida, y el arreglo
+evidente —una guarda en `locatePath`— tapaba el sintoma sin tocar la causa. La causa es un contrato
+que se escapaba por tres rutas de cinco.
+
+`PipelineValidatorService.rejectWith()` lanza sus incidencias en forma **interna**,
+`{ field, code, constraints }`. `FsmController` las traducia al contrato publico
+`{ path, message }` con `toIssueContract()`, y esa traduccion estaba **solo ahi**: el alta y la
+edicion de flujos y de plantillas llaman al mismo validador a traves de sus servicios, y como el
+backend no tiene ningun `ExceptionFilter`, el cuerpo interno viajaba literalmente al cliente.
+`extractApiIssues()` comprueba que `issues` sea un arreglo pero no la forma de cada elemento, asi que
+los dejaba pasar; `locateJsonPaths` leia `issue.path`, recibia `undefined`, y el `split` reventaba
+dentro del `watch` de CodeMirror. Se perdia la vista entera en vez de un subrayado. Y la lista de
+errores del dialogo, que pinta `issue.path` y `issue.message`, salia en blanco por el mismo motivo.
+
+Se arreglo en las dos capas, y las dos hacen falta:
+
+- **La causa.** `toIssueContractException()` en `schema-issue-contract.util.ts`, invocado desde los
+  tres controladores. La traduccion sigue viviendo en el controlador y no en el servicio, que es la
+  decision que ya documentaba `FsmController`: cuatro llamadores comparten el validador y cambiarlo
+  alli lo cambiaria para todos a la vez.
+- **La defensa.** La guarda en `locatePath`. Que el backend haya dejado de emitir esa forma no quita
+  que el dato venga de un cuerpo HTTP que TypeScript no puede garantizar, y esta funcion es la unica
+  capa que puede resistirlo.
+
+**El helper DEVUELVE la excepcion en vez de lanzarla**, y el llamador escribe
+`throw toIssueContractException(error)`. Se intento primero con un `(error: unknown): never` que
+lanzaba por dentro, y TypeScript no propaga ese `never` a traves de la frontera del modulo: los cinco
+`catch` fallaban con TS2366 por no terminar en un `return`. Anotar el tipo en el `const` tampoco
+basto. Con el `throw` a la vista del compilador el problema desaparece y ademas se lee lo que pasa.
+
+Un 400 **sin** issues se devuelve intacto. Un conflicto de nombre o un fallo del `ValidationPipe`
+global sobre el DTO de la peticion no tienen nada que traducir, y envolverlos les quitaria su
+`message`, que es lo unico que esos errores tienen que decir.
+
+### El extractor web ya no supone quien va delante
+
+`web-scraper.store.ts` declaraba `URL_SOURCE_NAMESPACE = 'parsed_email'` y
+`URL_SOURCE_FIELD = 'extracted_urls'`, y ofrecia diez posiciones fijas pasara lo que pasara.
+`availableUpstreamNamespaces` —que el asistente ya alimentaba con la topologia real— solo servia para
+decidir si pintar un aviso. Consecuencia: un flujo que extrajera sus enlaces de cualquier otro nodo
+era inconfigurable, y uno sin parser delante ofrecia diez opciones que ninguna ejecucion podria
+resolver.
+
+Ahora las opciones son la **proyeccion de la topologia**: por cada namespace anterior, los campos de
+tipo `url` (una opcion) y `url[]` (diez posiciones). Ningun namespace escrito a mano en el archivo.
+
+**El inventario de campos se pidio al backend en vez de replicarlo.** La alternativa era una tabla
+`namespace -> campos` en el frontend, derivada de `ParsedEmailPayload` y `ScrapedWebPayload`. Se
+descarto: esos payloads los construye la estrategia, y una segunda tabla acaba discrepando de la
+primera en cuanto alguien anade una clave. `outputFields` se declara junto al codigo que lo produce y
+viaja por el catalogo, que es el canal que ya existia para "que sabe ejecutar el motor".
+
+**Se anadio un canal nuevo en vez de ampliar el existente.** `setAvailableUpstreamNamespaces` entrega
+nombres y le basta al mapeador; `setAvailableUpstreamContext` entrega nombres **y** campos y es lo que
+el extractor necesita. Sustituir aquel por este obligaria al mapeador a desempaquetar una estructura
+de la que ignora la mitad. Ambos son opcionales, el anfitrion empuja los dos, y un disparador —que no
+implementa ninguno— no paga nada.
+
+**El componente NO inyecta `useFlujoDraftStore`.** Era la via directa, y rompia dos cosas: el
+contrato §3.1 (un configurador consume solo su store) y `NodeConfigSandboxPage.vue`, que monta el
+nodo sin asistente y habria mostrado el selector permanentemente deshabilitado. El anfitrion empuja,
+el nodo no tira.
+
+### Tres decisiones que cambian comportamiento existente
+
+- **`buildInitialConfig()` arranca con `targetUrl: ''`.** Ya no hay un origen por defecto que valga
+  para todo flujo. Un valor prefijado seria una eleccion que el operador no ha hecho y que
+  `isConfigValid` tendria que rechazar acto seguido.
+- **`hydrateFromNode` conserva el `targetUrl` guardado VERBATIM.** Antes caia a
+  `urlTemplateFor(0)` cuando no reconocia el valor, lo que era reescribir en silencio la
+  configuracion que el operador venia a revisar: abria el formulario afirmando una eleccion que nadie
+  hizo, y guardar la persistia. Ahora se conserva, `hasStaleTargetUrl` lo distingue de "no has
+  elegido nada" y `configWarnings` explica que hay que reordenar el flujo o elegir otro origen. El
+  paso queda bloqueado, pero **explicado**.
+- **`isConfigValid` pasa a tres filtros** y ninguno sobra: no vacio; casa el patron anclado de
+  interpolacion (replica del `@Matches` del DTO, de modo que una URL literal heredada se rechace con
+  una regla de campo y no con un 400); y pertenece a `urlOptions`. El patron no sustituye a la lista:
+  una plantilla hacia un namespace que el flujo no produce es sintacticamente impecable e igual de
+  irresoluble.
+
+### El hueco que el validador de topologia tenia abierto
+
+Las directrices pedian construir la validacion DAG desde cero. Ya estaba: `validatePipelineTopology`
+implementa siete reglas, incluida la 7 (`detectUnreachableNamespaces`, recorrido
+`entrypoint -> nextStep` acumulando lo producido, emitiendo `ERR_MISSING_UPSTREAM_CONTEXT`) y la
+guarda de ciclos con un `Set` de visitados, que es mas fuerte que un tope de profundidad.
+
+El hueco real estaba en el **origen** de las dependencias: salian solo de `getRequiredNamespaces`,
+que de ocho tipos implementan dos. Un `MAPEADOR_PLANTILLA` —que deliberadamente no lo implementa,
+porque sus variables viven en `plantillas_html` y derivarlas seria asincrono— o un tipo aun sin
+estrategia podia interpolar `{{scraped_web.url}}` en cualquier clave de sus `params` y guardarse sin
+que nadie comprobara nada.
+
+`collectNamespaceRoots` cierra ese hueco barriendo recursivamente los `params`. **Reutiliza
+`extractNamespaceRoots` en vez de escribir una regex nueva**, por el mismo motivo que aquella comparte
+`INTERPOLATION_PATTERN` con `getInterpolatedValue`: dos expresiones equivalentes acaban divergiendo, y
+entonces la validacion aprueba esquemas que la ejecucion no sabe resolver, o al reves. Las dos fuentes
+se **suman y deduplican**: `getRequiredNamespaces` sabe cosas que el texto no dice —el parser depende
+de `raw_email` aunque su `sourceNamespace` sea implicito, el extractor impone su
+`FALLBACK_SCRAPER_NAMESPACE`— y el barrido cubre a todos los demas.
+
+No se creo el decorador de clase `@ValidatePipelineTopology()` ni la `SchemaValidationException` que
+las directrices sugerian. El decorador duplicaria la regla 7 y no podria iterar `nodes`, que es un
+`Record` y class-validator 0.15.1 solo recorre Array/Set/Map — ese es justamente el motivo
+documentado de que la topologia viva en el servicio. La excepcion romperia el contrato
+`{ statusCode, error, message, issues }` que cuatro llamadores ya consumen.
+
+### Lo que las pruebas cubren y lo que no
+
+Backend: **47 suites, 1089 pruebas**. Nuevas: seis de `collectNamespaceRoots` (anidamiento, arreglos,
+deduplicacion, tipos no textuales y el tope de profundidad), cuatro del segundo canal de la regla 7
+—incluida la que fija que un namespace declarado por ambas fuentes aparezca **una sola vez** en el
+mensaje—, dos de `outputFields` en el catalogo, y tres de contrato HTTP en
+`workflows.controller.spec.ts` que son la regresion directa del crash: reproducen el cuerpo interno
+que lanzaba el validador y aseveran que lo que sale lleva `path`/`message` y nunca
+`field`/`constraints`.
+
+Frontend: **17 ficheros, 379 pruebas**. `json-path-locator.spec.ts` suma cuatro casos de issues mal
+formados, incluido el que conserva los validos que acompanan a uno roto. `web-scraper.store.spec.ts`
+pasa de 30 a 42 y es donde esta el grueso: opciones derivadas de `url` y `url[]`, el rechazo de los
+campos que no son URL, la reaccion a un cambio de topologia sin recrear el store, la URL literal y la
+marca embebida, y la conservacion verbatim de un `targetUrl` huerfano.
+
+Lo que **no** esta cubierto: `NodeConfigSandboxPage.vue` sigue sin prueba automatizada, asi que el
+arreglo del banco —que ahora alimenta el canal rico y carga el catalogo al montar— se verifica a
+mano. Tampoco hay prueba de extremo a extremo que recorra guardar una plantilla invalida desde la
+interfaz hasta el subrayado; las dos mitades del arreglo del crash estan probadas por separado, la
+costura no.
+
+---
+
+## Correccion — Tres preguntas distintas que un solo decorador intentaba responder
+
+El sintoma enganaba: los tres constraints de `targetUrl` saltaban **a la vez**, incluido
+"debe ser una cadena", y eso solo pasa cuando la propiedad no existe. No era un `targetUrl: ''`,
+era un `params: {}` — exactamente lo que `DEFAULT_PARAMS_BY_NODE_TYPE[EXTRACTOR_WEB]` produce.
+
+Chocaban dos cosas que el codigo ya tenia escritas por separado. Una plantilla de flujo es un
+blueprint **sin operativa**: lo dice su propio dialogo, y por eso sus `params` van vacios. Pero
+`PipelineValidatorService` aplica los `paramsSchema` a plantillas y flujos por igual, y
+`WebScraperConfigDto` exigia `targetUrl`. Como EXTRACTOR_WEB es el **unico** de los ocho tipos
+que declara `paramsSchema`, era el unico nodo del catalogo que no podia aparecer en una
+plantilla. No "con el campo vacio fallaba": no era expresable.
+
+El arreglo no fue relajar el decorador, sino **separar tres preguntas** que estaban fundidas en
+el, y poner cada una donde hay informacion para responderla:
+
+| Pregunta | Capa | Por que ahi |
+|---|---|---|
+| "esto tiene forma de interpolacion" | DTO (`@Matches`) | Es lo unico que se puede decidir viendo un nodo AISLADO |
+| "hay de donde sacar una URL en este flujo" | Regla 8 de la topologia | `class-validator` no puede saber quien va delante |
+| "esta completo para ejecutarse" | `getIncompleteParams`, al activar | Guardar y activar son dos exigencias distintas |
+
+### El fallback que adivinaba
+
+`getRequiredNamespaces` caia a `FALLBACK_SCRAPER_NAMESPACE = 'parsed_email'` cuando no habia
+`targetUrl`, para que ningun extractor quedara sin dependencias declaradas y la regla 7 tuviera
+algo que comprobar. Su propio TSDoc reconocia el precio: el fallback **no era una lectura, era
+una suposicion**, y el operador acababa leyendo `ERR_MISSING_UPSTREAM_CONTEXT` sobre un namespace
+que su esquema nunca menciono.
+
+Se retira. La garantia no se pierde, cambia de pregunta: `requiredUpstreamFieldTypes` declara
+`['url', 'url[]']` y la regla 8 comprueba que algun predecesor publique uno de esos tipos,
+apoyandose en los `outputFields` que el catalogo ya expone. Se sustituye una suposicion por un
+hecho, y el diagnostico pasa de *"necesita [parsed_email]"* a *"ningun paso anterior publica un
+campo de tipo [url, url[]]"*, que describe el problema real: el ORDEN del flujo.
+
+La regla 8 es **deliberadamente mas debil** que pedir el valor. No afirma que el nodo este
+configurado —un `params: {}` la supera—, solo que el flujo PODRIA configurarse. Esa es justo la
+distincion que hacia falta para que una plantilla exista.
+
+### Por que un objeto de resolutores y no un tercer parametro
+
+`validatePipelineTopology(schema, resolvers)` pasa a recibir `{ dependencies, outputFields,
+requiredFieldTypes }`. Tres lambdas posicionales en la llamada no dicen cual es cual, y cada una
+sigue siendo opcional por separado, de modo que omitir una desactiva solo su regla — que es lo
+que permite a las pruebas de las reglas 1 a 6 seguir llamando `validatePipelineTopology(schema)`
+a secas, y a las de la 7 no arrastrar issues de la 8.
+
+### La asimetria entre guardar y activar
+
+`ValidateSchemaOptions.requireRunnableParams` lo pide **solo** `assertActivatable`. Un flujo se
+guarda a medias porque eso es un borrador, y porque la plantilla de la que nace ni siquiera trae
+operativa; activarlo es ponerlo a disparar cada minuto. Se recorre el mapa entero y no solo el
+camino activo: activar con una rama de `onErrorStep` a medio configurar es el fallo que se
+descubre de madrugada, la primera vez que esa rama se usa.
+
+Se anadio ademas una guarda en `resolveConfig` del extractor: sin `targetUrl` devuelve
+`ERR_SCRAPER_CONFIG` nombrando el campo, en vez de dejar que `new URL('')` reviente mas abajo
+como `ERR_SCRAPER_URL_MALFORMED` y mande a revisar el formato de una URL que nadie escribio.
+
+### Comportamiento verificado sobre los dos casos reportados
+
+| Escenario | Antes | Ahora |
+|---|---|---|
+| `TRIGGER_IMAP -> EXTRACTOR_WEB`, plantilla | 3 constraints sobre `targetUrl` | `ERR_MISSING_UPSTREAM_FIELD_TYPE`: ningun paso anterior publica una URL |
+| `PARSER -> EXTRACTOR_WEB`, plantilla, guardar | 3 constraints sobre `targetUrl` | Se guarda |
+| El mismo esquema, activar | — | `ERR_INCOMPLETE_NODE_PARAMS`: falta `targetUrl` |
+
+Backend **47 suites / 1105 pruebas**; frontend **17 ficheros / 380 pruebas**. Nuevas: ocho de la
+regla 8 (incluidas la que exige los DOS resolutores, la que impide que un nodo se satisfaga a si
+mismo y la que acepta un `params: {}`), cuatro de la asimetria guardar/activar, y cuatro del
+contrato de la estrategia.
+
+Lo que **no** esta cubierto: la costura HTTP sigue sin prueba de extremo a extremo. Y el
+frontend no distingue todavia `ERR_MISSING_UPSTREAM_FIELD_TYPE` de los demas issues del esquema:
+los pinta en la lista del dialogo como cualquier otro, sin llevar al operador al paso culpable.
+
+---
+
+## Tanda actual — Los tres nodos que producian sin declarar lo que producian
+
+La peticion pedia un endpoint nuevo, `GET /api/fsm/nodes/catalog`, alimentado por una constante
+`NODE_OUTPUT_CATALOG` escrita a mano en `src/modules/fsm/constants/`. No se hizo, y conviene
+dejar escrito por que: ese directorio no existe —el motor vive en `@core/fsm` y el catalogo en
+`@modules/nodes`— y, sobre todo, **la funcionalidad ya estaba, construida al reves**.
+
+`GET /api/nodos` sirve `outputFields` por tipo desde la tanda anterior, y los resuelve
+preguntandole a `NodeStrategyFactory` en cada peticion. El argumento contra la tabla estatica ya
+estaba escrito en el TSDoc de `INodeStrategy.outputFields` y no ha cambiado: *una fila de catalogo
+y un `*-payload.util.ts` son dos fuentes que se desincronizan en cuanto alguien anade una clave, y
+la que manda en ejecucion es siempre la segunda*. Una constante habria sido esa segunda fuente.
+
+### El hueco real: 2 de 5
+
+De las cinco estrategias que `NodesModule.onModuleInit` registra, solo `PARSER_PRE_IA` y
+`EXTRACTOR_WEB` declaraban su inventario. `TRIGGER_CRON`, `TRIGGER_IMAP` y `MAPEADOR_PLANTILLA`
+llegaban al catalogo con `[]` pese a tener claves `data` perfectamente deterministas, escritas
+literalmente en el `return` de su `execute`. No era una decision: era el trabajo a medias.
+
+| Nodo | Claves declaradas ahora |
+|---|---|
+| `TRIGGER_CRON` | `triggered_at`, `cron_expression`, `time_zone`, `next_run_at` |
+| `TRIGGER_IMAP` | `message_id`, `from`, `subject`, `text`, `html`, `date`, `attachments` |
+| `MAPEADOR_PLANTILLA` | `compiled_markup`, `mapped_at` |
+
+Dos de esas claves no estaban en el enunciado y si en el payload real: `time_zone` en el cron y
+`attachments` en el IMAP. Se declaran, porque el inventario describe lo que el nodo escribe, no lo
+que alguien recordaba que escribia.
+
+### Por que `status` se queda fuera del inventario de IMAP
+
+`ImapTriggerStrategy` tiene dos vias de exito. La del correo encontrado devuelve las siete claves
+de `ExtractedEmail`; la del buzon vacio devuelve `{ status: 'NO_MESSAGES_FOUND' }` **acompanado de
+`halt`**. Esa segunda no produce contexto para nadie: el motor cierra la ejecucion en EXITOSO y
+ningun nodo de aguas abajo llega a interpolar. Declarar `status` pondria en el selector del
+asistente un campo que nunca esta presente cuando hay algo que mapear —un `{{raw_email.status}}`
+que resuelve siempre a cadena vacia—, que es la clase de promesa falsa que el Poka-Yoke existe
+para no hacer.
+
+### Por que ningun campo de IMAP es `url`
+
+`html` y `text` vienen llenos de enlaces. Aun asi se declaran `text`: contienen direcciones, pero
+no **son** una direccion, y extraerlas es trabajo de `PARSER_PRE_IA`, que para eso publica
+`extracted_urls` como `url[]`. Declarar `html` como `url` colaria el cuerpo entero de un correo en
+el desplegable del EXTRACTOR_WEB, que es exactamente el error de tipeo que la regla 8 del
+validador de topologia viene a impedir.
+
+La consecuencia visible es que `TRIGGER_IMAP -> EXTRACTOR_WEB` sigue emitiendo
+`ERR_MISSING_UPSTREAM_FIELD_TYPE`, igual que en la entrada anterior. La diferencia es que antes el
+diagnostico era correcto por accidente —no habia inventario que consultar— y ahora lo es por
+lectura: el inventario existe, se miro, y no hay ninguna URL en el.
+
+### La prueba que de verdad sostiene esto
+
+Declarar una lista a mano junto al codigo que construye el payload sigue siendo dos escrituras que
+pueden separarse. Lo que impide que se separen es una prueba por estrategia que ejecuta `execute`
+con los dobles que el spec ya montaba y contrasta `Object.keys(result.data)` contra los `name`
+declarados. Si manana alguien anade una clave al `data` sin declararla, el spec cae con el nombre
+de la clave delante. Es la unica forma de que el inventario no envejezca en silencio, que es como
+envejecen los inventarios.
+
+De paso se corrigio el TSDoc de `ParserEmailStrategy`, que decia "las doce claves" sobre un arreglo
+de trece desde que se anadieron `requires_multimodal_fallback` y `multimodal_reason`.
+
+### Lo que las pruebas cubren y lo que no
+
+Backend **47 suites / 1114 pruebas** (nueve nuevas); frontend **17 ficheros / 380 pruebas**, sin
+cambios: `frontend/src/types/node-catalog.ts` ya replicaba el contrato y ningun store asumia que
+tipos publican campos.
+
+Lo que **no** esta cubierto: la costura HTTP sigue sin prueba de extremo a extremo, asi que el
+`GET /api/nodos` con los cinco inventarios llenos hay que comprobarlo a mano. Y queda abierta la
+deuda de `DEFAULT_UPSTREAM_NAMESPACES` en `template-mapper.store.ts`, que sigue siendo el ultimo
+mock del frontend: ahora que los cinco nodos publican campos, el editor de plantillas podria
+ofrecer `{{namespace.campo}}` completo en vez de solo el nombre del namespace.
+
+---
+
+## Tanda actual — El mapeador dejo de fiarse del nombre del namespace
+
+La peticion pedia un `getNodeCatalog()` en el servicio del nodo contra
+`GET /api/fsm/nodes/catalog`, y en `flujo-draft.store.ts` un estado `nodeCatalog`, una accion
+`fetchNodeCatalog()` y un getter `availableInterpolationVariables(currentNodeId)`. No se hizo nada
+de eso, y el motivo es el mismo de la tanda anterior: **ya existia, y anadirlo habria creado
+segundas fuentes**.
+
+| Lo pedido | Donde ya vivia |
+|---|---|
+| `getNodeCatalog()` | `node-catalog.service.ts::fetchNodeCatalog()` → `GET /nodos` (la ruta del enunciado no existe) |
+| `nodeCatalog` + `fetchNodeCatalog()` | `node-catalog.store.ts`, cargado en paralelo con las plantillas en `loadAvailableTemplates()` |
+| Recorrido entrypoint → nodo anterior, cruzado con el catalogo | `upstreamContext(stepIndex)` |
+| Empuje a cada nodo | `syncUpstreamNamespaces()`, que ya empujaba los DOS canales a TODOS los stores |
+
+Y una razon de reparto: componer las opciones de `{{ns.campo}}` en el agregador lo obligaria a
+saber que forma tiene la configuracion de UN tipo de nodo concreto, que es exactamente lo que
+§3.1 prohibe. El getter va en el store del nodo, como `buildUrlOptions()` en el extractor web.
+
+### De "existe el namespace" a "existe el campo"
+
+`missingRequiredVariables` comparaba solo la RAIZ de cada ruta: `path.split('.')[0]` contra la
+lista de namespaces. Con eso, una plantilla que interpolara `{{parsed_email.clean_bodyy}}` se daba
+por buena con que hubiera un parser aguas arriba. El error sobrevivia a la configuracion, al
+guardado y a la activacion, y aparecia en la primera ejecucion como un GRAVE con el flujo PAUSADO.
+
+Ahora hay tres reglas, y la tercera es la que importa:
+
+1. Ningun paso anterior escribe ese namespace → falta. Es lo que ya hacia.
+2. El namespace existe y **se conoce su inventario**, pero no publica ese campo → falta. Es el
+   grano fino que `outputFields` hizo posible.
+3. El namespace existe pero llega con `fields: []` → **se da por satisfecha**.
+
+La tercera no es una concesion: un inventario vacio significa "aun no se que publica" —el catalogo
+viajando, o un tipo de nodo que no declara sus campos—, y asi lo fija el contrato de
+`UpstreamNamespace`. Tratarlo como fallo pintaria de rojo todas las plantillas mientras dura la
+peticion, y para siempre si falla. Es la misma politica que `isNodeTypeImplemented`: ante la duda
+no se bloquea.
+
+Las rutas profundas (`llm_response.articles.0.title`) se juzgan por sus **dos primeros
+segmentos**. Lo que el nodo publica es `articles`; lo de dentro es la forma de ese objeto, que
+ninguna estrategia declara campo a campo, y comparar la ruta entera daria por ausente toda
+variable que navegue una estructura.
+
+### El default que mentia
+
+`DEFAULT_UPSTREAM_NAMESPACES = ['parsed_email', 'scraped_web', 'llm_response']` sembraba el store
+al construirse. Su TSDoc lo marcaba PROVISIONAL "hasta que exista el asistente", y el asistente
+lleva dos tandas empujando el contexto de verdad. Habia dejado de ser un apano para ser una
+mentira: hasta la primera sincronizacion el nodo se validaba contra un flujo inventado, y un flujo
+que arranca en TRIGGER_CRON daba por resoluble un `{{parsed_email.x}}`. Se retira, igual que se
+retiro el `URL_SOURCE_NAMESPACE` del extractor web.
+
+### Por que el aviso de "no hay variables" NO bloquea
+
+El enunciado pedia `isConfigValid = false` cuando no hubiera variables aguas arriba. No se hizo:
+una plantilla **estatica** —un pie corporativo, un aviso de cabecera fija— no interpola nada y es
+legitima en un flujo que no publique un solo campo. Exigirle contexto seria inventar un requisito
+que el motor no tiene. El aviso ambar se muestra (`data-test="no-upstream-variables"`), explica que
+una plantilla con variables no podra resolverse ahi, y deja el badge de validez en paz. Lo que si
+bloquea sigue siendo el contrato roto, que ahora se detecta mejor.
+
+### Dos fallos, dos mensajes
+
+El banner rojo fundia los dos casos en "faltan estos namespaces". Se separan porque el arreglo es
+distinto: si falta el namespace entero hay que **anadir o reordenar un nodo**; si el namespace esta
+y el campo no, hay que **corregir la plantilla**. Mandar al operador a revisar la topologia por una
+errata en un nombre de campo es hacerle perder la tarde. De ahi `missingUpstreamNamespaces` y
+`missingUpstreamFields` como dos derivados distintos, y el tooltip del chip diciendo cual de los
+dos es.
+
+### El editor inserta la ruta entera
+
+Los chips de `TemplateEditorDialog` insertaban `{{namespace.}}` y dejaban el caret dentro de las
+llaves para que el autor terminara el nombre a mano — que es justo donde se cometia la errata que
+el punto anterior detecta. Con un flujo detras, el dialogo recibe `upstreamContext` por prop y
+ofrece la ruta completa, insertada con offset `0` porque ya no falta nada que escribir.
+
+La prop es **opcional a proposito**: el gestor de plantillas abre el mismo dialogo sin ningun flujo
+detras, y ahi no hay topologia que consultar. Sin contexto se conservan los chips de namespace de
+siempre. No es un degradado, es el otro caso de uso.
+
+### Detalles con razon detras
+
+- **`UpstreamNamespace` gana `nodeType`**, opcional. Es lo que permite agrupar el desplegable por
+  `parsed_email (PARSER_PRE_IA)` en vez de por el namespace a secas. Opcional porque `_assets` no
+  lo escribe ningun nodo. No se deduce invirtiendo `DEFAULT_OUTPUT_NAMESPACE_BY_NODE_TYPE` en el
+  consumidor: esa relacion es una CONVENCION y un esquema puede declarar otro `outputNamespace`.
+- **`outputNamespace` pasa a `q-select` cerrado.** Era el ultimo campo de texto libre del nodo
+  sobre una lista cerrada; una mayuscula o un guion ahi eran un 400 al guardar el flujo entero.
+- **El selector de variables NO filtra por tipo**, a diferencia del extractor web: una plantilla
+  interpola cualquier cosa que sepa convertirse en texto. El tipo va en la etiqueta —`subject
+  (text)`, `attachments (object)`— para que el operador sepa que esta insertando.
+- **El componente no carga el catalogo.** El enunciado pedia `fetchNodeCatalog()` en su
+  `onMounted`; se omitio porque el catalogo es estado del ANFITRION y los dos que existen ya lo
+  piden. Un tercer cargador desde el componente lo haria alcanzar un store global que no es el
+  suyo.
+- **`data-test` en el contenedor y no en el `<q-select>`.** Quasar derrama los atributos sobre un
+  div interno (`.q-field__native`), no sobre la raiz del componente, asi que
+  `findComponent('[data-test=…]')` no encuentra nada. Localizar por posicion habria funcionado
+  hasta el primer reordenamiento del formulario.
+
+### Lo que las pruebas cubren y lo que no
+
+Frontend **18 ficheros / 405 pruebas** (25 nuevas): 15 en el spec del store —canal rico,
+`variableOptions`, las tres reglas del grano fino, `hasUpstreamVariables`— y 10 en
+`TemplateMapperConfig.spec.ts`, que no existia. Backend sin cambios.
+
+Lo que **no** esta cubierto: los chips del editor de plantillas con contexto no tienen prueba de
+componente —`TemplateEditorDialog` arrastra CodeMirror y el spec del mapeador lo sustituye por un
+stub—, y la costura HTTP sigue sin prueba de extremo a extremo.
+
+---
+
+## Tanda actual — El editor de plantillas dejo de pedir que se teclee el campo
+
+Los chips del editor insertaban `{{namespace.}}` y dejaban el caret dentro de las llaves para que
+el autor terminara el nombre **a mano**. El coste de ese "a mano" esta medido: el backend valida
+solo el NAMESPACE de cada variable, nunca el campo. `extractAndValidateVariables` comprueba el
+grupo 1 contra `ALLOWED_NAMESPACES` y acepta el resto de la ruta tal cual —lo dice su propio
+TSDoc: *"Se valida la RAIZ de la ruta a cualquier profundidad"*—, asi que un
+`{{parsed_email.clean_bodyy}}` se guarda sin protesta y falla en render.
+
+La tanda anterior ensenio a detectar esa errata en el nodo mapeador, cruzando las
+`requiredVariables` de la plantilla contra los campos reales del flujo. Esta la impide cometer.
+
+### Un explorador en vez de tres vias de insercion
+
+Se retiran los dos bloques de chips —los planos de `TEMPLATE_NAMESPACES` y los de ruta completa
+que la tanda anterior anadio— y en su lugar va una sola secuencia:
+
+```
+1. Selecciona Origen / Namespace   ->  2. Campo a inyectar  ->  tarjeta con el token
+                                                                 [Copiar] [Insertar]
+```
+
+Tres vias conviviendo en una barra lateral que ya compite con el editor no son tres comodidades,
+son ruido. Y la mas rapida de las tres era justamente la que permitia la errata.
+
+### De donde salen los origenes: la prop gana al catalogo
+
+El dialogo lo abren dos sitios, y necesitan respuestas distintas:
+
+| Anfitrion | Origenes que ofrece |
+|---|---|
+| `TemplateMapperConfig` (hay flujo) | Los del `upstreamContext`: lo que ESE flujo publica de verdad |
+| `TemplatesManager` (no hay flujo) | El catalogo global: los ocho namespaces mas `_assets` |
+
+La prop manda cuando viene con algo porque es la respuesta mas **especifica**: un flujo concreto
+sabe que namespaces tiene y con que campos; el catalogo solo sabe que publicaria cada tipo de nodo
+si alguien lo colocara. Y el gestor necesita justo eso ultimo, porque una plantilla suya tiene que
+poder escribirse para cualquier flujo futuro.
+
+### La inversion del mapa, subida a `src/utils/`
+
+Resolver "namespace -> campos" sin topologia exige invertir
+`DEFAULT_OUTPUT_NAMESPACE_BY_NODE_TYPE`. Esa inversion ya existia **una vez**, como `const` privada
+dentro de `NodeConfigSandboxPage.vue`. Hacia falta una segunda, asi que se sube a
+`@/utils/upstream-catalog` y el banco pasa a usarla: dos tablas que responden lo mismo discrepan en
+cuanto se anade un tipo de nodo, y el TSDoc de `UpstreamNamespace` ya avisaba contra invertir el
+mapa "en cada consumidor".
+
+La advertencia sigue en pie y el helper no la contradice. Cuando hay flujo se usa su topologia, que
+sabe quien escribe que. El helper responde la otra pregunta, la de quien no tiene flujo: *si
+alguien escribiera `parsed_email`, que publicaria*.
+
+`findByCode` entra **por parametro** y no importando el store, para que el helper quede puro y su
+spec no necesite Pinia.
+
+### `_assets` tenia que declararse a mano
+
+Es el unico namespace que no publica ningun nodo: lo inyecta `TemplateRendererService` en cada
+render, y su unica clave —`base_url`— no esta en el catalogo ni en ninguna lista; solo vivia en la
+prosa de un TSDoc y en una linea del renderer. Quitar los chips planos la habria dejado sin
+ninguna forma de insertarse. Se declara `ASSETS_FIELDS` en `@/types/html-template`, junto a
+`TEMPLATE_NAMESPACES`, asumiendo que es una replica y diciendolo por escrito.
+
+### Por que no se alcanza el `EditorView`
+
+El enunciado pedia tomar la instancia de CodeMirror y despachar la transaccion desde el dialogo.
+No hace falta y ademas no se puede: `TemplateCodeEditor` guarda su `view` en una variable privada
+del `setup` —con un TSDoc explicando que envolver una instancia imperativa en un proxy reactivo de
+Vue es fuente conocida de rarezas— y `defineExpose` publica solo tres metodos. Uno de ellos,
+`insertTextAtCursor`, ya hace exactamente lo pedido: reemplaza el rango de
+`view.state.selection.main`, recoloca el caret, hace `scrollIntoView` y devuelve el foco que el
+clic en el boton acaba de robar.
+
+La seleccion de CodeMirror sobrevive a perder el foco, asi que "la ultima posicion conocida" del
+enunciado es precisamente lo que ese metodo usa. El unico caso degradado real es un editor que
+nunca ha tenido el foco: ahi la seleccion es `{0,0}` y se inserta al principio, que para una
+plantilla nueva es el mismo sitio.
+
+Tampoco habia que tocar nada para que `requiredVariables` se actualice: la insercion despacha una
+transaccion -> `docChanged` -> `update:modelValue` -> `updateHtmlContent`, y `detectedVariables` es
+un `computed` sobre el borrador. El cableado ya estaba.
+
+### El fallback del store se generalizo
+
+`insertMarker(namespace)` solo sabia componer `{{ns.}}`, asi que la tanda anterior habia dejado en
+el dialogo un `marker.replace(/^\{\{|\.[^.]*\}\}$/g, '')` para degradar un marcador completo a su
+raiz. Feo y facil de romper. Ahora el store expone `insertTextAtCursor(text, caretOffset)`, que no
+conoce la gramatica del marcador, e `insertMarker` delega en el. Sus cuatro pruebas siguen pasando
+sin tocarlas.
+
+### Detalles con razon detras
+
+- **El catalogo se pide AL ABRIR, no en `onMounted`.** El dialogo vive montado y cerrado en el
+  arbol de sus dos anfitriones; pedirlo al montar seria pedirlo con el gestor recien pintado y
+  nadie mirando. La llamada es memoizada, asi que si el asistente ya lo cargo no cuesta peticion.
+- **El componente consume el store del catalogo, no su servicio.** La frontera HTTP sigue siendo
+  `node-catalog.service.ts`. Es distinto del caso del nodo mapeador, donde se omitio la carga
+  porque ahi SI hay un anfitrion que la hace; el gestor de plantillas no tiene ninguno.
+- **Cambiar de origen limpia el campo.** Conservarlo compondria un marcador que mezcla dos
+  namespaces.
+- **El badge de tipo usa `.pd-badge--role` de `app.scss`**, que tenia exactamente los tres valores
+  que la `.pd-namespace-chip` scoped duplicaba. Esa clase se va con los chips.
+- **El doble de CodeMirror se mockea a nivel de MODULO**, no con `stubs`: el dialogo lo carga con
+  `defineAsyncComponent` y en el arbol no hay un nombre contra el que casar. El mock necesita
+  `__esModule: true` o Vue toma el modulo entero por el componente.
+
+### Lo que las pruebas cubren y lo que no
+
+Frontend **20 ficheros / 429 pruebas** (24 nuevas): 9 del helper puro, 11 del dialogo —primer spec
+de componente de `src/components/templates/`, que cierra la pendiente 35— y 4 del fallback
+generico del store.
+
+Lo que **no** esta cubierto: el camino con CodeMirror real sigue sin prueba (el doble sustituye al
+editor), asi que la insercion de verdad solo se comprueba a mano; y `copyToClipboard` no se
+asevera, porque el portapapeles exige contexto seguro y su fallo ya degrada a un aviso.
+
+---
+
+## Tanda actual — PROT-15.2: el prompt dejo de ser un campo del flujo
+
+### Tres divergencias del enunciado, todas por la misma razon
+
+El enunciado pedia una migracion TypeORM (`MigrationInterface`) en
+`backend/src/database/migrations/`, columnas en ingles (`ai_prompts`, `prompt_text`,
+`created_by_id`) y un `DELETE` fisico. Las tres se cambiaron tras consultarlo, porque las tres
+chocaban con una convencion que el repo ya tenia resuelta:
+
+1. **Migracion en SQL plano.** El runner de TypeORM no existe aqui: no hay `data-source.ts`, la
+   config de `TypeOrmModule` no declara `migrations` y no hay scripts npm. Las 17 migraciones
+   anteriores son `.sql` numerados que se aplican con `psql`. Una clase habria sido codigo que
+   nadie ejecuta, con la tabla sin crear y la falsa sensacion de que si.
+2. **Columnas en espanol.** Las diez tablas del esquema son snake_case en espanol y la FK apuntaba
+   a una tabla `users` que no existe — se llama `usuarios`, con PK `id_usuario`. La regla real es
+   la de `code-conventions.md` §1: identificadores en ingles, columnas en espanol. La entidad
+   expone `promptText` y `createdById`; la tabla, `texto_prompt` e `id_usuario_creador`.
+3. **Borrado logico.** Las dos tablas analogas de contenido curado (`plantillas_html`,
+   `plantillas_flujo`) usan `activo`, y por el mismo motivo: una ejecucion ya trazada apunta al
+   prompt con el que se genero su salida. Un `DELETE` fisico dejaria la auditoria sin la pieza que
+   explica el resultado.
+
+### Por que la tabla no guarda el modelo
+
+Es la decision de diseno de la subtarea, no una simplificacion. Si `prompts_ia` tuviera `provider`
+y `model`, el texto quedaria atado a un proveedor y el mismo prompt no podria probarse con Claude y
+con ChatGPT sin duplicar la fila. El modelo es configuracion de EJECUCION y pertenece al nodo; el
+prompt es un activo de CONTENIDO y pertenece al repositorio. Separarlos es lo que permite que
+PROT-15.3 conecte cualquier prompt a cualquier nodo de IA.
+
+### El servicio devuelve DTOs y no la entidad
+
+`TemplatesService` devuelve `HtmlTemplate` cruda, y su TSDoc lo justifica: "aqui no hay ninguna
+columna que deba quedar oculta". `AiPrompt` si la tiene, de forma indirecta: la relacion `createdBy`
+apunta a `User`, que lleva `secreto_otp`. Hoy no se carga, pero basta con que alguien anada un
+`relations: ['createdBy']` a una consulta para que ese campo viaje al cliente. Devolver un DTO
+cierra esa puerta antes de que se abra, y de paso deja el listado sin `promptText`: la tabla muestra
+decenas de filas y una instruccion puede ocupar kilobytes.
+
+`findByName` y `findOneEntity` son la excepcion y devuelven la entidad, porque su consumidor no es
+la API sino la estrategia del nodo IA.
+
+### `findByName` devuelve null en vez de lanzar
+
+Los demas buscadores del repo lanzan `NotFoundException`. Aqui no, y es deliberado: quien va a
+llamarlo es la estrategia del `PROCESADOR_IA`, que ante un prompt ausente debe producir un
+`NodeResult` con `success: false` y su nivel de severidad, no una excepcion HTTP que el motor
+tendria que atrapar para traducirla. El que lanza es `findOneEntity`, que es el que sirve al CRUD.
+
+### `ON DELETE RESTRICT` y no `CASCADE`
+
+`tokens_sesion` usa CASCADE porque una credencial de renovacion no tiene sentido sin su dueno. Un
+prompt si: es patrimonio del equipo. Dar de baja a quien lo escribio no puede llevarse por delante
+las instrucciones que dejo en produccion, asi que la FK bloquea el borrado del usuario. El indice
+`idx_prompts_ia_id_usuario_creador` esta justamente para poder responder "que prompts dejo esta
+persona" antes de intentarlo.
+
+### `active` en el DTO de alta, pero ignorado
+
+`CreateAiPromptDto` declara `active?: boolean` y `create()` no lo lee: todo prompt nace activo. El
+campo existe porque `UpdateAiPromptDto` es un `PartialType` del de alta, y es la UNICA via para
+reactivar un prompt retirado — `softDelete` solo sabe apagar. Sin el, la tabla administrativa
+mostraria filas inactivas imposibles de recuperar. Mismo criterio que `TemplatesService`. La
+prueba 3.2 fija ese comportamiento para que nadie lo "arregle" propagandolo.
+
+### Lo que las pruebas cubren y lo que no
+
+17 pruebas sobre el servicio con el repositorio doblado, patron AAA: listado (filtro por activo,
+orden alfabetico, ausencia de `promptText`), detalle y `NotFoundException`, `findByName` con
+recorte y `null`, alta (autoria del JWT, `active` ignorado, descripcion a `null`, colision de
+nombre), edicion (campos omitidos intactos, reactivacion, conservar el propio nombre, colision con
+otro, inexistente) y retirada logica.
+
+NO se cubre: el controlador no tiene spec propio —los guards y `@CurrentUser()` son declarativos y
+el patron del repo no los prueba por separado—, y la migracion no se ha aplicado todavia contra el
+contenedor, asi que la correspondencia entre `init.sql` y la entidad esta verificada por lectura y
+no por ejecucion.
+
+---
+
+## Tanda actual — El prompt dejo de escribirse a ciegas
+
+### Renombrar una tabla son seis objetos, no dos
+
+`ALTER TABLE ... RENAME TO` no arrastra los nombres derivados. Sin renombrar tambien la PK, el
+UNIQUE del nombre, la clave ajena y el indice, una base migrada habria conservado
+`prompts_ia_pkey` mientras un clonado nuevo desde `init.sql` tendria
+`plantillas_prompts_ia_pkey` — y, peor, un error de nombre duplicado habria citado una tabla que ya
+no existe, mandando a quien depure al sitio equivocado. Es la tercera vez que el proyecto tropieza
+con lo mismo (009 y 011), asi que la 019 lo hace explicito en su cabecera.
+
+Cada paso va en un bloque `DO $$` porque `RENAME` no admite `IF EXISTS`. La clave ajena no se
+recrea: `ON DELETE RESTRICT` sobrevive al renombrado, y volver a declararla solo abriria la puerta
+a cambiar la regla sin darse cuenta.
+
+### La PK se sigue llamando `id`
+
+El enunciado pedia `idPlantillaPromptIa`. Se mantuvo `id` con
+`@PrimaryGeneratedColumn('uuid', { name: 'id_plantilla_prompt_ia' })`. `code-conventions.md` §1
+exige identificadores en ingles, y las diez entidades del proyecto ya mapean `id_flujo`,
+`id_usuario` e `id_plantilla` a una propiedad `id`. Aceptarlo habria dejado el unico identificador
+en espanol del backend y habria cambiado la forma del JSON, obligando al frontend a hablar espanol
+en sus tipos.
+
+### Lo que el enunciado daba por hacer y ya estaba hecho
+
+"Asegurar que los nodos tengan definido su output_schema" no era trabajo pendiente: no existe esa
+columna y no debe existir. `INodeStrategy.outputFields` es la fuente, y `NodeCatalogService` la
+resuelve en cada peticion contra la factoria de estrategias. Su TSDoc explica el porque: una copia
+en la tabla se desincronizaria con la estrategia a la primera. Los campos citados en el encargo
+—`clean_body`, `clean_title`, `extracted_urls`, `subject`, `from`— llevaban declarados desde la
+tanda de los cinco inventarios de salida.
+
+### El explorador se extrajo en vez de duplicarse
+
+Vivia en linea dentro de `TemplateEditorDialog` con 11 pruebas encima. Copiarlo al dialogo de
+prompts habria dejado dos gramaticas `{{ns.campo}}` que divergirian a la primera correccion, asi
+que se saco a `components/shared/VariableExplorer.vue` y el dialogo HTML pasa a consumirlo.
+
+**Las 11 pruebas de `TemplateEditorDialog.spec.ts` no se tocaron, y siguen pasando.** Era el
+criterio de aceptacion de la extraccion: si hubiera hecho falta editarlas, el comportamiento habria
+cambiado. Los `data-test` se conservan todos, y por eso las consultas del spec siguen resolviendo
+aunque ahora atraviesen un componente hijo.
+
+El componente NO decide que origenes se ofrecen; los recibe filtrados. Cada anfitrion tiene sus
+reglas —la plantilla HTML admite `_assets`, el prompt prohibe los destinos— y meterlas dentro
+habria convertido un componente de presentacion en el juez de dos dominios. Tampoco inserta: emite
+`insert` y que el anfitrion escriba donde sepa, porque uno despacha una transaccion de CodeMirror y
+el otro manipula el caret de un textarea.
+
+### Por que los destinos se excluyen por categoria y los otros tres por nombre
+
+Un destino cierra el flujo: su salida es el acuse de la publicacion y nada corre despues. Esa es
+una propiedad de la CATEGORIA, y hoy son dos filas pero manana seran tres — enumerarlas habria
+obligado a acordarse de la lista al anadir la siguiente.
+
+`PROCESADOR_IA`, `ESCUDO_POST_IA` y `MAPEADOR_PLANTILLA` son de PROCESAMIENTO y CONTROL, categorias
+que si se admiten, asi que a esos hay que nombrarlos. Los tres comparten motivo: consumen lo que
+produce la IA. Citarlos desde el prompt seria pedirle al modelo el resultado de procesar su propia
+respuesta, y `llm_response` es literalmente la salida del nodo que esta leyendo el prompt.
+
+Nota sobre las categorias del enunciado: pedia `'PROCESSING'` y `'DESTINATION'`. El enum real es
+`TRIGGER | PROCESAMIENTO | CONTROL | DESTINO`, el tipo PostgreSQL `enum_categoria`. Y "permitir
+CONTROL" resulta vacio en la practica: `ESCUDO_POST_IA` es el unico nodo de esa categoria y esta
+excluido por nombre.
+
+### El Escenario B esta listo pero nadie lo invoca todavia
+
+`AiPromptTemplateDialog` acepta `upstreamContext` con el mismo contrato que `TemplateEditorDialog`,
+y `filterPromptContext` lo depura. Pero hoy no hay quien se lo pase: `PROCESADOR_IA` no tiene
+estrategia en el backend, ni componente en `nodeConfigRegistry`, ni store en `nodeStoreRegistry`.
+La prop queda probada y documentada para que PROT-15.3 solo tenga que conectarla; construir ahi
+toda la triada del nodo habria sido meter PROT-15.3 entera en esta tanda, y el nodo seguiria sin
+poder ejecutarse.
+
+### La insercion en el textarea hubo que escribirla
+
+No hay `insertTextAtCursor` que reutilizar: el prompt se edita en un `q-input type="textarea"` y no
+en CodeMirror. Se toma la referencia del QInput, se lee `selectionStart`/`selectionEnd` del elemento
+nativo y se recompone la cadena. Se usan los DOS extremos y no solo el inicio para que un texto
+seleccionado quede REEMPLAZADO, que es lo que espera cualquiera que seleccione algo antes de pulsar
+Insertar.
+
+El caret se recoloca dentro de un `setTimeout(0)`: cuando la funcion termina, Vue todavia no ha
+propagado el `v-model` al DOM, y fijar la posicion antes la perderia en el repintado. Sin
+referencia al textarea —que no deberia ocurrir— se anade al final en vez de descartar la insercion.
+
+### Lo que las pruebas cubren y lo que no
+
+21 pruebas nuevas: 11 de `prompt-namespaces` (los cuatro origenes exactos del Escenario A, la
+exclusion por categoria con un destino inventado, el mapeador pese a ser de PROCESAMIENTO, la
+propia salida de la IA, los nodos sin campos, y en el Escenario B que el contexto recibido no se
+muta) y 10 de `VariableExplorer` (etiquetas, encadenado de los dos selects, limpieza al cambiar de
+origen, el marcador emitido y el `reset` imperativo).
+
+NO se cubre: la insercion real en el textarea no tiene prueba automatica —`selectionStart` sobre un
+QInput montado en happy-dom no reproduce el caret de un navegador de verdad—, asi que el punto 3 de
+la verificacion manual es el que la valida. Tampoco hay prueba del Escenario B de punta a punta,
+porque no existe el anfitrion que lo dispare.
+
+## Tanda actual — La tabla que llegaba al modelo convertida en una ristra de valores
+
+El sintoma venia de `Paneles de septiembre 2026-WEB.xlsx`: una hoja con las columnas
+`PRESIDENTE, PRESIDENTE, SECRETARIO, SECRETARIO`, donde la primera de cada par es el nombre de la
+persona y la segunda su universidad. `extractFromWorkbook` las aplanaba con `', '` y al modelo le
+llegaba `Ana Ruiz, Universidad A, Luis Paz, Universidad B`. No es que el modelo alucinara: es que
+no habia forma de saber cual era cual. Y una celda con una coma dentro —`Madrid, Espana`— valia
+por dos columnas.
+
+El mismo fallo aparecia tres veces en el mismo nodo: en Word, porque `mammoth.extractRawText`
+pega las celdas de un `<table>` sin delimitador; y en el cuerpo del correo, porque
+`CELL_SELECTORS` mete un espacio tras cada celda y el cuadro sale como prosa.
+
+### Por que un serializador y no tres
+
+Las tres rutas acaban en el mismo problema —una matriz de celdas que hay que escribir como
+rejilla— y resolverlas por separado garantiza que diverjan en la primera correccion. El
+serializador vive en `markdown-table.util.ts` y es PURO: no conoce cheerio, no conoce exceljs y no
+importa el saneador. Lo ultimo no es estetico: `email-sanitizer.util.ts` importa la capa HTML, y
+reutilizar su `normalizeWhitespace` desde el serializador cerraba el ciclo. Lleva el suyo,
+`normalizeCellText`, y la duplicacion es aparente: aquella CONSERVA los saltos de linea porque
+separan parrafos, y aqui un salto dentro de una celda rompe la rejilla.
+
+### El invariante que gobierna todo lo demas
+
+`normalizeWhitespace` se aplica despues, sobre todo el texto extraido. Colapsa `[ \t]+` a un
+espacio y recorta los bordes de cada linea. Si la tabla llevara relleno de alineacion —las
+columnas cuadradas que se ven bien en un editor— esa pasada lo destruiria y el texto dejaria de
+ser identico a si mismo. Por eso la celda vacia se emite como `| |` y nunca como `|  |`, y por eso
+las barras exteriores van pegadas al contenido.
+
+Esta decidido por una prueba y no por un comentario: `markdown-table.util.spec.ts` 4.1 asevera
+`normalizeWhitespace(tabla) === tabla`. El dia que alguien alinee las columnas "para que se lea
+mejor", esa prueba lo para antes de que lo pare un correo en produccion.
+
+### Las cuatro trampas que costaron una reescritura
+
+**1. `replaceWith(cadena)` PARSEA la cadena.** La primera version devolvia el Markdown al arbol de
+cheerio como texto suelto; cualquier `<` salido de una celda se habria convertido en un elemento y
+los pasos de aplanado posteriores lo habrian tocado. Ahora entra como `.text()` de un `<div>`, que
+es un unico nodo que ningun selector alcanza. Esto decide, de rebote, que el salto de linea dentro
+de una celda sea un espacio y no un `<br>`: un `<br>` escrito por nosotros se convertiria en
+elemento y `$('br').replaceWith('\n')` —que corre justo despues— lo volveria un salto DENTRO de la
+tabla.
+
+**2. Una sola pasada sobre `$('table')` deja pasar la maquetacion.** Si se reemplaza sobre la
+marcha, al llegar a una tabla CONTENEDORA su hija ya no esta en el arbol, `find('table')` devuelve
+cero y la tabla de maquetacion pasa la heuristica que acababa de suspender. Se hacen dos pasadas
+sobre la misma seleccion, guardando el indice —no el nodo, que obligaria a tipar `domhandler`.
+
+**3. `row.getCell(n)` CREA la celda.** El encargo pedia iterar por indice de columna con
+`worksheet.getRow(n)` y `row.getCell(c)` para no desalinear. Leyendo `exceljs/lib/doc/row.js`
+resulta que tanto `getCell` como `eachCell({ includeEmpty: true })` son "get OR CREATE" y
+materializan en memoria las celdas inexistentes —exactamente la hoja con mil columnas formateadas
+que el comentario original decia querer evitar. `eachCell` SIN `includeEmpty` ya entrega el
+`colNumber` real (`index + 1`), asi que colocar por indice da la misma alineacion sin ese coste.
+Ni `columnCount` ni `actualColumnCount` sirven como ancho: el primero cuenta huecos nulos y el
+segundo columnas distintas.
+
+**4. Leer una celda mutando el arbol vivo rompe la tabla que luego se rechaza.** Parte de la
+heuristica se decide DESPUES de leer las celdas. `readCellText` trabaja sobre un clon; sin eso,
+los `<br>` de una tabla de maquetacion rechazada dejaban de ser elementos y `sanitizeEmailHtml` ya
+no los convertia en saltos de linea. Es una regresion silenciosa en el caso mas comun del corpus,
+y la fija la prueba 1.8 de `html-markdown.util.spec.ts`.
+
+### Por que el CSV no pasa por exceljs
+
+Era el camino obvio teniendo ya la libreria. Su conversor por defecto
+(`exceljs/lib/csv/csv.js`) pasa `"00123"` a `123` —adios al codigo postal, al NIF y al numero de
+expediente—, convierte las fechas a `Date` segun SUS formatos y no los del fichero, traduce `#N/A`
+a un objeto de error, no retira el BOM y solo entiende la coma, de modo que un CSV espanol de
+Excel cae entero en una sola columna. Es literalmente "el viaje de ida y vuelta que solo puede
+perder informacion" contra el que avisaba el comentario original. Son cincuenta lineas de
+analizador propio, cero dependencias y cero coercion.
+
+### Tres premisas del encargo que no se sostenian
+
+**`officeparser` no lee binarios heredados.** Soporta `docx/pptx/xlsx/odt/ods/odp/pdf/rtf/csv/md/
+html/epub/tex`; `.doc`, `.xls` y `.ppt` de Office 97-2003 quedan fuera. Devuelven un `failure`
+nombrado que no bloquea y que no levanta la bandera multimodal —un `.doc` no lo arregla ningun
+modelo con vision, y contarlo retendria sus megabytes para una llamada que no puede servir.
+
+**El contrato de trece claves ya existia y ya se cumplia.** Esta en `ParsedEmailPayload` y la
+prueba 1.1 de `parser-email.strategy.spec.ts` lo compara posicionalmente. No habia nada que
+anadir: solo que no se rompiera, y hay dos pruebas nuevas que lo reafirman con una tabla dentro
+del cuerpo.
+
+**La logica no vive en `parser-email.strategy.ts`.** Esa clase es contrato de nodo y nada mas; de
+ella solo cambia el mapa de hooks.
+
+### Por que el aviso de hojas ignoradas no usa un Logger
+
+El encargo pedia registrarlo en el logger. `document-extractor.util.ts` esta documentado como
+puro y sin estado, y esa pureza es lo que permite que `WizardService` lo consuma sin cablear
+inyeccion de dependencias —igual que `buildParsedEmail`. El canal ya existia: `ParsedEmailHooks`.
+Se anade `onDocumentNotice`, que `ParserEmailStrategy` enchufa a `this.logger.warn` —el aviso SI
+acaba en el log, como se pedia— y `WizardService` empuja a su arreglo `warnings`, de modo que el
+operador lo ve tambien en el banco de pruebas del asistente, que es donde de verdad lo va a mirar.
+
+### Por que la cabecera se compone en el llamante
+
+El encargo pedia que el extractor emitiera
+`--- Documento: <fichero> (Hoja: <hoja>) ---`. El extractor no conoce el nombre del fichero, y
+hacer que lo conociera tenia un efecto peor: el bloque solo se emite cuando hay texto, asi que un
+texto ya encabezado dejaria de ser la cadena vacia cuando no hubiera contenido, y se romperian
+tanto esa guarda como el recuento de candidatos a vision. El extractor devuelve una `label`
+(`Hoja: Datos Principales`, `Presentación`) y `extractAttachmentDocuments` compone la cabecera. El
+formato resultante es el pedido, y un PDF sigue dando `--- Documento: nota.pdf ---` byte a byte.
+
+### El `import()` que funcionaba en produccion y en ninguna prueba
+
+`officeparser` se carga bajo demanda porque arrastra `pdfjs-dist` y `tesseract.js`. La version
+natural era `await import('officeparser')` dentro de la rama. Con `module: nodenext` TypeScript
+PRESERVA ese `import()` en la salida CommonJS —ese es su proposito— y la VM de Jest lo rechaza sin
+`--experimental-vm-modules`: `ERR_VM_DYNAMIC_IMPORT_CALLBACK_MISSING_FLAG`. El resultado era una
+rama que funcionaba en produccion y que ninguna prueba podia recorrer, que es la peor combinacion
+posible. Se usa `require` tipado con `typeof import(...)`: igual de perezoso, mismo camino en los
+dos sitios. Y `fileType: 'pptx'` es obligatorio porque sin el officeparser detecta por firma
+cargando `file-type`, que es ESM puro.
+
+### Por que `.doc` y `.ppt` NO entran en la lista blanca de ingesta
+
+Se planteo admitirlos para que el operador viera el fallo. Resulta que ya lo ve, antes y mas
+barato: `ImapTriggerStrategy` registra `LEVE | Adjunto "informe.doc" descartado por tipo MIME no
+autorizado` en el momento de la ingesta. Admitirlos solo cambiaria DONDE aparece el aviso, a
+cambio de escribir megabytes de base64 en `contexto_acumulado` reserializados en cada checkpoint
+para un fichero del que se sabe de antemano que no aporta nada. Si entra `.pptx`, porque se lee; y
+entra `application/vnd.ms-excel`, porque Excel se lo pone tambien a los `.csv` que el mismo
+exporta y asi se recuperan: la desambiguacion por extension solo sirve si el fichero ENTRA.
+
+### Fixtures sin binarios del sistema
+
+`tabla-simple.docx` y `presentacion-minima.pptx` se versionan en `test/fixtures/` con su generador
+de Python al lado (`*.gen.py`, solo biblioteca estandar), igual que `nota-nativa.ps` acompana a
+`nota-nativa.pdf`. No hace falta LibreOffice. Construirlos dentro de la prueba habria atado el
+fixture a la misma libreria que se quiere ejercitar.
+
+### Lo que las pruebas cubren y lo que no
+
+94 pruebas nuevas y 2 reescritas, con la suite completa en 1400: 23 del serializador puro, 19 de
+la capa HTML, 10 del analizador delimitado, 27 del extractor (desambiguacion, alineacion con
+huecos, hoja unica, corte seguro, legados, enrutamiento por extension, DOCX y PPTX reales), 6 del
+saneador, 4 de la estrategia y 5 del payload. Las dos que cambiaron de expectativa son la 0.2 (el
+CSV ya no sale verbatim) y la 2.1 (el XLSX ya no sale aplanado con comas).
+
+NO se cubre: las hojas ocultas (`worksheet.state`), que hoy se leerian si fuesen la primera del
+libro; `colspan` en XLSX mas alla de resolver la celda combinada contra su maestra; y el riesgo
+conocido de que una tabla que sea el ULTIMO parrafo del cuerpo, mida menos de 800 caracteres y
+contenga una palabra de aviso legal, la retire `stripTrailingBoilerplate` entera —es el mismo
+trato que recibe cualquier parrafo final y no se le anade excepcion.
+
+---
+
+## PROT-23 · El mapeador de plantillas pasa de compilar a inyectar
+
+Rama `feat/mapeador-inyeccion`. Cambia de dueno el contenido: hasta ahora el nodo compilaba la
+plantilla con Handlebars contra el contexto acumulado y era el ULTIMO paso del flujo; ahora es la
+IA quien estructura e inyecta el contenido, asi que el mapeador se coloca DELANTE del
+`PROCESADOR_IA` y su trabajo es resolver la plantilla, sanearla y verificar su estructura.
+
+### Lo que el encargo daba por hecho y no existia
+
+El encargo pedia eliminar un mapeador de pares `QSelectFieldMapper` y crear la triada en
+`backend/src/strategies/template-mapper/`. Nada de eso estaba en el repositorio: no hay ni ha
+habido un mapeador de pares (`grep` de `FieldMapper|fieldMap|keyValue|pair` sobre `frontend/src`
+no devuelve nada), `variableMapping` solo aparecia en un ejemplo obsoleto de
+`.claude/rules/testing-standards.md`, el configurador YA era un `q-select` cerrado de `templateId`
+con previsualizacion, y `backend/src/strategies/` no existe —el alias `@strategies/*` apunta a un
+directorio fantasma—. El trabajo real era solo el cambio semantico, y hacerlo donde ya vivia el
+codigo.
+
+### Por que el saneado no se reimplanto en la estrategia
+
+El encargo traia `sanitizeHtml` y `cheerio` en linea dentro del nodo. `TemplateRendererService` ya
+tenia la lista blanca endurecida que el gestor de plantillas aplica al guardar. Dos listas que
+describen la misma regla divergen en cuanto alguien toca una sola: el editor aceptaria markup que
+el nodo recorta, o al reves. Se anadieron alli `prepareInjectableMarkup` y `auditStructure`, y la
+estrategia se quedo con la traduccion al contrato `NodeResult`.
+
+### `ERR_TEMPLATE_PENDING_VARS`: lo que hace segura la sustitucion
+
+Sustituir el camino de compilacion tiene un modo de fallo que no es un test rojo sino corrupcion
+silenciosa. Un flujo ya guardado cuya plantilla interpole `{{parsed_email.clean_title}}` seguiria
+resolviendose, nadie sustituiria nada, y esas llaves viajarian literales hasta el articulo
+publicado en Drupal: sin excepcion, sin `PAUSADO`, sin alerta. La guarda corta ANTES de sanear y
+devuelve un GRAVE con las rutas pendientes en `missingFields`. Romper en voz alta y de forma
+corregible, que es la doctrina del resto del motor.
+
+Esa guarda es tambien la razon de que se tocara `test-fsm-runner.seed.ts`: su fixture era
+integramente interpolacion y hoy caeria en ella. Pasa a ser un esqueleto con tres ranuras
+(`h1.titular`, `p.entradilla`, `div.cuerpo`) que el nodo exige por `requiredSelectors`, de modo
+que la semilla demuestra ahora el contrato estructural en vez de la compilacion. El `mockData` del
+despacho manual se conserva A PROPOSITO aunque el nodo ya no lea el contexto: si apareciera en el
+markup, habria una compilacion donde no deberia haberla.
+
+### Por que `compiled_markup` conserva un nombre que ya miente
+
+La clave contiene ahora markup SIN compilar. Renombrarla era lo limpio y se descarto: dejaria sin
+dato a todo consumidor de `rendered_html.compiled_markup`, incluido el `DESTINO_DRUPAL` de cualquier
+flujo guardado. El precio —un nombre que no describe su contenido— se paga en la `description` del
+`outputField`, que es lo que leen `GET /api/nodos` y el selector de variables del asistente: quien
+audita una ejecucion lee la descripcion, no el identificador. La migracion 025 hace lo propio con
+la fila del catalogo, que seguia anunciando "interpola variables dinamicas".
+
+### Por que `allowedTags` solo puede restar
+
+Es un SUBCONJUNTO de la lista blanca del saneador, nunca una ampliacion. Pedir una etiqueta que no
+figura en ella devuelve `ERR_TEMPLATE_UNSUPPORTED_TAGS` en vez de concederla: permitir `script` por
+parametro convertiria la configuracion de un nodo en una via de XSS. `prepareInjectableMarkup`
+sanea con la interseccion aunque el llamante pida de mas, de modo que el fallo nunca deja markup
+peor del que habria salido sin el parametro.
+
+Y la auditoria estructural corre sobre el markup YA saneado, no sobre el crudo. Si el saneador se
+llevo por delante la ranura que el selector busca, eso tiene que verse al ejecutar el nodo y no
+cuando la IA devuelva un hueco sin rellenar.
+
+### Por que `requiredSelectors` son selectores y no marcadores
+
+`TemplatesService` rechaza al guardar cualquier marcador que no sea un `{{namespace.campo}}` de la
+lista blanca (`RESIDUAL_MARKER_PATTERN`). Un "hueco a rellenar por la IA" NO es expresable como
+`{{TITULAR}}`: la unica forma de nombrar una ranura es por su posicion en el DOM. De ahi que el
+contrato estructural sean selectores CSS.
+
+### Lo que se borro del frontend, y por que no se degrado a aviso
+
+Desaparece el aparato "contrato plantilla <-> topologia" entero: `missingRequiredVariables`,
+`missingUpstreamNamespaces`, `missingUpstreamFields`, el selector copia-al-portapapeles y el banner
+rojo que bloqueaba el avance. Conservarlo como advertencia habria mantenido un diagnostico cuyo
+enunciado es FALSO bajo la semantica nueva —"el flujo no provee X" cuando el nodo no necesita X— y
+habria marcado en ambar toda plantilla legada. Lo que sobrevive, reformulado, son dos avisos no
+bloqueantes: la plantilla trae marcadores que aqui ya nadie resuelve (redactado con el codigo
+`ERR_TEMPLATE_PENDING_VARS`, para que se reconozca el mismo problema en la trazabilidad), y el
+`PROCESADOR_IA` esta colocado ANTES de este nodo, que es el aviso que ensena el orden nuevo.
+
+Se conserva `availableUpstreamContext` pese a que el nodo ya no interpole: alimenta
+`:upstream-context` de `TemplateEditorDialog`, que es superficie de AUTORIA compartida con el
+gestor —la plantilla que se escribe ahi puede usarse en un nodo que si lea el contexto— y permite
+detectar el orden invertido. El canal de solo-NOMBRES si se retira; es opcional en
+`NodeConfigStore` y todos sus llamadores usan `?.()`, asi que ningun anfitrion cambia.
+
+Tambien cae `compilePreview` del servicio del nodo y `loadPreview` del store: ya eran codigo
+muerto, porque `TemplatePreviewDialog` compila por `useTemplatesStore()`.
+
+### `paramsSchema` queda pendiente, deliberadamente
+
+El DTO existe y esta probado, pero conectarlo como `paramsSchema` lo somete a
+`whitelist: true, forbidNonWhitelisted: true`: cualquier `params` historico con una clave no
+declarada pasaria a dar 400 al guardar Y al activar. Eso exige auditar antes `configuracion_pipeline`
+en PostgreSQL, no suponerlo. Hasta entonces la estrategia funciona igual; solo se pierde el 400
+temprano.
+
+### Cobertura
+
+Backend 1597 pruebas en verde (32 de la estrategia, 16 del DTO nuevo, 11 anadidas al renderer).
+Frontend 703 en verde. Dos pruebas de `flujo-draft.store.spec.ts` cambian de canal —preguntan por
+`availableUpstreamContext` en vez del de nombres— porque lo que vigilan es que el ANFITRION
+recalcule al cambiar de pipeline, no por que canal viaja el dato.
+
+---
+
+## PROT-23b · Validacion estricta del mapeador y la plantilla base en el prompt
+
+Cierra lo que PROT-23 dejo abierto, en la misma rama `feat/mapeador-inyeccion`.
+
+### La auditoria era la condicion, no un tramite
+
+`paramsSchema` quedo sin conectar porque `PipelineValidatorService` valida con
+`forbidNonWhitelisted: true`: una clave historica no declarada deja de ser un campo ignorado y pasa
+a ser un 400 al guardar Y al activar (`assertActivatable` revalida el esquema entero). La auditoria
+encontro `outputNamespace` dentro de `params`, que es justo el caso que habria roto flujos que hasta
+ahora se guardaban sin problema.
+
+### Tolerado, validado, y deliberadamente NO resuelto
+
+El proyecto tiene las dos posturas por escrito: los DTO de `TRIGGER_CRON` y `TRIGGER_IMAP` aceptan
+`outputNamespace` en `params`, y el de `PROCESADOR_IA` lo prohibe porque "crearia una segunda fuente
+de verdad que el validador de topologia no ve". Aqui se toma una tercera, que es la union de lo
+bueno de ambas: se DECLARA (para que el esquema historico siga guardandose) y se VALIDA contra
+`OUTPUT_NAMESPACE_PATTERN` (tolerar el campo no es tolerar cualquier contenido), pero **no entra en
+`ResolvedTemplateMapperConfig`**. Lo que no se resuelve no se puede leer por accidente, y el
+namespace efectivo sigue siendo uno solo: el del nodo.
+
+La migracion 026 retira la clave de `flujos` y `plantillas_flujo`, y se entrega SIN aplicar. El
+orden importa en una sola direccion: se puede aplicar cuando se quiera, pero el campo no puede
+salir del DTO antes de aplicarla.
+
+### El fixture dummy no se rompe, y por que conviene saberlo
+
+`dummy-pipeline.fixture.ts` declara `params: { template: DUMMY_TEMPLATE }`, una clave que el DTO no
+tiene, y tanto `run-dummy-e2e.ts` como la e2e del motor validan ese esquema. No rompe porque ambos
+llaman a `registerDummyStrategies(factory)` ANTES, y `registerStrategy` reemplaza al duplicado: el
+`MAPEADOR_PLANTILLA` que resuelve la factoria es el dummy, que no declara `paramsSchema`. Es una
+dependencia del ORDEN de registro, no una propiedad estable, y por eso queda anotada.
+
+### El PASO 3 del encargo ya estaba hecho
+
+Se pedia que `LlmExtractorStrategy` leyera `compiled_markup` del contexto y lo inyectara en el
+prompt con un `.replace()`. Resulta que la estrategia YA interpola el prompt entero contra el
+contexto (`interpolate` -> `getInterpolatedValue` -> `resolvePath`, que recorre todos los namespaces
+sin lista blanca), asi que `{{rendered_html.compiled_markup}}` se resuelve hoy, y da igual que el
+prompt venga de `inlinePrompt`, de `templatePromptId` o de `promptCode`: la interpolacion ocurre
+despues de resolverlo, sobre la cadena. `getRequiredNamespaces` ademas ya extrae las raices del
+`inlinePrompt`, de modo que la regla 7 valida la dependencia al guardar.
+
+Escribirlo habria anadido cuatro defectos: un namespace `template_base` que no existe en la lista
+cerrada —el mapeador escribe en `rendered_html`—, un error sin `code` que no compila y que dejaria
+el fallo inenrutable, una plantilla OBLIGATORIA que rompe el rescate OCR (`PARSER -> OCR ->
+PROCESADOR_IA`, sin mapeador) y cualquier nodo de IA recien anadido, y un `.replace()` literal mas
+fragil que la interpolacion a la que sustituia, porque no tolera `{{ ns.campo }}` con espacios.
+
+### Lo que si faltaba: que la interfaz lo ofreciera
+
+`PROMPT_EXCLUDED_NODE_TYPES` escondia el mapeador del explorador de variables, con este motivo:
+"consumen lo que produce la IA... en ejecucion ninguno de los dos habra corrido todavia". Era cierto
+mientras el nodo compilaba e iba al final. Desde que precede a la inferencia es falso, y de hecho
+`rendered_html.compiled_markup` es el origen con MAS sentido para una instruccion de redaccion.
+Sale de la lista; `PROCESADOR_IA` (que seria citarse a si mismo) y `ESCUDO_POST_IA` (que valida la
+salida de esta misma inferencia) se quedan.
+
+La prueba 1.3 del spec se invierte literalmente —de `not.toContain('rendered_html')` a
+`toContain(...)`— y la 2.2 cambia de sujeto al escudo, porque su enunciado ("un origen sin sentido
+aunque el flujo lo coloque antes") ya no describe al mapeador.
+
+### Cobertura
+
+Backend 1603 en verde (34 de la estrategia, 20 del DTO). Frontend 704. `npx tsc --noEmit` mantiene
+los 89 errores preexistentes, ninguno nuevo. Build de Quasar correcto.
+
+---
+
+## PROT-24 · Los prompts guardados dejan de ser un punto ciego del validador
+
+Misma rama `feat/mapeador-inyeccion`. El encargo pedia construir validacion topologica de
+dependencias de namespaces; esa validacion ya existia —la regla 7, `detectUnreachableNamespaces`—
+asi que lo que se hizo fue tapar el agujero por el que se escapaba.
+
+### Lo que ya estaba, y por que no se reescribio
+
+La regla 7 recorre `entrypoint -> nextStep` acumulando `outputNamespace` en un `Set`, comprueba las
+dependencias de cada nodo ANTES de anadir el suyo —de ahi que ningun nodo se satisfaga a si mismo— y
+emite `ERR_MISSING_UPSTREAM_CONTEXT`. Tenia 9 pruebas, y dos de ellas eran literalmente las que el
+PASO 2 pedia.
+
+Reemplazarla por el codigo propuesto habria metido tres regresiones. Su regex no contempla los
+indices `[0]`, asi que `{{parsed_email.extracted_urls[0]}}` —el ejemplo del propio
+`WebScraperConfigDto`— dejaria de detectarse. Su semilla `['trigger','raw_email']` omite `_assets` y
+`error_context` (que la regla cubre y tiene probados) y mete `raw_email`, que NO debe sembrarse: se
+deriva del `outputNamespace` del disparador, y sembrarlo daria por bueno un `{{raw_email.x}}` en un
+flujo que arranca por cron. Y su `throw` inmediato, sin `issues[]`, deja al asistente sin
+diagnostico —`extractApiIssues` solo mira ese arreglo— y acaba con el "nombrar todos los que faltan
+a la vez" que la prueba 7.7 fija.
+
+### El agujero: un prompt es texto que el validador no leia
+
+`resolveNodeDependencies` une dos fuentes: lo que la estrategia declara y un barrido de
+interpolaciones sobre `params`. Para el nodo de IA ninguna de las dos ve nada cuando la instruccion
+viene de base de datos: `getRequiredNamespaces` solo mira `inlinePrompt` —es puro y sincrono por
+contrato— y en `params` solo hay un UUID o un codigo, sin `{{...}}` que escanear.
+
+No era teorico. `NOTIWEB_DEFAULT`, uno de los tres prompts sembrados, interpola
+`{{scraped_web.full_article_content}}`. Un flujo que lo citara sin un `EXTRACTOR_WEB` por delante se
+guardaba, se activaba, y reventaba en la primera ejecucion con `ERR_LLM_INTERPOLATION` dejando el
+flujo PAUSADO.
+
+### Por que la estrategia declara la referencia y no el validador la busca
+
+El hook nuevo es `getPromptReferences(params)`, opcional en `INodeStrategy`. Podria haberse resuelto
+mirando `params.templatePromptId` y `params.promptCode` desde el validador, pero eso mete los
+nombres de los params de un nodo concreto dentro de `@core`, que no sabe lo que es un
+`templatePromptId` igual que no sabe lo que es un `targetUrl`. Con el hook, el dia que el
+`PROCESADOR_OCR` resuelva prompts guardados queda cubierto sin tocar el validador.
+
+Respeta la precedencia de `resolvePrompt` (`templatePromptId` gana a `promptCode`) a proposito:
+devolver las dos referencias cuando ambas estan declaradas haria exigir los namespaces de un prompt
+que la ejecucion nunca va a leer.
+
+### Por que se pre-resuelve y no se hace async el resolutor
+
+`validatePipelineTopology` es una funcion PURA y SINCRONA, y eso es lo que permite probar cada regla
+con un doble de una linea sin tocar el contenedor de Nest. Leer un prompt es I/O. La salida fue
+pre-resolver en `validateSchema` —que ya era `async`— y pasar las dependencias extra por el
+resolutor que la regla 7 ya recibia. El validador puro no cambia de firma.
+
+La pre-resolucion vive DENTRO del `if (issues.length === 0)` que ya guardaba la topologia, asi que un
+esquema con la forma mal ni siquiera paga la consulta. Y es UNA consulta para todo el esquema, no una
+por nodo: el puerto recibe todas las referencias juntas.
+
+### La frontera `@core` -> `@modules`, resuelta por inversion
+
+El validador vive en `@core` y los prompts en `@modules`. En vez de inyectar
+`AiPromptTemplatesService`, `@core` declara el puerto `PromptTextResolverPort` y
+`AiPromptTemplatesModule` provee la implementacion bajo el token `PROMPT_TEXT_RESOLVER`. La
+dependencia apunta hacia dentro.
+
+El puerto devuelve TEXTO y no namespaces, y eso es deliberado: `extractNamespaceRoots` ya vive en
+`@core`, junto al patron con el que el motor interpola de verdad. Si el puerto devolviera namespaces
+habria dos analizadores condenados a discrepar — el mismo motivo por el que
+`AiPromptTemplatesService.toDetail` reutiliza el de la FSM en vez de reimplementarlo.
+
+El adaptador NO reutiliza los buscadores del servicio: lanzan `NotFoundException` y resuelven de uno
+en uno, y aqui hace falta lo contrario —una consulta para todo el esquema y silencio ante lo que no
+existe—. Una referencia que no resuelve se OMITE del mapa: de la plantilla que falta se queja la
+ejecucion con `ERR_LLM_PROMPT_UNRESOLVED`, y tratarla aqui como namespace ausente mandaria al
+operador a reordenar un flujo cuyo orden esta bien. Las plantillas desactivadas SI se resuelven: de
+que namespaces depende un flujo no cambia porque alguien retire el prompt del selector.
+
+### El mensaje tenia que decir de donde sale la dependencia
+
+Cerrar el agujero sin esto habria empeorado el diagnostico: el operador leeria "el nodo necesita
+`scraped_web`", miraria los `params` del nodo y no encontraria ningun marcador que lo explique,
+porque esta en el prompt. De ahi el resolutor opcional `dependencyOrigins`, que la regla 7 usa SOLO
+para redactar: el namespace ausente se imprime como `scraped_web (lo cita el prompt "NOTIWEB_DEFAULT")`.
+Sin el resolutor el mensaje es el de siempre, y la prueba 7.13 lo fija.
+
+El codigo de error no cambia. Es el mismo problema —una dependencia que nadie satisface— y estrenar
+uno obligaria a tocar todo `catchErrors` que ya lo mencione a cambio de nada.
+
+### `@Optional()` como red
+
+El puerto se inyecta opcional. Sin el, el validador se comporta exactamente como antes, lo que deja
+en pie los 47 casos del spec del servicio —que construyen `new PipelineValidatorService(factory)` a
+mano— sin obligarlos a doblar una dependencia que no les concierne. La prueba "deberia comportarse
+como antes sin puerto inyectado" fija ese contrato.
+
+### Cobertura
+
+1631 pruebas en 70 suites, en verde: 9 nuevas en el servicio validador, 4 en el validador de
+topologia (entre ellas las dos del PASO 2, con la pareja `MAPEADOR_PLANTILLA`/`PROCESADOR_IA`), 6 del
+hook en la estrategia y 9 del adaptador. `npx tsc --noEmit` mantiene los 89 errores preexistentes y
+`nest build` pasa limpio.
+
+Comprobacion de que las pruebas muerden: quitando la union de los namespaces del prompt en el
+resolutor de dependencias, 3 de las nuevas se ponen rojas.
+
+### Lo que sigue abierto
+
+El texto de un prompt se guarda SIN VALIDAR. `create`/`update` asignan `promptText` verbatim y el DTO
+solo pide `@IsString`, asi que se persiste `{{inventado.campo}}`, `{{#each}}` o un `{{roto` con un
+201. Esto cierra la mitad que depende del FLUJO —un namespace real citado en el orden equivocado—,
+que es la unica que un validador de topologia puede responder. La otra mitad se cierra en el gestor
+de prompts, replicando lo que el de plantillas HTML ya hace.
+
+---
+
+## PROT-25 · El escudo posterior a la IA deja de ser un hueco en el enum
+
+Misma rama `feat/mapeador-inyeccion`. `ESCUDO_POST_IA` llevaba declarado desde la migracion 005 —valor
+de enum, fila de catalogo con categoria `CONTROL`, namespace `validated_drupal_json` reservado en la
+lista cerrada y tres menciones en la documentacion— y no tenia **ni una linea** de implementacion.
+`PostIaSanitizer` y `post-ia` daban cero ocurrencias en todo el repositorio.
+
+Importaba ahora y no antes por lo que cambio en PROT-23. Mientras el mapeador compilaba la plantilla
+e iba al final, lo ultimo que tocaba el markup era codigo nuestro. Desde que el mapeador entrega el
+esqueleto y la IA lo rellena, lo ultimo que lo toca es un modelo de lenguaje, y su salida iba directa
+al destino: un `<script>` colado por inyeccion de prompt, un `{{nodo.campo}}` copiado sin resolver,
+una valla ```` ```html ```` anadida por habito de chat o un titular borrado al reescribir el HTML
+llegaban a Drupal sin excepcion, sin PAUSADO y sin alerta.
+
+### Lo que el encargo daba por hecho y no existia
+
+El encargo venia escrito contra un repositorio que no es este, y la mitad de sus rutas eran
+inventadas: `modules/nodes/enums/node-type.enum.ts` (el enum vive en `@core/fsm/types/`),
+`@core/fsm/state-payload.context` (falta `/context`), `modules/nodes/services/node-strategy.factory.ts`
+(esta en `@core/fsm/factories/`, y ademas no es ahi donde se registra nada: se registra en el
+`onModuleInit` de `NodesModule`). Tambien pedia la firma `execute(context, config)` cuando el segundo
+parametro se llama `params`.
+
+Tres desviaciones eran de fondo y no de ruta:
+
+**El codigo del fallo dentro del mensaje.** El encargo escribia
+`message: "ERR_POST_IA_DOM_MUTATED: La IA altero..."`. Pero `NodeErrorDetail.code` es un campo
+obligatorio y **aparte**, y es contra lo que compara el `catchErrors` de un `onErrorStep`. Un fallo
+con el codigo enterrado en la prosa es un fallo inenrutable: el nodo de respaldo no corre, no hay
+excepcion y no hay traza. El sintoma seria mudo.
+
+**`validated_markup` como namespace.** `NODE_OUTPUT_NAMESPACES` es una lista **cerrada**, y ese valor
+no esta en ella. El hueco que este nodo tenia reservado desde siempre se llama
+`validated_drupal_json`, y el frontend ya lo mapeaba en `DEFAULT_OUTPUT_NAMESPACE_BY_NODE_TYPE`.
+Inventar uno nuevo habria obligado a tocar `@core`, la lista blanca del gestor de plantillas, el
+espejo del frontend y una migracion sobre una columna `jsonb`, todo para renombrar algo que ya
+existia.
+
+**`outputNamespace` como campo del DTO.** El namespace efectivo es el del NODO en el
+`pipeline_schema` —el motor hace `context.setNamespace(node.outputNamespace, result.data ?? {})`— y
+declararlo tambien en los `params` crea la segunda fuente de verdad que `llm-extractor-config.dto.ts`
+prohibe por escrito. A diferencia del mapeador, aqui no habia nada que tolerar por compatibilidad: el
+tipo nunca tuvo estrategia que ejecutara un esquema historico.
+
+### El agujero real: la IA no publica HTML
+
+La comprobacion que mas cambio el encargo fue mirar que hay de verdad en `llm_response`.
+`LlmExtractorStrategy` declara cuatro `outputFields` —`headline`, `summary`, `body_paragraphs` y
+`metadata`— y los tres clientes de proveedor piden la respuesta por esquema JSON con los tres
+primeros como `required`, mapeandolos clave a clave. **No hay ningun campo con marcado**, asi que el
+`sourcePayload.compiled_markup ?? raw_html ?? body` del encargo no podia resolver nunca.
+
+Se decidio no ampliar el alcance a ensenarle al `PROCESADOR_IA` a devolver HTML —son los tres
+clientes, su DTO, sus `outputFields` y sus specs, y merece su propia pasada de regresion— sino hacer
+el origen **configurable**: `sourceNamespace` y `sourceField`, con defecto `llm_response` y
+`filled_markup`. Mientras ese campo no exista, el escudo falla con `ERR_POST_IA_EMPTY_HTML` nombrando
+la ruta completa. Es la conducta correcta: un escudo que aprueba un payload inexistente es peor que
+uno que no corre, porque el primero da una falsa sensacion de cobertura.
+
+`filled_markup` y no `compiled_markup` a proposito. Esa clave ya significa otra cosa un namespace mas
+alla: `rendered_html.compiled_markup` es la plantilla base **vacia**. Reutilizar el nombre para la
+plantilla **rellena** dejaria dos claves homonimas con contenidos opuestos y convertiria cualquier
+traza de ejecucion en un acertijo. Ya basta con que `compiled_markup` contenga markup sin compilar.
+
+### Por que el saneado no se reimplanto en la estrategia
+
+El encargo traia su propia `DEFAULT_ALLOWED_TAGS` y su `DEFAULT_ALLOWED_ATTRIBUTES`. Seria la segunda
+lista blanca del backend. Es exactamente lo que PROT-23 rechazo para el mapeador y por el mismo
+motivo: dos listas que describen la misma regla divergen en cuanto alguien toca una sola, y el
+sintoma es que el gestor rechaza al guardar lo que el escudo deja publicar —o al reves—, sin que
+nadie sepa cual de las dos manda.
+
+La lista del encargo ademas ya divergia de salida: le faltaban `img`, `figure`, `blockquote`, `time`,
+`code` y media docena mas, de modo que un articulo con una imagen habria perdido la imagen.
+
+Lo mismo con el parser. `cheerio.load(sanitizedHtml)` a secas usa parse5 en modo documento, que
+**sintetiza** `<html>` y `<body>` sobre cualquier entrada. Todo el repositorio carga con
+`cheerio.load(html, { xml: { xmlMode: false } }, false)` —htmlparser2, sin sintetizar nada, y `xml`
+como objeto para no entrar en el modo sensible a mayusculas— y las dos cargas verian DOMs distintos.
+
+### Lo que si faltaba: distinguir «la ranura esta» de «la ranura esta rellena»
+
+`auditStructure` ya existia y responde si el selector encuentra algo. No basta aqui. El fallo que
+este nodo busca es precisamente la ranura **presente y en blanco**: la IA conservo el `<div
+class="cuerpo">` y no escribio dentro. Para `auditStructure` eso es un acierto.
+
+Se anadio `auditFilledSlots`, hermano y no bandera del anterior. La razon inmediata es de contrato
+—`auditStructure` devuelve `{ missing, invalid }` y lo consume el mapeador, que no pidio nada—, pero
+la de fondo es que la pregunta es genuinamente distinta: el mapeador audita la plantilla BASE, cuyas
+ranuras estan vacias **por definicion**, porque ese es su producto. Un `empty` seria ruido constante
+para el.
+
+Las tres familias se devuelven separadas y no en una lista porque mandan al operador a sitios
+distintos: `missing` a mirar lo que el modelo devolvio, `invalid` a su propia lista de selectores, y
+`empty` al prompt.
+
+### La tolerancia multimedia, que no es una concesion
+
+Una primera version contaba como relleno solo el texto. Habria dejado el flujo PAUSADO por un acierto
+del modelo: un `div.galeria` cuyo unico contenido es un `<img>`, una tabla de plazos de convocatoria,
+un `<hr>` separador. La pregunta que responde la auditoria es «quedo algo aqui», no «quedo texto».
+
+El `is` ademas del `find` tampoco es decorativo: la ranura puede **ser** el medio (un selector
+`img.portada`), y con `find` a secas una imagen apuntada directamente se reportaria como hueco vacio,
+porque un `<img>` no tiene ni texto ni descendientes.
+
+`picture` y `source` no entran en la lista de medios tolerados, y da igual: la comprobacion corre
+siempre sobre markup **ya saneado**, y para entonces esas dos etiquetas ya no existen. Se decidio no
+ampliar la lista blanca canonica para admitirlas —afectaria tambien a lo que el editor puede guardar
+en el gestor— porque no hace falta: `disallowedTagsMode: 'discard'` conserva los hijos, de modo que
+el `<img>` de respaldo sobrevive con su `src` relativo de Drupal intacto. Eso es lo que Drupal
+necesita.
+
+### El orden de las comprobaciones es la comprobacion
+
+Los marcadores residuales se buscan **antes** de sanear, y esa linea del orden es lo unico que separa
+un fallo ruidoso de uno mudo. Si se saneara primero, un `{{parsed_email.clean_title}}` que el modelo
+dejara dentro de un `<iframe>` desapareceria junto con la etiqueta: la prueba del delito se borraria
+y el flujo publicaria un hueco en vez de pararse. Hay una prueba dedicada a ese caso (4.6).
+
+La auditoria estructural va al reves, **despues** de sanear, y por el motivo simetrico: un selector
+que apunte a una etiqueta que la lista blanca descarta tiene que contar como ausente. El lector no va
+a ver esa etiqueta, asi que la ranura no esta.
+
+### Siete codigos y no uno
+
+Se podria haber emitido un unico `ERR_POST_IA_FAILED`. Enrutar todos los fallos al mismo
+`onErrorStep` sigue siendo posible con la forma de cadena, pero fundirlos en el origen impediria
+**para siempre** distinguirlos, y cada uno manda al operador a un sitio distinto: `RESIDUAL_VARS` al
+prompt, `UNSUPPORTED_TAGS` a los `params` del propio nodo, `EMPTY_HTML` al nodo de IA que va delante,
+`DOM_MUTATED` a la plantilla o al prompt.
+
+`EMPTY_AFTER_SANITIZE` se separo de `EMPTY_HTML` por la misma logica: aquel dice «no llego markup» y
+este «llego markup entero de etiquetas prohibidas», que es el sintoma de una inyeccion de prompt o de
+un modelo que ignoro el formato pedido. Son dos incidencias que se investigan distinto.
+
+Todos son `GRAVE` y ninguno `URGENTE`: son corregibles por el operador, y `GRAVE` es el unico nivel
+que el motor reintenta y que CU-09 permite relanzar. Por eso tambien `resolveConfig` usa `validate` y
+no `validateOrReject`, que lanzaria y haria que el motor lo normalizase a `URGENTE`.
+
+### Sin logger, a proposito
+
+El encargo declaraba un `Logger` con dos llamadas. Ni `TemplateMapperStrategy` ni
+`WebScraperStrategy` lo tienen, y el criterio del repositorio es claro: logger solo cuando hay E/S o
+decisiones que auditar. Este nodo no sale a ningun sitio, y el motor ya emite un `warn` con nivel,
+codigo, ejecucion y nodo en cuanto recibe un `success: false`. La linea del encargo habria sido un
+duplicado exacto.
+
+### Los fixtures que parecian romperse y no se rompian
+
+La lectura rapida decia que registrar la estrategia tumbaria tres suites. Comprobado uno a uno, no:
+
+- `node-catalog.service.spec.ts` usa un **doble** de la factoria con el conjunto de registrados
+  explicito —de ahi que su `it.each` liste tambien `PROCESADOR_IA`, que si esta implementado—, asi
+  que no depende del cableado real. Se saco `ESCUDO_POST_IA` de la lista igualmente, porque el caso
+  que ilustra ya no es cierto.
+- `pipeline-validator.service.spec.ts` construye `new NodeStrategyFactory()` **vacia**, de modo que
+  `tryGetStrategy` devuelve `undefined` y el `paramsSchema` nunca se aplica. Su fixture declaraba
+  `params: { schemaId: 'noticia_v1' }`, que contra el modulo real seria ahora un 400 por
+  `forbidNonWhitelisted`; se cambio a `{}` porque un fixture debe describir un esquema guardable.
+- `flujo-draft.store.spec.ts` usa el tipo como ejemplo de `SIN_CONFIGURADOR`, y **sigue siendo
+  cierto**: esta tanda no anade triada Quasar.
+- `prompt-namespaces.ts` mantiene `ESCUDO_POST_IA` en `PROMPT_EXCLUDED_NODE_TYPES` —consume la salida
+  de la IA, citarlo desde un prompt seguiria siendo un bucle— y solo se reescribio un comentario que
+  justificaba la exclusion «mientras no tengan estrategia», que ya no aplica.
+
+`GET /api/nodos` pasa a devolver `implemented: true` y los cuatro `outputFields` sin tocar nada:
+`NodeCatalogService` consulta la factoria en cada peticion, que es justo para lo que se hizo asi.
+
+### Cobertura
+
+Backend **1720 pruebas en 72 suites**, en verde (+77 y +2 suites: 36 de la estrategia, 24 del DTO, 8
+de `auditFilledSlots`, 1 del registro, mas los ajustes de fixtures). Frontend **716 en 37 archivos**,
+intacto y en verde. `npx tsc --noEmit` mantiene los **89 errores preexistentes**, ninguno nuevo y
+ninguno en los archivos de esta tanda. `nest build` limpio. ESLint sin avisos en lo nuevo; queda una
+deuda de formato preexistente en `template-renderer.service.ts:488`, en codigo que esta tanda no
+toca, y se deja estar para no colar un reformateo ajeno en el commit.
+
+### Lo que sigue abierto
+
+- **El escudo no tiene nada que aprobar todavia.** `PROCESADOR_IA` necesita un modo de salida HTML
+  que publique `llm_response.filled_markup`: su DTO, los tres clientes (que hoy fuerzan el esquema
+  JSON con `headline`/`summary`/`body_paragraphs` como `required`) y sus `outputFields`.
+- **Triada Quasar del nodo.** `EscudoPostIaConfig.vue`, su store y el alta en los dos registros.
+  Cerraria 9 de 10 configuradores y dejaria solo `DESTINO_DRUPAL`.
+- **Auditoria de `configuracion_pipeline` pendiente.** Conectar `paramsSchema` corre con
+  `forbidNonWhitelisted`, asi que un nodo `ESCUDO_POST_IA` ya guardado con una clave que el DTO no
+  declare pasa a ser un 400 al guardar **y al activar**. No se pudo comprobar en esta sesion: Docker
+  lo levanta el usuario y el servidor MCP de PostgreSQL no conecto. Es la misma trampa que freno la
+  conexion del mapeador en PROT-23 y que PROT-23b resolvio con una consulta previa; el fixture del
+  validador usaba `schemaId`, asi que la clave es verosimil.
+
+---
+
+## PROT-26 · La IA aprende a devolver la plantilla rellena
+
+Misma rama `feat/mapeador-inyeccion`. PROT-25 dejo el escudo montado y apuntando a
+`llm_response.filled_markup`, una clave que **no publicaba nadie**. El nodo quedaba en una posicion
+incomoda: implementado, registrado, en el catalogo como `implemented: true`, y cayendo siempre en
+`ERR_POST_IA_EMPTY_HTML` en cuanto alguien lo colocaba en un flujo.
+
+No era un olvido sino una frontera real. El contrato de salida del `PROCESADOR_IA` estaba congelado a
+tres claves en dos sitios distintos, y el de Anthropic ademas con `additionalProperties: false`, que
+no es una omision sino una **prohibicion expresa**: sin declarar la propiedad en el esquema, el modelo
+tiene vetado emitirla por mucho que la instruccion de texto se la pida.
+
+### Lo que el encargo daba por hecho y no existia
+
+Tres cuartas partes de los simbolos del encargo no estaban en el repositorio. `LlmStructuredOutput`
+(es `LlmResponsePayload`), `ILlmProvider` (es `ILlmProviderClient`), `LLM_OUTPUT_JSON_SCHEMA`
+compartido (no existia ninguno: Anthropic tenia el suyo privado y **Gemini no tiene esquema en
+absoluto**, solo `responseMimeType` y una frase), `mockFilledMarkup`, `openai-llm.provider.ts` y la
+ruta `modules/nodes/providers/`. Tambien situaba el contrato de SALIDA dentro del DTO de
+configuracion de ENTRADA.
+
+Dos desviaciones eran de fondo:
+
+**`type: 'array'` no existe.** `NodeOutputFieldType` es `url | url[] | text | number | boolean |
+object`. El propio TSDoc de `outputFields` ya explicaba por que `body_paragraphs` se declara `object`
+pese a ser un arreglo: ampliar el union arrastraria al validador de topologia, a
+`requiredUpstreamFieldTypes` de todos los nodos y al DTO de respuesta del catalogo.
+
+**`LLM_OUTPUT_KEYS` no se mencionaba.** Es la tupla contra la que el test 1.1 compara las claves
+publicadas. Anadir la clave sin tocarla deja la suite en rojo, y tocarla sin anadir la clave tambien:
+es, de hecho, la unica puerta de entrada real al namespace `llm_response`.
+
+### La deteccion no puede mirar el namespace
+
+La primera version del encargo —y la primera mia— ataba la deteccion a
+`markerPattern('rendered_html', 'compiled_markup')`. Esta mal, y el motivo es el mismo que ya obligo a
+prohibir los nombres ordinales de componente en el frontend: `outputNamespace` es propiedad del NODO
+en el `pipeline_schema`, no de su tipo. `rendered_html` es solo el valor que el asistente propone por
+defecto, y la regla 4 del validador admite cualquier entrada de `NODE_OUTPUT_NAMESPACES`.
+
+Con la version atada al literal, un `MAPEADOR_PLANTILLA` reconfigurado dejaria de recibir la directiva
+de maquetado **en silencio**: el prompt se interpolaria igual de bien, el modelo devolveria su JSON de
+tres claves, y el escudo acabaria acusando a la IA de no entregar un markup que nunca se le pidio. Lo
+que identifica a una plantilla base no es donde esta, es QUE ES: el campo `compiled_markup`, que
+publica `TemplateMapperStrategy` y nadie mas.
+
+De ahi `BASE_TEMPLATE_MARKER_PATTERN`, con `[a-z0-9_]+` replicando `OUTPUT_NAMESPACE_PATTERN` para no
+reconocer como namespace nada que el motor no pudiera resolver. La deteccion es LEXICA y no comprueba
+la pertenencia a la lista cerrada a proposito: la regla 4 ya lo hizo al guardar, y repetirlo aqui
+seria validar dos veces lo mismo en capas distintas.
+
+### Sobre el prompt resuelto, pero sin interpolar
+
+El orden dentro de `execute` no es negociable y es facil de romper: `getInterpolatedValue` sustituye
+el marcador por el HTML de la plantilla, asi que **despues de interpolar ya no queda nada que
+detectar**. La comprobacion va justo detras de `buildInputText`, que por el mismo motivo tambien
+recibe el prompt sin interpolar.
+
+Tiene un efecto secundario que conviene nombrar porque no era obvio: la deteccion alcanza las TRES
+vias del prompt, incluidas `promptCode` y `templatePromptId`. `getRequiredNamespaces` no puede —es
+puro y sincrono por contrato, y el texto de un prompt guardado vive en base de datos—, pero `execute`
+ya lo ha resuelto cuando llega aqui. Lo que alla se resolvio con un puerto y una pre-resolucion en el
+validador (PROT-24), aqui sale gratis.
+
+### Se revierte una decision que estaba escrita
+
+La frase del contrato estaba duplicada byte a byte en los dos clientes, con un TSDoc que prohibia
+expresamente extraerla: *"compartir el literal invitaria a ajustarlo para uno rompiendo al otro; la
+frontera de reutilizacion del nodo es `ILlmProviderClient`, no el texto"*.
+
+Ese argumento valia para un contrato FIJO. Dos literales constantes e identicos se mantienen
+sincronizados de un vistazo, y el coste de compartirlos —acoplar dos clientes que hablan APIs
+distintas— no compensaba. Con `filled_markup` el contrato pasa a tener una RAMA, y el calculo se
+invierte: el dia que alguien tocara solo una de las dos ramas, el sintoma seria un flujo con plantilla
+que funciona con Gemini y falla con Anthropic, sin una sola excepcion que lo delate —el escudo se
+limitaria a decir que no llego markup—. Esa clase de divergencia es justo la que ya costo una tanda
+en `LlmProviderFactory`, donde la copia de OCR nunca conocio `ANTHROPIC`.
+
+Lo que se centraliza es el CONTRATO, que por definicion tiene que ser el mismo para los dos. El
+COMPORTAMIENTO sigue separado: Anthropic adjunta ademas el esquema, y Gemini se queda solo con la
+frase porque su API no admite otra cosa. El TSDoc viejo se reescribio explicando el cambio en vez de
+borrarlo; un lector futuro merece saber que la duplicacion fue deliberada y por que dejo de serlo.
+
+### `required` condicional, que es lo contrario de lo que yo habia planeado
+
+El plan decia "`filled_markup` entra en `properties` pero **nunca** en `required`", razonando que
+exigirlo impediria responder a un flujo sin plantilla. El razonamiento era correcto para un esquema
+ESTATICO y dejo de serlo en cuanto el esquema se construye por llamada: cuando el indicador esta
+activo hay plantilla por definicion, y entonces exigirlo es justo lo que hay que hacer.
+
+Dejarlo opcional ahi tenia un fallo concreto: bajo un prompt largo —y uno que lleva una plantilla HTML
+entera lo es— un campo meramente opcional es el primero que un modelo omite. El sintoma seria un
+`ERR_POST_IA_EMPTY_HTML` intermitente, de los que no se reproducen a voluntad.
+
+### El presupuesto de tokens solo sube
+
+Quedarse corto no produce una respuesta mas breve: produce una respuesta **cortada a media cadena
+JSON**, que muere como `ERR_LLM_PROVIDER_CONTRACT` o `ERR_LLM_PROVIDER_TRUNCATED` sin que el mensaje
+mencione el presupuesto. Una plantilla institucional completa dentro de una cadena JSON no cabe en los
+defectos pensados para un resumen.
+
+Son 8192 y no 4096 por la leccion que ya costo una tanda en el nodo de OCR (ver
+`DEFAULT_OCR_MAX_TOKENS`): en la gama Gemini 3.x este tope cubre TAMBIEN los tokens de pensamiento, y
+con 4096 el modelo gastaba un millar deliberando y la respuesta salia cortada. Una plantilla HTML es
+bastante mas larga que una transcripcion.
+
+Y solo se aplica CON plantilla. El encargo proponia `expectsFilledMarkup ? 4096 : 1500`, y ese `1500`
+habria sido un cambio de conducta silencioso: hoy el nodo no envia `maxTokens` en absoluto, de modo
+que Anthropic aplica su propio tope de 4096. Fijar 1500 lo habria **recortado** para todos los flujos
+sin plantilla —que son la mayoria— y el sintoma, una noticia cortada a media frase, no se parece en
+nada a su causa. Subir el presupuesto cuando hace falta es seguro; bajarlo no. El tercer escalon es
+`null`, que significa "deja mandar al proveedor", y el operador puede fijarlo con el `maxTokens` nuevo
+del DTO.
+
+### Por que el simulador maqueta
+
+`MOCK` es el proveedor por defecto del DTO y el destino de `dryRun`. Sin un esqueleto simulado, el
+circuito `MAPEADOR_PLANTILLA → PROCESADOR_IA → ESCUDO_POST_IA` no se podria recorrer entero sin una
+clave de API de pago: el escudo caeria siempre en `ERR_POST_IA_EMPTY_HTML` y nadie podria distinguir
+"la auditoria funciona" de "el banco de pruebas no llega".
+
+Se compone con el titular y los parrafos que el propio mock ya produce, y NO recortando la plantilla
+real que viaja interpolada dentro del `systemPrompt`. Lo segundo seria mas realista y ataria el
+simulador al formato del prompt de otra capa, que es exactamente el atajo que el TSDoc de
+`LlmExecutionOptions.mode` rechaza para el modo OCR. Determinista como todo lo demas de ese archivo.
+
+### El invariante que faltaba
+
+`LLM_OUTPUT_KEYS` y `outputFields` eran dos fuentes paralelas del mismo contrato **sin nada que las
+atara**: el test 1.1 solo miraba la primera, de modo que editar `outputFields` sin tocar la tupla —o
+al reves— no lo notaba nadie. Las otras cinco estrategias si tienen la comprobacion. Se anade aqui,
+copiada de `post-ia-sanitizer.strategy.spec.ts`.
+
+### Cobertura
+
+Backend **1734 pruebas en 72 suites**, en verde (+14: nueve del bloque 13 de la estrategia, tres del
+contrato condicional de Anthropic y dos del de Gemini). Frontend **716 en 37 archivos**, intacto y en
+verde sin tocar nada. `npx tsc --noEmit` mantiene los **89 errores preexistentes** —verificado contra
+`HEAD` con `git stash`: los dos que mencionan estos archivos ya estaban, solo cambia el numero de
+linea— y ninguno nuevo. `nest build` limpio. ESLint sin avisos en lo nuevo; queda una deuda de
+`unbound-method` en `llm-extractor.strategy.spec.ts:313`, identica en `HEAD` y en codigo que esta
+tanda no toca.
+
+### Lo que sigue abierto
+
+- **Verificacion de extremo a extremo sin hacer.** El circuito completo con `dryRun` deberia terminar
+  en `EXITOSO` con `validated_drupal_json.audit_status === 'PASSED'`, y el mismo flujo sin la cita a
+  la plantilla deberia fallar en el escudo. Docker lo levanta el usuario y el servidor MCP de
+  PostgreSQL no conecta en esta sesion, asi que solo esta cubierto por pruebas unitarias.
+- **Sigue pendiente la auditoria de `configuracion_pipeline`** que PROT-25 dejo abierta, y ahora con
+  un motivo mas: `maxTokens` es una clave nueva del DTO del `PROCESADOR_IA`, de modo que ningun
+  esquema historico puede traerla, pero conviene confirmar que ninguno trae otras.
+- **Triada Quasar de `ESCUDO_POST_IA`**, y exponer `maxTokens` en el configurador del `PROCESADOR_IA`:
+  hoy el campo existe en el DTO y no tiene control en el asistente.
+
+---
+
+## PROT-27 · El escudo gana interfaz y el presupuesto de tokens deja de ser invisible
+
+Misma rama `feat/mapeador-inyeccion`. Cierra el slice vertical: PROT-25 puso la estrategia, PROT-26
+le dio algo que auditar, y hasta ahora el nodo seguia siendo inusable desde el asistente — el
+registro de componentes no lo conocia, asi que `resolveStepBlockReason` lo marcaba
+`SIN_CONFIGURADOR` y `canSave` era imposible en cualquier flujo que lo incluyera.
+
+### Cuatro cosas del encargo que no existian
+
+Mas de la mitad de las rutas y nombres del encargo eran ficticios, y dos habrian roto la compilacion:
+
+**`LlmProcessorConfig.vue` y `llm-processor.store.ts` no existen.** El nodo `PROCESADOR_IA` se
+implementa como `LlmExtractorConfig.vue` y `llm-extractor.store.ts` — el nombre sigue a la ESTRATEGIA
+(`LlmExtractorStrategy`), no al tipo de nodo.
+
+**`NodeType.DESTINO_ACENS` no existe**, y su ausencia esta documentada: el catalogo tiene once filas y
+el enum declara diez, porque `DESTINO_ACENS` no tiene estrategia y por tanto no es expresable en un
+`pipeline_schema`. El encargo lo proponia como nuevo nodo canonico «sin configurador»; el unico que
+de verdad queda es `DESTINO_DRUPAL`.
+
+**El endpoint `POST /nodos/validar-config` no existe.** `@Controller('nodos')` expone exactamente una
+ruta, `GET /api/nodos`, de solo lectura. El servicio propuesto habria sido codigo muerto contra un
+404. Y no es un descuido del backend: no hay ningun endpoint que valide los `params` de un nodo
+SUELTO, porque la validacion real la hace `paramsSchema` al guardar el esquema entero. El escudo se
+queda, por tanto, como PAR store+componente, igual que `TRIGGER_CRON` y `DESTINO_SMTP` y por el mismo
+motivo escrito en la cabecera de aquel: un servicio que no conoce ninguna ruta contradice su propia
+definicion.
+
+**El store propuesto no cumplia el contrato.** Era un singleton (`defineStore('post-ia-sanitizer')`)
+y los stores de nodo se instancian POR `nodeId` —`NodeStoreHook = (nodeId: string) => NodeConfigStore`—,
+de modo que dos escudos en el mismo flujo habrian compartido selectores. Y le faltaban `toNodeParams`
+y `hydrateFromNode`, los dos OBLIGATORIOS: sin el primero el nodo no aporta nada al
+`pipeline_schema` y sin el segundo el asistente abre el formulario en blanco al editar un flujo
+existente, de modo que guardar borraria lo que el operador venia a retocar.
+
+### Texto libre donde §4 exige lista cerrada
+
+El encargo pintaba `sourceNamespace` y `sourceField` como dos `q-input` de texto. Es exactamente lo
+que `frontend-quasar.md` §4 prohibe, y aqui el coste es concreto: un namespace tecleado a mano que no
+exista no falla al escribirlo ni al guardar, falla en EJECUCION con
+`ERR_POST_IA_MISSING_PAYLOAD` y el flujo ya PAUSADO.
+
+Los dos pasan a ser selectores cerrados alimentados por `setAvailableUpstreamContext`, que el
+agregador ya sincroniza para todos los nodos y que sale del catalogo (`GET /api/nodos` → los
+`outputFields` que declara cada estrategia). Es ademas la primera cosecha visible de PROT-26: como
+`filled_markup` entro en los `outputFields` del extractor, aparece solo en el segundo selector sin
+que este nodo tenga que saber nada de el.
+
+`allowedTags` tambien es cerrado, contra una replica de `TEMPLATE_SANITIZER_CONFIG.allowedTags`. La
+replica se paga —hay que acordarse de ella si alguien amplia la lista del saneador— y compensa:
+pedir una etiqueta que la lista global no admite es `ERR_POST_IA_UNSUPPORTED_TAGS`, y con entrada
+libre el operador lo descubriria al guardar el flujo entero en vez de al elegir.
+
+### El aviso que ata PROT-26 con la interfaz
+
+`configWarnings` levanta tres, y el segundo es el que de verdad aporta: **si no hay un
+`MAPEADOR_PLANTILLA` por delante, el escudo no tendra nada que auditar**. Es consecuencia directa de
+la auto-deteccion de PROT-26 — el `PROCESADOR_IA` solo rellena `filled_markup` cuando su instruccion
+cita una plantilla base— y sin decirlo aqui, el operador montaria un escudo perfectamente configurado
+que falla siempre con `ERR_POST_IA_EMPTY_HTML` sin pista de por que.
+
+Se detecta por el CAMPO `compiled_markup` y no por el tipo de nodo ni por el namespace, con el mismo
+argumento que `BASE_TEMPLATE_MARKER_PATTERN` en el backend: el `outputNamespace` lo elige el esquema,
+no el tipo.
+
+El tercer aviso —«sin selectores no detectare que la IA se haya llevado el titular»— existe porque un
+escudo recien anadido es valido y parece proteger mas de lo que protege: sanea y rechaza marcadores,
+pero no vigila ninguna ranura.
+
+### El fixture rota por cuarta vez, y es la ultima
+
+`UNSUPPORTED_TOPOLOGY` lleva rotando desde `PARSER_PRE_IA` → `EXTRACTOR_WEB` → `PROCESADOR_IA` →
+`ESCUDO_POST_IA`, y su TSDoc ya anunciaba que `DESTINO_DRUPAL` era «el ultimo de la cola». Ahora lo es
+de verdad: es el UNICO tipo del enum sin configurador. Se deja escrito que cuando reciba el suyo esta
+constante se queda sin candidato, y habra que decidir entre retirar las pruebas que la usan o
+declarar un tipo ficticio solo para ellas. De paso se corrigieron tres comentarios que ya mentian
+—seguian hablando de `PROCESADOR_IA` cuando el fixture usaba `ESCUDO_POST_IA` desde hacia dos tandas.
+
+### `maxTokens`: por que su defecto es `null` y no un numero
+
+Es el unico numerico del nodo que se OMITE de `toNodeParams` cuando no se declara. Los otros tres
+viajan siempre, y por un motivo escrito: tienen consecuencias economicas, y dejarlos implicitos
+significaria que cambiar un defecto del backend cambiaria en silencio el coste de flujos ya guardados.
+
+Aqui es al reves, y la diferencia esta en lo que significa la ausencia. El backend resuelve este
+campo en TRES escalones —lo que declare el nodo, el tope de marcado cuando hay plantilla, y el
+defecto del proveedor—, y el unico modo de pedir el segundo y el tercero es no mandar la clave.
+Publicar un numero fijaria el presupuesto para siempre y desactivaria la subida automatica, que es
+justo la proteccion que PROT-26 anadio contra el JSON cortado a media cadena. De ahi `number | null`
+en vez de `number`, y de ahi el `clearable` del control: vaciarlo es la unica forma de volver a
+`null`.
+
+El rango solo se exige cuando hay valor: `null` es valido y es el caso normal.
+
+### Cobertura
+
+Frontend **758 pruebas en 39 archivos**, en verde (+42 y +2 archivos: 23 del store del escudo, 11 de
+su componente, 6 de `maxTokens` en el store del extractor y 2 en su configurador). Backend **1734 en
+72 suites**, intacto. `vue-tsc --noEmit` limpio —el frontend no arrastra deuda de tipos, a diferencia
+del backend— y `quasar build` sin avisos. ESLint sin avisos en lo nuevo.
+
+### Lo que sigue abierto
+
+- **`DESTINO_DRUPAL` es lo unico que queda.** Sin estrategia en el motor y sin triada; su turno va
+  detras del backend, como ya le paso al escudo.
+- **Sigue sin verificacion de extremo a extremo.** El circuito completo
+  `MAPEADOR_PLANTILLA → PROCESADOR_IA (dryRun) → ESCUDO_POST_IA` esta cubierto por pruebas unitarias
+  en las tres capas, pero no se ha recorrido contra una base de datos real: Docker lo levanta el
+  usuario y el servidor MCP de PostgreSQL no conecta en esta sesion.
+- **La auditoria de `configuracion_pipeline`** que PROT-25 dejo abierta sigue pendiente.
+- **`SANITIZER_ALLOWED_TAGS` es una replica manual** de la lista del saneador. Hoy no hay nada que
+  vigile que no diverjan; una prueba de contrato que las compare exigiria exponer la lista por la API
+  del catalogo, que es una tanda en si misma.
+
+---
+
+## PROT-29 · UX Poka-Yoke de los nodos, tablas CRUD y semillas de los cuatro flujos
+
+### El modo de coincidencia no se guarda, se deduce
+
+El encargo pedia sustituir la expresion regular del filtro de asunto por un selector de modo. Lo
+evidente seria anadir `subjectMatchMode` a los `params` del nodo, y es justo lo que no se puede
+hacer: el DTO valida con `forbidNonWhitelisted`, asi que una clave de mas devuelve un 400 al
+guardar el flujo entero, tres pasos despues de haberla escrito.
+
+La salida ya estaba inventada en el repositorio. `web-scraper.store.ts` no guarda en ningun sitio
+si el operador eligio «primer enlace elegible» o una posicion concreta: lo DEDUCE de la forma de
+`targetUrl` (`isFirstEligibleTarget = !targetUrl.includes('[')`). Aqui se hace lo mismo con
+`readSubjectPattern`, y la propiedad que lo sostiene es el viaje de ida y vuelta: componer y volver
+a leer devuelve el mismo modo y el mismo texto. Lo que no la cumple —`^S_2026_.*`, una alternancia
+con clases de caracteres— abre en modo avanzado con su expresion intacta, que es la unica forma de
+no romper un flujo heredado.
+
+**El error que casi se cuela.** La primera version enganchaba el campo del acordeon avanzado al
+mismo `setSubjectMatchDraft` que los modos asistidos. Las pruebas existentes lo cazaron en la
+primera ejecucion: escribir `^S_2026_.*` con el modo en «contiene» lo guardaba escapado como
+`\^S_2026_\.\*`. Y lo peor no era el escape, sino su consecuencia: un patron escapado SIEMPRE
+compila, de modo que la regla que bloquea el paso ante una expresion invalida se habria vuelto
+inalcanzable sin que nada lo delatase. De ahi `setAdvancedSubjectPattern`, una via propia que
+escribe el texto tal cual y entra en modo avanzado. Por la misma razon, SALIR de avanzado no
+reinterpreta el borrador: relee la forma del patron y, si no es expresable, ignora la peticion.
+
+### El flag `i`, y por que no se codifica en el patron
+
+El modo «contiene texto» compone `(?:licitacion|convocatoria)` a partir de palabras clave. Para que
+case con «Licitación» hace falta insensibilidad a mayusculas, y hay dos sitios donde ponerla: en el
+texto del patron o en la compilacion. En el texto exigiria una clase de caracteres por letra
+(`[Ll][Ii][Cc]...`), ilegible en cuanto alguien abra el modo avanzado para afinarla. Asi que va en
+`new RegExp(pattern, 'i')`.
+
+Tiene un efecto retroactivo y conviene decirlo en voz alta: amplia el conjunto de asuntos que casan
+en flujos ya guardados. Nunca lo reduce, de modo que ningun correo que hoy se procese dejara de
+procesarse; lo que puede pasar es que entre alguno que antes se descartaba por una mayuscula.
+
+**Una hora perdida por un `*/`.** Al insertar el TSDoc del flag me comi el cierre del comentario y
+deje `matchesSubjectFilter` y `toExtractedEmail` dentro del bloque. TypeScript no protesto —el
+codigo comentado es codigo valido— y el sintoma fueron 38 pruebas en rojo que parecian decir que el
+flag habia roto el parseo del correo. Comparar contra `HEAD` con un `git stash` dio la respuesta en
+un minuto: en `HEAD` pasaban las 76.
+
+### `OMITIDO`: el estado que faltaba
+
+El contrato `halt` ya existia y el motor ya lo honraba; lo que estaba mal era el DESENLACE. Un
+sondeo IMAP en vacio y un correo publicado en Drupal dejaban la fila EXACTAMENTE igual: `EXITOSO`
+con el cursor nulo. Con un sondeo por minuto eso significa que cualquier recuento de ejecuciones
+exitosas medía, sobre todo, buzones vacios.
+
+`haltReason` distinguia los dos casos, pero es una marca transitoria en memoria —no hay columna—
+que solo ve quien despacha dentro del mismo proceso. Nadie que consulte `ejecuciones_flujo` despues
+puede saberlo.
+
+Se descarto reutilizar `FALLIDO` (pide intervencion humana y escribiria un `.log` por cada correo
+irrelevante del buzon, ahogando las alertas reales, que es exactamente lo que el contrato `halt`
+existe para evitar) y `INACTIVO` (describe una fila que aun no arranco). `OMITIDO` dice lo que paso:
+termino sin trabajo que hacer.
+
+La migracion 030 va **sola y sin bloque transaccional**: PostgreSQL rechaza usar un valor de enum en
+la misma transaccion en la que se anade (55P04). `init.sql` lo adelanta para que una base nueva
+nazca completa, con el mismo criterio que la 006 aplico a `INACTIVO`.
+
+Las filas ya cerradas en `EXITOSO` por un `halt` se quedan como estan. Son traza historica de lo que
+de verdad se escribio entonces, y reescribirla falsearia la auditoria con el mismo criterio que la
+027 aplico a `logs_nodo.tipo_nodo`.
+
+`applyStopOnFirstSuccess` gana una condicion redundante: su comprobacion de `haltReason` ya la cubre
+el estado. Se conserva a proposito y documentada, porque es la comprobacion DIRECTA del hecho que
+importa —«no hizo ningun trabajo»— mientras que el estado es una consecuencia de el.
+
+### El editor de plantillas deja de ofrecer lo que el motor rechaza
+
+El paso 5.1 del encargo pedia facilitar la escritura de `{{rendered_html.campo}}` en el gestor de
+plantillas. Es exactamente lo contrario de lo que el sistema necesita hoy: desde la migracion 025 el
+`MAPEADOR_PLANTILLA` no interpola, entrega el esqueleto saneado para que lo rellene un
+`PROCESADOR_IA` posterior, y rechaza con `ERR_TEMPLATE_PENDING_VARS` cualquier plantilla cuyas
+`variables_esperadas` no vengan vacias. Un insertador de marcadores ahi solo sirve para fabricar
+flujos que revientan en la primera ejecucion, ya PAUSADOS.
+
+Se retiro el `VariableExplorer` del dialogo y en su lugar quedo el aviso de como se escribe hoy una
+plantilla: huecos nombrados por clase CSS y vacios. Los chips de «variables detectadas» SE
+CONSERVAN, y no por inercia: son de solo lectura y el unico aviso de que una plantilla heredada aun
+interpola y va a ser rechazada.
+
+Dos consecuencias en cadena que hubo que seguir. El dialogo pedia el catalogo de nodos en cada
+apertura SOLO para poblar el explorador, asi que la peticion desaparece. Y `TemplateMapperConfig` le
+pasaba un `upstreamContext` que ya nadie lee; se retira la prop entera en vez de dejarla muerta,
+porque una prop que no hace nada sugiere que todavia se interpola ahi.
+
+El spec del dialogo se reescribio completo: sus once pruebas iban del explorador. Lo que cubrian
+—seleccion en dos pasos, tarjeta del token, botones— ya lo cubre el spec propio de
+`VariableExplorer`, que es donde pertenece.
+
+### El prompt pasa de textarea a CodeMirror
+
+La asimetria era llamativa: el mismo lenguaje `{{ns.campo}}` tenia editor con resaltado en
+plantillas y un `<q-input type="textarea">` plano en prompts, donde insertar un marcador exigia
+manipular `selectionStart` del elemento nativo y recolocar el caret en un `setTimeout(0)` porque Vue
+aun no habia propagado el `v-model`.
+
+`markerHighlighter` sale a `@/utils/codemirror-markers` y lo consume un `PromptCodeEditor` nuevo,
+hermano del de plantillas pero **sin** la gramatica `html()` de Lezer ni el carril de diagnosticos:
+el texto de un prompt es prosa con marcadores, no marcado, y colorear sus angulos como etiquetas
+confundiria mas que ayudaria. La insercion pasa a ser una transaccion, de modo que `Ctrl+Z` la
+deshace entera.
+
+**El detalle que casi se escapa.** `QForm` valida recorriendo las reglas de sus hijos, y el editor
+de codigo no es un campo de Quasar. Al quitar el `<q-input>` desaparecio tambien su
+`:rules="[(val) => !!val.trim() || ...]"`, de modo que un prompt vacio habria llegado al backend y
+vuelto como 400. De ahi el `isFormValid` explicito que bloquea el boton Guardar.
+
+El filtro de origenes (`prompt-namespaces.ts`) ya cumplia lo pedido —fuera los destinos, el
+`PROCESADOR_IA` y el `ESCUDO_POST_IA`; dentro el OCR y el mapeador—. Solo se corrigio su TSDoc, que
+seguia diciendo «cuatro origenes» cuando son seis desde que el mapeador salio de las exclusiones.
+
+### Tablas: una regla global en vez de seis locales
+
+Quasar deja `white-space: nowrap` en los `td`, asi que una descripcion larga estiraba la fila hasta
+sacar las columnas de accion de la pantalla. La regla va en `.pd-table` de `app.scss` y el tope de
+350px se aplica con `classes: 'pd-cell--long'` desde la definicion de la columna: §2 prohibe el
+`style` inline, y ademas solo las columnas de prosa deben recortarse —cual es cual lo sabe cada
+tabla, no la hoja de estilos—. Es la primera vez que estas tablas usan la propiedad `classes` de
+`QTableColumn`, que ya existia sin usarse.
+
+### Semillas: por que las plantillas nuevas tampoco llevan marcadores
+
+Las 031 replican al pie de la letra las restricciones que la 028 documenta, y ninguna es de estilo:
+envoltorio `<div>` y no `<article>` (el saneador desenvuelve las etiquetas de estructura de pagina y
+se lleva la clase por delante, dejando el `itemSelector` sin nada que encontrar), `<a>` sin `href` e
+`<img>` sin `src` (un atributo vacio se descarta, de modo que escribirlo solo daria una diferencia
+entre lo sembrado y lo publicado), sin `scope` en los `<th>`, y contenedores vacios donde habria
+hecho falta un bucle.
+
+`.licitacion-entry` en la plantilla de cierre no es casual: es el `itemSelector` que declara el
+preset `CERRAR_LICITACION`, porque el bloque que se traslada es el que sembro la plantilla de
+apertura.
+
+### Prompts: renombrar obliga a reescribir el JSONB
+
+`LICITACION_DEFAULT` no decia si abria o cerraba, y `PANELES_UEM_DEFAULT` citaba una universidad
+concreta cuando el flujo procesa paneles de cualquiera. Renombrarlos es un `UPDATE` sobre una
+columna `VARCHAR UNIQUE`, trivial… salvo por el paso que la migracion 027 enseno a no olvidar: el
+`promptCode` tambien viaja como TEXTO dentro del JSONB `configuracion_pipeline` de cada flujo y cada
+plantilla guardados.
+
+Y aqui el fallo seria especialmente malo. El validador de topologia no comprueba que el codigo
+exista, asi que un flujo que citase el codigo muerto se guardaria y se activaria sin una queja, y
+reventaria en ejecucion al no resolver el prompt, con el flujo ya PAUSADO. Por eso el renombrado y
+la reescritura del JSONB van en la MISMA transaccion: dejar una sin la otra es peor que no
+renombrar.
+
+Los cuatro textos citan ahora `{{rendered_html.compiled_markup}}`. Es lo que enciende
+`expectsFilledMarkup` y cierra el circuito `MAPEADOR_PLANTILLA → PROCESADOR_IA → ESCUDO_POST_IA`;
+la 029 ya lo hizo para licitaciones y aqui se extiende a los cuatro. Un prompt sin ese marcador deja
+al escudo sin nada que auditar.
+
+A diferencia de las semillas de plantillas, los `UPDATE` de texto **no** llevan guarda y son
+reescrituras deliberadas: el objeto de la migracion ES el contenido del prompt. Si alguien curo uno
+desde el CRUD, esta migracion se lo pisa, y queda escrito en su cabecera.
+
+### Cobertura
+
+Frontend **901 pruebas en 46 archivos**, en verde (+22 y +2 archivos: 11 del utilitario de modos de
+asunto y de la gramatica del marcador, 6 de modos en el configurador IMAP, 2 del aviso de adjuntos,
+3 de atajos de etiquetas y 2 del preset Notiweb; −7 netas por la reescritura del spec del editor de
+plantillas). Backend **1861 en 76 suites**, en verde. `vue-tsc --noEmit` limpio; `tsc` sobre
+`tsconfig.build.json` limpio. Los 87 errores de tipos que `tsconfig.json` reporta sobre specs del
+backend son previos y no varian con esta tanda.
+
+### Lo que sigue abierto
+
+- **Las tres migraciones estan escritas y SIN APLICAR.** Docker lo levanta el usuario y el servidor
+  MCP de PostgreSQL no conecta en esta sesion. Hasta que se apliquen, `OMITIDO` no existe en la base
+  y el motor intentaria escribir un valor que el tipo no admite.
+- ~~**El preset `VERIFICACION_TITULOS` lleva `containerSelector: '#accordionCEU'` pero es
+  `CREATE_NODE`,** modo que ni muestra ni envia ese campo.~~ **RESUELTO.** El preset paso a
+  `APPEND_HTML_BLOCK` —el portal presenta un acordeon, no entidades sueltas— de modo que el campo
+  dejo de ser inerte. Y desde el despacho jerarquico vale `#accordion`: el destino real lo decide
+  cada panel por su `data-parent`, y este selector es solo el respaldo del marcado que no declara
+  ninguno. Apuntarlo a CEU mandaba alli los paneles de las otras trece universidades.
+- **El texto de un prompt se sigue guardando sin validar.** `AiPromptTemplatesService` acepta
+  `{{inventado.campo}}` con un 201; el gestor de plantillas HTML si lo valida. Sigue pendiente.
+- **`SANITIZER_ALLOWED_TAGS` sigue siendo una replica manual** de la lista del saneador. Los atajos
+  nuevos de `allowedTags` si tienen prueba de subconjunto contra ella, pero nada vigila que la
+  replica no diverja del original.
+
+---
+
+## PROT-30 · Barrera de saturacion global y contrapresion en el despacho
+
+El sintoma de partida se describio como «el motor no para». La auditoria lo desmintio: el bucle de
+`executeWorkflow` tiene una docena de clausulas de guarda y `pauseAt` conserva el cursor del nodo
+culpable. Lo que faltaba estaba una capa mas arriba, y el propio codigo ya lo tenia escrito como si
+fuera inmutable, en el comentario del cierre por `LEVE`: *«media hora de red caida deja treinta filas
+PAUSADO —una por tick, porque PAUSADO no reserva el mutex»*.
+
+El defecto real era que **todas** las barreras miraban a un flujo. Cincuenta flujos con una ejecucion
+cada uno las respetan todas y aun asi agotan el pool de PostgreSQL. Y el pool no se declaraba en
+ninguna parte: el sistema corria con el default implicito de `node-postgres`, diez conexiones, sin
+que ese numero apareciese escrito en ningun sitio donde alguien pudiera emparejarlo con nada.
+
+### Por que la excepcion rompe la convencion del proyecto
+
+Las otras cuatro excepciones propias extienden `Error` nativo. `SystemCapacityExceededException`
+extiende `HttpException`, y las dos razones son mecanicas, no estilisticas:
+
+`createExecution` se alcanza tambien desde el despacho manual, donde el codigo de estado viaja al
+cliente; un `Error` corriente habria convertido un rechazo por cupo en un 500. Y los `dispatchFlow`
+de ambos disparadores discriminan por `instanceof HttpException` para separar un rechazo del motor de
+una averia de red: un `Error` corriente se habria propagado hasta `pollInbox`, que lo habria
+registrado como «falla critica de conexion IMAP» —a nivel `error`, con stack— y habria levantado una
+alerta GRAVE por cada ciclo saturado, acusando al buzon de algo que no ha pasado.
+
+El precio es que la rama que la captura **tiene que ir antes** de la generica de `HttpException`, que
+si no la absorbe primero. Es una dependencia de orden invisible en el diff, y por eso esta escrita en
+el TSDoc de la clase y en un comentario en cada uno de los dos sitios que la capturan.
+
+### El `COUNT` global sale gratis
+
+Su unico predicado es `estado = 'EN_PROCESO'`, que es exactamente el predicado del indice unico
+parcial `idx_flujo_activo` creado en la migracion 006 para otra cosa. Las filas que hay que contar son
+las unicas que ese indice contiene, asi que PostgreSQL lo resuelve sin tocar la tabla. No hizo falta
+ningun indice nuevo ni ninguna migracion.
+
+### La guarda global va despues de la de flujo, no antes
+
+Parece contraintuitivo —lo mas general primero— pero el orden lo decide la calidad del diagnostico.
+Si el flujo ya tiene una ejecucion viva, el 409 de RNF-09 nombra el flujo y el conflicto exacto.
+Adelantar la global convertiria ese caso en un generico «el sistema esta saturado» que manda a mirar
+al sitio equivocado. El efecto colateral util es que los tres tests de `createExecution` que ya
+existian siguen pasando sin tocar una linea.
+
+### `MAX_EXECUTIONS_PER_POLL_TICK` no limitaba nada, asi que pasa a drenar
+
+Tal como se pidio, la variable era un techo sobre algo que estructuralmente valia uno: `pollInbox`
+colapsaba el resultado del `SEARCH` a un booleano y llamaba a `dispatchFlow` una sola vez, y la
+estrategia consume un unico correo, el UID mas alto que case. El drenaje real era de un correo por
+ciclo y por flujo —uno por minuto— de modo que un buzon con cien mensajes atrasados tardaba mas de
+hora y media en vaciarse, y nunca alcanzaba al remitente si este escribia mas rapido.
+
+La variable pasa a gobernar cuantos despachos **secuenciales** encadena un ciclo. Secuenciales
+importa: `dispatchFlow` espera al pipeline entero antes de volver, asi que el lote acelera el drenaje
+sin multiplicar la concurrencia. Quien pone el techo de ejecuciones a la vez sigue siendo
+`MAX_GLOBAL_CONCURRENT_EXECUTIONS`.
+
+Eso obligo a que `hasMatchingMessages` devolviera el recuento y pasara a llamarse
+`countMatchingMessages`. Iterar preguntando «queda alguno?» antes de cada despacho habria abierto una
+conexion TLS por correo, que es justo lo contrario de lo que persigue toda esta tanda. Con el
+recuento, el ciclo sigue costando exactamente una conexion, como antes.
+
+### La saturacion no es una averia, y la bandeja de alertas no debe creer que lo es
+
+`HybridLoggerService.logWorkerFailure` escribe en el `.log` y ademas crea una fila en `alertas_error`
+con nivel GRAVE. Usarlo en cada rechazo habria dejado seiscientas filas por hora con diez flujos
+sondeando cada minuto, describiendo una condicion que se resuelve sola en cuanto una ejecucion
+termina.
+
+Se reutilizo el criterio que `raiseWorkerAlert` ya aplicaba a las averias: consola en cada ciclo
+—ahi el detalle repetido sirve para ver si la saturacion es puntual o sostenida— y bandeja solo en la
+transicion sano → saturado. El conjunto `saturatedFlows` va **separado** de `failingFlows`, y no es
+purismo: no son la misma condicion, y compartir conjunto haria que recuperarse de una silenciase la
+alerta de la otra. La marca se retira cuando un despacho vuelve a cuajar, que es la unica senal
+fiable de que el motor acepta trabajo otra vez; `clearFailure` no servia porque corre *antes* de
+despachar y solo sabe que el buzon se pudo mirar.
+
+### Lo que NO se hizo
+
+**No se escribio una sola linea para «no marcar los correos como leidos».** El requisito ya se cumplia
+y la auditoria lo confirmo: el sondeo solo hace `SEARCH` —nunca `FETCH` ni `messageFlagsAdd`— y el
+unico punto del repositorio que marca `\Seen` esta dentro de `ImapTriggerStrategy`, en una ejecucion
+que con saturacion jamas llega a arrancar. Se fijo como prueba (`7.1`) en lugar de como codigo, con
+una asercion sobre el doble del cliente IMAP que se caeria si algun dia alguien hiciera que el sondeo
+empezase a consumir el buzon.
+
+**No se toco la programacion de los disparadores.** Filtrar en `findImapTriggerNodes` los flujos con
+ejecucion viva habria exigido que `NodesModule` consultase `ejecuciones_flujo` —`FsmModule` no exporta
+ese repositorio— y, peor, `refreshSchedules` desinscribe el temporizador de los flujos que no
+devuelve: al liberarse el motor, el flujo habria quedado sin sondear hasta la siguiente
+reconciliacion. El 409 ya era la via diseñada.
+
+**No se implemento BullMQ.** Sigue siendo la solucion de fondo y ambos servicios la documentan como
+deuda: hoy el pipeline corre en el mismo proceso que el disparador, de modo que estos techos protegen
+pero no desacoplan.
+
+### Estado de la verificacion
+
+Backend **2033 pruebas en 85 suites**, en verde. 34 son nuevas: 18 de `FsmConfig`, 5 del motor, 7 del
+sondeo IMAP y 4 del planificador CRON. `npm run build` limpio. `eslint` limpio sobre los doce archivos
+tocados; los tres errores de `no-unsafe-assignment` que quedan en `imap-polling.service.spec.ts` son
+previos —`registry.getInterval` devuelve `any`— y estan en lineas que esta tanda no toca.
+
+### Pendiente
+
+- **Las tres variables nuevas no estan en el `.env` real,** solo en la plantilla. Hasta declararlas,
+  el sistema corre con los defectos del codigo (5, 3 y 10), que son deliberadamente los valores con
+  los que ya funcionaba.
+- **Ninguna barrera cubre todavia las conexiones IMAP.** `createImapClient` sigue construyendo un
+  `ImapFlow` nuevo por llamada, sin pool ni semaforo. El techo global limita las ejecuciones, pero el
+  `SEARCH` de cada ciclo ocurre *antes* de pedirle permiso al motor: con el motor lleno, N flujos
+  siguen abriendo N conexiones TLS por minuto para descubrir que no pueden despachar. El punto de
+  enganche natural es `imap-client.factory.ts`, por donde pasa toda conexion del sistema.
+
+---
+
+## PROT-31 · CU-09: reanudacion manual y el acuse de la traza
+
+La tanda anterior puso los flujos en cuarentena. Esta abre la puerta.
+
+El motor **ya estaba escrito para reanudar**, y eso fue lo primero que confirmo la auditoria:
+`executeWorkflow` arranca en `execution.activeCursor ?? schema.entrypoint`, `buildContext` restaura
+los namespaces persistidos, el `retryState` se rehidrata desde su columna, y hay una linea que
+limpia la marca de aborto superviviente con el comentario explicito *«el reintento manual de CU-09
+reutiliza el mismo `executionId`»*. Reanudar es volver a llamar al bucle sobre la misma fila. Lo
+que faltaba no era el mecanismo sino la superficie HTTP y, sobre todo, las guardas.
+
+### La guarda que de verdad importa
+
+De las siete validaciones de `resumeExecution`, seis son las que cualquiera escribiria. La septima
+no es obvia y es la que evita un sintoma mudo: si alguien edita el flujo mientras la ejecucion esta
+pausada, el cursor puede quedar apuntando a un nodo que ya no existe. Sin comprobar
+`schema.nodes[activeCursor]`, `executeWorkflow` cae en su propia guarda de cursor inexistente,
+vuelve a pausar en el mismo sitio y devuelve **un 200**. El operador pulsa «Reanudar», la interfaz
+dice que todo fue bien, y nada avanza. Diez veces seguidas.
+
+### Dos asimetrias opuestas, y las dos deliberadas
+
+**El techo global si se aplica.** Reanudar entra al motor por `executeWorkflow` y no por
+`createExecution`, que es donde vivia `assertGlobalCapacityAvailable`. Sin una llamada explicita,
+cada reintento manual habria sumado una ejecucion por encima del limite que PROT-30 acababa de
+establecer: la barrera habria dejado de significar lo que dice justo por la puerta que abriamos. De
+ahi que el metodo pasara de `private` a `public`.
+
+**El flag `activo` no se exige.** Esa columna gobierna los disparadores automaticos, no las acciones
+manuales sobre ejecuciones que ya existen. Lo refrenda una decision anterior: `updateWorkflow` no
+aborta las PAUSADO al desactivar un flujo, precisamente porque son la cola de reintento. Exigir
+`activo` aqui habria dejado sin salida a las pausadas de todo flujo apagado — que son, con
+diferencia, las mas probables. Queda escrito en el TSDoc del metodo porque es justo el tipo de cosa
+que alguien «arregla» seis meses despues.
+
+### Por que el acuse es un objeto y no la ruta pelada
+
+`logNodeExecution` escribia la ruta del `execution-*.log` en `logs_nodo` y la tiraba. Devolverla
+habria bastado para que `pauseAt` la persistiera, pero se devuelve tambien el `logs_nodo.id`:
+`alertas_error` enlaza con la traza por `id_log_nodo` y **no guarda ruta propia**, asi que ese
+identificador es el unico eslabon que permitira a la interfaz saltar de un evento a su alerta. Es el
+dato que el `NotificationGateway` va a necesitar en la siguiente tanda, y anadirlo ahora cuesta una
+propiedad.
+
+El cambio de firma no toca el contrato de «no lanza nunca»: las tres sentencias del cuerpo ya
+estaban protegidas por sus propios manejadores, y un `return` no abre ninguna ruta de excepcion.
+
+### Donde se declara `lastTrace` cambia lo que se guarda
+
+Dentro del cuerpo del `while`, no fuera, y la diferencia es observable. Dos de los cuatro `pauseAt`
+—el circuit breaker y el cursor inexistente— ocurren ANTES de ejecutar ningun nodo de esa vuelta.
+Con alcance externo arrastrarian la ruta del nodo anterior y senalarian un archivo que no explica
+esta pausa; con el alcance correcto pausan sin ruta, que es la verdad.
+
+El cuarto `pauseAt`, el de `closeTerminalState`, tenia el problema simetrico: pausa en el nodo que
+fallo, de una iteracion anterior, cuando `lastTrace` ya apunta al nodo de alerta. La solucion fue
+meter la traza DENTRO del objeto `contingency`, que ya viaja con el desvio. Asi `closeTerminalState`
+no necesito parametro nuevo y pausa con el archivo del nodo que CU-09 va a reintentar.
+
+### Un defecto latente que destapo el cambio
+
+Al aseverar por primera vez el retorno de `logNodeExecution`, tres pruebas de
+`hybrid-logger.service.spec.ts` empezaron a fallar **solo en la corrida completa**, no aisladas. La
+causa estaba a cincuenta lineas: una prueba anterior hace que el doble de Winston lance para simular
+un disco lleno, y `jest.clearAllMocks()` borra las LLAMADAS pero conserva las IMPLEMENTACIONES. Ese
+`throw` se filtraba a todas las pruebas posteriores del fichero.
+
+Llevaba ahi desde que se escribio el fichero. Pasaba inadvertido porque nadie aseveraba el retorno:
+la traza «perdida» no cambiaba ninguna asercion. Se arreglo en el `beforeEach`, restaurando los dos
+dobles, en vez de parchear la prueba culpable: el problema no era de esa prueba sino del ciclo de
+vida compartido.
+
+### La suite E2E y el buzon corporativo
+
+La verificacion iba a ser manual, con cURL y psql. Sustituirla por Supertest destapo un riesgo que
+no habria aparecido de otro modo: **`backend/.env` tiene `IMAP_POLLING_ENABLED=true` y
+`CRON_SCHEDULING_ENABLED=true`**. Montar `AppModule` ejecuta sus `onModuleInit`, que programan
+temporizadores reales, abren conexion contra el buzon institucional y **marcan correos como leidos**.
+Una suite de pruebas que se ejecuta en cada commit no puede consumir la bandeja de nadie.
+
+Hay un segundo efecto colateral del arranque: `FsmModule.onModuleInit` hace un
+`UPDATE ejecuciones_flujo SET estado='PAUSADO' WHERE estado='EN_PROCESO'` **sin filtro por flujo**.
+Contra la base de desarrollo, le arranca de debajo las ejecuciones vivas a cualquier
+`npm run start:dev` que este corriendo.
+
+Los dos se neutralizan con tres lineas de `process.env` **antes de los imports** —`ConfigModule` no
+pisa lo que ya esta en el entorno— y una base de datos dedicada. Es la trampa que repetira quien
+escriba el siguiente E2E, y por eso esta documentada en el encabezado del fichero y aqui.
+
+### Lo que NO se hizo
+
+**No se comprueban los modelos de pago al reanudar.** `assertModelPermissions` vive donde se ELIGE
+el modelo, que es el alta y la edicion del flujo. El despacho automatico tampoco lo repite, asi que
+aplicarlo solo en CU-09 habria sido incoherente y habria dejado a un EDITOR sin poder desatascar un
+flujo que configuro un ADMIN.
+
+**No se espia `runNode`.** El enunciado pedia «mockear el runner interno», pero es `private` y
+espiarlo exigiria `as any`, prohibido por la regla de TypeScript estricto. El proyecto ya tiene un
+idioma para esto: `registerDummyStrategies` tras `init()`, aprovechando que `registerStrategy`
+sustituye ante un duplicado. Es lo que hace `fsm-engine.e2e-spec.ts` y lo documenta `nodes.module.ts`.
+
+**No se toco la interfaz.** Los tres endpoints existen y no los consume nadie todavia.
+
+### Estado de la verificacion
+
+Backend **2073 pruebas en 87 suites**, en verde — 40 mas que la linea base anterior. La suite E2E,
+**9 casos**, pasa contra PostgreSQL real. `npm run build` limpio. `eslint` limpio sobre los
+dieciseis archivos tocados; los cuatro errores que quedan en `workflows.service.spec.ts` son previos
+y se verificaron contra `HEAD` sin cambios.
+
+`test/jest-e2e.json` necesito tres ajustes para poder montar `AppModule`: su
+`transformIgnorePatterns` solo cubria lo que usaba el runner del motor, su `transform` no casaba
+`.mjs` y faltaba `testTimeout`. Se alinearon con el config de las unitarias, que ya resolvia el
+mismo arbol de dependencias ESM.
+
+### Pendiente
+
+- **La interfaz no consume nada de esto.** No hay vista de trazabilidad, ni boton de reanudar, ni
+  tipos replicados en `frontend/src/types/`. Los endpoints estan y esperan.
+- **La base `<nombre_bd_test>` hay que mantenerla al dia a mano.** No hay script que le aplique las
+  migraciones nuevas, asi que una migracion futura la dejara desfasada y el E2E fallara por un
+  motivo que no es el codigo.
+- **`FsmModule.onModuleInit` sigue haciendo un UPDATE sin filtro.** Con la base dedicada deja de
+  importar para el E2E, pero sigue siendo un efecto global en cada arranque del proceso.
+
+---
+
+## PROT-32 · El canal que faltaba: eventos del motor hasta la interfaz
+
+### El evento que nunca llegaba a ninguna parte
+
+`rules/architecture-patterns.md` §4 describe cuatro pasos para un fallo de nodo: volcar el `.log`,
+persistir en PostgreSQL, pausar el motor y **notificar por WebSocket**. Los tres primeros llevaban
+funcionando desde PROT-20; el cuarto no existia. Las dependencias estaban instaladas desde el
+principio, lo que hacia facil creer que el canal estaba montado — `grep -rl WebSocketGateway
+backend/src` no devolvia nada.
+
+### Por que el rechazo vive en un middleware y no en `handleConnection`
+
+Esta es la decision que mas cambio respecto al diseno inicial, y la razon es puramente mecanica.
+
+El enunciado situaba la validacion dentro de `handleConnection`, cerrando con
+`client.disconnect(true)`, y pedia al mismo tiempo que el cliente escuchase `connect_error` para
+distinguir una credencial invalida. Las dos cosas no pueden ser ciertas a la vez: `handleConnection`
+corre **despues** de que el handshake se haya aceptado, asi que desconectar ahi produce un evento
+`disconnect` con motivo `io server disconnect` — el mismo que genera un reinicio del backend.
+`connect_error` solo lo produce un middleware que rechaza el handshake llamando `next(error)`.
+
+Con la version literal, el cliente no podria separar «tu token caduco» de «el servidor se cayo», y
+la unica salida segura seria no purgar nunca la sesion… o purgarla siempre, expulsando al usuario
+cada vez que `nest start --watch` recarga.
+
+Asi que la autenticacion se instala en `afterInit` sobre `server.use(...)`, y `handleConnection`
+queda reducido a unir el socket a su sala privada leyendo lo que el middleware ya dejo validado en
+`socket.data`. Comprobado contra el servidor real: un handshake sin token devuelve
+`connect_error -> "WS_INVALID_TOKEN"`, que es exactamente la cadena que `boot/socket.ts` compara.
+
+### Un coordinador sincrono dentro del bucle de la FSM
+
+`ExecutionEventsCoordinator` es un calco de `FlowPollingCoordinator`, hasta en el comentario de por
+que se itera una copia del `Set`. No es pereza: los dos resuelven el mismo problema —`@core` no
+puede importar `@modules`— y dos soluciones distintas para un mismo problema obligan a elegir cada
+vez que aparece el tercero.
+
+Lo que si es propio de este es que los tres metodos devuelvan `void` en vez de `Promise<void>`. Se
+invocan desde `pauseAt`, a mitad de una transicion de estado. Una firma asincrona invita a
+esperarla, y esperar ahi convierte la latencia de un socket en latencia del motor. Ademas seria una
+promesa hueca: `emit` no espera acuse de nadie.
+
+El `try/catch` por puerto cierra el circulo: una notificacion que revienta no puede convertir una
+ejecucion correcta en una fallida.
+
+### El orden de los dos emisores no es decorativo
+
+`pauseAt` emite **despues** del checkpoint. El evento invita al operador a reanudar, y reanudar
+empieza leyendo esa misma fila: emitir con el UPDATE todavia en vuelo abre una ventana en la que la
+interfaz ofrece un boton sobre un estado que PostgreSQL aun no tiene.
+
+`ExecutionsService` emite **antes** de `executeWorkflow`, y por la razon opuesta: ese metodo es
+bloqueante hasta que el flujo termina o vuelve a pausarse. Emitido despues, el cliente recibiria
+«reanudado» detras del «pausado» del siguiente fallo, y la vista pintaria como viva una ejecucion
+que acaba de detenerse otra vez.
+
+### `logNodeOutcome` no sabia en que flujo estaba
+
+Recibia `(executionId, node, outcome, durationMs)`. El `flowId` —que es la clave de la sala— y el
+numero de intento no estaban en su ambito, asi que la firma gano dos parametros. Su unica llamada
+vive dentro del bucle de reintentos, donde ambos valores estan a mano.
+
+El `attempt` se publica como `(retryState[nodeId] ?? 0) + 1`. El contador crudo arranca en cero, de
+modo que publicarlo tal cual mostraria «intento 0» en el primer fallo.
+
+### El origen del socket no es el `baseURL` de Axios
+
+`VITE_API_BASE_URL` vale `http://localhost:3000/api`: ya trae el prefijo. Concatenar el namespace
+daria `http://localhost:3000/api/events`, que no existe, y el sintoma seria un socket que no conecta
+sin ninguna pista de por que. El cliente extrae el origen con `new URL(base).origin`.
+
+En el otro extremo pasa lo simetrico: `setGlobalPrefix('api')` no alcanza al adaptador de Socket.io
+—el mismo motivo por el que Swagger se monta a mano—, asi que el gateway declara
+`path: '/api/socket.io'` en su decorador y el cliente repite el valor. Verificado: `/api/socket.io`
+responde el handshake y `/socket.io` devuelve 404.
+
+### Una plantilla de entorno que nunca salia del disco
+
+Al documentar `VITE_SOCKET_URL` aparecio que `frontend/.env.example` **no esta versionado**:
+`frontend/.gitignore` tiene un `.env*` que se lo traga, y el `!.env.example` de la raiz no lo
+alcanza porque un patron de un `.gitignore` mas profundo gana sobre el de arriba.
+
+`rules/security-and-scope.md` §0.1 exige esa plantilla versionada, y sin ella cualquier clonado
+nuevo tiene que adivinar las variables del frontend. Se anade la negacion en el `.gitignore` del
+propio frontend. Comprobado que los tres `.env` reales siguen ignorados.
+
+### Lo que NO se hizo
+
+- **No hay consumidor visual.** No existe vista de trazabilidad, ni boton de reanudar, ni ruta
+  nueva. Es una decision explicita de alcance, con una consecuencia que conviene tener presente:
+  `joinFlowRoom` no se invoca desde ninguna pantalla, asi que hoy el socket se conecta, se autentica
+  y no entra en ninguna sala de flujo. La infraestructura esta probada; no esta *usada*.
+- **La sala `user_*` se ocupa pero no recibe nada.** Existe para los avisos dirigidos a una persona
+  concreta. Los eventos de ejecucion se difunden por flujo a proposito: un flujo lo vigila quien lo
+  tenga abierto, no quien lo creo.
+- **Sin BullMQ.** `rules/architecture-patterns.md` §5 lo pide junto a los WebSockets; esta tanda
+  solo cubre la segunda mitad. El desacoplamiento de las ejecuciones pesadas sigue pendiente.
+- **Sin reintento de suscripcion tras reconectar.** Si el socket se cae y vuelve, las salas de flujo
+  se pierden: Socket.io no las restaura. Hoy no se nota porque nadie se suscribe; en cuanto exista
+  la vista, habra que reenganchar en el evento `connect`.
+
+### Estado de la verificacion
+
+- `npm test` en `backend/`: **89 suites, 2099 pruebas**, todas en verde (antes 87 / 2073).
+- `npm run build` en `backend/`: limpio.
+- `npm run test:e2e -- executions-resume.e2e-spec.ts`: **9 casos en verde**. No es ceremonia:
+  `ExecutionsService` gano un parametro de constructor y esa suite monta el `AppModule` real, asi
+  que es lo unico que demuestra que el grafo de inyeccion sigue resolviendo con el gateway dentro.
+- `npm run test` en `frontend/`: **49 ficheros, 962 pruebas**, todas en verde.
+- `npm run typecheck` en `frontend/`: limpio.
+- ESLint limpio sobre los 22 archivos tocados. Los 4 errores de `workflows.service.spec.ts` y los 3
+  de `imap-polling.service.spec.ts` siguen siendo previos.
+- **Sondeo manual contra el servidor real** (puerto aislado, base `<nombre_bd_test>`, disparadores
+  apagados): handshake sin token → `connect_error "WS_INVALID_TOKEN"`; con token valido → conecta;
+  `flow:subscribe` con UUID → `{ok:true}`; con `user_otro` → `{ok:false}`; `flow:unsubscribe` →
+  `{ok:true}`.
+
+### Pendiente
+
+- Vista de trazabilidad en Quasar que consuma el store y llame a `joinFlowRoom`. Es lo unico que
+  convierte esta tanda en funcionalidad visible.
+- Reenganche de las salas de flujo en el evento `connect` del socket, para sobrevivir a una
+  reconexion.
+- Emision por la sala `user_*` cuando exista algun aviso dirigido a una persona.
+- BullMQ para el desacoplamiento productor-consumidor (`rules/architecture-patterns.md` §5).
+
+---
+
+## Consumidor visual del canal y RBAC de plantillas (rama `feat/fsm-realtime`)
+
+Tras la tanda anterior la infraestructura de tiempo real estaba completa pero **muda**: el backend
+emitia, el cliente recibia y `useExecutionStore` parcheaba su estado, pero el operador no veia nada.
+Esta tanda cierra esa ultima pulgada y resuelve dos de los pendientes anotados arriba.
+
+### Por que el aviso vive en el composable y no en el store
+
+`useExecutionSocket` pasaba las referencias del store directamente al canal. Ahora las envuelve: el
+store sigue parcheando el estado y el composable anade el `$q.notify`. Meter Quasar dentro del store
+lo sacaria de la capa de logica de negocio (`rules/frontend-architecture.md` §2.1) y, sobre todo,
+obligaria a levantar un DOM para probar cualquier transicion de estado. El composable ya era la
+costura entre store y transporte; es el sitio natural para la que va entre store y UI.
+
+El aviso de pausa es **persistente** (`timeout: 0`) porque lleva la accion de reanudar (CU-09): uno
+que se desvanece solo convertiria el reintento en cuestion de haber estado mirando la pantalla. El
+store propaga la excepcion de `resumeExecution` y es el composable quien la traduce, porque el 409
+(ya no esta PAUSADO), el 400 (su nodo desaparecio del esquema) y el 429 (motor saturado) llegan con
+textos distintos.
+
+Un `node:error` **LEVE no notifica**. Lo emite un nodo que va a reintentar y el flujo sigue
+avanzando: llenar la pantalla de avisos por algo que se resuelve solo acabaria tapando al `URGENTE`
+que si importa.
+
+Nota de contrato: `FlowPausedEvent` **no trae `nodeId`**. El paso detenido es `activeCursor`.
+
+### Por que `joinFlow` vive en el store
+
+`joinFlowRoom`/`leaveFlowRoom` existian desde la tanda anterior y no las llamaba nadie, y
+`joinedFlowId` se escribia sin leerse jamas. `joinFlow` cierra el circuito: abandona la sala previa,
+entra en la nueva y apunta `joinedFlowId` **solo con acuse afirmativo** — el gateway rechaza un UUID
+mal formado y el tope `MAX_ROOMS_PER_SOCKET` devolviendo `{ok: false}`, y apuntar una sala en la que
+no se esta haria que la re-suscripcion insistiera en un destino inexistente.
+
+El store importa aqui un servicio de socket. La prohibicion de §2.1 apunta a Axios y a `@boot`;
+`socket-events.service` es una capa de servicio como `fsm-executions.service`, y los nombres de
+evento siguen sin aparecer en el store.
+
+### Por que hay un listener de `connect`
+
+Las salas viven en el **servidor** y mueren con la conexion. Tras un micro-corte o un reinicio de
+Nest el socket vuelve solo, pero fuera de toda sala: la vista seguiria abierta, sin errores en
+consola, y simplemente dejaria de recibir eventos. `boot/socket.ts` reengancha `joinedFlowId` al
+reconectar.
+
+### Estado de la verificacion
+
+- `npm run test` en `frontend/`: **51 ficheros, 980 pruebas**, todas en verde (antes 49 / 962).
+- `npm run typecheck` en `frontend/`: limpio.
+- `npm run lint:check` en `frontend/`: limpio.
+- Backend **sin tocar** en esta tanda.
+
+### Pendiente
+
+- **Vista de detalle de flujo que llame a `executionStore.joinFlow(flowId)`.** Sigue siendo el unico
+  hueco: el router solo tiene `/flujos` (listado), `/flujos/nuevo` y `/flujos/:id/editar`, ninguna
+  expone un flujo concreto en modo observacion. `joinFlow` y el reenganche del `connect` quedan
+  listos y probados, pero hasta que exista esa vista nadie entra en ninguna sala, de modo que los
+  avisos solo se disparan con los eventos que el gateway difunda por otras vias.
+- Emision por la sala `user_*` cuando exista algun aviso dirigido a una persona.
+- BullMQ para el desacoplamiento productor-consumidor (`rules/architecture-patterns.md` §5).
+
+---
+
+## Canvas de topología y supervisión en vivo (rama `feat/canvas-view`)
+
+El canal de tiempo real llevaba desde PROT-32 completo de extremo a extremo salvo el último
+tramo: no tenía pantalla. `PLAN.md` §4542 lo dejaba anotado —«no hay consumidor visual»— y el
+router solo exponía `/flujos` (tabla), `/flujos/nuevo` y `/flujos/:id/editar`. Un operador que
+recibía el aviso de «flujo pausado» no podía ver *dónde* se congeló el cursor ni qué había dejado
+cada nodo en el contexto: solo el texto del `q-notify`. Esta tanda añade esa vista, la que
+`frontend-quasar.md` §4 ya exigía con el nombre de «Canvas Read-Only».
+
+### Por qué `node:started` se emite por intento y no por nodo
+
+El motor ya aplicaba ese criterio dos veces: `logNodeOutcome` escribe una fila por invocación real
+de la estrategia, y `emitNodeError` lleva su `attempt` 1-based. Emitir una sola vez por nodo
+produciría la secuencia `started → error(1) → error(2) → completed`, en la que el canvas pinta la
+caja en rojo mientras el nodo está en realidad corriendo otra vez — incluido el `waitBackoff`, que
+puede durar segundos. Con emisión por intento, la interfaz puede decir «reintentando 3 de 3» sin
+inventarse nada.
+
+`node:completed`, en cambio, se emite **una vez y solo en el éxito**, justo tras
+`lastCompletedNodeType = node.nodeType`: ese punto domina las tres salidas de éxito (`halt`, nodo
+terminal y transición normal), igual que la liberación de binarios que vive dos líneas más abajo.
+El hueco del fallo ya lo cubre `node:error`, y un `node:completed` con `success: false` obligaría a
+todo consumidor a discriminar dentro del manejador del camino feliz.
+
+### Por qué el `stepIndex` sale de la topología y no del contador del bucle
+
+Es la decisión que más fácil sería deshacer por accidente. El consumidor ya tiene pintada la
+proyección de `buildOrderedTopology`, así que lo que necesita del evento es «ilumina la caja número
+3 de las que ya tienes». El contador `transitions` describe otra cosa —el ordinal de esta vuelta
+del bucle— y miente como índice en dos casos concretos: tras una reanudación CU-09 desde el quinto
+nodo arranca en cero y anunciaría «paso 1 de 7», y tras un desvío por `onErrorStep` con
+reincorporación vale 5 sobre un nodo que es la caja 3. Ambos viajan igualmente, pero cada uno con
+su papel: `stepIndex` para posicionar y `transition` para ordenar la serie, que con nodos de
+milisegundos y entregas por socket es lo único que deja descartar llegadas desordenadas y entender
+un ciclo `A → B → A`.
+
+`buildOrderedTopology` se calcula **una vez por ejecución**, junto al contador de transiciones y
+fuera del `while`: recorre el grafo entero, y moverlo dentro lo volvería O(n²) en la ruta crítica.
+
+### `stepIndex: number | null`, y no `-1`
+
+`buildOrderedTopology` solo sigue `nextStep`, de modo que un nodo de contingencia colgado
+únicamente de un `onErrorStep` no figura en la topología. Ese nodo **sí emite** —es justo el que el
+operador mira tras un fallo, y silenciarlo dejaría el canvas congelado tras el `node:error`—, pero
+con índice nulo. Se eligió `null` sobre `-1` porque un índice fuera de rango se pinta como caja
+válida en el primer `array[index]` descuidado, mientras que el nulo obliga a decidir: el canvas lo
+dibuja como derivación lateral punteada, bajo «Rutas de contingencia».
+
+### Sala y no difusión
+
+`flow:completed` se difunde al namespace entero porque es la confirmación de que el trabajo salió y
+alcanza a quien se fue a otra pantalla. El par del ciclo de vida del nodo es exactamente lo
+contrario: es la animación, no el desenlace, y solo significa algo para quien tiene ese canvas
+abierto en ese instante. El argumento decisivo es de volumen — dos eventos por intento de cada
+nodo, multiplicados por los sockets conectados si se difundieran.
+
+### Hueco conocido: el nodo en vuelo no tiene cierre propio
+
+Si salta el circuit breaker (`MAX_TRANSITIONS`) o el flujo se pausa, el último `node:started` se
+queda sin su `node:completed`. No se añadió un `node:aborted`: duplicaría lo que
+`flow:paused.activeCursor` ya lleva. En su lugar, **`flow:paused` y `flow:completed` son también el
+cierre del nodo en vuelo**, y el canvas los consume con ese papel — la pausa congela el cursor, y
+el cierre apaga las cajas que seguían corriendo marcándolas completadas o fallidas según el
+`finalState`. Sin esto, la caja giraría su spinner para siempre.
+
+### El store del canvas no duplica el de ejecución
+
+`canvas.store.ts` posee solo lo que no significa nada fuera de esta pantalla: el flujo cargado, su
+topología proyectada, el mapa de estados por caja y la selección. La ejecución, el cursor, la
+pertenencia a salas y las dos acciones de CU-09 siguen siendo de `useExecutionStore`. Es el mismo
+criterio por el que `useFlujoDraftStore` no guarda la configuración de cada nodo: duplicarlo
+crearía dos fuentes de verdad que divergen en cuanto una pausa llegue con el canvas cerrado.
+
+Sí guarda una ejecución propia, `observedExecution`, y la distinción importa:
+`executionStore.activeExecution` sigue al **último evento recibido sea del flujo que sea**, porque
+la tabla de `/flujos` mantiene abiertas las salas de todos los flujos a la vez. El canvas necesita
+la de *su* flujo, y por el mismo motivo todos sus manejadores descartan lo que no lleve su `flowId`.
+
+### Dónde vive `fetchActiveExecution`
+
+En `fsm-executions.service.ts` y no en `workflows.service.ts`: compone dos rutas de `/executions`
+—el listado para localizar la ejecución viva y el detalle para traer `context` y `retryState`, que
+el resumen omite a propósito— y `frontend-architecture.md` §1 fija un servicio por dominio. Filtra
+por estado **en el servidor**, consultando `EN_PROCESO` y luego `PAUSADO`: el listado pagina por
+`createdAt DESC`, así que filtrar en el cliente dejaría la ejecución pausada de un flujo con
+histórico largo fuera de la primera página y el canvas la daría por inexistente.
+
+No se añadió el endpoint `GET /workflows/:id/executions/active` que se barajó: los dos existentes
+bastan, y uno nuevo habría que mantenerlo sincronizado con ellos.
+
+### Verificación
+
+Backend **92 suites / 2226 pruebas**; frontend **56 ficheros / 1049 pruebas**; `tsc` y `vue-tsc`
+limpios, ESLint sin incidencias nuevas. Los 7 casos del bloque 38 del motor fijan las decisiones de
+arriba, en particular el 38.2 (emisión por intento) y el 38.5 (`stepIndex` tras reanudar), que es
+el que falla si alguien cambia la fuente del índice al contador del bucle.
+
+Un spec previo, `useExecutionSocket.spec.ts`, hubo que completarlo: el composable alimenta ahora
+también al canvas, y con él arrastra `@services/workflows.service` hasta `@boot/axios`, que no
+resuelve fuera del navegador.
+
+### Pendiente tras esta tanda
+
+- **Tabla de trazabilidad histórica** (`<q-table>` con `.row-urgente` / `-grave` / `-exitoso`): el
+  canvas cubre la ejecución VIVA de un flujo, no el histórico de todas.
+- Emisión por sala `user_*` y BullMQ, que siguen donde estaban.
+
+---
+
+## Estado triestatal del flujo y bifurcaciones del canvas (rama `feat/canvas-view`)
+
+Dos trabajos en una tanda: uno de dominio —el flujo gana un tercer estado— y otro de interfaz —el
+canvas aprende a dibujar las rutas de error—. Antes de nada, lo que **no** hubo que hacer.
+
+### Lo que el enunciado pedía y ya estaba hecho
+
+Buena parte de la petición describía trabajo cerrado en `c2840ca`, `7dd255a`, `9deb188` y `97bb208`.
+Se verificó uno a uno en vez de reimplementarlo: los reintentos encapsulados con
+`metadata.exhausted` y su guarda en `canRetry`; el `ignoreExtractionFailure` con `FALLBACK_EMPTY`;
+las dos guardas de `SmtpAlertStrategy` (contexto y severidad) con los reintentos en el correo; la
+ventana IMAP de 48 h; `normalizeSubjectText` preservando la `ñ`; las cuatro variables OCR en el
+catálogo de prompts; y la telemetría por nodo.
+
+Dos hallazgos concretos merecen quedar escritos, porque invitan a reimplementar algo que existe:
+
+1. **El «break tras contingencia» ya existía**, con un criterio más fino que el pedido.
+   `closeTerminalState` distingue si la rama de error **reincorporó** al camino (cierra EXITOSO: el
+   trabajo se hizo) o **murió en un nodo de alerta** (pausa en el nodo que falló, si era GRAVE).
+   Pedir un `break` incondicional habría roto la recuperación por OCR/visión de PROT-18, que es
+   justamente la rama que sí recupera. Lo único que faltaba era propagar esa pausa al flujo padre.
+2. **El log `Intento N/M fallido` ya existía en las tres capas**: `HttpClientService:201` para LLM y
+   OCR, `web-scraper.runner:320` para el scraper. Subir el bucle de reintentos a las estrategias
+   —lo que el enunciado pedía— habría multiplicado los intentos por sí mismos.
+
+### Por qué un enum y no un segundo booleano
+
+`activo` + `pausado` admite la combinación `(false, true)` —un flujo retirado y pausado a la vez—
+que no significa nada y obliga a cada consulta a mirar dos columnas en el orden correcto. Los tres
+valores son mutuamente excluyentes por definición: un flujo dispara, no dispara porque alguien lo
+retiró, o no dispara porque algo se rompió.
+
+Tampoco se reutilizó `enum_estado`. Ese tipo describe el ciclo de vida de una **ejecución** y tiene
+siete valores, cinco terminales; un flujo no es EXITOSO ni DESCARTADO. Compartirlo habría borrado en
+el esquema la frontera que el TSDoc de `Workflow` defiende desde el principio. Lo que sí hubo que
+reescribir es ese TSDoc: `status` **no** rompe la frontera pese a compartir la palabra PAUSADO,
+porque sigue respondiendo «¿se puede disparar?», solo que con tres respuestas.
+
+### PAUSADO es escritura exclusiva del motor
+
+El `@IsIn([ACTIVO, INACTIVO])` del DTO no es celo. Un PAUSADO puesto a mano describe una ejecución
+detenida que no existe: el flujo deja de disparar, la tabla pinta el badge de pausa con su botón de
+reanudar, y al pulsarlo no pasa nada porque no hay ejecución que reanudar. Un callejón sin salida sin
+mensaje de error. Y «parar de disparar conservando las detenidas» ya tiene palabra: INACTIVO.
+
+De paso se cerró un agujero que venía de antes: `CreateWorkflowDto.active` permitía nacer armado, y
+`createWorkflow` **nunca** llama a `assertActivatable` —solo lo hace `updateWorkflow`—, así que un
+`POST { active: true }` creaba un flujo expuesto al sondeo sin que nadie comprobara que su esquema
+era ejecutable. El campo desaparece del alta.
+
+### El cuarto coordinador
+
+El enunciado pedía que la FSM llamase a `imapPollingService` y a `workflowsService`. No puede:
+`@core` no importa de `@modules`, que es el motivo de existir de los otros tres coordinadores. Se
+añadió `WorkflowStatusCoordinator` con el mismo patrón, y **no** se amplió `FlowPollingCoordinator`
+por tres razones, la primera bloqueante: `WorkflowsService` ya es *consumidor* de aquel, así que
+inscribirse en su mismo `Set` le devolvería sus propios despachos. Además aquel puerto es síncrono y
+`void` porque solo toca temporizadores, mientras que esto escribe en PostgreSQL.
+
+La trampa que más importa está en `pauseFlow`: reutiliza `publishMutation`, pero **jamás**
+`releaseDeactivatedFlow`. Aquel llama a `abortExecutionsForFlow`, que cierra como FALLIDO todo lo que
+esté en EN_PROCESO o PAUSADO; invocado desde dentro de `pauseAt` mataría la ejecución que el motor
+acaba de pausar —se llamaría a sí mismo— y convertiría cada pausa reanudable en un fallo definitivo.
+Hay un test dedicado a esa regresión (13.2).
+
+El orden de las tres operaciones es observable y hay un test que lo fija (39.2): checkpoint → pausa
+del flujo → evento. Antes del checkpoint no habría fila que leer; después del evento, la interfaz
+pintaría «Activo» sobre una ejecución detenida.
+
+### `suppressFlowPause`
+
+Sin esta opción, probar desde el banco de pruebas un flujo que está en producción lo dejaría PAUSADO
+y apagaría su sondeo: un ensayo convertido en una interrupción del servicio. Es el mismo criterio por
+el que `applyStopOnFirstSuccess` ya excluía el despacho manual. La guarda de `pauseFlow` —solo actúa
+sobre un flujo ACTIVO— cubre el caso del flujo en borrador, pero no este.
+
+### Carriles espejo frente a SVG superpuesto
+
+Para que el trazo de una bifurcación caiga bajo el nodo que la declara había dos caminos. Se eligió
+repetir en el carril inferior **la misma estructura de columnas** del nominal —una celda de 220px por
+paso, un hueco de 36px entre pasos— rellenando solo las celdas con ruta: la alineación sale sola y
+las medidas viven una sola vez, en variables SCSS que comparten los dos carriles.
+
+Un `<svg>` absoluto superpuesto habría obligado a replicar esas medidas en TypeScript (segunda fuente
+de verdad geométrica, que diverge en cuanto alguien toque el SCSS), a sincronizar `scrollLeft` con el
+contenedor y a re-medir en cada `resize`. Solo se habría pagado por diagonales reales, y el diseño las
+elimina a propósito: en un carril con scroll horizontal, una arista larga tiene sus dos extremos fuera
+de pantalla a la vez, así que el número de paso informa más que la línea.
+
+El conector sí es SVG inline, pero local: `stroke-dasharray` controla el ritmo del guion, que un
+`border: dashed` deja al navegador, y la punta es un `<path>` en el mismo `viewBox` en vez de un
+`marker-end`, que exigiría ids únicos por instancia. El color entra por `currentColor` desde la clase,
+así que la plantilla no lleva ni un color.
+
+**Contraste asumido por escrito:** `--pd-warning` sobre el fondo claro da ~2.1:1, por debajo del 3:1
+de WCAG 1.4.11. La mitigación cabe dentro de la lista cerrada de tokens: trazo de 2px, patrón
+discontinuo y punta —tres señales no cromáticas— y el texto **nunca** en ámbar.
+
+### Una tarjeta por nodo
+
+El alertador es uno por flujo (regla 5 del validador: `outputNamespace` único), y dos pasos pueden
+desviar hacia él. Duplicar su tarjeta haría leer dos alertadores donde hay uno y rompería la biyección
+`nodeId ↔ .pd-node-card` de la que dependen el `aria-label` y el recuento de los tests. Los demás
+declarantes pintan su trazo completo terminado en un chip de referencia, y la tarjeta única lleva
+«Recibe de: …» en el pie.
+
+Caso que no se puede perder de vista: `isTraversed` de una contingencia **no** puede ser
+`statusOf(origen) === 'COMPLETED'`, porque un nodo completado es justo el que *no* desvió. La prueba
+de que la rama se disparó es que su destino dejó de estar `IDLE`.
+
+### `markAsRead: false` y lo que cuesta
+
+El buzón corporativo deja de marcarse. El coste es real y se asume: la bandera `\Seen` era, junto a
+`unreadOnly`, el único marcador de «ya tratado» que sobrevivía a un reinicio, y sin ella la
+deduplicación recae en la ventana de 48 h y el filtro de asunto. Un flujo con filtros laxos puede
+republicar. Se acepta porque el buzón es compartido y que un automatismo marque como leídos los
+correos de una persona es un efecto irreversible sobre datos que no son suyos; quien prefiera lo
+anterior lo declara en el nodo.
+
+### Lo que se retiró del formulario del scraper
+
+El banner largo sobre «primer enlace elegible» y dos avisos de `configWarnings`. Los dos avisos
+describían configuraciones **correctas** —«primer elegible» sin dominios excluidos equivale a la
+posición 1, que es además el defecto del nodo—, de modo que aparecían en un nodo bien configurado y
+acostumbraban al operador a ignorar la lista donde sí salen los problemas reales. Sus dos tests se
+invirtieron en vez de borrarse: ahora fijan que esos avisos **no** aparecen. El `q-select`
+determinista se queda intacto: es el Poka-Yoke que exige la regla §4.
+
+### Verificación
+
+Backend **93 suites / 2248 pruebas**; frontend **56 ficheros / 1066**. `tsc` y `vue-tsc` limpios,
+ESLint sin incidencias nuevas (quedan 5 preexistentes en `workflows.service.spec.ts` y 3 en
+`imap-polling.service.spec.ts`, todas `any` de `expect.any` y del `SchedulerRegistry`).
+
+### Pendiente y advertido
+
+- **Migración 040 obligatoria ANTES de desplegar.** Con `synchronize: false`, en cuanto la entidad
+  declara `status` toda lectura de `flujos` muere con `column Workflow.status does not exist`. Hay una
+  guarda en `onModuleInit` que aborta el arranque con el comando `psql` literal en el log, para que el
+  síntoma aparezca una vez y en el sitio donde se arregla.
+- **La 030 debería estar ya aplicada**: el motor escribe `ExecutionState.OMITIDO`, así que toda parada
+  ordenada está fallando hoy contra la base real.
+- `init.sql` llevaba `enum_estado` sin `DESCARTADO` (migración 039): una base creada desde cero
+  reventaba en el primer descarte. Corregido en el mismo commit.
+
+---
+
+## Nodo de pausa, reanudación flexible y dependencias de contingencia (rama `feat/canvas-view`)
+
+Tres defectos y dos capacidades. Los tres defectos resultaron tener la misma forma: **una regla que
+mira solo el camino nominal cuando el dominio ya tiene ramas**.
+
+### El 400 sobre una topología correcta
+
+`detectUnreachableNamespaces` recorre `entrypoint → nextStep` acumulando `outputNamespace`. La
+acotación estaba documentada y razonada —«un nodo al que solo se llega por `onErrorStep` tiene
+predecesores distintos según por dónde se entre, y afirmar algo sobre él aquí sería adivinar»— pero
+se quedó corta cuando el satélite **reincorpora**: el rescate por OCR desvía desde `parser_pre_ia`,
+escribe `ocr_result` y devuelve el flujo al `procesador_ia`. Ese nodo sí está en el camino nominal, y
+su prompt citando `{{ocr_result.clean_body}}` es exactamente la razón de existir del satélite. Se
+rechazaba con `ERR_MISSING_UPSTREAM_CONTEXT`. El propio motor dejó constancia del agujero por
+escrito (`fsm-engine.service.ts`, en el comentario de la publicación desacoplada del payload).
+
+Lo que **no** se hizo es contar esos namespaces como si tal cosa. `produced` pasa de `Set` a
+`Map<string, 'certain' | 'conditional'>`, y la exigencia se parte en dos según de dónde venga la
+dependencia:
+
+- **Interpolada** (`{{ns.campo}}` en los `params` o dentro de un prompt guardado): se satisface con
+  un condicional. Si la rama no se disparó, `getInterpolatedValue` devuelve cadena vacía y el flujo
+  continúa. Se comprobó que `LlmExtractorStrategy` **no** implementa `getRequiredNamespaces`, así que
+  el caso del encargo entra por esta vía y no tiene modo de fallo.
+- **Declarada** en `getRequiredNamespaces`: sigue exigiendo productor en el camino activo. Ahí el
+  motor no interpola nada —`findMissingNamespaces` aborta el nodo—, y lo haría **siempre que la
+  ejecución tome el camino feliz**, que es el caso normal. Aceptarlo habría convertido el validador
+  en un sello de goma justo en el escenario que más caro sale. Estrena código propio,
+  `ERR_CONDITIONAL_UPSTREAM_CONTEXT`, porque el diagnóstico no es «falta el namespace» sino «el nodo
+  está bien colocado y mal alimentado».
+
+El recorrido del subgrafo de contingencia **para en cuanto pisa el camino activo**. Sin ese corte, un
+satélite que reincorpora haría parecer disponibles los nodos nominales posteriores, que es
+precisamente lo que la regla existe para impedir. Reutiliza `declaredErrorTarget`, que ya conocía la
+unión `string | SelectiveErrorFallback` y que la regla 3 usa desde siempre.
+
+Un detalle que costó un test rojo: el helper recibe el **nodo ya resuelto** y no su `nodeId`. La
+regla 2 no garantiza que la clave del mapa coincida con el `nodeId`, así que volver a indexar
+`schema.nodes` con el segundo reventaba justo en los esquemas que esa regla está reportando.
+
+### El mismo hueco en el asistente, por otra causa
+
+`flujo-draft.store.upstreamContext` recortaba con `pipelineTopology.slice(0, stepIndex)`, y los
+satélites viven **fuera** de ese arreglo por diseño: su orden *es* la topología —`nextStep` es el
+elemento siguiente—, así que un nodo de rescate metido ahí acabaría en el camino feliz. No era el
+`filterPromptContext` que apuntaba el enunciado. El síntoma visible: la misma variable existía o no
+según por dónde se abriera el editor, porque el gestor de prompts recorre el catálogo entero y el
+asistente no.
+
+Arreglado en la causa, no en el consumidor. Y marcado: `UpstreamNamespace` gana `isConditional`, y
+`VariableExplorer` lo distingue con badge **y** con frase. El color nunca viaja solo, y aquí además
+no bastaría: la diferencia entre «este dato siempre llega» y «este dato llega a veces» no se ve hasta
+que el flujo se ejecuta y el marcador sale vacío.
+
+### La cabecera que decía lo contrario
+
+`stateBadge` se derivaba solo de `executionState`, que sale de una ejecución **viva**. Un flujo
+`ACTIVO` a la espera de su disparador no tiene ninguna, caía en el `default` y se pintaba
+«INACTIVO»: la vista afirmaba que estaba apagado un flujo armado y escuchando. Cruza ahora las dos
+fuentes, y el orden de las ramas es la regla y no una casualidad — lo que ocurre **ahora** manda
+sobre lo que el flujo es en general: una ejecución en curso se anuncia aunque la fila diga ACTIVO, y
+una detenida aunque el flujo ya se haya reactivado. Cero backend: `WorkflowDetailResponseDto` extiende
+`PipelineSummaryResponseDto` y ya traía `status` desde la entrega anterior.
+
+### Reanudar desde otro paso, y lo que no se admite
+
+`ResumeExecutionDto` **ya existía** con `resetRetries` y `contextPatch`; solo se le añadió
+`targetStepId`. Lo que importa es el criterio de admisión: el propio cursor, o un nodo cuyo
+`outputNamespace` esté escrito en el contexto acumulado. Saltar a un paso posterior dejaría sin
+escribir los namespaces intermedios, y el flujo reventaría al interpolarlos con un fallo que el
+operador leería como un error del motor y no como la consecuencia de su elección.
+
+La prueba se hace contra el **contexto** y no contra el índice en la topología ordenada. Esa última
+deja fuera a los satélites de contingencia, que es justo donde una reanudación selectiva resulta más
+útil: si el rescate por OCR llegó a correr, volver a él es legítimo.
+
+El criterio está escrito dos veces, en `ExecutionsService.resolveResumeCursor` y en
+`canvas.store.isResumableFrom`, y la duplicación es deliberada: la segunda decide qué tarjetas
+enseñan el botón, así que una copia más laxa ofrecería botones que devuelven 400 y una más estricta
+escondería opciones legítimas. Hay tests a los dos lados.
+
+**`logs_nodo` no se toca.** El enunciado pedía «limpiar o marcar como obsoletos» los pasos
+posteriores, y no existe tal concepto: `NodeLogStatus` solo admite `OK | ERROR | ADVERTENCIA` y
+ampliarlo exige recrear el tipo PG. Borrar habría destruido la evidencia del fallo que motivó la
+pausa, que es lo que CU-09 existe para conservar. En su lugar, la reanudación escribe una fila
+`ADVERTENCIA` de demarcación —«Reanudado desde `<nodo>`»— que separa los dos intentos. Cero
+migraciones.
+
+El presupuesto de reintentos se restaura para el nodo **desde el que se reanuda**, no para el que
+detuvo la ejecución: devolvérselo al viejo dejaría al nuevo con el contador que traía y, si ya había
+agotado su política antes, fallaría al primer tropiezo.
+
+En la tabla, «Reanudar» pasa a preguntar en vez de disparar el POST de un clic — las dos opciones
+llevan a sitios muy distintos, una ejecuta y la otra abre una vista. **Sin** el temporizador de 5 s:
+ese está reservado a lo irreversible, y reanudar no destruye nada.
+
+### `PAUSA_FLOW`: una pausa que no es un fallo
+
+Hasta ahora la única forma de que una ejecución quedara en `PAUSADO` era que algo se rompiera. Un
+flujo que debe esperar el visto bueno de redacción antes de publicar no tenía cómo decirlo: o
+publicaba solo, o alguien daba de baja el flujo entero y perdía el contexto de la ejecución en curso.
+
+Categoría **CONTROL** y no `DESTINO`: no entrega nada fuera del sistema y conserva su `nextStep`, que
+es donde queda el cursor. Un `DESTINO` tiene que cerrar el flujo (regla 11), que es lo contrario.
+
+La señal viaja en `NodeResult.pause?: { reason }`, **campo tipado** y hermano de `halt`. El enunciado
+proponía leerla de `data.shouldPause`, y no se hizo: `data` es un `Record<string, unknown>` y quien
+consume la señal es el motor, en `@core`, así que sacarla de ahí obligaría a un cast en el núcleo y
+haría que una errata en el nombre de la clave pasara en silencio. `data` publica igualmente
+`shouldPause` y `pauseReason`, pero para la trazabilidad, no como fuente de verdad de la transición.
+
+La diferencia con `halt` es el desenlace y la ve el usuario: `halt` cierra en `OMITIDO` —no había
+nada que hacer, nadie tiene que intervenir— y esto deja la ejecución viva reclamando atención. El
+motor la atiende reutilizando `pauseAt`, que ya hacía checkpoint → pausa del flujo → evento en ese
+orden no intercambiable; solo se le añadieron `isProgrammedPause` y `pauseReason` al evento, sin los
+cuales el cliente presentaría una suspensión deliberada con el mismo lenguaje de alarma que una
+caída, porque el resto del payload es indistinguible.
+
+**No hay auto-reanudación, y es una decisión.** Los `resumeCronExpression` / `pauseUntilDate` del
+enunciado original prometían que el flujo vuelve solo, y nada en el sistema lo haría: la única salida
+de `PAUSADO` es `POST /executions/:id/resume`, con una persona delante. Un campo que promete algo que
+no ocurre es peor que no tener el campo. Lo que `pauseMode` parametriza es *cuándo* se congela.
+
+**El coste del retardo, dicho por escrito.** La espera transcurre dentro de `execute`, con la
+ejecución en `EN_PROCESO` ocupando una plaza de la capacidad global y reteniendo el mutex parcial
+`idx_flujo_activo`; si el proceso se reinicia en ese hueco, la fila queda `EN_PROCESO` sin checkpoint
+posterior. De ahí `MAX_PAUSE_DELAY_SECONDS = 900`. No se trocea la espera para atender un aborto
+porque `abortedExecutions` es privado del motor y no hay puerto que lo exponga a `@modules`: montar
+uno para esto habría sido más superficie que la que resuelve, y para detener un flujo durante horas
+la herramienta correcta ya existe —darlo de baja, que no consume nada mientras espera—.
+
+Un `PAUSA_FLOW` sin `nextStep` **no pausa**: no quedaría ningún paso que reanudar, así que congelar
+la ejecución solo dejaría una fila detenida para siempre esperando un trabajo que no existe. Cierra
+por la salida normal del bucle, con un aviso en el log.
+
+El aviso por correo reutiliza la carta institucional, pero hubo que **parametrizar su titular**: la
+cinta decía «Notificación de Incidencia» en duro, y encabezar así una suspensión deliberada diría
+justo lo contrario de lo que ha pasado. `AlertEmailParams` gana `headline` y `title`, ambos con el
+texto de siempre por defecto, de modo que ninguna alerta existente cambia. Un fallo de transporte
+**no** convierte la pausa en error: la pausa es el trabajo del nodo y el correo una cortesía;
+tratarlo como fallo desviaría el flujo por `onErrorStep` en vez de detenerlo.
+
+### Verificación
+
+Backend **94 suites / 2280 pruebas**; frontend **59 ficheros / 1113**. `tsc` y `vue-tsc` limpios,
+ESLint sin incidencias en nada de lo tocado (siguen las preexistentes en `workflows.service.spec.ts`,
+`wizard.service.spec.ts` y `template-mapper.strategy*`).
+
+### Pendiente y advertido
+
+- **Migración 042** da de alta `PAUSA_FLOW` en el catálogo `nodos`. Sin ella el tipo existe en el
+  enum y en la factoría, pero `GET /api/nodos` no lo lista y el editor de plantillas no lo ofrece.
+  `init.sql` se actualizó en el mismo commit.
+- Sigue vigente todo lo advertido en la entrada anterior: **030** (el motor escribe
+  `ExecutionState.OMITIDO` y hoy toda parada ordenada falla contra la base real) y **040** (sin ella
+  toda lectura de `flujos` muere), además de 026, 031 y 032.
+- La **041** llevaba el nombre de columna equivocado (`actualizado_en`); el correcto es
+  `fecha_actualizacion`, como confirma `init.sql`. Corregido en este commit.
+
+---
+
+## Órdenes por correo, sincronización del canvas y suite E2E (rama `feat/canvas-view`)
+
+### La pausa se pintaba en el nodo de al lado
+
+El motor deja el cursor en `node.nextStep`, y está bien: reanudar volviendo a entrar en la pausa
+sería un bucle del que CU-09 no podría sacar la ejecución. Pero el canvas solo tenía esa clave, así
+que marcaba `PAUSADO` un nodo que **nunca arrancó** —no hubo `node:started` para él— mientras el
+`PAUSA_FLOW`, que sí se ejecutó, quedaba `COMPLETADO` por el `emitNodeCompleted` de unas líneas
+antes. El operador veía el aviso de pausa colgando del paso equivocado.
+
+`flow:paused` gana `pausedStepId` y se emite **siempre**, cayendo al propio cursor cuando no hay
+nada que distinguir. Esa decisión es deliberada: con una clave opcional, cada consumidor tendría que
+escribir `event.pausedStepId ?? event.activeCursor` y bastaría que uno lo olvidara para reintroducir
+el defecto. Emitiéndola siempre, leer la clave correcta es el camino fácil.
+
+Al recargar la página no hay evento que escuchar, así que el dato tiene que estar persistido. Lo
+escribe el motor, no la estrategia: un nodo recibe `context` y `params` y no sabe ni su propio
+`nodeId` ni cuál es su `nextStep`. Se fusiona sobre `node.outputNamespace` y **no** sobre el literal
+`pause_context`, por lo mismo que `DESTINO_DRUPAL` conserva `http_result` tras el renombrado: el
+namespace es propiedad del nodo en el esquema. Y el cliente lo localiza buscando la clave
+`pausedAtStepId` entre los namespaces, no el nombre del namespace, de modo que un `PAUSA_FLOW`
+reconfigurado sigue funcionando.
+
+### El canvas no sabía que alguien había reanudado
+
+No existía `handleFlowResumed`. `useExecutionSocket` dirigía el evento solo a `execution.store`, que
+repinta la fila de la tabla. Resultado: el nodo pausado seguía en ámbar —con una reanudación
+selectiva ya no es el cursor, así que nadie volvía a tocarlo— y los pasos posteriores conservaban su
+`COMPLETADO` del intento anterior, afirmando un trabajo que estaba a punto de rehacerse. Había que
+recargar para ver el estado real, que es justo lo que un canvas en vivo existe para evitar.
+
+La regla es la topología: desde el paso elegido en adelante todo vuelve a `IDLE`; lo anterior
+conserva lo que logró. El caso que obliga a pensarlo es el satélite de contingencia: no está en
+`orderedSteps`, así que «posterior a él» no significa nada y solo se reinicia él mismo.
+
+De paso, `resumedBy` deja de ser un UUID. El aviso imprimía literalmente «reanudado por
+3f1c2b64-8a5e-…» pese a que `AuthenticatedUser` ya traía el correo desde el JWT: el dato legible
+estaba a mano y se tiraba. El identificador se conserva junto al correo porque es lo estable.
+
+### Lo que no se hizo en la Parte 2, y por qué
+
+El enunciado describía un defecto que no existe: el CRUD de prompts **ya ofrecía `ocr_result`**
+—hay un test que lo fija desde hace tiempo— y no hay en ninguna parte una «advertencia de namespace
+inexistente» que desactivar; de hecho nada valida el texto del prompt contra la lista de namespaces,
+y se puede teclear `{{inventado.campo}}` sin que nadie proteste.
+
+Lo que sí estaba roto era la **resolución**, por una carrera: `fetchCatalog()` se invocaba con `void`
+al abrir el diálogo, de modo que el primer repintado ocurría con `entries` vacío. Duraba un instante
+—el justo para que quien abriera y fuera directo al desplegable lo encontrara vacío y concluyera que
+no había variables—. Ahora se espera, y el selector dice que está cargando en vez de parecer vacío.
+
+Y faltaba algo que el catálogo **no puede ofrecer por construcción**: `trigger`, `error_context` y
+`_assets` no los publica ninguna estrategia, los siembra el motor. Son marcadores perfectamente
+válidos —`{{trigger.flow_name}}` es lo que lleva el asunto por defecto del nodo de alerta— y se
+podían teclear pero no elegir, que es exactamente lo que el Poka-Yoke de §4 quiere evitar. Se
+replican en `engine-namespaces.ts`, y esa réplica manual es aceptable porque la alternativa no
+existe: no hay endpoint que los publique. Solo se ofrecen en el catálogo general; dentro del
+asistente, poner `error_context` a disposición de un nodo del camino feliz sería mentir.
+
+Sobre `processed_at`: se pedía declararlo en una constante del cliente, pero no existía en el
+backend. Replicarlo allí habría ofrecido al operador una variable que interpola vacío siempre, y
+dejado dos listas de campos divergiendo a la primera edición de la estrategia. Se añadió donde
+corresponde —`OcrProcessorStrategy` lo publica y lo declara— y el frontend lo recibe del catálogo
+sin replicar nada. Su marca es propia y no derivada del checkpoint: una reanudación reescribe
+`fecha_actualizacion`, así que leer de ahí cuándo se transcribió daría la hora del último reintento.
+
+### Reanudar desde un correo sin abrir un agujero
+
+Esta es la parte que más cambió respecto del enunciado, y conviene dejar escrito por qué.
+
+**El remitente no puede ser la credencial.** SMTP no autentica la cabecera `From`: ponerla es
+escribir una línea de texto. Y el correo entra desde Internet, de modo que esta vía evita a la vez
+el `RedLocalMiddleware` que filtra por subred, el OTP y el JWT — las tres capas que
+`security-and-scope.md` declara obligatorias. Con el remitente como única prueba, cualquiera que
+conociera el UUID de un flujo y la dirección del buzón reanudaba ejecuciones de producción.
+
+La credencial es un **testigo de un solo uso** que genera el nodo `PAUSA_FLOW` al avisar de la
+pausa. Viaja en claro en la carta y de él solo se persiste la huella SHA-256, igual que una
+contraseña: el contexto acumulado se devuelve por la API y se copia en el checkpoint de cada
+transición, así que guardarlo entero sería repartir la credencial por todas partes.
+
+Lo que hace elegante la solución es **dónde vive**. Dentro del contexto de la ejecución pausada se
+obtienen tres propiedades sin tabla, sin migración y sin trabajo de expiración:
+
+1. **Un solo uso**: al reanudar, la ejecución deja de estar `PAUSADO` y no vuelve a ser candidata.
+2. **Atado a una ejecución concreta**, no al flujo: un testigo filtrado no sirve para la siguiente.
+3. **Sin aviso no hay canal**: una pausa configurada sin `notifyOnPause` no genera testigo y por
+   tanto no es reanudable por correo. Es una propiedad deseable y no una carencia.
+
+El UUID del flujo desaparece del asunto —lo identifica el testigo— porque un identificador de
+producción es un dato que no conviene pasear por buzones ajenos ni por los registros de los
+servidores intermedios.
+
+El orden de las comprobaciones también importa: primero el testigo, después el remitente. Al revés,
+consultar `usuarios` con el remitente de un mensaje cualquiera convertiría el buzón en un oráculo de
+qué direcciones están dadas de alta. Hay un test que fija ese orden.
+
+El buzón es **propio** y se declara en el entorno, nunca el de un flujo: el de un flujo lo elige
+quien edita ese flujo, y un EDITOR podría entonces redirigir el canal de mando a un servidor suyo.
+La clave sigue el patrón `IMAP_*PASSWORD` por el mismo motivo que en el nodo IMAP — sin esa guarda,
+apuntarla a `JWT_SECRET` entregaría el secreto de firma al servidor de correo en el saludo.
+
+El despacho pasa por el mismo `resumeExecution` que usa la API, así que el canal nuevo **no relaja
+ninguna regla**: las guardas de estado, la revalidación del esquema, el techo de ejecuciones y el
+rechazo de los saltos hacia adelante siguen aplicando igual. Este servicio decide quién pide y qué
+ejecución, nunca si la reanudación es legal.
+
+Dos detalles de operación. El correo se marca `\Seen` **siempre**, aceptado o rechazado: uno sin
+marcar se reprocesa en cada vuelta, de modo que un intento no autorizado quedaría reintentándose
+solo para siempre. Y un identificador de paso que no resuelve **no aborta**: se reanuda desde donde
+se detuvo, porque abortar por una errata en un nombre dejaría el flujo parado por un detalle que el
+correo no permite corregir.
+
+### La suite E2E, y lo que de verdad se pudo comprobar
+
+La infraestructura ya existía —`test/jest-e2e.json`, `supertest`, y `executions-resume.e2e-spec.ts`
+con el preámbulo de aislamiento resuelto—. Faltaba `socket.io-client` en el backend, que se añadió.
+
+**La suite arranca y conecta contra PostgreSQL.** Falla en la guarda `assertStatusColumnExists`,
+porque la base de pruebas no tiene aplicada la migración 040. Es el resultado esperado y resultó
+útil por partida doble: confirma que `<nombre_bd_test>` existe y acepta conexión, y demuestra que la
+guarda hace su trabajo. De paso delató un defecto propio: el mensaje nombraba la base de desarrollo en duro,
+así que mandaba a aplicar la migración sobre la base **equivocada**. Ahora lee la base de la conexión
+viva.
+
+El tercer caso quedó más estrecho de lo que pedía el enunciado, y es deliberado. La validación del
+canal de correo —testigo desconocido, caducado o usado; remitente inexistente, dado de baja o sin
+rol; las tres formas de nombrar un paso; el marcado en todos los caminos— está cubierta con 21
+pruebas unitarias y dobles del cliente IMAP. Repetirla en E2E exigiría un servidor de correo de
+pruebas y no mediría nada nuevo. Lo que sí se comprueba de extremo a extremo es lo que aquellas no
+pueden ver: que una orden ya validada atraviesa el servicio real, mueve la fila en PostgreSQL y sale
+por el canal marcada como llegada por correo.
+
+### Verificación
+
+Backend **95 suites / 2307 pruebas**; frontend **59 ficheros / 1124**. `tsc` y `vue-tsc` limpios,
+ESLint sin incidencias en nada de lo tocado.
+
+**La suite E2E no se ha podido ejecutar en verde ni una vez**, y conviene decirlo sin adornos: se
+entrega código de prueba verificado solo hasta donde llega el arranque de la aplicación.
+
+### Pendiente y advertido
+
+- La base `<nombre_bd_test>` existe pero le faltan migraciones, empezando por la **040**. Hasta
+  aplicarlas, `npm run test:e2e` muere en el arranque con el comando exacto en el log.
+- Las variables `INBOUND_RESUME_*` quedan documentadas en `.env.example`.
+- Sigue vigente lo advertido en las dos entregas anteriores: **030** (hoy toda parada ordenada falla
+  contra la base real) y **040** (sin ella toda lectura de `flujos` muere), además de 026, 031, 032,
+  041 y 042.
+
+---
+
+## Correos de mando, purga de `error_context` y límites Poka-Yoke (rama `feat/canvas-view`)
+
+### El correo que el operador responde vuelve al flujo
+
+El aviso de incidencia pide responder. Esa respuesta cae en el **mismo buzón que el flujo sondea**, y
+hasta ahora `ImapTriggerStrategy` la ingería como si fuera una noticia más: el cuerpo útil va vacío
+—lo único que lleva es el comando— y la ejecución reventaba tres nodos más adelante, en el
+`PROCESADOR_IA`, con `ERR_LLM_MISSING_INPUT_TEXT`. El diagnóstico apuntaba al nodo equivocado y no
+decía nada de la orden que nadie llegó a atender.
+
+Descartar el mensaje no bastaba. Quien responde espera que su flujo se reanude, así que la estrategia
+**delega y luego para**: llama a `InboundEmailResumeService.processMessage()` y cierra con `halt`.
+Ese método es nuevo solo en su visibilidad —sale del `handleMessage` privado—, y existe así para que
+las dos entradas al canal pasen por las **mismas** guardas. La alternativa era que la estrategia
+reimplementara la validación del testigo y el RBAC, y dos copias de una comprobación de seguridad
+divergen.
+
+Tres detalles del orden, que no son cosméticos:
+
+1. La guarda va **antes del filtro de asunto**. La orden llega como respuesta al aviso, de modo que
+   su asunto es el de aquel con un `Re:` delante y no casa con el filtro del flujo. Evaluada después,
+   el mensaje salía por `SUBJECT_FILTERED` y la reanudación no se atendía jamás.
+2. El `\Seen` se marca **al margen de `markAsRead`**. Esa bandera gobierna los correos de contenido
+   —si marcarlos altera un buzón compartido es decisión del operador—, pero un mensaje de mando sin
+   marcar lo reencuentra `findLatestMatchingUid` en cada sondeo: se reejecutaría en bucle y, peor,
+   ningún correo posterior llegaría a procesarse nunca, porque el UID máximo sería siempre ese.
+3. El `halt` es obligatorio. Sin él el motor avanza al nodo siguiente con el namespace del disparador
+   vacío, que es exactamente el fallo que esta vía existe para evitar. Y es `{ reason }`, no un
+   booleano: el contrato de `NodeResult` lo declara así.
+
+### La orden se lee del cuerpo, y la cita es una trampa
+
+La lectura por asunto estaba condenada: los clientes anteponen `Re:`, así que un asunto que empiece
+literalmente por `REANUDAR` solo se consigue editándolo a mano. Se pasa al cuerpo, con el asunto como
+respaldo para quien responde sin texto útil.
+
+Pero un `^…$` sobre el cuerpo crudo no sirve, y por un motivo que solo se ve mirando un correo real:
+**la cita del aviso incluye literalmente el texto `REANUDAR <testigo>` que el propio sistema
+escribió**. Sin cortar en la marca de cita, una respuesta que solo dijera «recibido, gracias»
+reanudaría el flujo. De ahí `extractCommandLine`, que descarta las líneas citadas y las firmas y
+devuelve la primera línea útil; y `cleanSubject`, que descuenta los `Re:`/`Fwd:` acumulados. Los dos
+son puros, para poder probarlos contra cuerpos reales.
+
+El anclaje sigue siendo completo: un cuerpo con texto de más detrás de la orden se rechaza. Es
+deliberado y es lo que impide que una respuesta larga que mencione el comando de pasada acabe
+reanudando un flujo.
+
+### El canal no existía
+
+`processInbox()` estaba escrito y probado, pero **no lo invocaba nadie en producción**: ni cron, ni
+intervalo, ni endpoint. Una orden enviada al buzón propio se quedaba ahí para siempre. Gana
+`onModuleInit`/`onModuleDestroy` con `SchedulerRegistry`, gobernados por `INBOUND_RESUME_ENABLED`
+—apagado por defecto— y un `INBOUND_RESUME_POLL_MS` acotado por abajo.
+
+### El aviso de un GRAVE ahora ofrece la salida
+
+El testigo solo lo emitía `PAUSA_FLOW`, es decir, la pausa *deliberada*. La pausa que de verdad
+interrumpe a alguien —un fallo GRAVE que deja el flujo esperando reintento— no ofrecía ninguna, de
+modo que la única salida era entrar en la aplicación.
+
+`SmtpAlertStrategy` lo emite bajo dos condiciones, y las dos importan. **GRAVE**, porque es la única
+severidad que acaba en `pauseAt`: con URGENTE el motor cierra sin cursor y con LEVE ni siquiera pausa,
+así que ofrecer un código ahí es prometer una salida que no existe —quien respondiera recibiría un
+rechazo por «testigo desconocido»—. Y **el canal encendido**, porque con `INBOUND_RESUME_ENABLED` en
+`false` nadie lee ningún buzón de vuelta.
+
+No hizo falta tocar el motor: la estrategia publica la huella en su propio namespace, `pauseAt` hace
+checkpoint del contexto entero y `findExecutionByToken` ya recorre todos los namespaces buscando la
+clave. El generador, el hash y el TTL suben a `@common/utils/resume-token.util`, y eso sí era
+necesario: con dos emisores y un verificador, una segunda implementación que normalizara distinto
+produciría huellas que no casan, y el síntoma sería un testigo legítimo rechazado como caducado, sin
+nada en el registro que apuntara a la causa.
+
+`resume_token_hash` y `token_expires_at` **se publican pero no se declaran** en `outputFields`: ese
+catálogo es lo que el explorador de variables ofrece para construir marcadores, y la huella de una
+credencial no es algo que ningún prompt deba poder citar.
+
+### Dos mitades del mismo repintado erróneo
+
+El canvas marcaba en ámbar el `pausa_flow` cuando el flujo había reventado en `procesador_ia`. Hay
+**dos** causas y hacían falta las dos correcciones:
+
+- **La prioridad.** `seedStatuses` —lo que corre al recargar, donde no hay evento que escuchar—
+  consultaba siempre primero la pausa programada. Ahora, si `error_context` trae contenido, marca
+  `PAUSED` **solo** el `activeCursor`.
+- **La purga.** Aun con la prioridad, un `error_context` de un fallo **ya reanudado** seguía en el
+  contexto, de modo que una suspensión limpia posterior se leía como fallo. `prepareResume` lo retira
+  con una copia filtrada —no con `delete`: el checkpoint es inmutable por contrato— y **antes** de
+  fusionar el parche, para que este siga mandando. La evidencia forense no se pierde: vive en
+  `logs_nodo` y en el `.log` físico, que es donde CU-09 la guarda a propósito.
+
+### La política de corrida única no alcanzaba a las reanudaciones
+
+`applyStopOnFirstSuccess` solo corría desde `runAutomaticWorkflow`. Un flujo que se atascaba, se
+reanudaba a mano y terminaba bien se quedaba `ACTIVO` con su sondeo vivo: la política «una sola
+corrida» se cumplía **solo si nadie había tenido que intervenir**, que es justo cuando menos falta
+hacía. Pasa a `public` y la invoca también `resumeExecution`, después del motor —hasta que
+`executeWorkflow` no devuelve no se sabe cómo terminó— y reevaluando sus cuatro condiciones.
+
+**No se inyectan los workers en el motor**, pese a que el encargo lo pedía literalmente:
+`NodesModule` importa `FsmModule`, así que sería un ciclo. Y no hace falta: el desregistro ya lo
+abanica `FlowPollingCoordinator.stopPollingForFlow` a los dos puertos, IMAP y Cron. El evento
+`flow:completed` tampoco se toca, porque ya era difusión global al namespace.
+
+### El techo de reintentos, y el suelo que no se mueve
+
+De 5 a 3 en los dos nodos de IA. El motor ejecuta los nodos **en línea**, así que el tiempo que una
+ejecución pasa bloqueada es `timeoutMs × (maxRetries + 1)` y se repite por cada proveedor de la
+cadena de respaldo.
+
+El suelo **sigue en cero**, al contrario de lo que pedía el encargo: apagar los reintentos es una
+configuración legítima y la más barata frente a un proveedor de pago, así que exigir al menos uno
+quitaba la única forma de expresarla. El techo de espera tampoco baja a 60 000: las variables
+`LLM_HTTP_*`/`OCR_HTTP_*` ya aplican piso y techo **en ejecución** sobre los flujos guardados, que es
+donde de verdad alcanza a lo que ya está persistido.
+
+La migración `043` recorta los `maxRetries` ya guardados porque el DTO valida al **editar**: un flujo
+viejo con 4 o 5 devolvería un 400 que el operador leería como un fallo del formulario y no como la
+consecuencia de un límite nuevo.
+
+### `markAsRead` existía y nadie podía tocarlo
+
+El campo estaba en el DTO desde el principio, con su valor por defecto y su TSDoc. Lo que no existía
+era ninguna forma de decidirlo: **ni el tipo, ni el store, ni el componente** del disparador lo
+contemplaban, así que todo flujo se guardaba con el defecto. Se expone con el mismo nombre que el DTO
+—un alias en cliente obligaría a traducir en `toNodeParams`, y el DTO valida con
+`forbidNonWhitelisted`— y se publica siempre, también apagado: lo que el operador vio marcado tiene
+que quedar escrito en el esquema, sin depender de un defecto que puede cambiar.
+
+El texto de ayuda cambia según la posición, y eso es deliberado: los dos lados tienen coste y ninguno
+es obviamente el correcto. Encendido se toca un buzón compartido de forma irreversible; apagado se
+pierde el marcador anti-duplicados y la deduplicación recae en la ventana de 48 h.
+
+**Lo que NO se movió:** el orden del marcado dentro de la estrategia. El encargo pedía llevarlo
+detrás del filtro de asunto, pero el comentario que ya estaba ahí explica por qué va delante: un
+correo descartado que quedase sin leer volvería a descargarse en cada sondeo y ningún mensaje
+posterior llegaría a procesarse, porque `findLatestMatchingUid` reencontraría siempre el mismo.
+
+### El explorador de variables, y lo que se queda
+
+El segundo selector ofrecía claves en `snake_case` sin más; la `description` que cada estrategia ya
+declara no se veía hasta *después* de elegir. Pasa a `emit-value` con `option-value="name"`: el modelo
+es la clave que se interpola, de modo que la etiqueta queda libre para llevar también la descripción.
+Eso obligó a mover `type` y `description` a un `selectedFieldDetail` resuelto aparte, porque la
+tarjeta de abajo los necesita y el modelo ya no los lleva.
+
+Del catálogo general salen `trigger` y `error_context` —mecánica del motor, no datos del negocio; y
+`error_context` solo existe en las ejecuciones que se desviaron, así que citado desde el camino feliz
+interpola vacío—. **`_assets` se conserva**, y la asimetría es deliberada: no es mecánica, es
+contenido, la base de las URL con las que una plantilla enlaza los binarios subidos a Drupal. Siguen
+funcionando si alguien los teclea; lo que se retira es la invitación a usarlos.
+
+`smtp_result` **entra** pese a ser categoría `DESTINO`. La regla general —un destino cierra el flujo,
+nada corre después— no le aplica: el alertador no vive en el camino feliz sino colgado de un
+`onErrorStep`, de modo que una rama de recuperación posterior puede citar el acuse del aviso. Se
+declara en un conjunto y no como una comparación suelta para que el día que aparezca otro destino con
+la misma forma se añada ahí en vez de ensanchar la regla.
+
+### Teclear para filtrar no es teclear para inventar
+
+Los desplegables son cerrados por Poka-Yoke (§4) y algunos listan decenas de entradas. `use-input`
+abre un campo para **filtrar**; lo que permitiría dar de alta un valor libre es `new-value-mode`, que
+no se declara en ninguno de los que se tocaron. Una prueba que ataba la garantía a `useInput` se
+corrigió para afirmar lo que de verdad la sostiene, `newValueMode`.
+
+Los selectores **múltiples** van sin `fill-input`/`hide-selected`: con ellos los chips de lo ya
+elegido dejan de pintarse. Y se dejan fuera las listas de dos o tres opciones fijas —roles,
+proveedores, modos—, donde un filtro es ruido.
+
+### La base que nadie sabía que estaba desfasada
+
+`PROCESADOR_OCR` **faltaba en la base de desarrollo**: la migración `022` nunca se aplicó ahí, de
+modo que `GET /api/nodos` no devolvía la fila y `ocr_result` no aparecía en el explorador. Once nodos
+en vez de doce, y nada que lo delatara. Ese es exactamente el caso que justifica `schema_migrations`.
+
+`scripts/apply-migrations.sh` registra lo aplicado y para en el primer fallo. **No envuelve nada en
+una transacción**: cada archivo declara la suya cuando la necesita, y las que añaden un valor a un
+enum (`030`, `039`) no pueden ir en una (error 55P04). `--baseline` adopta una base ya al día sin
+reejecutar.
+
+Al construir una base limpia salieron dos cosas que conviene dejar escritas:
+
+- **`init.sql` no se puede encadenar con toda la historia.** Es el acumulado final, así que varias
+  migraciones describen pasos que ya dejó atrás: la `005` actualiza `tipos_nodo` (sustituida por
+  `nodos` en la `011`), la `009` recrea `tokens_sesion` sin `IF NOT EXISTS`, y la `002` **promueve**
+  una cuenta en vez de crearla. Por eso el bootstrap las registra en baseline y siembra el ADMIN
+  aparte.
+- **Las migraciones `035`-`038` están rotas.** Escriben en `plantillas_html.actualizado_en` y
+  `plantillas_prompts_ia.actualizado_en`, columnas que no existen: las dos tablas usan
+  `fecha_actualizacion`. Fallan contra cualquier base, también la de desarrollo. Defecto previo,
+  pendiente de decidir si se corrigen o se retiran.
+
+Las semillas **no se funden en `init.sql`**, pese a que el encargo lo pedía: duplicarlas crearía dos
+copias de cada plantilla y cada prompt, y dos copias divergen. El archivo sigue siendo DDL puro.
+
+### La suite E2E no podía pasar
+
+`fsm-canvas-execution.e2e-spec.ts` sembraba la ejecución en `INACTIVO` y pedía reanudarla.
+`POST /executions/:id/resume` exige `PAUSADO` y devuelve 409 con cualquier otro estado —guarda
+deliberada: solo una ejecución detenida tiene desde dónde retomarse—, así que **siete de los nueve
+casos fallaban en su primera petición**, antes de ejercitar nada de lo que venían a probar. Se
+corrigió el fixture, no la guarda. Con eso los nueve pasan, y la tanda añade tres más:
+autodesactivación tras reanudar, su contraria sin la política declarada, y el rechazo de un
+`maxRetries` por encima del techo.
+
+---
+
+## Reanudación CU-09: la fuga de `\Seen`, los alias de paso y el OCR sin binarios
+
+El encargo traía cuatro defectos. **Dos no existían**, el diagnóstico de un tercero era incorrecto,
+y el cuarto era real pero vivía en otro archivo. Vale la pena dejar escrito qué se comprobó, porque
+tres de esas premisas son creíbles y volverán a plantearse.
+
+### Lo que ya estaba resuelto
+
+`markAsRead` **no** se evaluaba con `?? true`. `DEFAULT_MARK_AS_READ` vale `false` desde que se
+invirtió el valor histórico, `resolveImapConfig` lo aplica, y la consulta sobre `flujos` y
+`plantillas_flujo` no devolvió **ni una sola fila** con `true`: o traen `false` explícito, o no traen
+la clave y el runtime ya resuelve `false`. La estrategia solo marca `\Seen` bajo `if (config.markAsRead)`.
+
+`applyStopOnFirstSuccess` **ya se invoca al reanudar** (`executions.service.ts`), y la plantilla
+«Verificiacion De Titulos Sandbox» **ya declara** `executionPolicy.stopOnFirstSuccess: true`, igual
+que el flujo homónimo. No había nada que añadir en ninguno de los dos sitios.
+
+### Por qué el flujo Sandbox no se desactivó: no es un defecto
+
+Su ejecución EXITOSA del 19/10/2026 a las 17:30 trae el namespace `error_context` poblado, que es la
+huella de haber salido por una ruta de contingencia. El motor marca esas ejecuciones con
+`tookContingency = true`, y la **condición 4** de `applyStopOnFirstSuccess` declina desactivar
+justamente ahí: una recuperación funcional cierra EXITOSO —el trabajo se hizo— pero la política
+describe un flujo que ya funciona **sin incidencias**, y apagarlo enterraría el fallo junto con el
+flujo.
+
+Funciona como está escrito. Se deja sin tocar, por decisión expresa, y queda documentado aquí para
+que no se reabra como avería.
+
+### El defecto real de `markAsRead` estaba en el buzón de órdenes
+
+`InboundEmailResumeService` marcaba `\Seen` **todo** mensaje que leía, fuera o no una orden. Cuando
+ese buzón es el mismo que sondea un `TRIGGER_IMAP` —que es el caso cuando el operador responde al
+correo de alerta—, el flujo configurado con `markAsRead: false` veía su correo marcado por la
+espalda, por un servicio que solo venía a buscar comandos. Ninguna lectura del esquema lo explicaba,
+porque el esquema no tenía la culpa.
+
+El `finally` que marcaba estaba bien razonado: una orden sin marcar se reprocesa en cada vuelta. Lo
+que faltaba era distinguir. Ahora `handleMessage` devuelve `{ wasCommand, dispatched }`: lo que era
+una orden se marca aunque se rechace —un testigo caducado no debe reprocesarse cada minuto—, y lo
+que no lo era se deja intacto y se recuerda en `skippedUids`.
+
+Ese conjunto es el **canje** del arreglo: se cambia una marca en el servidor por un recuerdo en
+memoria. Filtra **antes** del `slice(0, MAX_COMMANDS_PER_RUN)`, y ese orden es lo importante: como
+esos mensajes ya no se marcan, el servidor los sigue devolviendo en cada búsqueda de no-leídos, y
+filtrarlos al final dejaría que una conversación larga copara las diez plazas del lote hasta que
+ninguna orden real se atendiera. Tras un reinicio se re-parsean una vez; está acotado por
+`MAX_SKIPPED_UIDS`.
+
+La prueba `5.3` del spec **se invirtió**: exigía literalmente el comportamiento que era el defecto.
+
+`markSeenQuietly` de `ImapTriggerStrategy` no se toca: marcar siempre los correos de mando es
+deliberado y su TSDoc ya lo explicaba.
+
+### `DESDE Disparador IMAP` no fallaba: no llegaba a existir
+
+El grupo del paso en la expresión era `[a-zA-Z0-9_-]+` y la expresión está **anclada de punta a
+punta**. Una orden que nombrara el paso con dos palabras no casaba con *nada*, así que el mensaje se
+descartaba como «esto no es una orden»: el operador no recibía ni el aviso de paso irresoluble ni la
+reanudación desde el cursor. Fallaba en silencio, que es la peor forma de fallar.
+
+El grupo pasa a `.+?` y el anclaje se conserva —es lo que impide que una respuesta larga reanude un
+flujo de pasada—. Quien acota qué es un paso válido es `resolveTargetStep`, que para eso conoce el
+grafo.
+
+Y se añade el cuarto alias: la **etiqueta del catálogo**. Es la forma que de verdad usa una persona
+y la única que no vive en el esquema, porque `PipelineNodeConfigDto` no tiene `name` ni `label`; la
+etiqueta solo existe en la tabla `nodos` (`codigo` → `nombre`). Se lee de ahí en lugar de replicar el
+diccionario. Todo se compara con `normalizeStepAlias`, que pliega diacríticos: nadie escribe las
+tildes de «Procesador de IA» al responder desde el móvil.
+
+Se inyecta el **repositorio** de `NodeCatalogEntry` y no `NodeCatalogService`: de aquel solo hacen
+falta dos columnas, mientras que el servicio arrastra la `NodeStrategyFactory` y obligaría a
+`WorkflowsModule` a importar `NodesModule`, que es precisamente lo que ese módulo evita. Si el
+catálogo no responde, se resuelve con los tres alias del esquema y se reanuda igual: perder la forma
+cómoda de nombrar un paso es un inconveniente; dejar un flujo detenido porque una tabla no contestó
+sería el fallo de verdad.
+
+### OCR: reanudar desde un nodo cuyos binarios ya se tiraron
+
+Llegar a `PROCESADOR_OCR` sin adjuntos tenía **dos causas que no se parecen en nada**, y tratarlas
+igual era el defecto: o el correo nunca los trajo, o este mismo nodo ya los transcribió y el motor
+liberó los binarios después (RNF-01). En el segundo caso la transcripción sigue entera en el
+contexto, de modo que fallar con `ERR_OCR_NO_ATTACHMENTS` convertía toda reanudación desde ese paso
+en un callejón sin salida: el operador no puede devolver un base64 que el sistema tiró a propósito.
+
+La salvaguarda reutiliza el resultado previo y **no llama al proveedor**. Exige
+`ocr_status === 'COMPLETED'` y no la mera presencia del namespace: el motor copia el `data` de un
+resultado fallido en `error_context.partial_data`, y reutilizar restos a medias publicaría texto
+incompleto como si fuera una transcripción buena.
+
+El nodo **no conoce su propio `outputNamespace`** —`execute(context, node.params)` no se lo pasa—,
+así que la caché se localiza por un `cacheNamespace` nuevo con `'ocr_result'` por defecto, el mismo
+patrón que `sourceNamespace` en el parser. Como el DTO ya estaba enchufado como `paramsSchema`, la
+validación al guardar sale gratis.
+
+**`ParserEmailStrategy` no necesitaba la guarda equivalente**, y comprobarlo evitó código muerto:
+`parsed-email-payload.util.ts` ya descarta un adjunto cuyo `contentBase64` es `null` *antes* de
+contarlo como candidato a visión, con un comentario que lo explica —«un adjunto ya liberado no se
+puede evaluar, y tratarlo como sin texto lo convertiría en candidato cuando lo único que pasa es que
+su binario ya no está»—. `requires_multimodal_fallback` se queda en `false` y el parser sale adelante
+solo al reanudar.
+
+### El aviso del canvas, sin cuenta regresiva
+
+El encargo pedía un modal con temporizador bloqueante de 5 segundos. `CanvasNodeCard` lleva escrito
+por qué su diálogo de reanudación **no** lo tiene: ese temporizador está reservado a lo irreversible
+—descartar una ejecución, dar de baja un flujo— y reanudar no destruye nada. Se respetó la
+convención: se amplía el mensaje del diálogo que ya existía, sin componente nuevo ni contador.
+
+El aviso se condiciona al **tipo** de nodo y no al `nodeId`: `ocr_ia` es solo el nombre que suele
+poner el asistente, y atar la advertencia a esa cadena la apagaría en cuanto alguien renombrara el
+paso. La detección de binarios liberados vive en `src/utils/purged-attachments.ts` porque el frontend
+**no tiene tipo espejo del adjunto**: el contexto es un payload abierto, y replicar aquí la forma de
+`RawEmailAttachment` crearía una segunda definición destinada a desincronizarse.
+
+Exige que **todos** estén liberados: mientras quede uno con binario, el nodo puede transcribir de
+verdad y prometer una reutilización sería mentir. Y un arreglo vacío devuelve `false` explícitamente,
+porque `Array.every` sobre vacío da `true` y sin esa guarda todo correo de texto plano dispararía la
+advertencia.
+
+### La migración 044 es cosmética, y conviene saberlo
+
+Inyecta `markAsRead: false` explícito donde falta la clave. **No corrige ningún comportamiento**: el
+runtime ya resolvía `false`. Lo que corrige es la *lectura* del esquema, para que un operador no
+tenga que irse al DTO del backend a saber si su flujo marcará el correo. Recorre todos los nodos y no
+solo el `entrypoint`, siguiendo el patrón de la `043`, y respeta cualquier valor ya declarado.
+
+### Un detalle de las pruebas de componente que costó encontrar
+
+Quasar instala cada plugin **una sola vez por proceso** y copia `Dialog.create` dentro del `$q` en
+esa primera instalación. Un `vi.spyOn(Dialog, 'create')` puesto en una prueba llega siempre tarde:
+el `$q` del componente ya apunta a la función original y el espía no registra nada —sin error, solo
+cero llamadas—. La salida es doblar `useQuasar`, dejando el plugin instalado únicamente por el `_q_`
+que inyectan `QIcon` y compañía al renderizarse.
+
+---
+
+## Tarifas de IA, orden en servidor y entradas resilientes
+
+### Una tarifa no se edita: se releva
+
+`precios_modelos_ia` es un historial. Cada fila de `telemetria_tokens_ia` guarda su propia copia de
+las tarifas que aplico, asi que la tabla de precios es el registro de **que regia cuando**. Editar
+una fila en sitio reescribiria ese registro, y desactivarla sin sustituta dejaria el par sin tarifa:
+`resolvePricing` caeria al comodin `*` y el coste pasaria a "estimado" sin que nadie lo notara. Por
+eso el controlador tiene `GET` y `POST`, y nada mas. "Modificar" es registrar la siguiente.
+
+### El bloqueo no basta: hace falta el indice parcial
+
+`SELECT ... FOR UPDATE` serializa a dos ADMIN que ya ven una vigente. No cubre el alta simultanea
+de un par **sin** vigente previa, porque no hay fila que bloquear y las dos transacciones insertan su
+`activo = TRUE`. La migracion 052 convierte esa carrera en un `23505`, y el servicio lo traduce a un
+409 legible. Solo se traducen las dos restricciones de tarifas: cualquier otro `23505` sube crudo,
+para no disfrazar un fallo distinto de "otro administrador se adelanto".
+
+### La vigencia la pone el servidor
+
+`CreatePricingDto` no tiene `validFrom`. Con una vigencia futura habria un hueco: la anterior ya
+desactivada y la nueva sin entrar en vigor. En ese intervalo `resolvePricing` no encontraria nada.
+
+### Auditoria y aviso, despues del `COMMIT`
+
+El interceptor registra el `CREAR` de la fila nueva. El paso a historico de la anterior no pasa por
+ningun endpoint propio, asi que se audita a mano como `DESACTIVAR`. Las dos cosas, y el
+`pricing:updated`, ocurren despues de confirmar la transaccion: se anuncia un hecho, no una intencion.
+
+### Orden en servidor: el texto del cliente nunca llega al SQL
+
+TypeORM concatena en crudo el primer argumento de `.orderBy()`, y un identificador no admite un
+parametro enlazado. Hay dos lineas de defensa:
+
+1. El DTO valida `sortBy` con `@IsIn(claves)`, asi que una clave ajena, un array o un objeto dan 400.
+2. El servicio traduce la clave con `resolveSort`, y solo interpola literales del codigo fuente.
+   Usa `Object.hasOwn` en lugar de `in`, porque `constructor` y `__proto__` existen en el prototipo
+   de cualquier objeto literal.
+
+Las rutas de la lista blanca son de **propiedad** (`e.createdAt`) y no de columna, porque con
+`take`/`skip` y un `JOIN`, TypeORM reescribe el orden en una subconsulta de ids y solo sabe hacerlo
+con propiedades. `NULLS LAST` en los dos sentidos: un hueco no es "el menor".
+
+### Las e2e estaban rotas desde la 051, y nadie lo vio
+
+Las cuatro suites firmaban tokens para usuarios inventados. Cuando `JwtStrategy` empezo a consultar
+`usuarios`, esas peticiones pasaron a 401 de forma silenciosa. Ahora cada suite siembra **su propio**
+EDITOR: Jest ejecuta las suites en paralelo, y un usuario compartido lo borraba el `afterAll` de la
+primera en terminar, lo que producia 401 intermitentes en la otra. Ademas montan el mismo
+`ValidationPipe` que `main.ts`, y la de auditoria esperaba aun `CREATE`/`UPDATE`/`DELETE` en ingles.
+
+### Lo que no se recorta
+
+`@TrimmedString` se aplica a nombres, descripciones, codigos, URLs y prompts. **No** a los DTO de
+configuracion de nodo ni al `pipeline_schema`, donde viven selectores CSS, expresiones y
+plantillas: ahi un espacio inicial puede ser parte del dato.
+
+---
+
+## Pruebas a mala leche: lo que encontraron
+
+### Un `sub` con forma rara tumbaba la peticion
+
+`JwtStrategy` pasaba el `sub` a `findAuthState`, que lo compara contra una columna UUID. Un token
+firmado con `sub = "x' OR '1'='1"` no inyectaba nada: TypeORM parametriza. Pero el driver lanzaba
+`invalid input syntax for type uuid`, y el cliente recibia un **500** que ademas delataba el motor.
+Para firmar un token asi hace falta el `JWT_SECRET`, asi que el riesgo es bajo. Aun asi, un 500 es
+un fallo y no la respuesta "token invalido" que corresponde. La guarda `isUUID` lo convierte en un
+401 antes de tocar la base.
+
+### Dos suites e2e escribian en la base de desarrollo
+
+Al preparar la purga, la base real tenia dos flujos `[E2E] Pipeline dummy` mas que una hora antes.
+Venian de `fsm-engine.e2e-spec.ts`, que, igual que `app.e2e-spec.ts`, no fijaba `DB_NAME` ni apagaba
+el IMAP, la reanudacion por correo y el cron. Cada `npm run test:e2e` arrancaba la aplicacion entera
+contra la base de desarrollo y con el buzon corporativo abierto. De ahi salian los catorce "dummy"
+que se iban acumulando. Ahora las dos llevan la misma cabecera de aislamiento que el resto, y la
+prueba es objetiva: la base de desarrollo tiene el mismo numero de flujos antes y despues de la suite.
+
+### Por que la purga va por id y en seco
+
+Los nombres se repiten (catorce "[E2E] Pipeline dummy") y tienen erratas ("TODOSO LOS NODOS"), asi
+que un `ILIKE` amplio conservaria de mas o borraria de menos. El script conserva cinco ids
+concretos, comprueba que existen con el nombre esperado (si no, aborta) y termina en `ROLLBACK`
+salvo que se pase `-v confirmar=yes`.
+
+---
+
+## Estabilizacion: reanudacion auditada, `temperature` y dos `<tbody>`
+
+### Por que `REANUDAR` se registra a mano y no con `@AuditAction`
+
+`POST /executions/:id/resume` no modifica una maestra: cambia una ejecucion y, de rebote, el
+`status` del flujo. Ademas, la misma reanudacion llega por correo entrante, donde no hay peticion
+HTTP. El unico punto por el que pasan los dos caminos es `WorkflowsService.reactivateAfterResume`,
+y ahi se escribe el evento, igual que `PricingService` registra la desactivacion de la tarifa
+anterior. Se registra **siempre**, este o no el flujo en pausa: lo que se audita es la intervencion
+humana sobre una ejecucion detenida. Un flujo INACTIVO se reanuda sin rearmarse, y tambien deja traza.
+
+El interceptor gana la regla simetrica. Un PATCH que lleva un flujo de `PAUSADO` a `ACTIVO` no lo
+arma de cero: lo reanuda. Asi, un auditor encuentra todas las reanudaciones con un solo filtro.
+
+### Por que `temperature` se descarta en el cliente de Anthropic
+
+Los modelos Claude vigentes la rechazan con un 400, y desde el 2026-10-21 la API la rechaza en todos.
+Quitarla solo en el optimizador dejaba vivo el otro camino: el fallback del OCR (Gemini -> Claude)
+hereda la temperatura configurada para Gemini. El descarte vive en el unico punto que habla con
+Anthropic, y el optimizador la omite ademas de forma explicita para que el contrato se lea en su sitio.
+
+### Por que `auditFilledSlots` evalua elemento a elemento
+
+`Cheerio.text()` concatena el texto de todas las coincidencias. En la tabla de titulos, con
+`.panel-titulos-body` vacio y el `<tbody>` de evaluadores estatico, un selector amplio como
+`table.tableform tbody` pasaba la auditoria con el panel en blanco. Ahora cada coincidencia se juzga
+por separado, y una seccion de tabla solo cuenta como rellena si tiene al menos un `<tr>` con texto o
+medios. El `<tbody>` estatico no casa con `.panel-titulos-body`, asi que nunca se juzga: varias
+secciones en la misma tabla no producen falsos positivos.
+
+La 054 anade la regla al texto del prompt filtrando por **contenido** y no por `codigo`.
+`prompt-migrations.helper.ts` recompone el prompt sembrado a partir de las migraciones que lo nombran,
+y solo entiende asignaciones completas y `REPLACE`: un anexo que lo nombrase se leeria como una
+reescritura entera.
+
+---
+
+## MOD-03: nodo `DESTINO_HTTP_GENERICO` y boveda de credenciales
+
+### Por que una boveda y no variables de entorno
+
+El patron de IMAP (`passwordEnvKey`) obliga a tocar el `.env` y reiniciar Nest por cada API nueva.
+Un conector generico existe para no depender de eso. Los secretos van cifrados con AES-256-GCM en la
+tabla `credenciales`. El `id_credencial` es el AAD del cifrado y lo genera la aplicacion antes del
+INSERT: un blob copiado a otra fila no descifra. El esquema del flujo solo guarda
+`authConfig.credentialId`.
+
+### Por que el secreto es de solo escritura
+
+El panel nunca recibe el secreto guardado, asi que no puede reenviarlo. Un PATCH sin campos secretos
+conserva el cifrado. Un PATCH con alguno exige el juego COMPLETO del tipo, porque mezclar el usuario
+nuevo con la contrasena vieja obligaria a descifrar fuera del motor. Cambiar el tipo de una
+credencial en uso, o borrarla, da 409. La consulta de uso es un `jsonb_path_exists` parametrizado
+sobre `flujos` y `plantillas_flujo`.
+
+### Por que la auditoria proyecta y no solo sanea
+
+`sanitizeSnapshot` borra claves como `token` o `password`, pero no sabe nada de `encryptedData`,
+`iv` ni `authTag`, que se habrian auditado en crudo de haberse cargado. Para `credenciales`, un
+proyector las descarta y anade `credentialData` con `'********'` por cada campo del tipo. Corre
+DESPUES del saneado, porque la mascara lleva justo las claves que el saneado elimina. Las columnas
+llevan ademas `select: false`: defensa en profundidad.
+
+### Por que dos barreras SSRF
+
+`assertPublicTarget` rechaza protocolos raros, URLs con credenciales embebidas, `localhost` y
+cualquier IP privada, local o reservada, tambien tras resolver el nombre. Despues, el `lookup` que
+recibe Axios repite la comprobacion con la IP con la que de verdad conecta: eso cierra el DNS
+rebinding. `maxRedirects: 0` impide que un 302 lleve la credencial a donde la guarda no miro. La
+consecuencia aceptada es que la intranet no es un destino valido.
+
+### Por que el JSON se interpola hoja a hoja
+
+Un titular con comillas sustituido en crudo rompia el JSON. La plantilla se parsea primero (el DTO
+exige que ya sea JSON valido, porque los marcadores viven dentro de cadenas) y se interpola cada
+cadena por separado.
+
+### Por que `retryAttempts` marca `exhausted`
+
+El cliente HTTP ya reintenta lo que el operador pide. Sin `metadata.exhausted`, `canRetry` sumaria
+los intentos del `retryPolicy` del nodo y se multiplicarian. El defecto es 0, porque un POST
+reintentado puede publicar dos veces.
+
+### Por que el nodo no tiene servicio propio en el frontend
+
+Ningun endpoint valida los `params` de un nodo suelto, el mismo motivo que en Drupal. Lo unico que
+pide al backend son las opciones del selector de credencial, y las trae el store de dominio de la
+boveda (`credentials.store.ts` -> `credentials.service.ts`), compartido por cualquier nodo futuro
+que las necesite. El registro visual del asistente es `node-config-registry.ts` (no existe ningun
+`NodeConfigFactory.vue`).
+
+---
+
+## Accesibilidad WCAG y bateria de correcciones del destino HTTP
+
+### Por que las paletas redefinen tokens y no colores sueltos
+
+Los componentes ya pintaban todo con `--pd-*` y con los colores de marca de Quasar (`color="positive"`
+resuelve por `--q-positive`). Una paleta para daltonismo es entonces una sustitucion de tokens sobre
+`<html>`, sin tocar un solo componente. El texto que va SOBRE un relleno tambien es token
+(`--pd-on-*`), porque el blanco que sirve sobre el rojo claro no llega a 4.5:1 sobre el rojo del
+modo oscuro. `color-contrast.spec.ts` lee las hojas reales y comprueba cada par en las cinco
+paletas y los dos modos.
+
+### Por que la escala tipografica exigio pasar a rem
+
+Todo el tamano del texto estaba en px, que no sigue al `font-size` de la raiz. Se convirtieron a
+rem las declaraciones tipograficas de `app.scss`, las variables de Quasar y los estilos de los
+componentes; bordes y rellenos se quedan en px. Algunos tamanos internos de Quasar (tablas,
+campos, tooltips) no salen de sus variables y se reescriben en `a11y.scss`.
+
+### Por que los objetivos de 44 px son una opcion
+
+Aplicados siempre, los botones compactos de las tablas crecerian y la interfaz perderia densidad
+para quien no lo necesita. El foco de teclado, en cambio, esta siempre activo.
+
+### Por que el rol del banco de pruebas se decide en el servicio
+
+El mismo endpoint admite a un EDITOR para el destino HTTP y lo rechaza para IA u OCR, asi que la
+regla depende del CUERPO y `@Roles` no puede expresarla. La prueba ejecuta la estrategia real con
+un contexto efimero: su inferencia se factura y la telemetria la imputa al usuario con el origen
+`BANCO_PRUEBAS`, porque el CHECK de la 049 rechazaba una fila de "ejecucion" sin ejecucion.
+
+### Por que las reglas nuevas solo se exigen al guardar
+
+El validador corre tambien al ejecutar y al reanudar. Endurecerlo ahi dejaria sin poder correr ni
+reanudar flujos ya persistidos que nacieron antes de estas reglas; se corrigen al editarlos.
+
+### Por que el badge seguia en "Pausado" tras reanudar
+
+El backend publicaba la fila con la ejecucion todavia PAUSADO (el motor la mueve despues), y nada
+la republicaba al terminar. Ahora se publica EN_PROCESO al reanudar y la foto final cuando el motor
+devuelve el control.
+
+---
+
+## Telemetria de IA realista, estado por modelo y atribucion de usuario
+
+### Por que la tasa de exito se restringe a ejecuciones con IA
+
+La tarjeta vive en el informe de consumo de IA, pero contaba todas las ejecuciones concluidas.
+Un flujo sin IA que sondea un buzon cada minuto movia la metrica sin haber llamado a ningun
+modelo. El `EXISTS` contra `telemetria_tokens_ia` deja solo las que invocaron IA y aplica los
+mismos filtros de proveedor, modelo y nodo que el resto del informe.
+
+### Por que toda llamada fallida deja fila
+
+Antes solo se registraban los fallos que el proveedor facturaba (respuesta truncada o contrato
+roto). Un timeout no dejaba rastro, y la tasa por modelo habria salido inflada. Ahora el fallo de
+transporte deja una fila `FAILED` con ceros y el modelo configurado. Ese registro es best-effort:
+si no se puede escribir, no detiene el nodo, porque no hay gasto sin trazar.
+
+### Por que la cuenta de respaldo es un DEFAULT de la base de datos
+
+Cron, los disparos IMAP con remitente desconocido y las acciones de sistema no tienen JWT. El
+backend omite la columna y PostgreSQL pone `fn_usuario_respaldo()`. Asi no hace falta una variable
+nueva ni una consulta extra en el camino caliente. El login fallido escribe NULL explicito:
+atribuirlo a una cuenta real falsearia la traza de seguridad. La atribucion deja de distinguir
+"lo hizo el sistema" de "lo hizo la cuenta de respaldo".
+
+### Por que el remitente IMAP no pisa al usuario manual
+
+El remitente se conoce cuando el disparador ya ha leido el correo. El motor actualiza la fila con
+un `UPDATE` condicional (`usuario_id IS NULL OR = fn_usuario_respaldo()`): quien lanzo o reanudo el
+flujo a mano sigue siendo el responsable.
+
+### Por que el diff de auditoria baja hasta las hojas
+
+Editar el prompt de un nodo OCR aparecia como un cambio en `pipelineSchema` y obligaba a comparar
+dos volcados JSON a ojo. Ahora la tabla, el modal, el CSV y el PDF muestran la ruta exacta con su
+valor antes y despues. El interceptor sigue comparando columnas de primer nivel, porque es asi como
+reconoce un cambio de rol o de estado.
+
+### Checklist de dependencias
+
+- [ ] Aplicar la migracion 060 y reiniciar Nest
+- [ ] Confirmar que la cuenta de respaldo existe en `usuarios`; si no, el DEFAULT queda en NULL
+
+## Autodesactivacion auditada, coalescencia del texto documental y filtros del panel
+
+### Por que el apagado por `stopOnFirstSuccess` se audita
+
+La politica de corrida unica ya apagaba el flujo tras el primer exito, pero solo lo dejaba en el
+log. En Auditoria el flujo seguia apareciendo como activo en su ultima edicion, y nadie podia saber
+por que estaba apagado. Ahora queda un `DESACTIVAR` con el motivo y la ejecucion que lo provoco.
+Lo firma quien reanudo la ejecucion o, en el despacho automatico, la cuenta de respaldo. Si la
+auditoria falla, el sondeo se suelta igual: un temporizador vivo sobre un flujo apagado es peor que
+un evento perdido.
+
+### Por que el prompt coalesce el texto documental
+
+Un mismo prompt sirve para correos escaneados, con adjuntos ofimaticos o sin adjuntos. Exigir el
+marcador exacto pausaba el flujo con `ERR_LLM_INTERPOLATION` aunque el texto estuviera en el
+contexto bajo otra clave. La redireccion se hace antes de ensamblar la materia prima, para que el
+texto viaje una sola vez. Si no hay ningun texto documental, el error se mantiene.
+
+### Por que el sondeo IMAP abre en solo lectura
+
+El sondeo solo cuenta mensajes. Abrir el buzon en `EXAMINE` le quita la posibilidad de alterar
+banderas, que son trabajo de la estrategia. La estrategia sigue en lectura-escritura porque marca
+las ordenes de reanudacion, pero descarga con `BODY.PEEK` y solo marca el contenido si
+`markAsRead` es verdadero.
+
+### Por que los filtros del historial esperan a "Aplicar"
+
+Aplicar cada cambio lanzaba una consulta por campo y, con las fechas, otra cada vez que se
+completaba un dia valido. Con un borrador y "Aplicar" la barra se comporta como la de Auditoria.
+
+### Checklist de dependencias
+
+- [ ] Ninguna: esta ronda no lleva migracion
+
+## Fallos de API en la telemetria y barras de filtros
+
+### Por que un fallo local no cuenta contra el modelo
+
+La tasa de exito por modelo mide al proveedor. Un prompt con un marcador que no resuelve o un
+correo sin texto se rechazan antes de llamar a la API, y el modelo no tiene culpa de ello: si
+dejaran fila `FAILED`, un flujo mal configurado hundiria la tasa de un modelo sano. El codigo ya se
+comportaba asi; los tests lo dejan fijado para que un cambio futuro no lo rompa.
+
+### Por que Informes aplica todo con un solo boton
+
+Las fechas esperaban al boton y los selectores consultaban al instante, con los botones en mitad de
+la barra. Ahora la barra es un solo formulario, como en Auditoria y el Historial: se edita en
+borrador y "Aplicar" lanza una unica consulta.
+
+## Telemetria de "Probar conexion"
+
+### Por que la prueba de conexion deja fila
+
+El boton lanza una inferencia real que el proveedor factura, y hasta ahora no aparecia en el
+informe de consumo. Una credencial rechazada tampoco quedaba registrada, de modo que la tasa por
+modelo no veia esos fallos. Ahora cada prueba deja una fila con origen propio y el usuario que la
+lanzo. La de OCR usa el mismo endpoint, asi que queda cubierta con el mismo cambio.
+
+### Por que un fallo del registro se avisa y no se calla
+
+La prueba ya se hizo y su resultado es lo que el usuario espera ver, asi que no se convierte en un
+error. Pero la inferencia se facturo, y si no se pudo registrar no aparecera en el informe: la
+respuesta trae un aviso que la interfaz muestra junto al resultado.
+
+### Checklist de dependencias
+
+- [ ] Aplicar la migracion 061 y reiniciar Nest; sin ella, el CHECK rechaza el nuevo origen y la
+      prueba devuelve el aviso de registro fallido
+
+## Nodo Drupal: entorno, Innodays y Banco de Pruebas
+
+### Por que Innodays no re-serializa la pagina
+
+La pagina de Innodays lleva estilos, scripts y un carrusel. Cargarla con cheerio y devolver
+`$.html()` cambiaria comillas, entidades y atributos de toda la pagina, y la revision en Drupal
+mostraria cientos de cambios donde solo hubo uno. Cheerio solo localiza el elemento: parse5 da la
+posicion exacta del atributo en el texto original y se sustituye ese tramo. Si el selector casa con
+cero o con varios elementos no se escribe nada, porque elegir uno seria adivinar.
+
+### Por que el nuevo enlace se valida
+
+El valor sale de una plantilla que interpola contexto, a veces texto de un modelo. Un
+`javascript:` en el `href` de una pagina publica seria un XSS persistente en el portal, asi que
+solo pasan rutas relativas y `http(s)`. Se comprueba antes de leer la pagina, sin gastar peticiones.
+
+### Por que el Banco de Pruebas no se fia del toggle
+
+Las paginas de pruebas y las publicas viven en la misma instalacion de Drupal, con la misma
+credencial: lo unico que las separa es el UUID. El toggle bloqueado es la parte visible; la garantia
+la da el backend, que rechaza `isSandbox: false` y cualquier pagina fuera de la lista blanca del
+`.env`, y deja despublicada toda noticia creada desde alli.
+
+### Por que los presets dejan UUID vacios
+
+Un UUID inventado pasaria la validacion y fallaria en ejecucion con un 404 y el flujo ya pausado.
+Vacio, el paso se queda en rojo hasta que alguien escriba la pagina correcta.
+
+### Checklist de dependencias
+
+- [ ] Declarar en `backend/.env` los UUID de las paginas de pruebas de cerradas e Innodays; hasta
+      entonces el Banco de Pruebas rechaza esas paginas
+- [ ] Facilitar los UUID de Produccion para cablearlos en los presets
+
+## Innobar, borrador en Sandbox y envoltorio de licitaciones
+
+### Por que el borrador solo se fuerza con `isSandbox` guardado
+
+Los flujos anteriores al toggle no traen la clave y se resuelven a Sandbox por defecto. Forzar el
+borrador con ese defecto convertiria en silencio cada noticia de produccion en un borrador
+olvidado. La estrategia solo lo aplica cuando el entorno esta escrito en el esquema; la interfaz,
+en cambio, lo aplica siempre que el toggle este en Sandbox.
+
+### Por que el envoltorio reutiliza el del marcado
+
+La plantilla de apertura ya emite `div.licitacion-entry` con su `data-expediente`. Envolverlo otra
+vez solo anadiria un nivel; basta con darle la clase estandar. Cerrar licitacion busca las dos
+clases para seguir encontrando las licitaciones antiguas. El expediente se escapa porque un codigo
+con comillas cerraria el atributo y dejaria el resto como marcado.
+
+## Contenedor de destino, Notiweb y paneles por texto
+
+### Por que la migracion 062 no siembra marcadores
+
+El MAPEADOR_PLANTILLA rechaza cualquier plantilla con variables pendientes. Las plantillas dinamicas
+del destino Drupal viven en los params del nodo, que es donde se interpolan; la plantilla HTML solo
+gana la clase que Cerrar licitacion busca.
+
+### Por que la 062 busca la plantilla por prefijo y por expresion regular
+
+El nombre y el marcado se editan desde el gestor: la plantilla ya no se llama como la sembro la 028.
+Un WHERE por igualdad o un REPLACE literal habrian dejado 0 filas cambiadas y la migracion
+"aplicada". Si la plantilla no existe se avisa y se sigue; si existe y no se reconoce, se aborta.
+
+### Por que el resumen va en `body.summary`
+
+El bundle de noticias no declara ningun campo de resumen propio: el cuerpo es un texto con resumen.
+Enviar el resumen aparte provocaba un 422 en cuanto se configuraba.
+
+### Por que el selector del enlace escapa cada valor y no la plantilla
+
+Interpolar la plantilla entera y escaparla despues romperia la sintaxis que escribio el operador
+(`:contains('...')`). Se resuelve marca a marca y solo el valor se escapa: un nombre de evento con
+parentesis o comillas casa como texto literal y no puede abrir otra clausula del selector.
+
+### Por que ESIC se busca por el texto del encabezado y nunca por UFV
+
+El panel de ESIC ha aparecido con el colapsable `#collapseUFV`, y Francisco de Vitoria comparte
+pagina. El encabezado se busca por su texto, el `href` se resuelve dentro de su propio panel y se
+descarta cualquier encabezado que nombre a otra universidad: un identificador repetido no puede
+mandar un comite al acordeon ajeno.
+
+### Por que el borrador y la lista negra solo miran el entorno guardado
+
+Los flujos sin la clave `isSandbox` se resuelven a Sandbox por defecto y apuntan a paginas reales.
+Negarles su pagina de Produccion los romperia; la red de seguridad solo actua cuando el entorno
+esta escrito en el esquema.
+
+### Checklist de dependencias
+
+- [ ] Aplicar la 062
+- [x] Seccion y tipo de Notiweb prefijados en el preset; la fuente queda a cargo del operador
+- [ ] Declarar los UUID de Produccion en `backend/.env` y reiniciar Nest
+
+## Traslado sin perdidas y paginas desde el backend
+
+### Por que el traslado perdia licitaciones
+
+«Ya trasladado» era «el selector casa en la pagina de destino». Con el selector generico del preset,
+la pagina de cerradas casaba siempre por las licitaciones que ya tenia: se saltaba la escritura en
+destino, se retiraba el bloque de origen y el nodo terminaba EXITOSO. Ahora decide el expediente del
+bloque concreto; sin expediente se escribe siempre, y lo peor posible es un duplicado visible.
+
+### Por que las paginas de los presets salen del backend
+
+El mismo UUID era lista blanca del Banco de Pruebas en el backend y constante en el cliente, y cambiar
+una pagina obligaba a tocar los dos. Ahora el `.env` es la unica fuente; un valor mal escrito cuenta
+como no declarado, para que el preset deje el campo al operador en vez de apuntar a una pagina que no
+existe.
+
+### Por que Innodays e Innobar usan headline y summary
+
+El PROCESADOR_IA solo publica `headline`, `summary` y `body_paragraphs`: los proveedores descartan
+cualquier otra clave. El nombre del evento va en `headline`, como el expediente en el prompt de
+licitaciones, y el selector de la fila lo escapa antes de buscarlo.
+
+### Checklist de dependencias
+
+- [ ] Aplicar las migraciones 063 y 064
+- [ ] Unir en una linea el UUID de Produccion de Cerrar licitacion en `backend/.env` y reiniciar Nest
+
+## Acens, reanudacion tolerante y disparador transaccional
+
+### Por que la URL de Acens no esta en el nodo
+
+Es el unico destino de envio masivo y tiene una sola cuenta. Si la raiz estuviera en los `params`,
+cualquier EDITOR podria mandar la clave a otro host editando un flujo. Por eso el nodo solo elige la
+ruta relativa, y la estrategia comprueba que la URL compuesta conserve el origen de la raiz.
+
+### Por que el `\Seen` va al final
+
+El disparador marcaba el correo antes del filtro de asunto y de la imputacion del remitente. Un fallo
+en esos pasos dejaba el mensaje leido sin que el flujo recibiera su contenido. Ahora el marcado es lo
+ultimo. La excepcion es el descarte por filtro, que no es un fallo: sin marcar, el mismo UID tapaba a
+todos los posteriores.
+
+### Por que la orden de reanudacion admite erratas
+
+Las respuestas se escriben desde el movil: «Reanudár … DE trigger imap». Se pliegan las tildes, se
+admiten `DESE` y `DE`, y el paso se compara en forma `snake_case` con alias fijos. Asi «disparador
+imap» resuelve aunque la tabla `nodos` no responda.
+
+### Por que el escudo tiene modo texto
+
+Cerrar licitacion, Innodays e Innobar no maquetan: `filled_markup` llega a `null` y el escudo fallaba
+siempre con `ERR_POST_IA_EMPTY_HTML`. En modo TEXT audita `headline` y `summary` sin pedir ningun
+mapeador.
+
+### Checklist de dependencias
+
+- [ ] Aplicar las migraciones 065 y 066
+- [ ] Declarar las variables de Acens en `backend/.env` y reiniciar Nest
+
+---
+
+## Busqueda IMAP multi-UID, reanudacion por diccionario y metadatos del scraper
+
+- **Por que se recorren los candidatos:** con `markAsRead` apagado, un correo reciente que no casaba con el asunto tapaba en cada sondeo a los anteriores que si casaban. El tope de 25 acota las descargas MIME completas.
+- **Por que la prioridad va por niveles:** una etiqueta real del canvas no debe perder frente a un sinonimo generico («Drupal»). El diccionario solo actua cuando el grafo no reconoce el nombre.
+- **Por que los metadatos se leen antes que Readability:** Readability reescribe el DOM y se lleva los `<meta>` y el JSON-LD.
+- **Referencia APA 7:** si el extractor falla, la IA reconstruye la referencia a partir de la URL del correo y de su conocimiento del tema, por decision del usuario. Nunca inventa DOI, volumen ni paginas.
+
+### Checklist de dependencias
+
+- [ ] Aplicar la migracion 067
+
+---
+
+## Interpolacion tolerante, autor robusto y capturas del informe
+
+- **Por que la tolerancia solo afecta a la IA:** un dato opcional ausente (el autor) no justifica pausar una redaccion. En un destino real, en cambio, un campo vacio se publicaria; por eso alli se mantiene el fallo. La guarda de texto de entrada vacio sigue evitando pagar una inferencia sobre nada.
+- **Por que la regex lleva `\b` y `\p{L}`:** sin el limite de palabra, «nearby» se leia como firma; sin `\p{L}`, «José Pérez» quedaba fuera.
+- **Por que los fragmentos se localizan por regex:** con numeros de linea, cada edicion del codigo descuadraria las capturas.
+- **Limitacion:** la captura de resiliencia muestra las ejecuciones que existan en staging; el script no provoca ningun fallo.
+
+---
+
+## Capturas: canvas, formulario Drupal y asistente
+
+- **Por que `?nodeType=` y no `/sandbox/:nodeType`:** la miga de pan del layout se resuelve por ruta exacta; un parametro de ruta la habria dejado vacia.
+- **Por que se recortan las vistas:** sin el shell y acotadas a la ventana, los formularios se leen; a pantalla completa quedaban diminutos dentro del mosaico.
+- **El canvas se reduce solo en la captura** (`zoom` inyectado por el script) para que quepa el flujo completo.
+
+---
+
+## Capturas desglosadas en PNG dedicados
+
+- **Por que se renderiza cada vista al ancho de su panel:** capturada a 1920 px y encogida a media pantalla, una tabla quedaba al 50 % y no se leia.
+- **Por que se ocultan cabecera y drawer al capturar:** son fijos, y al capturar un formulario mas alto que la ventana se superponian sobre el.
+
+---
+
+## Capturas: informes, tarifas y cobertura completa de nodos
+
+- **Nombres reales del enum:** el banco solo acepta tipos registrados, asi que se usan `PARSER_PRE_IA`, `PAUSA_FLOW` y `TRIGGER_CRON` (no PARSER_CORREO, PAUSA_FLUJO ni DISPARADOR_CRON).
+- **Destino SMTP (07n)** se anade aunque no estaba en la lista: era el unico configurador sin captura.
+
+---
+
+## Marcas obligatorias en prompts
+
+- **Por que se extiende la gramatica existente y no se crea un motor aparte:** el contexto, el validador, la coalescencia documental y los editores del frontend comparten un unico patron. Un segundo patron limitado a `ns.campo` habria dejado sin interpolar las rutas profundas e indices (`urls[0]`) y acabaria divergiendo.
+- **Por que el asterisco va en un grupo no capturante:** el grupo 1 sigue siendo la ruta, asi que `extractNamespaceRoots`, `collectNamespaceRoots` y el validador de topologia entienden la marca sin cambios.
+- **Por que una obligatoria en blanco cuenta como ausente:** `"   "` no es materia prima; facturar una inferencia sobre eso es pagar por nada.
+- **Por que el corte va despues de la coalescencia:** el texto documental ya intento degradarse a otra ruta con material; solo si ninguna tiene texto la marca queda ausente.
+- **Por que el `*` no vale en campos URL ni plantillas HTML:** solo tiene semantica en la interpolacion tolerante; en la estricta toda variable ya es obligatoria.
+
+- **Por que el conmutador solo vive en el editor de prompts:** en plantillas HTML y campos URL toda variable ya es obligatoria; ofrecer el asterisco alli invitaria a un marcador que el backend rechaza.
+- **Por que el chip obligatorio usa `--pd-on-negative` y no blanco:** el blanco no llega a 4.5:1 sobre el rojo del modo oscuro; es el mismo par que `.pd-badge--failed`, ya cubierto por la prueba de contraste. El asterisco visible evita depender solo del color.
+- **Por que la gramatica de prompt sale a `prompt-markers.ts`:** la usan el store y el selector de variables, que no deben arrastrar CodeMirror ni romper la carga diferida del editor.
+- **Por que no se incorpora Ajv al escudo:** lo que llega al escudo es HTML o texto; el contrato JSON de la respuesta ya lo validan los clientes de proveedor al parsear.
+
+## E2E de pipelines operativos
+
+- **Por que se conduce con `POST /executions/:id/resume`:** es la misma via que la suite del canvas y valida el esquema antes de arrancar, de modo que los fixtures respetan los namespaces cerrados y la regla de productores aguas arriba.
+- **Por que Drupal se dobla en `HttpClientService`:** el portal en memoria mantiene el HTML de cada pagina y registra cada peticion; ademas la URL base apunta a un dominio `.invalid` como segunda barrera.
+- **Por que la telemetria se comprueba en `metadata` y no en la tabla:** el simulador no escribe filas por diseno (no factura y no debe contaminar la tasa de exito de los modelos reales). Pedir filas reales exigiria un proveedor de pago.
+- **Por que sin TRUNCATE:** la limpieza borra solo los flujos de la suite y el resto cae en cascada; un TRUNCATE contra la base equivocada arrasaria datos ajenos.
+
+### Checklist de dependencias
+
+- [x] Selector en el frontend
+- [x] E2E con la base de pruebas al dia (migraciones 061–067)
+- [ ] Validar el texto de los prompts al guardarlos
+
+## Resiliencia IMAP y metadatos del extractor web
+
+- **Por que el fallo era de clasificacion y no de timeouts:** la fabrica ya fijaba los temporizadores y el `finally` ya cerraba el socket. Lo que faltaba es que el `CONNECT_TIMEOUT` de `imapflow` no lleva `errno`, asi que cada microcorte se registraba como averia del buzon en cada ciclo.
+- **Por que 45 s de conexion en el worker y no 60:** corre cada minuto en segundo plano; rendirse antes solo cuesta esperar al ciclo siguiente, y colgarse encadenaba ciclos saltados por la guarda de solapamiento.
+- **Por que la fecha de la URL va al final de la cascada:** no tiene hora; basta para citar el dia real en APA, pero una meta o un JSON-LD son mas fiables.
+- **Por que el autor cae en la organizacion del dominio:** en APA 7 una pagina sin autor personal se cita por la organizacion editora; no es un relleno.
+
+## Enlace de la publicacion en Drupal
+
+- **Por que se deriva del nodo devuelto y no de la configuracion:** el UUID no es navegable y un alias escrito a mano se desactualiza cuando un editor renombra la pagina; Drupal resuelve siempre `/node/{nid}`.
+- **Por que el modal solo se abre a quien sigue la sala:** `flow:completed` se emite a todos los clientes; un dialogo persistente sin filtro interrumpiria a cada operador con publicaciones ajenas.
+- **Por que el motor lee el namespace del propio nodo:** el destino puede escribir en otro namespace que `http_result`; atarse al nombre fallaria en silencio.
+
+## Prompts institucionales y optimizador
+
+- **Por que se retira "sin encabezados ni vinetas":** convivia con "AL MENOS DOS encabezados" y el modelo resolvia el conflicto con `<p><strong>` como falso titulo.
+- **Por que `{{scraped_web.full_article_content}}` sigue opcional:** el extractor puede terminar en `SKIPPED_EMPTY`; marcarla pausaria noticias que se pueden redactar con la directiva del editor.
+- **Por que las variables recomendadas se calculan del texto:** la lista y el prompt no pueden contradecirse, y el contrato JSON compartido por los proveedores no admite claves nuevas. Ascender una opcional a obligatoria ya no se avisa como perdida; degradarla si.
+
+## Ecosistema maestro (migracion 069)
+
+- **Por que hacia falta:** las semillas antiguas tomaban como autor "el primer ADMIN"; en una base creada antes de tenerlo no hicieron nada, y los parches posteriores tampoco encontraron filas. La migracion inserta los textos finales completos.
+- **Por que blueprints y no flujos:** `id_flujo` es UUID (sin clave legible para `ON CONFLICT`) y un flujo ACTIVO con disparador IMAP sondearia el buzon real. El slug va en `flowId`.
+- **Por que no hay columna `implemented` en `nodos`:** estar en el catalogo ya significa que el motor sabe ejecutarlo.
+- **Por que una tarifa vigente no se reescribe:** cambiar un precio es una fila nueva con su vigencia; sobrescribirla falsearia el historico de costes.
+- **Por que el prompt de cierre deja de pedir la plantilla base:** el cierre no lleva mapeador y el traslado mueve el bloque ya publicado; el validador rechazaria la dependencia de `rendered_html`.
+- **Por que la auditoria usa `accion = 'CREAR'`:** el CHECK de `audit_eventos` no admite otros valores; el origen viaja en `datos_nuevos.origen = 'SEED_MASTER_DATA'`.
+- [x] Migraciones 068 y 069 aplicadas en la base de pruebas e idempotentes al reejecutarlas
+- [x] Ensayo en la base de desarrollo dentro de una transaccion revertida
+- [x] Aplicada en desarrollo
+
+## Reanudacion por bolsa de palabras
+
+- **Por que un quinto nivel y no sustituir los cuatro:** los niveles estrictos (etiqueta, id, tipo, sinonimo) ya resuelven lo habitual sin ambiguedad. La bolsa de palabras es laxa: «ia» casaria tambien con `escudo_post_ia`. Va la ultima para que solo atienda lo que nadie mas entiende, como el orden invertido («plantilla mapeador»).
+- **Por que partir tambien por `_`:** con el guion bajo dentro de la palabra, `mapeador_plantilla` seria un unico termino y ninguna orden escrita a mano lo encontraria.
+- **Por que el mismo tokenizador que el filtro del Trigger:** quien configura un flujo aprende una sola regla de normalizacion para las dos puertas de correo.
+
+## Prompts maestros enriquecidos
+
+- **Por que dos variantes de la directiva Markdown:** cierre e Innodays/Innobar no tienen plantilla base ni `filled_markup`. Hablarles de transpolar a la PLANTILLA BASE invitaria al modelo a inventarse un HTML que nadie publica; su variante pide texto plano en `headline`, `summary` y `body_paragraphs`.
+- **Por que la ranura de apertura se exige en el escudo y no solo en el prompt:** sin `requiredSelectors` el escudo no audita ninguna ranura, y una instruccion que el modelo ignore llegaria a Drupal. Con el selector, un `<h3>` suprimido, sin clase o vacio pausa el flujo con `ERR_POST_IA_DOM_MUTATED`.
+- **Por que el OCR va junto al texto de los adjuntos:** respeta el contrato de variables opcionales. Coste asumido: la cadena de degradacion (OCR -> adjuntos -> cuerpo) puede repetir material en un correo sin adjuntos.
+- **Por que dentro de la 069 y no en una migracion nueva:** el contenido maestro queda en un solo fichero; cada parche se protege con su marcador, y una base que ya tenia la 069 la vuelve a pasar con `psql -f` sin duplicar nada.
+- [x] 069 reejecutada dos veces en la base de pruebas sin cambios en el segundo pase
+- [x] Ensayo en desarrollo dentro de una transaccion revertida
+- [x] 069 reejecutada en desarrollo
+
+## Guarda contra el bucle del escudo
+
+- **Por que existe:** el escudo es determinista. Reanudarlo sobre la misma respuesta de la IA que rechazo, que sigue en el contexto, vuelve a fallar al instante y deja el flujo pausado otra vez.
+- **Por que tambien con un DESDE explicito:** quien escribe "DESDE el escudo" quiere repetir la validacion, pero lo que necesita es otra respuesta que validar.
+- **Por que se excluyen `ERR_POST_IA_CONFIG` y `ERR_POST_IA_UNSUPPORTED_TAGS`:** son errores de los params del propio escudo; regenerar con la IA gastaria tokens para fallar igual.
+- **Por que el ultimo desenlace y no el ultimo error:** cada reanudacion deja una fila `ADVERTENCIA` y un escudo puede haber fallado y despues pasado. Solo cuenta como bucle si lo ultimo que hizo el nodo fue fallar.
+- **Por que nunca bloquea:** sin productor localizable o sin traza legible, se reanuda donde se pidio con un aviso; la guarda no puede ser la razon de que un flujo no arranque.
+
+## Apertura de licitaciones canonica
+
+- **Por que reescribir el prompt entero:** el anterior dejaba que el asunto del correo ("Abrir licitacion V5") acabara como titulo y no pedia los importes. Un parche por fragmentos sobre textos editados a mano no garantizaba el resultado.
+- **Por que la regla de no estimar:** al exigir los tres importes, un correo que solo trae el total empujaria al modelo a calcular base e IVA. En una licitacion publica un importe inventado es peor que un hueco.
+- **Por que los spans no van en `requiredSelectors`:** una convocatoria que solo publica el total pausaria el flujo sin motivo; el escudo exige solo el titulo.
+- [x] 069 reejecutada dos veces en la base de pruebas sin cambios en el segundo pase
+- [x] 069 reejecutada en desarrollo
+
+## Cardinalidad 1 a N
+
+- **Por que raiz = primero e `items` = resto:** con `items` repitiendo tambien el primero, un correo de una sola noticia generaria su HTML dos veces (casi el doble de tokens). Ademas, todo lo que hoy lee la raiz (`{{llm_response.headline}}`) sigue valiendo sin tocar ningun flujo.
+- **Por que los destinos recorren `validated_items` y no `items`:** cada elemento del lote tiene que pasar por el saneado XSS del escudo; recorrer la salida en bruto de la IA abriria una via para publicar un elemento sin auditar.
+- **Por que un contexto por elemento:** las plantillas del nodo no cambian; para el elemento k se superpone su contenido a los namespaces que citan. Se comparten por referencia los namespaces no superpuestos para no duplicar adjuntos en memoria.
+- **Por que un solo fragmento en APPEND:** insertar con `prepend` uno a uno deja el lote invertido; unir los bloques en orden y anteponer una vez deja el primero arriba.
+- **Por que CREATE_NODE recuerda lo creado:** un POST no es idempotente. Si el lote falla a mitad, el resultado parcial queda en el contexto y la reanudacion salta las noticias ya creadas en vez de duplicarlas.
+- **Por que siempre viaja un tope de tokens:** el coste maximo de cada inferencia pasa a ser predecible, y un lote no hereda un tope pensado para un solo elemento.
+
+## Campana de Acens
+
+- **Por que el token sigue en el entorno:** la regla de seguridad del proyecto declara la clave de Acens secreto exclusivo del servidor. Viaja como `auth_token` en el cuerpo, que es lo que espera la API, y nunca en el flujo, el contexto ni la traza.
+- **Por que el contenido es el marcado validado:** la plantilla base que inyecta el mapeador esta vacia; lo publicable es lo que audito el escudo, de todas las noticias del lote.
+- **Por que el banco de pruebas no crea la campana:** crearla seria un envio real a listas de destinatarios; la prueba devuelve la peticion prevista (`TEST_MODE`).
+- **Por que se relaja la regla 11:** el maestro de Notiweb publica en Drupal y despues crea la campana con el mismo marcado. Encadenar una entrega tras otra es seguro (si la segunda falla, se reanuda desde ella); lo que sigue prohibido es procesar despues de entregar.
+- [x] 069 reejecutada dos veces en la base de pruebas sin cambios en el segundo pase
+- [x] Ensayo en desarrollo dentro de una transaccion revertida
+- [ ] Reejecutar la 069 en desarrollo (`psql -f`)
+
+## Escudo, lote y contingencias
+
+- **Por que el h2 se perdia sin que el saneador lo prohibiera:** `allowedTags` solo puede RESTAR de la lista blanca, y el atajo del asistente restaba de mas. El escudo hacia lo que se le pedia; la correccion es el atajo, mas un paso de la 069 que repara los flujos guardados con esa lista exacta y respeta las escritas a mano.
+- **Por que `urls` vive en el namespace de Drupal:** cada nodo escribe solo en el suyo; poner las URLs en el del escudo romperia la inmutabilidad del contexto.
+- **Por que `items: [root]` solo existe en el normalizador:** si el JSON de la IA lo llevara, Drupal y Acens publicarian dos veces el unico elemento. La vista simetrica se construye al leer, nunca se publica.
+- **Por que AUTO presupuesta como lote:** cuantos elementos devolvera el modelo no se sabe antes de llamarlo, y quedarse corto trunca el JSON.
+- **Por que la purga de Base64 en el overlay no toca el checkpoint:** los contextos por elemento no se persisten; la purga evita arrastrar binarios en cada uno. La memoria persistida la sigue liberando el motor cuando alguien extrae el texto.
+- **Por que `alerta_smtp` no rompe la reanudacion:** con un fallo GRAVE el motor pausa en el nodo que fallo despues de avisar; la rama de contingencia solo notifica.
+- **Por que la ruta al OCR es selectiva:** con `catchErrors: [ERR_PARSER_UNEXTRACTABLE_MEDIA]` solo los escaneos van a `ocr_ia`; un correo vacio u otro fallo del parser no tiene nada que transcribir.
+- [x] 069 aplicada dos veces en la base de pruebas: el segundo pase no cambia nada
+- [x] Ensayo en desarrollo con transaccion revertida
+- [ ] Reejecutar la 069 en desarrollo (`psql -f`)
+
+## Reanudacion independiente y capturas en imagen
+
+- **Por que el bloqueo no estaba en el motor:** su unica guarda es la de la propia ejecucion y el mutex por flujo. El bloqueo lo producian el barrido del correo, que esperaba el flujo entero, y un unico `isResuming` en la interfaz que deshabilitaba todos los botones mientras la peticion seguia abierta.
+- **Por que se separa arranque y recorrido:** lo que puede rechazar la orden tiene que contestarse en el acto; el recorrido puede durar minutos y nadie debe esperarlo salvo quien lo pidio por HTTP.
+- **Por que el fallo de titulos no era del prompt:** la tabla venia en una imagen en linea y el cuerpo superaba el umbral de texto, asi que la IA nunca la vio. Un prompt con respaldos pero sin la regla de no inventar habria publicado un panel rellenado a ciegas.
+- **Por que el umbral de 20 KB:** los logotipos de firma tambien dejan su marcador en el texto plano; una captura con datos pesa decenas de kilobytes.
+- **Por que el paso 5d sustituye su bloque anterior:** la base de desarrollo ya tenia la version previa; insertar al lado habria dejado dos reglas de extension contradictorias.
+- [x] 069 aplicada dos veces en la base de pruebas sin cambios en el segundo pase
+- [x] Camino de base nueva comprobado en transaccion revertida
+- [ ] Reejecutar la 069 en desarrollo (`psql -f`)
+
+## Apagado, ESIC y generacion extensa
+
+- **Por que el flujo seguia disparando:** la politica descartaba las ejecuciones recuperadas por contingencia. Con el desvio de los escaneos al OCR, eso afectaba a cualquier correo escaneado: cada sondeo publicaba de nuevo.
+- **Por que se apaga el flujo y no la plantilla:** el sondeo lee el estado del flujo instanciado; la plantilla es un molde que no dispara nada.
+- **Por que UFV va guardado por encabezado:** la pagina tiene tambien la Universidad Francisco de Vitoria con su propio UFV; un selector global repetiria el error que revirtio la migracion 038.
+- **Por que el estimador lee el prompt:** una noticia larga no se nota en la plantilla, que es corta y vacia; lo que la alarga son los parrafos que el prompt exige.
+- **Por que un solo reintento:** cada vuelta repite la espera entera y vuelve a facturar la salida; con 180 s, el peor caso ya son seis minutos por proveedor.
+- [x] 069 v3 aplicada dos veces en la base de pruebas sin cambios en el segundo pase
+- [ ] Reejecutar la 069 en desarrollo (`psql -f`)

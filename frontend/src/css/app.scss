@@ -37,6 +37,15 @@
 
   --pd-negative: #d93a2b;
 
+  // Texto SOBRE un relleno semantico (badges de estado). Va por token y no
+  // fijo en blanco porque el contraste depende del relleno y del modo: blanco
+  // sobre el rojo claro da 4.6:1, pero sobre el rojo del modo oscuro se queda en
+  // 3.8:1 (WCAG AA exige 4.5:1). Lo verifica `color-contrast.spec.ts`.
+  --pd-on-negative: #ffffff;
+
+  // Indicador de foco de teclado (`:focus-visible`), >= 3:1 contra el fondo.
+  --pd-focus-ring: #2c4fc7;
+
   // Fondo de fila de tabla según severidad (Vista 6 — Trazabilidad).
   // Tokens derivados de la tríada semántica: no son colores nuevos,
   // son el mismo matiz a baja opacidad sobre la superficie clara.
@@ -61,6 +70,9 @@ body.body--dark {
   --pd-disabled-text: #9ca0b5;
 
   --pd-negative: #e74c3c;
+  --pd-on-negative: #12142e;
+
+  --pd-focus-ring: #5b8ce8;
 
   --pd-row-urgente: #2b1a1d;
   --pd-row-grave: #2c2418;
@@ -77,8 +89,21 @@ body.body--dark {
   --pd-panel-solid: #3a5ce0;
   --pd-accent: #5b8ce8;
 
+  // Derivados de --pd-accent a baja opacidad. No son colores nuevos: son el
+  // mismo matiz translucido, y por eso valen igual en claro y en oscuro.
+  --pd-accent-soft: rgba(91, 140, 232, 0.15); // fondo del chip de marcador en el editor
+  --pd-accent-selection: rgba(91, 140, 232, 0.25); // seleccion activa de CodeMirror
+
   --pd-warning: #f59e0b;
   --pd-positive: #10b981;
+
+  // Texto sobre cada relleno semantico que NO conmuta con el tema (ver
+  // `--pd-on-negative`). Blanco sobre `--pd-positive` daba 2.5:1 en el badge
+  // "Activo"; el navy del shell da 7:1.
+  --pd-on-positive: #12142e;
+  --pd-on-warning: #12142e;
+  --pd-on-primary: #ffffff;
+  --pd-on-accent: #12142e;
 
   --pd-shell-bg: #12142e;
   --pd-shell-alt: #1c2049; // ítem de nav activo / hover sobre shell
@@ -87,6 +112,12 @@ body.body--dark {
 
   // Degradado corporativo obligatorio (header y botones primarios)
   --pd-gradient: linear-gradient(90deg, var(--pd-primary) 0%, var(--pd-primary-light) 100%);
+
+  // Consola del visor de logs: oscura en AMBOS temas, como una terminal. El
+  // fondo es el `--pd-page-bg` del modo oscuro; el verde claro sobre el da un
+  // contraste de ~13:1 (WCAG AAA) para leer stack traces largos.
+  --pd-terminal-bg: #0d0f26;
+  --pd-terminal-text: #6ee7b7;
 }
 
 // ---- Base ----
@@ -172,33 +203,33 @@ body {
 
 .pd-h1 {
   font-family: $heading-font-family;
-  font-size: 20px;
-  line-height: 28px;
+  font-size: 1.25rem;
+  line-height: 1.75rem;
   font-weight: 700;
-  letter-spacing: -0.2px;
+  letter-spacing: -0.0125rem;
   margin: 0;
   color: var(--pd-text-primary);
 }
 .pd-h2 {
   font-family: $heading-font-family;
-  font-size: 16px;
-  line-height: 24px;
+  font-size: 1rem;
+  line-height: 1.5rem;
   font-weight: 600;
-  letter-spacing: -0.1px;
+  letter-spacing: -0.0063rem;
   margin: 0;
   color: var(--pd-text-primary);
 }
 .pd-subtitle {
-  font-size: 12.5px;
-  line-height: 18px;
+  font-size: 0.7812rem;
+  line-height: 1.125rem;
   font-weight: 400;
   color: var(--pd-text-secondary);
 }
 
 // Label de formulario: Inter 700, escala compacta.
 .pd-label {
-  font-size: 13px;
-  line-height: 18px;
+  font-size: 0.8125rem;
+  line-height: 1.125rem;
   font-weight: 700;
   color: var(--pd-text-primary);
 }
@@ -214,17 +245,17 @@ body {
 .pd-nav {
   font-family: $heading-font-family;
   font-weight: 500;
-  font-size: 13px;
+  font-size: 0.8125rem;
   text-transform: uppercase;
-  letter-spacing: 1.2px;
+  letter-spacing: 0.075rem;
 }
 
 // Valores técnicos: id_flujo, nombres de plantilla/prompt, payload JSON, rutas .log
 .pd-mono {
   font-family: $mono-font-family;
-  font-size: 13px;
+  font-size: 0.8125rem;
   font-weight: 500;
-  line-height: 18px;
+  line-height: 1.125rem;
 }
 
 // ---- Botones (regla §2) ----
@@ -237,7 +268,7 @@ body {
   border-radius: $button-border-radius;
 
   .q-icon {
-    font-size: 16px;
+    font-size: 1rem;
   }
 
   // Deshabilitado: plano, sin degradado ni hover, con texto legible
@@ -264,6 +295,13 @@ body {
     color: var(--pd-disabled-text) !important;
     opacity: 1 !important;
   }
+}
+
+// Secundario: accion de escape (Cancelar, Cerrar). Sin relleno ni degradado,
+// para que nunca compita visualmente con la accion primaria del dialogo.
+.pd-btn-secondary {
+  color: var(--pd-text-secondary);
+  border-radius: $button-border-radius;
 }
 
 // Botón de icono de trazo lineal (columna Acciones): sin rellenos pesados.
@@ -342,9 +380,9 @@ body {
 .pd-badge {
   border-radius: 999px;
   padding: 4px 10px;
-  font-size: 11.5px;
+  font-size: 0.7188rem;
   font-weight: 700;
-  letter-spacing: 0.3px;
+  letter-spacing: 0.0187rem;
 }
 
 // Rol: chip tenue de marca sobre superficie subordinada.
@@ -356,13 +394,82 @@ body {
 
 .pd-badge--active {
   background: var(--pd-positive);
-  color: var(--pd-shell-text);
+  color: var(--pd-on-positive);
 }
 
-// Inactivo NO es un error: es estado neutro, de ahí los tokens de deshabilitado.
+// En proceso: azul corporativo. Clase propia y no `pd-badge--active` —que es
+// la verde de "Activo"— porque son dos estados distintos: uno dice que el flujo
+// está armado y el otro que el motor está recorriendo el pipeline AHORA. Pintar
+// ambos igual obligaba a leer el texto para distinguirlos.
+//
+// Hace falta la clase porque Quasar no conoce `--pd-primary`: no hay bloque
+// `brand:` en `quasar.config.ts`, así que `color="pd-primary"` no existe.
+.pd-badge--running {
+  background: var(--pd-primary);
+  color: var(--pd-on-primary);
+}
+
+// Inactivo NO es un error: es estado neutro. Antes usaba los tokens de
+// deshabilitado, pensados para controles inertes (exentos de contraste en WCAG)
+// y que como texto de estado se quedaban en 2.4:1; ahora superficie atenuada
+// con texto secundario y borde, que supera 6:1 en ambos modos.
 .pd-badge--inactive {
-  background: var(--pd-disabled-bg);
-  color: var(--pd-disabled-text);
+  background: var(--pd-surface-muted);
+  color: var(--pd-text-secondary);
+  border: 1px solid var(--pd-border);
+}
+
+// Chips de marcador de prompt: `{{*ns.campo}}` (obligatorio) y `{{ns.campo}}`
+// (opcional). Los pinta el editor CodeMirror de prompts, el selector de
+// variables y la ficha del nodo IA. Texto sobre rojo con `--pd-on-negative` y
+// no blanco: el blanco no llega a 4.5:1 sobre el rojo del modo oscuro (mismo
+// par que `.pd-badge--failed`, ya cubierto por `color-contrast.spec.ts`). El
+// asterisco visible en el texto evita comunicar el estado solo por color.
+.pd-chip-mandatory,
+.pd-chip-optional {
+  border-radius: 4px;
+  padding: 0.0625rem 0.25rem;
+  font-weight: 600;
+}
+
+.pd-chip-mandatory {
+  background: var(--pd-negative);
+  color: var(--pd-on-negative);
+  border: 1px solid var(--pd-negative);
+}
+
+.pd-chip-optional {
+  background: var(--pd-accent-soft);
+  color: var(--pd-accent-text);
+  border: 1px solid var(--pd-accent);
+}
+
+// Fallido: el motor se rindió y alguien tiene que mirarlo. Rojo de severidad.
+.pd-badge--failed {
+  background: var(--pd-negative);
+  color: var(--pd-on-negative);
+}
+
+// Eliminacion: la fila ya no existe. Rojo de severidad, igual que `--failed`,
+// pero con clase propia porque son dos hechos distintos —un fallo del motor y
+// una baja deliberada— y compartir la clase haria que cambiar el color de uno
+// moviese el del otro sin quererlo.
+.pd-badge--negative {
+  background: var(--pd-negative);
+  color: var(--pd-on-negative);
+}
+
+// Pausado: detenido a la espera de un operador. Texto OSCURO sobre ámbar: el
+// blanco sobre `--pd-warning` no llega al contraste AA (~2:1).
+.pd-badge--paused {
+  background: var(--pd-warning);
+  color: var(--pd-on-warning);
+}
+
+// Informativo (severidad LEVE): acento de marca con texto oscuro.
+.pd-badge--info {
+  background: var(--pd-accent);
+  color: var(--pd-on-accent);
 }
 
 // ---- Shell: QHeader + QDrawer (regla §2) ----
@@ -387,8 +494,8 @@ body {
 // un valor y no son un token del sistema.
 .pd-shell-text-secondary {
   color: var(--pd-shell-text-secondary);
-  font-size: 12.5px;
-  line-height: 18px;
+  font-size: 0.7812rem;
+  line-height: 1.125rem;
 }
 
 .pd-drawer {
@@ -417,10 +524,40 @@ body {
   .q-item__label--header {
     color: var(--pd-shell-text-secondary);
     font-family: $heading-font-family;
-    font-size: 10.5px;
+    font-size: 0.6562rem;
     font-weight: 500;
     text-transform: uppercase;
-    letter-spacing: 1.2px;
+    letter-spacing: 0.075rem;
+  }
+}
+
+// Buscador de las tablas administrativas. Global y no scoped porque lo consumen
+// los tres gestores; se compone con tokens ya existentes, sin anadir ninguno.
+.pd-search-input {
+  width: 240px;
+  max-width: 100%;
+
+  .q-field__control {
+    background: var(--pd-card-bg);
+  }
+
+  .q-field__control::before {
+    border-color: var(--pd-border);
+  }
+
+  .q-field__native,
+  .q-field__input {
+    color: var(--pd-text-primary);
+  }
+
+  // Placeholder e icono en el tono subordinado del sistema, nunca en las clases
+  // text-grey-N de Quasar, que estan fijadas a un valor y no son un token.
+  .q-field__native::placeholder {
+    color: var(--pd-text-secondary);
+  }
+
+  .q-icon {
+    color: var(--pd-text-secondary);
   }
 }
 
@@ -433,15 +570,31 @@ body {
   thead th {
     background: var(--pd-surface-muted);
     color: var(--pd-text-secondary);
-    font-size: 10.5px;
+    font-size: 0.6562rem;
     font-weight: 700;
-    letter-spacing: 0.4px;
+    letter-spacing: 0.025rem;
     text-transform: uppercase;
   }
 
   th,
   td {
     border-color: var(--pd-border);
+  }
+
+  // Las celdas crecen a lo alto en vez de ensanchar la tabla. Quasar deja
+  // `white-space: nowrap` en `td`, de modo que una descripcion larga estiraba
+  // la fila hasta sacar las columnas de accion fuera de la pantalla.
+  td {
+    white-space: normal;
+    word-break: break-word;
+  }
+
+  // Tope para las columnas de texto libre. Se aplica desde la definicion de la
+  // columna (`classes`) y no con un `style` inline, que §2 prohibe: solo las
+  // columnas que de verdad llevan prosa deben recortarse, y cual es cual lo
+  // sabe cada tabla.
+  .pd-cell--long {
+    max-width: 350px;
   }
 
   tbody tr:hover > td {
@@ -460,4 +613,437 @@ body {
 }
 .row-exitoso {
   background: var(--pd-row-exitoso);
+}
+
+// ---------------------------------------------------------------------------
+// Canvas de topologia (Vista de supervision, `/flujos/:id`)
+//
+// Viven aqui y no en el `<style scoped>` del componente porque los comparten
+// el lienzo y el panel de inspeccion, y porque el estado de una caja se
+// expresa con un modificador de clase: `frontend-quasar.md` §2 prohibe el
+// `style` inline tanto para el color como para la franja de severidad.
+// ---------------------------------------------------------------------------
+
+// Metricas de columna. Las comparten los DOS carriles, y por eso son variables
+// y no literales repetidos: si divergen, el trazo de una bifurcacion deja de
+// caer bajo el nodo que la declara.
+$pd-node-width: 220px;
+$pd-link-width: 36px;
+$pd-fork-height: 56px;
+
+// Contenedor del grafo. El scroll es suyo y no de la pagina para que la
+// cabecera con el estado del flujo siga visible mientras se recorre. Apila
+// carriles: el nominal, el de contingencias y el de huerfanos.
+.pd-canvas {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding: 24px 16px;
+  scroll-behavior: smooth;
+}
+
+// Fila de columnas. `max-content` es lo que garantiza que los dos carriles
+// midan exactamente igual y queden alineados sin medir nada en JavaScript.
+.pd-canvas-rail {
+  display: flex;
+  align-items: stretch;
+  width: max-content;
+}
+
+.pd-canvas-rail--forks,
+.pd-canvas-rail--orphans {
+  align-items: flex-start;
+}
+
+.pd-canvas-rail--orphans {
+  margin-top: 16px;
+}
+
+// Espejo de una columna del carril nominal. Vacia la mayoria de las veces: es
+// justo lo que hace caer cada bifurcacion bajo su nodo.
+.pd-canvas-slot {
+  flex: 0 0 auto;
+  width: $pd-node-width;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+}
+
+// Espejo del hueco que ocupa la flecha entre dos tarjetas nominales.
+.pd-canvas-gap {
+  flex: 0 0 auto;
+  width: $pd-link-width;
+}
+
+.pd-node-card {
+  flex: 0 0 auto;
+  width: $pd-node-width;
+  padding: 14px;
+  cursor: pointer;
+  // Solo la sombra y el borde transicionan: animar `transform` desplazaria las
+  // flechas, que se posicionan respecto a la caja.
+  transition:
+    border-color 0.2s ease,
+    box-shadow 0.2s ease;
+
+  &:hover {
+    border-color: var(--pd-accent);
+  }
+
+  &:focus-visible {
+    outline: 2px solid var(--pd-accent);
+    outline-offset: 2px;
+  }
+}
+
+// Caja abierta en el panel lateral.
+.pd-node-card--selected {
+  border-color: var(--pd-primary-light);
+  box-shadow: 0 0 0 1px var(--pd-primary-light);
+}
+
+.pd-node-card--running {
+  border-color: var(--pd-accent);
+  animation: pd-node-pulse 1.4s ease-in-out infinite;
+}
+
+.pd-node-card--completed {
+  border-color: var(--pd-positive);
+}
+
+// La pausa parpadea y el fallo no: la primera espera una decision del operador
+// y el movimiento es lo que lleva la mirada hasta ella; el segundo ya esta
+// cerrado y un parpadeo permanente solo seria ruido.
+.pd-node-card--paused {
+  border-color: var(--pd-warning);
+  animation: pd-node-blink 1.8s ease-in-out infinite;
+}
+
+.pd-node-card--failed {
+  border-color: var(--pd-negative);
+}
+
+// Nodo de contingencia: existe en el esquema pero no en el camino nominal.
+.pd-node-card--contingency {
+  border-style: dashed;
+}
+
+// Conector entre dos cajas consecutivas.
+.pd-canvas-link {
+  flex: 0 0 auto;
+  align-self: center;
+  width: $pd-link-width;
+  color: var(--pd-border);
+}
+
+// Tramo ya recorrido por la ejecucion.
+.pd-canvas-link--traversed {
+  color: var(--pd-accent);
+}
+
+.pd-node-type {
+  color: var(--pd-text-secondary);
+}
+
+// Consola del visor de logs (`LogViewerModal`). Mismo armazon que
+// `.pd-code-block`, pero oscura en los dos temas para leerse como una terminal.
+.pd-terminal {
+  background: var(--pd-terminal-bg);
+  color: var(--pd-terminal-text);
+  border: 1px solid var(--pd-shell-alt);
+  border-radius: $generic-border-radius;
+  padding: 12px;
+  margin: 0;
+  max-height: 360px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+// Visor de JSON del panel de inspeccion.
+.pd-code-block {
+  background: var(--pd-surface-muted);
+  border: 1px solid var(--pd-border);
+  border-radius: $generic-border-radius;
+  padding: 12px;
+  margin: 0;
+  max-height: 320px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: var(--pd-text-primary);
+}
+
+// Respeta a quien pidio al sistema que no anime nada: el estado tambien se
+// transmite por icono y por texto, de modo que no se pierde informacion.
+@media (prefers-reduced-motion: reduce) {
+  .pd-node-card--running,
+  .pd-node-card--paused {
+    animation: none;
+  }
+}
+
+@keyframes pd-node-pulse {
+  0%,
+  100% {
+    box-shadow: 0 0 0 0 var(--pd-accent-soft);
+  }
+  50% {
+    box-shadow: 0 0 0 6px var(--pd-accent-soft);
+  }
+}
+
+@keyframes pd-node-blink {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.62;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Campos numericos con rango declarado
+//
+// Quasar ya pinta en rojo un campo con `:rules` incumplidas, pero solo DESPUES
+// de tocarlo y sin decir nada cuando el valor es correcto. Estas dos clases
+// dan la lectura continua que pide un formulario con minimos y maximos: verde
+// mientras el valor cae dentro, rojo en cuanto se sale.
+//
+// Se aplican al contenedor del campo y no al `q-input`, para alcanzar tambien
+// al `hint` que enuncia el rango — que es la informacion que el operador
+// necesita leer justo cuando se equivoca.
+// ---------------------------------------------------------------------------
+
+.pd-field--in-range {
+  :deep(.q-field__control):after {
+    border-color: var(--pd-positive);
+  }
+}
+
+.pd-field--out-of-range {
+  :deep(.q-field__control):after {
+    border-color: var(--pd-negative);
+  }
+
+  // El caption del rango se enciende con el campo: es el unico sitio donde
+  // dice cuales son el minimo y el maximo, y en gris pasa desapercibido justo
+  // cuando hace falta.
+  .pd-field-range {
+    color: var(--pd-negative);
+    font-weight: 700;
+  }
+
+  &:hover .pd-field-range {
+    text-decoration: underline;
+  }
+}
+
+// Enunciado del rango bajo un campo numerico. Neutro mientras el valor vale.
+.pd-field-range {
+  display: block;
+  margin-top: 2px;
+  font-size: 0.75rem;
+  color: var(--pd-text-secondary);
+  transition: color 0.15s ease;
+}
+
+// --- Bifurcaciones de contingencia (`onErrorStep`) ---------------------------
+//
+// El trazo baja a la izquierda de la celda, bajo el ICONO del nodo y no bajo su
+// centro: deja asi los ~170px restantes para la etiqueta sin desplazar nada.
+.pd-fork {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: $pd-fork-height;
+  padding-left: 22px;
+}
+
+// Unico sitio donde se nombra el color del trazo. El SVG lo hereda con
+// `currentColor`, de modo que la plantilla no lleva ni un color.
+.pd-canvas-fork {
+  flex: 0 0 auto;
+  color: var(--pd-warning);
+  opacity: 0.55;
+}
+
+.pd-canvas-fork--traversed {
+  opacity: 1;
+}
+
+.pd-fork-label {
+  // Habilita el recorte del texto dentro del contenedor flex.
+  min-width: 0;
+  border-left: 2px solid var(--pd-warning);
+  padding-left: 6px;
+}
+
+// El alcance de la ruta. NUNCA en `--pd-warning`: ese token no alcanza el 3:1
+// de WCAG sobre el fondo claro, asi que el ambar queda reducido al trazo y a la
+// franja de 2px, ambos redundantes respecto a este texto.
+.pd-fork-label__codes {
+  color: var(--pd-text-secondary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+// Ruta con `catchErrors: []`: declarada pero imposible de disparar.
+.pd-fork-label__codes--inert {
+  color: var(--pd-disabled-text);
+}
+
+// Referencia a una tarjeta que ya existe en otra columna o en el carril
+// nominal. Se dibuja en vez de duplicar la tarjeta: el alertador es uno por
+// flujo, y pintarlo dos veces haria leer dos.
+.pd-fork-ref {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: $pd-node-width;
+  padding: 8px 10px;
+  text-align: left;
+  border: 1px dashed var(--pd-border);
+  border-radius: $generic-border-radius;
+  background: var(--pd-surface-muted);
+  color: var(--pd-text-secondary);
+  cursor: pointer;
+
+  &:hover {
+    border-color: var(--pd-accent);
+  }
+
+  &:focus-visible {
+    outline: 2px solid var(--pd-accent);
+    outline-offset: 2px;
+  }
+}
+
+// El `onErrorStep` apunta a un nodo que no existe: esquema roto.
+.pd-fork-ref--missing {
+  border-color: var(--pd-negative);
+  color: var(--pd-negative);
+}
+
+.pd-fork-sources,
+.pd-fork-rejoin {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--pd-text-secondary);
+}
+
+// Nodo al que no apunta ni `nextStep` ni ningun `onErrorStep`.
+.pd-node-card--orphan {
+  border-style: dotted;
+  border-color: var(--pd-disabled-bg);
+}
+
+// ---------------------------------------------------------------------------
+// Selector de fecha (`QDate`) dentro de un `QPopupProxy`.
+//
+// Va GLOBAL y no en el `<style scoped>` del componente a proposito: Quasar
+// monta los popups en un portal colgado de `<body>`, fuera del arbol del
+// componente, de modo que el atributo de alcance nunca llegaria a alcanzarlos.
+//
+// Sustituye al selector NATIVO de `<input type="date">`, que se pintaba con el
+// tema del sistema operativo —un recuadro blanco sobre el panel oscuro— y no
+// admitia ni un solo estilo.
+.pd-date-popup.q-date {
+  background: var(--pd-card-bg);
+  border: 1px solid var(--pd-border);
+  border-radius: $generic-border-radius;
+  color: var(--pd-text-primary);
+
+  // Cabecera del mes: el degradado corporativo obligatorio (regla §2), el
+  // mismo que el `QHeader` y los botones primarios.
+  .q-date__header {
+    background: var(--pd-gradient);
+    color: var(--pd-text-primary);
+  }
+
+  .q-date__content,
+  .q-date__view {
+    background: var(--pd-card-bg);
+  }
+
+  // Nombres de los dias y numeros fuera del mes: jerarquia de texto, no gris
+  // de Quasar (las clases `text-grey-N` estan prohibidas como sustituto de un
+  // token).
+  .q-date__calendar-weekdays > div,
+  .q-date__calendar-item--out {
+    color: var(--pd-text-secondary);
+  }
+
+  .q-date__calendar-item--in {
+    color: var(--pd-text-primary);
+  }
+
+  // Dia seleccionado y navegacion: acento de marca.
+  .q-date__today {
+    box-shadow: 0 0 0 1px var(--pd-accent);
+  }
+
+  .q-date__navigation .q-btn,
+  .q-date__calendar-item .q-btn {
+    color: var(--pd-text-primary);
+  }
+
+  .q-date__calendar-item .q-btn.bg-primary,
+  .q-date__years-item .q-btn.bg-primary,
+  .q-date__months-item .q-btn.bg-primary {
+    background: var(--pd-panel-solid) !important;
+    color: var(--pd-text-primary);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Selector de destinatarios de correo (`q-select` con chips).
+//
+// Compartido por la alerta SMTP y la pausa de flujo, que antes solo coincidian
+// en el marcado: los estilos vivian en el `<style scoped>` de SmtpAlertConfig y
+// la pausa pintaba los chips con el gris por defecto de Quasar, ilegible en
+// modo oscuro. Un unico bloque global garantiza el mismo borde, relleno y
+// contraste en los dos nodos y en los dos temas.
+.pd-recipients-field {
+  &.q-field--outlined .q-field__control {
+    background: var(--pd-card-bg);
+  }
+
+  &.q-field--outlined .q-field__control::before {
+    border-color: var(--pd-border);
+  }
+
+  .q-field__native::placeholder {
+    color: var(--pd-text-secondary);
+  }
+
+  .q-field__messages {
+    color: var(--pd-text-secondary);
+  }
+
+  // Chips sobre los tokens de acento, como los chips de variable del mapeador.
+  .q-chip {
+    background: var(--pd-surface-muted);
+    color: var(--pd-accent-text);
+    border: 1px solid var(--pd-border);
+  }
+}
+
+// Aviso de direcciones invalidas bajo el selector de destinatarios.
+.pd-invalid-banner {
+  background: var(--pd-row-urgente);
+  border: 1px solid var(--pd-negative);
+  border-radius: $generic-border-radius;
+  color: var(--pd-text-primary);
+}
+
+.pd-invalid-icon,
+.pd-invalid-title {
+  color: var(--pd-negative);
 }

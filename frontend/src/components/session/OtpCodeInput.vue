@@ -132,7 +132,7 @@ defineExpose({ focusFirst: () => focusAt(0) });
 .otp-grid__cell {
   :deep(input) {
     text-align: center;
-    font-size: 20px;
+    font-size: 1.25rem;
     font-weight: 700;
     padding: 0;
   }
