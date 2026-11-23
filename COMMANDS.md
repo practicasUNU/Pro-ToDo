@@ -154,8 +154,8 @@ ejecuta lo que falta y se detiene en el primer fallo.
 # Base de desarrollo (DB_NAME de backend/.env)
 npm run db:migrate --prefix backend
 
-# Base de las pruebas E2E
-DB_NAME='<nombre_bd_test>' npm run test:migrate --prefix backend
+# Base de las pruebas E2E (E2E_DB_NAME de backend/.env, ver §4.3.1)
+npm run test:migrate --prefix backend
 ```
 
 > **Primera vez sobre una base que YA está al día:** regístralas sin ejecutarlas, o se reaplicaría
@@ -171,8 +171,12 @@ añaden un valor a un enum (`030`, `039`) no pueden ir en una (error 55P04 de Po
 
 ```bash
 npm run db:bootstrap --prefix backend                 # usa DB_NAME
-DB_NAME='<nombre_bd_test>' npm run test:bootstrap --prefix backend
+npm run test:bootstrap --prefix backend               # usa E2E_DB_NAME (ver §4.3.1)
 ```
+
+Si el volumen nació vacío, el primer `docker compose up -d` ya creó `DB_NAME` desde `init.sql`
+(sin ADMIN ni `schema_migrations`) y `db:bootstrap` abortará con «ya existe»: como esa base está
+vacía, se borra con el `DROP DATABASE` que imprime el propio script y se relanza.
 
 Ejecuta `init.sql`, registra las migraciones en modo baseline y siembra un ADMIN activo
 (`BOOTSTRAP_ADMIN_EMAIL`, por defecto la cuenta declarada en `backend/.env`; ej. `admin@example.com`). Aborta si la base ya existe: recrearla
@@ -233,7 +237,25 @@ Todos los comandos se ejecutan desde `backend/`.
 | `npm run test:watch` | Modo observador. |
 | `npm run test:cov` | Con cobertura (`../coverage`). |
 | `npm run test:debug` | `--inspect-brk --runInBand` para depuración paso a paso. |
-| `DB_NAME='<nombre_bd_test>' npm run test:e2e` | Integración/E2E (`test/jest-e2e.json`, configuración aparte). Aborta si `DB_NAME` falta o coincide con la base de `backend/.env`. |
+| `npm run test:e2e` | Integración/E2E (`test/jest-e2e.json`, configuración aparte) contra la base de `E2E_DB_NAME`. Aborta antes de conectar si falta o coincide con `DB_NAME` (ver §4.3.1). |
+
+#### 4.3.1 Base de las pruebas E2E (`E2E_DB_NAME`)
+
+Se declara una vez en `backend/.env`: `E2E_DB_NAME='<nombre_bd_test>'`, distinto de `DB_NAME`.
+`test:e2e`, `test:migrate` y `test:bootstrap` la leen solos, sin `DB_NAME=` en la línea de comandos.
+La regla vive en `backend/test/helpers/test-database.resolver.ts` (guarda de Jest en `setupFiles`)
+y se replica en `scripts/with-test-env.sh` (envoltorio de los dos scripts de base de datos):
+
+| Situación | Base usada |
+|---|---|
+| `DB_NAME='<nombre_bd_test>'` explícito, distinto del de desarrollo | ese override |
+| `DB_NAME` heredado de `source backend/.env` (igual al de desarrollo) | `E2E_DB_NAME`, con aviso |
+| sin `DB_NAME` en el entorno | `E2E_DB_NAME` (exportado o, si no, de `backend/.env`) |
+| `E2E_DB_NAME` vacío o igual a `DB_NAME` | **aborta** (exit 1) sin conectar |
+
+La base de pruebas necesita además la semilla `069-*.sql` (cinco blueprints maestros, la valida
+`pipeline-seeds-integrity.e2e-spec.ts`). `test:bootstrap` la registra en baseline sin ejecutarla, así
+que se aplica a mano una vez, como en §3.1, con `-d "${E2E_DB_NAME:?exporta backend/.env}"`.
 
 > `jest.rootDir` es `src`, así que **un `.spec.ts` colocado en `backend/test/` no lo ejecuta `npm test`**. Los specs unitarios viven junto al fuente; `backend/test/` alberga factories, fixtures y los `*.e2e-spec.ts`.
 
@@ -249,7 +271,7 @@ Todos los comandos se ejecutan desde `frontend/`.
 |---|---|
 | `npm run dev` | Servidor de desarrollo Vite (`quasar dev`). |
 | `npm run build` | Compilación SPA de producción (`quasar build`). |
-| `npm run postinstall` | `quasar prepare --silent`; regenera `.quasar/` (automático en `npm install`). |
+| `npm run postinstall` | `quasar prepare --silent`; regenera `.quasar/` (automático en `npm ci`). |
 
 ### 5.2 Calidad y tipos
 
@@ -539,8 +561,9 @@ Slash commands invocables en Claude Code. Cada uno exige validaciones antes de t
 # 0. Entorno (desde la raíz, una vez por terminal)
 set -a && source backend/.env && set +a
 
-# 1. Infraestructura
+# 1. Infraestructura y dependencias (npm ci, nunca npm install en limpio)
 sudo docker compose up -d
+(cd backend && npm ci) && (cd frontend && npm ci)
 
 # 2. Backend (terminal 1)
 cd backend && npm run start:dev
@@ -551,4 +574,7 @@ cd frontend && npm run dev
 # 4. Verificación antes de commitear
 cd backend  && npm test && npx tsc --noEmit -p tsconfig.build.json
 cd frontend && npm test && npm run typecheck
+
+# 5. E2E contra la base de E2E_DB_NAME (sin DB_NAME= en la línea de comandos)
+cd backend  && npm run test:migrate && npm run test:e2e
 ```

@@ -45,7 +45,7 @@ TypeORM sobre PostgreSQL (driver `pg`), `class-validator` + `ValidationPipe` glo
 |---|---|---|
 | Backend: build + tipos + unitarias | `cd backend && npm run verify` | `nest build`, `tsc -p tsconfig.build.json` y `jest` entero |
 | Backend: solo unitarias | `cd backend && npx jest` | Estrategias, DTOs, servicios, guardas |
-| Backend: E2E (PostgreSQL real) | `cd backend && export DB_NAME='<nombre_bd_test>' && npm run test:migrate && npm run test:e2e` | Frontera HTTP con el `ValidationPipe` de producción (`supertest` contra el `AppModule`) |
+| Backend: E2E (PostgreSQL real) | `cd backend && npm run test:migrate && npm run test:e2e` (base de `E2E_DB_NAME` en `backend/.env`) | Frontera HTTP con el `ValidationPipe` de producción (`supertest` contra el `AppModule`) |
 | Frontend: componentes y stores | `cd frontend && npm run test` | Vitest (`vitest run`) sobre `src/**/*.spec.ts` |
 | Frontend: tipos | `cd frontend && npx vue-tsc --noEmit` | Plantillas y TypeScript estricto |
 

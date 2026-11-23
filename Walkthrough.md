@@ -9522,3 +9522,15 @@ mapeador.
 - **Por que un solo reintento:** cada vuelta repite la espera entera y vuelve a facturar la salida; con 180 s, el peor caso ya son seis minutos por proveedor.
 - [x] 069 v3 aplicada dos veces en la base de pruebas sin cambios en el segundo pase
 - [ ] Reejecutar la 069 en desarrollo (`psql -f`)
+
+## Base E2E en un solo comando
+
+- **Por que `E2E_DB_NAME` y no un `.env.test`:** el nombre ya vivia en `backend/.env` de cada maquina. Un segundo archivo duplicaria credenciales y abriria otra forma de desincronizarse.
+- **Por que un `DB_NAME` heredado se ignora en vez de abortar:** el modismo `set -a && source backend/.env` (lo exige el MCP) deja exportada la base de desarrollo en toda la terminal. Ese valor nunca es valido para E2E, asi que tratarlo como intencion explicita solo obligaba a un `unset` en cada terminal. Un override distinto si se respeta.
+- **Por que la regla es una funcion pura aparte:** la guarda se ejecuta al importarse. Separar la decision (`test-database.resolver.ts`) del efecto permite probarla sin base de datos y sin repetir el aviso.
+- **Por que un envoltorio bash:** `test:migrate`/`test:bootstrap` llevaban `${DB_NAME:?}` en la propia linea de npm, que aborta antes de ejecutar ningun script. `apply-migrations.sh` y `bootstrap-db.sh` ya respetan el entorno, asi que basta con fijar `DB_NAME` antes de llamarlos.
+- **Por que el spec va en `test/e2e/`:** `jest.rootDir` es `src` y `npm test` no ve `test/`. No conecta: el envoltorio se ejecuta sobre un `.env` ficticio en un directorio temporal.
+- **Por que hubo que aplicar la 069 a mano:** `test:bootstrap` registra todas las migraciones en baseline, de modo que la base de pruebas tenia la 069 marcada pero `plantillas_flujo` vacia. `test:migrate` la salta por estar registrada.
+- [x] `npm run test:e2e` sin `DB_NAME=`: 151/152 en verde. El caso PDF falla porque falta el binario de Chromium de Playwright en la maquina, no por el codigo.
+- [x] `E2E_DB_NAME` igual a `DB_NAME`: `test:e2e`, `test:migrate` y `test:bootstrap` abortan con exit 1 sin conectar
+- [ ] Gate de auditoria moderada pendiente de aprobacion

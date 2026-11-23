@@ -5331,3 +5331,17 @@ Rama: `feat/drupal-and-acens-nodes-dev`. Migraciones `065` y `066`.
 - [x] Contenedor UFV/ESIC guardado por encabezado
 - [x] Recomendador para generacion extensa y lotes
 - [ ] Pendiente: reejecutar la 069 en la base de desarrollo con `psql -f`
+
+## Base E2E desde `E2E_DB_NAME`, READMEs alineados y auditoria moderada (gate)
+
+- **Contrato:** `resolveTestDatabase({ envDbName, envE2eDbName, fileEnv })` (`backend/test/helpers/test-database.resolver.ts`, pura) devuelve `{ dbName, source: 'cli' | 'e2e-db-name', warning? }` o lanza. La consumen la guarda de Jest (`e2e-database.guard.ts`, `setupFiles`) y, con la misma regla en bash, `scripts/with-test-env.sh`, que envuelve `test:migrate` y `test:bootstrap` (solo cambia el bloque `scripts` de `backend/package.json`).
+- **Precedencia:** `DB_NAME` explicito distinto del de desarrollo > `E2E_DB_NAME` (entorno y, si no, `backend/.env`). Un `DB_NAME` heredado igual al de desarrollo se descarta con aviso. Aborta antes de conectar si el resultado esta vacio o es la base de desarrollo.
+- **Lectura del `.env`:** `util.parseEnv` nativo de Node 24, sin dependencias nuevas. El envoltorio bash lee por clave, sin `source`.
+- **Documentacion:** `README.md`, `backend/README.md`, `frontend/README.md`, `COMMANDS.md` (§3.1.1, §3.1.2, §4.3.1, §9) y `backend/.env.example` (`E2E_DB_NAME`).
+- **Auditoria:** solo diagnostico. Hay dos advisories raiz (`glob` GHSA-3g3m-2fjr-6pw4, `minimatch` GHSA-g3hv-75wg-m249) que dan 25 moderadas en el backend (todas dev) y 13 en el frontend (4 de runtime, por `js-beautify`).
+- [x] Guarda y envoltorio con la misma precedencia, 13 casos AAA (`test/e2e/test-database-env.e2e-spec.ts`)
+- [x] 069 aplicada en la base de pruebas (estaba registrada en baseline sin ejecutar)
+- [x] READMEs y COMMANDS.md alineados
+- [ ] Pendiente de aprobacion: Fase 1 `npm audit fix` (sin `--force`) en ambos proyectos
+- [ ] Pendiente de decision: Fase 2, registrar el resto como revisadas o `overrides` acotados de `glob`/`minimatch`
+- [ ] Pendiente de entorno: `npx playwright install chromium` para el caso PDF de `telemetry.e2e-spec.ts`
