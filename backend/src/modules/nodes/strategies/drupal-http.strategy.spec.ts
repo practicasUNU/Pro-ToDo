@@ -1343,9 +1343,10 @@ describe('DrupalHttpStrategy', () => {
       );
 
       // 3. Assert 🎯: ningun PATCH, y el CODIGO DEL COMITE en `missingFields`
-      //    —es lo que permite localizarlo en el material de origen—.
+      //    —es lo que permite localizarlo en el material de origen—. UPM es una
+      //    universidad reconocida cuya seccion falta: ERR_DRUPAL_TARGET_NOT_FOUND.
       expect(result.success).toBe(false);
-      expect(result.error?.code).toBe(ERR_DRUPAL_DOM_TARGET);
+      expect(result.error?.code).toBe(ERR_DRUPAL_TARGET_NOT_FOUND);
       expect(result.error?.missingFields).toEqual(['UPM 2']);
       expect(httpClient.requestWithStatus).toHaveBeenCalledTimes(1);
     });
@@ -1395,13 +1396,13 @@ describe('DrupalHttpStrategy', () => {
       expect($('.panel-comite-codigo')).toHaveLength(1);
     });
 
-    it('2bis.3 deberia cazar el relleno de la plantilla sin sustituir', async () => {
-      // 1. Arrange 📐: si el modelo no reemplaza el literal, el destino no
-      //    existe y el nodo para aqui en vez de publicar fuera de sitio.
+    it('2bis.3 deberia corregir el relleno sin sustituir a partir del codigo visible', async () => {
+      // 1. Arrange 📐: el modelo dejo `#accordionPadreId`. «UAM 9» basta para
+      //    saber el destino: el backend reescribe los atributos tecnicos.
       const httpClient = buildHttpMock();
-      httpClient.requestWithStatus.mockResolvedValueOnce(
-        pageResponse(ACCORDION_PAGE),
-      );
+      httpClient.requestWithStatus
+        .mockResolvedValueOnce(pageResponse(ACCORDION_PAGE))
+        .mockResolvedValueOnce(pageResponse(''));
       const strategy = buildStrategy(httpClient);
 
       // 2. Act ⚙️
@@ -1415,8 +1416,13 @@ describe('DrupalHttpStrategy', () => {
       );
 
       // 3. Assert 🎯
-      expect(result.success).toBe(false);
-      expect(result.error?.message).toContain('#accordionPadreId');
+      const $ = cheerio.load(sentHtml(httpClient, 1), null, false);
+
+      expect(result.success).toBe(true);
+      expect($('#accordionUAM a.panel-toggle-link').attr('data-parent')).toBe(
+        '#accordionUAM',
+      );
+      expect(sentHtml(httpClient, 1)).not.toContain('accordionPadreId');
     });
 
     it('2bis.4 deberia respetar insertPosition dentro del sub-acordeon', async () => {
@@ -1516,6 +1522,246 @@ describe('DrupalHttpStrategy', () => {
       // 3. Assert 🎯
       expect(result.success).toBe(true);
       expect(sentHtml(httpClient, 1)).toContain(MARKUP);
+    });
+
+    /** Panel de comite como lo publico Proto-Do (clases de la plantilla). */
+    const injectedPanel = (
+      code: string,
+      collapseId: string,
+      extraClass = '',
+    ): string =>
+      `<div class="panel panel-default${extraClass}" data-protodo-injected="true">` +
+      '<div class="panel-heading"><h5 class="panel-title">' +
+      `<a class="panel-toggle-link" href="#${collapseId}">` +
+      `<strong class="panel-comite-codigo">${code}</strong></a></h5></div>` +
+      `<div class="collapse" id="${collapseId}"><p>Viejo</p></div></div>`;
+
+    it('2bis.6 NO deberia tocar el UAM 9 oculto de #accordionUAM: el nuevo entra como collapseUAM9-2', async () => {
+      // 1. Arrange 📐: el HTML base de Drupal ya trae un UAM 9 con `d-none`
+      //    DENTRO de su sub-acordeon. Dentro del destino no se reemplaza ni se
+      //    borra nada: el nuevo toma un sufijo y no hay ids duplicados.
+      const existing = injectedPanel('UAM 9', 'collapseUAM9', ' d-none');
+      const page =
+        '<div id="accordion"><div class="panel panel-default">' +
+        '<div class="collapse" id="collapseUAM">' +
+        `<div class="panel-group" id="accordionUAM">${existing}</div>` +
+        '</div></div></div>';
+      const httpClient = buildHttpMock();
+      httpClient.requestWithStatus
+        .mockResolvedValueOnce(pageResponse(page))
+        .mockResolvedValueOnce(pageResponse(''));
+      const strategy = buildStrategy(httpClient);
+
+      // 2. Act ⚙️
+      const result = await strategy.execute(
+        buildContext({
+          [SOURCE_NAMESPACE]: {
+            [SOURCE_FIELD]: panel('UAM 9', '#accordion'),
+          },
+        }),
+        appendParams,
+      );
+
+      // 3. Assert 🎯
+      const $ = cheerio.load(sentHtml(httpClient, 1), null, false);
+      const panels = $('#accordionUAM > .panel');
+      const kept = $('[id="collapseUAM9"]').closest('.panel');
+      const added = $('[id="collapseUAM9-2"]').closest('.panel');
+
+      expect(result.success).toBe(true);
+      expect(panels).toHaveLength(2);
+      // El existente, intacto (sigue oculto y con su id).
+      expect($.html(kept)).toBe(cheerio.load(existing, null, false).html());
+      // El nuevo, con sufijo en href e id, visible y con su codigo visible.
+      expect(added.find('a.panel-toggle-link').attr('href')).toBe(
+        '#collapseUAM9-2',
+      );
+      expect(added.find('.collapse').attr('id')).toBe('collapseUAM9-2');
+      expect(added.find('a.panel-toggle-link').attr('data-parent')).toBe(
+        '#accordionUAM',
+      );
+      expect(added.hasClass('d-none')).toBe(false);
+      expect(added.find('.panel-comite-codigo').text()).toBe('UAM 9');
+      expect($('[id="collapseUAM9-2"]')).toHaveLength(1);
+    });
+
+    it('2bis.7 deberia retirar el UAM 9 que la averia dejo suelto en la raiz #accordion', async () => {
+      // 1. Arrange 📐: restos del fallo 2. UAM 9 colgado de la raiz, junto a
+      //    un huerfano sin encabezado; y un UCM 3 en la raiz que NO es de este
+      //    comite y debe quedarse.
+      const page =
+        '<div id="accordion">' +
+        '<div class="panel panel-default"><div class="collapse" id="collapseUAM">' +
+        '<div class="panel-group" id="accordionUAM"></div></div></div>' +
+        injectedPanel('UAM 9', 'collapseUAM9') +
+        '<div class="panel panel-default" data-protodo-injected="true"><div class="collapse"><p>Huerfano</p></div></div>' +
+        injectedPanel('UCM 3', 'collapseUCM3') +
+        '</div>';
+      const httpClient = buildHttpMock();
+      httpClient.requestWithStatus
+        .mockResolvedValueOnce(pageResponse(page))
+        .mockResolvedValueOnce(pageResponse(''));
+      const strategy = buildStrategy(httpClient);
+
+      // 2. Act ⚙️
+      const result = await strategy.execute(
+        buildContext({
+          [SOURCE_NAMESPACE]: {
+            [SOURCE_FIELD]: panel('UAM 9', '#accordion'),
+          },
+        }),
+        appendParams,
+      );
+
+      // 3. Assert 🎯
+      const $ = cheerio.load(sentHtml(httpClient, 1), null, false);
+
+      expect(result.success).toBe(true);
+      expect($('[id="collapseUAM9"]')).toHaveLength(1);
+      expect($('#accordionUAM [id="collapseUAM9"]')).toHaveLength(1);
+      expect(
+        $('#accordion > .panel > .panel-heading .panel-comite-codigo')
+          .toArray()
+          .map((el) => $(el).text()),
+      ).toEqual(['UCM 3']);
+      expect(sentHtml(httpClient, 1)).not.toContain('Huerfano');
+    });
+
+    it('2bis.8 deberia meter UAH 1 en #accordionUAH anidado en UPM 5 sin alterar UPM 5', async () => {
+      // 1. Arrange 📐: el HTML heredado de Drupal anida la universidad UAH
+      //    DENTRO del colapsable del comite UPM 5.
+      const upm5 =
+        '<div class="panel panel-default"><div class="panel-heading"><h5 class="panel-title">' +
+        '<a class="panel-toggle-link" href="#collapseUPM5" data-parent="#accordionUPM">' +
+        '<strong class="panel-comite-codigo">UPM 5</strong></a></h5></div>' +
+        '<div class="collapse" id="collapseUPM5"><div class="panel-body">' +
+        '<p>Titulos UPM 5</p><div class="panel-group" id="accordionUAH"></div>' +
+        '</div></div></div>';
+      const page =
+        '<div id="accordion"><div class="panel panel-default">' +
+        '<div class="collapse" id="collapseUPM">' +
+        `<div class="panel-group" id="accordionUPM">${upm5}</div>` +
+        '</div></div></div>';
+      const httpClient = buildHttpMock();
+      httpClient.requestWithStatus
+        .mockResolvedValueOnce(pageResponse(page))
+        .mockResolvedValueOnce(pageResponse(''));
+      const strategy = buildStrategy(httpClient);
+
+      // 2. Act ⚙️
+      const result = await strategy.execute(
+        buildContext({
+          [SOURCE_NAMESPACE]: {
+            [SOURCE_FIELD]: panel('UAH 1', '#accordion'),
+          },
+        }),
+        appendParams,
+      );
+
+      // 3. Assert 🎯
+      const $ = cheerio.load(sentHtml(httpClient, 1), null, false);
+      const upm5After = $('#collapseUPM5').closest('.panel');
+
+      expect(result.success).toBe(true);
+      expect($('#accordionUAH .panel-comite-codigo').text()).toBe('UAH 1');
+      expect($('#accordionUAH a.panel-toggle-link').attr('data-parent')).toBe(
+        '#accordionUAH',
+      );
+      // UPM 5 conserva su encabezado, su texto y su sub-acordeon anidado.
+      expect(
+        upm5After.find('> .panel-heading .panel-comite-codigo').text(),
+      ).toBe('UPM 5');
+      expect(upm5After.find('p').first().text()).toBe('Titulos UPM 5');
+      expect($('#accordionUPM > .panel')).toHaveLength(1);
+    });
+
+    it('2bis.9 deberia fallar con ERR_DRUPAL_TARGET_NOT_FOUND sin contaminar la raiz si falta #accordionURJC', async () => {
+      // 1. Arrange 📐: la raiz existe y URJC no tiene sub-acordeon.
+      const httpClient = buildHttpMock();
+      httpClient.requestWithStatus.mockResolvedValueOnce(
+        pageResponse(ACCORDION_PAGE),
+      );
+      const strategy = buildStrategy(httpClient);
+
+      // 2. Act ⚙️
+      const result = await strategy.execute(
+        buildContext({
+          [SOURCE_NAMESPACE]: {
+            [SOURCE_FIELD]: panel('URJC 7', '#accordion'),
+          },
+        }),
+        appendParams,
+      );
+
+      // 3. Assert 🎯: GRAVE tipado, sin PATCH (solo el GET), y el mensaje
+      //    nombra el comite y el sub-acordeon buscado.
+      expect(result.success).toBe(false);
+      expect(result.error?.level).toBe('GRAVE');
+      expect(result.error?.code).toBe(ERR_DRUPAL_TARGET_NOT_FOUND);
+      expect(result.error?.missingFields).toEqual(['URJC 7']);
+      expect(result.error?.message).toContain('#accordionURJC');
+      expect(httpClient.requestWithStatus).toHaveBeenCalledTimes(1);
+    });
+
+    it('2bis.10 deberia publicar ESIC 2 como collapseESIC2 en #accordionESIC aunque llegue como collapseUFV2', async () => {
+      // 1. Arrange 📐: la averia 1 de produccion: codigo visible ESIC 2 con
+      //    `href="#collapseUFV2"` e `id="collapseUFV2"`.
+      const page =
+        '<div id="accordion"><div class="panel panel-default">' +
+        '<div class="panel-heading"><h4><a href="#collapseESIC">ESIC Universidad</a></h4></div>' +
+        '<div class="collapse" id="collapseESIC">' +
+        '<div class="panel-group" id="accordionESIC"></div></div></div></div>';
+      const httpClient = buildHttpMock();
+      httpClient.requestWithStatus
+        .mockResolvedValueOnce(pageResponse(page))
+        .mockResolvedValueOnce(pageResponse(''));
+      const strategy = buildStrategy(httpClient);
+      const ufvPanel = panel('ESIC 2', '#accordion').replace(
+        /collapseESIC 2/g,
+        'collapseUFV2',
+      );
+
+      // 2. Act ⚙️
+      const result = await strategy.execute(
+        buildContext({ [SOURCE_NAMESPACE]: { [SOURCE_FIELD]: ufvPanel } }),
+        appendParams,
+      );
+
+      // 3. Assert 🎯
+      const $ = cheerio.load(sentHtml(httpClient, 1), null, false);
+      const link = $('#accordionESIC a.panel-toggle-link');
+
+      expect(result.success).toBe(true);
+      expect(link.attr('href')).toBe('#collapseESIC2');
+      expect(link.attr('data-parent')).toBe('#accordionESIC');
+      expect($('#accordionESIC .collapse').attr('id')).toBe('collapseESIC2');
+      expect(sentHtml(httpClient, 1)).not.toContain('collapseUFV2');
+    });
+
+    it('2bis.11 NO deberia publicar por el containerSelector un comite sin panel completo', async () => {
+      // 1. Arrange 📐: el modelo perdio el `.panel.panel-default` pero dejo el
+      //    codigo del comite. Por la ruta de bloques sueltos acabaria en la raiz.
+      const httpClient = buildHttpMock();
+      httpClient.requestWithStatus.mockResolvedValueOnce(
+        pageResponse(ACCORDION_PAGE),
+      );
+      const strategy = buildStrategy(httpClient);
+
+      // 2. Act ⚙️
+      const result = await strategy.execute(
+        buildContext({
+          [SOURCE_NAMESPACE]: {
+            [SOURCE_FIELD]:
+              '<div class="panel-heading"><strong class="panel-comite-codigo">UAM 9</strong></div>',
+          },
+        }),
+        appendParams,
+      );
+
+      // 3. Assert 🎯
+      expect(result.success).toBe(false);
+      expect(result.error?.code).toBe(ERR_DRUPAL_DOM_TARGET);
+      expect(httpClient.requestWithStatus).toHaveBeenCalledTimes(1);
     });
   });
 

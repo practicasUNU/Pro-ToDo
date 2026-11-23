@@ -578,10 +578,10 @@ describe('useDrupalHttpStore · configuracion del nodo DESTINO_DRUPAL', () => {
       expect(store.config.operationMode).toBe(DrupalOperationMode.APPEND_HTML_BLOCK);
       expect(store.config.bundle).toBe('node--page');
       expect(store.config.targetNodeUuid).toBe(SANDBOX_TITULOS_UUID);
-      // El contenedor es el acordeon RAIZ y actua de respaldo: el destino real
-      // lo decide cada panel por su `data-parent`. Apuntarlo a la universidad
-      // CEU mandaria alli los paneles sin destino resoluble.
-      expect(store.config.containerSelector).toBe('#accordion');
+      // Sin contenedor: el destino real lo decide cada panel por su
+      // `#accordion<SIGLAS>`. El respaldo `#accordion` (la raiz) mandaba alli
+      // los comites, fuera de su universidad.
+      expect(store.config.containerSelector).toBeNull();
       expect(store.config.itemSelector).toBe('.panel-default');
       // "Al final" en el QSelect. A diferencia del resto de canales, el destino
       // no es una lista cronologica sino el sub-acordeon de una universidad:

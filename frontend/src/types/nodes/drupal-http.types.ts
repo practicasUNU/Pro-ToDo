@@ -432,10 +432,11 @@ export const DRUPAL_PRESETS: Readonly<
     // pagina agregadora, no un nodo suelto.
     operationMode: DrupalOperationMode.APPEND_HTML_BLOCK,
     bundle: 'node--page',
-    // Acordeon RAIZ del portal, y es un RESPALDO, no el destino: el destino
-    // real lo decide cada panel por su `data-parent`, y la estrategia lo reparte
-    // al sub-acordeon de su universidad.
-    containerSelector: '#accordion',
+    // SIN contenedor: el destino lo decide cada panel por el codigo de su
+    // comite (`#accordion<SIGLAS>`) y la estrategia lo busca por id directo. El
+    // antiguo respaldo `#accordion` era la RAIZ del acordeon, y publicar alli un
+    // comite es precisamente la averia que eso evitaba en teoria.
+    containerSelector: null,
     // El envoltorio que siembra la plantilla base, equivalente a
     // `.licitacion-entry` en el canal de licitaciones.
     itemSelector: '.panel-default',

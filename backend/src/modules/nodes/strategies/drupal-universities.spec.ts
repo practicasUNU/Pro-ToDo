@@ -2,6 +2,7 @@ import * as cheerio from 'cheerio';
 
 import {
   DRUPAL_UNIVERSITIES_CATALOG,
+  deriveCommitteeIdentity,
   findAccordionByHeading,
   isEsicCommittee,
   planPanelDispatch,
@@ -282,22 +283,113 @@ describe('Catalogo de universidades de Drupal', () => {
       expect(planPanelDispatch(markup)).toHaveLength(0);
     });
 
-    it('3.7 deberia conservar el literal sin sustituir, no inventarse un destino', () => {
-      // 1. Arrange 📐: si el modelo no sustituye el relleno de la plantilla, el
-      //    destino sale tal cual, no existe en la pagina y el nodo para con un
-      //    error que lo nombra. Deducirlo del encabezado aqui esconderia el
-      //    fallo del prompt.
+    it('3.7 el codigo visible deberia mandar sobre un data-parent sin sustituir', () => {
+      // 1. Arrange 📐: el modelo dejo el relleno `#accordionPadreId`. El codigo
+      //    «UAM 9» basta para saber el destino, asi que no se publica fuera de
+      //    sitio ni se para el flujo: se corrigen los tres atributos tecnicos.
       const markup = buildPanel({
         code: 'UAM 9',
         facultad: 'Universidad Autonoma de Madrid',
         dataParentOnLink: '#accordionPadreId',
       });
 
-      // 2. Act ⚙️ + 3. Assert 🎯
-      expect(planPanelDispatch(markup)[0]?.targetSelector).toBe(
-        '#accordionPadreId',
-      );
+      // 2. Act ⚙️
+      const [panel] = planPanelDispatch(markup);
+
+      // 3. Assert 🎯
+      expect(panel?.targetSelector).toBe('#accordionUAM');
+      expect(panel?.html).toContain('data-parent="#accordionUAM"');
+      expect(panel?.html).toContain('href="#collapseUAM9"');
+      expect(panel?.html).toContain('id="collapseUAM9"');
     });
+
+    it('3.8 deberia normalizar «ESIC 2» publicado como collapseUFV2 en #accordion', () => {
+      // 1. Arrange 📐: la averia de produccion tal cual. Codigo visible ESIC 2,
+      //    atributos tecnicos de Francisco de Vitoria y padre en la raiz.
+      const markup = buildPanel({
+        code: 'ESIC 2',
+        dataParentOnLink: '#accordion',
+      }).replace(/collapseESIC 2/g, 'collapseUFV2');
+
+      // 2. Act ⚙️
+      const [panel] = planPanelDispatch(markup);
+      const $ = cheerio.load(panel?.html ?? '', null, false);
+
+      // 3. Assert 🎯: href e id coinciden con el codigo visible, que no cambia.
+      expect(panel?.identity?.siglas).toBe('ESIC');
+      expect($('a.panel-toggle-link').attr('href')).toBe('#collapseESIC2');
+      expect($('a.panel-toggle-link').attr('data-parent')).toBe(
+        '#accordionESIC',
+      );
+      expect($('.collapse').attr('id')).toBe('collapseESIC2');
+      expect($('.panel-comite-codigo').text()).toBe('ESIC 2');
+      expect(panel?.html).not.toContain('UFV');
+    });
+
+    it('3.9 NO deberia aceptar la raiz #accordion como destino declarado', () => {
+      // 1. Arrange 📐: comite fuera del catalogo (sin identidad) que declara la
+      //    raiz. La raiz lista universidades, nunca comites: cuenta como no
+      //    declarado y se cae al encabezado, que tampoco resuelve.
+      const markup = buildPanel({
+        code: 'X 1',
+        facultad: 'Centro desconocido',
+        dataParentOnLink: '#accordion',
+      });
+
+      // 2. Act ⚙️ + 3. Assert 🎯
+      expect(planPanelDispatch(markup)[0]?.targetSelector).toBeNull();
+    });
+
+    it('3.10 deberia quitar d-none del panel entrante', () => {
+      // 1. Arrange 📐: un panel copiado de una muestra oculta.
+      const markup = buildPanel({ code: 'UAM 9' }).replace(
+        'class="panel panel-default"',
+        'class="panel panel-default d-none"',
+      );
+
+      // 2. Act ⚙️
+      const [panel] = planPanelDispatch(markup);
+
+      // 3. Assert 🎯
+      expect(panel?.html).toContain('class="panel panel-default"');
+      expect(panel?.html).not.toContain('d-none');
+    });
+  });
+
+  describe('3bis. Identidad del comite (siglas_universidad y codigo_comite_id)', () => {
+    it.each([
+      ['ESIC 2', 'ESIC', 'ESIC2'],
+      ['UAM 9', 'UAM', 'UAM9'],
+      ['UPM 4', 'UPM', 'UPM4'],
+      ['UC3M 1', 'UC3M', 'UC3M1'],
+      ['UCJC 3', 'UCJC', 'UCJC3'],
+      ['udima\u00a01', 'UDIMA', 'UDIMA1'],
+      ['URJC', 'URJC', 'URJC'],
+    ])(
+      'deberia derivar «%s» -> siglas %s e id %s',
+      (code, siglas, committeeId) => {
+        // 1. Arrange 📐 + 2. Act ⚙️
+        const identity = deriveCommitteeIdentity(code);
+
+        // 3. Assert 🎯
+        expect(identity).toEqual({
+          siglas,
+          committeeId,
+          collapseId: `collapse${committeeId}`,
+          accordionId: `#accordion${siglas}`,
+        });
+      },
+    );
+
+    it.each([[''], ['UFV 1'], ['UAMX 1'], ['Comite sin siglas']])(
+      'deberia devolver null para «%s»',
+      (code) => {
+        // 1. Arrange 📐: vacio, universidad fuera del catalogo (UFV), prefijo
+        //    seguido de letra y texto libre.
+        // 2. Act ⚙️ + 3. Assert 🎯
+        expect(deriveCommitteeIdentity(code)).toBeNull();
+      },
+    );
   });
 
   describe('4. Resolucion del contenedor en la pagina', () => {
@@ -419,6 +511,53 @@ describe('Catalogo de universidades de Drupal', () => {
       expect(fallback?.attr('id')).toBe('ok');
       expect(onlyInvalid).toBeNull();
     });
+
+    it('4.7 con identidad deberia buscar #accordion<SIGLAS> por id directo aunque este anidado', () => {
+      // 1. Arrange 📐: el HTML heredado anida UAH dentro del comite UPM 5.
+      const $ = load(
+        '<div id="accordion">' +
+          universityPanel(
+            'Universidad Politecnica',
+            'collapseUPM',
+            'accordionUPM',
+          ) +
+          '</div>',
+      );
+      $('#accordionUPM').append(
+        '<div class="panel panel-default"><div class="collapse" id="collapseUPM5">' +
+          '<div class="panel-group" id="accordionUAH"></div></div></div>',
+      );
+      const [panel] = planPanelDispatch(buildPanel({ code: 'UAH 1' }));
+
+      // 2. Act ⚙️
+      const container =
+        panel === undefined ? null : resolvePanelContainer($, panel);
+
+      // 3. Assert 🎯
+      expect(container?.attr('id')).toBe('accordionUAH');
+    });
+
+    it('4.8 con identidad NO deberia caer en el encabezado ni en la raiz si falta el sub-acordeon', () => {
+      // 1. Arrange 📐: hay encabezado de URJC con otro id de sub-acordeon y una
+      //    raiz `#accordion`; ninguno es `#accordionURJC`.
+      const $ = load(
+        '<div id="accordion">' +
+          universityPanel(
+            'Universidad Rey Juan Carlos',
+            'collapseURJC',
+            'grupoURJC',
+          ) +
+          '</div>',
+      );
+      const [panel] = planPanelDispatch(buildPanel({ code: 'URJC 7' }));
+
+      // 2. Act ⚙️
+      const container =
+        panel === undefined ? undefined : resolvePanelContainer($, panel);
+
+      // 3. Assert 🎯
+      expect(container).toBeNull();
+    });
   });
 
   describe('5. Contenedor de ESIC (UFV guardado por encabezado)', () => {
@@ -446,9 +585,9 @@ describe('Catalogo de universidades de Drupal', () => {
       expect(isEsicCommittee('UPM 2')).toBe(false);
     });
 
-    it('5.2 deberia preferir #collapseUFV cuando cuelga del encabezado de ESIC (produccion)', () => {
-      // 1. Arrange 📐: la pagina de produccion, con ESIC bajo el id heredado
-      //    UFV, y ademas un `#accordionESIC` de sandbox que NO debe ganar.
+    it('5.2 deberia preferir #accordionESIC por id directo sobre el UFV heredado', () => {
+      // 1. Arrange 📐: la pagina tiene las dos secciones de ESIC. Gana la que
+      //    corresponde a collapseESIC<N>; el UFV es solo el respaldo.
       const $ = load(
         section('ESIC Universidad', 'collapseUFV', 'accordionUFV') +
           '<div id="accordionESIC"></div>',
@@ -458,7 +597,28 @@ describe('Catalogo de universidades de Drupal', () => {
       const container = resolveEsicContainer($);
 
       // 3. Assert 🎯
-      expect(container?.attr('id')).toBe('accordionUFV');
+      expect(container?.attr('id')).toBe('accordionESIC');
+    });
+
+    it('5.2bis deberia usar el UFV bajo el encabezado de ESIC si #accordionESIC no existe (produccion)', () => {
+      // 1. Arrange 📐
+      const $ = load(
+        section('ESIC Universidad', 'collapseUFV', 'accordionUFV'),
+      );
+
+      // 2. Act ⚙️ + 3. Assert 🎯
+      expect(resolveEsicContainer($)?.attr('id')).toBe('accordionUFV');
+    });
+
+    it('5.2ter deberia preferir el UFV visible a un #accordionESIC oculto', () => {
+      // 1. Arrange 📐: el `#accordionESIC` cuelga de una muestra `d-none`.
+      const $ = load(
+        '<div class="d-none"><div id="accordionESIC"></div></div>' +
+          section('ESIC Universidad', 'collapseUFV', 'accordionUFV'),
+      );
+
+      // 2. Act ⚙️ + 3. Assert 🎯
+      expect(resolveEsicContainer($)?.attr('id')).toBe('accordionUFV');
     });
 
     it('5.3 NO deberia caer en el UFV de la Universidad Francisco de Vitoria', () => {

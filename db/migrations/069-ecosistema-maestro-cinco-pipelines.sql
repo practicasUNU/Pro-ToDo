@@ -11,6 +11,9 @@
 --   3. Tarifas de referencia que faltaban. Una tarifa ACTIVA previa no se
 --      reescribe: cambiar un precio es insertar una fila nueva, no esto.
 --   4. Plantillas HTML de Notiweb, apertura, cierre y titulos.
+--   4b. El panel de titulos siembra data-parent="#accordionSiglasUniversidad"
+--      (relleno que sustituye la IA y normaliza el backend), nunca la raiz
+--      "#accordion": con ella los comites aterrizaban fuera de su universidad.
 --   5. Prompts corporativos, con el texto final de la 032-068 (encabezados
 --      <h2>/<h3>, fecha APA y marcas {{*...}}). LICITACION_CIERRE_DEFAULT se
 --      reescribe si aun pide la plantilla base: el cierre no lleva mapeador y
@@ -37,8 +40,10 @@
 --      mixtas, divide cada noticia en 3 a 4 secciones <h2>, exige 12 a 14
 --      parrafos a la individual o principal y un minimo de 4 a cada secundaria,
 --      con cierre <hr /><h2>Referencia bibliográfica</h2> en APA 7; titulos fija
---      h5.panel-title, da respaldos a sus dos ranuras, asigna el identificador
---      UFV a ESIC y prohibe inventar sin datos. Sustituye los bloques de las
+--      h5.panel-title, da respaldos a sus dos ranuras, deriva siglas_universidad
+--      y codigo_comite_id del codigo del comite (ESIC 2 -> ESIC / ESIC2, nunca
+--      UFV), sustituye los rellenos collapsePanelId y #accordionSiglasUniversidad
+--      y prohibe inventar sin datos. Sustituye los bloques de las
 --      versiones anteriores de este paso.
 --   5e. Innodays e Innobar: el nombre del evento se reduce a su denominacion
 --      tematica canonica, sin prefijos de formato ("InnoBar de", "InnoDays
@@ -57,6 +62,9 @@
 --      (PROCESADOR_OCR) al que el parser desvia solo los escaneos.
 --   6e. El escudo de titulos exige .panel-title y sus dos ranuras.
 --   6g. El nodo de redaccion del maestro de Notiweb con 32768 tokens y 180 s.
+--   6h. El DESTINO_DRUPAL de titulos (maestro y flujos instanciados) pierde el
+--      containerSelector "#accordion": el destino lo decide cada panel por su
+--      #accordion<SIGLAS>, y la raiz solo servia para contaminarla.
 --   6f. Escudos de `flujos` y `plantillas_flujo` con el atajo antiguo
 --      "Estructura completa" (sin h2) pasan a la lista canonica.
 --   2b. El catalogo describe el modo campana de DESTINO_ACENS.
@@ -432,11 +440,11 @@ BEGIN
     inserted_id := NULL;
     INSERT INTO plantillas_html (nombre, descripcion, contenido_html, variables_esperadas,
                                  id_usuario_creador, creado_por, actualizado_por)
-    VALUES ('Verificación de Títulos · Panel de evaluación', 'Esqueleto del panel colapsable de Bootstrap para la pagina agregadora de verificacion de titulos. Lo rellena el PROCESADOR_IA; el destino es el preset VERIFICACION_TITULOS (APPEND_HTML_BLOCK sobre node--page, dentro de #accordionCEU).',
+    VALUES ('Verificación de Títulos · Panel de evaluación', 'Esqueleto del panel colapsable de Bootstrap para la pagina agregadora de verificacion de titulos. Lo rellena el PROCESADOR_IA; el destino es el preset VERIFICACION_TITULOS (APPEND_HTML_BLOCK sobre node--page; cada panel en su #accordion<SIGLAS>).',
             $html$<div class="panel panel-default" data-protodo-injected="true" aria-expanded="false">
   <div class="panel-heading">
     <h5 class="panel-title">
-      <a class="panel-toggle-link" aria-expanded="false" data-parent="#accordion" data-bs-toggle="collapse" href="#collapsePanelId">
+      <a class="panel-toggle-link" aria-expanded="false" data-parent="#accordionSiglasUniversidad" data-bs-toggle="collapse" href="#collapsePanelId">
         <strong class="panel-comite-codigo"></strong>&nbsp;<span class="panel-facultad-nombre"></span>
       </a>
     </h5>
@@ -475,6 +483,31 @@ BEGIN
         INSERT INTO audit_eventos (usuario_id, accion, tabla_afectada, registro_id, datos_nuevos)
         VALUES (admin_id, 'CREAR', 'plantillas_html', inserted_id::TEXT, seed_tag || jsonb_build_object('nombre', 'Verificación de Títulos · Panel de evaluación'));
     END IF;
+
+    -- 4b. Acordeon de destino del panel de titulos ------------------------
+    -- Las bases sembradas antes conservan data-parent="#accordion" (la raiz),
+    -- que mandaba cada comite fuera de su universidad. Se sustituye por el
+    -- relleno #accordionSiglasUniversidad, que la IA cambia por
+    -- #accordion<siglas_universidad> y el backend normaliza desde el codigo
+    -- visible. Protegido por el atributo exacto: reejecutar no cambia nada.
+    inserted_id := NULL;
+    SELECT id_plantilla, contenido_html INTO inserted_id, previous_text
+      FROM plantillas_html
+     WHERE nombre = 'Verificación de Títulos · Panel de evaluación'
+       AND position('data-parent="#accordion"' IN contenido_html) > 0;
+    IF inserted_id IS NOT NULL THEN
+        UPDATE plantillas_html
+           SET contenido_html = replace(contenido_html, 'data-parent="#accordion"', 'data-parent="#accordionSiglasUniversidad"'),
+               descripcion = replace(descripcion, ', dentro de #accordionCEU).', '; cada panel en su #accordion<SIGLAS>).'),
+               actualizado_por = admin_id,
+               fecha_actualizacion = NOW()
+         WHERE id_plantilla = inserted_id;
+        INSERT INTO audit_eventos (usuario_id, accion, tabla_afectada, registro_id, datos_anteriores, datos_nuevos)
+        VALUES (admin_id, 'ACTUALIZAR', 'plantillas_html', inserted_id::TEXT,
+                jsonb_build_object('contenido_html', previous_text),
+                seed_tag || jsonb_build_object('nombre', 'Verificación de Títulos · Panel de evaluación', 'parche', 'acordeon_por_siglas'));
+    END IF;
+    inserted_id := NULL;
 
     -- 5. Prompts corporativos ------------------------------------------------
     inserted_id := NULL;
@@ -972,8 +1005,11 @@ PLANTILLA BASE:
     -- Notiweb: deteccion de lote y fuentes mixtas, 3 a 4 secciones <h2>, 12 a
     -- 14 parrafos para la noticia individual o principal y un minimo de 4 para
     -- cada secundaria del lote, con cierre bibliografico APA 7. Titulos:
-    -- h5.panel-title, respaldos de sus ranuras, identificador UFV para ESIC y
-    -- la regla de no inventar sin datos (la valida el escudo).
+    -- h5.panel-title, respaldos de sus ranuras, siglas_universidad y
+    -- codigo_comite_id derivados del codigo del comite (ESIC 2 -> ESIC2, nunca
+    -- UFV), los rellenos collapsePanelId y #accordionSiglasUniversidad, y la
+    -- regla de no inventar sin datos (la valida el escudo). La v3 asignaba a
+    -- ESIC el identificador UFV; esta version la sustituye entera.
     --
     -- VERSIONADO: `old_rules` lleva los bloques de las versiones anteriores de
     -- este paso. Si la base tiene alguno, se SUSTITUYE entero (nunca conviven
@@ -1002,7 +1038,15 @@ PLANTILLA BASE:
 - Los "body_paragraphs" de cada noticia contienen exactamente esos mismos párrafos, sin los encabezados.
 - Cuando el insumo de una noticia es escaso (solo título, fuente y entradilla), alcanza la extensión desarrollando el contexto institucional, el ámbito y el alcance de lo anunciado con los datos que sí figuran; nunca inventes cifras, nombres, fechas ni declaraciones.
 - Cada "filled_markup" termina OBLIGATORIAMENTE con <hr /><h2>Referencia bibliográfica</h2><p class="notiweb-referencia">...</p>, con la referencia en formato APA 7 estricto según las reglas de "Referencia bibliografica". En las noticias secundarias, construye la referencia de página web con la fuente, la fecha y el título que figuran en el listado. Nunca la escribas como <p><strong>...</strong></p>.$rule$),
-            ('VERIFICADOR_TITULOS_DEFAULT', 'ENCABEZADO DEL PANEL E IDENTIFICADORES (VERIFICACIÓN DE TÍTULOS)', ARRAY[$old_rule$CONTRATO DE PANEL (VERIFICACIÓN DE TÍTULOS):
+            ('VERIFICADOR_TITULOS_DEFAULT', 'ENCABEZADO DEL PANEL, SIGLAS E IDENTIFICADORES (VERIFICACIÓN DE TÍTULOS)', ARRAY[$old_rule$ENCABEZADO DEL PANEL E IDENTIFICADORES (VERIFICACIÓN DE TÍTULOS):
+- Cada panel —el de la raíz y cada uno de "items"— conserva el encabezado de la PLANTILLA BASE tal cual: <h5 class="panel-title"> con su <a class="panel-toggle-link">. Nunca lo cambies por <h4> ni por otro nivel.
+- RESPALDO DEL ENCABEZADO DEL PANEL: cuando el material trae un comité, <h5 class="panel-title"> y su <a class="panel-toggle-link"> NUNCA quedan vacíos de texto. Rellena SIEMPRE sus dos ranuras con estos respaldos:
+  - ".panel-comite-codigo": el identificador del comité (ej. "UPM 1", "ESIC 1"). Si en el material no figura un número de comité, usa las siglas de la universidad (ej. "UPM").
+  - ".panel-facultad-nombre": el nombre del centro o la facultad. Si no figura de forma explícita, usa la titulación principal evaluada y, en su defecto, el nombre de la universidad.
+- IDENTIFICADORES: el href de "a.panel-toggle-link" y el id de su "div.collapse" deben coincidir exactamente y se derivan del valor final de ".panel-comite-codigo" (ej. "UPM 1" → href="#collapseUPM1" e id="collapseUPM1").
+- IDENTIFICADOR DE ESIC: Para comités de ESIC, asigna SIEMPRE el identificador UFV en las etiquetas: href="#collapseUFV<N>" en "a.panel-toggle-link" e id="collapseUFV<N>" en su "div.collapse", donde <N> es el número del comité (ej. "ESIC 1" → href="#collapseUFV1" e id="collapseUFV1"). Nunca uses "collapseESIC" para ESIC.
+- SIN DATOS, NO INVENTES: si el material no contiene NINGÚN comité, universidad ni titulación (por ejemplo, porque la tabla venía en una imagen que no se pudo leer), no fabriques ningún encabezado ni texto de relleno: deja el panel sin rellenar para que la validación posterior detenga la publicación.
+- Cardinalidad tolerante 1 a N: un panel por comité. Si el material trae un solo comité, va en la raíz y "items" es []; si trae varios, el primero en la raíz y uno por cada comité restante en "items", sin repetir el primero.$old_rule$, $old_rule$CONTRATO DE PANEL (VERIFICACIÓN DE TÍTULOS):
 - Cada panel —el de la raíz y cada uno de "items"— conserva el encabezado de la PLANTILLA BASE tal cual: <h5 class="panel-title"> con su <a class="panel-toggle-link">. Nunca lo cambies por <h4> ni por otro nivel.
 - Rellena SIEMPRE las tres ranuras del encabezado: el href de "a.panel-toggle-link" (igual al id de su "div.collapse"), ".panel-comite-codigo" con el código del comité y ".panel-facultad-nombre" con el centro o la facultad. Si el material no nombra la facultad, usa el nombre del centro o de la universidad tal como figure. Un panel con cualquiera de esas ranuras vacía se rechaza entero; esta obligación prevalece sobre la regla de dejar vacío un dato ausente, que sigue valiendo para el resto de celdas.
 - Cardinalidad tolerante 1 a N: un panel por comité. Si el material trae un solo comité, va en la raíz y "items" es []; si trae varios, el primero en la raíz y uno por cada comité restante en "items", sin repetir el primero.$old_rule$, $old_rule$RESPALDO DEL ENCABEZADO DEL PANEL (VERIFICACIÓN DE TÍTULOS):
@@ -1012,13 +1056,15 @@ PLANTILLA BASE:
   - ".panel-facultad-nombre": el nombre del centro o la facultad. Si no figura de forma explícita, usa la titulación principal evaluada y, en su defecto, el nombre de la universidad.
 - El href de "a.panel-toggle-link" y el id de su "div.collapse" se derivan del valor final de ".panel-comite-codigo" (ej. "#collapseUPM1" e id="collapseUPM1") y deben coincidir exactamente.
 - SIN DATOS, NO INVENTES: si el material no contiene NINGÚN comité, universidad ni titulación (por ejemplo, porque la tabla venía en una imagen que no se pudo leer), no fabriques ningún encabezado ni texto de relleno: deja el panel sin rellenar para que la validación posterior detenga la publicación.
-- Cardinalidad tolerante 1 a N: un panel por comité. Si el material trae un solo comité, va en la raíz y "items" es []; si trae varios, el primero en la raíz y uno por cada comité restante en "items", sin repetir el primero.$old_rule$], $rule$ENCABEZADO DEL PANEL E IDENTIFICADORES (VERIFICACIÓN DE TÍTULOS):
+- Cardinalidad tolerante 1 a N: un panel por comité. Si el material trae un solo comité, va en la raíz y "items" es []; si trae varios, el primero en la raíz y uno por cada comité restante en "items", sin repetir el primero.$old_rule$], $rule$ENCABEZADO DEL PANEL, SIGLAS E IDENTIFICADORES (VERIFICACIÓN DE TÍTULOS):
 - Cada panel —el de la raíz y cada uno de "items"— conserva el encabezado de la PLANTILLA BASE tal cual: <h5 class="panel-title"> con su <a class="panel-toggle-link">. Nunca lo cambies por <h4> ni por otro nivel.
 - RESPALDO DEL ENCABEZADO DEL PANEL: cuando el material trae un comité, <h5 class="panel-title"> y su <a class="panel-toggle-link"> NUNCA quedan vacíos de texto. Rellena SIEMPRE sus dos ranuras con estos respaldos:
   - ".panel-comite-codigo": el identificador del comité (ej. "UPM 1", "ESIC 1"). Si en el material no figura un número de comité, usa las siglas de la universidad (ej. "UPM").
   - ".panel-facultad-nombre": el nombre del centro o la facultad. Si no figura de forma explícita, usa la titulación principal evaluada y, en su defecto, el nombre de la universidad.
-- IDENTIFICADORES: el href de "a.panel-toggle-link" y el id de su "div.collapse" deben coincidir exactamente y se derivan del valor final de ".panel-comite-codigo" (ej. "UPM 1" → href="#collapseUPM1" e id="collapseUPM1").
-- IDENTIFICADOR DE ESIC: Para comités de ESIC, asigna SIEMPRE el identificador UFV en las etiquetas: href="#collapseUFV<N>" en "a.panel-toggle-link" e id="collapseUFV<N>" en su "div.collapse", donde <N> es el número del comité (ej. "ESIC 1" → href="#collapseUFV1" e id="collapseUFV1"). Nunca uses "collapseESIC" para ESIC.
+- SIGLAS DE LA UNIVERSIDAD (siglas_universidad): son EXACTAMENTE el prefijo del código de ".panel-comite-codigo" y solo pueden ser una de estas: CEU, UAX, UCM, UDIMA, UIV, UEM, UNNE, UPM, UAH, UAM, UC3M, UCJC, URJC, ESIC. Ejemplos: "ESIC 2" → ESIC (nunca UFV ni otra universidad), "UAM 9" → UAM, "UC3M 1" → UC3M.
+- CÓDIGO NORMALIZADO DEL COMITÉ (codigo_comite_id): el código de ".panel-comite-codigo" sin espacios, derivado de forma determinista: "ESIC 2" → ESIC2, "UAM 9" → UAM9, "UPM 4" → UPM4.
+- IDENTIFICADORES: sustituye el relleno "collapsePanelId" por collapse<codigo_comite_id> en sus dos sitios: href="#collapse<codigo_comite_id>" en "a.panel-toggle-link" e id="collapse<codigo_comite_id>" en su "div.collapse" (ej. "ESIC 2" → href="#collapseESIC2" e id="collapseESIC2"). Los dos valores deben coincidir exactamente.
+- ACORDEÓN DE DESTINO: sustituye el relleno "#accordionSiglasUniversidad" del atributo data-parent de "a.panel-toggle-link" por #accordion<siglas_universidad> (ej. "ESIC 2" → data-parent="#accordionESIC"). Nunca uses el acordeón raíz data-parent="#accordion".
 - SIN DATOS, NO INVENTES: si el material no contiene NINGÚN comité, universidad ni titulación (por ejemplo, porque la tabla venía en una imagen que no se pudo leer), no fabriques ningún encabezado ni texto de relleno: deja el panel sin rellenar para que la validación posterior detenga la publicación.
 - Cardinalidad tolerante 1 a N: un panel por comité. Si el material trae un solo comité, va en la raíz y "items" es []; si trae varios, el primero en la raíz y uno por cada comité restante en "items", sin repetir el primero.$rule$)
         ) AS t(codigo, marker, old_rules, rule_text)
@@ -1040,11 +1086,16 @@ PLANTILLA BASE:
             patched := replace(patched,
                 $old$- Un dato que no aparezca en el material se deja vacio. NUNCA lo estimes ni lo deduzcas.$old$,
                 $new$- Un dato que no aparezca en el material se deja vacio. NUNCA lo estimes ni lo deduzcas. La unica salvedad son las dos ranuras del encabezado del panel, que siguen el RESPALDO DEL ENCABEZADO DEL PANEL.$new$);
-            -- El ejemplo de la instruccion base usaba collapseESIC1, que
-            -- contradice el identificador UFV de ESIC.
+            -- La v3 cambio el ejemplo collapseESIC1 de la instruccion base por
+            -- uno de UPM para no contradecir el identificador UFV de ESIC. Esa
+            -- regla ya no existe: ESIC usa collapseESIC<N> como las demas.
             patched := replace(patched,
-                $old$(ej. href="#collapseESIC1" e id="collapseESIC1", con almohadilla solo en el href)$old$,
-                $new$(ej. href="#collapseUPM1" e id="collapseUPM1", con almohadilla solo en el href; para ESIC, ver IDENTIFICADOR DE ESIC)$new$);
+                $old$(ej. href="#collapseUPM1" e id="collapseUPM1", con almohadilla solo en el href; para ESIC, ver IDENTIFICADOR DE ESIC)$old$,
+                $new$(ej. href="#collapseESIC1" e id="collapseESIC1", con almohadilla solo en el href)$new$);
+            -- data-parent ya no se conserva tal cual: lleva un relleno.
+            patched := replace(patched,
+                $old$asi como los atributos data-bs-toggle, data-parent, aria-expanded y colspan que la plantilla ya trae.$old$,
+                $new$asi como los atributos data-bs-toggle, data-parent, aria-expanded y colspan que la plantilla ya trae (el valor de data-parent se sustituye segun ACORDEÓN DE DESTINO).$new$);
         ELSE
             patched := replace(patched,
                 $old$- Elimina del marcado el <hr>, el encabezado <h2>Referencia bibliográfica</h2> y su parrafo SOLO si no hay estudio citado, ni articulo original, ni URL en la directiva del editor.$old$,
@@ -1715,7 +1766,6 @@ PLANTILLA BASE:
         "bundle": "node--page",
         "sourceNamespace": "validated_drupal_json",
         "sourceField": "validated_markup",
-        "containerSelector": "#accordion",
         "itemSelector": ".panel-default",
         "insertPosition": "APPEND"
       }
@@ -1975,6 +2025,47 @@ PLANTILLA BASE:
         VALUES (admin_id, 'ACTUALIZAR', 'plantillas_flujo', inserted_id::TEXT,
                 seed_tag || jsonb_build_object('slug', 'wf-notiweb-madridmasd', 'parche', 'presupuesto_generacion_extensa'));
     END IF;
+
+    -- 6h. Sin containerSelector en el destino de titulos -----------------
+    -- Cada panel declara su sub-acordeon (#accordion<SIGLAS>) y la estrategia
+    -- lo resuelve por id directo; el "#accordion" del nodo solo servia como
+    -- respaldo, y ese respaldo es la raiz del acordeon: publicar ahi un comite
+    -- es la averia. Se retira solo donde vale exactamente "#accordion" en un
+    -- DESTINO_DRUPAL con la huella del preset de titulos (itemSelector
+    -- ".panel-default"); cualquier otro valor es decision del operador.
+    FOR rec IN
+        SELECT f.id_flujo AS id, 'flujos' AS tabla, n.key AS destino_key, f.configuracion_pipeline
+          FROM flujos f, jsonb_each(f.configuracion_pipeline->'nodes') n
+         WHERE n.value->>'nodeType' = 'DESTINO_DRUPAL'
+           AND n.value #>> '{params,containerSelector}' = '#accordion'
+           AND n.value #>> '{params,itemSelector}' = '.panel-default'
+        UNION ALL
+        SELECT p.id_plantilla_flujo, 'plantillas_flujo', n.key, p.configuracion_pipeline
+          FROM plantillas_flujo p, jsonb_each(p.configuracion_pipeline->'nodes') n
+         WHERE n.value->>'nodeType' = 'DESTINO_DRUPAL'
+           AND n.value #>> '{params,containerSelector}' = '#accordion'
+           AND n.value #>> '{params,itemSelector}' = '.panel-default'
+    LOOP
+        IF rec.tabla = 'flujos' THEN
+            UPDATE flujos
+               SET configuracion_pipeline = configuracion_pipeline #- ARRAY['nodes', rec.destino_key, 'params', 'containerSelector'],
+                   actualizado_por = admin_id,
+                   fecha_actualizacion = NOW()
+             WHERE id_flujo = rec.id;
+            summary := jsonb_set(summary, '{flujos_reparados}', to_jsonb((summary->>'flujos_reparados')::INT + 1));
+        ELSE
+            UPDATE plantillas_flujo
+               SET configuracion_pipeline = configuracion_pipeline #- ARRAY['nodes', rec.destino_key, 'params', 'containerSelector'],
+                   actualizado_por = admin_id,
+                   fecha_actualizacion = NOW()
+             WHERE id_plantilla_flujo = rec.id;
+            summary := jsonb_set(summary, '{blueprints_parcheados}', to_jsonb((summary->>'blueprints_parcheados')::INT + 1));
+        END IF;
+        INSERT INTO audit_eventos (usuario_id, accion, tabla_afectada, registro_id, datos_anteriores, datos_nuevos)
+        VALUES (admin_id, 'ACTUALIZAR', rec.tabla, rec.id::TEXT,
+                jsonb_build_object('containerSelector', '#accordion'),
+                seed_tag || jsonb_build_object('nodo', rec.destino_key, 'parche', 'destino_titulos_sin_raiz'));
+    END LOOP;
 
     -- 7. Resumen de la siembra ----------------------------------------------
     -- Solo si se creo algo: una reejecucion no deja rastro nuevo.
