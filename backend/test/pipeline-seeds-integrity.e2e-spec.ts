@@ -591,33 +591,40 @@ describe('Siembra maestra de los cinco pipelines (e2e)', () => {
       );
     });
 
-    it('14.4ter deberia validar el cierre como JSON exigiendo headline, con el prompt intacto', async () => {
-      // 1. Arrange 📐 + 2. Act ⚙️: escudo del maestro de cierre (paso 6i) y
-      //    prompt de cierre.
+    it('14.4ter deberia dejar el cierre en el escudo TEXT estandar, sin modo JSON en ninguna fila', async () => {
+      // 1. Arrange 📐 + 2. Act ⚙️: escudo del maestro de cierre, escudos de
+      //    cualquier flujo o plantilla (paso 6i) y prompt de cierre.
       const escudo = blueprintBySlug('wf-licitacion-cerrar')
         .configuracion_pipeline.nodes['escudo'];
+      const [nonStandard] = await dataSource.query<{ total: number }[]>(
+        `SELECT count(*)::INT AS total FROM (
+           SELECT n.value FROM flujos f, jsonb_each(f.configuracion_pipeline->'nodes') n
+            WHERE n.value->>'nodeType' = 'ESCUDO_POST_IA'
+           UNION ALL
+           SELECT n.value FROM plantillas_flujo p, jsonb_each(p.configuracion_pipeline->'nodes') n
+            WHERE n.value->>'nodeType' = 'ESCUDO_POST_IA') e
+          WHERE e.value #>> '{params,contentMode}' NOT IN ('HTML', 'TEXT')
+             OR e.value #> '{params}' ? 'jsonSchema'`,
+      );
       const [prompt] = await dataSource.query<{ texto_prompt: string }[]>(
         `SELECT texto_prompt FROM plantillas_prompts_ia
           WHERE codigo = 'LICITACION_CIERRE_DEFAULT'`,
       );
       const text = prompt?.texto_prompt ?? '';
 
-      // 3. Assert 🎯: modo JSON con `headline` obligatorio y no vacio.
-      expect(escudo?.params).toMatchObject({
-        contentMode: 'JSON',
+      // 3. Assert 🎯
+      expect(escudo?.params).toEqual({
+        contentMode: 'TEXT',
         sourceNamespace: 'llm_response',
-        jsonSchema: {
-          required: ['headline'],
-          properties: { headline: { type: 'string', minLength: 1 } },
-        },
+        sourceFields: ['headline', 'summary'],
       });
+      expect(nonStandard?.total).toBe(0);
       // El asterisco es la marca OBLIGATORIA del motor (pausa antes de llamar
       // al modelo si falta el cuerpo), no un error: se conserva.
       expect(text).toContain('{{*parsed_email.clean_body}}');
       expect(text).toContain('{{parsed_email.extracted_documents_text}}');
       expect(text).toContain('{{ocr_result.clean_body}}');
       expect(text).not.toContain('{{**');
-      // Toda marca del prompt esta bien formada: `{{` + `*` opcional + ruta.
       const markers = text.match(/\{\{[^}]*\}\}/g) ?? [];
       expect(markers.length).toBeGreaterThan(0);
       for (const marker of markers) {

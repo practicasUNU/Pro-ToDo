@@ -56,18 +56,10 @@ const TAGS_HINT = `Lista cerrada: solo puede RESTRINGIR lo publicable. Vacio sig
 const TAGS_NOTICE =
   'Pedir una etiqueta que la lista blanca global no admite es ERR_POST_IA_UNSUPPORTED_TAGS: concederla por parametro seria abrir una via de XSS desde la configuracion de un nodo.';
 
-// Selector CERRADO (Poka-Yoke §4): solo los tres modos que el backend admite.
 const CONTENT_MODE_OPTIONS = [
   { label: 'Marcado HTML', value: PostIaContentMode.HTML },
   { label: 'Texto (sin plantilla)', value: PostIaContentMode.TEXT },
-  {
-    label: 'JSON (Validación y serialización de datos estructurados)',
-    value: PostIaContentMode.JSON,
-  },
 ] as const;
-
-const JSON_MODE_NOTICE =
-  'Modo para flujos que extraen datos (Cerrar licitacion): el escudo valida el objeto entero del PROCESADOR_IA —cadenas, listas y objetos anidados—, le quita toda etiqueta, rechaza los marcadores sin resolver y, si el nodo trae un esquema, comprueba que lo cumple. Un objeto sin ningun dato se detiene con ERR_POST_IA_EMPTY_JSON. El resultado queda en validated_json y, para los campos de texto de primer nivel, en validated_fields.<campo>.';
 
 const TEXT_MODE_NOTICE =
   'Modo para flujos que no maquetan HTML (Cerrar licitacion, Innodays, Innobar): el escudo lee los campos de texto del PROCESADOR_IA, les quita toda etiqueta y rechaza los marcadores sin resolver. No necesita ningun MAPEADOR_PLANTILLA por delante. El resultado queda en validated_fields.<campo>.';
@@ -168,15 +160,12 @@ const commitTypedSelector = (): void => {
     <div class="q-mb-md" data-test="content-mode-field">
       <span class="pd-label">Que audita el escudo</span>
       <div class="q-mt-xs">
-        <q-select
-          id="post-ia-content-mode"
+        <q-btn-toggle
           :model-value="store.config.contentMode"
+          no-caps
+          unelevated
+          toggle-color="primary"
           :options="[...CONTENT_MODE_OPTIONS]"
-          outlined
-          dense
-          emit-value
-          map-options
-          aria-label="Que audita el escudo"
           data-test="content-mode"
           @update:model-value="store.updateConfig({ contentMode: $event as PostIaContentMode })"
         />
@@ -184,23 +173,6 @@ const commitTypedSelector = (): void => {
       <p v-if="store.isTextMode" class="pd-subtitle q-mt-sm q-mb-none" data-test="text-mode-notice">
         {{ TEXT_MODE_NOTICE }}
       </p>
-      <template v-if="store.isJsonMode">
-        <p class="pd-subtitle q-mt-sm q-mb-none" data-test="json-mode-notice">
-          {{ JSON_MODE_NOTICE }}
-        </p>
-        <p
-          v-if="store.config.jsonSchema !== null"
-          class="pd-subtitle q-mt-sm q-mb-none"
-          data-test="json-schema-summary"
-        >
-          Esquema configurado. Campos obligatorios:
-          <span class="pd-mono">{{
-            store.jsonSchemaRequiredKeys.length > 0
-              ? store.jsonSchemaRequiredKeys.join(', ')
-              : 'ninguno'
-          }}</span>
-        </p>
-      </template>
     </div>
 
     <h3 class="pd-h2 q-mt-lg q-mb-md">Origen del marcado</h3>
@@ -257,7 +229,7 @@ const commitTypedSelector = (): void => {
         />
       </div>
 
-      <div v-else-if="!store.isJsonMode" class="col-12 col-md-6" data-test="source-field-field">
+      <div v-else class="col-12 col-md-6" data-test="source-field-field">
         <label class="pd-label" for="post-ia-field">
           Campo con el HTML<span class="pd-required">*</span>
         </label>
@@ -301,7 +273,7 @@ const commitTypedSelector = (): void => {
       <p class="pd-subtitle pd-mono q-mb-none">{{ store.config.sourceNamespace }}</p>
     </q-banner>
     <!-- Selectores y etiquetas solo tienen sentido sobre marcado HTML. -->
-    <template v-if="!store.isTextMode && !store.isJsonMode">
+    <template v-if="!store.isTextMode">
       <br />
       <h3 class="pd-h2 q-mt-lg q-mb-xs">Ranuras que la IA debe respetar</h3>
       <p class="pd-subtitle q-mb-md">{{ SELECTORS_NOTICE }}</p>

@@ -50,25 +50,6 @@ const asText = (value: unknown): string => (typeof value === 'string' ? value : 
 const asStringList = (value: unknown): string[] =>
   Array.isArray(value) ? value.filter((entry): entry is string => typeof entry === 'string') : [];
 
-/**
- * Copia profunda de un valor JSON.
- *
- * Por serializacion y no con `structuredClone`: el esquema vive dentro del
- * `ref` de la config y llega envuelto en proxies reactivos de Vue, que
- * `structuredClone` no sabe clonar (`DataCloneError`). Un JSON Schema es JSON
- * por definicion, asi que la serializacion no pierde nada.
- */
-const cloneJson = <T>(value: T): T => JSON.parse(JSON.stringify(value)) as T;
-
-/** Lee un objeto plano de los `params` crudos (copia), o `null`. */
-const asPlainObject = (value: unknown): Record<string, unknown> | null =>
-  typeof value === 'object' && value !== null && !Array.isArray(value)
-    ? cloneJson(value as Record<string, unknown>)
-    : null;
-
-/** Modos que el backend reconoce; cualquier otro valor cae al defecto. */
-const KNOWN_CONTENT_MODES: readonly string[] = Object.values(PostIaContentMode);
-
 /** Configuracion inicial; se reutiliza en `resetConfig`. */
 const buildInitialConfig = (): PostIaSanitizerNodeConfig => ({
   contentMode: DEFAULT_POST_IA_CONTENT_MODE,
@@ -77,7 +58,6 @@ const buildInitialConfig = (): PostIaSanitizerNodeConfig => ({
   sourceField: DEFAULT_POST_IA_SOURCE_FIELD,
   requiredSelectors: [],
   allowedTags: [],
-  jsonSchema: null,
 });
 
 // Estado reactivo del nodo ESCUDO_POST_IA (regla frontend-quasar.md §3.1).
@@ -149,17 +129,6 @@ const postIaSanitizerSetup = () => {
   /** Modo TEXT: audita campos de texto, sin plantilla base. */
   const isTextMode = computed<boolean>(() => config.value.contentMode === PostIaContentMode.TEXT);
 
-  /** Modo JSON: valida y sanea el objeto estructurado entero del modelo. */
-  const isJsonMode = computed<boolean>(() => config.value.contentMode === PostIaContentMode.JSON);
-
-  /**
-   * Claves que el `jsonSchema` del nodo exige (`required` de primer nivel), para
-   * mostrarlas en solo lectura. Vacio si no hay esquema o no exige ninguna.
-   */
-  const jsonSchemaRequiredKeys = computed<readonly string[]>(() =>
-    asStringList(config.value.jsonSchema?.required),
-  );
-
   /** Campos de texto elegidos que el namespace de origen no publica. */
   const missingTextFields = computed<readonly string[]>(() =>
     fieldOptions.value.length === 0
@@ -171,9 +140,6 @@ const postIaSanitizerSetup = () => {
     if (availableUpstreamContext.value.length === 0) return false;
 
     if (selectedNamespace.value === undefined) return true;
-
-    // En JSON se lee el objeto entero: basta con que el namespace exista.
-    if (isJsonMode.value) return false;
 
     if (isTextMode.value) return missingTextFields.value.length > 0;
 
@@ -242,16 +208,14 @@ const postIaSanitizerSetup = () => {
   const isConfigValid = computed<boolean>(
     () =>
       config.value.sourceNamespace.trim() !== '' &&
-      // En JSON solo cuenta el origen: campos, selectores y etiquetas no viajan.
-      (isJsonMode.value ||
-        ((isTextMode.value
-          ? config.value.sourceFields.length > 0 &&
-            config.value.sourceFields.length <= MAX_POST_IA_SOURCE_FIELDS
-          : config.value.sourceField.trim() !== '') &&
-          config.value.requiredSelectors.length <= MAX_REQUIRED_SELECTORS &&
-          oversizedSelectors.value.length === 0 &&
-          config.value.allowedTags.length <= MAX_ALLOWED_TAGS &&
-          unsupportedTags.value.length === 0)),
+      (isTextMode.value
+        ? config.value.sourceFields.length > 0 &&
+          config.value.sourceFields.length <= MAX_POST_IA_SOURCE_FIELDS
+        : config.value.sourceField.trim() !== '') &&
+      config.value.requiredSelectors.length <= MAX_REQUIRED_SELECTORS &&
+      oversizedSelectors.value.length === 0 &&
+      config.value.allowedTags.length <= MAX_ALLOWED_TAGS &&
+      unsupportedTags.value.length === 0,
   );
 
   /** Avisos que NO bloquean; lo que debe impedir guardar va en `isConfigValid`. */
@@ -261,25 +225,15 @@ const postIaSanitizerSetup = () => {
     if (hasStaleSource.value) {
       const origin = isTextMode.value
         ? `${config.value.sourceNamespace}.{${config.value.sourceFields.join(', ')}}`
-        : isJsonMode.value
-          ? config.value.sourceNamespace
-          : `${config.value.sourceNamespace}.${config.value.sourceField}`;
+        : `${config.value.sourceNamespace}.${config.value.sourceField}`;
 
       warnings.push(
         `El origen guardado "${origin}" ya no lo publica ningun paso anterior del flujo. El escudo fallara con ERR_POST_IA_MISSING_PAYLOAD o ERR_POST_IA_EMPTY_HTML en la primera ejecucion.`,
       );
     }
 
-    // En modo JSON sin esquema, cualquier dato basta para pasar: el escudo no
-    // sabe cual es imprescindible para el destino.
-    if (isJsonMode.value && config.value.jsonSchema === null) {
-      warnings.push(
-        'Sin jsonSchema, el escudo deja pasar cualquier objeto con algun dato. Si el destino necesita un campo concreto (p. ej. headline para localizar el expediente), declara un esquema que lo exija.',
-      );
-    }
-
-    // En TEXT y JSON no hay marcado que rellenar: el mapeador no hace falta.
-    if (isTextMode.value || isJsonMode.value) return warnings;
+    // En modo TEXT no hay marcado que rellenar: el mapeador no hace falta.
+    if (isTextMode.value) return warnings;
 
     if (availableUpstreamContext.value.length > 0 && !hasBaseTemplateUpstream.value) {
       warnings.push(
@@ -327,17 +281,6 @@ const postIaSanitizerSetup = () => {
 
     if (sourceNamespace !== '' && sourceNamespace !== DEFAULT_POST_IA_SOURCE_NAMESPACE) {
       params.sourceNamespace = sourceNamespace;
-    }
-
-    // Modo JSON: solo viajan el modo y el esquema, si lo hay.
-    if (isJsonMode.value) {
-      params.contentMode = PostIaContentMode.JSON;
-
-      if (config.value.jsonSchema !== null) {
-        params.jsonSchema = cloneJson(config.value.jsonSchema);
-      }
-
-      return params;
     }
 
     // Modo TEXT: solo viajan el modo y los campos; ni campo HTML, ni selectores
@@ -423,15 +366,14 @@ const postIaSanitizerSetup = () => {
 
     config.value = {
       contentMode:
-        typeof params.contentMode === 'string' && KNOWN_CONTENT_MODES.includes(params.contentMode)
-          ? (params.contentMode as PostIaContentMode)
+        params.contentMode === PostIaContentMode.TEXT
+          ? PostIaContentMode.TEXT
           : DEFAULT_POST_IA_CONTENT_MODE,
       sourceNamespace: asText(params.sourceNamespace) || DEFAULT_POST_IA_SOURCE_NAMESPACE,
       sourceFields: sourceFields.length > 0 ? sourceFields : [...DEFAULT_POST_IA_SOURCE_FIELDS],
       sourceField: asText(params.sourceField) || DEFAULT_POST_IA_SOURCE_FIELD,
       requiredSelectors: asStringList(params.requiredSelectors),
       allowedTags: asStringList(params.allowedTags),
-      jsonSchema: asPlainObject(params.jsonSchema),
     };
   };
 
@@ -451,8 +393,6 @@ const postIaSanitizerSetup = () => {
     hasStaleSource,
     hasBaseTemplateUpstream,
     isTextMode,
-    isJsonMode,
-    jsonSchemaRequiredKeys,
     missingTextFields,
     oversizedSelectors,
     unsupportedTags,

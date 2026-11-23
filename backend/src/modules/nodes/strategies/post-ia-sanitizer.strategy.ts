@@ -9,11 +9,6 @@ import { TemplateRendererService } from '@modules/templates/services/template-re
 import { RESIDUAL_MARKER_PATTERN } from '@modules/templates/templates.service';
 import { normalizeItems } from '@common/utils/cardinality-normalizer.util';
 import { stripCodeFence } from '@modules/nodes/utils/code-fence.util';
-import {
-  compileJsonSchema,
-  describeSchemaErrors,
-  isPlainObject,
-} from '@modules/nodes/utils/json-schema.util';
 
 import {
   DEFAULT_POST_IA_SOURCE_NAMESPACE,
@@ -30,7 +25,6 @@ import type {
   NodeResult,
 } from '@core/fsm/types/node-strategy.types';
 import type { ResolvedPostIaSanitizerConfig } from '../dto/post-ia-sanitizer-config.dto';
-import type { ValidateFunction } from 'ajv';
 import type { ValidatorOptions } from 'class-validator';
 
 /**
@@ -56,61 +50,17 @@ export const ERR_POST_IA_EMPTY_AFTER_SANITIZE =
   'ERR_POST_IA_EMPTY_AFTER_SANITIZE';
 export const ERR_POST_IA_DOM_MUTATED = 'ERR_POST_IA_DOM_MUTATED';
 
-/**
- * Modo JSON: el objeto del modelo no trae ningun valor efectivo (todo vacio,
- * nulo o solo claves tecnicas). Codigo propio y no `EMPTY_HTML`: no faltaba
- * marcado, faltaban DATOS, y el arreglo esta en el prompt o en el material.
- */
-export const ERR_POST_IA_EMPTY_JSON = 'ERR_POST_IA_EMPTY_JSON';
-
-/**
- * Modo JSON: el objeto saneado no cumple el `jsonSchema` del nodo. Es el caso
- * del cierre de licitacion sin expediente: hay datos, pero no el que localiza
- * el bloque en la pagina, y publicarlos solo moveria el fallo al destino.
- */
-export const ERR_POST_IA_SCHEMA_MISMATCH = 'ERR_POST_IA_SCHEMA_MISMATCH';
-
 /** Clave del lote en la salida del nodo de IA (cardinalidad 1 a N). */
 const RESPONSE_ITEMS_FIELD = 'items';
 
 /** Campos de texto que acompanan al markup y se publican saneados. */
 const HTML_COMPANION_FIELDS = ['headline', 'summary', 'source_url'] as const;
 
-/**
- * Claves TECNICAS que publica el `PROCESADOR_IA` junto a los datos. El modo
- * JSON no las audita ni las republica: `metadata` (telemetria) siempre trae
- * valor, y contarla haria que ningun objeto pareciera vacio; `items` se audita
- * elemento a elemento, como en los otros modos.
- */
-const JSON_TECHNICAL_KEYS: ReadonlySet<string> = new Set([
-  'metadata',
-  'resolved_cardinality',
-  RESPONSE_ITEMS_FIELD,
-]);
-
-/**
- * Caracteres de control que no tienen sitio en un dato publicable. Se conservan
- * el tabulador y los saltos de linea (`\t`, `\n`, `\r`), que son formato.
- */
-// eslint-disable-next-line no-control-regex
-const CONTROL_CHARACTERS = /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g;
-
-/** Valor JSON tal y como lo serializa el escudo. */
-type JsonValue =
-  | string
-  | number
-  | boolean
-  | null
-  | readonly JsonValue[]
-  | { readonly [key: string]: JsonValue };
-
 /** Un elemento del lote ya auditado, tal y como se publica. */
 interface ValidatedItem {
   readonly validated_markup: string;
   readonly validated_fields: Record<string, string>;
   readonly character_count: number;
-  /** El objeto saneado del elemento en modo JSON; `{}` en HTML y TEXT. */
-  readonly validated_json: Record<string, JsonValue>;
 }
 
 /** Las mismas que aplica `PipelineValidatorService` al guardar el esquema. */
@@ -179,7 +129,7 @@ export class PostIaSanitizerStrategy implements INodeStrategy {
   public readonly paramsSchema = PostIaSanitizerConfigDto;
 
   /**
-   * Las siete claves que este nodo deposita en su namespace, en los tres modos.
+   * Las cuatro claves que este nodo deposita en su namespace.
    *
    * `validated_markup` y no `compiled_markup`: el nombre heredado del mapeador
    * ya miente alli (contiene markup sin compilar) y repetirlo aqui multiplicaria
@@ -218,13 +168,7 @@ export class PostIaSanitizerStrategy implements INodeStrategy {
       name: 'validated_items',
       type: 'object',
       description:
-        'Elementos del lote del segundo en adelante, ya auditados: [{ validated_markup, validated_fields, character_count, validated_json }]. Vacio con un solo elemento',
-    },
-    {
-      name: 'validated_json',
-      type: 'object',
-      description:
-        'Modo JSON: el objeto estructurado del modelo, saneado en profundidad y validado contra el jsonSchema del nodo ({} en HTML y TEXT)',
+        'Elementos del lote del segundo en adelante, ya auditados: [{ validated_markup, validated_fields, character_count }]. Vacio con un solo elemento',
     },
   ];
 
@@ -281,51 +225,20 @@ export class PostIaSanitizerStrategy implements INodeStrategy {
       };
     }
 
-    // 2bis. Tres modos. TEXT y JSON no necesitan ningun MAPEADOR_PLANTILLA por
-    //       delante: TEXT audita cadenas sueltas y JSON el objeto entero.
-    const { contentMode, sourceFields, jsonSchema } = resolution.config;
-
-    // El esquema se compila UNA vez por ejecucion, no por elemento del lote. El
-    // DTO ya lo rechazo al guardar si no compilaba; esto cubre un esquema
-    // escrito directamente en la base.
-    const schemaCompilation =
-      contentMode === PostIaContentMode.JSON && jsonSchema !== null
-        ? compileJsonSchema(jsonSchema)
-        : null;
-
-    if (schemaCompilation !== null && 'error' in schemaCompilation) {
-      return {
-        success: false,
-        error: {
-          level: 'GRAVE',
-          code: ERR_POST_IA_CONFIG,
-          message: `Configuracion invalida del nodo escudo posterior a IA: jsonSchema no es un JSON Schema valido (${schemaCompilation.error}).`,
-          missingFields: ['jsonSchema'],
-        },
-      };
-    }
-
+    // 2bis. Flujos sin maquetacion: el escudo audita los campos de texto del
+    //       modelo y no necesita ningun MAPEADOR_PLANTILLA por delante.
+    const isTextMode = resolution.config.contentMode === PostIaContentMode.TEXT;
     const audit = (
       record: Record<string, unknown>,
       label: string,
-    ): NodeResult => {
-      switch (contentMode) {
-        case PostIaContentMode.TEXT:
-          return this.auditTextFields(record, label, sourceFields);
-        case PostIaContentMode.JSON:
-          return this.auditJson(
-            record,
-            label,
-            schemaCompilation === null ? null : schemaCompilation.validate,
-          );
-        default:
-          return this.auditHtml(record, label, {
+    ): NodeResult =>
+      isTextMode
+        ? this.auditTextFields(record, label, resolution.config.sourceFields)
+        : this.auditHtml(record, label, {
             sourceField,
             allowedTags,
             requiredSelectors,
           });
-      }
-    };
 
     // 3. La raiz: el primer (o unico) elemento, exactamente como hasta ahora.
     const rootResult = audit(sourcePayload, sourceNamespace);
@@ -367,9 +280,6 @@ export class PostIaSanitizerStrategy implements INodeStrategy {
           string
         >,
         character_count: Number(itemResult.data?.character_count ?? 0),
-        validated_json: isPlainObject(itemResult.data?.validated_json)
-          ? (itemResult.data.validated_json as Record<string, JsonValue>)
-          : {},
       });
     }
 
@@ -507,8 +417,6 @@ export class PostIaSanitizerStrategy implements INodeStrategy {
         // destino puede titular cada elemento del lote sin leer el texto en
         // bruto del modelo.
         validated_fields: this.plainCompanionFields(sourcePayload),
-        // Neutro: la forma del payload es la misma en los tres modos.
-        validated_json: {},
       },
     };
   }
@@ -599,202 +507,8 @@ export class PostIaSanitizerStrategy implements INodeStrategy {
         audit_status: AUDIT_STATUS_PASSED,
         sanitized_at: new Date().toISOString(),
         validated_fields: validatedFields,
-        // Neutro: la forma del payload es la misma en los tres modos.
-        validated_json: {},
       },
     };
-  }
-
-  /**
-   * Modo JSON: valida, sanea y serializa el objeto estructurado del modelo.
-   *
-   * Mismo orden que los otros modos y por el mismo motivo: los marcadores
-   * residuales se buscan ANTES de sanear. Despues:
-   *
-   * 1. Valor efectivo: al menos una cadena con texto, un numero, un booleano o
-   *    una coleccion que contenga algo de eso. `null`, `''`, `[]` y `{}` no
-   *    cuentan, y las claves tecnicas (`metadata`...) no se miran.
-   * 2. Saneado en profundidad de cada cadena —sin ninguna etiqueta, entidades
-   *    decodificadas y sin caracteres de control—, construyendo un objeto NUEVO.
-   *    Claves, numeros, booleanos, `null` y la forma de los arreglos se
-   *    conservan. El contexto no se toca: `getNamespace` entrega un clon y de el
-   *    solo se lee.
-   * 3. `jsonSchema` sobre el objeto YA saneado: lo que el esquema garantiza es
-   *    lo que se publica, no lo que el modelo escribio antes de quitarle las
-   *    etiquetas.
-   *
-   * `validated_fields` lleva las cadenas de primer nivel saneadas, para que los
-   * destinos que ya leen `validated_fields.headline` funcionen igual.
-   */
-  private auditJson(
-    sourcePayload: Record<string, unknown>,
-    sourceNamespace: string,
-    validateSchema: ValidateFunction | null,
-  ): NodeResult {
-    const content = Object.fromEntries(
-      Object.entries(sourcePayload).filter(
-        ([key]) => !JSON_TECHNICAL_KEYS.has(key),
-      ),
-    );
-
-    if (!this.hasEffectiveValue(content)) {
-      return {
-        success: false,
-        error: {
-          level: 'GRAVE',
-          code: ERR_POST_IA_EMPTY_JSON,
-          message: `El escudo (modo JSON) no encuentra ningun dato en "${sourceNamespace}": el objeto esta vacio o todos sus campos son nulos o estan en blanco.`,
-          missingFields: [sourceNamespace],
-        },
-      };
-    }
-
-    const residualMarkers = [
-      ...new Set(
-        this.collectStrings(content).flatMap((text) =>
-          this.findResidualMarkers(text),
-        ),
-      ),
-    ];
-
-    if (residualMarkers.length > 0) {
-      return {
-        success: false,
-        error: {
-          level: 'GRAVE',
-          code: ERR_POST_IA_RESIDUAL_VARS,
-          message: `El modelo devolvio ${residualMarkers.length} marcador(es) sin resolver: ${residualMarkers.join(', ')}. Publicarlos imprimiria las llaves literales.`,
-          missingFields: residualMarkers,
-        },
-      };
-    }
-
-    const sanitized = this.sanitizeJsonObject(content);
-
-    if (!this.hasEffectiveValue(sanitized)) {
-      return {
-        success: false,
-        error: {
-          level: 'GRAVE',
-          code: ERR_POST_IA_EMPTY_AFTER_SANITIZE,
-          message: `El objeto de "${sourceNamespace}" quedo sin ningun dato tras el saneado: todo su texto eran etiquetas.`,
-          missingFields: [sourceNamespace],
-        },
-      };
-    }
-
-    if (validateSchema !== null && !validateSchema(sanitized)) {
-      const { paths, messages } = describeSchemaErrors(
-        validateSchema.errors ?? [],
-        sourceNamespace,
-      );
-
-      return {
-        success: false,
-        error: {
-          level: 'GRAVE',
-          code: ERR_POST_IA_SCHEMA_MISMATCH,
-          message: `El objeto saneado no cumple el jsonSchema del escudo: ${messages.join('; ')}.`,
-          missingFields: paths,
-        },
-      };
-    }
-
-    const validatedFields = Object.fromEntries(
-      Object.entries(sanitized).filter(
-        (entry): entry is [string, string] =>
-          typeof entry[1] === 'string' && entry[1].length > 0,
-      ),
-    );
-
-    return {
-      success: true,
-      data: {
-        validated_markup: '',
-        character_count: JSON.stringify(sanitized).length,
-        audit_status: AUDIT_STATUS_PASSED,
-        sanitized_at: new Date().toISOString(),
-        validated_fields: validatedFields,
-        validated_json: sanitized,
-      },
-    };
-  }
-
-  /** Si un valor (a cualquier profundidad) trae algun dato publicable. */
-  private hasEffectiveValue(value: unknown): boolean {
-    if (typeof value === 'string') return value.trim().length > 0;
-    if (typeof value === 'number') return Number.isFinite(value);
-    if (typeof value === 'boolean') return true;
-    if (Array.isArray(value)) {
-      return value.some((entry) => this.hasEffectiveValue(entry));
-    }
-    if (isPlainObject(value)) {
-      return Object.values(value).some((entry) =>
-        this.hasEffectiveValue(entry),
-      );
-    }
-
-    return false;
-  }
-
-  /** Todas las cadenas de un valor, a cualquier profundidad. */
-  private collectStrings(value: unknown): string[] {
-    if (typeof value === 'string') return [value];
-    if (Array.isArray(value)) {
-      return value.flatMap((entry) => this.collectStrings(entry));
-    }
-    if (isPlainObject(value)) {
-      return Object.values(value).flatMap((entry) =>
-        this.collectStrings(entry),
-      );
-    }
-
-    return [];
-  }
-
-  /** Copia saneada de un objeto: ver `sanitizeJsonValue`. */
-  private sanitizeJsonObject(
-    record: Record<string, unknown>,
-  ): Record<string, JsonValue> {
-    return Object.fromEntries(
-      Object.entries(record).flatMap(([key, value]) => {
-        const sanitized = this.sanitizeJsonValue(value);
-
-        return sanitized === undefined ? [] : [[key, sanitized]];
-      }),
-    );
-  }
-
-  /**
-   * Copia saneada de un valor JSON.
-   *
-   * Las cadenas pierden toda etiqueta, decodifican entidades y pierden los
-   * caracteres de control; numeros, booleanos y `null` pasan tal cual. Lo que
-   * no es JSON (`undefined`, funciones, `NaN`) se descarta: no sobreviviria a
-   * la persistencia del namespace en `jsonb`, y es mejor que falte aqui, a la
-   * vista, que en la base.
-   */
-  private sanitizeJsonValue(value: unknown): JsonValue | undefined {
-    if (typeof value === 'string') {
-      return this.toPlainText(stripCodeFence(value)).replace(
-        CONTROL_CHARACTERS,
-        '',
-      );
-    }
-    if (typeof value === 'number') {
-      return Number.isFinite(value) ? value : undefined;
-    }
-    if (typeof value === 'boolean' || value === null) return value;
-    if (Array.isArray(value)) {
-      return value.flatMap((entry) => {
-        const sanitized = this.sanitizeJsonValue(entry);
-
-        return sanitized === undefined ? [] : [sanitized];
-      });
-    }
-    if (isPlainObject(value)) return this.sanitizeJsonObject(value);
-
-    return undefined;
   }
 
   /**
