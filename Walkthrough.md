@@ -9563,3 +9563,11 @@ mapeador.
 - **Por que el esquema se aplica tras sanear:** lo que se garantiza es lo que se publica. Un `headline` que solo fueran etiquetas no cuenta como expediente.
 - **Por que `structuredClone` no sirve en el store:** el esquema vive dentro del `ref` reactivo y llega en proxies que no se pueden clonar. Se copia por JSON, que para un JSON Schema no pierde nada.
 - [ ] Pendiente de negocio: pedir que los correos de cierre incluyan el codigo de expediente. Sin el no hay forma determinista de saber que bloque trasladar, y el flujo seguira pausandose (ahora con `ERR_POST_IA_SCHEMA_MISMATCH` y alerta SMTP)
+
+## Retiro del modo JSON del escudo
+
+- **Por que se retira:** el cierre funciona con TEXT sobre `headline` y `summary`, y un tercer modo con su propio contrato (`jsonSchema`, `ajv`, dos codigos de error) no compensa su mantenimiento. Se revirtio el commit entero y no a mano: el codigo de produccion queda identico al anterior.
+- **Por que hace falta 6i aunque se revirtiera la 069:** las bases que ya la habian ejecutado conservaban escudos en `JSON`, que el DTO rechaza ahora con `ERR_POST_IA_CONFIG`. La normalizacion los devuelve a TEXT; es idempotente y queda auditada.
+- **Que no cambia:** el asterisco de `{{*parsed_email.clean_body}}` sigue siendo la marca obligatoria. El caso real sin expediente se sigue parando en el escudo, ahora con `ERR_POST_IA_EMPTY_HTML` sobre `llm_response.headline` / `summary` (unitaria 12.2 y e2e 8.3bis).
+- **Estado observado en desarrollo:** `Cierre Licitacion Remoto` ya estaba editado a mano en TEXT con `sourceFields: ["headline"]`. Como no estaba en JSON, la normalizacion no lo toca.
+- [ ] Pendiente de negocio: que los correos de cierre incluyan el codigo de expediente

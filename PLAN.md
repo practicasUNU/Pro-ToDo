@@ -5384,3 +5384,13 @@ Rama: `feat/drupal-and-acens-nodes-dev`. Migraciones `065` y `066`.
 - [x] 069 reaplicada dos veces en la base de pruebas y en la de desarrollo. El flujo `Cierre Licitacion Remoto` queda en JSON
 - [x] Backend 3360 unitarias y 155/155 e2e (8.3bis y 14.4ter nuevas). Frontend 1813 y `vue-tsc` limpio
 - [ ] Negocio: el correo de cierre debe identificar el expediente (ver Walkthrough)
+
+## Retiro del modo JSON del escudo
+
+- **Decision:** el escudo vuelve a los dos modos estandar, `HTML | TEXT`, para simplificar el contrato y su mantenimiento. Se revierte el modo JSON (`a684a03`): sin `jsonSchema`, sin `ajv`, sin `ERR_POST_IA_EMPTY_JSON` / `ERR_POST_IA_SCHEMA_MISMATCH` y sin `validated_json`. La seccion «Escudo en modo JSON y maestro de cierre» queda RETIRADA.
+- **Maestro de cierre:** escudo `{"contentMode": "TEXT", "sourceNamespace": "llm_response", "sourceFields": ["headline", "summary"]}`.
+- **Migracion 069 (6i):** normaliza a ese TEXT cualquier `ESCUDO_POST_IA` de `flujos` o `plantillas_flujo` que siga en `contentMode: "JSON"`, quitando `jsonSchema`, conservando su `sourceNamespace` y dejando registro en auditoria. Es idempotente.
+- **Frontend:** el toggle vuelve a las dos opciones «Marcado HTML» / «Texto (sin plantilla)».
+- [x] 069 reaplicada dos veces en la base de pruebas y en la de desarrollo: 0 escudos en JSON o con `jsonSchema`
+- [x] Regresion TEXT/HTML (unitaria bloque 12, e2e 8.3bis en TEXT y 14.4ter). Backend 3346 unitarias y 155/155 e2e; frontend 1806 y `vue-tsc` limpio
+- [ ] Negocio: el correo de cierre debe identificar el expediente
