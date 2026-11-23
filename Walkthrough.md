@@ -9553,3 +9553,13 @@ mapeador.
 - **Por que ESIC conserva el respaldo UFV:** la seccion de ESIC en produccion se publico con `#collapseUFV`. Si esa pagina no tiene `#accordionESIC`, el respaldo guardado por encabezado evita un error en una pagina valida, y sigue sin poder caer en la Universidad Francisco de Vitoria.
 - [x] Backend: 3341 unitarias y 153/153 e2e (nuevo 14.4bis). Frontend: 1806 y `vue-tsc` limpio
 - [ ] Revisar en la pagina real que las copias `d-none` y los restos de la raiz desaparecen o reciben sufijo en la proxima publicacion
+
+## Cierre de licitacion pausado en el escudo
+
+- **Diagnostico con la ejecucion real** (desarrollo, 2026-11-23): el cuerpo del correo SI llego al modelo, que extrajo de el la fecha de cierre y el enlace. `headline` salio vacio porque el correo no menciona ningun expediente ni el objeto del contrato («va de la mano con la prueba de abrir licitacion»), y el prompt ordena dejarlo vacio antes que inventarlo.
+- **Por que no se quito el asterisco de `{{*parsed_email.clean_body}}`:** es la marca obligatoria del motor (`state-payload.context.ts`), no un error de sintaxis. Si falta el cuerpo, pausa ANTES de pagar la llamada al modelo. Quitarlo no habria cambiado el resultado y habria debilitado la guarda.
+- **Por que fallaba tambien tras reconfigurar el escudo:** el modo TEXT solo audita cadenas (`body_paragraphs` es un arreglo) y el HTML necesita un campo con marcado. El cierre extrae datos, y ninguno de los dos modos los describe.
+- **Por que JSON con esquema y no "cualquier dato basta":** el destino localiza el bloque por `validated_fields.headline`. Sin esquema, el caso real (con `body_paragraphs` pero sin expediente) habria pasado el escudo y fallado en Drupal con `[data-expediente=""]`. Con el esquema se para en el escudo, nombrando `llm_response.headline`.
+- **Por que el esquema se aplica tras sanear:** lo que se garantiza es lo que se publica. Un `headline` que solo fueran etiquetas no cuenta como expediente.
+- **Por que `structuredClone` no sirve en el store:** el esquema vive dentro del `ref` reactivo y llega en proxies que no se pueden clonar. Se copia por JSON, que para un JSON Schema no pierde nada.
+- [ ] Pendiente de negocio: pedir que los correos de cierre incluyan el codigo de expediente. Sin el no hay forma determinista de saber que bloque trasladar, y el flujo seguira pausandose (ahora con `ERR_POST_IA_SCHEMA_MISMATCH` y alerta SMTP)

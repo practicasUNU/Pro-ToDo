@@ -5368,3 +5368,19 @@ Rama: `feat/drupal-and-acens-nodes-dev`. Migraciones `065` y `066`.
   - El preset `VERIFICACION_TITULOS` del frontend pasa a `containerSelector: null`.
 - [x] 069 reaplicada dos veces en la base de pruebas y en la de desarrollo (la segunda pasada no cambia nada), y bootstrap de una base nueva comprobado
 - [x] Pruebas AAA: colision `collapseUAM9-2`, limpieza de la raiz, UAH anidado en UPM 5, URJC sin contenedor, ESIC 2 desde `collapseUFV2`
+
+## Escudo en modo JSON y maestro de cierre
+
+- **Contrato:** `PostIaContentMode` pasa a `HTML | TEXT | JSON`. `jsonSchema?: Record<string, unknown>` (`IsCompilableJsonSchemaConstraint`: compila con `ajv` estricto al guardar; tope de 16 KB). La compilacion se comparte entre el DTO y la estrategia en `utils/json-schema.util.ts` (`compileJsonSchema`, `describeSchemaErrors`).
+- **`auditJson`** (raiz y cada item):
+  1. Descarta las claves tecnicas (`metadata`, `resolved_cardinality`, `items`).
+  2. Exige al menos un valor efectivo (`ERR_POST_IA_EMPTY_JSON`).
+  3. Rechaza los marcadores residuales anidados.
+  4. Sanea en profundidad sin mutar el contexto (sin etiquetas, entidades decodificadas, sin caracteres de control; se conservan claves, numeros, booleanos, `null` y la forma de los arreglos).
+  5. Aplica `ajv` sobre el objeto ya saneado (`ERR_POST_IA_SCHEMA_MISMATCH`).
+- **Salida:** `validated_json` y, para las cadenas de primer nivel, `validated_fields` (los destinos siguen leyendo `validated_fields.headline`). `validated_json` sale `{}` en HTML y TEXT para que el payload tenga la misma forma.
+- **Migracion 069 (6i):** el maestro `wf-licitacion-cerrar` y los flujos con un `DESTINO_DRUPAL` en `TRANSFER_HTML_BLOCK` pasan el escudo a JSON con un esquema que exige `headline` no vacio. El prompt de cierre conserva `{{*parsed_email.clean_body}}`.
+- **Frontend:** el modo es un `q-select` cerrado con la opcion «JSON (Validación y serialización de datos estructurados)». El store conserva el `jsonSchema` en la ida y vuelta, y en JSON solo valida el origen.
+- [x] 069 reaplicada dos veces en la base de pruebas y en la de desarrollo. El flujo `Cierre Licitacion Remoto` queda en JSON
+- [x] Backend 3360 unitarias y 155/155 e2e (8.3bis y 14.4ter nuevas). Frontend 1813 y `vue-tsc` limpio
+- [ ] Negocio: el correo de cierre debe identificar el expediente (ver Walkthrough)
