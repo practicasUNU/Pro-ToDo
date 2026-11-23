@@ -154,8 +154,8 @@ ejecuta lo que falta y se detiene en el primer fallo.
 # Base de desarrollo (DB_NAME de backend/.env)
 npm run db:migrate --prefix backend
 
-# Base de las pruebas E2E
-DB_NAME='<nombre_bd_test>' npm run test:migrate --prefix backend
+# Base de las pruebas E2E (E2E_DB_NAME de backend/.env, ver §4.3.1)
+npm run test:migrate --prefix backend
 ```
 
 > **Primera vez sobre una base que YA está al día:** regístralas sin ejecutarlas, o se reaplicaría
@@ -171,17 +171,32 @@ añaden un valor a un enum (`030`, `039`) no pueden ir en una (error 55P04 de Po
 
 ```bash
 npm run db:bootstrap --prefix backend                 # usa DB_NAME
-DB_NAME='<nombre_bd_test>' npm run test:bootstrap --prefix backend
+npm run test:bootstrap --prefix backend               # usa E2E_DB_NAME (ver §4.3.1)
 ```
 
-Ejecuta `init.sql`, registra las migraciones en modo baseline y siembra un ADMIN activo
-(`BOOTSTRAP_ADMIN_EMAIL`, por defecto la cuenta declarada en `backend/.env`; ej. `admin@example.com`). Aborta si la base ya existe: recrearla
+Si el volumen nació vacío, el primer `docker compose up -d` ya creó `DB_NAME` desde `init.sql`
+(sin ADMIN ni `schema_migrations`) y `db:bootstrap` abortará con «ya existe»: como esa base está
+vacía, se borra con el `DROP DATABASE` que imprime el propio script y se relanza.
+
+Ejecuta `init.sql`, registra las migraciones en modo baseline, siembra un ADMIN activo
+(`BOOTSTRAP_ADMIN_EMAIL`, por defecto la cuenta declarada en `backend/.env`; ej. `admin@example.com`) y carga las semillas de contenido (ver abajo). Aborta si la base ya existe: recrearla
 pierde datos y no puede ser un efecto secundario.
 
-⚠️ **No incluye las semillas de contenido** (plantillas HTML, prompts, plantillas de flujo). Viven en
-migraciones que exigen un autor (`id_usuario_creador` es NOT NULL con FK RESTRICT) y por eso no están
-en `init.sql`. Para una base de desarrollo con contenido, aplícalas a mano después:
-`db/migrations/{008,018,023,024,028,029,031,032}-*.sql`.
+✅ **Incluye las semillas de contenido** (plantillas HTML, prompts de IA y los cinco blueprints
+maestros de `plantillas_flujo`): justo después del ADMIN ejecuta `db/migrations/069-*.sql` con
+`ON_ERROR_STOP=1`. No hay bucle manual posterior, ni en `db:bootstrap` ni en `test:bootstrap`. Si
+falla, el script sale con código ≠ 0.
+
+- **Van directas, no por `schema_migrations`:** el baseline ya las marcó como aplicadas, así que
+  `db:migrate` las saltaría.
+- **Solo la `069`, no la secuencia histórica `008…032`:** la `069` es autocontenida (nodos, tarifas,
+  plantillas HTML, prompts con su texto final y blueprints) e inserta cada fila solo si falta. Si
+  antes corren `023`/`032`, la fila queda con el texto antiguo, la `069` no la reescribe y las
+  `033…068` que la actualizaban están en baseline: `NOTIWEB_DEFAULT` pierde la fecha APA de la `068`
+  y la `028` deja una plantilla de apertura obsoleta. La `018` crearía además la tabla huérfana
+  `prompts_ia`. Una semilla nueva que la `069` no cubra se añade a `SEED_MIGRATIONS` en el script.
+- **Bases creadas antes de este cambio** pueden tener la `069` registrada sin ejecutar
+  (`plantillas_flujo` vacía): recréalas o aplica la `069` una vez como en §3.1.
 
 ⚠️ **`init.sql` no se puede encadenar con toda la historia.** Es el acumulado final, así que la `005`
 (actualiza `tipos_nodo`, sustituida por `nodos` en la `011`), la `009` (recrea `tokens_sesion`) y la
@@ -233,7 +248,24 @@ Todos los comandos se ejecutan desde `backend/`.
 | `npm run test:watch` | Modo observador. |
 | `npm run test:cov` | Con cobertura (`../coverage`). |
 | `npm run test:debug` | `--inspect-brk --runInBand` para depuración paso a paso. |
-| `DB_NAME='<nombre_bd_test>' npm run test:e2e` | Integración/E2E (`test/jest-e2e.json`, configuración aparte). Aborta si `DB_NAME` falta o coincide con la base de `backend/.env`. |
+| `npm run test:e2e` | Integración/E2E (`test/jest-e2e.json`, configuración aparte) contra la base de `E2E_DB_NAME`. Aborta antes de conectar si falta o coincide con `DB_NAME` (ver §4.3.1). |
+
+#### 4.3.1 Base de las pruebas E2E (`E2E_DB_NAME`)
+
+Se declara una vez en `backend/.env`: `E2E_DB_NAME='<nombre_bd_test>'`, distinto de `DB_NAME`.
+`test:e2e`, `test:migrate` y `test:bootstrap` la leen solos, sin `DB_NAME=` en la línea de comandos.
+La regla vive en `backend/test/helpers/test-database.resolver.ts` (guarda de Jest en `setupFiles`)
+y se replica en `scripts/with-test-env.sh` (envoltorio de los dos scripts de base de datos):
+
+| Situación | Base usada |
+|---|---|
+| `DB_NAME='<nombre_bd_test>'` explícito, distinto del de desarrollo | ese override |
+| `DB_NAME` heredado de `source backend/.env` (igual al de desarrollo) | `E2E_DB_NAME`, con aviso |
+| sin `DB_NAME` en el entorno | `E2E_DB_NAME` (exportado o, si no, de `backend/.env`) |
+| `E2E_DB_NAME` vacío o igual a `DB_NAME` | **aborta** (exit 1) sin conectar |
+
+`test:bootstrap` deja la base sembrada (§3.1.2), incluida la `069` que valida
+`pipeline-seeds-integrity.e2e-spec.ts`.
 
 > `jest.rootDir` es `src`, así que **un `.spec.ts` colocado en `backend/test/` no lo ejecuta `npm test`**. Los specs unitarios viven junto al fuente; `backend/test/` alberga factories, fixtures y los `*.e2e-spec.ts`.
 
@@ -249,7 +281,7 @@ Todos los comandos se ejecutan desde `frontend/`.
 |---|---|
 | `npm run dev` | Servidor de desarrollo Vite (`quasar dev`). |
 | `npm run build` | Compilación SPA de producción (`quasar build`). |
-| `npm run postinstall` | `quasar prepare --silent`; regenera `.quasar/` (automático en `npm install`). |
+| `npm run postinstall` | `quasar prepare --silent`; regenera `.quasar/` (automático en `npm ci`). |
 
 ### 5.2 Calidad y tipos
 
@@ -539,8 +571,9 @@ Slash commands invocables en Claude Code. Cada uno exige validaciones antes de t
 # 0. Entorno (desde la raíz, una vez por terminal)
 set -a && source backend/.env && set +a
 
-# 1. Infraestructura
+# 1. Infraestructura y dependencias (npm ci, nunca npm install en limpio)
 sudo docker compose up -d
+(cd backend && npm ci) && (cd frontend && npm ci)
 
 # 2. Backend (terminal 1)
 cd backend && npm run start:dev
@@ -551,4 +584,7 @@ cd frontend && npm run dev
 # 4. Verificación antes de commitear
 cd backend  && npm test && npx tsc --noEmit -p tsconfig.build.json
 cd frontend && npm test && npm run typecheck
+
+# 5. E2E contra la base de E2E_DB_NAME (sin DB_NAME= en la línea de comandos)
+cd backend  && npm run test:migrate && npm run test:e2e
 ```

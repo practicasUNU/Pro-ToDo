@@ -1219,4 +1219,109 @@ describe('PostIaSanitizerStrategy', () => {
       });
     });
   });
+
+  describe('12. Regresion del cierre en TEXT (headline y summary)', () => {
+    /** El escudo del maestro de cierre de la 069. */
+    const CLOSING_PARAMS = {
+      contentMode: 'TEXT',
+      sourceNamespace: SOURCE_NAMESPACE,
+      sourceFields: ['headline', 'summary'],
+    };
+
+    it('12.1 deberia serializar headline y summary en validated_fields', async () => {
+      // 1. Arrange 📐: salida del PROCESADOR_IA de cierre, con arreglos y
+      //    telemetria al lado que el modo TEXT no audita.
+      const strategy = buildStrategy();
+      const context = buildContext({
+        headline: 'EXP-2026-041',
+        summary: '<b>Suministro</b> de equipos &amp; licencias',
+        body_paragraphs: ['fecha_cierre: 2026-09-21T14:00'],
+        items: [],
+        metadata: { provider: 'ANTHROPIC' },
+      });
+
+      // 2. Act ⚙️
+      const result = await strategy.execute(context, CLOSING_PARAMS);
+
+      // 3. Assert 🎯
+      expect(result.success).toBe(true);
+      expect(result.data?.validated_fields).toEqual({
+        headline: 'EXP-2026-041',
+        summary: 'Suministro de equipos & licencias',
+      });
+      expect(result.data?.validated_markup).toBe('');
+      expect(result.data).not.toHaveProperty('validated_json');
+    });
+
+    it('12.2 deberia parar el caso real: sin expediente, aunque body_paragraphs traiga datos', async () => {
+      // 1. Arrange 📐: la ejecucion de desarrollo del 2026-11-23. El correo no
+      //    traia expediente; el modelo dejo headline y summary vacios.
+      const strategy = buildStrategy();
+      const context = buildContext({
+        headline: '',
+        summary: '',
+        filled_markup: null,
+        body_paragraphs: ['fecha_cierre: 2026-09-21T14:00'],
+        items: [],
+      });
+
+      // 2. Act ⚙️
+      const result = await strategy.execute(context, CLOSING_PARAMS);
+
+      // 3. Assert 🎯: GRAVE en el escudo, nombrando los campos, no en Drupal.
+      expect(result.success).toBe(false);
+      expect(result.error?.level).toBe('GRAVE');
+      expect(result.error?.code).toBe(ERR_POST_IA_EMPTY_HTML);
+      expect(result.error?.missingFields).toEqual([
+        'llm_response.headline',
+        'llm_response.summary',
+      ]);
+    });
+
+    it('12.3 deberia seguir rechazando un arreglo como campo de texto', async () => {
+      // 1. Arrange 📐: la configuracion manual que se probo en el flujo real.
+      const strategy = buildStrategy();
+
+      // 2. Act ⚙️
+      const result = await strategy.execute(
+        buildContext({ headline: 'EXP-1', body_paragraphs: ['dato'] }),
+        { contentMode: 'TEXT', sourceFields: ['body_paragraphs'] },
+      );
+
+      // 3. Assert 🎯: TEXT solo audita cadenas.
+      expect(result.error?.code).toBe(ERR_POST_IA_EMPTY_HTML);
+      expect(result.error?.missingFields).toEqual([
+        'llm_response.body_paragraphs',
+      ]);
+    });
+
+    it('12.4 HTML: deberia seguir lanzando EMPTY_HTML sin markup', async () => {
+      // 1. Arrange 📐: el payload del cierre en el modo equivocado.
+      const strategy = buildStrategy();
+
+      // 2. Act ⚙️
+      const result = await strategy.execute(
+        buildContext({ headline: 'EXP-1', filled_markup: null }),
+        { contentMode: 'HTML' },
+      );
+
+      // 3. Assert 🎯
+      expect(result.error?.code).toBe(ERR_POST_IA_EMPTY_HTML);
+    });
+
+    it('12.5 deberia rechazar en la configuracion un modo que no sea HTML ni TEXT', async () => {
+      // 1. Arrange 📐: un escudo que hubiera quedado en el modo JSON retirado.
+      const strategy = buildStrategy();
+
+      // 2. Act ⚙️
+      const result = await strategy.execute(
+        buildContext({ headline: 'EXP-1' }),
+        { contentMode: 'JSON' },
+      );
+
+      // 3. Assert 🎯
+      expect(result.success).toBe(false);
+      expect(result.error?.code).toBe(ERR_POST_IA_CONFIG);
+    });
+  });
 });

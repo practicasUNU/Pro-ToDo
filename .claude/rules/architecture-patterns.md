@@ -2,7 +2,8 @@
 
 ## 1. ⚙️ Ciclo de Vida del Motor FSM (`FsmEngineService`)
 - El motor opera como una Máquina de Estados Finita basada en una tabla o arreglo declarativo de transiciones.
-- **Estados del flujo:** `INACTIVO`, `EN_PROCESO`, `PAUSADO`, `EXITOSO`, `FALLIDO`.
+- **Estados de ejecución:** `INACTIVO`, `EN_PROCESO`, `PAUSADO`, `EXITOSO`, `FALLIDO`, `OMITIDO` y `DESCARTADO`.
+- **Estado del flujo (`flujos.status`):** `ACTIVO | INACTIVO | PAUSADO`; `PAUSADO` lo escribe solo el motor.
 - **Bucle de ejecución (`Execution Loop`):** 
   1. Identifica el paso activo mediante el `activeCursor`.
   2. Obtiene la estrategia adecuada usando `NodeStrategyFactory`.
@@ -107,9 +108,9 @@ Cuando un nodo retorna `success: false` o lanza una excepción no controlada, el
 ## 5. 📬 Desacoplamiento y Notificaciones en Tiempo Real
 
 * **Colas Productor-Consumidor:** Las ejecuciones pesadas o disparadas por Cron/IMAP deben enviarse a colas de BullMQ para no bloquear el hilo de peticiones HTTP.
-* **WebSockets Gateway:** Cada flujo ejecutándose debe emitir eventos (`node_started`, `node_completed`, `flow_finished`, `flow_failed`) a la sala correspondiente (`flow_${flowId}`).
+* **WebSockets Gateway:** `NotificationGateway` (namespace `/events`, path `/api/socket.io`) emite a la sala `flow_${flowId}` los eventos `flow:paused`, `flow:resumed`, `node:started`, `node:completed`, `node:error` y `flow:completed`.
 
-> Estado de avance: este contrato es la arquitectura objetivo. Las dependencias (`socket.io`, `@nestjs/websockets`, `@nestjs/platform-socket.io`) ya están instaladas, pero a la fecha no existe ningún `@WebSocketGateway` implementado en `backend/src`. Ver `claude.md` → "Estado de Avance" antes de asumir que este canal ya emite eventos.
+> Estado de avance: canal operativo (PROT-32). El motor publica contra el puerto `ExecutionEventsCoordinator` (`@common`) y no conoce Socket.io. Detalle en `claude.md` → "Estado de Avance".
 
 ---
 

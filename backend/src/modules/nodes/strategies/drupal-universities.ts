@@ -1,7 +1,14 @@
 import * as cheerio from 'cheerio';
 
+import {
+  applyPanelIdentifiers,
+  compactCommitteeCode,
+} from '@modules/nodes/strategies/drupal-panel-upsert';
 import { foldDiacritics } from '@modules/nodes/utils/diacritics.util';
-import { selectVisibleTarget } from '@modules/nodes/utils/visible-target.util';
+import {
+  hasHiddenAncestor,
+  selectVisibleTarget,
+} from '@modules/nodes/utils/visible-target.util';
 
 import type { Cheerio, CheerioAPI } from 'cheerio';
 import type { AnyNode } from 'domhandler';
@@ -148,6 +155,81 @@ export const DRUPAL_UNIVERSITIES_CATALOG: readonly UniversityMapping[] = [
     aliases: ['esic'],
   },
 ] as const;
+
+/** Prefijo comun de los sub-acordeones del catalogo. */
+const ACCORDION_PREFIX = '#accordion';
+
+/**
+ * Acordeon RAIZ de la pagina. Nunca es destino de un comite: es el que lista
+ * las universidades, y la plantilla antigua lo sembraba como `data-parent`.
+ */
+export const ROOT_ACCORDION_SELECTOR = '#accordion';
+
+/**
+ * Siglas del catalogo (`CEU`, `UC3M`...), de la mas larga a la mas corta.
+ *
+ * Se derivan de `accordionId` y no se escriben aparte: dos listas de lo mismo
+ * divergen. El orden por longitud es lo que impide que «UC3M 1» se quede en un
+ * prefijo mas corto que tambien case.
+ */
+const CATALOG_SIGLAS: readonly string[] = DRUPAL_UNIVERSITIES_CATALOG.map(
+  (university) => university.accordionId.slice(ACCORDION_PREFIX.length),
+).sort((left, right) => right.length - left.length);
+
+/**
+ * Identidad tecnica de un comite, derivada de su codigo visible.
+ *
+ * Es la respuesta a la averia de «ESIC 2» publicado como `collapseUFV2` y
+ * colgado de `#accordion`: el codigo que lee el editor es la fuente de verdad,
+ * y los tres atributos tecnicos (`href`, `id`, `data-parent`) se derivan de el
+ * en vez de fiarse de lo que haya escrito el modelo.
+ */
+export interface CommitteeIdentity {
+  /** `siglas_universidad`: prefijo del codigo, del catalogo (ej. `ESIC`). */
+  readonly siglas: string;
+
+  /** `codigo_comite_id`: el codigo sin espacios (ej. `ESIC2`). */
+  readonly committeeId: string;
+
+  /** `collapse<codigo_comite_id>`, sin almohadilla. */
+  readonly collapseId: string;
+
+  /** `#accordion<siglas_universidad>`. */
+  readonly accordionId: string;
+}
+
+/**
+ * Identidad de un comite a partir de su codigo visible, o `null`.
+ *
+ * Las siglas son la entrada MAS LARGA del catalogo que prefija el codigo
+ * compactado y va seguida de un digito o del final: «UC3M 1» -> `UC3M` (y no
+ * un hipotetico `UC`), «UAMX 1» -> nada. Devolver `null` no es un fallo que se
+ * trague: el panel sigue el despacho heredado y, si tampoco ahi tiene destino,
+ * el nodo para nombrandolo.
+ */
+export const deriveCommitteeIdentity = (
+  code: string,
+): CommitteeIdentity | null => {
+  const committeeId = compactCommitteeCode(code);
+
+  const siglas = CATALOG_SIGLAS.find(
+    (candidate) =>
+      committeeId.startsWith(candidate) &&
+      (committeeId.length === candidate.length ||
+        /\d/.test(committeeId.charAt(candidate.length))),
+  );
+
+  if (committeeId.length === 0 || siglas === undefined) {
+    return null;
+  }
+
+  return {
+    siglas,
+    committeeId,
+    collapseId: `collapse${committeeId}`,
+    accordionId: `${ACCORDION_PREFIX}${siglas}`,
+  };
+};
 
 /** Caracteres que no forman palabra, para anclar la busqueda de un alias. */
 const WORD_BOUNDARY = /[^a-z0-9]+/;
@@ -297,37 +379,35 @@ const ESIC_UNIVERSITY = DRUPAL_UNIVERSITIES_CATALOG.find(
  * Colapsable de la seccion de ESIC en PRODUCCION.
  *
  * Es un identificador heredado que comparte nombre con la Universidad
- * Francisco de Vitoria: solo se acepta cuando cuelga del encabezado de ESIC.
+ * Francisco de Vitoria: solo se acepta cuando cuelga del encabezado de ESIC, y
+ * solo como RESPALDO de `#accordionESIC`.
  */
 export const ESIC_PRODUCTION_COLLAPSE_ID = 'collapseUFV';
 
-/** Sub-acordeon de comites de ESIC en el sandbox. */
+/** Sub-acordeon de comites de ESIC por identificador directo. */
 export const ESIC_SANDBOX_ACCORDION_SELECTOR = '#accordionESIC';
 
-/** Seccion de ESIC en el sandbox, para cuando el sub-acordeon no tiene id propio. */
+/** Seccion de ESIC, para cuando el sub-acordeon no tiene id propio. */
 export const ESIC_SANDBOX_COLLAPSE_SELECTOR = '#collapseESIC';
+
+/** Siglas de ESIC en el catalogo (`ESIC`). */
+const ESIC_SIGLAS = ESIC_SANDBOX_ACCORDION_SELECTOR.slice(
+  ACCORDION_PREFIX.length,
+);
 
 /** Si un texto (encabezado de comite o de seccion) nombra a ESIC Universidad. */
 export const isEsicCommittee = (text: string): boolean =>
   ESIC_UNIVERSITY !== undefined && findUniversity(text) === ESIC_UNIVERSITY;
 
 /**
- * Contenedor de los comites de ESIC, o `null` si la pagina no tiene ninguno.
+ * `.panel-group` bajo el colapsable `#collapseUFV` que despliega el encabezado
+ * «ESIC Universidad», o `null`.
  *
- * Prioridad fija, de produccion a sandbox:
- *
- *   1. `#collapseUFV` / su `.panel-group` (`#accordionUFV`), pero SOLO si el
- *      enlace que lo despliega dice «ESIC Universidad». Nunca un
- *      `$('#collapseUFV')` global: la Universidad Francisco de Vitoria vive en
- *      la misma pagina con su propio UFV, y caer en el suyo es exactamente la
- *      averia que revirtio la migracion 038.
- *   2. `#accordionESIC`, o el `.panel-group` dentro de `#collapseESIC`.
- *
- * Funcion pura sobre el DOM ya cargado: no lo modifica.
+ * Nunca un `$('#collapseUFV')` global: la Universidad Francisco de Vitoria vive
+ * en la misma pagina con su propio UFV, y caer en el suyo es exactamente la
+ * averia que revirtio la migracion 038.
  */
-export const resolveEsicContainer = (
-  $: CheerioAPI,
-): Cheerio<AnyNode> | null => {
+const findEsicUnderUfvHeading = ($: CheerioAPI): Cheerio<AnyNode> | null => {
   for (const element of $(PANEL_TOGGLE_SELECTOR).toArray()) {
     const link = $(element);
 
@@ -350,13 +430,41 @@ export const resolveEsicContainer = (
     }
   }
 
-  const sandboxAccordion = selectVisibleTarget(
-    $,
-    ESIC_SANDBOX_ACCORDION_SELECTOR,
-  );
+  return null;
+};
 
-  if (sandboxAccordion.length > 0) {
-    return sandboxAccordion;
+/**
+ * Contenedor de los comites de ESIC, o `null` si la pagina no tiene ninguno.
+ *
+ * Prioridad fija:
+ *
+ *   1. `#accordionESIC` VISIBLE, por identificador directo: es el destino que
+ *      corresponde a `collapseESIC<N>` / `data-parent="#accordionESIC"`.
+ *   2. El `#accordionUFV` heredado, pero SOLO bajo el encabezado «ESIC
+ *      Universidad» (`findEsicUnderUfvHeading`). Es el respaldo para la pagina
+ *      que aun conserva la seccion de ESIC con aquel identificador.
+ *   3. `#accordionESIC` aunque venga oculto (sub-acordeon todavia vacio; quien
+ *      llama lo destapa), o el `.panel-group` dentro de `#collapseESIC`.
+ *
+ * Nunca la raiz `#accordion`. Funcion pura sobre el DOM ya cargado.
+ */
+export const resolveEsicContainer = (
+  $: CheerioAPI,
+): Cheerio<AnyNode> | null => {
+  const direct = selectVisibleTarget($, ESIC_SANDBOX_ACCORDION_SELECTOR);
+
+  if (direct.length > 0 && !hasHiddenAncestor(direct)) {
+    return direct;
+  }
+
+  const legacy = findEsicUnderUfvHeading($);
+
+  if (legacy !== null) {
+    return legacy;
+  }
+
+  if (direct.length > 0) {
+    return direct;
   }
 
   const sandboxGroup = selectVisibleTarget($, ESIC_SANDBOX_COLLAPSE_SELECTOR)
@@ -407,18 +515,35 @@ export const splitSelectorAlternatives = (selector: string): string[] => {
 /**
  * Contenedor donde va un panel, o `null` si la pagina no tiene ninguno.
  *
- * Primero las alternativas declaradas, en orden y prefiriendo la copia visible
- * de cada una; despues, si ninguna existe, el encabezado por texto. Un selector
- * que cheerio no sabe leer cuenta como inexistente: es el mismo desenlace —no
- * hay donde insertar— y debe acabar en el mismo error que nombra el comite.
+ * CON IDENTIDAD (`.panel-comite-codigo` reconocido) la busqueda es ESTRICTA y
+ * por identificador directo en todo el documento: `#accordion<SIGLAS>`. Asi se
+ * encuentra `#accordionUAH` aunque el HTML heredado lo anide dentro de
+ * `#collapseUPM5`, y si no existe se devuelve `null` —que el nodo convierte en
+ * un error con el comite dentro— en vez de buscar por texto o caer en la raiz.
+ * ESIC es la unica excepcion, con su respaldo UFV guardado
+ * (`resolveEsicContainer`).
+ *
+ * SIN IDENTIDAD (paneles heredados) se mantiene el despacho de siempre:
+ * alternativas declaradas en orden, prefiriendo la copia visible, y despues el
+ * encabezado por texto. Un selector que cheerio no sabe leer cuenta como
+ * inexistente.
  */
 export const resolvePanelContainer = (
   $: CheerioAPI,
   panel: PanelDispatch,
 ): Cheerio<AnyNode> | null => {
-  // ESIC tiene destino fijo (UFV guardado y despues ESIC), por encima del
-  // `data-parent` que traiga el panel: la plantilla siembra un `#accordion`
-  // generico que lo mandaria a la raiz del acordeon, fuera de su universidad.
+  if (panel.identity !== undefined) {
+    if (panel.identity.siglas === ESIC_SIGLAS) {
+      return resolveEsicContainer($);
+    }
+
+    const container = selectVisibleTarget($, panel.identity.accordionId);
+
+    return container.length > 0 ? container : null;
+  }
+
+  // ESIC tiene destino fijo (ESIC y despues UFV guardado), por encima del
+  // `data-parent` que traiga el panel.
   if (isEsicCommittee(panel.heading)) {
     return resolveEsicContainer($);
   }
@@ -453,6 +578,13 @@ export interface PanelDispatch {
 
   /** El panel entero, listo para insertar. */
   readonly html: string;
+
+  /**
+   * Identidad derivada de `.panel-comite-codigo`, si se reconoce. Con ella el
+   * `html` ya viene normalizado (`href`, `id` y `data-parent`) y el destino es
+   * estricto (`resolvePanelContainer`).
+   */
+  readonly identity?: CommitteeIdentity;
 }
 
 /** Panel que el despacho reconoce como unidad insertable. */
@@ -463,14 +595,18 @@ const PANEL_SELECTOR = '.panel.panel-default';
  *
  * Precedencia del destino, de mayor a menor:
  *
+ *   0. El CODIGO VISIBLE (`.panel-comite-codigo`), si sus siglas estan en el
+ *      catalogo: destino `#accordion<SIGLAS>`, y el panel sale normalizado con
+ *      `href="#collapse<ID>"`, `id="collapse<ID>"` y
+ *      `data-parent="#accordion<SIGLAS>"`. Manda sobre lo que haya escrito el
+ *      modelo: «ESIC 2» con `#collapseUFV2` y `data-parent="#accordion"` era
+ *      exactamente la averia en produccion.
  *   1. `data-parent` del propio `.panel`.
  *   2. `data-parent` del primer `a[data-parent]` descendiente.
  *   3. El texto del `.panel-heading`, por `resolveUniversityAccordion`.
  *
- * Los dos primeros escalones existen porque el encargo pedia una cosa y la
- * plantilla hace otra: Bootstrap pone `data-parent` en el enlace que dispara el
- * colapsable, y ahi es donde lo siembra la migracion 034. Mirar solo el panel
- * no habria encontrado nunca el atributo que el sistema ya escribe.
+ * En los escalones 1 y 2 la raiz `#accordion` cuenta como NO declarada: es el
+ * acordeon de universidades, nunca el de un comite.
  *
  * Devuelve lista VACIA cuando el marcado no trae ningun `.panel.panel-default`,
  * y es la senal que usa la estrategia para conservar su ruta de siempre: los
@@ -485,29 +621,41 @@ export const planPanelDispatch = (markup: string): readonly PanelDispatch[] => {
     .toArray()
     .map((element) => {
       const panel = $(element);
-
-      const declared =
-        panel.attr('data-parent') ??
-        panel.find('a[data-parent]').first().attr('data-parent');
-
       const heading = panel.find('.panel-heading').first().text();
+      const codeText = panel.find('.panel-comite-codigo').first().text().trim();
+      const committeeCode = codeText || heading.trim() || 'comite sin codigo';
 
-      const targetSelector =
-        declared !== undefined && declared.trim().length > 0
-          ? declared.trim()
-          : resolveUniversityAccordion(heading);
+      // `$.html(panel)` y no `panel.html()`: el segundo devolveria el
+      // CONTENIDO del panel y perderia el `<div class="panel panel-default">`
+      // que lo envuelve, que es justo lo que el acordeon necesita.
+      const html = $.html(panel);
+      const identity = deriveCommitteeIdentity(codeText);
+
+      if (identity !== null) {
+        return {
+          committeeCode,
+          targetSelector: identity.accordionId,
+          heading,
+          html: applyPanelIdentifiers(html, {
+            collapseId: identity.collapseId,
+            dataParent: identity.accordionId,
+          }),
+          identity,
+        };
+      }
+
+      const declared = [
+        panel.attr('data-parent'),
+        panel.find('a[data-parent]').first().attr('data-parent'),
+      ]
+        .map((value) => value?.trim() ?? '')
+        .find((value) => value.length > 0 && value !== ROOT_ACCORDION_SELECTOR);
 
       return {
-        committeeCode:
-          panel.find('.panel-comite-codigo').first().text().trim() ||
-          heading.trim() ||
-          'comite sin codigo',
-        targetSelector,
+        committeeCode,
+        targetSelector: declared ?? resolveUniversityAccordion(heading),
         heading,
-        // `$.html(panel)` y no `panel.html()`: el segundo devolveria el
-        // CONTENIDO del panel y perderia el `<div class="panel panel-default">`
-        // que lo envuelve, que es justo lo que el acordeon necesita.
-        html: $.html(panel),
+        html,
       };
     });
 };

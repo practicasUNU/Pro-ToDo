@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Genera las 11 capturas del informe tecnico en docs/capturas/ (1920x1080 PNG).
+// Genera las capturas del informe tecnico en docs/capturas/ (1920x1080 PNG).
 // Combina vistas reales de la app (Playwright, Chromium headless) con
 // fragmentos del codigo fuente pintados en HTML. El login conserva el OTP:
 // el codigo llega por correo y se teclea en la terminal (o PROTODO_OTP_CODE).
@@ -27,6 +27,14 @@ const VIEWPORT = { width: 1920, height: 1080 };
 const NAVIGATION_TIMEOUT_MS = 30_000;
 const SETTLE_DELAY_MS = 1_200;
 const MAX_CODE_LINES = 70;
+const MIN_TEMPLATE_CARDS = 6;
+const JPEG_QUALITY = 90;
+
+// Lista separada por comas de ficheros: regenera solo esos y no limpia el resto.
+const ONLY = (process.env.PROTODO_ONLY ?? "")
+  .split(",")
+  .map((name) => name.trim())
+  .filter(Boolean);
 
 const backendEnv = (() => {
   const envPath = path.join(ROOT, "backend", ".env");
@@ -53,11 +61,12 @@ const ui = (route, title, options = {}) => ({
 });
 
 /** Formulario de un nodo en el Banco de Pruebas (`?nodeType=`). */
-const sandbox = (nodeType, title) =>
+const sandbox = (nodeType, title, options = {}) =>
   ui(`/nodos/config-sandbox?nodeType=${nodeType}`, title, {
-    key: `sandbox-${nodeType}`,
+    key: `sandbox-${nodeType}${options.prepare ? "-prepared" : ""}`,
     waitFor: ".sandbox-grid",
     clip: ".sandbox-grid > div:first-child",
+    ...options,
   });
 
 /** Panel de codigo: el fragmento se localiza por regex, no por numero de linea. */
@@ -87,6 +96,27 @@ async function openWorkflowCanvas(page) {
 /** Reduce solo en la captura el grafo, para que quepa el flujo completo. */
 async function fitCanvasToViewport(page) {
   await page.addStyleTag({ content: ".pd-canvas { zoom: 0.66; }" });
+}
+
+/** Enfoca la barra de busqueda de plantillas y avisa si hay menos de 6 tarjetas. */
+async function focusTemplateSearch(page) {
+  await page.locator(".pd-template-search input").first().click();
+  const cards = await page.locator(".pd-pipeline-card").count();
+
+  if (cards < MIN_TEMPLATE_CARDS) {
+    console.warn(
+      `  aviso: solo ${cards} tarjetas de plantilla (se esperaban >= ${MIN_TEMPLATE_CARDS})`,
+    );
+  }
+}
+
+/** Despliega el selector «Elementos por correo» para mostrar sus 3 opciones. */
+async function openCardinalitySelect(page) {
+  await page
+    .locator('[data-test="output-cardinality-field"] .q-field__control')
+    .first()
+    .click();
+  await page.locator(".q-menu .q-item").first().waitFor({ timeout: 5_000 });
 }
 
 // Un PNG por tema y como maximo 2-3 paneles: en mosaicos de 4-6 el texto
@@ -213,11 +243,13 @@ const CAPTURES = [
     ],
   },
   {
-    file: "captura_07a_wizard_seleccion.png",
+    file: "captura_07a_wizard_seleccion.jpg",
+    format: "jpg",
     title: "Asistente guiado: eleccion de la plantilla del flujo",
     panels: [
       ui("/flujos/nuevo", "Asistente: eleccion de plantilla", {
         waitFor: ".pd-pipeline-card",
+        prepare: focusTemplateSearch,
       }),
     ],
   },
@@ -232,9 +264,14 @@ const CAPTURES = [
     panels: [sandbox("EXTRACTOR_WEB", "Extractor web")],
   },
   {
-    file: "captura_07d_nodo_procesador_ia.png",
+    file: "captura_07d_nodo_procesador_ia.jpg",
+    format: "jpg",
     title: "Formulario del nodo: Procesador IA",
-    panels: [sandbox("PROCESADOR_IA", "Procesador IA")],
+    panels: [
+      sandbox("PROCESADOR_IA", "Procesador IA", {
+        prepare: openCardinalitySelect,
+      }),
+    ],
   },
   {
     file: "captura_07e_nodo_escudo_post_ia.png",
@@ -551,6 +588,22 @@ const readOtpCode = async (email) => {
     return process.env.PROTODO_OTP_CODE.trim();
   }
 
+  // Sin terminal: espera hasta 5 min a que aparezca el codigo en PROTODO_OTP_FILE.
+  if (!process.stdin.isTTY && process.env.PROTODO_OTP_FILE) {
+    const deadline = Date.now() + 300_000;
+    console.log(`Esperando el codigo OTP en ${process.env.PROTODO_OTP_FILE} ...`);
+
+    while (Date.now() < deadline) {
+      if (fs.existsSync(process.env.PROTODO_OTP_FILE)) {
+        const content = fs.readFileSync(process.env.PROTODO_OTP_FILE, "utf8").trim();
+        if (content) {
+          return content;
+        }
+      }
+      await new Promise((resolve) => setTimeout(resolve, 1_000));
+    }
+  }
+
   if (!process.stdin.isTTY) {
     throw new Error(
       `OTP solicitado para ${email}. Sin terminal interactiva: relanza con PROTODO_OTP_CODE=<codigo> antes de que caduque.`,
@@ -734,7 +787,16 @@ const main = async () => {
     console.log(`Autenticando en ${FRONTEND_URL} ...`);
     await login(page, email);
 
-    for (const capture of CAPTURES) {
+    const selected =
+      ONLY.length > 0
+        ? CAPTURES.filter((capture) => ONLY.includes(capture.file))
+        : CAPTURES;
+
+    if (selected.length === 0) {
+      throw new Error(`PROTODO_ONLY no coincide con ninguna captura: ${ONLY}`);
+    }
+
+    for (const capture of selected) {
       console.log(`- ${capture.file}`);
       const panels = [];
 
@@ -748,26 +810,32 @@ const main = async () => {
       });
       await composer.screenshot({
         path: path.join(OUTPUT_DIR, capture.file),
-        type: "png",
+        ...(capture.format === "jpg"
+          ? { type: "jpeg", quality: JPEG_QUALITY }
+          : { type: "png" }),
       });
     }
 
-    // Solo tras generar todo: borra las capturas de catalogos anteriores.
-    const expected = new Set(CAPTURES.map((capture) => capture.file));
-    for (const file of fs.readdirSync(OUTPUT_DIR)) {
-      if (/^captura_.*\.png$/.test(file) && !expected.has(file)) {
-        fs.unlinkSync(path.join(OUTPUT_DIR, file));
+    // Solo tras generar todo y sin filtro: borra las capturas de catalogos anteriores.
+    if (ONLY.length === 0) {
+      const expected = new Set(CAPTURES.map((capture) => capture.file));
+      for (const file of fs.readdirSync(OUTPUT_DIR)) {
+        if (/^captura_.*\.(png|jpg)$/.test(file) && !expected.has(file)) {
+          fs.unlinkSync(path.join(OUTPUT_DIR, file));
+        }
       }
     }
 
     console.log(
-      `Listo: ${CAPTURES.length} capturas en ${path.relative(ROOT, OUTPUT_DIR)}/`,
+      `Listo: ${selected.length} capturas en ${path.relative(ROOT, OUTPUT_DIR)}/`,
     );
-    for (const capture of CAPTURES) {
-      const png = fs.readFileSync(path.join(OUTPUT_DIR, capture.file));
-      console.log(
-        `  ${capture.file}  ${png.readUInt32BE(16)}x${png.readUInt32BE(20)}`,
-      );
+    for (const capture of selected) {
+      const bytes = fs.readFileSync(path.join(OUTPUT_DIR, capture.file));
+      const size =
+        capture.format === "jpg"
+          ? `${Math.round(bytes.length / 1024)} KB (JPEG)`
+          : `${bytes.readUInt32BE(16)}x${bytes.readUInt32BE(20)}`;
+      console.log(`  ${capture.file}  ${size}`);
     }
   } finally {
     await browser.close();

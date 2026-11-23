@@ -571,6 +571,67 @@ describe('Siembra maestra de los cinco pipelines (e2e)', () => {
       ]);
     });
 
+    it('14.4bis deberia despachar los paneles de titulos a #accordion<SIGLAS>, nunca a la raiz', async () => {
+      // 1. Arrange 📐 + 2. Act ⚙️: plantilla con el relleno de siglas y
+      //    destino sin el respaldo "#accordion" (pasos 4b y 6h).
+      const destino = blueprintBySlug('wf-titulos-verificacion')
+        .configuracion_pipeline.nodes['destino_drupal'];
+      const [template] = await dataSource.query<{ contenido_html: string }[]>(
+        `SELECT contenido_html FROM plantillas_html
+          WHERE nombre = 'Verificación de Títulos · Panel de evaluación'`,
+      );
+
+      // 3. Assert 🎯
+      expect(destino?.params).not.toHaveProperty('containerSelector');
+      expect(template?.contenido_html).toContain(
+        'data-parent="#accordionSiglasUniversidad"',
+      );
+      expect(template?.contenido_html).not.toContain(
+        'data-parent="#accordion"',
+      );
+    });
+
+    it('14.4ter deberia dejar el cierre en el escudo TEXT estandar, sin modo JSON en ninguna fila', async () => {
+      // 1. Arrange 📐 + 2. Act ⚙️: escudo del maestro de cierre, escudos de
+      //    cualquier flujo o plantilla (paso 6i) y prompt de cierre.
+      const escudo = blueprintBySlug('wf-licitacion-cerrar')
+        .configuracion_pipeline.nodes['escudo'];
+      const [nonStandard] = await dataSource.query<{ total: number }[]>(
+        `SELECT count(*)::INT AS total FROM (
+           SELECT n.value FROM flujos f, jsonb_each(f.configuracion_pipeline->'nodes') n
+            WHERE n.value->>'nodeType' = 'ESCUDO_POST_IA'
+           UNION ALL
+           SELECT n.value FROM plantillas_flujo p, jsonb_each(p.configuracion_pipeline->'nodes') n
+            WHERE n.value->>'nodeType' = 'ESCUDO_POST_IA') e
+          WHERE e.value #>> '{params,contentMode}' NOT IN ('HTML', 'TEXT')
+             OR e.value #> '{params}' ? 'jsonSchema'`,
+      );
+      const [prompt] = await dataSource.query<{ texto_prompt: string }[]>(
+        `SELECT texto_prompt FROM plantillas_prompts_ia
+          WHERE codigo = 'LICITACION_CIERRE_DEFAULT'`,
+      );
+      const text = prompt?.texto_prompt ?? '';
+
+      // 3. Assert 🎯
+      expect(escudo?.params).toEqual({
+        contentMode: 'TEXT',
+        sourceNamespace: 'llm_response',
+        sourceFields: ['headline', 'summary'],
+      });
+      expect(nonStandard?.total).toBe(0);
+      // El asterisco es la marca OBLIGATORIA del motor (pausa antes de llamar
+      // al modelo si falta el cuerpo), no un error: se conserva.
+      expect(text).toContain('{{*parsed_email.clean_body}}');
+      expect(text).toContain('{{parsed_email.extracted_documents_text}}');
+      expect(text).toContain('{{ocr_result.clean_body}}');
+      expect(text).not.toContain('{{**');
+      const markers = text.match(/\{\{[^}]*\}\}/g) ?? [];
+      expect(markers.length).toBeGreaterThan(0);
+      for (const marker of markers) {
+        expect(marker).toMatch(/^\{\{\*?[a-z0-9_]+\.[a-z0-9_]+\}\}$/);
+      }
+    });
+
     it('14.5 deberia consolidar los prompts de Notiweb y de titulos una sola vez', async () => {
       // 1. Arrange 📐 + 2. Act ⚙️
       const rows = await dataSource.query<
@@ -609,21 +670,27 @@ describe('Siembra maestra de los cinco pipelines (e2e)', () => {
       expect(notiweb).not.toMatch(/M[IÍ]NIMO DE 3|M[AÁ]XIMO DE 4/i);
       expect(notiweb).not.toContain('Elimina del marcado el <hr>');
 
-      // Titulos: respaldos, identificador UFV de ESIC y no inventar.
+      // Titulos: respaldos, siglas e identificadores derivados del codigo del
+      // comite (ESIC 2 -> ESIC / ESIC2, nunca UFV) y no inventar.
       const titulos = textOf('VERIFICADOR_TITULOS_DEFAULT');
       expect(
         titulos.split(
-          'ENCABEZADO DEL PANEL E IDENTIFICADORES (VERIFICACIÓN DE TÍTULOS)',
+          'ENCABEZADO DEL PANEL, SIGLAS E IDENTIFICADORES (VERIFICACIÓN DE TÍTULOS)',
         ),
       ).toHaveLength(2);
+      expect(titulos).not.toContain(
+        'ENCABEZADO DEL PANEL E IDENTIFICADORES (VERIFICACIÓN DE TÍTULOS)',
+      );
       expect(titulos).not.toContain('CONTRATO DE PANEL');
       expect(titulos).not.toContain('RESPALDO DEL ENCABEZADO DEL PANEL (');
-      expect(titulos).toContain(
-        'Para comités de ESIC, asigna SIEMPRE el identificador UFV',
-      );
-      expect(titulos).toContain('href="#collapseUFV1"');
-      expect(titulos).toContain('id="collapseUFV1"');
-      expect(titulos).not.toContain('href="#collapseESIC1"');
+      expect(titulos).not.toContain('IDENTIFICADOR DE ESIC');
+      expect(titulos).not.toContain('collapseUFV');
+      expect(titulos).toContain('"ESIC 2" → ESIC (nunca UFV');
+      expect(titulos).toContain('"ESIC 2" → ESIC2');
+      expect(titulos).toContain('href="#collapseESIC2"');
+      expect(titulos).toContain('id="collapseESIC2"');
+      expect(titulos).toContain('data-parent="#accordionESIC"');
+      expect(titulos).toContain('#accordionSiglasUniversidad');
       expect(titulos).toContain('usa las siglas de la universidad');
       expect(titulos).toContain('usa la titulación principal evaluada');
       expect(titulos).toContain('SIN DATOS, NO INVENTES');

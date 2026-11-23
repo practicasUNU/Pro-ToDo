@@ -1687,6 +1687,91 @@ describe('Pipelines operativos de la FSM (e2e)', () => {
     );
 
     it(
+      '8.3bis Cierre (N=2) con el escudo TEXT del maestro: deberia trasladar los dos expedientes y parar el lote sin expediente',
+      async () => {
+        // 1. Arrange 📐: el escudo del maestro de cierre (TEXT, headline y
+        //    summary). El segundo flujo reproduce la ejecucion real de
+        //    desarrollo: el correo no traia expediente y headline llego vacio.
+        const closingShield = {
+          contentMode: 'TEXT',
+          sourceNamespace: 'llm_response',
+          sourceFields: ['headline', 'summary'],
+        };
+        const transfer = {
+          operationMode: DrupalOperationMode.TRANSFER_HTML_BLOCK,
+          bundle: 'node--page',
+          targetNodeUuid: OPEN_TENDERS_UUID,
+          destinationNodeUuid: CLOSED_TENDERS_UUID,
+          itemSelector:
+            '[data-expediente="{{validated_drupal_json.validated_fields.headline}}"]',
+        };
+        portal.pages.set(
+          OPEN_TENDERS_UUID,
+          '<div data-expediente="LIC-2026-004"><p>Cuatro</p></div>' +
+            '<div data-expediente="LIC-2026-005"><p>Cinco</p></div>' +
+            '<div data-expediente="LIC-2026-006"><p>Sigue abierta</p></div>',
+        );
+        portal.pages.set(CLOSED_TENDERS_UUID, '<p>Cerradas</p>');
+        const flowId = await seedFlow((id) =>
+          shieldedSchema(id, 'Cierre TEXT', closingShield, transfer),
+        );
+        const executionId = await seedExecution(flowId, 'escudo', {
+          llm_response: {
+            headline: 'LIC-2026-004',
+            summary: 'Adjudicada',
+            body_paragraphs: ['fecha_cierre: 2026-09-21T14:00'],
+            items: [
+              {
+                headline: 'LIC-2026-005',
+                summary: 'Desierta',
+                body_paragraphs: ['estado_resolucion: desierta'],
+              },
+            ],
+          },
+        });
+        const noCodeFlowId = await seedFlow((id) =>
+          shieldedSchema(
+            id,
+            'Cierre TEXT sin expediente',
+            closingShield,
+            transfer,
+          ),
+        );
+        const noCodeExecutionId = await seedExecution(noCodeFlowId, 'escudo', {
+          llm_response: {
+            headline: '',
+            summary: '',
+            body_paragraphs: ['fecha_cierre: 2026-09-21T14:00'],
+            items: [],
+          },
+        });
+
+        // 2. Act ⚙️
+        await resume(executionId);
+        const done = await readExecution(executionId);
+        await resume(noCodeExecutionId);
+        const paused = await readExecution(noCodeExecutionId);
+
+        // 3. Assert 🎯: los dos movidos y el tercero quieto; sin expediente el
+        //    flujo se para EN EL ESCUDO, sin un segundo PATCH a Drupal.
+        expect(done.currentState).toBe(ExecutionState.EXITOSO);
+        const [closed] = portal.patchedHtml(CLOSED_TENDERS_UUID);
+        const [open] = portal.patchedHtml(OPEN_TENDERS_UUID);
+        expect(closed).toContain('LIC-2026-004');
+        expect(closed).toContain('LIC-2026-005');
+        expect(open).toContain('LIC-2026-006');
+        expect(paused.currentState).not.toBe(ExecutionState.EXITOSO);
+        expect(portal.patchedHtml(CLOSED_TENDERS_UUID)).toHaveLength(1);
+        expect(
+          (await readNodeLogs(noCodeExecutionId)).map(
+            (log) => log.codigo_error,
+          ),
+        ).toContain('ERR_POST_IA_EMPTY_HTML');
+      },
+      CASE_TIMEOUT_MS,
+    );
+
+    it(
       '8.4 Titulos (N>1): deberia repartir los paneles de ESIC, UAM, UPM y URJC en sus acordeones',
       async () => {
         // 1. Arrange 📐

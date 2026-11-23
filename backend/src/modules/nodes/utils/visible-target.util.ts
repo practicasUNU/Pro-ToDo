@@ -55,3 +55,14 @@ export const selectVisibleTarget = (
 
   return visible.length > 0 ? visible.first() : candidates.first();
 };
+
+/**
+ * Si el elemento, o alguno de sus ancestros, lleva una utilidad de ocultacion.
+ *
+ * Es la misma definicion de "visible" que usa `selectVisibleTarget`, expuesta
+ * para quien necesita distinguir "el primero visible" de "el primero aunque
+ * este oculto" —el despacho de ESIC, que antes de aceptar un `#accordionESIC`
+ * oculto prueba su respaldo visible—.
+ */
+export const hasHiddenAncestor = (element: Cheerio<AnyNode>): boolean =>
+  element.closest(HIDDEN_ANCESTOR_SELECTOR).length > 0;

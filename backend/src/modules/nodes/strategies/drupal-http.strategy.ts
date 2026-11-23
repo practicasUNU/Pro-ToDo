@@ -17,6 +17,11 @@ import { HttpClientService } from '@core/http/http-client.service';
 
 import { BaseHttpDestinationStrategy } from './base/base-http-destination.strategy';
 import {
+  allocateCollapseId,
+  applyPanelIdentifiers,
+  findStaleInjectedPanels,
+} from './drupal-panel-upsert';
+import {
   isEsicCommittee,
   planPanelDispatch,
   resolvePanelContainer,
@@ -76,12 +81,14 @@ export const ERR_DRUPAL_SERVER = 'ERR_DRUPAL_SERVER';
 export const ERR_DRUPAL_DOM_TARGET = 'ERR_DRUPAL_DOM_TARGET';
 
 /**
- * Un comite de ESIC no encuentra su contenedor: ni el UFV de produccion bajo el
- * encabezado de ESIC ni el `#accordionESIC` / `#collapseESIC` del sandbox.
+ * Un comite con universidad reconocida no encuentra su sub-acordeon
+ * `#accordion<SIGLAS>` en la pagina (para ESIC: ni `#accordionESIC` ni el UFV
+ * heredado bajo el encabezado de ESIC).
  *
  * Codigo propio y no `ERR_DRUPAL_DOM_TARGET` porque la causa es distinta y
- * tiene su propio arreglo: la pagina no tiene la seccion de ESIC donde se
- * espera. GRAVE: no se escribe nada y la ejecucion queda PAUSADA y reanudable.
+ * tiene su propio arreglo: el comite SABE a que universidad va, pero la pagina
+ * no tiene su seccion donde se espera. Nunca se cae en la raiz `#accordion`.
+ * GRAVE: no se escribe nada y la ejecucion queda PAUSADA y reanudable.
  */
 export const ERR_DRUPAL_TARGET_NOT_FOUND = 'ERR_DRUPAL_TARGET_NOT_FOUND';
 export const ERR_DRUPAL_NETWORK = 'ERR_DRUPAL_NETWORK';
@@ -340,6 +347,15 @@ const PDF_ICON_SRC = '/modules/file/icons/application-pdf.png';
  * el nodo devuelve EXITOSO y nadie lo ve en la pagina.
  */
 const HIDDEN_UTILITY_CLASSES = 'd-none hidden';
+
+/**
+ * Huella de un fragmento de comite de verificacion de titulos.
+ *
+ * Si aparece sin ningun `.panel.panel-default` despachable, el fragmento no
+ * puede publicarse por la ruta de los bloques sueltos (ver `insertBlock`).
+ */
+const COMMITTEE_FRAGMENT_SELECTOR =
+  '.panel-comite-codigo, [data-protodo-injected="true"]';
 
 /**
  * Nombres de campo de fichero que se buscan cuando el configurado no existe.
@@ -2198,6 +2214,19 @@ export class DrupalHttpStrategy extends BaseHttpDestinationStrategy {
       return this.insertDispatchedPanels($, plan, config);
     }
 
+    // Un fragmento de comite SIN paneles reconocibles (la plantilla mal
+    // rellenada: sin `.panel.panel-default`) no puede tomar la ruta de los
+    // bloques sueltos: acabaria en el `containerSelector` —historicamente la
+    // raiz `#accordion`— o en la raiz del documento, fuera de su universidad.
+    if (loadFragment(blockHtml)(COMMITTEE_FRAGMENT_SELECTOR).length > 0) {
+      return {
+        level: 'GRAVE',
+        code: ERR_DRUPAL_DOM_TARGET,
+        message: `El marcado trae un comite (${COMMITTEE_FRAGMENT_SELECTOR}) pero ningun panel ".panel.panel-default" completo, asi que no hay sub-acordeon de universidad al que despacharlo. ${where.consequence}`,
+        missingFields: ['.panel.panel-default'],
+      };
+    }
+
     // Sin `containerSelector` se opera sobre la raiz del fragmento, que es el
     // caso normal: la pagina agregadora es una lista de bloques hermanos.
     // `selectVisibleTarget` y no `$(...)` a secas: la pagina trae una plantilla
@@ -2281,21 +2310,30 @@ export class DrupalHttpStrategy extends BaseHttpDestinationStrategy {
         )
         .join('; ');
 
-      // Un comite de ESIC sin destino lleva su propio codigo: la causa es que
-      // falta la seccion de ESIC, no un selector mal escrito.
-      const esicMissing = unplaceable.some((panel) =>
-        isEsicCommittee(panel.heading),
+      // Con universidad reconocida (o ESIC por encabezado) la causa es que
+      // falta SU seccion en la pagina, no un destino indeterminado: codigo
+      // propio. Basta un panel sin destino deducible para que el problema de
+      // fondo sea ese y se informe como `DOM_TARGET`.
+      const targetMissing = unplaceable.every(
+        (panel) =>
+          panel.identity !== undefined || isEsicCommittee(panel.heading),
+      );
+      const esicMissing = unplaceable.some(
+        (panel) =>
+          panel.identity?.siglas === 'ESIC' || isEsicCommittee(panel.heading),
       );
 
       return {
         level: 'GRAVE',
-        code: esicMissing ? ERR_DRUPAL_TARGET_NOT_FOUND : ERR_DRUPAL_DOM_TARGET,
+        code: targetMissing
+          ? ERR_DRUPAL_TARGET_NOT_FOUND
+          : ERR_DRUPAL_DOM_TARGET,
         message:
           `No existe en la pagina el contenedor de ${unplaceable.length} de los ${plan.length} paneles recibidos: ${detail}. ` +
           (esicMissing
-            ? 'Para ESIC se busco #collapseUFV bajo el encabezado «ESIC Universidad» y despues #accordionESIC / #collapseESIC. '
+            ? 'Para ESIC se busco #accordionESIC y despues #collapseUFV bajo el encabezado «ESIC Universidad». '
             : '') +
-          'No se ha modificado nada. Revisa el mapeo de universidades del prompt o la estructura de la pagina agregadora.',
+          'No se ha modificado nada ni se ha usado el acordeon raiz #accordion. Revisa las siglas del comite o la estructura de la pagina agregadora.',
         // El CODIGO DEL COMITE y no el selector: es lo que permite localizar el
         // panel en el material de origen, que es donde esta la correccion.
         missingFields: unplaceable.map((panel) => panel.committeeCode),
@@ -2305,34 +2343,70 @@ export class DrupalHttpStrategy extends BaseHttpDestinationStrategy {
     for (const { panel, container } of placements) {
       // `container` no puede ser null aqui: la guarda de arriba ya devolvio en
       // ese caso. La comprobacion es para el compilador, no para el flujo.
-      // `resolvePanelContainer` ya prefiere, entre varios candidatos, el que no
-      // cuelga de un subarbol oculto; si TODOS cuelgan de uno, devuelve el
-      // primero igual y lo destapa el `removeClass` de aqui abajo.
       if (container === null) continue;
 
       // Un sub-acordeon al que todavia no se le ha inyectado ningun comite
       // puede venir oculto, y entonces el primero que reciba se publicaria sin
-      // verse. Es el mismo fallo de "publicado pero invisible" que obligo a
-      // cambiar este preset de CREATE_NODE a APPEND_HTML_BLOCK, y no se
-      // manifiesta en ninguna respuesta HTTP: el PATCH devuelve 200.
-      //
-      // Se retira SOLO la utilidad de ocultacion, no la clase entera: el
-      // contenedor lleva ademas las suyas propias —`panel-group` y demas— y
-      // vaciarlas romperia la maquetacion del portal.
+      // verse. Se retira SOLO la utilidad de ocultacion, no la clase entera:
+      // el contenedor lleva ademas las suyas propias —`panel-group` y demas—.
       container.removeClass(HIDDEN_UTILITY_CLASSES);
 
+      const html =
+        panel.identity === undefined
+          ? panel.html
+          : this.prepareCommitteePanel($, container, panel, panel.identity);
+
       if (config.insertPosition === 'APPEND') {
-        container.append(panel.html);
+        container.append(html);
       } else {
-        container.prepend(panel.html);
+        container.prepend(html);
       }
 
       this.logger.debug(
-        `Panel "${panel.committeeCode}" inyectado en ${panel.targetSelector ?? ''}.`,
+        `Panel "${panel.committeeCode}" inyectado en #${container.attr('id') ?? panel.targetSelector ?? ''}.`,
       );
     }
 
     return $.html();
+  }
+
+  /**
+   * Deja listo un panel de comite para entrar en su sub-acordeon, SIN tocar
+   * nada de lo que ya hay dentro de el.
+   *
+   * 1. Retira de FUERA del destino los paneles de Proto-Do de ese mismo comite
+   *    (los que la averia dejo en la raiz o en otra universidad) y los
+   *    huerfanos sin encabezado de la raiz. Ver `findStaleInjectedPanels`.
+   * 2. Si `collapse<ID>` sigue ocupado —una copia `d-none` del HTML base de
+   *    Drupal, o una prueba anterior dentro del mismo sub-acordeon—, el panel
+   *    NUEVO toma un sufijo (`collapse<ID>-2`). Reemplazar el existente podria
+   *    llevarse por delante un sub-acordeon anidado (UPM 5 contiene UAH).
+   * 3. `data-parent` apunta al contenedor REAL: en el respaldo de ESIC es
+   *    `#accordionUFV`, y un `data-parent` que no existe deja el acordeon sin
+   *    cerrar los hermanos.
+   */
+  private prepareCommitteePanel(
+    $: CheerioAPI,
+    container: Cheerio<AnyNode>,
+    panel: PanelDispatch,
+    identity: NonNullable<PanelDispatch['identity']>,
+  ): string {
+    const stale = findStaleInjectedPanels($, container, identity);
+
+    if (stale.length > 0) {
+      this.logger.warn(
+        `Retirados ${stale.length} panel(es) de "${panel.committeeCode}" publicados fuera de ${identity.accordionId}.`,
+      );
+      stale.remove();
+    }
+
+    const containerId = container.attr('id');
+
+    return applyPanelIdentifiers(panel.html, {
+      collapseId: allocateCollapseId($, identity.collapseId),
+      dataParent:
+        containerId === undefined ? identity.accordionId : `#${containerId}`,
+    });
   }
 
   /** Lee el markup a publicar del namespace de origen. */

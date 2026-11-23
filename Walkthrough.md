@@ -9522,3 +9522,52 @@ mapeador.
 - **Por que un solo reintento:** cada vuelta repite la espera entera y vuelve a facturar la salida; con 180 s, el peor caso ya son seis minutos por proveedor.
 - [x] 069 v3 aplicada dos veces en la base de pruebas sin cambios en el segundo pase
 - [ ] Reejecutar la 069 en desarrollo (`psql -f`)
+
+## Base E2E en un solo comando
+
+- **Por que `E2E_DB_NAME` y no un `.env.test`:** el nombre ya vivia en `backend/.env` de cada maquina. Un segundo archivo duplicaria credenciales y abriria otra forma de desincronizarse.
+- **Por que un `DB_NAME` heredado se ignora en vez de abortar:** el modismo `set -a && source backend/.env` (lo exige el MCP) deja exportada la base de desarrollo en toda la terminal. Ese valor nunca es valido para E2E, asi que tratarlo como intencion explicita solo obligaba a un `unset` en cada terminal. Un override distinto si se respeta.
+- **Por que la regla es una funcion pura aparte:** la guarda se ejecuta al importarse. Separar la decision (`test-database.resolver.ts`) del efecto permite probarla sin base de datos y sin repetir el aviso.
+- **Por que un envoltorio bash:** `test:migrate`/`test:bootstrap` llevaban `${DB_NAME:?}` en la propia linea de npm, que aborta antes de ejecutar ningun script. `apply-migrations.sh` y `bootstrap-db.sh` ya respetan el entorno, asi que basta con fijar `DB_NAME` antes de llamarlos.
+- **Por que el spec va en `test/e2e/`:** `jest.rootDir` es `src` y `npm test` no ve `test/`. No conecta: el envoltorio se ejecuta sobre un `.env` ficticio en un directorio temporal.
+- **Por que hubo que aplicar la 069 a mano:** `test:bootstrap` registra todas las migraciones en baseline, de modo que la base de pruebas tenia la 069 marcada pero `plantillas_flujo` vacia. `test:migrate` la salta por estar registrada.
+- [x] `npm run test:e2e` sin `DB_NAME=`: 151/152 en verde. El caso PDF falla porque falta el binario de Chromium de Playwright en la maquina, no por el codigo.
+- [x] `E2E_DB_NAME` igual a `DB_NAME`: `test:e2e`, `test:migrate` y `test:bootstrap` abortan con exit 1 sin conectar
+- [ ] Gate de auditoria moderada pendiente de aprobacion
+
+## Bootstrap con semillas
+
+- **Por que las semillas van despues del baseline y fuera de `schema_migrations`:** el baseline las marca como aplicadas sin ejecutarlas, y `apply-migrations.sh` las saltaria. Asi es como la base de pruebas acabo con la 069 registrada y `plantillas_flujo` vacia.
+- **Por que despues del ADMIN:** `id_usuario_creador` es NOT NULL con FK RESTRICT; la 069 crea su ADMIN ancla si falta, pero el orden deja una unica secuencia comprensible.
+- **Por que solo la 069 y no la secuencia pedida 008-032:** se probo la secuencia completa y dio 151/152. La 023 y la 032 insertan `NOTIWEB_DEFAULT` con su texto de entonces; la 069 inserta solo si falta y no lo reescribe, y la 068, que añadia la fecha APA, esta en baseline. La 028 deja ademas una plantilla de apertura obsoleta junto a la "V1". La 069 sola es autocontenida y da 152/152. La 018 se descarto antes: crearia la tabla huerfana `prompts_ia`.
+- **Por que las bases de desarrollo existentes no sirvieron de referencia:** tambien nacieron por baseline y tienen 0 prompts y 0 plantillas.
+- **Por que `stdout` a /dev/null:** los SELECT de comprobacion de cada migracion vuelcan tablas enteras. Los NOTICE y los errores salen por `stderr` y siguen viendose.
+
+## Paneles de titulos fuera de su universidad
+
+- **Por que caian en la raiz:** la plantilla sembraba `data-parent="#accordion"`, el despacho lo tomaba como destino declarado y `#accordion` existe: es el acordeon de universidades. La IA tampoco podia acertar con ESIC, porque la regla v3 la obligaba a escribir `collapseUFV<N>`.
+- **Por que manda el codigo visible:** es el unico dato que lee el editor y el que trae el material. Los tres atributos tecnicos se derivan de el de forma determinista, de modo que un relleno sin sustituir (`#accordionPadreId`, `collapsePanelId`) ya no detiene ni desvia la publicacion.
+- **Por que rellenos literales y no `{{siglas_universidad}}`:** `MAPEADOR_PLANTILLA` rechaza cualquier plantilla con marcadores (`ERR_TEMPLATE_PENDING_VARS`). Ademas, la IA devuelve HTML en `filled_markup` con cardinalidad MULTIPLE: una tanda puede traer comites de varias universidades, asi que un `containerSelector` interpolado sobre la raiz del namespace solo acertaria con el primero.
+- **Por que insercion aditiva y no reemplazo:** un panel existente puede contener el sub-acordeon de otra universidad (UPM 5 lleva dentro a UAH); reemplazarlo borraria una universidad entera. La colision de `id` se resuelve con un sufijo en el panel nuevo, y la limpieza se limita a los restos de Proto-Do fuera del destino.
+- **Por que se reconoce lo de Proto-Do tambien por clases:** Drupal filtra `data-protodo-injected` al guardar (ver `cleanup-drupal-sandbox.ts`). Solo con el marcador, la limpieza no encontraria nada en la pagina real.
+- **Por que ESIC conserva el respaldo UFV:** la seccion de ESIC en produccion se publico con `#collapseUFV`. Si esa pagina no tiene `#accordionESIC`, el respaldo guardado por encabezado evita un error en una pagina valida, y sigue sin poder caer en la Universidad Francisco de Vitoria.
+- [x] Backend: 3341 unitarias y 153/153 e2e (nuevo 14.4bis). Frontend: 1806 y `vue-tsc` limpio
+- [ ] Revisar en la pagina real que las copias `d-none` y los restos de la raiz desaparecen o reciben sufijo en la proxima publicacion
+
+## Cierre de licitacion pausado en el escudo
+
+- **Diagnostico con la ejecucion real** (desarrollo, 2026-11-23): el cuerpo del correo SI llego al modelo, que extrajo de el la fecha de cierre y el enlace. `headline` salio vacio porque el correo no menciona ningun expediente ni el objeto del contrato («va de la mano con la prueba de abrir licitacion»), y el prompt ordena dejarlo vacio antes que inventarlo.
+- **Por que no se quito el asterisco de `{{*parsed_email.clean_body}}`:** es la marca obligatoria del motor (`state-payload.context.ts`), no un error de sintaxis. Si falta el cuerpo, pausa ANTES de pagar la llamada al modelo. Quitarlo no habria cambiado el resultado y habria debilitado la guarda.
+- **Por que fallaba tambien tras reconfigurar el escudo:** el modo TEXT solo audita cadenas (`body_paragraphs` es un arreglo) y el HTML necesita un campo con marcado. El cierre extrae datos, y ninguno de los dos modos los describe.
+- **Por que JSON con esquema y no "cualquier dato basta":** el destino localiza el bloque por `validated_fields.headline`. Sin esquema, el caso real (con `body_paragraphs` pero sin expediente) habria pasado el escudo y fallado en Drupal con `[data-expediente=""]`. Con el esquema se para en el escudo, nombrando `llm_response.headline`.
+- **Por que el esquema se aplica tras sanear:** lo que se garantiza es lo que se publica. Un `headline` que solo fueran etiquetas no cuenta como expediente.
+- **Por que `structuredClone` no sirve en el store:** el esquema vive dentro del `ref` reactivo y llega en proxies que no se pueden clonar. Se copia por JSON, que para un JSON Schema no pierde nada.
+- [ ] Pendiente de negocio: pedir que los correos de cierre incluyan el codigo de expediente. Sin el no hay forma determinista de saber que bloque trasladar, y el flujo seguira pausandose (ahora con `ERR_POST_IA_SCHEMA_MISMATCH` y alerta SMTP)
+
+## Retiro del modo JSON del escudo
+
+- **Por que se retira:** el cierre funciona con TEXT sobre `headline` y `summary`, y un tercer modo con su propio contrato (`jsonSchema`, `ajv`, dos codigos de error) no compensa su mantenimiento. Se revirtio el commit entero y no a mano: el codigo de produccion queda identico al anterior.
+- **Por que hace falta 6i aunque se revirtiera la 069:** las bases que ya la habian ejecutado conservaban escudos en `JSON`, que el DTO rechaza ahora con `ERR_POST_IA_CONFIG`. La normalizacion los devuelve a TEXT; es idempotente y queda auditada.
+- **Que no cambia:** el asterisco de `{{*parsed_email.clean_body}}` sigue siendo la marca obligatoria. El caso real sin expediente se sigue parando en el escudo, ahora con `ERR_POST_IA_EMPTY_HTML` sobre `llm_response.headline` / `summary` (unitaria 12.2 y e2e 8.3bis).
+- **Estado observado en desarrollo:** `Cierre Licitacion Remoto` ya estaba editado a mano en TEXT con `sourceFields: ["headline"]`. Como no estaba en JSON, la normalizacion no lo toca.
+- [ ] Pendiente de negocio: que los correos de cierre incluyan el codigo de expediente

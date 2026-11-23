@@ -5331,3 +5331,66 @@ Rama: `feat/drupal-and-acens-nodes-dev`. Migraciones `065` y `066`.
 - [x] Contenedor UFV/ESIC guardado por encabezado
 - [x] Recomendador para generacion extensa y lotes
 - [ ] Pendiente: reejecutar la 069 en la base de desarrollo con `psql -f`
+
+## Base E2E desde `E2E_DB_NAME`, READMEs alineados y auditoria moderada (gate)
+
+- **Contrato:** `resolveTestDatabase({ envDbName, envE2eDbName, fileEnv })` (`backend/test/helpers/test-database.resolver.ts`, pura) devuelve `{ dbName, source: 'cli' | 'e2e-db-name', warning? }` o lanza. La consumen la guarda de Jest (`e2e-database.guard.ts`, `setupFiles`) y, con la misma regla en bash, `scripts/with-test-env.sh`, que envuelve `test:migrate` y `test:bootstrap` (solo cambia el bloque `scripts` de `backend/package.json`).
+- **Precedencia:** `DB_NAME` explicito distinto del de desarrollo > `E2E_DB_NAME` (entorno y, si no, `backend/.env`). Un `DB_NAME` heredado igual al de desarrollo se descarta con aviso. Aborta antes de conectar si el resultado esta vacio o es la base de desarrollo.
+- **Lectura del `.env`:** `util.parseEnv` nativo de Node 24, sin dependencias nuevas. El envoltorio bash lee por clave, sin `source`.
+- **Documentacion:** `README.md`, `backend/README.md`, `frontend/README.md`, `COMMANDS.md` (§3.1.1, §3.1.2, §4.3.1, §9) y `backend/.env.example` (`E2E_DB_NAME`).
+- **Auditoria:** solo diagnostico. Hay dos advisories raiz (`glob` GHSA-3g3m-2fjr-6pw4, `minimatch` GHSA-g3hv-75wg-m249) que dan 25 moderadas en el backend (todas dev) y 13 en el frontend (4 de runtime, por `js-beautify`).
+- [x] Guarda y envoltorio con la misma precedencia, 13 casos AAA (`test/e2e/test-database-env.e2e-spec.ts`)
+- [x] 069 aplicada en la base de pruebas (estaba registrada en baseline sin ejecutar)
+- [x] READMEs y COMMANDS.md alineados
+- [ ] Pendiente de aprobacion: Fase 1 `npm audit fix` (sin `--force`) en ambos proyectos
+- [ ] Pendiente de decision: Fase 2, registrar el resto como revisadas o `overrides` acotados de `glob`/`minimatch`
+- [ ] Pendiente de entorno: `npx playwright install chromium` para el caso PDF de `telemetry.e2e-spec.ts`
+
+## Semillas automaticas en `bootstrap-db.sh`
+
+- **Cambio:** tras sembrar el ADMIN, `scripts/bootstrap-db.sh` ejecuta con `ON_ERROR_STOP=1` `db/migrations/069-*.sql` (lista `SEED_MIGRATIONS`) contra la misma `TARGET_DB`. Sirve para `db:bootstrap` y para `test:bootstrap` (vía `with-test-env.sh`). Si una falla, el script sale con codigo distinto de 0.
+- **Solo la 069:** la secuencia 008-032 sobre `init.sql` deja prompts y plantillas obsoletos, porque la 069 inserta solo si falta y las 033-068 estan en baseline (`pipeline-seeds-integrity` §8 falla). La 018 crearia ademas la tabla huerfana `prompts_ia`.
+- [x] Semillas en el mismo flujo del bootstrap
+- [x] Documentacion sin bucles manuales (README, backend/README, COMMANDS §3.1.2 y §4.3.1)
+- [ ] Recrear la base de pruebas con `test:bootstrap` y pasar `test:e2e` (pendiente de cerrar las conexiones abiertas a esa base)
+
+## Paneles de titulos: acordeon por siglas, insercion aditiva y 069
+
+- **Identidad del comite:** `deriveCommitteeIdentity(code)` (`drupal-universities.ts`, pura) devuelve `{ siglas, committeeId, collapseId, accordionId }` a partir de `.panel-comite-codigo` («ESIC 2» -> `ESIC` / `ESIC2` / `collapseESIC2` / `#accordionESIC`). Las siglas son el prefijo mas largo del catalogo de 14. `planPanelDispatch` normaliza `href`, `id` y `data-parent` con ella: manda el codigo visible y no lo que escribio el modelo.
+- **Destino estricto:** con identidad, `resolvePanelContainer` busca `#accordion<SIGLAS>` por id directo en todo el documento (encuentra `#accordionUAH` anidado en `#collapseUPM5`). Si no existe: `ERR_DRUPAL_TARGET_NOT_FOUND`, GRAVE y sin PATCH. Nunca cae en la raiz `#accordion`, que ademas deja de aceptarse como `data-parent` declarado.
+- **ESIC:** `#accordionESIC` visible > `#accordionUFV` solo bajo el encabezado «ESIC Universidad» > `#accordionESIC` / `#collapseESIC` aunque esten ocultos.
+- **Insercion aditiva** (`drupal-panel-upsert.ts`, pura): dentro de `#accordion<SIGLAS>` no se reemplaza ni se borra nada. Si `collapse<ID>` ya existe en el documento, el panel nuevo toma `collapse<ID>-2`, `-3`... Fuera del destino solo se retiran los paneles de Proto-Do de ese mismo comite y los huerfanos sin encabezado de la raiz. Como Drupal filtra `data-protodo-injected`, "de Proto-Do" es el marcador O las clases `panel-toggle-link` / `panel-comite-codigo`. Nunca se retira un bloque con `.panel-group`.
+- **Guarda:** un fragmento con `.panel-comite-codigo` pero sin `.panel.panel-default` no pasa por la ruta de bloques sueltos (`ERR_DRUPAL_DOM_TARGET`).
+- **Migracion 069 (sin 070):**
+  - 4b: la plantilla siembra `data-parent="#accordionSiglasUniversidad"`.
+  - 5d v4: `siglas_universidad` y `codigo_comite_id`, sin la regla UFV de ESIC.
+  - 6h: los `DESTINO_DRUPAL` de titulos en `plantillas_flujo` y `flujos` pierden `containerSelector: "#accordion"`.
+  - El preset `VERIFICACION_TITULOS` del frontend pasa a `containerSelector: null`.
+- [x] 069 reaplicada dos veces en la base de pruebas y en la de desarrollo (la segunda pasada no cambia nada), y bootstrap de una base nueva comprobado
+- [x] Pruebas AAA: colision `collapseUAM9-2`, limpieza de la raiz, UAH anidado en UPM 5, URJC sin contenedor, ESIC 2 desde `collapseUFV2`
+
+## Escudo en modo JSON y maestro de cierre
+
+- **Contrato:** `PostIaContentMode` pasa a `HTML | TEXT | JSON`. `jsonSchema?: Record<string, unknown>` (`IsCompilableJsonSchemaConstraint`: compila con `ajv` estricto al guardar; tope de 16 KB). La compilacion se comparte entre el DTO y la estrategia en `utils/json-schema.util.ts` (`compileJsonSchema`, `describeSchemaErrors`).
+- **`auditJson`** (raiz y cada item):
+  1. Descarta las claves tecnicas (`metadata`, `resolved_cardinality`, `items`).
+  2. Exige al menos un valor efectivo (`ERR_POST_IA_EMPTY_JSON`).
+  3. Rechaza los marcadores residuales anidados.
+  4. Sanea en profundidad sin mutar el contexto (sin etiquetas, entidades decodificadas, sin caracteres de control; se conservan claves, numeros, booleanos, `null` y la forma de los arreglos).
+  5. Aplica `ajv` sobre el objeto ya saneado (`ERR_POST_IA_SCHEMA_MISMATCH`).
+- **Salida:** `validated_json` y, para las cadenas de primer nivel, `validated_fields` (los destinos siguen leyendo `validated_fields.headline`). `validated_json` sale `{}` en HTML y TEXT para que el payload tenga la misma forma.
+- **Migracion 069 (6i):** el maestro `wf-licitacion-cerrar` y los flujos con un `DESTINO_DRUPAL` en `TRANSFER_HTML_BLOCK` pasan el escudo a JSON con un esquema que exige `headline` no vacio. El prompt de cierre conserva `{{*parsed_email.clean_body}}`.
+- **Frontend:** el modo es un `q-select` cerrado con la opcion «JSON (Validación y serialización de datos estructurados)». El store conserva el `jsonSchema` en la ida y vuelta, y en JSON solo valida el origen.
+- [x] 069 reaplicada dos veces en la base de pruebas y en la de desarrollo. El flujo `Cierre Licitacion Remoto` queda en JSON
+- [x] Backend 3360 unitarias y 155/155 e2e (8.3bis y 14.4ter nuevas). Frontend 1813 y `vue-tsc` limpio
+- [ ] Negocio: el correo de cierre debe identificar el expediente (ver Walkthrough)
+
+## Retiro del modo JSON del escudo
+
+- **Decision:** el escudo vuelve a los dos modos estandar, `HTML | TEXT`, para simplificar el contrato y su mantenimiento. Se revierte el modo JSON (`a684a03`): sin `jsonSchema`, sin `ajv`, sin `ERR_POST_IA_EMPTY_JSON` / `ERR_POST_IA_SCHEMA_MISMATCH` y sin `validated_json`. La seccion «Escudo en modo JSON y maestro de cierre» queda RETIRADA.
+- **Maestro de cierre:** escudo `{"contentMode": "TEXT", "sourceNamespace": "llm_response", "sourceFields": ["headline", "summary"]}`.
+- **Migracion 069 (6i):** normaliza a ese TEXT cualquier `ESCUDO_POST_IA` de `flujos` o `plantillas_flujo` que siga en `contentMode: "JSON"`, quitando `jsonSchema`, conservando su `sourceNamespace` y dejando registro en auditoria. Es idempotente.
+- **Frontend:** el toggle vuelve a las dos opciones «Marcado HTML» / «Texto (sin plantilla)».
+- [x] 069 reaplicada dos veces en la base de pruebas y en la de desarrollo: 0 escudos en JSON o con `jsonSchema`
+- [x] Regresion TEXT/HTML (unitaria bloque 12, e2e 8.3bis en TEXT y 14.4ter). Backend 3346 unitarias y 155/155 e2e; frontend 1806 y `vue-tsc` limpio
+- [ ] Negocio: el correo de cierre debe identificar el expediente
