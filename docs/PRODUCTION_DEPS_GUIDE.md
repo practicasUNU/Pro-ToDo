@@ -190,5 +190,28 @@ Historial:
 |---|---|---|
 | 2026-11-04 | `nodemailer` (backend, high) | Subido de `9.x` a `10.x` (único cambio incompatible: exige Node ≥ 20) |
 | 2026-11-04 | `happy-dom` (frontend, high, solo desarrollo) | Subido de `20.x` a `21.x` |
+| 2026-11-23 | `typescript-eslint` (ambos), `eslint` y `@eslint/config-array` (frontend), moderadas | `npm audit fix` sin `--force`: `typescript-eslint` 8.74.0, `eslint` 10.15.0, `@eslint/config-array` 0.23.6. Solo lockfiles. Backend 25 → 19, frontend 13 → 5 |
+
+### Moderadas revisadas (no bloquean)
+
+Según `dependency-security.md` §4, las `moderate` se revisan pero no bloquean. Estas quedan
+**revisadas y aceptadas** tras la auditoría del 2026-11-23. Todas vienen de dos advisories raíz:
+
+- `glob` ≤ 14.0.1 — [GHSA-3g3m-2fjr-6pw4](https://github.com/advisories/GHSA-3g3m-2fjr-6pw4)
+  (la cancelación por `AbortSignal` no detiene el recorrido; corregido en ≥ 14.0.2).
+- `minimatch` 7.0.0 – 11.0.0 — [GHSA-g3hv-75wg-m249](https://github.com/advisories/GHSA-g3hv-75wg-m249)
+  (ReDoS por amplificación de *globparts*; corregido en ≥ 11.0.1).
+
+| Proyecto | Cadena (n) | Alcance real | Por qué no se corrige ahora | Condición de revisión |
+|---|---|---|---|---|
+| backend | `jest` 30.5.2 → `jest-config`, `@jest/reporters`, `jest-runtime` → `glob` 13.0.6; `babel-plugin-istanbul` → `test-exclude` 7.0.2 → `glob` 10.5.0 / `minimatch` 9.0.9 (16) | Solo desarrollo. `npm audit --omit=dev`: 0 | `npm audit fix --force` propone **bajar** a `jest` 29.7.0. La 30.5.2 es la última y fija `glob ^13.0.6` | Una versión de Jest con `glob` ≥ 14.0.2 |
+| backend | `@nestjs/cli` 11.0.24 → `glob` 13.0.6 → `minimatch` 10.2.6 (1 + `glob` y `minimatch`) | Solo desarrollo (build) | La corrección es `@nestjs/cli` 12, un salto major de NestJS no aprobado | Migración planificada a Nest CLI 12 o un parche 11.x |
+| frontend | `js-beautify` 2.0.3 → `glob` 13.0.6 y `editorconfig` 3.0.2 → `minimatch` 10.2.6 (4) | **Dependencia de runtime**, pero `glob` y `editorconfig` solo los carga la CLI de Node de `js-beautify`. `src/utils/html-formatter.ts` usa `html()` en el navegador y no los incluye | La 2.0.3 es la última. `--force` propone **bajar** a 1.14.9 | Una versión de `js-beautify` con `glob` ≥ 14.0.2 y `editorconfig` ≥ 4 |
+| frontend | `@vue/test-utils` 2.5.x → `js-beautify` (1) | Solo desarrollo | `--force` propone **bajar** a 2.4.11 | Se resuelve con la fila anterior |
+
+Descartado por ahora: `overrides` acotados (`"glob@>=9 <14.0.2": "^14.0.2"`,
+`"minimatch@>=7 <11.0.1": "^11.0.1"`). Fuerzan versiones major en transitivas que declaran `^13` y
+`^10`, y no compensan para moderadas sin exposición en producción. Se reconsiderarán si alguna pasa
+a `high` o si se quiere `npm audit` a cero.
 
 `overrides` / parches locales activos: ninguno.
