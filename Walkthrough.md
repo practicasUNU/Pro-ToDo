@@ -9542,3 +9542,14 @@ mapeador.
 - **Por que solo la 069 y no la secuencia pedida 008-032:** se probo la secuencia completa y dio 151/152. La 023 y la 032 insertan `NOTIWEB_DEFAULT` con su texto de entonces; la 069 inserta solo si falta y no lo reescribe, y la 068, que añadia la fecha APA, esta en baseline. La 028 deja ademas una plantilla de apertura obsoleta junto a la "V1". La 069 sola es autocontenida y da 152/152. La 018 se descarto antes: crearia la tabla huerfana `prompts_ia`.
 - **Por que las bases de desarrollo existentes no sirvieron de referencia:** tambien nacieron por baseline y tienen 0 prompts y 0 plantillas.
 - **Por que `stdout` a /dev/null:** los SELECT de comprobacion de cada migracion vuelcan tablas enteras. Los NOTICE y los errores salen por `stderr` y siguen viendose.
+
+## Paneles de titulos fuera de su universidad
+
+- **Por que caian en la raiz:** la plantilla sembraba `data-parent="#accordion"`, el despacho lo tomaba como destino declarado y `#accordion` existe: es el acordeon de universidades. La IA tampoco podia acertar con ESIC, porque la regla v3 la obligaba a escribir `collapseUFV<N>`.
+- **Por que manda el codigo visible:** es el unico dato que lee el editor y el que trae el material. Los tres atributos tecnicos se derivan de el de forma determinista, de modo que un relleno sin sustituir (`#accordionPadreId`, `collapsePanelId`) ya no detiene ni desvia la publicacion.
+- **Por que rellenos literales y no `{{siglas_universidad}}`:** `MAPEADOR_PLANTILLA` rechaza cualquier plantilla con marcadores (`ERR_TEMPLATE_PENDING_VARS`). Ademas, la IA devuelve HTML en `filled_markup` con cardinalidad MULTIPLE: una tanda puede traer comites de varias universidades, asi que un `containerSelector` interpolado sobre la raiz del namespace solo acertaria con el primero.
+- **Por que insercion aditiva y no reemplazo:** un panel existente puede contener el sub-acordeon de otra universidad (UPM 5 lleva dentro a UAH); reemplazarlo borraria una universidad entera. La colision de `id` se resuelve con un sufijo en el panel nuevo, y la limpieza se limita a los restos de Proto-Do fuera del destino.
+- **Por que se reconoce lo de Proto-Do tambien por clases:** Drupal filtra `data-protodo-injected` al guardar (ver `cleanup-drupal-sandbox.ts`). Solo con el marcador, la limpieza no encontraria nada en la pagina real.
+- **Por que ESIC conserva el respaldo UFV:** la seccion de ESIC en produccion se publico con `#collapseUFV`. Si esa pagina no tiene `#accordionESIC`, el respaldo guardado por encabezado evita un error en una pagina valida, y sigue sin poder caer en la Universidad Francisco de Vitoria.
+- [x] Backend: 3341 unitarias y 153/153 e2e (nuevo 14.4bis). Frontend: 1806 y `vue-tsc` limpio
+- [ ] Revisar en la pagina real que las copias `d-none` y los restos de la raiz desaparecen o reciben sufijo en la proxima publicacion

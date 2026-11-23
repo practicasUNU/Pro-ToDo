@@ -5353,3 +5353,18 @@ Rama: `feat/drupal-and-acens-nodes-dev`. Migraciones `065` y `066`.
 - [x] Semillas en el mismo flujo del bootstrap
 - [x] Documentacion sin bucles manuales (README, backend/README, COMMANDS §3.1.2 y §4.3.1)
 - [ ] Recrear la base de pruebas con `test:bootstrap` y pasar `test:e2e` (pendiente de cerrar las conexiones abiertas a esa base)
+
+## Paneles de titulos: acordeon por siglas, insercion aditiva y 069
+
+- **Identidad del comite:** `deriveCommitteeIdentity(code)` (`drupal-universities.ts`, pura) devuelve `{ siglas, committeeId, collapseId, accordionId }` a partir de `.panel-comite-codigo` («ESIC 2» -> `ESIC` / `ESIC2` / `collapseESIC2` / `#accordionESIC`). Las siglas son el prefijo mas largo del catalogo de 14. `planPanelDispatch` normaliza `href`, `id` y `data-parent` con ella: manda el codigo visible y no lo que escribio el modelo.
+- **Destino estricto:** con identidad, `resolvePanelContainer` busca `#accordion<SIGLAS>` por id directo en todo el documento (encuentra `#accordionUAH` anidado en `#collapseUPM5`). Si no existe: `ERR_DRUPAL_TARGET_NOT_FOUND`, GRAVE y sin PATCH. Nunca cae en la raiz `#accordion`, que ademas deja de aceptarse como `data-parent` declarado.
+- **ESIC:** `#accordionESIC` visible > `#accordionUFV` solo bajo el encabezado «ESIC Universidad» > `#accordionESIC` / `#collapseESIC` aunque esten ocultos.
+- **Insercion aditiva** (`drupal-panel-upsert.ts`, pura): dentro de `#accordion<SIGLAS>` no se reemplaza ni se borra nada. Si `collapse<ID>` ya existe en el documento, el panel nuevo toma `collapse<ID>-2`, `-3`... Fuera del destino solo se retiran los paneles de Proto-Do de ese mismo comite y los huerfanos sin encabezado de la raiz. Como Drupal filtra `data-protodo-injected`, "de Proto-Do" es el marcador O las clases `panel-toggle-link` / `panel-comite-codigo`. Nunca se retira un bloque con `.panel-group`.
+- **Guarda:** un fragmento con `.panel-comite-codigo` pero sin `.panel.panel-default` no pasa por la ruta de bloques sueltos (`ERR_DRUPAL_DOM_TARGET`).
+- **Migracion 069 (sin 070):**
+  - 4b: la plantilla siembra `data-parent="#accordionSiglasUniversidad"`.
+  - 5d v4: `siglas_universidad` y `codigo_comite_id`, sin la regla UFV de ESIC.
+  - 6h: los `DESTINO_DRUPAL` de titulos en `plantillas_flujo` y `flujos` pierden `containerSelector: "#accordion"`.
+  - El preset `VERIFICACION_TITULOS` del frontend pasa a `containerSelector: null`.
+- [x] 069 reaplicada dos veces en la base de pruebas y en la de desarrollo (la segunda pasada no cambia nada), y bootstrap de una base nueva comprobado
+- [x] Pruebas AAA: colision `collapseUAM9-2`, limpieza de la raiz, UAH anidado en UPM 5, URJC sin contenedor, ESIC 2 desde `collapseUFV2`
