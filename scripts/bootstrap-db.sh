@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 #
-# Crea una base limpia y la deja al dia: esquema + todas las migraciones.
+# Crea una base limpia y la deja al dia: esquema + todas las migraciones +
+# ADMIN + semillas de contenido (plantillas HTML, prompts y blueprints).
 #
 # POR QUE NO BASTA `init.sql`. Ese archivo es DDL PURO y lo es a proposito: no
 # crea ningun usuario, de modo que no puede sembrar nada que dependa de
@@ -111,14 +112,55 @@ psql -v ON_ERROR_STOP=1 --quiet -h "${DB_HOST}" -p "${DB_PORT}" \
     VALUES ('${BOOTSTRAP_ADMIN_EMAIL}', 'ADMIN', TRUE)
     ON CONFLICT (correo) DO UPDATE SET rol = 'ADMIN', activo = TRUE;"
 
+echo "== Semillas de contenido"
+# SEMILLAS DE CONTENIDO: plantillas HTML, prompts de IA y los cinco blueprints
+# maestros de `plantillas_flujo`. Van aqui por dos motivos:
+#
+#   * DESPUES DEL ADMIN: todo lo sembrado exige autor (`id_usuario_creador`
+#     NOT NULL con FK RESTRICT). La 069 usa su ADMIN ancla y lo crea si falta.
+#   * DESPUES DEL BASELINE, Y EJECUTADAS DIRECTAMENTE: el baseline ya las marco
+#     como aplicadas en `schema_migrations`, asi que `apply-migrations.sh` las
+#     saltaria. Antes eso dejaba la base con la 069 "aplicada" y
+#     `plantillas_flujo` vacia, sin que nada lo avisara.
+#
+# SOLO LA 069, Y NO LA SECUENCIA HISTORICA 008-032. La 069 es autocontenida
+# (ADMIN ancla, catalogo de nodos, tarifas, plantillas HTML, prompts con su
+# texto FINAL y los cinco blueprints) e inserta cada fila solo si falta. Si
+# antes corren las semillas antiguas, la fila ya existe con el texto de su
+# epoca, la 069 no la reescribe, y las 033-068 que la ponian al dia estan
+# saltadas por el baseline. Probado: con 023/032 delante, NOTIWEB_DEFAULT se
+# queda sin la fecha APA de la 068 (falla `pipeline-seeds-integrity` §8), y la
+# 028 deja una plantilla de apertura antigua junto a la "V1" de la 069. Las
+# demas tampoco aportan nada sobre `init.sql`: la 008 son ALTER que ya
+# coinciden, y la 018 crearia `prompts_ia`, la tabla que la 019 renombro (una
+# tabla huerfana). Una semilla NUEVA que no cubra la 069 se anade a esta lista.
+#
+# Cada archivo gobierna su propia transaccion (como en `apply-migrations.sh`).
+# `ON_ERROR_STOP=1` hace que psql salga con codigo 3 al primer error y
+# `set -e` corta aqui. `stdout` va a /dev/null porque los SELECT de
+# comprobacion de cada migracion vuelcan tablas enteras; los NOTICE y los
+# errores salen por `stderr` y siguen viendose.
+SEED_MIGRATIONS=(069)
+
+for seed in "${SEED_MIGRATIONS[@]}"; do
+  seed_files=("${REPO_ROOT}"/db/migrations/"${seed}"-*.sql)
+
+  # Un glob sin coincidencias se queda literal; con varias seria ambiguo.
+  if [[ ${#seed_files[@]} -ne 1 || ! -f "${seed_files[0]}" ]]; then
+    echo "Semilla ${seed}: no hay exactamente un db/migrations/${seed}-*.sql" >&2
+    exit 1
+  fi
+
+  echo "-- aplicando $(basename "${seed_files[0]}")"
+  psql -v ON_ERROR_STOP=1 --quiet -h "${DB_HOST}" -p "${DB_PORT}" \
+    -U "${DB_USER}" -d "${TARGET_DB}" -f "${seed_files[0]}" > /dev/null
+done
+
 cat <<EOF
 
 == ${TARGET_DB} lista.
 
-   Incluye: esquema completo y un ADMIN activo (${BOOTSTRAP_ADMIN_EMAIL}).
-   NO incluye: plantillas HTML, prompts de IA ni plantillas de flujo. Esas
-   semillas viven en migraciones que dependen de un autor
-   (\`id_usuario_creador\` es NOT NULL con FK RESTRICT), asi que para una base
-   de desarrollo con contenido hay que aplicarlas a mano DESPUES, en orden:
-     db/migrations/{008,018,023,024,028,029,031,032}-*.sql
+   Incluye: esquema completo, un ADMIN activo (${BOOTSTRAP_ADMIN_EMAIL}) y las
+   semillas de contenido (plantillas HTML, prompts de IA y los cinco
+   blueprints maestros), migracion(es): ${SEED_MIGRATIONS[*]}
 EOF
