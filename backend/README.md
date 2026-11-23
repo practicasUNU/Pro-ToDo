@@ -41,11 +41,11 @@ npm run build && npm run start:prod   # producción
 Sin CLI de TypeORM: el esquema se gestiona con SQL versionado (`init.sql` + `db/migrations/`).
 
 ```bash
-npm run db:bootstrap   # crea DB_NAME si no existe: init.sql + baseline + ADMIN activo
+npm run db:bootstrap   # crea DB_NAME si no existe: init.sql + baseline + ADMIN activo + semillas
 npm run db:migrate     # aplica solo las migraciones pendientes (tabla schema_migrations)
 ```
 
-Las semillas de contenido (`008, 018, 023, 024, 028, 029, 031, 032` y, para los blueprints maestros, `069`) se aplican a mano después del bootstrap. Ver [COMMANDS.md §3](../COMMANDS.md#3-migraciones-de-base-de-datos).
+`db:bootstrap` y `test:bootstrap` cargan solos las semillas de contenido (plantillas HTML, prompts y los cinco blueprints maestros: migración `069`), sin bucles manuales posteriores. Ver [COMMANDS.md §3](../COMMANDS.md#3-migraciones-de-base-de-datos).
 
 ## Testing
 
@@ -65,7 +65,7 @@ E2E_DB_NAME=<nombre_bd_test>   # distinto de DB_NAME
 ```
 
 ```bash
-npm run test:bootstrap   # solo la primera vez: crea la base de pruebas
+npm run test:bootstrap   # solo la primera vez: crea la base de pruebas, ya sembrada
 npm run test:migrate     # migraciones pendientes sobre la base de pruebas
 npm run test:e2e
 ```

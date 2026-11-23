@@ -5345,3 +5345,11 @@ Rama: `feat/drupal-and-acens-nodes-dev`. Migraciones `065` y `066`.
 - [ ] Pendiente de aprobacion: Fase 1 `npm audit fix` (sin `--force`) en ambos proyectos
 - [ ] Pendiente de decision: Fase 2, registrar el resto como revisadas o `overrides` acotados de `glob`/`minimatch`
 - [ ] Pendiente de entorno: `npx playwright install chromium` para el caso PDF de `telemetry.e2e-spec.ts`
+
+## Semillas automaticas en `bootstrap-db.sh`
+
+- **Cambio:** tras sembrar el ADMIN, `scripts/bootstrap-db.sh` ejecuta con `ON_ERROR_STOP=1` `db/migrations/069-*.sql` (lista `SEED_MIGRATIONS`) contra la misma `TARGET_DB`. Sirve para `db:bootstrap` y para `test:bootstrap` (vía `with-test-env.sh`). Si una falla, el script sale con codigo distinto de 0.
+- **Solo la 069:** la secuencia 008-032 sobre `init.sql` deja prompts y plantillas obsoletos, porque la 069 inserta solo si falta y las 033-068 estan en baseline (`pipeline-seeds-integrity` §8 falla). La 018 crearia ademas la tabla huerfana `prompts_ia`.
+- [x] Semillas en el mismo flujo del bootstrap
+- [x] Documentacion sin bucles manuales (README, backend/README, COMMANDS §3.1.2 y §4.3.1)
+- [ ] Recrear la base de pruebas con `test:bootstrap` y pasar `test:e2e` (pendiente de cerrar las conexiones abiertas a esa base)

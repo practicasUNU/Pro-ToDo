@@ -178,14 +178,25 @@ Si el volumen nació vacío, el primer `docker compose up -d` ya creó `DB_NAME`
 (sin ADMIN ni `schema_migrations`) y `db:bootstrap` abortará con «ya existe»: como esa base está
 vacía, se borra con el `DROP DATABASE` que imprime el propio script y se relanza.
 
-Ejecuta `init.sql`, registra las migraciones en modo baseline y siembra un ADMIN activo
-(`BOOTSTRAP_ADMIN_EMAIL`, por defecto la cuenta declarada en `backend/.env`; ej. `admin@example.com`). Aborta si la base ya existe: recrearla
+Ejecuta `init.sql`, registra las migraciones en modo baseline, siembra un ADMIN activo
+(`BOOTSTRAP_ADMIN_EMAIL`, por defecto la cuenta declarada en `backend/.env`; ej. `admin@example.com`) y carga las semillas de contenido (ver abajo). Aborta si la base ya existe: recrearla
 pierde datos y no puede ser un efecto secundario.
 
-⚠️ **No incluye las semillas de contenido** (plantillas HTML, prompts, plantillas de flujo). Viven en
-migraciones que exigen un autor (`id_usuario_creador` es NOT NULL con FK RESTRICT) y por eso no están
-en `init.sql`. Para una base de desarrollo con contenido, aplícalas a mano después:
-`db/migrations/{008,018,023,024,028,029,031,032}-*.sql`.
+✅ **Incluye las semillas de contenido** (plantillas HTML, prompts de IA y los cinco blueprints
+maestros de `plantillas_flujo`): justo después del ADMIN ejecuta `db/migrations/069-*.sql` con
+`ON_ERROR_STOP=1`. No hay bucle manual posterior, ni en `db:bootstrap` ni en `test:bootstrap`. Si
+falla, el script sale con código ≠ 0.
+
+- **Van directas, no por `schema_migrations`:** el baseline ya las marcó como aplicadas, así que
+  `db:migrate` las saltaría.
+- **Solo la `069`, no la secuencia histórica `008…032`:** la `069` es autocontenida (nodos, tarifas,
+  plantillas HTML, prompts con su texto final y blueprints) e inserta cada fila solo si falta. Si
+  antes corren `023`/`032`, la fila queda con el texto antiguo, la `069` no la reescribe y las
+  `033…068` que la actualizaban están en baseline: `NOTIWEB_DEFAULT` pierde la fecha APA de la `068`
+  y la `028` deja una plantilla de apertura obsoleta. La `018` crearía además la tabla huérfana
+  `prompts_ia`. Una semilla nueva que la `069` no cubra se añade a `SEED_MIGRATIONS` en el script.
+- **Bases creadas antes de este cambio** pueden tener la `069` registrada sin ejecutar
+  (`plantillas_flujo` vacía): recréalas o aplica la `069` una vez como en §3.1.
 
 ⚠️ **`init.sql` no se puede encadenar con toda la historia.** Es el acumulado final, así que la `005`
 (actualiza `tipos_nodo`, sustituida por `nodos` en la `011`), la `009` (recrea `tokens_sesion`) y la
@@ -253,9 +264,8 @@ y se replica en `scripts/with-test-env.sh` (envoltorio de los dos scripts de bas
 | sin `DB_NAME` en el entorno | `E2E_DB_NAME` (exportado o, si no, de `backend/.env`) |
 | `E2E_DB_NAME` vacío o igual a `DB_NAME` | **aborta** (exit 1) sin conectar |
 
-La base de pruebas necesita además la semilla `069-*.sql` (cinco blueprints maestros, la valida
-`pipeline-seeds-integrity.e2e-spec.ts`). `test:bootstrap` la registra en baseline sin ejecutarla, así
-que se aplica a mano una vez, como en §3.1, con `-d "${E2E_DB_NAME:?exporta backend/.env}"`.
+`test:bootstrap` deja la base sembrada (§3.1.2), incluida la `069` que valida
+`pipeline-seeds-integrity.e2e-spec.ts`.
 
 > `jest.rootDir` es `src`, así que **un `.spec.ts` colocado en `backend/test/` no lo ejecuta `npm test`**. Los specs unitarios viven junto al fuente; `backend/test/` alberga factories, fixtures y los `*.e2e-spec.ts`.
 

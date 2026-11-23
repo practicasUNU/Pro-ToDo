@@ -9534,3 +9534,11 @@ mapeador.
 - [x] `npm run test:e2e` sin `DB_NAME=`: 151/152 en verde. El caso PDF falla porque falta el binario de Chromium de Playwright en la maquina, no por el codigo.
 - [x] `E2E_DB_NAME` igual a `DB_NAME`: `test:e2e`, `test:migrate` y `test:bootstrap` abortan con exit 1 sin conectar
 - [ ] Gate de auditoria moderada pendiente de aprobacion
+
+## Bootstrap con semillas
+
+- **Por que las semillas van despues del baseline y fuera de `schema_migrations`:** el baseline las marca como aplicadas sin ejecutarlas, y `apply-migrations.sh` las saltaria. Asi es como la base de pruebas acabo con la 069 registrada y `plantillas_flujo` vacia.
+- **Por que despues del ADMIN:** `id_usuario_creador` es NOT NULL con FK RESTRICT; la 069 crea su ADMIN ancla si falta, pero el orden deja una unica secuencia comprensible.
+- **Por que solo la 069 y no la secuencia pedida 008-032:** se probo la secuencia completa y dio 151/152. La 023 y la 032 insertan `NOTIWEB_DEFAULT` con su texto de entonces; la 069 inserta solo si falta y no lo reescribe, y la 068, que añadia la fecha APA, esta en baseline. La 028 deja ademas una plantilla de apertura obsoleta junto a la "V1". La 069 sola es autocontenida y da 152/152. La 018 se descarto antes: crearia la tabla huerfana `prompts_ia`.
+- **Por que las bases de desarrollo existentes no sirvieron de referencia:** tambien nacieron por baseline y tienen 0 prompts y 0 plantillas.
+- **Por que `stdout` a /dev/null:** los SELECT de comprobacion de cada migracion vuelcan tablas enteras. Los NOTICE y los errores salen por `stderr` y siguen viendose.

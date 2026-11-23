@@ -54,26 +54,16 @@ sudo docker compose up -d
 
 ### Base de datos de desarrollo
 
-`npm run db:bootstrap --prefix backend` crea una base **que no exista**: ejecuta `init.sql`, registra todas las migraciones como aplicadas (baseline) y siembra un ADMIN activo. Si la base ya existe, aborta sin tocar nada.
+`npm run db:bootstrap --prefix backend` crea una base **que no exista** y la deja lista en un solo paso. Ejecuta `init.sql`, registra todas las migraciones como aplicadas (baseline), siembra un ADMIN activo y carga las **semillas de contenido** (plantillas HTML, prompts de IA y los cinco blueprints maestros de `plantillas_flujo`, migración `069`). Si la base ya existe, aborta sin tocar nada.
 
 > ⚠️ **El primer `docker compose up -d` sobre un volumen vacío ya crea `DB_NAME`** desde `init.sql` (variable `POSTGRES_DB`), pero sin ADMIN ni registro en `schema_migrations`, así que `db:bootstrap` abortará con «ya existe». Como esa base nace vacía, lo más limpio es borrarla y dejar que `db:bootstrap` la rehaga. El comando exacto (`DROP DATABASE …`) lo imprime el propio script al abortar. Hazlo **solo** sobre una base recién creada: borrar una base con datos los pierde.
 
 ```bash
-npm run db:bootstrap --prefix backend    # base nueva: esquema + baseline + ADMIN
+npm run db:bootstrap --prefix backend    # base nueva: esquema + baseline + ADMIN + semillas
 npm run db:migrate --prefix backend      # después: aplica solo las migraciones pendientes
 ```
 
-**Semillas de contenido.** `db:bootstrap` no siembra plantillas HTML, prompts ni plantillas de flujo: dependen de un autor (`id_usuario_creador` es NOT NULL con FK RESTRICT) y viven en migraciones. Como quedaron registradas en baseline, `db:migrate` no las ejecuta, así que se aplican a mano y en orden:
-
-```bash
-for f in db/migrations/{008,018,023,024,028,029,031,032}-*.sql; do
-  echo "== $f"
-  sudo docker exec -i protodo_postgres \
-    psql -v ON_ERROR_STOP=1 -U "${DB_USER:?exporta backend/.env}" -d "${DB_NAME:?exporta backend/.env}" < "$f" || break
-done
-```
-
-La `069-*.sql` (idempotente) siembra los cinco blueprints maestros de `plantillas_flujo`. Aplícala igual si los necesitas. Más detalle en [COMMANDS.md §3](COMMANDS.md#3-migraciones-de-base-de-datos).
+No hacen falta bucles manuales de semillas tras el bootstrap. Más detalle en [COMMANDS.md §3.1.2](COMMANDS.md#312-crear-una-base-desde-cero).
 
 ### Arranque
 
@@ -88,7 +78,7 @@ Las suites E2E montan el `AppModule` real contra PostgreSQL, así que **nunca** 
 
 ```bash
 cd backend
-npm run test:bootstrap   # solo la primera vez: crea la base de pruebas (esquema + baseline + ADMIN)
+npm run test:bootstrap   # solo la primera vez: crea la base de pruebas (esquema + baseline + ADMIN + semillas)
 npm run test:migrate     # al día con las migraciones pendientes
 npm run test:e2e         # suites *.e2e-spec.ts (test/jest-e2e.json)
 ```
@@ -99,7 +89,7 @@ Ninguno necesita `DB_NAME=` en la línea de comandos. La precedencia es la misma
 2. Un `DB_NAME` heredado de `source backend/.env` (igual al de desarrollo) se ignora con un aviso y se usa `E2E_DB_NAME`.
 3. Abortan **antes de conectar** si `E2E_DB_NAME` falta o coincide con `DB_NAME`.
 
-La base de pruebas también necesita la semilla `069-*.sql` (la valida `pipeline-seeds-integrity.e2e-spec.ts`). Aplícala con el bucle de arriba usando `-d "${E2E_DB_NAME}"`.
+`test:bootstrap` ya carga las semillas que valida `pipeline-seeds-integrity.e2e-spec.ts`. Una base de pruebas creada **antes** de este cambio puede tener la `069` registrada pero sin ejecutar (`plantillas_flujo` vacía). Si es así, recréala o aplica una vez `db/migrations/069-*.sql` con `psql -v ON_ERROR_STOP=1 -d "${E2E_DB_NAME}"`.
 
 ## Docker Compose: interpolación de variables
 
